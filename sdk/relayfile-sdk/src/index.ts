@@ -1,7 +1,22 @@
 export { RelayFileClient, type RelayFileRetryOptions } from "./client.js";
-export { InvalidStateError, QueueFullError, RelayFileApiError, RevisionConflictError } from "./errors.js";
+export {
+  InvalidStateError,
+  PayloadTooLargeError,
+  QueueFullError,
+  RelayFileApiError,
+  RevisionConflictError
+} from "./errors.js";
 export type {
   AckResponse,
+  AdminIngressAlert,
+  AdminIngressAlertProfile,
+  AdminIngressEffectiveAlertProfile,
+  AdminIngressAlertSeverity,
+  AdminIngressAlertThresholds,
+  AdminIngressAlertTotals,
+  AdminIngressAlertType,
+  AdminIngressStatusResponse,
+  BackendStatusResponse,
   ConflictErrorResponse,
   DeleteFileInput,
   DeadLetterFeedResponse,
@@ -12,6 +27,7 @@ export type {
   FileWriteRequest,
   FilesystemEvent,
   GetEventsOptions,
+  GetAdminIngressStatusOptions,
   GetOperationsOptions,
   GetSyncDeadLettersOptions,
   GetSyncIngressStatusOptions,

@@ -1,4 +1,6 @@
 import {
+  type AdminIngressStatusResponse,
+  type BackendStatusResponse,
   type AckResponse,
   type DeleteFileInput,
   type DeadLetterItem,
@@ -7,6 +9,7 @@ import {
   type EventFeedResponse,
   type FileReadResponse,
   type GetEventsOptions,
+  type GetAdminIngressStatusOptions,
   type GetOperationsOptions,
   type GetSyncDeadLettersOptions,
   type GetSyncIngressStatusOptions,
@@ -21,7 +24,13 @@ import {
   type WriteFileInput,
   type WriteQueuedResponse
 } from "./types.js";
-import { InvalidStateError, QueueFullError, RelayFileApiError, RevisionConflictError } from "./errors.js";
+import {
+  InvalidStateError,
+  PayloadTooLargeError,
+  QueueFullError,
+  RelayFileApiError,
+  RevisionConflictError
+} from "./errors.js";
 
 export type AccessTokenProvider = string | (() => string | Promise<string>);
 
@@ -166,6 +175,7 @@ export class RelayFileClient {
 
   async getEvents(workspaceId: string, options: GetEventsOptions = {}): Promise<EventFeedResponse> {
     const query = buildQuery({
+      provider: options.provider,
       cursor: options.cursor,
       limit: options.limit
     });
@@ -216,6 +226,64 @@ export class RelayFileClient {
     });
   }
 
+  async replayAdminEnvelope(envelopeId: string, correlationId?: string, signal?: AbortSignal): Promise<QueuedResponse> {
+    return this.request<QueuedResponse>({
+      method: "POST",
+      path: `/v1/admin/replay/envelope/${encodeURIComponent(envelopeId)}`,
+      correlationId,
+      signal
+    });
+  }
+
+  async replayAdminOp(opId: string, correlationId?: string, signal?: AbortSignal): Promise<QueuedResponse> {
+    return this.request<QueuedResponse>({
+      method: "POST",
+      path: `/v1/admin/replay/op/${encodeURIComponent(opId)}`,
+      correlationId,
+      signal
+    });
+  }
+
+  async getBackendStatus(correlationId?: string, signal?: AbortSignal): Promise<BackendStatusResponse> {
+    return this.request<BackendStatusResponse>({
+      method: "GET",
+      path: "/v1/admin/backends",
+      correlationId,
+      signal
+    });
+  }
+
+  async getAdminIngressStatus(
+    optionsOrCorrelationId: GetAdminIngressStatusOptions | string = {},
+    signal?: AbortSignal
+  ): Promise<AdminIngressStatusResponse> {
+    const options: GetAdminIngressStatusOptions =
+      typeof optionsOrCorrelationId === "string"
+        ? { correlationId: optionsOrCorrelationId, signal }
+        : optionsOrCorrelationId;
+    const query = buildQuery({
+      workspaceId: options.workspaceId,
+      provider: options.provider,
+      alertProfile: options.alertProfile,
+      pendingThreshold: options.pendingThreshold,
+      deadLetterThreshold: options.deadLetterThreshold,
+      staleThreshold: options.staleThreshold,
+      dropRateThreshold: options.dropRateThreshold,
+      nonZeroOnly: options.nonZeroOnly,
+      maxAlerts: options.maxAlerts,
+      cursor: options.cursor,
+      limit: options.limit,
+      includeWorkspaces: options.includeWorkspaces,
+      includeAlerts: options.includeAlerts
+    });
+    return this.request<AdminIngressStatusResponse>({
+      method: "GET",
+      path: `/v1/admin/ingress${query}`,
+      correlationId: options.correlationId,
+      signal: options.signal
+    });
+  }
+
   async getSyncStatus(workspaceId: string, options: GetSyncStatusOptions = {}): Promise<SyncStatusResponse> {
     const query = buildQuery({ provider: options.provider });
     return this.request<SyncStatusResponse>({
@@ -230,9 +298,12 @@ export class RelayFileClient {
     workspaceId: string,
     options: GetSyncIngressStatusOptions = {}
   ): Promise<SyncIngressStatusResponse> {
+    const query = buildQuery({
+      provider: options.provider
+    });
     return this.request<SyncIngressStatusResponse>({
       method: "GET",
-      path: `/v1/workspaces/${encodeURIComponent(workspaceId)}/sync/ingress`,
+      path: `/v1/workspaces/${encodeURIComponent(workspaceId)}/sync/ingress${query}`,
       correlationId: options.correlationId,
       signal: options.signal
     });
@@ -324,20 +395,23 @@ export class RelayFileClient {
     correlationId?: string;
     signal?: AbortSignal;
   }): Promise<T> {
-    const token = await resolveToken(this.tokenProvider);
     const correlationId = params.correlationId ?? generateCorrelationId();
-    const headers: Record<string, string> = {
-      "Authorization": `Bearer ${token}`,
+    const baseHeaders: Record<string, string> = {
       "Content-Type": "application/json",
       "X-Correlation-Id": correlationId,
       ...params.headers
     };
     if (this.userAgent) {
-      headers["User-Agent"] = this.userAgent;
+      baseHeaders["User-Agent"] = this.userAgent;
     }
     let retries = 0;
     const url = `${this.baseUrl}${params.path}`;
     for (;;) {
+      const token = await resolveToken(this.tokenProvider);
+      const headers: Record<string, string> = {
+        "Authorization": `Bearer ${token}`,
+        ...baseHeaders
+      };
       const requestInit: RequestInit = {
         method: params.method,
         headers,
@@ -508,6 +582,15 @@ export class RelayFileClient {
         },
         retryAfterSeconds
       );
+    }
+
+    if (status === 413) {
+      throw new PayloadTooLargeError(status, {
+        code: data.code ?? "payload_too_large",
+        message: data.message ?? "Request payload exceeds configured limit",
+        correlationId: data.correlationId,
+        details: data.details
+      });
     }
 
     throw new RelayFileApiError(status, {

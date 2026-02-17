@@ -46,3 +46,10 @@ export class InvalidStateError extends RelayFileApiError {
     this.name = "InvalidStateError";
   }
 }
+
+export class PayloadTooLargeError extends RelayFileApiError {
+  constructor(status: number, payload: Partial<ErrorResponse> = {}) {
+    super(status, payload);
+    this.name = "PayloadTooLargeError";
+  }
+}

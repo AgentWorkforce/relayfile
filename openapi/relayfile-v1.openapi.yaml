@@ -153,6 +153,8 @@ paths:
           $ref: '#/components/responses/Conflict'
         '412':
           $ref: '#/components/responses/PreconditionFailed'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
         '429':
           $ref: '#/components/responses/RateLimited'
         '500':
@@ -321,6 +323,8 @@ paths:
                 $ref: '#/components/schemas/OperationFeedResponse'
         '400':
           $ref: '#/components/responses/BadRequest'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
@@ -411,6 +415,11 @@ paths:
       parameters:
         - $ref: '#/components/parameters/WorkspaceId'
         - $ref: '#/components/parameters/CorrelationId'
+        - name: provider
+          in: query
+          required: false
+          schema:
+            type: string
       responses:
         '200':
           description: Webhook ingress status
@@ -437,6 +446,11 @@ paths:
       parameters:
         - $ref: '#/components/parameters/WorkspaceId'
         - $ref: '#/components/parameters/CorrelationId'
+        - name: provider
+          in: query
+          required: false
+          schema:
+            type: string
         - name: cursor
           in: query
           required: false
@@ -639,6 +653,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
         '429':
           description: Ingress queue full, retry with backoff and jitter
           content:
@@ -648,7 +664,185 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
-  /v1/admin/replay/envelopes/{envelopeId}:
+  /v1/admin/backends:
+    get:
+      tags: [Admin]
+      operationId: getBackendStatus
+      summary: Get active state and queue backend implementations
+      security:
+        - BearerAuth: [admin:read]
+        - BearerAuth: [admin:replay]
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Backend status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BackendStatusResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /v1/admin/ingress:
+    get:
+      tags: [Admin]
+      operationId: getAdminIngressStatus
+      summary: Get webhook ingress status map across workspaces
+      security:
+        - BearerAuth: [admin:read]
+        - BearerAuth: [admin:replay]
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+        - name: workspaceId
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: provider
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: alertProfile
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [strict, balanced, relaxed]
+            default: balanced
+        - name: pendingThreshold
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            default: 100
+        - name: deadLetterThreshold
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: staleThreshold
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            default: 10
+        - name: dropRateThreshold
+          in: query
+          required: false
+          schema:
+            type: number
+            format: float
+            minimum: 0
+            maximum: 1
+            default: 0.05
+        - name: nonZeroOnly
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: false
+        - name: maxAlerts
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+            maximum: 10000
+            default: 200
+        - name: cursor
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 5000
+            default: 200
+        - name: includeWorkspaces
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: true
+        - name: includeAlerts
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: true
+      responses:
+        '200':
+          description: Workspace ingress status map
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IngressStatusMapResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /v1/admin/sync:
+    get:
+      tags: [Admin]
+      operationId: getAdminSyncStatus
+      summary: Get sync status map and failure aggregates across workspaces
+      security:
+        - BearerAuth: [admin:read]
+        - BearerAuth: [admin:replay]
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+        - name: workspaceId
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: provider
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: nonZeroOnly
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: false
+      responses:
+        '200':
+          description: Workspace sync status map
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminSyncStatusMapResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /v1/admin/replay/envelope/{envelopeId}:
     post:
       tags: [Admin]
       operationId: replayEnvelope
@@ -678,7 +872,7 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
-  /v1/admin/replay/ops/{opId}:
+  /v1/admin/replay/op/{opId}:
     post:
       tags: [Admin]
       operationId: replayOperation
@@ -810,6 +1004,12 @@ components:
             $ref: '#/components/schemas/ConflictErrorResponse'
     PreconditionFailed:
       description: Missing or invalid precondition header
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    PayloadTooLarge:
+      description: Request payload exceeds configured size limit
       content:
         application/json:
           schema:
@@ -952,6 +1152,8 @@ components:
         origin:
           type: string
           enum: [provider_sync, agent_write, system]
+        provider:
+          type: string
         correlationId:
           type: string
         timestamp:
@@ -970,6 +1172,245 @@ components:
         nextCursor:
           type: string
           nullable: true
+
+    BackendStatusResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - backendProfile
+        - stateBackend
+        - envelopeQueue
+        - envelopeQueueDepth
+        - envelopeQueueCapacity
+        - writebackQueue
+        - writebackQueueDepth
+        - writebackQueueCapacity
+      properties:
+        backendProfile:
+          type: string
+        stateBackend:
+          type: string
+        envelopeQueue:
+          type: string
+        envelopeQueueDepth:
+          type: integer
+          minimum: 0
+        envelopeQueueCapacity:
+          type: integer
+          minimum: 0
+        writebackQueue:
+          type: string
+        writebackQueueDepth:
+          type: integer
+          minimum: 0
+        writebackQueueCapacity:
+          type: integer
+          minimum: 0
+
+    IngressStatusMapResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - generatedAt
+        - alertProfile
+        - effectiveAlertProfile
+        - workspaceCount
+        - returnedWorkspaceCount
+        - workspaceIds
+        - pendingTotal
+        - deadLetterTotal
+        - acceptedTotal
+        - droppedTotal
+        - dedupedTotal
+        - coalescedTotal
+        - suppressedTotal
+        - staleTotal
+        - thresholds
+        - alertTotals
+        - alertsTruncated
+        - alerts
+        - workspaces
+      properties:
+        generatedAt:
+          type: string
+          format: date-time
+        alertProfile:
+          type: string
+          enum: [strict, balanced, relaxed]
+        effectiveAlertProfile:
+          type: string
+          enum: [strict, balanced, relaxed, custom]
+        workspaceCount:
+          type: integer
+          minimum: 0
+        returnedWorkspaceCount:
+          type: integer
+          minimum: 0
+        workspaceIds:
+          type: array
+          items:
+            type: string
+        nextCursor:
+          type: string
+          nullable: true
+        pendingTotal:
+          type: integer
+          minimum: 0
+        deadLetterTotal:
+          type: integer
+          minimum: 0
+        acceptedTotal:
+          type: integer
+          minimum: 0
+        droppedTotal:
+          type: integer
+          minimum: 0
+        dedupedTotal:
+          type: integer
+          minimum: 0
+        coalescedTotal:
+          type: integer
+          minimum: 0
+        suppressedTotal:
+          type: integer
+          minimum: 0
+        staleTotal:
+          type: integer
+          minimum: 0
+        thresholds:
+          $ref: '#/components/schemas/AdminIngressAlertThresholds'
+        alertTotals:
+          $ref: '#/components/schemas/AdminIngressAlertTotals'
+        alertsTruncated:
+          type: boolean
+        alerts:
+          type: array
+          items:
+            $ref: '#/components/schemas/AdminIngressAlert'
+        workspaces:
+          type: object
+          additionalProperties:
+            $ref: '#/components/schemas/IngressStatusResponse'
+
+    AdminIngressAlert:
+      type: object
+      additionalProperties: false
+      required: [workspaceId, type, severity, value, threshold, message]
+      properties:
+        workspaceId:
+          type: string
+        type:
+          type: string
+          enum: [dead_letters, pending_backlog, drop_rate, stale_events]
+        severity:
+          type: string
+          enum: [warning, critical]
+        value:
+          type: number
+          format: float
+        threshold:
+          type: number
+          format: float
+        message:
+          type: string
+
+    AdminIngressAlertThresholds:
+      type: object
+      additionalProperties: false
+      required: [pending, deadLetter, stale, dropRate]
+      properties:
+        pending:
+          type: integer
+          minimum: 1
+        deadLetter:
+          type: integer
+          minimum: 1
+        stale:
+          type: integer
+          minimum: 1
+        dropRate:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 1
+
+    AdminIngressAlertTotals:
+      type: object
+      additionalProperties: false
+      required: [total, critical, warning, byType]
+      properties:
+        total:
+          type: integer
+          minimum: 0
+        critical:
+          type: integer
+          minimum: 0
+        warning:
+          type: integer
+          minimum: 0
+        byType:
+          type: object
+          additionalProperties:
+            type: integer
+            minimum: 0
+
+    AdminSyncStatusMapResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - generatedAt
+        - workspaceCount
+        - workspaceIds
+        - providerStatusCount
+        - healthyCount
+        - laggingCount
+        - errorCount
+        - pausedCount
+        - deadLetteredEnvelopesTotal
+        - deadLetteredOpsTotal
+        - failureCodes
+        - workspaces
+      properties:
+        generatedAt:
+          type: string
+          format: date-time
+        workspaceCount:
+          type: integer
+          minimum: 0
+        workspaceIds:
+          type: array
+          items:
+            type: string
+        providerStatusCount:
+          type: integer
+          minimum: 0
+        healthyCount:
+          type: integer
+          minimum: 0
+        laggingCount:
+          type: integer
+          minimum: 0
+        errorCount:
+          type: integer
+          minimum: 0
+        pausedCount:
+          type: integer
+          minimum: 0
+        deadLetteredEnvelopesTotal:
+          type: integer
+          minimum: 0
+        deadLetteredOpsTotal:
+          type: integer
+          minimum: 0
+        failureCodes:
+          type: object
+          additionalProperties:
+            type: integer
+            minimum: 0
+        workspaces:
+          type: object
+          additionalProperties:
+            $ref: '#/components/schemas/SyncStatusResponse'
 
     OperationStatusResponse:
       type: object
@@ -1067,6 +1508,12 @@ components:
                 additionalProperties:
                   type: integer
                   minimum: 0
+              deadLetteredEnvelopes:
+                type: integer
+                minimum: 0
+              deadLetteredOps:
+                type: integer
+                minimum: 0
 
     IngressStatusResponse:
       type: object

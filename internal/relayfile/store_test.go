@@ -1,6 +1,8 @@
 package relayfile
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -8,6 +10,224 @@ import (
 	"testing"
 	"time"
 )
+
+type memoryStateBackend struct {
+	snapshot  persistedState
+	loaded    bool
+	saveCalls int32
+}
+
+type blockingEnvelopeQueue struct {
+	capacity int
+	enqueue  int32
+	release  chan struct{}
+}
+
+func (q *blockingEnvelopeQueue) TryEnqueue(envelopeID string) bool {
+	_ = envelopeID
+	return false
+}
+
+func (q *blockingEnvelopeQueue) Enqueue(ctx context.Context, envelopeID string) bool {
+	_ = envelopeID
+	atomic.AddInt32(&q.enqueue, 1)
+	select {
+	case <-q.release:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func (q *blockingEnvelopeQueue) Dequeue(ctx context.Context) (string, bool) {
+	<-ctx.Done()
+	return "", false
+}
+
+func (q *blockingEnvelopeQueue) Depth() int {
+	return 0
+}
+
+func (q *blockingEnvelopeQueue) Capacity() int {
+	return q.capacity
+}
+
+func (q *blockingEnvelopeQueue) Close() error {
+	return nil
+}
+
+type blockingWritebackQueue struct {
+	capacity int
+	enqueue  int32
+	release  chan struct{}
+}
+
+func (q *blockingWritebackQueue) TryEnqueue(task WritebackQueueItem) bool {
+	_ = task
+	return false
+}
+
+func (q *blockingWritebackQueue) Enqueue(ctx context.Context, task WritebackQueueItem) bool {
+	_ = task
+	atomic.AddInt32(&q.enqueue, 1)
+	select {
+	case <-q.release:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func (q *blockingWritebackQueue) Dequeue(ctx context.Context) (WritebackQueueItem, bool) {
+	<-ctx.Done()
+	return WritebackQueueItem{}, false
+}
+
+func (q *blockingWritebackQueue) Depth() int {
+	return 0
+}
+
+func (q *blockingWritebackQueue) Capacity() int {
+	return q.capacity
+}
+
+func (q *blockingWritebackQueue) Close() error {
+	return nil
+}
+
+type countingEnvelopeQueue struct {
+	inner        EnvelopeQueue
+	tryCalls     int32
+	enqueueCalls int32
+	dequeueCalls int32
+}
+
+func (q *countingEnvelopeQueue) TryEnqueue(envelopeID string) bool {
+	atomic.AddInt32(&q.tryCalls, 1)
+	if q.inner == nil {
+		return false
+	}
+	return q.inner.TryEnqueue(envelopeID)
+}
+
+func (q *countingEnvelopeQueue) Enqueue(ctx context.Context, envelopeID string) bool {
+	atomic.AddInt32(&q.enqueueCalls, 1)
+	if q.inner == nil {
+		return false
+	}
+	return q.inner.Enqueue(ctx, envelopeID)
+}
+
+func (q *countingEnvelopeQueue) Dequeue(ctx context.Context) (string, bool) {
+	atomic.AddInt32(&q.dequeueCalls, 1)
+	if q.inner == nil {
+		return "", false
+	}
+	return q.inner.Dequeue(ctx)
+}
+
+func (q *countingEnvelopeQueue) Depth() int {
+	if q.inner == nil {
+		return 0
+	}
+	return q.inner.Depth()
+}
+
+func (q *countingEnvelopeQueue) Capacity() int {
+	if q.inner == nil {
+		return 0
+	}
+	return q.inner.Capacity()
+}
+
+func (q *countingEnvelopeQueue) Close() error {
+	if q.inner == nil {
+		return nil
+	}
+	return q.inner.Close()
+}
+
+type countingWritebackQueue struct {
+	inner        WritebackQueue
+	tryCalls     int32
+	enqueueCalls int32
+	dequeueCalls int32
+}
+
+func (q *countingWritebackQueue) TryEnqueue(task WritebackQueueItem) bool {
+	atomic.AddInt32(&q.tryCalls, 1)
+	if q.inner == nil {
+		return false
+	}
+	return q.inner.TryEnqueue(task)
+}
+
+func (q *countingWritebackQueue) Enqueue(ctx context.Context, task WritebackQueueItem) bool {
+	atomic.AddInt32(&q.enqueueCalls, 1)
+	if q.inner == nil {
+		return false
+	}
+	return q.inner.Enqueue(ctx, task)
+}
+
+func (q *countingWritebackQueue) Dequeue(ctx context.Context) (WritebackQueueItem, bool) {
+	atomic.AddInt32(&q.dequeueCalls, 1)
+	if q.inner == nil {
+		return WritebackQueueItem{}, false
+	}
+	return q.inner.Dequeue(ctx)
+}
+
+func (q *countingWritebackQueue) Depth() int {
+	if q.inner == nil {
+		return 0
+	}
+	return q.inner.Depth()
+}
+
+func (q *countingWritebackQueue) Capacity() int {
+	if q.inner == nil {
+		return 0
+	}
+	return q.inner.Capacity()
+}
+
+func (q *countingWritebackQueue) Close() error {
+	if q.inner == nil {
+		return nil
+	}
+	return q.inner.Close()
+}
+
+func (m *memoryStateBackend) Load() (*persistedState, error) {
+	if !m.loaded {
+		return nil, nil
+	}
+	data, err := json.Marshal(m.snapshot)
+	if err != nil {
+		return nil, err
+	}
+	var clone persistedState
+	if err := json.Unmarshal(data, &clone); err != nil {
+		return nil, err
+	}
+	return &clone, nil
+}
+
+func (m *memoryStateBackend) Save(state *persistedState) error {
+	atomic.AddInt32(&m.saveCalls, 1)
+	data, err := json.Marshal(state)
+	if err != nil {
+		return err
+	}
+	var clone persistedState
+	if err := json.Unmarshal(data, &clone); err != nil {
+		return err
+	}
+	m.snapshot = clone
+	m.loaded = true
+	return nil
+}
 
 func TestStoreWriteReadConflictDeleteLifecycle(t *testing.T) {
 	store := NewStore()
@@ -74,6 +294,349 @@ func TestStoreWriteReadConflictDeleteLifecycle(t *testing.T) {
 	}
 }
 
+func TestStoreUsesCustomStateBackend(t *testing.T) {
+	backend := &memoryStateBackend{}
+	store := NewStoreWithOptions(StoreOptions{
+		StateBackend:   backend,
+		DisableWorkers: true,
+	})
+
+	write, err := store.WriteFile(WriteRequest{
+		WorkspaceID:   "ws_backend",
+		Path:          "/notion/Backend.md",
+		IfMatch:       "0",
+		ContentType:   "text/markdown",
+		Content:       "# backend",
+		CorrelationID: "corr_backend_1",
+	})
+	if err != nil {
+		t.Fatalf("write failed: %v", err)
+	}
+	if write.TargetRevision == "" {
+		t.Fatalf("expected target revision from write")
+	}
+	if atomic.LoadInt32(&backend.saveCalls) < 1 {
+		t.Fatalf("expected custom backend Save to be called")
+	}
+	store.Close()
+
+	recovered := NewStoreWithOptions(StoreOptions{
+		StateBackend:   backend,
+		DisableWorkers: true,
+	})
+	t.Cleanup(recovered.Close)
+
+	file, err := recovered.ReadFile("ws_backend", "/notion/Backend.md")
+	if err != nil {
+		t.Fatalf("read from recovered store failed: %v", err)
+	}
+	if file.Content != "# backend" {
+		t.Fatalf("expected recovered content '# backend', got %q", file.Content)
+	}
+}
+
+func TestStoreUsesCustomQueues(t *testing.T) {
+	envelopeQueue := &countingEnvelopeQueue{
+		inner: NewInMemoryEnvelopeQueue(4),
+	}
+	writebackQueue := &countingWritebackQueue{
+		inner: NewInMemoryWritebackQueue(4),
+	}
+	store := NewStoreWithOptions(StoreOptions{
+		DisableWorkers: true,
+		EnvelopeQueue:  envelopeQueue,
+		WritebackQueue: writebackQueue,
+	})
+	t.Cleanup(store.Close)
+
+	_, err := store.WriteFile(WriteRequest{
+		WorkspaceID:   "ws_custom_queue",
+		Path:          "/notion/Queue.md",
+		IfMatch:       "0",
+		ContentType:   "text/markdown",
+		Content:       "# queue",
+		CorrelationID: "corr_queue_1",
+	})
+	if err != nil {
+		t.Fatalf("write failed: %v", err)
+	}
+
+	_, err = store.IngestEnvelope(WebhookEnvelopeRequest{
+		EnvelopeID:    "env_custom_queue_1",
+		WorkspaceID:   "ws_custom_queue",
+		Provider:      "notion",
+		DeliveryID:    "delivery_custom_queue_1",
+		ReceivedAt:    time.Now().UTC().Format(time.RFC3339Nano),
+		Payload:       map[string]any{"type": "notion.page.upsert", "objectId": "obj_custom_queue_1", "path": "/notion/Queue.md", "content": "# queue"},
+		CorrelationID: "corr_queue_2",
+	})
+	if err != nil {
+		t.Fatalf("ingest failed: %v", err)
+	}
+
+	if atomic.LoadInt32(&writebackQueue.tryCalls) < 1 {
+		t.Fatalf("expected custom writeback queue TryEnqueue to be used")
+	}
+	if atomic.LoadInt32(&envelopeQueue.tryCalls) < 1 {
+		t.Fatalf("expected custom envelope queue TryEnqueue to be used")
+	}
+
+	status, err := store.GetIngressStatus("ws_custom_queue")
+	if err != nil {
+		t.Fatalf("ingress status failed: %v", err)
+	}
+	if status.QueueCapacity != 4 {
+		t.Fatalf("expected queue capacity from custom queue (4), got %d", status.QueueCapacity)
+	}
+}
+
+func TestProcessWritebackSkipsNonPendingOperation(t *testing.T) {
+	var writeCalls int32
+	store := NewStoreWithOptions(StoreOptions{
+		DisableWorkers: true,
+		ProviderWriteAction: func(action WritebackAction) error {
+			atomic.AddInt32(&writeCalls, 1)
+			return nil
+		},
+	})
+	t.Cleanup(store.Close)
+
+	write, err := store.WriteFile(WriteRequest{
+		WorkspaceID:   "ws_writeback_guard",
+		Path:          "/notion/Guard.md",
+		IfMatch:       "0",
+		ContentType:   "text/markdown",
+		Content:       "# guard",
+		CorrelationID: "corr_writeback_guard_1",
+	})
+	if err != nil {
+		t.Fatalf("write failed: %v", err)
+	}
+
+	store.mu.Lock()
+	ws := store.workspaces["ws_writeback_guard"]
+	op := ws.Ops[write.OpID]
+	op.Status = "succeeded"
+	ws.Ops[write.OpID] = op
+	store.mu.Unlock()
+
+	store.processWriteback(writebackTask{
+		WorkspaceID:   "ws_writeback_guard",
+		OpID:          write.OpID,
+		Path:          "/notion/Guard.md",
+		Revision:      write.TargetRevision,
+		CorrelationID: "corr_writeback_guard_2",
+	})
+
+	if atomic.LoadInt32(&writeCalls) != 0 {
+		t.Fatalf("expected no provider write for non-pending op, got %d calls", atomic.LoadInt32(&writeCalls))
+	}
+}
+
+func TestEnqueueEnvelopeDeduplicatesQueuedEnvelopeID(t *testing.T) {
+	store := NewStoreWithOptions(StoreOptions{
+		DisableWorkers:    true,
+		EnvelopeQueueSize: 4,
+	})
+	t.Cleanup(store.Close)
+
+	_, err := store.IngestEnvelope(WebhookEnvelopeRequest{
+		EnvelopeID:    "env_queue_dedupe_1",
+		WorkspaceID:   "ws_queue_dedupe",
+		Provider:      "notion",
+		DeliveryID:    "delivery_queue_dedupe_1",
+		ReceivedAt:    time.Now().UTC().Format(time.RFC3339Nano),
+		Payload:       map[string]any{"type": "notion.page.upsert", "objectId": "obj_queue_dedupe_1", "path": "/notion/Q.md", "content": "# q"},
+		CorrelationID: "corr_queue_dedupe_1",
+	})
+	if err != nil {
+		t.Fatalf("ingest failed: %v", err)
+	}
+
+	_, err = store.ReplayEnvelope("env_queue_dedupe_1", "corr_queue_dedupe_2")
+	if err != nil {
+		t.Fatalf("first replay failed: %v", err)
+	}
+	_, err = store.ReplayEnvelope("env_queue_dedupe_1", "corr_queue_dedupe_3")
+	if err != nil {
+		t.Fatalf("second replay failed: %v", err)
+	}
+
+	status, err := store.GetIngressStatus("ws_queue_dedupe")
+	if err != nil {
+		t.Fatalf("ingress status failed: %v", err)
+	}
+	if status.QueueDepth != 1 {
+		t.Fatalf("expected envelope queue depth to remain 1 after duplicate replay enqueues, got %d", status.QueueDepth)
+	}
+}
+
+func TestEnqueueWritebackDeduplicatesByOpID(t *testing.T) {
+	store := NewStoreWithOptions(StoreOptions{
+		DisableWorkers: true,
+	})
+	t.Cleanup(store.Close)
+
+	task := writebackTask{
+		WorkspaceID:   "ws_writeback_dedupe",
+		OpID:          "op_writeback_dedupe_1",
+		Path:          "/notion/W.md",
+		Revision:      "rev_1",
+		CorrelationID: "corr_writeback_dedupe_1",
+	}
+	store.enqueueWriteback(task)
+	store.enqueueWriteback(task)
+
+	if depth := store.writebackQueue.Depth(); depth != 1 {
+		t.Fatalf("expected writeback queue depth 1 for duplicate op enqueue, got %d", depth)
+	}
+}
+
+func TestStoreSeedsQueuedIndexesFromFileQueueSnapshots(t *testing.T) {
+	dir := t.TempDir()
+	envelopeQueuePath := filepath.Join(dir, "seed-envelope-queue.json")
+	writebackQueuePath := filepath.Join(dir, "seed-writeback-queue.json")
+
+	envelopeQueue, err := NewFileEnvelopeQueue(envelopeQueuePath, 8)
+	if err != nil {
+		t.Fatalf("new file envelope queue failed: %v", err)
+	}
+	writebackQueue, err := NewFileWritebackQueue(writebackQueuePath, 8)
+	if err != nil {
+		t.Fatalf("new file writeback queue failed: %v", err)
+	}
+	if !envelopeQueue.TryEnqueue("env_seed_1") {
+		t.Fatalf("seed envelope enqueue failed")
+	}
+	if !writebackQueue.TryEnqueue(WritebackQueueItem{
+		WorkspaceID:   "ws_seed",
+		OpID:          "op_seed_1",
+		Path:          "/notion/Seed.md",
+		Revision:      "rev_seed_1",
+		CorrelationID: "corr_seed_1",
+	}) {
+		t.Fatalf("seed writeback enqueue failed")
+	}
+
+	store := NewStoreWithOptions(StoreOptions{
+		DisableWorkers: true,
+		EnvelopeQueue:  envelopeQueue,
+		WritebackQueue: writebackQueue,
+	})
+	t.Cleanup(store.Close)
+
+	store.enqueueEnvelope("env_seed_1")
+	store.enqueueWriteback(writebackTask{
+		WorkspaceID:   "ws_seed",
+		OpID:          "op_seed_1",
+		Path:          "/notion/Seed.md",
+		Revision:      "rev_seed_1",
+		CorrelationID: "corr_seed_1",
+	})
+
+	if depth := store.envelopeQueue.Depth(); depth != 1 {
+		t.Fatalf("expected seeded envelope queue depth to remain 1, got %d", depth)
+	}
+	if depth := store.writebackQueue.Depth(); depth != 1 {
+		t.Fatalf("expected seeded writeback queue depth to remain 1, got %d", depth)
+	}
+}
+
+func TestEnqueueEnvelopeDeduplicatesBlockingEnqueuePath(t *testing.T) {
+	envelopeQueue := &blockingEnvelopeQueue{
+		capacity: 4,
+		release:  make(chan struct{}),
+	}
+	store := NewStoreWithOptions(StoreOptions{
+		DisableWorkers: true,
+		EnvelopeQueue:  envelopeQueue,
+	})
+	t.Cleanup(store.Close)
+
+	store.enqueueEnvelope("env_blocking_dedupe_1")
+	store.enqueueEnvelope("env_blocking_dedupe_1")
+
+	deadline := time.Now().Add(200 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if atomic.LoadInt32(&envelopeQueue.enqueue) >= 1 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if atomic.LoadInt32(&envelopeQueue.enqueue) != 1 {
+		t.Fatalf("expected single blocking envelope enqueue call, got %d", atomic.LoadInt32(&envelopeQueue.enqueue))
+	}
+	close(envelopeQueue.release)
+}
+
+func TestEnqueueWritebackDeduplicatesBlockingEnqueuePath(t *testing.T) {
+	writebackQueue := &blockingWritebackQueue{
+		capacity: 4,
+		release:  make(chan struct{}),
+	}
+	store := NewStoreWithOptions(StoreOptions{
+		DisableWorkers: true,
+		WritebackQueue: writebackQueue,
+	})
+	t.Cleanup(store.Close)
+
+	task := writebackTask{
+		WorkspaceID:   "ws_blocking_dedupe",
+		OpID:          "op_blocking_dedupe_1",
+		Path:          "/notion/Blocking.md",
+		Revision:      "rev_blocking_1",
+		CorrelationID: "corr_blocking_dedupe_1",
+	}
+	store.enqueueWriteback(task)
+	store.enqueueWriteback(task)
+
+	deadline := time.Now().Add(200 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if atomic.LoadInt32(&writebackQueue.enqueue) >= 1 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if atomic.LoadInt32(&writebackQueue.enqueue) != 1 {
+		t.Fatalf("expected single blocking writeback enqueue call, got %d", atomic.LoadInt32(&writebackQueue.enqueue))
+	}
+	close(writebackQueue.release)
+}
+
+func TestGetBackendStatus(t *testing.T) {
+	store := NewStoreWithOptions(StoreOptions{
+		DisableWorkers: true,
+		StateBackend:   NewInMemoryStateBackend(),
+		EnvelopeQueue:  NewInMemoryEnvelopeQueue(11),
+		WritebackQueue: NewInMemoryWritebackQueue(13),
+		BackendProfile: "durable-local",
+	})
+	t.Cleanup(store.Close)
+
+	store.enqueueEnvelope("env_backend_status_1")
+	store.enqueueWriteback(writebackTask{
+		WorkspaceID:   "ws_backend_status",
+		OpID:          "op_backend_status_1",
+		Path:          "/notion/BackendStatus.md",
+		Revision:      "rev_backend_status_1",
+		CorrelationID: "corr_backend_status_1",
+	})
+
+	status := store.GetBackendStatus()
+	if status.StateBackend == "" || status.EnvelopeQueue == "" || status.WritebackQueue == "" {
+		t.Fatalf("expected backend type names, got %+v", status)
+	}
+	if status.BackendProfile != "durable-local" {
+		t.Fatalf("expected backend profile durable-local, got %q", status.BackendProfile)
+	}
+	if status.EnvelopeQueueCap != 11 || status.WritebackQueueCap != 13 {
+		t.Fatalf("expected queue capacities 11/13, got %+v", status)
+	}
+	if status.EnvelopeQueueDepth < 1 || status.WritebackQueueDepth < 1 {
+		t.Fatalf("expected non-zero queue depths after enqueue, got %+v", status)
+	}
+}
+
 func TestWriteCreateInfersProviderFromPath(t *testing.T) {
 	store := NewStore()
 	t.Cleanup(store.Close)
@@ -110,6 +673,81 @@ func TestWriteCreateInfersProviderFromPath(t *testing.T) {
 	}
 }
 
+func TestListTreeHonorsDepth(t *testing.T) {
+	store := NewStore()
+	t.Cleanup(store.Close)
+
+	writes := []WriteRequest{
+		{
+			WorkspaceID:   "ws_tree_depth",
+			Path:          "/notion/Engineering/Auth.md",
+			IfMatch:       "0",
+			ContentType:   "text/markdown",
+			Content:       "# auth",
+			CorrelationID: "corr_tree_depth_1",
+		},
+		{
+			WorkspaceID:   "ws_tree_depth",
+			Path:          "/notion/Engineering/Security/Policy.md",
+			IfMatch:       "0",
+			ContentType:   "text/markdown",
+			Content:       "# policy",
+			CorrelationID: "corr_tree_depth_2",
+		},
+		{
+			WorkspaceID:   "ws_tree_depth",
+			Path:          "/notion/Product/Roadmap.md",
+			IfMatch:       "0",
+			ContentType:   "text/markdown",
+			Content:       "# roadmap",
+			CorrelationID: "corr_tree_depth_3",
+		},
+	}
+	for _, writeReq := range writes {
+		if _, err := store.WriteFile(writeReq); err != nil {
+			t.Fatalf("write failed for %s: %v", writeReq.Path, err)
+		}
+	}
+
+	depth1, err := store.ListTree("ws_tree_depth", "/notion", 1, "")
+	if err != nil {
+		t.Fatalf("list tree depth=1 failed: %v", err)
+	}
+	if len(depth1.Entries) != 2 {
+		t.Fatalf("expected 2 depth-1 entries, got %d", len(depth1.Entries))
+	}
+	if depth1.Entries[0].Path != "/notion/Engineering" || depth1.Entries[0].Type != "dir" {
+		t.Fatalf("unexpected first depth-1 entry: %+v", depth1.Entries[0])
+	}
+	if depth1.Entries[1].Path != "/notion/Product" || depth1.Entries[1].Type != "dir" {
+		t.Fatalf("unexpected second depth-1 entry: %+v", depth1.Entries[1])
+	}
+
+	depth2, err := store.ListTree("ws_tree_depth", "/notion", 2, "")
+	if err != nil {
+		t.Fatalf("list tree depth=2 failed: %v", err)
+	}
+	expected := map[string]string{
+		"/notion/Engineering":          "dir",
+		"/notion/Engineering/Auth.md":  "file",
+		"/notion/Engineering/Security": "dir",
+		"/notion/Product":              "dir",
+		"/notion/Product/Roadmap.md":   "file",
+	}
+	if len(depth2.Entries) != len(expected) {
+		t.Fatalf("expected %d depth-2 entries, got %d", len(expected), len(depth2.Entries))
+	}
+	for _, entry := range depth2.Entries {
+		expectedType, ok := expected[entry.Path]
+		if !ok {
+			t.Fatalf("unexpected depth-2 entry: %+v", entry)
+		}
+		if expectedType != entry.Type {
+			t.Fatalf("expected %s to be %s, got %s", entry.Path, expectedType, entry.Type)
+		}
+	}
+}
+
 func TestStoreEventsAndOps(t *testing.T) {
 	store := NewStore()
 	t.Cleanup(store.Close)
@@ -126,7 +764,7 @@ func TestStoreEventsAndOps(t *testing.T) {
 		t.Fatalf("write failed: %v", err)
 	}
 
-	feed, err := store.GetEvents("ws_2", "", 100)
+	feed, err := store.GetEvents("ws_2", "", "", 100)
 	if err != nil {
 		t.Fatalf("events failed: %v", err)
 	}
@@ -144,6 +782,568 @@ func TestStoreEventsAndOps(t *testing.T) {
 	if op.Provider != "notion" {
 		t.Fatalf("expected op provider notion, got %q", op.Provider)
 	}
+}
+
+func TestGetEventsSupportsProviderFilter(t *testing.T) {
+	store := NewStore()
+	t.Cleanup(store.Close)
+
+	if _, err := store.WriteFile(WriteRequest{
+		WorkspaceID:   "ws_events_provider",
+		Path:          "/notion/EventsProvider.md",
+		IfMatch:       "0",
+		ContentType:   "text/markdown",
+		Content:       "# notion",
+		CorrelationID: "corr_events_provider_1",
+	}); err != nil {
+		t.Fatalf("notion write failed: %v", err)
+	}
+	if _, err := store.WriteFile(WriteRequest{
+		WorkspaceID:   "ws_events_provider",
+		Path:          "/custom/EventsProvider.md",
+		IfMatch:       "0",
+		ContentType:   "text/markdown",
+		Content:       "# custom",
+		CorrelationID: "corr_events_provider_2",
+	}); err != nil {
+		t.Fatalf("custom write failed: %v", err)
+	}
+
+	customFeed, err := store.GetEvents("ws_events_provider", "custom", "", 1000)
+	if err != nil {
+		t.Fatalf("custom filtered events failed: %v", err)
+	}
+	if len(customFeed.Events) == 0 {
+		t.Fatalf("expected custom filtered events to be non-empty")
+	}
+	for _, event := range customFeed.Events {
+		if event.Provider != "custom" {
+			t.Fatalf("expected custom provider events only, got provider=%q type=%q path=%q", event.Provider, event.Type, event.Path)
+		}
+	}
+
+	notionFeed, err := store.GetEvents("ws_events_provider", "notion", "", 1000)
+	if err != nil {
+		t.Fatalf("notion filtered events failed: %v", err)
+	}
+	if len(notionFeed.Events) == 0 {
+		t.Fatalf("expected notion filtered events to be non-empty")
+	}
+	for _, event := range notionFeed.Events {
+		if event.Provider != "notion" {
+			t.Fatalf("expected notion provider events only, got provider=%q type=%q path=%q", event.Provider, event.Type, event.Path)
+		}
+	}
+}
+
+func TestProviderUpsertWithoutPathUsesObjectIdentity(t *testing.T) {
+	store := NewStore()
+	t.Cleanup(store.Close)
+
+	firstReceivedAt := time.Now().UTC().Add(-2 * time.Second).Format(time.RFC3339Nano)
+	_, err := store.IngestEnvelope(WebhookEnvelopeRequest{
+		EnvelopeID:  "env_object_identity_1",
+		WorkspaceID: "ws_object_identity",
+		Provider:    "notion",
+		DeliveryID:  "delivery_object_identity_1",
+		ReceivedAt:  firstReceivedAt,
+		Payload: map[string]any{
+			"type":     "notion.page.upsert",
+			"objectId": "notion_obj_identity_1",
+			"path":     "/notion/ObjectIdentity.md",
+			"content":  "# initial",
+		},
+		CorrelationID: "corr_object_identity_1",
+	})
+	if err != nil {
+		t.Fatalf("first ingest failed: %v", err)
+	}
+
+	var firstRevision string
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		file, readErr := store.ReadFile("ws_object_identity", "/notion/ObjectIdentity.md")
+		if readErr == nil && file.Content == "# initial" {
+			firstRevision = file.Revision
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if firstRevision == "" {
+		t.Fatalf("expected initial provider upsert to materialize file")
+	}
+
+	secondReceivedAt := time.Now().UTC().Format(time.RFC3339Nano)
+	_, err = store.IngestEnvelope(WebhookEnvelopeRequest{
+		EnvelopeID:  "env_object_identity_2",
+		WorkspaceID: "ws_object_identity",
+		Provider:    "notion",
+		DeliveryID:  "delivery_object_identity_2",
+		ReceivedAt:  secondReceivedAt,
+		Payload: map[string]any{
+			"type":     "notion.page.upsert",
+			"objectId": "notion_obj_identity_1",
+			"content":  "# updated",
+		},
+		CorrelationID: "corr_object_identity_2",
+	})
+	if err != nil {
+		t.Fatalf("second ingest failed: %v", err)
+	}
+
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		file, readErr := store.ReadFile("ws_object_identity", "/notion/ObjectIdentity.md")
+		if readErr == nil && file.Content == "# updated" && file.Revision != firstRevision {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("expected object-identity upsert without path to update existing projected file")
+}
+
+func TestPendingWritebacksRecoveredOnRestart(t *testing.T) {
+	stateFile := filepath.Join(t.TempDir(), "relayfile-state.json")
+
+	store := NewStoreWithOptions(StoreOptions{
+		StateFile:         stateFile,
+		DisableWorkers:    true,
+		EnvelopeQueueSize: 8,
+	})
+	write, err := store.WriteFile(WriteRequest{
+		WorkspaceID:   "ws_restart_recovery",
+		Path:          "/notion/RestartRecovery.md",
+		IfMatch:       "0",
+		ContentType:   "text/markdown",
+		Content:       "# pending",
+		CorrelationID: "corr_restart_recovery_1",
+	})
+	if err != nil {
+		t.Fatalf("write failed: %v", err)
+	}
+	op, err := store.GetOperation("ws_restart_recovery", write.OpID)
+	if err != nil {
+		t.Fatalf("get pending operation failed: %v", err)
+	}
+	if op.Status != "pending" {
+		t.Fatalf("expected pending status before restart, got %s", op.Status)
+	}
+	store.Close()
+
+	var writeCalls int32
+	recovered := NewStoreWithOptions(StoreOptions{
+		StateFile: stateFile,
+		ProviderWriteAction: func(action WritebackAction) error {
+			atomic.AddInt32(&writeCalls, 1)
+			return nil
+		},
+		WritebackDelay: 5 * time.Millisecond,
+	})
+	t.Cleanup(recovered.Close)
+
+	waitForOpStatus(t, recovered, "ws_restart_recovery", write.OpID, "succeeded")
+	if atomic.LoadInt32(&writeCalls) < 1 {
+		t.Fatalf("expected recovered store to execute pending writeback at least once")
+	}
+}
+
+func TestRecoveredWritebackRespectsPersistedNextAttemptAt(t *testing.T) {
+	stateFile := filepath.Join(t.TempDir(), "relayfile-next-attempt.json")
+
+	store := NewStoreWithOptions(StoreOptions{
+		StateFile:            stateFile,
+		MaxWritebackAttempts: 3,
+		WritebackDelay:       400 * time.Millisecond,
+		ProviderWriteAction: func(action WritebackAction) error {
+			return fmt.Errorf("transient writeback failure")
+		},
+	})
+	write, err := store.WriteFile(WriteRequest{
+		WorkspaceID:   "ws_next_attempt",
+		Path:          "/notion/NextAttempt.md",
+		IfMatch:       "0",
+		ContentType:   "text/markdown",
+		Content:       "# retry",
+		CorrelationID: "corr_next_attempt_1",
+	})
+	if err != nil {
+		t.Fatalf("write failed: %v", err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		op, opErr := store.GetOperation("ws_next_attempt", write.OpID)
+		if opErr == nil && op.Status == "pending" && op.AttemptCount >= 1 && op.NextAttemptAt != nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	store.Close()
+
+	var recoveredCalls int32
+	recoveryStart := time.Now()
+	recovered := NewStoreWithOptions(StoreOptions{
+		StateFile:            stateFile,
+		MaxWritebackAttempts: 3,
+		WritebackDelay:       400 * time.Millisecond,
+		ProviderWriteAction: func(action WritebackAction) error {
+			atomic.AddInt32(&recoveredCalls, 1)
+			return nil
+		},
+	})
+	t.Cleanup(recovered.Close)
+
+	time.Sleep(100 * time.Millisecond)
+	if atomic.LoadInt32(&recoveredCalls) != 0 {
+		t.Fatalf("expected recovered writeback to wait for persisted nextAttemptAt delay")
+	}
+
+	waitForOpStatus(t, recovered, "ws_next_attempt", write.OpID, "succeeded")
+	if atomic.LoadInt32(&recoveredCalls) < 1 {
+		t.Fatalf("expected recovered writeback to execute after delay")
+	}
+	if time.Since(recoveryStart) < 200*time.Millisecond {
+		t.Fatalf("expected recovered writeback to respect backoff timing")
+	}
+}
+
+func TestEnvelopeRetryDelayPersistsAcrossRestart(t *testing.T) {
+	stateFile := filepath.Join(t.TempDir(), "relayfile-envelope-retry.json")
+
+	var initialParseCalls int32
+	store := NewStoreWithOptions(StoreOptions{
+		StateFile:           stateFile,
+		MaxEnvelopeAttempts: 3,
+		EnvelopeRetryDelay:  400 * time.Millisecond,
+		Adapters: []ProviderAdapter{
+			testAdapter{
+				provider: "custom",
+				parseEnvelope: func(req WebhookEnvelopeRequest) ([]ApplyAction, error) {
+					atomic.AddInt32(&initialParseCalls, 1)
+					return nil, fmt.Errorf("transient parse failure")
+				},
+			},
+		},
+	})
+	_, err := store.IngestEnvelope(WebhookEnvelopeRequest{
+		EnvelopeID:    "env_retry_persist_1",
+		WorkspaceID:   "ws_retry_persist",
+		Provider:      "custom",
+		DeliveryID:    "delivery_retry_persist_1",
+		ReceivedAt:    time.Now().UTC().Format(time.RFC3339Nano),
+		Payload:       map[string]any{"type": "custom.retry"},
+		CorrelationID: "corr_retry_persist_1",
+	})
+	if err != nil {
+		t.Fatalf("ingest failed: %v", err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if atomic.LoadInt32(&initialParseCalls) >= 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	store.Close()
+
+	var recoveredParseCalls int32
+	recovered := NewStoreWithOptions(StoreOptions{
+		StateFile:           stateFile,
+		MaxEnvelopeAttempts: 3,
+		EnvelopeRetryDelay:  400 * time.Millisecond,
+		Adapters: []ProviderAdapter{
+			testAdapter{
+				provider: "custom",
+				parseEnvelope: func(req WebhookEnvelopeRequest) ([]ApplyAction, error) {
+					atomic.AddInt32(&recoveredParseCalls, 1)
+					return nil, fmt.Errorf("transient parse failure")
+				},
+			},
+		},
+	})
+	t.Cleanup(recovered.Close)
+
+	time.Sleep(100 * time.Millisecond)
+	if atomic.LoadInt32(&recoveredParseCalls) != 0 {
+		t.Fatalf("expected recovered envelope retry to respect persisted delay")
+	}
+
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if atomic.LoadInt32(&recoveredParseCalls) >= 1 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("expected recovered envelope retry to execute after persisted delay")
+}
+
+func TestEnvelopeWorkersRespectProviderConcurrencyLimit(t *testing.T) {
+	var active int32
+	var maxActive int32
+
+	store := NewStoreWithOptions(StoreOptions{
+		EnvelopeWorkers:        4,
+		ProviderMaxConcurrency: 1,
+		EnvelopeRetryDelay:     5 * time.Millisecond,
+		MaxEnvelopeAttempts:    1,
+		Adapters: []ProviderAdapter{
+			testAdapter{
+				provider: "custom",
+				parseEnvelope: func(req WebhookEnvelopeRequest) ([]ApplyAction, error) {
+					current := atomic.AddInt32(&active, 1)
+					for {
+						existing := atomic.LoadInt32(&maxActive)
+						if current <= existing {
+							break
+						}
+						if atomic.CompareAndSwapInt32(&maxActive, existing, current) {
+							break
+						}
+					}
+					time.Sleep(40 * time.Millisecond)
+					atomic.AddInt32(&active, -1)
+					return []ApplyAction{
+						{
+							Type:             ActionFileUpsert,
+							Path:             toString(req.Payload["path"]),
+							Content:          toString(req.Payload["content"]),
+							ContentType:      "text/markdown",
+							ProviderObjectID: toString(req.Payload["objectId"]),
+						},
+					}, nil
+				},
+			},
+		},
+	})
+	t.Cleanup(store.Close)
+
+	_, err := store.IngestEnvelope(WebhookEnvelopeRequest{
+		EnvelopeID:    "env_provider_concurrency_1",
+		WorkspaceID:   "ws_provider_concurrency",
+		Provider:      "custom",
+		DeliveryID:    "delivery_provider_concurrency_1",
+		ReceivedAt:    time.Now().UTC().Format(time.RFC3339Nano),
+		Payload:       map[string]any{"type": "custom.upsert", "path": "/custom/A.md", "content": "# a", "objectId": "obj_a"},
+		CorrelationID: "corr_provider_concurrency_1",
+	})
+	if err != nil {
+		t.Fatalf("ingest 1 failed: %v", err)
+	}
+	_, err = store.IngestEnvelope(WebhookEnvelopeRequest{
+		EnvelopeID:    "env_provider_concurrency_2",
+		WorkspaceID:   "ws_provider_concurrency",
+		Provider:      "custom",
+		DeliveryID:    "delivery_provider_concurrency_2",
+		ReceivedAt:    time.Now().UTC().Format(time.RFC3339Nano),
+		Payload:       map[string]any{"type": "custom.upsert", "path": "/custom/B.md", "content": "# b", "objectId": "obj_b"},
+		CorrelationID: "corr_provider_concurrency_2",
+	})
+	if err != nil {
+		t.Fatalf("ingest 2 failed: %v", err)
+	}
+
+	waitForFileContent(t, store, "ws_provider_concurrency", "/custom/A.md", "# a")
+	waitForFileContent(t, store, "ws_provider_concurrency", "/custom/B.md", "# b")
+
+	if atomic.LoadInt32(&maxActive) > 1 {
+		t.Fatalf("expected max concurrent provider processing <= 1, got %d", atomic.LoadInt32(&maxActive))
+	}
+}
+
+func TestAcquireProviderSlotScopedByWorkspaceAndProvider(t *testing.T) {
+	store := NewStoreWithOptions(StoreOptions{
+		DisableWorkers:         true,
+		ProviderMaxConcurrency: 1,
+	})
+	t.Cleanup(store.Close)
+
+	store.mu.Lock()
+	store.envelopesByID["env_scope_1"] = WebhookEnvelopeRequest{
+		EnvelopeID:  "env_scope_1",
+		WorkspaceID: "ws_scope_1",
+		Provider:    "custom",
+	}
+	store.envelopesByID["env_scope_2"] = WebhookEnvelopeRequest{
+		EnvelopeID:  "env_scope_2",
+		WorkspaceID: "ws_scope_2",
+		Provider:    "custom",
+	}
+	store.envelopesByID["env_scope_3"] = WebhookEnvelopeRequest{
+		EnvelopeID:  "env_scope_3",
+		WorkspaceID: "ws_scope_1",
+		Provider:    "custom",
+	}
+	store.mu.Unlock()
+
+	release1 := store.acquireProviderSlot("env_scope_1")
+	t.Cleanup(release1)
+
+	acquiredDifferentWorkspace := make(chan struct{}, 1)
+	go func() {
+		release := store.acquireProviderSlot("env_scope_2")
+		release()
+		acquiredDifferentWorkspace <- struct{}{}
+	}()
+	select {
+	case <-acquiredDifferentWorkspace:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatalf("expected slot acquisition for different workspace to proceed without waiting")
+	}
+
+	acquiredSameWorkspace := make(chan struct{}, 1)
+	go func() {
+		release := store.acquireProviderSlot("env_scope_3")
+		release()
+		acquiredSameWorkspace <- struct{}{}
+	}()
+	select {
+	case <-acquiredSameWorkspace:
+		t.Fatalf("expected same-workspace slot acquisition to block until release")
+	case <-time.After(60 * time.Millisecond):
+	}
+
+	release1()
+	select {
+	case <-acquiredSameWorkspace:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatalf("expected same-workspace slot acquisition to unblock after release")
+	}
+}
+
+func TestEnvelopeWorkersParseInParallelAcrossWorkspaceScope(t *testing.T) {
+	var active int32
+	var maxActive int32
+
+	store := NewStoreWithOptions(StoreOptions{
+		EnvelopeWorkers:        4,
+		ProviderMaxConcurrency: 1,
+		Adapters: []ProviderAdapter{
+			testAdapter{
+				provider: "custom",
+				parseEnvelope: func(req WebhookEnvelopeRequest) ([]ApplyAction, error) {
+					current := atomic.AddInt32(&active, 1)
+					for {
+						existing := atomic.LoadInt32(&maxActive)
+						if current <= existing {
+							break
+						}
+						if atomic.CompareAndSwapInt32(&maxActive, existing, current) {
+							break
+						}
+					}
+					time.Sleep(50 * time.Millisecond)
+					atomic.AddInt32(&active, -1)
+					return []ApplyAction{
+						{
+							Type:             ActionFileUpsert,
+							Path:             toString(req.Payload["path"]),
+							Content:          toString(req.Payload["content"]),
+							ContentType:      "text/markdown",
+							ProviderObjectID: toString(req.Payload["objectId"]),
+						},
+					}, nil
+				},
+			},
+		},
+	})
+	t.Cleanup(store.Close)
+
+	_, err := store.IngestEnvelope(WebhookEnvelopeRequest{
+		EnvelopeID:    "env_parallel_scope_1",
+		WorkspaceID:   "ws_parallel_scope_1",
+		Provider:      "custom",
+		DeliveryID:    "delivery_parallel_scope_1",
+		ReceivedAt:    time.Now().UTC().Format(time.RFC3339Nano),
+		Payload:       map[string]any{"type": "custom.upsert", "path": "/custom/A.md", "content": "# a", "objectId": "obj_a"},
+		CorrelationID: "corr_parallel_scope_1",
+	})
+	if err != nil {
+		t.Fatalf("ingest 1 failed: %v", err)
+	}
+	_, err = store.IngestEnvelope(WebhookEnvelopeRequest{
+		EnvelopeID:    "env_parallel_scope_2",
+		WorkspaceID:   "ws_parallel_scope_2",
+		Provider:      "custom",
+		DeliveryID:    "delivery_parallel_scope_2",
+		ReceivedAt:    time.Now().UTC().Format(time.RFC3339Nano),
+		Payload:       map[string]any{"type": "custom.upsert", "path": "/custom/B.md", "content": "# b", "objectId": "obj_b"},
+		CorrelationID: "corr_parallel_scope_2",
+	})
+	if err != nil {
+		t.Fatalf("ingest 2 failed: %v", err)
+	}
+
+	waitForFileContent(t, store, "ws_parallel_scope_1", "/custom/A.md", "# a")
+	waitForFileContent(t, store, "ws_parallel_scope_2", "/custom/B.md", "# b")
+
+	if atomic.LoadInt32(&maxActive) < 2 {
+		t.Fatalf("expected at least 2 parallel parse operations across workspaces, got %d", atomic.LoadInt32(&maxActive))
+	}
+}
+
+func TestSuppressionMarkersPersistAcrossRestart(t *testing.T) {
+	stateFile := filepath.Join(t.TempDir(), "relayfile-suppressions.json")
+
+	store := NewStoreWithOptions(StoreOptions{
+		StateFile:         stateFile,
+		SuppressionWindow: 5 * time.Minute,
+		WritebackDelay:    5 * time.Millisecond,
+	})
+	write, err := store.WriteFile(WriteRequest{
+		WorkspaceID:   "ws_loop_persist",
+		Path:          "/notion/LoopPersist.md",
+		IfMatch:       "0",
+		ContentType:   "text/markdown",
+		Content:       "# initial",
+		CorrelationID: "corr_loop_persist_1",
+	})
+	if err != nil {
+		t.Fatalf("write failed: %v", err)
+	}
+	waitForOpStatus(t, store, "ws_loop_persist", write.OpID, "succeeded")
+	store.Close()
+
+	recovered := NewStoreWithOptions(StoreOptions{
+		StateFile:         stateFile,
+		SuppressionWindow: 5 * time.Minute,
+	})
+	t.Cleanup(recovered.Close)
+
+	_, err = recovered.IngestEnvelope(WebhookEnvelopeRequest{
+		EnvelopeID:  "env_loop_persist_1",
+		WorkspaceID: "ws_loop_persist",
+		Provider:    "notion",
+		DeliveryID:  "delivery_loop_persist_1",
+		ReceivedAt:  time.Now().UTC().Format(time.RFC3339Nano),
+		Payload: map[string]any{
+			"type":          "notion.page.upsert",
+			"objectId":      "notion_loop_persist_1",
+			"path":          "/notion/LoopPersist.md",
+			"content":       "# echo",
+			"origin":        "relayfile",
+			"opId":          write.OpID,
+			"correlationId": "corr_loop_persist_1",
+		},
+		CorrelationID: "corr_loop_persist_2",
+	})
+	if err != nil {
+		t.Fatalf("ingest loop echo failed: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		feed, feedErr := recovered.GetEvents("ws_loop_persist", "", "", 1000)
+		if feedErr != nil {
+			t.Fatalf("events lookup failed: %v", feedErr)
+		}
+		for _, event := range feed.Events {
+			if event.Type == "sync.suppressed" && event.CorrelationID == "corr_loop_persist_2" {
+				return
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("expected sync.suppressed event after restart for loop echo")
 }
 
 func TestGetSyncStatusMarksProviderLaggingFromPendingEnvelope(t *testing.T) {
@@ -235,6 +1435,9 @@ func TestGetSyncStatusMarksProviderErrorFromDeadLetter(t *testing.T) {
 			if providerStatus.FailureCodes["unknown"] < 1 {
 				t.Fatalf("expected failure code aggregation, got %+v", providerStatus.FailureCodes)
 			}
+			if providerStatus.DeadLetteredEnvelopes < 1 {
+				t.Fatalf("expected dead-lettered envelope count, got %d", providerStatus.DeadLetteredEnvelopes)
+			}
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -282,6 +1485,145 @@ func TestGetSyncStatusMarksProviderErrorFromWritebackDeadLetter(t *testing.T) {
 	if providerStatus.FailureCodes["unknown"] < 1 {
 		t.Fatalf("expected writeback failure code aggregation, got %+v", providerStatus.FailureCodes)
 	}
+	if providerStatus.DeadLetteredOps < 1 {
+		t.Fatalf("expected dead-lettered ops count, got %d", providerStatus.DeadLetteredOps)
+	}
+}
+
+func TestGetSyncStatusIncludesProviderPresentOnlyInOperations(t *testing.T) {
+	store := NewStoreWithOptions(StoreOptions{
+		MaxWritebackAttempts: 1,
+		WritebackDelay:       5 * time.Millisecond,
+		ProviderWriteAction: func(action WritebackAction) error {
+			if action.Type == WritebackActionFileDelete {
+				return fmt.Errorf("delete failure for provider discovery")
+			}
+			return nil
+		},
+	})
+	t.Cleanup(store.Close)
+
+	create, err := store.WriteFile(WriteRequest{
+		WorkspaceID:   "ws_sync_provider_discovery",
+		Path:          "/custom/ProviderFromOps.md",
+		IfMatch:       "0",
+		ContentType:   "text/markdown",
+		Content:       "# custom",
+		CorrelationID: "corr_sync_provider_discovery_1",
+	})
+	if err != nil {
+		t.Fatalf("create failed: %v", err)
+	}
+	waitForOpStatus(t, store, "ws_sync_provider_discovery", create.OpID, "succeeded")
+
+	file, err := store.ReadFile("ws_sync_provider_discovery", "/custom/ProviderFromOps.md")
+	if err != nil {
+		t.Fatalf("read after create failed: %v", err)
+	}
+	del, err := store.DeleteFile(DeleteRequest{
+		WorkspaceID:   "ws_sync_provider_discovery",
+		Path:          "/custom/ProviderFromOps.md",
+		IfMatch:       file.Revision,
+		CorrelationID: "corr_sync_provider_discovery_2",
+	})
+	if err != nil {
+		t.Fatalf("delete failed: %v", err)
+	}
+	waitForOpStatus(t, store, "ws_sync_provider_discovery", del.OpID, "dead_lettered")
+	waitForNotFound(t, store, "ws_sync_provider_discovery", "/custom/ProviderFromOps.md")
+
+	status, err := store.GetSyncStatus("ws_sync_provider_discovery", "")
+	if err != nil {
+		t.Fatalf("sync status failed: %v", err)
+	}
+	foundCustom := false
+	for _, providerStatus := range status.Providers {
+		if providerStatus.Provider != "custom" {
+			continue
+		}
+		foundCustom = true
+		if providerStatus.Status != "error" {
+			t.Fatalf("expected custom provider status error, got %s", providerStatus.Status)
+		}
+		if providerStatus.LastError == nil || *providerStatus.LastError == "" {
+			t.Fatalf("expected custom provider lastError to be populated")
+		}
+		if providerStatus.DeadLetteredOps < 1 {
+			t.Fatalf("expected custom provider dead-lettered ops count, got %d", providerStatus.DeadLetteredOps)
+		}
+		break
+	}
+	if !foundCustom {
+		t.Fatalf("expected custom provider to be included from operations, got %+v", status.Providers)
+	}
+}
+
+func TestListSyncStatusesAggregatesWorkspacesAndAppliesProviderFilter(t *testing.T) {
+	store := NewStoreWithOptions(StoreOptions{
+		DisableWorkers: true,
+	})
+	t.Cleanup(store.Close)
+
+	if _, err := store.WriteFile(WriteRequest{
+		WorkspaceID:   "ws_sync_list_ws_only",
+		Path:          "/notion/Seed.md",
+		IfMatch:       "0",
+		ContentType:   "text/markdown",
+		Content:       "# seed",
+		CorrelationID: "corr_sync_list_ws_only",
+	}); err != nil {
+		t.Fatalf("write seed file failed: %v", err)
+	}
+
+	if _, err := store.IngestEnvelope(WebhookEnvelopeRequest{
+		EnvelopeID:    "env_sync_list_1",
+		WorkspaceID:   "ws_sync_list_1",
+		Provider:      "notion",
+		DeliveryID:    "delivery_sync_list_1",
+		ReceivedAt:    time.Now().UTC().Add(-2 * time.Minute).Format(time.RFC3339Nano),
+		Payload:       map[string]any{"type": "sync"},
+		CorrelationID: "corr_sync_list_1",
+	}); err != nil {
+		t.Fatalf("ingest ws_sync_list_1 failed: %v", err)
+	}
+	if _, err := store.IngestEnvelope(WebhookEnvelopeRequest{
+		EnvelopeID:    "env_sync_list_2",
+		WorkspaceID:   "ws_sync_list_2",
+		Provider:      "custom",
+		DeliveryID:    "delivery_sync_list_2",
+		ReceivedAt:    time.Now().UTC().Format(time.RFC3339Nano),
+		Payload:       map[string]any{"type": "sync"},
+		CorrelationID: "corr_sync_list_2",
+	}); err != nil {
+		t.Fatalf("ingest ws_sync_list_2 failed: %v", err)
+	}
+
+	statuses := store.ListSyncStatuses("")
+	if len(statuses) < 3 {
+		t.Fatalf("expected at least three workspaces in sync status map, got %d", len(statuses))
+	}
+	if _, ok := statuses["ws_sync_list_ws_only"]; !ok {
+		t.Fatalf("expected workspace created from local write to be present in sync status map")
+	}
+	if _, ok := statuses["ws_sync_list_1"]; !ok {
+		t.Fatalf("expected ws_sync_list_1 in sync status map")
+	}
+	if _, ok := statuses["ws_sync_list_2"]; !ok {
+		t.Fatalf("expected ws_sync_list_2 in sync status map")
+	}
+
+	filtered := store.ListSyncStatuses("custom")
+	if len(filtered) < 3 {
+		t.Fatalf("expected provider-filtered sync status map to retain workspace set, got %d", len(filtered))
+	}
+	for workspaceID, status := range filtered {
+		if len(status.Providers) != 1 {
+			t.Fatalf("expected one provider entry for workspace %s after provider filter, got %+v", workspaceID, status.Providers)
+		}
+		if status.Providers[0].Provider != "custom" {
+			t.Fatalf("expected provider-filtered entry to be custom for workspace %s, got %+v", workspaceID, status.Providers[0])
+		}
+	}
 }
 
 func TestNormalizeFailureCode(t *testing.T) {
@@ -302,6 +1644,24 @@ func TestNormalizeFailureCode(t *testing.T) {
 		if got := normalizeFailureCode(tc.errText); got != tc.code {
 			t.Fatalf("normalizeFailureCode(%q) = %q, want %q", tc.errText, got, tc.code)
 		}
+	}
+}
+
+func TestTriggerSyncRefreshRejectsUnknownProvider(t *testing.T) {
+	store := NewStore()
+	t.Cleanup(store.Close)
+
+	_, err := store.TriggerSyncRefresh("ws_sync_refresh", "unknown-provider", "manual", "corr_sync_refresh_1")
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("expected invalid input for unknown provider, got %v", err)
+	}
+
+	resp, err := store.TriggerSyncRefresh("ws_sync_refresh", "notion", "manual", "corr_sync_refresh_2")
+	if err != nil {
+		t.Fatalf("expected known provider to queue refresh, got %v", err)
+	}
+	if resp.Status != "queued" || resp.ID == "" {
+		t.Fatalf("unexpected queued response: %+v", resp)
 	}
 }
 
@@ -756,7 +2116,7 @@ func TestReplayEnvelopeReprocessesProcessedEnvelope(t *testing.T) {
 	}
 	waitForFileContent(t, store, "ws_replay", "/notion/Replay.md", "# replay")
 
-	initialFeed, err := store.GetEvents("ws_replay", "", 1000)
+	initialFeed, err := store.GetEvents("ws_replay", "", "", 1000)
 	if err != nil {
 		t.Fatalf("events failed: %v", err)
 	}
@@ -769,13 +2129,13 @@ func TestReplayEnvelopeReprocessesProcessedEnvelope(t *testing.T) {
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		feed, err := store.GetEvents("ws_replay", "", 1000)
+		feed, err := store.GetEvents("ws_replay", "", "", 1000)
 		if err == nil && len(feed.Events) > initialCount {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	feed, err := store.GetEvents("ws_replay", "", 1000)
+	feed, err := store.GetEvents("ws_replay", "", "", 1000)
 	if err != nil {
 		t.Fatalf("events failed after replay: %v", err)
 	}
@@ -883,7 +2243,7 @@ func TestEnvelopeParseDeadLettersAfterMaxAttempts(t *testing.T) {
 	if attempts.Load() != 2 {
 		t.Fatalf("expected exactly 2 parse attempts, got %d", attempts.Load())
 	}
-	feed, err := store.GetEvents("ws_parse_dead", "", 1000)
+	feed, err := store.GetEvents("ws_parse_dead", "", "", 1000)
 	if err != nil {
 		t.Fatalf("events failed: %v", err)
 	}
@@ -1381,7 +2741,7 @@ func TestEnvelopeStalenessSkipsOlderUpsertForSameObject(t *testing.T) {
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		feed, err := store.GetEvents("ws_stale_upsert", "", 1000)
+		feed, err := store.GetEvents("ws_stale_upsert", "", "", 1000)
 		if err != nil {
 			t.Fatalf("get events failed: %v", err)
 		}
@@ -1460,7 +2820,7 @@ func TestEnvelopeStalenessSkipsOlderDeleteForSameObject(t *testing.T) {
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		feed, err := store.GetEvents("ws_stale_delete", "", 1000)
+		feed, err := store.GetEvents("ws_stale_delete", "", "", 1000)
 		if err != nil {
 			t.Fatalf("get events failed: %v", err)
 		}
@@ -1509,7 +2869,7 @@ func TestEnvelopeDuplicateDeliveryDoesNotDoubleApply(t *testing.T) {
 		t.Fatalf("ingest failed: %v", err)
 	}
 	waitForFileContent(t, store, "ws_dup", "/notion/Dup.md", "# dup")
-	initialFeed, err := store.GetEvents("ws_dup", "", 1000)
+	initialFeed, err := store.GetEvents("ws_dup", "", "", 1000)
 	if err != nil {
 		t.Fatalf("events failed: %v", err)
 	}
@@ -1522,7 +2882,7 @@ func TestEnvelopeDuplicateDeliveryDoesNotDoubleApply(t *testing.T) {
 		t.Fatalf("duplicate ingest failed: %v", err)
 	}
 	time.Sleep(50 * time.Millisecond)
-	nextFeed, err := store.GetEvents("ws_dup", "", 1000)
+	nextFeed, err := store.GetEvents("ws_dup", "", "", 1000)
 	if err != nil {
 		t.Fatalf("events failed: %v", err)
 	}
@@ -1654,6 +3014,109 @@ func TestEnvelopeCoalescingRespectsWindow(t *testing.T) {
 	}
 	if status.AcceptedTotal != 2 || status.CoalescedTotal != 0 || status.PendingTotal != 2 {
 		t.Fatalf("expected no coalescing outside window, got %+v", status)
+	}
+}
+
+func TestWebhookBurstCoalescingKeepsSinglePendingEnvelope(t *testing.T) {
+	store := NewStoreWithOptions(StoreOptions{
+		DisableWorkers:    true,
+		EnvelopeQueueSize: 16,
+		CoalesceWindow:    5 * time.Second,
+	})
+	t.Cleanup(store.Close)
+
+	receivedAt := time.Now().UTC()
+	const burstSize = 200
+	for i := 0; i < burstSize; i++ {
+		_, err := store.IngestEnvelope(WebhookEnvelopeRequest{
+			EnvelopeID:  fmt.Sprintf("env_burst_%d", i),
+			WorkspaceID: "ws_burst",
+			Provider:    "notion",
+			DeliveryID:  fmt.Sprintf("delivery_burst_%d", i),
+			ReceivedAt:  receivedAt.Add(time.Duration(i) * 10 * time.Millisecond).Format(time.RFC3339Nano),
+			Payload: map[string]any{
+				"type":     "notion.page.upsert",
+				"objectId": "notion_burst_1",
+				"path":     "/notion/Burst.md",
+				"content":  fmt.Sprintf("# burst %d", i),
+			},
+			CorrelationID: fmt.Sprintf("corr_burst_%d", i),
+		})
+		if err != nil {
+			t.Fatalf("burst ingest %d failed: %v", i, err)
+		}
+	}
+
+	status, err := store.GetIngressStatus("ws_burst")
+	if err != nil {
+		t.Fatalf("ingress status failed: %v", err)
+	}
+	if status.AcceptedTotal != 1 || status.CoalescedTotal != burstSize-1 || status.PendingTotal != 1 {
+		t.Fatalf("unexpected burst coalescing counters: %+v", status)
+	}
+	if status.QueueDepth != 1 {
+		t.Fatalf("expected queue depth to remain 1 for burst coalescing, got %d", status.QueueDepth)
+	}
+	if status.CoalesceRate < 0.99 {
+		t.Fatalf("expected high coalesce rate for burst coalescing, got %f", status.CoalesceRate)
+	}
+	notionIngress, ok := status.IngressByProvider["notion"]
+	if !ok || notionIngress.AcceptedTotal != 1 || notionIngress.CoalescedTotal != burstSize-1 || notionIngress.PendingTotal != 1 {
+		t.Fatalf("unexpected provider burst coalescing breakdown: %+v", status.IngressByProvider)
+	}
+}
+
+func TestRebuildCoalesceIndexPrefersLatestPendingEnvelope(t *testing.T) {
+	store := NewStoreWithOptions(StoreOptions{
+		DisableWorkers: true,
+	})
+	t.Cleanup(store.Close)
+
+	oldReq := WebhookEnvelopeRequest{
+		EnvelopeID:  "env_rebuild_old",
+		WorkspaceID: "ws_rebuild",
+		Provider:    "notion",
+		DeliveryID:  "delivery_rebuild_old",
+		ReceivedAt:  "2026-01-01T10:00:00Z",
+		Payload: map[string]any{
+			"type":     "notion.page.upsert",
+			"objectId": "notion_rebuild_1",
+			"path":     "/notion/Rebuild.md",
+			"content":  "# old",
+		},
+	}
+	newReq := WebhookEnvelopeRequest{
+		EnvelopeID:  "env_rebuild_new",
+		WorkspaceID: "ws_rebuild",
+		Provider:    "notion",
+		DeliveryID:  "delivery_rebuild_new",
+		ReceivedAt:  "2026-01-01T10:00:01Z",
+		Payload: map[string]any{
+			"type":     "notion.page.upsert",
+			"objectId": "notion_rebuild_1",
+			"path":     "/notion/Rebuild.md",
+			"content":  "# new",
+		},
+	}
+	coalesceKey := coalesceObjectKey(oldReq)
+	if coalesceKey == "" {
+		t.Fatalf("expected coalesce key for test envelope")
+	}
+
+	store.mu.Lock()
+	store.envelopesByID[oldReq.EnvelopeID] = oldReq
+	store.envelopesByID[newReq.EnvelopeID] = newReq
+	store.processedEnvs[oldReq.EnvelopeID] = false
+	store.processedEnvs[newReq.EnvelopeID] = false
+	store.coalesceIndex = map[string]string{
+		coalesceKey: oldReq.EnvelopeID,
+	}
+	store.rebuildCoalesceIndexLocked()
+	selected := store.coalesceIndex[coalesceKey]
+	store.mu.Unlock()
+
+	if selected != newReq.EnvelopeID {
+		t.Fatalf("expected rebuild to select latest pending envelope %q, got %q", newReq.EnvelopeID, selected)
 	}
 }
 
@@ -1816,6 +3279,116 @@ func TestEnvelopeQueueBackpressureAndIngressStatus(t *testing.T) {
 	notionIngress, ok := status.IngressByProvider["notion"]
 	if !ok || notionIngress.AcceptedTotal != 1 || notionIngress.DroppedTotal != 1 || notionIngress.PendingTotal != 1 {
 		t.Fatalf("expected notion ingress backpressure breakdown, got %+v", status.IngressByProvider)
+	}
+}
+
+func TestGetIngressStatusForProviderFiltersWorkspaceMetrics(t *testing.T) {
+	store := NewStoreWithOptions(StoreOptions{
+		DisableWorkers:    true,
+		EnvelopeQueueSize: 4,
+	})
+	t.Cleanup(store.Close)
+	receivedAt := time.Now().UTC().Format(time.RFC3339Nano)
+
+	_, err := store.IngestEnvelope(WebhookEnvelopeRequest{
+		EnvelopeID:    "env_ingress_provider_1",
+		WorkspaceID:   "ws_ingress_provider",
+		Provider:      "notion",
+		DeliveryID:    "delivery_ingress_provider_1",
+		ReceivedAt:    receivedAt,
+		Payload:       map[string]any{"type": "sync"},
+		CorrelationID: "corr_ingress_provider_1",
+	})
+	if err != nil {
+		t.Fatalf("ingest notion failed: %v", err)
+	}
+	_, err = store.IngestEnvelope(WebhookEnvelopeRequest{
+		EnvelopeID:    "env_ingress_provider_2",
+		WorkspaceID:   "ws_ingress_provider",
+		Provider:      "custom",
+		DeliveryID:    "delivery_ingress_provider_2",
+		ReceivedAt:    receivedAt,
+		Payload:       map[string]any{"type": "sync"},
+		CorrelationID: "corr_ingress_provider_2",
+	})
+	if err != nil {
+		t.Fatalf("ingest custom failed: %v", err)
+	}
+
+	full, err := store.GetIngressStatus("ws_ingress_provider")
+	if err != nil {
+		t.Fatalf("workspace ingress status failed: %v", err)
+	}
+	if full.PendingTotal != 2 {
+		t.Fatalf("expected workspace pending=2, got %d", full.PendingTotal)
+	}
+
+	filtered, err := store.GetIngressStatusForProvider("ws_ingress_provider", "custom")
+	if err != nil {
+		t.Fatalf("provider ingress status failed: %v", err)
+	}
+	if filtered.PendingTotal != 1 || filtered.AcceptedTotal != 1 || filtered.QueueDepth != 1 {
+		t.Fatalf("unexpected filtered ingress status: %+v", filtered)
+	}
+	if len(filtered.IngressByProvider) != 1 {
+		t.Fatalf("expected single provider entry in filtered status, got %+v", filtered.IngressByProvider)
+	}
+	customIngress, ok := filtered.IngressByProvider["custom"]
+	if !ok || customIngress.PendingTotal != 1 || customIngress.AcceptedTotal != 1 {
+		t.Fatalf("expected custom provider metrics in filtered status, got %+v", filtered.IngressByProvider)
+	}
+}
+
+func TestListIngressStatusesAggregatesWorkspaces(t *testing.T) {
+	store := NewStoreWithOptions(StoreOptions{
+		DisableWorkers:    true,
+		EnvelopeQueueSize: 8,
+	})
+	t.Cleanup(store.Close)
+
+	receivedAt := time.Now().UTC().Format(time.RFC3339Nano)
+	_, err := store.IngestEnvelope(WebhookEnvelopeRequest{
+		EnvelopeID:    "env_ingress_list_1",
+		WorkspaceID:   "ws_ingress_list_1",
+		Provider:      "notion",
+		DeliveryID:    "delivery_ingress_list_1",
+		ReceivedAt:    receivedAt,
+		Payload:       map[string]any{"type": "sync"},
+		CorrelationID: "corr_ingress_list_1",
+	})
+	if err != nil {
+		t.Fatalf("ingest workspace 1 failed: %v", err)
+	}
+	_, err = store.IngestEnvelope(WebhookEnvelopeRequest{
+		EnvelopeID:    "env_ingress_list_2",
+		WorkspaceID:   "ws_ingress_list_2",
+		Provider:      "custom",
+		DeliveryID:    "delivery_ingress_list_2",
+		ReceivedAt:    receivedAt,
+		Payload:       map[string]any{"type": "sync"},
+		CorrelationID: "corr_ingress_list_2",
+	})
+	if err != nil {
+		t.Fatalf("ingest workspace 2 failed: %v", err)
+	}
+
+	statuses := store.ListIngressStatuses()
+	if len(statuses) < 2 {
+		t.Fatalf("expected at least 2 workspace statuses, got %d", len(statuses))
+	}
+	ws1, ok := statuses["ws_ingress_list_1"]
+	if !ok {
+		t.Fatalf("expected status for ws_ingress_list_1")
+	}
+	if ws1.AcceptedTotal != 1 || ws1.PendingTotal != 1 {
+		t.Fatalf("unexpected status for ws_ingress_list_1: %+v", ws1)
+	}
+	ws2, ok := statuses["ws_ingress_list_2"]
+	if !ok {
+		t.Fatalf("expected status for ws_ingress_list_2")
+	}
+	if ws2.AcceptedTotal != 1 || ws2.PendingTotal != 1 {
+		t.Fatalf("unexpected status for ws_ingress_list_2: %+v", ws2)
 	}
 }
 
@@ -2140,12 +3713,12 @@ func TestCustomProviderAdapterIsUsedForEnvelopeProcessing(t *testing.T) {
 	t.Cleanup(store.Close)
 
 	_, err := store.IngestEnvelope(WebhookEnvelopeRequest{
-		EnvelopeID:  "env_custom_1",
-		WorkspaceID: "ws_custom",
-		Provider:    "custom",
-		DeliveryID:  "delivery_custom_1",
-		ReceivedAt:  time.Now().UTC().Format(time.RFC3339),
-		Payload:     map[string]any{"type": "ignored_by_adapter"},
+		EnvelopeID:    "env_custom_1",
+		WorkspaceID:   "ws_custom",
+		Provider:      "custom",
+		DeliveryID:    "delivery_custom_1",
+		ReceivedAt:    time.Now().UTC().Format(time.RFC3339),
+		Payload:       map[string]any{"type": "ignored_by_adapter"},
 		CorrelationID: "corr_custom_1",
 	})
 	if err != nil {
@@ -2237,7 +3810,7 @@ func TestLoopSuppressionSuppressesProviderEchoWithinWindow(t *testing.T) {
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		feed, err := store.GetEvents("ws_loop", "", 1000)
+		feed, err := store.GetEvents("ws_loop", "", "", 1000)
 		if err != nil {
 			t.Fatalf("get events failed: %v", err)
 		}
@@ -2367,10 +3940,10 @@ func waitForOpStatus(t *testing.T, store *Store, workspaceID, opID, status strin
 }
 
 type testAdapter struct {
-	provider string
-	actions  []ApplyAction
+	provider      string
+	actions       []ApplyAction
 	parseEnvelope func(req WebhookEnvelopeRequest) ([]ApplyAction, error)
-	writeback func(action WritebackAction) error
+	writeback     func(action WritebackAction) error
 }
 
 func (a testAdapter) Provider() string {

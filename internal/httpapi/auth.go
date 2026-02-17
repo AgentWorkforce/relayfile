@@ -123,7 +123,7 @@ func parseBearer(authHeader, jwtSecret string, now time.Time) (tokenClaims, *aut
 	if now.Unix() >= exp {
 		return tokenClaims{}, &authError{status: 401, code: "unauthorized", message: "token expired"}
 	}
-	if aud, ok := payload["aud"].(string); !ok || aud != "relayfile" {
+	if !hasAudience(payload["aud"], "relayfile") {
 		return tokenClaims{}, &authError{status: 401, code: "unauthorized", message: "invalid aud claim"}
 	}
 
@@ -161,6 +161,30 @@ func parseScopes(v any) map[string]struct{} {
 		}
 	}
 	return out
+}
+
+func hasAudience(v any, required string) bool {
+	required = strings.TrimSpace(required)
+	if required == "" {
+		return false
+	}
+	switch typed := v.(type) {
+	case string:
+		return strings.TrimSpace(typed) == required
+	case []any:
+		for _, item := range typed {
+			if aud, ok := item.(string); ok && strings.TrimSpace(aud) == required {
+				return true
+			}
+		}
+	case []string:
+		for _, aud := range typed {
+			if strings.TrimSpace(aud) == required {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func parseExp(v any) (int64, error) {

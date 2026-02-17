@@ -1,7 +1,11 @@
 package main
 
 import (
+	"context"
+	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -38,15 +42,303 @@ func TestDurationEnvFallsBackOnInvalidValue(t *testing.T) {
 	}
 }
 
+func TestInt64EnvParsesValue(t *testing.T) {
+	t.Setenv("RELAYFILE_TEST_INT64", "1048576")
+	got := int64Env("RELAYFILE_TEST_INT64", 512)
+	if got != 1048576 {
+		t.Fatalf("expected 1048576, got %d", got)
+	}
+}
+
+func TestInt64EnvFallsBackOnInvalidValue(t *testing.T) {
+	t.Setenv("RELAYFILE_TEST_INT64_BAD", "not-a-number")
+	got := int64Env("RELAYFILE_TEST_INT64_BAD", 2048)
+	if got != 2048 {
+		t.Fatalf("expected fallback 2048, got %d", got)
+	}
+}
+
 func TestEnvHelpersUseFallbackWhenUnset(t *testing.T) {
 	_ = os.Unsetenv("RELAYFILE_TEST_INT_UNSET")
+	_ = os.Unsetenv("RELAYFILE_TEST_INT64_UNSET")
 	_ = os.Unsetenv("RELAYFILE_TEST_DURATION_UNSET")
 
 	if got := intEnv("RELAYFILE_TEST_INT_UNSET", 9); got != 9 {
 		t.Fatalf("expected fallback 9, got %d", got)
+	}
+	if got := int64Env("RELAYFILE_TEST_INT64_UNSET", 9000); got != 9000 {
+		t.Fatalf("expected fallback 9000, got %d", got)
 	}
 	if got := durationEnv("RELAYFILE_TEST_DURATION_UNSET", 3*time.Second); got != 3*time.Second {
 		t.Fatalf("expected fallback 3s, got %s", got)
 	}
 }
 
+func TestBuildNotionTokenProviderStatic(t *testing.T) {
+	provider := buildNotionTokenProvider("static_token", "")
+	if provider == nil {
+		t.Fatalf("expected static token provider")
+	}
+	token, err := provider(context.Background())
+	if err != nil {
+		t.Fatalf("static token provider returned error: %v", err)
+	}
+	if token != "static_token" {
+		t.Fatalf("expected static_token, got %q", token)
+	}
+}
+
+func TestBuildNotionTokenProviderFile(t *testing.T) {
+	tokenPath := filepath.Join(t.TempDir(), "notion-token.txt")
+	if err := os.WriteFile(tokenPath, []byte("token_from_file\n"), 0o644); err != nil {
+		t.Fatalf("write token file failed: %v", err)
+	}
+	provider := buildNotionTokenProvider("", tokenPath)
+	if provider == nil {
+		t.Fatalf("expected file token provider")
+	}
+	token, err := provider(context.Background())
+	if err != nil {
+		t.Fatalf("file token provider returned error: %v", err)
+	}
+	if token != "token_from_file" {
+		t.Fatalf("expected token_from_file, got %q", token)
+	}
+}
+
+func TestBuildNotionTokenProviderFileCachesTokenWithinTTL(t *testing.T) {
+	tokenPath := filepath.Join(t.TempDir(), "notion-token-cache.txt")
+	if err := os.WriteFile(tokenPath, []byte("token_cached_1\n"), 0o644); err != nil {
+		t.Fatalf("write token file failed: %v", err)
+	}
+	provider := buildNotionTokenProviderWithCache("", tokenPath, time.Hour)
+	if provider == nil {
+		t.Fatalf("expected file token provider")
+	}
+	first, err := provider(context.Background())
+	if err != nil {
+		t.Fatalf("first provider call returned error: %v", err)
+	}
+	if first != "token_cached_1" {
+		t.Fatalf("expected token_cached_1, got %q", first)
+	}
+	if err := os.WriteFile(tokenPath, []byte("token_cached_2\n"), 0o644); err != nil {
+		t.Fatalf("overwrite token file failed: %v", err)
+	}
+	second, err := provider(context.Background())
+	if err != nil {
+		t.Fatalf("second provider call returned error: %v", err)
+	}
+	if second != "token_cached_1" {
+		t.Fatalf("expected cached token token_cached_1, got %q", second)
+	}
+}
+
+func TestBuildNotionTokenProviderFileRefreshesAfterTTL(t *testing.T) {
+	tokenPath := filepath.Join(t.TempDir(), "notion-token-refresh.txt")
+	if err := os.WriteFile(tokenPath, []byte("token_refresh_1\n"), 0o644); err != nil {
+		t.Fatalf("write token file failed: %v", err)
+	}
+	provider := buildNotionTokenProviderWithCache("", tokenPath, 15*time.Millisecond)
+	if provider == nil {
+		t.Fatalf("expected file token provider")
+	}
+	first, err := provider(context.Background())
+	if err != nil {
+		t.Fatalf("first provider call returned error: %v", err)
+	}
+	if first != "token_refresh_1" {
+		t.Fatalf("expected token_refresh_1, got %q", first)
+	}
+	if err := os.WriteFile(tokenPath, []byte("token_refresh_2\n"), 0o644); err != nil {
+		t.Fatalf("overwrite token file failed: %v", err)
+	}
+	time.Sleep(30 * time.Millisecond)
+	second, err := provider(context.Background())
+	if err != nil {
+		t.Fatalf("second provider call returned error: %v", err)
+	}
+	if second != "token_refresh_2" {
+		t.Fatalf("expected refreshed token token_refresh_2, got %q", second)
+	}
+}
+
+func TestBuildNotionTokenProviderUnset(t *testing.T) {
+	provider := buildNotionTokenProvider("", "")
+	if provider != nil {
+		t.Fatalf("expected nil provider when no token source configured")
+	}
+}
+
+func TestBuildStateBackendFromEnvUnset(t *testing.T) {
+	t.Setenv("RELAYFILE_STATE_BACKEND_DSN", "")
+	t.Setenv("RELAYFILE_STATE_FILE", "")
+	backend, err := buildStateBackendFromEnv()
+	if err != nil {
+		t.Fatalf("buildStateBackendFromEnv failed: %v", err)
+	}
+	if backend != nil {
+		t.Fatalf("expected nil backend when state backend env is unset")
+	}
+}
+
+func TestBuildStateBackendFromEnvDSN(t *testing.T) {
+	t.Setenv("RELAYFILE_STATE_BACKEND_DSN", "memory://")
+	backend, err := buildStateBackendFromEnv()
+	if err != nil {
+		t.Fatalf("buildStateBackendFromEnv failed: %v", err)
+	}
+	if backend == nil {
+		t.Fatalf("expected memory backend from dsn")
+	}
+}
+
+func TestBuildStateBackendFromEnvFileFallback(t *testing.T) {
+	t.Setenv("RELAYFILE_STATE_BACKEND_DSN", "")
+	t.Setenv("RELAYFILE_STATE_FILE", filepath.Join(t.TempDir(), "state.json"))
+	backend, err := buildStateBackendFromEnv()
+	if err != nil {
+		t.Fatalf("buildStateBackendFromEnv failed: %v", err)
+	}
+	if backend == nil {
+		t.Fatalf("expected file backend from state file fallback")
+	}
+}
+
+func TestBuildStateBackendFromEnvInvalidDSN(t *testing.T) {
+	t.Setenv("RELAYFILE_STATE_BACKEND_DSN", "postgres://localhost/relayfile")
+	_, err := buildStateBackendFromEnv()
+	if err == nil {
+		t.Fatalf("expected unsupported state backend scheme error")
+	}
+}
+
+func TestBuildStateBackendFromEnvProfileFallback(t *testing.T) {
+	t.Setenv("RELAYFILE_STATE_BACKEND_DSN", "")
+	t.Setenv("RELAYFILE_STATE_FILE", "")
+	t.Setenv("RELAYFILE_BACKEND_PROFILE", "inmemory")
+	backend, err := buildStateBackendFromEnv()
+	if err != nil {
+		t.Fatalf("buildStateBackendFromEnv failed: %v", err)
+	}
+	if backend == nil {
+		t.Fatalf("expected profile-backed state backend")
+	}
+}
+
+func TestBuildQueuesFromEnvUnset(t *testing.T) {
+	t.Setenv("RELAYFILE_ENVELOPE_QUEUE_FILE", "")
+	t.Setenv("RELAYFILE_WRITEBACK_QUEUE_FILE", "")
+
+	envelopeQueue, writebackQueue, err := buildQueuesFromEnv()
+	if err != nil {
+		t.Fatalf("buildQueuesFromEnv failed: %v", err)
+	}
+	if envelopeQueue != nil || writebackQueue != nil {
+		t.Fatalf("expected nil queues when queue files are unset")
+	}
+}
+
+func TestBuildQueuesFromEnvFileBacked(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("RELAYFILE_ENVELOPE_QUEUE_FILE", filepath.Join(dir, "envelope-queue.json"))
+	t.Setenv("RELAYFILE_WRITEBACK_QUEUE_FILE", filepath.Join(dir, "writeback-queue.json"))
+	t.Setenv("RELAYFILE_ENVELOPE_QUEUE_SIZE", "12")
+	t.Setenv("RELAYFILE_WRITEBACK_QUEUE_SIZE", "24")
+
+	envelopeQueue, writebackQueue, err := buildQueuesFromEnv()
+	if err != nil {
+		t.Fatalf("buildQueuesFromEnv failed: %v", err)
+	}
+	if envelopeQueue == nil || writebackQueue == nil {
+		t.Fatalf("expected both queues to be initialized")
+	}
+	if envelopeQueue.Capacity() != 12 {
+		t.Fatalf("expected envelope queue capacity 12, got %d", envelopeQueue.Capacity())
+	}
+	if writebackQueue.Capacity() != 24 {
+		t.Fatalf("expected writeback queue capacity 24, got %d", writebackQueue.Capacity())
+	}
+}
+
+func TestBuildQueuesFromEnvDSNBacked(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("RELAYFILE_ENVELOPE_QUEUE_DSN", "memory://")
+	t.Setenv("RELAYFILE_WRITEBACK_QUEUE_DSN", "file://"+filepath.Join(dir, "writeback-queue-dsn.json"))
+	t.Setenv("RELAYFILE_WRITEBACK_QUEUE_SIZE", "16")
+
+	envelopeQueue, writebackQueue, err := buildQueuesFromEnv()
+	if err != nil {
+		t.Fatalf("buildQueuesFromEnv failed: %v", err)
+	}
+	if envelopeQueue == nil || writebackQueue == nil {
+		t.Fatalf("expected both queues to be initialized from dsn")
+	}
+	if envelopeQueue.Capacity() != 1024 {
+		t.Fatalf("expected memory envelope queue default capacity 1024, got %d", envelopeQueue.Capacity())
+	}
+	if writebackQueue.Capacity() != 16 {
+		t.Fatalf("expected writeback queue capacity 16, got %d", writebackQueue.Capacity())
+	}
+}
+
+func TestBuildQueuesFromEnvInvalidDSN(t *testing.T) {
+	t.Setenv("RELAYFILE_ENVELOPE_QUEUE_DSN", "redis://localhost:6379/0")
+	_, _, err := buildQueuesFromEnv()
+	if err == nil {
+		t.Fatalf("expected buildQueuesFromEnv to fail for unsupported queue dsn scheme")
+	}
+}
+
+func TestBuildStorageBackendsFromEnv(t *testing.T) {
+	t.Setenv("RELAYFILE_STATE_BACKEND_DSN", "memory://")
+	t.Setenv("RELAYFILE_ENVELOPE_QUEUE_DSN", "memory://")
+	t.Setenv("RELAYFILE_WRITEBACK_QUEUE_DSN", "memory://")
+
+	stateBackend, envelopeQueue, writebackQueue, err := buildStorageBackendsFromEnv()
+	if err != nil {
+		t.Fatalf("buildStorageBackendsFromEnv failed: %v", err)
+	}
+	if stateBackend == nil || envelopeQueue == nil || writebackQueue == nil {
+		t.Fatalf("expected non-nil state and queue backends")
+	}
+}
+
+func TestBuildStorageBackendsFromEnvDurableLocalProfile(t *testing.T) {
+	t.Setenv("RELAYFILE_BACKEND_PROFILE", "durable-local")
+	t.Setenv("RELAYFILE_DATA_DIR", t.TempDir())
+
+	stateBackend, envelopeQueue, writebackQueue, err := buildStorageBackendsFromEnv()
+	if err != nil {
+		t.Fatalf("buildStorageBackendsFromEnv failed: %v", err)
+	}
+	if stateBackend == nil || envelopeQueue == nil || writebackQueue == nil {
+		t.Fatalf("expected non-nil backends for durable-local profile")
+	}
+}
+
+func TestBuildStorageBackendsFromEnvInvalidProfile(t *testing.T) {
+	t.Setenv("RELAYFILE_BACKEND_PROFILE", "unsupported-profile")
+	_, _, _, err := buildStorageBackendsFromEnv()
+	if err == nil {
+		t.Fatalf("expected invalid profile to return an error")
+	}
+}
+
+func TestBuildQueuesFromEnvProfileAllowsExplicitFileOverride(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("RELAYFILE_BACKEND_PROFILE", "inmemory")
+	t.Setenv("RELAYFILE_ENVELOPE_QUEUE_FILE", filepath.Join(dir, "env-override.json"))
+	t.Setenv("RELAYFILE_WRITEBACK_QUEUE_FILE", filepath.Join(dir, "wb-override.json"))
+
+	envelopeQueue, writebackQueue, err := buildQueuesFromEnv()
+	if err != nil {
+		t.Fatalf("buildQueuesFromEnv failed: %v", err)
+	}
+	if !strings.Contains(fmt.Sprintf("%T", envelopeQueue), "fileEnvelopeQueue") {
+		t.Fatalf("expected envelope queue override to use file-backed queue, got %T", envelopeQueue)
+	}
+	if !strings.Contains(fmt.Sprintf("%T", writebackQueue), "fileWritebackQueue") {
+		t.Fatalf("expected writeback queue override to use file-backed queue, got %T", writebackQueue)
+	}
+}

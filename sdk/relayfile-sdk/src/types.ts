@@ -64,6 +64,7 @@ export interface FilesystemEvent {
   path: string;
   revision: string;
   origin: EventOrigin;
+  provider?: string;
   correlationId: string;
   timestamp: string;
 }
@@ -127,6 +128,8 @@ export interface SyncProviderStatus {
   lagSeconds?: number;
   lastError?: string | null;
   failureCodes?: Record<string, number>;
+  deadLetteredEnvelopes?: number;
+  deadLetteredOps?: number;
 }
 
 export interface SyncStatusResponse {
@@ -159,6 +162,83 @@ export interface ConflictErrorResponse extends ErrorResponse {
   currentContentPreview?: string;
 }
 
+export interface BackendStatusResponse {
+  backendProfile: string;
+  stateBackend: string;
+  envelopeQueue: string;
+  envelopeQueueDepth: number;
+  envelopeQueueCapacity: number;
+  writebackQueue: string;
+  writebackQueueDepth: number;
+  writebackQueueCapacity: number;
+}
+
+export type AdminIngressAlertType = "dead_letters" | "pending_backlog" | "drop_rate" | "stale_events";
+export type AdminIngressAlertSeverity = "warning" | "critical";
+export type AdminIngressAlertProfile = "strict" | "balanced" | "relaxed";
+export type AdminIngressEffectiveAlertProfile = AdminIngressAlertProfile | "custom";
+
+export interface AdminIngressAlert {
+  workspaceId: string;
+  type: AdminIngressAlertType;
+  severity: AdminIngressAlertSeverity;
+  value: number;
+  threshold: number;
+  message: string;
+}
+
+export interface AdminIngressAlertThresholds {
+  pending: number;
+  deadLetter: number;
+  stale: number;
+  dropRate: number;
+}
+
+export interface AdminIngressAlertTotals {
+  total: number;
+  critical: number;
+  warning: number;
+  byType: Record<string, number>;
+}
+
+export interface AdminIngressStatusResponse {
+  generatedAt: string;
+  alertProfile: AdminIngressAlertProfile;
+  effectiveAlertProfile: AdminIngressEffectiveAlertProfile;
+  workspaceCount: number;
+  returnedWorkspaceCount: number;
+  workspaceIds: string[];
+  nextCursor: string | null;
+  pendingTotal: number;
+  deadLetterTotal: number;
+  acceptedTotal: number;
+  droppedTotal: number;
+  dedupedTotal: number;
+  coalescedTotal: number;
+  suppressedTotal: number;
+  staleTotal: number;
+  thresholds: AdminIngressAlertThresholds;
+  alertTotals: AdminIngressAlertTotals;
+  alertsTruncated: boolean;
+  alerts: AdminIngressAlert[];
+  workspaces: Record<string, SyncIngressStatusResponse>;
+}
+
+export interface AdminSyncStatusResponse {
+  generatedAt: string;
+  workspaceCount: number;
+  workspaceIds: string[];
+  providerStatusCount: number;
+  healthyCount: number;
+  laggingCount: number;
+  errorCount: number;
+  pausedCount: number;
+  deadLetteredEnvelopesTotal: number;
+  deadLetteredOpsTotal: number;
+  failureCodes: Record<string, number>;
+  workspaces: Record<string, SyncStatusResponse>;
+}
+
 export interface ListTreeOptions {
   path?: string;
   depth?: number;
@@ -168,6 +248,7 @@ export interface ListTreeOptions {
 }
 
 export interface GetEventsOptions {
+  provider?: string;
   cursor?: string;
   limit?: number;
   correlationId?: string;
@@ -181,6 +262,33 @@ export interface GetSyncStatusOptions {
 }
 
 export interface GetSyncIngressStatusOptions {
+  provider?: string;
+  correlationId?: string;
+  signal?: AbortSignal;
+}
+
+export interface GetAdminIngressStatusOptions {
+  workspaceId?: string;
+  provider?: string;
+  alertProfile?: AdminIngressAlertProfile;
+  pendingThreshold?: number;
+  deadLetterThreshold?: number;
+  staleThreshold?: number;
+  dropRateThreshold?: number;
+  nonZeroOnly?: boolean;
+  maxAlerts?: number;
+  cursor?: string;
+  limit?: number;
+  includeWorkspaces?: boolean;
+  includeAlerts?: boolean;
+  correlationId?: string;
+  signal?: AbortSignal;
+}
+
+export interface GetAdminSyncStatusOptions {
+  workspaceId?: string;
+  provider?: string;
+  nonZeroOnly?: boolean;
   correlationId?: string;
   signal?: AbortSignal;
 }

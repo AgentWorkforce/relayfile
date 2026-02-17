@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -36,9 +37,9 @@ func TestLifecycleAndConflicts(t *testing.T) {
 		method: http.MethodPut,
 		path:   "/v1/workspaces/ws_1/fs/file?path=/notion/Engineering/Auth.md",
 		headers: map[string]string{
-			"Authorization":   "Bearer " + token,
+			"Authorization":    "Bearer " + token,
 			"X-Correlation-Id": "corr_1",
-			"If-Match":        "0",
+			"If-Match":         "0",
 		},
 		body: map[string]any{
 			"contentType": "text/markdown",
@@ -58,7 +59,7 @@ func TestLifecycleAndConflicts(t *testing.T) {
 		method: http.MethodGet,
 		path:   "/v1/workspaces/ws_1/fs/file?path=/notion/Engineering/Auth.md",
 		headers: map[string]string{
-			"Authorization":   "Bearer " + token,
+			"Authorization":    "Bearer " + token,
 			"X-Correlation-Id": "corr_2",
 		},
 	})
@@ -74,9 +75,9 @@ func TestLifecycleAndConflicts(t *testing.T) {
 		method: http.MethodPut,
 		path:   "/v1/workspaces/ws_1/fs/file?path=/notion/Engineering/Auth.md",
 		headers: map[string]string{
-			"Authorization":   "Bearer " + token,
+			"Authorization":    "Bearer " + token,
 			"X-Correlation-Id": "corr_3",
-			"If-Match":        "rev_stale",
+			"If-Match":         "rev_stale",
 		},
 		body: map[string]any{
 			"contentType": "text/markdown",
@@ -101,9 +102,9 @@ func TestLifecycleAndConflicts(t *testing.T) {
 		method: http.MethodDelete,
 		path:   "/v1/workspaces/ws_1/fs/file?path=/notion/Engineering/Auth.md",
 		headers: map[string]string{
-			"Authorization":   "Bearer " + token,
+			"Authorization":    "Bearer " + token,
 			"X-Correlation-Id": "corr_4",
-			"If-Match":        file.Revision,
+			"If-Match":         file.Revision,
 		},
 	})
 	if delResp.Code != http.StatusAccepted {
@@ -114,7 +115,7 @@ func TestLifecycleAndConflicts(t *testing.T) {
 		method: http.MethodGet,
 		path:   "/v1/workspaces/ws_1/ops/" + queued.OpID,
 		headers: map[string]string{
-			"Authorization":   "Bearer " + token,
+			"Authorization":    "Bearer " + token,
 			"X-Correlation-Id": "corr_5",
 		},
 	})
@@ -144,7 +145,7 @@ func TestLifecycleAndConflicts(t *testing.T) {
 			method: http.MethodGet,
 			path:   "/v1/workspaces/ws_1/ops?status=succeeded&limit=10",
 			headers: map[string]string{
-				"Authorization":   "Bearer " + token,
+				"Authorization":    "Bearer " + token,
 				"X-Correlation-Id": "corr_6",
 			},
 		})
@@ -171,7 +172,7 @@ func TestLifecycleAndConflicts(t *testing.T) {
 			method: http.MethodGet,
 			path:   "/v1/workspaces/ws_1/ops?status=succeeded&action=file_delete&limit=10",
 			headers: map[string]string{
-				"Authorization":   "Bearer " + token,
+				"Authorization":    "Bearer " + token,
 				"X-Correlation-Id": "corr_7",
 			},
 		})
@@ -194,6 +195,233 @@ func TestLifecycleAndConflicts(t *testing.T) {
 		return
 	}
 	t.Fatalf("expected at least one file_delete operation in filtered list")
+}
+
+func TestWriteFilePayloadTooLarge(t *testing.T) {
+	server := NewServerWithConfig(relayfile.NewStore(), ServerConfig{
+		MaxBodyBytes: 128,
+	})
+	token := mustTestJWT(t, "dev-secret", "ws_payload_limit", "Worker1", []string{"fs:write"}, time.Now().Add(time.Hour))
+	resp := doRequest(t, server, request{
+		method: http.MethodPut,
+		path:   "/v1/workspaces/ws_payload_limit/fs/file?path=/notion/Large.md",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_payload_limit",
+			"If-Match":         "0",
+		},
+		body: map[string]any{
+			"contentType": "text/markdown",
+			"content":     strings.Repeat("x", 1024),
+		},
+	})
+	if resp.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("expected 413 for oversized write payload, got %d (%s)", resp.Code, resp.Body.String())
+	}
+	var payload map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode payload-too-large response: %v", err)
+	}
+	if payload["code"] != "payload_too_large" {
+		t.Fatalf("expected payload_too_large code, got %v", payload["code"])
+	}
+}
+
+func TestIfMatchQuotedETagAccepted(t *testing.T) {
+	server := NewServer(relayfile.NewStore())
+	token := mustTestJWT(t, "dev-secret", "ws_ifmatch", "Worker1", []string{"fs:read", "fs:write"}, time.Now().Add(time.Hour))
+
+	createResp := doRequest(t, server, request{
+		method: http.MethodPut,
+		path:   "/v1/workspaces/ws_ifmatch/fs/file?path=/notion/IfMatch.md",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_ifmatch_1",
+			"If-Match":         "0",
+		},
+		body: map[string]any{
+			"contentType": "text/markdown",
+			"content":     "# v1",
+		},
+	})
+	if createResp.Code != http.StatusAccepted {
+		t.Fatalf("expected 202 create, got %d (%s)", createResp.Code, createResp.Body.String())
+	}
+
+	readResp := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/workspaces/ws_ifmatch/fs/file?path=/notion/IfMatch.md",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_ifmatch_2",
+		},
+	})
+	if readResp.Code != http.StatusOK {
+		t.Fatalf("expected 200 read, got %d (%s)", readResp.Code, readResp.Body.String())
+	}
+	var file relayfile.File
+	if err := json.NewDecoder(readResp.Body).Decode(&file); err != nil {
+		t.Fatalf("decode read response: %v", err)
+	}
+
+	updateResp := doRequest(t, server, request{
+		method: http.MethodPut,
+		path:   "/v1/workspaces/ws_ifmatch/fs/file?path=/notion/IfMatch.md",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_ifmatch_3",
+			"If-Match":         `"` + file.Revision + `"`,
+		},
+		body: map[string]any{
+			"contentType": "text/markdown",
+			"content":     "# v2",
+		},
+	})
+	if updateResp.Code != http.StatusAccepted {
+		t.Fatalf("expected 202 update with quoted If-Match, got %d (%s)", updateResp.Code, updateResp.Body.String())
+	}
+
+	readUpdated := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/workspaces/ws_ifmatch/fs/file?path=/notion/IfMatch.md",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_ifmatch_4",
+		},
+	})
+	if readUpdated.Code != http.StatusOK {
+		t.Fatalf("expected 200 read updated, got %d (%s)", readUpdated.Code, readUpdated.Body.String())
+	}
+	var updated relayfile.File
+	if err := json.NewDecoder(readUpdated.Body).Decode(&updated); err != nil {
+		t.Fatalf("decode updated response: %v", err)
+	}
+
+	deleteResp := doRequest(t, server, request{
+		method: http.MethodDelete,
+		path:   "/v1/workspaces/ws_ifmatch/fs/file?path=/notion/IfMatch.md",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_ifmatch_5",
+			"If-Match":         `W/"` + updated.Revision + `"`,
+		},
+	})
+	if deleteResp.Code != http.StatusAccepted {
+		t.Fatalf("expected 202 delete with weak quoted If-Match, got %d (%s)", deleteResp.Code, deleteResp.Body.String())
+	}
+}
+
+func TestTreeEndpointHonorsDepth(t *testing.T) {
+	server := NewServer(relayfile.NewStore())
+	token := mustTestJWT(t, "dev-secret", "ws_tree_api", "Worker1", []string{"fs:read", "fs:write"}, time.Now().Add(time.Hour))
+
+	writes := []request{
+		{
+			method: http.MethodPut,
+			path:   "/v1/workspaces/ws_tree_api/fs/file?path=/notion/Engineering/Auth.md",
+			headers: map[string]string{
+				"Authorization":    "Bearer " + token,
+				"X-Correlation-Id": "corr_tree_api_1",
+				"If-Match":         "0",
+			},
+			body: map[string]any{
+				"contentType": "text/markdown",
+				"content":     "# auth",
+			},
+		},
+		{
+			method: http.MethodPut,
+			path:   "/v1/workspaces/ws_tree_api/fs/file?path=/notion/Engineering/Security/Policy.md",
+			headers: map[string]string{
+				"Authorization":    "Bearer " + token,
+				"X-Correlation-Id": "corr_tree_api_2",
+				"If-Match":         "0",
+			},
+			body: map[string]any{
+				"contentType": "text/markdown",
+				"content":     "# policy",
+			},
+		},
+		{
+			method: http.MethodPut,
+			path:   "/v1/workspaces/ws_tree_api/fs/file?path=/notion/Product/Roadmap.md",
+			headers: map[string]string{
+				"Authorization":    "Bearer " + token,
+				"X-Correlation-Id": "corr_tree_api_3",
+				"If-Match":         "0",
+			},
+			body: map[string]any{
+				"contentType": "text/markdown",
+				"content":     "# roadmap",
+			},
+		},
+	}
+	for _, writeReq := range writes {
+		resp := doRequest(t, server, writeReq)
+		if resp.Code != http.StatusAccepted {
+			t.Fatalf("expected 202 write for %s, got %d (%s)", writeReq.path, resp.Code, resp.Body.String())
+		}
+	}
+
+	depth1Resp := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/workspaces/ws_tree_api/fs/tree?path=/notion&depth=1",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_tree_api_4",
+		},
+	})
+	if depth1Resp.Code != http.StatusOK {
+		t.Fatalf("expected 200 depth=1 tree, got %d (%s)", depth1Resp.Code, depth1Resp.Body.String())
+	}
+	var depth1 relayfile.TreeResponse
+	if err := json.NewDecoder(depth1Resp.Body).Decode(&depth1); err != nil {
+		t.Fatalf("decode depth=1 tree response: %v", err)
+	}
+	if len(depth1.Entries) != 2 {
+		t.Fatalf("expected 2 depth-1 entries, got %d", len(depth1.Entries))
+	}
+	if depth1.Entries[0].Path != "/notion/Engineering" || depth1.Entries[0].Type != "dir" {
+		t.Fatalf("unexpected first depth-1 entry: %+v", depth1.Entries[0])
+	}
+	if depth1.Entries[1].Path != "/notion/Product" || depth1.Entries[1].Type != "dir" {
+		t.Fatalf("unexpected second depth-1 entry: %+v", depth1.Entries[1])
+	}
+
+	depth2Resp := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/workspaces/ws_tree_api/fs/tree?path=/notion&depth=2",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_tree_api_5",
+		},
+	})
+	if depth2Resp.Code != http.StatusOK {
+		t.Fatalf("expected 200 depth=2 tree, got %d (%s)", depth2Resp.Code, depth2Resp.Body.String())
+	}
+	var depth2 relayfile.TreeResponse
+	if err := json.NewDecoder(depth2Resp.Body).Decode(&depth2); err != nil {
+		t.Fatalf("decode depth=2 tree response: %v", err)
+	}
+	expected := map[string]string{
+		"/notion/Engineering":          "dir",
+		"/notion/Engineering/Auth.md":  "file",
+		"/notion/Engineering/Security": "dir",
+		"/notion/Product":              "dir",
+		"/notion/Product/Roadmap.md":   "file",
+	}
+	if len(depth2.Entries) != len(expected) {
+		t.Fatalf("expected %d depth-2 entries, got %d", len(expected), len(depth2.Entries))
+	}
+	for _, entry := range depth2.Entries {
+		expectedType, ok := expected[entry.Path]
+		if !ok {
+			t.Fatalf("unexpected depth-2 entry: %+v", entry)
+		}
+		if expectedType != entry.Type {
+			t.Fatalf("expected %s to be %s, got %s", entry.Path, expectedType, entry.Type)
+		}
+	}
 }
 
 func TestOpsListProviderFilterEndpoint(t *testing.T) {
@@ -235,7 +463,7 @@ func TestOpsListProviderFilterEndpoint(t *testing.T) {
 		method: http.MethodPost,
 		path:   "/v1/internal/webhook-envelopes",
 		headers: map[string]string{
-			"X-Correlation-Id": "corr_ops_provider_api_1",
+			"X-Correlation-Id":  "corr_ops_provider_api_1",
 			"X-Relay-Timestamp": ts,
 			"X-Relay-Signature": sig,
 			"Content-Type":      "application/json",
@@ -254,7 +482,7 @@ func TestOpsListProviderFilterEndpoint(t *testing.T) {
 			method: http.MethodGet,
 			path:   "/v1/workspaces/ws_ops_provider_api/fs/file?path=/custom/OpsProvider.md",
 			headers: map[string]string{
-				"Authorization":   "Bearer " + token,
+				"Authorization":    "Bearer " + token,
 				"X-Correlation-Id": "corr_ops_provider_api_2",
 			},
 		})
@@ -274,9 +502,9 @@ func TestOpsListProviderFilterEndpoint(t *testing.T) {
 		method: http.MethodPut,
 		path:   "/v1/workspaces/ws_ops_provider_api/fs/file?path=/custom/OpsProvider.md",
 		headers: map[string]string{
-			"Authorization":   "Bearer " + token,
+			"Authorization":    "Bearer " + token,
 			"X-Correlation-Id": "corr_ops_provider_api_3",
-			"If-Match":        customFile.Revision,
+			"If-Match":         customFile.Revision,
 		},
 		body: map[string]any{
 			"contentType": "text/markdown",
@@ -291,9 +519,9 @@ func TestOpsListProviderFilterEndpoint(t *testing.T) {
 		method: http.MethodPut,
 		path:   "/v1/workspaces/ws_ops_provider_api/fs/file?path=/notion/OpsProvider.md",
 		headers: map[string]string{
-			"Authorization":   "Bearer " + token,
+			"Authorization":    "Bearer " + token,
 			"X-Correlation-Id": "corr_ops_provider_api_4",
-			"If-Match":        "0",
+			"If-Match":         "0",
 		},
 		body: map[string]any{
 			"contentType": "text/markdown",
@@ -308,7 +536,7 @@ func TestOpsListProviderFilterEndpoint(t *testing.T) {
 		method: http.MethodGet,
 		path:   "/v1/workspaces/ws_ops_provider_api/ops?provider=custom&limit=20",
 		headers: map[string]string{
-			"Authorization":   "Bearer " + token,
+			"Authorization":    "Bearer " + token,
 			"X-Correlation-Id": "corr_ops_provider_api_5",
 		},
 	})
@@ -328,11 +556,35 @@ func TestOpsListProviderFilterEndpoint(t *testing.T) {
 		}
 	}
 
+	customOpsMixedCase := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/workspaces/ws_ops_provider_api/ops?provider=CuStOm&limit=20",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_ops_provider_api_5b",
+		},
+	})
+	if customOpsMixedCase.Code != http.StatusOK {
+		t.Fatalf("expected mixed-case custom provider ops list 200, got %d (%s)", customOpsMixedCase.Code, customOpsMixedCase.Body.String())
+	}
+	var customMixedFeed relayfile.OperationFeed
+	if err := json.NewDecoder(customOpsMixedCase.Body).Decode(&customMixedFeed); err != nil {
+		t.Fatalf("decode mixed-case custom provider feed: %v", err)
+	}
+	if len(customMixedFeed.Items) == 0 {
+		t.Fatalf("expected mixed-case provider-filtered custom ops to be non-empty")
+	}
+	for _, item := range customMixedFeed.Items {
+		if item.Provider != "custom" {
+			t.Fatalf("expected only custom provider ops for mixed-case filter, got %s", item.Provider)
+		}
+	}
+
 	notionOps := doRequest(t, server, request{
 		method: http.MethodGet,
 		path:   "/v1/workspaces/ws_ops_provider_api/ops?provider=notion&limit=20",
 		headers: map[string]string{
-			"Authorization":   "Bearer " + token,
+			"Authorization":    "Bearer " + token,
 			"X-Correlation-Id": "corr_ops_provider_api_6",
 		},
 	})
@@ -361,13 +613,26 @@ func TestEventsAndSyncStatus(t *testing.T) {
 		method: http.MethodPut,
 		path:   "/v1/workspaces/ws_2/fs/file?path=/notion/Product/Roadmap.md",
 		headers: map[string]string{
-			"Authorization":   "Bearer " + token,
+			"Authorization":    "Bearer " + token,
 			"X-Correlation-Id": "corr_evt_1",
-			"If-Match":        "0",
+			"If-Match":         "0",
 		},
 		body: map[string]any{
 			"contentType": "text/markdown",
 			"content":     "# roadmap",
+		},
+	})
+	_ = doRequest(t, server, request{
+		method: http.MethodPut,
+		path:   "/v1/workspaces/ws_2/fs/file?path=/custom/Product/Notes.md",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_evt_1b",
+			"If-Match":         "0",
+		},
+		body: map[string]any{
+			"contentType": "text/markdown",
+			"content":     "# notes",
 		},
 	})
 
@@ -375,7 +640,7 @@ func TestEventsAndSyncStatus(t *testing.T) {
 		method: http.MethodGet,
 		path:   "/v1/workspaces/ws_2/fs/events?limit=10",
 		headers: map[string]string{
-			"Authorization":   "Bearer " + token,
+			"Authorization":    "Bearer " + token,
 			"X-Correlation-Id": "corr_evt_2",
 		},
 	})
@@ -390,11 +655,35 @@ func TestEventsAndSyncStatus(t *testing.T) {
 		t.Fatalf("expected events to be present")
 	}
 
+	filteredEventsResp := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/workspaces/ws_2/fs/events?provider=custom&limit=10",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_evt_2b",
+		},
+	})
+	if filteredEventsResp.Code != http.StatusOK {
+		t.Fatalf("expected 200 on provider-filtered events, got %d (%s)", filteredEventsResp.Code, filteredEventsResp.Body.String())
+	}
+	var filteredFeed relayfile.EventFeed
+	if err := json.NewDecoder(filteredEventsResp.Body).Decode(&filteredFeed); err != nil {
+		t.Fatalf("decode filtered events response: %v", err)
+	}
+	if len(filteredFeed.Events) == 0 {
+		t.Fatalf("expected custom provider events to be present")
+	}
+	for _, event := range filteredFeed.Events {
+		if event.Provider != "custom" {
+			t.Fatalf("expected only custom provider events, got provider=%q path=%q type=%q", event.Provider, event.Path, event.Type)
+		}
+	}
+
 	syncResp := doRequest(t, server, request{
 		method: http.MethodGet,
 		path:   "/v1/workspaces/ws_2/sync/status",
 		headers: map[string]string{
-			"Authorization":   "Bearer " + token,
+			"Authorization":    "Bearer " + token,
 			"X-Correlation-Id": "corr_evt_3",
 		},
 	})
@@ -429,7 +718,7 @@ func TestSyncStatusEndpointReportsLaggingProvider(t *testing.T) {
 		method: http.MethodPost,
 		path:   "/v1/internal/webhook-envelopes",
 		headers: map[string]string{
-			"X-Correlation-Id": "corr_sync_status_lag_api_1",
+			"X-Correlation-Id":  "corr_sync_status_lag_api_1",
 			"X-Relay-Timestamp": ts,
 			"X-Relay-Signature": sig,
 			"Content-Type":      "application/json",
@@ -445,7 +734,7 @@ func TestSyncStatusEndpointReportsLaggingProvider(t *testing.T) {
 		method: http.MethodGet,
 		path:   "/v1/workspaces/ws_sync_status_lag_api/sync/status?provider=notion",
 		headers: map[string]string{
-			"Authorization":   "Bearer " + token,
+			"Authorization":    "Bearer " + token,
 			"X-Correlation-Id": "corr_sync_status_lag_api_2",
 		},
 	})
@@ -496,7 +785,7 @@ func TestSyncStatusEndpointReportsErrorFromDeadLetter(t *testing.T) {
 		method: http.MethodPost,
 		path:   "/v1/internal/webhook-envelopes",
 		headers: map[string]string{
-			"X-Correlation-Id": "corr_sync_status_error_api_1",
+			"X-Correlation-Id":  "corr_sync_status_error_api_1",
 			"X-Relay-Timestamp": ts,
 			"X-Relay-Signature": sig,
 			"Content-Type":      "application/json",
@@ -514,7 +803,7 @@ func TestSyncStatusEndpointReportsErrorFromDeadLetter(t *testing.T) {
 			method: http.MethodGet,
 			path:   "/v1/workspaces/ws_sync_status_error_api/sync/status?provider=custom",
 			headers: map[string]string{
-				"Authorization":   "Bearer " + token,
+				"Authorization":    "Bearer " + token,
 				"X-Correlation-Id": "corr_sync_status_error_api_2",
 			},
 		})
@@ -532,11 +821,112 @@ func TestSyncStatusEndpointReportsErrorFromDeadLetter(t *testing.T) {
 			if payload.Providers[0].FailureCodes["unknown"] < 1 {
 				t.Fatalf("expected failureCodes aggregation for provider status=error, got %+v", payload.Providers[0].FailureCodes)
 			}
+			if payload.Providers[0].DeadLetteredEnvelopes < 1 {
+				t.Fatalf("expected dead-lettered envelope count, got %d", payload.Providers[0].DeadLetteredEnvelopes)
+			}
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("expected provider sync status to transition to error from dead-letter")
+}
+
+func TestSyncStatusEndpointIncludesProviderFromOperations(t *testing.T) {
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{
+		MaxWritebackAttempts: 1,
+		WritebackDelay:       5 * time.Millisecond,
+		ProviderWriteAction: func(action relayfile.WritebackAction) error {
+			if action.Type == relayfile.WritebackActionFileDelete {
+				return fmt.Errorf("delete failure for provider discovery")
+			}
+			return nil
+		},
+	})
+	t.Cleanup(store.Close)
+	server := NewServer(store)
+
+	token := mustTestJWT(t, "dev-secret", "ws_sync_ops_provider_api", "Worker1", []string{"fs:write", "fs:read", "sync:read"}, time.Now().Add(time.Hour))
+	createResp := doRequest(t, server, request{
+		method: http.MethodPut,
+		path:   "/v1/workspaces/ws_sync_ops_provider_api/fs/file?path=/custom/OpsProvider.md",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_sync_ops_provider_api_1",
+			"If-Match":         "0",
+		},
+		body: map[string]any{
+			"contentType": "text/markdown",
+			"content":     "# custom",
+		},
+	})
+	if createResp.Code != http.StatusAccepted {
+		t.Fatalf("expected 202 create, got %d (%s)", createResp.Code, createResp.Body.String())
+	}
+
+	var file relayfile.File
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		readResp := doRequest(t, server, request{
+			method: http.MethodGet,
+			path:   "/v1/workspaces/ws_sync_ops_provider_api/fs/file?path=/custom/OpsProvider.md",
+			headers: map[string]string{
+				"Authorization":    "Bearer " + token,
+				"X-Correlation-Id": "corr_sync_ops_provider_api_2",
+			},
+		})
+		if readResp.Code == http.StatusOK {
+			if err := json.NewDecoder(readResp.Body).Decode(&file); err != nil {
+				t.Fatalf("decode file failed: %v", err)
+			}
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if file.Revision == "" {
+		t.Fatalf("expected created file to be readable before delete")
+	}
+
+	deleteResp := doRequest(t, server, request{
+		method: http.MethodDelete,
+		path:   "/v1/workspaces/ws_sync_ops_provider_api/fs/file?path=/custom/OpsProvider.md",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_sync_ops_provider_api_3",
+			"If-Match":         file.Revision,
+		},
+	})
+	if deleteResp.Code != http.StatusAccepted {
+		t.Fatalf("expected 202 delete, got %d (%s)", deleteResp.Code, deleteResp.Body.String())
+	}
+
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		statusResp := doRequest(t, server, request{
+			method: http.MethodGet,
+			path:   "/v1/workspaces/ws_sync_ops_provider_api/sync/status",
+			headers: map[string]string{
+				"Authorization":    "Bearer " + token,
+				"X-Correlation-Id": "corr_sync_ops_provider_api_4",
+			},
+		})
+		if statusResp.Code != http.StatusOK {
+			t.Fatalf("expected 200 on sync status, got %d (%s)", statusResp.Code, statusResp.Body.String())
+		}
+		var status relayfile.SyncStatus
+		if err := json.NewDecoder(statusResp.Body).Decode(&status); err != nil {
+			t.Fatalf("decode sync status failed: %v", err)
+		}
+		for _, providerStatus := range status.Providers {
+			if providerStatus.Provider != "custom" {
+				continue
+			}
+			if providerStatus.Status == "error" && providerStatus.LastError != nil && *providerStatus.LastError != "" && providerStatus.DeadLetteredOps >= 1 {
+				return
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("expected sync status to include custom provider from operations")
 }
 
 func TestScopeAndWorkspaceClaimsEnforced(t *testing.T) {
@@ -547,9 +937,9 @@ func TestScopeAndWorkspaceClaimsEnforced(t *testing.T) {
 		method: http.MethodPut,
 		path:   "/v1/workspaces/ws_3/fs/file?path=/notion/X.md",
 		headers: map[string]string{
-			"Authorization":   "Bearer " + readOnlyToken,
+			"Authorization":    "Bearer " + readOnlyToken,
 			"X-Correlation-Id": "corr_scope_1",
-			"If-Match":        "0",
+			"If-Match":         "0",
 		},
 		body: map[string]any{
 			"contentType": "text/markdown",
@@ -565,7 +955,7 @@ func TestScopeAndWorkspaceClaimsEnforced(t *testing.T) {
 		method: http.MethodGet,
 		path:   "/v1/workspaces/ws_3/fs/tree?path=/",
 		headers: map[string]string{
-			"Authorization":   "Bearer " + wrongWorkspaceToken,
+			"Authorization":    "Bearer " + wrongWorkspaceToken,
 			"X-Correlation-Id": "corr_scope_2",
 		},
 	})
@@ -586,12 +976,57 @@ func TestScopeAndWorkspaceClaimsEnforced(t *testing.T) {
 		method: http.MethodGet,
 		path:   "/v1/workspaces/ws_3/fs/tree?path=/",
 		headers: map[string]string{
-			"Authorization":   "Bearer " + wrongAudience,
+			"Authorization":    "Bearer " + wrongAudience,
 			"X-Correlation-Id": "corr_scope_3",
 		},
 	})
 	if badAudResp.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401 for invalid audience, got %d (%s)", badAudResp.Code, badAudResp.Body.String())
+	}
+}
+
+func TestAudienceArrayClaimAccepted(t *testing.T) {
+	server := NewServer(relayfile.NewStore())
+	allowed := mustTestJWTWithAudienceClaim(
+		t,
+		"dev-secret",
+		"ws_aud_array",
+		"Worker1",
+		[]string{"fs:read"},
+		[]string{"other-service", "relayfile"},
+		time.Now().Add(time.Hour),
+	)
+	okResp := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/workspaces/ws_aud_array/fs/tree?path=/",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + allowed,
+			"X-Correlation-Id": "corr_aud_array_1",
+		},
+	})
+	if okResp.Code != http.StatusOK {
+		t.Fatalf("expected 200 for aud array containing relayfile, got %d (%s)", okResp.Code, okResp.Body.String())
+	}
+
+	denied := mustTestJWTWithAudienceClaim(
+		t,
+		"dev-secret",
+		"ws_aud_array",
+		"Worker1",
+		[]string{"fs:read"},
+		[]string{"other-service", "not-relayfile"},
+		time.Now().Add(time.Hour),
+	)
+	deniedResp := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/workspaces/ws_aud_array/fs/tree?path=/",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + denied,
+			"X-Correlation-Id": "corr_aud_array_2",
+		},
+	})
+	if deniedResp.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for aud array missing relayfile, got %d (%s)", deniedResp.Code, deniedResp.Body.String())
 	}
 }
 
@@ -617,7 +1052,7 @@ func TestInternalWebhookIngressHMAC(t *testing.T) {
 		method: http.MethodPost,
 		path:   "/v1/internal/webhook-envelopes",
 		headers: map[string]string{
-			"X-Correlation-Id": "corr_internal_1",
+			"X-Correlation-Id":  "corr_internal_1",
 			"X-Relay-Timestamp": ts,
 			"X-Relay-Signature": sig,
 			"Content-Type":      "application/json",
@@ -632,7 +1067,7 @@ func TestInternalWebhookIngressHMAC(t *testing.T) {
 		method: http.MethodPost,
 		path:   "/v1/internal/webhook-envelopes",
 		headers: map[string]string{
-			"X-Correlation-Id": "corr_internal_2",
+			"X-Correlation-Id":  "corr_internal_2",
 			"X-Relay-Timestamp": ts,
 			"X-Relay-Signature": "bad_signature",
 			"Content-Type":      "application/json",
@@ -649,7 +1084,7 @@ func TestInternalWebhookIngressHMAC(t *testing.T) {
 		method: http.MethodPost,
 		path:   "/v1/internal/webhook-envelopes",
 		headers: map[string]string{
-			"X-Correlation-Id": "corr_internal_3",
+			"X-Correlation-Id":  "corr_internal_3",
 			"X-Relay-Timestamp": staleTs,
 			"X-Relay-Signature": staleSig,
 			"Content-Type":      "application/json",
@@ -658,6 +1093,99 @@ func TestInternalWebhookIngressHMAC(t *testing.T) {
 	})
 	if staleResp.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401 for stale internal timestamp, got %d (%s)", staleResp.Code, staleResp.Body.String())
+	}
+}
+
+func TestInternalWebhookIngressPayloadTooLarge(t *testing.T) {
+	server := NewServerWithConfig(relayfile.NewStore(), ServerConfig{
+		InternalHMACSecret: "dev-internal-secret",
+		MaxBodyBytes:       256,
+	})
+	body := map[string]any{
+		"envelopeId":    "env_oversized",
+		"workspaceId":   "ws_oversized",
+		"provider":      "notion",
+		"deliveryId":    "del_oversized",
+		"receivedAt":    time.Now().UTC().Format(time.RFC3339),
+		"payload":       map[string]any{"blob": strings.Repeat("z", 4096)},
+		"correlationId": "corr_internal_oversized",
+	}
+	bodyBytes, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal oversized body: %v", err)
+	}
+	ts := time.Now().UTC().Format(time.RFC3339)
+	sig := mustHMAC("dev-internal-secret", ts+"\n"+string(bodyBytes))
+
+	resp := doRawRequest(t, server, rawRequest{
+		method: http.MethodPost,
+		path:   "/v1/internal/webhook-envelopes",
+		headers: map[string]string{
+			"X-Correlation-Id":  "corr_internal_oversized",
+			"X-Relay-Timestamp": ts,
+			"X-Relay-Signature": sig,
+			"Content-Type":      "application/json",
+		},
+		body: bodyBytes,
+	})
+	if resp.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("expected 413 for oversized internal ingress payload, got %d (%s)", resp.Code, resp.Body.String())
+	}
+	var payload map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode payload-too-large response: %v", err)
+	}
+	if payload["code"] != "payload_too_large" {
+		t.Fatalf("expected payload_too_large code, got %v", payload["code"])
+	}
+}
+
+func TestInternalWebhookIngressRejectsReplay(t *testing.T) {
+	server := NewServer(relayfile.NewStore())
+	body := map[string]any{
+		"envelopeId":    "env_replay_1",
+		"workspaceId":   "ws_replay_guard",
+		"provider":      "notion",
+		"deliveryId":    "delivery_replay_1",
+		"receivedAt":    time.Now().UTC().Format(time.RFC3339),
+		"payload":       map[string]any{"type": "sync"},
+		"correlationId": "corr_replay_guard_1",
+	}
+	bodyBytes, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal body: %v", err)
+	}
+	ts := time.Now().UTC().Format(time.RFC3339)
+	sig := mustHMAC("dev-internal-secret", ts+"\n"+string(bodyBytes))
+
+	first := doRawRequest(t, server, rawRequest{
+		method: http.MethodPost,
+		path:   "/v1/internal/webhook-envelopes",
+		headers: map[string]string{
+			"X-Correlation-Id":  "corr_replay_guard_1",
+			"X-Relay-Timestamp": ts,
+			"X-Relay-Signature": sig,
+			"Content-Type":      "application/json",
+		},
+		body: bodyBytes,
+	})
+	if first.Code != http.StatusAccepted {
+		t.Fatalf("expected 202 for first internal ingress, got %d (%s)", first.Code, first.Body.String())
+	}
+
+	replayed := doRawRequest(t, server, rawRequest{
+		method: http.MethodPost,
+		path:   "/v1/internal/webhook-envelopes",
+		headers: map[string]string{
+			"X-Correlation-Id":  "corr_replay_guard_2",
+			"X-Relay-Timestamp": ts,
+			"X-Relay-Signature": sig,
+			"Content-Type":      "application/json",
+		},
+		body: bodyBytes,
+	})
+	if replayed.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for replayed internal ingress, got %d (%s)", replayed.Code, replayed.Body.String())
 	}
 }
 
@@ -688,7 +1216,7 @@ func TestInternalWebhookIngressQueueFull(t *testing.T) {
 		method: http.MethodPost,
 		path:   "/v1/internal/webhook-envelopes",
 		headers: map[string]string{
-			"X-Correlation-Id": "corr_qf_1",
+			"X-Correlation-Id":  "corr_qf_1",
 			"X-Relay-Timestamp": firstTs,
 			"X-Relay-Signature": firstSig,
 			"Content-Type":      "application/json",
@@ -718,7 +1246,7 @@ func TestInternalWebhookIngressQueueFull(t *testing.T) {
 		method: http.MethodPost,
 		path:   "/v1/internal/webhook-envelopes",
 		headers: map[string]string{
-			"X-Correlation-Id": "corr_qf_2",
+			"X-Correlation-Id":  "corr_qf_2",
 			"X-Relay-Timestamp": secondTs,
 			"X-Relay-Signature": secondSig,
 			"Content-Type":      "application/json",
@@ -764,7 +1292,7 @@ func TestSyncIngressStatusEndpoint(t *testing.T) {
 		method: http.MethodPost,
 		path:   "/v1/internal/webhook-envelopes",
 		headers: map[string]string{
-			"X-Correlation-Id": "corr_stats_1",
+			"X-Correlation-Id":  "corr_stats_1",
 			"X-Relay-Timestamp": firstTs,
 			"X-Relay-Signature": firstSig,
 			"Content-Type":      "application/json",
@@ -791,7 +1319,7 @@ func TestSyncIngressStatusEndpoint(t *testing.T) {
 		method: http.MethodPost,
 		path:   "/v1/internal/webhook-envelopes",
 		headers: map[string]string{
-			"X-Correlation-Id": "corr_stats_2",
+			"X-Correlation-Id":  "corr_stats_2",
 			"X-Relay-Timestamp": secondTs,
 			"X-Relay-Signature": secondSig,
 			"Content-Type":      "application/json",
@@ -804,7 +1332,7 @@ func TestSyncIngressStatusEndpoint(t *testing.T) {
 		method: http.MethodGet,
 		path:   "/v1/workspaces/ws_stats/sync/ingress",
 		headers: map[string]string{
-			"Authorization":   "Bearer " + token,
+			"Authorization":    "Bearer " + token,
 			"X-Correlation-Id": "corr_stats_3",
 		},
 	})
@@ -845,6 +1373,82 @@ func TestSyncIngressStatusEndpoint(t *testing.T) {
 	}
 }
 
+func TestSyncIngressStatusEndpointProviderFilter(t *testing.T) {
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{
+		DisableWorkers:    true,
+		EnvelopeQueueSize: 4,
+	})
+	t.Cleanup(store.Close)
+	server := NewServer(store)
+
+	envelopes := []map[string]any{
+		{
+			"envelopeId":    "env_stats_provider_1",
+			"workspaceId":   "ws_stats_provider",
+			"provider":      "notion",
+			"deliveryId":    "delivery_stats_provider_1",
+			"receivedAt":    time.Now().UTC().Format(time.RFC3339Nano),
+			"payload":       map[string]any{"type": "sync"},
+			"correlationId": "corr_stats_provider_1",
+		},
+		{
+			"envelopeId":    "env_stats_provider_2",
+			"workspaceId":   "ws_stats_provider",
+			"provider":      "custom",
+			"deliveryId":    "delivery_stats_provider_2",
+			"receivedAt":    time.Now().UTC().Format(time.RFC3339Nano),
+			"payload":       map[string]any{"type": "sync"},
+			"correlationId": "corr_stats_provider_2",
+		},
+	}
+	for _, envelope := range envelopes {
+		body, err := json.Marshal(envelope)
+		if err != nil {
+			t.Fatalf("marshal envelope: %v", err)
+		}
+		ts := time.Now().UTC().Format(time.RFC3339)
+		sig := mustHMAC("dev-internal-secret", ts+"\n"+string(body))
+		_ = doRawRequest(t, server, rawRequest{
+			method: http.MethodPost,
+			path:   "/v1/internal/webhook-envelopes",
+			headers: map[string]string{
+				"X-Correlation-Id":  envelope["correlationId"].(string),
+				"X-Relay-Timestamp": ts,
+				"X-Relay-Signature": sig,
+				"Content-Type":      "application/json",
+			},
+			body: body,
+		})
+	}
+
+	token := mustTestJWT(t, "dev-secret", "ws_stats_provider", "Worker1", []string{"sync:read"}, time.Now().Add(time.Hour))
+	resp := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/workspaces/ws_stats_provider/sync/ingress?provider=custom",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_stats_provider_3",
+		},
+	})
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200 for provider-filtered ingress status, got %d (%s)", resp.Code, resp.Body.String())
+	}
+	var status relayfile.IngressStatus
+	if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
+		t.Fatalf("decode provider-filtered ingress status: %v", err)
+	}
+	if status.PendingTotal != 1 || status.AcceptedTotal != 1 || status.QueueDepth != 1 {
+		t.Fatalf("unexpected provider-filtered ingress status: %+v", status)
+	}
+	if len(status.IngressByProvider) != 1 {
+		t.Fatalf("expected one provider in ingressByProvider, got %+v", status.IngressByProvider)
+	}
+	customIngress, ok := status.IngressByProvider["custom"]
+	if !ok || customIngress.PendingTotal != 1 || customIngress.AcceptedTotal != 1 {
+		t.Fatalf("expected custom-only provider metrics, got %+v", status.IngressByProvider)
+	}
+}
+
 func TestSyncDeadLetterEndpoint(t *testing.T) {
 	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{
 		MaxEnvelopeAttempts: 1,
@@ -874,7 +1478,7 @@ func TestSyncDeadLetterEndpoint(t *testing.T) {
 		method: http.MethodPost,
 		path:   "/v1/internal/webhook-envelopes",
 		headers: map[string]string{
-			"X-Correlation-Id": "corr_dead_api_1",
+			"X-Correlation-Id":  "corr_dead_api_1",
 			"X-Relay-Timestamp": ts,
 			"X-Relay-Signature": sig,
 			"Content-Type":      "application/json",
@@ -892,7 +1496,7 @@ func TestSyncDeadLetterEndpoint(t *testing.T) {
 			method: http.MethodGet,
 			path:   "/v1/workspaces/ws_dead_api/sync/dead-letter?limit=10",
 			headers: map[string]string{
-				"Authorization":   "Bearer " + token,
+				"Authorization":    "Bearer " + token,
 				"X-Correlation-Id": "corr_dead_api_2",
 			},
 		})
@@ -943,7 +1547,7 @@ func TestSyncDeadLetterItemEndpoint(t *testing.T) {
 		method: http.MethodPost,
 		path:   "/v1/internal/webhook-envelopes",
 		headers: map[string]string{
-			"X-Correlation-Id": "corr_dead_item_api_1",
+			"X-Correlation-Id":  "corr_dead_item_api_1",
 			"X-Relay-Timestamp": ts,
 			"X-Relay-Signature": sig,
 			"Content-Type":      "application/json",
@@ -961,7 +1565,7 @@ func TestSyncDeadLetterItemEndpoint(t *testing.T) {
 			method: http.MethodGet,
 			path:   "/v1/workspaces/ws_dead_item_api/sync/dead-letter/env_dead_item_api_1",
 			headers: map[string]string{
-				"Authorization":   "Bearer " + token,
+				"Authorization":    "Bearer " + token,
 				"X-Correlation-Id": "corr_dead_item_api_2",
 			},
 		})
@@ -1022,7 +1626,7 @@ func TestSyncDeadLetterEndpointProviderFilter(t *testing.T) {
 			method: http.MethodPost,
 			path:   "/v1/internal/webhook-envelopes",
 			headers: map[string]string{
-				"X-Correlation-Id": envelope["correlationId"].(string),
+				"X-Correlation-Id":  envelope["correlationId"].(string),
 				"X-Relay-Timestamp": ts,
 				"X-Relay-Signature": sig,
 				"Content-Type":      "application/json",
@@ -1041,7 +1645,7 @@ func TestSyncDeadLetterEndpointProviderFilter(t *testing.T) {
 			method: http.MethodGet,
 			path:   "/v1/workspaces/ws_dead_filter_api/sync/dead-letter?provider=custom2&limit=10",
 			headers: map[string]string{
-				"Authorization":   "Bearer " + token,
+				"Authorization":    "Bearer " + token,
 				"X-Correlation-Id": "corr_dead_filter_api_3",
 			},
 		})
@@ -1093,7 +1697,7 @@ func TestSyncDeadLetterReplayEndpoint(t *testing.T) {
 		method: http.MethodPost,
 		path:   "/v1/internal/webhook-envelopes",
 		headers: map[string]string{
-			"X-Correlation-Id": "corr_dead_replay_api_1",
+			"X-Correlation-Id":  "corr_dead_replay_api_1",
 			"X-Relay-Timestamp": ts,
 			"X-Relay-Signature": sig,
 			"Content-Type":      "application/json",
@@ -1113,7 +1717,7 @@ func TestSyncDeadLetterReplayEndpoint(t *testing.T) {
 			method: http.MethodGet,
 			path:   "/v1/workspaces/ws_dead_replay_api/sync/dead-letter?limit=10",
 			headers: map[string]string{
-				"Authorization":   "Bearer " + readToken,
+				"Authorization":    "Bearer " + readToken,
 				"X-Correlation-Id": "corr_dead_replay_api_2",
 			},
 		})
@@ -1134,7 +1738,7 @@ func TestSyncDeadLetterReplayEndpoint(t *testing.T) {
 		method: http.MethodPost,
 		path:   "/v1/workspaces/ws_dead_replay_api/sync/dead-letter/env_dead_replay_api_1/replay",
 		headers: map[string]string{
-			"Authorization":   "Bearer " + readToken,
+			"Authorization":    "Bearer " + readToken,
 			"X-Correlation-Id": "corr_dead_replay_api_denied",
 		},
 	})
@@ -1147,7 +1751,7 @@ func TestSyncDeadLetterReplayEndpoint(t *testing.T) {
 		method: http.MethodPost,
 		path:   "/v1/workspaces/ws_dead_replay_api/sync/dead-letter/env_dead_replay_api_1/replay",
 		headers: map[string]string{
-			"Authorization":   "Bearer " + replayToken,
+			"Authorization":    "Bearer " + replayToken,
 			"X-Correlation-Id": "corr_dead_replay_api_3",
 		},
 	})
@@ -1161,7 +1765,7 @@ func TestSyncDeadLetterReplayEndpoint(t *testing.T) {
 			method: http.MethodGet,
 			path:   "/v1/workspaces/ws_dead_replay_api/fs/file?path=/custom/Replayed.md",
 			headers: map[string]string{
-				"Authorization":   "Bearer " + readToken,
+				"Authorization":    "Bearer " + readToken,
 				"X-Correlation-Id": "corr_dead_replay_api_4",
 			},
 		})
@@ -1202,7 +1806,7 @@ func TestSyncDeadLetterAckEndpoint(t *testing.T) {
 		method: http.MethodPost,
 		path:   "/v1/internal/webhook-envelopes",
 		headers: map[string]string{
-			"X-Correlation-Id": "corr_dead_ack_api_1",
+			"X-Correlation-Id":  "corr_dead_ack_api_1",
 			"X-Relay-Timestamp": ts,
 			"X-Relay-Signature": sig,
 			"Content-Type":      "application/json",
@@ -1221,7 +1825,7 @@ func TestSyncDeadLetterAckEndpoint(t *testing.T) {
 			method: http.MethodGet,
 			path:   "/v1/workspaces/ws_dead_ack_api/sync/dead-letter?limit=10",
 			headers: map[string]string{
-				"Authorization":   "Bearer " + readToken,
+				"Authorization":    "Bearer " + readToken,
 				"X-Correlation-Id": "corr_dead_ack_api_2",
 			},
 		})
@@ -1238,7 +1842,7 @@ func TestSyncDeadLetterAckEndpoint(t *testing.T) {
 		method: http.MethodPost,
 		path:   "/v1/workspaces/ws_dead_ack_api/sync/dead-letter/env_dead_ack_api_1/ack",
 		headers: map[string]string{
-			"Authorization":   "Bearer " + readToken,
+			"Authorization":    "Bearer " + readToken,
 			"X-Correlation-Id": "corr_dead_ack_api_denied",
 		},
 	})
@@ -1250,7 +1854,7 @@ func TestSyncDeadLetterAckEndpoint(t *testing.T) {
 		method: http.MethodPost,
 		path:   "/v1/workspaces/ws_dead_ack_api/sync/dead-letter/env_dead_ack_api_1/ack",
 		headers: map[string]string{
-			"Authorization":   "Bearer " + triggerToken,
+			"Authorization":    "Bearer " + triggerToken,
 			"X-Correlation-Id": "corr_dead_ack_api_3",
 		},
 	})
@@ -1262,7 +1866,7 @@ func TestSyncDeadLetterAckEndpoint(t *testing.T) {
 		method: http.MethodGet,
 		path:   "/v1/workspaces/ws_dead_ack_api/sync/dead-letter?limit=10",
 		headers: map[string]string{
-			"Authorization":   "Bearer " + readToken,
+			"Authorization":    "Bearer " + readToken,
 			"X-Correlation-Id": "corr_dead_ack_api_4",
 		},
 	})
@@ -1294,9 +1898,9 @@ func TestWorkspaceOperationReplayEndpoint(t *testing.T) {
 		method: http.MethodPut,
 		path:   "/v1/workspaces/ws_ops_replay/fs/file?path=/notion/ReplayOp.md",
 		headers: map[string]string{
-			"Authorization":   "Bearer " + writeToken,
+			"Authorization":    "Bearer " + writeToken,
 			"X-Correlation-Id": "corr_ops_replay_1",
-			"If-Match":        "0",
+			"If-Match":         "0",
 		},
 		body: map[string]any{
 			"contentType": "text/markdown",
@@ -1317,7 +1921,7 @@ func TestWorkspaceOperationReplayEndpoint(t *testing.T) {
 			method: http.MethodGet,
 			path:   "/v1/workspaces/ws_ops_replay/ops/" + queued.OpID,
 			headers: map[string]string{
-				"Authorization":   "Bearer " + writeToken,
+				"Authorization":    "Bearer " + writeToken,
 				"X-Correlation-Id": "corr_ops_replay_2",
 			},
 		})
@@ -1334,7 +1938,7 @@ func TestWorkspaceOperationReplayEndpoint(t *testing.T) {
 		method: http.MethodPost,
 		path:   "/v1/workspaces/ws_ops_replay/ops/" + queued.OpID + "/replay",
 		headers: map[string]string{
-			"Authorization":   "Bearer " + writeToken,
+			"Authorization":    "Bearer " + writeToken,
 			"X-Correlation-Id": "corr_ops_replay_3",
 		},
 	})
@@ -1347,7 +1951,7 @@ func TestWorkspaceOperationReplayEndpoint(t *testing.T) {
 		method: http.MethodPost,
 		path:   "/v1/workspaces/ws_ops_replay/ops/" + queued.OpID + "/replay",
 		headers: map[string]string{
-			"Authorization":   "Bearer " + readOnlyToken,
+			"Authorization":    "Bearer " + readOnlyToken,
 			"X-Correlation-Id": "corr_ops_replay_4",
 		},
 	})
@@ -1364,9 +1968,9 @@ func TestWorkspaceOperationReplayEndpointRejectsNonDeadLetteredOp(t *testing.T) 
 		method: http.MethodPut,
 		path:   "/v1/workspaces/ws_ops_replay_state/fs/file?path=/notion/ReplayState.md",
 		headers: map[string]string{
-			"Authorization":   "Bearer " + token,
+			"Authorization":    "Bearer " + token,
 			"X-Correlation-Id": "corr_ops_replay_state_1",
-			"If-Match":        "0",
+			"If-Match":         "0",
 		},
 		body: map[string]any{
 			"contentType": "text/markdown",
@@ -1387,7 +1991,7 @@ func TestWorkspaceOperationReplayEndpointRejectsNonDeadLetteredOp(t *testing.T) 
 			method: http.MethodGet,
 			path:   "/v1/workspaces/ws_ops_replay_state/ops/" + queued.OpID,
 			headers: map[string]string{
-				"Authorization":   "Bearer " + token,
+				"Authorization":    "Bearer " + token,
 				"X-Correlation-Id": "corr_ops_replay_state_2",
 			},
 		})
@@ -1404,7 +2008,7 @@ func TestWorkspaceOperationReplayEndpointRejectsNonDeadLetteredOp(t *testing.T) 
 		method: http.MethodPost,
 		path:   "/v1/workspaces/ws_ops_replay_state/ops/" + queued.OpID + "/replay",
 		headers: map[string]string{
-			"Authorization":   "Bearer " + token,
+			"Authorization":    "Bearer " + token,
 			"X-Correlation-Id": "corr_ops_replay_state_3",
 		},
 	})
@@ -1421,7 +2025,7 @@ func TestListEndpointsRejectInvalidCursor(t *testing.T) {
 		method: http.MethodGet,
 		path:   "/v1/workspaces/ws_cursor/ops?cursor=op_missing",
 		headers: map[string]string{
-			"Authorization":   "Bearer " + opsToken,
+			"Authorization":    "Bearer " + opsToken,
 			"X-Correlation-Id": "corr_cursor_1",
 		},
 	})
@@ -1433,7 +2037,7 @@ func TestListEndpointsRejectInvalidCursor(t *testing.T) {
 		method: http.MethodGet,
 		path:   "/v1/workspaces/ws_cursor/sync/dead-letter?cursor=env_missing",
 		headers: map[string]string{
-			"Authorization":   "Bearer " + mustTestJWT(t, "dev-secret", "ws_cursor", "Worker1", []string{"sync:read"}, time.Now().Add(time.Hour)),
+			"Authorization":    "Bearer " + mustTestJWT(t, "dev-secret", "ws_cursor", "Worker1", []string{"sync:read"}, time.Now().Add(time.Hour)),
 			"X-Correlation-Id": "corr_cursor_2",
 		},
 	})
@@ -1472,7 +2076,7 @@ func TestAdminReplayAndSyncRefresh(t *testing.T) {
 		method: http.MethodPost,
 		path:   "/v1/internal/webhook-envelopes",
 		headers: map[string]string{
-			"X-Correlation-Id": "corr_admin_internal_1",
+			"X-Correlation-Id":  "corr_admin_internal_1",
 			"X-Relay-Timestamp": ts,
 			"X-Relay-Signature": sig,
 			"Content-Type":      "application/json",
@@ -1493,14 +2097,25 @@ func TestAdminReplayAndSyncRefresh(t *testing.T) {
 	)
 	replay := doRequest(t, server, request{
 		method: http.MethodPost,
-		path:   "/v1/admin/replay/envelopes/env_admin_1",
+		path:   "/v1/admin/replay/envelope/env_admin_1",
 		headers: map[string]string{
-			"Authorization":   "Bearer " + adminToken,
+			"Authorization":    "Bearer " + adminToken,
 			"X-Correlation-Id": "corr_admin_1",
 		},
 	})
 	if replay.Code != http.StatusAccepted {
 		t.Fatalf("expected 202 replay envelope, got %d (%s)", replay.Code, replay.Body.String())
+	}
+	replayLegacy := doRequest(t, server, request{
+		method: http.MethodPost,
+		path:   "/v1/admin/replay/envelopes/env_admin_1",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + adminToken,
+			"X-Correlation-Id": "corr_admin_1b",
+		},
+	})
+	if replayLegacy.Code != http.StatusAccepted {
+		t.Fatalf("expected 202 replay envelope (legacy path), got %d (%s)", replayLegacy.Code, replayLegacy.Body.String())
 	}
 
 	noAdmin := mustTestJWT(
@@ -1513,9 +2128,9 @@ func TestAdminReplayAndSyncRefresh(t *testing.T) {
 	)
 	replayDenied := doRequest(t, server, request{
 		method: http.MethodPost,
-		path:   "/v1/admin/replay/envelopes/env_admin_1",
+		path:   "/v1/admin/replay/envelope/env_admin_1",
 		headers: map[string]string{
-			"Authorization":   "Bearer " + noAdmin,
+			"Authorization":    "Bearer " + noAdmin,
 			"X-Correlation-Id": "corr_admin_2",
 		},
 	})
@@ -1527,7 +2142,7 @@ func TestAdminReplayAndSyncRefresh(t *testing.T) {
 		method: http.MethodPost,
 		path:   "/v1/workspaces/ws_admin/sync/refresh",
 		headers: map[string]string{
-			"Authorization":   "Bearer " + adminToken,
+			"Authorization":    "Bearer " + adminToken,
 			"X-Correlation-Id": "corr_admin_3",
 		},
 		body: map[string]any{
@@ -1539,13 +2154,29 @@ func TestAdminReplayAndSyncRefresh(t *testing.T) {
 		t.Fatalf("expected 202 for sync refresh, got %d (%s)", syncRefresh.Code, syncRefresh.Body.String())
 	}
 
+	syncRefreshInvalid := doRequest(t, server, request{
+		method: http.MethodPost,
+		path:   "/v1/workspaces/ws_admin/sync/refresh",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + adminToken,
+			"X-Correlation-Id": "corr_admin_3b",
+		},
+		body: map[string]any{
+			"provider": "unknown-provider",
+			"reason":   "manual",
+		},
+	})
+	if syncRefreshInvalid.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for unknown provider on sync refresh, got %d (%s)", syncRefreshInvalid.Code, syncRefreshInvalid.Body.String())
+	}
+
 	write := doRequest(t, server, request{
 		method: http.MethodPut,
 		path:   "/v1/workspaces/ws_admin/fs/file?path=/notion/Admin.md",
 		headers: map[string]string{
-			"Authorization":   "Bearer " + mustTestJWT(t, "dev-secret", "ws_admin", "Lead", []string{"fs:write"}, time.Now().Add(time.Hour)),
+			"Authorization":    "Bearer " + mustTestJWT(t, "dev-secret", "ws_admin", "Lead", []string{"fs:write"}, time.Now().Add(time.Hour)),
 			"X-Correlation-Id": "corr_admin_4",
-			"If-Match":        "0",
+			"If-Match":         "0",
 		},
 		body: map[string]any{
 			"contentType": "text/markdown",
@@ -1566,7 +2197,7 @@ func TestAdminReplayAndSyncRefresh(t *testing.T) {
 			method: http.MethodGet,
 			path:   "/v1/workspaces/ws_admin/ops/" + queued.OpID,
 			headers: map[string]string{
-				"Authorization":   "Bearer " + adminToken,
+				"Authorization":    "Bearer " + adminToken,
 				"X-Correlation-Id": "corr_admin_4b",
 			},
 		})
@@ -1581,14 +2212,902 @@ func TestAdminReplayAndSyncRefresh(t *testing.T) {
 
 	replayOp := doRequest(t, server, request{
 		method: http.MethodPost,
-		path:   "/v1/admin/replay/ops/" + queued.OpID,
+		path:   "/v1/admin/replay/op/" + queued.OpID,
 		headers: map[string]string{
-			"Authorization":   "Bearer " + adminToken,
+			"Authorization":    "Bearer " + adminToken,
 			"X-Correlation-Id": "corr_admin_5",
 		},
 	})
 	if replayOp.Code != http.StatusAccepted {
 		t.Fatalf("expected 202 replay op, got %d (%s)", replayOp.Code, replayOp.Body.String())
+	}
+}
+
+func TestAdminBackendsEndpoint(t *testing.T) {
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{
+		DisableWorkers: true,
+		StateBackend:   relayfile.NewInMemoryStateBackend(),
+		EnvelopeQueue:  relayfile.NewInMemoryEnvelopeQueue(5),
+		WritebackQueue: relayfile.NewInMemoryWritebackQueue(6),
+	})
+	t.Cleanup(store.Close)
+	server := NewServer(store)
+
+	readToken := mustTestJWT(
+		t,
+		"dev-secret",
+		"ws_admin_backends",
+		"Lead",
+		[]string{"admin:read"},
+		time.Now().Add(time.Hour),
+	)
+	resp := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/admin/backends",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + readToken,
+			"X-Correlation-Id": "corr_admin_backends_1",
+		},
+	})
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200 for admin backends endpoint, got %d (%s)", resp.Code, resp.Body.String())
+	}
+	var payload relayfile.BackendStatus
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode admin backends payload: %v", err)
+	}
+	if payload.EnvelopeQueueCap != 5 || payload.WritebackQueueCap != 6 {
+		t.Fatalf("expected queue capacities 5/6, got %+v", payload)
+	}
+	if payload.BackendProfile != "custom" {
+		t.Fatalf("expected default backend profile custom, got %+v", payload)
+	}
+
+	replayToken := mustTestJWT(
+		t,
+		"dev-secret",
+		"ws_admin_backends",
+		"Lead",
+		[]string{"admin:replay"},
+		time.Now().Add(time.Hour),
+	)
+	replayResp := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/admin/backends",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + replayToken,
+			"X-Correlation-Id": "corr_admin_backends_1b",
+		},
+	})
+	if replayResp.Code != http.StatusOK {
+		t.Fatalf("expected 200 for admin:replay token on admin backends endpoint, got %d (%s)", replayResp.Code, replayResp.Body.String())
+	}
+
+	deniedToken := mustTestJWT(
+		t,
+		"dev-secret",
+		"ws_admin_backends",
+		"Worker1",
+		[]string{"fs:read"},
+		time.Now().Add(time.Hour),
+	)
+	denied := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/admin/backends",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + deniedToken,
+			"X-Correlation-Id": "corr_admin_backends_2",
+		},
+	})
+	if denied.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for missing admin scope, got %d (%s)", denied.Code, denied.Body.String())
+	}
+}
+
+func TestAdminIngressEndpoint(t *testing.T) {
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{
+		DisableWorkers:    true,
+		EnvelopeQueueSize: 8,
+	})
+	t.Cleanup(store.Close)
+	server := NewServer(store)
+
+	receivedAt := time.Now().UTC().Format(time.RFC3339Nano)
+	_, err := store.IngestEnvelope(relayfile.WebhookEnvelopeRequest{
+		EnvelopeID:    "env_admin_ingress_1",
+		WorkspaceID:   "ws_admin_ingress_1",
+		Provider:      "notion",
+		DeliveryID:    "delivery_admin_ingress_1",
+		ReceivedAt:    receivedAt,
+		Payload:       map[string]any{"type": "sync"},
+		CorrelationID: "corr_admin_ingress_1",
+	})
+	if err != nil {
+		t.Fatalf("ingest ws_admin_ingress_1 failed: %v", err)
+	}
+	_, err = store.IngestEnvelope(relayfile.WebhookEnvelopeRequest{
+		EnvelopeID:    "env_admin_ingress_2",
+		WorkspaceID:   "ws_admin_ingress_2",
+		Provider:      "custom",
+		DeliveryID:    "delivery_admin_ingress_2",
+		ReceivedAt:    receivedAt,
+		Payload:       map[string]any{"type": "sync"},
+		CorrelationID: "corr_admin_ingress_2",
+	})
+	if err != nil {
+		t.Fatalf("ingest ws_admin_ingress_2 failed: %v", err)
+	}
+
+	readToken := mustTestJWT(
+		t,
+		"dev-secret",
+		"ws_admin_ingress_1",
+		"Lead",
+		[]string{"admin:read"},
+		time.Now().Add(time.Hour),
+	)
+	resp := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/admin/ingress",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + readToken,
+			"X-Correlation-Id": "corr_admin_ingress_3",
+		},
+	})
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200 for admin ingress endpoint, got %d (%s)", resp.Code, resp.Body.String())
+	}
+	var payload struct {
+		AlertProfile           string                             `json:"alertProfile"`
+		EffectiveAlertProfile  string                             `json:"effectiveAlertProfile"`
+		WorkspaceCount         int                                `json:"workspaceCount"`
+		ReturnedWorkspaceCount int                                `json:"returnedWorkspaceCount"`
+		WorkspaceIDs           []string                           `json:"workspaceIds"`
+		NextCursor             *string                            `json:"nextCursor"`
+		PendingTotal           int                                `json:"pendingTotal"`
+		Thresholds     struct {
+			Pending    int     `json:"pending"`
+			DeadLetter int     `json:"deadLetter"`
+			Stale      int     `json:"stale"`
+			DropRate   float64 `json:"dropRate"`
+		} `json:"thresholds"`
+		AlertTotals struct {
+			Total    int            `json:"total"`
+			Critical int            `json:"critical"`
+			Warning  int            `json:"warning"`
+			ByType   map[string]int `json:"byType"`
+		} `json:"alertTotals"`
+		AlertsTruncated bool                            `json:"alertsTruncated"`
+		Alerts         []map[string]any                 `json:"alerts"`
+		Workspaces     map[string]relayfile.IngressStatus `json:"workspaces"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode admin ingress payload: %v", err)
+	}
+	if payload.WorkspaceCount < 2 {
+		t.Fatalf("expected workspaceCount >= 2, got %d", payload.WorkspaceCount)
+	}
+	if payload.AlertProfile != "balanced" {
+		t.Fatalf("expected default alertProfile=balanced, got %q", payload.AlertProfile)
+	}
+	if payload.EffectiveAlertProfile != "balanced" {
+		t.Fatalf("expected default effectiveAlertProfile=balanced, got %q", payload.EffectiveAlertProfile)
+	}
+	if payload.ReturnedWorkspaceCount < 2 {
+		t.Fatalf("expected returnedWorkspaceCount >= 2, got %d", payload.ReturnedWorkspaceCount)
+	}
+	if len(payload.WorkspaceIDs) != payload.ReturnedWorkspaceCount {
+		t.Fatalf("expected workspaceIds length to match returnedWorkspaceCount, got ids=%d count=%d", len(payload.WorkspaceIDs), payload.ReturnedWorkspaceCount)
+	}
+	if payload.NextCursor != nil {
+		t.Fatalf("expected nil nextCursor for full response, got %q", *payload.NextCursor)
+	}
+	if payload.PendingTotal < 2 {
+		t.Fatalf("expected pendingTotal >= 2, got %d", payload.PendingTotal)
+	}
+	if payload.Thresholds.Pending != 100 || payload.Thresholds.DeadLetter != 1 || payload.Thresholds.Stale != 10 || payload.Thresholds.DropRate != 0.05 {
+		t.Fatalf("unexpected default threshold payload: %+v", payload.Thresholds)
+	}
+	if payload.AlertTotals.Total != 0 || payload.AlertTotals.Critical != 0 || payload.AlertTotals.Warning != 0 || len(payload.AlertTotals.ByType) != 0 {
+		t.Fatalf("unexpected zero-alert totals payload: %+v", payload.AlertTotals)
+	}
+	if payload.AlertsTruncated {
+		t.Fatalf("expected alertsTruncated=false for baseline payload")
+	}
+	if len(payload.Alerts) != 0 {
+		t.Fatalf("expected no alerts for baseline admin ingress test payload, got %+v", payload.Alerts)
+	}
+	summaryOnlyResp := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/admin/ingress?includeWorkspaces=false",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + readToken,
+			"X-Correlation-Id": "corr_admin_ingress_3_summary_only",
+		},
+	})
+	if summaryOnlyResp.Code != http.StatusOK {
+		t.Fatalf("expected 200 for summary-only admin ingress endpoint, got %d (%s)", summaryOnlyResp.Code, summaryOnlyResp.Body.String())
+	}
+	var summaryOnlyPayload struct {
+		WorkspaceCount         int                                `json:"workspaceCount"`
+		ReturnedWorkspaceCount int                                `json:"returnedWorkspaceCount"`
+		WorkspaceIDs           []string                           `json:"workspaceIds"`
+		NextCursor             *string                            `json:"nextCursor"`
+		Workspaces             map[string]relayfile.IngressStatus `json:"workspaces"`
+	}
+	if err := json.NewDecoder(summaryOnlyResp.Body).Decode(&summaryOnlyPayload); err != nil {
+		t.Fatalf("decode summary-only admin ingress payload: %v", err)
+	}
+	if summaryOnlyPayload.WorkspaceCount < 2 || summaryOnlyPayload.ReturnedWorkspaceCount != 0 || len(summaryOnlyPayload.WorkspaceIDs) != 0 || len(summaryOnlyPayload.Workspaces) != 0 || summaryOnlyPayload.NextCursor != nil {
+		t.Fatalf("unexpected summary-only payload: %+v", summaryOnlyPayload)
+	}
+	summaryOnlyWithCursorResp := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/admin/ingress?includeWorkspaces=false&cursor=missing_workspace&limit=1",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + readToken,
+			"X-Correlation-Id": "corr_admin_ingress_3_summary_only_cursor",
+		},
+	})
+	if summaryOnlyWithCursorResp.Code != http.StatusOK {
+		t.Fatalf("expected 200 for summary-only admin ingress with cursor params, got %d (%s)", summaryOnlyWithCursorResp.Code, summaryOnlyWithCursorResp.Body.String())
+	}
+	var summaryOnlyWithCursorPayload struct {
+		ReturnedWorkspaceCount int                                `json:"returnedWorkspaceCount"`
+		WorkspaceIDs           []string                           `json:"workspaceIds"`
+		NextCursor             *string                            `json:"nextCursor"`
+		Workspaces             map[string]relayfile.IngressStatus `json:"workspaces"`
+	}
+	if err := json.NewDecoder(summaryOnlyWithCursorResp.Body).Decode(&summaryOnlyWithCursorPayload); err != nil {
+		t.Fatalf("decode summary-only-with-cursor payload: %v", err)
+	}
+	if summaryOnlyWithCursorPayload.ReturnedWorkspaceCount != 0 || len(summaryOnlyWithCursorPayload.WorkspaceIDs) != 0 || len(summaryOnlyWithCursorPayload.Workspaces) != 0 || summaryOnlyWithCursorPayload.NextCursor != nil {
+		t.Fatalf("unexpected summary-only-with-cursor payload: %+v", summaryOnlyWithCursorPayload)
+	}
+	ws1, ok := payload.Workspaces["ws_admin_ingress_1"]
+	if !ok {
+		t.Fatalf("expected ws_admin_ingress_1 in admin ingress payload")
+	}
+	if ws1.AcceptedTotal != 1 || ws1.PendingTotal != 1 {
+		t.Fatalf("unexpected ws_admin_ingress_1 status: %+v", ws1)
+	}
+	ws2, ok := payload.Workspaces["ws_admin_ingress_2"]
+	if !ok {
+		t.Fatalf("expected ws_admin_ingress_2 in admin ingress payload")
+	}
+	if ws2.AcceptedTotal != 1 || ws2.PendingTotal != 1 {
+		t.Fatalf("unexpected ws_admin_ingress_2 status: %+v", ws2)
+	}
+
+	filteredWorkspace := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/admin/ingress?workspaceId=ws_admin_ingress_2",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + readToken,
+			"X-Correlation-Id": "corr_admin_ingress_3b",
+		},
+	})
+	if filteredWorkspace.Code != http.StatusOK {
+		t.Fatalf("expected 200 for admin ingress workspace filter, got %d (%s)", filteredWorkspace.Code, filteredWorkspace.Body.String())
+	}
+	var workspacePayload struct {
+		WorkspaceCount int                              `json:"workspaceCount"`
+		PendingTotal   int                              `json:"pendingTotal"`
+		Workspaces     map[string]relayfile.IngressStatus `json:"workspaces"`
+	}
+	if err := json.NewDecoder(filteredWorkspace.Body).Decode(&workspacePayload); err != nil {
+		t.Fatalf("decode admin ingress workspace-filter payload: %v", err)
+	}
+	if workspacePayload.WorkspaceCount != 1 || workspacePayload.PendingTotal != 1 {
+		t.Fatalf("unexpected workspace-filter summary: workspaceCount=%d pendingTotal=%d", workspacePayload.WorkspaceCount, workspacePayload.PendingTotal)
+	}
+	if len(workspacePayload.Workspaces) != 1 {
+		t.Fatalf("expected one workspace in admin ingress workspace filter payload, got %d", len(workspacePayload.Workspaces))
+	}
+	if workspacePayload.Workspaces["ws_admin_ingress_2"].AcceptedTotal != 1 {
+		t.Fatalf("expected workspace filter to return ws_admin_ingress_2 acceptedTotal=1, got %+v", workspacePayload.Workspaces)
+	}
+
+	filteredProvider := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/admin/ingress?provider=custom",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + readToken,
+			"X-Correlation-Id": "corr_admin_ingress_3c",
+		},
+	})
+	if filteredProvider.Code != http.StatusOK {
+		t.Fatalf("expected 200 for admin ingress provider filter, got %d (%s)", filteredProvider.Code, filteredProvider.Body.String())
+	}
+	var providerPayload struct {
+		WorkspaceCount int                              `json:"workspaceCount"`
+		PendingTotal   int                              `json:"pendingTotal"`
+		Workspaces     map[string]relayfile.IngressStatus `json:"workspaces"`
+	}
+	if err := json.NewDecoder(filteredProvider.Body).Decode(&providerPayload); err != nil {
+		t.Fatalf("decode admin ingress provider-filter payload: %v", err)
+	}
+	if providerPayload.WorkspaceCount < 2 || providerPayload.PendingTotal != 1 {
+		t.Fatalf("unexpected provider-filter summary: workspaceCount=%d pendingTotal=%d", providerPayload.WorkspaceCount, providerPayload.PendingTotal)
+	}
+	providerStatus, ok := providerPayload.Workspaces["ws_admin_ingress_2"]
+	if !ok {
+		t.Fatalf("expected ws_admin_ingress_2 in provider-filter payload")
+	}
+	if providerStatus.AcceptedTotal != 1 || providerStatus.PendingTotal != 1 {
+		t.Fatalf("expected provider-filtered ws_admin_ingress_2 metrics, got %+v", providerStatus)
+	}
+	ws1Filtered, ok := providerPayload.Workspaces["ws_admin_ingress_1"]
+	if !ok {
+		t.Fatalf("expected ws_admin_ingress_1 in provider-filter payload")
+	}
+	if ws1Filtered.AcceptedTotal != 0 || ws1Filtered.PendingTotal != 0 {
+		t.Fatalf("expected zeroed ws_admin_ingress_1 metrics for custom provider filter, got %+v", ws1Filtered)
+	}
+
+	pageOneResp := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/admin/ingress?limit=1",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + readToken,
+			"X-Correlation-Id": "corr_admin_ingress_3d_page1",
+		},
+	})
+	if pageOneResp.Code != http.StatusOK {
+		t.Fatalf("expected 200 for admin ingress page one, got %d (%s)", pageOneResp.Code, pageOneResp.Body.String())
+	}
+	var pageOne struct {
+		WorkspaceCount         int      `json:"workspaceCount"`
+		ReturnedWorkspaceCount int      `json:"returnedWorkspaceCount"`
+		WorkspaceIDs           []string `json:"workspaceIds"`
+		NextCursor             *string  `json:"nextCursor"`
+	}
+	if err := json.NewDecoder(pageOneResp.Body).Decode(&pageOne); err != nil {
+		t.Fatalf("decode admin ingress page one payload: %v", err)
+	}
+	if pageOne.WorkspaceCount < 2 || pageOne.ReturnedWorkspaceCount != 1 || len(pageOne.WorkspaceIDs) != 1 || pageOne.NextCursor == nil {
+		t.Fatalf("unexpected page one payload: %+v", pageOne)
+	}
+
+	pageTwoResp := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/admin/ingress?limit=1&cursor=" + *pageOne.NextCursor,
+		headers: map[string]string{
+			"Authorization":    "Bearer " + readToken,
+			"X-Correlation-Id": "corr_admin_ingress_3d_page2",
+		},
+	})
+	if pageTwoResp.Code != http.StatusOK {
+		t.Fatalf("expected 200 for admin ingress page two, got %d (%s)", pageTwoResp.Code, pageTwoResp.Body.String())
+	}
+	var pageTwo struct {
+		ReturnedWorkspaceCount int      `json:"returnedWorkspaceCount"`
+		WorkspaceIDs           []string `json:"workspaceIds"`
+	}
+	if err := json.NewDecoder(pageTwoResp.Body).Decode(&pageTwo); err != nil {
+		t.Fatalf("decode admin ingress page two payload: %v", err)
+	}
+	if pageTwo.ReturnedWorkspaceCount != 1 || len(pageTwo.WorkspaceIDs) != 1 {
+		t.Fatalf("unexpected page two payload: %+v", pageTwo)
+	}
+	if pageTwo.WorkspaceIDs[0] == pageOne.WorkspaceIDs[0] {
+		t.Fatalf("expected page two workspace id to differ from page one")
+	}
+
+	invalidCursorResp := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/admin/ingress?limit=1&cursor=missing_workspace",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + readToken,
+			"X-Correlation-Id": "corr_admin_ingress_3d_bad_cursor",
+		},
+	})
+	if invalidCursorResp.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for invalid admin ingress cursor, got %d (%s)", invalidCursorResp.Code, invalidCursorResp.Body.String())
+	}
+
+	invalidProfileResp := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/admin/ingress?alertProfile=unknown",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + readToken,
+			"X-Correlation-Id": "corr_admin_ingress_bad_profile",
+		},
+	})
+	if invalidProfileResp.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for invalid admin ingress alertProfile, got %d (%s)", invalidProfileResp.Code, invalidProfileResp.Body.String())
+	}
+	invalidPendingThresholdResp := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/admin/ingress?pendingThreshold=oops",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + readToken,
+			"X-Correlation-Id": "corr_admin_ingress_bad_pending_threshold",
+		},
+	})
+	if invalidPendingThresholdResp.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for invalid pendingThreshold, got %d (%s)", invalidPendingThresholdResp.Code, invalidPendingThresholdResp.Body.String())
+	}
+	invalidLimitResp := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/admin/ingress?limit=0",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + readToken,
+			"X-Correlation-Id": "corr_admin_ingress_bad_limit",
+		},
+	})
+	if invalidLimitResp.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for invalid limit, got %d (%s)", invalidLimitResp.Code, invalidLimitResp.Body.String())
+	}
+	invalidIncludeAlertsResp := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/admin/ingress?includeAlerts=maybe",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + readToken,
+			"X-Correlation-Id": "corr_admin_ingress_bad_include_alerts",
+		},
+	})
+	if invalidIncludeAlertsResp.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for invalid includeAlerts boolean, got %d (%s)", invalidIncludeAlertsResp.Code, invalidIncludeAlertsResp.Body.String())
+	}
+
+	filteredProviderNonZero := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/admin/ingress?provider=custom&nonZeroOnly=true&limit=1",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + readToken,
+			"X-Correlation-Id": "corr_admin_ingress_3d",
+		},
+	})
+	if filteredProviderNonZero.Code != http.StatusOK {
+		t.Fatalf("expected 200 for nonZeroOnly provider filter, got %d (%s)", filteredProviderNonZero.Code, filteredProviderNonZero.Body.String())
+	}
+	var nonZeroPayload struct {
+		WorkspaceCount         int                                `json:"workspaceCount"`
+		ReturnedWorkspaceCount int                                `json:"returnedWorkspaceCount"`
+		PendingTotal           int                                `json:"pendingTotal"`
+		Workspaces     map[string]relayfile.IngressStatus `json:"workspaces"`
+	}
+	if err := json.NewDecoder(filteredProviderNonZero.Body).Decode(&nonZeroPayload); err != nil {
+		t.Fatalf("decode admin ingress non-zero provider payload: %v", err)
+	}
+	if nonZeroPayload.WorkspaceCount != 1 || nonZeroPayload.ReturnedWorkspaceCount != 1 || nonZeroPayload.PendingTotal != 1 {
+		t.Fatalf("unexpected nonZeroOnly summary: workspaceCount=%d returnedWorkspaceCount=%d pendingTotal=%d", nonZeroPayload.WorkspaceCount, nonZeroPayload.ReturnedWorkspaceCount, nonZeroPayload.PendingTotal)
+	}
+	if len(nonZeroPayload.Workspaces) != 1 {
+		t.Fatalf("expected one workspace in nonZeroOnly provider filter payload, got %d", len(nonZeroPayload.Workspaces))
+	}
+	if _, ok := nonZeroPayload.Workspaces["ws_admin_ingress_2"]; !ok {
+		t.Fatalf("expected ws_admin_ingress_2 in nonZeroOnly provider filter payload, got %+v", nonZeroPayload.Workspaces)
+	}
+
+	orderedAlertsResp := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/admin/ingress?pendingThreshold=1&deadLetterThreshold=1000000&staleThreshold=1000000&dropRateThreshold=1",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + readToken,
+			"X-Correlation-Id": "corr_admin_ingress_3e",
+		},
+	})
+	if orderedAlertsResp.Code != http.StatusOK {
+		t.Fatalf("expected 200 for ordered alert response, got %d (%s)", orderedAlertsResp.Code, orderedAlertsResp.Body.String())
+	}
+	var orderedPayload struct {
+		Alerts []struct {
+			WorkspaceID string `json:"workspaceId"`
+			Type        string `json:"type"`
+			Severity    string `json:"severity"`
+		} `json:"alerts"`
+	}
+	if err := json.NewDecoder(orderedAlertsResp.Body).Decode(&orderedPayload); err != nil {
+		t.Fatalf("decode ordered alert payload: %v", err)
+	}
+	if len(orderedPayload.Alerts) != 2 {
+		t.Fatalf("expected two pending_backlog alerts, got %+v", orderedPayload.Alerts)
+	}
+	if orderedPayload.Alerts[0].WorkspaceID != "ws_admin_ingress_1" || orderedPayload.Alerts[0].Type != "pending_backlog" || orderedPayload.Alerts[0].Severity != "warning" {
+		t.Fatalf("unexpected first sorted alert: %+v", orderedPayload.Alerts[0])
+	}
+	if orderedPayload.Alerts[1].WorkspaceID != "ws_admin_ingress_2" || orderedPayload.Alerts[1].Type != "pending_backlog" || orderedPayload.Alerts[1].Severity != "warning" {
+		t.Fatalf("unexpected second sorted alert: %+v", orderedPayload.Alerts[1])
+	}
+
+	truncatedAlertsResp := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/admin/ingress?pendingThreshold=1&deadLetterThreshold=1000000&staleThreshold=1000000&dropRateThreshold=1&maxAlerts=1",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + readToken,
+			"X-Correlation-Id": "corr_admin_ingress_3f",
+		},
+	})
+	if truncatedAlertsResp.Code != http.StatusOK {
+		t.Fatalf("expected 200 for truncated alerts response, got %d (%s)", truncatedAlertsResp.Code, truncatedAlertsResp.Body.String())
+	}
+	var truncatedPayload struct {
+		EffectiveAlertProfile string `json:"effectiveAlertProfile"`
+		AlertsTruncated bool `json:"alertsTruncated"`
+		AlertTotals     struct {
+			Total int `json:"total"`
+		} `json:"alertTotals"`
+		Alerts []map[string]any `json:"alerts"`
+	}
+	if err := json.NewDecoder(truncatedAlertsResp.Body).Decode(&truncatedPayload); err != nil {
+		t.Fatalf("decode truncated alert payload: %v", err)
+	}
+	if !truncatedPayload.AlertsTruncated {
+		t.Fatalf("expected alertsTruncated=true for maxAlerts=1 payload")
+	}
+	if truncatedPayload.EffectiveAlertProfile != "custom" {
+		t.Fatalf("expected effectiveAlertProfile=custom when thresholds are overridden, got %q", truncatedPayload.EffectiveAlertProfile)
+	}
+	if truncatedPayload.AlertTotals.Total != 2 {
+		t.Fatalf("expected alertTotals.total=2 despite truncation, got %+v", truncatedPayload.AlertTotals)
+	}
+	if len(truncatedPayload.Alerts) != 1 {
+		t.Fatalf("expected one returned alert after truncation, got %+v", truncatedPayload.Alerts)
+	}
+
+	deniedToken := mustTestJWT(
+		t,
+		"dev-secret",
+		"ws_admin_ingress_1",
+		"Worker1",
+		[]string{"sync:read"},
+		time.Now().Add(time.Hour),
+	)
+	denied := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/admin/ingress",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + deniedToken,
+			"X-Correlation-Id": "corr_admin_ingress_4",
+		},
+	})
+	if denied.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for missing admin scope on admin ingress endpoint, got %d (%s)", denied.Code, denied.Body.String())
+	}
+}
+
+func TestAdminIngressEndpointIncludesDeadLetterAlert(t *testing.T) {
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{
+		MaxEnvelopeAttempts: 1,
+		EnvelopeRetryDelay:  5 * time.Millisecond,
+		Adapters: []relayfile.ProviderAdapter{
+			serverFailingAdapter{provider: "customdead"},
+		},
+	})
+	t.Cleanup(store.Close)
+	server := NewServer(store)
+
+	_, err := store.IngestEnvelope(relayfile.WebhookEnvelopeRequest{
+		EnvelopeID:    "env_admin_ingress_alert_1",
+		WorkspaceID:   "ws_admin_ingress_alert",
+		Provider:      "customdead",
+		DeliveryID:    "delivery_admin_ingress_alert_1",
+		ReceivedAt:    time.Now().UTC().Format(time.RFC3339Nano),
+		Payload:       map[string]any{"type": "customdead.event"},
+		CorrelationID: "corr_admin_ingress_alert_1",
+	})
+	if err != nil {
+		t.Fatalf("ingest alert envelope failed: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		status, statusErr := store.GetIngressStatus("ws_admin_ingress_alert")
+		if statusErr == nil && status.DeadLetterTotal >= 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	adminToken := mustTestJWT(
+		t,
+		"dev-secret",
+		"ws_admin_ingress_alert",
+		"Lead",
+		[]string{"admin:read"},
+		time.Now().Add(time.Hour),
+	)
+	highThresholdResp := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/admin/ingress?workspaceId=ws_admin_ingress_alert&deadLetterThreshold=2",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + adminToken,
+			"X-Correlation-Id": "corr_admin_ingress_alert_2a",
+		},
+	})
+	if highThresholdResp.Code != http.StatusOK {
+		t.Fatalf("expected 200 for admin ingress alert endpoint with high deadLetterThreshold, got %d (%s)", highThresholdResp.Code, highThresholdResp.Body.String())
+	}
+	var highThresholdPayload struct {
+		AlertProfile          string `json:"alertProfile"`
+		EffectiveAlertProfile string `json:"effectiveAlertProfile"`
+		Thresholds struct {
+			DeadLetter int `json:"deadLetter"`
+		} `json:"thresholds"`
+		Alerts []map[string]any `json:"alerts"`
+	}
+	if err := json.NewDecoder(highThresholdResp.Body).Decode(&highThresholdPayload); err != nil {
+		t.Fatalf("decode high-threshold admin ingress payload: %v", err)
+	}
+	if highThresholdPayload.Thresholds.DeadLetter != 2 {
+		t.Fatalf("expected deadLetterThreshold=2 in response, got %+v", highThresholdPayload.Thresholds)
+	}
+	if highThresholdPayload.AlertProfile != "balanced" {
+		t.Fatalf("expected alertProfile=balanced for default profile with deadLetter override, got %q", highThresholdPayload.AlertProfile)
+	}
+	if highThresholdPayload.EffectiveAlertProfile != "custom" {
+		t.Fatalf("expected effectiveAlertProfile=custom for deadLetter override, got %q", highThresholdPayload.EffectiveAlertProfile)
+	}
+	if len(highThresholdPayload.Alerts) != 0 {
+		t.Fatalf("expected no alerts when deadLetterThreshold=2 for single dead letter, got %+v", highThresholdPayload.Alerts)
+	}
+
+	relaxedProfileResp := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/admin/ingress?workspaceId=ws_admin_ingress_alert&alertProfile=relaxed",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + adminToken,
+			"X-Correlation-Id": "corr_admin_ingress_alert_2_relaxed",
+		},
+	})
+	if relaxedProfileResp.Code != http.StatusOK {
+		t.Fatalf("expected 200 for relaxed alert profile payload, got %d (%s)", relaxedProfileResp.Code, relaxedProfileResp.Body.String())
+	}
+	var relaxedProfilePayload struct {
+		AlertProfile          string `json:"alertProfile"`
+		EffectiveAlertProfile string `json:"effectiveAlertProfile"`
+		Thresholds struct {
+			DeadLetter int `json:"deadLetter"`
+		} `json:"thresholds"`
+		AlertTotals struct {
+			Total int `json:"total"`
+		} `json:"alertTotals"`
+		Alerts []map[string]any `json:"alerts"`
+	}
+	if err := json.NewDecoder(relaxedProfileResp.Body).Decode(&relaxedProfilePayload); err != nil {
+		t.Fatalf("decode relaxed profile payload: %v", err)
+	}
+	if relaxedProfilePayload.AlertProfile != "relaxed" || relaxedProfilePayload.Thresholds.DeadLetter != 5 {
+		t.Fatalf("unexpected relaxed profile payload: %+v", relaxedProfilePayload)
+	}
+	if relaxedProfilePayload.EffectiveAlertProfile != "relaxed" {
+		t.Fatalf("expected effectiveAlertProfile=relaxed without threshold overrides, got %q", relaxedProfilePayload.EffectiveAlertProfile)
+	}
+	if relaxedProfilePayload.AlertTotals.Total != 0 || len(relaxedProfilePayload.Alerts) != 0 {
+		t.Fatalf("expected no alerts for relaxed profile single dead-letter payload, got totals=%+v alerts=%+v", relaxedProfilePayload.AlertTotals, relaxedProfilePayload.Alerts)
+	}
+
+	summaryOnlyAlertsResp := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/admin/ingress?workspaceId=ws_admin_ingress_alert&includeAlerts=false",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + adminToken,
+			"X-Correlation-Id": "corr_admin_ingress_alert_2b",
+		},
+	})
+	if summaryOnlyAlertsResp.Code != http.StatusOK {
+		t.Fatalf("expected 200 for includeAlerts=false payload, got %d (%s)", summaryOnlyAlertsResp.Code, summaryOnlyAlertsResp.Body.String())
+	}
+	var summaryOnlyAlertsPayload struct {
+		AlertsTruncated bool `json:"alertsTruncated"`
+		AlertTotals     struct {
+			Total    int            `json:"total"`
+			Critical int            `json:"critical"`
+			ByType   map[string]int `json:"byType"`
+		} `json:"alertTotals"`
+		Alerts []map[string]any `json:"alerts"`
+	}
+	if err := json.NewDecoder(summaryOnlyAlertsResp.Body).Decode(&summaryOnlyAlertsPayload); err != nil {
+		t.Fatalf("decode includeAlerts=false payload: %v", err)
+	}
+	if summaryOnlyAlertsPayload.AlertsTruncated {
+		t.Fatalf("expected alertsTruncated=false when includeAlerts=false")
+	}
+	if len(summaryOnlyAlertsPayload.Alerts) != 0 {
+		t.Fatalf("expected zero alerts when includeAlerts=false, got %+v", summaryOnlyAlertsPayload.Alerts)
+	}
+	if summaryOnlyAlertsPayload.AlertTotals.Total < 1 || summaryOnlyAlertsPayload.AlertTotals.Critical < 1 || summaryOnlyAlertsPayload.AlertTotals.ByType["dead_letters"] < 1 {
+		t.Fatalf("expected alertTotals to remain available when includeAlerts=false, got %+v", summaryOnlyAlertsPayload.AlertTotals)
+	}
+
+	resp := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/admin/ingress?workspaceId=ws_admin_ingress_alert",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + adminToken,
+			"X-Correlation-Id": "corr_admin_ingress_alert_2",
+		},
+	})
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200 for admin ingress alert endpoint, got %d (%s)", resp.Code, resp.Body.String())
+	}
+	var payload struct {
+		AlertTotals struct {
+			Total    int            `json:"total"`
+			Critical int            `json:"critical"`
+			Warning  int            `json:"warning"`
+			ByType   map[string]int `json:"byType"`
+		} `json:"alertTotals"`
+		AlertsTruncated bool `json:"alertsTruncated"`
+		Alerts []struct {
+			WorkspaceID string `json:"workspaceId"`
+			Type        string `json:"type"`
+			Severity    string `json:"severity"`
+		} `json:"alerts"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode admin ingress alert payload: %v", err)
+	}
+	found := false
+	for _, alert := range payload.Alerts {
+		if alert.WorkspaceID == "ws_admin_ingress_alert" && alert.Type == "dead_letters" && alert.Severity == "critical" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected dead_letters critical alert in payload, got %+v", payload.Alerts)
+	}
+	if payload.AlertTotals.Total < 1 || payload.AlertTotals.Critical < 1 || payload.AlertTotals.ByType["dead_letters"] < 1 {
+		t.Fatalf("expected dead-letter alert totals in payload, got %+v", payload.AlertTotals)
+	}
+	if payload.AlertsTruncated {
+		t.Fatalf("expected alertsTruncated=false for single-alert payload")
+	}
+}
+
+func TestAdminSyncEndpoint(t *testing.T) {
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{
+		MaxEnvelopeAttempts: 1,
+		EnvelopeRetryDelay:  5 * time.Millisecond,
+		Adapters: []relayfile.ProviderAdapter{
+			serverFailingAdapter{provider: "customdead"},
+		},
+	})
+	t.Cleanup(store.Close)
+	server := NewServer(store)
+
+	_, err := store.IngestEnvelope(relayfile.WebhookEnvelopeRequest{
+		EnvelopeID:    "env_admin_sync_healthy_1",
+		WorkspaceID:   "ws_admin_sync_healthy",
+		Provider:      "notion",
+		DeliveryID:    "delivery_admin_sync_healthy_1",
+		ReceivedAt:    time.Now().UTC().Format(time.RFC3339Nano),
+		Payload:       map[string]any{"type": "sync"},
+		CorrelationID: "corr_admin_sync_healthy_1",
+	})
+	if err != nil {
+		t.Fatalf("ingest healthy sync envelope failed: %v", err)
+	}
+	_, err = store.IngestEnvelope(relayfile.WebhookEnvelopeRequest{
+		EnvelopeID:    "env_admin_sync_error_1",
+		WorkspaceID:   "ws_admin_sync_error",
+		Provider:      "customdead",
+		DeliveryID:    "delivery_admin_sync_error_1",
+		ReceivedAt:    time.Now().UTC().Format(time.RFC3339Nano),
+		Payload:       map[string]any{"type": "customdead.event"},
+		CorrelationID: "corr_admin_sync_error_1",
+	})
+	if err != nil {
+		t.Fatalf("ingest error sync envelope failed: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		status, statusErr := store.GetSyncStatus("ws_admin_sync_error", "customdead")
+		if statusErr != nil {
+			t.Fatalf("sync status lookup failed: %v", statusErr)
+		}
+		if len(status.Providers) == 1 && status.Providers[0].DeadLetteredEnvelopes >= 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	adminToken := mustTestJWT(
+		t,
+		"dev-secret",
+		"ws_admin_sync_healthy",
+		"Lead",
+		[]string{"admin:read"},
+		time.Now().Add(time.Hour),
+	)
+	resp := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/admin/sync",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + adminToken,
+			"X-Correlation-Id": "corr_admin_sync_2",
+		},
+	})
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200 for admin sync endpoint, got %d (%s)", resp.Code, resp.Body.String())
+	}
+	var payload struct {
+		WorkspaceCount             int                             `json:"workspaceCount"`
+		ProviderStatusCount        int                             `json:"providerStatusCount"`
+		ErrorCount                 int                             `json:"errorCount"`
+		DeadLetteredEnvelopesTotal int                             `json:"deadLetteredEnvelopesTotal"`
+		FailureCodes               map[string]int                  `json:"failureCodes"`
+		Workspaces                 map[string]relayfile.SyncStatus `json:"workspaces"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode admin sync payload: %v", err)
+	}
+	if payload.WorkspaceCount < 2 {
+		t.Fatalf("expected at least two workspaces in admin sync payload, got %d", payload.WorkspaceCount)
+	}
+	if payload.ProviderStatusCount < 2 {
+		t.Fatalf("expected at least two provider statuses in admin sync payload, got %d", payload.ProviderStatusCount)
+	}
+	if payload.ErrorCount < 1 || payload.DeadLetteredEnvelopesTotal < 1 || payload.FailureCodes["unknown"] < 1 {
+		t.Fatalf("expected aggregated error counters in admin sync payload, got %+v", payload)
+	}
+	if _, ok := payload.Workspaces["ws_admin_sync_healthy"]; !ok {
+		t.Fatalf("expected ws_admin_sync_healthy in admin sync payload")
+	}
+	if _, ok := payload.Workspaces["ws_admin_sync_error"]; !ok {
+		t.Fatalf("expected ws_admin_sync_error in admin sync payload")
+	}
+
+	filteredResp := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/admin/sync?provider=customdead&nonZeroOnly=true",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + adminToken,
+			"X-Correlation-Id": "corr_admin_sync_3",
+		},
+	})
+	if filteredResp.Code != http.StatusOK {
+		t.Fatalf("expected 200 for provider-filtered admin sync endpoint, got %d (%s)", filteredResp.Code, filteredResp.Body.String())
+	}
+	var filteredPayload struct {
+		WorkspaceCount      int                             `json:"workspaceCount"`
+		ProviderStatusCount int                             `json:"providerStatusCount"`
+		Workspaces          map[string]relayfile.SyncStatus `json:"workspaces"`
+	}
+	if err := json.NewDecoder(filteredResp.Body).Decode(&filteredPayload); err != nil {
+		t.Fatalf("decode provider-filtered admin sync payload: %v", err)
+	}
+	if filteredPayload.WorkspaceCount != 1 || filteredPayload.ProviderStatusCount != 1 {
+		t.Fatalf("unexpected provider-filtered admin sync summary: %+v", filteredPayload)
+	}
+	if _, ok := filteredPayload.Workspaces["ws_admin_sync_error"]; !ok {
+		t.Fatalf("expected ws_admin_sync_error in provider-filtered admin sync payload, got %+v", filteredPayload.Workspaces)
+	}
+
+	invalidNonZeroOnlyResp := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/admin/sync?nonZeroOnly=maybe",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + adminToken,
+			"X-Correlation-Id": "corr_admin_sync_bad_nonzero",
+		},
+	})
+	if invalidNonZeroOnlyResp.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for invalid admin sync nonZeroOnly, got %d (%s)", invalidNonZeroOnlyResp.Code, invalidNonZeroOnlyResp.Body.String())
+	}
+
+	deniedToken := mustTestJWT(
+		t,
+		"dev-secret",
+		"ws_admin_sync_healthy",
+		"Worker1",
+		[]string{"sync:read"},
+		time.Now().Add(time.Hour),
+	)
+	deniedResp := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/admin/sync",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + deniedToken,
+			"X-Correlation-Id": "corr_admin_sync_denied",
+		},
+	})
+	if deniedResp.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for missing admin scope on admin sync endpoint, got %d (%s)", deniedResp.Code, deniedResp.Body.String())
 	}
 }
 
@@ -1620,7 +3139,7 @@ func TestInternalIngressAppliesToFilesystemAPI(t *testing.T) {
 		method: http.MethodPost,
 		path:   "/v1/internal/webhook-envelopes",
 		headers: map[string]string{
-			"X-Correlation-Id": "corr_apply_api_1",
+			"X-Correlation-Id":  "corr_apply_api_1",
 			"X-Relay-Timestamp": ts,
 			"X-Relay-Signature": sig,
 			"Content-Type":      "application/json",
@@ -1638,7 +3157,7 @@ func TestInternalIngressAppliesToFilesystemAPI(t *testing.T) {
 			method: http.MethodGet,
 			path:   "/v1/workspaces/ws_apply_api/fs/file?path=/notion/Engineering/Ingress.md",
 			headers: map[string]string{
-				"Authorization":   "Bearer " + readToken,
+				"Authorization":    "Bearer " + readToken,
 				"X-Correlation-Id": "corr_apply_api_2",
 			},
 		})
@@ -1670,7 +3189,7 @@ func TestRateLimitingByWorkspaceAndAgent(t *testing.T) {
 			method: http.MethodGet,
 			path:   "/v1/workspaces/ws_rate/fs/tree?path=/",
 			headers: map[string]string{
-				"Authorization":   "Bearer " + token,
+				"Authorization":    "Bearer " + token,
 				"X-Correlation-Id": fmt.Sprintf("corr_rate_%d", i),
 			},
 		})
@@ -1683,12 +3202,266 @@ func TestRateLimitingByWorkspaceAndAgent(t *testing.T) {
 		method: http.MethodGet,
 		path:   "/v1/workspaces/ws_rate/fs/tree?path=/",
 		headers: map[string]string{
-			"Authorization":   "Bearer " + token,
+			"Authorization":    "Bearer " + token,
 			"X-Correlation-Id": "corr_rate_denied",
 		},
 	})
 	if denied.Code != http.StatusTooManyRequests {
 		t.Fatalf("expected 429 after rate limit exceeded, got %d (%s)", denied.Code, denied.Body.String())
+	}
+	if denied.Header().Get("Retry-After") != "60" {
+		t.Fatalf("expected Retry-After=60 on rate limit response, got %q", denied.Header().Get("Retry-After"))
+	}
+}
+
+func TestParseBoundedInt(t *testing.T) {
+	tests := []struct {
+		name     string
+		raw      string
+		fallback int
+		min      int
+		max      int
+		want     int
+	}{
+		{
+			name:     "empty uses fallback",
+			raw:      "",
+			fallback: 100,
+			min:      1,
+			max:      1000,
+			want:     100,
+		},
+		{
+			name:     "valid value",
+			raw:      "250",
+			fallback: 100,
+			min:      1,
+			max:      1000,
+			want:     250,
+		},
+		{
+			name:     "non numeric uses fallback",
+			raw:      "abc",
+			fallback: 100,
+			min:      1,
+			max:      1000,
+			want:     100,
+		},
+		{
+			name:     "below min uses fallback",
+			raw:      "0",
+			fallback: 100,
+			min:      1,
+			max:      1000,
+			want:     100,
+		},
+		{
+			name:     "above max clamps",
+			raw:      "5000",
+			fallback: 100,
+			min:      1,
+			max:      1000,
+			want:     1000,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := parseBoundedInt(tc.raw, tc.fallback, tc.min, tc.max)
+			if got != tc.want {
+				t.Fatalf("expected %d, got %d", tc.want, got)
+			}
+		})
+	}
+}
+
+func TestParseBoundedFloat(t *testing.T) {
+	tests := []struct {
+		name     string
+		raw      string
+		fallback float64
+		min      float64
+		max      float64
+		want     float64
+	}{
+		{
+			name:     "empty uses fallback",
+			raw:      "",
+			fallback: 0.05,
+			min:      0,
+			max:      1,
+			want:     0.05,
+		},
+		{
+			name:     "valid value",
+			raw:      "0.2",
+			fallback: 0.05,
+			min:      0,
+			max:      1,
+			want:     0.2,
+		},
+		{
+			name:     "non numeric uses fallback",
+			raw:      "oops",
+			fallback: 0.05,
+			min:      0,
+			max:      1,
+			want:     0.05,
+		},
+		{
+			name:     "below min clamps",
+			raw:      "-1",
+			fallback: 0.05,
+			min:      0,
+			max:      1,
+			want:     0,
+		},
+		{
+			name:     "above max clamps",
+			raw:      "5",
+			fallback: 0.05,
+			min:      0,
+			max:      1,
+			want:     1,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := parseBoundedFloat(tc.raw, tc.fallback, tc.min, tc.max)
+			if got != tc.want {
+				t.Fatalf("expected %f, got %f", tc.want, got)
+			}
+		})
+	}
+}
+
+func TestParseBool(t *testing.T) {
+	tests := []struct {
+		name     string
+		raw      string
+		fallback bool
+		want     bool
+	}{
+		{name: "empty uses fallback", raw: "", fallback: false, want: false},
+		{name: "valid true", raw: "true", fallback: false, want: true},
+		{name: "valid false", raw: "false", fallback: true, want: false},
+		{name: "valid numeric true", raw: "1", fallback: false, want: true},
+		{name: "invalid uses fallback", raw: "oops", fallback: true, want: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := parseBool(tc.raw, tc.fallback)
+			if got != tc.want {
+				t.Fatalf("expected %t, got %t", tc.want, got)
+			}
+		})
+	}
+}
+
+func TestParseOptionalBoundedInt(t *testing.T) {
+	tests := []struct {
+		name     string
+		raw      string
+		fallback int
+		min      int
+		max      int
+		want     int
+		wantErr  bool
+	}{
+		{name: "empty uses fallback", raw: "", fallback: 3, min: 1, max: 10, want: 3},
+		{name: "valid value", raw: "5", fallback: 3, min: 1, max: 10, want: 5},
+		{name: "non numeric errors", raw: "oops", fallback: 3, min: 1, max: 10, wantErr: true},
+		{name: "below min errors", raw: "0", fallback: 3, min: 1, max: 10, wantErr: true},
+		{name: "above max errors", raw: "11", fallback: 3, min: 1, max: 10, wantErr: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseOptionalBoundedInt(tc.raw, tc.fallback, tc.min, tc.max)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got nil (value=%d)", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("expected no error, got %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("expected %d, got %d", tc.want, got)
+			}
+		})
+	}
+}
+
+func TestParseOptionalBoundedFloat(t *testing.T) {
+	tests := []struct {
+		name     string
+		raw      string
+		fallback float64
+		min      float64
+		max      float64
+		want     float64
+		wantErr  bool
+	}{
+		{name: "empty uses fallback", raw: "", fallback: 0.25, min: 0, max: 1, want: 0.25},
+		{name: "valid value", raw: "0.75", fallback: 0.25, min: 0, max: 1, want: 0.75},
+		{name: "non numeric errors", raw: "oops", fallback: 0.25, min: 0, max: 1, wantErr: true},
+		{name: "below min errors", raw: "-0.1", fallback: 0.25, min: 0, max: 1, wantErr: true},
+		{name: "above max errors", raw: "1.1", fallback: 0.25, min: 0, max: 1, wantErr: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseOptionalBoundedFloat(tc.raw, tc.fallback, tc.min, tc.max)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got nil (value=%f)", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("expected no error, got %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("expected %f, got %f", tc.want, got)
+			}
+		})
+	}
+}
+
+func TestParseOptionalBool(t *testing.T) {
+	tests := []struct {
+		name     string
+		raw      string
+		fallback bool
+		want     bool
+		wantErr  bool
+	}{
+		{name: "empty uses fallback", raw: "", fallback: true, want: true},
+		{name: "valid true", raw: "true", fallback: false, want: true},
+		{name: "valid false", raw: "false", fallback: true, want: false},
+		{name: "invalid errors", raw: "maybe", fallback: true, wantErr: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseOptionalBool(tc.raw, tc.fallback)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got nil (value=%t)", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("expected no error, got %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("expected %t, got %t", tc.want, got)
+			}
+		})
 	}
 }
 
@@ -1741,6 +3514,10 @@ func mustTestJWT(t *testing.T, secret, workspaceID, agentName string, scopes []s
 }
 
 func mustTestJWTWithAudience(t *testing.T, secret, workspaceID, agentName string, scopes []string, aud string, exp time.Time) string {
+	return mustTestJWTWithAudienceClaim(t, secret, workspaceID, agentName, scopes, aud, exp)
+}
+
+func mustTestJWTWithAudienceClaim(t *testing.T, secret, workspaceID, agentName string, scopes []string, aud any, exp time.Time) string {
 	t.Helper()
 	headerBytes, err := json.Marshal(map[string]any{
 		"alg": "HS256",

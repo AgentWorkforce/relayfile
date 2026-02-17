@@ -1,6 +1,7 @@
 package relayfile
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,6 +21,7 @@ var (
 	ErrInvalidInput        = errors.New("invalid input")
 	ErrInvalidState        = errors.New("invalid state")
 	ErrQueueFull           = errors.New("queue full")
+	ErrNotImplemented      = errors.New("not implemented")
 )
 
 type ConflictError struct {
@@ -68,6 +70,7 @@ type Event struct {
 	Path          string `json:"path"`
 	Revision      string `json:"revision"`
 	Origin        string `json:"origin"`
+	Provider      string `json:"provider,omitempty"`
 	CorrelationID string `json:"correlationId"`
 	Timestamp     string `json:"timestamp"`
 }
@@ -123,13 +126,15 @@ type OperationFeed struct {
 }
 
 type SyncProviderStatus struct {
-	Provider    string  `json:"provider"`
-	Status      string  `json:"status"`
-	Cursor      *string `json:"cursor,omitempty"`
-	WatermarkTs *string `json:"watermarkTs,omitempty"`
-	LagSeconds  int     `json:"lagSeconds,omitempty"`
-	LastError   *string `json:"lastError,omitempty"`
-	FailureCodes map[string]int `json:"failureCodes,omitempty"`
+	Provider              string         `json:"provider"`
+	Status                string         `json:"status"`
+	Cursor                *string        `json:"cursor,omitempty"`
+	WatermarkTs           *string        `json:"watermarkTs,omitempty"`
+	LagSeconds            int            `json:"lagSeconds,omitempty"`
+	LastError             *string        `json:"lastError,omitempty"`
+	FailureCodes          map[string]int `json:"failureCodes,omitempty"`
+	DeadLetteredEnvelopes int            `json:"deadLetteredEnvelopes,omitempty"`
+	DeadLetteredOps       int            `json:"deadLetteredOps,omitempty"`
 }
 
 type SyncStatus struct {
@@ -138,36 +143,36 @@ type SyncStatus struct {
 }
 
 type IngressStatus struct {
-	WorkspaceID   string `json:"workspaceId"`
-	QueueDepth    int    `json:"queueDepth"`
-	QueueCapacity int    `json:"queueCapacity"`
-	QueueUtilization float64 `json:"queueUtilization"`
-	PendingTotal  int    `json:"pendingTotal"`
-	OldestPendingAgeSeconds int `json:"oldestPendingAgeSeconds"`
-	DeadLetterTotal int  `json:"deadLetterTotal"`
-	DeadLetterByProvider map[string]int `json:"deadLetterByProvider"`
-	AcceptedTotal uint64 `json:"acceptedTotal"`
-	DroppedTotal  uint64 `json:"droppedTotal"`
-	DedupedTotal  uint64 `json:"dedupedTotal"`
-	CoalescedTotal uint64 `json:"coalescedTotal"`
-	DedupeRate float64 `json:"dedupeRate"`
-	CoalesceRate float64 `json:"coalesceRate"`
-	SuppressedTotal uint64 `json:"suppressedTotal"`
-	StaleTotal uint64 `json:"staleTotal"`
-	IngressByProvider map[string]IngressProviderStatus `json:"ingressByProvider"`
+	WorkspaceID             string                           `json:"workspaceId"`
+	QueueDepth              int                              `json:"queueDepth"`
+	QueueCapacity           int                              `json:"queueCapacity"`
+	QueueUtilization        float64                          `json:"queueUtilization"`
+	PendingTotal            int                              `json:"pendingTotal"`
+	OldestPendingAgeSeconds int                              `json:"oldestPendingAgeSeconds"`
+	DeadLetterTotal         int                              `json:"deadLetterTotal"`
+	DeadLetterByProvider    map[string]int                   `json:"deadLetterByProvider"`
+	AcceptedTotal           uint64                           `json:"acceptedTotal"`
+	DroppedTotal            uint64                           `json:"droppedTotal"`
+	DedupedTotal            uint64                           `json:"dedupedTotal"`
+	CoalescedTotal          uint64                           `json:"coalescedTotal"`
+	DedupeRate              float64                          `json:"dedupeRate"`
+	CoalesceRate            float64                          `json:"coalesceRate"`
+	SuppressedTotal         uint64                           `json:"suppressedTotal"`
+	StaleTotal              uint64                           `json:"staleTotal"`
+	IngressByProvider       map[string]IngressProviderStatus `json:"ingressByProvider"`
 }
 
 type IngressProviderStatus struct {
-	AcceptedTotal uint64 `json:"acceptedTotal"`
-	DroppedTotal  uint64 `json:"droppedTotal"`
-	DedupedTotal  uint64 `json:"dedupedTotal"`
-	CoalescedTotal uint64 `json:"coalescedTotal"`
-	PendingTotal int `json:"pendingTotal"`
-	OldestPendingAgeSeconds int `json:"oldestPendingAgeSeconds"`
-	SuppressedTotal uint64 `json:"suppressedTotal"`
-	StaleTotal uint64 `json:"staleTotal"`
-	DedupeRate float64 `json:"dedupeRate"`
-	CoalesceRate float64 `json:"coalesceRate"`
+	AcceptedTotal           uint64  `json:"acceptedTotal"`
+	DroppedTotal            uint64  `json:"droppedTotal"`
+	DedupedTotal            uint64  `json:"dedupedTotal"`
+	CoalescedTotal          uint64  `json:"coalescedTotal"`
+	PendingTotal            int     `json:"pendingTotal"`
+	OldestPendingAgeSeconds int     `json:"oldestPendingAgeSeconds"`
+	SuppressedTotal         uint64  `json:"suppressedTotal"`
+	StaleTotal              uint64  `json:"staleTotal"`
+	DedupeRate              float64 `json:"dedupeRate"`
+	CoalesceRate            float64 `json:"coalesceRate"`
 }
 
 type EnvelopeDeadLetter struct {
@@ -186,20 +191,38 @@ type DeadLetterFeed struct {
 	NextCursor *string              `json:"nextCursor"`
 }
 
+type BackendStatus struct {
+	BackendProfile      string `json:"backendProfile,omitempty"`
+	StateBackend        string `json:"stateBackend"`
+	EnvelopeQueue       string `json:"envelopeQueue"`
+	EnvelopeQueueDepth  int    `json:"envelopeQueueDepth"`
+	EnvelopeQueueCap    int    `json:"envelopeQueueCapacity"`
+	WritebackQueue      string `json:"writebackQueue"`
+	WritebackQueueDepth int    `json:"writebackQueueDepth"`
+	WritebackQueueCap   int    `json:"writebackQueueCapacity"`
+}
+
 type StoreOptions struct {
-	StateFile            string
-	MaxWritebackAttempts int
-	WritebackDelay       time.Duration
-	MaxEnvelopeAttempts  int
-	EnvelopeRetryDelay   time.Duration
-	SuppressionWindow    time.Duration
-	CoalesceWindow       time.Duration
-	MaxStoredEnvelopes   int
-	ProviderWrite        ProviderWriteFunc
-	ProviderWriteAction  ProviderWriteActionFunc
-	DisableWorkers       bool
-	EnvelopeQueueSize    int
-	Adapters             []ProviderAdapter
+	StateFile              string
+	StateBackend           StateBackend
+	MaxWritebackAttempts   int
+	WritebackDelay         time.Duration
+	MaxEnvelopeAttempts    int
+	EnvelopeRetryDelay     time.Duration
+	SuppressionWindow      time.Duration
+	CoalesceWindow         time.Duration
+	MaxStoredEnvelopes     int
+	ProviderWrite          ProviderWriteFunc
+	ProviderWriteAction    ProviderWriteActionFunc
+	DisableWorkers         bool
+	EnvelopeQueueSize      int
+	EnvelopeQueue          EnvelopeQueue
+	WritebackQueue         WritebackQueue
+	BackendProfile         string
+	EnvelopeWorkers        int
+	WritebackWorkers       int
+	ProviderMaxConcurrency int
+	Adapters               []ProviderAdapter
 }
 
 type ProviderWriteFunc func(workspaceID, path, revision string) error
@@ -213,21 +236,47 @@ const (
 )
 
 type WritebackAction struct {
-	WorkspaceID       string            `json:"workspaceId"`
-	Path              string            `json:"path"`
-	Revision          string            `json:"revision"`
-	Type              WritebackActionType `json:"type"`
-	ContentType       string            `json:"contentType,omitempty"`
-	Content           string            `json:"content,omitempty"`
-	Provider          string            `json:"provider,omitempty"`
-	ProviderObjectID  string            `json:"providerObjectId,omitempty"`
-	CorrelationID     string            `json:"correlationId,omitempty"`
+	WorkspaceID      string              `json:"workspaceId"`
+	Path             string              `json:"path"`
+	Revision         string              `json:"revision"`
+	Type             WritebackActionType `json:"type"`
+	ContentType      string              `json:"contentType,omitempty"`
+	Content          string              `json:"content,omitempty"`
+	Provider         string              `json:"provider,omitempty"`
+	ProviderObjectID string              `json:"providerObjectId,omitempty"`
+	CorrelationID    string              `json:"correlationId,omitempty"`
 }
 
 type QueuedResponse struct {
 	Status        string `json:"status"`
 	ID            string `json:"id"`
 	CorrelationID string `json:"correlationId,omitempty"`
+}
+
+type EnvelopeQueue interface {
+	TryEnqueue(envelopeID string) bool
+	Enqueue(ctx context.Context, envelopeID string) bool
+	Dequeue(ctx context.Context) (string, bool)
+	Depth() int
+	Capacity() int
+	Close() error
+}
+
+type WritebackQueue interface {
+	TryEnqueue(task WritebackQueueItem) bool
+	Enqueue(ctx context.Context, task WritebackQueueItem) bool
+	Dequeue(ctx context.Context) (WritebackQueueItem, bool)
+	Depth() int
+	Capacity() int
+	Close() error
+}
+
+type envelopeQueueSnapshotter interface {
+	SnapshotEnvelopeIDs() []string
+}
+
+type writebackQueueSnapshotter interface {
+	SnapshotWritebacks() []WritebackQueueItem
 }
 
 type AckResponse struct {
@@ -248,47 +297,58 @@ type WebhookEnvelopeRequest struct {
 }
 
 type Store struct {
-	mu            sync.RWMutex
-	workspaces    map[string]*workspaceState
-	revCounter    uint64
-	opCounter     uint64
-	eventCounter  uint64
-	envelopesByID map[string]WebhookEnvelopeRequest
-	deliveryIndex map[string]string
-	processedEnvs map[string]bool
-	stateFile     string
-	writebackCh   chan writebackTask
-	envelopeCh    chan string
-	ingressByWS   map[string]ingressCounter
-	coalesceIndex map[string]string
-	envelopeAttempts map[string]int
-	deadLetters   map[string]EnvelopeDeadLetter
-	providerWrite ProviderWriteFunc
+	mu                      sync.RWMutex
+	queueMu                 sync.Mutex
+	workspaces              map[string]*workspaceState
+	revCounter              uint64
+	opCounter               uint64
+	eventCounter            uint64
+	envelopesByID           map[string]WebhookEnvelopeRequest
+	deliveryIndex           map[string]string
+	processedEnvs           map[string]bool
+	processingEnvs          map[string]bool
+	stateBackend            StateBackend
+	writebackQueue          WritebackQueue
+	envelopeQueue           EnvelopeQueue
+	queuedWritebacks        map[string]struct{}
+	queuedEnvelopes         map[string]struct{}
+	ingressByWS             map[string]ingressCounter
+	coalesceIndex           map[string]string
+	envelopeAttempts        map[string]int
+	envelopeNextAttempt     map[string]time.Time
+	deadLetters             map[string]EnvelopeDeadLetter
+	providerWrite           ProviderWriteFunc
 	providerWriteConfigured bool
-	providerWriteAction ProviderWriteActionFunc
-	adapters      map[string]ProviderAdapter
-	maxAttempts   int
-	retryDelay    time.Duration
-	maxEnvelopeAttempts int
-	envelopeRetryDelay time.Duration
-	suppressionWindow time.Duration
-	coalesceWindow time.Duration
-	suppressions map[string]time.Time
-	maxStoredEnvelopes int
-	closed        chan struct{}
-	closeOnce     sync.Once
-	wg            sync.WaitGroup
+	providerWriteAction     ProviderWriteActionFunc
+	adapters                map[string]ProviderAdapter
+	backendProfile          string
+	maxAttempts             int
+	retryDelay              time.Duration
+	maxEnvelopeAttempts     int
+	envelopeRetryDelay      time.Duration
+	suppressionWindow       time.Duration
+	coalesceWindow          time.Duration
+	suppressions            map[string]time.Time
+	maxStoredEnvelopes      int
+	providerMaxConcurrency  int
+	providerSemMu           sync.Mutex
+	providerSemaphores      map[string]chan struct{}
+	closed                  chan struct{}
+	queueCtx                context.Context
+	queueCancel             context.CancelFunc
+	closeOnce               sync.Once
+	wg                      sync.WaitGroup
 }
 
 type workspaceState struct {
-	Files         map[string]File            `json:"files"`
-	Events        []Event                    `json:"events"`
-	Ops           map[string]OperationStatus `json:"ops"`
-	ProviderIndex map[string]string          `json:"providerIndex,omitempty"`
-	ProviderWatermarks map[string]string     `json:"providerWatermarks,omitempty"`
+	Files              map[string]File            `json:"files"`
+	Events             []Event                    `json:"events"`
+	Ops                map[string]OperationStatus `json:"ops"`
+	ProviderIndex      map[string]string          `json:"providerIndex,omitempty"`
+	ProviderWatermarks map[string]string          `json:"providerWatermarks,omitempty"`
 }
 
-type writebackTask struct {
+type WritebackQueueItem struct {
 	WorkspaceID   string `json:"workspaceId"`
 	OpID          string `json:"opId"`
 	Path          string `json:"path"`
@@ -296,36 +356,226 @@ type writebackTask struct {
 	CorrelationID string `json:"correlationId"`
 }
 
+type writebackTask = WritebackQueueItem
+
 type ingressCounter struct {
-	AcceptedTotal uint64 `json:"acceptedTotal"`
-	DroppedTotal  uint64 `json:"droppedTotal"`
-	DedupedTotal  uint64 `json:"dedupedTotal"`
-	CoalescedTotal uint64 `json:"coalescedTotal"`
-	SuppressedTotal uint64 `json:"suppressedTotal"`
-	StaleTotal uint64 `json:"staleTotal"`
-	ByProvider map[string]providerIngressCounter `json:"byProvider,omitempty"`
+	AcceptedTotal   uint64                            `json:"acceptedTotal"`
+	DroppedTotal    uint64                            `json:"droppedTotal"`
+	DedupedTotal    uint64                            `json:"dedupedTotal"`
+	CoalescedTotal  uint64                            `json:"coalescedTotal"`
+	SuppressedTotal uint64                            `json:"suppressedTotal"`
+	StaleTotal      uint64                            `json:"staleTotal"`
+	ByProvider      map[string]providerIngressCounter `json:"byProvider,omitempty"`
 }
 
 type providerIngressCounter struct {
-	AcceptedTotal uint64 `json:"acceptedTotal"`
-	DroppedTotal  uint64 `json:"droppedTotal"`
-	DedupedTotal  uint64 `json:"dedupedTotal"`
-	CoalescedTotal uint64 `json:"coalescedTotal"`
+	AcceptedTotal   uint64 `json:"acceptedTotal"`
+	DroppedTotal    uint64 `json:"droppedTotal"`
+	DedupedTotal    uint64 `json:"dedupedTotal"`
+	CoalescedTotal  uint64 `json:"coalescedTotal"`
 	SuppressedTotal uint64 `json:"suppressedTotal"`
-	StaleTotal uint64 `json:"staleTotal"`
+	StaleTotal      uint64 `json:"staleTotal"`
 }
 
 type persistedState struct {
-	RevCounter        uint64                            `json:"revCounter"`
-	OpCounter         uint64                            `json:"opCounter"`
-	EventCounter      uint64                            `json:"eventCounter"`
-	Workspaces        map[string]*workspaceState        `json:"workspaces"`
-	EnvelopesByID     map[string]WebhookEnvelopeRequest `json:"envelopesById"`
-	DeliveryIndex     map[string]string                 `json:"deliveryIndex"`
-	ProcessedEnvs     map[string]bool                   `json:"processedEnvs"`
-	IngressByWorkspace map[string]ingressCounter        `json:"ingressByWorkspace"`
-	EnvelopeAttempts  map[string]int                    `json:"envelopeAttempts"`
-	DeadLetters       map[string]EnvelopeDeadLetter     `json:"deadLetters"`
+	RevCounter          uint64                            `json:"revCounter"`
+	OpCounter           uint64                            `json:"opCounter"`
+	EventCounter        uint64                            `json:"eventCounter"`
+	Workspaces          map[string]*workspaceState        `json:"workspaces"`
+	EnvelopesByID       map[string]WebhookEnvelopeRequest `json:"envelopesById"`
+	DeliveryIndex       map[string]string                 `json:"deliveryIndex"`
+	ProcessedEnvs       map[string]bool                   `json:"processedEnvs"`
+	IngressByWorkspace  map[string]ingressCounter         `json:"ingressByWorkspace"`
+	EnvelopeAttempts    map[string]int                    `json:"envelopeAttempts"`
+	EnvelopeNextAttempt map[string]time.Time              `json:"envelopeNextAttempt"`
+	DeadLetters         map[string]EnvelopeDeadLetter     `json:"deadLetters"`
+	Suppressions        map[string]time.Time              `json:"suppressions"`
+}
+
+type StateBackend interface {
+	Load() (*persistedState, error)
+	Save(state *persistedState) error
+}
+
+type JSONFileStateBackend struct {
+	Path string
+}
+
+type inMemoryEnvelopeQueue struct {
+	ch chan string
+}
+
+func NewInMemoryEnvelopeQueue(capacity int) EnvelopeQueue {
+	if capacity <= 0 {
+		capacity = 1024
+	}
+	return &inMemoryEnvelopeQueue{
+		ch: make(chan string, capacity),
+	}
+}
+
+func (q *inMemoryEnvelopeQueue) TryEnqueue(envelopeID string) bool {
+	if q == nil || envelopeID == "" {
+		return false
+	}
+	select {
+	case q.ch <- envelopeID:
+		return true
+	default:
+		return false
+	}
+}
+
+func (q *inMemoryEnvelopeQueue) Enqueue(ctx context.Context, envelopeID string) bool {
+	if q == nil || envelopeID == "" {
+		return false
+	}
+	select {
+	case q.ch <- envelopeID:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func (q *inMemoryEnvelopeQueue) Dequeue(ctx context.Context) (string, bool) {
+	if q == nil {
+		return "", false
+	}
+	select {
+	case envelopeID := <-q.ch:
+		return envelopeID, true
+	case <-ctx.Done():
+		return "", false
+	}
+}
+
+func (q *inMemoryEnvelopeQueue) Depth() int {
+	if q == nil {
+		return 0
+	}
+	return len(q.ch)
+}
+
+func (q *inMemoryEnvelopeQueue) Capacity() int {
+	if q == nil {
+		return 0
+	}
+	return cap(q.ch)
+}
+
+func (q *inMemoryEnvelopeQueue) Close() error {
+	return nil
+}
+
+type inMemoryWritebackQueue struct {
+	ch chan WritebackQueueItem
+}
+
+func NewInMemoryWritebackQueue(capacity int) WritebackQueue {
+	if capacity <= 0 {
+		capacity = 1024
+	}
+	return &inMemoryWritebackQueue{
+		ch: make(chan WritebackQueueItem, capacity),
+	}
+}
+
+func (q *inMemoryWritebackQueue) TryEnqueue(task WritebackQueueItem) bool {
+	if q == nil || task.OpID == "" {
+		return false
+	}
+	select {
+	case q.ch <- task:
+		return true
+	default:
+		return false
+	}
+}
+
+func (q *inMemoryWritebackQueue) Enqueue(ctx context.Context, task WritebackQueueItem) bool {
+	if q == nil || task.OpID == "" {
+		return false
+	}
+	select {
+	case q.ch <- task:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func (q *inMemoryWritebackQueue) Dequeue(ctx context.Context) (WritebackQueueItem, bool) {
+	if q == nil {
+		return WritebackQueueItem{}, false
+	}
+	select {
+	case task := <-q.ch:
+		return task, true
+	case <-ctx.Done():
+		return WritebackQueueItem{}, false
+	}
+}
+
+func (q *inMemoryWritebackQueue) Depth() int {
+	if q == nil {
+		return 0
+	}
+	return len(q.ch)
+}
+
+func (q *inMemoryWritebackQueue) Capacity() int {
+	if q == nil {
+		return 0
+	}
+	return cap(q.ch)
+}
+
+func (q *inMemoryWritebackQueue) Close() error {
+	return nil
+}
+
+func NewJSONFileStateBackend(path string) *JSONFileStateBackend {
+	return &JSONFileStateBackend{Path: strings.TrimSpace(path)}
+}
+
+func (b *JSONFileStateBackend) Load() (*persistedState, error) {
+	if b == nil || strings.TrimSpace(b.Path) == "" {
+		return nil, nil
+	}
+	data, err := os.ReadFile(b.Path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var snapshot persistedState
+	if err := json.Unmarshal(data, &snapshot); err != nil {
+		return nil, err
+	}
+	return &snapshot, nil
+}
+
+func (b *JSONFileStateBackend) Save(state *persistedState) error {
+	if b == nil || strings.TrimSpace(b.Path) == "" || state == nil {
+		return nil
+	}
+	data, err := json.Marshal(state)
+	if err != nil {
+		return err
+	}
+	dir := filepath.Dir(b.Path)
+	if dir != "." {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return err
+		}
+	}
+	tmp := b.Path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, b.Path)
 }
 
 func NewStore() *Store {
@@ -365,6 +615,26 @@ func NewStoreWithOptions(opts StoreOptions) *Store {
 	if queueSize <= 0 {
 		queueSize = 1024
 	}
+	envelopeQueue := opts.EnvelopeQueue
+	if envelopeQueue == nil {
+		envelopeQueue = NewInMemoryEnvelopeQueue(queueSize)
+	}
+	writebackQueue := opts.WritebackQueue
+	if writebackQueue == nil {
+		writebackQueue = NewInMemoryWritebackQueue(1024)
+	}
+	envelopeWorkers := opts.EnvelopeWorkers
+	if envelopeWorkers <= 0 {
+		envelopeWorkers = 1
+	}
+	writebackWorkers := opts.WritebackWorkers
+	if writebackWorkers <= 0 {
+		writebackWorkers = 1
+	}
+	providerMaxConcurrency := opts.ProviderMaxConcurrency
+	if providerMaxConcurrency <= 0 {
+		providerMaxConcurrency = 1
+	}
 	writer := opts.ProviderWrite
 	legacyWriterConfigured := writer != nil
 	if writer == nil {
@@ -373,6 +643,11 @@ func NewStoreWithOptions(opts StoreOptions) *Store {
 		}
 	}
 	actionWriter := opts.ProviderWriteAction
+	stateBackend := opts.StateBackend
+	if stateBackend == nil && strings.TrimSpace(opts.StateFile) != "" {
+		stateBackend = NewJSONFileStateBackend(opts.StateFile)
+	}
+	queueCtx, queueCancel := context.WithCancel(context.Background())
 
 	adapters := map[string]ProviderAdapter{
 		"notion": NewNotionAdapter(nil),
@@ -383,63 +658,175 @@ func NewStoreWithOptions(opts StoreOptions) *Store {
 		}
 		adapters[adapter.Provider()] = adapter
 	}
+	backendProfile := normalizeProvider(opts.BackendProfile)
+	if backendProfile == "" {
+		backendProfile = "custom"
+	}
 
 	s := &Store{
-		workspaces:    map[string]*workspaceState{},
-		envelopesByID: map[string]WebhookEnvelopeRequest{},
-		deliveryIndex: map[string]string{},
-		processedEnvs: map[string]bool{},
-		stateFile:     opts.StateFile,
-		writebackCh:   make(chan writebackTask, 1024),
-		envelopeCh:    make(chan string, queueSize),
-		ingressByWS:   map[string]ingressCounter{},
-		coalesceIndex: map[string]string{},
-		envelopeAttempts: map[string]int{},
-		deadLetters:   map[string]EnvelopeDeadLetter{},
-		providerWrite: writer,
+		workspaces:              map[string]*workspaceState{},
+		envelopesByID:           map[string]WebhookEnvelopeRequest{},
+		deliveryIndex:           map[string]string{},
+		processedEnvs:           map[string]bool{},
+		processingEnvs:          map[string]bool{},
+		stateBackend:            stateBackend,
+		writebackQueue:          writebackQueue,
+		envelopeQueue:           envelopeQueue,
+		queuedWritebacks:        map[string]struct{}{},
+		queuedEnvelopes:         map[string]struct{}{},
+		ingressByWS:             map[string]ingressCounter{},
+		coalesceIndex:           map[string]string{},
+		envelopeAttempts:        map[string]int{},
+		envelopeNextAttempt:     map[string]time.Time{},
+		deadLetters:             map[string]EnvelopeDeadLetter{},
+		providerWrite:           writer,
 		providerWriteConfigured: legacyWriterConfigured,
-		providerWriteAction: actionWriter,
-		adapters:      adapters,
-		maxAttempts:   maxAttempts,
-		retryDelay:    retryDelay,
-		maxEnvelopeAttempts: maxEnvelopeAttempts,
-		envelopeRetryDelay: envelopeRetryDelay,
-		suppressionWindow: suppressionWindow,
-		coalesceWindow: coalesceWindow,
-		suppressions: map[string]time.Time{},
-		maxStoredEnvelopes: maxStoredEnvelopes,
-		closed:        make(chan struct{}),
+		providerWriteAction:     actionWriter,
+		adapters:                adapters,
+		backendProfile:          backendProfile,
+		maxAttempts:             maxAttempts,
+		retryDelay:              retryDelay,
+		maxEnvelopeAttempts:     maxEnvelopeAttempts,
+		envelopeRetryDelay:      envelopeRetryDelay,
+		suppressionWindow:       suppressionWindow,
+		coalesceWindow:          coalesceWindow,
+		suppressions:            map[string]time.Time{},
+		maxStoredEnvelopes:      maxStoredEnvelopes,
+		providerMaxConcurrency:  providerMaxConcurrency,
+		providerSemaphores:      map[string]chan struct{}{},
+		closed:                  make(chan struct{}),
+		queueCtx:                queueCtx,
+		queueCancel:             queueCancel,
 	}
+	s.seedQueuedIndexesFromQueues()
 	_ = s.loadFromDisk()
 	s.rebuildCoalesceIndexLocked()
 	if !opts.DisableWorkers {
-		s.wg.Add(2)
-		go func() {
-			defer s.wg.Done()
-			s.writebackWorker()
-		}()
-		go func() {
-			defer s.wg.Done()
-			s.envelopeWorker()
-		}()
+		s.wg.Add(writebackWorkers + envelopeWorkers)
+		for i := 0; i < writebackWorkers; i++ {
+			go func() {
+				defer s.wg.Done()
+				s.writebackWorker()
+			}()
+		}
+		for i := 0; i < envelopeWorkers; i++ {
+			go func() {
+				defer s.wg.Done()
+				s.envelopeWorker()
+			}()
+		}
 		s.mu.RLock()
-		pending := make([]string, 0, len(s.envelopesByID))
+		type delayedEnvelopeTask struct {
+			id    string
+			delay time.Duration
+		}
+		pendingEnvelopes := make([]string, 0, len(s.envelopesByID))
+		delayedEnvelopes := make([]delayedEnvelopeTask, 0)
 		for envelopeID := range s.envelopesByID {
 			if !s.processedEnvs[envelopeID] {
-				pending = append(pending, envelopeID)
+				if nextAttempt, ok := s.envelopeNextAttempt[envelopeID]; ok {
+					if until := time.Until(nextAttempt); until > 0 {
+						delayedEnvelopes = append(delayedEnvelopes, delayedEnvelopeTask{id: envelopeID, delay: until})
+						continue
+					}
+				}
+				pendingEnvelopes = append(pendingEnvelopes, envelopeID)
+			}
+		}
+		type delayedWritebackTask struct {
+			task  writebackTask
+			delay time.Duration
+		}
+		pendingWritebacks := make([]writebackTask, 0)
+		delayedWritebacks := make([]delayedWritebackTask, 0)
+		for workspaceID, ws := range s.workspaces {
+			for opID, op := range ws.Ops {
+				if op.Status != "pending" && op.Status != "running" {
+					continue
+				}
+				task := writebackTask{
+					WorkspaceID:   workspaceID,
+					OpID:          opID,
+					Path:          op.Path,
+					Revision:      op.Revision,
+					CorrelationID: op.CorrelationID,
+				}
+				delay := time.Duration(0)
+				if op.NextAttemptAt != nil {
+					if nextAt, err := time.Parse(time.RFC3339Nano, *op.NextAttemptAt); err == nil {
+						if until := time.Until(nextAt); until > 0 {
+							delay = until
+						}
+					}
+				}
+				if delay > 0 {
+					delayedWritebacks = append(delayedWritebacks, delayedWritebackTask{task: task, delay: delay})
+					continue
+				}
+				pendingWritebacks = append(pendingWritebacks, task)
 			}
 		}
 		s.mu.RUnlock()
-		for _, envelopeID := range pending {
+		for _, envelopeID := range pendingEnvelopes {
 			s.enqueueEnvelope(envelopeID)
+		}
+		for _, delayed := range delayedEnvelopes {
+			s.scheduleEnvelopeRetry(delayed.id, delayed.delay)
+		}
+		for _, task := range pendingWritebacks {
+			s.enqueueWriteback(task)
+		}
+		for _, scheduled := range delayedWritebacks {
+			scheduledTask := scheduled.task
+			scheduledDelay := scheduled.delay
+			time.AfterFunc(scheduledDelay, func() {
+				select {
+				case <-s.closed:
+					return
+				default:
+					s.enqueueWriteback(scheduledTask)
+				}
+			})
 		}
 	}
 	return s
 }
 
+func (s *Store) seedQueuedIndexesFromQueues() {
+	if s.envelopeQueue != nil {
+		if snapshotter, ok := s.envelopeQueue.(envelopeQueueSnapshotter); ok {
+			for _, envelopeID := range snapshotter.SnapshotEnvelopeIDs() {
+				if strings.TrimSpace(envelopeID) == "" {
+					continue
+				}
+				s.queuedEnvelopes[envelopeID] = struct{}{}
+			}
+		}
+	}
+	if s.writebackQueue != nil {
+		if snapshotter, ok := s.writebackQueue.(writebackQueueSnapshotter); ok {
+			for _, task := range snapshotter.SnapshotWritebacks() {
+				if strings.TrimSpace(task.OpID) == "" {
+					continue
+				}
+				s.queuedWritebacks[task.OpID] = struct{}{}
+			}
+		}
+	}
+}
+
 func (s *Store) Close() {
 	s.closeOnce.Do(func() {
 		close(s.closed)
+		if s.queueCancel != nil {
+			s.queueCancel()
+		}
+		if s.envelopeQueue != nil {
+			_ = s.envelopeQueue.Close()
+		}
+		if s.writebackQueue != nil {
+			_ = s.writebackQueue.Close()
+		}
 		s.wg.Wait()
 	})
 }
@@ -472,21 +859,27 @@ func (s *Store) ListTree(workspaceID, path string, depth int, cursor string) (Tr
 		if len(parts) == 0 {
 			continue
 		}
-		child := joinPath(base, parts[0])
-		if len(parts) == 1 {
-			entryMap[child] = TreeEntry{
-				Path:             child,
-				Type:             "file",
-				Revision:         file.Revision,
-				Provider:         file.Provider,
-				ProviderObjectID: file.ProviderObjectID,
-				Size:             int64(len(file.Content)),
-				UpdatedAt:        file.LastEditedAt,
-			}
-			continue
+		maxLevel := depth
+		if len(parts) < maxLevel {
+			maxLevel = len(parts)
 		}
-		if _, exists := entryMap[child]; !exists {
-			entryMap[child] = TreeEntry{Path: child, Type: "dir", Revision: "dir"}
+		for level := 1; level <= maxLevel; level++ {
+			child := joinPath(base, strings.Join(parts[:level], "/"))
+			if level == len(parts) {
+				entryMap[child] = TreeEntry{
+					Path:             child,
+					Type:             "file",
+					Revision:         file.Revision,
+					Provider:         file.Provider,
+					ProviderObjectID: file.ProviderObjectID,
+					Size:             int64(len(file.Content)),
+					UpdatedAt:        file.LastEditedAt,
+				}
+				continue
+			}
+			if _, exists := entryMap[child]; !exists {
+				entryMap[child] = TreeEntry{Path: child, Type: "dir", Revision: "dir"}
+			}
 		}
 	}
 
@@ -611,7 +1004,7 @@ func (s *Store) DeleteFile(req DeleteRequest) (WriteResult, error) {
 	return result, nil
 }
 
-func (s *Store) GetEvents(workspaceID, cursor string, limit int) (EventFeed, error) {
+func (s *Store) GetEvents(workspaceID, provider, cursor string, limit int) (EventFeed, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -622,28 +1015,42 @@ func (s *Store) GetEvents(workspaceID, cursor string, limit int) (EventFeed, err
 	if limit <= 0 {
 		limit = 200
 	}
+	events := ws.Events
+	normalizedProvider := normalizeProvider(provider)
+	if normalizedProvider != "" {
+		filtered := make([]Event, 0, len(ws.Events))
+		for _, event := range ws.Events {
+			if eventProvider(event) == normalizedProvider {
+				filtered = append(filtered, event)
+			}
+		}
+		events = filtered
+	}
+	if len(events) == 0 {
+		return EventFeed{Events: []Event{}, NextCursor: nil}, nil
+	}
 
 	start := 0
 	if cursor != "" {
-		for i := range ws.Events {
-			if ws.Events[i].EventID == cursor {
+		for i := range events {
+			if events[i].EventID == cursor {
 				start = i + 1
 				break
 			}
 		}
 	}
-	if start >= len(ws.Events) {
+	if start >= len(events) {
 		return EventFeed{Events: []Event{}, NextCursor: nil}, nil
 	}
 	end := start + limit
-	if end > len(ws.Events) {
-		end = len(ws.Events)
+	if end > len(events) {
+		end = len(events)
 	}
-	chunk := append([]Event(nil), ws.Events[start:end]...)
+	chunk := append([]Event(nil), events[start:end]...)
 
 	var nextCursor *string
-	if end < len(ws.Events) {
-		next := ws.Events[end-1].EventID
+	if end < len(events) {
+		next := events[end-1].EventID
 		nextCursor = &next
 	}
 
@@ -669,6 +1076,7 @@ func (s *Store) ListOperations(workspaceID, status, action, provider, cursor str
 	if workspaceID == "" {
 		return OperationFeed{}, ErrInvalidInput
 	}
+	provider = normalizeProvider(provider)
 	if limit <= 0 {
 		limit = 100
 	}
@@ -739,6 +1147,42 @@ func (s *Store) ListOperations(workspaceID, status, action, provider, cursor str
 func (s *Store) GetSyncStatus(workspaceID string, provider string) (SyncStatus, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	return s.buildSyncStatusLocked(workspaceID, provider), nil
+}
+
+func (s *Store) ListSyncStatuses(provider string) map[string]SyncStatus {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	workspaceSet := make(map[string]struct{}, len(s.workspaces)+len(s.ingressByWS))
+	for workspaceID := range s.workspaces {
+		workspaceSet[workspaceID] = struct{}{}
+	}
+	for workspaceID := range s.ingressByWS {
+		workspaceSet[workspaceID] = struct{}{}
+	}
+	for _, envelope := range s.envelopesByID {
+		if envelope.WorkspaceID == "" {
+			continue
+		}
+		workspaceSet[envelope.WorkspaceID] = struct{}{}
+	}
+	for _, dead := range s.deadLetters {
+		if dead.WorkspaceID == "" {
+			continue
+		}
+		workspaceSet[dead.WorkspaceID] = struct{}{}
+	}
+
+	statuses := make(map[string]SyncStatus, len(workspaceSet))
+	for workspaceID := range workspaceSet {
+		statuses[workspaceID] = s.buildSyncStatusLocked(workspaceID, provider)
+	}
+	return statuses
+}
+
+func (s *Store) buildSyncStatusLocked(workspaceID string, provider string) SyncStatus {
+	provider = normalizeProvider(provider)
 
 	providers := map[string]struct{}{}
 	if provider != "" {
@@ -766,6 +1210,11 @@ func (s *Store) GetSyncStatus(workspaceID string, provider string) (SyncStatus, 
 					providers[file.Provider] = struct{}{}
 				}
 			}
+			for _, op := range ws.Ops {
+				if op.Provider != "" {
+					providers[op.Provider] = struct{}{}
+				}
+			}
 		}
 	}
 
@@ -779,7 +1228,7 @@ func (s *Store) GetSyncStatus(workspaceID string, provider string) (SyncStatus, 
 	for _, providerName := range providerNames {
 		statuses = append(statuses, s.buildProviderSyncStatusLocked(workspaceID, providerName))
 	}
-	return SyncStatus{WorkspaceID: workspaceID, Providers: statuses}, nil
+	return SyncStatus{WorkspaceID: workspaceID, Providers: statuses}
 }
 
 func (s *Store) buildProviderSyncStatusLocked(workspaceID, provider string) SyncProviderStatus {
@@ -834,10 +1283,12 @@ func (s *Store) buildProviderSyncStatusLocked(workspaceID, provider string) Sync
 
 	var latestFailedAt time.Time
 	var lastError string
+	deadLetteredEnvelopes := 0
 	for _, dead := range s.deadLetters {
 		if dead.WorkspaceID != workspaceID || dead.Provider != provider {
 			continue
 		}
+		deadLetteredEnvelopes++
 		failedAt, err := time.Parse(time.RFC3339Nano, dead.FailedAt)
 		if err != nil {
 			continue
@@ -852,13 +1303,16 @@ func (s *Store) buildProviderSyncStatusLocked(workspaceID, provider string) Sync
 		status.Status = "error"
 		status.LastError = &lastError
 	}
+	status.DeadLetteredEnvelopes = deadLetteredEnvelopes
 	if ws, ok := s.workspaces[workspaceID]; ok {
 		latestDeadLetteredOpSeq := int64(-1)
 		lastOpError := ""
+		deadLetteredOps := 0
 		for opID, op := range ws.Ops {
 			if op.Provider != provider || op.Status != "dead_lettered" || op.LastError == nil || *op.LastError == "" {
 				continue
 			}
+			deadLetteredOps++
 			seq := operationIDSeq(opID)
 			if seq > latestDeadLetteredOpSeq {
 				latestDeadLetteredOpSeq = seq
@@ -870,6 +1324,7 @@ func (s *Store) buildProviderSyncStatusLocked(workspaceID, provider string) Sync
 			status.Status = "error"
 			status.LastError = &lastOpError
 		}
+		status.DeadLetteredOps = deadLetteredOps
 	}
 	if len(failureCodes) > 0 {
 		status.FailureCodes = failureCodes
@@ -917,8 +1372,14 @@ func (s *Store) GetIngressStatus(workspaceID string) (IngressStatus, error) {
 		}
 	}
 	utilization := 0.0
-	if cap(s.envelopeCh) > 0 {
-		utilization = float64(len(s.envelopeCh)) / float64(cap(s.envelopeCh))
+	queueDepth := 0
+	queueCapacity := 0
+	if s.envelopeQueue != nil {
+		queueDepth = s.envelopeQueue.Depth()
+		queueCapacity = s.envelopeQueue.Capacity()
+	}
+	if queueCapacity > 0 {
+		utilization = float64(queueDepth) / float64(queueCapacity)
 	}
 	totalIngressAttempts := counter.AcceptedTotal + counter.DroppedTotal + counter.DedupedTotal + counter.CoalescedTotal
 	dedupeRate := 0.0
@@ -955,16 +1416,16 @@ func (s *Store) GetIngressStatus(workspaceID string) (IngressStatus, error) {
 			}
 		}
 		ingressByProvider[provider] = IngressProviderStatus{
-			AcceptedTotal: providerCounter.AcceptedTotal,
-			DroppedTotal: providerCounter.DroppedTotal,
-			DedupedTotal: providerCounter.DedupedTotal,
-			CoalescedTotal: providerCounter.CoalescedTotal,
-			PendingTotal: pendingByProvider[provider],
+			AcceptedTotal:           providerCounter.AcceptedTotal,
+			DroppedTotal:            providerCounter.DroppedTotal,
+			DedupedTotal:            providerCounter.DedupedTotal,
+			CoalescedTotal:          providerCounter.CoalescedTotal,
+			PendingTotal:            pendingByProvider[provider],
 			OldestPendingAgeSeconds: providerOldestPendingAgeSeconds,
-			SuppressedTotal: providerCounter.SuppressedTotal,
-			StaleTotal: providerCounter.StaleTotal,
-			DedupeRate: providerDedupeRate,
-			CoalesceRate: providerCoalesceRate,
+			SuppressedTotal:         providerCounter.SuppressedTotal,
+			StaleTotal:              providerCounter.StaleTotal,
+			DedupeRate:              providerDedupeRate,
+			CoalesceRate:            providerCoalesceRate,
 		}
 	}
 	oldestPendingAgeSeconds := 0
@@ -975,30 +1436,253 @@ func (s *Store) GetIngressStatus(workspaceID string) (IngressStatus, error) {
 		}
 	}
 	return IngressStatus{
-		WorkspaceID:   workspaceID,
-		QueueDepth:    len(s.envelopeCh),
-		QueueCapacity: cap(s.envelopeCh),
-		QueueUtilization: utilization,
-		PendingTotal:  pending,
+		WorkspaceID:             workspaceID,
+		QueueDepth:              queueDepth,
+		QueueCapacity:           queueCapacity,
+		QueueUtilization:        utilization,
+		PendingTotal:            pending,
 		OldestPendingAgeSeconds: oldestPendingAgeSeconds,
-		DeadLetterTotal: deadLetters,
-		DeadLetterByProvider: deadLettersByProvider,
-		AcceptedTotal: counter.AcceptedTotal,
-		DroppedTotal:  counter.DroppedTotal,
-		DedupedTotal:  counter.DedupedTotal,
-		CoalescedTotal: counter.CoalescedTotal,
-		DedupeRate: dedupeRate,
-		CoalesceRate: coalesceRate,
-		SuppressedTotal: counter.SuppressedTotal,
-		StaleTotal: counter.StaleTotal,
-		IngressByProvider: ingressByProvider,
+		DeadLetterTotal:         deadLetters,
+		DeadLetterByProvider:    deadLettersByProvider,
+		AcceptedTotal:           counter.AcceptedTotal,
+		DroppedTotal:            counter.DroppedTotal,
+		DedupedTotal:            counter.DedupedTotal,
+		CoalescedTotal:          counter.CoalescedTotal,
+		DedupeRate:              dedupeRate,
+		CoalesceRate:            coalesceRate,
+		SuppressedTotal:         counter.SuppressedTotal,
+		StaleTotal:              counter.StaleTotal,
+		IngressByProvider:       ingressByProvider,
 	}, nil
+}
+
+func (s *Store) GetIngressStatusForProvider(workspaceID, provider string) (IngressStatus, error) {
+	provider = normalizeProvider(provider)
+	if provider == "" {
+		return s.GetIngressStatus(workspaceID)
+	}
+	status, err := s.GetIngressStatus(workspaceID)
+	if err != nil {
+		return IngressStatus{}, err
+	}
+	providerStatus, ok := status.IngressByProvider[provider]
+	if !ok {
+		providerStatus = IngressProviderStatus{}
+	}
+	filteredDeadLetters := map[string]int{}
+	if deadCount, ok := status.DeadLetterByProvider[provider]; ok && deadCount > 0 {
+		filteredDeadLetters[provider] = deadCount
+	}
+	status.QueueDepth = providerStatus.PendingTotal
+	if status.QueueCapacity > 0 {
+		status.QueueUtilization = float64(providerStatus.PendingTotal) / float64(status.QueueCapacity)
+	} else {
+		status.QueueUtilization = 0
+	}
+	status.PendingTotal = providerStatus.PendingTotal
+	status.OldestPendingAgeSeconds = providerStatus.OldestPendingAgeSeconds
+	status.DeadLetterTotal = filteredDeadLetters[provider]
+	status.DeadLetterByProvider = filteredDeadLetters
+	status.AcceptedTotal = providerStatus.AcceptedTotal
+	status.DroppedTotal = providerStatus.DroppedTotal
+	status.DedupedTotal = providerStatus.DedupedTotal
+	status.CoalescedTotal = providerStatus.CoalescedTotal
+	status.DedupeRate = providerStatus.DedupeRate
+	status.CoalesceRate = providerStatus.CoalesceRate
+	status.SuppressedTotal = providerStatus.SuppressedTotal
+	status.StaleTotal = providerStatus.StaleTotal
+	status.IngressByProvider = map[string]IngressProviderStatus{
+		provider: providerStatus,
+	}
+	return status, nil
+}
+
+func (s *Store) ListIngressStatuses() map[string]IngressStatus {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	type pendingWorkspace struct {
+		total            int
+		byProvider       map[string]int
+		oldest           time.Time
+		oldestByProvider map[string]time.Time
+	}
+	type deadWorkspace struct {
+		total      int
+		byProvider map[string]int
+	}
+
+	workspaceSet := make(map[string]struct{}, len(s.workspaces)+len(s.ingressByWS))
+	for workspaceID := range s.workspaces {
+		workspaceSet[workspaceID] = struct{}{}
+	}
+	for workspaceID := range s.ingressByWS {
+		workspaceSet[workspaceID] = struct{}{}
+	}
+
+	pendingByWorkspace := map[string]*pendingWorkspace{}
+	for envelopeID, envelope := range s.envelopesByID {
+		workspaceID := envelope.WorkspaceID
+		if workspaceID == "" {
+			continue
+		}
+		workspaceSet[workspaceID] = struct{}{}
+		if s.processedEnvs[envelopeID] {
+			continue
+		}
+		pending := pendingByWorkspace[workspaceID]
+		if pending == nil {
+			pending = &pendingWorkspace{
+				byProvider:       map[string]int{},
+				oldestByProvider: map[string]time.Time{},
+			}
+			pendingByWorkspace[workspaceID] = pending
+		}
+		pending.total++
+		pending.byProvider[envelope.Provider]++
+		if ts, err := time.Parse(time.RFC3339Nano, envelope.ReceivedAt); err == nil {
+			if pending.oldest.IsZero() || ts.Before(pending.oldest) {
+				pending.oldest = ts
+			}
+			if providerOldest, ok := pending.oldestByProvider[envelope.Provider]; !ok || ts.Before(providerOldest) {
+				pending.oldestByProvider[envelope.Provider] = ts
+			}
+		}
+	}
+
+	deadByWorkspace := map[string]*deadWorkspace{}
+	for _, dead := range s.deadLetters {
+		workspaceID := dead.WorkspaceID
+		if workspaceID == "" {
+			continue
+		}
+		workspaceSet[workspaceID] = struct{}{}
+		entry := deadByWorkspace[workspaceID]
+		if entry == nil {
+			entry = &deadWorkspace{byProvider: map[string]int{}}
+			deadByWorkspace[workspaceID] = entry
+		}
+		entry.total++
+		entry.byProvider[dead.Provider]++
+	}
+
+	queueDepth := 0
+	queueCapacity := 0
+	if s.envelopeQueue != nil {
+		queueDepth = s.envelopeQueue.Depth()
+		queueCapacity = s.envelopeQueue.Capacity()
+	}
+	utilization := 0.0
+	if queueCapacity > 0 {
+		utilization = float64(queueDepth) / float64(queueCapacity)
+	}
+
+	now := time.Now().UTC()
+	statuses := make(map[string]IngressStatus, len(workspaceSet))
+	for workspaceID := range workspaceSet {
+		counter := s.ingressByWS[workspaceID]
+		pending := pendingByWorkspace[workspaceID]
+		dead := deadByWorkspace[workspaceID]
+
+		pendingTotal := 0
+		oldestPendingAgeSeconds := 0
+		pendingByProvider := map[string]int{}
+		oldestPendingByProvider := map[string]time.Time{}
+		if pending != nil {
+			pendingTotal = pending.total
+			pendingByProvider = pending.byProvider
+			oldestPendingByProvider = pending.oldestByProvider
+			if !pending.oldest.IsZero() {
+				if age := int(now.Sub(pending.oldest).Seconds()); age > 0 {
+					oldestPendingAgeSeconds = age
+				}
+			}
+		}
+
+		deadLetterTotal := 0
+		deadLetterByProvider := map[string]int{}
+		if dead != nil {
+			deadLetterTotal = dead.total
+			deadLetterByProvider = dead.byProvider
+		}
+
+		totalIngressAttempts := counter.AcceptedTotal + counter.DroppedTotal + counter.DedupedTotal + counter.CoalescedTotal
+		dedupeRate := 0.0
+		coalesceRate := 0.0
+		if totalIngressAttempts > 0 {
+			dedupeRate = float64(counter.DedupedTotal) / float64(totalIngressAttempts)
+			coalesceRate = float64(counter.CoalescedTotal) / float64(totalIngressAttempts)
+		}
+
+		providers := map[string]struct{}{}
+		for provider := range counter.ByProvider {
+			providers[provider] = struct{}{}
+		}
+		for provider := range pendingByProvider {
+			providers[provider] = struct{}{}
+		}
+		for provider := range deadLetterByProvider {
+			providers[provider] = struct{}{}
+		}
+
+		ingressByProvider := map[string]IngressProviderStatus{}
+		for provider := range providers {
+			providerCounter := counter.ByProvider[provider]
+			providerAttempts := providerCounter.AcceptedTotal + providerCounter.DroppedTotal + providerCounter.DedupedTotal + providerCounter.CoalescedTotal
+			providerDedupeRate := 0.0
+			providerCoalesceRate := 0.0
+			if providerAttempts > 0 {
+				providerDedupeRate = float64(providerCounter.DedupedTotal) / float64(providerAttempts)
+				providerCoalesceRate = float64(providerCounter.CoalescedTotal) / float64(providerAttempts)
+			}
+			providerOldestPendingAgeSeconds := 0
+			if providerOldestPending, ok := oldestPendingByProvider[provider]; ok {
+				if age := int(now.Sub(providerOldestPending).Seconds()); age > 0 {
+					providerOldestPendingAgeSeconds = age
+				}
+			}
+			ingressByProvider[provider] = IngressProviderStatus{
+				AcceptedTotal:           providerCounter.AcceptedTotal,
+				DroppedTotal:            providerCounter.DroppedTotal,
+				DedupedTotal:            providerCounter.DedupedTotal,
+				CoalescedTotal:          providerCounter.CoalescedTotal,
+				PendingTotal:            pendingByProvider[provider],
+				OldestPendingAgeSeconds: providerOldestPendingAgeSeconds,
+				SuppressedTotal:         providerCounter.SuppressedTotal,
+				StaleTotal:              providerCounter.StaleTotal,
+				DedupeRate:              providerDedupeRate,
+				CoalesceRate:            providerCoalesceRate,
+			}
+		}
+
+		statuses[workspaceID] = IngressStatus{
+			WorkspaceID:             workspaceID,
+			QueueDepth:              queueDepth,
+			QueueCapacity:           queueCapacity,
+			QueueUtilization:        utilization,
+			PendingTotal:            pendingTotal,
+			OldestPendingAgeSeconds: oldestPendingAgeSeconds,
+			DeadLetterTotal:         deadLetterTotal,
+			DeadLetterByProvider:    deadLetterByProvider,
+			AcceptedTotal:           counter.AcceptedTotal,
+			DroppedTotal:            counter.DroppedTotal,
+			DedupedTotal:            counter.DedupedTotal,
+			CoalescedTotal:          counter.CoalescedTotal,
+			DedupeRate:              dedupeRate,
+			CoalesceRate:            coalesceRate,
+			SuppressedTotal:         counter.SuppressedTotal,
+			StaleTotal:              counter.StaleTotal,
+			IngressByProvider:       ingressByProvider,
+		}
+	}
+	return statuses
 }
 
 func (s *Store) ListDeadLetters(workspaceID, provider, cursor string, limit int) (DeadLetterFeed, error) {
 	if workspaceID == "" {
 		return DeadLetterFeed{}, ErrInvalidInput
 	}
+	provider = normalizeProvider(provider)
 	if limit <= 0 {
 		limit = 100
 	}
@@ -1090,6 +1774,13 @@ func (s *Store) TriggerSyncRefresh(workspaceID, provider, reason, correlationID 
 	if workspaceID == "" || provider == "" {
 		return QueuedResponse{}, ErrInvalidInput
 	}
+	provider = normalizeProvider(provider)
+	s.mu.RLock()
+	_, ok := s.adapters[provider]
+	s.mu.RUnlock()
+	if !ok {
+		return QueuedResponse{}, ErrInvalidInput
+	}
 	jobID := fmt.Sprintf("sync_%d", time.Now().UnixNano())
 	return QueuedResponse{
 		Status:        "queued",
@@ -1098,7 +1789,46 @@ func (s *Store) TriggerSyncRefresh(workspaceID, provider, reason, correlationID 
 	}, nil
 }
 
+func (s *Store) GetBackendStatus() BackendStatus {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	stateBackendType := "none"
+	if s.stateBackend != nil {
+		stateBackendType = fmt.Sprintf("%T", s.stateBackend)
+	}
+	envelopeQueueType := "none"
+	envelopeQueueDepth := 0
+	envelopeQueueCap := 0
+	if s.envelopeQueue != nil {
+		envelopeQueueType = fmt.Sprintf("%T", s.envelopeQueue)
+		envelopeQueueDepth = s.envelopeQueue.Depth()
+		envelopeQueueCap = s.envelopeQueue.Capacity()
+	}
+	writebackQueueType := "none"
+	writebackQueueDepth := 0
+	writebackQueueCap := 0
+	if s.writebackQueue != nil {
+		writebackQueueType = fmt.Sprintf("%T", s.writebackQueue)
+		writebackQueueDepth = s.writebackQueue.Depth()
+		writebackQueueCap = s.writebackQueue.Capacity()
+	}
+	return BackendStatus{
+		BackendProfile:      s.backendProfile,
+		StateBackend:        stateBackendType,
+		EnvelopeQueue:       envelopeQueueType,
+		EnvelopeQueueDepth:  envelopeQueueDepth,
+		EnvelopeQueueCap:    envelopeQueueCap,
+		WritebackQueue:      writebackQueueType,
+		WritebackQueueDepth: writebackQueueDepth,
+		WritebackQueueCap:   writebackQueueCap,
+	}
+}
+
 func (s *Store) IngestEnvelope(req WebhookEnvelopeRequest) (QueuedResponse, error) {
+	req.WorkspaceID = strings.TrimSpace(req.WorkspaceID)
+	req.Provider = normalizeProvider(req.Provider)
+	req.DeliveryID = strings.TrimSpace(req.DeliveryID)
 	if req.WorkspaceID == "" || req.Provider == "" || req.DeliveryID == "" {
 		return QueuedResponse{}, ErrInvalidInput
 	}
@@ -1122,7 +1852,7 @@ func (s *Store) IngestEnvelope(req WebhookEnvelopeRequest) (QueuedResponse, erro
 	coalesceKey := coalesceObjectKey(req)
 	if coalesceKey != "" {
 		if existingID, exists := s.coalesceIndex[coalesceKey]; exists {
-			if !s.processedEnvs[existingID] {
+			if !s.processedEnvs[existingID] && !s.processingEnvs[existingID] {
 				if existingReq, ok := s.envelopesByID[existingID]; ok && withinCoalesceWindow(existingReq.ReceivedAt, req.ReceivedAt, s.coalesceWindow) {
 					existingReq.Headers = req.Headers
 					existingReq.Payload = req.Payload
@@ -1162,6 +1892,8 @@ func (s *Store) IngestEnvelope(req WebhookEnvelopeRequest) (QueuedResponse, erro
 			}
 		}
 		delete(s.processedEnvs, envelopeID)
+		delete(s.envelopeAttempts, envelopeID)
+		delete(s.envelopeNextAttempt, envelopeID)
 		s.adjustIngressCountsLocked(req.WorkspaceID, req.Provider, -1, 1, 0, 0, 0, 0)
 		_ = s.saveLocked()
 		s.mu.Unlock()
@@ -1180,6 +1912,7 @@ func (s *Store) ReplayEnvelope(envelopeID, correlationID string) (QueuedResponse
 	}
 	s.processedEnvs[envelopeID] = false
 	delete(s.envelopeAttempts, envelopeID)
+	delete(s.envelopeNextAttempt, envelopeID)
 	delete(s.deadLetters, envelopeID)
 	if req.CorrelationID == "" {
 		req.CorrelationID = correlationID
@@ -1274,10 +2007,10 @@ func (s *Store) ensureWorkspaceLocked(workspaceID string) *workspaceState {
 		return ws
 	}
 	ws = &workspaceState{
-		Files:         map[string]File{},
-		Events:        []Event{},
-		Ops:           map[string]OperationStatus{},
-		ProviderIndex: map[string]string{},
+		Files:              map[string]File{},
+		Events:             []Event{},
+		Ops:                map[string]OperationStatus{},
+		ProviderIndex:      map[string]string{},
 		ProviderWatermarks: map[string]string{},
 	}
 	s.workspaces[workspaceID] = ws
@@ -1322,6 +2055,7 @@ func (s *Store) recordWriteLocked(ws *workspaceState, path, revision, eventType,
 		Path:          path,
 		Revision:      revision,
 		Origin:        "agent_write",
+		Provider:      provider,
 		CorrelationID: correlationID,
 		Timestamp:     time.Now().UTC().Format(time.RFC3339Nano),
 	}
@@ -1342,7 +2076,7 @@ func (s *Store) recordWriteLocked(ws *workspaceState, path, revision, eventType,
 }
 
 func (s *Store) enqueueWriteback(task writebackTask) {
-	if task.OpID == "" {
+	if task.OpID == "" || s.writebackQueue == nil {
 		return
 	}
 	select {
@@ -1350,33 +2084,40 @@ func (s *Store) enqueueWriteback(task writebackTask) {
 		return
 	default:
 	}
-	select {
-	case s.writebackCh <- task:
-	case <-s.closed:
+	s.queueMu.Lock()
+	if _, exists := s.queuedWritebacks[task.OpID]; exists {
+		s.queueMu.Unlock()
 		return
-	default:
-		go func() {
-			select {
-			case s.writebackCh <- task:
-			case <-s.closed:
-			}
-		}()
 	}
+	s.queuedWritebacks[task.OpID] = struct{}{}
+	s.queueMu.Unlock()
+	if s.writebackQueue.TryEnqueue(task) {
+		return
+	}
+	go func() {
+		if !s.writebackQueue.Enqueue(s.queueCtx, task) {
+			s.queueMu.Lock()
+			delete(s.queuedWritebacks, task.OpID)
+			s.queueMu.Unlock()
+		}
+	}()
 }
 
 func (s *Store) writebackWorker() {
 	for {
-		select {
-		case <-s.closed:
+		task, ok := s.writebackQueue.Dequeue(s.queueCtx)
+		if !ok {
 			return
-		case task := <-s.writebackCh:
-			s.processWriteback(task)
 		}
+		s.queueMu.Lock()
+		delete(s.queuedWritebacks, task.OpID)
+		s.queueMu.Unlock()
+		s.processWriteback(task)
 	}
 }
 
 func (s *Store) tryEnqueueEnvelope(envelopeID string) bool {
-	if envelopeID == "" {
+	if envelopeID == "" || s.envelopeQueue == nil {
 		return false
 	}
 	select {
@@ -1384,47 +2125,114 @@ func (s *Store) tryEnqueueEnvelope(envelopeID string) bool {
 		return false
 	default:
 	}
-	select {
-	case s.envelopeCh <- envelopeID:
+	s.queueMu.Lock()
+	if _, exists := s.queuedEnvelopes[envelopeID]; exists {
+		s.queueMu.Unlock()
 		return true
-	case <-s.closed:
-		return false
-	default:
-		return false
 	}
+	s.queuedEnvelopes[envelopeID] = struct{}{}
+	s.queueMu.Unlock()
+	if s.envelopeQueue.TryEnqueue(envelopeID) {
+		return true
+	}
+	s.queueMu.Lock()
+	delete(s.queuedEnvelopes, envelopeID)
+	s.queueMu.Unlock()
+	return false
 }
 
 func (s *Store) enqueueEnvelope(envelopeID string) {
-	if s.tryEnqueueEnvelope(envelopeID) {
+	if envelopeID == "" || s.envelopeQueue == nil {
 		return
 	}
-	if envelopeID == "" {
+	select {
+	case <-s.closed:
+		return
+	default:
+	}
+	s.queueMu.Lock()
+	if _, exists := s.queuedEnvelopes[envelopeID]; exists {
+		s.queueMu.Unlock()
+		return
+	}
+	s.queuedEnvelopes[envelopeID] = struct{}{}
+	s.queueMu.Unlock()
+	if s.envelopeQueue.TryEnqueue(envelopeID) {
 		return
 	}
 	go func() {
-		select {
-		case s.envelopeCh <- envelopeID:
-		case <-s.closed:
+		if !s.envelopeQueue.Enqueue(s.queueCtx, envelopeID) {
+			s.queueMu.Lock()
+			delete(s.queuedEnvelopes, envelopeID)
+			s.queueMu.Unlock()
 		}
 	}()
 }
 
 func (s *Store) envelopeWorker() {
 	for {
-		select {
-		case <-s.closed:
+		envelopeID, ok := s.envelopeQueue.Dequeue(s.queueCtx)
+		if !ok {
 			return
-		case envelopeID := <-s.envelopeCh:
-			s.processEnvelope(envelopeID)
 		}
+		s.queueMu.Lock()
+		delete(s.queuedEnvelopes, envelopeID)
+		s.queueMu.Unlock()
+		release := s.acquireProviderSlot(envelopeID)
+		s.processEnvelope(envelopeID)
+		release()
 	}
 }
 
-func (s *Store) scheduleEnvelopeRetry(envelopeID string) {
+func (s *Store) acquireProviderSlot(envelopeID string) func() {
+	if s.providerMaxConcurrency <= 0 {
+		return func() {}
+	}
+	s.mu.RLock()
+	req, ok := s.envelopesByID[envelopeID]
+	s.mu.RUnlock()
+	if !ok {
+		return func() {}
+	}
+	provider := normalizeProvider(req.Provider)
+	if provider == "" {
+		return func() {}
+	}
+	workspace := strings.TrimSpace(req.WorkspaceID)
+	if workspace == "" {
+		return func() {}
+	}
+	key := workspace + "|" + provider
+
+	s.providerSemMu.Lock()
+	sem, exists := s.providerSemaphores[key]
+	if !exists {
+		sem = make(chan struct{}, s.providerMaxConcurrency)
+		s.providerSemaphores[key] = sem
+	}
+	s.providerSemMu.Unlock()
+
+	select {
+	case sem <- struct{}{}:
+		return func() {
+			select {
+			case <-sem:
+			default:
+			}
+		}
+	case <-s.closed:
+		return func() {}
+	}
+}
+
+func (s *Store) scheduleEnvelopeRetry(envelopeID string, delay time.Duration) {
 	if envelopeID == "" {
 		return
 	}
-	time.AfterFunc(s.envelopeRetryDelay, func() {
+	if delay <= 0 {
+		delay = s.envelopeRetryDelay
+	}
+	time.AfterFunc(delay, func() {
 		select {
 		case <-s.closed:
 			return
@@ -1441,10 +2249,11 @@ func (s *Store) processEnvelope(envelopeID string) {
 		s.mu.Unlock()
 		return
 	}
-	if s.processedEnvs[envelopeID] {
+	if s.processedEnvs[envelopeID] || s.processingEnvs[envelopeID] {
 		s.mu.Unlock()
 		return
 	}
+	s.processingEnvs[envelopeID] = true
 	ws := s.ensureWorkspaceLocked(req.WorkspaceID)
 
 	adapter, ok := s.adapters[req.Provider]
@@ -1455,12 +2264,15 @@ func (s *Store) processEnvelope(envelopeID string) {
 			Path:          "/",
 			Revision:      "",
 			Origin:        "provider_sync",
+			Provider:      req.Provider,
 			CorrelationID: req.CorrelationID,
 			Timestamp:     time.Now().UTC().Format(time.RFC3339Nano),
 		})
 		s.processedEnvs[envelopeID] = true
 		s.clearCoalesceIndexLocked(req, envelopeID)
 		delete(s.envelopeAttempts, envelopeID)
+		delete(s.envelopeNextAttempt, envelopeID)
+		delete(s.processingEnvs, envelopeID)
 		s.pruneProcessedEnvelopesLocked()
 		_ = s.saveLocked()
 		s.mu.Unlock()
@@ -1473,6 +2285,7 @@ func (s *Store) processEnvelope(envelopeID string) {
 			Path:          "/",
 			Revision:      "",
 			Origin:        "provider_sync",
+			Provider:      req.Provider,
 			CorrelationID: req.CorrelationID,
 			Timestamp:     time.Now().UTC().Format(time.RFC3339Nano),
 		})
@@ -1480,7 +2293,9 @@ func (s *Store) processEnvelope(envelopeID string) {
 		s.processedEnvs[envelopeID] = true
 		s.clearCoalesceIndexLocked(req, envelopeID)
 		delete(s.envelopeAttempts, envelopeID)
+		delete(s.envelopeNextAttempt, envelopeID)
 		delete(s.deadLetters, envelopeID)
+		delete(s.processingEnvs, envelopeID)
 		s.pruneProcessedEnvelopesLocked()
 		_ = s.saveLocked()
 		s.mu.Unlock()
@@ -1489,10 +2304,21 @@ func (s *Store) processEnvelope(envelopeID string) {
 
 	attempt := s.envelopeAttempts[envelopeID] + 1
 	s.envelopeAttempts[envelopeID] = attempt
-	actions, err := adapter.ParseEnvelope(req)
-	if err != nil {
-		errText := err.Error()
-		_ = errText
+	s.mu.Unlock()
+
+	actions, parseErr := adapter.ParseEnvelope(req)
+
+	s.mu.Lock()
+	req, ok = s.envelopesByID[envelopeID]
+	if !ok || s.processedEnvs[envelopeID] {
+		delete(s.processingEnvs, envelopeID)
+		s.mu.Unlock()
+		return
+	}
+	ws = s.ensureWorkspaceLocked(req.WorkspaceID)
+	if parseErr != nil {
+		errText := parseErr.Error()
+		retryDelay := time.Duration(0)
 		if attempt >= s.maxEnvelopeAttempts {
 			ws.Events = append(ws.Events, Event{
 				EventID:       s.nextEventIDLocked(),
@@ -1500,6 +2326,7 @@ func (s *Store) processEnvelope(envelopeID string) {
 				Path:          "/",
 				Revision:      "",
 				Origin:        "provider_sync",
+				Provider:      req.Provider,
 				CorrelationID: req.CorrelationID,
 				Timestamp:     time.Now().UTC().Format(time.RFC3339Nano),
 			})
@@ -1516,12 +2343,18 @@ func (s *Store) processEnvelope(envelopeID string) {
 				LastError:     errText,
 			}
 			delete(s.envelopeAttempts, envelopeID)
+			delete(s.envelopeNextAttempt, envelopeID)
 			s.pruneProcessedEnvelopesLocked()
+		} else {
+			nextAttempt := time.Now().UTC().Add(s.envelopeRetryDelay)
+			s.envelopeNextAttempt[envelopeID] = nextAttempt
+			retryDelay = time.Until(nextAttempt)
 		}
+		delete(s.processingEnvs, envelopeID)
 		_ = s.saveLocked()
 		s.mu.Unlock()
 		if attempt < s.maxEnvelopeAttempts {
-			s.scheduleEnvelopeRetry(envelopeID)
+			s.scheduleEnvelopeRetry(envelopeID, retryDelay)
 		}
 		return
 	}
@@ -1533,6 +2366,7 @@ func (s *Store) processEnvelope(envelopeID string) {
 				Path:          normalizePath(action.Path),
 				Revision:      "",
 				Origin:        "provider_sync",
+				Provider:      req.Provider,
 				CorrelationID: req.CorrelationID,
 				Timestamp:     time.Now().UTC().Format(time.RFC3339Nano),
 			})
@@ -1551,6 +2385,7 @@ func (s *Store) processEnvelope(envelopeID string) {
 				Path:          "/",
 				Revision:      "",
 				Origin:        "provider_sync",
+				Provider:      req.Provider,
 				CorrelationID: req.CorrelationID,
 				Timestamp:     time.Now().UTC().Format(time.RFC3339Nano),
 			})
@@ -1559,7 +2394,9 @@ func (s *Store) processEnvelope(envelopeID string) {
 	s.processedEnvs[envelopeID] = true
 	s.clearCoalesceIndexLocked(req, envelopeID)
 	delete(s.envelopeAttempts, envelopeID)
+	delete(s.envelopeNextAttempt, envelopeID)
 	delete(s.deadLetters, envelopeID)
+	delete(s.processingEnvs, envelopeID)
 	s.pruneProcessedEnvelopesLocked()
 	_ = s.saveLocked()
 	s.mu.Unlock()
@@ -1575,6 +2412,10 @@ func (s *Store) processWriteback(task writebackTask) {
 	}
 	op, ok := ws.Ops[task.OpID]
 	if !ok {
+		s.mu.Unlock()
+		return
+	}
+	if op.Status != "pending" && op.Status != "running" {
 		s.mu.Unlock()
 		return
 	}
@@ -1667,6 +2508,7 @@ func (s *Store) processWriteback(task writebackTask) {
 			Path:          task.Path,
 			Revision:      task.Revision,
 			Origin:        "system",
+			Provider:      writeAction.Provider,
 			CorrelationID: task.CorrelationID,
 			Timestamp:     nowTS,
 		})
@@ -1687,6 +2529,7 @@ func (s *Store) processWriteback(task writebackTask) {
 			Path:          task.Path,
 			Revision:      task.Revision,
 			Origin:        "system",
+			Provider:      writeAction.Provider,
 			CorrelationID: task.CorrelationID,
 			Timestamp:     nowTS,
 		})
@@ -1713,6 +2556,14 @@ func (s *Store) processWriteback(task writebackTask) {
 
 func (s *Store) applyProviderUpsertLocked(ws *workspaceState, provider string, action ApplyAction, correlationID string) {
 	path := normalizePath(action.Path)
+	objectID := strings.TrimSpace(action.ProviderObjectID)
+	if path == "/" && objectID != "" {
+		if indexedPath, ok := ws.ProviderIndex[providerObjectKey(provider, objectID)]; ok {
+			path = indexedPath
+		} else {
+			path = fallbackProviderPath(provider, objectID)
+		}
+	}
 	if path == "/" {
 		return
 	}
@@ -1721,7 +2572,6 @@ func (s *Store) applyProviderUpsertLocked(ws *workspaceState, provider string, a
 	if contentType == "" {
 		contentType = "text/markdown"
 	}
-	objectID := action.ProviderObjectID
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 
 	// Canonical identity: object ID is authoritative, path is projection.
@@ -1735,6 +2585,7 @@ func (s *Store) applyProviderUpsertLocked(ws *workspaceState, provider string, a
 				Path:          previousPath,
 				Revision:      s.nextRevisionLocked(),
 				Origin:        "provider_sync",
+				Provider:      provider,
 				CorrelationID: correlationID,
 				Timestamp:     now,
 			})
@@ -1770,6 +2621,7 @@ func (s *Store) applyProviderUpsertLocked(ws *workspaceState, provider string, a
 		Path:          path,
 		Revision:      revision,
 		Origin:        "provider_sync",
+		Provider:      provider,
 		CorrelationID: correlationID,
 		Timestamp:     now,
 	})
@@ -1801,25 +2653,22 @@ func (s *Store) applyProviderDeleteLocked(ws *workspaceState, provider string, a
 		Path:          path,
 		Revision:      s.nextRevisionLocked(),
 		Origin:        "provider_sync",
+		Provider:      provider,
 		CorrelationID: correlationID,
 		Timestamp:     now,
 	})
 }
 
 func (s *Store) loadFromDisk() error {
-	if s.stateFile == "" {
+	if s.stateBackend == nil {
 		return nil
 	}
-	data, err := os.ReadFile(s.stateFile)
+	snapshot, err := s.stateBackend.Load()
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
 		return err
 	}
-	var snapshot persistedState
-	if err := json.Unmarshal(data, &snapshot); err != nil {
-		return err
+	if snapshot == nil {
+		return nil
 	}
 	if snapshot.Workspaces != nil {
 		s.workspaces = snapshot.Workspaces
@@ -1853,8 +2702,14 @@ func (s *Store) loadFromDisk() error {
 	if snapshot.EnvelopeAttempts != nil {
 		s.envelopeAttempts = snapshot.EnvelopeAttempts
 	}
+	if snapshot.EnvelopeNextAttempt != nil {
+		s.envelopeNextAttempt = snapshot.EnvelopeNextAttempt
+	}
 	if snapshot.DeadLetters != nil {
 		s.deadLetters = snapshot.DeadLetters
+	}
+	if snapshot.Suppressions != nil {
+		s.suppressions = snapshot.Suppressions
 	}
 	s.revCounter = snapshot.RevCounter
 	s.opCounter = snapshot.OpCounter
@@ -1863,36 +2718,24 @@ func (s *Store) loadFromDisk() error {
 }
 
 func (s *Store) saveLocked() error {
-	if s.stateFile == "" {
+	if s.stateBackend == nil {
 		return nil
 	}
 	snapshot := persistedState{
-		RevCounter:         s.revCounter,
-		OpCounter:          s.opCounter,
-		EventCounter:       s.eventCounter,
-		Workspaces:         s.workspaces,
-		EnvelopesByID:      s.envelopesByID,
-		DeliveryIndex:      s.deliveryIndex,
-		ProcessedEnvs:      s.processedEnvs,
-		IngressByWorkspace: s.ingressByWS,
-		EnvelopeAttempts:   s.envelopeAttempts,
-		DeadLetters:        s.deadLetters,
+		RevCounter:          s.revCounter,
+		OpCounter:           s.opCounter,
+		EventCounter:        s.eventCounter,
+		Workspaces:          s.workspaces,
+		EnvelopesByID:       s.envelopesByID,
+		DeliveryIndex:       s.deliveryIndex,
+		ProcessedEnvs:       s.processedEnvs,
+		IngressByWorkspace:  s.ingressByWS,
+		EnvelopeAttempts:    s.envelopeAttempts,
+		EnvelopeNextAttempt: s.envelopeNextAttempt,
+		DeadLetters:         s.deadLetters,
+		Suppressions:        s.suppressions,
 	}
-	data, err := json.Marshal(snapshot)
-	if err != nil {
-		return err
-	}
-	dir := filepath.Dir(s.stateFile)
-	if dir != "." {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			return err
-		}
-	}
-	tmp := s.stateFile + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, s.stateFile)
+	return s.stateBackend.Save(&snapshot)
 }
 
 func normalizePath(path string) string {
@@ -1937,6 +2780,38 @@ func inferProviderFromPath(path string) string {
 		return "notion"
 	}
 	return strings.ToLower(provider)
+}
+
+func fallbackProviderPath(provider, objectID string) string {
+	objectID = strings.TrimSpace(objectID)
+	if objectID == "" {
+		return "/"
+	}
+	normalizedProvider := normalizeProvider(provider)
+	if normalizedProvider == "" {
+		normalizedProvider = "notion"
+	}
+	replacer := strings.NewReplacer("/", "_", "\\", "_", " ", "_")
+	safeObjectID := replacer.Replace(objectID)
+	if safeObjectID == "" {
+		safeObjectID = "object"
+	}
+	return normalizePath("/" + normalizedProvider + "/" + safeObjectID + ".md")
+}
+
+func normalizeProvider(provider string) string {
+	return strings.ToLower(strings.TrimSpace(provider))
+}
+
+func eventProvider(event Event) string {
+	if normalized := normalizeProvider(event.Provider); normalized != "" {
+		return normalized
+	}
+	path := normalizePath(event.Path)
+	if path == "/" {
+		return ""
+	}
+	return inferProviderFromPath(path)
 }
 
 func deliveryKey(workspaceID, provider, deliveryID string) string {
@@ -2179,9 +3054,12 @@ func (s *Store) clearCoalesceIndexLocked(req WebhookEnvelopeRequest, envelopeID 
 }
 
 func (s *Store) rebuildCoalesceIndexLocked() {
-	if s.coalesceIndex == nil {
-		s.coalesceIndex = map[string]string{}
-	}
+	s.coalesceIndex = map[string]string{}
+	latestByKey := map[string]struct {
+		id         string
+		receivedAt time.Time
+		hasTime    bool
+	}{}
 	for envelopeID, req := range s.envelopesByID {
 		if s.processedEnvs[envelopeID] {
 			continue
@@ -2190,9 +3068,32 @@ func (s *Store) rebuildCoalesceIndexLocked() {
 		if key == "" {
 			continue
 		}
-		if _, exists := s.coalesceIndex[key]; !exists {
-			s.coalesceIndex[key] = envelopeID
+		receivedAt, parseErr := time.Parse(time.RFC3339Nano, req.ReceivedAt)
+		candidate := struct {
+			id         string
+			receivedAt time.Time
+			hasTime    bool
+		}{
+			id:         envelopeID,
+			receivedAt: receivedAt,
+			hasTime:    parseErr == nil,
 		}
+		current, exists := latestByKey[key]
+		if !exists {
+			latestByKey[key] = candidate
+			continue
+		}
+		switch {
+		case candidate.hasTime && !current.hasTime:
+			latestByKey[key] = candidate
+		case candidate.hasTime && current.hasTime && candidate.receivedAt.After(current.receivedAt):
+			latestByKey[key] = candidate
+		case candidate.hasTime == current.hasTime && candidate.receivedAt.Equal(current.receivedAt) && candidate.id > current.id:
+			latestByKey[key] = candidate
+		}
+	}
+	for key, candidate := range latestByKey {
+		s.coalesceIndex[key] = candidate.id
 	}
 }
 
@@ -2244,6 +3145,7 @@ func (s *Store) pruneProcessedEnvelopesLocked() {
 		delete(s.envelopesByID, item.id)
 		delete(s.processedEnvs, item.id)
 		delete(s.envelopeAttempts, item.id)
+		delete(s.envelopeNextAttempt, item.id)
 		key := deliveryKey(req.WorkspaceID, req.Provider, req.DeliveryID)
 		if existingID, ok := s.deliveryIndex[key]; ok && existingID == item.id {
 			delete(s.deliveryIndex, key)

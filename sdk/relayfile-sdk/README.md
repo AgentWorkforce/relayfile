@@ -33,18 +33,22 @@ const tree = await client.listTree(workspaceId, {
   signal: controller.signal
 });
 const file = await client.readFile(workspaceId, "/notion/Engineering/Auth.md");
+const events = await client.getEvents(workspaceId, { provider: "notion", limit: 50 });
 const ops = await client.listOps(workspaceId, { status: "dead_lettered", action: "file_upsert", provider: "notion", limit: 20 });
 const sync = await client.getSyncStatus(workspaceId, { provider: "notion" });
-const ingress = await client.getSyncIngressStatus(workspaceId);
+const ingress = await client.getSyncIngressStatus(workspaceId, { provider: "notion" });
+const adminIngress = await client.getAdminIngressStatus({ provider: "notion", alertProfile: "balanced", deadLetterThreshold: 2, nonZeroOnly: true, maxAlerts: 50, includeWorkspaces: true, includeAlerts: true });
 const deadLetters = await client.getSyncDeadLetters(workspaceId, { provider: "notion", limit: 20 });
+console.log(events.events.length);
 console.log(ops.items.length);
-console.log(sync.providers[0]?.status, sync.providers[0]?.failureCodes);
+console.log(sync.providers[0]?.status, sync.providers[0]?.failureCodes, sync.providers[0]?.deadLetteredEnvelopes, sync.providers[0]?.deadLetteredOps);
 console.log(ingress.queueDepth, ingress.droppedTotal);
 console.log(ingress.queueUtilization, ingress.oldestPendingAgeSeconds);
 console.log(ingress.coalescedTotal, ingress.suppressedTotal, ingress.staleTotal);
 console.log(ingress.dedupeRate, ingress.coalesceRate);
 console.log(ingress.deadLetterByProvider);
 console.log(ingress.ingressByProvider["notion"]?.pendingTotal, ingress.ingressByProvider["notion"]?.oldestPendingAgeSeconds);
+console.log(adminIngress.alertProfile, adminIngress.effectiveAlertProfile, adminIngress.workspaceCount, adminIngress.returnedWorkspaceCount, adminIngress.nextCursor, adminIngress.pendingTotal, adminIngress.thresholds.deadLetter, adminIngress.alertTotals.critical, adminIngress.alertsTruncated, adminIngress.alerts.length, Object.keys(adminIngress.workspaces));
 console.log(deadLetters.items.length);
 if (deadLetters.items.length > 0) {
   const detail = await client.getSyncDeadLetter(workspaceId, deadLetters.items[0].envelopeId);
@@ -54,7 +58,9 @@ if (deadLetters.items.length > 0) {
 }
 if (ops.items.length > 0) {
   await client.replayOp(workspaceId, ops.items[0].opId);
+  await client.replayAdminOp(ops.items[0].opId);
 }
+await client.replayAdminEnvelope("env_123");
 
 try {
   const write = await client.writeFile({
@@ -88,3 +94,5 @@ try {
 - `RevisionConflictError` is thrown for HTTP `409` conflict responses.
 - `QueueFullError` is thrown for HTTP `429` with `code=queue_full` and surfaces `retryAfterSeconds`.
 - `InvalidStateError` is thrown for HTTP `409` with `code=invalid_state` (for replay preconditions).
+- `replayAdminEnvelope` and `replayAdminOp` call admin replay endpoints and require a token with `admin:replay`.
+- `getBackendStatus` and `getAdminIngressStatus` are admin APIs and require `admin:read` (or `admin:replay`).

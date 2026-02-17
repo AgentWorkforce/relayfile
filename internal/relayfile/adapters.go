@@ -32,21 +32,21 @@ type ProviderWritebackAdapter interface {
 }
 
 type NotionUpsertRequest struct {
-	WorkspaceID      string
-	Path             string
-	Revision         string
-	ContentType      string
-	Content          string
-	ProviderObjectID string
-	CorrelationID    string
+	WorkspaceID      string `json:"workspaceId"`
+	Path             string `json:"path"`
+	Revision         string `json:"revision"`
+	ContentType      string `json:"contentType"`
+	Content          string `json:"content"`
+	ProviderObjectID string `json:"providerObjectId"`
+	CorrelationID    string `json:"correlationId"`
 }
 
 type NotionDeleteRequest struct {
-	WorkspaceID      string
-	Path             string
-	Revision         string
-	ProviderObjectID string
-	CorrelationID    string
+	WorkspaceID      string `json:"workspaceId"`
+	Path             string `json:"path"`
+	Revision         string `json:"revision"`
+	ProviderObjectID string `json:"providerObjectId"`
+	CorrelationID    string `json:"correlationId"`
 }
 
 type NotionWriteClient interface {
