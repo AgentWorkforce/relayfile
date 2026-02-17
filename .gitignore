@@ -1,0 +1,35 @@
+# Go
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+.gocache/
+
+# State files
+*.state.json
+*.state.json.tmp
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Trajectories
+.trajectories/
+
+# Node (SDK)
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Environment
+.env
+.env.*

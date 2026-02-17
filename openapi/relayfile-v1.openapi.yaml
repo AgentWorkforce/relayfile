@@ -1,0 +1,1331 @@
+openapi: 3.1.0
+info:
+  title: RelayFile API
+  version: 1.0.0
+  summary: Secure filesystem-over-REST contract for RelayFile
+  description: |
+    RelayFile exposes a workspace-scoped virtual filesystem with optimistic
+    concurrency, async write-back operations, and event feeds.
+
+    Security model:
+    - Agent and service access uses Bearer JWT with workspace and scope claims.
+    - Internal relay-cloud -> relayfile ingress uses HMAC-signed requests.
+    - Correlation IDs are required for traceability and audit.
+servers:
+  - url: https://relayfile.agent-relay.com
+    description: Production
+  - url: https://relayfile.staging.agent-relay.com
+    description: Staging
+tags:
+  - name: Filesystem
+  - name: Events
+  - name: Operations
+  - name: Sync
+  - name: Internal
+  - name: Admin
+security:
+  - BearerAuth: []
+paths:
+  /v1/workspaces/{workspaceId}/fs/tree:
+    get:
+      tags: [Filesystem]
+      operationId: listTree
+      summary: List filesystem entries under a path
+      security:
+        - BearerAuth: [fs:read]
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/CorrelationId'
+        - name: path
+          in: query
+          required: false
+          schema:
+            type: string
+            default: /
+            pattern: '^/.*'
+        - name: depth
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 10
+            default: 2
+        - name: cursor
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Tree listing
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TreeResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /v1/workspaces/{workspaceId}/fs/file:
+    get:
+      tags: [Filesystem]
+      operationId: readFile
+      summary: Read file contents at a path
+      security:
+        - BearerAuth: [fs:read]
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/CorrelationId'
+        - name: path
+          in: query
+          required: true
+          schema:
+            type: string
+            pattern: '^/.*'
+      responses:
+        '200':
+          description: File read success
+          headers:
+            ETag:
+              description: Current file revision identifier
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FileReadResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    put:
+      tags: [Filesystem]
+      operationId: writeFile
+      summary: Write file content with optimistic concurrency
+      security:
+        - BearerAuth: [fs:write]
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/CorrelationId'
+        - $ref: '#/components/parameters/IfMatch'
+        - name: path
+          in: query
+          required: true
+          schema:
+            type: string
+            pattern: '^/.*'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FileWriteRequest'
+      responses:
+        '202':
+          description: Write accepted and queued for provider write-back
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WriteQueuedResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '412':
+          $ref: '#/components/responses/PreconditionFailed'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    delete:
+      tags: [Filesystem]
+      operationId: deleteFile
+      summary: Delete a file with optimistic concurrency
+      security:
+        - BearerAuth: [fs:write]
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/CorrelationId'
+        - $ref: '#/components/parameters/IfMatch'
+        - name: path
+          in: query
+          required: true
+          schema:
+            type: string
+            pattern: '^/.*'
+      responses:
+        '202':
+          description: Delete accepted and queued for provider write-back
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WriteQueuedResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '412':
+          $ref: '#/components/responses/PreconditionFailed'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /v1/workspaces/{workspaceId}/fs/events:
+    get:
+      tags: [Events]
+      operationId: listFilesystemEvents
+      summary: Read ordered filesystem change events from a cursor
+      security:
+        - BearerAuth: [fs:read]
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/CorrelationId'
+        - name: provider
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: cursor
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000
+            default: 200
+      responses:
+        '200':
+          description: Event feed page
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EventFeedResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /v1/workspaces/{workspaceId}/ops/{opId}:
+    get:
+      tags: [Operations]
+      operationId: getWritebackOperation
+      summary: Get write-back operation status
+      security:
+        - BearerAuth: [ops:read]
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/CorrelationId'
+        - name: opId
+          in: path
+          required: true
+          schema:
+            type: string
+            minLength: 1
+      responses:
+        '200':
+          description: Operation status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OperationStatusResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /v1/workspaces/{workspaceId}/ops:
+    get:
+      tags: [Operations]
+      operationId: listWritebackOperations
+      summary: List write-back operations with optional status filtering
+      security:
+        - BearerAuth: [ops:read]
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/CorrelationId'
+        - name: status
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [pending, running, succeeded, failed, dead_lettered, canceled]
+        - name: action
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [file_upsert, file_delete]
+        - name: provider
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: cursor
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000
+      responses:
+        '200':
+          description: Operation list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OperationFeedResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /v1/workspaces/{workspaceId}/ops/{opId}/replay:
+    post:
+      tags: [Operations]
+      operationId: replayWritebackOperation
+      summary: Replay a workspace write-back operation
+      security:
+        - BearerAuth: [ops:replay]
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/CorrelationId'
+        - name: opId
+          in: path
+          required: true
+          schema:
+            type: string
+            minLength: 1
+      responses:
+        '202':
+          description: Replay accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QueuedResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Operation is not replayable in its current state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /v1/workspaces/{workspaceId}/sync/status:
+    get:
+      tags: [Sync]
+      operationId: getSyncStatus
+      summary: Get provider sync health and cursor state for a workspace
+      security:
+        - BearerAuth: [sync:read]
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/CorrelationId'
+        - name: provider
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Sync status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SyncStatusResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /v1/workspaces/{workspaceId}/sync/ingress:
+    get:
+      tags: [Sync]
+      operationId: getSyncIngressStatus
+      summary: Get webhook ingress queue and drop counters for a workspace
+      security:
+        - BearerAuth: [sync:read]
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Webhook ingress status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IngressStatusResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /v1/workspaces/{workspaceId}/sync/dead-letter:
+    get:
+      tags: [Sync]
+      operationId: getSyncDeadLetters
+      summary: List failed webhook envelopes that exhausted retries
+      security:
+        - BearerAuth: [sync:read]
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/CorrelationId'
+        - name: cursor
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000
+      responses:
+        '200':
+          description: Dead-letter envelope list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeadLetterFeedResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /v1/workspaces/{workspaceId}/sync/dead-letter/{envelopeId}/replay:
+    post:
+      tags: [Sync]
+      operationId: replaySyncDeadLetter
+      summary: Replay a failed envelope from workspace dead-letter queue
+      security:
+        - BearerAuth: [sync:trigger]
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/CorrelationId'
+        - name: envelopeId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '202':
+          description: Replay accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QueuedResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /v1/workspaces/{workspaceId}/sync/dead-letter/{envelopeId}/ack:
+    post:
+      tags: [Sync]
+      operationId: acknowledgeSyncDeadLetter
+      summary: Acknowledge and clear a failed envelope from workspace dead-letter queue
+      security:
+        - BearerAuth: [sync:trigger]
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/CorrelationId'
+        - name: envelopeId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Dead-letter acknowledged
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AckResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /v1/workspaces/{workspaceId}/sync/dead-letter/{envelopeId}:
+    get:
+      tags: [Sync]
+      operationId: getSyncDeadLetterById
+      summary: Get a single failed envelope from the workspace dead-letter queue
+      security:
+        - BearerAuth: [sync:read]
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/CorrelationId'
+        - name: envelopeId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Dead-letter envelope
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeadLetterItem'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /v1/workspaces/{workspaceId}/sync/refresh:
+    post:
+      tags: [Sync]
+      operationId: triggerSyncRefresh
+      summary: Trigger a provider refresh/reconciliation job
+      security:
+        - BearerAuth: [sync:trigger]
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SyncRefreshRequest'
+      responses:
+        '202':
+          description: Refresh job queued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QueuedResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /v1/internal/webhook-envelopes:
+    post:
+      tags: [Internal]
+      operationId: ingestWebhookEnvelope
+      summary: Internal relay-cloud ingestion endpoint for normalized envelopes
+      description: |
+        Internal endpoint intended for relay-cloud only.
+        Request must be HMAC signed and timestamp bounded to prevent replay.
+      security:
+        - InternalHmacAuth: []
+      parameters:
+        - $ref: '#/components/parameters/InternalTimestamp'
+        - $ref: '#/components/parameters/InternalSignature'
+        - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WebhookEnvelopeRequest'
+      responses:
+        '202':
+          description: Envelope accepted and queued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QueuedResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: Duplicate envelope
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          description: Ingress queue full, retry with backoff and jitter
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /v1/admin/replay/envelopes/{envelopeId}:
+    post:
+      tags: [Admin]
+      operationId: replayEnvelope
+      summary: Replay a previously ingested envelope from durable storage
+      security:
+        - BearerAuth: [admin:replay]
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+        - name: envelopeId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '202':
+          description: Replay accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QueuedResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /v1/admin/replay/ops/{opId}:
+    post:
+      tags: [Admin]
+      operationId: replayOperation
+      summary: Replay a dead-lettered write-back operation
+      security:
+        - BearerAuth: [admin:replay]
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+        - name: opId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '202':
+          description: Replay accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QueuedResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Operation is not replayable in its current state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        JWT must include workspace and agent claims.
+        Required claims:
+        - workspace_id
+        - agent_name
+        - scopes
+        - exp
+        - aud=relayfile
+    InternalHmacAuth:
+      type: apiKey
+      in: header
+      name: X-Relay-Signature
+      description: |
+        HMAC SHA-256 signature of canonical request body using shared internal secret.
+        Must be accompanied by X-Relay-Timestamp and replay window checks.
+
+  parameters:
+    WorkspaceId:
+      name: workspaceId
+      in: path
+      required: true
+      schema:
+        type: string
+        minLength: 1
+    CorrelationId:
+      name: X-Correlation-Id
+      in: header
+      required: true
+      schema:
+        type: string
+        minLength: 8
+        maxLength: 128
+    IfMatch:
+      name: If-Match
+      in: header
+      required: true
+      schema:
+        type: string
+        minLength: 1
+      description: Required optimistic concurrency token (revision/etag).
+    InternalTimestamp:
+      name: X-Relay-Timestamp
+      in: header
+      required: true
+      schema:
+        type: string
+        format: date-time
+      description: Request timestamp validated against replay window.
+    InternalSignature:
+      name: X-Relay-Signature
+      in: header
+      required: true
+      schema:
+        type: string
+        minLength: 16
+      description: HMAC signature of request payload.
+
+  responses:
+    BadRequest:
+      description: Invalid request
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Unauthorized:
+      description: Authentication failed
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Forbidden:
+      description: Authorization failed
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Conflict:
+      description: Revision conflict
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ConflictErrorResponse'
+    PreconditionFailed:
+      description: Missing or invalid precondition header
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    RateLimited:
+      description: Rate limit exceeded
+      headers:
+        Retry-After:
+          schema:
+            type: integer
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    InternalError:
+      description: Internal server error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+  schemas:
+    TreeEntry:
+      type: object
+      additionalProperties: false
+      required: [path, type, revision]
+      properties:
+        path:
+          type: string
+        type:
+          type: string
+          enum: [file, dir]
+        revision:
+          type: string
+        provider:
+          type: string
+        providerObjectId:
+          type: string
+        size:
+          type: integer
+          minimum: 0
+        updatedAt:
+          type: string
+          format: date-time
+
+    TreeResponse:
+      type: object
+      additionalProperties: false
+      required: [path, entries]
+      properties:
+        path:
+          type: string
+        entries:
+          type: array
+          items:
+            $ref: '#/components/schemas/TreeEntry'
+        nextCursor:
+          type: string
+          nullable: true
+
+    FileReadResponse:
+      type: object
+      additionalProperties: false
+      required: [path, revision, contentType, content]
+      properties:
+        path:
+          type: string
+        revision:
+          type: string
+        contentType:
+          type: string
+        content:
+          type: string
+        provider:
+          type: string
+        providerObjectId:
+          type: string
+        lastEditedAt:
+          type: string
+          format: date-time
+
+    FileWriteRequest:
+      type: object
+      additionalProperties: false
+      required: [content]
+      properties:
+        contentType:
+          type: string
+          default: text/markdown
+        content:
+          type: string
+
+    WriteQueuedResponse:
+      type: object
+      additionalProperties: false
+      required: [opId, status, targetRevision]
+      properties:
+        opId:
+          type: string
+        status:
+          type: string
+          enum: [queued, pending]
+        targetRevision:
+          type: string
+        writeback:
+          type: object
+          additionalProperties: false
+          properties:
+            provider:
+              type: string
+            state:
+              type: string
+              enum: [pending, succeeded, failed, dead_lettered]
+
+    FilesystemEvent:
+      type: object
+      additionalProperties: false
+      required: [eventId, type, path, revision, origin, correlationId, timestamp]
+      properties:
+        eventId:
+          type: string
+        type:
+          type: string
+          enum:
+            - file.created
+            - file.updated
+            - file.deleted
+            - dir.created
+            - dir.deleted
+            - sync.error
+            - sync.ignored
+            - sync.suppressed
+            - sync.stale
+            - writeback.failed
+            - writeback.succeeded
+        path:
+          type: string
+        revision:
+          type: string
+        origin:
+          type: string
+          enum: [provider_sync, agent_write, system]
+        correlationId:
+          type: string
+        timestamp:
+          type: string
+          format: date-time
+
+    EventFeedResponse:
+      type: object
+      additionalProperties: false
+      required: [events]
+      properties:
+        events:
+          type: array
+          items:
+            $ref: '#/components/schemas/FilesystemEvent'
+        nextCursor:
+          type: string
+          nullable: true
+
+    OperationStatusResponse:
+      type: object
+      additionalProperties: false
+      required: [opId, status, attemptCount]
+      properties:
+        opId:
+          type: string
+        path:
+          type: string
+        revision:
+          type: string
+        action:
+          type: string
+          enum: [file_upsert, file_delete]
+        provider:
+          type: string
+        status:
+          type: string
+          enum: [pending, running, succeeded, failed, dead_lettered, canceled]
+        attemptCount:
+          type: integer
+          minimum: 0
+        nextAttemptAt:
+          type: string
+          format: date-time
+          nullable: true
+        lastError:
+          type: string
+          nullable: true
+        providerResult:
+          type: object
+          additionalProperties: true
+        correlationId:
+          type: string
+
+    OperationFeedResponse:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/OperationStatusResponse'
+        nextCursor:
+          type: string
+          nullable: true
+
+    SyncRefreshRequest:
+      type: object
+      additionalProperties: false
+      required: [provider]
+      properties:
+        provider:
+          type: string
+        reason:
+          type: string
+          maxLength: 1000
+
+    SyncStatusResponse:
+      type: object
+      additionalProperties: false
+      required: [workspaceId, providers]
+      properties:
+        workspaceId:
+          type: string
+        providers:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [provider, status]
+            properties:
+              provider:
+                type: string
+              status:
+                type: string
+                enum: [healthy, lagging, error, paused]
+              cursor:
+                type: string
+                nullable: true
+              watermarkTs:
+                type: string
+                format: date-time
+                nullable: true
+              lagSeconds:
+                type: integer
+                minimum: 0
+              lastError:
+                type: string
+                nullable: true
+              failureCodes:
+                type: object
+                additionalProperties:
+                  type: integer
+                  minimum: 0
+
+    IngressStatusResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - workspaceId
+        - queueDepth
+        - queueCapacity
+        - queueUtilization
+        - pendingTotal
+        - oldestPendingAgeSeconds
+        - deadLetterTotal
+        - deadLetterByProvider
+        - acceptedTotal
+        - droppedTotal
+        - dedupedTotal
+        - coalescedTotal
+        - dedupeRate
+        - coalesceRate
+        - suppressedTotal
+        - staleTotal
+        - ingressByProvider
+      properties:
+        workspaceId:
+          type: string
+        queueDepth:
+          type: integer
+          minimum: 0
+        queueCapacity:
+          type: integer
+          minimum: 1
+        queueUtilization:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 1
+        pendingTotal:
+          type: integer
+          minimum: 0
+        oldestPendingAgeSeconds:
+          type: integer
+          minimum: 0
+        deadLetterTotal:
+          type: integer
+          minimum: 0
+        deadLetterByProvider:
+          type: object
+          additionalProperties:
+            type: integer
+            minimum: 0
+        acceptedTotal:
+          type: integer
+          minimum: 0
+        droppedTotal:
+          type: integer
+          minimum: 0
+        dedupedTotal:
+          type: integer
+          minimum: 0
+        coalescedTotal:
+          type: integer
+          minimum: 0
+        dedupeRate:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 1
+        coalesceRate:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 1
+        suppressedTotal:
+          type: integer
+          minimum: 0
+        staleTotal:
+          type: integer
+          minimum: 0
+        ingressByProvider:
+          type: object
+          additionalProperties:
+            type: object
+            additionalProperties: false
+            required:
+              - acceptedTotal
+              - droppedTotal
+              - dedupedTotal
+              - coalescedTotal
+              - pendingTotal
+              - oldestPendingAgeSeconds
+              - suppressedTotal
+              - staleTotal
+              - dedupeRate
+              - coalesceRate
+            properties:
+              acceptedTotal:
+                type: integer
+                minimum: 0
+              droppedTotal:
+                type: integer
+                minimum: 0
+              dedupedTotal:
+                type: integer
+                minimum: 0
+              coalescedTotal:
+                type: integer
+                minimum: 0
+              pendingTotal:
+                type: integer
+                minimum: 0
+              oldestPendingAgeSeconds:
+                type: integer
+                minimum: 0
+              suppressedTotal:
+                type: integer
+                minimum: 0
+              staleTotal:
+                type: integer
+                minimum: 0
+              dedupeRate:
+                type: number
+                format: float
+                minimum: 0
+                maximum: 1
+              coalesceRate:
+                type: number
+                format: float
+                minimum: 0
+                maximum: 1
+
+    DeadLetterFeedResponse:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/DeadLetterItem'
+        nextCursor:
+          type: string
+          nullable: true
+
+    DeadLetterItem:
+      type: object
+      additionalProperties: false
+      required:
+        - envelopeId
+        - workspaceId
+        - provider
+        - deliveryId
+        - failedAt
+        - attemptCount
+        - lastError
+      properties:
+        envelopeId:
+          type: string
+        workspaceId:
+          type: string
+        provider:
+          type: string
+        deliveryId:
+          type: string
+        correlationId:
+          type: string
+        failedAt:
+          type: string
+          format: date-time
+        attemptCount:
+          type: integer
+          minimum: 1
+        lastError:
+          type: string
+
+    WebhookEnvelopeRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - envelopeId
+        - workspaceId
+        - provider
+        - deliveryId
+        - receivedAt
+        - payload
+        - correlationId
+      properties:
+        envelopeId:
+          type: string
+        workspaceId:
+          type: string
+        provider:
+          type: string
+        deliveryId:
+          type: string
+        receivedAt:
+          type: string
+          format: date-time
+        headers:
+          type: object
+          additionalProperties:
+            type: string
+        payload:
+          type: object
+          additionalProperties: true
+        correlationId:
+          type: string
+
+    QueuedResponse:
+      type: object
+      additionalProperties: false
+      required: [status, id]
+      properties:
+        status:
+          type: string
+          enum: [queued]
+        id:
+          type: string
+        correlationId:
+          type: string
+
+    AckResponse:
+      type: object
+      additionalProperties: false
+      required: [status, id]
+      properties:
+        status:
+          type: string
+          enum: [acknowledged]
+        id:
+          type: string
+        correlationId:
+          type: string
+
+    ErrorResponse:
+      type: object
+      additionalProperties: false
+      required: [code, message, correlationId]
+      properties:
+        code:
+          type: string
+        message:
+          type: string
+        correlationId:
+          type: string
+        details:
+          type: object
+          additionalProperties: true
+
+    ConflictErrorResponse:
+      allOf:
+        - $ref: '#/components/schemas/ErrorResponse'
+        - type: object
+          additionalProperties: false
+          required: [expectedRevision, currentRevision]
+          properties:
+            expectedRevision:
+              type: string
+            currentRevision:
+              type: string
+            currentContentPreview:
+              type: string
+              maxLength: 4000
