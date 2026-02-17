@@ -826,6 +826,67 @@ paths:
           schema:
             type: boolean
             default: false
+        - name: cursor
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 5000
+            default: 200
+        - name: includeWorkspaces
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: true
+        - name: statusErrorThreshold
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: lagSecondsThreshold
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            default: 30
+        - name: deadLetteredEnvelopesThreshold
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: deadLetteredOpsThreshold
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: maxAlerts
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+            maximum: 10000
+            default: 200
+        - name: includeAlerts
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: true
       responses:
         '200':
           description: Workspace sync status map
@@ -1354,12 +1415,75 @@ components:
             type: integer
             minimum: 0
 
+    AdminSyncAlert:
+      type: object
+      additionalProperties: false
+      required: [workspaceId, provider, type, severity, value, threshold, message]
+      properties:
+        workspaceId:
+          type: string
+        provider:
+          type: string
+        type:
+          type: string
+          enum: [status_error, lag_seconds, dead_lettered_envelopes, dead_lettered_ops]
+        severity:
+          type: string
+          enum: [warning, critical]
+        value:
+          type: number
+          format: float
+        threshold:
+          type: number
+          format: float
+        message:
+          type: string
+
+    AdminSyncAlertThresholds:
+      type: object
+      additionalProperties: false
+      required: [statusError, lagSeconds, deadLetteredEnvelopes, deadLetteredOps]
+      properties:
+        statusError:
+          type: integer
+          minimum: 1
+        lagSeconds:
+          type: integer
+          minimum: 1
+        deadLetteredEnvelopes:
+          type: integer
+          minimum: 1
+        deadLetteredOps:
+          type: integer
+          minimum: 1
+
+    AdminSyncAlertTotals:
+      type: object
+      additionalProperties: false
+      required: [total, critical, warning, byType]
+      properties:
+        total:
+          type: integer
+          minimum: 0
+        critical:
+          type: integer
+          minimum: 0
+        warning:
+          type: integer
+          minimum: 0
+        byType:
+          type: object
+          additionalProperties:
+            type: integer
+            minimum: 0
+
     AdminSyncStatusMapResponse:
       type: object
       additionalProperties: false
       required:
         - generatedAt
         - workspaceCount
+        - returnedWorkspaceCount
         - workspaceIds
         - providerStatusCount
         - healthyCount
@@ -1368,6 +1492,10 @@ components:
         - pausedCount
         - deadLetteredEnvelopesTotal
         - deadLetteredOpsTotal
+        - thresholds
+        - alertTotals
+        - alertsTruncated
+        - alerts
         - failureCodes
         - workspaces
       properties:
@@ -1377,10 +1505,16 @@ components:
         workspaceCount:
           type: integer
           minimum: 0
+        returnedWorkspaceCount:
+          type: integer
+          minimum: 0
         workspaceIds:
           type: array
           items:
             type: string
+        nextCursor:
+          type: string
+          nullable: true
         providerStatusCount:
           type: integer
           minimum: 0
@@ -1402,6 +1536,16 @@ components:
         deadLetteredOpsTotal:
           type: integer
           minimum: 0
+        thresholds:
+          $ref: '#/components/schemas/AdminSyncAlertThresholds'
+        alertTotals:
+          $ref: '#/components/schemas/AdminSyncAlertTotals'
+        alertsTruncated:
+          type: boolean
+        alerts:
+          type: array
+          items:
+            $ref: '#/components/schemas/AdminSyncAlert'
         failureCodes:
           type: object
           additionalProperties:

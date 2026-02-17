@@ -705,6 +705,47 @@ func (s *Server) handleAdminSync(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_request", "invalid nonZeroOnly", correlationID)
 		return
 	}
+	workspaceCursor := strings.TrimSpace(r.URL.Query().Get("cursor"))
+	workspaceLimit, workspaceLimitErr := parseOptionalBoundedInt(r.URL.Query().Get("limit"), 200, 1, 5_000)
+	if workspaceLimitErr != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", "invalid limit", correlationID)
+		return
+	}
+	includeWorkspaces, includeWorkspacesErr := parseOptionalBool(r.URL.Query().Get("includeWorkspaces"), true)
+	if includeWorkspacesErr != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", "invalid includeWorkspaces", correlationID)
+		return
+	}
+	statusErrorThreshold, statusErrorThresholdErr := parseOptionalBoundedInt(r.URL.Query().Get("statusErrorThreshold"), 1, 1, 1_000_000)
+	if statusErrorThresholdErr != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", "invalid statusErrorThreshold", correlationID)
+		return
+	}
+	lagSecondsThreshold, lagSecondsThresholdErr := parseOptionalBoundedInt(r.URL.Query().Get("lagSecondsThreshold"), 30, 1, 1_000_000)
+	if lagSecondsThresholdErr != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", "invalid lagSecondsThreshold", correlationID)
+		return
+	}
+	deadLetteredEnvelopesThreshold, deadLetteredEnvelopesThresholdErr := parseOptionalBoundedInt(r.URL.Query().Get("deadLetteredEnvelopesThreshold"), 1, 1, 1_000_000)
+	if deadLetteredEnvelopesThresholdErr != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", "invalid deadLetteredEnvelopesThreshold", correlationID)
+		return
+	}
+	deadLetteredOpsThreshold, deadLetteredOpsThresholdErr := parseOptionalBoundedInt(r.URL.Query().Get("deadLetteredOpsThreshold"), 1, 1, 1_000_000)
+	if deadLetteredOpsThresholdErr != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", "invalid deadLetteredOpsThreshold", correlationID)
+		return
+	}
+	maxAlerts, maxAlertsErr := parseOptionalBoundedInt(r.URL.Query().Get("maxAlerts"), 200, 0, 10_000)
+	if maxAlertsErr != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", "invalid maxAlerts", correlationID)
+		return
+	}
+	includeAlerts, includeAlertsErr := parseOptionalBool(r.URL.Query().Get("includeAlerts"), true)
+	if includeAlertsErr != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", "invalid includeAlerts", correlationID)
+		return
+	}
 
 	statuses := map[string]relayfile.SyncStatus{}
 	if workspaceID != "" {
@@ -741,6 +782,34 @@ func (s *Server) handleAdminSync(w http.ResponseWriter, r *http.Request) {
 		workspaceIDs = append(workspaceIDs, wsID)
 	}
 	sort.Strings(workspaceIDs)
+	totalWorkspaceCount := len(workspaceIDs)
+	pagedWorkspaceIDs := []string{}
+	pagedStatuses := map[string]relayfile.SyncStatus{}
+	var nextCursor *string
+	if includeWorkspaces {
+		start := 0
+		if workspaceCursor != "" {
+			idx := sort.SearchStrings(workspaceIDs, workspaceCursor)
+			if idx >= len(workspaceIDs) || workspaceIDs[idx] != workspaceCursor {
+				writeError(w, http.StatusBadRequest, "bad_request", "invalid cursor", correlationID)
+				return
+			}
+			start = idx + 1
+		}
+		end := start + workspaceLimit
+		if end > len(workspaceIDs) {
+			end = len(workspaceIDs)
+		}
+		pagedWorkspaceIDs = workspaceIDs[start:end]
+		pagedStatuses = make(map[string]relayfile.SyncStatus, len(pagedWorkspaceIDs))
+		for _, wsID := range pagedWorkspaceIDs {
+			pagedStatuses[wsID] = statuses[wsID]
+		}
+		if end < len(workspaceIDs) && len(pagedWorkspaceIDs) > 0 {
+			next := pagedWorkspaceIDs[len(pagedWorkspaceIDs)-1]
+			nextCursor = &next
+		}
+	}
 
 	providerStatusCount := 0
 	healthyCount := 0
@@ -750,6 +819,16 @@ func (s *Server) handleAdminSync(w http.ResponseWriter, r *http.Request) {
 	deadLetteredEnvelopesTotal := 0
 	deadLetteredOpsTotal := 0
 	failureCodes := map[string]int{}
+	type syncAlert struct {
+		WorkspaceID string  `json:"workspaceId"`
+		Provider    string  `json:"provider"`
+		Type        string  `json:"type"`
+		Severity    string  `json:"severity"`
+		Value       float64 `json:"value"`
+		Threshold   float64 `json:"threshold"`
+		Message     string  `json:"message"`
+	}
+	alerts := make([]syncAlert, 0)
 	for _, status := range statuses {
 		for _, providerStatus := range status.Providers {
 			providerStatusCount++
@@ -770,11 +849,108 @@ func (s *Server) handleAdminSync(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	for wsID, status := range statuses {
+		for _, providerStatus := range status.Providers {
+			if providerStatus.Status == "error" && statusErrorThreshold <= 1 {
+				alerts = append(alerts, syncAlert{
+					WorkspaceID: wsID,
+					Provider:    providerStatus.Provider,
+					Type:        "status_error",
+					Severity:    "critical",
+					Value:       1,
+					Threshold:   float64(statusErrorThreshold),
+					Message:     "provider sync status is error",
+				})
+			}
+			if providerStatus.LagSeconds >= lagSecondsThreshold {
+				alerts = append(alerts, syncAlert{
+					WorkspaceID: wsID,
+					Provider:    providerStatus.Provider,
+					Type:        "lag_seconds",
+					Severity:    "warning",
+					Value:       float64(providerStatus.LagSeconds),
+					Threshold:   float64(lagSecondsThreshold),
+					Message:     "provider lag exceeds threshold",
+				})
+			}
+			if providerStatus.DeadLetteredEnvelopes >= deadLetteredEnvelopesThreshold {
+				alerts = append(alerts, syncAlert{
+					WorkspaceID: wsID,
+					Provider:    providerStatus.Provider,
+					Type:        "dead_lettered_envelopes",
+					Severity:    "critical",
+					Value:       float64(providerStatus.DeadLetteredEnvelopes),
+					Threshold:   float64(deadLetteredEnvelopesThreshold),
+					Message:     "dead-lettered envelopes exceed threshold",
+				})
+			}
+			if providerStatus.DeadLetteredOps >= deadLetteredOpsThreshold {
+				alerts = append(alerts, syncAlert{
+					WorkspaceID: wsID,
+					Provider:    providerStatus.Provider,
+					Type:        "dead_lettered_ops",
+					Severity:    "warning",
+					Value:       float64(providerStatus.DeadLetteredOps),
+					Threshold:   float64(deadLetteredOpsThreshold),
+					Message:     "dead-lettered writeback operations exceed threshold",
+				})
+			}
+		}
+	}
+	severityRank := func(severity string) int {
+		if severity == "critical" {
+			return 0
+		}
+		return 1
+	}
+	sort.Slice(alerts, func(i, j int) bool {
+		if severityRank(alerts[i].Severity) != severityRank(alerts[j].Severity) {
+			return severityRank(alerts[i].Severity) < severityRank(alerts[j].Severity)
+		}
+		if alerts[i].WorkspaceID != alerts[j].WorkspaceID {
+			return alerts[i].WorkspaceID < alerts[j].WorkspaceID
+		}
+		if alerts[i].Provider != alerts[j].Provider {
+			return alerts[i].Provider < alerts[j].Provider
+		}
+		if alerts[i].Type != alerts[j].Type {
+			return alerts[i].Type < alerts[j].Type
+		}
+		return alerts[i].Value > alerts[j].Value
+	})
+	alertTotals := struct {
+		Total    int            `json:"total"`
+		Critical int            `json:"critical"`
+		Warning  int            `json:"warning"`
+		ByType   map[string]int `json:"byType"`
+	}{
+		ByType: map[string]int{},
+	}
+	for _, alert := range alerts {
+		alertTotals.Total++
+		alertTotals.ByType[alert.Type]++
+		if alert.Severity == "critical" {
+			alertTotals.Critical++
+		} else if alert.Severity == "warning" {
+			alertTotals.Warning++
+		}
+	}
+	alertsTruncated := false
+	if len(alerts) > maxAlerts {
+		alerts = alerts[:maxAlerts]
+		alertsTruncated = true
+	}
+	if !includeAlerts {
+		alerts = []syncAlert{}
+		alertsTruncated = false
+	}
 
 	writeJSON(w, http.StatusOK, struct {
 		GeneratedAt                  string                           `json:"generatedAt"`
 		WorkspaceCount               int                              `json:"workspaceCount"`
+		ReturnedWorkspaceCount       int                              `json:"returnedWorkspaceCount"`
 		WorkspaceIDs                 []string                         `json:"workspaceIds"`
+		NextCursor                   *string                          `json:"nextCursor"`
 		ProviderStatusCount          int                              `json:"providerStatusCount"`
 		HealthyCount                 int                              `json:"healthyCount"`
 		LaggingCount                 int                              `json:"laggingCount"`
@@ -782,12 +958,28 @@ func (s *Server) handleAdminSync(w http.ResponseWriter, r *http.Request) {
 		PausedCount                  int                              `json:"pausedCount"`
 		DeadLetteredEnvelopesTotal   int                              `json:"deadLetteredEnvelopesTotal"`
 		DeadLetteredOpsTotal         int                              `json:"deadLetteredOpsTotal"`
+		Thresholds                   struct {
+			StatusError         int `json:"statusError"`
+			LagSeconds          int `json:"lagSeconds"`
+			DeadLetteredEnvelopes int `json:"deadLetteredEnvelopes"`
+			DeadLetteredOps     int `json:"deadLetteredOps"`
+		} `json:"thresholds"`
+		AlertTotals                  struct {
+			Total    int            `json:"total"`
+			Critical int            `json:"critical"`
+			Warning  int            `json:"warning"`
+			ByType   map[string]int `json:"byType"`
+		} `json:"alertTotals"`
+		AlertsTruncated              bool                             `json:"alertsTruncated"`
+		Alerts                       []syncAlert                      `json:"alerts"`
 		FailureCodes                 map[string]int                   `json:"failureCodes"`
 		Workspaces                   map[string]relayfile.SyncStatus  `json:"workspaces"`
 	}{
 		GeneratedAt:                time.Now().UTC().Format(time.RFC3339Nano),
-		WorkspaceCount:             len(workspaceIDs),
-		WorkspaceIDs:               workspaceIDs,
+		WorkspaceCount:             totalWorkspaceCount,
+		ReturnedWorkspaceCount:     len(pagedStatuses),
+		WorkspaceIDs:               pagedWorkspaceIDs,
+		NextCursor:                 nextCursor,
 		ProviderStatusCount:        providerStatusCount,
 		HealthyCount:               healthyCount,
 		LaggingCount:               laggingCount,
@@ -795,8 +987,22 @@ func (s *Server) handleAdminSync(w http.ResponseWriter, r *http.Request) {
 		PausedCount:                pausedCount,
 		DeadLetteredEnvelopesTotal: deadLetteredEnvelopesTotal,
 		DeadLetteredOpsTotal:       deadLetteredOpsTotal,
+		Thresholds: struct {
+			StatusError         int `json:"statusError"`
+			LagSeconds          int `json:"lagSeconds"`
+			DeadLetteredEnvelopes int `json:"deadLetteredEnvelopes"`
+			DeadLetteredOps     int `json:"deadLetteredOps"`
+		}{
+			StatusError:         statusErrorThreshold,
+			LagSeconds:          lagSecondsThreshold,
+			DeadLetteredEnvelopes: deadLetteredEnvelopesThreshold,
+			DeadLetteredOps:     deadLetteredOpsThreshold,
+		},
+		AlertTotals:                alertTotals,
+		AlertsTruncated:            alertsTruncated,
+		Alerts:                     alerts,
 		FailureCodes:               failureCodes,
-		Workspaces:                 statuses,
+		Workspaces:                 pagedStatuses,
 	})
 }
 

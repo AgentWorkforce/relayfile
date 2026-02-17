@@ -160,6 +160,65 @@ func TestSyncOncePreservesLocalBufferOnConflict(t *testing.T) {
 	}
 }
 
+func TestSyncOnceClearsDirtyStateWhenRemoteConverges(t *testing.T) {
+	client := &fakeClient{
+		files: map[string]RemoteFile{
+			"/notion/Docs/A.md": {
+				Path:        "/notion/Docs/A.md",
+				Revision:    "rev_1",
+				ContentType: "text/markdown",
+				Content:     "# A",
+			},
+		},
+		revisionCounter: 1,
+	}
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_mount_conflict_recovery",
+		RemoteRoot:  "/notion",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("initial sync failed: %v", err)
+	}
+
+	localFile := filepath.Join(localDir, "Docs", "A.md")
+	client.files["/notion/Docs/A.md"] = RemoteFile{
+		Path:        "/notion/Docs/A.md",
+		Revision:    "rev_remote",
+		ContentType: "text/markdown",
+		Content:     "# remote",
+	}
+	if err := os.WriteFile(localFile, []byte("# local"), 0o644); err != nil {
+		t.Fatalf("write local edit failed: %v", err)
+	}
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("sync conflict cycle failed: %v", err)
+	}
+
+	client.files["/notion/Docs/A.md"] = RemoteFile{
+		Path:        "/notion/Docs/A.md",
+		Revision:    "rev_remote_2",
+		ContentType: "text/markdown",
+		Content:     "# local",
+	}
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("sync convergence cycle failed: %v", err)
+	}
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("sync steady-state cycle failed: %v", err)
+	}
+	if client.files["/notion/Docs/A.md"].Revision != "rev_remote_2" {
+		t.Fatalf("expected no additional writeback after remote convergence, got revision %q", client.files["/notion/Docs/A.md"].Revision)
+	}
+	if client.files["/notion/Docs/A.md"].Content != "# local" {
+		t.Fatalf("expected converged remote content to remain '# local', got %q", client.files["/notion/Docs/A.md"].Content)
+	}
+}
+
 func TestSyncOnceUsesEventCursorForIncrementalPull(t *testing.T) {
 	client := &fakeClient{
 		files: map[string]RemoteFile{

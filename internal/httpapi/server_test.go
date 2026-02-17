@@ -3027,9 +3027,26 @@ func TestAdminSyncEndpoint(t *testing.T) {
 	}
 	var payload struct {
 		WorkspaceCount             int                             `json:"workspaceCount"`
+		ReturnedWorkspaceCount     int                             `json:"returnedWorkspaceCount"`
+		WorkspaceIDs               []string                        `json:"workspaceIds"`
+		NextCursor                 *string                         `json:"nextCursor"`
 		ProviderStatusCount        int                             `json:"providerStatusCount"`
 		ErrorCount                 int                             `json:"errorCount"`
 		DeadLetteredEnvelopesTotal int                             `json:"deadLetteredEnvelopesTotal"`
+		Thresholds                 struct {
+			StatusError           int `json:"statusError"`
+			LagSeconds            int `json:"lagSeconds"`
+			DeadLetteredEnvelopes int `json:"deadLetteredEnvelopes"`
+			DeadLetteredOps       int `json:"deadLetteredOps"`
+		} `json:"thresholds"`
+		AlertTotals struct {
+			Total    int            `json:"total"`
+			Critical int            `json:"critical"`
+			Warning  int            `json:"warning"`
+			ByType   map[string]int `json:"byType"`
+		} `json:"alertTotals"`
+		AlertsTruncated bool                            `json:"alertsTruncated"`
+		Alerts         []map[string]any                 `json:"alerts"`
 		FailureCodes               map[string]int                  `json:"failureCodes"`
 		Workspaces                 map[string]relayfile.SyncStatus `json:"workspaces"`
 	}
@@ -3039,17 +3056,117 @@ func TestAdminSyncEndpoint(t *testing.T) {
 	if payload.WorkspaceCount < 2 {
 		t.Fatalf("expected at least two workspaces in admin sync payload, got %d", payload.WorkspaceCount)
 	}
+	if payload.ReturnedWorkspaceCount < 2 {
+		t.Fatalf("expected at least two returned workspaces in admin sync payload, got %d", payload.ReturnedWorkspaceCount)
+	}
+	if len(payload.WorkspaceIDs) != payload.ReturnedWorkspaceCount || payload.NextCursor != nil {
+		t.Fatalf("unexpected workspace pagination payload: ids=%d returned=%d nextCursor=%v", len(payload.WorkspaceIDs), payload.ReturnedWorkspaceCount, payload.NextCursor)
+	}
 	if payload.ProviderStatusCount < 2 {
 		t.Fatalf("expected at least two provider statuses in admin sync payload, got %d", payload.ProviderStatusCount)
 	}
 	if payload.ErrorCount < 1 || payload.DeadLetteredEnvelopesTotal < 1 || payload.FailureCodes["unknown"] < 1 {
 		t.Fatalf("expected aggregated error counters in admin sync payload, got %+v", payload)
 	}
+	if payload.Thresholds.StatusError != 1 || payload.Thresholds.LagSeconds != 30 || payload.Thresholds.DeadLetteredEnvelopes != 1 || payload.Thresholds.DeadLetteredOps != 1 {
+		t.Fatalf("unexpected default admin sync thresholds: %+v", payload.Thresholds)
+	}
+	if payload.AlertTotals.Total < 2 || payload.AlertTotals.Critical < 2 || payload.AlertTotals.ByType["status_error"] < 1 || payload.AlertTotals.ByType["dead_lettered_envelopes"] < 1 {
+		t.Fatalf("expected status_error and dead_lettered_envelopes alerts in admin sync payload, got %+v", payload.AlertTotals)
+	}
+	if payload.AlertsTruncated {
+		t.Fatalf("expected alertsTruncated=false for baseline admin sync payload")
+	}
+	if len(payload.Alerts) < 2 {
+		t.Fatalf("expected at least two admin sync alerts in baseline payload, got %+v", payload.Alerts)
+	}
 	if _, ok := payload.Workspaces["ws_admin_sync_healthy"]; !ok {
 		t.Fatalf("expected ws_admin_sync_healthy in admin sync payload")
 	}
 	if _, ok := payload.Workspaces["ws_admin_sync_error"]; !ok {
 		t.Fatalf("expected ws_admin_sync_error in admin sync payload")
+	}
+	summaryOnlyResp := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/admin/sync?includeWorkspaces=false&cursor=missing_workspace&limit=1",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + adminToken,
+			"X-Correlation-Id": "corr_admin_sync_2_summary_only",
+		},
+	})
+	if summaryOnlyResp.Code != http.StatusOK {
+		t.Fatalf("expected 200 for summary-only admin sync endpoint, got %d (%s)", summaryOnlyResp.Code, summaryOnlyResp.Body.String())
+	}
+	var summaryOnlyPayload struct {
+		WorkspaceCount         int                             `json:"workspaceCount"`
+		ReturnedWorkspaceCount int                             `json:"returnedWorkspaceCount"`
+		WorkspaceIDs           []string                        `json:"workspaceIds"`
+		NextCursor             *string                         `json:"nextCursor"`
+		Workspaces             map[string]relayfile.SyncStatus `json:"workspaces"`
+	}
+	if err := json.NewDecoder(summaryOnlyResp.Body).Decode(&summaryOnlyPayload); err != nil {
+		t.Fatalf("decode summary-only admin sync payload: %v", err)
+	}
+	if summaryOnlyPayload.WorkspaceCount < 2 || summaryOnlyPayload.ReturnedWorkspaceCount != 0 || len(summaryOnlyPayload.WorkspaceIDs) != 0 || len(summaryOnlyPayload.Workspaces) != 0 || summaryOnlyPayload.NextCursor != nil {
+		t.Fatalf("unexpected summary-only admin sync payload: %+v", summaryOnlyPayload)
+	}
+	pageOneResp := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/admin/sync?limit=1",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + adminToken,
+			"X-Correlation-Id": "corr_admin_sync_2_page_one",
+		},
+	})
+	if pageOneResp.Code != http.StatusOK {
+		t.Fatalf("expected 200 for page one admin sync endpoint, got %d (%s)", pageOneResp.Code, pageOneResp.Body.String())
+	}
+	var pageOnePayload struct {
+		WorkspaceCount         int      `json:"workspaceCount"`
+		ReturnedWorkspaceCount int      `json:"returnedWorkspaceCount"`
+		WorkspaceIDs           []string `json:"workspaceIds"`
+		NextCursor             *string  `json:"nextCursor"`
+	}
+	if err := json.NewDecoder(pageOneResp.Body).Decode(&pageOnePayload); err != nil {
+		t.Fatalf("decode page one admin sync payload: %v", err)
+	}
+	if pageOnePayload.WorkspaceCount < 2 || pageOnePayload.ReturnedWorkspaceCount != 1 || len(pageOnePayload.WorkspaceIDs) != 1 || pageOnePayload.NextCursor == nil {
+		t.Fatalf("unexpected page one admin sync payload: %+v", pageOnePayload)
+	}
+	pageTwoResp := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/admin/sync?limit=1&cursor=" + *pageOnePayload.NextCursor,
+		headers: map[string]string{
+			"Authorization":    "Bearer " + adminToken,
+			"X-Correlation-Id": "corr_admin_sync_2_page_two",
+		},
+	})
+	if pageTwoResp.Code != http.StatusOK {
+		t.Fatalf("expected 200 for page two admin sync endpoint, got %d (%s)", pageTwoResp.Code, pageTwoResp.Body.String())
+	}
+	var pageTwoPayload struct {
+		ReturnedWorkspaceCount int      `json:"returnedWorkspaceCount"`
+		WorkspaceIDs           []string `json:"workspaceIds"`
+	}
+	if err := json.NewDecoder(pageTwoResp.Body).Decode(&pageTwoPayload); err != nil {
+		t.Fatalf("decode page two admin sync payload: %v", err)
+	}
+	if pageTwoPayload.ReturnedWorkspaceCount != 1 || len(pageTwoPayload.WorkspaceIDs) != 1 {
+		t.Fatalf("unexpected page two admin sync payload: %+v", pageTwoPayload)
+	}
+	if pageTwoPayload.WorkspaceIDs[0] == pageOnePayload.WorkspaceIDs[0] {
+		t.Fatalf("expected page two workspace id to differ from page one for admin sync endpoint")
+	}
+	invalidCursorResp := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/admin/sync?limit=1&cursor=missing_workspace",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + adminToken,
+			"X-Correlation-Id": "corr_admin_sync_bad_cursor",
+		},
+	})
+	if invalidCursorResp.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for invalid admin sync cursor, got %d (%s)", invalidCursorResp.Code, invalidCursorResp.Body.String())
 	}
 
 	filteredResp := doRequest(t, server, request{
@@ -3077,6 +3194,65 @@ func TestAdminSyncEndpoint(t *testing.T) {
 	if _, ok := filteredPayload.Workspaces["ws_admin_sync_error"]; !ok {
 		t.Fatalf("expected ws_admin_sync_error in provider-filtered admin sync payload, got %+v", filteredPayload.Workspaces)
 	}
+	summaryOnlyAlertsResp := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/admin/sync?workspaceId=ws_admin_sync_error&includeAlerts=false",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + adminToken,
+			"X-Correlation-Id": "corr_admin_sync_4",
+		},
+	})
+	if summaryOnlyAlertsResp.Code != http.StatusOK {
+		t.Fatalf("expected 200 for includeAlerts=false admin sync endpoint, got %d (%s)", summaryOnlyAlertsResp.Code, summaryOnlyAlertsResp.Body.String())
+	}
+	var summaryOnlyAlertsPayload struct {
+		AlertTotals struct {
+			Total    int            `json:"total"`
+			Critical int            `json:"critical"`
+			ByType   map[string]int `json:"byType"`
+		} `json:"alertTotals"`
+		AlertsTruncated bool            `json:"alertsTruncated"`
+		Alerts          []map[string]any `json:"alerts"`
+	}
+	if err := json.NewDecoder(summaryOnlyAlertsResp.Body).Decode(&summaryOnlyAlertsPayload); err != nil {
+		t.Fatalf("decode includeAlerts=false admin sync payload: %v", err)
+	}
+	if summaryOnlyAlertsPayload.AlertsTruncated {
+		t.Fatalf("expected alertsTruncated=false when includeAlerts=false for admin sync")
+	}
+	if len(summaryOnlyAlertsPayload.Alerts) != 0 {
+		t.Fatalf("expected no alerts when includeAlerts=false for admin sync, got %+v", summaryOnlyAlertsPayload.Alerts)
+	}
+	if summaryOnlyAlertsPayload.AlertTotals.Total < 2 || summaryOnlyAlertsPayload.AlertTotals.Critical < 2 || summaryOnlyAlertsPayload.AlertTotals.ByType["status_error"] < 1 {
+		t.Fatalf("expected alert totals to remain when includeAlerts=false for admin sync, got %+v", summaryOnlyAlertsPayload.AlertTotals)
+	}
+	truncatedAlertsResp := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/admin/sync?workspaceId=ws_admin_sync_error&maxAlerts=1",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + adminToken,
+			"X-Correlation-Id": "corr_admin_sync_5",
+		},
+	})
+	if truncatedAlertsResp.Code != http.StatusOK {
+		t.Fatalf("expected 200 for truncated admin sync alert payload, got %d (%s)", truncatedAlertsResp.Code, truncatedAlertsResp.Body.String())
+	}
+	var truncatedAlertsPayload struct {
+		AlertsTruncated bool `json:"alertsTruncated"`
+		AlertTotals     struct {
+			Total int `json:"total"`
+		} `json:"alertTotals"`
+		Alerts []map[string]any `json:"alerts"`
+	}
+	if err := json.NewDecoder(truncatedAlertsResp.Body).Decode(&truncatedAlertsPayload); err != nil {
+		t.Fatalf("decode truncated admin sync alert payload: %v", err)
+	}
+	if !truncatedAlertsPayload.AlertsTruncated {
+		t.Fatalf("expected alertsTruncated=true for admin sync maxAlerts=1 payload")
+	}
+	if truncatedAlertsPayload.AlertTotals.Total < 2 || len(truncatedAlertsPayload.Alerts) != 1 {
+		t.Fatalf("expected admin sync alert totals to remain untruncated with one returned alert, got totals=%+v alerts=%+v", truncatedAlertsPayload.AlertTotals, truncatedAlertsPayload.Alerts)
+	}
 
 	invalidNonZeroOnlyResp := doRequest(t, server, request{
 		method: http.MethodGet,
@@ -3088,6 +3264,28 @@ func TestAdminSyncEndpoint(t *testing.T) {
 	})
 	if invalidNonZeroOnlyResp.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400 for invalid admin sync nonZeroOnly, got %d (%s)", invalidNonZeroOnlyResp.Code, invalidNonZeroOnlyResp.Body.String())
+	}
+	invalidIncludeWorkspacesResp := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/admin/sync?includeWorkspaces=maybe",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + adminToken,
+			"X-Correlation-Id": "corr_admin_sync_bad_include_workspaces",
+		},
+	})
+	if invalidIncludeWorkspacesResp.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for invalid admin sync includeWorkspaces, got %d (%s)", invalidIncludeWorkspacesResp.Code, invalidIncludeWorkspacesResp.Body.String())
+	}
+	invalidLagThresholdResp := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/admin/sync?lagSecondsThreshold=0",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + adminToken,
+			"X-Correlation-Id": "corr_admin_sync_bad_lag_threshold",
+		},
+	})
+	if invalidLagThresholdResp.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for invalid admin sync lagSecondsThreshold, got %d (%s)", invalidLagThresholdResp.Code, invalidLagThresholdResp.Body.String())
 	}
 
 	deniedToken := mustTestJWT(

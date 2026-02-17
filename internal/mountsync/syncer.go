@@ -623,6 +623,22 @@ func (s *Syncer) pushLocal(ctx context.Context) (map[string]struct{}, error) {
 		if exists && tracked.Hash == snapshot.Hash && !tracked.Dirty {
 			continue
 		}
+		if exists && tracked.Dirty {
+			remoteFile, readErr := s.client.ReadFile(ctx, s.workspace, remotePath)
+			if readErr == nil && hashString(remoteFile.Content) == snapshot.Hash {
+				contentType := strings.TrimSpace(remoteFile.ContentType)
+				if contentType == "" {
+					contentType = snapshot.ContentType
+				}
+				s.state.Files[remotePath] = trackedFile{
+					Revision:    remoteFile.Revision,
+					ContentType: contentType,
+					Hash:        snapshot.Hash,
+					Dirty:       false,
+				}
+				continue
+			}
+		}
 		baseRevision := "0"
 		if exists {
 			baseRevision = tracked.Revision

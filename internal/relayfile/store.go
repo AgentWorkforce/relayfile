@@ -1153,30 +1153,200 @@ func (s *Store) GetSyncStatus(workspaceID string, provider string) (SyncStatus, 
 func (s *Store) ListSyncStatuses(provider string) map[string]SyncStatus {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	normalizedProvider := normalizeProvider(provider)
+
+	type syncProviderAggregate struct {
+		latestProcessedAt         time.Time
+		latestProcessedEnvelopeID string
+		oldestPendingAt           time.Time
+		latestDeadLetterAt        time.Time
+		lastDeadLetterError       string
+		deadLetteredEnvelopes     int
+		latestDeadLetteredOpSeq   int64
+		lastDeadLetteredOpError   string
+		deadLetteredOps           int
+		failureCodes              map[string]int
+	}
+	type syncWorkspaceAggregate struct {
+		providers map[string]*syncProviderAggregate
+	}
 
 	workspaceSet := make(map[string]struct{}, len(s.workspaces)+len(s.ingressByWS))
-	for workspaceID := range s.workspaces {
-		workspaceSet[workspaceID] = struct{}{}
-	}
-	for workspaceID := range s.ingressByWS {
-		workspaceSet[workspaceID] = struct{}{}
-	}
-	for _, envelope := range s.envelopesByID {
-		if envelope.WorkspaceID == "" {
-			continue
+	workspaceAggregates := map[string]*syncWorkspaceAggregate{}
+	ensureWorkspace := func(workspaceID string) *syncWorkspaceAggregate {
+		if workspaceID == "" {
+			return nil
 		}
-		workspaceSet[envelope.WorkspaceID] = struct{}{}
-	}
-	for _, dead := range s.deadLetters {
-		if dead.WorkspaceID == "" {
-			continue
+		workspaceSet[workspaceID] = struct{}{}
+		aggregate := workspaceAggregates[workspaceID]
+		if aggregate == nil {
+			aggregate = &syncWorkspaceAggregate{
+				providers: map[string]*syncProviderAggregate{},
+			}
+			workspaceAggregates[workspaceID] = aggregate
 		}
-		workspaceSet[dead.WorkspaceID] = struct{}{}
+		return aggregate
+	}
+	ensureProvider := func(workspaceAggregate *syncWorkspaceAggregate, providerName string) *syncProviderAggregate {
+		if workspaceAggregate == nil {
+			return nil
+		}
+		providerName = normalizeProvider(providerName)
+		if providerName == "" {
+			return nil
+		}
+		aggregate := workspaceAggregate.providers[providerName]
+		if aggregate == nil {
+			aggregate = &syncProviderAggregate{
+				failureCodes: map[string]int{},
+			}
+			workspaceAggregate.providers[providerName] = aggregate
+		}
+		return aggregate
 	}
 
+	for workspaceID := range s.workspaces {
+		ensureWorkspace(workspaceID)
+	}
+	for workspaceID := range s.ingressByWS {
+		ensureWorkspace(workspaceID)
+	}
+	for envelopeID, envelope := range s.envelopesByID {
+		workspaceAggregate := ensureWorkspace(envelope.WorkspaceID)
+		providerAggregate := ensureProvider(workspaceAggregate, envelope.Provider)
+		if providerAggregate == nil {
+			continue
+		}
+		receivedAt, err := time.Parse(time.RFC3339Nano, envelope.ReceivedAt)
+		if err != nil {
+			continue
+		}
+		if s.processedEnvs[envelopeID] {
+			if providerAggregate.latestProcessedAt.IsZero() ||
+				receivedAt.After(providerAggregate.latestProcessedAt) ||
+				(receivedAt.Equal(providerAggregate.latestProcessedAt) && envelopeID > providerAggregate.latestProcessedEnvelopeID) {
+				providerAggregate.latestProcessedAt = receivedAt
+				providerAggregate.latestProcessedEnvelopeID = envelopeID
+			}
+			continue
+		}
+		if providerAggregate.oldestPendingAt.IsZero() || receivedAt.Before(providerAggregate.oldestPendingAt) {
+			providerAggregate.oldestPendingAt = receivedAt
+		}
+	}
+	for _, dead := range s.deadLetters {
+		workspaceAggregate := ensureWorkspace(dead.WorkspaceID)
+		providerAggregate := ensureProvider(workspaceAggregate, dead.Provider)
+		if providerAggregate == nil {
+			continue
+		}
+		providerAggregate.deadLetteredEnvelopes++
+		providerAggregate.failureCodes[normalizeFailureCode(dead.LastError)]++
+		failedAt, err := time.Parse(time.RFC3339Nano, dead.FailedAt)
+		if err != nil {
+			continue
+		}
+		if providerAggregate.latestDeadLetterAt.IsZero() || failedAt.After(providerAggregate.latestDeadLetterAt) {
+			providerAggregate.latestDeadLetterAt = failedAt
+			providerAggregate.lastDeadLetterError = dead.LastError
+		}
+	}
+	for workspaceID, workspace := range s.workspaces {
+		workspaceAggregate := ensureWorkspace(workspaceID)
+		for _, file := range workspace.Files {
+			_ = ensureProvider(workspaceAggregate, file.Provider)
+		}
+		for opID, op := range workspace.Ops {
+			providerAggregate := ensureProvider(workspaceAggregate, op.Provider)
+			if providerAggregate == nil || op.Status != "dead_lettered" || op.LastError == nil || *op.LastError == "" {
+				continue
+			}
+			providerAggregate.deadLetteredOps++
+			providerAggregate.failureCodes[normalizeFailureCode(*op.LastError)]++
+			seq := operationIDSeq(opID)
+			if seq > providerAggregate.latestDeadLetteredOpSeq {
+				providerAggregate.latestDeadLetteredOpSeq = seq
+				providerAggregate.lastDeadLetteredOpError = *op.LastError
+			}
+		}
+	}
+
+	now := time.Now().UTC()
 	statuses := make(map[string]SyncStatus, len(workspaceSet))
 	for workspaceID := range workspaceSet {
-		statuses[workspaceID] = s.buildSyncStatusLocked(workspaceID, provider)
+		workspaceAggregate := workspaceAggregates[workspaceID]
+		providerNames := []string{}
+		if normalizedProvider != "" {
+			providerNames = append(providerNames, normalizedProvider)
+		} else {
+			providerSet := map[string]struct{}{
+				"notion": {},
+			}
+			if workspaceAggregate != nil {
+				for providerName := range workspaceAggregate.providers {
+					if providerName == "" {
+						continue
+					}
+					providerSet[providerName] = struct{}{}
+				}
+			}
+			providerNames = make([]string, 0, len(providerSet))
+			for providerName := range providerSet {
+				providerNames = append(providerNames, providerName)
+			}
+			sort.Strings(providerNames)
+		}
+
+		providerStatuses := make([]SyncProviderStatus, 0, len(providerNames))
+		for _, providerName := range providerNames {
+			providerStatus := SyncProviderStatus{
+				Provider: providerName,
+				Status:   "healthy",
+			}
+			var providerAggregate *syncProviderAggregate
+			if workspaceAggregate != nil {
+				providerAggregate = workspaceAggregate.providers[providerName]
+			}
+			if providerAggregate != nil {
+				if providerAggregate.latestProcessedEnvelopeID != "" {
+					cursor := providerAggregate.latestProcessedEnvelopeID
+					providerStatus.Cursor = &cursor
+				}
+				if !providerAggregate.latestProcessedAt.IsZero() {
+					watermark := providerAggregate.latestProcessedAt.Format(time.RFC3339Nano)
+					providerStatus.WatermarkTs = &watermark
+				}
+				if !providerAggregate.oldestPendingAt.IsZero() {
+					lagSeconds := int(now.Sub(providerAggregate.oldestPendingAt).Seconds())
+					if lagSeconds < 0 {
+						lagSeconds = 0
+					}
+					providerStatus.LagSeconds = lagSeconds
+					if lagSeconds > 30 {
+						providerStatus.Status = "lagging"
+					}
+				}
+				if providerAggregate.lastDeadLetterError != "" {
+					providerStatus.Status = "error"
+					lastError := providerAggregate.lastDeadLetterError
+					providerStatus.LastError = &lastError
+				} else if providerAggregate.lastDeadLetteredOpError != "" {
+					providerStatus.Status = "error"
+					lastError := providerAggregate.lastDeadLetteredOpError
+					providerStatus.LastError = &lastError
+				}
+				providerStatus.DeadLetteredEnvelopes = providerAggregate.deadLetteredEnvelopes
+				providerStatus.DeadLetteredOps = providerAggregate.deadLetteredOps
+				if len(providerAggregate.failureCodes) > 0 {
+					providerStatus.FailureCodes = providerAggregate.failureCodes
+				}
+			}
+			providerStatuses = append(providerStatuses, providerStatus)
+		}
+		statuses[workspaceID] = SyncStatus{
+			WorkspaceID: workspaceID,
+			Providers:   providerStatuses,
+		}
 	}
 	return statuses
 }

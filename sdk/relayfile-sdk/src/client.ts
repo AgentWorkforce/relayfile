@@ -1,4 +1,5 @@
 import {
+  type AdminSyncStatusResponse,
   type AdminIngressStatusResponse,
   type BackendStatusResponse,
   type AckResponse,
@@ -9,6 +10,7 @@ import {
   type EventFeedResponse,
   type FileReadResponse,
   type GetEventsOptions,
+  type GetAdminSyncStatusOptions,
   type GetAdminIngressStatusOptions,
   type GetOperationsOptions,
   type GetSyncDeadLettersOptions,
@@ -279,6 +281,36 @@ export class RelayFileClient {
     return this.request<AdminIngressStatusResponse>({
       method: "GET",
       path: `/v1/admin/ingress${query}`,
+      correlationId: options.correlationId,
+      signal: options.signal
+    });
+  }
+
+  async getAdminSyncStatus(
+    optionsOrCorrelationId: GetAdminSyncStatusOptions | string = {},
+    signal?: AbortSignal
+  ): Promise<AdminSyncStatusResponse> {
+    const options: GetAdminSyncStatusOptions =
+      typeof optionsOrCorrelationId === "string"
+        ? { correlationId: optionsOrCorrelationId, signal }
+        : optionsOrCorrelationId;
+    const query = buildQuery({
+      workspaceId: options.workspaceId,
+      provider: options.provider,
+      nonZeroOnly: options.nonZeroOnly,
+      cursor: options.cursor,
+      limit: options.limit,
+      includeWorkspaces: options.includeWorkspaces,
+      statusErrorThreshold: options.statusErrorThreshold,
+      lagSecondsThreshold: options.lagSecondsThreshold,
+      deadLetteredEnvelopesThreshold: options.deadLetteredEnvelopesThreshold,
+      deadLetteredOpsThreshold: options.deadLetteredOpsThreshold,
+      maxAlerts: options.maxAlerts,
+      includeAlerts: options.includeAlerts
+    });
+    return this.request<AdminSyncStatusResponse>({
+      method: "GET",
+      path: `/v1/admin/sync${query}`,
       correlationId: options.correlationId,
       signal: options.signal
     });

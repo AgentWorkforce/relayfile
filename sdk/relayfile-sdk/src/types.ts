@@ -177,6 +177,8 @@ export type AdminIngressAlertType = "dead_letters" | "pending_backlog" | "drop_r
 export type AdminIngressAlertSeverity = "warning" | "critical";
 export type AdminIngressAlertProfile = "strict" | "balanced" | "relaxed";
 export type AdminIngressEffectiveAlertProfile = AdminIngressAlertProfile | "custom";
+export type AdminSyncAlertType = "status_error" | "lag_seconds" | "dead_lettered_envelopes" | "dead_lettered_ops";
+export type AdminSyncAlertSeverity = "warning" | "critical";
 
 export interface AdminIngressAlert {
   workspaceId: string;
@@ -195,6 +197,30 @@ export interface AdminIngressAlertThresholds {
 }
 
 export interface AdminIngressAlertTotals {
+  total: number;
+  critical: number;
+  warning: number;
+  byType: Record<string, number>;
+}
+
+export interface AdminSyncAlert {
+  workspaceId: string;
+  provider: string;
+  type: AdminSyncAlertType;
+  severity: AdminSyncAlertSeverity;
+  value: number;
+  threshold: number;
+  message: string;
+}
+
+export interface AdminSyncAlertThresholds {
+  statusError: number;
+  lagSeconds: number;
+  deadLetteredEnvelopes: number;
+  deadLetteredOps: number;
+}
+
+export interface AdminSyncAlertTotals {
   total: number;
   critical: number;
   warning: number;
@@ -227,7 +253,9 @@ export interface AdminIngressStatusResponse {
 export interface AdminSyncStatusResponse {
   generatedAt: string;
   workspaceCount: number;
+  returnedWorkspaceCount: number;
   workspaceIds: string[];
+  nextCursor: string | null;
   providerStatusCount: number;
   healthyCount: number;
   laggingCount: number;
@@ -235,6 +263,10 @@ export interface AdminSyncStatusResponse {
   pausedCount: number;
   deadLetteredEnvelopesTotal: number;
   deadLetteredOpsTotal: number;
+  thresholds: AdminSyncAlertThresholds;
+  alertTotals: AdminSyncAlertTotals;
+  alertsTruncated: boolean;
+  alerts: AdminSyncAlert[];
   failureCodes: Record<string, number>;
   workspaces: Record<string, SyncStatusResponse>;
 }
@@ -289,6 +321,15 @@ export interface GetAdminSyncStatusOptions {
   workspaceId?: string;
   provider?: string;
   nonZeroOnly?: boolean;
+  cursor?: string;
+  limit?: number;
+  includeWorkspaces?: boolean;
+  statusErrorThreshold?: number;
+  lagSecondsThreshold?: number;
+  deadLetteredEnvelopesThreshold?: number;
+  deadLetteredOpsThreshold?: number;
+  maxAlerts?: number;
+  includeAlerts?: boolean;
   correlationId?: string;
   signal?: AbortSignal;
 }

@@ -26,6 +26,7 @@ Queue-first virtual filesystem-over-REST that ingests noisy external webhooks, p
 - Admin:
   - `GET /v1/admin/backends` (active backend profile + queue/state backend types)
   - `GET /v1/admin/ingress` (workspace ingress backlog + reliability counters with summary/alerts, optional `alertProfile` presets plus threshold overrides with `effectiveAlertProfile`, filters, `maxAlerts`, `includeWorkspaces`, `includeAlerts`, and `cursor`/`limit` pagination)
+  - `GET /v1/admin/sync` (cross-workspace sync provider status with aggregated failure-code, dead-letter, and health counters, alert thresholds/totals, optional `maxAlerts` and `includeAlerts`, plus `includeWorkspaces` and `cursor`/`limit` pagination)
   - `POST /v1/admin/replay/envelope/{envelopeId}`
   - `POST /v1/admin/replay/op/{opId}`
 - Sync and ingress:

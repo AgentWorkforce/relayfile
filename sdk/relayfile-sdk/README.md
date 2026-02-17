@@ -38,6 +38,7 @@ const ops = await client.listOps(workspaceId, { status: "dead_lettered", action:
 const sync = await client.getSyncStatus(workspaceId, { provider: "notion" });
 const ingress = await client.getSyncIngressStatus(workspaceId, { provider: "notion" });
 const adminIngress = await client.getAdminIngressStatus({ provider: "notion", alertProfile: "balanced", deadLetterThreshold: 2, nonZeroOnly: true, maxAlerts: 50, includeWorkspaces: true, includeAlerts: true });
+const adminSync = await client.getAdminSyncStatus({ provider: "notion", nonZeroOnly: true, includeWorkspaces: true, limit: 100, lagSecondsThreshold: 45, maxAlerts: 50, includeAlerts: true });
 const deadLetters = await client.getSyncDeadLetters(workspaceId, { provider: "notion", limit: 20 });
 console.log(events.events.length);
 console.log(ops.items.length);
@@ -49,6 +50,7 @@ console.log(ingress.dedupeRate, ingress.coalesceRate);
 console.log(ingress.deadLetterByProvider);
 console.log(ingress.ingressByProvider["notion"]?.pendingTotal, ingress.ingressByProvider["notion"]?.oldestPendingAgeSeconds);
 console.log(adminIngress.alertProfile, adminIngress.effectiveAlertProfile, adminIngress.workspaceCount, adminIngress.returnedWorkspaceCount, adminIngress.nextCursor, adminIngress.pendingTotal, adminIngress.thresholds.deadLetter, adminIngress.alertTotals.critical, adminIngress.alertsTruncated, adminIngress.alerts.length, Object.keys(adminIngress.workspaces));
+console.log(adminSync.workspaceCount, adminSync.returnedWorkspaceCount, adminSync.nextCursor, adminSync.providerStatusCount, adminSync.errorCount, adminSync.failureCodes, adminSync.thresholds.lagSeconds, adminSync.alertTotals.critical, adminSync.alertsTruncated, adminSync.alerts.length);
 console.log(deadLetters.items.length);
 if (deadLetters.items.length > 0) {
   const detail = await client.getSyncDeadLetter(workspaceId, deadLetters.items[0].envelopeId);
@@ -95,4 +97,4 @@ try {
 - `QueueFullError` is thrown for HTTP `429` with `code=queue_full` and surfaces `retryAfterSeconds`.
 - `InvalidStateError` is thrown for HTTP `409` with `code=invalid_state` (for replay preconditions).
 - `replayAdminEnvelope` and `replayAdminOp` call admin replay endpoints and require a token with `admin:replay`.
-- `getBackendStatus` and `getAdminIngressStatus` are admin APIs and require `admin:read` (or `admin:replay`).
+- `getBackendStatus`, `getAdminIngressStatus`, and `getAdminSyncStatus` are admin APIs and require `admin:read` (or `admin:replay`).

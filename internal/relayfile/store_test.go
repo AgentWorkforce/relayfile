@@ -1626,6 +1626,92 @@ func TestListSyncStatusesAggregatesWorkspacesAndAppliesProviderFilter(t *testing
 	}
 }
 
+func TestListSyncStatusesIncludesFailureCodesFromDeadLettersAndOps(t *testing.T) {
+	store := NewStoreWithOptions(StoreOptions{
+		MaxEnvelopeAttempts: 1,
+		EnvelopeRetryDelay:  5 * time.Millisecond,
+		MaxWritebackAttempts: 1,
+		WritebackDelay:       5 * time.Millisecond,
+		Adapters: []ProviderAdapter{
+			testAdapter{
+				provider: "customdead",
+				parseEnvelope: func(req WebhookEnvelopeRequest) ([]ApplyAction, error) {
+					return nil, fmt.Errorf("customdead parse failure")
+				},
+			},
+		},
+		ProviderWrite: func(workspaceID, path, revision string) error {
+			if workspaceID == "ws_sync_list_error_op" {
+				return fmt.Errorf("writeback provider failure")
+			}
+			return nil
+		},
+	})
+	t.Cleanup(store.Close)
+
+	if _, err := store.IngestEnvelope(WebhookEnvelopeRequest{
+		EnvelopeID:    "env_sync_list_error_1",
+		WorkspaceID:   "ws_sync_list_error_env",
+		Provider:      "customdead",
+		DeliveryID:    "delivery_sync_list_error_1",
+		ReceivedAt:    time.Now().UTC().Format(time.RFC3339Nano),
+		Payload:       map[string]any{"type": "customdead.event"},
+		CorrelationID: "corr_sync_list_error_1",
+	}); err != nil {
+		t.Fatalf("ingest dead-letter envelope failed: %v", err)
+	}
+
+	write, err := store.WriteFile(WriteRequest{
+		WorkspaceID:   "ws_sync_list_error_op",
+		Path:          "/notion/ListSyncOpFailure.md",
+		IfMatch:       "0",
+		ContentType:   "text/markdown",
+		Content:       "# op failure",
+		CorrelationID: "corr_sync_list_error_2",
+	})
+	if err != nil {
+		t.Fatalf("write failed: %v", err)
+	}
+	waitForOpStatus(t, store, "ws_sync_list_error_op", write.OpID, "dead_lettered")
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		statuses := store.ListSyncStatuses("")
+		envStatus, envOK := statuses["ws_sync_list_error_env"]
+		opStatus, opOK := statuses["ws_sync_list_error_op"]
+		if !envOK || !opOK {
+			time.Sleep(10 * time.Millisecond)
+			continue
+		}
+
+		var envProvider *SyncProviderStatus
+		for i := range envStatus.Providers {
+			if envStatus.Providers[i].Provider == "customdead" {
+				envProvider = &envStatus.Providers[i]
+				break
+			}
+		}
+		if envProvider == nil || envProvider.Status != "error" || envProvider.DeadLetteredEnvelopes < 1 || envProvider.FailureCodes["unknown"] < 1 {
+			time.Sleep(10 * time.Millisecond)
+			continue
+		}
+
+		var opProvider *SyncProviderStatus
+		for i := range opStatus.Providers {
+			if opStatus.Providers[i].Provider == "notion" {
+				opProvider = &opStatus.Providers[i]
+				break
+			}
+		}
+		if opProvider == nil || opProvider.Status != "error" || opProvider.DeadLetteredOps < 1 || opProvider.FailureCodes["unknown"] < 1 {
+			time.Sleep(10 * time.Millisecond)
+			continue
+		}
+		return
+	}
+	t.Fatalf("expected ListSyncStatuses to include dead-letter failure codes for envelope and writeback error paths")
+}
+
 func TestNormalizeFailureCode(t *testing.T) {
 	cases := []struct {
 		errText string
