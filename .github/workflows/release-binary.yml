@@ -4,11 +4,6 @@ on:
   push:
     branches:
       - main
-    paths:
-      - "cmd/**"
-      - "internal/**"
-      - "go.mod"
-      - "go.sum"
 
 permissions:
   contents: write
