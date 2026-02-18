@@ -1,6 +1,6 @@
 {
   "name": "@agent-relay/relayfile-sdk",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "TypeScript SDK for the RelayFile filesystem-over-REST API.",
   "license": "Apache-2.0",
   "type": "module",
