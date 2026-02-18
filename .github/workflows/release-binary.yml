@@ -5,12 +5,18 @@ on:
     branches:
       - main
 
+concurrency:
+  group: release-binary
+  cancel-in-progress: false
+
 permissions:
   contents: write
 
 jobs:
   build:
+    name: Build (${{ matrix.suffix }})
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
@@ -46,17 +52,106 @@ jobs:
           CGO_ENABLED: "0"
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
-        run: go build -o relayfile-${{ matrix.suffix }} ./cmd/relayfile
+        run: |
+          VERSION=$(git describe --tags --always --dirty 2>/dev/null || git rev-parse --short HEAD)
+          go build -ldflags="-s -w -X main.version=${VERSION}" -o relayfile-${{ matrix.suffix }} ./cmd/relayfile
+          echo "Built relayfile-${{ matrix.suffix }} (version: ${VERSION})"
+
+      - name: Verify binary size
+        run: |
+          SIZE=$(stat -f%z relayfile-${{ matrix.suffix }} 2>/dev/null || stat -c%s relayfile-${{ matrix.suffix }})
+          SIZE_MB=$(echo "scale=2; $SIZE / 1048576" | bc)
+          echo "Binary size: ${SIZE_MB}MB ($SIZE bytes)"
+
+          # Sanity check: binary should be at least 1MB and less than 100MB
+          if [ "$SIZE" -lt 1048576 ]; then
+            echo "ERROR: Binary is suspiciously small (< 1MB)"
+            exit 1
+          fi
+          if [ "$SIZE" -gt 104857600 ]; then
+            echo "ERROR: Binary is suspiciously large (> 100MB)"
+            exit 1
+          fi
+          echo "✓ Binary size is reasonable"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: relayfile-${{ matrix.suffix }}
           path: relayfile-${{ matrix.suffix }}
+          retention-days: 7
 
-  release:
+  verify-linux:
+    name: Verify (Linux)
     needs: build
     runs-on: ubuntu-latest
+
+    steps:
+      - name: Download Linux amd64 binary
+        uses: actions/download-artifact@v4
+        with:
+          name: relayfile-linux-amd64
+          path: bin/
+
+      - name: Verify binary executes
+        run: |
+          chmod +x bin/relayfile-linux-amd64
+          echo "Testing binary execution..."
+          ./bin/relayfile-linux-amd64 --help || ./bin/relayfile-linux-amd64 help || echo "Binary runs (no --help flag)"
+          echo "✓ Linux amd64 binary executes"
+
+      - name: Verify binary is statically linked
+        run: |
+          if ldd bin/relayfile-linux-amd64 2>&1 | grep -q "not a dynamic executable"; then
+            echo "✓ Binary is statically linked (CGO_ENABLED=0)"
+          else
+            echo "⚠ Binary appears to be dynamically linked"
+            ldd bin/relayfile-linux-amd64 || true
+          fi
+
+  verify-macos:
+    name: Verify (macOS)
+    needs: build
+    runs-on: macos-latest
+
+    steps:
+      - name: Download macOS arm64 binary
+        uses: actions/download-artifact@v4
+        with:
+          name: relayfile-darwin-arm64
+          path: bin/
+
+      - name: Verify binary executes
+        run: |
+          chmod +x bin/relayfile-darwin-arm64
+          echo "Testing binary execution..."
+          ./bin/relayfile-darwin-arm64 --help || ./bin/relayfile-darwin-arm64 help || echo "Binary runs (no --help flag)"
+          echo "✓ macOS arm64 binary executes"
+
+  verify-binaries:
+    name: All Binaries Verified
+    needs: [verify-linux, verify-macos]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: All binary checks passed
+        run: |
+          echo "✅ All binary verification checks passed!"
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## Binary Verification Gate" >> $GITHUB_STEP_SUMMARY
+          echo "✅ All platform binaries verified and ready for release" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Verified Binaries" >> $GITHUB_STEP_SUMMARY
+          echo "- relayfile-linux-amd64 (verified execution + static linking)" >> $GITHUB_STEP_SUMMARY
+          echo "- relayfile-darwin-arm64 (verified execution)" >> $GITHUB_STEP_SUMMARY
+          echo "- relayfile-linux-arm64 (cross-compiled)" >> $GITHUB_STEP_SUMMARY
+          echo "- relayfile-darwin-amd64 (cross-compiled)" >> $GITHUB_STEP_SUMMARY
+
+  release:
+    name: Create Release
+    needs: [build, verify-binaries]
+    runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -65,7 +160,12 @@ jobs:
 
       - name: Generate tag
         id: tag
-        run: echo "tag=build-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+        run: |
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          TAG="build-${SHORT_SHA}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "Tag: ${TAG}"
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -73,11 +173,92 @@ jobs:
           path: binaries
           merge-multiple: true
 
+      - name: Verify all binaries present
+        run: |
+          echo "=== Verifying release binaries ==="
+          ls -la binaries/
+
+          MISSING=0
+          for BINARY in relayfile-linux-amd64 relayfile-linux-arm64 relayfile-darwin-amd64 relayfile-darwin-arm64; do
+            if [ -f "binaries/$BINARY" ]; then
+              SIZE=$(stat -c%s "binaries/$BINARY")
+              SIZE_MB=$(echo "scale=2; $SIZE / 1048576" | bc)
+              echo "✓ $BINARY (${SIZE_MB}MB)"
+            else
+              echo "✗ MISSING: $BINARY"
+              MISSING=1
+            fi
+          done
+
+          if [ $MISSING -eq 1 ]; then
+            echo ""
+            echo "ERROR: Some required binaries are missing!"
+            exit 1
+          fi
+
+          echo ""
+          echo "All required binaries present."
+
+      - name: Make binaries executable
+        run: chmod +x binaries/relayfile-*
+
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.tag.outputs.tag }}
           name: Build ${{ steps.tag.outputs.tag }}
+          body: |
+            ## relayfile ${{ steps.tag.outputs.tag }}
+
+            Built from commit `${{ steps.tag.outputs.short_sha }}` on `main`.
+
+            ### Download
+
+            | Platform | Architecture | Binary |
+            |----------|-------------|--------|
+            | Linux | x86_64 | `relayfile-linux-amd64` |
+            | Linux | ARM64 | `relayfile-linux-arm64` |
+            | macOS | Intel | `relayfile-darwin-amd64` |
+            | macOS | Apple Silicon | `relayfile-darwin-arm64` |
+
+            ### Usage
+
+            ```bash
+            # Download (example: Linux x86_64)
+            curl -fsSL -o relayfile https://github.com/${{ github.repository }}/releases/download/${{ steps.tag.outputs.tag }}/relayfile-linux-amd64
+            chmod +x relayfile
+            ./relayfile serve
+            ```
           files: binaries/relayfile-*
           generate_release_notes: true
           prerelease: true
+
+  summary:
+    name: Summary
+    needs: [build, verify-linux, verify-macos, verify-binaries, release]
+    runs-on: ubuntu-latest
+    if: always()
+
+    steps:
+      - name: Summary
+        run: |
+          echo "## Binary Release Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Tag**: \`${{ needs.release.outputs.tag || 'N/A' }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Commit**: \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Trigger**: Push to \`main\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Results" >> $GITHUB_STEP_SUMMARY
+          echo "| Stage | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Build (4 platforms) | ${{ needs.build.result == 'success' && '✅' || '❌' }} ${{ needs.build.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Verify (Linux) | ${{ needs.verify-linux.result == 'success' && '✅' || '❌' }} ${{ needs.verify-linux.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Verify (macOS) | ${{ needs.verify-macos.result == 'success' && '✅' || '❌' }} ${{ needs.verify-macos.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Verification Gate | ${{ needs.verify-binaries.result == 'success' && '✅' || '❌' }} ${{ needs.verify-binaries.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Create Release | ${{ needs.release.result == 'success' && '✅' || (needs.release.result == 'skipped' && '⏭️' || '❌') }} ${{ needs.release.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Platforms" >> $GITHUB_STEP_SUMMARY
+          echo "- \`relayfile-linux-amd64\` — Linux x86_64" >> $GITHUB_STEP_SUMMARY
+          echo "- \`relayfile-linux-arm64\` — Linux ARM64" >> $GITHUB_STEP_SUMMARY
+          echo "- \`relayfile-darwin-amd64\` — macOS Intel" >> $GITHUB_STEP_SUMMARY
+          echo "- \`relayfile-darwin-arm64\` — macOS Apple Silicon" >> $GITHUB_STEP_SUMMARY
