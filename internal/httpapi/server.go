@@ -85,6 +85,11 @@ func NewServerWithConfig(store *relayfile.Store, cfg ServerConfig) *Server {
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == "/dashboard" {
+		s.handleDashboard(w, r)
+		return
+	}
+
 	if r.URL.Path == "/health" && r.Method == http.MethodGet {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 		return
@@ -137,6 +142,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case len(parts) == 5 && parts[3] == "fs" && parts[4] == "events" && r.Method == http.MethodGet:
 		requiredScope = "fs:read"
 		route = "events"
+	case len(parts) == 5 && parts[3] == "fs" && parts[4] == "query" && r.Method == http.MethodGet:
+		requiredScope = "fs:read"
+		route = "query_files"
 	case len(parts) == 5 && parts[3] == "sync" && parts[4] == "status" && r.Method == http.MethodGet:
 		requiredScope = "sync:read"
 		route = "sync_status"
@@ -197,15 +205,17 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	switch route {
 	case "tree":
-		s.handleTree(w, r, workspaceID, correlationID)
+		s.handleTree(w, r, workspaceID, correlationID, claims)
 	case "read_file":
-		s.handleReadFile(w, r, workspaceID, correlationID)
+		s.handleReadFile(w, r, workspaceID, correlationID, claims)
 	case "write_file":
-		s.handleWriteFile(w, r, workspaceID, correlationID)
+		s.handleWriteFile(w, r, workspaceID, correlationID, claims)
 	case "delete_file":
-		s.handleDeleteFile(w, r, workspaceID, correlationID)
+		s.handleDeleteFile(w, r, workspaceID, correlationID, claims)
 	case "events":
 		s.handleEvents(w, r, workspaceID, correlationID)
+	case "query_files":
+		s.handleQueryFiles(w, r, workspaceID, correlationID, claims)
 	case "sync_status":
 		s.handleSyncStatus(w, r, workspaceID, correlationID)
 	case "sync_ingress":
@@ -618,52 +628,52 @@ func (s *Server) handleAdminIngress(w http.ResponseWriter, r *http.Request) {
 		alertsTruncated = false
 	}
 	writeJSON(w, http.StatusOK, struct {
-		GeneratedAt    string                           `json:"generatedAt"`
-		AlertProfile   string                           `json:"alertProfile"`
-		EffectiveAlertProfile string                    `json:"effectiveAlertProfile"`
-		WorkspaceCount int                              `json:"workspaceCount"`
-		ReturnedWorkspaceCount int                      `json:"returnedWorkspaceCount"`
-		WorkspaceIDs   []string                         `json:"workspaceIds"`
-		NextCursor     *string                          `json:"nextCursor"`
-		PendingTotal   int                              `json:"pendingTotal"`
-		DeadLetterTotal int                             `json:"deadLetterTotal"`
-		AcceptedTotal  uint64                           `json:"acceptedTotal"`
-		DroppedTotal   uint64                           `json:"droppedTotal"`
-		DedupedTotal   uint64                           `json:"dedupedTotal"`
-		CoalescedTotal uint64                           `json:"coalescedTotal"`
-		SuppressedTotal uint64                          `json:"suppressedTotal"`
-		StaleTotal     uint64                           `json:"staleTotal"`
-		Thresholds     struct {
+		GeneratedAt            string   `json:"generatedAt"`
+		AlertProfile           string   `json:"alertProfile"`
+		EffectiveAlertProfile  string   `json:"effectiveAlertProfile"`
+		WorkspaceCount         int      `json:"workspaceCount"`
+		ReturnedWorkspaceCount int      `json:"returnedWorkspaceCount"`
+		WorkspaceIDs           []string `json:"workspaceIds"`
+		NextCursor             *string  `json:"nextCursor"`
+		PendingTotal           int      `json:"pendingTotal"`
+		DeadLetterTotal        int      `json:"deadLetterTotal"`
+		AcceptedTotal          uint64   `json:"acceptedTotal"`
+		DroppedTotal           uint64   `json:"droppedTotal"`
+		DedupedTotal           uint64   `json:"dedupedTotal"`
+		CoalescedTotal         uint64   `json:"coalescedTotal"`
+		SuppressedTotal        uint64   `json:"suppressedTotal"`
+		StaleTotal             uint64   `json:"staleTotal"`
+		Thresholds             struct {
 			Pending    int     `json:"pending"`
 			DeadLetter int     `json:"deadLetter"`
 			Stale      int     `json:"stale"`
 			DropRate   float64 `json:"dropRate"`
 		} `json:"thresholds"`
-		AlertTotals    struct {
+		AlertTotals struct {
 			Total    int            `json:"total"`
 			Critical int            `json:"critical"`
 			Warning  int            `json:"warning"`
 			ByType   map[string]int `json:"byType"`
 		} `json:"alertTotals"`
-		AlertsTruncated bool                            `json:"alertsTruncated"`
-		Alerts         []ingressAlert                   `json:"alerts"`
-		Workspaces     map[string]relayfile.IngressStatus `json:"workspaces"`
+		AlertsTruncated bool                               `json:"alertsTruncated"`
+		Alerts          []ingressAlert                     `json:"alerts"`
+		Workspaces      map[string]relayfile.IngressStatus `json:"workspaces"`
 	}{
-		GeneratedAt:     time.Now().UTC().Format(time.RFC3339Nano),
-		AlertProfile:    alertProfile,
-		EffectiveAlertProfile: effectiveAlertProfile,
-		WorkspaceCount:  totalWorkspaceCount,
+		GeneratedAt:            time.Now().UTC().Format(time.RFC3339Nano),
+		AlertProfile:           alertProfile,
+		EffectiveAlertProfile:  effectiveAlertProfile,
+		WorkspaceCount:         totalWorkspaceCount,
 		ReturnedWorkspaceCount: len(pagedStatuses),
-		WorkspaceIDs:    pagedWorkspaceIDs,
-		NextCursor:      nextCursor,
-		PendingTotal:    pendingTotal,
-		DeadLetterTotal: deadLetterTotal,
-		AcceptedTotal:   acceptedTotal,
-		DroppedTotal:    droppedTotal,
-		DedupedTotal:    dedupedTotal,
-		CoalescedTotal:  coalescedTotal,
-		SuppressedTotal: suppressedTotal,
-		StaleTotal:      staleTotal,
+		WorkspaceIDs:           pagedWorkspaceIDs,
+		NextCursor:             nextCursor,
+		PendingTotal:           pendingTotal,
+		DeadLetterTotal:        deadLetterTotal,
+		AcceptedTotal:          acceptedTotal,
+		DroppedTotal:           droppedTotal,
+		DedupedTotal:           dedupedTotal,
+		CoalescedTotal:         coalescedTotal,
+		SuppressedTotal:        suppressedTotal,
+		StaleTotal:             staleTotal,
 		Thresholds: struct {
 			Pending    int     `json:"pending"`
 			DeadLetter int     `json:"deadLetter"`
@@ -946,34 +956,34 @@ func (s *Server) handleAdminSync(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, struct {
-		GeneratedAt                  string                           `json:"generatedAt"`
-		WorkspaceCount               int                              `json:"workspaceCount"`
-		ReturnedWorkspaceCount       int                              `json:"returnedWorkspaceCount"`
-		WorkspaceIDs                 []string                         `json:"workspaceIds"`
-		NextCursor                   *string                          `json:"nextCursor"`
-		ProviderStatusCount          int                              `json:"providerStatusCount"`
-		HealthyCount                 int                              `json:"healthyCount"`
-		LaggingCount                 int                              `json:"laggingCount"`
-		ErrorCount                   int                              `json:"errorCount"`
-		PausedCount                  int                              `json:"pausedCount"`
-		DeadLetteredEnvelopesTotal   int                              `json:"deadLetteredEnvelopesTotal"`
-		DeadLetteredOpsTotal         int                              `json:"deadLetteredOpsTotal"`
-		Thresholds                   struct {
-			StatusError         int `json:"statusError"`
-			LagSeconds          int `json:"lagSeconds"`
+		GeneratedAt                string   `json:"generatedAt"`
+		WorkspaceCount             int      `json:"workspaceCount"`
+		ReturnedWorkspaceCount     int      `json:"returnedWorkspaceCount"`
+		WorkspaceIDs               []string `json:"workspaceIds"`
+		NextCursor                 *string  `json:"nextCursor"`
+		ProviderStatusCount        int      `json:"providerStatusCount"`
+		HealthyCount               int      `json:"healthyCount"`
+		LaggingCount               int      `json:"laggingCount"`
+		ErrorCount                 int      `json:"errorCount"`
+		PausedCount                int      `json:"pausedCount"`
+		DeadLetteredEnvelopesTotal int      `json:"deadLetteredEnvelopesTotal"`
+		DeadLetteredOpsTotal       int      `json:"deadLetteredOpsTotal"`
+		Thresholds                 struct {
+			StatusError           int `json:"statusError"`
+			LagSeconds            int `json:"lagSeconds"`
 			DeadLetteredEnvelopes int `json:"deadLetteredEnvelopes"`
-			DeadLetteredOps     int `json:"deadLetteredOps"`
+			DeadLetteredOps       int `json:"deadLetteredOps"`
 		} `json:"thresholds"`
-		AlertTotals                  struct {
+		AlertTotals struct {
 			Total    int            `json:"total"`
 			Critical int            `json:"critical"`
 			Warning  int            `json:"warning"`
 			ByType   map[string]int `json:"byType"`
 		} `json:"alertTotals"`
-		AlertsTruncated              bool                             `json:"alertsTruncated"`
-		Alerts                       []syncAlert                      `json:"alerts"`
-		FailureCodes                 map[string]int                   `json:"failureCodes"`
-		Workspaces                   map[string]relayfile.SyncStatus  `json:"workspaces"`
+		AlertsTruncated bool                            `json:"alertsTruncated"`
+		Alerts          []syncAlert                     `json:"alerts"`
+		FailureCodes    map[string]int                  `json:"failureCodes"`
+		Workspaces      map[string]relayfile.SyncStatus `json:"workspaces"`
 	}{
 		GeneratedAt:                time.Now().UTC().Format(time.RFC3339Nano),
 		WorkspaceCount:             totalWorkspaceCount,
@@ -988,21 +998,21 @@ func (s *Server) handleAdminSync(w http.ResponseWriter, r *http.Request) {
 		DeadLetteredEnvelopesTotal: deadLetteredEnvelopesTotal,
 		DeadLetteredOpsTotal:       deadLetteredOpsTotal,
 		Thresholds: struct {
-			StatusError         int `json:"statusError"`
-			LagSeconds          int `json:"lagSeconds"`
+			StatusError           int `json:"statusError"`
+			LagSeconds            int `json:"lagSeconds"`
 			DeadLetteredEnvelopes int `json:"deadLetteredEnvelopes"`
-			DeadLetteredOps     int `json:"deadLetteredOps"`
+			DeadLetteredOps       int `json:"deadLetteredOps"`
 		}{
-			StatusError:         statusErrorThreshold,
-			LagSeconds:          lagSecondsThreshold,
+			StatusError:           statusErrorThreshold,
+			LagSeconds:            lagSecondsThreshold,
 			DeadLetteredEnvelopes: deadLetteredEnvelopesThreshold,
-			DeadLetteredOps:     deadLetteredOpsThreshold,
+			DeadLetteredOps:       deadLetteredOpsThreshold,
 		},
-		AlertTotals:                alertTotals,
-		AlertsTruncated:            alertsTruncated,
-		Alerts:                     alerts,
-		FailureCodes:               failureCodes,
-		Workspaces:                 pagedStatuses,
+		AlertTotals:     alertTotals,
+		AlertsTruncated: alertsTruncated,
+		Alerts:          alerts,
+		FailureCodes:    failureCodes,
+		Workspaces:      pagedStatuses,
 	})
 }
 
@@ -1071,7 +1081,131 @@ func hasAnyScope(scopes map[string]struct{}, required ...string) bool {
 	return false
 }
 
-func (s *Server) handleTree(w http.ResponseWriter, r *http.Request, workspaceID, correlationID string) {
+type semanticJSONInput struct {
+	Properties  map[string]any `json:"properties"`
+	Relations   []string       `json:"relations"`
+	Permissions []string       `json:"permissions"`
+	Comments    []string       `json:"comments"`
+}
+
+func normalizeRoutePath(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return "/"
+	}
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	if len(path) > 1 {
+		path = strings.TrimSuffix(path, "/")
+	}
+	return path
+}
+
+func withinBasePath(base, candidate string) bool {
+	base = normalizeRoutePath(base)
+	candidate = normalizeRoutePath(candidate)
+	if base == "/" {
+		return true
+	}
+	return candidate == base || strings.HasPrefix(candidate, base+"/")
+}
+
+func filePermissionAllows(permissions []string, workspaceID string, claims tokenClaims) bool {
+	if len(permissions) == 0 {
+		return true
+	}
+	enforceableRuleSeen := false
+	allowMatch := false
+	for _, raw := range permissions {
+		rule, ok := parsePermissionRule(raw)
+		if !ok {
+			continue
+		}
+		enforceableRuleSeen = true
+		match := false
+		switch rule.kind {
+		case "public":
+			match = true
+		case "scope":
+			_, match = claims.Scopes[rule.value]
+		case "agent":
+			match = claims.AgentName == rule.value
+		case "workspace":
+			match = workspaceID == rule.value
+		}
+		if !match {
+			continue
+		}
+		if rule.effect == "deny" {
+			return false
+		}
+		allowMatch = true
+	}
+	if allowMatch {
+		return true
+	}
+	if !enforceableRuleSeen {
+		return true
+	}
+	return false
+}
+
+type parsedPermissionRule struct {
+	effect string
+	kind   string
+	value  string
+}
+
+func parsePermissionRule(raw string) (parsedPermissionRule, bool) {
+	rule := strings.TrimSpace(raw)
+	if rule == "" {
+		return parsedPermissionRule{}, false
+	}
+	effect := "allow"
+	lower := strings.ToLower(rule)
+	switch {
+	case strings.HasPrefix(lower, "allow:"):
+		rule = strings.TrimSpace(rule[len("allow:"):])
+	case strings.HasPrefix(lower, "deny:"):
+		effect = "deny"
+		rule = strings.TrimSpace(rule[len("deny:"):])
+	}
+	lower = strings.ToLower(rule)
+	if lower == "public" || lower == "any" || lower == "*" {
+		return parsedPermissionRule{effect: effect, kind: "public", value: "*"}, true
+	}
+	parts := strings.SplitN(rule, ":", 2)
+	if len(parts) != 2 {
+		return parsedPermissionRule{}, false
+	}
+	kind := strings.ToLower(strings.TrimSpace(parts[0]))
+	value := strings.TrimSpace(parts[1])
+	if value == "" {
+		return parsedPermissionRule{}, false
+	}
+	switch kind {
+	case "scope", "agent", "workspace":
+		return parsedPermissionRule{effect: effect, kind: kind, value: value}, true
+	default:
+		return parsedPermissionRule{}, false
+	}
+}
+
+func stringSliceContainsExact(values []string, needle string) bool {
+	needle = strings.TrimSpace(needle)
+	if needle == "" {
+		return false
+	}
+	for _, raw := range values {
+		if strings.TrimSpace(raw) == needle {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Server) handleTree(w http.ResponseWriter, r *http.Request, workspaceID, correlationID string, claims tokenClaims) {
 	path := r.URL.Query().Get("path")
 	if path == "" {
 		path = "/"
@@ -1082,10 +1216,76 @@ func (s *Server) handleTree(w http.ResponseWriter, r *http.Request, workspaceID,
 		writeError(w, http.StatusNotFound, "not_found", err.Error(), correlationID)
 		return
 	}
+	if len(resp.Entries) > 0 {
+		base := normalizeRoutePath(resp.Path)
+		visibleFiles := map[string]struct{}{}
+		visibleDirs := map[string]struct{}{}
+		cursor := ""
+		for {
+			batch, queryErr := s.store.QueryFiles(workspaceID, relayfile.FileQueryRequest{
+				PathPrefix: base,
+				Cursor:     cursor,
+				Limit:      200,
+			})
+			if queryErr != nil {
+				writeError(w, http.StatusInternalServerError, "internal_error", queryErr.Error(), correlationID)
+				return
+			}
+			for _, item := range batch.Items {
+				effectivePermissions := s.store.ResolveFilePermissions(workspaceID, item.Path, true)
+				if !filePermissionAllows(effectivePermissions, workspaceID, claims) {
+					continue
+				}
+				visibleFiles[item.Path] = struct{}{}
+				dirPath := item.Path
+				for {
+					lastSlash := strings.LastIndex(dirPath, "/")
+					if lastSlash <= 0 {
+						break
+					}
+					dirPath = dirPath[:lastSlash]
+					if dirPath == "" {
+						dirPath = "/"
+					}
+					if !withinBasePath(base, dirPath) {
+						break
+					}
+					if dirPath != "/" {
+						visibleDirs[dirPath] = struct{}{}
+					}
+					if dirPath == base || dirPath == "/" {
+						break
+					}
+				}
+			}
+			if batch.NextCursor == nil || *batch.NextCursor == "" {
+				break
+			}
+			nextCursor := *batch.NextCursor
+			if nextCursor == cursor {
+				break
+			}
+			cursor = nextCursor
+		}
+		filtered := make([]relayfile.TreeEntry, 0, len(resp.Entries))
+		for _, entry := range resp.Entries {
+			if entry.Type == "file" {
+				if _, ok := visibleFiles[entry.Path]; ok {
+					filtered = append(filtered, entry)
+				}
+				continue
+			}
+			if _, ok := visibleDirs[entry.Path]; ok {
+				filtered = append(filtered, entry)
+			}
+		}
+		resp.Entries = filtered
+		resp.NextCursor = nil
+	}
 	writeJSON(w, http.StatusOK, resp)
 }
 
-func (s *Server) handleReadFile(w http.ResponseWriter, r *http.Request, workspaceID, correlationID string) {
+func (s *Server) handleReadFile(w http.ResponseWriter, r *http.Request, workspaceID, correlationID string, claims tokenClaims) {
 	path := r.URL.Query().Get("path")
 	if path == "" {
 		writeError(w, http.StatusBadRequest, "bad_request", "missing path query", correlationID)
@@ -1100,11 +1300,16 @@ func (s *Server) handleReadFile(w http.ResponseWriter, r *http.Request, workspac
 		writeError(w, http.StatusInternalServerError, "internal_error", err.Error(), correlationID)
 		return
 	}
+	effectivePermissions := s.store.ResolveFilePermissions(workspaceID, path, true)
+	if !filePermissionAllows(effectivePermissions, workspaceID, claims) {
+		writeError(w, http.StatusForbidden, "forbidden", "file access denied by permission policy", correlationID)
+		return
+	}
 	w.Header().Set("ETag", file.Revision)
 	writeJSON(w, http.StatusOK, file)
 }
 
-func (s *Server) handleWriteFile(w http.ResponseWriter, r *http.Request, workspaceID, correlationID string) {
+func (s *Server) handleWriteFile(w http.ResponseWriter, r *http.Request, workspaceID, correlationID string, claims tokenClaims) {
 	path := r.URL.Query().Get("path")
 	if path == "" {
 		writeError(w, http.StatusBadRequest, "bad_request", "missing path query", correlationID)
@@ -1116,21 +1321,42 @@ func (s *Server) handleWriteFile(w http.ResponseWriter, r *http.Request, workspa
 		writeError(w, http.StatusPreconditionFailed, "precondition_failed", "missing If-Match header", correlationID)
 		return
 	}
+	_, readErr := s.store.ReadFile(workspaceID, path)
+	if readErr == nil {
+		existingPermissions := s.store.ResolveFilePermissions(workspaceID, path, true)
+		if !filePermissionAllows(existingPermissions, workspaceID, claims) {
+			writeError(w, http.StatusForbidden, "forbidden", "file access denied by permission policy", correlationID)
+			return
+		}
+	} else if readErr == relayfile.ErrNotFound {
+		inheritedPermissions := s.store.ResolveFilePermissions(workspaceID, path, false)
+		if !filePermissionAllows(inheritedPermissions, workspaceID, claims) {
+			writeError(w, http.StatusForbidden, "forbidden", "file access denied by permission policy", correlationID)
+			return
+		}
+	}
 
 	var body struct {
-		ContentType string `json:"contentType"`
-		Content     string `json:"content"`
+		ContentType string            `json:"contentType"`
+		Content     string            `json:"content"`
+		Semantics   semanticJSONInput `json:"semantics"`
 	}
 	if !s.decodeJSONBody(w, r, correlationID, &body) {
 		return
 	}
 
 	result, err := s.store.WriteFile(relayfile.WriteRequest{
-		WorkspaceID:   workspaceID,
-		Path:          path,
-		IfMatch:       ifMatch,
-		ContentType:   body.ContentType,
-		Content:       body.Content,
+		WorkspaceID: workspaceID,
+		Path:        path,
+		IfMatch:     ifMatch,
+		ContentType: body.ContentType,
+		Content:     body.Content,
+		Semantics: relayfile.FileSemantics{
+			Properties:  stringPropertiesFromAny(body.Semantics.Properties),
+			Relations:   body.Semantics.Relations,
+			Permissions: body.Semantics.Permissions,
+			Comments:    body.Semantics.Comments,
+		},
 		CorrelationID: correlationID,
 	})
 	if err != nil {
@@ -1164,7 +1390,7 @@ func (s *Server) handleWriteFile(w http.ResponseWriter, r *http.Request, workspa
 	writeJSON(w, http.StatusAccepted, result)
 }
 
-func (s *Server) handleDeleteFile(w http.ResponseWriter, r *http.Request, workspaceID, correlationID string) {
+func (s *Server) handleDeleteFile(w http.ResponseWriter, r *http.Request, workspaceID, correlationID string, claims tokenClaims) {
 	path := r.URL.Query().Get("path")
 	if path == "" {
 		writeError(w, http.StatusBadRequest, "bad_request", "missing path query", correlationID)
@@ -1175,6 +1401,14 @@ func (s *Server) handleDeleteFile(w http.ResponseWriter, r *http.Request, worksp
 	if ifMatch == "" {
 		writeError(w, http.StatusPreconditionFailed, "precondition_failed", "missing If-Match header", correlationID)
 		return
+	}
+	_, readErr := s.store.ReadFile(workspaceID, path)
+	if readErr == nil {
+		existingPermissions := s.store.ResolveFilePermissions(workspaceID, path, true)
+		if !filePermissionAllows(existingPermissions, workspaceID, claims) {
+			writeError(w, http.StatusForbidden, "forbidden", "file access denied by permission policy", correlationID)
+			return
+		}
 	}
 	result, err := s.store.DeleteFile(relayfile.DeleteRequest{
 		WorkspaceID:   workspaceID,
@@ -1219,6 +1453,81 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request, workspaceI
 		return
 	}
 	writeJSON(w, http.StatusOK, feed)
+}
+
+func (s *Server) handleQueryFiles(w http.ResponseWriter, r *http.Request, workspaceID, correlationID string, claims tokenClaims) {
+	limit := parseBoundedInt(r.URL.Query().Get("limit"), 100, 1, 1000)
+	properties := map[string]string{}
+	for key, values := range r.URL.Query() {
+		if !strings.HasPrefix(key, "property.") {
+			continue
+		}
+		propertyName := strings.TrimSpace(strings.TrimPrefix(key, "property."))
+		if propertyName == "" || len(values) == 0 {
+			continue
+		}
+		properties[propertyName] = strings.TrimSpace(values[0])
+	}
+
+	pathPrefix := r.URL.Query().Get("path")
+	provider := r.URL.Query().Get("provider")
+	relation := r.URL.Query().Get("relation")
+	permission := strings.TrimSpace(r.URL.Query().Get("permission"))
+	comment := r.URL.Query().Get("comment")
+	cursor := r.URL.Query().Get("cursor")
+
+	items := make([]relayfile.FileQueryItem, 0, limit)
+	var nextCursor *string
+	for len(items) < limit {
+		batchLimit := limit - len(items)
+		batch, err := s.store.QueryFiles(workspaceID, relayfile.FileQueryRequest{
+			PathPrefix: pathPrefix,
+			Provider:   provider,
+			Relation:   relation,
+			Permission: "",
+			Comment:    comment,
+			Properties: properties,
+			Cursor:     cursor,
+			Limit:      batchLimit,
+		})
+		if err != nil {
+			switch err {
+			case relayfile.ErrInvalidInput:
+				writeError(w, http.StatusBadRequest, "bad_request", err.Error(), correlationID)
+			default:
+				writeError(w, http.StatusInternalServerError, "internal_error", err.Error(), correlationID)
+			}
+			return
+		}
+		for _, item := range batch.Items {
+			effectivePermissions := s.store.ResolveFilePermissions(workspaceID, item.Path, true)
+			if permission != "" && !stringSliceContainsExact(effectivePermissions, permission) {
+				continue
+			}
+			if !filePermissionAllows(effectivePermissions, workspaceID, claims) {
+				continue
+			}
+			items = append(items, item)
+			if len(items) >= limit {
+				break
+			}
+		}
+		if batch.NextCursor == nil || *batch.NextCursor == "" {
+			nextCursor = nil
+			break
+		}
+		cursorValue := *batch.NextCursor
+		if cursorValue == cursor {
+			nextCursor = nil
+			break
+		}
+		cursor = cursorValue
+		nextCursor = &cursorValue
+	}
+	writeJSON(w, http.StatusOK, relayfile.FileQueryResponse{
+		Items:      items,
+		NextCursor: nextCursor,
+	})
 }
 
 func (s *Server) handleOp(w http.ResponseWriter, _ *http.Request, workspaceID, opID, correlationID string) {
@@ -1409,6 +1718,31 @@ func (s *Server) decodeJSONBody(w http.ResponseWriter, r *http.Request, correlat
 		return false
 	}
 	return true
+}
+
+func stringPropertiesFromAny(values map[string]any) map[string]string {
+	if len(values) == 0 {
+		return nil
+	}
+	out := map[string]string{}
+	for key, raw := range values {
+		trimmedKey := strings.TrimSpace(key)
+		if trimmedKey == "" {
+			continue
+		}
+		switch typed := raw.(type) {
+		case string:
+			out[trimmedKey] = strings.TrimSpace(typed)
+		case fmt.Stringer:
+			out[trimmedKey] = strings.TrimSpace(typed.String())
+		default:
+			out[trimmedKey] = strings.TrimSpace(fmt.Sprintf("%v", raw))
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func writeJSON(w http.ResponseWriter, status int, data any) {

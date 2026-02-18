@@ -24,6 +24,8 @@ var (
 	ErrNotImplemented      = errors.New("not implemented")
 )
 
+const DirectoryPermissionMarkerFile = ".relayfile.acl"
+
 type ConflictError struct {
 	ExpectedRevision      string
 	CurrentRevision       string
@@ -46,6 +48,10 @@ type TreeEntry struct {
 	ProviderObjectID string `json:"providerObjectId,omitempty"`
 	Size             int64  `json:"size,omitempty"`
 	UpdatedAt        string `json:"updatedAt,omitempty"`
+	PropertyCount    int    `json:"propertyCount,omitempty"`
+	RelationCount    int    `json:"relationCount,omitempty"`
+	PermissionCount  int    `json:"permissionCount,omitempty"`
+	CommentCount     int    `json:"commentCount,omitempty"`
 }
 
 type TreeResponse struct {
@@ -54,14 +60,22 @@ type TreeResponse struct {
 	NextCursor *string     `json:"nextCursor"`
 }
 
+type FileSemantics struct {
+	Properties  map[string]string `json:"properties,omitempty"`
+	Relations   []string          `json:"relations,omitempty"`
+	Permissions []string          `json:"permissions,omitempty"`
+	Comments    []string          `json:"comments,omitempty"`
+}
+
 type File struct {
-	Path             string `json:"path"`
-	Revision         string `json:"revision"`
-	ContentType      string `json:"contentType"`
-	Content          string `json:"content"`
-	Provider         string `json:"provider,omitempty"`
-	ProviderObjectID string `json:"providerObjectId,omitempty"`
-	LastEditedAt     string `json:"lastEditedAt,omitempty"`
+	Path             string        `json:"path"`
+	Revision         string        `json:"revision"`
+	ContentType      string        `json:"contentType"`
+	Content          string        `json:"content"`
+	Provider         string        `json:"provider,omitempty"`
+	ProviderObjectID string        `json:"providerObjectId,omitempty"`
+	LastEditedAt     string        `json:"lastEditedAt,omitempty"`
+	Semantics        FileSemantics `json:"semantics,omitempty"`
 }
 
 type Event struct {
@@ -86,6 +100,7 @@ type WriteRequest struct {
 	IfMatch       string
 	ContentType   string
 	Content       string
+	Semantics     FileSemantics
 	CorrelationID string
 }
 
@@ -123,6 +138,36 @@ type OperationStatus struct {
 type OperationFeed struct {
 	Items      []OperationStatus `json:"items"`
 	NextCursor *string           `json:"nextCursor"`
+}
+
+type FileQueryRequest struct {
+	PathPrefix string
+	Provider   string
+	Relation   string
+	Permission string
+	Comment    string
+	Properties map[string]string
+	Cursor     string
+	Limit      int
+}
+
+type FileQueryItem struct {
+	Path             string            `json:"path"`
+	Revision         string            `json:"revision"`
+	ContentType      string            `json:"contentType"`
+	Provider         string            `json:"provider,omitempty"`
+	ProviderObjectID string            `json:"providerObjectId,omitempty"`
+	LastEditedAt     string            `json:"lastEditedAt,omitempty"`
+	Size             int64             `json:"size"`
+	Properties       map[string]string `json:"properties,omitempty"`
+	Relations        []string          `json:"relations,omitempty"`
+	Permissions      []string          `json:"permissions,omitempty"`
+	Comments         []string          `json:"comments,omitempty"`
+}
+
+type FileQueryResponse struct {
+	Items      []FileQueryItem `json:"items"`
+	NextCursor *string         `json:"nextCursor"`
 }
 
 type SyncProviderStatus struct {
@@ -395,6 +440,10 @@ type persistedState struct {
 type StateBackend interface {
 	Load() (*persistedState, error)
 	Save(state *persistedState) error
+}
+
+type stateBackendCloser interface {
+	Close() error
 }
 
 type JSONFileStateBackend struct {
@@ -827,6 +876,9 @@ func (s *Store) Close() {
 		if s.writebackQueue != nil {
 			_ = s.writebackQueue.Close()
 		}
+		if closer, ok := s.stateBackend.(stateBackendCloser); ok && closer != nil {
+			_ = closer.Close()
+		}
 		s.wg.Wait()
 	})
 }
@@ -874,6 +926,10 @@ func (s *Store) ListTree(workspaceID, path string, depth int, cursor string) (Tr
 					ProviderObjectID: file.ProviderObjectID,
 					Size:             int64(len(file.Content)),
 					UpdatedAt:        file.LastEditedAt,
+					PropertyCount:    len(file.Semantics.Properties),
+					RelationCount:    len(file.Semantics.Relations),
+					PermissionCount:  len(file.Semantics.Permissions),
+					CommentCount:     len(file.Semantics.Comments),
 				}
 				continue
 			}
@@ -907,6 +963,144 @@ func (s *Store) ReadFile(workspaceID, path string) (File, error) {
 	return file, nil
 }
 
+func (s *Store) ResolveFilePermissions(workspaceID, path string, includeTarget bool) []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	ws, ok := s.workspaces[workspaceID]
+	if !ok {
+		return nil
+	}
+	target := normalizePath(path)
+	permissions := make([]string, 0, 8)
+	for _, dir := range ancestorDirectories(target) {
+		markerPath := joinPath(dir, DirectoryPermissionMarkerFile)
+		if markerPath == target {
+			continue
+		}
+		marker, exists := ws.Files[markerPath]
+		if !exists || len(marker.Semantics.Permissions) == 0 {
+			continue
+		}
+		permissions = append(permissions, marker.Semantics.Permissions...)
+	}
+	if includeTarget {
+		if file, exists := ws.Files[target]; exists && len(file.Semantics.Permissions) > 0 {
+			permissions = append(permissions, file.Semantics.Permissions...)
+		}
+	}
+	if len(permissions) == 0 {
+		return nil
+	}
+	out := make([]string, len(permissions))
+	copy(out, permissions)
+	return out
+}
+
+func (s *Store) QueryFiles(workspaceID string, req FileQueryRequest) (FileQueryResponse, error) {
+	if workspaceID == "" {
+		return FileQueryResponse{}, ErrInvalidInput
+	}
+	base := normalizePath(req.PathPrefix)
+	if req.PathPrefix == "" {
+		base = "/"
+	}
+	provider := normalizeProvider(req.Provider)
+	relation := strings.TrimSpace(req.Relation)
+	permission := strings.TrimSpace(req.Permission)
+	comment := strings.TrimSpace(req.Comment)
+	limit := req.Limit
+	if limit <= 0 {
+		limit = 100
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+	properties := normalizeProperties(req.Properties)
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	ws, ok := s.workspaces[workspaceID]
+	if !ok {
+		if strings.TrimSpace(req.Cursor) != "" {
+			return FileQueryResponse{}, ErrInvalidInput
+		}
+		return FileQueryResponse{Items: []FileQueryItem{}, NextCursor: nil}, nil
+	}
+	paths := make([]string, 0, len(ws.Files))
+	for path := range ws.Files {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+
+	start := 0
+	cursor := normalizePath(req.Cursor)
+	if strings.TrimSpace(req.Cursor) != "" {
+		found := false
+		for i := range paths {
+			if paths[i] == cursor {
+				start = i + 1
+				found = true
+				break
+			}
+		}
+		if !found {
+			return FileQueryResponse{}, ErrInvalidInput
+		}
+	}
+
+	items := make([]FileQueryItem, 0, limit)
+	var nextCursor *string
+
+	for i := start; i < len(paths); i++ {
+		path := paths[i]
+		if !withinBase(base, path) {
+			continue
+		}
+		file := ws.Files[path]
+		if provider != "" && normalizeProvider(file.Provider) != provider {
+			continue
+		}
+		semantics := normalizeSemantics(file.Semantics)
+		if relation != "" && !stringSliceContains(semantics.Relations, relation) {
+			continue
+		}
+		if permission != "" && !stringSliceContains(semantics.Permissions, permission) {
+			continue
+		}
+		if comment != "" && !stringSliceContains(semantics.Comments, comment) {
+			continue
+		}
+		if !propertiesMatch(semantics.Properties, properties) {
+			continue
+		}
+		if len(items) >= limit {
+			cursorValue := items[len(items)-1].Path
+			nextCursor = &cursorValue
+			break
+		}
+		items = append(items, FileQueryItem{
+			Path:             path,
+			Revision:         file.Revision,
+			ContentType:      file.ContentType,
+			Provider:         file.Provider,
+			ProviderObjectID: file.ProviderObjectID,
+			LastEditedAt:     file.LastEditedAt,
+			Size:             int64(len(file.Content)),
+			Properties:       copyStringMap(semantics.Properties),
+			Relations:        append([]string(nil), semantics.Relations...),
+			Permissions:      append([]string(nil), semantics.Permissions...),
+			Comments:         append([]string(nil), semantics.Comments...),
+		})
+	}
+
+	return FileQueryResponse{
+		Items:      items,
+		NextCursor: nextCursor,
+	}, nil
+}
+
 func (s *Store) WriteFile(req WriteRequest) (WriteResult, error) {
 	if req.IfMatch == "" {
 		return WriteResult{}, ErrMissingPrecondition
@@ -920,6 +1114,7 @@ func (s *Store) WriteFile(req WriteRequest) (WriteResult, error) {
 	path := normalizePath(req.Path)
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	contentType := req.ContentType
+	semantics := normalizeSemantics(req.Semantics)
 	if contentType == "" {
 		contentType = "text/markdown"
 	}
@@ -939,6 +1134,7 @@ func (s *Store) WriteFile(req WriteRequest) (WriteResult, error) {
 			Content:      req.Content,
 			Provider:     provider,
 			LastEditedAt: now,
+			Semantics:    semantics,
 		}
 		result, task := s.recordWriteLocked(ws, path, revision, "file.created", ws.Files[path].Provider, req.CorrelationID)
 		_ = s.saveLocked()
@@ -961,6 +1157,9 @@ func (s *Store) WriteFile(req WriteRequest) (WriteResult, error) {
 	existing.ContentType = contentType
 	existing.Content = req.Content
 	existing.LastEditedAt = now
+	if !isZeroSemantics(semantics) {
+		existing.Semantics = semantics
+	}
 	ws.Files[path] = existing
 
 	result, task := s.recordWriteLocked(ws, path, revision, "file.updated", existing.Provider, req.CorrelationID)
@@ -2764,6 +2963,10 @@ func (s *Store) applyProviderUpsertLocked(ws *workspaceState, provider string, a
 
 	existing, exists := ws.Files[path]
 	revision := s.nextRevisionLocked()
+	semantics := normalizeSemantics(action.Semantics)
+	if exists && isZeroSemantics(semantics) {
+		semantics = normalizeSemantics(existing.Semantics)
+	}
 	file := File{
 		Path:             path,
 		Revision:         revision,
@@ -2772,6 +2975,7 @@ func (s *Store) applyProviderUpsertLocked(ws *workspaceState, provider string, a
 		Provider:         provider,
 		ProviderObjectID: objectID,
 		LastEditedAt:     now,
+		Semantics:        semantics,
 	}
 	ws.Files[path] = file
 	if objectID != "" {
@@ -2938,6 +3142,32 @@ func joinPath(base, child string) string {
 	return base + "/" + child
 }
 
+func ancestorDirectories(path string) []string {
+	path = normalizePath(path)
+	dirs := []string{"/"}
+
+	parent := path
+	if lastSlash := strings.LastIndex(path, "/"); lastSlash >= 0 {
+		parent = path[:lastSlash]
+		if parent == "" {
+			parent = "/"
+		}
+	}
+	if parent == "/" {
+		return dirs
+	}
+	parts := strings.Split(strings.TrimPrefix(parent, "/"), "/")
+	current := ""
+	for _, part := range parts {
+		if part == "" {
+			continue
+		}
+		current = current + "/" + part
+		dirs = append(dirs, current)
+	}
+	return dirs
+}
+
 func inferProviderFromPath(path string) string {
 	normalized := normalizePath(path)
 	trimmed := strings.TrimPrefix(normalized, "/")
@@ -3026,6 +3256,104 @@ func toString(v any) string {
 		return s
 	}
 	return ""
+}
+
+func copyStringMap(in map[string]string) map[string]string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
+func normalizeProperties(in map[string]string) map[string]string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := map[string]string{}
+	for k, v := range in {
+		key := strings.TrimSpace(k)
+		if key == "" {
+			continue
+		}
+		out[key] = strings.TrimSpace(v)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func normalizeStringSlice(in []string) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(in))
+	seen := map[string]struct{}{}
+	for _, raw := range in {
+		v := strings.TrimSpace(raw)
+		if v == "" {
+			continue
+		}
+		if _, ok := seen[v]; ok {
+			continue
+		}
+		seen[v] = struct{}{}
+		out = append(out, v)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	sort.Strings(out)
+	return out
+}
+
+func normalizeSemantics(in FileSemantics) FileSemantics {
+	out := FileSemantics{
+		Properties:  normalizeProperties(in.Properties),
+		Relations:   normalizeStringSlice(in.Relations),
+		Permissions: normalizeStringSlice(in.Permissions),
+		Comments:    normalizeStringSlice(in.Comments),
+	}
+	return out
+}
+
+func isZeroSemantics(in FileSemantics) bool {
+	return len(in.Properties) == 0 &&
+		len(in.Relations) == 0 &&
+		len(in.Permissions) == 0 &&
+		len(in.Comments) == 0
+}
+
+func stringSliceContains(values []string, needle string) bool {
+	needle = strings.TrimSpace(needle)
+	if needle == "" {
+		return false
+	}
+	for _, value := range values {
+		if value == needle {
+			return true
+		}
+	}
+	return false
+}
+
+func propertiesMatch(actual map[string]string, expected map[string]string) bool {
+	if len(expected) == 0 {
+		return true
+	}
+	for key, value := range expected {
+		if actual == nil {
+			return false
+		}
+		if actual[key] != value {
+			return false
+		}
+	}
+	return true
 }
 
 func truncatePreview(content string) string {

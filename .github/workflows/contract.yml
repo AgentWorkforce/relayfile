@@ -1,0 +1,39 @@
+name: Contract
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run Go tests
+        run: go test ./...
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install SDK deps
+        working-directory: sdk/relayfile-sdk
+        run: npm ci
+
+      - name: Build SDK
+        working-directory: sdk/relayfile-sdk
+        run: npm run build
+
+      - name: Validate contract surface
+        run: ./scripts/check-contract-surface.sh

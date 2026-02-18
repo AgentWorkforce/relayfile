@@ -77,7 +77,9 @@ func BuildStateBackendFromDSN(dsn string) (StateBackend, error) {
 		return NewJSONFileStateBackend(path), nil
 	case "memory", "mem", "inmem":
 		return NewInMemoryStateBackend(), nil
-	case "postgres", "postgresql", "mysql", "sqlite":
+	case "postgres", "postgresql":
+		return NewPostgresStateBackend(dsn)
+	case "mysql", "sqlite":
 		return nil, fmt.Errorf("%w: state backend %s", ErrNotImplemented, scheme)
 	default:
 		return nil, fmt.Errorf("unsupported state backend scheme: %s", scheme)

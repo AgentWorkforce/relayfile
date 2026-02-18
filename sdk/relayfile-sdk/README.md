@@ -33,6 +33,13 @@ const tree = await client.listTree(workspaceId, {
   signal: controller.signal
 });
 const file = await client.readFile(workspaceId, "/notion/Engineering/Auth.md");
+const query = await client.queryFiles(workspaceId, {
+  path: "/notion",
+  provider: "notion",
+  relation: "db:investments",
+  properties: { stage: "active" },
+  limit: 25
+});
 const events = await client.getEvents(workspaceId, { provider: "notion", limit: 50 });
 const ops = await client.listOps(workspaceId, { status: "dead_lettered", action: "file_upsert", provider: "notion", limit: 20 });
 const sync = await client.getSyncStatus(workspaceId, { provider: "notion" });
@@ -41,6 +48,7 @@ const adminIngress = await client.getAdminIngressStatus({ provider: "notion", al
 const adminSync = await client.getAdminSyncStatus({ provider: "notion", nonZeroOnly: true, includeWorkspaces: true, limit: 100, lagSecondsThreshold: 45, maxAlerts: 50, includeAlerts: true });
 const deadLetters = await client.getSyncDeadLetters(workspaceId, { provider: "notion", limit: 20 });
 console.log(events.events.length);
+console.log(query.items.length);
 console.log(ops.items.length);
 console.log(sync.providers[0]?.status, sync.providers[0]?.failureCodes, sync.providers[0]?.deadLetteredEnvelopes, sync.providers[0]?.deadLetteredOps);
 console.log(ingress.queueDepth, ingress.droppedTotal);
@@ -70,7 +78,13 @@ try {
     path: file.path,
     baseRevision: file.revision,
     content: file.content + "\n\nUpdated by agent.",
-    contentType: "text/markdown"
+    contentType: "text/markdown",
+    semantics: {
+      properties: { stage: "active" },
+      relations: ["db:investments"],
+      permissions: ["scope:fs:read"],
+      comments: ["comment_123"]
+    }
   });
   console.log(write.opId);
 } catch (err) {

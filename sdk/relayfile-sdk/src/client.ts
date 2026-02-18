@@ -8,11 +8,13 @@ import {
   type DeadLetterFeedResponse,
   type ErrorResponse,
   type EventFeedResponse,
+  type FileQueryResponse,
   type FileReadResponse,
   type GetEventsOptions,
   type GetAdminSyncStatusOptions,
   type GetAdminIngressStatusOptions,
   type GetOperationsOptions,
+  type QueryFilesOptions,
   type GetSyncDeadLettersOptions,
   type GetSyncIngressStatusOptions,
   type GetSyncStatusOptions,
@@ -78,7 +80,7 @@ function normalizeRetryOptions(options?: RelayFileRetryOptions): NormalizedRetry
   };
 }
 
-function buildQuery(params: Record<string, string | number | undefined>): string {
+function buildQuery(params: Record<string, string | number | boolean | undefined>): string {
   const query = new URLSearchParams();
   for (const [key, value] of Object.entries(params)) {
     if (value !== undefined) {
@@ -145,6 +147,32 @@ export class RelayFileClient {
     });
   }
 
+  async queryFiles(workspaceId: string, options: QueryFilesOptions = {}): Promise<FileQueryResponse> {
+    const params = new URLSearchParams();
+    if (options.path !== undefined) params.set("path", options.path);
+    if (options.provider !== undefined) params.set("provider", options.provider);
+    if (options.relation !== undefined) params.set("relation", options.relation);
+    if (options.permission !== undefined) params.set("permission", options.permission);
+    if (options.comment !== undefined) params.set("comment", options.comment);
+    if (options.cursor !== undefined) params.set("cursor", options.cursor);
+    if (options.limit !== undefined) params.set("limit", String(options.limit));
+    if (options.properties !== undefined) {
+      for (const [key, value] of Object.entries(options.properties)) {
+        if (key !== "" && value !== undefined) {
+          params.set(`property.${key}`, value);
+        }
+      }
+    }
+    const encoded = params.toString();
+    const query = encoded ? `?${encoded}` : "";
+    return this.request<FileQueryResponse>({
+      method: "GET",
+      path: `/v1/workspaces/${encodeURIComponent(workspaceId)}/fs/query${query}`,
+      correlationId: options.correlationId,
+      signal: options.signal
+    });
+  }
+
   async writeFile(input: WriteFileInput): Promise<WriteQueuedResponse> {
     const query = buildQuery({ path: input.path });
     return this.request<WriteQueuedResponse>({
@@ -156,7 +184,8 @@ export class RelayFileClient {
       },
       body: {
         contentType: input.contentType ?? "text/markdown",
-        content: input.content
+        content: input.content,
+        semantics: input.semantics
       },
       signal: input.signal
     });

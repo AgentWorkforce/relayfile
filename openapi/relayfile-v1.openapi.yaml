@@ -31,6 +31,15 @@ paths:
       tags: [Filesystem]
       operationId: listTree
       summary: List filesystem entries under a path
+      description: |
+        Lists entries visible to the caller under a base path.
+        File entries include semantic counters (`propertyCount`, `relationCount`,
+        `permissionCount`, `commentCount`).
+
+        Visibility is permission-aware:
+        - inherited `.relayfile.acl` marker files on ancestor directories
+        - target file `semantics.permissions`
+        - deny rules override allow rules
       security:
         - BearerAuth: [fs:read]
       parameters:
@@ -79,6 +88,10 @@ paths:
       tags: [Filesystem]
       operationId: readFile
       summary: Read file contents at a path
+      description: |
+        Reads a file if effective permission rules allow access.
+        Effective permissions include inherited `.relayfile.acl` marker rules and
+        target file `semantics.permissions`. Deny rules override allow rules.
       security:
         - BearerAuth: [fs:read]
       parameters:
@@ -116,6 +129,11 @@ paths:
       tags: [Filesystem]
       operationId: writeFile
       summary: Write file content with optimistic concurrency
+      description: |
+        Writes file content with optimistic concurrency (`If-Match`).
+        Permission checks are applied before mutation:
+        - existing file updates/deletes use effective permissions on the target file
+        - new-file creates use inherited directory permission markers
       security:
         - BearerAuth: [fs:write]
       parameters:
@@ -163,6 +181,10 @@ paths:
       tags: [Filesystem]
       operationId: deleteFile
       summary: Delete a file with optimistic concurrency
+      description: |
+        Deletes a file with optimistic concurrency (`If-Match`) after effective
+        permission checks. Effective permissions include inherited
+        `.relayfile.acl` marker rules and target file `semantics.permissions`.
       security:
         - BearerAuth: [fs:write]
       parameters:
@@ -232,6 +254,90 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/EventFeedResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /v1/workspaces/{workspaceId}/fs/query:
+    get:
+      tags: [Filesystem]
+      operationId: queryFiles
+      summary: Query files by path, provider, and semantic filters
+      description: |
+        Returns files that match path/provider/semantic filters and are visible to
+        the caller under effective permission rules.
+
+        Permission filter behavior:
+        - `permission` query filter is matched against effective permissions
+        - effective permissions include inherited `.relayfile.acl` markers plus
+          target file `semantics.permissions`
+        - deny rules override allow rules
+      security:
+        - BearerAuth: [fs:read]
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/CorrelationId'
+        - name: path
+          in: query
+          required: false
+          schema:
+            type: string
+            pattern: '^/.*'
+        - name: provider
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: relation
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: permission
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: comment
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: property.<key>
+          in: query
+          required: false
+          description: |
+            Property equality filter. Replace `<key>` with the semantic property
+            name. Example: `property.stage=active`.
+          schema:
+            type: string
+        - name: cursor
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000
+            default: 100
+      responses:
+        '200':
+          description: Matching files page
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FileQueryResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
@@ -1115,6 +1221,46 @@ components:
         updatedAt:
           type: string
           format: date-time
+        propertyCount:
+          type: integer
+          minimum: 0
+        relationCount:
+          type: integer
+          minimum: 0
+        permissionCount:
+          type: integer
+          minimum: 0
+        commentCount:
+          type: integer
+          minimum: 0
+
+    FileSemantics:
+      type: object
+      additionalProperties: false
+      properties:
+        properties:
+          type: object
+          additionalProperties:
+            type: string
+        relations:
+          type: array
+          items:
+            type: string
+        permissions:
+          type: array
+          description: |
+            Permission rules supporting:
+            - `public` or `*`
+            - `scope:<scope>`
+            - `agent:<agentName>`
+            - `workspace:<workspaceId>`
+            Optional `allow:`/`deny:` prefixes are supported and deny wins.
+          items:
+            type: string
+        comments:
+          type: array
+          items:
+            type: string
 
     TreeResponse:
       type: object
@@ -1151,6 +1297,8 @@ components:
         lastEditedAt:
           type: string
           format: date-time
+        semantics:
+          $ref: '#/components/schemas/FileSemantics'
 
     FileWriteRequest:
       type: object
@@ -1162,6 +1310,59 @@ components:
           default: text/markdown
         content:
           type: string
+        semantics:
+          $ref: '#/components/schemas/FileSemantics'
+
+    FileQueryItem:
+      type: object
+      additionalProperties: false
+      required: [path, revision, contentType, size]
+      properties:
+        path:
+          type: string
+        revision:
+          type: string
+        contentType:
+          type: string
+        provider:
+          type: string
+        providerObjectId:
+          type: string
+        lastEditedAt:
+          type: string
+          format: date-time
+        size:
+          type: integer
+          minimum: 0
+        properties:
+          type: object
+          additionalProperties:
+            type: string
+        relations:
+          type: array
+          items:
+            type: string
+        permissions:
+          type: array
+          items:
+            type: string
+        comments:
+          type: array
+          items:
+            type: string
+
+    FileQueryResponse:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/FileQueryItem'
+        nextCursor:
+          type: string
+          nullable: true
 
     WriteQueuedResponse:
       type: object

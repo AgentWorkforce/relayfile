@@ -33,3 +33,6 @@ dist/
 # Environment
 .env
 .env.*
+
+# Local mount mirror
+/.livefs/

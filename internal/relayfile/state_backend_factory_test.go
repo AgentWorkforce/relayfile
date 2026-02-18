@@ -48,9 +48,16 @@ func TestBuildStateBackendFromDSNFile(t *testing.T) {
 }
 
 func TestBuildStateBackendFromDSNUnsupported(t *testing.T) {
-	if _, err := BuildStateBackendFromDSN("postgres://localhost/relayfile"); err == nil {
-		t.Fatalf("expected unsupported scheme error")
+	backend, err := BuildStateBackendFromDSN("postgres://localhost/relayfile?sslmode=disable")
+	if err != nil {
+		t.Fatalf("expected postgres state backend to be available, got %v", err)
+	}
+	if backend == nil {
+		t.Fatalf("expected non-nil postgres state backend")
+	}
+	if _, err := BuildStateBackendFromDSN("mysql://localhost/relayfile"); err == nil {
+		t.Fatalf("expected not implemented error for mysql state backend")
 	} else if !errors.Is(err, ErrNotImplemented) {
-		t.Fatalf("expected not implemented error for postgres state backend, got %v", err)
+		t.Fatalf("expected not implemented error for mysql state backend, got %v", err)
 	}
 }

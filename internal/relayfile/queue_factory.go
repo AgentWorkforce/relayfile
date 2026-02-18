@@ -28,6 +28,8 @@ func BuildEnvelopeQueueFromDSN(dsn string, capacity int) (EnvelopeQueue, error) 
 		return NewFileEnvelopeQueue(path, capacity)
 	case "memory", "mem", "inmem":
 		return NewInMemoryEnvelopeQueue(capacity), nil
+	case "postgres", "postgresql":
+		return NewPostgresEnvelopeQueue(dsn, capacity)
 	case "redis", "rediss", "nats", "sqs", "kafka":
 		return nil, fmt.Errorf("%w: envelope queue backend %s", ErrNotImplemented, scheme)
 	default:
@@ -57,6 +59,8 @@ func BuildWritebackQueueFromDSN(dsn string, capacity int) (WritebackQueue, error
 		return NewFileWritebackQueue(path, capacity)
 	case "memory", "mem", "inmem":
 		return NewInMemoryWritebackQueue(capacity), nil
+	case "postgres", "postgresql":
+		return NewPostgresWritebackQueue(dsn, capacity)
 	case "redis", "rediss", "nats", "sqs", "kafka":
 		return nil, fmt.Errorf("%w: writeback queue backend %s", ErrNotImplemented, scheme)
 	default:

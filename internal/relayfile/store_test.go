@@ -748,6 +748,184 @@ func TestListTreeHonorsDepth(t *testing.T) {
 	}
 }
 
+func TestQueryFilesSupportsSemanticFilters(t *testing.T) {
+	store := NewStore()
+	t.Cleanup(store.Close)
+
+	_, err := store.WriteFile(WriteRequest{
+		WorkspaceID: "ws_semantic_query",
+		Path:        "/notion/Investments/Seed.md",
+		IfMatch:     "0",
+		ContentType: "text/markdown",
+		Content:     "# seed",
+		Semantics: FileSemantics{
+			Properties: map[string]string{
+				"topic": "investments",
+				"stage": "seed",
+			},
+			Relations:   []string{"page_cap_table", "db_investments"},
+			Permissions: []string{"role:finance", "user:alice"},
+			Comments:    []string{"comment_a", "comment_b"},
+		},
+		CorrelationID: "corr_semantic_query_1",
+	})
+	if err != nil {
+		t.Fatalf("write seed failed: %v", err)
+	}
+
+	_, err = store.WriteFile(WriteRequest{
+		WorkspaceID: "ws_semantic_query",
+		Path:        "/notion/Legal/Terms.md",
+		IfMatch:     "0",
+		ContentType: "text/markdown",
+		Content:     "# terms",
+		Semantics: FileSemantics{
+			Properties: map[string]string{
+				"topic": "legal",
+			},
+			Relations:   []string{"db_legal"},
+			Permissions: []string{"role:legal"},
+			Comments:    []string{"comment_legal"},
+		},
+		CorrelationID: "corr_semantic_query_2",
+	})
+	if err != nil {
+		t.Fatalf("write legal failed: %v", err)
+	}
+
+	topicResp, err := store.QueryFiles("ws_semantic_query", FileQueryRequest{
+		PathPrefix: "/notion",
+		Properties: map[string]string{"topic": "investments"},
+		Limit:      50,
+	})
+	if err != nil {
+		t.Fatalf("query by property failed: %v", err)
+	}
+	if len(topicResp.Items) != 1 {
+		t.Fatalf("expected one topic match, got %d", len(topicResp.Items))
+	}
+	if topicResp.Items[0].Path != "/notion/Investments/Seed.md" {
+		t.Fatalf("unexpected topic match path: %s", topicResp.Items[0].Path)
+	}
+	if got := topicResp.Items[0].Properties["stage"]; got != "seed" {
+		t.Fatalf("expected stage=seed, got %q", got)
+	}
+
+	relationResp, err := store.QueryFiles("ws_semantic_query", FileQueryRequest{
+		PathPrefix: "/notion",
+		Relation:   "page_cap_table",
+		Permission: "role:finance",
+		Comment:    "comment_b",
+		Limit:      50,
+	})
+	if err != nil {
+		t.Fatalf("query by relation/permission/comment failed: %v", err)
+	}
+	if len(relationResp.Items) != 1 || relationResp.Items[0].Path != "/notion/Investments/Seed.md" {
+		t.Fatalf("unexpected relation query response: %+v", relationResp.Items)
+	}
+
+	pagedOne, err := store.QueryFiles("ws_semantic_query", FileQueryRequest{
+		PathPrefix: "/notion",
+		Limit:      1,
+	})
+	if err != nil {
+		t.Fatalf("paged query page 1 failed: %v", err)
+	}
+	if len(pagedOne.Items) != 1 {
+		t.Fatalf("expected one paged item on page 1, got %d", len(pagedOne.Items))
+	}
+	if pagedOne.NextCursor == nil || *pagedOne.NextCursor == "" {
+		t.Fatalf("expected next cursor for paged query")
+	}
+	pagedTwo, err := store.QueryFiles("ws_semantic_query", FileQueryRequest{
+		PathPrefix: "/notion",
+		Limit:      1,
+		Cursor:     *pagedOne.NextCursor,
+	})
+	if err != nil {
+		t.Fatalf("paged query page 2 failed: %v", err)
+	}
+	if len(pagedTwo.Items) != 1 {
+		t.Fatalf("expected one paged item on page 2, got %d", len(pagedTwo.Items))
+	}
+	if pagedTwo.Items[0].Path == pagedOne.Items[0].Path {
+		t.Fatalf("expected distinct items across pages")
+	}
+
+	tree, err := store.ListTree("ws_semantic_query", "/notion/Investments", 2, "")
+	if err != nil {
+		t.Fatalf("list tree for semantic counts failed: %v", err)
+	}
+	if len(tree.Entries) == 0 {
+		t.Fatalf("expected tree entries")
+	}
+	var found bool
+	for _, entry := range tree.Entries {
+		if entry.Path != "/notion/Investments/Seed.md" {
+			continue
+		}
+		found = true
+		if entry.PropertyCount == 0 || entry.RelationCount == 0 || entry.PermissionCount == 0 || entry.CommentCount == 0 {
+			t.Fatalf("expected semantic counters on tree entry, got %+v", entry)
+		}
+	}
+	if !found {
+		t.Fatalf("expected Seed.md entry in tree response")
+	}
+}
+
+func TestResolveFilePermissionsAppliesMarkerInheritance(t *testing.T) {
+	store := NewStore()
+	t.Cleanup(store.Close)
+
+	_, err := store.WriteFile(WriteRequest{
+		WorkspaceID: "ws_perm_resolve",
+		Path:        "/notion/private/.relayfile.acl",
+		IfMatch:     "0",
+		ContentType: "text/plain",
+		Content:     "acl",
+		Semantics: FileSemantics{
+			Permissions: []string{"scope:finance"},
+		},
+		CorrelationID: "corr_perm_resolve_1",
+	})
+	if err != nil {
+		t.Fatalf("write marker failed: %v", err)
+	}
+
+	_, err = store.WriteFile(WriteRequest{
+		WorkspaceID: "ws_perm_resolve",
+		Path:        "/notion/private/Doc.md",
+		IfMatch:     "0",
+		ContentType: "text/markdown",
+		Content:     "# doc",
+		Semantics: FileSemantics{
+			Permissions: []string{"deny:agent:intern"},
+		},
+		CorrelationID: "corr_perm_resolve_2",
+	})
+	if err != nil {
+		t.Fatalf("write doc failed: %v", err)
+	}
+
+	rulesWithTarget := store.ResolveFilePermissions("ws_perm_resolve", "/notion/private/Doc.md", true)
+	if len(rulesWithTarget) != 2 {
+		t.Fatalf("expected inherited + target rules, got %+v", rulesWithTarget)
+	}
+	if rulesWithTarget[0] != "scope:finance" {
+		t.Fatalf("expected inherited marker rule first, got %+v", rulesWithTarget)
+	}
+	if rulesWithTarget[1] != "deny:agent:intern" {
+		t.Fatalf("expected target rule second, got %+v", rulesWithTarget)
+	}
+
+	rulesNoTarget := store.ResolveFilePermissions("ws_perm_resolve", "/notion/private/Doc.md", false)
+	if len(rulesNoTarget) != 1 || rulesNoTarget[0] != "scope:finance" {
+		t.Fatalf("expected only inherited rules when includeTarget=false, got %+v", rulesNoTarget)
+	}
+}
+
 func TestStoreEventsAndOps(t *testing.T) {
 	store := NewStore()
 	t.Cleanup(store.Close)
@@ -1628,8 +1806,8 @@ func TestListSyncStatusesAggregatesWorkspacesAndAppliesProviderFilter(t *testing
 
 func TestListSyncStatusesIncludesFailureCodesFromDeadLettersAndOps(t *testing.T) {
 	store := NewStoreWithOptions(StoreOptions{
-		MaxEnvelopeAttempts: 1,
-		EnvelopeRetryDelay:  5 * time.Millisecond,
+		MaxEnvelopeAttempts:  1,
+		EnvelopeRetryDelay:   5 * time.Millisecond,
 		MaxWritebackAttempts: 1,
 		WritebackDelay:       5 * time.Millisecond,
 		Adapters: []ProviderAdapter{

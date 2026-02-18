@@ -192,6 +192,15 @@ func storageProfileDefaultsFromEnv() (stateBackendDSN, envelopeQueueDSN, writeba
 		return "", "", "", nil
 	case "memory", "inmemory":
 		return "memory://", "memory://", "memory://", nil
+	case "production", "prod":
+		productionDSN := strings.TrimSpace(os.Getenv("RELAYFILE_PRODUCTION_DSN"))
+		if productionDSN == "" {
+			productionDSN = strings.TrimSpace(os.Getenv("RELAYFILE_POSTGRES_DSN"))
+		}
+		if productionDSN == "" {
+			return "", "", "", fmt.Errorf("RELAYFILE_PRODUCTION_DSN or RELAYFILE_POSTGRES_DSN is required when RELAYFILE_BACKEND_PROFILE=%s", profile)
+		}
+		return productionDSN, productionDSN, productionDSN, nil
 	case "durable-local", "local-durable":
 		return "file://" + filepath.Join(dataDir, "state.json"),
 			"file://" + filepath.Join(dataDir, "envelope-queue.json"),

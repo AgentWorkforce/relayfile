@@ -29,6 +29,43 @@ func TestAuthRequired(t *testing.T) {
 	}
 }
 
+func TestDashboardRoute(t *testing.T) {
+	server := NewServer(relayfile.NewStore())
+	resp := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/dashboard",
+	})
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", resp.Code, resp.Body.String())
+	}
+	if got := resp.Header().Get("Content-Type"); !strings.Contains(got, "text/html") {
+		t.Fatalf("expected text/html content type, got %q", got)
+	}
+	if !strings.Contains(resp.Body.String(), "RelayFile Control Surface") {
+		t.Fatalf("expected dashboard html title in response body")
+	}
+}
+
+func TestDashboardRouteRejectsNonGET(t *testing.T) {
+	server := NewServer(relayfile.NewStore())
+	resp := doRequest(t, server, request{
+		method: http.MethodPost,
+		path:   "/dashboard",
+	})
+
+	if resp.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d (%s)", resp.Code, resp.Body.String())
+	}
+	var payload map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode error payload: %v", err)
+	}
+	if payload["code"] != "not_found" {
+		t.Fatalf("expected not_found code, got %v", payload["code"])
+	}
+}
+
 func TestLifecycleAndConflicts(t *testing.T) {
 	server := NewServer(relayfile.NewStore())
 	token := mustTestJWT(t, "dev-secret", "ws_1", "Worker1", []string{"fs:read", "fs:write", "ops:read", "sync:read"}, time.Now().Add(time.Hour))
@@ -421,6 +458,414 @@ func TestTreeEndpointHonorsDepth(t *testing.T) {
 		if expectedType != entry.Type {
 			t.Fatalf("expected %s to be %s, got %s", entry.Path, expectedType, entry.Type)
 		}
+	}
+}
+
+func TestQueryFilesEndpoint(t *testing.T) {
+	server := NewServer(relayfile.NewStore())
+	token := mustTestJWT(t, "dev-secret", "ws_query_api", "Worker1", []string{"fs:read", "fs:write"}, time.Now().Add(time.Hour))
+
+	writeResp := doRequest(t, server, request{
+		method: http.MethodPut,
+		path:   "/v1/workspaces/ws_query_api/fs/file?path=/notion/Investments/Seed.md",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_query_api_1",
+			"If-Match":         "0",
+		},
+		body: map[string]any{
+			"contentType": "text/markdown",
+			"content":     "# seed",
+			"semantics": map[string]any{
+				"properties": map[string]any{
+					"topic": "investments",
+					"stage": "seed",
+				},
+				"relations":   []string{"page_cap_table"},
+				"permissions": []string{"role:finance"},
+				"comments":    []string{"comment_a"},
+			},
+		},
+	})
+	if writeResp.Code != http.StatusAccepted {
+		t.Fatalf("expected 202 on write, got %d (%s)", writeResp.Code, writeResp.Body.String())
+	}
+
+	fileResp := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/workspaces/ws_query_api/fs/file?path=/notion/Investments/Seed.md",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_query_api_2",
+		},
+	})
+	if fileResp.Code != http.StatusOK {
+		t.Fatalf("expected 200 on read, got %d (%s)", fileResp.Code, fileResp.Body.String())
+	}
+	var file relayfile.File
+	if err := json.NewDecoder(fileResp.Body).Decode(&file); err != nil {
+		t.Fatalf("decode file response: %v", err)
+	}
+	if got := file.Semantics.Properties["topic"]; got != "investments" {
+		t.Fatalf("expected topic semantic to round-trip, got %q", got)
+	}
+
+	queryResp := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/workspaces/ws_query_api/fs/query?path=/notion&property.topic=investments&relation=page_cap_table&permission=role:finance&comment=comment_a&limit=10",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_query_api_3",
+		},
+	})
+	if queryResp.Code != http.StatusOK {
+		t.Fatalf("expected 200 on query, got %d (%s)", queryResp.Code, queryResp.Body.String())
+	}
+	var queryPayload relayfile.FileQueryResponse
+	if err := json.NewDecoder(queryResp.Body).Decode(&queryPayload); err != nil {
+		t.Fatalf("decode query response: %v", err)
+	}
+	if len(queryPayload.Items) != 1 {
+		t.Fatalf("expected one query result, got %d", len(queryPayload.Items))
+	}
+	if queryPayload.Items[0].Path != "/notion/Investments/Seed.md" {
+		t.Fatalf("unexpected query path: %s", queryPayload.Items[0].Path)
+	}
+	if queryPayload.Items[0].Properties["stage"] != "seed" {
+		t.Fatalf("expected stage semantic, got %q", queryPayload.Items[0].Properties["stage"])
+	}
+}
+
+func TestFilePermissionPolicyScopeEnforced(t *testing.T) {
+	server := NewServer(relayfile.NewStore())
+	ownerToken := mustTestJWT(t, "dev-secret", "ws_perm_scope", "Owner", []string{"fs:read", "fs:write", "finance"}, time.Now().Add(time.Hour))
+	limitedToken := mustTestJWT(t, "dev-secret", "ws_perm_scope", "Limited", []string{"fs:read", "fs:write"}, time.Now().Add(time.Hour))
+
+	writeResp := doRequest(t, server, request{
+		method: http.MethodPut,
+		path:   "/v1/workspaces/ws_perm_scope/fs/file?path=/notion/Restricted.md",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + ownerToken,
+			"X-Correlation-Id": "corr_perm_scope_1",
+			"If-Match":         "0",
+		},
+		body: map[string]any{
+			"contentType": "text/markdown",
+			"content":     "# restricted",
+			"semantics": map[string]any{
+				"permissions": []string{"scope:finance"},
+			},
+		},
+	})
+	if writeResp.Code != http.StatusAccepted {
+		t.Fatalf("expected 202 on restricted write, got %d (%s)", writeResp.Code, writeResp.Body.String())
+	}
+
+	ownerRead := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/workspaces/ws_perm_scope/fs/file?path=/notion/Restricted.md",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + ownerToken,
+			"X-Correlation-Id": "corr_perm_scope_2",
+		},
+	})
+	if ownerRead.Code != http.StatusOK {
+		t.Fatalf("expected owner read 200, got %d (%s)", ownerRead.Code, ownerRead.Body.String())
+	}
+	var restricted relayfile.File
+	if err := json.NewDecoder(ownerRead.Body).Decode(&restricted); err != nil {
+		t.Fatalf("decode owner read: %v", err)
+	}
+
+	limitedRead := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/workspaces/ws_perm_scope/fs/file?path=/notion/Restricted.md",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + limitedToken,
+			"X-Correlation-Id": "corr_perm_scope_3",
+		},
+	})
+	if limitedRead.Code != http.StatusForbidden {
+		t.Fatalf("expected limited read 403, got %d (%s)", limitedRead.Code, limitedRead.Body.String())
+	}
+
+	limitedWrite := doRequest(t, server, request{
+		method: http.MethodPut,
+		path:   "/v1/workspaces/ws_perm_scope/fs/file?path=/notion/Restricted.md",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + limitedToken,
+			"X-Correlation-Id": "corr_perm_scope_4",
+			"If-Match":         restricted.Revision,
+		},
+		body: map[string]any{
+			"contentType": "text/markdown",
+			"content":     "# unauthorized",
+		},
+	})
+	if limitedWrite.Code != http.StatusForbidden {
+		t.Fatalf("expected limited write 403, got %d (%s)", limitedWrite.Code, limitedWrite.Body.String())
+	}
+
+	limitedDelete := doRequest(t, server, request{
+		method: http.MethodDelete,
+		path:   "/v1/workspaces/ws_perm_scope/fs/file?path=/notion/Restricted.md",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + limitedToken,
+			"X-Correlation-Id": "corr_perm_scope_5",
+			"If-Match":         restricted.Revision,
+		},
+	})
+	if limitedDelete.Code != http.StatusForbidden {
+		t.Fatalf("expected limited delete 403, got %d (%s)", limitedDelete.Code, limitedDelete.Body.String())
+	}
+
+	limitedQuery := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/workspaces/ws_perm_scope/fs/query?path=/notion&limit=20",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + limitedToken,
+			"X-Correlation-Id": "corr_perm_scope_6",
+		},
+	})
+	if limitedQuery.Code != http.StatusOK {
+		t.Fatalf("expected limited query 200, got %d (%s)", limitedQuery.Code, limitedQuery.Body.String())
+	}
+	var limitedPayload relayfile.FileQueryResponse
+	if err := json.NewDecoder(limitedQuery.Body).Decode(&limitedPayload); err != nil {
+		t.Fatalf("decode limited query response: %v", err)
+	}
+	if len(limitedPayload.Items) != 0 {
+		t.Fatalf("expected no query items for limited token, got %d", len(limitedPayload.Items))
+	}
+}
+
+func TestTreeEndpointFiltersUnauthorizedFiles(t *testing.T) {
+	server := NewServer(relayfile.NewStore())
+	ownerToken := mustTestJWT(t, "dev-secret", "ws_perm_tree", "Owner", []string{"fs:read", "fs:write", "finance"}, time.Now().Add(time.Hour))
+	limitedToken := mustTestJWT(t, "dev-secret", "ws_perm_tree", "Limited", []string{"fs:read"}, time.Now().Add(time.Hour))
+
+	restrictedWrite := doRequest(t, server, request{
+		method: http.MethodPut,
+		path:   "/v1/workspaces/ws_perm_tree/fs/file?path=/notion/private/Secret.md",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + ownerToken,
+			"X-Correlation-Id": "corr_perm_tree_1",
+			"If-Match":         "0",
+		},
+		body: map[string]any{
+			"contentType": "text/markdown",
+			"content":     "# secret",
+			"semantics": map[string]any{
+				"permissions": []string{"scope:finance"},
+			},
+		},
+	})
+	if restrictedWrite.Code != http.StatusAccepted {
+		t.Fatalf("expected restricted write 202, got %d (%s)", restrictedWrite.Code, restrictedWrite.Body.String())
+	}
+
+	publicWrite := doRequest(t, server, request{
+		method: http.MethodPut,
+		path:   "/v1/workspaces/ws_perm_tree/fs/file?path=/notion/public/Guide.md",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + ownerToken,
+			"X-Correlation-Id": "corr_perm_tree_2",
+			"If-Match":         "0",
+		},
+		body: map[string]any{
+			"contentType": "text/markdown",
+			"content":     "# guide",
+		},
+	})
+	if publicWrite.Code != http.StatusAccepted {
+		t.Fatalf("expected public write 202, got %d (%s)", publicWrite.Code, publicWrite.Body.String())
+	}
+
+	treeResp := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/workspaces/ws_perm_tree/fs/tree?path=/notion&depth=3",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + limitedToken,
+			"X-Correlation-Id": "corr_perm_tree_3",
+		},
+	})
+	if treeResp.Code != http.StatusOK {
+		t.Fatalf("expected limited tree 200, got %d (%s)", treeResp.Code, treeResp.Body.String())
+	}
+	var tree relayfile.TreeResponse
+	if err := json.NewDecoder(treeResp.Body).Decode(&tree); err != nil {
+		t.Fatalf("decode limited tree response: %v", err)
+	}
+	paths := map[string]string{}
+	for _, entry := range tree.Entries {
+		paths[entry.Path] = entry.Type
+	}
+	if _, ok := paths["/notion/public/Guide.md"]; !ok {
+		t.Fatalf("expected public file in tree, got %+v", tree.Entries)
+	}
+	if _, ok := paths["/notion/public"]; !ok {
+		t.Fatalf("expected public dir in tree, got %+v", tree.Entries)
+	}
+	if _, ok := paths["/notion/private/Secret.md"]; ok {
+		t.Fatalf("expected restricted file to be hidden from tree")
+	}
+	if _, ok := paths["/notion/private"]; ok {
+		t.Fatalf("expected restricted dir to be hidden when no accessible descendants")
+	}
+}
+
+func TestFilePermissionPolicyDenyOverridesAllowAndPublic(t *testing.T) {
+	server := NewServer(relayfile.NewStore())
+	ownerToken := mustTestJWT(t, "dev-secret", "ws_perm_deny", "Owner", []string{"fs:read", "fs:write", "finance"}, time.Now().Add(time.Hour))
+	limitedToken := mustTestJWT(t, "dev-secret", "ws_perm_deny", "Limited", []string{"fs:read", "fs:write", "finance"}, time.Now().Add(time.Hour))
+
+	writeResp := doRequest(t, server, request{
+		method: http.MethodPut,
+		path:   "/v1/workspaces/ws_perm_deny/fs/file?path=/notion/Deny.md",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + ownerToken,
+			"X-Correlation-Id": "corr_perm_deny_1",
+			"If-Match":         "0",
+		},
+		body: map[string]any{
+			"contentType": "text/markdown",
+			"content":     "# deny",
+			"semantics": map[string]any{
+				"permissions": []string{"public", "scope:finance", "deny:agent:Limited"},
+			},
+		},
+	})
+	if writeResp.Code != http.StatusAccepted {
+		t.Fatalf("expected 202 on deny file write, got %d (%s)", writeResp.Code, writeResp.Body.String())
+	}
+
+	ownerRead := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/workspaces/ws_perm_deny/fs/file?path=/notion/Deny.md",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + ownerToken,
+			"X-Correlation-Id": "corr_perm_deny_2",
+		},
+	})
+	if ownerRead.Code != http.StatusOK {
+		t.Fatalf("expected owner read 200, got %d (%s)", ownerRead.Code, ownerRead.Body.String())
+	}
+
+	limitedRead := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/workspaces/ws_perm_deny/fs/file?path=/notion/Deny.md",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + limitedToken,
+			"X-Correlation-Id": "corr_perm_deny_3",
+		},
+	})
+	if limitedRead.Code != http.StatusForbidden {
+		t.Fatalf("expected deny override 403, got %d (%s)", limitedRead.Code, limitedRead.Body.String())
+	}
+}
+
+func TestFilePermissionPolicyInheritanceFromAclMarker(t *testing.T) {
+	server := NewServer(relayfile.NewStore())
+	financeToken := mustTestJWT(t, "dev-secret", "ws_perm_inherit", "FinanceAgent", []string{"fs:read", "fs:write", "finance"}, time.Now().Add(time.Hour))
+	limitedToken := mustTestJWT(t, "dev-secret", "ws_perm_inherit", "Limited", []string{"fs:read", "fs:write"}, time.Now().Add(time.Hour))
+
+	aclWrite := doRequest(t, server, request{
+		method: http.MethodPut,
+		path:   "/v1/workspaces/ws_perm_inherit/fs/file?path=/notion/private/.relayfile.acl",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + financeToken,
+			"X-Correlation-Id": "corr_perm_inherit_1",
+			"If-Match":         "0",
+		},
+		body: map[string]any{
+			"contentType": "text/plain",
+			"content":     "acl marker",
+			"semantics": map[string]any{
+				"permissions": []string{"scope:finance"},
+			},
+		},
+	})
+	if aclWrite.Code != http.StatusAccepted {
+		t.Fatalf("expected acl marker write 202, got %d (%s)", aclWrite.Code, aclWrite.Body.String())
+	}
+
+	childWrite := doRequest(t, server, request{
+		method: http.MethodPut,
+		path:   "/v1/workspaces/ws_perm_inherit/fs/file?path=/notion/private/Inherited.md",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + financeToken,
+			"X-Correlation-Id": "corr_perm_inherit_2",
+			"If-Match":         "0",
+		},
+		body: map[string]any{
+			"contentType": "text/markdown",
+			"content":     "# inherited",
+		},
+	})
+	if childWrite.Code != http.StatusAccepted {
+		t.Fatalf("expected child write 202, got %d (%s)", childWrite.Code, childWrite.Body.String())
+	}
+
+	limitedRead := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/workspaces/ws_perm_inherit/fs/file?path=/notion/private/Inherited.md",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + limitedToken,
+			"X-Correlation-Id": "corr_perm_inherit_3",
+		},
+	})
+	if limitedRead.Code != http.StatusForbidden {
+		t.Fatalf("expected inherited policy to deny read, got %d (%s)", limitedRead.Code, limitedRead.Body.String())
+	}
+
+	financeRead := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/workspaces/ws_perm_inherit/fs/file?path=/notion/private/Inherited.md",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + financeToken,
+			"X-Correlation-Id": "corr_perm_inherit_4",
+		},
+	})
+	if financeRead.Code != http.StatusOK {
+		t.Fatalf("expected finance read 200, got %d (%s)", financeRead.Code, financeRead.Body.String())
+	}
+
+	limitedQuery := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/workspaces/ws_perm_inherit/fs/query?path=/notion/private&permission=scope:finance&limit=20",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + limitedToken,
+			"X-Correlation-Id": "corr_perm_inherit_5",
+		},
+	})
+	if limitedQuery.Code != http.StatusOK {
+		t.Fatalf("expected limited query 200, got %d (%s)", limitedQuery.Code, limitedQuery.Body.String())
+	}
+	var limitedPayload relayfile.FileQueryResponse
+	if err := json.NewDecoder(limitedQuery.Body).Decode(&limitedPayload); err != nil {
+		t.Fatalf("decode limited inherited query: %v", err)
+	}
+	if len(limitedPayload.Items) != 0 {
+		t.Fatalf("expected no inherited query results for limited agent, got %d", len(limitedPayload.Items))
+	}
+
+	financeQuery := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/workspaces/ws_perm_inherit/fs/query?path=/notion/private&permission=scope:finance&limit=20",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + financeToken,
+			"X-Correlation-Id": "corr_perm_inherit_6",
+		},
+	})
+	if financeQuery.Code != http.StatusOK {
+		t.Fatalf("expected finance query 200, got %d (%s)", financeQuery.Code, financeQuery.Body.String())
+	}
+	var financePayload relayfile.FileQueryResponse
+	if err := json.NewDecoder(financeQuery.Body).Decode(&financePayload); err != nil {
+		t.Fatalf("decode finance inherited query: %v", err)
+	}
+	if len(financePayload.Items) != 2 {
+		t.Fatalf("expected marker + child for finance query, got %d", len(financePayload.Items))
 	}
 }
 
@@ -2358,14 +2803,14 @@ func TestAdminIngressEndpoint(t *testing.T) {
 		t.Fatalf("expected 200 for admin ingress endpoint, got %d (%s)", resp.Code, resp.Body.String())
 	}
 	var payload struct {
-		AlertProfile           string                             `json:"alertProfile"`
-		EffectiveAlertProfile  string                             `json:"effectiveAlertProfile"`
-		WorkspaceCount         int                                `json:"workspaceCount"`
-		ReturnedWorkspaceCount int                                `json:"returnedWorkspaceCount"`
-		WorkspaceIDs           []string                           `json:"workspaceIds"`
-		NextCursor             *string                            `json:"nextCursor"`
-		PendingTotal           int                                `json:"pendingTotal"`
-		Thresholds     struct {
+		AlertProfile           string   `json:"alertProfile"`
+		EffectiveAlertProfile  string   `json:"effectiveAlertProfile"`
+		WorkspaceCount         int      `json:"workspaceCount"`
+		ReturnedWorkspaceCount int      `json:"returnedWorkspaceCount"`
+		WorkspaceIDs           []string `json:"workspaceIds"`
+		NextCursor             *string  `json:"nextCursor"`
+		PendingTotal           int      `json:"pendingTotal"`
+		Thresholds             struct {
 			Pending    int     `json:"pending"`
 			DeadLetter int     `json:"deadLetter"`
 			Stale      int     `json:"stale"`
@@ -2377,9 +2822,9 @@ func TestAdminIngressEndpoint(t *testing.T) {
 			Warning  int            `json:"warning"`
 			ByType   map[string]int `json:"byType"`
 		} `json:"alertTotals"`
-		AlertsTruncated bool                            `json:"alertsTruncated"`
-		Alerts         []map[string]any                 `json:"alerts"`
-		Workspaces     map[string]relayfile.IngressStatus `json:"workspaces"`
+		AlertsTruncated bool                               `json:"alertsTruncated"`
+		Alerts          []map[string]any                   `json:"alerts"`
+		Workspaces      map[string]relayfile.IngressStatus `json:"workspaces"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
 		t.Fatalf("decode admin ingress payload: %v", err)
@@ -2491,8 +2936,8 @@ func TestAdminIngressEndpoint(t *testing.T) {
 		t.Fatalf("expected 200 for admin ingress workspace filter, got %d (%s)", filteredWorkspace.Code, filteredWorkspace.Body.String())
 	}
 	var workspacePayload struct {
-		WorkspaceCount int                              `json:"workspaceCount"`
-		PendingTotal   int                              `json:"pendingTotal"`
+		WorkspaceCount int                                `json:"workspaceCount"`
+		PendingTotal   int                                `json:"pendingTotal"`
 		Workspaces     map[string]relayfile.IngressStatus `json:"workspaces"`
 	}
 	if err := json.NewDecoder(filteredWorkspace.Body).Decode(&workspacePayload); err != nil {
@@ -2520,8 +2965,8 @@ func TestAdminIngressEndpoint(t *testing.T) {
 		t.Fatalf("expected 200 for admin ingress provider filter, got %d (%s)", filteredProvider.Code, filteredProvider.Body.String())
 	}
 	var providerPayload struct {
-		WorkspaceCount int                              `json:"workspaceCount"`
-		PendingTotal   int                              `json:"pendingTotal"`
+		WorkspaceCount int                                `json:"workspaceCount"`
+		PendingTotal   int                                `json:"pendingTotal"`
 		Workspaces     map[string]relayfile.IngressStatus `json:"workspaces"`
 	}
 	if err := json.NewDecoder(filteredProvider.Body).Decode(&providerPayload); err != nil {
@@ -2666,7 +3111,7 @@ func TestAdminIngressEndpoint(t *testing.T) {
 		WorkspaceCount         int                                `json:"workspaceCount"`
 		ReturnedWorkspaceCount int                                `json:"returnedWorkspaceCount"`
 		PendingTotal           int                                `json:"pendingTotal"`
-		Workspaces     map[string]relayfile.IngressStatus `json:"workspaces"`
+		Workspaces             map[string]relayfile.IngressStatus `json:"workspaces"`
 	}
 	if err := json.NewDecoder(filteredProviderNonZero.Body).Decode(&nonZeroPayload); err != nil {
 		t.Fatalf("decode admin ingress non-zero provider payload: %v", err)
@@ -2725,8 +3170,8 @@ func TestAdminIngressEndpoint(t *testing.T) {
 	}
 	var truncatedPayload struct {
 		EffectiveAlertProfile string `json:"effectiveAlertProfile"`
-		AlertsTruncated bool `json:"alertsTruncated"`
-		AlertTotals     struct {
+		AlertsTruncated       bool   `json:"alertsTruncated"`
+		AlertTotals           struct {
 			Total int `json:"total"`
 		} `json:"alertTotals"`
 		Alerts []map[string]any `json:"alerts"`
@@ -2823,7 +3268,7 @@ func TestAdminIngressEndpointIncludesDeadLetterAlert(t *testing.T) {
 	var highThresholdPayload struct {
 		AlertProfile          string `json:"alertProfile"`
 		EffectiveAlertProfile string `json:"effectiveAlertProfile"`
-		Thresholds struct {
+		Thresholds            struct {
 			DeadLetter int `json:"deadLetter"`
 		} `json:"thresholds"`
 		Alerts []map[string]any `json:"alerts"`
@@ -2858,7 +3303,7 @@ func TestAdminIngressEndpointIncludesDeadLetterAlert(t *testing.T) {
 	var relaxedProfilePayload struct {
 		AlertProfile          string `json:"alertProfile"`
 		EffectiveAlertProfile string `json:"effectiveAlertProfile"`
-		Thresholds struct {
+		Thresholds            struct {
 			DeadLetter int `json:"deadLetter"`
 		} `json:"thresholds"`
 		AlertTotals struct {
@@ -2931,7 +3376,7 @@ func TestAdminIngressEndpointIncludesDeadLetterAlert(t *testing.T) {
 			ByType   map[string]int `json:"byType"`
 		} `json:"alertTotals"`
 		AlertsTruncated bool `json:"alertsTruncated"`
-		Alerts []struct {
+		Alerts          []struct {
 			WorkspaceID string `json:"workspaceId"`
 			Type        string `json:"type"`
 			Severity    string `json:"severity"`
@@ -3026,13 +3471,13 @@ func TestAdminSyncEndpoint(t *testing.T) {
 		t.Fatalf("expected 200 for admin sync endpoint, got %d (%s)", resp.Code, resp.Body.String())
 	}
 	var payload struct {
-		WorkspaceCount             int                             `json:"workspaceCount"`
-		ReturnedWorkspaceCount     int                             `json:"returnedWorkspaceCount"`
-		WorkspaceIDs               []string                        `json:"workspaceIds"`
-		NextCursor                 *string                         `json:"nextCursor"`
-		ProviderStatusCount        int                             `json:"providerStatusCount"`
-		ErrorCount                 int                             `json:"errorCount"`
-		DeadLetteredEnvelopesTotal int                             `json:"deadLetteredEnvelopesTotal"`
+		WorkspaceCount             int      `json:"workspaceCount"`
+		ReturnedWorkspaceCount     int      `json:"returnedWorkspaceCount"`
+		WorkspaceIDs               []string `json:"workspaceIds"`
+		NextCursor                 *string  `json:"nextCursor"`
+		ProviderStatusCount        int      `json:"providerStatusCount"`
+		ErrorCount                 int      `json:"errorCount"`
+		DeadLetteredEnvelopesTotal int      `json:"deadLetteredEnvelopesTotal"`
 		Thresholds                 struct {
 			StatusError           int `json:"statusError"`
 			LagSeconds            int `json:"lagSeconds"`
@@ -3046,9 +3491,9 @@ func TestAdminSyncEndpoint(t *testing.T) {
 			ByType   map[string]int `json:"byType"`
 		} `json:"alertTotals"`
 		AlertsTruncated bool                            `json:"alertsTruncated"`
-		Alerts         []map[string]any                 `json:"alerts"`
-		FailureCodes               map[string]int                  `json:"failureCodes"`
-		Workspaces                 map[string]relayfile.SyncStatus `json:"workspaces"`
+		Alerts          []map[string]any                `json:"alerts"`
+		FailureCodes    map[string]int                  `json:"failureCodes"`
+		Workspaces      map[string]relayfile.SyncStatus `json:"workspaces"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
 		t.Fatalf("decode admin sync payload: %v", err)
@@ -3211,7 +3656,7 @@ func TestAdminSyncEndpoint(t *testing.T) {
 			Critical int            `json:"critical"`
 			ByType   map[string]int `json:"byType"`
 		} `json:"alertTotals"`
-		AlertsTruncated bool            `json:"alertsTruncated"`
+		AlertsTruncated bool             `json:"alertsTruncated"`
 		Alerts          []map[string]any `json:"alerts"`
 	}
 	if err := json.NewDecoder(summaryOnlyAlertsResp.Body).Decode(&summaryOnlyAlertsPayload); err != nil {

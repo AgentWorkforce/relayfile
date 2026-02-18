@@ -1,0 +1,77 @@
+services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-relayfile}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-relayfile}
+      POSTGRES_DB: ${POSTGRES_DB:-relayfile}
+    ports:
+      - "${POSTGRES_PORT:-5438}:5432"
+    volumes:
+      - relayfile-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-relayfile} -d ${POSTGRES_DB:-relayfile}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  relayfile:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      RELAYFILE_ADDR: :8080
+      RELAYFILE_BACKEND_PROFILE: production
+      RELAYFILE_PRODUCTION_DSN: postgres://${POSTGRES_USER:-relayfile}:${POSTGRES_PASSWORD:-relayfile}@postgres:5432/${POSTGRES_DB:-relayfile}?sslmode=disable
+      RELAYFILE_JWT_SECRET: ${RELAYFILE_JWT_SECRET:-dev-secret}
+      RELAYFILE_INTERNAL_HMAC_SECRET: ${RELAYFILE_INTERNAL_HMAC_SECRET:-dev-internal-secret}
+      RELAYFILE_ENVELOPE_WORKERS: ${RELAYFILE_ENVELOPE_WORKERS:-2}
+      RELAYFILE_WRITEBACK_WORKERS: ${RELAYFILE_WRITEBACK_WORKERS:-2}
+      RELAYFILE_PROVIDER_MAX_CONCURRENCY: ${RELAYFILE_PROVIDER_MAX_CONCURRENCY:-4}
+      RELAYFILE_NOTION_TOKEN: ${RELAYFILE_NOTION_TOKEN:-}
+      RELAYFILE_NOTION_BASE_URL: ${RELAYFILE_NOTION_BASE_URL:-}
+      RELAYFILE_NOTION_API_VERSION: ${RELAYFILE_NOTION_API_VERSION:-}
+    ports:
+      - "${RELAYFILE_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  mountsync:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      relayfile:
+        condition: service_healthy
+    command: ["/usr/local/bin/relayfile-mount"]
+    environment:
+      RELAYFILE_BASE_URL: http://relayfile:8080
+      RELAYFILE_TOKEN: ${RELAYFILE_TOKEN:-eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ3b3Jrc3BhY2VfaWQiOiJ3c19saXZlIiwiYWdlbnRfbmFtZSI6ImNvbXBvc2UtYWdlbnQiLCJzY29wZXMiOlsiZnM6cmVhZCIsImZzOndyaXRlIiwic3luYzpyZWFkIiwic3luYzp0cmlnZ2VyIiwib3BzOnJlYWQiLCJvcHM6cmVwbGF5IiwiYWRtaW46cmVhZCIsImFkbWluOnJlcGxheSJdLCJleHAiOjQxMDI0NDQ4MDAsImF1ZCI6InJlbGF5ZmlsZSJ9.uaXuCAqXhNkUHfmX4y9pPe0hez-H9bhjydKpippRdCg}
+      RELAYFILE_WORKSPACE: ${RELAYFILE_WORKSPACE:-ws_live}
+      RELAYFILE_REMOTE_PATH: ${RELAYFILE_REMOTE_PATH:-/notion}
+      RELAYFILE_LOCAL_DIR: /workspace
+      RELAYFILE_MOUNT_INTERVAL: ${RELAYFILE_MOUNT_INTERVAL:-1s}
+      RELAYFILE_MOUNT_TIMEOUT: ${RELAYFILE_MOUNT_TIMEOUT:-15s}
+      RELAYFILE_MOUNT_INTERVAL_JITTER: ${RELAYFILE_MOUNT_INTERVAL_JITTER:-0.2}
+    volumes:
+      - ./.livefs:/workspace
+
+  agent-workspace:
+    image: alpine:3.20
+    profiles: ["agent"]
+    command: ["/bin/sh", "-lc", "sleep infinity"]
+    working_dir: /workspace
+    volumes:
+      - ./.livefs:/workspace
+
+volumes:
+  relayfile-postgres-data:

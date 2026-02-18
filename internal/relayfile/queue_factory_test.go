@@ -34,6 +34,20 @@ func TestBuildWritebackQueueFromDSNFile(t *testing.T) {
 }
 
 func TestBuildQueueFromDSNRejectsUnsupportedScheme(t *testing.T) {
+	envelopeQueue, err := BuildEnvelopeQueueFromDSN("postgres://localhost/relayfile?sslmode=disable", 10)
+	if err != nil {
+		t.Fatalf("expected postgres envelope queue backend to be available, got %v", err)
+	}
+	if envelopeQueue == nil {
+		t.Fatalf("expected non-nil postgres envelope queue")
+	}
+	writebackQueue, err := BuildWritebackQueueFromDSN("postgres://localhost/relayfile?sslmode=disable", 11)
+	if err != nil {
+		t.Fatalf("expected postgres writeback queue backend to be available, got %v", err)
+	}
+	if writebackQueue == nil {
+		t.Fatalf("expected non-nil postgres writeback queue")
+	}
 	if _, err := BuildEnvelopeQueueFromDSN("redis://localhost:6379/0", 10); err == nil {
 		t.Fatalf("expected unsupported scheme error for envelope queue")
 	} else if !errors.Is(err, ErrNotImplemented) {

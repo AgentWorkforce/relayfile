@@ -1,0 +1,6 @@
+.git
+.gocache
+.trajectories
+.livefs
+.tmp
+.DS_Store

@@ -2,7 +2,9 @@ package relayfile
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -20,6 +22,7 @@ type ApplyAction struct {
 	Content          string
 	ContentType      string
 	ProviderObjectID string
+	Semantics        FileSemantics
 }
 
 type ProviderAdapter interface {
@@ -97,6 +100,7 @@ func (NotionAdapter) ParseEnvelope(req WebhookEnvelopeRequest) ([]ApplyAction, e
 				Content:          content,
 				ContentType:      toString(req.Payload["contentType"]),
 				ProviderObjectID: toString(req.Payload["objectId"]),
+				Semantics:        extractSemantics(req.Payload),
 			},
 		}, nil
 	case "notion.page.deleted":
@@ -110,6 +114,156 @@ func (NotionAdapter) ParseEnvelope(req WebhookEnvelopeRequest) ([]ApplyAction, e
 	default:
 		return []ApplyAction{{Type: ActionIgnored}}, nil
 	}
+}
+
+func extractSemantics(payload map[string]any) FileSemantics {
+	if len(payload) == 0 {
+		return FileSemantics{}
+	}
+	var semanticBlock map[string]any
+	if rawBlock, ok := payload["semantics"].(map[string]any); ok {
+		semanticBlock = rawBlock
+	}
+	selectField := func(name string) any {
+		if semanticBlock != nil {
+			if value, ok := semanticBlock[name]; ok {
+				return value
+			}
+		}
+		return payload[name]
+	}
+	semantics := FileSemantics{
+		Properties:  asStringMap(selectField("properties")),
+		Relations:   asStringSlice(selectField("relations")),
+		Permissions: asStringSlice(selectField("permissions")),
+		Comments:    asStringSlice(selectField("comments")),
+	}
+	if len(semantics.Relations) == 0 {
+		semantics.Relations = asStringSlice(selectField("relationIds"))
+	}
+	if len(semantics.Permissions) == 0 {
+		semantics.Permissions = asStringSlice(selectField("acl"))
+	}
+	if len(semantics.Comments) == 0 {
+		semantics.Comments = asStringSlice(selectField("commentIds"))
+	}
+	return normalizeSemantics(semantics)
+}
+
+func asStringMap(value any) map[string]string {
+	var raw map[string]any
+	switch typed := value.(type) {
+	case map[string]any:
+		raw = typed
+	case map[string]string:
+		if len(typed) == 0 {
+			return nil
+		}
+		raw = make(map[string]any, len(typed))
+		for k, v := range typed {
+			raw[k] = v
+		}
+	default:
+		return nil
+	}
+	if len(raw) == 0 {
+		return nil
+	}
+	out := map[string]string{}
+	for key, rawValue := range raw {
+		trimmed := strings.TrimSpace(key)
+		if trimmed == "" {
+			continue
+		}
+		switch typed := rawValue.(type) {
+		case string:
+			out[trimmed] = strings.TrimSpace(typed)
+		case fmt.Stringer:
+			out[trimmed] = strings.TrimSpace(typed.String())
+		case bool, int, int32, int64, float32, float64:
+			out[trimmed] = strings.TrimSpace(fmt.Sprintf("%v", typed))
+		case nil:
+			out[trimmed] = ""
+		default:
+			encoded, err := json.Marshal(typed)
+			if err != nil {
+				out[trimmed] = strings.TrimSpace(fmt.Sprintf("%v", typed))
+			} else {
+				out[trimmed] = strings.TrimSpace(string(encoded))
+			}
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func asStringSlice(value any) []string {
+	switch typed := value.(type) {
+	case nil:
+		return nil
+	case string:
+		trimmed := strings.TrimSpace(typed)
+		if trimmed == "" {
+			return nil
+		}
+		return []string{trimmed}
+	case []any:
+		out := make([]string, 0, len(typed))
+		for _, raw := range typed {
+			switch v := raw.(type) {
+			case string:
+				trimmed := strings.TrimSpace(v)
+				if trimmed != "" {
+					out = append(out, trimmed)
+				}
+			case fmt.Stringer:
+				trimmed := strings.TrimSpace(v.String())
+				if trimmed != "" {
+					out = append(out, trimmed)
+				}
+			default:
+				trimmed := strings.TrimSpace(fmt.Sprintf("%v", raw))
+				if trimmed != "" && trimmed != "<nil>" {
+					out = append(out, trimmed)
+				}
+			}
+		}
+		return dedupeAndSort(out)
+	case []string:
+		return dedupeAndSort(typed)
+	default:
+		trimmed := strings.TrimSpace(fmt.Sprintf("%v", value))
+		if trimmed == "" || trimmed == "<nil>" {
+			return nil
+		}
+		return []string{trimmed}
+	}
+}
+
+func dedupeAndSort(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(values))
+	for _, raw := range values {
+		v := strings.TrimSpace(raw)
+		if v == "" {
+			continue
+		}
+		if _, ok := seen[v]; ok {
+			continue
+		}
+		seen[v] = struct{}{}
+		out = append(out, v)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	sort.Strings(out)
+	return out
 }
 
 func (a NotionAdapter) ApplyWriteback(action WritebackAction) error {

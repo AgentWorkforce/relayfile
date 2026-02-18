@@ -8,12 +8,23 @@ export interface TreeEntry {
   providerObjectId?: string;
   size?: number;
   updatedAt?: string;
+  propertyCount?: number;
+  relationCount?: number;
+  permissionCount?: number;
+  commentCount?: number;
 }
 
 export interface TreeResponse {
   path: string;
   entries: TreeEntry[];
   nextCursor: string | null;
+}
+
+export interface FileSemantics {
+  properties?: Record<string, string>;
+  relations?: string[];
+  permissions?: string[];
+  comments?: string[];
 }
 
 export interface FileReadResponse {
@@ -24,11 +35,32 @@ export interface FileReadResponse {
   provider?: string;
   providerObjectId?: string;
   lastEditedAt?: string;
+  semantics?: FileSemantics;
 }
 
 export interface FileWriteRequest {
   contentType?: string;
   content: string;
+  semantics?: FileSemantics;
+}
+
+export interface FileQueryItem {
+  path: string;
+  revision: string;
+  contentType: string;
+  provider?: string;
+  providerObjectId?: string;
+  lastEditedAt?: string;
+  size: number;
+  properties?: Record<string, string>;
+  relations?: string[];
+  permissions?: string[];
+  comments?: string[];
+}
+
+export interface FileQueryResponse {
+  items: FileQueryItem[];
+  nextCursor: string | null;
 }
 
 export type WritebackState = "pending" | "succeeded" | "failed" | "dead_lettered";
@@ -279,6 +311,19 @@ export interface ListTreeOptions {
   signal?: AbortSignal;
 }
 
+export interface QueryFilesOptions {
+  path?: string;
+  provider?: string;
+  relation?: string;
+  permission?: string;
+  comment?: string;
+  properties?: Record<string, string>;
+  cursor?: string;
+  limit?: number;
+  correlationId?: string;
+  signal?: AbortSignal;
+}
+
 export interface GetEventsOptions {
   provider?: string;
   cursor?: string;
@@ -395,6 +440,7 @@ export interface WriteFileInput {
   baseRevision: string;
   content: string;
   contentType?: string;
+  semantics?: FileSemantics;
   correlationId?: string;
   signal?: AbortSignal;
 }

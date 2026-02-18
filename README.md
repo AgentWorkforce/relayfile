@@ -19,6 +19,7 @@ Queue-first virtual filesystem-over-REST that ingests noisy external webhooks, p
   - `PUT /v1/workspaces/{workspaceId}/fs/file`
   - `DELETE /v1/workspaces/{workspaceId}/fs/file`
   - `GET /v1/workspaces/{workspaceId}/fs/events`
+  - `GET /v1/workspaces/{workspaceId}/fs/query` (structured metadata filters)
 - Operations:
   - `GET /v1/workspaces/{workspaceId}/ops`
   - `GET /v1/workspaces/{workspaceId}/ops/{opId}`
@@ -38,6 +39,39 @@ Queue-first virtual filesystem-over-REST that ingests noisy external webhooks, p
   - `POST /v1/workspaces/{workspaceId}/sync/refresh`
 
 See `openapi/relayfile-v1.openapi.yaml` for contract details.
+
+Semantic primitives (provider-agnostic):
+
+- `semantics.properties` (key/value attributes)
+- `semantics.relations` (cross-object IDs)
+- `semantics.permissions` (ACL/entitlement references)
+- `semantics.comments` (comment/reference IDs)
+
+Permission policy (enforced on `fs/file`, `fs/tree`, `fs/query`, file updates/deletes):
+
+- `scope:<name>`: allow if bearer token has scope `<name>`
+- `agent:<name>`: allow if JWT `agent_name` matches `<name>`
+- `workspace:<id>`: allow if workspace ID matches `<id>`
+- `public` / `any` / `*`: allow all
+- `deny:scope:<name>` / `deny:agent:<name>` / `deny:workspace:<id>`: explicit deny (takes precedence over allow)
+
+Hierarchical inheritance:
+
+- Place a policy marker file named `.relayfile.acl` in a directory.
+- Its `semantics.permissions` rules are inherited by descendant files.
+- Child file rules are appended after inherited rules.
+
+If a file has `semantics.permissions` but none of the entries are recognized policy rules, entries are treated as metadata only (not enforced).
+
+Example structured query:
+
+```bash
+TOKEN="$(./scripts/generate-dev-token.sh ws_live)"
+curl -sS \
+  -H "Authorization: Bearer ${TOKEN}" \
+  -H "X-Correlation-Id: corr_query_$(date +%s)" \
+  "http://127.0.0.1:8080/v1/workspaces/ws_live/fs/query?path=/notion&property.topic=investments&relation=db_investments&permission=scope:fs:read&limit=20" | jq .
+```
 
 ## Local run
 
@@ -63,6 +97,22 @@ RELAYFILE_WRITEBACK_QUEUE_DSN=file://$PWD/.data/writeback-queue.json \
 go run ./cmd/relayfile
 ```
 
+Postgres DSN mode:
+
+```bash
+RELAYFILE_STATE_BACKEND_DSN=postgres://localhost:5432/relayfile?sslmode=disable \
+RELAYFILE_ENVELOPE_QUEUE_DSN=postgres://localhost:5432/relayfile?sslmode=disable \
+RELAYFILE_WRITEBACK_QUEUE_DSN=postgres://localhost:5432/relayfile?sslmode=disable \
+go run ./cmd/relayfile
+```
+
+Postgres adapter integration tests (requires running Postgres):
+
+```bash
+RELAYFILE_TEST_POSTGRES_DSN=postgres://localhost:5432/relayfile?sslmode=disable \
+go test ./internal/relayfile -run PostgresIntegration -count=1
+```
+
 Profile-based backend mode:
 
 ```bash
@@ -71,6 +121,84 @@ RELAYFILE_DATA_DIR=.data \
 go run ./cmd/relayfile
 ```
 
+```bash
+RELAYFILE_BACKEND_PROFILE=production \
+RELAYFILE_PRODUCTION_DSN=postgres://localhost:5432/relayfile?sslmode=disable \
+go run ./cmd/relayfile
+```
+
+Production profile validation runbook:
+
+```bash
+cat docs/production-validation.md
+```
+
+Contract surface check (OpenAPI <-> SDK):
+
+```bash
+./scripts/check-contract-surface.sh
+```
+
+## Docker Compose live run
+
+Bring up Postgres + RelayFile + continuous mount sync (shared local mirror in `./.livefs`):
+
+```bash
+cp compose.env.example .env
+# set RELAYFILE_NOTION_TOKEN in .env for real Notion writeback
+docker compose up --build -d
+docker compose logs -f relayfile mountsync
+```
+
+Open the local control dashboard:
+
+```text
+http://127.0.0.1:8080/dashboard
+```
+
+Use the token from `./scripts/generate-dev-token.sh ws_live` in the dashboard bearer-token field.
+
+If you change `RELAYFILE_WORKSPACE` or `RELAYFILE_JWT_SECRET` in `.env`, generate a matching token and set it as `RELAYFILE_TOKEN`:
+
+```bash
+./scripts/generate-dev-token.sh ws_live
+```
+
+Send a live internal webhook envelope to materialize content into the mounted virtual filesystem:
+
+```bash
+./scripts/send-internal-envelope.sh /notion/AgentGuide.md \"# agent walkthrough\"
+```
+
+Import real Notion pages into RelayFile for local virtual-FS testing (without a Notion bridge service):
+
+```bash
+# uses RELAYFILE_NOTION_TOKEN from .env
+./scripts/import-notion-pages.sh --database-id <notion_database_id> --max-pages 20
+```
+
+Search mode (if you don't want a fixed database id):
+
+```bash
+./scripts/import-notion-pages.sh --query \"project docs\" --max-pages 20
+```
+
+This importer reads from Notion API and emits signed internal envelopes to RelayFile so pages appear in `./.livefs`.
+It is intended for local testing only.
+
+Run fully automated live E2E (stack up, ingress seed, agent traverse/edit, ops + backend verification):
+
+```bash
+./scripts/live-e2e.sh --follow-logs
+```
+
+Run your agent against `./.livefs` to traverse/edit files.
+
+Notes:
+
+- `RELAYFILE_NOTION_TOKEN` is used for outbound writeback calls to Notion.
+- Inbound file materialization still requires webhook envelopes (from your upstream integration or `scripts/send-internal-envelope.sh`).
+
 Useful env vars:
 
 - `RELAYFILE_ADDR` (default `:8080`)
@@ -78,14 +206,15 @@ Useful env vars:
 - `RELAYFILE_INTERNAL_HMAC_SECRET`
 - `RELAYFILE_MAX_BODY_BYTES`
 - `RELAYFILE_STATE_FILE`
-- `RELAYFILE_STATE_BACKEND_DSN` (`memory://`, `file:///...`)
-- `RELAYFILE_BACKEND_PROFILE` (`inmemory`, `durable-local`)
+- `RELAYFILE_STATE_BACKEND_DSN` (`memory://`, `file:///...`, `postgres://...`)
+- `RELAYFILE_BACKEND_PROFILE` (`inmemory`, `durable-local`, `production`)
 - `RELAYFILE_DATA_DIR` (profile data directory, default `.relayfile`)
 - `RELAYFILE_ENVELOPE_QUEUE_SIZE`
 - `RELAYFILE_ENVELOPE_QUEUE_FILE`
 - `RELAYFILE_WRITEBACK_QUEUE_FILE`
-- `RELAYFILE_ENVELOPE_QUEUE_DSN` (`memory://`, `file:///...`)
-- `RELAYFILE_WRITEBACK_QUEUE_DSN` (`memory://`, `file:///...`)
+- `RELAYFILE_ENVELOPE_QUEUE_DSN` (`memory://`, `file:///...`, `postgres://...`)
+- `RELAYFILE_WRITEBACK_QUEUE_DSN` (`memory://`, `file:///...`, `postgres://...`)
+- `RELAYFILE_PRODUCTION_DSN` (required for `RELAYFILE_BACKEND_PROFILE=production`; fallback env alias: `RELAYFILE_POSTGRES_DSN`)
 - `RELAYFILE_WRITEBACK_QUEUE_SIZE`
 - `RELAYFILE_ENVELOPE_WORKERS`
 - `RELAYFILE_WRITEBACK_WORKERS`

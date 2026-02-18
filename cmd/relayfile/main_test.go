@@ -193,6 +193,17 @@ func TestBuildStateBackendFromEnvDSN(t *testing.T) {
 	}
 }
 
+func TestBuildStateBackendFromEnvPostgresDSN(t *testing.T) {
+	t.Setenv("RELAYFILE_STATE_BACKEND_DSN", "postgres://localhost/relayfile?sslmode=disable")
+	backend, err := buildStateBackendFromEnv()
+	if err != nil {
+		t.Fatalf("buildStateBackendFromEnv failed for postgres dsn: %v", err)
+	}
+	if backend == nil {
+		t.Fatalf("expected postgres backend from dsn")
+	}
+}
+
 func TestBuildStateBackendFromEnvFileFallback(t *testing.T) {
 	t.Setenv("RELAYFILE_STATE_BACKEND_DSN", "")
 	t.Setenv("RELAYFILE_STATE_FILE", filepath.Join(t.TempDir(), "state.json"))
@@ -206,7 +217,7 @@ func TestBuildStateBackendFromEnvFileFallback(t *testing.T) {
 }
 
 func TestBuildStateBackendFromEnvInvalidDSN(t *testing.T) {
-	t.Setenv("RELAYFILE_STATE_BACKEND_DSN", "postgres://localhost/relayfile")
+	t.Setenv("RELAYFILE_STATE_BACKEND_DSN", "unsupported://localhost/relayfile")
 	_, err := buildStateBackendFromEnv()
 	if err == nil {
 		t.Fatalf("expected unsupported state backend scheme error")
@@ -282,6 +293,27 @@ func TestBuildQueuesFromEnvDSNBacked(t *testing.T) {
 	}
 }
 
+func TestBuildQueuesFromEnvPostgresDSNBacked(t *testing.T) {
+	t.Setenv("RELAYFILE_ENVELOPE_QUEUE_DSN", "postgres://localhost/relayfile?sslmode=disable")
+	t.Setenv("RELAYFILE_WRITEBACK_QUEUE_DSN", "postgres://localhost/relayfile?sslmode=disable")
+	t.Setenv("RELAYFILE_ENVELOPE_QUEUE_SIZE", "22")
+	t.Setenv("RELAYFILE_WRITEBACK_QUEUE_SIZE", "33")
+
+	envelopeQueue, writebackQueue, err := buildQueuesFromEnv()
+	if err != nil {
+		t.Fatalf("buildQueuesFromEnv failed for postgres dsn: %v", err)
+	}
+	if envelopeQueue == nil || writebackQueue == nil {
+		t.Fatalf("expected both queues to be initialized from postgres dsn")
+	}
+	if envelopeQueue.Capacity() != 22 {
+		t.Fatalf("expected postgres envelope queue capacity 22, got %d", envelopeQueue.Capacity())
+	}
+	if writebackQueue.Capacity() != 33 {
+		t.Fatalf("expected postgres writeback queue capacity 33, got %d", writebackQueue.Capacity())
+	}
+}
+
 func TestBuildQueuesFromEnvInvalidDSN(t *testing.T) {
 	t.Setenv("RELAYFILE_ENVELOPE_QUEUE_DSN", "redis://localhost:6379/0")
 	_, _, err := buildQueuesFromEnv()
@@ -314,6 +346,29 @@ func TestBuildStorageBackendsFromEnvDurableLocalProfile(t *testing.T) {
 	}
 	if stateBackend == nil || envelopeQueue == nil || writebackQueue == nil {
 		t.Fatalf("expected non-nil backends for durable-local profile")
+	}
+}
+
+func TestBuildStorageBackendsFromEnvProductionProfile(t *testing.T) {
+	t.Setenv("RELAYFILE_BACKEND_PROFILE", "production")
+	t.Setenv("RELAYFILE_PRODUCTION_DSN", "postgres://localhost/relayfile?sslmode=disable")
+
+	stateBackend, envelopeQueue, writebackQueue, err := buildStorageBackendsFromEnv()
+	if err != nil {
+		t.Fatalf("buildStorageBackendsFromEnv failed: %v", err)
+	}
+	if stateBackend == nil || envelopeQueue == nil || writebackQueue == nil {
+		t.Fatalf("expected non-nil backends for production profile")
+	}
+}
+
+func TestBuildStorageBackendsFromEnvProductionProfileMissingDSN(t *testing.T) {
+	t.Setenv("RELAYFILE_BACKEND_PROFILE", "production")
+	t.Setenv("RELAYFILE_PRODUCTION_DSN", "")
+	t.Setenv("RELAYFILE_POSTGRES_DSN", "")
+	_, _, _, err := buildStorageBackendsFromEnv()
+	if err == nil {
+		t.Fatalf("expected production profile with missing dsn to return an error")
 	}
 }
 
