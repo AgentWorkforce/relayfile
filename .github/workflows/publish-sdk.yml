@@ -136,7 +136,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: sdk-build
-          path: .
+          path: sdk/relayfile-sdk
 
       - name: Update npm for OIDC support
         run: npm install -g npm@latest
@@ -190,7 +190,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: sdk-build
-          path: .
+          path: sdk/relayfile-sdk
 
       - name: Commit and tag
         run: |
