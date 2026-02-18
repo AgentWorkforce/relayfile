@@ -2,12 +2,24 @@
 
 set -euo pipefail
 
+has_pattern() {
+  local pattern="$1"
+  local file="$2"
+
+  if command -v rg >/dev/null 2>&1; then
+    rg --quiet --fixed-strings "$pattern" "$file"
+    return
+  fi
+
+  grep -Fq -- "$pattern" "$file"
+}
+
 require_pattern() {
   local file="$1"
   local pattern="$2"
   local label="$3"
 
-  if ! rg --quiet --fixed-strings "$pattern" "$file"; then
+  if ! has_pattern "$pattern" "$file"; then
     echo "contract check failed: missing '$label' in $file"
     exit 1
   fi
