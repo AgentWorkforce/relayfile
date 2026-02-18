@@ -141,6 +141,26 @@ jobs:
       - name: Update npm for OIDC support
         run: npm install -g npm@latest
 
+      - name: Verify build artifacts
+        working-directory: sdk/relayfile-sdk
+        run: |
+          echo "=== Verifying dist/ contents ==="
+          if [ ! -d "dist" ]; then
+            echo "ERROR: dist/ directory is missing!"
+            exit 1
+          fi
+          FILE_COUNT=$(find dist -name '*.js' -o -name '*.d.ts' | wc -l)
+          echo "Found $FILE_COUNT output files in dist/"
+          if [ "$FILE_COUNT" -lt 1 ]; then
+            echo "ERROR: dist/ contains no .js or .d.ts files!"
+            exit 1
+          fi
+          ls -la dist/
+          echo ""
+          echo "=== Dry run to verify package contents ==="
+          npm pack --dry-run
+          echo "✓ Build artifacts verified"
+
       - name: Dry run check
         if: github.event.inputs.dry_run == 'true'
         working-directory: sdk/relayfile-sdk
