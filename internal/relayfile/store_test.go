@@ -235,7 +235,7 @@ func TestStoreWriteReadConflictDeleteLifecycle(t *testing.T) {
 
 	write1, err := store.WriteFile(WriteRequest{
 		WorkspaceID:   "ws_1",
-		Path:          "/notion/Engineering/Auth.md",
+		Path:          "/external/Engineering/Auth.md",
 		IfMatch:       "0",
 		ContentType:   "text/markdown",
 		Content:       "# v1",
@@ -251,7 +251,7 @@ func TestStoreWriteReadConflictDeleteLifecycle(t *testing.T) {
 		t.Fatalf("expected writeback provider notion, got %s", write1.Writeback.Provider)
 	}
 
-	file, err := store.ReadFile("ws_1", "/notion/Engineering/Auth.md")
+	file, err := store.ReadFile("ws_1", "/external/Engineering/Auth.md")
 	if err != nil {
 		t.Fatalf("read failed: %v", err)
 	}
@@ -261,7 +261,7 @@ func TestStoreWriteReadConflictDeleteLifecycle(t *testing.T) {
 
 	_, err = store.WriteFile(WriteRequest{
 		WorkspaceID:   "ws_1",
-		Path:          "/notion/Engineering/Auth.md",
+		Path:          "/external/Engineering/Auth.md",
 		IfMatch:       "rev_stale",
 		ContentType:   "text/markdown",
 		Content:       "# stale",
@@ -273,7 +273,7 @@ func TestStoreWriteReadConflictDeleteLifecycle(t *testing.T) {
 
 	write2, err := store.WriteFile(WriteRequest{
 		WorkspaceID:   "ws_1",
-		Path:          "/notion/Engineering/Auth.md",
+		Path:          "/external/Engineering/Auth.md",
 		IfMatch:       file.Revision,
 		ContentType:   "text/markdown",
 		Content:       "# v2",
@@ -285,7 +285,7 @@ func TestStoreWriteReadConflictDeleteLifecycle(t *testing.T) {
 
 	_, err = store.DeleteFile(DeleteRequest{
 		WorkspaceID:   "ws_1",
-		Path:          "/notion/Engineering/Auth.md",
+		Path:          "/external/Engineering/Auth.md",
 		IfMatch:       write2.TargetRevision,
 		CorrelationID: "corr_4",
 	})
@@ -303,7 +303,7 @@ func TestStoreUsesCustomStateBackend(t *testing.T) {
 
 	write, err := store.WriteFile(WriteRequest{
 		WorkspaceID:   "ws_backend",
-		Path:          "/notion/Backend.md",
+		Path:          "/external/Backend.md",
 		IfMatch:       "0",
 		ContentType:   "text/markdown",
 		Content:       "# backend",
@@ -326,7 +326,7 @@ func TestStoreUsesCustomStateBackend(t *testing.T) {
 	})
 	t.Cleanup(recovered.Close)
 
-	file, err := recovered.ReadFile("ws_backend", "/notion/Backend.md")
+	file, err := recovered.ReadFile("ws_backend", "/external/Backend.md")
 	if err != nil {
 		t.Fatalf("read from recovered store failed: %v", err)
 	}
@@ -351,7 +351,7 @@ func TestStoreUsesCustomQueues(t *testing.T) {
 
 	_, err := store.WriteFile(WriteRequest{
 		WorkspaceID:   "ws_custom_queue",
-		Path:          "/notion/Queue.md",
+		Path:          "/external/Queue.md",
 		IfMatch:       "0",
 		ContentType:   "text/markdown",
 		Content:       "# queue",
@@ -367,7 +367,7 @@ func TestStoreUsesCustomQueues(t *testing.T) {
 		Provider:      "notion",
 		DeliveryID:    "delivery_custom_queue_1",
 		ReceivedAt:    time.Now().UTC().Format(time.RFC3339Nano),
-		Payload:       map[string]any{"type": "notion.page.upsert", "objectId": "obj_custom_queue_1", "path": "/notion/Queue.md", "content": "# queue"},
+		Payload:       map[string]any{"event_type": "file.created", "objectId": "obj_custom_queue_1", "path": "/external/Queue.md", "content": "# queue"},
 		CorrelationID: "corr_queue_2",
 	})
 	if err != nil {
@@ -403,7 +403,7 @@ func TestProcessWritebackSkipsNonPendingOperation(t *testing.T) {
 
 	write, err := store.WriteFile(WriteRequest{
 		WorkspaceID:   "ws_writeback_guard",
-		Path:          "/notion/Guard.md",
+		Path:          "/external/Guard.md",
 		IfMatch:       "0",
 		ContentType:   "text/markdown",
 		Content:       "# guard",
@@ -423,7 +423,7 @@ func TestProcessWritebackSkipsNonPendingOperation(t *testing.T) {
 	store.processWriteback(writebackTask{
 		WorkspaceID:   "ws_writeback_guard",
 		OpID:          write.OpID,
-		Path:          "/notion/Guard.md",
+		Path:          "/external/Guard.md",
 		Revision:      write.TargetRevision,
 		CorrelationID: "corr_writeback_guard_2",
 	})
@@ -446,7 +446,7 @@ func TestEnqueueEnvelopeDeduplicatesQueuedEnvelopeID(t *testing.T) {
 		Provider:      "notion",
 		DeliveryID:    "delivery_queue_dedupe_1",
 		ReceivedAt:    time.Now().UTC().Format(time.RFC3339Nano),
-		Payload:       map[string]any{"type": "notion.page.upsert", "objectId": "obj_queue_dedupe_1", "path": "/notion/Q.md", "content": "# q"},
+		Payload:       map[string]any{"event_type": "file.created", "objectId": "obj_queue_dedupe_1", "path": "/external/Q.md", "content": "# q"},
 		CorrelationID: "corr_queue_dedupe_1",
 	})
 	if err != nil {
@@ -480,7 +480,7 @@ func TestEnqueueWritebackDeduplicatesByOpID(t *testing.T) {
 	task := writebackTask{
 		WorkspaceID:   "ws_writeback_dedupe",
 		OpID:          "op_writeback_dedupe_1",
-		Path:          "/notion/W.md",
+		Path:          "/external/W.md",
 		Revision:      "rev_1",
 		CorrelationID: "corr_writeback_dedupe_1",
 	}
@@ -511,7 +511,7 @@ func TestStoreSeedsQueuedIndexesFromFileQueueSnapshots(t *testing.T) {
 	if !writebackQueue.TryEnqueue(WritebackQueueItem{
 		WorkspaceID:   "ws_seed",
 		OpID:          "op_seed_1",
-		Path:          "/notion/Seed.md",
+		Path:          "/external/Seed.md",
 		Revision:      "rev_seed_1",
 		CorrelationID: "corr_seed_1",
 	}) {
@@ -529,7 +529,7 @@ func TestStoreSeedsQueuedIndexesFromFileQueueSnapshots(t *testing.T) {
 	store.enqueueWriteback(writebackTask{
 		WorkspaceID:   "ws_seed",
 		OpID:          "op_seed_1",
-		Path:          "/notion/Seed.md",
+		Path:          "/external/Seed.md",
 		Revision:      "rev_seed_1",
 		CorrelationID: "corr_seed_1",
 	})
@@ -583,7 +583,7 @@ func TestEnqueueWritebackDeduplicatesBlockingEnqueuePath(t *testing.T) {
 	task := writebackTask{
 		WorkspaceID:   "ws_blocking_dedupe",
 		OpID:          "op_blocking_dedupe_1",
-		Path:          "/notion/Blocking.md",
+		Path:          "/external/Blocking.md",
 		Revision:      "rev_blocking_1",
 		CorrelationID: "corr_blocking_dedupe_1",
 	}
@@ -617,7 +617,7 @@ func TestGetBackendStatus(t *testing.T) {
 	store.enqueueWriteback(writebackTask{
 		WorkspaceID:   "ws_backend_status",
 		OpID:          "op_backend_status_1",
-		Path:          "/notion/BackendStatus.md",
+		Path:          "/external/BackendStatus.md",
 		Revision:      "rev_backend_status_1",
 		CorrelationID: "corr_backend_status_1",
 	})
@@ -680,7 +680,7 @@ func TestListTreeHonorsDepth(t *testing.T) {
 	writes := []WriteRequest{
 		{
 			WorkspaceID:   "ws_tree_depth",
-			Path:          "/notion/Engineering/Auth.md",
+			Path:          "/external/Engineering/Auth.md",
 			IfMatch:       "0",
 			ContentType:   "text/markdown",
 			Content:       "# auth",
@@ -688,7 +688,7 @@ func TestListTreeHonorsDepth(t *testing.T) {
 		},
 		{
 			WorkspaceID:   "ws_tree_depth",
-			Path:          "/notion/Engineering/Security/Policy.md",
+			Path:          "/external/Engineering/Security/Policy.md",
 			IfMatch:       "0",
 			ContentType:   "text/markdown",
 			Content:       "# policy",
@@ -696,7 +696,7 @@ func TestListTreeHonorsDepth(t *testing.T) {
 		},
 		{
 			WorkspaceID:   "ws_tree_depth",
-			Path:          "/notion/Product/Roadmap.md",
+			Path:          "/external/Product/Roadmap.md",
 			IfMatch:       "0",
 			ContentType:   "text/markdown",
 			Content:       "# roadmap",
@@ -716,10 +716,10 @@ func TestListTreeHonorsDepth(t *testing.T) {
 	if len(depth1.Entries) != 2 {
 		t.Fatalf("expected 2 depth-1 entries, got %d", len(depth1.Entries))
 	}
-	if depth1.Entries[0].Path != "/notion/Engineering" || depth1.Entries[0].Type != "dir" {
+	if depth1.Entries[0].Path != "/external/Engineering" || depth1.Entries[0].Type != "dir" {
 		t.Fatalf("unexpected first depth-1 entry: %+v", depth1.Entries[0])
 	}
-	if depth1.Entries[1].Path != "/notion/Product" || depth1.Entries[1].Type != "dir" {
+	if depth1.Entries[1].Path != "/external/Product" || depth1.Entries[1].Type != "dir" {
 		t.Fatalf("unexpected second depth-1 entry: %+v", depth1.Entries[1])
 	}
 
@@ -728,11 +728,11 @@ func TestListTreeHonorsDepth(t *testing.T) {
 		t.Fatalf("list tree depth=2 failed: %v", err)
 	}
 	expected := map[string]string{
-		"/notion/Engineering":          "dir",
-		"/notion/Engineering/Auth.md":  "file",
-		"/notion/Engineering/Security": "dir",
-		"/notion/Product":              "dir",
-		"/notion/Product/Roadmap.md":   "file",
+		"/external/Engineering":          "dir",
+		"/external/Engineering/Auth.md":  "file",
+		"/external/Engineering/Security": "dir",
+		"/external/Product":              "dir",
+		"/external/Product/Roadmap.md":   "file",
 	}
 	if len(depth2.Entries) != len(expected) {
 		t.Fatalf("expected %d depth-2 entries, got %d", len(expected), len(depth2.Entries))
@@ -754,7 +754,7 @@ func TestQueryFilesSupportsSemanticFilters(t *testing.T) {
 
 	_, err := store.WriteFile(WriteRequest{
 		WorkspaceID: "ws_semantic_query",
-		Path:        "/notion/Investments/Seed.md",
+		Path:        "/external/Investments/Seed.md",
 		IfMatch:     "0",
 		ContentType: "text/markdown",
 		Content:     "# seed",
@@ -775,7 +775,7 @@ func TestQueryFilesSupportsSemanticFilters(t *testing.T) {
 
 	_, err = store.WriteFile(WriteRequest{
 		WorkspaceID: "ws_semantic_query",
-		Path:        "/notion/Legal/Terms.md",
+		Path:        "/external/Legal/Terms.md",
 		IfMatch:     "0",
 		ContentType: "text/markdown",
 		Content:     "# terms",
@@ -804,7 +804,7 @@ func TestQueryFilesSupportsSemanticFilters(t *testing.T) {
 	if len(topicResp.Items) != 1 {
 		t.Fatalf("expected one topic match, got %d", len(topicResp.Items))
 	}
-	if topicResp.Items[0].Path != "/notion/Investments/Seed.md" {
+	if topicResp.Items[0].Path != "/external/Investments/Seed.md" {
 		t.Fatalf("unexpected topic match path: %s", topicResp.Items[0].Path)
 	}
 	if got := topicResp.Items[0].Properties["stage"]; got != "seed" {
@@ -821,7 +821,7 @@ func TestQueryFilesSupportsSemanticFilters(t *testing.T) {
 	if err != nil {
 		t.Fatalf("query by relation/permission/comment failed: %v", err)
 	}
-	if len(relationResp.Items) != 1 || relationResp.Items[0].Path != "/notion/Investments/Seed.md" {
+	if len(relationResp.Items) != 1 || relationResp.Items[0].Path != "/external/Investments/Seed.md" {
 		t.Fatalf("unexpected relation query response: %+v", relationResp.Items)
 	}
 
@@ -853,7 +853,7 @@ func TestQueryFilesSupportsSemanticFilters(t *testing.T) {
 		t.Fatalf("expected distinct items across pages")
 	}
 
-	tree, err := store.ListTree("ws_semantic_query", "/notion/Investments", 2, "")
+	tree, err := store.ListTree("ws_semantic_query", "/external/Investments", 2, "")
 	if err != nil {
 		t.Fatalf("list tree for semantic counts failed: %v", err)
 	}
@@ -862,7 +862,7 @@ func TestQueryFilesSupportsSemanticFilters(t *testing.T) {
 	}
 	var found bool
 	for _, entry := range tree.Entries {
-		if entry.Path != "/notion/Investments/Seed.md" {
+		if entry.Path != "/external/Investments/Seed.md" {
 			continue
 		}
 		found = true
@@ -881,7 +881,7 @@ func TestResolveFilePermissionsAppliesMarkerInheritance(t *testing.T) {
 
 	_, err := store.WriteFile(WriteRequest{
 		WorkspaceID: "ws_perm_resolve",
-		Path:        "/notion/private/.relayfile.acl",
+		Path:        "/external/private/.relayfile.acl",
 		IfMatch:     "0",
 		ContentType: "text/plain",
 		Content:     "acl",
@@ -896,7 +896,7 @@ func TestResolveFilePermissionsAppliesMarkerInheritance(t *testing.T) {
 
 	_, err = store.WriteFile(WriteRequest{
 		WorkspaceID: "ws_perm_resolve",
-		Path:        "/notion/private/Doc.md",
+		Path:        "/external/private/Doc.md",
 		IfMatch:     "0",
 		ContentType: "text/markdown",
 		Content:     "# doc",
@@ -909,7 +909,7 @@ func TestResolveFilePermissionsAppliesMarkerInheritance(t *testing.T) {
 		t.Fatalf("write doc failed: %v", err)
 	}
 
-	rulesWithTarget := store.ResolveFilePermissions("ws_perm_resolve", "/notion/private/Doc.md", true)
+	rulesWithTarget := store.ResolveFilePermissions("ws_perm_resolve", "/external/private/Doc.md", true)
 	if len(rulesWithTarget) != 2 {
 		t.Fatalf("expected inherited + target rules, got %+v", rulesWithTarget)
 	}
@@ -920,7 +920,7 @@ func TestResolveFilePermissionsAppliesMarkerInheritance(t *testing.T) {
 		t.Fatalf("expected target rule second, got %+v", rulesWithTarget)
 	}
 
-	rulesNoTarget := store.ResolveFilePermissions("ws_perm_resolve", "/notion/private/Doc.md", false)
+	rulesNoTarget := store.ResolveFilePermissions("ws_perm_resolve", "/external/private/Doc.md", false)
 	if len(rulesNoTarget) != 1 || rulesNoTarget[0] != "scope:finance" {
 		t.Fatalf("expected only inherited rules when includeTarget=false, got %+v", rulesNoTarget)
 	}
@@ -932,7 +932,7 @@ func TestStoreEventsAndOps(t *testing.T) {
 
 	write, err := store.WriteFile(WriteRequest{
 		WorkspaceID:   "ws_2",
-		Path:          "/notion/Product/Roadmap.md",
+		Path:          "/external/Product/Roadmap.md",
 		IfMatch:       "0",
 		ContentType:   "text/markdown",
 		Content:       "# roadmap",
@@ -968,7 +968,7 @@ func TestGetEventsSupportsProviderFilter(t *testing.T) {
 
 	if _, err := store.WriteFile(WriteRequest{
 		WorkspaceID:   "ws_events_provider",
-		Path:          "/notion/EventsProvider.md",
+		Path:          "/external/EventsProvider.md",
 		IfMatch:       "0",
 		ContentType:   "text/markdown",
 		Content:       "# notion",
@@ -1022,14 +1022,14 @@ func TestProviderUpsertWithoutPathUsesObjectIdentity(t *testing.T) {
 	_, err := store.IngestEnvelope(WebhookEnvelopeRequest{
 		EnvelopeID:  "env_object_identity_1",
 		WorkspaceID: "ws_object_identity",
-		Provider:    "notion",
+		Provider:    "external",
 		DeliveryID:  "delivery_object_identity_1",
 		ReceivedAt:  firstReceivedAt,
 		Payload: map[string]any{
-			"type":     "notion.page.upsert",
-			"objectId": "notion_obj_identity_1",
-			"path":     "/notion/ObjectIdentity.md",
-			"content":  "# initial",
+			"event_type": "file.created",
+			"objectId":   "obj_identity_1",
+			"path":       "/external/ObjectIdentity.md",
+			"content":    "# initial",
 		},
 		CorrelationID: "corr_object_identity_1",
 	})
@@ -1040,7 +1040,7 @@ func TestProviderUpsertWithoutPathUsesObjectIdentity(t *testing.T) {
 	var firstRevision string
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		file, readErr := store.ReadFile("ws_object_identity", "/notion/ObjectIdentity.md")
+		file, readErr := store.ReadFile("ws_object_identity", "/external/ObjectIdentity.md")
 		if readErr == nil && file.Content == "# initial" {
 			firstRevision = file.Revision
 			break
@@ -1055,13 +1055,13 @@ func TestProviderUpsertWithoutPathUsesObjectIdentity(t *testing.T) {
 	_, err = store.IngestEnvelope(WebhookEnvelopeRequest{
 		EnvelopeID:  "env_object_identity_2",
 		WorkspaceID: "ws_object_identity",
-		Provider:    "notion",
+		Provider:    "external",
 		DeliveryID:  "delivery_object_identity_2",
 		ReceivedAt:  secondReceivedAt,
 		Payload: map[string]any{
-			"type":     "notion.page.upsert",
-			"objectId": "notion_obj_identity_1",
-			"content":  "# updated",
+			"event_type": "file.updated",
+			"objectId":   "obj_identity_1",
+			"content":    "# updated",
 		},
 		CorrelationID: "corr_object_identity_2",
 	})
@@ -1071,7 +1071,7 @@ func TestProviderUpsertWithoutPathUsesObjectIdentity(t *testing.T) {
 
 	deadline = time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		file, readErr := store.ReadFile("ws_object_identity", "/notion/ObjectIdentity.md")
+		file, readErr := store.ReadFile("ws_object_identity", "/external/ObjectIdentity.md")
 		if readErr == nil && file.Content == "# updated" && file.Revision != firstRevision {
 			return
 		}
@@ -1090,7 +1090,7 @@ func TestPendingWritebacksRecoveredOnRestart(t *testing.T) {
 	})
 	write, err := store.WriteFile(WriteRequest{
 		WorkspaceID:   "ws_restart_recovery",
-		Path:          "/notion/RestartRecovery.md",
+		Path:          "/external/RestartRecovery.md",
 		IfMatch:       "0",
 		ContentType:   "text/markdown",
 		Content:       "# pending",
@@ -1138,7 +1138,7 @@ func TestRecoveredWritebackRespectsPersistedNextAttemptAt(t *testing.T) {
 	})
 	write, err := store.WriteFile(WriteRequest{
 		WorkspaceID:   "ws_next_attempt",
-		Path:          "/notion/NextAttempt.md",
+		Path:          "/external/NextAttempt.md",
 		IfMatch:       "0",
 		ContentType:   "text/markdown",
 		Content:       "# retry",
@@ -1469,7 +1469,7 @@ func TestSuppressionMarkersPersistAcrossRestart(t *testing.T) {
 	})
 	write, err := store.WriteFile(WriteRequest{
 		WorkspaceID:   "ws_loop_persist",
-		Path:          "/notion/LoopPersist.md",
+		Path:          "/external/LoopPersist.md",
 		IfMatch:       "0",
 		ContentType:   "text/markdown",
 		Content:       "# initial",
@@ -1495,8 +1495,8 @@ func TestSuppressionMarkersPersistAcrossRestart(t *testing.T) {
 		ReceivedAt:  time.Now().UTC().Format(time.RFC3339Nano),
 		Payload: map[string]any{
 			"type":          "notion.page.upsert",
-			"objectId":      "notion_loop_persist_1",
-			"path":          "/notion/LoopPersist.md",
+			"objectId":      "obj_loop_persist_1",
+			"path":          "/external/LoopPersist.md",
 			"content":       "# echo",
 			"origin":        "relayfile",
 			"opId":          write.OpID,
@@ -1635,7 +1635,7 @@ func TestGetSyncStatusMarksProviderErrorFromWritebackDeadLetter(t *testing.T) {
 
 	write, err := store.WriteFile(WriteRequest{
 		WorkspaceID:   "ws_sync_writeback_error",
-		Path:          "/notion/SyncWritebackError.md",
+		Path:          "/external/SyncWritebackError.md",
 		IfMatch:       "0",
 		ContentType:   "text/markdown",
 		Content:       "# writeback error",
@@ -1744,7 +1744,7 @@ func TestListSyncStatusesAggregatesWorkspacesAndAppliesProviderFilter(t *testing
 
 	if _, err := store.WriteFile(WriteRequest{
 		WorkspaceID:   "ws_sync_list_ws_only",
-		Path:          "/notion/Seed.md",
+		Path:          "/external/Seed.md",
 		IfMatch:       "0",
 		ContentType:   "text/markdown",
 		Content:       "# seed",
@@ -1841,7 +1841,7 @@ func TestListSyncStatusesIncludesFailureCodesFromDeadLettersAndOps(t *testing.T)
 
 	write, err := store.WriteFile(WriteRequest{
 		WorkspaceID:   "ws_sync_list_error_op",
-		Path:          "/notion/ListSyncOpFailure.md",
+		Path:          "/external/ListSyncOpFailure.md",
 		IfMatch:       "0",
 		ContentType:   "text/markdown",
 		Content:       "# op failure",
@@ -1915,14 +1915,18 @@ func TestTriggerSyncRefreshRejectsUnknownProvider(t *testing.T) {
 	store := NewStore()
 	t.Cleanup(store.Close)
 
-	_, err := store.TriggerSyncRefresh("ws_sync_refresh", "unknown-provider", "manual", "corr_sync_refresh_1")
-	if !errors.Is(err, ErrInvalidInput) {
-		t.Fatalf("expected invalid input for unknown provider, got %v", err)
+	// In provider-agnostic system, any provider name is acceptable
+	resp, err := store.TriggerSyncRefresh("ws_sync_refresh", "unknown-provider", "manual", "corr_sync_refresh_1")
+	if err != nil {
+		t.Fatalf("expected any provider to queue refresh, got %v", err)
+	}
+	if resp.Status != "queued" || resp.ID == "" {
+		t.Fatalf("unexpected queued response: %+v", resp)
 	}
 
-	resp, err := store.TriggerSyncRefresh("ws_sync_refresh", "notion", "manual", "corr_sync_refresh_2")
+	resp, err = store.TriggerSyncRefresh("ws_sync_refresh", "salesforce", "manual", "corr_sync_refresh_2")
 	if err != nil {
-		t.Fatalf("expected known provider to queue refresh, got %v", err)
+		t.Fatalf("expected any provider to queue refresh, got %v", err)
 	}
 	if resp.Status != "queued" || resp.ID == "" {
 		t.Fatalf("unexpected queued response: %+v", resp)
@@ -1941,7 +1945,7 @@ func TestListOperationsFiltersByStatus(t *testing.T) {
 
 	write, err := store.WriteFile(WriteRequest{
 		WorkspaceID:   "ws_ops_list",
-		Path:          "/notion/OpsList.md",
+		Path:          "/external/OpsList.md",
 		IfMatch:       "0",
 		ContentType:   "text/markdown",
 		Content:       "# ops",
@@ -1970,7 +1974,7 @@ func TestListOperationsFiltersByAction(t *testing.T) {
 
 	write, err := store.WriteFile(WriteRequest{
 		WorkspaceID:   "ws_ops_action",
-		Path:          "/notion/Action.md",
+		Path:          "/external/Action.md",
 		IfMatch:       "0",
 		ContentType:   "text/markdown",
 		Content:       "# action",
@@ -1981,13 +1985,13 @@ func TestListOperationsFiltersByAction(t *testing.T) {
 	}
 	waitForOpStatus(t, store, "ws_ops_action", write.OpID, "succeeded")
 
-	file, err := store.ReadFile("ws_ops_action", "/notion/Action.md")
+	file, err := store.ReadFile("ws_ops_action", "/external/Action.md")
 	if err != nil {
 		t.Fatalf("read failed: %v", err)
 	}
 	del, err := store.DeleteFile(DeleteRequest{
 		WorkspaceID:   "ws_ops_action",
-		Path:          "/notion/Action.md",
+		Path:          "/external/Action.md",
 		IfMatch:       file.Revision,
 		CorrelationID: "corr_ops_action_2",
 	})
@@ -2060,7 +2064,7 @@ func TestListOperationsFiltersByProvider(t *testing.T) {
 
 	notionWrite, err := store.WriteFile(WriteRequest{
 		WorkspaceID:   "ws_ops_provider",
-		Path:          "/notion/ProviderFilter.md",
+		Path:          "/external/ProviderFilter.md",
 		IfMatch:       "0",
 		ContentType:   "text/markdown",
 		Content:       "# notion",
@@ -2105,7 +2109,7 @@ func TestListOperationsSortsByOperationSequenceDescending(t *testing.T) {
 	for i := 0; i < 12; i++ {
 		_, err := store.WriteFile(WriteRequest{
 			WorkspaceID:   "ws_ops_sort",
-			Path:          fmt.Sprintf("/notion/Sort-%02d.md", i),
+			Path:          fmt.Sprintf("/external/Sort-%02d.md", i),
 			IfMatch:       "0",
 			ContentType:   "text/markdown",
 			Content:       fmt.Sprintf("# %d", i),
@@ -2147,7 +2151,7 @@ func TestStorePersistsStateAcrossRestart(t *testing.T) {
 
 	write, err := store.WriteFile(WriteRequest{
 		WorkspaceID:   "ws_persist",
-		Path:          "/notion/Engineering/Persist.md",
+		Path:          "/external/Engineering/Persist.md",
 		IfMatch:       "0",
 		ContentType:   "text/markdown",
 		Content:       "# persisted",
@@ -2162,7 +2166,7 @@ func TestStorePersistsStateAcrossRestart(t *testing.T) {
 
 	reloaded := NewStoreWithOptions(StoreOptions{StateFile: stateFile})
 	t.Cleanup(reloaded.Close)
-	file, err := reloaded.ReadFile("ws_persist", "/notion/Engineering/Persist.md")
+	file, err := reloaded.ReadFile("ws_persist", "/external/Engineering/Persist.md")
 	if err != nil {
 		t.Fatalf("read after reload failed: %v", err)
 	}
@@ -2269,7 +2273,7 @@ func TestStoreIngestEnvelopeAndReplayOp(t *testing.T) {
 
 	write, err := store.WriteFile(WriteRequest{
 		WorkspaceID:   "ws_env",
-		Path:          "/notion/X.md",
+		Path:          "/external/X.md",
 		IfMatch:       "0",
 		ContentType:   "text/markdown",
 		Content:       "# x",
@@ -2295,7 +2299,7 @@ func TestReplayOperationRequiresDeadLetteredState(t *testing.T) {
 
 	write, err := store.WriteFile(WriteRequest{
 		WorkspaceID:   "ws_replay_state",
-		Path:          "/notion/ReplayState.md",
+		Path:          "/external/ReplayState.md",
 		IfMatch:       "0",
 		ContentType:   "text/markdown",
 		Content:       "# replay-state",
@@ -2329,7 +2333,7 @@ func TestReplayOperationResetsAttemptCount(t *testing.T) {
 
 	write, err := store.WriteFile(WriteRequest{
 		WorkspaceID:   "ws_replay_attempts",
-		Path:          "/notion/ReplayAttempts.md",
+		Path:          "/external/ReplayAttempts.md",
 		IfMatch:       "0",
 		ContentType:   "text/markdown",
 		Content:       "# replay-attempts",
@@ -2370,7 +2374,7 @@ func TestReplayEnvelopeReprocessesProcessedEnvelope(t *testing.T) {
 		Payload: map[string]any{
 			"type":     "notion.page.upsert",
 			"objectId": "obj_replay_1",
-			"path":     "/notion/Replay.md",
+			"path":     "/external/Replay.md",
 			"content":  "# replay",
 		},
 		CorrelationID: "corr_replay_1",
@@ -2378,7 +2382,7 @@ func TestReplayEnvelopeReprocessesProcessedEnvelope(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ingest failed: %v", err)
 	}
-	waitForFileContent(t, store, "ws_replay", "/notion/Replay.md", "# replay")
+	waitForFileContent(t, store, "ws_replay", "/external/Replay.md", "# replay")
 
 	initialFeed, err := store.GetEvents("ws_replay", "", "", 1000)
 	if err != nil {
@@ -2910,8 +2914,8 @@ func TestEnvelopePipelineAppliesNotionUpsertMoveDelete(t *testing.T) {
 		ReceivedAt:  receivedAt,
 		Payload: map[string]any{
 			"type":     "notion.page.upsert",
-			"objectId": "notion_obj_1",
-			"path":     "/notion/Engineering/FromWebhook.md",
+			"objectId": "obj_obj_1",
+			"path":     "/external/Engineering/FromWebhook.md",
 			"title":    "FromWebhook",
 			"content":  "# from webhook",
 		},
@@ -2920,7 +2924,7 @@ func TestEnvelopePipelineAppliesNotionUpsertMoveDelete(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ingest upsert failed: %v", err)
 	}
-	waitForFileContent(t, store, "ws_pipe", "/notion/Engineering/FromWebhook.md", "# from webhook")
+	waitForFileContent(t, store, "ws_pipe", "/external/Engineering/FromWebhook.md", "# from webhook")
 
 	_, err = store.IngestEnvelope(WebhookEnvelopeRequest{
 		EnvelopeID:  "env_upsert_2",
@@ -2930,8 +2934,8 @@ func TestEnvelopePipelineAppliesNotionUpsertMoveDelete(t *testing.T) {
 		ReceivedAt:  receivedAt,
 		Payload: map[string]any{
 			"type":     "notion.page.upsert",
-			"objectId": "notion_obj_1",
-			"path":     "/notion/Engineering/Moved.md",
+			"objectId": "obj_obj_1",
+			"path":     "/external/Engineering/Moved.md",
 			"title":    "Moved",
 			"content":  "# moved",
 		},
@@ -2940,8 +2944,8 @@ func TestEnvelopePipelineAppliesNotionUpsertMoveDelete(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ingest move failed: %v", err)
 	}
-	waitForFileContent(t, store, "ws_pipe", "/notion/Engineering/Moved.md", "# moved")
-	waitForNotFound(t, store, "ws_pipe", "/notion/Engineering/FromWebhook.md")
+	waitForFileContent(t, store, "ws_pipe", "/external/Engineering/Moved.md", "# moved")
+	waitForNotFound(t, store, "ws_pipe", "/external/Engineering/FromWebhook.md")
 
 	_, err = store.IngestEnvelope(WebhookEnvelopeRequest{
 		EnvelopeID:  "env_delete_1",
@@ -2951,14 +2955,14 @@ func TestEnvelopePipelineAppliesNotionUpsertMoveDelete(t *testing.T) {
 		ReceivedAt:  receivedAt,
 		Payload: map[string]any{
 			"type":     "notion.page.deleted",
-			"objectId": "notion_obj_1",
+			"objectId": "obj_obj_1",
 		},
 		CorrelationID: "corr_pipe_3",
 	})
 	if err != nil {
 		t.Fatalf("ingest delete failed: %v", err)
 	}
-	waitForNotFound(t, store, "ws_pipe", "/notion/Engineering/Moved.md")
+	waitForNotFound(t, store, "ws_pipe", "/external/Engineering/Moved.md")
 }
 
 func TestEnvelopeStalenessSkipsOlderUpsertForSameObject(t *testing.T) {
@@ -2974,8 +2978,8 @@ func TestEnvelopeStalenessSkipsOlderUpsertForSameObject(t *testing.T) {
 		ReceivedAt:  now.Format(time.RFC3339Nano),
 		Payload: map[string]any{
 			"type":     "notion.page.upsert",
-			"objectId": "notion_stale_upsert_1",
-			"path":     "/notion/Stale.md",
+			"objectId": "obj_stale_upsert_1",
+			"path":     "/external/Stale.md",
 			"content":  "# newer",
 		},
 		CorrelationID: "corr_stale_upsert_new",
@@ -2983,7 +2987,7 @@ func TestEnvelopeStalenessSkipsOlderUpsertForSameObject(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ingest newer envelope failed: %v", err)
 	}
-	waitForFileContent(t, store, "ws_stale_upsert", "/notion/Stale.md", "# newer")
+	waitForFileContent(t, store, "ws_stale_upsert", "/external/Stale.md", "# newer")
 
 	_, err = store.IngestEnvelope(WebhookEnvelopeRequest{
 		EnvelopeID:  "env_stale_upsert_old",
@@ -2993,8 +2997,8 @@ func TestEnvelopeStalenessSkipsOlderUpsertForSameObject(t *testing.T) {
 		ReceivedAt:  now.Add(-1 * time.Minute).Format(time.RFC3339Nano),
 		Payload: map[string]any{
 			"type":     "notion.page.upsert",
-			"objectId": "notion_stale_upsert_1",
-			"path":     "/notion/Stale.md",
+			"objectId": "obj_stale_upsert_1",
+			"path":     "/external/Stale.md",
 			"content":  "# older",
 		},
 		CorrelationID: "corr_stale_upsert_old",
@@ -3017,7 +3021,7 @@ func TestEnvelopeStalenessSkipsOlderUpsertForSameObject(t *testing.T) {
 			}
 		}
 		if found {
-			file, err := store.ReadFile("ws_stale_upsert", "/notion/Stale.md")
+			file, err := store.ReadFile("ws_stale_upsert", "/external/Stale.md")
 			if err != nil {
 				t.Fatalf("read file failed: %v", err)
 			}
@@ -3055,8 +3059,8 @@ func TestEnvelopeStalenessSkipsOlderDeleteForSameObject(t *testing.T) {
 		ReceivedAt:  now.Format(time.RFC3339Nano),
 		Payload: map[string]any{
 			"type":     "notion.page.upsert",
-			"objectId": "notion_stale_delete_1",
-			"path":     "/notion/StaleDelete.md",
+			"objectId": "obj_stale_delete_1",
+			"path":     "/external/StaleDelete.md",
 			"content":  "# alive",
 		},
 		CorrelationID: "corr_stale_delete_new",
@@ -3064,7 +3068,7 @@ func TestEnvelopeStalenessSkipsOlderDeleteForSameObject(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ingest newer envelope failed: %v", err)
 	}
-	waitForFileContent(t, store, "ws_stale_delete", "/notion/StaleDelete.md", "# alive")
+	waitForFileContent(t, store, "ws_stale_delete", "/external/StaleDelete.md", "# alive")
 
 	_, err = store.IngestEnvelope(WebhookEnvelopeRequest{
 		EnvelopeID:  "env_stale_delete_old",
@@ -3074,7 +3078,7 @@ func TestEnvelopeStalenessSkipsOlderDeleteForSameObject(t *testing.T) {
 		ReceivedAt:  now.Add(-1 * time.Minute).Format(time.RFC3339Nano),
 		Payload: map[string]any{
 			"type":     "notion.page.deleted",
-			"objectId": "notion_stale_delete_1",
+			"objectId": "obj_stale_delete_1",
 		},
 		CorrelationID: "corr_stale_delete_old",
 	})
@@ -3096,7 +3100,7 @@ func TestEnvelopeStalenessSkipsOlderDeleteForSameObject(t *testing.T) {
 			}
 		}
 		if found {
-			file, err := store.ReadFile("ws_stale_delete", "/notion/StaleDelete.md")
+			file, err := store.ReadFile("ws_stale_delete", "/external/StaleDelete.md")
 			if err != nil {
 				t.Fatalf("read file failed: %v", err)
 			}
@@ -3122,8 +3126,8 @@ func TestEnvelopeDuplicateDeliveryDoesNotDoubleApply(t *testing.T) {
 		ReceivedAt:  receivedAt,
 		Payload: map[string]any{
 			"type":     "notion.page.upsert",
-			"objectId": "notion_dup",
-			"path":     "/notion/Dup.md",
+			"objectId": "obj_dup",
+			"path":     "/external/Dup.md",
 			"content":  "# dup",
 		},
 		CorrelationID: "corr_dup_1",
@@ -3132,7 +3136,7 @@ func TestEnvelopeDuplicateDeliveryDoesNotDoubleApply(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ingest failed: %v", err)
 	}
-	waitForFileContent(t, store, "ws_dup", "/notion/Dup.md", "# dup")
+	waitForFileContent(t, store, "ws_dup", "/external/Dup.md", "# dup")
 	initialFeed, err := store.GetEvents("ws_dup", "", "", 1000)
 	if err != nil {
 		t.Fatalf("events failed: %v", err)
@@ -3174,8 +3178,8 @@ func TestEnvelopeCoalescingMergesLatestPayloadWithinWindow(t *testing.T) {
 		ReceivedAt:  receivedAt.Format(time.RFC3339Nano),
 		Payload: map[string]any{
 			"type":     "notion.page.upsert",
-			"objectId": "notion_coalesce_1",
-			"path":     "/notion/Coalesced.md",
+			"objectId": "obj_coalesce_1",
+			"path":     "/external/Coalesced.md",
 			"content":  "# first",
 		},
 		CorrelationID: "corr_coalesce_1",
@@ -3192,8 +3196,8 @@ func TestEnvelopeCoalescingMergesLatestPayloadWithinWindow(t *testing.T) {
 		ReceivedAt:  receivedAt.Add(500 * time.Millisecond).Format(time.RFC3339Nano),
 		Payload: map[string]any{
 			"type":     "notion.page.upsert",
-			"objectId": "notion_coalesce_1",
-			"path":     "/notion/Coalesced.md",
+			"objectId": "obj_coalesce_1",
+			"path":     "/external/Coalesced.md",
 			"content":  "# second",
 		},
 		CorrelationID: "corr_coalesce_2",
@@ -3224,7 +3228,7 @@ func TestEnvelopeCoalescingMergesLatestPayloadWithinWindow(t *testing.T) {
 
 	reloaded := NewStoreWithOptions(StoreOptions{StateFile: stateFile})
 	t.Cleanup(reloaded.Close)
-	waitForFileContent(t, reloaded, "ws_coalesce", "/notion/Coalesced.md", "# second")
+	waitForFileContent(t, reloaded, "ws_coalesce", "/external/Coalesced.md", "# second")
 }
 
 func TestEnvelopeCoalescingRespectsWindow(t *testing.T) {
@@ -3244,8 +3248,8 @@ func TestEnvelopeCoalescingRespectsWindow(t *testing.T) {
 		ReceivedAt:  receivedAt.Format(time.RFC3339Nano),
 		Payload: map[string]any{
 			"type":     "notion.page.upsert",
-			"objectId": "notion_coalesce_window_1",
-			"path":     "/notion/Window.md",
+			"objectId": "obj_coalesce_window_1",
+			"path":     "/external/Window.md",
 			"content":  "# first",
 		},
 		CorrelationID: "corr_coalesce_window_1",
@@ -3262,8 +3266,8 @@ func TestEnvelopeCoalescingRespectsWindow(t *testing.T) {
 		ReceivedAt:  receivedAt.Add(1 * time.Second).Format(time.RFC3339Nano),
 		Payload: map[string]any{
 			"type":     "notion.page.upsert",
-			"objectId": "notion_coalesce_window_1",
-			"path":     "/notion/Window.md",
+			"objectId": "obj_coalesce_window_1",
+			"path":     "/external/Window.md",
 			"content":  "# second",
 		},
 		CorrelationID: "corr_coalesce_window_2",
@@ -3300,8 +3304,8 @@ func TestWebhookBurstCoalescingKeepsSinglePendingEnvelope(t *testing.T) {
 			ReceivedAt:  receivedAt.Add(time.Duration(i) * 10 * time.Millisecond).Format(time.RFC3339Nano),
 			Payload: map[string]any{
 				"type":     "notion.page.upsert",
-				"objectId": "notion_burst_1",
-				"path":     "/notion/Burst.md",
+				"objectId": "obj_burst_1",
+				"path":     "/external/Burst.md",
 				"content":  fmt.Sprintf("# burst %d", i),
 			},
 			CorrelationID: fmt.Sprintf("corr_burst_%d", i),
@@ -3344,8 +3348,8 @@ func TestRebuildCoalesceIndexPrefersLatestPendingEnvelope(t *testing.T) {
 		ReceivedAt:  "2026-01-01T10:00:00Z",
 		Payload: map[string]any{
 			"type":     "notion.page.upsert",
-			"objectId": "notion_rebuild_1",
-			"path":     "/notion/Rebuild.md",
+			"objectId": "obj_rebuild_1",
+			"path":     "/external/Rebuild.md",
 			"content":  "# old",
 		},
 	}
@@ -3357,8 +3361,8 @@ func TestRebuildCoalesceIndexPrefersLatestPendingEnvelope(t *testing.T) {
 		ReceivedAt:  "2026-01-01T10:00:01Z",
 		Payload: map[string]any{
 			"type":     "notion.page.upsert",
-			"objectId": "notion_rebuild_1",
-			"path":     "/notion/Rebuild.md",
+			"objectId": "obj_rebuild_1",
+			"path":     "/external/Rebuild.md",
 			"content":  "# new",
 		},
 	}
@@ -3763,7 +3767,7 @@ func TestProviderWriteActionReceivesFileUpsertPayload(t *testing.T) {
 
 	_, err := store.WriteFile(WriteRequest{
 		WorkspaceID:   "ws_write_action",
-		Path:          "/notion/WriteAction.md",
+		Path:          "/external/WriteAction.md",
 		IfMatch:       "0",
 		ContentType:   "text/markdown",
 		Content:       "# write action",
@@ -3778,7 +3782,7 @@ func TestProviderWriteActionReceivesFileUpsertPayload(t *testing.T) {
 		if action.Type != WritebackActionFileUpsert {
 			t.Fatalf("expected upsert action, got %s", action.Type)
 		}
-		if action.Path != "/notion/WriteAction.md" {
+		if action.Path != "/external/WriteAction.md" {
 			t.Fatalf("unexpected path: %s", action.Path)
 		}
 		if action.Content != "# write action" {
@@ -3804,7 +3808,7 @@ func TestProviderWriteActionReceivesFileDeletePayload(t *testing.T) {
 
 	_, err := store.WriteFile(WriteRequest{
 		WorkspaceID:   "ws_write_delete",
-		Path:          "/notion/DeleteAction.md",
+		Path:          "/external/DeleteAction.md",
 		IfMatch:       "0",
 		ContentType:   "text/markdown",
 		Content:       "# delete action",
@@ -3814,14 +3818,14 @@ func TestProviderWriteActionReceivesFileDeletePayload(t *testing.T) {
 		t.Fatalf("write failed: %v", err)
 	}
 
-	file, err := store.ReadFile("ws_write_delete", "/notion/DeleteAction.md")
+	file, err := store.ReadFile("ws_write_delete", "/external/DeleteAction.md")
 	if err != nil {
 		t.Fatalf("read failed: %v", err)
 	}
 
 	_, err = store.DeleteFile(DeleteRequest{
 		WorkspaceID:   "ws_write_delete",
-		Path:          "/notion/DeleteAction.md",
+		Path:          "/external/DeleteAction.md",
 		IfMatch:       file.Revision,
 		CorrelationID: "corr_write_delete_2",
 	})
@@ -3836,7 +3840,7 @@ func TestProviderWriteActionReceivesFileDeletePayload(t *testing.T) {
 			if action.Type != WritebackActionFileDelete {
 				continue
 			}
-			if action.Path != "/notion/DeleteAction.md" {
+			if action.Path != "/external/DeleteAction.md" {
 				t.Fatalf("unexpected delete path: %s", action.Path)
 			}
 			return
@@ -3864,7 +3868,7 @@ func TestWritebackRetriesThenSucceeds(t *testing.T) {
 
 	write, err := store.WriteFile(WriteRequest{
 		WorkspaceID:   "ws_retry",
-		Path:          "/notion/Retry.md",
+		Path:          "/external/Retry.md",
 		IfMatch:       "0",
 		ContentType:   "text/markdown",
 		Content:       "# retry",
@@ -3898,7 +3902,7 @@ func TestWritebackDeadLetterAfterMaxAttempts(t *testing.T) {
 
 	write, err := store.WriteFile(WriteRequest{
 		WorkspaceID:   "ws_dead",
-		Path:          "/notion/Dead.md",
+		Path:          "/external/Dead.md",
 		IfMatch:       "0",
 		ContentType:   "text/markdown",
 		Content:       "# dead",
@@ -3939,7 +3943,7 @@ func TestPendingEnvelopeIsRecoveredAfterRestart(t *testing.T) {
 		Payload: map[string]any{
 			"type":     "notion.page.upsert",
 			"objectId": "obj_recovery_1",
-			"path":     "/notion/Recovered.md",
+			"path":     "/external/Recovered.md",
 			"content":  "# recovered",
 		},
 		CorrelationID: "corr_recovery_1",
@@ -3947,14 +3951,14 @@ func TestPendingEnvelopeIsRecoveredAfterRestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ingest failed: %v", err)
 	}
-	if _, err := writerStore.ReadFile("ws_recovery", "/notion/Recovered.md"); err != ErrNotFound {
+	if _, err := writerStore.ReadFile("ws_recovery", "/external/Recovered.md"); err != ErrNotFound {
 		t.Fatalf("expected no apply before worker starts, got: %v", err)
 	}
 
 	// Simulate process restart where workers come up and recover pending envelopes.
 	restarted := NewStoreWithOptions(StoreOptions{StateFile: stateFile})
 	t.Cleanup(restarted.Close)
-	waitForFileContent(t, restarted, "ws_recovery", "/notion/Recovered.md", "# recovered")
+	waitForFileContent(t, restarted, "ws_recovery", "/external/Recovered.md", "# recovered")
 }
 
 func TestCustomProviderAdapterIsUsedForEnvelopeProcessing(t *testing.T) {
@@ -4009,7 +4013,7 @@ func TestAdapterWritebackHandlerIsUsedWhenLegacyProviderWriteNotConfigured(t *te
 
 	_, err := store.WriteFile(WriteRequest{
 		WorkspaceID:   "ws_adapter_writeback",
-		Path:          "/notion/AdapterWriteback.md",
+		Path:          "/external/AdapterWriteback.md",
 		IfMatch:       "0",
 		ContentType:   "text/markdown",
 		Content:       "# adapter writeback",
@@ -4024,7 +4028,7 @@ func TestAdapterWritebackHandlerIsUsedWhenLegacyProviderWriteNotConfigured(t *te
 		if action.Type != WritebackActionFileUpsert {
 			t.Fatalf("expected upsert action from adapter writeback, got %s", action.Type)
 		}
-		if action.Path != "/notion/AdapterWriteback.md" {
+		if action.Path != "/external/AdapterWriteback.md" {
 			t.Fatalf("unexpected action path: %s", action.Path)
 		}
 	case <-time.After(2 * time.Second):
@@ -4040,7 +4044,7 @@ func TestLoopSuppressionSuppressesProviderEchoWithinWindow(t *testing.T) {
 
 	write, err := store.WriteFile(WriteRequest{
 		WorkspaceID:   "ws_loop",
-		Path:          "/notion/Loop.md",
+		Path:          "/external/Loop.md",
 		IfMatch:       "0",
 		ContentType:   "text/markdown",
 		Content:       "# local",
@@ -4059,8 +4063,8 @@ func TestLoopSuppressionSuppressesProviderEchoWithinWindow(t *testing.T) {
 		ReceivedAt:  time.Now().UTC().Format(time.RFC3339Nano),
 		Payload: map[string]any{
 			"type":          "notion.page.upsert",
-			"objectId":      "notion_loop_1",
-			"path":          "/notion/Loop.md",
+			"objectId":      "obj_loop_1",
+			"path":          "/external/Loop.md",
 			"content":       "# echoed",
 			"origin":        "relayfile",
 			"opId":          write.OpID,
@@ -4086,7 +4090,7 @@ func TestLoopSuppressionSuppressesProviderEchoWithinWindow(t *testing.T) {
 			}
 		}
 		if foundSuppressed {
-			file, err := store.ReadFile("ws_loop", "/notion/Loop.md")
+			file, err := store.ReadFile("ws_loop", "/external/Loop.md")
 			if err != nil {
 				t.Fatalf("read file failed: %v", err)
 			}
@@ -4119,7 +4123,7 @@ func TestLoopSuppressionWindowExpiryAllowsProviderApply(t *testing.T) {
 
 	write, err := store.WriteFile(WriteRequest{
 		WorkspaceID:   "ws_loop_expiry",
-		Path:          "/notion/LoopExpiry.md",
+		Path:          "/external/LoopExpiry.md",
 		IfMatch:       "0",
 		ContentType:   "text/markdown",
 		Content:       "# local",
@@ -4140,8 +4144,8 @@ func TestLoopSuppressionWindowExpiryAllowsProviderApply(t *testing.T) {
 		ReceivedAt:  time.Now().UTC().Format(time.RFC3339Nano),
 		Payload: map[string]any{
 			"type":          "notion.page.upsert",
-			"objectId":      "notion_loop_expiry_1",
-			"path":          "/notion/LoopExpiry.md",
+			"objectId":      "obj_loop_expiry_1",
+			"path":          "/external/LoopExpiry.md",
 			"content":       "# echoed",
 			"origin":        "relayfile",
 			"opId":          write.OpID,
@@ -4153,7 +4157,7 @@ func TestLoopSuppressionWindowExpiryAllowsProviderApply(t *testing.T) {
 		t.Fatalf("ingest echo failed: %v", err)
 	}
 
-	waitForFileContent(t, store, "ws_loop_expiry", "/notion/LoopExpiry.md", "# echoed")
+	waitForFileContent(t, store, "ws_loop_expiry", "/external/LoopExpiry.md", "# echoed")
 }
 
 func waitForFileContent(t *testing.T, store *Store, workspaceID, path, expected string) {

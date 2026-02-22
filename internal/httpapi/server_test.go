@@ -2599,7 +2599,8 @@ func TestAdminReplayAndSyncRefresh(t *testing.T) {
 		t.Fatalf("expected 202 for sync refresh, got %d (%s)", syncRefresh.Code, syncRefresh.Body.String())
 	}
 
-	syncRefreshInvalid := doRequest(t, server, request{
+	// In provider-agnostic system, any provider name is accepted
+	syncRefreshAnyProvider := doRequest(t, server, request{
 		method: http.MethodPost,
 		path:   "/v1/workspaces/ws_admin/sync/refresh",
 		headers: map[string]string{
@@ -2611,8 +2612,8 @@ func TestAdminReplayAndSyncRefresh(t *testing.T) {
 			"reason":   "manual",
 		},
 	})
-	if syncRefreshInvalid.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400 for unknown provider on sync refresh, got %d (%s)", syncRefreshInvalid.Code, syncRefreshInvalid.Body.String())
+	if syncRefreshAnyProvider.Code != http.StatusAccepted {
+		t.Fatalf("expected 202 for any provider on sync refresh, got %d (%s)", syncRefreshAnyProvider.Code, syncRefreshAnyProvider.Body.String())
 	}
 
 	write := doRequest(t, server, request{
