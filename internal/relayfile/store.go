@@ -2236,12 +2236,7 @@ func (s *Store) TriggerSyncRefresh(workspaceID, provider, reason, correlationID 
 		return QueuedResponse{}, ErrInvalidInput
 	}
 	provider = normalizeProvider(provider)
-	s.mu.RLock()
-	_, ok := s.adapters[provider]
-	s.mu.RUnlock()
-	if !ok {
-		return QueuedResponse{}, ErrInvalidInput
-	}
+	// Allow any provider to trigger refresh; no adapter requirement (provider-agnostic)
 	jobID := fmt.Sprintf("sync_%d", time.Now().UnixNano())
 	return QueuedResponse{
 		Status:        "queued",

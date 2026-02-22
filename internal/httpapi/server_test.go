@@ -2504,10 +2504,10 @@ func TestAdminReplayAndSyncRefresh(t *testing.T) {
 	envelope := map[string]any{
 		"envelopeId":    "env_admin_1",
 		"workspaceId":   "ws_admin",
-		"provider":      "notion",
+		"provider":      "external",
 		"deliveryId":    "delivery_admin_1",
 		"receivedAt":    time.Now().UTC().Format(time.RFC3339),
-		"payload":       map[string]any{"type": "sync"},
+		"payload":       map[string]any{"event_type": "file.created", "path": "/docs/seed.md", "content": "# seed"},
 		"correlationId": "corr_admin_internal_1",
 	}
 	envelopeBytes, err := json.Marshal(envelope)
@@ -3760,14 +3760,13 @@ func TestInternalIngressAppliesToFilesystemAPI(t *testing.T) {
 	envelope := map[string]any{
 		"envelopeId":  "env_apply_api_1",
 		"workspaceId": "ws_apply_api",
-		"provider":    "notion",
+		"provider":    "external",
 		"deliveryId":  "delivery_apply_api_1",
 		"receivedAt":  time.Now().UTC().Format(time.RFC3339),
 		"payload": map[string]any{
-			"type":     "notion.page.upsert",
-			"objectId": "notion_obj_api_1",
-			"path":     "/notion/Engineering/Ingress.md",
-			"content":  "# ingress",
+			"event_type": "file.created",
+			"path":       "/documents/Ingress.md",
+			"content":    "# ingress",
 		},
 		"correlationId": "corr_apply_api_1",
 	}
@@ -3798,7 +3797,7 @@ func TestInternalIngressAppliesToFilesystemAPI(t *testing.T) {
 	for time.Now().Before(deadline) {
 		readResp := doRequest(t, server, request{
 			method: http.MethodGet,
-			path:   "/v1/workspaces/ws_apply_api/fs/file?path=/notion/Engineering/Ingress.md",
+			path:   "/v1/workspaces/ws_apply_api/fs/file?path=/documents/Ingress.md",
 			headers: map[string]string{
 				"Authorization":    "Bearer " + readToken,
 				"X-Correlation-Id": "corr_apply_api_2",
@@ -4366,7 +4365,7 @@ func TestGenericPassthroughForUnknownProvider(t *testing.T) {
 func TestWritebackQueueACK(t *testing.T) {
 	store := relayfile.NewStore()
 	server := NewServer(store)
-	token := mustTestJWT(t, "dev-secret", "ws_1", "Worker1", []string{"fs:read", "fs:write", "sync:read", "ops:replay"}, time.Now().Add(time.Hour))
+	token := mustTestJWT(t, "dev-secret", "ws_1", "Worker1", []string{"fs:read", "fs:write", "sync:read", "sync:trigger", "ops:replay"}, time.Now().Add(time.Hour))
 
 	// Create a file write that will queue a writeback
 	writeResp := doRequest(t, server, request{
