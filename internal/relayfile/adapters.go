@@ -48,11 +48,24 @@ func ParseGenericEnvelope(req WebhookEnvelopeRequest) ([]ApplyAction, error) {
 
 	// The generic envelope should have path and data at the top level
 	// If coming from the generic ingest API, the entire req.Payload is the data
+	providerObjectID := toString(req.Payload["providerObjectId"])
+	if providerObjectID == "" {
+		providerObjectID = toString(req.Payload["objectId"])
+	}
 	path := toString(req.Payload["path"])
 	if path == "" {
-		// Path might not be in Payload if sent through generic ingest API
-		// In that case, it should be in req itself (handled by caller)
-		return []ApplyAction{{Type: ActionIgnored}}, nil
+		// Allow missing path when a provider object ID is present so the store
+		// can resolve via provider index or fallback path.
+		switch eventType {
+		case "file.created", "file.updated", "file.deleted":
+			if providerObjectID != "" {
+				path = "/"
+				break
+			}
+			return []ApplyAction{{Type: ActionIgnored}}, nil
+		default:
+			return []ApplyAction{{Type: ActionIgnored}}, nil
+		}
 	}
 
 	switch {
@@ -69,7 +82,7 @@ func ParseGenericEnvelope(req WebhookEnvelopeRequest) ([]ApplyAction, error) {
 				Path:             normalizePath(path),
 				Content:          content,
 				ContentType:      contentType,
-				ProviderObjectID: toString(req.Payload["providerObjectId"]),
+				ProviderObjectID: providerObjectID,
 				Semantics:        extractSemantics(req.Payload),
 			},
 		}, nil
@@ -79,7 +92,7 @@ func ParseGenericEnvelope(req WebhookEnvelopeRequest) ([]ApplyAction, error) {
 			{
 				Type:             ActionFileDelete,
 				Path:             normalizePath(path),
-				ProviderObjectID: toString(req.Payload["providerObjectId"]),
+				ProviderObjectID: providerObjectID,
 			},
 		}, nil
 

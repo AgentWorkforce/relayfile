@@ -3301,7 +3301,10 @@ func coalesceObjectKey(req WebhookEnvelopeRequest) string {
 	if req.WorkspaceID == "" || req.Provider == "" {
 		return ""
 	}
-	objectID := strings.TrimSpace(toString(req.Payload["objectId"]))
+	objectID := strings.TrimSpace(toString(req.Payload["providerObjectId"]))
+	if objectID == "" {
+		objectID = strings.TrimSpace(toString(req.Payload["objectId"]))
+	}
 	if objectID != "" {
 		return req.WorkspaceID + "|" + req.Provider + "|object:" + objectID
 	}
