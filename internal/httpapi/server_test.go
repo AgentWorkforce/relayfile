@@ -2504,10 +2504,10 @@ func TestAdminReplayAndSyncRefresh(t *testing.T) {
 	envelope := map[string]any{
 		"envelopeId":    "env_admin_1",
 		"workspaceId":   "ws_admin",
-		"provider":      "notion",
+		"provider":      "external",
 		"deliveryId":    "delivery_admin_1",
 		"receivedAt":    time.Now().UTC().Format(time.RFC3339),
-		"payload":       map[string]any{"type": "sync"},
+		"payload":       map[string]any{"event_type": "file.created", "path": "/docs/seed.md", "content": "# seed"},
 		"correlationId": "corr_admin_internal_1",
 	}
 	envelopeBytes, err := json.Marshal(envelope)
@@ -2599,7 +2599,8 @@ func TestAdminReplayAndSyncRefresh(t *testing.T) {
 		t.Fatalf("expected 202 for sync refresh, got %d (%s)", syncRefresh.Code, syncRefresh.Body.String())
 	}
 
-	syncRefreshInvalid := doRequest(t, server, request{
+	// In provider-agnostic system, any provider name is accepted
+	syncRefreshAnyProvider := doRequest(t, server, request{
 		method: http.MethodPost,
 		path:   "/v1/workspaces/ws_admin/sync/refresh",
 		headers: map[string]string{
@@ -2611,8 +2612,8 @@ func TestAdminReplayAndSyncRefresh(t *testing.T) {
 			"reason":   "manual",
 		},
 	})
-	if syncRefreshInvalid.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400 for unknown provider on sync refresh, got %d (%s)", syncRefreshInvalid.Code, syncRefreshInvalid.Body.String())
+	if syncRefreshAnyProvider.Code != http.StatusAccepted {
+		t.Fatalf("expected 202 for any provider on sync refresh, got %d (%s)", syncRefreshAnyProvider.Code, syncRefreshAnyProvider.Body.String())
 	}
 
 	write := doRequest(t, server, request{
@@ -3760,14 +3761,13 @@ func TestInternalIngressAppliesToFilesystemAPI(t *testing.T) {
 	envelope := map[string]any{
 		"envelopeId":  "env_apply_api_1",
 		"workspaceId": "ws_apply_api",
-		"provider":    "notion",
+		"provider":    "external",
 		"deliveryId":  "delivery_apply_api_1",
 		"receivedAt":  time.Now().UTC().Format(time.RFC3339),
 		"payload": map[string]any{
-			"type":     "notion.page.upsert",
-			"objectId": "notion_obj_api_1",
-			"path":     "/notion/Engineering/Ingress.md",
-			"content":  "# ingress",
+			"event_type": "file.created",
+			"path":       "/documents/Ingress.md",
+			"content":    "# ingress",
 		},
 		"correlationId": "corr_apply_api_1",
 	}
@@ -3798,7 +3798,7 @@ func TestInternalIngressAppliesToFilesystemAPI(t *testing.T) {
 	for time.Now().Before(deadline) {
 		readResp := doRequest(t, server, request{
 			method: http.MethodGet,
-			path:   "/v1/workspaces/ws_apply_api/fs/file?path=/notion/Engineering/Ingress.md",
+			path:   "/v1/workspaces/ws_apply_api/fs/file?path=/documents/Ingress.md",
 			headers: map[string]string{
 				"Authorization":    "Bearer " + readToken,
 				"X-Correlation-Id": "corr_apply_api_2",
@@ -4105,6 +4105,336 @@ func TestParseOptionalBool(t *testing.T) {
 				t.Fatalf("expected %t, got %t", tc.want, got)
 			}
 		})
+	}
+}
+
+// Tests for Phase 1: Generic webhook ingestion API (provider-agnostic)
+
+func TestGenericWebhookIngestion(t *testing.T) {
+	server := NewServer(relayfile.NewStore())
+	token := mustTestJWT(t, "dev-secret", "ws_1", "Worker1", []string{"fs:read", "fs:write", "sync:read"}, time.Now().Add(time.Hour))
+
+	// Test 1: Ingest generic webhook with provider="notion"
+	ingestResp := doRequest(t, server, request{
+		method: http.MethodPost,
+		path:   "/v1/workspaces/ws_1/webhooks/ingest",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_webhook_1",
+		},
+		body: map[string]any{
+			"provider":   "notion",
+			"event_type": "file.updated",
+			"path":       "/documents/page123.md",
+			"data": map[string]any{
+				"content": "# Updated Page",
+				"title":   "Page 123",
+			},
+			"delivery_id": "evt_123",
+			"timestamp":   time.Now().UTC().Format(time.RFC3339),
+		},
+	})
+
+	if ingestResp.Code != http.StatusAccepted {
+		t.Fatalf("expected 202 Accepted, got %d (%s)", ingestResp.Code, ingestResp.Body.String())
+	}
+
+	var queuedResp relayfile.QueuedResponse
+	if err := json.NewDecoder(ingestResp.Body).Decode(&queuedResp); err != nil {
+		t.Fatalf("failed to decode queued response: %v", err)
+	}
+	if queuedResp.Status != "queued" {
+		t.Fatalf("expected status 'queued', got %q", queuedResp.Status)
+	}
+	if queuedResp.ID == "" {
+		t.Fatalf("expected envelope ID in response")
+	}
+}
+
+func TestGenericWebhookIngestionMultipleProviders(t *testing.T) {
+	server := NewServer(relayfile.NewStore())
+	token := mustTestJWT(t, "dev-secret", "ws_1", "Worker1", []string{"fs:read", "fs:write", "sync:read"}, time.Now().Add(time.Hour))
+
+	testCases := []struct {
+		name     string
+		provider string
+		eventType string
+	}{
+		{
+			name:      "Notion provider",
+			provider:  "notion",
+			eventType: "file.updated",
+		},
+		{
+			name:      "Salesforce provider",
+			provider:  "salesforce",
+			eventType: "object.changed",
+		},
+		{
+			name:      "Generic provider",
+			provider:  "custom",
+			eventType: "custom.event",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			ingestResp := doRequest(t, server, request{
+				method: http.MethodPost,
+				path:   "/v1/workspaces/ws_1/webhooks/ingest",
+				headers: map[string]string{
+					"Authorization":    "Bearer " + token,
+					"X-Correlation-Id": "corr_webhook_" + tc.provider,
+				},
+				body: map[string]any{
+					"provider":   tc.provider,
+					"event_type": tc.eventType,
+					"path":       "/path/to/file",
+					"data": map[string]any{
+						"key": "value",
+					},
+					"delivery_id": "evt_" + tc.provider,
+					"timestamp":   time.Now().UTC().Format(time.RFC3339),
+				},
+			})
+
+			if ingestResp.Code != http.StatusAccepted {
+				t.Fatalf("expected 202 Accepted, got %d (%s)", ingestResp.Code, ingestResp.Body.String())
+			}
+		})
+	}
+}
+
+func TestGenericWebhookIngestionMissingFields(t *testing.T) {
+	server := NewServer(relayfile.NewStore())
+	token := mustTestJWT(t, "dev-secret", "ws_1", "Worker1", []string{"fs:read", "fs:write", "sync:read"}, time.Now().Add(time.Hour))
+
+	testCases := []struct {
+		name   string
+		body   map[string]any
+		expect int
+	}{
+		{
+			name: "Missing provider",
+			body: map[string]any{
+				"event_type": "file.updated",
+				"path":       "/doc.md",
+				"data":       map[string]any{},
+				"delivery_id": "evt_1",
+				"timestamp":   time.Now().UTC().Format(time.RFC3339),
+			},
+			expect: http.StatusBadRequest,
+		},
+		{
+			name: "Missing event_type",
+			body: map[string]any{
+				"provider":   "notion",
+				"path":       "/doc.md",
+				"data":       map[string]any{},
+				"delivery_id": "evt_1",
+				"timestamp":   time.Now().UTC().Format(time.RFC3339),
+			},
+			expect: http.StatusBadRequest,
+		},
+		{
+			name: "Missing path",
+			body: map[string]any{
+				"provider":   "notion",
+				"event_type": "file.updated",
+				"data":       map[string]any{},
+				"delivery_id": "evt_1",
+				"timestamp":   time.Now().UTC().Format(time.RFC3339),
+			},
+			expect: http.StatusBadRequest,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := doRequest(t, server, request{
+				method: http.MethodPost,
+				path:   "/v1/workspaces/ws_1/webhooks/ingest",
+				headers: map[string]string{
+					"Authorization":    "Bearer " + token,
+					"X-Correlation-Id": "corr_webhook_test",
+				},
+				body: tc.body,
+			})
+
+			if resp.Code != tc.expect {
+				t.Fatalf("expected %d, got %d (%s)", tc.expect, resp.Code, resp.Body.String())
+			}
+		})
+	}
+}
+
+func TestWritebackQueueAPI(t *testing.T) {
+	store := relayfile.NewStore()
+	server := NewServer(store)
+	token := mustTestJWT(t, "dev-secret", "ws_1", "Worker1", []string{"fs:read", "fs:write", "sync:read"}, time.Now().Add(time.Hour))
+
+	// Test 1: Get empty writeback queue
+	pendingResp := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/workspaces/ws_1/writeback/pending",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_query_1",
+		},
+	})
+
+	if pendingResp.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d (%s)", pendingResp.Code, pendingResp.Body.String())
+	}
+
+	var items []map[string]any
+	if err := json.NewDecoder(pendingResp.Body).Decode(&items); err != nil {
+		t.Fatalf("failed to decode pending response: %v", err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("expected empty queue, got %d items", len(items))
+	}
+}
+
+func TestGenericPassthroughForUnknownProvider(t *testing.T) {
+	server := NewServer(relayfile.NewStore())
+	token := mustTestJWT(t, "dev-secret", "ws_1", "Worker1", []string{"fs:read", "fs:write", "sync:read"}, time.Now().Add(time.Hour))
+
+	// Ingest a webhook for an unknown provider with generic format
+	ingestResp := doRequest(t, server, request{
+		method: http.MethodPost,
+		path:   "/v1/workspaces/ws_1/webhooks/ingest",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_generic_1",
+		},
+		body: map[string]any{
+			"provider":   "custom-system",
+			"event_type": "file.updated",
+			"path":       "/data/record_123.json",
+			"data": map[string]any{
+				"content":        `{"id": 123, "name": "Test Record"}`,
+				"contentType":    "application/json",
+				"providerObjectId": "obj_123",
+			},
+			"delivery_id": "evt_custom_1",
+			"timestamp":   time.Now().UTC().Format(time.RFC3339),
+		},
+	})
+
+	if ingestResp.Code != http.StatusAccepted {
+		t.Fatalf("expected 202 Accepted, got %d (%s)", ingestResp.Code, ingestResp.Body.String())
+	}
+
+	var queuedResp relayfile.QueuedResponse
+	if err := json.NewDecoder(ingestResp.Body).Decode(&queuedResp); err != nil {
+		t.Fatalf("failed to decode queued response: %v", err)
+	}
+	if queuedResp.Status != "queued" {
+		t.Fatalf("expected status 'queued', got %q", queuedResp.Status)
+	}
+
+	// Wait for async processing
+	time.Sleep(50 * time.Millisecond)
+
+	// Verify the file was created via generic processor
+	readResp := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/workspaces/ws_1/fs/file?path=/data/record_123.json",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_read_1",
+		},
+	})
+
+	if readResp.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK on read, got %d (%s)", readResp.Code, readResp.Body.String())
+	}
+
+	var fileResp map[string]any
+	if err := json.NewDecoder(readResp.Body).Decode(&fileResp); err != nil {
+		t.Fatalf("failed to decode file response: %v", err)
+	}
+	if fileResp["path"] != "/data/record_123.json" {
+		t.Fatalf("expected path /data/record_123.json, got %v", fileResp["path"])
+	}
+	if fileResp["content"] != `{"id": 123, "name": "Test Record"}` {
+		t.Fatalf("expected content preserved, got %v", fileResp["content"])
+	}
+}
+
+func TestWritebackQueueACK(t *testing.T) {
+	store := relayfile.NewStore()
+	server := NewServer(store)
+	token := mustTestJWT(t, "dev-secret", "ws_1", "Worker1", []string{"fs:read", "fs:write", "sync:read", "sync:trigger", "ops:replay"}, time.Now().Add(time.Hour))
+
+	// Create a file write that will queue a writeback
+	writeResp := doRequest(t, server, request{
+		method: http.MethodPut,
+		path:   "/v1/workspaces/ws_1/fs/file?path=/test.md",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_write_1",
+			"If-Match":         "0",
+		},
+		body: map[string]any{
+			"contentType": "text/markdown",
+			"content":     "# Test",
+		},
+	})
+
+	if writeResp.Code != http.StatusAccepted {
+		t.Fatalf("expected 202 on write, got %d (%s)", writeResp.Code, writeResp.Body.String())
+	}
+
+	var writeResult relayfile.WriteResult
+	if err := json.NewDecoder(writeResp.Body).Decode(&writeResult); err != nil {
+		t.Fatalf("failed to decode write response: %v", err)
+	}
+
+	// Query pending writebacks
+	pendingResp := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/workspaces/ws_1/writeback/pending",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_query_1",
+		},
+	})
+
+	if pendingResp.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d (%s)", pendingResp.Code, pendingResp.Body.String())
+	}
+
+	var items []map[string]any
+	if err := json.NewDecoder(pendingResp.Body).Decode(&items); err != nil {
+		t.Fatalf("failed to decode pending response: %v", err)
+	}
+	if len(items) == 0 {
+		t.Fatalf("expected writeback items in queue")
+	}
+
+	// Get first item and acknowledge it
+	item := items[0]
+	itemID, ok := item["id"].(string)
+	if !ok || itemID == "" {
+		t.Fatalf("expected item id in response")
+	}
+
+	ackResp := doRequest(t, server, request{
+		method: http.MethodPost,
+		path:   "/v1/workspaces/ws_1/writeback/" + itemID + "/ack",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_ack_1",
+		},
+		body: map[string]any{
+			"success": true,
+		},
+	})
+
+	if ackResp.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK on ack, got %d (%s)", ackResp.Code, ackResp.Body.String())
 	}
 }
 

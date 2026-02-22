@@ -9,7 +9,7 @@
 
 ## 2. Problem Statement
 
-Agents need a filesystem-native way to consume and update external systems (starting with Notion) without directly handling provider credentials. Existing webhook streams are noisy and bursty, and current docs split critical capabilities across phases (filesystem-over-REST, write-back, and reliability controls). We need a production-ready design that:
+Agents need a filesystem-native way to consume and update external systems without directly handling provider credentials. Existing webhook streams are noisy and bursty, and current docs split critical capabilities across phases (filesystem-over-REST, write-back, and reliability controls). We need a production-ready design that:
 
 - Exposes a filesystem over REST in v1
 - Is robust under noisy webhook traffic
@@ -44,7 +44,7 @@ Agents need a filesystem-native way to consume and update external systems (star
 No expensive sync logic in webhook request handlers.
 
 3. Provider identity over filesystem path:
-Canonical object identity uses provider IDs (for Notion, `notion_id`).
+Canonical object identity uses provider IDs (e.g., external provider object ID).
 
 4. Fail-closed access:
 Policy must explicitly allow provider/file write actions.
@@ -139,7 +139,7 @@ relayfile ingest workers
 2. `provider_objects`
 - Canonical source objects.
 - Key fields: `workspace_id`, `provider`, `provider_object_id`, `type`, `parent_id`, `title`, `last_provider_edit_at`.
-- Notion: `provider_object_id = notion_id`.
+- Example provider: `provider_object_id = {provider}_{id}`.
 
 3. `fs_nodes`
 - Projected filesystem tree.
@@ -179,20 +179,20 @@ All endpoints are versioned and workspace-scoped:
 
 ## 10.1 Tree
 
-`GET /fs/tree?path=/notion&depth=2&cursor=...`
+`GET /fs/tree?path=/external&depth=2&cursor=...`
 
 Response:
 
 ```json
 {
-  "path": "/notion",
+  "path": "/external",
   "entries": [
     {
-      "path": "/notion/Engineering",
+      "path": "/external/Engineering",
       "type": "dir",
       "revision": "rev_abc",
-      "provider": "notion",
-      "providerObjectId": "notion_page_123"
+      "provider": "{provider_name}",
+      "providerObjectId": "obj_123"
     }
   ],
   "nextCursor": null
@@ -201,7 +201,7 @@ Response:
 
 ## 10.2 File Read
 
-`GET /fs/file?path=/notion/Engineering/Auth.md`
+`GET /fs/file?path=/external/Engineering/Auth.md`
 
 Response headers:
 - `ETag: "rev_abc"`
@@ -210,18 +210,18 @@ Response body:
 
 ```json
 {
-  "path": "/notion/Engineering/Auth.md",
+  "path": "/external/Engineering/Auth.md",
   "revision": "rev_abc",
   "contentType": "text/markdown",
   "content": "# Auth Design ...",
-  "provider": "notion",
-  "providerObjectId": "notion_page_123"
+  "provider": "{provider_name}",
+  "providerObjectId": "obj_123"
 }
 ```
 
 ## 10.3 File Write
 
-`PUT /fs/file?path=/notion/Engineering/Auth.md`
+`PUT /fs/file?path=/external/Engineering/Auth.md`
 
 Headers:
 - `If-Match: "rev_abc"` (required)
@@ -243,7 +243,7 @@ Accepted response:
   "status": "queued",
   "targetRevision": "rev_new",
   "writeback": {
-    "provider": "notion",
+    "provider": "{provider_name}",
     "state": "pending"
   }
 }
@@ -254,7 +254,7 @@ Conflict response (`409`):
 ```json
 {
   "error": "revision_conflict",
-  "path": "/notion/Engineering/Auth.md",
+  "path": "/external/Engineering/Auth.md",
   "expectedRevision": "rev_abc",
   "currentRevision": "rev_def",
   "currentContentPreview": "# Someone else edited ..."
@@ -263,7 +263,7 @@ Conflict response (`409`):
 
 ## 10.4 Delete
 
-`DELETE /fs/file?path=/notion/Engineering/Auth.md`
+`DELETE /fs/file?path=/external/Engineering/Auth.md`
 
 Headers:
 - `If-Match: "rev_abc"` required
@@ -280,7 +280,7 @@ Returns ordered events to allow incremental consumers:
     {
       "eventId": "evt_124",
       "type": "file.updated",
-      "path": "/notion/Engineering/Auth.md",
+      "path": "/external/Engineering/Auth.md",
       "revision": "rev_def",
       "origin": "provider_sync",
       "correlationId": "corr_789",
@@ -302,7 +302,7 @@ Returns ordered events to allow incremental consumers:
   "attemptCount": 2,
   "lastError": null,
   "providerResult": {
-    "providerRevision": "notion_rev_555"
+    "providerRevision": "rev_555"
   }
 }
 ```
@@ -323,7 +323,7 @@ Returns ordered events to allow incremental consumers:
 {
   "envelopeId": "whenv_123",
   "workspaceId": "ws_123",
-  "provider": "notion",
+  "provider": "{provider_name}",
   "deliveryId": "provider_delivery_abc",
   "receivedAt": "2026-02-17T10:00:00Z",
   "headers": { "x-signature": "..." },
@@ -391,7 +391,7 @@ Each provider adapter must implement:
 6. `getIdempotencyKey(event) -> string`
 
 Initial provider:
-1. Notion (metadata sync + page content fetch + page update write-back).
+1. External providers (metadata sync + content fetch + update write-back).
 
 ## 15. SDK Specification (TypeScript)
 
@@ -515,7 +515,7 @@ provider 429/500 storms, queue outage, partial DB outage.
 1. RelayFile service skeleton.
 2. VFS REST read/write APIs with revisions.
 3. relay-cloud ingress envelope + queue-first behavior.
-4. Notion read path from metadata + on-demand content.
+4. External provider integration + on-demand content fetch.
 
 Exit criteria:
 Tree/read/write/delete/events endpoints live in staging.
@@ -541,7 +541,7 @@ Pilot workspace can run end-to-end with operational dashboards.
 ## 22. Launch Blockers (Mandatory)
 
 1. Filesystem-over-REST is v1 scope.
-2. Canonical provider identity model (Notion: `notion_id`).
+2. Canonical provider identity model (provider-specific object IDs).
 3. Queue-first webhook ingress.
 4. Claim-based agent identity, no header trust.
 5. No raw provider token exposure to sandboxes.
@@ -559,7 +559,7 @@ Postgres + object store vs Postgres-only for v1.
 2. Queue technology:
 Redis streams vs hosted queue for durability targets.
 
-3. Notion DB rows representation:
+3. Provider-specific data representation:
 JSON row files vs materialized markdown views.
 
 4. Mount write behavior:
@@ -567,7 +567,7 @@ write-through only vs short buffered writes.
 
 ## 24. References
 
-1. `../relay-cloud/docs/notion-vfs-spec.md`
+1. `../relay-cloud/docs/external-vfs-spec.md`
 2. `../relay-cloud/docs/daytona-token-service-spec.md`
 3. `../relay-cloud/docs/daytona-integration-spec.md`
 4. `../relay-cloud/packages/cloud/src/api/proxy.ts`

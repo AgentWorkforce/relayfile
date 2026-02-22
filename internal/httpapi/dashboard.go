@@ -349,7 +349,7 @@ const dashboardHTML = `<!doctype html>
       <div class="controls">
         <input id="token" type="password" placeholder="Bearer token (admin:read + ops:read + fs:read)" autocomplete="off" />
         <input id="workspace" type="text" placeholder="workspace id (for ops + fs panels)" autocomplete="off" />
-        <input id="treePath" type="text" placeholder="tree path (default /notion)" autocomplete="off" />
+        <input id="treePath" type="text" placeholder="tree path (default /)" autocomplete="off" />
         <button id="refresh" class="btn-primary" type="button">Refresh Now</button>
         <button id="toggle" class="btn-secondary" type="button">Pause Auto</button>
       </div>
@@ -464,7 +464,7 @@ const dashboardHTML = `<!doctype html>
       function normalizePath(raw) {
         const trimmed = String(raw || "").trim();
         if (!trimmed) {
-          return "/notion";
+          return "/";
         }
         return trimmed.startsWith("/") ? trimmed : ("/" + trimmed);
       }
@@ -746,7 +746,7 @@ const dashboardHTML = `<!doctype html>
 
       const savedToken = window.localStorage.getItem("relayfile_dashboard_token") || "";
       const savedWorkspace = window.localStorage.getItem("relayfile_dashboard_workspace") || "ws_live";
-      const savedTreePath = window.localStorage.getItem("relayfile_dashboard_tree_path") || "/notion";
+      const savedTreePath = window.localStorage.getItem("relayfile_dashboard_tree_path") || "/";
       dom.token.value = savedToken;
       dom.workspace.value = savedWorkspace;
       dom.treePath.value = savedTreePath;

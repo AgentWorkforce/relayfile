@@ -1,7 +1,6 @@
 package relayfile
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -34,84 +33,71 @@ type ProviderWritebackAdapter interface {
 	ApplyWriteback(action WritebackAction) error
 }
 
-type NotionUpsertRequest struct {
-	WorkspaceID      string `json:"workspaceId"`
-	Path             string `json:"path"`
-	Revision         string `json:"revision"`
-	ContentType      string `json:"contentType"`
-	Content          string `json:"content"`
-	ProviderObjectID string `json:"providerObjectId"`
-	CorrelationID    string `json:"correlationId"`
-}
-
-type NotionDeleteRequest struct {
-	WorkspaceID      string `json:"workspaceId"`
-	Path             string `json:"path"`
-	Revision         string `json:"revision"`
-	ProviderObjectID string `json:"providerObjectId"`
-	CorrelationID    string `json:"correlationId"`
-}
-
-type NotionWriteClient interface {
-	UpsertPage(ctx context.Context, req NotionUpsertRequest) error
-	DeletePage(ctx context.Context, req NotionDeleteRequest) error
-}
-
-type noopNotionWriteClient struct{}
-
-func (noopNotionWriteClient) UpsertPage(ctx context.Context, req NotionUpsertRequest) error {
-	return nil
-}
-
-func (noopNotionWriteClient) DeletePage(ctx context.Context, req NotionDeleteRequest) error {
-	return nil
-}
-
-type NotionAdapter struct {
-	writeClient NotionWriteClient
-}
-
-func NewNotionAdapter(writeClient NotionWriteClient) NotionAdapter {
-	if writeClient == nil {
-		writeClient = noopNotionWriteClient{}
-	}
-	return NotionAdapter{writeClient: writeClient}
-}
-
-func (NotionAdapter) Provider() string {
-	return "notion"
-}
-
-func (NotionAdapter) ParseEnvelope(req WebhookEnvelopeRequest) ([]ApplyAction, error) {
-	eventType := toString(req.Payload["type"])
-	switch eventType {
-	case "notion.page.upsert":
-		content := toString(req.Payload["content"])
-		if content == "" {
-			title := strings.TrimSpace(toString(req.Payload["title"]))
-			if title != "" {
-				content = "# " + title
-			}
+// ParseGenericEnvelope processes a generic webhook envelope for any provider.
+// This is used when no provider-specific adapter is registered.
+// It expects the envelope to already be in the generic format from the ingest API.
+func ParseGenericEnvelope(req WebhookEnvelopeRequest) ([]ApplyAction, error) {
+	// Extract event type from the generic envelope
+	eventType := toString(req.Payload["event_type"])
+	if eventType == "" {
+		// Fallback: try to infer from standard field
+		if typeField, ok := req.Payload["type"].(string); ok {
+			eventType = typeField
 		}
+	}
+
+	// The generic envelope should have path and data at the top level
+	// If coming from the generic ingest API, the entire req.Payload is the data
+	providerObjectID := toString(req.Payload["providerObjectId"])
+	if providerObjectID == "" {
+		providerObjectID = toString(req.Payload["objectId"])
+	}
+	path := toString(req.Payload["path"])
+	if path == "" {
+		// Allow missing path when a provider object ID is present so the store
+		// can resolve via provider index or fallback path.
+		switch eventType {
+		case "file.created", "file.updated", "file.deleted":
+			if providerObjectID != "" {
+				path = "/"
+				break
+			}
+			return []ApplyAction{{Type: ActionIgnored}}, nil
+		default:
+			return []ApplyAction{{Type: ActionIgnored}}, nil
+		}
+	}
+
+	switch {
+	case eventType == "file.created" || eventType == "file.updated":
+		content := toString(req.Payload["content"])
+		contentType := toString(req.Payload["contentType"])
+		if contentType == "" {
+			contentType = "application/octet-stream"
+		}
+
 		return []ApplyAction{
 			{
 				Type:             ActionFileUpsert,
-				Path:             normalizePath(toString(req.Payload["path"])),
+				Path:             normalizePath(path),
 				Content:          content,
-				ContentType:      toString(req.Payload["contentType"]),
-				ProviderObjectID: toString(req.Payload["objectId"]),
+				ContentType:      contentType,
+				ProviderObjectID: providerObjectID,
 				Semantics:        extractSemantics(req.Payload),
 			},
 		}, nil
-	case "notion.page.deleted":
+
+	case eventType == "file.deleted":
 		return []ApplyAction{
 			{
 				Type:             ActionFileDelete,
-				Path:             normalizePath(toString(req.Payload["path"])),
-				ProviderObjectID: toString(req.Payload["objectId"]),
+				Path:             normalizePath(path),
+				ProviderObjectID: providerObjectID,
 			},
 		}, nil
+
 	default:
+		// Unknown event type - ignore
 		return []ApplyAction{{Type: ActionIgnored}}, nil
 	}
 }
@@ -264,33 +250,4 @@ func dedupeAndSort(values []string) []string {
 	}
 	sort.Strings(out)
 	return out
-}
-
-func (a NotionAdapter) ApplyWriteback(action WritebackAction) error {
-	writer := a.writeClient
-	if writer == nil {
-		writer = noopNotionWriteClient{}
-	}
-	switch action.Type {
-	case WritebackActionFileUpsert:
-		return writer.UpsertPage(context.Background(), NotionUpsertRequest{
-			WorkspaceID:      action.WorkspaceID,
-			Path:             action.Path,
-			Revision:         action.Revision,
-			ContentType:      action.ContentType,
-			Content:          action.Content,
-			ProviderObjectID: action.ProviderObjectID,
-			CorrelationID:    action.CorrelationID,
-		})
-	case WritebackActionFileDelete:
-		return writer.DeletePage(context.Background(), NotionDeleteRequest{
-			WorkspaceID:      action.WorkspaceID,
-			Path:             action.Path,
-			Revision:         action.Revision,
-			ProviderObjectID: action.ProviderObjectID,
-			CorrelationID:    action.CorrelationID,
-		})
-	default:
-		return fmt.Errorf("unsupported notion writeback action: %s", action.Type)
-	}
 }

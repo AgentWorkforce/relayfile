@@ -28,25 +28,25 @@ const workspaceId = "ws_123";
 
 const controller = new AbortController();
 const tree = await client.listTree(workspaceId, {
-  path: "/notion",
+  path: "/",
   depth: 2,
   signal: controller.signal
 });
-const file = await client.readFile(workspaceId, "/notion/Engineering/Auth.md");
+const file = await client.readFile(workspaceId, "/documents/page.md");
 const query = await client.queryFiles(workspaceId, {
-  path: "/notion",
-  provider: "notion",
-  relation: "db:investments",
-  properties: { stage: "active" },
+  path: "/documents",
+  provider: "salesforce",  // Any provider
+  relation: "account:123",
+  properties: { status: "active" },
   limit: 25
 });
-const events = await client.getEvents(workspaceId, { provider: "notion", limit: 50 });
-const ops = await client.listOps(workspaceId, { status: "dead_lettered", action: "file_upsert", provider: "notion", limit: 20 });
-const sync = await client.getSyncStatus(workspaceId, { provider: "notion" });
-const ingress = await client.getSyncIngressStatus(workspaceId, { provider: "notion" });
-const adminIngress = await client.getAdminIngressStatus({ provider: "notion", alertProfile: "balanced", deadLetterThreshold: 2, nonZeroOnly: true, maxAlerts: 50, includeWorkspaces: true, includeAlerts: true });
-const adminSync = await client.getAdminSyncStatus({ provider: "notion", nonZeroOnly: true, includeWorkspaces: true, limit: 100, lagSecondsThreshold: 45, maxAlerts: 50, includeAlerts: true });
-const deadLetters = await client.getSyncDeadLetters(workspaceId, { provider: "notion", limit: 20 });
+const events = await client.getEvents(workspaceId, { provider: "salesforce", limit: 50 });
+const ops = await client.listOps(workspaceId, { status: "dead_lettered", action: "file_upsert", provider: "salesforce", limit: 20 });
+const sync = await client.getSyncStatus(workspaceId, { provider: "salesforce" });
+const ingress = await client.getSyncIngressStatus(workspaceId, { provider: "salesforce" });
+const adminIngress = await client.getAdminIngressStatus({ provider: "salesforce", alertProfile: "balanced", deadLetterThreshold: 2, nonZeroOnly: true, maxAlerts: 50, includeWorkspaces: true, includeAlerts: true });
+const adminSync = await client.getAdminSyncStatus({ provider: "salesforce", nonZeroOnly: true, includeWorkspaces: true, limit: 100, lagSecondsThreshold: 45, maxAlerts: 50, includeAlerts: true });
+const deadLetters = await client.getSyncDeadLetters(workspaceId, { provider: "salesforce", limit: 20 });
 console.log(events.events.length);
 console.log(query.items.length);
 console.log(ops.items.length);
@@ -56,7 +56,7 @@ console.log(ingress.queueUtilization, ingress.oldestPendingAgeSeconds);
 console.log(ingress.coalescedTotal, ingress.suppressedTotal, ingress.staleTotal);
 console.log(ingress.dedupeRate, ingress.coalesceRate);
 console.log(ingress.deadLetterByProvider);
-console.log(ingress.ingressByProvider["notion"]?.pendingTotal, ingress.ingressByProvider["notion"]?.oldestPendingAgeSeconds);
+console.log(ingress.ingressByProvider["salesforce"]?.pendingTotal, ingress.ingressByProvider["salesforce"]?.oldestPendingAgeSeconds);
 console.log(adminIngress.alertProfile, adminIngress.effectiveAlertProfile, adminIngress.workspaceCount, adminIngress.returnedWorkspaceCount, adminIngress.nextCursor, adminIngress.pendingTotal, adminIngress.thresholds.deadLetter, adminIngress.alertTotals.critical, adminIngress.alertsTruncated, adminIngress.alerts.length, Object.keys(adminIngress.workspaces));
 console.log(adminSync.workspaceCount, adminSync.returnedWorkspaceCount, adminSync.nextCursor, adminSync.providerStatusCount, adminSync.errorCount, adminSync.failureCodes, adminSync.thresholds.lagSeconds, adminSync.alertTotals.critical, adminSync.alertsTruncated, adminSync.alerts.length);
 console.log(deadLetters.items.length);

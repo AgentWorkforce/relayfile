@@ -2,22 +2,18 @@ package relayfile
 
 import "testing"
 
-func TestNotionAdapterParseEnvelopeExtractsSemantics(t *testing.T) {
-	adapter := NewNotionAdapter(nil)
-	actions, err := adapter.ParseEnvelope(WebhookEnvelopeRequest{
-		Provider: "notion",
+func TestParseGenericEnvelopeFileUpdated(t *testing.T) {
+	actions, err := ParseGenericEnvelope(WebhookEnvelopeRequest{
+		Provider: "custom-system",
 		Payload: map[string]any{
-			"type":     "notion.page.upsert",
-			"path":     "/notion/Investments/Seed.md",
-			"objectId": "obj_1",
-			"content":  "# seed",
+			"path":               "/data/record_123.json",
+			"event_type":         "file.updated",
+			"content":            `{"id": 123}`,
+			"contentType":        "application/json",
+			"providerObjectId":   "obj_123",
 			"properties": map[string]any{
-				"topic": "investments",
-				"stage": "seed",
+				"system": "crm",
 			},
-			"relations":   []any{"db_investments"},
-			"permissions": []any{"role:finance"},
-			"comments":    []any{"comment_a"},
 		},
 	})
 	if err != nil {
@@ -27,37 +23,33 @@ func TestNotionAdapterParseEnvelopeExtractsSemantics(t *testing.T) {
 		t.Fatalf("expected one action, got %d", len(actions))
 	}
 	action := actions[0]
-	if action.Semantics.Properties["topic"] != "investments" {
-		t.Fatalf("expected topic property, got %+v", action.Semantics.Properties)
+	if action.Type != ActionFileUpsert {
+		t.Fatalf("expected ActionFileUpsert, got %v", action.Type)
 	}
-	if len(action.Semantics.Relations) != 1 || action.Semantics.Relations[0] != "db_investments" {
-		t.Fatalf("expected relations to be extracted, got %+v", action.Semantics.Relations)
+	if action.Path != "/data/record_123.json" {
+		t.Fatalf("expected path /data/record_123.json, got %s", action.Path)
 	}
-	if len(action.Semantics.Permissions) != 1 || action.Semantics.Permissions[0] != "role:finance" {
-		t.Fatalf("expected permissions to be extracted, got %+v", action.Semantics.Permissions)
+	if action.Content != `{"id": 123}` {
+		t.Fatalf("expected content preserved, got %s", action.Content)
 	}
-	if len(action.Semantics.Comments) != 1 || action.Semantics.Comments[0] != "comment_a" {
-		t.Fatalf("expected comments to be extracted, got %+v", action.Semantics.Comments)
+	if action.ContentType != "application/json" {
+		t.Fatalf("expected application/json, got %s", action.ContentType)
+	}
+	if action.ProviderObjectID != "obj_123" {
+		t.Fatalf("expected provider object id obj_123, got %s", action.ProviderObjectID)
+	}
+	if action.Semantics.Properties["system"] != "crm" {
+		t.Fatalf("expected system property in semantics, got %+v", action.Semantics.Properties)
 	}
 }
 
-func TestNotionAdapterParseEnvelopeSupportsNestedSemanticsBlock(t *testing.T) {
-	adapter := NewNotionAdapter(nil)
-	actions, err := adapter.ParseEnvelope(WebhookEnvelopeRequest{
-		Provider: "notion",
+func TestParseGenericEnvelopeFileDeleted(t *testing.T) {
+	actions, err := ParseGenericEnvelope(WebhookEnvelopeRequest{
+		Provider: "salesforce",
 		Payload: map[string]any{
-			"type":     "notion.page.upsert",
-			"path":     "/notion/Investments/Seed.md",
-			"objectId": "obj_2",
-			"content":  "# seed",
-			"semantics": map[string]any{
-				"properties": map[string]any{
-					"topic": "investments",
-				},
-				"relationIds": []any{"db_investments"},
-				"acl":         []any{"role:finance"},
-				"commentIds":  []any{"comment_b"},
-			},
+			"path":             "/salesforce/Account_123",
+			"event_type":       "file.deleted",
+			"providerObjectId": "sf_acc_123",
 		},
 	})
 	if err != nil {
@@ -67,16 +59,58 @@ func TestNotionAdapterParseEnvelopeSupportsNestedSemanticsBlock(t *testing.T) {
 		t.Fatalf("expected one action, got %d", len(actions))
 	}
 	action := actions[0]
-	if action.Semantics.Properties["topic"] != "investments" {
-		t.Fatalf("expected nested topic property, got %+v", action.Semantics.Properties)
+	if action.Type != ActionFileDelete {
+		t.Fatalf("expected ActionFileDelete, got %v", action.Type)
 	}
-	if len(action.Semantics.Relations) != 1 || action.Semantics.Relations[0] != "db_investments" {
-		t.Fatalf("expected nested relationIds to map to relations, got %+v", action.Semantics.Relations)
+	if action.Path != "/salesforce/Account_123" {
+		t.Fatalf("expected path /salesforce/Account_123, got %s", action.Path)
 	}
-	if len(action.Semantics.Permissions) != 1 || action.Semantics.Permissions[0] != "role:finance" {
-		t.Fatalf("expected nested acl to map to permissions, got %+v", action.Semantics.Permissions)
+	if action.ProviderObjectID != "sf_acc_123" {
+		t.Fatalf("expected provider object id sf_acc_123, got %s", action.ProviderObjectID)
 	}
-	if len(action.Semantics.Comments) != 1 || action.Semantics.Comments[0] != "comment_b" {
-		t.Fatalf("expected nested commentIds to map to comments, got %+v", action.Semantics.Comments)
+}
+
+func TestParseGenericEnvelopeFileCreated(t *testing.T) {
+	actions, err := ParseGenericEnvelope(WebhookEnvelopeRequest{
+		Provider: "custom",
+		Payload: map[string]any{
+			"path":        "/files/new_document.md",
+			"event_type":  "file.created",
+			"content":     "# New Document",
+			"contentType": "text/markdown",
+		},
+	})
+	if err != nil {
+		t.Fatalf("parse envelope failed: %v", err)
+	}
+	if len(actions) != 1 {
+		t.Fatalf("expected one action, got %d", len(actions))
+	}
+	action := actions[0]
+	if action.Type != ActionFileUpsert {
+		t.Fatalf("expected ActionFileUpsert for created, got %v", action.Type)
+	}
+	if action.Content != "# New Document" {
+		t.Fatalf("expected content preserved, got %s", action.Content)
+	}
+}
+
+func TestParseGenericEnvelopeUnknownEventType(t *testing.T) {
+	actions, err := ParseGenericEnvelope(WebhookEnvelopeRequest{
+		Provider: "unknown",
+		Payload: map[string]any{
+			"path":       "/unknown/event",
+			"event_type": "custom.unknown",
+		},
+	})
+	if err != nil {
+		t.Fatalf("parse envelope failed: %v", err)
+	}
+	if len(actions) != 1 {
+		t.Fatalf("expected one action, got %d", len(actions))
+	}
+	action := actions[0]
+	if action.Type != ActionIgnored {
+		t.Fatalf("expected ActionIgnored for unknown event type, got %v", action.Type)
 	}
 }
