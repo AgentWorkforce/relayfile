@@ -518,7 +518,9 @@ func (q *inMemoryEnvelopeQueue) Close() error {
 }
 
 type inMemoryWritebackQueue struct {
-	ch chan WritebackQueueItem
+	ch    chan WritebackQueueItem
+	items map[string]WritebackQueueItem
+	mu    sync.Mutex
 }
 
 func NewInMemoryWritebackQueue(capacity int) WritebackQueue {
@@ -526,7 +528,8 @@ func NewInMemoryWritebackQueue(capacity int) WritebackQueue {
 		capacity = 1024
 	}
 	return &inMemoryWritebackQueue{
-		ch: make(chan WritebackQueueItem, capacity),
+		ch:    make(chan WritebackQueueItem, capacity),
+		items: make(map[string]WritebackQueueItem),
 	}
 }
 
@@ -536,6 +539,9 @@ func (q *inMemoryWritebackQueue) TryEnqueue(task WritebackQueueItem) bool {
 	}
 	select {
 	case q.ch <- task:
+		q.mu.Lock()
+		q.items[task.OpID] = task
+		q.mu.Unlock()
 		return true
 	default:
 		return false
@@ -548,6 +554,9 @@ func (q *inMemoryWritebackQueue) Enqueue(ctx context.Context, task WritebackQueu
 	}
 	select {
 	case q.ch <- task:
+		q.mu.Lock()
+		q.items[task.OpID] = task
+		q.mu.Unlock()
 		return true
 	case <-ctx.Done():
 		return false
@@ -560,10 +569,26 @@ func (q *inMemoryWritebackQueue) Dequeue(ctx context.Context) (WritebackQueueIte
 	}
 	select {
 	case task := <-q.ch:
+		q.mu.Lock()
+		delete(q.items, task.OpID)
+		q.mu.Unlock()
 		return task, true
 	case <-ctx.Done():
 		return WritebackQueueItem{}, false
 	}
+}
+
+func (q *inMemoryWritebackQueue) SnapshotWritebacks() []WritebackQueueItem {
+	if q == nil {
+		return []WritebackQueueItem{}
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	result := make([]WritebackQueueItem, 0, len(q.items))
+	for _, item := range q.items {
+		result = append(result, item)
+	}
+	return result
 }
 
 func (q *inMemoryWritebackQueue) Depth() int {
@@ -698,9 +723,7 @@ func NewStoreWithOptions(opts StoreOptions) *Store {
 	}
 	queueCtx, queueCancel := context.WithCancel(context.Background())
 
-	adapters := map[string]ProviderAdapter{
-		"notion": NewNotionAdapter(nil),
-	}
+	adapters := map[string]ProviderAdapter{}
 	for _, adapter := range opts.Adapters {
 		if adapter == nil || adapter.Provider() == "" {
 			continue
@@ -1479,7 +1502,6 @@ func (s *Store) ListSyncStatuses(provider string) map[string]SyncStatus {
 			providerNames = append(providerNames, normalizedProvider)
 		} else {
 			providerSet := map[string]struct{}{
-				"notion": {},
 			}
 			if workspaceAggregate != nil {
 				for providerName := range workspaceAggregate.providers {
@@ -1557,7 +1579,6 @@ func (s *Store) buildSyncStatusLocked(workspaceID string, provider string) SyncS
 	if provider != "" {
 		providers[provider] = struct{}{}
 	} else {
-		providers["notion"] = struct{}{}
 		for envelopeID, envelope := range s.envelopesByID {
 			if envelopeID == "" {
 				continue
@@ -2139,6 +2160,77 @@ func (s *Store) AcknowledgeDeadLetter(workspaceID, envelopeID, correlationID str
 	}, nil
 }
 
+// GetPendingWritebacks returns all pending writeback items for a workspace
+func (s *Store) GetPendingWritebacks(workspaceID string) []map[string]any {
+	if s.writebackQueue == nil {
+		return []map[string]any{}
+	}
+
+	// Try to snapshot writebacks if the queue supports it
+	snapshotter, ok := s.writebackQueue.(writebackQueueSnapshotter)
+	if !ok {
+		return []map[string]any{}
+	}
+
+	items := snapshotter.SnapshotWritebacks()
+	result := make([]map[string]any, 0)
+	for _, item := range items {
+		if item.WorkspaceID == workspaceID {
+			result = append(result, map[string]any{
+				"id":              item.OpID,
+				"workspaceId":     item.WorkspaceID,
+				"path":            item.Path,
+				"revision":        item.Revision,
+				"correlationId":   item.CorrelationID,
+			})
+		}
+	}
+	return result
+}
+
+// AcknowledgeWriteback acknowledges a writeback item as processed
+func (s *Store) AcknowledgeWriteback(workspaceID, itemID string, success bool, errMsg, correlationID string) (map[string]any, error) {
+	if workspaceID == "" || itemID == "" {
+		return nil, ErrInvalidInput
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Find the operation with the matching ID
+	ws, ok := s.workspaces[workspaceID]
+	if !ok {
+		return nil, ErrNotFound
+	}
+
+	op, ok := ws.Ops[itemID]
+	if !ok {
+		return nil, ErrNotFound
+	}
+
+	// Update operation status based on acknowledgment
+	if success {
+		op.Status = "succeeded"
+		op.LastError = nil
+	} else {
+		op.Status = "dead_lettered"
+		if errMsg != "" {
+			op.LastError = &errMsg
+		}
+	}
+	op.NextAttemptAt = nil
+
+	ws.Ops[itemID] = op
+	_ = s.saveLocked()
+
+	return map[string]any{
+		"status":        "acknowledged",
+		"id":            itemID,
+		"correlationId": correlationID,
+		"success":       success,
+	}, nil
+}
+
 func (s *Store) TriggerSyncRefresh(workspaceID, provider, reason, correlationID string) (QueuedResponse, error) {
 	if workspaceID == "" || provider == "" {
 		return QueuedResponse{}, ErrInvalidInput
@@ -2198,8 +2290,12 @@ func (s *Store) IngestEnvelope(req WebhookEnvelopeRequest) (QueuedResponse, erro
 	req.WorkspaceID = strings.TrimSpace(req.WorkspaceID)
 	req.Provider = normalizeProvider(req.Provider)
 	req.DeliveryID = strings.TrimSpace(req.DeliveryID)
-	if req.WorkspaceID == "" || req.Provider == "" || req.DeliveryID == "" {
+	if req.WorkspaceID == "" || req.Provider == "" {
 		return QueuedResponse{}, ErrInvalidInput
+	}
+	// DeliveryID is optional; generate one if not provided (for deduplication)
+	if req.DeliveryID == "" {
+		req.DeliveryID = fmt.Sprintf("dlv_%d", time.Now().UnixNano())
 	}
 	if req.ReceivedAt == "" {
 		req.ReceivedAt = time.Now().UTC().Format(time.RFC3339Nano)
@@ -2403,7 +2499,6 @@ func (s *Store) nextEventIDLocked() string {
 
 func (s *Store) recordWriteLocked(ws *workspaceState, path, revision, eventType, provider, correlationID string) (WriteResult, writebackTask) {
 	if provider == "" {
-		provider = "notion"
 	}
 	opID := s.nextOperationIDLocked()
 	op := OperationStatus{
@@ -2626,27 +2721,8 @@ func (s *Store) processEnvelope(envelopeID string) {
 	ws := s.ensureWorkspaceLocked(req.WorkspaceID)
 
 	adapter, ok := s.adapters[req.Provider]
-	if !ok {
-		ws.Events = append(ws.Events, Event{
-			EventID:       s.nextEventIDLocked(),
-			Type:          "sync.ignored",
-			Path:          "/",
-			Revision:      "",
-			Origin:        "provider_sync",
-			Provider:      req.Provider,
-			CorrelationID: req.CorrelationID,
-			Timestamp:     time.Now().UTC().Format(time.RFC3339Nano),
-		})
-		s.processedEnvs[envelopeID] = true
-		s.clearCoalesceIndexLocked(req, envelopeID)
-		delete(s.envelopeAttempts, envelopeID)
-		delete(s.envelopeNextAttempt, envelopeID)
-		delete(s.processingEnvs, envelopeID)
-		s.pruneProcessedEnvelopesLocked()
-		_ = s.saveLocked()
-		s.mu.Unlock()
-		return
-	}
+	// If no provider-specific adapter found, we'll use generic pass-through later
+	// This allows any provider to submit webhooks
 	if s.shouldSuppressEnvelopeLocked(req, time.Now().UTC()) {
 		ws.Events = append(ws.Events, Event{
 			EventID:       s.nextEventIDLocked(),
@@ -2675,7 +2751,16 @@ func (s *Store) processEnvelope(envelopeID string) {
 	s.envelopeAttempts[envelopeID] = attempt
 	s.mu.Unlock()
 
-	actions, parseErr := adapter.ParseEnvelope(req)
+	// Parse envelope using provider-specific adapter, or generic pass-through
+	var actions []ApplyAction
+	var parseErr error
+	if ok {
+		// Provider-specific adapter available
+		actions, parseErr = adapter.ParseEnvelope(req)
+	} else {
+		// Use generic pass-through parser for unknown providers
+		actions, parseErr = ParseGenericEnvelope(req)
+	}
 
 	s.mu.Lock()
 	req, ok = s.envelopesByID[envelopeID]
@@ -2823,7 +2908,6 @@ func (s *Store) processWriteback(task writebackTask) {
 		}
 	}
 	if writeAction.Provider == "" {
-		writeAction.Provider = "notion"
 	}
 	attempt := op.AttemptCount + 1
 	s.mu.Unlock()
@@ -3172,12 +3256,12 @@ func inferProviderFromPath(path string) string {
 	normalized := normalizePath(path)
 	trimmed := strings.TrimPrefix(normalized, "/")
 	if trimmed == "" {
-		return "notion"
+		return ""
 	}
 	parts := strings.SplitN(trimmed, "/", 2)
 	provider := strings.TrimSpace(parts[0])
 	if provider == "" {
-		return "notion"
+		return ""
 	}
 	return strings.ToLower(provider)
 }
@@ -3189,7 +3273,7 @@ func fallbackProviderPath(provider, objectID string) string {
 	}
 	normalizedProvider := normalizeProvider(provider)
 	if normalizedProvider == "" {
-		normalizedProvider = "notion"
+		normalizedProvider = provider
 	}
 	replacer := strings.NewReplacer("/", "_", "\\", "_", " ", "_")
 	safeObjectID := replacer.Replace(objectID)

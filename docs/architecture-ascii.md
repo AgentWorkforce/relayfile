@@ -5,18 +5,19 @@
 ```text
                            (optional)
                     +----------------------+
-                    | Notion Bridge/Proxy |
+                    | Provider Bridge      |
+                    | (Nango / relay-cloud)|
                     +----------+-----------+
                                |
                                v
-+----------------+      +------+---------------------+       +----------------------+
-| Notion API     |<---->| relayfile (HTTP API+Store)|<----->| Postgres (5438 host) |
-| (read import + |      | :8080 inside container     |       | docker volume        |
-|  writeback)    |      +------+---------------------+       +----------+-----------+
-+--------+-------+             ^                                         |
-         |                     | REST/JWT                                |
-         |                     v                                         |
-+--------+-------------------+-------------------------------------------+
++-------------------+      +------+---------------------+       +----------------------+
+| External Provider |<---->| relayfile (HTTP API+Store)|<----->| Postgres (5438 host) |
+| APIs (via bridge) |      | :8080 inside container     |       | docker volume        |
+| (webhook ingress +|      +------+---------------------+       +----------+-----------+
+|  writeback queue) |      ^                                         |
++--------+----------+      | REST/JWT                                |
+         |                 v                                         |
++--------+-----------------+-------------------------------------------+
 | mountsync container (relayfile-mount loop)                             |
 | - pull remote tree/events/files                                         |
 | - push local edits with If-Match                                        |
@@ -36,16 +37,15 @@
 ## 2) Inbound Flow (Provider -> RelayFile)
 
 ```text
-import-notion-pages.sh (or webhook source)
-  -> send-internal-envelope.sh (HMAC signed)
-  -> POST /v1/internal/webhook-envelopes
+Provider bridge (Nango/relay-cloud)
+  -> POST /v1/webhooks/ingest (generic webhook)
   -> auth + replay-window verification
   -> IngestEnvelope():
        - dedupe by delivery key
        - coalesce by object/path window
        - enqueue envelope id
   -> envelope worker:
-       - adapter.ParseEnvelope() -> ApplyAction[]
+       - ParseGenericEnvelope() -> ApplyAction[]
        - apply file upsert/delete (+ semantics)
        - emit events + ingress counters
        - retry, then dead-letter on failure
@@ -72,9 +72,11 @@ agent edits ./.livefs/file.md
        - optimistic concurrency check
        - new revision + op pending + event
        - enqueue writeback task
-  -> writeback worker:
-       - adapter.ApplyWriteback()
-       - provider HTTP call (Notion client)
+  -> writeback queue:
+       - item marked pending for external consumer
+       - external service polls /v1/writeback/pending
+       - external service calls provider APIs
+       - external service ACKs via /v1/writeback/{id}/ack
        - success -> op succeeded
        - failure -> retry -> dead_lettered
 ```

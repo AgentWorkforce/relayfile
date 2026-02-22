@@ -212,77 +212,8 @@ func storageProfileDefaultsFromEnv() (stateBackendDSN, envelopeQueueDSN, writeba
 }
 
 func buildAdaptersFromEnv() []relayfile.ProviderAdapter {
-	notionToken := strings.TrimSpace(os.Getenv("RELAYFILE_NOTION_TOKEN"))
-	notionTokenFile := strings.TrimSpace(os.Getenv("RELAYFILE_NOTION_TOKEN_FILE"))
-	tokenProvider := buildNotionTokenProviderWithCache(
-		notionToken,
-		notionTokenFile,
-		durationEnv("RELAYFILE_NOTION_TOKEN_CACHE_TTL", 15*time.Second),
-	)
-	if tokenProvider == nil {
-		return nil
-	}
-	notionBaseURL := strings.TrimSpace(os.Getenv("RELAYFILE_NOTION_BASE_URL"))
-	notionClient := relayfile.NewHTTPNotionWriteClient(relayfile.NotionHTTPClientOptions{
-		BaseURL:       notionBaseURL,
-		TokenProvider: tokenProvider,
-		APIVersion:    strings.TrimSpace(os.Getenv("RELAYFILE_NOTION_API_VERSION")),
-		UserAgent:     strings.TrimSpace(os.Getenv("RELAYFILE_NOTION_USER_AGENT")),
-		MaxRetries:    intEnv("RELAYFILE_NOTION_MAX_RETRIES", 0),
-		BaseDelay:     durationEnv("RELAYFILE_NOTION_RETRY_BASE_DELAY", 0),
-		MaxDelay:      durationEnv("RELAYFILE_NOTION_RETRY_MAX_DELAY", 0),
-	})
-	log.Printf("notion writeback client enabled")
-	return []relayfile.ProviderAdapter{
-		relayfile.NewNotionAdapter(notionClient),
-	}
-}
-
-func buildNotionTokenProvider(staticToken, tokenFile string) relayfile.NotionAccessTokenProvider {
-	return buildNotionTokenProviderWithCache(staticToken, tokenFile, 0)
-}
-
-func buildNotionTokenProviderWithCache(staticToken, tokenFile string, cacheTTL time.Duration) relayfile.NotionAccessTokenProvider {
-	staticToken = strings.TrimSpace(staticToken)
-	tokenFile = strings.TrimSpace(tokenFile)
-	switch {
-	case tokenFile != "":
-		var mu sync.Mutex
-		cachedToken := ""
-		cacheExpiresAt := time.Time{}
-		return func(ctx context.Context) (string, error) {
-			_ = ctx
-			if cacheTTL > 0 {
-				mu.Lock()
-				if cachedToken != "" && time.Now().UTC().Before(cacheExpiresAt) {
-					token := cachedToken
-					mu.Unlock()
-					return token, nil
-				}
-				mu.Unlock()
-			}
-			data, err := os.ReadFile(tokenFile)
-			if err != nil {
-				return "", err
-			}
-			token := strings.TrimSpace(string(data))
-			if token == "" {
-				return "", fmt.Errorf("notion token file is empty")
-			}
-			if cacheTTL > 0 {
-				mu.Lock()
-				cachedToken = token
-				cacheExpiresAt = time.Now().UTC().Add(cacheTTL)
-				mu.Unlock()
-			}
-			return token, nil
-		}
-	case staticToken != "":
-		return func(ctx context.Context) (string, error) {
-			_ = ctx
-			return staticToken, nil
-		}
-	default:
-		return nil
-	}
+	// No provider-specific adapters are initialized by default.
+	// All provider integration is handled externally via the generic webhook API.
+	// Custom adapters can be provided as needed for specific use cases.
+	return nil
 }
