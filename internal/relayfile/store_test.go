@@ -4241,3 +4241,42 @@ func (a testAdapter) ApplyWriteback(action WritebackAction) error {
 	}
 	return a.writeback(action)
 }
+
+func TestExternalWritebackModeKeepsItemsInQueue(t *testing.T) {
+	store := NewStoreWithOptions(StoreOptions{
+		ExternalWritebackMode: true,
+	})
+	t.Cleanup(store.Close)
+
+	_, err := store.WriteFile(WriteRequest{
+		WorkspaceID:   "ws_ext",
+		Path:          "/external/Test.md",
+		IfMatch:       "0",
+		ContentType:   "text/markdown",
+		Content:       "# external writeback",
+		CorrelationID: "corr_ext_1",
+	})
+	if err != nil {
+		t.Fatalf("write failed: %v", err)
+	}
+
+	// Give time for any hypothetical worker to process (should not happen).
+	time.Sleep(200 * time.Millisecond)
+
+	// Items should remain pending for external consumers.
+	pending := store.GetPendingWritebacks("ws_ext")
+	if len(pending) == 0 {
+		t.Fatal("expected writeback items to remain in queue for external consumers")
+	}
+
+	// Op should still be in pending/running state, not succeeded.
+	ops, err := store.ListOperations("ws_ext", "", "", "", "", 100)
+	if err != nil {
+		t.Fatalf("list operations failed: %v", err)
+	}
+	for _, op := range ops.Items {
+		if op.Status == "succeeded" {
+			t.Fatalf("expected op not to be processed by internal worker, but got status succeeded")
+		}
+	}
+}

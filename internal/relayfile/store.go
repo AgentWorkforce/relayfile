@@ -260,6 +260,7 @@ type StoreOptions struct {
 	ProviderWrite          ProviderWriteFunc
 	ProviderWriteAction    ProviderWriteActionFunc
 	DisableWorkers         bool
+	ExternalWritebackMode  bool
 	EnvelopeQueueSize      int
 	EnvelopeQueue          EnvelopeQueue
 	WritebackQueue         WritebackQueue
@@ -779,13 +780,22 @@ func NewStoreWithOptions(opts StoreOptions) *Store {
 	s.seedQueuedIndexesFromQueues()
 	_ = s.loadFromDisk()
 	s.rebuildCoalesceIndexLocked()
+	// When ExternalWritebackMode is enabled, writeback workers are not
+	// started so items remain in the queue for external consumers to poll
+	// via /writeback/pending and ACK via /writeback/{id}/ack.
 	if !opts.DisableWorkers {
-		s.wg.Add(writebackWorkers + envelopeWorkers)
-		for i := 0; i < writebackWorkers; i++ {
-			go func() {
-				defer s.wg.Done()
-				s.writebackWorker()
-			}()
+		workerCount := envelopeWorkers
+		if !opts.ExternalWritebackMode {
+			workerCount += writebackWorkers
+		}
+		s.wg.Add(workerCount)
+		if !opts.ExternalWritebackMode {
+			for i := 0; i < writebackWorkers; i++ {
+				go func() {
+					defer s.wg.Done()
+					s.writebackWorker()
+				}()
+			}
 		}
 		for i := 0; i < envelopeWorkers; i++ {
 			go func() {

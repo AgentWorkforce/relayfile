@@ -42,6 +42,7 @@ func main() {
 		ProviderMaxConcurrency: intEnv("RELAYFILE_PROVIDER_MAX_CONCURRENCY", 0),
 		Adapters:               buildAdaptersFromEnv(),
 		BackendProfile:         strings.TrimSpace(os.Getenv("RELAYFILE_BACKEND_PROFILE")),
+		ExternalWritebackMode:  boolEnv("RELAYFILE_EXTERNAL_WRITEBACK", true),
 	})
 	server := httpapi.NewServerWithConfig(store, httpapi.ServerConfig{
 		JWTSecret:          os.Getenv("RELAYFILE_JWT_SECRET"),
@@ -95,6 +96,22 @@ func durationEnv(name string, fallback time.Duration) time.Duration {
 		return fallback
 	}
 	return value
+}
+
+func boolEnv(name string, fallback bool) bool {
+	raw := os.Getenv(name)
+	if raw == "" {
+		return fallback
+	}
+	switch strings.ToLower(raw) {
+	case "1", "true", "yes":
+		return true
+	case "0", "false", "no":
+		return false
+	default:
+		log.Printf("invalid %s=%q, using fallback %v", name, raw, fallback)
+		return fallback
+	}
 }
 
 func buildStorageBackendsFromEnv() (relayfile.StateBackend, relayfile.EnvelopeQueue, relayfile.WritebackQueue, error) {
