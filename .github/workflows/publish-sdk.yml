@@ -165,7 +165,7 @@ jobs:
         if: github.event.inputs.dry_run == 'true'
         working-directory: sdk/relayfile-sdk
         run: |
-          echo "Dry run - would publish @agent-relay/relayfile-sdk@${{ needs.build.outputs.new_version }}"
+          echo "Dry run - would publish @relayfile/sdk@${{ needs.build.outputs.new_version }}"
           npm publish --dry-run --access public --tag ${{ github.event.inputs.tag }} --ignore-scripts
 
       - name: Publish with provenance
@@ -221,7 +221,7 @@ jobs:
 
           echo "## SDK Publish Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Package**: \`@agent-relay/relayfile-sdk\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Package**: \`@relayfile/sdk\`" >> $GITHUB_STEP_SUMMARY
           echo "**Version**: \`${{ needs.build.outputs.new_version }}\`" >> $GITHUB_STEP_SUMMARY
           echo "**NPM Tag**: \`${{ github.event.inputs.tag }}\`" >> $GITHUB_STEP_SUMMARY
           echo "**Prerelease**: \`$IS_PRERELEASE\`" >> $GITHUB_STEP_SUMMARY
@@ -236,5 +236,5 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Install" >> $GITHUB_STEP_SUMMARY
           echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
-          echo "npm install @agent-relay/relayfile-sdk@${{ needs.build.outputs.new_version }}" >> $GITHUB_STEP_SUMMARY
+          echo "npm install @relayfile/sdk@${{ needs.build.outputs.new_version }}" >> $GITHUB_STEP_SUMMARY
           echo "\`\`\`" >> $GITHUB_STEP_SUMMARY

@@ -395,7 +395,7 @@ Initial provider:
 
 ## 15. SDK Specification (TypeScript)
 
-Package: `@agent-relay/relayfile-sdk`
+Package: `@relayfile/sdk`
 
 Core interface:
 

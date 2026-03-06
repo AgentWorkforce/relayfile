@@ -1,17 +1,17 @@
-# @agent-relay/relayfile-sdk
+# @relayfile/sdk
 
 TypeScript SDK for the RelayFile API contract in `openapi/relayfile-v1.openapi.yaml`.
 
 ## Install
 
 ```bash
-npm install @agent-relay/relayfile-sdk
+npm install @relayfile/sdk
 ```
 
 ## Usage
 
 ```ts
-import { InvalidStateError, QueueFullError, RelayFileClient, RevisionConflictError } from "@agent-relay/relayfile-sdk";
+import { InvalidStateError, QueueFullError, RelayFileClient, RevisionConflictError } from "@relayfile/sdk";
 
 const client = new RelayFileClient({
   baseUrl: "https://relayfile.agent-relay.com",
