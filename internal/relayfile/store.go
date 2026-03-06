@@ -537,13 +537,16 @@ func (q *inMemoryWritebackQueue) TryEnqueue(task WritebackQueueItem) bool {
 	if q == nil || task.OpID == "" {
 		return false
 	}
+	q.mu.Lock()
+	q.items[task.OpID] = task
+	q.mu.Unlock()
 	select {
 	case q.ch <- task:
-		q.mu.Lock()
-		q.items[task.OpID] = task
-		q.mu.Unlock()
 		return true
 	default:
+		q.mu.Lock()
+		delete(q.items, task.OpID)
+		q.mu.Unlock()
 		return false
 	}
 }
@@ -552,13 +555,16 @@ func (q *inMemoryWritebackQueue) Enqueue(ctx context.Context, task WritebackQueu
 	if q == nil || task.OpID == "" {
 		return false
 	}
+	q.mu.Lock()
+	q.items[task.OpID] = task
+	q.mu.Unlock()
 	select {
 	case q.ch <- task:
-		q.mu.Lock()
-		q.items[task.OpID] = task
-		q.mu.Unlock()
 		return true
 	case <-ctx.Done():
+		q.mu.Lock()
+		delete(q.items, task.OpID)
+		q.mu.Unlock()
 		return false
 	}
 }

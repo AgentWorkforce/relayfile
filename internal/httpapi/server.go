@@ -176,7 +176,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		requiredScope = "ops:read"
 		route = "op"
 	case len(parts) == 5 && parts[3] == "webhooks" && parts[4] == "ingest" && r.Method == http.MethodPost:
-		requiredScope = "sync:read"
+		requiredScope = "sync:trigger"
 		route = "generic_webhook_ingest"
 	case len(parts) == 5 && parts[3] == "writeback" && parts[4] == "pending" && r.Method == http.MethodGet:
 		requiredScope = "sync:read"
@@ -1760,6 +1760,9 @@ func (s *Server) handleGenericWebhookIngest(w http.ResponseWriter, r *http.Reque
 	// Merge any additional data fields from the request
 	if d, ok := payload["data"].(map[string]any); ok {
 		for k, v := range d {
+			if k == "event_type" || k == "path" {
+				continue
+			}
 			envelopePayload[k] = v
 		}
 	}

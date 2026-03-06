@@ -4112,7 +4112,7 @@ func TestParseOptionalBool(t *testing.T) {
 
 func TestGenericWebhookIngestion(t *testing.T) {
 	server := NewServer(relayfile.NewStore())
-	token := mustTestJWT(t, "dev-secret", "ws_1", "Worker1", []string{"fs:read", "fs:write", "sync:read"}, time.Now().Add(time.Hour))
+	token := mustTestJWT(t, "dev-secret", "ws_1", "Worker1", []string{"fs:read", "fs:write", "sync:read", "sync:trigger"}, time.Now().Add(time.Hour))
 
 	// Test 1: Ingest generic webhook with provider="notion"
 	ingestResp := doRequest(t, server, request{
@@ -4153,7 +4153,7 @@ func TestGenericWebhookIngestion(t *testing.T) {
 
 func TestGenericWebhookIngestionMultipleProviders(t *testing.T) {
 	server := NewServer(relayfile.NewStore())
-	token := mustTestJWT(t, "dev-secret", "ws_1", "Worker1", []string{"fs:read", "fs:write", "sync:read"}, time.Now().Add(time.Hour))
+	token := mustTestJWT(t, "dev-secret", "ws_1", "Worker1", []string{"fs:read", "fs:write", "sync:read", "sync:trigger"}, time.Now().Add(time.Hour))
 
 	testCases := []struct {
 		name     string
@@ -4207,7 +4207,7 @@ func TestGenericWebhookIngestionMultipleProviders(t *testing.T) {
 
 func TestGenericWebhookIngestionMissingFields(t *testing.T) {
 	server := NewServer(relayfile.NewStore())
-	token := mustTestJWT(t, "dev-secret", "ws_1", "Worker1", []string{"fs:read", "fs:write", "sync:read"}, time.Now().Add(time.Hour))
+	token := mustTestJWT(t, "dev-secret", "ws_1", "Worker1", []string{"fs:read", "fs:write", "sync:read", "sync:trigger"}, time.Now().Add(time.Hour))
 
 	testCases := []struct {
 		name   string
@@ -4271,7 +4271,7 @@ func TestGenericWebhookIngestionMissingFields(t *testing.T) {
 func TestWritebackQueueAPI(t *testing.T) {
 	store := relayfile.NewStore()
 	server := NewServer(store)
-	token := mustTestJWT(t, "dev-secret", "ws_1", "Worker1", []string{"fs:read", "fs:write", "sync:read"}, time.Now().Add(time.Hour))
+	token := mustTestJWT(t, "dev-secret", "ws_1", "Worker1", []string{"fs:read", "fs:write", "sync:read", "sync:trigger"}, time.Now().Add(time.Hour))
 
 	// Test 1: Get empty writeback queue
 	pendingResp := doRequest(t, server, request{
@@ -4298,7 +4298,7 @@ func TestWritebackQueueAPI(t *testing.T) {
 
 func TestGenericPassthroughForUnknownProvider(t *testing.T) {
 	server := NewServer(relayfile.NewStore())
-	token := mustTestJWT(t, "dev-secret", "ws_1", "Worker1", []string{"fs:read", "fs:write", "sync:read"}, time.Now().Add(time.Hour))
+	token := mustTestJWT(t, "dev-secret", "ws_1", "Worker1", []string{"fs:read", "fs:write", "sync:read", "sync:trigger"}, time.Now().Add(time.Hour))
 
 	// Ingest a webhook for an unknown provider with generic format
 	ingestResp := doRequest(t, server, request{
