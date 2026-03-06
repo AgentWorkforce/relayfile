@@ -4364,7 +4364,8 @@ func TestGenericPassthroughForUnknownProvider(t *testing.T) {
 }
 
 func TestWritebackQueueACK(t *testing.T) {
-	store := relayfile.NewStore()
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
+	defer store.Close()
 	server := NewServer(store)
 	token := mustTestJWT(t, "dev-secret", "ws_1", "Worker1", []string{"fs:read", "fs:write", "sync:read", "sync:trigger", "ops:replay"}, time.Now().Add(time.Hour))
 
