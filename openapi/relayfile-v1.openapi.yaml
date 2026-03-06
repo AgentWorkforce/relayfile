@@ -1075,6 +1075,178 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /v1/workspaces/{workspaceId}/webhooks/ingest:
+    post:
+      tags: [Sync]
+      operationId: ingestGenericWebhook
+      summary: Ingest a generic webhook payload
+      description: |
+        Accepts a generic webhook payload from any provider.
+        This is a provider-agnostic webhook ingestion endpoint that accepts
+        envelopes in a standard format. The provider name and event type
+        are specified in the payload, allowing any external service to
+        submit webhook events for processing.
+      security:
+        - BearerAuth: [sync:read]
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [provider, event_type, path]
+              properties:
+                provider:
+                  type: string
+                  description: Name of the provider (e.g., "salesforce", "slack", "github")
+                  example: salesforce
+                event_type:
+                  type: string
+                  description: Type of event (e.g., "file.updated", "file.deleted")
+                  example: file.updated
+                path:
+                  type: string
+                  description: Virtual filesystem path
+                  pattern: '^/.*'
+                  example: /documents/page123.md
+                data:
+                  type: object
+                  description: Provider-specific payload data
+                  example:
+                    content: "# Updated Page"
+                    title: "Page 123"
+                delivery_id:
+                  type: string
+                  description: Optional delivery ID for deduplication
+                  example: evt_123
+                timestamp:
+                  type: string
+                  format: date-time
+                  description: Event timestamp (defaults to now if not provided)
+                headers:
+                  type: object
+                  additionalProperties:
+                    type: string
+                  description: Optional provider-specific headers
+      responses:
+        '202':
+          description: Webhook accepted and queued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QueuedResponse'
+        '400':
+          description: Invalid webhook payload
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          description: Queue full, retry after specified delay
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /v1/workspaces/{workspaceId}/writeback/pending:
+    get:
+      tags: [Sync]
+      operationId: listPendingWritebacks
+      summary: List pending writeback items
+      description: |
+        Retrieves all pending writeback items in the queue for this workspace.
+        Writeback items are generated when files are modified and need to be
+        propagated back to the source provider.
+      security:
+        - BearerAuth: [sync:read]
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: List of pending writeback items
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/WritebackItem'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /v1/workspaces/{workspaceId}/writeback/{itemId}/ack:
+    post:
+      tags: [Sync]
+      operationId: acknowledgeWriteback
+      summary: Acknowledge a writeback item as processed
+      description: |
+        Marks a writeback item as successfully processed by the provider.
+        Should be called after the writeback has been applied to the source system.
+      security:
+        - BearerAuth: [sync:trigger]
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/CorrelationId'
+        - name: itemId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [success]
+              properties:
+                success:
+                  type: boolean
+                  description: Whether the writeback was successfully applied
+                error:
+                  type: string
+                  description: Optional error message if success is false
+      responses:
+        '200':
+          description: Acknowledgment accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [acknowledged]
+                  id:
+                    type: string
+                  correlationId:
+                    type: string
+                  success:
+                    type: boolean
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
 components:
   securitySchemes:
     BearerAuth:
@@ -2106,6 +2278,28 @@ components:
         details:
           type: object
           additionalProperties: true
+
+    WritebackItem:
+      type: object
+      additionalProperties: false
+      required: [id, workspaceId, path, revision, correlationId]
+      properties:
+        id:
+          type: string
+          description: Operation ID for this writeback
+        workspaceId:
+          type: string
+          description: Workspace identifier
+        path:
+          type: string
+          description: Virtual filesystem path
+          pattern: '^/.*'
+        revision:
+          type: string
+          description: Current file revision
+        correlationId:
+          type: string
+          description: Correlation ID for tracing
 
     ConflictErrorResponse:
       allOf:

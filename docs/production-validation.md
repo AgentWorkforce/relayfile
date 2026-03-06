@@ -49,10 +49,10 @@ Expected:
 
 ## Functional Validation
 
-1. Ingest an internal envelope:
+1. Ingest a generic webhook envelope:
 
 ```bash
-./scripts/send-internal-envelope.sh ws_live notion
+./scripts/send-internal-envelope.sh generic /docs/demo.md "# Demo Content" file.created
 ```
 
 2. Confirm files appear:
@@ -70,13 +70,13 @@ curl -sS \
 curl -sS \
   -H "Authorization: Bearer ${TOKEN}" \
   -H "X-Correlation-Id: corr_query_$(date +%s)" \
-  "http://127.0.0.1:8080/v1/workspaces/ws_live/fs/query?path=/notion&limit=20" | jq '.items | length'
+  "http://127.0.0.1:8080/v1/workspaces/ws_live/fs/query?path=/docs&limit=20" | jq '.items | length'
 ```
 
 4. Write and confirm operation:
 
 ```bash
-FILE_PATH="/notion/demo.md"
+FILE_PATH="/docs/demo.md"
 BASE="0"
 WRITE=$(curl -sS -X PUT \
   -H "Authorization: Bearer ${TOKEN}" \

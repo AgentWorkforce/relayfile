@@ -1,0 +1,895 @@
+diff --git a/internal/relayfile/adapters.go b/internal/relayfile/adapters.go
+index 2d04d20..1cc9c21 100644
+--- a/internal/relayfile/adapters.go
++++ b/internal/relayfile/adapters.go
+@@ -48,11 +48,24 @@ func ParseGenericEnvelope(req WebhookEnvelopeRequest) ([]ApplyAction, error) {
+ 
+ 	// The generic envelope should have path and data at the top level
+ 	// If coming from the generic ingest API, the entire req.Payload is the data
++	providerObjectID := toString(req.Payload["providerObjectId"])
++	if providerObjectID == "" {
++		providerObjectID = toString(req.Payload["objectId"])
++	}
+ 	path := toString(req.Payload["path"])
+ 	if path == "" {
+-		// Path might not be in Payload if sent through generic ingest API
+-		// In that case, it should be in req itself (handled by caller)
+-		return []ApplyAction{{Type: ActionIgnored}}, nil
++		// Allow missing path when a provider object ID is present so the store
++		// can resolve via provider index or fallback path.
++		switch eventType {
++		case "file.created", "file.updated", "file.deleted":
++			if providerObjectID != "" {
++				path = "/"
++				break
++			}
++			return []ApplyAction{{Type: ActionIgnored}}, nil
++		default:
++			return []ApplyAction{{Type: ActionIgnored}}, nil
++		}
+ 	}
+ 
+ 	switch {
+@@ -69,7 +82,7 @@ func ParseGenericEnvelope(req WebhookEnvelopeRequest) ([]ApplyAction, error) {
+ 				Path:             normalizePath(path),
+ 				Content:          content,
+ 				ContentType:      contentType,
+-				ProviderObjectID: toString(req.Payload["providerObjectId"]),
++				ProviderObjectID: providerObjectID,
+ 				Semantics:        extractSemantics(req.Payload),
+ 			},
+ 		}, nil
+@@ -79,7 +92,7 @@ func ParseGenericEnvelope(req WebhookEnvelopeRequest) ([]ApplyAction, error) {
+ 			{
+ 				Type:             ActionFileDelete,
+ 				Path:             normalizePath(path),
+-				ProviderObjectID: toString(req.Payload["providerObjectId"]),
++				ProviderObjectID: providerObjectID,
+ 			},
+ 		}, nil
+ 
+diff --git a/internal/relayfile/store.go b/internal/relayfile/store.go
+index 00343e2..ba365a7 100644
+--- a/internal/relayfile/store.go
++++ b/internal/relayfile/store.go
+@@ -3301,7 +3301,10 @@ func coalesceObjectKey(req WebhookEnvelopeRequest) string {
+ 	if req.WorkspaceID == "" || req.Provider == "" {
+ 		return ""
+ 	}
+-	objectID := strings.TrimSpace(toString(req.Payload["objectId"]))
++	objectID := strings.TrimSpace(toString(req.Payload["providerObjectId"]))
++	if objectID == "" {
++		objectID = strings.TrimSpace(toString(req.Payload["objectId"]))
++	}
+ 	if objectID != "" {
+ 		return req.WorkspaceID + "|" + req.Provider + "|object:" + objectID
+ 	}
+diff --git a/internal/relayfile/store_test.go b/internal/relayfile/store_test.go
+index 17f10a7..948b32c 100644
+--- a/internal/relayfile/store_test.go
++++ b/internal/relayfile/store_test.go
+@@ -247,7 +247,7 @@ func TestStoreWriteReadConflictDeleteLifecycle(t *testing.T) {
+ 	if write1.TargetRevision == "" {
+ 		t.Fatalf("expected target revision")
+ 	}
+-	if write1.Writeback.Provider != "notion" {
++	if write1.Writeback.Provider != "external" {
+ 		t.Fatalf("expected writeback provider notion, got %s", write1.Writeback.Provider)
+ 	}
+ 
+@@ -364,10 +364,10 @@ func TestStoreUsesCustomQueues(t *testing.T) {
+ 	_, err = store.IngestEnvelope(WebhookEnvelopeRequest{
+ 		EnvelopeID:    "env_custom_queue_1",
+ 		WorkspaceID:   "ws_custom_queue",
+-		Provider:      "notion",
++		Provider:    "external",
+ 		DeliveryID:    "delivery_custom_queue_1",
+ 		ReceivedAt:    time.Now().UTC().Format(time.RFC3339Nano),
+-		Payload:       map[string]any{"event_type": "file.created", "objectId": "obj_custom_queue_1", "path": "/external/Queue.md", "content": "# queue"},
++		Payload:       map[string]any{"event_type": "file.created", "providerObjectId": "obj_custom_queue_1", "path": "/external/Queue.md", "content": "# queue"},
+ 		CorrelationID: "corr_queue_2",
+ 	})
+ 	if err != nil {
+@@ -443,10 +443,10 @@ func TestEnqueueEnvelopeDeduplicatesQueuedEnvelopeID(t *testing.T) {
+ 	_, err := store.IngestEnvelope(WebhookEnvelopeRequest{
+ 		EnvelopeID:    "env_queue_dedupe_1",
+ 		WorkspaceID:   "ws_queue_dedupe",
+-		Provider:      "notion",
++		Provider:    "external",
+ 		DeliveryID:    "delivery_queue_dedupe_1",
+ 		ReceivedAt:    time.Now().UTC().Format(time.RFC3339Nano),
+-		Payload:       map[string]any{"event_type": "file.created", "objectId": "obj_queue_dedupe_1", "path": "/external/Q.md", "content": "# q"},
++		Payload:       map[string]any{"event_type": "file.created", "providerObjectId": "obj_queue_dedupe_1", "path": "/external/Q.md", "content": "# q"},
+ 		CorrelationID: "corr_queue_dedupe_1",
+ 	})
+ 	if err != nil {
+@@ -709,7 +709,7 @@ func TestListTreeHonorsDepth(t *testing.T) {
+ 		}
+ 	}
+ 
+-	depth1, err := store.ListTree("ws_tree_depth", "/notion", 1, "")
++	depth1, err := store.ListTree("ws_tree_depth", "/external", 1, "")
+ 	if err != nil {
+ 		t.Fatalf("list tree depth=1 failed: %v", err)
+ 	}
+@@ -723,7 +723,7 @@ func TestListTreeHonorsDepth(t *testing.T) {
+ 		t.Fatalf("unexpected second depth-1 entry: %+v", depth1.Entries[1])
+ 	}
+ 
+-	depth2, err := store.ListTree("ws_tree_depth", "/notion", 2, "")
++	depth2, err := store.ListTree("ws_tree_depth", "/external", 2, "")
+ 	if err != nil {
+ 		t.Fatalf("list tree depth=2 failed: %v", err)
+ 	}
+@@ -794,7 +794,7 @@ func TestQueryFilesSupportsSemanticFilters(t *testing.T) {
+ 	}
+ 
+ 	topicResp, err := store.QueryFiles("ws_semantic_query", FileQueryRequest{
+-		PathPrefix: "/notion",
++		PathPrefix: "/external",
+ 		Properties: map[string]string{"topic": "investments"},
+ 		Limit:      50,
+ 	})
+@@ -812,7 +812,7 @@ func TestQueryFilesSupportsSemanticFilters(t *testing.T) {
+ 	}
+ 
+ 	relationResp, err := store.QueryFiles("ws_semantic_query", FileQueryRequest{
+-		PathPrefix: "/notion",
++		PathPrefix: "/external",
+ 		Relation:   "page_cap_table",
+ 		Permission: "role:finance",
+ 		Comment:    "comment_b",
+@@ -826,7 +826,7 @@ func TestQueryFilesSupportsSemanticFilters(t *testing.T) {
+ 	}
+ 
+ 	pagedOne, err := store.QueryFiles("ws_semantic_query", FileQueryRequest{
+-		PathPrefix: "/notion",
++		PathPrefix: "/external",
+ 		Limit:      1,
+ 	})
+ 	if err != nil {
+@@ -839,7 +839,7 @@ func TestQueryFilesSupportsSemanticFilters(t *testing.T) {
+ 		t.Fatalf("expected next cursor for paged query")
+ 	}
+ 	pagedTwo, err := store.QueryFiles("ws_semantic_query", FileQueryRequest{
+-		PathPrefix: "/notion",
++		PathPrefix: "/external",
+ 		Limit:      1,
+ 		Cursor:     *pagedOne.NextCursor,
+ 	})
+@@ -957,7 +957,7 @@ func TestStoreEventsAndOps(t *testing.T) {
+ 	if op.Status == "" {
+ 		t.Fatalf("expected op status")
+ 	}
+-	if op.Provider != "notion" {
++	if op.Provider != "external" {
+ 		t.Fatalf("expected op provider notion, got %q", op.Provider)
+ 	}
+ }
+@@ -1000,7 +1000,7 @@ func TestGetEventsSupportsProviderFilter(t *testing.T) {
+ 		}
+ 	}
+ 
+-	notionFeed, err := store.GetEvents("ws_events_provider", "notion", "", 1000)
++	notionFeed, err := store.GetEvents("ws_events_provider", "external", "", 1000)
+ 	if err != nil {
+ 		t.Fatalf("notion filtered events failed: %v", err)
+ 	}
+@@ -1008,7 +1008,7 @@ func TestGetEventsSupportsProviderFilter(t *testing.T) {
+ 		t.Fatalf("expected notion filtered events to be non-empty")
+ 	}
+ 	for _, event := range notionFeed.Events {
+-		if event.Provider != "notion" {
++		if event.Provider != "external" {
+ 			t.Fatalf("expected notion provider events only, got provider=%q type=%q path=%q", event.Provider, event.Type, event.Path)
+ 		}
+ 	}
+@@ -1027,7 +1027,7 @@ func TestProviderUpsertWithoutPathUsesObjectIdentity(t *testing.T) {
+ 		ReceivedAt:  firstReceivedAt,
+ 		Payload: map[string]any{
+ 			"event_type": "file.created",
+-			"objectId":   "obj_identity_1",
++			"providerObjectId":   "obj_identity_1",
+ 			"path":       "/external/ObjectIdentity.md",
+ 			"content":    "# initial",
+ 		},
+@@ -1060,7 +1060,7 @@ func TestProviderUpsertWithoutPathUsesObjectIdentity(t *testing.T) {
+ 		ReceivedAt:  secondReceivedAt,
+ 		Payload: map[string]any{
+ 			"event_type": "file.updated",
+-			"objectId":   "obj_identity_1",
++			"providerObjectId":   "obj_identity_1",
+ 			"content":    "# updated",
+ 		},
+ 		CorrelationID: "corr_object_identity_2",
+@@ -1286,7 +1286,7 @@ func TestEnvelopeWorkersRespectProviderConcurrencyLimit(t *testing.T) {
+ 							Path:             toString(req.Payload["path"]),
+ 							Content:          toString(req.Payload["content"]),
+ 							ContentType:      "text/markdown",
+-							ProviderObjectID: toString(req.Payload["objectId"]),
++							ProviderObjectID: toString(req.Payload["providerObjectId"]),
+ 						},
+ 					}, nil
+ 				},
+@@ -1301,7 +1301,7 @@ func TestEnvelopeWorkersRespectProviderConcurrencyLimit(t *testing.T) {
+ 		Provider:      "custom",
+ 		DeliveryID:    "delivery_provider_concurrency_1",
+ 		ReceivedAt:    time.Now().UTC().Format(time.RFC3339Nano),
+-		Payload:       map[string]any{"type": "custom.upsert", "path": "/custom/A.md", "content": "# a", "objectId": "obj_a"},
++		Payload:       map[string]any{"type": "custom.upsert", "path": "/custom/A.md", "content": "# a", "providerObjectId": "obj_a"},
+ 		CorrelationID: "corr_provider_concurrency_1",
+ 	})
+ 	if err != nil {
+@@ -1313,7 +1313,7 @@ func TestEnvelopeWorkersRespectProviderConcurrencyLimit(t *testing.T) {
+ 		Provider:      "custom",
+ 		DeliveryID:    "delivery_provider_concurrency_2",
+ 		ReceivedAt:    time.Now().UTC().Format(time.RFC3339Nano),
+-		Payload:       map[string]any{"type": "custom.upsert", "path": "/custom/B.md", "content": "# b", "objectId": "obj_b"},
++		Payload:       map[string]any{"type": "custom.upsert", "path": "/custom/B.md", "content": "# b", "providerObjectId": "obj_b"},
+ 		CorrelationID: "corr_provider_concurrency_2",
+ 	})
+ 	if err != nil {
+@@ -1417,7 +1417,7 @@ func TestEnvelopeWorkersParseInParallelAcrossWorkspaceScope(t *testing.T) {
+ 							Path:             toString(req.Payload["path"]),
+ 							Content:          toString(req.Payload["content"]),
+ 							ContentType:      "text/markdown",
+-							ProviderObjectID: toString(req.Payload["objectId"]),
++							ProviderObjectID: toString(req.Payload["providerObjectId"]),
+ 						},
+ 					}, nil
+ 				},
+@@ -1432,7 +1432,7 @@ func TestEnvelopeWorkersParseInParallelAcrossWorkspaceScope(t *testing.T) {
+ 		Provider:      "custom",
+ 		DeliveryID:    "delivery_parallel_scope_1",
+ 		ReceivedAt:    time.Now().UTC().Format(time.RFC3339Nano),
+-		Payload:       map[string]any{"type": "custom.upsert", "path": "/custom/A.md", "content": "# a", "objectId": "obj_a"},
++		Payload:       map[string]any{"type": "custom.upsert", "path": "/custom/A.md", "content": "# a", "providerObjectId": "obj_a"},
+ 		CorrelationID: "corr_parallel_scope_1",
+ 	})
+ 	if err != nil {
+@@ -1444,7 +1444,7 @@ func TestEnvelopeWorkersParseInParallelAcrossWorkspaceScope(t *testing.T) {
+ 		Provider:      "custom",
+ 		DeliveryID:    "delivery_parallel_scope_2",
+ 		ReceivedAt:    time.Now().UTC().Format(time.RFC3339Nano),
+-		Payload:       map[string]any{"type": "custom.upsert", "path": "/custom/B.md", "content": "# b", "objectId": "obj_b"},
++		Payload:       map[string]any{"type": "custom.upsert", "path": "/custom/B.md", "content": "# b", "providerObjectId": "obj_b"},
+ 		CorrelationID: "corr_parallel_scope_2",
+ 	})
+ 	if err != nil {
+@@ -1490,12 +1490,12 @@ func TestSuppressionMarkersPersistAcrossRestart(t *testing.T) {
+ 	_, err = recovered.IngestEnvelope(WebhookEnvelopeRequest{
+ 		EnvelopeID:  "env_loop_persist_1",
+ 		WorkspaceID: "ws_loop_persist",
+-		Provider:    "notion",
++		Provider:    "external",
+ 		DeliveryID:  "delivery_loop_persist_1",
+ 		ReceivedAt:  time.Now().UTC().Format(time.RFC3339Nano),
+ 		Payload: map[string]any{
+-			"type":          "notion.page.upsert",
+-			"objectId":      "obj_loop_persist_1",
++			"event_type": "file.updated",
++			"providerObjectId":      "obj_loop_persist_1",
+ 			"path":          "/external/LoopPersist.md",
+ 			"content":       "# echo",
+ 			"origin":        "relayfile",
+@@ -1533,7 +1533,7 @@ func TestGetSyncStatusMarksProviderLaggingFromPendingEnvelope(t *testing.T) {
+ 	_, err := store.IngestEnvelope(WebhookEnvelopeRequest{
+ 		EnvelopeID:    "env_sync_lag_1",
+ 		WorkspaceID:   "ws_sync_lag",
+-		Provider:      "notion",
++		Provider:    "external",
+ 		DeliveryID:    "delivery_sync_lag_1",
+ 		ReceivedAt:    time.Now().UTC().Add(-2 * time.Minute).Format(time.RFC3339Nano),
+ 		Payload:       map[string]any{"type": "sync"},
+@@ -1552,7 +1552,7 @@ func TestGetSyncStatusMarksProviderLaggingFromPendingEnvelope(t *testing.T) {
+ 	}
+ 	var notionStatus *SyncProviderStatus
+ 	for i := range status.Providers {
+-		if status.Providers[i].Provider == "notion" {
++		if status.Providers[i].Provider == "external" {
+ 			notionStatus = &status.Providers[i]
+ 			break
+ 		}
+@@ -1646,7 +1646,7 @@ func TestGetSyncStatusMarksProviderErrorFromWritebackDeadLetter(t *testing.T) {
+ 	}
+ 	waitForOpStatus(t, store, "ws_sync_writeback_error", write.OpID, "dead_lettered")
+ 
+-	status, err := store.GetSyncStatus("ws_sync_writeback_error", "notion")
++	status, err := store.GetSyncStatus("ws_sync_writeback_error", "external")
+ 	if err != nil {
+ 		t.Fatalf("sync status failed: %v", err)
+ 	}
+@@ -1756,7 +1756,7 @@ func TestListSyncStatusesAggregatesWorkspacesAndAppliesProviderFilter(t *testing
+ 	if _, err := store.IngestEnvelope(WebhookEnvelopeRequest{
+ 		EnvelopeID:    "env_sync_list_1",
+ 		WorkspaceID:   "ws_sync_list_1",
+-		Provider:      "notion",
++		Provider:    "external",
+ 		DeliveryID:    "delivery_sync_list_1",
+ 		ReceivedAt:    time.Now().UTC().Add(-2 * time.Minute).Format(time.RFC3339Nano),
+ 		Payload:       map[string]any{"type": "sync"},
+@@ -1876,7 +1876,7 @@ func TestListSyncStatusesIncludesFailureCodesFromDeadLettersAndOps(t *testing.T)
+ 
+ 		var opProvider *SyncProviderStatus
+ 		for i := range opStatus.Providers {
+-			if opStatus.Providers[i].Provider == "notion" {
++			if opStatus.Providers[i].Provider == "external" {
+ 				opProvider = &opStatus.Providers[i]
+ 				break
+ 			}
+@@ -2088,7 +2088,7 @@ func TestListOperationsFiltersByProvider(t *testing.T) {
+ 		}
+ 	}
+ 
+-	notionFeed, err := store.ListOperations("ws_ops_provider", "succeeded", "", "notion", "", 20)
++	notionFeed, err := store.ListOperations("ws_ops_provider", "succeeded", "", "external", "", 20)
+ 	if err != nil {
+ 		t.Fatalf("list notion operations failed: %v", err)
+ 	}
+@@ -2096,7 +2096,7 @@ func TestListOperationsFiltersByProvider(t *testing.T) {
+ 		t.Fatalf("expected notion operations in provider-filtered list")
+ 	}
+ 	for _, item := range notionFeed.Items {
+-		if item.Provider != "notion" {
++		if item.Provider != "external" {
+ 			t.Fatalf("expected only notion provider ops, got %s", item.Provider)
+ 		}
+ 	}
+@@ -2241,7 +2241,7 @@ func TestStoreIngestEnvelopeAndReplayOp(t *testing.T) {
+ 	resp, err := store.IngestEnvelope(WebhookEnvelopeRequest{
+ 		EnvelopeID:    "env_1",
+ 		WorkspaceID:   "ws_env",
+-		Provider:      "notion",
++		Provider:    "external",
+ 		DeliveryID:    "delivery_1",
+ 		ReceivedAt:    receivedAt,
+ 		Payload:       map[string]any{"type": "sync"},
+@@ -2258,7 +2258,7 @@ func TestStoreIngestEnvelopeAndReplayOp(t *testing.T) {
+ 	dup, err := store.IngestEnvelope(WebhookEnvelopeRequest{
+ 		EnvelopeID:    "env_2",
+ 		WorkspaceID:   "ws_env",
+-		Provider:      "notion",
++		Provider:    "external",
+ 		DeliveryID:    "delivery_1",
+ 		ReceivedAt:    receivedAt,
+ 		Payload:       map[string]any{"type": "sync"},
+@@ -2368,12 +2368,12 @@ func TestReplayEnvelopeReprocessesProcessedEnvelope(t *testing.T) {
+ 	_, err := store.IngestEnvelope(WebhookEnvelopeRequest{
+ 		EnvelopeID:  "env_replay_1",
+ 		WorkspaceID: "ws_replay",
+-		Provider:    "notion",
++		Provider:    "external",
+ 		DeliveryID:  "delivery_replay_1",
+ 		ReceivedAt:  receivedAt,
+ 		Payload: map[string]any{
+-			"type":     "notion.page.upsert",
+-			"objectId": "obj_replay_1",
++			"event_type": "file.updated",
++			"providerObjectId": "obj_replay_1",
+ 			"path":     "/external/Replay.md",
+ 			"content":  "# replay",
+ 		},
+@@ -2862,7 +2862,7 @@ func TestReplayEnvelopeForWorkspaceRejectsWorkspaceMismatch(t *testing.T) {
+ 	_, err := store.IngestEnvelope(WebhookEnvelopeRequest{
+ 		EnvelopeID:    "env_ws_scope_1",
+ 		WorkspaceID:   "ws_scope_a",
+-		Provider:      "notion",
++		Provider:    "external",
+ 		DeliveryID:    "delivery_ws_scope_1",
+ 		ReceivedAt:    time.Now().UTC().Format(time.RFC3339),
+ 		Payload:       map[string]any{"type": "sync"},
+@@ -2885,7 +2885,7 @@ func TestReplayEnvelopeForWorkspaceRejectsNonDeadLetterEnvelope(t *testing.T) {
+ 	_, err := store.IngestEnvelope(WebhookEnvelopeRequest{
+ 		EnvelopeID:    "env_ws_scope_2",
+ 		WorkspaceID:   "ws_scope_a",
+-		Provider:      "notion",
++		Provider:    "external",
+ 		DeliveryID:    "delivery_ws_scope_2",
+ 		ReceivedAt:    time.Now().UTC().Format(time.RFC3339),
+ 		Payload:       map[string]any{"type": "sync"},
+@@ -2901,7 +2901,7 @@ func TestReplayEnvelopeForWorkspaceRejectsNonDeadLetterEnvelope(t *testing.T) {
+ 	}
+ }
+ 
+-func TestEnvelopePipelineAppliesNotionUpsertMoveDelete(t *testing.T) {
++func TestEnvelopePipelineAppliesGenericUpsertMoveDelete(t *testing.T) {
+ 	store := NewStore()
+ 	t.Cleanup(store.Close)
+ 	receivedAt := time.Now().UTC().Format(time.RFC3339)
+@@ -2909,15 +2909,15 @@ func TestEnvelopePipelineAppliesNotionUpsertMoveDelete(t *testing.T) {
+ 	_, err := store.IngestEnvelope(WebhookEnvelopeRequest{
+ 		EnvelopeID:  "env_upsert_1",
+ 		WorkspaceID: "ws_pipe",
+-		Provider:    "notion",
++		Provider:    "external",
+ 		DeliveryID:  "delivery_pipe_1",
+ 		ReceivedAt:  receivedAt,
+ 		Payload: map[string]any{
+-			"type":     "notion.page.upsert",
+-			"objectId": "obj_obj_1",
+-			"path":     "/external/Engineering/FromWebhook.md",
+-			"title":    "FromWebhook",
++			"event_type": "file.updated",
++			"path":       "/external/Engineering/FromWebhook.md",
++			"providerObjectId": "obj_obj_1",
+ 			"content":  "# from webhook",
++			"contentType": "text/markdown",
+ 		},
+ 		CorrelationID: "corr_pipe_1",
+ 	})
+@@ -2929,15 +2929,15 @@ func TestEnvelopePipelineAppliesNotionUpsertMoveDelete(t *testing.T) {
+ 	_, err = store.IngestEnvelope(WebhookEnvelopeRequest{
+ 		EnvelopeID:  "env_upsert_2",
+ 		WorkspaceID: "ws_pipe",
+-		Provider:    "notion",
++		Provider:    "external",
+ 		DeliveryID:  "delivery_pipe_2",
+ 		ReceivedAt:  receivedAt,
+ 		Payload: map[string]any{
+-			"type":     "notion.page.upsert",
+-			"objectId": "obj_obj_1",
+-			"path":     "/external/Engineering/Moved.md",
+-			"title":    "Moved",
++			"event_type": "file.updated",
++			"path":       "/external/Engineering/Moved.md",
++			"providerObjectId": "obj_obj_1",
+ 			"content":  "# moved",
++			"contentType": "text/markdown",
+ 		},
+ 		CorrelationID: "corr_pipe_2",
+ 	})
+@@ -2950,12 +2950,13 @@ func TestEnvelopePipelineAppliesNotionUpsertMoveDelete(t *testing.T) {
+ 	_, err = store.IngestEnvelope(WebhookEnvelopeRequest{
+ 		EnvelopeID:  "env_delete_1",
+ 		WorkspaceID: "ws_pipe",
+-		Provider:    "notion",
++		Provider:    "external",
+ 		DeliveryID:  "delivery_pipe_3",
+ 		ReceivedAt:  receivedAt,
+ 		Payload: map[string]any{
+-			"type":     "notion.page.deleted",
+-			"objectId": "obj_obj_1",
++			"event_type": "file.deleted",
++			"path":       "/external/Engineering/Moved.md",
++			"providerObjectId": "obj_obj_1",
+ 		},
+ 		CorrelationID: "corr_pipe_3",
+ 	})
+@@ -2973,14 +2974,15 @@ func TestEnvelopeStalenessSkipsOlderUpsertForSameObject(t *testing.T) {
+ 	_, err := store.IngestEnvelope(WebhookEnvelopeRequest{
+ 		EnvelopeID:  "env_stale_upsert_new",
+ 		WorkspaceID: "ws_stale_upsert",
+-		Provider:    "notion",
++		Provider:    "external",
+ 		DeliveryID:  "delivery_stale_upsert_new",
+ 		ReceivedAt:  now.Format(time.RFC3339Nano),
+ 		Payload: map[string]any{
+-			"type":     "notion.page.upsert",
+-			"objectId": "obj_stale_upsert_1",
+-			"path":     "/external/Stale.md",
+-			"content":  "# newer",
++			"event_type":       "file.updated",
++			"path":             "/external/Stale.md",
++			"providerObjectId": "obj_stale_upsert_1",
++			"content":          "# newer",
++			"contentType":      "text/markdown",
+ 		},
+ 		CorrelationID: "corr_stale_upsert_new",
+ 	})
+@@ -2992,14 +2994,15 @@ func TestEnvelopeStalenessSkipsOlderUpsertForSameObject(t *testing.T) {
+ 	_, err = store.IngestEnvelope(WebhookEnvelopeRequest{
+ 		EnvelopeID:  "env_stale_upsert_old",
+ 		WorkspaceID: "ws_stale_upsert",
+-		Provider:    "notion",
++		Provider:    "external",
+ 		DeliveryID:  "delivery_stale_upsert_old",
+ 		ReceivedAt:  now.Add(-1 * time.Minute).Format(time.RFC3339Nano),
+ 		Payload: map[string]any{
+-			"type":     "notion.page.upsert",
+-			"objectId": "obj_stale_upsert_1",
+-			"path":     "/external/Stale.md",
+-			"content":  "# older",
++			"event_type":       "file.updated",
++			"path":             "/external/Stale.md",
++			"providerObjectId": "obj_stale_upsert_1",
++			"content":          "# older",
++			"contentType":      "text/markdown",
+ 		},
+ 		CorrelationID: "corr_stale_upsert_old",
+ 	})
+@@ -3035,7 +3038,7 @@ func TestEnvelopeStalenessSkipsOlderUpsertForSameObject(t *testing.T) {
+ 			if status.StaleTotal < 1 {
+ 				t.Fatalf("expected stale total >= 1, got %d", status.StaleTotal)
+ 			}
+-			notionIngress, ok := status.IngressByProvider["notion"]
++			notionIngress, ok := status.IngressByProvider["external"]
+ 			if !ok || notionIngress.StaleTotal < 1 {
+ 				t.Fatalf("expected notion stale breakdown, got %+v", status.IngressByProvider)
+ 			}
+@@ -3054,14 +3057,15 @@ func TestEnvelopeStalenessSkipsOlderDeleteForSameObject(t *testing.T) {
+ 	_, err := store.IngestEnvelope(WebhookEnvelopeRequest{
+ 		EnvelopeID:  "env_stale_delete_new",
+ 		WorkspaceID: "ws_stale_delete",
+-		Provider:    "notion",
++		Provider:    "external",
+ 		DeliveryID:  "delivery_stale_delete_new",
+ 		ReceivedAt:  now.Format(time.RFC3339Nano),
+ 		Payload: map[string]any{
+-			"type":     "notion.page.upsert",
+-			"objectId": "obj_stale_delete_1",
+-			"path":     "/external/StaleDelete.md",
+-			"content":  "# alive",
++			"event_type":       "file.updated",
++			"path":             "/external/StaleDelete.md",
++			"providerObjectId": "obj_stale_delete_1",
++			"content":          "# alive",
++			"contentType":      "text/markdown",
+ 		},
+ 		CorrelationID: "corr_stale_delete_new",
+ 	})
+@@ -3073,12 +3077,13 @@ func TestEnvelopeStalenessSkipsOlderDeleteForSameObject(t *testing.T) {
+ 	_, err = store.IngestEnvelope(WebhookEnvelopeRequest{
+ 		EnvelopeID:  "env_stale_delete_old",
+ 		WorkspaceID: "ws_stale_delete",
+-		Provider:    "notion",
++		Provider:    "external",
+ 		DeliveryID:  "delivery_stale_delete_old",
+ 		ReceivedAt:  now.Add(-1 * time.Minute).Format(time.RFC3339Nano),
+ 		Payload: map[string]any{
+-			"type":     "notion.page.deleted",
+-			"objectId": "obj_stale_delete_1",
++			"event_type":       "file.deleted",
++			"path":             "/external/StaleDelete.md",
++			"providerObjectId": "obj_stale_delete_1",
+ 		},
+ 		CorrelationID: "corr_stale_delete_old",
+ 	})
+@@ -3121,14 +3126,15 @@ func TestEnvelopeDuplicateDeliveryDoesNotDoubleApply(t *testing.T) {
+ 	envelope := WebhookEnvelopeRequest{
+ 		EnvelopeID:  "env_dup_1",
+ 		WorkspaceID: "ws_dup",
+-		Provider:    "notion",
++		Provider:    "external",
+ 		DeliveryID:  "delivery_dup_1",
+ 		ReceivedAt:  receivedAt,
+ 		Payload: map[string]any{
+-			"type":     "notion.page.upsert",
+-			"objectId": "obj_dup",
+-			"path":     "/external/Dup.md",
+-			"content":  "# dup",
++			"event_type":       "file.updated",
++			"path":             "/external/Dup.md",
++			"providerObjectId": "obj_dup",
++			"content":          "# dup",
++			"contentType":      "text/markdown",
+ 		},
+ 		CorrelationID: "corr_dup_1",
+ 	}
+@@ -3173,14 +3179,15 @@ func TestEnvelopeCoalescingMergesLatestPayloadWithinWindow(t *testing.T) {
+ 	_, err := writerStore.IngestEnvelope(WebhookEnvelopeRequest{
+ 		EnvelopeID:  "env_coalesce_1",
+ 		WorkspaceID: "ws_coalesce",
+-		Provider:    "notion",
++		Provider:    "external",
+ 		DeliveryID:  "delivery_coalesce_1",
+ 		ReceivedAt:  receivedAt.Format(time.RFC3339Nano),
+ 		Payload: map[string]any{
+-			"type":     "notion.page.upsert",
+-			"objectId": "obj_coalesce_1",
+-			"path":     "/external/Coalesced.md",
+-			"content":  "# first",
++			"event_type":       "file.updated",
++			"path":             "/external/Coalesced.md",
++			"providerObjectId": "obj_coalesce_1",
++			"content":          "# first",
++			"contentType":      "text/markdown",
+ 		},
+ 		CorrelationID: "corr_coalesce_1",
+ 	})
+@@ -3191,14 +3198,15 @@ func TestEnvelopeCoalescingMergesLatestPayloadWithinWindow(t *testing.T) {
+ 	_, err = writerStore.IngestEnvelope(WebhookEnvelopeRequest{
+ 		EnvelopeID:  "env_coalesce_2",
+ 		WorkspaceID: "ws_coalesce",
+-		Provider:    "notion",
++		Provider:    "external",
+ 		DeliveryID:  "delivery_coalesce_2",
+ 		ReceivedAt:  receivedAt.Add(500 * time.Millisecond).Format(time.RFC3339Nano),
+ 		Payload: map[string]any{
+-			"type":     "notion.page.upsert",
+-			"objectId": "obj_coalesce_1",
+-			"path":     "/external/Coalesced.md",
+-			"content":  "# second",
++			"event_type":       "file.updated",
++			"path":             "/external/Coalesced.md",
++			"providerObjectId": "obj_coalesce_1",
++			"content":          "# second",
++			"contentType":      "text/markdown",
+ 		},
+ 		CorrelationID: "corr_coalesce_2",
+ 	})
+@@ -3219,9 +3227,9 @@ func TestEnvelopeCoalescingMergesLatestPayloadWithinWindow(t *testing.T) {
+ 	if status.CoalesceRate != 0.5 {
+ 		t.Fatalf("expected coalesce rate 0.5, got %f", status.CoalesceRate)
+ 	}
+-	notionIngress, ok := status.IngressByProvider["notion"]
+-	if !ok || notionIngress.AcceptedTotal != 1 || notionIngress.CoalescedTotal != 1 || notionIngress.PendingTotal != 1 {
+-		t.Fatalf("expected notion ingress coalescing breakdown, got %+v", status.IngressByProvider)
++	externalIngress, ok := status.IngressByProvider["external"]
++	if !ok || externalIngress.AcceptedTotal != 1 || externalIngress.CoalescedTotal != 1 || externalIngress.PendingTotal != 1 {
++		t.Fatalf("expected external ingress coalescing breakdown, got %+v", status.IngressByProvider)
+ 	}
+ 
+ 	writerStore.Close()
+@@ -3243,14 +3251,15 @@ func TestEnvelopeCoalescingRespectsWindow(t *testing.T) {
+ 	_, err := store.IngestEnvelope(WebhookEnvelopeRequest{
+ 		EnvelopeID:  "env_coalesce_window_1",
+ 		WorkspaceID: "ws_coalesce_window",
+-		Provider:    "notion",
++		Provider:    "external",
+ 		DeliveryID:  "delivery_coalesce_window_1",
+ 		ReceivedAt:  receivedAt.Format(time.RFC3339Nano),
+ 		Payload: map[string]any{
+-			"type":     "notion.page.upsert",
+-			"objectId": "obj_coalesce_window_1",
+-			"path":     "/external/Window.md",
+-			"content":  "# first",
++			"event_type":       "file.updated",
++			"path":             "/external/Window.md",
++			"providerObjectId": "obj_coalesce_window_1",
++			"content":          "# first",
++			"contentType":      "text/markdown",
+ 		},
+ 		CorrelationID: "corr_coalesce_window_1",
+ 	})
+@@ -3261,14 +3270,15 @@ func TestEnvelopeCoalescingRespectsWindow(t *testing.T) {
+ 	_, err = store.IngestEnvelope(WebhookEnvelopeRequest{
+ 		EnvelopeID:  "env_coalesce_window_2",
+ 		WorkspaceID: "ws_coalesce_window",
+-		Provider:    "notion",
++		Provider:    "external",
+ 		DeliveryID:  "delivery_coalesce_window_2",
+ 		ReceivedAt:  receivedAt.Add(1 * time.Second).Format(time.RFC3339Nano),
+ 		Payload: map[string]any{
+-			"type":     "notion.page.upsert",
+-			"objectId": "obj_coalesce_window_1",
+-			"path":     "/external/Window.md",
+-			"content":  "# second",
++			"event_type":       "file.updated",
++			"path":             "/external/Window.md",
++			"providerObjectId": "obj_coalesce_window_1",
++			"content":          "# second",
++			"contentType":      "text/markdown",
+ 		},
+ 		CorrelationID: "corr_coalesce_window_2",
+ 	})
+@@ -3299,12 +3309,12 @@ func TestWebhookBurstCoalescingKeepsSinglePendingEnvelope(t *testing.T) {
+ 		_, err := store.IngestEnvelope(WebhookEnvelopeRequest{
+ 			EnvelopeID:  fmt.Sprintf("env_burst_%d", i),
+ 			WorkspaceID: "ws_burst",
+-			Provider:    "notion",
++			Provider:    "external",
+ 			DeliveryID:  fmt.Sprintf("delivery_burst_%d", i),
+ 			ReceivedAt:  receivedAt.Add(time.Duration(i) * 10 * time.Millisecond).Format(time.RFC3339Nano),
+ 			Payload: map[string]any{
+-				"type":     "notion.page.upsert",
+-				"objectId": "obj_burst_1",
++				"event_type": "file.updated",
++				"providerObjectId": "obj_burst_1",
+ 				"path":     "/external/Burst.md",
+ 				"content":  fmt.Sprintf("# burst %d", i),
+ 			},
+@@ -3328,7 +3338,7 @@ func TestWebhookBurstCoalescingKeepsSinglePendingEnvelope(t *testing.T) {
+ 	if status.CoalesceRate < 0.99 {
+ 		t.Fatalf("expected high coalesce rate for burst coalescing, got %f", status.CoalesceRate)
+ 	}
+-	notionIngress, ok := status.IngressByProvider["notion"]
++	notionIngress, ok := status.IngressByProvider["external"]
+ 	if !ok || notionIngress.AcceptedTotal != 1 || notionIngress.CoalescedTotal != burstSize-1 || notionIngress.PendingTotal != 1 {
+ 		t.Fatalf("unexpected provider burst coalescing breakdown: %+v", status.IngressByProvider)
+ 	}
+@@ -3343,12 +3353,12 @@ func TestRebuildCoalesceIndexPrefersLatestPendingEnvelope(t *testing.T) {
+ 	oldReq := WebhookEnvelopeRequest{
+ 		EnvelopeID:  "env_rebuild_old",
+ 		WorkspaceID: "ws_rebuild",
+-		Provider:    "notion",
++		Provider:    "external",
+ 		DeliveryID:  "delivery_rebuild_old",
+ 		ReceivedAt:  "2026-01-01T10:00:00Z",
+ 		Payload: map[string]any{
+-			"type":     "notion.page.upsert",
+-			"objectId": "obj_rebuild_1",
++			"event_type": "file.updated",
++			"providerObjectId": "obj_rebuild_1",
+ 			"path":     "/external/Rebuild.md",
+ 			"content":  "# old",
+ 		},
+@@ -3356,12 +3366,12 @@ func TestRebuildCoalesceIndexPrefersLatestPendingEnvelope(t *testing.T) {
+ 	newReq := WebhookEnvelopeRequest{
+ 		EnvelopeID:  "env_rebuild_new",
+ 		WorkspaceID: "ws_rebuild",
+-		Provider:    "notion",
++		Provider:    "external",
+ 		DeliveryID:  "delivery_rebuild_new",
+ 		ReceivedAt:  "2026-01-01T10:00:01Z",
+ 		Payload: map[string]any{
+-			"type":     "notion.page.upsert",
+-			"objectId": "obj_rebuild_1",
++			"event_type": "file.updated",
++			"providerObjectId": "obj_rebuild_1",
+ 			"path":     "/external/Rebuild.md",
+ 			"content":  "# new",
+ 		},
+@@ -3398,7 +3408,7 @@ func TestProcessedEnvelopeRetentionPrunesOldestProcessed(t *testing.T) {
+ 		_, err := store.IngestEnvelope(WebhookEnvelopeRequest{
+ 			EnvelopeID:    fmt.Sprintf("env_retention_%d", i),
+ 			WorkspaceID:   "ws_retention",
+-			Provider:      "notion",
++			Provider:    "external",
+ 			DeliveryID:    fmt.Sprintf("delivery_retention_%d", i),
+ 			ReceivedAt:    time.Now().UTC().Add(time.Duration(i) * time.Second).Format(time.RFC3339Nano),
+ 			Payload:       map[string]any{"type": "sync"},
+@@ -3467,7 +3477,7 @@ func TestEnvelopeRetentionDoesNotPruneDeadLetters(t *testing.T) {
+ 	_, err = store.IngestEnvelope(WebhookEnvelopeRequest{
+ 		EnvelopeID:    "env_retention_ok_1",
+ 		WorkspaceID:   "ws_retention_dead",
+-		Provider:      "notion",
++		Provider:    "external",
+ 		DeliveryID:    "delivery_retention_ok_1",
+ 		ReceivedAt:    time.Now().UTC().Add(time.Second).Format(time.RFC3339Nano),
+ 		Payload:       map[string]any{"type": "sync"},
+@@ -3502,7 +3512,7 @@ func TestEnvelopeQueueBackpressureAndIngressStatus(t *testing.T) {
+ 	_, err := store.IngestEnvelope(WebhookEnvelopeRequest{
+ 		EnvelopeID:    "env_backpressure_1",
+ 		WorkspaceID:   "ws_backpressure",
+-		Provider:      "notion",
++		Provider:    "external",
+ 		DeliveryID:    "delivery_backpressure_1",
+ 		ReceivedAt:    receivedAt,
+ 		Payload:       map[string]any{"type": "sync"},
+@@ -3515,7 +3525,7 @@ func TestEnvelopeQueueBackpressureAndIngressStatus(t *testing.T) {
+ 	_, err = store.IngestEnvelope(WebhookEnvelopeRequest{
+ 		EnvelopeID:    "env_backpressure_2",
+ 		WorkspaceID:   "ws_backpressure",
+-		Provider:      "notion",
++		Provider:    "external",
+ 		DeliveryID:    "delivery_backpressure_2",
+ 		ReceivedAt:    receivedAt,
+ 		Payload:       map[string]any{"type": "sync"},
+@@ -3544,7 +3554,7 @@ func TestEnvelopeQueueBackpressureAndIngressStatus(t *testing.T) {
+ 	if status.DedupeRate != 0 || status.CoalesceRate != 0 {
+ 		t.Fatalf("expected zero dedupe/coalesce rates, got dedupe=%f coalesce=%f", status.DedupeRate, status.CoalesceRate)
+ 	}
+-	notionIngress, ok := status.IngressByProvider["notion"]
++	notionIngress, ok := status.IngressByProvider["external"]
+ 	if !ok || notionIngress.AcceptedTotal != 1 || notionIngress.DroppedTotal != 1 || notionIngress.PendingTotal != 1 {
+ 		t.Fatalf("expected notion ingress backpressure breakdown, got %+v", status.IngressByProvider)
+ 	}
+@@ -3561,7 +3571,7 @@ func TestGetIngressStatusForProviderFiltersWorkspaceMetrics(t *testing.T) {
+ 	_, err := store.IngestEnvelope(WebhookEnvelopeRequest{
+ 		EnvelopeID:    "env_ingress_provider_1",
+ 		WorkspaceID:   "ws_ingress_provider",
+-		Provider:      "notion",
++		Provider:    "external",
+ 		DeliveryID:    "delivery_ingress_provider_1",
+ 		ReceivedAt:    receivedAt,
+ 		Payload:       map[string]any{"type": "sync"},
+@@ -3618,7 +3628,7 @@ func TestListIngressStatusesAggregatesWorkspaces(t *testing.T) {
+ 	_, err := store.IngestEnvelope(WebhookEnvelopeRequest{
+ 		EnvelopeID:    "env_ingress_list_1",
+ 		WorkspaceID:   "ws_ingress_list_1",
+-		Provider:      "notion",
++		Provider:    "external",
+ 		DeliveryID:    "delivery_ingress_list_1",
+ 		ReceivedAt:    receivedAt,
+ 		Payload:       map[string]any{"type": "sync"},
+@@ -3671,7 +3681,7 @@ func TestEnvelopeDedupedIngressStatusCounter(t *testing.T) {
+ 	_, err := store.IngestEnvelope(WebhookEnvelopeRequest{
+ 		EnvelopeID:    "env_dedupe_1",
+ 		WorkspaceID:   "ws_dedupe_status",
+-		Provider:      "notion",
++		Provider:    "external",
+ 		DeliveryID:    "delivery_dedupe_1",
+ 		ReceivedAt:    receivedAt,
+ 		Payload:       map[string]any{"type": "sync"},
+@@ -3684,7 +3694,7 @@ func TestEnvelopeDedupedIngressStatusCounter(t *testing.T) {
+ 	_, err = store.IngestEnvelope(WebhookEnvelopeRequest{
+ 		EnvelopeID:    "env_dedupe_2",
+ 		WorkspaceID:   "ws_dedupe_status",
+-		Provider:      "notion",
++		Provider:    "external",
+ 		DeliveryID:    "delivery_dedupe_1",
+ 		ReceivedAt:    receivedAt,
+ 		Payload:       map[string]any{"type": "sync"},
+@@ -3710,7 +3720,7 @@ func TestEnvelopeDedupedIngressStatusCounter(t *testing.T) {
+ 	if status.CoalesceRate != 0 {
+ 		t.Fatalf("expected coalesce rate 0, got %f", status.CoalesceRate)
+ 	}
+-	notionIngress, ok := status.IngressByProvider["notion"]
++	notionIngress, ok := status.IngressByProvider["external"]
+ 	if !ok || notionIngress.AcceptedTotal != 1 || notionIngress.DedupedTotal != 1 || notionIngress.PendingTotal != 1 {
+ 		t.Fatalf("expected notion ingress dedupe breakdown, got %+v", status.IngressByProvider)
+ 	}
+@@ -3729,7 +3739,7 @@ func TestIngressStatusReportsOldestPendingAge(t *testing.T) {
+ 	_, err := store.IngestEnvelope(WebhookEnvelopeRequest{
+ 		EnvelopeID:    "env_age_1",
+ 		WorkspaceID:   "ws_age",
+-		Provider:      "notion",
++		Provider:    "external",
+ 		DeliveryID:    "delivery_age_1",
+ 		ReceivedAt:    time.Now().UTC().Add(-2 * time.Minute).Format(time.RFC3339),
+ 		Payload:       map[string]any{"type": "sync"},
+@@ -3746,7 +3756,7 @@ func TestIngressStatusReportsOldestPendingAge(t *testing.T) {
+ 	if status.OldestPendingAgeSeconds < 100 {
+ 		t.Fatalf("expected oldest pending age >=100s, got %d", status.OldestPendingAgeSeconds)
+ 	}
+-	notionIngress, ok := status.IngressByProvider["notion"]
++	notionIngress, ok := status.IngressByProvider["external"]
+ 	if !ok || notionIngress.PendingTotal != 1 {
+ 		t.Fatalf("expected notion pending backlog breakdown, got %+v", status.IngressByProvider)
+ 	}
+@@ -3937,12 +3947,12 @@ func TestPendingEnvelopeIsRecoveredAfterRestart(t *testing.T) {
+ 	_, err := writerStore.IngestEnvelope(WebhookEnvelopeRequest{
+ 		EnvelopeID:  "env_recovery_1",
+ 		WorkspaceID: "ws_recovery",
+-		Provider:    "notion",
++		Provider:    "external",
+ 		DeliveryID:  "delivery_recovery_1",
+ 		ReceivedAt:  receivedAt,
+ 		Payload: map[string]any{
+-			"type":     "notion.page.upsert",
+-			"objectId": "obj_recovery_1",
++			"event_type": "file.updated",
++			"providerObjectId": "obj_recovery_1",
+ 			"path":     "/external/Recovered.md",
+ 			"content":  "# recovered",
+ 		},
+@@ -4000,7 +4010,7 @@ func TestAdapterWritebackHandlerIsUsedWhenLegacyProviderWriteNotConfigured(t *te
+ 	store := NewStoreWithOptions(StoreOptions{
+ 		Adapters: []ProviderAdapter{
+ 			testAdapter{
+-				provider: "notion",
++				provider: "external",
+ 				actions:  []ApplyAction{{Type: ActionIgnored}},
+ 				writeback: func(action WritebackAction) error {
+ 					actions <- action
+@@ -4058,12 +4068,12 @@ func TestLoopSuppressionSuppressesProviderEchoWithinWindow(t *testing.T) {
+ 	_, err = store.IngestEnvelope(WebhookEnvelopeRequest{
+ 		EnvelopeID:  "env_loop_echo_1",
+ 		WorkspaceID: "ws_loop",
+-		Provider:    "notion",
++		Provider:    "external",
+ 		DeliveryID:  "delivery_loop_echo_1",
+ 		ReceivedAt:  time.Now().UTC().Format(time.RFC3339Nano),
+ 		Payload: map[string]any{
+-			"type":          "notion.page.upsert",
+-			"objectId":      "obj_loop_1",
++			"event_type": "file.updated",
++			"providerObjectId":      "obj_loop_1",
+ 			"path":          "/external/Loop.md",
+ 			"content":       "# echoed",
+ 			"origin":        "relayfile",
+@@ -4104,7 +4114,7 @@ func TestLoopSuppressionSuppressesProviderEchoWithinWindow(t *testing.T) {
+ 			if status.SuppressedTotal < 1 {
+ 				t.Fatalf("expected suppressed total >= 1, got %d", status.SuppressedTotal)
+ 			}
+-			notionIngress, ok := status.IngressByProvider["notion"]
++			notionIngress, ok := status.IngressByProvider["external"]
+ 			if !ok || notionIngress.SuppressedTotal < 1 {
+ 				t.Fatalf("expected notion suppression breakdown, got %+v", status.IngressByProvider)
+ 			}
+@@ -4139,12 +4149,12 @@ func TestLoopSuppressionWindowExpiryAllowsProviderApply(t *testing.T) {
+ 	_, err = store.IngestEnvelope(WebhookEnvelopeRequest{
+ 		EnvelopeID:  "env_loop_expiry_1",
+ 		WorkspaceID: "ws_loop_expiry",
+-		Provider:    "notion",
++		Provider:    "external",
+ 		DeliveryID:  "delivery_loop_expiry_1",
+ 		ReceivedAt:  time.Now().UTC().Format(time.RFC3339Nano),
+ 		Payload: map[string]any{
+-			"type":          "notion.page.upsert",
+-			"objectId":      "obj_loop_expiry_1",
++			"event_type": "file.updated",
++			"providerObjectId":      "obj_loop_expiry_1",
+ 			"path":          "/external/LoopExpiry.md",
+ 			"content":       "# echoed",
+ 			"origin":        "relayfile",

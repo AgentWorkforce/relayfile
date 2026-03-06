@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -71,102 +70,6 @@ func TestEnvHelpersUseFallbackWhenUnset(t *testing.T) {
 	}
 	if got := durationEnv("RELAYFILE_TEST_DURATION_UNSET", 3*time.Second); got != 3*time.Second {
 		t.Fatalf("expected fallback 3s, got %s", got)
-	}
-}
-
-func TestBuildNotionTokenProviderStatic(t *testing.T) {
-	provider := buildNotionTokenProvider("static_token", "")
-	if provider == nil {
-		t.Fatalf("expected static token provider")
-	}
-	token, err := provider(context.Background())
-	if err != nil {
-		t.Fatalf("static token provider returned error: %v", err)
-	}
-	if token != "static_token" {
-		t.Fatalf("expected static_token, got %q", token)
-	}
-}
-
-func TestBuildNotionTokenProviderFile(t *testing.T) {
-	tokenPath := filepath.Join(t.TempDir(), "notion-token.txt")
-	if err := os.WriteFile(tokenPath, []byte("token_from_file\n"), 0o644); err != nil {
-		t.Fatalf("write token file failed: %v", err)
-	}
-	provider := buildNotionTokenProvider("", tokenPath)
-	if provider == nil {
-		t.Fatalf("expected file token provider")
-	}
-	token, err := provider(context.Background())
-	if err != nil {
-		t.Fatalf("file token provider returned error: %v", err)
-	}
-	if token != "token_from_file" {
-		t.Fatalf("expected token_from_file, got %q", token)
-	}
-}
-
-func TestBuildNotionTokenProviderFileCachesTokenWithinTTL(t *testing.T) {
-	tokenPath := filepath.Join(t.TempDir(), "notion-token-cache.txt")
-	if err := os.WriteFile(tokenPath, []byte("token_cached_1\n"), 0o644); err != nil {
-		t.Fatalf("write token file failed: %v", err)
-	}
-	provider := buildNotionTokenProviderWithCache("", tokenPath, time.Hour)
-	if provider == nil {
-		t.Fatalf("expected file token provider")
-	}
-	first, err := provider(context.Background())
-	if err != nil {
-		t.Fatalf("first provider call returned error: %v", err)
-	}
-	if first != "token_cached_1" {
-		t.Fatalf("expected token_cached_1, got %q", first)
-	}
-	if err := os.WriteFile(tokenPath, []byte("token_cached_2\n"), 0o644); err != nil {
-		t.Fatalf("overwrite token file failed: %v", err)
-	}
-	second, err := provider(context.Background())
-	if err != nil {
-		t.Fatalf("second provider call returned error: %v", err)
-	}
-	if second != "token_cached_1" {
-		t.Fatalf("expected cached token token_cached_1, got %q", second)
-	}
-}
-
-func TestBuildNotionTokenProviderFileRefreshesAfterTTL(t *testing.T) {
-	tokenPath := filepath.Join(t.TempDir(), "notion-token-refresh.txt")
-	if err := os.WriteFile(tokenPath, []byte("token_refresh_1\n"), 0o644); err != nil {
-		t.Fatalf("write token file failed: %v", err)
-	}
-	provider := buildNotionTokenProviderWithCache("", tokenPath, 15*time.Millisecond)
-	if provider == nil {
-		t.Fatalf("expected file token provider")
-	}
-	first, err := provider(context.Background())
-	if err != nil {
-		t.Fatalf("first provider call returned error: %v", err)
-	}
-	if first != "token_refresh_1" {
-		t.Fatalf("expected token_refresh_1, got %q", first)
-	}
-	if err := os.WriteFile(tokenPath, []byte("token_refresh_2\n"), 0o644); err != nil {
-		t.Fatalf("overwrite token file failed: %v", err)
-	}
-	time.Sleep(30 * time.Millisecond)
-	second, err := provider(context.Background())
-	if err != nil {
-		t.Fatalf("second provider call returned error: %v", err)
-	}
-	if second != "token_refresh_2" {
-		t.Fatalf("expected refreshed token token_refresh_2, got %q", second)
-	}
-}
-
-func TestBuildNotionTokenProviderUnset(t *testing.T) {
-	provider := buildNotionTokenProvider("", "")
-	if provider != nil {
-		t.Fatalf("expected nil provider when no token source configured")
 	}
 }
 

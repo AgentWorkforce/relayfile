@@ -92,7 +92,7 @@ set -a; source "${ENV_FILE}"; set +a
 
 RELAYFILE_PORT="${RELAYFILE_PORT:-8080}"
 RELAYFILE_WORKSPACE="${RELAYFILE_WORKSPACE:-ws_live}"
-RELAYFILE_REMOTE_PATH="${RELAYFILE_REMOTE_PATH:-/notion}"
+RELAYFILE_REMOTE_PATH="${RELAYFILE_REMOTE_PATH:-/}"
 RELAYFILE_JWT_SECRET="${RELAYFILE_JWT_SECRET:-dev-secret}"
 RELAYFILE_INTERNAL_HMAC_SECRET="${RELAYFILE_INTERNAL_HMAC_SECRET:-dev-internal-secret}"
 
@@ -121,13 +121,8 @@ compose() {
   env RELAYFILE_TOKEN="${RELAYFILE_TOKEN}" docker compose --env-file "${ENV_FILE}" "$@"
 }
 
-if [[ -z "${RELAYFILE_NOTION_TOKEN:-}" ]]; then
-  echo "[warn] RELAYFILE_NOTION_TOKEN is unset; Notion writeback calls are not enabled."
-fi
-if [[ -n "${RELAYFILE_NOTION_TOKEN:-}" && -z "${RELAYFILE_NOTION_BASE_URL:-}" ]]; then
-  echo "[warn] RELAYFILE_NOTION_BASE_URL is unset; writeback defaults to https://api.notion.com with relay-specific paths (/v1/notion/pages/*)."
-  echo "[warn] Use your Notion bridge/proxy base URL if you expect real outbound writeback success."
-fi
+echo "[info] Provider writeback is handled externally via the generic webhook API and writeback queue."
+echo "[info] External services should poll /v1/workspaces/{ws}/writeback/pending and acknowledge via /v1/workspaces/{ws}/writeback/{id}/ack"
 
 echo "[step] starting compose stack"
 if [[ "${SKIP_BUILD}" -eq 1 ]]; then

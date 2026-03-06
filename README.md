@@ -20,6 +20,10 @@ Queue-first virtual filesystem-over-REST that ingests noisy external webhooks, p
   - `DELETE /v1/workspaces/{workspaceId}/fs/file`
   - `GET /v1/workspaces/{workspaceId}/fs/events`
   - `GET /v1/workspaces/{workspaceId}/fs/query` (structured metadata filters)
+- Webhook Ingestion (Provider-Agnostic):
+  - `POST /v1/workspaces/{workspaceId}/webhooks/ingest` (accept webhooks from any provider)
+  - `GET /v1/workspaces/{workspaceId}/writeback/pending` (list pending writeback items)
+  - `POST /v1/workspaces/{workspaceId}/writeback/{id}/ack` (acknowledge processed writeback)
 - Operations:
   - `GET /v1/workspaces/{workspaceId}/ops`
   - `GET /v1/workspaces/{workspaceId}/ops/{opId}`
@@ -70,7 +74,7 @@ TOKEN="$(./scripts/generate-dev-token.sh ws_live)"
 curl -sS \
   -H "Authorization: Bearer ${TOKEN}" \
   -H "X-Correlation-Id: corr_query_$(date +%s)" \
-  "http://127.0.0.1:8080/v1/workspaces/ws_live/fs/query?path=/notion&property.topic=investments&relation=db_investments&permission=scope:fs:read&limit=20" | jq .
+  "http://127.0.0.1:8080/v1/workspaces/ws_live/fs/query?path=/documents&property.topic=investments&relation=db_investments&permission=scope:fs:read&limit=20" | jq .
 ```
 
 ## Local run
@@ -145,7 +149,6 @@ Bring up Postgres + RelayFile + continuous mount sync (shared local mirror in `.
 
 ```bash
 cp compose.env.example .env
-# set RELAYFILE_NOTION_TOKEN in .env for real Notion writeback
 docker compose up --build -d
 docker compose logs -f relayfile mountsync
 ```
@@ -167,24 +170,33 @@ If you change `RELAYFILE_WORKSPACE` or `RELAYFILE_JWT_SECRET` in `.env`, generat
 Send a live internal webhook envelope to materialize content into the mounted virtual filesystem:
 
 ```bash
-./scripts/send-internal-envelope.sh /notion/AgentGuide.md \"# agent walkthrough\"
+./scripts/send-internal-envelope.sh /docs/guide.md \"# agent guide\"
 ```
 
-Import real Notion pages into RelayFile for local virtual-FS testing (without a Notion bridge service):
+Submit a webhook from any provider via the generic ingestion API:
 
 ```bash
-# uses RELAYFILE_NOTION_TOKEN from .env
-./scripts/import-notion-pages.sh --database-id <notion_database_id> --max-pages 20
+TOKEN="$(./scripts/generate-dev-token.sh ws_live)"
+curl -X POST "http://127.0.0.1:8080/v1/workspaces/ws_live/webhooks/ingest" \
+  -H "Authorization: Bearer ${TOKEN}" \
+  -H "X-Correlation-Id: webhook_test_1" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "provider": "salesforce",
+    "event_type": "file.updated",
+    "path": "/salesforce/Account_123",
+    "data": {
+      "content": "Account details",
+      "contentType": "text/plain"
+    },
+    "delivery_id": "sf_evt_123"
+  }'
 ```
 
-Search mode (if you don't want a fixed database id):
-
-```bash
-./scripts/import-notion-pages.sh --query \"project docs\" --max-pages 20
-```
-
-This importer reads from Notion API and emits signed internal envelopes to RelayFile so pages appear in `./.livefs`.
-It is intended for local testing only.
+Provider integration is handled externally. External services can:
+1. Submit webhooks via the generic ingestion API
+2. Poll the writeback queue for pending items
+3. Acknowledge writebacks after processing
 
 Run fully automated live E2E (stack up, ingress seed, agent traverse/edit, ops + backend verification):
 
@@ -196,8 +208,10 @@ Run your agent against `./.livefs` to traverse/edit files.
 
 Notes:
 
-- `RELAYFILE_NOTION_TOKEN` is used for outbound writeback calls to Notion.
-- Inbound file materialization still requires webhook envelopes (from your upstream integration or `scripts/send-internal-envelope.sh`).
+- Provider integration is handled externally via the generic webhook API.
+- Inbound file materialization requires webhook envelopes (from your upstream integration or `scripts/send-internal-envelope.sh`).
+- Use the `/v1/workspaces/{workspaceId}/writeback/pending` endpoint to retrieve pending writeback items.
+- Use the `/v1/workspaces/{workspaceId}/writeback/{id}/ack` endpoint to acknowledge processed writebacks.
 
 Useful env vars:
 
@@ -223,18 +237,6 @@ Useful env vars:
 - `RELAYFILE_SUPPRESSION_WINDOW`
 - `RELAYFILE_MAX_ENVELOPE_ATTEMPTS`
 - `RELAYFILE_MAX_WRITEBACK_ATTEMPTS`
-
-Optional Notion writeback integration env vars:
-
-- `RELAYFILE_NOTION_TOKEN`
-- `RELAYFILE_NOTION_TOKEN_FILE`
-- `RELAYFILE_NOTION_TOKEN_CACHE_TTL`
-- `RELAYFILE_NOTION_BASE_URL`
-- `RELAYFILE_NOTION_API_VERSION`
-- `RELAYFILE_NOTION_USER_AGENT`
-- `RELAYFILE_NOTION_MAX_RETRIES`
-- `RELAYFILE_NOTION_RETRY_BASE_DELAY`
-- `RELAYFILE_NOTION_RETRY_MAX_DELAY`
 
 Mount client env vars:
 
@@ -266,7 +268,7 @@ Run once:
 go run ./cmd/relayfile-mount --once \
   --base-url http://127.0.0.1:8080 \
   --workspace ws_123 \
-  --remote-path /notion \
+  --remote-path /documents \
   --local-dir ./mount \
   --token "$RELAYFILE_TOKEN"
 ```
@@ -277,7 +279,7 @@ Run continuously:
 go run ./cmd/relayfile-mount \
   --base-url http://127.0.0.1:8080 \
   --workspace ws_123 \
-  --remote-path /notion \
+  --remote-path /documents \
   --local-dir ./mount \
   --token "$RELAYFILE_TOKEN" \
   --interval 2s
