@@ -504,15 +504,8 @@ describe("RelayFileClient — new webhook/writeback methods", () => {
     const f = mockFetch(payload);
     const client = makeClient(f);
 
-    // The method should exist on the client
-    const ingestWebhook = (client as any).ingestWebhook?.bind(client);
-    if (!ingestWebhook) {
-      // Method not yet implemented — skip with a note
-      console.log("SKIP: ingestWebhook not yet implemented");
-      return;
-    }
-
-    const res = await ingestWebhook("ws_acme", {
+    const res = await client.ingestWebhook({
+      workspaceId: "ws_acme",
       provider: "zendesk",
       event_type: "file.updated",
       path: "/zendesk/tickets/48291.json",
@@ -530,6 +523,27 @@ describe("RelayFileClient — new webhook/writeback methods", () => {
     expect(body.path).toBe("/zendesk/tickets/48291.json");
   });
 
+  it("ingestWebhook sends optional headers and timestamp", async () => {
+    const payload: QueuedResponse = { status: "queued", id: "env_def" };
+    const f = mockFetch(payload);
+    const client = makeClient(f);
+
+    await client.ingestWebhook({
+      workspaceId: "ws_acme",
+      provider: "github",
+      event_type: "file.created",
+      path: "/github/repos/acme/api/issues/42.json",
+      data: { number: 42 },
+      timestamp: "2026-03-14T12:00:00Z",
+      headers: { "X-GitHub-Event": "issues" },
+    });
+    const body = JSON.parse(
+      (f.mock.calls[0]![1] as RequestInit).body as string
+    );
+    expect(body.timestamp).toBe("2026-03-14T12:00:00Z");
+    expect(body.headers["X-GitHub-Event"]).toBe("issues");
+  });
+
   it("listPendingWritebacks GETs writeback/pending", async () => {
     const payload: WritebackItem[] = [
       {
@@ -543,17 +557,21 @@ describe("RelayFileClient — new webhook/writeback methods", () => {
     const f = mockFetch(payload);
     const client = makeClient(f);
 
-    const listPendingWritebacks = (client as any).listPendingWritebacks?.bind(client);
-    if (!listPendingWritebacks) {
-      console.log("SKIP: listPendingWritebacks not yet implemented");
-      return;
-    }
-
-    const res = await listPendingWritebacks("ws_acme");
+    const res = await client.listPendingWritebacks("ws_acme");
     expect(res).toHaveLength(1);
-    expect(res[0].path).toBe("/zendesk/tickets/48291.json");
+    expect(res[0]!.path).toBe("/zendesk/tickets/48291.json");
     const url = f.mock.calls[0]![0] as string;
     expect(url).toContain("/v1/workspaces/ws_acme/writeback/pending");
+    const init = f.mock.calls[0]![1] as RequestInit;
+    expect(init.method).toBe("GET");
+  });
+
+  it("listPendingWritebacks passes correlationId", async () => {
+    const f = mockFetch([]);
+    const client = makeClient(f);
+    await client.listPendingWritebacks("ws_acme", "corr_custom");
+    const headers = (f.mock.calls[0]![1] as RequestInit).headers as Record<string, string>;
+    expect(headers["X-Correlation-Id"]).toBe("corr_custom");
   });
 
   it("ackWriteback POSTs to writeback/{itemId}/ack", async () => {
@@ -565,13 +583,9 @@ describe("RelayFileClient — new webhook/writeback methods", () => {
     const f = mockFetch(payload);
     const client = makeClient(f);
 
-    const ackWriteback = (client as any).ackWriteback?.bind(client);
-    if (!ackWriteback) {
-      console.log("SKIP: ackWriteback not yet implemented");
-      return;
-    }
-
-    const res = await ackWriteback("ws_acme", "wb_1", {
+    const res = await client.ackWriteback({
+      workspaceId: "ws_acme",
+      itemId: "wb_1",
       success: true,
     });
     expect(res.status).toBe("acknowledged");
@@ -590,13 +604,9 @@ describe("RelayFileClient — new webhook/writeback methods", () => {
     const f = mockFetch(payload);
     const client = makeClient(f);
 
-    const ackWriteback = (client as any).ackWriteback?.bind(client);
-    if (!ackWriteback) {
-      console.log("SKIP: ackWriteback not yet implemented");
-      return;
-    }
-
-    await ackWriteback("ws_acme", "wb_2", {
+    await client.ackWriteback({
+      workspaceId: "ws_acme",
+      itemId: "wb_2",
       success: false,
       error: "Provider returned 403",
     });
@@ -613,25 +623,12 @@ describe("RelayFileClient — new webhook/writeback methods", () => {
 // ---------------------------------------------------------------------------
 
 describe("NangoHelpers", () => {
-  // These tests validate the Nango convenience helper class.
-  // The helpers wrap the low-level client with Nango-specific path/property logic.
-
   it("ingestNangoWebhook computes canonical path and properties", async () => {
-    const ingestPayload: QueuedResponse = { status: "queued", id: "env_1" };
-    const f = mockFetch(ingestPayload);
+    const f = mockFetch({ status: "queued", id: "env_1" } satisfies QueuedResponse);
     const client = makeClient(f);
-
-    // Try to import NangoHelpers — may not exist yet
-    let NangoHelpers: any;
-    try {
-      const mod = await import("./nango.js");
-      NangoHelpers = mod.NangoHelpers;
-    } catch {
-      console.log("SKIP: NangoHelpers not yet implemented");
-      return;
-    }
-
+    const { NangoHelpers } = await import("./nango.js");
     const nango = new NangoHelpers(client);
+
     await nango.ingestNangoWebhook("ws_acme", {
       connectionId: "conn_zendesk_acme",
       integrationId: "zendesk-support",
@@ -642,48 +639,133 @@ describe("NangoHelpers", () => {
       payload: { id: 48291, status: "open" },
     });
 
-    const body = JSON.parse(
-      (f.mock.calls[0]![1] as RequestInit).body as string
-    );
-    // Should compute path as /zendesk/tickets/48291.json
+    const body = JSON.parse((f.mock.calls[0]![1] as RequestInit).body as string);
     expect(body.path).toBe("/zendesk/tickets/48291.json");
     expect(body.provider).toBe("zendesk");
+    expect(body.event_type).toBe("updated");
+    expect(body.headers["X-Nango-Connection-Id"]).toBe("conn_zendesk_acme");
+    expect(body.headers["X-Nango-Integration-Id"]).toBe("zendesk-support");
+    expect(body.headers["X-Nango-Provider-Config-Key"]).toBe("zendesk");
+    // Verify semantic properties are embedded in the data
+    expect(body.data.semantics.properties["nango.connection_id"]).toBe("conn_zendesk_acme");
+    expect(body.data.semantics.properties["provider.object_type"]).toBe("tickets");
+    expect(body.data.semantics.properties["provider.status"]).toBe("open");
+  });
+
+  it("ingestNangoWebhook uses fallback path for unknown provider", async () => {
+    const f = mockFetch({ status: "queued", id: "env_2" } satisfies QueuedResponse);
+    const client = makeClient(f);
+    const { NangoHelpers } = await import("./nango.js");
+    const nango = new NangoHelpers(client);
+
+    await nango.ingestNangoWebhook("ws_acme", {
+      connectionId: "conn_1",
+      integrationId: "notion-sync",
+      model: "pages",
+      objectId: "page_1",
+      eventType: "created",
+      payload: { title: "My Page" },
+    });
+
+    const body = JSON.parse((f.mock.calls[0]![1] as RequestInit).body as string);
+    // "notion" extracted from "notion-sync" integrationId
+    expect(body.path).toBe("/notion/pages/page_1.json");
+    expect(body.provider).toBe("notion");
+    // providerConfigKey not set — header should be absent
+    expect(body.headers["X-Nango-Provider-Config-Key"]).toBeUndefined();
+  });
+
+  it("ingestNangoWebhook passes relations to semantics", async () => {
+    const f = mockFetch({ status: "queued", id: "env_3" } satisfies QueuedResponse);
+    const client = makeClient(f);
+    const { NangoHelpers } = await import("./nango.js");
+    const nango = new NangoHelpers(client);
+
+    await nango.ingestNangoWebhook("ws_acme", {
+      connectionId: "conn_1",
+      integrationId: "zendesk-support",
+      model: "tickets",
+      objectId: "100",
+      eventType: "updated",
+      payload: { id: 100 },
+      relations: ["/zendesk/users/42.json"],
+    });
+
+    const body = JSON.parse((f.mock.calls[0]![1] as RequestInit).body as string);
+    expect(body.data.semantics.relations).toEqual(["/zendesk/users/42.json"]);
   });
 
   it("getProviderFiles queries with provider and path prefix", async () => {
     const queryPayload: FileQueryResponse = {
       items: [
-        {
-          path: "/zendesk/tickets/1.json",
-          revision: "rev_1",
-          contentType: "application/json",
-          size: 100,
-        },
+        { path: "/zendesk/tickets/1.json", revision: "rev_1", contentType: "application/json", size: 100 },
       ],
       nextCursor: null,
     };
     const f = mockFetch(queryPayload);
     const client = makeClient(f);
-
-    let NangoHelpers: any;
-    try {
-      const mod = await import("./nango.js");
-      NangoHelpers = mod.NangoHelpers;
-    } catch {
-      console.log("SKIP: NangoHelpers not yet implemented");
-      return;
-    }
-
+    const { NangoHelpers } = await import("./nango.js");
     const nango = new NangoHelpers(client);
+
     const files = await nango.getProviderFiles("ws_acme", {
       provider: "zendesk",
       objectType: "tickets",
       status: "open",
     });
 
+    expect(files).toHaveLength(1);
+    expect(files[0]!.path).toBe("/zendesk/tickets/1.json");
     const url = f.mock.calls[0]![0] as string;
     expect(url).toContain("provider=zendesk");
     expect(url).toContain("path=%2Fzendesk%2Ftickets%2F");
+    expect(url).toContain("property.provider.status=open");
+    expect(url).toContain("property.provider.object_type=tickets");
+  });
+
+  it("getProviderFiles without objectType queries full provider prefix", async () => {
+    const f = mockFetch({ items: [], nextCursor: null } satisfies FileQueryResponse);
+    const client = makeClient(f);
+    const { NangoHelpers } = await import("./nango.js");
+    const nango = new NangoHelpers(client);
+
+    await nango.getProviderFiles("ws_acme", { provider: "github" });
+
+    const url = f.mock.calls[0]![0] as string;
+    expect(url).toContain("path=%2Fgithub%2F");
+  });
+
+  it("watchProviderEvents yields events and respects abort", async () => {
+    let callCount = 0;
+    const f = vi.fn().mockImplementation(() => {
+      callCount++;
+      const events = callCount === 1
+        ? [{ eventId: "e1", type: "file.created", path: "/github/issues/1.json", revision: "r1", origin: "provider_sync", provider: "github", correlationId: "c1", timestamp: "2026-03-14T00:00:00Z" }]
+        : [];
+      return Promise.resolve({
+        ok: true, status: 200,
+        headers: new Headers({ "content-type": "application/json" }),
+        json: () => Promise.resolve({ events, nextCursor: callCount === 1 ? "cur_1" : null }),
+        text: () => Promise.resolve("{}"),
+      });
+    }) as unknown as typeof fetch;
+
+    const client = makeClient(f);
+    const { NangoHelpers } = await import("./nango.js");
+    const nango = new NangoHelpers(client);
+
+    const controller = new AbortController();
+    const collected: unknown[] = [];
+    for await (const event of nango.watchProviderEvents("ws_acme", {
+      provider: "github",
+      pollIntervalMs: 10,
+      signal: controller.signal,
+    })) {
+      collected.push(event);
+      controller.abort();
+    }
+
+    expect(collected).toHaveLength(1);
+    expect((collected[0] as any).eventId).toBe("e1");
   });
 });
 
@@ -710,7 +792,7 @@ describe("RelayFileClient — edge cases", () => {
     });
     await client.listTree("ws_1");
     const url = f.mock.calls[0]![0] as string;
-    expect(url).toStartWith("https://relay.test/v1/");
+    expect(url.startsWith("https://relay.test/v1/")).toBe(true);
   });
 
   it("handles empty query params gracefully", async () => {
