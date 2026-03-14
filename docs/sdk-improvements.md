@@ -1,5 +1,7 @@
 # SDK Improvements Plan
 
+> **Status (2026-03-14):** TS SDK has full API coverage (24/25 endpoints; 1 internal HMAC-only endpoint excluded by design). NangoHelpers implemented and tested. Python SDK has types + errors defined; client and nango modules need implementation.
+
 ## 1. OpenAPI vs TypeScript SDK Gap Analysis
 
 ### Endpoints in OpenAPI spec
@@ -36,9 +38,11 @@
 
 The following 3 public endpoints were added to `client.ts` along with their types in `types.ts`:
 
-- `ingestWebhook(input: IngestWebhookInput)` — generic webhook ingestion
-- `listPendingWritebacks(workspaceId, correlationId?, signal?)` — list pending writeback items
-- `ackWriteback(input: AckWritebackInput)` — acknowledge a writeback result
+- `ingestWebhook(input: IngestWebhookInput)` — generic webhook ingestion (POST `/webhooks/ingest`)
+- `listPendingWritebacks(workspaceId, correlationId?, signal?)` — list pending writeback items (GET `/writeback/pending`)
+- `ackWriteback(input: AckWritebackInput)` — acknowledge a writeback result (POST `/writeback/{itemId}/ack`)
+
+All 3 methods have test coverage in `client.test.ts`.
 
 ### Note on internal endpoint
 
@@ -143,6 +147,18 @@ class QueueFullError(RelayFileApiError):
 class PayloadTooLargeError(RelayFileApiError): ...
 ```
 
+### Implementation status
+
+| Component | File | Status |
+|-----------|------|--------|
+| `pyproject.toml` | `sdk/relayfile-sdk-py/pyproject.toml` | Done — hatchling build, httpx dep, Python >=3.10 |
+| Types | `sdk/relayfile-sdk-py/src/relayfile/types.py` | Done — all dataclasses mirror TS types |
+| Errors | `sdk/relayfile-sdk-py/src/relayfile/errors.py` | Done — `RelayFileApiError` hierarchy |
+| `__init__.py` | `sdk/relayfile-sdk-py/src/relayfile/__init__.py` | Done — exports defined (imports `client.py` and `nango.py` which don't exist yet) |
+| `client.py` | `sdk/relayfile-sdk-py/src/relayfile/client.py` | **Not started** |
+| `nango.py` | `sdk/relayfile-sdk-py/src/relayfile/nango.py` | **Not started** |
+| Tests | `sdk/relayfile-sdk-py/tests/` | **Not started** |
+
 ### Implementation notes
 
 - Use `httpx.AsyncClient` for HTTP with connection pooling
@@ -150,6 +166,7 @@ class PayloadTooLargeError(RelayFileApiError): ...
 - Use `dataclasses` for input/output types (not Pydantic — keep dependency-light)
 - Retry logic mirrors TS SDK: exponential backoff with jitter, honor `Retry-After`
 - Token provider accepts `str | Callable[[], str] | Callable[[], Awaitable[str]]`
+- The sync `RelayFileClient` should wrap `AsyncRelayFileClient` using `asyncio.run()` or a dedicated event loop to avoid nested-loop issues
 
 ---
 
@@ -253,3 +270,25 @@ async for event in nango.watch_provider_events("ws_acme", provider="github", pol
 4. Sleep for `pollIntervalMs` between polls
 5. Respect `AbortSignal` / cancellation for clean shutdown
 6. On error: log and continue (configurable via `onError` callback)
+
+---
+
+## 4. Remaining Work
+
+### High Priority
+
+1. **Python SDK `client.py`** — Implement `RelayFileClient` and `AsyncRelayFileClient` covering all 24 public endpoints. Mirror the TS SDK's retry logic, error mapping, and correlation ID generation.
+2. **Python SDK `nango.py`** — Port `NangoHelpers` / `AsyncNangoHelpers` from TS. Include `ingest_nango_webhook`, `get_provider_files`, and `watch_provider_events` (async generator).
+3. **Python SDK tests** — Use `pytest-asyncio` + `respx` (httpx mock). Cover all client methods, error cases, retry behavior, and NangoHelpers.
+
+### Medium Priority
+
+4. **TS SDK: `AccessTokenProvider` refresh hook** — Add optional `onTokenRefresh` callback so callers get notified when a token is re-resolved (useful for token caching/metrics).
+5. **TS SDK: batch operations** — Consider `batchWriteFiles()` and `batchDeleteFiles()` if the API adds batch endpoints.
+6. **Both SDKs: request/response interceptors** — Middleware hooks for logging, metrics, and custom header injection.
+
+### Low Priority
+
+7. **OpenAPI codegen validation** — CI step that diffs the OpenAPI spec against SDK method signatures to catch drift.
+8. **SDK versioning alignment** — Ensure TS SDK (`package.json`) and Python SDK (`pyproject.toml`) versions track the API version.
+9. **SDK documentation site** — Auto-generate API docs from TSDoc/docstrings.

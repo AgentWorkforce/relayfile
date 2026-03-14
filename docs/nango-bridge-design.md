@@ -2,6 +2,8 @@
 
 How Nango webhooks flow into Relayfile so AI agents can access SaaS data as files.
 
+> **Status (2026-03-14):** Core ingest + writeback endpoints are live in the Go HTTP API (`internal/httpapi/server.go`). The TS SDK exposes `ingestWebhook()`, `listPendingWritebacks()`, and `ackWriteback()`. High-level `NangoHelpers` class is implemented in `sdk/relayfile-sdk/src/nango.ts` with `ingestNangoWebhook`, `getProviderFiles`, and `watchProviderEvents`. Python SDK types are defined; client + nango modules are in progress.
+
 ## Overview
 
 Nango is a SaaS integration platform that normalizes OAuth, token refresh, and webhook delivery for 250+ providers. The Nango Bridge is a lightweight service that receives Nango webhook events and translates them into Relayfile ingestion calls.
@@ -313,3 +315,32 @@ workspaces:
 - Nango webhook deliveries are verified using Nango's webhook signature (HMAC-SHA256)
 - The bridge never stores provider credentials — all API calls go through Nango's proxy
 - Writeback payloads are validated against known schemas before forwarding to prevent injection
+
+## Implementation Status
+
+### Completed
+
+| Component | Location | Notes |
+|-----------|----------|-------|
+| Generic webhook ingest endpoint | `internal/httpapi/server.go` route `generic_webhook_ingest` | JWT auth with `sync:trigger` scope |
+| Writeback pending list endpoint | `internal/httpapi/server.go` route `writeback_pending` | JWT auth with `sync:read` scope |
+| Writeback ack endpoint | `internal/httpapi/server.go` route `writeback_ack` | JWT auth with `sync:trigger` scope |
+| TS SDK `ingestWebhook()` | `sdk/relayfile-sdk/src/client.ts` | POST to `/webhooks/ingest` |
+| TS SDK `listPendingWritebacks()` | `sdk/relayfile-sdk/src/client.ts` | GET from `/writeback/pending` |
+| TS SDK `ackWriteback()` | `sdk/relayfile-sdk/src/client.ts` | POST to `/writeback/{itemId}/ack` |
+| TS `NangoHelpers.ingestNangoWebhook()` | `sdk/relayfile-sdk/src/nango.ts` | Canonical path computation, semantic property mapping |
+| TS `NangoHelpers.getProviderFiles()` | `sdk/relayfile-sdk/src/nango.ts` | Auto-paginating query with provider/status filters |
+| TS `NangoHelpers.watchProviderEvents()` | `sdk/relayfile-sdk/src/nango.ts` | Async generator with polling + AbortSignal |
+| TS SDK types | `sdk/relayfile-sdk/src/types.ts` | `IngestWebhookInput`, `WritebackItem`, `AckWritebackInput`, `AckWritebackResponse` |
+| Python SDK types | `sdk/relayfile-sdk-py/src/relayfile/types.py` | Mirrors TS types with dataclasses |
+| Python SDK errors | `sdk/relayfile-sdk-py/src/relayfile/errors.py` | `RelayFileApiError` hierarchy |
+| Test coverage | `sdk/relayfile-sdk/src/client.test.ts` | Tests for ingest, writeback, and NangoHelpers |
+
+### Remaining Work
+
+1. **Python SDK client** (`sdk/relayfile-sdk-py/src/relayfile/client.py`) — `RelayFileClient` + `AsyncRelayFileClient` using `httpx`; mirror all TS SDK methods
+2. **Python SDK Nango helpers** (`sdk/relayfile-sdk-py/src/relayfile/nango.py`) — `NangoHelpers` + `AsyncNangoHelpers`; mirror TS `nango.ts`
+3. **Standalone Nango Bridge service** — Deployable worker that receives Nango webhooks, translates them via `NangoHelpers`, and runs the writeback polling loop
+4. **Provider-specific diff logic** — Writeback bridge currently sends full file content; need minimal diff/patch computation per provider
+5. **Rate limiting for writeback polling** — Bridge should respect `Retry-After` headers and backoff on 429s from Relayfile
+6. **Observability** — Structured logging and metrics (ingest count, writeback latency, error rate per provider)
