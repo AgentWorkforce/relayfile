@@ -28,59 +28,17 @@
 | 20 | `/v1/admin/sync` | GET | getAdminSyncStatus | `getAdminSyncStatus()` | Covered |
 | 21 | `/v1/admin/replay/envelope/{id}` | POST | replayAdminEnvelope | `replayAdminEnvelope()` | Covered |
 | 22 | `/v1/admin/replay/op/{id}` | POST | replayAdminOp | `replayAdminOp()` | Covered |
-| 23 | `/v1/workspaces/{id}/webhooks/ingest` | POST | ingestGenericWebhook | — | **Missing** |
-| 24 | `/v1/workspaces/{id}/writeback/pending` | GET | listPendingWritebacks | — | **Missing** |
-| 25 | `/v1/workspaces/{id}/writeback/{itemId}/ack` | POST | acknowledgeWriteback | — | **Missing** |
+| 23 | `/v1/workspaces/{id}/webhooks/ingest` | POST | ingestGenericWebhook | `ingestWebhook()` | Covered |
+| 24 | `/v1/workspaces/{id}/writeback/pending` | GET | listPendingWritebacks | `listPendingWritebacks()` | Covered |
+| 25 | `/v1/workspaces/{id}/writeback/{itemId}/ack` | POST | acknowledgeWriteback | `ackWriteback()` | Covered |
 
-### Missing SDK methods (3 public endpoints)
+### Previously missing SDK methods (now implemented)
 
-```typescript
-// 1. Generic webhook ingestion
-async ingestWebhook(workspaceId: string, input: IngestWebhookInput): Promise<QueuedResponse>
+The following 3 public endpoints were added to `client.ts` along with their types in `types.ts`:
 
-// 2. List pending writebacks
-async listPendingWritebacks(workspaceId: string, correlationId?: string, signal?: AbortSignal): Promise<WritebackItem[]>
-
-// 3. Acknowledge writeback
-async ackWriteback(workspaceId: string, itemId: string, input: AckWritebackInput): Promise<AckResponse>
-```
-
-### Missing types
-
-```typescript
-export interface IngestWebhookInput {
-  provider: string;
-  event_type: string;
-  path: string;
-  data?: Record<string, unknown>;
-  delivery_id?: string;
-  timestamp?: string;
-  headers?: Record<string, string>;
-  correlationId?: string;
-  signal?: AbortSignal;
-}
-
-export interface WritebackItem {
-  itemId: string;
-  workspaceId: string;
-  path: string;
-  revision: string;
-  provider: string;
-  action: WritebackActionType;
-  content?: string;
-  contentType?: string;
-  semantics?: FileSemantics;
-  queuedAt: string;
-  correlationId?: string;
-}
-
-export interface AckWritebackInput {
-  success: boolean;
-  error?: string;
-  correlationId?: string;
-  signal?: AbortSignal;
-}
-```
+- `ingestWebhook(input: IngestWebhookInput)` — generic webhook ingestion
+- `listPendingWritebacks(workspaceId, correlationId?, signal?)` — list pending writeback items
+- `ackWriteback(input: AckWritebackInput)` — acknowledge a writeback result
 
 ### Note on internal endpoint
 

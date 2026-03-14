@@ -6,8 +6,16 @@ export {
   RelayFileApiError,
   RevisionConflictError
 } from "./errors.js";
+export { NangoHelpers } from "./nango.js";
+export type {
+  NangoWebhookInput,
+  GetProviderFilesOptions,
+  WatchProviderEventsOptions
+} from "./nango.js";
 export type {
   AckResponse,
+  AckWritebackInput,
+  AckWritebackResponse,
   AdminIngressAlert,
   AdminIngressAlertProfile,
   AdminIngressEffectiveAlertProfile,
@@ -42,6 +50,7 @@ export type {
   GetSyncDeadLettersOptions,
   GetSyncIngressStatusOptions,
   GetSyncStatusOptions,
+  IngestWebhookInput,
   ListTreeOptions,
   OperationFeedResponse,
   OperationStatusResponse,
@@ -53,6 +62,7 @@ export type {
   TreeEntry,
   TreeResponse,
   WritebackActionType,
+  WritebackItem,
   WriteFileInput,
   WriteQueuedResponse
 } from "./types.js";
