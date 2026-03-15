@@ -1,3 +1,11 @@
+/**
+ * Nango integration bridge for Relayfile.
+ *
+ * Maps Nango sync webhook events → Relayfile filesystem paths + semantics.
+ *
+ * @see https://docs.nango.dev/integrate/guides/receive-webhooks-from-nango
+ */
+
 import type { RelayFileClient } from "./client.js";
 import type {
   FileQueryItem,
@@ -5,6 +13,15 @@ import type {
   FileSemantics,
   QueuedResponse
 } from "./types.js";
+import {
+  IntegrationProvider,
+  computeCanonicalPath,
+  type WebhookInput,
+} from "./provider.js";
+
+// ---------------------------------------------------------------------------
+// Nango-specific types
+// ---------------------------------------------------------------------------
 
 export interface NangoWebhookInput {
   connectionId: string;
@@ -32,22 +49,9 @@ export interface WatchProviderEventsOptions {
   signal?: AbortSignal;
 }
 
-const PROVIDER_PATH_PREFIX: Record<string, string> = {
-  zendesk: "/zendesk",
-  shopify: "/shopify",
-  github: "/github",
-  stripe: "/stripe",
-  slack: "/slack",
-  linear: "/linear",
-  jira: "/jira",
-  hubspot: "/hubspot",
-  salesforce: "/salesforce"
-};
-
-function computeCanonicalPath(provider: string, model: string, objectId: string): string {
-  const prefix = PROVIDER_PATH_PREFIX[provider] ?? `/${provider}`;
-  return `${prefix}/${model}/${objectId}.json`;
-}
+// ---------------------------------------------------------------------------
+// Nango provider implementation
+// ---------------------------------------------------------------------------
 
 function buildSemanticProperties(
   provider: string,
@@ -76,18 +80,22 @@ function buildSemanticProperties(
   return properties;
 }
 
-export class NangoHelpers {
-  private readonly client: RelayFileClient;
+export class NangoHelpers extends IntegrationProvider {
+  readonly name = "nango";
 
-  constructor(client: RelayFileClient) {
-    this.client = client;
-  }
-
-  async ingestNangoWebhook(
+  /**
+   * Ingest a Nango webhook event into Relayfile.
+   *
+   * @param workspaceId - Relayfile workspace ID
+   * @param rawInput - NangoWebhookInput
+   * @param signal - Optional abort signal
+   */
+  async ingestWebhook(
     workspaceId: string,
-    input: NangoWebhookInput,
+    rawInput: unknown,
     signal?: AbortSignal
   ): Promise<QueuedResponse> {
+    const input = rawInput as NangoWebhookInput;
     const provider = input.integrationId.split("-")[0] ?? input.integrationId;
     const path = computeCanonicalPath(provider, input.model, input.objectId);
     const properties = buildSemanticProperties(provider, input, input.payload);
@@ -115,80 +123,25 @@ export class NangoHelpers {
     });
   }
 
-  async getProviderFiles(
-    workspaceId: string,
-    options: GetProviderFilesOptions
-  ): Promise<FileQueryItem[]> {
-    const prefix = PROVIDER_PATH_PREFIX[options.provider] ?? `/${options.provider}`;
-    const pathFilter = options.objectType
-      ? `${prefix}/${options.objectType}/`
-      : `${prefix}/`;
-
-    const properties: Record<string, string> = {
-      provider: options.provider
+  /**
+   * Normalize a Nango webhook input to the generic WebhookInput format.
+   */
+  normalize(input: NangoWebhookInput): WebhookInput {
+    const provider = input.integrationId.split("-")[0] ?? input.integrationId;
+    return {
+      provider,
+      objectType: input.model,
+      objectId: input.objectId,
+      eventType: input.eventType,
+      payload: input.payload,
+      relations: input.relations,
+      metadata: {
+        "nango.connection_id": input.connectionId,
+        "nango.integration_id": input.integrationId,
+        ...(input.providerConfigKey
+          ? { "nango.provider_config_key": input.providerConfigKey }
+          : {}),
+      },
     };
-    if (options.objectType) {
-      properties["provider.object_type"] = options.objectType;
-    }
-    if (options.status) {
-      properties["provider.status"] = options.status;
-    }
-
-    const allItems: FileQueryItem[] = [];
-    let cursor: string | undefined;
-    for (;;) {
-      const response = await this.client.queryFiles(workspaceId, {
-        path: pathFilter,
-        properties,
-        cursor,
-        limit: options.limit,
-        signal: options.signal
-      });
-      allItems.push(...response.items);
-      if (!response.nextCursor || (options.limit && allItems.length >= options.limit)) {
-        break;
-      }
-      cursor = response.nextCursor;
-    }
-    return options.limit ? allItems.slice(0, options.limit) : allItems;
-  }
-
-  async *watchProviderEvents(
-    workspaceId: string,
-    options: WatchProviderEventsOptions
-  ): AsyncGenerator<FilesystemEvent, void, unknown> {
-    const pollIntervalMs = options.pollIntervalMs ?? 5000;
-    let cursor = options.cursor;
-
-    for (;;) {
-      if (options.signal?.aborted) {
-        return;
-      }
-      const response = await this.client.getEvents(workspaceId, {
-        provider: options.provider,
-        cursor,
-        signal: options.signal
-      });
-      for (const event of response.events) {
-        yield event;
-      }
-      if (response.nextCursor) {
-        cursor = response.nextCursor;
-      }
-      if (options.signal?.aborted) {
-        return;
-      }
-      await new Promise<void>((resolve, reject) => {
-        const timer = setTimeout(() => {
-          options.signal?.removeEventListener("abort", onAbort);
-          resolve();
-        }, pollIntervalMs);
-        const onAbort = () => {
-          clearTimeout(timer);
-          resolve();
-        };
-        options.signal?.addEventListener("abort", onAbort, { once: true });
-      });
-    }
   }
 }
