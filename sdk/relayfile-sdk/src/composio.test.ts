@@ -139,7 +139,7 @@ describe("ComposioHelpers", () => {
       await composio.ingestWebhook("ws_1", githubCommitPayload);
 
       expect(client.ingestWebhook).toHaveBeenCalledTimes(1);
-      const call = (client.ingestWebhook as ReturnType<typeof vi.fn>).mock.calls[0][0];
+      const call = (client.ingestWebhook as ReturnType<typeof vi.fn>).mock.calls[0]![0];
 
       expect(call.workspaceId).toBe("ws_1");
       expect(call.provider).toBe("github");
@@ -161,7 +161,7 @@ describe("ComposioHelpers", () => {
     it("ingests a Slack message with correct path", async () => {
       await composio.ingestWebhook("ws_1", slackMessagePayload);
 
-      const call = (client.ingestWebhook as ReturnType<typeof vi.fn>).mock.calls[0][0];
+      const call = (client.ingestWebhook as ReturnType<typeof vi.fn>).mock.calls[0]![0];
       expect(call.path).toBe("/slack/messages/msg-123.json");
       expect(call.provider).toBe("slack");
       expect(call.event_type).toBe("created"); // NEW_MESSAGE → created
@@ -170,7 +170,7 @@ describe("ComposioHelpers", () => {
     it("ingests a Zendesk ticket with status and timestamps", async () => {
       await composio.ingestWebhook("ws_1", zendeskTicketPayload);
 
-      const call = (client.ingestWebhook as ReturnType<typeof vi.fn>).mock.calls[0][0];
+      const call = (client.ingestWebhook as ReturnType<typeof vi.fn>).mock.calls[0]![0];
       expect(call.path).toBe("/zendesk/tickets/ticket-456.json");
       expect(call.event_type).toBe("created"); // NEW_TICKET → created
 
@@ -183,7 +183,7 @@ describe("ComposioHelpers", () => {
     it("handles account expired events", async () => {
       await composio.ingestWebhook("ws_1", accountExpiredPayload);
 
-      const call = (client.ingestWebhook as ReturnType<typeof vi.fn>).mock.calls[0][0];
+      const call = (client.ingestWebhook as ReturnType<typeof vi.fn>).mock.calls[0]![0];
       expect(call.path).toBe("/.system/composio/expired/ca_expired1.json");
       expect(call.event_type).toBe("account_expired");
       expect(call.data.connected_account_id).toBe("ca_expired1");
@@ -192,7 +192,7 @@ describe("ComposioHelpers", () => {
     it("infers object type for unmapped trigger slugs", async () => {
       await composio.ingestWebhook("ws_1", unknownTriggerPayload);
 
-      const call = (client.ingestWebhook as ReturnType<typeof vi.fn>).mock.calls[0][0];
+      const call = (client.ingestWebhook as ReturnType<typeof vi.fn>).mock.calls[0]![0];
       // NOTION_DATABASE_ROW_CREATED → infer "database_rows" (pluralized middle parts)
       expect(call.path).toBe("/notion/database_rows/row-789.json");
       expect(call.event_type).toBe("created");
@@ -201,14 +201,14 @@ describe("ComposioHelpers", () => {
     it("extracts nested object IDs (e.g., issue.id)", async () => {
       await composio.ingestWebhook("ws_1", nestedIdPayload);
 
-      const call = (client.ingestWebhook as ReturnType<typeof vi.fn>).mock.calls[0][0];
+      const call = (client.ingestWebhook as ReturnType<typeof vi.fn>).mock.calls[0]![0];
       expect(call.path).toBe("/github/issues/issue-999.json");
     });
 
     it("omits user ID header when not provided", async () => {
       await composio.ingestWebhook("ws_1", slackMessagePayload);
 
-      const call = (client.ingestWebhook as ReturnType<typeof vi.fn>).mock.calls[0][0];
+      const call = (client.ingestWebhook as ReturnType<typeof vi.fn>).mock.calls[0]![0];
       expect(call.headers["X-Composio-User-Id"]).toBeUndefined();
     });
 
@@ -216,7 +216,7 @@ describe("ComposioHelpers", () => {
       const ac = new AbortController();
       await composio.ingestWebhook("ws_1", githubCommitPayload, ac.signal);
 
-      const call = (client.ingestWebhook as ReturnType<typeof vi.fn>).mock.calls[0][0];
+      const call = (client.ingestWebhook as ReturnType<typeof vi.fn>).mock.calls[0]![0];
       expect(call.signal).toBe(ac.signal);
     });
   });

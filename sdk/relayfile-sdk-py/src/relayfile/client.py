@@ -81,7 +81,7 @@ def _enc(segment: str) -> str:
 
 
 def _build_query(params: dict[str, Any]) -> str:
-    filtered = {k: str(v) for k, v in params.items() if v is not None}
+    filtered = {k: (str(v).lower() if isinstance(v, bool) else str(v)) for k, v in params.items() if v is not None}
     return f"?{urlencode(filtered)}" if filtered else ""
 
 
