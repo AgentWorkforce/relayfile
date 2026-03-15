@@ -629,7 +629,7 @@ describe("NangoHelpers", () => {
     const { NangoHelpers } = await import("./nango.js");
     const nango = new NangoHelpers(client);
 
-    await nango.ingestNangoWebhook("ws_acme", {
+    await nango.ingestWebhook("ws_acme", {
       connectionId: "conn_zendesk_acme",
       integrationId: "zendesk-support",
       providerConfigKey: "zendesk",
@@ -658,7 +658,7 @@ describe("NangoHelpers", () => {
     const { NangoHelpers } = await import("./nango.js");
     const nango = new NangoHelpers(client);
 
-    await nango.ingestNangoWebhook("ws_acme", {
+    await nango.ingestWebhook("ws_acme", {
       connectionId: "conn_1",
       integrationId: "notion-sync",
       model: "pages",
@@ -681,7 +681,7 @@ describe("NangoHelpers", () => {
     const { NangoHelpers } = await import("./nango.js");
     const nango = new NangoHelpers(client);
 
-    await nango.ingestNangoWebhook("ws_acme", {
+    await nango.ingestWebhook("ws_acme", {
       connectionId: "conn_1",
       integrationId: "zendesk-support",
       model: "tickets",
