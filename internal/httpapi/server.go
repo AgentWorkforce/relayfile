@@ -1436,9 +1436,14 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request, workspaceI
 	case "json":
 		writeJSON(w, http.StatusOK, visible)
 	case "tar":
-		if err := s.writeTarExport(w, visible); err != nil {
-			log.Printf("tar export error: %v", err)
-			writeError(w, http.StatusInternalServerError, "export_error", "tar export failed: "+err.Error(), correlationID)
+		prepared, prepErr := s.prepareTarExport(visible)
+		if prepErr != nil {
+			writeError(w, http.StatusInternalServerError, "export_error", "tar export failed: "+prepErr.Error(), correlationID)
+			return
+		}
+		if err := s.streamTarExport(w, prepared); err != nil {
+			// Headers already sent — can only log
+			log.Printf("tar export streaming error (headers already sent): %v", err)
 		}
 	case "patch":
 		s.writePatchExport(w, visible)
@@ -2016,17 +2021,20 @@ func stringPropertiesFromAny(values map[string]any) map[string]string {
 	return out
 }
 
-func (s *Server) writeTarExport(w http.ResponseWriter, files []relayfile.File) error {
-	type tarFile struct {
-		name    string
-		modTime time.Time
-		content []byte
-	}
+type tarFile struct {
+	name    string
+	modTime time.Time
+	content []byte
+}
+
+// prepareTarExport decodes content and validates all files before any headers are sent.
+// Errors here can still produce a proper HTTP error response.
+func (s *Server) prepareTarExport(files []relayfile.File) ([]tarFile, error) {
 	prepared := make([]tarFile, 0, len(files))
 	for _, file := range files {
 		content, err := decodeExportContent(file)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		name := strings.TrimPrefix(path.Clean(file.Path), "/")
 		if name == "." || name == "" {
@@ -2038,7 +2046,12 @@ func (s *Server) writeTarExport(w http.ResponseWriter, files []relayfile.File) e
 			content: content,
 		})
 	}
+	return prepared, nil
+}
 
+// streamTarExport writes headers and streams gzip tar data.
+// Once called, HTTP 200 is committed — errors can only be logged, not sent to client.
+func (s *Server) streamTarExport(w http.ResponseWriter, prepared []tarFile) error {
 	w.Header().Set("Content-Type", "application/gzip")
 	w.Header().Set("Content-Disposition", `attachment; filename="workspace-export.tar.gz"`)
 	w.WriteHeader(http.StatusOK)

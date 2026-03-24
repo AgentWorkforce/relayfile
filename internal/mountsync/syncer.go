@@ -422,7 +422,7 @@ func (s *Syncer) connectWebSocket(ctx context.Context) error {
 		return err
 	}
 
-	readCtx, cancel := context.WithCancel(context.Background())
+	readCtx, cancel := context.WithCancel(ctx)
 
 	s.mu.Lock()
 	s.wsConn = conn

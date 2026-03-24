@@ -537,11 +537,11 @@ ${B}${CYAN}╔══════════════════════
           reject(new Error('WebSocket timeout waiting for events'));
         }, 10_000);
 
-        ws.addEventListener('open', async () => {
-          // Write a file to trigger an event
-          await api('POST', `/v1/workspaces/${WORKSPACE}/fs/bulk`, {
+        ws.addEventListener('open', () => {
+          // Write a file to trigger an event (fire-and-forget, ignore errors from server shutdown)
+          api('POST', `/v1/workspaces/${WORKSPACE}/fs/bulk`, {
             files: [{ path: '/ws-test.txt', content: 'websocket test' }],
-          });
+          }).catch(() => {});
         });
 
         ws.addEventListener('message', (event) => {
