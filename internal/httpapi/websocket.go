@@ -46,9 +46,6 @@ func (s *Server) handleFileEventsWebSocket(w http.ResponseWriter, r *http.Reques
 	defer conn.Close(websocket.StatusNormalClosure, "")
 
 	ctx := r.Context()
-	subscriptionCh := make(chan relayfile.Event, 256)
-	unsubscribe := s.store.Subscribe(workspaceID, subscriptionCh)
-	defer unsubscribe()
 
 	catchUp, err := s.store.GetRecentEvents(workspaceID, 100)
 	if err != nil {
@@ -60,6 +57,10 @@ func (s *Server) handleFileEventsWebSocket(w http.ResponseWriter, r *http.Reques
 			return
 		}
 	}
+
+	subscriptionCh := make(chan relayfile.Event, 256)
+	unsubscribe := s.store.Subscribe(workspaceID, subscriptionCh)
+	defer unsubscribe()
 
 	controlCh := make(chan fileEventMessage, 8)
 	readErrCh := make(chan error, 1)

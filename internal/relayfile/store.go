@@ -3688,7 +3688,7 @@ func normalizeEncoding(raw string) (string, error) {
 	encoding := strings.ToLower(strings.TrimSpace(raw))
 	switch encoding {
 	case "", "utf-8", "utf8":
-		return "utf-8", nil
+		return "", nil
 	case "base64":
 		return "base64", nil
 	default:

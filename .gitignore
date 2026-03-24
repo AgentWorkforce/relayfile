@@ -29,6 +29,12 @@ node_modules/
 dist/
 *.tsbuildinfo
 
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+
 # Environment
 .env
 .env.*

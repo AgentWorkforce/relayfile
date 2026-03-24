@@ -490,3 +490,40 @@ export interface DeleteFileInput {
   correlationId?: string;
   signal?: AbortSignal;
 }
+
+export interface IngestWebhookInput {
+  workspaceId: string;
+  provider: string;
+  event_type: string;
+  path: string;
+  data?: Record<string, unknown>;
+  delivery_id?: string;
+  timestamp?: string;
+  headers?: Record<string, string>;
+  correlationId?: string;
+  signal?: AbortSignal;
+}
+
+export interface WritebackItem {
+  id: string;
+  workspaceId: string;
+  path: string;
+  revision: string;
+  correlationId: string;
+}
+
+export interface AckWritebackInput {
+  workspaceId: string;
+  itemId: string;
+  success: boolean;
+  error?: string;
+  correlationId?: string;
+  signal?: AbortSignal;
+}
+
+export interface AckWritebackResponse {
+  status: "acknowledged";
+  id: string;
+  correlationId?: string;
+  success: boolean;
+}

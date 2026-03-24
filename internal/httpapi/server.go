@@ -8,9 +8,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"math"
 	"net/http"
-	"path/filepath"
+	"path"
 	"sort"
 	"strconv"
 	"strings"
@@ -1383,6 +1384,13 @@ func (s *Server) handleBulkWrite(w http.ResponseWriter, r *http.Request, workspa
 				})
 				continue
 			}
+		} else {
+			errorsOut = append(errorsOut, relayfile.BulkWriteError{
+				Path:    path,
+				Code:    "internal_error",
+				Message: "failed to check file permissions",
+			})
+			continue
 		}
 		allowed = append(allowed, file)
 	}
@@ -1427,7 +1435,7 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request, workspaceI
 		writeJSON(w, http.StatusOK, visible)
 	case "tar":
 		if err := s.writeTarExport(w, visible); err != nil {
-			writeError(w, http.StatusInternalServerError, "internal_error", err.Error(), correlationID)
+			log.Printf("tar export error (headers already sent): %v", err)
 		}
 	case "patch":
 		s.writePatchExport(w, visible)
@@ -2017,7 +2025,7 @@ func (s *Server) writeTarExport(w http.ResponseWriter, files []relayfile.File) e
 		if err != nil {
 			return err
 		}
-		name := strings.TrimPrefix(filepath.Clean(file.Path), "/")
+		name := strings.TrimPrefix(path.Clean(file.Path), "/")
 		if name == "." || name == "" {
 			name = "root"
 		}

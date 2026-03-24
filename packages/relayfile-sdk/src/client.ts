@@ -31,7 +31,11 @@ import {
   type SyncStatusResponse,
   type TreeResponse,
   type WriteFileInput,
-  type WriteQueuedResponse
+  type WriteQueuedResponse,
+  type IngestWebhookInput,
+  type WritebackItem,
+  type AckWritebackInput,
+  type AckWritebackResponse
 } from "./types.js";
 import {
   InvalidStateError,
@@ -599,6 +603,50 @@ export class RelayFileClient {
         reason
       },
       signal
+    });
+  }
+
+  async ingestWebhook(input: IngestWebhookInput): Promise<QueuedResponse> {
+    return this.request<QueuedResponse>({
+      method: "POST",
+      path: `/v1/workspaces/${encodeURIComponent(input.workspaceId)}/webhooks/ingest`,
+      correlationId: input.correlationId,
+      body: {
+        provider: input.provider,
+        event_type: input.event_type,
+        path: input.path,
+        data: input.data,
+        delivery_id: input.delivery_id,
+        timestamp: input.timestamp,
+        headers: input.headers
+      },
+      signal: input.signal
+    });
+  }
+
+  async listPendingWritebacks(
+    workspaceId: string,
+    correlationId?: string,
+    signal?: AbortSignal
+  ): Promise<WritebackItem[]> {
+    return this.request<WritebackItem[]>({
+      method: "GET",
+      path: `/v1/workspaces/${encodeURIComponent(workspaceId)}/writeback/pending`,
+      correlationId,
+      signal
+    });
+  }
+
+  async ackWriteback(input: AckWritebackInput): Promise<AckWritebackResponse> {
+    return this.request<AckWritebackResponse>({
+      method: "POST",
+      path: `/v1/workspaces/${encodeURIComponent(input.workspaceId)}/writeback/${encodeURIComponent(input.itemId)}/ack`,
+      correlationId: input.correlationId,
+      body: {
+        success: input.success,
+        error: input.error
+      },
+      signal: input.signal
     });
   }
 
