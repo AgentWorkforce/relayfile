@@ -6,8 +6,21 @@ export {
   RelayFileApiError,
   RevisionConflictError
 } from "./errors.js";
+// Integration providers
+export { IntegrationProvider, computeCanonicalPath } from "./provider.js";
+export type { WebhookInput, ListProviderFilesOptions, WatchProviderEventsOptions } from "./provider.js";
+
+// Nango bridge
+export { NangoHelpers } from "./nango.js";
+export type { NangoWebhookInput } from "./nango.js";
+
+// Composio bridge
+export { ComposioHelpers } from "./composio.js";
+export type { ComposioWebhookPayload, ComposioTriggerOptions } from "./composio.js";
 export type {
   AckResponse,
+  AckWritebackInput,
+  AckWritebackResponse,
   AdminIngressAlert,
   AdminIngressAlertProfile,
   AdminIngressEffectiveAlertProfile,
@@ -42,6 +55,7 @@ export type {
   GetSyncDeadLettersOptions,
   GetSyncIngressStatusOptions,
   GetSyncStatusOptions,
+  IngestWebhookInput,
   ListTreeOptions,
   OperationFeedResponse,
   OperationStatusResponse,
@@ -53,6 +67,7 @@ export type {
   TreeEntry,
   TreeResponse,
   WritebackActionType,
+  WritebackItem,
   WriteFileInput,
   WriteQueuedResponse
 } from "./types.js";
