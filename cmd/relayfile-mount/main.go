@@ -27,6 +27,7 @@ func main() {
 	interval := flag.Duration("interval", durationEnv("RELAYFILE_MOUNT_INTERVAL", 2*time.Second), "sync interval")
 	intervalJitter := flag.Float64("interval-jitter", floatEnv("RELAYFILE_MOUNT_INTERVAL_JITTER", 0.2), "sync interval jitter ratio (0.0-1.0)")
 	timeout := flag.Duration("timeout", durationEnv("RELAYFILE_MOUNT_TIMEOUT", 15*time.Second), "per-sync timeout")
+	websocketEnabled := flag.Bool("websocket", boolEnv("RELAYFILE_MOUNT_WEBSOCKET", true), "enable websocket event streaming when available")
 	once := flag.Bool("once", false, "run one sync cycle and exit")
 	flag.Parse()
 
@@ -54,6 +55,7 @@ func main() {
 		EventProvider: strings.TrimSpace(*eventProvider),
 		LocalRoot:     *localDir,
 		StateFile:     *stateFile,
+		WebSocket:     boolPtr(*websocketEnabled),
 		Logger:        log.Default(),
 	})
 	if err != nil {
@@ -124,6 +126,23 @@ func floatEnv(name string, fallback float64) float64 {
 		return fallback
 	}
 	return value
+}
+
+func boolEnv(name string, fallback bool) bool {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return fallback
+	}
+	value, err := strconv.ParseBool(raw)
+	if err != nil {
+		log.Printf("invalid %s=%q, using fallback %t", name, raw, fallback)
+		return fallback
+	}
+	return value
+}
+
+func boolPtr(value bool) *bool {
+	return &value
 }
 
 func clampJitterRatio(value float64) float64 {

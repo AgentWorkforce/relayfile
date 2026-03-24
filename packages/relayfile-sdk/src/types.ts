@@ -32,6 +32,7 @@ export interface FileReadResponse {
   revision: string;
   contentType: string;
   content: string;
+  encoding?: "utf-8" | "base64";
   provider?: string;
   providerObjectId?: string;
   lastEditedAt?: string;
@@ -42,6 +43,31 @@ export interface FileWriteRequest {
   contentType?: string;
   content: string;
   semantics?: FileSemantics;
+}
+
+export interface BulkWriteFile {
+  path: string;
+  contentType?: string;
+  content: string;
+  encoding?: "utf-8" | "base64";
+}
+
+export interface BulkWriteInput {
+  workspaceId: string;
+  files: BulkWriteFile[];
+  correlationId?: string;
+  signal?: AbortSignal;
+}
+
+export interface BulkWriteResponse {
+  written: number;
+  errorCount: number;
+  errors: Array<{
+    path: string;
+    code: string;
+    message: string;
+  }>;
+  correlationId: string;
 }
 
 export interface FileQueryItem {
@@ -105,6 +131,17 @@ export interface EventFeedResponse {
   events: FilesystemEvent[];
   nextCursor: string | null;
 }
+
+export type ExportFormat = "tar" | "json" | "patch";
+
+export interface ExportOptions {
+  workspaceId: string;
+  format?: ExportFormat;
+  correlationId?: string;
+  signal?: AbortSignal;
+}
+
+export type ExportJsonResponse = FileReadResponse[];
 
 export type OperationStatus =
   | "pending"
@@ -440,6 +477,7 @@ export interface WriteFileInput {
   baseRevision: string;
   content: string;
   contentType?: string;
+  encoding?: "utf-8" | "base64";
   semantics?: FileSemantics;
   correlationId?: string;
   signal?: AbortSignal;

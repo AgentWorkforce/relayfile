@@ -2,6 +2,7 @@ package relayfile
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -229,6 +230,64 @@ func (m *memoryStateBackend) Save(state *persistedState) error {
 	return nil
 }
 
+func TestStoreSubscribePublishesAndUnsubscribes(t *testing.T) {
+	store := NewStoreWithOptions(StoreOptions{DisableWorkers: true})
+	t.Cleanup(store.Close)
+
+	events := make(chan Event, 4)
+	unsubscribe := store.Subscribe("ws_subscribe", events)
+
+	write, err := store.WriteFile(WriteRequest{
+		WorkspaceID:   "ws_subscribe",
+		Path:          "/external/Doc.md",
+		IfMatch:       "0",
+		ContentType:   "text/markdown",
+		Content:       "# hello",
+		CorrelationID: "corr_subscribe_1",
+	})
+	if err != nil {
+		t.Fatalf("write failed: %v", err)
+	}
+	if write.TargetRevision == "" {
+		t.Fatalf("expected target revision")
+	}
+
+	select {
+	case event := <-events:
+		if event.Type != "file.created" {
+			t.Fatalf("expected file.created event, got %s", event.Type)
+		}
+		if event.Path != "/external/Doc.md" {
+			t.Fatalf("unexpected event path: %s", event.Path)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("timed out waiting for subscribed event")
+	}
+
+	unsubscribe()
+
+	file, err := store.ReadFile("ws_subscribe", "/external/Doc.md")
+	if err != nil {
+		t.Fatalf("read failed: %v", err)
+	}
+	if _, err := store.WriteFile(WriteRequest{
+		WorkspaceID:   "ws_subscribe",
+		Path:          "/external/Doc.md",
+		IfMatch:       file.Revision,
+		ContentType:   "text/markdown",
+		Content:       "# updated",
+		CorrelationID: "corr_subscribe_2",
+	}); err != nil {
+		t.Fatalf("second write failed: %v", err)
+	}
+
+	select {
+	case event := <-events:
+		t.Fatalf("unexpected event after unsubscribe: %+v", event)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
 func TestStoreWriteReadConflictDeleteLifecycle(t *testing.T) {
 	store := NewStore()
 	t.Cleanup(store.Close)
@@ -335,6 +394,222 @@ func TestStoreUsesCustomStateBackend(t *testing.T) {
 	}
 }
 
+func TestStoreBulkWriteAndExportWorkspace(t *testing.T) {
+	store := NewStoreWithOptions(StoreOptions{DisableWorkers: true})
+	t.Cleanup(store.Close)
+
+	written, errs := store.BulkWrite("ws_bulk", []BulkWriteFile{
+		{
+			Path:        "/external/Seed.md",
+			ContentType: "text/markdown",
+			Content:     "# seed",
+		},
+		{
+			Path:        "/external/blob.bin",
+			ContentType: "application/octet-stream",
+			Content:     base64.StdEncoding.EncodeToString([]byte{0x00, 0x01, 0x02, 0x03}),
+			Encoding:    "base64",
+		},
+	})
+	if written != 2 {
+		t.Fatalf("expected 2 written files, got %d", written)
+	}
+	if len(errs) != 0 {
+		t.Fatalf("expected no bulk write errors, got %+v", errs)
+	}
+
+	exported, err := store.ExportWorkspace("ws_bulk")
+	if err != nil {
+		t.Fatalf("export failed: %v", err)
+	}
+	if len(exported) != 2 {
+		t.Fatalf("expected 2 exported files, got %d", len(exported))
+	}
+
+	byPath := map[string]File{}
+	for _, file := range exported {
+		byPath[file.Path] = file
+	}
+	if byPath["/external/Seed.md"].Content != "# seed" {
+		t.Fatalf("unexpected exported content: %+v", byPath["/external/Seed.md"])
+	}
+	if byPath["/external/blob.bin"].Encoding != "base64" {
+		t.Fatalf("expected base64 encoding for binary file, got %+v", byPath["/external/blob.bin"])
+	}
+}
+
+func TestBulkWrite(t *testing.T) {
+	store := NewStoreWithOptions(StoreOptions{DisableWorkers: true})
+	t.Cleanup(store.Close)
+
+	events := make(chan Event, 16)
+	unsubscribe := store.Subscribe("ws_bulk_write", events)
+	defer unsubscribe()
+
+	files := make([]BulkWriteFile, 0, 10)
+	expectedPaths := make(map[string]struct{}, 10)
+	for i := 0; i < 10; i++ {
+		path := fmt.Sprintf("/external/File-%02d.md", i)
+		files = append(files, BulkWriteFile{
+			Path:        path,
+			ContentType: "text/markdown",
+			Content:     fmt.Sprintf("# file %d", i),
+		})
+		expectedPaths[path] = struct{}{}
+	}
+
+	written, errs := store.BulkWrite("ws_bulk_write", files)
+	if written != 10 {
+		t.Fatalf("expected 10 written files, got %d", written)
+	}
+	if len(errs) != 0 {
+		t.Fatalf("expected no bulk write errors, got %+v", errs)
+	}
+
+	tree, err := store.ListTree("ws_bulk_write", "/external", 1, "")
+	if err != nil {
+		t.Fatalf("list tree failed: %v", err)
+	}
+	if len(tree.Entries) != 10 {
+		t.Fatalf("expected 10 tree entries, got %d", len(tree.Entries))
+	}
+	for _, entry := range tree.Entries {
+		if entry.Type != "file" {
+			t.Fatalf("expected file entry, got %+v", entry)
+		}
+		if _, ok := expectedPaths[entry.Path]; !ok {
+			t.Fatalf("unexpected tree path: %s", entry.Path)
+		}
+	}
+
+	received := make(map[string]Event, 10)
+	deadline := time.After(time.Second)
+	for len(received) < 10 {
+		select {
+		case event := <-events:
+			received[event.Path] = event
+		case <-deadline:
+			t.Fatalf("timed out waiting for bulk write events; received %d", len(received))
+		}
+	}
+	for path := range expectedPaths {
+		event, ok := received[path]
+		if !ok {
+			t.Fatalf("missing event for path %s", path)
+		}
+		if event.Type != "file.created" {
+			t.Fatalf("expected file.created for %s, got %s", path, event.Type)
+		}
+	}
+}
+
+func TestBulkWriteOverwrite(t *testing.T) {
+	store := NewStoreWithOptions(StoreOptions{DisableWorkers: true})
+	t.Cleanup(store.Close)
+
+	initial := []BulkWriteFile{
+		{Path: "/external/A.md", ContentType: "text/markdown", Content: "# v1"},
+		{Path: "/external/B.md", ContentType: "text/markdown", Content: "# v1"},
+	}
+	written, errs := store.BulkWrite("ws_bulk_overwrite", initial)
+	if written != len(initial) {
+		t.Fatalf("expected %d initial writes, got %d", len(initial), written)
+	}
+	if len(errs) != 0 {
+		t.Fatalf("expected no initial errors, got %+v", errs)
+	}
+
+	updated := []BulkWriteFile{
+		{Path: "/external/A.md", ContentType: "text/markdown", Content: "# v2"},
+		{Path: "/external/B.md", ContentType: "text/markdown", Content: "# v3"},
+	}
+	written, errs = store.BulkWrite("ws_bulk_overwrite", updated)
+	if written != len(updated) {
+		t.Fatalf("expected %d overwrite writes, got %d", len(updated), written)
+	}
+	if len(errs) != 0 {
+		t.Fatalf("expected no overwrite errors, got %+v", errs)
+	}
+
+	for _, file := range updated {
+		got, err := store.ReadFile("ws_bulk_overwrite", file.Path)
+		if err != nil {
+			t.Fatalf("read %s failed: %v", file.Path, err)
+		}
+		if got.Content != file.Content {
+			t.Fatalf("expected latest content %q for %s, got %q", file.Content, file.Path, got.Content)
+		}
+	}
+}
+
+func TestExportWorkspace(t *testing.T) {
+	store := NewStoreWithOptions(StoreOptions{DisableWorkers: true})
+	t.Cleanup(store.Close)
+
+	seed := []BulkWriteFile{
+		{Path: "/external/A.md", ContentType: "text/markdown", Content: "# A"},
+		{Path: "/external/B.md", ContentType: "text/plain", Content: "B"},
+		{Path: "/external/C.json", ContentType: "application/json", Content: `{"ok":true}`},
+	}
+	written, errs := store.BulkWrite("ws_export", seed)
+	if written != len(seed) {
+		t.Fatalf("expected %d written files, got %d", len(seed), written)
+	}
+	if len(errs) != 0 {
+		t.Fatalf("expected no bulk write errors, got %+v", errs)
+	}
+
+	exported, err := store.ExportWorkspace("ws_export")
+	if err != nil {
+		t.Fatalf("export workspace failed: %v", err)
+	}
+	if len(exported) != len(seed) {
+		t.Fatalf("expected %d exported files, got %d", len(seed), len(exported))
+	}
+
+	for i, file := range exported {
+		if file.Path != seed[i].Path {
+			t.Fatalf("expected path %s at index %d, got %s", seed[i].Path, i, file.Path)
+		}
+		if file.Content != seed[i].Content {
+			t.Fatalf("expected content %q for %s, got %q", seed[i].Content, file.Path, file.Content)
+		}
+		if file.ContentType != seed[i].ContentType {
+			t.Fatalf("expected content type %q for %s, got %q", seed[i].ContentType, file.Path, file.ContentType)
+		}
+	}
+}
+
+func TestBinaryEncoding(t *testing.T) {
+	store := NewStoreWithOptions(StoreOptions{DisableWorkers: true})
+	t.Cleanup(store.Close)
+
+	encoded := base64.StdEncoding.EncodeToString([]byte{0x00, 0x7f, 0xff, 0x10})
+	written, errs := store.BulkWrite("ws_binary_encoding", []BulkWriteFile{{
+		Path:        "/external/blob.bin",
+		ContentType: "application/octet-stream",
+		Content:     encoded,
+		Encoding:    "base64",
+	}})
+	if written != 1 {
+		t.Fatalf("expected 1 written file, got %d", written)
+	}
+	if len(errs) != 0 {
+		t.Fatalf("expected no bulk write errors, got %+v", errs)
+	}
+
+	file, err := store.ReadFile("ws_binary_encoding", "/external/blob.bin")
+	if err != nil {
+		t.Fatalf("read binary file failed: %v", err)
+	}
+	if file.Content != encoded {
+		t.Fatalf("expected encoded content %q, got %q", encoded, file.Content)
+	}
+	if file.Encoding != "base64" {
+		t.Fatalf("expected base64 encoding, got %q", file.Encoding)
+	}
+}
+
 func TestStoreUsesCustomQueues(t *testing.T) {
 	envelopeQueue := &countingEnvelopeQueue{
 		inner: NewInMemoryEnvelopeQueue(4),
@@ -364,7 +639,7 @@ func TestStoreUsesCustomQueues(t *testing.T) {
 	_, err = store.IngestEnvelope(WebhookEnvelopeRequest{
 		EnvelopeID:    "env_custom_queue_1",
 		WorkspaceID:   "ws_custom_queue",
-		Provider:    "external",
+		Provider:      "external",
 		DeliveryID:    "delivery_custom_queue_1",
 		ReceivedAt:    time.Now().UTC().Format(time.RFC3339Nano),
 		Payload:       map[string]any{"event_type": "file.created", "providerObjectId": "obj_custom_queue_1", "path": "/external/Queue.md", "content": "# queue"},
@@ -443,7 +718,7 @@ func TestEnqueueEnvelopeDeduplicatesQueuedEnvelopeID(t *testing.T) {
 	_, err := store.IngestEnvelope(WebhookEnvelopeRequest{
 		EnvelopeID:    "env_queue_dedupe_1",
 		WorkspaceID:   "ws_queue_dedupe",
-		Provider:    "external",
+		Provider:      "external",
 		DeliveryID:    "delivery_queue_dedupe_1",
 		ReceivedAt:    time.Now().UTC().Format(time.RFC3339Nano),
 		Payload:       map[string]any{"event_type": "file.created", "providerObjectId": "obj_queue_dedupe_1", "path": "/external/Q.md", "content": "# q"},
@@ -1026,10 +1301,10 @@ func TestProviderUpsertWithoutPathUsesObjectIdentity(t *testing.T) {
 		DeliveryID:  "delivery_object_identity_1",
 		ReceivedAt:  firstReceivedAt,
 		Payload: map[string]any{
-			"event_type": "file.created",
-			"providerObjectId":   "obj_identity_1",
-			"path":       "/external/ObjectIdentity.md",
-			"content":    "# initial",
+			"event_type":       "file.created",
+			"providerObjectId": "obj_identity_1",
+			"path":             "/external/ObjectIdentity.md",
+			"content":          "# initial",
 		},
 		CorrelationID: "corr_object_identity_1",
 	})
@@ -1059,9 +1334,9 @@ func TestProviderUpsertWithoutPathUsesObjectIdentity(t *testing.T) {
 		DeliveryID:  "delivery_object_identity_2",
 		ReceivedAt:  secondReceivedAt,
 		Payload: map[string]any{
-			"event_type": "file.updated",
-			"providerObjectId":   "obj_identity_1",
-			"content":    "# updated",
+			"event_type":       "file.updated",
+			"providerObjectId": "obj_identity_1",
+			"content":          "# updated",
 		},
 		CorrelationID: "corr_object_identity_2",
 	})
@@ -1494,13 +1769,13 @@ func TestSuppressionMarkersPersistAcrossRestart(t *testing.T) {
 		DeliveryID:  "delivery_loop_persist_1",
 		ReceivedAt:  time.Now().UTC().Format(time.RFC3339Nano),
 		Payload: map[string]any{
-			"event_type": "file.updated",
-			"providerObjectId":      "obj_loop_persist_1",
-			"path":          "/external/LoopPersist.md",
-			"content":       "# echo",
-			"origin":        "relayfile",
-			"opId":          write.OpID,
-			"correlationId": "corr_loop_persist_1",
+			"event_type":       "file.updated",
+			"providerObjectId": "obj_loop_persist_1",
+			"path":             "/external/LoopPersist.md",
+			"content":          "# echo",
+			"origin":           "relayfile",
+			"opId":             write.OpID,
+			"correlationId":    "corr_loop_persist_1",
 		},
 		CorrelationID: "corr_loop_persist_2",
 	})
@@ -1533,7 +1808,7 @@ func TestGetSyncStatusMarksProviderLaggingFromPendingEnvelope(t *testing.T) {
 	_, err := store.IngestEnvelope(WebhookEnvelopeRequest{
 		EnvelopeID:    "env_sync_lag_1",
 		WorkspaceID:   "ws_sync_lag",
-		Provider:    "external",
+		Provider:      "external",
 		DeliveryID:    "delivery_sync_lag_1",
 		ReceivedAt:    time.Now().UTC().Add(-2 * time.Minute).Format(time.RFC3339Nano),
 		Payload:       map[string]any{"type": "sync"},
@@ -1756,7 +2031,7 @@ func TestListSyncStatusesAggregatesWorkspacesAndAppliesProviderFilter(t *testing
 	if _, err := store.IngestEnvelope(WebhookEnvelopeRequest{
 		EnvelopeID:    "env_sync_list_1",
 		WorkspaceID:   "ws_sync_list_1",
-		Provider:    "external",
+		Provider:      "external",
 		DeliveryID:    "delivery_sync_list_1",
 		ReceivedAt:    time.Now().UTC().Add(-2 * time.Minute).Format(time.RFC3339Nano),
 		Payload:       map[string]any{"type": "sync"},
@@ -2241,7 +2516,7 @@ func TestStoreIngestEnvelopeAndReplayOp(t *testing.T) {
 	resp, err := store.IngestEnvelope(WebhookEnvelopeRequest{
 		EnvelopeID:    "env_1",
 		WorkspaceID:   "ws_env",
-		Provider:    "external",
+		Provider:      "external",
 		DeliveryID:    "delivery_1",
 		ReceivedAt:    receivedAt,
 		Payload:       map[string]any{"type": "sync"},
@@ -2258,7 +2533,7 @@ func TestStoreIngestEnvelopeAndReplayOp(t *testing.T) {
 	dup, err := store.IngestEnvelope(WebhookEnvelopeRequest{
 		EnvelopeID:    "env_2",
 		WorkspaceID:   "ws_env",
-		Provider:    "external",
+		Provider:      "external",
 		DeliveryID:    "delivery_1",
 		ReceivedAt:    receivedAt,
 		Payload:       map[string]any{"type": "sync"},
@@ -2372,10 +2647,10 @@ func TestReplayEnvelopeReprocessesProcessedEnvelope(t *testing.T) {
 		DeliveryID:  "delivery_replay_1",
 		ReceivedAt:  receivedAt,
 		Payload: map[string]any{
-			"event_type": "file.updated",
+			"event_type":       "file.updated",
 			"providerObjectId": "obj_replay_1",
-			"path":     "/external/Replay.md",
-			"content":  "# replay",
+			"path":             "/external/Replay.md",
+			"content":          "# replay",
 		},
 		CorrelationID: "corr_replay_1",
 	})
@@ -2862,7 +3137,7 @@ func TestReplayEnvelopeForWorkspaceRejectsWorkspaceMismatch(t *testing.T) {
 	_, err := store.IngestEnvelope(WebhookEnvelopeRequest{
 		EnvelopeID:    "env_ws_scope_1",
 		WorkspaceID:   "ws_scope_a",
-		Provider:    "external",
+		Provider:      "external",
 		DeliveryID:    "delivery_ws_scope_1",
 		ReceivedAt:    time.Now().UTC().Format(time.RFC3339),
 		Payload:       map[string]any{"type": "sync"},
@@ -2885,7 +3160,7 @@ func TestReplayEnvelopeForWorkspaceRejectsNonDeadLetterEnvelope(t *testing.T) {
 	_, err := store.IngestEnvelope(WebhookEnvelopeRequest{
 		EnvelopeID:    "env_ws_scope_2",
 		WorkspaceID:   "ws_scope_a",
-		Provider:    "external",
+		Provider:      "external",
 		DeliveryID:    "delivery_ws_scope_2",
 		ReceivedAt:    time.Now().UTC().Format(time.RFC3339),
 		Payload:       map[string]any{"type": "sync"},
@@ -2913,11 +3188,11 @@ func TestEnvelopePipelineAppliesGenericUpsertMoveDelete(t *testing.T) {
 		DeliveryID:  "delivery_pipe_1",
 		ReceivedAt:  receivedAt,
 		Payload: map[string]any{
-			"event_type": "file.updated",
-			"path":       "/external/Engineering/FromWebhook.md",
+			"event_type":       "file.updated",
+			"path":             "/external/Engineering/FromWebhook.md",
 			"providerObjectId": "obj_obj_1",
-			"content":  "# from webhook",
-			"contentType": "text/markdown",
+			"content":          "# from webhook",
+			"contentType":      "text/markdown",
 		},
 		CorrelationID: "corr_pipe_1",
 	})
@@ -2933,11 +3208,11 @@ func TestEnvelopePipelineAppliesGenericUpsertMoveDelete(t *testing.T) {
 		DeliveryID:  "delivery_pipe_2",
 		ReceivedAt:  receivedAt,
 		Payload: map[string]any{
-			"event_type": "file.updated",
-			"path":       "/external/Engineering/Moved.md",
+			"event_type":       "file.updated",
+			"path":             "/external/Engineering/Moved.md",
 			"providerObjectId": "obj_obj_1",
-			"content":  "# moved",
-			"contentType": "text/markdown",
+			"content":          "# moved",
+			"contentType":      "text/markdown",
 		},
 		CorrelationID: "corr_pipe_2",
 	})
@@ -2954,8 +3229,8 @@ func TestEnvelopePipelineAppliesGenericUpsertMoveDelete(t *testing.T) {
 		DeliveryID:  "delivery_pipe_3",
 		ReceivedAt:  receivedAt,
 		Payload: map[string]any{
-			"event_type": "file.deleted",
-			"path":       "/external/Engineering/Moved.md",
+			"event_type":       "file.deleted",
+			"path":             "/external/Engineering/Moved.md",
 			"providerObjectId": "obj_obj_1",
 		},
 		CorrelationID: "corr_pipe_3",
@@ -3313,10 +3588,10 @@ func TestWebhookBurstCoalescingKeepsSinglePendingEnvelope(t *testing.T) {
 			DeliveryID:  fmt.Sprintf("delivery_burst_%d", i),
 			ReceivedAt:  receivedAt.Add(time.Duration(i) * 10 * time.Millisecond).Format(time.RFC3339Nano),
 			Payload: map[string]any{
-				"event_type": "file.updated",
+				"event_type":       "file.updated",
 				"providerObjectId": "obj_burst_1",
-				"path":     "/external/Burst.md",
-				"content":  fmt.Sprintf("# burst %d", i),
+				"path":             "/external/Burst.md",
+				"content":          fmt.Sprintf("# burst %d", i),
 			},
 			CorrelationID: fmt.Sprintf("corr_burst_%d", i),
 		})
@@ -3357,10 +3632,10 @@ func TestRebuildCoalesceIndexPrefersLatestPendingEnvelope(t *testing.T) {
 		DeliveryID:  "delivery_rebuild_old",
 		ReceivedAt:  "2026-01-01T10:00:00Z",
 		Payload: map[string]any{
-			"event_type": "file.updated",
+			"event_type":       "file.updated",
 			"providerObjectId": "obj_rebuild_1",
-			"path":     "/external/Rebuild.md",
-			"content":  "# old",
+			"path":             "/external/Rebuild.md",
+			"content":          "# old",
 		},
 	}
 	newReq := WebhookEnvelopeRequest{
@@ -3370,10 +3645,10 @@ func TestRebuildCoalesceIndexPrefersLatestPendingEnvelope(t *testing.T) {
 		DeliveryID:  "delivery_rebuild_new",
 		ReceivedAt:  "2026-01-01T10:00:01Z",
 		Payload: map[string]any{
-			"event_type": "file.updated",
+			"event_type":       "file.updated",
 			"providerObjectId": "obj_rebuild_1",
-			"path":     "/external/Rebuild.md",
-			"content":  "# new",
+			"path":             "/external/Rebuild.md",
+			"content":          "# new",
 		},
 	}
 	coalesceKey := coalesceObjectKey(oldReq)
@@ -3408,7 +3683,7 @@ func TestProcessedEnvelopeRetentionPrunesOldestProcessed(t *testing.T) {
 		_, err := store.IngestEnvelope(WebhookEnvelopeRequest{
 			EnvelopeID:    fmt.Sprintf("env_retention_%d", i),
 			WorkspaceID:   "ws_retention",
-			Provider:    "external",
+			Provider:      "external",
 			DeliveryID:    fmt.Sprintf("delivery_retention_%d", i),
 			ReceivedAt:    time.Now().UTC().Add(time.Duration(i) * time.Second).Format(time.RFC3339Nano),
 			Payload:       map[string]any{"type": "sync"},
@@ -3477,7 +3752,7 @@ func TestEnvelopeRetentionDoesNotPruneDeadLetters(t *testing.T) {
 	_, err = store.IngestEnvelope(WebhookEnvelopeRequest{
 		EnvelopeID:    "env_retention_ok_1",
 		WorkspaceID:   "ws_retention_dead",
-		Provider:    "external",
+		Provider:      "external",
 		DeliveryID:    "delivery_retention_ok_1",
 		ReceivedAt:    time.Now().UTC().Add(time.Second).Format(time.RFC3339Nano),
 		Payload:       map[string]any{"type": "sync"},
@@ -3512,7 +3787,7 @@ func TestEnvelopeQueueBackpressureAndIngressStatus(t *testing.T) {
 	_, err := store.IngestEnvelope(WebhookEnvelopeRequest{
 		EnvelopeID:    "env_backpressure_1",
 		WorkspaceID:   "ws_backpressure",
-		Provider:    "external",
+		Provider:      "external",
 		DeliveryID:    "delivery_backpressure_1",
 		ReceivedAt:    receivedAt,
 		Payload:       map[string]any{"type": "sync"},
@@ -3525,7 +3800,7 @@ func TestEnvelopeQueueBackpressureAndIngressStatus(t *testing.T) {
 	_, err = store.IngestEnvelope(WebhookEnvelopeRequest{
 		EnvelopeID:    "env_backpressure_2",
 		WorkspaceID:   "ws_backpressure",
-		Provider:    "external",
+		Provider:      "external",
 		DeliveryID:    "delivery_backpressure_2",
 		ReceivedAt:    receivedAt,
 		Payload:       map[string]any{"type": "sync"},
@@ -3571,7 +3846,7 @@ func TestGetIngressStatusForProviderFiltersWorkspaceMetrics(t *testing.T) {
 	_, err := store.IngestEnvelope(WebhookEnvelopeRequest{
 		EnvelopeID:    "env_ingress_provider_1",
 		WorkspaceID:   "ws_ingress_provider",
-		Provider:    "external",
+		Provider:      "external",
 		DeliveryID:    "delivery_ingress_provider_1",
 		ReceivedAt:    receivedAt,
 		Payload:       map[string]any{"type": "sync"},
@@ -3628,7 +3903,7 @@ func TestListIngressStatusesAggregatesWorkspaces(t *testing.T) {
 	_, err := store.IngestEnvelope(WebhookEnvelopeRequest{
 		EnvelopeID:    "env_ingress_list_1",
 		WorkspaceID:   "ws_ingress_list_1",
-		Provider:    "external",
+		Provider:      "external",
 		DeliveryID:    "delivery_ingress_list_1",
 		ReceivedAt:    receivedAt,
 		Payload:       map[string]any{"type": "sync"},
@@ -3681,7 +3956,7 @@ func TestEnvelopeDedupedIngressStatusCounter(t *testing.T) {
 	_, err := store.IngestEnvelope(WebhookEnvelopeRequest{
 		EnvelopeID:    "env_dedupe_1",
 		WorkspaceID:   "ws_dedupe_status",
-		Provider:    "external",
+		Provider:      "external",
 		DeliveryID:    "delivery_dedupe_1",
 		ReceivedAt:    receivedAt,
 		Payload:       map[string]any{"type": "sync"},
@@ -3694,7 +3969,7 @@ func TestEnvelopeDedupedIngressStatusCounter(t *testing.T) {
 	_, err = store.IngestEnvelope(WebhookEnvelopeRequest{
 		EnvelopeID:    "env_dedupe_2",
 		WorkspaceID:   "ws_dedupe_status",
-		Provider:    "external",
+		Provider:      "external",
 		DeliveryID:    "delivery_dedupe_1",
 		ReceivedAt:    receivedAt,
 		Payload:       map[string]any{"type": "sync"},
@@ -3739,7 +4014,7 @@ func TestIngressStatusReportsOldestPendingAge(t *testing.T) {
 	_, err := store.IngestEnvelope(WebhookEnvelopeRequest{
 		EnvelopeID:    "env_age_1",
 		WorkspaceID:   "ws_age",
-		Provider:    "external",
+		Provider:      "external",
 		DeliveryID:    "delivery_age_1",
 		ReceivedAt:    time.Now().UTC().Add(-2 * time.Minute).Format(time.RFC3339),
 		Payload:       map[string]any{"type": "sync"},
@@ -3951,10 +4226,10 @@ func TestPendingEnvelopeIsRecoveredAfterRestart(t *testing.T) {
 		DeliveryID:  "delivery_recovery_1",
 		ReceivedAt:  receivedAt,
 		Payload: map[string]any{
-			"event_type": "file.updated",
+			"event_type":       "file.updated",
 			"providerObjectId": "obj_recovery_1",
-			"path":     "/external/Recovered.md",
-			"content":  "# recovered",
+			"path":             "/external/Recovered.md",
+			"content":          "# recovered",
 		},
 		CorrelationID: "corr_recovery_1",
 	})
@@ -4072,13 +4347,13 @@ func TestLoopSuppressionSuppressesProviderEchoWithinWindow(t *testing.T) {
 		DeliveryID:  "delivery_loop_echo_1",
 		ReceivedAt:  time.Now().UTC().Format(time.RFC3339Nano),
 		Payload: map[string]any{
-			"event_type": "file.updated",
-			"providerObjectId":      "obj_loop_1",
-			"path":          "/external/Loop.md",
-			"content":       "# echoed",
-			"origin":        "relayfile",
-			"opId":          write.OpID,
-			"correlationId": "corr_loop_1",
+			"event_type":       "file.updated",
+			"providerObjectId": "obj_loop_1",
+			"path":             "/external/Loop.md",
+			"content":          "# echoed",
+			"origin":           "relayfile",
+			"opId":             write.OpID,
+			"correlationId":    "corr_loop_1",
 		},
 		CorrelationID: "corr_loop_echo_1",
 	})
@@ -4153,13 +4428,13 @@ func TestLoopSuppressionWindowExpiryAllowsProviderApply(t *testing.T) {
 		DeliveryID:  "delivery_loop_expiry_1",
 		ReceivedAt:  time.Now().UTC().Format(time.RFC3339Nano),
 		Payload: map[string]any{
-			"event_type": "file.updated",
-			"providerObjectId":      "obj_loop_expiry_1",
-			"path":          "/external/LoopExpiry.md",
-			"content":       "# echoed",
-			"origin":        "relayfile",
-			"opId":          write.OpID,
-			"correlationId": "corr_loop_expiry_1",
+			"event_type":       "file.updated",
+			"providerObjectId": "obj_loop_expiry_1",
+			"path":             "/external/LoopExpiry.md",
+			"content":          "# echoed",
+			"origin":           "relayfile",
+			"opId":             write.OpID,
+			"correlationId":    "corr_loop_expiry_1",
 		},
 		CorrelationID: "corr_loop_expiry_echo_1",
 	})

@@ -1,0 +1,58 @@
+---
+interface Feature {
+  title: string;
+  body: string;
+}
+
+interface Props {
+  introTitle: string;
+  introBody: string;
+  problemPoints: string[];
+  features: Feature[];
+  programmablePoints: string[];
+}
+
+const { introTitle, introBody, problemPoints, features, programmablePoints } = Astro.props;
+---
+
+<section class="grid gap-8 lg:grid-cols-[1.15fr_0.85fr]">
+  <div class="section-shell p-8 sm:p-10">
+    <p class="section-heading">Why This Exists</p>
+    <h2 class="section-title">{introTitle}</h2>
+    <p class="mt-6 text-base leading-8 text-zinc-300">{introBody}</p>
+    <div class="mt-8 grid gap-4">
+      {
+        problemPoints.map((point) => (
+          <div class="rounded-2xl border border-zinc-800 bg-zinc-950/70 p-5">
+            <p class="text-sm leading-7 text-zinc-300">{point}</p>
+          </div>
+        ))
+      }
+    </div>
+  </div>
+
+  <div class="space-y-6">
+    {
+      features.map((feature) => (
+        <article class="section-shell p-7">
+          <h3 class="text-xl font-semibold text-zinc-50">{feature.title}</h3>
+          <p class="mt-3 text-sm leading-7 text-zinc-300">{feature.body}</p>
+        </article>
+      ))
+    }
+
+    <article class="section-shell p-7">
+      <h3 class="text-xl font-semibold text-zinc-50">Programmable by default</h3>
+      <ul class="mt-4 space-y-3 text-sm leading-7 text-zinc-300">
+        {
+          programmablePoints.map((point) => (
+            <li class="flex gap-3">
+              <span class="mt-2 h-2 w-2 rounded-full bg-cyan-400"></span>
+              <span>{point}</span>
+            </li>
+          ))
+        }
+      </ul>
+    </article>
+  </div>
+</section>

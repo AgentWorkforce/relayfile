@@ -22,8 +22,7 @@
 .DS_Store
 Thumbs.db
 
-# Trajectories
-.trajectories/
+.agent-relay
 
 # Node (SDK)
 node_modules/
@@ -42,3 +41,18 @@ __pycache__/
 
 # Local mount mirror
 /.livefs/
+
+# Compiled binaries
+/relayfile
+/relayfile-cli
+/relayfile-mount
+/relayfile-server
+
+# Agent tool configs
+.factory/
+.gemini/
+.trajectories/
+.mcp.json
+opencode.json
+site/node_modules/
+site/dist/

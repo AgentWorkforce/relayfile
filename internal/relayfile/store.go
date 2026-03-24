@@ -2,6 +2,7 @@ package relayfile
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -72,6 +73,7 @@ type File struct {
 	Revision         string        `json:"revision"`
 	ContentType      string        `json:"contentType"`
 	Content          string        `json:"content"`
+	Encoding         string        `json:"encoding,omitempty"`
 	Provider         string        `json:"provider,omitempty"`
 	ProviderObjectID string        `json:"providerObjectId,omitempty"`
 	LastEditedAt     string        `json:"lastEditedAt,omitempty"`
@@ -100,8 +102,22 @@ type WriteRequest struct {
 	IfMatch       string
 	ContentType   string
 	Content       string
+	Encoding      string
 	Semantics     FileSemantics
 	CorrelationID string
+}
+
+type BulkWriteFile struct {
+	Path        string `json:"path"`
+	ContentType string `json:"contentType"`
+	Content     string `json:"content"`
+	Encoding    string `json:"encoding"`
+}
+
+type BulkWriteError struct {
+	Path    string `json:"path"`
+	Code    string `json:"code"`
+	Message string `json:"message"`
 }
 
 type DeleteRequest struct {
@@ -345,6 +361,7 @@ type WebhookEnvelopeRequest struct {
 type Store struct {
 	mu                      sync.RWMutex
 	queueMu                 sync.Mutex
+	subscriberMu            sync.RWMutex
 	workspaces              map[string]*workspaceState
 	revCounter              uint64
 	opCounter               uint64
@@ -379,6 +396,8 @@ type Store struct {
 	providerMaxConcurrency  int
 	providerSemMu           sync.Mutex
 	providerSemaphores      map[string]chan struct{}
+	subscribers             map[string]map[uint64]chan<- Event
+	subscriberCounter       uint64
 	closed                  chan struct{}
 	queueCtx                context.Context
 	queueCancel             context.CancelFunc
@@ -773,6 +792,7 @@ func NewStoreWithOptions(opts StoreOptions) *Store {
 		maxStoredEnvelopes:      maxStoredEnvelopes,
 		providerMaxConcurrency:  providerMaxConcurrency,
 		providerSemaphores:      map[string]chan struct{}{},
+		subscribers:             map[string]map[uint64]chan<- Event{},
 		closed:                  make(chan struct{}),
 		queueCtx:                queueCtx,
 		queueCancel:             queueCancel,
@@ -906,6 +926,9 @@ func (s *Store) seedQueuedIndexesFromQueues() {
 func (s *Store) Close() {
 	s.closeOnce.Do(func() {
 		close(s.closed)
+		s.subscriberMu.Lock()
+		s.subscribers = map[string]map[uint64]chan<- Event{}
+		s.subscriberMu.Unlock()
 		if s.queueCancel != nil {
 			s.queueCancel()
 		}
@@ -1147,6 +1170,13 @@ func (s *Store) WriteFile(req WriteRequest) (WriteResult, error) {
 	if req.WorkspaceID == "" || req.Path == "" {
 		return WriteResult{}, ErrInvalidInput
 	}
+	encoding, err := normalizeEncoding(req.Encoding)
+	if err != nil {
+		return WriteResult{}, err
+	}
+	if err := validateEncodedContent(req.Content, encoding); err != nil {
+		return WriteResult{}, err
+	}
 
 	s.mu.Lock()
 	ws := s.ensureWorkspaceLocked(req.WorkspaceID)
@@ -1171,6 +1201,7 @@ func (s *Store) WriteFile(req WriteRequest) (WriteResult, error) {
 			Revision:     revision,
 			ContentType:  contentType,
 			Content:      req.Content,
+			Encoding:     encoding,
 			Provider:     provider,
 			LastEditedAt: now,
 			Semantics:    semantics,
@@ -1195,6 +1226,7 @@ func (s *Store) WriteFile(req WriteRequest) (WriteResult, error) {
 	existing.Revision = revision
 	existing.ContentType = contentType
 	existing.Content = req.Content
+	existing.Encoding = encoding
 	existing.LastEditedAt = now
 	if !isZeroSemantics(semantics) {
 		existing.Semantics = semantics
@@ -1206,6 +1238,113 @@ func (s *Store) WriteFile(req WriteRequest) (WriteResult, error) {
 	s.mu.Unlock()
 	s.enqueueWriteback(task)
 	return result, nil
+}
+
+func (s *Store) BulkWrite(workspaceID string, files []BulkWriteFile) (int, []BulkWriteError) {
+	if strings.TrimSpace(workspaceID) == "" {
+		return 0, []BulkWriteError{{
+			Code:    "invalid_input",
+			Message: ErrInvalidInput.Error(),
+		}}
+	}
+	if len(files) == 0 {
+		return 0, nil
+	}
+
+	type queuedTask struct {
+		task writebackTask
+	}
+
+	s.mu.Lock()
+	ws := s.ensureWorkspaceLocked(workspaceID)
+	now := time.Now().UTC()
+	written := 0
+	errorsOut := make([]BulkWriteError, 0)
+	tasks := make([]queuedTask, 0, len(files))
+
+	for _, input := range files {
+		path := normalizePath(input.Path)
+		if strings.TrimSpace(input.Path) == "" {
+			errorsOut = append(errorsOut, BulkWriteError{
+				Path:    input.Path,
+				Code:    "invalid_path",
+				Message: "missing path",
+			})
+			continue
+		}
+		encoding, err := normalizeEncoding(input.Encoding)
+		if err != nil {
+			errorsOut = append(errorsOut, BulkWriteError{
+				Path:    path,
+				Code:    "invalid_encoding",
+				Message: err.Error(),
+			})
+			continue
+		}
+		if err := validateEncodedContent(input.Content, encoding); err != nil {
+			errorsOut = append(errorsOut, BulkWriteError{
+				Path:    path,
+				Code:    "invalid_content",
+				Message: err.Error(),
+			})
+			continue
+		}
+		contentType := strings.TrimSpace(input.ContentType)
+		if contentType == "" {
+			contentType = "text/markdown"
+		}
+		_, existed := ws.Files[path]
+		revision := s.nextRevisionLocked()
+		file := ws.Files[path]
+		file.Path = path
+		file.Revision = revision
+		file.ContentType = contentType
+		file.Content = input.Content
+		file.Encoding = encoding
+		if file.Provider == "" {
+			file.Provider = inferProviderFromPath(path)
+		}
+		file.LastEditedAt = now.Format(time.RFC3339Nano)
+		ws.Files[path] = file
+
+		eventType := "file.created"
+		if existed {
+			eventType = "file.updated"
+		}
+		result, task := s.recordWriteLocked(ws, path, revision, eventType, file.Provider, "")
+		_ = result
+		tasks = append(tasks, queuedTask{task: task})
+		written++
+	}
+
+	_ = s.saveLocked()
+	s.mu.Unlock()
+
+	for _, queued := range tasks {
+		s.enqueueWriteback(queued.task)
+	}
+	return written, errorsOut
+}
+
+func (s *Store) ExportWorkspace(workspaceID string) ([]File, error) {
+	if strings.TrimSpace(workspaceID) == "" {
+		return nil, ErrInvalidInput
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	ws, ok := s.workspaces[workspaceID]
+	if !ok {
+		return []File{}, nil
+	}
+	files := make([]File, 0, len(ws.Files))
+	for _, file := range ws.Files {
+		files = append(files, file)
+	}
+	sort.Slice(files, func(i, j int) bool {
+		return files[i].Path < files[j].Path
+	})
+	return files, nil
 }
 
 func (s *Store) DeleteFile(req DeleteRequest) (WriteResult, error) {
@@ -1293,6 +1432,61 @@ func (s *Store) GetEvents(workspaceID, provider, cursor string, limit int) (Even
 	}
 
 	return EventFeed{Events: chunk, NextCursor: nextCursor}, nil
+}
+
+func (s *Store) GetRecentEvents(workspaceID string, limit int) ([]Event, error) {
+	if workspaceID == "" {
+		return []Event{}, ErrInvalidInput
+	}
+	if limit <= 0 {
+		return []Event{}, nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	ws, ok := s.workspaces[workspaceID]
+	if !ok || len(ws.Events) == 0 {
+		return []Event{}, nil
+	}
+	start := len(ws.Events) - limit
+	if start < 0 {
+		start = 0
+	}
+	return append([]Event(nil), ws.Events[start:]...), nil
+}
+
+func (s *Store) Subscribe(workspaceID string, ch chan<- Event) func() {
+	workspaceID = strings.TrimSpace(workspaceID)
+	if workspaceID == "" || ch == nil {
+		return func() {}
+	}
+	s.subscriberMu.Lock()
+	s.subscriberCounter++
+	subID := s.subscriberCounter
+	if s.subscribers == nil {
+		s.subscribers = map[string]map[uint64]chan<- Event{}
+	}
+	if s.subscribers[workspaceID] == nil {
+		s.subscribers[workspaceID] = map[uint64]chan<- Event{}
+	}
+	s.subscribers[workspaceID][subID] = ch
+	s.subscriberMu.Unlock()
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			s.subscriberMu.Lock()
+			defer s.subscriberMu.Unlock()
+			subscribers := s.subscribers[workspaceID]
+			if subscribers == nil {
+				return
+			}
+			delete(subscribers, subID)
+			if len(subscribers) == 0 {
+				delete(s.subscribers, workspaceID)
+			}
+		})
+	}
 }
 
 func (s *Store) GetOperation(workspaceID, opID string) (OperationStatus, error) {
@@ -1517,8 +1711,7 @@ func (s *Store) ListSyncStatuses(provider string) map[string]SyncStatus {
 		if normalizedProvider != "" {
 			providerNames = append(providerNames, normalizedProvider)
 		} else {
-			providerSet := map[string]struct{}{
-			}
+			providerSet := map[string]struct{}{}
 			if workspaceAggregate != nil {
 				for providerName := range workspaceAggregate.providers {
 					if providerName == "" {
@@ -2193,11 +2386,11 @@ func (s *Store) GetPendingWritebacks(workspaceID string) []map[string]any {
 	for _, item := range items {
 		if item.WorkspaceID == workspaceID {
 			result = append(result, map[string]any{
-				"id":              item.OpID,
-				"workspaceId":     item.WorkspaceID,
-				"path":            item.Path,
-				"revision":        item.Revision,
-				"correlationId":   item.CorrelationID,
+				"id":            item.OpID,
+				"workspaceId":   item.WorkspaceID,
+				"path":          item.Path,
+				"revision":      item.Revision,
+				"correlationId": item.CorrelationID,
 			})
 		}
 	}
@@ -2511,6 +2704,7 @@ func (s *Store) nextEventIDLocked() string {
 func (s *Store) recordWriteLocked(ws *workspaceState, path, revision, eventType, provider, correlationID string) (WriteResult, writebackTask) {
 	if provider == "" {
 	}
+	workspaceID := s.workspaceIDForStateLocked(ws)
 	opID := s.nextOperationIDLocked()
 	op := OperationStatus{
 		OpID:          opID,
@@ -2534,19 +2728,13 @@ func (s *Store) recordWriteLocked(ws *workspaceState, path, revision, eventType,
 		CorrelationID: correlationID,
 		Timestamp:     time.Now().UTC().Format(time.RFC3339Nano),
 	}
-	ws.Events = append(ws.Events, event)
+	s.appendWorkspaceEventLocked(workspaceID, ws, event)
 
 	result := WriteResult{OpID: opID, Status: "queued", TargetRevision: revision}
 	result.Writeback.Provider = provider
 	result.Writeback.State = "pending"
 
-	task := writebackTask{WorkspaceID: "", OpID: opID, Path: path, Revision: revision, CorrelationID: correlationID}
-	for wsID, candidate := range s.workspaces {
-		if candidate == ws {
-			task.WorkspaceID = wsID
-			break
-		}
-	}
+	task := writebackTask{WorkspaceID: workspaceID, OpID: opID, Path: path, Revision: revision, CorrelationID: correlationID}
 	return result, task
 }
 
@@ -2735,7 +2923,7 @@ func (s *Store) processEnvelope(envelopeID string) {
 	// If no provider-specific adapter found, we'll use generic pass-through later
 	// This allows any provider to submit webhooks
 	if s.shouldSuppressEnvelopeLocked(req, time.Now().UTC()) {
-		ws.Events = append(ws.Events, Event{
+		s.appendWorkspaceEventLocked(req.WorkspaceID, ws, Event{
 			EventID:       s.nextEventIDLocked(),
 			Type:          "sync.suppressed",
 			Path:          "/",
@@ -2785,7 +2973,7 @@ func (s *Store) processEnvelope(envelopeID string) {
 		errText := parseErr.Error()
 		retryDelay := time.Duration(0)
 		if attempt >= s.maxEnvelopeAttempts {
-			ws.Events = append(ws.Events, Event{
+			s.appendWorkspaceEventLocked(req.WorkspaceID, ws, Event{
 				EventID:       s.nextEventIDLocked(),
 				Type:          "sync.error",
 				Path:          "/",
@@ -2825,7 +3013,7 @@ func (s *Store) processEnvelope(envelopeID string) {
 	}
 	for _, action := range actions {
 		if s.isStaleProviderActionLocked(ws, req.Provider, action, req.ReceivedAt) {
-			ws.Events = append(ws.Events, Event{
+			s.appendWorkspaceEventLocked(req.WorkspaceID, ws, Event{
 				EventID:       s.nextEventIDLocked(),
 				Type:          "sync.stale",
 				Path:          normalizePath(action.Path),
@@ -2844,7 +3032,7 @@ func (s *Store) processEnvelope(envelopeID string) {
 		case ActionFileDelete:
 			s.applyProviderDeleteLocked(ws, req.Provider, action, req.CorrelationID)
 		default:
-			ws.Events = append(ws.Events, Event{
+			s.appendWorkspaceEventLocked(req.WorkspaceID, ws, Event{
 				EventID:       s.nextEventIDLocked(),
 				Type:          "sync.ignored",
 				Path:          "/",
@@ -2966,7 +3154,7 @@ func (s *Store) processWriteback(task writebackTask) {
 		op.NextAttemptAt = nil
 		op.ProviderResult = map[string]any{"providerRevision": task.Revision}
 		ws.Ops[task.OpID] = op
-		ws.Events = append(ws.Events, Event{
+		s.appendWorkspaceEventLocked(task.WorkspaceID, ws, Event{
 			EventID:       s.nextEventIDLocked(),
 			Type:          "writeback.succeeded",
 			Path:          task.Path,
@@ -2987,7 +3175,7 @@ func (s *Store) processWriteback(task writebackTask) {
 		op.Status = "dead_lettered"
 		op.NextAttemptAt = nil
 		ws.Ops[task.OpID] = op
-		ws.Events = append(ws.Events, Event{
+		s.appendWorkspaceEventLocked(task.WorkspaceID, ws, Event{
 			EventID:       s.nextEventIDLocked(),
 			Type:          "writeback.failed",
 			Path:          task.Path,
@@ -3019,6 +3207,7 @@ func (s *Store) processWriteback(task writebackTask) {
 }
 
 func (s *Store) applyProviderUpsertLocked(ws *workspaceState, provider string, action ApplyAction, correlationID string) {
+	workspaceID := s.workspaceIDForStateLocked(ws)
 	path := normalizePath(action.Path)
 	objectID := strings.TrimSpace(action.ProviderObjectID)
 	if path == "/" && objectID != "" {
@@ -3043,7 +3232,7 @@ func (s *Store) applyProviderUpsertLocked(ws *workspaceState, provider string, a
 		key := providerObjectKey(provider, objectID)
 		if previousPath, ok := ws.ProviderIndex[key]; ok && previousPath != path {
 			delete(ws.Files, previousPath)
-			ws.Events = append(ws.Events, Event{
+			s.appendWorkspaceEventLocked(workspaceID, ws, Event{
 				EventID:       s.nextEventIDLocked(),
 				Type:          "file.deleted",
 				Path:          previousPath,
@@ -3067,6 +3256,7 @@ func (s *Store) applyProviderUpsertLocked(ws *workspaceState, provider string, a
 		Revision:         revision,
 		ContentType:      contentType,
 		Content:          content,
+		Encoding:         "",
 		Provider:         provider,
 		ProviderObjectID: objectID,
 		LastEditedAt:     now,
@@ -3084,7 +3274,7 @@ func (s *Store) applyProviderUpsertLocked(ws *workspaceState, provider string, a
 			// Keep update event for sync observability, but still revision-incremented.
 		}
 	}
-	ws.Events = append(ws.Events, Event{
+	s.appendWorkspaceEventLocked(workspaceID, ws, Event{
 		EventID:       s.nextEventIDLocked(),
 		Type:          fsEvent,
 		Path:          path,
@@ -3097,6 +3287,7 @@ func (s *Store) applyProviderUpsertLocked(ws *workspaceState, provider string, a
 }
 
 func (s *Store) applyProviderDeleteLocked(ws *workspaceState, provider string, action ApplyAction, correlationID string) {
+	workspaceID := s.workspaceIDForStateLocked(ws)
 	objectID := action.ProviderObjectID
 	path := normalizePath(action.Path)
 	now := time.Now().UTC().Format(time.RFC3339Nano)
@@ -3116,7 +3307,7 @@ func (s *Store) applyProviderDeleteLocked(ws *workspaceState, provider string, a
 	if objectID != "" {
 		delete(ws.ProviderIndex, providerObjectKey(provider, objectID))
 	}
-	ws.Events = append(ws.Events, Event{
+	s.appendWorkspaceEventLocked(workspaceID, ws, Event{
 		EventID:       s.nextEventIDLocked(),
 		Type:          "file.deleted",
 		Path:          path,
@@ -3493,6 +3684,31 @@ func normalizeFailureCode(errText string) string {
 	}
 }
 
+func normalizeEncoding(raw string) (string, error) {
+	encoding := strings.ToLower(strings.TrimSpace(raw))
+	switch encoding {
+	case "", "utf-8", "utf8":
+		return "", nil
+	case "base64":
+		return "base64", nil
+	default:
+		return "", ErrInvalidInput
+	}
+}
+
+func validateEncodedContent(content, encoding string) error {
+	if encoding != "base64" {
+		return nil
+	}
+	if _, err := base64.StdEncoding.DecodeString(content); err == nil {
+		return nil
+	}
+	if _, err := base64.RawStdEncoding.DecodeString(content); err == nil {
+		return nil
+	}
+	return ErrInvalidInput
+}
+
 func providerWatermarkKey(provider string, action ApplyAction) string {
 	if action.ProviderObjectID != "" {
 		return "object:" + providerObjectKey(provider, action.ProviderObjectID)
@@ -3690,6 +3906,47 @@ func (s *Store) rebuildCoalesceIndexLocked() {
 	}
 	for key, candidate := range latestByKey {
 		s.coalesceIndex[key] = candidate.id
+	}
+}
+
+func (s *Store) workspaceIDForStateLocked(target *workspaceState) string {
+	for wsID, candidate := range s.workspaces {
+		if candidate == target {
+			return wsID
+		}
+	}
+	return ""
+}
+
+func (s *Store) appendWorkspaceEventLocked(workspaceID string, ws *workspaceState, event Event) {
+	if ws == nil {
+		return
+	}
+	ws.Events = append(ws.Events, event)
+	s.publishEvent(workspaceID, event)
+}
+
+func (s *Store) publishEvent(workspaceID string, event Event) {
+	workspaceID = strings.TrimSpace(workspaceID)
+	if workspaceID == "" {
+		return
+	}
+	s.subscriberMu.RLock()
+	subscribers := s.subscribers[workspaceID]
+	if len(subscribers) == 0 {
+		s.subscriberMu.RUnlock()
+		return
+	}
+	targets := make([]chan<- Event, 0, len(subscribers))
+	for _, ch := range subscribers {
+		targets = append(targets, ch)
+	}
+	s.subscriberMu.RUnlock()
+	for _, ch := range targets {
+		select {
+		case ch <- event:
+		default:
+		}
 	}
 }
 

@@ -1,0 +1,160 @@
+---
+import fs from "node:fs";
+import path from "node:path";
+import Layout from "../layouts/Layout.astro";
+import Hero from "../components/Hero.astro";
+import FeatureGrid from "../components/FeatureGrid.astro";
+import UseCases from "../components/UseCases.astro";
+import ApiPreview from "../components/ApiPreview.astro";
+import Architecture from "../components/Architecture.astro";
+import Footer from "../components/Footer.astro";
+
+const contentPath = path.resolve(Astro.site ? "." : "", "CONTENT.md");
+const rawContent = fs.readFileSync(contentPath, "utf-8");
+
+const normalize = (value: string) => value.replace(/\r\n/g, "\n").trim();
+
+const getSection = (title: string) => {
+  const pattern = new RegExp(`## ${title}\\n\\n([\\s\\S]*?)(?=\\n---\\n\\n## |$)`);
+  const match = rawContent.match(pattern);
+  return match ? normalize(match[1]) : "";
+};
+
+const getSubsection = (section: string, title: string) => {
+  const pattern = new RegExp(`### ${title}\\n\\n([\\s\\S]*?)(?=\\n### |$)`);
+  const match = section.match(pattern);
+  return match ? normalize(match[1]) : "";
+};
+
+const getLabelValue = (section: string, label: string) => {
+  const pattern = new RegExp(`\\*\\*${label}:\\*\\*\\n([^\\n]+)`);
+  const match = section.match(pattern);
+  return match ? normalize(match[1]) : "";
+};
+
+const parseMarkdownLinks = (line: string) =>
+  [...line.matchAll(/\[([^\]]+)\]\(([^)]+)\)/g)].map((match) => ({
+    label: match[1],
+    href: match[2]
+  }));
+
+const extractCodeBlocks = (section: string) =>
+  [...section.matchAll(/```(\w+)?\n([\s\S]*?)```/g)].map((match) => ({
+    language: match[1] || "text",
+    code: normalize(match[2])
+  }));
+
+const heroSection = getSection("Hero");
+const problemSection = getSection('Problem — "Files are the universal interface"');
+const solutionSection = getSection('Solution — "RelayFile"');
+const useCasesSection = getSection("Use Cases");
+const worksSection = getSection("How It Works");
+const apiSection = getSection("API Preview");
+const architectureSection = getSection("Architecture");
+const footerSection = getSection("Footer");
+
+const heroHeadline = getLabelValue(heroSection, "Headline");
+const heroSubhead = getLabelValue(heroSection, "Subhead");
+const heroCtas = normalize(
+  heroSection.split("**CTA:**")[1]?.split("---")[0] || ""
+)
+  .split("\n")
+  .filter((line) => line.startsWith("- "))
+  .map((line, index) => {
+    const [link] = parseMarkdownLinks(line);
+    return {
+      label: link?.label || "",
+      href: link?.href || "#",
+      variant: index === 0 ? "primary" : "secondary"
+    };
+  });
+
+const problemIntro = normalize(problemSection.split("\n\nBut sharing files")[0]);
+const problemTail = normalize(problemSection.split("\n\nBut sharing files across machines, sandboxes, and agents is broken:\n\n")[1] || "");
+const problemLead = `${problemIntro} But sharing files across machines, sandboxes, and agents is broken.`;
+const problemPoints = problemTail
+  .split("\n")
+  .filter((line) => line.startsWith("- "))
+  .map((line) => line.replace(/^- /, "").replace(/\*\*/g, ""));
+
+const mountAnywhere = getSubsection(solutionSection, "Mount anywhere");
+const revisionControlled = getSubsection(solutionSection, "Revision-controlled");
+const programmable = getSubsection(solutionSection, "Programmable");
+const programmablePoints = programmable
+  .split("\n")
+  .filter((line) => line.startsWith("- "))
+  .map((line) => line.replace(/^- /, ""));
+
+const solutionFeatures = [
+  {
+    title: "Mount anywhere",
+    body: mountAnywhere.split("```")[0].replace(/`/g, "").trim()
+  },
+  {
+    title: "Revision-controlled",
+    body: revisionControlled.split("```")[0].replace(/`/g, "").trim()
+  }
+];
+
+const useCaseMatches = [...useCasesSection.matchAll(/### ([^\n]+)\n\n([\s\S]*?)(?=\n### |$)/g)];
+const useCaseItems = useCaseMatches.map((match) => ({
+  title: normalize(match[1]),
+  body: normalize(match[2].split("```")[0]).replace(/`/g, "")
+}));
+const useCaseCodeBlocks = extractCodeBlocks(useCasesSection);
+
+const apiLabels = [...apiSection.matchAll(/\*\*([^*]+)\*\*:/g)].map((match) => match[1]);
+const apiSnippets = extractCodeBlocks(apiSection).map((snippet, index) => ({
+  label: apiLabels[index] || `Snippet ${index + 1}`,
+  language: snippet.language,
+  code: snippet.code
+}));
+
+const worksSteps = [...worksSection.matchAll(/\d+\.\s+([^\n]+)/g)].map((match) => normalize(match[1]).replace(/`/g, ""));
+const propertyItems = architectureSection
+  .split("**Key properties:**")[1]
+  ?.split("**Production stack:**")[0]
+  ?.split("\n")
+  .filter((line) => line.startsWith("- "))
+  .map((line) => line.replace(/^- /, "").replace(/\*\*/g, "")) || [];
+const stackItems = architectureSection
+  .split("**Production stack:**")[1]
+  ?.split("\n")
+  .filter((line) => line.startsWith("- "))
+  .map((line) => line.replace(/^- /, "")) || [];
+
+const footerLinks = parseMarkdownLinks(footerSection.split("\n\n")[0] || "");
+const builtBy = parseMarkdownLinks(footerSection.split("Built by ")[1] || "")[0];
+---
+
+<Layout
+  title="RelayFile | Real-time filesystem for humans and agents"
+  description={heroSubhead}
+>
+  <main class="relative isolate overflow-hidden">
+    <div class="absolute inset-0 -z-10 bg-[radial-gradient(circle_at_top,rgba(34,211,238,0.16),transparent_30%),linear-gradient(180deg,rgba(9,9,11,1),rgba(9,9,11,0.92))]"></div>
+    <div class="mx-auto flex max-w-6xl flex-col gap-8 px-4 py-6 sm:px-6 sm:py-10 lg:px-8">
+      <Hero headline={heroHeadline} subhead={heroSubhead} ctas={heroCtas} />
+
+      <FeatureGrid
+        introTitle="Files are the universal interface"
+        introBody={problemLead}
+        problemPoints={problemPoints}
+        features={solutionFeatures}
+        programmablePoints={programmablePoints}
+      />
+
+      <UseCases items={useCaseItems} collaborationSnippet={useCaseCodeBlocks[0]?.code} />
+
+      <ApiPreview snippets={apiSnippets} />
+
+      <Architecture steps={worksSteps} properties={propertyItems} stack={stackItems} />
+
+      <Footer
+        links={footerLinks}
+        builtByLabel={builtBy?.label || "Agent Workforce"}
+        builtByHref={builtBy?.href || "https://agentworkforce.dev"}
+      />
+    </div>
+  </main>
+</Layout>

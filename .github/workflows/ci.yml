@@ -1,0 +1,109 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go-test:
+    name: Go Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run tests
+        run: go test ./...
+
+  go-build:
+    name: Go Build
+    runs-on: ubuntu-latest
+    needs: go-test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build all binaries
+        run: make build
+
+      - name: Upload binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: relayfile-binaries
+          path: bin/
+          if-no-files-found: error
+
+  sdk-typecheck:
+    name: SDK Typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install SDK dependencies
+        working-directory: packages/relayfile-sdk
+        run: npm ci
+
+      - name: Build SDK
+        working-directory: packages/relayfile-sdk
+        run: npm run build
+
+      - name: Typecheck SDK
+        working-directory: packages/relayfile-sdk
+        run: npx tsc --noEmit
+
+  e2e:
+    name: E2E
+    runs-on: ubuntu-latest
+    needs: go-build
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Download binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: relayfile-binaries
+          path: bin
+
+      - name: Make binaries executable
+        run: chmod +x bin/*
+
+      - name: Run E2E suite
+        env:
+          CI: "true"
+        run: npx --yes tsx scripts/e2e.ts --ci

@@ -2,6 +2,61 @@
 
 Queue-first virtual filesystem-over-REST that ingests noisy external webhooks, projects a file tree, and executes conflict-safe writeback with retries, dead-lettering, and replay.
 
+## Quick Start
+
+Install the RelayFile CLI:
+
+```bash
+curl -fsSL https://relayfile.dev/install.sh | sh
+```
+
+Log in to a local RelayFile server:
+
+```bash
+relayfile login --server http://localhost:9090 --token dev-token
+```
+
+Seed a workspace from an existing project:
+
+```bash
+relayfile seed my-project ./src
+```
+
+Mount that workspace into a local directory:
+
+```bash
+relayfile mount my-project ./src
+```
+
+For a step-by-step walkthrough, see `docs/guides/getting-started.md`.
+
+## Collaborate
+
+RelayFile is designed for shared files between humans and agents.
+
+Two-machine setup:
+
+```bash
+# Machine A
+relayfile mount project-x ./src
+
+# Machine B
+relayfile mount project-x ./src
+```
+
+When someone edits a file on Machine A, the change appears on Machine B after the next sync cycle, typically in about 1-2 seconds with the default interval.
+
+Human + agent setup:
+
+- Mount the same workspace on your laptop with `relayfile mount`.
+- Mount the workspace inside an agent sandbox with `relayfile-mount` or the user-facing `relayfile mount` workflow.
+- Both sides read and write the same virtual project tree through RelayFile.
+
+More collaboration examples:
+
+- `docs/guides/collaboration.md`
+- `docs/guides/cloud-integration.md`
+
 ## What this service does
 
 - Exposes a workspace-scoped filesystem API (`/fs/tree`, `/fs/file`, `/fs/events`).
@@ -250,6 +305,13 @@ Mount client env vars:
 - `RELAYFILE_MOUNT_INTERVAL`
 - `RELAYFILE_MOUNT_INTERVAL_JITTER`
 - `RELAYFILE_MOUNT_TIMEOUT`
+
+User-facing guides:
+
+- `docs/guides/getting-started.md`
+- `docs/guides/collaboration.md`
+- `docs/guides/cloud-integration.md`
+- `docs/api-reference.md`
 
 ## SDK
 

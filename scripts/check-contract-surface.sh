@@ -26,8 +26,8 @@ require_pattern() {
 }
 
 OPENAPI_FILE="openapi/relayfile-v1.openapi.yaml"
-SDK_TYPES_FILE="sdk/relayfile-sdk/src/types.ts"
-SDK_CLIENT_FILE="sdk/relayfile-sdk/src/client.ts"
+SDK_TYPES_FILE="packages/relayfile-sdk/src/types.ts"
+SDK_CLIENT_FILE="packages/relayfile-sdk/src/client.ts"
 
 require_pattern "$OPENAPI_FILE" "/v1/workspaces/{workspaceId}/fs/query:" "fs query endpoint"
 require_pattern "$OPENAPI_FILE" "operationId: queryFiles" "queryFiles operation"

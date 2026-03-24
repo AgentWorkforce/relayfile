@@ -1,0 +1,31 @@
+---
+interface LinkItem {
+  label: string;
+  href: string;
+}
+
+interface Props {
+  links: LinkItem[];
+  builtByLabel: string;
+  builtByHref: string;
+}
+
+const { links, builtByLabel, builtByHref } = Astro.props;
+---
+
+<footer class="rounded-[2rem] border border-zinc-800 bg-zinc-900/70 px-6 py-8 sm:px-10">
+  <div class="flex flex-col gap-5 md:flex-row md:items-center md:justify-between">
+    <div class="flex flex-wrap gap-4 text-sm text-zinc-300">
+      {
+        links.map((link) => (
+          <a href={link.href} class="hover:text-cyan-300">
+            {link.label}
+          </a>
+        ))
+      }
+    </div>
+    <p class="text-sm text-zinc-500">
+      Built by <a class="text-cyan-300 hover:text-cyan-200" href={builtByHref}>{builtByLabel}</a>
+    </p>
+  </div>
+</footer>
