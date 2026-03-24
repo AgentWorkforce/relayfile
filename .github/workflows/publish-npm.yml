@@ -61,6 +61,9 @@ jobs:
           cache-dependency-path: sdk/relayfile-sdk/package-lock.json
           registry-url: "https://registry.npmjs.org"
 
+      - name: Update npm to latest
+        run: npm install -g npm@latest
+
       - name: Install deps
         working-directory: sdk/relayfile-sdk
         run: npm ci
@@ -93,15 +96,11 @@ jobs:
       - name: Dry run check
         if: github.event.inputs.dry_run == 'true'
         working-directory: sdk/relayfile-sdk
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: npm publish --dry-run --access public --tag "${{ github.event.inputs.tag }}" --ignore-scripts
 
       - name: Publish
         if: github.event.inputs.dry_run != 'true'
         working-directory: sdk/relayfile-sdk
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: npm publish --access public --provenance --tag "${{ github.event.inputs.tag }}" --ignore-scripts
 
       - name: Commit version bump and create git tag
@@ -139,3 +138,37 @@ jobs:
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  publish-cli:
+    name: Publish relayfile (CLI)
+    runs-on: ubuntu-latest
+    needs: publish-sdk
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Update npm to latest
+        run: npm install -g npm@latest
+
+      - name: Sync version with SDK
+        working-directory: sdk/relayfile
+        run: |
+          SDK_VERSION="$(node -p "require('../relayfile-sdk/package.json').version")"
+          npm version "$SDK_VERSION" --no-git-tag-version --allow-same-version
+
+      - name: Dry run check
+        if: github.event.inputs.dry_run == 'true'
+        working-directory: sdk/relayfile
+        run: npm publish --dry-run --access public --tag "${{ github.event.inputs.tag }}"
+
+      - name: Publish
+        if: github.event.inputs.dry_run != 'true'
+        working-directory: sdk/relayfile
+        run: npm publish --access public --provenance --tag "${{ github.event.inputs.tag }}"
