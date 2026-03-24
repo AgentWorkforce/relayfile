@@ -73,12 +73,12 @@ jobs:
           registry-url: "https://registry.npmjs.org"
 
       - name: Install deps
-        working-directory: sdk/relayfile-sdk
+        working-directory: packages/relayfile-sdk
         run: npm ci
 
       - name: Version bump
         id: bump
-        working-directory: sdk/relayfile-sdk
+        working-directory: packages/relayfile-sdk
         run: |
           CUSTOM_VERSION="${{ github.event.inputs.custom_version }}"
           VERSION_TYPE="${{ github.event.inputs.version }}"
@@ -105,7 +105,7 @@ jobs:
           fi
 
       - name: Build
-        working-directory: sdk/relayfile-sdk
+        working-directory: packages/relayfile-sdk
         run: npm run build
 
       - name: Upload build artifacts
@@ -113,8 +113,8 @@ jobs:
         with:
           name: sdk-build
           path: |
-            sdk/relayfile-sdk/package.json
-            sdk/relayfile-sdk/dist/
+            packages/relayfile-sdk/package.json
+            packages/relayfile-sdk/dist/
           retention-days: 1
 
   publish:
@@ -136,13 +136,13 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: sdk-build
-          path: sdk/relayfile-sdk
+          path: packages/relayfile-sdk
 
       - name: Update npm for OIDC support
         run: npm install -g npm@latest
 
       - name: Verify build artifacts
-        working-directory: sdk/relayfile-sdk
+        working-directory: packages/relayfile-sdk
         run: |
           echo "=== Verifying dist/ contents ==="
           if [ ! -d "dist" ]; then
@@ -163,14 +163,14 @@ jobs:
 
       - name: Dry run check
         if: github.event.inputs.dry_run == 'true'
-        working-directory: sdk/relayfile-sdk
+        working-directory: packages/relayfile-sdk
         run: |
           echo "Dry run - would publish @relayfile/sdk@${{ needs.build.outputs.new_version }}"
           npm publish --dry-run --access public --tag ${{ github.event.inputs.tag }} --ignore-scripts
 
       - name: Publish with provenance
         if: github.event.inputs.dry_run != 'true'
-        working-directory: sdk/relayfile-sdk
+        working-directory: packages/relayfile-sdk
         run: npm publish --access public --provenance --tag ${{ github.event.inputs.tag }} --ignore-scripts
 
   create-tag:
@@ -190,7 +190,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: sdk-build
-          path: sdk/relayfile-sdk
+          path: packages/relayfile-sdk
 
       - name: Commit and tag
         run: |
@@ -199,7 +199,7 @@ jobs:
 
           NEW_VERSION="${{ needs.build.outputs.new_version }}"
 
-          git add sdk/relayfile-sdk/package.json
+          git add packages/relayfile-sdk/package.json
           if ! git diff --staged --quiet; then
             git commit -m "chore(sdk): v${NEW_VERSION}"
             git push origin HEAD:main

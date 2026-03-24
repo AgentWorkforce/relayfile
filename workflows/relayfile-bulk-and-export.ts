@@ -77,13 +77,13 @@ const result = await workflow('relayfile-bulk-and-export')
 
   .step('read-ts-sdk', {
     type: 'deterministic',
-    command: `cat ${RELAYFILE}/sdk/relayfile-sdk/src/client.ts`,
+    command: `cat ${RELAYFILE}/packages/relayfile-sdk/src/client.ts`,
     captureOutput: true,
   })
 
   .step('read-ts-types', {
     type: 'deterministic',
-    command: `cat ${RELAYFILE}/sdk/relayfile-sdk/src/types.ts`,
+    command: `cat ${RELAYFILE}/packages/relayfile-sdk/src/types.ts`,
     captureOutput: true,
   })
 
@@ -249,7 +249,7 @@ Current SDK types:
 
 Changes:
 
-1. Edit ${RELAYFILE}/sdk/relayfile-sdk/src/types.ts — add:
+1. Edit ${RELAYFILE}/packages/relayfile-sdk/src/types.ts — add:
    - BulkWriteFile: { path: string; contentType?: string; content: string; encoding?: "utf-8" | "base64" }
    - BulkWriteInput: { workspaceId: string; files: BulkWriteFile[]; correlationId?: string; signal?: AbortSignal }
    - BulkWriteResponse: { imported: number; errors: { path: string; error: string }[] }
@@ -259,7 +259,7 @@ Changes:
    - FilesystemEvent (already exists? add if missing): { eventId, type, path, revision, timestamp }
    - Add encoding?: "utf-8" | "base64" to WriteFileInput and FileReadResponse
 
-2. Edit ${RELAYFILE}/sdk/relayfile-sdk/src/client.ts — add methods:
+2. Edit ${RELAYFILE}/packages/relayfile-sdk/src/client.ts — add methods:
    - bulkWrite(input: BulkWriteInput): Promise<BulkWriteResponse>
      POST /v1/workspaces/{workspaceId}/fs/bulk with JSON body
    - exportWorkspace(options: ExportOptions): Promise<ExportJsonResponse | Blob>
@@ -269,7 +269,7 @@ Changes:
      Connect to ws:// or wss:// endpoint
      Return object with { close(), on(event, handler) }
 
-3. Re-export new types from ${RELAYFILE}/sdk/relayfile-sdk/src/index.ts
+3. Re-export new types from ${RELAYFILE}/packages/relayfile-sdk/src/index.ts
 
 Write all changes to disk.`,
     verification: { type: 'exit_code' },
@@ -347,7 +347,7 @@ Write all test files to disk.`,
     command: `cd ${RELAYFILE} && echo "=== New/modified files ===" && \
 grep -rl "BulkWrite\|ExportWorkspace\|handleBulkWrite\|handleExport\|websocket\|WebSocket" internal/ --include="*.go" | sort && \
 echo "" && echo "=== SDK updates ===" && \
-grep -c "bulkWrite\|exportWorkspace\|connectWebSocket" sdk/relayfile-sdk/src/client.ts && \
+grep -c "bulkWrite\|exportWorkspace\|connectWebSocket" packages/relayfile-sdk/src/client.ts && \
 echo "" && echo "=== Build check ===" && \
 go build ./... 2>&1 | tail -10; echo "EXIT: $?"`,
     captureOutput: true,

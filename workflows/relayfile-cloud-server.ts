@@ -118,7 +118,7 @@ const result = await workflow('relayfile-cloud-server')
 
   .step('read-sdk-types', {
     type: 'deterministic',
-    command: `cat ${RELAYFILE}/sdk/relayfile-sdk/src/types.ts`,
+    command: `cat ${RELAYFILE}/packages/relayfile-sdk/src/types.ts`,
     captureOutput: true,
   })
 

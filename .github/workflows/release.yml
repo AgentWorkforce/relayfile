@@ -43,7 +43,7 @@ jobs:
     needs: release
     defaults:
       run:
-        working-directory: sdk/relayfile-sdk
+        working-directory: packages/relayfile-sdk
     steps:
       - name: Check out source
         uses: actions/checkout@v4

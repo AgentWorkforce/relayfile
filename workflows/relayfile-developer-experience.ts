@@ -329,9 +329,9 @@ Write all docs to disk.`,
     dependsOn: ['implement-cli'],
     task: `Prepare the TypeScript SDK for npm publishing.
 
-Read the current SDK: cat ${RELAYFILE}/sdk/relayfile-sdk/package.json
+Read the current SDK: cat ${RELAYFILE}/packages/relayfile-sdk/package.json
 
-Update ${RELAYFILE}/sdk/relayfile-sdk/package.json:
+Update ${RELAYFILE}/packages/relayfile-sdk/package.json:
 - name: "@relayfile/sdk" (or "relayfile-sdk")
 - version: "0.1.0"
 - main: "dist/index.js"
@@ -342,7 +342,7 @@ Update ${RELAYFILE}/sdk/relayfile-sdk/package.json:
     prepublishOnly: "npm run build"
 - repository, license, description fields
 
-Create ${RELAYFILE}/sdk/relayfile-sdk/tsconfig.json:
+Create ${RELAYFILE}/packages/relayfile-sdk/tsconfig.json:
 - target: ES2022
 - module: ESNext
 - moduleResolution: bundler
@@ -350,7 +350,7 @@ Create ${RELAYFILE}/sdk/relayfile-sdk/tsconfig.json:
 - outDir: dist
 - rootDir: src
 
-Verify it builds: cd sdk/relayfile-sdk && npm run build
+Verify it builds: cd packages/relayfile-sdk && npm run build
 
 Write changes to disk.`,
     verification: { type: 'exit_code' },
@@ -370,7 +370,7 @@ done && \
 echo "" && echo "=== Install script ===" && \
 [ -f scripts/install.sh ] && echo "install.sh: OK" || echo "install.sh: MISSING" && \
 echo "" && echo "=== SDK builds ===" && \
-cd sdk/relayfile-sdk && npm install 2>&1 | tail -1 && npx tsc --noEmit 2>&1 | tail -3; echo "EXIT: $?"`,
+cd packages/relayfile-sdk && npm install 2>&1 | tail -1 && npx tsc --noEmit 2>&1 | tail -3; echo "EXIT: $?"`,
     captureOutput: true,
     failOnError: false,
   })

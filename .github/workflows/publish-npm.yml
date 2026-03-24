@@ -58,19 +58,19 @@ jobs:
         with:
           node-version: "22"
           cache: npm
-          cache-dependency-path: sdk/relayfile-sdk/package-lock.json
+          cache-dependency-path: packages/relayfile-sdk/package-lock.json
           registry-url: "https://registry.npmjs.org"
 
       - name: Update npm to latest
         run: npm install -g npm@latest
 
       - name: Install deps
-        working-directory: sdk/relayfile-sdk
+        working-directory: packages/relayfile-sdk
         run: npm ci
 
       - name: Version bump
         id: version
-        working-directory: sdk/relayfile-sdk
+        working-directory: packages/relayfile-sdk
         run: |
           CUSTOM_VERSION="${{ github.event.inputs.custom_version }}"
           VERSION_TYPE="${{ github.event.inputs.version }}"
@@ -86,21 +86,21 @@ jobs:
           echo "tag_name=sdk-v$NEW_VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Build
-        working-directory: sdk/relayfile-sdk
+        working-directory: packages/relayfile-sdk
         run: npm run build
 
       - name: Test
-        working-directory: sdk/relayfile-sdk
+        working-directory: packages/relayfile-sdk
         run: npx tsc --noEmit
 
       - name: Dry run check
         if: github.event.inputs.dry_run == 'true'
-        working-directory: sdk/relayfile-sdk
+        working-directory: packages/relayfile-sdk
         run: npm publish --dry-run --access public --tag "${{ github.event.inputs.tag }}" --ignore-scripts
 
       - name: Publish
         if: github.event.inputs.dry_run != 'true'
-        working-directory: sdk/relayfile-sdk
+        working-directory: packages/relayfile-sdk
         run: npm publish --access public --provenance --tag "${{ github.event.inputs.tag }}" --ignore-scripts
 
       - name: Commit version bump and create git tag
@@ -112,7 +112,7 @@ jobs:
           git config user.name "GitHub Actions"
           git config user.email "actions@github.com"
 
-          git add sdk/relayfile-sdk/package.json sdk/relayfile-sdk/package-lock.json
+          git add packages/relayfile-sdk/package.json packages/relayfile-sdk/package-lock.json
           git commit -m "chore(sdk): release v${NEW_VERSION}"
           git tag -a "${TAG_NAME}" -m "SDK ${NEW_VERSION}"
 
@@ -158,17 +158,17 @@ jobs:
         run: npm install -g npm@latest
 
       - name: Sync version with SDK
-        working-directory: sdk/relayfile
+        working-directory: packages/relayfile
         run: |
           SDK_VERSION="$(node -p "require('../relayfile-sdk/package.json').version")"
           npm version "$SDK_VERSION" --no-git-tag-version --allow-same-version
 
       - name: Dry run check
         if: github.event.inputs.dry_run == 'true'
-        working-directory: sdk/relayfile
+        working-directory: packages/relayfile
         run: npm publish --dry-run --access public --tag "${{ github.event.inputs.tag }}"
 
       - name: Publish
         if: github.event.inputs.dry_run != 'true'
-        working-directory: sdk/relayfile
+        working-directory: packages/relayfile
         run: npm publish --access public --provenance --tag "${{ github.event.inputs.tag }}"
