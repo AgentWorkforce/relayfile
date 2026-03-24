@@ -479,16 +479,11 @@ ${B}${CYAN}╔══════════════════════
         path: `/bulk-api/file-${i}.txt`,
         content: `bulk content ${i}`,
       }));
-      const res = await fetch(`${BASE_URL}/v1/workspaces/${WORKSPACE}/fs/bulk`, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ files: bulkFiles }),
-      });
-      if (res.status !== 202) throw new Error(`Bulk write returned ${res.status}`);
-      const body = await res.json() as { written?: number; errors?: unknown[] };
-      if (body.written !== 5) throw new Error(`Expected 5 written, got ${body.written}`);
-      if (body.errors && (body.errors as unknown[]).length > 0) throw new Error(`Bulk write had errors: ${JSON.stringify(body.errors)}`);
-      log('📦', `Bulk write: ${body.written} files created`);
+      const { status, data } = await api('POST', `/v1/workspaces/${WORKSPACE}/fs/bulk`, { files: bulkFiles });
+      if (status !== 202) throw new Error(`Bulk write returned ${status}: ${JSON.stringify(data)}`);
+      if (data.written !== 5) throw new Error(`Expected 5 written, got ${data.written}`);
+      if (data.errors && data.errors.length > 0) throw new Error(`Bulk write had errors: ${JSON.stringify(data.errors)}`);
+      log('📦', `Bulk write: ${data.written} files created`);
     });
 
     // ------------------------------------------------------------------
@@ -496,19 +491,20 @@ ${B}${CYAN}╔══════════════════════
     // ------------------------------------------------------------------
     await run('JSON export returns files', async () => {
       step('Testing JSON export');
-      const res = await fetch(`${BASE_URL}/v1/workspaces/${WORKSPACE}/export?format=json`, {
-        headers: { Authorization: `Bearer ${TOKEN}` },
-      });
-      if (!res.ok) throw new Error(`JSON export returned ${res.status}`);
-      const body = await res.json() as unknown[];
-      if (!Array.isArray(body) || body.length === 0) throw new Error(`JSON export returned empty array`);
-      log('📤', `JSON export: ${body.length} files`);
+      const { status, data } = await api('GET', `/v1/workspaces/${WORKSPACE}/fs/export?format=json`);
+      if (status !== 200) throw new Error(`JSON export returned ${status}`);
+      if (!Array.isArray(data) || data.length === 0) throw new Error(`JSON export returned empty array`);
+      log('📤', `JSON export: ${data.length} files`);
     });
 
     await run('Tar export returns gzip', async () => {
       step('Testing tar export');
-      const res = await fetch(`${BASE_URL}/v1/workspaces/${WORKSPACE}/export?format=tar`, {
-        headers: { Authorization: `Bearer ${TOKEN}` },
+      const url = `${BASE_URL}/v1/workspaces/${WORKSPACE}/fs/export?format=tar`;
+      const res = await fetch(url, {
+        headers: {
+          Authorization: `Bearer ${TOKEN}`,
+          'X-Correlation-Id': nextCorrelationId(),
+        },
       });
       if (!res.ok) throw new Error(`Tar export returned ${res.status}`);
       const contentType = res.headers.get('content-type') ?? '';
@@ -543,10 +539,8 @@ ${B}${CYAN}╔══════════════════════
 
         ws.addEventListener('open', async () => {
           // Write a file to trigger an event
-          await fetch(`${BASE_URL}/v1/workspaces/${WORKSPACE}/fs`, {
-            method: 'POST',
-            headers: { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'application/json' },
-            body: JSON.stringify({ path: '/ws-test.txt', content: 'websocket test' }),
+          await api('POST', `/v1/workspaces/${WORKSPACE}/fs/bulk`, {
+            files: [{ path: '/ws-test.txt', content: 'websocket test' }],
           });
         });
 
