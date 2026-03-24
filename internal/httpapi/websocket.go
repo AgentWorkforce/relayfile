@@ -47,20 +47,26 @@ func (s *Server) handleFileEventsWebSocket(w http.ResponseWriter, r *http.Reques
 
 	ctx := r.Context()
 
+	// Subscribe FIRST, then catch up, so no events are missed in between.
+	subscriptionCh := make(chan relayfile.Event, 256)
+	unsubscribe := s.store.Subscribe(workspaceID, subscriptionCh)
+	defer unsubscribe()
+
 	catchUp, err := s.store.GetRecentEvents(workspaceID, 100)
 	if err != nil {
 		_ = conn.Close(websocket.StatusInternalError, "failed to load catch-up events")
 		return
 	}
+	// Track catch-up event IDs to deduplicate against live events
+	catchUpIDs := make(map[string]struct{}, len(catchUp))
 	for _, event := range catchUp {
+		if event.EventID != "" {
+			catchUpIDs[event.EventID] = struct{}{}
+		}
 		if err := s.writeWebSocketEvent(ctx, conn, event); err != nil {
 			return
 		}
 	}
-
-	subscriptionCh := make(chan relayfile.Event, 256)
-	unsubscribe := s.store.Subscribe(workspaceID, subscriptionCh)
-	defer unsubscribe()
 
 	controlCh := make(chan fileEventMessage, 8)
 	readErrCh := make(chan error, 1)
@@ -81,6 +87,13 @@ func (s *Server) handleFileEventsWebSocket(w http.ResponseWriter, r *http.Reques
 				return
 			}
 		case event := <-subscriptionCh:
+			// Skip events already sent during catch-up to avoid duplicates
+			if event.EventID != "" {
+				if _, dup := catchUpIDs[event.EventID]; dup {
+					delete(catchUpIDs, event.EventID)
+					continue
+				}
+			}
 			if err := s.writeWebSocketEvent(ctx, conn, event); err != nil {
 				return
 			}

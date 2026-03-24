@@ -470,6 +470,105 @@ ${B}${CYAN}╔══════════════════════
       log('⏱️ ', `${BULK_COUNT} files synced to Agent B in ${B}${syncLatency}ms${R}`);
     });
 
+    // ------------------------------------------------------------------
+    // Bulk API endpoint
+    // ------------------------------------------------------------------
+    await run('Bulk write API creates multiple files', async () => {
+      step('Testing bulk write API');
+      const bulkFiles = Array.from({ length: 5 }, (_, i) => ({
+        path: `/bulk-api/file-${i}.txt`,
+        content: `bulk content ${i}`,
+      }));
+      const res = await fetch(`${BASE_URL}/v1/workspaces/${WORKSPACE}/fs/bulk`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ files: bulkFiles }),
+      });
+      if (res.status !== 202) throw new Error(`Bulk write returned ${res.status}`);
+      const body = await res.json() as { written?: number; errors?: unknown[] };
+      if (body.written !== 5) throw new Error(`Expected 5 written, got ${body.written}`);
+      if (body.errors && (body.errors as unknown[]).length > 0) throw new Error(`Bulk write had errors: ${JSON.stringify(body.errors)}`);
+      log('📦', `Bulk write: ${body.written} files created`);
+    });
+
+    // ------------------------------------------------------------------
+    // Export endpoints
+    // ------------------------------------------------------------------
+    await run('JSON export returns files', async () => {
+      step('Testing JSON export');
+      const res = await fetch(`${BASE_URL}/v1/workspaces/${WORKSPACE}/export?format=json`, {
+        headers: { Authorization: `Bearer ${TOKEN}` },
+      });
+      if (!res.ok) throw new Error(`JSON export returned ${res.status}`);
+      const body = await res.json() as unknown[];
+      if (!Array.isArray(body) || body.length === 0) throw new Error(`JSON export returned empty array`);
+      log('📤', `JSON export: ${body.length} files`);
+    });
+
+    await run('Tar export returns gzip', async () => {
+      step('Testing tar export');
+      const res = await fetch(`${BASE_URL}/v1/workspaces/${WORKSPACE}/export?format=tar`, {
+        headers: { Authorization: `Bearer ${TOKEN}` },
+      });
+      if (!res.ok) throw new Error(`Tar export returned ${res.status}`);
+      const contentType = res.headers.get('content-type') ?? '';
+      if (!contentType.includes('gzip')) throw new Error(`Expected gzip content-type, got ${contentType}`);
+      const buf = Buffer.from(await res.arrayBuffer());
+      // gzip magic bytes: 1f 8b
+      if (buf[0] !== 0x1f || buf[1] !== 0x8b) throw new Error('Tar export is not valid gzip');
+      log('📤', `Tar export: ${buf.length} bytes (gzip)`);
+    });
+
+    // ------------------------------------------------------------------
+    // WebSocket real-time events
+    // ------------------------------------------------------------------
+    await run('WebSocket receives file change events', async () => {
+      step('Testing WebSocket push');
+      const wsUrl = `${BASE_URL.replace('http', 'ws')}/v1/workspaces/${WORKSPACE}/ws?token=${TOKEN}`;
+
+      // Node 22+ has native WebSocket
+      if (typeof globalThis.WebSocket === 'undefined') {
+        log('⏭️ ', 'Skipping WebSocket test (Node < 22, no native WebSocket)');
+        return;
+      }
+
+      const ws = new WebSocket(wsUrl);
+      const events: unknown[] = [];
+
+      await new Promise<void>((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          ws.close();
+          reject(new Error('WebSocket timeout waiting for events'));
+        }, 10_000);
+
+        ws.addEventListener('open', async () => {
+          // Write a file to trigger an event
+          await fetch(`${BASE_URL}/v1/workspaces/${WORKSPACE}/fs`, {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ path: '/ws-test.txt', content: 'websocket test' }),
+          });
+        });
+
+        ws.addEventListener('message', (event) => {
+          const data = JSON.parse(typeof event.data === 'string' ? event.data : '{}');
+          events.push(data);
+          if (events.length >= 1) {
+            clearTimeout(timeout);
+            ws.close();
+            resolve();
+          }
+        });
+
+        ws.addEventListener('error', () => {
+          clearTimeout(timeout);
+          reject(new Error('WebSocket connection error'));
+        });
+      });
+
+      log('🔌', `WebSocket received ${events.length} event(s)`);
+    });
+
   } finally {
     // ------------------------------------------------------------------
     // Teardown

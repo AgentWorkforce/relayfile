@@ -431,9 +431,7 @@ func runSeed(args []string, stdout io.Writer) error {
 		return nil
 	}
 
-	for i := range files {
-		fmt.Fprintf(stdout, "Seeding %d/%d files...\n", i+1, len(files))
-	}
+	fmt.Fprintf(stdout, "Seeding %d files...\n", len(files))
 
 	var response bulkWriteResponse
 	if err := client.postJSON(context.Background(), fmt.Sprintf("/v1/workspaces/%s/fs/bulk", url.PathEscape(workspaceID)), bulkWriteRequest{Files: files}, &response); err != nil {

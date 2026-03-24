@@ -1392,6 +1392,8 @@ func (s *Server) handleBulkWrite(w http.ResponseWriter, r *http.Request, workspa
 			})
 			continue
 		}
+		// Use the normalized path so BulkWrite sees the same path as the permission check
+		file.Path = path
 		allowed = append(allowed, file)
 	}
 
@@ -1435,7 +1437,8 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request, workspaceI
 		writeJSON(w, http.StatusOK, visible)
 	case "tar":
 		if err := s.writeTarExport(w, visible); err != nil {
-			log.Printf("tar export error (headers already sent): %v", err)
+			log.Printf("tar export error: %v", err)
+			writeError(w, http.StatusInternalServerError, "export_error", "tar export failed: "+err.Error(), correlationID)
 		}
 	case "patch":
 		s.writePatchExport(w, visible)
