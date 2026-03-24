@@ -1,0 +1,51 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    color-scheme: dark;
+  }
+
+  html {
+    @apply bg-zinc-950 text-zinc-100 antialiased;
+  }
+
+  body {
+    @apply min-h-screen bg-zinc-950 text-zinc-100;
+  }
+
+  a {
+    @apply transition-colors duration-150;
+  }
+
+  ::selection {
+    @apply bg-cyan-400/30 text-zinc-50;
+  }
+}
+
+@layer components {
+  .section-shell {
+    @apply rounded-3xl border border-zinc-800/80 bg-zinc-900/60 shadow-glow backdrop-blur;
+  }
+
+  .section-heading {
+    @apply text-xs font-semibold uppercase tracking-[0.28em] text-cyan-400;
+  }
+
+  .section-title {
+    @apply mt-3 text-3xl font-semibold tracking-tight text-zinc-50 sm:text-4xl;
+  }
+
+  .prose-dark {
+    @apply max-w-none text-zinc-300;
+  }
+
+  .prose-dark p {
+    @apply text-base leading-8 text-zinc-300;
+  }
+
+  .prose-dark code {
+    @apply rounded bg-zinc-950 px-1.5 py-0.5 text-cyan-200;
+  }
+}

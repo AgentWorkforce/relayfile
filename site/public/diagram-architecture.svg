@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 250" width="400" height="250" role="img" aria-labelledby="title desc">
+  <title id="title">RelayFile architecture stack</title>
+  <desc id="desc">Cloudflare Workers above a durable object, connected to R2 and D1, with a mount daemon on the side over HTTP and WebSocket.</desc>
+  <rect width="400" height="250" fill="#09090b"/>
+  <g stroke="#22d3ee" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="128" y="28" width="156" height="44" rx="14"/>
+    <rect x="110" y="92" width="192" height="50" rx="14"/>
+    <rect x="76" y="176" width="116" height="46" rx="14"/>
+    <rect x="208" y="176" width="116" height="46" rx="14"/>
+    <rect x="22" y="92" width="64" height="86" rx="14"/>
+
+    <line x1="206" y1="72" x2="206" y2="92"/>
+    <path d="M199 85l7 7 7-7"/>
+
+    <line x1="158" y1="142" x2="134" y2="176"/>
+    <path d="M133 166l1 10 9-2"/>
+
+    <line x1="254" y1="142" x2="266" y2="176"/>
+    <path d="M258 169l8 7 5-9"/>
+
+    <line x1="86" y1="122" x2="110" y2="122"/>
+    <path d="M103 115l7 7-7 7"/>
+    <path d="M93 115l-7 7 7 7"/>
+  </g>
+  <g fill="#fafafa" font-family="ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" text-anchor="middle">
+    <text x="206" y="55" font-size="15" font-weight="600">Cloudflare Workers</text>
+    <text x="206" y="118" font-size="15" font-weight="600">Durable Object</text>
+    <text x="206" y="135" font-size="11" fill="#a1a1aa">(per workspace)</text>
+    <text x="134" y="203" font-size="15" font-weight="600">R2</text>
+    <text x="134" y="218" font-size="11" fill="#a1a1aa">content</text>
+    <text x="266" y="203" font-size="15" font-weight="600">D1</text>
+    <text x="266" y="218" font-size="11" fill="#a1a1aa">metadata</text>
+    <text x="54" y="118" font-size="13" font-weight="600">Mount</text>
+    <text x="54" y="135" font-size="13" font-weight="600">Daemon</text>
+    <text x="54" y="156" font-size="10" fill="#a1a1aa">HTTP / WS</text>
+  </g>
+</svg>

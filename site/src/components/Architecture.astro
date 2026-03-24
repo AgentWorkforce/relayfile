@@ -1,0 +1,62 @@
+---
+interface Props {
+  steps: string[];
+  properties: string[];
+  stack: string[];
+}
+
+const { steps, properties, stack } = Astro.props;
+---
+
+<section class="grid gap-8 lg:grid-cols-[1fr_1.05fr]">
+  <div class="section-shell p-8 sm:p-10">
+    <p class="section-heading">How It Works</p>
+    <h2 class="section-title">One workspace, one canonical state</h2>
+    <div class="mt-8 rounded-3xl border border-cyan-400/20 bg-zinc-950/80 p-6">
+      <div class="grid gap-4 text-center text-sm text-zinc-300 sm:grid-cols-3">
+        <div class="rounded-2xl border border-zinc-800 bg-zinc-900/80 p-4">Developer laptop<br /><span class="text-cyan-400">relayfile mount</span></div>
+        <div class="rounded-2xl border border-cyan-400/30 bg-cyan-400/10 p-4 font-medium text-zinc-100">RelayFile API</div>
+        <div class="rounded-2xl border border-zinc-800 bg-zinc-900/80 p-4">Cloud sandbox<br /><span class="text-cyan-400">relayfile mount</span></div>
+      </div>
+    </div>
+    <ol class="mt-8 space-y-4">
+      {
+        steps.map((step, index) => (
+          <li class="flex gap-4 rounded-2xl border border-zinc-800 bg-zinc-950/70 p-4">
+            <span class="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-cyan-400 text-sm font-bold text-zinc-950">
+              {index + 1}
+            </span>
+            <span class="text-sm leading-7 text-zinc-300">{step}</span>
+          </li>
+        ))
+      }
+    </ol>
+  </div>
+
+  <div class="space-y-6">
+    <article class="section-shell p-8">
+      <h3 class="text-xl font-semibold text-zinc-50">Key properties</h3>
+      <ul class="mt-5 space-y-4 text-sm leading-7 text-zinc-300">
+        {
+          properties.map((item) => (
+            <li class="flex gap-3">
+              <span class="mt-2 h-2 w-2 rounded-full bg-cyan-400"></span>
+              <span>{item}</span>
+            </li>
+          ))
+        }
+      </ul>
+    </article>
+
+    <article class="section-shell p-8">
+      <h3 class="text-xl font-semibold text-zinc-50">Production stack</h3>
+      <ul class="mt-5 space-y-4 text-sm leading-7 text-zinc-300">
+        {
+          stack.map((item) => (
+            <li class="rounded-2xl border border-zinc-800 bg-zinc-950/70 px-4 py-3">{item}</li>
+          ))
+        }
+      </ul>
+    </article>
+  </div>
+</section>

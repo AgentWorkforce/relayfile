@@ -1,0 +1,55 @@
+---
+interface ApiSnippet {
+  label: string;
+  language: string;
+  code: string;
+}
+
+interface Props {
+  snippets: ApiSnippet[];
+}
+
+const { snippets } = Astro.props;
+
+const highlightBash = (code: string) =>
+  code
+    .replaceAll(/(curl|jq|TOKEN|relayfile)/g, '<span class="text-cyan-300">$1</span>')
+    .replaceAll(/(-X|-H|-d|-s)/g, '<span class="text-blue-300">$1</span>')
+    .replaceAll(/("https:[^"]+")/g, '<span class="text-emerald-300">$1</span>')
+    .replaceAll(/("[^"]*")/g, '<span class="text-emerald-300">$1</span>');
+
+const highlightJson = (code: string) =>
+  code
+    .replaceAll(/"([^"]+)"(?=\s*:)/g, '<span class="text-cyan-300">"$1"</span>')
+    .replaceAll(/:\s*"([^"]*)"/g, ': <span class="text-emerald-300">"$1"</span>')
+    .replaceAll(/:\s*(\d+)/g, ': <span class="text-blue-300">$1</span>');
+
+const renderCode = (snippet: ApiSnippet) =>
+  snippet.language === "json" ? highlightJson(snippet.code) : highlightBash(snippet.code);
+---
+
+<section class="section-shell p-8 sm:p-10">
+  <div class="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+    <div>
+      <p class="section-heading">API Preview</p>
+      <h2 class="section-title">Filesystem primitives over HTTP</h2>
+    </div>
+    <p class="max-w-2xl text-sm leading-7 text-zinc-400">
+      Revision-aware reads, writes, and event streams. The API mirrors the filesystem model instead of forcing another sync abstraction.
+    </p>
+  </div>
+
+  <div class="mt-8 grid gap-6 xl:grid-cols-3">
+    {
+      snippets.map((snippet) => (
+        <article class="overflow-hidden rounded-3xl border border-zinc-800 bg-zinc-950">
+          <div class="flex items-center justify-between border-b border-zinc-800 px-5 py-3">
+            <span class="text-sm font-semibold text-zinc-100">{snippet.label}</span>
+            <span class="text-xs uppercase tracking-[0.2em] text-cyan-400">{snippet.language}</span>
+          </div>
+          <pre class="overflow-x-auto p-5 text-sm leading-7 text-zinc-200"><code set:html={renderCode(snippet)}></code></pre>
+        </article>
+      ))
+    }
+  </div>
+</section>

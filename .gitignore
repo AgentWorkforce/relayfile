@@ -48,3 +48,5 @@ dist/
 .trajectories/
 .mcp.json
 opencode.json
+site/node_modules/
+site/dist/
