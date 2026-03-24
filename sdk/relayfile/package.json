@@ -6,7 +6,7 @@
     "relayfile": "bin/relayfile"
   },
   "scripts": {
-    "postinstall": "node scripts/install.js"
+    "postinstall": "node scripts/install.js || true"
   },
   "publishConfig": {
     "access": "public",

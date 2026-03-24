@@ -1,8 +1,14 @@
 {
   "private": true,
   "description": "relayfile — real-time filesystem for humans and agents",
+  "workspaces": [
+    "sdk/relayfile-sdk",
+    "sdk/relayfile"
+  ],
   "scripts": {
-    "workflow": "agent-relay run"
+    "workflow": "agent-relay run",
+    "build": "npm run build --workspace=sdk/relayfile-sdk",
+    "typecheck": "npm run typecheck --workspace=sdk/relayfile-sdk"
   },
   "dependencies": {
     "@agent-relay/sdk": "latest"
