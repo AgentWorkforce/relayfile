@@ -35,3 +35,16 @@ dist/
 
 # Local mount mirror
 /.livefs/
+
+# Compiled binaries
+/relayfile
+/relayfile-cli
+/relayfile-mount
+/relayfile-server
+
+# Agent tool configs
+.factory/
+.gemini/
+.trajectories/
+.mcp.json
+opencode.json

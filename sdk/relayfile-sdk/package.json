@@ -1,11 +1,11 @@
 {
   "name": "@relayfile/sdk",
-  "version": "0.2.0",
-  "description": "TypeScript SDK for the RelayFile filesystem-over-REST API.",
-  "license": "Apache-2.0",
+  "version": "0.1.0",
+  "description": "Official TypeScript SDK for RelayFile.",
+  "license": "MIT",
   "type": "module",
-  "main": "./dist/index.js",
-  "types": "./dist/index.d.ts",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -16,8 +16,7 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "clean": "rm -rf dist",
+    "build": "tsc",
     "prepublishOnly": "npm run build"
   },
   "publishConfig": {
