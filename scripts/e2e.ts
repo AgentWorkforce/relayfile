@@ -520,7 +520,7 @@ ${B}${CYAN}╔══════════════════════
     // ------------------------------------------------------------------
     await run('WebSocket receives file change events', async () => {
       step('Testing WebSocket push');
-      const wsUrl = `${BASE_URL.replace('http', 'ws')}/v1/workspaces/${WORKSPACE}/ws?token=${TOKEN}`;
+      const wsUrl = `${BASE_URL.replace('http', 'ws')}/v1/workspaces/${WORKSPACE}/fs/ws?token=${TOKEN}`;
 
       // Node 22+ has native WebSocket
       if (typeof globalThis.WebSocket === 'undefined') {
