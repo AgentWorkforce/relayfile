@@ -1,12 +1,16 @@
 package httpapi
 
 import (
+	"archive/tar"
+	"compress/gzip"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"math"
 	"net/http"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -130,6 +134,15 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case len(parts) == 5 && parts[3] == "fs" && parts[4] == "tree" && r.Method == http.MethodGet:
 		requiredScope = "fs:read"
 		route = "tree"
+	case len(parts) == 5 && parts[3] == "fs" && parts[4] == "ws" && r.Method == http.MethodGet:
+		requiredScope = "fs:read"
+		route = "fs_ws"
+	case len(parts) == 5 && parts[3] == "fs" && parts[4] == "bulk" && r.Method == http.MethodPost:
+		requiredScope = "fs:write"
+		route = "bulk_write"
+	case len(parts) == 5 && parts[3] == "fs" && parts[4] == "export" && r.Method == http.MethodGet:
+		requiredScope = "fs:read"
+		route = "export"
 	case len(parts) == 5 && parts[3] == "fs" && parts[4] == "file" && r.Method == http.MethodGet:
 		requiredScope = "fs:read"
 		route = "read_file"
@@ -189,6 +202,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if route == "fs_ws" {
+		s.handleFileEventsWebSocket(w, r, workspaceID)
+		return
+	}
+
 	claims, authErr := authorizeBearer(r.Header.Get("Authorization"), s.cfg.JWTSecret, workspaceID, requiredScope, time.Now().UTC())
 	if authErr != nil {
 		writeError(w, authErr.status, authErr.code, authErr.message, getCorrelationID(r))
@@ -215,6 +233,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch route {
 	case "tree":
 		s.handleTree(w, r, workspaceID, correlationID, claims)
+	case "bulk_write":
+		s.handleBulkWrite(w, r, workspaceID, correlationID, claims)
+	case "export":
+		s.handleExport(w, r, workspaceID, correlationID, claims)
 	case "read_file":
 		s.handleReadFile(w, r, workspaceID, correlationID, claims)
 	case "write_file":
@@ -1324,6 +1346,96 @@ func (s *Server) handleReadFile(w http.ResponseWriter, r *http.Request, workspac
 	writeJSON(w, http.StatusOK, file)
 }
 
+func (s *Server) handleBulkWrite(w http.ResponseWriter, r *http.Request, workspaceID, correlationID string, claims tokenClaims) {
+	var body struct {
+		Files []relayfile.BulkWriteFile `json:"files"`
+	}
+	if !s.decodeJSONBody(w, r, correlationID, &body) {
+		return
+	}
+	if len(body.Files) == 0 {
+		writeError(w, http.StatusBadRequest, "bad_request", "missing files", correlationID)
+		return
+	}
+
+	allowed := make([]relayfile.BulkWriteFile, 0, len(body.Files))
+	errorsOut := make([]relayfile.BulkWriteError, 0)
+	for _, file := range body.Files {
+		path := normalizeRoutePath(file.Path)
+		_, readErr := s.store.ReadFile(workspaceID, path)
+		if readErr == nil {
+			existingPermissions := s.store.ResolveFilePermissions(workspaceID, path, true)
+			if !filePermissionAllows(existingPermissions, workspaceID, claims) {
+				errorsOut = append(errorsOut, relayfile.BulkWriteError{
+					Path:    path,
+					Code:    "forbidden",
+					Message: "file access denied by permission policy",
+				})
+				continue
+			}
+		} else if readErr == relayfile.ErrNotFound {
+			inheritedPermissions := s.store.ResolveFilePermissions(workspaceID, path, false)
+			if !filePermissionAllows(inheritedPermissions, workspaceID, claims) {
+				errorsOut = append(errorsOut, relayfile.BulkWriteError{
+					Path:    path,
+					Code:    "forbidden",
+					Message: "file access denied by permission policy",
+				})
+				continue
+			}
+		}
+		allowed = append(allowed, file)
+	}
+
+	written, storeErrors := s.store.BulkWrite(workspaceID, allowed)
+	errorsOut = append(errorsOut, storeErrors...)
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"written":       written,
+		"errorCount":    len(errorsOut),
+		"errors":        errorsOut,
+		"correlationId": correlationID,
+	})
+}
+
+func (s *Server) handleExport(w http.ResponseWriter, r *http.Request, workspaceID, correlationID string, claims tokenClaims) {
+	format := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("format")))
+	if format == "" {
+		format = "json"
+	}
+
+	files, err := s.store.ExportWorkspace(workspaceID)
+	if err != nil {
+		if err == relayfile.ErrInvalidInput {
+			writeError(w, http.StatusBadRequest, "bad_request", err.Error(), correlationID)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "internal_error", err.Error(), correlationID)
+		return
+	}
+
+	visible := make([]relayfile.File, 0, len(files))
+	for _, file := range files {
+		effectivePermissions := s.store.ResolveFilePermissions(workspaceID, file.Path, true)
+		if !filePermissionAllows(effectivePermissions, workspaceID, claims) {
+			continue
+		}
+		visible = append(visible, file)
+	}
+
+	switch format {
+	case "json":
+		writeJSON(w, http.StatusOK, visible)
+	case "tar":
+		if err := s.writeTarExport(w, visible); err != nil {
+			writeError(w, http.StatusInternalServerError, "internal_error", err.Error(), correlationID)
+		}
+	case "patch":
+		s.writePatchExport(w, visible)
+	default:
+		writeError(w, http.StatusBadRequest, "bad_request", "invalid format", correlationID)
+	}
+}
+
 func (s *Server) handleWriteFile(w http.ResponseWriter, r *http.Request, workspaceID, correlationID string, claims tokenClaims) {
 	path := r.URL.Query().Get("path")
 	if path == "" {
@@ -1354,6 +1466,7 @@ func (s *Server) handleWriteFile(w http.ResponseWriter, r *http.Request, workspa
 	var body struct {
 		ContentType string            `json:"contentType"`
 		Content     string            `json:"content"`
+		Encoding    string            `json:"encoding"`
 		Semantics   semanticJSONInput `json:"semantics"`
 	}
 	if !s.decodeJSONBody(w, r, correlationID, &body) {
@@ -1366,6 +1479,7 @@ func (s *Server) handleWriteFile(w http.ResponseWriter, r *http.Request, workspa
 		IfMatch:     ifMatch,
 		ContentType: body.ContentType,
 		Content:     body.Content,
+		Encoding:    body.Encoding,
 		Semantics: relayfile.FileSemantics{
 			Properties:  stringPropertiesFromAny(body.Semantics.Properties),
 			Relations:   body.Semantics.Relations,
@@ -1889,6 +2003,104 @@ func stringPropertiesFromAny(values map[string]any) map[string]string {
 		return nil
 	}
 	return out
+}
+
+func (s *Server) writeTarExport(w http.ResponseWriter, files []relayfile.File) error {
+	type tarFile struct {
+		name    string
+		modTime time.Time
+		content []byte
+	}
+	prepared := make([]tarFile, 0, len(files))
+	for _, file := range files {
+		content, err := decodeExportContent(file)
+		if err != nil {
+			return err
+		}
+		name := strings.TrimPrefix(filepath.Clean(file.Path), "/")
+		if name == "." || name == "" {
+			name = "root"
+		}
+		prepared = append(prepared, tarFile{
+			name:    name,
+			modTime: parseFileTime(file.LastEditedAt),
+			content: content,
+		})
+	}
+
+	w.Header().Set("Content-Type", "application/gzip")
+	w.Header().Set("Content-Disposition", `attachment; filename="workspace-export.tar.gz"`)
+	w.WriteHeader(http.StatusOK)
+
+	gz := gzip.NewWriter(w)
+	defer gz.Close()
+	tw := tar.NewWriter(gz)
+	defer tw.Close()
+
+	for _, file := range prepared {
+		header := &tar.Header{
+			Name:    file.name,
+			Mode:    0o644,
+			Size:    int64(len(file.content)),
+			ModTime: file.modTime,
+		}
+		if err := tw.WriteHeader(header); err != nil {
+			return err
+		}
+		if _, err := tw.Write(file.content); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Server) writePatchExport(w http.ResponseWriter, files []relayfile.File) {
+	var builder strings.Builder
+	for _, file := range files {
+		builder.WriteString("--- /dev/null\n")
+		builder.WriteString("+++ b")
+		builder.WriteString(file.Path)
+		builder.WriteString("\n")
+		if file.Encoding == "base64" {
+			builder.WriteString("@@ -0,0 +1 @@\n")
+			builder.WriteString("+[binary content omitted; encoding=base64]\n")
+			continue
+		}
+		lines := strings.Split(file.Content, "\n")
+		builder.WriteString(fmt.Sprintf("@@ -0,0 +1,%d @@\n", len(lines)))
+		for _, line := range lines {
+			builder.WriteString("+")
+			builder.WriteString(line)
+			builder.WriteString("\n")
+		}
+	}
+	w.Header().Set("Content-Type", "text/x-diff; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = io.WriteString(w, builder.String())
+}
+
+func decodeExportContent(file relayfile.File) ([]byte, error) {
+	if file.Encoding != "base64" {
+		return []byte(file.Content), nil
+	}
+	if decoded, err := decodeBase64String(file.Content); err == nil {
+		return decoded, nil
+	}
+	return nil, relayfile.ErrInvalidInput
+}
+
+func decodeBase64String(value string) ([]byte, error) {
+	if decoded, err := base64.StdEncoding.DecodeString(value); err == nil {
+		return decoded, nil
+	}
+	return base64.RawStdEncoding.DecodeString(value)
+}
+
+func parseFileTime(value string) time.Time {
+	if parsed, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(value)); err == nil {
+		return parsed
+	}
+	return time.Unix(0, 0).UTC()
 }
 
 func writeJSON(w http.ResponseWriter, status int, data any) {

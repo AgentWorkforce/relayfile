@@ -1,12 +1,16 @@
 package httpapi
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -15,6 +19,8 @@ import (
 	"time"
 
 	"github.com/agentworkforce/relayfile/internal/relayfile"
+	"nhooyr.io/websocket"
+	"nhooyr.io/websocket/wsjson"
 )
 
 func TestAuthRequired(t *testing.T) {
@@ -63,6 +69,81 @@ func TestDashboardRouteRejectsNonGET(t *testing.T) {
 	}
 	if payload["code"] != "not_found" {
 		t.Fatalf("expected not_found code, got %v", payload["code"])
+	}
+}
+
+func TestFileEventsWebSocketCatchUpAndPingPong(t *testing.T) {
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
+	t.Cleanup(store.Close)
+
+	if _, err := store.WriteFile(relayfile.WriteRequest{
+		WorkspaceID:   "ws_socket",
+		Path:          "/notion/Docs/One.md",
+		IfMatch:       "0",
+		ContentType:   "text/markdown",
+		Content:       "# one",
+		CorrelationID: "corr_socket_1",
+	}); err != nil {
+		t.Fatalf("seed write failed: %v", err)
+	}
+
+	server := httptest.NewServer(NewServer(store))
+	defer server.Close()
+
+	token := mustTestJWT(t, "dev-secret", "ws_socket", "Worker1", []string{"fs:read"}, time.Now().Add(time.Hour))
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/workspaces/ws_socket/fs/ws?token=" + token
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	conn, _, err := websocket.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatalf("websocket dial failed: %v", err)
+	}
+	defer conn.Close(websocket.StatusNormalClosure, "")
+
+	var catchUp map[string]any
+	if err := wsjson.Read(ctx, conn, &catchUp); err != nil {
+		t.Fatalf("read catch-up event failed: %v", err)
+	}
+	if catchUp["type"] != "file.created" {
+		t.Fatalf("expected file.created catch-up event, got %v", catchUp["type"])
+	}
+	if catchUp["path"] != "/notion/Docs/One.md" {
+		t.Fatalf("unexpected catch-up path: %v", catchUp["path"])
+	}
+
+	if err := wsjson.Write(ctx, conn, map[string]any{"type": "ping"}); err != nil {
+		t.Fatalf("write ping failed: %v", err)
+	}
+	var pong map[string]any
+	if err := wsjson.Read(ctx, conn, &pong); err != nil {
+		t.Fatalf("read pong failed: %v", err)
+	}
+	if pong["type"] != "pong" {
+		t.Fatalf("expected pong response, got %v", pong["type"])
+	}
+
+	if _, err := store.WriteFile(relayfile.WriteRequest{
+		WorkspaceID:   "ws_socket",
+		Path:          "/notion/Docs/Two.md",
+		IfMatch:       "0",
+		ContentType:   "text/markdown",
+		Content:       "# two",
+		CorrelationID: "corr_socket_2",
+	}); err != nil {
+		t.Fatalf("live write failed: %v", err)
+	}
+
+	var live map[string]any
+	if err := wsjson.Read(ctx, conn, &live); err != nil {
+		t.Fatalf("read live event failed: %v", err)
+	}
+	if live["type"] != "file.created" {
+		t.Fatalf("expected file.created live event, got %v", live["type"])
+	}
+	if live["path"] != "/notion/Docs/Two.md" {
+		t.Fatalf("unexpected live event path: %v", live["path"])
 	}
 }
 
@@ -261,6 +342,326 @@ func TestWriteFilePayloadTooLarge(t *testing.T) {
 	}
 	if payload["code"] != "payload_too_large" {
 		t.Fatalf("expected payload_too_large code, got %v", payload["code"])
+	}
+}
+
+func TestBinaryEncodingRoundTripAndExport(t *testing.T) {
+	server := NewServerWithConfig(relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true}), ServerConfig{})
+	token := mustTestJWT(t, "dev-secret", "ws_binary", "Worker1", []string{"fs:read", "fs:write"}, time.Now().Add(time.Hour))
+	encoded := base64.StdEncoding.EncodeToString([]byte{0x00, 0x7f, 0xff, 0x10})
+
+	writeResp := doRequest(t, server, request{
+		method: http.MethodPut,
+		path:   "/v1/workspaces/ws_binary/fs/file?path=/external/blob.bin",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_binary_write",
+			"If-Match":         "0",
+		},
+		body: map[string]any{
+			"contentType": "application/octet-stream",
+			"content":     encoded,
+			"encoding":    "base64",
+		},
+	})
+	if writeResp.Code != http.StatusAccepted {
+		t.Fatalf("expected 202 on binary write, got %d (%s)", writeResp.Code, writeResp.Body.String())
+	}
+
+	readResp := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/workspaces/ws_binary/fs/file?path=/external/blob.bin",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_binary_read",
+		},
+	})
+	if readResp.Code != http.StatusOK {
+		t.Fatalf("expected 200 on binary read, got %d (%s)", readResp.Code, readResp.Body.String())
+	}
+	var file relayfile.File
+	if err := json.NewDecoder(readResp.Body).Decode(&file); err != nil {
+		t.Fatalf("decode binary read response: %v", err)
+	}
+	if file.Encoding != "base64" {
+		t.Fatalf("expected base64 encoding in read response, got %+v", file)
+	}
+
+	exportResp := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/workspaces/ws_binary/fs/export?format=tar",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_binary_export",
+		},
+	})
+	if exportResp.Code != http.StatusOK {
+		t.Fatalf("expected 200 on tar export, got %d (%s)", exportResp.Code, exportResp.Body.String())
+	}
+	gzr, err := gzip.NewReader(bytes.NewReader(exportResp.Body.Bytes()))
+	if err != nil {
+		t.Fatalf("gzip reader: %v", err)
+	}
+	defer gzr.Close()
+	tr := tar.NewReader(gzr)
+	header, err := tr.Next()
+	if err != nil {
+		t.Fatalf("tar next: %v", err)
+	}
+	if header.Name != "external/blob.bin" {
+		t.Fatalf("unexpected tar entry name: %s", header.Name)
+	}
+	content, err := io.ReadAll(tr)
+	if err != nil {
+		t.Fatalf("read tar content: %v", err)
+	}
+	if !bytes.Equal(content, []byte{0x00, 0x7f, 0xff, 0x10}) {
+		t.Fatalf("unexpected tar content bytes: %v", content)
+	}
+}
+
+func TestBulkWriteAndJSONExportEndpoints(t *testing.T) {
+	server := NewServer(relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true}))
+	token := mustTestJWT(t, "dev-secret", "ws_bulk_api", "Worker1", []string{"fs:read", "fs:write"}, time.Now().Add(time.Hour))
+
+	bulkResp := doRequest(t, server, request{
+		method: http.MethodPost,
+		path:   "/v1/workspaces/ws_bulk_api/fs/bulk",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_bulk",
+		},
+		body: map[string]any{
+			"files": []map[string]any{
+				{
+					"path":        "/external/A.md",
+					"contentType": "text/markdown",
+					"content":     "# A",
+				},
+				{
+					"path":        "/external/B.md",
+					"contentType": "text/markdown",
+					"content":     "# B",
+				},
+			},
+		},
+	})
+	if bulkResp.Code != http.StatusAccepted {
+		t.Fatalf("expected 202 on bulk write, got %d (%s)", bulkResp.Code, bulkResp.Body.String())
+	}
+	var bulkPayload map[string]any
+	if err := json.NewDecoder(bulkResp.Body).Decode(&bulkPayload); err != nil {
+		t.Fatalf("decode bulk response: %v", err)
+	}
+	if int(bulkPayload["written"].(float64)) != 2 {
+		t.Fatalf("expected written=2, got %v", bulkPayload["written"])
+	}
+
+	exportResp := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/workspaces/ws_bulk_api/fs/export?format=json",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_export_json",
+		},
+	})
+	if exportResp.Code != http.StatusOK {
+		t.Fatalf("expected 200 on json export, got %d (%s)", exportResp.Code, exportResp.Body.String())
+	}
+	var files []relayfile.File
+	if err := json.NewDecoder(exportResp.Body).Decode(&files); err != nil {
+		t.Fatalf("decode export response: %v", err)
+	}
+	if len(files) != 2 {
+		t.Fatalf("expected 2 exported files, got %d", len(files))
+	}
+	if files[0].Path != "/external/A.md" || files[1].Path != "/external/B.md" {
+		t.Fatalf("unexpected exported file ordering: %+v", files)
+	}
+}
+
+func TestBulkWriteEndpoint(t *testing.T) {
+	server := NewServer(relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true}))
+	token := mustTestJWT(t, "dev-secret", "ws_bulk_endpoint", "Worker1", []string{"fs:read", "fs:write"}, time.Now().Add(time.Hour))
+
+	files := make([]map[string]any, 0, 5)
+	for i := 0; i < 5; i++ {
+		files = append(files, map[string]any{
+			"path":        fmt.Sprintf("/external/Bulk-%d.md", i),
+			"contentType": "text/markdown",
+			"content":     fmt.Sprintf("# file %d", i),
+		})
+	}
+
+	resp := doRequest(t, server, request{
+		method: http.MethodPost,
+		path:   "/v1/workspaces/ws_bulk_endpoint/fs/bulk",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_bulk_endpoint",
+		},
+		body: map[string]any{
+			"files": files,
+		},
+	})
+	if resp.Code != http.StatusAccepted {
+		t.Fatalf("expected 202 on bulk write, got %d (%s)", resp.Code, resp.Body.String())
+	}
+
+	var payload map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode bulk response: %v", err)
+	}
+	if int(payload["written"].(float64)) != 5 {
+		t.Fatalf("expected written=5, got %v", payload["written"])
+	}
+	if int(payload["errorCount"].(float64)) != 0 {
+		t.Fatalf("expected errorCount=0, got %v", payload["errorCount"])
+	}
+}
+
+func TestExportJSON(t *testing.T) {
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
+	t.Cleanup(store.Close)
+
+	if written, errs := store.BulkWrite("ws_export_json", []relayfile.BulkWriteFile{
+		{Path: "/external/A.md", ContentType: "text/markdown", Content: "# A"},
+		{Path: "/external/B.txt", ContentType: "text/plain", Content: "B"},
+	}); written != 2 || len(errs) != 0 {
+		t.Fatalf("seed bulk write failed: written=%d errs=%+v", written, errs)
+	}
+
+	server := NewServer(store)
+	token := mustTestJWT(t, "dev-secret", "ws_export_json", "Worker1", []string{"fs:read"}, time.Now().Add(time.Hour))
+
+	resp := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/workspaces/ws_export_json/fs/export?format=json",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_export_json_case",
+		},
+	})
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200 on json export, got %d (%s)", resp.Code, resp.Body.String())
+	}
+
+	var files []relayfile.File
+	if err := json.NewDecoder(resp.Body).Decode(&files); err != nil {
+		t.Fatalf("decode export json response: %v", err)
+	}
+	if len(files) != 2 {
+		t.Fatalf("expected 2 exported files, got %d", len(files))
+	}
+	if files[0].Path != "/external/A.md" || files[0].Content != "# A" {
+		t.Fatalf("unexpected first exported file: %+v", files[0])
+	}
+	if files[1].Path != "/external/B.txt" || files[1].Content != "B" {
+		t.Fatalf("unexpected second exported file: %+v", files[1])
+	}
+}
+
+func TestExportTar(t *testing.T) {
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
+	t.Cleanup(store.Close)
+
+	if written, errs := store.BulkWrite("ws_export_tar", []relayfile.BulkWriteFile{
+		{
+			Path:        "/external/blob.bin",
+			ContentType: "application/octet-stream",
+			Content:     base64.StdEncoding.EncodeToString([]byte{0x01, 0x02, 0x03, 0x04}),
+			Encoding:    "base64",
+		},
+	}); written != 1 || len(errs) != 0 {
+		t.Fatalf("seed bulk write failed: written=%d errs=%+v", written, errs)
+	}
+
+	server := NewServer(store)
+	token := mustTestJWT(t, "dev-secret", "ws_export_tar", "Worker1", []string{"fs:read"}, time.Now().Add(time.Hour))
+
+	resp := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/workspaces/ws_export_tar/fs/export?format=tar",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_export_tar_case",
+		},
+	})
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200 on tar export, got %d (%s)", resp.Code, resp.Body.String())
+	}
+	if got := resp.Header().Get("Content-Type"); got != "application/gzip" {
+		t.Fatalf("expected application/gzip content type, got %q", got)
+	}
+
+	gzr, err := gzip.NewReader(bytes.NewReader(resp.Body.Bytes()))
+	if err != nil {
+		t.Fatalf("gzip reader: %v", err)
+	}
+	defer gzr.Close()
+	tr := tar.NewReader(gzr)
+
+	header, err := tr.Next()
+	if err != nil {
+		t.Fatalf("tar next: %v", err)
+	}
+	if header.Name != "external/blob.bin" {
+		t.Fatalf("unexpected tar entry name: %s", header.Name)
+	}
+	content, err := io.ReadAll(tr)
+	if err != nil {
+		t.Fatalf("read tar content: %v", err)
+	}
+	if !bytes.Equal(content, []byte{0x01, 0x02, 0x03, 0x04}) {
+		t.Fatalf("unexpected tar content bytes: %v", content)
+	}
+}
+
+func TestWebSocketEvents(t *testing.T) {
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
+	t.Cleanup(store.Close)
+
+	server := httptest.NewServer(NewServer(store))
+	defer server.Close()
+
+	token := mustTestJWT(t, "dev-secret", "ws_websocket_events", "Worker1", []string{"fs:read", "fs:write"}, time.Now().Add(time.Hour))
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/workspaces/ws_websocket_events/fs/ws?token=" + token
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	conn, _, err := websocket.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatalf("websocket dial failed: %v", err)
+	}
+	defer conn.Close(websocket.StatusNormalClosure, "")
+
+	writeResp := doRequest(t, NewServer(store), request{
+		method: http.MethodPut,
+		path:   "/v1/workspaces/ws_websocket_events/fs/file?path=/external/Event.md",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_ws_event_write",
+			"If-Match":         "0",
+		},
+		body: map[string]any{
+			"contentType": "text/markdown",
+			"content":     "# event",
+		},
+	})
+	if writeResp.Code != http.StatusAccepted {
+		t.Fatalf("expected 202 write, got %d (%s)", writeResp.Code, writeResp.Body.String())
+	}
+
+	var event map[string]any
+	if err := wsjson.Read(ctx, conn, &event); err != nil {
+		t.Fatalf("read websocket event failed: %v", err)
+	}
+	if event["type"] != "file.created" {
+		t.Fatalf("expected file.created event, got %v", event["type"])
+	}
+	if event["path"] != "/external/Event.md" {
+		t.Fatalf("unexpected event path: %v", event["path"])
 	}
 }
 
@@ -4156,8 +4557,8 @@ func TestGenericWebhookIngestionMultipleProviders(t *testing.T) {
 	token := mustTestJWT(t, "dev-secret", "ws_1", "Worker1", []string{"fs:read", "fs:write", "sync:read", "sync:trigger"}, time.Now().Add(time.Hour))
 
 	testCases := []struct {
-		name     string
-		provider string
+		name      string
+		provider  string
 		eventType string
 	}{
 		{
@@ -4217,9 +4618,9 @@ func TestGenericWebhookIngestionMissingFields(t *testing.T) {
 		{
 			name: "Missing provider",
 			body: map[string]any{
-				"event_type": "file.updated",
-				"path":       "/doc.md",
-				"data":       map[string]any{},
+				"event_type":  "file.updated",
+				"path":        "/doc.md",
+				"data":        map[string]any{},
 				"delivery_id": "evt_1",
 				"timestamp":   time.Now().UTC().Format(time.RFC3339),
 			},
@@ -4228,9 +4629,9 @@ func TestGenericWebhookIngestionMissingFields(t *testing.T) {
 		{
 			name: "Missing event_type",
 			body: map[string]any{
-				"provider":   "notion",
-				"path":       "/doc.md",
-				"data":       map[string]any{},
+				"provider":    "notion",
+				"path":        "/doc.md",
+				"data":        map[string]any{},
 				"delivery_id": "evt_1",
 				"timestamp":   time.Now().UTC().Format(time.RFC3339),
 			},
@@ -4239,9 +4640,9 @@ func TestGenericWebhookIngestionMissingFields(t *testing.T) {
 		{
 			name: "Missing path",
 			body: map[string]any{
-				"provider":   "notion",
-				"event_type": "file.updated",
-				"data":       map[string]any{},
+				"provider":    "notion",
+				"event_type":  "file.updated",
+				"data":        map[string]any{},
 				"delivery_id": "evt_1",
 				"timestamp":   time.Now().UTC().Format(time.RFC3339),
 			},
@@ -4313,8 +4714,8 @@ func TestGenericPassthroughForUnknownProvider(t *testing.T) {
 			"event_type": "file.updated",
 			"path":       "/data/record_123.json",
 			"data": map[string]any{
-				"content":        `{"id": 123, "name": "Test Record"}`,
-				"contentType":    "application/json",
+				"content":          `{"id": 123, "name": "Test Record"}`,
+				"contentType":      "application/json",
 				"providerObjectId": "obj_123",
 			},
 			"delivery_id": "evt_custom_1",

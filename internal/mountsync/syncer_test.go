@@ -1,13 +1,25 @@
 package mountsync
 
 import (
+	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/agentworkforce/relayfile/internal/httpapi"
+	"github.com/agentworkforce/relayfile/internal/relayfile"
 )
 
 func TestSyncOncePullsRemoteAndPushesLocalEdits(t *testing.T) {
@@ -330,6 +342,71 @@ func TestSyncOnceFallsBackToFullPullWhenEventsUnavailable(t *testing.T) {
 	}
 }
 
+func TestBulkSeedThenSync(t *testing.T) {
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
+	t.Cleanup(store.Close)
+
+	api := httptest.NewServer(httpapi.NewServer(store))
+	defer api.Close()
+
+	workspaceID := "ws_mount_bulk_seed"
+	token := mustMountsyncTestJWT(t, "dev-secret", workspaceID, "MountSync", []string{"fs:read", "fs:write"}, time.Now().Add(time.Hour))
+
+	body, err := json.Marshal(map[string]any{
+		"files": []map[string]any{
+			{
+				"path":        "/notion/Docs/A.md",
+				"contentType": "text/markdown",
+				"content":     "# A",
+			},
+			{
+				"path":        "/notion/Docs/B.md",
+				"contentType": "text/markdown",
+				"content":     "# B",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal bulk seed body failed: %v", err)
+	}
+
+	req, err := http.NewRequest(http.MethodPost, api.URL+"/v1/workspaces/"+workspaceID+"/fs/bulk", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("new bulk request failed: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("X-Correlation-Id", "corr_mount_bulk_seed")
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := api.Client().Do(req)
+	if err != nil {
+		t.Fatalf("bulk seed request failed: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		payload, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 202 from bulk seed, got %d (%s)", resp.StatusCode, string(payload))
+	}
+
+	localDir := t.TempDir()
+	client := NewHTTPClient(api.URL, token, api.Client())
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: workspaceID,
+		RemoteRoot:  "/notion",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("sync once failed: %v", err)
+	}
+
+	assertLocalFileContent(t, filepath.Join(localDir, "Docs", "A.md"), "# A")
+	assertLocalFileContent(t, filepath.Join(localDir, "Docs", "B.md"), "# B")
+}
+
 func TestRemoteToLocalAndLocalToRemotePath(t *testing.T) {
 	localRoot := filepath.Join("tmp", "mirror")
 	localPath, err := remoteToLocalPath(localRoot, "/notion", "/notion/Folder/File.md")
@@ -529,6 +606,49 @@ func (c *fakeClient) DeleteFile(ctx context.Context, workspaceID, path, baseRevi
 	delete(c.files, path)
 	c.appendEvent("file.deleted", path, current.Revision)
 	return nil
+}
+
+func assertLocalFileContent(t *testing.T, path, want string) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read local file %s failed: %v", path, err)
+	}
+	if string(data) != want {
+		t.Fatalf("expected %s to contain %q, got %q", path, want, string(data))
+	}
+}
+
+func mustMountsyncTestJWT(t *testing.T, secret, workspaceID, agentName string, scopes []string, exp time.Time) string {
+	t.Helper()
+
+	headerBytes, err := json.Marshal(map[string]any{
+		"alg": "HS256",
+		"typ": "JWT",
+	})
+	if err != nil {
+		t.Fatalf("marshal jwt header: %v", err)
+	}
+	payloadBytes, err := json.Marshal(map[string]any{
+		"workspace_id": workspaceID,
+		"agent_name":   agentName,
+		"scopes":       scopes,
+		"exp":          exp.Unix(),
+		"aud":          "relayfile",
+	})
+	if err != nil {
+		t.Fatalf("marshal jwt payload: %v", err)
+	}
+
+	h := base64.RawURLEncoding.EncodeToString(headerBytes)
+	p := base64.RawURLEncoding.EncodeToString(payloadBytes)
+	signingInput := h + "." + p
+
+	mac := hmac.New(sha256.New, []byte(secret))
+	_, _ = mac.Write([]byte(signingInput))
+	signature := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+
+	return signingInput + "." + signature
 }
 
 func (c *fakeClient) appendEvent(eventType, path, revision string) {

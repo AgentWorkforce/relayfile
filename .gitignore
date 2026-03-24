@@ -22,8 +22,7 @@
 .DS_Store
 Thumbs.db
 
-# Trajectories
-.trajectories/
+.agent-relay
 
 # Node (SDK)
 node_modules/

@@ -26,6 +26,27 @@ tags:
 security:
   - BearerAuth: []
 paths:
+  /health:
+    get:
+      tags: [Admin]
+      operationId: healthCheck
+      summary: Health check endpoint
+      description: Returns a simple status indicator for load balancers and monitoring.
+      security: []
+      responses:
+        '200':
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [status]
+                properties:
+                  status:
+                    type: string
+                    enum: [ok]
+
   /v1/workspaces/{workspaceId}/fs/tree:
     get:
       tags: [Filesystem]
@@ -78,6 +99,123 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /v1/workspaces/{workspaceId}/fs/ws:
+    get:
+      tags: [Events]
+      operationId: fileEventsWebSocket
+      summary: WebSocket stream of real-time filesystem change events
+      description: |
+        Opens a WebSocket connection that streams filesystem events for the
+        workspace in real time. Authentication is via a `token` query parameter
+        containing a valid JWT (same format as the Bearer token).
+
+        The server sends JSON messages with `type`, `path`, `revision`, and
+        `timestamp` fields. The client may send `{"type":"ping"}` to keep the
+        connection alive; the server responds with `{"type":"pong"}`.
+      security:
+        - BearerAuth: [fs:read]
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - name: token
+          in: query
+          required: true
+          description: JWT token for authentication (same as Bearer token value)
+          schema:
+            type: string
+      responses:
+        '101':
+          description: WebSocket upgrade successful
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /v1/workspaces/{workspaceId}/fs/bulk:
+    post:
+      tags: [Filesystem]
+      operationId: bulkWriteFiles
+      summary: Write multiple files in a single request
+      description: |
+        Writes multiple files atomically within a workspace. Each file is
+        individually permission-checked; files that fail permission checks are
+        reported in the `errors` array while permitted files are written.
+      security:
+        - BearerAuth: [fs:write]
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BulkWriteRequest'
+      responses:
+        '202':
+          description: Bulk write accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BulkWriteResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /v1/workspaces/{workspaceId}/fs/export:
+    get:
+      tags: [Filesystem]
+      operationId: exportWorkspace
+      summary: Export all visible files in a workspace
+      description: |
+        Exports all files visible to the caller under effective permission rules.
+        Supports multiple output formats: JSON (default), tar (gzipped tarball),
+        or patch (unified diff format).
+      security:
+        - BearerAuth: [fs:read]
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/CorrelationId'
+        - name: format
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [json, tar, patch]
+            default: json
+      responses:
+        '200':
+          description: Export data in requested format
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/FileReadResponse'
+            application/gzip:
+              schema:
+                type: string
+                format: binary
+            text/plain:
+              schema:
+                type: string
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '429':
           $ref: '#/components/responses/RateLimited'
         '500':
@@ -2300,6 +2438,63 @@ components:
         correlationId:
           type: string
           description: Correlation ID for tracing
+
+    BulkWriteRequest:
+      type: object
+      additionalProperties: false
+      required: [files]
+      properties:
+        files:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/BulkWriteFile'
+
+    BulkWriteFile:
+      type: object
+      additionalProperties: false
+      required: [path, contentType, content]
+      properties:
+        path:
+          type: string
+          pattern: '^/.*'
+        contentType:
+          type: string
+        content:
+          type: string
+        encoding:
+          type: string
+          description: Content encoding, e.g. "base64" for binary data
+
+    BulkWriteError:
+      type: object
+      additionalProperties: false
+      required: [path, code, message]
+      properties:
+        path:
+          type: string
+        code:
+          type: string
+        message:
+          type: string
+
+    BulkWriteResponse:
+      type: object
+      additionalProperties: false
+      required: [written, errorCount, errors, correlationId]
+      properties:
+        written:
+          type: integer
+          minimum: 0
+        errorCount:
+          type: integer
+          minimum: 0
+        errors:
+          type: array
+          items:
+            $ref: '#/components/schemas/BulkWriteError'
+        correlationId:
+          type: string
 
     ConflictErrorResponse:
       allOf:

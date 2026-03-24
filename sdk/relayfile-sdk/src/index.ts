@@ -1,4 +1,9 @@
-export { RelayFileClient, type RelayFileRetryOptions } from "./client.js";
+export {
+  RelayFileClient,
+  type ConnectWebSocketOptions,
+  type RelayFileRetryOptions,
+  type WebSocketConnection
+} from "./client.js";
 export {
   InvalidStateError,
   PayloadTooLargeError,
@@ -23,12 +28,18 @@ export type {
   AdminSyncAlertType,
   AdminSyncStatusResponse,
   BackendStatusResponse,
+  BulkWriteFile,
+  BulkWriteInput,
+  BulkWriteResponse,
   ConflictErrorResponse,
   DeleteFileInput,
   DeadLetterFeedResponse,
   DeadLetterItem,
   ErrorResponse,
   EventFeedResponse,
+  ExportFormat,
+  ExportJsonResponse,
+  ExportOptions,
   FileQueryItem,
   FileQueryResponse,
   FileReadResponse,

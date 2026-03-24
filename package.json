@@ -1,0 +1,10 @@
+{
+  "private": true,
+  "description": "relayfile — real-time filesystem for humans and agents",
+  "scripts": {
+    "workflow": "agent-relay run"
+  },
+  "dependencies": {
+    "@agent-relay/sdk": "latest"
+  }
+}

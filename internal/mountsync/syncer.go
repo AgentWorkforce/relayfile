@@ -17,7 +17,11 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
+
+	"nhooyr.io/websocket"
+	"nhooyr.io/websocket/wsjson"
 )
 
 var ErrConflict = errors.New("revision conflict")
@@ -272,6 +276,7 @@ type SyncerOptions struct {
 	LocalRoot     string
 	StateFile     string
 	EventProvider string
+	WebSocket     *bool
 	Logger        Logger
 }
 
@@ -289,6 +294,10 @@ type Syncer struct {
 	logger        Logger
 	state         mountState
 	loaded        bool
+	websocket     bool
+	wsConn        *websocket.Conn
+	wsCancel      context.CancelFunc
+	mu            sync.Mutex
 }
 
 type mountState struct {
@@ -307,6 +316,13 @@ type localSnapshot struct {
 	Content     string
 	ContentType string
 	Hash        string
+}
+
+type websocketEvent struct {
+	Type      string `json:"type"`
+	Path      string `json:"path,omitempty"`
+	Revision  string `json:"revision,omitempty"`
+	Timestamp string `json:"timestamp,omitempty"`
 }
 
 func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
@@ -337,6 +353,10 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 	if err := os.MkdirAll(localRoot, 0o755); err != nil {
 		return nil, err
 	}
+	websocketEnabled := true
+	if opts.WebSocket != nil {
+		websocketEnabled = *opts.WebSocket
+	}
 	return &Syncer{
 		client:        client,
 		workspace:     workspace,
@@ -344,6 +364,7 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 		localRoot:     localRoot,
 		stateFile:     stateFile,
 		eventProvider: eventProvider,
+		websocket:     websocketEnabled,
 		logger:        opts.Logger,
 		state: mountState{
 			Files: map[string]trackedFile{},
@@ -352,9 +373,23 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 }
 
 func (s *Syncer) SyncOnce(ctx context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	if err := s.loadState(); err != nil {
 		return err
 	}
+
+	// Connect websocket outside the lock to avoid deadlock with readWebSocketLoop.
+	needsWS := s.websocket && s.wsConn == nil
+	if needsWS {
+		s.mu.Unlock()
+		if err := s.connectWebSocket(ctx); err != nil {
+			s.logf("websocket unavailable; using polling sync: %v", err)
+		}
+		s.mu.Lock()
+	}
+
 	conflicted, err := s.pushLocal(ctx)
 	if err != nil {
 		return err
@@ -363,6 +398,114 @@ func (s *Syncer) SyncOnce(ctx context.Context) error {
 		return err
 	}
 	return s.saveState()
+}
+
+func (s *Syncer) connectWebSocket(ctx context.Context) error {
+	s.mu.Lock()
+	if !s.websocket || s.wsConn != nil {
+		s.mu.Unlock()
+		return nil
+	}
+	s.mu.Unlock()
+
+	httpClient, ok := s.client.(*HTTPClient)
+	if !ok {
+		return nil
+	}
+
+	wsURL, err := httpClient.websocketURL(s.workspace)
+	if err != nil {
+		return err
+	}
+	conn, _, err := websocket.Dial(ctx, wsURL, nil)
+	if err != nil {
+		return err
+	}
+
+	readCtx, cancel := context.WithCancel(context.Background())
+
+	s.mu.Lock()
+	s.wsConn = conn
+	s.wsCancel = cancel
+	s.mu.Unlock()
+
+	go s.readWebSocketLoop(readCtx, conn)
+	return nil
+}
+
+func (s *Syncer) readWebSocketLoop(ctx context.Context, conn *websocket.Conn) {
+	defer s.handleWebSocketDisconnect(conn)
+
+	for {
+		var event websocketEvent
+		if err := wsjson.Read(ctx, conn, &event); err != nil {
+			if websocket.CloseStatus(err) == websocket.StatusNormalClosure ||
+				websocket.CloseStatus(err) == websocket.StatusGoingAway ||
+				errors.Is(err, context.Canceled) {
+				return
+			}
+			s.logf("websocket read failed; falling back to polling: %v", err)
+			return
+		}
+		if err := s.applyWebSocketEvent(ctx, event); err != nil {
+			s.logf("websocket event apply failed for %s: %v", strings.TrimSpace(event.Path), err)
+		}
+	}
+}
+
+func (s *Syncer) applyWebSocketEvent(ctx context.Context, event websocketEvent) error {
+	switch eventType := strings.TrimSpace(event.Type); eventType {
+	case "", "pong":
+		return nil
+	case "file.created", "file.updated":
+		remotePath := normalizeRemotePath(event.Path)
+		if remotePath == "/" || !isUnderRemoteRoot(s.remoteRoot, remotePath) {
+			return nil
+		}
+		file, err := s.client.ReadFile(ctx, s.workspace, remotePath)
+		if err != nil {
+			var httpErr *HTTPError
+			if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusNotFound {
+				return nil
+			}
+			return err
+		}
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if err := s.applyRemoteFile(remotePath, file, nil); err != nil {
+			return err
+		}
+		return s.saveState()
+	case "file.deleted":
+		remotePath := normalizeRemotePath(event.Path)
+		if remotePath == "/" || !isUnderRemoteRoot(s.remoteRoot, remotePath) {
+			return nil
+		}
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if err := s.applyRemoteDelete(remotePath, nil); err != nil {
+			return err
+		}
+		return s.saveState()
+	default:
+		return nil
+	}
+}
+
+func (s *Syncer) handleWebSocketDisconnect(conn *websocket.Conn) {
+	_ = conn.Close(websocket.StatusNormalClosure, "")
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.wsConn != conn {
+		return
+	}
+	if s.wsCancel != nil {
+		s.wsCancel()
+		s.wsCancel = nil
+	}
+	s.wsConn = nil
 }
 
 func (s *Syncer) pullRemote(ctx context.Context, conflicted map[string]struct{}) error {
@@ -545,8 +688,10 @@ func (s *Syncer) resolveLatestEventCursor(ctx context.Context) (string, error) {
 }
 
 func (s *Syncer) applyRemoteFile(remotePath string, file RemoteFile, conflicted map[string]struct{}) error {
-	if _, skip := conflicted[remotePath]; skip {
-		return nil
+	if conflicted != nil {
+		if _, skip := conflicted[remotePath]; skip {
+			return nil
+		}
 	}
 	if tracked, ok := s.state.Files[remotePath]; ok && tracked.Dirty {
 		return nil
@@ -584,8 +729,10 @@ func (s *Syncer) applyRemoteFile(remotePath string, file RemoteFile, conflicted 
 }
 
 func (s *Syncer) applyRemoteDelete(remotePath string, conflicted map[string]struct{}) error {
-	if _, skip := conflicted[remotePath]; skip {
-		return nil
+	if conflicted != nil {
+		if _, skip := conflicted[remotePath]; skip {
+			return nil
+		}
 	}
 	tracked, ok := s.state.Files[remotePath]
 	if !ok || tracked.Dirty {
@@ -905,6 +1052,27 @@ func hashString(s string) string {
 
 func correlationID() string {
 	return fmt.Sprintf("mount_%d", time.Now().UnixNano())
+}
+
+func (c *HTTPClient) websocketURL(workspaceID string) (string, error) {
+	base, err := url.Parse(c.baseURL)
+	if err != nil {
+		return "", err
+	}
+	switch base.Scheme {
+	case "http":
+		base.Scheme = "ws"
+	case "https":
+		base.Scheme = "wss"
+	case "ws", "wss":
+	default:
+		return "", fmt.Errorf("unsupported base url scheme %q", base.Scheme)
+	}
+	base.Path = fmt.Sprintf("/v1/workspaces/%s/fs/ws", url.PathEscape(workspaceID))
+	q := url.Values{}
+	q.Set("token", c.token)
+	base.RawQuery = q.Encode()
+	return base.String(), nil
 }
 
 func (c *HTTPClient) retryDelay(attempt int, retryAfterHeader string) time.Duration {
