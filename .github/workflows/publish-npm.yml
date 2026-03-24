@@ -1,0 +1,141 @@
+name: Publish NPM Package
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version bump type"
+        required: true
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+          - prerelease
+        default: patch
+      custom_version:
+        description: "Custom version (optional, overrides version type)"
+        required: false
+        type: string
+      dry_run:
+        description: "Dry run (do not actually publish)"
+        required: false
+        type: boolean
+        default: false
+      tag:
+        description: "NPM dist-tag"
+        required: false
+        type: choice
+        options:
+          - latest
+          - next
+          - beta
+          - alpha
+        default: latest
+
+concurrency:
+  group: publish-npm
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  publish-sdk:
+    name: Publish @relayfile/sdk
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: sdk/relayfile-sdk/package-lock.json
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Install deps
+        working-directory: sdk/relayfile-sdk
+        run: npm ci
+
+      - name: Version bump
+        id: version
+        working-directory: sdk/relayfile-sdk
+        run: |
+          CUSTOM_VERSION="${{ github.event.inputs.custom_version }}"
+          VERSION_TYPE="${{ github.event.inputs.version }}"
+
+          if [ -n "$CUSTOM_VERSION" ]; then
+            npm version "$CUSTOM_VERSION" --no-git-tag-version --allow-same-version
+          else
+            npm version "$VERSION_TYPE" --no-git-tag-version
+          fi
+
+          NEW_VERSION="$(node -p "require('./package.json').version")"
+          echo "new_version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag_name=sdk-v$NEW_VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        working-directory: sdk/relayfile-sdk
+        run: npm run build
+
+      - name: Test
+        working-directory: sdk/relayfile-sdk
+        run: npx tsc --noEmit
+
+      - name: Dry run check
+        if: github.event.inputs.dry_run == 'true'
+        working-directory: sdk/relayfile-sdk
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --dry-run --access public --tag "${{ github.event.inputs.tag }}" --ignore-scripts
+
+      - name: Publish
+        if: github.event.inputs.dry_run != 'true'
+        working-directory: sdk/relayfile-sdk
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public --provenance --tag "${{ github.event.inputs.tag }}" --ignore-scripts
+
+      - name: Commit version bump and create git tag
+        if: github.event.inputs.dry_run != 'true'
+        run: |
+          NEW_VERSION="${{ steps.version.outputs.new_version }}"
+          TAG_NAME="${{ steps.version.outputs.tag_name }}"
+
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+
+          git add sdk/relayfile-sdk/package.json sdk/relayfile-sdk/package-lock.json
+          git commit -m "chore(sdk): release v${NEW_VERSION}"
+          git tag -a "${TAG_NAME}" -m "SDK ${NEW_VERSION}"
+
+          git push origin HEAD:main
+          git push origin "${TAG_NAME}"
+
+      - name: Create GitHub Release
+        if: github.event.inputs.dry_run != 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag_name }}
+          name: ${{ steps.version.outputs.tag_name }}
+          body: |
+            ## @relayfile/sdk ${{ steps.version.outputs.new_version }}
+
+            Install:
+            ```bash
+            npm install @relayfile/sdk@${{ steps.version.outputs.new_version }}
+            ```
+
+            Dist-tag: `${{ github.event.inputs.tag }}`
+            Provenance: enabled via `npm publish --provenance`
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
