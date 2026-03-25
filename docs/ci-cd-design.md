@@ -2,20 +2,19 @@
 
 ## Overview
 
-Four GitHub Actions workflows covering continuous integration, SDK publishing, binary releases, and Cloudflare Workers deployment.
+Four GitHub Actions workflows covering continuous integration, SDK publishing, binary releases, and Cloudflare Workers deployment. Designed to match the proven patterns from the relaycast project.
 
 ---
 
 ## 1. `ci.yml` — Continuous Integration
 
-**Trigger:** Pull requests targeting `main`, pushes to `main`, manual dispatch.
+**Trigger:** Pull requests, pushes to `main`, manual dispatch.
 
 ```yaml
 name: CI
 
 on:
   pull_request:
-    branches: [main]
   push:
     branches: [main]
   workflow_dispatch:
@@ -27,55 +26,71 @@ concurrency:
 
 ### Jobs
 
-#### `go-test` — Go Tests & Build
+#### `go-test` — Go Unit Tests
 - **Runner:** `ubuntu-latest`
 - **Steps:**
   1. `actions/checkout@v4`
   2. `actions/setup-go@v5` with `go-version-file: go.mod`, `cache: true`
   3. `go test ./...` — run all Go package tests
-  4. `go build ./cmd/relayfile ./cmd/relayfile-mount ./cmd/relayfile-cli` — verify all three binaries compile
 
-#### `sdk` — TypeScript SDK
+#### `go-build` — Go Build Verification
+- **Runner:** `ubuntu-latest`
+- **Needs:** `go-test`
+- **Steps:**
+  1. Checkout + setup Go (same as above)
+  2. `make build` — builds all three binaries (`relayfile`, `relayfile-server`, `relayfile-mount`) to `bin/`
+  3. `actions/upload-artifact@v4` — upload `bin/` as `relayfile-binaries` (needed by E2E)
+
+#### `sdk-typecheck` — TypeScript SDK
 - **Runner:** `ubuntu-latest`
 - **Steps:**
   1. `actions/checkout@v4`
-  2. `actions/setup-node@v4` with `node-version: "20"`
-  3. `cd sdk/relayfile-sdk && npm ci`
-  4. `npm run build` — compile TypeScript
+  2. `actions/setup-node@v4` with `node-version: "22"`
+  3. `cd packages/relayfile-sdk && npm ci`
+  4. `npm run build` — compile TypeScript to `dist/`
   5. `npx tsc --noEmit` — strict type-check (catches errors not surfaced by build)
 
 #### `e2e` — End-to-End Tests
 - **Runner:** `ubuntu-latest`
-- **Needs:** `go-test`, `sdk`
+- **Needs:** `go-build`
 - **Steps:**
   1. `actions/checkout@v4`
-  2. Setup Go + Node (same as above)
-  3. `go build -o bin/relayfile-server ./cmd/relayfile` — build the server binary
-  4. Start server in background: `bin/relayfile-server &`
-  5. Wait for server ready (curl health check with retry)
-  6. `npx tsx scripts/e2e.ts --ci` — run E2E test suite
-  7. Kill server, collect exit code
+  2. Setup Go + Node 22
+  3. `actions/download-artifact@v4` — download `relayfile-binaries` to `bin/`
+  4. `chmod +x bin/*`
+  5. `npx --yes tsx scripts/e2e.ts --ci` — runs full E2E suite (server lifecycle, mount sync, WebSocket events, bulk operations, export endpoints)
+
+The E2E suite (`scripts/e2e.ts`) handles its own server startup/shutdown — no manual background process management needed.
 
 #### `workers-typecheck` — CF Workers Type Check (conditional)
 - **Runner:** `ubuntu-latest`
 - **Condition:** `hashFiles('packages/server/tsconfig.json') != ''`
 - **Steps:**
   1. `actions/checkout@v4`
-  2. `actions/setup-node@v4` with `node-version: "20"`
+  2. `actions/setup-node@v4` with `node-version: "22"`
   3. `cd packages/server && npm ci && npx tsc --noEmit`
+
+**Note:** `packages/server/` does not exist yet. This job is a no-op until a CF Workers server package is added. The `hashFiles` condition ensures it is silently skipped.
 
 ### Secrets & Permissions
 - **Permissions:** default (read)
 - **Secrets:** none
 
+### Job Dependency Graph
+```
+go-test ──> go-build ──> e2e
+sdk-typecheck          (independent)
+workers-typecheck      (independent, conditional)
+```
+
 ---
 
 ## 2. `publish-npm.yml` — SDK Publishing
 
-**Trigger:** `workflow_dispatch` (manual only).
+**Trigger:** `workflow_dispatch` (manual only, matching relaycast pattern).
 
 ```yaml
-name: Publish SDK
+name: Publish NPM Package
 
 on:
   workflow_dispatch:
@@ -84,17 +99,16 @@ on:
         description: "Version bump type"
         required: true
         type: choice
-        options: [patch, minor, major, prepatch, preminor, premajor, prerelease]
+        options:
+          - patch
+          - minor
+          - major
+          - prerelease
+        default: patch
       custom_version:
         description: "Custom version (optional, overrides version type)"
         required: false
         type: string
-      preid:
-        description: "Prerelease identifier (used with pre* version types)"
-        required: false
-        type: choice
-        options: [beta, alpha, rc]
-        default: "beta"
       dry_run:
         description: "Dry run (do not actually publish)"
         required: false
@@ -104,11 +118,15 @@ on:
         description: "NPM dist-tag"
         required: false
         type: choice
-        options: [latest, next, beta, alpha]
+        options:
+          - latest
+          - next
+          - beta
+          - alpha
         default: "latest"
 
 concurrency:
-  group: publish-sdk
+  group: publish-npm
   cancel-in-progress: false
 
 permissions:
@@ -118,47 +136,44 @@ permissions:
 
 ### Jobs
 
-#### `build` — Build & Version
+#### `publish-sdk` — Build, Version & Publish @relayfile/sdk
 - **Runner:** `ubuntu-latest`
-- **Outputs:** `new_version`, `is_prerelease`
 - **Steps:**
-  1. `actions/checkout@v4` with `token: ${{ secrets.GITHUB_TOKEN }}`
-  2. `actions/setup-node@v4` with `node-version: "20"`, `registry-url: "https://registry.npmjs.org"` **(CRITICAL)**
-  3. `npm ci` in `sdk/relayfile-sdk`
-  4. Version bump logic:
-     - If `custom_version` is set, use `npm version "$CUSTOM_VERSION" --no-git-tag-version --allow-same-version`
-     - Otherwise, `npm version "$VERSION_TYPE" --no-git-tag-version --preid="$PREID"`
-  5. Read new version from `package.json`, detect prerelease (`*-*` pattern)
+  1. `actions/checkout@v4` with `fetch-depth: 0`, `token: ${{ secrets.GITHUB_TOKEN }}`
+  2. `actions/setup-node@v4` with `node-version: "22"`, `cache: npm`, `cache-dependency-path: packages/relayfile-sdk/package-lock.json`, **`registry-url: "https://registry.npmjs.org"`** (CRITICAL — required for NODE_AUTH_TOKEN wiring)
+  3. `npm install -g npm@latest` — ensure OIDC/provenance support
+  4. `npm ci` in `packages/relayfile-sdk`
+  5. **Version bump:**
+     - If `custom_version` set: `npm version "$CUSTOM_VERSION" --no-git-tag-version --allow-same-version`
+     - Otherwise: `npm version "$VERSION_TYPE" --no-git-tag-version`
+     - Output `new_version` and `tag_name=sdk-v${NEW_VERSION}`
   6. `npm run build` — compile SDK
-  7. `npm test` (if tests exist) — verify before publish
-  8. `actions/upload-artifact@v4` — upload `package.json` + `dist/`
+  7. `npx tsc --noEmit` — type-check verification
+  8. **Dry run path:** `npm publish --dry-run --access public --tag $TAG --ignore-scripts`
+  9. **Publish path:** `npm publish --access public --provenance --tag $TAG --ignore-scripts`
+  10. **Git tag (non-dry-run only):**
+      - Configure git user as "GitHub Actions"
+      - `git add packages/relayfile-sdk/package.json packages/relayfile-sdk/package-lock.json`
+      - `git commit -m "chore(sdk): release v${NEW_VERSION}"`
+      - `git tag -a "sdk-v${NEW_VERSION}" -m "SDK ${NEW_VERSION}"`
+      - Push commit + tag to `main`
+  11. `softprops/action-gh-release@v2` — create GitHub Release with install instructions
 
-#### `publish` — Publish to NPM
+#### `publish-cli` — Publish relayfile CLI wrapper
 - **Runner:** `ubuntu-latest`
-- **Needs:** `build`
+- **Needs:** `publish-sdk`
 - **Steps:**
-  1. `actions/checkout@v4`
-  2. `actions/setup-node@v4` with `node-version: "20"`, `registry-url: "https://registry.npmjs.org"`
-  3. `actions/download-artifact@v4` — restore built artifacts
-  4. `npm install -g npm@latest` — ensure OIDC/provenance support
-  5. Verify `dist/` contents (file count, dry-run pack)
-  6. **Dry run path:** `npm publish --dry-run --access public --tag $TAG --ignore-scripts`
-  7. **Publish path:** `npm publish --access public --provenance --tag $TAG --ignore-scripts`
+  1. Checkout + setup Node with `registry-url: "https://registry.npmjs.org"`
+  2. `npm install -g npm@latest`
+  3. Sync version from SDK: read `packages/relayfile-sdk/package.json` version, apply to `packages/relayfile/package.json`
+  4. **Dry run path:** `npm publish --dry-run --access public --tag $TAG`
+  5. **Publish path:** `npm publish --access public --provenance --tag $TAG`
 
-#### `create-tag` — Git Tag & Release
-- **Runner:** `ubuntu-latest`
-- **Needs:** `build`, `publish`
-- **Condition:** `github.event.inputs.dry_run != 'true'`
-- **Steps:**
-  1. `actions/checkout@v4` with `fetch-depth: 0`
-  2. Download artifacts (for updated `package.json`)
-  3. Commit bumped `package.json` to `main`
-  4. Create annotated tag `sdk-v${NEW_VERSION}`
-  5. Push tag
-
-#### `summary` — Report
-- **Condition:** `always()`
-- Writes job summary table with version, tag, dry-run status, per-stage results
+### CRITICAL Requirements
+- **`registry-url: "https://registry.npmjs.org"`** must be set in `actions/setup-node` — this wires `NODE_AUTH_TOKEN` into `.npmrc`
+- **`--provenance`** flag requires `id-token: write` permission (GitHub OIDC → npm Sigstore attestation)
+- **`NODE_AUTH_TOKEN`** must be a repository secret containing an npm Automation token (bypasses 2FA)
+- **`npm install -g npm@latest`** is needed because older npm versions don't support OIDC provenance
 
 ### Secrets & Permissions
 | Secret | Purpose |
@@ -172,9 +187,9 @@ permissions:
 | `id-token: write` | OIDC token for npm provenance attestation |
 
 ### NPM Token Setup
-1. Generate an **Automation** token at npmjs.com (not Granular — Automation tokens bypass 2FA)
-2. Add as repository secret: `Settings > Secrets > Actions > NODE_AUTH_TOKEN`
-3. `actions/setup-node` with `registry-url` automatically wires `NODE_AUTH_TOKEN` into `.npmrc`
+1. Go to npmjs.com → Access Tokens → Generate New Token → **Automation** (not Granular — Automation tokens bypass 2FA)
+2. Add as repository secret: Settings → Secrets and variables → Actions → `NODE_AUTH_TOKEN`
+3. `actions/setup-node` with `registry-url` automatically creates `.npmrc` that references `NODE_AUTH_TOKEN`
 
 ---
 
@@ -195,62 +210,69 @@ permissions:
   packages: write          # For GHCR Docker push
 
 concurrency:
-  group: release-binaries
+  group: release-binaries-${{ github.ref }}
   cancel-in-progress: false
+
+env:
+  GO_VERSION: "1.22"
+  REGISTRY_IMAGE: ghcr.io/agentworkforce/relayfile
 ```
 
 ### Jobs
 
-#### `test` — Gate
-- **Runner:** `ubuntu-latest`
-- **Steps:**
-  1. Checkout + setup Go
-  2. `make test` — full test suite must pass before release
-
 #### `build` — Cross-Compile (matrix)
-- **Runner:** `${{ matrix.os }}`
-- **Needs:** `test`
+- **Runner:** `ubuntu-latest`
 - **Matrix:**
 
-| os | GOOS | GOARCH | suffix |
-|----|------|--------|--------|
-| `ubuntu-latest` | linux | amd64 | linux-amd64 |
-| `ubuntu-latest` | linux | arm64 | linux-arm64 |
-| `macos-latest` | darwin | amd64 | darwin-amd64 |
-| `macos-latest` | darwin | arm64 | darwin-arm64 |
+| GOOS | GOARCH | Artifact Name |
+|------|--------|---------------|
+| linux | amd64 | `release-linux-amd64` |
+| linux | arm64 | `release-linux-arm64` |
+| darwin | amd64 | `release-darwin-amd64` |
+| darwin | arm64 | `release-darwin-arm64` |
 
 - **Steps:**
-  1. Checkout + setup Go
-  2. `make build-all VERSION=${{ github.ref_name }}` or direct `go build` with ldflags
-  3. Produces three binaries per platform: `relayfile`, `relayfile-server`, `relayfile-mount`
-  4. Upload each platform's binaries as artifact
+  1. `actions/checkout@v4`
+  2. `actions/setup-go@v5` with `go-version: ${{ env.GO_VERSION }}`, `cache: true`
+  3. Cross-compile with `CGO_ENABLED=0`:
+     ```bash
+     go build -o "dist/relayfile-${GOOS}-${GOARCH}" ./cmd/relayfile
+     go build -o "dist/relayfile-mount-${GOOS}-${GOARCH}" ./cmd/relayfile-mount
+     go build -o "dist/relayfile-cli-${GOOS}-${GOARCH}" ./cmd/relayfile-cli
+     ```
+  4. Generate per-platform SHA256 checksums:
+     ```bash
+     shasum -a 256 relayfile-* > checksums-${GOOS}-${GOARCH}.txt
+     ```
+  5. `actions/upload-artifact@v4` — upload binaries + checksum file
+
+**Three binaries per platform:**
+- `relayfile` — main server
+- `relayfile-mount` — mount/sync daemon
+- `relayfile-cli` — CLI tool
 
 #### `release` — Create GitHub Release
 - **Runner:** `ubuntu-latest`
 - **Needs:** `build`
 - **Steps:**
-  1. Download all artifacts
-  2. Create tarballs: `{binary}_{goos}_{goarch}.tar.gz`
-  3. Generate checksums: `sha256sum *.tar.gz > checksums.txt`
-  4. `softprops/action-gh-release@v2` with:
+  1. `actions/download-artifact@v4` with `merge-multiple: true` — flatten all platform artifacts
+  2. `softprops/action-gh-release@v2`:
      - `tag_name: ${{ github.ref_name }}`
-     - `files: dist/*.tar.gz, dist/checksums.txt`
+     - `files: release-assets/*` (12 binaries + 4 checksum files)
      - `generate_release_notes: true`
-
-Alternatively, delegate to `make release VERSION=${{ github.ref_name }}` which already produces tarballs + checksums in `dist/`.
 
 #### `docker` — Docker Image
 - **Runner:** `ubuntu-latest`
 - **Needs:** `release`
 - **Steps:**
-  1. Checkout
+  1. `actions/checkout@v4`
   2. `docker/setup-buildx-action@v3`
   3. `docker/login-action@v3` — login to `ghcr.io` with `GITHUB_TOKEN`
-  4. `docker/metadata-action@v5` — extract tags (`type=ref,event=tag` + `type=raw,value=latest`)
-  5. `docker/build-push-action@v6`:
+  4. `docker/build-push-action@v6`:
+     - `context: .`, `file: ./Dockerfile`
      - `platforms: linux/amd64,linux/arm64`
      - `push: true`
-     - `context: .`, `file: ./Dockerfile`
+     - Tags: `ghcr.io/agentworkforce/relayfile:latest` + `ghcr.io/agentworkforce/relayfile:${{ github.ref_name }}`
 
 ### Secrets & Permissions
 | Secret | Purpose |
@@ -259,20 +281,22 @@ Alternatively, delegate to `make release VERSION=${{ github.ref_name }}` which a
 
 | Permission | Purpose |
 |------------|---------|
-| `contents: write` | Create GitHub releases |
+| `contents: write` | Create GitHub releases, upload assets |
 | `packages: write` | Push to GitHub Container Registry |
 
 ### Release Flow
 ```
 git tag v1.2.0 && git push origin v1.2.0
-  -> test -> build (4 platforms x 3 binaries) -> release (tarballs + checksums) -> docker (multi-arch)
+  → build (4 platforms × 3 binaries = 12 binaries)
+  → release (binaries + checksums → GitHub Release)
+  → docker (multi-arch image → ghcr.io)
 ```
 
 ---
 
 ## 4. `deploy-workers.yml` — Cloudflare Workers Deployment
 
-**Trigger:** Push to `main` with changes in `packages/server/`.
+**Trigger:** Push to `main` with changes in `packages/server/`, or manual dispatch.
 
 ```yaml
 name: Deploy Workers
@@ -292,19 +316,21 @@ concurrency:
   cancel-in-progress: false
 ```
 
+**Note:** This workflow is a placeholder until `packages/server/` is created. It will not trigger until files exist at that path.
+
 ### Jobs
 
-#### `test` — Pre-Deploy Gate
+#### `typecheck` — Pre-Deploy Gate
 - **Runner:** `ubuntu-latest`
 - **Steps:**
-  1. Checkout + setup Node
-  2. `cd packages/server && npm ci`
-  3. `npx tsc --noEmit` — type-check
-  4. Run tests if present
+  1. `actions/checkout@v4`
+  2. `actions/setup-node@v4` with `node-version: "22"`
+  3. `cd packages/server && npm ci`
+  4. `npx tsc --noEmit` — type-check
 
 #### `migrate` — D1 Database Migrations
 - **Runner:** `ubuntu-latest`
-- **Needs:** `test`
+- **Needs:** `typecheck`
 - **Steps:**
   1. Checkout + setup Node
   2. `npm ci` in `packages/server`
@@ -316,69 +342,86 @@ concurrency:
 - **Steps:**
   1. Checkout + setup Node
   2. `npm ci` in `packages/server`
-  3. `npx wrangler deploy` (uses `wrangler.toml` in `packages/server/`)
+  3. `npx wrangler deploy` (reads `wrangler.toml` in `packages/server/`)
 
 ### Secrets & Permissions
 | Secret | Purpose |
 |--------|---------|
-| `CLOUDFLARE_API_TOKEN` | Wrangler authentication |
+| `CLOUDFLARE_API_TOKEN` | Wrangler authentication (Workers edit permission) |
 | `CLOUDFLARE_ACCOUNT_ID` | Target Cloudflare account |
 
 | Variable | Purpose |
 |----------|---------|
 | `D1_DATABASE_NAME` | D1 database name for migrations |
-| `D1_DATABASE_ID` | D1 database ID (if needed by wrangler config) |
+| `D1_DATABASE_ID` | D1 database ID (referenced in wrangler.toml) |
 
 | Permission | Purpose |
 |------------|---------|
 | `contents: read` | Checkout only |
 
 ### Wrangler Auth
-Wrangler reads `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` from environment automatically. Set both as repository secrets.
+Wrangler reads `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` from the environment automatically. Set both as repository secrets.
+
+### Job Dependency Graph
+```
+typecheck ──> migrate ──> deploy
+```
 
 ---
 
-## Secrets Summary
+## Complete Secrets Summary
 
 | Secret | Workflow(s) | How to Obtain |
 |--------|------------|---------------|
-| `GITHUB_TOKEN` | all | Automatic — provided by Actions |
-| `NODE_AUTH_TOKEN` | `publish-npm` | npmjs.com > Access Tokens > Automation |
-| `CLOUDFLARE_API_TOKEN` | `deploy-workers` | Cloudflare dashboard > API Tokens > Create (Workers edit) |
-| `CLOUDFLARE_ACCOUNT_ID` | `deploy-workers` | Cloudflare dashboard > Account ID |
+| `GITHUB_TOKEN` | all | Automatic — provided by GitHub Actions |
+| `NODE_AUTH_TOKEN` | `publish-npm` | npmjs.com → Access Tokens → Automation |
+| `CLOUDFLARE_API_TOKEN` | `deploy-workers` | Cloudflare dashboard → API Tokens → Create (Workers edit) |
+| `CLOUDFLARE_ACCOUNT_ID` | `deploy-workers` | Cloudflare dashboard → Overview → Account ID |
+
+## Complete Permissions Summary
+
+| Workflow | `contents` | `id-token` | `packages` |
+|----------|-----------|------------|------------|
+| `ci.yml` | read (default) | — | — |
+| `publish-npm.yml` | **write** | **write** | — |
+| `release-binaries.yml` | **write** | — | **write** |
+| `deploy-workers.yml` | read | — | — |
 
 ## Workflow Interaction Diagram
 
 ```
 PR opened / push to main
-  |
-  v
-ci.yml -----> go-test + sdk + e2e + workers-typecheck
-                (gate for merge)
+  │
+  ▼
+ci.yml ────► go-test → go-build → e2e
+             sdk-typecheck        (parallel)
+             workers-typecheck    (parallel, conditional)
 
 push to main + packages/server/** changed
-  |
-  v
-deploy-workers.yml -----> test -> migrate -> deploy
+  │
+  ▼
+deploy-workers.yml ────► typecheck → migrate → deploy
 
-manual trigger
-  |
-  v
-publish-npm.yml -----> build -> publish (@relayfile/sdk) -> tag + release
+manual trigger (workflow_dispatch)
+  │
+  ▼
+publish-npm.yml ────► publish-sdk → publish-cli → git tag + GitHub Release
 
 git tag v*
-  |
-  v
-release-binaries.yml -----> test -> build (4 platforms) -> release (tarballs) -> docker (GHCR)
+  │
+  ▼
+release-binaries.yml ────► build (4 platforms × 3 binaries) → release → docker
 ```
 
 ## Migration from Existing Workflows
 
-The four new workflows replace the current set:
+The four workflows consolidate and replace the current set:
 
-| Current | Replaced By | Notes |
-|---------|-------------|-------|
-| `contract.yml` | `ci.yml` | Expanded: adds E2E, Go build check, workers typecheck |
-| `publish-sdk.yml` | `publish-npm.yml` | Same pattern, kept aligned with relaycast reference |
-| `release-binary.yml` | `release-binaries.yml` | Now triggered on `v*` tags (not every push to main), adds checksums, all 3 binaries, Docker |
-| `release.yml` | `release-binaries.yml` | Consolidated — Docker job folded into binary release workflow |
+| Current File | Replaced By | Notes |
+|-------------|-------------|-------|
+| `ci.yml` | `ci.yml` | Already aligned — no changes needed |
+| `contract.yml` | `ci.yml` | Contract surface check can be added as additional CI job |
+| `publish-npm.yml` | `publish-npm.yml` | Already aligned — provenance enabled |
+| `publish-sdk.yml` | `publish-npm.yml` | Consolidated into single publish workflow |
+| `release.yml` | `release-binaries.yml` | Consolidated — Docker job folded in |
+| `release-binary.yml` | `release-binaries.yml` | Superseded by matrix-based cross-compile |
