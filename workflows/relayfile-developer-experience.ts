@@ -57,37 +57,37 @@ const result = await workflow('relayfile-developer-experience')
 
   .step('read-mount-cmd', {
     type: 'deterministic',
-    command: `cat ${RELAYFILE}/cmd/relayfile-mount/main.go`,
+    command: `cat "${RELAYFILE}/cmd/relayfile-mount/main.go"`,
     captureOutput: true,
   })
 
   .step('read-server-cmd', {
     type: 'deterministic',
-    command: `cat ${RELAYFILE}/cmd/relayfile/main.go`,
+    command: `cat "${RELAYFILE}/cmd/relayfile/main.go"`,
     captureOutput: true,
   })
 
   .step('read-auth', {
     type: 'deterministic',
-    command: `cat ${RELAYFILE}/internal/httpapi/auth.go`,
+    command: `cat "${RELAYFILE}/internal/httpapi/auth.go"`,
     captureOutput: true,
   })
 
   .step('read-token-script', {
     type: 'deterministic',
-    command: `cat ${RELAYFILE}/scripts/generate-dev-token.sh`,
+    command: `cat "${RELAYFILE}/scripts/generate-dev-token.sh"`,
     captureOutput: true,
   })
 
   .step('read-readme', {
     type: 'deterministic',
-    command: `cat ${RELAYFILE}/README.md`,
+    command: `cat "${RELAYFILE}/README.md"`,
     captureOutput: true,
   })
 
   .step('read-openapi', {
     type: 'deterministic',
-    command: `cat ${RELAYFILE}/openapi/relayfile-v1.openapi.yaml | head -100`,
+    command: `cat "${RELAYFILE}/openapi/relayfile-v1.openapi.yaml | head -100"`,
     captureOutput: true,
   })
 
@@ -329,7 +329,7 @@ Write all docs to disk.`,
     dependsOn: ['implement-cli'],
     task: `Prepare the TypeScript SDK for npm publishing.
 
-Read the current SDK: cat ${RELAYFILE}/packages/relayfile-sdk/package.json
+Read the current SDK: cat "${RELAYFILE}/packages/relayfile-sdk/package.json
 
 Update ${RELAYFILE}/packages/relayfile-sdk/package.json:
 - name: "@relayfile/sdk" (or "relayfile-sdk")

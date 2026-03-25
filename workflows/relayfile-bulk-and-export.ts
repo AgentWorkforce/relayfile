@@ -59,43 +59,43 @@ const result = await workflow('relayfile-bulk-and-export')
 
   .step('read-store', {
     type: 'deterministic',
-    command: `grep -n "func.*Store\\b\\|func.*Write\\|func.*Read\\|func.*Delete\\|func.*List\\|func.*Event" ${RELAYFILE}/internal/relayfile/store.go | head -40`,
+    command: `grep -n "func.*Store\\b\\|func.*Write\\|func.*Read\\|func.*Delete\\|func.*List\\|func.*Event" "${RELAYFILE}/internal/relayfile/store.go | head -40"`,
     captureOutput: true,
   })
 
   .step('read-http-server', {
     type: 'deterministic',
-    command: `cat ${RELAYFILE}/internal/httpapi/server.go`,
+    command: `cat "${RELAYFILE}/internal/httpapi/server.go"`,
     captureOutput: true,
   })
 
   .step('read-openapi', {
     type: 'deterministic',
-    command: `cat ${RELAYFILE}/openapi/relayfile-v1.openapi.yaml`,
+    command: `cat "${RELAYFILE}/openapi/relayfile-v1.openapi.yaml"`,
     captureOutput: true,
   })
 
   .step('read-ts-sdk', {
     type: 'deterministic',
-    command: `cat ${RELAYFILE}/packages/relayfile-sdk/src/client.ts`,
+    command: `cat "${RELAYFILE}/packages/relayfile-sdk/src/client.ts"`,
     captureOutput: true,
   })
 
   .step('read-ts-types', {
     type: 'deterministic',
-    command: `cat ${RELAYFILE}/packages/relayfile-sdk/src/types.ts`,
+    command: `cat "${RELAYFILE}/packages/relayfile-sdk/src/types.ts"`,
     captureOutput: true,
   })
 
   .step('read-syncer', {
     type: 'deterministic',
-    command: `cat ${RELAYFILE}/internal/mountsync/syncer.go`,
+    command: `cat "${RELAYFILE}/internal/mountsync/syncer.go"`,
     captureOutput: true,
   })
 
   .step('read-store-full', {
     type: 'deterministic',
-    command: `cat ${RELAYFILE}/internal/relayfile/store.go`,
+    command: `cat "${RELAYFILE}/internal/relayfile/store.go"`,
     captureOutput: true,
   })
 
@@ -386,7 +386,7 @@ Run go test ./... again to verify.`,
     dependsOn: ['fix-issues'],
     task: `Update the OpenAPI spec to include the new endpoints.
 
-Read the current spec: cat ${RELAYFILE}/openapi/relayfile-v1.openapi.yaml
+Read the current spec: cat "${RELAYFILE}/openapi/relayfile-v1.openapi.yaml
 
 Add these endpoints to the spec:
 

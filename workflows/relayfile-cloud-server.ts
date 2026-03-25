@@ -76,19 +76,19 @@ const result = await workflow('relayfile-cloud-server')
 
   .step('read-go-store', {
     type: 'deterministic',
-    command: `cat ${RELAYFILE}/internal/relayfile/store.go`,
+    command: `cat "${RELAYFILE}/internal/relayfile/store.go"`,
     captureOutput: true,
   })
 
   .step('read-go-http', {
     type: 'deterministic',
-    command: `cat ${RELAYFILE}/internal/httpapi/server.go`,
+    command: `cat "${RELAYFILE}/internal/httpapi/server.go"`,
     captureOutput: true,
   })
 
   .step('read-openapi', {
     type: 'deterministic',
-    command: `cat ${RELAYFILE}/openapi/relayfile-v1.openapi.yaml`,
+    command: `cat "${RELAYFILE}/openapi/relayfile-v1.openapi.yaml"`,
     captureOutput: true,
   })
 
@@ -118,7 +118,7 @@ const result = await workflow('relayfile-cloud-server')
 
   .step('read-sdk-types', {
     type: 'deterministic',
-    command: `cat ${RELAYFILE}/packages/relayfile-sdk/src/types.ts`,
+    command: `cat "${RELAYFILE}/packages/relayfile-sdk/src/types.ts"`,
     captureOutput: true,
   })
 

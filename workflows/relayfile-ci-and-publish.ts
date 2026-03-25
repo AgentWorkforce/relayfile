@@ -72,7 +72,7 @@ const result = await workflow('relayfile-ci-and-publish')
 
   .step('read-sdk-package', {
     type: 'deterministic',
-    command: `cat ${RELAYFILE}/packages/relayfile-sdk/package.json 2>/dev/null || echo "no package.json"`,
+    command: `cat "${RELAYFILE}/packages/relayfile-sdk/package.json 2>/dev/null || echo "no package.json""`,
     captureOutput: true,
   })
 

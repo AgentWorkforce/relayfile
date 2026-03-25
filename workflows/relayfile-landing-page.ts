@@ -46,19 +46,19 @@ const result = await workflow('relayfile-landing-page')
 
   .step('read-readme', {
     type: 'deterministic',
-    command: `cat ${RELAYFILE}/README.md`,
+    command: `cat "${RELAYFILE}/README.md"`,
     captureOutput: true,
   })
 
   .step('read-spec', {
     type: 'deterministic',
-    command: `cat ${RELAYFILE}/docs/relayfile-v1-spec.md`,
+    command: `cat "${RELAYFILE}/docs/relayfile-v1-spec.md"`,
     captureOutput: true,
   })
 
   .step('read-openapi', {
     type: 'deterministic',
-    command: `head -100 ${RELAYFILE}/openapi/relayfile-v1.openapi.yaml`,
+    command: `head -100 "${RELAYFILE}/openapi/relayfile-v1.openapi.yaml"`,
     captureOutput: true,
   })
 
@@ -70,7 +70,7 @@ const result = await workflow('relayfile-landing-page')
 
   .step('read-architecture-doc', {
     type: 'deterministic',
-    command: `cat ${RELAYFILE}/docs/architecture-ascii.md`,
+    command: `cat "${RELAYFILE}/docs/architecture-ascii.md"`,
     captureOutput: true,
   })
 
@@ -167,7 +167,7 @@ Create:
 
 6. ${RELAYFILE}/site/src/pages/index.astro:
    - Import Layout, render all sections from the content doc
-   - Read content: cat ${RELAYFILE}/site/CONTENT.md
+   - Read content: cat "${RELAYFILE}/site/CONTENT.md
    - Hero with gradient text (cyan → blue)
    - Sections with prose styling
    - API preview with syntax-highlighted code blocks
