@@ -19,20 +19,20 @@ env:
 
 jobs:
   build:
-    name: Build ${{ matrix.goos }}-${{ matrix.goarch }}
+    name: Build ${{ matrix.os }}-${{ matrix.arch }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         include:
-          - goos: linux
-            goarch: amd64
-          - goos: linux
-            goarch: arm64
-          - goos: darwin
-            goarch: amd64
-          - goos: darwin
-            goarch: arm64
+          - os: linux
+            arch: amd64
+          - os: linux
+            arch: arm64
+          - os: darwin
+            arch: amd64
+          - os: darwin
+            arch: arm64
 
     steps:
       - name: Checkout
@@ -47,10 +47,11 @@ jobs:
       - name: Cross-compile binaries
         env:
           CGO_ENABLED: "0"
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
+          GOOS: ${{ matrix.os }}
+          GOARCH: ${{ matrix.arch }}
         run: |
           mkdir -p dist
+
           go build -o "dist/relayfile-${GOOS}-${GOARCH}" ./cmd/relayfile
           go build -o "dist/relayfile-mount-${GOOS}-${GOARCH}" ./cmd/relayfile-mount
           go build -o "dist/relayfile-cli-${GOOS}-${GOARCH}" ./cmd/relayfile-cli
@@ -59,20 +60,20 @@ jobs:
         working-directory: dist
         run: |
           shasum -a 256 \
-            "relayfile-${{ matrix.goos }}-${{ matrix.goarch }}" \
-            "relayfile-mount-${{ matrix.goos }}-${{ matrix.goarch }}" \
-            "relayfile-cli-${{ matrix.goos }}-${{ matrix.goarch }}" \
-            > "checksums-${{ matrix.goos }}-${{ matrix.goarch }}.txt"
+            "relayfile-${{ matrix.os }}-${{ matrix.arch }}" \
+            "relayfile-mount-${{ matrix.os }}-${{ matrix.arch }}" \
+            "relayfile-cli-${{ matrix.os }}-${{ matrix.arch }}" \
+            > "checksums-${{ matrix.os }}-${{ matrix.arch }}.txt"
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: release-${{ matrix.goos }}-${{ matrix.goarch }}
+          name: release-${{ matrix.os }}-${{ matrix.arch }}
           path: |
-            dist/relayfile-${{ matrix.goos }}-${{ matrix.goarch }}
-            dist/relayfile-mount-${{ matrix.goos }}-${{ matrix.goarch }}
-            dist/relayfile-cli-${{ matrix.goos }}-${{ matrix.goarch }}
-            dist/checksums-${{ matrix.goos }}-${{ matrix.goarch }}.txt
+            dist/relayfile-${{ matrix.os }}-${{ matrix.arch }}
+            dist/relayfile-mount-${{ matrix.os }}-${{ matrix.arch }}
+            dist/relayfile-cli-${{ matrix.os }}-${{ matrix.arch }}
+            dist/checksums-${{ matrix.os }}-${{ matrix.arch }}.txt
 
   release:
     name: Publish GitHub Release

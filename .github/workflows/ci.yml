@@ -10,6 +10,9 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   go-test:
     name: Go Test
@@ -21,10 +24,10 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          go-version: "1.22"
           cache: true
 
-      - name: Run tests
+      - name: Run Go tests
         run: go test ./...
 
   go-build:
@@ -38,18 +41,17 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          go-version: "1.22"
           cache: true
 
-      - name: Build all binaries
-        run: make build
+      - name: Build relayfile
+        run: go build ./cmd/relayfile
 
-      - name: Upload binaries
-        uses: actions/upload-artifact@v4
-        with:
-          name: relayfile-binaries
-          path: bin/
-          if-no-files-found: error
+      - name: Build relayfile-mount
+        run: go build ./cmd/relayfile-mount
+
+      - name: Build relayfile-cli
+        run: go build ./cmd/relayfile-cli
 
   sdk-typecheck:
     name: SDK Typecheck
@@ -62,6 +64,8 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "22"
+          cache: npm
+          cache-dependency-path: packages/relayfile-sdk/package-lock.json
 
       - name: Install SDK dependencies
         working-directory: packages/relayfile-sdk
@@ -86,24 +90,45 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          go-version: "1.22"
           cache: true
 
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: "22"
+          cache: npm
+          cache-dependency-path: package-lock.json
 
-      - name: Download binaries
-        uses: actions/download-artifact@v4
-        with:
-          name: relayfile-binaries
-          path: bin
-
-      - name: Make binaries executable
-        run: chmod +x bin/*
+      - name: Install root dependencies
+        run: npm ci
 
       - name: Run E2E suite
         env:
           CI: "true"
-        run: npx --yes tsx scripts/e2e.ts --ci
+        run: |
+          # scripts/e2e.ts builds and starts relayfile/relayfile-mount internally.
+          npx tsx scripts/e2e.ts --ci
+
+  workers-typecheck:
+    name: Workers Typecheck
+    if: ${{ hashFiles('packages/server/tsconfig.json') != '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install worker dependencies
+        working-directory: packages/server
+        run: npm ci
+
+      - name: Typecheck workers
+        working-directory: packages/server
+        run: npx tsc --noEmit
