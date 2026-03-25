@@ -5,15 +5,14 @@ BIN_DIR ?= bin
 DIST_DIR ?= dist
 INSTALL_DIR ?= /usr/local/bin
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
-COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
-LDFLAGS ?= -s -w -X main.version=$(VERSION) -X main.commit=$(COMMIT)
 GOFLAGS ?=
+LDFLAGS ?= -s -w
 
 CLI_PKG := ./cmd/relayfile-cli
 SERVER_PKG := ./cmd/relayfile
 MOUNT_PKG := ./cmd/relayfile-mount
 
-CLI_BIN := relayfile
+CLI_BIN := relayfile-cli
 SERVER_BIN := relayfile-server
 MOUNT_BIN := relayfile-mount
 
@@ -44,9 +43,9 @@ build-all:
 
 install: build
 	install -d $(INSTALL_DIR)
-	install $(BIN_DIR)/$(CLI_BIN) $(INSTALL_DIR)/$(CLI_BIN)
-	install $(BIN_DIR)/$(SERVER_BIN) $(INSTALL_DIR)/$(SERVER_BIN)
-	install $(BIN_DIR)/$(MOUNT_BIN) $(INSTALL_DIR)/$(MOUNT_BIN)
+	install -m 0755 $(BIN_DIR)/$(CLI_BIN) $(INSTALL_DIR)/relayfile
+	install -m 0755 $(BIN_DIR)/$(SERVER_BIN) $(INSTALL_DIR)/$(SERVER_BIN)
+	install -m 0755 $(BIN_DIR)/$(MOUNT_BIN) $(INSTALL_DIR)/$(MOUNT_BIN)
 
 test:
 	$(GO) test ./...
@@ -63,7 +62,7 @@ release: clean build-all
 		done; \
 	done
 	cd $(DIST_DIR) && \
-		(if command -v sha256sum >/dev/null 2>&1; then sha256sum ./*.tar.gz > checksums.txt; else shasum -a 256 ./*.tar.gz > checksums.txt; fi)
+		(if command -v sha256sum >/dev/null 2>&1; then sha256sum *.tar.gz > checksums.txt; else shasum -a 256 *.tar.gz > checksums.txt; fi)
 
 clean:
 	rm -rf $(BIN_DIR) $(DIST_DIR)

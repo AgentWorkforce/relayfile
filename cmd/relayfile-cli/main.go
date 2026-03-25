@@ -31,9 +31,9 @@ import (
 )
 
 const (
-	defaultServerURL         = "https://relayfile-api.agentworkforce.workers.dev"
-	configDirName            = ".relayfile"
-	websocketReconcileEvery  = 10
+	defaultServerURL        = "https://relayfile-api.agentworkforce.workers.dev"
+	configDirName           = ".relayfile"
+	websocketReconcileEvery = 10
 )
 
 type credentials struct {
@@ -259,7 +259,7 @@ func runWorkspace(args []string, stdin io.Reader, stdout io.Writer) error {
 func runWorkspaceCreate(args []string, stdout io.Writer) error {
 	fs := flag.NewFlagSet("workspace create", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{})); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
@@ -290,7 +290,10 @@ func runWorkspaceList(args []string, stdout io.Writer) error {
 	fs.SetOutput(io.Discard)
 	server := fs.String("server", "", "relayfile server URL override")
 	token := fs.String("token", "", "relayfile token override")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
+		"server": true,
+		"token":  true,
+	})); err != nil {
 		return err
 	}
 
@@ -327,7 +330,9 @@ func runWorkspaceDelete(args []string, stdin io.Reader, stdout io.Writer) error 
 	fs := flag.NewFlagSet("workspace delete", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	yes := fs.Bool("yes", false, "skip confirmation prompt")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
+		"yes": false,
+	})); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
@@ -376,7 +381,18 @@ func runMount(args []string) error {
 	timeout := fs.Duration("timeout", durationEnv("RELAYFILE_MOUNT_TIMEOUT", 15*time.Second), "per-sync timeout")
 	websocketEnabled := fs.Bool("websocket", boolEnv("RELAYFILE_MOUNT_WEBSOCKET", true), "enable websocket event streaming when available")
 	once := fs.Bool("once", false, "run one sync cycle and exit")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
+		"server":          true,
+		"token":           true,
+		"remote-path":     true,
+		"provider":        true,
+		"state-file":      true,
+		"interval":        true,
+		"interval-jitter": true,
+		"timeout":         true,
+		"websocket":       true,
+		"once":            false,
+	})); err != nil {
 		return err
 	}
 	if fs.NArg() < 1 || fs.NArg() > 2 {
@@ -435,7 +451,10 @@ func runSeed(args []string, stdout io.Writer) error {
 	fs.SetOutput(io.Discard)
 	server := fs.String("server", "", "relayfile server URL override")
 	token := fs.String("token", "", "relayfile token override")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
+		"server": true,
+		"token":  true,
+	})); err != nil {
 		return err
 	}
 	if fs.NArg() < 1 || fs.NArg() > 2 {
@@ -495,7 +514,12 @@ func runExport(args []string, stdout io.Writer) error {
 	token := fs.String("token", "", "relayfile token override")
 	format := fs.String("format", "json", "export format: tar, json, or patch")
 	output := fs.String("output", "-", "output file path or - for stdout")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
+		"server": true,
+		"token":  true,
+		"format": true,
+		"output": true,
+	})); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
@@ -535,7 +559,10 @@ func runStatus(args []string, stdout io.Writer) error {
 	fs.SetOutput(io.Discard)
 	server := fs.String("server", "", "relayfile server URL override")
 	token := fs.String("token", "", "relayfile token override")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
+		"server": true,
+		"token":  true,
+	})); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
@@ -960,6 +987,48 @@ func remoteWorkspaceNames(response adminWorkspaceList) []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+func normalizeFlagArgs(args []string, flags map[string]bool) []string {
+	if len(args) == 0 {
+		return nil
+	}
+	flagArgs := make([]string, 0, len(args))
+	positionalArgs := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			positionalArgs = append(positionalArgs, args[i+1:]...)
+			break
+		}
+		name, ok, hasInlineValue := parseFlagName(arg)
+		if !ok {
+			positionalArgs = append(positionalArgs, arg)
+			continue
+		}
+		flagArgs = append(flagArgs, arg)
+		if takesValue, known := flags[name]; known && takesValue && !hasInlineValue && i+1 < len(args) {
+			i++
+			flagArgs = append(flagArgs, args[i])
+		}
+	}
+	return append(flagArgs, positionalArgs...)
+}
+
+func parseFlagName(arg string) (name string, ok bool, hasInlineValue bool) {
+	if !strings.HasPrefix(arg, "-") || arg == "-" {
+		return "", false, false
+	}
+	trimmed := strings.TrimLeft(arg, "-")
+	if trimmed == "" {
+		return "", false, false
+	}
+	name = trimmed
+	if idx := strings.IndexByte(trimmed, '='); idx >= 0 {
+		name = trimmed[:idx]
+		hasInlineValue = true
+	}
+	return name, true, hasInlineValue
 }
 
 func resolveServer(flagValue string, creds credentials) string {
