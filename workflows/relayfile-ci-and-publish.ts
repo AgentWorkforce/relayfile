@@ -78,7 +78,7 @@ const result = await workflow('relayfile-ci-and-publish')
 
   .step('read-existing-github', {
     type: 'deterministic',
-    command: `find ${RELAYFILE}/.github -type f 2>/dev/null | sort || echo no .github dir"`,
+    command: `find ${RELAYFILE}/.github -type f 2>/dev/null | sort || echo "no .github dir"`,
     captureOutput: true,
   })
 
