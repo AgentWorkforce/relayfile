@@ -72,10 +72,10 @@ jobs:
       - name: Version package
         id: bump
         working-directory: packages/relayfile-sdk
+        env:
+          CUSTOM_VERSION: ${{ github.event.inputs.custom_version }}
+          VERSION_TYPE: ${{ github.event.inputs.version }}
         run: |
-          CUSTOM_VERSION="${{ github.event.inputs.custom_version }}"
-          VERSION_TYPE="${{ github.event.inputs.version }}"
-
           if [ -n "$CUSTOM_VERSION" ]; then
             npm version "$CUSTOM_VERSION" --no-git-tag-version --allow-same-version
           else
@@ -132,19 +132,22 @@ jobs:
       - name: Dry run check
         if: github.event.inputs.dry_run == 'true'
         working-directory: packages/relayfile-sdk
-        run: |
-          PACKAGE_NAME=$(node -p "require('./package.json').name")
-          echo "Dry run - would publish ${PACKAGE_NAME}@${{ needs.build.outputs.new_version }}"
-          npm publish --dry-run --access public --tag "${{ github.event.inputs.tag }}" --ignore-scripts
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_TAG: ${{ github.event.inputs.tag }}
+          NEW_VERSION: ${{ needs.build.outputs.new_version }}
+        run: |
+          PACKAGE_NAME=$(node -p "require('./package.json').name")
+          echo "Dry run - would publish ${PACKAGE_NAME}@${NEW_VERSION}"
+          npm publish --dry-run --access public --tag "$NPM_TAG" --ignore-scripts
 
       - name: Publish to npm with provenance
         if: github.event.inputs.dry_run != 'true'
         working-directory: packages/relayfile-sdk
-        run: npm publish --access public --provenance --tag "${{ github.event.inputs.tag }}" --ignore-scripts
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_TAG: ${{ github.event.inputs.tag }}
+        run: npm publish --access public --provenance --tag "$NPM_TAG" --ignore-scripts
 
   create-release:
     name: Create Release
@@ -166,16 +169,23 @@ jobs:
           path: .
 
       - name: Commit version bump and create tag
+        env:
+          NEW_VERSION: ${{ needs.build.outputs.new_version }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          NEW_VERSION="${{ needs.build.outputs.new_version }}"
-
           git config user.name "GitHub Actions"
           git config user.email "actions@github.com"
 
           git add packages/relayfile-sdk/package.json packages/relayfile-sdk/package-lock.json
           if ! git diff --staged --quiet; then
+            BRANCH="chore/release-v${NEW_VERSION}"
+            git checkout -b "$BRANCH"
             git commit -m "chore(release): v${NEW_VERSION}"
-            git push origin HEAD:main
+            git push origin "$BRANCH"
+            gh pr create --title "chore(release): v${NEW_VERSION}" \
+              --body "Automated version bump to v${NEW_VERSION}" \
+              --base main --head "$BRANCH"
+            gh pr merge "$BRANCH" --auto --squash
           fi
 
           git tag -a "v${NEW_VERSION}" -m "Release v${NEW_VERSION}"

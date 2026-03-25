@@ -14,8 +14,8 @@
 
 import { workflow } from '@agent-relay/sdk/workflows';
 
-const RELAYFILE = '/Users/khaliqgant/Projects/AgentWorkforce-relayfile';
-const RELAYCAST = '/Users/khaliqgant/Projects/AgentWorkforce/relaycast';
+const RELAYFILE = process.env.RELAYFILE_PATH || '/Users/khaliqgant/Projects/AgentWorkforce-relayfile';
+const RELAYCAST = process.env.RELAYCAST_PATH || '/Users/khaliqgant/Projects/AgentWorkforce/relaycast';
 
 async function main() {
 const result = await workflow('relayfile-ci-and-publish')

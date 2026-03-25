@@ -49,6 +49,13 @@ jobs:
           go build -o "dist/relayfile-mount-${GOOS}-${GOARCH}" ./cmd/relayfile-mount
           go build -o "dist/relayfile-cli-${GOOS}-${GOARCH}" ./cmd/relayfile-cli
 
+      - name: Create tarballs for Homebrew/install.sh
+        working-directory: dist
+        run: |
+          for bin in relayfile relayfile-mount relayfile-cli; do
+            tar -czf "${bin}_${{ matrix.os }}_${{ matrix.arch }}.tar.gz" "${bin}-${{ matrix.os }}-${{ matrix.arch }}"
+          done
+
       - name: Generate SHA256 checksums
         working-directory: dist
         run: |
@@ -56,6 +63,9 @@ jobs:
             "relayfile-${{ matrix.os }}-${{ matrix.arch }}" \
             "relayfile-mount-${{ matrix.os }}-${{ matrix.arch }}" \
             "relayfile-cli-${{ matrix.os }}-${{ matrix.arch }}" \
+            "relayfile_${{ matrix.os }}_${{ matrix.arch }}.tar.gz" \
+            "relayfile-mount_${{ matrix.os }}_${{ matrix.arch }}.tar.gz" \
+            "relayfile-cli_${{ matrix.os }}_${{ matrix.arch }}.tar.gz" \
             > "checksums-${{ matrix.os }}-${{ matrix.arch }}.txt"
 
       - name: Upload build artifacts
@@ -66,6 +76,9 @@ jobs:
             dist/relayfile-${{ matrix.os }}-${{ matrix.arch }}
             dist/relayfile-mount-${{ matrix.os }}-${{ matrix.arch }}
             dist/relayfile-cli-${{ matrix.os }}-${{ matrix.arch }}
+            dist/relayfile_${{ matrix.os }}_${{ matrix.arch }}.tar.gz
+            dist/relayfile-mount_${{ matrix.os }}_${{ matrix.arch }}.tar.gz
+            dist/relayfile-cli_${{ matrix.os }}_${{ matrix.arch }}.tar.gz
             dist/checksums-${{ matrix.os }}-${{ matrix.arch }}.txt
 
   release:

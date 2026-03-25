@@ -132,14 +132,23 @@ jobs:
 
   workers-typecheck:
     name: Workers Typecheck
-    if: ${{ hashFiles('packages/server/**') != '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Check if packages/server exists
+        id: check-server
+        run: |
+          if [ -d packages/server ] && [ -f packages/server/tsconfig.json ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Setup Node
+        if: steps.check-server.outputs.exists == 'true'
         uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
@@ -149,6 +158,7 @@ jobs:
             packages/server/package-lock.json
 
       - name: Install worker dependencies
+        if: steps.check-server.outputs.exists == 'true'
         run: |
           if [ -f packages/server/package-lock.json ]; then
             cd packages/server
@@ -161,5 +171,6 @@ jobs:
           fi
 
       - name: Typecheck workers
+        if: steps.check-server.outputs.exists == 'true'
         working-directory: packages/server
         run: npx tsc --noEmit

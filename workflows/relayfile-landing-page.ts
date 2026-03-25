@@ -12,8 +12,8 @@
 
 import { workflow } from '@agent-relay/sdk/workflows';
 
-const RELAYFILE = '/Users/khaliqgant/Projects/AgentWorkforce-relayfile';
-const RELAYCAST_SITE = '/Users/khaliqgant/Projects/AgentWorkforce/relaycast/site';
+const RELAYFILE = process.env.RELAYFILE_PATH || '/Users/khaliqgant/Projects/AgentWorkforce-relayfile';
+const RELAYCAST_SITE = process.env.RELAYCAST_SITE_PATH || '/Users/khaliqgant/Projects/AgentWorkforce/relaycast/site';
 
 async function main() {
 const result = await workflow('relayfile-landing-page')

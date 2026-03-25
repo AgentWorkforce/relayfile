@@ -13,7 +13,7 @@ import (
 	"fmt"
 	"io"
 	"log"
-	mathrand "math/rand"
+	mathrand "math/rand/v2"
 	"mime"
 	"net/http"
 	"net/url"
@@ -1165,8 +1165,7 @@ func runMountLoop(rootCtx context.Context, syncer *mountsync.Syncer, timeout, in
 		return initialErr
 	}
 
-	rng := mathrand.New(mathrand.NewSource(time.Now().UnixNano()))
-	timer := time.NewTimer(jitteredIntervalWithSample(interval, intervalJitter, rng.Float64()))
+	timer := time.NewTimer(jitteredIntervalWithSample(interval, intervalJitter, mathrand.Float64()))
 	defer timer.Stop()
 	cycle := 0
 	for {
@@ -1178,7 +1177,7 @@ func runMountLoop(rootCtx context.Context, syncer *mountsync.Syncer, timeout, in
 			cycle++
 			reconcile := !websocketEnabled || cycle%websocketReconcileEvery == 0
 			_ = runCycle(reconcile)
-			timer.Reset(jitteredIntervalWithSample(interval, intervalJitter, rng.Float64()))
+			timer.Reset(jitteredIntervalWithSample(interval, intervalJitter, mathrand.Float64()))
 		}
 	}
 }

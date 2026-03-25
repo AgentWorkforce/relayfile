@@ -234,7 +234,9 @@ func (c *HTTPClient) doJSON(
 			}
 			return err
 		}
-		payloadBytes, readErr := io.ReadAll(resp.Body)
+		// Limit response body to 64MB to prevent unbounded memory usage.
+		const maxResponseSize = 64 << 20
+		payloadBytes, readErr := io.ReadAll(io.LimitReader(resp.Body, maxResponseSize))
 		_ = resp.Body.Close()
 		if readErr != nil {
 			return readErr
@@ -383,21 +385,25 @@ func (s *Syncer) Reconcile(ctx context.Context) error {
 
 func (s *Syncer) sync(ctx context.Context, forcePoll bool) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	if err := s.loadState(); err != nil {
+		s.mu.Unlock()
 		return err
 	}
 
-	// Connect websocket outside the lock to avoid deadlock with readWebSocketLoop.
+	// Check if websocket connection is needed while holding the lock,
+	// then release before connecting to avoid deadlock with readWebSocketLoop.
 	needsWS := s.websocket && s.wsConn == nil
+	s.mu.Unlock()
+
 	if needsWS {
-		s.mu.Unlock()
 		if err := s.connectWebSocket(ctx); err != nil {
 			s.logf("websocket unavailable; using polling sync: %v", err)
 		}
-		s.mu.Lock()
 	}
+
+	// Re-acquire lock for the remainder of the sync operation.
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	conflicted, err := s.pushLocal(ctx)
 	if err != nil {
@@ -431,12 +437,16 @@ func (s *Syncer) connectWebSocket(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	conn, _, err := websocket.Dial(ctx, wsURL, nil)
+	conn, _, err := websocket.Dial(ctx, wsURL, &websocket.DialOptions{
+		HTTPHeader: http.Header{
+			"Authorization": []string{"Bearer " + httpClient.token},
+		},
+	})
 	if err != nil {
 		return err
 	}
 
-	readCtx, cancel := context.WithCancel(context.Background())
+	readCtx, cancel := context.WithCancel(ctx)
 
 	s.mu.Lock()
 	s.wsConn = conn
@@ -971,6 +981,14 @@ func normalizeRemotePath(path string) string {
 	if !strings.HasPrefix(path, "/") {
 		path = "/" + path
 	}
+	// Clean the path to resolve any ".." or "." components, preventing traversal.
+	path = filepath.ToSlash(filepath.Clean(path))
+	if path == "." || path == "" {
+		return "/"
+	}
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
 	if len(path) > 1 {
 		path = strings.TrimSuffix(path, "/")
 	}
@@ -1018,7 +1036,17 @@ func remoteToLocalPath(localRoot, remoteRoot, remotePath string) (string, error)
 	if rel == "" {
 		return "", fmt.Errorf("remote path %s cannot map to local root", remotePath)
 	}
-	return filepath.Join(localRoot, filepath.FromSlash(rel)), nil
+	// Reject path traversal components in the relative path.
+	relSlash := filepath.ToSlash(rel)
+	if strings.HasPrefix(relSlash, "../") || relSlash == ".." || strings.Contains(relSlash, "/../") {
+		return "", fmt.Errorf("path %s escapes local root", remotePath)
+	}
+	joined := filepath.Join(localRoot, filepath.FromSlash(rel))
+	// Final safety check: resolved path must be under localRoot.
+	if !strings.HasPrefix(filepath.Clean(joined), localRoot+string(filepath.Separator)) && filepath.Clean(joined) != localRoot {
+		return "", fmt.Errorf("resolved path %s escapes local root %s", joined, localRoot)
+	}
+	return joined, nil
 }
 
 func localToRemotePath(localRoot, remoteRoot, localPath string) (string, error) {
@@ -1083,6 +1111,7 @@ func (c *HTTPClient) websocketURL(workspaceID string) (string, error) {
 		return "", fmt.Errorf("unsupported base url scheme %q", base.Scheme)
 	}
 	base.Path = fmt.Sprintf("/v1/workspaces/%s/fs/ws", url.PathEscape(workspaceID))
+	// TODO: Remove query-param token once server supports Authorization header on WS upgrade.
 	q := url.Values{}
 	q.Set("token", c.token)
 	base.RawQuery = q.Encode()

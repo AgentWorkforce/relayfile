@@ -236,7 +236,14 @@ class RelayFileWebSocketConnection implements WebSocketConnection {
       }
       let parsed: FilesystemEvent;
       try {
-        parsed = JSON.parse(event.data) as FilesystemEvent;
+        const raw = JSON.parse(event.data);
+        if (typeof raw !== "object" || raw === null || typeof raw.type !== "string") {
+          throw new Error("Invalid WebSocket event: missing required 'type' field.");
+        }
+        if (raw.path !== undefined && typeof raw.path !== "string") {
+          throw new Error("Invalid WebSocket event: 'path' must be a string.");
+        }
+        parsed = raw as FilesystemEvent;
       } catch (error) {
         const parseError = error instanceof Error ? error : new Error("Failed to parse WebSocket event payload.");
         for (const handler of this.handlers.error) {
@@ -701,7 +708,8 @@ export class RelayFileClient {
     signal?: AbortSignal;
   }): Promise<T> {
     const response = await this.performRequest(params);
-    return this.readPayload(response) as Promise<T>;
+    const payload = await this.readPayload(response);
+    return payload as T;
   }
 
   private async performRequest(params: {
