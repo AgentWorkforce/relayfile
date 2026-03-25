@@ -53,7 +53,9 @@ jobs:
         working-directory: dist
         run: |
           for bin in relayfile relayfile-mount relayfile-cli; do
-            tar -czf "${bin}_${{ matrix.os }}_${{ matrix.arch }}.tar.gz" "${bin}-${{ matrix.os }}-${{ matrix.arch }}"
+            cp "${bin}-${{ matrix.os }}-${{ matrix.arch }}" "${bin}"
+            tar -czf "${bin}_${{ matrix.os }}_${{ matrix.arch }}.tar.gz" "${bin}"
+            rm "${bin}"
           done
 
       - name: Generate SHA256 checksums
@@ -95,6 +97,9 @@ jobs:
 
       - name: Show release assets
         run: ls -lah release-assets
+
+      - name: Merge per-platform checksums into checksums.txt
+        run: cat release-assets/checksums-*.txt > release-assets/checksums.txt
 
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2

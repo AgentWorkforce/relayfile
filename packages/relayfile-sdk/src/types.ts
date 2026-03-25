@@ -62,10 +62,14 @@ export interface BulkWriteInput {
 
 export interface BulkWriteResponse {
   imported: number;
+  /** Raw field returned by Go server; SDK normalizes to `imported`. */
+  written?: number;
   errors: Array<{
     path: string;
     error: string;
   }>;
+  /** Raw field returned by Go server; derive length from `errors` array instead. */
+  errorCount?: number;
 }
 
 export interface FileQueryItem {
