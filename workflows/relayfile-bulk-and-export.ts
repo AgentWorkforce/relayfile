@@ -14,7 +14,7 @@
 
 import { workflow } from '@agent-relay/sdk/workflows';
 
-const RELAYFILE = '/Users/khaliqgant/Projects/AgentWorkforce/relayfile';
+const RELAYFILE = '/Users/khaliqgant/Projects/Agent Workforce/relayfile';
 
 async function main() {
 const result = await workflow('relayfile-bulk-and-export')

@@ -29,9 +29,9 @@
 
 import { workflow } from '@agent-relay/sdk/workflows';
 
-const RELAYFILE = '/Users/khaliqgant/Projects/AgentWorkforce/relayfile';
+const RELAYFILE = '/Users/khaliqgant/Projects/Agent Workforce/relayfile';
 const RELAYCAST = '/Users/khaliqgant/Projects/AgentWorkforce/relaycast';
-const HOSTED = '/Users/khaliqgant/Projects/AgentWorkforce/relayfile-cloud';
+const HOSTED = '/Users/khaliqgant/Projects/Agent Workforce/relayfile-cloud';
 
 async function main() {
 const result = await workflow('relayfile-cloud-server')
