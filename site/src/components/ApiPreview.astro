@@ -11,15 +11,18 @@ interface Props {
 
 const { snippets } = Astro.props;
 
+const escapeHtml = (code: string) =>
+  code.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+
 const highlightBash = (code: string) =>
-  code
+  escapeHtml(code)
     .replaceAll(/(curl|jq|TOKEN|relayfile)/g, '<span class="text-cyan-300">$1</span>')
     .replaceAll(/(-X|-H|-d|-s)/g, '<span class="text-blue-300">$1</span>')
     .replaceAll(/("https:[^"]+")/g, '<span class="text-emerald-300">$1</span>')
     .replaceAll(/("[^"]*")/g, '<span class="text-emerald-300">$1</span>');
 
 const highlightJson = (code: string) =>
-  code
+  escapeHtml(code)
     .replaceAll(/"([^"]+)"(?=\s*:)/g, '<span class="text-cyan-300">"$1"</span>')
     .replaceAll(/:\s*"([^"]*)"/g, ': <span class="text-emerald-300">"$1"</span>')
     .replaceAll(/:\s*(\d+)/g, ': <span class="text-blue-300">$1</span>');

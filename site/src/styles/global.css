@@ -37,15 +37,23 @@
     @apply mt-3 text-3xl font-semibold tracking-tight text-zinc-50 sm:text-4xl;
   }
 
-  .prose-dark {
+  .content-prose {
     @apply max-w-none text-zinc-300;
   }
 
-  .prose-dark p {
+  .content-prose p {
     @apply text-base leading-8 text-zinc-300;
   }
 
-  .prose-dark code {
+  .content-prose p + p {
+    @apply mt-4;
+  }
+
+  .content-prose strong {
+    @apply font-semibold text-zinc-100;
+  }
+
+  .content-prose code {
     @apply rounded bg-zinc-950 px-1.5 py-0.5 text-cyan-200;
   }
 }

@@ -1,6 +1,5 @@
 ---
 import fs from "node:fs";
-import path from "node:path";
 import Layout from "../layouts/Layout.astro";
 import Hero from "../components/Hero.astro";
 import FeatureGrid from "../components/FeatureGrid.astro";
@@ -9,19 +8,37 @@ import ApiPreview from "../components/ApiPreview.astro";
 import Architecture from "../components/Architecture.astro";
 import Footer from "../components/Footer.astro";
 
-const contentPath = path.resolve(Astro.site ? "." : "", "CONTENT.md");
-const rawContent = fs.readFileSync(contentPath, "utf-8");
+const rawContent = fs
+  .readFileSync(new URL("../../CONTENT.md", import.meta.url), "utf-8")
+  .replace(/\r\n/g, "\n")
+  .trim();
 
 const normalize = (value: string) => value.replace(/\r\n/g, "\n").trim();
+const escapeRegex = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const stripMarkdown = (value: string) =>
+  normalize(value)
+    .replace(/\*\*([^*]+)\*\*/g, "$1")
+    .replace(/`([^`]+)`/g, "$1");
+const getParagraphs = (value: string) =>
+  value
+    .split("\n\n")
+    .map((entry) => normalize(entry))
+    .filter(Boolean);
 
 const getSection = (title: string) => {
-  const pattern = new RegExp(`## ${title}\\n\\n([\\s\\S]*?)(?=\\n---\\n\\n## |$)`);
+  const pattern = new RegExp(
+    `^## ${escapeRegex(title)}\\n\\n([\\s\\S]*?)(?=\\n---\\n(?:\\n## |$)|$)`,
+    "m"
+  );
   const match = rawContent.match(pattern);
   return match ? normalize(match[1]) : "";
 };
 
 const getSubsection = (section: string, title: string) => {
-  const pattern = new RegExp(`### ${title}\\n\\n([\\s\\S]*?)(?=\\n### |$)`);
+  const pattern = new RegExp(
+    `^### ${escapeRegex(title)}\\n\\n([\\s\\S]*?)(?=\\n### |$)`,
+    "m"
+  );
   const match = section.match(pattern);
   return match ? normalize(match[1]) : "";
 };
@@ -55,27 +72,31 @@ const footerSection = getSection("Footer");
 
 const heroHeadline = getLabelValue(heroSection, "Headline");
 const heroSubhead = getLabelValue(heroSection, "Subhead");
-const heroCtas = normalize(
-  heroSection.split("**CTA:**")[1]?.split("---")[0] || ""
-)
-  .split("\n")
+const heroCtas = heroSection
+  .split("**CTA:**")[1]
+  ?.split("\n")
   .filter((line) => line.startsWith("- "))
   .map((line, index) => {
     const [link] = parseMarkdownLinks(line);
     return {
       label: link?.label || "",
       href: link?.href || "#",
-      variant: index === 0 ? "primary" : "secondary"
+      variant: /primary/i.test(line) || index === 0 ? "primary" : "secondary"
     };
-  });
+  }) || [];
 
-const problemIntro = normalize(problemSection.split("\n\nBut sharing files")[0]);
-const problemTail = normalize(problemSection.split("\n\nBut sharing files across machines, sandboxes, and agents is broken:\n\n")[1] || "");
-const problemLead = `${problemIntro} But sharing files across machines, sandboxes, and agents is broken.`;
-const problemPoints = problemTail
+const problemParagraphs = getParagraphs(problemSection).filter((block) => !block.startsWith("- "));
+const problemPoints = problemSection
   .split("\n")
   .filter((line) => line.startsWith("- "))
-  .map((line) => line.replace(/^- /, "").replace(/\*\*/g, ""));
+  .map((line) => line.replace(/^- /, "").trim())
+  .map((line) => {
+    const match = line.match(/^\*\*([^*]+)\*\*\s*(.*)$/);
+    return {
+      title: match ? stripMarkdown(match[1]) : "",
+      body: stripMarkdown(match ? match[2] : line)
+    };
+  });
 
 const mountAnywhere = getSubsection(solutionSection, "Mount anywhere");
 const revisionControlled = getSubsection(solutionSection, "Revision-controlled");
@@ -83,23 +104,28 @@ const programmable = getSubsection(solutionSection, "Programmable");
 const programmablePoints = programmable
   .split("\n")
   .filter((line) => line.startsWith("- "))
-  .map((line) => line.replace(/^- /, ""));
+  .map((line) => stripMarkdown(line.replace(/^- /, "")));
 
 const solutionFeatures = [
   {
     title: "Mount anywhere",
-    body: mountAnywhere.split("```")[0].replace(/`/g, "").trim()
+    body: stripMarkdown(mountAnywhere.split("```")[0] || "")
   },
   {
     title: "Revision-controlled",
-    body: revisionControlled.split("```")[0].replace(/`/g, "").trim()
+    body: stripMarkdown(revisionControlled.split("```")[0] || "")
   }
 ];
+const programmableIntro = stripMarkdown(
+  getParagraphs(programmable)
+    .filter((block) => !block.startsWith("- ") && !block.startsWith("```"))
+    .join("\n\n")
+);
 
 const useCaseMatches = [...useCasesSection.matchAll(/### ([^\n]+)\n\n([\s\S]*?)(?=\n### |$)/g)];
 const useCaseItems = useCaseMatches.map((match) => ({
   title: normalize(match[1]),
-  body: normalize(match[2].split("```")[0]).replace(/`/g, "")
+  body: stripMarkdown(match[2].split("```")[0] || "")
 }));
 const useCaseCodeBlocks = extractCodeBlocks(useCasesSection);
 
@@ -111,17 +137,18 @@ const apiSnippets = extractCodeBlocks(apiSection).map((snippet, index) => ({
 }));
 
 const worksSteps = [...worksSection.matchAll(/\d+\.\s+([^\n]+)/g)].map((match) => normalize(match[1]).replace(/`/g, ""));
+const architectureOverview = getParagraphs(architectureSection.split("**Key properties:**")[0] || "").map(stripMarkdown);
 const propertyItems = architectureSection
   .split("**Key properties:**")[1]
   ?.split("**Production stack:**")[0]
   ?.split("\n")
   .filter((line) => line.startsWith("- "))
-  .map((line) => line.replace(/^- /, "").replace(/\*\*/g, "")) || [];
+  .map((line) => stripMarkdown(line.replace(/^- /, ""))) || [];
 const stackItems = architectureSection
   .split("**Production stack:**")[1]
   ?.split("\n")
   .filter((line) => line.startsWith("- "))
-  .map((line) => line.replace(/^- /, "")) || [];
+  .map((line) => stripMarkdown(line.replace(/^- /, ""))) || [];
 
 const footerLinks = parseMarkdownLinks(footerSection.split("\n\n")[0] || "");
 const builtBy = parseMarkdownLinks(footerSection.split("Built by ")[1] || "")[0];
@@ -137,10 +164,12 @@ const builtBy = parseMarkdownLinks(footerSection.split("Built by ")[1] || "")[0]
       <Hero headline={heroHeadline} subhead={heroSubhead} ctas={heroCtas} />
 
       <FeatureGrid
-        introTitle="Files are the universal interface"
-        introBody={problemLead}
+        problemTitle="Files are the universal interface"
+        problemBody={problemParagraphs}
         problemPoints={problemPoints}
+        solutionTitle="RelayFile"
         features={solutionFeatures}
+        programmableIntro={programmableIntro}
         programmablePoints={programmablePoints}
       />
 
@@ -148,7 +177,12 @@ const builtBy = parseMarkdownLinks(footerSection.split("Built by ")[1] || "")[0]
 
       <ApiPreview snippets={apiSnippets} />
 
-      <Architecture steps={worksSteps} properties={propertyItems} stack={stackItems} />
+      <Architecture
+        overview={architectureOverview}
+        steps={worksSteps}
+        properties={propertyItems}
+        stack={stackItems}
+      />
 
       <Footer
         links={footerLinks}

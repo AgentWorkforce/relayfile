@@ -1,17 +1,25 @@
 ---
 interface Props {
+  overview: string[];
   steps: string[];
   properties: string[];
   stack: string[];
 }
 
-const { steps, properties, stack } = Astro.props;
+const { overview, steps, properties, stack } = Astro.props;
 ---
 
 <section class="grid gap-8 lg:grid-cols-[1fr_1.05fr]">
   <div class="section-shell p-8 sm:p-10">
     <p class="section-heading">How It Works</p>
     <h2 class="section-title">One workspace, one canonical state</h2>
+    <div class="content-prose mt-6">
+      {
+        overview.map((paragraph) => (
+          <p>{paragraph}</p>
+        ))
+      }
+    </div>
     <div class="mt-8 rounded-3xl border border-cyan-400/20 bg-zinc-950/80 p-6">
       <div class="grid gap-4 text-center text-sm text-zinc-300 sm:grid-cols-3">
         <div class="rounded-2xl border border-zinc-800 bg-zinc-900/80 p-4">Developer laptop<br /><span class="text-cyan-400">relayfile mount</span></div>
