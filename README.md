@@ -28,7 +28,9 @@ Mount that workspace into a local directory:
 relayfile mount my-project ./src
 ```
 
-For a step-by-step walkthrough, see `docs/guides/getting-started.md`.
+Replace `--server` with your hosted RelayFile URL if you are not running the API locally.
+
+For a step-by-step walkthrough, see [docs/guides/getting-started.md](docs/guides/getting-started.md).
 
 ## Collaborate
 
@@ -54,8 +56,8 @@ Human + agent setup:
 
 More collaboration examples:
 
-- `docs/guides/collaboration.md`
-- `docs/guides/cloud-integration.md`
+- [docs/guides/collaboration.md](docs/guides/collaboration.md)
+- [docs/guides/cloud-integration.md](docs/guides/cloud-integration.md)
 
 ## What this service does
 

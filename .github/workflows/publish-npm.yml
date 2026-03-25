@@ -1,4 +1,4 @@
-name: Publish NPM Package
+name: Publish NPM Packages
 
 on:
   workflow_dispatch:
@@ -34,7 +34,7 @@ on:
         default: latest
 
 concurrency:
-  group: publish-npm
+  group: publish-package
   cancel-in-progress: false
 
 permissions:
@@ -150,7 +150,7 @@ jobs:
     name: Create Release
     needs: [build, publish]
     runs-on: ubuntu-latest
-    if: github.event.inputs.dry_run != 'true'
+    if: github.event.inputs.dry_run != 'true' && needs.publish.result == 'success'
 
     steps:
       - name: Checkout code
@@ -198,6 +198,7 @@ jobs:
             - Dist-tag: `${{ github.event.inputs.tag }}`
             - Provenance: enabled via `npm publish --provenance`
             - Registry: `https://registry.npmjs.org`
+            - Package: `@relayfile/sdk`
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -217,6 +218,8 @@ jobs:
           echo "**Version**: \`${{ needs.build.outputs.new_version }}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "**NPM Tag**: \`${{ github.event.inputs.tag }}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "**Dry Run**: \`${{ github.event.inputs.dry_run }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Registry**: \`https://registry.npmjs.org\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Provenance**: \`enabled\`" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "### Results" >> "$GITHUB_STEP_SUMMARY"
           echo "| Stage | Status |" >> "$GITHUB_STEP_SUMMARY"

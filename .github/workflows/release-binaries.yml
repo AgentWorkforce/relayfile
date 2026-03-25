@@ -24,15 +24,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: linux
-            arch: amd64
-          - os: linux
-            arch: arm64
-          - os: darwin
-            arch: amd64
-          - os: darwin
-            arch: arm64
+        os: [linux, darwin]
+        arch: [amd64, arm64]
 
     steps:
       - name: Checkout
@@ -44,7 +37,7 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
           cache: true
 
-      - name: Cross-compile binaries
+      - name: Cross-compile release binaries
         env:
           CGO_ENABLED: "0"
           GOOS: ${{ matrix.os }}
@@ -59,7 +52,7 @@ jobs:
       - name: Generate SHA256 checksums
         working-directory: dist
         run: |
-          shasum -a 256 \
+          sha256sum \
             "relayfile-${{ matrix.os }}-${{ matrix.arch }}" \
             "relayfile-mount-${{ matrix.os }}-${{ matrix.arch }}" \
             "relayfile-cli-${{ matrix.os }}-${{ matrix.arch }}" \

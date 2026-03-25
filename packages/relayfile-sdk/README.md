@@ -24,9 +24,11 @@ const tree = await client.listTree(workspaceId, {
   path: "/",
   depth: 2
 });
+
 console.log(tree.entries.map((entry) => entry.path));
 
 const file = await client.readFile(workspaceId, "/notes/todo.md");
+
 console.log(file.content);
 
 await client.writeFile({
@@ -40,4 +42,4 @@ await client.writeFile({
 
 ## Full Docs
 
-Full documentation is available at https://github.com/AgentWorkforce/relayfile/tree/main/docs
+Full documentation is available in the [relayfile docs](https://github.com/AgentWorkforce/relayfile/tree/main/docs).

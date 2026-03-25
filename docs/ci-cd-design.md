@@ -38,7 +38,7 @@ concurrency:
 - **Needs:** `go-test`
 - **Steps:**
   1. Checkout + setup Go (same as above)
-  2. `make build` — builds all three binaries (`relayfile`, `relayfile-server`, `relayfile-mount`) to `bin/`
+  2. `go build ./cmd/relayfile ./cmd/relayfile-mount ./cmd/relayfile-cli` — builds all three binaries to `bin/`
   3. `actions/upload-artifact@v4` — upload `bin/` as `relayfile-binaries` (needed by E2E)
 
 #### `sdk-typecheck` — TypeScript SDK

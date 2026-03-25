@@ -14,6 +14,11 @@ RelayFile gives multiple machines and agents a shared workspace-backed filesyste
 - For hosted usage, you only need the RelayFile CLI plus a server URL and token.
 - If you want to mount the same workspace on multiple machines, each machine needs network access to the same RelayFile server.
 
+RelayFile works in two common modes:
+
+- local development: run the server from this repository with Go
+- hosted usage: point the CLI at a shared RelayFile deployment and skip the local server step
+
 ## Start The Server Locally
 
 Run the API server from the repository root:
@@ -55,6 +60,12 @@ relayfile workspace list
 ```
 
 If your environment already assigns you a workspace ID, you can use that directly instead of creating one.
+
+If you are using a hosted deployment, the same login flow works with your hosted base URL:
+
+```bash
+relayfile login --server https://relayfile-api.agentworkforce.workers.dev --token YOUR_TOKEN
+```
 
 ## Seed Files From A Project
 
@@ -125,6 +136,6 @@ curl -sS \
 
 ## Next Steps
 
-- Collaboration patterns: `docs/guides/collaboration.md`
-- Cloud workflow integration: `docs/guides/cloud-integration.md`
-- REST contract details: `docs/api-reference.md`
+- Collaboration patterns: [docs/guides/collaboration.md](collaboration.md)
+- Cloud workflow integration: [docs/guides/cloud-integration.md](cloud-integration.md)
+- REST contract details: [docs/api-reference.md](../api-reference.md)

@@ -31,22 +31,27 @@ import (
 )
 
 const (
-	defaultServerURL = "http://127.0.0.1:8080"
-	configDirName    = ".relayfile"
+	defaultServerURL         = "https://relayfile-api.agentworkforce.workers.dev"
+	configDirName            = ".relayfile"
+	websocketReconcileEvery  = 10
 )
 
 type credentials struct {
-	Server    string `json:"server"`
-	Token     string `json:"token"`
-	UpdatedAt string `json:"updatedAt,omitempty"`
+	Server       string `json:"server"`
+	Token        string `json:"token"`
+	RefreshToken string `json:"refreshToken,omitempty"`
+	ExpiresAt    string `json:"expiresAt,omitempty"`
+	UpdatedAt    string `json:"updatedAt,omitempty"`
 }
 
 type workspaceCatalog struct {
+	Default    string            `json:"default,omitempty"`
 	Workspaces []workspaceRecord `json:"workspaces"`
 }
 
 type workspaceRecord struct {
 	Name       string `json:"name"`
+	ID         string `json:"id,omitempty"`
 	CreatedAt  string `json:"createdAt"`
 	LastUsedAt string `json:"lastUsedAt,omitempty"`
 }
@@ -108,7 +113,8 @@ type exportedFile struct {
 }
 
 type adminWorkspaceList struct {
-	Workspaces []string `json:"workspaces"`
+	WorkspaceIDs []string        `json:"workspaceIds"`
+	Workspaces   json.RawMessage `json:"workspaces"`
 }
 
 type apiError struct {
@@ -142,9 +148,9 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	case "login":
 		return runLogin(args[1:], stdin, stdout)
 	case "workspace":
-		return runWorkspace(args[1:], stdout)
+		return runWorkspace(args[1:], stdin, stdout)
 	case "mount":
-		return runMount(args[1:], stdout)
+		return runMount(args[1:])
 	case "seed":
 		return runSeed(args[1:], stdout)
 	case "export":
@@ -167,14 +173,15 @@ Usage:
   relayfile login --server URL [--token TOKEN]
   relayfile workspace create NAME
   relayfile workspace list
-  relayfile mount WORKSPACE [LOCAL_DIR] [flags]
+  relayfile workspace delete NAME [--yes]
+  relayfile mount WORKSPACE [LOCAL_DIR]
   relayfile seed WORKSPACE [DIR]
   relayfile export WORKSPACE --format FORMAT [--output FILE]
   relayfile status WORKSPACE
 
 Subcommands:
   login       Store credentials in ~/.relayfile/credentials.json
-  workspace   Manage locally tracked workspaces
+  workspace   Create, list, or delete locally tracked workspaces
   mount       Mirror a remote workspace to a local directory
   seed        Upload a directory tree with bulk writes
   export      Export a workspace as json, tar, or patch
@@ -206,11 +213,12 @@ func runLogin(args []string, stdin io.Reader, stdout io.Writer) error {
 		return errors.New("token is required")
 	}
 
-	client := &http.Client{Timeout: 10 * time.Second}
 	req, err := http.NewRequest(http.MethodGet, strings.TrimRight(serverValue, "/")+"/health", nil)
 	if err != nil {
 		return err
 	}
+	req.Header.Set("Authorization", "Bearer "+tokenValue)
+	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("health check failed: %w", err)
@@ -232,15 +240,17 @@ func runLogin(args []string, stdin io.Reader, stdout io.Writer) error {
 	return nil
 }
 
-func runWorkspace(args []string, stdout io.Writer) error {
+func runWorkspace(args []string, stdin io.Reader, stdout io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("workspace subcommand is required: create or list")
+		return errors.New("workspace subcommand is required: create, list, or delete")
 	}
 	switch args[0] {
 	case "create":
 		return runWorkspaceCreate(args[1:], stdout)
 	case "list":
 		return runWorkspaceList(args[1:], stdout)
+	case "delete":
+		return runWorkspaceDelete(args[1:], stdin, stdout)
 	default:
 		return fmt.Errorf("unknown workspace subcommand %q", args[0])
 	}
@@ -255,14 +265,23 @@ func runWorkspaceCreate(args []string, stdout io.Writer) error {
 	if fs.NArg() != 1 {
 		return errors.New("usage: relayfile workspace create NAME")
 	}
+
 	name := strings.TrimSpace(fs.Arg(0))
 	if name == "" {
 		return errors.New("workspace name is required")
 	}
-	if err := upsertWorkspace(name); err != nil {
+	if _, err := loadCredentials(); err != nil {
 		return err
 	}
-	fmt.Fprintf(stdout, "Registered workspace %s in %s\n", name, workspacesPath())
+	record, err := upsertWorkspace(name)
+	if err != nil {
+		return err
+	}
+	workspaceID := record.ID
+	if workspaceID == "" {
+		workspaceID = name
+	}
+	fmt.Fprintf(stdout, "Workspace %s ready (id: %s)\n", record.Name, workspaceID)
 	return nil
 }
 
@@ -274,17 +293,23 @@ func runWorkspaceList(args []string, stdout io.Writer) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	creds, _ := loadCredentials()
 
+	creds, _ := loadCredentials()
 	client, err := newAPIClient(resolveServer(*server, creds), resolveToken(*token, creds))
 	if err == nil {
 		var remote adminWorkspaceList
 		err = client.getJSON(context.Background(), "/v1/admin/workspaces", &remote)
-		if err == nil && len(remote.Workspaces) > 0 {
-			for _, name := range remote.Workspaces {
-				fmt.Fprintln(stdout, name)
+		if err != nil {
+			err = client.getJSON(context.Background(), "/v1/admin/sync", &remote)
+		}
+		if err == nil {
+			names := remoteWorkspaceNames(remote)
+			if len(names) > 0 {
+				for _, name := range names {
+					fmt.Fprintln(stdout, name)
+				}
+				return nil
 			}
-			return nil
 		}
 	}
 
@@ -298,12 +323,50 @@ func runWorkspaceList(args []string, stdout io.Writer) error {
 	return nil
 }
 
-func runMount(args []string, stdout io.Writer) error {
+func runWorkspaceDelete(args []string, stdin io.Reader, stdout io.Writer) error {
+	fs := flag.NewFlagSet("workspace delete", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	yes := fs.Bool("yes", false, "skip confirmation prompt")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return errors.New("usage: relayfile workspace delete NAME [--yes]")
+	}
+
+	name := strings.TrimSpace(fs.Arg(0))
+	if name == "" {
+		return errors.New("workspace name is required")
+	}
+	if !*yes {
+		answer, err := promptLine(stdin, stdout, fmt.Sprintf("Delete workspace %q from local config? [y/N]: ", name))
+		if err != nil {
+			return err
+		}
+		answer = strings.ToLower(strings.TrimSpace(answer))
+		if answer != "y" && answer != "yes" {
+			fmt.Fprintln(stdout, "Aborted")
+			return nil
+		}
+	}
+
+	removed, err := removeWorkspace(name)
+	if err != nil {
+		return err
+	}
+	if !removed {
+		return fmt.Errorf("workspace %q not found in %s", name, workspacesPath())
+	}
+	fmt.Fprintf(stdout, "Removed workspace %s from %s\n", name, workspacesPath())
+	return nil
+}
+
+func runMount(args []string) error {
 	fs := flag.NewFlagSet("mount", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 
 	creds, _ := loadCredentials()
-	baseURL := fs.String("server", resolveServer("", creds), "relayfile server URL")
+	server := fs.String("server", resolveServer("", creds), "relayfile server URL")
 	token := fs.String("token", resolveToken("", creds), "bearer token")
 	remotePath := fs.String("remote-path", envOrDefault("RELAYFILE_REMOTE_PATH", "/"), "remote root path")
 	eventProvider := fs.String("provider", strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_PROVIDER")), "event provider filter")
@@ -321,6 +384,9 @@ func runMount(args []string, stdout io.Writer) error {
 	}
 
 	workspaceID := strings.TrimSpace(fs.Arg(0))
+	if workspaceID == "" {
+		return errors.New("workspace is required")
+	}
 	localDir := "."
 	if fs.NArg() == 2 {
 		localDir = fs.Arg(1)
@@ -330,7 +396,8 @@ func runMount(args []string, stdout io.Writer) error {
 		return err
 	}
 
-	if strings.TrimSpace(*token) == "" {
+	tokenValue := strings.TrimSpace(*token)
+	if tokenValue == "" {
 		return errors.New("token is required; run relayfile login or pass --token")
 	}
 	if *interval <= 0 {
@@ -341,54 +408,26 @@ func runMount(args []string, stdout io.Writer) error {
 	}
 	*intervalJitter = clampJitterRatio(*intervalJitter)
 
-	client := mountsync.NewHTTPClient(*baseURL, *token, &http.Client{Timeout: *timeout})
+	client := mountsync.NewHTTPClient(*server, tokenValue, &http.Client{Timeout: *timeout})
 	syncer, err := mountsync.NewSyncer(client, mountsync.SyncerOptions{
 		WorkspaceID:   workspaceID,
 		RemoteRoot:    *remotePath,
 		EventProvider: strings.TrimSpace(*eventProvider),
 		LocalRoot:     absLocalDir,
-		StateFile:     *stateFile,
+		StateFile:     strings.TrimSpace(*stateFile),
 		WebSocket:     boolPtr(*websocketEnabled),
 		Logger:        log.Default(),
 	})
 	if err != nil {
 		return fmt.Errorf("failed to initialize mount syncer: %w", err)
 	}
-	if err := upsertWorkspace(workspaceID); err != nil {
+	if _, err := upsertWorkspace(workspaceID); err != nil {
 		return err
 	}
 
 	rootCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-
-	runSync := func() {
-		ctx, cancel := context.WithTimeout(rootCtx, *timeout)
-		defer cancel()
-		if err := syncer.SyncOnce(ctx); err != nil {
-			log.Printf("mount sync cycle failed: %v", err)
-			return
-		}
-		log.Printf("mount sync cycle completed")
-	}
-
-	runSync()
-	if *once {
-		return nil
-	}
-
-	rng := mathrand.New(mathrand.NewSource(time.Now().UnixNano()))
-	timer := time.NewTimer(jitteredIntervalWithSample(*interval, *intervalJitter, rng.Float64()))
-	defer timer.Stop()
-	for {
-		select {
-		case <-rootCtx.Done():
-			log.Printf("mount sync stopping: %v", rootCtx.Err())
-			return nil
-		case <-timer.C:
-			runSync()
-			timer.Reset(jitteredIntervalWithSample(*interval, *intervalJitter, rng.Float64()))
-		}
-	}
+	return runMountLoop(rootCtx, syncer, *timeout, *interval, *intervalJitter, *websocketEnabled, *once)
 }
 
 func runSeed(args []string, stdout io.Writer) error {
@@ -422,7 +461,7 @@ func runSeed(args []string, stdout io.Writer) error {
 		return err
 	}
 
-	files, err := collectSeedFiles(root)
+	files, err := collectSeedFiles(root, stdout)
 	if err != nil {
 		return err
 	}
@@ -431,13 +470,11 @@ func runSeed(args []string, stdout io.Writer) error {
 		return nil
 	}
 
-	fmt.Fprintf(stdout, "Seeding %d files...\n", len(files))
-
 	var response bulkWriteResponse
 	if err := client.postJSON(context.Background(), fmt.Sprintf("/v1/workspaces/%s/fs/bulk", url.PathEscape(workspaceID)), bulkWriteRequest{Files: files}, &response); err != nil {
 		return err
 	}
-	if err := upsertWorkspace(workspaceID); err != nil {
+	if _, err := upsertWorkspace(workspaceID); err != nil {
 		return err
 	}
 	fmt.Fprintf(stdout, "Seeded %d files", response.Written)
@@ -456,7 +493,7 @@ func runExport(args []string, stdout io.Writer) error {
 	fs.SetOutput(io.Discard)
 	server := fs.String("server", "", "relayfile server URL override")
 	token := fs.String("token", "", "relayfile token override")
-	format := fs.String("format", "json", "export format: json, tar, or patch")
+	format := fs.String("format", "json", "export format: tar, json, or patch")
 	output := fs.String("output", "-", "output file path or - for stdout")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -480,11 +517,14 @@ func runExport(args []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if err := upsertWorkspace(workspaceID); err != nil {
+	if _, err := upsertWorkspace(workspaceID); err != nil {
 		return err
 	}
-	if strings.TrimSpace(*output) == "" || *output == "-" {
+	if strings.TrimSpace(*output) == "" || strings.TrimSpace(*output) == "-" {
 		_, err = stdout.Write(body)
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(*output), 0o755); err != nil {
 		return err
 	}
 	return os.WriteFile(*output, body, 0o644)
@@ -510,13 +550,13 @@ func runStatus(args []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	workspaceID := strings.TrimSpace(fs.Arg(0))
 
+	workspaceID := strings.TrimSpace(fs.Arg(0))
 	var status syncStatusResponse
 	if err := client.getJSON(context.Background(), fmt.Sprintf("/v1/workspaces/%s/sync/status", url.PathEscape(workspaceID)), &status); err != nil {
 		return err
 	}
-	if err := upsertWorkspace(workspaceID); err != nil {
+	if _, err := upsertWorkspace(workspaceID); err != nil {
 		return err
 	}
 
@@ -529,26 +569,28 @@ func runStatus(args []string, stdout io.Writer) error {
 	fmt.Fprintf(stdout, "Workspace: %s\n", status.WorkspaceID)
 	fmt.Fprintf(stdout, "File count: %s\n", fileCountText)
 	if len(status.Providers) == 0 {
-		fmt.Fprintln(stdout, "Providers: none")
+		fmt.Fprintln(stdout, "Last activity: unknown")
 		return nil
 	}
+
+	lastActivity := "unknown"
 	for _, provider := range status.Providers {
-		lastActivity := ""
-		if provider.WatermarkTs != nil {
-			lastActivity = *provider.WatermarkTs
+		if provider.WatermarkTs != nil && strings.TrimSpace(*provider.WatermarkTs) != "" {
+			if lastActivity == "unknown" || strings.TrimSpace(*provider.WatermarkTs) > lastActivity {
+				lastActivity = strings.TrimSpace(*provider.WatermarkTs)
+			}
 		}
-		if lastActivity == "" {
-			lastActivity = "unknown"
-		}
-		fmt.Fprintf(stdout, "%s: %s", provider.Provider, provider.Status)
+	}
+	fmt.Fprintf(stdout, "Last activity: %s\n", lastActivity)
+	for _, provider := range status.Providers {
+		line := fmt.Sprintf("%s: %s", provider.Provider, provider.Status)
 		if provider.LagSeconds > 0 {
-			fmt.Fprintf(stdout, " lag=%ds", provider.LagSeconds)
+			line += fmt.Sprintf(" lag=%ds", provider.LagSeconds)
 		}
-		fmt.Fprintf(stdout, " last_activity=%s", lastActivity)
 		if provider.LastError != nil && strings.TrimSpace(*provider.LastError) != "" {
-			fmt.Fprintf(stdout, " error=%q", *provider.LastError)
+			line += fmt.Sprintf(" error=%q", *provider.LastError)
 		}
-		fmt.Fprintln(stdout)
+		fmt.Fprintln(stdout, line)
 	}
 	return nil
 }
@@ -628,25 +670,61 @@ func (c *apiClient) do(ctx context.Context, method, path string, body []byte) ([
 		return payload, resp.Header.Get("Content-Type"), nil
 	}
 
-	var apiErr struct {
+	var errPayload struct {
 		Code    string `json:"code"`
 		Message string `json:"message"`
 	}
 	if len(payload) > 0 {
-		_ = json.Unmarshal(payload, &apiErr)
+		_ = json.Unmarshal(payload, &errPayload)
 	}
-	if apiErr.Message == "" {
-		apiErr.Message = strings.TrimSpace(string(payload))
+	if errPayload.Message == "" {
+		errPayload.Message = strings.TrimSpace(string(payload))
 	}
 	return nil, "", &apiError{
 		StatusCode: resp.StatusCode,
-		Code:       apiErr.Code,
-		Message:    apiErr.Message,
+		Code:       errPayload.Code,
+		Message:    errPayload.Message,
 	}
 }
 
-func collectSeedFiles(root string) ([]bulkWriteFile, error) {
-	files := make([]bulkWriteFile, 0)
+func collectSeedFiles(root string, stdout io.Writer) ([]bulkWriteFile, error) {
+	paths, err := collectSeedPaths(root)
+	if err != nil {
+		return nil, err
+	}
+	files := make([]bulkWriteFile, 0, len(paths))
+	for idx, path := range paths {
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return nil, err
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return nil, err
+		}
+		entry := bulkWriteFile{
+			Path:        "/" + filepath.ToSlash(rel),
+			ContentType: detectContentType(path, content),
+		}
+		if utf8.Valid(content) {
+			entry.Content = string(content)
+		} else {
+			entry.Content = base64.StdEncoding.EncodeToString(content)
+			entry.Encoding = "base64"
+		}
+		files = append(files, entry)
+		if stdout != nil {
+			fmt.Fprintf(stdout, "\rSeeding %d/%d files...", idx+1, len(paths))
+		}
+	}
+	if stdout != nil && len(paths) > 0 {
+		fmt.Fprintln(stdout)
+	}
+	return files, nil
+}
+
+func collectSeedPaths(root string) ([]string, error) {
+	paths := make([]string, 0)
 	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -661,34 +739,14 @@ func collectSeedFiles(root string) ([]bulkWriteFile, error) {
 		if !info.Mode().IsRegular() {
 			return nil
 		}
-		rel, err := filepath.Rel(root, path)
-		if err != nil {
-			return err
-		}
-		content, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		entry := bulkWriteFile{
-			Path:        "/" + filepath.ToSlash(rel),
-			ContentType: detectContentType(path, content),
-		}
-		if utf8.Valid(content) {
-			entry.Content = string(content)
-		} else {
-			entry.Content = base64.StdEncoding.EncodeToString(content)
-			entry.Encoding = "base64"
-		}
-		files = append(files, entry)
+		paths = append(paths, path)
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
-	sort.Slice(files, func(i, j int) bool {
-		return files[i].Path < files[j].Path
-	})
-	return files, nil
+	sort.Strings(paths)
+	return paths, nil
 }
 
 func detectContentType(path string, content []byte) string {
@@ -794,28 +852,114 @@ func saveWorkspaceCatalog(catalog workspaceCatalog) error {
 	return os.WriteFile(workspacesPath(), payload, 0o644)
 }
 
-func upsertWorkspace(name string) error {
+func upsertWorkspace(name string) (workspaceRecord, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
-		return errors.New("workspace name is required")
+		return workspaceRecord{}, errors.New("workspace name is required")
 	}
+
 	catalog, err := loadWorkspaceCatalog()
 	if err != nil {
-		return err
+		return workspaceRecord{}, err
 	}
+
 	now := time.Now().UTC().Format(time.RFC3339)
 	for i := range catalog.Workspaces {
 		if catalog.Workspaces[i].Name == name {
+			if catalog.Workspaces[i].ID == "" {
+				catalog.Workspaces[i].ID = name
+			}
 			catalog.Workspaces[i].LastUsedAt = now
-			return saveWorkspaceCatalog(catalog)
+			if err := saveWorkspaceCatalog(catalog); err != nil {
+				return workspaceRecord{}, err
+			}
+			return catalog.Workspaces[i], nil
 		}
 	}
-	catalog.Workspaces = append(catalog.Workspaces, workspaceRecord{
+
+	record := workspaceRecord{
 		Name:       name,
+		ID:         name,
 		CreatedAt:  now,
 		LastUsedAt: now,
-	})
-	return saveWorkspaceCatalog(catalog)
+	}
+	catalog.Workspaces = append(catalog.Workspaces, record)
+	if strings.TrimSpace(catalog.Default) == "" {
+		catalog.Default = name
+	}
+	if err := saveWorkspaceCatalog(catalog); err != nil {
+		return workspaceRecord{}, err
+	}
+	return record, nil
+}
+
+func removeWorkspace(name string) (bool, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return false, errors.New("workspace name is required")
+	}
+
+	catalog, err := loadWorkspaceCatalog()
+	if err != nil {
+		return false, err
+	}
+	filtered := catalog.Workspaces[:0]
+	removed := false
+	for _, workspace := range catalog.Workspaces {
+		if workspace.Name == name {
+			removed = true
+			continue
+		}
+		filtered = append(filtered, workspace)
+	}
+	if !removed {
+		return false, nil
+	}
+	catalog.Workspaces = filtered
+	if catalog.Default == name {
+		catalog.Default = ""
+		if len(catalog.Workspaces) > 0 {
+			catalog.Default = catalog.Workspaces[0].Name
+		}
+	}
+	return true, saveWorkspaceCatalog(catalog)
+}
+
+func remoteWorkspaceNames(response adminWorkspaceList) []string {
+	set := map[string]struct{}{}
+	for _, workspaceID := range response.WorkspaceIDs {
+		workspaceID = strings.TrimSpace(workspaceID)
+		if workspaceID != "" {
+			set[workspaceID] = struct{}{}
+		}
+	}
+	if len(set) == 0 && len(response.Workspaces) > 0 {
+		var workspaceIDs []string
+		if err := json.Unmarshal(response.Workspaces, &workspaceIDs); err == nil {
+			for _, workspaceID := range workspaceIDs {
+				workspaceID = strings.TrimSpace(workspaceID)
+				if workspaceID != "" {
+					set[workspaceID] = struct{}{}
+				}
+			}
+		} else {
+			var workspaceMap map[string]json.RawMessage
+			if err := json.Unmarshal(response.Workspaces, &workspaceMap); err == nil {
+				for workspaceID := range workspaceMap {
+					workspaceID = strings.TrimSpace(workspaceID)
+					if workspaceID != "" {
+						set[workspaceID] = struct{}{}
+					}
+				}
+			}
+		}
+	}
+	names := make([]string, 0, len(set))
+	for name := range set {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 func resolveServer(flagValue string, creds credentials) string {
@@ -927,6 +1071,47 @@ func jitteredIntervalWithSample(base time.Duration, jitterRatio, sample float64)
 		return time.Millisecond
 	}
 	return delay
+}
+
+func runMountLoop(rootCtx context.Context, syncer *mountsync.Syncer, timeout, interval time.Duration, intervalJitter float64, websocketEnabled, once bool) error {
+	runCycle := func(reconcile bool) error {
+		ctx, cancel := context.WithTimeout(rootCtx, timeout)
+		defer cancel()
+		var err error
+		if reconcile {
+			err = syncer.Reconcile(ctx)
+		} else {
+			err = syncer.SyncOnce(ctx)
+		}
+		if err != nil {
+			log.Printf("mount sync cycle failed: %v", err)
+			return err
+		}
+		log.Printf("mount sync cycle completed")
+		return nil
+	}
+
+	initialErr := runCycle(true)
+	if once {
+		return initialErr
+	}
+
+	rng := mathrand.New(mathrand.NewSource(time.Now().UnixNano()))
+	timer := time.NewTimer(jitteredIntervalWithSample(interval, intervalJitter, rng.Float64()))
+	defer timer.Stop()
+	cycle := 0
+	for {
+		select {
+		case <-rootCtx.Done():
+			log.Printf("mount sync stopping: %v", rootCtx.Err())
+			return nil
+		case <-timer.C:
+			cycle++
+			reconcile := !websocketEnabled || cycle%websocketReconcileEvery == 0
+			_ = runCycle(reconcile)
+			timer.Reset(jitteredIntervalWithSample(interval, intervalJitter, rng.Float64()))
+		}
+	}
 }
 
 func correlationID() string {

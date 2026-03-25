@@ -7,16 +7,21 @@ on:
       - main
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
   contents: read
 
+env:
+  GO_VERSION: "1.22"
+  NODE_VERSION: "22"
+
 jobs:
   go-test:
     name: Go Test
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -24,7 +29,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: "1.22"
+          go-version: ${{ env.GO_VERSION }}
           cache: true
 
       - name: Run Go tests
@@ -34,6 +39,7 @@ jobs:
     name: Go Build
     runs-on: ubuntu-latest
     needs: go-test
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -41,21 +47,27 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: "1.22"
+          go-version: ${{ env.GO_VERSION }}
           cache: true
 
-      - name: Build relayfile
-        run: go build ./cmd/relayfile
+      - name: Build binaries
+        run: |
+          mkdir -p bin
+          go build -o bin/relayfile ./cmd/relayfile
+          go build -o bin/relayfile-mount ./cmd/relayfile-mount
+          go build -o bin/relayfile-cli ./cmd/relayfile-cli
 
-      - name: Build relayfile-mount
-        run: go build ./cmd/relayfile-mount
-
-      - name: Build relayfile-cli
-        run: go build ./cmd/relayfile-cli
+      - name: Upload binaries artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: relayfile-binaries
+          path: bin/
+          retention-days: 1
 
   sdk-typecheck:
     name: SDK Typecheck
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -63,7 +75,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: ${{ env.NODE_VERSION }}
           cache: npm
           cache-dependency-path: packages/relayfile-sdk/package-lock.json
 
@@ -83,6 +95,7 @@ jobs:
     name: E2E
     runs-on: ubuntu-latest
     needs: go-build
+    timeout-minutes: 25
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -90,15 +103,21 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: "1.22"
+          go-version: ${{ env.GO_VERSION }}
           cache: true
 
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: ${{ env.NODE_VERSION }}
           cache: npm
           cache-dependency-path: package-lock.json
+
+      - name: Download binaries artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: relayfile-binaries
+          path: bin
 
       - name: Install root dependencies
         run: npm ci
@@ -107,13 +126,15 @@ jobs:
         env:
           CI: "true"
         run: |
-          # scripts/e2e.ts builds and starts relayfile/relayfile-mount internally.
+          chmod +x bin/relayfile bin/relayfile-mount bin/relayfile-cli
+          # The E2E harness builds and starts relayfile and relayfile-mount as part of the test flow.
           npx tsx scripts/e2e.ts --ci
 
   workers-typecheck:
     name: Workers Typecheck
-    if: ${{ hashFiles('packages/server/tsconfig.json') != '' }}
+    if: ${{ hashFiles('packages/server/**') != '' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -121,13 +142,23 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: ${{ env.NODE_VERSION }}
           cache: npm
-          cache-dependency-path: package-lock.json
+          cache-dependency-path: |
+            package-lock.json
+            packages/server/package-lock.json
 
       - name: Install worker dependencies
-        working-directory: packages/server
-        run: npm ci
+        run: |
+          if [ -f packages/server/package-lock.json ]; then
+            cd packages/server
+            npm ci
+          elif [ -f package-lock.json ]; then
+            npm ci
+          else
+            echo "No package-lock.json found for packages/server" >&2
+            exit 1
+          fi
 
       - name: Typecheck workers
         working-directory: packages/server
