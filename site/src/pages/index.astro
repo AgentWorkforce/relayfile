@@ -8,57 +8,76 @@ import ApiPreview from "../components/ApiPreview.astro";
 import Architecture from "../components/Architecture.astro";
 import Footer from "../components/Footer.astro";
 
-const rawContent = fs
-  .readFileSync(new URL("../../CONTENT.md", import.meta.url), "utf-8")
-  .replace(/\r\n/g, "\n")
-  .trim();
+type CodeBlock = {
+  language: string;
+  code: string;
+};
 
-const normalize = (value: string) => value.replace(/\r\n/g, "\n").trim();
-const escapeRegex = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-const stripMarkdown = (value: string) =>
-  normalize(value)
-    .replace(/\*\*([^*]+)\*\*/g, "$1")
-    .replace(/`([^`]+)`/g, "$1");
-const getParagraphs = (value: string) =>
-  value
-    .split("\n\n")
-    .map((entry) => normalize(entry))
-    .filter(Boolean);
+type ProblemPoint = {
+  title: string;
+  body: string;
+};
+
+type SolutionCard = {
+  title: string;
+  paragraphs: string[];
+  code?: CodeBlock;
+};
+
+type UseCase = {
+  title: string;
+  paragraphs: string[];
+  code?: CodeBlock;
+};
+
+const contentPath = new URL("../../CONTENT.md", import.meta.url);
+const rawContent = fs.readFileSync(contentPath, "utf-8").replace(/\r\n/g, "\n");
+
+const normalize = (value = "") => value.trim();
+const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const escapeHtml = (value: string) =>
+  value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+
+const renderInlineMarkdown = (value: string) =>
+  escapeHtml(value)
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2">$1</a>')
+    .replace(/`([^`]+)`/g, "<code>$1</code>")
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
 
 const getSection = (title: string) => {
-  const pattern = new RegExp(
-    `^## ${escapeRegex(title)}\\n\\n([\\s\\S]*?)(?=\\n---\\n(?:\\n## |$)|$)`,
-    "m"
-  );
-  const match = rawContent.match(pattern);
-  return match ? normalize(match[1]) : "";
+  const pattern = new RegExp(`## ${escapeRegExp(title)}\\n\\n([\\s\\S]*?)(?=\\n---\\n\\n## |$)`);
+  return normalize(rawContent.match(pattern)?.[1] || "");
 };
 
 const getSubsection = (section: string, title: string) => {
-  const pattern = new RegExp(
-    `^### ${escapeRegex(title)}\\n\\n([\\s\\S]*?)(?=\\n### |$)`,
-    "m"
-  );
-  const match = section.match(pattern);
-  return match ? normalize(match[1]) : "";
+  const pattern = new RegExp(`### ${escapeRegExp(title)}\\n\\n([\\s\\S]*?)(?=\\n### |$)`);
+  return normalize(section.match(pattern)?.[1] || "");
 };
 
-const getLabelValue = (section: string, label: string) => {
-  const pattern = new RegExp(`\\*\\*${label}:\\*\\*\\n([^\\n]+)`);
-  const match = section.match(pattern);
-  return match ? normalize(match[1]) : "";
+const getLabeledValue = (section: string, label: string) => {
+  const pattern = new RegExp(`\\*\\*${escapeRegExp(label)}:\\*\\*\\n([^\\n]+)`);
+  return normalize(section.match(pattern)?.[1] || "");
 };
+
+const stripCodeBlocks = (value: string) => normalize(value.replace(/```[\s\S]*?```/g, ""));
+
+const extractCodeBlocks = (value: string): CodeBlock[] =>
+  [...value.matchAll(/```(\w+)?\n([\s\S]*?)```/g)].map((match) => ({
+    language: match[1] || "text",
+    code: normalize(match[2])
+  }));
+
+const splitParagraphs = (value: string) =>
+  stripCodeBlocks(value)
+    .split(/\n\n+/)
+    .map((paragraph) => normalize(paragraph))
+    .filter(Boolean)
+    .map((paragraph) => renderInlineMarkdown(paragraph));
 
 const parseMarkdownLinks = (line: string) =>
   [...line.matchAll(/\[([^\]]+)\]\(([^)]+)\)/g)].map((match) => ({
     label: match[1],
     href: match[2]
-  }));
-
-const extractCodeBlocks = (section: string) =>
-  [...section.matchAll(/```(\w+)?\n([\s\S]*?)```/g)].map((match) => ({
-    language: match[1] || "text",
-    code: normalize(match[2])
   }));
 
 const heroSection = getSection("Hero");
@@ -70,64 +89,82 @@ const apiSection = getSection("API Preview");
 const architectureSection = getSection("Architecture");
 const footerSection = getSection("Footer");
 
-const heroHeadline = getLabelValue(heroSection, "Headline");
-const heroSubhead = getLabelValue(heroSection, "Subhead");
-const heroCtas = heroSection
-  .split("**CTA:**")[1]
-  ?.split("\n")
+const heroHeadline = getLabeledValue(heroSection, "Headline");
+const heroSubhead = getLabeledValue(heroSection, "Subhead");
+const heroCtas = normalize(heroSection.split("**CTA:**")[1] || "")
+  .split("\n")
   .filter((line) => line.startsWith("- "))
-  .map((line, index) => {
+  .map((line) => {
     const [link] = parseMarkdownLinks(line);
     return {
       label: link?.label || "",
       href: link?.href || "#",
-      variant: /primary/i.test(line) || index === 0 ? "primary" : "secondary"
-    };
-  }) || [];
+      variant: line.includes("primary") ? "primary" : "secondary"
+    } as const;
+  });
 
-const problemParagraphs = getParagraphs(problemSection).filter((block) => !block.startsWith("- "));
-const problemPoints = problemSection
+const problemIntroBlock = normalize(problemSection.split("\n\n- ")[0] || "");
+const problemParagraphs = problemIntroBlock
+  .split(/\n\n+/)
+  .map((paragraph) => normalize(paragraph))
+  .filter(Boolean)
+  .map((paragraph) => renderInlineMarkdown(paragraph));
+
+const problemPoints: ProblemPoint[] = problemSection
   .split("\n")
   .filter((line) => line.startsWith("- "))
-  .map((line) => line.replace(/^- /, "").trim())
+  .map((line) => line.replace(/^- /, ""))
   .map((line) => {
     const match = line.match(/^\*\*([^*]+)\*\*\s*(.*)$/);
     return {
-      title: match ? stripMarkdown(match[1]) : "",
-      body: stripMarkdown(match ? match[2] : line)
+      title: match?.[1] || "Workflow friction",
+      body: renderInlineMarkdown(match?.[2] || line)
     };
   });
 
 const mountAnywhere = getSubsection(solutionSection, "Mount anywhere");
 const revisionControlled = getSubsection(solutionSection, "Revision-controlled");
 const programmable = getSubsection(solutionSection, "Programmable");
+
+const solutionParagraphs = [
+  renderInlineMarkdown(
+    "A revision-controlled, programmable filesystem that syncs everywhere. Mount it locally, in the cloud, or in a sandbox. Everyone sees the same files."
+  )
+];
+
+const toSolutionCard = (title: string, value: string): SolutionCard => ({
+  title,
+  paragraphs: splitParagraphs(value),
+  code: extractCodeBlocks(value)[0]
+});
+
+const solutionCards = [
+  toSolutionCard("Mount anywhere", mountAnywhere),
+  toSolutionCard("Revision-controlled", revisionControlled)
+];
+
+const programmableParagraphs = splitParagraphs(
+  programmable
+    .split("\n")
+    .filter((line) => !line.startsWith("- "))
+    .join("\n")
+);
+
 const programmablePoints = programmable
   .split("\n")
   .filter((line) => line.startsWith("- "))
-  .map((line) => stripMarkdown(line.replace(/^- /, "")));
+  .map((line) => renderInlineMarkdown(line.replace(/^- /, "")));
 
-const solutionFeatures = [
-  {
-    title: "Mount anywhere",
-    body: stripMarkdown(mountAnywhere.split("```")[0] || "")
-  },
-  {
-    title: "Revision-controlled",
-    body: stripMarkdown(revisionControlled.split("```")[0] || "")
+const useCases: UseCase[] = [...useCasesSection.matchAll(/### ([^\n]+)\n\n([\s\S]*?)(?=\n### |$)/g)].map(
+  (match) => {
+    const content = normalize(match[2]);
+    return {
+      title: normalize(match[1]),
+      paragraphs: splitParagraphs(content),
+      code: extractCodeBlocks(content)[0]
+    };
   }
-];
-const programmableIntro = stripMarkdown(
-  getParagraphs(programmable)
-    .filter((block) => !block.startsWith("- ") && !block.startsWith("```"))
-    .join("\n\n")
 );
-
-const useCaseMatches = [...useCasesSection.matchAll(/### ([^\n]+)\n\n([\s\S]*?)(?=\n### |$)/g)];
-const useCaseItems = useCaseMatches.map((match) => ({
-  title: normalize(match[1]),
-  body: stripMarkdown(match[2].split("```")[0] || "")
-}));
-const useCaseCodeBlocks = extractCodeBlocks(useCasesSection);
 
 const apiLabels = [...apiSection.matchAll(/\*\*([^*]+)\*\*:/g)].map((match) => match[1]);
 const apiSnippets = extractCodeBlocks(apiSection).map((snippet, index) => ({
@@ -136,22 +173,32 @@ const apiSnippets = extractCodeBlocks(apiSection).map((snippet, index) => ({
   code: snippet.code
 }));
 
-const worksSteps = [...worksSection.matchAll(/\d+\.\s+([^\n]+)/g)].map((match) => normalize(match[1]).replace(/`/g, ""));
-const architectureOverview = getParagraphs(architectureSection.split("**Key properties:**")[0] || "").map(stripMarkdown);
+const worksSteps = [...worksSection.matchAll(/\d+\.\s+([^\n]+)/g)].map((match) =>
+  renderInlineMarkdown(normalize(match[1]))
+);
+
+const architectureOverview = splitParagraphs(
+  architectureSection.split("**Key properties:**")[0] || ""
+);
+
 const propertyItems = architectureSection
   .split("**Key properties:**")[1]
   ?.split("**Production stack:**")[0]
   ?.split("\n")
   .filter((line) => line.startsWith("- "))
-  .map((line) => stripMarkdown(line.replace(/^- /, ""))) || [];
+  .map((line) => renderInlineMarkdown(line.replace(/^- /, ""))) || [];
+
 const stackItems = architectureSection
   .split("**Production stack:**")[1]
   ?.split("\n")
   .filter((line) => line.startsWith("- "))
-  .map((line) => stripMarkdown(line.replace(/^- /, ""))) || [];
+  .map((line) => renderInlineMarkdown(line.replace(/^- /, ""))) || [];
 
 const footerLinks = parseMarkdownLinks(footerSection.split("\n\n")[0] || "");
-const builtBy = parseMarkdownLinks(footerSection.split("Built by ")[1] || "")[0];
+const builtBy = parseMarkdownLinks(footerSection.split("Built by ")[1] || "")[0] || {
+  label: "Agent Workforce",
+  href: "https://agentworkforce.dev"
+};
 ---
 
 <Layout
@@ -159,21 +206,24 @@ const builtBy = parseMarkdownLinks(footerSection.split("Built by ")[1] || "")[0]
   description={heroSubhead}
 >
   <main class="relative isolate overflow-hidden">
-    <div class="absolute inset-0 -z-10 bg-[radial-gradient(circle_at_top,rgba(34,211,238,0.16),transparent_30%),linear-gradient(180deg,rgba(9,9,11,1),rgba(9,9,11,0.92))]"></div>
+    <div class="absolute inset-0 -z-10 bg-[radial-gradient(circle_at_top,rgba(34,211,238,0.16),transparent_28%),linear-gradient(180deg,rgba(9,9,11,1),rgba(9,9,11,0.94))]"></div>
+    <div class="absolute inset-x-0 top-0 -z-10 h-96 bg-[radial-gradient(circle_at_top,rgba(14,165,233,0.18),transparent_60%)]"></div>
+
     <div class="mx-auto flex max-w-6xl flex-col gap-8 px-4 py-6 sm:px-6 sm:py-10 lg:px-8">
       <Hero headline={heroHeadline} subhead={heroSubhead} ctas={heroCtas} />
 
       <FeatureGrid
         problemTitle="Files are the universal interface"
-        problemBody={problemParagraphs}
+        problemParagraphs={problemParagraphs}
         problemPoints={problemPoints}
         solutionTitle="RelayFile"
-        features={solutionFeatures}
-        programmableIntro={programmableIntro}
+        solutionParagraphs={solutionParagraphs}
+        solutionCards={solutionCards}
+        programmableParagraphs={programmableParagraphs}
         programmablePoints={programmablePoints}
       />
 
-      <UseCases items={useCaseItems} collaborationSnippet={useCaseCodeBlocks[0]?.code} />
+      <UseCases items={useCases} />
 
       <ApiPreview snippets={apiSnippets} />
 
@@ -186,8 +236,8 @@ const builtBy = parseMarkdownLinks(footerSection.split("Built by ")[1] || "")[0]
 
       <Footer
         links={footerLinks}
-        builtByLabel={builtBy?.label || "Agent Workforce"}
-        builtByHref={builtBy?.href || "https://agentworkforce.dev"}
+        builtByLabel={builtBy.label}
+        builtByHref={builtBy.href}
       />
     </div>
   </main>

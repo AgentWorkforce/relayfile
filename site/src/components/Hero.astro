@@ -14,19 +14,22 @@ interface Props {
 const { headline, subhead, ctas } = Astro.props;
 ---
 
-<section class="relative overflow-hidden rounded-[2rem] border border-cyan-400/20 bg-zinc-950 px-6 py-16 shadow-glow sm:px-10 sm:py-20">
-  <div class="absolute inset-0 bg-hero-grid bg-[size:100%_100%,24px_24px,24px_24px] opacity-70"></div>
-  <div class="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-cyan-400/60 to-transparent"></div>
+<section class="surface-panel relative overflow-hidden px-6 py-16 sm:px-10 sm:py-20">
+  <div class="pointer-events-none absolute inset-0 bg-hero-grid bg-[size:100%_100%,26px_26px,26px_26px] opacity-70"></div>
+  <div class="pointer-events-none absolute -left-24 top-12 h-48 w-48 rounded-full bg-cyan-400/15 blur-3xl"></div>
+  <div class="pointer-events-none absolute -right-20 bottom-6 h-56 w-56 rounded-full bg-blue-500/15 blur-3xl"></div>
+  <div class="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-cyan-400/60 to-transparent"></div>
+
   <div class="relative mx-auto max-w-4xl text-center">
-    <p class="section-heading">Real-Time File Collaboration</p>
+    <p class="eyebrow">Agent Workforce Brand</p>
     <h1 class="mt-6 text-5xl font-semibold tracking-tight text-zinc-50 sm:text-6xl lg:text-7xl">
-      <span class="bg-gradient-to-r from-cyan-300 via-cyan-400 to-blue-500 bg-clip-text text-transparent">
-        {headline}
-      </span>
+      <span
+        class="bg-gradient-to-r from-cyan-300 via-cyan-400 to-blue-500 bg-clip-text text-transparent"
+        set:html={headline}
+      ></span>
     </h1>
-    <p class="mx-auto mt-6 max-w-3xl text-lg leading-8 text-zinc-300 sm:text-xl">
-      {subhead}
-    </p>
+    <p class="mx-auto mt-6 max-w-3xl text-lg leading-8 text-zinc-300 sm:text-xl" set:html={subhead}></p>
+
     <div class="mt-10 flex flex-col items-center justify-center gap-4 sm:flex-row">
       {
         ctas.map((cta) => (
@@ -35,7 +38,7 @@ const { headline, subhead, ctas } = Astro.props;
             class:list={[
               "inline-flex min-w-44 items-center justify-center rounded-full px-6 py-3 text-sm font-semibold transition duration-150",
               cta.variant === "primary"
-                ? "bg-cyan-400 text-zinc-950 hover:bg-cyan-300"
+                ? "bg-cyan-400 text-zinc-950 shadow-[0_18px_60px_rgba(34,211,238,0.25)] hover:bg-cyan-300"
                 : "border border-zinc-700 bg-zinc-900/80 text-zinc-100 hover:border-cyan-400/50 hover:text-cyan-200"
             ]}
           >
@@ -43,6 +46,12 @@ const { headline, subhead, ctas } = Astro.props;
           </a>
         ))
       }
+    </div>
+
+    <div class="mt-12 flex flex-wrap items-center justify-center gap-3 text-xs uppercase tracking-[0.22em] text-zinc-400">
+      <span class="rounded-full border border-zinc-800 bg-zinc-900/70 px-3 py-2">Revision-controlled</span>
+      <span class="rounded-full border border-zinc-800 bg-zinc-900/70 px-3 py-2">Real-time sync</span>
+      <span class="rounded-full border border-zinc-800 bg-zinc-900/70 px-3 py-2">Filesystem-native</span>
     </div>
   </div>
 </section>

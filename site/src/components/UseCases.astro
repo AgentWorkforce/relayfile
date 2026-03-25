@@ -1,42 +1,48 @@
 ---
 interface UseCase {
   title: string;
-  body: string;
+  paragraphs: string[];
+  code?: {
+    language: string;
+    code: string;
+  };
 }
 
 interface Props {
   items: UseCase[];
-  collaborationSnippet?: string;
 }
 
-const { items, collaborationSnippet } = Astro.props;
+const { items } = Astro.props;
 ---
 
-<section class="section-shell p-8 sm:p-10">
-  <p class="section-heading">Use Cases</p>
+<section class="surface-panel p-8 sm:p-10">
+  <p class="eyebrow">Use Cases</p>
   <h2 class="section-title">Built for human and agent workflows</h2>
+
   <div class="mt-8 grid gap-5 md:grid-cols-2">
     {
       items.map((item) => (
-        <article class="rounded-3xl border border-zinc-800 bg-zinc-950/70 p-6">
+        <article class="rounded-3xl border border-zinc-800 bg-zinc-950/80 p-6">
           <h3 class="text-xl font-semibold text-zinc-50">{item.title}</h3>
           <div class="content-prose mt-3">
-            <p>{item.body}</p>
+            {
+              item.paragraphs.map((paragraph) => (
+                <p set:html={paragraph}></p>
+              ))
+            }
           </div>
+          {
+            item.code && (
+              <div class="code-frame mt-5">
+                <div class="code-frame__header">
+                  <span>{item.code.language}</span>
+                </div>
+                <pre class="overflow-x-auto p-5 text-sm leading-7 text-zinc-200"><code>{item.code.code}</code></pre>
+              </div>
+            )
+          }
         </article>
       ))
     }
   </div>
-
-  {
-    collaborationSnippet && (
-      <div class="mt-8 overflow-hidden rounded-3xl border border-cyan-400/20 bg-zinc-950">
-        <div class="flex items-center justify-between border-b border-zinc-800 px-5 py-3">
-          <span class="text-xs font-semibold uppercase tracking-[0.24em] text-cyan-400">Shared Workspace</span>
-          <span class="text-xs text-zinc-500">bash</span>
-        </div>
-        <pre class="overflow-x-auto p-5 text-sm leading-7 text-zinc-200"><code>{collaborationSnippet}</code></pre>
-      </div>
-    )
-  }
 </section>

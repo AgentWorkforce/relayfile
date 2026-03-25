@@ -14,27 +14,36 @@ const { snippets } = Astro.props;
 const escapeHtml = (code: string) =>
   code.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
 
+const applyRules = (code: string, rules: Array<[RegExp, string]>) =>
+  rules.reduce((html, [pattern, replacement]) => html.replace(pattern, replacement), escapeHtml(code));
+
 const highlightBash = (code: string) =>
-  escapeHtml(code)
-    .replaceAll(/(curl|jq|TOKEN|relayfile)/g, '<span class="text-cyan-300">$1</span>')
-    .replaceAll(/(-X|-H|-d|-s)/g, '<span class="text-blue-300">$1</span>')
-    .replaceAll(/("https:[^"]+")/g, '<span class="text-emerald-300">$1</span>')
-    .replaceAll(/("[^"]*")/g, '<span class="text-emerald-300">$1</span>');
+  applyRules(code, [
+    [/\b(curl|jq|relayfile)\b/g, '<span class="text-cyan-300">$1</span>'],
+    [/\b(TOKEN)\b/g, '<span class="text-sky-300">$1</span>'],
+    [/\$[A-Z_][A-Z0-9_]*/g, '<span class="text-violet-300">$&</span>'],
+    [/\s(-X|-H|-d|-s)\b/g, ' <span class="text-blue-300">$1</span>'],
+    [/"https:[^"]+"/g, '<span class="text-emerald-300">$&</span>'],
+    [/"[^"]*"/g, '<span class="text-amber-300">$&</span>']
+  ]);
 
 const highlightJson = (code: string) =>
-  escapeHtml(code)
-    .replaceAll(/"([^"]+)"(?=\s*:)/g, '<span class="text-cyan-300">"$1"</span>')
-    .replaceAll(/:\s*"([^"]*)"/g, ': <span class="text-emerald-300">"$1"</span>')
-    .replaceAll(/:\s*(\d+)/g, ': <span class="text-blue-300">$1</span>');
+  applyRules(code, [
+    [/"([^"]+)"(?=\s*:)/g, '<span class="text-cyan-300">"$1"</span>'],
+    [/: /g, '<span class="text-zinc-500">:</span> '],
+    [/"[^"]*"/g, '<span class="text-emerald-300">$&</span>'],
+    [/\b\d+\b/g, '<span class="text-blue-300">$&</span>'],
+    [/\b(true|false|null)\b/g, '<span class="text-fuchsia-300">$1</span>']
+  ]);
 
 const renderCode = (snippet: ApiSnippet) =>
   snippet.language === "json" ? highlightJson(snippet.code) : highlightBash(snippet.code);
 ---
 
-<section class="section-shell p-8 sm:p-10">
+<section class="surface-panel p-8 sm:p-10">
   <div class="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
     <div>
-      <p class="section-heading">API Preview</p>
+      <p class="eyebrow">API Preview</p>
       <h2 class="section-title">Filesystem primitives over HTTP</h2>
     </div>
     <p class="max-w-2xl text-sm leading-7 text-zinc-400">
@@ -45,7 +54,7 @@ const renderCode = (snippet: ApiSnippet) =>
   <div class="mt-8 grid gap-6 xl:grid-cols-3">
     {
       snippets.map((snippet) => (
-        <article class="overflow-hidden rounded-3xl border border-zinc-800 bg-zinc-950">
+        <article class="overflow-hidden rounded-3xl border border-zinc-800 bg-zinc-950/90">
           <div class="flex items-center justify-between border-b border-zinc-800 px-5 py-3">
             <span class="text-sm font-semibold text-zinc-100">{snippet.label}</span>
             <span class="text-xs uppercase tracking-[0.2em] text-cyan-400">{snippet.language}</span>
