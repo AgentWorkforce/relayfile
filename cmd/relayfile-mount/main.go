@@ -50,6 +50,9 @@ func main() {
 	}
 	*intervalJitter = clampJitterRatio(*intervalJitter)
 
+	rootCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	client := mountsync.NewHTTPClient(*baseURL, *token, &http.Client{Timeout: *timeout})
 	syncer, err := mountsync.NewSyncer(client, mountsync.SyncerOptions{
 		WorkspaceID:   strings.TrimSpace(*workspaceID),
@@ -58,13 +61,12 @@ func main() {
 		LocalRoot:     *localDir,
 		StateFile:     *stateFile,
 		WebSocket:     boolPtr(*websocketEnabled),
+		RootCtx:       rootCtx,
 		Logger:        log.Default(),
 	})
 	if err != nil {
 		log.Fatalf("failed to initialize mount syncer: %v", err)
 	}
-	rootCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 
 	run := func(reconcile bool) {
 		ctx, cancel := context.WithTimeout(rootCtx, *timeout)

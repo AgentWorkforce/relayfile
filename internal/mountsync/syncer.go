@@ -279,6 +279,7 @@ type SyncerOptions struct {
 	StateFile     string
 	EventProvider string
 	WebSocket     *bool
+	RootCtx       context.Context
 	Logger        Logger
 }
 
@@ -298,6 +299,7 @@ type Syncer struct {
 	loaded        bool
 	bootstrapped  bool
 	websocket     bool
+	rootCtx       context.Context
 	wsConn        *websocket.Conn
 	wsCancel      context.CancelFunc
 	mu            sync.Mutex
@@ -360,6 +362,10 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 	if opts.WebSocket != nil {
 		websocketEnabled = *opts.WebSocket
 	}
+	rootCtx := opts.RootCtx
+	if rootCtx == nil {
+		rootCtx = context.Background()
+	}
 	return &Syncer{
 		client:        client,
 		workspace:     workspace,
@@ -368,6 +374,7 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 		stateFile:     stateFile,
 		eventProvider: eventProvider,
 		websocket:     websocketEnabled,
+		rootCtx:       rootCtx,
 		logger:        opts.Logger,
 		state: mountState{
 			Files: map[string]trackedFile{},
@@ -446,7 +453,7 @@ func (s *Syncer) connectWebSocket(ctx context.Context) error {
 		return err
 	}
 
-	readCtx, cancel := context.WithCancel(ctx)
+	readCtx, cancel := context.WithCancel(s.rootCtx)
 
 	s.mu.Lock()
 	s.wsConn = conn

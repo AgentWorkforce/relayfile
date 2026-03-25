@@ -390,7 +390,7 @@ func runMount(args []string) error {
 		"interval":        true,
 		"interval-jitter": true,
 		"timeout":         true,
-		"websocket":       true,
+		"websocket":       false,
 		"once":            false,
 	})); err != nil {
 		return err
@@ -424,6 +424,9 @@ func runMount(args []string) error {
 	}
 	*intervalJitter = clampJitterRatio(*intervalJitter)
 
+	rootCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	client := mountsync.NewHTTPClient(*server, tokenValue, &http.Client{Timeout: *timeout})
 	syncer, err := mountsync.NewSyncer(client, mountsync.SyncerOptions{
 		WorkspaceID:   workspaceID,
@@ -432,6 +435,7 @@ func runMount(args []string) error {
 		LocalRoot:     absLocalDir,
 		StateFile:     strings.TrimSpace(*stateFile),
 		WebSocket:     boolPtr(*websocketEnabled),
+		RootCtx:       rootCtx,
 		Logger:        log.Default(),
 	})
 	if err != nil {
@@ -441,8 +445,6 @@ func runMount(args []string) error {
 		return err
 	}
 
-	rootCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 	return runMountLoop(rootCtx, syncer, *timeout, *interval, *intervalJitter, *websocketEnabled, *once)
 }
 
