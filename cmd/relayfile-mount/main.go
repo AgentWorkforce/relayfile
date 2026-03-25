@@ -16,6 +16,8 @@ import (
 	"github.com/agentworkforce/relayfile/internal/mountsync"
 )
 
+const websocketReconcileEvery = 10
+
 func main() {
 	baseURL := flag.String("base-url", envOrDefault("RELAYFILE_BASE_URL", "http://127.0.0.1:8080"), "relayfile base URL")
 	token := flag.String("token", strings.TrimSpace(os.Getenv("RELAYFILE_TOKEN")), "bearer token")
@@ -64,17 +66,23 @@ func main() {
 	rootCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	run := func() {
+	run := func(reconcile bool) {
 		ctx, cancel := context.WithTimeout(rootCtx, *timeout)
 		defer cancel()
-		if err := syncer.SyncOnce(ctx); err != nil {
+		var err error
+		if reconcile {
+			err = syncer.Reconcile(ctx)
+		} else {
+			err = syncer.SyncOnce(ctx)
+		}
+		if err != nil {
 			log.Printf("mount sync cycle failed: %v", err)
 			return
 		}
 		log.Printf("mount sync cycle completed")
 	}
 
-	run()
+	run(true)
 	if *once {
 		return
 	}
@@ -82,13 +90,16 @@ func main() {
 	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
 	timer := time.NewTimer(jitteredIntervalWithSample(*interval, *intervalJitter, rng.Float64()))
 	defer timer.Stop()
+	cycle := 0
 	for {
 		select {
 		case <-rootCtx.Done():
 			log.Printf("mount sync stopping: %v", rootCtx.Err())
 			return
 		case <-timer.C:
-			run()
+			cycle++
+			reconcile := !*websocketEnabled || cycle%websocketReconcileEvery == 0
+			run(reconcile)
 			timer.Reset(jitteredIntervalWithSample(*interval, *intervalJitter, rng.Float64()))
 		}
 	}

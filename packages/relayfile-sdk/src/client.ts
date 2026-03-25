@@ -69,6 +69,20 @@ interface NormalizedRetryOptions {
   jitterRatio: number;
 }
 
+interface BulkWriteApiResponseShape {
+  imported?: number;
+  written?: number;
+  errors?: Array<{
+    path?: string;
+    error?: string;
+    message?: string;
+  }>;
+}
+
+interface ExportJsonApiResponseShape {
+  files?: FileReadResponse[];
+}
+
 type WebSocketEventName = "event" | "error" | "open" | "close";
 type WebSocketHandlerMap = {
   event: (event: FilesystemEvent) => void;
@@ -151,6 +165,33 @@ function createBlobFromResponse(response: Response): Promise<Blob> {
     return response.blob();
   }
   return response.arrayBuffer().then((buffer) => new Blob([buffer], { type: response.headers.get("content-type") ?? undefined }));
+}
+
+function normalizeBulkWriteResponse(payload: unknown): BulkWriteResponse {
+  const data = (payload ?? {}) as BulkWriteApiResponseShape;
+  return {
+    imported: typeof data.imported === "number"
+      ? data.imported
+      : typeof data.written === "number"
+        ? data.written
+        : 0,
+    errors: Array.isArray(data.errors)
+      ? data.errors.map((error) => ({
+        path: error.path ?? "",
+        error: error.error ?? error.message ?? "Unknown bulk write error"
+      }))
+      : []
+  };
+}
+
+function normalizeExportJsonResponse(payload: unknown): ExportJsonResponse {
+  if (Array.isArray(payload)) {
+    return { files: payload as FileReadResponse[] };
+  }
+  const data = (payload ?? {}) as ExportJsonApiResponseShape;
+  return {
+    files: Array.isArray(data.files) ? data.files : []
+  };
 }
 
 class RelayFileWebSocketConnection implements WebSocketConnection {
@@ -306,7 +347,7 @@ export class RelayFileClient {
   }
 
   async bulkWrite(input: BulkWriteInput): Promise<BulkWriteResponse> {
-    return this.request<BulkWriteResponse>({
+    const response = await this.performRequest({
       method: "POST",
       path: `/v1/workspaces/${encodeURIComponent(input.workspaceId)}/fs/bulk`,
       correlationId: input.correlationId,
@@ -315,6 +356,7 @@ export class RelayFileClient {
       },
       signal: input.signal
     });
+    return normalizeBulkWriteResponse(await this.readPayload(response));
   }
 
   async deleteFile(input: DeleteFileInput): Promise<WriteQueuedResponse> {
@@ -357,7 +399,7 @@ export class RelayFileClient {
     });
 
     if (format === "json") {
-      return this.readPayload(response) as Promise<ExportJsonResponse>;
+      return normalizeExportJsonResponse(await this.readPayload(response));
     }
 
     return createBlobFromResponse(response);

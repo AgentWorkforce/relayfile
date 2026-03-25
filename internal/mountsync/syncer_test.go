@@ -11,10 +11,12 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -407,6 +409,70 @@ func TestBulkSeedThenSync(t *testing.T) {
 	assertLocalFileContent(t, filepath.Join(localDir, "Docs", "B.md"), "# B")
 }
 
+func TestSyncOnceUsesWebSocketForRealtimeUpdatesAndSkipsPollingWhileConnected(t *testing.T) {
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
+	t.Cleanup(store.Close)
+
+	workspaceID := "ws_mount_websocket"
+	token := mustMountsyncTestJWT(t, "dev-secret", workspaceID, "MountSync", []string{"fs:read", "fs:write"}, time.Now().Add(time.Hour))
+
+	var treeCalls atomic.Int32
+	var eventCalls atomic.Int32
+	handler := httpapi.NewServer(store)
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/fs/tree"):
+			treeCalls.Add(1)
+		case strings.HasSuffix(r.URL.Path, "/fs/events"):
+			eventCalls.Add(1)
+		}
+		handler.ServeHTTP(w, r)
+	}))
+	defer api.Close()
+
+	writeMountsyncRemoteFile(t, api.Client(), api.URL, token, workspaceID, "/notion/Docs/A.md", "0", "# A")
+
+	localDir := t.TempDir()
+	client := NewHTTPClient(api.URL, token, api.Client())
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: workspaceID,
+		RemoteRoot:  "/notion",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := syncer.SyncOnce(ctx); err != nil {
+		t.Fatalf("initial websocket sync failed: %v", err)
+	}
+	assertLocalFileContent(t, filepath.Join(localDir, "Docs", "A.md"), "# A")
+
+	treeBefore := treeCalls.Load()
+	eventsBefore := eventCalls.Load()
+
+	remoteFile, err := client.ReadFile(context.Background(), workspaceID, "/notion/Docs/A.md")
+	if err != nil {
+		t.Fatalf("read seeded remote file failed: %v", err)
+	}
+	writeMountsyncRemoteFile(t, api.Client(), api.URL, token, workspaceID, "/notion/Docs/A.md", remoteFile.Revision, "# A websocket")
+	waitForLocalContent(t, filepath.Join(localDir, "Docs", "A.md"), "# A websocket")
+
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel2()
+	if err := syncer.SyncOnce(ctx2); err != nil {
+		t.Fatalf("follow-up sync failed: %v", err)
+	}
+	if treeCalls.Load() != treeBefore {
+		t.Fatalf("expected websocket-connected sync to skip tree polling, got %d -> %d calls", treeBefore, treeCalls.Load())
+	}
+	if eventCalls.Load() != eventsBefore {
+		t.Fatalf("expected websocket-connected sync to skip event polling, got %d -> %d calls", eventsBefore, eventCalls.Load())
+	}
+}
+
 func TestRemoteToLocalAndLocalToRemotePath(t *testing.T) {
 	localRoot := filepath.Join("tmp", "mirror")
 	localPath, err := remoteToLocalPath(localRoot, "/notion", "/notion/Folder/File.md")
@@ -616,6 +682,52 @@ func assertLocalFileContent(t *testing.T, path, want string) {
 	}
 	if string(data) != want {
 		t.Fatalf("expected %s to contain %q, got %q", path, want, string(data))
+	}
+}
+
+func waitForLocalContent(t *testing.T, path, want string) {
+	t.Helper()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		data, err := os.ReadFile(path)
+		if err == nil && string(data) == want {
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+
+	assertLocalFileContent(t, path, want)
+}
+
+func writeMountsyncRemoteFile(t *testing.T, client *http.Client, baseURL, token, workspaceID, path, baseRevision, content string) {
+	t.Helper()
+
+	body, err := json.Marshal(map[string]any{
+		"contentType": "text/markdown",
+		"content":     content,
+	})
+	if err != nil {
+		t.Fatalf("marshal remote file body failed: %v", err)
+	}
+
+	req, err := http.NewRequest(http.MethodPut, baseURL+"/v1/workspaces/"+workspaceID+"/fs/file?path="+url.QueryEscape(path), bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("build remote file request failed: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("X-Correlation-Id", correlationID())
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("If-Match", baseRevision)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("write remote file request failed: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
+		payload, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200/202 writing remote file, got %d (%s)", resp.StatusCode, strings.TrimSpace(string(payload)))
 	}
 }
 

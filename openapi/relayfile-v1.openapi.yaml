@@ -1600,6 +1600,9 @@ components:
           type: string
         content:
           type: string
+        encoding:
+          type: string
+          description: Content encoding, e.g. "base64" for binary data
         provider:
           type: string
         providerObjectId:
@@ -1620,6 +1623,9 @@ components:
           default: text/markdown
         content:
           type: string
+        encoding:
+          type: string
+          description: Content encoding, e.g. "base64" for binary data
         semantics:
           $ref: '#/components/schemas/FileSemantics'
 

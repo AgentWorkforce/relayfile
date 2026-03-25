@@ -1,13 +1,13 @@
 # Bulk Seed, Export, WebSocket & Binary Support — Design Doc
 
-**Status:** Draft
-**Date:** 2026-03-24
+**Status:** Implemented
+**Last Updated:** 2026-03-25
 
 ---
 
 ## Overview
 
-This document specifies four new capabilities for the RelayFile HTTP API:
+This document specifies four capabilities in the RelayFile HTTP API:
 
 1. **Bulk Seed** — atomic multi-file write in a single request
 2. **Workspace Export** — full workspace snapshot in tar, JSON, or patch format
@@ -26,11 +26,11 @@ All endpoints live under the existing `/v1/workspaces/{workspaceId}/fs/` namespa
 POST /v1/workspaces/{workspaceId}/fs/bulk
 ```
 
-**Scope:** `fs:write`
+**Auth:** Bearer JWT with `fs:write` scope.
 
 ### Purpose
 
-Populate or update many files in a single atomic request. Useful for initial workspace seeding from a provider sync, migration tooling, or batch imports.
+Populate or update many files in a single request. Used for initial workspace seeding from a provider sync, migration tooling, or batch imports.
 
 ### Request — JSON
 
@@ -45,13 +45,13 @@ Content-Type: application/json
       "path": "/docs/readme.md",
       "contentType": "text/markdown",
       "content": "# Hello",
-      "encoding": "utf-8",
-      "semantics": {
-        "properties": { "stage": "active" },
-        "relations": [],
-        "permissions": [],
-        "comments": []
-      }
+      "encoding": "utf-8"
+    },
+    {
+      "path": "/assets/logo.png",
+      "contentType": "image/png",
+      "content": "iVBORw0KGgoAAAANSUhEU...",
+      "encoding": "base64"
     }
   ]
 }
@@ -61,18 +61,13 @@ Content-Type: application/json
 |-------|------|----------|-------------|
 | `files` | array | yes | Array of file objects to write |
 | `files[].path` | string | yes | Virtual filesystem path (must start with `/`) |
-| `files[].contentType` | string | no | MIME type (default: `text/markdown`) |
+| `files[].contentType` | string | yes | MIME type of the file content |
 | `files[].content` | string | yes | File content (plain text or base64-encoded) |
-| `files[].encoding` | string | no | `"utf-8"` (default) or `"base64"` |
-| `files[].semantics` | object | no | Optional semantic metadata (properties, relations, permissions, comments) |
+| `files[].encoding` | string | no | `"utf-8"` (default) or `"base64"` for binary |
 
-**Limits:**
+**Request body limit:** Governed by `ServerConfig.MaxBodyBytes` (default: 1 MiB).
 
-- Maximum 500 files per request
-- Total request body capped at 50 MB
-- Individual file content capped at 10 MB
-
-### Request — Multipart tar.gz
+### Request — Multipart tar.gz (Future)
 
 ```
 Content-Type: multipart/form-data
@@ -81,52 +76,39 @@ Content-Type: multipart/form-data
 | Part | Type | Description |
 |------|------|-------------|
 | `archive` | file (application/gzip) | A `.tar.gz` containing files rooted at `/` |
-| `metadata` | application/json (optional) | JSON object mapping paths to semantic metadata |
+| `metadata` | application/json (optional) | JSON mapping paths to content types and semantics |
 
-The tar archive is extracted with paths mapped directly to the virtual filesystem. Directory entries are created implicitly. The optional `metadata` part allows attaching semantics:
+This format is not yet implemented. The JSON path covers all current use cases. The multipart format would allow larger imports without base64 overhead.
 
-```json
-{
-  "/docs/readme.md": {
-    "contentType": "text/markdown",
-    "semantics": {
-      "properties": { "stage": "active" }
-    }
-  }
-}
-```
+### Behavior
 
-### Atomicity
+1. Each file path is normalized via `normalizeRoutePath`.
+2. Permission checks run per-file against the caller's JWT claims:
+   - **Existing file:** Effective permissions (target + inherited `.relayfile.acl` markers) must allow access.
+   - **New file:** Inherited directory permissions must allow access.
+   - Files failing permission checks are reported in the `errors` array; permitted files proceed.
+3. Permitted files are passed to `Store.BulkWrite(workspaceID, files)`.
+4. `BulkWrite` writes each file, generating a new revision and emitting an event per file.
+5. Writeback operations are enqueued for files that have a provider binding.
 
-- All files are written within a single store transaction.
-- If any file fails validation (invalid path, exceeds size), the entire batch is rejected.
-- Each successfully written file produces one filesystem event (`file.created` or `file.updated`).
-- A single `If-Match: *` semantic is used — bulk seed always overwrites existing content (create-or-update).
+### Partial Failure
+
+Bulk write always uses partial-failure semantics. Files that pass permission checks are written even if other files fail. The response reports both the count of successful writes and a list of errors.
 
 ### Response
 
-**Success (200):**
+**Status: 202 Accepted**
 
 ```json
 {
-  "imported": 12,
-  "skipped": 0,
-  "errors": [],
-  "correlationId": "corr-abc123"
-}
-```
-
-**Partial failure (207 Multi-Status):**
-
-Returned only if the `allowPartial=true` query parameter is set. Without it, any error rejects the entire batch.
-
-```json
-{
-  "imported": 10,
-  "skipped": 0,
+  "written": 42,
+  "errorCount": 1,
   "errors": [
-    { "path": "/bad/path", "error": "invalid path: must start with /" },
-    { "path": "/too/large.bin", "error": "content exceeds 10 MB limit" }
+    {
+      "path": "/restricted/secret.md",
+      "code": "forbidden",
+      "message": "file access denied by permission policy"
+    }
   ],
   "correlationId": "corr-abc123"
 }
@@ -140,80 +122,33 @@ type BulkWriteFile struct {
     ContentType string
     Content     string
     Encoding    string         // "utf-8" or "base64"
-    Semantics   FileSemantics
-}
-
-type BulkWriteResult struct {
-    Imported int
-    Skipped  int
-    Errors   []BulkWriteError
 }
 
 type BulkWriteError struct {
-    Path  string
-    Error string
+    Path    string
+    Code    string
+    Message string
 }
 
-func (s *Store) BulkWrite(workspaceID string, files []BulkWriteFile, allowPartial bool, correlationID string) (BulkWriteResult, error)
+func (s *Store) BulkWrite(workspaceID string, files []BulkWriteFile) (int, []BulkWriteError)
 ```
 
-Implementation notes:
+Implementation:
 - Acquires store lock once for the entire batch.
-- Validates all files before writing any (unless `allowPartial`).
-- Generates a revision per file, emits one event per file.
-- Queues writeback operations per file if the workspace has provider bindings.
+- Generates a revision per file (UUID-based).
+- Emits one event per file (`file.created` or `file.updated`).
+- Queues writeback operations per file if a provider is bound.
+- Returns count of written files and a slice of per-path errors.
 
-### OpenAPI Addition
+### Error Codes
 
-```yaml
-/v1/workspaces/{workspaceId}/fs/bulk:
-  post:
-    tags: [Filesystem]
-    operationId: bulkSeedFiles
-    summary: Atomically write multiple files in a single request
-    security:
-      - BearerAuth: [fs:write]
-    parameters:
-      - $ref: '#/components/parameters/WorkspaceId'
-      - $ref: '#/components/parameters/CorrelationId'
-      - name: allowPartial
-        in: query
-        required: false
-        schema:
-          type: boolean
-          default: false
-    requestBody:
-      required: true
-      content:
-        application/json:
-          schema:
-            $ref: '#/components/schemas/BulkSeedRequest'
-        multipart/form-data:
-          schema:
-            type: object
-            properties:
-              archive:
-                type: string
-                format: binary
-              metadata:
-                type: string
-                format: json
-    responses:
-      '200':
-        description: All files imported successfully
-      '207':
-        description: Partial success (allowPartial=true)
-      '400':
-        $ref: '#/components/responses/BadRequest'
-      '401':
-        $ref: '#/components/responses/Unauthorized'
-      '403':
-        $ref: '#/components/responses/Forbidden'
-      '413':
-        $ref: '#/components/responses/PayloadTooLarge'
-      '429':
-        $ref: '#/components/responses/RateLimited'
-```
+| HTTP Status | Code | Condition |
+|-------------|------|-----------|
+| 400 | `bad_request` | Missing `files` array or empty |
+| 401 | `unauthorized` | Invalid or expired JWT |
+| 403 | `forbidden` | Missing `fs:write` scope |
+| 413 | `payload_too_large` | Body exceeds `MaxBodyBytes` |
+| 429 | `rate_limited` | Per-agent rate limit exceeded |
 
 ---
 
@@ -222,164 +157,115 @@ Implementation notes:
 ### Endpoint
 
 ```
-GET /v1/workspaces/{workspaceId}/fs/export
+GET /v1/workspaces/{workspaceId}/fs/export?format={json|tar|patch}
 ```
 
-**Scope:** `fs:read`
+**Auth:** Bearer JWT with `fs:read` scope.
 
 ### Purpose
 
-Download the entire workspace filesystem as a single artifact. Useful for backups, migrations, offline analysis, and audit.
+Download all visible workspace files as a single artifact. Used for backups, migrations, offline analysis, and audit.
 
 ### Query Parameters
 
 | Param | Type | Default | Description |
 |-------|------|---------|-------------|
-| `format` | string | `json` | One of: `tar`, `json`, `patch` |
-| `path` | string | `/` | Subtree to export (prefix filter) |
-| `includeSemantics` | boolean | `true` | Include semantic metadata in export |
+| `format` | string | `json` | One of: `json`, `tar`, `patch` |
 
-### Format: `tar`
+### Permission Filtering
 
-**Response:** `Content-Type: application/gzip`
-
-Returns a gzip-compressed tar archive. File paths in the archive mirror the virtual filesystem paths. Binary files are stored as raw bytes. A `.relayfile-manifest.json` file is included at the root containing metadata:
-
-```json
-{
-  "workspaceId": "ws-123",
-  "exportedAt": "2026-03-24T12:00:00Z",
-  "fileCount": 42,
-  "files": {
-    "/docs/readme.md": {
-      "revision": "rev-abc",
-      "contentType": "text/markdown",
-      "semantics": { "properties": { "stage": "active" } }
-    }
-  }
-}
-```
+The export respects the caller's effective permissions. Each file is checked against inherited `.relayfile.acl` markers and target `semantics.permissions`. Files the caller cannot read are silently excluded.
 
 ### Format: `json`
 
 **Response:** `Content-Type: application/json`
 
+Returns a JSON array of file objects with full content and metadata:
+
 ```json
-{
-  "workspaceId": "ws-123",
-  "exportedAt": "2026-03-24T12:00:00Z",
-  "files": [
-    {
-      "path": "/docs/readme.md",
-      "revision": "rev-abc",
-      "contentType": "text/markdown",
-      "content": "# Hello",
-      "encoding": "utf-8",
-      "semantics": {
-        "properties": { "stage": "active" },
-        "relations": [],
-        "permissions": [],
-        "comments": []
-      }
+[
+  {
+    "path": "/docs/readme.md",
+    "revision": "rev-abc",
+    "contentType": "text/markdown",
+    "content": "# Hello",
+    "encoding": "utf-8",
+    "provider": "confluence",
+    "providerObjectId": "page-123",
+    "lastEditedAt": "2026-03-25T10:00:00Z",
+    "semantics": {
+      "properties": { "stage": "active" },
+      "relations": ["depends-on:/docs/api.md"],
+      "permissions": ["scope:fs:read"],
+      "comments": ["Reviewed 2026-03-20"]
     }
-  ]
-}
+  }
+]
 ```
 
 Binary files are included with `"encoding": "base64"` and base64-encoded content.
 
+### Format: `tar`
+
+**Response:** `Content-Type: application/gzip`
+**Content-Disposition:** `attachment; filename="workspace-export.tar.gz"`
+
+Returns a gzip-compressed tar archive. Each file becomes a tar entry:
+
+| Tar Header Field | Value |
+|-----------------|-------|
+| **Name** | File path with leading `/` stripped (e.g., `docs/readme.md`) |
+| **Mode** | `0644` |
+| **Size** | Byte length of content |
+| **ModTime** | Parsed from `lastEditedAt` (falls back to Unix epoch) |
+
+Binary files (encoding=base64) are **decoded** to raw bytes in the tar entry, so extracted files are immediately usable.
+
+**Two-phase implementation to avoid partial responses:**
+
+1. **Prepare phase** (`prepareTarExport`): Decodes all content, validates base64 encoding, and assembles tar entry metadata. Errors at this stage produce a proper HTTP error response (e.g., `500 export_error`).
+
+2. **Stream phase** (`streamTarExport`): Sets HTTP headers, writes `200 OK`, and streams the gzip+tar data. Once streaming begins, HTTP status is committed — errors can only be logged, not sent to the client.
+
 ### Format: `patch`
 
-**Response:** `Content-Type: text/plain`
+**Response:** `Content-Type: text/x-diff; charset=utf-8`
 
-Returns a unified diff of all files against an empty tree, similar to `git diff --no-index /dev/null`. Each file produces a diff hunk:
+Returns a unified diff of all files against an empty tree:
 
 ```diff
 --- /dev/null
-+++ a/docs/readme.md
-@@ -0,0 +1,1 @@
++++ b/docs/readme.md
+@@ -0,0 +1,3 @@
 +# Hello
++
++World
+--- /dev/null
++++ b/assets/logo.png
+@@ -0,0 +1 @@
++[binary content omitted; encoding=base64]
 ```
 
-Binary files are represented as:
-
-```
-Binary file /images/logo.png added (4.2 KB, base64)
-```
-
-### Permission Filtering
-
-The export respects the caller's effective permissions. Files the caller cannot read (per ACL rules) are silently excluded. The response includes only visible files.
+Binary files emit a placeholder line instead of base64 content.
 
 ### Store Method
 
 ```go
-func (s *Store) ExportWorkspace(workspaceID string, pathPrefix string) ([]File, error)
+func (s *Store) ExportWorkspace(workspaceID string) ([]File, error)
 ```
 
-Returns all files under the given path prefix. The HTTP handler is responsible for format conversion (tar assembly, patch generation).
+- Returns all files in the workspace regardless of permissions (filtering is done at the HTTP layer).
+- Returns `ErrInvalidInput` if the workspace ID is empty.
 
-### Streaming
+### Error Codes
 
-For large workspaces, the tar and patch formats stream directly to the response writer without buffering the entire archive in memory. The JSON format buffers because it requires a valid JSON array.
-
-For workspaces exceeding 10,000 files or 500 MB total content, the server returns `413 Payload Too Large` with a suggestion to use path-scoped exports.
-
-### OpenAPI Addition
-
-```yaml
-/v1/workspaces/{workspaceId}/fs/export:
-  get:
-    tags: [Filesystem]
-    operationId: exportWorkspace
-    summary: Export workspace files as tar, JSON, or patch
-    security:
-      - BearerAuth: [fs:read]
-    parameters:
-      - $ref: '#/components/parameters/WorkspaceId'
-      - $ref: '#/components/parameters/CorrelationId'
-      - name: format
-        in: query
-        required: false
-        schema:
-          type: string
-          enum: [tar, json, patch]
-          default: json
-      - name: path
-        in: query
-        required: false
-        schema:
-          type: string
-          default: /
-      - name: includeSemantics
-        in: query
-        required: false
-        schema:
-          type: boolean
-          default: true
-    responses:
-      '200':
-        description: Workspace export
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/ExportJsonResponse'
-          application/gzip:
-            schema:
-              type: string
-              format: binary
-          text/plain:
-            schema:
-              type: string
-      '401':
-        $ref: '#/components/responses/Unauthorized'
-      '403':
-        $ref: '#/components/responses/Forbidden'
-      '413':
-        $ref: '#/components/responses/PayloadTooLarge'
-      '429':
-        $ref: '#/components/responses/RateLimited'
-```
+| HTTP Status | Code | Condition |
+|-------------|------|-----------|
+| 400 | `bad_request` | Invalid format parameter or empty workspace ID |
+| 401 | `unauthorized` | Invalid or expired JWT |
+| 403 | `forbidden` | Missing `fs:read` scope |
+| 429 | `rate_limited` | Per-agent rate limit exceeded |
+| 500 | `export_error` | Tar preparation failed (e.g., invalid base64) |
 
 ---
 
@@ -388,74 +274,121 @@ For workspaces exceeding 10,000 files or 500 MB total content, the server return
 ### Endpoint
 
 ```
-GET /v1/workspaces/{workspaceId}/fs/ws
+GET /v1/workspaces/{workspaceId}/fs/ws?token={jwt}
 ```
 
-**Scope:** `fs:read`
+**Auth:** JWT passed as `token` query parameter (not Bearer header, because the WebSocket upgrade handshake does not support custom headers in browser clients).
+
+**Required scope:** `fs:read`
 
 ### Purpose
 
-Real-time push of filesystem change events over a persistent WebSocket connection. Replaces polling the `/fs/events` endpoint for latency-sensitive consumers.
+Real-time streaming of filesystem change events over a persistent WebSocket connection. Replaces polling `/fs/events` for latency-sensitive consumers.
+
+### Library
+
+Uses `nhooyr.io/websocket` with `wsjson` for JSON message framing.
 
 ### Connection Lifecycle
 
-1. Client sends HTTP GET with `Upgrade: websocket` header.
-2. Server validates JWT bearer token (same as REST endpoints).
-3. On successful upgrade, server sends a `connected` frame.
-4. Client optionally sends `subscribe` messages to filter events.
-5. Server pushes events as they occur.
-6. Either side can close the connection.
-
-### Server-to-Client Messages
-
-**Connected:**
-
-```json
-{
-  "type": "connected",
-  "workspaceId": "ws-123",
-  "serverTime": "2026-03-24T12:00:00Z"
-}
+```
+Client                                    Server
+  |                                         |
+  |  GET /v1/workspaces/ws1/fs/ws?token=... |
+  | --------- HTTP Upgrade ---------------→ |
+  |                                         | validate JWT (query param)
+  |                                         | check rate limit
+  | ←-------- 101 Switching Protocols ----- |
+  |                                         |
+  |                                         | subscribe to store event channel
+  |                                         | fetch recent 100 events (catch-up)
+  | ←-------- catch-up events ------------- |
+  | ←-------- live events (ongoing) ------- |
+  |                                         |
+  | --------- {"type":"ping"} -----------→  |
+  | ←-------- {"type":"pong","ts":"..."} -- |
+  |                                         |
+  | --------- close ----------------------→ |
+  | ←-------- close ack ------------------- |
 ```
 
-**Event:**
+### Catch-Up Pattern
+
+To prevent missing events between subscribe and the first live event:
+
+1. Subscribe to the store's event channel first.
+2. Fetch the most recent 100 events via `Store.GetRecentEvents`.
+3. Send catch-up events to the client.
+4. Track sent event IDs in a map to deduplicate.
+5. Forward live events, skipping any already sent during catch-up.
+
+### Server → Client Messages
+
+**File event:**
 
 ```json
 {
-  "type": "file.created",
+  "type": "file.updated",
   "path": "/docs/readme.md",
-  "revision": "rev-abc",
-  "provider": "notion",
-  "origin": "provider_sync",
-  "correlationId": "corr-xyz",
-  "timestamp": "2026-03-24T12:00:01Z"
+  "revision": "rev-002",
+  "timestamp": "2026-03-25T10:05:00Z"
 }
 ```
 
-Event types mirror the existing `FilesystemEvent` schema:
-- `file.created`
-- `file.updated`
-- `file.deleted`
-- `dir.created`
-- `dir.deleted`
-- `sync.error`
-- `sync.ignored`
-- `sync.suppressed`
-- `sync.stale`
-- `writeback.failed`
-- `writeback.succeeded`
+Event types: `file.created`, `file.updated`, `file.deleted`, `dir.created`, `dir.deleted`, `sync.error`, `sync.ignored`, `sync.suppressed`, `sync.stale`, `writeback.failed`, `writeback.succeeded`.
 
-**Ping:**
+**Pong (response to client ping):**
 
 ```json
-{ "type": "ping", "ts": "2026-03-24T12:00:30Z" }
+{
+  "type": "pong",
+  "ts": "2026-03-25T10:05:00Z"
+}
 ```
 
-Server sends pings every 30 seconds. Client must respond with `pong` within 10 seconds or the connection is closed.
+### Client → Server Messages
 
-### Client-to-Server Messages
+**Ping (keepalive):**
 
-**Subscribe (filter):**
+```json
+{
+  "type": "ping"
+}
+```
+
+The server responds with a pong including the current server timestamp.
+
+### Concurrency Model
+
+- A background goroutine (`readWebSocketMessages`) handles incoming client messages and routes pings/errors through channels.
+- The main goroutine reads from the store subscription channel and writes events to the WebSocket.
+- Context cancellation closes the WebSocket with `StatusNormalClosure`.
+
+### Store Integration
+
+```go
+func (s *Store) Subscribe(workspaceID string, ch chan<- Event) func()
+```
+
+The store's `Subscribe` method registers a channel to receive events for a workspace. The returned function unsubscribes and is called on connection close.
+
+```go
+func (s *Store) GetRecentEvents(workspaceID string, limit int) ([]Event, error)
+```
+
+Used for the catch-up phase on initial connection.
+
+### Polling Fallback
+
+For environments where WebSocket connections are unavailable (some proxies, serverless):
+
+- Use `GET /v1/workspaces/{workspaceId}/fs/events?cursor={lastCursor}&limit=200`
+- Poll on a 1–5 second interval.
+- The `nextCursor` field in the response provides the resume point.
+
+### Future: Client-Side Filtering
+
+A `subscribe` message with path and event type filters is a natural extension:
 
 ```json
 {
@@ -468,99 +401,7 @@ Server sends pings every 30 seconds. Client must respond with `pong` within 10 s
 }
 ```
 
-All filter fields are optional. If omitted, the client receives all events. Filters use simple glob matching for paths (`*` matches any segment, `**` matches recursively).
-
-**Pong:**
-
-```json
-{ "type": "pong" }
-```
-
-**Unsubscribe (reset to all):**
-
-```json
-{ "type": "unsubscribe" }
-```
-
-### Cursor Resumption
-
-On connect, clients can provide a `cursor` query parameter to resume from a known position:
-
-```
-GET /v1/workspaces/{workspaceId}/fs/ws?cursor=evt-456
-```
-
-The server replays missed events from the cursor position before switching to live push. If the cursor is too old (events have been pruned), the server sends an error frame and falls back to live-only:
-
-```json
-{
-  "type": "error",
-  "code": "cursor_expired",
-  "message": "Requested cursor is no longer available. Receiving live events only."
-}
-```
-
-### Polling Fallback
-
-For environments that don't support WebSocket (some proxies, serverless), clients should fall back to the existing `GET /v1/workspaces/{workspaceId}/fs/events` endpoint with cursor-based polling. No server-side changes needed for this — it's a client implementation concern.
-
-### Implementation Notes
-
-- Use `gorilla/websocket` or `nhooyr.io/websocket` for the WebSocket upgrade.
-- The store emits events to an internal channel; the WebSocket handler fans out to connected clients.
-- Each workspace has an independent fan-out group. Connections are tracked in a `sync.Map`.
-- Max connections per workspace: 50 (configurable).
-- Max connections per agent per workspace: 5.
-- Idle timeout: 5 minutes with no subscribe/pong activity.
-
-### Store Integration
-
-No new store method required. The WebSocket handler subscribes to the existing event emission path. A new internal interface is added:
-
-```go
-type EventSubscriber interface {
-    Subscribe(workspaceID string, filter EventFilter) (<-chan FilesystemEvent, func())
-}
-
-type EventFilter struct {
-    Paths      []string  // glob patterns
-    EventTypes []string
-    Providers  []string
-}
-```
-
-The `Store` implements `EventSubscriber`. The returned channel receives events; the returned `func()` is called to unsubscribe.
-
-### OpenAPI Addition
-
-```yaml
-/v1/workspaces/{workspaceId}/fs/ws:
-  get:
-    tags: [Events]
-    operationId: websocketEvents
-    summary: Real-time filesystem events over WebSocket
-    description: |
-      Upgrades to a WebSocket connection for real-time event push.
-      Falls back to polling /fs/events for non-WebSocket environments.
-    security:
-      - BearerAuth: [fs:read]
-    parameters:
-      - $ref: '#/components/parameters/WorkspaceId'
-      - name: cursor
-        in: query
-        required: false
-        schema:
-          type: string
-    responses:
-      '101':
-        description: WebSocket upgrade successful
-      '401':
-        $ref: '#/components/responses/Unauthorized'
-      '403':
-        $ref: '#/components/responses/Forbidden'
-      '429':
-        $ref: '#/components/responses/RateLimited'
-```
+This is not yet implemented. Currently all workspace events are streamed to every connected client.
 
 ---
 
@@ -570,139 +411,106 @@ The `Store` implements `EventSubscriber`. The returned channel receives events; 
 
 Support storing and retrieving non-text files (images, PDFs, compiled assets) through the same filesystem API by allowing base64-encoded content.
 
+### Encoding Field
+
+All write endpoints (`PUT /fs/file`, `POST /fs/bulk`) accept an optional `encoding` field:
+
+| Value | Behavior |
+|-------|----------|
+| `utf-8` | Default. Content is plain text. |
+| `base64` | Content is base64-encoded binary data. |
+
 ### Write Path
 
-The `encoding` field is added to file write requests:
-
 ```json
+PUT /v1/workspaces/ws1/fs/file?path=/assets/logo.png
+If-Match: *
+
 {
   "contentType": "image/png",
-  "content": "iVBORw0KGgoAAAANSUhEUgAA...",
+  "content": "iVBORw0KGgoAAAANSUhEU...",
   "encoding": "base64"
 }
 ```
 
-| Field | Values | Default | Description |
-|-------|--------|---------|-------------|
-| `encoding` | `"utf-8"`, `"base64"` | `"utf-8"` | How `content` is encoded in the JSON payload |
-
-When `encoding` is `"base64"`:
-- The server validates that `content` is valid base64.
-- Content is stored as the raw base64 string in the store.
-- The `encoding` value is persisted in file metadata.
-- Size limits apply to the decoded size, not the base64 representation.
+The store persists the `encoding` field alongside the content. The content string is stored as-is (the base64 string, not decoded bytes). This keeps the storage layer simple and avoids binary blob handling.
 
 ### Read Path
 
-The read response includes the `encoding` field:
+```json
+GET /v1/workspaces/ws1/fs/file?path=/assets/logo.png
+
+{
+  "path": "/assets/logo.png",
+  "revision": "rev-003",
+  "contentType": "image/png",
+  "content": "iVBORw0KGgoAAAANSUhEU...",
+  "encoding": "base64",
+  "lastEditedAt": "2026-03-25T10:00:00Z"
+}
+```
+
+The `encoding` field tells the client how to interpret the `content` string.
+
+### Bulk Write
+
+Binary files in bulk write use the same `encoding` field per file entry:
 
 ```json
 {
-  "path": "/images/logo.png",
-  "revision": "rev-abc",
-  "contentType": "image/png",
-  "content": "iVBORw0KGgoAAAANSUhEUgAA...",
-  "encoding": "base64",
-  "semantics": {}
+  "files": [
+    { "path": "/logo.png", "contentType": "image/png", "content": "iVBOR...", "encoding": "base64" },
+    { "path": "/readme.md", "contentType": "text/markdown", "content": "# Hi" }
+  ]
 }
 ```
 
-Detection logic:
-- If the file was written with `encoding: "base64"`, it is returned with `encoding: "base64"`.
-- If no encoding was specified at write time, it defaults to `"utf-8"`.
-- The `contentType` field is informational and does not affect encoding detection.
+### Export Handling
 
-### Store Changes
+| Format | Binary behavior |
+|--------|-----------------|
+| `json` | Content returned as base64 string with `encoding: "base64"` |
+| `tar` | Base64 content is **decoded** to raw bytes in the tar entry |
+| `patch` | Placeholder line: `+[binary content omitted; encoding=base64]` |
 
-The `File` struct gains an `Encoding` field:
+The tar format decodes base64 so that extracted files are immediately usable. Both standard and raw base64 (no padding) are accepted during decode:
 
 ```go
-type File struct {
-    Path            string
-    Revision        string
-    ContentType     string
-    Content         string
-    Encoding        string        // "utf-8" or "base64"
-    Provider        string
-    ProviderObjectID string
-    LastEditedAt    string
-    Semantics       FileSemantics
+func decodeBase64String(value string) ([]byte, error) {
+    if decoded, err := base64.StdEncoding.DecodeString(value); err == nil {
+        return decoded, nil
+    }
+    return base64.RawStdEncoding.DecodeString(value)
 }
 ```
 
-The `WriteRequest` struct gains a matching field:
+### Content Size
 
-```go
-type WriteRequest struct {
-    // ... existing fields ...
-    Encoding      string  // "utf-8" or "base64"
-}
-```
+Binary content is subject to the same `MaxBodyBytes` limit as text content (default: 1 MiB). The base64 encoding adds ~33% overhead, so effective binary file size limit is ~750 KiB with default settings.
 
-Storage is unchanged — content is always stored as a Go `string`. For base64 files, the string contains the base64 representation. No decoding happens at the store layer.
-
-### Validation
-
-- On write with `encoding: "base64"`: validate that content is valid standard base64 (RFC 4648). Reject with `400 bad_request` if invalid.
-- Decoded size must not exceed the per-file content limit (10 MB decoded).
-- Base64 content size in the JSON payload is approximately 4/3 of the decoded size.
-
-### Content Type Detection
-
-The server does not auto-detect content types. The caller must provide the correct `contentType`. Common binary types:
-
-- `image/png`, `image/jpeg`, `image/gif`, `image/svg+xml`
-- `application/pdf`
-- `application/octet-stream` (generic binary)
-
-### Impact on Other Endpoints
+### Impact on Endpoints
 
 | Endpoint | Change |
 |----------|--------|
 | `PUT /fs/file` | Accepts `encoding` field |
 | `GET /fs/file` | Returns `encoding` field |
+| `POST /fs/bulk` | Accepts `encoding` per file |
+| `GET /fs/export` | Includes `encoding` per file; tar decodes base64 |
 | `GET /fs/query` | No change (doesn't return content) |
 | `GET /fs/tree` | No change |
-| `GET /fs/export` | Includes `encoding` per file; tar format stores decoded bytes |
-| `POST /fs/bulk` | Accepts `encoding` per file |
 | WebSocket events | No change (events don't include content) |
-
-### OpenAPI Changes
-
-Add `encoding` to `FileWriteRequest`:
-
-```yaml
-FileWriteRequest:
-  type: object
-  properties:
-    # ... existing ...
-    encoding:
-      type: string
-      enum: [utf-8, base64]
-      default: utf-8
-      description: Content encoding. Use base64 for binary files.
-```
-
-Add `encoding` to `FileReadResponse`:
-
-```yaml
-FileReadResponse:
-  type: object
-  properties:
-    # ... existing ...
-    encoding:
-      type: string
-      enum: [utf-8, base64]
-      default: utf-8
-```
 
 ---
 
 ## HTTP Handler Routing
 
-New routes added to `ServeHTTP`:
+Routes in `ServeHTTP`:
 
 ```go
+case len(parts) == 5 && parts[3] == "fs" && parts[4] == "ws" && r.Method == http.MethodGet:
+    requiredScope = "fs:read"
+    route = "fs_ws"
+
 case len(parts) == 5 && parts[3] == "fs" && parts[4] == "bulk" && r.Method == http.MethodPost:
     requiredScope = "fs:write"
     route = "bulk_write"
@@ -710,10 +518,42 @@ case len(parts) == 5 && parts[3] == "fs" && parts[4] == "bulk" && r.Method == ht
 case len(parts) == 5 && parts[3] == "fs" && parts[4] == "export" && r.Method == http.MethodGet:
     requiredScope = "fs:read"
     route = "export"
+```
 
-case len(parts) == 5 && parts[3] == "fs" && parts[4] == "ws" && r.Method == http.MethodGet:
-    requiredScope = "fs:read"
-    route = "ws_events"
+The WebSocket route (`fs_ws`) bypasses the standard Bearer header auth and correlation ID requirement — it handles auth via the `token` query parameter and is dispatched before the main auth middleware.
+
+---
+
+## Cross-Cutting Concerns
+
+### Authentication & Authorization
+
+| Endpoint | Auth Method | Required Scope |
+|----------|-------------|----------------|
+| `POST /fs/bulk` | Bearer JWT (header) | `fs:write` |
+| `GET /fs/export` | Bearer JWT (header) | `fs:read` |
+| `GET /fs/ws` | JWT (query param) | `fs:read` |
+
+All workspace-scoped endpoints validate that the JWT's `workspace_id` claim matches the URL workspace.
+
+### Correlation ID
+
+All REST endpoints require `X-Correlation-Id` header. The WebSocket endpoint is the exception (correlation IDs are embedded in event payloads).
+
+### Rate Limiting
+
+Rate limiting is keyed on `{workspaceId}|{agentName}` with a configurable window and max count. Applied to all authenticated endpoints including WebSocket connection establishment.
+
+### Error Format
+
+All errors use the standard envelope:
+
+```json
+{
+  "code": "bad_request",
+  "message": "missing files",
+  "correlationId": "corr-abc123"
+}
 ```
 
 ---
@@ -724,24 +564,3 @@ case len(parts) == 5 && parts[3] == "fs" && parts[4] == "ws" && r.Method == http
 - The `encoding` field defaults to `"utf-8"`, so existing clients see no change.
 - Files written before binary support have no `encoding` metadata and default to `"utf-8"` on read.
 - The WebSocket endpoint is independent of the polling events endpoint; both remain available.
-
----
-
-## Error Codes
-
-| Code | HTTP Status | Description |
-|------|-------------|-------------|
-| `bulk_too_large` | 413 | Bulk request exceeds file count or size limit |
-| `invalid_base64` | 400 | Content is not valid base64 when encoding=base64 |
-| `export_too_large` | 413 | Workspace exceeds export size threshold |
-| `ws_limit_reached` | 429 | WebSocket connection limit per workspace exceeded |
-| `cursor_expired` | N/A (WS frame) | Resume cursor no longer available |
-
----
-
-## Security Considerations
-
-- **Bulk seed** uses the same permission checks as single-file writes. Each file in the batch is validated against effective ACL rules.
-- **Export** filters files by caller permissions — no information leakage.
-- **WebSocket** validates JWT on upgrade. Token expiry is checked periodically (every 60s); expired tokens trigger graceful close.
-- **Binary content** is stored as base64 strings, not raw bytes, avoiding encoding issues in JSON transport. No server-side execution of binary content.

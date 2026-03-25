@@ -42,6 +42,7 @@ export interface FileReadResponse {
 export interface FileWriteRequest {
   contentType?: string;
   content: string;
+  encoding?: "utf-8" | "base64";
   semantics?: FileSemantics;
 }
 
@@ -60,14 +61,11 @@ export interface BulkWriteInput {
 }
 
 export interface BulkWriteResponse {
-  written: number;
-  errorCount: number;
+  imported: number;
   errors: Array<{
     path: string;
-    code: string;
-    message: string;
+    error: string;
   }>;
-  correlationId: string;
 }
 
 export interface FileQueryItem {
@@ -121,9 +119,9 @@ export interface FilesystemEvent {
   type: FilesystemEventType;
   path: string;
   revision: string;
-  origin: EventOrigin;
+  origin?: EventOrigin;
   provider?: string;
-  correlationId: string;
+  correlationId?: string;
   timestamp: string;
 }
 
@@ -141,7 +139,9 @@ export interface ExportOptions {
   signal?: AbortSignal;
 }
 
-export type ExportJsonResponse = FileReadResponse[];
+export interface ExportJsonResponse {
+  files: FileReadResponse[];
+}
 
 export type OperationStatus =
   | "pending"

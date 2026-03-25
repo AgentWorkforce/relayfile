@@ -294,6 +294,7 @@ type Syncer struct {
 	logger        Logger
 	state         mountState
 	loaded        bool
+	bootstrapped  bool
 	websocket     bool
 	wsConn        *websocket.Conn
 	wsCancel      context.CancelFunc
@@ -373,6 +374,14 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 }
 
 func (s *Syncer) SyncOnce(ctx context.Context) error {
+	return s.sync(ctx, false)
+}
+
+func (s *Syncer) Reconcile(ctx context.Context) error {
+	return s.sync(ctx, true)
+}
+
+func (s *Syncer) sync(ctx context.Context, forcePoll bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -394,8 +403,13 @@ func (s *Syncer) SyncOnce(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if err := s.pullRemote(ctx, conflicted); err != nil {
-		return err
+
+	shouldPoll := forcePoll || !s.bootstrapped || s.wsConn == nil
+	if shouldPoll {
+		if err := s.pullRemote(ctx, conflicted); err != nil {
+			return err
+		}
+		s.bootstrapped = true
 	}
 	return s.saveState()
 }
@@ -422,7 +436,7 @@ func (s *Syncer) connectWebSocket(ctx context.Context) error {
 		return err
 	}
 
-	readCtx, cancel := context.WithCancel(ctx)
+	readCtx, cancel := context.WithCancel(context.Background())
 
 	s.mu.Lock()
 	s.wsConn = conn
