@@ -12,7 +12,7 @@
 
 import { workflow } from '@agent-relay/sdk/workflows';
 
-const RELAYFILE = '/Users/khaliqgant/Projects/Agent Workforce/relayfile';
+const RELAYFILE = '/Users/khaliqgant/Projects/AgentWorkforce-relayfile';
 const RELAYCAST_SITE = '/Users/khaliqgant/Projects/AgentWorkforce/relaycast/site';
 
 async function main() {
@@ -46,19 +46,19 @@ const result = await workflow('relayfile-landing-page')
 
   .step('read-readme', {
     type: 'deterministic',
-    command: `cat "${RELAYFILE}/README.md"`,
+    command: `cat ${RELAYFILE}/README.md`,
     captureOutput: true,
   })
 
   .step('read-spec', {
     type: 'deterministic',
-    command: `cat "${RELAYFILE}/docs/relayfile-v1-spec.md"`,
+    command: `cat ${RELAYFILE}/docs/relayfile-v1-spec.md`,
     captureOutput: true,
   })
 
   .step('read-openapi', {
     type: 'deterministic',
-    command: `head -100 "${RELAYFILE}/openapi/relayfile-v1.openapi.yaml"`,
+    command: `head -100 ${RELAYFILE}/openapi/relayfile-v1.openapi.yaml`,
     captureOutput: true,
   })
 
@@ -70,7 +70,7 @@ const result = await workflow('relayfile-landing-page')
 
   .step('read-architecture-doc', {
     type: 'deterministic',
-    command: `cat "${RELAYFILE}/docs/architecture-ascii.md"`,
+    command: `cat ${RELAYFILE}/docs/architecture-ascii.md`,
     captureOutput: true,
   })
 
@@ -93,7 +93,7 @@ Spec highlights:
 Write ${RELAYFILE}/site/CONTENT.md with the complete page content:
 
 **Hero section:**
-- Headline: "Real-time filesystem for humans and agents"
+- Headline: Real-time filesystem for humans and agents"
 - Subhead: "A revision-controlled, programmable filesystem that syncs everywhere. Mount it locally, in the cloud, or in a sandbox — everyone sees the same files."
 - CTA: "Get Started" → docs, "View on GitHub" → repo
 
@@ -167,7 +167,7 @@ Create:
 
 6. ${RELAYFILE}/site/src/pages/index.astro:
    - Import Layout, render all sections from the content doc
-   - Read content: cat "${RELAYFILE}/site/CONTENT.md
+   - Read content: cat ${RELAYFILE}/site/CONTENT.md
    - Hero with gradient text (cyan → blue)
    - Sections with prose styling
    - API preview with syntax-highlighted code blocks
@@ -201,7 +201,7 @@ Content plan:
 Create these SVG files at ${RELAYFILE}/site/public/:
 
 1. diagram-sync.svg — Shows the sync flow:
-   Three boxes: "Your Laptop", "relayfile", "Cloud Sandbox"
+   Three boxes: Your Laptop", "relayfile", "Cloud Sandbox"
    Bidirectional arrows between them
    Inside each box: a file tree icon
    Style: dark background (#09090b), cyan (#22d3ee) lines, white text, rounded corners
@@ -232,7 +232,7 @@ Write all SVGs to disk.`,
     type: 'deterministic',
     dependsOn: ['scaffold-site', 'create-diagrams'],
     command: `cd ${RELAYFILE}/site && \
-echo "=== Files ===" && find src public -type f | sort && \
+echo === Files ===" && find src public -type f | sort && \
 echo "" && echo "=== Install ===" && npm install 2>&1 | tail -3 && \
 echo "" && echo "=== Build ===" && npx astro build 2>&1 | tail -10; echo "EXIT: $?"`,
     captureOutput: true,

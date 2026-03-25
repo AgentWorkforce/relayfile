@@ -18,7 +18,7 @@
 
 import { workflow } from '@agent-relay/sdk/workflows';
 
-const RELAYFILE = '/Users/khaliqgant/Projects/Agent Workforce/relayfile';
+const RELAYFILE = '/Users/khaliqgant/Projects/AgentWorkforce-relayfile';
 
 async function main() {
 const result = await workflow('relayfile-developer-experience')
@@ -57,37 +57,37 @@ const result = await workflow('relayfile-developer-experience')
 
   .step('read-mount-cmd', {
     type: 'deterministic',
-    command: `cat "${RELAYFILE}/cmd/relayfile-mount/main.go"`,
+    command: `cat ${RELAYFILE}/cmd/relayfile-mount/main.go`,
     captureOutput: true,
   })
 
   .step('read-server-cmd', {
     type: 'deterministic',
-    command: `cat "${RELAYFILE}/cmd/relayfile/main.go"`,
+    command: `cat ${RELAYFILE}/cmd/relayfile/main.go`,
     captureOutput: true,
   })
 
   .step('read-auth', {
     type: 'deterministic',
-    command: `cat "${RELAYFILE}/internal/httpapi/auth.go"`,
+    command: `cat ${RELAYFILE}/internal/httpapi/auth.go`,
     captureOutput: true,
   })
 
   .step('read-token-script', {
     type: 'deterministic',
-    command: `cat "${RELAYFILE}/scripts/generate-dev-token.sh"`,
+    command: `cat ${RELAYFILE}/scripts/generate-dev-token.sh`,
     captureOutput: true,
   })
 
   .step('read-readme', {
     type: 'deterministic',
-    command: `cat "${RELAYFILE}/README.md"`,
+    command: `cat ${RELAYFILE}/README.md`,
     captureOutput: true,
   })
 
   .step('read-openapi', {
     type: 'deterministic',
-    command: `cat "${RELAYFILE}/openapi/relayfile-v1.openapi.yaml | head -100"`,
+    command: `cat ${RELAYFILE}/openapi/relayfile-v1.openapi.yaml | head -100`,
     captureOutput: true,
   })
 
@@ -147,7 +147,7 @@ Write a design doc at ${RELAYFILE}/docs/cli-design.md:
 
 **Config file: ~/.relayfile/credentials.json**
 {
-  "server": "https://relayfile-api.agentworkforce.workers.dev",
+  server": "https://relayfile-api.agentworkforce.workers.dev",
   "token": "eyJ...",
   "refreshToken": "...",
   "expiresAt": "..."
@@ -213,7 +213,7 @@ Subcommands:
    - Load credentials
    - Walk DIR, read all files
    - POST /v1/workspaces/{ws}/fs/bulk with file contents
-   - Show progress: "Seeding 142/250 files..."
+   - Show progress: Seeding 142/250 files..."
 
 6. relayfile export WORKSPACE --format FORMAT --output FILE
    - GET /v1/workspaces/{ws}/fs/export?format=FORMAT
@@ -281,7 +281,7 @@ Current README:
 Create/update:
 
 1. Update ${RELAYFILE}/README.md:
-   - Add "Quick Start" section at the top:
+   - Add Quick Start" section at the top:
      Install: curl -fsSL https://relayfile.dev/install.sh | sh
      Login: relayfile login --server http://localhost:9090 --token dev-token
      Seed: relayfile seed my-project ./src
@@ -329,10 +329,10 @@ Write all docs to disk.`,
     dependsOn: ['implement-cli'],
     task: `Prepare the TypeScript SDK for npm publishing.
 
-Read the current SDK: cat "${RELAYFILE}/packages/relayfile-sdk/package.json
+Read the current SDK: cat ${RELAYFILE}/packages/relayfile-sdk/package.json
 
 Update ${RELAYFILE}/packages/relayfile-sdk/package.json:
-- name: "@relayfile/sdk" (or "relayfile-sdk")
+- name: @relayfile/sdk" (or "relayfile-sdk")
 - version: "0.1.0"
 - main: "dist/index.js"
 - types: "dist/index.d.ts"
