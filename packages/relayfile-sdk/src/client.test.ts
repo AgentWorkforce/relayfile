@@ -187,7 +187,7 @@ describe("RelayFileClient — existing methods", () => {
 
   // ---- bulkWrite ----
   describe("bulkWrite", () => {
-    it("maps the bulk write response to imported/errors", async () => {
+    it("returns the bulk write response matching the server contract", async () => {
       const f = mockFetch({
         written: 2,
         errorCount: 1,
@@ -211,13 +211,16 @@ describe("RelayFileClient — existing methods", () => {
       });
 
       expect(res).toEqual({
-        imported: 2,
+        written: 2,
+        errorCount: 1,
         errors: [
           {
             path: "/restricted.md",
-            error: "file access denied by permission policy",
+            code: "forbidden",
+            message: "file access denied by permission policy",
           },
         ],
+        correlationId: "corr_1",
       });
 
       const init = f.mock.calls[0]![1] as RequestInit;

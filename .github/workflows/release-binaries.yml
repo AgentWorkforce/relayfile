@@ -62,12 +62,12 @@ jobs:
         working-directory: dist
         run: |
           sha256sum \
-            "relayfile-${{ matrix.os }}-${{ matrix.arch }}" \
-            "relayfile-mount-${{ matrix.os }}-${{ matrix.arch }}" \
-            "relayfile-cli-${{ matrix.os }}-${{ matrix.arch }}" \
             "relayfile_${{ matrix.os }}_${{ matrix.arch }}.tar.gz" \
             "relayfile-mount_${{ matrix.os }}_${{ matrix.arch }}.tar.gz" \
             "relayfile-cli_${{ matrix.os }}_${{ matrix.arch }}.tar.gz" \
+            "relayfile-${{ matrix.os }}-${{ matrix.arch }}" \
+            "relayfile-mount-${{ matrix.os }}-${{ matrix.arch }}" \
+            "relayfile-cli-${{ matrix.os }}-${{ matrix.arch }}" \
             > "checksums-${{ matrix.os }}-${{ matrix.arch }}.txt"
 
       - name: Upload build artifacts
@@ -75,12 +75,12 @@ jobs:
         with:
           name: release-${{ matrix.os }}-${{ matrix.arch }}
           path: |
-            dist/relayfile-${{ matrix.os }}-${{ matrix.arch }}
-            dist/relayfile-mount-${{ matrix.os }}-${{ matrix.arch }}
-            dist/relayfile-cli-${{ matrix.os }}-${{ matrix.arch }}
             dist/relayfile_${{ matrix.os }}_${{ matrix.arch }}.tar.gz
             dist/relayfile-mount_${{ matrix.os }}_${{ matrix.arch }}.tar.gz
             dist/relayfile-cli_${{ matrix.os }}_${{ matrix.arch }}.tar.gz
+            dist/relayfile-${{ matrix.os }}-${{ matrix.arch }}
+            dist/relayfile-mount-${{ matrix.os }}-${{ matrix.arch }}
+            dist/relayfile-cli-${{ matrix.os }}-${{ matrix.arch }}
             dist/checksums-${{ matrix.os }}-${{ matrix.arch }}.txt
 
   release:
@@ -95,11 +95,13 @@ jobs:
           path: release-assets
           merge-multiple: true
 
+      - name: Merge per-platform checksums into checksums.txt
+        run: |
+          cat release-assets/checksums-*.txt > release-assets/checksums.txt
+          rm release-assets/checksums-*.txt
+
       - name: Show release assets
         run: ls -lah release-assets
-
-      - name: Merge per-platform checksums into checksums.txt
-        run: cat release-assets/checksums-*.txt > release-assets/checksums.txt
 
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2

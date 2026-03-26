@@ -63,6 +63,7 @@ jobs:
           name: relayfile-binaries
           path: bin/
           retention-days: 1
+          if-no-files-found: error
 
   sdk-typecheck:
     name: SDK Typecheck
