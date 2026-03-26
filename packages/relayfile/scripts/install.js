@@ -8,7 +8,6 @@ const https = require("https");
 
 const VERSION = require("../package.json").version;
 const BIN_DIR = path.join(__dirname, "..", "bin");
-const BIN_PATH = path.join(BIN_DIR, "relayfile");
 
 const PLATFORM_MAP = {
   darwin: "darwin",
@@ -20,6 +19,10 @@ const ARCH_MAP = {
   x64: "amd64",
   arm64: "arm64",
 };
+
+function getBinaryFilename() {
+  return os.platform() === "win32" ? "relayfile.exe" : "relayfile";
+}
 
 function getDownloadUrl() {
   const platform = PLATFORM_MAP[os.platform()];
@@ -61,13 +64,14 @@ function download(url, dest) {
 
 async function main() {
   const url = getDownloadUrl();
+  const binPath = path.join(BIN_DIR, getBinaryFilename());
 
   fs.mkdirSync(BIN_DIR, { recursive: true });
 
   console.log(`Downloading relayfile v${VERSION}...`);
   try {
-    await download(url, BIN_PATH);
-    fs.chmodSync(BIN_PATH, 0o755);
+    await download(url, binPath);
+    fs.chmodSync(binPath, 0o755);
     console.log("relayfile installed successfully.");
   } catch (err) {
     console.error(`Failed to download relayfile: ${err.message}`);

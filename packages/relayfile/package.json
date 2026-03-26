@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "description": "CLI for relayfile — real-time filesystem for humans and agents",
   "bin": {
-    "relayfile": "bin/relayfile"
+    "relayfile": "scripts/run.js"
   },
   "scripts": {
     "postinstall": "node scripts/install.js || true"
