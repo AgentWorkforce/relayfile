@@ -4768,7 +4768,7 @@ func TestWritebackQueueACK(t *testing.T) {
 	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
 	defer store.Close()
 	server := NewServer(store)
-	token := mustTestJWT(t, "dev-secret", "ws_1", "Worker1", []string{"fs:read", "fs:write", "sync:read", "sync:trigger", "ops:replay"}, time.Now().Add(time.Hour))
+	token := mustTestJWT(t, "dev-secret", "ws_1", "Worker1", []string{"fs:read", "fs:write", "sync:read", "sync:trigger", "ops:read", "ops:replay"}, time.Now().Add(time.Hour))
 
 	// Create a file write that will queue a writeback
 	writeResp := doRequest(t, server, request{
@@ -4837,6 +4837,47 @@ func TestWritebackQueueACK(t *testing.T) {
 
 	if ackResp.Code != http.StatusOK {
 		t.Fatalf("expected 200 OK on ack, got %d (%s)", ackResp.Code, ackResp.Body.String())
+	}
+
+	opResp := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/workspaces/ws_1/ops/" + itemID,
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_ack_2",
+		},
+	})
+	if opResp.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK fetching op after ack, got %d (%s)", opResp.Code, opResp.Body.String())
+	}
+	var op relayfile.OperationStatus
+	if err := json.NewDecoder(opResp.Body).Decode(&op); err != nil {
+		t.Fatalf("failed to decode op response: %v", err)
+	}
+	if op.Status != "succeeded" {
+		t.Fatalf("expected acked op to be succeeded, got %q", op.Status)
+	}
+
+	pendingAfterResp := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/workspaces/ws_1/writeback/pending",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_query_2",
+		},
+	})
+	if pendingAfterResp.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK querying pending after ack, got %d (%s)", pendingAfterResp.Code, pendingAfterResp.Body.String())
+	}
+
+	var itemsAfter []map[string]any
+	if err := json.NewDecoder(pendingAfterResp.Body).Decode(&itemsAfter); err != nil {
+		t.Fatalf("failed to decode pending response after ack: %v", err)
+	}
+	for _, pending := range itemsAfter {
+		if pendingID, _ := pending["id"].(string); pendingID == itemID {
+			t.Fatalf("expected acked item %q to be filtered from pending writebacks, got %+v", itemID, itemsAfter)
+		}
 	}
 }
 
