@@ -21,7 +21,7 @@ import type {
   Paginated,
   FileSemantics,
 } from "./storage.js";
-import { normalizePath } from "./files.js";
+import { normalizePath, DEFAULT_CONTENT_TYPE, MAX_FILE_BYTES, encodedSize } from "./files.js";
 
 export interface IngestWebhookInput {
   provider: string;
@@ -64,10 +64,11 @@ export interface ApplyEnvelopeOptions {
 }
 
 export interface ApplyEnvelopeResult {
-  status: "processed" | "ignored" | "suppressed" | "stale";
+  status: "processed" | "ignored" | "suppressed" | "stale" | "rejected";
   eventType: string | null;
   path: string | null;
   revision: string | null;
+  reason?: string;
 }
 
 export interface IngestWebhookOptions {
@@ -373,6 +374,17 @@ export function applyWebhookEnvelope(
       typeof event.content === "string"
         ? event.content
         : JSON.stringify(event.data ?? {});
+    const encoding = normalizeEncoding(event.encoding) ?? "utf-8";
+
+    if (encodedSize(content, encoding) > MAX_FILE_BYTES) {
+      return {
+        status: "rejected",
+        eventType: event.type,
+        path: event.path,
+        revision: null,
+        reason: "file_too_large",
+      };
+    }
 
     // Strip permissions from webhook-provided semantics to prevent
     // external webhooks from injecting or overwriting ACL rules.
@@ -384,7 +396,7 @@ export function applyWebhookEnvelope(
       revision,
       contentType: event.contentType?.trim() || DEFAULT_CONTENT_TYPE,
       content,
-      encoding: normalizeEncoding(event.encoding) ?? "utf-8",
+      encoding,
       provider: envelope.provider,
       lastEditedAt: event.timestamp,
       semantics,
@@ -451,7 +463,6 @@ export function applyWebhookEnvelope(
   };
 }
 
-const DEFAULT_CONTENT_TYPE = "text/markdown";
 const DEFAULT_COALESCE_WINDOW_MS = 3_000;
 const ENVELOPE_SCAN_PAGE_SIZE = 100;
 const MAX_ENVELOPE_SCAN_PAGES = 1000;

@@ -5,6 +5,14 @@ export {
   type WebSocketConnection
 } from "./client.js";
 export {
+  RelayFileSync,
+  type RelayFileSyncOptions,
+  type RelayFileSyncPong,
+  type RelayFileSyncReconnectOptions,
+  type RelayFileSyncSocket,
+  type RelayFileSyncState
+} from "./sync.js";
+export {
   InvalidStateError,
   PayloadTooLargeError,
   QueueFullError,
