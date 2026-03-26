@@ -737,8 +737,18 @@ func (s *Syncer) applyRemoteFile(remotePath string, file RemoteFile, conflicted 
 	remoteHash := hashString(file.Content)
 	shouldWrite := true
 	if current, err := os.ReadFile(localPath); err == nil {
-		if hashBytes(current) == remoteHash {
+		localHash := hashBytes(current)
+		if localHash == remoteHash {
 			shouldWrite = false
+		} else if tracked, ok := s.state.Files[remotePath]; ok && localHash != tracked.Hash {
+			// Local file was modified since last sync — mark dirty and preserve the local edit
+			s.state.Files[remotePath] = trackedFile{
+				Revision:    tracked.Revision,
+				ContentType: tracked.ContentType,
+				Hash:        localHash,
+				Dirty:       true,
+			}
+			return nil
 		}
 	}
 	if shouldWrite {
