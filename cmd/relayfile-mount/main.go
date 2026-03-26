@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
+	"fmt"
 	"log"
 	"math/rand"
 	"net/http"
@@ -18,6 +20,36 @@ import (
 
 const websocketReconcileEvery = 10
 
+const (
+	mountModePoll = "poll"
+	mountModeFuse = "fuse"
+)
+
+var errFuseModeUnavailable = errors.New("fuse mode is not available in this build")
+
+type mountConfig struct {
+	baseURL          string
+	token            string
+	workspaceID      string
+	remotePath       string
+	eventProvider    string
+	localDir         string
+	stateFile        string
+	interval         time.Duration
+	intervalJitter   float64
+	timeout          time.Duration
+	websocketEnabled bool
+	once             bool
+	mode             string
+}
+
+type pollRunner func(context.Context, mountConfig) error
+type fuseRunner func(context.Context, mountConfig) error
+
+var defaultFuseRunner fuseRunner = func(context.Context, mountConfig) error {
+	return errFuseModeUnavailable
+}
+
 func main() {
 	baseURL := flag.String("base-url", envOrDefault("RELAYFILE_BASE_URL", "http://127.0.0.1:8080"), "relayfile base URL")
 	token := flag.String("token", strings.TrimSpace(os.Getenv("RELAYFILE_TOKEN")), "bearer token")
@@ -30,6 +62,8 @@ func main() {
 	intervalJitter := flag.Float64("interval-jitter", floatEnv("RELAYFILE_MOUNT_INTERVAL_JITTER", 0.2), "sync interval jitter ratio (0.0-1.0)")
 	timeout := flag.Duration("timeout", durationEnv("RELAYFILE_MOUNT_TIMEOUT", 15*time.Second), "per-sync timeout")
 	websocketEnabled := flag.Bool("websocket", boolEnv("RELAYFILE_MOUNT_WEBSOCKET", true), "enable websocket event streaming when available")
+	mode := flag.String("mode", envOrDefault("RELAYFILE_MOUNT_MODE", mountModePoll), "mount mode: poll or fuse")
+	fuse := flag.Bool("fuse", boolEnv("RELAYFILE_MOUNT_FUSE", false), "shortcut for --mode=fuse")
 	once := flag.Bool("once", false, "run one sync cycle and exit")
 	flag.Parse()
 
@@ -49,27 +83,83 @@ func main() {
 		*timeout = 15 * time.Second
 	}
 	*intervalJitter = clampJitterRatio(*intervalJitter)
+	resolvedMode, err := resolveMountMode(*mode, *fuse)
+	if err != nil {
+		log.Fatalf("invalid mount mode: %v", err)
+	}
 
 	rootCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	client := mountsync.NewHTTPClient(*baseURL, *token, &http.Client{Timeout: *timeout})
+	cfg := mountConfig{
+		baseURL:          *baseURL,
+		token:            strings.TrimSpace(*token),
+		workspaceID:      strings.TrimSpace(*workspaceID),
+		remotePath:       *remotePath,
+		eventProvider:    strings.TrimSpace(*eventProvider),
+		localDir:         *localDir,
+		stateFile:        *stateFile,
+		interval:         *interval,
+		intervalJitter:   *intervalJitter,
+		timeout:          *timeout,
+		websocketEnabled: *websocketEnabled,
+		once:             *once,
+		mode:             resolvedMode,
+	}
+
+	if err := executeMount(rootCtx, cfg, runPollingMount, defaultFuseRunner); err != nil {
+		if errors.Is(err, errFuseModeUnavailable) {
+			log.Fatalf("failed to start %s mount: %v; rerun with --mode=%s", cfg.mode, err, mountModePoll)
+		}
+		log.Fatalf("failed to start %s mount: %v", cfg.mode, err)
+	}
+}
+
+func resolveMountMode(mode string, fuse bool) (string, error) {
+	if fuse {
+		return mountModeFuse, nil
+	}
+	normalized := strings.ToLower(strings.TrimSpace(mode))
+	if normalized == "" {
+		return mountModePoll, nil
+	}
+	switch normalized {
+	case mountModePoll, mountModeFuse:
+		return normalized, nil
+	default:
+		return "", fmt.Errorf("%q (supported: %s, %s)", mode, mountModePoll, mountModeFuse)
+	}
+}
+
+func executeMount(rootCtx context.Context, cfg mountConfig, runPoll pollRunner, runFuse fuseRunner) error {
+	switch cfg.mode {
+	case mountModePoll:
+		return runPoll(rootCtx, cfg)
+	case mountModeFuse:
+		return runFuse(rootCtx, cfg)
+	default:
+		return fmt.Errorf("unsupported mount mode %q", cfg.mode)
+	}
+}
+
+func runPollingMount(rootCtx context.Context, cfg mountConfig) error {
+	client := mountsync.NewHTTPClient(cfg.baseURL, cfg.token, &http.Client{Timeout: cfg.timeout})
 	syncer, err := mountsync.NewSyncer(client, mountsync.SyncerOptions{
-		WorkspaceID:   strings.TrimSpace(*workspaceID),
-		RemoteRoot:    *remotePath,
-		EventProvider: strings.TrimSpace(*eventProvider),
-		LocalRoot:     *localDir,
-		StateFile:     *stateFile,
-		WebSocket:     boolPtr(*websocketEnabled),
+		WorkspaceID:   cfg.workspaceID,
+		RemoteRoot:    cfg.remotePath,
+		EventProvider: cfg.eventProvider,
+		LocalRoot:     cfg.localDir,
+		StateFile:     cfg.stateFile,
+		WebSocket:     boolPtr(cfg.websocketEnabled),
 		RootCtx:       rootCtx,
 		Logger:        log.Default(),
 	})
 	if err != nil {
-		log.Fatalf("failed to initialize mount syncer: %v", err)
+		return fmt.Errorf("initialize mount syncer: %w", err)
 	}
 
 	run := func(reconcile bool) {
-		ctx, cancel := context.WithTimeout(rootCtx, *timeout)
+		ctx, cancel := context.WithTimeout(rootCtx, cfg.timeout)
 		defer cancel()
 		var err error
 		if reconcile {
@@ -85,24 +175,24 @@ func main() {
 	}
 
 	run(true)
-	if *once {
-		return
+	if cfg.once {
+		return nil
 	}
 
 	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
-	timer := time.NewTimer(jitteredIntervalWithSample(*interval, *intervalJitter, rng.Float64()))
+	timer := time.NewTimer(jitteredIntervalWithSample(cfg.interval, cfg.intervalJitter, rng.Float64()))
 	defer timer.Stop()
 	cycle := 0
 	for {
 		select {
 		case <-rootCtx.Done():
 			log.Printf("mount sync stopping: %v", rootCtx.Err())
-			return
+			return nil
 		case <-timer.C:
 			cycle++
-			reconcile := !*websocketEnabled || cycle%websocketReconcileEvery == 0
+			reconcile := !cfg.websocketEnabled || cycle%websocketReconcileEvery == 0
 			run(reconcile)
-			timer.Reset(jitteredIntervalWithSample(*interval, *intervalJitter, rng.Float64()))
+			timer.Reset(jitteredIntervalWithSample(cfg.interval, cfg.intervalJitter, rng.Float64()))
 		}
 	}
 }
