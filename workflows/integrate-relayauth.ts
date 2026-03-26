@@ -83,7 +83,7 @@ const result = await workflow('integrate-relayauth-relayfile')
 
   .step('read-ts-sdk-client', {
     type: 'deterministic',
-    command: `head -60 ${RELAYFILE}/sdk/relayfile-sdk/src/client.ts`,
+    command: `head -60 ${RELAYFILE}/packages/relayfile-sdk/src/client.ts`,
     captureOutput: true,
   })
 
@@ -216,7 +216,7 @@ The SDK already accepts a token in RelayFileClientOptions. The change is:
 3. Add a helper: RelayFileClient.fromRelayAuth(baseUrl, relayauthToken)
    Convenience factory that creates a client authenticated via relayauth.
 
-Edit ${RELAYFILE}/sdk/relayfile-sdk/src/client.ts
+Edit ${RELAYFILE}/packages/relayfile-sdk/src/client.ts
 Write to disk.`,
     verification: { type: 'exit_code' },
   })
@@ -224,7 +224,7 @@ Write to disk.`,
   .step('verify-files', {
     type: 'deterministic',
     dependsOn: ['implement-go-auth', 'implement-mount-auth', 'implement-ts-sdk', 'write-tests'],
-    command: `cd ${RELAYFILE} && echo "=== Go files ===" && ls internal/httpapi/relayauth_test.go 2>&1 && echo "=== Go build ===" && go build ./... 2>&1 | tail -5; echo "EXIT: $?"`,
+    command: `bash -lc 'cd ${RELAYFILE} && echo "=== Go files ===" && ls internal/httpapi/relayauth_test.go 2>&1 && echo "=== Go build ===" && set -o pipefail && go build ./... 2>&1 | tail -5'`,
     captureOutput: true,
     failOnError: false,
   })
@@ -234,7 +234,7 @@ Write to disk.`,
   .step('run-tests', {
     type: 'deterministic',
     dependsOn: ['verify-files'],
-    command: `cd ${RELAYFILE} && go test ./internal/httpapi/... 2>&1 | tail -20; echo "EXIT: $?"`,
+    command: `bash -lc 'cd ${RELAYFILE} && set -o pipefail && go test ./internal/httpapi/... 2>&1 | tail -20'`,
     captureOutput: true,
     failOnError: false,
   })
