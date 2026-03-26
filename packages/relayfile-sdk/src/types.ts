@@ -68,6 +68,7 @@ export interface BulkWriteResponse {
     code: string;
     message: string;
   }>;
+  correlationId: string;
 }
 
 export interface FileQueryItem {
