@@ -121,6 +121,23 @@ const nestedIdPayload: ComposioWebhookPayload = {
   },
 };
 
+const fallbackIdPayload: ComposioWebhookPayload = {
+  type: "composio.trigger.message",
+  metadata: {
+    trigger_slug: "NOTION_PAGE_UPDATED",
+    trigger_id: "trig_fallback1",
+    connected_account_id: "ca_fallback1",
+    toolkit: "notion",
+  },
+  data: {
+    title: "Untitled page",
+    status: "draft",
+    nested: {
+      source: "webhook",
+    },
+  },
+};
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -205,6 +222,16 @@ describe("ComposioHelpers", () => {
       expect(call.path).toBe("/github/issues/issue-999.json");
     });
 
+    it("uses a deterministic fallback object ID when payload data has no ID", async () => {
+      await composio.ingestWebhook("ws_1", fallbackIdPayload);
+
+      const call = (client.ingestWebhook as ReturnType<typeof vi.fn>).mock.calls[0]![0];
+      const objectId = call.data.semantics.properties["provider.object_id"];
+
+      expect(objectId).toMatch(/^auto-/);
+      expect(call.path).toBe(`/notion/pages/${objectId}.json`);
+    });
+
     it("omits user ID header when not provided", async () => {
       await composio.ingestWebhook("ws_1", slackMessagePayload);
 
@@ -251,6 +278,14 @@ describe("ComposioHelpers", () => {
       expect(normalized.objectType).toBe("database_rows");
       expect(normalized.objectId).toBe("row-789");
       expect(normalized.eventType).toBe("created");
+    });
+
+    it("reuses the same fallback object ID across normalizations", () => {
+      const first = composio.normalize(fallbackIdPayload);
+      const second = composio.normalize(fallbackIdPayload);
+
+      expect(first.objectId).toMatch(/^auto-/);
+      expect(first.objectId).toBe(second.objectId);
     });
   });
 

@@ -124,7 +124,7 @@ function extractEventType(triggerSlug: string): string {
  * Extract a stable object ID from Composio event data.
  * Different triggers have different ID fields.
  */
-function extractObjectId(data: Record<string, unknown>): string {
+function extractObjectId(data: Record<string, unknown>): string | null {
   // Common ID fields across various providers
   const idFields = ["id", "objectId", "object_id", "ticketId", "issueId", "messageId", "orderId", "commitId"];
   for (const field of idFields) {
@@ -140,8 +140,42 @@ function extractObjectId(data: Record<string, unknown>): string {
   if (typeof data.pull_request === "object" && data.pull_request !== null && "id" in data.pull_request) {
     return String((data.pull_request as Record<string, unknown>).id);
   }
-  // Fallback: hash from trigger_id + timestamp
-  return `auto-${Date.now().toString(36)}`;
+  return null;
+}
+
+function stableStringify(value: unknown): string {
+  if (value === null || typeof value !== "object") {
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stableStringify(item)).join(",")}]`;
+  }
+  const entries = Object.entries(value as Record<string, unknown>)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, entryValue]) => `${JSON.stringify(key)}:${stableStringify(entryValue)}`);
+  return `{${entries.join(",")}}`;
+}
+
+function hashString(value: string): string {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
+}
+
+function deriveObjectId(input: ComposioWebhookPayload): string {
+  const directId = extractObjectId(input.data);
+  if (directId) {
+    return directId;
+  }
+  const fallbackSeed = stableStringify({
+    type: input.type,
+    metadata: input.metadata,
+    data: input.data,
+  });
+  return `auto-${hashString(fallbackSeed)}`;
 }
 
 /**
@@ -202,11 +236,11 @@ export class ComposioHelpers extends IntegrationProvider {
     const triggerSlug = input.metadata.trigger_slug;
     const objectType =
       TRIGGER_OBJECT_TYPE[triggerSlug] ?? inferObjectType(triggerSlug);
-    const objectId = extractObjectId(input.data);
+    const objectId = deriveObjectId(input);
     const eventType = extractEventType(triggerSlug);
 
     const path = computeCanonicalPath(toolkit, objectType, objectId);
-    const properties = this.buildSemanticProperties(input);
+    const properties = this.buildSemanticProperties(input, objectId);
     const semantics: FileSemantics = {
       properties,
       relations: [],
@@ -240,11 +274,12 @@ export class ComposioHelpers extends IntegrationProvider {
   normalize(input: ComposioWebhookPayload): WebhookInput {
     const toolkit = input.metadata.toolkit;
     const triggerSlug = input.metadata.trigger_slug;
+    const objectId = deriveObjectId(input);
     return {
       provider: toolkit,
       objectType:
         TRIGGER_OBJECT_TYPE[triggerSlug] ?? inferObjectType(triggerSlug),
-      objectId: extractObjectId(input.data),
+      objectId,
       eventType: extractEventType(triggerSlug),
       payload: input.data,
       metadata: {
@@ -259,7 +294,8 @@ export class ComposioHelpers extends IntegrationProvider {
   }
 
   private buildSemanticProperties(
-    input: ComposioWebhookPayload
+    input: ComposioWebhookPayload,
+    objectId: string
   ): Record<string, string> {
     const properties: Record<string, string> = {
       "composio.trigger_id": input.metadata.trigger_id,
@@ -269,7 +305,7 @@ export class ComposioHelpers extends IntegrationProvider {
       "provider.object_type":
         TRIGGER_OBJECT_TYPE[input.metadata.trigger_slug] ??
         inferObjectType(input.metadata.trigger_slug),
-      "provider.object_id": extractObjectId(input.data),
+      "provider.object_id": objectId,
     };
     if (input.metadata.user_id) {
       properties["composio.user_id"] = input.metadata.user_id;
