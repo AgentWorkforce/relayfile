@@ -1,0 +1,36 @@
+{
+  "groups": [
+    {
+      "id": "group-1",
+      "label": "Go CLI and Homebrew formula fixes",
+      "domain": "code-quality",
+      "findings": [
+        "cmd/relayfile-cli/main.go-Deprecated math/rand.NewSource usage-developer-review-medium",
+        "Formula/relayfile.rb-Placeholder SHA256 values with no release automation-historian-review-medium"
+      ],
+      "files": [
+        "cmd/relayfile-cli/main.go",
+        "Formula/relayfile.rb"
+      ],
+      "rationale": "Both are build/release infrastructure files outside the JS/TS ecosystem — no file overlap with group-2"
+    },
+    {
+      "id": "group-2",
+      "label": "SDK tests, package config, and site parsing fixes",
+      "domain": "testing",
+      "findings": [
+        "packages/relayfile-sdk/src/client.test.ts-Illusory test coverage — SDK tests cannot execute-historian-review, developer-cross-review-medium",
+        "packages/relayfile-sdk/package.json-SDK package.json stripped but lockfile contains devDependencies-historian-review-medium",
+        "site/src/pages/index.astro-Regex-based markdown parsing for page content-developer-review-medium"
+      ],
+      "files": [
+        "packages/relayfile-sdk/src/client.test.ts",
+        "packages/relayfile-sdk/package.json",
+        "site/src/pages/index.astro"
+      ],
+      "rationale": "All TypeScript/JS ecosystem files; SDK test and package findings share the same package directory, site file has no overlap"
+    }
+  ],
+  "totalGroups": 2,
+  "conflictCheck": "no file appears in multiple groups"
+}

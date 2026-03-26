@@ -70,6 +70,11 @@ What to expect in practice:
 4. If the write is stale, RelayFile treats it as a conflict rather than blindly replacing the newer version.
 5. Clients or operators can inspect the resulting operation and replay state.
 
+User-facing expectation:
+
+- RelayFile should surface a conflict as a failed or stale write, not as silent data loss.
+- The safest recovery path is to pull the latest version, reapply the intended change, and retry the write.
+
 Best practices:
 
 - Prefer separate files for parallel work when possible.
@@ -78,6 +83,6 @@ Best practices:
 
 ## Related Guides
 
-- Setup and first sync: `docs/guides/getting-started.md`
-- Cloud workflow model: `docs/guides/cloud-integration.md`
-- Full HTTP contract: `docs/api-reference.md`
+- Setup and first sync: [docs/guides/getting-started.md](getting-started.md)
+- Cloud workflow model: [docs/guides/cloud-integration.md](cloud-integration.md)
+- Full HTTP contract: [docs/api-reference.md](../api-reference.md)

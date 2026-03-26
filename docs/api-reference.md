@@ -13,12 +13,16 @@ export RELAYFILE_TOKEN="$(./scripts/generate-dev-token.sh ${RELAYFILE_WORKSPACE}
 export RELAYFILE_CORRELATION_ID="corr_$(date +%s)"
 ```
 
+## Authentication Headers
+
 Authenticated requests usually include:
 
 ```bash
 -H "Authorization: Bearer ${RELAYFILE_TOKEN}" \
 -H "X-Correlation-Id: ${RELAYFILE_CORRELATION_ID}"
 ```
+
+For internal ingress endpoints, production deployments may require HMAC-style service authentication instead of a Bearer token. The local development examples below keep the commands simple and focus on the request shapes.
 
 Endpoints that are intended for internal service-to-service ingress may require different auth or signing behavior in production. The examples here focus on local development and contract discovery.
 
@@ -168,7 +172,7 @@ curl -sS \
 
 Open a WebSocket stream for real-time filesystem changes.
 
-This endpoint upgrades to WebSocket rather than returning a normal REST body. The token is passed as a query parameter.
+This endpoint upgrades to WebSocket rather than returning a normal REST body. It is included here because it is part of the same user-facing API surface. The token is passed as a query parameter.
 
 ```bash
 wscat -c "ws://127.0.0.1:8080/v1/workspaces/${RELAYFILE_WORKSPACE}/fs/ws?token=${RELAYFILE_TOKEN}"

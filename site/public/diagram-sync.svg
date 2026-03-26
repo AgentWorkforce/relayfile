@@ -1,45 +1,55 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 250" width="400" height="250" role="img" aria-labelledby="title desc">
-  <title id="title">RelayFile sync flow</title>
-  <desc id="desc">Your Laptop, relayfile, and Cloud Sandbox connected by bidirectional sync arrows.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="400" height="250" viewBox="0 0 400 250" role="img" aria-labelledby="title desc">
+  <title id="title">relayfile sync flow</title>
+  <desc id="desc">Your Laptop, relayfile, and Cloud Sandbox connected with bidirectional sync arrows and file tree icons.</desc>
   <rect width="400" height="250" fill="#09090b"/>
+
   <g stroke="#22d3ee" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round">
-    <rect x="20" y="70" width="110" height="110" rx="16"/>
-    <rect x="145" y="55" width="110" height="140" rx="16"/>
-    <rect x="270" y="70" width="110" height="110" rx="16"/>
+    <rect x="20" y="58" width="104" height="134" rx="14"/>
+    <rect x="148" y="42" width="104" height="166" rx="14"/>
+    <rect x="276" y="58" width="104" height="134" rx="14"/>
 
-    <line x1="130" y1="125" x2="145" y2="125"/>
-    <path d="M138 118l7 7-7 7"/>
-    <path d="M137 118l-7 7 7 7"/>
+    <line x1="124" y1="125" x2="148" y2="125"/>
+    <path d="M138 119l10 6-10 6"/>
+    <path d="M134 112l-10 13 10 13"/>
 
-    <line x1="255" y1="125" x2="270" y2="125"/>
-    <path d="M263 118l7 7-7 7"/>
-    <path d="M262 118l-7 7 7 7"/>
+    <line x1="252" y1="125" x2="276" y2="125"/>
+    <path d="M266 119l10 6-10 6"/>
+    <path d="M262 112l-10 13 10 13"/>
 
-    <path d="M48 114h24"/>
-    <path d="M48 128h36"/>
-    <path d="M48 142h30"/>
-    <path d="M42 96h46v58H42z"/>
-    <path d="M42 108h46"/>
+    <path d="M50 90h22l8 8v50H50z"/>
+    <path d="M72 90v8h8"/>
+    <path d="M63 113v33"/>
+    <path d="M63 120h16"/>
+    <path d="M63 132h13"/>
+    <path d="M63 144h10"/>
 
-    <path d="M173 99h24"/>
-    <path d="M173 113h36"/>
-    <path d="M173 127h30"/>
-    <path d="M167 81h46v58H167z"/>
-    <path d="M167 93h46"/>
+    <path d="M178 76h22l8 8v66h-30z"/>
+    <path d="M200 76v8h8"/>
+    <path d="M191 99v49"/>
+    <path d="M191 108h16"/>
+    <path d="M191 120h13"/>
+    <path d="M191 132h10"/>
+    <path d="M191 144h8"/>
 
-    <path d="M298 114h24"/>
-    <path d="M298 128h36"/>
-    <path d="M298 142h30"/>
-    <path d="M292 96h46v58H292z"/>
-    <path d="M292 108h46"/>
+    <path d="M306 90h22l8 8v50h-30z"/>
+    <path d="M328 90v8h8"/>
+    <path d="M319 113v33"/>
+    <path d="M319 120h16"/>
+    <path d="M319 132h13"/>
+    <path d="M319 144h10"/>
   </g>
-  <g fill="#fafafa" font-family="ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" text-anchor="middle">
-    <text x="75" y="90" font-size="15" font-weight="600">Your Laptop</text>
-    <text x="200" y="76" font-size="15" font-weight="600">relayfile</text>
-    <text x="325" y="90" font-size="15" font-weight="600">Cloud Sandbox</text>
 
-    <text x="75" y="208" font-size="12" fill="#a1a1aa">local tree</text>
-    <text x="200" y="208" font-size="12" fill="#a1a1aa">sync core</text>
-    <text x="325" y="208" font-size="12" fill="#a1a1aa">agent tree</text>
+  <g fill="#ffffff" font-family="ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" text-anchor="middle">
+    <text x="72" y="80" font-size="16" font-weight="700">Your Laptop</text>
+    <text x="200" y="64" font-size="16" font-weight="700">relayfile</text>
+    <text x="328" y="80" font-size="16" font-weight="700">Cloud Sandbox</text>
+
+    <text x="72" y="170" font-size="12">Local Files</text>
+    <text x="200" y="176" font-size="12">Shared Workspace</text>
+    <text x="328" y="170" font-size="12">Sandbox Files</text>
+
+    <text x="72" y="210" font-size="11" fill="#a1a1aa">mount</text>
+    <text x="200" y="226" font-size="11" fill="#a1a1aa">bidirectional revisioned sync</text>
+    <text x="328" y="210" font-size="11" fill="#a1a1aa">agent runtime</text>
   </g>
 </svg>

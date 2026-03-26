@@ -234,7 +234,9 @@ func (c *HTTPClient) doJSON(
 			}
 			return err
 		}
-		payloadBytes, readErr := io.ReadAll(resp.Body)
+		// Limit response body to 64MB to prevent unbounded memory usage.
+		const maxResponseSize = 64 << 20
+		payloadBytes, readErr := io.ReadAll(io.LimitReader(resp.Body, maxResponseSize))
 		_ = resp.Body.Close()
 		if readErr != nil {
 			return readErr
@@ -277,6 +279,7 @@ type SyncerOptions struct {
 	StateFile     string
 	EventProvider string
 	WebSocket     *bool
+	RootCtx       context.Context
 	Logger        Logger
 }
 
@@ -294,7 +297,9 @@ type Syncer struct {
 	logger        Logger
 	state         mountState
 	loaded        bool
+	bootstrapped  bool
 	websocket     bool
+	rootCtx       context.Context
 	wsConn        *websocket.Conn
 	wsCancel      context.CancelFunc
 	mu            sync.Mutex
@@ -357,6 +362,10 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 	if opts.WebSocket != nil {
 		websocketEnabled = *opts.WebSocket
 	}
+	rootCtx := opts.RootCtx
+	if rootCtx == nil {
+		rootCtx = context.Background()
+	}
 	return &Syncer{
 		client:        client,
 		workspace:     workspace,
@@ -365,6 +374,7 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 		stateFile:     stateFile,
 		eventProvider: eventProvider,
 		websocket:     websocketEnabled,
+		rootCtx:       rootCtx,
 		logger:        opts.Logger,
 		state: mountState{
 			Files: map[string]trackedFile{},
@@ -373,29 +383,46 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 }
 
 func (s *Syncer) SyncOnce(ctx context.Context) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	return s.sync(ctx, false)
+}
 
+func (s *Syncer) Reconcile(ctx context.Context) error {
+	return s.sync(ctx, true)
+}
+
+func (s *Syncer) sync(ctx context.Context, forcePoll bool) error {
+	s.mu.Lock()
 	if err := s.loadState(); err != nil {
+		s.mu.Unlock()
 		return err
 	}
 
-	// Connect websocket outside the lock to avoid deadlock with readWebSocketLoop.
+	// Check if websocket connection is needed while holding the lock,
+	// then release before connecting to avoid deadlock with readWebSocketLoop.
 	needsWS := s.websocket && s.wsConn == nil
+	s.mu.Unlock()
+
 	if needsWS {
-		s.mu.Unlock()
 		if err := s.connectWebSocket(ctx); err != nil {
 			s.logf("websocket unavailable; using polling sync: %v", err)
 		}
-		s.mu.Lock()
 	}
+
+	// Re-acquire lock for the remainder of the sync operation.
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	conflicted, err := s.pushLocal(ctx)
 	if err != nil {
 		return err
 	}
-	if err := s.pullRemote(ctx, conflicted); err != nil {
-		return err
+
+	shouldPoll := forcePoll || !s.bootstrapped || s.wsConn == nil
+	if shouldPoll {
+		if err := s.pullRemote(ctx, conflicted); err != nil {
+			return err
+		}
+		s.bootstrapped = true
 	}
 	return s.saveState()
 }
@@ -417,12 +444,16 @@ func (s *Syncer) connectWebSocket(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	conn, _, err := websocket.Dial(ctx, wsURL, nil)
+	conn, _, err := websocket.Dial(ctx, wsURL, &websocket.DialOptions{
+		HTTPHeader: http.Header{
+			"Authorization": []string{"Bearer " + httpClient.token},
+		},
+	})
 	if err != nil {
 		return err
 	}
 
-	readCtx, cancel := context.WithCancel(ctx)
+	readCtx, cancel := context.WithCancel(s.rootCtx)
 
 	s.mu.Lock()
 	s.wsConn = conn
@@ -706,8 +737,18 @@ func (s *Syncer) applyRemoteFile(remotePath string, file RemoteFile, conflicted 
 	remoteHash := hashString(file.Content)
 	shouldWrite := true
 	if current, err := os.ReadFile(localPath); err == nil {
-		if hashBytes(current) == remoteHash {
+		localHash := hashBytes(current)
+		if localHash == remoteHash {
 			shouldWrite = false
+		} else if tracked, ok := s.state.Files[remotePath]; ok && localHash != tracked.Hash {
+			// Local file was modified since last sync — mark dirty and preserve the local edit
+			s.state.Files[remotePath] = trackedFile{
+				Revision:    tracked.Revision,
+				ContentType: tracked.ContentType,
+				Hash:        localHash,
+				Dirty:       true,
+			}
+			return nil
 		}
 	}
 	if shouldWrite {
@@ -957,6 +998,14 @@ func normalizeRemotePath(path string) string {
 	if !strings.HasPrefix(path, "/") {
 		path = "/" + path
 	}
+	// Clean the path to resolve any ".." or "." components, preventing traversal.
+	path = filepath.ToSlash(filepath.Clean(path))
+	if path == "." || path == "" {
+		return "/"
+	}
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
 	if len(path) > 1 {
 		path = strings.TrimSuffix(path, "/")
 	}
@@ -1004,7 +1053,17 @@ func remoteToLocalPath(localRoot, remoteRoot, remotePath string) (string, error)
 	if rel == "" {
 		return "", fmt.Errorf("remote path %s cannot map to local root", remotePath)
 	}
-	return filepath.Join(localRoot, filepath.FromSlash(rel)), nil
+	// Reject path traversal components in the relative path.
+	relSlash := filepath.ToSlash(rel)
+	if strings.HasPrefix(relSlash, "../") || relSlash == ".." || strings.Contains(relSlash, "/../") {
+		return "", fmt.Errorf("path %s escapes local root", remotePath)
+	}
+	joined := filepath.Join(localRoot, filepath.FromSlash(rel))
+	// Final safety check: resolved path must be under localRoot.
+	if !strings.HasPrefix(filepath.Clean(joined), localRoot+string(filepath.Separator)) && filepath.Clean(joined) != localRoot {
+		return "", fmt.Errorf("resolved path %s escapes local root %s", joined, localRoot)
+	}
+	return joined, nil
 }
 
 func localToRemotePath(localRoot, remoteRoot, localPath string) (string, error) {
@@ -1069,6 +1128,7 @@ func (c *HTTPClient) websocketURL(workspaceID string) (string, error) {
 		return "", fmt.Errorf("unsupported base url scheme %q", base.Scheme)
 	}
 	base.Path = fmt.Sprintf("/v1/workspaces/%s/fs/ws", url.PathEscape(workspaceID))
+	// TODO: Remove query-param token once server supports Authorization header on WS upgrade.
 	q := url.Values{}
 	q.Set("token", c.token)
 	base.RawQuery = q.Encode()

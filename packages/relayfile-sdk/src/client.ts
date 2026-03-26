@@ -69,6 +69,10 @@ interface NormalizedRetryOptions {
   jitterRatio: number;
 }
 
+interface ExportJsonApiResponseShape {
+  files?: FileReadResponse[];
+}
+
 type WebSocketEventName = "event" | "error" | "open" | "close";
 type WebSocketHandlerMap = {
   event: (event: FilesystemEvent) => void;
@@ -153,6 +157,16 @@ function createBlobFromResponse(response: Response): Promise<Blob> {
   return response.arrayBuffer().then((buffer) => new Blob([buffer], { type: response.headers.get("content-type") ?? undefined }));
 }
 
+function normalizeExportJsonResponse(payload: unknown): ExportJsonResponse {
+  if (Array.isArray(payload)) {
+    return { files: payload as FileReadResponse[] };
+  }
+  const data = (payload ?? {}) as ExportJsonApiResponseShape;
+  return {
+    files: Array.isArray(data.files) ? data.files : []
+  };
+}
+
 class RelayFileWebSocketConnection implements WebSocketConnection {
   private readonly socket: WebSocket;
   private readonly handlers: {
@@ -195,7 +209,14 @@ class RelayFileWebSocketConnection implements WebSocketConnection {
       }
       let parsed: FilesystemEvent;
       try {
-        parsed = JSON.parse(event.data) as FilesystemEvent;
+        const raw = JSON.parse(event.data);
+        if (typeof raw !== "object" || raw === null || typeof raw.type !== "string") {
+          throw new Error("Invalid WebSocket event: missing required 'type' field.");
+        }
+        if (raw.path !== undefined && typeof raw.path !== "string") {
+          throw new Error("Invalid WebSocket event: 'path' must be a string.");
+        }
+        parsed = raw as FilesystemEvent;
       } catch (error) {
         const parseError = error instanceof Error ? error : new Error("Failed to parse WebSocket event payload.");
         for (const handler of this.handlers.error) {
@@ -306,7 +327,7 @@ export class RelayFileClient {
   }
 
   async bulkWrite(input: BulkWriteInput): Promise<BulkWriteResponse> {
-    return this.request<BulkWriteResponse>({
+    const response = await this.performRequest({
       method: "POST",
       path: `/v1/workspaces/${encodeURIComponent(input.workspaceId)}/fs/bulk`,
       correlationId: input.correlationId,
@@ -315,6 +336,7 @@ export class RelayFileClient {
       },
       signal: input.signal
     });
+    return this.readPayload(response) as Promise<BulkWriteResponse>;
   }
 
   async deleteFile(input: DeleteFileInput): Promise<WriteQueuedResponse> {
@@ -357,7 +379,7 @@ export class RelayFileClient {
     });
 
     if (format === "json") {
-      return this.readPayload(response) as Promise<ExportJsonResponse>;
+      return normalizeExportJsonResponse(await this.readPayload(response));
     }
 
     return createBlobFromResponse(response);
@@ -659,7 +681,8 @@ export class RelayFileClient {
     signal?: AbortSignal;
   }): Promise<T> {
     const response = await this.performRequest(params);
-    return this.readPayload(response) as Promise<T>;
+    const payload = await this.readPayload(response);
+    return payload as T;
   }
 
   private async performRequest(params: {

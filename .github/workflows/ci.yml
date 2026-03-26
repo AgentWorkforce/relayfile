@@ -7,13 +7,21 @@ on:
       - main
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: "1.22"
+  NODE_VERSION: "22"
 
 jobs:
   go-test:
     name: Go Test
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -21,16 +29,17 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          go-version: ${{ env.GO_VERSION }}
           cache: true
 
-      - name: Run tests
+      - name: Run Go tests
         run: go test ./...
 
   go-build:
     name: Go Build
     runs-on: ubuntu-latest
     needs: go-test
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -38,22 +47,28 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          go-version: ${{ env.GO_VERSION }}
           cache: true
 
-      - name: Build all binaries
-        run: make build
+      - name: Build binaries
+        run: |
+          mkdir -p bin
+          go build -o bin/relayfile ./cmd/relayfile
+          go build -o bin/relayfile-mount ./cmd/relayfile-mount
+          go build -o bin/relayfile-cli ./cmd/relayfile-cli
 
-      - name: Upload binaries
+      - name: Upload binaries artifact
         uses: actions/upload-artifact@v4
         with:
           name: relayfile-binaries
           path: bin/
+          retention-days: 1
           if-no-files-found: error
 
   sdk-typecheck:
     name: SDK Typecheck
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -61,7 +76,9 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: packages/relayfile-sdk/package-lock.json
 
       - name: Install SDK dependencies
         working-directory: packages/relayfile-sdk
@@ -75,10 +92,15 @@ jobs:
         working-directory: packages/relayfile-sdk
         run: npx tsc --noEmit
 
+      - name: Test SDK
+        working-directory: packages/relayfile-sdk
+        run: npm run test
+
   e2e:
     name: E2E
     runs-on: ubuntu-latest
     needs: go-build
+    timeout-minutes: 25
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -86,24 +108,74 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          go-version: ${{ env.GO_VERSION }}
           cache: true
 
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: package-lock.json
 
-      - name: Download binaries
+      - name: Download binaries artifact
         uses: actions/download-artifact@v4
         with:
           name: relayfile-binaries
           path: bin
 
-      - name: Make binaries executable
-        run: chmod +x bin/*
+      - name: Install root dependencies
+        run: npm ci
 
       - name: Run E2E suite
         env:
           CI: "true"
-        run: npx --yes tsx scripts/e2e.ts --ci
+        run: |
+          chmod +x bin/relayfile bin/relayfile-mount bin/relayfile-cli
+          # The E2E harness builds and starts relayfile and relayfile-mount as part of the test flow.
+          npx tsx scripts/e2e.ts --ci
+
+  workers-typecheck:
+    name: Workers Typecheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check if packages/server exists
+        id: check-server
+        run: |
+          if [ -d packages/server ] && [ -f packages/server/tsconfig.json ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Setup Node
+        if: steps.check-server.outputs.exists == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            packages/server/package-lock.json
+
+      - name: Install worker dependencies
+        if: steps.check-server.outputs.exists == 'true'
+        run: |
+          if [ -f packages/server/package-lock.json ]; then
+            cd packages/server
+            npm ci
+          elif [ -f package-lock.json ]; then
+            npm ci
+          else
+            echo "No package-lock.json found for packages/server" >&2
+            exit 1
+          fi
+
+      - name: Typecheck workers
+        if: steps.check-server.outputs.exists == 'true'
+        working-directory: packages/server
+        run: npx tsc --noEmit

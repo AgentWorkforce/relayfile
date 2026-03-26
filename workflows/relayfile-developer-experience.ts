@@ -18,7 +18,7 @@
 
 import { workflow } from '@agent-relay/sdk/workflows';
 
-const RELAYFILE = '/Users/khaliqgant/Projects/AgentWorkforce/relayfile';
+const RELAYFILE = process.env.RELAYFILE_PATH || '/Users/khaliqgant/Projects/AgentWorkforce-relayfile';
 
 async function main() {
 const result = await workflow('relayfile-developer-experience')
@@ -147,7 +147,7 @@ Write a design doc at ${RELAYFILE}/docs/cli-design.md:
 
 **Config file: ~/.relayfile/credentials.json**
 {
-  "server": "https://relayfile-api.agentworkforce.workers.dev",
+  server": "https://relayfile-api.agentworkforce.workers.dev",
   "token": "eyJ...",
   "refreshToken": "...",
   "expiresAt": "..."
@@ -213,7 +213,7 @@ Subcommands:
    - Load credentials
    - Walk DIR, read all files
    - POST /v1/workspaces/{ws}/fs/bulk with file contents
-   - Show progress: "Seeding 142/250 files..."
+   - Show progress: Seeding 142/250 files..."
 
 6. relayfile export WORKSPACE --format FORMAT --output FILE
    - GET /v1/workspaces/{ws}/fs/export?format=FORMAT
@@ -281,7 +281,7 @@ Current README:
 Create/update:
 
 1. Update ${RELAYFILE}/README.md:
-   - Add "Quick Start" section at the top:
+   - Add Quick Start" section at the top:
      Install: curl -fsSL https://relayfile.dev/install.sh | sh
      Login: relayfile login --server http://localhost:9090 --token dev-token
      Seed: relayfile seed my-project ./src
@@ -332,7 +332,7 @@ Write all docs to disk.`,
 Read the current SDK: cat ${RELAYFILE}/packages/relayfile-sdk/package.json
 
 Update ${RELAYFILE}/packages/relayfile-sdk/package.json:
-- name: "@relayfile/sdk" (or "relayfile-sdk")
+- name: @relayfile/sdk" (or "relayfile-sdk")
 - version: "0.1.0"
 - main: "dist/index.js"
 - types: "dist/index.d.ts"

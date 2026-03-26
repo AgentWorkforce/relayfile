@@ -12,8 +12,8 @@
 
 import { workflow } from '@agent-relay/sdk/workflows';
 
-const RELAYFILE = '/Users/khaliqgant/Projects/AgentWorkforce/relayfile';
-const RELAYCAST_SITE = '/Users/khaliqgant/Projects/AgentWorkforce/relaycast/site';
+const RELAYFILE = process.env.RELAYFILE_PATH || '/Users/khaliqgant/Projects/AgentWorkforce-relayfile';
+const RELAYCAST_SITE = process.env.RELAYCAST_SITE_PATH || '/Users/khaliqgant/Projects/AgentWorkforce/relaycast/site';
 
 async function main() {
 const result = await workflow('relayfile-landing-page')
@@ -93,7 +93,7 @@ Spec highlights:
 Write ${RELAYFILE}/site/CONTENT.md with the complete page content:
 
 **Hero section:**
-- Headline: "Real-time filesystem for humans and agents"
+- Headline: Real-time filesystem for humans and agents"
 - Subhead: "A revision-controlled, programmable filesystem that syncs everywhere. Mount it locally, in the cloud, or in a sandbox — everyone sees the same files."
 - CTA: "Get Started" → docs, "View on GitHub" → repo
 
@@ -201,7 +201,7 @@ Content plan:
 Create these SVG files at ${RELAYFILE}/site/public/:
 
 1. diagram-sync.svg — Shows the sync flow:
-   Three boxes: "Your Laptop", "relayfile", "Cloud Sandbox"
+   Three boxes: Your Laptop", "relayfile", "Cloud Sandbox"
    Bidirectional arrows between them
    Inside each box: a file tree icon
    Style: dark background (#09090b), cyan (#22d3ee) lines, white text, rounded corners
@@ -232,7 +232,7 @@ Write all SVGs to disk.`,
     type: 'deterministic',
     dependsOn: ['scaffold-site', 'create-diagrams'],
     command: `cd ${RELAYFILE}/site && \
-echo "=== Files ===" && find src public -type f | sort && \
+echo === Files ===" && find src public -type f | sort && \
 echo "" && echo "=== Install ===" && npm install 2>&1 | tail -3 && \
 echo "" && echo "=== Build ===" && npx astro build 2>&1 | tail -10; echo "EXIT: $?"`,
     captureOutput: true,

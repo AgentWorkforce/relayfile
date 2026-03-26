@@ -8,11 +8,14 @@ import {
   PayloadTooLargeError,
 } from "./errors.js";
 import type {
+  BulkWriteResponse,
   TreeResponse,
   FileReadResponse,
   WriteQueuedResponse,
   FileQueryResponse,
   EventFeedResponse,
+  ExportJsonResponse,
+  FilesystemEvent,
   OperationStatusResponse,
   OperationFeedResponse,
   QueuedResponse,
@@ -179,6 +182,174 @@ describe("RelayFileClient — existing methods", () => {
       const url = f.mock.calls[0]![0] as string;
       expect(url).toContain("provider=github");
       expect(url).toContain("limit=10");
+    });
+  });
+
+  // ---- bulkWrite ----
+  describe("bulkWrite", () => {
+    it("returns the bulk write response matching the server contract", async () => {
+      const f = mockFetch({
+        written: 2,
+        errorCount: 1,
+        errors: [
+          {
+            path: "/restricted.md",
+            code: "forbidden",
+            message: "file access denied by permission policy",
+          },
+        ],
+        correlationId: "corr_1",
+      });
+      const client = makeClient(f);
+
+      const res: BulkWriteResponse = await client.bulkWrite({
+        workspaceId: "ws_acme",
+        files: [
+          { path: "/a.md", content: "a" },
+          { path: "/b.md", content: "b", encoding: "utf-8" },
+        ],
+      });
+
+      expect(res).toEqual({
+        written: 2,
+        errorCount: 1,
+        errors: [
+          {
+            path: "/restricted.md",
+            code: "forbidden",
+            message: "file access denied by permission policy",
+          },
+        ],
+        correlationId: "corr_1",
+      });
+
+      const init = f.mock.calls[0]![1] as RequestInit;
+      expect(init.method).toBe("POST");
+      expect(JSON.parse(init.body as string)).toEqual({
+        files: [
+          { path: "/a.md", content: "a" },
+          { path: "/b.md", content: "b", encoding: "utf-8" },
+        ],
+      });
+    });
+  });
+
+  // ---- exportWorkspace ----
+  describe("exportWorkspace", () => {
+    it("wraps JSON export arrays in a files object", async () => {
+      const f = mockFetch([
+        {
+          path: "/docs/readme.md",
+          revision: "rev_1",
+          contentType: "text/markdown",
+          content: "# Hello",
+          encoding: "utf-8",
+        },
+      ] satisfies FileReadResponse[]);
+      const client = makeClient(f);
+
+      const res = await client.exportWorkspace({
+        workspaceId: "ws_acme",
+        format: "json",
+      }) as ExportJsonResponse;
+
+      expect(res.files).toHaveLength(1);
+      expect(res.files[0]!.path).toBe("/docs/readme.md");
+      const url = f.mock.calls[0]![0] as string;
+      expect(url).toContain("/v1/workspaces/ws_acme/fs/export?format=json");
+    });
+
+    it("returns a Blob for non-JSON exports", async () => {
+      const f = vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        headers: new Headers({ "content-type": "application/gzip" }),
+        blob: () => Promise.resolve(new Blob(["archive"], { type: "application/gzip" })),
+        arrayBuffer: () => Promise.resolve(new TextEncoder().encode("archive").buffer),
+        text: () => Promise.resolve("archive"),
+      } as unknown as Response);
+      const client = makeClient(f);
+
+      const res = await client.exportWorkspace({
+        workspaceId: "ws_acme",
+        format: "tar",
+      });
+
+      expect(res).toBeInstanceOf(Blob);
+    });
+  });
+
+  // ---- connectWebSocket ----
+  describe("connectWebSocket", () => {
+    class MockWebSocket {
+      static instances: MockWebSocket[] = [];
+
+      readonly url: string;
+      private readonly listeners = new Map<string, Set<(event: any) => void>>();
+
+      constructor(url: string) {
+        this.url = url;
+        MockWebSocket.instances.push(this);
+      }
+
+      addEventListener(type: string, handler: (event: any) => void): void {
+        if (!this.listeners.has(type)) {
+          this.listeners.set(type, new Set());
+        }
+        this.listeners.get(type)!.add(handler);
+      }
+
+      close = vi.fn();
+
+      emit(type: string, event: any): void {
+        for (const handler of this.listeners.get(type) ?? []) {
+          handler(event);
+        }
+      }
+    }
+
+    beforeEach(() => {
+      MockWebSocket.instances = [];
+      Object.defineProperty(globalThis, "WebSocket", {
+        configurable: true,
+        writable: true,
+        value: MockWebSocket as unknown as typeof WebSocket,
+      });
+    });
+
+    it("connects using the workspace WebSocket endpoint and token query param", () => {
+      const client = makeClient(mockFetch({ path: "/", entries: [], nextCursor: null }));
+
+      client.connectWebSocket("ws_acme", { token: "ws_token" });
+
+      expect(MockWebSocket.instances).toHaveLength(1);
+      expect(MockWebSocket.instances[0]!.url).toBe("wss://relay.test/v1/workspaces/ws_acme/fs/ws?token=ws_token");
+    });
+
+    it("emits parsed filesystem events to the event handler", () => {
+      const client = makeClient(mockFetch({ path: "/", entries: [], nextCursor: null }));
+      const onEvent = vi.fn();
+
+      client.connectWebSocket("ws_acme", { token: "ws_token", onEvent });
+      const socket = MockWebSocket.instances[0]!;
+
+      socket.emit("message", {
+        data: JSON.stringify({
+          eventId: "evt_1",
+          type: "file.created",
+          path: "/docs/readme.md",
+          revision: "rev_1",
+          timestamp: "2026-03-25T00:00:00Z",
+        } satisfies FilesystemEvent),
+      });
+
+      expect(onEvent).toHaveBeenCalledWith({
+        eventId: "evt_1",
+        type: "file.created",
+        path: "/docs/readme.md",
+        revision: "rev_1",
+        timestamp: "2026-03-25T00:00:00Z",
+      });
     });
   });
 

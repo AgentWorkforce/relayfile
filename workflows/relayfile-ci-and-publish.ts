@@ -14,8 +14,8 @@
 
 import { workflow } from '@agent-relay/sdk/workflows';
 
-const RELAYFILE = '/Users/khaliqgant/Projects/AgentWorkforce/relayfile';
-const RELAYCAST = '/Users/khaliqgant/Projects/AgentWorkforce/relaycast';
+const RELAYFILE = process.env.RELAYFILE_PATH || '/Users/khaliqgant/Projects/AgentWorkforce-relayfile';
+const RELAYCAST = process.env.RELAYCAST_PATH || '/Users/khaliqgant/Projects/AgentWorkforce/relaycast';
 
 async function main() {
 const result = await workflow('relayfile-ci-and-publish')
@@ -72,7 +72,7 @@ const result = await workflow('relayfile-ci-and-publish')
 
   .step('read-sdk-package', {
     type: 'deterministic',
-    command: `cat ${RELAYFILE}/packages/relayfile-sdk/package.json 2>/dev/null || echo "no package.json"`,
+    command: `cat ${RELAYFILE}/packages/relayfile-sdk/package.json 2>/dev/null || echo no package.json""`,
     captureOutput: true,
   })
 
@@ -121,7 +121,7 @@ Write a design doc at ${RELAYFILE}/docs/ci-cd-design.md covering:
    - NPM dist-tag: latest/next/beta/alpha
    - Build SDK, run tests, publish to npm as @relayfile/sdk
    - Create git tag + GitHub Release
-   - CRITICAL: registry-url must be "https://registry.npmjs.org" in setup-node
+   - CRITICAL: registry-url must be https://registry.npmjs.org" in setup-node
    - CRITICAL: NODE_AUTH_TOKEN secret must be set (npm automation token)
 
 3. **release-binaries.yml** — triggered on tag push (v*):
@@ -188,7 +188,7 @@ Key requirements:
 - concurrency group to prevent parallel publishes
 - Steps:
   1. Checkout
-  2. Setup Node 22 with registry-url: "https://registry.npmjs.org"
+  2. Setup Node 22 with registry-url: https://registry.npmjs.org"
   3. Install deps: cd packages/relayfile-sdk && npm ci
   4. Version bump: npm version {type} --no-git-tag-version
   5. Build: npm run build
@@ -252,7 +252,7 @@ Current package.json:
 Update ${RELAYFILE}/packages/relayfile-sdk/package.json:
 
 {
-  "name": "@relayfile/sdk",
+  name": "@relayfile/sdk",
   "version": "0.1.0",
   "description": "TypeScript SDK for relayfile — real-time filesystem for humans and agents",
   "main": "dist/index.js",
@@ -281,7 +281,7 @@ Update ${RELAYFILE}/packages/relayfile-sdk/package.json:
 
 Also create/update ${RELAYFILE}/packages/relayfile-sdk/tsconfig.json:
 {
-  "compilerOptions": {
+  compilerOptions": {
     "target": "ES2022",
     "module": "ESNext",
     "moduleResolution": "bundler",

@@ -1,6 +1,6 @@
 # RelayFile Cloud Integration
 
-RelayFile is the shared filesystem layer for Agent Relay style cloud workflows. It gives each workflow run a workspace-backed tree that humans, automations, and cloud agents can mount at the same time.
+RelayFile is the shared filesystem layer for Agent Relay cloud workflows. It gives each workflow run a workspace-backed tree that humans, automations, and cloud agents can mount at the same time.
 
 ## How RelayFile Fits Into Cloud Workflows
 
@@ -13,6 +13,8 @@ A typical Agent Relay flow looks like this:
 5. Everyone reads and writes the same project tree through RelayFile.
 
 This makes the filesystem a first-class workflow artifact instead of a side effect hidden inside one machine or one agent process.
+
+In practice, that means a workflow can create files once and keep them available across retries, sandbox restarts, and human review without copying artifacts between systems.
 
 ## Automatic Workspace Creation Per Workflow Run
 
@@ -30,6 +32,14 @@ relayfile seed workflow-2026-03-24-1234 ./bootstrap
 ```
 
 In hosted automation, the same lifecycle is usually driven by the control plane rather than by a human at a terminal.
+
+Typical control-plane sequence:
+
+1. create or resolve a workspace for the workflow run
+2. inject credentials into the sandbox
+3. start `relayfile-mount` against that workspace
+4. let agents read and write normal files under the mounted directory
+5. keep the workspace available for human inspection or downstream jobs
 
 ## relayfile-mount In Sandbox Snapshots
 
@@ -84,5 +94,5 @@ That avoids manual upload, download, and copy-paste loops.
 
 - Use a unique workspace per workflow run when isolation matters more than continuity.
 - Reuse a long-lived workspace when a team wants a shared persistent project tree.
-- Use the sync, ops, and admin endpoints from `docs/api-reference.md` to inspect ingestion health, dead letters, and replay status.
+- Use the sync, ops, and admin endpoints from [docs/api-reference.md](../api-reference.md) to inspect ingestion health, dead letters, and replay status.
 - For external providers, submit inbound events through `POST /v1/workspaces/{workspaceId}/webhooks/ingest` and consume outbound work through the writeback queue endpoints.

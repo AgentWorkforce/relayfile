@@ -14,7 +14,7 @@
 
 import { workflow } from '@agent-relay/sdk/workflows';
 
-const RELAYFILE = '/Users/khaliqgant/Projects/AgentWorkforce/relayfile';
+const RELAYFILE = process.env.RELAYFILE_PATH || '/Users/khaliqgant/Projects/AgentWorkforce-relayfile';
 
 async function main() {
 const result = await workflow('relayfile-bulk-and-export')
@@ -134,7 +134,7 @@ Write a design doc at ${RELAYFILE}/docs/bulk-export-design.md:
 
 3. **WebSocket Events** — GET /v1/workspaces/{workspaceId}/fs/ws
    - Upgrade to WebSocket
-   - Server pushes JSON events: { type: "file.created"|"file.updated"|"file.deleted", path, revision, timestamp }
+   - Server pushes JSON events: { type: file.created"|"file.updated"|"file.deleted", path, revision, timestamp }
    - Client can send: { type: "subscribe", filter?: { paths?: string[] } }
    - Falls back to polling for environments without WebSocket support
 
@@ -182,7 +182,7 @@ Changes:
      For json: return JSON array of files.
      For patch: generate unified diff format.
    - Update handleWriteFile and handleReadFile for binary encoding support:
-     Accept "encoding" field in write request body.
+     Accept encoding" field in write request body.
      Include "encoding" field in read response when base64.
 
 3. Add encoding field to File struct in store.go:
@@ -218,7 +218,7 @@ Changes:
    - On connect: send all recent events (last 100) as catch-up
    - Subscribe to store events for this workspace
    - Push events as JSON messages: { type, path, revision, timestamp }
-   - Handle client messages: { type: "ping" } → respond with { type: "pong" }
+   - Handle client messages: { type: ping" } → respond with { type: "pong" }
    - Clean disconnect on context cancellation
 
 3. Add event subscription to store:
@@ -250,7 +250,7 @@ Current SDK types:
 Changes:
 
 1. Edit ${RELAYFILE}/packages/relayfile-sdk/src/types.ts — add:
-   - BulkWriteFile: { path: string; contentType?: string; content: string; encoding?: "utf-8" | "base64" }
+   - BulkWriteFile: { path: string; contentType?: string; content: string; encoding?: utf-8" | "base64" }
    - BulkWriteInput: { workspaceId: string; files: BulkWriteFile[]; correlationId?: string; signal?: AbortSignal }
    - BulkWriteResponse: { imported: number; errors: { path: string; error: string }[] }
    - ExportFormat: "tar" | "json" | "patch"

@@ -19,20 +19,13 @@ env:
 
 jobs:
   build:
-    name: Build ${{ matrix.goos }}-${{ matrix.goarch }}
+    name: Build ${{ matrix.os }}-${{ matrix.arch }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - goos: linux
-            goarch: amd64
-          - goos: linux
-            goarch: arm64
-          - goos: darwin
-            goarch: amd64
-          - goos: darwin
-            goarch: arm64
+        os: [linux, darwin]
+        arch: [amd64, arm64]
 
     steps:
       - name: Checkout
@@ -44,35 +37,51 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
           cache: true
 
-      - name: Cross-compile binaries
+      - name: Cross-compile release binaries
         env:
           CGO_ENABLED: "0"
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
+          GOOS: ${{ matrix.os }}
+          GOARCH: ${{ matrix.arch }}
         run: |
           mkdir -p dist
+
           go build -o "dist/relayfile-${GOOS}-${GOARCH}" ./cmd/relayfile
           go build -o "dist/relayfile-mount-${GOOS}-${GOARCH}" ./cmd/relayfile-mount
           go build -o "dist/relayfile-cli-${GOOS}-${GOARCH}" ./cmd/relayfile-cli
 
+      - name: Create tarballs for Homebrew/install.sh
+        working-directory: dist
+        run: |
+          for bin in relayfile relayfile-mount relayfile-cli; do
+            cp "${bin}-${{ matrix.os }}-${{ matrix.arch }}" "${bin}"
+            tar -czf "${bin}_${{ matrix.os }}_${{ matrix.arch }}.tar.gz" "${bin}"
+            rm "${bin}"
+          done
+
       - name: Generate SHA256 checksums
         working-directory: dist
         run: |
-          shasum -a 256 \
-            "relayfile-${{ matrix.goos }}-${{ matrix.goarch }}" \
-            "relayfile-mount-${{ matrix.goos }}-${{ matrix.goarch }}" \
-            "relayfile-cli-${{ matrix.goos }}-${{ matrix.goarch }}" \
-            > "checksums-${{ matrix.goos }}-${{ matrix.goarch }}.txt"
+          sha256sum \
+            "relayfile_${{ matrix.os }}_${{ matrix.arch }}.tar.gz" \
+            "relayfile-mount_${{ matrix.os }}_${{ matrix.arch }}.tar.gz" \
+            "relayfile-cli_${{ matrix.os }}_${{ matrix.arch }}.tar.gz" \
+            "relayfile-${{ matrix.os }}-${{ matrix.arch }}" \
+            "relayfile-mount-${{ matrix.os }}-${{ matrix.arch }}" \
+            "relayfile-cli-${{ matrix.os }}-${{ matrix.arch }}" \
+            > "checksums-${{ matrix.os }}-${{ matrix.arch }}.txt"
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: release-${{ matrix.goos }}-${{ matrix.goarch }}
+          name: release-${{ matrix.os }}-${{ matrix.arch }}
           path: |
-            dist/relayfile-${{ matrix.goos }}-${{ matrix.goarch }}
-            dist/relayfile-mount-${{ matrix.goos }}-${{ matrix.goarch }}
-            dist/relayfile-cli-${{ matrix.goos }}-${{ matrix.goarch }}
-            dist/checksums-${{ matrix.goos }}-${{ matrix.goarch }}.txt
+            dist/relayfile_${{ matrix.os }}_${{ matrix.arch }}.tar.gz
+            dist/relayfile-mount_${{ matrix.os }}_${{ matrix.arch }}.tar.gz
+            dist/relayfile-cli_${{ matrix.os }}_${{ matrix.arch }}.tar.gz
+            dist/relayfile-${{ matrix.os }}-${{ matrix.arch }}
+            dist/relayfile-mount-${{ matrix.os }}-${{ matrix.arch }}
+            dist/relayfile-cli-${{ matrix.os }}-${{ matrix.arch }}
+            dist/checksums-${{ matrix.os }}-${{ matrix.arch }}.txt
 
   release:
     name: Publish GitHub Release
@@ -86,6 +95,11 @@ jobs:
           path: release-assets
           merge-multiple: true
 
+      - name: Merge per-platform checksums into checksums.txt
+        run: |
+          cat release-assets/checksums-*.txt > release-assets/checksums.txt
+          rm release-assets/checksums-*.txt
+
       - name: Show release assets
         run: ls -lah release-assets
 
@@ -95,6 +109,59 @@ jobs:
           tag_name: ${{ github.ref_name }}
           files: release-assets/*
           generate_release_notes: true
+
+  update-homebrew:
+    name: Update Homebrew Formula
+    runs-on: ubuntu-latest
+    needs: release
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Download release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Update Formula/relayfile.rb
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          DARWIN_ARM64_SHA=$(sha256sum release-assets/relayfile-cli_darwin_arm64.tar.gz | awk '{print $1}')
+          DARWIN_AMD64_SHA=$(sha256sum release-assets/relayfile-cli_darwin_amd64.tar.gz | awk '{print $1}')
+          LINUX_ARM64_SHA=$(sha256sum release-assets/relayfile-cli_linux_arm64.tar.gz | awk '{print $1}')
+          LINUX_AMD64_SHA=$(sha256sum release-assets/relayfile-cli_linux_amd64.tar.gz | awk '{print $1}')
+
+          sed -i 's/version ".*"/version "'"${VERSION}"'"/' Formula/relayfile.rb
+
+          export DARWIN_ARM64_SHA DARWIN_AMD64_SHA LINUX_ARM64_SHA LINUX_AMD64_SHA
+          python3 << 'PYEOF'
+          import re, os
+          sha_map = {
+              "darwin_arm64": os.environ["DARWIN_ARM64_SHA"],
+              "darwin_amd64": os.environ["DARWIN_AMD64_SHA"],
+              "linux_arm64": os.environ["LINUX_ARM64_SHA"],
+              "linux_amd64": os.environ["LINUX_AMD64_SHA"],
+          }
+          with open("Formula/relayfile.rb") as f:
+              content = f.read()
+          for key, sha in sha_map.items():
+              pattern = r'(url ".*' + key + r'.*"\n\s+sha256 )"[^"]*"'
+              content = re.sub(pattern, r'\1"' + sha + '"', content)
+          with open("Formula/relayfile.rb", "w") as f:
+              f.write(content)
+          PYEOF
+
+      - name: Commit and push formula update
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/relayfile.rb
+          git commit -m "chore: update Homebrew formula for ${GITHUB_REF_NAME}"
+          git push
 
   docker:
     name: Build and Push Docker Image

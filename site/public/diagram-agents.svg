@@ -1,42 +1,46 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 250" width="400" height="250" role="img" aria-labelledby="title desc">
-  <title id="title">Multi-agent collaboration through RelayFile</title>
-  <desc id="desc">Backend Agent, Frontend Agent, and Human Developer sync through a shared relayfile workspace with file change events flowing across connections.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="400" height="250" viewBox="0 0 400 250" role="img" aria-labelledby="title desc">
+  <title id="title">relayfile multi-agent collaboration</title>
+  <desc id="desc">Backend Agent, Frontend Agent, and Human Developer connected to one relayfile workspace with sync arrows and file change events.</desc>
   <rect width="400" height="250" fill="#09090b"/>
+
   <g stroke="#22d3ee" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round">
-    <rect x="134" y="88" width="132" height="74" rx="18"/>
-    <rect x="28" y="26" width="108" height="54" rx="16"/>
-    <rect x="264" y="26" width="108" height="54" rx="16"/>
-    <rect x="146" y="182" width="108" height="42" rx="16"/>
+    <rect x="126" y="88" width="148" height="74" rx="18"/>
+    <rect x="26" y="26" width="118" height="48" rx="14"/>
+    <rect x="256" y="26" width="118" height="48" rx="14"/>
+    <rect x="118" y="186" width="164" height="40" rx="14"/>
 
-    <line x1="136" y1="78" x2="170" y2="96"/>
-    <path d="M161 88l9 8-12 0"/>
-    <path d="M154 77l-10 0 4 10"/>
+    <line x1="144" y1="74" x2="173" y2="96"/>
+    <path d="M160 84l13 12-16-1"/>
+    <path d="M154 74l-10 0 4 9"/>
 
-    <line x1="264" y1="78" x2="230" y2="96"/>
-    <path d="M242 88l-12 8 3-13"/>
-    <path d="M251 77h10l-4 10"/>
+    <line x1="256" y1="74" x2="227" y2="96"/>
+    <path d="M243 95l-16 1 13-12"/>
+    <path d="M246 74l10 0-4 9"/>
 
-    <line x1="200" y1="182" x2="200" y2="162"/>
-    <path d="M193 169l7-7 7 7"/>
-    <path d="M193 175l7 7 7-7"/>
+    <line x1="200" y1="186" x2="200" y2="162"/>
+    <path d="M194 170l6-8 6 8"/>
+    <path d="M194 178l6 8 6-8"/>
 
-    <path d="M72 110c12-8 31-6 44 2"/>
-    <path d="M328 110c-12-8-31-6-44 2"/>
-    <path d="M110 194c28 12 152 12 180 0"/>
+    <path d="M91 101c21 0 36 5 49 14"/>
+    <path d="M309 101c-21 0-36 5-49 14"/>
+    <path d="M138 178c23 7 101 7 124 0"/>
 
-    <circle cx="94" cy="103" r="2.5" fill="#22d3ee"/>
-    <circle cx="305" cy="103" r="2.5" fill="#22d3ee"/>
-    <circle cx="200" cy="194" r="2.5" fill="#22d3ee"/>
+    <circle cx="110" cy="105" r="3" fill="#22d3ee"/>
+    <circle cx="290" cy="105" r="3" fill="#22d3ee"/>
+    <circle cx="178" cy="178" r="3" fill="#22d3ee"/>
+    <circle cx="222" cy="178" r="3" fill="#22d3ee"/>
   </g>
-  <g fill="#fafafa" font-family="ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" text-anchor="middle">
-    <text x="200" y="118" font-size="16" font-weight="600">relayfile</text>
-    <text x="200" y="137" font-size="16" font-weight="600">workspace</text>
-    <text x="82" y="58" font-size="14" font-weight="600">Backend Agent</text>
-    <text x="318" y="58" font-size="14" font-weight="600">Frontend Agent</text>
-    <text x="200" y="208" font-size="14" font-weight="600">Human Developer</text>
 
-    <text x="95" y="119" font-size="10" fill="#a1a1aa">file change events</text>
-    <text x="305" y="119" font-size="10" fill="#a1a1aa">sync events</text>
-    <text x="200" y="240" font-size="10" fill="#a1a1aa">shared edits propagate across the workspace</text>
+  <g fill="#ffffff" font-family="ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" text-anchor="middle">
+    <text x="200" y="118" font-size="16" font-weight="700">relayfile workspace</text>
+    <text x="200" y="138" font-size="11" fill="#a1a1aa">shared files, revisions, events</text>
+
+    <text x="85" y="55" font-size="14" font-weight="700">Backend Agent</text>
+    <text x="315" y="55" font-size="14" font-weight="700">Frontend Agent</text>
+    <text x="200" y="211" font-size="14" font-weight="700">Human Developer</text>
+
+    <text x="91" y="121" font-size="10" fill="#a1a1aa">file events</text>
+    <text x="309" y="121" font-size="10" fill="#a1a1aa">sync</text>
+    <text x="200" y="240" font-size="10" fill="#a1a1aa">everyone sees the same workspace in real time</text>
   </g>
 </svg>

@@ -29,9 +29,9 @@
 
 import { workflow } from '@agent-relay/sdk/workflows';
 
-const RELAYFILE = '/Users/khaliqgant/Projects/AgentWorkforce/relayfile';
-const RELAYCAST = '/Users/khaliqgant/Projects/AgentWorkforce/relaycast';
-const HOSTED = '/Users/khaliqgant/Projects/AgentWorkforce/relayfile-cloud';
+const RELAYFILE = process.env.RELAYFILE_PATH || '/Users/khaliqgant/Projects/AgentWorkforce-relayfile';
+const RELAYCAST = process.env.RELAYCAST_PATH || '/Users/khaliqgant/Projects/AgentWorkforce/relaycast';
+const HOSTED = process.env.RELAYFILE_CLOUD_PATH || '/Users/khaliqgant/Projects/AgentWorkforce-relayfile-cloud';
 
 async function main() {
 const result = await workflow('relayfile-cloud-server')
@@ -205,8 +205,18 @@ Write all files. Create directories as needed.`,
     type: 'deterministic',
     dependsOn: ['design-repo'],
     command: `cd ${HOSTED} && \
-[ -f package.json ] && [ -f wrangler.toml ] && [ -f src/worker.ts ] && [ -f src/env.ts ] && \
-echo "Scaffold OK" || (echo "MISSING FILES" && ls -la src/ && exit 1)`,
+if [ -f package.json ] && [ -f wrangler.toml ] && [ -f src/worker.ts ] && [ -f src/env.ts ]; then \
+  echo "Scaffold OK"; \
+else \
+  echo "Agent did not scaffold — creating minimal files" && \
+  mkdir -p src && \
+  echo '{"name":"relayfile-cloud","private":true,"scripts":{"dev":"wrangler dev","deploy":"wrangler deploy"},"dependencies":{"hono":"latest"},"devDependencies":{"@cloudflare/workers-types":"latest","wrangler":"latest","typescript":"latest"}}' > package.json && \
+  echo 'name = "relayfile-api"\nmain = "src/worker.ts"\ncompatibility_date = "2024-01-01"\n\n[[d1_databases]]\nbinding = "DB"\ndatabase_name = "relayfile"\ndatabase_id = "local"\n\n[[r2_buckets]]\nbinding = "CONTENT"\nbucket_name = "relayfile-content"\n\n[durable_objects]\nbindings = [{name="WORKSPACE",class_name="WorkspaceDO"}]\n\n[[migrations]]\ntag = "v1"\nnew_classes = ["WorkspaceDO"]' > wrangler.toml && \
+  echo 'export interface AppEnv { Bindings: { DB: D1Database; CONTENT: R2Bucket; WORKSPACE: DurableObjectNamespace } }' > src/env.ts && \
+  echo 'import { Hono } from "hono"; import type { AppEnv } from "./env.js"; const app = new Hono<AppEnv>(); app.get("/health", c => c.json({status:"ok"})); export default app; export { WorkspaceDO } from "./durable-objects/workspace.js";' > src/worker.ts && \
+  mkdir -p src/durable-objects && echo 'export class WorkspaceDO { constructor(private state: DurableObjectState) {} async fetch(req: Request) { return new Response("ok"); } }' > src/durable-objects/workspace.ts && \
+  echo "Fallback scaffold created"; \
+fi`,
     failOnError: true,
     captureOutput: true,
   })

@@ -3,25 +3,27 @@
   "version": "0.1.0",
   "description": "TypeScript SDK for relayfile — real-time filesystem for humans and agents",
   "main": "dist/index.js",
-  "module": "dist/index.js",
   "types": "dist/index.d.ts",
   "type": "module",
   "files": [
-    "dist",
-    "README.md",
-    "LICENSE"
+    "dist"
   ],
   "scripts": {
     "build": "tsc",
-    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
     "prepublishOnly": "npm run build"
   },
+  "devDependencies": {
+    "typescript": "^5.7.3",
+    "vitest": "^3.0.0"
+  },
   "publishConfig": {
-    "access": "public"
+    "access": "public",
+    "provenance": true
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/AgentWorkforce/relayfile.git",
+    "url": "https://github.com/AgentWorkforce/relayfile",
     "directory": "packages/relayfile-sdk"
   },
   "license": "MIT",
@@ -34,8 +36,5 @@
   ],
   "engines": {
     "node": ">=18"
-  },
-  "devDependencies": {
-    "typescript": "^5.7.3"
   }
 }

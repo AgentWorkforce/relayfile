@@ -42,6 +42,7 @@ export interface FileReadResponse {
 export interface FileWriteRequest {
   contentType?: string;
   content: string;
+  encoding?: "utf-8" | "base64";
   semantics?: FileSemantics;
 }
 
@@ -121,9 +122,9 @@ export interface FilesystemEvent {
   type: FilesystemEventType;
   path: string;
   revision: string;
-  origin: EventOrigin;
+  origin?: EventOrigin;
   provider?: string;
-  correlationId: string;
+  correlationId?: string;
   timestamp: string;
 }
 
@@ -141,7 +142,9 @@ export interface ExportOptions {
   signal?: AbortSignal;
 }
 
-export type ExportJsonResponse = FileReadResponse[];
+export interface ExportJsonResponse {
+  files: FileReadResponse[];
+}
 
 export type OperationStatus =
   | "pending"

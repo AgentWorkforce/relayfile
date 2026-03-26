@@ -1,30 +1,59 @@
 ---
-interface Feature {
+interface ProblemPoint {
   title: string;
   body: string;
 }
 
+interface SolutionCard {
+  title: string;
+  paragraphs: string[];
+  code?: {
+    language: string;
+    code: string;
+  };
+}
+
 interface Props {
-  introTitle: string;
-  introBody: string;
-  problemPoints: string[];
-  features: Feature[];
+  problemTitle: string;
+  problemParagraphs: string[];
+  problemPoints: ProblemPoint[];
+  solutionTitle: string;
+  solutionParagraphs: string[];
+  solutionCards: SolutionCard[];
+  programmableParagraphs: string[];
   programmablePoints: string[];
 }
 
-const { introTitle, introBody, problemPoints, features, programmablePoints } = Astro.props;
+const {
+  problemTitle,
+  problemParagraphs,
+  problemPoints,
+  solutionTitle,
+  solutionParagraphs,
+  solutionCards,
+  programmableParagraphs,
+  programmablePoints
+} = Astro.props;
 ---
 
-<section class="grid gap-8 lg:grid-cols-[1.15fr_0.85fr]">
-  <div class="section-shell p-8 sm:p-10">
-    <p class="section-heading">Why This Exists</p>
-    <h2 class="section-title">{introTitle}</h2>
-    <p class="mt-6 text-base leading-8 text-zinc-300">{introBody}</p>
+<section class="grid gap-8 lg:grid-cols-[1.05fr_0.95fr]">
+  <div class="surface-panel p-8 sm:p-10">
+    <p class="eyebrow">Problem</p>
+    <h2 class="section-title">{problemTitle}</h2>
+    <div class="content-prose mt-6">
+      {
+        problemParagraphs.map((paragraph) => (
+          <p set:html={paragraph}></p>
+        ))
+      }
+    </div>
+
     <div class="mt-8 grid gap-4">
       {
         problemPoints.map((point) => (
-          <div class="rounded-2xl border border-zinc-800 bg-zinc-950/70 p-5">
-            <p class="text-sm leading-7 text-zinc-300">{point}</p>
+          <div class="rounded-2xl border border-zinc-800 bg-zinc-950/80 p-5">
+            <h3 class="text-sm font-semibold text-zinc-100">{point.title}</h3>
+            <p class="mt-2 text-sm leading-7 text-zinc-400" set:html={point.body}></p>
           </div>
         ))
       }
@@ -32,23 +61,58 @@ const { introTitle, introBody, problemPoints, features, programmablePoints } = A
   </div>
 
   <div class="space-y-6">
+    <article class="surface-panel p-8">
+      <p class="eyebrow">Solution</p>
+      <h2 class="section-title">{solutionTitle}</h2>
+      <div class="content-prose mt-6">
+        {
+          solutionParagraphs.map((paragraph) => (
+            <p set:html={paragraph}></p>
+          ))
+        }
+      </div>
+    </article>
+
     {
-      features.map((feature) => (
-        <article class="section-shell p-7">
-          <h3 class="text-xl font-semibold text-zinc-50">{feature.title}</h3>
-          <p class="mt-3 text-sm leading-7 text-zinc-300">{feature.body}</p>
+      solutionCards.map((card) => (
+        <article class="surface-panel p-7">
+          <h3 class="text-xl font-semibold text-zinc-50">{card.title}</h3>
+          <div class="content-prose mt-3">
+            {
+              card.paragraphs.map((paragraph) => (
+                <p set:html={paragraph}></p>
+              ))
+            }
+          </div>
+          {
+            card.code && (
+              <div class="code-frame mt-5">
+                <div class="code-frame__header">
+                  <span>{card.code.language}</span>
+                </div>
+                <pre class="overflow-x-auto p-5 text-sm leading-7 text-zinc-200"><code>{card.code.code}</code></pre>
+              </div>
+            )
+          }
         </article>
       ))
     }
 
-    <article class="section-shell p-7">
+    <article class="surface-panel p-7">
       <h3 class="text-xl font-semibold text-zinc-50">Programmable by default</h3>
+      <div class="content-prose mt-3">
+        {
+          programmableParagraphs.map((paragraph) => (
+            <p set:html={paragraph}></p>
+          ))
+        }
+      </div>
       <ul class="mt-4 space-y-3 text-sm leading-7 text-zinc-300">
         {
           programmablePoints.map((point) => (
             <li class="flex gap-3">
               <span class="mt-2 h-2 w-2 rounded-full bg-cyan-400"></span>
-              <span>{point}</span>
+              <span set:html={point}></span>
             </li>
           ))
         }
