@@ -1,0 +1,53 @@
+name: Cloud Preview
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, closed]
+
+jobs:
+  dispatch-deploy:
+    name: Trigger Cloud Preview
+    if: github.event.action != 'closed'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch preview deploy
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.CLOUD_DISPATCH_TOKEN }}
+          script: |
+            await github.rest.actions.createWorkflowDispatch({
+              owner: 'AgentWorkforce',
+              repo: 'cloud',
+              workflow_id: 'preview-relayfile.yml',
+              ref: 'main',
+              inputs: {
+                pr_number: String(context.payload.pull_request.number),
+                head_sha: context.payload.pull_request.head.sha,
+                sdk_ref: context.payload.pull_request.head.ref,
+                source_repo: context.payload.repository.full_name,
+                action: 'deploy',
+              },
+            });
+
+  dispatch-cleanup:
+    name: Cleanup Cloud Preview
+    if: github.event.action == 'closed'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch preview cleanup
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.CLOUD_DISPATCH_TOKEN }}
+          script: |
+            await github.rest.actions.createWorkflowDispatch({
+              owner: 'AgentWorkforce',
+              repo: 'cloud',
+              workflow_id: 'preview-relayfile.yml',
+              ref: 'main',
+              inputs: {
+                pr_number: String(context.payload.pull_request.number),
+                head_sha: context.payload.pull_request.head.sha,
+                source_repo: context.payload.repository.full_name,
+                action: 'cleanup',
+              },
+            });
