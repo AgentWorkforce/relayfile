@@ -1190,7 +1190,7 @@ func (s *Store) WriteFile(req WriteRequest) (WriteResult, error) {
 
 	existing, exists := ws.Files[path]
 	if !exists {
-		if req.IfMatch != "0" {
+		if req.IfMatch != "0" && req.IfMatch != "*" {
 			s.mu.Unlock()
 			return WriteResult{}, ErrNotFound
 		}
@@ -1213,7 +1213,7 @@ func (s *Store) WriteFile(req WriteRequest) (WriteResult, error) {
 		return result, nil
 	}
 
-	if req.IfMatch != existing.Revision {
+	if req.IfMatch != "*" && req.IfMatch != existing.Revision {
 		s.mu.Unlock()
 		return WriteResult{}, &ConflictError{
 			ExpectedRevision:      req.IfMatch,
@@ -1363,7 +1363,7 @@ func (s *Store) DeleteFile(req DeleteRequest) (WriteResult, error) {
 		s.mu.Unlock()
 		return WriteResult{}, ErrNotFound
 	}
-	if req.IfMatch != existing.Revision {
+	if req.IfMatch != "*" && req.IfMatch != existing.Revision {
 		s.mu.Unlock()
 		return WriteResult{}, &ConflictError{
 			ExpectedRevision:      req.IfMatch,
@@ -2381,18 +2381,35 @@ func (s *Store) GetPendingWritebacks(workspaceID string) []map[string]any {
 		return []map[string]any{}
 	}
 
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	ws, ok := s.workspaces[workspaceID]
+	if !ok {
+		return []map[string]any{}
+	}
+
 	items := snapshotter.SnapshotWritebacks()
 	result := make([]map[string]any, 0)
 	for _, item := range items {
-		if item.WorkspaceID == workspaceID {
-			result = append(result, map[string]any{
-				"id":            item.OpID,
-				"workspaceId":   item.WorkspaceID,
-				"path":          item.Path,
-				"revision":      item.Revision,
-				"correlationId": item.CorrelationID,
-			})
+		if item.WorkspaceID != workspaceID {
+			continue
 		}
+		op, ok := ws.Ops[item.OpID]
+		if !ok {
+			continue
+		}
+		// External consumers should only see work that still needs processing.
+		if op.Status != "pending" && op.Status != "running" {
+			continue
+		}
+		result = append(result, map[string]any{
+			"id":            item.OpID,
+			"workspaceId":   item.WorkspaceID,
+			"path":          item.Path,
+			"revision":      item.Revision,
+			"correlationId": item.CorrelationID,
+		})
 	}
 	return result
 }
