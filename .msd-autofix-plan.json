@@ -2,30 +2,30 @@
   "groups": [
     {
       "id": "group-1",
-      "label": "CI workflow fix in contract.yml",
+      "label": "FUSE mount invalidation and directory listing fixes",
       "domain": "reliability",
       "findings": [
-        "2995682752"
+        "2997959423",
+        "2997959507"
       ],
       "files": [
-        ".github/workflows/contract.yml"
+        "internal/mountfuse/wsinvalidate.go",
+        "internal/mountfuse/dir.go"
       ],
-      "rationale": "Single CI workflow file, isolated from core package changes"
+      "rationale": "Two separate files in mountfuse package with one finding each; grouped for a single worker to handle both without file conflicts"
     },
     {
       "id": "group-2",
-      "label": "Core package fixes in webhooks.ts and acl.ts",
-      "domain": "code-quality",
+      "label": "FUSE file read/write operation fixes",
+      "domain": "reliability",
       "findings": [
-        "2995839572",
-        "2995839732",
-        "2995839906"
+        "2997959660",
+        "2997959755"
       ],
       "files": [
-        "packages/core/src/webhooks.ts",
-        "packages/core/src/acl.ts"
+        "internal/mountfuse/file.go"
       ],
-      "rationale": "All three findings are in the same packages/core/src directory; webhooks.ts has two findings and acl.ts has one, all from the same review"
+      "rationale": "Both findings are in the same file (file.go); must be handled by a single worker to avoid conflicts"
     }
   ],
   "totalGroups": 2,

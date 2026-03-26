@@ -131,7 +131,7 @@ func (w *WSInvalidator) websocketURL() (string, error) {
 	default:
 		return "", fmt.Errorf("unsupported base URL scheme %q", base.Scheme)
 	}
-	base.Path = fmt.Sprintf("/v1/workspaces/%s/fs/events/ws", url.PathEscape(w.workspaceID))
+	base.Path = fmt.Sprintf("/v1/workspaces/%s/fs/ws", url.PathEscape(w.workspaceID))
 	q := base.Query()
 	q.Set("token", w.token)
 	base.RawQuery = q.Encode()

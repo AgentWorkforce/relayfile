@@ -127,7 +127,7 @@ func (n *DirNode) Create(ctx context.Context, name string, flags uint32, mode ui
 	out.SetAttrTimeout(n.state.attrTTL)
 	handle := node.newHandle([]byte{}, meta.revision, meta.contentType, true)
 	n.state.invalidate(remotePath)
-	return child, handle, flags, 0
+	return child, handle, fuse.FOPEN_KEEP_CACHE, 0
 }
 
 func (n *DirNode) Unlink(ctx context.Context, name string) syscall.Errno {

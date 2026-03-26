@@ -220,7 +220,6 @@ func (h *FileHandle) flush(ctx context.Context) syscall.Errno {
 		ContentType: contentType,
 		Content:     string(body),
 	}
-	h.node.state.putFile(file)
 	h.node.state.invalidate(h.node.path)
 	h.node.state.putFile(file)
 	h.node.updateFromBuffer(body, result.TargetRevision, contentType)
@@ -234,6 +233,7 @@ func (h *FileHandle) flush(ctx context.Context) syscall.Errno {
 }
 
 func (n *FileNode) fillEntry(out *fuse.EntryOut) syscall.Errno {
+	n.mu.RLock()
 	meta := nodeMeta{
 		path:        n.path,
 		mode:        syscall.S_IFREG | defaultFileMode,
@@ -242,6 +242,7 @@ func (n *FileNode) fillEntry(out *fuse.EntryOut) syscall.Errno {
 		modTime:     zeroTimeToNow(n.modTime),
 		contentType: n.contentType,
 	}
+	n.mu.RUnlock()
 	meta.fillEntry(out, n.state)
 	return 0
 }

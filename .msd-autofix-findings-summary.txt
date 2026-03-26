@@ -1,4 +1,4 @@
-1. [MEDIUM] .github/workflows/contract.yml:35 — <!-- devin-review-comment {"id": "BUG_pr-review-job-ca1d91a9d6c74847bff18a6d13f94f7c_0001", "file_path": ".github/workfl
-2. [MEDIUM] packages/core/src/webhooks.ts:594 — <!-- devin-review-comment {"id": "BUG_pr-review-job-ccdef9cc24a84af5abb66d100b3ae3ca_0001", "file_path": "packages/core/
-3. [MEDIUM] packages/core/src/webhooks.ts:413 — <!-- devin-review-comment {"id": "BUG_pr-review-job-ccdef9cc24a84af5abb66d100b3ae3ca_0002", "file_path": "packages/core/
-4. [MEDIUM] packages/core/src/acl.ts:177 — <!-- devin-review-comment {"id": "BUG_pr-review-job-ccdef9cc24a84af5abb66d100b3ae3ca_0003", "file_path": "packages/core/
+1. [MEDIUM] internal/mountfuse/wsinvalidate.go:134 — <!-- devin-review-comment {"id": "BUG_pr-review-job-c2f61fc1a26f4c2395d9e6bdd2c66929_0001", "file_path": "internal/mount
+2. [MEDIUM] internal/mountfuse/dir.go:130 — <!-- devin-review-comment {"id": "BUG_pr-review-job-c2f61fc1a26f4c2395d9e6bdd2c66929_0002", "file_path": "internal/mount
+3. [MEDIUM] internal/mountfuse/file.go:247 — <!-- devin-review-comment {"id": "BUG_pr-review-job-c2f61fc1a26f4c2395d9e6bdd2c66929_0003", "file_path": "internal/mount
+4. [MEDIUM] internal/mountfuse/file.go:225 — <!-- devin-review-comment {"id": "BUG_pr-review-job-c2f61fc1a26f4c2395d9e6bdd2c66929_0004", "file_path": "internal/mount
