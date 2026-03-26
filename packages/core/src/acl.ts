@@ -173,7 +173,19 @@ function normalizePath(path: string): string {
     return "/";
   }
   const prefixed = trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
-  return prefixed.length > 1 ? prefixed.replace(/\/+$/, "") : "/";
+  const parts = prefixed.split("/");
+  const resolved: string[] = [];
+  for (const part of parts) {
+    if (part === "." || part === "") {
+      continue;
+    } else if (part === "..") {
+      resolved.pop();
+    } else {
+      resolved.push(part);
+    }
+  }
+  const result = "/" + resolved.join("/");
+  return result.length > 1 ? result.replace(/\/+$/, "") : "/";
 }
 
 function joinPath(base: string, child: string): string {

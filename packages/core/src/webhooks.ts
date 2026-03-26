@@ -410,6 +410,14 @@ export function applyWebhookEnvelope(
   }
 
   if (event.type === "file.deleted") {
+    if (options.isPathWriteAllowed && !options.isPathWriteAllowed(event.path)) {
+      return {
+        status: "ignored",
+        eventType: event.type,
+        path: event.path,
+        revision: null,
+      };
+    }
     storage.deleteFile(event.path);
     const revision = appendSyncEvent(
       storage,
@@ -591,7 +599,7 @@ function withinCoalesceWindow(
   windowMs: number,
 ): boolean {
   if (windowMs <= 0) {
-    return true;
+    return false;
   }
   const existingTs = Date.parse(existingReceivedAt);
   const incomingTs = Date.parse(incomingReceivedAt);

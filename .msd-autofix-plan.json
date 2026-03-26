@@ -2,92 +2,32 @@
   "groups": [
     {
       "id": "group-1",
-      "label": "Webhook security, ACL bypass, pagination safety, and race conditions",
-      "domain": "security",
+      "label": "CI workflow fix in contract.yml",
+      "domain": "reliability",
       "findings": [
-        "packages/core/src/webhooks.ts-**Webhook envelope processing bypasses ACL enforcement.** `a-security-review-2d355590-high",
-        "packages/core/src/webhooks.ts-Security-review found webhook ACL bypass, but missed: the `n-developer-cross-review-2d355590-high",
-        "packages/core/src/webhooks.ts-**No webhook signature verification.** `ingestWebhook()` acc-security-review-2d355590-medium",
-        "packages/core/src/webhooks.ts-**No-WorkflowRunner-medium",
-        "packages/core/src/webhooks.ts-**Infinite loop risk in findEnvelopeByDelivery pagination**.-historian-review-2d355590-medium",
-        "packages/core/src/webhooks.ts-Envelope scanning loop has no iteration limit. The `while(tr-developer-review-2d355590-medium",
-        "packages/core/src/webhooks.ts-**Non-atomic envelope coalescing creates race window**. The -historian-review-2d355590-medium",
-        "packages/core/src/webhooks.ts-**Non-atomic envelope coalescing creates race-WorkflowRunner-medium",
-        "packages/core/src/webhooks.ts-Historian-review correctly identified the non-atomic coalesc-developer-cross-review-2d355590-medium",
-        "packages/core/src/webhooks.ts-Security-review flagged missing webhook signature verificati-developer-cross-review-2d355590-medium",
-        "packages/core/src/acl.ts-**ACL defaults to permissive (allow) when no enforceable rul-historian-review-2d355590-medium",
-        "packages/core/src/acl.ts-`filePermissionAllows` returns `true` (allow access) when no-developer-review-2d355590-medium"
+        "2995682752"
+      ],
+      "files": [
+        ".github/workflows/contract.yml"
+      ],
+      "rationale": "Single CI workflow file, isolated from core package changes"
+    },
+    {
+      "id": "group-2",
+      "label": "Core package fixes in webhooks.ts and acl.ts",
+      "domain": "code-quality",
+      "findings": [
+        "2995839572",
+        "2995839732",
+        "2995839906"
       ],
       "files": [
         "packages/core/src/webhooks.ts",
         "packages/core/src/acl.ts"
       ],
-      "rationale": "All webhook and ACL findings are tightly coupled — webhook ACL bypass requires understanding ACL enforcement logic. Grouping prevents conflicting edits to the security boundary."
-    },
-    {
-      "id": "group-2",
-      "label": "Semantics merge bug, path traversal, file content leaks, and normalizePath dedup",
-      "domain": "security",
-      "findings": [
-        "packages/core/src/semantics.ts-`mergeSemantics(existing, incoming)` immediately voids the `-developer-review-2d355590-critical",
-        "packages/core/src/semantics.ts-Agree with **security reviewer**'s synthesis and **historian-merge-findings-2d355590-critical",
-        "packages/core/src/semantics.ts-**mergeSemantics() discards existing data — named \"merge\" bu-historian-review-2d355590-high",
-        "packages/core/src/semantics.ts-The developer found mergeSemantics discards existing data, b-security-cross-review-2d355590-high",
-        "packages/core/src/files.ts-**Path traversal via `..` segments bypasses ACL enforcement.-security-review-2d355590-high",
-        "packages/core/src/files.ts-The **security reviewer** found path traversal via `..` bypa-historian-cross-review-2d355590-high",
-        "packages/core/src/files.ts-**Conflict response leaks file content preview.** When a wri-security-review-2d355590-low",
-        "packages/core/src/files.ts-**No size limits on semantics arrays.** File content is capp-security-review-2d355590-low",
-        "packages/core/src/files.ts-Security-review found conflict response leaks content previe-developer-cross-review-2d355590-low",
-        "packages/core/src/*.ts-`normalizePath` is copy-pasted identically in 6 files (files-developer-review-2d355590-high",
-        "packages/core/src — multiple files-**Pervasive function duplication across 6+ files creates div-historian-review-2d355590-high",
-        "packages/core/src/webhooks.ts, files.ts, semantics.ts-`normalizeSemantics`, `normalizeProperties`, and `normalizeS-developer-review-2d355590-high"
-      ],
-      "files": [
-        "packages/core/src/semantics.ts",
-        "packages/core/src/files.ts",
-        "packages/core/src/utils.ts"
-      ],
-      "rationale": "Semantics and files modules share normalize helpers — dedup findings (15-17) require creating a shared utils.ts and updating imports in both files.ts and semantics.ts. Path traversal fix in files.ts also intersects with normalize logic."
-    },
-    {
-      "id": "group-3",
-      "label": "Writeback status bugs, correlation ID issue, and minor export/events/storage fixes",
-      "domain": "reliability",
-      "findings": [
-        "packages/core/src/writeback.ts-`acknowledgeWriteback` accepts `correlationId` parameter but-developer-review-2d355590-critical",
-        "packages/core/src/writeback.ts-`acknowledgeWriteback` accepts `correlationId`-WorkflowRunner-critical",
-        "packages/core/src/writeback.ts-**getPendingWritebacks() re-introduces the bug fixed in PR #-historian-review-2d355590-high",
-        "packages/core/src/writeback.ts-**dispatchWriteback sets status back to \"pending\" after succ-historian-review-2d355590-medium",
-        "packages/core/src/writeback.ts-Historian-review found `dispatchWriteback` sets status back -developer-cross-review-2d355590-medium",
-        "packages/core/src/export.ts-Non-null assertion on `Response.body!` without guard. While -developer-review-2d355590-low",
-        "packages/core/src/events.ts-**Event creation has TOCTOU race between nextEventId() and a-historian-review-2d355590-low",
-        "packages/core/src/storage.ts-**StorageAdapter interface lacks atomicity/concurrency contr-historian-review-2d355590-low"
-      ],
-      "files": [
-        "packages/core/src/writeback.ts",
-        "packages/core/src/export.ts",
-        "packages/core/src/events.ts",
-        "packages/core/src/storage.ts"
-      ],
-      "rationale": "Writeback module has 5 findings (2 critical) that are all interrelated state-machine bugs. export.ts, events.ts, and storage.ts have 1 low finding each and share the reliability domain."
-    },
-    {
-      "id": "group-4",
-      "label": "Conformance test quality: error handling, type safety, JWT exposure, ACL gap",
-      "domain": "testing",
-      "findings": [
-        "scripts/conformance.ts-Empty `catch {}` in health check loop silently swallows all -developer-review-2d355590-critical",
-        "scripts/conformance.ts-Writeback conformance test silently passes when no writeback-developer-review-2d355590-high",
-        "scripts/conformance.ts-Pervasive `any` types throughout conformance tests with no r-developer-review-2d355590-high",
-        "scripts/conformance.ts-**JWT token passed in WebSocket query string.** The conforma-security-review-2d355590-medium",
-        "scripts/conformance.ts-**Conformance test codifies a known ACL enforcement gap as a-historian-review-2d355590-low"
-      ],
-      "files": [
-        "scripts/conformance.ts"
-      ],
-      "rationale": "All 5 findings target the single conformance test file — must be handled by one worker to avoid conflicts."
+      "rationale": "All three findings are in the same packages/core/src directory; webhooks.ts has two findings and acl.ts has one, all from the same review"
     }
   ],
-  "totalGroups": 4,
-  "conflictCheck": "no file appears in multiple groups — utils.ts is new (created by group-2), all other files are exclusive to their group"
+  "totalGroups": 2,
+  "conflictCheck": "no file appears in multiple groups"
 }
