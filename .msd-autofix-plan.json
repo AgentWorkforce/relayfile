@@ -2,77 +2,35 @@
   "groups": [
     {
       "id": "group-1",
-      "label": "Go mountsync security fixes",
-      "domain": "security",
-      "findings": [
-        "internal/mountsync/syncer.go-Path traversal via malicious remote server responses-security-review, developer-review, historian-review-critical",
-        "internal/mountsync/syncer.go-Mutex unlock/relock race window with security implications-developer-review, security-cross-review, historian-cross-review-high",
-        "internal/mountsync/syncer.go-Auth token exposed in WebSocket URL query parameter-security-review, developer-review, historian-review-high",
-        "internal/mountsync/syncer.go-Unbounded response body read (bidirectional DoS)-security-review, developer-review, historian-cross-review-medium"
-      ],
-      "files": [
-        "internal/mountsync/syncer.go"
-      ],
-      "rationale": "All 4 findings target the same file (syncer.go) and are security-related — path traversal, race condition, token exposure, and unbounded reads"
-    },
-    {
-      "id": "group-2",
-      "label": "CLI quality and misc infrastructure",
+      "label": "Go CLI and Homebrew formula fixes",
       "domain": "code-quality",
       "findings": [
-        "cmd/relayfile-cli/main.go-1192-line monolithic main.go-developer-review, historian-cross-review-medium",
         "cmd/relayfile-cli/main.go-Deprecated math/rand.NewSource usage-developer-review-medium",
-        "cmd/relayfile-cli/main_test.go-Thin CLI test coverage-developer-review-low",
-        "docker-compose.yml-Weak default secrets in dev configurations-security-review-low",
-        "site/src/pages/index.astro-Regex-based markdown parsing for page content-developer-review-medium"
+        "Formula/relayfile.rb-Placeholder SHA256 values with no release automation-historian-review-medium"
       ],
       "files": [
         "cmd/relayfile-cli/main.go",
-        "cmd/relayfile-cli/main_test.go",
-        "docker-compose.yml",
-        "site/src/pages/index.astro"
+        "Formula/relayfile.rb"
       ],
-      "rationale": "CLI files grouped together, plus non-overlapping misc files (docker-compose, site) to balance workload"
+      "rationale": "Both are build/release infrastructure files outside the JS/TS ecosystem — no file overlap with group-2"
     },
     {
-      "id": "group-3",
-      "label": "TypeScript SDK fixes",
-      "domain": "code-quality",
+      "id": "group-2",
+      "label": "SDK tests, package config, and site parsing fixes",
+      "domain": "testing",
       "findings": [
-        "packages/relayfile-sdk/src/client.ts-Unsafe type assertion with security implications-developer-review, security-cross-review-medium",
         "packages/relayfile-sdk/src/client.test.ts-Illusory test coverage — SDK tests cannot execute-historian-review, developer-cross-review-medium",
         "packages/relayfile-sdk/package.json-SDK package.json stripped but lockfile contains devDependencies-historian-review-medium",
-        "packages/relayfile-sdk/src/client.ts-Inconsistent API method signatures-developer-review-low",
-        "packages/relayfile-sdk/src/client.ts-WebSocket event handler per-event mutex and disk write-developer-review-low"
+        "site/src/pages/index.astro-Regex-based markdown parsing for page content-developer-review-medium"
       ],
       "files": [
-        "packages/relayfile-sdk/src/client.ts",
         "packages/relayfile-sdk/src/client.test.ts",
-        "packages/relayfile-sdk/package.json"
+        "packages/relayfile-sdk/package.json",
+        "site/src/pages/index.astro"
       ],
-      "rationale": "All findings within the relayfile-sdk package — client code, tests, and package config"
-    },
-    {
-      "id": "group-4",
-      "label": "CI/CD workflows, Homebrew formula, and workflow scripts",
-      "domain": "reliability",
-      "findings": [
-        ".github/workflows/publish-npm.yml-Script injection via workflow_dispatch input-historian-review, security-cross-review, developer-cross-review-high",
-        ".github/workflows/publish-npm.yml-Version bump push directly to main without branch protection-developer-review, historian-review, security-cross-review-high",
-        "Formula/relayfile.rb-Release artifact naming mismatch breaks Homebrew and install.sh-historian-review, developer-cross-review-high",
-        "Formula/relayfile.rb-Placeholder SHA256 values with no release automation-historian-review-medium",
-        "workflows/*.ts-Hardcoded user-specific absolute paths in all 5 workflow files-security-review, developer-review, historian-review-medium",
-        ".github/workflows/ci.yml-Workers typecheck job uses fragile hashFiles conditional-historian-review-low"
-      ],
-      "files": [
-        ".github/workflows/publish-npm.yml",
-        ".github/workflows/ci.yml",
-        "Formula/relayfile.rb",
-        "workflows/*.ts"
-      ],
-      "rationale": "CI/CD pipelines, Homebrew formula, and workflow scripts — all release/build infrastructure with no file overlap to other groups"
+      "rationale": "All TypeScript/JS ecosystem files; SDK test and package findings share the same package directory, site file has no overlap"
     }
   ],
-  "totalGroups": 4,
+  "totalGroups": 2,
   "conflictCheck": "no file appears in multiple groups"
 }

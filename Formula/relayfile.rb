@@ -1,6 +1,6 @@
-# TODO: Automate version and SHA256 updates from release-binaries.yml
-# Currently version and sha256 values are placeholders that must be updated
-# manually for each release. The release workflow should update this file.
+# Version and SHA256 values are automatically updated by the
+# update-homebrew job in .github/workflows/release-binaries.yml
+# when a new release tag is pushed.
 class Relayfile < Formula
   desc "CLI for RelayFile collaborative file workspaces"
   homepage "https://relayfile.dev"
