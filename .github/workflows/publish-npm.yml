@@ -208,8 +208,8 @@ jobs:
 
           # Tag on main so the tag is reachable from main's history
           git fetch origin main
-          git tag -a "v${NEW_VERSION}" origin/main -m "Release v${NEW_VERSION}"
-          git push origin "v${NEW_VERSION}"
+          git tag -a "sdk-v${NEW_VERSION}" origin/main -m "SDK v${NEW_VERSION}"
+          git push origin "sdk-v${NEW_VERSION}"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
