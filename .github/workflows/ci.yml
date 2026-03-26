@@ -78,22 +78,22 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
-          cache-dependency-path: packages/relayfile-sdk/package-lock.json
+          cache-dependency-path: packages/sdk/package-lock.json
 
       - name: Install SDK dependencies
-        working-directory: packages/relayfile-sdk
+        working-directory: packages/sdk
         run: npm ci
 
       - name: Build SDK
-        working-directory: packages/relayfile-sdk
+        working-directory: packages/sdk
         run: npm run build
 
       - name: Typecheck SDK
-        working-directory: packages/relayfile-sdk
+        working-directory: packages/sdk
         run: npx tsc --noEmit
 
       - name: Test SDK
-        working-directory: packages/relayfile-sdk
+        working-directory: packages/sdk
         run: npm run test
 
   e2e:

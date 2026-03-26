@@ -2,33 +2,30 @@
   "groups": [
     {
       "id": "group-1",
-      "label": "Go CLI and Homebrew formula fixes",
-      "domain": "code-quality",
+      "label": "CI workflow fix in contract.yml",
+      "domain": "reliability",
       "findings": [
-        "cmd/relayfile-cli/main.go-Deprecated math/rand.NewSource usage-developer-review-medium",
-        "Formula/relayfile.rb-Placeholder SHA256 values with no release automation-historian-review-medium"
+        "2995682752"
       ],
       "files": [
-        "cmd/relayfile-cli/main.go",
-        "Formula/relayfile.rb"
+        ".github/workflows/contract.yml"
       ],
-      "rationale": "Both are build/release infrastructure files outside the JS/TS ecosystem — no file overlap with group-2"
+      "rationale": "Single CI workflow file, isolated from core package changes"
     },
     {
       "id": "group-2",
-      "label": "SDK tests, package config, and site parsing fixes",
-      "domain": "testing",
+      "label": "Core package fixes in webhooks.ts and acl.ts",
+      "domain": "code-quality",
       "findings": [
-        "packages/relayfile-sdk/src/client.test.ts-Illusory test coverage — SDK tests cannot execute-historian-review, developer-cross-review-medium",
-        "packages/relayfile-sdk/package.json-SDK package.json stripped but lockfile contains devDependencies-historian-review-medium",
-        "site/src/pages/index.astro-Regex-based markdown parsing for page content-developer-review-medium"
+        "2995839572",
+        "2995839732",
+        "2995839906"
       ],
       "files": [
-        "packages/relayfile-sdk/src/client.test.ts",
-        "packages/relayfile-sdk/package.json",
-        "site/src/pages/index.astro"
+        "packages/core/src/webhooks.ts",
+        "packages/core/src/acl.ts"
       ],
-      "rationale": "All TypeScript/JS ecosystem files; SDK test and package findings share the same package directory, site file has no overlap"
+      "rationale": "All three findings are in the same packages/core/src directory; webhooks.ts has two findings and acl.ts has one, all from the same review"
     }
   ],
   "totalGroups": 2,

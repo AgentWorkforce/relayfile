@@ -28,11 +28,11 @@ jobs:
           node-version: "20"
 
       - name: Install SDK deps
-        working-directory: packages/relayfile-sdk
+        working-directory: packages/sdk
         run: npm ci
 
       - name: Build SDK
-        working-directory: packages/relayfile-sdk
+        working-directory: packages/sdk
         run: npm run build
 
       - name: Validate contract surface
