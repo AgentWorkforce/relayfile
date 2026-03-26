@@ -6,6 +6,7 @@
     "packages/relayfile"
   ],
   "scripts": {
+    "postinstall": "patch-package",
     "workflow": "agent-relay run",
     "build": "npm run build --workspace=packages/relayfile-sdk",
     "typecheck": "npm run typecheck --workspace=packages/relayfile-sdk"
@@ -14,6 +15,7 @@
     "@agent-relay/sdk": "latest"
   },
   "devDependencies": {
+    "patch-package": "^8.0.1",
     "tsx": "^4.21.0"
   }
 }
