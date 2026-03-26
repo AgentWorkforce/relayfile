@@ -1,0 +1,40 @@
+{
+  "name": "@relayfile/core",
+  "version": "0.1.0",
+  "description": "Shared business logic for relayfile — file operations, ACL, queries, events, and writeback lifecycle",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "type": "module",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "prepublishOnly": "npm run build"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.3",
+    "vitest": "^3.0.0"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/AgentWorkforce/relayfile",
+    "directory": "packages/relayfile-core"
+  },
+  "license": "MIT",
+  "keywords": [
+    "relayfile",
+    "filesystem",
+    "agent",
+    "collaboration",
+    "core"
+  ],
+  "engines": {
+    "node": ">=18"
+  }
+}

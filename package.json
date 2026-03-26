@@ -2,6 +2,7 @@
   "private": true,
   "description": "relayfile — real-time filesystem for humans and agents",
   "workspaces": [
+    "packages/relayfile-core",
     "packages/relayfile-sdk",
     "packages/relayfile"
   ],
