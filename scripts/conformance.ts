@@ -82,6 +82,42 @@ const TOKEN_BETA = generateToken('agent-beta', ALL_SCOPES);
 const TOKEN_LIMITED = generateToken('agent-limited', ['fs:read']);
 
 // ---------------------------------------------------------------------------
+// Response types for API validation
+// ---------------------------------------------------------------------------
+interface FileResponse {
+  content: string;
+  revision: string;
+  semantics?: {
+    properties?: Record<string, string>;
+    relations?: string[];
+    comments?: string[];
+    permissions?: string[];
+  };
+}
+
+interface QueryItem {
+  path: string;
+  properties?: Record<string, string>;
+  relations?: string[];
+}
+
+interface TreeEntry {
+  path: string;
+  type: string;
+}
+
+interface EventEntry {
+  type: string;
+  path?: string;
+}
+
+interface WritebackItem {
+  id: string;
+  path: string;
+  status?: string;
+}
+
+// ---------------------------------------------------------------------------
 // HTTP helpers
 // ---------------------------------------------------------------------------
 let correlationCounter = 0;
@@ -144,15 +180,18 @@ async function startServer(): Promise<void> {
     if (line) log('📡', `${DIM}[server] ${line}${R}`);
   });
   // Wait for health
+  let lastHealthError = '';
   const deadline = Date.now() + 10_000;
   while (Date.now() < deadline) {
     try {
       const r = await fetch(`${BASE_URL}/health`);
       if (r.ok) { ok('Server healthy'); return; }
-    } catch {}
+    } catch (err) {
+      lastHealthError = err instanceof Error ? err.message : String(err);
+    }
     await sleep(200);
   }
-  throw new Error('Server health check timed out');
+  throw new Error(`Server health check timed out${lastHealthError ? `: last error: ${lastHealthError}` : ''}`);
 }
 
 function stopServer() {
@@ -320,14 +359,14 @@ async function runSuite() {
     assert(r.status === 200, `Expected 200, got ${r.status}`);
     assert(Array.isArray(r.data.items), 'Missing items array');
     assert(r.data.items.length >= 1, `Expected at least 1 result, got ${r.data.items.length}`);
-    assert(r.data.items.every((i: any) => i.properties?.author === 'agent-beta'), 'Non-beta file in results');
+    assert(r.data.items.every((i: QueryItem) => i.properties?.author === 'agent-beta'), 'Non-beta file in results');
   });
 
   await test('Query by relation (task-123) finds files from both agents', async () => {
     const r = await api('GET', `${ws()}/fs/query?relation=task-123`);
     assert(r.status === 200, `Expected 200, got ${r.status}`);
     assert(r.data.items.length >= 2, `Expected at least 2 results (both agents), got ${r.data.items.length}`);
-    const paths = r.data.items.map((i: any) => i.path);
+    const paths = r.data.items.map((i: QueryItem) => i.path);
     assert(paths.includes('/docs/readme.md'), 'Missing readme.md in relation query');
     assert(paths.includes('/docs/design.md'), 'Missing design.md in relation query');
   });
@@ -346,7 +385,7 @@ async function runSuite() {
     const r = await api('GET', `${ws()}/fs/tree?path=/&depth=3`);
     assert(r.status === 200, `Expected 200, got ${r.status}`);
     assert(Array.isArray(r.data.entries), 'Missing entries array');
-    const paths = r.data.entries.map((e: any) => e.path);
+    const paths = r.data.entries.map((e: TreeEntry) => e.path);
     assert(paths.includes('/docs/readme.md'), 'Missing readme.md in tree');
     assert(paths.includes('/docs/design.md'), 'Missing design.md in tree');
   });
@@ -377,7 +416,7 @@ async function runSuite() {
     assert(r.status === 200, `Expected 200, got ${r.status}`);
     assert(Array.isArray(r.data.events), 'Missing events array');
     assert(r.data.events.length >= 5, `Expected at least 5 events, got ${r.data.events.length}`);
-    const types = new Set(r.data.events.map((e: any) => e.type));
+    const types = new Set(r.data.events.map((e: EventEntry) => e.type));
     assert(types.has('file.created'), 'Missing file.created events');
   });
 
@@ -390,7 +429,7 @@ async function runSuite() {
     assert(r.status === 200, `Expected 200, got ${r.status}`);
     const files = Array.isArray(r.data) ? r.data : r.data.files;
     assert(Array.isArray(files) && files.length >= 4, `Expected at least 4 files in export, got ${files?.length}`);
-    const readme = files.find((f: any) => f.path === '/docs/readme.md');
+    const readme = files.find((f: FileResponse & { path: string }) => f.path === '/docs/readme.md');
     assert(readme !== undefined, 'readme.md missing from export');
     assert(readme.semantics?.properties?.author === 'agent-alpha', 'Export missing semantics');
   });
@@ -409,27 +448,26 @@ async function runSuite() {
     assert(pending.status === 200, `Expected 200 for pending, got ${pending.status}`);
     assert(Array.isArray(pending.data), 'Pending response should be an array');
 
-    if (pending.data.length > 0) {
-      const item = pending.data.find((i: any) => i.path === '/writeback/test.md');
-      if (item) {
-        // ACK it
-        const ack = await api('POST', `${ws()}/writeback/${item.id}/ack`, TOKEN_ALPHA, {
-          success: true,
-        });
-        assert(ack.status === 200, `Expected 200 for ack, got ${ack.status}`);
+    assert(pending.data.length > 0, 'Expected at least one pending writeback after file creation');
+    const item = pending.data.find((i: WritebackItem) => i.path === '/writeback/test.md');
+    assert(item !== undefined, 'Expected pending writeback for /writeback/test.md');
 
-        // Verify op status
-        const op = await api('GET', `${ws()}/ops/${item.id}`);
-        assert(op.status === 200, `Expected 200 for op, got ${op.status}`);
-        assert(op.data.status === 'succeeded', `Expected op status succeeded, got ${op.data.status}`);
+    // ACK it
+    const ack = await api('POST', `${ws()}/writeback/${item.id}/ack`, TOKEN_ALPHA, {
+      success: true,
+    });
+    assert(ack.status === 200, `Expected 200 for ack, got ${ack.status}`);
 
-        // Verify item is filtered from pending
-        const pendingAfter = await api('GET', `${ws()}/writeback/pending`);
-        const stillPending = pendingAfter.data.find((i: any) => i.id === item.id);
-        assert(!stillPending, `Acked item ${item.id} still appears in pending writebacks`);
-        ok('  Acked item correctly filtered from pending');
-      }
-    }
+    // Verify op status
+    const op = await api('GET', `${ws()}/ops/${item.id}`);
+    assert(op.status === 200, `Expected 200 for op, got ${op.status}`);
+    assert(op.data.status === 'succeeded', `Expected op status succeeded, got ${op.data.status}`);
+
+    // Verify item is filtered from pending
+    const pendingAfter = await api('GET', `${ws()}/writeback/pending`);
+    const stillPending = pendingAfter.data.find((i: WritebackItem) => i.id === item.id);
+    assert(!stillPending, `Acked item ${item.id} still appears in pending writebacks`);
+    ok('  Acked item correctly filtered from pending');
   });
 
   // ── 10. ACL / Permission enforcement ───────────────────────────────
@@ -463,12 +501,16 @@ async function runSuite() {
     // A token WITHOUT the finance scope should be denied
     const TOKEN_NO_FINANCE = generateToken('agent-no-finance', ['fs:read', 'fs:write']);
     const r = await api('GET', `${ws()}/fs/file?path=/finance/report.md`, TOKEN_NO_FINANCE);
-    // Should be 403 if ACL enforcement is implemented
+    // Should be 403 if ACL enforcement is implemented.
+    // Known gap: some implementations return 200 instead of 403, indicating
+    // ACL enforcement is not active. This is tracked as a conformance gap
+    // and should be resolved — accepting 200 here prevents regressions from
+    // being caught once ACL enforcement is implemented.
     if (r.status === 403) {
       ok('  ACL correctly denied access (403)');
     } else if (r.status === 200) {
-      log('⚠️ ', `${YELLOW}ACL enforcement not active — file returned 200 instead of 403${R}`);
-      // Don't fail — this is a known gap in the cloud version
+      log('⚠️ ', `${YELLOW}ACL enforcement gap — got 200 instead of 403. This MUST be fixed before ACL is considered conformant.${R}`);
+      failed.push('ACL enforcement gap (200 instead of 403)');
     } else {
       assert(false, `Unexpected status ${r.status}: ${JSON.stringify(r.data)}`);
     }
@@ -484,6 +526,10 @@ async function runSuite() {
       return;
     }
 
+    // NOTE: Passing JWT in query string is a known security concern (tokens may appear
+    // in server logs, proxy logs, and Referer headers). Production deployments should
+    // use a WebSocket sub-protocol or initial-message auth instead. This approach is
+    // acceptable only for local conformance testing.
     const wsUrl = `${BASE_URL.replace('http', 'ws')}${ws()}/fs/ws?token=${TOKEN_ALPHA}`;
     const ws_conn = new WebSocket(wsUrl);
     const events: any[] = [];

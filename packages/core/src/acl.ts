@@ -72,6 +72,17 @@ export function parsePermissionRule(raw: string): ParsedPermissionRule | null {
   };
 }
 
+/**
+ * Evaluate ACL rules against agent claims.
+ *
+ * Security model: **default-open**. When no permissions array is provided
+ * (or it is empty), access is allowed — this is intentional so that files
+ * without explicit ACL markers remain accessible. When enforceable rules
+ * exist but none match the caller's claims, access is **denied**.
+ *
+ * Callers that need a default-deny posture should ensure every path has
+ * at least one ACL marker in its ancestor directories.
+ */
 export function filePermissionAllows(
   permissions: string[] | undefined,
   workspaceId: string,

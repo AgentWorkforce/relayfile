@@ -99,6 +99,11 @@ export interface EnvelopeQueryOptions extends PaginationOptions {
 
 // ---------------------------------------------------------------------------
 // Storage adapter interface
+//
+// Concurrency contract: implementations MUST ensure that multi-step
+// read-modify-write sequences (e.g. writeFile, dispatchWriteback, webhook
+// coalescing, event creation via nextEventId+appendEvent) are atomic or
+// serialised. The core logic does NOT provide its own locking.
 // ---------------------------------------------------------------------------
 
 export interface StorageAdapter {

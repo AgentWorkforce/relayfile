@@ -32,13 +32,15 @@ export function getPendingWritebacks(storage: StorageAdapter): WritebackItem[] {
     });
 
     items.push(
-      ...page.items.map((op) => ({
-        id: op.opId,
-        workspaceId: storage.getWorkspaceId(),
-        path: normalizePath(op.path),
-        revision: op.revision,
-        correlationId: op.correlationId || "",
-      })),
+      ...page.items
+        .filter((op) => op.status === "pending")
+        .map((op) => ({
+          id: op.opId,
+          workspaceId: storage.getWorkspaceId(),
+          path: normalizePath(op.path),
+          revision: op.revision,
+          correlationId: op.correlationId || "",
+        })),
     );
 
     cursor = page.nextCursor ?? undefined;
@@ -62,11 +64,14 @@ export function acknowledgeWriteback(
 
   const timestamp = now();
 
+  const effectiveCorrelationId = correlationId ?? op.correlationId;
+
   storage.putOperation({
     ...op,
     status: success ? "succeeded" : "failed",
     nextAttemptAt: null,
     lastError: success ? null : normalizeError(errorMsg),
+    correlationId: effectiveCorrelationId,
   });
 
   createEvent(storage, {
@@ -75,11 +80,10 @@ export function acknowledgeWriteback(
     revision: op.revision,
     origin: "system",
     provider: op.provider,
-    correlationId: op.correlationId,
+    correlationId: effectiveCorrelationId,
     timestamp,
   });
 
-  void correlationId;
   return { status: "acknowledged", id: op.opId, success };
 }
 
@@ -109,6 +113,7 @@ export function dispatchWriteback(
   const item = toWritebackItem(storage, runningOp);
   try {
     callbacks.send(item);
+    storage.putOperation({ ...runningOp, status: "dispatched" });
     return true;
   } catch (error) {
     const lastError = error instanceof Error ? error.message : "queue send failed";

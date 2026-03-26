@@ -88,10 +88,12 @@ export async function buildTarGzip(files: FileRow[]): Promise<ArrayBuffer> {
   chunks.push(new Uint8Array(1024));
 
   const tar = concatBytes(chunks);
+  const sourceBody = new Response(toArrayBuffer(tar)).body;
+  if (!sourceBody) {
+    throw new Error("failed to create readable stream for tar archive");
+  }
   const compressed = new Response(
-    new Response(toArrayBuffer(tar)).body!.pipeThrough(
-      new CompressionStream("gzip"),
-    ),
+    sourceBody.pipeThrough(new CompressionStream("gzip")),
   );
   return compressed.arrayBuffer();
 }

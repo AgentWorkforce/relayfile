@@ -12,6 +12,8 @@
  */
 
 import type { StorageAdapter, FileRow, FileSemantics } from "./storage.js";
+import { normalizePath } from "./utils.js";
+import { normalizeSemantics } from "./semantics.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -74,14 +76,8 @@ export function normalizeIfMatch(value: string): string {
   return weak;
 }
 
-export function normalizePath(path: string): string {
-  const trimmed = path.trim();
-  if (!trimmed) {
-    return "/";
-  }
-  const prefixed = trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
-  return prefixed.length > 1 ? prefixed.replace(/\/+$/, "") : "/";
-}
+// Re-export normalizePath so existing importers (e.g. webhooks.ts) are not broken.
+export { normalizePath };
 
 export function inferProvider(path: string): string {
   const normalized = normalizePath(path).slice(1);
@@ -122,7 +118,6 @@ export function writeFile(storage: StorageAdapter, req: WriteFileRequest): Write
         type: "conflict",
         expectedRevision: ifMatch,
         currentRevision: existing.revision,
-        currentContentPreview: truncatePreview(existing.content),
       },
     };
   }
@@ -219,7 +214,6 @@ export function deleteFile(storage: StorageAdapter, req: DeleteFileRequest): Del
         type: "conflict",
         expectedRevision: ifMatch,
         currentRevision: existing.revision,
-        currentContentPreview: truncatePreview(existing.content),
       },
     };
   }
@@ -316,46 +310,3 @@ function encodedSize(content: string, encoding: "utf-8" | "base64"): number {
   return new TextEncoder().encode(content).byteLength;
 }
 
-function truncatePreview(content: string): string {
-  return content.length <= 4000 ? content : content.slice(0, 4000);
-}
-
-function normalizeSemantics(input?: FileSemantics): FileSemantics {
-  return {
-    properties: normalizeProperties(input?.properties),
-    relations: normalizeStringArray(input?.relations),
-    permissions: normalizeStringArray(input?.permissions),
-    comments: normalizeStringArray(input?.comments),
-  };
-}
-
-function normalizeProperties(
-  input?: Record<string, string>,
-): Record<string, string> | undefined {
-  if (!input) {
-    return undefined;
-  }
-
-  const out: Record<string, string> = {};
-  for (const [key, value] of Object.entries(input)) {
-    const normalizedKey = key.trim();
-    if (!normalizedKey) {
-      continue;
-    }
-    out[normalizedKey] = String(value).trim();
-  }
-
-  return Object.keys(out).length > 0 ? out : undefined;
-}
-
-function normalizeStringArray(values?: string[]): string[] | undefined {
-  if (!values || values.length === 0) {
-    return undefined;
-  }
-
-  const normalized = Array.from(
-    new Set(values.map((value) => value.trim()).filter(Boolean)),
-  );
-  normalized.sort((left, right) => left.localeCompare(right));
-  return normalized.length > 0 ? normalized : undefined;
-}

@@ -55,6 +55,12 @@ export interface ApplyEnvelopeOptions {
   now?: () => string;
   shouldSuppress?: (envelope: EnvelopeRow, event: EnvelopeEvent) => boolean;
   isStale?: (envelope: EnvelopeRow, event: EnvelopeEvent) => boolean;
+  /**
+   * Optional ACL enforcement callback. When provided, called before file
+   * writes with the target path. Return `true` to allow, `false` to deny.
+   * If denied, the envelope is marked as "ignored".
+   */
+  isPathWriteAllowed?: (path: string) => boolean;
 }
 
 export interface ApplyEnvelopeResult {
@@ -68,6 +74,13 @@ export interface IngestWebhookOptions {
   now?: () => string;
   generateEnvelopeId?: () => string;
   coalesceWindowMs?: number;
+  /**
+   * Optional signature verification callback. When provided, called with the
+   * raw input before processing. Return `true` if the payload signature is
+   * valid, `false` to reject the webhook. Callers should implement
+   * HMAC/RSA verification in this callback at the HTTP handler layer.
+   */
+  signatureVerifier?: (input: IngestWebhookInput) => boolean;
 }
 
 export interface WebhookStorageAdapter extends StorageAdapter {
@@ -93,6 +106,15 @@ export function ingestWebhook(
 ): IngestResult {
   const envelopeStorage = getWebhookStorage(storage);
   const correlationId = input.correlationId?.trim() ?? "";
+
+  if (options.signatureVerifier && !options.signatureVerifier(input)) {
+    return {
+      status: "signature_invalid",
+      envelopeId: "",
+      correlationId,
+    };
+  }
+
   if (!envelopeStorage) {
     return {
       status: "invalid_storage",
@@ -337,11 +359,25 @@ export function applyWebhookEnvelope(
   }
 
   if (event.type === "file.created" || event.type === "file.updated") {
+    if (options.isPathWriteAllowed && !options.isPathWriteAllowed(event.path)) {
+      return {
+        status: "ignored",
+        eventType: event.type,
+        path: event.path,
+        revision: null,
+      };
+    }
+
     const revision = storage.nextRevision();
     const content =
       typeof event.content === "string"
         ? event.content
         : JSON.stringify(event.data ?? {});
+
+    // Strip permissions from webhook-provided semantics to prevent
+    // external webhooks from injecting or overwriting ACL rules.
+    const semantics = normalizeSemantics(event.semantics);
+    delete semantics.permissions;
 
     storage.putFile({
       path: event.path,
@@ -351,7 +387,7 @@ export function applyWebhookEnvelope(
       encoding: normalizeEncoding(event.encoding) ?? "utf-8",
       provider: envelope.provider,
       lastEditedAt: event.timestamp,
-      semantics: normalizeSemantics(event.semantics),
+      semantics,
     });
 
     storage.appendEvent({
@@ -410,6 +446,7 @@ export function applyWebhookEnvelope(
 const DEFAULT_CONTENT_TYPE = "text/markdown";
 const DEFAULT_COALESCE_WINDOW_MS = 3_000;
 const ENVELOPE_SCAN_PAGE_SIZE = 100;
+const MAX_ENVELOPE_SCAN_PAGES = 1000;
 const VALID_EVENT_TYPES = new Set([
   "file.created",
   "file.updated",
@@ -447,13 +484,18 @@ function findEnvelopeByDelivery(
   }
 
   let cursor: string | undefined;
+  let pagesScanned = 0;
   for (;;) {
+    if (pagesScanned >= MAX_ENVELOPE_SCAN_PAGES) {
+      return null;
+    }
     const page = storage.listEnvelopes({
       workspaceId,
       provider,
       cursor,
       limit: ENVELOPE_SCAN_PAGE_SIZE,
     });
+    pagesScanned += 1;
 
     for (const envelope of page.items) {
       if (deliveryMatches(envelope, deliveryId)) {
