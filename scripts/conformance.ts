@@ -85,7 +85,7 @@ const TOKEN_LIMITED = generateToken('agent-limited', ['fs:read']);
 // HTTP helpers
 // ---------------------------------------------------------------------------
 let correlationCounter = 0;
-function nextCorrId(): string { return `conf_${++correlationCounter}`; }
+function nextCorrId(): string { return `conf_${Date.now()}_${++correlationCounter}`; }
 
 async function api(
   method: string,

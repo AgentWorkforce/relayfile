@@ -109,12 +109,6 @@ export function dispatchWriteback(
   const item = toWritebackItem(storage, runningOp);
   try {
     callbacks.send(item);
-    storage.putOperation({
-      ...runningOp,
-      status: "pending",
-      nextAttemptAt: null,
-      lastError: null,
-    });
     return true;
   } catch (error) {
     const lastError = error instanceof Error ? error.message : "queue send failed";

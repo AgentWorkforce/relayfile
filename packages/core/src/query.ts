@@ -108,7 +108,7 @@ export function queryFiles(
   return {
     items,
     nextCursor:
-      rows.length > items.length ? (items[items.length - 1]?.path ?? null) : null,
+      items.length >= limit ? (items[items.length - 1]?.path ?? null) : null,
   };
 }
 
