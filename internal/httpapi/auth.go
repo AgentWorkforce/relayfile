@@ -41,7 +41,7 @@ func authorizeBearer(authHeader, jwtSecret, workspaceID, requiredScope string, n
 		}
 	}
 	if requiredScope != "" {
-		if _, ok := claims.Scopes[requiredScope]; !ok {
+		if !scopeMatches(claims.Scopes, requiredScope) {
 			return tokenClaims{}, &authError{
 				status:  403,
 				code:    "forbidden",
@@ -161,6 +161,45 @@ func parseScopes(v any) map[string]struct{} {
 		}
 	}
 	return out
+}
+
+func scopeMatches(granted map[string]struct{}, required string) bool {
+	if _, ok := granted[required]; ok {
+		return true
+	}
+
+	parts := strings.SplitN(required, ":", 2)
+	if len(parts) != 2 {
+		return false
+	}
+	resource, action := parts[0], parts[1]
+
+	for scope := range granted {
+		segments := strings.SplitN(scope, ":", 4)
+		if len(segments) < 3 {
+			continue
+		}
+
+		plane := segments[0]
+		res := segments[1]
+		act := segments[2]
+
+		if plane != "relayfile" && plane != "*" {
+			continue
+		}
+		if res != resource && res != "*" {
+			continue
+		}
+		if act != action && act != "*" {
+			if act != "manage" || (action != "read" && action != "write") {
+				continue
+			}
+		}
+
+		return true
+	}
+
+	return false
 }
 
 func hasAudience(v any, required string) bool {
