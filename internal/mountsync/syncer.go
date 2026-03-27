@@ -789,9 +789,6 @@ func (s *Syncer) applyRemoteFile(remotePath string, file RemoteFile, conflicted 
 	}
 	tracked := s.state.Files[remotePath]
 	canWrite := s.canWritePath(remotePath)
-	if tracked.ReadOnly {
-		canWrite = false
-	}
 	tracked.ReadOnly = !canWrite
 	tracked.Denied = false
 	if tracked.Dirty {
@@ -880,28 +877,57 @@ func scopeGrantsWrite(scope, filePath string) bool {
 	if scope == "" {
 		return false
 	}
-	if scope == "fs:write" {
+	// Short-form scope without plane prefix.
+	if scope == "fs:write" || scope == "fs:manage" {
 		return true
 	}
-	if !strings.HasPrefix(scope, "relayfile:fs:write:") {
+
+	segments := strings.SplitN(scope, ":", 4)
+	if len(segments) < 3 {
 		return false
 	}
-	allowedPrefix := strings.TrimSpace(strings.TrimPrefix(scope, "relayfile:fs:write:"))
-	if allowedPrefix == "" {
+
+	plane := segments[0]
+	res := segments[1]
+	act := segments[2]
+
+	// Plane must be "relayfile" or wildcard.
+	if plane != "relayfile" && plane != "*" {
 		return false
 	}
-	allowedPrefix = normalizeRemotePath(allowedPrefix)
-	if strings.HasSuffix(allowedPrefix, "/*") {
-		allowedPrefix = strings.TrimSuffix(allowedPrefix, "/*")
+	// Resource must be "fs" or wildcard.
+	if res != "fs" && res != "*" {
+		return false
+	}
+	// Action must grant write: "write", "manage", or wildcard.
+	if act != "write" && act != "manage" && act != "*" {
+		return false
+	}
+
+	// If there is a path restriction (4th segment), check it.
+	if len(segments) == 4 {
+		allowedPrefix := strings.TrimSpace(segments[3])
+		if allowedPrefix == "" {
+			return false
+		}
+		if allowedPrefix == "*" {
+			return true
+		}
 		allowedPrefix = normalizeRemotePath(allowedPrefix)
+		if strings.HasSuffix(allowedPrefix, "/*") {
+			allowedPrefix = strings.TrimSuffix(allowedPrefix, "/*")
+			allowedPrefix = normalizeRemotePath(allowedPrefix)
+		}
+		if allowedPrefix == "/" {
+			return true
+		}
+		if allowedPrefix == "" {
+			return false
+		}
+		return filePath == allowedPrefix || strings.HasPrefix(filePath, allowedPrefix+"/")
 	}
-	if allowedPrefix == "/" {
-		return true
-	}
-	if allowedPrefix == "" {
-		return false
-	}
-	return filePath == allowedPrefix || strings.HasPrefix(filePath, allowedPrefix+"/")
+
+	return true
 }
 
 func (s *Syncer) applyRemoteDelete(remotePath string, conflicted map[string]struct{}) error {
@@ -1058,6 +1084,7 @@ func (s *Syncer) pushLocal(ctx context.Context) (map[string]struct{}, error) {
 				if setErr := s.applyWriteDenied(ctx, remotePath, localPath, snapshot, tracked); setErr != nil {
 					return nil, setErr
 				}
+				conflicted[remotePath] = struct{}{}
 				continue
 			}
 			return nil, err
@@ -1090,7 +1117,7 @@ func (s *Syncer) pushLocal(ctx context.Context) (map[string]struct{}, error) {
 
 	for _, remotePath := range statePaths {
 		tracked := s.state.Files[remotePath]
-		tracked.ReadOnly = tracked.ReadOnly || !s.canWritePath(remotePath)
+		tracked.ReadOnly = !s.canWritePath(remotePath)
 		if tracked.Denied || tracked.ReadOnly {
 			s.state.Files[remotePath] = tracked
 			continue
@@ -1190,6 +1217,9 @@ func (s *Syncer) scanLocalFiles() (map[string]localSnapshot, error) {
 			return walkErr
 		}
 		if d.IsDir() {
+			if d.Name() == ".relay" {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		absPath, err := filepath.Abs(path)
