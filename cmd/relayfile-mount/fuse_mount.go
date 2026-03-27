@@ -31,15 +31,21 @@ func runFuseMount(ctx context.Context, cfg mountConfig) error {
 		return fmt.Errorf("mount fuse: %w", err)
 	}
 
+	// Derive a cancellable context so all goroutines (including the
+	// WSInvalidator) are cleaned up when the FUSE server exits for any
+	// reason — normal unmount, crash, or kernel-initiated unmount.
+	mountCtx, mountCancel := context.WithCancel(ctx)
+	defer mountCancel()
+
 	// Start WebSocket invalidation if enabled.
 	if cfg.websocketEnabled {
 		invalidator := mountfuse.NewWSInvalidator(cfg.baseURL, cfg.token, cfg.workspaceID, mounted.Root.State(), log.Default())
-		go invalidator.Run(ctx)
+		go invalidator.Run(mountCtx)
 	}
 
 	// Wait for context cancellation, then unmount.
 	go func() {
-		<-ctx.Done()
+		<-mountCtx.Done()
 		log.Printf("unmounting FUSE filesystem...")
 		if err := mounted.Unmount(); err != nil {
 			log.Printf("unmount error: %v", err)

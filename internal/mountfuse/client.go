@@ -107,7 +107,9 @@ func mapError(err error) syscall.Errno {
 			return syscall.ENOENT
 		case httpErr.StatusCode == 409:
 			return syscall.EAGAIN
-		case httpErr.StatusCode == 429 || (httpErr.StatusCode >= 500 && httpErr.StatusCode <= 599):
+		case httpErr.StatusCode == 429:
+			return syscall.EAGAIN
+		case httpErr.StatusCode >= 500 && httpErr.StatusCode <= 599:
 			return syscall.EIO
 		default:
 			return syscall.EIO

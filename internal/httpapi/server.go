@@ -57,9 +57,11 @@ func NewServer(store *relayfile.Store) *Server {
 func NewServerWithConfig(store *relayfile.Store, cfg ServerConfig) *Server {
 	if cfg.JWTSecret == "" {
 		cfg.JWTSecret = "dev-secret"
+		log.Println("WARNING: using default JWTSecret — set a strong secret via configuration for production use")
 	}
 	if cfg.InternalHMACSecret == "" {
 		cfg.InternalHMACSecret = "dev-internal-secret"
+		log.Println("WARNING: using default InternalHMACSecret — set a strong secret via configuration for production use")
 	}
 	if cfg.InternalMaxSkew == 0 {
 		cfg.InternalMaxSkew = 5 * time.Minute
@@ -1166,6 +1168,13 @@ func aclCheckPath(route string, r *http.Request) (string, bool, bool) {
 		return path, true, true
 	case "write_file":
 		return path, aclTargetExists(r), true
+	case "tree", "query_files":
+		// Directory-level operations: check ACL for the path prefix.
+		// Handlers also do per-file ACL filtering as a second layer of defense.
+		return path, false, true
+	// bulk_write: ACL is checked per-file inside handleBulkWrite.
+	// fs_ws: auth is handled in handleFileEventsWebSocket.
+	// export: per-file ACL filtering in handleExport.
 	default:
 		return "", false, false
 	}
@@ -1176,6 +1185,9 @@ func aclTargetExists(r *http.Request) bool {
 	return ifMatch != "" && ifMatch != "*"
 }
 
+// aclGetFile returns a function that reads ACL permissions for a given path.
+// Both Semantics and Content are read from a single ReadFile snapshot to avoid
+// TOCTOU races between the two sources.
 func (s *Server) aclGetFile(workspaceID string) func(path string) ([]byte, error) {
 	return func(path string) ([]byte, error) {
 		file, err := s.store.ReadFile(workspaceID, path)
@@ -1183,7 +1195,7 @@ func (s *Server) aclGetFile(workspaceID string) func(path string) ([]byte, error
 			return nil, err
 		}
 
-		// First check the structured semantics field
+		// Prefer structured semantics (authoritative source).
 		if len(file.Semantics.Permissions) > 0 {
 			return json.Marshal(file.Semantics.Permissions)
 		}

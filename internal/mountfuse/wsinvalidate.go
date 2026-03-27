@@ -14,6 +14,16 @@ import (
 	"nhooyr.io/websocket/wsjson"
 )
 
+const (
+	// maxWSReadLimit caps the maximum WebSocket message size to prevent OOM
+	// from oversized frames.
+	maxWSReadLimit = 1 << 20 // 1 MiB
+
+	// maxConsecutiveWSFailures is the maximum number of consecutive connection
+	// failures before giving up. Resets on a successful connection.
+	maxConsecutiveWSFailures = 10
+)
+
 type wsEvent struct {
 	Type string `json:"type"`
 	Path string `json:"path"`
@@ -46,10 +56,12 @@ func NewWSInvalidator(baseURL, token, workspaceID string, state *fsState, logger
 
 // Run connects to the WebSocket event stream and processes events until ctx
 // is cancelled. On disconnection it reconnects with exponential backoff
-// starting at 1 second and doubling up to 30 seconds.
+// starting at 1 second and doubling up to 30 seconds. Stops reconnecting on
+// authentication failures (401/403) or after maxConsecutiveWSFailures.
 func (w *WSInvalidator) Run(ctx context.Context) {
 	backoff := time.Second
 	const maxBackoff = 30 * time.Second
+	consecutiveFailures := 0
 
 	for {
 		connectedAt := time.Now()
@@ -58,9 +70,23 @@ func (w *WSInvalidator) Run(ctx context.Context) {
 			return
 		}
 
-		// Reset backoff if the connection was stable for a reasonable duration.
+		// Stop reconnecting on auth failures — retrying won't help.
+		if isAuthError(err) {
+			w.logger.Printf("mountfuse: ws auth failure, not reconnecting: %v", err)
+			return
+		}
+
+		// Reset backoff and failure count if the connection was stable.
 		if time.Since(connectedAt) > maxBackoff {
 			backoff = time.Second
+			consecutiveFailures = 0
+		} else {
+			consecutiveFailures++
+		}
+
+		if consecutiveFailures >= maxConsecutiveWSFailures {
+			w.logger.Printf("mountfuse: ws giving up after %d consecutive failures", consecutiveFailures)
+			return
 		}
 
 		w.logger.Printf("mountfuse: ws disconnected: %v; reconnecting in %v", err, backoff)
@@ -78,6 +104,19 @@ func (w *WSInvalidator) Run(ctx context.Context) {
 	}
 }
 
+// isAuthError returns true if the error indicates an authentication/authorization
+// failure (HTTP 401 or 403), where reconnecting would not help.
+func isAuthError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "status = 401") ||
+		strings.Contains(msg, "status = 403") ||
+		strings.Contains(msg, "StatusCode: 401") ||
+		strings.Contains(msg, "StatusCode: 403")
+}
+
 func (w *WSInvalidator) listenOnce(ctx context.Context) error {
 	wsURL, err := w.websocketURL()
 	if err != nil {
@@ -93,6 +132,7 @@ func (w *WSInvalidator) listenOnce(ctx context.Context) error {
 		return fmt.Errorf("ws dial: %w", err)
 	}
 	defer conn.Close(websocket.StatusNormalClosure, "")
+	conn.SetReadLimit(maxWSReadLimit)
 
 	w.logger.Printf("mountfuse: ws connected for workspace %s", w.workspaceID)
 

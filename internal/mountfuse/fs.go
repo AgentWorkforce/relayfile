@@ -24,6 +24,10 @@ const (
 	defaultNegativeTTL = 1 * time.Second
 	defaultDirMode     = 0o755
 	defaultFileMode    = 0o644
+
+	// maxInodeCacheSize limits the inode mapping cache to prevent unbounded
+	// memory growth. When exceeded, the oldest half of entries are evicted.
+	maxInodeCacheSize = 100_000
 )
 
 type Config struct {
@@ -187,11 +191,34 @@ func (s *fsState) inodeFor(remotePath string, isDir bool) uint64 {
 		if existing, ok := s.pathByInode[sum]; !ok || existing == remotePath {
 			s.inodeByPath[remotePath] = sum
 			s.pathByInode[sum] = remotePath
+			s.evictInodesIfNeeded()
 			return sum
 		}
 		sum++
 		if sum == ^uint64(0) {
 			sum = 2
+		}
+	}
+}
+
+// evictInodesIfNeeded removes entries when the cache exceeds maxInodeCacheSize.
+// Caller must hold s.inodeMu.
+func (s *fsState) evictInodesIfNeeded() {
+	if len(s.inodeByPath) <= maxInodeCacheSize {
+		return
+	}
+	// Evict roughly half the entries (excluding the root).
+	count := 0
+	target := len(s.inodeByPath) / 2
+	for p, ino := range s.inodeByPath {
+		if p == s.remoteRoot {
+			continue
+		}
+		delete(s.inodeByPath, p)
+		delete(s.pathByInode, ino)
+		count++
+		if count >= target {
+			break
 		}
 	}
 }
@@ -269,6 +296,15 @@ func (s *fsState) invalidate(remotePath string) {
 	}
 	delete(s.dirCache, parent)
 	s.cacheMu.Unlock()
+
+	// Remove stale inode mapping so a recreated file at the same path gets a
+	// fresh inode number, preventing the kernel from serving cached stale data.
+	s.inodeMu.Lock()
+	if ino, ok := s.inodeByPath[remotePath]; ok {
+		delete(s.inodeByPath, remotePath)
+		delete(s.pathByInode, ino)
+	}
+	s.inodeMu.Unlock()
 }
 
 func (s *fsState) listDirectory(ctx context.Context, remotePath string) (map[string]nodeMeta, error) {

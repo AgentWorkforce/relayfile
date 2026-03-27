@@ -12,6 +12,9 @@ import (
 	"github.com/hanwen/go-fuse/v2/fuse"
 )
 
+// maxFileBytes is the maximum file size allowed, matching the core package limit.
+const maxFileBytes = 10 * 1024 * 1024 // 10 MiB
+
 type FileNode struct {
 	gofusefs.Inode
 	state *fsState
@@ -176,6 +179,9 @@ func (h *FileHandle) Write(ctx context.Context, data []byte, off int64) (uint32,
 		return 0, syscall.EINVAL
 	}
 	end := int(off) + len(data)
+	if end > maxFileBytes {
+		return 0, syscall.EFBIG
+	}
 	if end > len(h.buf) {
 		grown := make([]byte, end)
 		copy(grown, h.buf)

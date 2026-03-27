@@ -76,12 +76,22 @@ export interface IngestWebhookOptions {
   generateEnvelopeId?: () => string;
   coalesceWindowMs?: number;
   /**
-   * Optional signature verification callback. When provided, called with the
-   * raw input before processing. Return `true` if the payload signature is
-   * valid, `false` to reject the webhook. Callers should implement
-   * HMAC/RSA verification in this callback at the HTTP handler layer.
+   * Signature verification callback. Called with the raw input before
+   * processing. Return `true` if the payload signature is valid, `false` to
+   * reject the webhook. Callers should implement HMAC/RSA verification in
+   * this callback at the HTTP handler layer.
+   *
+   * When not provided, all webhooks are rejected unless
+   * `requireSignature` is explicitly set to `false`.
    */
   signatureVerifier?: (input: IngestWebhookInput) => boolean;
+  /**
+   * Whether signature verification is required. Defaults to `true`
+   * (fail-closed). When `true` and no `signatureVerifier` is provided,
+   * all webhooks are rejected with status `"signature_missing"`.
+   * Set to `false` only in trusted/internal environments.
+   */
+  requireSignature?: boolean;
 }
 
 export interface WebhookStorageAdapter extends StorageAdapter {
@@ -108,6 +118,14 @@ export function ingestWebhook(
   const envelopeStorage = getWebhookStorage(storage);
   const correlationId = input.correlationId?.trim() ?? "";
 
+  const requireSignature = options.requireSignature !== false;
+  if (requireSignature && !options.signatureVerifier) {
+    return {
+      status: "signature_missing",
+      envelopeId: "",
+      correlationId,
+    };
+  }
   if (options.signatureVerifier && !options.signatureVerifier(input)) {
     return {
       status: "signature_invalid",

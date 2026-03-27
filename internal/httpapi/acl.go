@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"encoding/json"
+	"regexp"
 	"strings"
 )
 
@@ -50,6 +51,11 @@ func parsePermissionRule(raw string) *ParsedPermissionRule {
 		return nil
 	}
 
+	// Validate rule values to prevent injection of unexpected semantics.
+	if !isValidACLRuleValue(kind, value) {
+		return nil
+	}
+
 	return &ParsedPermissionRule{
 		Effect: effect,
 		Kind:   kind,
@@ -57,10 +63,34 @@ func parsePermissionRule(raw string) *ParsedPermissionRule {
 	}
 }
 
+// aclAgentNamePattern allows alphanumerics, hyphens, underscores, and dots.
+var aclAgentNamePattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$`)
+
+// aclScopePattern allows scope values like "fs:read", "sync:trigger".
+var aclScopePattern = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9]*(?::[a-zA-Z][a-zA-Z0-9]*)*$`)
+
+// aclWorkspacePattern allows workspace IDs like "ws_123" or UUIDs.
+var aclWorkspacePattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]{0,255}$`)
+
+// isValidACLRuleValue validates the value for a given rule kind.
+func isValidACLRuleValue(kind, value string) bool {
+	switch kind {
+	case "agent":
+		return aclAgentNamePattern.MatchString(value)
+	case "scope":
+		return aclScopePattern.MatchString(value)
+	case "workspace":
+		return aclWorkspacePattern.MatchString(value)
+	default:
+		return false
+	}
+}
+
 // filePermissionAllows evaluates ACL rules against agent claims.
 // Returns true if access is allowed.
 func filePermissionAllows(permissions []string, workspaceID string, claims *tokenClaims) bool {
 	if len(permissions) == 0 {
+		// No ACL policy in effect — allow access.
 		return true
 	}
 
@@ -69,6 +99,8 @@ func filePermissionAllows(permissions []string, workspaceID string, claims *toke
 	for _, raw := range permissions {
 		rule := parsePermissionRule(raw)
 		if rule == nil {
+			// Non-ACL entries (e.g. metadata tags like "role:finance") are
+			// ignored — they share the permissions array but are not ACL rules.
 			continue
 		}
 		enforceableRuleSeen = true
@@ -99,6 +131,9 @@ func filePermissionAllows(permissions []string, workspaceID string, claims *toke
 	if allowMatch {
 		return true
 	}
+	// Fail-closed: if enforceable ACL rules exist but none granted access, deny.
+	// If no enforceable ACL rules exist (only metadata tags), allow —
+	// there is no ACL policy to enforce.
 	return !enforceableRuleSeen
 }
 
