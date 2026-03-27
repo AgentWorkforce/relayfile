@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -278,6 +279,7 @@ type SyncerOptions struct {
 	LocalRoot     string
 	StateFile     string
 	EventProvider string
+	Scopes        []string
 	WebSocket     *bool
 	RootCtx       context.Context
 	Logger        Logger
@@ -294,6 +296,7 @@ type Syncer struct {
 	localRoot     string
 	stateFile     string
 	eventProvider string
+	scopes        []string
 	logger        Logger
 	state         mountState
 	loaded        bool
@@ -315,6 +318,8 @@ type trackedFile struct {
 	ContentType string `json:"contentType"`
 	Hash        string `json:"hash"`
 	Dirty       bool   `json:"dirty,omitempty"`
+	Denied      bool   `json:"denied,omitempty"`
+	ReadOnly    bool   `json:"readonly,omitempty"`
 }
 
 type localSnapshot struct {
@@ -355,6 +360,12 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 	if stateFile == "" {
 		stateFile = filepath.Join(localRoot, ".relayfile-mount-state.json")
 	}
+	scopes := normalizeScopes(opts.Scopes)
+	if len(scopes) == 0 {
+		if httpClient, ok := client.(*HTTPClient); ok {
+			scopes = parseScopesFromJWT(httpClient.token)
+		}
+	}
 	if err := os.MkdirAll(localRoot, 0o755); err != nil {
 		return nil, err
 	}
@@ -373,6 +384,7 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 		localRoot:     localRoot,
 		stateFile:     stateFile,
 		eventProvider: eventProvider,
+		scopes:        scopes,
 		websocket:     websocketEnabled,
 		rootCtx:       rootCtx,
 		logger:        opts.Logger,
@@ -380,6 +392,24 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 			Files: map[string]trackedFile{},
 		},
 	}, nil
+}
+
+func parseScopesFromJWT(token string) []string {
+	parts := strings.Split(strings.TrimSpace(token), ".")
+	if len(parts) != 3 {
+		return nil
+	}
+	payloadBytes, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return nil
+	}
+	var claims struct {
+		Scopes []string `json:"scopes"`
+	}
+	if err := json.Unmarshal(payloadBytes, &claims); err != nil {
+		return nil
+	}
+	return claims.Scopes
 }
 
 func (s *Syncer) SyncOnce(ctx context.Context) error {
@@ -499,6 +529,13 @@ func (s *Syncer) applyWebSocketEvent(ctx context.Context, event websocketEvent) 
 			if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusNotFound {
 				return nil
 			}
+			if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusForbidden {
+				s.logf("skipping denied file: %s", remotePath)
+				if markErr := s.markReadDenied(remotePath); markErr != nil {
+					return markErr
+				}
+				return nil
+			}
 			return err
 		}
 		s.mu.Lock()
@@ -585,8 +622,19 @@ func (s *Syncer) pullRemoteFull(ctx context.Context, conflicted map[string]struc
 			if !isUnderRemoteRoot(s.remoteRoot, remotePath) {
 				continue
 			}
+			if tracked, ok := s.state.Files[remotePath]; ok && tracked.Denied {
+				continue
+			}
 			file, err := s.client.ReadFile(ctx, s.workspace, remotePath)
 			if err != nil {
+				var httpErr *HTTPError
+				if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusForbidden {
+					s.logf("skipping denied file: %s", remotePath)
+					if markErr := s.markReadDenied(remotePath); markErr != nil {
+						return markErr
+					}
+					continue
+				}
 				return err
 			}
 			remoteFiles[remotePath] = file
@@ -644,6 +692,9 @@ func (s *Syncer) pullRemoteIncremental(ctx context.Context, conflicted map[strin
 			if remotePath == "/" || !isUnderRemoteRoot(s.remoteRoot, remotePath) {
 				continue
 			}
+			if tracked, ok := s.state.Files[remotePath]; ok && tracked.Denied {
+				continue
+			}
 			switch event.Type {
 			case "file.created", "file.updated":
 				changed[remotePath] = struct{}{}
@@ -670,6 +721,13 @@ func (s *Syncer) pullRemoteIncremental(ctx context.Context, conflicted map[strin
 			var httpErr *HTTPError
 			if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusNotFound {
 				deleted[remotePath] = struct{}{}
+				continue
+			}
+			if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusForbidden {
+				s.logf("skipping denied file: %s", remotePath)
+				if markErr := s.markReadDenied(remotePath); markErr != nil {
+					return cursor, markErr
+				}
 				continue
 			}
 			return cursor, err
@@ -724,7 +782,22 @@ func (s *Syncer) applyRemoteFile(remotePath string, file RemoteFile, conflicted 
 			return nil
 		}
 	}
-	if tracked, ok := s.state.Files[remotePath]; ok && tracked.Dirty {
+	tracked := s.state.Files[remotePath]
+	canWrite := s.canWritePath(remotePath)
+	if tracked.ReadOnly {
+		canWrite = false
+	}
+	tracked.ReadOnly = !canWrite
+	tracked.Denied = false
+	if tracked.Dirty {
+		localPath, err := remoteToLocalPath(s.localRoot, s.remoteRoot, remotePath)
+		if err != nil {
+			return nil
+		}
+		if err := s.applyLocalPermissions(localPath, canWrite); err != nil {
+			return err
+		}
+		s.state.Files[remotePath] = tracked
 		return nil
 	}
 	localPath, err := remoteToLocalPath(s.localRoot, s.remoteRoot, remotePath)
@@ -742,12 +815,14 @@ func (s *Syncer) applyRemoteFile(remotePath string, file RemoteFile, conflicted 
 			shouldWrite = false
 		} else if tracked, ok := s.state.Files[remotePath]; ok && localHash != tracked.Hash {
 			// Local file was modified since last sync — mark dirty and preserve the local edit
-			s.state.Files[remotePath] = trackedFile{
-				Revision:    tracked.Revision,
-				ContentType: tracked.ContentType,
-				Hash:        localHash,
-				Dirty:       true,
+			tracked.Revision = tracked.Revision
+			tracked.ContentType = tracked.ContentType
+			tracked.Hash = localHash
+			tracked.Dirty = true
+			if err := s.applyLocalPermissions(localPath, canWrite); err != nil {
+				return err
 			}
+			s.state.Files[remotePath] = tracked
 			return nil
 		}
 	}
@@ -756,17 +831,72 @@ func (s *Syncer) applyRemoteFile(remotePath string, file RemoteFile, conflicted 
 			return err
 		}
 	}
+	if err := s.applyLocalPermissions(localPath, canWrite); err != nil {
+		return err
+	}
 	contentType := strings.TrimSpace(file.ContentType)
 	if contentType == "" {
 		contentType = detectContentType(localPath)
 	}
+	tracked.ReadOnly = !canWrite
 	s.state.Files[remotePath] = trackedFile{
 		Revision:    file.Revision,
 		ContentType: contentType,
 		Hash:        remoteHash,
 		Dirty:       false,
+		Denied:      false,
+		ReadOnly:    !canWrite,
 	}
 	return nil
+}
+
+func (s *Syncer) applyLocalPermissions(localPath string, canWrite bool) error {
+	if canWrite {
+		return os.Chmod(localPath, 0o644)
+	}
+	return os.Chmod(localPath, 0o444)
+}
+
+func (s *Syncer) canWritePath(filePath string) bool {
+	if len(s.scopes) == 0 {
+		return true
+	}
+	normalizedPath := normalizeRemotePath(filePath)
+	for _, scope := range s.scopes {
+		if scopeGrantsWrite(scope, normalizedPath) {
+			return true
+		}
+	}
+	return false
+}
+
+func scopeGrantsWrite(scope, filePath string) bool {
+	scope = strings.ToLower(strings.TrimSpace(scope))
+	if scope == "" {
+		return false
+	}
+	if scope == "fs:write" {
+		return true
+	}
+	if !strings.HasPrefix(scope, "relayfile:fs:write:") {
+		return false
+	}
+	allowedPrefix := strings.TrimSpace(strings.TrimPrefix(scope, "relayfile:fs:write:"))
+	if allowedPrefix == "" {
+		return false
+	}
+	allowedPrefix = normalizeRemotePath(allowedPrefix)
+	if strings.HasSuffix(allowedPrefix, "/*") {
+		allowedPrefix = strings.TrimSuffix(allowedPrefix, "/*")
+		allowedPrefix = normalizeRemotePath(allowedPrefix)
+	}
+	if allowedPrefix == "/" {
+		return true
+	}
+	if allowedPrefix == "" {
+		return false
+	}
+	return filePath == allowedPrefix || strings.HasPrefix(filePath, allowedPrefix+"/")
 }
 
 func (s *Syncer) applyRemoteDelete(remotePath string, conflicted map[string]struct{}) error {
@@ -777,6 +907,9 @@ func (s *Syncer) applyRemoteDelete(remotePath string, conflicted map[string]stru
 	}
 	tracked, ok := s.state.Files[remotePath]
 	if !ok || tracked.Dirty {
+		return nil
+	}
+	if tracked.Denied {
 		return nil
 	}
 	localPath, err := remoteToLocalPath(s.localRoot, s.remoteRoot, remotePath)
@@ -808,6 +941,35 @@ func (s *Syncer) pushLocal(ctx context.Context) (map[string]struct{}, error) {
 	for _, remotePath := range localRemotePaths {
 		snapshot := localFiles[remotePath]
 		tracked, exists := s.state.Files[remotePath]
+		localPath, err := remoteToLocalPath(s.localRoot, s.remoteRoot, remotePath)
+		if err != nil {
+			return nil, err
+		}
+		canWrite := s.canWritePath(remotePath)
+		tracked.ReadOnly = !canWrite
+		if exists && tracked.Denied {
+			if err := os.Remove(localPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return nil, err
+			}
+			tracked.Dirty = false
+			s.state.Files[remotePath] = tracked
+			continue
+		}
+		if exists && tracked.ReadOnly {
+			if err := s.applyLocalPermissions(localPath, false); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return nil, err
+			}
+			s.state.Files[remotePath] = tracked
+			continue
+		}
+		if exists && !canWrite {
+			if err := s.applyLocalPermissions(localPath, false); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return nil, err
+			}
+			tracked.Dirty = false
+			s.state.Files[remotePath] = tracked
+			continue
+		}
 		if exists && tracked.Hash == snapshot.Hash && !tracked.Dirty {
 			continue
 		}
@@ -823,6 +985,7 @@ func (s *Syncer) pushLocal(ctx context.Context) (map[string]struct{}, error) {
 					ContentType: contentType,
 					Hash:        snapshot.Hash,
 					Dirty:       false,
+					ReadOnly:    !canWrite,
 				}
 				continue
 			}
@@ -833,6 +996,16 @@ func (s *Syncer) pushLocal(ctx context.Context) (map[string]struct{}, error) {
 		}
 		result, err := s.client.WriteFile(ctx, s.workspace, remotePath, baseRevision, snapshot.ContentType, snapshot.Content)
 		if err != nil {
+			if !canWrite && !exists {
+				var httpErr *HTTPError
+				if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusForbidden {
+					if removeErr := os.Remove(localPath); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+						return nil, removeErr
+					}
+					delete(s.state.Files, remotePath)
+					continue
+				}
+			}
 			if errors.Is(err, ErrConflict) {
 				s.logf("conflict writing %s; keeping local content", remotePath)
 				conflicted[remotePath] = struct{}{}
@@ -860,6 +1033,13 @@ func (s *Syncer) pushLocal(ctx context.Context) (map[string]struct{}, error) {
 				}
 				continue
 			}
+			var httpErr *HTTPError
+			if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusForbidden {
+				if setErr := s.applyWriteDenied(ctx, remotePath, localPath, snapshot, tracked); setErr != nil {
+					return nil, setErr
+				}
+				continue
+			}
 			return nil, err
 		}
 		revision := result.TargetRevision
@@ -878,6 +1058,7 @@ func (s *Syncer) pushLocal(ctx context.Context) (map[string]struct{}, error) {
 			ContentType: snapshot.ContentType,
 			Hash:        snapshot.Hash,
 			Dirty:       false,
+			ReadOnly:    !canWrite,
 		}
 	}
 
@@ -889,6 +1070,11 @@ func (s *Syncer) pushLocal(ctx context.Context) (map[string]struct{}, error) {
 
 	for _, remotePath := range statePaths {
 		tracked := s.state.Files[remotePath]
+		tracked.ReadOnly = tracked.ReadOnly || !s.canWritePath(remotePath)
+		if tracked.Denied || tracked.ReadOnly {
+			s.state.Files[remotePath] = tracked
+			continue
+		}
 		if _, ok := localFiles[remotePath]; ok {
 			continue
 		}
@@ -908,6 +1094,55 @@ func (s *Syncer) pushLocal(ctx context.Context) (map[string]struct{}, error) {
 		delete(s.state.Files, remotePath)
 	}
 	return conflicted, nil
+}
+
+func (s *Syncer) markReadDenied(remotePath string) error {
+	tracked := s.state.Files[remotePath]
+	tracked.Denied = true
+	tracked.Dirty = false
+	tracked.ReadOnly = false
+	s.state.Files[remotePath] = tracked
+
+	localPath, err := remoteToLocalPath(s.localRoot, s.remoteRoot, remotePath)
+	if err != nil {
+		return nil
+	}
+	if err := os.Remove(localPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
+func (s *Syncer) applyWriteDenied(ctx context.Context, remotePath, localPath string, snapshot localSnapshot, tracked trackedFile) error {
+	remoteFile, readErr := s.client.ReadFile(ctx, s.workspace, remotePath)
+	if readErr == nil {
+		contentType := strings.TrimSpace(remoteFile.ContentType)
+		if contentType == "" {
+			contentType = snapshot.ContentType
+		}
+		if err := writeFileAtomic(localPath, []byte(remoteFile.Content), 0o444); err != nil {
+			return err
+		}
+		if err := os.Chmod(localPath, 0o444); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		tracked.Revision = remoteFile.Revision
+		tracked.ContentType = contentType
+		tracked.Hash = hashString(remoteFile.Content)
+	} else {
+		if err := s.applyLocalPermissions(localPath, false); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		if tracked.ContentType == "" {
+			tracked.ContentType = snapshot.ContentType
+		}
+	}
+	tracked.Dirty = false
+	tracked.Denied = false
+	tracked.ReadOnly = true
+	s.state.Files[remotePath] = tracked
+	s.logf("write denied, reverted: %s", remotePath)
+	return nil
 }
 
 func (s *Syncer) scanLocalFiles() (map[string]localSnapshot, error) {
@@ -946,6 +1181,23 @@ func (s *Syncer) scanLocalFiles() (map[string]localSnapshot, error) {
 		return nil, err
 	}
 	return results, nil
+}
+
+func normalizeScopes(scopes []string) []string {
+	normalized := make([]string, 0, len(scopes))
+	seen := map[string]struct{}{}
+	for _, scope := range scopes {
+		scope = strings.TrimSpace(scope)
+		if scope == "" {
+			continue
+		}
+		if _, ok := seen[scope]; ok {
+			continue
+		}
+		seen[scope] = struct{}{}
+		normalized = append(normalized, scope)
+	}
+	return normalized
 }
 
 func (s *Syncer) loadState() error {

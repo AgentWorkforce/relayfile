@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -39,6 +41,7 @@ type mountConfig struct {
 	intervalJitter   float64
 	timeout          time.Duration
 	websocketEnabled bool
+	scopes           []string
 	once             bool
 	mode             string
 }
@@ -103,6 +106,7 @@ func main() {
 		intervalJitter:   *intervalJitter,
 		timeout:          *timeout,
 		websocketEnabled: *websocketEnabled,
+		scopes:           parseTokenScopes(strings.TrimSpace(*token)),
 		once:             *once,
 		mode:             resolvedMode,
 	}
@@ -150,6 +154,7 @@ func runPollingMount(rootCtx context.Context, cfg mountConfig) error {
 		EventProvider: cfg.eventProvider,
 		LocalRoot:     cfg.localDir,
 		StateFile:     cfg.stateFile,
+		Scopes:        cfg.scopes,
 		WebSocket:     boolPtr(cfg.websocketEnabled),
 		RootCtx:       rootCtx,
 		Logger:        log.Default(),
@@ -246,6 +251,90 @@ func boolEnv(name string, fallback bool) bool {
 
 func boolPtr(value bool) *bool {
 	return &value
+}
+
+func parseTokenScopes(token string) []string {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return nil
+	}
+
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return nil
+	}
+
+	claimsBytes, err := decodeBase64URLSegment(parts[1])
+	if err != nil {
+		return nil
+	}
+	var claims map[string]any
+	if err := json.Unmarshal(claimsBytes, &claims); err != nil {
+		return nil
+	}
+
+	rawScopes, ok := claims["scopes"]
+	if !ok {
+		rawScopes, ok = claims["scope"]
+	}
+	if !ok {
+		return nil
+	}
+	return normalizeTokenScopes(rawScopes)
+}
+
+func decodeBase64URLSegment(segment string) ([]byte, error) {
+	segment = strings.TrimSpace(segment)
+	segment = strings.TrimRight(segment, "=")
+
+	decoded, err := base64.RawURLEncoding.DecodeString(segment)
+	if err == nil {
+		return decoded, nil
+	}
+
+	if rem := len(segment) % 4; rem != 0 {
+		segment += strings.Repeat("=", 4-rem)
+	}
+	return base64.URLEncoding.DecodeString(segment)
+}
+
+func normalizeTokenScopes(raw any) []string {
+	seen := map[string]struct{}{}
+	values := make([]string, 0)
+
+	addScope := func(scope string) {
+		scope = strings.TrimSpace(scope)
+		if scope == "" {
+			return
+		}
+		if _, exists := seen[scope]; exists {
+			return
+		}
+		seen[scope] = struct{}{}
+		values = append(values, scope)
+	}
+
+	switch v := raw.(type) {
+	case []any:
+		for _, scope := range v {
+			strScope, ok := scope.(string)
+			if !ok {
+				continue
+			}
+			addScope(strScope)
+		}
+	case []string:
+		for _, scope := range v {
+			addScope(scope)
+		}
+	case string:
+		for _, scope := range strings.FieldsFunc(v, func(r rune) bool {
+			return r == ' ' || r == ',' || r == '\t' || r == '\n' || r == '\r'
+		}) {
+			addScope(scope)
+		}
+	}
+	return values
 }
 
 func clampJitterRatio(value float64) float64 {
