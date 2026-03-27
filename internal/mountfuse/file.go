@@ -32,6 +32,7 @@ type FileHandle struct {
 	revision    string
 	contentType string
 	dirty       bool
+	writeGen    uint64 // incremented on each Write; used to detect concurrent writes during flush
 }
 
 var _ gofusefs.InodeEmbedder = (*FileNode)(nil)
@@ -182,6 +183,7 @@ func (h *FileHandle) Write(ctx context.Context, data []byte, off int64) (uint32,
 	}
 	copy(h.buf[int(off):end], data)
 	h.dirty = true
+	h.writeGen++
 	return uint32(len(data)), 0
 }
 
@@ -207,6 +209,7 @@ func (h *FileHandle) flush(ctx context.Context) syscall.Errno {
 	body := append([]byte(nil), h.buf...)
 	baseRevision := h.revision
 	contentType := h.contentType
+	genSnapshot := h.writeGen
 	h.mu.Unlock()
 
 	result, err := h.node.state.client.WriteFile(ctx, h.node.state.workspaceID, h.node.path, baseRevision, contentType, string(body))
@@ -226,8 +229,13 @@ func (h *FileHandle) flush(ctx context.Context) syscall.Errno {
 
 	h.mu.Lock()
 	h.revision = result.TargetRevision
-	h.dirty = false
-	h.buf = append(h.buf[:0], body...)
+	if h.writeGen == genSnapshot {
+		// No concurrent Write() happened; safe to reset buffer and clear dirty flag.
+		h.buf = append(h.buf[:0], body...)
+		h.dirty = false
+	}
+	// If writeGen changed, a concurrent Write() modified buf — keep the new
+	// data and dirty flag so the next flush persists it.
 	h.mu.Unlock()
 	return 0
 }

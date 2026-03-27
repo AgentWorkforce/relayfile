@@ -52,10 +52,17 @@ func (w *WSInvalidator) Run(ctx context.Context) {
 	const maxBackoff = 30 * time.Second
 
 	for {
+		connectedAt := time.Now()
 		err := w.listenOnce(ctx)
 		if ctx.Err() != nil {
 			return
 		}
+
+		// Reset backoff if the connection was stable for a reasonable duration.
+		if time.Since(connectedAt) > maxBackoff {
+			backoff = time.Second
+		}
+
 		w.logger.Printf("mountfuse: ws disconnected: %v; reconnecting in %v", err, backoff)
 
 		select {
@@ -128,6 +135,8 @@ func (w *WSInvalidator) websocketURL() (string, error) {
 		base.Scheme = "ws"
 	case "https":
 		base.Scheme = "wss"
+	case "ws", "wss":
+		// already a WebSocket scheme; use as-is
 	default:
 		return "", fmt.Errorf("unsupported base URL scheme %q", base.Scheme)
 	}

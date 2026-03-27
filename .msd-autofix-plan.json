@@ -2,32 +2,51 @@
   "groups": [
     {
       "id": "group-1",
-      "label": "FUSE mount invalidation and directory listing fixes",
+      "label": "mountfuse wsinvalidate and dir fixes",
       "domain": "reliability",
       "findings": [
         "2997959423",
-        "2997959507"
+        "2998001814",
+        "2998033340",
+        "2999888275",
+        "2997959507",
+        "2998033116"
       ],
       "files": [
         "internal/mountfuse/wsinvalidate.go",
         "internal/mountfuse/dir.go"
       ],
-      "rationale": "Two separate files in mountfuse package with one finding each; grouped for a single worker to handle both without file conflicts"
+      "rationale": "All wsinvalidate.go findings (endpoint URL, invalidation logic) plus dir.go findings grouped together — same mountfuse directory, no file overlap with other groups. Findings 2998033340 and 2998033116 are already resolved and just need verification."
     },
     {
       "id": "group-2",
-      "label": "FUSE file read/write operation fixes",
+      "label": "mountfuse file.go concurrency and operation ordering fixes",
       "domain": "reliability",
       "findings": [
         "2997959660",
-        "2997959755"
+        "2997959755",
+        "2998033543",
+        "2998033809",
+        "2998034401"
       ],
       "files": [
         "internal/mountfuse/file.go"
       ],
-      "rationale": "Both findings are in the same file (file.go); must be handled by a single worker to avoid conflicts"
+      "rationale": "All file.go findings — mutex locking, operation ordering, and buffer handling. Findings 2998033543 and 2998033809 are already resolved and just need verification."
+    },
+    {
+      "id": "group-3",
+      "label": "core webhooks fix",
+      "domain": "reliability",
+      "findings": [
+        "2998001767"
+      ],
+      "files": [
+        "packages/core/src/webhooks.ts"
+      ],
+      "rationale": "Single finding in a completely separate package (TypeScript core), isolated from Go mountfuse code."
     }
   ],
-  "totalGroups": 2,
+  "totalGroups": 3,
   "conflictCheck": "no file appears in multiple groups"
 }

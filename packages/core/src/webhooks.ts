@@ -369,7 +369,6 @@ export function applyWebhookEnvelope(
       };
     }
 
-    const revision = storage.nextRevision();
     const content =
       typeof event.content === "string"
         ? event.content
@@ -385,6 +384,8 @@ export function applyWebhookEnvelope(
         reason: "file_too_large",
       };
     }
+
+    const revision = storage.nextRevision();
 
     // Strip permissions from webhook-provided semantics to prevent
     // external webhooks from injecting or overwriting ACL rules.

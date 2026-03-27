@@ -1,4 +1,12 @@
 1. [MEDIUM] internal/mountfuse/wsinvalidate.go:134 — <!-- devin-review-comment {"id": "BUG_pr-review-job-c2f61fc1a26f4c2395d9e6bdd2c66929_0001", "file_path": "internal/mount
 2. [MEDIUM] internal/mountfuse/dir.go:130 — <!-- devin-review-comment {"id": "BUG_pr-review-job-c2f61fc1a26f4c2395d9e6bdd2c66929_0002", "file_path": "internal/mount
-3. [MEDIUM] internal/mountfuse/file.go:247 — <!-- devin-review-comment {"id": "BUG_pr-review-job-c2f61fc1a26f4c2395d9e6bdd2c66929_0003", "file_path": "internal/mount
+3. [MEDIUM] internal/mountfuse/file.go:248 — <!-- devin-review-comment {"id": "BUG_pr-review-job-c2f61fc1a26f4c2395d9e6bdd2c66929_0003", "file_path": "internal/mount
 4. [MEDIUM] internal/mountfuse/file.go:225 — <!-- devin-review-comment {"id": "BUG_pr-review-job-c2f61fc1a26f4c2395d9e6bdd2c66929_0004", "file_path": "internal/mount
+5. [MEDIUM] packages/core/src/webhooks.ts:387 — <!-- devin-review-comment {"id": "BUG_pr-review-job-0d58fd55531d4b52b5bcd4223e16c975_0002", "file_path": "packages/core/
+6. [MEDIUM] internal/mountfuse/wsinvalidate.go:71 — <!-- devin-review-comment {"id": "BUG_pr-review-job-0d58fd55531d4b52b5bcd4223e16c975_0003", "file_path": "internal/mount
+7. [MEDIUM] internal/mountfuse/dir.go:130 — ✅ **Resolved**: The current code at dir.go:130 now shows `return child, handle, fuse.FOPEN_KEEP_CACHE, 0`, which is the 
+8. [MEDIUM] internal/mountfuse/wsinvalidate.go:134 — ✅ **Resolved**: The current code at wsinvalidate.go:134 now shows `/v1/workspaces/%s/fs/ws` which is the correct endpoin
+9. [MEDIUM] internal/mountfuse/file.go:248 — ✅ **Resolved**: The current code at file.go:236-247 now includes `n.mu.RLock()` and `n.mu.RUnlock()` around the field re
+10. [MEDIUM] internal/mountfuse/file.go:225 — ✅ **Resolved**: The current code at file.go:223-225 shows `invalidate` then `putFile` then `updateFromBuffer` — the redu
+11. [MEDIUM] internal/mountfuse/file.go:231 — <!-- devin-review-comment {"id": "BUG_pr-review-job-d4770554ba7b4e5aa1f6896925a9822a_0001", "file_path": "internal/mount
+12. [MEDIUM] internal/mountfuse/wsinvalidate.go:133 — <!-- devin-review-comment {"id": "BUG_pr-review-job-f5948a9d2b7047af850e87ae1a144d2c_0003", "file_path": "internal/mount
