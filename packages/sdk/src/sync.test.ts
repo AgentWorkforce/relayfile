@@ -68,9 +68,11 @@ describe("RelayFileSync", () => {
 
     sync.start();
     expect(sockets).toHaveLength(1);
-    expect(sockets[0]!.url).toBe("wss://relay.test/v1/workspaces/ws_acme/fs/ws?token=ws_token");
+    expect(sockets[0]!.url).toBe("wss://relay.test/v1/workspaces/ws_acme/fs/ws");
 
     sockets[0]!.emit("open", {});
+    // Token is now sent as an auth message after connection opens
+    expect(sockets[0]!.sent).toContainEqual(JSON.stringify({ type: "auth", token: "ws_token" }));
     sockets[0]!.emit("message", {
       data: JSON.stringify({
         type: "file.updated",
