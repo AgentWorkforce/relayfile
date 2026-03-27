@@ -1182,10 +1182,26 @@ func (s *Server) aclGetFile(workspaceID string) func(path string) ([]byte, error
 		if err != nil {
 			return nil, err
 		}
-		if len(file.Semantics.Permissions) == 0 {
-			return nil, nil
+
+		// First check the structured semantics field
+		if len(file.Semantics.Permissions) > 0 {
+			return json.Marshal(file.Semantics.Permissions)
 		}
-		return json.Marshal(file.Semantics.Permissions)
+
+		// Fall back to parsing permissions from file content
+		// (ACL markers seeded via bulk write store permissions in content as JSON)
+		if file.Content != "" {
+			var contentObj struct {
+				Semantics struct {
+					Permissions []string `json:"permissions"`
+				} `json:"semantics"`
+			}
+			if err := json.Unmarshal([]byte(file.Content), &contentObj); err == nil && len(contentObj.Semantics.Permissions) > 0 {
+				return json.Marshal(contentObj.Semantics.Permissions)
+			}
+		}
+
+		return nil, nil
 	}
 }
 
