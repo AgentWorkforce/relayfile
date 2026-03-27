@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -20,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/fsnotify/fsnotify"
 	"nhooyr.io/websocket"
 	"nhooyr.io/websocket/wsjson"
 )
@@ -278,6 +280,7 @@ type SyncerOptions struct {
 	LocalRoot     string
 	StateFile     string
 	EventProvider string
+	Scopes        []string
 	WebSocket     *bool
 	RootCtx       context.Context
 	Logger        Logger
@@ -292,9 +295,12 @@ type Syncer struct {
 	workspace     string
 	remoteRoot    string
 	localRoot     string
+	localDir      string
 	stateFile     string
 	eventProvider string
+	scopes        []string
 	logger        Logger
+	denialLogPath string // path to .relay/permissions-denied.log
 	state         mountState
 	loaded        bool
 	bootstrapped  bool
@@ -315,6 +321,8 @@ type trackedFile struct {
 	ContentType string `json:"contentType"`
 	Hash        string `json:"hash"`
 	Dirty       bool   `json:"dirty,omitempty"`
+	Denied      bool   `json:"denied,omitempty"`
+	ReadOnly    bool   `json:"readonly,omitempty"`
 }
 
 type localSnapshot struct {
@@ -355,7 +363,16 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 	if stateFile == "" {
 		stateFile = filepath.Join(localRoot, ".relayfile-mount-state.json")
 	}
+	scopes := normalizeScopes(opts.Scopes)
+	if len(scopes) == 0 {
+		if httpClient, ok := client.(*HTTPClient); ok {
+			scopes = parseScopesFromJWT(httpClient.token)
+		}
+	}
 	if err := os.MkdirAll(localRoot, 0o755); err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(filepath.Join(localRoot, ".relay"), 0o755); err != nil {
 		return nil, err
 	}
 	websocketEnabled := true
@@ -371,15 +388,36 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 		workspace:     workspace,
 		remoteRoot:    remoteRoot,
 		localRoot:     localRoot,
+		localDir:      localRoot,
 		stateFile:     stateFile,
 		eventProvider: eventProvider,
+		scopes:        scopes,
 		websocket:     websocketEnabled,
 		rootCtx:       rootCtx,
 		logger:        opts.Logger,
+		denialLogPath: filepath.Join(localRoot, ".relay", "permissions-denied.log"),
 		state: mountState{
 			Files: map[string]trackedFile{},
 		},
 	}, nil
+}
+
+func parseScopesFromJWT(token string) []string {
+	parts := strings.Split(strings.TrimSpace(token), ".")
+	if len(parts) != 3 {
+		return nil
+	}
+	payloadBytes, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return nil
+	}
+	var claims struct {
+		Scopes []string `json:"scopes"`
+	}
+	if err := json.Unmarshal(payloadBytes, &claims); err != nil {
+		return nil
+	}
+	return claims.Scopes
 }
 
 func (s *Syncer) SyncOnce(ctx context.Context) error {
@@ -388,6 +426,264 @@ func (s *Syncer) SyncOnce(ctx context.Context) error {
 
 func (s *Syncer) Reconcile(ctx context.Context) error {
 	return s.sync(ctx, true)
+}
+
+func (s *Syncer) HandleLocalChange(ctx context.Context, relativePath string, op fsnotify.Op) error {
+	relativePath = filepath.ToSlash(strings.TrimSpace(filepath.Clean(relativePath)))
+	if relativePath == "" || relativePath == "." {
+		return nil
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.loadState(); err != nil {
+		return err
+	}
+
+	remotePath := normalizeRemotePath(filepath.Join(s.remoteRoot, filepath.FromSlash(relativePath)))
+	if remotePath == "/" || !isUnderRemoteRoot(s.remoteRoot, remotePath) {
+		return nil
+	}
+	localPath := filepath.Join(s.localDir, filepath.FromSlash(relativePath))
+
+	if info, statErr := os.Stat(localPath); statErr == nil && info.IsDir() {
+		return nil
+	}
+
+	switch {
+	case op&(fsnotify.Write|fsnotify.Create) != 0:
+		if err := s.handleLocalWriteOrCreate(ctx, remotePath, localPath); err != nil {
+			return err
+		}
+		return s.saveState()
+	case op&(fsnotify.Remove|fsnotify.Rename) != 0:
+		tracked, exists := s.state.Files[remotePath]
+		if exists && tracked.ReadOnly {
+			if err := s.revertReadonlyFile(ctx, remotePath, localPath, tracked, ""); err != nil {
+				return err
+			}
+			return s.saveState()
+		}
+		if err := s.pushSingleDelete(ctx, remotePath, localPath); err != nil {
+			return err
+		}
+		return s.saveState()
+	case op&fsnotify.Chmod != 0:
+		tracked, exists := s.state.Files[remotePath]
+		if exists && tracked.ReadOnly {
+			if err := s.applyLocalPermissions(localPath, false); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (s *Syncer) handleLocalWriteOrCreate(ctx context.Context, remotePath, localPath string) error {
+	snapshotContent, err := os.ReadFile(localPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return s.pushSingleDelete(ctx, remotePath, localPath)
+		}
+		return err
+	}
+	snapshot := localSnapshot{
+		Content:     string(snapshotContent),
+		ContentType: detectContentType(localPath),
+		Hash:        hashBytes(snapshotContent),
+	}
+	tracked, exists := s.state.Files[remotePath]
+	if exists && tracked.ReadOnly {
+		return s.revertReadonlyFile(ctx, remotePath, localPath, tracked, snapshot.ContentType)
+	}
+	return s.pushSingleFile(ctx, remotePath, localPath, snapshot, tracked, exists, nil)
+}
+
+func (s *Syncer) pushSingleFile(
+	ctx context.Context,
+	remotePath, localPath string,
+	snapshot localSnapshot,
+	tracked trackedFile,
+	exists bool,
+	conflicted map[string]struct{},
+) error {
+	canWrite := s.canWritePath(remotePath)
+	tracked.ReadOnly = !canWrite
+	if !canWrite {
+		// If content was modified (chmod bypass), revert to server version
+		if snapshot.Hash != tracked.Hash && tracked.Hash != "" {
+			return s.revertReadonlyFile(ctx, remotePath, localPath, tracked, snapshot.ContentType)
+		}
+		if err := s.applyLocalPermissions(localPath, false); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		tracked.Dirty = false
+		s.state.Files[remotePath] = tracked
+		return nil
+	}
+
+	if exists && tracked.Dirty {
+		remoteFile, readErr := s.client.ReadFile(ctx, s.workspace, remotePath)
+		if readErr == nil && hashString(remoteFile.Content) == snapshot.Hash {
+			contentType := strings.TrimSpace(remoteFile.ContentType)
+			if contentType == "" {
+				contentType = snapshot.ContentType
+			}
+			tracked.Revision = remoteFile.Revision
+			tracked.ContentType = contentType
+			tracked.Hash = snapshot.Hash
+			tracked.Dirty = false
+			s.state.Files[remotePath] = tracked
+			return nil
+		}
+	}
+
+	baseRevision := "0"
+	if exists {
+		baseRevision = tracked.Revision
+	}
+	result, err := s.client.WriteFile(ctx, s.workspace, remotePath, baseRevision, snapshot.ContentType, snapshot.Content)
+	if err != nil {
+		if errors.Is(err, ErrConflict) {
+			s.logf("conflict writing %s; keeping local content", remotePath)
+			if conflicted != nil {
+				conflicted[remotePath] = struct{}{}
+			}
+			remoteFile, readErr := s.client.ReadFile(ctx, s.workspace, remotePath)
+			switch {
+			case readErr == nil:
+				s.state.Files[remotePath] = trackedFile{
+					Revision:    remoteFile.Revision,
+					ContentType: snapshot.ContentType,
+					Hash:        snapshot.Hash,
+					Dirty:       true,
+					Denied:      false,
+					ReadOnly:    false,
+				}
+			case exists:
+				tracked.Hash = snapshot.Hash
+				tracked.ContentType = snapshot.ContentType
+				tracked.Dirty = true
+				s.state.Files[remotePath] = tracked
+			default:
+				s.state.Files[remotePath] = trackedFile{
+					Revision:    "",
+					ContentType: snapshot.ContentType,
+					Hash:        snapshot.Hash,
+					Dirty:       true,
+					ReadOnly:    false,
+				}
+			}
+			return nil
+		}
+		var httpErr *HTTPError
+		if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusForbidden {
+			if !exists {
+				s.logDenial("WRITE_DENIED", remotePath, "agent does not have write permission")
+				if removeErr := os.Remove(localPath); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+					return removeErr
+				}
+				delete(s.state.Files, remotePath)
+				return nil
+			}
+			return s.revertReadonlyFile(ctx, remotePath, localPath, tracked, snapshot.ContentType)
+		}
+		return err
+	}
+
+	revision := result.TargetRevision
+	if revision == "" && exists {
+		revision = tracked.Revision
+	}
+	if revision == "" {
+		file, readErr := s.client.ReadFile(ctx, s.workspace, remotePath)
+		if readErr != nil {
+			return readErr
+		}
+		revision = file.Revision
+	}
+	s.state.Files[remotePath] = trackedFile{
+		Revision:    revision,
+		ContentType: snapshot.ContentType,
+		Hash:        snapshot.Hash,
+		Dirty:       false,
+		ReadOnly:    !canWrite,
+	}
+	return nil
+}
+
+func (s *Syncer) revertReadonlyFile(ctx context.Context, remotePath, localPath string, tracked trackedFile, fallbackContentType string) error {
+	s.logDenial("WRITE_DENIED", remotePath, "agent does not have write permission")
+	remoteFile, readErr := s.client.ReadFile(ctx, s.workspace, remotePath)
+	if readErr == nil {
+		contentType := strings.TrimSpace(remoteFile.ContentType)
+		if contentType == "" {
+			contentType = strings.TrimSpace(fallbackContentType)
+			if contentType == "" {
+				contentType = detectContentType(localPath)
+			}
+		}
+		if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+			return err
+		}
+		if err := writeFileAtomic(localPath, []byte(remoteFile.Content), 0o444); err != nil {
+			return err
+		}
+		if err := os.Chmod(localPath, 0o444); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		tracked.Revision = remoteFile.Revision
+		tracked.ContentType = contentType
+		tracked.Hash = hashString(remoteFile.Content)
+		s.logDenial("WRITE_REVERTED", remotePath, "file is read-only; content reverted to server version")
+	} else {
+		if err := s.applyLocalPermissions(localPath, false); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		if tracked.ContentType == "" {
+			tracked.ContentType = strings.TrimSpace(fallbackContentType)
+			if tracked.ContentType == "" {
+				tracked.ContentType = detectContentType(localPath)
+			}
+		}
+	}
+	tracked.Dirty = false
+	tracked.Denied = false
+	tracked.ReadOnly = true
+	s.state.Files[remotePath] = tracked
+	s.logf("write denied, reverted: %s", remotePath)
+	return nil
+}
+
+func (s *Syncer) pushSingleDelete(ctx context.Context, remotePath, localPath string) error {
+	tracked, exists := s.state.Files[remotePath]
+	if !exists {
+		delete(s.state.Files, remotePath)
+		return nil
+	}
+
+	if !s.canWritePath(remotePath) || tracked.ReadOnly {
+		return s.revertReadonlyFile(ctx, remotePath, localPath, tracked, "")
+	}
+
+	err := s.client.DeleteFile(ctx, s.workspace, remotePath, tracked.Revision)
+	if err != nil {
+		var httpErr *HTTPError
+		if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusNotFound {
+			delete(s.state.Files, remotePath)
+			return nil
+		}
+		if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusForbidden {
+			return s.revertReadonlyFile(ctx, remotePath, localPath, tracked, "")
+		}
+		if errors.Is(err, ErrConflict) {
+			s.logf("conflict deleting %s; remote changed", remotePath)
+			return nil
+		}
+		return err
+	}
+	delete(s.state.Files, remotePath)
+	return nil
 }
 
 func (s *Syncer) sync(ctx context.Context, forcePoll bool) error {
@@ -499,6 +795,13 @@ func (s *Syncer) applyWebSocketEvent(ctx context.Context, event websocketEvent) 
 			if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusNotFound {
 				return nil
 			}
+			if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusForbidden {
+				s.logf("skipping denied file: %s", remotePath)
+				if markErr := s.markReadDenied(remotePath); markErr != nil {
+					return markErr
+				}
+				return nil
+			}
 			return err
 		}
 		s.mu.Lock()
@@ -585,8 +888,19 @@ func (s *Syncer) pullRemoteFull(ctx context.Context, conflicted map[string]struc
 			if !isUnderRemoteRoot(s.remoteRoot, remotePath) {
 				continue
 			}
+			if tracked, ok := s.state.Files[remotePath]; ok && tracked.Denied {
+				continue
+			}
 			file, err := s.client.ReadFile(ctx, s.workspace, remotePath)
 			if err != nil {
+				var httpErr *HTTPError
+				if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusForbidden {
+					s.logf("skipping denied file: %s", remotePath)
+					if markErr := s.markReadDenied(remotePath); markErr != nil {
+						return markErr
+					}
+					continue
+				}
 				return err
 			}
 			remoteFiles[remotePath] = file
@@ -644,6 +958,9 @@ func (s *Syncer) pullRemoteIncremental(ctx context.Context, conflicted map[strin
 			if remotePath == "/" || !isUnderRemoteRoot(s.remoteRoot, remotePath) {
 				continue
 			}
+			if tracked, ok := s.state.Files[remotePath]; ok && tracked.Denied {
+				continue
+			}
 			switch event.Type {
 			case "file.created", "file.updated":
 				changed[remotePath] = struct{}{}
@@ -670,6 +987,13 @@ func (s *Syncer) pullRemoteIncremental(ctx context.Context, conflicted map[strin
 			var httpErr *HTTPError
 			if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusNotFound {
 				deleted[remotePath] = struct{}{}
+				continue
+			}
+			if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusForbidden {
+				s.logf("skipping denied file: %s", remotePath)
+				if markErr := s.markReadDenied(remotePath); markErr != nil {
+					return cursor, markErr
+				}
 				continue
 			}
 			return cursor, err
@@ -724,7 +1048,19 @@ func (s *Syncer) applyRemoteFile(remotePath string, file RemoteFile, conflicted 
 			return nil
 		}
 	}
-	if tracked, ok := s.state.Files[remotePath]; ok && tracked.Dirty {
+	tracked := s.state.Files[remotePath]
+	canWrite := s.canWritePath(remotePath)
+	tracked.ReadOnly = !canWrite
+	tracked.Denied = false
+	if tracked.Dirty {
+		localPath, err := remoteToLocalPath(s.localRoot, s.remoteRoot, remotePath)
+		if err != nil {
+			return nil
+		}
+		if err := s.applyLocalPermissions(localPath, canWrite); err != nil {
+			return err
+		}
+		s.state.Files[remotePath] = tracked
 		return nil
 	}
 	localPath, err := remoteToLocalPath(s.localRoot, s.remoteRoot, remotePath)
@@ -742,12 +1078,14 @@ func (s *Syncer) applyRemoteFile(remotePath string, file RemoteFile, conflicted 
 			shouldWrite = false
 		} else if tracked, ok := s.state.Files[remotePath]; ok && localHash != tracked.Hash {
 			// Local file was modified since last sync — mark dirty and preserve the local edit
-			s.state.Files[remotePath] = trackedFile{
-				Revision:    tracked.Revision,
-				ContentType: tracked.ContentType,
-				Hash:        localHash,
-				Dirty:       true,
+			tracked.Revision = file.Revision
+			tracked.ContentType = file.ContentType
+			tracked.Hash = localHash
+			tracked.Dirty = true
+			if err := s.applyLocalPermissions(localPath, canWrite); err != nil {
+				return err
 			}
+			s.state.Files[remotePath] = tracked
 			return nil
 		}
 	}
@@ -756,17 +1094,101 @@ func (s *Syncer) applyRemoteFile(remotePath string, file RemoteFile, conflicted 
 			return err
 		}
 	}
+	if err := s.applyLocalPermissions(localPath, canWrite); err != nil {
+		return err
+	}
 	contentType := strings.TrimSpace(file.ContentType)
 	if contentType == "" {
 		contentType = detectContentType(localPath)
 	}
+	tracked.ReadOnly = !canWrite
 	s.state.Files[remotePath] = trackedFile{
 		Revision:    file.Revision,
 		ContentType: contentType,
 		Hash:        remoteHash,
 		Dirty:       false,
+		Denied:      false,
+		ReadOnly:    !canWrite,
 	}
 	return nil
+}
+
+func (s *Syncer) applyLocalPermissions(localPath string, canWrite bool) error {
+	if canWrite {
+		return os.Chmod(localPath, 0o644)
+	}
+	return os.Chmod(localPath, 0o444)
+}
+
+func (s *Syncer) canWritePath(filePath string) bool {
+	if len(s.scopes) == 0 {
+		return true
+	}
+	normalizedPath := normalizeRemotePath(filePath)
+	for _, scope := range s.scopes {
+		if scopeGrantsWrite(scope, normalizedPath) {
+			return true
+		}
+	}
+	return false
+}
+
+func scopeGrantsWrite(scope, filePath string) bool {
+	scope = strings.ToLower(strings.TrimSpace(scope))
+	if scope == "" {
+		return false
+	}
+	// Short-form scope without plane prefix.
+	if scope == "fs:write" || scope == "fs:manage" {
+		return true
+	}
+
+	segments := strings.SplitN(scope, ":", 4)
+	if len(segments) < 3 {
+		return false
+	}
+
+	plane := segments[0]
+	res := segments[1]
+	act := segments[2]
+
+	// Plane must be "relayfile" or wildcard.
+	if plane != "relayfile" && plane != "*" {
+		return false
+	}
+	// Resource must be "fs" or wildcard.
+	if res != "fs" && res != "*" {
+		return false
+	}
+	// Action must grant write: "write", "manage", or wildcard.
+	if act != "write" && act != "manage" && act != "*" {
+		return false
+	}
+
+	// If there is a path restriction (4th segment), check it.
+	if len(segments) == 4 {
+		allowedPrefix := strings.TrimSpace(segments[3])
+		if allowedPrefix == "" {
+			return false
+		}
+		if allowedPrefix == "*" {
+			return true
+		}
+		allowedPrefix = normalizeRemotePath(allowedPrefix)
+		if strings.HasSuffix(allowedPrefix, "/*") {
+			allowedPrefix = strings.TrimSuffix(allowedPrefix, "/*")
+			allowedPrefix = normalizeRemotePath(allowedPrefix)
+		}
+		if allowedPrefix == "/" {
+			return true
+		}
+		if allowedPrefix == "" {
+			return false
+		}
+		return filePath == allowedPrefix || strings.HasPrefix(filePath, allowedPrefix+"/")
+	}
+
+	return true
 }
 
 func (s *Syncer) applyRemoteDelete(remotePath string, conflicted map[string]struct{}) error {
@@ -777,6 +1199,9 @@ func (s *Syncer) applyRemoteDelete(remotePath string, conflicted map[string]stru
 	}
 	tracked, ok := s.state.Files[remotePath]
 	if !ok || tracked.Dirty {
+		return nil
+	}
+	if tracked.Denied {
 		return nil
 	}
 	localPath, err := remoteToLocalPath(s.localRoot, s.remoteRoot, remotePath)
@@ -808,76 +1233,53 @@ func (s *Syncer) pushLocal(ctx context.Context) (map[string]struct{}, error) {
 	for _, remotePath := range localRemotePaths {
 		snapshot := localFiles[remotePath]
 		tracked, exists := s.state.Files[remotePath]
+		localPath, err := remoteToLocalPath(s.localRoot, s.remoteRoot, remotePath)
+		if err != nil {
+			return nil, err
+		}
+		canWrite := s.canWritePath(remotePath)
+		tracked.ReadOnly = !canWrite
+		if exists && tracked.Denied {
+			if err := os.Remove(localPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return nil, err
+			}
+			tracked.Dirty = false
+			s.state.Files[remotePath] = tracked
+			continue
+		}
+		if exists && tracked.ReadOnly {
+			// Check if agent modified the readonly file (e.g. via chmod bypass)
+			if snapshot.Hash != tracked.Hash {
+				// Revert to server content
+				remoteFile, readErr := s.client.ReadFile(ctx, s.workspace, remotePath)
+				if readErr == nil {
+					if writeErr := os.WriteFile(localPath, []byte(remoteFile.Content), 0o444); writeErr == nil {
+						tracked.Hash = hashString(remoteFile.Content)
+						tracked.Revision = remoteFile.Revision
+						s.logDenial("WRITE_REVERTED", remotePath, "file is read-only; content reverted to server version")
+						s.logf("write denied, reverted: %s", remotePath)
+					}
+				}
+			}
+			if err := s.applyLocalPermissions(localPath, false); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return nil, err
+			}
+			s.state.Files[remotePath] = tracked
+			continue
+		}
+		if exists && !canWrite {
+			if err := s.applyLocalPermissions(localPath, false); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return nil, err
+			}
+			tracked.Dirty = false
+			s.state.Files[remotePath] = tracked
+			continue
+		}
 		if exists && tracked.Hash == snapshot.Hash && !tracked.Dirty {
 			continue
 		}
-		if exists && tracked.Dirty {
-			remoteFile, readErr := s.client.ReadFile(ctx, s.workspace, remotePath)
-			if readErr == nil && hashString(remoteFile.Content) == snapshot.Hash {
-				contentType := strings.TrimSpace(remoteFile.ContentType)
-				if contentType == "" {
-					contentType = snapshot.ContentType
-				}
-				s.state.Files[remotePath] = trackedFile{
-					Revision:    remoteFile.Revision,
-					ContentType: contentType,
-					Hash:        snapshot.Hash,
-					Dirty:       false,
-				}
-				continue
-			}
-		}
-		baseRevision := "0"
-		if exists {
-			baseRevision = tracked.Revision
-		}
-		result, err := s.client.WriteFile(ctx, s.workspace, remotePath, baseRevision, snapshot.ContentType, snapshot.Content)
-		if err != nil {
-			if errors.Is(err, ErrConflict) {
-				s.logf("conflict writing %s; keeping local content", remotePath)
-				conflicted[remotePath] = struct{}{}
-				remoteFile, readErr := s.client.ReadFile(ctx, s.workspace, remotePath)
-				switch {
-				case readErr == nil:
-					s.state.Files[remotePath] = trackedFile{
-						Revision:    remoteFile.Revision,
-						ContentType: snapshot.ContentType,
-						Hash:        snapshot.Hash,
-						Dirty:       true,
-					}
-				case exists:
-					tracked.Hash = snapshot.Hash
-					tracked.ContentType = snapshot.ContentType
-					tracked.Dirty = true
-					s.state.Files[remotePath] = tracked
-				default:
-					s.state.Files[remotePath] = trackedFile{
-						Revision:    "",
-						ContentType: snapshot.ContentType,
-						Hash:        snapshot.Hash,
-						Dirty:       true,
-					}
-				}
-				continue
-			}
+		if err := s.pushSingleFile(ctx, remotePath, localPath, snapshot, tracked, exists, conflicted); err != nil {
 			return nil, err
-		}
-		revision := result.TargetRevision
-		if revision == "" && exists {
-			revision = tracked.Revision
-		}
-		if revision == "" {
-			file, readErr := s.client.ReadFile(ctx, s.workspace, remotePath)
-			if readErr != nil {
-				return nil, readErr
-			}
-			revision = file.Revision
-		}
-		s.state.Files[remotePath] = trackedFile{
-			Revision:    revision,
-			ContentType: snapshot.ContentType,
-			Hash:        snapshot.Hash,
-			Dirty:       false,
 		}
 	}
 
@@ -889,6 +1291,11 @@ func (s *Syncer) pushLocal(ctx context.Context) (map[string]struct{}, error) {
 
 	for _, remotePath := range statePaths {
 		tracked := s.state.Files[remotePath]
+		tracked.ReadOnly = !s.canWritePath(remotePath)
+		if tracked.Denied || tracked.ReadOnly {
+			s.state.Files[remotePath] = tracked
+			continue
+		}
 		if _, ok := localFiles[remotePath]; ok {
 			continue
 		}
@@ -910,6 +1317,39 @@ func (s *Syncer) pushLocal(ctx context.Context) (map[string]struct{}, error) {
 	return conflicted, nil
 }
 
+func (s *Syncer) markReadDenied(remotePath string) error {
+	tracked := s.state.Files[remotePath]
+	tracked.Denied = true
+	tracked.Dirty = false
+	tracked.ReadOnly = false
+	s.state.Files[remotePath] = tracked
+
+	localPath, err := remoteToLocalPath(s.localRoot, s.remoteRoot, remotePath)
+	if err != nil {
+		return nil
+	}
+	s.logDenial("READ_DENIED", remotePath, "agent does not have read permission; file removed")
+	if err := os.Remove(localPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
+func (s *Syncer) logDenial(action, filePath, reason string) {
+	entry := fmt.Sprintf("[%s] %s %s: %s\n",
+		time.Now().Format(time.RFC3339), action, filePath, reason)
+	f, err := os.OpenFile(s.denialLogPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	_, _ = f.WriteString(entry)
+}
+
+func (s *Syncer) applyWriteDenied(ctx context.Context, remotePath, localPath string, snapshot localSnapshot, tracked trackedFile) error {
+	return s.revertReadonlyFile(ctx, remotePath, localPath, tracked, snapshot.ContentType)
+}
+
 func (s *Syncer) scanLocalFiles() (map[string]localSnapshot, error) {
 	results := map[string]localSnapshot{}
 	statePathAbs, err := filepath.Abs(s.stateFile)
@@ -921,6 +1361,9 @@ func (s *Syncer) scanLocalFiles() (map[string]localSnapshot, error) {
 			return walkErr
 		}
 		if d.IsDir() {
+			if d.Name() == ".relay" {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		absPath, err := filepath.Abs(path)
@@ -946,6 +1389,23 @@ func (s *Syncer) scanLocalFiles() (map[string]localSnapshot, error) {
 		return nil, err
 	}
 	return results, nil
+}
+
+func normalizeScopes(scopes []string) []string {
+	normalized := make([]string, 0, len(scopes))
+	seen := map[string]struct{}{}
+	for _, scope := range scopes {
+		scope = strings.TrimSpace(scope)
+		if scope == "" {
+			continue
+		}
+		if _, ok := seen[scope]; ok {
+			continue
+		}
+		seen[scope] = struct{}{}
+		normalized = append(normalized, scope)
+	}
+	return normalized
 }
 
 func (s *Syncer) loadState() error {

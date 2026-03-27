@@ -22,6 +22,7 @@ import (
 
 	"github.com/agentworkforce/relayfile/internal/httpapi"
 	"github.com/agentworkforce/relayfile/internal/relayfile"
+	"github.com/fsnotify/fsnotify"
 )
 
 func TestSyncOncePullsRemoteAndPushesLocalEdits(t *testing.T) {
@@ -473,6 +474,601 @@ func TestSyncOnceUsesWebSocketForRealtimeUpdatesAndSkipsPollingWhileConnected(t 
 	}
 }
 
+func TestPullSkipsDeniedFiles(t *testing.T) {
+	disableWebSocket := false
+	token := mustMountsyncTestJWT(t, "dev-secret", "ws_mount_denied_read", "MountSync", []string{"fs:read"}, time.Now().Add(time.Hour))
+	server := newMockMountsyncServer(t, map[string]RemoteFile{
+		"/notion/secrets/key.txt": {
+			Path:        "/notion/secrets/key.txt",
+			Revision:    "rev_1",
+			ContentType: "text/markdown",
+			Content:     "# secret",
+		},
+	}, map[string]struct{}{"/notion/secrets/key.txt": {}}, nil)
+	defer server.Close()
+
+	localDir := t.TempDir()
+	client := NewHTTPClient(server.URL, token, server.Client())
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_mount_denied_read",
+		RemoteRoot:  "/notion",
+		LocalRoot:   localDir,
+		WebSocket:   &disableWebSocket,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("sync for denied file failed: %v", err)
+	}
+
+	localPath := filepath.Join(localDir, "secrets", "key.txt")
+	if _, err := os.Stat(localPath); err == nil {
+		t.Fatalf("expected denied remote file not to be created locally, got %s", localPath)
+	}
+
+	stateFile := filepath.Join(localDir, ".relayfile-mount-state.json")
+	assertStateMarksPathDenied(t, stateFile, "/notion/secrets/key.txt")
+}
+
+func TestPullDeletesLocalDeniedFile(t *testing.T) {
+	disableWebSocket := false
+	token := mustMountsyncTestJWT(t, "dev-secret", "ws_mount_denied_delete", "MountSync", []string{"fs:read"}, time.Now().Add(time.Hour))
+	localDir := t.TempDir()
+	localPath := filepath.Join(localDir, "secrets", "key.txt")
+	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+		t.Fatalf("mkdir local dir failed: %v", err)
+	}
+	if err := os.WriteFile(localPath, []byte("# local secret"), 0o644); err != nil {
+		t.Fatalf("write local denied file failed: %v", err)
+	}
+
+	initialState := mountState{
+		Files: map[string]trackedFile{
+			"/notion/secrets/key.txt": {
+				Revision:    "rev_1",
+				ContentType: "text/markdown",
+				Hash:        hashString("# local secret"),
+			},
+		},
+	}
+	stateFile := filepath.Join(localDir, ".relayfile-mount-state.json")
+	if err := writeMountState(stateFile, initialState); err != nil {
+		t.Fatalf("seed state file failed: %v", err)
+	}
+
+	server := newMockMountsyncServer(t, map[string]RemoteFile{
+		"/notion/secrets/key.txt": {
+			Path:        "/notion/secrets/key.txt",
+			Revision:    "rev_1",
+			ContentType: "text/markdown",
+			Content:     "# secret",
+		},
+	}, map[string]struct{}{"/notion/secrets/key.txt": {}}, nil)
+	defer server.Close()
+
+	client := NewHTTPClient(server.URL, token, server.Client())
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_mount_denied_delete",
+		RemoteRoot:  "/notion",
+		LocalRoot:   localDir,
+		WebSocket:   &disableWebSocket,
+		StateFile:   stateFile,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("sync denied file failed: %v", err)
+	}
+	if _, err := os.Stat(localPath); !os.IsNotExist(err) {
+		t.Fatalf("expected denied local file to be deleted, got err=%v", err)
+	}
+	assertStateMarksPathDenied(t, stateFile, "/notion/secrets/key.txt")
+}
+
+func TestWriteRejectionRevertsFile(t *testing.T) {
+	disableWebSocket := false
+	token := mustMountsyncTestJWT(t, "dev-secret", "ws_mount_write_reject", "MountSync", []string{"fs:read"}, time.Now().Add(time.Hour))
+	localDir := t.TempDir()
+	server := newMockMountsyncServer(t, map[string]RemoteFile{
+		"/notion/readonly/notes.md": {
+			Path:        "/notion/readonly/notes.md",
+			Revision:    "rev_1",
+			ContentType: "text/markdown",
+			Content:     "# readonly",
+		},
+	}, nil, map[string]struct{}{"/notion/readonly/notes.md": {}})
+	defer server.Close()
+
+	client := NewHTTPClient(server.URL, token, server.Client())
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_mount_write_reject",
+		RemoteRoot:  "/notion",
+		LocalRoot:   localDir,
+		WebSocket:   &disableWebSocket,
+		Scopes:      []string{"fs:read"},
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("initial pull failed: %v", err)
+	}
+
+	localPath := filepath.Join(localDir, "readonly", "notes.md")
+	// Simulate agent chmod bypass
+	if err := os.Chmod(localPath, 0o644); err != nil {
+		t.Fatalf("chmod bypass failed: %v", err)
+	}
+	if err := os.WriteFile(localPath, []byte("# local change"), 0o644); err != nil {
+		t.Fatalf("modify local file failed: %v", err)
+	}
+
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("write-rejected sync failed: %v", err)
+	}
+	assertLocalFileContent(t, localPath, "# readonly")
+	if mode, err := os.Stat(localPath); err != nil {
+		t.Fatalf("stat local file failed: %v", err)
+	} else if mode.Mode().Perm() != 0o444 {
+		t.Fatalf("expected denied-write file mode 0444, got %o", mode.Mode().Perm())
+	}
+}
+
+func TestReadonlyFilesGetChmod444(t *testing.T) {
+	disableWebSocket := false
+	token := mustMountsyncTestJWT(t, "dev-secret", "ws_mount_readonly_mode", "MountSync", []string{"fs:read"}, time.Now().Add(time.Hour))
+	localDir := t.TempDir()
+	server := newMockMountsyncServer(t, map[string]RemoteFile{
+		"/notion/docs/notes.md": {
+			Path:        "/notion/docs/notes.md",
+			Revision:    "rev_1",
+			ContentType: "text/markdown",
+			Content:     "# notes",
+		},
+	}, nil, nil)
+	defer server.Close()
+
+	client := NewHTTPClient(server.URL, token, server.Client())
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_mount_readonly_mode",
+		RemoteRoot:  "/notion",
+		LocalRoot:   localDir,
+		WebSocket:   &disableWebSocket,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("initial pull failed: %v", err)
+	}
+
+	localPath := filepath.Join(localDir, "docs", "notes.md")
+	mode, err := os.Stat(localPath)
+	if err != nil {
+		t.Fatalf("stat local file failed: %v", err)
+	}
+	if mode.Mode().Perm() != 0o444 {
+		t.Fatalf("expected read-only mode 0444, got %o", mode.Mode().Perm())
+	}
+}
+
+func TestWritableFilesGetChmod644(t *testing.T) {
+	disableWebSocket := false
+	token := mustMountsyncTestJWT(t, "dev-secret", "ws_mount_rw_mode", "MountSync", []string{"fs:read", "fs:write"}, time.Now().Add(time.Hour))
+	localDir := t.TempDir()
+	server := newMockMountsyncServer(t, map[string]RemoteFile{
+		"/notion/docs/notes.md": {
+			Path:        "/notion/docs/notes.md",
+			Revision:    "rev_1",
+			ContentType: "text/markdown",
+			Content:     "# notes",
+		},
+	}, nil, nil)
+	defer server.Close()
+
+	client := NewHTTPClient(server.URL, token, server.Client())
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_mount_rw_mode",
+		RemoteRoot:  "/notion",
+		LocalRoot:   localDir,
+		WebSocket:   &disableWebSocket,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("initial pull failed: %v", err)
+	}
+
+	localPath := filepath.Join(localDir, "docs", "notes.md")
+	mode, err := os.Stat(localPath)
+	if err != nil {
+		t.Fatalf("stat local file failed: %v", err)
+	}
+	if mode.Mode().Perm() != 0o644 {
+		t.Fatalf("expected writable mode 0644, got %o", mode.Mode().Perm())
+	}
+}
+
+func TestCanWritePathWithShortScopes(t *testing.T) {
+	writeToken := mustMountsyncTestJWT(t, "dev-secret", "ws_scope_short", "MountSync", []string{"fs:write"}, time.Now().Add(time.Hour))
+	readToken := mustMountsyncTestJWT(t, "dev-secret", "ws_scope_short", "MountSync", []string{"fs:read"}, time.Now().Add(time.Hour))
+
+	writeScopes := parseMountsyncTokenScopes(t, writeToken)
+	readScopes := parseMountsyncTokenScopes(t, readToken)
+
+	if !canWritePath(writeScopes, "/notion/docs/readme.md") {
+		t.Fatalf("expected fs:write token to permit write for all paths")
+	}
+	if canWritePath(readScopes, "/notion/docs/readme.md") {
+		t.Fatalf("expected fs:read-only token to deny writes")
+	}
+}
+
+func TestCanWritePathWithRelayauthScopes(t *testing.T) {
+	token := mustMountsyncTestJWT(t, "dev-secret", "ws_scope_relayer", "MountSync", []string{"relayfile:fs:write:/src/*"}, time.Now().Add(time.Hour))
+	scopes := parseMountsyncTokenScopes(t, token)
+
+	if !canWritePath(scopes, "/src/app.ts") {
+		t.Fatalf("expected scoped write token to permit path under /src")
+	}
+	if canWritePath(scopes, "/docs/readme.md") {
+		t.Fatalf("expected scoped write token to deny path outside /src")
+	}
+}
+
+func TestCanReadPathWithPerFileScopes(t *testing.T) {
+	scopes := map[string]struct{}{
+		"relayfile:fs:read:/src/app.ts": {},
+		"relayfile:fs:read:/README.md": {},
+	}
+
+	if !canReadPath(scopes, "/src/app.ts") {
+		t.Fatalf("expected /src/app.ts to be readable")
+	}
+	if canReadPath(scopes, "/.env") {
+		t.Fatalf("expected /.env to be unreadable")
+	}
+	if canReadPath(scopes, "/secrets/key.txt") {
+		t.Fatalf("expected /secrets/key.txt to be unreadable")
+	}
+}
+
+func TestCanReadPathFromTokenPerFileScopes(t *testing.T) {
+	token := mustMountsyncTestJWT(t, "dev-secret", "ws_scope_read_from_token", "MountSync", []string{
+		"relayfile:fs:read:/src/app.ts",
+		"relayfile:fs:read:/notes/*",
+	}, time.Now().Add(time.Hour))
+
+	scopes := parseMountsyncTokenScopes(t, token)
+
+	if !canReadPath(scopes, "/src/app.ts") {
+		t.Fatalf("expected /src/app.ts to be readable from scoped token")
+	}
+	if !canReadPath(scopes, "/notes/today.md") {
+		t.Fatalf("expected /notes/today.md to be readable from scoped token")
+	}
+	if canReadPath(scopes, "/docs/readme.md") {
+		t.Fatalf("expected /docs/readme.md to be unreadable from scoped token")
+	}
+}
+
+func TestCanReadPathWithWildcard(t *testing.T) {
+	scopes := map[string]struct{}{
+		"relayfile:fs:read:/src/*": {},
+	}
+
+	if !canReadPath(scopes, "/src/api/handler.ts") {
+		t.Fatalf("expected /src/api/handler.ts to be readable")
+	}
+	if canReadPath(scopes, "/docs/readme.md") {
+		t.Fatalf("expected /docs/readme.md to be unreadable")
+	}
+}
+
+func TestCanReadPathEmpty(t *testing.T) {
+	scopes := map[string]struct{}{}
+
+	if !canReadPath(scopes, "/anything") {
+		t.Fatalf("expected empty scope set to allow read")
+	}
+}
+
+func TestPullSkipsUnreadableFiles(t *testing.T) {
+	disableWebSocket := false
+	token := mustMountsyncTestJWT(t, "dev-secret", "ws_scope_read_filter", "MountSync", []string{"relayfile:fs:read:/src/app.ts"}, time.Now().Add(time.Hour))
+	localDir := t.TempDir()
+	server := newMockMountsyncServer(t, map[string]RemoteFile{
+		"/notion/src/app.ts": {
+			Path:        "/notion/src/app.ts",
+			Revision:    "rev_1",
+			ContentType: "text/markdown",
+			Content:     "# app",
+		},
+		"/notion/.env": {
+			Path:        "/notion/.env",
+			Revision:    "rev_1",
+			ContentType: "text/plain",
+			Content:     "SECRET=abc",
+		},
+	}, map[string]struct{}{
+		"/notion/.env": {},
+	}, nil)
+	defer server.Close()
+
+	client := NewHTTPClient(server.URL, token, server.Client())
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_scope_read_filter",
+		RemoteRoot:  "/notion",
+		LocalRoot:   localDir,
+		WebSocket:   &disableWebSocket,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("initial pull failed: %v", err)
+	}
+
+	stateFile := filepath.Join(localDir, ".relayfile-mount-state.json")
+
+	if _, err := os.Stat(filepath.Join(localDir, "src", "app.ts")); err != nil {
+		t.Fatalf("expected readable file to exist, got: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(localDir, ".env")); !os.IsNotExist(err) {
+		t.Fatalf("expected unreadable file to be absent, got err=%v", err)
+	}
+	assertStateMarksPathDenied(t, stateFile, "/notion/.env")
+}
+
+func TestReadonlyRevertAfterChmodBypass(t *testing.T) {
+	disableWebSocket := false
+	token := mustMountsyncTestJWT(t, "dev-secret", "ws_readonly_chmod_bypass", "MountSync", []string{"relayfile:fs:read:/readonly/notes.md"}, time.Now().Add(time.Hour))
+	localDir := t.TempDir()
+	server := newMockMountsyncServer(t, map[string]RemoteFile{
+		"/notion/readonly/notes.md": {
+			Path:        "/notion/readonly/notes.md",
+			Revision:    "rev_1",
+			ContentType: "text/markdown",
+			Content:     "# readonly",
+		},
+	}, nil, map[string]struct{}{"/notion/readonly/notes.md": {}})
+	defer server.Close()
+
+	client := NewHTTPClient(server.URL, token, server.Client())
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_readonly_chmod_bypass",
+		RemoteRoot:  "/notion",
+		LocalRoot:   localDir,
+		WebSocket:   &disableWebSocket,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("initial pull failed: %v", err)
+	}
+
+	localPath := filepath.Join(localDir, "readonly", "notes.md")
+	if err := os.Chmod(localPath, 0o644); err != nil {
+		t.Fatalf("chmod writable before modify failed: %v", err)
+	}
+	if err := os.WriteFile(localPath, []byte("# changed"), 0o644); err != nil {
+		t.Fatalf("modify local file failed: %v", err)
+	}
+
+	if err := syncer.HandleLocalChange(context.Background(), filepath.ToSlash(filepath.Join("readonly", "notes.md")), fsnotify.Write); err != nil {
+		t.Fatalf("handle local write failed: %v", err)
+	}
+
+	assertLocalFileContent(t, localPath, "# readonly")
+	mode, err := os.Stat(localPath)
+	if err != nil {
+		t.Fatalf("stat local file failed: %v", err)
+	}
+	if mode.Mode().Perm() != 0o444 {
+		t.Fatalf("expected reverted readonly file mode 0444, got %o", mode.Mode().Perm())
+	}
+}
+
+func TestReadonlyRevertOnModify(t *testing.T) {
+	disableWebSocket := false
+	token := mustMountsyncTestJWT(t, "dev-secret", "ws_readonly_modify", "MountSync", []string{"relayfile:fs:read:/readonly/notes.md"}, time.Now().Add(time.Hour))
+	localDir := t.TempDir()
+	server := newMockMountsyncServer(t, map[string]RemoteFile{
+		"/notion/readonly/notes.md": {
+			Path:        "/notion/readonly/notes.md",
+			Revision:    "rev_1",
+			ContentType: "text/markdown",
+			Content:     "# readonly",
+		},
+	}, nil, nil)
+	defer server.Close()
+
+	client := NewHTTPClient(server.URL, token, server.Client())
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_readonly_modify",
+		RemoteRoot:  "/notion",
+		LocalRoot:   localDir,
+		WebSocket:   &disableWebSocket,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("initial pull failed: %v", err)
+	}
+
+	localPath := filepath.Join(localDir, "readonly", "notes.md")
+	if err := os.Chmod(localPath, 0o644); err != nil {
+		t.Fatalf("chmod writable before modify failed: %v", err)
+	}
+	if err := os.WriteFile(localPath, []byte("# changed"), 0o644); err != nil {
+		t.Fatalf("modify local file failed: %v", err)
+	}
+
+	if err := syncer.HandleLocalChange(context.Background(), filepath.ToSlash(filepath.Join("readonly", "notes.md")), fsnotify.Write); err != nil {
+		t.Fatalf("handle local modify failed: %v", err)
+	}
+
+	assertLocalFileContent(t, localPath, "# readonly")
+	mode, err := os.Stat(localPath)
+	if err != nil {
+		t.Fatalf("stat local file failed: %v", err)
+	}
+	if mode.Mode().Perm() != 0o444 {
+		t.Fatalf("expected reverted readonly file mode 0444, got %o", mode.Mode().Perm())
+	}
+
+	denialLogPath := filepath.Join(localDir, ".relay", "permissions-denied.log")
+	logData, err := os.ReadFile(denialLogPath)
+	if err != nil {
+		t.Fatalf("read denial log failed: %v", err)
+	}
+	if !strings.Contains(string(logData), "WRITE_DENIED") {
+		t.Fatalf("expected WRITE_DENIED in denial log, got: %q", string(logData))
+	}
+}
+
+func TestReadonlyRevertOnDelete(t *testing.T) {
+	disableWebSocket := false
+	token := mustMountsyncTestJWT(t, "dev-secret", "ws_readonly_delete", "MountSync", []string{"relayfile:fs:read:/readonly/notes.md"}, time.Now().Add(time.Hour))
+	localDir := t.TempDir()
+	server := newMockMountsyncServer(t, map[string]RemoteFile{
+		"/notion/readonly/notes.md": {
+			Path:        "/notion/readonly/notes.md",
+			Revision:    "rev_1",
+			ContentType: "text/markdown",
+			Content:     "# readonly",
+		},
+	}, nil, nil)
+	defer server.Close()
+
+	client := NewHTTPClient(server.URL, token, server.Client())
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_readonly_delete",
+		RemoteRoot:  "/notion",
+		LocalRoot:   localDir,
+		WebSocket:   &disableWebSocket,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("initial pull failed: %v", err)
+	}
+
+	localPath := filepath.Join(localDir, "readonly", "notes.md")
+	if err := os.Remove(localPath); err != nil {
+		t.Fatalf("delete local file failed: %v", err)
+	}
+	if err := syncer.HandleLocalChange(context.Background(), filepath.ToSlash(filepath.Join("readonly", "notes.md")), fsnotify.Remove); err != nil {
+		t.Fatalf("handle local delete failed: %v", err)
+	}
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("post-delete sync failed: %v", err)
+	}
+
+	assertLocalFileContent(t, localPath, "# readonly")
+}
+
+func TestFsnotifyTriggersRevert(t *testing.T) {
+	disableWebSocket := false
+	token := mustMountsyncTestJWT(t, "dev-secret", "ws_readonly_fsnotify", "MountSync", []string{"relayfile:fs:read:/readonly/notes.md"}, time.Now().Add(time.Hour))
+	localDir := t.TempDir()
+	server := newMockMountsyncServer(t, map[string]RemoteFile{
+		"/notion/readonly/notes.md": {
+			Path:        "/notion/readonly/notes.md",
+			Revision:    "rev_1",
+			ContentType: "text/markdown",
+			Content:     "# readonly",
+		},
+	}, nil, nil)
+	defer server.Close()
+
+	client := NewHTTPClient(server.URL, token, server.Client())
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_readonly_fsnotify",
+		RemoteRoot:  "/notion",
+		LocalRoot:   localDir,
+		WebSocket:   &disableWebSocket,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("initial pull failed: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	fwErr := make(chan error, 4)
+	watcher, err := NewFileWatcher(localDir, func(relativePath string, op fsnotify.Op) {
+		if err := syncer.HandleLocalChange(context.Background(), relativePath, op); err != nil {
+			select {
+			case fwErr <- err:
+			default:
+			}
+		}
+	})
+	if err != nil {
+		t.Fatalf("new watcher failed: %v", err)
+	}
+	if err := watcher.Start(ctx); err != nil {
+		t.Fatalf("start watcher failed: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = watcher.Close()
+	})
+
+	localPath := filepath.Join(localDir, "readonly", "notes.md")
+	if err := os.Chmod(localPath, 0o644); err != nil {
+		t.Fatalf("chmod writable before modify failed: %v", err)
+	}
+	if err := os.WriteFile(localPath, []byte("# tampered"), 0o644); err != nil {
+		t.Fatalf("modify local file failed: %v", err)
+	}
+
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		select {
+		case <-fwErr:
+			t.Fatal("watcher callback returned error during revert")
+		default:
+		}
+		data, readErr := os.ReadFile(localPath)
+		if readErr != nil {
+			time.Sleep(25 * time.Millisecond)
+			continue
+		}
+		if string(data) == "# readonly" {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	assertLocalFileContent(t, localPath, "# readonly")
+	mode, err := os.Stat(localPath)
+	if err != nil {
+		t.Fatalf("stat local file failed: %v", err)
+	}
+	if mode.Mode().Perm() != 0o444 {
+		t.Fatalf("expected reverted readonly file mode 0444, got %o", mode.Mode().Perm())
+	}
+}
+
 func TestRemoteToLocalAndLocalToRemotePath(t *testing.T) {
 	localRoot := filepath.Join("tmp", "mirror")
 	localPath, err := remoteToLocalPath(localRoot, "/notion", "/notion/Folder/File.md")
@@ -683,6 +1279,309 @@ func assertLocalFileContent(t *testing.T, path, want string) {
 	if string(data) != want {
 		t.Fatalf("expected %s to contain %q, got %q", path, want, string(data))
 	}
+}
+
+func newMockMountsyncServer(
+	t *testing.T,
+	files map[string]RemoteFile,
+	readDenied map[string]struct{},
+	writeDenied map[string]struct{},
+) *httptest.Server {
+	t.Helper()
+
+	normalizedFiles := map[string]RemoteFile{}
+	for path, file := range files {
+		normalizedFiles[normalizeRemotePath(path)] = file
+	}
+	normalizedReadDenied := map[string]struct{}{}
+	for path := range readDenied {
+		normalizedReadDenied[normalizeRemotePath(path)] = struct{}{}
+	}
+	normalizedWriteDenied := map[string]struct{}{}
+	for path := range writeDenied {
+		normalizedWriteDenied[normalizeRemotePath(path)] = struct{}{}
+	}
+
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/fs/tree") && r.Method == http.MethodGet:
+			entries := make([]TreeEntry, 0, len(normalizedFiles))
+			for path, file := range normalizedFiles {
+				entries = append(entries, TreeEntry{
+					Path:     path,
+					Type:     "file",
+					Revision: file.Revision,
+				})
+			}
+			sort.Slice(entries, func(i, j int) bool {
+				return entries[i].Path < entries[j].Path
+			})
+			writeJSONResponse(t, w, http.StatusOK, TreeResponse{
+				Path:       "/notion",
+				Entries:    entries,
+				NextCursor: nil,
+			})
+		case strings.HasSuffix(r.URL.Path, "/fs/events") && r.Method == http.MethodGet:
+			writeJSONResponse(t, w, http.StatusOK, EventFeed{
+				Events:     []FilesystemEvent{},
+				NextCursor: nil,
+			})
+		case strings.HasSuffix(r.URL.Path, "/fs/file") && r.Method == http.MethodGet:
+			path := normalizeRemotePath(r.URL.Query().Get("path"))
+			if _, denied := normalizedReadDenied[path]; denied {
+				writeJSONResponse(t, w, http.StatusForbidden, map[string]any{
+					"code":    "forbidden",
+					"message": "denied",
+				})
+				return
+			}
+			file, ok := normalizedFiles[path]
+			if !ok {
+				writeJSONResponse(t, w, http.StatusNotFound, map[string]any{
+					"code":    "not_found",
+					"message": "not found",
+				})
+				return
+			}
+			writeJSONResponse(t, w, http.StatusOK, file)
+		case strings.HasSuffix(r.URL.Path, "/fs/file") && r.Method == http.MethodPut:
+			path := normalizeRemotePath(r.URL.Query().Get("path"))
+			if _, denied := normalizedWriteDenied[path]; denied {
+				writeJSONResponse(t, w, http.StatusForbidden, map[string]any{
+					"code":    "forbidden",
+					"message": "denied",
+				})
+				return
+			}
+			var payload struct {
+				Content     string `json:"content"`
+				ContentType string `json:"contentType"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				writeJSONResponse(t, w, http.StatusBadRequest, map[string]any{
+					"code":    "bad_request",
+					"message": "invalid json",
+				})
+				return
+			}
+			file := normalizedFiles[path]
+			file.Path = path
+			file.Content = payload.Content
+			if payload.ContentType != "" {
+				file.ContentType = payload.ContentType
+			}
+			if file.Revision == "" {
+				file.Revision = "rev_1"
+			} else {
+				file.Revision = "rev_2"
+			}
+			normalizedFiles[path] = file
+			writeJSONResponse(t, w, http.StatusOK, WriteResult{
+				TargetRevision: file.Revision,
+			})
+		case strings.HasSuffix(r.URL.Path, "/fs/file") && r.Method == http.MethodDelete:
+			path := normalizeRemotePath(r.URL.Query().Get("path"))
+			if _, denied := normalizedWriteDenied[path]; denied {
+				writeJSONResponse(t, w, http.StatusForbidden, map[string]any{
+					"code":    "forbidden",
+					"message": "denied",
+				})
+				return
+			}
+			delete(normalizedFiles, path)
+			writeJSONResponse(t, w, http.StatusOK, map[string]any{})
+		default:
+			writeJSONResponse(t, w, http.StatusNotFound, map[string]any{
+				"code":    "not_found",
+				"message": "route not found",
+			})
+		}
+	}))
+}
+
+func writeJSONResponse(t *testing.T, w http.ResponseWriter, status int, payload any) {
+	t.Helper()
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	if payload == nil {
+		return
+	}
+	if err := json.NewEncoder(w).Encode(payload); err != nil {
+		t.Fatalf("write JSON response failed: %v", err)
+	}
+}
+
+func parseMountsyncTokenScopes(t *testing.T, token string) map[string]struct{} {
+	t.Helper()
+	parts := strings.Split(token, ".")
+	if len(parts) < 2 {
+		t.Fatalf("invalid token format: %q", token)
+	}
+
+	payloadJSON, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		t.Fatalf("decode token payload failed: %v", err)
+	}
+	var claims struct {
+		Scopes []string `json:"scopes"`
+	}
+	if err := json.Unmarshal(payloadJSON, &claims); err != nil {
+		t.Fatalf("decode token claims failed: %v", err)
+	}
+
+	out := map[string]struct{}{}
+	for _, scope := range claims.Scopes {
+		scope = strings.TrimSpace(scope)
+		if scope != "" {
+			out[scope] = struct{}{}
+		}
+	}
+	return out
+}
+
+func canWritePath(scopes map[string]struct{}, path string) bool {
+	target := normalizeRemotePath(path)
+	for scope := range scopes {
+		if canWritePathForScope(scope, target) {
+			return true
+		}
+	}
+	return false
+}
+
+func canReadPath(scopes map[string]struct{}, path string) bool {
+	if len(scopes) == 0 {
+		return true
+	}
+	target := normalizeRemotePath(path)
+	for scope := range scopes {
+		if canReadPathForScope(scope, target) {
+			return true
+		}
+	}
+	return false
+}
+
+func canWritePathForScope(scope, path string) bool {
+	scope = strings.TrimSpace(scope)
+	if scope == "fs:write" {
+		return true
+	}
+	parts := strings.Split(scope, ":")
+	if len(parts) < 3 {
+		return false
+	}
+	plane := strings.ToLower(parts[0])
+	resource := strings.ToLower(parts[1])
+	action := strings.ToLower(parts[2])
+	if plane != "relayfile" && plane != "*" {
+		return false
+	}
+	if resource != "fs" && resource != "*" {
+		return false
+	}
+	if action != "write" && action != "manage" && action != "*" {
+		return false
+	}
+
+	pathPattern := ""
+	if len(parts) >= 4 {
+		pathPattern = strings.TrimSpace(parts[3])
+	}
+	if pathPattern == "" || pathPattern == "*" {
+		return true
+	}
+	if strings.HasSuffix(pathPattern, "/*") {
+		base := strings.TrimSuffix(pathPattern, "/*")
+		if base == "" {
+			return true
+		}
+		return path == base || strings.HasPrefix(path, base+"/")
+	}
+
+	return path == normalizeRemotePath(pathPattern)
+}
+
+func canReadPathForScope(scope, path string) bool {
+	scope = strings.ToLower(strings.TrimSpace(scope))
+	if scope == "" {
+		return false
+	}
+	if scope == "fs:read" {
+		return true
+	}
+	parts := strings.Split(scope, ":")
+	if len(parts) < 3 {
+		return false
+	}
+	plane := strings.ToLower(strings.TrimSpace(parts[0]))
+	resource := strings.ToLower(strings.TrimSpace(parts[1]))
+	action := strings.ToLower(strings.TrimSpace(parts[2]))
+	if plane != "relayfile" && plane != "*" {
+		return false
+	}
+	if resource != "fs" && resource != "*" {
+		return false
+	}
+	if action != "read" && action != "manage" && action != "*" {
+		return false
+	}
+
+	pathPattern := ""
+	if len(parts) >= 4 {
+		pathPattern = strings.TrimSpace(parts[3])
+	}
+	if pathPattern == "" || pathPattern == "*" {
+		return true
+	}
+	pathPattern = normalizeRemotePath(pathPattern)
+	if pathPattern == "/" {
+		return true
+	}
+	if strings.HasSuffix(pathPattern, "/*") {
+		prefix := strings.TrimSuffix(pathPattern, "/*")
+		if prefix == "" {
+			return true
+		}
+		return path == prefix || strings.HasPrefix(path, prefix+"/")
+	}
+
+	return path == pathPattern
+}
+
+func assertStateMarksPathDenied(t *testing.T, stateFile, remotePath string) {
+	t.Helper()
+	data, err := os.ReadFile(stateFile)
+	if err != nil {
+		t.Fatalf("read state file failed: %v", err)
+	}
+	var raw struct {
+		Files map[string]json.RawMessage `json:"files"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("unmarshal state failed: %v", err)
+	}
+	blob, ok := raw.Files[remotePath]
+	if !ok {
+		t.Fatalf("expected state file to track path %q", remotePath)
+	}
+	var entry struct {
+		Denied *bool `json:"denied"`
+	}
+	if err := json.Unmarshal(blob, &entry); err != nil {
+		t.Fatalf("unmarshal state entry failed: %v", err)
+	}
+	if entry.Denied == nil || !*entry.Denied {
+		t.Fatalf("expected state path %q marked denied", remotePath)
+	}
+}
+
+func writeMountState(stateFile string, state mountState) error {
+	data, err := json.Marshal(state)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(stateFile, data, 0o644)
 }
 
 func waitForLocalContent(t *testing.T, path, want string) {

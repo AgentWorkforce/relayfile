@@ -268,8 +268,8 @@ export function deleteFile(storage: StorageAdapter, req: DeleteFileRequest): Del
   };
 }
 
-const DEFAULT_CONTENT_TYPE = "text/markdown";
-const MAX_FILE_BYTES = 10 * 1024 * 1024;
+export const DEFAULT_CONTENT_TYPE = "text/markdown";
+export const MAX_FILE_BYTES = 10 * 1024 * 1024;
 
 function normalizeEncoding(value?: string): "utf-8" | "base64" | null {
   const encoding = value?.trim().toLowerCase() ?? "";
@@ -298,7 +298,7 @@ function validateEncodedContent(
   }
 }
 
-function encodedSize(content: string, encoding: "utf-8" | "base64"): number {
+export function encodedSize(content: string, encoding: "utf-8" | "base64"): number {
   if (encoding === "base64") {
     try {
       return Uint8Array.from(atob(content), (char) => char.charCodeAt(0))

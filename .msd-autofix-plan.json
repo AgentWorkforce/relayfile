@@ -2,32 +2,51 @@
   "groups": [
     {
       "id": "group-1",
-      "label": "CI workflow fix in contract.yml",
+      "label": "mountfuse wsinvalidate and dir fixes",
       "domain": "reliability",
       "findings": [
-        "2995682752"
+        "2997959423",
+        "2998001814",
+        "2998033340",
+        "2999888275",
+        "2997959507",
+        "2998033116"
       ],
       "files": [
-        ".github/workflows/contract.yml"
+        "internal/mountfuse/wsinvalidate.go",
+        "internal/mountfuse/dir.go"
       ],
-      "rationale": "Single CI workflow file, isolated from core package changes"
+      "rationale": "All wsinvalidate.go findings (endpoint URL, invalidation logic) plus dir.go findings grouped together — same mountfuse directory, no file overlap with other groups. Findings 2998033340 and 2998033116 are already resolved and just need verification."
     },
     {
       "id": "group-2",
-      "label": "Core package fixes in webhooks.ts and acl.ts",
-      "domain": "code-quality",
+      "label": "mountfuse file.go concurrency and operation ordering fixes",
+      "domain": "reliability",
       "findings": [
-        "2995839572",
-        "2995839732",
-        "2995839906"
+        "2997959660",
+        "2997959755",
+        "2998033543",
+        "2998033809",
+        "2998034401"
       ],
       "files": [
-        "packages/core/src/webhooks.ts",
-        "packages/core/src/acl.ts"
+        "internal/mountfuse/file.go"
       ],
-      "rationale": "All three findings are in the same packages/core/src directory; webhooks.ts has two findings and acl.ts has one, all from the same review"
+      "rationale": "All file.go findings — mutex locking, operation ordering, and buffer handling. Findings 2998033543 and 2998033809 are already resolved and just need verification."
+    },
+    {
+      "id": "group-3",
+      "label": "core webhooks fix",
+      "domain": "reliability",
+      "findings": [
+        "2998001767"
+      ],
+      "files": [
+        "packages/core/src/webhooks.ts"
+      ],
+      "rationale": "Single finding in a completely separate package (TypeScript core), isolated from Go mountfuse code."
     }
   ],
-  "totalGroups": 2,
+  "totalGroups": 3,
   "conflictCheck": "no file appears in multiple groups"
 }

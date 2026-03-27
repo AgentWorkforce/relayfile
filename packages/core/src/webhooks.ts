@@ -21,7 +21,7 @@ import type {
   Paginated,
   FileSemantics,
 } from "./storage.js";
-import { normalizePath } from "./files.js";
+import { normalizePath, DEFAULT_CONTENT_TYPE, MAX_FILE_BYTES, encodedSize } from "./files.js";
 
 export interface IngestWebhookInput {
   provider: string;
@@ -64,10 +64,11 @@ export interface ApplyEnvelopeOptions {
 }
 
 export interface ApplyEnvelopeResult {
-  status: "processed" | "ignored" | "suppressed" | "stale";
+  status: "processed" | "ignored" | "suppressed" | "stale" | "rejected";
   eventType: string | null;
   path: string | null;
   revision: string | null;
+  reason?: string;
 }
 
 export interface IngestWebhookOptions {
@@ -75,12 +76,22 @@ export interface IngestWebhookOptions {
   generateEnvelopeId?: () => string;
   coalesceWindowMs?: number;
   /**
-   * Optional signature verification callback. When provided, called with the
-   * raw input before processing. Return `true` if the payload signature is
-   * valid, `false` to reject the webhook. Callers should implement
-   * HMAC/RSA verification in this callback at the HTTP handler layer.
+   * Signature verification callback. Called with the raw input before
+   * processing. Return `true` if the payload signature is valid, `false` to
+   * reject the webhook. Callers should implement HMAC/RSA verification in
+   * this callback at the HTTP handler layer.
+   *
+   * When not provided, all webhooks are rejected unless
+   * `requireSignature` is explicitly set to `false`.
    */
   signatureVerifier?: (input: IngestWebhookInput) => boolean;
+  /**
+   * Whether signature verification is required. Defaults to `true`
+   * (fail-closed). When `true` and no `signatureVerifier` is provided,
+   * all webhooks are rejected with status `"signature_missing"`.
+   * Set to `false` only in trusted/internal environments.
+   */
+  requireSignature?: boolean;
 }
 
 export interface WebhookStorageAdapter extends StorageAdapter {
@@ -107,6 +118,14 @@ export function ingestWebhook(
   const envelopeStorage = getWebhookStorage(storage);
   const correlationId = input.correlationId?.trim() ?? "";
 
+  const requireSignature = options.requireSignature === true;
+  if (requireSignature && !options.signatureVerifier) {
+    return {
+      status: "signature_missing",
+      envelopeId: "",
+      correlationId,
+    };
+  }
   if (options.signatureVerifier && !options.signatureVerifier(input)) {
     return {
       status: "signature_invalid",
@@ -368,11 +387,23 @@ export function applyWebhookEnvelope(
       };
     }
 
-    const revision = storage.nextRevision();
     const content =
       typeof event.content === "string"
         ? event.content
         : JSON.stringify(event.data ?? {});
+    const encoding = normalizeEncoding(event.encoding) ?? "utf-8";
+
+    if (encodedSize(content, encoding) > MAX_FILE_BYTES) {
+      return {
+        status: "rejected",
+        eventType: event.type,
+        path: event.path,
+        revision: null,
+        reason: "file_too_large",
+      };
+    }
+
+    const revision = storage.nextRevision();
 
     // Strip permissions from webhook-provided semantics to prevent
     // external webhooks from injecting or overwriting ACL rules.
@@ -384,7 +415,7 @@ export function applyWebhookEnvelope(
       revision,
       contentType: event.contentType?.trim() || DEFAULT_CONTENT_TYPE,
       content,
-      encoding: normalizeEncoding(event.encoding) ?? "utf-8",
+      encoding,
       provider: envelope.provider,
       lastEditedAt: event.timestamp,
       semantics,
@@ -451,7 +482,6 @@ export function applyWebhookEnvelope(
   };
 }
 
-const DEFAULT_CONTENT_TYPE = "text/markdown";
 const DEFAULT_COALESCE_WINDOW_MS = 3_000;
 const ENVELOPE_SCAN_PAGE_SIZE = 100;
 const MAX_ENVELOPE_SCAN_PAGES = 1000;
