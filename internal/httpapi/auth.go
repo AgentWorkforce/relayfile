@@ -28,7 +28,7 @@ type tokenClaims struct {
 	Exp         int64
 }
 
-func authorizeBearer(authHeader, jwtSecret, workspaceID, requiredScope string, now time.Time) (tokenClaims, *authError) {
+func authorizeBearer(authHeader, jwtSecret, workspaceID, requiredScope, requiredPath string, now time.Time) (tokenClaims, *authError) {
 	claims, err := parseBearer(authHeader, jwtSecret, now)
 	if err != nil {
 		return tokenClaims{}, err
@@ -41,7 +41,15 @@ func authorizeBearer(authHeader, jwtSecret, workspaceID, requiredScope string, n
 		}
 	}
 	if requiredScope != "" {
-		if !scopeMatches(claims.Scopes, requiredScope) {
+		if requiredPath == "" {
+			if !scopeMatches(claims.Scopes, requiredScope) {
+				return tokenClaims{}, &authError{
+					status:  403,
+					code:    "forbidden",
+					message: "missing required scope: " + requiredScope,
+				}
+			}
+		} else if !scopeMatchesPath(claims.Scopes, requiredScope, requiredPath) {
 			return tokenClaims{}, &authError{
 				status:  403,
 				code:    "forbidden",
@@ -199,6 +207,63 @@ func scopeMatches(granted map[string]struct{}, required string) bool {
 		return true
 	}
 
+	return false
+}
+
+func scopeMatchesPath(granted map[string]struct{}, required string, filePath string) bool {
+	if _, ok := granted[required]; ok {
+		return true
+	}
+
+	filePath = strings.TrimSpace(filePath)
+	parts := strings.SplitN(required, ":", 2)
+	if len(parts) != 2 {
+		return false
+	}
+	resource, action := parts[0], parts[1]
+
+	for scope := range granted {
+		segments := strings.SplitN(scope, ":", 4)
+		if len(segments) < 3 {
+			continue
+		}
+
+		plane, res, act := segments[0], segments[1], segments[2]
+		scopePath := "*"
+		if len(segments) == 4 {
+			scopePath = segments[3]
+		}
+
+		if plane != "relayfile" && plane != "*" {
+			continue
+		}
+		if res != resource && res != "*" {
+			continue
+		}
+		if act != action && act != "*" {
+			if act != "manage" || (action != "read" && action != "write") {
+				continue
+			}
+		}
+
+		if scopePath == "*" {
+			return true
+		}
+		if filePath == "" {
+			return true
+		}
+		scopeDir := strings.TrimSuffix(scopePath, "/*")
+		scopeDir = strings.TrimSuffix(scopeDir, "*")
+		if scopePath == filePath {
+			return true
+		}
+		if strings.HasSuffix(scopePath, "/*") && strings.HasPrefix(filePath, scopeDir+"/") {
+			return true
+		}
+		if strings.HasSuffix(scopePath, "*") && strings.HasPrefix(filePath, scopeDir) {
+			return true
+		}
+	}
 	return false
 }
 

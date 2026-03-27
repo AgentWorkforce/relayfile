@@ -18,9 +18,8 @@ import (
 	"time"
 
 	"github.com/agentworkforce/relayfile/internal/mountsync"
+	"github.com/fsnotify/fsnotify"
 )
-
-const websocketReconcileEvery = 10
 
 const (
 	mountModePoll = "poll"
@@ -61,7 +60,7 @@ func main() {
 	eventProvider := flag.String("provider", strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_PROVIDER")), "event provider filter")
 	localDir := flag.String("local-dir", strings.TrimSpace(os.Getenv("RELAYFILE_LOCAL_DIR")), "local mirror directory")
 	stateFile := flag.String("state-file", strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_STATE_FILE")), "state file path")
-	interval := flag.Duration("interval", durationEnv("RELAYFILE_MOUNT_INTERVAL", 2*time.Second), "sync interval")
+	interval := flag.Duration("interval", durationEnv("RELAYFILE_MOUNT_INTERVAL", 30*time.Second), "sync interval")
 	intervalJitter := flag.Float64("interval-jitter", floatEnv("RELAYFILE_MOUNT_INTERVAL_JITTER", 0.2), "sync interval jitter ratio (0.0-1.0)")
 	timeout := flag.Duration("timeout", durationEnv("RELAYFILE_MOUNT_TIMEOUT", 15*time.Second), "per-sync timeout")
 	websocketEnabled := flag.Bool("websocket", boolEnv("RELAYFILE_MOUNT_WEBSOCKET", true), "enable websocket event streaming when available")
@@ -80,7 +79,7 @@ func main() {
 		log.Fatalf("local-dir is required (--local-dir or RELAYFILE_LOCAL_DIR)")
 	}
 	if *interval <= 0 {
-		*interval = 2 * time.Second
+		*interval = 30 * time.Second
 	}
 	if *timeout <= 0 {
 		*timeout = 15 * time.Second
@@ -184,19 +183,31 @@ func runPollingMount(rootCtx context.Context, cfg mountConfig) error {
 		return nil
 	}
 
+	watcher, err := mountsync.NewFileWatcher(cfg.localDir, func(relativePath string, op fsnotify.Op) {
+		ctx, cancel := context.WithTimeout(rootCtx, cfg.timeout)
+		defer cancel()
+		if err := syncer.HandleLocalChange(ctx, relativePath, op); err != nil {
+			log.Printf("mount local change failed: %v", err)
+		}
+	})
+	if err != nil {
+		return fmt.Errorf("create file watcher: %w", err)
+	}
+	if err := watcher.Start(rootCtx); err != nil {
+		return fmt.Errorf("start file watcher: %w", err)
+	}
+	defer watcher.Close()
+
 	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
 	timer := time.NewTimer(jitteredIntervalWithSample(cfg.interval, cfg.intervalJitter, rng.Float64()))
 	defer timer.Stop()
-	cycle := 0
 	for {
 		select {
 		case <-rootCtx.Done():
 			log.Printf("mount sync stopping: %v", rootCtx.Err())
 			return nil
 		case <-timer.C:
-			cycle++
-			reconcile := !cfg.websocketEnabled || cycle%websocketReconcileEvery == 0
-			run(reconcile)
+			run(true)
 			timer.Reset(jitteredIntervalWithSample(cfg.interval, cfg.intervalJitter, rng.Float64()))
 		}
 	}

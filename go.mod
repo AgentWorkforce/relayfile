@@ -7,6 +7,8 @@ require (
 	github.com/lib/pq v1.10.9
 )
 
+require github.com/fsnotify/fsnotify v1.9.0 // indirect
+
 require (
 	golang.org/x/sys v0.28.0 // indirect
 	nhooyr.io/websocket v1.8.17

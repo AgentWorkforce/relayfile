@@ -210,7 +210,14 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	claims, authErr := authorizeBearer(r.Header.Get("Authorization"), s.cfg.JWTSecret, workspaceID, requiredScope, time.Now().UTC())
+	scopePath := ""
+	if requiredScope == "fs:read" || requiredScope == "fs:write" {
+		switch route {
+		case "read_file", "write_file", "delete_file":
+			scopePath = strings.TrimSpace(r.URL.Query().Get("path"))
+		}
+	}
+	claims, authErr := authorizeBearer(r.Header.Get("Authorization"), s.cfg.JWTSecret, workspaceID, requiredScope, scopePath, time.Now().UTC())
 	if authErr != nil {
 		writeError(w, authErr.status, authErr.code, authErr.message, getCorrelationID(r))
 		return
@@ -344,7 +351,7 @@ func (s *Server) handleAdminReplay(w http.ResponseWriter, r *http.Request, parts
 		writeError(w, http.StatusNotFound, "not_found", "route not found", getCorrelationID(r))
 		return
 	}
-	if _, authErr := authorizeBearer(r.Header.Get("Authorization"), s.cfg.JWTSecret, "", "admin:replay", time.Now().UTC()); authErr != nil {
+	if _, authErr := authorizeBearer(r.Header.Get("Authorization"), s.cfg.JWTSecret, "", "admin:replay", "", time.Now().UTC()); authErr != nil {
 		writeError(w, authErr.status, authErr.code, authErr.message, getCorrelationID(r))
 		return
 	}
@@ -383,7 +390,7 @@ func (s *Server) handleAdminReplay(w http.ResponseWriter, r *http.Request, parts
 }
 
 func (s *Server) handleAdminBackends(w http.ResponseWriter, r *http.Request) {
-	claims, authErr := authorizeBearer(r.Header.Get("Authorization"), s.cfg.JWTSecret, "", "", time.Now().UTC())
+	claims, authErr := authorizeBearer(r.Header.Get("Authorization"), s.cfg.JWTSecret, "", "", "", time.Now().UTC())
 	if authErr != nil {
 		writeError(w, authErr.status, authErr.code, authErr.message, getCorrelationID(r))
 		return
@@ -401,7 +408,7 @@ func (s *Server) handleAdminBackends(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAdminIngress(w http.ResponseWriter, r *http.Request) {
-	claims, authErr := authorizeBearer(r.Header.Get("Authorization"), s.cfg.JWTSecret, "", "", time.Now().UTC())
+	claims, authErr := authorizeBearer(r.Header.Get("Authorization"), s.cfg.JWTSecret, "", "", "", time.Now().UTC())
 	if authErr != nil {
 		writeError(w, authErr.status, authErr.code, authErr.message, getCorrelationID(r))
 		return
@@ -740,7 +747,7 @@ func (s *Server) handleAdminIngress(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAdminSync(w http.ResponseWriter, r *http.Request) {
-	claims, authErr := authorizeBearer(r.Header.Get("Authorization"), s.cfg.JWTSecret, "", "", time.Now().UTC())
+	claims, authErr := authorizeBearer(r.Header.Get("Authorization"), s.cfg.JWTSecret, "", "", "", time.Now().UTC())
 	if authErr != nil {
 		writeError(w, authErr.status, authErr.code, authErr.message, getCorrelationID(r))
 		return

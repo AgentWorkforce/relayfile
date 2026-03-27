@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/fsnotify/fsnotify"
 	"nhooyr.io/websocket"
 	"nhooyr.io/websocket/wsjson"
 )
@@ -294,6 +295,7 @@ type Syncer struct {
 	workspace     string
 	remoteRoot    string
 	localRoot     string
+	localDir      string
 	stateFile     string
 	eventProvider string
 	scopes        []string
@@ -386,6 +388,7 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 		workspace:     workspace,
 		remoteRoot:    remoteRoot,
 		localRoot:     localRoot,
+		localDir:      localRoot,
 		stateFile:     stateFile,
 		eventProvider: eventProvider,
 		scopes:        scopes,
@@ -423,6 +426,261 @@ func (s *Syncer) SyncOnce(ctx context.Context) error {
 
 func (s *Syncer) Reconcile(ctx context.Context) error {
 	return s.sync(ctx, true)
+}
+
+func (s *Syncer) HandleLocalChange(ctx context.Context, relativePath string, op fsnotify.Op) error {
+	relativePath = filepath.ToSlash(strings.TrimSpace(filepath.Clean(relativePath)))
+	if relativePath == "" || relativePath == "." {
+		return nil
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.loadState(); err != nil {
+		return err
+	}
+
+	remotePath := normalizeRemotePath(filepath.Join(s.remoteRoot, filepath.FromSlash(relativePath)))
+	if remotePath == "/" || !isUnderRemoteRoot(s.remoteRoot, remotePath) {
+		return nil
+	}
+	localPath := filepath.Join(s.localDir, filepath.FromSlash(relativePath))
+
+	if info, statErr := os.Stat(localPath); statErr == nil && info.IsDir() {
+		return nil
+	}
+
+	switch {
+	case op&(fsnotify.Write|fsnotify.Create) != 0:
+		if err := s.handleLocalWriteOrCreate(ctx, remotePath, localPath); err != nil {
+			return err
+		}
+		return s.saveState()
+	case op&(fsnotify.Remove|fsnotify.Rename) != 0:
+		tracked, exists := s.state.Files[remotePath]
+		if exists && tracked.ReadOnly {
+			return s.revertReadonlyFile(ctx, remotePath, localPath, tracked, "")
+		}
+		if err := s.pushSingleDelete(ctx, remotePath, localPath); err != nil {
+			return err
+		}
+		return s.saveState()
+	case op&fsnotify.Chmod != 0:
+		tracked, exists := s.state.Files[remotePath]
+		if exists && tracked.ReadOnly {
+			if err := s.applyLocalPermissions(localPath, false); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (s *Syncer) handleLocalWriteOrCreate(ctx context.Context, remotePath, localPath string) error {
+	snapshotContent, err := os.ReadFile(localPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return s.pushSingleDelete(ctx, remotePath, localPath)
+		}
+		return err
+	}
+	snapshot := localSnapshot{
+		Content:     string(snapshotContent),
+		ContentType: detectContentType(localPath),
+		Hash:        hashBytes(snapshotContent),
+	}
+	tracked, exists := s.state.Files[remotePath]
+	if exists && tracked.ReadOnly {
+		return s.revertReadonlyFile(ctx, remotePath, localPath, tracked, snapshot.ContentType)
+	}
+	return s.pushSingleFile(ctx, remotePath, localPath, snapshot, tracked, exists, nil)
+}
+
+func (s *Syncer) pushSingleFile(
+	ctx context.Context,
+	remotePath, localPath string,
+	snapshot localSnapshot,
+	tracked trackedFile,
+	exists bool,
+	conflicted map[string]struct{},
+) error {
+	canWrite := s.canWritePath(remotePath)
+	tracked.ReadOnly = !canWrite
+	if !canWrite {
+		// If content was modified (chmod bypass), revert to server version
+		if snapshot.Hash != tracked.Hash && tracked.Hash != "" {
+			return s.revertReadonlyFile(ctx, remotePath, localPath, tracked, snapshot.ContentType)
+		}
+		if err := s.applyLocalPermissions(localPath, false); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		tracked.Dirty = false
+		s.state.Files[remotePath] = tracked
+		return nil
+	}
+
+	if exists && tracked.Dirty {
+		remoteFile, readErr := s.client.ReadFile(ctx, s.workspace, remotePath)
+		if readErr == nil && hashString(remoteFile.Content) == snapshot.Hash {
+			contentType := strings.TrimSpace(remoteFile.ContentType)
+			if contentType == "" {
+				contentType = snapshot.ContentType
+			}
+			tracked.Revision = remoteFile.Revision
+			tracked.ContentType = contentType
+			tracked.Hash = snapshot.Hash
+			tracked.Dirty = false
+			s.state.Files[remotePath] = tracked
+			return nil
+		}
+	}
+
+	baseRevision := "0"
+	if exists {
+		baseRevision = tracked.Revision
+	}
+	result, err := s.client.WriteFile(ctx, s.workspace, remotePath, baseRevision, snapshot.ContentType, snapshot.Content)
+	if err != nil {
+		if errors.Is(err, ErrConflict) {
+			s.logf("conflict writing %s; keeping local content", remotePath)
+			if conflicted != nil {
+				conflicted[remotePath] = struct{}{}
+			}
+			remoteFile, readErr := s.client.ReadFile(ctx, s.workspace, remotePath)
+			switch {
+			case readErr == nil:
+				s.state.Files[remotePath] = trackedFile{
+					Revision:    remoteFile.Revision,
+					ContentType: snapshot.ContentType,
+					Hash:        snapshot.Hash,
+					Dirty:       true,
+					Denied:      false,
+					ReadOnly:    false,
+				}
+			case exists:
+				tracked.Hash = snapshot.Hash
+				tracked.ContentType = snapshot.ContentType
+				tracked.Dirty = true
+				s.state.Files[remotePath] = tracked
+			default:
+				s.state.Files[remotePath] = trackedFile{
+					Revision:    "",
+					ContentType: snapshot.ContentType,
+					Hash:        snapshot.Hash,
+					Dirty:       true,
+					ReadOnly:    false,
+				}
+			}
+			return nil
+		}
+		var httpErr *HTTPError
+		if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusForbidden {
+			if !exists {
+				s.logDenial("WRITE_DENIED", remotePath, "agent does not have write permission")
+				if removeErr := os.Remove(localPath); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+					return removeErr
+				}
+				delete(s.state.Files, remotePath)
+				return nil
+			}
+			return s.revertReadonlyFile(ctx, remotePath, localPath, tracked, snapshot.ContentType)
+		}
+		return err
+	}
+
+	revision := result.TargetRevision
+	if revision == "" && exists {
+		revision = tracked.Revision
+	}
+	if revision == "" {
+		file, readErr := s.client.ReadFile(ctx, s.workspace, remotePath)
+		if readErr != nil {
+			return readErr
+		}
+		revision = file.Revision
+	}
+	s.state.Files[remotePath] = trackedFile{
+		Revision:    revision,
+		ContentType: snapshot.ContentType,
+		Hash:        snapshot.Hash,
+		Dirty:       false,
+		ReadOnly:    !canWrite,
+	}
+	return nil
+}
+
+func (s *Syncer) revertReadonlyFile(ctx context.Context, remotePath, localPath string, tracked trackedFile, fallbackContentType string) error {
+	s.logDenial("WRITE_DENIED", remotePath, "agent does not have write permission")
+	remoteFile, readErr := s.client.ReadFile(ctx, s.workspace, remotePath)
+	if readErr == nil {
+		contentType := strings.TrimSpace(remoteFile.ContentType)
+		if contentType == "" {
+			contentType = strings.TrimSpace(fallbackContentType)
+			if contentType == "" {
+				contentType = detectContentType(localPath)
+			}
+		}
+		if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+			return err
+		}
+		if err := writeFileAtomic(localPath, []byte(remoteFile.Content), 0o444); err != nil {
+			return err
+		}
+		if err := os.Chmod(localPath, 0o444); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		tracked.Revision = remoteFile.Revision
+		tracked.ContentType = contentType
+		tracked.Hash = hashString(remoteFile.Content)
+		s.logDenial("WRITE_REVERTED", remotePath, "file is read-only; content reverted to server version")
+	} else {
+		if err := s.applyLocalPermissions(localPath, false); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		if tracked.ContentType == "" {
+			tracked.ContentType = strings.TrimSpace(fallbackContentType)
+			if tracked.ContentType == "" {
+				tracked.ContentType = detectContentType(localPath)
+			}
+		}
+	}
+	tracked.Dirty = false
+	tracked.Denied = false
+	tracked.ReadOnly = true
+	s.state.Files[remotePath] = tracked
+	s.logf("write denied, reverted: %s", remotePath)
+	return nil
+}
+
+func (s *Syncer) pushSingleDelete(ctx context.Context, remotePath, localPath string) error {
+	tracked, exists := s.state.Files[remotePath]
+	if !exists {
+		delete(s.state.Files, remotePath)
+		return nil
+	}
+
+	if !s.canWritePath(remotePath) || tracked.ReadOnly {
+		return s.revertReadonlyFile(ctx, remotePath, localPath, tracked, "")
+	}
+
+	err := s.client.DeleteFile(ctx, s.workspace, remotePath, tracked.Revision)
+	if err != nil {
+		var httpErr *HTTPError
+		if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusNotFound {
+			delete(s.state.Files, remotePath)
+			return nil
+		}
+		if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusForbidden {
+			return s.revertReadonlyFile(ctx, remotePath, localPath, tracked, "")
+		}
+		if errors.Is(err, ErrConflict) {
+			s.logf("conflict deleting %s; remote changed", remotePath)
+			return nil
+		}
+		return err
+	}
+	delete(s.state.Files, remotePath)
+	return nil
 }
 
 func (s *Syncer) sync(ctx context.Context, forcePoll bool) error {
@@ -1017,95 +1275,8 @@ func (s *Syncer) pushLocal(ctx context.Context) (map[string]struct{}, error) {
 		if exists && tracked.Hash == snapshot.Hash && !tracked.Dirty {
 			continue
 		}
-		if exists && tracked.Dirty {
-			remoteFile, readErr := s.client.ReadFile(ctx, s.workspace, remotePath)
-			if readErr == nil && hashString(remoteFile.Content) == snapshot.Hash {
-				contentType := strings.TrimSpace(remoteFile.ContentType)
-				if contentType == "" {
-					contentType = snapshot.ContentType
-				}
-				s.state.Files[remotePath] = trackedFile{
-					Revision:    remoteFile.Revision,
-					ContentType: contentType,
-					Hash:        snapshot.Hash,
-					Dirty:       false,
-					ReadOnly:    !canWrite,
-				}
-				continue
-			}
-		}
-		baseRevision := "0"
-		if exists {
-			baseRevision = tracked.Revision
-		}
-		result, err := s.client.WriteFile(ctx, s.workspace, remotePath, baseRevision, snapshot.ContentType, snapshot.Content)
-		if err != nil {
-			if !canWrite && !exists {
-				var httpErr *HTTPError
-				if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusForbidden {
-					s.logDenial("WRITE_DENIED", remotePath, "agent does not have write permission")
-					if removeErr := os.Remove(localPath); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
-						return nil, removeErr
-					}
-					delete(s.state.Files, remotePath)
-					continue
-				}
-			}
-			if errors.Is(err, ErrConflict) {
-				s.logf("conflict writing %s; keeping local content", remotePath)
-				conflicted[remotePath] = struct{}{}
-				remoteFile, readErr := s.client.ReadFile(ctx, s.workspace, remotePath)
-				switch {
-				case readErr == nil:
-					s.state.Files[remotePath] = trackedFile{
-						Revision:    remoteFile.Revision,
-						ContentType: snapshot.ContentType,
-						Hash:        snapshot.Hash,
-						Dirty:       true,
-					}
-				case exists:
-					tracked.Hash = snapshot.Hash
-					tracked.ContentType = snapshot.ContentType
-					tracked.Dirty = true
-					s.state.Files[remotePath] = tracked
-				default:
-					s.state.Files[remotePath] = trackedFile{
-						Revision:    "",
-						ContentType: snapshot.ContentType,
-						Hash:        snapshot.Hash,
-						Dirty:       true,
-					}
-				}
-				continue
-			}
-			var httpErr *HTTPError
-			if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusForbidden {
-				s.logDenial("WRITE_DENIED", remotePath, "agent does not have write permission")
-				if setErr := s.applyWriteDenied(ctx, remotePath, localPath, snapshot, tracked); setErr != nil {
-					return nil, setErr
-				}
-				conflicted[remotePath] = struct{}{}
-				continue
-			}
+		if err := s.pushSingleFile(ctx, remotePath, localPath, snapshot, tracked, exists, conflicted); err != nil {
 			return nil, err
-		}
-		revision := result.TargetRevision
-		if revision == "" && exists {
-			revision = tracked.Revision
-		}
-		if revision == "" {
-			file, readErr := s.client.ReadFile(ctx, s.workspace, remotePath)
-			if readErr != nil {
-				return nil, readErr
-			}
-			revision = file.Revision
-		}
-		s.state.Files[remotePath] = trackedFile{
-			Revision:    revision,
-			ContentType: snapshot.ContentType,
-			Hash:        snapshot.Hash,
-			Dirty:       false,
-			ReadOnly:    !canWrite,
 		}
 	}
 
@@ -1173,37 +1344,7 @@ func (s *Syncer) logDenial(action, filePath, reason string) {
 }
 
 func (s *Syncer) applyWriteDenied(ctx context.Context, remotePath, localPath string, snapshot localSnapshot, tracked trackedFile) error {
-	s.logDenial("WRITE_DENIED", remotePath, "agent does not have write permission")
-	remoteFile, readErr := s.client.ReadFile(ctx, s.workspace, remotePath)
-	if readErr == nil {
-		contentType := strings.TrimSpace(remoteFile.ContentType)
-		if contentType == "" {
-			contentType = snapshot.ContentType
-		}
-		if err := writeFileAtomic(localPath, []byte(remoteFile.Content), 0o444); err != nil {
-			return err
-		}
-		if err := os.Chmod(localPath, 0o444); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return err
-		}
-		tracked.Revision = remoteFile.Revision
-		tracked.ContentType = contentType
-		tracked.Hash = hashString(remoteFile.Content)
-		s.logDenial("WRITE_REVERTED", remotePath, "file is read-only; content reverted to server version")
-	} else {
-		if err := s.applyLocalPermissions(localPath, false); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return err
-		}
-		if tracked.ContentType == "" {
-			tracked.ContentType = snapshot.ContentType
-		}
-	}
-	tracked.Dirty = false
-	tracked.Denied = false
-	tracked.ReadOnly = true
-	s.state.Files[remotePath] = tracked
-	s.logf("write denied, reverted: %s", remotePath)
-	return nil
+	return s.revertReadonlyFile(ctx, remotePath, localPath, tracked, snapshot.ContentType)
 }
 
 func (s *Syncer) scanLocalFiles() (map[string]localSnapshot, error) {
