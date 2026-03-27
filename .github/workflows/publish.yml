@@ -272,36 +272,17 @@ jobs:
       - name: Commit version bump and create tag
         env:
           NEW_VERSION: ${{ needs.build.outputs.new_version }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           git config user.name "GitHub Actions"
           git config user.email "actions@github.com"
 
           git add package.json packages/*/package.json
           if ! git diff --staged --quiet; then
-            BRANCH="chore/release-v${NEW_VERSION}"
-            git checkout -b "$BRANCH"
             git commit -m "chore(release): v${NEW_VERSION}"
-            git push origin "$BRANCH"
-            gh pr create --title "chore(release): v${NEW_VERSION}" \
-              --body "Automated version bump to v${NEW_VERSION}" \
-              --base main --head "$BRANCH"
-            gh pr merge "$BRANCH" --auto --squash
-            for i in $(seq 1 30); do
-              STATE=$(gh pr view "$BRANCH" --json state --jq '.state')
-              if [ "$STATE" = "MERGED" ]; then
-                break
-              fi
-              sleep 10
-            done
-            if [ "$STATE" != "MERGED" ]; then
-              echo "::error::PR was not merged within timeout"
-              exit 1
-            fi
+            git push
           fi
 
-          git fetch origin main
-          git tag -a "v${NEW_VERSION}" origin/main -m "Release v${NEW_VERSION}"
+          git tag -a "v${NEW_VERSION}" -m "Release v${NEW_VERSION}"
           git push origin "v${NEW_VERSION}"
 
       - name: Create GitHub Release
