@@ -3,6 +3,16 @@ name: Publish Package
 on:
   workflow_dispatch:
     inputs:
+      package:
+        description: "Package to publish"
+        required: true
+        type: choice
+        options:
+          - all
+          - core
+          - sdk
+          - cli
+        default: "all"
       version:
         description: "Version bump type"
         required: true
@@ -56,6 +66,7 @@ env:
   NPM_CONFIG_FUND: false
 
 jobs:
+  # Build all packages once, version them, and upload
   build:
     name: Build & Version
     runs-on: ubuntu-latest
@@ -74,16 +85,13 @@ jobs:
         with:
           node-version: "22"
           cache: "npm"
-          cache-dependency-path: packages/sdk/package-lock.json
           registry-url: "https://registry.npmjs.org"
 
       - name: Install dependencies
-        working-directory: packages/sdk
         run: npm ci
 
-      - name: Version bump
+      - name: Version all packages
         id: bump
-        working-directory: packages/sdk
         run: |
           CUSTOM_VERSION="${{ github.event.inputs.custom_version }}"
           VERSION_TYPE="${{ github.event.inputs.version }}"
@@ -109,29 +117,60 @@ jobs:
             echo "is_prerelease=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Build package
-        working-directory: packages/sdk
-        run: npm run build
+          # Sync all package versions and internal dependencies
+          node -e "
+            const fs = require('fs');
+            const path = require('path');
+            const version = '$NEW_VERSION';
 
-      - name: Typecheck package
-        working-directory: packages/sdk
-        run: npx tsc --noEmit
+            const packagesDir = 'packages';
+            for (const dir of fs.readdirSync(packagesDir)) {
+              const pkgPath = path.join(packagesDir, dir, 'package.json');
+              if (fs.existsSync(pkgPath)) {
+                const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+                pkg.version = version;
+                console.log(pkg.name + ' -> v' + version);
+                for (const depType of ['dependencies', 'devDependencies']) {
+                  for (const dep of Object.keys(pkg[depType] || {})) {
+                    if (dep.startsWith('@relayfile/')) {
+                      pkg[depType][dep] = version;
+                    }
+                  }
+                }
+                fs.writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + '\n');
+              }
+            }
+          "
+
+      - name: Build packages
+        run: |
+          npm run build --workspace=packages/core
+          npm run build --workspace=packages/sdk
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: sdk-build
+          name: build-output
           path: |
-            packages/sdk/package.json
-            packages/sdk/package-lock.json
-            packages/sdk/dist/
-            packages/sdk/README.md
+            package.json
+            packages/*/package.json
+            packages/*/dist/
           retention-days: 1
 
-  publish:
-    name: Publish @relayfile/sdk
+  # Publish all packages in parallel
+  publish-packages:
+    name: Publish ${{ matrix.package }}
     needs: build
     runs-on: ubuntu-latest
+    if: github.event.inputs.package == 'all'
+    strategy:
+      fail-fast: false
+      max-parallel: 10
+      matrix:
+        package:
+          - core
+          - sdk
+          - cli
 
     steps:
       - name: Checkout code
@@ -146,59 +185,76 @@ jobs:
       - name: Download build artifacts
         uses: actions/download-artifact@v4
         with:
-          name: sdk-build
-          path: _artifacts
-
-      - name: Overlay build artifacts onto checkout
-        run: cp -r _artifacts/* . && rm -rf _artifacts
+          name: build-output
+          path: .
 
       - name: Update npm for OIDC support
         run: npm install -g npm@latest
 
-      - name: Verify build artifacts
-        working-directory: packages/sdk
+      - name: Dry run check
+        if: github.event.inputs.dry_run == 'true'
+        working-directory: packages/${{ matrix.package }}
         run: |
-          echo "=== Verifying dist/ contents ==="
-          if [ ! -d "dist" ]; then
-            echo "ERROR: dist/ directory is missing!"
-            exit 1
-          fi
-          FILE_COUNT=$(find dist -name '*.js' -o -name '*.d.ts' | wc -l)
-          echo "Found $FILE_COUNT output files in dist/"
-          if [ "$FILE_COUNT" -lt 1 ]; then
-            echo "ERROR: dist/ contains no .js or .d.ts files!"
-            exit 1
-          fi
-          ls -la dist/
-          echo ""
-          echo "=== Dry run to verify package contents ==="
-          npm pack --dry-run
+          PACKAGE_NAME=$(node -p "require('./package.json').name")
+          echo "Dry run - would publish ${PACKAGE_NAME}"
+          npm publish --dry-run --access public --tag ${{ github.event.inputs.tag }} --ignore-scripts
+
+      - name: Publish to NPM
+        if: github.event.inputs.dry_run != 'true'
+        working-directory: packages/${{ matrix.package }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public --provenance --tag ${{ github.event.inputs.tag }} --ignore-scripts
+
+  # Publish single package (when not 'all')
+  publish-single:
+    name: Publish single package
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event.inputs.package != 'all'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: build-output
+          path: .
+
+      - name: Update npm for OIDC support
+        run: npm install -g npm@latest
 
       - name: Dry run check
         if: github.event.inputs.dry_run == 'true'
-        working-directory: packages/sdk
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-          NPM_TAG: ${{ github.event.inputs.tag }}
-          NEW_VERSION: ${{ needs.build.outputs.new_version }}
+        working-directory: packages/${{ github.event.inputs.package }}
         run: |
           PACKAGE_NAME=$(node -p "require('./package.json').name")
-          echo "Dry run - would publish ${PACKAGE_NAME}@${NEW_VERSION}"
-          npm publish --dry-run --access public --tag "$NPM_TAG" --ignore-scripts
+          echo "Dry run - would publish ${PACKAGE_NAME}"
+          npm publish --dry-run --access public --tag ${{ github.event.inputs.tag }} --ignore-scripts
 
-      - name: Publish to npm with provenance
+      - name: Publish to NPM
         if: github.event.inputs.dry_run != 'true'
-        working-directory: packages/sdk
+        working-directory: packages/${{ github.event.inputs.package }}
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-          NPM_TAG: ${{ github.event.inputs.tag }}
-        run: npm publish --access public --provenance --tag "$NPM_TAG" --ignore-scripts
+        run: npm publish --access public --provenance --tag ${{ github.event.inputs.tag }} --ignore-scripts
 
   create-release:
     name: Create Release
-    needs: [build, publish]
+    needs: [build, publish-packages, publish-single]
     runs-on: ubuntu-latest
-    if: github.event.inputs.dry_run != 'true' && needs.publish.result == 'success'
+    if: |
+      always() &&
+      github.event.inputs.dry_run != 'true' &&
+      (needs.publish-packages.result == 'success' || needs.publish-single.result == 'success')
 
     steps:
       - name: Checkout code
@@ -210,11 +266,8 @@ jobs:
       - name: Download build artifacts
         uses: actions/download-artifact@v4
         with:
-          name: sdk-build
-          path: _artifacts
-
-      - name: Overlay build artifacts onto checkout
-        run: cp -r _artifacts/* . && rm -rf _artifacts
+          name: build-output
+          path: .
 
       - name: Commit version bump and create tag
         env:
@@ -224,7 +277,7 @@ jobs:
           git config user.name "GitHub Actions"
           git config user.email "actions@github.com"
 
-          git add packages/sdk/package.json packages/sdk/package-lock.json
+          git add package.json packages/*/package.json
           if ! git diff --staged --quiet; then
             BRANCH="chore/release-v${NEW_VERSION}"
             git checkout -b "$BRANCH"
@@ -234,7 +287,6 @@ jobs:
               --body "Automated version bump to v${NEW_VERSION}" \
               --base main --head "$BRANCH"
             gh pr merge "$BRANCH" --auto --squash
-            # Wait for the squash-merge to complete on main
             for i in $(seq 1 30); do
               STATE=$(gh pr view "$BRANCH" --json state --jq '.state')
               if [ "$STATE" = "MERGED" ]; then
@@ -248,37 +300,40 @@ jobs:
             fi
           fi
 
-          # Tag on main so the tag is reachable from main's history
           git fetch origin main
-          git tag -a "sdk-v${NEW_VERSION}" origin/main -m "SDK v${NEW_VERSION}"
           git tag -a "v${NEW_VERSION}" origin/main -m "Release v${NEW_VERSION}"
-          git push origin "sdk-v${NEW_VERSION}" "v${NEW_VERSION}"
+          git push origin "v${NEW_VERSION}"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: sdk-v${{ needs.build.outputs.new_version }}
+          tag_name: v${{ needs.build.outputs.new_version }}
           name: v${{ needs.build.outputs.new_version }}
           body: |
-            ## @relayfile/sdk v${{ needs.build.outputs.new_version }}
+            ## relayfile v${{ needs.build.outputs.new_version }}
+
+            ### Packages
+            - `@relayfile/core@${{ needs.build.outputs.new_version }}`
+            - `@relayfile/sdk@${{ needs.build.outputs.new_version }}`
+            - `relayfile@${{ needs.build.outputs.new_version }}`
 
             ### Install
             ```bash
             npm install @relayfile/sdk@${{ needs.build.outputs.new_version }}
+            npm install relayfile@${{ needs.build.outputs.new_version }}
             ```
 
             ### Publish Details
             - Dist-tag: `${{ github.event.inputs.tag }}`
             - Provenance: enabled via `npm publish --provenance`
             - Registry: `https://registry.npmjs.org`
-            - Package: `@relayfile/sdk`
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   summary:
     name: Summary
-    needs: [build, publish, create-release]
+    needs: [build, publish-packages, publish-single, create-release]
     runs-on: ubuntu-latest
     if: always()
 
@@ -287,22 +342,17 @@ jobs:
         run: |
           echo "## Publish Summary" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "**Package**: \`@relayfile/sdk\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Package**: \`${{ github.event.inputs.package }}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "**Version**: \`${{ needs.build.outputs.new_version }}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "**NPM Tag**: \`${{ github.event.inputs.tag }}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "**Prerelease**: \`${{ needs.build.outputs.is_prerelease }}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "**Dry Run**: \`${{ github.event.inputs.dry_run }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "**Registry**: \`https://registry.npmjs.org\`" >> "$GITHUB_STEP_SUMMARY"
           echo "**Provenance**: \`enabled\`" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "### Results" >> "$GITHUB_STEP_SUMMARY"
           echo "| Stage | Status |" >> "$GITHUB_STEP_SUMMARY"
           echo "|-------|--------|" >> "$GITHUB_STEP_SUMMARY"
           echo "| Build & Version | ${{ needs.build.result == 'success' && 'SUCCESS' || 'FAILURE' }} |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Publish | ${{ needs.publish.result == 'success' && 'SUCCESS' || (needs.publish.result == 'skipped' && 'SKIPPED' || 'FAILURE') }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Publish All | ${{ needs.publish-packages.result == 'success' && 'SUCCESS' || (needs.publish-packages.result == 'skipped' && 'SKIPPED' || 'FAILURE') }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Publish Single | ${{ needs.publish-single.result == 'success' && 'SUCCESS' || (needs.publish-single.result == 'skipped' && 'SKIPPED' || 'FAILURE') }} |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Create Release | ${{ needs.create-release.result == 'success' && 'SUCCESS' || (needs.create-release.result == 'skipped' && 'SKIPPED' || 'FAILURE') }} |" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "### Install" >> "$GITHUB_STEP_SUMMARY"
-          echo "\`\`\`bash" >> "$GITHUB_STEP_SUMMARY"
-          echo "npm install @relayfile/sdk@${{ needs.build.outputs.new_version }}" >> "$GITHUB_STEP_SUMMARY"
-          echo "\`\`\`" >> "$GITHUB_STEP_SUMMARY"
