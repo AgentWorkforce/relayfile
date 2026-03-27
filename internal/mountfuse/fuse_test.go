@@ -218,7 +218,7 @@ func TestMapError(t *testing.T) {
 		{
 			name: "HTTP 429",
 			err:  &mountsync.HTTPError{StatusCode: 429, Code: "rate_limit", Message: "too many"},
-			want: syscall.EIO,
+			want: syscall.EAGAIN,
 		},
 		{
 			name: "HTTP 500",
