@@ -961,6 +961,19 @@ func (s *Syncer) pushLocal(ctx context.Context) (map[string]struct{}, error) {
 			continue
 		}
 		if exists && tracked.ReadOnly {
+			// Check if agent modified the readonly file (e.g. via chmod bypass)
+			if snapshot.Hash != tracked.Hash {
+				// Revert to server content
+				remoteFile, readErr := s.client.ReadFile(ctx, s.workspace, remotePath)
+				if readErr == nil {
+					if writeErr := os.WriteFile(localPath, []byte(remoteFile.Content), 0o444); writeErr == nil {
+						tracked.Hash = hashString(remoteFile.Content)
+						tracked.Revision = remoteFile.Revision
+						s.logDenial("WRITE_REVERTED", remotePath, "file is read-only; content reverted to server version")
+						s.logf("write denied, reverted: %s", remotePath)
+					}
+				}
+			}
 			if err := s.applyLocalPermissions(localPath, false); err != nil && !errors.Is(err, os.ErrNotExist) {
 				return nil, err
 			}
