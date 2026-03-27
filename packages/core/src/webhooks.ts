@@ -118,7 +118,7 @@ export function ingestWebhook(
   const envelopeStorage = getWebhookStorage(storage);
   const correlationId = input.correlationId?.trim() ?? "";
 
-  const requireSignature = options.requireSignature !== false;
+  const requireSignature = options.requireSignature === true;
   if (requireSignature && !options.signatureVerifier) {
     return {
       status: "signature_missing",

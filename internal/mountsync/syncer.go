@@ -459,7 +459,10 @@ func (s *Syncer) HandleLocalChange(ctx context.Context, relativePath string, op 
 	case op&(fsnotify.Remove|fsnotify.Rename) != 0:
 		tracked, exists := s.state.Files[remotePath]
 		if exists && tracked.ReadOnly {
-			return s.revertReadonlyFile(ctx, remotePath, localPath, tracked, "")
+			if err := s.revertReadonlyFile(ctx, remotePath, localPath, tracked, ""); err != nil {
+				return err
+			}
+			return s.saveState()
 		}
 		if err := s.pushSingleDelete(ctx, remotePath, localPath); err != nil {
 			return err
@@ -1075,8 +1078,8 @@ func (s *Syncer) applyRemoteFile(remotePath string, file RemoteFile, conflicted 
 			shouldWrite = false
 		} else if tracked, ok := s.state.Files[remotePath]; ok && localHash != tracked.Hash {
 			// Local file was modified since last sync — mark dirty and preserve the local edit
-			tracked.Revision = tracked.Revision
-			tracked.ContentType = tracked.ContentType
+			tracked.Revision = file.Revision
+			tracked.ContentType = file.ContentType
 			tracked.Hash = localHash
 			tracked.Dirty = true
 			if err := s.applyLocalPermissions(localPath, canWrite); err != nil {

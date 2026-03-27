@@ -266,9 +266,11 @@ export class RelayFileSync {
 
     const url = new URL(`${this.baseUrl}/v1/workspaces/${encodeURIComponent(this.workspaceId)}/fs/ws`);
     url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-    // Token is sent as the first message after connection opens rather than
-    // in the URL query string, to avoid exposure in server logs, proxy logs,
-    // browser history, and Referer headers.
+    // Pass token in query string — the server authenticates during the HTTP
+    // upgrade handshake via r.URL.Query().Get("token").
+    if (this.token) {
+      url.searchParams.set("token", this.token);
+    }
 
     this.setState(isReconnect ? "reconnecting" : "connecting");
 
@@ -286,16 +288,6 @@ export class RelayFileSync {
     socket.addEventListener("open", (event) => {
       if (this.socket !== socket || this.stopped) {
         return;
-      }
-      // Authenticate via first message instead of URL query params.
-      if (this.token) {
-        try {
-          socket.send(JSON.stringify({ type: "auth", token: this.token }));
-        } catch (error) {
-          this.emit("error", error instanceof Error ? error : new Error("Failed to send auth message."));
-          socket.close(1000, "auth send failed");
-          return;
-        }
       }
       this.reconnectAttempts = 0;
       this.setState("open");
