@@ -298,6 +298,7 @@ type Syncer struct {
 	eventProvider string
 	scopes        []string
 	logger        Logger
+	denialLogPath string // path to .relay/permissions-denied.log
 	state         mountState
 	loaded        bool
 	bootstrapped  bool
@@ -369,6 +370,9 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 	if err := os.MkdirAll(localRoot, 0o755); err != nil {
 		return nil, err
 	}
+	if err := os.MkdirAll(filepath.Join(localRoot, ".relay"), 0o755); err != nil {
+		return nil, err
+	}
 	websocketEnabled := true
 	if opts.WebSocket != nil {
 		websocketEnabled = *opts.WebSocket
@@ -388,6 +392,7 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 		websocket:     websocketEnabled,
 		rootCtx:       rootCtx,
 		logger:        opts.Logger,
+		denialLogPath: filepath.Join(localRoot, ".relay", "permissions-denied.log"),
 		state: mountState{
 			Files: map[string]trackedFile{},
 		},
@@ -999,6 +1004,7 @@ func (s *Syncer) pushLocal(ctx context.Context) (map[string]struct{}, error) {
 			if !canWrite && !exists {
 				var httpErr *HTTPError
 				if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusForbidden {
+					s.logDenial("WRITE_DENIED", remotePath, "agent does not have write permission")
 					if removeErr := os.Remove(localPath); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
 						return nil, removeErr
 					}
@@ -1035,6 +1041,7 @@ func (s *Syncer) pushLocal(ctx context.Context) (map[string]struct{}, error) {
 			}
 			var httpErr *HTTPError
 			if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusForbidden {
+				s.logDenial("WRITE_DENIED", remotePath, "agent does not have write permission")
 				if setErr := s.applyWriteDenied(ctx, remotePath, localPath, snapshot, tracked); setErr != nil {
 					return nil, setErr
 				}
@@ -1107,13 +1114,26 @@ func (s *Syncer) markReadDenied(remotePath string) error {
 	if err != nil {
 		return nil
 	}
+	s.logDenial("READ_DENIED", remotePath, "agent does not have read permission; file removed")
 	if err := os.Remove(localPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 	return nil
 }
 
+func (s *Syncer) logDenial(action, filePath, reason string) {
+	entry := fmt.Sprintf("[%s] %s %s: %s\n",
+		time.Now().Format(time.RFC3339), action, filePath, reason)
+	f, err := os.OpenFile(s.denialLogPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	_, _ = f.WriteString(entry)
+}
+
 func (s *Syncer) applyWriteDenied(ctx context.Context, remotePath, localPath string, snapshot localSnapshot, tracked trackedFile) error {
+	s.logDenial("WRITE_DENIED", remotePath, "agent does not have write permission")
 	remoteFile, readErr := s.client.ReadFile(ctx, s.workspace, remotePath)
 	if readErr == nil {
 		contentType := strings.TrimSpace(remoteFile.ContentType)
@@ -1129,6 +1149,7 @@ func (s *Syncer) applyWriteDenied(ctx context.Context, remotePath, localPath str
 		tracked.Revision = remoteFile.Revision
 		tracked.ContentType = contentType
 		tracked.Hash = hashString(remoteFile.Content)
+		s.logDenial("WRITE_REVERTED", remotePath, "file is read-only; content reverted to server version")
 	} else {
 		if err := s.applyLocalPermissions(localPath, false); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
