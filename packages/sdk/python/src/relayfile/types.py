@@ -248,6 +248,9 @@ class OperationStatusResponse:
     last_error: str | None = None
     provider_result: dict[str, Any] | None = None
     correlation_id: str | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
+    completed_at: str | None = None
 
 
 @dataclass

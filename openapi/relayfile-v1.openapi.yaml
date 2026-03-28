@@ -2107,6 +2107,19 @@ components:
           additionalProperties: true
         correlationId:
           type: string
+        createdAt:
+          type: string
+          format: date-time
+          description: Timestamp when the operation was created
+        updatedAt:
+          type: string
+          format: date-time
+          description: Timestamp when the operation was last updated
+        completedAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: Timestamp when the operation reached a terminal state (succeeded/failed/dead_lettered)
 
     OperationFeedResponse:
       type: object
