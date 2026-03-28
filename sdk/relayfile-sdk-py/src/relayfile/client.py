@@ -289,9 +289,10 @@ class RelayFileClient:
                     continue
                 raise
 
-            payload = _read_payload(resp)
             if resp.is_success:
                 return resp
+
+            payload = _read_payload(resp)
 
             if _should_retry(resp.status_code, retries, self._retry.max_retries):
                 retries += 1
@@ -853,9 +854,10 @@ class AsyncRelayFileClient:
                     continue
                 raise
 
-            payload = _read_payload(resp)
             if resp.is_success:
                 return resp
+
+            payload = _read_payload(resp)
 
             if _should_retry(resp.status_code, retries, self._retry.max_retries):
                 retries += 1
