@@ -28,11 +28,11 @@ jobs:
           node-version: "20"
 
       - name: Install SDK deps
-        working-directory: packages/sdk
+        working-directory: packages/sdk/typescript
         run: npm ci
 
       - name: Build SDK
-        working-directory: packages/sdk
+        working-directory: packages/sdk/typescript
         run: npm run build
 
       - name: Validate contract surface

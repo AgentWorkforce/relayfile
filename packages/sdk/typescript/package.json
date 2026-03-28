@@ -24,7 +24,7 @@
   "repository": {
     "type": "git",
     "url": "https://github.com/AgentWorkforce/relayfile",
-    "directory": "packages/sdk"
+    "directory": "packages/sdk/typescript"
   },
   "license": "MIT",
   "keywords": [

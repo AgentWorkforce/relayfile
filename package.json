@@ -4,13 +4,13 @@
   "description": "relayfile — real-time filesystem for humans and agents",
   "workspaces": [
     "packages/core",
-    "packages/sdk",
+    "packages/sdk/typescript",
     "packages/cli"
   ],
   "scripts": {
     "workflow": "agent-relay run",
-    "build": "npm run build --workspace=packages/sdk",
-    "typecheck": "npm run typecheck --workspace=packages/sdk"
+    "build": "npm run build --workspace=packages/sdk/typescript",
+    "typecheck": "npm run typecheck --workspace=packages/sdk/typescript"
   },
   "dependencies": {
     "@agent-relay/sdk": "latest"

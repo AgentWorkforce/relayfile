@@ -151,13 +151,13 @@ class PayloadTooLargeError(RelayFileApiError): ...
 
 | Component | File | Status |
 |-----------|------|--------|
-| `pyproject.toml` | `sdk/relayfile-sdk-py/pyproject.toml` | Done — hatchling build, httpx dep, Python >=3.10 |
-| Types | `sdk/relayfile-sdk-py/src/relayfile/types.py` | Done — all dataclasses mirror TS types |
-| Errors | `sdk/relayfile-sdk-py/src/relayfile/errors.py` | Done — `RelayFileApiError` hierarchy |
-| `__init__.py` | `sdk/relayfile-sdk-py/src/relayfile/__init__.py` | Done — exports defined (imports `client.py` and `nango.py` which don't exist yet) |
-| `client.py` | `sdk/relayfile-sdk-py/src/relayfile/client.py` | **Not started** |
-| `nango.py` | `sdk/relayfile-sdk-py/src/relayfile/nango.py` | **Not started** |
-| Tests | `sdk/relayfile-sdk-py/tests/` | **Not started** |
+| `pyproject.toml` | `packages/sdk/python/pyproject.toml` | Done — hatchling build, httpx dep, Python >=3.10 |
+| Types | `packages/sdk/python/src/relayfile/types.py` | Done — all dataclasses mirror TS types |
+| Errors | `packages/sdk/python/src/relayfile/errors.py` | Done — `RelayFileApiError` hierarchy |
+| `__init__.py` | `packages/sdk/python/src/relayfile/__init__.py` | Done — exports defined (imports `client.py` and `nango.py` which don't exist yet) |
+| `client.py` | `packages/sdk/python/src/relayfile/client.py` | **Not started** |
+| `nango.py` | `packages/sdk/python/src/relayfile/nango.py` | **Not started** |
+| Tests | `packages/sdk/python/tests/` | **Not started** |
 
 ### Implementation notes
 

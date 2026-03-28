@@ -78,22 +78,22 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
-          cache-dependency-path: packages/sdk/package-lock.json
+          cache-dependency-path: packages/sdk/typescript/package-lock.json
 
       - name: Install SDK dependencies
-        working-directory: packages/sdk
+        working-directory: packages/sdk/typescript
         run: npm ci
 
       - name: Build SDK
-        working-directory: packages/sdk
+        working-directory: packages/sdk/typescript
         run: npm run build
 
       - name: Typecheck SDK
-        working-directory: packages/sdk
+        working-directory: packages/sdk/typescript
         run: npx tsc --noEmit
 
       - name: Test SDK
-        working-directory: packages/sdk
+        working-directory: packages/sdk/typescript
         run: npm run test
 
   e2e:

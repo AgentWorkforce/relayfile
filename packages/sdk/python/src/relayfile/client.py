@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import math
 import random
 import time
 from dataclasses import dataclass
@@ -244,11 +243,28 @@ class RelayFileClient:
         json_body: Any = None,
         correlation_id: str | None = None,
     ) -> Any:
+        resp = self._request_response(
+            method,
+            path,
+            headers=headers,
+            json_body=json_body,
+            correlation_id=correlation_id,
+        )
+        return _read_payload(resp)
+
+    def _request_response(
+        self,
+        method: str,
+        path: str,
+        *,
+        headers: dict[str, str] | None = None,
+        json_body: Any = None,
+        correlation_id: str | None = None,
+    ) -> httpx.Response:
         cid = correlation_id or _generate_correlation_id()
-        base_headers: dict[str, str] = {
-            "Content-Type": "application/json",
-            "X-Correlation-Id": cid,
-        }
+        base_headers: dict[str, str] = {"X-Correlation-Id": cid}
+        if json_body is not None:
+            base_headers["Content-Type"] = "application/json"
         if self._user_agent:
             base_headers["User-Agent"] = self._user_agent
         if headers:
@@ -273,9 +289,10 @@ class RelayFileClient:
                     continue
                 raise
 
-            payload = _read_payload(resp)
             if resp.is_success:
-                return payload
+                return resp
+
+            payload = _read_payload(resp)
 
             if _should_retry(resp.status_code, retries, self._retry.max_retries):
                 retries += 1
@@ -371,6 +388,20 @@ class RelayFileClient:
             correlation_id=input.correlation_id,
         )
 
+    def bulk_write(
+        self,
+        workspace_id: str,
+        files: list[dict[str, Any]],
+        *,
+        correlation_id: str | None = None,
+    ) -> dict[str, Any]:
+        return self._request(
+            "POST",
+            f"/v1/workspaces/{_enc(workspace_id)}/fs/bulk",
+            json_body={"files": files},
+            correlation_id=correlation_id,
+        )
+
     def delete_file(self, input: DeleteFileInput) -> dict[str, Any]:
         query = _build_query({"path": input.path})
         return self._request(
@@ -379,6 +410,25 @@ class RelayFileClient:
             headers={"If-Match": input.base_revision},
             correlation_id=input.correlation_id,
         )
+
+    def export_workspace(
+        self,
+        workspace_id: str,
+        *,
+        format: str = "json",
+        correlation_id: str | None = None,
+    ) -> list[dict[str, Any]] | bytes:
+        query = _build_query({"format": format})
+        response = self._request_response(
+            "GET",
+            f"/v1/workspaces/{_enc(workspace_id)}/fs/export{query}",
+            headers={"Accept": "application/json" if format == "json" else "*/*"},
+            correlation_id=correlation_id,
+        )
+        if format == "json":
+            payload = _read_payload(response)
+            return payload if isinstance(payload, list) else []
+        return response.content
 
     # ------------------------------------------------------------------
     # Events
@@ -755,12 +805,29 @@ class AsyncRelayFileClient:
         correlation_id: str | None = None,
     ) -> Any:
         import asyncio
+        resp = await self._request_response(
+            method,
+            path,
+            headers=headers,
+            json_body=json_body,
+            correlation_id=correlation_id,
+        )
+        return _read_payload(resp)
 
+    async def _request_response(
+        self,
+        method: str,
+        path: str,
+        *,
+        headers: dict[str, str] | None = None,
+        json_body: Any = None,
+        correlation_id: str | None = None,
+    ) -> httpx.Response:
+        import asyncio
         cid = correlation_id or _generate_correlation_id()
-        base_headers: dict[str, str] = {
-            "Content-Type": "application/json",
-            "X-Correlation-Id": cid,
-        }
+        base_headers: dict[str, str] = {"X-Correlation-Id": cid}
+        if json_body is not None:
+            base_headers["Content-Type"] = "application/json"
         if self._user_agent:
             base_headers["User-Agent"] = self._user_agent
         if headers:
@@ -787,9 +854,10 @@ class AsyncRelayFileClient:
                     continue
                 raise
 
-            payload = _read_payload(resp)
             if resp.is_success:
-                return payload
+                return resp
+
+            payload = _read_payload(resp)
 
             if _should_retry(resp.status_code, retries, self._retry.max_retries):
                 retries += 1
@@ -888,6 +956,20 @@ class AsyncRelayFileClient:
             correlation_id=input.correlation_id,
         )
 
+    async def bulk_write(
+        self,
+        workspace_id: str,
+        files: list[dict[str, Any]],
+        *,
+        correlation_id: str | None = None,
+    ) -> dict[str, Any]:
+        return await self._request(
+            "POST",
+            f"/v1/workspaces/{_enc(workspace_id)}/fs/bulk",
+            json_body={"files": files},
+            correlation_id=correlation_id,
+        )
+
     async def delete_file(self, input: DeleteFileInput) -> dict[str, Any]:
         query = _build_query({"path": input.path})
         return await self._request(
@@ -896,6 +978,25 @@ class AsyncRelayFileClient:
             headers={"If-Match": input.base_revision},
             correlation_id=input.correlation_id,
         )
+
+    async def export_workspace(
+        self,
+        workspace_id: str,
+        *,
+        format: str = "json",
+        correlation_id: str | None = None,
+    ) -> list[dict[str, Any]] | bytes:
+        query = _build_query({"format": format})
+        response = await self._request_response(
+            "GET",
+            f"/v1/workspaces/{_enc(workspace_id)}/fs/export{query}",
+            headers={"Accept": "application/json" if format == "json" else "*/*"},
+            correlation_id=correlation_id,
+        )
+        if format == "json":
+            payload = _read_payload(response)
+            return payload if isinstance(payload, list) else []
+        return response.content
 
     # ------------------------------------------------------------------
     # Events

@@ -51,7 +51,7 @@ jobs:
     needs: release
     defaults:
       run:
-        working-directory: packages/sdk
+        working-directory: packages/sdk/typescript
     steps:
       - name: Check out source
         uses: actions/checkout@v4
