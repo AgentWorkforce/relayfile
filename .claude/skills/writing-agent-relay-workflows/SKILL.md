@@ -1,6 +1,6 @@
 ---
 name: writing-agent-relay-workflows
-description: Use when building multi-agent workflows with the relay broker-sdk - covers the WorkflowBuilder API, DAG step dependencies, agent definitions, step output chaining via {{steps.X.output}}, verification gates, evidence-based completion, owner decisions, dedicated channels, swarm patterns, error handling, event listeners, step sizing rules, authoring best practices, and the lead+workers team pattern for complex steps
+description: Use when building multi-agent workflows with the relay broker-sdk - covers the WorkflowBuilder API, DAG step dependencies, agent definitions, step output chaining via {{steps.X.output}}, verification gates, evidence-based completion, owner decisions, dedicated channels, dynamic channel management (subscribe/unsubscribe/mute/unmute), swarm patterns, error handling, event listeners, step sizing rules, authoring best practices, and the lead+workers team pattern for complex steps
 ---
 
 # Writing Agent Relay Workflows
@@ -17,6 +17,7 @@ The relay broker-sdk workflow system orchestrates multiple AI agents (Claude, Co
 - Orchestrating different AI CLIs (claude, codex, gemini, aider, goose)
 - Creating DAG, pipeline, fan-out, or other swarm patterns
 - Needing verification gates, retries, or step output chaining
+- Dynamic channel management: agents joining/leaving/muting channels mid-workflow
 
 ## Quick Reference
 
@@ -38,7 +39,7 @@ const result = await workflow('my-workflow')
     agent: 'lead',
     task: `Analyze the codebase and produce a plan.`,
     retries: 2,
-    verification: { type: 'output_contains', value: 'PLAN_COMPLETE' }, // optional accelerator
+    verification: { type: 'output_contains', value: 'PLAN_COMPLETE' },
   })
   .step('implement', {
     agent: 'worker',
@@ -48,91 +49,255 @@ const result = await workflow('my-workflow')
   })
 
   .onError('retry', { maxRetries: 2, retryDelayMs: 10_000 })
-  .run({ onEvent: (e) => console.log(e.type), vars: { task: 'Add auth' } });
+  .run({ cwd: process.cwd() });
+
+  console.log('Result:', result.status);
 }
 
 main().catch(console.error);
 ```
 
+**Critical TypeScript rules:**
+1. Use `require()`, not `import` — most projects default to CJS
+2. Wrap in `async function main()` — CJS does not support top-level await
+3. Use `.run({ cwd: process.cwd() })` — `createWorkflowRenderer` does not exist
+4. Validate with `--dry-run` before running: `agent-relay run --dry-run workflow.ts`
+
+## ⚡ Parallelism — Design for Speed
+
+**This is the most important design consideration.** Sequential workflows waste hours. Always design for maximum parallelism.
+
+### Cross-Workflow Parallelism: Wave Planning
+
+When a project has multiple workflows, group independent ones into parallel waves:
+
+```bash
+# BAD — sequential (14 hours for 27 workflows at ~30 min each)
+agent-relay run workflows/34-sst-wiring.ts
+agent-relay run workflows/35-env-config.ts
+agent-relay run workflows/36-loading-states.ts
+# ... one at a time
+
+# GOOD — parallel waves (3-4 hours for 27 workflows)
+# Wave 1: independent infra (parallel)
+agent-relay run workflows/34-sst-wiring.ts &
+agent-relay run workflows/35-env-config.ts &
+agent-relay run workflows/36-loading-states.ts &
+agent-relay run workflows/37-responsive.ts &
+wait
+git add -A && git commit -m "Wave 1"
+
+# Wave 2: testing (parallel — independent test suites)
+agent-relay run workflows/40-unit-tests.ts &
+agent-relay run workflows/41-integration-tests.ts &
+agent-relay run workflows/42-e2e-tests.ts &
+wait
+git add -A && git commit -m "Wave 2"
+```
+
+### Wave Planning Heuristics
+
+Two workflows can run in parallel if they don't have write-write or write-read file conflicts:
+
+| Touch Zone | Can Parallelize? |
+|---|---|
+| Different `packages/*/src/` dirs | ✅ Yes |
+| Different `app/` routes | ✅ Yes |
+| Same package, different subdirs | ⚠️ Usually yes |
+| Same files (shared config, root package.json) | ❌ No — sequential or same wave with merge |
+| Explicit dependency | ❌ No — ordered waves |
+
+### Declare File Scope for Planning
+
+Help wave planners (human or automated) understand what each workflow touches:
+
+```typescript
+workflow('48-comparison-mode')
+  .packages(['web', 'core'])                // monorepo packages touched
+  .isolatedFrom(['49-feedback-system'])      // explicitly safe to parallelize
+  .requiresBefore(['46-admin-dashboard'])    // explicit ordering constraint
+```
+
+### Within-Workflow Parallelism
+
+Use shared `dependsOn` to fan out independent sub-tasks:
+
+```typescript
+// BAD — unnecessary sequential chain
+.step('fix-component-a', { agent: 'worker', dependsOn: ['review'] })
+.step('fix-component-b', { agent: 'worker', dependsOn: ['fix-component-a'] })  // why wait?
+
+// GOOD — parallel fan-out, merge at the end
+.step('fix-component-a', { agent: 'impl-1', dependsOn: ['review'] })
+.step('fix-component-b', { agent: 'impl-2', dependsOn: ['review'] })  // same dep = parallel
+.step('verify-all', { agent: 'reviewer', dependsOn: ['fix-component-a', 'fix-component-b'] })
+```
+
+### Impact
+
+Real-world example (Relayed — 60 workflows):
+- **Sequential**: ~30 min × 60 = **30 hours**
+- **Parallel waves (4-6 per wave)**: ~12 waves × 35 min = **~7 hours** (4x faster)
+- **Aggressive parallelism (8-way)**: **~4 hours** (7.5x faster)
+
+---
+
 ## Key Concepts
 
 ### Step Output Chaining
 
-Use `{{steps.STEP_NAME.output}}` in a downstream step's task to inject the prior step's terminal output. The runner captures PTY output automatically.
+Use `{{steps.STEP_NAME.output}}` in a downstream step's task to inject the prior step's terminal output.
+
+**Only chain output from clean sources:**
+- Deterministic steps (shell commands — always clean)
+- Non-interactive agents (`preset: 'worker'` — clean stdout)
+
+**Never chain from interactive agents** (`cli: 'claude'` without preset) — PTY output includes spinners, ANSI codes, and TUI chrome. Instead, have the agent write to a file, then read it in a deterministic step.
 
 ### Verification Gates
 
-Steps can include verification checks. These are **one input** to the completion decision — not the only one. The runner uses a multi-signal pipeline: deterministic verification, owner judgment, and evidence collection.
-
 ```typescript
 verification: { type: 'exit_code' }                        // preferred for code-editing steps
-verification: { type: 'output_contains', value: 'DONE' }   // optional accelerator, not mandatory
+verification: { type: 'output_contains', value: 'DONE' }   // optional accelerator
 verification: { type: 'file_exists', value: 'src/out.ts' } // deterministic file check
 ```
 
-Types: `exit_code` (preferred for implementations), `output_contains`, `file_exists`, `custom`.
+Only these four types are valid: `exit_code`, `output_contains`, `file_exists`, `custom`. Invalid types are silently ignored and fall through to process-exit auto-pass.
 
-**Key principle:** Verification passing is sufficient for step completion — even if no sentinel marker is present. The runner completes steps through evidence, not ceremony.
+**Verification token gotcha:** If the token appears in the task text, the runner requires it **twice** in output (once from task echo, once from agent). Prefer `exit_code` for code-editing steps to avoid this.
 
 ### DAG Dependencies
 
-Steps with `dependsOn` wait for all listed steps to complete. Steps with no dependencies start immediately. Steps sharing the same `dependsOn` run in parallel:
+Steps with `dependsOn` wait for all listed steps. Steps with no dependencies start immediately. Steps sharing the same `dependsOn` run in parallel:
 
 ```typescript
-// These two run in parallel after 'review' completes:
 .step('fix-types',  { agent: 'worker', dependsOn: ['review'], ... })
 .step('fix-tests',  { agent: 'worker', dependsOn: ['review'], ... })
-// This waits for BOTH to finish:
 .step('final',      { agent: 'lead',   dependsOn: ['fix-types', 'fix-tests'], ... })
 ```
 
-### Dedicated Channels
-
-Always set `.channel('wf-my-workflow-name')` for workflow isolation. If omitted, the runner auto-generates `wf-{name}-{id}`. Never rely on `general`.
-
 ### Self-Termination
 
-Do NOT add exit instructions to task strings. The runner automatically appends self-termination instructions with the agent's runtime name in `spawnAndWait()`.
+Do NOT add exit instructions to task strings. The runner handles this automatically.
 
 ### Step Completion Model
 
-Steps complete through a **multi-signal decision pipeline**, not a single sentinel marker:
+Steps complete through a multi-signal pipeline (highest priority first):
 
-1. **Deterministic verification** (highest priority) — if `verification` passes (exit_code, file_exists, output_contains), the step completes immediately
-2. **Owner decision** — the step owner (lead or step agent) can issue a structured decision: `OWNER_DECISION: COMPLETE|INCOMPLETE_RETRY|INCOMPLETE_FAIL`
-3. **Evidence-based completion** — channel messages (WORKER_DONE signals), file artifacts, and process exit codes are collected as evidence
-4. **Marker fast-path** — `STEP_COMPLETE:<step-name>` still works as an accelerator but is never required
+1. **Deterministic verification** — `exit_code`, `file_exists`, `output_contains` pass → immediate completion
+2. **Owner decision** — `OWNER_DECISION: COMPLETE|INCOMPLETE_RETRY|INCOMPLETE_FAIL`
+3. **Evidence-based** — channel signals, file artifacts, clean exit code
+4. **Marker fast-path** — `STEP_COMPLETE:<step-name>` (optional accelerator)
+5. **Process-exit fallback** — agent exits 0 with no signals → completes after grace period
 
-**Completion states:**
+**Key principle:** No single signal is mandatory. Describe the deliverable, not what to print.
 
-| State | Meaning |
-| --- | --- |
-| `completed_verified` | Deterministic verification passed |
-| `completed_by_owner_decision` | Owner approved the step |
-| `completed_by_evidence` | Evidence-based completion (channel signals, files, exit code) |
-| `retry_requested_by_owner` | Owner requested retry via OWNER_DECISION |
-| `failed_verification` | Verification explicitly failed |
-| `failed_owner_decision` | Owner rejected the step |
-| `failed_no_evidence` | No verification, no owner decision, no evidence — hard fail |
+### Dynamic Channel Management
 
-**Review parsing is tolerant:** The runner accepts semantically equivalent outputs like "Approved", "Complete — task done", "LGTM", not just exact `REVIEW_DECISION: APPROVE` strings.
+Agents can dynamically subscribe, unsubscribe, mute, and unmute channels **after spawn**. This eliminates the need for client-side channel filtering and manual peer fanout.
 
-### No Per-Agent Timeouts
+#### SDK API
 
-Avoid `timeoutMs` on agents/steps unless you have a specific reason. The global `.timeout()` is the safety net. Per-agent timeouts cause premature kills on steps that legitimately need more time.
+```typescript
+// Subscribe an agent to additional channels post-spawn
+relay.subscribe({ agent: 'security-auditor', channels: ['review-pr-456'] });
+
+// Unsubscribe — agent leaves the channel entirely
+relay.unsubscribe({ agent: 'security-auditor', channels: ['general'] });
+
+// Mute — agent stays subscribed (history access) but messages are NOT injected into PTY
+relay.mute({ agent: 'security-auditor', channel: 'review-pr-123' });
+
+// Unmute — resume PTY injection
+relay.unmute({ agent: 'security-auditor', channel: 'review-pr-123' });
+```
+
+Agent-level methods are also available:
+
+```typescript
+const agent = await relay.claude.spawn({ name: 'auditor', channels: ['ch-a'] });
+await agent.subscribe(['ch-b']);       // now subscribed to ch-a and ch-b
+await agent.mute('ch-a');              // ch-a messages silenced (still in history)
+await agent.unmute('ch-a');            // ch-a messages resume
+await agent.unsubscribe(['ch-b']);     // leaves ch-b
+console.log(agent.channels);          // ['ch-a']
+console.log(agent.mutedChannels);     // []
+```
+
+#### Semantics
+
+| Operation     | Channel membership | PTY injection | History access |
+|---------------|-------------------|---------------|----------------|
+| `subscribe`   | Yes               | Yes           | Yes            |
+| `unsubscribe` | No                | No            | No (leaves)    |
+| `mute`        | Yes (stays)       | No (silenced) | Yes (can query)|
+| `unmute`      | Yes               | Yes (resumes) | Yes            |
+
+#### Events
+
+```typescript
+relay.onChannelSubscribed = (agent, channels) => { /* ... */ };
+relay.onChannelUnsubscribed = (agent, channels) => { /* ... */ };
+relay.onChannelMuted = (agent, channel) => { /* ... */ };
+relay.onChannelUnmuted = (agent, channel) => { /* ... */ };
+```
+
+#### When to Use in Workflows
+
+- **Multi-PR chat sessions**: Agents focused on one PR can mute other PR channels to reduce noise
+- **Phase transitions**: Subscribe agents to new channels as work progresses between phases
+- **Team isolation**: Workers mute the main coordination channel during focused work, unmute for review
+- **Dynamic fanout**: A lead subscribes workers to sub-channels at runtime based on task decomposition
+
+#### What This Eliminates
+
+With broker-managed subscriptions, you no longer need:
+1. Client-side persona filtering (`personaNames.has(from)` checks)
+2. Channel prefix regex for message routing
+3. Manual peer fanout (iterating agents to forward messages)
+4. Dedup caches for dual-path delivery
 
 ## Agent Definition
 
 ```typescript
 .agent('name', {
   cli: 'claude' | 'codex' | 'gemini' | 'aider' | 'goose' | 'opencode' | 'droid',
-  role?: string,        // describes agent's purpose (used by pattern auto-selection)
-  preset?: 'lead' | 'worker' | 'reviewer' | 'analyst', // sets interactive mode + task guardrails
-  retries?: number,     // default retry count for steps using this agent
-  model?: string,       // model override
-  interactive?: boolean, // default: true. Set false for non-interactive subprocess mode
+  role?: string,
+  preset?: 'lead' | 'worker' | 'reviewer' | 'analyst',
+  retries?: number,
+  model?: string,
+  interactive?: boolean, // default: true
 })
 ```
+
+**Post-spawn channel operations** (available on Agent instances and AgentRelay facade):
+
+```typescript
+// Agent instance methods
+agent.subscribe(channels: string[]): Promise<void>
+agent.unsubscribe(channels: string[]): Promise<void>
+agent.mute(channel: string): Promise<void>
+agent.unmute(channel: string): Promise<void>
+agent.channels: string[]          // current subscribed channels
+agent.mutedChannels: string[]     // currently muted channels
+
+// AgentRelay facade methods (by agent name)
+relay.subscribe({ agent: string, channels: string[] }): Promise<void>
+relay.unsubscribe({ agent: string, channels: string[] }): Promise<void>
+relay.mute({ agent: string, channel: string }): Promise<void>
+relay.unmute({ agent: string, channel: string }): Promise<void>
+```
+
+| Preset     | Interactive   | Relay access | Use for                                              |
+| ---------- | ------------- | ------------ | ---------------------------------------------------- |
+| `lead`     | yes (PTY)     | yes          | Coordination, monitoring channels                    |
+| `worker`   | no (subprocess) | no         | Bounded tasks, structured stdout                     |
+| `reviewer` | no (subprocess) | no         | Reading artifacts, producing verdicts                |
+| `analyst`  | no (subprocess) | no         | Reading code/files, writing findings                 |
+
+Non-interactive presets run via one-shot mode (`claude -p`, `codex exec`). Output is clean and available via `{{steps.X.output}}`.
+
+**Critical rule:** Pre-inject content into non-interactive agents. Don't ask them to read large files — pre-read in a deterministic step and inject via `{{steps.X.output}}`.
 
 ## Step Definition
 
@@ -140,11 +305,11 @@ Avoid `timeoutMs` on agents/steps unless you have a specific reason. The global 
 
 ```typescript
 .step('name', {
-  agent: string,                  // must match an .agent() name
+  agent: string,
   task: string,                   // supports {{var}} and {{steps.NAME.output}}
-  dependsOn?: string[],           // DAG edges
+  dependsOn?: string[],
   verification?: VerificationCheck,
-  retries?: number,               // overrides agent-level retries
+  retries?: number,
 })
 ```
 
@@ -155,39 +320,14 @@ Avoid `timeoutMs` on agents/steps unless you have a specific reason. The global 
   type: 'deterministic',
   command: 'test -f src/auth.ts && echo "FILE_EXISTS"',
   dependsOn: ['implement'],
-  captureOutput: true,       // capture stdout for {{steps.verify-files.output}}
-  failOnError: true,         // fail workflow if exit code != 0
+  captureOutput: true,
+  failOnError: true,
 })
 ```
 
-Deterministic steps run shell commands without spawning an agent. Use them for:
-- File existence checks after implementation waves
-- Reading file contents to inject into downstream agent steps via `{{steps.X.output}}`
-- Running build/test commands as workflow gates
-- Gathering system info or context before agent steps
-
-## Event Listener
-
-```typescript
-.run({
-  onEvent: (event) => {
-    // event.type is one of:
-    // 'run:started' | 'run:completed' | 'run:failed' | 'run:cancelled'
-    // 'step:started' | 'step:completed' | 'step:failed' | 'step:skipped' | 'step:retrying'
-  },
-  vars: { key: 'value' },  // template variables for {{key}}
-})
-```
+Use for: file checks, reading files for injection, build/test gates, git operations.
 
 ## Common Patterns
-
-### Parallel Review (lead + reviewer run simultaneously)
-
-```typescript
-.step('lead-review', { agent: 'lead', dependsOn: ['implement'], ... })
-.step('code-review', { agent: 'reviewer', dependsOn: ['implement'], ... })
-.step('next-phase', { agent: 'worker', dependsOn: ['lead-review', 'code-review'], ... })
-```
 
 ### Pipeline (sequential handoff)
 
@@ -198,7 +338,7 @@ Deterministic steps run shell commands without spawning an agent. Use them for:
 .step('test', { agent: 'tester', task: '{{steps.implement.output}}', dependsOn: ['implement'] })
 ```
 
-### Error Handling Strategies
+### Error Handling
 
 ```typescript
 .onError('fail-fast')   // stop on first failure (default)
@@ -206,362 +346,76 @@ Deterministic steps run shell commands without spawning an agent. Use them for:
 .onError('retry', { maxRetries: 3, retryDelayMs: 5000 })
 ```
 
-## Supervisor Pattern and Auto-Resolution
+## Multi-File Edit Pattern
 
-### How the supervisor pattern works
-
-When you set `.pattern('supervisor')` (or any hub pattern: `hub-spoke`, `fan-out`, `supervisor`), the runner **automatically assigns a supervisor agent as the owner/monitor** for all worker steps. This is called "auto-hardening."
-
-The supervisor doesn't need its own steps — it's auto-spawned as a concurrent owner process alongside each worker. The supervisor:
-- Monitors the worker's progress via the Relaycast channel
-- Can nudge idle workers
-- Issues `OWNER_DECISION: COMPLETE|INCOMPLETE_RETRY|INCOMPLETE_FAIL` when satisfied
-- Receives the `WORKER_DONE` / `LEAD_DONE` handoff signals
-
-### Auto-owner role resolution
-
-The runner picks the supervisor automatically using role/name keyword matching. Priority order:
-
-| Priority | Keyword | Example |
-|----------|---------|---------|
-| 6 (highest) | `lead` | `role: 'Lead architect'` |
-| 5 | `coordinator` | `role: 'Build coordinator'` |
-| 4 | `supervisor` | `role: 'Quality supervisor'` |
-| 3 | `orchestrator` | `role: 'Pipeline orchestrator'` |
-| 2 | `hub` | `role: 'Communication hub'` |
-| 1 | Any hub-role match | Fallback to any matching agent |
-
-The runner scans both the agent `name` and `role` fields for these keywords.
-
-### When auto-hardening activates
-
-Auto-hardening **only** activates when ALL of these are true:
-1. The pattern is a hub pattern (`supervisor`, `hub-spoke`, `fan-out`)
-2. The step's agent has `interactive !== false`
-3. The step's agent is not an explicit interactive worker (`preset: 'worker'` with `interactive !== false`)
-
-**It does NOT activate for `pipeline` or `dag` patterns.** This is a common gotcha — if you use `.pattern('pipeline')` with a lead agent, the lead won't auto-monitor workers. Switch to `.pattern('supervisor')` to get the auto-owner behavior.
-
-### Example: supervisor pattern
-
-```typescript
-workflow('review-codebase')
-  .pattern('supervisor')  // enables auto-hardening
-  .channel('wf-review')
-  .maxConcurrency(5)
-
-  // Lead agent — 0 direct steps, auto-assigned as owner for worker steps
-  .agent('lead', {
-    cli: 'claude',
-    role: 'Lead supervisor — monitors workers, validates output',
-  })
-  .agent('analyzer', {
-    cli: 'opencode',
-    model: 'ollama/qwen3:14b-q4_K_M',
-    role: 'Worker — analyzes code patterns',
-  })
-  .agent('reporter', {
-    cli: 'opencode',
-    model: 'ollama/qwen3:14b-q4_K_M',
-    role: 'Worker — writes review report',
-  })
-
-  .step('gather-context', {
-    type: 'deterministic',
-    command: 'find src -name "*.ts" | head -50 && cat package.json',
-    captureOutput: true,
-  })
-  .step('analyze', {
-    agent: 'analyzer',
-    dependsOn: ['gather-context'],
-    task: `Analyze these files:\n{{steps.gather-context.output}}`,
-    verification: { type: 'exit_code' },
-  })
-  // Runner auto-spawns: lead as owner, analyzer as specialist
-  // Lead monitors #wf-review for WORKER_DONE signal from analyzer
-```
-
-### The handoff contract
-
-When the runner spawns a supervised step, it injects two task modifications:
-
-**Worker gets appended:**
-```
-WORKER COMPLETION CONTRACT:
-- You are handing work off to owner "lead" for step "analyze".
-- When your work is ready for review, post to #wf-review: WORKER_DONE: <brief summary>
-- After posting your handoff signal, self-terminate with /exit.
-```
-
-**Owner gets a supervisor task:**
-```
-You are the step owner/supervisor for step "analyze".
-Worker: analyzer (runtime: analyze-worker-xxx) on #wf-review
-Your job: Monitor the worker and determine when the task is complete.
-- Watch #wf-review for the worker's progress messages
-- Check file changes: run git diff --stat or inspect expected files
-- When validated, post LEAD_DONE: <brief summary> to #wf-review
-When you have enough evidence, return:
-OWNER_DECISION: <COMPLETE|INCOMPLETE_RETRY|INCOMPLETE_FAIL|NEEDS_CLARIFICATION>
-REASON: <one sentence>
-```
-
-### Auto-reviewer resolution
-
-In addition to the auto-owner, hub patterns also trigger **auto-reviewer resolution**. The runner finds an eligible reviewer agent using similar keyword matching (`reviewer`, `critic`, `verifier`, `qa` in role/name). The reviewer runs a post-completion review gate on the step output.
-
-### pipeline vs supervisor: when to use each
-
-| Use case | Pattern | Why |
-|----------|---------|-----|
-| Sequential handoff, no monitoring needed | `pipeline` | Simple, no overhead |
-| Workers need oversight (nudging, retries) | `supervisor` | Auto-owner monitors and intervenes |
-| Local/small models that may not complete cleanly | `supervisor` | Supervisor catches idle/stuck workers |
-| All agents are non-interactive (`preset: 'worker'`) | `pipeline` or `dag` | No PTY = no supervision needed |
-| Mixed interactive + non-interactive agents | `supervisor` | Supervisor handles interactive workers |
-
-**Key insight:** If you're using local models (Ollama, etc.) or models that may not reliably produce completion signals, use `supervisor` pattern with a stronger model as the lead. The lead compensates for worker unreliability.
-
-## Non-Interactive Agents (preset: worker / reviewer / analyst)
-
-Use presets instead of manually setting `interactive: false`. Presets configure interactive mode and inject guardrails automatically:
-
-```typescript
-.agent('worker', { cli: 'claude', preset: 'worker', model: 'sonnet' })
-// Equivalent to interactive: false + "Do NOT use relay tools" prefix injected
-```
-
-| Preset     | Interactive   | Relay access | Use for                                              |
-| ---------- | ------------- | ------------ | ---------------------------------------------------- |
-| `lead`     | ✅ PTY        | ✅ Full      | Coordination, spawning workers, monitoring channels  |
-| `worker`   | ❌ subprocess | ❌ None      | Executing bounded tasks, producing structured stdout |
-| `reviewer` | ❌ subprocess | ❌ None      | Reading artifacts, producing verdicts                |
-| `analyst`  | ❌ subprocess | ❌ None      | Reading code/files, writing findings                 |
-
-**What changes with non-interactive presets:**
-
-- Agent runs via CLI one-shot mode (`claude -p`, `codex exec`, `gemini -p`)
-- stdin is `/dev/null` — the process never blocks waiting for terminal input
-- No PTY, no relay messaging, no `/exit` self-termination
-- Output captured from stdout, available via `{{steps.X.output}}`
-
-**Critical rule — pre-inject content, never ask non-interactive agents to discover it:**
+When a workflow needs to modify multiple existing files, **use one agent step per file** with a deterministic verify gate after each. Agents reliably edit 1-2 files per step but fail on 4+.
 
 ```yaml
-# WRONG — claude -p will try to read the file via tools, may time out on large files
-- name: analyze
-  agent: analyst
-  task: 'Read src/runner.ts and summarize the scrubForChannel method.'
-
-# RIGHT — deterministic step reads the file, injects content directly
-- name: read-method
-  type: deterministic
-  command: sed -n '/scrubForChannel/,/^  \}/p' src/runner.ts
-  captureOutput: true
-
-- name: analyze
-  agent: analyst
-  dependsOn: [read-method]
-  task: |
-    Summarize this method:
-    {{steps.read-method.output}}
-```
-
-Non-interactive agents can use tools but it's slow and unreliable on large files.
-Deterministic steps are instant. Always pre-read, then inject.
-
-## DAG Deadlock Anti-Pattern
-
-**The lead↔worker deadlock** is the most common DAG mistake. It causes the lead to wait indefinitely for workers that can never start.
-
-```yaml
-# WRONG — deadlock: coordinate waits for WORKER_DONE from work-a,
-# but work-a can't start until coordinate finishes
 steps:
-  - name: coordinate   # lead, waits for WORKER_A_DONE signal
-    dependsOn: [context]
-  - name: work-a       # can't start — blocked by coordinate
-    dependsOn: [coordinate]
-
-# RIGHT — workers and lead start in parallel, merge step gates on all three
-steps:
-  - name: context
+  - name: read-types
     type: deterministic
-  - name: work-a        # starts with lead
-    dependsOn: [context]
-  - name: work-b        # starts with lead
-    dependsOn: [context]
-  - name: coordinate    # lead monitors channel for worker signals
-    dependsOn: [context]
-  - name: merge         # gates on everything
-    dependsOn: [work-a, work-b, coordinate]
-```
+    command: cat src/types.ts
+    captureOutput: true
 
-The runner will catch obvious cases of this at parse time and throw an error.
-
-**Rule:** if a lead step's task mentions downstream step names alongside waiting keywords (wait, DONE, monitor, check inbox), that's a deadlock.
-
-## Step Sizing: Keep Tasks Focused
-
-**A step's task prompt should be 10–20 lines maximum.** If you find yourself writing a 100-line task prompt, the step is too large for one agent — split it into a team.
-
-### The Rule
-
-One agent, one deliverable. A step should instruct an agent to produce **one specific artifact** (one file, one plan, one review pass). If the step requires reading the whole codebase, coordinating sub-tasks, _and_ reviewing output, it will fail or produce poor results.
-
-### When to Use a Team Instead
-
-Decompose a large step into a **lead + workers** team when:
-
-- The task would require a 50+ line prompt to fully specify
-- The deliverable is multiple files that must be consistent with each other
-- The work benefits from back-and-forth (questions, corrections, reviews)
-- You need one agent to verify another's output before signaling completion
-
-### Team Pattern
-
-All team members run as concurrent steps sharing a dedicated channel. The lead coordinates dynamically via messages; workers receive assignments at runtime, not in their task prompt.
-
-```yaml
-agents:
-  - name: track-lead
-    cli: claude
-    channels: [my-track, main-channel]
-    role: 'Leads the track. Assigns files to workers, reviews output.'
-    constraints:
-      model: sonnet
-
-  - name: track-worker-1
-    cli: codex
-    channels: [my-track]
-    role: 'Writes file-a.ts as assigned by track-lead.'
-    constraints:
-      model: gpt-5.3-codex
-
-  - name: track-worker-2
-    cli: codex
-    channels: [my-track]
-    role: 'Writes file-b.ts as assigned by track-lead.'
-    constraints:
-      model: gpt-5.3-codex-spark
-
-steps:
-  # All three start in the same wave (same dependsOn).
-  # Lead posts assignments to #my-track; workers read and implement.
-  - name: track-lead-coord
-    agent: track-lead
-    dependsOn: [prior-step]
+  - name: edit-types
+    agent: dev
+    dependsOn: [read-types]
     task: |
-      Lead the track on #my-track. Workers: track-worker-1, track-worker-2.
-      Post assignments to the channel. Review worker output.
-      When all workers are done and output is satisfactory, summarize results.
-    # Lead uses OWNER_DECISION or the runner detects completion via evidence
-
-  - name: track-worker-1-impl
-    agent: track-worker-1
-    dependsOn: [prior-step] # same dep as lead — starts concurrently
-    task: |
-      Join #my-track. track-lead will post your assignment.
-      Implement the file as directed. Post a summary when complete.
-    verification:
-      type: exit_code  # preferred for code-editing workers
-
-  - name: track-worker-2-impl
-    agent: track-worker-2
-    dependsOn: [prior-step]
-    task: |
-      Join #my-track. track-lead will post your assignment.
-      Implement the file as directed. Post a summary when complete.
+      Edit src/types.ts. Current contents:
+      {{steps.read-types.output}}
+      Add 'pending' to the Status union type.
+      Only edit this one file.
     verification:
       type: exit_code
 
-  # Next step depends only on the lead — lead reviews workers via channel
-  # evidence and issues OWNER_DECISION or STEP_COMPLETE when satisfied.
-  - name: next-step
-    agent: ...
-    dependsOn: [track-lead-coord]
+  - name: verify-types
+    type: deterministic
+    dependsOn: [edit-types]
+    command: 'if git diff --quiet src/types.ts; then echo "NOT MODIFIED"; exit 1; fi; echo "OK"'
+    failOnError: true
+
+  - name: read-service
+    type: deterministic
+    dependsOn: [verify-types]
+    command: cat src/service.ts
+    captureOutput: true
+
+  - name: edit-service
+    agent: dev
+    dependsOn: [read-service]
+    task: |
+      Edit src/service.ts. Current contents:
+      {{steps.read-service.output}}
+      Add a handlePending() method.
+      Only edit this one file.
+    verification:
+      type: exit_code
+
+  - name: verify-service
+    type: deterministic
+    dependsOn: [edit-service]
+    command: 'if git diff --quiet src/service.ts; then echo "NOT MODIFIED"; exit 1; fi; echo "OK"'
+    failOnError: true
+
+  # Deterministic commit — never rely on agents to commit
+  - name: commit
+    type: deterministic
+    dependsOn: [verify-service]
+    command: git add src/types.ts src/service.ts && git commit -m "feat: add pending status"
+    failOnError: true
 ```
 
-### Key Points
-
-- **Lead task prompt**: who your workers are, which channel to use, what to assign, what "done" looks like. ~15 lines. Describe the work contract, not output ceremony.
-- **Worker task prompt**: which channel to join, that the lead will post their assignment. ~5 lines. Workers post summaries, not mandatory sentinel strings.
-- **Workers don't need the full spec in their prompt** — they get it from the lead at runtime via the channel.
-- **Downstream steps depend on the lead**, not the workers — the lead reviews worker output via channel evidence and issues completion.
-- **Separate channels per team** prevent cross-talk: `#harness-track`, `#review-track`, etc.
-- **Channel evidence is first-class** — worker summaries, DONE signals, and file creation events posted to the channel are collected as completion evidence by the runner.
-
-## Concurrency: Don't Over-Parallelize
-
-**Set `maxConcurrency` to 4–6 for most workflows.** Each agent spawn requires a PTY startup plus a Relaycast registration. Spawning 10+ agents simultaneously overwhelms the broker and causes spawn timeouts.
-
-```yaml
-swarm:
-  pattern: dag
-  maxConcurrency: 5 # good: staggers spawns within each wave
-```
-
-Even if a wave has 10 ready steps, the runner will only start 5 at a time and pick up the next as each finishes. This keeps the broker healthy and prevents the `request timed out after 10000ms (type='spawn_agent')` error that occurs when too many agents register with Relaycast concurrently.
-
-**Rule of thumb by workflow size:**
-
-| Parallel agents needed | `maxConcurrency` |
-| ---------------------- | ---------------- |
-| 2–4                    | 4 (default safe) |
-| 5–10                   | 5                |
-| 10+                    | 6–8 max          |
-
-## Phase Count: Keep Workflows Compact
-
-**Limit workflows to 3–4 phases.** Each phase is a sequential barrier — the next phase can't start until the previous one finishes. More phases means more serialization, more wall-clock time, and more chances for context drift between agents.
-
-| Phases | Verdict  | Notes                                                       |
-| ------ | -------- | ----------------------------------------------------------- |
-| 2–3    | Ideal    | Tight feedback loops, agents see recent context              |
-| 4      | Okay     | Acceptable for large projects with clear module boundaries   |
-| 5+     | Too many | Agents lose context, reviews find "FILE NOT FOUND" errors    |
-| 8+     | Never    | Each agent works blind — integration issues multiply         |
-
-**Why fewer phases work better:**
-
-- Non-interactive agents can't see each other's output. Each phase boundary is a hard wall.
-- Reflection/review steps only add value if the files actually exist on disk. With many phases, early agents write files that later agents can't find (wrong cwd, wrong paths).
-- Consolidating related work into one phase lets parallel workers share a lead who can coordinate and verify.
-
-**How to consolidate:**
-
-Instead of Phase 1 (auth) → Phase 2 (volumes) → Phase 3 (storage) → Phase 4 (executor), group by integration surface:
-
-```yaml
-# Phase 1: Foundation (auth + volumes + storage — independent modules)
-# Phase 2: Orchestration (executor + bootstrap — depend on Phase 1)
-# Phase 3: API + Integration (web routes + reporter + barrel exports)
-```
-
-Within each phase, use parallel workers with a shared lead for coordination.
+**Key rules:**
+- Read the file in a deterministic step right before the edit (not all files upfront)
+- Tell the agent "Only edit this one file" to prevent it touching other files
+- Verify with `git diff --quiet` after each edit — fail fast if the agent didn't write
+- Always commit with a deterministic step, never an agent step
 
 ## File Materialization: Verify Before Proceeding
 
-**Always add a deterministic file-check step after implementation waves.** Non-interactive agents (codex, claude -p) may fail silently — the process exits 0 but files weren't written because of a wrong cwd, permission issue, or the agent output code to stdout instead of writing files.
-
-### The pattern
+After any step that creates files, add a deterministic `file_exists` check before proceeding. Non-interactive agents may exit 0 without writing anything (wrong cwd, stdout instead of disk).
 
 ```yaml
-# Workers write files in parallel
-- name: impl-auth
-  agent: worker-1
-  task: |
-    Create the file src/auth/credentials.ts with the following implementation...
-    IMPORTANT: Write the file to disk using your file-writing tools.
-    Do NOT just output the code to stdout — the file must exist at src/auth/credentials.ts when you finish.
-
-- name: impl-storage
-  agent: worker-2
-  task: |
-    Create the file src/storage/client.ts with the following implementation...
-    IMPORTANT: Write the file to disk. The file must exist at src/storage/client.ts when you finish.
-
-# Deterministic gate: verify all expected files exist before any review/next-phase step
 - name: verify-files
   type: deterministic
   dependsOn: [impl-auth, impl-storage]
@@ -573,235 +427,133 @@ Within each phase, use parallel workers with a shared lead for coordination.
     if [ $missing -gt 0 ]; then echo "$missing files missing"; exit 1; fi
     echo "All files present"
   failOnError: true
-  captureOutput: true
-
-# Reviews and next-phase steps depend on verify-files, not directly on workers
-- name: review
-  agent: reviewer
-  dependsOn: [verify-files]
-  task: ...
 ```
 
-### Rules for non-interactive file-writing tasks
+**Rules for file-writing tasks:**
+1. Use full paths from project root — say `src/auth/credentials.ts`, not `credentials.ts`
+2. Add `IMPORTANT: Write the file to disk. Do NOT output to stdout.`
+3. Use `file_exists` verification for creation steps (not just `exit_code`)
+4. Gate all downstream steps on the verify step
 
-1. **Use absolute or explicit relative paths** — always include the full path from the project root in the task prompt. Don't say "implement credentials.ts", say "create the file at `src/auth/credentials.ts`".
-2. **Tell the agent to write the file, not output it** — add `IMPORTANT: Write the file to disk using your file-writing tools. Do NOT just output the code to stdout.` Non-interactive agents sometimes default to printing code instead of writing files.
-3. **Gate downstream steps on file verification** — never let a review or next-phase step run without first confirming the expected files exist via a deterministic `[ -f ]` check.
-4. **Fail fast on missing files** — set `failOnError: true` on the verification step. A missing file early is much cheaper to debug than 30 minutes of "FILE NOT FOUND" reviews.
-
-### Reading files for context injection
-
-When the next phase needs to read files produced by the current phase, use a deterministic step:
+## DAG Deadlock Anti-Pattern
 
 ```yaml
-- name: read-phase1-output
-  type: deterministic
-  dependsOn: [verify-phase1-files]
-  command: |
-    echo "=== src/auth/credentials.ts ==="
-    cat src/auth/credentials.ts
-    echo "=== src/storage/client.ts ==="
-    cat src/storage/client.ts
-  captureOutput: true
+# WRONG — deadlock: coordinate depends on context, work-a depends on coordinate
+steps:
+  - name: coordinate
+    dependsOn: [context]    # lead waits for WORKER_DONE...
+  - name: work-a
+    dependsOn: [coordinate] # ...but work-a can't start until coordinate finishes
 
-- name: phase2-implement
-  agent: worker
-  dependsOn: [read-phase1-output]
-  task: |
-    Here are the files from Phase 1:
-    {{steps.read-phase1-output.output}}
-
-    Now implement the executor that uses these modules...
+# RIGHT — workers and lead start in parallel
+steps:
+  - name: context
+    type: deterministic
+  - name: work-a
+    dependsOn: [context]    # starts with lead
+  - name: coordinate
+    dependsOn: [context]    # starts with workers
+  - name: merge
+    dependsOn: [work-a, coordinate]
 ```
 
-## Completion Signals: Required vs Optional
+**Rule:** if a lead step's task mentions downstream step names alongside waiting keywords, that's a deadlock.
 
-The runner uses a multi-tier completion resolution system. **No single signal is mandatory** — the runner resolves completion from whatever evidence is available.
+## Step Sizing
 
-### Tier 1: Explicit owner decision (strongest)
+**One agent, one deliverable.** A step's task prompt should be 10-20 lines max.
 
-```
-OWNER_DECISION: COMPLETE
-REASON: All files written and tests pass
-```
-
-The structured `OWNER_DECISION` format is preferred for owner/lead agents. It gives the runner an unambiguous completion signal.
-
-### Tier 2: Legacy completion marker
-
-```
-STEP_COMPLETE:step-name
-```
-
-Still supported but optional. The runner treats it as equivalent to `OWNER_DECISION: COMPLETE`.
-
-### Tier 3: Verification gate
-
-If `verification` is configured on the step, the runner checks it automatically. A passing verification gate completes the step even without an explicit owner decision.
-
-### Tier 4: Evidence-based completion
-
-When no explicit signal is found, the runner checks collected evidence:
-- Coordination signals in output (`WORKER_DONE`, `LEAD_DONE`)
-- Process exit code 0 (clean exit)
-- Tool side-effects (git diff checks, file inspections)
-- Positive-conclusion language in owner output
-
-If both a positive conclusion **and** at least one evidence signal are present, the step completes.
-
-### Tier 5: Process-exit fallback
-
-When the agent exits with code 0 but posts **no** coordination signal at all:
-- The runner waits a configurable grace period (`completionGracePeriodMs`, default 5s)
-- If verification is configured and passes, the step completes with reason `completed_by_process_exit`
-- If no verification is configured, the step completes based on the clean exit alone
-
-This tier is the key mechanism for reducing dependence on exact agent behavior.
-
-### What this means for workflow authors
-
-- **Don't require exact text output** as the only completion signal. Always configure a verification gate (`exit_code`, `file_exists`, or `output_contains`) as a backup.
-- **Describe the deliverable, not the ceremony.** Say "implement the auth module" not "implement the auth module and then output IMPL_DONE".
-- **Prefer `exit_code` verification** for code-editing workers — it's the most reliable signal because it doesn't depend on the agent printing specific text.
-- **Use `completionGracePeriodMs: 0`** in the swarm config to disable the process-exit fallback if you need strict signal compliance.
-
-### Configuring the grace period
+Split into a **lead + workers team** when:
+- The task requires a 50+ line prompt
+- The deliverable is multiple files that must be consistent
+- You need one agent to verify another's output
 
 ```yaml
-swarm:
-  pattern: dag
-  completionGracePeriodMs: 5000  # default: 5s. Set to 0 to disable.
+# Team pattern: lead + workers on a shared channel
+steps:
+  - name: track-lead-coord
+    agent: track-lead
+    dependsOn: [prior-step]
+    task: |
+      Lead the track on #my-track. Workers: track-worker-1, track-worker-2.
+      Post assignments to the channel. Review worker output.
+
+  - name: track-worker-1-impl
+    agent: track-worker-1
+    dependsOn: [prior-step]  # same dep as lead — starts concurrently
+    task: |
+      Join #my-track. track-lead will post your assignment.
+      Implement the file as directed.
+    verification:
+      type: exit_code
+
+  - name: next-step
+    dependsOn: [track-lead-coord]  # downstream depends on lead, not workers
 ```
 
-## Robust Coordination Best Practices
+## Supervisor Pattern
 
-### Design for agent non-compliance
+When you set `.pattern('supervisor')` (or `hub-spoke`, `fan-out`), the runner auto-assigns a supervisor agent as owner for worker steps. The supervisor monitors progress, nudges idle workers, and issues `OWNER_DECISION`.
 
-Agents may not follow instructions perfectly. The runner is designed to handle this gracefully:
+**Auto-hardening only activates for hub patterns** — not `pipeline` or `dag`.
 
-1. **Always configure verification gates** — they're the most reliable completion mechanism because they don't depend on agent behavior at all.
-2. **Use deterministic steps for critical checks** — `file_exists` checks, test runs, and type checks are deterministic and infallible.
-3. **Don't rely on agents posting exact signal text** — use `exit_code` verification instead of `output_contains` when possible.
-4. **Let the runner handle self-termination** — it appends `/exit` instructions automatically and detects idle agents.
+| Use case | Pattern | Why |
+|----------|---------|-----|
+| Sequential, no monitoring | `pipeline` | Simple, no overhead |
+| Workers need oversight | `supervisor` | Auto-owner monitors |
+| Local/small models | `supervisor` | Supervisor catches stuck workers |
+| All non-interactive | `pipeline` or `dag` | No PTY = no supervision needed |
 
-### Completion strategy by step type
+## Concurrency
 
-| Step type | Recommended verification | Why |
-|---|---|---|
-| Code editing (codex worker) | `exit_code` | Agent may not print tokens reliably |
-| Analysis/review (claude) | `output_contains` with unique token | Structured output is the deliverable |
-| File creation (any worker) | `file_exists` | Deterministic check, zero agent dependency |
-| Lead coordination | None (owner decision or evidence) | Lead agents are interactive and monitored |
+**Cap `maxConcurrency` at 4-6.** Spawning 10+ agents simultaneously causes broker timeouts.
 
-### Owner steps: structured decisions preferred
-
-For supervised steps with a dedicated owner, the `OWNER_DECISION` format is preferred over legacy `STEP_COMPLETE:` markers because:
-- It supports negative outcomes (`INCOMPLETE_RETRY`, `INCOMPLETE_FAIL`) not just success
-- It includes a `REASON` field for observability
-- The runner can distinguish owner intent from echoed prompt text more reliably
-
-But if the owner doesn't post either format, the runner still resolves completion from evidence.
+| Parallel agents | `maxConcurrency` |
+|-----------------|-------------------|
+| 2-4             | 4 (default safe)  |
+| 5-10            | 5                 |
+| 10+             | 6-8 max           |
 
 ## Common Mistakes
 
-| Mistake                                                     | Fix                                                               |
-| ----------------------------------------------------------- | ----------------------------------------------------------------- |
-| Adding `withExit()` or exit instructions to tasks           | Runner handles this automatically                                 |
-| Setting tight `timeoutMs` on agents                         | Use global `.timeout()` only                                      |
-| Using `general` channel                                     | Set `.channel('wf-name')` for isolation                           |
-| Referencing `{{steps.X.output}}` without `dependsOn: ['X']` | Output won't be available yet                                     |
-| Making review steps serial when they could be parallel      | Both reviewers can depend on the same upstream step               |
-| Requiring exact sentinel strings as the only completion gate | Use deterministic verification (`exit_code`, `file_exists`) or owner judgment |
-| Writing 100-line task prompts                               | Split into lead + workers communicating on a channel              |
-| Putting the full spec in every worker's task                | Lead posts the spec to the channel at runtime                     |
-| `maxConcurrency: 16` with many parallel steps               | Cap at 5–6; broker times out spawning 10+ agents at once          |
-| Asking non-interactive agent to read a large file via tools | Pre-read in a deterministic step, inject via `{{steps.X.output}}` |
-| Workers depending on the lead step (deadlock)               | Workers and lead both depend on a shared context step             |
-| Omitting `agents` field for deterministic-only workflows    | Field is now optional — pure shell pipelines work without it      |
-| Designing prompts around output ceremony instead of work    | Describe the deliverable and acceptance criteria, not what to print |
-| Treating markers as mandatory truth                          | Markers are optional accelerators; verification and evidence decide completion |
-| Using `fan-out`/`hub-spoke` for simple parallel workers     | Use `dag` — hub patterns trigger auto owner/supervisor/reviewer pipeline |
-| Using `pipeline` pattern but expecting auto-supervisor      | Auto-hardening only activates for hub patterns (`supervisor`, `hub-spoke`, `fan-out`). Switch to `.pattern('supervisor')` |
-| Local/small models timing out without completion signals    | Use `supervisor` pattern with a stronger model as lead — compensates for worker unreliability |
-| Workers without `preset: 'worker'` in lead+worker workflows | Add `preset: 'worker'` — it auto-sets `interactive: false` and produces clean stdout for `{{steps.X.output}}` injection |
-| Lead running concurrently with workers, monitoring channel  | Make lead `dependsOn` workers — use `{{steps.X.output}}` injection instead of real-time channel monitoring |
-| Using `_` in YAML numbers (e.g., `timeoutMs: 1_200_000`)   | YAML doesn't support `_` as a numeric separator — use `1200000`. TypeScript separators don't work in YAML |
-| Setting workflow timeout under 30 minutes for complex workflows | Claude leads reading large codebases take 5-15 min per step. Use `3600000` (1 hour) as a safe default |
-| Passing too much context in `read-context` deterministic steps | Trim to only the relevant code. Use `grep`, `sed -n`, `head` instead of full `cat`. Large context slows lead design |
-| Using `import { workflow }` (ESM) in TypeScript workflows     | Use `const { workflow } = require('@agent-relay/sdk/workflows')` — most projects default to CJS and `tsx` will fail with top-level await or ESM-only imports |
-| Top-level `await` in TypeScript workflow files                | Wrap in `async function main() { ... } main().catch(console.error)` — CJS mode does not support top-level await |
-| Using `export default workflow(...)...build()` pattern        | There is no `.build()` method. The builder chain ends with `.run()` inside an `async main()`. `export default` does not work — the file must call `.run()` and be executed, not imported |
-| Using `import` path `'../workflows/builder.js'` (relative)   | Use `require('@agent-relay/sdk/workflows')` — the package export, not internal file paths |
-| Not validating with `--dry-run` before running                | Always run `agent-relay run --dry-run workflow.ts` first to catch import errors, deadlocks, and missing deps |
-
-## Verification Tokens with Non-Interactive Workers
-
-### The double-occurrence rule
-
-When the verification token appears in the task text, the runner requires it to appear
-**twice** in the captured output — once from the task injection echo, once from the agent's
-actual response. A single occurrence is treated as the task echo and fails verification.
-
-This means if your task says `Output: DONE` or `REQUIRED: print DONE`, the token `DONE`
-is in the task text. The agent must print it a second time, explicitly.
-
-### Preferred: use `exit_code` for code-editing workers
-
-For steps where the real quality gate is downstream (type-check, tests), `exit_code`
-verification is simpler and more reliable than `output_contains`:
-
-```yaml
-# WRONG for codex code editors — token in task causes double-occurrence requirement
-- name: implement
-  agent: implementer  # codex, preset: worker
-  task: |
-    Make these changes to foo.ts...
-    Output: IMPL_DONE        # token now in task text → requires 2 occurrences
-  verification:
-    type: output_contains
-    value: IMPL_DONE
-
-# RIGHT — exit 0 means success; tests catch any mistakes
-- name: implement
-  agent: implementer
-  task: |
-    Make these changes to foo.ts...
-  verification:
-    type: exit_code
-```
-
-### When you need `output_contains` with a codex worker
-
-Use a token that does **not** appear verbatim anywhere in the task text. A unique sentinel
-works well:
-
-```yaml
-task: |
-  Analyze foo.ts and write a summary report.
-  Signal completion by printing: ANALYSIS_DONE
-verification:
-  type: output_contains
-  value: ANALYSIS_DONE   # "ANALYSIS_DONE" does not appear verbatim above → single occurrence is enough
-```
-
-If the token must appear in the instructions, instruct the agent to run it as a shell
-command so the execution (not the description) produces the second occurrence:
-
-```yaml
-task: |
-  Make changes to foo.ts...
-  When done, run: echo "IMPL_DONE"
-verification:
-  type: output_contains
-  value: IMPL_DONE
-```
-
-**Rule of thumb:** Code-editing steps → `exit_code`. Analysis/review steps that produce
-structured output → `output_contains` with a token not mentioned verbatim in the task.
+| Mistake | Fix |
+|---------|-----|
+| All workflows run sequentially | Group independent workflows into parallel waves (4-7x speedup) |
+| Every step depends on the previous one | Only add `dependsOn` when there's a real data dependency |
+| Self-review step with no timeout | Set `timeout: 300_000` (5 min) — Codex hangs in non-interactive review |
+| One giant workflow per feature | Split into smaller workflows that can run in parallel waves |
+| Adding exit instructions to tasks | Runner handles self-termination automatically |
+| Setting `timeoutMs` on agents/steps | Use global `.timeout()` only |
+| Using `general` channel | Set `.channel('wf-name')` for isolation |
+| `{{steps.X.output}}` without `dependsOn: ['X']` | Output won't be available yet |
+| Requiring exact sentinel as only completion gate | Use `exit_code` or `file_exists` verification |
+| Writing 100-line task prompts | Split into lead + workers on a channel |
+| `maxConcurrency: 16` with many parallel steps | Cap at 5-6 |
+| Non-interactive agent reading large files via tools | Pre-read in deterministic step, inject via `{{steps.X.output}}` |
+| Workers depending on lead step (deadlock) | Both depend on shared context step |
+| `fan-out`/`hub-spoke` for simple parallel workers | Use `dag` instead |
+| `pipeline` but expecting auto-supervisor | Only hub patterns auto-harden. Use `.pattern('supervisor')` |
+| Workers without `preset: 'worker'` in lead+worker flows | Add preset for clean stdout |
+| Using `_` in YAML numbers (`timeoutMs: 1_200_000`) | YAML doesn't support `_` separators |
+| Workflow timeout under 30 min for complex workflows | Use `3600000` (1 hour) as default |
+| `import { workflow }` (ESM) in TypeScript workflows | Use `require('@agent-relay/sdk/workflows')` — most repos are CJS |
+| Top-level `await` in TypeScript | Wrap in `async function main() { ... } main().catch(console.error)` |
+| Using `createWorkflowRenderer` | Does not exist. Use `.run({ cwd: process.cwd() })` |
+| `export default workflow(...)...build()` | No `.build()`. Chain ends with `.run()` inside async main |
+| Relative import `'../workflows/builder.js'` | Use `require('@agent-relay/sdk/workflows')` |
+| `pattern('single')` on cloud runner | Not supported — use `dag` |
+| `pattern('supervisor')` with one agent | Same agent is owner + specialist. Use `dag` |
+| Invalid verification type (`type: 'deterministic'`) | Only `exit_code`, `output_contains`, `file_exists`, `custom` are valid |
+| Chaining `{{steps.X.output}}` from interactive agents | PTY output is garbled. Use deterministic steps or `preset: 'worker'` |
+| Single step editing 4+ files | Agents modify 1-2 then exit. Split to one file per step with verify gates |
+| Relying on agents to `git commit` | Agents emit markers without running git. Use deterministic commit step |
+| File-writing steps without `file_exists` verification | `exit_code` auto-passes even if no file written |
+| Manual peer fanout in `handleChannelMessage()` | Use broker-managed channel subscriptions — broker fans out to all subscribers automatically |
+| Client-side `personaNames.has(from)` filtering | Use `relay.subscribe()`/`relay.unsubscribe()` — only subscribed agents receive messages |
+| Agents receiving noisy cross-channel messages during focused work | Use `relay.mute({ agent, channel })` to silence non-primary channels without leaving them |
+| Hardcoding all channels at spawn time | Use `agent.subscribe()` / `agent.unsubscribe()` for dynamic channel membership post-spawn |
 
 ## YAML Alternative
-
-Workflows can also be defined as `.yaml` files:
 
 ```yaml
 version: '1.0'
@@ -822,169 +574,15 @@ workflows:
       - name: plan
         agent: lead
         task: 'Produce a detailed implementation plan.'
-        # No sentinel required — owner judgment + evidence complete the step
       - name: implement
         agent: worker
         task: 'Implement: {{steps.plan.output}}'
         dependsOn: [plan]
         verification:
-          type: exit_code  # deterministic: exit 0 = success
+          type: exit_code
 ```
 
 Run with: `agent-relay run path/to/workflow.yaml`
-
-## TypeScript Workflow Setup
-
-TypeScript workflows use the fluent builder API via `@agent-relay/sdk/workflows`.
-
-**Critical rules for TypeScript workflows:**
-
-1. **Use `require()`, not `import`** — most projects default to CJS (`"type"` is not `"module"` in package.json), and `tsx` will fail with ESM imports
-2. **Wrap in `async function main()`** — CJS does not support top-level `await`
-3. **Validate with `--dry-run`** before running: `agent-relay run --dry-run workflow.ts`
-
-**Template:**
-```typescript
-const { workflow } = require('@agent-relay/sdk/workflows');
-
-async function main() {
-  const result = await workflow('my-workflow')
-    .description('What this workflow does')
-    .pattern('dag')
-    .channel('wf-my-workflow')
-    .maxConcurrency(4)
-    .timeout(3_600_000)
-
-    .agent('lead', { cli: 'claude', role: 'Architect' })
-    .agent('worker', { cli: 'claude', preset: 'worker', role: 'Implementer' })
-
-    .step('plan', {
-      agent: 'lead',
-      task: 'Produce a plan.',
-      verification: { type: 'output_contains', value: 'PLAN_COMPLETE' },
-    })
-    .step('implement', {
-      agent: 'worker',
-      dependsOn: ['plan'],
-      task: 'Implement: {{steps.plan.output}}',
-      verification: { type: 'exit_code' },
-    })
-
-    .onError('retry', { maxRetries: 2, retryDelayMs: 10_000 })
-    .run({ onEvent: (e) => console.log(`[${e.type}] ${e.step ?? ''}`) });
-
-  console.log('Result:', result.status);
-}
-
-main().catch(console.error);
-```
-
-Run with: `agent-relay run path/to/workflow.ts`
-
-## Python Workflow Setup
-
-Python workflows use the same builder API via `agent_relay.workflows`.
-
-**Critical rules for Python workflows:**
-
-1. **Use `async/await`** — the workflow builder is async
-2. **Validate with `--dry-run`** before running: `agent-relay run --dry-run workflow.py`
-
-**Template:**
-```python
-import asyncio
-from agent_relay.workflows import workflow
-
-async def main():
-    result = await (
-        workflow("my-workflow")
-        .description("What this workflow does")
-        .pattern("dag")
-        .channel("wf-my-workflow")
-        .max_concurrency(4)
-        .timeout(3_600_000)
-
-        .agent("lead", cli="claude", role="Architect")
-        .agent("worker", cli="claude", preset="worker", role="Implementer")
-
-        .step("plan", agent="lead",
-              task="Produce a plan.",
-              verification={"type": "output_contains", "value": "PLAN_COMPLETE"})
-        .step("implement", agent="worker",
-              depends_on=["plan"],
-              task="Implement: {{steps.plan.output}}",
-              verification={"type": "exit_code"})
-
-        .on_error("retry", max_retries=2, retry_delay_ms=10_000)
-        .run(on_event=lambda e: print(f"[{e.type}] {e.step or ''}"))
-    )
-
-    print(f"Result: {result.status}")
-
-asyncio.run(main())
-```
-
-Run with: `agent-relay run path/to/workflow.py`
-
-## Workflow Authoring Rules
-
-Follow these principles when designing workflow step prompts:
-
-### 1. Prefer verification over sentinel-only prompts
-
-Use deterministic checks (`exit_code`, `file_exists`) as the primary completion signal. Don't rely solely on agents printing magic strings.
-
-```yaml
-# GOOD — deterministic verification
-verification:
-  type: exit_code  # or file_exists: src/auth.ts
-
-# OKAY — sentinel as optional accelerator alongside verification
-verification:
-  type: output_contains
-  value: PLAN_COMPLETE
-
-# BAD — no verification, relying only on agent printing a string
-task: "Do X. You MUST print STEP_COMPLETE when done."
-```
-
-### 2. Use owners/reviewers to interpret ambiguous outputs
-
-The step owner (lead or step agent) can approve or reject a step via `OWNER_DECISION`. This is useful when automated verification isn't sufficient — the owner reads evidence and makes a judgment call.
-
-```yaml
-# Owner reviews worker output and decides
-task: |
-  Review worker output on #my-track.
-  If satisfactory, approve. If not, request retry.
-  # Runner accepts: OWNER_DECISION: COMPLETE, or tolerant variants like "Approved", "LGTM"
-```
-
-### 3. For channel workflows, define required channel events explicitly
-
-When coordination happens via channel messages, tell agents what to post and what the lead should observe:
-
-```yaml
-# Worker prompt — describe what to communicate
-task: |
-  Implement auth module. Post a summary of changes to #my-track when done.
-
-# Lead prompt — describe what to observe
-task: |
-  Monitor #my-track for worker summaries. When all workers have posted summaries,
-  review the changes and approve the step.
-```
-
-### 4. Treat exact completion strings as optional accelerators only
-
-`STEP_COMPLETE:<name>` and `REVIEW_DECISION: APPROVE` still work as fast-paths but are never required. The runner's completion pipeline will find evidence even without them.
-
-### 5. Ensure prompts describe work contract, not output ceremony
-
-**Bad:** "You MUST end your response with exactly: IMPLEMENTATION_DONE"
-**Good:** "Implement the auth module. Write the file to src/auth.ts. The step is complete when the file exists and compiles."
-
-The prompt should describe what the agent should deliver, not what it should print.
 
 ## Available Swarm Patterns
 
