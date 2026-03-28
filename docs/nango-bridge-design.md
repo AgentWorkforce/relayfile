@@ -332,14 +332,14 @@ workspaces:
 | TS `NangoHelpers.getProviderFiles()` | `sdk/relayfile-sdk/src/nango.ts` | Auto-paginating query with provider/status filters |
 | TS `NangoHelpers.watchProviderEvents()` | `sdk/relayfile-sdk/src/nango.ts` | Async generator with polling + AbortSignal |
 | TS SDK types | `sdk/relayfile-sdk/src/types.ts` | `IngestWebhookInput`, `WritebackItem`, `AckWritebackInput`, `AckWritebackResponse` |
-| Python SDK types | `sdk/relayfile-sdk-py/src/relayfile/types.py` | Mirrors TS types with dataclasses |
-| Python SDK errors | `sdk/relayfile-sdk-py/src/relayfile/errors.py` | `RelayFileApiError` hierarchy |
+| Python SDK types | `packages/sdk/python/src/relayfile/types.py` | Mirrors TS types with dataclasses |
+| Python SDK errors | `packages/sdk/python/src/relayfile/errors.py` | `RelayFileApiError` hierarchy |
 | Test coverage | `sdk/relayfile-sdk/src/client.test.ts` | Tests for ingest, writeback, and NangoHelpers |
 
 ### Remaining Work
 
-1. **Python SDK client** (`sdk/relayfile-sdk-py/src/relayfile/client.py`) — `RelayFileClient` + `AsyncRelayFileClient` using `httpx`; mirror all TS SDK methods
-2. **Python SDK Nango helpers** (`sdk/relayfile-sdk-py/src/relayfile/nango.py`) — `NangoHelpers` + `AsyncNangoHelpers`; mirror TS `nango.ts`
+1. **Python SDK client** (`packages/sdk/python/src/relayfile/client.py`) — `RelayFileClient` + `AsyncRelayFileClient` using `httpx`; mirror all TS SDK methods
+2. **Python SDK Nango helpers** (`packages/sdk/python/src/relayfile/nango.py`) — `NangoHelpers` + `AsyncNangoHelpers`; mirror TS `nango.ts`
 3. **Standalone Nango Bridge service** — Deployable worker that receives Nango webhooks, translates them via `NangoHelpers`, and runs the writeback polling loop
 4. **Provider-specific diff logic** — Writeback bridge currently sends full file content; need minimal diff/patch computation per provider
 5. **Rate limiting for writeback polling** — Bridge should respect `Retry-After` headers and backoff on 429s from Relayfile

@@ -123,9 +123,13 @@ jobs:
             const path = require('path');
             const version = '$NEW_VERSION';
 
-            const packagesDir = 'packages';
-            for (const dir of fs.readdirSync(packagesDir)) {
-              const pkgPath = path.join(packagesDir, dir, 'package.json');
+            const packagePaths = [
+              'packages/core/package.json',
+              'packages/sdk/typescript/package.json',
+              'packages/cli/package.json',
+            ];
+
+            for (const pkgPath of packagePaths) {
               if (fs.existsSync(pkgPath)) {
                 const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
                 pkg.version = version;
@@ -145,7 +149,7 @@ jobs:
       - name: Build packages
         run: |
           npm run build --workspace=packages/core
-          npm run build --workspace=packages/sdk
+          npm run build --workspace=packages/sdk/typescript
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
@@ -153,8 +157,12 @@ jobs:
           name: build-output
           path: |
             package.json
-            packages/*/package.json
-            packages/*/dist/
+            packages/core/package.json
+            packages/core/dist/
+            packages/sdk/typescript/package.json
+            packages/sdk/typescript/dist/
+            packages/cli/package.json
+            packages/cli/dist/
           retention-days: 1
 
   # Publish all packages in parallel
@@ -167,10 +175,13 @@ jobs:
       fail-fast: false
       max-parallel: 10
       matrix:
-        package:
-          - core
-          - sdk
-          - cli
+        include:
+          - package: core
+            path: packages/core
+          - package: sdk
+            path: packages/sdk/typescript
+          - package: cli
+            path: packages/cli
 
     steps:
       - name: Checkout code
@@ -193,7 +204,7 @@ jobs:
 
       - name: Dry run check
         if: github.event.inputs.dry_run == 'true'
-        working-directory: packages/${{ matrix.package }}
+        working-directory: ${{ matrix.path }}
         run: |
           PACKAGE_NAME=$(node -p "require('./package.json').name")
           echo "Dry run - would publish ${PACKAGE_NAME}"
@@ -201,7 +212,7 @@ jobs:
 
       - name: Publish to NPM
         if: github.event.inputs.dry_run != 'true'
-        working-directory: packages/${{ matrix.package }}
+        working-directory: ${{ matrix.path }}
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: npm publish --access public --provenance --tag ${{ github.event.inputs.tag }} --ignore-scripts
@@ -232,9 +243,22 @@ jobs:
       - name: Update npm for OIDC support
         run: npm install -g npm@latest
 
+      - name: Resolve package path
+        id: resolve-package
+        run: |
+          case "${{ github.event.inputs.package }}" in
+            core) echo "path=packages/core" >> "$GITHUB_OUTPUT" ;;
+            sdk) echo "path=packages/sdk/typescript" >> "$GITHUB_OUTPUT" ;;
+            cli) echo "path=packages/cli" >> "$GITHUB_OUTPUT" ;;
+            *)
+              echo "Unsupported package: ${{ github.event.inputs.package }}" >&2
+              exit 1
+              ;;
+          esac
+
       - name: Dry run check
         if: github.event.inputs.dry_run == 'true'
-        working-directory: packages/${{ github.event.inputs.package }}
+        working-directory: ${{ steps.resolve-package.outputs.path }}
         run: |
           PACKAGE_NAME=$(node -p "require('./package.json').name")
           echo "Dry run - would publish ${PACKAGE_NAME}"
@@ -242,7 +266,7 @@ jobs:
 
       - name: Publish to NPM
         if: github.event.inputs.dry_run != 'true'
-        working-directory: packages/${{ github.event.inputs.package }}
+        working-directory: ${{ steps.resolve-package.outputs.path }}
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: npm publish --access public --provenance --tag ${{ github.event.inputs.tag }} --ignore-scripts
@@ -276,7 +300,7 @@ jobs:
           git config user.name "GitHub Actions"
           git config user.email "actions@github.com"
 
-          git add package.json packages/*/package.json
+          git add package.json packages/core/package.json packages/sdk/typescript/package.json packages/cli/package.json
           if ! git diff --staged --quiet; then
             git commit -m "chore(release): v${NEW_VERSION}"
             git push

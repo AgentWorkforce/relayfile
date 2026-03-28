@@ -10,8 +10,8 @@
 const { workflow } = require('@agent-relay/sdk/workflows');
 
 const ROOT = '/Users/khaliqgant/Projects/AgentWorkforce-relayfile';
-const TS_SDK = `${ROOT}/packages/relayfile-sdk/src`;
-const PY_SDK = `${ROOT}/sdk/relayfile-sdk-py/src/relayfile`;
+const TS_SDK = `${ROOT}/packages/sdk/typescript/src`;
+const PY_SDK = `${ROOT}/packages/sdk/python/src/relayfile`;
 
 async function main() {
 const result = await workflow('sync-python-sdk')
@@ -61,7 +61,7 @@ Add all missing dataclasses to match the TS SDK exactly:
 - Any other missing types identified in the analysis
 
 Use Python dataclasses with proper type hints. Follow the existing style in types.py.
-Run: cd ${ROOT} && python -m pytest sdk/relayfile-sdk-py/tests/ -x 2>/dev/null || echo "Tests checked"
+Run: cd ${ROOT} && python -m pytest packages/sdk/python/tests/ -x 2>/dev/null || echo "Tests checked"
 End with TYPES_SYNC_COMPLETE.`,
     verification: { type: 'output_contains', value: 'TYPES_SYNC_COMPLETE' },
     timeout: 600_000,
@@ -81,7 +81,7 @@ Add all missing methods to both RelayFileClient (sync) and AsyncRelayFileClient 
 - Any other missing methods identified in the analysis
 
 Follow the existing Python client style (httpx, retry logic, error handling).
-Run: cd ${ROOT} && python -m pytest sdk/relayfile-sdk-py/tests/ -x 2>/dev/null || echo "Tests checked"
+Run: cd ${ROOT} && python -m pytest packages/sdk/python/tests/ -x 2>/dev/null || echo "Tests checked"
 End with CLIENT_SYNC_COMPLETE.`,
     verification: { type: 'output_contains', value: 'CLIENT_SYNC_COMPLETE' },
     timeout: 600_000,
@@ -108,7 +108,7 @@ Gap analysis: {{steps.analyze-gaps.output}}
 3. Update ${PY_SDK}/__init__.py to export new modules
 
 Follow the existing Python style. Use abc.ABC for abstract classes.
-Run: cd ${ROOT} && python -m pytest sdk/relayfile-sdk-py/tests/ -x 2>/dev/null || echo "Tests checked"
+Run: cd ${ROOT} && python -m pytest packages/sdk/python/tests/ -x 2>/dev/null || echo "Tests checked"
 End with PROVIDER_SYNC_COMPLETE.`,
     verification: { type: 'output_contains', value: 'PROVIDER_SYNC_COMPLETE' },
     timeout: 600_000,
@@ -126,9 +126,9 @@ Check:
 4. composio.py exists and matches TS composio.ts
 5. __init__.py exports everything
 6. Code follows existing Python style
-7. Tests pass: cd ${ROOT} && python -m pytest sdk/relayfile-sdk-py/tests/ -x
+7. Tests pass: cd ${ROOT} && python -m pytest packages/sdk/python/tests/ -x
 
-Fix any issues. Also create a SYNC_STATUS.md in ${ROOT}/sdk/relayfile-sdk-py/ documenting:
+Fix any issues. Also create a SYNC_STATUS.md in ${ROOT}/packages/sdk/python/ documenting:
 - What was synced
 - Remaining differences (if any)
 - How to keep SDKs in sync going forward
@@ -138,12 +138,12 @@ Keep output under 50 lines. End with REVIEW_COMPLETE.`,
     timeout: 300_000,
   })
 
-  .step('commit', {
+ .step('commit', {
     agent: 'types-builder',
     dependsOn: ['review-and-test'],
     task: `In ${ROOT}:
 1. git checkout -b feat/python-sdk-sync
-2. git add sdk/relayfile-sdk-py/
+2. git add packages/sdk/python/
 3. git commit -m "feat: sync Python SDK to TypeScript SDK parity
 
 Added missing types: BulkWriteFile, BulkWriteInput, BulkWriteResponse,
