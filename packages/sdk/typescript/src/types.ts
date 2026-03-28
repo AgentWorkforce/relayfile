@@ -168,6 +168,9 @@ export interface OperationStatusResponse {
   lastError?: string | null;
   providerResult?: Record<string, unknown>;
   correlationId?: string;
+  createdAt?: string;
+  updatedAt?: string;
+  completedAt?: string | null;
 }
 
 export interface GetOperationsOptions {

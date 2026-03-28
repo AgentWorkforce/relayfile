@@ -149,6 +149,9 @@ type OperationStatus struct {
 	LastError      *string        `json:"lastError,omitempty"`
 	ProviderResult map[string]any `json:"providerResult,omitempty"`
 	CorrelationID  string         `json:"correlationId,omitempty"`
+	CreatedAt      string         `json:"createdAt,omitempty"`
+	UpdatedAt      string         `json:"updatedAt,omitempty"`
+	CompletedAt    *string        `json:"completedAt,omitempty"`
 }
 
 type OperationFeed struct {
@@ -2435,16 +2438,20 @@ func (s *Store) AcknowledgeWriteback(workspaceID, itemID string, success bool, e
 	}
 
 	// Update operation status based on acknowledgment
+	nowTS := nowRFC3339NanoUTC()
 	if success {
 		op.Status = "succeeded"
 		op.LastError = nil
+		op.CompletedAt = &nowTS
 	} else {
 		op.Status = "dead_lettered"
 		if errMsg != "" {
 			op.LastError = &errMsg
 		}
+		op.CompletedAt = &nowTS
 	}
 	op.NextAttemptAt = nil
+	op.UpdatedAt = nowTS
 
 	ws.Ops[itemID] = op
 	_ = s.saveLocked()
@@ -2651,6 +2658,8 @@ func (s *Store) ReplayOperation(workspaceID, opID, correlationID string) (Queued
 	op.LastError = nil
 	op.CorrelationID = correlationID
 	op.NextAttemptAt = nil
+	op.CompletedAt = nil
+	op.UpdatedAt = nowRFC3339NanoUTC()
 	ws.Ops[opID] = op
 	_ = s.saveLocked()
 	s.mu.Unlock()
@@ -2718,11 +2727,16 @@ func (s *Store) nextEventIDLocked() string {
 	return fmt.Sprintf("evt_%d", s.eventCounter)
 }
 
+func nowRFC3339NanoUTC() string {
+	return time.Now().UTC().Format(time.RFC3339Nano)
+}
+
 func (s *Store) recordWriteLocked(ws *workspaceState, path, revision, eventType, provider, correlationID string) (WriteResult, writebackTask) {
 	if provider == "" {
 	}
 	workspaceID := s.workspaceIDForStateLocked(ws)
 	opID := s.nextOperationIDLocked()
+	nowTS := nowRFC3339NanoUTC()
 	op := OperationStatus{
 		OpID:          opID,
 		Path:          path,
@@ -2732,6 +2746,8 @@ func (s *Store) recordWriteLocked(ws *workspaceState, path, revision, eventType,
 		Status:        "pending",
 		AttemptCount:  0,
 		CorrelationID: correlationID,
+		CreatedAt:     nowTS,
+		UpdatedAt:     nowTS,
 	}
 	ws.Ops[opID] = op
 
@@ -2743,7 +2759,7 @@ func (s *Store) recordWriteLocked(ws *workspaceState, path, revision, eventType,
 		Origin:        "agent_write",
 		Provider:      provider,
 		CorrelationID: correlationID,
-		Timestamp:     time.Now().UTC().Format(time.RFC3339Nano),
+		Timestamp:     nowTS,
 	}
 	s.appendWorkspaceEventLocked(workspaceID, ws, event)
 
@@ -3170,6 +3186,8 @@ func (s *Store) processWriteback(task writebackTask) {
 		op.LastError = nil
 		op.NextAttemptAt = nil
 		op.ProviderResult = map[string]any{"providerRevision": task.Revision}
+		op.UpdatedAt = nowTS
+		op.CompletedAt = &nowTS
 		ws.Ops[task.OpID] = op
 		s.appendWorkspaceEventLocked(task.WorkspaceID, ws, Event{
 			EventID:       s.nextEventIDLocked(),
@@ -3191,6 +3209,8 @@ func (s *Store) processWriteback(task writebackTask) {
 	if attempt >= s.maxAttempts {
 		op.Status = "dead_lettered"
 		op.NextAttemptAt = nil
+		op.UpdatedAt = nowTS
+		op.CompletedAt = &nowTS
 		ws.Ops[task.OpID] = op
 		s.appendWorkspaceEventLocked(task.WorkspaceID, ws, Event{
 			EventID:       s.nextEventIDLocked(),
@@ -3209,6 +3229,8 @@ func (s *Store) processWriteback(task writebackTask) {
 	op.Status = "pending"
 	nextAt := now.Add(s.retryDelay).Format(time.RFC3339Nano)
 	op.NextAttemptAt = &nextAt
+	op.UpdatedAt = nowTS
+	op.CompletedAt = nil
 	ws.Ops[task.OpID] = op
 	_ = s.saveLocked()
 

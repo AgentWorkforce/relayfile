@@ -28,6 +28,7 @@ require_pattern() {
 OPENAPI_FILE="openapi/relayfile-v1.openapi.yaml"
 SDK_TYPES_FILE="packages/sdk/typescript/src/types.ts"
 SDK_CLIENT_FILE="packages/sdk/typescript/src/client.ts"
+PY_TYPES_FILE="packages/sdk/python/src/relayfile/types.py"
 
 require_pattern "$OPENAPI_FILE" "/v1/workspaces/{workspaceId}/fs/query:" "fs query endpoint"
 require_pattern "$OPENAPI_FILE" "operationId: queryFiles" "queryFiles operation"
@@ -48,5 +49,24 @@ require_pattern "$SDK_TYPES_FILE" "semantics?: FileSemantics;" "sdk semantics su
 require_pattern "$SDK_CLIENT_FILE" "async queryFiles(workspaceId: string, options: QueryFilesOptions = {})" "sdk queryFiles method"
 require_pattern "$SDK_CLIENT_FILE" "/fs/query" "sdk fs query path"
 require_pattern "$SDK_CLIENT_FILE" "semantics: input.semantics" "sdk write semantics body"
+
+# ── Python SDK parity checks ──
+# Ensure Python SDK declares the same core types as TypeScript SDK
+
+require_pattern "$PY_TYPES_FILE" "class OperationStatusResponse:" "python OperationStatusResponse"
+require_pattern "$PY_TYPES_FILE" "class FilesystemEvent:" "python FilesystemEvent"
+require_pattern "$PY_TYPES_FILE" "class EventFeedResponse:" "python EventFeedResponse"
+require_pattern "$PY_TYPES_FILE" "class OperationFeedResponse:" "python OperationFeedResponse"
+require_pattern "$PY_TYPES_FILE" "class FileQueryResponse:" "python FileQueryResponse"
+require_pattern "$PY_TYPES_FILE" "class FileSemantics:" "python FileSemantics"
+require_pattern "$PY_TYPES_FILE" "class BulkWriteResponse:" "python BulkWriteResponse"
+
+# ── Cross-SDK field parity: OperationStatusResponse ──
+require_pattern "$SDK_TYPES_FILE" "createdAt?" "ts operation createdAt"
+require_pattern "$SDK_TYPES_FILE" "updatedAt?" "ts operation updatedAt"
+require_pattern "$SDK_TYPES_FILE" "completedAt?" "ts operation completedAt"
+require_pattern "$PY_TYPES_FILE" "created_at:" "python operation created_at"
+require_pattern "$PY_TYPES_FILE" "updated_at:" "python operation updated_at"
+require_pattern "$PY_TYPES_FILE" "completed_at:" "python operation completed_at"
 
 echo "contract check passed"
