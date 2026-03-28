@@ -23,13 +23,6 @@ export {
 export { IntegrationProvider, computeCanonicalPath } from "./provider.js";
 export type { WebhookInput, ListProviderFilesOptions, WatchProviderEventsOptions } from "./provider.js";
 
-// Nango bridge
-export { NangoHelpers } from "./nango.js";
-export type { NangoWebhookInput } from "./nango.js";
-
-// Composio bridge
-export { ComposioHelpers } from "./composio.js";
-export type { ComposioWebhookPayload, ComposioTriggerOptions } from "./composio.js";
 export type {
   AckResponse,
   AckWritebackInput,

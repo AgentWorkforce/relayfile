@@ -68,6 +68,15 @@ More collaboration examples:
 - Exposes operational APIs for sync status, ingress metrics, dead letters, and operation feeds.
 - Ships an OpenAPI contract and a TypeScript SDK.
 
+## Breaking: Nango and Composio helpers removed from SDK
+
+These have moved to dedicated packages:
+
+- `@relayfile/provider-nango` (npm) / `relayfile-provider-nango` (pip)
+- `@relayfile/provider-composio` (npm) / `relayfile-provider-composio` (pip)
+
+If you used `NangoHelpers` or `ComposioHelpers`, install the provider package instead.
+
 ## Current API highlights
 
 - Filesystem:
