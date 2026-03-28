@@ -6,7 +6,21 @@ from .errors import (
     InvalidStateError,
     PayloadTooLargeError,
 )
-from .nango import NangoHelpers, AsyncNangoHelpers
+from .provider import (
+    IntegrationProvider,
+    ListProviderFilesOptions,
+    WatchProviderEventsOptions,
+    WebhookInput,
+    compute_canonical_path,
+)
+from .nango import AsyncNangoHelpers, NangoHelpers, NangoWebhookInput
+from .composio import (
+    ComposioHelpers,
+    ComposioProvider,
+    ComposioTriggerOptions,
+    ComposioWebhookMetadata,
+    ComposioWebhookPayload,
+)
 
 __all__ = [
     "RelayFileClient",
@@ -17,6 +31,17 @@ __all__ = [
     "QueueFullError",
     "InvalidStateError",
     "PayloadTooLargeError",
+    "IntegrationProvider",
+    "WebhookInput",
+    "ListProviderFilesOptions",
+    "WatchProviderEventsOptions",
+    "compute_canonical_path",
     "NangoHelpers",
     "AsyncNangoHelpers",
+    "NangoWebhookInput",
+    "ComposioProvider",
+    "ComposioHelpers",
+    "ComposioWebhookMetadata",
+    "ComposioWebhookPayload",
+    "ComposioTriggerOptions",
 ]

@@ -8,13 +8,16 @@ import pytest
 import respx
 
 from relayfile import (
-    RelayFileClient,
     AsyncRelayFileClient,
-    RelayFileApiError,
-    RevisionConflictError,
-    QueueFullError,
+    ComposioProvider,
+    IntegrationProvider,
     InvalidStateError,
     PayloadTooLargeError,
+    QueueFullError,
+    RelayFileApiError,
+    RelayFileClient,
+    RevisionConflictError,
+    compute_canonical_path,
 )
 from relayfile.types import (
     IngestWebhookInput,
@@ -81,6 +84,27 @@ class TestRelayFileClient:
         assert req.headers["If-Match"] == "rev_3"
 
     @respx.mock
+    def test_bulk_write(self) -> None:
+        payload = {"written": 2, "errorCount": 0, "errors": [], "correlationId": "corr_bulk"}
+        respx.post(f"{BASE}/v1/workspaces/ws_acme/fs/bulk").mock(
+            return_value=httpx.Response(202, json=payload)
+        )
+        client = self._client()
+        res = client.bulk_write(
+            "ws_acme",
+            [
+                {"path": "/a.md", "contentType": "text/markdown", "content": "# A"},
+                {"path": "/b.md", "contentType": "text/markdown", "content": "# B"},
+            ],
+            correlation_id="corr_bulk",
+        )
+        assert res["written"] == 2
+        req = respx.calls.last.request
+        assert req.method == "POST"
+        assert req.headers["X-Correlation-Id"] == "corr_bulk"
+        assert json.loads(req.content)["files"][0]["path"] == "/a.md"
+
+    @respx.mock
     def test_query_files(self) -> None:
         payload = {"items": [], "nextCursor": None}
         respx.get(f"{BASE}/v1/workspaces/ws_acme/fs/query").mock(
@@ -102,6 +126,35 @@ class TestRelayFileClient:
         client = self._client()
         res = client.get_events("ws_acme", provider="github", limit=10)
         assert res["events"] == []
+
+    @respx.mock
+    def test_export_workspace_json(self) -> None:
+        payload = [
+            {"path": "/a.md", "revision": "rev_1", "contentType": "text/markdown", "content": "# A"},
+            {"path": "/b.md", "revision": "rev_2", "contentType": "text/markdown", "content": "# B"},
+        ]
+        respx.get(f"{BASE}/v1/workspaces/ws_acme/fs/export").mock(
+            return_value=httpx.Response(200, json=payload)
+        )
+        client = self._client()
+        res = client.export_workspace("ws_acme")
+        assert len(res) == 2
+        req = respx.calls.last.request
+        assert b"format=json" in req.url.raw_path
+        assert req.headers["Accept"] == "application/json"
+
+    @respx.mock
+    def test_export_workspace_tar(self) -> None:
+        payload = b"tar-bytes"
+        respx.get(f"{BASE}/v1/workspaces/ws_acme/fs/export").mock(
+            return_value=httpx.Response(200, content=payload, headers={"content-type": "application/gzip"})
+        )
+        client = self._client()
+        res = client.export_workspace("ws_acme", format="tar")
+        assert res == payload
+        req = respx.calls.last.request
+        assert b"format=tar" in req.url.raw_path
+        assert req.headers["Accept"] == "*/*"
 
     @respx.mock
     def test_get_op(self) -> None:
@@ -498,6 +551,194 @@ class TestNangoHelpers:
 
 
 # ---------------------------------------------------------------------------
+# Provider abstractions
+# ---------------------------------------------------------------------------
+
+
+class TestProviderAbstractions:
+    def test_compute_canonical_path_known_provider(self) -> None:
+        assert compute_canonical_path("github", "issues", "42") == "/github/issues/42.json"
+
+    def test_compute_canonical_path_unknown_provider(self) -> None:
+        assert compute_canonical_path("custom", "events", "abc") == "/custom/events/abc.json"
+
+    def test_nango_helpers_extend_integration_provider(self) -> None:
+        from relayfile.nango import NangoHelpers
+
+        nango = NangoHelpers(RelayFileClient(BASE, "tok_test"))
+        assert isinstance(nango, IntegrationProvider)
+
+
+# ---------------------------------------------------------------------------
+# Composio helpers
+# ---------------------------------------------------------------------------
+
+
+class TestComposioProvider:
+    def _provider(self) -> ComposioProvider:
+        return ComposioProvider(RelayFileClient(BASE, "tok_test"))
+
+    @respx.mock
+    def test_ingest_github_commit_event(self) -> None:
+        payload = {"status": "queued", "id": "env_1"}
+        respx.post(f"{BASE}/v1/workspaces/ws_1/webhooks/ingest").mock(
+            return_value=httpx.Response(200, json=payload)
+        )
+        provider = self._provider()
+        provider.ingest_webhook(
+            "ws_1",
+            {
+                "type": "composio.trigger.message",
+                "metadata": {
+                    "trigger_slug": "GITHUB_COMMIT_EVENT",
+                    "trigger_id": "trig_abc123",
+                    "connected_account_id": "ca_xyz789",
+                    "user_id": "user_42",
+                    "toolkit": "github",
+                },
+                "data": {
+                    "id": "sha-abc123",
+                    "author": "khaliq",
+                    "message": "fix: update billing logic",
+                },
+            },
+        )
+
+        body = json.loads(respx.calls.last.request.content)
+        assert body["provider"] == "github"
+        assert body["event_type"] == "event"
+        assert body["path"] == "/github/commits/sha-abc123.json"
+        assert body["headers"]["X-Composio-Trigger-Id"] == "trig_abc123"
+        assert body["headers"]["X-Composio-User-Id"] == "user_42"
+        assert body["data"]["semantics"]["properties"]["provider.object_type"] == "commits"
+        assert body["data"]["semantics"]["properties"]["provider.object_id"] == "sha-abc123"
+
+    @respx.mock
+    def test_ingest_account_expired_event(self) -> None:
+        payload = {"status": "queued", "id": "env_2"}
+        respx.post(f"{BASE}/v1/workspaces/ws_1/webhooks/ingest").mock(
+            return_value=httpx.Response(200, json=payload)
+        )
+        provider = self._provider()
+        provider.ingest_webhook(
+            "ws_1",
+            {
+                "type": "composio.connected_account.expired",
+                "metadata": {
+                    "trigger_slug": "",
+                    "trigger_id": "",
+                    "connected_account_id": "ca_expired1",
+                    "user_id": "user_10",
+                    "toolkit": "github",
+                },
+                "data": {},
+            },
+        )
+
+        body = json.loads(respx.calls.last.request.content)
+        assert body["event_type"] == "account_expired"
+        assert body["path"] == "/.system/composio/expired/ca_expired1.json"
+        assert body["data"]["connected_account_id"] == "ca_expired1"
+
+    @respx.mock
+    def test_ingest_unknown_trigger_infers_object_type(self) -> None:
+        payload = {"status": "queued", "id": "env_3"}
+        respx.post(f"{BASE}/v1/workspaces/ws_1/webhooks/ingest").mock(
+            return_value=httpx.Response(200, json=payload)
+        )
+        provider = self._provider()
+        provider.ingest_webhook(
+            "ws_1",
+            {
+                "type": "composio.trigger.message",
+                "metadata": {
+                    "trigger_slug": "NOTION_DATABASE_ROW_CREATED",
+                    "trigger_id": "trig_notion1",
+                    "connected_account_id": "ca_notion1",
+                    "toolkit": "notion",
+                },
+                "data": {"id": "row-789", "title": "New task"},
+            },
+        )
+
+        body = json.loads(respx.calls.last.request.content)
+        assert body["path"] == "/notion/database_rows/row-789.json"
+        assert body["event_type"] == "created"
+
+    @respx.mock
+    def test_ingest_nested_object_id(self) -> None:
+        payload = {"status": "queued", "id": "env_4"}
+        respx.post(f"{BASE}/v1/workspaces/ws_1/webhooks/ingest").mock(
+            return_value=httpx.Response(200, json=payload)
+        )
+        provider = self._provider()
+        provider.ingest_webhook(
+            "ws_1",
+            {
+                "type": "composio.trigger.message",
+                "metadata": {
+                    "trigger_slug": "GITHUB_ISSUE_EVENT",
+                    "trigger_id": "trig_issue1",
+                    "connected_account_id": "ca_gh1",
+                    "toolkit": "github",
+                },
+                "data": {"issue": {"id": "issue-999", "title": "Bug report"}},
+            },
+        )
+
+        body = json.loads(respx.calls.last.request.content)
+        assert body["path"] == "/github/issues/issue-999.json"
+
+    def test_normalize(self) -> None:
+        provider = self._provider()
+        normalized = provider.normalize(
+            {
+                "type": "composio.trigger.message",
+                "metadata": {
+                    "trigger_slug": "SLACK_NEW_MESSAGE",
+                    "trigger_id": "trig_slack1",
+                    "connected_account_id": "ca_slack1",
+                    "toolkit": "slack",
+                },
+                "data": {"id": "msg-123", "text": "Hello from Slack!"},
+            }
+        )
+
+        assert normalized.provider == "slack"
+        assert normalized.object_type == "messages"
+        assert normalized.object_id == "msg-123"
+        assert normalized.event_type == "created"
+        assert normalized.metadata is not None
+        assert normalized.metadata["composio.trigger_id"] == "trig_slack1"
+
+    @respx.mock
+    def test_get_provider_files(self) -> None:
+        payload = {
+            "items": [
+                {
+                    "path": "/github/commits/sha-1.json",
+                    "revision": "rev_1",
+                    "contentType": "application/json",
+                    "size": 100,
+                }
+            ],
+            "nextCursor": None,
+        }
+        respx.get(f"{BASE}/v1/workspaces/ws_1/fs/query").mock(
+            return_value=httpx.Response(200, json=payload)
+        )
+        provider = self._provider()
+        files = provider.get_provider_files("ws_1", provider="github", object_type="commits")
+        assert len(files) == 1
+        req = respx.calls.last.request
+        assert b"provider=github" in req.url.raw_path
+        assert b"property.provider.object_type=commits" in req.url.raw_path
+
+    def test_name(self) -> None:
+        assert self._provider().name == "composio"
+
+
+# ---------------------------------------------------------------------------
 # Async client (basic smoke test)
 # ---------------------------------------------------------------------------
 
@@ -513,6 +754,32 @@ class TestAsyncClient:
         async with AsyncRelayFileClient(BASE, "tok_test") as client:
             res = await client.list_tree("ws_1")
             assert res["entries"] == []
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_bulk_write(self) -> None:
+        payload = {"written": 1, "errorCount": 0, "errors": [], "correlationId": "corr_bulk"}
+        respx.post(f"{BASE}/v1/workspaces/ws_acme/fs/bulk").mock(
+            return_value=httpx.Response(202, json=payload)
+        )
+        async with AsyncRelayFileClient(BASE, "tok_test") as client:
+            res = await client.bulk_write(
+                "ws_acme",
+                [{"path": "/a.md", "contentType": "text/markdown", "content": "# A"}],
+                correlation_id="corr_bulk",
+            )
+            assert res["written"] == 1
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_export_workspace_json(self) -> None:
+        payload = [{"path": "/a.md", "revision": "rev_1", "contentType": "text/markdown", "content": "# A"}]
+        respx.get(f"{BASE}/v1/workspaces/ws_acme/fs/export").mock(
+            return_value=httpx.Response(200, json=payload)
+        )
+        async with AsyncRelayFileClient(BASE, "tok_test") as client:
+            res = await client.export_workspace("ws_acme")
+            assert len(res) == 1
 
     @respx.mock
     @pytest.mark.asyncio
