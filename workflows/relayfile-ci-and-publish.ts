@@ -72,7 +72,7 @@ const result = await workflow('relayfile-ci-and-publish')
 
   .step('read-sdk-package', {
     type: 'deterministic',
-    command: `cat ${RELAYFILE}/packages/relayfile-sdk/package.json 2>/dev/null || echo no package.json""`,
+    command: `cat ${RELAYFILE}/packages/sdk/typescript/package.json 2>/dev/null || echo no package.json""`,
     captureOutput: true,
   })
 
@@ -109,7 +109,7 @@ Write a design doc at ${RELAYFILE}/docs/ci-cd-design.md covering:
 1. **ci.yml** — runs on every PR and push to main:
    - Go tests: go test ./... (all packages)
    - Go build: go build ./cmd/relayfile ./cmd/relayfile-mount ./cmd/relayfile-cli
-   - TS SDK: cd packages/relayfile-sdk && npm ci && npm run build && npx tsc --noEmit
+   - TS SDK: cd packages/sdk/typescript && npm ci && npm run build && npx tsc --noEmit
    - E2E test: start Go server, run scripts/e2e.ts --ci
    - CF Workers typecheck: cd packages/server && npx tsc --noEmit (if it exists)
 
@@ -159,7 +159,7 @@ Create ${RELAYFILE}/.github/workflows/ci.yml:
 - Jobs:
   1. go-test: setup Go 1.22, run go test ./...
   2. go-build: build all 3 binaries
-  3. sdk-typecheck: setup Node 22, cd packages/relayfile-sdk, npm ci, npm run build, tsc --noEmit
+  3. sdk-typecheck: setup Node 22, cd packages/sdk/typescript, npm ci, npm run build, tsc --noEmit
   4. e2e: depends on go-build, start server, run e2e.ts --ci
   5. workers-typecheck (conditional): if packages/server exists, tsc --noEmit
 
@@ -189,7 +189,7 @@ Key requirements:
 - Steps:
   1. Checkout
   2. Setup Node 22 with registry-url: https://registry.npmjs.org"
-  3. Install deps: cd packages/relayfile-sdk && npm ci
+  3. Install deps: cd packages/sdk/typescript && npm ci
   4. Version bump: npm version {type} --no-git-tag-version
   5. Build: npm run build
   6. Test: npx tsc --noEmit
@@ -249,7 +249,7 @@ Write to disk.`,
 Current package.json:
 {{steps.read-sdk-package.output}}
 
-Update ${RELAYFILE}/packages/relayfile-sdk/package.json:
+Update ${RELAYFILE}/packages/sdk/typescript/package.json:
 
 {
   name": "@relayfile/sdk",
@@ -272,14 +272,14 @@ Update ${RELAYFILE}/packages/relayfile-sdk/package.json:
   "repository": {
     "type": "git",
     "url": "https://github.com/AgentWorkforce/relayfile",
-    "directory": "packages/relayfile-sdk"
+    "directory": "packages/sdk/typescript"
   },
   "license": "MIT",
   "keywords": ["relayfile", "filesystem", "sync", "agent", "collaboration"],
   "engines": { "node": ">=18" }
 }
 
-Also create/update ${RELAYFILE}/packages/relayfile-sdk/tsconfig.json:
+Also create/update ${RELAYFILE}/packages/sdk/typescript/tsconfig.json:
 {
   compilerOptions": {
     "target": "ES2022",
@@ -297,13 +297,13 @@ Also create/update ${RELAYFILE}/packages/relayfile-sdk/tsconfig.json:
   "include": ["src"]
 }
 
-Create ${RELAYFILE}/packages/relayfile-sdk/README.md with:
+Create ${RELAYFILE}/packages/sdk/typescript/README.md with:
 - Package name + description
 - Install: npm install @relayfile/sdk
 - Quick example: create client, list tree, read/write file
 - Link to full docs
 
-Verify it builds: cd packages/relayfile-sdk && npm run build
+Verify it builds: cd packages/sdk/typescript && npm run build
 
 Write all files to disk.`,
     verification: { type: 'exit_code' },
@@ -323,7 +323,7 @@ echo "" && echo "=== Provenance check ===" && \
 grep -c "provenance" .github/workflows/publish-npm.yml && \
 grep -c "id-token: write" .github/workflows/publish-npm.yml && \
 echo "" && echo "=== SDK builds ===" && \
-cd packages/relayfile-sdk && npm install 2>&1 | tail -1 && npm run build 2>&1 | tail -3; echo "EXIT: $?"`,
+cd packages/sdk/typescript && npm install 2>&1 | tail -1 && npm run build 2>&1 | tail -3; echo "EXIT: $?"`,
     captureOutput: true,
     failOnError: false,
   })

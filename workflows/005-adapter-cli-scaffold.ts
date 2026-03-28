@@ -29,7 +29,7 @@ const result = await workflow('adapter-cli-scaffold')
 
   .step('read-package-layout', {
     type: 'deterministic',
-    command: `cat ${SDK_REPO}/packages/relayfile-sdk/package.json`,
+    command: `cat ${SDK_REPO}/packages/sdk/typescript/package.json`,
     captureOutput: true,
   })
 

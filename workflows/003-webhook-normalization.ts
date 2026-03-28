@@ -10,7 +10,7 @@
 const { workflow } = require('@agent-relay/sdk/workflows');
 
 const SDK_REPO = '/Users/khaliqgant/Projects/AgentWorkforce-relayfile';
-const SDK_PACKAGE = `${SDK_REPO}/packages/relayfile-sdk`;
+const SDK_PACKAGE = `${SDK_REPO}/packages/sdk/typescript`;
 const SDK_SRC = `${SDK_PACKAGE}/src`;
 const GITHUB_ADAPTER_REPO = '/Users/khaliqgant/Projects/AgentWorkforce/relayfile-adapter-github';
 const SPEC = `${GITHUB_ADAPTER_REPO}/docs/adapter-spec.md`;

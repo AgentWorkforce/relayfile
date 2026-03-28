@@ -83,7 +83,7 @@ End with SERVER_COMPLETE.`,
   .step('implement-sdk', {
     agent: 'sdk-builder',
     dependsOn: ['design-storage'],
-    task: `Add knowledge methods to the Relayfile SDK in ${RELAYFILE}/packages/relayfile-sdk/src/.
+    task: `Add knowledge methods to the Relayfile SDK in ${RELAYFILE}/packages/sdk/typescript/src/.
 
 1. Update types.ts — add KnowledgeAnnotation, KnowledgeCategory, KnowledgeSource interfaces (from spec)
 
@@ -94,7 +94,7 @@ End with SERVER_COMPLETE.`,
    - confirmKnowledge(workspaceId, annotationId, confirmedBy) → void
    - supersedeKnowledge(workspaceId, annotationId, replacement) → { id }
 
-3. Add tests: packages/relayfile-sdk/test/knowledge.test.ts
+3. Add tests: packages/sdk/typescript/test/knowledge.test.ts
    - Test queryKnowledge path matching
    - Test writeKnowledge + queryKnowledge round-trip
    - Test confirmKnowledge updates confirmedAt
