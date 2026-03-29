@@ -59,6 +59,32 @@ More collaboration examples:
 - [docs/guides/collaboration.md](docs/guides/collaboration.md)
 - [docs/guides/cloud-integration.md](docs/guides/cloud-integration.md)
 
+## Authentication
+
+**[Relayfile Cloud](https://relayfile.dev/pricing)** — sign up, get a token, start using the API. Everything is managed.
+
+**Self-hosted** — relayfile uses JWT tokens for auth. Generate a dev token to get started:
+
+```bash
+# Start the server
+RELAYFILE_JWT_SECRET=my-secret go run ./cmd/relayfile
+
+# Generate a token (uses the same secret)
+SIGNING_KEY=my-secret ./scripts/generate-dev-token.sh
+```
+
+The token is a scoped JWT — you control what each agent can read and write:
+
+```bash
+# Full access
+RELAYAUTH_SCOPES_JSON='["relayfile:fs:read:*", "relayfile:fs:write:*"]' ./scripts/generate-dev-token.sh
+
+# Read-only access to a specific repo
+RELAYAUTH_SCOPES_JSON='["relayfile:fs:read:/github/repos/acme/api/*"]' ./scripts/generate-dev-token.sh
+```
+
+For production, use [relayauth](https://github.com/AgentWorkforce/relayauth) to mint and manage tokens programmatically.
+
 ## What this service does
 
 - Exposes a workspace-scoped filesystem API (`/fs/tree`, `/fs/file`, `/fs/events`).
