@@ -67,21 +67,33 @@ export class WritebackConsumer {
         continue;
       }
 
+      let executed = false;
       try {
         await handler.execute(item, this.provider);
-        await this.client.ackWriteback({
-          workspaceId: this.workspaceId,
-          itemId: item.id,
-          success: true,
-          correlationId: item.correlationId,
-          signal
-        });
+        executed = true;
       } catch (error) {
         if (isAbortError(error) || signal?.aborted) {
           throw error;
         }
-
         await this.ackFailure(item, error, signal);
+      }
+
+      if (executed) {
+        try {
+          await this.client.ackWriteback({
+            workspaceId: this.workspaceId,
+            itemId: item.id,
+            success: true,
+            correlationId: item.correlationId,
+            signal
+          });
+        } catch (ackError) {
+          if (isAbortError(ackError) || signal?.aborted) {
+            throw ackError;
+          }
+          // Handler succeeded — do NOT send failure ack (would cause duplicate writes on retry).
+          // Log and move on; server will eventually time out and retry the ack.
+        }
       }
     }
   }
