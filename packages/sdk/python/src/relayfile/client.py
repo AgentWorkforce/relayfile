@@ -75,6 +75,25 @@ def _generate_correlation_id() -> str:
     return f"rf_{int(time.time() * 1000)}_{random.getrandbits(32):08x}"
 
 
+def _merge_headers(
+    headers: dict[str, str] | None,
+    *,
+    correlation_id: str | None,
+    user_agent: str | None,
+    has_json_body: bool,
+) -> dict[str, str]:
+    base_headers: dict[str, str] = {}
+    if has_json_body:
+        base_headers["Content-Type"] = "application/json"
+    if user_agent:
+        base_headers["User-Agent"] = user_agent
+    if headers:
+        base_headers.update(headers)
+    if "X-Correlation-Id" not in base_headers:
+        base_headers["X-Correlation-Id"] = correlation_id or _generate_correlation_id()
+    return base_headers
+
+
 def _enc(segment: str) -> str:
     return quote(segment, safe="")
 
@@ -264,14 +283,12 @@ class RelayFileClient:
         json_body: Any = None,
         correlation_id: str | None = None,
     ) -> httpx.Response:
-        cid = correlation_id or _generate_correlation_id()
-        base_headers: dict[str, str] = {"X-Correlation-Id": cid}
-        if json_body is not None:
-            base_headers["Content-Type"] = "application/json"
-        if self._user_agent:
-            base_headers["User-Agent"] = self._user_agent
-        if headers:
-            base_headers.update(headers)
+        base_headers = _merge_headers(
+            headers,
+            correlation_id=correlation_id,
+            user_agent=self._user_agent,
+            has_json_body=json_body is not None,
+        )
 
         url = f"{self._base_url}{path}"
         retries = 0
@@ -383,6 +400,7 @@ class RelayFileClient:
                 "permissions": input.semantics.permissions,
                 "comments": input.semantics.comments,
             }
+        # Single-file PUT expects the target path in the query string, not the JSON body.
         return self._request(
             "PUT",
             f"/v1/workspaces/{_enc(input.workspace_id)}/fs/file{query}",
@@ -827,14 +845,12 @@ class AsyncRelayFileClient:
         correlation_id: str | None = None,
     ) -> httpx.Response:
         import asyncio
-        cid = correlation_id or _generate_correlation_id()
-        base_headers: dict[str, str] = {"X-Correlation-Id": cid}
-        if json_body is not None:
-            base_headers["Content-Type"] = "application/json"
-        if self._user_agent:
-            base_headers["User-Agent"] = self._user_agent
-        if headers:
-            base_headers.update(headers)
+        base_headers = _merge_headers(
+            headers,
+            correlation_id=correlation_id,
+            user_agent=self._user_agent,
+            has_json_body=json_body is not None,
+        )
 
         url = f"{self._base_url}{path}"
         retries = 0
@@ -951,6 +967,7 @@ class AsyncRelayFileClient:
                 "permissions": input.semantics.permissions,
                 "comments": input.semantics.comments,
             }
+        # Single-file PUT expects the target path in the query string, not the JSON body.
         return await self._request(
             "PUT",
             f"/v1/workspaces/{_enc(input.workspace_id)}/fs/file{query}",

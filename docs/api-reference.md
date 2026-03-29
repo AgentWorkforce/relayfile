@@ -9,13 +9,16 @@ Set these once for the examples below:
 ```bash
 export RELAYFILE_BASE_URL=http://127.0.0.1:8080
 export RELAYFILE_WORKSPACE=ws_live
+export RELAYFILE_AGENT_NAME=compose-agent
 export RELAYFILE_TOKEN="$(./scripts/generate-dev-token.sh ${RELAYFILE_WORKSPACE})"
 export RELAYFILE_CORRELATION_ID="corr_$(date +%s)"
 ```
 
+`./scripts/generate-dev-token.sh` emits a JWT with `workspace_id`, `agent_name`, and `aud: ["relayfile"]`.
+
 ## Authentication Headers
 
-Authenticated requests usually include:
+Authenticated requests require:
 
 ```bash
 -H "Authorization: Bearer ${RELAYFILE_TOKEN}" \
@@ -418,4 +421,4 @@ curl -sS -X POST \
 - Most workspace and admin endpoints use Bearer token auth.
 - The OpenAPI contract defines scope-aware auth such as `fs:read` and `fs:write`.
 - Internal ingress may use service-to-service signing in production.
-- `X-Correlation-Id` is recommended for traceability and auditability across requests.
+- `X-Correlation-Id` is required on authenticated HTTP requests and is used for traceability and auditability across requests.

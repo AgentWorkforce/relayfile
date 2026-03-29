@@ -40,6 +40,8 @@ await client.writeFile({
 });
 ```
 
+Use a relayfile JWT whose claims include `workspace_id`, `agent_name`, and `aud: ["relayfile"]`. The SDK adds `X-Correlation-Id` automatically for API calls.
+
 ## Full Docs
 
 Full documentation is available in the [relayfile docs](https://github.com/AgentWorkforce/relayfile/tree/main/docs).
