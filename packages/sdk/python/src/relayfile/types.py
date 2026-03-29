@@ -4,16 +4,25 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, TypedDict
 
 
-class RelayFileJwtClaims(TypedDict, total=False):
-    """JWT claims expected by the Relayfile API for SDK bearer tokens.
-
-    Example minting payload:
-    `{"workspace_id": "ws_123", "agent_name": "review-bot", "aud": ["relayfile"]}`
-    """
+class _RelayFileJwtClaimsRequired(TypedDict):
+    """Required JWT claims — server returns 401 if missing."""
 
     workspace_id: str
     agent_name: str
-    aud: Literal["relayfile"] | list[str]
+    aud: list[str]  # must include "relayfile"
+
+
+class RelayFileJwtClaims(_RelayFileJwtClaimsRequired, total=False):
+    """JWT claims expected by the Relayfile API for SDK bearer tokens.
+
+    Required: ``workspace_id``, ``agent_name``, ``aud``.
+    Optional: ``exp``, ``iat``, ``nbf``, ``iss``, ``sub``.
+
+    Example minting payload::
+
+        {"workspace_id": "ws_123", "agent_name": "review-bot", "aud": ["relayfile"]}
+    """
+
     exp: int
     iat: int
     nbf: int
