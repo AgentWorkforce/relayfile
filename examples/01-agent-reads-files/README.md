@@ -10,6 +10,11 @@ The simplest relayfile example: connect to a workspace and read its contents.
 | `readFile` | Fetch a single file's content and metadata |
 | `queryFiles` | Search files by provider or semantic properties |
 
+## Prerequisites
+
+- **Docker** — needed to run the relayfile server locally (`docker compose up`)
+- Node.js 18+, `tsx`
+
 ## Run
 
 ```bash

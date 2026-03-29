@@ -10,6 +10,11 @@ Watch for file changes in a workspace using event polling.
 | Cursor tracking | Resume from where you left off — never miss an event |
 | Provider filtering | Watch only events from a specific provider |
 
+## Prerequisites
+
+- **Docker** — needed to run the relayfile server locally (`docker compose up`)
+- Node.js 18+, `tsx`
+
 ## Run
 
 ```bash

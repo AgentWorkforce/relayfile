@@ -11,6 +11,11 @@ Demonstrate how relayfile tokens restrict agent access with path-based scopes.
 | Cross-path rejection | Reading outside the allowed path returns 403 |
 | `RelayFileApiError` | Catch and inspect permission errors |
 
+## Prerequisites
+
+- **Docker** — needed to run the relayfile server locally (`docker compose up`)
+- Node.js 18+, `tsx`
+
 ## Run
 
 ```bash

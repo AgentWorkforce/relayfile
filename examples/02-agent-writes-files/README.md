@@ -12,6 +12,11 @@ Write files into the relayfile virtual filesystem, then read them back.
 | `bulkWrite` | Atomically write multiple files in one request |
 | `readFile` | Verify written content |
 
+## Prerequisites
+
+- **Docker** — needed to run the relayfile server locally (`docker compose up`)
+- Node.js 18+, `tsx`
+
 ## Run
 
 ```bash

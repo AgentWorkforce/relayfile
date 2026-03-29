@@ -4,6 +4,9 @@ End-to-end examples showing how agents interact with the relayfile virtual files
 
 ## Prerequisites
 
+- **Docker** — needed to run the relayfile server locally (`docker compose up`)
+- Node.js 18+
+
 ```bash
 npm install @relayfile/sdk
 npm install -D tsx
@@ -31,6 +34,7 @@ relayauth sign --workspace ws_demo --agent my-agent --scope "fs:read" --scope "f
 | 03 | [webhook-to-vfs](./03-webhook-to-vfs/) | `ingestWebhook`, `computeCanonicalPath` — external events to files |
 | 04 | [realtime-events](./04-realtime-events/) | `getEvents` polling — watch for file changes with cursors |
 | 05 | [relayauth-scoped-agent](./05-relayauth-scoped-agent/) | Path-scoped tokens, 403 rejection, least-privilege agents |
+| 06 | [writeback-consumer](./06-writeback-consumer/) | `listPendingWritebacks`, `ackWriteback` — push VFS changes back to GitHub |
 
 ## Running
 

@@ -10,6 +10,11 @@ Ingest external webhooks into the relayfile virtual filesystem.
 | `ingestWebhook` | Push external events (GitHub, Slack, etc.) into the VFS |
 | `readFile` | Read back the ingested data as a file |
 
+## Prerequisites
+
+- **Docker** — needed to run the relayfile server locally (`docker compose up`)
+- Node.js 18+, `tsx`
+
 ## Run
 
 ```bash
