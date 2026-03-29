@@ -54,8 +54,12 @@ export interface RelayFileRetryOptions {
   jitterRatio?: number;
 }
 
+/** Default base URL for the hosted Relayfile API */
+export const DEFAULT_RELAYFILE_BASE_URL = "https://api.relayfile.dev";
+
 export interface RelayFileClientOptions {
-  baseUrl: string;
+  /** API base URL. Defaults to https://api.relayfile.dev */
+  baseUrl?: string;
   token: AccessTokenProvider;
   fetchImpl?: typeof fetch;
   userAgent?: string;
@@ -250,7 +254,7 @@ export class RelayFileClient {
   private readonly retryOptions: NormalizedRetryOptions;
 
   constructor(options: RelayFileClientOptions) {
-    this.baseUrl = options.baseUrl.replace(/\/+$/, "");
+    this.baseUrl = (options.baseUrl ?? DEFAULT_RELAYFILE_BASE_URL).replace(/\/+$/, "");
     this.tokenProvider = options.token;
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.userAgent = options.userAgent;

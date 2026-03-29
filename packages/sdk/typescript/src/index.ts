@@ -1,5 +1,6 @@
 export {
   RelayFileClient,
+  DEFAULT_RELAYFILE_BASE_URL,
   type ConnectWebSocketOptions,
   type RelayFileRetryOptions,
   type WebSocketConnection
