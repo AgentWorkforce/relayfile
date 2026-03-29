@@ -200,13 +200,16 @@ def _throw_for_error(status: int, payload: Any, headers: httpx.Headers) -> None:
 # ======================================================================
 
 
+DEFAULT_RELAYFILE_BASE_URL = "https://api.relayfile.dev"
+
+
 class RelayFileClient:
     """Synchronous RelayFile SDK client with retry support."""
 
     def __init__(
         self,
-        base_url: str,
-        token: AccessTokenProvider,
+        base_url: str = DEFAULT_RELAYFILE_BASE_URL,
+        token: AccessTokenProvider = "",
         *,
         timeout: float = 30.0,
         user_agent: str | None = None,
@@ -766,8 +769,8 @@ class AsyncRelayFileClient:
 
     def __init__(
         self,
-        base_url: str,
-        token: AsyncAccessTokenProvider,
+        base_url: str = DEFAULT_RELAYFILE_BASE_URL,
+        token: AsyncAccessTokenProvider = "",
         *,
         timeout: float = 30.0,
         user_agent: str | None = None,
