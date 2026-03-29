@@ -45,6 +45,12 @@ import {
   RevisionConflictError
 } from "./errors.js";
 
+/**
+ * Bearer token or token factory used for Relayfile API requests.
+ *
+ * When you mint JWTs for Relayfile, the server expects claims like:
+ * `{ workspace_id: "ws_123", agent_name: "review-bot", aud: ["relayfile"] }`
+ */
 export type AccessTokenProvider = string | (() => string | Promise<string>);
 
 export interface RelayFileRetryOptions {
@@ -60,6 +66,12 @@ export const DEFAULT_RELAYFILE_BASE_URL = "https://api.relayfile.dev";
 export interface RelayFileClientOptions {
   /** API base URL. Defaults to https://api.relayfile.dev */
   baseUrl?: string;
+  /**
+   * Bearer token or token factory for SDK requests.
+   *
+   * Relayfile-authenticated JWTs should include `workspace_id`, `agent_name`,
+   * and `aud` containing `relayfile`.
+   */
   token: AccessTokenProvider;
   fetchImpl?: typeof fetch;
   userAgent?: string;
@@ -127,7 +139,20 @@ function buildQuery(params: Record<string, string | number | boolean | undefined
 }
 
 function generateCorrelationId(): string {
-  return `rf_${Date.now()}_${Math.random().toString(16).slice(2, 10)}`;
+  return `rf_${crypto.randomUUID()}`;
+}
+
+function getHeaderValue(headers: Record<string, string> | undefined, name: string): string | undefined {
+  if (!headers) {
+    return undefined;
+  }
+  const target = name.toLowerCase();
+  for (const [key, value] of Object.entries(headers)) {
+    if (key.toLowerCase() === target) {
+      return value;
+    }
+  }
+  return undefined;
 }
 
 async function resolveToken(tokenProvider: AccessTokenProvider): Promise<string> {
@@ -698,11 +723,14 @@ export class RelayFileClient {
     signal?: AbortSignal;
     accept?: string;
   }): Promise<Response> {
-    const correlationId = params.correlationId ?? generateCorrelationId();
+    const existingCorrelationId = getHeaderValue(params.headers, "X-Correlation-Id");
+    const correlationId = existingCorrelationId ?? params.correlationId ?? generateCorrelationId();
     const baseHeaders: Record<string, string> = {
-      "X-Correlation-Id": correlationId,
-      ...params.headers
+      ...(params.headers ?? {})
     };
+    if (!existingCorrelationId) {
+      baseHeaders["X-Correlation-Id"] = correlationId;
+    }
     if (params.body !== undefined) {
       baseHeaders["Content-Type"] = "application/json";
     }

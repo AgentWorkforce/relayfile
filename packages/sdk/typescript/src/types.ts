@@ -1,5 +1,27 @@
 export type FileNodeType = "file" | "dir";
 
+/**
+ * JWT claims expected by the Relayfile Go API when your token provider mints
+ * bearer tokens for SDK requests.
+ *
+ * Example minting payload:
+ * `const claims: RelayFileJwtClaims = { workspace_id: "ws_123", agent_name: "review-bot", aud: ["relayfile"] };`
+ */
+export interface RelayFileJwtClaims {
+  /** Workspace id the token is scoped to, for example `ws_123`. */
+  workspace_id: string;
+  /** Stable agent name presented to the Relayfile server, for example `review-bot`. */
+  agent_name: string;
+  /** Audience must contain `relayfile`. */
+  aud: "relayfile" | string[];
+  exp?: number;
+  iat?: number;
+  nbf?: number;
+  iss?: string;
+  sub?: string;
+  [claim: string]: unknown;
+}
+
 export interface TreeEntry {
   path: string;
   type: FileNodeType;

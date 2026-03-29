@@ -1,7 +1,9 @@
 export {
   RelayFileClient,
   DEFAULT_RELAYFILE_BASE_URL,
+  type AccessTokenProvider,
   type ConnectWebSocketOptions,
+  type RelayFileClientOptions,
   type RelayFileRetryOptions,
   type WebSocketConnection
 } from "./client.js";
@@ -87,6 +89,7 @@ export type {
   OperationStatusResponse,
   QueuedResponse,
   QueryFilesOptions,
+  RelayFileJwtClaims,
   SyncIngressStatusResponse,
   SyncProviderStatus,
   SyncProviderStatusState,
