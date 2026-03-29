@@ -1,7 +1,24 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any, Literal, TypedDict
+
+
+class RelayFileJwtClaims(TypedDict, total=False):
+    """JWT claims expected by the Relayfile API for SDK bearer tokens.
+
+    Example minting payload:
+    `{"workspace_id": "ws_123", "agent_name": "review-bot", "aud": ["relayfile"]}`
+    """
+
+    workspace_id: str
+    agent_name: str
+    aud: Literal["relayfile"] | list[str]
+    exp: int
+    iat: int
+    nbf: int
+    iss: str
+    sub: str
 
 
 ContentEncoding = Literal["utf-8", "base64"]
