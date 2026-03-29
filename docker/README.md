@@ -26,10 +26,14 @@ The `seed` container mints a dev token and writes three sample files. Watch its 
 TOKEN=$(docker compose logs seed | grep 'token' | tail -1 | awk '{print $NF}')
 
 # List files
-curl -H "Authorization: Bearer $TOKEN" http://localhost:9090/v1/workspaces/ws_demo/fs/tree
+curl -H "Authorization: Bearer $TOKEN" \
+  -H "X-Correlation-Id: demo-tree" \
+  http://localhost:9090/v1/workspaces/ws_demo/fs/tree
 
 # Read a file
-curl -H "Authorization: Bearer $TOKEN" "http://localhost:9090/v1/workspaces/ws_demo/fs/file?path=/docs/welcome.md"
+curl -H "Authorization: Bearer $TOKEN" \
+  -H "X-Correlation-Id: demo-read-welcome" \
+  "http://localhost:9090/v1/workspaces/ws_demo/fs/file?path=/docs/welcome.md"
 
 # Mint a new token
 curl -X POST http://localhost:9091/sign \
@@ -40,6 +44,8 @@ curl -X POST http://localhost:9091/sign \
 ## Configuration
 
 Copy `.env.example` to `.env` to override defaults. The in-memory backend means data resets on restart — perfect for development.
+
+Every authenticated relayfile API call needs a non-empty `X-Correlation-Id` header. The seed script and examples above include it so the quickstart works against the real server contract.
 
 ## Teardown
 

@@ -44,7 +44,7 @@ External Services          relayfile             Your Agents
 cd docker && docker compose up --build
 ```
 
-This starts relayfile on `:9090` and relayauth on `:9091`, seeds a `ws_demo` workspace with sample files, and prints a dev token. See [`docker/README.md`](docker/README.md) for details.
+This starts relayfile on `:9090` and relayauth on `:9091`, seeds a `ws_demo` workspace with sample files, and prints a dev token. Authenticated API calls also require `X-Correlation-Id`, which the Docker quickstart examples already include. See [`docker/README.md`](docker/README.md) for details.
 
 ## Getting Started
 

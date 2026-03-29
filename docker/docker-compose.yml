@@ -1,5 +1,6 @@
 services:
   relayfile:
+    image: relayfile-quickstart-relayfile
     build:
       context: ..
       dockerfile: docker/Dockerfile.relayfile
@@ -31,7 +32,7 @@ services:
       retries: 10
 
   seed:
-    image: curlimages/curl:latest
+    image: relayfile-quickstart-relayfile
     depends_on:
       relayfile:
         condition: service_healthy
