@@ -1,429 +1,166 @@
 # relayfile
 
-Queue-first virtual filesystem-over-REST that ingests noisy external webhooks, projects a file tree, and executes conflict-safe writeback with retries, dead-lettering, and replay.
+Turn any API into a filesystem that AI agents can read and write.
 
-## Quick Start
-
-Install the RelayFile CLI:
+Agents don't call APIs. They read and write files. Relayfile handles webhooks, auth, and writeback so agents never need to know about the services behind the files.
 
 ```bash
-curl -fsSL https://relayfile.dev/install.sh | sh
+# Agent reads a GitHub PR
+cat /relayfile/github/repos/acme/api/pulls/42/metadata.json
+
+# Agent writes a review
+echo '{"body": "LGTM!", "event": "APPROVE"}' \
+  > /relayfile/github/repos/acme/api/pulls/42/reviews/review.json
+
+# Done. The review is posted to GitHub. The agent didn't authenticate or call any API.
 ```
 
-Log in to a local RelayFile server:
+## How It Works
 
-```bash
-relayfile login --server http://localhost:9090 --token dev-token
+```
+External Services          relayfile             Your Agents
+─────────────────     ─────────────────     ─────────────────
+                       ┌──────────────┐
+  GitHub ──webhook──▶  │              │     cat /github/...
+  Slack  ──webhook──▶  │  Virtual     │◀──  echo '...' > /slack/...
+  Notion ──webhook──▶  │  Filesystem  │     ls /notion/...
+  Linear ──webhook──▶  │              │
+                       └──────┬───────┘
+                              │
+                        Adapters map paths
+                        Providers handle auth
+                        relayauth scopes access
 ```
 
-Seed a workspace from an existing project:
+1. **Webhooks arrive** from GitHub, Slack, Notion, etc.
+2. [**Adapters**](https://github.com/AgentWorkforce/relayfile-adapters) normalize the payload and map it to a VFS path
+3. [**Providers**](https://github.com/AgentWorkforce/relayfile-providers) handle OAuth tokens and API proxying
+4. **Agents read and write files** — that's their entire integration
+5. When an agent writes to a writeback path, the adapter posts the change back to the source API
+
+## Getting Started
+
+**[Relayfile Cloud](https://relayfile.dev/pricing)** — everything managed. Sign up, get a token, connect your services from the dashboard.
+
+**Self-hosted:**
 
 ```bash
-relayfile seed my-project ./src
-```
-
-Mount that workspace into a local directory:
-
-```bash
-relayfile mount my-project ./src
-```
-
-Replace `--server` with your hosted RelayFile URL if you are not running the API locally.
-
-For a step-by-step walkthrough, see [docs/guides/getting-started.md](docs/guides/getting-started.md).
-
-## Collaborate
-
-RelayFile is designed for shared files between humans and agents.
-
-Two-machine setup:
-
-```bash
-# Machine A
-relayfile mount project-x ./src
-
-# Machine B
-relayfile mount project-x ./src
-```
-
-When someone edits a file on Machine A, the change appears on Machine B after the next sync cycle, typically in about 1-2 seconds with the default interval.
-
-Human + agent setup:
-
-- Mount the same workspace on your laptop with `relayfile mount`.
-- Mount the workspace inside an agent sandbox with `relayfile-mount` or the user-facing `relayfile mount` workflow.
-- Both sides read and write the same virtual project tree through RelayFile.
-
-More collaboration examples:
-
-- [docs/guides/collaboration.md](docs/guides/collaboration.md)
-- [docs/guides/cloud-integration.md](docs/guides/cloud-integration.md)
-
-## Authentication
-
-**[Relayfile Cloud](https://relayfile.dev/pricing)** — sign up, get a token, start using the API. Everything is managed.
-
-**Self-hosted** — relayfile uses JWT tokens for auth. Generate a dev token to get started:
-
-```bash
-# Start the server
+# 1. Start the server
 RELAYFILE_JWT_SECRET=my-secret go run ./cmd/relayfile
 
-# Generate a token (uses the same secret)
+# 2. Generate a token
 SIGNING_KEY=my-secret ./scripts/generate-dev-token.sh
+
+# 3. Mount a workspace
+relayfile mount my-workspace ./files --token $TOKEN
 ```
 
-Tokens are scoped JWTs — you control exactly what each agent can access using [relayauth](https://github.com/AgentWorkforce/relayauth) scopes.
+## Authentication & Permissions
 
-### Scope examples
-
-Scopes follow the format `plane:resource:action:path`:
+Tokens are scoped JWTs issued by [relayauth](https://github.com/AgentWorkforce/relayauth). The VFS paths *are* the permission boundaries — you control exactly what each agent can see and do:
 
 ```bash
-# Full read/write access to everything
-RELAYAUTH_SCOPES_JSON='["relayfile:fs:read:*", "relayfile:fs:write:*"]'
-
-# Read-only access to a specific GitHub repo
-RELAYAUTH_SCOPES_JSON='["relayfile:fs:read:/github/repos/acme/api/*"]'
-
-# Agent can only read specific Notion pages (not the whole workspace)
+# Read-only access to specific Notion pages
 RELAYAUTH_SCOPES_JSON='["relayfile:fs:read:/notion/pages/product-roadmap/*", "relayfile:fs:read:/notion/pages/eng-specs/*"]'
 
-# Code review agent: read GitHub PRs, write only to review paths
+# Code review agent: read PRs, write only reviews
 RELAYAUTH_SCOPES_JSON='["relayfile:fs:read:/github/repos/acme/api/pulls/*", "relayfile:fs:write:/github/repos/acme/api/pulls/*/reviews/*"]'
 
-# Support agent: read Slack messages, write replies, no access to GitHub
+# Support agent: read + reply in Slack support channel only
 RELAYAUTH_SCOPES_JSON='["relayfile:fs:read:/slack/channels/support/*", "relayfile:fs:write:/slack/channels/support/messages/*"]'
 
-# Read everything, write nothing (observer)
+# Observer: see everything, change nothing
 RELAYAUTH_SCOPES_JSON='["relayfile:fs:read:*"]'
 ```
 
-Generate a token with scopes:
+Scope format: `plane:resource:action:path` — supports wildcards and path prefixes.
+
+## Ecosystem
+
+| Repo | What it does |
+|------|-------------|
+| **[relayfile](https://github.com/AgentWorkforce/relayfile)** | Go server + TypeScript/Python SDKs |
+| **[relayauth](https://github.com/AgentWorkforce/relayauth)** | Token issuance + scoped permissions |
+| **[relayfile-adapters](https://github.com/AgentWorkforce/relayfile-adapters)** | GitHub, GitLab, Slack, Teams, Linear, Notion adapters |
+| **[relayfile-providers](https://github.com/AgentWorkforce/relayfile-providers)** | Nango, Composio, Pipedream, Clerk, Supabase, n8n providers |
+| **[cloud](https://github.com/AgentWorkforce/cloud)** | Cloudflare Workers deployment (managed service) |
+
+## SDK
 
 ```bash
-SIGNING_KEY=my-secret \
-RELAYAUTH_SUB=review-agent \
-RELAYAUTH_SCOPES_JSON='["relayfile:fs:read:/github/repos/acme/api/pulls/*", "relayfile:fs:write:/github/repos/acme/api/pulls/*/reviews/*"]' \
-  ./scripts/generate-dev-token.sh
+npm install @relayfile/sdk    # TypeScript
+pip install relayfile          # Python
 ```
 
-The agent gets a token that lets it read PR data and write reviews — nothing else. It can't read Slack, can't access Notion, can't delete files. The VFS paths *are* the permission boundaries.
+```ts
+import { RelayFileClient } from "@relayfile/sdk";
 
-For production token management, use [relayauth](https://github.com/AgentWorkforce/relayauth) programmatically or via the [Cloud dashboard](https://relayfile.dev/pricing).
+const client = new RelayFileClient({ token: process.env.RELAYFILE_TOKEN! });
 
-## What this service does
+// Read
+const file = await client.getFile("ws_123", "/github/repos/acme/api/pulls/42/metadata.json");
 
-- Exposes a workspace-scoped filesystem API (`/fs/tree`, `/fs/file`, `/fs/events`).
-- Ingests webhook envelopes asynchronously through internal ingress.
-- Handles noisy webhook traffic with dedupe, coalescing, staleness checks, and loop suppression.
-- Executes outbound writeback with retries, dead-letter handling, and replay.
-- Exposes operational APIs for sync status, ingress metrics, dead letters, and operation feeds.
-- Ships an OpenAPI contract and a TypeScript SDK.
+// Write (triggers writeback to GitHub automatically)
+await client.putFile("ws_123", "/github/repos/acme/api/pulls/42/reviews/review.json", {
+  content: JSON.stringify({ body: "LGTM!", event: "APPROVE" }),
+});
 
-## Breaking: Nango and Composio helpers removed from SDK
-
-These have moved to dedicated packages:
-
-- `@relayfile/provider-nango` (npm) / `relayfile-provider-nango` (pip)
-- `@relayfile/provider-composio` (npm) / `relayfile-provider-composio` (pip)
-
-If you used `NangoHelpers` or `ComposioHelpers`, install the provider package instead.
-
-## Current API highlights
-
-- Filesystem:
-  - `GET /v1/workspaces/{workspaceId}/fs/tree`
-  - `GET /v1/workspaces/{workspaceId}/fs/file`
-  - `PUT /v1/workspaces/{workspaceId}/fs/file`
-  - `DELETE /v1/workspaces/{workspaceId}/fs/file`
-  - `GET /v1/workspaces/{workspaceId}/fs/events`
-  - `GET /v1/workspaces/{workspaceId}/fs/query` (structured metadata filters)
-- Webhook Ingestion (Provider-Agnostic):
-  - `POST /v1/workspaces/{workspaceId}/webhooks/ingest` (accept webhooks from any provider)
-  - `GET /v1/workspaces/{workspaceId}/writeback/pending` (list pending writeback items)
-  - `POST /v1/workspaces/{workspaceId}/writeback/{id}/ack` (acknowledge processed writeback)
-- Operations:
-  - `GET /v1/workspaces/{workspaceId}/ops`
-  - `GET /v1/workspaces/{workspaceId}/ops/{opId}`
-  - `POST /v1/workspaces/{workspaceId}/ops/{opId}/replay`
-- Admin:
-  - `GET /v1/admin/backends` (active backend profile + queue/state backend types)
-  - `GET /v1/admin/ingress` (workspace ingress backlog + reliability counters with summary/alerts, optional `alertProfile` presets plus threshold overrides with `effectiveAlertProfile`, filters, `maxAlerts`, `includeWorkspaces`, `includeAlerts`, and `cursor`/`limit` pagination)
-  - `GET /v1/admin/sync` (cross-workspace sync provider status with aggregated failure-code, dead-letter, and health counters, alert thresholds/totals, optional `maxAlerts` and `includeAlerts`, plus `includeWorkspaces` and `cursor`/`limit` pagination)
-  - `POST /v1/admin/replay/envelope/{envelopeId}`
-  - `POST /v1/admin/replay/op/{opId}`
-- Sync and ingress:
-  - `GET /v1/workspaces/{workspaceId}/sync/status`
-  - `GET /v1/workspaces/{workspaceId}/sync/ingress`
-  - `GET /v1/workspaces/{workspaceId}/sync/dead-letter`
-  - `POST /v1/workspaces/{workspaceId}/sync/dead-letter/{envelopeId}/replay`
-  - `POST /v1/workspaces/{workspaceId}/sync/dead-letter/{envelopeId}/ack`
-  - `POST /v1/workspaces/{workspaceId}/sync/refresh`
-
-See `openapi/relayfile-v1.openapi.yaml` for contract details.
-
-Semantic primitives (provider-agnostic):
-
-- `semantics.properties` (key/value attributes)
-- `semantics.relations` (cross-object IDs)
-- `semantics.permissions` (ACL/entitlement references)
-- `semantics.comments` (comment/reference IDs)
-
-Permission policy (enforced on `fs/file`, `fs/tree`, `fs/query`, file updates/deletes):
-
-- `scope:<name>`: allow if bearer token has scope `<name>`
-- `agent:<name>`: allow if JWT `agent_name` matches `<name>`
-- `workspace:<id>`: allow if workspace ID matches `<id>`
-- `public` / `any` / `*`: allow all
-- `deny:scope:<name>` / `deny:agent:<name>` / `deny:workspace:<id>`: explicit deny (takes precedence over allow)
-
-Hierarchical inheritance:
-
-- Place a policy marker file named `.relayfile.acl` in a directory.
-- Its `semantics.permissions` rules are inherited by descendant files.
-- Child file rules are appended after inherited rules.
-
-If a file has `semantics.permissions` but none of the entries are recognized policy rules, entries are treated as metadata only (not enforced).
-
-Example structured query:
-
-```bash
-TOKEN="$(./scripts/generate-dev-token.sh ws_live)"
-curl -sS \
-  -H "Authorization: Bearer ${TOKEN}" \
-  -H "X-Correlation-Id: corr_query_$(date +%s)" \
-  "http://127.0.0.1:8080/v1/workspaces/ws_live/fs/query?path=/documents&property.topic=investments&relation=db_investments&permission=scope:fs:read&limit=20" | jq .
+// List
+const tree = await client.listFiles("ws_123", "/github/repos/acme/api/pulls/");
 ```
 
-## Local run
+## API
+
+Filesystem:
+- `GET /v1/workspaces/{id}/fs/tree` — list files
+- `GET /v1/workspaces/{id}/fs/file` — read file
+- `PUT /v1/workspaces/{id}/fs/file` — write file
+- `DELETE /v1/workspaces/{id}/fs/file` — delete file
+- `GET /v1/workspaces/{id}/fs/query` — structured metadata query
+
+Webhooks & Writeback:
+- `POST /v1/workspaces/{id}/webhooks/ingest` — receive webhooks
+- `GET /v1/workspaces/{id}/writeback/pending` — pending writebacks
+- `POST /v1/workspaces/{id}/writeback/{wbId}/ack` — acknowledge writeback
+
+Operations:
+- `GET /v1/workspaces/{id}/ops` — operation log
+- `POST /v1/workspaces/{id}/ops/{opId}/replay` — replay failed operation
+
+Full spec: [`openapi/relayfile-v1.openapi.yaml`](openapi/relayfile-v1.openapi.yaml)
+
+## Self-Hosted
 
 ```bash
+# In-memory (development)
 go run ./cmd/relayfile
+
+# Durable local (persisted to disk)
+RELAYFILE_BACKEND_PROFILE=durable-local RELAYFILE_DATA_DIR=.data go run ./cmd/relayfile
+
+# Production (Postgres)
+RELAYFILE_BACKEND_PROFILE=production RELAYFILE_PRODUCTION_DSN=postgres://localhost/relayfile go run ./cmd/relayfile
 ```
 
-Durable local mode (state + queues persisted to disk):
-
-```bash
-RELAYFILE_STATE_FILE=.data/state.json \
-RELAYFILE_ENVELOPE_QUEUE_FILE=.data/envelope-queue.json \
-RELAYFILE_WRITEBACK_QUEUE_FILE=.data/writeback-queue.json \
-go run ./cmd/relayfile
-```
-
-DSN-based backend mode:
-
-```bash
-RELAYFILE_STATE_BACKEND_DSN=file://$PWD/.data/state.json \
-RELAYFILE_ENVELOPE_QUEUE_DSN=file://$PWD/.data/envelope-queue.json \
-RELAYFILE_WRITEBACK_QUEUE_DSN=file://$PWD/.data/writeback-queue.json \
-go run ./cmd/relayfile
-```
-
-Postgres DSN mode:
-
-```bash
-RELAYFILE_STATE_BACKEND_DSN=postgres://localhost:5432/relayfile?sslmode=disable \
-RELAYFILE_ENVELOPE_QUEUE_DSN=postgres://localhost:5432/relayfile?sslmode=disable \
-RELAYFILE_WRITEBACK_QUEUE_DSN=postgres://localhost:5432/relayfile?sslmode=disable \
-go run ./cmd/relayfile
-```
-
-Postgres adapter integration tests (requires running Postgres):
-
-```bash
-RELAYFILE_TEST_POSTGRES_DSN=postgres://localhost:5432/relayfile?sslmode=disable \
-go test ./internal/relayfile -run PostgresIntegration -count=1
-```
-
-Profile-based backend mode:
-
-```bash
-RELAYFILE_BACKEND_PROFILE=durable-local \
-RELAYFILE_DATA_DIR=.data \
-go run ./cmd/relayfile
-```
-
-```bash
-RELAYFILE_BACKEND_PROFILE=production \
-RELAYFILE_PRODUCTION_DSN=postgres://localhost:5432/relayfile?sslmode=disable \
-go run ./cmd/relayfile
-```
-
-Production profile validation runbook:
-
-```bash
-cat docs/production-validation.md
-```
-
-Contract surface check (OpenAPI <-> SDK):
-
-```bash
-./scripts/check-contract-surface.sh
-```
-
-## Docker Compose live run
-
-Bring up Postgres + RelayFile + continuous mount sync (shared local mirror in `./.livefs`):
+Docker Compose:
 
 ```bash
 cp compose.env.example .env
 docker compose up --build -d
-docker compose logs -f relayfile mountsync
 ```
 
-Open the local control dashboard:
+## Mount
 
-```text
-http://127.0.0.1:8080/dashboard
-```
-
-Use the token from `./scripts/generate-dev-token.sh ws_live` in the dashboard bearer-token field.
-
-If you change `RELAYFILE_WORKSPACE` or `RELAYFILE_JWT_SECRET` in `.env`, generate a matching token and set it as `RELAYFILE_TOKEN`:
+Mount a workspace as a local directory:
 
 ```bash
-./scripts/generate-dev-token.sh ws_live
+# FUSE mount (real-time)
+relayfile mount ws_123 ./files --token $TOKEN
+
+# Polling sync (no FUSE required)
+go run ./cmd/relayfile-mount --workspace ws_123 --local-dir ./files --interval 2s --token $TOKEN
 ```
 
-Send a live internal webhook envelope to materialize content into the mounted virtual filesystem:
+## License
 
-```bash
-./scripts/send-internal-envelope.sh /docs/guide.md \"# agent guide\"
-```
-
-Submit a webhook from any provider via the generic ingestion API:
-
-```bash
-TOKEN="$(./scripts/generate-dev-token.sh ws_live)"
-curl -X POST "http://127.0.0.1:8080/v1/workspaces/ws_live/webhooks/ingest" \
-  -H "Authorization: Bearer ${TOKEN}" \
-  -H "X-Correlation-Id: webhook_test_1" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "provider": "salesforce",
-    "event_type": "file.updated",
-    "path": "/salesforce/Account_123",
-    "data": {
-      "content": "Account details",
-      "contentType": "text/plain"
-    },
-    "delivery_id": "sf_evt_123"
-  }'
-```
-
-Provider integration is handled externally. External services can:
-1. Submit webhooks via the generic ingestion API
-2. Poll the writeback queue for pending items
-3. Acknowledge writebacks after processing
-
-Run fully automated live E2E (stack up, ingress seed, agent traverse/edit, ops + backend verification):
-
-```bash
-./scripts/live-e2e.sh --follow-logs
-```
-
-Run your agent against `./.livefs` to traverse/edit files.
-
-Notes:
-
-- Provider integration is handled externally via the generic webhook API.
-- Inbound file materialization requires webhook envelopes (from your upstream integration or `scripts/send-internal-envelope.sh`).
-- Use the `/v1/workspaces/{workspaceId}/writeback/pending` endpoint to retrieve pending writeback items.
-- Use the `/v1/workspaces/{workspaceId}/writeback/{id}/ack` endpoint to acknowledge processed writebacks.
-
-Useful env vars:
-
-- `RELAYFILE_ADDR` (default `:8080`)
-- `RELAYFILE_JWT_SECRET`
-- `RELAYFILE_INTERNAL_HMAC_SECRET`
-- `RELAYFILE_MAX_BODY_BYTES`
-- `RELAYFILE_STATE_FILE`
-- `RELAYFILE_STATE_BACKEND_DSN` (`memory://`, `file:///...`, `postgres://...`)
-- `RELAYFILE_BACKEND_PROFILE` (`inmemory`, `durable-local`, `production`)
-- `RELAYFILE_DATA_DIR` (profile data directory, default `.relayfile`)
-- `RELAYFILE_ENVELOPE_QUEUE_SIZE`
-- `RELAYFILE_ENVELOPE_QUEUE_FILE`
-- `RELAYFILE_WRITEBACK_QUEUE_FILE`
-- `RELAYFILE_ENVELOPE_QUEUE_DSN` (`memory://`, `file:///...`, `postgres://...`)
-- `RELAYFILE_WRITEBACK_QUEUE_DSN` (`memory://`, `file:///...`, `postgres://...`)
-- `RELAYFILE_PRODUCTION_DSN` (required for `RELAYFILE_BACKEND_PROFILE=production`; fallback env alias: `RELAYFILE_POSTGRES_DSN`)
-- `RELAYFILE_WRITEBACK_QUEUE_SIZE`
-- `RELAYFILE_ENVELOPE_WORKERS`
-- `RELAYFILE_WRITEBACK_WORKERS`
-- `RELAYFILE_PROVIDER_MAX_CONCURRENCY`
-- `RELAYFILE_COALESCE_WINDOW`
-- `RELAYFILE_SUPPRESSION_WINDOW`
-- `RELAYFILE_MAX_ENVELOPE_ATTEMPTS`
-- `RELAYFILE_MAX_WRITEBACK_ATTEMPTS`
-
-Mount client env vars:
-
-- `RELAYFILE_BASE_URL`
-- `RELAYFILE_TOKEN`
-- `RELAYFILE_WORKSPACE`
-- `RELAYFILE_REMOTE_PATH`
-- `RELAYFILE_MOUNT_PROVIDER`
-- `RELAYFILE_LOCAL_DIR`
-- `RELAYFILE_MOUNT_STATE_FILE`
-- `RELAYFILE_MOUNT_INTERVAL`
-- `RELAYFILE_MOUNT_INTERVAL_JITTER`
-- `RELAYFILE_MOUNT_TIMEOUT`
-
-User-facing guides:
-
-- `docs/guides/getting-started.md`
-- `docs/guides/collaboration.md`
-- `docs/guides/cloud-integration.md`
-- `docs/api-reference.md`
-
-## SDK
-
-TypeScript SDK lives in `sdk/relayfile-sdk`.
-
-- Client: `sdk/relayfile-sdk/src/client.ts`
-- Types: `sdk/relayfile-sdk/src/types.ts`
-
-## Mount client alpha
-
-`relayfile-mount` provides polling-based local mirror + writeback sync.
-
-Run once:
-
-```bash
-go run ./cmd/relayfile-mount --once \
-  --base-url http://127.0.0.1:8080 \
-  --workspace ws_123 \
-  --remote-path /documents \
-  --local-dir ./mount \
-  --token "$RELAYFILE_TOKEN"
-```
-
-Run continuously:
-
-```bash
-go run ./cmd/relayfile-mount \
-  --base-url http://127.0.0.1:8080 \
-  --workspace ws_123 \
-  --remote-path /documents \
-  --local-dir ./mount \
-  --token "$RELAYFILE_TOKEN" \
-  --interval 2s
-```
-
-## Current status
-
-Implemented:
-
-- Filesystem-over-REST with optimistic concurrency.
-- Webhook queue ingestion with noisy-event defenses.
-- Writeback with retry/backoff, dead-lettering, replay safety, and provider attribution.
-- Provider-level sync and ingress observability.
-- OpenAPI + SDK contract alignment for current endpoints.
-
-Remaining major work:
-
-- Production persistence/queue backends (DB/queue/object storage).
-- Full provider client implementations and auth/token lifecycle integration.
-- Mount client hardening (true FUSE integration, inode cache semantics, conflict translation).
-- Broader end-to-end/load/failure test suites and release packaging.
+MIT
