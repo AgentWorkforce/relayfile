@@ -23,6 +23,16 @@ export {
 // Integration providers
 export { IntegrationProvider, computeCanonicalPath } from "./provider.js";
 export type { WebhookInput, ListProviderFilesOptions, WatchProviderEventsOptions } from "./provider.js";
+// Connection provider contract
+export type {
+  ConnectionProvider,
+  NormalizedWebhook,
+  ProxyHeaders,
+  ProxyMethod,
+  ProxyQuery,
+  ProxyRequest,
+  ProxyResponse,
+} from "./connection.js";
 
 export type {
   AckResponse,
