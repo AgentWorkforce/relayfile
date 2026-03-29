@@ -1,0 +1,42 @@
+services:
+  relayfile:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.relayfile
+    ports:
+      - "${RELAYFILE_PORT:-9090}:8080"
+    environment:
+      RELAYFILE_ADDR: :8080
+      RELAYFILE_BACKEND_PROFILE: memory
+      RELAYFILE_JWT_SECRET: ${RELAYFILE_JWT_SECRET:-dev-secret}
+      RELAYFILE_INTERNAL_HMAC_SECRET: ${RELAYFILE_INTERNAL_HMAC_SECRET:-dev-internal-secret}
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/health"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  relayauth:
+    build:
+      context: .
+      dockerfile: Dockerfile.relayauth
+    ports:
+      - "${RELAYAUTH_PORT:-9091}:9091"
+    environment:
+      RELAYFILE_JWT_SECRET: ${RELAYFILE_JWT_SECRET:-dev-secret}
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9091/health"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  seed:
+    image: curlimages/curl:latest
+    depends_on:
+      relayfile:
+        condition: service_healthy
+      relayauth:
+        condition: service_healthy
+    volumes:
+      - ./seed.sh:/seed.sh:ro
+    entrypoint: ["/bin/sh", "/seed.sh"]
