@@ -90,18 +90,18 @@ export class WritebackConsumer {
     while (!this.stopped && !this.signal?.aborted) {
       try {
         await this.pollOnce(this.signal);
+
+        if (this.stopped || this.signal?.aborted) {
+          return;
+        }
+
+        await sleep(this.pollIntervalMs, this.signal);
       } catch (error) {
         if (isAbortError(error) || this.signal?.aborted || this.stopped) {
           return;
         }
         throw error;
       }
-
-      if (this.stopped || this.signal?.aborted) {
-        return;
-      }
-
-      await sleep(this.pollIntervalMs, this.signal);
     }
   }
 
