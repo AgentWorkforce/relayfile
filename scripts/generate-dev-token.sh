@@ -12,7 +12,7 @@ b64url() {
 
 header='{"alg":"HS256","typ":"JWT"}'
 payload=$(cat <<JSON
-{"workspace_id":"${workspace_id}","agent_name":"${agent_name}","scopes":["fs:read","fs:write","sync:read","sync:trigger","ops:read","ops:replay","admin:read","admin:replay"],"exp":${exp_epoch},"aud":"relayfile"}
+{"workspace_id":"${workspace_id}","agent_name":"${agent_name}","scopes":["fs:read","fs:write","sync:read","sync:trigger","ops:read","ops:replay","admin:read","admin:replay"],"exp":${exp_epoch},"aud":["relayfile"]}
 JSON
 )
 

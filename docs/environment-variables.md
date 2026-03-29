@@ -193,6 +193,8 @@ The npm wrapper package does not read environment variables in its published ins
 | `RELAYFILE_AGENT_NAME` | `compose-agent` | `agent_name` claim in the generated JWT |
 | `RELAYFILE_TOKEN_EXP` | `4102444800` | Expiration epoch written into the generated JWT |
 
+The generated JWT includes `workspace_id`, `agent_name`, and `aud: ["relayfile"]`.
+
 ### `scripts/live-e2e.sh`
 
 This script sources an env file directly. By default it reads `.env` in the repo root and will create it from `compose.env.example` if missing.

@@ -49,11 +49,14 @@ External Services          relayfile             Your Agents
 RELAYFILE_JWT_SECRET=my-secret go run ./cmd/relayfile
 
 # 2. Generate a token
+export RELAYFILE_AGENT_NAME=compose-agent
 SIGNING_KEY=my-secret ./scripts/generate-dev-token.sh
 
 # 3. Mount a workspace
 relayfile mount my-workspace ./files --token $TOKEN
 ```
+
+Development tokens should include `workspace_id`, `agent_name`, and `aud: ["relayfile"]`.
 
 ## Authentication & Permissions
 
