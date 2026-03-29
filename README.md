@@ -38,6 +38,14 @@ External Services          relayfile             Your Agents
 4. **Agents read and write files** — that's their entire integration
 5. When an agent writes to a writeback path, the adapter posts the change back to the source API
 
+## Quick Start (Docker)
+
+```bash
+cd docker && docker compose up --build
+```
+
+This starts relayfile on `:9090` and relayauth on `:9091`, seeds a `ws_demo` workspace with sample files, and prints a dev token. See [`docker/README.md`](docker/README.md) for details.
+
 ## Getting Started
 
 **[Relayfile Cloud](https://relayfile.dev/pricing)** — everything managed. Sign up, get a token, connect your services from the dashboard.
