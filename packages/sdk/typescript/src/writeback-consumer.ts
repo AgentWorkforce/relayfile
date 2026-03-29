@@ -42,9 +42,16 @@ export class WritebackConsumer {
   }
 
   async start(): Promise<void> {
-    if (!this.loopPromise) {
-      this.loopPromise = this.runLoop();
+    if (this.loopPromise) {
+      if (this.stopped) {
+        // Previous run was stopped — reset and start fresh
+        this.stopped = false;
+        this.loopPromise = undefined;
+      } else {
+        return this.loopPromise;
+      }
     }
+    this.loopPromise = this.runLoop();
     return this.loopPromise;
   }
 
