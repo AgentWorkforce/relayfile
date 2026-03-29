@@ -337,21 +337,23 @@ export class RelayFileClient {
   }
 
   async writeFile(input: WriteFileInput): Promise<WriteQueuedResponse> {
-    const query = buildQuery({ path: input.path });
+    const { workspaceId, path, correlationId, baseRevision, content, contentType, encoding, semantics, signal } = input;
+    const query = buildQuery({ path });
     return this.request<WriteQueuedResponse>({
       method: "PUT",
-      path: `/v1/workspaces/${encodeURIComponent(input.workspaceId)}/fs/file${query}`,
-      correlationId: input.correlationId,
+      path: `/v1/workspaces/${encodeURIComponent(workspaceId)}/fs/file${query}`,
+      correlationId,
       headers: {
-        "If-Match": input.baseRevision
+        "If-Match": baseRevision
       },
+      // Single-file PUT expects the target path in the query string, not the JSON body.
       body: {
-        contentType: input.contentType ?? "text/markdown",
-        content: input.content,
-        encoding: input.encoding,
-        semantics: input.semantics
+        contentType: contentType ?? "text/markdown",
+        content,
+        encoding,
+        semantics
       },
-      signal: input.signal
+      signal
     });
   }
 
