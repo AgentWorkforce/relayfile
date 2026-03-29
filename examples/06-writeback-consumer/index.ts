@@ -3,7 +3,7 @@
  *
  * Polls for pending writebacks and pushes VFS changes back to GitHub
  * via the GitHub API. Demonstrates the full writeback lifecycle:
- * list → read → push → acknowledge.
+ * list → read → dispatch → acknowledge.
  *
  * Run:  npx tsx index.ts
  * Env:  RELAYFILE_TOKEN  — JWT with fs:read + ops:read scopes
@@ -11,7 +11,11 @@
  *       GITHUB_TOKEN     — GitHub PAT with repo scope
  */
 
-import { RelayFileClient } from "@relayfile/sdk";
+import {
+  RelayFileClient,
+  type FileReadResponse,
+  type WritebackItem,
+} from "@relayfile/sdk";
 
 const token = process.env.RELAYFILE_TOKEN;
 const workspaceId = process.env.WORKSPACE_ID ?? "ws_demo";
@@ -24,8 +28,6 @@ if (!token || !githubToken) {
 
 const client = new RelayFileClient({ token });
 
-// ── 1. GitHub writeback handler ────────────────────────────────────────────
-
 interface WritebackRoute {
   owner: string;
   repo: string;
@@ -33,79 +35,131 @@ interface WritebackRoute {
   id: string;
 }
 
-function parseGitHubPath(path: string): WritebackRoute | null {
-  // /github/{owner}/{repo}/{resource}/{id}.json
-  const match = path.match(/^\/github\/([^/]+)\/([^/]+)\/([^/]+)\/(\d+)\.json$/);
-  if (!match) return null;
-  return { owner: match[1], repo: match[2], resource: match[3], id: match[4] };
+interface WritebackHandler {
+  canHandle(path: string): boolean;
+  handle(item: WritebackItem, file: FileReadResponse): Promise<void>;
 }
 
-async function pushToGitHub(route: WritebackRoute, content: string): Promise<void> {
-  const body = JSON.parse(content);
-  const { owner, repo, resource, id } = route;
+class GitHubWritebackHandler implements WritebackHandler {
+  constructor(
+    private readonly accessToken: string,
+    private readonly fetchImpl: typeof fetch = fetch,
+  ) {}
 
-  const endpoint =
-    resource === "issues" ? `repos/${owner}/${repo}/issues/${id}` :
-    resource === "pulls"  ? `repos/${owner}/${repo}/pulls/${id}` :
-    resource === "comments" ? `repos/${owner}/${repo}/issues/comments/${id}` :
-    null;
-
-  if (!endpoint) {
-    throw new Error(`Unsupported GitHub resource: ${resource}`);
+  canHandle(path: string): boolean {
+    return this.parsePath(path) !== null;
   }
 
-  const resp = await fetch(`https://api.github.com/${endpoint}`, {
-    method: "PATCH",
-    headers: {
-      Authorization: `Bearer ${githubToken}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(body),
-  });
+  async handle(item: WritebackItem, file: FileReadResponse): Promise<void> {
+    const route = this.parsePath(item.path);
+    if (!route) {
+      throw new Error(`Unsupported GitHub writeback path: ${item.path}`);
+    }
 
-  if (!resp.ok) {
-    const err = await resp.text();
-    throw new Error(`GitHub API ${resp.status}: ${err.slice(0, 200)}`);
-  }
-}
+    const body = JSON.parse(file.content);
+    const endpoint = this.buildEndpoint(route);
 
-// ── 2. Poll and process pending writebacks ─────────────────────────────────
-
-console.log("── listPendingWritebacks ──");
-const pending = await client.listPendingWritebacks(workspaceId);
-console.log(`  ${pending.length} pending writeback(s)\n`);
-
-for (const item of pending) {
-  console.log(`── processing ${item.path} (id=${item.id}) ──`);
-
-  const route = parseGitHubPath(item.path);
-  if (!route) {
-    console.log(`  skipping — not a GitHub path`);
-    await client.ackWriteback({
-      workspaceId,
-      itemId: item.id,
-      success: false,
-      error: "Unrecognized path format",
+    const response = await this.fetchImpl(`https://api.github.com/${endpoint}`, {
+      method: "PATCH",
+      headers: {
+        Authorization: `Bearer ${this.accessToken}`,
+        Accept: "application/vnd.github+json",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
     });
-    continue;
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`GitHub API ${response.status}: ${errorText.slice(0, 200)}`);
+    }
   }
 
-  // ── 3. Read file content and push to GitHub ──────────────────────────────
+  private parsePath(path: string): WritebackRoute | null {
+    // /github/{owner}/{repo}/{resource}/{id}.json
+    const match = path.match(
+      /^\/github\/([^/]+)\/([^/]+)\/([^/]+)\/(\d+)\.json$/,
+    );
+    if (!match) {
+      return null;
+    }
 
-  try {
-    const file = await client.readFile(workspaceId, item.path);
-    console.log(`  read ${file.path} rev=${file.revision}`);
+    return {
+      owner: match[1],
+      repo: match[2],
+      resource: match[3],
+      id: match[4],
+    };
+  }
 
-    await pushToGitHub(route, file.content);
-    console.log(`  pushed to GitHub ${route.owner}/${route.repo}/${route.resource}/${route.id}`);
+  private buildEndpoint(route: WritebackRoute): string {
+    const { owner, repo, resource, id } = route;
 
-    await client.ackWriteback({ workspaceId, itemId: item.id, success: true });
-    console.log(`  ack: success`);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
+    switch (resource) {
+      case "issues":
+        return `repos/${owner}/${repo}/issues/${id}`;
+      case "pulls":
+        return `repos/${owner}/${repo}/pulls/${id}`;
+      case "comments":
+        return `repos/${owner}/${repo}/issues/comments/${id}`;
+      default:
+        throw new Error(`Unsupported GitHub resource: ${resource}`);
+    }
+  }
+}
+
+class WritebackConsumer {
+  constructor(
+    private readonly relayfile: RelayFileClient,
+    private readonly workspaceId: string,
+    private readonly handlers: WritebackHandler[],
+  ) {}
+
+  async runOnce(): Promise<void> {
+    console.log("── listPendingWritebacks ──");
+    const pending = await this.relayfile.listPendingWritebacks(this.workspaceId);
+    console.log(`  ${pending.length} pending writeback(s)\n`);
+
+    for (const item of pending) {
+      await this.processItem(item);
+    }
+  }
+
+  private async processItem(item: WritebackItem): Promise<void> {
+    console.log(`── processing ${item.path} (id=${item.id}) ──`);
+
+    const handler = this.handlers.find((candidate) =>
+      candidate.canHandle(item.path),
+    );
+
+    if (!handler) {
+      await this.fail(item, "No handler registered for this path");
+      return;
+    }
+
+    try {
+      const file = await this.relayfile.readFile(this.workspaceId, item.path);
+      console.log(`  read ${file.path} rev=${file.revision}`);
+
+      await handler.handle(item, file);
+      console.log("  pushed to upstream provider");
+
+      await this.relayfile.ackWriteback({
+        workspaceId: this.workspaceId,
+        itemId: item.id,
+        success: true,
+      });
+      console.log("  ack: success");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      await this.fail(item, message);
+    }
+  }
+
+  private async fail(item: WritebackItem, message: string): Promise<void> {
     console.log(`  ack: failed — ${message}`);
-    await client.ackWriteback({
-      workspaceId,
+    await this.relayfile.ackWriteback({
+      workspaceId: this.workspaceId,
       itemId: item.id,
       success: false,
       error: message,
@@ -113,4 +167,9 @@ for (const item of pending) {
   }
 }
 
+const consumer = new WritebackConsumer(client, workspaceId, [
+  new GitHubWritebackHandler(githubToken),
+]);
+
+await consumer.runOnce();
 console.log("\nDone.");

@@ -13,8 +13,18 @@ Demonstrate how relayfile tokens restrict agent access with path-based scopes.
 
 ## Prerequisites
 
-- **Docker** — needed to run the relayfile server locally (`docker compose up`)
+- Docker Engine or Docker Desktop with the Compose plugin
 - Node.js 18+, `tsx`
+
+Start the local stack from the repo root before running this example:
+
+```bash
+cd docker
+docker compose up --build
+```
+
+This boots the relayfile API, relayauth, and the seeded `ws_demo`
+workspace used throughout the examples.
 
 ## Run
 

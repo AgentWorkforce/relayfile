@@ -4,13 +4,24 @@ End-to-end examples showing how agents interact with the relayfile virtual files
 
 ## Prerequisites
 
-- **Docker** — needed to run the relayfile server locally (`docker compose up`)
+- Docker Engine or Docker Desktop with the Compose plugin
 - Node.js 18+
 
 ```bash
 npm install @relayfile/sdk
 npm install -D tsx
 ```
+
+Start the local relayfile stack before running any example:
+
+```bash
+cd docker
+docker compose up --build
+```
+
+That brings up `relayfile` on `http://localhost:9090`, `relayauth` on
+`http://localhost:9091`, and seeds `ws_demo` with sample files. See
+[`docker/README.md`](../docker/README.md) for the full local setup.
 
 Each example reads configuration from environment variables:
 
@@ -34,7 +45,7 @@ relayauth sign --workspace ws_demo --agent my-agent --scope "fs:read" --scope "f
 | 03 | [webhook-to-vfs](./03-webhook-to-vfs/) | `ingestWebhook`, `computeCanonicalPath` — external events to files |
 | 04 | [realtime-events](./04-realtime-events/) | `getEvents` polling — watch for file changes with cursors |
 | 05 | [relayauth-scoped-agent](./05-relayauth-scoped-agent/) | Path-scoped tokens, 403 rejection, least-privilege agents |
-| 06 | [writeback-consumer](./06-writeback-consumer/) | `listPendingWritebacks`, `ackWriteback` — push VFS changes back to GitHub |
+| 06 | [writeback-consumer](./06-writeback-consumer/) | `WritebackConsumer` + `GitHubWritebackHandler` — push VFS changes back to GitHub |
 
 ## Running
 
