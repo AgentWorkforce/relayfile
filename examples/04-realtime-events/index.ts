@@ -85,7 +85,7 @@ console.log("\nDone.");
 function printEvent(evt: FilesystemEvent) {
   const ts = new Date(evt.timestamp).toLocaleTimeString();
   console.log(
-    `    ${ts}  ${padRight(evt.type, 14)}  ${evt.path}  (${evt.origin})`
+    `    ${ts}  ${padRight(evt.type, 14)}  ${evt.path}  (${evt.origin ?? "unknown"})`
   );
 }
 
