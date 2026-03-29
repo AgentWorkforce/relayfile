@@ -73,17 +73,44 @@ RELAYFILE_JWT_SECRET=my-secret go run ./cmd/relayfile
 SIGNING_KEY=my-secret ./scripts/generate-dev-token.sh
 ```
 
-The token is a scoped JWT — you control what each agent can read and write:
+Tokens are scoped JWTs — you control exactly what each agent can access using [relayauth](https://github.com/AgentWorkforce/relayauth) scopes.
+
+### Scope examples
+
+Scopes follow the format `plane:resource:action:path`:
 
 ```bash
-# Full access
-RELAYAUTH_SCOPES_JSON='["relayfile:fs:read:*", "relayfile:fs:write:*"]' ./scripts/generate-dev-token.sh
+# Full read/write access to everything
+RELAYAUTH_SCOPES_JSON='["relayfile:fs:read:*", "relayfile:fs:write:*"]'
 
-# Read-only access to a specific repo
-RELAYAUTH_SCOPES_JSON='["relayfile:fs:read:/github/repos/acme/api/*"]' ./scripts/generate-dev-token.sh
+# Read-only access to a specific GitHub repo
+RELAYAUTH_SCOPES_JSON='["relayfile:fs:read:/github/repos/acme/api/*"]'
+
+# Agent can only read specific Notion pages (not the whole workspace)
+RELAYAUTH_SCOPES_JSON='["relayfile:fs:read:/notion/pages/product-roadmap/*", "relayfile:fs:read:/notion/pages/eng-specs/*"]'
+
+# Code review agent: read GitHub PRs, write only to review paths
+RELAYAUTH_SCOPES_JSON='["relayfile:fs:read:/github/repos/acme/api/pulls/*", "relayfile:fs:write:/github/repos/acme/api/pulls/*/reviews/*"]'
+
+# Support agent: read Slack messages, write replies, no access to GitHub
+RELAYAUTH_SCOPES_JSON='["relayfile:fs:read:/slack/channels/support/*", "relayfile:fs:write:/slack/channels/support/messages/*"]'
+
+# Read everything, write nothing (observer)
+RELAYAUTH_SCOPES_JSON='["relayfile:fs:read:*"]'
 ```
 
-For production, use [relayauth](https://github.com/AgentWorkforce/relayauth) to mint and manage tokens programmatically.
+Generate a token with scopes:
+
+```bash
+SIGNING_KEY=my-secret \
+RELAYAUTH_SUB=review-agent \
+RELAYAUTH_SCOPES_JSON='["relayfile:fs:read:/github/repos/acme/api/pulls/*", "relayfile:fs:write:/github/repos/acme/api/pulls/*/reviews/*"]' \
+  ./scripts/generate-dev-token.sh
+```
+
+The agent gets a token that lets it read PR data and write reviews — nothing else. It can't read Slack, can't access Notion, can't delete files. The VFS paths *are* the permission boundaries.
+
+For production token management, use [relayauth](https://github.com/AgentWorkforce/relayauth) programmatically or via the [Cloud dashboard](https://relayfile.dev/pricing).
 
 ## What this service does
 
