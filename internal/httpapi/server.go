@@ -1242,7 +1242,7 @@ func (s *Server) handleTree(w http.ResponseWriter, r *http.Request, workspaceID,
 	if path == "" {
 		path = "/"
 	}
-	depth := parseBoundedInt(r.URL.Query().Get("depth"), 2, 1, 10)
+	depth := parseBoundedInt(r.URL.Query().Get("depth"), 10, 1, 100)
 	resp, err := s.store.ListTree(workspaceID, path, depth, r.URL.Query().Get("cursor"))
 	if err != nil {
 		writeError(w, http.StatusNotFound, "not_found", err.Error(), correlationID)
