@@ -351,7 +351,7 @@ export class RelayFileClient {
         contentType: contentType ?? "text/markdown",
         content,
         encoding,
-        semantics
+        semantics: input.semantics
       },
       signal
     });
