@@ -122,17 +122,24 @@ async function sleep(ms: number, signal?: AbortSignal): Promise<void> {
     return;
   }
 
+  if (signal?.aborted) {
+    throw signal.reason ?? new DOMException("The operation was aborted", "AbortError");
+  }
+
   await new Promise<void>((resolve, reject) => {
-    const timer = setTimeout(resolve, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal!.reason ?? new DOMException("The operation was aborted", "AbortError"));
+    };
+
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
 
     if (!signal) {
       return;
     }
-
-    const onAbort = () => {
-      clearTimeout(timer);
-      reject(signal.reason ?? new DOMException("The operation was aborted", "AbortError"));
-    };
 
     signal.addEventListener("abort", onAbort, { once: true });
   });
