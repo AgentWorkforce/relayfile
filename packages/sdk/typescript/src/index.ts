@@ -103,3 +103,6 @@ export type {
   WriteFileInput,
   WriteQueuedResponse
 } from "./types.js";
+
+export { WritebackConsumer } from "./writeback-consumer.js";
+export type { WritebackHandler, WritebackConsumerOptions } from "./writeback-consumer.js";
