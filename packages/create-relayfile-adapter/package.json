@@ -1,0 +1,42 @@
+{
+  "name": "create-relayfile-adapter",
+  "version": "0.1.0",
+  "description": "Scaffold Relayfile adapter and provider starter packages",
+  "type": "module",
+  "bin": {
+    "create-relayfile-adapter": "bin/create-relayfile-adapter.js"
+  },
+  "files": [
+    "bin",
+    "dist",
+    "templates"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "devDependencies": {
+    "@types/node": "^22.14.1",
+    "typescript": "^5.7.3"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/AgentWorkforce/relayfile",
+    "directory": "packages/create-relayfile-adapter"
+  },
+  "license": "MIT",
+  "keywords": [
+    "relayfile",
+    "adapter",
+    "provider",
+    "scaffold",
+    "cli"
+  ],
+  "engines": {
+    "node": ">=18"
+  }
+}

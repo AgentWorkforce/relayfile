@@ -5,7 +5,8 @@
   "workspaces": [
     "packages/core",
     "packages/sdk/typescript",
-    "packages/cli"
+    "packages/cli",
+    "packages/create-relayfile-adapter"
   ],
   "scripts": {
     "workflow": "agent-relay run",

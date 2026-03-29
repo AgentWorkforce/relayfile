@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { IntegrationAdapter, type IngestResult } from "./adapter.js";
 import { RelayFileClient } from "./client.js";
 import {
   RelayFileApiError,
@@ -32,6 +33,7 @@ import type {
   AckWritebackInput,
   AckWritebackResponse,
 } from "./types.js";
+import type { ConnectionProvider } from "./provider.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -55,6 +57,34 @@ function makeClient(fetchImpl: typeof fetch, opts?: { retry?: { maxRetries: numb
     fetchImpl,
     retry: opts?.retry ?? { maxRetries: 0 },
   });
+}
+
+const adapterProvider: ConnectionProvider = {
+  name: "github",
+  proxy: vi.fn(),
+  healthCheck: vi.fn()
+};
+
+const adapterIngestResult: IngestResult = {
+  filesWritten: 1,
+  filesUpdated: 0,
+  filesDeleted: 0,
+  paths: ["/github/issues/123.json"],
+  errors: []
+};
+
+class ClientTestAdapter extends IntegrationAdapter {
+  readonly name = "github";
+  readonly version = "1.0.0";
+  readonly ingestWebhook = vi.fn(async (): Promise<IngestResult> => adapterIngestResult);
+
+  computePath(objectType: string, objectId: string): string {
+    return `/${objectType}/${objectId}.json`;
+  }
+
+  computeSemantics(): Record<string, never> {
+    return {};
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -790,157 +820,6 @@ describe("RelayFileClient — new webhook/writeback methods", () => {
 });
 
 // ---------------------------------------------------------------------------
-// NangoHelpers
-// ---------------------------------------------------------------------------
-
-describe("NangoHelpers", () => {
-  it("ingestNangoWebhook computes canonical path and properties", async () => {
-    const f = mockFetch({ status: "queued", id: "env_1" } satisfies QueuedResponse);
-    const client = makeClient(f);
-    const { NangoHelpers } = await import("./nango.js");
-    const nango = new NangoHelpers(client);
-
-    await nango.ingestWebhook("ws_acme", {
-      connectionId: "conn_zendesk_acme",
-      integrationId: "zendesk-support",
-      providerConfigKey: "zendesk",
-      model: "tickets",
-      objectId: "48291",
-      eventType: "updated",
-      payload: { id: 48291, status: "open" },
-    });
-
-    const body = JSON.parse((f.mock.calls[0]![1] as RequestInit).body as string);
-    expect(body.path).toBe("/zendesk/tickets/48291.json");
-    expect(body.provider).toBe("zendesk");
-    expect(body.event_type).toBe("updated");
-    expect(body.headers["X-Nango-Connection-Id"]).toBe("conn_zendesk_acme");
-    expect(body.headers["X-Nango-Integration-Id"]).toBe("zendesk-support");
-    expect(body.headers["X-Nango-Provider-Config-Key"]).toBe("zendesk");
-    // Verify semantic properties are embedded in the data
-    expect(body.data.semantics.properties["nango.connection_id"]).toBe("conn_zendesk_acme");
-    expect(body.data.semantics.properties["provider.object_type"]).toBe("tickets");
-    expect(body.data.semantics.properties["provider.status"]).toBe("open");
-  });
-
-  it("ingestNangoWebhook uses fallback path for unknown provider", async () => {
-    const f = mockFetch({ status: "queued", id: "env_2" } satisfies QueuedResponse);
-    const client = makeClient(f);
-    const { NangoHelpers } = await import("./nango.js");
-    const nango = new NangoHelpers(client);
-
-    await nango.ingestWebhook("ws_acme", {
-      connectionId: "conn_1",
-      integrationId: "notion-sync",
-      model: "pages",
-      objectId: "page_1",
-      eventType: "created",
-      payload: { title: "My Page" },
-    });
-
-    const body = JSON.parse((f.mock.calls[0]![1] as RequestInit).body as string);
-    // "notion" extracted from "notion-sync" integrationId
-    expect(body.path).toBe("/notion/pages/page_1.json");
-    expect(body.provider).toBe("notion");
-    // providerConfigKey not set — header should be absent
-    expect(body.headers["X-Nango-Provider-Config-Key"]).toBeUndefined();
-  });
-
-  it("ingestNangoWebhook passes relations to semantics", async () => {
-    const f = mockFetch({ status: "queued", id: "env_3" } satisfies QueuedResponse);
-    const client = makeClient(f);
-    const { NangoHelpers } = await import("./nango.js");
-    const nango = new NangoHelpers(client);
-
-    await nango.ingestWebhook("ws_acme", {
-      connectionId: "conn_1",
-      integrationId: "zendesk-support",
-      model: "tickets",
-      objectId: "100",
-      eventType: "updated",
-      payload: { id: 100 },
-      relations: ["/zendesk/users/42.json"],
-    });
-
-    const body = JSON.parse((f.mock.calls[0]![1] as RequestInit).body as string);
-    expect(body.data.semantics.relations).toEqual(["/zendesk/users/42.json"]);
-  });
-
-  it("getProviderFiles queries with provider and path prefix", async () => {
-    const queryPayload: FileQueryResponse = {
-      items: [
-        { path: "/zendesk/tickets/1.json", revision: "rev_1", contentType: "application/json", size: 100 },
-      ],
-      nextCursor: null,
-    };
-    const f = mockFetch(queryPayload);
-    const client = makeClient(f);
-    const { NangoHelpers } = await import("./nango.js");
-    const nango = new NangoHelpers(client);
-
-    const files = await nango.getProviderFiles("ws_acme", {
-      provider: "zendesk",
-      objectType: "tickets",
-      status: "open",
-    });
-
-    expect(files).toHaveLength(1);
-    expect(files[0]!.path).toBe("/zendesk/tickets/1.json");
-    const url = f.mock.calls[0]![0] as string;
-    expect(url).toContain("provider=zendesk");
-    expect(url).toContain("path=%2Fzendesk%2Ftickets%2F");
-    expect(url).toContain("property.provider.status=open");
-    expect(url).toContain("property.provider.object_type=tickets");
-  });
-
-  it("getProviderFiles without objectType queries full provider prefix", async () => {
-    const f = mockFetch({ items: [], nextCursor: null } satisfies FileQueryResponse);
-    const client = makeClient(f);
-    const { NangoHelpers } = await import("./nango.js");
-    const nango = new NangoHelpers(client);
-
-    await nango.getProviderFiles("ws_acme", { provider: "github" });
-
-    const url = f.mock.calls[0]![0] as string;
-    expect(url).toContain("path=%2Fgithub%2F");
-  });
-
-  it("watchProviderEvents yields events and respects abort", async () => {
-    let callCount = 0;
-    const f = vi.fn().mockImplementation(() => {
-      callCount++;
-      const events = callCount === 1
-        ? [{ eventId: "e1", type: "file.created", path: "/github/issues/1.json", revision: "r1", origin: "provider_sync", provider: "github", correlationId: "c1", timestamp: "2026-03-14T00:00:00Z" }]
-        : [];
-      return Promise.resolve({
-        ok: true, status: 200,
-        headers: new Headers({ "content-type": "application/json" }),
-        json: () => Promise.resolve({ events, nextCursor: callCount === 1 ? "cur_1" : null }),
-        text: () => Promise.resolve("{}"),
-      });
-    }) as unknown as typeof fetch;
-
-    const client = makeClient(f);
-    const { NangoHelpers } = await import("./nango.js");
-    const nango = new NangoHelpers(client);
-
-    const controller = new AbortController();
-    const collected: unknown[] = [];
-    for await (const event of nango.watchProviderEvents("ws_acme", {
-      provider: "github",
-      pollIntervalMs: 10,
-      signal: controller.signal,
-    })) {
-      collected.push(event);
-      controller.abort();
-    }
-
-    expect(collected).toHaveLength(1);
-    expect((collected[0] as any).eventId).toBe("e1");
-  });
-});
-
-// ---------------------------------------------------------------------------
 // URL encoding & edge cases
 // ---------------------------------------------------------------------------
 
@@ -973,5 +852,64 @@ describe("RelayFileClient — edge cases", () => {
     const url = f.mock.calls[0]![0] as string;
     // Default path is /
     expect(url).toContain("path=%2F");
+  });
+});
+
+describe("RelayFileClient — adapter lifecycle events", () => {
+  it("proxies adapter lifecycle listeners through the client", async () => {
+    const client = makeClient(mockFetch({ ok: true }));
+    const adapter = new ClientTestAdapter(client, adapterProvider);
+    const onRegistered = vi.fn();
+    const onIngested = vi.fn();
+
+    client.on("registered", onRegistered);
+    client.on("ingested", onIngested);
+    client.registerAdapter(adapter);
+
+    expect(client.adapterListenerCount("registered")).toBe(1);
+    expect(onRegistered).toHaveBeenCalledWith({
+      adapterName: "github",
+      version: "1.0.0",
+      providerName: "github",
+      supportedEvents: undefined
+    });
+
+    await client.routeWebhook("ws_123", {
+      provider: "github",
+      connectionId: "conn_123",
+      objectType: "issues",
+      objectId: "123",
+      eventType: "updated",
+      payload: { title: "Adapter events" }
+    });
+
+    expect(onIngested).toHaveBeenCalledWith({
+      adapterName: "github",
+      workspaceId: "ws_123",
+      event: {
+        provider: "github",
+        connectionId: "conn_123",
+        objectType: "issues",
+        objectId: "123",
+        eventType: "updated",
+        payload: { title: "Adapter events" }
+      },
+      result: adapterIngestResult
+    });
+  });
+
+  it("supports removing and clearing adapter listeners", () => {
+    const client = makeClient(mockFetch({ ok: true }));
+    const listener = vi.fn();
+
+    const unsubscribe = client.on("registered", listener);
+    expect(client.adapterListenerCount("registered")).toBe(1);
+
+    unsubscribe();
+    expect(client.adapterListenerCount("registered")).toBe(0);
+
+    client.on("registered", listener);
+    client.clearAdapterListeners("registered");
+    expect(client.adapterListenerCount("registered")).toBe(0);
   });
 });

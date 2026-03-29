@@ -9,16 +9,41 @@
  */
 
 import type { RelayFileClient } from "./client.js";
+import {
+  WebhookNormalizationError,
+  fromWebhookInput as fromBridgeWebhookInput,
+  isEventType,
+  isNormalizedWebhook as isBridgeNormalizedWebhook,
+  isObjectId,
+  isObjectType,
+  isProvider,
+  normalizeWebhook as normalizeBridgeWebhook,
+  toIngestWebhookInput,
+} from "./normalized-webhook.js";
 import type {
   FileQueryItem,
   FilesystemEvent,
-  FileSemantics,
   QueuedResponse
 } from "./types.js";
+import type {
+  IngestWebhookRequest,
+  WebhookEventType,
+  WebhookNormalizationErrorCode,
+  WebhookNormalizationField,
+  WebhookObjectId,
+  WebhookObjectType,
+  WebhookProvider,
+} from "./normalized-webhook.js";
 
 // ---------------------------------------------------------------------------
 // Common types
 // ---------------------------------------------------------------------------
+
+export type ProviderPayload = Record<string, unknown>;
+export type ProviderMetadata = Record<string, string>;
+export type ProxyHeaders = Record<string, string>;
+export type ProxyQuery = Record<string, string>;
+export type ProxyMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 
 /** Normalized webhook input from any provider */
 export interface WebhookInput {
@@ -31,11 +56,93 @@ export interface WebhookInput {
   /** Event type (e.g., "created", "updated", "deleted") */
   eventType: string;
   /** Raw payload data */
-  payload: Record<string, unknown>;
+  payload: ProviderPayload;
   /** Optional relations to other objects */
   relations?: string[];
   /** Provider-specific metadata (connection IDs, user IDs, etc.) */
-  metadata?: Record<string, string>;
+  metadata?: ProviderMetadata;
+}
+
+/**
+ * Normalized webhook emitted by a connection provider.
+ *
+ * This extends the generic webhook shape with the provider connection context
+ * adapters need for follow-up API calls.
+ */
+export interface NormalizedWebhook extends WebhookInput {
+  /** Connection handle managed by the provider (e.g., Nango connection ID) */
+  connectionId: string;
+}
+
+export {
+  WebhookNormalizationError,
+  isEventType,
+  isObjectId,
+  isObjectType,
+  isProvider,
+  toIngestWebhookInput,
+};
+
+export type {
+  IngestWebhookRequest,
+  WebhookEventType,
+  WebhookNormalizationErrorCode,
+  WebhookNormalizationField,
+  WebhookObjectId,
+  WebhookObjectType,
+  WebhookProvider,
+};
+
+export function isNormalizedWebhook(value: unknown): value is NormalizedWebhook {
+  return (
+    isBridgeNormalizedWebhook(value) &&
+    typeof value.connectionId === "string" &&
+    value.connectionId.trim().length > 0
+  );
+}
+
+export function normalizeWebhook(
+  raw: unknown,
+  provider: unknown
+): NormalizedWebhook {
+  return requireConnectionId(normalizeBridgeWebhook(raw, provider));
+}
+
+export function fromWebhookInput(
+  input: WebhookInput | NormalizedWebhook
+): NormalizedWebhook {
+  return requireConnectionId(fromBridgeWebhookInput(input));
+}
+
+/** Authenticated proxy request executed by a connection provider */
+export interface ProxyRequest {
+  method: ProxyMethod;
+  baseUrl: string;
+  endpoint: string;
+  connectionId: string;
+  headers?: ProxyHeaders;
+  body?: unknown;
+  query?: ProxyQuery;
+}
+
+/** Authenticated proxy response returned by a connection provider */
+export interface ProxyResponse {
+  status: number;
+  headers: ProxyHeaders;
+  data: unknown;
+}
+
+/**
+ * Connection provider contract for adapter packages.
+ *
+ * Providers own auth, token refresh, and API proxying. They do not define
+ * Relayfile paths or semantics.
+ */
+export interface ConnectionProvider {
+  readonly name: string;
+  proxy(request: ProxyRequest): Promise<ProxyResponse>;
+  healthCheck(connectionId: string): Promise<boolean>;
+  handleWebhook?(rawPayload: unknown): Promise<NormalizedWebhook>;
 }
 
 /** Options for listing files from a specific provider */
@@ -89,15 +196,26 @@ export function computeCanonicalPath(
 }
 
 // ---------------------------------------------------------------------------
-// Abstract provider
+// Legacy-compatible provider abstraction
 // ---------------------------------------------------------------------------
 
+/**
+ * Legacy-compatible abstraction used by the in-SDK provider helpers.
+ *
+ * New standalone provider packages should implement ConnectionProvider instead.
+ */
 export abstract class IntegrationProvider {
   protected readonly client: RelayFileClient;
   abstract readonly name: string;
 
   constructor(client: RelayFileClient) {
     this.client = client;
+  }
+
+  protected toNormalizedWebhook(
+    input: WebhookInput | NormalizedWebhook
+  ): NormalizedWebhook {
+    return fromWebhookInput(input);
   }
 
   /**
@@ -192,4 +310,24 @@ export abstract class IntegrationProvider {
       });
     }
   }
+}
+
+function requireConnectionId(
+  event: WebhookInput & { connectionId?: unknown }
+): NormalizedWebhook {
+  if (
+    typeof event.connectionId !== "string" ||
+    event.connectionId.trim().length === 0
+  ) {
+    throw new WebhookNormalizationError(
+      "invalid_webhook",
+      "Webhook connectionId must be a non-empty string.",
+      { value: event.connectionId }
+    );
+  }
+
+  return {
+    ...event,
+    connectionId: event.connectionId.trim(),
+  };
 }

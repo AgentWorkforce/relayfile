@@ -1,3 +1,4 @@
+import type { IngestResult, IntegrationAdapter } from "./adapter.js";
 import {
   type AdminIngressStatusResponse,
   type AdminSyncStatusResponse,
@@ -38,12 +39,29 @@ import {
   type AckWritebackResponse
 } from "./types.js";
 import {
+  fromWebhookInput,
+  type NormalizedWebhook as CanonicalWebhook
+} from "./normalized-webhook.js";
+import type { PluginEventListener } from "./plugin-events.js";
+import type { WebhookInput, NormalizedWebhook as AdapterWebhook } from "./provider.js";
+import { AdapterRegistry, type AdapterRegistryEventMap } from "./registry.js";
+import {
   InvalidStateError,
   PayloadTooLargeError,
   QueueFullError,
   RelayFileApiError,
   RevisionConflictError
 } from "./errors.js";
+
+export {
+  createPluginEventEmitter,
+  type PluginErrorEventPayload,
+  type PluginEventEmitter,
+  type PluginEventListener,
+  type PluginEventMap,
+  type PluginIngestedEventPayload,
+  type PluginRegisteredEventPayload
+} from "./plugin-events.js";
 
 export type AccessTokenProvider = string | (() => string | Promise<string>);
 
@@ -54,8 +72,12 @@ export interface RelayFileRetryOptions {
   jitterRatio?: number;
 }
 
+/** Default base URL for the hosted Relayfile API */
+export const DEFAULT_RELAYFILE_BASE_URL = "https://api.relayfile.dev";
+
 export interface RelayFileClientOptions {
-  baseUrl: string;
+  /** API base URL. Defaults to https://api.relayfile.dev */
+  baseUrl?: string;
   token: AccessTokenProvider;
   fetchImpl?: typeof fetch;
   userAgent?: string;
@@ -89,6 +111,26 @@ export interface WebSocketConnection {
 export interface ConnectWebSocketOptions {
   token?: string;
   onEvent?: (event: FilesystemEvent) => void;
+}
+
+export interface RouteWebhookInput {
+  provider: string;
+  connectionId?: string;
+  connection_id?: string;
+  eventType?: string;
+  event_type?: string;
+  objectType?: string;
+  object_type?: string;
+  objectId?: string;
+  object_id?: string;
+  payload?: Record<string, unknown>;
+  data?: Record<string, unknown>;
+  relations?: string[];
+  metadata?: Record<string, string>;
+  headers?: Record<string, string>;
+  deliveryId?: string;
+  delivery_id?: string;
+  timestamp?: string;
 }
 
 const DEFAULT_RETRY_OPTIONS: NormalizedRetryOptions = {
@@ -164,6 +206,30 @@ function normalizeExportJsonResponse(payload: unknown): ExportJsonResponse {
   const data = (payload ?? {}) as ExportJsonApiResponseShape;
   return {
     files: Array.isArray(data.files) ? data.files : []
+  };
+}
+
+function normalizeRouteWebhookInput(
+  event: RouteWebhookInput
+): AdapterWebhook {
+  const normalized = fromWebhookInput(
+    event as WebhookInput | CanonicalWebhook
+  );
+  const connectionId = normalized.connectionId?.trim();
+
+  if (!connectionId) {
+    throw new Error("routeWebhook requires a non-empty connectionId.");
+  }
+
+  return {
+    provider: normalized.provider,
+    connectionId,
+    eventType: normalized.eventType,
+    objectType: normalized.objectType,
+    objectId: normalized.objectId,
+    payload: normalized.payload,
+    ...(normalized.relations ? { relations: normalized.relations } : {}),
+    ...(normalized.metadata ? { metadata: normalized.metadata } : {})
   };
 }
 
@@ -248,13 +314,53 @@ export class RelayFileClient {
   private readonly fetchImpl: typeof fetch;
   private readonly userAgent?: string;
   private readonly retryOptions: NormalizedRetryOptions;
+  private readonly adapterRegistry: AdapterRegistry;
 
   constructor(options: RelayFileClientOptions) {
-    this.baseUrl = options.baseUrl.replace(/\/+$/, "");
+    this.baseUrl = (options.baseUrl ?? DEFAULT_RELAYFILE_BASE_URL).replace(/\/+$/, "");
     this.tokenProvider = options.token;
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.userAgent = options.userAgent;
     this.retryOptions = normalizeRetryOptions(options.retry);
+    this.adapterRegistry = new AdapterRegistry();
+  }
+
+  registerAdapter<TAdapter extends IntegrationAdapter>(
+    adapter: TAdapter
+  ): TAdapter {
+    return this.adapterRegistry.registerAdapter(adapter);
+  }
+
+  on<TEventName extends keyof AdapterRegistryEventMap>(
+    eventName: TEventName,
+    listener: PluginEventListener<AdapterRegistryEventMap, TEventName>
+  ): () => void {
+    return this.adapterRegistry.on(eventName, listener);
+  }
+
+  off<TEventName extends keyof AdapterRegistryEventMap>(
+    eventName: TEventName,
+    listener: PluginEventListener<AdapterRegistryEventMap, TEventName>
+  ): void {
+    this.adapterRegistry.off(eventName, listener);
+  }
+
+  clearAdapterListeners(eventName?: keyof AdapterRegistryEventMap): void {
+    this.adapterRegistry.clearListeners(eventName);
+  }
+
+  adapterListenerCount<TEventName extends keyof AdapterRegistryEventMap>(eventName: TEventName): number {
+    return this.adapterRegistry.listenerCount(eventName);
+  }
+
+  async routeWebhook(
+    workspaceId: string,
+    event: RouteWebhookInput
+  ): Promise<IngestResult> {
+    return this.adapterRegistry.routeWebhook(
+      workspaceId,
+      normalizeRouteWebhookInput(event)
+    );
   }
 
   async listTree(workspaceId: string, options: ListTreeOptions = {}): Promise<TreeResponse> {
