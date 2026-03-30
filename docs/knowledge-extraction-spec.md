@@ -3,10 +3,10 @@
 ## 1. Document Status
 
 - Status: Draft
-- Date: 2026-03-27
+- Date: 2026-03-30
 - Scope: Convention extraction, path-scoped knowledge retrieval, and broker-time context injection
 - Audience: relayfile server, SDK, relay broker, and workflow authors
-- Depends on: `relayfile-v1-spec.md`, `knowledge-graph-spec.md`
+- Depends on: `relayfile-v1-spec.md`
 - Complements: [Agent Trajectories](https://github.com/AgentWorkforce/trajectories)
 
 ## 2. Problem Statement
@@ -18,16 +18,12 @@ Today the workarounds are:
 - **AGENTS.md / .claude/rules** — static files, not updated in real-time, not scoped to paths.
 - **Step output injection** — `{{steps.X.output}}` passes one step's output to the next. Dies at workflow boundaries.
 
-The knowledge-graph spec (v2) tracks **derivation relationships** — which files were produced from which sources, staleness detection, cascade invalidation. That's structural metadata about the file graph.
-
-This spec addresses a different problem: **what have agents learned about working with this code, and how do we get that knowledge to the right agent at the right time?**
-
 ## 3. Goals
 
-1. Agents can attach **knowledge annotations** to file paths at write time.
+1. Agents attach **knowledge annotations** to file paths at write time.
 2. Knowledge is queryable by **path scope** — "what do we know about `packages/billing/**`?"
-3. Knowledge is automatically extractable from **diffs and trajectories** without agent cooperation.
-4. The relay broker can **inject relevant knowledge** into agent task preambles at dispatch time.
+3. Knowledge is automatically extractable from **diffs and trajectories** without agent cooperation (Phase 2+).
+4. The relay broker can **inject relevant knowledge** into agent task preambles at dispatch time (Phase 2+).
 5. Knowledge accumulates over time, forming project-level "institutional memory."
 
 ## 4. Non-Goals
@@ -53,10 +49,11 @@ A knowledge annotation is a structured lesson attached to a file path (or path g
 
 ```typescript
 interface KnowledgeAnnotation {
-  id: string;                          // unique ID
+  id: string;                          // unique ID (server-generated)
+  workspaceId: string;                 // workspace scope
   path: string;                        // file path or glob: "packages/billing/**"
   category: KnowledgeCategory;
-  content: string;                     // the lesson, max 200 chars
+  content: string;                     // the lesson, max 500 chars
   confidence: "high" | "medium" | "low";
   source: KnowledgeSource;
   createdAt: string;                   // ISO timestamp
@@ -65,8 +62,6 @@ interface KnowledgeAnnotation {
   confirmedBy?: string;
   expiresAt?: string;                  // optional TTL
   supersededBy?: string;               // ID of annotation that replaces this
-  trajectoryId?: string;               // link to trajectory that produced this
-  workflowId?: string;                 // link to workflow run
 }
 
 type KnowledgeCategory =
@@ -80,17 +75,34 @@ type KnowledgeCategory =
 
 type KnowledgeSource =
   | "agent-explicit"  // agent called writeKnowledge()
-  | "diff-extraction" // server extracted from file diff
-  | "trajectory"      // extracted from trajectory retrospective
+  | "diff-extraction" // server extracted from file diff (Phase 2)
+  | "trajectory"      // extracted from trajectory retrospective (Phase 2)
   | "human"           // human wrote or edited directly
 ```
 
 ### 6.2 Storage
 
-Annotations are stored in the existing Relayfile state model as a knowledge index per workspace. Implementation options:
+Annotations are stored in the Go server's backend (memory or Postgres, matching the existing storage profile pattern).
 
-- **D1 table** (Cloudflare Workers): `knowledge_annotations` table with path prefix indexing
-- **KV namespace**: Key = `ws:{workspaceId}:knowledge:{path_hash}:{id}`, value = JSON annotation
+**Table: `knowledge_annotations`**
+
+| Column | Type | Notes |
+|--------|------|-------|
+| id | TEXT PK | `ka_` prefix + ULID |
+| workspace_id | TEXT | FK to workspace |
+| path | TEXT | File path or glob |
+| category | TEXT | One of KnowledgeCategory |
+| content | TEXT | Max 500 chars |
+| confidence | TEXT | high/medium/low |
+| source | TEXT | One of KnowledgeSource |
+| created_at | TIMESTAMP | Server-set |
+| created_by | TEXT | Agent name or "human" |
+| confirmed_at | TIMESTAMP | Nullable |
+| confirmed_by | TEXT | Nullable |
+| expires_at | TIMESTAMP | Nullable |
+| superseded_by | TEXT | Nullable, FK to id |
+
+**Index:** `(workspace_id, path)` for prefix queries.
 
 Path queries use prefix matching: `packages/billing/**` matches annotations on `packages/billing/src/checkout.ts`, `packages/billing/test/checkout.test.ts`, and `packages/billing/**` itself.
 
@@ -99,7 +111,6 @@ Path queries use prefix matching: `packages/billing/**` matches annotations on `
 The existing `FileSemantics.properties` field can carry a `knowledge` key pointing to annotation IDs:
 
 ```typescript
-// On writeFile, the semantics.properties can reference knowledge
 await relayfile.writeFile({
   workspaceId,
   path: 'packages/billing/src/checkout.ts',
@@ -107,7 +118,6 @@ await relayfile.writeFile({
   semantics: {
     properties: {
       'knowledge:convention:pricing': 'prices stored in cents, not dollars',
-      'knowledge:dependency:domain': '@nightcto/domain:PlanTier',
     }
   }
 });
@@ -121,6 +131,8 @@ But the primary API for knowledge is separate endpoints (Section 7), not embedde
 
 ```
 POST /v1/workspaces/{workspaceId}/knowledge
+Authorization: Bearer <token>
+X-Correlation-Id: <id>
 ```
 
 Request body:
@@ -131,257 +143,123 @@ Request body:
   "content": "prices stored in cents, not dollars",
   "confidence": "high",
   "source": "agent-explicit",
-  "createdBy": "billing-builder-agent",
-  "trajectoryId": "traj_abc123"
+  "createdBy": "billing-builder-agent"
 }
 ```
 
-Response: `201 Created` with the annotation ID.
-
-Agents call this after completing work. The annotation is immediately queryable.
-
-### 7.2 Query Knowledge
-
-```
-GET /v1/workspaces/{workspaceId}/knowledge?paths=packages/billing/**,packages/domain/**&limit=50&categories=convention,gotcha,dependency
-```
-
-Response:
+Response: `201 Created`
 ```json
 {
-  "annotations": [
-    {
-      "id": "ka_001",
-      "path": "packages/billing/**",
-      "category": "convention",
-      "content": "prices stored in cents, not dollars",
-      "confidence": "high",
-      "createdBy": "billing-builder-agent",
-      "createdAt": "2026-03-27T01:30:00Z"
-    },
-    {
-      "id": "ka_002",
-      "path": "packages/domain/**",
-      "category": "dependency",
-      "content": "PlanTier enum exported from src/types.ts",
-      "confidence": "high",
-      "createdBy": "domain-builder-agent",
-      "createdAt": "2026-03-27T00:45:00Z"
-    }
-  ],
-  "total": 2
+  "id": "ka_01HXYZ...",
+  "createdAt": "2026-03-30T12:00:00Z"
 }
 ```
 
-Path matching rules:
-- `packages/billing/src/checkout.ts` matches annotations on `packages/billing/**`, `packages/billing/src/**`, and `packages/billing/src/checkout.ts`
-- Glob patterns use standard gitignore-style matching
-- Results sorted by: confidence (high first), then recency
-
-### 7.3 Confirm / Supersede / Delete Knowledge
-
-```
-PATCH /v1/workspaces/{workspaceId}/knowledge/{annotationId}
-```
-
-```json
-{
-  "confirmedAt": "2026-03-27T06:00:00Z",
-  "confirmedBy": "review-agent"
-}
-```
-
-Or to supersede:
-```json
-{
-  "supersededBy": "ka_005",
-  "content": "prices stored in cents — EXCEPT subscriptions which use whole dollars"
-}
-```
-
-### 7.4 Bulk Write (for trajectory extraction)
+### 7.2 Bulk Write Knowledge
 
 ```
 POST /v1/workspaces/{workspaceId}/knowledge/bulk
 ```
 
+Request body:
 ```json
 {
   "annotations": [
     { "path": "packages/billing/**", "category": "convention", "content": "...", ... },
-    { "path": "packages/billing/**", "category": "gotcha", "content": "...", ... }
-  ],
-  "source": "trajectory",
-  "trajectoryId": "traj_abc123"
+    { "path": "packages/domain/**", "category": "dependency", "content": "...", ... }
+  ]
 }
 ```
 
-## 8. Automatic Extraction
+Response: `201 Created` with `{ "ids": ["ka_...", "ka_..."] }`
 
-### 8.1 Diff-Based Extraction (Server-Side)
+### 7.3 Query Knowledge
 
-After a write operation completes, the server can optionally extract knowledge from the diff. This runs as a background task, not in the write path.
+```
+GET /v1/workspaces/{workspaceId}/knowledge?paths=packages/billing/**,packages/domain/**&limit=50&categories=convention,gotcha
+```
 
-**What to extract:**
-- New `import` statements → `dependency` annotation
-- New config values / env vars → `environment` annotation  
-- Test framework usage (vitest/jest/mocha) → `convention` annotation
-- Error handling patterns → `pattern` annotation
-- Package.json dependency changes → `dependency` annotation
+Query parameters:
+- `paths` — comma-separated file paths or globs (prefix match)
+- `categories` — comma-separated category filter
+- `limit` — max results (default 50, max 200)
+- `minConfidence` — filter by confidence (low/medium/high)
+- `createdAfter` — ISO timestamp filter
 
-**Implementation:** Pattern matching on diff hunks. No LLM needed for v1. A set of extractors:
-
-```typescript
-interface DiffExtractor {
-  name: string;
-  category: KnowledgeCategory;
-  match(diff: DiffHunk): KnowledgeAnnotation | null;
+Response:
+```json
+{
+  "annotations": [ ... ],
+  "total": 12
 }
-
-const extractors: DiffExtractor[] = [
-  {
-    name: 'import-detector',
-    category: 'dependency',
-    match(diff) {
-      // Match added lines with import/require statements
-      // Extract package name and what's imported
-    }
-  },
-  {
-    name: 'test-framework-detector',
-    category: 'convention',
-    match(diff) {
-      // Match import from vitest/jest/mocha
-      // "uses {framework} for testing"
-    }
-  },
-  {
-    name: 'env-var-detector',
-    category: 'environment',
-    match(diff) {
-      // Match process.env.X or Deno.env.get("X")
-      // "requires {VAR} environment variable"
-    }
-  },
-];
 ```
 
-### 8.2 Trajectory-Based Extraction (Post-Workflow)
-
-After a workflow completes and a trajectory is written, extract knowledge from the trajectory's retrospective chapter.
-
-The trajectory retrospective already contains agent reflections like:
-- "Had to switch from Paddle to Stripe because Paddle lacks a test mode API"
-- "The project uses strict TypeScript with composite references"
-- "pnpm workspace protocol requires explicit version ranges"
-
-These are high-value knowledge entries. Extraction can use a lightweight LLM call:
-
-**Prompt:**
-```
-Extract reusable project lessons from this trajectory retrospective.
-For each lesson, output: path scope, category, and a one-line description (max 200 chars).
-Categories: convention, dependency, gotcha, pattern, decision, constraint, environment.
-
-Retrospective:
-{retrospective_text}
-
-Output JSON array of annotations.
-```
-
-This runs once per workflow, not per step — cost is minimal.
-
-### 8.3 Deduplication
-
-Before inserting, check for existing annotations with the same path + category + similar content. If a match exists:
-- Same content → update `confirmedAt` (reconfirmation)
-- Updated content → create new annotation, mark old as `supersededBy`
-- Contradicting content → flag for human review
-
-## 9. Broker Integration
-
-The highest-leverage feature: the relay broker auto-injects knowledge when dispatching tasks to agents.
-
-### 9.1 Flow
-
-1. Workflow step defines `task` text and `fileTargets` (or broker infers from task text)
-2. Before spawning the agent, broker calls `GET /v1/workspaces/{wsId}/knowledge?paths={fileTargets}&limit=30`
-3. Broker prepends a knowledge preamble to the task:
+### 7.4 Confirm Knowledge
 
 ```
-## Project Knowledge (auto-injected)
-The following conventions and lessons have been established by previous agents working on this codebase:
-
-**Conventions:**
-- packages/billing: prices stored in cents, not dollars
-- packages/domain: PlanTier enum exported from src/types.ts
-
-**Gotchas:**
-- root: pnpm install fails without shamefully-hoist in .npmrc
-
-**Dependencies:**
-- packages/billing → @nightcto/domain:PlanTier
-- packages/billing → stripe
-
----
-
-{original_task_text}
+POST /v1/workspaces/{workspaceId}/knowledge/{id}/confirm
 ```
 
-4. Agent receives enriched task. Knowledge is in context without the agent needing to discover it.
-
-### 9.2 Budget
-
-Knowledge preamble is capped at a configurable token limit (default: 2000 tokens, ~50 annotations). If more knowledge exists than fits:
-- Prioritize by confidence (high > medium > low)
-- Prioritize by recency
-- Prioritize `gotcha` and `convention` over `dependency` (dependencies are in the code)
-- Prioritize annotations with path specificity matching the task's file targets
-
-### 9.3 Opt-In
-
-Knowledge injection is opt-in per workflow:
-
-```typescript
-workflow('my-workflow')
-  .knowledgeInjection({ enabled: true, maxTokens: 2000 })
+```json
+{ "confirmedBy": "agent-name" }
 ```
 
-Or per step:
-```typescript
-.step('implement-billing', {
-  agent: 'builder',
-  knowledge: { paths: ['packages/billing/**'], categories: ['convention', 'gotcha'] },
-  task: `...`,
-})
+Updates `confirmedAt` and `confirmedBy`. Resets confidence decay.
+
+### 7.5 Supersede Knowledge
+
+```
+POST /v1/workspaces/{workspaceId}/knowledge/{id}/supersede
 ```
 
-## 10. SDK Changes
+```json
+{
+  "replacement": {
+    "path": "packages/billing/**",
+    "category": "convention",
+    "content": "prices stored in millicents (1/10 cent)",
+    "confidence": "high",
+    "source": "agent-explicit",
+    "createdBy": "billing-refactor-agent"
+  }
+}
+```
 
-### 10.1 RelayFileClient Additions
+Marks original as superseded, creates new annotation.
+
+### 7.6 Delete Knowledge
+
+```
+DELETE /v1/workspaces/{workspaceId}/knowledge/{id}
+```
+
+Returns `204 No Content`.
+
+## 8. SDK Changes
+
+### 8.1 TypeScript SDK
 
 ```typescript
 class RelayFileClient {
-  // Existing methods...
+  // ... existing methods ...
 
   async writeKnowledge(
     workspaceId: string,
-    annotation: Omit<KnowledgeAnnotation, 'id' | 'createdAt'>
-  ): Promise<{ id: string }>;
+    annotation: WriteKnowledgeInput
+  ): Promise<{ id: string; createdAt: string }>;
 
   async writeKnowledgeBulk(
     workspaceId: string,
-    annotations: Omit<KnowledgeAnnotation, 'id' | 'createdAt'>[],
-    source?: { trajectoryId?: string; workflowId?: string }
+    annotations: WriteKnowledgeInput[]
   ): Promise<{ ids: string[] }>;
 
   async queryKnowledge(
     workspaceId: string,
-    options: {
+    options?: {
       paths?: string[];
       categories?: KnowledgeCategory[];
       limit?: number;
-      minConfidence?: 'low' | 'medium' | 'high';
+      minConfidence?: "low" | "medium" | "high";
       createdAfter?: string;
     }
   ): Promise<{ annotations: KnowledgeAnnotation[]; total: number }>;
@@ -395,66 +273,91 @@ class RelayFileClient {
   async supersedeKnowledge(
     workspaceId: string,
     annotationId: string,
-    replacement: Omit<KnowledgeAnnotation, 'id' | 'createdAt'>
+    replacement: WriteKnowledgeInput
   ): Promise<{ id: string }>;
+
+  async deleteKnowledge(
+    workspaceId: string,
+    annotationId: string
+  ): Promise<void>;
 }
 ```
 
-### 10.2 Relay SDK Broker Changes
+### 8.2 Python SDK
 
-The relay broker (`@agent-relay/sdk`) needs a hook in the step dispatch path:
+Matching methods on `RelayFileClient` with snake_case naming.
+
+## 9. Broker Integration (Phase 2)
+
+The highest-leverage feature: the relay broker auto-injects knowledge when dispatching tasks to agents.
+
+### 9.1 Flow
+
+1. Workflow step defines `task` text and `fileTargets` (or broker infers from task text).
+2. Before spawning the agent, broker calls `GET /v1/workspaces/{wsId}/knowledge?paths={fileTargets}&limit=30`.
+3. Broker prepends a knowledge preamble to the task:
+
+```
+## Project Knowledge (auto-injected)
+
+**Conventions:**
+- packages/billing: prices stored in cents, not dollars
+- packages/domain: PlanTier enum exported from src/types.ts
+
+**Gotchas:**
+- root: pnpm install fails without shamefully-hoist in .npmrc
+```
+
+4. Agent receives enriched task. Knowledge is in context without the agent needing to discover it.
+
+### 9.2 Budget
+
+Knowledge preamble is capped at a configurable token limit (default: 2000 tokens, ~50 annotations). Priority:
+- `gotcha` and `convention` over `dependency`
+- High confidence over low
+- Recent over old
+- Path-specific over broad globs
+
+### 9.3 Opt-In
 
 ```typescript
-// In runner.ts, before spawning agent for a step
-if (step.knowledge?.enabled || workflow.knowledgeInjection?.enabled) {
-  const knowledge = await relayfileClient.queryKnowledge(workspaceId, {
-    paths: step.knowledge?.paths || step.fileTargets,
-    categories: step.knowledge?.categories,
-    limit: Math.floor((step.knowledge?.maxTokens || 2000) / 40), // ~40 chars per annotation
-  });
-  
-  if (knowledge.annotations.length > 0) {
-    step.task = formatKnowledgePreamble(knowledge.annotations) + '\n\n' + step.task;
-  }
-}
+workflow('my-workflow')
+  .knowledgeInjection({ enabled: true, maxTokens: 2000 })
 ```
 
-## 11. Relationship to Other Specs
+Or per step:
+```typescript
+.step('implement-billing', {
+  agent: 'builder',
+  knowledge: { paths: ['packages/billing/**'], categories: ['convention', 'gotcha'] },
+  task: '...',
+})
+```
 
-| Spec | What it tracks | When it's used |
-|---|---|---|
-| **Relayfile v1** | Files, revisions, sync state | Every read/write operation |
-| **Knowledge Graph (v2)** | Derivation DAG, staleness, validation | When files are derived from other files |
-| **Knowledge Extraction (this)** | Conventions, lessons, gotchas | When agents need context about unfamiliar code |
-| **Trajectories** | Full agent work history | After-the-fact review, source for extraction |
+## 10. Implementation Phases
 
-Knowledge extraction is orthogonal to the knowledge graph. The graph tracks "file A was derived from file B." Extraction tracks "when working on file A, we learned X." They can coexist: a file can have derivation edges (graph) AND knowledge annotations (extraction).
+### Phase 1: Storage + API + SDK (this PR)
+- Go server: `knowledge_annotations` table + CRUD endpoints
+- TypeScript SDK: `writeKnowledge`, `queryKnowledge`, `confirmKnowledge`, `supersedeKnowledge`, `deleteKnowledge`
+- Python SDK: matching methods
+- OpenAPI spec updates
+- Tests for server endpoints and SDK methods
 
-## 12. Implementation Phases
-
-### Phase 1: Explicit Write + Query (1-2 days)
-- `POST /knowledge` and `GET /knowledge` endpoints on relayfile server
-- `writeKnowledge()` and `queryKnowledge()` on SDK
-- D1 table for annotation storage
-- Path prefix matching
-
-### Phase 2: Diff-Based Auto-Extraction (2-3 days)
+### Phase 2: Diff-Based Auto-Extraction (future)
 - Background worker on write operations
 - Pattern-matching extractors (imports, env vars, test frameworks)
 - Deduplication logic
 
-### Phase 3: Trajectory Extraction (1-2 days)
+### Phase 3: Trajectory Mining (future)
 - Post-workflow hook that reads trajectory retrospective
 - Lightweight LLM extraction call
 - Bulk write to knowledge store
 
-### Phase 4: Broker Injection (2-3 days)
+### Phase 4: Broker Injection (future)
 - Hook in relay SDK step dispatch
 - Knowledge preamble formatting
 - Token budget management
-- `knowledgeInjection` workflow/step config
 
 ### Phase 5: Curation UI (future)
 - Dashboard view of knowledge per workspace
-- Human can confirm, supersede, delete annotations
-- Confidence decay over time (annotations not reconfirmed lose confidence)
+- Confidence decay over time
