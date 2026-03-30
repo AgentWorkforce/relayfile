@@ -52,7 +52,6 @@ bin/
 # Agent tool configs
 .factory/
 .gemini/
-.trajectories/
 .mcp.json
 opencode.json
 site/node_modules/
