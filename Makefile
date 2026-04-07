@@ -59,10 +59,12 @@ release: clean build-all
 		for bin in $(RELEASE_BINS); do \
 			archive="$(DIST_DIR)/$${bin}_$${goos}_$${goarch}.tar.gz"; \
 			LC_ALL=C tar -C "$${work_dir}" -czf "$${archive}" "$${bin}"; \
+			cp "$${work_dir}/$${bin}" "$(DIST_DIR)/$${bin}-$${goos}-$${goarch}"; \
 		done; \
 	done
+	rm -rf $(DIST_DIR)/darwin_* $(DIST_DIR)/linux_*
 	cd $(DIST_DIR) && \
-		(if command -v sha256sum >/dev/null 2>&1; then sha256sum *.tar.gz > checksums.txt; else shasum -a 256 *.tar.gz > checksums.txt; fi)
+		(if command -v sha256sum >/dev/null 2>&1; then sha256sum $$(ls -1 | grep -v checksums.txt) > checksums.txt; else shasum -a 256 $$(ls -1 | grep -v checksums.txt) > checksums.txt; fi)
 
 clean:
 	rm -rf $(BIN_DIR) $(DIST_DIR)
