@@ -106,3 +106,4 @@ export type {
 
 export { WritebackConsumer } from "./writeback-consumer.js";
 export type { WritebackHandler, WritebackConsumerOptions } from "./writeback-consumer.js";
+export * from "./integration-adapter.js";
