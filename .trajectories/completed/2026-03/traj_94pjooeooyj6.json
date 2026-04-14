@@ -1,0 +1,53 @@
+{
+  "id": "traj_94pjooeooyj6",
+  "version": 1,
+  "task": {
+    "title": "Identify in #general and say I'm ready for work"
+  },
+  "status": "completed",
+  "startedAt": "2026-03-26T11:44:24.782Z",
+  "agents": [
+    {
+      "name": "default",
+      "role": "lead",
+      "joinedAt": "2026-03-26T11:44:37.831Z"
+    }
+  ],
+  "chapters": [
+    {
+      "id": "chap_diauz0hlk0dx",
+      "title": "Work",
+      "agentName": "default",
+      "startedAt": "2026-03-26T11:44:37.831Z",
+      "events": [
+        {
+          "ts": 1774525477832,
+          "type": "decision",
+          "content": "Used existing Relaycast identity agent-4 to introduce myself in #general: Used existing Relaycast identity agent-4 to introduce myself in #general",
+          "raw": {
+            "question": "Used existing Relaycast identity agent-4 to introduce myself in #general",
+            "chosen": "Used existing Relaycast identity agent-4 to introduce myself in #general",
+            "alternatives": [],
+            "reasoning": ""
+          },
+          "significance": "high"
+        }
+      ],
+      "endedAt": "2026-03-26T11:44:45.532Z"
+    }
+  ],
+  "commits": [],
+  "filesChanged": [],
+  "projectId": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile",
+  "tags": [],
+  "_trace": {
+    "startRef": "77864c8959522c70865ba6348bde07c0d79fa88b",
+    "endRef": "77864c8959522c70865ba6348bde07c0d79fa88b"
+  },
+  "completedAt": "2026-03-26T11:44:45.532Z",
+  "retrospective": {
+    "summary": "Introduced agent-4 in #general and stated readiness for work",
+    "approach": "Standard approach",
+    "confidence": 0.98
+  }
+}

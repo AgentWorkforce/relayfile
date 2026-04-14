@@ -1,0 +1,53 @@
+{
+  "id": "traj_bnilj3jwxvbe",
+  "version": 1,
+  "task": {
+    "title": "Fix writeback pending endpoint to exclude acknowledged items"
+  },
+  "status": "completed",
+  "startedAt": "2026-03-26T10:49:06.331Z",
+  "agents": [
+    {
+      "name": "default",
+      "role": "lead",
+      "joinedAt": "2026-03-26T10:50:46.379Z"
+    }
+  ],
+  "chapters": [
+    {
+      "id": "chap_jbjqyakie6mb",
+      "title": "Work",
+      "agentName": "default",
+      "startedAt": "2026-03-26T10:50:46.379Z",
+      "events": [
+        {
+          "ts": 1774522246380,
+          "type": "decision",
+          "content": "Filter pending writebacks by operation status: Filter pending writebacks by operation status",
+          "raw": {
+            "question": "Filter pending writebacks by operation status",
+            "chosen": "Filter pending writebacks by operation status",
+            "alternatives": [],
+            "reasoning": "The queue snapshot retains acknowledged items, so the pending endpoint must cross-check workspace op state and only expose writebacks still actionable by external consumers (pending/running)."
+          },
+          "significance": "high"
+        }
+      ],
+      "endedAt": "2026-03-26T10:51:01.672Z"
+    }
+  ],
+  "commits": [],
+  "filesChanged": [],
+  "projectId": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile",
+  "tags": [],
+  "_trace": {
+    "startRef": "76843f3521d46858798eec20592586c9daf430b5",
+    "endRef": "76843f3521d46858798eec20592586c9daf430b5"
+  },
+  "completedAt": "2026-03-26T10:51:01.672Z",
+  "retrospective": {
+    "summary": "Fixed pending writeback filtering so acknowledged/succeeded ops are excluded from /writeback/pending, and added an HTTP regression test covering ack plus post-ack pending visibility.",
+    "approach": "Standard approach",
+    "confidence": 0.93
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "id": "traj_fcqiyr1z3i71",
+  "version": 1,
+  "task": {
+    "title": "Acknowledge standby for relayfile parity task"
+  },
+  "status": "completed",
+  "startedAt": "2026-03-26T11:45:04.805Z",
+  "agents": [],
+  "chapters": [],
+  "commits": [],
+  "filesChanged": [],
+  "projectId": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile",
+  "tags": [],
+  "_trace": {
+    "startRef": "77864c8959522c70865ba6348bde07c0d79fa88b",
+    "endRef": "77864c8959522c70865ba6348bde07c0d79fa88b"
+  },
+  "completedAt": "2026-03-26T11:45:13.685Z",
+  "retrospective": {
+    "summary": "Acknowledged standby status to agent-3 in #general",
+    "approach": "Standard approach",
+    "confidence": 0.99
+  }
+}

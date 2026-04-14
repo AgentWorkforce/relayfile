@@ -1,0 +1,96 @@
+{
+  "version": "1.0.0",
+  "id": "fba60542-4943-4009-9dda-2b13259e5503",
+  "timestamp": "2026-03-26T11:34:34.280Z",
+  "trajectory": "traj_r3hna8s9cqh1",
+  "files": [
+    {
+      "path": ".claude/skills/relayfile-workspace/SKILL.md",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 1,
+              "end_line": 340,
+              "revision": "77864c8959522c70865ba6348bde07c0d79fa88b"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "internal/httpapi/server_test.go",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 4768,
+              "end_line": 4774,
+              "revision": "77864c8959522c70865ba6348bde07c0d79fa88b"
+            },
+            {
+              "start_line": 4838,
+              "end_line": 4843,
+              "revision": "77864c8959522c70865ba6348bde07c0d79fa88b"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "internal/relayfile/store.go",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 1190,
+              "end_line": 1196,
+              "revision": "77864c8959522c70865ba6348bde07c0d79fa88b"
+            },
+            {
+              "start_line": 1213,
+              "end_line": 1219,
+              "revision": "77864c8959522c70865ba6348bde07c0d79fa88b"
+            },
+            {
+              "start_line": 1363,
+              "end_line": 1369,
+              "revision": "77864c8959522c70865ba6348bde07c0d79fa88b"
+            },
+            {
+              "start_line": 2381,
+              "end_line": 2398,
+              "revision": "77864c8959522c70865ba6348bde07c0d79fa88b"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "scripts/conformance.ts",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 1,
+              "end_line": 620,
+              "revision": "77864c8959522c70865ba6348bde07c0d79fa88b"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

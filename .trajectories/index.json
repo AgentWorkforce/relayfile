@@ -1,0 +1,378 @@
+{
+  "version": 1,
+  "lastUpdated": "2026-04-14T08:48:21.924Z",
+  "trajectories": {
+    "traj_gncr4xwgfobl": {
+      "title": "Reply to agent-2 introduction in Relaycast",
+      "status": "completed",
+      "startedAt": "2026-03-26T10:26:07.696Z",
+      "completedAt": "2026-03-26T10:26:13.568Z",
+      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-03/traj_gncr4xwgfobl.json",
+      "compactedInto": "compact_gba3aqbygmdu"
+    },
+    "traj_w0vuq7h5msvi": {
+      "title": "Acknowledge agent-2 coordination update in Relaycast",
+      "status": "completed",
+      "startedAt": "2026-03-26T10:26:21.969Z",
+      "completedAt": "2026-03-26T10:26:28.162Z",
+      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-03/traj_w0vuq7h5msvi.json",
+      "compactedInto": "compact_gba3aqbygmdu"
+    },
+    "traj_lhwmduhvautk": {
+      "title": "Test relayfile multi-agent collaboration behavior locally",
+      "status": "active",
+      "startedAt": "2026-03-26T10:31:14.821Z",
+      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/active/traj_lhwmduhvautk.json"
+    },
+    "traj_bnilj3jwxvbe": {
+      "title": "Fix writeback pending endpoint to exclude acknowledged items",
+      "status": "completed",
+      "startedAt": "2026-03-26T10:49:06.331Z",
+      "completedAt": "2026-03-26T10:51:01.672Z",
+      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-03/traj_bnilj3jwxvbe.json",
+      "compactedInto": "compact_gba3aqbygmdu"
+    },
+    "traj_r3hna8s9cqh1": {
+      "title": "Investigate relayfile-cloud Cloudflare Workers port status",
+      "status": "completed",
+      "startedAt": "2026-03-26T11:06:12.505Z",
+      "completedAt": "2026-03-26T11:34:34.204Z",
+      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-03/traj_r3hna8s9cqh1.json",
+      "compactedInto": "compact_gba3aqbygmdu"
+    },
+    "traj_94pjooeooyj6": {
+      "title": "Identify in #general and say I'm ready for work",
+      "status": "completed",
+      "startedAt": "2026-03-26T11:44:24.782Z",
+      "completedAt": "2026-03-26T11:44:45.532Z",
+      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-03/traj_94pjooeooyj6.json",
+      "compactedInto": "compact_gba3aqbygmdu"
+    },
+    "traj_fcqiyr1z3i71": {
+      "title": "Acknowledge standby for relayfile parity task",
+      "status": "completed",
+      "startedAt": "2026-03-26T11:45:04.805Z",
+      "completedAt": "2026-03-26T11:45:13.685Z",
+      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-03/traj_fcqiyr1z3i71.json",
+      "compactedInto": "compact_gba3aqbygmdu"
+    },
+    "traj_ybeuramh9i0k": {
+      "title": "Acknowledge agent-3 follow-up on pending slice",
+      "status": "completed",
+      "startedAt": "2026-03-26T11:45:22.866Z",
+      "completedAt": "2026-03-26T11:45:31.412Z",
+      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-03/traj_ybeuramh9i0k.json",
+      "compactedInto": "compact_gba3aqbygmdu"
+    },
+    "traj_sxxtm9bz1vy9": {
+      "title": "Acknowledge pending core package boundary handoff",
+      "status": "completed",
+      "startedAt": "2026-03-26T11:45:45.781Z",
+      "completedAt": "2026-03-26T11:45:52.621Z",
+      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-03/traj_sxxtm9bz1vy9.json",
+      "compactedInto": "compact_gba3aqbygmdu"
+    },
+    "traj_olazqfp409ea": {
+      "title": "Acknowledge no-change status on core boundary",
+      "status": "completed",
+      "startedAt": "2026-03-26T11:46:09.412Z",
+      "completedAt": "2026-03-26T11:46:16.549Z",
+      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-03/traj_olazqfp409ea.json",
+      "compactedInto": "compact_gba3aqbygmdu"
+    },
+    "traj_zorm1e9dw8t2": {
+      "title": "Add conformance suite to CI for relayfile and relayfile-cloud",
+      "status": "completed",
+      "startedAt": "2026-03-26T11:46:31.895Z",
+      "completedAt": "2026-03-26T11:52:27.510Z",
+      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-03/traj_zorm1e9dw8t2.json",
+      "compactedInto": "compact_gba3aqbygmdu"
+    },
+    "traj_ynec8605xziy": {
+      "title": "Acknowledge agent-3 on conformance CI failure mode",
+      "status": "completed",
+      "startedAt": "2026-03-26T11:52:52.228Z",
+      "completedAt": "2026-03-26T11:54:12.292Z",
+      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-03/traj_ynec8605xziy.json",
+      "compactedInto": "compact_gba3aqbygmdu"
+    },
+    "traj_d5gkggl3e78x": {
+      "title": "Acknowledge agent-3 on PR #10 compatibility baseline",
+      "status": "completed",
+      "startedAt": "2026-03-26T11:54:30.892Z",
+      "completedAt": "2026-03-26T11:54:37.364Z",
+      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-03/traj_d5gkggl3e78x.json",
+      "compactedInto": "compact_gba3aqbygmdu"
+    },
+    "traj_4zoitp4q8ye7": {
+      "title": "Acknowledge extraction handoff to agent-3",
+      "status": "completed",
+      "startedAt": "2026-03-26T11:54:52.892Z",
+      "completedAt": "2026-03-26T11:55:05.581Z",
+      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-03/traj_4zoitp4q8ye7.json",
+      "compactedInto": "compact_gba3aqbygmdu"
+    },
+    "traj_1xyc6inu1sot": {
+      "title": "Acknowledge standby after CI task completion",
+      "status": "completed",
+      "startedAt": "2026-03-26T11:55:24.041Z",
+      "completedAt": "2026-03-26T11:55:41.285Z",
+      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-03/traj_1xyc6inu1sot.json",
+      "compactedInto": "compact_gba3aqbygmdu"
+    },
+    "traj_gf3tmf1adths": {
+      "title": "Final standby acknowledgment",
+      "status": "completed",
+      "startedAt": "2026-03-26T11:55:53.039Z",
+      "completedAt": "2026-03-26T11:56:02.811Z",
+      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-03/traj_gf3tmf1adths.json",
+      "compactedInto": "compact_gba3aqbygmdu"
+    },
+    "traj_npyslqkw2at8": {
+      "title": "Private standby acknowledgment to avoid channel noise",
+      "status": "completed",
+      "startedAt": "2026-03-26T11:56:16.029Z",
+      "completedAt": "2026-03-26T12:23:27.261Z",
+      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-03/traj_npyslqkw2at8.json",
+      "compactedInto": "compact_gba3aqbygmdu"
+    },
+    "traj_c16kiui2nh7o": {
+      "title": "Implement relayfile-core webhooks and export modules",
+      "status": "completed",
+      "startedAt": "2026-03-26T12:25:27.486Z",
+      "completedAt": "2026-03-26T12:32:34.768Z",
+      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-03/traj_c16kiui2nh7o.json",
+      "compactedInto": "compact_gba3aqbygmdu"
+    },
+    "traj_r9tri0w8camb": {
+      "title": "Take over operations.ts and writeback.ts extraction after agent-6 became unresponsive",
+      "status": "completed",
+      "startedAt": "2026-03-26T12:33:43.285Z",
+      "completedAt": "2026-03-26T12:38:40.626Z",
+      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-03/traj_r9tri0w8camb.json",
+      "compactedInto": "compact_gba3aqbygmdu"
+    },
+    "traj_2tuhrtxacmcv": {
+      "title": "Fix webhook alias-scan pagination fallback",
+      "status": "completed",
+      "startedAt": "2026-03-26T12:39:20.707Z",
+      "completedAt": "2026-03-26T12:43:37.613Z",
+      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-03/traj_2tuhrtxacmcv.json",
+      "compactedInto": "compact_gba3aqbygmdu"
+    },
+    "traj_8td8qau7gvmk": {
+      "title": "Availability check for relayfile-cloud workspace.ts refactor to use @relayfile/core",
+      "status": "completed",
+      "startedAt": "2026-03-26T12:54:29.505Z",
+      "completedAt": "2026-03-26T13:30:24.088Z",
+      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-03/traj_8td8qau7gvmk.json",
+      "compactedInto": "compact_gba3aqbygmdu"
+    },
+    "traj_yxwevikwodcd": {
+      "title": "Refactor relayfile-cloud workspace.ts monolith into extracted handler and infrastructure files",
+      "status": "completed",
+      "startedAt": "2026-03-26T13:34:57.363Z",
+      "completedAt": "2026-03-26T13:55:59.314Z",
+      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-03/traj_yxwevikwodcd.json",
+      "compactedInto": "compact_gba3aqbygmdu"
+    },
+    "traj_40co0j1gn351": {
+      "title": "Implement mount entry point and tests for wf-fuse-mount assignment",
+      "status": "completed",
+      "startedAt": "2026-03-26T21:57:35.890Z",
+      "completedAt": "2026-03-26T21:59:35.675Z",
+      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-03/traj_40co0j1gn351.json",
+      "compactedInto": "compact_gba3aqbygmdu"
+    },
+    "traj_meqsvkx53xhx": {
+      "title": "FUSE mount implementation for relayfile",
+      "status": "completed",
+      "startedAt": "2026-03-26T22:07:18.234Z",
+      "completedAt": "2026-03-26T22:07:30.294Z",
+      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-03/traj_meqsvkx53xhx.json",
+      "compactedInto": "compact_gba3aqbygmdu"
+    },
+    "traj_x9fgb9v5wgb0": {
+      "title": "Add .relayfile.acl enforcement to Go HTTP file handlers",
+      "status": "completed",
+      "startedAt": "2026-03-27T09:02:15.039Z",
+      "completedAt": "2026-03-27T09:03:52.376Z",
+      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-03/traj_x9fgb9v5wgb0.json",
+      "compactedInto": "compact_gba3aqbygmdu"
+    },
+    "traj_jo2w3zttv20r": {
+      "title": "Fix build or test failures in internal/httpapi",
+      "status": "completed",
+      "startedAt": "2026-03-27T09:05:50.301Z",
+      "completedAt": "2026-03-27T09:06:08.952Z",
+      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-03/traj_jo2w3zttv20r.json",
+      "compactedInto": "compact_gba3aqbygmdu"
+    },
+    "traj_t8r86rp3igce": {
+      "title": "Refactor mount syncer to event-driven local changes",
+      "status": "active",
+      "startedAt": "2026-03-27T11:03:44.254Z",
+      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/active/traj_t8r86rp3igce.json"
+    },
+    "traj_1774356734791_b43723dd": {
+      "title": "test-relayfile-e2e-workflow",
+      "status": "completed",
+      "startedAt": "2026-03-24T12:52:14.791Z",
+      "completedAt": "2026-03-24T12:57:21.356Z",
+      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/traj_1774356734791_b43723dd.json",
+      "compactedInto": "compact_gba3aqbygmdu"
+    },
+    "traj_1774359060261_2b743d57": {
+      "title": "relayfile-bulk-and-export-workflow",
+      "status": "completed",
+      "startedAt": "2026-03-24T13:31:00.261Z",
+      "completedAt": "2026-03-24T13:53:07.944Z",
+      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/traj_1774359060261_2b743d57.json",
+      "compactedInto": "compact_gba3aqbygmdu"
+    },
+    "traj_1774360817739_2de3f716": {
+      "title": "relayfile-developer-experience-workflow",
+      "status": "completed",
+      "startedAt": "2026-03-24T14:00:17.739Z",
+      "completedAt": "2026-03-24T14:11:29.834Z",
+      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/traj_1774360817739_2de3f716.json",
+      "compactedInto": "compact_gba3aqbygmdu"
+    },
+    "traj_1774361927375_bfc3ebdb": {
+      "title": "relayfile-ci-and-publish-workflow",
+      "status": "completed",
+      "startedAt": "2026-03-24T14:18:47.375Z",
+      "completedAt": "2026-03-24T14:25:04.588Z",
+      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/traj_1774361927375_bfc3ebdb.json",
+      "compactedInto": "compact_gba3aqbygmdu"
+    },
+    "traj_1774363487366_9216d944": {
+      "title": "relayfile-cloud-server-workflow",
+      "status": "completed",
+      "startedAt": "2026-03-24T14:44:47.366Z",
+      "completedAt": "2026-03-24T15:04:53.094Z",
+      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/traj_1774363487366_9216d944.json",
+      "compactedInto": "compact_gba3aqbygmdu"
+    },
+    "traj_1774364941031_4ff5fe6a": {
+      "title": "relayfile-landing-page-workflow",
+      "status": "completed",
+      "startedAt": "2026-03-24T15:09:01.031Z",
+      "completedAt": "2026-03-24T15:16:31.695Z",
+      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/traj_1774364941031_4ff5fe6a.json",
+      "compactedInto": "compact_gba3aqbygmdu"
+    },
+    "traj_1774516051670_ddd78d29": {
+      "title": "autofix-swarm-Agentworkforce-relayfile-workflow",
+      "status": "completed",
+      "startedAt": "2026-03-26T09:07:31.670Z",
+      "completedAt": "2026-03-26T09:11:40.497Z",
+      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/traj_1774516051670_ddd78d29.json",
+      "compactedInto": "compact_gba3aqbygmdu"
+    },
+    "traj_1774516812234_aced5eac": {
+      "title": "autofix-swarm-Agentworkforce-relayfile-workflow",
+      "status": "completed",
+      "startedAt": "2026-03-26T09:20:12.234Z",
+      "completedAt": "2026-03-26T09:27:12.758Z",
+      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/traj_1774516812234_aced5eac.json",
+      "compactedInto": "compact_gba3aqbygmdu"
+    },
+    "traj_1774517989035_bba5a80e": {
+      "title": "autofix-swarm-Agentworkforce-relayfile-workflow",
+      "status": "completed",
+      "startedAt": "2026-03-26T09:39:49.035Z",
+      "completedAt": "2026-03-26T09:43:15.179Z",
+      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/traj_1774517989035_bba5a80e.json",
+      "compactedInto": "compact_gba3aqbygmdu"
+    },
+    "traj_1774540728456_f332c537": {
+      "title": "review-pr-11-workflow",
+      "status": "completed",
+      "startedAt": "2026-03-26T15:58:48.456Z",
+      "completedAt": "2026-03-26T16:11:28.964Z",
+      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/traj_1774540728456_f332c537.json",
+      "compactedInto": "compact_gba3aqbygmdu"
+    },
+    "traj_1774542740854_60ae7fb4": {
+      "title": "review-pr-11-workflow",
+      "status": "completed",
+      "startedAt": "2026-03-26T16:32:20.854Z",
+      "completedAt": "2026-03-26T16:36:04.280Z",
+      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/traj_1774542740854_60ae7fb4.json",
+      "compactedInto": "compact_gba3aqbygmdu"
+    },
+    "traj_1774543576754_fb0bd663": {
+      "title": "review-pr-11-workflow",
+      "status": "completed",
+      "startedAt": "2026-03-26T16:46:16.754Z",
+      "completedAt": "2026-03-26T16:56:10.841Z",
+      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/traj_1774543576754_fb0bd663.json",
+      "compactedInto": "compact_gba3aqbygmdu"
+    },
+    "traj_1774562232812_f9733ecf": {
+      "title": "fuse-mount-workflow",
+      "status": "completed",
+      "startedAt": "2026-03-26T21:57:12.812Z",
+      "completedAt": "2026-03-26T22:10:22.912Z",
+      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/traj_1774562232812_f9733ecf.json",
+      "compactedInto": "compact_gba3aqbygmdu"
+    },
+    "traj_1774602109268_eff33287": {
+      "title": "acl-enforcement-and-scope-compat-workflow",
+      "status": "completed",
+      "startedAt": "2026-03-27T09:01:49.268Z",
+      "completedAt": "2026-03-27T09:06:14.803Z",
+      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/traj_1774602109268_eff33287.json",
+      "compactedInto": "compact_gba3aqbygmdu"
+    },
+    "traj_1774603847685_ac433dda": {
+      "title": "permission-enforcing-mount-workflow",
+      "status": "completed",
+      "startedAt": "2026-03-27T09:30:47.685Z",
+      "completedAt": "2026-03-27T09:37:03.236Z",
+      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/traj_1774603847685_ac433dda.json",
+      "compactedInto": "compact_gba3aqbygmdu"
+    },
+    "traj_1774607161674_21308fb0": {
+      "title": "live-sync-enforcement-workflow",
+      "status": "completed",
+      "startedAt": "2026-03-27T10:26:01.674Z",
+      "completedAt": "2026-03-27T10:27:05.361Z",
+      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/traj_1774607161674_21308fb0.json",
+      "compactedInto": "compact_gba3aqbygmdu"
+    },
+    "traj_1774609380795_c79bc675": {
+      "title": "fsnotify-mount-workflow",
+      "status": "completed",
+      "startedAt": "2026-03-27T11:03:00.795Z",
+      "completedAt": "2026-03-27T11:06:50.131Z",
+      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/traj_1774609380795_c79bc675.json",
+      "compactedInto": "compact_gba3aqbygmdu"
+    },
+    "traj_1774609749676_fa666d38": {
+      "title": "permission-test-coverage-workflow",
+      "status": "completed",
+      "startedAt": "2026-03-27T11:09:09.676Z",
+      "completedAt": "2026-03-27T11:11:17.845Z",
+      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/traj_1774609749676_fa666d38.json",
+      "compactedInto": "compact_gba3aqbygmdu"
+    },
+    "traj_1774610908751_06eaa6c8": {
+      "title": "permission-test-coverage-workflow",
+      "status": "completed",
+      "startedAt": "2026-03-27T11:28:28.751Z",
+      "completedAt": "2026-03-27T11:30:04.400Z",
+      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/traj_1774610908751_06eaa6c8.json",
+      "compactedInto": "compact_gba3aqbygmdu"
+    },
+    "traj_1774724999189_2f006fb0": {
+      "title": "autofix-swarm-Agentworkforce-relayfile-workflow",
+      "status": "completed",
+      "startedAt": "2026-03-28T19:09:59.189Z",
+      "completedAt": "2026-03-28T19:11:51.925Z",
+      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/traj_1774724999189_2f006fb0.json",
+      "compactedInto": "compact_gba3aqbygmdu"
+    }
+  }
+}

@@ -1,0 +1,451 @@
+{
+  "version": "1.0.0",
+  "id": "d62880eb-dca0-45bd-b516-8146215bf88d",
+  "timestamp": "2026-03-26T13:30:24.156Z",
+  "trajectory": "traj_8td8qau7gvmk",
+  "files": [
+    {
+      "path": "package.json",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 2,
+              "end_line": 15,
+              "revision": "6ade4d79a22fc4130e23974d4ed20e0c64553c38"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "packages/cli/package.json",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 14,
+              "end_line": 20,
+              "revision": "6ade4d79a22fc4130e23974d4ed20e0c64553c38"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "packages/cli/scripts/install.js",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": []
+        }
+      ]
+    },
+    {
+      "path": "packages/core/package.json",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 1,
+              "end_line": 40,
+              "revision": "6ade4d79a22fc4130e23974d4ed20e0c64553c38"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "packages/core/src/acl.ts",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 1,
+              "end_line": 187,
+              "revision": "6ade4d79a22fc4130e23974d4ed20e0c64553c38"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "packages/core/src/events.ts",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 1,
+              "end_line": 60,
+              "revision": "6ade4d79a22fc4130e23974d4ed20e0c64553c38"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "packages/core/src/export.ts",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 1,
+              "end_line": 204,
+              "revision": "6ade4d79a22fc4130e23974d4ed20e0c64553c38"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "packages/core/src/files.ts",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 1,
+              "end_line": 361,
+              "revision": "6ade4d79a22fc4130e23974d4ed20e0c64553c38"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "packages/core/src/index.ts",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 1,
+              "end_line": 32,
+              "revision": "6ade4d79a22fc4130e23974d4ed20e0c64553c38"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "packages/core/src/operations.ts",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 1,
+              "end_line": 131,
+              "revision": "6ade4d79a22fc4130e23974d4ed20e0c64553c38"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "packages/core/src/query.ts",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 1,
+              "end_line": 202,
+              "revision": "6ade4d79a22fc4130e23974d4ed20e0c64553c38"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "packages/core/src/semantics.ts",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 1,
+              "end_line": 76,
+              "revision": "6ade4d79a22fc4130e23974d4ed20e0c64553c38"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "packages/core/src/storage.ts",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 1,
+              "end_line": 152,
+              "revision": "6ade4d79a22fc4130e23974d4ed20e0c64553c38"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "packages/core/src/tree.ts",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 1,
+              "end_line": 159,
+              "revision": "6ade4d79a22fc4130e23974d4ed20e0c64553c38"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "packages/core/src/webhooks.ts",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 1,
+              "end_line": 680,
+              "revision": "6ade4d79a22fc4130e23974d4ed20e0c64553c38"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "packages/core/src/writeback.ts",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 1,
+              "end_line": 195,
+              "revision": "6ade4d79a22fc4130e23974d4ed20e0c64553c38"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "packages/core/tsconfig.json",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 1,
+              "end_line": 19,
+              "revision": "6ade4d79a22fc4130e23974d4ed20e0c64553c38"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "packages/sdk/README.md",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": []
+        }
+      ]
+    },
+    {
+      "path": "packages/sdk/package-lock.json",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": []
+        }
+      ]
+    },
+    {
+      "path": "packages/sdk/package.json",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 24,
+              "end_line": 30,
+              "revision": "6ade4d79a22fc4130e23974d4ed20e0c64553c38"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "packages/sdk/src/client.test.ts",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": []
+        }
+      ]
+    },
+    {
+      "path": "packages/sdk/src/client.ts",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": []
+        }
+      ]
+    },
+    {
+      "path": "packages/sdk/src/composio.test.ts",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": []
+        }
+      ]
+    },
+    {
+      "path": "packages/sdk/src/composio.ts",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": []
+        }
+      ]
+    },
+    {
+      "path": "packages/sdk/src/errors.ts",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": []
+        }
+      ]
+    },
+    {
+      "path": "packages/sdk/src/index.ts",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": []
+        }
+      ]
+    },
+    {
+      "path": "packages/sdk/src/nango.ts",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": []
+        }
+      ]
+    },
+    {
+      "path": "packages/sdk/src/provider.ts",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": []
+        }
+      ]
+    },
+    {
+      "path": "packages/sdk/src/types.ts",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": []
+        }
+      ]
+    },
+    {
+      "path": "packages/sdk/src/vitest.d.ts",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": []
+        }
+      ]
+    },
+    {
+      "path": "packages/sdk/tsconfig.json",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": []
+        }
+      ]
+    }
+  ]
+}

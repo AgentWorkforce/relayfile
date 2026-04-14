@@ -1,0 +1,53 @@
+{
+  "id": "traj_lhwmduhvautk",
+  "version": 1,
+  "task": {
+    "title": "Test relayfile multi-agent collaboration behavior locally"
+  },
+  "status": "active",
+  "startedAt": "2026-03-26T10:31:14.821Z",
+  "agents": [
+    {
+      "name": "default",
+      "role": "lead",
+      "joinedAt": "2026-03-26T10:37:18.561Z"
+    }
+  ],
+  "chapters": [
+    {
+      "id": "chap_88frty77em0e",
+      "title": "Work",
+      "agentName": "default",
+      "startedAt": "2026-03-26T10:37:18.561Z",
+      "events": [
+        {
+          "ts": 1774521438561,
+          "type": "decision",
+          "content": "Treat /writeback/pending after ack as a product gap: Treat /writeback/pending after ack as a product gap",
+          "raw": {
+            "question": "Treat /writeback/pending after ack as a product gap",
+            "chosen": "Treat /writeback/pending after ack as a product gap",
+            "alternatives": [],
+            "reasoning": "Live local testing showed POST /writeback/{id}/ack returns 200 and marks the op succeeded, but GET /writeback/pending still includes the same item because pending results come from queue snapshot state rather than filtering acknowledged operation status."
+          },
+          "significance": "high"
+        }
+      ]
+    }
+  ],
+  "commits": [],
+  "filesChanged": [],
+  "projectId": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile",
+  "tags": [],
+  "_trace": {
+    "startRef": "76843f3521d46858798eec20592586c9daf430b5",
+    "endRef": "76843f3521d46858798eec20592586c9daf430b5"
+  }
+}lesChanged": [],
+  "projectId": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile",
+  "tags": [],
+  "_trace": {
+    "startRef": "76843f3521d46858798eec20592586c9daf430b5",
+    "endRef": "76843f3521d46858798eec20592586c9daf430b5"
+  }
+}

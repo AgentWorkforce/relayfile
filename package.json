@@ -16,7 +16,7 @@
     "@agent-relay/sdk": "latest"
   },
   "devDependencies": {
-    "agent-trajectories": "^0.5.2",
+    "agent-trajectories": "^0.5.4",
     "tsx": "^4.21.0"
   }
 }
