@@ -17,11 +17,21 @@ npx trail start "Task description"
 
 ## When Starting Work
 
-Start a trajectory when beginning a task:
+Before opening a new trajectory, run `trail status` first to see whether one is
+already active. See [Checking Status](#checking-status) for the command.
+
+If `trail status` shows no active trajectory, start a trajectory when beginning
+a task:
 
 ```bash
 trail start "Implement user authentication"
 ```
+
+If `trail status` shows an active trajectory, do not open a duplicate
+trajectory. Workflow-created trajectories (for example, ones created by
+`system: workflow-runner`) should be reused with `trail decision`,
+`trail reflect`, and `trail complete`; trying `trail start` again will fail
+with `Trajectory already active`.
 
 With external task reference:
 ```bash
