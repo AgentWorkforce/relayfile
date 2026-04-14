@@ -17,7 +17,13 @@ npx trail start "Task description"
 
 ## When Starting Work
 
-Start a trajectory when beginning a task:
+Check the current trajectory before starting a new one:
+
+```bash
+trail status
+```
+
+If no trajectory is active, start one when beginning a task:
 
 ```bash
 trail start "Implement user authentication"
@@ -26,6 +32,19 @@ trail start "Implement user authentication"
 With external task reference:
 ```bash
 trail start "Fix login bug" --task "ENG-123"
+```
+
+If `trail status` shows an active trajectory, keep recording work in that trajectory instead of starting another one. Automated runs such as `agent-relay run` may already have an inherited trajectory open.
+
+For an automated run that inherits an active trajectory:
+```bash
+trail decision "Continuing work in inherited workflow trajectory"
+
+trail reflect "Applied the assigned rule updates inside the active trajectory" \
+  --confidence 0.8
+
+trail complete --summary "Finished the assigned rule-file update in the inherited trajectory" \
+  --confidence 0.85
 ```
 
 ## Recording Decisions
