@@ -1,0 +1,243 @@
+package schema
+
+import (
+	"encoding/json"
+	"strings"
+	"testing"
+)
+
+const issueMetaPath = "/github/repos/octocat/hello-world/issues/10/meta.json"
+
+func TestGitHubIssueAdapterConformance(t *testing.T) {
+	err := ValidateContent(issueMetaPath, mustJSON(t, map[string]any{
+		"number": 10,
+		"title":  "Track adapter issue ingestion coverage",
+		"state":  "open",
+		"body":   "We need E2E coverage for issue ingestion and webhook routing.",
+		"labels": []string{"bug"},
+		"assignees": []string{
+			"monalisa",
+		},
+		"author": map[string]any{
+			"avatarUrl": "https://avatars.githubusercontent.com/u/3?v=4",
+			"login":     "hubot",
+		},
+		"milestone":  nil,
+		"created_at": "2026-03-25T10:00:00Z",
+		"updated_at": "2026-03-28T07:45:00Z",
+		"closed_at":  nil,
+		"html_url":   "https://github.com/octocat/hello-world/issues/10",
+	}))
+	if err != nil {
+		t.Fatalf("ValidateContent returned error: %v", err)
+	}
+}
+
+func TestGitHubIssueAdapterConformanceMissingRequired(t *testing.T) {
+	err := ValidateContent(issueMetaPath, mustJSON(t, map[string]any{
+		"number":     10,
+		"state":      "open",
+		"body":       "missing title",
+		"labels":     []string{"bug"},
+		"assignees":  []string{"monalisa"},
+		"author":     map[string]any{"avatarUrl": nil, "login": "hubot"},
+		"milestone":  nil,
+		"created_at": "2026-03-25T10:00:00Z",
+		"updated_at": "2026-03-28T07:45:00Z",
+		"closed_at":  nil,
+		"html_url":   "https://github.com/octocat/hello-world/issues/10",
+	}))
+	if err == nil || !strings.Contains(err.Error(), "title") {
+		t.Fatalf("expected missing title validation error, got %v", err)
+	}
+}
+
+func TestGitHubIssueAdapterConformanceExtraField(t *testing.T) {
+	err := ValidateContent(issueMetaPath, mustJSON(t, map[string]any{
+		"number":     10,
+		"title":      "Track adapter issue ingestion coverage",
+		"state":      "open",
+		"body":       "We need E2E coverage for issue ingestion and webhook routing.",
+		"labels":     []string{"bug"},
+		"assignees":  []string{"monalisa"},
+		"author":     map[string]any{"avatarUrl": "https://avatars.githubusercontent.com/u/3?v=4", "login": "hubot"},
+		"milestone":  nil,
+		"created_at": "2026-03-25T10:00:00Z",
+		"updated_at": "2026-03-28T07:45:00Z",
+		"closed_at":  nil,
+		"html_url":   "https://github.com/octocat/hello-world/issues/10",
+		"provider":   "github",
+	}))
+	if err == nil || !strings.Contains(err.Error(), "additional properties") {
+		t.Fatalf("expected additionalProperties validation error, got %v", err)
+	}
+}
+
+func TestGitHubIssueAdapterConformanceInvalidState(t *testing.T) {
+	err := ValidateContent(issueMetaPath, mustJSON(t, map[string]any{
+		"number":     10,
+		"title":      "Track adapter issue ingestion coverage",
+		"state":      "OPEN",
+		"body":       "We need E2E coverage for issue ingestion and webhook routing.",
+		"labels":     []string{"bug"},
+		"assignees":  []string{"monalisa"},
+		"author":     map[string]any{"avatarUrl": "https://avatars.githubusercontent.com/u/3?v=4", "login": "hubot"},
+		"milestone":  nil,
+		"created_at": "2026-03-25T10:00:00Z",
+		"updated_at": "2026-03-28T07:45:00Z",
+		"closed_at":  nil,
+		"html_url":   "https://github.com/octocat/hello-world/issues/10",
+	}))
+	if err == nil || !strings.Contains(err.Error(), "/state") {
+		t.Fatalf("expected enum validation error, got %v", err)
+	}
+}
+
+func TestGitHubIssueCLIConformance(t *testing.T) {
+	raw := map[string]any{
+		"number": 10,
+		"title":  "Track adapter issue ingestion coverage",
+		"state":  "OPEN",
+		"body":   "We need E2E coverage for issue ingestion and webhook routing.",
+		"labels": []any{
+			map[string]any{"name": "bug", "id": "L1", "color": "f00"},
+		},
+		"assignees": []any{
+			map[string]any{"login": "monalisa", "id": "U1"},
+		},
+		"user": map[string]any{
+			"avatar_url": "https://avatars.githubusercontent.com/u/3?v=4",
+			"login":      "hubot",
+		},
+		"milestone": nil,
+		"createdAt": "2026-03-25T10:00:00Z",
+		"updatedAt": "2026-03-28T07:45:00Z",
+		"closedAt":  nil,
+		"url":       "https://github.com/octocat/hello-world/issues/10",
+	}
+
+	err := ValidateContent(issueMetaPath, mustJSON(t, mapCLIToCanonical(raw)))
+	if err != nil {
+		t.Fatalf("ValidateContent returned error: %v", err)
+	}
+}
+
+func TestGitHubIssueCLIConformanceUnmappedFails(t *testing.T) {
+	raw := map[string]any{
+		"number": 10,
+		"title":  "Track adapter issue ingestion coverage",
+		"state":  "OPEN",
+		"body":   "We need E2E coverage for issue ingestion and webhook routing.",
+		"labels": []any{
+			map[string]any{"name": "bug", "id": "L1", "color": "f00"},
+		},
+		"assignees": []any{
+			map[string]any{"login": "monalisa", "id": "U1"},
+		},
+		"user":      map[string]any{"avatar_url": "https://avatars.githubusercontent.com/u/3?v=4", "login": "hubot"},
+		"createdAt": "2026-03-25T10:00:00Z",
+		"updatedAt": "2026-03-28T07:45:00Z",
+		"url":       "https://github.com/octocat/hello-world/issues/10",
+	}
+
+	err := ValidateContent(issueMetaPath, mustJSON(t, raw))
+	if err == nil {
+		t.Fatal("expected raw CLI shape to fail validation")
+	}
+	if !strings.Contains(err.Error(), "author") && !strings.Contains(err.Error(), "created_at") {
+		t.Fatalf("expected canonical field mismatch, got %v", err)
+	}
+}
+
+func TestValidateContentUnknownPath(t *testing.T) {
+	err := ValidateContent("/slack/channels/general/messages/1.json", []byte(`{"ok":true}`))
+	if err != nil {
+		t.Fatalf("expected nil for unknown path, got %v", err)
+	}
+}
+
+func TestValidateContentInvalidJSON(t *testing.T) {
+	err := ValidateContent(issueMetaPath, []byte(`{"number":10`))
+	if err == nil || !strings.Contains(err.Error(), "decode") {
+		t.Fatalf("expected decode error, got %v", err)
+	}
+}
+
+func TestValidateContentNullableFields(t *testing.T) {
+	err := ValidateContent(issueMetaPath, mustJSON(t, map[string]any{
+		"number":     10,
+		"title":      "Track adapter issue ingestion coverage",
+		"state":      "closed",
+		"body":       nil,
+		"labels":     []string{},
+		"assignees":  []string{},
+		"author":     map[string]any{"avatarUrl": nil, "login": nil},
+		"milestone":  nil,
+		"created_at": "2026-03-25T10:00:00Z",
+		"updated_at": "2026-03-28T07:45:00Z",
+		"closed_at":  nil,
+		"html_url":   "https://github.com/octocat/hello-world/issues/10",
+	}))
+	if err != nil {
+		t.Fatalf("expected nullable fields to pass, got %v", err)
+	}
+}
+
+func TestValidateContentMissingOptionalArraysStillFails(t *testing.T) {
+	err := ValidateContent(issueMetaPath, mustJSON(t, map[string]any{
+		"number":     10,
+		"title":      "Track adapter issue ingestion coverage",
+		"state":      "open",
+		"body":       nil,
+		"author":     map[string]any{"avatarUrl": nil, "login": "hubot"},
+		"milestone":  nil,
+		"created_at": "2026-03-25T10:00:00Z",
+		"updated_at": "2026-03-28T07:45:00Z",
+		"closed_at":  nil,
+		"html_url":   "https://github.com/octocat/hello-world/issues/10",
+	}))
+	if err == nil || !strings.Contains(err.Error(), "labels") {
+		t.Fatalf("expected missing labels validation error, got %v", err)
+	}
+}
+
+func mapCLIToCanonical(raw map[string]any) map[string]any {
+	labels := make([]string, 0)
+	for _, item := range raw["labels"].([]any) {
+		entry := item.(map[string]any)
+		labels = append(labels, entry["name"].(string))
+	}
+
+	assignees := make([]string, 0)
+	for _, item := range raw["assignees"].([]any) {
+		entry := item.(map[string]any)
+		assignees = append(assignees, entry["login"].(string))
+	}
+
+	user := raw["user"].(map[string]any)
+	state := strings.ToLower(raw["state"].(string))
+
+	return map[string]any{
+		"number":     raw["number"],
+		"title":      raw["title"],
+		"state":      state,
+		"body":       raw["body"],
+		"labels":     labels,
+		"assignees":  assignees,
+		"author":     map[string]any{"avatarUrl": user["avatar_url"], "login": user["login"]},
+		"milestone":  raw["milestone"],
+		"created_at": raw["createdAt"],
+		"updated_at": raw["updatedAt"],
+		"closed_at":  raw["closedAt"],
+		"html_url":   raw["url"],
+	}
+}
+
+func mustJSON(t *testing.T, value any) []byte {
+	t.Helper()
+	data, err := json.Marshal(value)
+	if err != nil {
+		t.Fatalf("json.Marshal returned error: %v", err)
+	}
+	return data
+}
