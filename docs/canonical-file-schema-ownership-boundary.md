@@ -116,7 +116,7 @@ The `internal/schema/` package provides `ValidateContent(path string, content []
 - Embeds JSON Schema files via `schemas/embed.go` (`//go:embed`).
 - Uses `santhosh-tekuri/jsonschema/v6` for draft 2020-12 validation with format assertion.
 - Path pattern matching uses regex to map VFS paths to schema files (e.g., `^/github/repos/[^/]+/[^/]+/issues/\d+/meta\.json$`).
-- Returns `nil` for unknown paths (no schema registered) — unknown paths pass silently.
+- Returns `ErrUnknownPath` for unknown paths (no schema registered) — callers can distinguish this case with `errors.Is(err, ErrUnknownPath)`. 
 - Compiles schemas once on first use (`sync.Once` + `sync.Map` cache).
 - **Optional and test-time only** — not in the `Store.WriteFile()` hot path.
 

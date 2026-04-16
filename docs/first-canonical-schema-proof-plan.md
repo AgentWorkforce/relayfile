@@ -117,7 +117,8 @@ Implementation details:
 package schema
 
 // ValidateContent checks whether content conforms to the canonical schema for a
-// registered VFS path. Unknown paths are ignored (returns nil).
+// registered VFS path. Unknown paths return ErrUnknownPath (checkable via
+// errors.Is) so callers can distinguish "not validated" from "valid".
 func ValidateContent(path string, content []byte) error
 ```
 

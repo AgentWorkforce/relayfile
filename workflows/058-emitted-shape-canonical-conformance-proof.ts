@@ -1,3 +1,11 @@
+/**
+ * 058-emitted-shape-canonical-conformance-proof.ts
+ *
+ * Define and implement canonical schema conformance against captured emitted shapes
+ * from real producer paths rather than hand-authored inline payloads.
+ *
+ * Run: agent-relay run workflows/058-emitted-shape-canonical-conformance-proof.ts
+ */
 import { workflow } from '@agent-relay/sdk/workflows';
 import { ClaudeModels, CodexModels } from '@agent-relay/config';
 
