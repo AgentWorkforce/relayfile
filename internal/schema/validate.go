@@ -2,6 +2,7 @@ package schema
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"sync"
@@ -9,6 +10,10 @@ import (
 	schemaassets "github.com/agentworkforce/relayfile/schemas"
 	"github.com/santhosh-tekuri/jsonschema/v6"
 )
+
+// ErrUnknownPath is returned when no schema is registered for the given VFS path.
+// Callers can check for this with errors.Is to distinguish "not validated" from "valid".
+var ErrUnknownPath = errors.New("no schema registered for path")
 
 type registration struct {
 	pattern *regexp.Regexp
@@ -29,11 +34,13 @@ var (
 )
 
 // ValidateContent checks whether content conforms to the canonical schema for a
-// registered VFS path. Unknown paths are ignored.
+// registered VFS path. Returns ErrUnknownPath (checkable via errors.Is) when no
+// schema is registered for the path pattern, nil if validation passes, or a
+// non-nil error for invalid JSON or schema violations.
 func ValidateContent(path string, content []byte) error {
 	schemaPath := registeredSchema(path)
 	if schemaPath == "" {
-		return nil
+		return fmt.Errorf("%w: %s", ErrUnknownPath, path)
 	}
 
 	sch, err := loadSchema(schemaPath)
@@ -94,6 +101,13 @@ func loadSchema(path string) (*jsonschema.Schema, error) {
 	return actual.(*jsonschema.Schema), nil
 }
 
+// TODO: initCompiler uses a global compilerErr that poisons all validation if any
+// single schema fails to compile. Acceptable with one schema; refactor to per-schema
+// error tracking when the second schema is added.
+// TODO: initCompiler and loadSchema each create separate newCompiler() instances.
+// With one schema this works, but $ref across schemas will fail because compilers
+// don't share resource registries. Refactor to a single shared compiler when adding
+// schemas that reference each other.
 func initCompiler() {
 	compilerOnce.Do(func() {
 		for _, item := range registrations {

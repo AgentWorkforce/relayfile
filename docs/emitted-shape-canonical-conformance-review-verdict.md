@@ -2,9 +2,9 @@
 
 ## Verdict
 
-**Partially accepted.**
+**Partially accepted — approved for merge.**
 
-This change materially improves the proof and closes the original adapter-side evidence gap, but it does **not** fully establish emitted-shape canonical conformance for the whole proof boundary because the CLI path is still **Derived**, not **Emitted**.
+This change materially improves the proof and closes the original adapter-side evidence gap, but it does **not** fully establish emitted-shape canonical conformance for the whole proof boundary because the CLI path is still **Derived**, not **Emitted**. This PR is approved for merge; the remaining CLI-emitted evidence work is deferred to a future PR.
 
 ## Assessment
 

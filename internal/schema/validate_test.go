@@ -3,6 +3,7 @@ package schema
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -126,8 +127,11 @@ func TestGitHubIssueCLIConformanceUnmappedFails(t *testing.T) {
 
 func TestValidateContentUnknownPath(t *testing.T) {
 	err := ValidateContent("/slack/channels/general/messages/1.json", []byte(`{"ok":true}`))
-	if err != nil {
-		t.Fatalf("expected nil for unknown path, got %v", err)
+	if err == nil {
+		t.Fatal("expected ErrUnknownPath, got nil")
+	}
+	if !errors.Is(err, ErrUnknownPath) {
+		t.Fatalf("expected ErrUnknownPath, got %v", err)
 	}
 }
 

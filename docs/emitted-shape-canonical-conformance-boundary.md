@@ -5,7 +5,7 @@
 - Date: 2026-04-16
 - Scope: Close the evidence gap in the first canonical schema proof by validating against real emitted shapes
 - Prerequisites: [first-canonical-schema-proof-boundary.md](first-canonical-schema-proof-boundary.md), [first-canonical-schema-proof-remediation-review-verdict.md](first-canonical-schema-proof-remediation-review-verdict.md) (identified gap)
-- State: **Proposed**
+- State: **Implemented**
 
 ## Problem
 

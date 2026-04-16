@@ -27,6 +27,7 @@
       "type": ["string", "null"]
     },
     "state": {
+      "description": "Issue state, normalized to lowercase. GitHub's GraphQL API returns OPEN/CLOSED; adapters and CLI mappers must lowercase before emitting.",
       "type": ["string", "null"],
       "enum": ["open", "closed", null]
     },
@@ -48,6 +49,7 @@
       "default": []
     },
     "author": {
+      "description": "Issue author. Sub-fields use camelCase (avatarUrl, login) per the nested object convention, unlike top-level snake_case fields.",
       "type": "object",
       "required": [
         "avatarUrl",
