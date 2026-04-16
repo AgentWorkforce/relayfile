@@ -4,7 +4,7 @@
 
 - Date: 2026-04-15
 - Tracks: [first-canonical-schema-proof-remediation-boundary.md](first-canonical-schema-proof-remediation-boundary.md)
-- State: **Complete** — all items verified
+- State: **Complete**
 
 ## Pre-Flight
 

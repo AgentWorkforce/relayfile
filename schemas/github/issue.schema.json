@@ -27,7 +27,7 @@
       "type": ["string", "null"]
     },
     "state": {
-      "description": "Issue state, normalized to lowercase. GitHub's GraphQL API returns OPEN/CLOSED; adapters and CLI mappers must lowercase before emitting.",
+      "description": "Issue state, normalized to lowercase. GitHub GraphQL returns OPEN/CLOSED; canonical form is open/closed.",
       "type": ["string", "null"],
       "enum": ["open", "closed", null]
     },
@@ -35,6 +35,7 @@
       "type": ["string", "null"]
     },
     "labels": {
+      "description": "Label names, flattened from GitHub's nested label objects ({name, id, color}).",
       "type": "array",
       "items": {
         "type": "string"
@@ -42,6 +43,7 @@
       "default": []
     },
     "assignees": {
+      "description": "Assignee login names, flattened from GitHub's nested assignee objects.",
       "type": "array",
       "items": {
         "type": "string"

@@ -5,7 +5,7 @@
 - Date: 2026-04-15
 - Scope: Documentation-only correction — fix test count miscount in proof docs
 - Prerequisites: [first-canonical-schema-proof-review-verdict.md](first-canonical-schema-proof-review-verdict.md) (approved with one documentation correction)
-- State: **Complete** — remediation applied
+- State: **Complete**
 
 ## Finding
 

@@ -6,7 +6,7 @@ This directory is the canonical registry for relayfile file-content schemas.
 |---|---|---|
 | `/github/repos/{owner}/{repo}/issues/{number}/meta.json` | `github/issue.schema.json` | Read |
 
-> **Migration note:** This path pattern replaces the previous `{number}.json` convention. Code targeting the old `/github/repos/{owner}/{repo}/issues/{number}.json` path must be updated.
+> **Migration note:** The issue path was previously `{number}.json`. The canonical path is now `{number}/meta.json`. Code targeting the old pattern must be updated.
 
 ## Evolution Rules
 

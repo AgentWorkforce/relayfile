@@ -11,9 +11,10 @@ import (
 	"github.com/santhosh-tekuri/jsonschema/v6"
 )
 
-// ErrUnknownPath is returned when no schema is registered for the given VFS path.
-// Callers can check for this with errors.Is to distinguish "not validated" from "valid".
-var ErrUnknownPath = errors.New("no schema registered for path")
+// ErrUnknownPath is returned when no canonical schema is registered for the
+// given VFS path. Callers can check for this with errors.Is to distinguish
+// "not validated" from "valid".
+var ErrUnknownPath = errors.New("no canonical schema registered for path")
 
 type registration struct {
 	pattern *regexp.Regexp
@@ -29,14 +30,17 @@ var registrations = []registration{
 
 var (
 	compilerOnce sync.Once
-	compilerErr  error
-	compiled     sync.Map
+	// TODO: compilerErr is a global kill switch — if any single schema fails to
+	// compile during init, all validation is blocked. Refactor to per-schema error
+	// tracking when the second schema is added.
+	compilerErr error
+	compiled    sync.Map
 )
 
 // ValidateContent checks whether content conforms to the canonical schema for a
 // registered VFS path. Returns ErrUnknownPath (checkable via errors.Is) when no
-// schema is registered for the path pattern, nil if validation passes, or a
-// non-nil error for invalid JSON or schema violations.
+// schema is registered for the path pattern, nil when validation passes, or a
+// descriptive error for invalid JSON or schema violations.
 func ValidateContent(path string, content []byte) error {
 	schemaPath := registeredSchema(path)
 	if schemaPath == "" {
@@ -77,6 +81,10 @@ func loadSchema(path string) (*jsonschema.Schema, error) {
 		return cached.(*jsonschema.Schema), nil
 	}
 
+	// NOTE: This fallback path creates a fresh compiler that does not share
+	// state with initCompiler(). If schemas ever use $ref to reference each
+	// other, this will fail to resolve cross-schema references. Refactor to a
+	// single shared compiler instance when the schema set grows.
 	data, err := schemaassets.FS.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read schema %s: %w", path, err)
@@ -101,13 +109,6 @@ func loadSchema(path string) (*jsonschema.Schema, error) {
 	return actual.(*jsonschema.Schema), nil
 }
 
-// TODO: initCompiler uses a global compilerErr that poisons all validation if any
-// single schema fails to compile. Acceptable with one schema; refactor to per-schema
-// error tracking when the second schema is added.
-// TODO: initCompiler and loadSchema each create separate newCompiler() instances.
-// With one schema this works, but $ref across schemas will fail because compilers
-// don't share resource registries. Refactor to a single shared compiler when adding
-// schemas that reference each other.
 func initCompiler() {
 	compilerOnce.Do(func() {
 		for _, item := range registrations {
