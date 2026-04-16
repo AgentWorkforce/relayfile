@@ -1,0 +1,45 @@
+@import "tailwindcss";
+
+:root {
+  --background: #0a0a0b;
+  --foreground: #fafafa;
+  --surface-soft: #18181b;
+  --surface-muted: #27272a;
+  --border-default: #3f3f46;
+  --border-strong: #52525b;
+  --brand-primary: #6366f1;
+  --brand-primary-faint: rgba(99, 102, 241, 0.1);
+  --text-secondary: #a1a1aa;
+  --status-warning: #f59e0b;
+  --status-success: #10b981;
+  --status-error: #ef4444;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+}
+
+.brand-grid {
+  background-image:
+    linear-gradient(rgba(99, 102, 241, 0.03) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(99, 102, 241, 0.03) 1px, transparent 1px);
+  background-size: 40px 40px;
+}
+
+.brand-glass {
+  background: rgba(24, 24, 27, 0.8);
+  backdrop-filter: blur(12px);
+  border: 1px solid var(--border-default);
+  border-radius: 12px;
+}
+
+.brand-card {
+  background: var(--surface-soft);
+  border: 1px solid var(--border-default);
+  border-radius: 12px;
+}
