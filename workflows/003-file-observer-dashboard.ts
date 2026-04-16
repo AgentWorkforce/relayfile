@@ -9,6 +9,7 @@
  */
 
 const { workflow } = require('@agent-relay/sdk/workflows');
+const { ClaudeModels, CodexModels } = require('@agent-relay/config');
 
 const RELAYFILE_ROOT = process.env.RELAYFILE_PATH || process.cwd();
 const FILE_OBSERVER_DIR = `${RELAYFILE_ROOT}/packages/file-observer`;
@@ -24,33 +25,39 @@ async function main() {
 
     .agent('researcher', {
       cli: 'claude',
+      model: ClaudeModels.SONNET,
       preset: 'analyst',
       role: 'Researches best practices for file explorer dashboards',
     })
     .agent('designer', {
       cli: 'claude',
+      model: ClaudeModels.SONNET,
       preset: 'analyst',
       role: 'Designs the dashboard UI and component structure',
     })
     .agent('builder-package', {
       cli: 'codex',
+      model: CodexModels.GPT_5_4,
       preset: 'worker',
-      role: 'Creates package structure and config files',
+      role: 'Creates package structure and config files. IMPORTANT: After local dev server starts, verify the UI looks beautiful using browser automation or manual inspection. The 80-100 workflow requires visual verification that the dashboard is beautiful, not just that tests pass.',
     })
     .agent('builder-components', {
       cli: 'codex',
+      model: CodexModels.GPT_5_4,
       preset: 'worker',
-      role: 'Implements React components for the dashboard',
+      role: 'Implements React components for the dashboard. IMPORTANT: Use the frontendImplementer persona patterns from workforce package when implementing UI components. Focus on accessibility, UX, and visual appeal.',
     })
     .agent('builder-api', {
       cli: 'codex',
+      model: CodexModels.GPT_5_4,
       preset: 'worker',
       role: 'Implements API client and hooks for relayfile',
     })
     .agent('tester', {
       cli: 'codex',
+      model: CodexModels.GPT_5_4,
       preset: 'worker',
-      role: 'Writes and runs E2E tests for the dashboard',
+      role: 'Writes and runs E2E tests for the dashboard. IMPORTANT: The 80-100 workflow requires running the dev server and verifying the UI visually with Playwright or similar browser automation - not just unit tests. Before declaring done, verify the page loads and looks correct in a browser.',
     })
 
     // Phase 1: Discovery - Research best practices
@@ -61,6 +68,7 @@ async function main() {
 2. Real-time file synchronization patterns
 3. Beautiful dashboard aesthetics with dark mode
 4. Relaycast observer-dashboard implementation (in ../relaycast/packages/observer-dashboard)
+5. Check if workforce package has relevant personas (capabilityDiscoverer, frontendImplementer) that could be used - look at /Users/khaliqgant/Projects/AgentWorkforce/workforce/packages/workload-router/src/generated/personas.ts
 
 Focus on:
 - Clean, minimal design with proper spacing
@@ -69,13 +77,44 @@ Focus on:
 - Smooth animations and transitions
 - Mobile responsiveness
 
+IMPORTANT: If capabilityDiscoverer or frontendImplementer personas from workforce are relevant, note how they could be integrated via usePersona() API.
+
 Provide a summary of design patterns and recommendations. End with DESIGN_RESEARCH_COMPLETE.`,
       verification: { type: 'output_contains', value: 'DESIGN_RESEARCH_COMPLETE' },
+    })
+
+    // Phase 1b: Use usePersona to discover existing skills/capabilities
+    .step('discover-capabilities', {
+      agent: 'researcher',
+      dependsOn: ['research-dashboard-patterns'],
+      task: `Use usePersona from the workforce package to discover relevant skills and capabilities.
+
+First, ensure the workforce package is available by running:
+  cd /Users/khaliqgant/Projects/AgentWorkforce/workforce && npm run build
+  cd /Users/khaliqgant/Projects/AgentWorkforce/relayfile && npm install file:../workforce/packages/workload-router
+
+Then create a small script that calls usePersona('capability-discovery') to find skills for:
+- Building file explorer dashboards
+- Real-time file watching/sync
+- Beautiful React UI components
+- Playwright E2E testing
+
+The usePersona call should search skill.sh and prpm.dev for relevant skills.
+
+Example approach:
+1. Link or install the workforce package
+2. Create a small script that imports usePersona and calls it
+3. Run the script to discover relevant capabilities
+4. Report what skills/capabilities were found and how to install them
+
+End with CAPABILITY_DISCOVERY_COMPLETE and list the found skills with install commands.`,
+      verification: { type: 'output_contains', value: 'CAPABILITY_DISCOVERY_COMPLETE' },
     })
 
     // Phase 2: Read existing structure
     .step('read-relayfile-structure', {
       type: 'deterministic',
+      dependsOn: ['discover-capabilities'],
       command: `ls -la ${RELAYFILE_ROOT} && ls -la ${RELAYFILE_ROOT}/site`,
       captureOutput: true,
     })
@@ -89,7 +128,7 @@ Provide a summary of design patterns and recommendations. End with DESIGN_RESEAR
     // Phase 3: Design
     .step('design-dashboard', {
       agent: 'designer',
-      dependsOn: ['research-dashboard-patterns', 'read-relayfile-structure', 'read-observer-dashboard'],
+      dependsOn: ['research-dashboard-patterns', 'discover-capabilities', 'read-relayfile-structure', 'read-observer-dashboard'],
       task: `Design the file observer dashboard for relayfile. 
 
 Research findings:
@@ -474,10 +513,29 @@ Re-run: cd packages/file-observer && npm test`,
       failOnError: false,
     })
 
+    // Visual verification step - ensure UI looks beautiful
+    .step('verify-ui-beautiful', {
+      agent: 'builder-components',
+      dependsOn: ['test-local-dev'],
+      task: `The dev server has been started. Now verify the UI looks beautiful:
+1. The dashboard should be accessible at http://localhost:3101
+2. Check that:
+   - Dark theme is applied correctly
+   - File tree renders with proper icons
+   - Layout is clean and professional
+   - No visual glitches or errors in console
+3. If using Playwright or similar, run a quick visual check
+4. Take a screenshot if possible to verify aesthetics
+
+This is required by the 80-100 workflow - the feature must not just work, it must look beautiful.
+End with UI_VERIFIED_BEAUTIFUL when done.`,
+      verification: { type: 'output_contains', value: 'UI_VERIFIED_BEAUTIFUL' },
+    })
+
     // Cloud deployment preparation - Pages app
     .step('create-pages-config', {
       agent: 'builder-package',
-      dependsOn: ['test-local-dev'],
+      dependsOn: ['verify-ui-beautiful'],
       task: `Create packages/file-observer/wrangler.file-observer.toml:
 name = "relayfile-file-observer"
 compatibility_date = "2024-12-01"
