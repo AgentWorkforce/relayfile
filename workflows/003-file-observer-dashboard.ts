@@ -10,8 +10,9 @@
 
 const { workflow } = require('@agent-relay/sdk/workflows');
 
-const RELAYFILE_ROOT = '/Users/khaliqgant/Projects/AgentWorkforce/relayfile';
+const RELAYFILE_ROOT = process.env.RELAYFILE_PATH || process.cwd();
 const FILE_OBSERVER_DIR = `${RELAYFILE_ROOT}/packages/file-observer`;
+const FILE_OBSERVER_ROUTER_DIR = `${RELAYFILE_ROOT}/packages/file-observer-router`;
 
 async function main() {
   const result = await workflow('file-observer-dashboard')
@@ -380,7 +381,7 @@ Use the relayfile API patterns. Include loading states and error handling.`,
     .step('install-dependencies', {
       type: 'deterministic',
       dependsOn: ['create-use-file-events-hook'],
-      command: `cd ${FILE_OBSERVER_DIR} && npm install 2>&1 | tail -20`,
+      command: `set -o pipefail && cd ${FILE_OBSERVER_DIR} && npm install 2>&1 | tail -20`,
       captureOutput: true,
       failOnError: true,
     })
@@ -389,7 +390,7 @@ Use the relayfile API patterns. Include loading states and error handling.`,
     .step('build-dashboard', {
       type: 'deterministic',
       dependsOn: ['install-dependencies'],
-      command: `cd ${FILE_OBSERVER_DIR} && npm run build 2>&1 | tail -30`,
+      command: `set -o pipefail && cd ${FILE_OBSERVER_DIR} && npm run build 2>&1 | tail -30`,
       captureOutput: true,
       failOnError: false,
     })
@@ -410,7 +411,7 @@ Re-run: cd packages/file-observer && npm run build`,
     .step('build-final', {
       type: 'deterministic',
       dependsOn: ['fix-build-errors'],
-      command: `cd ${FILE_OBSERVER_DIR} && npm run build 2>&1 | tail -20`,
+      command: `set -o pipefail && cd ${FILE_OBSERVER_DIR} && npm run build 2>&1 | tail -20`,
       captureOutput: true,
       failOnError: true,
     })
@@ -431,7 +432,7 @@ Re-run: cd packages/file-observer && npm run build`,
     .step('run-e2e-tests', {
       type: 'deterministic',
       dependsOn: ['create-e2e-tests'],
-      command: `cd ${FILE_OBSERVER_DIR} && npm test 2>&1 | tail -40`,
+      command: `set -o pipefail && cd ${FILE_OBSERVER_DIR} && npm test 2>&1 | tail -40`,
       captureOutput: true,
       failOnError: false,
     })
@@ -460,7 +461,7 @@ Re-run: cd packages/file-observer && npm test`,
     .step('verify-tests-pass', {
       type: 'deterministic',
       dependsOn: ['run-e2e-final'],
-      command: `cd ${FILE_OBSERVER_DIR} && npm run build 2>&1 | tail -10`,
+      command: `set -o pipefail && cd ${FILE_OBSERVER_DIR} && npm run build 2>&1 | tail -10`,
       captureOutput: true,
       failOnError: true,
     })
@@ -613,6 +614,7 @@ test -f ${FILE_OBSERVER_DIR}/package.json && echo "✓ package.json" && \
 test -f ${FILE_OBSERVER_DIR}/next.config.js && echo "✓ next.config.js" && \
 test -f ${FILE_OBSERVER_DIR}/tsconfig.json && echo "✓ tsconfig.json" && \
 test -f ${FILE_OBSERVER_DIR}/postcss.config.mjs && echo "✓ postcss.config.mjs" && \
+test -f ${FILE_OBSERVER_DIR}/DESIGN.md && echo "✓ DESIGN.md" && \
 test -f ${FILE_OBSERVER_DIR}/src/app/layout.tsx && echo "✓ layout.tsx" && \
 test -f ${FILE_OBSERVER_DIR}/src/app/globals.css && echo "✓ globals.css" && \
 test -f ${FILE_OBSERVER_DIR}/src/app/page.tsx && echo "✓ page.tsx" && \
@@ -622,11 +624,12 @@ test -f ${FILE_OBSERVER_DIR}/src/components/WorkspaceSelector.tsx && echo "✓ W
 test -f ${FILE_OBSERVER_DIR}/src/lib/relayfile-client.ts && echo "✓ relayfile-client.ts" && \
 test -f ${FILE_OBSERVER_DIR}/src/hooks/useFileTree.ts && echo "✓ useFileTree.ts" && \
 test -f ${FILE_OBSERVER_DIR}/src/hooks/useFileEvents.ts && echo "✓ useFileEvents.ts" && \
+test -f ${FILE_OBSERVER_DIR}/tests/file-observer.test.ts && echo "✓ file-observer.test.ts" && \
 test -f ${FILE_OBSERVER_DIR}/wrangler.file-observer.toml && echo "✓ wrangler config" && \
-test -f ${RELAYFILE_ROOT}/packages/file-observer-router/package.json && echo "✓ router package.json" && \
-test -f ${RELAYFILE_ROOT}/packages/file-observer-router/src/worker.ts && echo "✓ router worker.ts" && \
-test -f ${RELAYFILE_ROOT}/packages/file-observer-router/wrangler.toml && echo "✓ router wrangler.toml" && \
-test -f ${RELAYFILE_ROOT}/packages/file-observer-router/tsconfig.json && echo "✓ router tsconfig.json" && \
+test -f ${FILE_OBSERVER_ROUTER_DIR}/package.json && echo "✓ router package.json" && \
+test -f ${FILE_OBSERVER_ROUTER_DIR}/src/worker.ts && echo "✓ router worker.ts" && \
+test -f ${FILE_OBSERVER_ROUTER_DIR}/wrangler.toml && echo "✓ router wrangler.toml" && \
+test -f ${FILE_OBSERVER_ROUTER_DIR}/tsconfig.json && echo "✓ router tsconfig.json" && \
 echo "=== All files verified ==="`,
       captureOutput: true,
       failOnError: true,
@@ -642,6 +645,7 @@ packages/file-observer/next.config.js \
 packages/file-observer/tsconfig.json \
 packages/file-observer/postcss.config.mjs \
 packages/file-observer/wrangler.file-observer.toml \
+packages/file-observer/DESIGN.md \
 packages/file-observer/src/app/layout.tsx \
 packages/file-observer/src/app/globals.css \
 packages/file-observer/src/app/page.tsx \
@@ -651,6 +655,7 @@ packages/file-observer/src/components/WorkspaceSelector.tsx \
 packages/file-observer/src/lib/relayfile-client.ts \
 packages/file-observer/src/hooks/useFileTree.ts \
 packages/file-observer/src/hooks/useFileEvents.ts \
+packages/file-observer/tests/file-observer.test.ts \
 packages/file-observer-router/package.json \
 packages/file-observer-router/src/worker.ts \
 packages/file-observer-router/wrangler.toml \
@@ -663,6 +668,8 @@ git commit -m "feat: add file-observer dashboard with Cloudflare Worker router
 - Workspace selector dropdown
 - API client and hooks for relayfile
 - WebSocket support for real-time updates
+- E2E tests with Vitest
+- DESIGN.md with component architecture
 
 - Cloudflare Worker router at packages/file-observer-router/
 - Proxies files.relayfile.dev to Cloudflare Pages origin
