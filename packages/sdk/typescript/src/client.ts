@@ -281,7 +281,7 @@ export class RelayFileClient {
   constructor(options: RelayFileClientOptions) {
     this.baseUrl = (options.baseUrl ?? DEFAULT_RELAYFILE_BASE_URL).replace(/\/+$/, "");
     this.tokenProvider = options.token;
-    this.fetchImpl = options.fetchImpl ?? fetch;
+    this.fetchImpl = options.fetchImpl ?? fetch.bind(globalThis);
     this.userAgent = options.userAgent;
     this.retryOptions = normalizeRetryOptions(options.retry);
   }
