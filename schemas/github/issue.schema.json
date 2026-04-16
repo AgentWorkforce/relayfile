@@ -1,0 +1,91 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://relayfile.dev/schemas/github/issue.schema.json",
+  "title": "GitHubIssueMetaFile",
+  "description": "Canonical schema for files at /github/repos/{owner}/{repo}/issues/{number}/meta.json",
+  "type": "object",
+  "required": [
+    "number",
+    "title",
+    "state",
+    "created_at",
+    "updated_at",
+    "body",
+    "labels",
+    "assignees",
+    "author",
+    "milestone",
+    "closed_at",
+    "html_url"
+  ],
+  "properties": {
+    "number": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "title": {
+      "type": ["string", "null"]
+    },
+    "state": {
+      "description": "Issue state, normalized to lowercase. GitHub GraphQL returns OPEN/CLOSED; canonical form is open/closed.",
+      "type": ["string", "null"],
+      "enum": ["open", "closed", null]
+    },
+    "body": {
+      "type": ["string", "null"]
+    },
+    "labels": {
+      "description": "Label names, flattened from GitHub's nested label objects ({name, id, color}).",
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "default": []
+    },
+    "assignees": {
+      "description": "Assignee login names, flattened from GitHub's nested assignee objects.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "default": []
+    },
+    "author": {
+      "description": "Issue author. Sub-fields use camelCase (avatarUrl, login) per the nested object convention, unlike top-level snake_case fields.",
+      "type": "object",
+      "required": [
+        "avatarUrl",
+        "login"
+      ],
+      "properties": {
+        "avatarUrl": {
+          "type": ["string", "null"]
+        },
+        "login": {
+          "type": ["string", "null"]
+        }
+      },
+      "additionalProperties": false
+    },
+    "milestone": {
+      "type": ["string", "null"]
+    },
+    "created_at": {
+      "type": ["string", "null"],
+      "format": "date-time"
+    },
+    "updated_at": {
+      "type": ["string", "null"],
+      "format": "date-time"
+    },
+    "closed_at": {
+      "type": ["string", "null"],
+      "format": "date-time"
+    },
+    "html_url": {
+      "type": "string",
+      "format": "uri"
+    }
+  },
+  "additionalProperties": false
+}
