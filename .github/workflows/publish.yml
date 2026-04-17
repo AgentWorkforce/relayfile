@@ -213,6 +213,10 @@ jobs:
           name: build-output
           path: .
 
+      - name: Restore CLI binary permissions
+        if: matrix.package == 'cli'
+        run: chmod 755 packages/cli/bin/relayfile-cli-*
+
       - name: Update npm for OIDC support
         run: npm install -g npm@latest
 
@@ -251,6 +255,10 @@ jobs:
         with:
           name: build-output
           path: .
+
+      - name: Restore CLI binary permissions
+        if: github.event.inputs.package == 'cli'
+        run: chmod 755 packages/cli/bin/relayfile-cli-*
 
       - name: Update npm for OIDC support
         run: npm install -g npm@latest
