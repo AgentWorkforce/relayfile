@@ -126,6 +126,15 @@ If you want to watch the workspace status while testing:
 relayfile status my-project
 ```
 
+For direct VFS inspection without mounting:
+
+```bash
+relayfile tree my-project / --depth 2
+relayfile tree my-project /github --depth 5 --json
+relayfile read my-project /github/repos/acme/api/pulls/42/metadata.json
+relayfile read my-project /external/blob.bin --output blob.bin
+```
+
 For low-level API testing, you can also inspect the event feed directly:
 
 ```bash

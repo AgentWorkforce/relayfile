@@ -1,0 +1,62 @@
+{
+  "name": "@relayfile/file-observer",
+  "version": "0.1.0",
+  "description": "RelayFile observer dashboard for browsing synced workspace files and metadata",
+  "files": [
+    "src",
+    "next-env.d.ts",
+    "next.config.js",
+    "postcss.config.mjs",
+    "tsconfig.json",
+    "wrangler.file-observer.toml"
+  ],
+  "scripts": {
+    "dev": "next dev --port 3101",
+    "build": "next build",
+    "pages:build": "next build",
+    "start": "next start",
+    "test": "vitest run",
+    "prepublishOnly": "npm run pages:build"
+  },
+  "dependencies": {
+    "class-variance-authority": "^0.7.0",
+    "clsx": "^2.1.0",
+    "lucide-react": "^0.400.0",
+    "next": "^14.2.0",
+    "react": "^18.3.0",
+    "react-dom": "^18.3.0",
+    "tailwind-merge": "^2.3.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4.0.0",
+    "@testing-library/react": "^16.0.0",
+    "@types/node": "^22.0.0",
+    "@types/react": "^18.3.0",
+    "@types/react-dom": "^18.3.0",
+    "jsdom": "^29.0.2",
+    "postcss": "^8.5.0",
+    "tailwindcss": "^4.0.0",
+    "typescript": "^5.7.0",
+    "vitest": "^2.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/AgentWorkforce/relayfile",
+    "directory": "packages/file-observer"
+  },
+  "license": "MIT",
+  "keywords": [
+    "relayfile",
+    "observer",
+    "dashboard",
+    "filesystem",
+    "sync",
+    "agent"
+  ],
+  "engines": {
+    "node": ">=18"
+  }
+}
