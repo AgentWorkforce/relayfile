@@ -205,18 +205,19 @@ func printUsage(w io.Writer) {
 Usage:
   relayfile login --server URL [--token TOKEN]
   relayfile workspace create NAME
+  relayfile workspace use NAME
   relayfile workspace list
   relayfile workspace delete NAME [--yes]
-  relayfile mount WORKSPACE [LOCAL_DIR]
-  relayfile tree WORKSPACE [PATH] [--depth N]
-  relayfile read WORKSPACE PATH
-  relayfile seed WORKSPACE [DIR]
-  relayfile export WORKSPACE --format FORMAT [--output FILE]
-  relayfile status WORKSPACE
+  relayfile mount [WORKSPACE] [LOCAL_DIR]
+  relayfile tree [WORKSPACE] [PATH] [--depth N]
+  relayfile read [WORKSPACE] PATH
+  relayfile seed [WORKSPACE] [DIR]
+  relayfile export [WORKSPACE] --format FORMAT [--output FILE]
+  relayfile status [WORKSPACE]
 
 Subcommands:
   login       Store credentials in ~/.relayfile/credentials.json
-  workspace   Create, list, or delete locally tracked workspaces
+  workspace   Create, select, list, or delete locally tracked workspaces
   mount       Mirror a remote workspace to a local directory
   tree        List a remote workspace path
   read        Print a remote file's content
@@ -279,11 +280,13 @@ func runLogin(args []string, stdin io.Reader, stdout io.Writer) error {
 
 func runWorkspace(args []string, stdin io.Reader, stdout io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("workspace subcommand is required: create, list, or delete")
+		return errors.New("workspace subcommand is required: create, use, list, or delete")
 	}
 	switch args[0] {
 	case "create":
 		return runWorkspaceCreate(args[1:], stdout)
+	case "use":
+		return runWorkspaceUse(args[1:], stdout)
 	case "list":
 		return runWorkspaceList(args[1:], stdout)
 	case "delete":
@@ -322,6 +325,28 @@ func runWorkspaceCreate(args []string, stdout io.Writer) error {
 	return nil
 }
 
+func runWorkspaceUse(args []string, stdout io.Writer) error {
+	fs := flag.NewFlagSet("workspace use", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{})); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return errors.New("usage: relayfile workspace use NAME")
+	}
+
+	record, err := setDefaultWorkspace(fs.Arg(0))
+	if err != nil {
+		return err
+	}
+	workspaceID := record.ID
+	if workspaceID == "" {
+		workspaceID = record.Name
+	}
+	fmt.Fprintf(stdout, "Default workspace set to %s (id: %s)\n", record.Name, workspaceID)
+	return nil
+}
+
 func runWorkspaceList(args []string, stdout io.Writer) error {
 	fs := flag.NewFlagSet("workspace list", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -335,7 +360,8 @@ func runWorkspaceList(args []string, stdout io.Writer) error {
 	}
 
 	creds, _ := loadCredentials()
-	client, err := newAPIClient(resolveServer(*server, creds), resolveToken(*token, creds))
+	tokenValue := resolveToken(*token, creds)
+	client, err := newAPIClient(resolveServer(*server, creds), tokenValue)
 	if err == nil {
 		var remote adminWorkspaceList
 		err = client.getJSON(context.Background(), "/v1/admin/workspaces", &remote)
@@ -357,8 +383,8 @@ func runWorkspaceList(args []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	for _, workspace := range catalog.Workspaces {
-		fmt.Fprintln(stdout, workspace.Name)
+	for _, name := range workspaceCatalogNames(catalog, tokenValue) {
+		fmt.Fprintln(stdout, name)
 	}
 	return nil
 }
@@ -413,6 +439,7 @@ func runMount(args []string) error {
 	remotePath := fs.String("remote-path", envOrDefault("RELAYFILE_REMOTE_PATH", "/"), "remote root path")
 	eventProvider := fs.String("provider", strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_PROVIDER")), "event provider filter")
 	stateFile := fs.String("state-file", strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_STATE_FILE")), "state file path")
+	localDirFlag := fs.String("local-dir", "", "local mirror directory")
 	interval := fs.Duration("interval", durationEnv("RELAYFILE_MOUNT_INTERVAL", 2*time.Second), "sync interval")
 	intervalJitter := fs.Float64("interval-jitter", floatEnv("RELAYFILE_MOUNT_INTERVAL_JITTER", 0.2), "sync interval jitter ratio (0.0-1.0)")
 	timeout := fs.Duration("timeout", durationEnv("RELAYFILE_MOUNT_TIMEOUT", 15*time.Second), "per-sync timeout")
@@ -429,30 +456,46 @@ func runMount(args []string) error {
 		"timeout":         true,
 		"websocket":       false,
 		"once":            false,
+		"local-dir":       true,
 	})); err != nil {
 		return err
 	}
-	if fs.NArg() < 1 || fs.NArg() > 2 {
-		return errors.New("usage: relayfile mount WORKSPACE [LOCAL_DIR]")
+	if fs.NArg() > 2 {
+		return errors.New("usage: relayfile mount [WORKSPACE] [LOCAL_DIR]")
 	}
 
-	workspaceID := strings.TrimSpace(fs.Arg(0))
-	if workspaceID == "" {
-		return errors.New("workspace is required")
-	}
+	workspaceID := ""
 	localDir := "."
-	if fs.NArg() == 2 {
+	tokenValue := strings.TrimSpace(*token)
+	if tokenValue == "" {
+		return errors.New("token is required; run relayfile login or pass --token")
+	}
+	var err error
+	switch fs.NArg() {
+	case 0:
+		workspaceID, err = resolveWorkspaceIDWithToken("", tokenValue)
+		localDir = strings.TrimSpace(*localDirFlag)
+	case 1:
+		workspaceID, err = resolveWorkspaceIDWithToken(fs.Arg(0), tokenValue)
+		localDir = strings.TrimSpace(*localDirFlag)
+	case 2:
+		if strings.TrimSpace(*localDirFlag) != "" {
+			return errors.New("local directory specified twice")
+		}
+		workspaceID, err = resolveWorkspaceIDWithToken(fs.Arg(0), tokenValue)
 		localDir = fs.Arg(1)
+	}
+	if err != nil {
+		return err
+	}
+	if localDir == "" {
+		localDir = "."
 	}
 	absLocalDir, err := filepath.Abs(localDir)
 	if err != nil {
 		return err
 	}
 
-	tokenValue := strings.TrimSpace(*token)
-	if tokenValue == "" {
-		return errors.New("token is required; run relayfile login or pass --token")
-	}
 	if *interval <= 0 {
 		*interval = 2 * time.Second
 	}
@@ -502,26 +545,39 @@ func runTree(args []string, stdout io.Writer) error {
 	})); err != nil {
 		return err
 	}
-	if fs.NArg() < 1 || fs.NArg() > 2 {
-		return errors.New("usage: relayfile tree WORKSPACE [PATH] [--depth N]")
+	if fs.NArg() > 2 {
+		return errors.New("usage: relayfile tree [WORKSPACE] [PATH] [--depth N]")
 	}
 
 	creds, err := loadCredentials()
 	if err != nil {
 		return err
 	}
-	client, err := newAPIClient(resolveServer(*server, creds), resolveToken(*token, creds))
+	tokenValue := resolveToken(*token, creds)
+	client, err := newAPIClient(resolveServer(*server, creds), tokenValue)
 	if err != nil {
 		return err
 	}
 
-	workspaceID := strings.TrimSpace(fs.Arg(0))
-	if workspaceID == "" {
-		return errors.New("workspace is required")
-	}
 	remotePath := strings.TrimSpace(*pathFlag)
-	if fs.NArg() == 2 {
+	var workspaceID string
+	switch fs.NArg() {
+	case 0:
+		workspaceID, err = resolveWorkspaceIDWithToken("", tokenValue)
+	case 1:
+		arg := strings.TrimSpace(fs.Arg(0))
+		if strings.HasPrefix(arg, "/") {
+			workspaceID, err = resolveWorkspaceIDWithToken("", tokenValue)
+			remotePath = arg
+		} else {
+			workspaceID, err = resolveWorkspaceIDWithToken(arg, tokenValue)
+		}
+	case 2:
+		workspaceID, err = resolveWorkspaceIDWithToken(fs.Arg(0), tokenValue)
 		remotePath = strings.TrimSpace(fs.Arg(1))
+	}
+	if err != nil {
+		return err
 	}
 	if remotePath == "" {
 		remotePath = "/"
@@ -594,23 +650,31 @@ func runRead(args []string, stdout io.Writer) error {
 	})); err != nil {
 		return err
 	}
-	if fs.NArg() != 2 {
-		return errors.New("usage: relayfile read WORKSPACE PATH")
+	if fs.NArg() < 1 || fs.NArg() > 2 {
+		return errors.New("usage: relayfile read [WORKSPACE] PATH")
 	}
 
 	creds, err := loadCredentials()
 	if err != nil {
 		return err
 	}
-	client, err := newAPIClient(resolveServer(*server, creds), resolveToken(*token, creds))
+	tokenValue := resolveToken(*token, creds)
+	client, err := newAPIClient(resolveServer(*server, creds), tokenValue)
 	if err != nil {
 		return err
 	}
 
-	workspaceID := strings.TrimSpace(fs.Arg(0))
-	remotePath := strings.TrimSpace(fs.Arg(1))
-	if workspaceID == "" {
-		return errors.New("workspace is required")
+	var workspaceID string
+	var remotePath string
+	if fs.NArg() == 1 {
+		workspaceID, err = resolveWorkspaceIDWithToken("", tokenValue)
+		remotePath = strings.TrimSpace(fs.Arg(0))
+	} else {
+		workspaceID, err = resolveWorkspaceIDWithToken(fs.Arg(0), tokenValue)
+		remotePath = strings.TrimSpace(fs.Arg(1))
+	}
+	if err != nil {
+		return err
 	}
 	if remotePath == "" {
 		return errors.New("path is required")
@@ -663,23 +727,33 @@ func runSeed(args []string, stdout io.Writer) error {
 	})); err != nil {
 		return err
 	}
-	if fs.NArg() < 1 || fs.NArg() > 2 {
-		return errors.New("usage: relayfile seed WORKSPACE [DIR]")
+	if fs.NArg() > 2 {
+		return errors.New("usage: relayfile seed [WORKSPACE] [DIR]")
 	}
 
 	creds, err := loadCredentials()
 	if err != nil {
 		return err
 	}
-	client, err := newAPIClient(resolveServer(*server, creds), resolveToken(*token, creds))
+	tokenValue := resolveToken(*token, creds)
+	client, err := newAPIClient(resolveServer(*server, creds), tokenValue)
 	if err != nil {
 		return err
 	}
 
-	workspaceID := strings.TrimSpace(fs.Arg(0))
+	workspaceID := ""
 	dir := "."
-	if fs.NArg() == 2 {
+	switch fs.NArg() {
+	case 0:
+		workspaceID, err = resolveWorkspaceIDWithToken("", tokenValue)
+	case 1:
+		workspaceID, err = resolveWorkspaceIDWithToken(fs.Arg(0), tokenValue)
+	case 2:
+		workspaceID, err = resolveWorkspaceIDWithToken(fs.Arg(0), tokenValue)
 		dir = fs.Arg(1)
+	}
+	if err != nil {
+		return err
 	}
 	root, err := filepath.Abs(dir)
 	if err != nil {
@@ -728,20 +802,27 @@ func runExport(args []string, stdout io.Writer) error {
 	})); err != nil {
 		return err
 	}
-	if fs.NArg() != 1 {
-		return errors.New("usage: relayfile export WORKSPACE --format FORMAT [--output FILE]")
+	if fs.NArg() > 1 {
+		return errors.New("usage: relayfile export [WORKSPACE] --format FORMAT [--output FILE]")
 	}
 
 	creds, err := loadCredentials()
 	if err != nil {
 		return err
 	}
-	client, err := newAPIClient(resolveServer(*server, creds), resolveToken(*token, creds))
+	tokenValue := resolveToken(*token, creds)
+	client, err := newAPIClient(resolveServer(*server, creds), tokenValue)
 	if err != nil {
 		return err
 	}
 
-	workspaceID := strings.TrimSpace(fs.Arg(0))
+	workspaceID, err := resolveWorkspaceIDWithToken("", tokenValue)
+	if fs.NArg() == 1 {
+		workspaceID, err = resolveWorkspaceIDWithToken(fs.Arg(0), tokenValue)
+	}
+	if err != nil {
+		return err
+	}
 	path := fmt.Sprintf("/v1/workspaces/%s/fs/export?format=%s", url.PathEscape(workspaceID), url.QueryEscape(strings.ToLower(strings.TrimSpace(*format))))
 	body, _, err := client.getBytes(context.Background(), path)
 	if err != nil {
@@ -771,20 +852,27 @@ func runStatus(args []string, stdout io.Writer) error {
 	})); err != nil {
 		return err
 	}
-	if fs.NArg() != 1 {
-		return errors.New("usage: relayfile status WORKSPACE")
+	if fs.NArg() > 1 {
+		return errors.New("usage: relayfile status [WORKSPACE]")
 	}
 
 	creds, err := loadCredentials()
 	if err != nil {
 		return err
 	}
-	client, err := newAPIClient(resolveServer(*server, creds), resolveToken(*token, creds))
+	tokenValue := resolveToken(*token, creds)
+	client, err := newAPIClient(resolveServer(*server, creds), tokenValue)
 	if err != nil {
 		return err
 	}
 
-	workspaceID := strings.TrimSpace(fs.Arg(0))
+	workspaceID, err := resolveWorkspaceIDWithToken("", tokenValue)
+	if fs.NArg() == 1 {
+		workspaceID, err = resolveWorkspaceIDWithToken(fs.Arg(0), tokenValue)
+	}
+	if err != nil {
+		return err
+	}
 	var status syncStatusResponse
 	if err := client.getJSON(context.Background(), fmt.Sprintf("/v1/workspaces/%s/sync/status", url.PathEscape(workspaceID)), &status); err != nil {
 		return err
@@ -1096,6 +1184,39 @@ func saveWorkspaceCatalog(catalog workspaceCatalog) error {
 	return os.WriteFile(workspacesPath(), payload, 0o644)
 }
 
+func setDefaultWorkspace(name string) (workspaceRecord, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return workspaceRecord{}, errors.New("workspace name is required")
+	}
+
+	record, err := upsertWorkspace(name)
+	if err != nil {
+		return workspaceRecord{}, err
+	}
+	catalog, err := loadWorkspaceCatalog()
+	if err != nil {
+		return workspaceRecord{}, err
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	for i := range catalog.Workspaces {
+		if catalog.Workspaces[i].Name == record.Name {
+			if catalog.Workspaces[i].ID == "" {
+				catalog.Workspaces[i].ID = record.Name
+			}
+			catalog.Workspaces[i].LastUsedAt = now
+			record = catalog.Workspaces[i]
+			break
+		}
+	}
+	catalog.Default = record.Name
+	if err := saveWorkspaceCatalog(catalog); err != nil {
+		return workspaceRecord{}, err
+	}
+	return record, nil
+}
+
 func upsertWorkspace(name string) (workspaceRecord, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
@@ -1167,6 +1288,124 @@ func removeWorkspace(name string) (bool, error) {
 		}
 	}
 	return true, saveWorkspaceCatalog(catalog)
+}
+
+func resolveWorkspaceIDWithToken(value, token string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value != "" {
+		if id, ok := catalogWorkspaceID(value); ok {
+			return id, nil
+		}
+		return value, nil
+	}
+
+	if workspaceID := strings.TrimSpace(os.Getenv("RELAYFILE_WORKSPACE")); workspaceID != "" {
+		if id, ok := catalogWorkspaceID(workspaceID); ok {
+			return id, nil
+		}
+		return workspaceID, nil
+	}
+
+	if workspaceID := workspaceIDFromToken(token); workspaceID != "" {
+		if id, ok := catalogWorkspaceID(workspaceID); ok {
+			return id, nil
+		}
+		return workspaceID, nil
+	}
+
+	catalog, err := loadWorkspaceCatalog()
+	if err != nil {
+		return "", err
+	}
+	defaultName := strings.TrimSpace(catalog.Default)
+	if defaultName != "" {
+		if id, ok := catalogWorkspaceIDFromCatalog(catalog, defaultName); ok {
+			return id, nil
+		}
+		return defaultName, nil
+	}
+	return "", errors.New("workspace is required; pass WORKSPACE, set RELAYFILE_WORKSPACE, or run relayfile workspace use NAME")
+}
+
+func catalogWorkspaceID(name string) (string, bool) {
+	catalog, err := loadWorkspaceCatalog()
+	if err != nil {
+		return "", false
+	}
+	return catalogWorkspaceIDFromCatalog(catalog, name)
+}
+
+func catalogWorkspaceIDFromCatalog(catalog workspaceCatalog, name string) (string, bool) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "", false
+	}
+	for _, workspace := range catalog.Workspaces {
+		if workspace.Name == name || workspace.ID == name {
+			if strings.TrimSpace(workspace.ID) != "" {
+				return strings.TrimSpace(workspace.ID), true
+			}
+			return strings.TrimSpace(workspace.Name), true
+		}
+	}
+	return "", false
+}
+
+func workspaceCatalogNames(catalog workspaceCatalog, token string) []string {
+	set := map[string]struct{}{}
+	names := make([]string, 0, len(catalog.Workspaces)+3)
+	add := func(value string) {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			if _, ok := set[value]; ok {
+				return
+			}
+			set[value] = struct{}{}
+			names = append(names, value)
+		}
+	}
+	add(os.Getenv("RELAYFILE_WORKSPACE"))
+	add(workspaceIDFromToken(token))
+	add(catalog.Default)
+
+	localNames := make([]string, 0, len(catalog.Workspaces))
+	for _, workspace := range catalog.Workspaces {
+		name := strings.TrimSpace(workspace.Name)
+		if name == "" {
+			continue
+		}
+		if _, ok := set[name]; ok {
+			continue
+		}
+		localNames = append(localNames, name)
+	}
+	sort.Strings(localNames)
+	names = append(names, localNames...)
+	return names
+}
+
+func workspaceIDFromToken(token string) string {
+	parts := strings.Split(strings.TrimSpace(token), ".")
+	if len(parts) < 2 {
+		return ""
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		payload, err = base64.URLEncoding.DecodeString(parts[1])
+	}
+	if err != nil {
+		return ""
+	}
+	var claims map[string]any
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return ""
+	}
+	for _, key := range []string{"workspace_id", "wks"} {
+		if value, ok := claims[key].(string); ok && strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 func remoteWorkspaceNames(response adminWorkspaceList) []string {

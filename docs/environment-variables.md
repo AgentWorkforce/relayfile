@@ -13,7 +13,7 @@ Relayfile does not use `dotenv` or `godotenv` in application code. Runtime binar
 | --- | --- |
 | `cmd/relayfile` | Direct `os.Getenv(...)` reads plus typed helpers for ints, int64s, durations, and booleans |
 | `cmd/relayfile-mount` | Direct `os.Getenv(...)` reads plus typed helpers for durations, floats, and booleans |
-| `cmd/relayfile-cli` | Direct `os.Getenv(...)` reads for login and mount defaults; falls back to saved credentials for server and token |
+| `cmd/relayfile-cli` | Direct `os.Getenv(...)` reads for login, workspace, and mount defaults; falls back to saved credentials for server/token and saved workspace catalog defaults |
 | `scripts/*.sh` | Standard shell parameter expansion such as `${VAR:-default}` |
 | `scripts/e2e.ts`, `workflows/*.ts` | `process.env.VAR` lookups |
 | `compose.env.example` / `docker-compose.yml` | Docker Compose interpolation and container env injection |
@@ -141,13 +141,17 @@ Queue backend precedence is:
 
 ## CLI Package: `cmd/relayfile-cli`
 
-The CLI only reads a small env surface directly. Workspace ID and local directory for `relayfile mount` come from positional arguments, not env vars.
+The CLI reads a small env surface directly. Workspace resolution for commands
+that accept a workspace is: explicit positional workspace, `RELAYFILE_WORKSPACE`,
+the `workspace_id`/`wks` claim in the active token, then the default stored by
+`relayfile workspace use`.
 
 | Variable | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `RELAYFILE_SERVER` | string | unset | Preferred server override for `relayfile login` and server resolution |
 | `RELAYFILE_BASE_URL` | string | `https://relayfile-api.agentworkforce.workers.dev` for login fallback | Used when `RELAYFILE_SERVER` is unset |
 | `RELAYFILE_TOKEN` | string | unset | Used for `login` and as a token fallback before saved credentials |
+| `RELAYFILE_WORKSPACE` | string | unset | Workspace override for CLI commands when no workspace argument is supplied |
 | `RELAYFILE_REMOTE_PATH` | string | `/` | Mount command default |
 | `RELAYFILE_MOUNT_PROVIDER` | string | unset | Mount command provider filter |
 | `RELAYFILE_MOUNT_STATE_FILE` | string | unset | Mount command state-file default |

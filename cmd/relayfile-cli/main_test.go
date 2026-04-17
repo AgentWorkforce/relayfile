@@ -41,6 +41,27 @@ func TestWorkspaceCreateStoresCatalogEntry(t *testing.T) {
 	}
 }
 
+func TestWorkspaceUseSetsDefaultWorkspace(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	var stdout bytes.Buffer
+	if err := run([]string{"workspace", "use", "ws_cloud"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("run workspace use failed: %v", err)
+	}
+
+	catalog, err := loadWorkspaceCatalog()
+	if err != nil {
+		t.Fatalf("loadWorkspaceCatalog failed: %v", err)
+	}
+	if catalog.Default != "ws_cloud" {
+		t.Fatalf("expected default workspace ws_cloud, got %q", catalog.Default)
+	}
+	if got := stdout.String(); !strings.Contains(got, "Default workspace set to ws_cloud") {
+		t.Fatalf("unexpected workspace use output: %q", got)
+	}
+}
+
 func TestWorkspaceDeleteRemovesCatalogEntry(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)
@@ -59,6 +80,65 @@ func TestWorkspaceDeleteRemovesCatalogEntry(t *testing.T) {
 	}
 	if len(catalog.Workspaces) != 0 {
 		t.Fatalf("expected workspace catalog to be empty, got %d entries", len(catalog.Workspaces))
+	}
+}
+
+func TestWorkspaceListIncludesEnvWorkspaceWhenRemoteListUnavailable(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+	t.Setenv("RELAYFILE_WORKSPACE", "ws_env")
+	if _, err := upsertWorkspace(".relay/vfs"); err != nil {
+		t.Fatalf("upsertWorkspace .relay/vfs failed: %v", err)
+	}
+	if _, err := upsertWorkspace("relay-test"); err != nil {
+		t.Fatalf("upsertWorkspace relay-test failed: %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+	}))
+	defer server.Close()
+
+	if err := saveCredentials(credentials{
+		Server: server.URL,
+		Token:  "token",
+	}); err != nil {
+		t.Fatalf("saveCredentials failed: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := run([]string{"workspace", "list"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("run workspace list failed: %v", err)
+	}
+
+	if got := strings.TrimSpace(stdout.String()); got != "ws_env\n.relay/vfs\nrelay-test" {
+		t.Fatalf("unexpected workspace list output: %q", got)
+	}
+}
+
+func TestWorkspaceListIncludesTokenWorkspaceWhenRemoteListUnavailable(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+	}))
+	defer server.Close()
+
+	if err := saveCredentials(credentials{
+		Server: server.URL,
+		Token:  testJWTWithWorkspace("ws_token"),
+	}); err != nil {
+		t.Fatalf("saveCredentials failed: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := run([]string{"workspace", "list"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("run workspace list failed: %v", err)
+	}
+
+	if got := strings.TrimSpace(stdout.String()); got != "ws_token" {
+		t.Fatalf("unexpected workspace list output: %q", got)
 	}
 }
 
@@ -93,6 +173,40 @@ func TestWorkspaceListFallsBackToAdminSync(t *testing.T) {
 
 	if got := strings.TrimSpace(stdout.String()); got != "ws_alpha\nws_bravo" {
 		t.Fatalf("unexpected workspace list output: %q", got)
+	}
+}
+
+func TestTreeUsesEnvWorkspaceWhenWorkspaceArgOmitted(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+	t.Setenv("RELAYFILE_WORKSPACE", "ws_env")
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/workspaces/ws_env/fs/tree" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		if got := r.URL.Query().Get("path"); got != "/github" {
+			t.Fatalf("expected path /github, got %q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"path":"/github","entries":[],"nextCursor":null}`))
+	}))
+	defer server.Close()
+
+	if err := saveCredentials(credentials{
+		Server: server.URL,
+		Token:  "token",
+	}); err != nil {
+		t.Fatalf("saveCredentials failed: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := run([]string{"tree", "/github"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("run tree failed: %v", err)
+	}
+
+	if got := stdout.String(); !strings.Contains(got, "Tree /github") {
+		t.Fatalf("expected tree header, got %q", got)
 	}
 }
 
@@ -202,6 +316,40 @@ func TestReadPrintsRemoteFileContent(t *testing.T) {
 	}
 }
 
+func TestReadUsesTokenWorkspaceWhenWorkspaceArgOmitted(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	token := testJWTWithWorkspace("ws_token")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/workspaces/ws_token/fs/file" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		if got := r.URL.Query().Get("path"); got != "/docs/readme.md" {
+			t.Fatalf("expected file path, got %q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"path":"/docs/readme.md","revision":"rev_1","contentType":"text/markdown","content":"ok\n"}`))
+	}))
+	defer server.Close()
+
+	if err := saveCredentials(credentials{
+		Server: server.URL,
+		Token:  token,
+	}); err != nil {
+		t.Fatalf("saveCredentials failed: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := run([]string{"read", "/docs/readme.md"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("run read failed: %v", err)
+	}
+
+	if got := stdout.String(); got != "ok\n" {
+		t.Fatalf("unexpected file content: %q", got)
+	}
+}
+
 func TestReadDecodesBase64Content(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)
@@ -257,4 +405,11 @@ func clearRelayfileEnv(t *testing.T) {
 	t.Setenv("RELAYFILE_SERVER", "")
 	t.Setenv("RELAYFILE_BASE_URL", "")
 	t.Setenv("RELAYFILE_TOKEN", "")
+	t.Setenv("RELAYFILE_WORKSPACE", "")
+}
+
+func testJWTWithWorkspace(workspaceID string) string {
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none","typ":"JWT"}`))
+	payload := base64.RawURLEncoding.EncodeToString([]byte(`{"workspace_id":"` + workspaceID + `","agent_name":"test","aud":"relayfile"}`))
+	return header + "." + payload + ".sig"
 }

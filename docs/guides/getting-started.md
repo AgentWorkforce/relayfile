@@ -51,6 +51,7 @@ Create a workspace for the project you want to sync:
 
 ```bash
 relayfile workspace create my-project
+relayfile workspace use my-project
 ```
 
 List available workspaces:
@@ -59,7 +60,13 @@ List available workspaces:
 relayfile workspace list
 ```
 
-If your environment already assigns you a workspace ID, you can use that directly instead of creating one.
+If your environment already assigns you a workspace ID, you can use that directly instead of creating one:
+
+```bash
+relayfile workspace use ws_123
+```
+
+`RELAYFILE_WORKSPACE=ws_123` also overrides the stored default for scripts and agent sessions.
 
 If you are using a hosted deployment, the same login flow works with your hosted base URL:
 
@@ -123,16 +130,16 @@ With the default polling interval, changes usually arrive in about 1-2 seconds.
 If you want to watch the workspace status while testing:
 
 ```bash
-relayfile status my-project
+relayfile status
 ```
 
 For direct VFS inspection without mounting:
 
 ```bash
-relayfile tree my-project / --depth 2
-relayfile tree my-project /github --depth 5 --json
-relayfile read my-project /github/repos/acme/api/pulls/42/metadata.json
-relayfile read my-project /external/blob.bin --output blob.bin
+relayfile tree / --depth 2
+relayfile tree /github --depth 5 --json
+relayfile read /github/repos/acme/api/pulls/42/metadata.json
+relayfile read /external/blob.bin --output blob.bin
 ```
 
 For low-level API testing, you can also inspect the event feed directly:
