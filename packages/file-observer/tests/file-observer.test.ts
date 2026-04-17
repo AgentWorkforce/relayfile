@@ -346,6 +346,7 @@ afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
   vi.useRealTimers();
+  window.history.replaceState({}, '', '/');
   process.env.NEXT_PUBLIC_RELAYFILE_BASE_URL = originalEnv.NEXT_PUBLIC_RELAYFILE_BASE_URL;
   process.env.NEXT_PUBLIC_RELAYFILE_TOKEN = originalEnv.NEXT_PUBLIC_RELAYFILE_TOKEN;
   process.env.NEXT_PUBLIC_RELAYFILE_WORKSPACE_IDS = originalEnv.NEXT_PUBLIC_RELAYFILE_WORKSPACE_IDS;
@@ -353,6 +354,34 @@ afterEach(() => {
 });
 
 describe('file-observer dashboard', () => {
+  it('accepts relayfile connection settings from the URL fragment', async () => {
+    process.env.NEXT_PUBLIC_RELAYFILE_BASE_URL = '';
+    process.env.NEXT_PUBLIC_RELAYFILE_TOKEN = '';
+    process.env.NEXT_PUBLIC_RELAYFILE_WORKSPACE_IDS = '';
+    process.env.NEXT_PUBLIC_RELAYFILE_WORKSPACE_ID = '';
+    window.history.replaceState(
+      {},
+      '',
+      '/#baseUrl=https%3A%2F%2Frelayfile.test&token=public-test-token&workspaceId=default'
+    );
+
+    const fetchMock = createRelayfileFetchMock();
+    vi.stubGlobal('fetch', fetchMock);
+    vi.stubGlobal('React', React);
+    vi.resetModules();
+
+    const module = await import('../src/app/page');
+    const Page = module.default;
+    render(React.createElement(Page));
+
+    await screen.findByText('File tree');
+    await screen.findByRole('button', { name: /README\.md/i });
+
+    const urls = getCallUrls(fetchMock);
+    expect(urls.some((url) => url.origin === 'https://relayfile.test')).toBe(true);
+    expect(urls.some((url) => url.pathname.includes('/v1/workspaces/default/fs/tree'))).toBe(true);
+  });
+
   it('renders the file tree and lazy-loads nested directories', async () => {
     const { fetchMock } = await renderDashboard();
 

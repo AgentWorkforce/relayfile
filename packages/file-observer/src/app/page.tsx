@@ -130,6 +130,12 @@ const PUBLIC_TOKEN = process.env.NEXT_PUBLIC_RELAYFILE_TOKEN ?? '';
 const WORKSPACE_ENV =
   process.env.NEXT_PUBLIC_RELAYFILE_WORKSPACE_IDS ?? process.env.NEXT_PUBLIC_RELAYFILE_WORKSPACE_ID ?? '';
 
+interface ObserverConfig {
+  baseUrl: string;
+  token: string;
+  workspaceIds: string[];
+}
+
 function parseWorkspaceIds(raw: string): string[] {
   return Array.from(
     new Set(
@@ -139,6 +145,40 @@ function parseWorkspaceIds(raw: string): string[] {
         .filter(Boolean)
     )
   );
+}
+
+function readParam(params: URLSearchParams, names: string[]): string {
+  for (const name of names) {
+    const value = params.get(name)?.trim();
+    if (value) {
+      return value;
+    }
+  }
+  return '';
+}
+
+function readRuntimeObserverConfig(): Partial<ObserverConfig> {
+  if (typeof window === 'undefined') {
+    return {};
+  }
+  const hash = window.location.hash.replace(/^#\/?/, '');
+  const hashParams = new URLSearchParams(hash);
+  const searchParams = new URLSearchParams(window.location.search);
+  const read = (names: string[]) => readParam(hashParams, names) || readParam(searchParams, names);
+  const workspaceRaw = read(['workspaceIds', 'workspaceId', 'workspace', 'wks']);
+  const config: Partial<ObserverConfig> = {};
+  const baseUrl = read(['baseUrl', 'server', 'url']);
+  const token = read(['token', 'relayfileToken']);
+  if (baseUrl) {
+    config.baseUrl = baseUrl;
+  }
+  if (token) {
+    config.token = token;
+  }
+  if (workspaceRaw) {
+    config.workspaceIds = parseWorkspaceIds(workspaceRaw);
+  }
+  return config;
 }
 
 function buildQuery(params: Record<string, string | number | undefined>): string {
@@ -398,9 +438,21 @@ function ErrorBanner({
 }
 
 export default function Page() {
-  const workspaceIds = useMemo(() => parseWorkspaceIds(WORKSPACE_ENV), []);
-  const configReady = Boolean(DEFAULT_BASE_URL && PUBLIC_TOKEN && workspaceIds.length > 0);
-  const client = useMemo(() => createRelayFileClient(DEFAULT_BASE_URL, PUBLIC_TOKEN), []);
+  const defaultConfig = useMemo<ObserverConfig>(
+    () => ({
+      baseUrl: DEFAULT_BASE_URL,
+      token: PUBLIC_TOKEN,
+      workspaceIds: parseWorkspaceIds(WORKSPACE_ENV)
+    }),
+    []
+  );
+  const [observerConfig, setObserverConfig] = useState<ObserverConfig>(defaultConfig);
+  const workspaceIds = observerConfig.workspaceIds;
+  const configReady = Boolean(observerConfig.baseUrl && observerConfig.token && workspaceIds.length > 0);
+  const client = useMemo(
+    () => createRelayFileClient(observerConfig.baseUrl, observerConfig.token),
+    [observerConfig.baseUrl, observerConfig.token]
+  );
   const [workspaceId, setWorkspaceId] = useState<string>(workspaceIds[0] ?? '');
   const [selectedEntry, setSelectedEntry] = useState<SelectedEntry | null>(null);
   const [fullViewEntry, setFullViewEntry] = useState<SelectedEntry | null>(null);
@@ -433,6 +485,30 @@ export default function Page() {
   const [syncError, setSyncError] = useState<string | null>(null);
 
   const activeSearch = deferredSearch.trim();
+
+  useEffect(() => {
+    const runtimeConfig = readRuntimeObserverConfig();
+    if (!runtimeConfig.baseUrl && !runtimeConfig.token && !runtimeConfig.workspaceIds) {
+      return;
+    }
+    setObserverConfig((current) => ({
+      baseUrl: runtimeConfig.baseUrl ?? current.baseUrl,
+      token: runtimeConfig.token ?? current.token,
+      workspaceIds: runtimeConfig.workspaceIds?.length ? runtimeConfig.workspaceIds : current.workspaceIds
+    }));
+  }, []);
+
+  useEffect(() => {
+    if (workspaceIds.length === 0) {
+      if (workspaceId) {
+        setWorkspaceId('');
+      }
+      return;
+    }
+    if (!workspaceId || !workspaceIds.includes(workspaceId)) {
+      setWorkspaceId(workspaceIds[0] ?? '');
+    }
+  }, [workspaceId, workspaceIds]);
 
   useEffect(() => {
     treeCacheRef.current = treeCache;

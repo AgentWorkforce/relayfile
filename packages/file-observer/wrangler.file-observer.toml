@@ -1,10 +1,5 @@
 name = "relayfile-file-observer"
 compatibility_date = "2024-12-01"
 
-routes = [
-  { pattern = "files.relayfile.dev/*", zone_name = "relayfile.dev" },
-  { pattern = "staging-files.relayfile.dev/*", zone_name = "relayfile.dev" },
-]
-
-[vars]
-FILE_OBSERVER_ORIGIN = "https://relayfile-file-observer.pages.dev"
+# Public routing is handled by the AgentRelay router:
+# https://agentrelay.com/observer/file -> https://relayfile-file-observer.pages.dev

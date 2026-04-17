@@ -18,8 +18,10 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -33,6 +35,7 @@ import (
 
 const (
 	defaultServerURL        = "https://api.relayfile.dev"
+	defaultObserverURL      = "https://agentrelay.com/observer/file"
 	configDirName           = ".relayfile"
 	websocketReconcileEvery = 10
 )
@@ -191,6 +194,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		return runExport(args[1:], stdout)
 	case "status":
 		return runStatus(args[1:], stdout)
+	case "observer":
+		return runObserver(args[1:], stdout)
 	case "help", "-h", "--help":
 		printUsage(stdout)
 		return nil
@@ -215,6 +220,7 @@ Usage:
   relayfile seed [WORKSPACE] [DIR]
   relayfile export [WORKSPACE] --format FORMAT [--output FILE]
   relayfile status [WORKSPACE]
+  relayfile observer [WORKSPACE] [--no-open]
 
 Subcommands:
   login       Store credentials in ~/.relayfile/credentials.json
@@ -224,7 +230,8 @@ Subcommands:
   read        Print a remote file's content
   seed        Upload a directory tree with bulk writes
   export      Export a workspace as json, tar, or patch
-  status      Show sync status for a workspace`)
+  status      Show sync status for a workspace
+  observer    Open the hosted file observer for a workspace`)
 }
 
 func runLogin(args []string, stdin io.Reader, stdout io.Writer) error {
@@ -915,6 +922,94 @@ func runStatus(args []string, stdout io.Writer) error {
 		fmt.Fprintln(stdout, line)
 	}
 	return nil
+}
+
+func runObserver(args []string, stdout io.Writer) error {
+	fs := flag.NewFlagSet("observer", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	server := fs.String("server", "", "relayfile server URL override")
+	token := fs.String("token", "", "relayfile token override")
+	observerURL := fs.String("url", envOrDefault("RELAYFILE_OBSERVER_URL", defaultObserverURL), "observer URL")
+	noOpen := fs.Bool("no-open", false, "print the observer URL without opening a browser")
+	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
+		"server":  true,
+		"token":   true,
+		"url":     true,
+		"no-open": false,
+	})); err != nil {
+		return err
+	}
+	if fs.NArg() > 1 {
+		return errors.New("usage: relayfile observer [WORKSPACE] [--no-open]")
+	}
+
+	creds, err := loadCredentials()
+	if err != nil {
+		if strings.TrimSpace(*token) == "" && strings.TrimSpace(os.Getenv("RELAYFILE_TOKEN")) == "" {
+			return err
+		}
+		creds = credentials{}
+	}
+	tokenValue := resolveToken(*token, creds)
+	if strings.TrimSpace(tokenValue) == "" {
+		return errors.New("token is required; run relayfile login or pass --token")
+	}
+	serverValue := resolveServer(*server, creds)
+	workspaceID, err := resolveWorkspaceIDWithToken("", tokenValue)
+	if fs.NArg() == 1 {
+		workspaceID, err = resolveWorkspaceIDWithToken(fs.Arg(0), tokenValue)
+	}
+	if err != nil {
+		return err
+	}
+	launchURL, err := buildObserverURL(*observerURL, serverValue, tokenValue, workspaceID)
+	if err != nil {
+		return err
+	}
+	if _, err := upsertWorkspace(workspaceID); err != nil {
+		return err
+	}
+	if *noOpen {
+		fmt.Fprintln(stdout, launchURL)
+		return nil
+	}
+	fmt.Fprintf(stdout, "Opening observer for workspace %s\n", workspaceID)
+	if err := openBrowser(launchURL); err != nil {
+		return fmt.Errorf("open observer: %w (rerun with --no-open to print the URL)", err)
+	}
+	return nil
+}
+
+func buildObserverURL(observerURL, server, token, workspaceID string) (string, error) {
+	observerURL = strings.TrimSpace(observerURL)
+	if observerURL == "" {
+		observerURL = defaultObserverURL
+	}
+	parsed, err := url.Parse(observerURL)
+	if err != nil {
+		return "", err
+	}
+	if parsed.Scheme == "" || parsed.Host == "" {
+		return "", fmt.Errorf("observer URL must be absolute: %s", observerURL)
+	}
+	fragment := url.Values{}
+	fragment.Set("baseUrl", strings.TrimRight(strings.TrimSpace(server), "/"))
+	fragment.Set("token", strings.TrimSpace(token))
+	fragment.Set("workspaceId", strings.TrimSpace(workspaceID))
+	parsed.Fragment = ""
+	parsed.RawFragment = ""
+	return parsed.String() + "#" + fragment.Encode(), nil
+}
+
+func openBrowser(targetURL string) error {
+	switch runtime.GOOS {
+	case "darwin":
+		return exec.Command("open", targetURL).Start()
+	case "windows":
+		return exec.Command("rundll32", "url.dll,FileProtocolHandler", targetURL).Start()
+	default:
+		return exec.Command("xdg-open", targetURL).Start()
+	}
 }
 
 func newAPIClient(server, token string) (*apiClient, error) {
