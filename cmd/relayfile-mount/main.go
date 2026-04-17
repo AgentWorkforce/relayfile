@@ -22,8 +22,9 @@ import (
 )
 
 const (
-	mountModePoll = "poll"
-	mountModeFuse = "fuse"
+	mountModePoll           = "poll"
+	mountModeFuse           = "fuse"
+	websocketReconcileEvery = 10
 )
 
 var errFuseModeUnavailable = errors.New("fuse mode is not available in this build")
@@ -201,13 +202,18 @@ func runPollingMount(rootCtx context.Context, cfg mountConfig) error {
 	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
 	timer := time.NewTimer(jitteredIntervalWithSample(cfg.interval, cfg.intervalJitter, rng.Float64()))
 	defer timer.Stop()
+	cycle := 0
 	for {
 		select {
 		case <-rootCtx.Done():
 			log.Printf("mount sync stopping: %v", rootCtx.Err())
 			return nil
 		case <-timer.C:
-			run(true)
+			cycle++
+			reconcile := !cfg.websocketEnabled || cycle%websocketReconcileEvery == 0
+			if reconcile {
+				run(true)
+			}
 			timer.Reset(jitteredIntervalWithSample(cfg.interval, cfg.intervalJitter, rng.Float64()))
 		}
 	}
