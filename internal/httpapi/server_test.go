@@ -561,6 +561,44 @@ func TestExportJSON(t *testing.T) {
 	}
 }
 
+func TestExportJSONPathFilter(t *testing.T) {
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
+	t.Cleanup(store.Close)
+
+	if written, errs := store.BulkWrite("ws_export_json_path", []relayfile.BulkWriteFile{
+		{Path: "/github/repos/demo/README.md", ContentType: "text/markdown", Content: "# Demo"},
+		{Path: "/notion/pages/A.md", ContentType: "text/markdown", Content: "# A"},
+	}); written != 2 || len(errs) != 0 {
+		t.Fatalf("seed bulk write failed: written=%d errs=%+v", written, errs)
+	}
+
+	server := NewServer(store)
+	token := mustTestJWT(t, "dev-secret", "ws_export_json_path", "Worker1", []string{"fs:read"}, time.Now().Add(time.Hour))
+
+	resp := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/workspaces/ws_export_json_path/fs/export?format=json&path=/github",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_export_json_path_case",
+		},
+	})
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200 on json export, got %d (%s)", resp.Code, resp.Body.String())
+	}
+
+	var files []relayfile.File
+	if err := json.NewDecoder(resp.Body).Decode(&files); err != nil {
+		t.Fatalf("decode export json response: %v", err)
+	}
+	if len(files) != 1 {
+		t.Fatalf("expected 1 exported file, got %d", len(files))
+	}
+	if files[0].Path != "/github/repos/demo/README.md" || files[0].Content != "# Demo" {
+		t.Fatalf("unexpected exported file: %+v", files[0])
+	}
+}
+
 func TestExportTar(t *testing.T) {
 	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
 	t.Cleanup(store.Close)
