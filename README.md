@@ -172,6 +172,18 @@ relayfile mount ws_123 ./files --token $TOKEN
 go run ./cmd/relayfile-mount --workspace ws_123 --local-dir ./files --interval 2s --token $TOKEN
 ```
 
+## CLI Inspection
+
+Inspect the remote VFS directly without mounting:
+
+```bash
+relayfile login --server https://api.relayfile.dev --token "$RELAYFILE_TOKEN"
+relayfile tree ws_123 /github --depth 5
+relayfile read ws_123 /github/repos/acme/api/pulls/42/metadata.json
+relayfile tree ws_123 /github --depth 5 --json
+relayfile read ws_123 /external/blob.bin --output blob.bin
+```
+
 ## License
 
 MIT

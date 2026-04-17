@@ -12,6 +12,7 @@ on:
           - core
           - sdk
           - cli
+          - file-observer
         default: "all"
       version:
         description: "Version bump type"
@@ -127,6 +128,7 @@ jobs:
               'packages/core/package.json',
               'packages/sdk/typescript/package.json',
               'packages/cli/package.json',
+              'packages/file-observer/package.json',
             ];
 
             for (const pkgPath of packagePaths) {
@@ -150,6 +152,8 @@ jobs:
         run: |
           npm run build --workspace=packages/core
           npm run build --workspace=packages/sdk/typescript
+          npm ci --prefix packages/file-observer
+          npm run pages:build --prefix packages/file-observer
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
@@ -163,6 +167,7 @@ jobs:
             packages/sdk/typescript/dist/
             packages/cli/package.json
             packages/cli/dist/
+            packages/file-observer/package.json
           retention-days: 1
 
   # Publish all packages in parallel
@@ -182,6 +187,8 @@ jobs:
             path: packages/sdk/typescript
           - package: cli
             path: packages/cli
+          - package: file-observer
+            path: packages/file-observer
 
     steps:
       - name: Checkout code
@@ -213,8 +220,6 @@ jobs:
       - name: Publish to NPM
         if: github.event.inputs.dry_run != 'true'
         working-directory: ${{ matrix.path }}
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: npm publish --access public --provenance --tag ${{ github.event.inputs.tag }} --ignore-scripts
 
   # Publish single package (when not 'all')
@@ -250,6 +255,7 @@ jobs:
             core) echo "path=packages/core" >> "$GITHUB_OUTPUT" ;;
             sdk) echo "path=packages/sdk/typescript" >> "$GITHUB_OUTPUT" ;;
             cli) echo "path=packages/cli" >> "$GITHUB_OUTPUT" ;;
+            file-observer) echo "path=packages/file-observer" >> "$GITHUB_OUTPUT" ;;
             *)
               echo "Unsupported package: ${{ github.event.inputs.package }}" >&2
               exit 1
@@ -267,8 +273,6 @@ jobs:
       - name: Publish to NPM
         if: github.event.inputs.dry_run != 'true'
         working-directory: ${{ steps.resolve-package.outputs.path }}
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: npm publish --access public --provenance --tag ${{ github.event.inputs.tag }} --ignore-scripts
 
   create-release:
@@ -300,7 +304,7 @@ jobs:
           git config user.name "GitHub Actions"
           git config user.email "actions@github.com"
 
-          git add package.json packages/core/package.json packages/sdk/typescript/package.json packages/cli/package.json
+          git add package.json packages/core/package.json packages/sdk/typescript/package.json packages/cli/package.json packages/file-observer/package.json
           if ! git diff --staged --quiet; then
             git commit -m "chore(release): v${NEW_VERSION}"
             git push
@@ -321,11 +325,13 @@ jobs:
             - `@relayfile/core@${{ needs.build.outputs.new_version }}`
             - `@relayfile/sdk@${{ needs.build.outputs.new_version }}`
             - `relayfile@${{ needs.build.outputs.new_version }}`
+            - `@relayfile/file-observer@${{ needs.build.outputs.new_version }}`
 
             ### Install
             ```bash
             npm install @relayfile/sdk@${{ needs.build.outputs.new_version }}
             npm install relayfile@${{ needs.build.outputs.new_version }}
+            npm install @relayfile/file-observer@${{ needs.build.outputs.new_version }}
             ```
 
             ### Publish Details

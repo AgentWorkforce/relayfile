@@ -13,7 +13,6 @@ const { ClaudeModels, CodexModels } = require('@agent-relay/config');
 
 const RELAYFILE_ROOT = process.env.RELAYFILE_PATH || process.cwd();
 const FILE_OBSERVER_DIR = `${RELAYFILE_ROOT}/packages/file-observer`;
-const FILE_OBSERVER_ROUTER_DIR = `${RELAYFILE_ROOT}/packages/file-observer-router`;
 const DOCKER_DIR = `${RELAYFILE_ROOT}/docker`;
 
 async function main() {
@@ -643,123 +642,9 @@ FILE_OBSERVER_ORIGIN = "https://relayfile-file-observer.pages.dev"`,
       verification: { type: 'file_exists', value: 'packages/file-observer/wrangler.file-observer.toml' },
     })
 
-    // Cloudflare Worker router (like relaycast observer-router)
-    .step('create-router-package-json', {
-      agent: 'builder-package',
-      dependsOn: ['create-pages-config'],
-      task: `Create packages/file-observer-router/package.json:
-{
-  "name": "@relayfile/file-observer-router",
-  "version": "0.0.1",
-  "private": true,
-  "scripts": {
-    "deploy": "wrangler deploy"
-  },
-  "devDependencies": {
-    "wrangler": "^3.80.0",
-    "typescript": "^5.7.0",
-    "@types/node": "^22.0.0"
-  }
-}`,
-      verification: { type: 'file_exists', value: 'packages/file-observer-router/package.json' },
-    })
-
-    .step('create-router-worker', {
-      agent: 'builder-package',
-      dependsOn: ['create-router-package-json'],
-      task: `Create packages/file-observer-router/src/worker.ts:
-
-interface Env {
-  FILE_OBSERVER_ORIGIN?: string;
-}
-
-const DEFAULT_FILE_OBSERVER_ORIGIN = 'https://relayfile-file-observer.pages.dev';
-
-function resolveOrigin(env: Env): URL {
-  const raw = env.FILE_OBSERVER_ORIGIN?.trim() || DEFAULT_FILE_OBSERVER_ORIGIN;
-  const url = new URL(raw);
-  if (url.protocol !== 'https:') {
-    throw new Error('FILE_OBSERVER_ORIGIN must use https://');
-  }
-  return url;
-}
-
-export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
-    const incoming = new URL(request.url);
-    const origin = resolveOrigin(env);
-    const upstream = new URL(origin.toString());
-    upstream.pathname = incoming.pathname;
-    upstream.search = incoming.search;
-
-    const headers = new Headers(request.headers);
-    headers.set('x-relayfile-observer-host', incoming.host);
-    headers.set('x-forwarded-host', incoming.host);
-    headers.set('x-forwarded-proto', incoming.protocol.replace(':', ''));
-    headers.delete('host');
-
-    const forwardedFor = request.headers.get('cf-connecting-ip');
-    if (forwardedFor) {
-      headers.set('x-forwarded-for', forwardedFor);
-    }
-
-    const upstreamRequest = new Request(upstream.toString(), {
-      method: request.method,
-      headers,
-      body: request.body,
-      redirect: 'manual',
-    });
-
-    return fetch(upstreamRequest);
-  },
-};`,
-      verification: { type: 'file_exists', value: 'packages/file-observer-router/src/worker.ts' },
-    })
-
-    .step('create-router-wrangler', {
-      agent: 'builder-package',
-      dependsOn: ['create-router-worker'],
-      task: `Create packages/file-observer-router/wrangler.toml:
-name = "relayfile-file-observer-router"
-main = "src/worker.ts"
-compatibility_date = "2024-12-01"
-
-routes = [
-  { pattern = "files.relayfile.dev/*", zone_name = "relayfile.dev" },
-  { pattern = "staging-files.relayfile.dev/*", zone_name = "relayfile.dev" },
-  { pattern = "*-files.relayfile.dev/*", zone_name = "relayfile.dev" },
-]
-
-[vars]
-FILE_OBSERVER_ORIGIN = "https://relayfile-file-observer.pages.dev"`,
-      verification: { type: 'file_exists', value: 'packages/file-observer-router/wrangler.toml' },
-    })
-
-    .step('create-router-tsconfig', {
-      agent: 'builder-package',
-      dependsOn: ['create-router-wrangler'],
-      task: `Create packages/file-observer-router/tsconfig.json:
-{
-  "compilerOptions": {
-    "target": "ES2020",
-    "lib": ["ES2020"],
-    "module": "ESNext",
-    "moduleResolution": "bundler",
-    "strict": true,
-    "esModuleInterop": true,
-    "skipLibCheck": true,
-    "forceConsistentCasingInFileNames": true,
-    "resolveJsonModule": true
-  },
-  "include": ["src/**/*"],
-  "exclude": ["node_modules"]
-}`,
-      verification: { type: 'file_exists', value: 'packages/file-observer-router/tsconfig.json' },
-    })
-
     .step('verify-all-files', {
       type: 'deterministic',
-      dependsOn: ['create-router-tsconfig'],
+      dependsOn: ['create-pages-config'],
       command: `echo "=== Verifying all files exist ===" && \
 test -f ${FILE_OBSERVER_DIR}/package.json && echo "✓ package.json" && \
 test -f ${FILE_OBSERVER_DIR}/next.config.js && echo "✓ next.config.js" && \
@@ -777,10 +662,6 @@ test -f ${FILE_OBSERVER_DIR}/src/hooks/useFileTree.ts && echo "✓ useFileTree.t
 test -f ${FILE_OBSERVER_DIR}/src/hooks/useFileEvents.ts && echo "✓ useFileEvents.ts" && \
 test -f ${FILE_OBSERVER_DIR}/tests/file-observer.test.ts && echo "✓ file-observer.test.ts" && \
 test -f ${FILE_OBSERVER_DIR}/wrangler.file-observer.toml && echo "✓ wrangler config" && \
-test -f ${FILE_OBSERVER_ROUTER_DIR}/package.json && echo "✓ router package.json" && \
-test -f ${FILE_OBSERVER_ROUTER_DIR}/src/worker.ts && echo "✓ router worker.ts" && \
-test -f ${FILE_OBSERVER_ROUTER_DIR}/wrangler.toml && echo "✓ router wrangler.toml" && \
-test -f ${FILE_OBSERVER_ROUTER_DIR}/tsconfig.json && echo "✓ router tsconfig.json" && \
 echo "=== All files verified ==="`,
       captureOutput: true,
       failOnError: true,
@@ -806,12 +687,8 @@ packages/file-observer/src/components/WorkspaceSelector.tsx \
 packages/file-observer/src/lib/relayfile-client.ts \
 packages/file-observer/src/hooks/useFileTree.ts \
 packages/file-observer/src/hooks/useFileEvents.ts \
-packages/file-observer/tests/file-observer.test.ts \
-packages/file-observer-router/package.json \
-packages/file-observer-router/src/worker.ts \
-packages/file-observer-router/wrangler.toml \
-packages/file-observer-router/tsconfig.json && \
-git commit -m "feat: add file-observer dashboard with Cloudflare Worker router
+packages/file-observer/tests/file-observer.test.ts && \
+git commit -m "feat: add file-observer dashboard
 
 - Next.js app at packages/file-observer/ displaying relayfile workspace files
 - File tree with expand/collapse and metadata
@@ -820,11 +697,7 @@ git commit -m "feat: add file-observer dashboard with Cloudflare Worker router
 - API client and hooks for relayfile
 - WebSocket support for real-time updates
 - E2E tests with Vitest
-- DESIGN.md with component architecture
-
-- Cloudflare Worker router at packages/file-observer-router/
-- Proxies files.relayfile.dev to Cloudflare Pages origin
-- Same pattern as relaycast observer-router"`,
+- DESIGN.md with component architecture"`,
       captureOutput: true,
       failOnError: true,
     })

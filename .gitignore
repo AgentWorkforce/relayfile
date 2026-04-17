@@ -22,7 +22,8 @@
 .DS_Store
 Thumbs.db
 
-.agent-relay
+.agent-relay/
+.relay/
 
 # Node (SDK)
 node_modules/
@@ -56,3 +57,6 @@ bin/
 opencode.json
 site/node_modules/
 site/dist/
+
+# observer
+.next/

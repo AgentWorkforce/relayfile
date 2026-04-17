@@ -1008,7 +1008,7 @@ cp .env.local.example .env.local
 # Edit .env.local with your workspace ID and API token
 npm install
 npm run dev
-# Open http://localhost:3001
+# Open http://localhost:3101
 ```
 
 ---

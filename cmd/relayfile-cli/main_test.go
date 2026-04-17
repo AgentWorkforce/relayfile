@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/base64"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -12,6 +13,7 @@ import (
 
 func TestWorkspaceCreateStoresCatalogEntry(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
 	if err := saveCredentials(credentials{
 		Server: defaultServerURL,
 		Token:  "token",
@@ -41,6 +43,7 @@ func TestWorkspaceCreateStoresCatalogEntry(t *testing.T) {
 
 func TestWorkspaceDeleteRemovesCatalogEntry(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
 	if _, err := upsertWorkspace("demo"); err != nil {
 		t.Fatalf("upsertWorkspace failed: %v", err)
 	}
@@ -61,6 +64,7 @@ func TestWorkspaceDeleteRemovesCatalogEntry(t *testing.T) {
 
 func TestWorkspaceListFallsBackToAdminSync(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -92,6 +96,140 @@ func TestWorkspaceListFallsBackToAdminSync(t *testing.T) {
 	}
 }
 
+func TestTreeReadsRemoteWorkspacePath(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/workspaces/ws_cloud/fs/tree" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		if got := r.URL.Query().Get("path"); got != "/github" {
+			t.Fatalf("expected path /github, got %q", got)
+		}
+		if got := r.URL.Query().Get("depth"); got != "5" {
+			t.Fatalf("expected depth 5, got %q", got)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer token" {
+			t.Fatalf("unexpected Authorization header: %q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"path":"/github","entries":[{"path":"/github/repos","type":"dir","revision":"rev_dir"},{"path":"/github/README.md","type":"file","revision":"rev_file","provider":"github","size":12}],"nextCursor":null}`))
+	}))
+	defer server.Close()
+
+	if err := saveCredentials(credentials{
+		Server: server.URL,
+		Token:  "token",
+	}); err != nil {
+		t.Fatalf("saveCredentials failed: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := run([]string{"tree", "ws_cloud", "/github", "--depth", "5"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("run tree failed: %v", err)
+	}
+
+	got := stdout.String()
+	if !strings.Contains(got, "Tree /github") {
+		t.Fatalf("expected tree header, got %q", got)
+	}
+	if !strings.Contains(got, "dir  /github/repos") {
+		t.Fatalf("expected dir entry, got %q", got)
+	}
+	if !strings.Contains(got, "file /github/README.md  provider=github  size=12  rev=rev_file") {
+		t.Fatalf("expected file metadata entry, got %q", got)
+	}
+}
+
+func TestTreeCanPrintPrettyJSON(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"path":"/","entries":[],"nextCursor":null}`))
+	}))
+	defer server.Close()
+
+	if err := saveCredentials(credentials{
+		Server: server.URL,
+		Token:  "token",
+	}); err != nil {
+		t.Fatalf("saveCredentials failed: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := run([]string{"tree", "ws_cloud", "--json"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("run tree --json failed: %v", err)
+	}
+
+	if got := stdout.String(); !strings.Contains(got, "\n  \"path\": \"/\"") {
+		t.Fatalf("expected pretty JSON, got %q", got)
+	}
+}
+
+func TestReadPrintsRemoteFileContent(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/workspaces/ws_cloud/fs/file" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		if got := r.URL.Query().Get("path"); got != "/github/README.md" {
+			t.Fatalf("expected file path, got %q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"path":"/github/README.md","revision":"rev_1","contentType":"text/markdown","content":"# readme\n"}`))
+	}))
+	defer server.Close()
+
+	if err := saveCredentials(credentials{
+		Server: server.URL,
+		Token:  "token",
+	}); err != nil {
+		t.Fatalf("saveCredentials failed: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := run([]string{"read", "ws_cloud", "/github/README.md"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("run read failed: %v", err)
+	}
+
+	if got := stdout.String(); got != "# readme\n" {
+		t.Fatalf("unexpected file content: %q", got)
+	}
+}
+
+func TestReadDecodesBase64Content(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	encoded := base64.StdEncoding.EncodeToString([]byte{0x00, 0x7f, 0xff, 0x10})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"path":"/external/blob.bin","revision":"rev_1","contentType":"application/octet-stream","content":"` + encoded + `","encoding":"base64"}`))
+	}))
+	defer server.Close()
+
+	if err := saveCredentials(credentials{
+		Server: server.URL,
+		Token:  "token",
+	}); err != nil {
+		t.Fatalf("saveCredentials failed: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := run([]string{"cat", "ws_cloud", "/external/blob.bin"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("run cat failed: %v", err)
+	}
+
+	if got := stdout.Bytes(); !bytes.Equal(got, []byte{0x00, 0x7f, 0xff, 0x10}) {
+		t.Fatalf("unexpected decoded content: %#v", got)
+	}
+}
+
 func TestCollectSeedFilesReportsProgress(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte("alpha"), 0o644); err != nil {
@@ -112,4 +250,11 @@ func TestCollectSeedFilesReportsProgress(t *testing.T) {
 	if !strings.Contains(stdout.String(), "Seeding 2/2 files...") {
 		t.Fatalf("expected progress output, got %q", stdout.String())
 	}
+}
+
+func clearRelayfileEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv("RELAYFILE_SERVER", "")
+	t.Setenv("RELAYFILE_BASE_URL", "")
+	t.Setenv("RELAYFILE_TOKEN", "")
 }

@@ -91,6 +91,22 @@ type syncStatusResponse struct {
 	Providers   []syncProviderStatus `json:"providers"`
 }
 
+type treeResponse struct {
+	Path       string      `json:"path"`
+	Entries    []treeEntry `json:"entries"`
+	NextCursor *string     `json:"nextCursor"`
+}
+
+type treeEntry struct {
+	Path             string `json:"path"`
+	Type             string `json:"type"`
+	Revision         string `json:"revision"`
+	Provider         string `json:"provider,omitempty"`
+	ProviderObjectID string `json:"providerObjectId,omitempty"`
+	Size             *int64 `json:"size,omitempty"`
+	UpdatedAt        string `json:"updatedAt,omitempty"`
+}
+
 type syncProviderStatus struct {
 	Provider              string         `json:"provider"`
 	Status                string         `json:"status"`
@@ -110,6 +126,19 @@ type exportedFile struct {
 	Content     string `json:"content"`
 	Encoding    string `json:"encoding,omitempty"`
 	LastEdited  string `json:"lastEditedAt,omitempty"`
+}
+
+type readFileResponse struct {
+	Path             string            `json:"path"`
+	Revision         string            `json:"revision"`
+	ContentType      string            `json:"contentType"`
+	Content          string            `json:"content"`
+	Encoding         string            `json:"encoding,omitempty"`
+	Provider         string            `json:"provider,omitempty"`
+	ProviderObjectID string            `json:"providerObjectId,omitempty"`
+	LastEdited       string            `json:"lastEditedAt,omitempty"`
+	Semantics        map[string]any    `json:"semantics,omitempty"`
+	Properties       map[string]string `json:"properties,omitempty"`
 }
 
 type adminWorkspaceList struct {
@@ -151,6 +180,10 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		return runWorkspace(args[1:], stdin, stdout)
 	case "mount":
 		return runMount(args[1:])
+	case "tree", "ls":
+		return runTree(args[1:], stdout)
+	case "read", "cat":
+		return runRead(args[1:], stdout)
 	case "seed":
 		return runSeed(args[1:], stdout)
 	case "export":
@@ -175,6 +208,8 @@ Usage:
   relayfile workspace list
   relayfile workspace delete NAME [--yes]
   relayfile mount WORKSPACE [LOCAL_DIR]
+  relayfile tree WORKSPACE [PATH] [--depth N]
+  relayfile read WORKSPACE PATH
   relayfile seed WORKSPACE [DIR]
   relayfile export WORKSPACE --format FORMAT [--output FILE]
   relayfile status WORKSPACE
@@ -183,6 +218,8 @@ Subcommands:
   login       Store credentials in ~/.relayfile/credentials.json
   workspace   Create, list, or delete locally tracked workspaces
   mount       Mirror a remote workspace to a local directory
+  tree        List a remote workspace path
+  read        Print a remote file's content
   seed        Upload a directory tree with bulk writes
   export      Export a workspace as json, tar, or patch
   status      Show sync status for a workspace`)
@@ -446,6 +483,173 @@ func runMount(args []string) error {
 	}
 
 	return runMountLoop(rootCtx, syncer, *timeout, *interval, *intervalJitter, *websocketEnabled, *once)
+}
+
+func runTree(args []string, stdout io.Writer) error {
+	fs := flag.NewFlagSet("tree", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	server := fs.String("server", "", "relayfile server URL override")
+	token := fs.String("token", "", "relayfile token override")
+	pathFlag := fs.String("path", "/", "remote path to list")
+	depth := fs.Int("depth", 1, "tree depth")
+	jsonOutput := fs.Bool("json", false, "print the raw JSON response")
+	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
+		"server": true,
+		"token":  true,
+		"path":   true,
+		"depth":  true,
+		"json":   false,
+	})); err != nil {
+		return err
+	}
+	if fs.NArg() < 1 || fs.NArg() > 2 {
+		return errors.New("usage: relayfile tree WORKSPACE [PATH] [--depth N]")
+	}
+
+	creds, err := loadCredentials()
+	if err != nil {
+		return err
+	}
+	client, err := newAPIClient(resolveServer(*server, creds), resolveToken(*token, creds))
+	if err != nil {
+		return err
+	}
+
+	workspaceID := strings.TrimSpace(fs.Arg(0))
+	if workspaceID == "" {
+		return errors.New("workspace is required")
+	}
+	remotePath := strings.TrimSpace(*pathFlag)
+	if fs.NArg() == 2 {
+		remotePath = strings.TrimSpace(fs.Arg(1))
+	}
+	if remotePath == "" {
+		remotePath = "/"
+	}
+	if *depth < 0 {
+		return errors.New("depth must be greater than or equal to 0")
+	}
+
+	query := url.Values{}
+	query.Set("path", remotePath)
+	query.Set("depth", strconv.Itoa(*depth))
+	body, _, err := client.getBytes(context.Background(), fmt.Sprintf("/v1/workspaces/%s/fs/tree?%s", url.PathEscape(workspaceID), query.Encode()))
+	if err != nil {
+		return err
+	}
+	if _, err := upsertWorkspace(workspaceID); err != nil {
+		return err
+	}
+	if *jsonOutput {
+		return writePrettyJSON(stdout, body)
+	}
+
+	var tree treeResponse
+	if err := json.Unmarshal(body, &tree); err != nil {
+		return err
+	}
+	if strings.TrimSpace(tree.Path) == "" {
+		tree.Path = remotePath
+	}
+	fmt.Fprintf(stdout, "Tree %s\n", tree.Path)
+	if len(tree.Entries) == 0 {
+		fmt.Fprintln(stdout, "(empty)")
+		return nil
+	}
+	for _, entry := range tree.Entries {
+		entryType := strings.TrimSpace(entry.Type)
+		if entryType == "" {
+			entryType = "file"
+		}
+		fmt.Fprintf(stdout, "%-4s %s", entryType, entry.Path)
+		if entry.Provider != "" {
+			fmt.Fprintf(stdout, "  provider=%s", entry.Provider)
+		}
+		if entry.Size != nil {
+			fmt.Fprintf(stdout, "  size=%d", *entry.Size)
+		}
+		if entry.Revision != "" {
+			fmt.Fprintf(stdout, "  rev=%s", entry.Revision)
+		}
+		fmt.Fprintln(stdout)
+	}
+	if tree.NextCursor != nil && strings.TrimSpace(*tree.NextCursor) != "" {
+		fmt.Fprintf(stdout, "next cursor: %s\n", strings.TrimSpace(*tree.NextCursor))
+	}
+	return nil
+}
+
+func runRead(args []string, stdout io.Writer) error {
+	fs := flag.NewFlagSet("read", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	server := fs.String("server", "", "relayfile server URL override")
+	token := fs.String("token", "", "relayfile token override")
+	output := fs.String("output", "-", "output file path or - for stdout")
+	jsonOutput := fs.Bool("json", false, "print the raw JSON response")
+	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
+		"server": true,
+		"token":  true,
+		"output": true,
+		"json":   false,
+	})); err != nil {
+		return err
+	}
+	if fs.NArg() != 2 {
+		return errors.New("usage: relayfile read WORKSPACE PATH")
+	}
+
+	creds, err := loadCredentials()
+	if err != nil {
+		return err
+	}
+	client, err := newAPIClient(resolveServer(*server, creds), resolveToken(*token, creds))
+	if err != nil {
+		return err
+	}
+
+	workspaceID := strings.TrimSpace(fs.Arg(0))
+	remotePath := strings.TrimSpace(fs.Arg(1))
+	if workspaceID == "" {
+		return errors.New("workspace is required")
+	}
+	if remotePath == "" {
+		return errors.New("path is required")
+	}
+
+	query := url.Values{}
+	query.Set("path", remotePath)
+	body, _, err := client.getBytes(context.Background(), fmt.Sprintf("/v1/workspaces/%s/fs/file?%s", url.PathEscape(workspaceID), query.Encode()))
+	if err != nil {
+		return err
+	}
+	if _, err := upsertWorkspace(workspaceID); err != nil {
+		return err
+	}
+	if *jsonOutput {
+		return writePrettyJSON(stdout, body)
+	}
+
+	var file readFileResponse
+	if err := json.Unmarshal(body, &file); err != nil {
+		return err
+	}
+	content := []byte(file.Content)
+	if strings.EqualFold(strings.TrimSpace(file.Encoding), "base64") {
+		decoded, err := base64.StdEncoding.DecodeString(file.Content)
+		if err != nil {
+			return fmt.Errorf("decode base64 content for %s: %w", remotePath, err)
+		}
+		content = decoded
+	}
+	if strings.TrimSpace(*output) == "" || strings.TrimSpace(*output) == "-" {
+		_, err = stdout.Write(content)
+		return err
+	}
+	outputPath := strings.TrimSpace(*output)
+	if err := os.MkdirAll(filepath.Dir(outputPath), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(outputPath, content, 0o644)
 }
 
 func runSeed(args []string, stdout io.Writer) error {
@@ -714,6 +918,17 @@ func (c *apiClient) do(ctx context.Context, method, path string, body []byte) ([
 		Code:       errPayload.Code,
 		Message:    errPayload.Message,
 	}
+}
+
+func writePrettyJSON(stdout io.Writer, body []byte) error {
+	var out bytes.Buffer
+	if err := json.Indent(&out, body, "", "  "); err != nil {
+		_, writeErr := stdout.Write(body)
+		return writeErr
+	}
+	out.WriteByte('\n')
+	_, err := stdout.Write(out.Bytes())
+	return err
 }
 
 func collectSeedFiles(root string, stdout io.Writer) ([]bulkWriteFile, error) {

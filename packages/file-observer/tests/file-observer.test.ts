@@ -66,6 +66,21 @@ const workspaceFixtures: Record<string, WorkspaceFixture> = {
         nextCursor: null,
         entries: [
           {
+            path: '/github',
+            type: 'dir',
+            revision: 'dir'
+          },
+          {
+            path: '/notion',
+            type: 'dir',
+            revision: 'dir'
+          },
+          {
+            path: '/slack',
+            type: 'dir',
+            revision: 'dir'
+          },
+          {
             path: '/docs',
             type: 'dir',
             revision: 'docs_rev_1',
@@ -225,16 +240,7 @@ const workspaceFixtures: Record<string, WorkspaceFixture> = {
     },
     syncStatus: {
       workspaceId: 'staging',
-      providers: [
-        {
-          provider: 'notion',
-          status: 'lagging',
-          lagSeconds: 22,
-          deadLetteredEnvelopes: 1,
-          deadLetteredOps: 0,
-          lastError: 'Backfill in progress'
-        }
-      ]
+      providers: []
     }
   }
 };
@@ -350,10 +356,17 @@ describe('file-observer dashboard', () => {
   it('renders the file tree and lazy-loads nested directories', async () => {
     const { fetchMock } = await renderDashboard();
 
-    expect(screen.getByText('3 loaded entries')).toBeDefined();
+    expect(screen.getByText('6 loaded entries')).toBeDefined();
     expect(screen.getByRole('button', { name: /docs/i })).toBeDefined();
+    expect(screen.getAllByRole('button', { name: /github/i }).length).toBeGreaterThan(0);
+    expect(screen.getByRole('button', { name: /notion/i })).toBeDefined();
+    expect(screen.getByRole('button', { name: /slack/i })).toBeDefined();
     expect(screen.getByRole('button', { name: /README\.md/i })).toBeDefined();
     expect(screen.getAllByText('google-drive').length).toBeGreaterThan(0);
+    const [, providerSelect] = screen.getAllByRole('combobox') as HTMLSelectElement[];
+    expect(Array.from(providerSelect.options).map((option) => option.value)).toEqual(
+      expect.arrayContaining(['github', 'notion', 'slack'])
+    );
 
     fireEvent.click(screen.getByRole('button', { name: /docs/i }));
 
@@ -389,6 +402,24 @@ describe('file-observer dashboard', () => {
     expect(screen.getByText('write')).toBeDefined();
   });
 
+  it('pretty-prints JSON content in the file preview', async () => {
+    const { fetchMock } = await renderDashboard();
+
+    fireEvent.click(screen.getByRole('button', { name: /tickets\.json/i }));
+
+    await waitFor(() => {
+      expect(
+        getCallUrls(fetchMock).some(
+          (url) => url.pathname.includes('/v1/workspaces/default/fs/file') && url.searchParams.get('path') === '/tickets.json'
+        )
+      ).toBe(true);
+    });
+
+    expect(
+      await screen.findByText((_, node) => node?.tagName === 'PRE' && node.textContent === '{\n  "count": 2\n}')
+    ).toBeDefined();
+  });
+
   it('switches workspaces and reloads the tree and sync status for the selected workspace', async () => {
     const { fetchMock } = await renderDashboard();
 
@@ -407,6 +438,7 @@ describe('file-observer dashboard', () => {
     expect(
       getCallUrls(fetchMock).some((url) => url.pathname.includes('/v1/workspaces/staging/sync/status'))
     ).toBe(true);
+    expect(await screen.findByText('No sync metrics')).toBeDefined();
   });
 
   it('queries search results and reapplies the provider filter when searching files', async () => {

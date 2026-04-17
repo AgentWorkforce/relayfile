@@ -201,6 +201,60 @@ relayfile mount <workspace> [local-dir]
 
 ---
 
+### `relayfile tree`
+
+List a remote workspace path without mounting.
+
+```
+relayfile tree <workspace> [path] [--depth n] [--json]
+```
+
+| Argument | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `workspace` | Yes | — | Workspace ID |
+| `path` | No | `/` | Remote VFS path to list |
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--depth` | `1` | Maximum tree depth |
+| `--json` | `false` | Pretty-print the raw API response |
+
+**Behavior:**
+
+1. Calls `GET /v1/workspaces/{workspaceId}/fs/tree?path=<path>&depth=<depth>`.
+2. Prints a compact human-readable tree by default.
+3. With `--json`, prints the raw response formatted as JSON for scripts.
+
+---
+
+### `relayfile read`
+
+Read one remote file without mounting.
+
+```
+relayfile read <workspace> <path> [--output file] [--json]
+relayfile cat <workspace> <path>
+```
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `workspace` | Yes | Workspace ID |
+| `path` | Yes | Remote VFS file path |
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--output` | `-` | Output file path or stdout |
+| `--json` | `false` | Pretty-print the raw API response |
+
+**Behavior:**
+
+1. Calls `GET /v1/workspaces/{workspaceId}/fs/file?path=<path>`.
+2. Prints file content to stdout by default.
+3. Decodes `encoding: "base64"` content before writing to stdout or `--output`.
+4. With `--json`, prints the raw response formatted as JSON.
+
+---
+
 ### `relayfile seed`
 
 Bulk-upload a local directory into a workspace.
