@@ -60,3 +60,4 @@ site/dist/
 
 # observer
 .next/
+packages/file-observer/out/

@@ -152,6 +152,7 @@ the `workspace_id`/`wks` claim in the active token, then the default stored by
 | `RELAYFILE_BASE_URL` | string | `https://api.relayfile.dev` for login fallback | Used when `RELAYFILE_SERVER` is unset |
 | `RELAYFILE_TOKEN` | string | unset | Used for `login` and as a token fallback before saved credentials |
 | `RELAYFILE_WORKSPACE` | string | unset | Workspace override for CLI commands when no workspace argument is supplied |
+| `RELAYFILE_OBSERVER_URL` | string | `https://files.relayfile.dev` | Hosted observer URL used by `relayfile observer` |
 | `RELAYFILE_REMOTE_PATH` | string | `/` | Mount command default |
 | `RELAYFILE_MOUNT_PROVIDER` | string | unset | Mount command provider filter |
 | `RELAYFILE_MOUNT_STATE_FILE` | string | unset | Mount command state-file default |

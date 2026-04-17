@@ -187,6 +187,13 @@ relayfile read /external/blob.bin --output blob.bin
 
 You can also set `RELAYFILE_WORKSPACE=ws_123` instead of storing a default.
 
+Open the hosted observer for the active workspace:
+
+```bash
+relayfile observer
+relayfile observer ws_123 --no-open
+```
+
 ## License
 
 MIT

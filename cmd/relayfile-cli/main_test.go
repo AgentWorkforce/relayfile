@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -46,6 +47,40 @@ func TestResolveServerDefaultsToHostedRelayfile(t *testing.T) {
 
 	if got := resolveServer("", credentials{}); got != "https://api.relayfile.dev" {
 		t.Fatalf("expected hosted Relayfile default server, got %q", got)
+	}
+}
+
+func TestObserverPrintsFragmentLaunchURL(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+	token := testJWTWithWorkspace("ws_observer")
+	t.Setenv("RELAYFILE_TOKEN", token)
+	t.Setenv("RELAYFILE_SERVER", "https://api.example.test")
+
+	var stdout bytes.Buffer
+	if err := run([]string{"observer", "--no-open", "--url", "https://files.example.test/app"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("run observer failed: %v", err)
+	}
+
+	parsed, err := url.Parse(strings.TrimSpace(stdout.String()))
+	if err != nil {
+		t.Fatalf("parse observer url failed: %v", err)
+	}
+	if parsed.Scheme != "https" || parsed.Host != "files.example.test" || parsed.Path != "/app" {
+		t.Fatalf("unexpected observer url: %s", parsed.String())
+	}
+	fragment, err := url.ParseQuery(parsed.Fragment)
+	if err != nil {
+		t.Fatalf("parse observer fragment failed: %v", err)
+	}
+	if fragment.Get("baseUrl") != "https://api.example.test" {
+		t.Fatalf("expected baseUrl fragment, got %q", fragment.Get("baseUrl"))
+	}
+	if fragment.Get("workspaceId") != "ws_observer" {
+		t.Fatalf("expected workspaceId fragment, got %q", fragment.Get("workspaceId"))
+	}
+	if fragment.Get("token") != token {
+		t.Fatalf("expected token fragment to match")
 	}
 }
 

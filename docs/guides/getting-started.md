@@ -74,6 +74,12 @@ If you are using a hosted deployment, the same login flow works with your hosted
 relayfile login --server https://api.relayfile.dev --token YOUR_TOKEN
 ```
 
+Open the hosted observer for the selected workspace:
+
+```bash
+relayfile observer
+```
+
 ## Seed Files From A Project
 
 Upload an existing local directory into the workspace:
