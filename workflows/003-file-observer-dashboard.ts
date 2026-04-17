@@ -14,6 +14,7 @@ const { ClaudeModels, CodexModels } = require('@agent-relay/config');
 const RELAYFILE_ROOT = process.env.RELAYFILE_PATH || process.cwd();
 const FILE_OBSERVER_DIR = `${RELAYFILE_ROOT}/packages/file-observer`;
 const FILE_OBSERVER_ROUTER_DIR = `${RELAYFILE_ROOT}/packages/file-observer-router`;
+const DOCKER_DIR = `${RELAYFILE_ROOT}/docker`;
 
 async function main() {
   const result = await workflow('file-observer-dashboard')
@@ -505,31 +506,123 @@ Re-run: cd packages/file-observer && npm test`,
       failOnError: true,
     })
 
-    .step('test-local-dev', {
+    // Start the relayfile backend stack (API on :9090, auth on :9091, seeded workspace ws_demo)
+    .step('start-relayfile-stack', {
       type: 'deterministic',
       dependsOn: ['verify-tests-pass'],
-      command: `cd ${FILE_OBSERVER_DIR} && timeout 10 npm run dev 2>&1 || true`,
+      command: `set -e
+cd ${DOCKER_DIR}
+docker compose up --build -d
+# Wait for seed to finish and emit the token
+for i in $(seq 1 60); do
+  if docker compose logs seed 2>/dev/null | grep -q "=== Ready ==="; then
+    break
+  fi
+  sleep 1
+done
+TOKEN=$(docker compose logs seed 2>/dev/null | grep -E "^seed-1  \\|   token" | tail -1 | awk '{print $NF}')
+if [ -z "$TOKEN" ]; then
+  echo "ERROR: failed to extract seed token"
+  docker compose logs seed | tail -40
+  exit 1
+fi
+echo "RELAYFILE_TOKEN=$TOKEN"
+# Persist env for the Next.js app
+cat > ${FILE_OBSERVER_DIR}/.env.local <<EOF
+NEXT_PUBLIC_RELAYFILE_BASE_URL=http://localhost:9090
+NEXT_PUBLIC_RELAYFILE_TOKEN=$TOKEN
+NEXT_PUBLIC_RELAYFILE_WORKSPACE_ID=ws_demo
+NEXT_PUBLIC_RELAYFILE_WORKSPACE_IDS=ws_demo
+EOF
+# Confirm the API is actually reachable with the token
+curl -fsS -H "Authorization: Bearer $TOKEN" http://localhost:9090/v1/workspaces/ws_demo/fs/tree | head -c 200
+echo`,
       captureOutput: true,
-      failOnError: false,
+      failOnError: true,
     })
 
-    // Visual verification step - ensure UI looks beautiful
+    // Start dev server in the background so later steps can hit it
+    .step('start-dev-server', {
+      type: 'deterministic',
+      dependsOn: ['start-relayfile-stack'],
+      command: `set -e
+cd ${FILE_OBSERVER_DIR}
+# Kill anything already on the port
+if lsof -ti:3101 >/dev/null 2>&1; then kill $(lsof -ti:3101) || true; sleep 1; fi
+nohup npm run dev > /tmp/file-observer-dev.log 2>&1 &
+echo $! > /tmp/file-observer-dev.pid
+# Wait for Ready
+for i in $(seq 1 60); do
+  if curl -fsS -o /dev/null http://localhost:3101; then
+    echo "dev server ready (pid=$(cat /tmp/file-observer-dev.pid))"
+    exit 0
+  fi
+  sleep 1
+done
+echo "ERROR: dev server did not become ready"
+tail -80 /tmp/file-observer-dev.log
+exit 1`,
+      captureOutput: true,
+      failOnError: true,
+    })
+
+    // Deterministic UI sanity check: page must NOT show the missing-env-vars card,
+    // must include the app shell, and console/server log must be error-free.
+    .step('verify-ui-loads', {
+      type: 'deterministic',
+      dependsOn: ['start-dev-server'],
+      command: `set -e
+HTML=$(curl -fsS http://localhost:3101)
+if echo "$HTML" | grep -qi "Missing environment variables"; then
+  echo "FAIL: page shows missing env vars screen"
+  echo "$HTML" | head -c 2000
+  exit 1
+fi
+if ! echo "$HTML" | grep -qi "relayfile"; then
+  echo "FAIL: page does not mention relayfile — app shell likely did not render"
+  echo "$HTML" | head -c 2000
+  exit 1
+fi
+if grep -qiE "(error|failed to compile|unhandled)" /tmp/file-observer-dev.log; then
+  echo "FAIL: dev server log contains errors"
+  grep -iE "(error|failed|unhandled)" /tmp/file-observer-dev.log | head -40
+  exit 1
+fi
+echo "UI_LOADS_CLEAN"`,
+      captureOutput: true,
+      failOnError: true,
+    })
+
+    // Agent-led visual polish check with the server actually running
     .step('verify-ui-beautiful', {
       agent: 'builder-components',
-      dependsOn: ['test-local-dev'],
-      task: `The dev server has been started. Now verify the UI looks beautiful:
-1. The dashboard should be accessible at http://localhost:3101
-2. Check that:
-   - Dark theme is applied correctly
-   - File tree renders with proper icons
-   - Layout is clean and professional
-   - No visual glitches or errors in console
-3. If using Playwright or similar, run a quick visual check
-4. Take a screenshot if possible to verify aesthetics
+      dependsOn: ['verify-ui-loads'],
+      task: `The dev server is running at http://localhost:3101 with a live relayfile backend at http://localhost:9090 (workspace ws_demo, seeded with sample files). The env has already been wired up and the page loads without the missing-env-vars screen.
 
-This is required by the 80-100 workflow - the feature must not just work, it must look beautiful.
+Verify the UI looks beautiful. Use curl to inspect the rendered HTML and, if available, Playwright for a headless screenshot. Check:
+- Dark theme applied correctly
+- File tree renders with proper icons and shows the seeded ws_demo files
+- Layout is clean, professional, no visual glitches
+- No console errors (inspect /tmp/file-observer-dev.log if needed)
+
 End with UI_VERIFIED_BEAUTIFUL when done.`,
       verification: { type: 'output_contains', value: 'UI_VERIFIED_BEAUTIFUL' },
+    })
+
+    // Cleanup — always runs so we don't leak the dev server / docker stack
+    .step('cleanup-local-servers', {
+      type: 'deterministic',
+      dependsOn: ['verify-ui-beautiful'],
+      command: `set +e
+if [ -f /tmp/file-observer-dev.pid ]; then
+  kill $(cat /tmp/file-observer-dev.pid) 2>/dev/null || true
+  rm -f /tmp/file-observer-dev.pid
+fi
+lsof -ti:3101 | xargs -r kill 2>/dev/null || true
+cd ${DOCKER_DIR} && docker compose down -v || true
+echo "cleanup complete"`,
+      captureOutput: true,
+      failOnError: false,
     })
 
     // Cloud deployment preparation - Pages app

@@ -1,18 +1,33 @@
 {
   "version": 1,
-  "lastUpdated": "2026-04-14T19:33:17.111Z",
+  "lastUpdated": "2026-04-16T21:08:29.117Z",
   "trajectories": {
-    "traj_xt5epedlntg7": {
-      "title": "maintain-agent-rules-workflow",
+    "traj_lcvvpzmuroqb": {
+      "title": "file-observer-dashboard-workflow",
       "status": "active",
-      "startedAt": "2026-04-14T09:35:46.733Z",
-      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/active/traj_xt5epedlntg7.json"
+      "startedAt": "2026-04-16T14:04:30.782Z",
+      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/active/traj_lcvvpzmuroqb.json"
     },
     "traj_ffifqtlytuiz": {
       "title": "maintain-agent-rules-workflow",
-      "status": "active",
+      "status": "completed",
       "startedAt": "2026-04-14T19:28:06.123Z",
-      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/active/traj_ffifqtlytuiz.json"
+      "completedAt": "2026-04-14T19:32:58.835Z",
+      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-04/traj_ffifqtlytuiz.json"
+    },
+    "traj_xt5epedlntg7": {
+      "title": "maintain-agent-rules-workflow",
+      "status": "completed",
+      "startedAt": "2026-04-14T09:35:46.733Z",
+      "completedAt": "2026-04-14T09:44:48.436Z",
+      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-04/traj_xt5epedlntg7.json"
+    },
+    "traj_jm2y8f6brsd4": {
+      "title": "file-observer-dashboard-workflow",
+      "status": "completed",
+      "startedAt": "2026-04-16T20:58:48.561Z",
+      "completedAt": "2026-04-16T21:08:29.105Z",
+      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-04/traj_jm2y8f6brsd4.json"
     }
   }
 }

@@ -12,11 +12,12 @@
     "build": "npm run build --workspace=packages/sdk/typescript",
     "typecheck": "npm run typecheck --workspace=packages/sdk/typescript"
   },
-  "dependencies": {
-    "@agent-relay/sdk": "latest"
-  },
   "devDependencies": {
-    "agent-trajectories": "^0.5.2",
+    "@agent-relay/sdk": "^4.0.28",
+    "agent-trajectories": "^0.5.6",
     "tsx": "^4.21.0"
+  },
+  "dependencies": {
+    "@agentworkforce/workload-router": "file:../workforce/packages/workload-router"
   }
 }
