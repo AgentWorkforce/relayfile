@@ -30,6 +30,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/agentworkforce/relayfile/internal/mountsync"
+	"github.com/fsnotify/fsnotify"
 )
 
 const (
@@ -532,7 +533,7 @@ func runMount(args []string) error {
 		return err
 	}
 
-	return runMountLoop(rootCtx, syncer, *timeout, *interval, *intervalJitter, *websocketEnabled, *once)
+	return runMountLoop(rootCtx, syncer, absLocalDir, *timeout, *interval, *intervalJitter, *websocketEnabled, *once)
 }
 
 func runTree(args []string, stdout io.Writer) error {
@@ -995,8 +996,9 @@ func buildObserverURL(observerURL, server, token, workspaceID string) (string, e
 	fragment.Set("baseUrl", strings.TrimRight(strings.TrimSpace(server), "/"))
 	fragment.Set("token", strings.TrimSpace(token))
 	fragment.Set("workspaceId", strings.TrimSpace(workspaceID))
-	parsed.Fragment = fragment.Encode()
-	return parsed.String(), nil
+	parsed.Fragment = ""
+	parsed.RawFragment = ""
+	return parsed.String() + "#" + fragment.Encode(), nil
 }
 
 func openBrowser(targetURL string) error {
@@ -1692,7 +1694,7 @@ func jitteredIntervalWithSample(base time.Duration, jitterRatio, sample float64)
 	return delay
 }
 
-func runMountLoop(rootCtx context.Context, syncer *mountsync.Syncer, timeout, interval time.Duration, intervalJitter float64, websocketEnabled, once bool) error {
+func runMountLoop(rootCtx context.Context, syncer *mountsync.Syncer, localDir string, timeout, interval time.Duration, intervalJitter float64, websocketEnabled, once bool) error {
 	runCycle := func(reconcile bool) error {
 		ctx, cancel := context.WithTimeout(rootCtx, timeout)
 		defer cancel()
@@ -1715,6 +1717,22 @@ func runMountLoop(rootCtx context.Context, syncer *mountsync.Syncer, timeout, in
 		return initialErr
 	}
 
+	watcher, err := mountsync.NewFileWatcher(localDir, func(relativePath string, op fsnotify.Op) {
+		ctx, cancel := context.WithTimeout(rootCtx, timeout)
+		defer cancel()
+		if err := syncer.HandleLocalChange(ctx, relativePath, op); err != nil {
+			log.Printf("mount local change failed: %v", err)
+		}
+	})
+	if err != nil {
+		return fmt.Errorf("create file watcher: %w", err)
+	}
+	if err := watcher.Start(rootCtx); err != nil {
+		_ = watcher.Close()
+		return fmt.Errorf("start file watcher: %w", err)
+	}
+	defer watcher.Close()
+
 	timer := time.NewTimer(jitteredIntervalWithSample(interval, intervalJitter, mathrand.Float64()))
 	defer timer.Stop()
 	cycle := 0
@@ -1726,7 +1744,9 @@ func runMountLoop(rootCtx context.Context, syncer *mountsync.Syncer, timeout, in
 		case <-timer.C:
 			cycle++
 			reconcile := !websocketEnabled || cycle%websocketReconcileEvery == 0
-			_ = runCycle(reconcile)
+			if reconcile {
+				_ = runCycle(true)
+			}
 			timer.Reset(jitteredIntervalWithSample(interval, intervalJitter, mathrand.Float64()))
 		}
 	}

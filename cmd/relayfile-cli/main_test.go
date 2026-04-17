@@ -62,17 +62,15 @@ func TestObserverPrintsFragmentLaunchURL(t *testing.T) {
 		t.Fatalf("run observer failed: %v", err)
 	}
 
-	parsed, err := url.Parse(strings.TrimSpace(stdout.String()))
+	launchURL := strings.TrimSpace(stdout.String())
+	parsed, err := url.Parse(launchURL)
 	if err != nil {
 		t.Fatalf("parse observer url failed: %v", err)
 	}
 	if parsed.Scheme != "https" || parsed.Host != "files.example.test" || parsed.Path != "/app" {
 		t.Fatalf("unexpected observer url: %s", parsed.String())
 	}
-	fragment, err := url.ParseQuery(parsed.Fragment)
-	if err != nil {
-		t.Fatalf("parse observer fragment failed: %v", err)
-	}
+	fragment := parseBrowserFragment(t, launchURL)
 	if fragment.Get("baseUrl") != "https://api.example.test" {
 		t.Fatalf("expected baseUrl fragment, got %q", fragment.Get("baseUrl"))
 	}
@@ -97,6 +95,28 @@ func TestBuildObserverURLDefaultsToHostedRouterPath(t *testing.T) {
 	if parsed.Scheme != "https" || parsed.Host != "agentrelay.com" || parsed.Path != "/observer/file" {
 		t.Fatalf("unexpected default observer url: %s", parsed.String())
 	}
+
+	fragment := parseBrowserFragment(t, got)
+	if fragment.Get("baseUrl") != "https://api.example.test" {
+		t.Fatalf("expected browser-decoded baseUrl fragment, got %q", fragment.Get("baseUrl"))
+	}
+}
+
+func parseBrowserFragment(t *testing.T, rawURL string) url.Values {
+	t.Helper()
+
+	_, rawFragment, ok := strings.Cut(rawURL, "#")
+	if !ok {
+		t.Fatalf("expected observer url to include a fragment: %s", rawURL)
+	}
+	if strings.Contains(rawFragment, "%25") {
+		t.Fatalf("observer fragment appears double-encoded: %s", rawFragment)
+	}
+	fragment, err := url.ParseQuery(rawFragment)
+	if err != nil {
+		t.Fatalf("parse observer fragment failed: %v", err)
+	}
+	return fragment
 }
 
 func TestWorkspaceUseSetsDefaultWorkspace(t *testing.T) {
