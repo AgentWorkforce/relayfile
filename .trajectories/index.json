@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "lastUpdated": "2026-04-17T12:24:48.233Z",
+  "lastUpdated": "2026-04-17T12:57:08.241Z",
   "trajectories": {
     "traj_lcvvpzmuroqb": {
       "title": "file-observer-dashboard-workflow",
@@ -43,6 +43,13 @@
       "startedAt": "2026-04-17T12:14:00.283Z",
       "completedAt": "2026-04-17T12:24:48.149Z",
       "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-04/traj_mq8gu25evmdu.json"
+    },
+    "traj_o8aamzw5k45f": {
+      "title": "Fix CLI default relayfile server and token status behavior",
+      "status": "completed",
+      "startedAt": "2026-04-17T12:55:20.190Z",
+      "completedAt": "2026-04-17T12:57:08.107Z",
+      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-04/traj_o8aamzw5k45f.json"
     }
   }
 }

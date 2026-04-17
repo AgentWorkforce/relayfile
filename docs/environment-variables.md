@@ -149,7 +149,7 @@ the `workspace_id`/`wks` claim in the active token, then the default stored by
 | Variable | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `RELAYFILE_SERVER` | string | unset | Preferred server override for `relayfile login` and server resolution |
-| `RELAYFILE_BASE_URL` | string | `https://relayfile-api.agentworkforce.workers.dev` for login fallback | Used when `RELAYFILE_SERVER` is unset |
+| `RELAYFILE_BASE_URL` | string | `https://api.relayfile.dev` for login fallback | Used when `RELAYFILE_SERVER` is unset |
 | `RELAYFILE_TOKEN` | string | unset | Used for `login` and as a token fallback before saved credentials |
 | `RELAYFILE_WORKSPACE` | string | unset | Workspace override for CLI commands when no workspace argument is supplied |
 | `RELAYFILE_REMOTE_PATH` | string | `/` | Mount command default |

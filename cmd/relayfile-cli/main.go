@@ -31,7 +31,7 @@ import (
 )
 
 const (
-	defaultServerURL        = "https://relayfile-api.agentworkforce.workers.dev"
+	defaultServerURL        = "https://api.relayfile.dev"
 	configDirName           = ".relayfile"
 	websocketReconcileEvery = 10
 )
