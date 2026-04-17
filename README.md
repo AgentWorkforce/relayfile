@@ -178,11 +178,14 @@ Inspect the remote VFS directly without mounting:
 
 ```bash
 relayfile login --server https://api.relayfile.dev --token "$RELAYFILE_TOKEN"
-relayfile tree ws_123 /github --depth 5
-relayfile read ws_123 /github/repos/acme/api/pulls/42/metadata.json
-relayfile tree ws_123 /github --depth 5 --json
-relayfile read ws_123 /external/blob.bin --output blob.bin
+relayfile workspace use ws_123
+relayfile tree /github --depth 5
+relayfile read /github/repos/acme/api/pulls/42/metadata.json
+relayfile tree /github --depth 5 --json
+relayfile read /external/blob.bin --output blob.bin
 ```
+
+You can also set `RELAYFILE_WORKSPACE=ws_123` instead of storing a default.
 
 ## License
 
