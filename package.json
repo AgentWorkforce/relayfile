@@ -14,10 +14,8 @@
   },
   "devDependencies": {
     "@agent-relay/sdk": "^4.0.28",
+    "@agentworkforce/workload-router": "^0.3.0",
     "agent-trajectories": "^0.5.6",
     "tsx": "^4.21.0"
-  },
-  "dependencies": {
-    "@agentworkforce/workload-router": "file:../workforce/packages/workload-router"
   }
 }
