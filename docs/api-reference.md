@@ -141,7 +141,8 @@ curl -sS -X POST \
 
 ### `GET /v1/workspaces/{workspaceId}/fs/export`
 
-Export visible files from a workspace.
+Export visible files from a workspace. Add `path=/github` to restrict the
+snapshot to a subtree.
 
 JSON export:
 
@@ -149,7 +150,7 @@ JSON export:
 curl -sS \
   -H "Authorization: Bearer ${RELAYFILE_TOKEN}" \
   -H "X-Correlation-Id: ${RELAYFILE_CORRELATION_ID}" \
-  "${RELAYFILE_BASE_URL}/v1/workspaces/${RELAYFILE_WORKSPACE}/fs/export?format=json" | jq .
+  "${RELAYFILE_BASE_URL}/v1/workspaces/${RELAYFILE_WORKSPACE}/fs/export?format=json&path=/" | jq .
 ```
 
 Tar export:

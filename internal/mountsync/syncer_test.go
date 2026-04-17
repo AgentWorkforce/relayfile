@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -73,6 +74,53 @@ func TestSyncOncePullsRemoteAndPushesLocalEdits(t *testing.T) {
 	}
 	if remote.Revision == "rev_1" {
 		t.Fatalf("expected remote revision to advance")
+	}
+}
+
+func TestReconcileUsesExportSnapshotForInitialPull(t *testing.T) {
+	base := &fakeClient{
+		files: map[string]RemoteFile{
+			"/github/repos/demo/README.md": {
+				Path:        "/github/repos/demo/README.md",
+				Revision:    "rev_1",
+				ContentType: "text/markdown",
+				Content:     "# Demo",
+			},
+			"/notion/Docs/A.md": {
+				Path:        "/notion/Docs/A.md",
+				Revision:    "rev_2",
+				ContentType: "text/markdown",
+				Content:     "# A",
+			},
+		},
+	}
+	client := &fakeExportClient{fakeClient: base}
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_mount_export",
+		RemoteRoot:  "/github",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+
+	if err := syncer.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile failed: %v", err)
+	}
+
+	if client.exportCalls != 1 {
+		t.Fatalf("expected one export snapshot call, got %d", client.exportCalls)
+	}
+	if base.listTreeCalls != 0 {
+		t.Fatalf("expected export bootstrap to avoid list tree, got %d calls", base.listTreeCalls)
+	}
+	if client.readFileCalls != 0 {
+		t.Fatalf("expected export bootstrap to avoid per-file reads, got %d calls", client.readFileCalls)
+	}
+	assertLocalFileContent(t, filepath.Join(localDir, "repos", "demo", "README.md"), "# Demo")
+	if _, err := os.Stat(filepath.Join(localDir, "notion", "Docs", "A.md")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected remote root filter to exclude notion file, stat err=%v", err)
 	}
 }
 
@@ -727,7 +775,7 @@ func TestCanWritePathWithRelayauthScopes(t *testing.T) {
 func TestCanReadPathWithPerFileScopes(t *testing.T) {
 	scopes := map[string]struct{}{
 		"relayfile:fs:read:/src/app.ts": {},
-		"relayfile:fs:read:/README.md": {},
+		"relayfile:fs:read:/README.md":  {},
 	}
 
 	if !canReadPath(scopes, "/src/app.ts") {
@@ -1150,6 +1198,33 @@ type fakeClient struct {
 	eventCounter      int
 	listTreeCalls     int
 	eventsUnsupported bool
+}
+
+type fakeExportClient struct {
+	*fakeClient
+	exportCalls   int
+	readFileCalls int
+}
+
+func (c *fakeExportClient) ExportFiles(ctx context.Context, workspaceID, path string) ([]RemoteFile, error) {
+	_ = ctx
+	_ = workspaceID
+	base := normalizeRemotePath(path)
+	files := make([]RemoteFile, 0, len(c.files))
+	for remotePath, file := range c.files {
+		if !isUnderRemoteRoot(base, remotePath) {
+			continue
+		}
+		files = append(files, file)
+	}
+	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
+	c.exportCalls++
+	return files, nil
+}
+
+func (c *fakeExportClient) ReadFile(ctx context.Context, workspaceID, path string) (RemoteFile, error) {
+	c.readFileCalls++
+	return c.fakeClient.ReadFile(ctx, workspaceID, path)
 }
 
 func (c *fakeClient) ListTree(ctx context.Context, workspaceID, path string, depth int, cursor string) (TreeResponse, error) {

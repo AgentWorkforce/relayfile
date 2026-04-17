@@ -31,7 +31,7 @@ The `relayfile` CLI is the primary interface for humans and CI systems to intera
 ### Auth flow: API key (v1)
 
 ```
-relayfile login --server https://relayfile-api.agentworkforce.workers.dev
+relayfile login --server https://api.relayfile.dev
 ```
 
 1. Prompts the user for an API key (paste from dashboard or generate via API).
@@ -46,14 +46,14 @@ Same as `gh auth login` — opens a browser, completes device-code flow, stores 
 
 ```json
 {
-  "server": "https://relayfile-api.agentworkforce.workers.dev",
+  "server": "https://api.relayfile.dev",
   "token": "eyJ...",
   "refreshToken": null,
   "expiresAt": null
 }
 ```
 
-- `server` — base URL for all API calls. Default: `https://relayfile-api.agentworkforce.workers.dev`.
+- `server` — base URL for all API calls. Default: `https://api.relayfile.dev`.
 - `token` — Bearer JWT or API key.
 - `refreshToken` / `expiresAt` — reserved for OAuth flow (v2). Null for API-key auth.
 - File permissions: `0600` (user-only read/write).
@@ -72,7 +72,7 @@ relayfile login [--server URL]
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--server` | `https://relayfile-api.agentworkforce.workers.dev` | Server base URL |
+| `--server` | `https://api.relayfile.dev` | Server base URL |
 
 **Behavior:**
 
@@ -113,7 +113,7 @@ relayfile workspace create <name>
   "workspaces": {
     "my-project": {
       "id": "ws_abc123",
-      "server": "https://relayfile-api.agentworkforce.workers.dev",
+      "server": "https://api.relayfile.dev",
       "createdAt": "2026-03-24T12:00:00Z"
     }
   },
@@ -329,7 +329,7 @@ relayfile status [workspace]
 3. Print:
    ```
    Workspace:  my-project (ws_abc123)
-   Server:     https://relayfile-api.agentworkforce.workers.dev
+   Server:     https://api.relayfile.dev
    Files:      142
    Last event: 2026-03-24T11:42:00Z (3 minutes ago)
    Agents:     compose-agent, reviewer-bot
@@ -382,7 +382,7 @@ Error: not authenticated. Run 'relayfile login' or set RELAYFILE_TOKEN.
 1. `--server` flag
 2. `RELAYFILE_SERVER` environment variable
 3. `~/.relayfile/credentials.json` → `server` field
-4. Default: `https://relayfile-api.agentworkforce.workers.dev`
+4. Default: `https://api.relayfile.dev`
 
 ---
 
@@ -449,7 +449,7 @@ The CLI imports `internal/mountsync` directly for the `mount` subcommand rather 
 # First-time setup
 relayfile login
 # Enter API key: ********
-# Logged in to https://relayfile-api.agentworkforce.workers.dev as my-agent
+# Logged in to https://api.relayfile.dev as my-agent
 
 # Seed a project
 relayfile seed my-workspace ./src

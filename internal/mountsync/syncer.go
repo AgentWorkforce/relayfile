@@ -101,6 +101,10 @@ type RemoteClient interface {
 	DeleteFile(ctx context.Context, workspaceID, path, baseRevision string) error
 }
 
+type exportSnapshotClient interface {
+	ExportFiles(ctx context.Context, workspaceID, path string) ([]RemoteFile, error)
+}
+
 type HTTPClient struct {
 	baseURL    string
 	token      string
@@ -191,6 +195,36 @@ func (c *HTTPClient) DeleteFile(ctx context.Context, workspaceID, path, baseRevi
 		"If-Match": baseRevision,
 	}
 	return c.doJSON(ctx, http.MethodDelete, fmt.Sprintf("/v1/workspaces/%s/fs/file?%s", url.PathEscape(workspaceID), q.Encode()), headers, nil, nil)
+}
+
+func (c *HTTPClient) ExportFiles(ctx context.Context, workspaceID, path string) ([]RemoteFile, error) {
+	q := url.Values{}
+	q.Set("format", "json")
+	q.Set("path", normalizeRemotePath(path))
+	var out []struct {
+		Path        string `json:"path"`
+		Revision    string `json:"revision"`
+		ContentType string `json:"contentType"`
+		Content     string `json:"content"`
+	}
+	err := c.doJSON(ctx, http.MethodGet, fmt.Sprintf("/v1/workspaces/%s/fs/export?%s", url.PathEscape(workspaceID), q.Encode()), nil, nil, &out)
+	if err != nil {
+		return nil, err
+	}
+	files := make([]RemoteFile, 0, len(out))
+	for _, file := range out {
+		remotePath := normalizeRemotePath(file.Path)
+		if remotePath == "/" {
+			continue
+		}
+		files = append(files, RemoteFile{
+			Path:        remotePath,
+			Revision:    file.Revision,
+			ContentType: file.ContentType,
+			Content:     file.Content,
+		})
+	}
+	return files, nil
 }
 
 func (c *HTTPClient) doJSON(
@@ -860,6 +894,9 @@ func (s *Syncer) pullRemote(ctx context.Context, conflicted map[string]struct{})
 	if err := s.pullRemoteFull(ctx, conflicted); err != nil {
 		return err
 	}
+	if s.wsConn != nil {
+		return nil
+	}
 	cursor, err := s.resolveLatestEventCursor(ctx)
 	if err != nil {
 		var httpErr *HTTPError
@@ -873,6 +910,50 @@ func (s *Syncer) pullRemote(ctx context.Context, conflicted map[string]struct{})
 }
 
 func (s *Syncer) pullRemoteFull(ctx context.Context, conflicted map[string]struct{}) error {
+	if client, ok := s.client.(exportSnapshotClient); ok {
+		used, err := s.pullRemoteFullExport(ctx, client, conflicted)
+		if used {
+			return err
+		}
+	}
+	return s.pullRemoteFullTree(ctx, conflicted)
+}
+
+func (s *Syncer) pullRemoteFullExport(ctx context.Context, client exportSnapshotClient, conflicted map[string]struct{}) (bool, error) {
+	files, err := client.ExportFiles(ctx, s.workspace, s.remoteRoot)
+	if err != nil {
+		if exportSnapshotUnsupported(err) {
+			return false, nil
+		}
+		return true, err
+	}
+	remoteFiles := map[string]RemoteFile{}
+	for _, file := range files {
+		remotePath := normalizeRemotePath(file.Path)
+		if remotePath == "/" || !isUnderRemoteRoot(s.remoteRoot, remotePath) {
+			continue
+		}
+		if tracked, ok := s.state.Files[remotePath]; ok && tracked.Denied {
+			continue
+		}
+		file.Path = remotePath
+		remoteFiles[remotePath] = file
+	}
+	return true, s.applyRemoteSnapshot(remoteFiles, conflicted)
+}
+
+func exportSnapshotUnsupported(err error) bool {
+	var httpErr *HTTPError
+	if !errors.As(err, &httpErr) {
+		return false
+	}
+	if httpErr.StatusCode == http.StatusNotFound {
+		return true
+	}
+	return httpErr.StatusCode == http.StatusBadRequest && strings.EqualFold(httpErr.Code, "bad_request")
+}
+
+func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]struct{}) error {
 	remoteFiles := map[string]RemoteFile{}
 	cursor := ""
 	for {
@@ -911,6 +992,10 @@ func (s *Syncer) pullRemoteFull(ctx context.Context, conflicted map[string]struc
 		cursor = *page.NextCursor
 	}
 
+	return s.applyRemoteSnapshot(remoteFiles, conflicted)
+}
+
+func (s *Syncer) applyRemoteSnapshot(remoteFiles map[string]RemoteFile, conflicted map[string]struct{}) error {
 	remotePaths := make([]string, 0, len(remoteFiles))
 	for remotePath := range remoteFiles {
 		remotePaths = append(remotePaths, remotePath)

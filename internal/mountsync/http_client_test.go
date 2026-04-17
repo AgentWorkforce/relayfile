@@ -75,3 +75,33 @@ func TestHTTPClientListEvents(t *testing.T) {
 		t.Fatalf("expected nextCursor evt_2, got %+v", feed.NextCursor)
 	}
 }
+
+func TestHTTPClientExportFilesUsesPathFilter(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/workspaces/ws_export/fs/export" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if r.URL.Query().Get("format") != "json" {
+			t.Fatalf("expected json export format, got %q", r.URL.Query().Get("format"))
+		}
+		if r.URL.Query().Get("path") != "/github" {
+			t.Fatalf("expected path filter /github, got %q", r.URL.Query().Get("path"))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[{"path":"/github/repos/demo/README.md","revision":"rev_1","contentType":"text/markdown","content":"# Demo"}]`))
+	}))
+	defer server.Close()
+
+	client := NewHTTPClient(server.URL, "token", server.Client())
+	files, err := client.ExportFiles(context.Background(), "ws_export", "/github")
+	if err != nil {
+		t.Fatalf("export files failed: %v", err)
+	}
+	if len(files) != 1 {
+		t.Fatalf("expected one exported file, got %d", len(files))
+	}
+	if files[0].Path != "/github/repos/demo/README.md" || files[0].Revision != "rev_1" || files[0].Content != "# Demo" {
+		t.Fatalf("unexpected exported file: %+v", files[0])
+	}
+}

@@ -157,7 +157,7 @@ Implementation:
 ### Endpoint
 
 ```
-GET /v1/workspaces/{workspaceId}/fs/export?format={json|tar|patch}
+GET /v1/workspaces/{workspaceId}/fs/export?format={json|tar|patch}&path={path}
 ```
 
 **Auth:** Bearer JWT with `fs:read` scope.
@@ -171,6 +171,7 @@ Download all visible workspace files as a single artifact. Used for backups, mig
 | Param | Type | Default | Description |
 |-------|------|---------|-------------|
 | `format` | string | `json` | One of: `json`, `tar`, `patch` |
+| `path` | string | `/` | Restrict the export to files under this VFS path |
 
 ### Permission Filtering
 

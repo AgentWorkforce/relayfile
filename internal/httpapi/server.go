@@ -1406,6 +1406,10 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request, workspaceI
 	if format == "" {
 		format = "json"
 	}
+	exportRoot := normalizeRoutePath(r.URL.Query().Get("path"))
+	if exportRoot == "" {
+		exportRoot = "/"
+	}
 
 	files, err := s.store.ExportWorkspace(workspaceID)
 	if err != nil {
@@ -1419,6 +1423,9 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request, workspaceI
 
 	visible := make([]relayfile.File, 0, len(files))
 	for _, file := range files {
+		if !withinBasePath(exportRoot, file.Path) {
+			continue
+		}
 		effectivePermissions := s.store.ResolveFilePermissions(workspaceID, file.Path, true)
 		if !filePermissionAllows(effectivePermissions, workspaceID, &claims) {
 			continue
