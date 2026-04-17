@@ -5,12 +5,41 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 
-const binName = os.platform() === "win32" ? "relayfile.exe" : "relayfile";
-const binPath = path.join(__dirname, "..", "bin", binName);
+const PLATFORM_MAP = {
+  darwin: "darwin",
+  linux: "linux",
+  win32: "windows",
+};
 
-if (!fs.existsSync(binPath)) {
+const ARCH_MAP = {
+  x64: "amd64",
+  arm64: "arm64",
+};
+
+function getPlatformBinaryName() {
+  const platform = PLATFORM_MAP[os.platform()];
+  const arch = ARCH_MAP[os.arch()];
+
+  if (!platform || !arch) {
+    return null;
+  }
+
+  const ext = platform === "windows" ? ".exe" : "";
+  return `relayfile-cli-${platform}-${arch}${ext}`;
+}
+
+const genericBinName = os.platform() === "win32" ? "relayfile.exe" : "relayfile";
+const packagedBinName = getPlatformBinaryName();
+const candidates = [
+  path.join(__dirname, "..", "bin", genericBinName),
+  packagedBinName && path.join(__dirname, "..", "bin", packagedBinName),
+].filter(Boolean);
+
+const binPath = candidates.find((candidate) => fs.existsSync(candidate));
+
+if (!binPath) {
   console.error(
-    `relayfile binary not found at ${binPath}. Reinstall the package or run postinstall again.`
+    `relayfile binary not found for ${os.platform()} ${os.arch()}. Reinstall the package or run postinstall again.`
   );
   process.exit(1);
 }
