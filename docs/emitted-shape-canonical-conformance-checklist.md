@@ -1,0 +1,166 @@
+# Emitted-Shape Canonical Conformance — Checklist
+
+## Status
+
+- Date: 2026-04-16
+- Boundary: [emitted-shape-canonical-conformance-boundary.md](emitted-shape-canonical-conformance-boundary.md)
+
+## Prerequisites
+
+- [x] `relayfile-adapters` repo is available locally at a known path (needed for fixture generation)
+- [x] `relayfile-adapters/packages/github` builds successfully (`npm run build` or `npx tsc`)
+- [x] Current `go test ./internal/schema/...` passes (baseline green)
+- [x] Current `go build ./...` passes (baseline green)
+
+## Phase 1: Generate Adapter-Emitted Fixture
+
+### 1.1 Create testdata directory
+
+- [x] Create `internal/schema/testdata/` directory
+
+### 1.2 Capture adapter raw input fixture
+
+- [x] Copy `mockIssuePayload` from `relayfile-adapters/packages/github/src/__tests__/fixtures/index.ts`
+- [x] Resolve all template literals and constants to produce a standalone JSON object
+- [x] Write to `internal/schema/testdata/github-issue-adapter-raw-input.json`
+- [x] Verify: file is valid JSON, contains `user.avatar_url`, `labels[0].name`, `assignees[0].login` (GitHub API shape, not canonical shape)
+
+### 1.3 Write fixture generation script
+
+- [x] Create `internal/schema/testdata/generate-fixtures.ts`
+- [x] Script imports `mapIssue` from the adapter package (or calls it via a local import path)
+- [x] Script reads `github-issue-adapter-raw-input.json` as the input payload
+- [x] Script calls `mapIssue(payload, "octocat", "hello-world")`
+- [x] Script writes `JSON.parse(result.content)` to `github-issue-adapter-emitted.json`
+- [x] Script prints the adapter package version or commit hash for provenance
+- [x] Verify: script runs without error via `npx tsx internal/schema/testdata/generate-fixtures.ts`
+
+### 1.4 Generate and check in the adapter-emitted fixture
+
+- [x] Run the generation script
+- [x] Write output to `internal/schema/testdata/github-issue-adapter-emitted.json`
+- [x] Verify: fixture contains exactly 12 top-level fields matching the canonical schema
+- [x] Verify: `number` is `10`, `state` is `"open"` (lowercase), `labels` is `["bug"]`, `author.avatarUrl` is present
+- [x] Verify: no extra fields (no `url`, `repository_url`, `labels_url`, `reactions`, etc.)
+- [x] Verify: `html_url` is a valid URI string
+
+### 1.5 Cross-check against adapter test assertion
+
+- [x] Compare `github-issue-adapter-emitted.json` byte-for-byte (modulo formatting) with the expected output in `relayfile-adapters/packages/github/src/issues/__tests__/issue-mapping.test.ts` line 139-156
+- [x] If they differ, investigate — the adapter test and the fixture must agree on the emitted shape
+
+## Phase 2: Generate CLI Fixtures
+
+### 2.1 Capture CLI raw input fixture
+
+- [x] Construct a GitHub REST API issue response in the shape that `gh issue view --json` returns
+- [x] Use the same issue data (number 10, octocat/hello-world) for consistency
+- [x] Fields use GitHub API conventions: `user` (not `author`), `createdAt` (camelCase from GraphQL), nested `labels` and `assignees` objects, `OPEN` state (uppercase), `url` (not `html_url`)
+- [x] Write to `internal/schema/testdata/github-issue-cli-raw-input.json`
+- [x] Verify: file is valid JSON, contains `user.avatar_url`, `state: "OPEN"`, `createdAt`, `url`
+
+### 2.2 Generate CLI mapped fixture
+
+- [x] Apply the `mapCLIToCanonical()` transform logic to the CLI raw input
+- [x] Write the result to `internal/schema/testdata/github-issue-cli-mapped.json`
+- [x] Verify: fixture contains exactly 12 top-level fields matching the canonical schema
+- [x] Verify: `state` is `"open"` (lowercased from `"OPEN"`), `labels` is `["bug"]` (flattened), `author.avatarUrl` is present (renamed from `user.avatar_url`)
+- [x] Verify: field names are `created_at`, `updated_at`, `closed_at`, `html_url` (snake_case, renamed)
+
+## Phase 3: Write Provenance
+
+### 3.1 Create provenance file
+
+- [x] Create `internal/schema/testdata/PROVENANCE.md`
+- [x] Document each fixture with:
+  - Filename
+  - Provenance level (Emitted, Derived, or Raw Input)
+  - Source description
+  - Generation method
+  - Adapter commit hash (for adapter-emitted fixture)
+  - Generation date
+- [x] Document the CLI mapping's Derived status honestly: "`mapCLIToCanonical()` is test-only code in `validate_test.go`, not a shipped CLI tool"
+- [x] Document how to regenerate: "Run `npx tsx internal/schema/testdata/generate-fixtures.ts` from the repo root with `relayfile-adapters` available"
+
+## Phase 4: Update Go Conformance Tests
+
+### 4.1 Add fixture loading helper
+
+- [x] Add a `loadFixture(t *testing.T, name string) []byte` helper to `validate_test.go`
+- [x] Helper reads from `testdata/{name}` using `os.ReadFile` (standard Go test convention)
+- [x] Helper calls `t.Fatal` on read error
+
+### 4.2 Update adapter conformance test
+
+- [x] Modify `TestGitHubIssueAdapterConformance` to load `github-issue-adapter-emitted.json` via `loadFixture`
+- [x] Remove the hand-authored inline `map[string]any{...}` payload
+- [x] Add a comment: `// Provenance: Emitted — generated by mapIssue() in relayfile-adapters`
+- [x] Verify: test passes with `go test ./internal/schema/... -run TestGitHubIssueAdapterConformance`
+
+### 4.3 Update CLI conformance test
+
+- [x] Modify `TestGitHubIssueCLIConformance` to load `github-issue-cli-raw-input.json` via `loadFixture`
+- [x] Unmarshal the raw input into `map[string]any`
+- [x] Pass through the existing `mapCLIToCanonical()` transform
+- [x] Validate the mapped result against the schema
+- [x] Also compare the mapped result to `github-issue-cli-mapped.json` to verify the mapping is deterministic
+- [x] Add a comment: `// Provenance: Derived — mapCLIToCanonical() is test-only, not a shipped producer`
+- [x] Verify: test passes with `go test ./internal/schema/... -run TestGitHubIssueCLIConformance`
+
+### 4.4 Preserve existing negative and edge-case tests
+
+- [x] Verify that all 8 non-conformance tests still use inline payloads (they test schema mechanics, not producer conformance)
+- [x] Verify: `go test ./internal/schema/...` passes with all 10 tests
+
+## Phase 5: Verification Gates
+
+### 5.1 Full test suite
+
+- [x] `go test ./internal/schema/...` passes (all 10 tests)
+- [x] `go build ./...` passes
+
+### 5.2 Fixture integrity
+
+- [x] `github-issue-adapter-emitted.json` is valid JSON and passes `ValidateContent()` for path `/github/repos/octocat/hello-world/issues/10/meta.json`
+- [x] `github-issue-cli-mapped.json` is valid JSON and passes `ValidateContent()` for the same path
+- [x] `github-issue-adapter-raw-input.json` does NOT pass `ValidateContent()` (it's the raw GitHub API shape, not the canonical shape)
+- [x] `github-issue-cli-raw-input.json` does NOT pass `ValidateContent()` (it's the raw CLI shape, not the canonical shape)
+
+### 5.3 Provenance audit
+
+- [x] `PROVENANCE.md` lists all 4 fixture files with correct provenance levels
+- [x] Adapter-emitted fixture's provenance includes the adapter commit hash
+- [x] CLI fixture's provenance explicitly states Derived status
+
+### 5.4 Cross-check adapter test
+
+- [x] The `JSON.parse(mapIssue(mockIssuePayload).content)` output from the adapter test matches `github-issue-adapter-emitted.json` (field-for-field, ignoring JSON formatting)
+
+### 5.5 No regressions
+
+- [x] No files modified in `internal/relayfile/`, `relayfile-adapters/`, or `relayfile-cli/`
+- [x] No changes to `schemas/github/issue.schema.json`
+- [x] No changes to `schemas/embed.go` or `schemas/README.md`
+- [x] No new dependencies added to `go.mod`
+
+## Exit Criteria
+
+All of the following must be true:
+
+1. `internal/schema/testdata/` contains 4 fixture files, 1 provenance file, and 1 generation script.
+2. `TestGitHubIssueAdapterConformance` validates a fixture generated by the real adapter's `mapIssue()` function — provenance level **Emitted**.
+3. `TestGitHubIssueCLIConformance` validates a fixture produced by `mapCLIToCanonical()` applied to a representative CLI input — provenance level **Derived**.
+4. `PROVENANCE.md` documents the generation method, source, and provenance level for every fixture.
+5. All 10 tests in `validate_test.go` pass.
+6. `go build ./...` succeeds.
+7. No files outside `internal/schema/` and `docs/` were modified.
+
+## Failure Modes
+
+| Failure | Meaning | Action |
+|---------|---------|--------|
+| Adapter fixture doesn't match schema | `mapIssue()` output has drifted from the canonical schema | Either the schema needs updating or the adapter has a bug — investigate |
+| Adapter fixture doesn't match adapter test assertion | Generation script is using a different adapter version | Re-run with the correct adapter version |
+| CLI mapped fixture doesn't match schema | `mapCLIToCanonical()` transform has a bug | Fix the transform |
+| `relayfile-adapters` not available locally | Cannot generate adapter-emitted fixture | Document in PROVENANCE.md, use the adapter test's expected output as a fallback (weaker but honest) |
+| `mapIssue()` import fails | Adapter package structure changed | Update the generation script's import path |
