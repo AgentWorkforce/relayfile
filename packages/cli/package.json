@@ -5,8 +5,14 @@
   "bin": {
     "relayfile": "scripts/run.js"
   },
+  "files": [
+    "bin",
+    "scripts"
+  ],
   "scripts": {
-    "postinstall": "node scripts/install.js || true"
+    "build": "node scripts/build-binaries.js",
+    "prepack": "npm run build",
+    "postinstall": "node scripts/install.js"
   },
   "publishConfig": {
     "access": "public"

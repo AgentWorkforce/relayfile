@@ -88,6 +88,12 @@ jobs:
           cache: "npm"
           registry-url: "https://registry.npmjs.org"
 
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
       - name: Install dependencies
         run: npm ci
 
@@ -152,6 +158,7 @@ jobs:
         run: |
           npm run build --workspace=packages/core
           npm run build --workspace=packages/sdk/typescript
+          npm run build --workspace=packages/cli
           npm ci --prefix packages/file-observer
           npm run pages:build --prefix packages/file-observer
 
@@ -166,7 +173,7 @@ jobs:
             packages/sdk/typescript/package.json
             packages/sdk/typescript/dist/
             packages/cli/package.json
-            packages/cli/dist/
+            packages/cli/bin/
             packages/file-observer/package.json
           retention-days: 1
 
@@ -206,6 +213,10 @@ jobs:
           name: build-output
           path: .
 
+      - name: Restore CLI binary permissions
+        if: matrix.package == 'cli'
+        run: chmod 755 packages/cli/bin/relayfile-cli-*
+
       - name: Update npm for OIDC support
         run: npm install -g npm@latest
 
@@ -244,6 +255,10 @@ jobs:
         with:
           name: build-output
           path: .
+
+      - name: Restore CLI binary permissions
+        if: github.event.inputs.package == 'cli'
+        run: chmod 755 packages/cli/bin/relayfile-cli-*
 
       - name: Update npm for OIDC support
         run: npm install -g npm@latest
@@ -338,6 +353,7 @@ jobs:
             - Dist-tag: `${{ github.event.inputs.tag }}`
             - Provenance: enabled via `npm publish --provenance`
             - Registry: `https://registry.npmjs.org`
+          files: packages/cli/bin/relayfile-cli-*
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

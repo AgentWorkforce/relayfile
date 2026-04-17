@@ -1,6 +1,5 @@
 #!/usr/bin/env node
 
-const { execSync } = require("child_process");
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
@@ -24,7 +23,7 @@ function getBinaryFilename() {
   return os.platform() === "win32" ? "relayfile.exe" : "relayfile";
 }
 
-function getDownloadUrl() {
+function getPlatformSuffix() {
   const platform = PLATFORM_MAP[os.platform()];
   const arch = ARCH_MAP[os.arch()];
 
@@ -35,8 +34,25 @@ function getDownloadUrl() {
     process.exit(1);
   }
 
-  const ext = platform === "windows" ? ".exe" : "";
-  return `https://github.com/AgentWorkforce/relayfile/releases/download/v${VERSION}/relayfile-${platform}-${arch}${ext}`;
+  return `${platform}-${arch}`;
+}
+
+function getPackagedBinaryFilename() {
+  const suffix = getPlatformSuffix();
+  const ext = suffix.startsWith("windows-") ? ".exe" : "";
+  return `relayfile-cli-${suffix}${ext}`;
+}
+
+function getDownloadUrl() {
+  return `https://github.com/AgentWorkforce/relayfile/releases/download/v${VERSION}/${getPackagedBinaryFilename()}`;
+}
+
+function isSourceCheckout() {
+  const repoRoot = path.resolve(__dirname, "..", "..", "..");
+  return (
+    fs.existsSync(path.join(repoRoot, "go.mod")) &&
+    fs.existsSync(path.join(repoRoot, "cmd", "relayfile-cli"))
+  );
 }
 
 function download(url, dest) {
@@ -63,11 +79,33 @@ function download(url, dest) {
 }
 
 async function main() {
-  const url = getDownloadUrl();
   const binPath = path.join(BIN_DIR, getBinaryFilename());
 
   fs.mkdirSync(BIN_DIR, { recursive: true });
 
+  if (fs.existsSync(binPath)) {
+    fs.chmodSync(binPath, 0o755);
+    console.log("relayfile binary already installed.");
+    return;
+  }
+
+  if (isSourceCheckout()) {
+    console.log(
+      "Skipping relayfile binary install in source checkout; run npm run build --workspace=packages/cli to build package binaries."
+    );
+    return;
+  }
+
+  const packagedBinPath = path.join(BIN_DIR, getPackagedBinaryFilename());
+
+  if (fs.existsSync(packagedBinPath)) {
+    fs.copyFileSync(packagedBinPath, binPath);
+    fs.chmodSync(binPath, 0o755);
+    console.log("relayfile installed from packaged binary.");
+    return;
+  }
+
+  const url = getDownloadUrl();
   console.log(`Downloading relayfile v${VERSION}...`);
   try {
     await download(url, binPath);
