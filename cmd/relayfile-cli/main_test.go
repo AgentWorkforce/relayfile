@@ -84,6 +84,21 @@ func TestObserverPrintsFragmentLaunchURL(t *testing.T) {
 	}
 }
 
+func TestBuildObserverURLDefaultsToHostedRouterPath(t *testing.T) {
+	got, err := buildObserverURL("", "https://api.example.test", "test-token", "ws_observer")
+	if err != nil {
+		t.Fatalf("build observer url failed: %v", err)
+	}
+
+	parsed, err := url.Parse(got)
+	if err != nil {
+		t.Fatalf("parse observer url failed: %v", err)
+	}
+	if parsed.Scheme != "https" || parsed.Host != "agentrelay.com" || parsed.Path != "/observer/file" {
+		t.Fatalf("unexpected default observer url: %s", parsed.String())
+	}
+}
+
 func TestWorkspaceUseSetsDefaultWorkspace(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)

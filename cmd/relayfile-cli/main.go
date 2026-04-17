@@ -34,7 +34,7 @@ import (
 
 const (
 	defaultServerURL        = "https://api.relayfile.dev"
-	defaultObserverURL      = "https://files.relayfile.dev"
+	defaultObserverURL      = "https://agentrelay.com/observer/file"
 	configDirName           = ".relayfile"
 	websocketReconcileEvery = 10
 )
