@@ -115,7 +115,7 @@ Write a design doc at ${RELAYFILE}/docs/cli-design.md:
    - Opens browser to OAuth flow (or accepts API key)
    - Stores credentials at ~/.relayfile/credentials.json
    - Validates by calling GET /health on the server
-   - Default server: https://relayfile-api.agentworkforce.workers.dev
+   - Default server: https://api.relayfile.dev
 
 2. relayfile workspace create <name>
    - Creates a new workspace
@@ -147,7 +147,7 @@ Write a design doc at ${RELAYFILE}/docs/cli-design.md:
 
 **Config file: ~/.relayfile/credentials.json**
 {
-  server": "https://relayfile-api.agentworkforce.workers.dev",
+  "server": "https://api.relayfile.dev",
   "token": "eyJ...",
   "refreshToken": "...",
   "expiresAt": "..."

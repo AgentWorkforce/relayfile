@@ -1,0 +1,53 @@
+{
+  "id": "traj_o8aamzw5k45f",
+  "version": 1,
+  "task": {
+    "title": "Fix CLI default relayfile server and token status behavior"
+  },
+  "status": "completed",
+  "startedAt": "2026-04-17T12:55:20.190Z",
+  "completedAt": "2026-04-17T12:57:08.107Z",
+  "agents": [
+    {
+      "name": "default",
+      "role": "lead",
+      "joinedAt": "2026-04-17T12:56:21.095Z"
+    }
+  ],
+  "chapters": [
+    {
+      "id": "chap_m59dokzynzup",
+      "title": "Work",
+      "agentName": "default",
+      "startedAt": "2026-04-17T12:56:21.095Z",
+      "endedAt": "2026-04-17T12:57:08.107Z",
+      "events": [
+        {
+          "ts": 1776430581095,
+          "type": "decision",
+          "content": "Use api.relayfile.dev as the CLI built-in default server: Use api.relayfile.dev as the CLI built-in default server",
+          "raw": {
+            "question": "Use api.relayfile.dev as the CLI built-in default server",
+            "chosen": "Use api.relayfile.dev as the CLI built-in default server",
+            "alternatives": [],
+            "reasoning": "The hosted observer and SDK already use api.relayfile.dev, and the user expects bare relayfile commands to target that host when no server override or saved server is present."
+          },
+          "significance": "high"
+        }
+      ]
+    }
+  ],
+  "retrospective": {
+    "summary": "Updated the CLI built-in default server to https://api.relayfile.dev, refreshed stale docs/workflow references, and added a regression test for default server resolution.",
+    "approach": "Standard approach",
+    "confidence": 0.95
+  },
+  "commits": [],
+  "filesChanged": [],
+  "projectId": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile",
+  "tags": [],
+  "_trace": {
+    "startRef": "3bc5ae9509934d603839c2f9a4ff7a6eb79ecd44",
+    "endRef": "3bc5ae9509934d603839c2f9a4ff7a6eb79ecd44"
+  }
+}

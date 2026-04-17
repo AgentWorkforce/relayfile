@@ -71,7 +71,7 @@ relayfile workspace use ws_123
 If you are using a hosted deployment, the same login flow works with your hosted base URL:
 
 ```bash
-relayfile login --server https://relayfile-api.agentworkforce.workers.dev --token YOUR_TOKEN
+relayfile login --server https://api.relayfile.dev --token YOUR_TOKEN
 ```
 
 ## Seed Files From A Project
