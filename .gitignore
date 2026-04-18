@@ -27,6 +27,7 @@ Thumbs.db
 
 # Node (SDK)
 node_modules/
+.npm-cache/
 dist/
 *.tsbuildinfo
 

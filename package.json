@@ -5,12 +5,13 @@
   "workspaces": [
     "packages/core",
     "packages/sdk/typescript",
-    "packages/cli"
+    "packages/cli",
+    "packages/local-mount"
   ],
   "scripts": {
     "workflow": "agent-relay run",
-    "build": "npm run build --workspace=packages/sdk/typescript",
-    "typecheck": "npm run typecheck --workspace=packages/sdk/typescript"
+    "build": "npm run build --workspace=packages/sdk/typescript && npm run build --workspace=packages/local-mount",
+    "typecheck": "npm run typecheck --workspace=packages/sdk/typescript && npm run typecheck --workspace=packages/local-mount"
   },
   "devDependencies": {
     "@agent-relay/sdk": "^4.0.28",
