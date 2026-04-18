@@ -58,11 +58,11 @@ export async function launchOnMount(opts: LaunchOnMountOptions): Promise<LaunchO
     finalized = true;
     try {
       syncedCount = await handle.syncBack();
+      if (opts.onAfterSync) {
+        await opts.onAfterSync(syncedCount);
+      }
     } finally {
       handle.cleanup();
-    }
-    if (opts.onAfterSync) {
-      await opts.onAfterSync(syncedCount);
     }
   };
 

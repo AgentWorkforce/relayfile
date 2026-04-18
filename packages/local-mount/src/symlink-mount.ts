@@ -34,6 +34,9 @@ export interface SymlinkMountHandle {
 
 const DEFAULT_EXCLUDED_DIRS = ['.git', 'node_modules'];
 const MOUNT_README_FILENAME = '_MOUNT_README.md';
+const MOUNT_MARKER_FILENAME = '.relayfile-local-mount';
+const MOUNT_MARKER_CONTENT =
+  'This directory is managed by @relayfile/local-mount. Do not place unrelated files here; the directory will be deleted when the mount is torn down.\n';
 
 export function createSymlinkMount(
   projectDir: string,
@@ -64,9 +67,11 @@ export function createSymlinkMount(
     throw new Error('mountDir must be different from projectDir');
   }
 
+  assertMountDirSafeToRemove(resolvedMountDir, resolvedProjectDir);
   removeMountDir(resolvedMountDir);
   mkdirSync(resolvedMountDir, { recursive: true });
   const realMountDir = realpathSync(resolvedMountDir);
+  writeFileSync(path.join(realMountDir, MOUNT_MARKER_FILENAME), MOUNT_MARKER_CONTENT, 'utf8');
 
   walkProjectTree(
     resolvedProjectDir,
@@ -112,6 +117,47 @@ export function createSymlinkMount(
       removeMountDir(resolvedMountDir);
     },
   };
+}
+
+function assertMountDirSafeToRemove(mountDir: string, projectDir: string): void {
+  const resolved = path.resolve(mountDir);
+  const parsed = path.parse(resolved);
+  // Refuse filesystem roots (posix '/' or a Windows drive root like 'C:\').
+  if (resolved === parsed.root) {
+    throw new Error(`Refusing to use filesystem root as mountDir: ${resolved}`);
+  }
+  // Refuse anything that would overlap the project directory (destroying the
+  // project would be catastrophic). `path.resolve(projectDir)` avoids following
+  // symlinks so both the symlink-target and the literal argument are rejected.
+  const resolvedProject = path.resolve(projectDir);
+  if (
+    resolved === resolvedProject ||
+    resolved.startsWith(`${resolvedProject}${path.sep}`) ||
+    resolvedProject.startsWith(`${resolved}${path.sep}`)
+  ) {
+    throw new Error(`mountDir ${resolved} overlaps projectDir ${resolvedProject}`);
+  }
+  // If the directory already exists, require it to be a directory we created
+  // previously (identified by the mount marker file). Otherwise the caller
+  // pointed us at an unrelated directory and removing it would destroy data.
+  if (!existsSync(resolved)) {
+    return;
+  }
+  try {
+    const stat = lstatSync(resolved);
+    if (!stat.isDirectory()) {
+      throw new Error(`mountDir ${resolved} exists and is not a directory`);
+    }
+  } catch (err) {
+    throw new Error(`Failed to stat mountDir ${resolved}: ${(err as Error).message}`);
+  }
+  const markerPath = path.join(resolved, MOUNT_MARKER_FILENAME);
+  if (!existsSync(markerPath)) {
+    throw new Error(
+      `Refusing to remove ${resolved}: missing ${MOUNT_MARKER_FILENAME} marker. ` +
+        `Only directories previously created by createSymlinkMount can be reused as mountDir.`
+    );
+  }
 }
 
 function walkProjectTree(
@@ -283,6 +329,15 @@ function isPathMatched(relPath: string, matcher: Ignore, isDirectory = false): b
 
 function hasSameContent(left: string, right: string): boolean {
   try {
+    const leftStat = statSync(left);
+    const rightStat = statSync(right);
+    if (leftStat.size !== rightStat.size) {
+      return false;
+    }
+    // Same size: fall back to a full byte comparison. Buffer.equals short-
+    // circuits internally but we still read both files; for very large files
+    // callers may want a streaming approach, though in practice mounts are
+    // dominated by source code where this is cheap.
     const leftContent = readFileSync(left);
     const rightContent = readFileSync(right);
     return leftContent.equals(rightContent);
@@ -320,7 +375,9 @@ function resolveSyncRelativePath(
 ): string | null {
   const relative = path.relative(mountDir, sourceFile);
   if (relative === '' || relative.startsWith('..')) return null;
-  if (normalizeRelativePosix(relative) === MOUNT_README_FILENAME) return null;
+  const relativePosix = normalizeRelativePosix(relative);
+  if (relativePosix === MOUNT_README_FILENAME) return null;
+  if (relativePosix === MOUNT_MARKER_FILENAME) return null;
   if (isPathMatched(relative, readonlyMatcher) || isPathMatched(relative, ignoredMatcher)) return null;
 
   try {
@@ -442,7 +499,7 @@ ${ignoredList}
 All other files can be read and modified freely.
 
 If you get "permission denied", the file is read-only.
-Changes to read-only files will be automatically reverted.
-Do not attempt to chmod files - permissions will be restored.
+Changes to read-only files are not synced back to the source project.
+Edits or permission changes to read-only files inside this mount may be discarded or overwritten when the mount is recreated.
 ${agentLine}`;
 }

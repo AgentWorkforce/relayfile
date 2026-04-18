@@ -48,13 +48,25 @@ export function readAgentDotfiles(
   ];
 
   if (options.agentName) {
+    const safeAgentName = sanitizeAgentName(options.agentName);
     ignoredPatterns.push(
-      ...loadPatternsFromFile(path.join(resolvedProjectDir, `.${options.agentName}.agentignore`))
+      ...loadPatternsFromFile(path.join(resolvedProjectDir, `.${safeAgentName}.agentignore`))
     );
     readonlyPatterns.push(
-      ...loadPatternsFromFile(path.join(resolvedProjectDir, `.${options.agentName}.agentreadonly`))
+      ...loadPatternsFromFile(path.join(resolvedProjectDir, `.${safeAgentName}.agentreadonly`))
     );
   }
 
   return { ignoredPatterns, readonlyPatterns };
+}
+
+const AGENT_NAME_PATTERN = /^[A-Za-z0-9_-]+$/;
+
+function sanitizeAgentName(agentName: string): string {
+  if (!AGENT_NAME_PATTERN.test(agentName) || path.basename(agentName) !== agentName) {
+    throw new Error(
+      `Invalid agentName ${JSON.stringify(agentName)}: only [A-Za-z0-9_-] are allowed`
+    );
+  }
+  return agentName;
 }
