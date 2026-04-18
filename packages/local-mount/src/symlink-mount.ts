@@ -143,13 +143,14 @@ function assertMountDirSafeToRemove(mountDir: string, projectDir: string): void 
   if (!existsSync(resolved)) {
     return;
   }
+  let stat;
   try {
-    const stat = lstatSync(resolved);
-    if (!stat.isDirectory()) {
-      throw new Error(`mountDir ${resolved} exists and is not a directory`);
-    }
+    stat = lstatSync(resolved);
   } catch (err) {
     throw new Error(`Failed to stat mountDir ${resolved}: ${(err as Error).message}`);
+  }
+  if (!stat.isDirectory()) {
+    throw new Error(`mountDir ${resolved} exists and is not a directory`);
   }
   const markerPath = path.join(resolved, MOUNT_MARKER_FILENAME);
   if (!existsSync(markerPath)) {
