@@ -13,6 +13,7 @@ on:
           - sdk
           - cli
           - file-observer
+          - local-mount
         default: "all"
       version:
         description: "Version bump type"
@@ -135,6 +136,7 @@ jobs:
               'packages/sdk/typescript/package.json',
               'packages/cli/package.json',
               'packages/file-observer/package.json',
+              'packages/local-mount/package.json',
             ];
 
             for (const pkgPath of packagePaths) {
@@ -159,6 +161,7 @@ jobs:
           npm run build --workspace=packages/core
           npm run build --workspace=packages/sdk/typescript
           npm run build --workspace=packages/cli
+          npm run build --workspace=packages/local-mount
           npm ci --prefix packages/file-observer
           npm run pages:build --prefix packages/file-observer
 
@@ -175,6 +178,8 @@ jobs:
             packages/cli/package.json
             packages/cli/bin/
             packages/file-observer/package.json
+            packages/local-mount/package.json
+            packages/local-mount/dist/
           retention-days: 1
 
   # Publish all packages in parallel
@@ -196,6 +201,8 @@ jobs:
             path: packages/cli
           - package: file-observer
             path: packages/file-observer
+          - package: local-mount
+            path: packages/local-mount
 
     steps:
       - name: Checkout code
@@ -271,6 +278,7 @@ jobs:
             sdk) echo "path=packages/sdk/typescript" >> "$GITHUB_OUTPUT" ;;
             cli) echo "path=packages/cli" >> "$GITHUB_OUTPUT" ;;
             file-observer) echo "path=packages/file-observer" >> "$GITHUB_OUTPUT" ;;
+            local-mount) echo "path=packages/local-mount" >> "$GITHUB_OUTPUT" ;;
             *)
               echo "Unsupported package: ${{ github.event.inputs.package }}" >&2
               exit 1
@@ -319,7 +327,7 @@ jobs:
           git config user.name "GitHub Actions"
           git config user.email "actions@github.com"
 
-          git add package.json packages/core/package.json packages/sdk/typescript/package.json packages/cli/package.json packages/file-observer/package.json
+          git add package.json packages/core/package.json packages/sdk/typescript/package.json packages/cli/package.json packages/file-observer/package.json packages/local-mount/package.json
           if ! git diff --staged --quiet; then
             git commit -m "chore(release): v${NEW_VERSION}"
             git push
@@ -341,12 +349,14 @@ jobs:
             - `@relayfile/sdk@${{ needs.build.outputs.new_version }}`
             - `relayfile@${{ needs.build.outputs.new_version }}`
             - `@relayfile/file-observer@${{ needs.build.outputs.new_version }}`
+            - `@relayfile/local-mount@${{ needs.build.outputs.new_version }}`
 
             ### Install
             ```bash
             npm install @relayfile/sdk@${{ needs.build.outputs.new_version }}
             npm install relayfile@${{ needs.build.outputs.new_version }}
             npm install @relayfile/file-observer@${{ needs.build.outputs.new_version }}
+            npm install @relayfile/local-mount@${{ needs.build.outputs.new_version }}
             ```
 
             ### Publish Details

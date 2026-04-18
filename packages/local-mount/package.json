@@ -1,0 +1,46 @@
+{
+  "name": "@relayfile/local-mount",
+  "version": "0.1.0",
+  "description": "Create a symlink/copy mount of a project directory with .agentignore/.agentreadonly semantics, then launch a CLI inside it and sync writable changes back on exit",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "type": "module",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "ignore": "^7.0.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.3",
+    "vitest": "^3.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/AgentWorkforce/relayfile",
+    "directory": "packages/local-mount"
+  },
+  "license": "MIT",
+  "keywords": [
+    "relayfile",
+    "mount",
+    "symlink",
+    "agent",
+    "sandbox",
+    "agentignore",
+    "agentreadonly"
+  ],
+  "engines": {
+    "node": ">=18"
+  }
+}
