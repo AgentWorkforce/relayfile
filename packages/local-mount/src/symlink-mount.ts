@@ -14,6 +14,12 @@ import {
 import type { Stats } from 'node:fs';
 import ignore, { type Ignore } from 'ignore';
 import path from 'node:path';
+import {
+  startAutoSync,
+  type AutoSyncContext,
+  type AutoSyncHandle,
+  type AutoSyncOptions,
+} from './auto-sync.js';
 
 export interface SymlinkMountOptions {
   ignoredPatterns: string[];
@@ -29,6 +35,12 @@ export interface SymlinkMountOptions {
 export interface SymlinkMountHandle {
   mountDir: string;
   syncBack(): Promise<number>;
+  /**
+   * Start bidirectional auto-sync: watches both the mount and project trees
+   * with chokidar and runs a full reconcile every `scanIntervalMs` as a
+   * safety net. Returns a handle you must `stop()` before teardown.
+   */
+  startAutoSync(opts?: AutoSyncOptions): AutoSyncHandle;
   cleanup(): void;
 }
 
@@ -93,6 +105,18 @@ export function createSymlinkMount(
     'utf8'
   );
 
+  const autoSyncContext: AutoSyncContext = {
+    realMountDir,
+    realProjectDir: resolvedProjectDir,
+    isExcluded: (relPosix) => isExcludedPath(relPosix, excludeSet),
+    isIgnored: (relPosix) =>
+      isPathMatched(relPosix, ignoredMatcher) ||
+      isPathMatched(relPosix, ignoredMatcher, true),
+    isReadonly: (relPosix) => isPathMatched(relPosix, readonlyMatcher),
+    isReservedFile: (relPosix) =>
+      relPosix === MOUNT_README_FILENAME || relPosix === MOUNT_MARKER_FILENAME,
+  };
+
   return {
     mountDir: resolvedMountDir,
     async syncBack(): Promise<number> {
@@ -112,6 +136,9 @@ export function createSymlinkMount(
       }
 
       return synced;
+    },
+    startAutoSync(opts?: AutoSyncOptions): AutoSyncHandle {
+      return startAutoSync(autoSyncContext, opts);
     },
     cleanup(): void {
       removeMountDir(resolvedMountDir);

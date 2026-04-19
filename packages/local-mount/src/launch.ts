@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import { createSymlinkMount, type SymlinkMountHandle } from './symlink-mount.js';
+import type { AutoSyncHandle, AutoSyncOptions } from './auto-sync.js';
 
 export interface LaunchOnMountOptions {
   /** Binary name or absolute path to the CLI to spawn, e.g. 'claude'. */
@@ -30,6 +31,12 @@ export interface LaunchOnMountOptions {
    * files that were written back to the project directory.
    */
   onAfterSync?: (syncedFileCount: number) => void | Promise<void>;
+  /**
+   * Auto-sync behavior. By default, bidirectional auto-sync runs during the
+   * lifetime of the spawned CLI. Pass `false` to disable, or an options object
+   * to tune the scan interval / write-finish debounce.
+   */
+  autoSync?: boolean | AutoSyncOptions;
 }
 
 export interface LaunchOnMountResult {
@@ -52,12 +59,20 @@ export async function launchOnMount(opts: LaunchOnMountOptions): Promise<LaunchO
 
   let syncedCount = 0;
   let finalized = false;
+  let autoSync: AutoSyncHandle | undefined;
 
   const finalize = async (): Promise<void> => {
     if (finalized) return;
     finalized = true;
     try {
-      syncedCount = await handle.syncBack();
+      let autoSyncChanges = 0;
+      if (autoSync) {
+        await autoSync.stop();
+        autoSyncChanges = autoSync.totalChanges();
+        autoSync = undefined;
+      }
+      const finalSynced = await handle.syncBack();
+      syncedCount = autoSyncChanges + finalSynced;
       if (opts.onAfterSync) {
         await opts.onAfterSync(syncedCount);
       }
@@ -69,6 +84,11 @@ export async function launchOnMount(opts: LaunchOnMountOptions): Promise<LaunchO
   try {
     if (opts.onBeforeLaunch) {
       await opts.onBeforeLaunch(handle.mountDir);
+    }
+
+    if (opts.autoSync !== false) {
+      const autoSyncOpts = typeof opts.autoSync === 'object' ? opts.autoSync : undefined;
+      autoSync = handle.startAutoSync(autoSyncOpts);
     }
 
     const envVars: NodeJS.ProcessEnv = {
