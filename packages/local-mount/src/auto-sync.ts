@@ -71,7 +71,7 @@ export function startAutoSync(
     syncing = true;
     let count = 0;
     try {
-      count = reconcile(state, ctx);
+      count = reconcile(state, ctx, onError);
     } catch (err) {
       onError(err as Error);
     } finally {
@@ -80,7 +80,7 @@ export function startAutoSync(
     if (pending) {
       pending = false;
       try {
-        count += reconcile(state, ctx);
+        count += reconcile(state, ctx, onError);
       } catch (err) {
         onError(err as Error);
       }
@@ -152,9 +152,9 @@ export function startAutoSync(
 }
 
 function primeState(state: Map<string, FileState>, ctx: AutoSyncContext): void {
-  // Record current mtimes for every file that exists in both trees. Files that
-  // differ, or exist on only one side, are left out so the first reconcile
-  // treats them as changed and syncs them.
+  // Record current mtimes for every file that exists in both trees with the
+  // same content. Files that differ are left out so the first reconcile sees
+  // no prev entry and picks a winner via the content-based resolution path.
   walk(ctx.realMountDir, ctx, (abs) => {
     const rel = toRelPosix(abs, ctx);
     if (rel === null) return;
@@ -164,6 +164,7 @@ function primeState(state: Map<string, FileState>, ctx: AutoSyncContext): void {
     const projectAbs = path.join(ctx.realProjectDir, rel);
     const projectStat = safeFileStat(projectAbs);
     if (!projectStat) return;
+    if (!sameContent(abs, projectAbs)) return;
     state.set(rel, {
       mountMtimeMs: mountStat.mtimeMs,
       projectMtimeMs: projectStat.mtimeMs,
@@ -171,7 +172,11 @@ function primeState(state: Map<string, FileState>, ctx: AutoSyncContext): void {
   });
 }
 
-function reconcile(state: Map<string, FileState>, ctx: AutoSyncContext): number {
+function reconcile(
+  state: Map<string, FileState>,
+  ctx: AutoSyncContext,
+  onError: (err: Error) => void
+): number {
   const seen = new Set<string>();
   let count = 0;
 
@@ -179,8 +184,12 @@ function reconcile(state: Map<string, FileState>, ctx: AutoSyncContext): number 
     if (seen.has(relPosix)) return;
     seen.add(relPosix);
     if (!isSyncCandidate(relPosix, ctx)) return;
-    const changed = syncOneFile(relPosix, state, ctx);
-    if (changed) count += 1;
+    try {
+      const changed = syncOneFile(relPosix, state, ctx);
+      if (changed) count += 1;
+    } catch (err) {
+      onError(err as Error);
+    }
   };
 
   walk(ctx.realMountDir, ctx, (abs) => {
@@ -268,11 +277,14 @@ function syncOneFile(
     }
   }
 
+  // Use strict inequality rather than `>`: on filesystems with coarse mtime
+  // resolution, or after a backdated touch, a real content change can land
+  // with a non-greater mtime.
   const mountChanged = mountStat
-    ? prev?.mountMtimeMs === undefined || mountStat.mtimeMs > prev.mountMtimeMs
+    ? prev?.mountMtimeMs === undefined || mountStat.mtimeMs !== prev.mountMtimeMs
     : false;
   const projectChanged = projectStat
-    ? prev?.projectMtimeMs === undefined || projectStat.mtimeMs > prev.projectMtimeMs
+    ? prev?.projectMtimeMs === undefined || projectStat.mtimeMs !== prev.projectMtimeMs
     : false;
 
   if (mountStat && projectStat) {
@@ -318,6 +330,7 @@ function doMountToProject(
 ): boolean {
   const target = resolveSafeWriteTarget(ctx.realProjectDir, projectAbs);
   if (!target) return false;
+  if (isSymlinkTarget(target)) return false;
   if (existsSync(target) && sameContent(mountAbs, target)) {
     updateState(state, relPosix, mountAbs, target);
     return false;
@@ -337,6 +350,7 @@ function doProjectToMount(
 ): boolean {
   const target = resolveSafeWriteTarget(ctx.realMountDir, mountAbs);
   if (!target) return false;
+  if (isSymlinkTarget(target)) return false;
   if (existsSync(target) && sameContent(projectAbs, target)) {
     updateState(state, relPosix, target, projectAbs);
     return false;
@@ -429,6 +443,16 @@ function safeFileStat(p: string): Stats | null {
     return s;
   } catch {
     return null;
+  }
+}
+
+function isSymlinkTarget(target: string): boolean {
+  // If the target already exists as a symlink, writing through it would
+  // follow the link and potentially escape the mount/project root. Refuse.
+  try {
+    return lstatSync(target).isSymbolicLink();
+  } catch {
+    return false;
   }
 }
 

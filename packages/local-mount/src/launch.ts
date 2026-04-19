@@ -27,8 +27,11 @@ export interface LaunchOnMountOptions {
    */
   onBeforeLaunch?: (mountDir: string) => void | Promise<void>;
   /**
-   * Invoked after sync-back completes, before cleanup. Receives the number of
-   * files that were written back to the project directory.
+   * Invoked after sync-back completes, before cleanup. Receives the total
+   * number of file changes propagated during the run — the sum of autosync
+   * activity in both directions (including deletes) and the final mount→
+   * project syncBack. Use this as an "anything changed?" signal rather than
+   * a strict mount→project count.
    */
   onAfterSync?: (syncedFileCount: number) => void | Promise<void>;
   /**
