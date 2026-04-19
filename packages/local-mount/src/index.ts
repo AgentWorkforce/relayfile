@@ -5,6 +5,11 @@ export {
 } from './symlink-mount.js';
 
 export {
+  type AutoSyncOptions,
+  type AutoSyncHandle,
+} from './auto-sync.js';
+
+export {
   readAgentDotfiles,
   type ReadAgentDotfilesOptions,
   type AgentDotfilePatterns,

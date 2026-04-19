@@ -20,6 +20,7 @@ Builds a mounted copy of `projectDir` at `mountDir` and returns a handle:
 interface SymlinkMountHandle {
   mountDir: string;
   syncBack(): Promise<number>;
+  startAutoSync(opts?: AutoSyncOptions): AutoSyncHandle;
   cleanup(): void;
 }
 ```
@@ -53,12 +54,58 @@ const { ignoredPatterns, readonlyPatterns } = readAgentDotfiles(projectDir, {
 
 High-level helper that:
 1. creates a mount,
-2. runs a CLI inside it,
-3. forwards `SIGINT` and `SIGTERM`,
-4. syncs writable changes back after the child exits,
-5. cleans up the mount directory.
+2. starts bidirectional auto-sync (see below, controllable via `autoSync`),
+3. runs a CLI inside the mount,
+4. forwards `SIGINT` and `SIGTERM`,
+5. stops auto-sync and runs a final sync-back pass after the child exits,
+6. cleans up the mount directory.
 
-It resolves with the child process exit code.
+It resolves with the child process exit code. `onAfterSync(count)` receives the sum of files changed by auto-sync plus the final sync-back pass.
+
+### Auto-sync
+
+By default, `launchOnMount` keeps the mount and project directory in sync continuously while the CLI is running, rather than only at exit. The same machinery is available standalone via `handle.startAutoSync()`.
+
+```ts
+interface AutoSyncOptions {
+  /** Full-reconcile interval as a safety net. Default: 10_000 ms. */
+  scanIntervalMs?: number;
+  /** chokidar `awaitWriteFinish` stability threshold. Default: 200 ms. */
+  writeFinishMs?: number;
+  /** Invoked on sync errors. Defaults to swallowing them. */
+  onError?: (err: Error) => void;
+}
+
+interface AutoSyncHandle {
+  stop(): Promise<void>;
+  reconcile(): Promise<number>;
+  totalChanges(): number;
+  ready(): Promise<void>;
+}
+```
+
+Control it from `launchOnMount`:
+
+```ts
+// Disable entirely — only the final sync-back pass runs.
+launchOnMount({ /* ... */, autoSync: false });
+
+// Tune it.
+launchOnMount({ /* ... */, autoSync: { scanIntervalMs: 5_000, writeFinishMs: 100 } });
+```
+
+How it works:
+- chokidar watches both the mount and the project tree
+- every `scanIntervalMs`, a full reconcile walks both trees as a safety net for missed events
+- per-file `mtime` is tracked at the last sync, so the scan skips files that haven't changed
+
+Conflict and delete rules:
+- both sides changed since last sync → **mount wins**
+- only one side changed → propagate that change
+- one side deleted and the other unchanged since last sync → propagate the delete
+- one side deleted and the other changed since last sync → recreate the missing file from the changed side
+- readonly paths never flow mount→project; project-side edits still flow into the mount (the mount copy is re-chmodded `0o444`)
+- `_MOUNT_README.md`, `.relayfile-local-mount`, ignored paths, and excluded directories never cross
 
 ## Dotfile semantics
 
@@ -135,7 +182,7 @@ console.log(result.exitCode);
 
 ## Sync-back behavior
 
-When `syncBack()` runs, the package only writes back files that are safe and writable:
+`syncBack()` is the one-shot, mount-only sweep used as a final pass (and available on its own if you disable auto-sync). It only writes files that are safe and writable:
 
 - changed writable files are copied back
 - new writable files created in the mount are copied back
@@ -144,7 +191,7 @@ When `syncBack()` runs, the package only writes back files that are safe and wri
 - read-only matches are skipped
 - symlinks inside the mount are skipped
 
-The returned number is the count of files actually written back to `projectDir`.
+The returned number is the count of files written back to `projectDir` in that pass. `syncBack()` never deletes — delete propagation is handled by auto-sync.
 
 ## Safety constraints
 
