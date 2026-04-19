@@ -18,7 +18,12 @@ export interface AutoSyncContext {
   realMountDir: string;
   realProjectDir: string;
   isExcluded: (relPosix: string) => boolean;
-  isIgnored: (relPosix: string) => boolean;
+  /**
+   * Directory-only ignore patterns (ending in `/`) must only match when the
+   * path is a directory. Callers that know the path's type pass `isDirectory`;
+   * callers that don't (chokidar's prune filter) should check both forms.
+   */
+  isIgnored: (relPosix: string, isDirectory?: boolean) => boolean;
   isReadonly: (relPosix: string) => boolean;
   isReservedFile: (relPosix: string) => boolean;
 }
@@ -111,7 +116,8 @@ export function startAutoSync(
         stabilityThreshold: writeFinishMs,
         pollInterval: 50,
       },
-      ignored: (candidate: string) => shouldChokidarIgnore(candidate, root, ctx),
+      ignored: (candidate: string, stats?: Stats) =>
+        shouldChokidarIgnore(candidate, root, ctx, stats),
     });
     const onEvent = (p: string) => syncPathFromRoot(root, p);
     watcher.on('add', onEvent);
@@ -511,7 +517,7 @@ function walk(
       const abs = path.join(cur, entry.name);
       const rel = path.relative(root, abs).split(path.sep).join('/');
       if (!rel || rel.startsWith('..')) continue;
-      if (ctx.isExcluded(rel) || ctx.isIgnored(rel)) continue;
+      if (ctx.isExcluded(rel) || ctx.isIgnored(rel, entry.isDirectory())) continue;
       if (entry.isDirectory()) {
         stack.push(abs);
       } else if (entry.isFile() || entry.isSymbolicLink()) {
@@ -524,16 +530,22 @@ function walk(
 function shouldChokidarIgnore(
   candidate: string,
   root: string,
-  ctx: AutoSyncContext
+  ctx: AutoSyncContext,
+  stats?: Stats
 ): boolean {
   if (candidate === root) return false;
   const rel = path.relative(root, candidate);
   if (rel === '' || rel.startsWith('..')) return false;
   const relPosix = rel.split(path.sep).join('/');
-  // We can't tell from here whether it's a dir or a file, but the filters only
-  // reject paths; callers that hit an excluded dir will stop there.
   if (ctx.isExcluded(relPosix)) return true;
-  if (ctx.isIgnored(relPosix)) return true;
   if (ctx.isReservedFile(relPosix)) return true;
-  return false;
+  // chokidar calls this filter twice: first without stats (pre-stat prune),
+  // then again with stats once it knows the entry type. Only apply the
+  // directory-form match when we have stats confirming it's a directory,
+  // otherwise a directory-only pattern like `cache/` would wrongly prune a
+  // same-named file.
+  if (stats) {
+    return ctx.isIgnored(relPosix, stats.isDirectory());
+  }
+  return ctx.isIgnored(relPosix);
 }

@@ -243,6 +243,30 @@ describe('startAutoSync', () => {
     }
   });
 
+  it('directory-only ignore patterns do not swallow like-named files', async () => {
+    // Pattern `cache/` means "ignore the cache directory" — a *file* whose
+    // path happens to include a segment of the same name must still sync.
+    write(path.join(projectDir, 'docs/cache'), 'this is a file, not a dir');
+
+    const handle = createSymlinkMount(projectDir, mountDir, {
+      ignoredPatterns: ['cache/'],
+      readonlyPatterns: [],
+      excludeDirs: [],
+    });
+
+    const auto = handle.startAutoSync({ writeFinishMs: 50, scanIntervalMs: 10_000 });
+    await auto.ready();
+    try {
+      writeFileSync(path.join(handle.mountDir, 'docs/cache'), 'edited', 'utf8');
+      await waitFor(() =>
+        readFileSync(path.join(projectDir, 'docs/cache'), 'utf8') === 'edited'
+      );
+    } finally {
+      await auto.stop();
+      handle.cleanup();
+    }
+  });
+
   it('periodic full scan catches changes even if watcher events are missed', async () => {
     write(path.join(projectDir, 'file.txt'), 'original');
 

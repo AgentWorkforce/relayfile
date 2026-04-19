@@ -109,9 +109,7 @@ export function createSymlinkMount(
     realMountDir,
     realProjectDir: resolvedProjectDir,
     isExcluded: (relPosix) => isExcludedPath(relPosix, excludeSet),
-    isIgnored: (relPosix) =>
-      isPathMatched(relPosix, ignoredMatcher) ||
-      isPathMatched(relPosix, ignoredMatcher, true),
+    isIgnored: (relPosix, isDir) => isPathMatched(relPosix, ignoredMatcher, isDir),
     isReadonly: (relPosix) => isPathMatched(relPosix, readonlyMatcher),
     isReservedFile: (relPosix) =>
       relPosix === MOUNT_README_FILENAME || relPosix === MOUNT_MARKER_FILENAME,
