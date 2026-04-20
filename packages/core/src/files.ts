@@ -12,6 +12,7 @@
  */
 
 import type { StorageAdapter, FileRow, FileSemantics } from "./storage.js";
+import type { ContentIdentity } from "./dedup.js";
 import { normalizePath } from "./utils.js";
 import { normalizeSemantics } from "./semantics.js";
 
@@ -27,6 +28,7 @@ export interface WriteFileRequest {
   encoding?: string;
   semantics?: FileSemantics;
   correlationId?: string;
+  contentIdentity?: ContentIdentity;
 }
 
 export interface WriteFileResult {
@@ -47,6 +49,7 @@ export interface DeleteFileRequest {
   path: string;
   ifMatch: string;
   correlationId?: string;
+  contentIdentity?: ContentIdentity;
 }
 
 export type WriteResult =
@@ -309,4 +312,3 @@ export function encodedSize(content: string, encoding: "utf-8" | "base64"): numb
   }
   return new TextEncoder().encode(content).byteLength;
 }
-
