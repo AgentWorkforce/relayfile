@@ -182,6 +182,79 @@ jobs:
             packages/local-mount/dist/
           retention-days: 1
 
+  # Cross-compile relayfile-mount for every consumer-supported platform.
+  # These are attached to the GitHub Release so downstream consumers (e.g.
+  # the cloud Daytona snapshot rebuild) can pin a specific published version
+  # instead of building from source.
+  build-mount-binaries:
+    name: Build relayfile-mount (${{ matrix.suffix }})
+    needs: build
+    runs-on: ${{ matrix.runner }}
+    if: github.event.inputs.dry_run != 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - suffix: linux-amd64
+            goos: linux
+            goarch: amd64
+            runner: ubuntu-latest
+          - suffix: linux-arm64
+            goos: linux
+            goarch: arm64
+            runner: ubuntu-latest
+          - suffix: darwin-amd64
+            goos: darwin
+            goarch: amd64
+            runner: macos-latest
+          - suffix: darwin-arm64
+            goos: darwin
+            goarch: arm64
+            runner: macos-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build relayfile-mount
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          VERSION: ${{ needs.build.outputs.new_version }}
+        run: |
+          set -euo pipefail
+          OUT="relayfile-mount-${{ matrix.suffix }}"
+          go build \
+            -ldflags="-s -w -X main.version=v${VERSION}" \
+            -o "${OUT}" \
+            ./cmd/relayfile-mount
+          SIZE=$(stat -f%z "${OUT}" 2>/dev/null || stat -c%s "${OUT}")
+          echo "Built ${OUT} (${SIZE} bytes, v${VERSION})"
+          if [ "${SIZE}" -lt 1048576 ]; then
+            echo "ERROR: binary is suspiciously small (< 1MB)" >&2
+            exit 1
+          fi
+
+      - name: Smoke-test binary (matching runner only)
+        if: |
+          (matrix.goos == 'linux' && matrix.goarch == 'amd64') ||
+          (matrix.goos == 'darwin' && matrix.goarch == 'arm64')
+        run: ./relayfile-mount-${{ matrix.suffix }} --help | head -20
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: relayfile-mount-${{ matrix.suffix }}
+          path: relayfile-mount-${{ matrix.suffix }}
+          retention-days: 1
+
   # Publish all packages in parallel
   publish-packages:
     name: Publish ${{ matrix.package }}
@@ -300,11 +373,12 @@ jobs:
 
   create-release:
     name: Create Release
-    needs: [build, publish-packages, publish-single]
+    needs: [build, publish-packages, publish-single, build-mount-binaries]
     runs-on: ubuntu-latest
     if: |
       always() &&
       github.event.inputs.dry_run != 'true' &&
+      needs.build-mount-binaries.result == 'success' &&
       (needs.publish-packages.result == 'success' || needs.publish-single.result == 'success')
 
     steps:
@@ -319,6 +393,25 @@ jobs:
         with:
           name: build-output
           path: .
+
+      - name: Download relayfile-mount binaries
+        uses: actions/download-artifact@v4
+        with:
+          pattern: relayfile-mount-*
+          path: mount-binaries
+          merge-multiple: true
+
+      - name: Verify mount binaries present
+        run: |
+          set -euo pipefail
+          ls -la mount-binaries/
+          for SUFFIX in linux-amd64 linux-arm64 darwin-amd64 darwin-arm64; do
+            if [ ! -f "mount-binaries/relayfile-mount-${SUFFIX}" ]; then
+              echo "ERROR: mount-binaries/relayfile-mount-${SUFFIX} missing"
+              exit 1
+            fi
+          done
+          chmod +x mount-binaries/relayfile-mount-*
 
       - name: Commit version bump and create tag
         env:
@@ -359,18 +452,33 @@ jobs:
             npm install @relayfile/local-mount@${{ needs.build.outputs.new_version }}
             ```
 
+            ### Binaries
+
+            Cross-compiled `relayfile-mount` binaries are attached to this
+            release for linux/amd64, linux/arm64, darwin/amd64, and darwin/arm64.
+            Downstream consumers (e.g. the cloud Daytona snapshot) can pin a
+            specific tag and `curl` the binary directly:
+
+            ```bash
+            curl -fSL -o relayfile-mount \
+              https://github.com/${{ github.repository }}/releases/download/v${{ needs.build.outputs.new_version }}/relayfile-mount-linux-amd64
+            chmod +x relayfile-mount
+            ```
+
             ### Publish Details
             - Dist-tag: `${{ github.event.inputs.tag }}`
             - Provenance: enabled via `npm publish --provenance`
             - Registry: `https://registry.npmjs.org`
-          files: packages/cli/bin/relayfile-cli-*
+          files: |
+            packages/cli/bin/relayfile-cli-*
+            mount-binaries/relayfile-mount-*
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   summary:
     name: Summary
-    needs: [build, publish-packages, publish-single, create-release]
+    needs: [build, publish-packages, publish-single, build-mount-binaries, create-release]
     runs-on: ubuntu-latest
     if: always()
 
@@ -392,4 +500,5 @@ jobs:
           echo "| Build & Version | ${{ needs.build.result == 'success' && 'SUCCESS' || 'FAILURE' }} |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Publish All | ${{ needs.publish-packages.result == 'success' && 'SUCCESS' || (needs.publish-packages.result == 'skipped' && 'SKIPPED' || 'FAILURE') }} |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Publish Single | ${{ needs.publish-single.result == 'success' && 'SUCCESS' || (needs.publish-single.result == 'skipped' && 'SKIPPED' || 'FAILURE') }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Build Mount Binaries | ${{ needs.build-mount-binaries.result == 'success' && 'SUCCESS' || (needs.build-mount-binaries.result == 'skipped' && 'SKIPPED' || 'FAILURE') }} |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Create Release | ${{ needs.create-release.result == 'success' && 'SUCCESS' || (needs.create-release.result == 'skipped' && 'SKIPPED' || 'FAILURE') }} |" >> "$GITHUB_STEP_SUMMARY"
