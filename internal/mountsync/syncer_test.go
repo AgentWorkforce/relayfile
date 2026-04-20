@@ -988,6 +988,125 @@ func TestReadonlyRevertOnModify(t *testing.T) {
 	}
 }
 
+// TestLocalCreatePreservedWhenServerDeniesWrite guards the regression where
+// relayfile-mount was destroying local files if the server rejected the
+// push with 403. The correct behavior: keep the local file, log the
+// denial, skip future push attempts until the content changes, and never
+// re-enter the delete path on subsequent reconciles.
+func TestLocalCreatePreservedWhenServerDeniesWrite(t *testing.T) {
+	disableWebSocket := true
+	token := mustMountsyncTestJWT(
+		t,
+		"dev-secret",
+		"ws_local_create_denied",
+		"MountSync",
+		[]string{"relayfile:fs:write"},
+		time.Now().Add(time.Hour),
+	)
+	localDir := t.TempDir()
+	// Server: empty workspace, but configured to reject ANY write to /notion/*.
+	server := newMockMountsyncServer(
+		t,
+		map[string]RemoteFile{},
+		nil,
+		map[string]struct{}{"/notion/intro-agent.md": {}},
+	)
+	defer server.Close()
+
+	client := NewHTTPClient(server.URL, token, server.Client())
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_local_create_denied",
+		RemoteRoot:  "/notion",
+		LocalRoot:   localDir,
+		WebSocket:   &disableWebSocket,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+
+	// Initial pull — workspace is empty, nothing to download.
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("initial pull failed: %v", err)
+	}
+
+	// Agent writes a new local file.
+	localPath := filepath.Join(localDir, "intro-agent.md")
+	const expected = "# Hello from the agent"
+	if err := os.WriteFile(localPath, []byte(expected), 0o644); err != nil {
+		t.Fatalf("write local file failed: %v", err)
+	}
+
+	// Watcher fires → mount pushes → server returns 403.
+	if err := syncer.HandleLocalChange(
+		context.Background(),
+		"intro-agent.md",
+		fsnotify.Create,
+	); err != nil {
+		t.Fatalf("handle local create failed: %v", err)
+	}
+
+	// Invariant #1: local file must be preserved.
+	assertLocalFileContent(t, localPath, expected)
+
+	// Invariant #2: denial must be logged.
+	denialLogPath := filepath.Join(localDir, ".relay", "permissions-denied.log")
+	logData, err := os.ReadFile(denialLogPath)
+	if err != nil {
+		t.Fatalf("read denial log failed: %v", err)
+	}
+	if !strings.Contains(string(logData), "WRITE_DENIED /notion/intro-agent.md") {
+		t.Fatalf("expected WRITE_DENIED entry for /intro-agent.md, got: %q", string(logData))
+	}
+
+	// Invariant #3: a subsequent reconcile (full pull + push) must NOT
+	// delete the local file or re-push / re-log the denial for the same
+	// content. We simulate this by running two more reconcile cycles.
+	startingLogLen := len(logData)
+	if err := syncer.Reconcile(context.Background()); err != nil {
+		t.Fatalf("second reconcile failed: %v", err)
+	}
+	if err := syncer.Reconcile(context.Background()); err != nil {
+		t.Fatalf("third reconcile failed: %v", err)
+	}
+	assertLocalFileContent(t, localPath, expected)
+	logData2, err := os.ReadFile(denialLogPath)
+	if err != nil {
+		t.Fatalf("read denial log (2nd) failed: %v", err)
+	}
+	if len(logData2) != startingLogLen {
+		t.Fatalf(
+			"expected denial log unchanged across reconciles (len=%d → %d), diff: %q",
+			startingLogLen,
+			len(logData2),
+			string(logData2[startingLogLen:]),
+		)
+	}
+
+	// Invariant #4: when the user edits the file, we retry the push.
+	// With the mock still denying writes the retry fails again, but the
+	// fresh denial line must appear (proving we didn't silently skip
+	// legitimate content changes).
+	if err := os.WriteFile(localPath, []byte("# Updated"), 0o644); err != nil {
+		t.Fatalf("update local file failed: %v", err)
+	}
+	if err := syncer.HandleLocalChange(
+		context.Background(),
+		"intro-agent.md",
+		fsnotify.Write,
+	); err != nil {
+		t.Fatalf("handle local update failed: %v", err)
+	}
+	assertLocalFileContent(t, localPath, "# Updated")
+	logData3, err := os.ReadFile(denialLogPath)
+	if err != nil {
+		t.Fatalf("read denial log (3rd) failed: %v", err)
+	}
+	denialLines := strings.Count(string(logData3), "WRITE_DENIED /notion/intro-agent.md")
+	if denialLines < 2 {
+		t.Fatalf("expected a second WRITE_DENIED entry after file edit, got: %q", string(logData3))
+	}
+}
+
 func TestReadonlyRevertOnDelete(t *testing.T) {
 	disableWebSocket := false
 	token := mustMountsyncTestJWT(t, "dev-secret", "ws_readonly_delete", "MountSync", []string{"relayfile:fs:read:/readonly/notes.md"}, time.Now().Add(time.Hour))

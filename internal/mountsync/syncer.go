@@ -355,7 +355,15 @@ type trackedFile struct {
 	ContentType string `json:"contentType"`
 	Hash        string `json:"hash"`
 	Dirty       bool   `json:"dirty,omitempty"`
-	Denied      bool   `json:"denied,omitempty"`
+	// Denied — the server denied reading this path. The local copy (if any)
+	// has been removed and future syncs ignore it.
+	Denied bool `json:"denied,omitempty"`
+	// WriteDenied — the server denied creating this path from local. Unlike
+	// Denied, the local copy is preserved. Future sync cycles skip the push
+	// attempt as long as the file's hash still matches DeniedHash; if the
+	// user modifies the file we retry the write on the next cycle.
+	WriteDenied bool   `json:"writeDenied,omitempty"`
+	DeniedHash  string `json:"deniedHash,omitempty"`
 	ReadOnly    bool   `json:"readonly,omitempty"`
 }
 
@@ -573,7 +581,10 @@ func (s *Syncer) pushSingleFile(
 	}
 
 	baseRevision := "0"
-	if exists {
+	if exists && tracked.Revision != "" {
+		// Previously-pushed file — use its revision for optimistic concurrency.
+		// A WriteDenied entry has no Revision (the push never landed), so fall
+		// back to the create-if-absent sentinel "0".
 		baseRevision = tracked.Revision
 	}
 	result, err := s.client.WriteFile(ctx, s.workspace, remotePath, baseRevision, snapshot.ContentType, snapshot.Content)
@@ -613,11 +624,22 @@ func (s *Syncer) pushSingleFile(
 		var httpErr *HTTPError
 		if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusForbidden {
 			if !exists {
-				s.logDenial("WRITE_DENIED", remotePath, "agent does not have write permission")
-				if removeErr := os.Remove(localPath); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
-					return removeErr
+				// The server rejected the create. Do NOT delete the local file —
+				// destroying user data on permission failure is worse than the
+				// workspace drifting out of sync. Record the denial + hash so the
+				// next cycle skips re-pushing (no log spam) unless the file
+				// changes, in which case we retry.
+				s.logDenial(
+					"WRITE_DENIED",
+					remotePath,
+					"agent does not have write permission; local copy preserved",
+				)
+				s.state.Files[remotePath] = trackedFile{
+					ContentType: snapshot.ContentType,
+					Hash:        snapshot.Hash,
+					WriteDenied: true,
+					DeniedHash:  snapshot.Hash,
 				}
-				delete(s.state.Files, remotePath)
 				return nil
 			}
 			return s.revertReadonlyFile(ctx, remotePath, localPath, tracked, snapshot.ContentType)
@@ -1289,6 +1311,11 @@ func (s *Syncer) applyRemoteDelete(remotePath string, conflicted map[string]stru
 	if tracked.Denied {
 		return nil
 	}
+	// Write-denied files were never on the remote — absence from the remote
+	// snapshot is expected and must not trigger a local delete.
+	if tracked.WriteDenied {
+		return nil
+	}
 	localPath, err := remoteToLocalPath(s.localRoot, s.remoteRoot, remotePath)
 	if err != nil {
 		delete(s.state.Files, remotePath)
@@ -1363,6 +1390,13 @@ func (s *Syncer) pushLocal(ctx context.Context) (map[string]struct{}, error) {
 		if exists && tracked.Hash == snapshot.Hash && !tracked.Dirty {
 			continue
 		}
+		// Skip re-pushing a previously write-denied file whose content hasn't
+		// changed — no point spamming the denial log. If the user edits it,
+		// Hash differs from DeniedHash and we fall through to pushSingleFile
+		// which will retry (and may succeed or log a fresh denial).
+		if exists && tracked.WriteDenied && tracked.DeniedHash == snapshot.Hash {
+			continue
+		}
 		if err := s.pushSingleFile(ctx, remotePath, localPath, snapshot, tracked, exists, conflicted); err != nil {
 			return nil, err
 		}
@@ -1377,7 +1411,9 @@ func (s *Syncer) pushLocal(ctx context.Context) (map[string]struct{}, error) {
 	for _, remotePath := range statePaths {
 		tracked := s.state.Files[remotePath]
 		tracked.ReadOnly = !s.canWritePath(remotePath)
-		if tracked.Denied || tracked.ReadOnly {
+		// Write-denied files never made it to the remote — there's nothing to
+		// delete remotely and we must not delete the local copy.
+		if tracked.Denied || tracked.ReadOnly || tracked.WriteDenied {
 			s.state.Files[remotePath] = tracked
 			continue
 		}
