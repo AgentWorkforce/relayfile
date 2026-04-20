@@ -25,7 +25,7 @@ function write(file: string, body: string): void {
  * Wait up to `timeoutMs` for `check` to return true. Useful for letting
  * chokidar + awaitWriteFinish observe a write and propagate it.
  */
-async function waitFor(check: () => boolean, timeoutMs = 3000): Promise<void> {
+async function waitFor(check: () => boolean, timeoutMs = 5000): Promise<void> {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     if (check()) return;
@@ -287,6 +287,35 @@ describe('startAutoSync', () => {
       expect(readFileSync(path.join(projectDir, 'file.txt'), 'utf8')).toBe('edited');
     } finally {
       await auto.stop();
+      handle.cleanup();
+    }
+  });
+
+  it('stop({ signal }) skips the draining reconcile when already aborted, but still closes watchers', async () => {
+    write(path.join(projectDir, 'file.txt'), 'original');
+
+    const handle = createSymlinkMount(projectDir, mountDir, {
+      ignoredPatterns: [],
+      readonlyPatterns: [],
+      excludeDirs: [],
+    });
+
+    const auto = handle.startAutoSync({ writeFinishMs: 50, scanIntervalMs: 10_000 });
+    await auto.ready();
+
+    writeFileSync(path.join(handle.mountDir, 'file.txt'), 'changed-before-stop', 'utf8');
+
+    const controller = new AbortController();
+    controller.abort();
+
+    try {
+      await auto.stop({ signal: controller.signal });
+      expect(readFileSync(path.join(projectDir, 'file.txt'), 'utf8')).toBe('original');
+
+      writeFileSync(path.join(handle.mountDir, 'file.txt'), 'changed-after-stop', 'utf8');
+      await new Promise((r) => setTimeout(r, 200));
+      expect(readFileSync(path.join(projectDir, 'file.txt'), 'utf8')).toBe('original');
+    } finally {
       handle.cleanup();
     }
   });

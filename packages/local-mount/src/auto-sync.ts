@@ -38,9 +38,9 @@ export interface AutoSyncOptions {
 }
 
 export interface AutoSyncHandle {
-  stop(): Promise<void>;
+  stop(opts?: { signal?: AbortSignal }): Promise<void>;
   /** Force a reconcile now; returns number of files copied/deleted. */
-  reconcile(): Promise<number>;
+  reconcile(opts?: { signal?: AbortSignal }): Promise<number>;
   /** Cumulative files changed (copied or deleted) since autosync started. */
   totalChanges(): number;
   /** Resolves once both watchers have completed their initial scan. */
@@ -68,7 +68,11 @@ export function startAutoSync(
   let pending = false;
   let totalChanges = 0;
 
-  const runReconcile = async (): Promise<number> => {
+  const runReconcile = async (opts?: { signal?: AbortSignal }): Promise<number> => {
+    const signal = opts?.signal;
+    if (signal?.aborted) {
+      return 0;
+    }
     if (syncing) {
       pending = true;
       return 0;
@@ -76,16 +80,16 @@ export function startAutoSync(
     syncing = true;
     let count = 0;
     try {
-      count = reconcile(state, ctx, onError);
+      count = reconcile(state, ctx, onError, signal);
     } catch (err) {
       onError(err as Error);
     } finally {
       syncing = false;
     }
-    if (pending) {
+    if (pending && !signal?.aborted) {
       pending = false;
       try {
-        count += reconcile(state, ctx, onError);
+        count += reconcile(state, ctx, onError, signal);
       } catch (err) {
         onError(err as Error);
       }
@@ -143,11 +147,14 @@ export function startAutoSync(
   interval.unref?.();
 
   return {
-    async stop() {
+    async stop(opts?: { signal?: AbortSignal }) {
       clearInterval(interval);
       await Promise.all([mountWatcher.close(), projectWatcher.close()]);
+      if (opts?.signal?.aborted) {
+        return;
+      }
       // Drain any pending work so callers can rely on "stopped means quiesced".
-      await runReconcile();
+      await runReconcile(opts);
     },
     reconcile: runReconcile,
     totalChanges: () => totalChanges,
@@ -181,7 +188,8 @@ function primeState(state: Map<string, FileState>, ctx: AutoSyncContext): void {
 function reconcile(
   state: Map<string, FileState>,
   ctx: AutoSyncContext,
-  onError: (err: Error) => void
+  onError: (err: Error) => void,
+  signal?: AbortSignal
 ): number {
   const seen = new Set<string>();
   let count = 0;
@@ -199,14 +207,24 @@ function reconcile(
   };
 
   walk(ctx.realMountDir, ctx, (abs) => {
+    if (signal?.aborted) return;
     const rel = toRelPosix(abs, ctx);
     if (rel !== null) visit(rel);
-  });
+  }, signal);
+
+  if (signal?.aborted) {
+    return count;
+  }
 
   walk(ctx.realProjectDir, ctx, (abs) => {
+    if (signal?.aborted) return;
     const rel = toRelPosixFromProject(abs, ctx);
     if (rel !== null) visit(rel);
-  });
+  }, signal);
+
+  if (signal?.aborted) {
+    return count;
+  }
 
   // Tombstone sweep: any path in state we didn't visit had both sides absent,
   // so it's fully gone.
@@ -501,10 +519,12 @@ function resolveSafeWriteTarget(root: string, candidate: string): string | null 
 function walk(
   root: string,
   ctx: AutoSyncContext,
-  visit: (absPath: string) => void
+  visit: (absPath: string) => void,
+  signal?: AbortSignal
 ): void {
   const stack = [root];
   while (stack.length > 0) {
+    if (signal?.aborted) return;
     const cur = stack.pop();
     if (!cur) continue;
     let entries;
@@ -514,6 +534,7 @@ function walk(
       continue;
     }
     for (const entry of entries) {
+      if (signal?.aborted) return;
       const abs = path.join(cur, entry.name);
       const rel = path.relative(root, abs).split(path.sep).join('/');
       if (!rel || rel.startsWith('..')) continue;

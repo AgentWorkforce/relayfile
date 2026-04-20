@@ -22,6 +22,11 @@ export interface LaunchOnMountOptions {
   /** Optional agent name, used in the _MOUNT_README.md "Agent:" line. */
   agentName?: string;
   /**
+   * Optional signal used only during post-child shutdown work.
+   * If aborted, sync-back returns the partial count accumulated so far.
+   */
+  shutdownSignal?: AbortSignal;
+  /**
    * Invoked after the mount is created but before the CLI is spawned.
    * Useful for writing additional files into the mount (overrides, extra docs).
    */
@@ -70,11 +75,11 @@ export async function launchOnMount(opts: LaunchOnMountOptions): Promise<LaunchO
     try {
       let autoSyncChanges = 0;
       if (autoSync) {
-        await autoSync.stop();
+        await autoSync.stop({ signal: opts.shutdownSignal });
         autoSyncChanges = autoSync.totalChanges();
         autoSync = undefined;
       }
-      const finalSynced = await handle.syncBack();
+      const finalSynced = await handle.syncBack({ signal: opts.shutdownSignal });
       syncedCount = autoSyncChanges + finalSynced;
       if (opts.onAfterSync) {
         await opts.onAfterSync(syncedCount);
