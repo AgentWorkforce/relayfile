@@ -1,0 +1,478 @@
+{
+  "id": "compact_d60kxya4ert0",
+  "version": 1,
+  "type": "compacted",
+  "compactedAt": "2026-04-20T10:44:15.415Z",
+  "sourceTrajectories": [
+    "traj_m00zw2zi99fd",
+    "traj_2elotzbudken",
+    "traj_45b3fcyh4kl9",
+    "traj_e7kxnaf40q07",
+    "traj_d8emfg3tc8yi",
+    "traj_nv8vh0eav3v0",
+    "traj_o8aamzw5k45f",
+    "traj_mq8gu25evmdu",
+    "traj_8gockt810ha6",
+    "traj_jm2y8f6brsd4",
+    "traj_lcvvpzmuroqb",
+    "traj_ffifqtlytuiz",
+    "traj_xt5epedlntg7"
+  ],
+  "dateRange": {
+    "start": "2026-04-14T09:35:46.733Z",
+    "end": "2026-04-20T10:44:12.044Z"
+  },
+  "summary": {
+    "totalDecisions": 34,
+    "totalEvents": 144,
+    "uniqueAgents": [
+      "default",
+      "orchestrator",
+      "builder-components",
+      "builder-package",
+      "researcher",
+      "designer",
+      "builder-api",
+      "tester",
+      "analyst",
+      "lead",
+      "writer"
+    ]
+  },
+  "decisionGroups": [
+    {
+      "category": "other",
+      "decisions": [
+        {
+          "question": "Treat unchanged watcher write events as no-ops",
+          "chosen": "Treat unchanged watcher write events as no-ops",
+          "reasoning": "Remote pulls write files atomically and can emit filesystem events; pushing those unchanged tracked hashes advances remote revisions or causes stale revision conflicts between mounts.",
+          "fromTrajectory": "traj_m00zw2zi99fd"
+        },
+        {
+          "question": "Default observer launch to agentrelay.com router path",
+          "chosen": "Default observer launch to agentrelay.com router path",
+          "reasoning": "files.relayfile.dev is not live; cloud routes the file observer at /observer/file on agentrelay.com.",
+          "fromTrajectory": "traj_45b3fcyh4kl9"
+        },
+        {
+          "question": "Use file watching for CLI mount local writes",
+          "chosen": "Use file watching for CLI mount local writes",
+          "reasoning": "The CLI mount entrypoint was polling and scanning the local mirror every two seconds even though mountsync already has an fsnotify watcher. Wiring the watcher lets websocket mounts skip no-op cycles while still pushing local edits immediately.",
+          "fromTrajectory": "traj_d8emfg3tc8yi"
+        },
+        {
+          "question": "Move workspace health into dashboard header",
+          "chosen": "Move workspace health into dashboard header",
+          "reasoning": "The provider sync panel duplicates the existing header status and wastes the primary workspace area when sync/status returns no providers; making it a compact header state gives search and tree browsing more room.",
+          "fromTrajectory": "traj_lcvvpzmuroqb"
+        },
+        {
+          "question": "Make file details panel sticky",
+          "chosen": "Make file details panel sticky",
+          "reasoning": "The file tree can be long, and selected-file context should remain visible while browsing; sticky behavior should apply only when the two-column desktop layout is active.",
+          "fromTrajectory": "traj_lcvvpzmuroqb"
+        },
+        {
+          "question": "Constrain observer main panels to viewport height",
+          "chosen": "Constrain observer main panels to viewport height",
+          "reasoning": "Sticky details inside a page-scrolling layout can still disappear on non-xl widths or when ancestor overflow bounds the sticky area; making the file tree and details panels independent viewport-bounded scroll regions keeps details visible while browsing.",
+          "fromTrajectory": "traj_lcvvpzmuroqb"
+        },
+        {
+          "question": "Opened cloud PR for RelayFile provider writeback workflow",
+          "chosen": "Opened cloud PR for RelayFile provider writeback workflow",
+          "reasoning": "The user wanted the workflow available from another computer; a clean origin/main worktree avoided unrelated local untracked files and existing branch commits.",
+          "fromTrajectory": "traj_lcvvpzmuroqb"
+        },
+        {
+          "question": "Addressed PR feedback for RelayFile writeback workflow gates",
+          "chosen": "Addressed PR feedback for RelayFile writeback workflow gates",
+          "reasoning": "Review comments found two workflow reliability bugs: npm install failures hidden by a tail pipeline and a secret grep that matched legitimate NANGO_SECRET_KEY references. Both were narrowed to preserve root-cause failures and avoid false-positive safety gate blocks.",
+          "fromTrajectory": "traj_lcvvpzmuroqb"
+        },
+        {
+          "question": "Expose RelayFile observer from active integrations only",
+          "chosen": "Expose RelayFile observer from active integrations only",
+          "reasoning": "User rejected a sidebar entry; the integrations page already owns provider state, so the observer link can be shown only when the workspace has connected provider records.",
+          "fromTrajectory": "traj_lcvvpzmuroqb"
+        },
+        {
+          "question": "Make Slack channel access lazy and collapsible",
+          "chosen": "Make Slack channel access lazy and collapsible",
+          "reasoning": "The channel picker can dominate the integrations page and does not need to fetch available Slack channels until the user expands the management section.",
+          "fromTrajectory": "traj_lcvvpzmuroqb"
+        },
+        {
+          "question": "Opened cloud PR for RelayFile observer integration entry",
+          "chosen": "Opened cloud PR for RelayFile observer integration entry",
+          "reasoning": "Moved the observer route and integrations-page entry onto a clean branch from origin/main so the PR excludes stale deleted-branch commits and unrelated untracked workflow files.",
+          "fromTrajectory": "traj_lcvvpzmuroqb"
+        },
+        {
+          "question": "Deleted file-observer-router package",
+          "chosen": "Deleted file-observer-router package",
+          "reasoning": "Routing for agentrelay.com/observer/file is owned by cloud, and the relayfile npm surface should publish only the reusable @relayfile/file-observer app.",
+          "fromTrajectory": "traj_lcvvpzmuroqb"
+        },
+        {
+          "question": "Ground Pass 2 in current repo state plus the 51st reachable commit diff because HEAD~50 does not resolve in this checkout",
+          "chosen": "Ground Pass 2 in current repo state plus the 51st reachable commit diff because HEAD~50 does not resolve in this checkout",
+          "reasoning": "git rev-list can still recover the intended comparison window, which keeps the missing-rules pass evidence-based instead of relying only on the empty scope summary.",
+          "fromTrajectory": "traj_xt5epedlntg7"
+        }
+      ]
+    },
+    {
+      "category": "testing",
+      "decisions": [
+        {
+          "question": "Used the active verify-ui-beautiful trajectory and self-started the dashboard locally because localhost:3101 was not listening.",
+          "chosen": "Used the active verify-ui-beautiful trajectory and self-started the dashboard locally because localhost:3101 was not listening.",
+          "reasoning": "The verification target must be reachable for browser inspection, and the current workflow chapter already tracks this task.",
+          "fromTrajectory": "traj_lcvvpzmuroqb"
+        },
+        {
+          "question": "Add direct tree/read CLI commands",
+          "chosen": "Add direct tree/read CLI commands",
+          "reasoning": "Cloud test scripts exercise fs/tree and fs/file directly; existing CLI only exposes those through mount/export, so first-class commands make the same checks possible with user-provided server/token credentials.",
+          "fromTrajectory": "traj_lcvvpzmuroqb"
+        },
+        {
+          "question": "Verify dashboard with package-local install",
+          "chosen": "Verify dashboard with package-local install",
+          "reasoning": "The observer test suite depends on package devDependencies such as jsdom, which were not installed in the workspace; npm ci from the package lock preserves package metadata while enabling local verification.",
+          "fromTrajectory": "traj_lcvvpzmuroqb"
+        },
+        {
+          "question": "Add double-click full content modal",
+          "chosen": "Add double-click full content modal",
+          "reasoning": "The details pane is optimized for metadata and clipped previews; users need a focused viewer for complete file content, especially JSON, without losing tree context.",
+          "fromTrajectory": "traj_lcvvpzmuroqb"
+        },
+        {
+          "question": "Created writeback implementation workflow",
+          "chosen": "Created writeback implementation workflow",
+          "reasoning": "The missing writeback path spans relayfile queue handling, cloud web credential resolution, provider adapter planners, infra env wiring, and E2E validation. A dedicated agent-relay DAG workflow with tests-first and hard verification gates is the right vehicle.",
+          "fromTrajectory": "traj_lcvvpzmuroqb"
+        },
+        {
+          "question": "Route RelayFile observer under agentrelay.com observer namespace",
+          "chosen": "Route RelayFile observer under agentrelay.com observer namespace",
+          "reasoning": "The existing cloud router already owns agentrelay.com path routing. Adding /observer/file as a more-specific route lets Relaycast observer keep /observer while mounting the published RelayFile observer package separately at /observer/file.",
+          "fromTrajectory": "traj_lcvvpzmuroqb"
+        },
+        {
+          "question": "Keep file observer routing in cloud and publish only the observer app",
+          "chosen": "Keep file observer routing in cloud and publish only the observer app",
+          "reasoning": "The relayfile file-observer-router package is a deployment-specific proxy for relayfile.dev; agentrelay.com path routing is cloud-owned, while @relayfile/file-observer should be the reusable published app package.",
+          "fromTrajectory": "traj_lcvvpzmuroqb"
+        },
+        {
+          "question": "Pack relayfile npm CLI with native binaries",
+          "chosen": "Pack relayfile npm CLI with native binaries",
+          "reasoning": "The installed CLI must work even when npm postinstall scripts are disabled; packaging platform-specific cmd/relayfile-cli binaries lets scripts/run.js launch an included binary and avoids the missing bin/relayfile failure.",
+          "fromTrajectory": "traj_lcvvpzmuroqb"
+        }
+      ]
+    },
+    {
+      "category": "api",
+      "decisions": [
+        {
+          "question": "Bootstrap mirror mounts from the export snapshot API",
+          "chosen": "Bootstrap mirror mounts from the export snapshot API",
+          "reasoning": "Mount startup was doing one tree request plus one file read per visible file and then walking events. The implemented export endpoint already provides a full JSON snapshot with revisions, so using it makes sandbox mounts one request while preserving a tree/read fallback for older servers.",
+          "fromTrajectory": "traj_nv8vh0eav3v0"
+        },
+        {
+          "question": "Use api.relayfile.dev as the CLI built-in default server",
+          "chosen": "Use api.relayfile.dev as the CLI built-in default server",
+          "reasoning": "The hosted observer and SDK already use api.relayfile.dev, and the user expects bare relayfile commands to target that host when no server override or saved server is present.",
+          "fromTrajectory": "traj_o8aamzw5k45f"
+        },
+        {
+          "question": "Restore CLI binary execute bits after artifact download",
+          "chosen": "Restore CLI binary execute bits after artifact download",
+          "reasoning": "GitHub artifact downloads strip Unix modes, and the npm publish jobs use --ignore-scripts. Chmodding packages/cli/bin before publishing ensures macOS/Linux packaged binaries remain executable when users install with scripts disabled.",
+          "fromTrajectory": "traj_8gockt810ha6"
+        },
+        {
+          "question": "Refine observer content and health empty states",
+          "chosen": "Refine observer content and health empty states",
+          "reasoning": "Live cloud data showed JSON files rendered as a raw single-line string and an empty provider health response consumed excessive vertical space; both are presentation issues in the observer page, not API issues.",
+          "fromTrajectory": "traj_lcvvpzmuroqb"
+        }
+      ]
+    },
+    {
+      "category": "database",
+      "decisions": [
+        {
+          "question": "Launch hosted observer with URL fragment config",
+          "chosen": "Launch hosted observer with URL fragment config",
+          "reasoning": "The hosted observer cannot rely on per-user build-time NEXT_PUBLIC values. The CLI can pass server, workspace, and token at launch time in the URL fragment so credentials are available to browser code without being sent to the observer host as query parameters.",
+          "fromTrajectory": "traj_e7kxnaf40q07"
+        },
+        {
+          "question": "Investigate Notion directory load failure at core",
+          "chosen": "Investigate Notion directory load failure at core",
+          "reasoning": "The dashboard reports SQLITE_ERROR from listTree for a Notion database path, which indicates a backend path/query modeling issue rather than a UI-only error; inspect core tree listing and adapter path output before changing behavior.",
+          "fromTrajectory": "traj_lcvvpzmuroqb"
+        },
+        {
+          "question": "Tightened RelayFile writeback workflow to require PGlite-backed workspace integration tests",
+          "chosen": "Tightened RelayFile writeback workflow to require PGlite-backed workspace integration tests",
+          "reasoning": "The 80-to-100 workflow skill requires DB-backed validation when behavior depends on database state; pure workspace_integrations mocks were not enough evidence for writeback bridge correctness.",
+          "fromTrajectory": "traj_lcvvpzmuroqb"
+        }
+      ]
+    },
+    {
+      "category": "security",
+      "decisions": [
+        {
+          "question": "Support active workspace resolution in CLI commands and workspace list fallback",
+          "chosen": "Support active workspace resolution in CLI commands and workspace list fallback",
+          "reasoning": "Remote workspace listing requires admin scopes; for scoped agent tokens, the CLI should still show and use the active workspace from RELAYFILE_WORKSPACE or token claims.",
+          "fromTrajectory": "traj_mq8gu25evmdu"
+        },
+        {
+          "question": "Workspace list fallback prints active workspace before local catalog entries",
+          "chosen": "Workspace list fallback prints active workspace before local catalog entries",
+          "reasoning": "Scoped remote tokens may not authorize admin workspace listing, so the CLI should surface the active env/token workspace ahead of stale local catalog entries.",
+          "fromTrajectory": "traj_mq8gu25evmdu"
+        },
+        {
+          "question": "Add observer write/edit path",
+          "chosen": "Add observer write/edit path",
+          "reasoning": "Users need to edit files from the observer; RelayFile writes require optimistic concurrency via If-Match and fs:write-scoped tokens, so the UI should surface editing inside the full-view modal and refresh details after save.",
+          "fromTrajectory": "traj_lcvvpzmuroqb"
+        }
+      ]
+    },
+    {
+      "category": "tooling",
+      "decisions": [
+        {
+          "question": "Build observer URLs with a raw single-encoded fragment",
+          "chosen": "Build observer URLs with a raw single-encoded fragment",
+          "reasoning": "Go re-encodes URL.Fragment when String() is called, so assigning fragment.Encode() there double-encodes browser parameters.",
+          "fromTrajectory": "traj_2elotzbudken"
+        },
+        {
+          "question": "Added Cloudflare Pages deploy placeholder for file observer",
+          "chosen": "Added Cloudflare Pages deploy placeholder for file observer",
+          "reasoning": "Cloud should own deploying the published @relayfile/file-observer package; the production workflow now packs version 0.1.0 at deploy time so cloud npm ci does not depend on the package before deployment.",
+          "fromTrajectory": "traj_lcvvpzmuroqb"
+        }
+      ]
+    },
+    {
+      "category": "naming",
+      "decisions": [
+        {
+          "question": "Infer provider filter options from root path segments",
+          "chosen": "Infer provider filter options from root path segments",
+          "reasoning": "Root provider directories such as /github, /notion, and /slack do not always carry provider metadata, so the dashboard must derive provider choices from path namespaces before child files are loaded.",
+          "fromTrajectory": "traj_lcvvpzmuroqb"
+        }
+      ]
+    }
+  ],
+  "keyLearnings": [],
+  "keyFindings": [
+    "\"verify-ui-beautiful\" completed → UI_VERIFIED_BEAUTIFUL",
+    "\"create-pages-config\" completed → - Artifact produced: `packages/file-observer/wrangler.file-observer.toml`",
+    "\"create-router-package-json\" completed → - `packages/file-observer-router/package.json`",
+    "\"create-router-worker\" completed → - Recorded the work in Trail on the existing active trajectory and completed it.",
+    "\"create-router-wrangler\" completed → Created [packages/file-observer-router/wrangler.toml](/Users/khaliqgant/Projects/AgentWorkforce/relayfile/packages/file-",
+    "\"create-router-tsconfig\" completed → Created `packages/file-observer-router/tsconfig.json` with the requested contents:\n\n```json\n{\n  \"compilerOptions\": {\n   ",
+    "\"research-dashboard-patterns\" completed → DESIGN_RESEARCH_COMPLETE",
+    "\"discover-capabilities\" completed → The script ran successfully. Here is the complete capability discovery report:\n\n---\n\n## Capability Discovery Report\n\n###",
+    "\"design-dashboard\" completed (after 2 attempts) → DESIGN_DONE",
+    "\"create-package-json\" completed → - Recorded the work in Trail and completed the active trajectory.",
+    "\"create-next-config\" completed → **Artifact Created**\n\nCreated [packages/file-observer/next.config.js](/Users/khaliqgant/Projects/AgentWorkforce/relayfil",
+    "\"create-tsconfig\" completed → - Artifact produced: `packages/file-observer/tsconfig.json`",
+    "\"create-postcss-config\" completed → - Recorded the implementation decision in the active `trail` trajectory.",
+    "\"create-app-layout\" completed → - Recorded the work in `trail` and completed the active trajectory.",
+    "\"create-globals-css\" completed → - `packages/file-observer/src/app/globals.css`",
+    "\"create-main-page\" completed → **Artifact Produced**\n\n- Created `packages/file-observer/src/app/page.tsx`\n\n**What The Page Implements**\n\n- A client-sid",
+    "\"create-file-tree-component\" completed → - reflection recorded for implementation status and validation constraints",
+    "\"create-file-details-component\" completed → - Trajectory updated with a decision, reflection, and completion summary for this task",
+    "\"create-workspace-selector\" completed → - `packages/file-observer/src/components/WorkspaceSelector.tsx`",
+    "\"create-relayfile-client\" completed → - `packages/file-observer/src/lib/relayfile-client.ts`",
+    "\"create-use-file-tree-hook\" completed → **Artifact**\n\nCreated [useFileTree.ts](/Users/khaliqgant/Projects/AgentWorkforce/relayfile/packages/file-observer/src/ho",
+    "\"create-use-file-events-hook\" completed → - Produced one artifact: `packages/file-observer/src/hooks/useFileEvents.ts`.",
+    "\"fix-build-errors\" completed → **Result**\n\n`packages/file-observer` does not currently have a reproducible build failure in this workspace. I re-ran th",
+    "\"create-e2e-tests\" completed → Implemented the requested test suite at [packages/file-observer/tests/file-observer.test.ts](/Users/khaliqgant/Projects/",
+    "\"fix-test-failures\" completed → **Result**\n\nNo code or test changes were required in `packages/file-observer`.\n\n**What I verified**\n\n1. Ran `cd packages",
+    "\"audit-drift\" completed → # Rules Drift Report\n\n## Summary\n- files_audited: 1\n- files_with_drift: 1\n- new_rules_to_add: 1\n\n## Drift per file\n### .",
+    "\"team-lead\" completed → 2"
+  ],
+  "filesAffected": [],
+  "commits": [],
+  "narrative": "This trajectory batch captures roughly a week of work centered on the relayfile project: a file observer dashboard (@relayfile/file-observer), CLI ergonomics, mount sync reliability, and supporting cloud routing/publish pipelines. The largest single thread was the 39-step DAG workflow that stood up packages/file-observer (Next.js app) with src/app/{layout,page,globals.css}.tsx, components (FileTree.tsx, FileDetails.tsx, WorkspaceSelector.tsx), hooks (useFileTree.ts, useFileEvents.ts), a relayfile-client.ts, plus tests/file-observer.test.ts; a second cluster extended it with layout fixes (sticky details, viewport-bound scroll, header-mounted workspace health), a double-click full-content modal, a writeback/edit path gated on If-Match optimistic concurrency and fs:write-scoped tokens, and JSON preview formatting. Routing landed on agentrelay.com/observer/file owned by cloud — the interim packages/file-observer-router worker was created, then deleted once cloud took ownership; deploy became a cloud-owned Cloudflare Pages placeholder that packs @relayfile/file-observer 0.1.0 at deploy time. CLI and runtime work tightened the mount path: mirror bootstrap switched to the export snapshot endpoint with server-side path filtering (tree/read fallback retained for older servers), the CLI mount entrypoint was wired to mountsync's fsnotify watcher to skip websocket no-op cycles, and a fix was landed for a watcher-echo bug where unchanged tracked hashes were being pushed and advancing remote revisions (the regression that had been breaking the e2e Agent B edit-propagation test). Separately: api.relayfile.dev became the built-in CLI default server; a `workspace use` / default-workspace resolution chain (explicit > RELAYFILE_WORKSPACE > token claim > stored default) was added with a list fallback that surfaces the active workspace ahead of stale catalog entries; direct tree/read CLI commands were added for parity with cloud test scripts; and the npm publish job now packs platform cmd/relayfile-cli binaries and chmods them after artifact download so installs with --ignore-scripts still work. Smaller but notable threads: PR 46 conflict resolution kept PR 45's mount polling changes and fixed observer launch URLs to use a raw single-encoded fragment (Go re-encodes URL.Fragment on String()); an AGENTS.md audit added the rule that workers must run `trail status` before `trail start` and reuse inherited workflow trajectories in automated runs; a RelayFile provider writeback workflow was authored with PGlite-backed workspace integration tests as a hard gate, and PR feedback narrowed a tail-pipe that was masking npm install failures plus a false-positive NANGO_SECRET_KEY grep.",
+  "decisions": [
+    {
+      "question": "How should mount sync treat unchanged filesystem events from its own watcher?",
+      "chosen": "Treat unchanged tracked-hash watcher events as no-ops",
+      "reasoning": "Remote pulls write files atomically and then fire fsnotify; pushing those back with unchanged hashes advanced remote revisions and caused stale-revision conflicts between mounts, breaking the e2e Agent B propagation test.",
+      "impact": "Fixes CI e2e; regression coverage added in internal/mountsync; `go test ./internal/mountsync`, `go test ./...`, and `npx tsx scripts/e2e.ts --ci` all pass."
+    },
+    {
+      "question": "How should the CLI bootstrap a mount's initial mirror?",
+      "chosen": "Use the Relayfile export JSON snapshot with server-side path filtering, keep tree/read fallback",
+      "reasoning": "Previous flow issued one tree request plus one file read per visible file; the export endpoint delivers the full snapshot with revisions in a single call, which dramatically cuts sandbox mount startup.",
+      "impact": "Faster bootstrap for sandbox agents; older servers still work via fallback."
+    },
+    {
+      "question": "Where should the hosted file observer live, and how should it get credentials?",
+      "chosen": "Host under agentrelay.com/observer/file routed by cloud; CLI launches it with server/workspace/token in the URL fragment",
+      "reasoning": "files.relayfile.dev was never live and NEXT_PUBLIC build-time config can't serve per-user credentials; fragments stay client-side so creds don't hit the observer host as query params.",
+      "impact": "Cloud owns routing (file-observer-router package was deleted after cloud took over); the CLI `relayfile observer` launcher opens the correct production URL."
+    },
+    {
+      "question": "How should observer launch URLs be constructed in Go?",
+      "chosen": "Assign a raw single-encoded string to url.URL.Fragment, not fragment.Encode()",
+      "reasoning": "Go's url.URL re-encodes Fragment when String() is called, so Encode() double-encodes browser params.",
+      "impact": "Observer launches now parse correctly in the browser; assertion coverage added."
+    },
+    {
+      "question": "Should the CLI have direct tree/read commands beyond mount/export?",
+      "chosen": "Yes, first-class `tree` and `read` commands",
+      "reasoning": "Cloud test scripts hit fs/tree and fs/file directly; requiring mount for parity was friction for users with server/token credentials.",
+      "impact": "Closes CLI parity gap with cloud, unblocks targeted verification."
+    },
+    {
+      "question": "What's the workspace resolution order for CLI commands?",
+      "chosen": "Explicit flag > RELAYFILE_WORKSPACE > token workspace claim > stored default",
+      "reasoning": "Scoped agent tokens can't hit admin workspace listing; the CLI must still surface an active workspace and not be blocked by missing admin scopes.",
+      "impact": "`workspace list` fallback prints the active workspace before stale local catalog entries; `workspace use` persists a default."
+    },
+    {
+      "question": "How should the npm CLI package survive installs run with --ignore-scripts?",
+      "chosen": "Pack platform-specific cmd/relayfile-cli binaries into the tarball and chmod them after artifact download in publish jobs",
+      "reasoning": "GitHub artifact downloads strip Unix mode bits; without postinstall, a missing executable would break `bin/relayfile` on macOS/Linux.",
+      "impact": "Global installs verified with both --ignore-scripts=true and =false; packed mode restored after simulated permission loss."
+    },
+    {
+      "question": "Does workspace-mock coverage satisfy the writeback workflow's verification gate?",
+      "chosen": "No — require PGlite-backed workspace integration tests",
+      "reasoning": "The 80-to-100 skill mandates DB-backed validation when behavior depends on DB state; the writeback bridge crosses queue, cloud web creds, and provider adapters.",
+      "impact": "Workflow now gates merges on PGlite integration tests, not workspace_integrations mocks."
+    },
+    {
+      "question": "How should the observer be exposed in the cloud UI?",
+      "chosen": "Surface from the Integrations page only when the workspace has connected providers; no sidebar entry",
+      "reasoning": "User rejected a sidebar entry and the integrations page already owns provider state.",
+      "impact": "Observer link is gated on active integrations; keeps nav clean."
+    }
+  ],
+  "conventions": [
+    {
+      "pattern": "Mount sync watcher must suppress events where the tracked hash is unchanged",
+      "rationale": "Remote pulls write atomically and trigger fsnotify; echoing those back as pushes advances remote revisions and causes multi-mount conflicts.",
+      "scope": "internal/mountsync and any future local-watcher → remote-push path"
+    },
+    {
+      "pattern": "Prefer the export snapshot endpoint for bulk/initial reads; keep tree+read as a fallback",
+      "rationale": "One request vs N+1 requests; older servers may still lack export.",
+      "scope": "CLI mount bootstrap and any sandbox/agent tools that need a workspace snapshot"
+    },
+    {
+      "pattern": "Pass runtime CLI config to the hosted observer via URL fragment, never query string",
+      "rationale": "Fragments stay client-side, avoiding credential exposure to the observer host and intermediaries; works without per-user NEXT_PUBLIC build values.",
+      "scope": "Any CLI→hosted-web launcher that needs to inject server/workspace/token"
+    },
+    {
+      "pattern": "When assembling URLs in Go, single-encode the fragment string and assign to url.URL.Fragment directly",
+      "rationale": "url.URL.String() re-encodes Fragment; calling Encode() first produces double-encoded output.",
+      "scope": "All Go URL construction where a fragment carries encoded params"
+    },
+    {
+      "pattern": "Workspace resolution order: explicit flag > RELAYFILE_WORKSPACE > token claim > stored default; list fallback surfaces active workspace first",
+      "rationale": "Agent/scoped tokens often lack admin scopes for remote workspace listing.",
+      "scope": "relayfile CLI commands and docs"
+    },
+    {
+      "pattern": "npm-published Go CLIs must pack platform binaries and chmod them after artifact download in the publish workflow",
+      "rationale": "GitHub artifacts strip exec bits; users commonly install with --ignore-scripts.",
+      "scope": "Any @relayfile/* or sibling package that ships a Go binary via npm"
+    },
+    {
+      "pattern": "Writeback/edit paths must use optimistic concurrency (If-Match) and fs:write-scoped tokens, and refresh details after save",
+      "rationale": "Relayfile writes require the revision check and the scoped token; UI must reflect the new state immediately.",
+      "scope": "File observer edit UI and any other Relayfile write clients"
+    },
+    {
+      "pattern": "Workers check `trail status` before `trail start` and reuse inherited workflow trajectories in automated runs",
+      "rationale": "Prevents duplicate trajectories when the orchestrator has already opened one for the workflow step.",
+      "scope": "AGENTS.md / workflow worker prompts"
+    },
+    {
+      "pattern": "DB-state-dependent features gate merges on PGlite-backed integration tests, not mocks",
+      "rationale": "Per the 80-to-100 skill; workspace_integrations mocks were insufficient evidence for the writeback bridge.",
+      "scope": "Workflows that exercise cloud DB paths (writeback, provider sync, etc.)"
+    },
+    {
+      "pattern": "Observer panels use viewport-bounded independent scroll regions; file details are sticky on xl with internal overflow",
+      "rationale": "Page-level sticky fails when ancestors bound overflow or at narrower breakpoints; independent scroll regions keep details visible across layouts.",
+      "scope": "packages/file-observer dashboard layout"
+    },
+    {
+      "pattern": "Derive provider filter options from root path segments (/github, /notion, /slack) rather than relying on provider metadata",
+      "rationale": "Root provider directories don't always carry provider metadata, so the filter must work before child files load.",
+      "scope": "File observer filter/selector components"
+    }
+  ],
+  "lessons": [
+    {
+      "lesson": "Local file watchers need explicit echo-suppression when the same process also writes files from remote pulls",
+      "context": "The mount sync watcher was re-pushing atomically-written remote pulls, advancing revisions and breaking e2e Agent B edit propagation.",
+      "recommendation": "Gate pushes on a content-hash diff against the last-known tracked hash; add a regression test that pulls a remote edit and asserts no outbound push event."
+    },
+    {
+      "lesson": "Verification signals must check artifact state, not just stdout",
+      "context": "design-dashboard retried because the verifier read the agent's stdout instead of the already-completed DESIGN.md file ending with DESIGN_DONE.",
+      "recommendation": "Have workflow verifiers read the target artifact on disk (or channel-posted evidence) as the primary signal; treat stdout as secondary."
+    },
+    {
+      "lesson": "Go's url.URL fragment re-encoding is a silent double-encode trap",
+      "context": "Assigning fragment.Encode() to URL.Fragment produced browser-side parameters that failed to decode.",
+      "recommendation": "Build the fragment string once with the intended single encoding and assign directly; add a test that parses URL.String() as a browser would."
+    },
+    {
+      "lesson": "Pipelines that `| tail` or broadly grep can mask real failures and create false-positive safety gates",
+      "context": "PR 46/writeback-workflow review found npm install failures hidden by a tail pipe and a secret-grep flagging legitimate NANGO_SECRET_KEY refs.",
+      "recommendation": "Preserve the root-cause exit code (PIPESTATUS / set -o pipefail), and anchor secret patterns to avoid matching documented env var names."
+    },
+    {
+      "lesson": "npm packages that install Go binaries must assume --ignore-scripts",
+      "context": "Users install with scripts disabled; postinstall-only binary fetches leave `bin/relayfile` missing. Artifact downloads also strip Unix mode bits.",
+      "recommendation": "Pack platform binaries into the tarball, chmod +x them after artifact download in the publish workflow, and have bin/relayfile dispatch to the packed binary."
+    },
+    {
+      "lesson": "Defaults should match the actual hosted surface, not aspirational hostnames",
+      "context": "Both observer (files.relayfile.dev) and CLI server defaults were out of sync with the live api.relayfile.dev / agentrelay.com routes.",
+      "recommendation": "Treat default hostnames as a deploy-coupled config and add a CLI/doc regression test any time the hosted surface moves."
+    },
+    {
+      "lesson": "Scoped tokens break any UI that assumes admin scopes",
+      "context": "Workspace listing required admin scopes; scoped agent tokens hit an empty/forbidden list with no clear workspace context.",
+      "recommendation": "Always derive the active context from env/token claims as a fallback and surface it ahead of remote listings."
+    },
+    {
+      "lesson": "Page-level sticky positioning is fragile across breakpoints and ancestor overflow",
+      "context": "File details pane disappeared on non-xl widths even after adding `sticky` because ancestor overflow bounded the sticky area.",
+      "recommendation": "Use independent viewport-bounded scroll regions (flex + min-h-0 + overflow-auto) rather than page-level sticky for persistent side panels."
+    }
+  ],
+  "openQuestions": [
+    "Should `workspace use` / default-workspace resolution also write back to a remote profile so the default follows the user across machines, or stay machine-local?",
+    "Is the observer's edit path expected to handle non-text/non-JSON content types, and how should binary diffs be surfaced in the If-Match failure case?",
+    "The Notion directory load failure surfaced a SQLITE_ERROR in core listTree; was the root-cause fix shipped in this batch, or is the adapter path/query modeling issue still pending?",
+    "With @relayfile/file-observer published and cloud owning agentrelay.com/observer/file routing, what's the plan for versioning the observer package relative to the CLI (separate release cadence, or coupled)?",
+    "Does the writeback workflow's PGlite integration gate cover all provider adapters (Notion, GitHub, Slack) or only a subset, and where are the remaining gaps tracked?"
+  ]
+}

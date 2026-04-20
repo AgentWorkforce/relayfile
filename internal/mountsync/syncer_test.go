@@ -77,6 +77,47 @@ func TestSyncOncePullsRemoteAndPushesLocalEdits(t *testing.T) {
 	}
 }
 
+func TestHandleLocalChangeIgnoresAlreadyTrackedContent(t *testing.T) {
+	client := &fakeClient{
+		files: map[string]RemoteFile{
+			"/notion/Docs/A.md": {
+				Path:        "/notion/Docs/A.md",
+				Revision:    "rev_1",
+				ContentType: "text/markdown",
+				Content:     "# A",
+			},
+		},
+		revisionCounter: 1,
+	}
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_mount_watcher_echo",
+		RemoteRoot:  "/notion",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("initial sync failed: %v", err)
+	}
+	localFile := filepath.Join(localDir, "Docs", "A.md")
+	assertLocalFileContent(t, localFile, "# A")
+
+	if err := syncer.HandleLocalChange(context.Background(), "Docs/A.md", fsnotify.Write); err != nil {
+		t.Fatalf("handle unchanged local write failed: %v", err)
+	}
+
+	if client.writeFileCalls != 0 {
+		t.Fatalf("expected unchanged watcher event not to push, got %d write calls", client.writeFileCalls)
+	}
+	remote := client.files["/notion/Docs/A.md"]
+	if remote.Revision != "rev_1" {
+		t.Fatalf("expected remote revision to remain rev_1, got %q", remote.Revision)
+	}
+}
+
 func TestReconcileUsesExportSnapshotForInitialPull(t *testing.T) {
 	base := &fakeClient{
 		files: map[string]RemoteFile{
@@ -1316,6 +1357,7 @@ type fakeClient struct {
 	revisionCounter   int
 	eventCounter      int
 	listTreeCalls     int
+	writeFileCalls    int
 	eventsUnsupported bool
 }
 
@@ -1424,6 +1466,7 @@ func (c *fakeClient) ReadFile(ctx context.Context, workspaceID, path string) (Re
 func (c *fakeClient) WriteFile(ctx context.Context, workspaceID, path, baseRevision, contentType, content string) (WriteResult, error) {
 	_ = ctx
 	_ = workspaceID
+	c.writeFileCalls++
 	path = normalizeRemotePath(path)
 	current, exists := c.files[path]
 	if !exists && baseRevision != "0" {
