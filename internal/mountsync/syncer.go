@@ -564,6 +564,15 @@ func (s *Syncer) pushSingleFile(
 		return nil
 	}
 
+	if exists && !tracked.Dirty && tracked.Hash == snapshot.Hash {
+		if tracked.ContentType == "" {
+			tracked.ContentType = snapshot.ContentType
+		}
+		tracked.ReadOnly = false
+		s.state.Files[remotePath] = tracked
+		return nil
+	}
+
 	if exists && tracked.Dirty {
 		remoteFile, readErr := s.client.ReadFile(ctx, s.workspace, remotePath)
 		if readErr == nil && hashString(remoteFile.Content) == snapshot.Hash {
