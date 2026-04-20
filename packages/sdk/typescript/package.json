@@ -1,6 +1,6 @@
 {
   "name": "@relayfile/sdk",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "TypeScript SDK for relayfile — real-time filesystem for humans and agents",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
