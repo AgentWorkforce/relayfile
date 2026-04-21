@@ -23,7 +23,7 @@ function write(file: string, body: string): void {
 
 /**
  * Wait up to `timeoutMs` for `check` to return true. Useful for letting
- * chokidar + awaitWriteFinish observe a write and propagate it.
+ * the watcher observe a write and propagate it.
  */
 async function waitFor(check: () => boolean, timeoutMs = 3000): Promise<void> {
   const start = Date.now();
@@ -59,9 +59,9 @@ describe('startAutoSync', () => {
       excludeDirs: [],
     });
 
-    // Use a short writeFinish so the test runs quickly; still long enough
+    // Use a short debounce so the test runs quickly; still long enough
     // to coalesce a single write.
-    const auto = handle.startAutoSync({ writeFinishMs: 50, scanIntervalMs: 10_000 });
+    const auto = handle.startAutoSync({ debounceMs: 50, scanIntervalMs: 10_000 });
     await auto.ready();
     try {
       writeFileSync(path.join(handle.mountDir, 'file.txt'), 'edited-in-mount', 'utf8');
@@ -81,7 +81,7 @@ describe('startAutoSync', () => {
       excludeDirs: [],
     });
 
-    const auto = handle.startAutoSync({ writeFinishMs: 50, scanIntervalMs: 10_000 });
+    const auto = handle.startAutoSync({ debounceMs: 50, scanIntervalMs: 10_000 });
     await auto.ready();
     try {
       writeFileSync(path.join(projectDir, 'file.txt'), 'edited-externally', 'utf8');
@@ -103,7 +103,7 @@ describe('startAutoSync', () => {
       excludeDirs: [],
     });
 
-    const auto = handle.startAutoSync({ writeFinishMs: 50, scanIntervalMs: 10_000 });
+    const auto = handle.startAutoSync({ debounceMs: 50, scanIntervalMs: 10_000 });
     await auto.ready();
     try {
       rmSync(path.join(handle.mountDir, 'file.txt'));
@@ -123,7 +123,7 @@ describe('startAutoSync', () => {
       excludeDirs: [],
     });
 
-    const auto = handle.startAutoSync({ writeFinishMs: 50, scanIntervalMs: 10_000 });
+    const auto = handle.startAutoSync({ debounceMs: 50, scanIntervalMs: 10_000 });
     await auto.ready();
     try {
       rmSync(path.join(projectDir, 'file.txt'));
@@ -143,7 +143,7 @@ describe('startAutoSync', () => {
       excludeDirs: [],
     });
 
-    const auto = handle.startAutoSync({ writeFinishMs: 50, scanIntervalMs: 10_000 });
+    const auto = handle.startAutoSync({ debounceMs: 50, scanIntervalMs: 10_000 });
     await auto.ready();
     try {
       // Bypass the 0o444 permission for the test.
@@ -171,7 +171,7 @@ describe('startAutoSync', () => {
       excludeDirs: [],
     });
 
-    const auto = handle.startAutoSync({ writeFinishMs: 50, scanIntervalMs: 10_000 });
+    const auto = handle.startAutoSync({ debounceMs: 50, scanIntervalMs: 10_000 });
     await auto.ready();
     try {
       writeFileSync(path.join(projectDir, 'locked.txt'), 'updated-externally', 'utf8');
@@ -195,11 +195,11 @@ describe('startAutoSync', () => {
 
     // Don't start autosync yet — set up the conflict state first, then
     // trigger a single reconcile so we exercise the resolution rule.
-    const auto = handle.startAutoSync({ writeFinishMs: 10, scanIntervalMs: 10_000 });
+    const auto = handle.startAutoSync({ debounceMs: 10, scanIntervalMs: 10_000 });
     // Stop immediately to drain priming; then mutate and reconcile manually.
     await auto.stop();
 
-    const auto2 = handle.startAutoSync({ writeFinishMs: 10, scanIntervalMs: 10_000 });
+    const auto2 = handle.startAutoSync({ debounceMs: 10, scanIntervalMs: 10_000 });
     await auto2.ready();
     try {
       writeFileSync(path.join(projectDir, 'file.txt'), 'project-side', 'utf8');
@@ -224,7 +224,7 @@ describe('startAutoSync', () => {
       excludeDirs: [],
     });
 
-    const auto = handle.startAutoSync({ writeFinishMs: 50, scanIntervalMs: 10_000 });
+    const auto = handle.startAutoSync({ debounceMs: 50, scanIntervalMs: 10_000 });
     await auto.ready();
     try {
       // File appearing in project under an ignored path — must NOT appear in mount.
@@ -254,7 +254,7 @@ describe('startAutoSync', () => {
       excludeDirs: [],
     });
 
-    const auto = handle.startAutoSync({ writeFinishMs: 50, scanIntervalMs: 10_000 });
+    const auto = handle.startAutoSync({ debounceMs: 50, scanIntervalMs: 10_000 });
     await auto.ready();
     try {
       writeFileSync(path.join(handle.mountDir, 'docs/cache'), 'edited', 'utf8');
@@ -278,7 +278,7 @@ describe('startAutoSync', () => {
 
     // Start autosync but we'll rely on the explicit reconcile() call rather
     // than waiting for the watcher, to simulate a missed event.
-    const auto = handle.startAutoSync({ writeFinishMs: 50, scanIntervalMs: 100 });
+    const auto = handle.startAutoSync({ debounceMs: 50, scanIntervalMs: 100 });
     try {
       writeFileSync(path.join(handle.mountDir, 'file.txt'), 'edited', 'utf8');
       // Forcing a reconcile should find the change regardless of whether
@@ -298,7 +298,7 @@ describe('startAutoSync', () => {
       excludeDirs: [],
     });
 
-    const auto = handle.startAutoSync({ writeFinishMs: 50, scanIntervalMs: 10_000 });
+    const auto = handle.startAutoSync({ debounceMs: 50, scanIntervalMs: 10_000 });
     await auto.ready();
     try {
       writeFileSync(path.join(handle.mountDir, '_MOUNT_README.md'), 'mutated', 'utf8');
