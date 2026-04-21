@@ -1637,7 +1637,11 @@ func (s *Store) CommitForkWithValidator(workspaceID, forkID, correlationID strin
 				_, task := s.recordWriteLocked(ws, path, revision, "file.deleted", existing.Provider, correlationID)
 				tasks = append(tasks, task)
 			}
-			deletedCount++
+			if existed {
+				if existed {
+				deletedCount++
+			}
+			}
 		}
 	}
 
