@@ -134,6 +134,43 @@ describe("RelayFileClient — existing methods", () => {
       expect(init.method).toBe("PUT");
       expect((init.headers as Record<string, string>)["If-Match"]).toBe("rev_3");
     });
+
+    it("forwards contentIdentity in the body when provided", async () => {
+      const payload: WriteQueuedResponse = {
+        opId: "op_1",
+        status: "queued",
+        targetRevision: "rev_4",
+      };
+      const f = mockFetch(payload);
+      const client = makeClient(f);
+      await client.writeFile({
+        workspaceId: "ws_acme",
+        path: "/github/push/abc123.json",
+        baseRevision: "rev_3",
+        content: "{}",
+        contentIdentity: { kind: "github.push", key: "abc123" },
+      });
+      const body = JSON.parse((f.mock.calls[0]![1] as RequestInit).body as string);
+      expect(body.contentIdentity).toEqual({ kind: "github.push", key: "abc123" });
+    });
+
+    it("omits contentIdentity from the body when not provided", async () => {
+      const payload: WriteQueuedResponse = {
+        opId: "op_1",
+        status: "queued",
+        targetRevision: "rev_4",
+      };
+      const f = mockFetch(payload);
+      const client = makeClient(f);
+      await client.writeFile({
+        workspaceId: "ws_acme",
+        path: "/x.json",
+        baseRevision: "rev_3",
+        content: "{}",
+      });
+      const body = JSON.parse((f.mock.calls[0]![1] as RequestInit).body as string);
+      expect(body.contentIdentity).toBeUndefined();
+    });
   });
 
   // ---- deleteFile ----
