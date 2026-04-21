@@ -418,8 +418,95 @@ func TestForkCommitReturnsParentMovedConflict(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
 		t.Fatalf("decode conflict payload: %v", err)
 	}
-	if payload["error"] != "parent_moved" || payload["currentRevision"] == "" {
+	if payload["code"] != "parent_moved" || payload["message"] != "parent moved" || payload["currentRevision"] == "" {
 		t.Fatalf("unexpected parent_moved payload: %+v", payload)
+	}
+	details, ok := payload["details"].(map[string]any)
+	if !ok || details["currentRevision"] != payload["currentRevision"] {
+		t.Fatalf("expected parent_moved details to include currentRevision, got %+v", payload)
+	}
+}
+
+func TestForkCommitEnforcesPathScopedWriteAccess(t *testing.T) {
+	server := newForkTestServer(t)
+	workspaceID := "ws_fork_commit_scope"
+	ownerToken := forkTestToken(t, workspaceID)
+	limitedToken := mustTestJWT(t, "dev-secret", workspaceID, "Limited", []string{"relayfile:fs:write:/notion/Allowed/*"}, time.Now().Add(time.Hour))
+	fork := createForkForTest(t, server, ownerToken, workspaceID, "proposal-scope", nil)
+	writeForkFileForTest(t, server, ownerToken, workspaceID, fork.ForkID, "/notion/Secret.md", "0", "# secret", "corr_fork_scope_write")
+
+	resp := doRequest(t, server, request{
+		method: http.MethodPost,
+		path:   "/v1/workspaces/" + workspaceID + "/forks/" + fork.ForkID + "/commit",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + limitedToken,
+			"X-Correlation-Id": "corr_fork_scope_commit",
+		},
+	})
+	if resp.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 path-scoped fork commit, got %d (%s)", resp.Code, resp.Body.String())
+	}
+	parentRead := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/workspaces/" + workspaceID + "/fs/file?path=/notion/Secret.md",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + ownerToken,
+			"X-Correlation-Id": "corr_fork_scope_parent",
+		},
+	})
+	if parentRead.Code != http.StatusNotFound {
+		t.Fatalf("expected denied commit to leave parent untouched, got %d (%s)", parentRead.Code, parentRead.Body.String())
+	}
+}
+
+func TestForkCommitEnforcesParentACL(t *testing.T) {
+	server := newForkTestServer(t)
+	workspaceID := "ws_fork_commit_acl"
+	ownerToken := mustTestJWT(t, "dev-secret", workspaceID, "Owner", []string{"fs:read", "fs:write", "finance"}, time.Now().Add(time.Hour))
+	limitedToken := mustTestJWT(t, "dev-secret", workspaceID, "Limited", []string{"fs:write"}, time.Now().Add(time.Hour))
+	seed := writeFileForTest(t, server, ownerToken, workspaceID, "/notion/Protected.md", "0", "# protected", "corr_fork_acl_seed")
+
+	protectResp := doRequest(t, server, request{
+		method: http.MethodPut,
+		path:   "/v1/workspaces/" + workspaceID + "/fs/file?path=/notion/Protected.md",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + ownerToken,
+			"X-Correlation-Id": "corr_fork_acl_protect",
+			"If-Match":         seed.TargetRevision,
+		},
+		body: map[string]any{
+			"contentType": "text/markdown",
+			"content":     "# protected",
+			"semantics": map[string]any{
+				"permissions": []string{"scope:finance"},
+			},
+		},
+	})
+	if protectResp.Code != http.StatusAccepted {
+		t.Fatalf("expected 202 protecting parent file, got %d (%s)", protectResp.Code, protectResp.Body.String())
+	}
+	var protected relayfile.WriteResult
+	if err := json.NewDecoder(protectResp.Body).Decode(&protected); err != nil {
+		t.Fatalf("decode protected write: %v", err)
+	}
+
+	fork := createForkForTest(t, server, ownerToken, workspaceID, "proposal-acl", nil)
+	writeForkFileForTest(t, server, ownerToken, workspaceID, fork.ForkID, "/notion/Protected.md", protected.TargetRevision, "# staged", "corr_fork_acl_overlay")
+
+	resp := doRequest(t, server, request{
+		method: http.MethodPost,
+		path:   "/v1/workspaces/" + workspaceID + "/forks/" + fork.ForkID + "/commit",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + limitedToken,
+			"X-Correlation-Id": "corr_fork_acl_commit",
+		},
+	})
+	if resp.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 ACL-protected fork commit, got %d (%s)", resp.Code, resp.Body.String())
+	}
+	parent := readFileForTest(t, server, ownerToken, workspaceID, "/notion/Protected.md", "corr_fork_acl_parent")
+	if parent.Content != "# protected" {
+		t.Fatalf("expected denied commit to preserve parent content, got %q", parent.Content)
 	}
 }
 

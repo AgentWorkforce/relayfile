@@ -266,7 +266,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "discard_fork":
 		s.handleDiscardFork(w, r, workspaceID, parts[4], correlationID)
 	case "commit_fork":
-		s.handleCommitFork(w, r, workspaceID, parts[4], correlationID)
+		s.handleCommitFork(w, r, workspaceID, parts[4], correlationID, claims)
 	case "tree":
 		s.handleTree(w, r, workspaceID, correlationID, claims)
 	case "bulk_write":
@@ -1307,6 +1307,26 @@ func writeForkAwareError(w http.ResponseWriter, err error, correlationID string)
 	}
 }
 
+type forkCommitAuthorizationError struct {
+	message string
+}
+
+func (e *forkCommitAuthorizationError) Error() string {
+	return e.message
+}
+
+func validateForkCommitEntries(workspaceID string, claims tokenClaims, entries []relayfile.ForkCommitEntry) error {
+	for _, entry := range entries {
+		if !scopeMatchesPath(claims.Scopes, "fs:write", entry.Path) {
+			return &forkCommitAuthorizationError{message: "fork commit denied by path scope"}
+		}
+		if !filePermissionAllows(entry.Permissions, workspaceID, &claims) {
+			return &forkCommitAuthorizationError{message: "fork commit denied by permission policy"}
+		}
+	}
+	return nil
+}
+
 func (s *Server) handleCreateFork(w http.ResponseWriter, r *http.Request, workspaceID, correlationID string) {
 	var body struct {
 		ProposalID string `json:"proposalId"`
@@ -1354,15 +1374,26 @@ func (s *Server) handleDiscardFork(w http.ResponseWriter, _ *http.Request, works
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (s *Server) handleCommitFork(w http.ResponseWriter, _ *http.Request, workspaceID, forkID, correlationID string) {
-	resp, err := s.store.CommitFork(workspaceID, forkID, correlationID)
+func (s *Server) handleCommitFork(w http.ResponseWriter, _ *http.Request, workspaceID, forkID, correlationID string, claims tokenClaims) {
+	resp, err := s.store.CommitForkWithValidator(workspaceID, forkID, correlationID, func(entries []relayfile.ForkCommitEntry) error {
+		return validateForkCommitEntries(workspaceID, claims, entries)
+	})
 	if err != nil {
+		var authzErr *forkCommitAuthorizationError
+		if errors.As(err, &authzErr) {
+			writeError(w, http.StatusForbidden, "forbidden", authzErr.Error(), correlationID)
+			return
+		}
 		var parentMoved *relayfile.ParentMovedError
 		if errors.As(err, &parentMoved) {
 			writeJSON(w, http.StatusConflict, map[string]any{
-				"error":           "parent_moved",
+				"code":            "parent_moved",
+				"message":         err.Error(),
 				"currentRevision": parentMoved.CurrentRevision,
 				"correlationId":   correlationID,
+				"details": map[string]any{
+					"currentRevision": parentMoved.CurrentRevision,
+				},
 			})
 			return
 		}

@@ -62,6 +62,7 @@ export type {
   CommitForkResponse,
   ConflictErrorResponse,
   CreateForkInput,
+  ContentIdentity,
   DeleteFileInput,
   DeadLetterFeedResponse,
   DeadLetterItem,

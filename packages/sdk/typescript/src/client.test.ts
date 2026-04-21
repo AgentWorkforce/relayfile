@@ -134,6 +134,43 @@ describe("RelayFileClient — existing methods", () => {
       expect(init.method).toBe("PUT");
       expect((init.headers as Record<string, string>)["If-Match"]).toBe("rev_3");
     });
+
+    it("forwards contentIdentity in the body when provided", async () => {
+      const payload: WriteQueuedResponse = {
+        opId: "op_1",
+        status: "queued",
+        targetRevision: "rev_4",
+      };
+      const f = mockFetch(payload);
+      const client = makeClient(f);
+      await client.writeFile({
+        workspaceId: "ws_acme",
+        path: "/github/push/abc123.json",
+        baseRevision: "rev_3",
+        content: "{}",
+        contentIdentity: { kind: "github.push", key: "abc123" },
+      });
+      const body = JSON.parse((f.mock.calls[0]![1] as RequestInit).body as string);
+      expect(body.contentIdentity).toEqual({ kind: "github.push", key: "abc123" });
+    });
+
+    it("omits contentIdentity from the body when not provided", async () => {
+      const payload: WriteQueuedResponse = {
+        opId: "op_1",
+        status: "queued",
+        targetRevision: "rev_4",
+      };
+      const f = mockFetch(payload);
+      const client = makeClient(f);
+      await client.writeFile({
+        workspaceId: "ws_acme",
+        path: "/x.json",
+        baseRevision: "rev_3",
+        content: "{}",
+      });
+      const body = JSON.parse((f.mock.calls[0]![1] as RequestInit).body as string);
+      expect(body.contentIdentity).toBeUndefined();
+    });
   });
 
   // ---- deleteFile ----
@@ -720,6 +757,26 @@ describe("RelayFileClient — error handling", () => {
         content: "{}",
       })
     ).rejects.toThrow(RevisionConflictError);
+  });
+
+  it("preserves parent_moved details on commitFork errors", async () => {
+    const body = {
+      code: "parent_moved",
+      message: "parent moved",
+      correlationId: "c_parent",
+      currentRevision: "rev_new",
+    };
+    const f = mockFetch(body, 409);
+    const client = makeClient(f);
+    try {
+      await client.commitFork({ workspaceId: "ws_1", forkId: "fork_1" });
+      expect.unreachable("Should have thrown");
+    } catch (error) {
+      expect(error).toBeInstanceOf(RelayFileApiError);
+      const apiError = error as RelayFileApiError;
+      expect(apiError.code).toBe("parent_moved");
+      expect(apiError.details?.currentRevision).toBe("rev_new");
+    }
   });
 
   it("throws InvalidStateError on 409 with invalid_state code", async () => {

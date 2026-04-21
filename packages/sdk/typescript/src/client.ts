@@ -202,6 +202,19 @@ function normalizeExportJsonResponse(payload: unknown): ExportJsonResponse {
   };
 }
 
+function normalizeErrorDetails(data: Record<string, unknown>, explicitDetails: unknown): Record<string, unknown> | undefined {
+  if (explicitDetails && typeof explicitDetails === "object" && !Array.isArray(explicitDetails)) {
+    return explicitDetails as Record<string, unknown>;
+  }
+  const details: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(data)) {
+    if (key !== "code" && key !== "message" && key !== "correlationId") {
+      details[key] = value;
+    }
+  }
+  return Object.keys(details).length > 0 ? details : undefined;
+}
+
 class RelayFileWebSocketConnection implements WebSocketConnection {
   private readonly socket: WebSocket;
   private readonly handlers: {
@@ -360,7 +373,7 @@ export class RelayFileClient {
   }
 
   async writeFile(input: WriteFileInput): Promise<WriteQueuedResponse> {
-    const { workspaceId, path, correlationId, baseRevision, content, contentType, encoding, signal } = input;
+    const { workspaceId, path, correlationId, baseRevision, content, contentType, encoding, contentIdentity, signal } = input;
     const query = buildQuery({ path, forkId: input.forkId });
     return this.request<WriteQueuedResponse>({
       method: "PUT",
@@ -374,7 +387,8 @@ export class RelayFileClient {
         contentType: contentType ?? "text/markdown",
         content,
         encoding,
-        semantics: input.semantics
+        semantics: input.semantics,
+        ...(contentIdentity ? { contentIdentity } : {})
       },
       signal
     });
@@ -929,11 +943,13 @@ export class RelayFileClient {
   }
 
   private throwForError(status: number, payload: unknown, headers: Headers): never {
-    const data = (payload ?? {}) as Partial<ErrorResponse> & {
+    const rawData = (payload ?? {}) as Record<string, unknown>;
+    const data = rawData as Partial<ErrorResponse> & {
       expectedRevision?: string;
       currentRevision?: string;
       currentContentPreview?: string;
     };
+    const details = normalizeErrorDetails(rawData, data.details);
 
     if (
       status === 409 &&
@@ -944,7 +960,7 @@ export class RelayFileClient {
         code: data.code ?? "revision_conflict",
         message: data.message ?? "Revision conflict",
         correlationId: data.correlationId ?? "",
-        details: data.details,
+        details,
         expectedRevision: data.expectedRevision,
         currentRevision: data.currentRevision,
         currentContentPreview: data.currentContentPreview
@@ -956,7 +972,7 @@ export class RelayFileClient {
         code: data.code,
         message: data.message ?? "Invalid resource state",
         correlationId: data.correlationId,
-        details: data.details
+        details
       });
     }
 
@@ -975,7 +991,7 @@ export class RelayFileClient {
           code: data.code,
           message: data.message ?? "Ingress queue full",
           correlationId: data.correlationId,
-          details: data.details
+          details
         },
         retryAfterSeconds
       );
@@ -986,7 +1002,7 @@ export class RelayFileClient {
         code: data.code ?? "payload_too_large",
         message: data.message ?? "Request payload exceeds configured limit",
         correlationId: data.correlationId,
-        details: data.details
+        details
       });
     }
 
@@ -994,7 +1010,7 @@ export class RelayFileClient {
       code: data.code ?? "api_error",
       message: data.message ?? `HTTP ${status}`,
       correlationId: data.correlationId,
-      details: data.details
+      details
     });
   }
 }

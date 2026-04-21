@@ -119,6 +119,14 @@ type ForkCommitResponse struct {
 	DeletedCount int    `json:"deletedCount"`
 }
 
+type ForkCommitEntry struct {
+	Path        string
+	Type        string
+	Permissions []string
+}
+
+type ForkCommitValidator func([]ForkCommitEntry) error
+
 type forkState struct {
 	ForkID                 string                      `json:"forkId"`
 	WorkspaceID            string                      `json:"workspaceId"`
@@ -1530,6 +1538,10 @@ func (s *Store) DiscardFork(workspaceID, forkID string) error {
 }
 
 func (s *Store) CommitFork(workspaceID, forkID, correlationID string) (ForkCommitResponse, error) {
+	return s.CommitForkWithValidator(workspaceID, forkID, correlationID, nil)
+}
+
+func (s *Store) CommitForkWithValidator(workspaceID, forkID, correlationID string, validate ForkCommitValidator) (ForkCommitResponse, error) {
 	workspaceID = strings.TrimSpace(workspaceID)
 	forkID = strings.TrimSpace(forkID)
 	if workspaceID == "" || forkID == "" {
@@ -1555,6 +1567,26 @@ func (s *Store) CommitFork(workspaceID, forkID, correlationID string) (ForkCommi
 		paths = append(paths, path)
 	}
 	sort.Strings(paths)
+
+	if validate != nil {
+		entries := make([]ForkCommitEntry, 0, len(paths))
+		for _, path := range paths {
+			entry := fork.Overlay[path]
+			if entry.Type != "write" && entry.Type != "delete" {
+				continue
+			}
+			_, parentExists := ws.Files[path]
+			entries = append(entries, ForkCommitEntry{
+				Path:        normalizePath(path),
+				Type:        entry.Type,
+				Permissions: resolvePermissionsFromFiles(ws.Files, path, parentExists || entry.Type == "delete"),
+			})
+		}
+		if err := validate(entries); err != nil {
+			s.mu.Unlock()
+			return ForkCommitResponse{}, err
+		}
+	}
 
 	writtenCount := 0
 	deletedCount := 0
