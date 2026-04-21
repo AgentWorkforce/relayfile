@@ -36,7 +36,7 @@ export interface AutoSyncOptions {
    * Per-path event debounce in ms. Rapid watcher events for the same path
    * are coalesced into a single sync. Default: 50.
    */
-  writeFinishMs?: number;
+  debounceMs?: number;
   /** Invoked on errors during sync — logged by default consumer. */
   onError?: (err: Error) => void;
 }
@@ -61,7 +61,7 @@ export function startAutoSync(
   opts: AutoSyncOptions = {}
 ): AutoSyncHandle {
   const scanIntervalMs = opts.scanIntervalMs ?? 10_000;
-  const debounceMs = opts.writeFinishMs ?? 50;
+  const debounceMs = opts.debounceMs ?? 50;
   const onError = opts.onError ?? (() => { /* ignore by default */ });
 
   const state = new Map<string, FileState>();

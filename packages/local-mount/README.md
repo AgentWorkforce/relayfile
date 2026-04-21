@@ -71,7 +71,7 @@ interface AutoSyncOptions {
   /** Full-reconcile interval as a safety net. Default: 10_000 ms. */
   scanIntervalMs?: number;
   /** Per-path event debounce in ms. Default: 50 ms. */
-  writeFinishMs?: number;
+  debounceMs?: number;
   /** Invoked on sync errors. Defaults to swallowing them. */
   onError?: (err: Error) => void;
 }
@@ -91,7 +91,7 @@ Control it from `launchOnMount`:
 launchOnMount({ /* ... */, autoSync: false });
 
 // Tune it.
-launchOnMount({ /* ... */, autoSync: { scanIntervalMs: 5_000, writeFinishMs: 100 } });
+launchOnMount({ /* ... */, autoSync: { scanIntervalMs: 5_000, debounceMs: 100 } });
 ```
 
 How it works:
