@@ -70,6 +70,7 @@ export function startAutoSync(
 
   let syncing = false;
   let pending = false;
+  let stopped = false;
   let totalChanges = 0;
   const pendingDebounces = new Map<string, NodeJS.Timeout>();
 
@@ -113,6 +114,12 @@ export function startAutoSync(
   };
 
   const schedulePathSync = (root: string, absPath: string): void => {
+    // Once stop() has begun, refuse to schedule new timers. Watcher
+    // callbacks can still fire during the unsubscribe await (native
+    // backends deliver queued events asynchronously); without this guard
+    // those events would create timers that outlive stop() and do file
+    // work against a mount the caller may have already cleaned up.
+    if (stopped) return;
     // Coalesce bursts of events for the same path. The reconcile path
     // re-checks content via mtime+bytes, so a partial-write event that
     // races a later write is harmless.
@@ -178,9 +185,10 @@ export function startAutoSync(
 
   return {
     async stop() {
+      // Flip the flag first so any watcher callbacks delivered during the
+      // awaits below refuse to schedule new timers.
+      stopped = true;
       clearInterval(interval);
-      for (const t of pendingDebounces.values()) clearTimeout(t);
-      pendingDebounces.clear();
       try {
         await watchersReady;
       } catch {
@@ -191,6 +199,11 @@ export function startAutoSync(
         mountSub?.unsubscribe(),
         projectSub?.unsubscribe(),
       ]);
+      // Clear debounces *after* unsubscribe resolves: any timer scheduled
+      // between stop() being called and the watcher actually quiescing is
+      // gathered here, so none fire after stop() returns.
+      for (const t of pendingDebounces.values()) clearTimeout(t);
+      pendingDebounces.clear();
       // Drain any pending work so callers can rely on "stopped means quiesced".
       await runReconcile();
     },

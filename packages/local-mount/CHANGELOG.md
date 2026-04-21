@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - `startAutoSync` no longer leaks a subscription when one of the two `@parcel/watcher` subscribes rejects. If mount- or project-side setup fails, the successful side is now unsubscribed before the error surfaces.
+- `AutoSyncHandle.stop()` now honors its "stopped means quiesced" contract. A `stopped` flag blocks new debounces from scheduling the moment `stop()` is called, and the `pendingDebounces` map is cleared *after* the watcher unsubscribes resolve. Previously, events delivered during the unsubscribe await could create timers that fired after `stop()` returned, running file ops against a mount `launchOnMount`'s `cleanup()` had already deleted.
 
 ## [0.3.0] - 2026-04-20
 
