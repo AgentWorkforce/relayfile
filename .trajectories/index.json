@@ -1,5 +1,12 @@
 {
   "version": 1,
-  "lastUpdated": "2026-04-20T10:49:34.958Z",
-  "trajectories": {}
+  "lastUpdated": "2026-04-21T08:42:46.622Z",
+  "trajectories": {
+    "traj_dnzgabyc2ijd": {
+      "title": "Implement relayfile fork API",
+      "status": "active",
+      "startedAt": "2026-04-21T08:39:54.101Z",
+      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/active/traj_dnzgabyc2ijd.json"
+    }
+  }
 }
