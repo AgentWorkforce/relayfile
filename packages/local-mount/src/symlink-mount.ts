@@ -37,8 +37,8 @@ export interface SymlinkMountHandle {
   syncBack(opts?: { signal?: AbortSignal }): Promise<number>;
   /**
    * Start bidirectional auto-sync: watches both the mount and project trees
-   * with chokidar and runs a full reconcile every `scanIntervalMs` as a
-   * safety net. Returns a handle you must `stop()` before teardown.
+   * via @parcel/watcher and runs a full reconcile every `scanIntervalMs`
+   * as a safety net. Returns a handle you must `stop()` before teardown.
    */
   startAutoSync(opts?: AutoSyncOptions): AutoSyncHandle;
   cleanup(): void;
