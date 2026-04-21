@@ -22,8 +22,11 @@ export interface LaunchOnMountOptions {
   /** Optional agent name, used in the _MOUNT_README.md "Agent:" line. */
   agentName?: string;
   /**
-   * Optional signal used only during post-child shutdown work.
-   * If aborted, sync-back returns the partial count accumulated so far.
+   * Optional signal used during shutdown work after the child exits.
+   * It is passed to both autosync shutdown and the final mount→project sync-back.
+   * If aborted, autosync stop may skip its draining reconcile and sync-back
+   * returns the partial count accumulated so far, so fewer changes may be
+   * propagated than during an uninterrupted shutdown.
    */
   shutdownSignal?: AbortSignal;
   /**
