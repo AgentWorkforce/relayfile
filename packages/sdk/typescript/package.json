@@ -1,6 +1,6 @@
 {
   "name": "@relayfile/sdk",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "TypeScript SDK for relayfile — real-time filesystem for humans and agents",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -15,7 +15,7 @@
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
-    "@relayfile/core": "0.4.0"
+    "@relayfile/core": "0.5.0"
   },
   "devDependencies": {
     "typescript": "^5.7.3",
