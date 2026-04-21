@@ -23,7 +23,7 @@ function write(file: string, body: string): void {
 
 /**
  * Wait up to `timeoutMs` for `check` to return true. Useful for letting
- * chokidar + awaitWriteFinish observe a write and propagate it.
+ * the watcher observe a write and propagate it.
  */
 async function waitFor(check: () => boolean, timeoutMs = 3000): Promise<void> {
   const start = Date.now();

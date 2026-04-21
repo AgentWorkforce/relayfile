@@ -12,7 +12,7 @@ import {
 } from 'node:fs';
 import type { Stats } from 'node:fs';
 import path from 'node:path';
-import chokidar, { type FSWatcher } from 'chokidar';
+import watcher, { type AsyncSubscription } from '@parcel/watcher';
 
 export interface AutoSyncContext {
   realMountDir: string;
@@ -21,7 +21,8 @@ export interface AutoSyncContext {
   /**
    * Directory-only ignore patterns (ending in `/`) must only match when the
    * path is a directory. Callers that know the path's type pass `isDirectory`;
-   * callers that don't (chokidar's prune filter) should check both forms.
+   * callers that don't should omit the second argument and fall back to the
+   * file-form check.
    */
   isIgnored: (relPosix: string, isDirectory?: boolean) => boolean;
   isReadonly: (relPosix: string) => boolean;
@@ -31,7 +32,10 @@ export interface AutoSyncContext {
 export interface AutoSyncOptions {
   /** Full-reconcile interval as a safety net. Default: 10_000ms. */
   scanIntervalMs?: number;
-  /** chokidar awaitWriteFinish stabilityThreshold in ms. Default: 200. */
+  /**
+   * Per-path event debounce in ms. Rapid watcher events for the same path
+   * are coalesced into a single sync. Default: 50.
+   */
   writeFinishMs?: number;
   /** Invoked on errors during sync — logged by default consumer. */
   onError?: (err: Error) => void;
@@ -57,7 +61,7 @@ export function startAutoSync(
   opts: AutoSyncOptions = {}
 ): AutoSyncHandle {
   const scanIntervalMs = opts.scanIntervalMs ?? 10_000;
-  const writeFinishMs = opts.writeFinishMs ?? 200;
+  const debounceMs = opts.writeFinishMs ?? 50;
   const onError = opts.onError ?? (() => { /* ignore by default */ });
 
   const state = new Map<string, FileState>();
@@ -67,6 +71,7 @@ export function startAutoSync(
   let syncing = false;
   let pending = false;
   let totalChanges = 0;
+  const pendingDebounces = new Map<string, NodeJS.Timeout>();
 
   const runReconcile = async (): Promise<number> => {
     if (syncing) {
@@ -107,34 +112,46 @@ export function startAutoSync(
     }
   };
 
-  const makeWatcher = (root: string): { watcher: FSWatcher; ready: Promise<void> } => {
-    const watcher = chokidar.watch(root, {
-      ignoreInitial: true,
-      persistent: true,
-      followSymlinks: false,
-      awaitWriteFinish: {
-        stabilityThreshold: writeFinishMs,
-        pollInterval: 50,
-      },
-      ignored: (candidate: string, stats?: Stats) =>
-        shouldChokidarIgnore(candidate, root, ctx, stats),
-    });
-    const onEvent = (p: string) => syncPathFromRoot(root, p);
-    watcher.on('add', onEvent);
-    watcher.on('change', onEvent);
-    watcher.on('unlink', onEvent);
-    watcher.on('error', (err) => onError(err as Error));
-    const ready = new Promise<void>((resolve) => {
-      watcher.once('ready', () => resolve());
-    });
-    return { watcher, ready };
+  const schedulePathSync = (root: string, absPath: string): void => {
+    // Coalesce bursts of events for the same path. The reconcile path
+    // re-checks content via mtime+bytes, so a partial-write event that
+    // races a later write is harmless.
+    const existing = pendingDebounces.get(absPath);
+    if (existing) clearTimeout(existing);
+    const t = setTimeout(() => {
+      pendingDebounces.delete(absPath);
+      syncPathFromRoot(root, absPath);
+    }, debounceMs);
+    pendingDebounces.set(absPath, t);
   };
 
-  const mount = makeWatcher(ctx.realMountDir);
-  const project = makeWatcher(ctx.realProjectDir);
-  const mountWatcher = mount.watcher;
-  const projectWatcher = project.watcher;
-  const watchersReady = Promise.all([mount.ready, project.ready]);
+  const ignoreGlobs = buildIgnoreGlobs(ctx);
+
+  const subscribeTo = (root: string): Promise<AsyncSubscription> =>
+    watcher.subscribe(
+      root,
+      (err, events) => {
+        if (err) { onError(err); return; }
+        for (const ev of events) {
+          schedulePathSync(root, ev.path);
+        }
+      },
+      { ignore: ignoreGlobs }
+    );
+
+  let mountSub: AsyncSubscription | undefined;
+  let projectSub: AsyncSubscription | undefined;
+  const watchersReady = (async () => {
+    const [m, p] = await Promise.all([
+      subscribeTo(ctx.realMountDir),
+      subscribeTo(ctx.realProjectDir),
+    ]);
+    mountSub = m;
+    projectSub = p;
+  })();
+  // If subscription setup fails, surface via onError rather than an unhandled
+  // rejection. stop() will still await the same promise.
+  watchersReady.catch((err) => onError(err as Error));
 
   const interval = setInterval(() => {
     void runReconcile();
@@ -145,7 +162,17 @@ export function startAutoSync(
   return {
     async stop() {
       clearInterval(interval);
-      await Promise.all([mountWatcher.close(), projectWatcher.close()]);
+      for (const t of pendingDebounces.values()) clearTimeout(t);
+      pendingDebounces.clear();
+      try {
+        await watchersReady;
+      } catch {
+        // Already surfaced via onError; nothing to unsubscribe from.
+      }
+      await Promise.all([
+        mountSub?.unsubscribe(),
+        projectSub?.unsubscribe(),
+      ]);
       // Drain any pending work so callers can rely on "stopped means quiesced".
       await runReconcile();
     },
@@ -155,6 +182,24 @@ export function startAutoSync(
       await watchersReady;
     },
   };
+}
+
+function buildIgnoreGlobs(ctx: AutoSyncContext): string[] {
+  // @parcel/watcher matches globs against absolute paths via globset. For each
+  // excluded directory name, ignore both the directory itself and everything
+  // beneath it, anywhere under the watched root. The `isExcluded` predicate is
+  // driven by a Set of directory names, so we probe a small set of common
+  // exclusions rather than introspecting it. The in-handler `isSyncCandidate`
+  // filter is authoritative — this is just a perf hint so the watcher doesn't
+  // recurse into heavy trees like node_modules or .git.
+  const globs: string[] = [];
+  const candidates = ['.git', 'node_modules', 'dist', 'build', '.next', '.cache'];
+  for (const name of candidates) {
+    if (ctx.isExcluded(name)) {
+      globs.push(`**/${name}`, `**/${name}/**`);
+    }
+  }
+  return globs;
 }
 
 function primeState(state: Map<string, FileState>, ctx: AutoSyncContext): void {
@@ -527,25 +572,3 @@ function walk(
   }
 }
 
-function shouldChokidarIgnore(
-  candidate: string,
-  root: string,
-  ctx: AutoSyncContext,
-  stats?: Stats
-): boolean {
-  if (candidate === root) return false;
-  const rel = path.relative(root, candidate);
-  if (rel === '' || rel.startsWith('..')) return false;
-  const relPosix = rel.split(path.sep).join('/');
-  if (ctx.isExcluded(relPosix)) return true;
-  if (ctx.isReservedFile(relPosix)) return true;
-  // chokidar calls this filter twice: first without stats (pre-stat prune),
-  // then again with stats once it knows the entry type. Only apply the
-  // directory-form match when we have stats confirming it's a directory,
-  // otherwise a directory-only pattern like `cache/` would wrongly prune a
-  // same-named file.
-  if (stats) {
-    return ctx.isIgnored(relPosix, stats.isDirectory());
-  }
-  return ctx.isIgnored(relPosix);
-}

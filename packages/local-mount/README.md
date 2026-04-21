@@ -70,7 +70,7 @@ By default, `launchOnMount` keeps the mount and project directory in sync contin
 interface AutoSyncOptions {
   /** Full-reconcile interval as a safety net. Default: 10_000 ms. */
   scanIntervalMs?: number;
-  /** chokidar `awaitWriteFinish` stability threshold. Default: 200 ms. */
+  /** Per-path event debounce in ms. Default: 50 ms. */
   writeFinishMs?: number;
   /** Invoked on sync errors. Defaults to swallowing them. */
   onError?: (err: Error) => void;
@@ -95,7 +95,7 @@ launchOnMount({ /* ... */, autoSync: { scanIntervalMs: 5_000, writeFinishMs: 100
 ```
 
 How it works:
-- chokidar watches both the mount and the project tree
+- [@parcel/watcher](https://www.npmjs.com/package/@parcel/watcher) watches both the mount and the project tree using native FSEvents/inotify/ReadDirectoryChangesW
 - every `scanIntervalMs`, a full reconcile walks both trees as a safety net for missed events
 - per-file `mtime` is tracked at the last sync, so the scan skips files that haven't changed
 
