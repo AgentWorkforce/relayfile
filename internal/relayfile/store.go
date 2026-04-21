@@ -2,6 +2,7 @@ package relayfile
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -16,16 +17,21 @@ import (
 )
 
 var (
-	ErrNotFound            = errors.New("not found")
-	ErrRevisionConflict    = errors.New("revision conflict")
-	ErrMissingPrecondition = errors.New("missing precondition")
-	ErrInvalidInput        = errors.New("invalid input")
-	ErrInvalidState        = errors.New("invalid state")
-	ErrQueueFull           = errors.New("queue full")
-	ErrNotImplemented      = errors.New("not implemented")
+	ErrNotFound             = errors.New("not found")
+	ErrRevisionConflict     = errors.New("revision conflict")
+	ErrMissingPrecondition  = errors.New("missing precondition")
+	ErrInvalidInput         = errors.New("invalid input")
+	ErrInvalidState         = errors.New("invalid state")
+	ErrQueueFull            = errors.New("queue full")
+	ErrNotImplemented       = errors.New("not implemented")
+	ErrForkProposalConflict = errors.New("fork proposal conflict")
+	ErrForkExpired          = errors.New("fork expired")
+	ErrParentMoved          = errors.New("parent moved")
 )
 
 const DirectoryPermissionMarkerFile = ".relayfile.acl"
+const DefaultForkTTLSeconds int64 = 7 * 24 * 60 * 60
+const MaxForkTTLSeconds int64 = 30 * 24 * 60 * 60
 
 type ConflictError struct {
 	ExpectedRevision      string
@@ -39,6 +45,18 @@ func (e *ConflictError) Error() string {
 
 func (e *ConflictError) Is(target error) bool {
 	return target == ErrRevisionConflict
+}
+
+type ParentMovedError struct {
+	CurrentRevision string
+}
+
+func (e *ParentMovedError) Error() string {
+	return "parent moved"
+}
+
+func (e *ParentMovedError) Is(target error) bool {
+	return target == ErrParentMoved
 }
 
 type TreeEntry struct {
@@ -78,6 +96,46 @@ type File struct {
 	ProviderObjectID string        `json:"providerObjectId,omitempty"`
 	LastEditedAt     string        `json:"lastEditedAt,omitempty"`
 	Semantics        FileSemantics `json:"semantics,omitempty"`
+}
+
+type ForkHandle struct {
+	ForkID         string `json:"forkId"`
+	ProposalID     string `json:"proposalId"`
+	WorkspaceID    string `json:"workspaceId"`
+	ExpiresAt      string `json:"expiresAt"`
+	ParentRevision string `json:"parentRevision"`
+}
+
+type ForkOverlayEntry struct {
+	Type      string `json:"type"`
+	File      *File  `json:"file,omitempty"`
+	Revision  string `json:"revision,omitempty"`
+	DeletedAt string `json:"deletedAt,omitempty"`
+}
+
+type ForkCommitResponse struct {
+	Revision     string `json:"revision"`
+	WrittenCount int    `json:"writtenCount"`
+	DeletedCount int    `json:"deletedCount"`
+}
+
+type ForkCommitEntry struct {
+	Path        string
+	Type        string
+	Permissions []string
+}
+
+type ForkCommitValidator func([]ForkCommitEntry) error
+
+type forkState struct {
+	ForkID                 string                      `json:"forkId"`
+	WorkspaceID            string                      `json:"workspaceId"`
+	ProposalID             string                      `json:"proposalId"`
+	ParentRevision         string                      `json:"parentRevision"`
+	CreatedAt              string                      `json:"createdAt"`
+	ExpiresAt              string                      `json:"expiresAt"`
+	Overlay                map[string]ForkOverlayEntry `json:"overlay"`
+	OverlayRevisionCounter uint64                      `json:"overlayRevisionCounter"`
 }
 
 type Event struct {
@@ -366,6 +424,11 @@ type Store struct {
 	queueMu                 sync.Mutex
 	subscriberMu            sync.RWMutex
 	workspaces              map[string]*workspaceState
+	forks                   map[string]*forkState
+	forkByWorkspaceProposal map[string]string
+	forkByProposal          map[string]string
+	expiredForks            map[string]time.Time
+	forkTimers              map[string]*time.Timer
 	revCounter              uint64
 	opCounter               uint64
 	eventCounter            uint64
@@ -409,6 +472,7 @@ type Store struct {
 }
 
 type workspaceState struct {
+	Revision           string                     `json:"revision,omitempty"`
 	Files              map[string]File            `json:"files"`
 	Events             []Event                    `json:"events"`
 	Ops                map[string]OperationStatus `json:"ops"`
@@ -450,6 +514,7 @@ type persistedState struct {
 	OpCounter           uint64                            `json:"opCounter"`
 	EventCounter        uint64                            `json:"eventCounter"`
 	Workspaces          map[string]*workspaceState        `json:"workspaces"`
+	Forks               map[string]*forkState             `json:"forks,omitempty"`
 	EnvelopesByID       map[string]WebhookEnvelopeRequest `json:"envelopesById"`
 	DeliveryIndex       map[string]string                 `json:"deliveryIndex"`
 	ProcessedEnvs       map[string]bool                   `json:"processedEnvs"`
@@ -766,6 +831,11 @@ func NewStoreWithOptions(opts StoreOptions) *Store {
 
 	s := &Store{
 		workspaces:              map[string]*workspaceState{},
+		forks:                   map[string]*forkState{},
+		forkByWorkspaceProposal: map[string]string{},
+		forkByProposal:          map[string]string{},
+		expiredForks:            map[string]time.Time{},
+		forkTimers:              map[string]*time.Timer{},
 		envelopesByID:           map[string]WebhookEnvelopeRequest{},
 		deliveryIndex:           map[string]string{},
 		processedEnvs:           map[string]bool{},
@@ -802,7 +872,9 @@ func NewStoreWithOptions(opts StoreOptions) *Store {
 	}
 	s.seedQueuedIndexesFromQueues()
 	_ = s.loadFromDisk()
+	s.rebuildForkIndexesLocked()
 	s.rebuildCoalesceIndexLocked()
+	s.scheduleForkExpiryTimers()
 	// When ExternalWritebackMode is enabled, writeback workers are not
 	// started so items remain in the queue for external consumers to poll
 	// via /writeback/pending and ACK via /writeback/{id}/ack.
@@ -929,6 +1001,12 @@ func (s *Store) seedQueuedIndexesFromQueues() {
 func (s *Store) Close() {
 	s.closeOnce.Do(func() {
 		close(s.closed)
+		s.mu.Lock()
+		for _, timer := range s.forkTimers {
+			timer.Stop()
+		}
+		s.forkTimers = map[string]*time.Timer{}
+		s.mu.Unlock()
 		s.subscriberMu.Lock()
 		s.subscribers = map[string]map[uint64]chan<- Event{}
 		s.subscriberMu.Unlock()
@@ -1209,6 +1287,7 @@ func (s *Store) WriteFile(req WriteRequest) (WriteResult, error) {
 			LastEditedAt: now,
 			Semantics:    semantics,
 		}
+		ws.Revision = revision
 		result, task := s.recordWriteLocked(ws, path, revision, "file.created", ws.Files[path].Provider, req.CorrelationID)
 		_ = s.saveLocked()
 		s.mu.Unlock()
@@ -1235,6 +1314,7 @@ func (s *Store) WriteFile(req WriteRequest) (WriteResult, error) {
 		existing.Semantics = semantics
 	}
 	ws.Files[path] = existing
+	ws.Revision = revision
 
 	result, task := s.recordWriteLocked(ws, path, revision, "file.updated", existing.Provider, req.CorrelationID)
 	_ = s.saveLocked()
@@ -1309,6 +1389,7 @@ func (s *Store) BulkWrite(workspaceID string, files []BulkWriteFile) (int, []Bul
 		}
 		file.LastEditedAt = now.Format(time.RFC3339Nano)
 		ws.Files[path] = file
+		ws.Revision = revision
 
 		eventType := "file.created"
 		if existed {
@@ -1377,11 +1458,413 @@ func (s *Store) DeleteFile(req DeleteRequest) (WriteResult, error) {
 	delete(ws.Files, path)
 
 	revision := s.nextRevisionLocked()
+	ws.Revision = revision
 	result, task := s.recordWriteLocked(ws, path, revision, "file.deleted", existing.Provider, req.CorrelationID)
 	_ = s.saveLocked()
 	s.mu.Unlock()
 	s.enqueueWriteback(task)
 	return result, nil
+}
+
+func (s *Store) CreateFork(workspaceID, proposalID string, ttlSeconds int64) (ForkHandle, error) {
+	workspaceID = strings.TrimSpace(workspaceID)
+	proposalID = strings.TrimSpace(proposalID)
+	if workspaceID == "" || proposalID == "" {
+		return ForkHandle{}, ErrInvalidInput
+	}
+
+	now := time.Now().UTC()
+	s.mu.Lock()
+	s.expireForksLocked(now)
+
+	key := forkWorkspaceProposalKey(workspaceID, proposalID)
+	if existingForkID := s.forkByWorkspaceProposal[key]; existingForkID != "" {
+		if existing := s.forks[existingForkID]; existing != nil {
+			handle := existing.handle()
+			s.mu.Unlock()
+			return handle, nil
+		}
+		delete(s.forkByWorkspaceProposal, key)
+	}
+	if existingForkID := s.forkByProposal[proposalID]; existingForkID != "" {
+		if existing := s.forks[existingForkID]; existing != nil && existing.WorkspaceID != workspaceID {
+			s.mu.Unlock()
+			return ForkHandle{}, ErrForkProposalConflict
+		}
+	}
+
+	forkID := newForkID()
+	createdAt := now.Format(time.RFC3339Nano)
+	expiresAt := now.Add(normalizeForkTTL(ttlSeconds)).Format(time.RFC3339Nano)
+	fork := &forkState{
+		ForkID:                 forkID,
+		WorkspaceID:            workspaceID,
+		ProposalID:             proposalID,
+		ParentRevision:         s.currentWorkspaceRevisionLocked(workspaceID),
+		CreatedAt:              createdAt,
+		ExpiresAt:              expiresAt,
+		Overlay:                map[string]ForkOverlayEntry{},
+		OverlayRevisionCounter: 0,
+	}
+	s.forks[forkID] = fork
+	s.forkByWorkspaceProposal[key] = forkID
+	s.forkByProposal[proposalID] = forkID
+	delete(s.expiredForks, forkID)
+	_ = s.saveLocked()
+	handle := fork.handle()
+	s.mu.Unlock()
+
+	s.scheduleForkExpiry(forkID, expiresAt)
+	return handle, nil
+}
+
+func (s *Store) DiscardFork(workspaceID, forkID string) error {
+	workspaceID = strings.TrimSpace(workspaceID)
+	forkID = strings.TrimSpace(forkID)
+	if workspaceID == "" || forkID == "" {
+		return ErrInvalidInput
+	}
+
+	s.mu.Lock()
+	fork := s.forks[forkID]
+	if fork == nil || fork.WorkspaceID != workspaceID {
+		s.mu.Unlock()
+		return nil
+	}
+	s.deleteForkLocked(forkID, false)
+	_ = s.saveLocked()
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *Store) CommitFork(workspaceID, forkID, correlationID string) (ForkCommitResponse, error) {
+	return s.CommitForkWithValidator(workspaceID, forkID, correlationID, nil)
+}
+
+func (s *Store) CommitForkWithValidator(workspaceID, forkID, correlationID string, validate ForkCommitValidator) (ForkCommitResponse, error) {
+	workspaceID = strings.TrimSpace(workspaceID)
+	forkID = strings.TrimSpace(forkID)
+	if workspaceID == "" || forkID == "" {
+		return ForkCommitResponse{}, ErrInvalidInput
+	}
+
+	s.mu.Lock()
+	fork, err := s.getLiveForkLocked(workspaceID, forkID, time.Now().UTC())
+	if err != nil {
+		s.mu.Unlock()
+		return ForkCommitResponse{}, err
+	}
+
+	currentRevision := s.currentWorkspaceRevisionLocked(workspaceID)
+	if currentRevision != fork.ParentRevision {
+		s.mu.Unlock()
+		return ForkCommitResponse{}, &ParentMovedError{CurrentRevision: currentRevision}
+	}
+
+	ws := s.ensureWorkspaceLocked(workspaceID)
+	paths := make([]string, 0, len(fork.Overlay))
+	for path := range fork.Overlay {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+
+	if validate != nil {
+		entries := make([]ForkCommitEntry, 0, len(paths))
+		for _, path := range paths {
+			entry := fork.Overlay[path]
+			if entry.Type != "write" && entry.Type != "delete" {
+				continue
+			}
+			_, parentExists := ws.Files[path]
+			entries = append(entries, ForkCommitEntry{
+				Path:        normalizePath(path),
+				Type:        entry.Type,
+				Permissions: resolvePermissionsFromFiles(ws.Files, path, parentExists || entry.Type == "delete"),
+			})
+		}
+		if err := validate(entries); err != nil {
+			s.mu.Unlock()
+			return ForkCommitResponse{}, err
+		}
+	}
+
+	writtenCount := 0
+	deletedCount := 0
+	revision := currentRevision
+	tasks := make([]writebackTask, 0, len(paths))
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+
+	for _, path := range paths {
+		entry := fork.Overlay[path]
+		switch entry.Type {
+		case "write":
+			if entry.File == nil {
+				continue
+			}
+			existing, existed := ws.Files[path]
+			file := *entry.File
+			file.Path = normalizePath(path)
+			revision = s.nextRevisionLocked()
+			file.Revision = revision
+			if file.ContentType == "" {
+				file.ContentType = "text/markdown"
+			}
+			if file.Provider == "" {
+				if existing.Provider != "" {
+					file.Provider = existing.Provider
+				} else {
+					file.Provider = inferProviderFromPath(file.Path)
+				}
+			}
+			if file.LastEditedAt == "" {
+				file.LastEditedAt = now
+			}
+			ws.Files[file.Path] = file
+			ws.Revision = revision
+			eventType := "file.created"
+			if existed {
+				eventType = "file.updated"
+			}
+			_, task := s.recordWriteLocked(ws, file.Path, revision, eventType, file.Provider, correlationID)
+			tasks = append(tasks, task)
+			writtenCount++
+		case "delete":
+			existing, existed := ws.Files[path]
+			if existed {
+				delete(ws.Files, path)
+				revision = s.nextRevisionLocked()
+				ws.Revision = revision
+				_, task := s.recordWriteLocked(ws, path, revision, "file.deleted", existing.Provider, correlationID)
+				tasks = append(tasks, task)
+			}
+			if existed {
+				if existed {
+				deletedCount++
+			}
+			}
+		}
+	}
+
+	s.deleteForkLocked(forkID, false)
+	_ = s.saveLocked()
+	s.mu.Unlock()
+
+	for _, task := range tasks {
+		s.enqueueWriteback(task)
+	}
+
+	return ForkCommitResponse{
+		Revision:     revision,
+		WrittenCount: writtenCount,
+		DeletedCount: deletedCount,
+	}, nil
+}
+
+func (s *Store) ReadForkFile(workspaceID, forkID, path string) (File, error) {
+	if strings.TrimSpace(path) == "" {
+		return File{}, ErrInvalidInput
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	fork, err := s.getLiveForkLocked(workspaceID, forkID, time.Now().UTC())
+	if err != nil {
+		return File{}, err
+	}
+	file, ok := s.readForkFileLocked(fork, normalizePath(path))
+	if !ok {
+		return File{}, ErrNotFound
+	}
+	return file, nil
+}
+
+func (s *Store) WriteForkFile(req WriteRequest, forkID string) (WriteResult, error) {
+	if req.IfMatch == "" {
+		return WriteResult{}, ErrMissingPrecondition
+	}
+	if req.WorkspaceID == "" || req.Path == "" || strings.TrimSpace(forkID) == "" {
+		return WriteResult{}, ErrInvalidInput
+	}
+	encoding, err := normalizeEncoding(req.Encoding)
+	if err != nil {
+		return WriteResult{}, err
+	}
+	if err := validateEncodedContent(req.Content, encoding); err != nil {
+		return WriteResult{}, err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	fork, err := s.getLiveForkLocked(req.WorkspaceID, forkID, time.Now().UTC())
+	if err != nil {
+		return WriteResult{}, err
+	}
+	path := normalizePath(req.Path)
+	existing, exists := s.readForkFileLocked(fork, path)
+	if !exists && req.IfMatch != "0" && req.IfMatch != "*" {
+		return WriteResult{}, ErrNotFound
+	}
+	if exists && req.IfMatch != "*" && req.IfMatch != existing.Revision {
+		return WriteResult{}, &ConflictError{
+			ExpectedRevision:      req.IfMatch,
+			CurrentRevision:       existing.Revision,
+			CurrentContentPreview: truncatePreview(existing.Content),
+		}
+	}
+
+	result := s.writeForkOverlayLocked(fork, WriteRequest{
+		WorkspaceID:   req.WorkspaceID,
+		Path:          path,
+		IfMatch:       req.IfMatch,
+		ContentType:   req.ContentType,
+		Content:       req.Content,
+		Encoding:      encoding,
+		Semantics:     req.Semantics,
+		CorrelationID: req.CorrelationID,
+	}, existing, exists)
+	_ = s.saveLocked()
+	return result, nil
+}
+
+func (s *Store) BulkWriteFork(workspaceID, forkID string, files []BulkWriteFile) (int, []BulkWriteError) {
+	if strings.TrimSpace(workspaceID) == "" || strings.TrimSpace(forkID) == "" {
+		return 0, []BulkWriteError{{
+			Code:    "invalid_input",
+			Message: ErrInvalidInput.Error(),
+		}}
+	}
+	if len(files) == 0 {
+		return 0, nil
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	fork, err := s.getLiveForkLocked(workspaceID, forkID, time.Now().UTC())
+	if err != nil {
+		return 0, []BulkWriteError{{
+			Code:    forkBulkErrorCode(err),
+			Message: err.Error(),
+		}}
+	}
+
+	written := 0
+	errorsOut := make([]BulkWriteError, 0)
+	for _, input := range files {
+		path := normalizePath(input.Path)
+		if strings.TrimSpace(input.Path) == "" {
+			errorsOut = append(errorsOut, BulkWriteError{
+				Path:    input.Path,
+				Code:    "invalid_path",
+				Message: "missing path",
+			})
+			continue
+		}
+		encoding, err := normalizeEncoding(input.Encoding)
+		if err != nil {
+			errorsOut = append(errorsOut, BulkWriteError{
+				Path:    path,
+				Code:    "invalid_encoding",
+				Message: err.Error(),
+			})
+			continue
+		}
+		if err := validateEncodedContent(input.Content, encoding); err != nil {
+			errorsOut = append(errorsOut, BulkWriteError{
+				Path:    path,
+				Code:    "invalid_content",
+				Message: err.Error(),
+			})
+			continue
+		}
+		existing, exists := s.readForkFileLocked(fork, path)
+		s.writeForkOverlayLocked(fork, WriteRequest{
+			WorkspaceID: workspaceID,
+			Path:        path,
+			IfMatch:     "*",
+			ContentType: input.ContentType,
+			Content:     input.Content,
+			Encoding:    encoding,
+		}, existing, exists)
+		written++
+	}
+	_ = s.saveLocked()
+	return written, errorsOut
+}
+
+func (s *Store) DeleteForkFile(req DeleteRequest, forkID string) (WriteResult, error) {
+	if req.IfMatch == "" {
+		return WriteResult{}, ErrMissingPrecondition
+	}
+	if req.WorkspaceID == "" || req.Path == "" || strings.TrimSpace(forkID) == "" {
+		return WriteResult{}, ErrInvalidInput
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	fork, err := s.getLiveForkLocked(req.WorkspaceID, forkID, time.Now().UTC())
+	if err != nil {
+		return WriteResult{}, err
+	}
+	path := normalizePath(req.Path)
+	existing, exists := s.readForkFileLocked(fork, path)
+	if !exists {
+		return WriteResult{}, ErrNotFound
+	}
+	if req.IfMatch != "*" && req.IfMatch != existing.Revision {
+		return WriteResult{}, &ConflictError{
+			ExpectedRevision:      req.IfMatch,
+			CurrentRevision:       existing.Revision,
+			CurrentContentPreview: truncatePreview(existing.Content),
+		}
+	}
+
+	revision := s.nextForkOverlayRevisionLocked(fork)
+	fork.Overlay[path] = ForkOverlayEntry{
+		Type:      "delete",
+		Revision:  revision,
+		DeletedAt: time.Now().UTC().Format(time.RFC3339Nano),
+	}
+	_ = s.saveLocked()
+	result := WriteResult{OpID: "fork:" + fork.ForkID + ":op:" + strconv.FormatUint(fork.OverlayRevisionCounter, 10), Status: "queued", TargetRevision: revision}
+	result.Writeback.Provider = existing.Provider
+	result.Writeback.State = "pending"
+	return result, nil
+}
+
+func (s *Store) ListForkTree(workspaceID, forkID, path string, depth int, cursor string) (TreeResponse, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	fork, err := s.getLiveForkLocked(workspaceID, forkID, time.Now().UTC())
+	if err != nil {
+		return TreeResponse{}, err
+	}
+	files := s.mergedForkFilesLocked(fork)
+	return listTreeFromFiles(files, path, depth, cursor), nil
+}
+
+func (s *Store) QueryForkFiles(workspaceID, forkID string, req FileQueryRequest) (FileQueryResponse, error) {
+	if workspaceID == "" || strings.TrimSpace(forkID) == "" {
+		return FileQueryResponse{}, ErrInvalidInput
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	fork, err := s.getLiveForkLocked(workspaceID, forkID, time.Now().UTC())
+	if err != nil {
+		return FileQueryResponse{}, err
+	}
+	files := s.mergedForkFilesLocked(fork)
+	return queryFilesFromMap(files, req)
+}
+
+func (s *Store) ResolveForkFilePermissions(workspaceID, forkID, path string, includeTarget bool) []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	fork, err := s.getLiveForkLocked(workspaceID, forkID, time.Now().UTC())
+	if err != nil {
+		return nil
+	}
+	files := s.mergedForkFilesLocked(fork)
+	return resolvePermissionsFromFiles(files, path, includeTarget)
 }
 
 func (s *Store) GetEvents(workspaceID, provider, cursor string, limit int) (EventFeed, error) {
@@ -2702,6 +3185,7 @@ func (s *Store) ensureWorkspaceLocked(workspaceID string) *workspaceState {
 		return ws
 	}
 	ws = &workspaceState{
+		Revision:           "0",
 		Files:              map[string]File{},
 		Events:             []Event{},
 		Ops:                map[string]OperationStatus{},
@@ -3271,11 +3755,13 @@ func (s *Store) applyProviderUpsertLocked(ws *workspaceState, provider string, a
 		key := providerObjectKey(provider, objectID)
 		if previousPath, ok := ws.ProviderIndex[key]; ok && previousPath != path {
 			delete(ws.Files, previousPath)
+			moveRevision := s.nextRevisionLocked()
+			ws.Revision = moveRevision
 			s.appendWorkspaceEventLocked(workspaceID, ws, Event{
 				EventID:       s.nextEventIDLocked(),
 				Type:          "file.deleted",
 				Path:          previousPath,
-				Revision:      s.nextRevisionLocked(),
+				Revision:      moveRevision,
 				Origin:        "provider_sync",
 				Provider:      provider,
 				CorrelationID: correlationID,
@@ -3302,6 +3788,7 @@ func (s *Store) applyProviderUpsertLocked(ws *workspaceState, provider string, a
 		Semantics:        semantics,
 	}
 	ws.Files[path] = file
+	ws.Revision = revision
 	if objectID != "" {
 		ws.ProviderIndex[providerObjectKey(provider, objectID)] = path
 	}
@@ -3346,11 +3833,13 @@ func (s *Store) applyProviderDeleteLocked(ws *workspaceState, provider string, a
 	if objectID != "" {
 		delete(ws.ProviderIndex, providerObjectKey(provider, objectID))
 	}
+	revision := s.nextRevisionLocked()
+	ws.Revision = revision
 	s.appendWorkspaceEventLocked(workspaceID, ws, Event{
 		EventID:       s.nextEventIDLocked(),
 		Type:          "file.deleted",
 		Path:          path,
-		Revision:      s.nextRevisionLocked(),
+		Revision:      revision,
 		Origin:        "provider_sync",
 		Provider:      provider,
 		CorrelationID: correlationID,
@@ -3383,6 +3872,14 @@ func (s *Store) loadFromDisk() error {
 			}
 			if ws.ProviderWatermarks == nil {
 				ws.ProviderWatermarks = map[string]string{}
+			}
+		}
+	}
+	if snapshot.Forks != nil {
+		s.forks = snapshot.Forks
+		for _, fork := range s.forks {
+			if fork.Overlay == nil {
+				fork.Overlay = map[string]ForkOverlayEntry{}
 			}
 		}
 	}
@@ -3425,6 +3922,7 @@ func (s *Store) saveLocked() error {
 		OpCounter:           s.opCounter,
 		EventCounter:        s.eventCounter,
 		Workspaces:          s.workspaces,
+		Forks:               s.forks,
 		EnvelopesByID:       s.envelopesByID,
 		DeliveryIndex:       s.deliveryIndex,
 		ProcessedEnvs:       s.processedEnvs,
@@ -3435,6 +3933,465 @@ func (s *Store) saveLocked() error {
 		Suppressions:        s.suppressions,
 	}
 	return s.stateBackend.Save(&snapshot)
+}
+
+func (f *forkState) handle() ForkHandle {
+	if f == nil {
+		return ForkHandle{}
+	}
+	return ForkHandle{
+		ForkID:         f.ForkID,
+		ProposalID:     f.ProposalID,
+		WorkspaceID:    f.WorkspaceID,
+		ExpiresAt:      f.ExpiresAt,
+		ParentRevision: f.ParentRevision,
+	}
+}
+
+func (s *Store) currentWorkspaceRevisionLocked(workspaceID string) string {
+	if ws, ok := s.workspaces[workspaceID]; ok && strings.TrimSpace(ws.Revision) != "" {
+		return ws.Revision
+	}
+	return "0"
+}
+
+func (s *Store) rebuildForkIndexesLocked() {
+	s.forkByWorkspaceProposal = map[string]string{}
+	s.forkByProposal = map[string]string{}
+	now := time.Now().UTC()
+	for forkID, fork := range s.forks {
+		if fork == nil || fork.ForkID == "" {
+			delete(s.forks, forkID)
+			continue
+		}
+		if fork.Overlay == nil {
+			fork.Overlay = map[string]ForkOverlayEntry{}
+		}
+		if isForkExpiredAt(fork, now) {
+			s.deleteForkLocked(forkID, true)
+			continue
+		}
+		s.forkByWorkspaceProposal[forkWorkspaceProposalKey(fork.WorkspaceID, fork.ProposalID)] = fork.ForkID
+		s.forkByProposal[fork.ProposalID] = fork.ForkID
+	}
+}
+
+func (s *Store) scheduleForkExpiryTimers() {
+	s.mu.RLock()
+	expiries := make(map[string]string, len(s.forks))
+	for forkID, fork := range s.forks {
+		if fork != nil {
+			expiries[forkID] = fork.ExpiresAt
+		}
+	}
+	s.mu.RUnlock()
+	for forkID, expiresAt := range expiries {
+		s.scheduleForkExpiry(forkID, expiresAt)
+	}
+}
+
+func (s *Store) scheduleForkExpiry(forkID, expiresAt string) {
+	expires, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(expiresAt))
+	if err != nil {
+		return
+	}
+	delay := time.Until(expires)
+	if delay < 0 {
+		delay = 0
+	}
+	s.mu.Lock()
+	if existing := s.forkTimers[forkID]; existing != nil {
+		existing.Stop()
+	}
+	s.forkTimers[forkID] = time.AfterFunc(delay, func() {
+		s.expireForkByTimer(forkID)
+	})
+	s.mu.Unlock()
+}
+
+func (s *Store) expireForkByTimer(forkID string) {
+	s.mu.Lock()
+	fork := s.forks[forkID]
+	if fork == nil || !isForkExpiredAt(fork, time.Now().UTC()) {
+		s.mu.Unlock()
+		return
+	}
+	s.deleteForkLocked(forkID, true)
+	_ = s.saveLocked()
+	s.mu.Unlock()
+}
+
+func (s *Store) expireForksLocked(now time.Time) {
+	for forkID, fork := range s.forks {
+		if fork != nil && isForkExpiredAt(fork, now) {
+			s.deleteForkLocked(forkID, true)
+		}
+	}
+}
+
+func (s *Store) getLiveForkLocked(workspaceID, forkID string, now time.Time) (*forkState, error) {
+	workspaceID = strings.TrimSpace(workspaceID)
+	forkID = strings.TrimSpace(forkID)
+	if workspaceID == "" || forkID == "" {
+		return nil, ErrInvalidInput
+	}
+	fork := s.forks[forkID]
+	if fork == nil {
+		if _, expired := s.expiredForks[forkID]; expired {
+			return nil, ErrForkExpired
+		}
+		return nil, ErrNotFound
+	}
+	if fork.WorkspaceID != workspaceID {
+		return nil, ErrNotFound
+	}
+	if isForkExpiredAt(fork, now) {
+		s.deleteForkLocked(forkID, true)
+		_ = s.saveLocked()
+		return nil, ErrForkExpired
+	}
+	return fork, nil
+}
+
+func (s *Store) deleteForkLocked(forkID string, markExpired bool) {
+	fork := s.forks[forkID]
+	if timer := s.forkTimers[forkID]; timer != nil {
+		timer.Stop()
+	}
+	delete(s.forkTimers, forkID)
+	if fork == nil {
+		return
+	}
+	delete(s.forks, forkID)
+	delete(s.forkByWorkspaceProposal, forkWorkspaceProposalKey(fork.WorkspaceID, fork.ProposalID))
+	delete(s.forkByProposal, fork.ProposalID)
+	if markExpired {
+		if expiresAt, err := time.Parse(time.RFC3339Nano, fork.ExpiresAt); err == nil {
+			s.expiredForks[forkID] = expiresAt
+		} else {
+			s.expiredForks[forkID] = time.Now().UTC()
+		}
+	} else {
+		delete(s.expiredForks, forkID)
+	}
+}
+
+func (s *Store) readForkFileLocked(fork *forkState, path string) (File, bool) {
+	path = normalizePath(path)
+	if entry, ok := fork.Overlay[path]; ok {
+		switch entry.Type {
+		case "delete":
+			return File{}, false
+		case "write":
+			if entry.File == nil {
+				return File{}, false
+			}
+			file := *entry.File
+			file.Path = path
+			file.Revision = entry.Revision
+			return file, true
+		}
+	}
+	if ws, ok := s.workspaces[fork.WorkspaceID]; ok {
+		file, ok := ws.Files[path]
+		return file, ok
+	}
+	return File{}, false
+}
+
+func (s *Store) writeForkOverlayLocked(fork *forkState, req WriteRequest, existing File, exists bool) WriteResult {
+	path := normalizePath(req.Path)
+	contentType := strings.TrimSpace(req.ContentType)
+	if contentType == "" {
+		contentType = "text/markdown"
+	}
+	semantics := normalizeSemantics(req.Semantics)
+	if exists && isZeroSemantics(semantics) {
+		semantics = normalizeSemantics(existing.Semantics)
+	}
+	provider := existing.Provider
+	if provider == "" {
+		provider = inferProviderFromPath(path)
+	}
+	revision := s.nextForkOverlayRevisionLocked(fork)
+	file := File{
+		Path:         path,
+		Revision:     revision,
+		ContentType:  contentType,
+		Content:      req.Content,
+		Encoding:     req.Encoding,
+		Provider:     provider,
+		LastEditedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		Semantics:    semantics,
+	}
+	fork.Overlay[path] = ForkOverlayEntry{
+		Type:     "write",
+		File:     &file,
+		Revision: revision,
+	}
+	result := WriteResult{
+		OpID:           "fork:" + fork.ForkID + ":op:" + strconv.FormatUint(fork.OverlayRevisionCounter, 10),
+		Status:         "queued",
+		TargetRevision: revision,
+	}
+	result.Writeback.Provider = provider
+	result.Writeback.State = "pending"
+	return result
+}
+
+func (s *Store) nextForkOverlayRevisionLocked(fork *forkState) string {
+	fork.OverlayRevisionCounter++
+	return "fork:" + fork.ForkID + ":" + strconv.FormatUint(fork.OverlayRevisionCounter, 10)
+}
+
+func (s *Store) mergedForkFilesLocked(fork *forkState) map[string]File {
+	files := map[string]File{}
+	if ws, ok := s.workspaces[fork.WorkspaceID]; ok {
+		for path, file := range ws.Files {
+			files[path] = file
+		}
+	}
+	for path, entry := range fork.Overlay {
+		normalized := normalizePath(path)
+		switch entry.Type {
+		case "delete":
+			delete(files, normalized)
+		case "write":
+			if entry.File == nil {
+				continue
+			}
+			file := *entry.File
+			file.Path = normalized
+			file.Revision = entry.Revision
+			files[normalized] = file
+		}
+	}
+	return files
+}
+
+func listTreeFromFiles(files map[string]File, path string, depth int, cursor string) TreeResponse {
+	base := normalizePath(path)
+	if depth <= 0 {
+		depth = 1
+	}
+
+	entryMap := map[string]TreeEntry{}
+	for filePath, file := range files {
+		if !withinBase(base, filePath) {
+			continue
+		}
+		rest := strings.TrimPrefix(filePath, base)
+		rest = strings.TrimPrefix(rest, "/")
+		if rest == "" {
+			continue
+		}
+		parts := strings.Split(rest, "/")
+		if len(parts) == 0 {
+			continue
+		}
+		maxLevel := depth
+		if len(parts) < maxLevel {
+			maxLevel = len(parts)
+		}
+		for level := 1; level <= maxLevel; level++ {
+			child := joinPath(base, strings.Join(parts[:level], "/"))
+			if level == len(parts) {
+				entryMap[child] = TreeEntry{
+					Path:             child,
+					Type:             "file",
+					Revision:         file.Revision,
+					Provider:         file.Provider,
+					ProviderObjectID: file.ProviderObjectID,
+					Size:             int64(len(file.Content)),
+					UpdatedAt:        file.LastEditedAt,
+					PropertyCount:    len(file.Semantics.Properties),
+					RelationCount:    len(file.Semantics.Relations),
+					PermissionCount:  len(file.Semantics.Permissions),
+					CommentCount:     len(file.Semantics.Comments),
+				}
+				continue
+			}
+			if _, exists := entryMap[child]; !exists {
+				entryMap[child] = TreeEntry{Path: child, Type: "dir", Revision: "dir"}
+			}
+		}
+	}
+
+	entries := make([]TreeEntry, 0, len(entryMap))
+	for _, entry := range entryMap {
+		entries = append(entries, entry)
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Path < entries[j].Path })
+	if cursor != "" {
+		for index, entry := range entries {
+			if entry.Path == cursor {
+				entries = entries[index+1:]
+				break
+			}
+		}
+	}
+
+	return TreeResponse{Path: base, Entries: entries, NextCursor: nil}
+}
+
+func queryFilesFromMap(files map[string]File, req FileQueryRequest) (FileQueryResponse, error) {
+	base := normalizePath(req.PathPrefix)
+	if req.PathPrefix == "" {
+		base = "/"
+	}
+	provider := normalizeProvider(req.Provider)
+	relation := strings.TrimSpace(req.Relation)
+	permission := strings.TrimSpace(req.Permission)
+	comment := strings.TrimSpace(req.Comment)
+	limit := req.Limit
+	if limit <= 0 {
+		limit = 100
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+	properties := normalizeProperties(req.Properties)
+
+	paths := make([]string, 0, len(files))
+	for path := range files {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+
+	start := 0
+	cursor := normalizePath(req.Cursor)
+	if strings.TrimSpace(req.Cursor) != "" {
+		found := false
+		for i := range paths {
+			if paths[i] == cursor {
+				start = i + 1
+				found = true
+				break
+			}
+		}
+		if !found {
+			return FileQueryResponse{}, ErrInvalidInput
+		}
+	}
+
+	items := make([]FileQueryItem, 0, limit)
+	var nextCursor *string
+	for i := start; i < len(paths); i++ {
+		path := paths[i]
+		if !withinBase(base, path) {
+			continue
+		}
+		file := files[path]
+		if provider != "" && normalizeProvider(file.Provider) != provider {
+			continue
+		}
+		semantics := normalizeSemantics(file.Semantics)
+		if relation != "" && !stringSliceContains(semantics.Relations, relation) {
+			continue
+		}
+		if permission != "" && !stringSliceContains(semantics.Permissions, permission) {
+			continue
+		}
+		if comment != "" && !stringSliceContains(semantics.Comments, comment) {
+			continue
+		}
+		if !propertiesMatch(semantics.Properties, properties) {
+			continue
+		}
+		if len(items) >= limit {
+			cursorValue := items[len(items)-1].Path
+			nextCursor = &cursorValue
+			break
+		}
+		items = append(items, FileQueryItem{
+			Path:             path,
+			Revision:         file.Revision,
+			ContentType:      file.ContentType,
+			Provider:         file.Provider,
+			ProviderObjectID: file.ProviderObjectID,
+			LastEditedAt:     file.LastEditedAt,
+			Size:             int64(len(file.Content)),
+			Properties:       copyStringMap(semantics.Properties),
+			Relations:        append([]string(nil), semantics.Relations...),
+			Permissions:      append([]string(nil), semantics.Permissions...),
+			Comments:         append([]string(nil), semantics.Comments...),
+		})
+	}
+
+	return FileQueryResponse{Items: items, NextCursor: nextCursor}, nil
+}
+
+func resolvePermissionsFromFiles(files map[string]File, path string, includeTarget bool) []string {
+	target := normalizePath(path)
+	permissions := make([]string, 0, 8)
+	for _, dir := range ancestorDirectories(target) {
+		markerPath := joinPath(dir, DirectoryPermissionMarkerFile)
+		if markerPath == target {
+			continue
+		}
+		marker, exists := files[markerPath]
+		if !exists || len(marker.Semantics.Permissions) == 0 {
+			continue
+		}
+		permissions = append(permissions, marker.Semantics.Permissions...)
+	}
+	if includeTarget {
+		if file, exists := files[target]; exists && len(file.Semantics.Permissions) > 0 {
+			permissions = append(permissions, file.Semantics.Permissions...)
+		}
+	}
+	if len(permissions) == 0 {
+		return nil
+	}
+	out := make([]string, len(permissions))
+	copy(out, permissions)
+	return out
+}
+
+func forkWorkspaceProposalKey(workspaceID, proposalID string) string {
+	return workspaceID + "\x00" + proposalID
+}
+
+func normalizeForkTTL(ttlSeconds int64) time.Duration {
+	if ttlSeconds <= 0 {
+		ttlSeconds = DefaultForkTTLSeconds
+	}
+	if ttlSeconds > MaxForkTTLSeconds {
+		ttlSeconds = MaxForkTTLSeconds
+	}
+	return time.Duration(ttlSeconds) * time.Second
+}
+
+func isForkExpiredAt(fork *forkState, now time.Time) bool {
+	if fork == nil {
+		return true
+	}
+	expiresAt, err := time.Parse(time.RFC3339Nano, fork.ExpiresAt)
+	if err != nil {
+		return true
+	}
+	return !now.Before(expiresAt)
+}
+
+func forkBulkErrorCode(err error) string {
+	switch err {
+	case ErrForkExpired:
+		return "fork_expired"
+	case ErrNotFound:
+		return "not_found"
+	default:
+		return "invalid_input"
+	}
+}
+
+func newForkID() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "fork_" + strconv.FormatInt(time.Now().UTC().UnixNano(), 36)
+	}
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+	return fmt.Sprintf("fork_%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:])
 }
 
 func normalizePath(path string) string {

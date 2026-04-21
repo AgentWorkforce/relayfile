@@ -1,13 +1,5 @@
 {
   "version": 1,
-  "lastUpdated": "2026-04-20T20:58:15.543Z",
-  "trajectories": {
-    "traj_iuzm83ogm43k": {
-      "title": "Replace chokidar with @parcel/watcher in local-mount",
-      "status": "completed",
-      "startedAt": "2026-04-20T20:35:15.759Z",
-      "completedAt": "2026-04-20T20:58:15.412Z",
-      "path": "/Users/will/Projects/relayfile/.trajectories/completed/2026-04/traj_iuzm83ogm43k.json"
-    }
-  }
+  "lastUpdated": "2026-04-21T09:23:04.305Z",
+  "trajectories": {}
 }

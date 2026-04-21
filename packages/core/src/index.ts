@@ -30,3 +30,5 @@ export * from "./operations.js";
 export * from "./writeback.js";
 export * from "./webhooks.js";
 export * from "./export.js";
+export * from "./dedup.js";
+export * from "./forks.js";
