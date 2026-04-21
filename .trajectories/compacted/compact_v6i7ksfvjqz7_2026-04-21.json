@@ -1,0 +1,127 @@
+{
+  "id": "compact_v6i7ksfvjqz7",
+  "version": 1,
+  "type": "compacted",
+  "compactedAt": "2026-04-21T09:00:42.058Z",
+  "sourceTrajectories": [
+    "traj_dnzgabyc2ijd"
+  ],
+  "dateRange": {
+    "start": "2026-04-21T08:39:54.101Z",
+    "end": "2026-04-21T09:00:30.899Z"
+  },
+  "summary": {
+    "totalDecisions": 2,
+    "totalEvents": 3,
+    "uniqueAgents": [
+      "default"
+    ]
+  },
+  "decisionGroups": [
+    {
+      "category": "api",
+      "decisions": [
+        {
+          "question": "Implement fork server state in the existing Go Store",
+          "chosen": "Implement fork server state in the existing Go Store",
+          "reasoning": "main has no apps/relayfile Durable Object worker; the routed server is internal/httpapi over internal/relayfile.Store, so fork state will live as pointer-plus-overlay store state with timers emulating DO alarms.",
+          "fromTrajectory": "traj_dnzgabyc2ijd"
+        }
+      ]
+    },
+    {
+      "category": "architecture",
+      "decisions": [
+        {
+          "question": "Fork fallback reads use current parent view",
+          "chosen": "Fork fallback reads use current parent view",
+          "reasoning": "The actual Go store has no point-in-time read API or historical file snapshots. Fork commit still enforces the stored parent revision with compare-and-set, and docs/fork-architecture.md calls out the read fallback explicitly.",
+          "fromTrajectory": "traj_dnzgabyc2ijd"
+        }
+      ]
+    }
+  ],
+  "keyLearnings": [],
+  "keyFindings": [],
+  "filesAffected": [
+    ".trajectories/active/traj_dnzgabyc2ijd.json",
+    ".trajectories/index.json",
+    "docs/fork-architecture.md",
+    "internal/httpapi/server.go",
+    "internal/httpapi/server_test.go",
+    "internal/relayfile/store.go",
+    "package-lock.json",
+    "packages/core/package.json",
+    "packages/core/src/forks.test.ts",
+    "packages/core/src/forks.ts",
+    "packages/core/src/index.ts",
+    "packages/sdk/typescript/package.json",
+    "packages/sdk/typescript/src/client.test.ts",
+    "packages/sdk/typescript/src/client.ts",
+    "packages/sdk/typescript/src/index.ts",
+    "packages/sdk/typescript/src/types.ts"
+  ],
+  "commits": [
+    "f1ed3e4",
+    "8aff6c5"
+  ],
+  "narrative": "This 20-minute session implemented a relayfile fork API end-to-end on current main, culminating in PR #58 (old stub PR #56 was closed). The work spanned three layers: core fork primitives in packages/core/src/forks.ts (with packages/core/src/forks.test.ts), Go server-side fork state in internal/relayfile/store.go and internal/httpapi/server.go (with internal/httpapi/server_test.go), and a TypeScript SDK surface in packages/sdk/typescript/src/client.ts exposing fork lifecycle methods plus forkId scoping on fs operations. Architecture is documented in docs/fork-architecture.md. The server-side fork model is a pointer-plus-overlay living inside the existing internal/relayfile.Store rather than a separate Durable Object — main has no apps/relayfile DO worker, so fork state is kept as in-memory store state with Go timers emulating DO alarms for expiry. Commits enforce the stored parent revision via compare-and-set to prevent lost updates. Tests cover the full lifecycle: fork create, overlay read/write semantics, commit with CAS conflict, discard, expiry, and merged tree behavior. Version bumps landed on packages/core and packages/sdk/typescript. A notable compromise: fork fallback reads return the *current* parent view rather than a point-in-time snapshot, because the Go store has no historical snapshot or point-in-time read API. Commit-time CAS against the recorded parent revision is the only consistency guarantee, and docs/fork-architecture.md explicitly calls out this read-fallback behavior so SDK consumers aren't surprised.",
+  "decisions": [
+    {
+      "question": "Where should fork server state live given main has no apps/relayfile Durable Object worker?",
+      "chosen": "Embed fork state in the existing Go internal/relayfile.Store as pointer-plus-overlay, using Go timers to emulate DO alarms for expiry.",
+      "reasoning": "The routed server is internal/httpapi over internal/relayfile.Store; there is no DO worker on main to host fork state separately. Keeping state in-process avoids introducing a new runtime and matches the existing storage boundary.",
+      "impact": "Fork lifecycle (create/read/write/commit/discard/expire) is implemented without new infrastructure. Expiry relies on process-local timers, which is acceptable for current single-process deployment but will need revisiting if/when a DO-backed worker lands."
+    },
+    {
+      "question": "How should fork reads behave when a key is not present in the overlay?",
+      "chosen": "Fall through to the current parent view rather than a snapshot of the parent at fork-create time.",
+      "reasoning": "The Go store exposes no point-in-time read API or historical file snapshots, so a true snapshot read is not implementable without new storage machinery.",
+      "impact": "Forks see live parent state for un-overlaid keys; isolation is only guaranteed for keys the fork has written. Commit-time CAS on the stored parent revision is the sole conflict guard. Documented explicitly in docs/fork-architecture.md so SDK users understand the semantics."
+    }
+  ],
+  "conventions": [
+    {
+      "pattern": "Fork primitives live in @relayfile/core (packages/core/src/forks.ts) and are re-exported via packages/core/src/index.ts; server and SDK both consume them rather than redefining fork logic.",
+      "rationale": "Continues the core-consolidation direction — shared types and helpers in @relayfile/core, thin adapters in server and SDK.",
+      "scope": "Any future fork-related primitives (merge strategies, diff helpers, conflict types) belong in packages/core, not in the SDK or server."
+    },
+    {
+      "pattern": "Fork commits use compare-and-set against a stored parent revision captured at fork-create time.",
+      "rationale": "Without snapshot reads, CAS on parent revision is the only mechanism preventing lost updates when the parent advanced during the fork's lifetime.",
+      "scope": "All fork commit paths (Go server and any future SDK-side commit helpers) must enforce this; do not relax CAS without adding a snapshot read model."
+    },
+    {
+      "pattern": "Fork expiry is driven by Go timers inside internal/relayfile.Store, emulating DO alarm semantics.",
+      "rationale": "Main has no DO worker; timers keep the API surface shape (time-bounded forks with automatic cleanup) consistent with a future DO-backed implementation.",
+      "scope": "If fork state migrates to a DO worker later, the timer-based expiry should be swapped for alarms — keep the lifecycle contract identical."
+    },
+    {
+      "pattern": "SDK fs operations accept an optional forkId to scope reads/writes into a fork overlay (packages/sdk/typescript/src/client.ts, types in packages/sdk/typescript/src/types.ts).",
+      "rationale": "Keeps the existing fs API shape and lets callers opt into fork scoping per-call rather than through a separate client.",
+      "scope": "New fs operations added to the TS SDK should accept forkId the same way; don't introduce a parallel \"fork client\" surface."
+    }
+  ],
+  "lessons": [
+    {
+      "lesson": "Document storage-model compromises (like live parent fallback reads) directly in the architecture doc, not only in code comments.",
+      "context": "Fork reads fall through to live parent state because no point-in-time API exists. This is a semantic surprise for anyone expecting snapshot isolation.",
+      "recommendation": "Keep docs/fork-architecture.md as the canonical statement of fork read/commit semantics; update it whenever storage capabilities change (e.g., if snapshot reads get added)."
+    },
+    {
+      "lesson": "When the target runtime (DO worker) isn't present on main, implement against the existing server boundary rather than introducing it speculatively.",
+      "context": "The fork API was initially sketched as a DO-backed worker (old stub PR #56), but main routes through internal/httpapi over internal/relayfile.Store with no DO runtime.",
+      "recommendation": "Prefer shipping against the runtime that actually exists; preserve the external API shape so a later DO migration is a swap, not a rewrite. PR #56 was closed in favor of #58 for exactly this reason."
+    },
+    {
+      "lesson": "Targeted server tests covering lifecycle, overlay, CAS conflict, discard, expiry, and merged tree give high confidence for a stateful API with few LoC.",
+      "context": "internal/httpapi/server_test.go exercises each fork state transition rather than only happy-path CRUD.",
+      "recommendation": "For future stateful APIs, enumerate state transitions first and write one test per transition; don't rely on integration tests to catch CAS or expiry bugs."
+    }
+  ],
+  "openQuestions": [
+    "When (or whether) to migrate fork state to a proper Durable Object worker under apps/relayfile, and how to preserve the lifecycle contract across the swap.",
+    "Whether snapshot/point-in-time reads should be added to internal/relayfile.Store so forks can offer true isolation instead of live parent fallback.",
+    "How fork expiry should evolve if the server moves to a distributed runtime — the current Go store persists expiresAt and recreates timers on load, but cleanup during downtime happens on the next load/access rather than at the exact wall-clock instant."
+  ]
+}

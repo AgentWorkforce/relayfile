@@ -134,6 +134,15 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var requiredScope string
 	var route string
 	switch {
+	case len(parts) == 4 && parts[3] == "forks" && r.Method == http.MethodPost:
+		requiredScope = "fs:write"
+		route = "create_fork"
+	case len(parts) == 5 && parts[3] == "forks" && r.Method == http.MethodDelete:
+		requiredScope = "fs:write"
+		route = "discard_fork"
+	case len(parts) == 6 && parts[3] == "forks" && parts[5] == "commit" && r.Method == http.MethodPost:
+		requiredScope = "fs:write"
+		route = "commit_fork"
 	case len(parts) == 5 && parts[3] == "fs" && parts[4] == "tree" && r.Method == http.MethodGet:
 		requiredScope = "fs:read"
 		route = "tree"
@@ -223,7 +232,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if aclPath, includeTarget, ok := aclCheckPath(route, r); ok {
-		permissions := resolveFilePermissionsWithTarget(s.aclGetFile(workspaceID), aclPath, includeTarget)
+		aclReader := s.aclGetFile(workspaceID)
+		if forkID := strings.TrimSpace(r.URL.Query().Get("forkId")); forkID != "" {
+			aclReader = s.aclGetForkFile(workspaceID, forkID)
+		}
+		permissions := resolveFilePermissionsWithTarget(aclReader, aclPath, includeTarget)
 		if !filePermissionAllows(permissions, workspaceID, &claims) {
 			writeError(w, http.StatusForbidden, "forbidden", "access denied by ACL", getCorrelationID(r))
 			return
@@ -248,6 +261,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	switch route {
+	case "create_fork":
+		s.handleCreateFork(w, r, workspaceID, correlationID)
+	case "discard_fork":
+		s.handleDiscardFork(w, r, workspaceID, parts[4], correlationID)
+	case "commit_fork":
+		s.handleCommitFork(w, r, workspaceID, parts[4], correlationID, claims)
 	case "tree":
 		s.handleTree(w, r, workspaceID, correlationID, claims)
 	case "bulk_write":
@@ -1224,6 +1243,32 @@ func (s *Server) aclGetFile(workspaceID string) func(path string) ([]byte, error
 	}
 }
 
+func (s *Server) aclGetForkFile(workspaceID, forkID string) func(path string) ([]byte, error) {
+	return func(path string) ([]byte, error) {
+		file, err := s.store.ReadForkFile(workspaceID, forkID, path)
+		if err != nil {
+			return nil, err
+		}
+
+		if len(file.Semantics.Permissions) > 0 {
+			return json.Marshal(file.Semantics.Permissions)
+		}
+
+		if file.Content != "" {
+			var contentObj struct {
+				Semantics struct {
+					Permissions []string `json:"permissions"`
+				} `json:"semantics"`
+			}
+			if err := json.Unmarshal([]byte(file.Content), &contentObj); err == nil && len(contentObj.Semantics.Permissions) > 0 {
+				return json.Marshal(contentObj.Semantics.Permissions)
+			}
+		}
+
+		return nil, nil
+	}
+}
+
 func stringSliceContainsExact(values []string, needle string) bool {
 	needle = strings.TrimSpace(needle)
 	if needle == "" {
@@ -1237,15 +1282,155 @@ func stringSliceContainsExact(values []string, needle string) bool {
 	return false
 }
 
+func (s *Server) readFile(workspaceID, forkID, path string) (relayfile.File, error) {
+	if strings.TrimSpace(forkID) != "" {
+		return s.store.ReadForkFile(workspaceID, forkID, path)
+	}
+	return s.store.ReadFile(workspaceID, path)
+}
+
+func (s *Server) resolveFilePermissions(workspaceID, forkID, path string, includeTarget bool) []string {
+	if strings.TrimSpace(forkID) != "" {
+		return s.store.ResolveForkFilePermissions(workspaceID, forkID, path, includeTarget)
+	}
+	return s.store.ResolveFilePermissions(workspaceID, path, includeTarget)
+}
+
+func writeForkAwareError(w http.ResponseWriter, err error, correlationID string) {
+	switch err {
+	case relayfile.ErrNotFound, relayfile.ErrForkExpired:
+		writeError(w, http.StatusNotFound, "not_found", err.Error(), correlationID)
+	case relayfile.ErrInvalidInput:
+		writeError(w, http.StatusBadRequest, "bad_request", err.Error(), correlationID)
+	default:
+		writeError(w, http.StatusInternalServerError, "internal_error", err.Error(), correlationID)
+	}
+}
+
+type forkCommitAuthorizationError struct {
+	message string
+}
+
+func (e *forkCommitAuthorizationError) Error() string {
+	return e.message
+}
+
+func validateForkCommitEntries(workspaceID string, claims tokenClaims, entries []relayfile.ForkCommitEntry) error {
+	for _, entry := range entries {
+		if !scopeMatchesPath(claims.Scopes, "fs:write", entry.Path) {
+			return &forkCommitAuthorizationError{message: "fork commit denied by path scope"}
+		}
+		if !filePermissionAllows(entry.Permissions, workspaceID, &claims) {
+			return &forkCommitAuthorizationError{message: "fork commit denied by permission policy"}
+		}
+	}
+	return nil
+}
+
+func (s *Server) handleCreateFork(w http.ResponseWriter, r *http.Request, workspaceID, correlationID string) {
+	var body struct {
+		ProposalID string `json:"proposalId"`
+		TTLSeconds *int64 `json:"ttlSeconds"`
+		ForkID     string `json:"forkId"`
+	}
+	if !s.decodeJSONBody(w, r, correlationID, &body) {
+		return
+	}
+	if strings.TrimSpace(body.ForkID) != "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"error":         "nested_forks_not_supported",
+			"correlationId": correlationID,
+		})
+		return
+	}
+	ttlSeconds := int64(0)
+	if body.TTLSeconds != nil {
+		ttlSeconds = *body.TTLSeconds
+	}
+	handle, err := s.store.CreateFork(workspaceID, body.ProposalID, ttlSeconds)
+	if err != nil {
+		switch err {
+		case relayfile.ErrInvalidInput:
+			writeError(w, http.StatusBadRequest, "bad_request", err.Error(), correlationID)
+		case relayfile.ErrForkProposalConflict:
+			writeError(w, http.StatusConflict, "proposal_conflict", err.Error(), correlationID)
+		default:
+			writeError(w, http.StatusInternalServerError, "internal_error", err.Error(), correlationID)
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, handle)
+}
+
+func (s *Server) handleDiscardFork(w http.ResponseWriter, _ *http.Request, workspaceID, forkID, correlationID string) {
+	if err := s.store.DiscardFork(workspaceID, forkID); err != nil {
+		if err == relayfile.ErrInvalidInput {
+			writeError(w, http.StatusBadRequest, "bad_request", err.Error(), correlationID)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "internal_error", err.Error(), correlationID)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleCommitFork(w http.ResponseWriter, _ *http.Request, workspaceID, forkID, correlationID string, claims tokenClaims) {
+	resp, err := s.store.CommitForkWithValidator(workspaceID, forkID, correlationID, func(entries []relayfile.ForkCommitEntry) error {
+		return validateForkCommitEntries(workspaceID, claims, entries)
+	})
+	if err != nil {
+		var authzErr *forkCommitAuthorizationError
+		if errors.As(err, &authzErr) {
+			writeError(w, http.StatusForbidden, "forbidden", authzErr.Error(), correlationID)
+			return
+		}
+		var parentMoved *relayfile.ParentMovedError
+		if errors.As(err, &parentMoved) {
+			writeJSON(w, http.StatusConflict, map[string]any{
+				"code":            "parent_moved",
+				"message":         err.Error(),
+				"currentRevision": parentMoved.CurrentRevision,
+				"correlationId":   correlationID,
+				"details": map[string]any{
+					"currentRevision": parentMoved.CurrentRevision,
+				},
+			})
+			return
+		}
+		switch err {
+		case relayfile.ErrForkExpired:
+			writeJSON(w, http.StatusGone, map[string]any{
+				"error":         "fork_expired",
+				"correlationId": correlationID,
+			})
+		case relayfile.ErrNotFound:
+			writeError(w, http.StatusNotFound, "not_found", err.Error(), correlationID)
+		case relayfile.ErrInvalidInput:
+			writeError(w, http.StatusBadRequest, "bad_request", err.Error(), correlationID)
+		default:
+			writeError(w, http.StatusInternalServerError, "internal_error", err.Error(), correlationID)
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
 func (s *Server) handleTree(w http.ResponseWriter, r *http.Request, workspaceID, correlationID string, claims tokenClaims) {
 	path := r.URL.Query().Get("path")
 	if path == "" {
 		path = "/"
 	}
 	depth := parseBoundedInt(r.URL.Query().Get("depth"), 10, 1, 100)
-	resp, err := s.store.ListTree(workspaceID, path, depth, r.URL.Query().Get("cursor"))
+	forkID := strings.TrimSpace(r.URL.Query().Get("forkId"))
+	var resp relayfile.TreeResponse
+	var err error
+	if forkID != "" {
+		resp, err = s.store.ListForkTree(workspaceID, forkID, path, depth, r.URL.Query().Get("cursor"))
+	} else {
+		resp, err = s.store.ListTree(workspaceID, path, depth, r.URL.Query().Get("cursor"))
+	}
 	if err != nil {
-		writeError(w, http.StatusNotFound, "not_found", err.Error(), correlationID)
+		writeForkAwareError(w, err, correlationID)
 		return
 	}
 	if len(resp.Entries) > 0 {
@@ -1254,17 +1439,24 @@ func (s *Server) handleTree(w http.ResponseWriter, r *http.Request, workspaceID,
 		visibleDirs := map[string]struct{}{}
 		cursor := ""
 		for {
-			batch, queryErr := s.store.QueryFiles(workspaceID, relayfile.FileQueryRequest{
+			queryReq := relayfile.FileQueryRequest{
 				PathPrefix: base,
 				Cursor:     cursor,
 				Limit:      200,
-			})
+			}
+			var batch relayfile.FileQueryResponse
+			var queryErr error
+			if forkID != "" {
+				batch, queryErr = s.store.QueryForkFiles(workspaceID, forkID, queryReq)
+			} else {
+				batch, queryErr = s.store.QueryFiles(workspaceID, queryReq)
+			}
 			if queryErr != nil {
 				writeError(w, http.StatusInternalServerError, "internal_error", queryErr.Error(), correlationID)
 				return
 			}
 			for _, item := range batch.Items {
-				effectivePermissions := s.store.ResolveFilePermissions(workspaceID, item.Path, true)
+				effectivePermissions := s.resolveFilePermissions(workspaceID, forkID, item.Path, true)
 				if !filePermissionAllows(effectivePermissions, workspaceID, &claims) {
 					continue
 				}
@@ -1323,16 +1515,13 @@ func (s *Server) handleReadFile(w http.ResponseWriter, r *http.Request, workspac
 		writeError(w, http.StatusBadRequest, "bad_request", "missing path query", correlationID)
 		return
 	}
-	file, err := s.store.ReadFile(workspaceID, path)
+	forkID := strings.TrimSpace(r.URL.Query().Get("forkId"))
+	file, err := s.readFile(workspaceID, forkID, path)
 	if err != nil {
-		if err == relayfile.ErrNotFound {
-			writeError(w, http.StatusNotFound, "not_found", err.Error(), correlationID)
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "internal_error", err.Error(), correlationID)
+		writeForkAwareError(w, err, correlationID)
 		return
 	}
-	effectivePermissions := s.store.ResolveFilePermissions(workspaceID, path, true)
+	effectivePermissions := s.resolveFilePermissions(workspaceID, forkID, path, true)
 	if !filePermissionAllows(effectivePermissions, workspaceID, &claims) {
 		writeError(w, http.StatusForbidden, "forbidden", "file access denied by permission policy", correlationID)
 		return
@@ -1342,6 +1531,7 @@ func (s *Server) handleReadFile(w http.ResponseWriter, r *http.Request, workspac
 }
 
 func (s *Server) handleBulkWrite(w http.ResponseWriter, r *http.Request, workspaceID, correlationID string, claims tokenClaims) {
+	forkID := strings.TrimSpace(r.URL.Query().Get("forkId"))
 	var body struct {
 		Files []relayfile.BulkWriteFile `json:"files"`
 	}
@@ -1352,14 +1542,20 @@ func (s *Server) handleBulkWrite(w http.ResponseWriter, r *http.Request, workspa
 		writeError(w, http.StatusBadRequest, "bad_request", "missing files", correlationID)
 		return
 	}
+	if forkID != "" {
+		if _, err := s.store.ListForkTree(workspaceID, forkID, "/", 1, ""); err != nil {
+			writeForkAwareError(w, err, correlationID)
+			return
+		}
+	}
 
 	allowed := make([]relayfile.BulkWriteFile, 0, len(body.Files))
 	errorsOut := make([]relayfile.BulkWriteError, 0)
 	for _, file := range body.Files {
 		path := normalizeRoutePath(file.Path)
-		_, readErr := s.store.ReadFile(workspaceID, path)
+		_, readErr := s.readFile(workspaceID, forkID, path)
 		if readErr == nil {
-			existingPermissions := s.store.ResolveFilePermissions(workspaceID, path, true)
+			existingPermissions := s.resolveFilePermissions(workspaceID, forkID, path, true)
 			if !filePermissionAllows(existingPermissions, workspaceID, &claims) {
 				errorsOut = append(errorsOut, relayfile.BulkWriteError{
 					Path:    path,
@@ -1368,8 +1564,8 @@ func (s *Server) handleBulkWrite(w http.ResponseWriter, r *http.Request, workspa
 				})
 				continue
 			}
-		} else if readErr == relayfile.ErrNotFound {
-			inheritedPermissions := s.store.ResolveFilePermissions(workspaceID, path, false)
+		} else if readErr == relayfile.ErrNotFound || readErr == relayfile.ErrForkExpired {
+			inheritedPermissions := s.resolveFilePermissions(workspaceID, forkID, path, false)
 			if !filePermissionAllows(inheritedPermissions, workspaceID, &claims) {
 				errorsOut = append(errorsOut, relayfile.BulkWriteError{
 					Path:    path,
@@ -1391,7 +1587,13 @@ func (s *Server) handleBulkWrite(w http.ResponseWriter, r *http.Request, workspa
 		allowed = append(allowed, file)
 	}
 
-	written, storeErrors := s.store.BulkWrite(workspaceID, allowed)
+	var written int
+	var storeErrors []relayfile.BulkWriteError
+	if forkID != "" {
+		written, storeErrors = s.store.BulkWriteFork(workspaceID, forkID, allowed)
+	} else {
+		written, storeErrors = s.store.BulkWrite(workspaceID, allowed)
+	}
 	errorsOut = append(errorsOut, storeErrors...)
 	writeJSON(w, http.StatusAccepted, map[string]any{
 		"written":       written,
@@ -1465,15 +1667,16 @@ func (s *Server) handleWriteFile(w http.ResponseWriter, r *http.Request, workspa
 		writeError(w, http.StatusPreconditionFailed, "precondition_failed", "missing If-Match header", correlationID)
 		return
 	}
-	_, readErr := s.store.ReadFile(workspaceID, path)
+	forkID := strings.TrimSpace(r.URL.Query().Get("forkId"))
+	_, readErr := s.readFile(workspaceID, forkID, path)
 	if readErr == nil {
-		existingPermissions := s.store.ResolveFilePermissions(workspaceID, path, true)
+		existingPermissions := s.resolveFilePermissions(workspaceID, forkID, path, true)
 		if !filePermissionAllows(existingPermissions, workspaceID, &claims) {
 			writeError(w, http.StatusForbidden, "forbidden", "file access denied by permission policy", correlationID)
 			return
 		}
-	} else if readErr == relayfile.ErrNotFound {
-		inheritedPermissions := s.store.ResolveFilePermissions(workspaceID, path, false)
+	} else if readErr == relayfile.ErrNotFound || readErr == relayfile.ErrForkExpired {
+		inheritedPermissions := s.resolveFilePermissions(workspaceID, forkID, path, false)
 		if !filePermissionAllows(inheritedPermissions, workspaceID, &claims) {
 			writeError(w, http.StatusForbidden, "forbidden", "file access denied by permission policy", correlationID)
 			return
@@ -1490,7 +1693,7 @@ func (s *Server) handleWriteFile(w http.ResponseWriter, r *http.Request, workspa
 		return
 	}
 
-	result, err := s.store.WriteFile(relayfile.WriteRequest{
+	writeReq := relayfile.WriteRequest{
 		WorkspaceID: workspaceID,
 		Path:        path,
 		IfMatch:     ifMatch,
@@ -1504,7 +1707,14 @@ func (s *Server) handleWriteFile(w http.ResponseWriter, r *http.Request, workspa
 			Comments:    body.Semantics.Comments,
 		},
 		CorrelationID: correlationID,
-	})
+	}
+	var result relayfile.WriteResult
+	var err error
+	if forkID != "" {
+		result, err = s.store.WriteForkFile(writeReq, forkID)
+	} else {
+		result, err = s.store.WriteFile(writeReq)
+	}
 	if err != nil {
 		var conflict *relayfile.ConflictError
 		if errors.As(err, &conflict) {
@@ -1524,7 +1734,7 @@ func (s *Server) handleWriteFile(w http.ResponseWriter, r *http.Request, workspa
 		switch err {
 		case relayfile.ErrMissingPrecondition:
 			writeError(w, http.StatusPreconditionFailed, "precondition_failed", err.Error(), correlationID)
-		case relayfile.ErrNotFound:
+		case relayfile.ErrNotFound, relayfile.ErrForkExpired:
 			writeError(w, http.StatusNotFound, "not_found", err.Error(), correlationID)
 		case relayfile.ErrInvalidInput:
 			writeError(w, http.StatusBadRequest, "bad_request", err.Error(), correlationID)
@@ -1548,20 +1758,28 @@ func (s *Server) handleDeleteFile(w http.ResponseWriter, r *http.Request, worksp
 		writeError(w, http.StatusPreconditionFailed, "precondition_failed", "missing If-Match header", correlationID)
 		return
 	}
-	_, readErr := s.store.ReadFile(workspaceID, path)
+	forkID := strings.TrimSpace(r.URL.Query().Get("forkId"))
+	_, readErr := s.readFile(workspaceID, forkID, path)
 	if readErr == nil {
-		existingPermissions := s.store.ResolveFilePermissions(workspaceID, path, true)
+		existingPermissions := s.resolveFilePermissions(workspaceID, forkID, path, true)
 		if !filePermissionAllows(existingPermissions, workspaceID, &claims) {
 			writeError(w, http.StatusForbidden, "forbidden", "file access denied by permission policy", correlationID)
 			return
 		}
 	}
-	result, err := s.store.DeleteFile(relayfile.DeleteRequest{
+	deleteReq := relayfile.DeleteRequest{
 		WorkspaceID:   workspaceID,
 		Path:          path,
 		IfMatch:       ifMatch,
 		CorrelationID: correlationID,
-	})
+	}
+	var result relayfile.WriteResult
+	var err error
+	if forkID != "" {
+		result, err = s.store.DeleteForkFile(deleteReq, forkID)
+	} else {
+		result, err = s.store.DeleteFile(deleteReq)
+	}
 	if err != nil {
 		var conflict *relayfile.ConflictError
 		if errors.As(err, &conflict) {
@@ -1579,7 +1797,7 @@ func (s *Server) handleDeleteFile(w http.ResponseWriter, r *http.Request, worksp
 			return
 		}
 		switch err {
-		case relayfile.ErrNotFound:
+		case relayfile.ErrNotFound, relayfile.ErrForkExpired:
 			writeError(w, http.StatusNotFound, "not_found", err.Error(), correlationID)
 		case relayfile.ErrMissingPrecondition:
 			writeError(w, http.StatusPreconditionFailed, "precondition_failed", err.Error(), correlationID)
@@ -1603,6 +1821,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request, workspaceI
 
 func (s *Server) handleQueryFiles(w http.ResponseWriter, r *http.Request, workspaceID, correlationID string, claims tokenClaims) {
 	limit := parseBoundedInt(r.URL.Query().Get("limit"), 100, 1, 1000)
+	forkID := strings.TrimSpace(r.URL.Query().Get("forkId"))
 	properties := map[string]string{}
 	for key, values := range r.URL.Query() {
 		if !strings.HasPrefix(key, "property.") {
@@ -1626,7 +1845,7 @@ func (s *Server) handleQueryFiles(w http.ResponseWriter, r *http.Request, worksp
 	var nextCursor *string
 	for len(items) < limit {
 		batchLimit := limit - len(items)
-		batch, err := s.store.QueryFiles(workspaceID, relayfile.FileQueryRequest{
+		queryReq := relayfile.FileQueryRequest{
 			PathPrefix: pathPrefix,
 			Provider:   provider,
 			Relation:   relation,
@@ -1635,18 +1854,27 @@ func (s *Server) handleQueryFiles(w http.ResponseWriter, r *http.Request, worksp
 			Properties: properties,
 			Cursor:     cursor,
 			Limit:      batchLimit,
-		})
+		}
+		var batch relayfile.FileQueryResponse
+		var err error
+		if forkID != "" {
+			batch, err = s.store.QueryForkFiles(workspaceID, forkID, queryReq)
+		} else {
+			batch, err = s.store.QueryFiles(workspaceID, queryReq)
+		}
 		if err != nil {
 			switch err {
 			case relayfile.ErrInvalidInput:
 				writeError(w, http.StatusBadRequest, "bad_request", err.Error(), correlationID)
+			case relayfile.ErrNotFound, relayfile.ErrForkExpired:
+				writeError(w, http.StatusNotFound, "not_found", err.Error(), correlationID)
 			default:
 				writeError(w, http.StatusInternalServerError, "internal_error", err.Error(), correlationID)
 			}
 			return
 		}
 		for _, item := range batch.Items {
-			effectivePermissions := s.store.ResolveFilePermissions(workspaceID, item.Path, true)
+			effectivePermissions := s.resolveFilePermissions(workspaceID, forkID, item.Path, true)
 			if permission != "" && !stringSliceContainsExact(effectivePermissions, permission) {
 				continue
 			}

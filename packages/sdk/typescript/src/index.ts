@@ -58,11 +58,15 @@ export type {
   BulkWriteFile,
   BulkWriteInput,
   BulkWriteResponse,
+  CommitForkInput,
+  CommitForkResponse,
   ConflictErrorResponse,
+  CreateForkInput,
   ContentIdentity,
   DeleteFileInput,
   DeadLetterFeedResponse,
   DeadLetterItem,
+  DiscardForkInput,
   ErrorResponse,
   EventFeedResponse,
   ExportFormat,
@@ -90,6 +94,7 @@ export type {
   OperationStatusResponse,
   QueuedResponse,
   QueryFilesOptions,
+  ReadFileInput,
   RelayFileJwtClaims,
   SyncIngressStatusResponse,
   SyncProviderStatus,
@@ -104,6 +109,7 @@ export type {
   WriteFileInput,
   WriteQueuedResponse
 } from "./types.js";
+export type { ForkHandle, ForkOptions } from "@relayfile/core";
 
 export { WritebackConsumer } from "./writeback-consumer.js";
 export type { WritebackHandler, WritebackConsumerOptions } from "./writeback-consumer.js";

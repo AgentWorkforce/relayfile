@@ -5,9 +5,13 @@ import {
   type BulkWriteResponse,
   type BackendStatusResponse,
   type AckResponse,
+  type CommitForkInput,
+  type CommitForkResponse,
+  type CreateForkInput,
   type DeleteFileInput,
   type DeadLetterItem,
   type DeadLetterFeedResponse,
+  type DiscardForkInput,
   type ErrorResponse,
   type EventFeedResponse,
   type ExportJsonResponse,
@@ -26,6 +30,7 @@ import {
   type OperationFeedResponse,
   type OperationStatusResponse,
   type QueuedResponse,
+  type ReadFileInput,
   type QueryFilesOptions,
   type SyncIngressStatusResponse,
   type SyncStatusResponse,
@@ -37,6 +42,7 @@ import {
   type AckWritebackInput,
   type AckWritebackResponse
 } from "./types.js";
+import type { ForkHandle } from "@relayfile/core";
 import {
   InvalidStateError,
   PayloadTooLargeError,
@@ -196,6 +202,19 @@ function normalizeExportJsonResponse(payload: unknown): ExportJsonResponse {
   };
 }
 
+function normalizeErrorDetails(data: Record<string, unknown>, explicitDetails: unknown): Record<string, unknown> | undefined {
+  if (explicitDetails && typeof explicitDetails === "object" && !Array.isArray(explicitDetails)) {
+    return explicitDetails as Record<string, unknown>;
+  }
+  const details: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(data)) {
+    if (key !== "code" && key !== "message" && key !== "correlationId") {
+      details[key] = value;
+    }
+  }
+  return Object.keys(details).length > 0 ? details : undefined;
+}
+
 class RelayFileWebSocketConnection implements WebSocketConnection {
   private readonly socket: WebSocket;
   private readonly handlers: {
@@ -290,7 +309,8 @@ export class RelayFileClient {
     const query = buildQuery({
       path: options.path ?? "/",
       depth: options.depth,
-      cursor: options.cursor
+      cursor: options.cursor,
+      forkId: options.forkId
     });
     return this.request<TreeResponse>({
       method: "GET",
@@ -300,13 +320,28 @@ export class RelayFileClient {
     });
   }
 
-  async readFile(workspaceId: string, path: string, correlationId?: string, signal?: AbortSignal): Promise<FileReadResponse> {
-    const query = buildQuery({ path });
+  async readFile(workspaceId: string, path: string, correlationId?: string, signal?: AbortSignal): Promise<FileReadResponse>;
+  async readFile(input: ReadFileInput): Promise<FileReadResponse>;
+  async readFile(
+    workspaceOrInput: string | ReadFileInput,
+    path?: string,
+    correlationId?: string,
+    signal?: AbortSignal
+  ): Promise<FileReadResponse> {
+    const input: ReadFileInput = typeof workspaceOrInput === "string"
+      ? {
+          workspaceId: workspaceOrInput,
+          path: path ?? "",
+          correlationId,
+          signal
+        }
+      : workspaceOrInput;
+    const query = buildQuery({ path: input.path, forkId: input.forkId });
     return this.request<FileReadResponse>({
       method: "GET",
-      path: `/v1/workspaces/${encodeURIComponent(workspaceId)}/fs/file${query}`,
-      correlationId,
-      signal
+      path: `/v1/workspaces/${encodeURIComponent(input.workspaceId)}/fs/file${query}`,
+      correlationId: input.correlationId,
+      signal: input.signal
     });
   }
 
@@ -319,6 +354,7 @@ export class RelayFileClient {
     if (options.comment !== undefined) params.set("comment", options.comment);
     if (options.cursor !== undefined) params.set("cursor", options.cursor);
     if (options.limit !== undefined) params.set("limit", String(options.limit));
+    if (options.forkId !== undefined) params.set("forkId", options.forkId);
     if (options.properties !== undefined) {
       for (const [key, value] of Object.entries(options.properties)) {
         if (key !== "" && value !== undefined) {
@@ -338,7 +374,7 @@ export class RelayFileClient {
 
   async writeFile(input: WriteFileInput): Promise<WriteQueuedResponse> {
     const { workspaceId, path, correlationId, baseRevision, content, contentType, encoding, contentIdentity, signal } = input;
-    const query = buildQuery({ path });
+    const query = buildQuery({ path, forkId: input.forkId });
     return this.request<WriteQueuedResponse>({
       method: "PUT",
       path: `/v1/workspaces/${encodeURIComponent(workspaceId)}/fs/file${query}`,
@@ -359,9 +395,10 @@ export class RelayFileClient {
   }
 
   async bulkWrite(input: BulkWriteInput): Promise<BulkWriteResponse> {
+    const query = buildQuery({ forkId: input.forkId });
     const response = await this.performRequest({
       method: "POST",
-      path: `/v1/workspaces/${encodeURIComponent(input.workspaceId)}/fs/bulk`,
+      path: `/v1/workspaces/${encodeURIComponent(input.workspaceId)}/fs/bulk${query}`,
       correlationId: input.correlationId,
       body: {
         files: input.files
@@ -372,7 +409,7 @@ export class RelayFileClient {
   }
 
   async deleteFile(input: DeleteFileInput): Promise<WriteQueuedResponse> {
-    const query = buildQuery({ path: input.path });
+    const query = buildQuery({ path: input.path, forkId: input.forkId });
     return this.request<WriteQueuedResponse>({
       method: "DELETE",
       path: `/v1/workspaces/${encodeURIComponent(input.workspaceId)}/fs/file${query}`,
@@ -380,6 +417,40 @@ export class RelayFileClient {
       headers: {
         "If-Match": input.baseRevision
       },
+      signal: input.signal
+    });
+  }
+
+  async createFork(input: CreateForkInput): Promise<ForkHandle> {
+    const body: { proposalId: string; ttlSeconds?: number } = {
+      proposalId: input.proposalId
+    };
+    if (input.ttlSeconds !== undefined) {
+      body.ttlSeconds = input.ttlSeconds;
+    }
+    return this.request<ForkHandle>({
+      method: "POST",
+      path: `/v1/workspaces/${encodeURIComponent(input.workspaceId)}/forks`,
+      correlationId: input.correlationId,
+      body,
+      signal: input.signal
+    });
+  }
+
+  async discardFork(input: DiscardForkInput): Promise<void> {
+    await this.performRequest({
+      method: "DELETE",
+      path: `/v1/workspaces/${encodeURIComponent(input.workspaceId)}/forks/${encodeURIComponent(input.forkId)}`,
+      correlationId: input.correlationId,
+      signal: input.signal
+    });
+  }
+
+  async commitFork(input: CommitForkInput): Promise<CommitForkResponse> {
+    return this.request<CommitForkResponse>({
+      method: "POST",
+      path: `/v1/workspaces/${encodeURIComponent(input.workspaceId)}/forks/${encodeURIComponent(input.forkId)}/commit`,
+      correlationId: input.correlationId,
       signal: input.signal
     });
   }
@@ -872,11 +943,13 @@ export class RelayFileClient {
   }
 
   private throwForError(status: number, payload: unknown, headers: Headers): never {
-    const data = (payload ?? {}) as Partial<ErrorResponse> & {
+    const rawData = (payload ?? {}) as Record<string, unknown>;
+    const data = rawData as Partial<ErrorResponse> & {
       expectedRevision?: string;
       currentRevision?: string;
       currentContentPreview?: string;
     };
+    const details = normalizeErrorDetails(rawData, data.details);
 
     if (
       status === 409 &&
@@ -887,7 +960,7 @@ export class RelayFileClient {
         code: data.code ?? "revision_conflict",
         message: data.message ?? "Revision conflict",
         correlationId: data.correlationId ?? "",
-        details: data.details,
+        details,
         expectedRevision: data.expectedRevision,
         currentRevision: data.currentRevision,
         currentContentPreview: data.currentContentPreview
@@ -899,7 +972,7 @@ export class RelayFileClient {
         code: data.code,
         message: data.message ?? "Invalid resource state",
         correlationId: data.correlationId,
-        details: data.details
+        details
       });
     }
 
@@ -918,7 +991,7 @@ export class RelayFileClient {
           code: data.code,
           message: data.message ?? "Ingress queue full",
           correlationId: data.correlationId,
-          details: data.details
+          details
         },
         retryAfterSeconds
       );
@@ -929,7 +1002,7 @@ export class RelayFileClient {
         code: data.code ?? "payload_too_large",
         message: data.message ?? "Request payload exceeds configured limit",
         correlationId: data.correlationId,
-        details: data.details
+        details
       });
     }
 
@@ -937,7 +1010,7 @@ export class RelayFileClient {
       code: data.code ?? "api_error",
       message: data.message ?? `HTTP ${status}`,
       correlationId: data.correlationId,
-      details: data.details
+      details
     });
   }
 }
