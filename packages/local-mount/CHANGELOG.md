@@ -10,6 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **BREAKING**: Renamed `AutoSyncOptions.writeFinishMs` → `AutoSyncOptions.debounceMs`. The semantics also shifted — it is now a per-path event coalescing debounce (default `50ms`), not a file-stability threshold (previously `200ms`). Any caller passing `writeFinishMs` will now be ignored silently under TypeScript's structural typing; update the field name.
 - Replaced `chokidar` with [`@parcel/watcher`](https://www.npmjs.com/package/@parcel/watcher) for file watching. `autoSync.stop()` no longer hangs on teardown — native FSEvents/inotify/ReadDirectoryChangesW subscriptions unsubscribe promptly instead of draining per-file `awaitWriteFinish` polling timers.
 
+### Fixed
+- `startAutoSync` no longer leaks a subscription when one of the two `@parcel/watcher` subscribes rejects. If mount- or project-side setup fails, the successful side is now unsubscribed before the error surfaces.
+
 ## [0.3.0] - 2026-04-20
 
 ### Fixed

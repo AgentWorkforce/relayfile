@@ -141,16 +141,33 @@ export function startAutoSync(
 
   let mountSub: AsyncSubscription | undefined;
   let projectSub: AsyncSubscription | undefined;
+  // Subscribe in parallel but track each outcome independently. With
+  // Promise.all, a failure on one side would reject before the other's
+  // assignment ran and leak the succeeded subscription. allSettled lets us
+  // tear down whichever fulfilled before re-throwing the first failure.
   const watchersReady = (async () => {
-    const [m, p] = await Promise.all([
+    const [mountResult, projectResult] = await Promise.allSettled([
       subscribeTo(ctx.realMountDir),
       subscribeTo(ctx.realProjectDir),
     ]);
-    mountSub = m;
-    projectSub = p;
+    if (mountResult.status === 'fulfilled') mountSub = mountResult.value;
+    if (projectResult.status === 'fulfilled') projectSub = projectResult.value;
+    if (mountResult.status === 'fulfilled' && projectResult.status === 'fulfilled') {
+      return;
+    }
+    await Promise.allSettled([
+      mountSub?.unsubscribe(),
+      projectSub?.unsubscribe(),
+    ]);
+    mountSub = undefined;
+    projectSub = undefined;
+    throw mountResult.status === 'rejected'
+      ? mountResult.reason
+      : (projectResult as PromiseRejectedResult).reason;
   })();
   // If subscription setup fails, surface via onError rather than an unhandled
-  // rejection. stop() will still await the same promise.
+  // rejection. stop() still awaits the same promise and will observe the
+  // rejection after the cleanup above has already run.
   watchersReady.catch((err) => onError(err as Error));
 
   const interval = setInterval(() => {
@@ -167,9 +184,10 @@ export function startAutoSync(
       try {
         await watchersReady;
       } catch {
-        // Already surfaced via onError; nothing to unsubscribe from.
+        // Setup failed and already cleaned up any partial subscription;
+        // mountSub / projectSub were reset to undefined before the throw.
       }
-      await Promise.all([
+      await Promise.allSettled([
         mountSub?.unsubscribe(),
         projectSub?.unsubscribe(),
       ]);
