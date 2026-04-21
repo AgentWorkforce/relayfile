@@ -442,6 +442,201 @@ describe("RelayFileClient — existing methods", () => {
       expect(url).toContain("/v1/admin/replay/envelope/env_1");
     });
   });
+
+  describe("forks", () => {
+    it("createFork posts proposalId and ttlSeconds and returns a handle", async () => {
+      const payload = {
+        forkId: "fork_123",
+        proposalId: "proposal_1",
+        workspaceId: "ws_acme",
+        expiresAt: "2026-04-28T00:00:00.000Z",
+        parentRevision: "rev_1",
+      };
+      const f = mockFetch(payload);
+      const client = makeClient(f);
+
+      const res = await client.createFork({
+        workspaceId: "ws_acme",
+        proposalId: "proposal_1",
+        ttlSeconds: 3600,
+      });
+
+      expect(res).toEqual(payload);
+      const url = f.mock.calls[0]![0] as string;
+      const init = f.mock.calls[0]![1] as RequestInit;
+      expect(url).toBe("https://relay.test/v1/workspaces/ws_acme/forks");
+      expect(init.method).toBe("POST");
+      expect(JSON.parse(init.body as string)).toEqual({
+        proposalId: "proposal_1",
+        ttlSeconds: 3600,
+      });
+    });
+
+    it("createFork omits ttlSeconds when unset", async () => {
+      const f = mockFetch({
+        forkId: "fork_123",
+        proposalId: "proposal_1",
+        workspaceId: "ws_acme",
+        expiresAt: "2026-04-28T00:00:00.000Z",
+        parentRevision: "rev_1",
+      });
+      const client = makeClient(f);
+
+      await client.createFork({
+        workspaceId: "ws_acme",
+        proposalId: "proposal_1",
+      });
+
+      const init = f.mock.calls[0]![1] as RequestInit;
+      expect(JSON.parse(init.body as string)).toEqual({
+        proposalId: "proposal_1",
+      });
+    });
+
+    it("discardFork deletes the fork and resolves on 204", async () => {
+      const f = mockFetch({}, 204);
+      const client = makeClient(f);
+
+      await expect(client.discardFork({
+        workspaceId: "ws_acme",
+        forkId: "fork_123",
+      })).resolves.toBeUndefined();
+
+      const url = f.mock.calls[0]![0] as string;
+      const init = f.mock.calls[0]![1] as RequestInit;
+      expect(url).toBe("https://relay.test/v1/workspaces/ws_acme/forks/fork_123");
+      expect(init.method).toBe("DELETE");
+    });
+
+    it("commitFork posts and returns commit counts", async () => {
+      const payload = { revision: "rev_2", writtenCount: 2, deletedCount: 1 };
+      const f = mockFetch(payload);
+      const client = makeClient(f);
+
+      const res = await client.commitFork({
+        workspaceId: "ws_acme",
+        forkId: "fork_123",
+      });
+
+      expect(res).toEqual(payload);
+      const url = f.mock.calls[0]![0] as string;
+      const init = f.mock.calls[0]![1] as RequestInit;
+      expect(url).toBe("https://relay.test/v1/workspaces/ws_acme/forks/fork_123/commit");
+      expect(init.method).toBe("POST");
+      expect(init.body).toBeUndefined();
+    });
+
+    it("writeFile with forkId appends forkId and leaves body unchanged", async () => {
+      const f = mockFetch({ opId: "op_1", status: "queued", targetRevision: "fork:fork_123:1" });
+      const client = makeClient(f);
+
+      await client.writeFile({
+        workspaceId: "ws_acme",
+        path: "/docs/a.md",
+        baseRevision: "0",
+        content: "# a",
+        contentType: "text/markdown",
+        forkId: "fork_123",
+      });
+
+      const url = f.mock.calls[0]![0] as string;
+      const init = f.mock.calls[0]![1] as RequestInit;
+      expect(url).toContain("path=%2Fdocs%2Fa.md");
+      expect(url).toContain("forkId=fork_123");
+      expect(JSON.parse(init.body as string)).toEqual({
+        contentType: "text/markdown",
+        content: "# a",
+      });
+    });
+
+    it("readFile with forkId appends forkId", async () => {
+      const f = mockFetch({
+        path: "/docs/a.md",
+        revision: "fork:fork_123:1",
+        contentType: "text/markdown",
+        content: "# a",
+      });
+      const client = makeClient(f);
+
+      await client.readFile({
+        workspaceId: "ws_acme",
+        path: "/docs/a.md",
+        forkId: "fork_123",
+      });
+
+      const url = f.mock.calls[0]![0] as string;
+      expect(url).toContain("path=%2Fdocs%2Fa.md");
+      expect(url).toContain("forkId=fork_123");
+    });
+
+    it("bulkWrite with forkId appends forkId", async () => {
+      const f = mockFetch({ written: 1, errorCount: 0, errors: [], correlationId: "corr_1" });
+      const client = makeClient(f);
+
+      await client.bulkWrite({
+        workspaceId: "ws_acme",
+        forkId: "fork_123",
+        files: [{ path: "/docs/a.md", content: "# a" }],
+      });
+
+      const url = f.mock.calls[0]![0] as string;
+      expect(url).toContain("/v1/workspaces/ws_acme/fs/bulk?");
+      expect(url).toContain("forkId=fork_123");
+    });
+
+    it("listTree with forkId appends forkId", async () => {
+      const f = mockFetch({ path: "/", entries: [], nextCursor: null });
+      const client = makeClient(f);
+
+      await client.listTree("ws_acme", { path: "/docs", forkId: "fork_123" });
+
+      const url = f.mock.calls[0]![0] as string;
+      expect(url).toContain("path=%2Fdocs");
+      expect(url).toContain("forkId=fork_123");
+    });
+
+    it("queryFiles with forkId appends forkId", async () => {
+      const f = mockFetch({ items: [], nextCursor: null });
+      const client = makeClient(f);
+
+      await client.queryFiles("ws_acme", { path: "/docs", forkId: "fork_123" });
+
+      const url = f.mock.calls[0]![0] as string;
+      expect(url).toContain("path=%2Fdocs");
+      expect(url).toContain("forkId=fork_123");
+    });
+
+    it("deleteFile with forkId appends forkId", async () => {
+      const f = mockFetch({ opId: "op_1", status: "queued", targetRevision: "fork:fork_123:2" });
+      const client = makeClient(f);
+
+      await client.deleteFile({
+        workspaceId: "ws_acme",
+        path: "/docs/a.md",
+        baseRevision: "fork:fork_123:1",
+        forkId: "fork_123",
+      });
+
+      const url = f.mock.calls[0]![0] as string;
+      expect(url).toContain("path=%2Fdocs%2Fa.md");
+      expect(url).toContain("forkId=fork_123");
+    });
+
+    it("writeFile without forkId does not include forkId", async () => {
+      const f = mockFetch({ opId: "op_1", status: "queued", targetRevision: "rev_1" });
+      const client = makeClient(f);
+
+      await client.writeFile({
+        workspaceId: "ws_acme",
+        path: "/docs/a.md",
+        baseRevision: "0",
+        content: "# a",
+      });
+
+      const url = f.mock.calls[0]![0] as string;
+      expect(url).not.toContain("forkId=");
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------

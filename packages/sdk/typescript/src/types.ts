@@ -78,6 +78,7 @@ export interface BulkWriteFile {
 export interface BulkWriteInput {
   workspaceId: string;
   files: BulkWriteFile[];
+  forkId?: string;
   correlationId?: string;
   signal?: AbortSignal;
 }
@@ -372,6 +373,7 @@ export interface ListTreeOptions {
   path?: string;
   depth?: number;
   cursor?: string;
+  forkId?: string;
   correlationId?: string;
   signal?: AbortSignal;
 }
@@ -385,6 +387,15 @@ export interface QueryFilesOptions {
   properties?: Record<string, string>;
   cursor?: string;
   limit?: number;
+  forkId?: string;
+  correlationId?: string;
+  signal?: AbortSignal;
+}
+
+export interface ReadFileInput {
+  workspaceId: string;
+  path: string;
+  forkId?: string;
   correlationId?: string;
   signal?: AbortSignal;
 }
@@ -507,6 +518,7 @@ export interface WriteFileInput {
   contentType?: string;
   encoding?: "utf-8" | "base64";
   semantics?: FileSemantics;
+  forkId?: string;
   correlationId?: string;
   signal?: AbortSignal;
 }
@@ -515,8 +527,37 @@ export interface DeleteFileInput {
   workspaceId: string;
   path: string;
   baseRevision: string;
+  forkId?: string;
   correlationId?: string;
   signal?: AbortSignal;
+}
+
+export interface CreateForkInput {
+  workspaceId: string;
+  proposalId: string;
+  ttlSeconds?: number;
+  correlationId?: string;
+  signal?: AbortSignal;
+}
+
+export interface DiscardForkInput {
+  workspaceId: string;
+  forkId: string;
+  correlationId?: string;
+  signal?: AbortSignal;
+}
+
+export interface CommitForkInput {
+  workspaceId: string;
+  forkId: string;
+  correlationId?: string;
+  signal?: AbortSignal;
+}
+
+export interface CommitForkResponse {
+  revision: string;
+  writtenCount: number;
+  deletedCount: number;
 }
 
 export interface IngestWebhookInput {

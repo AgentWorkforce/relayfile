@@ -5,9 +5,13 @@ import {
   type BulkWriteResponse,
   type BackendStatusResponse,
   type AckResponse,
+  type CommitForkInput,
+  type CommitForkResponse,
+  type CreateForkInput,
   type DeleteFileInput,
   type DeadLetterItem,
   type DeadLetterFeedResponse,
+  type DiscardForkInput,
   type ErrorResponse,
   type EventFeedResponse,
   type ExportJsonResponse,
@@ -26,6 +30,7 @@ import {
   type OperationFeedResponse,
   type OperationStatusResponse,
   type QueuedResponse,
+  type ReadFileInput,
   type QueryFilesOptions,
   type SyncIngressStatusResponse,
   type SyncStatusResponse,
@@ -37,6 +42,7 @@ import {
   type AckWritebackInput,
   type AckWritebackResponse
 } from "./types.js";
+import type { ForkHandle } from "@relayfile/core";
 import {
   InvalidStateError,
   PayloadTooLargeError,
@@ -290,7 +296,8 @@ export class RelayFileClient {
     const query = buildQuery({
       path: options.path ?? "/",
       depth: options.depth,
-      cursor: options.cursor
+      cursor: options.cursor,
+      forkId: options.forkId
     });
     return this.request<TreeResponse>({
       method: "GET",
@@ -300,13 +307,28 @@ export class RelayFileClient {
     });
   }
 
-  async readFile(workspaceId: string, path: string, correlationId?: string, signal?: AbortSignal): Promise<FileReadResponse> {
-    const query = buildQuery({ path });
+  async readFile(workspaceId: string, path: string, correlationId?: string, signal?: AbortSignal): Promise<FileReadResponse>;
+  async readFile(input: ReadFileInput): Promise<FileReadResponse>;
+  async readFile(
+    workspaceOrInput: string | ReadFileInput,
+    path?: string,
+    correlationId?: string,
+    signal?: AbortSignal
+  ): Promise<FileReadResponse> {
+    const input: ReadFileInput = typeof workspaceOrInput === "string"
+      ? {
+          workspaceId: workspaceOrInput,
+          path: path ?? "",
+          correlationId,
+          signal
+        }
+      : workspaceOrInput;
+    const query = buildQuery({ path: input.path, forkId: input.forkId });
     return this.request<FileReadResponse>({
       method: "GET",
-      path: `/v1/workspaces/${encodeURIComponent(workspaceId)}/fs/file${query}`,
-      correlationId,
-      signal
+      path: `/v1/workspaces/${encodeURIComponent(input.workspaceId)}/fs/file${query}`,
+      correlationId: input.correlationId,
+      signal: input.signal
     });
   }
 
@@ -319,6 +341,7 @@ export class RelayFileClient {
     if (options.comment !== undefined) params.set("comment", options.comment);
     if (options.cursor !== undefined) params.set("cursor", options.cursor);
     if (options.limit !== undefined) params.set("limit", String(options.limit));
+    if (options.forkId !== undefined) params.set("forkId", options.forkId);
     if (options.properties !== undefined) {
       for (const [key, value] of Object.entries(options.properties)) {
         if (key !== "" && value !== undefined) {
@@ -337,8 +360,8 @@ export class RelayFileClient {
   }
 
   async writeFile(input: WriteFileInput): Promise<WriteQueuedResponse> {
-    const { workspaceId, path, correlationId, baseRevision, content, contentType, encoding, semantics, signal } = input;
-    const query = buildQuery({ path });
+    const { workspaceId, path, correlationId, baseRevision, content, contentType, encoding, signal } = input;
+    const query = buildQuery({ path, forkId: input.forkId });
     return this.request<WriteQueuedResponse>({
       method: "PUT",
       path: `/v1/workspaces/${encodeURIComponent(workspaceId)}/fs/file${query}`,
@@ -358,9 +381,10 @@ export class RelayFileClient {
   }
 
   async bulkWrite(input: BulkWriteInput): Promise<BulkWriteResponse> {
+    const query = buildQuery({ forkId: input.forkId });
     const response = await this.performRequest({
       method: "POST",
-      path: `/v1/workspaces/${encodeURIComponent(input.workspaceId)}/fs/bulk`,
+      path: `/v1/workspaces/${encodeURIComponent(input.workspaceId)}/fs/bulk${query}`,
       correlationId: input.correlationId,
       body: {
         files: input.files
@@ -371,7 +395,7 @@ export class RelayFileClient {
   }
 
   async deleteFile(input: DeleteFileInput): Promise<WriteQueuedResponse> {
-    const query = buildQuery({ path: input.path });
+    const query = buildQuery({ path: input.path, forkId: input.forkId });
     return this.request<WriteQueuedResponse>({
       method: "DELETE",
       path: `/v1/workspaces/${encodeURIComponent(input.workspaceId)}/fs/file${query}`,
@@ -379,6 +403,40 @@ export class RelayFileClient {
       headers: {
         "If-Match": input.baseRevision
       },
+      signal: input.signal
+    });
+  }
+
+  async createFork(input: CreateForkInput): Promise<ForkHandle> {
+    const body: { proposalId: string; ttlSeconds?: number } = {
+      proposalId: input.proposalId
+    };
+    if (input.ttlSeconds !== undefined) {
+      body.ttlSeconds = input.ttlSeconds;
+    }
+    return this.request<ForkHandle>({
+      method: "POST",
+      path: `/v1/workspaces/${encodeURIComponent(input.workspaceId)}/forks`,
+      correlationId: input.correlationId,
+      body,
+      signal: input.signal
+    });
+  }
+
+  async discardFork(input: DiscardForkInput): Promise<void> {
+    await this.performRequest({
+      method: "DELETE",
+      path: `/v1/workspaces/${encodeURIComponent(input.workspaceId)}/forks/${encodeURIComponent(input.forkId)}`,
+      correlationId: input.correlationId,
+      signal: input.signal
+    });
+  }
+
+  async commitFork(input: CommitForkInput): Promise<CommitForkResponse> {
+    return this.request<CommitForkResponse>({
+      method: "POST",
+      path: `/v1/workspaces/${encodeURIComponent(input.workspaceId)}/forks/${encodeURIComponent(input.forkId)}/commit`,
+      correlationId: input.correlationId,
       signal: input.signal
     });
   }

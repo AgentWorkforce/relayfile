@@ -31,6 +31,38 @@
             "reasoning": "main has no apps/relayfile Durable Object worker; the routed server is internal/httpapi over internal/relayfile.Store, so fork state will live as pointer-plus-overlay store state with timers emulating DO alarms."
           },
           "significance": "high"
+        },
+        {
+          "ts": 1776761662512,
+          "type": "reflection",
+          "content": "Core fork helpers and Go server overlay implementation are in place; targeted server tests cover lifecycle, overlay semantics, commit conflict, discard, expiry, and merged tree behavior.",
+          "raw": {
+            "focalPoints": [
+              "fork-api",
+              "server-tests",
+              "actual-layout"
+            ],
+            "confidence": 0.78
+          },
+          "significance": "high",
+          "tags": [
+            "focal:fork-api",
+            "focal:server-tests",
+            "focal:actual-layout",
+            "confidence:0.78"
+          ]
+        },
+        {
+          "ts": 1776761856857,
+          "type": "decision",
+          "content": "Fork fallback reads use current parent view: Fork fallback reads use current parent view",
+          "raw": {
+            "question": "Fork fallback reads use current parent view",
+            "chosen": "Fork fallback reads use current parent view",
+            "alternatives": [],
+            "reasoning": "The actual Go store has no point-in-time read API or historical file snapshots. Fork commit still enforces the stored parent revision with compare-and-set, and docs/fork-architecture.md calls out the read fallback explicitly."
+          },
+          "significance": "high"
         }
       ]
     }
