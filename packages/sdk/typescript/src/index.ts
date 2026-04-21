@@ -59,6 +59,7 @@ export type {
   BulkWriteInput,
   BulkWriteResponse,
   ConflictErrorResponse,
+  ContentIdentity,
   DeleteFileInput,
   DeadLetterFeedResponse,
   DeadLetterItem,

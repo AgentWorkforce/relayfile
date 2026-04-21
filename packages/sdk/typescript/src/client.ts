@@ -337,7 +337,7 @@ export class RelayFileClient {
   }
 
   async writeFile(input: WriteFileInput): Promise<WriteQueuedResponse> {
-    const { workspaceId, path, correlationId, baseRevision, content, contentType, encoding, semantics, signal } = input;
+    const { workspaceId, path, correlationId, baseRevision, content, contentType, encoding, contentIdentity, signal } = input;
     const query = buildQuery({ path });
     return this.request<WriteQueuedResponse>({
       method: "PUT",
@@ -351,7 +351,8 @@ export class RelayFileClient {
         contentType: contentType ?? "text/markdown",
         content,
         encoding,
-        semantics: input.semantics
+        semantics: input.semantics,
+        ...(contentIdentity ? { contentIdentity } : {})
       },
       signal
     });
