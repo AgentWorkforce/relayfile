@@ -300,7 +300,7 @@ describe('startAutoSync', () => {
       excludeDirs: [],
     });
 
-    const auto = handle.startAutoSync({ writeFinishMs: 50, scanIntervalMs: 10_000 });
+    const auto = handle.startAutoSync({ debounceMs: 50, scanIntervalMs: 10_000 });
     await auto.ready();
 
     writeFileSync(path.join(handle.mountDir, 'file.txt'), 'changed-before-stop', 'utf8');
