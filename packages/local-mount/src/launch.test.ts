@@ -1,6 +1,7 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -9,6 +10,7 @@ import {
 import os from 'node:os';
 import path from 'node:path';
 import { launchOnMount } from './launch.js';
+import * as symlinkMount from './symlink-mount.js';
 
 describe('launchOnMount', () => {
   let projectDir: string;
@@ -77,5 +79,63 @@ describe('launchOnMount', () => {
     });
     expect(sawMountDir).toBeTruthy();
     expect(result.exitCode).toBe(0);
+  });
+
+  it('fires onAfterSync with a partial count and still cleans up when shutdownSignal aborts after child exit', async () => {
+    mkdirSync(mountDir, { recursive: true });
+
+    const controller = new AbortController();
+    let cleanedUp = false;
+    let stopCalled = false;
+
+    const createSpy = vi.spyOn(symlinkMount, 'createSymlinkMount').mockReturnValue({
+      mountDir,
+      startAutoSync: () => ({
+        stop: async () => {
+          stopCalled = true;
+        },
+        reconcile: async () => 0,
+        totalChanges: () => 0,
+        ready: async () => {},
+      }),
+      syncBack: async ({ signal } = {}) => {
+        let synced = 0;
+        for (let i = 0; i < 3; i += 1) {
+          if (signal?.aborted) {
+            break;
+          }
+          synced += 1;
+          if (i === 0) {
+            controller.abort();
+          }
+          await new Promise((resolve) => setImmediate(resolve));
+        }
+        return synced;
+      },
+      cleanup: () => {
+        cleanedUp = true;
+      },
+    });
+
+    let syncedSeen = -1;
+    try {
+      const result = await launchOnMount({
+        cli: '/bin/sh',
+        projectDir,
+        mountDir,
+        args: ['-c', 'exit 0'],
+        shutdownSignal: controller.signal,
+        onAfterSync: (count) => {
+          syncedSeen = count;
+        },
+      });
+
+      expect(result.exitCode).toBe(0);
+      expect(stopCalled).toBe(true);
+      expect(syncedSeen).toBe(1);
+      expect(cleanedUp).toBe(true);
+    } finally {
+      createSpy.mockRestore();
+    }
   });
 });

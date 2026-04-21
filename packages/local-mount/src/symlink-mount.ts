@@ -34,7 +34,7 @@ export interface SymlinkMountOptions {
 
 export interface SymlinkMountHandle {
   mountDir: string;
-  syncBack(): Promise<number>;
+  syncBack(opts?: { signal?: AbortSignal }): Promise<number>;
   /**
    * Start bidirectional auto-sync: watches both the mount and project trees
    * via @parcel/watcher and runs a full reconcile every `scanIntervalMs`
@@ -117,20 +117,30 @@ export function createSymlinkMount(
 
   return {
     mountDir: resolvedMountDir,
-    async syncBack(): Promise<number> {
+    async syncBack(opts?: { signal?: AbortSignal }): Promise<number> {
       let synced = 0;
       const realProjectDir = realpathSync(resolvedProjectDir);
       const realMountDir = realpathSync(resolvedMountDir);
       const files = listFiles(realMountDir);
+      const signal = opts?.signal;
 
       for (const sourceFile of files) {
-        synced += syncMountedFileBack(
+        if (signal?.aborted) {
+          break;
+        }
+
+        const syncedForFile = syncMountedFileBack(
           sourceFile,
           realMountDir,
           realProjectDir,
           readonlyMatcher,
           ignoredMatcher
         );
+        synced += syncedForFile;
+
+        if (signal && syncedForFile > 0 && !signal.aborted) {
+          await new Promise<void>((resolve) => setImmediate(resolve));
+        }
       }
 
       return synced;

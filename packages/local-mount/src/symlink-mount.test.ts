@@ -134,4 +134,59 @@ describe('createSymlinkMount', () => {
 
     handle.cleanup();
   });
+
+  it('syncBack: returns immediately when already aborted', async () => {
+    write(path.join(projectDir, 'writable.txt'), 'original');
+
+    const handle = createSymlinkMount(projectDir, mountDir, {
+      ignoredPatterns: [],
+      readonlyPatterns: [],
+      excludeDirs: [],
+    });
+
+    writeFileSync(path.join(handle.mountDir, 'writable.txt'), 'changed', 'utf8');
+
+    const controller = new AbortController();
+    controller.abort();
+
+    const synced = await handle.syncBack({ signal: controller.signal });
+
+    expect(synced).toBe(0);
+    expect(readFileSync(path.join(projectDir, 'writable.txt'), 'utf8')).toBe('original');
+
+    handle.cleanup();
+  });
+
+  it('syncBack: returns a partial count when aborted mid-walk', async () => {
+    write(path.join(projectDir, 'a.txt'), 'a0');
+    write(path.join(projectDir, 'b.txt'), 'b0');
+    write(path.join(projectDir, 'c.txt'), 'c0');
+
+    const handle = createSymlinkMount(projectDir, mountDir, {
+      ignoredPatterns: [],
+      readonlyPatterns: [],
+      excludeDirs: [],
+    });
+
+    writeFileSync(path.join(handle.mountDir, 'a.txt'), 'a1', 'utf8');
+    writeFileSync(path.join(handle.mountDir, 'b.txt'), 'b1', 'utf8');
+    writeFileSync(path.join(handle.mountDir, 'c.txt'), 'c1', 'utf8');
+
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(), 0);
+
+    const synced = await handle.syncBack({ signal: controller.signal });
+
+    expect(synced).toBeGreaterThanOrEqual(1);
+    expect(synced).toBeLessThan(3);
+
+    const values = [
+      readFileSync(path.join(projectDir, 'a.txt'), 'utf8'),
+      readFileSync(path.join(projectDir, 'b.txt'), 'utf8'),
+      readFileSync(path.join(projectDir, 'c.txt'), 'utf8'),
+    ];
+    expect(values.filter((value) => value.endsWith('1'))).toHaveLength(synced);
+
+    handle.cleanup();
+  });
 });

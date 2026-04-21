@@ -6,7 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_No unreleased changes._
+### Added
+- `launchOnMount({ shutdownSignal })`, `AutoSyncHandle.stop({ signal })`, `AutoSyncHandle.reconcile({ signal })`, and `syncBack({ signal })` now support cooperative shutdown cancellation so post-child finalize work can return a partial sync count while still running `onAfterSync` and cleanup.
 
 ## [0.4.0] - 2026-04-21
 

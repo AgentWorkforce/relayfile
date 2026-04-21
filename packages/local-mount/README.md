@@ -19,7 +19,7 @@ Builds a mounted copy of `projectDir` at `mountDir` and returns a handle:
 ```ts
 interface SymlinkMountHandle {
   mountDir: string;
-  syncBack(): Promise<number>;
+  syncBack(opts?: { signal?: AbortSignal }): Promise<number>;
   startAutoSync(opts?: AutoSyncOptions): AutoSyncHandle;
   cleanup(): void;
 }
@@ -62,6 +62,8 @@ High-level helper that:
 
 It resolves with the child process exit code. `onAfterSync(count)` receives the sum of files changed by auto-sync plus the final sync-back pass.
 
+`launchOnMount({ shutdownSignal })` threads an optional `AbortSignal` into the shutdown phase only. It does not cancel the spawned CLI. If shutdown is aborted, `onAfterSync` still fires with the partial count gathered so far and the mount directory is still cleaned up.
+
 ### Auto-sync
 
 By default, `launchOnMount` keeps the mount and project directory in sync continuously while the CLI is running, rather than only at exit. The same machinery is available standalone via `handle.startAutoSync()`.
@@ -77,8 +79,8 @@ interface AutoSyncOptions {
 }
 
 interface AutoSyncHandle {
-  stop(): Promise<void>;
-  reconcile(): Promise<number>;
+  stop(opts?: { signal?: AbortSignal }): Promise<void>;
+  reconcile(opts?: { signal?: AbortSignal }): Promise<number>;
   totalChanges(): number;
   ready(): Promise<void>;
 }
@@ -97,6 +99,7 @@ launchOnMount({ /* ... */, autoSync: { scanIntervalMs: 5_000, debounceMs: 100 } 
 How it works:
 - [@parcel/watcher](https://www.npmjs.com/package/@parcel/watcher) watches both the mount and the project tree using native FSEvents/inotify/ReadDirectoryChangesW
 - every `scanIntervalMs`, a full reconcile walks both trees as a safety net for missed events
+- `stop({ signal })` still closes watchers if aborted, but skips the final draining reconcile
 - per-file `mtime` is tracked at the last sync, so the scan skips files that haven't changed
 
 Conflict and delete rules:
@@ -154,6 +157,7 @@ import os from 'node:os';
 
 const projectDir = '/projects/acme-api';
 const mountDir = path.join(os.tmpdir(), 'acme-api-agent-mount');
+const abortController = new AbortController();
 
 const { ignoredPatterns, readonlyPatterns } = readAgentDotfiles(projectDir, {
   agentName: 'reviewer',
@@ -172,6 +176,7 @@ const result = await launchOnMount({
     // Add extra instructions or scratch files inside the mount if needed.
     console.log(`Mount ready at ${dir}`);
   },
+  shutdownSignal: abortController.signal,
   onAfterSync: async (count) => {
     console.log(`Synced ${count} writable file(s) back to the project`);
   },
@@ -192,6 +197,10 @@ console.log(result.exitCode);
 - symlinks inside the mount are skipped
 
 The returned number is the count of files written back to `projectDir` in that pass. `syncBack()` never deletes — delete propagation is handled by auto-sync.
+
+`syncBack({ signal })` checks for aborts between files. If the signal aborts during shutdown, it returns the partial count accumulated so far instead of throwing, which lets callers report a partial sync and still run cleanup.
+
+`reconcile({ signal })` and the internal tree walk also poll for aborts between file visits so an in-flight draining scan can stop cooperatively.
 
 ## Safety constraints
 
