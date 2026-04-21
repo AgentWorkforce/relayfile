@@ -194,6 +194,22 @@ relayfile observer
 relayfile observer ws_123 --no-open
 ```
 
+## Changelogs
+
+Each publishable package keeps its own `CHANGELOG.md`:
+
+- [`relayfile`](packages/cli/CHANGELOG.md) — CLI
+- [`@relayfile/core`](packages/core/CHANGELOG.md)
+- [`@relayfile/sdk`](packages/sdk/typescript/CHANGELOG.md)
+- [`@relayfile/local-mount`](packages/local-mount/CHANGELOG.md)
+- [`@relayfile/file-observer`](packages/file-observer/CHANGELOG.md)
+
+**Process** — landed in every PR, finalized at release:
+
+1. PRs that touch a package add an entry under its `## [Unreleased]` section (Keep a Changelog format: `Added` / `Changed` / `Deprecated` / `Removed` / `Fixed` / `Security`). Include the PR number as a link reference at the bottom of the file.
+2. When cutting a release, rename `[Unreleased]` to `[x.y.z] - YYYY-MM-DD` and open a fresh empty `[Unreleased]` section above it. Update the compare-link references accordingly.
+3. Packages without user-visible changes in a given release leave `[Unreleased]` as `_No unreleased changes._` through the version bump.
+
 ## License
 
 MIT
