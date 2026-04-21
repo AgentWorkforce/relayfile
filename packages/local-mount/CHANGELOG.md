@@ -6,6 +6,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+_No unreleased changes._
+
+## [0.4.0] - 2026-04-21
+
 ### Changed
 - **BREAKING**: Renamed `AutoSyncOptions.writeFinishMs` → `AutoSyncOptions.debounceMs`. The semantics also shifted — it is now a per-path event coalescing debounce (default `50ms`), not a file-stability threshold (previously `200ms`). Any caller passing `writeFinishMs` will now be ignored silently under TypeScript's structural typing; update the field name.
 - Replaced `chokidar` with [`@parcel/watcher`](https://www.npmjs.com/package/@parcel/watcher) for file watching. `autoSync.stop()` no longer hangs on teardown — native FSEvents/inotify/ReadDirectoryChangesW subscriptions unsubscribe promptly instead of draining per-file `awaitWriteFinish` polling timers.
@@ -36,7 +40,8 @@ Initial release.
 - Directory-only ignore patterns (e.g. `cache/`) match directories without swallowing like-named files.
 - README documenting the mount lifecycle, dotfile semantics, and auto-sync behavior. ([#48])
 
-[Unreleased]: https://github.com/AgentWorkforce/relayfile/compare/v0.3.2...HEAD
+[Unreleased]: https://github.com/AgentWorkforce/relayfile/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.4.0
 [0.3.0]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.3.0
 [0.2.1]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.2.1
 [0.2.0]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.2.0
