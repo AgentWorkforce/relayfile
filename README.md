@@ -207,8 +207,8 @@ Each publishable package keeps its own `CHANGELOG.md`:
 **Process** — landed in every PR, finalized at release:
 
 1. PRs that touch a package add an entry under its `## [Unreleased]` section (Keep a Changelog format: `Added` / `Changed` / `Deprecated` / `Removed` / `Fixed` / `Security`). Include the PR number as a link reference at the bottom of the file.
-2. When cutting a release, rename `[Unreleased]` to `[x.y.z] - YYYY-MM-DD` and open a fresh empty `[Unreleased]` section above it. Update the compare-link references accordingly.
-3. Packages without user-visible changes in a given release leave `[Unreleased]` as `_No unreleased changes._` through the version bump.
+2. At release, the `Publish Package` workflow runs [`scripts/finalize-changelogs.mjs`](scripts/finalize-changelogs.mjs), which renames `[Unreleased]` to `[x.y.z] - YYYY-MM-DD`, opens a fresh empty `[Unreleased]` above, and rewrites the compare-link references. Prereleases skip this step so their entries accumulate until the final release.
+3. Packages without user-visible changes in a given release leave `[Unreleased]` as `_No unreleased changes._`. The finalizer rewrites the dated section's body to `_No user-visible changes in this release._` so the release heading still reads naturally.
 
 ## License
 

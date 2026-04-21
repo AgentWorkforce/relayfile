@@ -156,6 +156,18 @@ jobs:
             }
           "
 
+      # Rename each package's `## [Unreleased]` section to `## [X.Y.Z] - <today>`
+      # and reopen an empty Unreleased section. Skipped on prereleases and dry
+      # runs — prereleases would fragment a single logical release into many
+      # changelog entries, and dry runs must not mutate files.
+      - name: Finalize CHANGELOGs
+        if: |
+          steps.bump.outputs.is_prerelease == 'false' &&
+          github.event.inputs.dry_run != 'true'
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: node scripts/finalize-changelogs.mjs "${{ steps.bump.outputs.new_version }}"
+
       - name: Build packages
         run: |
           npm run build --workspace=packages/core
@@ -173,13 +185,18 @@ jobs:
             package.json
             packages/core/package.json
             packages/core/dist/
+            packages/core/CHANGELOG.md
             packages/sdk/typescript/package.json
             packages/sdk/typescript/dist/
+            packages/sdk/typescript/CHANGELOG.md
             packages/cli/package.json
             packages/cli/bin/
+            packages/cli/CHANGELOG.md
             packages/file-observer/package.json
+            packages/file-observer/CHANGELOG.md
             packages/local-mount/package.json
             packages/local-mount/dist/
+            packages/local-mount/CHANGELOG.md
           retention-days: 1
 
   # Cross-compile relayfile-mount for every consumer-supported platform.
@@ -420,7 +437,13 @@ jobs:
           git config user.name "GitHub Actions"
           git config user.email "actions@github.com"
 
-          git add package.json packages/core/package.json packages/sdk/typescript/package.json packages/cli/package.json packages/file-observer/package.json packages/local-mount/package.json
+          git add \
+            package.json \
+            packages/core/package.json packages/core/CHANGELOG.md \
+            packages/sdk/typescript/package.json packages/sdk/typescript/CHANGELOG.md \
+            packages/cli/package.json packages/cli/CHANGELOG.md \
+            packages/file-observer/package.json packages/file-observer/CHANGELOG.md \
+            packages/local-mount/package.json packages/local-mount/CHANGELOG.md
           if ! git diff --staged --quiet; then
             git commit -m "chore(release): v${NEW_VERSION}"
             git push
