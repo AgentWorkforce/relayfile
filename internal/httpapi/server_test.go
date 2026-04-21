@@ -315,6 +315,345 @@ func TestLifecycleAndConflicts(t *testing.T) {
 	t.Fatalf("expected at least one file_delete operation in filtered list")
 }
 
+func TestForkWriteReadOverlay(t *testing.T) {
+	server := newForkTestServer(t)
+	token := forkTestToken(t, "ws_fork_overlay")
+	fork := createForkForTest(t, server, token, "ws_fork_overlay", "proposal-overlay", nil)
+
+	write := writeForkFileForTest(t, server, token, "ws_fork_overlay", fork.ForkID, "/notion/Fork.md", "0", "# forked", "corr_fork_overlay_write")
+	if !strings.HasPrefix(write.TargetRevision, "fork:"+fork.ForkID+":") {
+		t.Fatalf("expected fork overlay revision, got %q", write.TargetRevision)
+	}
+
+	file := readForkFileForTest(t, server, token, "ws_fork_overlay", fork.ForkID, "/notion/Fork.md", "corr_fork_overlay_read")
+	if file.Content != "# forked" {
+		t.Fatalf("expected fork overlay content, got %q", file.Content)
+	}
+}
+
+func TestForkReadFallsThroughToParent(t *testing.T) {
+	server := newForkTestServer(t)
+	token := forkTestToken(t, "ws_fork_parent")
+	seed := writeFileForTest(t, server, token, "ws_fork_parent", "/notion/Parent.md", "0", "# parent", "corr_fork_parent_seed")
+	fork := createForkForTest(t, server, token, "ws_fork_parent", "proposal-parent", nil)
+
+	file := readForkFileForTest(t, server, token, "ws_fork_parent", fork.ForkID, "/notion/Parent.md", "corr_fork_parent_read")
+	if file.Content != "# parent" || file.Revision != seed.TargetRevision {
+		t.Fatalf("expected parent content/revision through fork, got content=%q revision=%q", file.Content, file.Revision)
+	}
+}
+
+func TestForkDeleteTombstoneMasksParent(t *testing.T) {
+	server := newForkTestServer(t)
+	token := forkTestToken(t, "ws_fork_delete")
+	seed := writeFileForTest(t, server, token, "ws_fork_delete", "/notion/Delete.md", "0", "# parent", "corr_fork_delete_seed")
+	fork := createForkForTest(t, server, token, "ws_fork_delete", "proposal-delete", nil)
+
+	deleteResp := doRequest(t, server, request{
+		method: http.MethodDelete,
+		path:   "/v1/workspaces/ws_fork_delete/fs/file?path=/notion/Delete.md&forkId=" + fork.ForkID,
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_fork_delete",
+			"If-Match":         seed.TargetRevision,
+		},
+	})
+	if deleteResp.Code != http.StatusAccepted {
+		t.Fatalf("expected 202 deleting in fork, got %d (%s)", deleteResp.Code, deleteResp.Body.String())
+	}
+
+	masked := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/workspaces/ws_fork_delete/fs/file?path=/notion/Delete.md&forkId=" + fork.ForkID,
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_fork_delete_read",
+		},
+	})
+	if masked.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 reading fork tombstone, got %d (%s)", masked.Code, masked.Body.String())
+	}
+
+	parent := readFileForTest(t, server, token, "ws_fork_delete", "/notion/Delete.md", "corr_fork_delete_parent")
+	if parent.Content != "# parent" {
+		t.Fatalf("expected parent content to remain, got %q", parent.Content)
+	}
+}
+
+func TestForkCommitPromotesOverlayToParent(t *testing.T) {
+	server := newForkTestServer(t)
+	token := forkTestToken(t, "ws_fork_commit")
+	fork := createForkForTest(t, server, token, "ws_fork_commit", "proposal-commit", nil)
+	writeForkFileForTest(t, server, token, "ws_fork_commit", fork.ForkID, "/notion/Commit.md", "0", "# committed", "corr_fork_commit_write")
+
+	commit := commitForkForTest(t, server, token, "ws_fork_commit", fork.ForkID, "corr_fork_commit")
+	if commit.WrittenCount != 1 || commit.DeletedCount != 0 || commit.Revision == "" {
+		t.Fatalf("unexpected commit response: %+v", commit)
+	}
+	parent := readFileForTest(t, server, token, "ws_fork_commit", "/notion/Commit.md", "corr_fork_commit_parent")
+	if parent.Content != "# committed" || parent.Revision != commit.Revision {
+		t.Fatalf("expected committed parent content/revision, got content=%q revision=%q commit=%q", parent.Content, parent.Revision, commit.Revision)
+	}
+}
+
+func TestForkCommitReturnsParentMovedConflict(t *testing.T) {
+	server := newForkTestServer(t)
+	token := forkTestToken(t, "ws_fork_conflict")
+	fork := createForkForTest(t, server, token, "ws_fork_conflict", "proposal-conflict", nil)
+	writeForkFileForTest(t, server, token, "ws_fork_conflict", fork.ForkID, "/notion/Fork.md", "0", "# fork", "corr_fork_conflict_overlay")
+	writeFileForTest(t, server, token, "ws_fork_conflict", "/notion/ParentMove.md", "0", "# parent move", "corr_fork_conflict_parent")
+
+	resp := doRequest(t, server, request{
+		method: http.MethodPost,
+		path:   "/v1/workspaces/ws_fork_conflict/forks/" + fork.ForkID + "/commit",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_fork_conflict_commit",
+		},
+	})
+	if resp.Code != http.StatusConflict {
+		t.Fatalf("expected 409 parent_moved, got %d (%s)", resp.Code, resp.Body.String())
+	}
+	var payload map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode conflict payload: %v", err)
+	}
+	if payload["code"] != "parent_moved" || payload["message"] != "parent moved" || payload["currentRevision"] == "" {
+		t.Fatalf("unexpected parent_moved payload: %+v", payload)
+	}
+	details, ok := payload["details"].(map[string]any)
+	if !ok || details["currentRevision"] != payload["currentRevision"] {
+		t.Fatalf("expected parent_moved details to include currentRevision, got %+v", payload)
+	}
+}
+
+func TestForkCommitEnforcesPathScopedWriteAccess(t *testing.T) {
+	server := newForkTestServer(t)
+	workspaceID := "ws_fork_commit_scope"
+	ownerToken := forkTestToken(t, workspaceID)
+	limitedToken := mustTestJWT(t, "dev-secret", workspaceID, "Limited", []string{"relayfile:fs:write:/notion/Allowed/*"}, time.Now().Add(time.Hour))
+	fork := createForkForTest(t, server, ownerToken, workspaceID, "proposal-scope", nil)
+	writeForkFileForTest(t, server, ownerToken, workspaceID, fork.ForkID, "/notion/Secret.md", "0", "# secret", "corr_fork_scope_write")
+
+	resp := doRequest(t, server, request{
+		method: http.MethodPost,
+		path:   "/v1/workspaces/" + workspaceID + "/forks/" + fork.ForkID + "/commit",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + limitedToken,
+			"X-Correlation-Id": "corr_fork_scope_commit",
+		},
+	})
+	if resp.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 path-scoped fork commit, got %d (%s)", resp.Code, resp.Body.String())
+	}
+	parentRead := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/workspaces/" + workspaceID + "/fs/file?path=/notion/Secret.md",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + ownerToken,
+			"X-Correlation-Id": "corr_fork_scope_parent",
+		},
+	})
+	if parentRead.Code != http.StatusNotFound {
+		t.Fatalf("expected denied commit to leave parent untouched, got %d (%s)", parentRead.Code, parentRead.Body.String())
+	}
+}
+
+func TestForkCommitEnforcesParentACL(t *testing.T) {
+	server := newForkTestServer(t)
+	workspaceID := "ws_fork_commit_acl"
+	ownerToken := mustTestJWT(t, "dev-secret", workspaceID, "Owner", []string{"fs:read", "fs:write", "finance"}, time.Now().Add(time.Hour))
+	limitedToken := mustTestJWT(t, "dev-secret", workspaceID, "Limited", []string{"fs:write"}, time.Now().Add(time.Hour))
+	seed := writeFileForTest(t, server, ownerToken, workspaceID, "/notion/Protected.md", "0", "# protected", "corr_fork_acl_seed")
+
+	protectResp := doRequest(t, server, request{
+		method: http.MethodPut,
+		path:   "/v1/workspaces/" + workspaceID + "/fs/file?path=/notion/Protected.md",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + ownerToken,
+			"X-Correlation-Id": "corr_fork_acl_protect",
+			"If-Match":         seed.TargetRevision,
+		},
+		body: map[string]any{
+			"contentType": "text/markdown",
+			"content":     "# protected",
+			"semantics": map[string]any{
+				"permissions": []string{"scope:finance"},
+			},
+		},
+	})
+	if protectResp.Code != http.StatusAccepted {
+		t.Fatalf("expected 202 protecting parent file, got %d (%s)", protectResp.Code, protectResp.Body.String())
+	}
+	var protected relayfile.WriteResult
+	if err := json.NewDecoder(protectResp.Body).Decode(&protected); err != nil {
+		t.Fatalf("decode protected write: %v", err)
+	}
+
+	fork := createForkForTest(t, server, ownerToken, workspaceID, "proposal-acl", nil)
+	writeForkFileForTest(t, server, ownerToken, workspaceID, fork.ForkID, "/notion/Protected.md", protected.TargetRevision, "# staged", "corr_fork_acl_overlay")
+
+	resp := doRequest(t, server, request{
+		method: http.MethodPost,
+		path:   "/v1/workspaces/" + workspaceID + "/forks/" + fork.ForkID + "/commit",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + limitedToken,
+			"X-Correlation-Id": "corr_fork_acl_commit",
+		},
+	})
+	if resp.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 ACL-protected fork commit, got %d (%s)", resp.Code, resp.Body.String())
+	}
+	parent := readFileForTest(t, server, ownerToken, workspaceID, "/notion/Protected.md", "corr_fork_acl_parent")
+	if parent.Content != "# protected" {
+		t.Fatalf("expected denied commit to preserve parent content, got %q", parent.Content)
+	}
+}
+
+func TestForkDiscardIsIdempotentAndRemovesOverlay(t *testing.T) {
+	server := newForkTestServer(t)
+	token := forkTestToken(t, "ws_fork_discard")
+	fork := createForkForTest(t, server, token, "ws_fork_discard", "proposal-discard", nil)
+	writeForkFileForTest(t, server, token, "ws_fork_discard", fork.ForkID, "/notion/Discard.md", "0", "# discard", "corr_fork_discard_write")
+
+	for i := 0; i < 2; i++ {
+		resp := doRequest(t, server, request{
+			method: http.MethodDelete,
+			path:   "/v1/workspaces/ws_fork_discard/forks/" + fork.ForkID,
+			headers: map[string]string{
+				"Authorization":    "Bearer " + token,
+				"X-Correlation-Id": fmt.Sprintf("corr_fork_discard_%d", i),
+			},
+		})
+		if resp.Code != http.StatusNoContent {
+			t.Fatalf("expected idempotent 204 discard, got %d (%s)", resp.Code, resp.Body.String())
+		}
+	}
+
+	resp := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/workspaces/ws_fork_discard/fs/file?path=/notion/Discard.md&forkId=" + fork.ForkID,
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_fork_discard_read",
+		},
+	})
+	if resp.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 after discard, got %d (%s)", resp.Code, resp.Body.String())
+	}
+}
+
+func TestForkCreateIsIdempotentByProposal(t *testing.T) {
+	server := newForkTestServer(t)
+	token := forkTestToken(t, "ws_fork_idempotent")
+
+	first := createForkForTest(t, server, token, "ws_fork_idempotent", "proposal-same", nil)
+	second := createForkForTest(t, server, token, "ws_fork_idempotent", "proposal-same", nil)
+	if first.ForkID != second.ForkID {
+		t.Fatalf("expected same fork id for same proposal, got %q and %q", first.ForkID, second.ForkID)
+	}
+}
+
+func TestForkExpiresAndCommitReturnsGone(t *testing.T) {
+	server := newForkTestServer(t)
+	token := forkTestToken(t, "ws_fork_expire")
+	ttl := int64(1)
+	fork := createForkForTest(t, server, token, "ws_fork_expire", "proposal-expire", &ttl)
+	writeForkFileForTest(t, server, token, "ws_fork_expire", fork.ForkID, "/notion/Expire.md", "0", "# expire", "corr_fork_expire_write")
+
+	expiresAt, err := time.Parse(time.RFC3339Nano, fork.ExpiresAt)
+	if err != nil {
+		t.Fatalf("parse fork expiresAt: %v", err)
+	}
+	if wait := time.Until(expiresAt) + 50*time.Millisecond; wait > 0 {
+		time.Sleep(wait)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		resp := doRequest(t, server, request{
+			method: http.MethodPost,
+			path:   "/v1/workspaces/ws_fork_expire/forks/" + fork.ForkID + "/commit",
+			headers: map[string]string{
+				"Authorization":    "Bearer " + token,
+				"X-Correlation-Id": "corr_fork_expire_commit",
+			},
+		})
+		if resp.Code == http.StatusGone {
+			var payload map[string]any
+			if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode expired payload: %v", err)
+			}
+			if payload["error"] != "fork_expired" {
+				t.Fatalf("expected fork_expired payload, got %+v", payload)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("expected 410 after expiry, last response %d (%s)", resp.Code, resp.Body.String())
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+
+	resp := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/workspaces/ws_fork_expire/fs/file?path=/notion/Expire.md&forkId=" + fork.ForkID,
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_fork_expire_read",
+		},
+	})
+	if resp.Code != http.StatusNotFound {
+		t.Fatalf("expected expired fork read to be 404, got %d (%s)", resp.Code, resp.Body.String())
+	}
+}
+
+func TestForkTreeMergesParentOverlayWritesAndDeletes(t *testing.T) {
+	server := newForkTestServer(t)
+	token := forkTestToken(t, "ws_fork_tree")
+	seed := writeFileForTest(t, server, token, "ws_fork_tree", "/notion/Tree/Parent.md", "0", "# parent", "corr_fork_tree_seed")
+	fork := createForkForTest(t, server, token, "ws_fork_tree", "proposal-tree", nil)
+	writeForkFileForTest(t, server, token, "ws_fork_tree", fork.ForkID, "/notion/Tree/Overlay.md", "0", "# overlay", "corr_fork_tree_overlay")
+
+	deleteResp := doRequest(t, server, request{
+		method: http.MethodDelete,
+		path:   "/v1/workspaces/ws_fork_tree/fs/file?path=/notion/Tree/Parent.md&forkId=" + fork.ForkID,
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_fork_tree_delete",
+			"If-Match":         seed.TargetRevision,
+		},
+	})
+	if deleteResp.Code != http.StatusAccepted {
+		t.Fatalf("expected 202 deleting in fork tree test, got %d (%s)", deleteResp.Code, deleteResp.Body.String())
+	}
+
+	treeResp := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/workspaces/ws_fork_tree/fs/tree?path=/notion/Tree&depth=1&forkId=" + fork.ForkID,
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_fork_tree_read",
+		},
+	})
+	if treeResp.Code != http.StatusOK {
+		t.Fatalf("expected 200 fork tree, got %d (%s)", treeResp.Code, treeResp.Body.String())
+	}
+	var tree relayfile.TreeResponse
+	if err := json.NewDecoder(treeResp.Body).Decode(&tree); err != nil {
+		t.Fatalf("decode fork tree: %v", err)
+	}
+	paths := map[string]bool{}
+	for _, entry := range tree.Entries {
+		paths[entry.Path] = true
+	}
+	if !paths["/notion/Tree/Overlay.md"] {
+		t.Fatalf("expected overlay file in fork tree, got %+v", tree.Entries)
+	}
+	if paths["/notion/Tree/Parent.md"] {
+		t.Fatalf("expected deleted parent file hidden from fork tree, got %+v", tree.Entries)
+	}
+}
+
 func TestWriteFilePayloadTooLarge(t *testing.T) {
 	server := NewServerWithConfig(relayfile.NewStore(), ServerConfig{
 		MaxBodyBytes: 128,
@@ -4961,6 +5300,158 @@ func doRawRequest(t *testing.T, server http.Handler, r rawRequest) *httptest.Res
 	rec := httptest.NewRecorder()
 	server.ServeHTTP(rec, req)
 	return rec
+}
+
+func newForkTestServer(t *testing.T) http.Handler {
+	t.Helper()
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
+	t.Cleanup(store.Close)
+	return NewServer(store)
+}
+
+func forkTestToken(t *testing.T, workspaceID string) string {
+	t.Helper()
+	return mustTestJWT(t, "dev-secret", workspaceID, "Worker1", []string{"fs:read", "fs:write"}, time.Now().Add(time.Hour))
+}
+
+func createForkForTest(t *testing.T, server http.Handler, token, workspaceID, proposalID string, ttlSeconds *int64) relayfile.ForkHandle {
+	t.Helper()
+	body := map[string]any{
+		"proposalId": proposalID,
+	}
+	if ttlSeconds != nil {
+		body["ttlSeconds"] = *ttlSeconds
+	}
+	resp := doRequest(t, server, request{
+		method: http.MethodPost,
+		path:   "/v1/workspaces/" + workspaceID + "/forks",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_create_" + proposalID,
+		},
+		body: body,
+	})
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200 creating fork, got %d (%s)", resp.Code, resp.Body.String())
+	}
+	var handle relayfile.ForkHandle
+	if err := json.NewDecoder(resp.Body).Decode(&handle); err != nil {
+		t.Fatalf("decode fork handle: %v", err)
+	}
+	if handle.ForkID == "" || handle.ProposalID != proposalID || handle.WorkspaceID != workspaceID || handle.ExpiresAt == "" {
+		t.Fatalf("unexpected fork handle: %+v", handle)
+	}
+	return handle
+}
+
+func writeFileForTest(t *testing.T, server http.Handler, token, workspaceID, filePath, ifMatch, content, correlationID string) relayfile.WriteResult {
+	t.Helper()
+	resp := doRequest(t, server, request{
+		method: http.MethodPut,
+		path:   "/v1/workspaces/" + workspaceID + "/fs/file?path=" + filePath,
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": correlationID,
+			"If-Match":         ifMatch,
+		},
+		body: map[string]any{
+			"contentType": "text/markdown",
+			"content":     content,
+		},
+	})
+	if resp.Code != http.StatusAccepted {
+		t.Fatalf("expected 202 writing file, got %d (%s)", resp.Code, resp.Body.String())
+	}
+	var result relayfile.WriteResult
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode write result: %v", err)
+	}
+	return result
+}
+
+func writeForkFileForTest(t *testing.T, server http.Handler, token, workspaceID, forkID, filePath, ifMatch, content, correlationID string) relayfile.WriteResult {
+	t.Helper()
+	resp := doRequest(t, server, request{
+		method: http.MethodPut,
+		path:   "/v1/workspaces/" + workspaceID + "/fs/file?path=" + filePath + "&forkId=" + forkID,
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": correlationID,
+			"If-Match":         ifMatch,
+		},
+		body: map[string]any{
+			"contentType": "text/markdown",
+			"content":     content,
+		},
+	})
+	if resp.Code != http.StatusAccepted {
+		t.Fatalf("expected 202 writing fork file, got %d (%s)", resp.Code, resp.Body.String())
+	}
+	var result relayfile.WriteResult
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode fork write result: %v", err)
+	}
+	return result
+}
+
+func readFileForTest(t *testing.T, server http.Handler, token, workspaceID, filePath, correlationID string) relayfile.File {
+	t.Helper()
+	resp := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/workspaces/" + workspaceID + "/fs/file?path=" + filePath,
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": correlationID,
+		},
+	})
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200 reading file, got %d (%s)", resp.Code, resp.Body.String())
+	}
+	var file relayfile.File
+	if err := json.NewDecoder(resp.Body).Decode(&file); err != nil {
+		t.Fatalf("decode file: %v", err)
+	}
+	return file
+}
+
+func readForkFileForTest(t *testing.T, server http.Handler, token, workspaceID, forkID, filePath, correlationID string) relayfile.File {
+	t.Helper()
+	resp := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/workspaces/" + workspaceID + "/fs/file?path=" + filePath + "&forkId=" + forkID,
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": correlationID,
+		},
+	})
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200 reading fork file, got %d (%s)", resp.Code, resp.Body.String())
+	}
+	var file relayfile.File
+	if err := json.NewDecoder(resp.Body).Decode(&file); err != nil {
+		t.Fatalf("decode fork file: %v", err)
+	}
+	return file
+}
+
+func commitForkForTest(t *testing.T, server http.Handler, token, workspaceID, forkID, correlationID string) relayfile.ForkCommitResponse {
+	t.Helper()
+	resp := doRequest(t, server, request{
+		method: http.MethodPost,
+		path:   "/v1/workspaces/" + workspaceID + "/forks/" + forkID + "/commit",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": correlationID,
+		},
+	})
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200 committing fork, got %d (%s)", resp.Code, resp.Body.String())
+	}
+	var result relayfile.ForkCommitResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode fork commit response: %v", err)
+	}
+	return result
 }
 
 func mustTestJWT(t *testing.T, secret, workspaceID, agentName string, scopes []string, exp time.Time) string {

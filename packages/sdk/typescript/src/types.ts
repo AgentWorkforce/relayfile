@@ -49,6 +49,18 @@ export interface FileSemantics {
   comments?: string[];
 }
 
+/**
+ * Stable identity for an idempotent write, used by the server to coalesce
+ * duplicate deliveries (webhook retries, cross-product fan-in). Two writes
+ * with equal `(kind, key)` in the same workspace within the dedup window
+ * resolve to the same op. Callers typically derive `key` from the upstream
+ * event id, e.g. `github:push:<sha>`.
+ */
+export interface ContentIdentity {
+  kind: string;
+  key: string;
+}
+
 export interface FileReadResponse {
   path: string;
   revision: string;
@@ -66,6 +78,7 @@ export interface FileWriteRequest {
   content: string;
   encoding?: "utf-8" | "base64";
   semantics?: FileSemantics;
+  contentIdentity?: ContentIdentity;
 }
 
 export interface BulkWriteFile {
@@ -73,11 +86,13 @@ export interface BulkWriteFile {
   contentType?: string;
   content: string;
   encoding?: "utf-8" | "base64";
+  contentIdentity?: ContentIdentity;
 }
 
 export interface BulkWriteInput {
   workspaceId: string;
   files: BulkWriteFile[];
+  forkId?: string;
   correlationId?: string;
   signal?: AbortSignal;
 }
@@ -372,6 +387,7 @@ export interface ListTreeOptions {
   path?: string;
   depth?: number;
   cursor?: string;
+  forkId?: string;
   correlationId?: string;
   signal?: AbortSignal;
 }
@@ -385,6 +401,15 @@ export interface QueryFilesOptions {
   properties?: Record<string, string>;
   cursor?: string;
   limit?: number;
+  forkId?: string;
+  correlationId?: string;
+  signal?: AbortSignal;
+}
+
+export interface ReadFileInput {
+  workspaceId: string;
+  path: string;
+  forkId?: string;
   correlationId?: string;
   signal?: AbortSignal;
 }
@@ -507,6 +532,8 @@ export interface WriteFileInput {
   contentType?: string;
   encoding?: "utf-8" | "base64";
   semantics?: FileSemantics;
+  forkId?: string;
+  contentIdentity?: ContentIdentity;
   correlationId?: string;
   signal?: AbortSignal;
 }
@@ -515,8 +542,37 @@ export interface DeleteFileInput {
   workspaceId: string;
   path: string;
   baseRevision: string;
+  forkId?: string;
   correlationId?: string;
   signal?: AbortSignal;
+}
+
+export interface CreateForkInput {
+  workspaceId: string;
+  proposalId: string;
+  ttlSeconds?: number;
+  correlationId?: string;
+  signal?: AbortSignal;
+}
+
+export interface DiscardForkInput {
+  workspaceId: string;
+  forkId: string;
+  correlationId?: string;
+  signal?: AbortSignal;
+}
+
+export interface CommitForkInput {
+  workspaceId: string;
+  forkId: string;
+  correlationId?: string;
+  signal?: AbortSignal;
+}
+
+export interface CommitForkResponse {
+  revision: string;
+  writtenCount: number;
+  deletedCount: number;
 }
 
 export interface IngestWebhookInput {
