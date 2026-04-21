@@ -19,6 +19,8 @@ export type {
   EnvelopeQueryOptions,
 } from "./storage.js";
 
+export type { ForkOptions, ForkHandle } from "./forks.js";
+
 // Business logic modules (agent-3 will extract these from workspace.ts)
 export * from "./files.js";
 export * from "./acl.js";
