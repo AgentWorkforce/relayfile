@@ -23,6 +23,9 @@ import (
 
 type ServerConfig struct {
 	JWTSecret          string
+	JWKSURL            string
+	AcceptHS256        bool
+	JWKSFetchTimeout   time.Duration
 	InternalHMACSecret string
 	InternalMaxSkew    time.Duration
 	RateLimitMax       int
@@ -33,6 +36,7 @@ type ServerConfig struct {
 type Server struct {
 	store              *relayfile.Store
 	cfg                ServerConfig
+	bearerVerifier     *bearerVerifier
 	rateLimiter        *rateLimiter
 	internalReplayMu   sync.Mutex
 	internalReplaySeen map[string]time.Time
@@ -51,13 +55,29 @@ type rateEntry struct {
 }
 
 func NewServer(store *relayfile.Store) *Server {
-	return NewServerWithConfig(store, ServerConfig{})
+	server, err := NewServerWithConfig(store, ServerConfig{
+		JWTSecret:   "dev-secret",
+		AcceptHS256: true,
+	})
+	if err != nil {
+		panic(err)
+	}
+	log.Println("WARNING: using default JWTSecret — set a strong secret via configuration for production use")
+	return server
 }
 
-func NewServerWithConfig(store *relayfile.Store, cfg ServerConfig) *Server {
-	if cfg.JWTSecret == "" {
-		cfg.JWTSecret = "dev-secret"
-		log.Println("WARNING: using default JWTSecret — set a strong secret via configuration for production use")
+func NewServerWithConfig(store *relayfile.Store, cfg ServerConfig) (*Server, error) {
+	if !cfg.AcceptHS256 && cfg.JWTSecret == "" && cfg.JWKSURL == "" && cfg.JWKSFetchTimeout == 0 {
+		cfg.AcceptHS256 = true
+	}
+	if cfg.JWKSURL == "" {
+		cfg.JWKSURL = defaultRelayAuthJWKSURL
+	}
+	if cfg.JWKSFetchTimeout <= 0 {
+		cfg.JWKSFetchTimeout = defaultJWKSFetchTimeout
+	}
+	if cfg.AcceptHS256 && cfg.JWTSecret == "" {
+		return nil, fmt.Errorf("RELAYFILE_JWT_SECRET is required when RELAYFILE_VERIFIER_ACCEPT_HS256 is not false")
 	}
 	if cfg.InternalHMACSecret == "" {
 		cfg.InternalHMACSecret = "dev-internal-secret"
@@ -86,9 +106,10 @@ func NewServerWithConfig(store *relayfile.Store, cfg ServerConfig) *Server {
 	return &Server{
 		store:              store,
 		cfg:                cfg,
+		bearerVerifier:     newBearerVerifier(cfg),
 		rateLimiter:        limiter,
 		internalReplaySeen: map[string]time.Time{},
-	}
+	}, nil
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -226,7 +247,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			scopePath = strings.TrimSpace(r.URL.Query().Get("path"))
 		}
 	}
-	claims, authErr := authorizeBearer(r.Header.Get("Authorization"), s.cfg.JWTSecret, workspaceID, requiredScope, scopePath, time.Now().UTC())
+	claims, authErr := authorizeBearer(r.Header.Get("Authorization"), s.bearerVerifier, workspaceID, requiredScope, scopePath, time.Now().UTC())
 	if authErr != nil {
 		writeError(w, authErr.status, authErr.code, authErr.message, getCorrelationID(r))
 		return
@@ -370,7 +391,7 @@ func (s *Server) handleAdminReplay(w http.ResponseWriter, r *http.Request, parts
 		writeError(w, http.StatusNotFound, "not_found", "route not found", getCorrelationID(r))
 		return
 	}
-	if _, authErr := authorizeBearer(r.Header.Get("Authorization"), s.cfg.JWTSecret, "", "admin:replay", "", time.Now().UTC()); authErr != nil {
+	if _, authErr := authorizeBearer(r.Header.Get("Authorization"), s.bearerVerifier, "", "admin:replay", "", time.Now().UTC()); authErr != nil {
 		writeError(w, authErr.status, authErr.code, authErr.message, getCorrelationID(r))
 		return
 	}
@@ -409,7 +430,7 @@ func (s *Server) handleAdminReplay(w http.ResponseWriter, r *http.Request, parts
 }
 
 func (s *Server) handleAdminBackends(w http.ResponseWriter, r *http.Request) {
-	claims, authErr := authorizeBearer(r.Header.Get("Authorization"), s.cfg.JWTSecret, "", "", "", time.Now().UTC())
+	claims, authErr := authorizeBearer(r.Header.Get("Authorization"), s.bearerVerifier, "", "", "", time.Now().UTC())
 	if authErr != nil {
 		writeError(w, authErr.status, authErr.code, authErr.message, getCorrelationID(r))
 		return
@@ -427,7 +448,7 @@ func (s *Server) handleAdminBackends(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAdminIngress(w http.ResponseWriter, r *http.Request) {
-	claims, authErr := authorizeBearer(r.Header.Get("Authorization"), s.cfg.JWTSecret, "", "", "", time.Now().UTC())
+	claims, authErr := authorizeBearer(r.Header.Get("Authorization"), s.bearerVerifier, "", "", "", time.Now().UTC())
 	if authErr != nil {
 		writeError(w, authErr.status, authErr.code, authErr.message, getCorrelationID(r))
 		return
@@ -766,7 +787,7 @@ func (s *Server) handleAdminIngress(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAdminSync(w http.ResponseWriter, r *http.Request) {
-	claims, authErr := authorizeBearer(r.Header.Get("Authorization"), s.cfg.JWTSecret, "", "", "", time.Now().UTC())
+	claims, authErr := authorizeBearer(r.Header.Get("Authorization"), s.bearerVerifier, "", "", "", time.Now().UTC())
 	if authErr != nil {
 		writeError(w, authErr.status, authErr.code, authErr.message, getCorrelationID(r))
 		return

@@ -24,7 +24,7 @@ type websocketClientMessage struct {
 }
 
 func (s *Server) handleFileEventsWebSocket(w http.ResponseWriter, r *http.Request, workspaceID string) {
-	claims, authErr := authorizeBearer("Bearer "+strings.TrimSpace(r.URL.Query().Get("token")), s.cfg.JWTSecret, workspaceID, "fs:read", "", time.Now().UTC())
+	claims, authErr := authorizeBearer("Bearer "+strings.TrimSpace(r.URL.Query().Get("token")), s.bearerVerifier, workspaceID, "fs:read", "", time.Now().UTC())
 	if authErr != nil {
 		writeError(w, authErr.status, authErr.code, authErr.message, "")
 		return

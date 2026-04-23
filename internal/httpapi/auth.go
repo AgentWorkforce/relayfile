@@ -1,14 +1,29 @@
 package httpapi
 
 import (
+	"crypto"
 	"crypto/hmac"
+	"crypto/rsa"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
+	"log"
+	"math/big"
+	"net/http"
 	"strings"
+	"sync"
 	"time"
+)
+
+const (
+	defaultRelayAuthJWKSURL = "https://api.relayauth.dev/.well-known/jwks.json"
+	defaultJWKSFetchTimeout = 5 * time.Second
+	jwksCacheTTL            = 5 * time.Minute
+	jwksStaleGraceWindow    = time.Minute
 )
 
 type authError struct {
@@ -28,8 +43,51 @@ type tokenClaims struct {
 	Exp         int64
 }
 
-func authorizeBearer(authHeader, jwtSecret, workspaceID, requiredScope, requiredPath string, now time.Time) (tokenClaims, *authError) {
-	claims, err := parseBearer(authHeader, jwtSecret, now)
+type bearerVerifier struct {
+	jwtSecret        string
+	acceptHS256      bool
+	jwksURL          string
+	jwksFetchTimeout time.Duration
+	jwksCache        *jwksCache
+}
+
+type jwksCache struct {
+	mu      sync.RWMutex
+	entries map[string]cachedJWKS
+}
+
+type cachedJWKS struct {
+	keys      map[string]*rsa.PublicKey
+	fetchedAt time.Time
+}
+
+type jwksDocument struct {
+	Keys []jwkKey `json:"keys"`
+}
+
+type jwkKey struct {
+	Kid string `json:"kid"`
+	Kty string `json:"kty"`
+	Alg string `json:"alg"`
+	Use string `json:"use"`
+	N   string `json:"n"`
+	E   string `json:"e"`
+}
+
+func newBearerVerifier(cfg ServerConfig) *bearerVerifier {
+	return &bearerVerifier{
+		jwtSecret:        cfg.JWTSecret,
+		acceptHS256:      cfg.AcceptHS256,
+		jwksURL:          cfg.JWKSURL,
+		jwksFetchTimeout: cfg.JWKSFetchTimeout,
+		jwksCache: &jwksCache{
+			entries: map[string]cachedJWKS{},
+		},
+	}
+}
+
+func authorizeBearer(authHeader string, verifier *bearerVerifier, workspaceID, requiredScope, requiredPath string, now time.Time) (tokenClaims, *authError) {
+	claims, err := parseBearer(authHeader, verifier, now)
 	if err != nil {
 		return tokenClaims{}, err
 	}
@@ -60,7 +118,7 @@ func authorizeBearer(authHeader, jwtSecret, workspaceID, requiredScope, required
 	return claims, nil
 }
 
-func parseBearer(authHeader, jwtSecret string, now time.Time) (tokenClaims, *authError) {
+func parseBearer(authHeader string, verifier *bearerVerifier, now time.Time) (tokenClaims, *authError) {
 	if !strings.HasPrefix(authHeader, "Bearer ") {
 		return tokenClaims{}, &authError{
 			status:  401,
@@ -85,12 +143,10 @@ func parseBearer(authHeader, jwtSecret string, now time.Time) (tokenClaims, *aut
 	var header struct {
 		Alg string `json:"alg"`
 		Typ string `json:"typ"`
+		Kid string `json:"kid"`
 	}
 	if err := json.Unmarshal(headerBytes, &header); err != nil {
 		return tokenClaims{}, &authError{status: 401, code: "unauthorized", message: "invalid jwt header"}
-	}
-	if header.Alg != "HS256" {
-		return tokenClaims{}, &authError{status: 401, code: "unauthorized", message: "unsupported jwt algorithm"}
 	}
 
 	payloadBytes, err := base64.RawURLEncoding.DecodeString(parts[1])
@@ -103,11 +159,29 @@ func parseBearer(authHeader, jwtSecret string, now time.Time) (tokenClaims, *aut
 		return tokenClaims{}, &authError{status: 401, code: "unauthorized", message: "invalid jwt signature"}
 	}
 
-	mac := hmac.New(sha256.New, []byte(jwtSecret))
-	_, _ = mac.Write([]byte(parts[0] + "." + parts[1]))
-	expected := mac.Sum(nil)
-	if !hmac.Equal(sigBytes, expected) {
-		return tokenClaims{}, &authError{status: 401, code: "unauthorized", message: "jwt signature mismatch"}
+	signingInput := parts[0] + "." + parts[1]
+	switch header.Alg {
+	case "HS256":
+		if !verifier.acceptHS256 {
+			return tokenClaims{}, &authError{status: 401, code: "unauthorized", message: "hs256 disabled"}
+		}
+		mac := hmac.New(sha256.New, []byte(verifier.jwtSecret))
+		_, _ = mac.Write([]byte(signingInput))
+		expected := mac.Sum(nil)
+		if !hmac.Equal(sigBytes, expected) {
+			return tokenClaims{}, &authError{status: 401, code: "unauthorized", message: "jwt signature mismatch"}
+		}
+	case "RS256":
+		publicKey, authErr := verifier.lookupRSAPublicKey(header.Kid, now)
+		if authErr != nil {
+			return tokenClaims{}, authErr
+		}
+		sum := sha256.Sum256([]byte(signingInput))
+		if err := rsa.VerifyPKCS1v15(publicKey, crypto.SHA256, sum[:], sigBytes); err != nil {
+			return tokenClaims{}, &authError{status: 401, code: "unauthorized", message: "jwt signature mismatch"}
+		}
+	default:
+		return tokenClaims{}, &authError{status: 401, code: "unauthorized", message: "unsupported jwt algorithm"}
 	}
 
 	var payload map[string]any
@@ -115,13 +189,13 @@ func parseBearer(authHeader, jwtSecret string, now time.Time) (tokenClaims, *aut
 		return tokenClaims{}, &authError{status: 401, code: "unauthorized", message: "invalid jwt payload"}
 	}
 
-	workspaceID, ok := payload["workspace_id"].(string)
-	if !ok || workspaceID == "" {
-		return tokenClaims{}, &authError{status: 401, code: "unauthorized", message: "missing workspace_id claim"}
+	workspaceID := firstStringClaim(payload, "wks", "workspace_id")
+	if workspaceID == "" {
+		return tokenClaims{}, &authError{status: 401, code: "unauthorized", message: "missing workspace claim"}
 	}
-	agentName, ok := payload["agent_name"].(string)
-	if !ok || agentName == "" {
-		return tokenClaims{}, &authError{status: 401, code: "unauthorized", message: "missing agent_name claim"}
+	agentName := firstStringClaim(payload, "sub", "agent_name")
+	if agentName == "" {
+		return tokenClaims{}, &authError{status: 401, code: "unauthorized", message: "missing subject claim"}
 	}
 
 	exp, err := parseExp(payload["exp"])
@@ -145,6 +219,132 @@ func parseBearer(authHeader, jwtSecret string, now time.Time) (tokenClaims, *aut
 		AgentName:   agentName,
 		Scopes:      scopes,
 		Exp:         exp,
+	}, nil
+}
+
+func firstStringClaim(payload map[string]any, keys ...string) string {
+	for _, key := range keys {
+		value, ok := payload[key].(string)
+		if ok && strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func (v *bearerVerifier) lookupRSAPublicKey(kid string, now time.Time) (*rsa.PublicKey, *authError) {
+	if strings.TrimSpace(kid) == "" {
+		return nil, &authError{status: 401, code: "unauthorized", message: "missing jwt kid"}
+	}
+
+	keys, authErr := v.jwksCache.keysFor(v.jwksURL, v.jwksFetchTimeout, kid, now)
+	if authErr != nil {
+		return nil, authErr
+	}
+
+	publicKey := keys[kid]
+	if publicKey == nil {
+		return nil, &authError{status: 401, code: "unauthorized", message: "unknown jwt kid"}
+	}
+	return publicKey, nil
+}
+
+func (c *jwksCache) keysFor(url string, timeout time.Duration, kid string, now time.Time) (map[string]*rsa.PublicKey, *authError) {
+	entry, ok := c.load(url)
+	if ok && now.Sub(entry.fetchedAt) < jwksCacheTTL {
+		if kid == "" || entry.keys[kid] != nil {
+			return entry.keys, nil
+		}
+	}
+
+	keys, err := fetchJWKS(url, timeout)
+	if err == nil {
+		c.store(url, cachedJWKS{
+			keys:      keys,
+			fetchedAt: now,
+		})
+		return keys, nil
+	}
+
+	if ok {
+		age := now.Sub(entry.fetchedAt)
+		if age <= jwksCacheTTL+jwksStaleGraceWindow {
+			// Keep a brief grace window so transient JWKS outages do not break live traffic,
+			// but cap it tightly to avoid trusting rotated keys for long.
+			log.Printf("WARNING: serving stale JWKS from %s after refresh failed: %v", url, err)
+			return entry.keys, nil
+		}
+	}
+
+	return nil, &authError{status: 503, code: "unavailable", message: "jwks unreachable"}
+}
+
+func (c *jwksCache) load(url string) (cachedJWKS, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	entry, ok := c.entries[url]
+	return entry, ok
+}
+
+func (c *jwksCache) store(url string, entry cachedJWKS) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.entries[url] = entry
+}
+
+func fetchJWKS(url string, timeout time.Duration) (map[string]*rsa.PublicKey, error) {
+	client := &http.Client{Timeout: timeout}
+	resp, err := client.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		return nil, fmt.Errorf("unexpected JWKS status: %s", resp.Status)
+	}
+
+	var document jwksDocument
+	if err := json.NewDecoder(resp.Body).Decode(&document); err != nil {
+		return nil, err
+	}
+
+	keys := make(map[string]*rsa.PublicKey, len(document.Keys))
+	for _, jwk := range document.Keys {
+		if jwk.Kid == "" || !strings.EqualFold(jwk.Kty, "RSA") {
+			continue
+		}
+		publicKey, err := parseRSAPublicKey(jwk)
+		if err != nil {
+			return nil, err
+		}
+		keys[jwk.Kid] = publicKey
+	}
+	return keys, nil
+}
+
+func parseRSAPublicKey(jwk jwkKey) (*rsa.PublicKey, error) {
+	nBytes, err := base64.RawURLEncoding.DecodeString(jwk.N)
+	if err != nil {
+		return nil, err
+	}
+	eBytes, err := base64.RawURLEncoding.DecodeString(jwk.E)
+	if err != nil {
+		return nil, err
+	}
+
+	modulus := new(big.Int).SetBytes(nBytes)
+	exponent := new(big.Int).SetBytes(eBytes)
+	if modulus.Sign() <= 0 || exponent.Sign() <= 0 || exponent.BitLen() > 31 {
+		return nil, errors.New("invalid rsa jwk")
+	}
+
+	return &rsa.PublicKey{
+		N: modulus,
+		E: int(exponent.Int64()),
 	}, nil
 }
 

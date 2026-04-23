@@ -44,14 +44,19 @@ func main() {
 		BackendProfile:         strings.TrimSpace(os.Getenv("RELAYFILE_BACKEND_PROFILE")),
 		ExternalWritebackMode:  boolEnv("RELAYFILE_EXTERNAL_WRITEBACK", true),
 	})
-	server := httpapi.NewServerWithConfig(store, httpapi.ServerConfig{
+	server, err := httpapi.NewServerWithConfig(store, httpapi.ServerConfig{
 		JWTSecret:          os.Getenv("RELAYFILE_JWT_SECRET"),
+		JWKSURL:            strings.TrimSpace(os.Getenv("RELAYAUTH_JWKS_URL")),
+		AcceptHS256:        !strings.EqualFold(strings.TrimSpace(os.Getenv("RELAYFILE_VERIFIER_ACCEPT_HS256")), "false"),
 		InternalHMACSecret: os.Getenv("RELAYFILE_INTERNAL_HMAC_SECRET"),
 		InternalMaxSkew:    durationEnv("RELAYFILE_INTERNAL_MAX_SKEW", 5*time.Minute),
 		RateLimitMax:       intEnv("RELAYFILE_RATE_LIMIT_MAX", 0),
 		RateLimitWindow:    durationEnv("RELAYFILE_RATE_LIMIT_WINDOW", time.Minute),
 		MaxBodyBytes:       int64Env("RELAYFILE_MAX_BODY_BYTES", 0),
 	})
+	if err != nil {
+		log.Fatalf("invalid relayfile server config: %v", err)
+	}
 
 	log.Printf("relayfile listening on %s", addr)
 	if err := http.ListenAndServe(addr, server); err != nil {
