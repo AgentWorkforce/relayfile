@@ -655,7 +655,9 @@ func TestForkTreeMergesParentOverlayWritesAndDeletes(t *testing.T) {
 }
 
 func TestWriteFilePayloadTooLarge(t *testing.T) {
-	server := NewServerWithConfig(relayfile.NewStore(), ServerConfig{
+	server := mustNewServerWithConfig(t, relayfile.NewStore(), ServerConfig{
+		JWTSecret:    "dev-secret",
+		AcceptHS256:  true,
 		MaxBodyBytes: 128,
 	})
 	token := mustTestJWT(t, "dev-secret", "ws_payload_limit", "Worker1", []string{"fs:write"}, time.Now().Add(time.Hour))
@@ -685,7 +687,10 @@ func TestWriteFilePayloadTooLarge(t *testing.T) {
 }
 
 func TestBinaryEncodingRoundTripAndExport(t *testing.T) {
-	server := NewServerWithConfig(relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true}), ServerConfig{})
+	server := mustNewServerWithConfig(t, relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true}), ServerConfig{
+		JWTSecret:   "dev-secret",
+		AcceptHS256: true,
+	})
 	token := mustTestJWT(t, "dev-secret", "ws_binary", "Worker1", []string{"fs:read", "fs:write"}, time.Now().Add(time.Hour))
 	encoded := base64.StdEncoding.EncodeToString([]byte{0x00, 0x7f, 0xff, 0x10})
 
@@ -2320,7 +2325,9 @@ func TestInternalWebhookIngressHMAC(t *testing.T) {
 }
 
 func TestInternalWebhookIngressPayloadTooLarge(t *testing.T) {
-	server := NewServerWithConfig(relayfile.NewStore(), ServerConfig{
+	server := mustNewServerWithConfig(t, relayfile.NewStore(), ServerConfig{
+		JWTSecret:          "dev-secret",
+		AcceptHS256:        true,
 		InternalHMACSecret: "dev-internal-secret",
 		MaxBodyBytes:       256,
 	})
@@ -4597,8 +4604,9 @@ func TestInternalIngressAppliesToFilesystemAPI(t *testing.T) {
 }
 
 func TestRateLimitingByWorkspaceAndAgent(t *testing.T) {
-	server := NewServerWithConfig(relayfile.NewStore(), ServerConfig{
+	server := mustNewServerWithConfig(t, relayfile.NewStore(), ServerConfig{
 		JWTSecret:          "dev-secret",
+		AcceptHS256:        true,
 		InternalHMACSecret: "dev-internal-secret",
 		RateLimitMax:       2,
 		RateLimitWindow:    time.Minute,
@@ -5456,6 +5464,16 @@ func commitForkForTest(t *testing.T, server http.Handler, token, workspaceID, fo
 
 func mustTestJWT(t *testing.T, secret, workspaceID, agentName string, scopes []string, exp time.Time) string {
 	return mustTestJWTWithAudience(t, secret, workspaceID, agentName, scopes, "relayfile", exp)
+}
+
+func mustNewServerWithConfig(t *testing.T, store *relayfile.Store, cfg ServerConfig) *Server {
+	t.Helper()
+
+	server, err := NewServerWithConfig(store, cfg)
+	if err != nil {
+		t.Fatalf("NewServerWithConfig returned error: %v", err)
+	}
+	return server
 }
 
 func mustTestJWTWithAudience(t *testing.T, secret, workspaceID, agentName string, scopes []string, aud string, exp time.Time) string {
