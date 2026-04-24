@@ -661,7 +661,7 @@ func (s *Syncer) flushPendingBulkWrites(ctx context.Context, pending []pendingBu
 	for _, writeErr := range response.Errors {
 		errorsByPath[normalizeRemotePath(writeErr.Path)] = writeErr
 	}
-	revisionsByPath := response.revisionsByPath()
+	resultsByPath := response.resultsByPath()
 
 	var firstErr error
 	for _, pendingWrite := range pending {
@@ -681,7 +681,10 @@ func (s *Syncer) flushPendingBulkWrites(ctx context.Context, pending []pendingBu
 			}
 			continue
 		}
-		if err := s.reconcileBulkWrite(ctx, pendingWrite, revisionsByPath[pendingWrite.remotePath]); err != nil && firstErr == nil {
+		if result, ok := resultsByPath[pendingWrite.remotePath]; ok && strings.TrimSpace(result.ContentType) != "" {
+			pendingWrite.snapshot.ContentType = result.ContentType
+		}
+		if err := s.reconcileBulkWrite(ctx, pendingWrite, resultsByPath[pendingWrite.remotePath].Revision); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}

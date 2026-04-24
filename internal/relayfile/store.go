@@ -178,6 +178,12 @@ type BulkWriteError struct {
 	Message string `json:"message"`
 }
 
+type BulkWriteResult struct {
+	Path        string `json:"path"`
+	Revision    string `json:"revision"`
+	ContentType string `json:"contentType,omitempty"`
+}
+
 type DeleteRequest struct {
 	WorkspaceID   string
 	Path          string
@@ -1323,15 +1329,15 @@ func (s *Store) WriteFile(req WriteRequest) (WriteResult, error) {
 	return result, nil
 }
 
-func (s *Store) BulkWrite(workspaceID string, files []BulkWriteFile) (int, []BulkWriteError) {
+func (s *Store) BulkWrite(workspaceID string, files []BulkWriteFile) (int, []BulkWriteResult, []BulkWriteError) {
 	if strings.TrimSpace(workspaceID) == "" {
-		return 0, []BulkWriteError{{
+		return 0, nil, []BulkWriteError{{
 			Code:    "invalid_input",
 			Message: ErrInvalidInput.Error(),
 		}}
 	}
 	if len(files) == 0 {
-		return 0, nil
+		return 0, nil, nil
 	}
 
 	type queuedTask struct {
@@ -1342,6 +1348,7 @@ func (s *Store) BulkWrite(workspaceID string, files []BulkWriteFile) (int, []Bul
 	ws := s.ensureWorkspaceLocked(workspaceID)
 	now := time.Now().UTC()
 	written := 0
+	results := make([]BulkWriteResult, 0, len(files))
 	errorsOut := make([]BulkWriteError, 0)
 	tasks := make([]queuedTask, 0, len(files))
 
@@ -1397,6 +1404,11 @@ func (s *Store) BulkWrite(workspaceID string, files []BulkWriteFile) (int, []Bul
 		}
 		result, task := s.recordWriteLocked(ws, path, revision, eventType, file.Provider, "")
 		_ = result
+		results = append(results, BulkWriteResult{
+			Path:        path,
+			Revision:    revision,
+			ContentType: contentType,
+		})
 		tasks = append(tasks, queuedTask{task: task})
 		written++
 	}
@@ -1407,7 +1419,7 @@ func (s *Store) BulkWrite(workspaceID string, files []BulkWriteFile) (int, []Bul
 	for _, queued := range tasks {
 		s.enqueueWriteback(queued.task)
 	}
-	return written, errorsOut
+	return written, results, errorsOut
 }
 
 func (s *Store) ExportWorkspace(workspaceID string) ([]File, error) {
@@ -1639,8 +1651,8 @@ func (s *Store) CommitForkWithValidator(workspaceID, forkID, correlationID strin
 			}
 			if existed {
 				if existed {
-				deletedCount++
-			}
+					deletedCount++
+				}
 			}
 		}
 	}
@@ -1726,28 +1738,29 @@ func (s *Store) WriteForkFile(req WriteRequest, forkID string) (WriteResult, err
 	return result, nil
 }
 
-func (s *Store) BulkWriteFork(workspaceID, forkID string, files []BulkWriteFile) (int, []BulkWriteError) {
+func (s *Store) BulkWriteFork(workspaceID, forkID string, files []BulkWriteFile) (int, []BulkWriteResult, []BulkWriteError) {
 	if strings.TrimSpace(workspaceID) == "" || strings.TrimSpace(forkID) == "" {
-		return 0, []BulkWriteError{{
+		return 0, nil, []BulkWriteError{{
 			Code:    "invalid_input",
 			Message: ErrInvalidInput.Error(),
 		}}
 	}
 	if len(files) == 0 {
-		return 0, nil
+		return 0, nil, nil
 	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	fork, err := s.getLiveForkLocked(workspaceID, forkID, time.Now().UTC())
 	if err != nil {
-		return 0, []BulkWriteError{{
+		return 0, nil, []BulkWriteError{{
 			Code:    forkBulkErrorCode(err),
 			Message: err.Error(),
 		}}
 	}
 
 	written := 0
+	results := make([]BulkWriteResult, 0, len(files))
 	errorsOut := make([]BulkWriteError, 0)
 	for _, input := range files {
 		path := normalizePath(input.Path)
@@ -1777,7 +1790,7 @@ func (s *Store) BulkWriteFork(workspaceID, forkID string, files []BulkWriteFile)
 			continue
 		}
 		existing, exists := s.readForkFileLocked(fork, path)
-		s.writeForkOverlayLocked(fork, WriteRequest{
+		result := s.writeForkOverlayLocked(fork, WriteRequest{
 			WorkspaceID: workspaceID,
 			Path:        path,
 			IfMatch:     "*",
@@ -1785,10 +1798,19 @@ func (s *Store) BulkWriteFork(workspaceID, forkID string, files []BulkWriteFile)
 			Content:     input.Content,
 			Encoding:    encoding,
 		}, existing, exists)
+		contentType := strings.TrimSpace(input.ContentType)
+		if contentType == "" {
+			contentType = "text/markdown"
+		}
+		results = append(results, BulkWriteResult{
+			Path:        path,
+			Revision:    result.TargetRevision,
+			ContentType: contentType,
+		})
 		written++
 	}
 	_ = s.saveLocked()
-	return written, errorsOut
+	return written, results, errorsOut
 }
 
 func (s *Store) DeleteForkFile(req DeleteRequest, forkID string) (WriteResult, error) {

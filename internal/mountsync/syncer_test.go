@@ -660,31 +660,11 @@ func TestBulkMigrationReducesHTTPCalls(t *testing.T) {
 	workspaceID := "ws_mount_bulk_http_volume"
 	handler := newMountsyncAPIHandler(t, store)
 
-	// NOTE on what this test proves:
-	//
-	// The relayfile server's /fs/bulk response today only carries
-	// {written, errorCount, errors, correlationId} — it does NOT return
-	// per-file revisions. That means after a bulk write, the Syncer's
-	// reconcileBulkWrite() falls back to a per-file GET /fs/file to learn
-	// the new revision for If-Match on the next cycle. So in production
-	// the post-bulk traffic looks like: 1 POST /fs/bulk + N GET /fs/file.
-	//
-	// The migration's guarantee is: **zero per-file WRITES (POST /fs/file)
-	// after the first batch.** That is what this test asserts. It counts
-	// POST and GET separately on /fs/file so GET-based revision read-back
-	// does not trigger a false failure. An earlier version of this test
-	// mocked synthetic `Results` into the bulk response, which masked the
-	// GET fallback and reviewers flagged it as non-representative.
-	//
-	// When /fs/bulk grows per-file revision output on the server, the GET
-	// fallback goes away and this test can tighten to "zero total requests
-	// on /fs/file" by removing the PostCount filter below.
 	var requestCounts sync.Map
 	var requestsMu sync.Mutex
 	requests := make([]string, 0)
 	var fsFileRequestsMu sync.Mutex
 	fsFileRequests := make([]string, 0)
-	var fsFilePostCount atomic.Int32
 	counterFor := func(path string) *atomic.Int32 {
 		counter, _ := requestCounts.LoadOrStore(path, &atomic.Int32{})
 		return counter.(*atomic.Int32)
@@ -699,9 +679,6 @@ func TestBulkMigrationReducesHTTPCalls(t *testing.T) {
 			fsFileRequestsMu.Lock()
 			fsFileRequests = append(fsFileRequests, r.Method+" "+r.URL.String())
 			fsFileRequestsMu.Unlock()
-			if r.Method == http.MethodPost {
-				fsFilePostCount.Add(1)
-			}
 		}
 
 		recorder := httptest.NewRecorder()
@@ -753,15 +730,10 @@ func TestBulkMigrationReducesHTTPCalls(t *testing.T) {
 		t.Fatalf("expected exactly one bulk request to %s, got %d", bulkPath, got)
 	}
 
-	// The migration's load-bearing guarantee: no per-file POSTs (writes)
-	// to /fs/file. GETs on /fs/file from the post-bulk revision read-back
-	// are expected until the server returns per-file revisions in the
-	// bulk response — they're tracked in fsFileRequests for visibility
-	// but don't fail the test.
-	if got := fsFilePostCount.Load(); got != 0 {
-		t.Fatalf("expected zero POST /fs/file requests (per-file writes) after bulk migration, got %d: %v", got, fsFileRequests)
+	if got := len(fsFileRequests); got != 0 {
+		t.Fatalf("expected zero /fs/file requests after bulk migration, got %d: %v", got, fsFileRequests)
 	}
-	t.Logf("bulk migration verified: 1 POST /fs/bulk, 0 POST /fs/file, %d GET /fs/file (revision read-back)", len(fsFileRequests))
+	t.Logf("bulk migration verified: 1 POST /fs/bulk, 0 total requests on /fs/file")
 }
 
 func TestBulkWrite_ChunkAtThreshold(t *testing.T) {
@@ -2129,7 +2101,7 @@ func (c *fakeClient) WriteFilesBulk(ctx context.Context, workspaceID string, fil
 	if response.ErrorCount == 0 && len(response.Errors) > 0 {
 		response.ErrorCount = len(response.Errors)
 	}
-	if len(response.Results) == 0 && len(response.Files) == 0 {
+	if len(response.Results) == 0 {
 		response.Results = results
 	}
 	c.lastBulkWriteResponse = response
@@ -2250,6 +2222,7 @@ func newMockMountsyncServer(
 				return
 			}
 			errorsOut := make([]BulkWriteError, 0)
+			resultsOut := make([]BulkWriteResult, 0, len(payload.Files))
 			written := 0
 			for _, file := range payload.Files {
 				path := normalizeRemotePath(file.Path)
@@ -2272,12 +2245,18 @@ func newMockMountsyncServer(
 				revisionCounter++
 				current.Revision = fmt.Sprintf("rev_%d", revisionCounter)
 				normalizedFiles[path] = current
+				resultsOut = append(resultsOut, BulkWriteResult{
+					Path:        path,
+					Revision:    current.Revision,
+					ContentType: current.ContentType,
+				})
 				written++
 			}
 			writeJSONResponse(t, w, http.StatusAccepted, BulkWriteResponse{
 				Written:       written,
 				ErrorCount:    len(errorsOut),
 				Errors:        errorsOut,
+				Results:       resultsOut,
 				CorrelationID: "corr_mock_bulk",
 			})
 		case strings.HasSuffix(r.URL.Path, "/fs/file") && r.Method == http.MethodPut:

@@ -200,6 +200,36 @@ func (q *countingWritebackQueue) Close() error {
 	return q.inner.Close()
 }
 
+func assertBulkWriteResults(t *testing.T, results []BulkWriteResult, files []BulkWriteFile) {
+	t.Helper()
+
+	if len(results) != len(files) {
+		t.Fatalf("expected %d bulk write results, got %d", len(files), len(results))
+	}
+
+	expected := make(map[string]string, len(files))
+	for _, file := range files {
+		contentType := file.ContentType
+		if contentType == "" {
+			contentType = "text/markdown"
+		}
+		expected[file.Path] = contentType
+	}
+
+	for _, result := range results {
+		contentType, ok := expected[result.Path]
+		if !ok {
+			t.Fatalf("unexpected bulk write result path %q", result.Path)
+		}
+		if result.Revision == "" {
+			t.Fatalf("expected revision for %s", result.Path)
+		}
+		if result.ContentType != contentType {
+			t.Fatalf("expected content type %q for %s, got %q", contentType, result.Path, result.ContentType)
+		}
+	}
+}
+
 func (m *memoryStateBackend) Load() (*persistedState, error) {
 	if !m.loaded {
 		return nil, nil
@@ -398,7 +428,7 @@ func TestStoreBulkWriteAndExportWorkspace(t *testing.T) {
 	store := NewStoreWithOptions(StoreOptions{DisableWorkers: true})
 	t.Cleanup(store.Close)
 
-	written, errs := store.BulkWrite("ws_bulk", []BulkWriteFile{
+	files := []BulkWriteFile{
 		{
 			Path:        "/external/Seed.md",
 			ContentType: "text/markdown",
@@ -410,10 +440,12 @@ func TestStoreBulkWriteAndExportWorkspace(t *testing.T) {
 			Content:     base64.StdEncoding.EncodeToString([]byte{0x00, 0x01, 0x02, 0x03}),
 			Encoding:    "base64",
 		},
-	})
+	}
+	written, results, errs := store.BulkWrite("ws_bulk", files)
 	if written != 2 {
 		t.Fatalf("expected 2 written files, got %d", written)
 	}
+	assertBulkWriteResults(t, results, files)
 	if len(errs) != 0 {
 		t.Fatalf("expected no bulk write errors, got %+v", errs)
 	}
@@ -458,10 +490,11 @@ func TestBulkWrite(t *testing.T) {
 		expectedPaths[path] = struct{}{}
 	}
 
-	written, errs := store.BulkWrite("ws_bulk_write", files)
+	written, results, errs := store.BulkWrite("ws_bulk_write", files)
 	if written != 10 {
 		t.Fatalf("expected 10 written files, got %d", written)
 	}
+	assertBulkWriteResults(t, results, files)
 	if len(errs) != 0 {
 		t.Fatalf("expected no bulk write errors, got %+v", errs)
 	}
@@ -511,10 +544,11 @@ func TestBulkWriteOverwrite(t *testing.T) {
 		{Path: "/external/A.md", ContentType: "text/markdown", Content: "# v1"},
 		{Path: "/external/B.md", ContentType: "text/markdown", Content: "# v1"},
 	}
-	written, errs := store.BulkWrite("ws_bulk_overwrite", initial)
+	written, results, errs := store.BulkWrite("ws_bulk_overwrite", initial)
 	if written != len(initial) {
 		t.Fatalf("expected %d initial writes, got %d", len(initial), written)
 	}
+	assertBulkWriteResults(t, results, initial)
 	if len(errs) != 0 {
 		t.Fatalf("expected no initial errors, got %+v", errs)
 	}
@@ -523,10 +557,11 @@ func TestBulkWriteOverwrite(t *testing.T) {
 		{Path: "/external/A.md", ContentType: "text/markdown", Content: "# v2"},
 		{Path: "/external/B.md", ContentType: "text/markdown", Content: "# v3"},
 	}
-	written, errs = store.BulkWrite("ws_bulk_overwrite", updated)
+	written, results, errs = store.BulkWrite("ws_bulk_overwrite", updated)
 	if written != len(updated) {
 		t.Fatalf("expected %d overwrite writes, got %d", len(updated), written)
 	}
+	assertBulkWriteResults(t, results, updated)
 	if len(errs) != 0 {
 		t.Fatalf("expected no overwrite errors, got %+v", errs)
 	}
@@ -551,10 +586,11 @@ func TestExportWorkspace(t *testing.T) {
 		{Path: "/external/B.md", ContentType: "text/plain", Content: "B"},
 		{Path: "/external/C.json", ContentType: "application/json", Content: `{"ok":true}`},
 	}
-	written, errs := store.BulkWrite("ws_export", seed)
+	written, results, errs := store.BulkWrite("ws_export", seed)
 	if written != len(seed) {
 		t.Fatalf("expected %d written files, got %d", len(seed), written)
 	}
+	assertBulkWriteResults(t, results, seed)
 	if len(errs) != 0 {
 		t.Fatalf("expected no bulk write errors, got %+v", errs)
 	}
@@ -585,15 +621,17 @@ func TestBinaryEncoding(t *testing.T) {
 	t.Cleanup(store.Close)
 
 	encoded := base64.StdEncoding.EncodeToString([]byte{0x00, 0x7f, 0xff, 0x10})
-	written, errs := store.BulkWrite("ws_binary_encoding", []BulkWriteFile{{
+	files := []BulkWriteFile{{
 		Path:        "/external/blob.bin",
 		ContentType: "application/octet-stream",
 		Content:     encoded,
 		Encoding:    "base64",
-	}})
+	}}
+	written, results, errs := store.BulkWrite("ws_binary_encoding", files)
 	if written != 1 {
 		t.Fatalf("expected 1 written file, got %d", written)
 	}
+	assertBulkWriteResults(t, results, files)
 	if len(errs) != 0 {
 		t.Fatalf("expected no bulk write errors, got %+v", errs)
 	}

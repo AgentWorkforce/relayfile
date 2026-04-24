@@ -1597,17 +1597,19 @@ func (s *Server) handleBulkWrite(w http.ResponseWriter, r *http.Request, workspa
 	}
 
 	var written int
+	var results []relayfile.BulkWriteResult
 	var storeErrors []relayfile.BulkWriteError
 	if forkID != "" {
-		written, storeErrors = s.store.BulkWriteFork(workspaceID, forkID, allowed)
+		written, results, storeErrors = s.store.BulkWriteFork(workspaceID, forkID, allowed)
 	} else {
-		written, storeErrors = s.store.BulkWrite(workspaceID, allowed)
+		written, results, storeErrors = s.store.BulkWrite(workspaceID, allowed)
 	}
 	errorsOut = append(errorsOut, storeErrors...)
 	writeJSON(w, http.StatusAccepted, map[string]any{
 		"written":       written,
 		"errorCount":    len(errorsOut),
 		"errors":        errorsOut,
+		"results":       results,
 		"correlationId": correlationID,
 	})
 }

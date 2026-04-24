@@ -6,11 +6,11 @@ func TestParseGenericEnvelopeFileUpdated(t *testing.T) {
 	actions, err := ParseGenericEnvelope(WebhookEnvelopeRequest{
 		Provider: "custom-system",
 		Payload: map[string]any{
-			"path":               "/data/record_123.json",
-			"event_type":         "file.updated",
-			"content":            `{"id": 123}`,
-			"contentType":        "application/json",
-			"providerObjectId":   "obj_123",
+			"path":             "/data/record_123.json",
+			"event_type":       "file.updated",
+			"content":          `{"id": 123}`,
+			"contentType":      "application/json",
+			"providerObjectId": "obj_123",
 			"properties": map[string]any{
 				"system": "crm",
 			},
