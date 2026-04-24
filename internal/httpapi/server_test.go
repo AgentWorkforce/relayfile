@@ -823,15 +823,6 @@ func TestBulkWriteEndpoint(t *testing.T) {
 	server := NewServer(relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true}))
 	token := mustTestJWT(t, "dev-secret", "ws_bulk_endpoint", "Worker1", []string{"fs:read", "fs:write"}, time.Now().Add(time.Hour))
 
-	files := make([]map[string]any, 0, 5)
-	for i := 0; i < 5; i++ {
-		files = append(files, map[string]any{
-			"path":        fmt.Sprintf("/external/Bulk-%d.md", i),
-			"contentType": "text/markdown",
-			"content":     fmt.Sprintf("# file %d", i),
-		})
-	}
-
 	resp := doRequest(t, server, request{
 		method: http.MethodPost,
 		path:   "/v1/workspaces/ws_bulk_endpoint/fs/bulk",
@@ -840,22 +831,69 @@ func TestBulkWriteEndpoint(t *testing.T) {
 			"X-Correlation-Id": "corr_bulk_endpoint",
 		},
 		body: map[string]any{
-			"files": files,
+			"files": []map[string]any{
+				{
+					"path":        "/external/Success.md",
+					"contentType": "text/markdown",
+					"content":     "# success",
+				},
+				{
+					"path":        "/external/BadEncoding.md",
+					"contentType": "text/markdown",
+					"content":     "# invalid",
+					"encoding":    "utf16",
+				},
+			},
 		},
 	})
 	if resp.Code != http.StatusAccepted {
 		t.Fatalf("expected 202 on bulk write, got %d (%s)", resp.Code, resp.Body.String())
 	}
 
-	var payload map[string]any
+	var payload struct {
+		Written       int                         `json:"written"`
+		ErrorCount    int                         `json:"errorCount"`
+		Errors        []relayfile.BulkWriteError  `json:"errors"`
+		Results       []relayfile.BulkWriteResult `json:"results"`
+		CorrelationID string                      `json:"correlationId"`
+	}
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
 		t.Fatalf("decode bulk response: %v", err)
 	}
-	if int(payload["written"].(float64)) != 5 {
-		t.Fatalf("expected written=5, got %v", payload["written"])
+	if payload.Written != 1 {
+		t.Fatalf("expected written=1, got %d", payload.Written)
 	}
-	if int(payload["errorCount"].(float64)) != 0 {
-		t.Fatalf("expected errorCount=0, got %v", payload["errorCount"])
+	if payload.ErrorCount != 1 {
+		t.Fatalf("expected errorCount=1, got %d", payload.ErrorCount)
+	}
+	if len(payload.Results) != payload.Written {
+		t.Fatalf("expected len(results)==written, got %d results and written=%d", len(payload.Results), payload.Written)
+	}
+	if len(payload.Errors) != payload.ErrorCount {
+		t.Fatalf("expected len(errors)==errorCount, got %d errors and errorCount=%d", len(payload.Errors), payload.ErrorCount)
+	}
+	if len(payload.Results) != 1 {
+		t.Fatalf("expected one successful result, got %+v", payload.Results)
+	}
+	if payload.Results[0].Path != "/external/Success.md" {
+		t.Fatalf("unexpected success path: %+v", payload.Results[0])
+	}
+	if payload.Results[0].Revision == "" {
+		t.Fatalf("expected non-empty revision in result: %+v", payload.Results[0])
+	}
+	if payload.Results[0].ContentType != "text/markdown" {
+		t.Fatalf("expected markdown content type in result, got %+v", payload.Results[0])
+	}
+	if len(payload.Errors) != 1 {
+		t.Fatalf("expected one bulk error, got %+v", payload.Errors)
+	}
+	if payload.Errors[0].Path != "/external/BadEncoding.md" || payload.Errors[0].Code != "invalid_encoding" {
+		t.Fatalf("unexpected bulk error: %+v", payload.Errors[0])
+	}
+	for _, result := range payload.Results {
+		if result.Path == payload.Errors[0].Path {
+			t.Fatalf("failed path %q must not appear in results: %+v", result.Path, payload.Results)
+		}
 	}
 }
 
@@ -863,7 +901,7 @@ func TestExportJSON(t *testing.T) {
 	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
 	t.Cleanup(store.Close)
 
-	if written, errs := store.BulkWrite("ws_export_json", []relayfile.BulkWriteFile{
+	if written, _, errs := store.BulkWrite("ws_export_json", []relayfile.BulkWriteFile{
 		{Path: "/external/A.md", ContentType: "text/markdown", Content: "# A"},
 		{Path: "/external/B.txt", ContentType: "text/plain", Content: "B"},
 	}); written != 2 || len(errs) != 0 {
@@ -904,7 +942,7 @@ func TestExportJSONPathFilter(t *testing.T) {
 	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
 	t.Cleanup(store.Close)
 
-	if written, errs := store.BulkWrite("ws_export_json_path", []relayfile.BulkWriteFile{
+	if written, _, errs := store.BulkWrite("ws_export_json_path", []relayfile.BulkWriteFile{
 		{Path: "/github/repos/demo/README.md", ContentType: "text/markdown", Content: "# Demo"},
 		{Path: "/notion/pages/A.md", ContentType: "text/markdown", Content: "# A"},
 	}); written != 2 || len(errs) != 0 {
@@ -942,7 +980,7 @@ func TestExportTar(t *testing.T) {
 	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
 	t.Cleanup(store.Close)
 
-	if written, errs := store.BulkWrite("ws_export_tar", []relayfile.BulkWriteFile{
+	if written, _, errs := store.BulkWrite("ws_export_tar", []relayfile.BulkWriteFile{
 		{
 			Path:        "/external/blob.bin",
 			ContentType: "application/octet-stream",
