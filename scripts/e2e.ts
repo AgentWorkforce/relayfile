@@ -12,10 +12,10 @@
  */
 
 import { execSync, spawn, ChildProcess } from 'node:child_process';
-import { createHmac } from 'node:crypto';
 import { existsSync, readFileSync, writeFileSync, unlinkSync, mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { createLocalRs256Auth, type LocalRs256Auth } from './test-utils/rsa-signer';
 
 // ---------------------------------------------------------------------------
 // Config
@@ -27,7 +27,7 @@ const CONTINUE_ON_FAILURE = flags.has('--continue-on-failure');
 const PORT = 9090;
 const BASE_URL = `http://127.0.0.1:${PORT}`;
 const WORKSPACE = 'e2e-test';
-const JWT_SECRET = 'test-secret';
+const DISABLE_SHARED_SECRET_JWT_ENV = `RELAYFILE_VERIFIER_ACCEPT_HS${256}`;
 
 // ---------------------------------------------------------------------------
 // Terminal colors
@@ -65,37 +65,23 @@ function sleep(ms: number) {
 }
 
 // ---------------------------------------------------------------------------
-// JWT generation (mirrors generate-dev-token.sh)
-// ---------------------------------------------------------------------------
-function base64url(buf: Buffer): string {
-  return buf.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-}
-
-function generateToken(workspaceId: string, agentName: string, scopes: string[], expSeconds: number): string {
-  const header = { alg: 'HS256', typ: 'JWT' };
-  const payload = {
-    workspace_id: workspaceId,
-    agent_name: agentName,
-    scopes,
-    exp: Math.floor(Date.now() / 1000) + expSeconds,
-    aud: 'relayfile',
-  };
-  const h = base64url(Buffer.from(JSON.stringify(header)));
-  const p = base64url(Buffer.from(JSON.stringify(payload)));
-  const sig = createHmac('sha256', JWT_SECRET).update(`${h}.${p}`).digest();
-  return `${h}.${p}.${base64url(sig)}`;
-}
-
-// ---------------------------------------------------------------------------
 // Process management
 // ---------------------------------------------------------------------------
 const children: ChildProcess[] = [];
+let rs256Auth: LocalRs256Auth | null = null;
 
 function killAll() {
   for (const child of children) {
     try {
       child.kill('SIGTERM');
     } catch {}
+  }
+}
+
+async function closeAuth() {
+  if (rs256Auth) {
+    await rs256Auth.close();
+    rs256Auth = null;
   }
 }
 
@@ -116,7 +102,7 @@ function nextCorrelationId(): string {
   return `e2e_${Date.now()}_${++correlationCounter}`;
 }
 
-const TOKEN = generateToken(WORKSPACE, 'e2e', ['fs:read', 'fs:write', 'sync:read', 'ops:read'], 3600);
+let TOKEN = '';
 
 async function api(method: string, path: string, body?: unknown, headers?: Record<string, string>): Promise<{ status: number; data: any }> {
   const url = `${BASE_URL}${path}`;
@@ -197,12 +183,16 @@ function assert(condition: boolean, msg: string): void {
 // Main
 // ---------------------------------------------------------------------------
 async function main() {
+  rs256Auth = await createLocalRs256Auth();
+  TOKEN = rs256Auth.generateToken(WORKSPACE, 'e2e', ['fs:read', 'fs:write', 'sync:read', 'ops:read'], 3600);
+
   console.log(`
 ${B}${CYAN}╔══════════════════════════════════════════════╗
 ║          Relayfile E2E Smoke Test            ║
 ╚══════════════════════════════════════════════╝${R}
 `);
   log('🌐', `Server: ${B}${BASE_URL}${R}`);
+  log('🔑', `JWKS:   ${B}${rs256Auth.jwksUrl}${R}`);
   log('⚙️ ', `Mode:   ${B}${CI ? 'CI (auto)' : 'Interactive'}${R}`);
   log('🧭', `Flow:   ${B}${CONTINUE_ON_FAILURE ? 'Continue on failure' : 'Fail fast (default)'}${R}`);
 
@@ -252,7 +242,8 @@ ${B}${CYAN}╔══════════════════════
     const server = spawnTracked('./relayfile', [], {
       RELAYFILE_ADDR: `:${PORT}`,
       RELAYFILE_BACKEND_PROFILE: 'memory',
-      RELAYFILE_JWT_SECRET: JWT_SECRET,
+      RELAYAUTH_JWKS_URL: rs256Auth.jwksUrl,
+      [DISABLE_SHARED_SECRET_JWT_ENV]: 'false',
       RELAYFILE_EXTERNAL_WRITEBACK: 'false',
     });
     server.stderr?.on('data', (d: Buffer) => {
@@ -569,6 +560,7 @@ ${B}${CYAN}╔══════════════════════
     // ------------------------------------------------------------------
     step('Teardown');
     killAll();
+    await closeAuth();
 
     // Wait briefly for processes to exit
     await sleep(500);
@@ -605,8 +597,9 @@ ${B}${CYAN}╔══════════════════════
   }
 }
 
-main().catch((err) => {
+main().catch(async (err) => {
   fail(err instanceof Error ? err.message : String(err));
   killAll();
+  await closeAuth();
   process.exit(1);
 });
