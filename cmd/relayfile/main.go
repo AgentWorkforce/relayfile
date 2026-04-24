@@ -45,9 +45,7 @@ func main() {
 		ExternalWritebackMode:  boolEnv("RELAYFILE_EXTERNAL_WRITEBACK", true),
 	})
 	server, err := httpapi.NewServerWithConfig(store, httpapi.ServerConfig{
-		JWTSecret:          os.Getenv("RELAYFILE_JWT_SECRET"),
 		JWKSURL:            strings.TrimSpace(os.Getenv("RELAYAUTH_JWKS_URL")),
-		AcceptHS256:        !strings.EqualFold(strings.TrimSpace(os.Getenv("RELAYFILE_VERIFIER_ACCEPT_HS256")), "false"),
 		InternalHMACSecret: os.Getenv("RELAYFILE_INTERNAL_HMAC_SECRET"),
 		InternalMaxSkew:    durationEnv("RELAYFILE_INTERNAL_MAX_SKEW", 5*time.Minute),
 		RateLimitMax:       intEnv("RELAYFILE_RATE_LIMIT_MAX", 0),

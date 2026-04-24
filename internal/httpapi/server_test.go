@@ -656,8 +656,6 @@ func TestForkTreeMergesParentOverlayWritesAndDeletes(t *testing.T) {
 
 func TestWriteFilePayloadTooLarge(t *testing.T) {
 	server := mustNewServerWithConfig(t, relayfile.NewStore(), ServerConfig{
-		JWTSecret:    "dev-secret",
-		AcceptHS256:  true,
 		MaxBodyBytes: 128,
 	})
 	token := mustTestJWT(t, "dev-secret", "ws_payload_limit", "Worker1", []string{"fs:write"}, time.Now().Add(time.Hour))
@@ -687,10 +685,7 @@ func TestWriteFilePayloadTooLarge(t *testing.T) {
 }
 
 func TestBinaryEncodingRoundTripAndExport(t *testing.T) {
-	server := mustNewServerWithConfig(t, relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true}), ServerConfig{
-		JWTSecret:   "dev-secret",
-		AcceptHS256: true,
-	})
+	server := mustNewServerWithConfig(t, relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true}), ServerConfig{})
 	token := mustTestJWT(t, "dev-secret", "ws_binary", "Worker1", []string{"fs:read", "fs:write"}, time.Now().Add(time.Hour))
 	encoded := base64.StdEncoding.EncodeToString([]byte{0x00, 0x7f, 0xff, 0x10})
 
@@ -2326,8 +2321,6 @@ func TestInternalWebhookIngressHMAC(t *testing.T) {
 
 func TestInternalWebhookIngressPayloadTooLarge(t *testing.T) {
 	server := mustNewServerWithConfig(t, relayfile.NewStore(), ServerConfig{
-		JWTSecret:          "dev-secret",
-		AcceptHS256:        true,
 		InternalHMACSecret: "dev-internal-secret",
 		MaxBodyBytes:       256,
 	})
@@ -4605,8 +4598,6 @@ func TestInternalIngressAppliesToFilesystemAPI(t *testing.T) {
 
 func TestRateLimitingByWorkspaceAndAgent(t *testing.T) {
 	server := mustNewServerWithConfig(t, relayfile.NewStore(), ServerConfig{
-		JWTSecret:          "dev-secret",
-		AcceptHS256:        true,
 		InternalHMACSecret: "dev-internal-secret",
 		RateLimitMax:       2,
 		RateLimitWindow:    time.Minute,
@@ -5482,65 +5473,23 @@ func mustTestJWTWithAudience(t *testing.T, secret, workspaceID, agentName string
 
 func mustTestJWTWithAudienceClaim(t *testing.T, secret, workspaceID, agentName string, scopes []string, aud any, exp time.Time) string {
 	t.Helper()
-	headerBytes, err := json.Marshal(map[string]any{
-		"alg": "HS256",
-		"typ": "JWT",
-	})
-	if err != nil {
-		t.Fatalf("marshal jwt header: %v", err)
-	}
-	payloadBytes, err := json.Marshal(map[string]any{
+	_ = secret
+
+	return mustTestRS256JWT(t, testBearerPrivateKey, testBearerJWTKID, map[string]any{
+		"wks":          workspaceID,
 		"workspace_id": workspaceID,
+		"sub":          agentName,
 		"agent_name":   agentName,
 		"scopes":       scopes,
 		"exp":          exp.Unix(),
 		"aud":          aud,
 	})
-	if err != nil {
-		t.Fatalf("marshal jwt payload: %v", err)
-	}
-	h := base64.RawURLEncoding.EncodeToString(headerBytes)
-	p := base64.RawURLEncoding.EncodeToString(payloadBytes)
-	signingInput := h + "." + p
-	sig := mustHMAC(secret, signingInput)
-	sigBytes, err := hexToBytes(sig)
-	if err != nil {
-		t.Fatalf("decode signature: %v", err)
-	}
-	jwtSig := base64.RawURLEncoding.EncodeToString(sigBytes)
-	return signingInput + "." + jwtSig
 }
 
 func mustHMAC(secret, data string) string {
 	mac := hmac.New(sha256.New, []byte(secret))
 	_, _ = mac.Write([]byte(data))
 	return fmt.Sprintf("%x", mac.Sum(nil))
-}
-
-func hexToBytes(h string) ([]byte, error) {
-	if len(h)%2 != 0 {
-		return nil, fmt.Errorf("invalid hex")
-	}
-	out := make([]byte, len(h)/2)
-	for i := 0; i < len(h); i += 2 {
-		var b byte
-		for j := 0; j < 2; j++ {
-			ch := h[i+j]
-			b <<= 4
-			switch {
-			case ch >= '0' && ch <= '9':
-				b |= ch - '0'
-			case ch >= 'a' && ch <= 'f':
-				b |= ch - 'a' + 10
-			case ch >= 'A' && ch <= 'F':
-				b |= ch - 'A' + 10
-			default:
-				return nil, fmt.Errorf("invalid hex char")
-			}
-		}
-		out[i/2] = b
-	}
-	return out, nil
 }
 
 type serverFailingAdapter struct {

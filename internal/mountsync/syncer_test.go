@@ -3,13 +3,16 @@ package mountsync
 import (
 	"bytes"
 	"context"
-	"crypto/hmac"
+	"crypto"
+	"crypto/rand"
+	"crypto/rsa"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -17,6 +20,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -438,10 +442,11 @@ func TestBulkSeedThenSync(t *testing.T) {
 	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
 	t.Cleanup(store.Close)
 
-	api := httptest.NewServer(httpapi.NewServer(store))
+	workspaceID := "ws_mount_bulk_seed"
+	handler := newMountsyncAPIHandler(t, store)
+	api := httptest.NewServer(handler)
 	defer api.Close()
 
-	workspaceID := "ws_mount_bulk_seed"
 	token := mustMountsyncTestJWT(t, "dev-secret", workspaceID, "MountSync", []string{"fs:read", "fs:write"}, time.Now().Add(time.Hour))
 
 	body, err := json.Marshal(map[string]any{
@@ -504,11 +509,11 @@ func TestSyncOnceUsesWebSocketForRealtimeUpdatesAndSkipsPollingWhileConnected(t 
 	t.Cleanup(store.Close)
 
 	workspaceID := "ws_mount_websocket"
+	handler := newMountsyncAPIHandler(t, store)
 	token := mustMountsyncTestJWT(t, "dev-secret", workspaceID, "MountSync", []string{"fs:read", "fs:write"}, time.Now().Add(time.Hour))
 
 	var treeCalls atomic.Int32
 	var eventCalls atomic.Int32
-	handler := httpapi.NewServer(store)
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/fs/tree"):
@@ -1867,18 +1872,74 @@ func writeMountsyncRemoteFile(t *testing.T, client *http.Client, baseURL, token,
 	}
 }
 
-func mustMountsyncTestJWT(t *testing.T, secret, workspaceID, agentName string, scopes []string, exp time.Time) string {
+const mountsyncTestJWTKID = "mountsync-test-kid"
+
+var (
+	mountsyncTestJWKSOnce   sync.Once
+	mountsyncTestJWKSURL    string
+	mountsyncTestPrivateKey *rsa.PrivateKey
+)
+
+func ensureMountsyncJWTVerifier(t *testing.T) {
 	t.Helper()
 
+	mountsyncTestJWKSOnce.Do(func() {
+		privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+		if err != nil {
+			panic(fmt.Sprintf("generate rsa key: %v", err))
+		}
+		mountsyncTestPrivateKey = privateKey
+
+		jwksServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			exponent := base64.RawURLEncoding.EncodeToString(big.NewInt(int64(privateKey.PublicKey.E)).Bytes())
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"keys": []map[string]any{
+					{
+						"kid": mountsyncTestJWTKID,
+						"kty": "RSA",
+						"alg": "RS256",
+						"use": "sig",
+						"n":   base64.RawURLEncoding.EncodeToString(privateKey.PublicKey.N.Bytes()),
+						"e":   exponent,
+					},
+				},
+			})
+		}))
+		mountsyncTestJWKSURL = jwksServer.URL
+	})
+}
+
+func newMountsyncAPIHandler(t *testing.T, store *relayfile.Store) http.Handler {
+	t.Helper()
+	ensureMountsyncJWTVerifier(t)
+
+	handler, err := httpapi.NewServerWithConfig(store, httpapi.ServerConfig{
+		JWKSURL:          mountsyncTestJWKSURL,
+		JWKSFetchTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatalf("new mountsync api handler: %v", err)
+	}
+	return handler
+}
+
+func mustMountsyncTestJWT(t *testing.T, secret, workspaceID, agentName string, scopes []string, exp time.Time) string {
+	t.Helper()
+	_ = secret
+	ensureMountsyncJWTVerifier(t)
+
 	headerBytes, err := json.Marshal(map[string]any{
-		"alg": "HS256",
+		"alg": "RS256",
 		"typ": "JWT",
+		"kid": mountsyncTestJWTKID,
 	})
 	if err != nil {
 		t.Fatalf("marshal jwt header: %v", err)
 	}
 	payloadBytes, err := json.Marshal(map[string]any{
+		"wks":          workspaceID,
 		"workspace_id": workspaceID,
+		"sub":          agentName,
 		"agent_name":   agentName,
 		"scopes":       scopes,
 		"exp":          exp.Unix(),
@@ -1892,11 +1953,13 @@ func mustMountsyncTestJWT(t *testing.T, secret, workspaceID, agentName string, s
 	p := base64.RawURLEncoding.EncodeToString(payloadBytes)
 	signingInput := h + "." + p
 
-	mac := hmac.New(sha256.New, []byte(secret))
-	_, _ = mac.Write([]byte(signingInput))
-	signature := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+	sum := sha256.Sum256([]byte(signingInput))
+	signature, err := rsa.SignPKCS1v15(rand.Reader, mountsyncTestPrivateKey, crypto.SHA256, sum[:])
+	if err != nil {
+		t.Fatalf("sign jwt: %v", err)
+	}
 
-	return signingInput + "." + signature
+	return signingInput + "." + base64.RawURLEncoding.EncodeToString(signature)
 }
 
 func (c *fakeClient) appendEvent(eventType, path, revision string) {
