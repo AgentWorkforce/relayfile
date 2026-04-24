@@ -22,9 +22,7 @@ import (
 )
 
 type ServerConfig struct {
-	JWTSecret          string
 	JWKSURL            string
-	AcceptHS256        bool
 	JWKSFetchTimeout   time.Duration
 	InternalHMACSecret string
 	InternalMaxSkew    time.Duration
@@ -55,29 +53,19 @@ type rateEntry struct {
 }
 
 func NewServer(store *relayfile.Store) *Server {
-	server, err := NewServerWithConfig(store, ServerConfig{
-		JWTSecret:   "dev-secret",
-		AcceptHS256: true,
-	})
+	server, err := NewServerWithConfig(store, ServerConfig{})
 	if err != nil {
 		panic(err)
 	}
-	log.Println("WARNING: using default JWTSecret — set a strong secret via configuration for production use")
 	return server
 }
 
 func NewServerWithConfig(store *relayfile.Store, cfg ServerConfig) (*Server, error) {
-	if !cfg.AcceptHS256 && cfg.JWTSecret == "" && cfg.JWKSURL == "" && cfg.JWKSFetchTimeout == 0 {
-		cfg.AcceptHS256 = true
-	}
 	if cfg.JWKSURL == "" {
 		cfg.JWKSURL = defaultRelayAuthJWKSURL
 	}
 	if cfg.JWKSFetchTimeout <= 0 {
 		cfg.JWKSFetchTimeout = defaultJWKSFetchTimeout
-	}
-	if cfg.AcceptHS256 && cfg.JWTSecret == "" {
-		return nil, fmt.Errorf("RELAYFILE_JWT_SECRET is required when RELAYFILE_VERIFIER_ACCEPT_HS256 is not false")
 	}
 	if cfg.InternalHMACSecret == "" {
 		cfg.InternalHMACSecret = "dev-internal-secret"

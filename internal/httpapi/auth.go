@@ -20,11 +20,12 @@ import (
 )
 
 const (
-	defaultRelayAuthJWKSURL = "https://api.relayauth.dev/.well-known/jwks.json"
 	defaultJWKSFetchTimeout = 5 * time.Second
 	jwksCacheTTL            = 5 * time.Minute
 	jwksStaleGraceWindow    = time.Minute
 )
+
+var defaultRelayAuthJWKSURL = "https://api.relayauth.dev/.well-known/jwks.json"
 
 type authError struct {
 	status  int
@@ -44,8 +45,6 @@ type tokenClaims struct {
 }
 
 type bearerVerifier struct {
-	jwtSecret        string
-	acceptHS256      bool
 	jwksURL          string
 	jwksFetchTimeout time.Duration
 	jwksCache        *jwksCache
@@ -76,8 +75,6 @@ type jwkKey struct {
 
 func newBearerVerifier(cfg ServerConfig) *bearerVerifier {
 	return &bearerVerifier{
-		jwtSecret:        cfg.JWTSecret,
-		acceptHS256:      cfg.AcceptHS256,
 		jwksURL:          cfg.JWKSURL,
 		jwksFetchTimeout: cfg.JWKSFetchTimeout,
 		jwksCache: &jwksCache{
@@ -161,16 +158,6 @@ func parseBearer(authHeader string, verifier *bearerVerifier, now time.Time) (to
 
 	signingInput := parts[0] + "." + parts[1]
 	switch header.Alg {
-	case "HS256":
-		if !verifier.acceptHS256 {
-			return tokenClaims{}, &authError{status: 401, code: "unauthorized", message: "hs256 disabled"}
-		}
-		mac := hmac.New(sha256.New, []byte(verifier.jwtSecret))
-		_, _ = mac.Write([]byte(signingInput))
-		expected := mac.Sum(nil)
-		if !hmac.Equal(sigBytes, expected) {
-			return tokenClaims{}, &authError{status: 401, code: "unauthorized", message: "jwt signature mismatch"}
-		}
 	case "RS256":
 		publicKey, authErr := verifier.lookupRSAPublicKey(header.Kid, now)
 		if authErr != nil {

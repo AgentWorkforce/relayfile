@@ -2,7 +2,6 @@ package httpapi
 
 import (
 	"crypto"
-	"crypto/hmac"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
@@ -285,60 +284,21 @@ func TestParseBearerRS256ExpiredToken(t *testing.T) {
 	}
 }
 
-func TestParseBearerHS256AcceptedWhenEnabled(t *testing.T) {
-	t.Parallel()
-
-	now := time.Now().UTC()
-	token := mustTestHS256JWT(t, "test-secret", map[string]any{
-		"workspace_id": "ws-hs",
-		"agent_name":   "LegacyWorker",
-		"scopes":       []string{"fs:read"},
-		"exp":          now.Add(time.Hour).Unix(),
-		"aud":          "relayfile",
-	})
-
-	claims, authErr := parseBearer("Bearer "+token, newBearerVerifier(ServerConfig{
-		JWTSecret:   "test-secret",
-		AcceptHS256: true,
-	}), now)
-	if authErr != nil {
-		t.Fatalf("parseBearer returned auth error: %+v", authErr)
-	}
-	if claims.WorkspaceID != "ws-hs" || claims.AgentName != "LegacyWorker" {
-		t.Fatalf("unexpected claims: %+v", claims)
-	}
-}
-
-func TestParseBearerHS256RejectedWhenDisabled(t *testing.T) {
-	t.Parallel()
-
-	now := time.Now().UTC()
-	token := mustTestHS256JWT(t, "test-secret", map[string]any{
-		"workspace_id": "ws-hs",
-		"agent_name":   "LegacyWorker",
-		"scopes":       []string{"fs:read"},
-		"exp":          now.Add(time.Hour).Unix(),
-		"aud":          "relayfile",
-	})
-
-	_, authErr := parseBearer("Bearer "+token, newBearerVerifier(ServerConfig{
-		JWTSecret: "test-secret",
-	}), now)
-	if authErr == nil {
-		t.Fatal("expected auth error when HS256 is disabled")
-	}
-	if authErr.message != "hs256 disabled" {
-		t.Fatalf("expected hs256 disabled message, got %q", authErr.message)
-	}
-}
-
 func TestParseBearerClaimNormalization(t *testing.T) {
 	t.Parallel()
 
 	now := time.Now().UTC()
+	privateKey := mustRSATestKey(t)
+	jwksServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(jwksDocument{
+			Keys: []jwkKey{mustRSATestJWK("kid-1", &privateKey.PublicKey)},
+		})
+	}))
+	defer jwksServer.Close()
+
 	verifier := newBearerVerifier(ServerConfig{
-		JWTSecret:   "test-secret",
-		AcceptHS256: true,
+		JWKSURL:          jwksServer.URL,
+		JWKSFetchTimeout: time.Second,
 	})
 
 	tests := []struct {
@@ -390,9 +350,7 @@ func TestParseBearerClaimNormalization(t *testing.T) {
 	for _, tt := range tests {
 		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			token := mustTestHS256JWT(t, "test-secret", tt.payload)
+			token := mustTestRS256JWT(t, privateKey, "kid-1", tt.payload)
 			claims, authErr := parseBearer("Bearer "+token, verifier, now)
 			if authErr != nil {
 				t.Fatalf("parseBearer returned auth error: %+v", authErr)
@@ -513,19 +471,6 @@ func mustRSATestKey(t *testing.T) *rsa.PrivateKey {
 		t.Fatalf("generate rsa key: %v", err)
 	}
 	return privateKey
-}
-
-func mustTestHS256JWT(t *testing.T, secret string, payload map[string]any) string {
-	t.Helper()
-
-	return mustTestJWTWithClaims(t, map[string]any{
-		"alg": "HS256",
-		"typ": "JWT",
-	}, payload, func(signingInput string) []byte {
-		mac := hmac.New(sha256.New, []byte(secret))
-		_, _ = mac.Write([]byte(signingInput))
-		return mac.Sum(nil)
-	})
 }
 
 func mustTestRS256JWT(t *testing.T, privateKey *rsa.PrivateKey, kid string, payload map[string]any) string {
