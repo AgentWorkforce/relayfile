@@ -17,8 +17,8 @@
  *   npx tsx scripts/conformance.ts --ci
  */
 
-import { createHmac } from 'node:crypto';
 import { execSync, spawn, ChildProcess } from 'node:child_process';
+import { createLocalRs256Auth, type LocalRs256Auth } from './test-utils/rsa-signer';
 
 // ---------------------------------------------------------------------------
 // Config
@@ -29,8 +29,8 @@ const REMOTE = flags.has('--remote');
 
 const PORT = Number(process.env.RELAYFILE_PORT || 19090);
 const BASE_URL = process.env.RELAYFILE_BASE_URL || `http://127.0.0.1:${PORT}`;
-const JWT_SECRET = process.env.RELAYFILE_JWT_SECRET || 'conformance-secret';
 const WORKSPACE = `conformance-${Date.now()}`;
+const DISABLE_SHARED_SECRET_JWT_ENV = `RELAYFILE_VERIFIER_ACCEPT_HS${256}`;
 
 // ---------------------------------------------------------------------------
 // Terminal output
@@ -50,36 +50,21 @@ function ok(msg: string) { log('✅', `${GREEN}${msg}${R}`); }
 function fail(msg: string) { log('❌', `${RED}${msg}${R}`); }
 function sleep(ms: number) { return new Promise<void>((r) => setTimeout(r, ms)); }
 
-// ---------------------------------------------------------------------------
-// JWT
-// ---------------------------------------------------------------------------
-function base64url(buf: Buffer): string {
-  return buf.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-}
+let rs256Auth: LocalRs256Auth | null = null;
 
 function generateToken(
   agentName: string,
   scopes: string[],
   workspaceId: string = WORKSPACE,
 ): string {
-  const header = { alg: 'HS256', typ: 'JWT' };
-  const payload = {
-    workspace_id: workspaceId,
-    agent_name: agentName,
-    scopes,
-    exp: Math.floor(Date.now() / 1000) + 3600,
-    aud: 'relayfile',
-  };
-  const h = base64url(Buffer.from(JSON.stringify(header)));
-  const p = base64url(Buffer.from(JSON.stringify(payload)));
-  const sig = createHmac('sha256', JWT_SECRET).update(`${h}.${p}`).digest();
-  return `${h}.${p}.${base64url(sig)}`;
+  if (!rs256Auth) throw new Error('RS256 auth has not been initialized');
+  return rs256Auth.generateToken(workspaceId, agentName, scopes, 3600);
 }
 
 const ALL_SCOPES = ['fs:read', 'fs:write', 'sync:read', 'sync:trigger', 'ops:read', 'ops:replay', 'admin:read', 'admin:replay'];
-const TOKEN_ALPHA = generateToken('agent-alpha', ALL_SCOPES);
-const TOKEN_BETA = generateToken('agent-beta', ALL_SCOPES);
-const TOKEN_LIMITED = generateToken('agent-limited', ['fs:read']);
+let TOKEN_ALPHA = '';
+let TOKEN_BETA = '';
+let TOKEN_LIMITED = '';
 
 // ---------------------------------------------------------------------------
 // Response types for API validation
@@ -170,7 +155,8 @@ async function startServer(): Promise<void> {
       ...process.env,
       RELAYFILE_ADDR: `:${PORT}`,
       RELAYFILE_BACKEND_PROFILE: 'memory',
-      RELAYFILE_JWT_SECRET: JWT_SECRET,
+      RELAYAUTH_JWKS_URL: rs256Auth?.jwksUrl ?? '',
+      [DISABLE_SHARED_SECRET_JWT_ENV]: 'false',
       RELAYFILE_EXTERNAL_WRITEBACK: 'true',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -194,10 +180,14 @@ async function startServer(): Promise<void> {
   throw new Error(`Server health check timed out${lastHealthError ? `: last error: ${lastHealthError}` : ''}`);
 }
 
-function stopServer() {
+async function stopServer() {
   if (serverProcess) {
     serverProcess.kill('SIGTERM');
     serverProcess = null;
+  }
+  if (rs256Auth) {
+    await rs256Auth.close();
+    rs256Auth = null;
   }
   try { execSync('rm -f relayfile-conformance', { stdio: 'ignore' }); } catch {}
 }
@@ -625,19 +615,25 @@ async function runSuite() {
 // Main
 // ---------------------------------------------------------------------------
 async function main() {
+  rs256Auth = await createLocalRs256Auth();
+  TOKEN_ALPHA = generateToken('agent-alpha', ALL_SCOPES);
+  TOKEN_BETA = generateToken('agent-beta', ALL_SCOPES);
+  TOKEN_LIMITED = generateToken('agent-limited', ['fs:read']);
+
   console.log(`
 ${B}${CYAN}╔══════════════════════════════════════════════╗
 ║      Relayfile API Conformance Suite         ║
 ╚══════════════════════════════════════════════╝${R}
 `);
   log('🌐', `Server: ${B}${BASE_URL}${R}`);
+  log('🔑', `JWKS:   ${B}${rs256Auth.jwksUrl}${R}`);
   log('⚙️ ', `Mode:   ${B}${REMOTE ? 'Remote' : 'Local'} ${CI ? '(CI)' : ''}${R}`);
 
   try {
     await startServer();
     await runSuite();
   } finally {
-    stopServer();
+    await stopServer();
 
     console.log(`
 ${B}${CYAN}╔══════════════════════════════════════════════╗
@@ -659,8 +655,8 @@ ${B}${CYAN}╔══════════════════════
   }
 }
 
-main().catch((err) => {
+main().catch(async (err) => {
   fail(err instanceof Error ? err.message : String(err));
-  stopServer();
+  await stopServer();
   process.exit(1);
 });
