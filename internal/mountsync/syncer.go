@@ -28,6 +28,8 @@ import (
 
 var ErrConflict = errors.New("revision conflict")
 
+const defaultBulkFlushThreshold = 256
+
 type ConflictError struct {
 	Path string
 }
@@ -98,6 +100,7 @@ type RemoteClient interface {
 	ListEvents(ctx context.Context, workspaceID, provider, cursor string, limit int) (EventFeed, error)
 	ReadFile(ctx context.Context, workspaceID, path string) (RemoteFile, error)
 	WriteFile(ctx context.Context, workspaceID, path, baseRevision, contentType, content string) (WriteResult, error)
+	WriteFilesBulk(ctx context.Context, workspaceID string, files []BulkWriteFile) (BulkWriteResponse, error)
 	DeleteFile(ctx context.Context, workspaceID, path, baseRevision string) error
 }
 
@@ -185,6 +188,20 @@ func (c *HTTPClient) WriteFile(ctx context.Context, workspaceID, path, baseRevis
 	}
 	var out WriteResult
 	err := c.doJSON(ctx, http.MethodPut, fmt.Sprintf("/v1/workspaces/%s/fs/file?%s", url.PathEscape(workspaceID), q.Encode()), headers, body, &out)
+	return out, err
+}
+
+func (c *HTTPClient) WriteFilesBulk(ctx context.Context, workspaceID string, files []BulkWriteFile) (BulkWriteResponse, error) {
+	if len(files) == 0 {
+		return BulkWriteResponse{}, ErrEmptyBulkWrite
+	}
+	body := struct {
+		Files []BulkWriteFile `json:"files"`
+	}{
+		Files: files,
+	}
+	var out BulkWriteResponse
+	err := c.doJSON(ctx, http.MethodPost, fmt.Sprintf("/v1/workspaces/%s/fs/bulk", url.PathEscape(workspaceID)), nil, body, &out)
 	return out, err
 }
 
@@ -325,24 +342,25 @@ type Logger interface {
 }
 
 type Syncer struct {
-	client        RemoteClient
-	workspace     string
-	remoteRoot    string
-	localRoot     string
-	localDir      string
-	stateFile     string
-	eventProvider string
-	scopes        []string
-	logger        Logger
-	denialLogPath string // path to .relay/permissions-denied.log
-	state         mountState
-	loaded        bool
-	bootstrapped  bool
-	websocket     bool
-	rootCtx       context.Context
-	wsConn        *websocket.Conn
-	wsCancel      context.CancelFunc
-	mu            sync.Mutex
+	client             RemoteClient
+	workspace          string
+	remoteRoot         string
+	localRoot          string
+	localDir           string
+	stateFile          string
+	eventProvider      string
+	scopes             []string
+	logger             Logger
+	denialLogPath      string // path to .relay/permissions-denied.log
+	state              mountState
+	loaded             bool
+	bootstrapped       bool
+	websocket          bool
+	rootCtx            context.Context
+	wsConn             *websocket.Conn
+	wsCancel           context.CancelFunc
+	bulkFlushThreshold int
+	mu                 sync.Mutex
 }
 
 type mountState struct {
@@ -371,6 +389,14 @@ type localSnapshot struct {
 	Content     string
 	ContentType string
 	Hash        string
+}
+
+type pendingBulkWrite struct {
+	remotePath string
+	localPath  string
+	snapshot   localSnapshot
+	tracked    trackedFile
+	exists     bool
 }
 
 type websocketEvent struct {
@@ -426,18 +452,19 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 		rootCtx = context.Background()
 	}
 	return &Syncer{
-		client:        client,
-		workspace:     workspace,
-		remoteRoot:    remoteRoot,
-		localRoot:     localRoot,
-		localDir:      localRoot,
-		stateFile:     stateFile,
-		eventProvider: eventProvider,
-		scopes:        scopes,
-		websocket:     websocketEnabled,
-		rootCtx:       rootCtx,
-		logger:        opts.Logger,
-		denialLogPath: filepath.Join(localRoot, ".relay", "permissions-denied.log"),
+		client:             client,
+		workspace:          workspace,
+		remoteRoot:         remoteRoot,
+		localRoot:          localRoot,
+		localDir:           localRoot,
+		stateFile:          stateFile,
+		eventProvider:      eventProvider,
+		scopes:             scopes,
+		websocket:          websocketEnabled,
+		rootCtx:            rootCtx,
+		logger:             opts.Logger,
+		denialLogPath:      filepath.Join(localRoot, ".relay", "permissions-denied.log"),
+		bulkFlushThreshold: defaultBulkFlushThreshold,
 		state: mountState{
 			Files: map[string]trackedFile{},
 		},
@@ -549,19 +576,33 @@ func (s *Syncer) pushSingleFile(
 	exists bool,
 	conflicted map[string]struct{},
 ) error {
+	pendingWrite, err := s.preparePendingBulkWrite(ctx, remotePath, localPath, snapshot, tracked, exists)
+	if err != nil || pendingWrite == nil {
+		return err
+	}
+	return s.flushPendingBulkWrites(ctx, []pendingBulkWrite{*pendingWrite}, conflicted)
+}
+
+func (s *Syncer) preparePendingBulkWrite(
+	ctx context.Context,
+	remotePath, localPath string,
+	snapshot localSnapshot,
+	tracked trackedFile,
+	exists bool,
+) (*pendingBulkWrite, error) {
 	canWrite := s.canWritePath(remotePath)
 	tracked.ReadOnly = !canWrite
 	if !canWrite {
 		// If content was modified (chmod bypass), revert to server version
 		if snapshot.Hash != tracked.Hash && tracked.Hash != "" {
-			return s.revertReadonlyFile(ctx, remotePath, localPath, tracked, snapshot.ContentType)
+			return nil, s.revertReadonlyFile(ctx, remotePath, localPath, tracked, snapshot.ContentType)
 		}
 		if err := s.applyLocalPermissions(localPath, false); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return err
+			return nil, err
 		}
 		tracked.Dirty = false
 		s.state.Files[remotePath] = tracked
-		return nil
+		return nil, nil
 	}
 
 	if exists && !tracked.Dirty && tracked.Hash == snapshot.Hash {
@@ -570,7 +611,7 @@ func (s *Syncer) pushSingleFile(
 		}
 		tracked.ReadOnly = false
 		s.state.Files[remotePath] = tracked
-		return nil
+		return nil, nil
 	}
 
 	if exists && tracked.Dirty {
@@ -585,96 +626,192 @@ func (s *Syncer) pushSingleFile(
 			tracked.Hash = snapshot.Hash
 			tracked.Dirty = false
 			s.state.Files[remotePath] = tracked
-			return nil
+			return nil, nil
 		}
 	}
 
-	baseRevision := "0"
-	if exists && tracked.Revision != "" {
-		// Previously-pushed file — use its revision for optimistic concurrency.
-		// A WriteDenied entry has no Revision (the push never landed), so fall
-		// back to the create-if-absent sentinel "0".
-		baseRevision = tracked.Revision
+	return &pendingBulkWrite{
+		remotePath: remotePath,
+		localPath:  localPath,
+		snapshot:   snapshot,
+		tracked:    tracked,
+		exists:     exists,
+	}, nil
+}
+
+func (s *Syncer) flushPendingBulkWrites(ctx context.Context, pending []pendingBulkWrite, conflicted map[string]struct{}) error {
+	if len(pending) == 0 {
+		return nil
 	}
-	result, err := s.client.WriteFile(ctx, s.workspace, remotePath, baseRevision, snapshot.ContentType, snapshot.Content)
+	files := make([]BulkWriteFile, 0, len(pending))
+	for _, pendingWrite := range pending {
+		files = append(files, BulkWriteFile{
+			Path:        pendingWrite.remotePath,
+			ContentType: pendingWrite.snapshot.ContentType,
+			Content:     pendingWrite.snapshot.Content,
+		})
+	}
+
+	response, err := s.client.WriteFilesBulk(ctx, s.workspace, files)
 	if err != nil {
-		if errors.Is(err, ErrConflict) {
-			s.logf("conflict writing %s; keeping local content", remotePath)
-			if conflicted != nil {
-				conflicted[remotePath] = struct{}{}
-			}
-			remoteFile, readErr := s.client.ReadFile(ctx, s.workspace, remotePath)
-			switch {
-			case readErr == nil:
-				s.state.Files[remotePath] = trackedFile{
-					Revision:    remoteFile.Revision,
-					ContentType: snapshot.ContentType,
-					Hash:        snapshot.Hash,
-					Dirty:       true,
-					Denied:      false,
-					ReadOnly:    false,
-				}
-			case exists:
-				tracked.Hash = snapshot.Hash
-				tracked.ContentType = snapshot.ContentType
-				tracked.Dirty = true
-				s.state.Files[remotePath] = tracked
-			default:
-				s.state.Files[remotePath] = trackedFile{
-					Revision:    "",
-					ContentType: snapshot.ContentType,
-					Hash:        snapshot.Hash,
-					Dirty:       true,
-					ReadOnly:    false,
-				}
-			}
-			return nil
-		}
-		var httpErr *HTTPError
-		if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusForbidden {
-			if !exists {
-				// The server rejected the create. Do NOT delete the local file —
-				// destroying user data on permission failure is worse than the
-				// workspace drifting out of sync. Record the denial + hash so the
-				// next cycle skips re-pushing (no log spam) unless the file
-				// changes, in which case we retry.
-				s.logDenial(
-					"WRITE_DENIED",
-					remotePath,
-					"agent does not have write permission; local copy preserved",
-				)
-				s.state.Files[remotePath] = trackedFile{
-					ContentType: snapshot.ContentType,
-					Hash:        snapshot.Hash,
-					WriteDenied: true,
-					DeniedHash:  snapshot.Hash,
-				}
-				return nil
-			}
-			return s.revertReadonlyFile(ctx, remotePath, localPath, tracked, snapshot.ContentType)
-		}
 		return err
 	}
 
-	revision := result.TargetRevision
-	if revision == "" && exists {
-		revision = tracked.Revision
+	errorsByPath := make(map[string]BulkWriteError, len(response.Errors))
+	for _, writeErr := range response.Errors {
+		errorsByPath[normalizeRemotePath(writeErr.Path)] = writeErr
 	}
-	if revision == "" {
-		file, readErr := s.client.ReadFile(ctx, s.workspace, remotePath)
-		if readErr != nil {
-			return readErr
+	revisionsByPath := response.revisionsByPath()
+
+	var firstErr error
+	for _, pendingWrite := range pending {
+		if writeErr, ok := errorsByPath[pendingWrite.remotePath]; ok {
+			err := s.handleWriteError(
+				ctx,
+				pendingWrite.remotePath,
+				pendingWrite.localPath,
+				pendingWrite.snapshot,
+				pendingWrite.tracked,
+				pendingWrite.exists,
+				conflicted,
+				bulkWriteErrorAsError(writeErr),
+			)
+			if err != nil && firstErr == nil {
+				firstErr = err
+			}
+			continue
 		}
-		revision = file.Revision
+		if err := s.reconcileBulkWrite(ctx, pendingWrite, revisionsByPath[pendingWrite.remotePath]); err != nil && firstErr == nil {
+			firstErr = err
+		}
 	}
-	s.state.Files[remotePath] = trackedFile{
+	return firstErr
+}
+
+func (s *Syncer) reconcileBulkWrite(ctx context.Context, pendingWrite pendingBulkWrite, revision string) error {
+	tracked := pendingWrite.tracked
+	contentType := strings.TrimSpace(pendingWrite.snapshot.ContentType)
+	if contentType == "" {
+		contentType = pendingWrite.snapshot.ContentType
+	}
+	revision = strings.TrimSpace(revision)
+	if revision == "" {
+		remoteFile, err := s.client.ReadFile(ctx, s.workspace, pendingWrite.remotePath)
+		if err != nil {
+			return err
+		}
+		revision = remoteFile.Revision
+		if contentType == "" {
+			contentType = strings.TrimSpace(remoteFile.ContentType)
+		}
+	}
+	tracked.ContentType = contentType
+	s.state.Files[pendingWrite.remotePath] = trackedFile{
 		Revision:    revision,
-		ContentType: snapshot.ContentType,
-		Hash:        snapshot.Hash,
+		ContentType: tracked.ContentType,
+		Hash:        pendingWrite.snapshot.Hash,
 		Dirty:       false,
-		ReadOnly:    !canWrite,
+		ReadOnly:    false,
 	}
 	return nil
+}
+
+func (s *Syncer) handleWriteError(
+	ctx context.Context,
+	remotePath, localPath string,
+	snapshot localSnapshot,
+	tracked trackedFile,
+	exists bool,
+	conflicted map[string]struct{},
+	err error,
+) error {
+	if errors.Is(err, ErrConflict) {
+		s.logf("conflict writing %s; keeping local content", remotePath)
+		if conflicted != nil {
+			conflicted[remotePath] = struct{}{}
+		}
+		remoteFile, readErr := s.client.ReadFile(ctx, s.workspace, remotePath)
+		switch {
+		case readErr == nil:
+			s.state.Files[remotePath] = trackedFile{
+				Revision:    remoteFile.Revision,
+				ContentType: snapshot.ContentType,
+				Hash:        snapshot.Hash,
+				Dirty:       true,
+				Denied:      false,
+				ReadOnly:    false,
+			}
+		case exists:
+			tracked.Hash = snapshot.Hash
+			tracked.ContentType = snapshot.ContentType
+			tracked.Dirty = true
+			s.state.Files[remotePath] = tracked
+		default:
+			s.state.Files[remotePath] = trackedFile{
+				Revision:    "",
+				ContentType: snapshot.ContentType,
+				Hash:        snapshot.Hash,
+				Dirty:       true,
+				ReadOnly:    false,
+			}
+		}
+		return nil
+	}
+
+	var httpErr *HTTPError
+	if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusForbidden {
+		if !exists {
+			// The server rejected the create. Do NOT delete the local file —
+			// destroying user data on permission failure is worse than the
+			// workspace drifting out of sync. Record the denial + hash so the
+			// next cycle skips re-pushing (no log spam) unless the file
+			// changes, in which case we retry.
+			s.logDenial(
+				"WRITE_DENIED",
+				remotePath,
+				"agent does not have write permission; local copy preserved",
+			)
+			s.state.Files[remotePath] = trackedFile{
+				ContentType: snapshot.ContentType,
+				Hash:        snapshot.Hash,
+				WriteDenied: true,
+				DeniedHash:  snapshot.Hash,
+			}
+			return nil
+		}
+		return s.revertReadonlyFile(ctx, remotePath, localPath, tracked, snapshot.ContentType)
+	}
+
+	return err
+}
+
+func bulkWriteErrorAsError(writeErr BulkWriteError) error {
+	statusCode := 0
+	switch strings.TrimSpace(writeErr.Code) {
+	case "forbidden":
+		statusCode = http.StatusForbidden
+	case "not_found":
+		statusCode = http.StatusNotFound
+	case "precondition_failed":
+		statusCode = http.StatusPreconditionFailed
+	case "conflict":
+		return &ConflictError{Path: normalizeRemotePath(writeErr.Path)}
+	}
+	if statusCode != 0 || writeErr.Code != "" || writeErr.Message != "" {
+		return &HTTPError{
+			StatusCode: statusCode,
+			Code:       writeErr.Code,
+			Message:    writeErr.Message,
+		}
+	}
+	return fmt.Errorf("bulk write failed for %s", normalizeRemotePath(writeErr.Path))
+}
+
+func (s *Syncer) bulkFlushThresholdValue() int {
+	if s.bulkFlushThreshold > 0 {
+		return s.bulkFlushThreshold
+	}
+	return defaultBulkFlushThreshold
 }
 
 func (s *Syncer) revertReadonlyFile(ctx context.Context, remotePath, localPath string, tracked trackedFile, fallbackContentType string) error {
@@ -1351,6 +1488,8 @@ func (s *Syncer) pushLocal(ctx context.Context) (map[string]struct{}, error) {
 	}
 	sort.Strings(localRemotePaths)
 
+	pendingWrites := make([]pendingBulkWrite, 0, len(localRemotePaths))
+
 	for _, remotePath := range localRemotePaths {
 		snapshot := localFiles[remotePath]
 		tracked, exists := s.state.Files[remotePath]
@@ -1406,9 +1545,25 @@ func (s *Syncer) pushLocal(ctx context.Context) (map[string]struct{}, error) {
 		if exists && tracked.WriteDenied && tracked.DeniedHash == snapshot.Hash {
 			continue
 		}
-		if err := s.pushSingleFile(ctx, remotePath, localPath, snapshot, tracked, exists, conflicted); err != nil {
+		pendingWrite, err := s.preparePendingBulkWrite(ctx, remotePath, localPath, snapshot, tracked, exists)
+		if err != nil {
 			return nil, err
 		}
+		if pendingWrite == nil {
+			continue
+		}
+		pendingWrites = append(pendingWrites, *pendingWrite)
+		if len(pendingWrites) < s.bulkFlushThresholdValue() {
+			continue
+		}
+		if err := s.flushPendingBulkWrites(ctx, pendingWrites, conflicted); err != nil {
+			return nil, err
+		}
+		pendingWrites = pendingWrites[:0]
+	}
+
+	if err := s.flushPendingBulkWrites(ctx, pendingWrites, conflicted); err != nil {
+		return nil, err
 	}
 
 	statePaths := make([]string, 0, len(s.state.Files))

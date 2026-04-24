@@ -2,6 +2,9 @@ package mountsync
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -103,5 +106,84 @@ func TestHTTPClientExportFilesUsesPathFilter(t *testing.T) {
 	}
 	if files[0].Path != "/github/repos/demo/README.md" || files[0].Revision != "rev_1" || files[0].Content != "# Demo" {
 		t.Fatalf("unexpected exported file: %+v", files[0])
+	}
+}
+
+func TestHTTPClientWriteFilesBulkUsesSinglePOSTWithAllFiles(t *testing.T) {
+	var calls int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/workspaces/ws_bulk/fs/bulk" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if r.Method != http.MethodPost {
+			t.Fatalf("expected POST method, got %s", r.Method)
+		}
+		if got := r.Header.Get("Content-Type"); got != "application/json" {
+			t.Fatalf("expected application/json content type, got %q", got)
+		}
+		if atomic.AddInt32(&calls, 1) != 1 {
+			t.Fatalf("expected exactly one bulk request")
+		}
+
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read request body failed: %v", err)
+		}
+
+		var payload struct {
+			Files []BulkWriteFile `json:"files"`
+		}
+		if err := json.Unmarshal(body, &payload); err != nil {
+			t.Fatalf("unmarshal request body failed: %v", err)
+		}
+		if len(payload.Files) != 2 {
+			t.Fatalf("expected two files in bulk payload, got %d", len(payload.Files))
+		}
+		if payload.Files[0].Path != "/notion/Docs/A.md" || payload.Files[0].Content != "# A" {
+			t.Fatalf("unexpected first bulk file: %+v", payload.Files[0])
+		}
+		if payload.Files[1].Path != "/notion/Docs/B.md" || payload.Files[1].Content != "# B" {
+			t.Fatalf("unexpected second bulk file: %+v", payload.Files[1])
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"written":2,"errorCount":0,"errors":[],"correlationId":"corr_bulk"}`))
+	}))
+	defer server.Close()
+
+	client := NewHTTPClient(server.URL, "token", server.Client())
+	files := []BulkWriteFile{
+		{Path: "/notion/Docs/A.md", ContentType: "text/markdown", Content: "# A"},
+		{Path: "/notion/Docs/B.md", ContentType: "text/markdown", Content: "# B"},
+	}
+
+	response, err := client.WriteFilesBulk(context.Background(), "ws_bulk", files)
+	if err != nil {
+		t.Fatalf("bulk write failed: %v", err)
+	}
+	if response.Written != 2 || response.ErrorCount != 0 || response.CorrelationID != "corr_bulk" {
+		t.Fatalf("unexpected bulk response: %+v", response)
+	}
+	if atomic.LoadInt32(&calls) != 1 {
+		t.Fatalf("expected exactly one bulk request, got %d", atomic.LoadInt32(&calls))
+	}
+}
+
+func TestHTTPClientWriteFilesBulkRejectsEmptyBatch(t *testing.T) {
+	var calls int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	client := NewHTTPClient(server.URL, "token", server.Client())
+	response, err := client.WriteFilesBulk(context.Background(), "ws_bulk", nil)
+	if !errors.Is(err, ErrEmptyBulkWrite) {
+		t.Fatalf("expected ErrEmptyBulkWrite, got response=%+v err=%v", response, err)
+	}
+	if atomic.LoadInt32(&calls) != 0 {
+		t.Fatalf("expected empty batch to fail before issuing a request, got %d calls", atomic.LoadInt32(&calls))
 	}
 }
