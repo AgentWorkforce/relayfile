@@ -56,6 +56,13 @@ func (f *fakeRemoteClient) WriteFile(_ context.Context, _, path, _, _, _ string)
 	return mountsync.WriteResult{TargetRevision: "r_new"}, nil
 }
 
+func (f *fakeRemoteClient) WriteFilesBulk(_ context.Context, _ string, _ []mountsync.BulkWriteFile) (mountsync.BulkWriteResponse, error) {
+	// mountfuse tests never exercise the bulk-write path — the daemon uses
+	// WriteFile directly. Return an empty response; if a future test ever
+	// exercises bulk here, widen this stub with fields + error toggles.
+	return mountsync.BulkWriteResponse{}, nil
+}
+
 func (f *fakeRemoteClient) DeleteFile(_ context.Context, _, path, _ string) error {
 	if f.deleteErr != nil {
 		return f.deleteErr
