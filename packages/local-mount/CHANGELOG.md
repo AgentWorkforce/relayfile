@@ -6,6 +6,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+_No unreleased changes._
+
+## [0.6.0] - 2026-04-30
+
 ### Added
 - `MountOptions.includeGit` (also exposed on `launchOnMount`) opts the project's `.git` directory back into the mount with one-way project→mount sync. Git operations work inside the mount; mount-side `.git` mutations stay sandboxed and are discarded on cleanup. Fixes [#66](https://github.com/AgentWorkforce/relayfile/issues/66).
 
@@ -58,7 +62,8 @@ Initial release.
 - Directory-only ignore patterns (e.g. `cache/`) match directories without swallowing like-named files.
 - README documenting the mount lifecycle, dotfile semantics, and auto-sync behavior. ([#48])
 
-[Unreleased]: https://github.com/AgentWorkforce/relayfile/compare/v0.5.3...HEAD
+[Unreleased]: https://github.com/AgentWorkforce/relayfile/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.6.0
 [0.5.3]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.5.3
 [0.5.2]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.5.2
 [0.5.1]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.5.1
