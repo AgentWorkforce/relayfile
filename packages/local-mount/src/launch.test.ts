@@ -10,7 +10,7 @@ import {
 import os from 'node:os';
 import path from 'node:path';
 import { launchOnMount } from './launch.js';
-import * as symlinkMount from './symlink-mount.js';
+import * as mountModule from './mount.js';
 
 describe('launchOnMount', () => {
   let projectDir: string;
@@ -88,7 +88,7 @@ describe('launchOnMount', () => {
     let cleanedUp = false;
     let stopCalled = false;
 
-    const createSpy = vi.spyOn(symlinkMount, 'createSymlinkMount').mockReturnValue({
+    const createSpy = vi.spyOn(mountModule, 'createMount').mockReturnValue({
       mountDir,
       startAutoSync: () => ({
         stop: async () => {

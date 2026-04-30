@@ -12,12 +12,12 @@ npm install @relayfile/local-mount
 
 ## What it exports
 
-### `createSymlinkMount(projectDir, mountDir, options)`
+### `createMount(projectDir, mountDir, options)`
 
 Builds a mounted copy of `projectDir` at `mountDir` and returns a handle:
 
 ```ts
-interface SymlinkMountHandle {
+interface MountHandle {
   mountDir: string;
   syncBack(opts?: { signal?: AbortSignal }): Promise<number>;
   startAutoSync(opts?: AutoSyncOptions): AutoSyncHandle;
@@ -212,6 +212,18 @@ The implementation is intentionally conservative about `mountDir`:
 - if `mountDir` already exists, it must contain the `.relayfile-local-mount` marker file from a previous mount created by this package
 
 These checks help prevent accidental deletion of unrelated directories during mount recreation and cleanup.
+
+## Why copy instead of symlink?
+
+The mount is built by copying files rather than symlinking them. Symlinks would break several of the package's guarantees:
+
+1. **`.agentreadonly` can't be enforced.** Read-only is implemented by `chmod 0o444` on the mount copy. `chmod` follows symlinks, so applying it to a symlink would mark the *source* file read-only, flipping the project's permissions instead of restricting the agent's view.
+2. **The auto-sync conflict model assumes two distinct files.** Rules like "both sides changed → mount wins", "one side deleted → propagate", and "readonly paths never flow mount→project but project-side edits still flow into the mount" only make sense if mount and source are separate bytes. Through a symlink they're the same inode — there's no mount-side copy to re-chmod `0o444` after a project-side edit.
+3. **Editor save-via-rename breaks symlinks anyway.** Most editors save by writing a temp file and renaming it over the target, which replaces the symlink with a regular file and severs the link. A "live view" via symlinks isn't reliable in practice.
+4. **Containment.** A copy gives you a checkpoint: if the agent destroys files or writes garbage, the source is untouched until `syncBack()` filters and copies back. With symlinks, every keystroke is live on the project.
+5. **`.agentignore` hiding works fine with symlinks** (just don't link), but the readonly and conflict semantics still need copies — so a hybrid would be more complex than just copying everything.
+
+Source-side symlinks that resolve to regular files inside the project *are* followed when building the mount; the resolved bytes are copied. Symlinks the agent creates inside the mount are skipped on sync-back.
 
 ## Notes
 

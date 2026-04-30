@@ -1,8 +1,8 @@
 export {
-  createSymlinkMount,
-  type SymlinkMountOptions,
-  type SymlinkMountHandle,
-} from './symlink-mount.js';
+  createMount,
+  type MountOptions,
+  type MountHandle,
+} from './mount.js';
 
 export {
   type AutoSyncOptions,

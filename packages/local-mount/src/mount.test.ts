@@ -11,7 +11,7 @@ import {
 } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { createSymlinkMount } from './symlink-mount.js';
+import { createMount } from './mount.js';
 
 function tmpDir(): string {
   return mkdtempSync(path.join(os.tmpdir(), 'local-mount-test-'));
@@ -22,7 +22,7 @@ function write(file: string, body: string): void {
   writeFileSync(file, body, 'utf8');
 }
 
-describe('createSymlinkMount', () => {
+describe('createMount', () => {
   let projectDir: string;
   let mountDir: string;
 
@@ -43,7 +43,7 @@ describe('createSymlinkMount', () => {
     write(path.join(projectDir, 'docs/guide.md'), 'guide');
     write(path.join(projectDir, 'config.ro'), 'frozen');
 
-    const handle = createSymlinkMount(projectDir, mountDir, {
+    const handle = createMount(projectDir, mountDir, {
       ignoredPatterns: ['secrets/'],
       readonlyPatterns: ['*.ro', 'docs/**'],
       excludeDirs: [],
@@ -70,7 +70,7 @@ describe('createSymlinkMount', () => {
 
   it('refuses mountDir === projectDir', () => {
     expect(() =>
-      createSymlinkMount(projectDir, projectDir, {
+      createMount(projectDir, projectDir, {
         ignoredPatterns: [],
         readonlyPatterns: [],
         excludeDirs: [],
@@ -84,7 +84,7 @@ describe('createSymlinkMount', () => {
     write(path.join(projectDir, '.relay/state.json'), '{}');
     write(path.join(projectDir, 'keep.txt'), 'yes');
 
-    const handle = createSymlinkMount(projectDir, mountDir, {
+    const handle = createMount(projectDir, mountDir, {
       ignoredPatterns: [],
       readonlyPatterns: [],
       excludeDirs: [],
@@ -103,7 +103,7 @@ describe('createSymlinkMount', () => {
     write(path.join(projectDir, 'writable.txt'), 'original');
     write(path.join(projectDir, 'readonly.txt'), 'original-ro');
 
-    const handle = createSymlinkMount(projectDir, mountDir, {
+    const handle = createMount(projectDir, mountDir, {
       ignoredPatterns: [],
       readonlyPatterns: ['readonly.txt'],
       excludeDirs: [],
@@ -138,7 +138,7 @@ describe('createSymlinkMount', () => {
   it('syncBack: returns immediately when already aborted', async () => {
     write(path.join(projectDir, 'writable.txt'), 'original');
 
-    const handle = createSymlinkMount(projectDir, mountDir, {
+    const handle = createMount(projectDir, mountDir, {
       ignoredPatterns: [],
       readonlyPatterns: [],
       excludeDirs: [],
@@ -162,7 +162,7 @@ describe('createSymlinkMount', () => {
     write(path.join(projectDir, 'b.txt'), 'b0');
     write(path.join(projectDir, 'c.txt'), 'c0');
 
-    const handle = createSymlinkMount(projectDir, mountDir, {
+    const handle = createMount(projectDir, mountDir, {
       ignoredPatterns: [],
       readonlyPatterns: [],
       excludeDirs: [],
