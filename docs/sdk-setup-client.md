@@ -10,7 +10,7 @@
 Using relayfile today requires understanding at least four separate systems before writing a single line of product code: the cloud web API (workspace creation, join tokens), relayauth (JWT issuance), Nango (OAuth connect sessions), and the relayfile VFS API. None of these steps are exposed through the SDK — they live in the cloud web app, accessed through a browser dashboard or undocumented HTTP calls.
 
 The result is that embedding relayfile in an agent sandbox requires either:
-- Hand-rolling HTTP calls against `app.agentrelay.com/api/v1/...` with no type safety, or
+- Hand-rolling HTTP calls against `https://agentrelay.com/cloud/api/v1/...` with no type safety, or
 - Copying setup code from examples that have no official contract.
 
 The existing `RelayFileClient` assumes you already have a workspace ID and a valid JWT. It does not know how to get either.
@@ -79,8 +79,8 @@ This spec does **not** cover: self-hosted server setup, the Go server, Python SD
           │                     │
 ┌─────────▼──────────┐  ┌──────▼────────────────────┐
 │  cloud web API      │  │  relayfile VFS (CF Worker) │
-│  app.agentrelay.com │  │  relayfile.agent-relay.com │
-│  /api/v1/workspaces │  │  /v1/workspaces/{id}/fs/…  │
+│  agentrelay.com      │  │  relayfile.agent-relay.com │
+│  /cloud/api/v1/...   │  │  /v1/workspaces/{id}/fs/…  │
 └─────────────────────┘  └───────────────────────────┘
           │
           │  (internally calls)
@@ -94,7 +94,7 @@ The SDK calls the cloud web API for all setup operations. The cloud web API is t
 
 ### Cloud web API base URL
 
-`RelayfileSetup` defaults to `https://app.agentrelay.com`. This is overridable via constructor option for staging/dev environments.
+`RelayfileSetup` defaults to `https://agentrelay.com/cloud`. This is overridable via constructor option for staging/dev environments.
 
 ---
 
@@ -108,7 +108,7 @@ The entry point. Stateless — creates workspaces and returns handles.
 export interface RelayfileSetupOptions {
   /**
    * Base URL for the cloud web API.
-   * @default "https://app.agentrelay.com"
+   * @default "https://agentrelay.com/cloud"
    */
   cloudApiUrl?: string
 
