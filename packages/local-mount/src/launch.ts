@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { createSymlinkMount, type SymlinkMountHandle } from './symlink-mount.js';
+import { createMount, type MountHandle } from './mount.js';
 import type { AutoSyncHandle, AutoSyncOptions } from './auto-sync.js';
 
 export interface LaunchOnMountOptions {
@@ -61,7 +61,7 @@ export interface LaunchOnMountResult {
  * exit code.
  */
 export async function launchOnMount(opts: LaunchOnMountOptions): Promise<LaunchOnMountResult> {
-  const handle: SymlinkMountHandle = createSymlinkMount(opts.projectDir, opts.mountDir, {
+  const handle: MountHandle = createMount(opts.projectDir, opts.mountDir, {
     ignoredPatterns: opts.ignoredPatterns ?? [],
     readonlyPatterns: opts.readonlyPatterns ?? [],
     excludeDirs: opts.excludeDirs ?? [],

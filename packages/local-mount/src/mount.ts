@@ -21,7 +21,7 @@ import {
   type AutoSyncOptions,
 } from './auto-sync.js';
 
-export interface SymlinkMountOptions {
+export interface MountOptions {
   ignoredPatterns: string[];
   readonlyPatterns: string[];
   excludeDirs: string[];
@@ -32,7 +32,7 @@ export interface SymlinkMountOptions {
   agentName?: string;
 }
 
-export interface SymlinkMountHandle {
+export interface MountHandle {
   mountDir: string;
   syncBack(opts?: { signal?: AbortSignal }): Promise<number>;
   /**
@@ -50,11 +50,11 @@ const MOUNT_MARKER_FILENAME = '.relayfile-local-mount';
 const MOUNT_MARKER_CONTENT =
   'This directory is managed by @relayfile/local-mount. Do not place unrelated files here; the directory will be deleted when the mount is torn down.\n';
 
-export function createSymlinkMount(
+export function createMount(
   projectDir: string,
   mountDir: string,
-  options: SymlinkMountOptions
-): SymlinkMountHandle {
+  options: MountOptions
+): MountHandle {
   const resolvedProjectDir = realpathSync(projectDir);
   const resolvedMountDir = path.resolve(mountDir);
   const readonlyPatterns = [...options.readonlyPatterns];
@@ -191,7 +191,7 @@ function assertMountDirSafeToRemove(mountDir: string, projectDir: string): void 
   if (!existsSync(markerPath)) {
     throw new Error(
       `Refusing to remove ${resolved}: missing ${MOUNT_MARKER_FILENAME} marker. ` +
-        `Only directories previously created by createSymlinkMount can be reused as mountDir.`
+        `Only directories previously created by createMount can be reused as mountDir.`
     );
   }
 }
