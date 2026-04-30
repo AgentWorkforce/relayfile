@@ -29,7 +29,7 @@ Behavior:
 - Copies regular files into the mount
 - Applies ignore rules from `ignoredPatterns`
 - Marks read-only matches as mode `0o444`
-- Excludes `.git` and `node_modules` by default
+- Excludes `.git` and `node_modules` by default. Pass `includeGit: true` to opt the project's `.git` directory back in (see [Including `.git`](#including-git))
 - Writes `_MOUNT_README.md` and `.relayfile-local-mount` into the mount
 - Skips syncing `_MOUNT_README.md`, `.relayfile-local-mount`, ignored files, read-only files, and symlinks back to the source project
 
@@ -109,6 +109,28 @@ Conflict and delete rules:
 - one side deleted and the other changed since last sync → recreate the missing file from the changed side
 - readonly paths never flow mount→project; project-side edits still flow into the mount (the mount copy is re-chmodded `0o444`)
 - `_MOUNT_README.md`, `.relayfile-local-mount`, ignored paths, and excluded directories never cross
+
+## Including `.git`
+
+By default, the project's `.git` directory is excluded from the mount, which means git commands inside the mount fail with `fatal: not a git repository`. Pass `includeGit: true` (on `createMount` or `launchOnMount`) to copy `.git` into the mount with **one-way project→mount sync**:
+
+- `.git` is copied on mount creation, so `git status`, `git log`, `git diff`, `git commit`, etc. all work inside the mount.
+- Project-side changes under `.git/**` flow into the mount (e.g. if a teammate's tooling moves `HEAD` while the agent is running).
+- Mount-side changes under `.git/**` are **not** synced back to the project. Branches, commits, or refs the agent creates in the mount stay sandboxed and are discarded on cleanup.
+
+If the agent needs its commits to survive, push to a remote from inside the mount. Source files outside `.git` continue to follow the normal bidirectional sync rules.
+
+```ts
+launchOnMount({
+  cli: 'claude',
+  args: ['--print', 'Inspect the diff and propose a fix.'],
+  projectDir,
+  mountDir,
+  includeGit: true,
+});
+```
+
+Note that `.git` can be sizable (hundreds of MB on long-lived repos); the initial mount creation copies the whole tree.
 
 ## Dotfile semantics
 

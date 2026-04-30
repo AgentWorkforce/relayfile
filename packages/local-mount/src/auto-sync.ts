@@ -26,6 +26,13 @@ export interface AutoSyncContext {
    */
   isIgnored: (relPosix: string, isDirectory?: boolean) => boolean;
   isReadonly: (relPosix: string) => boolean;
+  /**
+   * One-way project→mount paths. Project-side changes flow into the mount,
+   * but mount-side changes never flow back. Unlike readonly, the mount copy
+   * is left writable so tools (e.g. git) can mutate it locally; those
+   * mutations are simply discarded on cleanup.
+   */
+  isNoSyncBack: (relPosix: string) => boolean;
   isReservedFile: (relPosix: string) => boolean;
 }
 
@@ -323,11 +330,16 @@ function reconcile(
  * Resolution rules ("mount wins"):
  * - If both sides changed since last sync → mount→project.
  * - Only mount changed → mount→project (unless mount-side change is disallowed
- *   for readonly files; then drop the mount change).
+ *   for readonly / noSyncBack files; then drop the mount change).
  * - Only project changed → project→mount.
  * - One side missing:
  *   • Other side changed since last sync → recreate the missing side.
  *   • Otherwise → propagate the delete.
+ *
+ * `readonly` and `noSyncBack` both forbid mount→project. The split exists so
+ * the chmod 0o444 only fires for true readonly entries (e.g. `.agentreadonly`
+ * matches), while noSyncBack entries (e.g. `.git/**` when `includeGit: true`)
+ * stay writable in the mount so tools can mutate them locally.
  */
 function syncOneFile(
   relPosix: string,
@@ -342,6 +354,7 @@ function syncOneFile(
 
   const prev = state.get(relPosix);
   const readonly = ctx.isReadonly(relPosix);
+  const noSyncBack = readonly || ctx.isNoSyncBack(relPosix);
 
   if (!mountStat && !projectStat) {
     state.delete(relPosix);
@@ -359,15 +372,15 @@ function syncOneFile(
         return false;
       }
       // Differ with no history: arbitrary tiebreak → mount wins.
-      if (readonly) {
-        // Readonly can't accept mount-side writes; fall back to project→mount.
+      if (noSyncBack) {
+        // Mount-side writes never flow back; fall back to project→mount.
         return doProjectToMount(relPosix, state, ctx, projectAbs, mountAbs, readonly);
       }
       return doMountToProject(relPosix, state, ctx, mountAbs, projectAbs);
     }
     if (mountStat && !projectStat) {
-      if (readonly) {
-        // New file in mount with a readonly pattern → cannot sync back.
+      if (noSyncBack) {
+        // New file in mount with a no-sync-back pattern → cannot sync back.
         return false;
       }
       return doMountToProject(relPosix, state, ctx, mountAbs, projectAbs);
@@ -389,7 +402,7 @@ function syncOneFile(
 
   if (mountStat && projectStat) {
     if (!mountChanged && !projectChanged) return false;
-    if (mountChanged && !readonly) {
+    if (mountChanged && !noSyncBack) {
       return doMountToProject(relPosix, state, ctx, mountAbs, projectAbs);
     }
     if (projectChanged) {
@@ -399,7 +412,7 @@ function syncOneFile(
   }
 
   if (mountStat && !projectStat) {
-    if (mountChanged && !readonly) {
+    if (mountChanged && !noSyncBack) {
       return doMountToProject(relPosix, state, ctx, mountAbs, projectAbs);
     }
     // Project deleted externally and mount hasn't been touched since → mirror.
@@ -411,8 +424,8 @@ function syncOneFile(
       return doProjectToMount(relPosix, state, ctx, projectAbs, mountAbs, readonly);
     }
     // Mount deleted and project hasn't been touched since → mirror to project.
-    if (readonly) {
-      // Readonly deletes in mount don't sync back; recreate mount from project.
+    if (noSyncBack) {
+      // No-sync-back deletes in mount don't propagate; recreate from project.
       return doProjectToMount(relPosix, state, ctx, projectAbs, mountAbs, readonly);
     }
     return doDeleteProject(relPosix, state, projectAbs);

@@ -30,6 +30,19 @@ export interface MountOptions {
    * If omitted, the doc uses a generic "agent" value.
    */
   agentName?: string;
+  /**
+   * Include the project's `.git` directory inside the mount with one-way
+   * project→mount sync. Default: false (`.git` is excluded entirely, matching
+   * historical behavior).
+   *
+   * When true:
+   * - `.git` is copied into the mount on creation, so git commands work inside.
+   * - Project-side changes under `.git/**` flow into the mount.
+   * - Mount-side changes under `.git/**` do NOT flow back to the project, so
+   *   commits/branches the agent creates inside the mount stay sandboxed and
+   *   are discarded with the mount on cleanup. Push to a remote to keep them.
+   */
+  includeGit?: boolean;
 }
 
 export interface MountHandle {
@@ -59,13 +72,23 @@ export function createMount(
   const resolvedMountDir = path.resolve(mountDir);
   const readonlyPatterns = [...options.readonlyPatterns];
   const ignoredPatterns = [...options.ignoredPatterns];
+  const includeGit = options.includeGit === true;
   const readonlyMatcher = createPathMatcher(readonlyPatterns);
   const ignoredMatcher = createPathMatcher(ignoredPatterns);
+  // `.git` is in DEFAULT_EXCLUDED_DIRS so the mount stays small and git
+  // operations don't accidentally cross-mutate the host repo. When the caller
+  // opts in via `includeGit`, drop it from the defaults and instead route it
+  // through the noSyncBack matcher below so it stays one-way.
+  const defaultExcludes = includeGit
+    ? DEFAULT_EXCLUDED_DIRS.filter((d) => d !== '.git')
+    : DEFAULT_EXCLUDED_DIRS;
   const excludeSet = new Set(
-    [...DEFAULT_EXCLUDED_DIRS, ...options.excludeDirs]
+    [...defaultExcludes, ...options.excludeDirs]
       .map((entry) => normalizeRelativePosix(entry).replace(/^\/+|\/+$/g, ''))
       .filter(Boolean)
   );
+  const noSyncBackPatterns = includeGit ? ['.git', '.git/**'] : [];
+  const noSyncBackMatcher = createPathMatcher(noSyncBackPatterns);
 
   // Guard against mountDir === projectDir. We compare both the realpath'd
   // project dir and the plain resolved project dir so callers that pass the
@@ -111,6 +134,7 @@ export function createMount(
     isExcluded: (relPosix) => isExcludedPath(relPosix, excludeSet),
     isIgnored: (relPosix, isDir) => isPathMatched(relPosix, ignoredMatcher, isDir),
     isReadonly: (relPosix) => isPathMatched(relPosix, readonlyMatcher),
+    isNoSyncBack: (relPosix) => isPathMatched(relPosix, noSyncBackMatcher),
     isReservedFile: (relPosix) =>
       relPosix === MOUNT_README_FILENAME || relPosix === MOUNT_MARKER_FILENAME,
   };
@@ -134,7 +158,8 @@ export function createMount(
           realMountDir,
           realProjectDir,
           readonlyMatcher,
-          ignoredMatcher
+          ignoredMatcher,
+          noSyncBackMatcher
         );
         synced += syncedForFile;
 
@@ -387,9 +412,16 @@ function syncMountedFileBack(
   mountDir: string,
   projectDir: string,
   readonlyMatcher: Ignore,
-  ignoredMatcher: Ignore
+  ignoredMatcher: Ignore,
+  noSyncBackMatcher: Ignore
 ): number {
-  const relative = resolveSyncRelativePath(sourceFile, mountDir, readonlyMatcher, ignoredMatcher);
+  const relative = resolveSyncRelativePath(
+    sourceFile,
+    mountDir,
+    readonlyMatcher,
+    ignoredMatcher,
+    noSyncBackMatcher
+  );
   if (!relative) return 0;
 
   const safeTargetPath = resolveVerifiedSyncTarget(projectDir, relative);
@@ -407,14 +439,19 @@ function resolveSyncRelativePath(
   sourceFile: string,
   mountDir: string,
   readonlyMatcher: Ignore,
-  ignoredMatcher: Ignore
+  ignoredMatcher: Ignore,
+  noSyncBackMatcher: Ignore
 ): string | null {
   const relative = path.relative(mountDir, sourceFile);
   if (relative === '' || relative.startsWith('..')) return null;
   const relativePosix = normalizeRelativePosix(relative);
   if (relativePosix === MOUNT_README_FILENAME) return null;
   if (relativePosix === MOUNT_MARKER_FILENAME) return null;
-  if (isPathMatched(relative, readonlyMatcher) || isPathMatched(relative, ignoredMatcher)) return null;
+  if (
+    isPathMatched(relative, readonlyMatcher) ||
+    isPathMatched(relative, ignoredMatcher) ||
+    isPathMatched(relative, noSyncBackMatcher)
+  ) return null;
 
   try {
     if (lstatSync(sourceFile).isSymbolicLink()) return null;
