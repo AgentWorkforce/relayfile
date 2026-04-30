@@ -320,6 +320,68 @@ describe('startAutoSync', () => {
     }
   });
 
+  it('includeGit: project-side .git edits flow into the mount', async () => {
+    write(path.join(projectDir, '.git/HEAD'), 'ref: refs/heads/main\n');
+
+    const handle = createMount(projectDir, mountDir, {
+      ignoredPatterns: [],
+      readonlyPatterns: [],
+      excludeDirs: [],
+      includeGit: true,
+    });
+
+    const auto = handle.startAutoSync({ debounceMs: 50, scanIntervalMs: 10_000 });
+    await auto.ready();
+    try {
+      writeFileSync(
+        path.join(projectDir, '.git/HEAD'),
+        'ref: refs/heads/feature\n',
+        'utf8'
+      );
+      await waitFor(() =>
+        readFileSync(path.join(handle.mountDir, '.git/HEAD'), 'utf8') ===
+          'ref: refs/heads/feature\n'
+      );
+    } finally {
+      await auto.stop();
+      handle.cleanup();
+    }
+  });
+
+  it('includeGit: mount-side .git edits do NOT flow back to the project', async () => {
+    write(path.join(projectDir, '.git/HEAD'), 'ref: refs/heads/main\n');
+
+    const handle = createMount(projectDir, mountDir, {
+      ignoredPatterns: [],
+      readonlyPatterns: [],
+      excludeDirs: [],
+      includeGit: true,
+    });
+
+    const auto = handle.startAutoSync({ debounceMs: 50, scanIntervalMs: 10_000 });
+    await auto.ready();
+    try {
+      writeFileSync(
+        path.join(handle.mountDir, '.git/HEAD'),
+        'ref: refs/heads/feature\n',
+        'utf8'
+      );
+      writeFileSync(path.join(handle.mountDir, '.git/COMMIT_EDITMSG'), 'wip\n', 'utf8');
+
+      // Give autosync time to notice and choose not to propagate.
+      await new Promise((r) => setTimeout(r, 300));
+      await auto.reconcile();
+
+      expect(readFileSync(path.join(projectDir, '.git/HEAD'), 'utf8')).toBe(
+        'ref: refs/heads/main\n'
+      );
+      expect(existsSync(path.join(projectDir, '.git/COMMIT_EDITMSG'))).toBe(false);
+    } finally {
+      await auto.stop();
+      handle.cleanup();
+    }
+  });
+
   it('does not sync the _MOUNT_README.md or marker files', async () => {
     const handle = createMount(projectDir, mountDir, {
       ignoredPatterns: [],
