@@ -568,8 +568,8 @@ Sequence:
 
 2. `POST {cloudApiUrl}/api/v1/workspaces/{workspaceId}/integrations/connect-session`  
    — Body: `{ allowedIntegrations?: string[] }` (mapped from provider to Nango config keys)  
-   — Auth: `Authorization: Bearer {accessToken}` (this endpoint requires auth — see Cloud API Changes)  
-   — Returns: `{ token, expiresAt, connectLink }`
+   — Auth: `Authorization: Bearer {relayfileJwt}` from the workspace handle. If an `accessToken` was supplied to `RelayfileSetup`, it is used for workspace create/join calls, but setup operations on an existing handle use the handle's workspace-scoped relayfile JWT so anonymous SDK-created workspaces can also connect integrations.  
+   — Returns: `{ token, expiresAt, connectLink, connectionId? }`. When the cloud cannot know the final Nango connection ID at session creation time, the SDK uses `workspaceId` as the polling key and the cloud status endpoint treats an omitted `connectionId` or `connectionId=workspaceId` as "ready when a provider row exists".
 
 3. Store `{ connectionId, provider }` on the handle in a `_pendingConnections: Map<provider, string>` for use by `waitForConnection()`.
 
@@ -810,6 +810,7 @@ New exports added to `index.ts`:
 
 ```ts
 export { RelayfileSetup, WorkspaceHandle } from './setup.js'
+export { WORKSPACE_INTEGRATION_PROVIDERS } from './setup-types.js'
 export type {
   RelayfileSetupOptions,
   CreateWorkspaceOptions,
@@ -819,7 +820,6 @@ export type {
   WaitForConnectionOptions,
   WorkspaceInfo,
   WorkspaceIntegrationProvider,
-  WORKSPACE_INTEGRATION_PROVIDERS,
 } from './setup-types.js'
 export {
   RelayfileSetupError,
@@ -868,7 +868,8 @@ All requests from `RelayfileSetup` and `WorkspaceHandle` to the cloud web API:
 
 - Use `fetch` (Node.js 18+ native)
 - Set `Content-Type: application/json` on POST requests
-- Set `Authorization: Bearer {accessToken}` when `accessToken` is provided
+- Set `Authorization: Bearer {accessToken}` for setup-level calls when `accessToken` is provided
+- Set `Authorization: Bearer {relayfileJwt}` for workspace-handle setup calls such as `connectIntegration`, `waitForConnection`, `isConnected`, and `disconnectIntegration`
 - Set `X-Relayfile-SDK-Version: {version}` header (from `package.json` version, injected at build time)
 - Apply exponential backoff with jitter on 429 and 5xx responses, up to `retry.maxRetries` attempts
 - Honor `Retry-After` header on 429 responses
