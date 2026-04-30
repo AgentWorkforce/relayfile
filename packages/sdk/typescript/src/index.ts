@@ -7,6 +7,30 @@ export {
   type RelayFileRetryOptions,
   type WebSocketConnection
 } from "./client.js";
+export { RelayfileSetup, WorkspaceHandle } from "./setup.js";
+export {
+  CloudAbortError,
+  CloudApiError,
+  CloudTimeoutError,
+  IntegrationConnectionTimeoutError,
+  MalformedCloudResponseError,
+  MissingConnectionIdError,
+  RelayfileSetupError,
+  UnknownProviderError
+} from "./setup-errors.js";
+export {
+  WORKSPACE_INTEGRATION_PROVIDERS,
+  type ConnectIntegrationOptions,
+  type ConnectIntegrationResult,
+  type CreateWorkspaceOptions,
+  type JoinWorkspaceOptions,
+  type RelayfileSetupOptions,
+  type RelayfileSetupRetryOptions,
+  type WaitForConnectionOptions,
+  type WorkspaceInfo,
+  type WorkspaceIntegrationProvider,
+  type WorkspacePermissions
+} from "./setup-types.js";
 export {
   RelayFileSync,
   type RelayFileSyncOptions,

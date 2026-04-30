@@ -1,20 +1,80 @@
 {
   "version": 1,
-  "lastUpdated": "2026-04-24T09:10:42.556Z",
+  "lastUpdated": "2026-04-30T20:11:29.215Z",
   "trajectories": {
+    "traj_mfyus7zfgxt2": {
+      "title": "062-sdk-setup-client-workflow",
+      "status": "active",
+      "startedAt": "2026-04-30T16:53:07.629Z",
+      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/active/traj_mfyus7zfgxt2.json"
+    },
+    "traj_82lywlk9dcnc": {
+      "title": "Write SDK setup client workflow from spec",
+      "status": "completed",
+      "startedAt": "2026-04-30T16:43:24.651Z",
+      "completedAt": "2026-04-30T16:51:07.147Z",
+      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-04/traj_82lywlk9dcnc.json"
+    },
     "traj_iuzm83ogm43k": {
       "title": "Replace chokidar with @parcel/watcher in local-mount",
       "status": "completed",
       "startedAt": "2026-04-20T20:35:15.759Z",
       "completedAt": "2026-04-20T20:58:15.412Z",
-      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile-rs256/.trajectories/completed/2026-04/traj_iuzm83ogm43k.json"
+      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-04/traj_iuzm83ogm43k.json"
     },
     "traj_nixaonkglri1": {
       "title": "Migrate relayfile e2e and conformance scripts to RS256 local JWKS",
       "status": "completed",
       "startedAt": "2026-04-24T09:06:31.046Z",
       "completedAt": "2026-04-24T09:10:42.425Z",
-      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile-rs256/.trajectories/completed/2026-04/traj_nixaonkglri1.json"
+      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-04/traj_nixaonkglri1.json"
+    },
+    "traj_i1f02867dkxn": {
+      "title": "Fix SDK setup workflow verify gate",
+      "status": "completed",
+      "startedAt": "2026-04-30T17:07:38.811Z",
+      "completedAt": "2026-04-30T17:10:18.837Z",
+      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-04/traj_i1f02867dkxn.json"
+    },
+    "traj_ubq95azheqpt": {
+      "title": "062-sdk-setup-client-workflow",
+      "status": "active",
+      "startedAt": "2026-04-30T17:12:22.684Z",
+      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/active/traj_ubq95azheqpt.json"
+    },
+    "traj_dmoc4slub7ox": {
+      "title": "Fix SDK setup workflow evidence path",
+      "status": "completed",
+      "startedAt": "2026-04-30T17:33:11.390Z",
+      "completedAt": "2026-04-30T17:34:29.265Z",
+      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-04/traj_dmoc4slub7ox.json"
+    },
+    "traj_cojnals16pf9": {
+      "title": "062-sdk-setup-client-workflow",
+      "status": "active",
+      "startedAt": "2026-04-30T17:35:02.672Z",
+      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/active/traj_cojnals16pf9.json"
+    },
+    "traj_qi3qmy5oveab": {
+      "title": "Resolve SDK setup review gate",
+      "status": "completed",
+      "startedAt": "2026-04-30T17:41:15.457Z",
+      "completedAt": "2026-04-30T17:43:16.297Z",
+      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-04/traj_qi3qmy5oveab.json"
+    },
+    "traj_em3hvzpg1xmx": {
+      "title": "062-sdk-setup-client-workflow",
+      "status": "completed",
+      "startedAt": "2026-04-30T17:43:56.110Z",
+      "completedAt": "2026-04-30T17:43:59.041Z",
+      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-04/traj_em3hvzpg1xmx.json"
+    },
+    "traj_cdist8i8vdmd": {
+      "title": "Address PR 65 feedback",
+      "status": "completed",
+      "startedAt": "2026-04-30T20:10:45.916Z",
+      "completedAt": "2026-04-30T20:11:29.126Z",
+      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-04/traj_cdist8i8vdmd.json"
     }
   }
 }

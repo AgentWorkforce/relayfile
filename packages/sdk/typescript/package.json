@@ -12,6 +12,7 @@
     "build": "tsc",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "setup:e2e": "node scripts/setup-e2e.mjs",
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
