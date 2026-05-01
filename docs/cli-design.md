@@ -62,6 +62,38 @@ Same as `gh auth login` — opens a browser, completes device-code flow, stores 
 
 ## Commands
 
+### `relayfile` / `relayfile setup`
+
+Run the low-friction Cloud setup path for humans and agent-guided onboarding.
+
+```
+relayfile
+relayfile setup [--provider github] [--workspace my-project] [--local-dir ./relayfile-mount]
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--cloud-api-url` | `https://agentrelay.com/cloud` | Relayfile Cloud API URL |
+| `--cloud-token` | `RELAYFILE_CLOUD_TOKEN` | Cloud access token for headless setup; skips browser login |
+| `--provider` | prompted, default `github` | Integration to connect; use `none` to skip |
+| `--workspace` | prompted | Workspace name to create |
+| `--local-dir` | prompted, default `./relayfile-mount` | Local VFS mount directory |
+| `--no-open` | false | Print hosted login/connect URLs instead of opening a browser |
+| `--skip-mount` | false | Complete setup without starting the foreground mount loop |
+| `--once` | false | Run one mount sync cycle and exit |
+
+**Behavior:**
+
+1. Start a localhost callback and open the Cloud login URL at `/api/v1/cli/login`.
+2. Store Cloud login tokens in `~/.relayfile/cloud-credentials.json`.
+3. Create and join a Cloud workspace, then store the Relayfile VFS URL/token in `~/.relayfile/credentials.json`.
+4. Request a hosted Nango connect session for the selected integration and wait until the Cloud status endpoint reports it ready.
+5. Start the existing `relayfile mount` sync loop so the user and agent see ordinary files.
+
+This path is intentionally a wrapper over the lower-level commands and Cloud APIs. Existing `login`, `workspace`, `mount`, `tree`, and `read` commands remain available for CI, self-hosted servers, and scripted workflows.
+
+---
+
 ### `relayfile login`
 
 Authenticate and store credentials.
@@ -447,9 +479,15 @@ The CLI imports `internal/mountsync` directly for the `mount` subcommand rather 
 
 ```bash
 # First-time setup
-relayfile login
-# Enter API key: ********
-# Logged in to https://api.relayfile.dev as my-agent
+relayfile
+# Opens Relayfile Cloud login
+# Opens the selected integration connect flow
+# Starts syncing files into ./relayfile-mount
+
+# Token-first self-hosted setup
+relayfile login --server https://api.relayfile.dev
+# API key: ********
+# Stored credentials for https://api.relayfile.dev
 
 # Seed a project
 relayfile seed my-workspace ./src

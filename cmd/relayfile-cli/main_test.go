@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/base64"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -478,12 +479,131 @@ func TestCollectSeedFilesReportsProgress(t *testing.T) {
 	}
 }
 
+func TestBuildCloudURLKeepsBasePath(t *testing.T) {
+	got, err := buildCloudURL("https://agentrelay.test/cloud", "api/v1/cli/login")
+	if err != nil {
+		t.Fatalf("buildCloudURL failed: %v", err)
+	}
+	if got.String() != "https://agentrelay.test/cloud/api/v1/cli/login" {
+		t.Fatalf("unexpected cloud URL: %s", got.String())
+	}
+}
+
+func TestSetupCreatesWorkspaceConnectsIntegrationAndSkipsMount(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	seen := map[string]bool{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/workspaces":
+			seen["create"] = true
+			if r.Method != http.MethodPost {
+				t.Fatalf("expected create POST, got %s", r.Method)
+			}
+			if got := r.Header.Get("Authorization"); got != "Bearer cld_test" {
+				t.Fatalf("unexpected create Authorization: %q", got)
+			}
+			var body cloudWorkspaceCreateRequest
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("decode create body failed: %v", err)
+			}
+			if body.Name != "demo" {
+				t.Fatalf("expected workspace name demo, got %q", body.Name)
+			}
+			_, _ = w.Write([]byte(`{"workspaceId":"ws_123","relayfileUrl":"https://relayfile.test","createdAt":"2026-05-01T00:00:00Z","name":"demo"}`))
+		case "/api/v1/workspaces/ws_123/join":
+			seen["join"] = true
+			if r.Method != http.MethodPost {
+				t.Fatalf("expected join POST, got %s", r.Method)
+			}
+			if got := r.Header.Get("Authorization"); got != "Bearer cld_test" {
+				t.Fatalf("unexpected join Authorization: %q", got)
+			}
+			_, _ = w.Write([]byte(`{"workspaceId":"ws_123","token":"rf_join","relayfileUrl":"https://relayfile.test","wsUrl":"wss://relayfile.test/ws","relaycastApiKey":"rc_test"}`))
+		case "/api/v1/workspaces/ws_123/integrations/connect-session":
+			seen["connect"] = true
+			if r.Method != http.MethodPost {
+				t.Fatalf("expected connect POST, got %s", r.Method)
+			}
+			if got := r.Header.Get("Authorization"); got != "Bearer rf_join" {
+				t.Fatalf("unexpected connect Authorization: %q", got)
+			}
+			var body cloudConnectSessionRequest
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("decode connect body failed: %v", err)
+			}
+			if len(body.AllowedIntegrations) != 1 || body.AllowedIntegrations[0] != "github" {
+				t.Fatalf("unexpected allowed integrations: %#v", body.AllowedIntegrations)
+			}
+			_, _ = w.Write([]byte(`{"token":"session_token","expiresAt":"2026-05-01T01:00:00Z","connectLink":"https://connect.test/github","connectionId":"conn_123"}`))
+		case "/api/v1/workspaces/ws_123/integrations/github/status":
+			seen["status"] = true
+			if got := r.Header.Get("Authorization"); got != "Bearer rf_join" {
+				t.Fatalf("unexpected status Authorization: %q", got)
+			}
+			if got := r.URL.Query().Get("connectionId"); got != "conn_123" {
+				t.Fatalf("unexpected connectionId: %q", got)
+			}
+			_, _ = w.Write([]byte(`{"ready":true}`))
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	err := run([]string{
+		"setup",
+		"--cloud-api-url", server.URL,
+		"--cloud-token", "cld_test",
+		"--workspace", "demo",
+		"--provider", "github",
+		"--local-dir", "./vfs",
+		"--no-open",
+		"--skip-mount",
+	}, strings.NewReader(""), &stdout, &stdout)
+	if err != nil {
+		t.Fatalf("run setup failed: %v\noutput:\n%s", err, stdout.String())
+	}
+	for _, key := range []string{"create", "join", "connect", "status"} {
+		if !seen[key] {
+			t.Fatalf("expected %s request", key)
+		}
+	}
+
+	creds, err := loadCredentials()
+	if err != nil {
+		t.Fatalf("loadCredentials failed: %v", err)
+	}
+	if creds.Server != "https://relayfile.test" || creds.Token != "rf_join" {
+		t.Fatalf("unexpected saved credentials: %#v", creds)
+	}
+	catalog, err := loadWorkspaceCatalog()
+	if err != nil {
+		t.Fatalf("loadWorkspaceCatalog failed: %v", err)
+	}
+	if catalog.Default != "demo" || len(catalog.Workspaces) != 1 || catalog.Workspaces[0].ID != "ws_123" {
+		t.Fatalf("unexpected workspace catalog: %#v", catalog)
+	}
+	gotOutput := stdout.String()
+	if !strings.Contains(gotOutput, "Connect github: https://connect.test/github") {
+		t.Fatalf("expected printed connect link, got %q", gotOutput)
+	}
+	if !strings.Contains(gotOutput, "relayfile mount ws_123 ./vfs") {
+		t.Fatalf("expected mount command guidance, got %q", gotOutput)
+	}
+}
+
 func clearRelayfileEnv(t *testing.T) {
 	t.Helper()
 	t.Setenv("RELAYFILE_SERVER", "")
 	t.Setenv("RELAYFILE_BASE_URL", "")
 	t.Setenv("RELAYFILE_TOKEN", "")
 	t.Setenv("RELAYFILE_WORKSPACE", "")
+	t.Setenv("RELAYFILE_CLOUD_API_URL", "")
+	t.Setenv("RELAYFILE_CLOUD_TOKEN", "")
 }
 
 func testJWTWithWorkspace(workspaceID string) string {
