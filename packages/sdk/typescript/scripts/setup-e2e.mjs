@@ -471,16 +471,42 @@ async function main() {
       break;
     }
 
+    case "connect-notion": {
+      const setup = new RelayfileSetup(setupOptions());
+      const handle = await setup.joinWorkspace(workspaceId);
+      const connection = await handle.connectNotion();
+      assert.equal(connection.alreadyConnected, false);
+      assert.equal(connection.connectionId, "conn_notion");
+      result = connection;
+      break;
+    }
+
+    case "mount-env-and-invite": {
+      const setup = new RelayfileSetup(setupOptions());
+      const handle = await setup.joinWorkspace(workspaceId, {
+        agentName: "lead-agent",
+        scopes: ["fs:read", "fs:write", "relaycast:write"]
+      });
+      result = {
+        mountEnv: handle.mountEnv({
+          localDir: "/workspace/notion",
+          remotePath: "/notion"
+        }),
+        invite: handle.agentInvite({ agentName: "review-agent" })
+      };
+      break;
+    }
+
     case "wait-delayed": {
       const setup = new RelayfileSetup(setupOptions());
       const handle = await setup.joinWorkspace(workspaceId);
       await handle.connectIntegration("github");
       const polls = [];
       await handle.waitForConnection("github", {
-        intervalMs: 10,
+        pollIntervalMs: 10,
         timeoutMs: 500,
-        onPoll: (attempt, ready) => {
-          polls.push([attempt, ready]);
+        onPoll: (elapsed) => {
+          polls.push(elapsed);
         }
       });
       result = { polls };
@@ -495,7 +521,7 @@ async function main() {
           () =>
             handle.waitForConnection("github", {
               connectionId: "conn_timeout",
-              intervalMs: 10,
+              pollIntervalMs: 10,
               timeoutMs: 60
             }),
           async (error) => {
@@ -516,7 +542,7 @@ async function main() {
           () =>
             handle.waitForConnection("github", {
               connectionId: "conn_abort",
-              intervalMs: 25,
+              pollIntervalMs: 25,
               timeoutMs: 500,
               signal: controller.signal
             }),
@@ -533,7 +559,7 @@ async function main() {
       const handle = await setup.joinWorkspace(workspaceId);
       await handle.waitForConnection("github", {
         connectionId: "conn_retry",
-        intervalMs: 5,
+        pollIntervalMs: 5,
         timeoutMs: 2_000
       });
       result = { ready: true };
@@ -545,7 +571,7 @@ async function main() {
       const handle = await setup.joinWorkspace(workspaceId);
       await handle.waitForConnection("github", {
         connectionId: "conn_retry_5xx",
-        intervalMs: 5,
+        pollIntervalMs: 5,
         timeoutMs: 1_000
       });
       result = { ready: true };
@@ -560,7 +586,7 @@ async function main() {
           () =>
             handle.waitForConnection("github", {
               connectionId: "conn_unauthorized",
-              intervalMs: 5,
+              pollIntervalMs: 5,
               timeoutMs: 200
             }),
           async (error) => {
@@ -788,6 +814,8 @@ async function main() {
     );
     assert.equal(createRequests[0].headers.authorization, "Bearer cld_at_test");
     assert.equal(createRequests[1].headers.authorization, "Bearer cld_at_test");
+    assert.equal(createRequests[0].headers["x-relayfile-sdk-version"], "0.5.3");
+    assert.equal(createRequests[1].headers["x-relayfile-sdk-version"], "0.5.3");
     assert.equal(createWorkspaceResult.workspaceId, "ws_e2e");
 
     cloudServer.reset();
@@ -877,6 +905,68 @@ async function main() {
           body: {
             token: "session_token",
             expiresAt: "2026-04-30T01:00:00.000Z",
+            connectLink: "https://connect.test/notion",
+            connectionId: "conn_notion"
+          }
+        }
+      ]
+    });
+    relayServer.reset();
+    const connectNotionResult = await runScenario(
+      consumerDir,
+      consumerScriptPath,
+      cloudBaseUrl,
+      "connect-notion"
+    );
+    const connectNotionRequests = expectRequestCount("cloud", 2);
+    assert.deepEqual(connectNotionRequests[1].body, {
+      allowedIntegrations: ["notion"]
+    });
+    assert.deepEqual(connectNotionResult, {
+      alreadyConnected: false,
+      connectLink: "https://connect.test/notion",
+      sessionToken: "session_token",
+      expiresAt: "2026-04-30T01:00:00.000Z",
+      connectionId: "conn_notion"
+    });
+
+    cloudServer.reset();
+    relayServer.reset();
+    const mountEnvAndInviteResult = await runScenario(
+      consumerDir,
+      consumerScriptPath,
+      cloudBaseUrl,
+      "mount-env-and-invite"
+    );
+    expectRequestCount("cloud", 1);
+    assert.deepEqual(mountEnvAndInviteResult.mountEnv, {
+      RELAYFILE_BASE_URL: relayBaseUrlRef.current,
+      RELAYFILE_TOKEN: "rf_jwt_join_1",
+      RELAYFILE_WORKSPACE: "ws_e2e",
+      RELAYFILE_REMOTE_PATH: "/notion",
+      RELAYFILE_LOCAL_DIR: "/workspace/notion",
+      RELAYCAST_API_KEY: "rc_test",
+      RELAY_API_KEY: "rc_test",
+      RELAYCAST_BASE_URL: "https://api.relaycast.dev",
+      RELAY_BASE_URL: "https://api.relaycast.dev"
+    });
+    assert.deepEqual(mountEnvAndInviteResult.invite, {
+      workspaceId: "ws_e2e",
+      cloudApiUrl: cloudBaseUrl,
+      relayfileUrl: relayBaseUrlRef.current,
+      relaycastApiKey: "rc_test",
+      relaycastBaseUrl: "https://api.relaycast.dev",
+      agentName: "review-agent",
+      scopes: ["fs:read", "fs:write", "relaycast:write"],
+      relayfileToken: "rf_jwt_join_1"
+    });
+
+    cloudServer.reset({
+      connectQueue: [
+        {
+          body: {
+            token: "session_token",
+            expiresAt: "2026-04-30T01:00:00.000Z",
             connectLink: "https://connect.test/github",
             connectionId: "conn_delayed"
           }
@@ -898,11 +988,10 @@ async function main() {
       "wait-delayed"
     );
     const waitDelayedRequests = expectRequestCount("cloud", 5);
-    assert.deepEqual(waitDelayedResult.polls, [
-      [1, false],
-      [2, false],
-      [3, true]
-    ]);
+    assert.equal(waitDelayedResult.polls.length, 3);
+    assert.equal(waitDelayedResult.polls[0], 0);
+    assert.ok(waitDelayedResult.polls[1] >= 0);
+    assert.ok(waitDelayedResult.polls[2] >= waitDelayedResult.polls[1]);
     assert.deepEqual(
       waitDelayedRequests
         .filter((request) => request.method === "GET")

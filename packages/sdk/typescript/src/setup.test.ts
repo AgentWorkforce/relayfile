@@ -48,10 +48,18 @@ function readRequestBody(fetchMock: ReturnType<typeof vi.fn>, index: number): un
   return init?.body ? JSON.parse(String(init.body)) : undefined
 }
 
+function readRequestHeaders(
+  fetchMock: ReturnType<typeof vi.fn>,
+  index: number
+): Record<string, string> {
+  const init = fetchMock.mock.calls[index]?.[1] as RequestInit | undefined
+  return init?.headers as Record<string, string>
+}
+
 async function advanceTimers(options?: WaitForConnectionOptions): Promise<void> {
-  const intervalMs = options?.intervalMs ?? 0
-  const timeoutMs = options?.timeoutMs ?? intervalMs
-  await vi.advanceTimersByTimeAsync(intervalMs + timeoutMs + 5)
+  const pollIntervalMs = options?.pollIntervalMs ?? options?.intervalMs ?? 0
+  const timeoutMs = options?.timeoutMs ?? pollIntervalMs
+  await vi.advanceTimersByTimeAsync(pollIntervalMs + timeoutMs + 5)
 }
 
 describe("RelayfileSetup", () => {
@@ -79,6 +87,8 @@ describe("RelayfileSetup", () => {
     expect(handle.workspaceId).toBe("ws_123")
     expect(readRequestUrl(fetchMock, 0)).toBe("https://agentrelay.com/cloud/api/v1/workspaces")
     expect(readRequestUrl(fetchMock, 1)).toBe("https://agentrelay.com/cloud/api/v1/workspaces/ws_123/join")
+    expect(readRequestHeaders(fetchMock, 0)["X-Relayfile-SDK-Version"]).toBe("0.5.3")
+    expect(readRequestHeaders(fetchMock, 1)["X-Relayfile-SDK-Version"]).toBe("0.5.3")
   })
 
   it("preserves a path-bearing override URL for join and integration calls", async () => {
@@ -195,7 +205,7 @@ describe("RelayfileSetup", () => {
 
     const waitPromise = handle.waitForConnection("github", {
       connectionId: "conn_123",
-      intervalMs: 1000,
+      pollIntervalMs: 1000,
       onPoll
     })
 
@@ -203,11 +213,7 @@ describe("RelayfileSetup", () => {
     await waitPromise
 
     expect(fetchMock).toHaveBeenCalledTimes(4)
-    expect(onPoll.mock.calls).toEqual([
-      [1, false],
-      [2, false],
-      [3, true]
-    ])
+    expect(onPoll.mock.calls).toEqual([[0], [1000], [2000]])
   })
 
   it("waitForConnection honors Retry-After on 429 responses", async () => {
@@ -243,14 +249,14 @@ describe("RelayfileSetup", () => {
     const handle = await setup.joinWorkspace("ws_123")
     const timeoutPromise = handle.waitForConnection("github", {
       connectionId: "conn_123",
-      intervalMs: 1000,
+      pollIntervalMs: 1000,
       timeoutMs: 1000
     })
     const timeoutExpectation = expect(timeoutPromise).rejects.toBeInstanceOf(
       IntegrationConnectionTimeoutError
     )
 
-    await advanceTimers({ intervalMs: 1000, timeoutMs: 1000 })
+    await advanceTimers({ pollIntervalMs: 1000, timeoutMs: 1000 })
     await timeoutExpectation
 
     const controller = new AbortController()
@@ -258,7 +264,7 @@ describe("RelayfileSetup", () => {
     const abortedHandle = await setup.joinWorkspace("ws_123")
     const abortPromise = abortedHandle.waitForConnection("github", {
       connectionId: "conn_123",
-      intervalMs: 1000,
+      pollIntervalMs: 1000,
       signal: controller.signal
     })
     controller.abort()
@@ -317,5 +323,60 @@ describe("RelayfileSetup", () => {
     expect((relayRequestInit.headers as Record<string, string>).Authorization).toBe(
       "Bearer rf_jwt_refreshed"
     )
+  })
+
+  it("offers a one-call Notion connect helper", async () => {
+    const fetchMock = queueFetch(
+      makeJoinResponse(),
+      jsonResponse({
+        token: "session_token",
+        expiresAt: "2026-04-30T01:00:00.000Z",
+        connectLink: "https://nango.test/notion",
+        connectionId: "conn_notion"
+      })
+    )
+
+    const setup = new RelayfileSetup()
+    const handle = await setup.joinWorkspace("ws_123")
+    const result = await handle.connectNotion()
+
+    expect(result.connectLink).toBe("https://nango.test/notion")
+    expect(readRequestBody(fetchMock, 1)).toEqual({
+      allowedIntegrations: ["notion"]
+    })
+  })
+
+  it("returns mount env and agent invites for relayfile plus relaycast", async () => {
+    queueFetch(makeJoinResponse("rf_jwt_mount"))
+
+    const setup = new RelayfileSetup({
+      cloudApiUrl: "https://staging.agentrelay.com/cloud"
+    })
+    const handle = await setup.joinWorkspace("ws_123", {
+      agentName: "lead-agent",
+      scopes: ["fs:read", "fs:write", "relaycast:write"]
+    })
+
+    expect(handle.mountEnv({ localDir: "/workspace", remotePath: "/notion" })).toEqual({
+      RELAYFILE_BASE_URL: "https://relayfile.test",
+      RELAYFILE_TOKEN: "rf_jwt_mount",
+      RELAYFILE_WORKSPACE: "ws_123",
+      RELAYFILE_REMOTE_PATH: "/notion",
+      RELAYFILE_LOCAL_DIR: "/workspace",
+      RELAYCAST_API_KEY: "rc_test",
+      RELAY_API_KEY: "rc_test",
+      RELAYCAST_BASE_URL: "https://api.relaycast.dev",
+      RELAY_BASE_URL: "https://api.relaycast.dev"
+    })
+    expect(handle.agentInvite({ agentName: "review-agent" })).toEqual({
+      workspaceId: "ws_123",
+      cloudApiUrl: "https://staging.agentrelay.com/cloud",
+      relayfileUrl: "https://relayfile.test",
+      relaycastApiKey: "rc_test",
+      relaycastBaseUrl: "https://api.relaycast.dev",
+      agentName: "review-agent",
+      scopes: ["fs:read", "fs:write", "relaycast:write"],
+      relayfileToken: "rf_jwt_mount"
+    })
   })
 })

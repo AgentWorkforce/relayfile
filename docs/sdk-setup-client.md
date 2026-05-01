@@ -33,11 +33,45 @@ const { connectLink } = await workspace.connectIntegration('github', {
 })
 if (connectLink) {
   console.log('Authorize GitHub:', connectLink)
-  await workspace.waitForConnection('github', process.env.GITHUB_CONNECTION_ID)
+  await workspace.waitForConnection('github', {
+    connectionId: process.env.GITHUB_CONNECTION_ID,
+  })
 }
 
 const client = workspace.client()
 const tree = await client.listTree(workspace.workspaceId, { path: '/github' })
+```
+
+The one-agent workspace path should be even smaller for the most common
+OAuth-backed workspace flow. An agent can create or join a workspace, hand the
+human one Notion authorization URL, wait for the webhook-confirmed connection,
+then pass one env block or invite payload to every other process that needs the
+same relayfile filesystem plus relaycast room.
+
+```ts
+import { RelayfileSetup } from '@relayfile/sdk'
+
+const setup = new RelayfileSetup({ accessToken: process.env.RELAY_ACCESS_TOKEN })
+const workspace = await setup.createWorkspace({
+  name: 'notion-research-room',
+  agentName: 'lead-agent',
+})
+
+const notion = await workspace.connectNotion()
+if (notion.connectLink) {
+  console.log(`Connect Notion: ${notion.connectLink}`)
+  await workspace.waitForNotion()
+}
+
+// Use these vars to launch relayfile-mount locally or inside a cloud sandbox.
+const mountEnv = workspace.mountEnv({
+  localDir: '/workspace/notion',
+  remotePath: '/notion',
+})
+
+// Send this secret payload to another trusted agent so it can mount relayfile
+// and join the same relaycast workspace.
+const reviewerInvite = workspace.agentInvite({ agentName: 'review-agent' })
 ```
 
 ---
@@ -271,6 +305,14 @@ export class WorkspaceHandle {
   ): Promise<ConnectIntegrationResult>
 
   /**
+   * Convenience wrapper for connectIntegration('notion') that returns the
+   * single URL a human should open to connect Notion.
+   */
+  connectNotion(
+    options?: Omit<ConnectIntegrationOptions, 'allowedIntegrations'>,
+  ): Promise<ConnectIntegrationResult>
+
+  /**
    * Poll until a previously requested integration connection is confirmed active,
    * or until the timeout is reached.
    *
@@ -285,6 +327,9 @@ export class WorkspaceHandle {
     provider: WorkspaceIntegrationProvider,
     options?: WaitForConnectionOptions,
   ): Promise<void>
+
+  /** Convenience wrapper for waitForConnection('notion'). */
+  waitForNotion(options?: WaitForConnectionOptions): Promise<void>
 
   /**
    * Check whether an integration is currently connected.
@@ -311,6 +356,21 @@ export class WorkspaceHandle {
    * always returns the current token synchronously.
    */
   getToken(): string
+
+  /**
+   * Build the environment needed by relayfile-mount and relaycast-aware agents.
+   * Values include RELAYFILE_BASE_URL, RELAYFILE_TOKEN, RELAYFILE_WORKSPACE,
+   * RELAYFILE_REMOTE_PATH, RELAY_API_KEY, and RELAY_BASE_URL.
+   */
+  mountEnv(options?: WorkspaceMountEnvOptions): WorkspaceMountEnv
+
+  /**
+   * Build a serializable, secret invite for another trusted agent. The invite
+   * includes relayfile workspace details and relaycast credentials; by default
+   * it also includes the current relayfile JWT so the receiving agent can mount
+   * the workspace immediately.
+   */
+  agentInvite(options?: AgentWorkspaceInviteOptions): AgentWorkspaceInvite
 
   /**
    * Refresh the relayfile JWT by re-joining the workspace.
@@ -422,6 +482,70 @@ export interface WaitForConnectionOptions {
   onPoll?: (elapsed: number) => void
 }
 ```
+
+---
+
+### `WorkspaceMountEnvOptions`
+
+```ts
+export interface WorkspaceMountEnvOptions {
+  /** Local directory for relayfile-mount, for example /workspace/notion. */
+  localDir?: string
+
+  /** Remote relayfile path to mount. Defaults to /. */
+  remotePath?: string
+
+  /** relayfile-mount mode. */
+  mode?: 'poll' | 'fuse'
+
+  /** Override for non-production relaycast deployments. */
+  relaycastBaseUrl?: string
+}
+
+export type WorkspaceMountEnv = Record<string, string>
+```
+
+`mountEnv()` returns `RELAYFILE_BASE_URL`, `RELAYFILE_TOKEN`,
+`RELAYFILE_WORKSPACE`, `RELAYFILE_REMOTE_PATH`, `RELAY_API_KEY`,
+`RELAYCAST_API_KEY`, `RELAY_BASE_URL`, and `RELAYCAST_BASE_URL`, plus optional
+mount fields when provided. The result is intentionally shaped as environment
+variables so a host agent can pass it directly to a local process, a cloud
+sandbox, or `relayfile-mount`.
+
+---
+
+### `AgentWorkspaceInviteOptions`
+
+```ts
+export interface AgentWorkspaceInviteOptions {
+  agentName?: string
+  scopes?: string[]
+  relaycastBaseUrl?: string
+
+  /**
+   * Include the current relayfile JWT. Defaults to true for the easiest
+   * trusted-agent handoff. Set false when an agent should join separately.
+   */
+  includeRelayfileToken?: boolean
+}
+
+export interface AgentWorkspaceInvite {
+  workspaceId: string
+  cloudApiUrl: string
+  relayfileUrl: string
+  relaycastApiKey: string
+  relaycastBaseUrl: string
+  agentName: string
+  scopes: string[]
+  relayfileToken?: string
+  createdAt?: string
+  name?: string
+}
+```
+
+The invite is secret credential material. It is meant for trusted agents under
+the same user or workflow so they can both join the relaycast workspace and work
+against the same relayfile filesystem.
 
 ---
 
@@ -870,7 +994,7 @@ All requests from `RelayfileSetup` and `WorkspaceHandle` to the cloud web API:
 - Set `Content-Type: application/json` on POST requests
 - Set `Authorization: Bearer {accessToken}` for setup-level calls when `accessToken` is provided
 - Set `Authorization: Bearer {relayfileJwt}` for workspace-handle setup calls such as `connectIntegration`, `waitForConnection`, `isConnected`, and `disconnectIntegration`
-- Set `X-Relayfile-SDK-Version: {version}` header (from `package.json` version, injected at build time)
+- Set `X-Relayfile-SDK-Version: {version}` header from the SDK version constant, kept in sync with `package.json`
 - Apply exponential backoff with jitter on 429 and 5xx responses, up to `retry.maxRetries` attempts
 - Honor `Retry-After` header on 429 responses
 - Apply `requestTimeoutMs` via `AbortSignal.timeout()`
