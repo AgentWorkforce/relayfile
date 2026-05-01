@@ -56,7 +56,16 @@ interface JoinWorkspaceResponse {
   relayfileUrl?: string
   wsUrl?: string
   relaycastApiKey?: string
+  relaycastBaseUrl?: string
 }
+
+type ValidatedJoinWorkspaceResponse = Required<
+  Pick<
+    JoinWorkspaceResponse,
+    "workspaceId" | "token" | "relayfileUrl" | "wsUrl" | "relaycastApiKey"
+  >
+> &
+  Pick<JoinWorkspaceResponse, "relaycastBaseUrl">
 
 interface ConnectSessionResponse {
   token?: string
@@ -144,6 +153,7 @@ export class RelayfileSetup {
         workspaceId: createResponse.workspaceId,
         relayfileUrl: joinResponse.relayfileUrl,
         relaycastApiKey: joinResponse.relaycastApiKey,
+        relaycastBaseUrl: joinResponse.relaycastBaseUrl,
         createdAt: createResponse.createdAt,
         name: createResponse.name,
         wsUrl: joinResponse.wsUrl
@@ -166,6 +176,7 @@ export class RelayfileSetup {
         workspaceId: joinResponse.workspaceId,
         relayfileUrl: joinResponse.relayfileUrl,
         relaycastApiKey: joinResponse.relaycastApiKey,
+        relaycastBaseUrl: joinResponse.relaycastBaseUrl,
         wsUrl: joinResponse.wsUrl
       },
       token: joinResponse.token,
@@ -176,7 +187,7 @@ export class RelayfileSetup {
   async joinWorkspaceResponse(
     workspaceId: string,
     options: NormalizedJoinWorkspaceOptions
-  ): Promise<Required<JoinWorkspaceResponse>> {
+  ): Promise<ValidatedJoinWorkspaceResponse> {
     return validateJoinWorkspaceResponse(
       await this.requestJson({
         operation: "joinWorkspace",
@@ -454,6 +465,10 @@ export class WorkspaceHandle {
   }
 
   mountEnv(options: WorkspaceMountEnvOptions = {}): WorkspaceMountEnv {
+    const relaycastBaseUrl = this.resolveRelaycastBaseUrl(
+      options.relaycastBaseUrl
+    )
+
     return compactStringRecord({
       RELAYFILE_BASE_URL: this.info.relayfileUrl,
       RELAYFILE_TOKEN: this.getToken(),
@@ -463,18 +478,22 @@ export class WorkspaceHandle {
       RELAYFILE_MOUNT_MODE: options.mode,
       RELAYCAST_API_KEY: this.info.relaycastApiKey,
       RELAY_API_KEY: this.info.relaycastApiKey,
-      RELAYCAST_BASE_URL: options.relaycastBaseUrl ?? DEFAULT_RELAYCAST_BASE_URL,
-      RELAY_BASE_URL: options.relaycastBaseUrl ?? DEFAULT_RELAYCAST_BASE_URL
+      RELAYCAST_BASE_URL: relaycastBaseUrl,
+      RELAY_BASE_URL: relaycastBaseUrl
     })
   }
 
   agentInvite(options: AgentWorkspaceInviteOptions = {}): AgentWorkspaceInvite {
+    const relaycastBaseUrl = this.resolveRelaycastBaseUrl(
+      options.relaycastBaseUrl
+    )
+
     return compactObject({
       workspaceId: this.workspaceId,
       cloudApiUrl: this._setup.getCloudApiUrl(),
       relayfileUrl: this.info.relayfileUrl,
       relaycastApiKey: this.info.relaycastApiKey,
-      relaycastBaseUrl: options.relaycastBaseUrl ?? DEFAULT_RELAYCAST_BASE_URL,
+      relaycastBaseUrl,
       agentName: options.agentName ?? this._joinOptions.agentName,
       scopes:
         options.scopes && options.scopes.length > 0
@@ -545,6 +564,14 @@ export class WorkspaceHandle {
     )
     return response.ready
   }
+
+  private resolveRelaycastBaseUrl(override?: string): string {
+    return (
+      normalizeNonEmptyString(override) ??
+      normalizeNonEmptyString(this.info.relaycastBaseUrl) ??
+      DEFAULT_RELAYCAST_BASE_URL
+    )
+  }
 }
 
 function assertProvider(provider: string): asserts provider is WorkspaceIntegrationProvider {
@@ -602,13 +629,14 @@ function validateCreateWorkspaceResponse(
 
 function validateJoinWorkspaceResponse(
   payload: unknown
-): Required<JoinWorkspaceResponse> {
+): ValidatedJoinWorkspaceResponse {
   return {
     workspaceId: requireStringField(payload, "workspaceId"),
     token: requireStringField(payload, "token"),
     relayfileUrl: requireStringField(payload, "relayfileUrl"),
     wsUrl: requireStringField(payload, "wsUrl"),
-    relaycastApiKey: requireStringField(payload, "relaycastApiKey")
+    relaycastApiKey: requireStringField(payload, "relaycastApiKey"),
+    relaycastBaseUrl: readOptionalStringField(payload, "relaycastBaseUrl")
   }
 }
 

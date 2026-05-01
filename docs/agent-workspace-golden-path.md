@@ -1,8 +1,30 @@
 # Agent Workspace Golden Path
 
-**Status:** Proposed  
+**Status:** Partially Implemented  
 **Builds on:** `docs/sdk-setup-client.md`  
-**Affects:** `packages/sdk/typescript`, `cmd/relayfile-mount`, `../cloud`, `../relaycast`
+**Affects:** `packages/sdk/typescript`, `cmd/relayfile-mount`, `../cloud`, `../relaycast`  
+**Acceptance contract:** `docs/agent-workspace-golden-path-acceptance.md`
+
+### V1 Caveats
+
+The following decisions are binding for v1 and differ from the original open questions. See `docs/agent-workspace-golden-path-acceptance.md §1` for the full rationale.
+
+- **Readiness:** `waitForNotion()` resolves when **OAuth is connected** (`ready: true` from the status endpoint). Initial sync completion is not required for v1; an empty `/notion` mount immediately after readiness is acceptable.
+- **Method names:** `connectNotion`, `waitForNotion`, `mountEnv`, `agentInvite` are locked. The `AgentWorkspace` / `setup.agentWorkspace()` orchestrator (Layer 2) is **not** part of v1.
+- **`relaycastBaseUrl`:** SDK-defaulted to `https://api.relaycast.dev`. Cloud join response may override it. Caller `options.relaycastBaseUrl` takes highest precedence.
+- **Invite secrecy:** `agentInvite()` includes `relayfileToken` by default. Pass `includeRelayfileToken: false` to omit it. Never log the full invite payload.
+- **Per-agent scoped tokens:** Out of scope for v1. The lead agent's `relayfileToken` is reused.
+
+### Demo
+
+```bash
+# Run the golden-path demo against in-process mocks
+npm run demo:agent-workspace --workspace=packages/sdk/typescript
+```
+
+The demo script (`packages/sdk/typescript/scripts/agent-workspace-demo.mjs`) prints a Notion connect link, waits for readiness, mounts the workspace through the deterministic harness, seeds and reads a `/notion` file, creates an invited agent with read-only scope, and confirms read-only denial — all against in-process mock servers. Relaycast message exchange is covered by the packaged E2E (`scripts/agent-workspace-golden-path-e2e.mjs`), not the demo.
+
+E2E evidence: `docs/evidence/agent-workspace-golden-path-e2e.log`.
 
 ---
 
@@ -635,66 +657,85 @@ A human should be able to run one script locally:
 npm run demo:agent-workspace --workspace=packages/sdk/typescript
 ```
 
-The script should print a Notion link, wait for readiness, mount the workspace,
-print the mount path, invite a second local agent process, and show a relaycast
-message exchange.
+The script prints a Notion connect link, waits for readiness against in-process
+mocks, mounts the workspace through the deterministic harness, reads a seeded
+`/notion` file from the mount, creates an invited agent with read-only scope,
+reads the same file through the invited harness, and asserts that a write from
+the read-only harness is denied. Relaycast message exchange is verified by
+`test:e2e:golden-path`, not the demo.
 
 ---
 
 ## Implementation Plan
 
-### Phase 1: Spec Lock
+All v1 phases are complete as of SDK v0.6.0. The packaged E2E passes end-to-end.
+Evidence: `docs/evidence/agent-workspace-golden-path-e2e.log`.
 
-Confirm this spec against the implemented setup-client contract and the current
-cloud and relaycast APIs. Resolve naming before coding:
+### Phase 1: Spec Lock — **Complete**
 
-- `agentInvite()` versus `createAgentInvite()`
-- `mountEnv()` versus `mountConfig()`
-- `relaycastBaseUrl` default and cloud override behavior
-- Whether v1 readiness means OAuth connected or initial sync complete
+Naming resolved in `docs/agent-workspace-golden-path-acceptance.md §1`:
+`agentInvite`, `mountEnv`, SDK-defaulted `relaycastBaseUrl`, and OAuth-connected
+readiness are locked.
 
-### Phase 2: SDK Completion
+### Phase 2: SDK Completion — **Complete**
 
-Land the Layer 1 `WorkspaceHandle` methods with unit tests and packaged E2E
-coverage.
+`WorkspaceHandle.connectNotion()`, `waitForNotion()`, `mountEnv()`, and
+`agentInvite()` are implemented in `packages/sdk/typescript/src/setup.ts` with
+unit tests in `setup.test.ts` and packaged E2E coverage.
 
-### Phase 3: Cloud Readiness
+### Phase 3: Cloud Readiness — **Mocked in E2E; real cloud changes separate**
 
-Make cloud return enough status to distinguish OAuth readiness from sync
-readiness. Add `relaycastBaseUrl` to join responses when configured.
+The mock cloud server in `scripts/agent-workspace-mocks.mjs` satisfies the
+acceptance contract. Real cloud changes (`relaycastBaseUrl` in join response,
+richer integration status fields) are tracked in the cloud repo.
 
-### Phase 4: Relaycast Invite Consumption
+### Phase 4: Relaycast Invite Consumption — **Complete**
 
-Document and test how an invited agent uses relaycast credentials. If relaycast
-needs a first-class invite/token primitive, add it behind the same invite shape.
+The packaged E2E proves a full relaycast message exchange (lead → invited →
+lead ACK) using the `AgentWorkspaceInvite` payload.
 
-### Phase 5: Mount Harness
+### Phase 5: Mount Harness — **Complete**
 
-Add a deterministic test harness for `relayfile-mount` so E2E tests can verify
-mount behavior without depending on host FUSE availability.
+`packages/sdk/typescript/src/mount-harness.ts` provides a deterministic harness
+that mirrors remote paths to a local directory and enforces scope-based
+read-only access without requiring host FUSE.
 
-### Phase 6: Demo Script
+### Phase 6: Demo Script — **Complete**
 
-Add a real demo script that a human can run and that doubles as living
-documentation for the golden path.
+`packages/sdk/typescript/scripts/agent-workspace-demo.mjs` runs the golden path
+against in-process mocks and is the entry point for `npm run demo:agent-workspace`.
 
 ---
 
 ## Open Questions
 
-1. Should `waitForNotion()` resolve at OAuth connection, initial sync start, or
-   initial sync completion?
+These were open at spec time. V1 decisions are noted inline; see
+`docs/agent-workspace-golden-path-acceptance.md §1` for full context.
+
+1. ~~Should `waitForNotion()` resolve at OAuth connection, initial sync start, or
+   initial sync completion?~~ **Closed (§1.2):** Resolves at OAuth connection
+   (`ready: true`). Sync state fields may appear in the status response but
+   `waitForNotion()` ignores them in v1.
+
 2. Should cloud mint per-agent relayfile JWTs directly from `agentInvite()`, or
    should invited agents call `joinWorkspace()` themselves with a separate
-   access token?
+   access token? **Open — post-v1.** V1 reuses the lead agent's token.
+   Tracked as Q2 in the acceptance doc.
+
 3. Should relaycast expose short-lived scoped agent tokens so invites do not
-   contain workspace API keys?
+   contain workspace API keys? **Open — post-v1.**
+
 4. Should Notion always mount at `/notion`, or should provider roots be
-   configurable per workspace?
-5. Should the mount process be launched by the SDK, returned as env only, or
-   offered as both `mountEnv()` and `launchMount()`?
+   configurable per workspace? **Open — post-v1.** V1 defaults to `/notion`.
+
+5. ~~Should the mount process be launched by the SDK, returned as env only, or
+   offered as both `mountEnv()` and `launchMount()`?~~ **Closed (§1.1):**
+   `mountEnv()` returns env vars only. The SDK does not launch the mount
+   process directly in v1.
+
 6. What is the minimum useful Notion file projection for v1: page markdown,
-   database rows, attachments, comments, or all of the above?
+   database rows, attachments, comments, or all of the above? **Open.**
+   V1 readiness criterion only requires OAuth connection, not content quality.
 
 ---
 

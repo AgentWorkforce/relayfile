@@ -175,7 +175,44 @@ Token resolution order is:
 2. `RELAYFILE_TOKEN`
 3. Saved credentials
 
-## Package: `packages/relayfile-sdk`
+## Package: `packages/sdk/typescript` (`@relayfile/sdk`)
+
+The SDK itself does not read env vars at runtime. The variables below are
+consumed by **caller code** that uses `@relayfile/sdk`, not by the SDK
+internals. They are the conventional names used in examples, demo scripts,
+and the golden-path E2E.
+
+### Setup Client (`RelayfileSetup`)
+
+| Variable | Notes |
+| --- | --- |
+| `RELAY_ACCESS_TOKEN` | Access token passed to `new RelayfileSetup({ accessToken })`. Used by the cloud API to authenticate workspace creation and join requests. |
+
+### Mount Env (`WorkspaceHandle.mountEnv()`)
+
+`mountEnv()` returns a plain `Record<string, string>`. Callers spread this
+record into the environment of a `relayfile-mount` process or cloud sandbox.
+The keys produced are documented in the Mount Package section above; the
+relaycast keys below are also included when present.
+
+### Relaycast Integration
+
+These variables are set in the env block returned by `mountEnv()` and
+included in `AgentWorkspaceInvite` payloads. They are also the conventional
+names for consuming the invite in an invited agent process.
+
+| Variable | Notes |
+| --- | --- |
+| `RELAY_API_KEY` | Alias for `relaycastApiKey` from the workspace join response. Set alongside `RELAYCAST_API_KEY` for backward compatibility. |
+| `RELAYCAST_API_KEY` | Relaycast workspace API key from the join response. Used to authenticate a relaycast client. |
+| `RELAY_BASE_URL` | Alias for `relaycastBaseUrl`. Defaults to `https://api.relaycast.dev` when not set by the cloud join response. |
+| `RELAYCAST_BASE_URL` | Relaycast base URL. SDK resolves in priority order: caller `options.relaycastBaseUrl` → cloud join response → `https://api.relaycast.dev`. |
+
+`RELAYFILE_MOUNT_MODE` is produced by `mountEnv(options.mode)` and honored
+by `relayfile-mount`. It was previously listed only as a forward-looking
+placeholder; it is now an active config key when `options.mode` is passed.
+
+### `packages/relayfile-sdk` (old package name)
 
 The SDK source under `packages/relayfile-sdk/src` does not read environment variables at runtime. The only env usage in this package is in `README.md`, where `process.env.RELAYFILE_TOKEN` is shown as an example token source for consumers.
 
@@ -298,4 +335,6 @@ These names exist only to exercise helper parsers in tests:
 
 ## Intentionally Excluded From The Main Tables
 
-The repo also contains env-like names in docs and design notes that are not currently read by code or Compose on this branch. Examples include `RELAYFILE_CORRELATION_ID`, `RELAYFILE_CACHE_*`, `RELAYFILE_CONFLICT_STRATEGY`, `RELAYFILE_MOUNT_MODE`, `RELAYFILE_FUSE_FALLBACK`, and `NANGO_SECRET_KEY`. They are examples or forward-looking design placeholders, not active config-loading surfaces.
+The repo also contains env-like names in docs and design notes that are not currently read by code or Compose on this branch. Examples include `RELAYFILE_CORRELATION_ID`, `RELAYFILE_CACHE_*`, `RELAYFILE_CONFLICT_STRATEGY`, `RELAYFILE_FUSE_FALLBACK`, and `NANGO_SECRET_KEY`. They are examples or forward-looking design placeholders, not active config-loading surfaces.
+
+`RELAYFILE_MOUNT_MODE` was previously in this list but is now active — it is produced by `WorkspaceHandle.mountEnv(options.mode)` and consumed by `relayfile-mount`. See the SDK and Mount sections above.

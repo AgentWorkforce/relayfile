@@ -490,9 +490,14 @@ async function main() {
       result = {
         mountEnv: handle.mountEnv({
           localDir: "/workspace/notion",
-          remotePath: "/notion"
+          remotePath: "/notion",
+          mode: "poll"
         }),
-        invite: handle.agentInvite({ agentName: "review-agent" })
+        mountEnvOverride: handle.mountEnv({
+          relaycastBaseUrl: "https://relaycast.override.test"
+        }),
+        invite: handle.agentInvite({ agentName: "review-agent" }),
+        tokenlessInvite: handle.agentInvite({ includeRelayfileToken: false })
       };
       break;
     }
@@ -930,7 +935,20 @@ async function main() {
       connectionId: "conn_notion"
     });
 
-    cloudServer.reset();
+    cloudServer.reset({
+      joinQueue: [
+        {
+          body: {
+            workspaceId: "ws_e2e",
+            token: "rf_jwt_join_1",
+            relayfileUrl: relayBaseUrlRef.current,
+            wsUrl: "wss://relayfile.test/ws",
+            relaycastApiKey: "rc_test",
+            relaycastBaseUrl: "https://relaycast.staging.test"
+          }
+        }
+      ]
+    });
     relayServer.reset();
     const mountEnvAndInviteResult = await runScenario(
       consumerDir,
@@ -945,20 +963,40 @@ async function main() {
       RELAYFILE_WORKSPACE: "ws_e2e",
       RELAYFILE_REMOTE_PATH: "/notion",
       RELAYFILE_LOCAL_DIR: "/workspace/notion",
+      RELAYFILE_MOUNT_MODE: "poll",
       RELAYCAST_API_KEY: "rc_test",
       RELAY_API_KEY: "rc_test",
-      RELAYCAST_BASE_URL: "https://api.relaycast.dev",
-      RELAY_BASE_URL: "https://api.relaycast.dev"
+      RELAYCAST_BASE_URL: "https://relaycast.staging.test",
+      RELAY_BASE_URL: "https://relaycast.staging.test"
+    });
+    assert.deepEqual(mountEnvAndInviteResult.mountEnvOverride, {
+      RELAYFILE_BASE_URL: relayBaseUrlRef.current,
+      RELAYFILE_TOKEN: "rf_jwt_join_1",
+      RELAYFILE_WORKSPACE: "ws_e2e",
+      RELAYFILE_REMOTE_PATH: "/",
+      RELAYCAST_API_KEY: "rc_test",
+      RELAY_API_KEY: "rc_test",
+      RELAYCAST_BASE_URL: "https://relaycast.override.test",
+      RELAY_BASE_URL: "https://relaycast.override.test"
     });
     assert.deepEqual(mountEnvAndInviteResult.invite, {
       workspaceId: "ws_e2e",
       cloudApiUrl: cloudBaseUrl,
       relayfileUrl: relayBaseUrlRef.current,
       relaycastApiKey: "rc_test",
-      relaycastBaseUrl: "https://api.relaycast.dev",
+      relaycastBaseUrl: "https://relaycast.staging.test",
       agentName: "review-agent",
       scopes: ["fs:read", "fs:write", "relaycast:write"],
       relayfileToken: "rf_jwt_join_1"
+    });
+    assert.deepEqual(mountEnvAndInviteResult.tokenlessInvite, {
+      workspaceId: "ws_e2e",
+      cloudApiUrl: cloudBaseUrl,
+      relayfileUrl: relayBaseUrlRef.current,
+      relaycastApiKey: "rc_test",
+      relaycastBaseUrl: "https://relaycast.staging.test",
+      agentName: "lead-agent",
+      scopes: ["fs:read", "fs:write", "relaycast:write"]
     });
 
     cloudServer.reset({

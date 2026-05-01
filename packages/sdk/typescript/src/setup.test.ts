@@ -20,13 +20,17 @@ function jsonResponse(body: unknown, init: ResponseInit = {}): Response {
   })
 }
 
-function makeJoinResponse(token = "rf_jwt_1"): Response {
+function makeJoinResponse(
+  token = "rf_jwt_1",
+  overrides: Record<string, unknown> = {}
+): Response {
   return jsonResponse({
     workspaceId: "ws_123",
     token,
     relayfileUrl: "https://relayfile.test",
     wsUrl: "wss://relayfile.test/ws",
-    relaycastApiKey: "rc_test"
+    relaycastApiKey: "rc_test",
+    ...overrides
   })
 }
 
@@ -346,8 +350,51 @@ describe("RelayfileSetup", () => {
     })
   })
 
-  it("returns mount env and agent invites for relayfile plus relaycast", async () => {
-    queueFetch(makeJoinResponse("rf_jwt_mount"))
+  it("forces connectNotion to request only the notion integration", async () => {
+    const fetchMock = queueFetch(
+      makeJoinResponse(),
+      jsonResponse({
+        token: "session_token",
+        expiresAt: "2026-04-30T01:00:00.000Z",
+        connectLink: "https://nango.test/notion",
+        connectionId: "conn_notion"
+      })
+    )
+
+    const setup = new RelayfileSetup()
+    const handle = await setup.joinWorkspace("ws_123")
+
+    await handle.connectNotion({
+      allowedIntegrations: ["github", "linear"]
+    } as never)
+
+    expect(readRequestBody(fetchMock, 1)).toEqual({
+      allowedIntegrations: ["notion"]
+    })
+  })
+
+  it("delegates waitForNotion to waitForConnection('notion')", async () => {
+    const setup = new RelayfileSetup()
+    const fetchMock = queueFetch(makeJoinResponse())
+    const handle = await setup.joinWorkspace("ws_123")
+    const waitForConnectionSpy = vi
+      .spyOn(handle, "waitForConnection")
+      .mockResolvedValue(undefined)
+
+    await handle.waitForNotion({ timeoutMs: 1234 })
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(waitForConnectionSpy).toHaveBeenCalledWith("notion", {
+      timeoutMs: 1234
+    })
+  })
+
+  it("returns mount env using the cloud relaycast base URL and mount options", async () => {
+    queueFetch(
+      makeJoinResponse("rf_jwt_mount", {
+        relaycastBaseUrl: "https://relaycast.staging.test"
+      })
+    )
 
     const setup = new RelayfileSetup({
       cloudApiUrl: "https://staging.agentrelay.com/cloud"
@@ -357,26 +404,100 @@ describe("RelayfileSetup", () => {
       scopes: ["fs:read", "fs:write", "relaycast:write"]
     })
 
-    expect(handle.mountEnv({ localDir: "/workspace", remotePath: "/notion" })).toEqual({
+    expect(
+      handle.mountEnv({
+        localDir: "/workspace",
+        remotePath: "/notion",
+        mode: "poll"
+      })
+    ).toEqual({
       RELAYFILE_BASE_URL: "https://relayfile.test",
       RELAYFILE_TOKEN: "rf_jwt_mount",
       RELAYFILE_WORKSPACE: "ws_123",
       RELAYFILE_REMOTE_PATH: "/notion",
       RELAYFILE_LOCAL_DIR: "/workspace",
+      RELAYFILE_MOUNT_MODE: "poll",
       RELAYCAST_API_KEY: "rc_test",
       RELAY_API_KEY: "rc_test",
-      RELAYCAST_BASE_URL: "https://api.relaycast.dev",
-      RELAY_BASE_URL: "https://api.relaycast.dev"
+      RELAYCAST_BASE_URL: "https://relaycast.staging.test",
+      RELAY_BASE_URL: "https://relaycast.staging.test"
     })
+  })
+
+  it("lets mountEnv override the relaycast base URL explicitly", async () => {
+    queueFetch(
+      makeJoinResponse("rf_jwt_mount", {
+        relaycastBaseUrl: "https://relaycast.staging.test"
+      })
+    )
+
+    const setup = new RelayfileSetup()
+    const handle = await setup.joinWorkspace("ws_123")
+
+    expect(
+      handle.mountEnv({
+        relaycastBaseUrl: "https://relaycast.override.test"
+      })
+    ).toEqual({
+      RELAYFILE_BASE_URL: "https://relayfile.test",
+      RELAYFILE_TOKEN: "rf_jwt_mount",
+      RELAYFILE_WORKSPACE: "ws_123",
+      RELAYFILE_REMOTE_PATH: "/",
+      RELAYCAST_API_KEY: "rc_test",
+      RELAY_API_KEY: "rc_test",
+      RELAYCAST_BASE_URL: "https://relaycast.override.test",
+      RELAY_BASE_URL: "https://relaycast.override.test"
+    })
+  })
+
+  it("returns agent invites for relayfile plus relaycast and omits relayfileToken on request", async () => {
+    queueFetch(
+      makeJoinResponse("rf_jwt_mount", {
+        relaycastBaseUrl: "https://relaycast.staging.test"
+      })
+    )
+
+    const setup = new RelayfileSetup({
+      cloudApiUrl: "https://staging.agentrelay.com/cloud"
+    })
+    const leadScopes = ["fs:read", "fs:write", "relaycast:write"]
+    const handle = await setup.joinWorkspace("ws_123", {
+      agentName: "lead-agent",
+      scopes: leadScopes
+    })
+
     expect(handle.agentInvite({ agentName: "review-agent" })).toEqual({
       workspaceId: "ws_123",
       cloudApiUrl: "https://staging.agentrelay.com/cloud",
       relayfileUrl: "https://relayfile.test",
       relaycastApiKey: "rc_test",
-      relaycastBaseUrl: "https://api.relaycast.dev",
+      relaycastBaseUrl: "https://relaycast.staging.test",
       agentName: "review-agent",
       scopes: ["fs:read", "fs:write", "relaycast:write"],
       relayfileToken: "rf_jwt_mount"
     })
+
+    const tokenlessInvite = handle.agentInvite({
+      includeRelayfileToken: false
+    })
+    expect(tokenlessInvite).toEqual({
+      workspaceId: "ws_123",
+      cloudApiUrl: "https://staging.agentrelay.com/cloud",
+      relayfileUrl: "https://relayfile.test",
+      relaycastApiKey: "rc_test",
+      relaycastBaseUrl: "https://relaycast.staging.test",
+      agentName: "lead-agent",
+      scopes: ["fs:read", "fs:write", "relaycast:write"]
+    })
+    expect("relayfileToken" in tokenlessInvite).toBe(false)
+
+    const inviteScopes = handle.agentInvite().scopes
+    inviteScopes.push("fs:admin")
+    expect(leadScopes).toEqual(["fs:read", "fs:write", "relaycast:write"])
+    expect(handle.agentInvite().scopes).toEqual([
+      "fs:read",
+      "fs:write",
+      "relaycast:write"
+    ])
   })
 })

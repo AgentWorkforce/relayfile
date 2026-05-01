@@ -46,6 +46,7 @@ export interface WorkspaceInfo {
   workspaceId: string
   relayfileUrl: string
   relaycastApiKey: string
+  relaycastBaseUrl?: string
   createdAt?: string
   name?: string
   wsUrl?: string

@@ -12,6 +12,10 @@
     "build": "tsc",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "test:e2e": "node scripts/setup-e2e.mjs",
+    "agent-workspace:e2e": "node scripts/agent-workspace-golden-path-e2e.mjs",
+    "test:e2e:golden-path": "node scripts/agent-workspace-golden-path-e2e.mjs",
+    "demo:agent-workspace": "npm run build && node scripts/agent-workspace-demo.mjs",
     "setup:e2e": "node scripts/setup-e2e.mjs",
     "prepublishOnly": "npm run build"
   },

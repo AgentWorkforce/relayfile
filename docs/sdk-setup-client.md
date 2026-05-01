@@ -1,6 +1,6 @@
 # SDK Setup Client
 
-**Status:** Proposed  
+**Status:** Implemented (SDK v0.6.0)  
 **Affects:** `packages/sdk/typescript`, `cloud/packages/web`
 
 ---
@@ -73,6 +73,12 @@ const mountEnv = workspace.mountEnv({
 // and join the same relaycast workspace.
 const reviewerInvite = workspace.agentInvite({ agentName: 'review-agent' })
 ```
+
+---
+
+## Golden Path
+
+The setup-client is the primitive contract. For the full agent workflow — connecting Notion, mounting the workspace, and inviting other agents — see [`docs/agent-workspace-golden-path.md`](./agent-workspace-golden-path.md). That doc composes the primitives here into a single end-to-end journey, records the v1 decisions, and links to the E2E evidence. Run `npm run demo:agent-workspace --workspace=packages/sdk/typescript` to see it locally.
 
 ---
 
