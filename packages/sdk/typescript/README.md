@@ -17,8 +17,8 @@ environment variable generation for `relayfile-mount`, and agent invites.
 ```ts
 import { RelayfileSetup } from '@relayfile/sdk'
 
-const setup = new RelayfileSetup({
-  accessToken: process.env.RELAY_ACCESS_TOKEN,
+const setup = await RelayfileSetup.login({
+  onLoginUrl: (url) => console.log(`Sign in to Relayfile Cloud: ${url}`),
 })
 
 // Create or resume a workspace
@@ -60,8 +60,11 @@ npm run demo:agent-workspace --workspace=packages/sdk/typescript
 The demo defaults to in-process mock cloud and relayfile servers, seeds a `/notion`
 file, mounts it through the deterministic harness, and proves read-only invited-agent
 behavior without requiring real Notion, Relaycast, or cloud credentials. For a real
-deployment, use `RelayfileSetup` with a real `RELAY_ACCESS_TOKEN`, your cloud API
-URL override if needed, and a human-completed Notion OAuth flow as described in
+deployment, use `RelayfileSetup.login()` to send the human one Cloud sign-in URL,
+or use `RelayfileSetup.fromCloudTokens()` with previously persisted Cloud tokens.
+You can still pass `accessToken` directly to `new RelayfileSetup()` in CI or
+advanced hosts that already provide a valid Cloud bearer token. After Cloud auth,
+complete the Notion OAuth flow as described in
 [`docs/agent-workspace-golden-path.md`](../../../docs/agent-workspace-golden-path.md).
 
 ---

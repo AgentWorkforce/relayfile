@@ -484,8 +484,9 @@ The mount E2E must prove:
 - The script either:
   - Runs end-to-end against in-process mocks (cloud, relayfile, relaycast),
     or
-  - Clearly identifies the real credentials it requires (`RELAY_ACCESS_TOKEN`,
-    Notion OAuth completion by the human, etc.) and what each one is for.
+  - Clearly identifies the real credentials it requires (`RelayfileSetup.login()`
+    Cloud sign-in or a raw `RELAY_ACCESS_TOKEN`, Notion OAuth completion by the
+    human, etc.) and what each one is for.
 - The README invocation matches the implementation (e.g.
   `npm run demo:agent-workspace --workspace=packages/sdk/typescript`).
 

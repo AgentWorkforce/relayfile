@@ -186,7 +186,7 @@ and the golden-path E2E.
 
 | Variable | Notes |
 | --- | --- |
-| `RELAY_ACCESS_TOKEN` | Access token passed to `new RelayfileSetup({ accessToken })`. Used by the cloud API to authenticate workspace creation and join requests. |
+| `RELAY_ACCESS_TOKEN` | Optional raw Cloud access token passed to `new RelayfileSetup({ accessToken })` by caller code. Interactive agents should prefer `RelayfileSetup.login()` and persist the returned token set through their own secret store. |
 
 ### Mount Env (`WorkspaceHandle.mountEnv()`)
 

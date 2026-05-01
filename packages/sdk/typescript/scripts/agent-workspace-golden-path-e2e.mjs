@@ -804,7 +804,7 @@ async function main() {
         request.method === "POST" && request.pathname === "/api/v1/workspaces",
       "workspace creation"
     );
-    assert.equal(createRequest.headers["x-relayfile-sdk-version"], "0.5.3");
+    assert.equal(createRequest.headers["x-relayfile-sdk-version"], "0.6.0");
     assert.deepEqual(createRequest.body, {
       name: "golden-path-consumer",
     });
@@ -816,7 +816,7 @@ async function main() {
         request.pathname === "/api/v1/workspaces/ws_agent_workspace_demo/join",
       "workspace join"
     );
-    assert.equal(joinRequest.headers["x-relayfile-sdk-version"], "0.5.3");
+    assert.equal(joinRequest.headers["x-relayfile-sdk-version"], "0.6.0");
     assert.deepEqual(joinRequest.body, {
       agentName: "lead-agent",
       scopes: ["fs:read", "fs:write", "relaycast:read", "relaycast:write"],
@@ -830,7 +830,7 @@ async function main() {
           "/api/v1/workspaces/ws_agent_workspace_demo/integrations/connect-session",
       "connectNotion"
     );
-    assert.equal(connectRequest.headers["x-relayfile-sdk-version"], "0.5.3");
+    assert.equal(connectRequest.headers["x-relayfile-sdk-version"], "0.6.0");
     assert.equal(connectRequest.headers.authorization, "Bearer rf_token_1_rw");
     assert.deepEqual(connectRequest.body, {
       allowedIntegrations: ["notion"],
@@ -1022,7 +1022,7 @@ async function main() {
     );
     assert.ok(statusRequests.length >= 2, "waitForNotion should poll until ready");
     for (const request of statusRequests) {
-      assert.equal(request.headers["x-relayfile-sdk-version"], "0.5.3");
+      assert.equal(request.headers["x-relayfile-sdk-version"], "0.6.0");
       assert.equal(request.headers.authorization, "Bearer rf_token_1_rw");
       assert.equal(request.searchParams.connectionId, "conn_notion");
     }

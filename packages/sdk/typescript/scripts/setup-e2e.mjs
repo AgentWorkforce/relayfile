@@ -819,8 +819,8 @@ async function main() {
     );
     assert.equal(createRequests[0].headers.authorization, "Bearer cld_at_test");
     assert.equal(createRequests[1].headers.authorization, "Bearer cld_at_test");
-    assert.equal(createRequests[0].headers["x-relayfile-sdk-version"], "0.5.3");
-    assert.equal(createRequests[1].headers["x-relayfile-sdk-version"], "0.5.3");
+    assert.equal(createRequests[0].headers["x-relayfile-sdk-version"], "0.6.0");
+    assert.equal(createRequests[1].headers["x-relayfile-sdk-version"], "0.6.0");
     assert.equal(createWorkspaceResult.workspaceId, "ws_e2e");
 
     cloudServer.reset();

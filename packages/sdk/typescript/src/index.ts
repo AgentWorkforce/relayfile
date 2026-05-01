@@ -13,6 +13,11 @@ export {
   WorkspaceHandle
 } from "./setup.js";
 export {
+  type RelayfileCloudLoginOptions,
+  type RelayfileCloudTokenSet,
+  type RelayfileCloudTokenSetupOptions
+} from "./cloud-login.js";
+export {
   CloudAbortError,
   CloudApiError,
   CloudTimeoutError,

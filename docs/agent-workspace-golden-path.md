@@ -71,8 +71,13 @@ The TypeScript path should feel like this:
 ```ts
 import { RelayfileSetup } from '@relayfile/sdk'
 
-const setup = new RelayfileSetup({
-  accessToken: process.env.RELAY_ACCESS_TOKEN,
+const setup = await RelayfileSetup.login({
+  onLoginUrl: (url) => {
+    console.log(`Sign in to Relayfile Cloud: ${url}`)
+  },
+  onTokens: async (tokens) => {
+    await saveSecret('relayfile-cloud-tokens', JSON.stringify(tokens))
+  },
 })
 
 const workspace = await setup.createWorkspace({
@@ -100,6 +105,18 @@ const mountEnv = workspace.mountEnv({
 const reviewer = workspace.agentInvite({
   agentName: 'review-agent',
   scopes: ['fs:read', 'relaycast:write'],
+})
+```
+
+On the next run, the same agent can skip the human Cloud sign-in step by
+restoring the saved token set:
+
+```ts
+const tokens = JSON.parse(await readSecret('relayfile-cloud-tokens'))
+const setup = RelayfileSetup.fromCloudTokens(tokens, {
+  onTokens: async (updatedTokens) => {
+    await saveSecret('relayfile-cloud-tokens', JSON.stringify(updatedTokens))
+  },
 })
 ```
 

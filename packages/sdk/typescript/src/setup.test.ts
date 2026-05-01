@@ -91,8 +91,123 @@ describe("RelayfileSetup", () => {
     expect(handle.workspaceId).toBe("ws_123")
     expect(readRequestUrl(fetchMock, 0)).toBe("https://agentrelay.com/cloud/api/v1/workspaces")
     expect(readRequestUrl(fetchMock, 1)).toBe("https://agentrelay.com/cloud/api/v1/workspaces/ws_123/join")
-    expect(readRequestHeaders(fetchMock, 0)["X-Relayfile-SDK-Version"]).toBe("0.5.3")
-    expect(readRequestHeaders(fetchMock, 1)["X-Relayfile-SDK-Version"]).toBe("0.5.3")
+    expect(readRequestHeaders(fetchMock, 0)["X-Relayfile-SDK-Version"]).toBe("0.6.0")
+    expect(readRequestHeaders(fetchMock, 1)["X-Relayfile-SDK-Version"]).toBe("0.6.0")
+  })
+
+  it("logs in through the cloud callback URL and returns an authenticated setup", async () => {
+    const loginUrls: string[] = []
+    const loginPromise = RelayfileSetup.login({
+      cloudApiUrl: "https://cloud.test/base",
+      state: "state_test",
+      timeoutMs: 5_000,
+      onLoginUrl: (url) => {
+        loginUrls.push(url)
+      }
+    })
+
+    for (let index = 0; index < 50 && loginUrls.length === 0; index += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10))
+    }
+
+    expect(loginUrls).toHaveLength(1)
+    const loginUrl = new URL(loginUrls[0])
+    expect(loginUrl.toString()).toContain("https://cloud.test/base/api/v1/cli/login")
+    expect(loginUrl.searchParams.get("state")).toBe("state_test")
+
+    const redirectUri = loginUrl.searchParams.get("redirect_uri")
+    expect(redirectUri).toBeTruthy()
+    const callbackUrl = new URL(redirectUri!)
+    callbackUrl.searchParams.set("state", "state_test")
+    callbackUrl.searchParams.set("access_token", "cld_at_login")
+    callbackUrl.searchParams.set("refresh_token", "cld_rt_login")
+    callbackUrl.searchParams.set(
+      "access_token_expires_at",
+      new Date(Date.now() + 60 * 60 * 1000).toISOString()
+    )
+    callbackUrl.searchParams.set("api_url", "https://cloud.test/base")
+
+    const response = await fetch(callbackUrl)
+    expect(response.status).toBe(200)
+
+    const setup = await loginPromise
+    expect(setup.getCloudApiUrl()).toBe("https://cloud.test/base")
+  })
+
+  it("prints the cloud login URL by default", async () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {})
+    const loginPromise = RelayfileSetup.login({
+      cloudApiUrl: "https://cloud.test/base",
+      state: "state_console",
+      timeoutMs: 5_000
+    })
+
+    for (let index = 0; index < 50 && logSpy.mock.calls.length === 0; index += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10))
+    }
+
+    expect(logSpy).toHaveBeenCalledOnce()
+    const logged = String(logSpy.mock.calls[0][0])
+    const loginUrl = new URL(logged.replace("Sign in to Relayfile Cloud: ", ""))
+    const callbackUrl = new URL(loginUrl.searchParams.get("redirect_uri")!)
+    callbackUrl.searchParams.set("state", "state_console")
+    callbackUrl.searchParams.set("access_token", "cld_at_console")
+    callbackUrl.searchParams.set("refresh_token", "cld_rt_console")
+    callbackUrl.searchParams.set(
+      "access_token_expires_at",
+      new Date(Date.now() + 60 * 60 * 1000).toISOString()
+    )
+
+    await fetch(callbackUrl)
+    await expect(loginPromise).resolves.toBeInstanceOf(RelayfileSetup)
+  })
+
+  it("creates a setup from cloud tokens and refreshes before requests", async () => {
+    const onTokens = vi.fn()
+    const fetchMock = queueFetch(
+      jsonResponse({
+        accessToken: "cld_at_refreshed",
+        refreshToken: "cld_rt_refreshed",
+        accessTokenExpiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+        refreshTokenExpiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString()
+      }),
+      jsonResponse({
+        workspaceId: "ws_123",
+        relayfileUrl: "https://relayfile.test",
+        relaycastApiKey: "rc_test",
+        createdAt: "2026-04-30T00:00:00.000Z"
+      }),
+      makeJoinResponse()
+    )
+
+    const setup = RelayfileSetup.fromCloudTokens(
+      {
+        apiUrl: "https://cloud.test/base",
+        accessToken: "cld_at_expiring",
+        refreshToken: "cld_rt_original",
+        accessTokenExpiresAt: new Date(Date.now() + 500).toISOString()
+      },
+      {
+        refreshWindowMs: 1_000,
+        onTokens
+      }
+    )
+
+    await setup.createWorkspace()
+
+    expect(readRequestUrl(fetchMock, 0)).toBe("https://cloud.test/base/api/v1/auth/token/refresh")
+    expect(readRequestBody(fetchMock, 0)).toEqual({
+      refreshToken: "cld_rt_original"
+    })
+    expect(readRequestHeaders(fetchMock, 1).Authorization).toBe("Bearer cld_at_refreshed")
+    expect(readRequestHeaders(fetchMock, 2).Authorization).toBe("Bearer cld_at_refreshed")
+    expect(onTokens).toHaveBeenCalledWith(
+      expect.objectContaining({
+        accessToken: "cld_at_refreshed",
+        refreshToken: "cld_rt_refreshed",
+        apiUrl: "https://cloud.test/base"
+      })
+    )
   })
 
   it("preserves a path-bearing override URL for join and integration calls", async () => {

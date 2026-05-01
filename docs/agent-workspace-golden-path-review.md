@@ -113,7 +113,8 @@ read-only invited harness. End markers `AGENT_WORKSPACE_E2E_OK` and
   `docs/agent-workspace-golden-path.md` exactly as named.
 - The README's demo blurb explicitly says it "defaults to in-process mock
   cloud and relayfile servers... without requiring real Notion, Relaycast,
-  or cloud credentials" and points readers at `RELAY_ACCESS_TOKEN` + a
+  or cloud credentials" and points readers at `RelayfileSetup.login()`,
+  `RelayfileSetup.fromCloudTokens()`, or a raw `RELAY_ACCESS_TOKEN` plus a
   human-completed Notion OAuth flow only "for a real deployment".
 - `docs/agent-workspace-golden-path.md` status header reads
   "Partially Implemented" with the V1 Caveats section calling out that
@@ -153,7 +154,7 @@ commands enforce that for the workflow path.
   that do not emit it.
 - `agentInvite` produces a fresh `[...this._joinOptions.scopes]` copy and is
   asserted not to mutate the lead handle's scopes (`setup.test.ts:493`).
-- The E2E asserts the `RELAYFILE_SDK_VERSION` constant (`0.5.3`) appears on
+- The E2E asserts the `RELAYFILE_SDK_VERSION` constant (`0.6.0`) appears on
   every cloud request, which catches drift if the constant is bumped without
   also updating the E2E expectations.
 - The mount harness exposes a typed `MountHarnessPermissionError` with

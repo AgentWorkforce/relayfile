@@ -3,6 +3,13 @@ import {
   type AccessTokenProvider
 } from "./client.js"
 import {
+  createRelayfileCloudAccessTokenProvider,
+  runRelayfileCloudLogin,
+  type RelayfileCloudLoginOptions,
+  type RelayfileCloudTokenSet,
+  type RelayfileCloudTokenSetupOptions
+} from "./cloud-login.js"
+import {
   CloudAbortError,
   CloudApiError,
   CloudTimeoutError,
@@ -28,7 +35,7 @@ import {
   type WorkspacePermissions
 } from "./setup-types.js"
 
-export const RELAYFILE_SDK_VERSION = "0.5.3"
+export const RELAYFILE_SDK_VERSION = "0.6.0"
 
 const DEFAULT_CLOUD_API_URL = "https://agentrelay.com/cloud"
 const DEFAULT_RELAYCAST_BASE_URL = "https://api.relaycast.dev"
@@ -112,6 +119,41 @@ export class RelayfileSetup {
   private readonly accessToken?: AccessTokenProvider
   private readonly requestTimeoutMs: number
   private readonly retryOptions: NormalizedRetryOptions
+
+  static async login(
+    options: RelayfileCloudLoginOptions = {}
+  ): Promise<RelayfileSetup> {
+    const cloudApiUrl = options.cloudApiUrl ?? DEFAULT_CLOUD_API_URL
+    const tokens = await runRelayfileCloudLogin({
+      ...options,
+      cloudApiUrl
+    })
+    return RelayfileSetup.fromCloudTokens(tokens, {
+      ...options,
+      cloudApiUrl: tokens.apiUrl ?? cloudApiUrl
+    })
+  }
+
+  static fromCloudTokens(
+    tokens: RelayfileCloudTokenSet,
+    options: RelayfileCloudTokenSetupOptions = {}
+  ): RelayfileSetup {
+    const cloudApiUrl = options.cloudApiUrl ?? tokens.apiUrl ?? DEFAULT_CLOUD_API_URL
+    return new RelayfileSetup({
+      ...options,
+      cloudApiUrl,
+      accessToken: createRelayfileCloudAccessTokenProvider(
+        {
+          ...tokens,
+          apiUrl: tokens.apiUrl ?? cloudApiUrl
+        },
+        {
+          ...options,
+          cloudApiUrl
+        }
+      )
+    })
+  }
 
   constructor(options: RelayfileSetupOptions = {}) {
     this.cloudApiUrl = options.cloudApiUrl ?? DEFAULT_CLOUD_API_URL

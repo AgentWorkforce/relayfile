@@ -24,7 +24,9 @@ A user running an agent in any sandbox environment (Daytona, E2B, Docker, local)
 ```ts
 import { RelayfileSetup } from '@relayfile/sdk'
 
-const setup = new RelayfileSetup()
+const setup = await RelayfileSetup.login({
+  onLoginUrl: (url) => console.log('Sign in to Relayfile Cloud:', url),
+})
 
 const workspace = await setup.createWorkspace({ name: 'my-agent' })
 
@@ -51,7 +53,9 @@ same relayfile filesystem plus relaycast room.
 ```ts
 import { RelayfileSetup } from '@relayfile/sdk'
 
-const setup = new RelayfileSetup({ accessToken: process.env.RELAY_ACCESS_TOKEN })
+const setup = await RelayfileSetup.login({
+  onLoginUrl: (url) => console.log(`Sign in to Relayfile Cloud: ${url}`),
+})
 const workspace = await setup.createWorkspace({
   name: 'notion-research-room',
   agentName: 'lead-agent',
@@ -88,11 +92,12 @@ This spec covers:
 
 1. A new `RelayfileSetup` class added to `@relayfile/sdk` that wraps the cloud web API
 2. A `WorkspaceHandle` class returned from setup that provides both setup operations and a ready `RelayFileClient`
-3. New cloud web API endpoints required to support polling for connection status without requiring full auth
-4. The `waitForConnection` polling contract
-5. Error types and error handling
-6. Token refresh and TTL handling
-7. What is explicitly out of scope
+3. A `RelayfileSetup.login()` helper that wraps the cloud CLI login redirect and returns an authenticated setup client
+4. New cloud web API endpoints required to support polling for connection status without requiring full auth
+5. The `waitForConnection` polling contract
+6. Error types and error handling
+7. Token refresh and TTL handling
+8. What is explicitly out of scope
 
 This spec does **not** cover: self-hosted server setup, the Go server, Python SDK changes, or changes to any existing `RelayFileClient` methods.
 
@@ -176,6 +181,22 @@ export interface RelayfileSetupOptions {
 }
 
 export class RelayfileSetup {
+  /**
+   * Start the Relayfile Cloud browser login flow, deliver the login URL to
+   * the caller, capture the localhost callback, and return an authenticated
+   * setup client whose cloud access token refreshes automatically.
+   */
+  static login(options?: RelayfileCloudLoginOptions): Promise<RelayfileSetup>
+
+  /**
+   * Build an authenticated setup client from tokens returned by login().
+   * Use this when you have persisted the Cloud token set between runs.
+   */
+  static fromCloudTokens(
+    tokens: RelayfileCloudTokenSet,
+    options?: RelayfileCloudTokenSetupOptions,
+  ): RelayfileSetup
+
   constructor(options?: RelayfileSetupOptions)
 
   /**
@@ -194,6 +215,79 @@ export class RelayfileSetup {
     workspaceId: string,
     options?: JoinWorkspaceOptions,
   ): Promise<WorkspaceHandle>
+}
+```
+
+### `RelayfileSetup.login()`
+
+`RelayfileSetup.login()` is the easiest Cloud auth path for local agents and
+interactive sandboxes. It starts a temporary localhost callback server, creates a
+Cloud login URL using `GET /api/v1/cli/login`, and resolves after the human
+finishes Google auth in the browser. The returned setup client uses the issued
+Cloud access token for workspace create/join calls and refreshes it with the
+Cloud refresh token when it is close to expiry.
+
+```ts
+const setup = await RelayfileSetup.login({
+  onLoginUrl: async (url) => {
+    await sendToUser(`Sign in to Relayfile Cloud: ${url}`)
+  },
+  onTokens: async (tokens) => {
+    await saveSecret('relayfile-cloud-tokens', JSON.stringify(tokens))
+  },
+})
+```
+
+For headless agents that already saved a token set from a previous login, skip
+the browser step:
+
+```ts
+const tokens = JSON.parse(await readSecret('relayfile-cloud-tokens'))
+const setup = RelayfileSetup.fromCloudTokens(tokens, {
+  onTokens: async (updatedTokens) => {
+    await saveSecret('relayfile-cloud-tokens', JSON.stringify(updatedTokens))
+  },
+})
+```
+
+The legacy constructor path remains supported for CI and hosts that already
+inject a valid Cloud bearer token:
+
+```ts
+const setup = new RelayfileSetup({
+  accessToken: process.env.RELAY_ACCESS_TOKEN,
+})
+```
+
+```ts
+export interface RelayfileCloudLoginOptions
+  extends RelayfileCloudTokenSetupOptions {
+  cloudApiUrl?: string
+  redirectHost?: string
+  redirectPort?: number
+  redirectPath?: string
+  timeoutMs?: number
+  state?: string
+  signal?: AbortSignal
+  openBrowser?: boolean
+  onLoginUrl?: (url: string) => void | Promise<void>
+  successMessage?: string
+}
+
+export interface RelayfileCloudTokenSet {
+  apiUrl?: string
+  accessToken: string
+  refreshToken: string
+  accessTokenExpiresAt: string
+  refreshTokenExpiresAt?: string
+}
+
+export interface RelayfileCloudTokenSetupOptions {
+  cloudApiUrl?: string
+  requestTimeoutMs?: number
+  retry?: RelayfileSetupRetryOptions
+  refreshWindowMs?: number
+  onTokens?: (tokens: RelayfileCloudTokenSet) => void | Promise<void>
 }
 ```
 
@@ -798,14 +892,26 @@ If Option A above is adopted, the `GET /integrations/:provider/status` endpoint'
 
 | Token type | Where issued | Used for | TTL | How SDK gets it |
 |---|---|---|---|---|
-| `cld_at_...` cloud token | `/api/v1/cli/login` OAuth flow | Authenticating to cloud web API | 24h | Passed by user as `accessToken` option |
+| `cld_at_...` cloud token | `/api/v1/cli/login` OAuth flow | Authenticating to cloud web API | 24h | Captured by `RelayfileSetup.login()`, restored through `RelayfileSetup.fromCloudTokens()`, or passed directly as `accessToken` |
+| Cloud refresh token | `/api/v1/cli/login` OAuth flow | Refreshing the cloud access token | 7d | Captured by `RelayfileSetup.login()` and persisted by the caller through `onTokens` |
 | Relayfile JWT | `/api/v1/workspaces/:id/join` | VFS API calls | 1h | Returned by `createWorkspace` / `joinWorkspace` |
 
-The SDK does not issue or refresh `cld_at_` tokens. If the user provides an `accessToken` and it expires, cloud API calls will return 401 and the SDK will throw `CloudApiError`. The user is responsible for refreshing their cloud token.
+`RelayfileSetup.login()` captures the cloud access and refresh tokens through
+the same OAuth-backed Cloud login route used by the CLI. The SDK refreshes those
+tokens automatically when the setup client was created by `login()` or
+`fromCloudTokens()`. Callers that want resumability should persist the token set
+from `onTokens` in their own secret store and restore it with
+`fromCloudTokens()`.
+
+If the user passes a raw `accessToken` to `new RelayfileSetup()` and that token
+expires, cloud API calls return 401 and the SDK throws `CloudApiError`. The user
+is responsible for replacing raw constructor tokens.
 
 The SDK automatically refreshes the relayfile JWT by re-joining (no `cld_at_` token required — the join endpoint accepts anonymous requests for anonymous workspaces, and workspace-owner requests for authenticated workspaces).
 
-For authenticated workspaces (`accessToken` provided), the re-join call uses the same `accessToken`. If the `accessToken` has expired by the time re-join is attempted, the SDK throws `CloudApiError` with status 401, which the user should handle by providing a fresh token.
+For authenticated workspaces, the re-join call uses the same cloud auth path as
+the original create/join call. `login()` and `fromCloudTokens()` refresh cloud
+tokens automatically; raw `accessToken` users need to provide a fresh token.
 
 ---
 
@@ -840,7 +946,9 @@ const client = workspace.client()
 ```ts
 import { RelayfileSetup, IntegrationConnectionTimeoutError } from '@relayfile/sdk'
 
-const setup = new RelayfileSetup({ accessToken: process.env.RELAY_ACCESS_TOKEN })
+const setup = await RelayfileSetup.login({
+  onLoginUrl: (url) => console.log(`Sign in to Relayfile Cloud: ${url}`),
+})
 const workspace = await setup.createWorkspace({ name: 'github-agent' })
 
 const result = await workspace.connectIntegration('github')
@@ -1013,13 +1121,13 @@ The following are explicitly deferred from this spec:
 
 1. **`getWorkspaceInfo()`** — A method on `WorkspaceHandle` that calls `GET /api/v1/workspaces/:id` to refresh metadata. Not needed for the initial use case since `createWorkspace` already returns the necessary fields.
 
-2. **Cloud token issuance in the SDK** — Wrapping the CLI login OAuth flow (`GET /api/v1/cli/login`) to let SDK users authenticate with a browser redirect. Out of scope; users should obtain their `cld_at_` token through the CLI or dashboard.
+2. **Python SDK** — Mirror `RelayfileSetup` as `RelayfileSetup` (sync) and `AsyncRelayfileSetup` in `packages/sdk/python`. This should follow the Python SDK implementation tracked in `sdk-improvements.md`.
 
-3. **Python SDK** — Mirror `RelayfileSetup` as `RelayfileSetup` (sync) and `AsyncRelayfileSetup` in `packages/sdk/python`. This should follow the Python SDK implementation tracked in `sdk-improvements.md`.
+3. **Workspace listing** — `RelayfileSetup.listWorkspaces()` to enumerate workspaces the current user owns. Requires the cloud `GET /api/v1/workspaces` endpoint to support non-Slack-integration queries.
 
-4. **Workspace listing** — `RelayfileSetup.listWorkspaces()` to enumerate workspaces the current user owns. Requires the cloud `GET /api/v1/workspaces` endpoint to support non-Slack-integration queries.
+4. **Connection ID pre-assignment** — Option B from the Cloud API Changes section: having the cloud return a stable, pre-assigned `connectionId` in the connect-session response. Requires Nango API support.
 
-5. **Connection ID pre-assignment** — Option B from the Cloud API Changes section: having the cloud return a stable, pre-assigned `connectionId` in the connect-session response. Requires Nango API support.
+5. **Persistent credential storage** — Optional SDK helpers that store the `RelayfileCloudTokenSet` in the OS keychain. The v1 SDK exposes `onTokens` and leaves storage to the host.
 
 6. **`watchForConnection()` via WebSocket** — Replace the polling loop in `waitForConnection()` with a WebSocket or SSE subscription to the workspace event stream, triggering on the Nango auth webhook event. Reduces latency from 2s to near-instant.
 
