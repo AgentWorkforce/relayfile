@@ -12,12 +12,12 @@ npm install @relayfile/local-mount
 
 ## What it exports
 
-### `createSymlinkMount(projectDir, mountDir, options)`
+### `createMount(projectDir, mountDir, options)`
 
 Builds a mounted copy of `projectDir` at `mountDir` and returns a handle:
 
 ```ts
-interface SymlinkMountHandle {
+interface MountHandle {
   mountDir: string;
   syncBack(opts?: { signal?: AbortSignal }): Promise<number>;
   startAutoSync(opts?: AutoSyncOptions): AutoSyncHandle;
@@ -29,7 +29,7 @@ Behavior:
 - Copies regular files into the mount
 - Applies ignore rules from `ignoredPatterns`
 - Marks read-only matches as mode `0o444`
-- Excludes `.git` and `node_modules` by default
+- Excludes `.git` and `node_modules` by default. Pass `includeGit: true` to opt the project's `.git` directory back in (see [Including `.git`](#including-git))
 - Writes `_MOUNT_README.md` and `.relayfile-local-mount` into the mount
 - Skips syncing `_MOUNT_README.md`, `.relayfile-local-mount`, ignored files, read-only files, and symlinks back to the source project
 
@@ -109,6 +109,28 @@ Conflict and delete rules:
 - one side deleted and the other changed since last sync → recreate the missing file from the changed side
 - readonly paths never flow mount→project; project-side edits still flow into the mount (the mount copy is re-chmodded `0o444`)
 - `_MOUNT_README.md`, `.relayfile-local-mount`, ignored paths, and excluded directories never cross
+
+## Including `.git`
+
+By default, the project's `.git` directory is excluded from the mount, which means git commands inside the mount fail with `fatal: not a git repository`. Pass `includeGit: true` (on `createMount` or `launchOnMount`) to copy `.git` into the mount with **one-way project→mount sync**:
+
+- `.git` is copied on mount creation, so `git status`, `git log`, `git diff`, `git commit`, etc. all work inside the mount.
+- Project-side changes under `.git/**` flow into the mount (e.g. if a teammate's tooling moves `HEAD` while the agent is running).
+- Mount-side changes under `.git/**` are **not** synced back to the project. Branches, commits, or refs the agent creates in the mount stay sandboxed and are discarded on cleanup.
+
+If the agent needs its commits to survive, push to a remote from inside the mount. Source files outside `.git` continue to follow the normal bidirectional sync rules.
+
+```ts
+launchOnMount({
+  cli: 'claude',
+  args: ['--print', 'Inspect the diff and propose a fix.'],
+  projectDir,
+  mountDir,
+  includeGit: true,
+});
+```
+
+Note that `.git` can be sizable (hundreds of MB on long-lived repos); the initial mount creation copies the whole tree.
 
 ## Dotfile semantics
 
@@ -212,6 +234,18 @@ The implementation is intentionally conservative about `mountDir`:
 - if `mountDir` already exists, it must contain the `.relayfile-local-mount` marker file from a previous mount created by this package
 
 These checks help prevent accidental deletion of unrelated directories during mount recreation and cleanup.
+
+## Why copy instead of symlink?
+
+The mount is built by copying files rather than symlinking them. Symlinks would break several of the package's guarantees:
+
+1. **`.agentreadonly` can't be enforced.** Read-only is implemented by `chmod 0o444` on the mount copy. `chmod` follows symlinks, so applying it to a symlink would mark the *source* file read-only, flipping the project's permissions instead of restricting the agent's view.
+2. **The auto-sync conflict model assumes two distinct files.** Rules like "both sides changed → mount wins", "one side deleted → propagate", and "readonly paths never flow mount→project but project-side edits still flow into the mount" only make sense if mount and source are separate bytes. Through a symlink they're the same inode — there's no mount-side copy to re-chmod `0o444` after a project-side edit.
+3. **Editor save-via-rename breaks symlinks anyway.** Most editors save by writing a temp file and renaming it over the target, which replaces the symlink with a regular file and severs the link. A "live view" via symlinks isn't reliable in practice.
+4. **Containment.** A copy gives you a checkpoint: if the agent destroys files or writes garbage, the source is untouched until `syncBack()` filters and copies back. With symlinks, every keystroke is live on the project.
+5. **`.agentignore` hiding works fine with symlinks** (just don't link), but the readonly and conflict semantics still need copies — so a hybrid would be more complex than just copying everything.
+
+Source-side symlinks that resolve to regular files inside the project *are* followed when building the mount; the resolved bytes are copied. Symlinks the agent creates inside the mount are skipped on sync-back.
 
 ## Notes
 

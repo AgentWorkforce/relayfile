@@ -11,7 +11,7 @@ import {
 } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { createSymlinkMount } from './symlink-mount.js';
+import { createMount } from './mount.js';
 
 function tmpDir(): string {
   return mkdtempSync(path.join(os.tmpdir(), 'local-mount-test-'));
@@ -22,7 +22,7 @@ function write(file: string, body: string): void {
   writeFileSync(file, body, 'utf8');
 }
 
-describe('createSymlinkMount', () => {
+describe('createMount', () => {
   let projectDir: string;
   let mountDir: string;
 
@@ -43,7 +43,7 @@ describe('createSymlinkMount', () => {
     write(path.join(projectDir, 'docs/guide.md'), 'guide');
     write(path.join(projectDir, 'config.ro'), 'frozen');
 
-    const handle = createSymlinkMount(projectDir, mountDir, {
+    const handle = createMount(projectDir, mountDir, {
       ignoredPatterns: ['secrets/'],
       readonlyPatterns: ['*.ro', 'docs/**'],
       excludeDirs: [],
@@ -70,7 +70,7 @@ describe('createSymlinkMount', () => {
 
   it('refuses mountDir === projectDir', () => {
     expect(() =>
-      createSymlinkMount(projectDir, projectDir, {
+      createMount(projectDir, projectDir, {
         ignoredPatterns: [],
         readonlyPatterns: [],
         excludeDirs: [],
@@ -84,7 +84,7 @@ describe('createSymlinkMount', () => {
     write(path.join(projectDir, '.relay/state.json'), '{}');
     write(path.join(projectDir, 'keep.txt'), 'yes');
 
-    const handle = createSymlinkMount(projectDir, mountDir, {
+    const handle = createMount(projectDir, mountDir, {
       ignoredPatterns: [],
       readonlyPatterns: [],
       excludeDirs: [],
@@ -99,11 +99,64 @@ describe('createSymlinkMount', () => {
     handle.cleanup();
   });
 
+  it('includeGit: copies .git into the mount and leaves it writable', () => {
+    write(path.join(projectDir, '.git/HEAD'), 'ref: refs/heads/main\n');
+    write(path.join(projectDir, '.git/refs/heads/main'), 'deadbeef\n');
+    write(path.join(projectDir, 'src/code.ts'), 'code');
+
+    const handle = createMount(projectDir, mountDir, {
+      ignoredPatterns: [],
+      readonlyPatterns: [],
+      excludeDirs: [],
+      includeGit: true,
+    });
+
+    expect(existsSync(path.join(handle.mountDir, '.git/HEAD'))).toBe(true);
+    expect(existsSync(path.join(handle.mountDir, '.git/refs/heads/main'))).toBe(true);
+
+    // Mount-side .git files must be writable so tools (git itself) can mutate
+    // them locally — the noSyncBack guard, not 0o444, is what keeps changes
+    // out of the project.
+    const headMode = statSync(path.join(handle.mountDir, '.git/HEAD')).mode & 0o777;
+    expect(headMode).not.toBe(0o444);
+
+    handle.cleanup();
+  });
+
+  it('includeGit: syncBack does not propagate .git mount edits to the project', async () => {
+    write(path.join(projectDir, '.git/HEAD'), 'ref: refs/heads/main\n');
+    write(path.join(projectDir, 'src/code.ts'), 'code');
+
+    const handle = createMount(projectDir, mountDir, {
+      ignoredPatterns: [],
+      readonlyPatterns: [],
+      excludeDirs: [],
+      includeGit: true,
+    });
+
+    // Simulate a git command in the mount mutating .git internals AND a normal
+    // source-file edit. Only the source edit should reach the project.
+    writeFileSync(path.join(handle.mountDir, '.git/HEAD'), 'ref: refs/heads/feature\n', 'utf8');
+    writeFileSync(path.join(handle.mountDir, '.git/COMMIT_EDITMSG'), 'wip\n', 'utf8');
+    writeFileSync(path.join(handle.mountDir, 'src/code.ts'), 'edited', 'utf8');
+
+    const synced = await handle.syncBack();
+
+    expect(synced).toBe(1);
+    expect(readFileSync(path.join(projectDir, '.git/HEAD'), 'utf8')).toBe(
+      'ref: refs/heads/main\n'
+    );
+    expect(existsSync(path.join(projectDir, '.git/COMMIT_EDITMSG'))).toBe(false);
+    expect(readFileSync(path.join(projectDir, 'src/code.ts'), 'utf8')).toBe('edited');
+
+    handle.cleanup();
+  });
+
   it('syncBack: writes back writable changes, skips readonly, skips _MOUNT_README.md, returns count', async () => {
     write(path.join(projectDir, 'writable.txt'), 'original');
     write(path.join(projectDir, 'readonly.txt'), 'original-ro');
 
-    const handle = createSymlinkMount(projectDir, mountDir, {
+    const handle = createMount(projectDir, mountDir, {
       ignoredPatterns: [],
       readonlyPatterns: ['readonly.txt'],
       excludeDirs: [],
@@ -138,7 +191,7 @@ describe('createSymlinkMount', () => {
   it('syncBack: returns immediately when already aborted', async () => {
     write(path.join(projectDir, 'writable.txt'), 'original');
 
-    const handle = createSymlinkMount(projectDir, mountDir, {
+    const handle = createMount(projectDir, mountDir, {
       ignoredPatterns: [],
       readonlyPatterns: [],
       excludeDirs: [],
@@ -162,7 +215,7 @@ describe('createSymlinkMount', () => {
     write(path.join(projectDir, 'b.txt'), 'b0');
     write(path.join(projectDir, 'c.txt'), 'c0');
 
-    const handle = createSymlinkMount(projectDir, mountDir, {
+    const handle = createMount(projectDir, mountDir, {
       ignoredPatterns: [],
       readonlyPatterns: [],
       excludeDirs: [],

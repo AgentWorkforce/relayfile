@@ -10,7 +10,7 @@ import {
 } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { createSymlinkMount } from './symlink-mount.js';
+import { createMount } from './mount.js';
 
 function tmpDir(): string {
   return mkdtempSync(path.join(os.tmpdir(), 'local-mount-autosync-'));
@@ -53,7 +53,7 @@ describe('startAutoSync', () => {
   it('propagates mount→project edits without waiting for final syncBack', async () => {
     write(path.join(projectDir, 'file.txt'), 'original');
 
-    const handle = createSymlinkMount(projectDir, mountDir, {
+    const handle = createMount(projectDir, mountDir, {
       ignoredPatterns: [],
       readonlyPatterns: [],
       excludeDirs: [],
@@ -75,7 +75,7 @@ describe('startAutoSync', () => {
   it('propagates project→mount external edits', async () => {
     write(path.join(projectDir, 'file.txt'), 'original');
 
-    const handle = createSymlinkMount(projectDir, mountDir, {
+    const handle = createMount(projectDir, mountDir, {
       ignoredPatterns: [],
       readonlyPatterns: [],
       excludeDirs: [],
@@ -97,7 +97,7 @@ describe('startAutoSync', () => {
   it('propagates mount→project deletes', async () => {
     write(path.join(projectDir, 'file.txt'), 'original');
 
-    const handle = createSymlinkMount(projectDir, mountDir, {
+    const handle = createMount(projectDir, mountDir, {
       ignoredPatterns: [],
       readonlyPatterns: [],
       excludeDirs: [],
@@ -117,7 +117,7 @@ describe('startAutoSync', () => {
   it('propagates project→mount deletes', async () => {
     write(path.join(projectDir, 'file.txt'), 'original');
 
-    const handle = createSymlinkMount(projectDir, mountDir, {
+    const handle = createMount(projectDir, mountDir, {
       ignoredPatterns: [],
       readonlyPatterns: [],
       excludeDirs: [],
@@ -137,7 +137,7 @@ describe('startAutoSync', () => {
   it('respects readonly patterns: mount-side edits do not sync back', async () => {
     write(path.join(projectDir, 'locked.txt'), 'original');
 
-    const handle = createSymlinkMount(projectDir, mountDir, {
+    const handle = createMount(projectDir, mountDir, {
       ignoredPatterns: [],
       readonlyPatterns: ['locked.txt'],
       excludeDirs: [],
@@ -165,7 +165,7 @@ describe('startAutoSync', () => {
   it('readonly: project-side edits flow into the mount', async () => {
     write(path.join(projectDir, 'locked.txt'), 'original');
 
-    const handle = createSymlinkMount(projectDir, mountDir, {
+    const handle = createMount(projectDir, mountDir, {
       ignoredPatterns: [],
       readonlyPatterns: ['locked.txt'],
       excludeDirs: [],
@@ -187,7 +187,7 @@ describe('startAutoSync', () => {
   it('mount-wins: concurrent edits on both sides resolve to mount content', async () => {
     write(path.join(projectDir, 'file.txt'), 'original');
 
-    const handle = createSymlinkMount(projectDir, mountDir, {
+    const handle = createMount(projectDir, mountDir, {
       ignoredPatterns: [],
       readonlyPatterns: [],
       excludeDirs: [],
@@ -218,7 +218,7 @@ describe('startAutoSync', () => {
   it('ignored paths are never synced in either direction', async () => {
     write(path.join(projectDir, 'keep.txt'), 'keep');
 
-    const handle = createSymlinkMount(projectDir, mountDir, {
+    const handle = createMount(projectDir, mountDir, {
       ignoredPatterns: ['secrets/'],
       readonlyPatterns: [],
       excludeDirs: [],
@@ -248,7 +248,7 @@ describe('startAutoSync', () => {
     // path happens to include a segment of the same name must still sync.
     write(path.join(projectDir, 'docs/cache'), 'this is a file, not a dir');
 
-    const handle = createSymlinkMount(projectDir, mountDir, {
+    const handle = createMount(projectDir, mountDir, {
       ignoredPatterns: ['cache/'],
       readonlyPatterns: [],
       excludeDirs: [],
@@ -270,7 +270,7 @@ describe('startAutoSync', () => {
   it('periodic full scan catches changes even if watcher events are missed', async () => {
     write(path.join(projectDir, 'file.txt'), 'original');
 
-    const handle = createSymlinkMount(projectDir, mountDir, {
+    const handle = createMount(projectDir, mountDir, {
       ignoredPatterns: [],
       readonlyPatterns: [],
       excludeDirs: [],
@@ -294,7 +294,7 @@ describe('startAutoSync', () => {
   it('stop({ signal }) skips the draining reconcile when already aborted, but still closes watchers', async () => {
     write(path.join(projectDir, 'file.txt'), 'original');
 
-    const handle = createSymlinkMount(projectDir, mountDir, {
+    const handle = createMount(projectDir, mountDir, {
       ignoredPatterns: [],
       readonlyPatterns: [],
       excludeDirs: [],
@@ -320,8 +320,70 @@ describe('startAutoSync', () => {
     }
   });
 
+  it('includeGit: project-side .git edits flow into the mount', async () => {
+    write(path.join(projectDir, '.git/HEAD'), 'ref: refs/heads/main\n');
+
+    const handle = createMount(projectDir, mountDir, {
+      ignoredPatterns: [],
+      readonlyPatterns: [],
+      excludeDirs: [],
+      includeGit: true,
+    });
+
+    const auto = handle.startAutoSync({ debounceMs: 50, scanIntervalMs: 10_000 });
+    await auto.ready();
+    try {
+      writeFileSync(
+        path.join(projectDir, '.git/HEAD'),
+        'ref: refs/heads/feature\n',
+        'utf8'
+      );
+      await waitFor(() =>
+        readFileSync(path.join(handle.mountDir, '.git/HEAD'), 'utf8') ===
+          'ref: refs/heads/feature\n'
+      );
+    } finally {
+      await auto.stop();
+      handle.cleanup();
+    }
+  });
+
+  it('includeGit: mount-side .git edits do NOT flow back to the project', async () => {
+    write(path.join(projectDir, '.git/HEAD'), 'ref: refs/heads/main\n');
+
+    const handle = createMount(projectDir, mountDir, {
+      ignoredPatterns: [],
+      readonlyPatterns: [],
+      excludeDirs: [],
+      includeGit: true,
+    });
+
+    const auto = handle.startAutoSync({ debounceMs: 50, scanIntervalMs: 10_000 });
+    await auto.ready();
+    try {
+      writeFileSync(
+        path.join(handle.mountDir, '.git/HEAD'),
+        'ref: refs/heads/feature\n',
+        'utf8'
+      );
+      writeFileSync(path.join(handle.mountDir, '.git/COMMIT_EDITMSG'), 'wip\n', 'utf8');
+
+      // Give autosync time to notice and choose not to propagate.
+      await new Promise((r) => setTimeout(r, 300));
+      await auto.reconcile();
+
+      expect(readFileSync(path.join(projectDir, '.git/HEAD'), 'utf8')).toBe(
+        'ref: refs/heads/main\n'
+      );
+      expect(existsSync(path.join(projectDir, '.git/COMMIT_EDITMSG'))).toBe(false);
+    } finally {
+      await auto.stop();
+      handle.cleanup();
+    }
+  });
+
   it('does not sync the _MOUNT_README.md or marker files', async () => {
-    const handle = createSymlinkMount(projectDir, mountDir, {
+    const handle = createMount(projectDir, mountDir, {
       ignoredPatterns: [],
       readonlyPatterns: [],
       excludeDirs: [],

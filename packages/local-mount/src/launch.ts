@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { createSymlinkMount, type SymlinkMountHandle } from './symlink-mount.js';
+import { createMount, type MountHandle } from './mount.js';
 import type { AutoSyncHandle, AutoSyncOptions } from './auto-sync.js';
 
 export interface LaunchOnMountOptions {
@@ -17,6 +17,12 @@ export interface LaunchOnMountOptions {
   readonlyPatterns?: string[];
   /** Extra directory names to exclude from the mount on top of defaults. */
   excludeDirs?: string[];
+  /**
+   * Include the project's `.git` directory inside the mount with one-way
+   * project→mount sync. Defaults to false. See {@link MountOptions.includeGit}
+   * for details.
+   */
+  includeGit?: boolean;
   /** Extra env vars merged on top of `process.env`. */
   env?: NodeJS.ProcessEnv;
   /** Optional agent name, used in the _MOUNT_README.md "Agent:" line. */
@@ -61,11 +67,12 @@ export interface LaunchOnMountResult {
  * exit code.
  */
 export async function launchOnMount(opts: LaunchOnMountOptions): Promise<LaunchOnMountResult> {
-  const handle: SymlinkMountHandle = createSymlinkMount(opts.projectDir, opts.mountDir, {
+  const handle: MountHandle = createMount(opts.projectDir, opts.mountDir, {
     ignoredPatterns: opts.ignoredPatterns ?? [],
     readonlyPatterns: opts.readonlyPatterns ?? [],
     excludeDirs: opts.excludeDirs ?? [],
     agentName: opts.agentName,
+    includeGit: opts.includeGit,
   });
 
   let syncedCount = 0;
