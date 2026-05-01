@@ -97,10 +97,12 @@ describe("RelayfileSetup", () => {
 
   it("logs in through the cloud callback URL and returns an authenticated setup", async () => {
     const loginUrls: string[] = []
+    const onTokens = vi.fn()
     const loginPromise = RelayfileSetup.login({
       cloudApiUrl: "https://cloud.test/base",
       state: "state_test",
       timeoutMs: 5_000,
+      onTokens,
       onLoginUrl: (url) => {
         loginUrls.push(url)
       }
@@ -132,6 +134,14 @@ describe("RelayfileSetup", () => {
 
     const setup = await loginPromise
     expect(setup.getCloudApiUrl()).toBe("https://cloud.test/base")
+    expect(onTokens).toHaveBeenCalledOnce()
+    expect(onTokens).toHaveBeenCalledWith({
+      apiUrl: "https://cloud.test/base",
+      accessToken: "cld_at_login",
+      refreshToken: "cld_rt_login",
+      accessTokenExpiresAt: callbackUrl.searchParams.get("access_token_expires_at"),
+      refreshTokenExpiresAt: undefined
+    })
   })
 
   it("prints the cloud login URL by default", async () => {
@@ -196,6 +206,7 @@ describe("RelayfileSetup", () => {
     await setup.createWorkspace()
 
     expect(readRequestUrl(fetchMock, 0)).toBe("https://cloud.test/base/api/v1/auth/token/refresh")
+    expect(readRequestHeaders(fetchMock, 0)["X-Relayfile-SDK-Version"]).toBe("0.6.0")
     expect(readRequestBody(fetchMock, 0)).toEqual({
       refreshToken: "cld_rt_original"
     })

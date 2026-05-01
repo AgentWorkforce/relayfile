@@ -6,6 +6,7 @@ import {
   MalformedCloudResponseError
 } from "./setup-errors.js"
 import type { RelayfileSetupOptions } from "./setup-types.js"
+import { RELAYFILE_SDK_VERSION } from "./version.js"
 
 const DEFAULT_CLOUD_API_URL = "https://agentrelay.com/cloud"
 const DEFAULT_LOGIN_TIMEOUT_MS = 5 * 60 * 1000
@@ -208,7 +209,10 @@ export function createRelayfileCloudAccessTokenProvider(
       buildCloudUrl(cloudApiUrl, "api/v1/auth/token/refresh").toString(),
       {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "X-Relayfile-SDK-Version": RELAYFILE_SDK_VERSION
+        },
         body: JSON.stringify({ refreshToken: tokens.refreshToken })
       },
       requestTimeoutMs

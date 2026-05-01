@@ -34,8 +34,9 @@ import {
   type WorkspaceIntegrationProvider,
   type WorkspacePermissions
 } from "./setup-types.js"
+import { RELAYFILE_SDK_VERSION } from "./version.js"
 
-export const RELAYFILE_SDK_VERSION = "0.6.0"
+export { RELAYFILE_SDK_VERSION } from "./version.js"
 
 const DEFAULT_CLOUD_API_URL = "https://agentrelay.com/cloud"
 const DEFAULT_RELAYCAST_BASE_URL = "https://api.relaycast.dev"
@@ -128,6 +129,7 @@ export class RelayfileSetup {
       ...options,
       cloudApiUrl
     })
+    await options.onTokens?.({ ...tokens })
     return RelayfileSetup.fromCloudTokens(tokens, {
       ...options,
       cloudApiUrl: tokens.apiUrl ?? cloudApiUrl
