@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "lastUpdated": "2026-04-30T20:11:29.215Z",
+  "lastUpdated": "2026-05-01T15:27:12.684Z",
   "trajectories": {
     "traj_mfyus7zfgxt2": {
       "title": "062-sdk-setup-client-workflow",
@@ -75,6 +75,41 @@
       "startedAt": "2026-04-30T20:10:45.916Z",
       "completedAt": "2026-04-30T20:11:29.126Z",
       "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-04/traj_cdist8i8vdmd.json"
+    },
+    "traj_wez7rl7pkfpn": {
+      "title": "Review PR 65 implementation against spec",
+      "status": "completed",
+      "startedAt": "2026-04-30T20:31:59.188Z",
+      "completedAt": "2026-04-30T20:31:59.361Z",
+      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-04/traj_wez7rl7pkfpn.json"
+    },
+    "traj_7x9nltybo08h": {
+      "title": "Update PR 65 usage instructions",
+      "status": "completed",
+      "startedAt": "2026-04-30T21:07:25.621Z",
+      "completedAt": "2026-04-30T21:08:20.135Z",
+      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-04/traj_7x9nltybo08h.json"
+    },
+    "traj_z2klijcrwqed": {
+      "title": "Design simple agent workspace connect flow",
+      "status": "completed",
+      "startedAt": "2026-05-01T14:58:15.412Z",
+      "completedAt": "2026-05-01T15:06:23.351Z",
+      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-05/traj_z2klijcrwqed.json"
+    },
+    "traj_a6rfc30zag40": {
+      "title": "Draft agent workspace golden path spec",
+      "status": "completed",
+      "startedAt": "2026-05-01T15:09:58.013Z",
+      "completedAt": "2026-05-01T15:12:08.390Z",
+      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-05/traj_a6rfc30zag40.json"
+    },
+    "traj_hyqnsfininh5": {
+      "title": "Write agent workspace implementation workflow",
+      "status": "completed",
+      "startedAt": "2026-05-01T15:22:05.684Z",
+      "completedAt": "2026-05-01T15:27:12.578Z",
+      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-05/traj_hyqnsfininh5.json"
     }
   }
 }

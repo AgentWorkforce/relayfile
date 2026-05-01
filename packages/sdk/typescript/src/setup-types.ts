@@ -46,6 +46,7 @@ export interface WorkspaceInfo {
   workspaceId: string
   relayfileUrl: string
   relaycastApiKey: string
+  relaycastBaseUrl?: string
   createdAt?: string
   name?: string
   wsUrl?: string
@@ -66,8 +67,42 @@ export interface ConnectIntegrationResult {
 
 export interface WaitForConnectionOptions {
   connectionId?: string
+  pollIntervalMs?: number
+  /**
+   * @deprecated Use pollIntervalMs. This alias will be removed in a future
+   * minor release.
+   */
   intervalMs?: number
   timeoutMs?: number
   signal?: AbortSignal
-  onPoll?: (attempt: number, ready: boolean) => void
+  onPoll?: (elapsed: number) => void
+}
+
+export interface WorkspaceMountEnvOptions {
+  localDir?: string
+  remotePath?: string
+  mode?: "poll" | "fuse"
+  relaycastBaseUrl?: string
+}
+
+export type WorkspaceMountEnv = Record<string, string>
+
+export interface AgentWorkspaceInviteOptions {
+  agentName?: string
+  scopes?: string[]
+  relaycastBaseUrl?: string
+  includeRelayfileToken?: boolean
+}
+
+export interface AgentWorkspaceInvite {
+  workspaceId: string
+  cloudApiUrl: string
+  relayfileUrl: string
+  relaycastApiKey: string
+  relaycastBaseUrl: string
+  agentName: string
+  scopes: string[]
+  relayfileToken?: string
+  createdAt?: string
+  name?: string
 }

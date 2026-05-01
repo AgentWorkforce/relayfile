@@ -1,0 +1,25 @@
+{
+  "id": "traj_7x9nltybo08h",
+  "version": 1,
+  "task": {
+    "title": "Update PR 65 usage instructions"
+  },
+  "status": "completed",
+  "startedAt": "2026-04-30T21:07:25.621Z",
+  "completedAt": "2026-04-30T21:08:20.135Z",
+  "agents": [],
+  "chapters": [],
+  "retrospective": {
+    "summary": "Updated PR 65 body with concrete SDK setup usage instructions covering createWorkspace, joinWorkspace, integration connect/wait, client usage, cloud URL override, and setup E2E validation.",
+    "approach": "Standard approach",
+    "confidence": 0.93
+  },
+  "commits": [],
+  "filesChanged": [],
+  "projectId": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile",
+  "tags": [],
+  "_trace": {
+    "startRef": "22513bdb58ad0cafa64a51f3bff5360df0a5074e",
+    "endRef": "22513bdb58ad0cafa64a51f3bff5360df0a5074e"
+  }
+}

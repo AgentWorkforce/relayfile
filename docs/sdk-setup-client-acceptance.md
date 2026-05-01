@@ -163,7 +163,8 @@ Behavioral guarantees:
   5. Returns
      `{ alreadyConnected, connectLink, sessionToken, expiresAt, connectionId }`.
 - **`waitForConnection`** polls `GET /api/v1/workspaces/:id/integrations/:provider/status`:
-  - Honors `timeoutMs`, `intervalMs`, `AbortSignal`, and `onPoll(attempt, ready)`.
+  - Honors `timeoutMs`, `pollIntervalMs`, `AbortSignal`, and `onPoll(elapsed)`.
+  - Keeps `intervalMs` as a deprecated alias for already-shipped callers.
   - On HTTP 429, respects the `Retry-After` header (seconds or HTTP date).
   - Performs bounded retry on 5xx (e.g. up to 3 retries with capped
     exponential backoff) before raising `CloudApiError`.
@@ -196,6 +197,10 @@ The unit-test surface includes every test enumerated in
   `https://agentrelay.com/cloud/api/v1`.
 - Constructor override of `cloudApiUrl` to a staging URL with a base path
   preserves that base path on every generated cloud URL.
+- Cloud setup requests include `X-Relayfile-SDK-Version`.
+- `connectNotion()` is covered as the single-link Notion connect helper.
+- `mountEnv()` and `agentInvite()` return relayfile mount values plus
+  relaycast credentials for trusted agent handoff.
 
 ### Cloud routes (`../cloud/tests/sdk-setup-client-routes.test.ts`)
 
@@ -246,6 +251,10 @@ The script MUST exercise:
   (`{ alreadyConnected: true }`).
 - `connectIntegration()` OAuth-required path (returns
   `connectLink` + `connectionId`).
+- `connectNotion()` returns a Notion-only connect link.
+- `mountEnv()` exposes relayfile mount env vars and relaycast env vars.
+- `agentInvite()` serializes relayfile and relaycast credentials for a
+  second trusted agent.
 - `waitForConnection()` delayed success (mock cloud flips `ready` from
   `false` to `true` after N polls).
 - `isConnected()` returning `false` then `true`.

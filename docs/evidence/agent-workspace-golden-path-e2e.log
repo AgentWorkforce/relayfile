@@ -1,0 +1,6 @@
+
+> @relayfile/sdk@0.6.0 agent-workspace:e2e
+> node scripts/agent-workspace-golden-path-e2e.mjs
+
+AGENT_WORKSPACE_E2E_OK
+GOLDEN_PATH_E2E_READY

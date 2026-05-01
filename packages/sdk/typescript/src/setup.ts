@@ -3,6 +3,13 @@ import {
   type AccessTokenProvider
 } from "./client.js"
 import {
+  createRelayfileCloudAccessTokenProvider,
+  runRelayfileCloudLogin,
+  type RelayfileCloudLoginOptions,
+  type RelayfileCloudTokenSet,
+  type RelayfileCloudTokenSetupOptions
+} from "./cloud-login.js"
+import {
   CloudAbortError,
   CloudApiError,
   CloudTimeoutError,
@@ -13,18 +20,26 @@ import {
 } from "./setup-errors.js"
 import {
   WORKSPACE_INTEGRATION_PROVIDERS,
+  type AgentWorkspaceInvite,
+  type AgentWorkspaceInviteOptions,
   type ConnectIntegrationOptions,
   type ConnectIntegrationResult,
   type CreateWorkspaceOptions,
   type JoinWorkspaceOptions,
   type RelayfileSetupOptions,
   type WaitForConnectionOptions,
+  type WorkspaceMountEnv,
+  type WorkspaceMountEnvOptions,
   type WorkspaceInfo,
   type WorkspaceIntegrationProvider,
   type WorkspacePermissions
 } from "./setup-types.js"
+import { RELAYFILE_SDK_VERSION } from "./version.js"
+
+export { RELAYFILE_SDK_VERSION } from "./version.js"
 
 const DEFAULT_CLOUD_API_URL = "https://agentrelay.com/cloud"
+const DEFAULT_RELAYCAST_BASE_URL = "https://api.relaycast.dev"
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000
 const DEFAULT_RETRY_BASE_DELAY_MS = 500
 const DEFAULT_RETRY_MAX_DELAY_MS = 5_000
@@ -49,7 +64,16 @@ interface JoinWorkspaceResponse {
   relayfileUrl?: string
   wsUrl?: string
   relaycastApiKey?: string
+  relaycastBaseUrl?: string
 }
+
+type ValidatedJoinWorkspaceResponse = Required<
+  Pick<
+    JoinWorkspaceResponse,
+    "workspaceId" | "token" | "relayfileUrl" | "wsUrl" | "relaycastApiKey"
+  >
+> &
+  Pick<JoinWorkspaceResponse, "relaycastBaseUrl">
 
 interface ConnectSessionResponse {
   token?: string
@@ -97,6 +121,42 @@ export class RelayfileSetup {
   private readonly requestTimeoutMs: number
   private readonly retryOptions: NormalizedRetryOptions
 
+  static async login(
+    options: RelayfileCloudLoginOptions = {}
+  ): Promise<RelayfileSetup> {
+    const cloudApiUrl = options.cloudApiUrl ?? DEFAULT_CLOUD_API_URL
+    const tokens = await runRelayfileCloudLogin({
+      ...options,
+      cloudApiUrl
+    })
+    await options.onTokens?.({ ...tokens })
+    return RelayfileSetup.fromCloudTokens(tokens, {
+      ...options,
+      cloudApiUrl: tokens.apiUrl ?? cloudApiUrl
+    })
+  }
+
+  static fromCloudTokens(
+    tokens: RelayfileCloudTokenSet,
+    options: RelayfileCloudTokenSetupOptions = {}
+  ): RelayfileSetup {
+    const cloudApiUrl = options.cloudApiUrl ?? tokens.apiUrl ?? DEFAULT_CLOUD_API_URL
+    return new RelayfileSetup({
+      ...options,
+      cloudApiUrl,
+      accessToken: createRelayfileCloudAccessTokenProvider(
+        {
+          ...tokens,
+          apiUrl: tokens.apiUrl ?? cloudApiUrl
+        },
+        {
+          ...options,
+          cloudApiUrl
+        }
+      )
+    })
+  }
+
   constructor(options: RelayfileSetupOptions = {}) {
     this.cloudApiUrl = options.cloudApiUrl ?? DEFAULT_CLOUD_API_URL
     this.accessToken = options.accessToken
@@ -137,6 +197,7 @@ export class RelayfileSetup {
         workspaceId: createResponse.workspaceId,
         relayfileUrl: joinResponse.relayfileUrl,
         relaycastApiKey: joinResponse.relaycastApiKey,
+        relaycastBaseUrl: joinResponse.relaycastBaseUrl,
         createdAt: createResponse.createdAt,
         name: createResponse.name,
         wsUrl: joinResponse.wsUrl
@@ -159,6 +220,7 @@ export class RelayfileSetup {
         workspaceId: joinResponse.workspaceId,
         relayfileUrl: joinResponse.relayfileUrl,
         relaycastApiKey: joinResponse.relaycastApiKey,
+        relaycastBaseUrl: joinResponse.relaycastBaseUrl,
         wsUrl: joinResponse.wsUrl
       },
       token: joinResponse.token,
@@ -169,7 +231,7 @@ export class RelayfileSetup {
   async joinWorkspaceResponse(
     workspaceId: string,
     options: NormalizedJoinWorkspaceOptions
-  ): Promise<Required<JoinWorkspaceResponse>> {
+  ): Promise<ValidatedJoinWorkspaceResponse> {
     return validateJoinWorkspaceResponse(
       await this.requestJson({
         operation: "joinWorkspace",
@@ -192,7 +254,9 @@ export class RelayfileSetup {
     let retries = 0
     for (;;) {
       const token = await resolveToken(options.tokenProvider ?? this.accessToken)
-      const headers: Record<string, string> = {}
+      const headers: Record<string, string> = {
+        "X-Relayfile-SDK-Version": RELAYFILE_SDK_VERSION
+      }
       if (token) {
         headers.Authorization = `Bearer ${token}`
       }
@@ -250,6 +314,10 @@ export class RelayfileSetup {
 
       throw new CloudApiError(response.status, payload)
     }
+  }
+
+  getCloudApiUrl(): string {
+    return this.cloudApiUrl
   }
 }
 
@@ -340,27 +408,38 @@ export class WorkspaceHandle {
     }
   }
 
+  async connectNotion(
+    options: Omit<ConnectIntegrationOptions, "allowedIntegrations"> = {}
+  ): Promise<ConnectIntegrationResult> {
+    return this.connectIntegration("notion", {
+      ...options,
+      allowedIntegrations: ["notion"]
+    })
+  }
+
   async waitForConnection(
     provider: WorkspaceIntegrationProvider,
     options: WaitForConnectionOptions = {}
   ): Promise<void> {
     assertProvider(provider)
     const connectionId = this.resolveConnectionId(provider, options.connectionId)
-    const intervalMs = Math.max(
+    const pollIntervalMs = Math.max(
       0,
-      Math.floor(options.intervalMs ?? DEFAULT_WAIT_INTERVAL_MS)
+      Math.floor(
+        options.pollIntervalMs ?? options.intervalMs ?? DEFAULT_WAIT_INTERVAL_MS
+      )
     )
     const timeoutMs = Math.max(
       1,
       Math.floor(options.timeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS)
     )
     const startedAt = Date.now()
-    let attempt = 0
 
     for (;;) {
       throwIfAborted(options.signal, "waitForConnection")
 
       const elapsedMs = Date.now() - startedAt
+      options.onPoll?.(elapsedMs)
       if (elapsedMs >= timeoutMs) {
         throw new IntegrationConnectionTimeoutError({
           provider,
@@ -370,7 +449,6 @@ export class WorkspaceHandle {
         })
       }
 
-      attempt += 1
       const remainingMs = timeoutMs - elapsedMs
       let ready: boolean
       try {
@@ -389,14 +467,19 @@ export class WorkspaceHandle {
         }
         throw error
       }
-      options.onPoll?.(attempt, ready)
       if (ready) {
         return
       }
 
-      const sleepMs = Math.min(intervalMs, Math.max(0, timeoutMs - (Date.now() - startedAt)))
+      const sleepMs = Math.min(pollIntervalMs, Math.max(0, timeoutMs - (Date.now() - startedAt)))
       await sleep(sleepMs, options.signal, "waitForConnection")
     }
+  }
+
+  async waitForNotion(
+    options: WaitForConnectionOptions = {}
+  ): Promise<void> {
+    return this.waitForConnection("notion", options)
   }
 
   async isConnected(
@@ -423,6 +506,48 @@ export class WorkspaceHandle {
 
   getToken(): string {
     return this._token
+  }
+
+  mountEnv(options: WorkspaceMountEnvOptions = {}): WorkspaceMountEnv {
+    const relaycastBaseUrl = this.resolveRelaycastBaseUrl(
+      options.relaycastBaseUrl
+    )
+
+    return compactStringRecord({
+      RELAYFILE_BASE_URL: this.info.relayfileUrl,
+      RELAYFILE_TOKEN: this.getToken(),
+      RELAYFILE_WORKSPACE: this.workspaceId,
+      RELAYFILE_REMOTE_PATH: options.remotePath ?? "/",
+      RELAYFILE_LOCAL_DIR: options.localDir,
+      RELAYFILE_MOUNT_MODE: options.mode,
+      RELAYCAST_API_KEY: this.info.relaycastApiKey,
+      RELAY_API_KEY: this.info.relaycastApiKey,
+      RELAYCAST_BASE_URL: relaycastBaseUrl,
+      RELAY_BASE_URL: relaycastBaseUrl
+    })
+  }
+
+  agentInvite(options: AgentWorkspaceInviteOptions = {}): AgentWorkspaceInvite {
+    const relaycastBaseUrl = this.resolveRelaycastBaseUrl(
+      options.relaycastBaseUrl
+    )
+
+    return compactObject({
+      workspaceId: this.workspaceId,
+      cloudApiUrl: this._setup.getCloudApiUrl(),
+      relayfileUrl: this.info.relayfileUrl,
+      relaycastApiKey: this.info.relaycastApiKey,
+      relaycastBaseUrl,
+      agentName: options.agentName ?? this._joinOptions.agentName,
+      scopes:
+        options.scopes && options.scopes.length > 0
+          ? [...options.scopes]
+          : [...this._joinOptions.scopes],
+      relayfileToken:
+        options.includeRelayfileToken === false ? undefined : this.getToken(),
+      createdAt: this.info.createdAt,
+      name: this.info.name
+    })
   }
 
   async refreshToken(): Promise<void> {
@@ -483,6 +608,14 @@ export class WorkspaceHandle {
     )
     return response.ready
   }
+
+  private resolveRelaycastBaseUrl(override?: string): string {
+    return (
+      normalizeNonEmptyString(override) ??
+      normalizeNonEmptyString(this.info.relaycastBaseUrl) ??
+      DEFAULT_RELAYCAST_BASE_URL
+    )
+  }
 }
 
 function assertProvider(provider: string): asserts provider is WorkspaceIntegrationProvider {
@@ -540,13 +673,14 @@ function validateCreateWorkspaceResponse(
 
 function validateJoinWorkspaceResponse(
   payload: unknown
-): Required<JoinWorkspaceResponse> {
+): ValidatedJoinWorkspaceResponse {
   return {
     workspaceId: requireStringField(payload, "workspaceId"),
     token: requireStringField(payload, "token"),
     relayfileUrl: requireStringField(payload, "relayfileUrl"),
     wsUrl: requireStringField(payload, "wsUrl"),
-    relaycastApiKey: requireStringField(payload, "relaycastApiKey")
+    relaycastApiKey: requireStringField(payload, "relaycastApiKey"),
+    relaycastBaseUrl: readOptionalStringField(payload, "relaycastBaseUrl")
   }
 }
 
@@ -629,6 +763,17 @@ function compactObject<T extends Record<string, unknown>>(value: T): T {
   return Object.fromEntries(
     Object.entries(value).filter(([, entry]) => entry !== undefined)
   ) as T
+}
+
+function compactStringRecord(
+  value: Record<string, string | undefined>
+): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(value).filter((entry): entry is [string, string] => {
+      const [, entryValue] = entry
+      return entryValue !== undefined
+    })
+  )
 }
 
 function buildCloudUrl(baseUrl: string, path: string): string {
