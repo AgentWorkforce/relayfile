@@ -1,6 +1,6 @@
 {
   "name": "@relayfile/local-mount",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "Create a symlink/copy mount of a project directory with .agentignore/.agentreadonly semantics, then launch a CLI inside it and sync writable changes back on exit",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
