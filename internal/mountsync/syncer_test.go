@@ -210,6 +210,151 @@ func TestSyncOnceCreatesAndDeletesRemoteFiles(t *testing.T) {
 	}
 }
 
+func TestSyncOnceWritesPublicStateFile(t *testing.T) {
+	client := &fakeClient{
+		files: map[string]RemoteFile{
+			"/notion/Docs/A.md": {
+				Path:        "/notion/Docs/A.md",
+				Revision:    "rev_1",
+				ContentType: "text/markdown",
+				Content:     "# A",
+			},
+		},
+		revisionCounter: 1,
+	}
+	localDir := t.TempDir()
+	interval := 30 * time.Second
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_mount_public_state",
+		RemoteRoot:  "/notion",
+		LocalRoot:   localDir,
+		Mode:        "poll",
+		Interval:    interval,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("sync failed: %v", err)
+	}
+
+	state := readPublicState(t, localDir)
+	if state.WorkspaceID != "ws_mount_public_state" {
+		t.Fatalf("expected workspace id in public state, got %+v", state)
+	}
+	if state.Status != "ready" {
+		t.Fatalf("expected ready status, got %+v", state)
+	}
+	if state.Mode != "poll" || state.IntervalMs != interval.Milliseconds() {
+		t.Fatalf("expected mode/interval in public state, got %+v", state)
+	}
+	if state.PendingWriteback != 0 || state.PendingConflicts != 0 || state.DeniedPaths != 0 {
+		t.Fatalf("expected clean public state, got %+v", state)
+	}
+	if fileState := state.Files["/notion/Docs/A.md"]; fileState.Status != "ready" {
+		t.Fatalf("expected mirrored file state ready, got %+v", fileState)
+	}
+}
+
+func TestBinaryFileRoundTripsThroughMirror(t *testing.T) {
+	client := &fakeClient{
+		files: map[string]RemoteFile{
+			"/external/blob.bin": {
+				Path:        "/external/blob.bin",
+				Revision:    "rev_1",
+				ContentType: "application/octet-stream",
+				Content:     base64.StdEncoding.EncodeToString([]byte{0x00, 0x7f, 0xff, 0x10}),
+				Encoding:    "base64",
+			},
+		},
+		revisionCounter: 1,
+	}
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_mount_binary_roundtrip",
+		RemoteRoot:  "/external",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("initial binary sync failed: %v", err)
+	}
+
+	localPath := filepath.Join(localDir, "blob.bin")
+	assertLocalFileBytes(t, localPath, []byte{0x00, 0x7f, 0xff, 0x10})
+
+	updated := []byte{0x01, 0x02, 0x03, 0x04}
+	if err := os.WriteFile(localPath, updated, 0o644); err != nil {
+		t.Fatalf("write binary local edit failed: %v", err)
+	}
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("binary roundtrip sync failed: %v", err)
+	}
+
+	remote := client.files["/external/blob.bin"]
+	if remote.Encoding != "base64" {
+		t.Fatalf("expected remote encoding=base64, got %+v", remote)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(remote.Content)
+	if err != nil {
+		t.Fatalf("decode remote base64 failed: %v", err)
+	}
+	if !bytes.Equal(decoded, updated) {
+		t.Fatalf("expected remote bytes %v, got %v", updated, decoded)
+	}
+	state := readPublicState(t, localDir)
+	if state.Files["/external/blob.bin"].Encoding != "base64" {
+		t.Fatalf("expected public state to track base64 encoding, got %+v", state.Files["/external/blob.bin"])
+	}
+}
+
+func TestLargeWriteFailureLeavesPendingWritebackVisible(t *testing.T) {
+	client := &fakeClient{
+		files: map[string]RemoteFile{},
+		bulkWriteResponseFunc: func(ctx context.Context, workspaceID string, files []BulkWriteFile) (BulkWriteResponse, error) {
+			return BulkWriteResponse{}, &HTTPError{
+				StatusCode: http.StatusRequestEntityTooLarge,
+				Code:       "payload_too_large",
+				Message:    "payload too large",
+			}
+		},
+	}
+	localDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(localDir, "Large.md"), []byte(strings.Repeat("A", 1024)), 0o644); err != nil {
+		t.Fatalf("seed large local file failed: %v", err)
+	}
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_mount_large_write_failure",
+		RemoteRoot:  "/notion",
+		LocalRoot:   localDir,
+		Mode:        "poll",
+		Interval:    30 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+
+	if err := syncer.SyncOnce(context.Background()); err == nil {
+		t.Fatal("expected large write sync to fail")
+	}
+
+	assertLocalFileContent(t, filepath.Join(localDir, "Large.md"), strings.Repeat("A", 1024))
+	state := readPublicState(t, localDir)
+	if state.Status != "writeback-pending" {
+		t.Fatalf("expected writeback-pending state, got %+v", state)
+	}
+	if state.PendingWriteback != 1 {
+		t.Fatalf("expected one pending writeback, got %+v", state)
+	}
+	if state.LastError == nil || state.LastError.StatusCode != http.StatusRequestEntityTooLarge || state.LastError.Code != "payload_too_large" {
+		t.Fatalf("expected 413 surfaced in public state, got %+v", state.LastError)
+	}
+}
+
 func TestBulkWrite_SingleCallForNFiles(t *testing.T) {
 	client := &fakeClient{
 		files: map[string]RemoteFile{},
@@ -575,10 +720,12 @@ func TestBulkSeedThenSync(t *testing.T) {
 
 	localDir := t.TempDir()
 	client := NewHTTPClient(api.URL, token, api.Client())
+	disableWebSocket := false
 	syncer, err := NewSyncer(client, SyncerOptions{
 		WorkspaceID: workspaceID,
 		RemoteRoot:  "/notion",
 		LocalRoot:   localDir,
+		WebSocket:   &disableWebSocket,
 	})
 	if err != nil {
 		t.Fatalf("new syncer failed: %v", err)
@@ -841,7 +988,7 @@ func TestBulkWrite_PartialErrors(t *testing.T) {
 	}
 }
 
-func TestBulkWrite_PerFileErrorMarksDirtyForRetry(t *testing.T) {
+func TestBulkWrite_PerFileConflictCreatesArtifactAndRefreshesRemote(t *testing.T) {
 	partialError := true
 	client := &fakeClient{
 		files: map[string]RemoteFile{
@@ -902,14 +1049,14 @@ func TestBulkWrite_PerFileErrorMarksDirtyForRetry(t *testing.T) {
 	}
 
 	trackedA := syncer.state.Files["/notion/Docs/A.md"]
-	if !trackedA.Dirty {
-		t.Fatalf("expected failed path to remain dirty for retry, got %+v", trackedA)
-	}
 	if trackedA.Revision != "rev_remote" {
 		t.Fatalf("expected failed path to refresh tracked revision to remote state, got %+v", trackedA)
 	}
-	if trackedA.Hash != hashString("# local A") {
-		t.Fatalf("expected failed path to keep local hash for retry, got %+v", trackedA)
+	if trackedA.Dirty {
+		t.Fatalf("expected failed path to reconcile to remote clean state, got %+v", trackedA)
+	}
+	if trackedA.Hash != hashString("# remote newer") {
+		t.Fatalf("expected failed path to track remote hash after refresh, got %+v", trackedA)
 	}
 	trackedB := syncer.state.Files["/notion/Docs/B.md"]
 	if trackedB.Dirty || trackedB.Revision == "" {
@@ -921,25 +1068,33 @@ func TestBulkWrite_PerFileErrorMarksDirtyForRetry(t *testing.T) {
 	if client.files["/notion/Docs/B.md"].Content != "# local B" {
 		t.Fatalf("expected successful path to be written during partial failure cycle, got %q", client.files["/notion/Docs/B.md"].Content)
 	}
+	assertLocalFileContent(t, localA, "# remote newer")
+	conflictPath := filepath.Join(localDir, ".relay", "conflicts", "notion", "Docs", "A.md.rev_1.local")
+	assertLocalFileContent(t, conflictPath, "# local A")
 
-	callsBeforeRetry := client.bulkWriteCalls
+	state := readPublicState(t, localDir)
+	if state.Status != "conflict" || state.PendingConflicts != 1 {
+		t.Fatalf("expected conflict status in public state, got %+v", state)
+	}
+	if state.Files["/notion/Docs/A.md"].Status != "conflict" {
+		t.Fatalf("expected file state conflict, got %+v", state.Files["/notion/Docs/A.md"])
+	}
+
+	if err := os.WriteFile(localA, []byte("# local A resolved"), 0o644); err != nil {
+		t.Fatalf("write resolved local A failed: %v", err)
+	}
 	if err := syncer.SyncOnce(context.Background()); err != nil {
-		t.Fatalf("retry sync failed: %v", err)
+		t.Fatalf("resolved retry sync failed: %v", err)
 	}
-	if client.bulkWriteCalls != callsBeforeRetry+1 {
-		t.Fatalf("expected exactly one retry bulk call, got %d -> %d", callsBeforeRetry, client.bulkWriteCalls)
+	if client.files["/notion/Docs/A.md"].Content != "# local A resolved" {
+		t.Fatalf("expected resolved retry to write local A, got %q", client.files["/notion/Docs/A.md"].Content)
 	}
-	if got := len(client.bulkWriteBatches[client.bulkWriteCalls-1]); got != 1 {
-		t.Fatalf("expected retry batch to contain only the failed path, got %d entries", got)
+	if _, err := os.Stat(filepath.Join(localDir, ".relay", "conflicts", "resolved", "notion", "Docs", "A.md.rev_1.local")); err != nil {
+		t.Fatalf("expected conflict artifact moved to resolved, got %v", err)
 	}
-	if retryPath := normalizeRemotePath(client.bulkWriteBatches[client.bulkWriteCalls-1][0].Path); retryPath != "/notion/Docs/A.md" {
-		t.Fatalf("expected retry batch to target only /notion/Docs/A.md, got %q", retryPath)
-	}
-	if client.files["/notion/Docs/A.md"].Content != "# local A" {
-		t.Fatalf("expected retry cycle to eventually write local A, got %q", client.files["/notion/Docs/A.md"].Content)
-	}
-	if syncer.state.Files["/notion/Docs/A.md"].Dirty {
-		t.Fatalf("expected retry cycle to clear dirty state, got %+v", syncer.state.Files["/notion/Docs/A.md"])
+	state = readPublicState(t, localDir)
+	if state.PendingConflicts != 0 || state.Status != "ready" {
+		t.Fatalf("expected ready status after resolution, got %+v", state)
 	}
 }
 
@@ -988,6 +1143,10 @@ func TestBulkWrite_DeletesStayPerFile(t *testing.T) {
 	}
 	if client.deleteCalls[0].Path != "/notion/Docs/A.md" || client.deleteCalls[0].BaseRevision != "rev_1" {
 		t.Fatalf("expected delete to use tracked revision rev_1, got %+v", client.deleteCalls[0])
+	}
+	state := readPublicState(t, localDir)
+	if state.PendingWriteback != 0 || state.Status != "ready" {
+		t.Fatalf("expected delete cycle to settle cleanly, got %+v", state)
 	}
 }
 
@@ -2034,6 +2193,7 @@ func (c *fakeClient) WriteFile(ctx context.Context, workspaceID, path, baseRevis
 		Revision:    revision,
 		ContentType: contentType,
 		Content:     content,
+		Encoding:    "",
 	}
 	c.appendEvent(eventType, path, revision)
 	return WriteResult{TargetRevision: revision}, nil
@@ -2086,6 +2246,7 @@ func (c *fakeClient) WriteFilesBulk(ctx context.Context, workspaceID string, fil
 			Revision:    revision,
 			ContentType: contentType,
 			Content:     file.Content,
+			Encoding:    strings.TrimSpace(file.Encoding),
 		}
 		results = append(results, BulkWriteResult{
 			Path:        path,
@@ -2242,6 +2403,7 @@ func newMockMountsyncServer(
 				} else if current.ContentType == "" {
 					current.ContentType = "text/markdown"
 				}
+				current.Encoding = strings.TrimSpace(file.Encoding)
 				revisionCounter++
 				current.Revision = fmt.Sprintf("rev_%d", revisionCounter)
 				normalizedFiles[path] = current
@@ -2271,6 +2433,7 @@ func newMockMountsyncServer(
 			var payload struct {
 				Content     string `json:"content"`
 				ContentType string `json:"contentType"`
+				Encoding    string `json:"encoding"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 				writeJSONResponse(t, w, http.StatusBadRequest, map[string]any{
@@ -2285,6 +2448,7 @@ func newMockMountsyncServer(
 			if payload.ContentType != "" {
 				file.ContentType = payload.ContentType
 			}
+			file.Encoding = strings.TrimSpace(payload.Encoding)
 			if file.Revision == "" {
 				file.Revision = "rev_1"
 			} else {
@@ -2488,6 +2652,30 @@ func assertStateMarksPathDenied(t *testing.T, stateFile, remotePath string) {
 	}
 	if entry.Denied == nil || !*entry.Denied {
 		t.Fatalf("expected state path %q marked denied", remotePath)
+	}
+}
+
+func readPublicState(t *testing.T, localDir string) publicState {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(localDir, ".relay", "state.json"))
+	if err != nil {
+		t.Fatalf("read public state failed: %v", err)
+	}
+	var state publicState
+	if err := json.Unmarshal(data, &state); err != nil {
+		t.Fatalf("unmarshal public state failed: %v", err)
+	}
+	return state
+}
+
+func assertLocalFileBytes(t *testing.T, path string, want []byte) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read local file %s failed: %v", path, err)
+	}
+	if !bytes.Equal(data, want) {
+		t.Fatalf("expected %s to contain %v, got %v", path, want, data)
 	}
 }
 

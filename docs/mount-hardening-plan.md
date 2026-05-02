@@ -11,7 +11,10 @@ The mount client (`cmd/relayfile-mount` + `internal/mountsync`) uses a **polling
 - Every N seconds (default 2s, with jitter), it runs `SyncOnce()`.
 - **Push phase**: walks the local directory, detects hash changes, and PUTs modified files with `If-Match` optimistic concurrency.
 - **Pull phase**: either fetches the full remote tree or uses an incremental event cursor to download changed/deleted files.
-- State is persisted to `.relayfile-mount-state.json` (revision, content hash, dirty flag per file).
+- Internal tracked state is persisted to `.relayfile-mount-state.json`, while the
+  user-facing synced-mirror status surface is written to `.relay/state.json`
+  with explicit `ready` / `stale` / `offline` / `conflict` /
+  `writeback-pending` states.
 - Conflict on write is detected via HTTP 409 and the file is marked `Dirty` for retry on the next cycle.
 
 ### Limitations
@@ -20,7 +23,7 @@ The mount client (`cmd/relayfile-mount` + `internal/mountsync`) uses a **polling
 |------|-----------------|---------|
 | Filesystem interface | Polling + `os.ReadFile` / `os.WriteFile` | Agent writes are invisible until the next poll; no instant notification; race window between poll cycles |
 | Cache coherence | SHA-256 hash comparison per file per cycle | No expiration, no TTL; stale reads possible between polls; full-tree walk is O(n) for large workspaces |
-| Conflict handling | HTTP 409 -> mark dirty, log, skip overwrite | No user-visible conflict artifact; no merge strategy; dirty flag silently retried forever |
+| Conflict handling | HTTP 409 -> local body is preserved in `.relay/conflicts/…`, remote is refreshed in place, status flips to `conflict` | User-visible and machine-readable, but still requires manual resolution before retry |
 
 ---
 

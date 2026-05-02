@@ -40,7 +40,12 @@ const (
 	defaultObserverURL      = "https://agentrelay.com/observer/file"
 	configDirName           = ".relayfile"
 	websocketReconcileEvery = 10
+	defaultMountMode        = "poll"
+	defaultMountInterval    = 30 * time.Second
+	defaultMountTimeout     = 15 * time.Second
 )
+
+var defaultJoinScopes = []string{"fs:read", "fs:write"}
 
 type credentials struct {
 	Server    string `json:"server"`
@@ -63,10 +68,15 @@ type workspaceCatalog struct {
 }
 
 type workspaceRecord struct {
-	Name       string `json:"name"`
-	ID         string `json:"id,omitempty"`
-	CreatedAt  string `json:"createdAt"`
-	LastUsedAt string `json:"lastUsedAt,omitempty"`
+	Name        string   `json:"name"`
+	ID          string   `json:"id,omitempty"`
+	CreatedAt   string   `json:"createdAt"`
+	LastUsedAt  string   `json:"lastUsedAt,omitempty"`
+	LocalDir    string   `json:"localDir,omitempty"`
+	Server      string   `json:"server,omitempty"`
+	CloudAPIURL string   `json:"cloudApiUrl,omitempty"`
+	AgentName   string   `json:"agentName,omitempty"`
+	Scopes      []string `json:"scopes,omitempty"`
 }
 
 type apiClient struct {
@@ -199,6 +209,77 @@ type cloudIntegrationReadyResponse struct {
 	Ready bool `json:"ready"`
 }
 
+type cloudTokenRefreshRequest struct {
+	RefreshToken string `json:"refreshToken"`
+}
+
+type cloudIntegrationCatalogResponse struct {
+	Providers []integrationCatalogEntry `json:"providers"`
+	Version   string                    `json:"version,omitempty"`
+}
+
+type integrationCatalogEntry struct {
+	ID          string `json:"id"`
+	DisplayName string `json:"displayName,omitempty"`
+	ConfigKey   string `json:"configKey,omitempty"`
+	VFSRoot     string `json:"vfsRoot,omitempty"`
+	Deprecated  bool   `json:"deprecated,omitempty"`
+}
+
+type cloudIntegrationListEntry struct {
+	Provider       string `json:"provider"`
+	Status         string `json:"status,omitempty"`
+	LagSeconds     int    `json:"lagSeconds,omitempty"`
+	LastEventAt    string `json:"lastEventAt,omitempty"`
+	ConnectionID   string `json:"connectionId,omitempty"`
+	WebhookHealthy *bool  `json:"webhookHealthy,omitempty"`
+	Deprecated     bool   `json:"deprecated,omitempty"`
+}
+
+type syncStateFile struct {
+	WorkspaceID      string              `json:"workspaceId"`
+	Mode             string              `json:"mode"`
+	LastReconcileAt  string              `json:"lastReconcileAt,omitempty"`
+	LastEventAt      string              `json:"lastEventAt,omitempty"`
+	IntervalMs       int64               `json:"intervalMs"`
+	Providers        []syncStateProvider `json:"providers,omitempty"`
+	PendingWriteback int                 `json:"pendingWriteback"`
+	PendingConflicts int                 `json:"pendingConflicts"`
+	DeniedPaths      int                 `json:"deniedPaths"`
+	StallReason      string              `json:"stallReason,omitempty"`
+	Daemon           *syncStateDaemon    `json:"daemon,omitempty"`
+}
+
+type syncStateProvider struct {
+	Provider        string `json:"provider"`
+	Status          string `json:"status"`
+	LagSeconds      int    `json:"lagSeconds"`
+	DeadLetteredOps int    `json:"deadLetteredOps"`
+	LastError       string `json:"lastError,omitempty"`
+	LastEventAt     string `json:"lastEventAt,omitempty"`
+}
+
+type syncStateDaemon struct {
+	PID     int    `json:"pid,omitempty"`
+	LogFile string `json:"logFile,omitempty"`
+	PIDFile string `json:"pidFile,omitempty"`
+}
+
+type integrationConnectionState struct {
+	Provider     string `json:"provider"`
+	ConnectionID string `json:"connectionId,omitempty"`
+	ConnectedAt  string `json:"connectedAt,omitempty"`
+	UpdatedAt    string `json:"updatedAt,omitempty"`
+}
+
+type daemonPIDState struct {
+	PID         int    `json:"pid"`
+	WorkspaceID string `json:"workspaceId"`
+	LocalDir    string `json:"localDir"`
+	LogFile     string `json:"logFile"`
+	StartedAt   string `json:"startedAt"`
+}
+
 type apiError struct {
 	StatusCode int
 	Code       string
@@ -232,6 +313,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		return runLogin(args[1:], stdin, stdout)
 	case "workspace":
 		return runWorkspace(args[1:], stdin, stdout)
+	case "integration":
+		return runIntegration(args[1:], stdin, stdout)
 	case "mount":
 		return runMount(args[1:])
 	case "tree", "ls":
@@ -244,6 +327,10 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		return runExport(args[1:], stdout)
 	case "status":
 		return runStatus(args[1:], stdout)
+	case "stop":
+		return runStop(args[1:], stdout)
+	case "logs":
+		return runLogs(args[1:], stdout)
 	case "observer":
 		return runObserver(args[1:], stdout)
 	case "help", "-h", "--help":
@@ -266,24 +353,32 @@ Usage:
   relayfile workspace use NAME
   relayfile workspace list
   relayfile workspace delete NAME [--yes]
+  relayfile integration connect PROVIDER [--workspace NAME]
+  relayfile integration list [--workspace NAME] [--json]
+  relayfile integration disconnect PROVIDER [--workspace NAME] [--yes]
   relayfile mount [WORKSPACE] [LOCAL_DIR]
   relayfile tree [WORKSPACE] [PATH] [--depth N]
   relayfile read [WORKSPACE] PATH
   relayfile seed [WORKSPACE] [DIR]
   relayfile export [WORKSPACE] --format FORMAT [--output FILE]
   relayfile status [WORKSPACE]
+  relayfile stop [WORKSPACE]
+  relayfile logs [WORKSPACE]
   relayfile observer [WORKSPACE] [--no-open]
 
 Subcommands:
   setup       Sign in, connect an integration, and mount the workspace
   login       Store credentials in ~/.relayfile/credentials.json
   workspace   Create, select, list, or delete locally tracked workspaces
-  mount       Mirror a remote workspace to a local directory
+  integration Connect, list, or disconnect workspace integrations
+  mount       Mirror a remote workspace to a local directory; add --background to detach
   tree        List a remote workspace path
   read        Print a remote file's content
   seed        Upload a directory tree with bulk writes
   export      Export a workspace as json, tar, or patch
-  status      Show sync status for a workspace
+  status      Show sync status and local mirror state for a workspace
+  stop        Stop a background mount
+  logs        Print the background mount log
   observer    Open the hosted file observer for a workspace`)
 }
 
@@ -323,27 +418,11 @@ func runSetup(args []string, stdin io.Reader, stdout io.Writer) error {
 		cloudAPI = defaultCloudAPIURL
 	}
 
-	fmt.Fprintln(stdout, "Relayfile setup")
-	fmt.Fprintln(stdout, "This signs you in, connects an integration, and prepares a local VFS mount.")
+	fmt.Fprintln(stdout, "Relayfile setup. This signs you in, connects an integration, and prepares a local VFS mount.")
 
-	tokenSet := cloudCredentials{
-		APIURL:      cloudAPI,
-		AccessToken: strings.TrimSpace(*cloudToken),
-		UpdatedAt:   time.Now().UTC().Format(time.RFC3339),
-	}
-	if tokenSet.AccessToken == "" {
-		var err error
-		tokenSet, err = runCloudLogin(cloudAPI, *loginTimeout, !*noOpen, stdout)
-		if err != nil {
-			return err
-		}
-		if err := saveCloudCredentials(tokenSet); err != nil {
-			return err
-		}
-	} else {
-		if err := saveCloudCredentials(tokenSet); err != nil {
-			return err
-		}
+	tokenSet, err := ensureCloudCredentials(cloudAPI, strings.TrimSpace(*cloudToken), *loginTimeout, !*noOpen, stdout)
+	if err != nil {
+		return err
 	}
 
 	name := strings.TrimSpace(*workspaceName)
@@ -361,7 +440,8 @@ func runSetup(args []string, stdin io.Reader, stdout io.Writer) error {
 
 	selectedProvider := strings.TrimSpace(*provider)
 	if selectedProvider == "" {
-		prompted, err := promptLine(stdin, stdout, "Integration (github, notion, linear, slack-sage, none) [github]: ")
+		providers, _ := loadIntegrationCatalog(tokenSet.APIURL, tokenSet.AccessToken)
+		prompted, err := promptLine(stdin, stdout, fmt.Sprintf("Integration (%s) [github]: ", providerPromptText(providers)))
 		if err != nil {
 			return err
 		}
@@ -370,7 +450,7 @@ func runSetup(args []string, stdin io.Reader, stdout io.Writer) error {
 			selectedProvider = "github"
 		}
 	}
-	selectedProvider = strings.ToLower(selectedProvider)
+	selectedProvider = normalizeProviderID(selectedProvider)
 
 	localDir := strings.TrimSpace(*localDirFlag)
 	if localDir == "" {
@@ -383,59 +463,47 @@ func runSetup(args []string, stdin io.Reader, stdout io.Writer) error {
 			localDir = "./relayfile-mount"
 		}
 	}
-
-	cloudClient, err := newAPIClient(cloudAPI, tokenSet.AccessToken)
+	absLocalDir, err := filepath.Abs(localDir)
 	if err != nil {
 		return err
 	}
-	var created cloudWorkspaceCreateResponse
-	if err := cloudClient.postJSON(context.Background(), "/api/v1/workspaces", cloudWorkspaceCreateRequest{Name: name}, &created); err != nil {
-		return fmt.Errorf("create cloud workspace: %w", err)
-	}
-	workspaceID := strings.TrimSpace(created.WorkspaceID)
-	if workspaceID == "" {
-		return errors.New("cloud workspace response missing workspaceId")
-	}
-
-	var joined cloudWorkspaceJoinResponse
-	if err := cloudClient.postJSON(context.Background(), fmt.Sprintf("/api/v1/workspaces/%s/join", url.PathEscape(workspaceID)), cloudWorkspaceJoinRequest{
-		AgentName: "relayfile-cli",
-		Scopes:    []string{"fs:read", "fs:write"},
-	}, &joined); err != nil {
-		return fmt.Errorf("join cloud workspace: %w", err)
-	}
-	if strings.TrimSpace(joined.WorkspaceID) == "" {
-		joined.WorkspaceID = workspaceID
-	}
-	if strings.TrimSpace(joined.Token) == "" {
-		return errors.New("cloud join response missing token")
-	}
-	if strings.TrimSpace(joined.RelayfileURL) == "" {
-		if strings.TrimSpace(created.RelayfileURL) == "" {
-			return errors.New("cloud join response missing relayfileUrl")
-		}
-		joined.RelayfileURL = created.RelayfileURL
-	}
-
-	if err := saveCredentials(credentials{
-		Server:    strings.TrimRight(joined.RelayfileURL, "/"),
-		Token:     joined.Token,
-		UpdatedAt: time.Now().UTC().Format(time.RFC3339),
-	}); err != nil {
-		return err
-	}
-	if _, err := upsertWorkspaceRecord(name, joined.WorkspaceID); err != nil {
-		return err
-	}
-	if _, err := setDefaultWorkspace(name); err != nil {
+	if err := ensureMirrorLayout(absLocalDir); err != nil {
 		return err
 	}
 
-	fmt.Fprintf(stdout, "Workspace %s ready (id: %s)\n", name, joined.WorkspaceID)
+	record, createdWorkspace, err := ensureWorkspaceForSetup(tokenSet, name, absLocalDir)
+	if err != nil {
+		return err
+	}
+
+	joined, err := joinWorkspaceViaCloud(tokenSet, record.ID, record.AgentName, record.Scopes)
+	if err != nil {
+		return err
+	}
+	if err := persistJoinedWorkspace(record, joined, tokenSet.APIURL, absLocalDir); err != nil {
+		return err
+	}
+
+	if createdWorkspace {
+		fmt.Fprintf(stdout, "Workspace %s ready (id: %s)\n", record.Name, record.ID)
+	} else {
+		fmt.Fprintf(stdout, "Workspace %s reused (id: %s)\n", record.Name, record.ID)
+	}
 
 	if selectedProvider != "" && selectedProvider != "none" && selectedProvider != "skip" {
-		if err := connectCloudIntegration(cloudAPI, joined.WorkspaceID, joined.Token, selectedProvider, *connectTimeout, !*noOpen, stdout); err != nil {
-			return err
+		if createdWorkspace {
+			if err := connectCloudIntegration(tokenSet.APIURL, record.ID, joined.Token, selectedProvider, absLocalDir, *connectTimeout, !*noOpen, stdout); err != nil {
+				return err
+			}
+		} else {
+			if err := ensureCloudIntegration(tokenSet.APIURL, record.ID, joined.Token, selectedProvider, absLocalDir, *connectTimeout, !*noOpen, stdout); err != nil {
+				return err
+			}
+		}
+		if !*skipMount {
+			if err := waitForInitialSync(joined.RelayfileURL, joined.Token, record.ID, selectedProvider, absLocalDir, *connectTimeout, stdout); err != nil {
+				return err
+			}
 		}
 	} else {
 		fmt.Fprintln(stdout, "Integration connection skipped")
@@ -444,19 +512,302 @@ func runSetup(args []string, stdin io.Reader, stdout io.Writer) error {
 	mountArgs := []string{
 		"--server", strings.TrimRight(joined.RelayfileURL, "/"),
 		"--token", joined.Token,
-		joined.WorkspaceID,
+		record.ID,
 		localDir,
 	}
 	if *once {
 		mountArgs = append(mountArgs, "--once")
 	}
 	if *skipMount {
-		fmt.Fprintf(stdout, "Setup complete. Start the VFS mount with:\n  relayfile mount %s %s\n", joined.WorkspaceID, localDir)
+		fmt.Fprintf(stdout, "Setup complete. Start the VFS mount with:\n  relayfile mount %s %s\n", record.ID, localDir)
 		return nil
 	}
 
 	fmt.Fprintf(stdout, "Starting VFS mount at %s\n", localDir)
 	return runMount(mountArgs)
+}
+
+func ensureCloudCredentials(cloudAPIURL, explicitToken string, timeout time.Duration, shouldOpenBrowser bool, stdout io.Writer) (cloudCredentials, error) {
+	explicitToken = strings.TrimSpace(explicitToken)
+	cloudAPIURL = strings.TrimRight(strings.TrimSpace(cloudAPIURL), "/")
+	if cloudAPIURL == "" {
+		cloudAPIURL = defaultCloudAPIURL
+	}
+	if explicitToken != "" {
+		creds := cloudCredentials{
+			APIURL:      cloudAPIURL,
+			AccessToken: explicitToken,
+			UpdatedAt:   time.Now().UTC().Format(time.RFC3339),
+		}
+		if err := saveCloudCredentials(creds); err != nil {
+			return cloudCredentials{}, err
+		}
+		return creds, nil
+	}
+
+	creds, err := loadCloudCredentials()
+	if err == nil {
+		if strings.TrimSpace(creds.APIURL) == "" {
+			creds.APIURL = cloudAPIURL
+		}
+		if strings.TrimRight(strings.TrimSpace(creds.APIURL), "/") != cloudAPIURL {
+			creds.APIURL = cloudAPIURL
+		}
+		refreshed, refreshErr := refreshCloudCredentialsIfNeeded(creds)
+		if refreshErr == nil {
+			return refreshed, nil
+		}
+	}
+
+	creds, err = runCloudLogin(cloudAPIURL, timeout, shouldOpenBrowser, stdout)
+	if err != nil {
+		return cloudCredentials{}, err
+	}
+	if err := saveCloudCredentials(creds); err != nil {
+		return cloudCredentials{}, err
+	}
+	return creds, nil
+}
+
+func loadCloudCredentials() (cloudCredentials, error) {
+	var creds cloudCredentials
+	payload, err := os.ReadFile(cloudCredentialsPath())
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return creds, fmt.Errorf("cloud credentials not found at %s; run relayfile setup or relayfile login", cloudCredentialsPath())
+		}
+		return creds, err
+	}
+	if err := json.Unmarshal(payload, &creds); err != nil {
+		return creds, fmt.Errorf("parse %s: %w", cloudCredentialsPath(), err)
+	}
+	if strings.TrimSpace(creds.APIURL) == "" {
+		creds.APIURL = defaultCloudAPIURL
+	}
+	return creds, nil
+}
+
+func refreshCloudCredentialsIfNeeded(creds cloudCredentials) (cloudCredentials, error) {
+	if !cloudAccessTokenExpiredSoon(creds) {
+		if strings.TrimSpace(creds.APIURL) == "" {
+			creds.APIURL = defaultCloudAPIURL
+		}
+		return creds, nil
+	}
+	return refreshCloudCredentials(creds)
+}
+
+func cloudAccessTokenExpiredSoon(creds cloudCredentials) bool {
+	if strings.TrimSpace(creds.AccessToken) == "" {
+		return true
+	}
+	expiry, ok := parseRFC3339(strings.TrimSpace(creds.AccessTokenExpiresAt))
+	if !ok {
+		return false
+	}
+	return !time.Now().UTC().Before(expiry.Add(-60 * time.Second))
+}
+
+func refreshCloudCredentials(creds cloudCredentials) (cloudCredentials, error) {
+	if strings.TrimSpace(creds.RefreshToken) == "" {
+		return creds, errors.New("cloud session expired. Run 'relayfile login' to sign in again.")
+	}
+	client, err := newAPIClient(creds.APIURL, creds.AccessToken)
+	if err != nil {
+		return creds, err
+	}
+	var refreshed cloudCredentials
+	err = client.postJSON(context.Background(), "/api/v1/auth/token/refresh", cloudTokenRefreshRequest{
+		RefreshToken: creds.RefreshToken,
+	}, &refreshed)
+	if err != nil {
+		var httpErr *apiError
+		if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusForbidden && strings.EqualFold(strings.TrimSpace(httpErr.Code), "invalid_grant") {
+			return creds, errors.New("cloud session expired. Run 'relayfile login' to sign in again.")
+		}
+		return creds, fmt.Errorf("refresh cloud session: %w", err)
+	}
+	if strings.TrimSpace(refreshed.APIURL) == "" {
+		refreshed.APIURL = creds.APIURL
+	}
+	if strings.TrimSpace(refreshed.RefreshToken) == "" {
+		refreshed.RefreshToken = creds.RefreshToken
+	}
+	if strings.TrimSpace(refreshed.RefreshTokenExpiresAt) == "" {
+		refreshed.RefreshTokenExpiresAt = creds.RefreshTokenExpiresAt
+	}
+	refreshed.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	if err := saveCloudCredentials(refreshed); err != nil {
+		return creds, err
+	}
+	return refreshed, nil
+}
+
+func providerPromptText(entries []integrationCatalogEntry) string {
+	ids := make([]string, 0, len(entries)+1)
+	for _, entry := range entries {
+		id := strings.TrimSpace(entry.ID)
+		if id == "" {
+			continue
+		}
+		ids = append(ids, id)
+	}
+	if len(ids) == 0 {
+		ids = []string{"github", "notion", "linear", "slack-sage", "none"}
+	}
+	if !containsString(ids, "none") {
+		ids = append(ids, "none")
+	}
+	return strings.Join(ids, ", ")
+}
+
+func normalizeProviderID(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	switch value {
+	case "slack", "slack-sage":
+		return "slack-sage"
+	default:
+		return value
+	}
+}
+
+func loadIntegrationCatalog(cloudAPIURL, accessToken string) ([]integrationCatalogEntry, error) {
+	client, err := newAPIClient(cloudAPIURL, accessToken)
+	if err != nil {
+		return fallbackIntegrationCatalog(), err
+	}
+	var payload cloudIntegrationCatalogResponse
+	if err := client.getJSON(context.Background(), "/api/v1/integrations/catalog", &payload); err != nil {
+		return fallbackIntegrationCatalog(), err
+	}
+	if len(payload.Providers) == 0 {
+		return fallbackIntegrationCatalog(), nil
+	}
+	return payload.Providers, nil
+}
+
+func fallbackIntegrationCatalog() []integrationCatalogEntry {
+	return []integrationCatalogEntry{
+		{ID: "github", DisplayName: "GitHub", VFSRoot: "/github"},
+		{ID: "notion", DisplayName: "Notion", VFSRoot: "/notion"},
+		{ID: "linear", DisplayName: "Linear", VFSRoot: "/linear"},
+		{ID: "slack-sage", DisplayName: "Slack", VFSRoot: "/slack"},
+		{ID: "slack-my-senior-dev", DisplayName: "Slack (MSD)", VFSRoot: "/slack-msd"},
+		{ID: "slack-nightcto", DisplayName: "Slack (NightCTO)", VFSRoot: "/slack-nightcto"},
+	}
+}
+
+func ensureMirrorLayout(localDir string) error {
+	if err := os.MkdirAll(localDir, 0o755); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Join(localDir, ".relay"), 0o755); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Join(localDir, ".relay", "integrations"), 0o755); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Join(localDir, ".relay", "disconnected"), 0o755); err != nil {
+		return err
+	}
+	return os.MkdirAll(filepath.Join(localDir, ".relay", "conflicts"), 0o755)
+}
+
+func ensureWorkspaceForSetup(cloud cloudCredentials, name, localDir string) (workspaceRecord, bool, error) {
+	if record, ok := workspaceRecordByName(name); ok {
+		if record.ID == "" {
+			record.ID = record.Name
+		}
+		if record.AgentName == "" {
+			record.AgentName = "relayfile-cli"
+		}
+		if len(record.Scopes) == 0 {
+			record.Scopes = append([]string(nil), defaultJoinScopes...)
+		}
+		return record, false, nil
+	}
+	client, err := newAPIClient(cloud.APIURL, cloud.AccessToken)
+	if err != nil {
+		return workspaceRecord{}, false, err
+	}
+	var created cloudWorkspaceCreateResponse
+	if err := client.postJSON(context.Background(), "/api/v1/workspaces", cloudWorkspaceCreateRequest{Name: name}, &created); err != nil {
+		return workspaceRecord{}, false, fmt.Errorf("create cloud workspace: %w", err)
+	}
+	record := workspaceRecord{
+		Name:        name,
+		ID:          strings.TrimSpace(created.WorkspaceID),
+		CreatedAt:   strings.TrimSpace(created.CreatedAt),
+		LastUsedAt:  time.Now().UTC().Format(time.RFC3339),
+		LocalDir:    localDir,
+		CloudAPIURL: cloud.APIURL,
+		Server:      strings.TrimRight(strings.TrimSpace(created.RelayfileURL), "/"),
+		AgentName:   "relayfile-cli",
+		Scopes:      append([]string(nil), defaultJoinScopes...),
+	}
+	if record.CreatedAt == "" {
+		record.CreatedAt = time.Now().UTC().Format(time.RFC3339)
+	}
+	if record.ID == "" {
+		return workspaceRecord{}, false, errors.New("cloud workspace response missing workspaceId")
+	}
+	return record, true, nil
+}
+
+func persistJoinedWorkspace(record workspaceRecord, joined cloudWorkspaceJoinResponse, cloudAPIURL, localDir string) error {
+	serverURL := strings.TrimRight(strings.TrimSpace(joined.RelayfileURL), "/")
+	if err := saveCredentials(credentials{
+		Server:    serverURL,
+		Token:     strings.TrimSpace(joined.Token),
+		UpdatedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		return err
+	}
+	record.Server = serverURL
+	record.LocalDir = localDir
+	record.CloudAPIURL = cloudAPIURL
+	record.LastUsedAt = time.Now().UTC().Format(time.RFC3339)
+	if record.AgentName == "" {
+		record.AgentName = "relayfile-cli"
+	}
+	if len(record.Scopes) == 0 {
+		record.Scopes = append([]string(nil), defaultJoinScopes...)
+	}
+	if _, err := upsertWorkspaceDetails(record); err != nil {
+		return err
+	}
+	_, err := setDefaultWorkspace(record.Name)
+	return err
+}
+
+func joinWorkspaceViaCloud(cloud cloudCredentials, workspaceID, agentName string, scopes []string) (cloudWorkspaceJoinResponse, error) {
+	if agentName == "" {
+		agentName = "relayfile-cli"
+	}
+	if len(scopes) == 0 {
+		scopes = append([]string(nil), defaultJoinScopes...)
+	}
+	client, err := newAPIClient(cloud.APIURL, cloud.AccessToken)
+	if err != nil {
+		return cloudWorkspaceJoinResponse{}, err
+	}
+	var joined cloudWorkspaceJoinResponse
+	if err := client.postJSON(context.Background(), fmt.Sprintf("/api/v1/workspaces/%s/join", url.PathEscape(workspaceID)), cloudWorkspaceJoinRequest{
+		AgentName: agentName,
+		Scopes:    scopes,
+	}, &joined); err != nil {
+		return cloudWorkspaceJoinResponse{}, fmt.Errorf("join cloud workspace: %w", err)
+	}
+	if strings.TrimSpace(joined.WorkspaceID) == "" {
+		joined.WorkspaceID = workspaceID
+	}
+	if strings.TrimSpace(joined.Token) == "" {
+		return cloudWorkspaceJoinResponse{}, errors.New("cloud join response missing token")
+	}
+	if strings.TrimSpace(joined.RelayfileURL) == "" {
+		return cloudWorkspaceJoinResponse{}, errors.New("cloud join response missing relayfileUrl")
+	}
+	return joined, nil
 }
 
 func runCloudLogin(cloudAPIURL string, timeout time.Duration, shouldOpenBrowser bool, stdout io.Writer) (cloudCredentials, error) {
@@ -537,7 +888,18 @@ func runCloudLogin(cloudAPIURL string, timeout time.Duration, shouldOpenBrowser 
 	}
 }
 
-func connectCloudIntegration(cloudAPIURL, workspaceID, workspaceToken, provider string, timeout time.Duration, shouldOpenBrowser bool, stdout io.Writer) error {
+func ensureCloudIntegration(cloudAPIURL, workspaceID, workspaceToken, provider, localDir string, timeout time.Duration, shouldOpenBrowser bool, stdout io.Writer) error {
+	connectionID := loadSavedConnectionID(localDir, provider)
+	if connectionID != "" {
+		if ready, err := cloudIntegrationReady(cloudAPIURL, workspaceID, workspaceToken, provider, connectionID); err == nil && ready {
+			fmt.Fprintf(stdout, "%s already connected\n", provider)
+			return nil
+		}
+	}
+	return connectCloudIntegration(cloudAPIURL, workspaceID, workspaceToken, provider, localDir, timeout, shouldOpenBrowser, stdout)
+}
+
+func connectCloudIntegration(cloudAPIURL, workspaceID, workspaceToken, provider, localDir string, timeout time.Duration, shouldOpenBrowser bool, stdout io.Writer) error {
 	client, err := newAPIClient(cloudAPIURL, workspaceToken)
 	if err != nil {
 		return err
@@ -553,6 +915,12 @@ func connectCloudIntegration(cloudAPIURL, workspaceID, workspaceToken, provider 
 	if connectionID == "" {
 		connectionID = workspaceID
 	}
+	_ = saveIntegrationConnection(localDir, integrationConnectionState{
+		Provider:     provider,
+		ConnectionID: connectionID,
+		ConnectedAt:  time.Now().UTC().Format(time.RFC3339),
+		UpdatedAt:    time.Now().UTC().Format(time.RFC3339),
+	})
 
 	if connectLink := strings.TrimSpace(session.ConnectLink); connectLink != "" {
 		fmt.Fprintf(stdout, "Connect %s: %s\n", provider, connectLink)
@@ -570,12 +938,12 @@ func connectCloudIntegration(cloudAPIURL, workspaceID, workspaceToken, provider 
 	}
 	deadline := time.Now().Add(timeout)
 	for {
-		ready, err := cloudIntegrationReady(client, workspaceID, provider, connectionID)
+		ready, err := cloudIntegrationReady(cloudAPIURL, workspaceID, workspaceToken, provider, connectionID)
 		if err != nil {
 			return err
 		}
 		if ready {
-			fmt.Fprintf(stdout, "%s connected\n", provider)
+			fmt.Fprintf(stdout, "%s connected. Files will appear under %s/%s within ~30s.\n", provider, localDir, providerRootDir(provider))
 			return nil
 		}
 		if time.Now().After(deadline) {
@@ -585,14 +953,53 @@ func connectCloudIntegration(cloudAPIURL, workspaceID, workspaceToken, provider 
 	}
 }
 
-func cloudIntegrationReady(client *apiClient, workspaceID, provider, connectionID string) (bool, error) {
+func cloudIntegrationReady(cloudAPIURL, workspaceID, workspaceToken, provider, connectionID string) (bool, error) {
+	client, err := newAPIClient(cloudAPIURL, workspaceToken)
+	if err != nil {
+		return false, err
+	}
 	query := url.Values{}
-	query.Set("connectionId", connectionID)
+	if strings.TrimSpace(connectionID) != "" {
+		query.Set("connectionId", connectionID)
+	}
 	var status cloudIntegrationReadyResponse
 	if err := client.getJSON(context.Background(), fmt.Sprintf("/api/v1/workspaces/%s/integrations/%s/status?%s", url.PathEscape(workspaceID), url.PathEscape(provider), query.Encode()), &status); err != nil {
 		return false, fmt.Errorf("check %s connection: %w", provider, err)
 	}
 	return status.Ready, nil
+}
+
+func waitForInitialSync(serverURL, token, workspaceID, provider, localDir string, timeout time.Duration, stdout io.Writer) error {
+	if timeout <= 0 {
+		timeout = 5 * time.Minute
+	}
+	client, err := newAPIClient(serverURL, token)
+	if err != nil {
+		return err
+	}
+	deadline := time.Now().Add(timeout)
+	lastPrinted := time.Time{}
+	for {
+		status, err := fetchWorkspaceSyncStatus(client, workspaceID)
+		if err != nil {
+			return err
+		}
+		providerStatus, ok := syncProviderByName(status, provider)
+		if ok && providerReadyForMirror(client, workspaceID, provider, providerStatus) {
+			return writeMirrorStateFile(localDir, buildSyncStateSnapshot(status, workspaceID, defaultMountMode, defaultMountInterval, localDir, readDaemonPID(localDir), ""))
+		}
+		if time.Since(lastPrinted) >= 5*time.Second {
+			lastPrinted = time.Now()
+			if ok {
+				fmt.Fprintf(stdout, "Syncing %s... lag %ds status=%s\n", provider, providerStatus.LagSeconds, providerStatus.Status)
+			}
+		}
+		if time.Now().After(deadline) {
+			fmt.Fprintf(stdout, "%s still syncing in the background. Files will continue to populate. See 'relayfile status'.\n", provider)
+			return nil
+		}
+		time.Sleep(2 * time.Second)
+	}
 }
 
 func runLogin(args []string, stdin io.Reader, stdout io.Writer) error {
@@ -663,6 +1070,166 @@ func runWorkspace(args []string, stdin io.Reader, stdout io.Writer) error {
 	default:
 		return fmt.Errorf("unknown workspace subcommand %q", args[0])
 	}
+}
+
+func runIntegration(args []string, stdin io.Reader, stdout io.Writer) error {
+	if len(args) == 0 {
+		return errors.New("integration subcommand is required: connect, list, or disconnect")
+	}
+	switch args[0] {
+	case "connect":
+		return runIntegrationConnect(args[1:], stdin, stdout)
+	case "list":
+		return runIntegrationList(args[1:], stdout)
+	case "disconnect":
+		return runIntegrationDisconnect(args[1:], stdin, stdout)
+	default:
+		return fmt.Errorf("unknown integration subcommand %q", args[0])
+	}
+}
+
+func runIntegrationConnect(args []string, stdin io.Reader, stdout io.Writer) error {
+	fs := flag.NewFlagSet("integration connect", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	workspaceName := fs.String("workspace", "", "workspace name or id")
+	cloudAPIURL := fs.String("cloud-api-url", envOrDefault("RELAYFILE_CLOUD_API_URL", defaultCloudAPIURL), "Relayfile Cloud API URL")
+	noOpen := fs.Bool("no-open", false, "print the hosted URL instead of opening it")
+	timeout := fs.Duration("timeout", 5*time.Minute, "integration readiness timeout")
+	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
+		"workspace":     true,
+		"cloud-api-url": true,
+		"no-open":       false,
+		"timeout":       true,
+	})); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return errors.New("usage: relayfile integration connect PROVIDER [--workspace NAME] [--no-open] [--timeout 5m]")
+	}
+	provider := normalizeProviderID(fs.Arg(0))
+	record, err := resolveWorkspaceRecord(strings.TrimSpace(*workspaceName))
+	if err != nil {
+		return err
+	}
+	cloudCreds, err := ensureCloudCredentials(strings.TrimSpace(*cloudAPIURL), "", 5*time.Minute, false, stdout)
+	if err != nil {
+		return err
+	}
+	joined, err := joinWorkspaceViaCloud(cloudCreds, record.ID, record.AgentName, record.Scopes)
+	if err != nil {
+		return err
+	}
+	if err := persistJoinedWorkspace(record, joined, cloudCreds.APIURL, record.LocalDir); err != nil {
+		return err
+	}
+	if err := ensureCloudIntegration(cloudCreds.APIURL, record.ID, joined.Token, provider, record.LocalDir, *timeout, !*noOpen, stdout); err != nil {
+		return err
+	}
+	return waitForInitialSync(joined.RelayfileURL, joined.Token, record.ID, provider, record.LocalDir, *timeout, stdout)
+}
+
+func runIntegrationList(args []string, stdout io.Writer) error {
+	fs := flag.NewFlagSet("integration list", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	workspaceName := fs.String("workspace", "", "workspace name or id")
+	jsonOutput := fs.Bool("json", false, "emit JSON")
+	cloudAPIURL := fs.String("cloud-api-url", envOrDefault("RELAYFILE_CLOUD_API_URL", defaultCloudAPIURL), "Relayfile Cloud API URL")
+	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
+		"workspace":     true,
+		"json":          false,
+		"cloud-api-url": true,
+	})); err != nil {
+		return err
+	}
+	if fs.NArg() > 0 {
+		return errors.New("usage: relayfile integration list [--workspace NAME] [--json]")
+	}
+	record, err := resolveWorkspaceRecord(strings.TrimSpace(*workspaceName))
+	if err != nil {
+		return err
+	}
+	cloudCreds, err := ensureCloudCredentials(strings.TrimSpace(*cloudAPIURL), "", 5*time.Minute, false, io.Discard)
+	if err != nil {
+		return err
+	}
+	joined, err := joinWorkspaceViaCloud(cloudCreds, record.ID, record.AgentName, record.Scopes)
+	if err != nil {
+		return err
+	}
+	client, err := newAPIClient(cloudCreds.APIURL, joined.Token)
+	if err != nil {
+		return err
+	}
+	var entries []cloudIntegrationListEntry
+	if err := client.getJSON(context.Background(), fmt.Sprintf("/api/v1/workspaces/%s/integrations", url.PathEscape(record.ID)), &entries); err != nil {
+		return err
+	}
+	if *jsonOutput {
+		return writeJSON(stdout, entries)
+	}
+	if len(entries) == 0 {
+		fmt.Fprintln(stdout, "No integrations connected")
+		return nil
+	}
+	fmt.Fprintln(stdout, "provider\tstatus\tlag\tlast_event_at")
+	for _, entry := range entries {
+		fmt.Fprintf(stdout, "%s\t%s\t%s\t%s\n", entry.Provider, defaultIfBlank(entry.Status, "unknown"), formatLag(entry.LagSeconds), defaultIfBlank(entry.LastEventAt, "-"))
+	}
+	return nil
+}
+
+func runIntegrationDisconnect(args []string, stdin io.Reader, stdout io.Writer) error {
+	fs := flag.NewFlagSet("integration disconnect", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	workspaceName := fs.String("workspace", "", "workspace name or id")
+	cloudAPIURL := fs.String("cloud-api-url", envOrDefault("RELAYFILE_CLOUD_API_URL", defaultCloudAPIURL), "Relayfile Cloud API URL")
+	yes := fs.Bool("yes", false, "skip confirmation")
+	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
+		"workspace":     true,
+		"cloud-api-url": true,
+		"yes":           false,
+	})); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return errors.New("usage: relayfile integration disconnect PROVIDER [--workspace NAME] [--yes]")
+	}
+	provider := normalizeProviderID(fs.Arg(0))
+	record, err := resolveWorkspaceRecord(strings.TrimSpace(*workspaceName))
+	if err != nil {
+		return err
+	}
+	if !*yes {
+		answer, err := promptLine(stdin, stdout, fmt.Sprintf("Disconnect %q from workspace %q? [y/N]: ", provider, record.Name))
+		if err != nil {
+			return err
+		}
+		answer = strings.ToLower(strings.TrimSpace(answer))
+		if answer != "y" && answer != "yes" {
+			fmt.Fprintln(stdout, "Aborted")
+			return nil
+		}
+	}
+	cloudCreds, err := ensureCloudCredentials(strings.TrimSpace(*cloudAPIURL), "", 5*time.Minute, false, io.Discard)
+	if err != nil {
+		return err
+	}
+	joined, err := joinWorkspaceViaCloud(cloudCreds, record.ID, record.AgentName, record.Scopes)
+	if err != nil {
+		return err
+	}
+	client, err := newAPIClient(cloudCreds.APIURL, joined.Token)
+	if err != nil {
+		return err
+	}
+	if _, _, err := client.do(context.Background(), http.MethodDelete, fmt.Sprintf("/api/v1/workspaces/%s/integrations/%s/status", url.PathEscape(record.ID), url.PathEscape(provider)), nil); err != nil {
+		return err
+	}
+	if err := markProviderDisconnected(record.LocalDir, provider); err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "%s disconnected from workspace %s\n", provider, record.Name)
+	return nil
 }
 
 func runWorkspaceCreate(args []string, stdout io.Writer) error {
@@ -809,10 +1376,15 @@ func runMount(args []string) error {
 	eventProvider := fs.String("provider", strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_PROVIDER")), "event provider filter")
 	stateFile := fs.String("state-file", strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_STATE_FILE")), "state file path")
 	localDirFlag := fs.String("local-dir", "", "local mirror directory")
-	interval := fs.Duration("interval", durationEnv("RELAYFILE_MOUNT_INTERVAL", 2*time.Second), "sync interval")
+	mode := fs.String("mode", envOrDefault("RELAYFILE_MOUNT_MODE", defaultMountMode), "mount mode: poll (recommended) or fuse")
+	interval := fs.Duration("interval", durationEnv("RELAYFILE_MOUNT_INTERVAL", defaultMountInterval), "sync interval")
 	intervalJitter := fs.Float64("interval-jitter", floatEnv("RELAYFILE_MOUNT_INTERVAL_JITTER", 0.2), "sync interval jitter ratio (0.0-1.0)")
-	timeout := fs.Duration("timeout", durationEnv("RELAYFILE_MOUNT_TIMEOUT", 15*time.Second), "per-sync timeout")
+	timeout := fs.Duration("timeout", durationEnv("RELAYFILE_MOUNT_TIMEOUT", defaultMountTimeout), "per-sync timeout")
 	websocketEnabled := fs.Bool("websocket", boolEnv("RELAYFILE_MOUNT_WEBSOCKET", true), "enable websocket event streaming when available")
+	background := fs.Bool("background", false, "detach and keep syncing in the background")
+	pidFileFlag := fs.String("pid-file", "", "pid file path for background mode")
+	logFileFlag := fs.String("log-file", "", "log file path for background mode")
+	daemonized := fs.Bool("daemonized", false, "internal flag used by relayfile mount --background")
 	once := fs.Bool("once", false, "run one sync cycle and exit")
 	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
 		"server":          true,
@@ -820,10 +1392,15 @@ func runMount(args []string) error {
 		"remote-path":     true,
 		"provider":        true,
 		"state-file":      true,
+		"mode":            true,
 		"interval":        true,
 		"interval-jitter": true,
 		"timeout":         true,
 		"websocket":       false,
+		"background":      false,
+		"pid-file":        true,
+		"log-file":        true,
+		"daemonized":      false,
 		"once":            false,
 		"local-dir":       true,
 	})); err != nil {
@@ -864,14 +1441,48 @@ func runMount(args []string) error {
 	if err != nil {
 		return err
 	}
+	if err := ensureMirrorLayout(absLocalDir); err != nil {
+		return err
+	}
 
+	if strings.EqualFold(strings.TrimSpace(*mode), "fuse") || boolEnv("RELAYFILE_MOUNT_FUSE", false) {
+		return errors.New("fuse mode is not available in this build; rerun with --mode=poll")
+	}
 	if *interval <= 0 {
-		*interval = 2 * time.Second
+		*interval = defaultMountInterval
 	}
 	if *timeout <= 0 {
-		*timeout = 15 * time.Second
+		*timeout = defaultMountTimeout
 	}
 	*intervalJitter = clampJitterRatio(*intervalJitter)
+
+	pidFile := strings.TrimSpace(*pidFileFlag)
+	if pidFile == "" {
+		pidFile = mountPIDFile(absLocalDir)
+	}
+	logFile := strings.TrimSpace(*logFileFlag)
+	if logFile == "" {
+		logFile = mountLogFile(absLocalDir)
+	}
+
+	if *background && !*daemonized {
+		return spawnBackgroundMountProcess(args, absLocalDir, pidFile, logFile)
+	}
+	if *daemonized {
+		if err := rotateLogFile(logFile); err != nil {
+			return err
+		}
+		if err := writeDaemonPIDState(pidFile, daemonPIDState{
+			PID:         os.Getpid(),
+			WorkspaceID: workspaceID,
+			LocalDir:    absLocalDir,
+			LogFile:     logFile,
+			StartedAt:   time.Now().UTC().Format(time.RFC3339),
+		}); err != nil {
+			return err
+		}
+		defer os.Remove(pidFile)
+	}
 
 	rootCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -893,8 +1504,22 @@ func runMount(args []string) error {
 	if _, err := upsertWorkspace(workspaceID); err != nil {
 		return err
 	}
+	record, _ := workspaceRecordByID(workspaceID)
+	record.ID = workspaceID
+	if record.Name == "" {
+		record.Name = workspaceID
+	}
+	record.LocalDir = absLocalDir
+	record.Server = strings.TrimRight(strings.TrimSpace(*server), "/")
+	if record.AgentName == "" {
+		record.AgentName = "relayfile-cli"
+	}
+	if len(record.Scopes) == 0 {
+		record.Scopes = append([]string(nil), defaultJoinScopes...)
+	}
+	_, _ = upsertWorkspaceDetails(record)
 
-	return runMountLoop(rootCtx, syncer, absLocalDir, *timeout, *interval, *intervalJitter, *websocketEnabled, *once)
+	return runMountLoop(rootCtx, syncer, absLocalDir, workspaceID, strings.TrimRight(strings.TrimSpace(*server), "/"), *timeout, *interval, *intervalJitter, *websocketEnabled, *once, *daemonized, pidFile, logFile)
 }
 
 func runTree(args []string, stdout io.Writer) error {
@@ -1215,14 +1840,16 @@ func runStatus(args []string, stdout io.Writer) error {
 	fs.SetOutput(io.Discard)
 	server := fs.String("server", "", "relayfile server URL override")
 	token := fs.String("token", "", "relayfile token override")
+	jsonOutput := fs.Bool("json", false, "emit JSON")
 	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
 		"server": true,
 		"token":  true,
+		"json":   false,
 	})); err != nil {
 		return err
 	}
 	if fs.NArg() > 1 {
-		return errors.New("usage: relayfile status [WORKSPACE]")
+		return errors.New("usage: relayfile status [WORKSPACE] [--json]")
 	}
 
 	creds, err := loadCredentials()
@@ -1242,44 +1869,102 @@ func runStatus(args []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	var status syncStatusResponse
-	if err := client.getJSON(context.Background(), fmt.Sprintf("/v1/workspaces/%s/sync/status", url.PathEscape(workspaceID)), &status); err != nil {
+	status, err := fetchWorkspaceSyncStatus(client, workspaceID)
+	if err != nil {
 		return err
 	}
 	if _, err := upsertWorkspace(workspaceID); err != nil {
 		return err
 	}
-
-	fileCountText := "unknown"
-	var exported []exportedFile
-	if err := client.getJSON(context.Background(), fmt.Sprintf("/v1/workspaces/%s/fs/export?format=json", url.PathEscape(workspaceID)), &exported); err == nil {
-		fileCountText = strconv.Itoa(len(exported))
+	record, _ := workspaceRecordByID(workspaceID)
+	snapshot := buildSyncStateSnapshot(status, workspaceID, defaultMountMode, defaultMountInterval, record.LocalDir, readDaemonPID(record.LocalDir), "")
+	if *jsonOutput {
+		return writeJSON(stdout, snapshot)
 	}
-
-	fmt.Fprintf(stdout, "Workspace: %s\n", status.WorkspaceID)
-	fmt.Fprintf(stdout, "File count: %s\n", fileCountText)
-	if len(status.Providers) == 0 {
-		fmt.Fprintln(stdout, "Last activity: unknown")
-		return nil
+	workspaceLabel := workspaceID
+	if strings.TrimSpace(record.Name) != "" && record.Name != workspaceID {
+		workspaceLabel = fmt.Sprintf("%s (%s)", workspaceID, record.Name)
 	}
-
-	lastActivity := "unknown"
+	fmt.Fprintf(stdout, "workspace %s   mode: %s   lag: %s\n", workspaceLabel, snapshot.Mode, formatLag(maxLagSeconds(status.Providers)))
 	for _, provider := range status.Providers {
-		if provider.WatermarkTs != nil && strings.TrimSpace(*provider.WatermarkTs) != "" {
-			if lastActivity == "unknown" || strings.TrimSpace(*provider.WatermarkTs) > lastActivity {
-				lastActivity = strings.TrimSpace(*provider.WatermarkTs)
-			}
+		lastEvent := "-"
+		if provider.WatermarkTs != nil {
+			lastEvent = humanizeRecentTime(strings.TrimSpace(*provider.WatermarkTs))
 		}
-	}
-	fmt.Fprintf(stdout, "Last activity: %s\n", lastActivity)
-	for _, provider := range status.Providers {
-		line := fmt.Sprintf("%s: %s", provider.Provider, provider.Status)
-		if provider.LagSeconds > 0 {
-			line += fmt.Sprintf(" lag=%ds", provider.LagSeconds)
+		line := fmt.Sprintf("  %-12s %-8s lag %s", provider.Provider, provider.Status, formatLag(provider.LagSeconds))
+		if lastEvent != "-" {
+			line += "   last event " + lastEvent
 		}
 		if provider.LastError != nil && strings.TrimSpace(*provider.LastError) != "" {
-			line += fmt.Sprintf(" error=%q", *provider.LastError)
+			line += "   last error: " + strings.TrimSpace(*provider.LastError)
 		}
+		fmt.Fprintln(stdout, line)
+	}
+	if record.LocalDir != "" {
+		fmt.Fprintf(stdout, "\nlocal mirror: %s\n", record.LocalDir)
+		if pid := readDaemonPID(record.LocalDir); pid != 0 {
+			fmt.Fprintf(stdout, "daemon: running (pid %d)\n", pid)
+		} else {
+			fmt.Fprintln(stdout, "daemon: not running")
+		}
+	}
+	fmt.Fprintf(stdout, "\npending writebacks: %d    conflicts: %d    denied: %d\n", snapshot.PendingWriteback, snapshot.PendingConflicts, snapshot.DeniedPaths)
+	return nil
+}
+
+func runStop(args []string, stdout io.Writer) error {
+	fs := flag.NewFlagSet("stop", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{})); err != nil {
+		return err
+	}
+	if fs.NArg() > 1 {
+		return errors.New("usage: relayfile stop [WORKSPACE]")
+	}
+	record, err := resolveWorkspaceRecord(firstArg(fs))
+	if err != nil {
+		return err
+	}
+	pid := readDaemonPID(record.LocalDir)
+	if pid == 0 {
+		return fmt.Errorf("no running mount found for workspace %s", record.Name)
+	}
+	process, err := os.FindProcess(pid)
+	if err != nil {
+		return err
+	}
+	if err := process.Signal(syscall.SIGTERM); err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "Stopped background mount for %s (pid %d)\n", record.Name, pid)
+	return nil
+}
+
+func runLogs(args []string, stdout io.Writer) error {
+	fs := flag.NewFlagSet("logs", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	lines := fs.Int("lines", 40, "number of lines to print")
+	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
+		"lines": true,
+	})); err != nil {
+		return err
+	}
+	if fs.NArg() > 1 {
+		return errors.New("usage: relayfile logs [WORKSPACE] [--lines N]")
+	}
+	record, err := resolveWorkspaceRecord(firstArg(fs))
+	if err != nil {
+		return err
+	}
+	payload, err := os.ReadFile(mountLogFile(record.LocalDir))
+	if err != nil {
+		return err
+	}
+	linesOut := strings.Split(strings.TrimRight(string(payload), "\n"), "\n")
+	if *lines > 0 && len(linesOut) > *lines {
+		linesOut = linesOut[len(linesOut)-*lines:]
+	}
+	for _, line := range linesOut {
 		fmt.Fprintln(stdout, line)
 	}
 	return nil
@@ -1594,7 +2279,7 @@ func saveCredentials(creds credentials) error {
 		return err
 	}
 	payload = append(payload, '\n')
-	return os.WriteFile(credentialsPath(), payload, 0o600)
+	return writeFileAtomically(credentialsPath(), payload, 0o600)
 }
 
 func saveCloudCredentials(creds cloudCredentials) error {
@@ -1612,7 +2297,7 @@ func saveCloudCredentials(creds cloudCredentials) error {
 		return err
 	}
 	payload = append(payload, '\n')
-	return os.WriteFile(cloudCredentialsPath(), payload, 0o600)
+	return writeFileAtomically(cloudCredentialsPath(), payload, 0o600)
 }
 
 func loadCredentials() (credentials, error) {
@@ -1660,7 +2345,7 @@ func saveWorkspaceCatalog(catalog workspaceCatalog) error {
 		return err
 	}
 	payload = append(payload, '\n')
-	return os.WriteFile(workspacesPath(), payload, 0o644)
+	return writeFileAtomically(workspacesPath(), payload, 0o644)
 }
 
 func setDefaultWorkspace(name string) (workspaceRecord, error) {
@@ -1816,6 +2501,135 @@ func upsertWorkspaceRecord(name, id string) (workspaceRecord, error) {
 	return record, nil
 }
 
+func upsertWorkspaceDetails(record workspaceRecord) (workspaceRecord, error) {
+	record.Name = strings.TrimSpace(record.Name)
+	record.ID = strings.TrimSpace(record.ID)
+	if record.Name == "" {
+		return workspaceRecord{}, errors.New("workspace name is required")
+	}
+	if record.ID == "" {
+		record.ID = record.Name
+	}
+	if record.CreatedAt == "" {
+		record.CreatedAt = time.Now().UTC().Format(time.RFC3339)
+	}
+	record.LastUsedAt = time.Now().UTC().Format(time.RFC3339)
+	record.LocalDir = strings.TrimSpace(record.LocalDir)
+	record.Server = strings.TrimRight(strings.TrimSpace(record.Server), "/")
+	record.CloudAPIURL = strings.TrimRight(strings.TrimSpace(record.CloudAPIURL), "/")
+	record.AgentName = strings.TrimSpace(record.AgentName)
+	if len(record.Scopes) == 0 {
+		record.Scopes = append([]string(nil), defaultJoinScopes...)
+	}
+
+	catalog, err := loadWorkspaceCatalog()
+	if err != nil {
+		return workspaceRecord{}, err
+	}
+	for i := range catalog.Workspaces {
+		current := catalog.Workspaces[i]
+		if current.Name == record.Name || (record.ID != "" && current.ID == record.ID) {
+			if record.CreatedAt == "" {
+				record.CreatedAt = current.CreatedAt
+			}
+			catalog.Workspaces[i] = mergeWorkspaceRecords(current, record)
+			if err := saveWorkspaceCatalog(catalog); err != nil {
+				return workspaceRecord{}, err
+			}
+			return catalog.Workspaces[i], nil
+		}
+	}
+	catalog.Workspaces = append(catalog.Workspaces, record)
+	if strings.TrimSpace(catalog.Default) == "" {
+		catalog.Default = record.Name
+	}
+	if err := saveWorkspaceCatalog(catalog); err != nil {
+		return workspaceRecord{}, err
+	}
+	return record, nil
+}
+
+func mergeWorkspaceRecords(current, update workspaceRecord) workspaceRecord {
+	merged := current
+	if update.Name != "" {
+		merged.Name = update.Name
+	}
+	if update.ID != "" {
+		merged.ID = update.ID
+	}
+	if update.CreatedAt != "" {
+		merged.CreatedAt = update.CreatedAt
+	}
+	if update.LastUsedAt != "" {
+		merged.LastUsedAt = update.LastUsedAt
+	}
+	if update.LocalDir != "" {
+		merged.LocalDir = update.LocalDir
+	}
+	if update.Server != "" {
+		merged.Server = update.Server
+	}
+	if update.CloudAPIURL != "" {
+		merged.CloudAPIURL = update.CloudAPIURL
+	}
+	if update.AgentName != "" {
+		merged.AgentName = update.AgentName
+	}
+	if len(update.Scopes) > 0 {
+		merged.Scopes = append([]string(nil), update.Scopes...)
+	}
+	return merged
+}
+
+func workspaceRecordByName(name string) (workspaceRecord, bool) {
+	catalog, err := loadWorkspaceCatalog()
+	if err != nil {
+		return workspaceRecord{}, false
+	}
+	name = strings.TrimSpace(name)
+	for _, record := range catalog.Workspaces {
+		if record.Name == name {
+			return record, true
+		}
+	}
+	return workspaceRecord{}, false
+}
+
+func workspaceRecordByID(id string) (workspaceRecord, bool) {
+	catalog, err := loadWorkspaceCatalog()
+	if err != nil {
+		return workspaceRecord{}, false
+	}
+	id = strings.TrimSpace(id)
+	for _, record := range catalog.Workspaces {
+		if record.ID == id {
+			return record, true
+		}
+	}
+	return workspaceRecord{}, false
+}
+
+func resolveWorkspaceRecord(nameOrID string) (workspaceRecord, error) {
+	nameOrID = strings.TrimSpace(nameOrID)
+	if nameOrID != "" {
+		if record, ok := workspaceRecordByName(nameOrID); ok {
+			return record, nil
+		}
+		if record, ok := workspaceRecordByID(nameOrID); ok {
+			return record, nil
+		}
+		return workspaceRecord{}, fmt.Errorf("workspace %q not found in %s", nameOrID, workspacesPath())
+	}
+	workspaceID, err := resolveWorkspaceIDWithToken("", "")
+	if err != nil {
+		return workspaceRecord{}, err
+	}
+	if record, ok := workspaceRecordByID(workspaceID); ok {
+		return record, nil
+	}
+	return workspaceRecord{Name: workspaceID, ID: workspaceID}, nil
+}
+
 func resolveWorkspaceIDWithToken(value, token string) (string, error) {
 	value = strings.TrimSpace(value)
 	if value != "" {
@@ -1959,6 +2773,441 @@ func readCloudCredentialsFromQuery(values url.Values, fallbackAPIURL string) (cl
 		RefreshTokenExpiresAt: strings.TrimSpace(values.Get("refresh_token_expires_at")),
 		UpdatedAt:             time.Now().UTC().Format(time.RFC3339),
 	}, nil
+}
+
+func fetchWorkspaceSyncStatus(client *apiClient, workspaceID string) (syncStatusResponse, error) {
+	var status syncStatusResponse
+	if err := client.getJSON(context.Background(), fmt.Sprintf("/v1/workspaces/%s/sync/status", url.PathEscape(workspaceID)), &status); err != nil {
+		return syncStatusResponse{}, err
+	}
+	return status, nil
+}
+
+func syncProviderByName(status syncStatusResponse, provider string) (syncProviderStatus, bool) {
+	provider = normalizeProviderID(provider)
+	for _, entry := range status.Providers {
+		if normalizeProviderID(entry.Provider) == provider {
+			return entry, true
+		}
+	}
+	return syncProviderStatus{}, false
+}
+
+func providerReadyForMirror(client *apiClient, workspaceID, provider string, status syncProviderStatus) bool {
+	switch status.Status {
+	case "ready":
+		return true
+	case "syncing":
+		if status.LagSeconds >= 30 {
+			return false
+		}
+		body, _, err := client.getBytes(context.Background(), fmt.Sprintf("/v1/workspaces/%s/fs/tree?path=%s&depth=1", url.PathEscape(workspaceID), url.QueryEscape("/"+providerRootDir(provider))))
+		if err != nil {
+			return false
+		}
+		var tree treeResponse
+		if err := json.Unmarshal(body, &tree); err != nil {
+			return false
+		}
+		return len(tree.Entries) > 0
+	default:
+		return false
+	}
+}
+
+func buildSyncStateSnapshot(status syncStatusResponse, workspaceID, mode string, interval time.Duration, localDir string, pid int, stallReason string) syncStateFile {
+	snapshot := syncStateFile{
+		WorkspaceID:      workspaceID,
+		Mode:             defaultIfBlank(mode, defaultMountMode),
+		IntervalMs:       interval.Milliseconds(),
+		PendingWriteback: countDirtyTrackedFiles(localDir),
+		PendingConflicts: countFilesInDir(filepath.Join(localDir, ".relay", "conflicts")),
+		DeniedPaths:      countLines(filepath.Join(localDir, ".relay", "permissions-denied.log")),
+		StallReason:      stallReason,
+	}
+	if pid != 0 {
+		snapshot.Daemon = &syncStateDaemon{
+			PID:     pid,
+			LogFile: mountLogFile(localDir),
+			PIDFile: mountPIDFile(localDir),
+		}
+	}
+	providers := make([]syncStateProvider, 0, len(status.Providers))
+	var lastEvent string
+	for _, provider := range status.Providers {
+		item := syncStateProvider{
+			Provider:        provider.Provider,
+			Status:          provider.Status,
+			LagSeconds:      provider.LagSeconds,
+			DeadLetteredOps: provider.DeadLetteredOps,
+		}
+		if provider.LastError != nil {
+			item.LastError = strings.TrimSpace(*provider.LastError)
+		}
+		if provider.WatermarkTs != nil {
+			item.LastEventAt = strings.TrimSpace(*provider.WatermarkTs)
+			if item.LastEventAt > lastEvent {
+				lastEvent = item.LastEventAt
+			}
+		}
+		providers = append(providers, item)
+	}
+	snapshot.Providers = providers
+	snapshot.LastEventAt = lastEvent
+	return snapshot
+}
+
+func writeMirrorStateFile(localDir string, snapshot syncStateFile) error {
+	if localDir == "" {
+		return nil
+	}
+	if err := ensureMirrorLayout(localDir); err != nil {
+		return err
+	}
+	snapshot.LastReconcileAt = time.Now().UTC().Format(time.RFC3339)
+	payload, err := json.MarshalIndent(snapshot, "", "  ")
+	if err != nil {
+		return err
+	}
+	payload = append(payload, '\n')
+	return writeFileAtomically(filepath.Join(localDir, ".relay", "state.json"), payload, 0o644)
+}
+
+func countDirtyTrackedFiles(localDir string) int {
+	if localDir == "" {
+		return 0
+	}
+	var state struct {
+		Files map[string]struct {
+			Dirty bool `json:"dirty"`
+		} `json:"files"`
+	}
+	payload, err := os.ReadFile(filepath.Join(localDir, ".relayfile-mount-state.json"))
+	if err != nil {
+		return 0
+	}
+	if err := json.Unmarshal(payload, &state); err != nil {
+		return 0
+	}
+	count := 0
+	for _, tracked := range state.Files {
+		if tracked.Dirty {
+			count++
+		}
+	}
+	return count
+}
+
+func countFilesInDir(dir string) int {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0
+	}
+	count := 0
+	for _, entry := range entries {
+		if entry.IsDir() {
+			if entry.Name() == "resolved" {
+				continue
+			}
+			count += countFilesInDir(filepath.Join(dir, entry.Name()))
+			continue
+		}
+		if !entry.IsDir() {
+			count++
+		}
+	}
+	return count
+}
+
+func countLines(path string) int {
+	payload, err := os.ReadFile(path)
+	if err != nil || len(payload) == 0 {
+		return 0
+	}
+	return bytes.Count(payload, []byte{'\n'})
+}
+
+func mountPIDFile(localDir string) string {
+	return filepath.Join(localDir, ".relay", "mount.pid")
+}
+
+func mountLogFile(localDir string) string {
+	return filepath.Join(localDir, ".relay", "mount.log")
+}
+
+func writeDaemonPIDState(path string, state daemonPIDState) error {
+	payload, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		return err
+	}
+	payload = append(payload, '\n')
+	return writeFileAtomically(path, payload, 0o644)
+}
+
+func readDaemonPID(localDir string) int {
+	if localDir == "" {
+		return 0
+	}
+	payload, err := os.ReadFile(mountPIDFile(localDir))
+	if err != nil {
+		return 0
+	}
+	var state daemonPIDState
+	if json.Unmarshal(payload, &state) == nil && state.PID > 0 {
+		return state.PID
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(payload)))
+	if err != nil {
+		return 0
+	}
+	return pid
+}
+
+func rotateLogFile(path string) error {
+	if path == "" {
+		return nil
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	if info.Size() < 10*1024*1024 {
+		return nil
+	}
+	_ = os.Remove(path + ".3")
+	for idx := 2; idx >= 1; idx-- {
+		src := fmt.Sprintf("%s.%d", path, idx)
+		dst := fmt.Sprintf("%s.%d", path, idx+1)
+		if _, err := os.Stat(src); err == nil {
+			if err := os.Rename(src, dst); err != nil {
+				return err
+			}
+		}
+	}
+	return os.Rename(path, path+".1")
+}
+
+func integrationConnectionPath(localDir, provider string) string {
+	return filepath.Join(localDir, ".relay", "integrations", provider+".json")
+}
+
+func saveIntegrationConnection(localDir string, state integrationConnectionState) error {
+	if localDir == "" || strings.TrimSpace(state.Provider) == "" {
+		return nil
+	}
+	if err := ensureMirrorLayout(localDir); err != nil {
+		return err
+	}
+	payload, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		return err
+	}
+	payload = append(payload, '\n')
+	return writeFileAtomically(integrationConnectionPath(localDir, state.Provider), payload, 0o644)
+}
+
+func loadSavedConnectionID(localDir, provider string) string {
+	if localDir == "" || strings.TrimSpace(provider) == "" {
+		return ""
+	}
+	payload, err := os.ReadFile(integrationConnectionPath(localDir, provider))
+	if err != nil {
+		return ""
+	}
+	var state integrationConnectionState
+	if err := json.Unmarshal(payload, &state); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(state.ConnectionID)
+}
+
+func markProviderDisconnected(localDir, provider string) error {
+	if localDir == "" {
+		return nil
+	}
+	_ = os.RemoveAll(filepath.Join(localDir, providerRootDir(provider)))
+	if err := ensureMirrorLayout(localDir); err != nil {
+		return err
+	}
+	marker := map[string]string{
+		"provider":       provider,
+		"disconnectedAt": time.Now().UTC().Format(time.RFC3339),
+	}
+	payload, err := json.MarshalIndent(marker, "", "  ")
+	if err != nil {
+		return err
+	}
+	payload = append(payload, '\n')
+	if err := writeFileAtomically(filepath.Join(localDir, ".relay", "disconnected", provider+".json"), payload, 0o644); err != nil {
+		return err
+	}
+	_ = os.Remove(integrationConnectionPath(localDir, provider))
+	return nil
+}
+
+func providerRootDir(provider string) string {
+	provider = normalizeProviderID(provider)
+	switch provider {
+	case "slack-sage":
+		return "slack"
+	default:
+		return provider
+	}
+}
+
+func writeJSON(w io.Writer, value any) error {
+	payload, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return err
+	}
+	payload = append(payload, '\n')
+	_, err = w.Write(payload)
+	return err
+}
+
+func writeFileAtomically(path string, payload []byte, perm os.FileMode) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	if _, err := tmp.Write(payload); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(perm); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpPath, path)
+}
+
+func parseRFC3339(value string) (time.Time, bool) {
+	if strings.TrimSpace(value) == "" {
+		return time.Time{}, false
+	}
+	parsed, err := time.Parse(time.RFC3339, value)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return parsed, true
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
+func defaultIfBlank(value, fallback string) string {
+	if strings.TrimSpace(value) == "" {
+		return fallback
+	}
+	return value
+}
+
+func firstArg(fs *flag.FlagSet) string {
+	if fs.NArg() == 0 {
+		return ""
+	}
+	return fs.Arg(0)
+}
+
+func formatLag(seconds int) string {
+	if seconds <= 0 {
+		return "0s"
+	}
+	return (time.Duration(seconds) * time.Second).String()
+}
+
+func humanizeRecentTime(value string) string {
+	parsed, ok := parseRFC3339(value)
+	if !ok {
+		return value
+	}
+	ago := time.Since(parsed)
+	if ago < time.Second {
+		return "just now"
+	}
+	return fmt.Sprintf("%s ago", ago.Round(time.Second).String())
+}
+
+func maxLagSeconds(providers []syncProviderStatus) int {
+	maxLag := 0
+	for _, provider := range providers {
+		if provider.LagSeconds > maxLag {
+			maxLag = provider.LagSeconds
+		}
+	}
+	return maxLag
+}
+
+func syncerClient(syncer *mountsync.Syncer) (*mountsync.HTTPClient, bool) {
+	return syncer.HTTPClient()
+}
+
+func relayfileTokenNeedsRefresh(token string) bool {
+	claims, ok := parseJWTClaims(token)
+	if !ok {
+		return false
+	}
+	expUnix, ok := claims["exp"].(float64)
+	if !ok {
+		return false
+	}
+	exp := time.Unix(int64(expUnix), 0)
+	threshold := 5 * time.Minute
+	if iatUnix, ok := claims["iat"].(float64); ok {
+		issuedAt := time.Unix(int64(iatUnix), 0)
+		lifetime := exp.Sub(issuedAt)
+		if lifetime > 0 {
+			candidate := lifetime / 10
+			if candidate > threshold {
+				threshold = candidate
+			}
+		}
+	}
+	return !time.Now().UTC().Before(exp.Add(-threshold))
+}
+
+func parseJWTClaims(token string) (map[string]any, bool) {
+	parts := strings.Split(strings.TrimSpace(token), ".")
+	if len(parts) < 2 {
+		return nil, false
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		payload, err = base64.URLEncoding.DecodeString(parts[1])
+	}
+	if err != nil {
+		return nil, false
+	}
+	var claims map[string]any
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return nil, false
+	}
+	return claims, true
+}
+
+func isMountAuthError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var httpErr *mountsync.HTTPError
+	return errors.As(err, &httpErr) && (httpErr.StatusCode == http.StatusUnauthorized || httpErr.StatusCode == http.StatusForbidden)
 }
 
 func buildCloudURL(baseURL, path string) (*url.URL, error) {
@@ -2180,35 +3429,166 @@ func jitteredIntervalWithSample(base time.Duration, jitterRatio, sample float64)
 	return delay
 }
 
-func runMountLoop(rootCtx context.Context, syncer *mountsync.Syncer, localDir string, timeout, interval time.Duration, intervalJitter float64, websocketEnabled, once bool) error {
-	runCycle := func(reconcile bool) error {
-		ctx, cancel := context.WithTimeout(rootCtx, timeout)
-		defer cancel()
-		var err error
-		if reconcile {
-			err = syncer.Reconcile(ctx)
-		} else {
-			err = syncer.SyncOnce(ctx)
+func spawnBackgroundMountProcess(originalArgs []string, localDir, pidFile, logFile string) error {
+	if err := ensureMirrorLayout(localDir); err != nil {
+		return err
+	}
+	if err := rotateLogFile(logFile); err != nil {
+		return err
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	filteredArgs := make([]string, 0, len(originalArgs)+5)
+	for i := 0; i < len(originalArgs); i++ {
+		arg := originalArgs[i]
+		if arg == "--background" || arg == "-background" {
+			continue
 		}
+		if strings.HasPrefix(arg, "--background=") || strings.HasPrefix(arg, "-background=") {
+			continue
+		}
+		filteredArgs = append(filteredArgs, arg)
+	}
+	childArgs := append([]string{"mount"}, filteredArgs...)
+	childArgs = append(childArgs, "--daemonized", "--pid-file", pidFile, "--log-file", logFile)
+	logHandle, err := os.OpenFile(logFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	defer logHandle.Close()
+	cmd := exec.Command(executable, childArgs...)
+	cmd.Stdout = logHandle
+	cmd.Stderr = logHandle
+	if err := configureDetachedProcess(cmd); err != nil {
+		return err
+	}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	if err := cmd.Process.Release(); err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stdout, "Mirror started in background at %s. Logs: %s\n", localDir, logFile)
+	return nil
+}
+
+func runMountLoop(rootCtx context.Context, syncer *mountsync.Syncer, localDir, workspaceID, serverURL string, timeout, interval time.Duration, intervalJitter float64, websocketEnabled, once, daemonized bool, pidFile, logFile string) error {
+	httpClient, _ := syncerClient(syncer)
+	record, _ := workspaceRecordByID(workspaceID)
+	if record.ID == "" {
+		record.ID = workspaceID
+	}
+	if record.Name == "" {
+		record.Name = workspaceID
+	}
+	lastSuccess := time.Now()
+	stallReason := ""
+
+	refreshMountAuth := func(force bool) error {
+		if httpClient == nil {
+			return nil
+		}
+		if !force && !relayfileTokenNeedsRefresh(httpClient.Token()) {
+			return nil
+		}
+		cloudCreds, err := loadCloudCredentials()
 		if err != nil {
-			log.Printf("mount sync cycle failed: %v", err)
+			return nil
+		}
+		cloudCreds, err = refreshCloudCredentialsIfNeeded(cloudCreds)
+		if err != nil {
+			log.Printf("cloud session refresh failed: %v", err)
+			return nil
+		}
+		joined, err := joinWorkspaceViaCloud(cloudCreds, workspaceID, record.AgentName, record.Scopes)
+		if err != nil {
 			return err
 		}
-		log.Printf("mount sync cycle completed")
+		httpClient.SetToken(joined.Token)
+		syncer.ResetWebSocket()
+		if err := saveCredentials(credentials{
+			Server:    strings.TrimRight(joined.RelayfileURL, "/"),
+			Token:     joined.Token,
+			UpdatedAt: time.Now().UTC().Format(time.RFC3339),
+		}); err != nil {
+			return err
+		}
+		record.Server = strings.TrimRight(joined.RelayfileURL, "/")
+		record.CloudAPIURL = cloudCreds.APIURL
+		if _, err := upsertWorkspaceDetails(record); err != nil {
+			return err
+		}
 		return nil
 	}
 
+	withAuthRefresh := func(operation func(context.Context) error) error {
+		if err := refreshMountAuth(false); err != nil {
+			return err
+		}
+		ctx, cancel := context.WithTimeout(rootCtx, timeout)
+		defer cancel()
+		err := operation(ctx)
+		if isMountAuthError(err) {
+			if refreshErr := refreshMountAuth(true); refreshErr != nil {
+				return refreshErr
+			}
+			retryCtx, retryCancel := context.WithTimeout(rootCtx, timeout)
+			defer retryCancel()
+			return operation(retryCtx)
+		}
+		return err
+	}
+
+	writeSnapshot := func() {
+		if httpClient == nil {
+			return
+		}
+		client, err := newAPIClient(serverURL, httpClient.Token())
+		if err != nil {
+			return
+		}
+		status, err := fetchWorkspaceSyncStatus(client, workspaceID)
+		if err != nil {
+			return
+		}
+		_ = writeMirrorStateFile(localDir, buildSyncStateSnapshot(status, workspaceID, defaultMountMode, interval, localDir, readDaemonPID(localDir), stallReason))
+	}
+
+	runCycle := func(reconcile bool) error {
+		err := withAuthRefresh(func(ctx context.Context) error {
+			if reconcile {
+				return syncer.Reconcile(ctx)
+			}
+			return syncer.SyncOnce(ctx)
+		})
+		if err != nil {
+			stallReason = err.Error()
+			log.Printf("mount sync cycle failed: %v", err)
+			writeSnapshot()
+			return err
+		}
+		stallReason = ""
+		lastSuccess = time.Now()
+		log.Printf("mount sync cycle completed")
+		writeSnapshot()
+		return nil
+	}
+
+	log.Printf("Mirror started at %s. Sync interval %s ±%.0f%%. Type 'relayfile status' for live state.", localDir, interval.String(), intervalJitter*100)
 	initialErr := runCycle(true)
 	if once {
 		return initialErr
 	}
 
 	watcher, err := mountsync.NewFileWatcher(localDir, func(relativePath string, op fsnotify.Op) {
-		ctx, cancel := context.WithTimeout(rootCtx, timeout)
-		defer cancel()
-		if err := syncer.HandleLocalChange(ctx, relativePath, op); err != nil {
+		if err := withAuthRefresh(func(ctx context.Context) error {
+			return syncer.HandleLocalChange(ctx, relativePath, op)
+		}); err != nil {
 			log.Printf("mount local change failed: %v", err)
 		}
+		writeSnapshot()
 	})
 	if err != nil {
 		return fmt.Errorf("create file watcher: %w", err)
@@ -2226,12 +3606,18 @@ func runMountLoop(rootCtx context.Context, syncer *mountsync.Syncer, localDir st
 		select {
 		case <-rootCtx.Done():
 			log.Printf("mount sync stopping: %v", rootCtx.Err())
+			writeSnapshot()
 			return nil
 		case <-timer.C:
 			cycle++
 			reconcile := !websocketEnabled || cycle%websocketReconcileEvery == 0
 			if reconcile {
 				_ = runCycle(true)
+			}
+			if time.Since(lastSuccess) >= 10*time.Minute {
+				stallReason = "no successful reconcile for 10m"
+				log.Printf("mount stalled: %s", stallReason)
+				writeSnapshot()
 			}
 			timer.Reset(jitteredIntervalWithSample(interval, intervalJitter, mathrand.Float64()))
 		}

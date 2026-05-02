@@ -139,6 +139,21 @@ If you want to watch the workspace status while testing:
 relayfile status
 ```
 
+The synced mirror also writes a machine-readable local status file at
+`<mount>/.relay/state.json`. That file is the authoritative local surface for:
+
+- sync freshness (`status`, `lastSuccessfulReconcileAt`, `staleAfter`)
+- pending local writeback (`pendingWriteback`, per-file `status`)
+- unresolved conflicts under `<mount>/.relay/conflicts/`
+- denied paths and the append-only `<mount>/.relay/permissions-denied.log`
+
+Binary files are materialized as raw bytes locally and written back with
+`encoding: "base64"` when needed. Large writes that the server rejects stay on
+disk locally and remain visible as `status: "writeback-pending"` in
+`.relay/state.json`; they are never silently dropped. Remote deletes stay
+per-file and only remove the local mirror when the tracked remote revision still
+matches.
+
 For direct VFS inspection without mounting:
 
 ```bash
