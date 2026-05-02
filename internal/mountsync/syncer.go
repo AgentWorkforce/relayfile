@@ -2162,7 +2162,7 @@ func newLocalSnapshot(path string, data []byte) localSnapshot {
 	contentType := detectContentType(path)
 	encoding := ""
 	wireContent := string(data)
-	if !utf8.Valid(data) || !isTextLikeContentType(contentType) {
+	if shouldEncodeLocalContentAsBase64(data, contentType) {
 		encoding = "base64"
 		wireContent = base64.StdEncoding.EncodeToString(data)
 	}
@@ -2173,6 +2173,26 @@ func newLocalSnapshot(path string, data []byte) localSnapshot {
 		Encoding:    encoding,
 		Hash:        hashBytes(data),
 	}
+}
+
+func shouldEncodeLocalContentAsBase64(data []byte, contentType string) bool {
+	if !utf8.Valid(data) || !isTextLikeContentType(contentType) {
+		return true
+	}
+	return containsNonTextControlBytes(data)
+}
+
+func containsNonTextControlBytes(data []byte) bool {
+	for _, b := range data {
+		switch b {
+		case '\t', '\n', '\r':
+			continue
+		}
+		if b < 0x20 || b == 0x7f {
+			return true
+		}
+	}
+	return false
 }
 
 func isTextLikeContentType(contentType string) bool {
