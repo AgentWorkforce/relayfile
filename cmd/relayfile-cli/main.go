@@ -140,6 +140,7 @@ type syncProviderStatus struct {
 	FailureCodes          map[string]int `json:"failureCodes"`
 	DeadLetteredEnvelopes int            `json:"deadLetteredEnvelopes"`
 	DeadLetteredOps       int            `json:"deadLetteredOps"`
+	WebhookHealthy        *bool          `json:"webhookHealthy,omitempty"`
 }
 
 type exportedFile struct {
@@ -315,6 +316,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		return runWorkspace(args[1:], stdin, stdout)
 	case "integration":
 		return runIntegration(args[1:], stdin, stdout)
+	case "ops":
+		return runOps(args[1:], stdin, stdout)
 	case "mount":
 		return runMount(args[1:])
 	case "tree", "ls":
@@ -356,6 +359,8 @@ Usage:
   relayfile integration connect PROVIDER [--workspace NAME]
   relayfile integration list [--workspace NAME] [--json]
   relayfile integration disconnect PROVIDER [--workspace NAME] [--yes]
+  relayfile ops list [--workspace NAME] [--json]
+  relayfile ops replay OPID [--workspace NAME]
   relayfile mount [WORKSPACE] [LOCAL_DIR]
   relayfile tree [WORKSPACE] [PATH] [--depth N]
   relayfile read [WORKSPACE] PATH
@@ -371,6 +376,7 @@ Subcommands:
   login       Store credentials in ~/.relayfile/credentials.json
   workspace   Create, select, list, or delete locally tracked workspaces
   integration Connect, list, or disconnect workspace integrations
+  ops         List or replay dead-lettered writeback ops
   mount       Mirror a remote workspace to a local directory; add --background to detach
   tree        List a remote workspace path
   read        Print a remote file's content
@@ -1232,6 +1238,176 @@ func runIntegrationDisconnect(args []string, stdin io.Reader, stdout io.Writer) 
 	return nil
 }
 
+// deadLetterRecord matches the on-disk shape produced by the mount writeback
+// path per contract §8.4. Fields are kept lenient so we can read records
+// written by older syncer versions without failing the list output.
+type deadLetterRecord struct {
+	OpID            string `json:"opId"`
+	Path            string `json:"path,omitempty"`
+	Code            string `json:"code,omitempty"`
+	Message         string `json:"message,omitempty"`
+	CreatedAt       string `json:"createdAt,omitempty"`
+	LastAttemptedAt string `json:"lastAttemptedAt,omitempty"`
+	Attempts        int    `json:"attempts,omitempty"`
+	ReplayURL       string `json:"replayUrl,omitempty"`
+}
+
+func deadLetterDirFor(localDir string) string {
+	return filepath.Join(localDir, ".relay", "dead-letter")
+}
+
+func runOps(args []string, stdin io.Reader, stdout io.Writer) error {
+	if len(args) == 0 {
+		return errors.New("ops subcommand is required: list or replay")
+	}
+	switch args[0] {
+	case "list":
+		return runOpsList(args[1:], stdout)
+	case "replay":
+		return runOpsReplay(args[1:], stdin, stdout)
+	default:
+		return fmt.Errorf("unknown ops subcommand %q", args[0])
+	}
+}
+
+func runOpsList(args []string, stdout io.Writer) error {
+	fs := flag.NewFlagSet("ops list", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	workspaceName := fs.String("workspace", "", "workspace name or id")
+	jsonOutput := fs.Bool("json", false, "emit JSON")
+	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
+		"workspace": true,
+		"json":      false,
+	})); err != nil {
+		return err
+	}
+	if fs.NArg() > 0 {
+		return errors.New("usage: relayfile ops list [--workspace NAME] [--json]")
+	}
+	record, err := resolveWorkspaceRecord(strings.TrimSpace(*workspaceName))
+	if err != nil {
+		return err
+	}
+	if record.LocalDir == "" {
+		if *jsonOutput {
+			return writeJSON(stdout, []deadLetterRecord{})
+		}
+		fmt.Fprintln(stdout, "No dead-lettered ops")
+		return nil
+	}
+	records, err := readDeadLetterRecords(record.LocalDir)
+	if err != nil {
+		return err
+	}
+	if *jsonOutput {
+		return writeJSON(stdout, records)
+	}
+	if len(records) == 0 {
+		fmt.Fprintln(stdout, "No dead-lettered ops")
+		return nil
+	}
+	fmt.Fprintln(stdout, "op_id\tpath\tcode\tattempts\tlast_attempted_at")
+	for _, r := range records {
+		fmt.Fprintf(stdout, "%s\t%s\t%s\t%d\t%s\n",
+			r.OpID,
+			defaultIfBlank(r.Path, "-"),
+			defaultIfBlank(r.Code, "-"),
+			r.Attempts,
+			defaultIfBlank(r.LastAttemptedAt, "-"),
+		)
+	}
+	return nil
+}
+
+func readDeadLetterRecords(localDir string) ([]deadLetterRecord, error) {
+	dir := deadLetterDirFor(localDir)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	records := make([]deadLetterRecord, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		payload, err := os.ReadFile(filepath.Join(dir, entry.Name()))
+		if err != nil {
+			return nil, err
+		}
+		var record deadLetterRecord
+		if err := json.Unmarshal(payload, &record); err != nil {
+			return nil, fmt.Errorf("invalid dead-letter record %s: %w", entry.Name(), err)
+		}
+		if strings.TrimSpace(record.OpID) == "" {
+			// Use filename as a fallback so the user can still replay it.
+			record.OpID = strings.TrimSuffix(entry.Name(), ".json")
+		}
+		records = append(records, record)
+	}
+	sort.Slice(records, func(i, j int) bool {
+		return records[i].OpID < records[j].OpID
+	})
+	return records, nil
+}
+
+func runOpsReplay(args []string, stdin io.Reader, stdout io.Writer) error {
+	_ = stdin
+	fs := flag.NewFlagSet("ops replay", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	workspaceName := fs.String("workspace", "", "workspace name or id")
+	cloudAPIURL := fs.String("cloud-api-url", envOrDefault("RELAYFILE_CLOUD_API_URL", defaultCloudAPIURL), "Relayfile Cloud API URL")
+	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
+		"workspace":     true,
+		"cloud-api-url": true,
+	})); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return errors.New("usage: relayfile ops replay OPID [--workspace NAME]")
+	}
+	opID := strings.TrimSpace(fs.Arg(0))
+	if opID == "" {
+		return errors.New("opId is required")
+	}
+	record, err := resolveWorkspaceRecord(strings.TrimSpace(*workspaceName))
+	if err != nil {
+		return err
+	}
+	cloudCreds, err := ensureCloudCredentials(strings.TrimSpace(*cloudAPIURL), "", 5*time.Minute, false, io.Discard)
+	if err != nil {
+		return err
+	}
+	joined, err := joinWorkspaceViaCloud(cloudCreds, record.ID, record.AgentName, record.Scopes)
+	if err != nil {
+		return err
+	}
+	client, err := newAPIClient(cloudCreds.APIURL, joined.Token)
+	if err != nil {
+		return err
+	}
+	if err := client.postJSON(
+		context.Background(),
+		fmt.Sprintf("/api/v1/workspaces/%s/ops/%s/replay", url.PathEscape(record.ID), url.PathEscape(opID)),
+		struct{}{},
+		nil,
+	); err != nil {
+		return err
+	}
+	// Per contract §8.4, on successful replay the local mirror record is
+	// removed so the user's view stays in sync with the queue.
+	if record.LocalDir != "" {
+		path := filepath.Join(deadLetterDirFor(record.LocalDir), opID+".json")
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			fmt.Fprintf(stdout, "warning: replay queued but failed to remove %s: %v\n", path, err)
+		}
+	}
+	fmt.Fprintf(stdout, "Replay queued for op %s\n", opID)
+	return nil
+}
+
 func runWorkspaceCreate(args []string, stdout io.Writer) error {
 	fs := flag.NewFlagSet("workspace create", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -1899,6 +2075,13 @@ func runStatus(args []string, stdout io.Writer) error {
 			line += "   last error: " + strings.TrimSpace(*provider.LastError)
 		}
 		fmt.Fprintln(stdout, line)
+		// Contract §7.4: warn when the webhook is unhealthy and the watermark
+		// has fallen behind, so users know polling is the only thing keeping
+		// the mirror current.
+		if provider.WebhookHealthy != nil && !*provider.WebhookHealthy && provider.LagSeconds > 60 {
+			fmt.Fprintf(stdout, "    %s webhook unhealthy — falling back to periodic sync (lag %s)\n",
+				provider.Provider, formatLag(provider.LagSeconds))
+		}
 	}
 	if record.LocalDir != "" {
 		fmt.Fprintf(stdout, "\nlocal mirror: %s\n", record.LocalDir)

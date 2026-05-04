@@ -917,3 +917,225 @@ func testJWTWithWorkspaceAndAgent(workspaceID, agentName string) string {
 	payload := base64.RawURLEncoding.EncodeToString([]byte(`{"workspace_id":"` + workspaceID + `","agent_name":"` + agentName + `","aud":"relayfile"}`))
 	return header + "." + payload + ".sig"
 }
+
+func TestStatusRendersWebhookUnhealthyWarning(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	localDir := t.TempDir()
+	if err := ensureMirrorLayout(localDir); err != nil {
+		t.Fatalf("ensureMirrorLayout failed: %v", err)
+	}
+	if _, err := upsertWorkspaceDetails(workspaceRecord{
+		Name:       "demo",
+		ID:         "ws_demo",
+		LocalDir:   localDir,
+		CreatedAt:  time.Now().UTC().Format(time.RFC3339),
+		LastUsedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("upsertWorkspaceDetails failed: %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path != "/v1/workspaces/ws_demo/sync/status" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"workspaceId":"ws_demo","providers":[{"provider":"notion","status":"lagging","lagSeconds":80,"watermarkTs":"2026-05-02T18:00:00Z","webhookHealthy":false}]}`))
+	}))
+	defer server.Close()
+
+	if err := saveCredentials(credentials{Server: server.URL, Token: "token"}); err != nil {
+		t.Fatalf("saveCredentials failed: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := run([]string{"status", "demo"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("run status failed: %v", err)
+	}
+	got := stdout.String()
+	if !strings.Contains(got, "notion webhook unhealthy") {
+		t.Fatalf("expected webhook-unhealthy warning row, got: %q", got)
+	}
+	if !strings.Contains(got, "lag 1m20s") {
+		t.Fatalf("expected lag in warning row, got: %q", got)
+	}
+}
+
+func TestStatusOmitsWebhookWarningWhenHealthy(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	localDir := t.TempDir()
+	if err := ensureMirrorLayout(localDir); err != nil {
+		t.Fatalf("ensureMirrorLayout failed: %v", err)
+	}
+	if _, err := upsertWorkspaceDetails(workspaceRecord{
+		Name:       "demo",
+		ID:         "ws_demo",
+		LocalDir:   localDir,
+		CreatedAt:  time.Now().UTC().Format(time.RFC3339),
+		LastUsedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("upsertWorkspaceDetails failed: %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"workspaceId":"ws_demo","providers":[{"provider":"notion","status":"ready","lagSeconds":4,"watermarkTs":"2026-05-02T18:00:00Z","webhookHealthy":true}]}`))
+	}))
+	defer server.Close()
+
+	if err := saveCredentials(credentials{Server: server.URL, Token: "token"}); err != nil {
+		t.Fatalf("saveCredentials failed: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := run([]string{"status", "demo"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("run status failed: %v", err)
+	}
+	if got := stdout.String(); strings.Contains(got, "webhook unhealthy") {
+		t.Fatalf("did not expect webhook-unhealthy warning, got: %q", got)
+	}
+}
+
+func TestOpsListReadsLocalDeadLetterMirror(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	localDir := t.TempDir()
+	if err := ensureMirrorLayout(localDir); err != nil {
+		t.Fatalf("ensureMirrorLayout failed: %v", err)
+	}
+	dlDir := filepath.Join(localDir, ".relay", "dead-letter")
+	if err := os.MkdirAll(dlDir, 0o755); err != nil {
+		t.Fatalf("mkdir dead-letter failed: %v", err)
+	}
+	record := `{"opId":"op_abc","path":"/notion/page.json","code":"validation_error","message":"body must include event","attempts":3,"lastAttemptedAt":"2026-05-02T18:05:00Z","replayUrl":"https://cloud.test/api/v1/workspaces/ws_demo/ops/op_abc/replay"}`
+	if err := os.WriteFile(filepath.Join(dlDir, "op_abc.json"), []byte(record), 0o644); err != nil {
+		t.Fatalf("write dead-letter record failed: %v", err)
+	}
+	if _, err := upsertWorkspaceDetails(workspaceRecord{
+		Name:       "demo",
+		ID:         "ws_demo",
+		LocalDir:   localDir,
+		CreatedAt:  time.Now().UTC().Format(time.RFC3339),
+		LastUsedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("upsertWorkspaceDetails failed: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := run([]string{"ops", "list", "--workspace", "demo"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("run ops list failed: %v", err)
+	}
+	got := stdout.String()
+	for _, fragment := range []string{"op_abc", "/notion/page.json", "validation_error", "2026-05-02T18:05:00Z"} {
+		if !strings.Contains(got, fragment) {
+			t.Fatalf("expected %q in ops list output, got %q", fragment, got)
+		}
+	}
+}
+
+func TestOpsListReportsEmptyWhenNoDeadLetterDir(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	localDir := t.TempDir()
+	if _, err := upsertWorkspaceDetails(workspaceRecord{
+		Name:       "demo",
+		ID:         "ws_demo",
+		LocalDir:   localDir,
+		CreatedAt:  time.Now().UTC().Format(time.RFC3339),
+		LastUsedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("upsertWorkspaceDetails failed: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := run([]string{"ops", "list", "--workspace", "demo"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("run ops list failed: %v", err)
+	}
+	if got := strings.TrimSpace(stdout.String()); got != "No dead-lettered ops" {
+		t.Fatalf("expected empty marker, got: %q", got)
+	}
+}
+
+func TestOpsReplayPostsToCloudAndRemovesLocalRecord(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	localDir := t.TempDir()
+	if err := ensureMirrorLayout(localDir); err != nil {
+		t.Fatalf("ensureMirrorLayout failed: %v", err)
+	}
+	dlDir := filepath.Join(localDir, ".relay", "dead-letter")
+	if err := os.MkdirAll(dlDir, 0o755); err != nil {
+		t.Fatalf("mkdir dead-letter failed: %v", err)
+	}
+	dlPath := filepath.Join(dlDir, "op_abc.json")
+	if err := os.WriteFile(dlPath, []byte(`{"opId":"op_abc","attempts":3}`), 0o644); err != nil {
+		t.Fatalf("write dead-letter record failed: %v", err)
+	}
+	if _, err := upsertWorkspaceDetails(workspaceRecord{
+		Name:       "demo",
+		ID:         "ws_demo",
+		LocalDir:   localDir,
+		AgentName:  "relayfile-cli",
+		Scopes:     append([]string(nil), defaultJoinScopes...),
+		CreatedAt:  time.Now().UTC().Format(time.RFC3339),
+		LastUsedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("upsertWorkspaceDetails failed: %v", err)
+	}
+
+	seen := map[string]bool{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/workspaces/ws_demo/join":
+			seen["join"] = true
+			_, _ = w.Write([]byte(`{"workspaceId":"ws_demo","token":"rf_join","relayfileUrl":"https://relayfile.test"}`))
+		case "/api/v1/workspaces/ws_demo/ops/op_abc/replay":
+			seen["replay"] = true
+			if r.Method != http.MethodPost {
+				t.Fatalf("unexpected replay method: %s", r.Method)
+			}
+			if got := r.Header.Get("Authorization"); got != "Bearer rf_join" {
+				t.Fatalf("unexpected replay Authorization: %q", got)
+			}
+			_, _ = w.Write([]byte(`{"status":"queued","id":"op_abc"}`))
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	if err := saveCloudCredentials(cloudCredentials{
+		APIURL:               server.URL,
+		AccessToken:          "cld_token",
+		AccessTokenExpiresAt: time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("saveCloudCredentials failed: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := run([]string{
+		"ops", "replay", "op_abc",
+		"--workspace", "demo",
+		"--cloud-api-url", server.URL,
+	}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("run ops replay failed: %v\noutput:\n%s", err, stdout.String())
+	}
+	for _, key := range []string{"join", "replay"} {
+		if !seen[key] {
+			t.Fatalf("expected %s request", key)
+		}
+	}
+	if got := stdout.String(); !strings.Contains(got, "Replay queued for op op_abc") {
+		t.Fatalf("unexpected replay output: %q", got)
+	}
+	if _, err := os.Stat(dlPath); !os.IsNotExist(err) {
+		t.Fatalf("expected dead-letter record removed, got err=%v", err)
+	}
+}

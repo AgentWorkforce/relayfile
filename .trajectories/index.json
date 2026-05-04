@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "lastUpdated": "2026-05-01T15:27:12.684Z",
+  "lastUpdated": "2026-05-04T10:01:57.858Z",
   "trajectories": {
     "traj_mfyus7zfgxt2": {
       "title": "062-sdk-setup-client-workflow",
@@ -110,6 +110,27 @@
       "startedAt": "2026-05-01T15:22:05.684Z",
       "completedAt": "2026-05-01T15:27:12.578Z",
       "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-05/traj_hyqnsfininh5.json"
+    },
+    "traj_ailh4waboewf": {
+      "title": "Design relayfile low-friction cloud login and integration mount flow",
+      "status": "completed",
+      "startedAt": "2026-05-01T23:39:39.687Z",
+      "completedAt": "2026-05-01T23:45:39.611Z",
+      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-05/traj_ailh4waboewf.json"
+    },
+    "traj_ozxb98dy7hk5": {
+      "title": "Research relayfile positioning vs MCP and CLI",
+      "status": "completed",
+      "startedAt": "2026-05-04T10:00:09.507Z",
+      "completedAt": "2026-05-04T10:01:10.778Z",
+      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-05/traj_ozxb98dy7hk5.json"
+    },
+    "traj_rnldje4mr6nw": {
+      "title": "Research relayfile positioning vs MCP and CLI",
+      "status": "completed",
+      "startedAt": "2026-05-04T10:01:57.596Z",
+      "completedAt": "2026-05-04T10:01:57.776Z",
+      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-05/traj_rnldje4mr6nw.json"
     }
   }
 }
