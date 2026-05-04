@@ -294,10 +294,24 @@ func (e *apiError) Error() string {
 	return fmt.Sprintf("http %d %s: %s", e.StatusCode, e.Code, e.Message)
 }
 
+// cloudLoginStateMismatchExitCode is the exit code mandated by productized
+// cloud-mount contract A2 when the browser callback's state parameter does
+// not match the value the CLI generated. The dedicated code lets shells and
+// CI distinguish a tampered/replayed login flow from a generic CLI error.
+const cloudLoginStateMismatchExitCode = 10
+
+// ErrCloudLoginStateMismatch is returned by runCloudLogin when the OAuth
+// callback's `state` query parameter does not match the value the CLI
+// generated. main() maps this sentinel to exit code 10 per A2.
+var ErrCloudLoginStateMismatch = errors.New("Relayfile Cloud login state mismatch")
+
 func main() {
 	log.SetFlags(0)
 	if err := run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
+		if errors.Is(err, ErrCloudLoginStateMismatch) {
+			os.Exit(cloudLoginStateMismatchExitCode)
+		}
 		os.Exit(1)
 	}
 }
@@ -926,7 +940,7 @@ func runCloudLogin(cloudAPIURL string, timeout time.Duration, shouldOpenBrowser 
 		}
 		if got := r.URL.Query().Get("state"); got != state {
 			http.Error(w, "Relayfile Cloud login state mismatch", http.StatusBadRequest)
-			errCh <- errors.New("Relayfile Cloud login state mismatch")
+			errCh <- ErrCloudLoginStateMismatch
 			return
 		}
 		if loginError := strings.TrimSpace(r.URL.Query().Get("error")); loginError != "" {
