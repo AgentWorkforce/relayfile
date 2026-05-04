@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "lastUpdated": "2026-05-01T15:27:12.684Z",
+  "lastUpdated": "2026-05-04T10:40:25.933Z",
   "trajectories": {
     "traj_mfyus7zfgxt2": {
       "title": "062-sdk-setup-client-workflow",
@@ -110,6 +110,55 @@
       "startedAt": "2026-05-01T15:22:05.684Z",
       "completedAt": "2026-05-01T15:27:12.578Z",
       "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-05/traj_hyqnsfininh5.json"
+    },
+    "traj_ailh4waboewf": {
+      "title": "Design relayfile low-friction cloud login and integration mount flow",
+      "status": "completed",
+      "startedAt": "2026-05-01T23:39:39.687Z",
+      "completedAt": "2026-05-01T23:45:39.611Z",
+      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-05/traj_ailh4waboewf.json"
+    },
+    "traj_ozxb98dy7hk5": {
+      "title": "Research relayfile positioning vs MCP and CLI",
+      "status": "completed",
+      "startedAt": "2026-05-04T10:00:09.507Z",
+      "completedAt": "2026-05-04T10:01:10.778Z",
+      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-05/traj_ozxb98dy7hk5.json"
+    },
+    "traj_rnldje4mr6nw": {
+      "title": "Research relayfile positioning vs MCP and CLI",
+      "status": "completed",
+      "startedAt": "2026-05-04T10:01:57.596Z",
+      "completedAt": "2026-05-04T10:01:57.776Z",
+      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-05/traj_rnldje4mr6nw.json"
+    },
+    "traj_78fn1fyq1m4d": {
+      "title": "Explain relayfile relayauth governance model",
+      "status": "completed",
+      "startedAt": "2026-05-04T10:16:51.523Z",
+      "completedAt": "2026-05-04T10:17:37.753Z",
+      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-05/traj_78fn1fyq1m4d.json"
+    },
+    "traj_aomtlnb3g5sa": {
+      "title": "Identify relayfile relayauth changes for per-user governance",
+      "status": "completed",
+      "startedAt": "2026-05-04T10:22:29.278Z",
+      "completedAt": "2026-05-04T10:22:29.396Z",
+      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-05/traj_aomtlnb3g5sa.json"
+    },
+    "traj_5uxheavo6d3q": {
+      "title": "Write per-user relayfile governance spec",
+      "status": "completed",
+      "startedAt": "2026-05-04T10:25:24.905Z",
+      "completedAt": "2026-05-04T10:27:40.891Z",
+      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-05/traj_5uxheavo6d3q.json"
+    },
+    "traj_2nl6e3gqkvki": {
+      "title": "Document programmatic Notion connect interface",
+      "status": "completed",
+      "startedAt": "2026-05-04T10:38:33.363Z",
+      "completedAt": "2026-05-04T10:40:25.800Z",
+      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-05/traj_2nl6e3gqkvki.json"
     }
   }
 }

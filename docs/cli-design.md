@@ -1,7 +1,7 @@
 # RelayFile CLI — Design Doc
 
-**Status:** Draft
-**Date:** 2026-03-24
+**Status:** Updated for v1 Cloud productization
+**Date:** 2026-05-02 (original: 2026-03-24)
 
 ---
 
@@ -89,6 +89,12 @@ relayfile setup [--provider github] [--workspace my-project] [--local-dir ./rela
 3. Create and join a Cloud workspace, then store the Relayfile VFS URL/token in `~/.relayfile/credentials.json`.
 4. Request a hosted Nango connect session for the selected integration and wait until the Cloud status endpoint reports it ready.
 5. Start the existing `relayfile mount` sync loop so the user and agent see ordinary files.
+
+Re-running `relayfile setup` with the same workspace name reuses the locally
+tracked workspace ID, refreshes the Cloud session if needed, re-joins to mint a
+fresh Relayfile JWT, preserves the existing local mirror directory, and only
+opens a new integration connect flow when the requested provider is not already
+connected.
 
 This path is intentionally a wrapper over the lower-level commands and Cloud APIs. Existing `login`, `workspace`, `mount`, `tree`, and `read` commands remain available for CI, self-hosted servers, and scripted workflows.
 
@@ -209,25 +215,24 @@ relayfile mount <workspace> [local-dir]
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--interval` | `2s` | Polling interval between sync cycles |
+| `--interval` | `30s` | Polling interval between sync cycles |
 | `--once` | `false` | Run a single sync cycle and exit |
-| `--provider` | (none) | Filter events by provider name |
+| `--mode` | `poll` | `poll` (synced mirror, recommended) or `fuse` (opt-in, POSIX) |
+| `--background` | `false` | Detach from terminal; write PID to `.relay/mount.pid`, logs to `.relay/mount.log` |
+| `--pid-file` | `.relay/mount.pid` | Override PID file path |
 | `--no-websocket` | `false` | Disable WebSocket streaming, poll only |
 
 **Behavior:**
 
-1. Resolve workspace name to ID.
-2. Create `local-dir` if it doesn't exist.
-3. Load or initialize state file at `<local-dir>/.relayfile-mount-state.json`.
-4. Start the existing `mountsync.Syncer` engine (reuses `internal/mountsync`).
-5. Run in foreground. Print sync activity to stderr:
-   ```
-   [mount] syncing ws_abc123 -> ./my-project
-   [mount] + /src/main.go (1.2 KB)
-   [mount] ~ /README.md (updated)
-   [mount] waiting for changes...
-   ```
-6. `Ctrl+C` (SIGINT/SIGTERM) triggers graceful shutdown.
+1. Print on start: `Mirror started at <local-dir>. Sync interval 30s ±20%. Type 'relayfile status' for live state.`
+2. Resolve workspace name to ID.
+3. Create `local-dir` if it doesn't exist; create `.relay/` subdirectory.
+4. Start `mountsync.Syncer` in foreground (default) or detached (`--background`).
+5. Foreground mode logs to stderr; `Ctrl+C` flushes pending writes (≤5 s), persists `.relay/state.json`, and exits.
+6. Background mode (`--background`): fork + setsid (macOS/Linux) or detached child (Windows); redirect stdio to `.relay/mount.log` (rotated at 10 MB × 3); write PID to `.relay/mount.pid`.
+7. On `--mode=fuse` in an environment without FUSE: exit 50 with `fuse mode is not available in this build; rerun with --mode=poll`.
+
+**Sync state:** After every cycle and on clean exit, the daemon writes `.relay/state.json` atomically. Token expiry triggers an automatic workspace rejoin without dropping the process. If no successful reconcile occurs for ≥10 minutes, logs `mount stalled: <reason>` but keeps running.
 
 **Relationship to `relayfile-mount`:** This command replaces the standalone `relayfile-mount` binary for end users. The `cmd/relayfile-mount` binary remains available for backwards compatibility and for deployments that need a minimal single-purpose daemon.
 
@@ -344,10 +349,10 @@ relayfile export <workspace> [--format tar|json|patch] [--output file]
 
 ### `relayfile status`
 
-Show workspace status and stats.
+Show workspace sync status including per-provider state.
 
 ```
-relayfile status [workspace]
+relayfile status [workspace] [--json]
 ```
 
 | Argument | Required | Default | Description |
@@ -357,15 +362,136 @@ relayfile status [workspace]
 **Behavior:**
 
 1. Resolve workspace (uses default if omitted).
-2. Fetch workspace metadata and tree stats.
-3. Print:
+2. Read Cloud `/sync` endpoint and local `.relay/state.json`.
+3. Print one-screen summary:
    ```
-   Workspace:  my-project (ws_abc123)
-   Server:     https://api.relayfile.dev
-   Files:      142
-   Last event: 2026-03-24T11:42:00Z (3 minutes ago)
-   Agents:     compose-agent, reviewer-bot
+   workspace ws_abc (my-project)   mode: poll   lag: 4s
+     github       ready    2,400 files   last event 2s ago
+     notion       ready      214 files   last event 4s ago
+     linear       error    last error: 401 invalid_grant (3 min ago)
+
+   pending writebacks: 0    conflicts: 0    denied: 12
+     see .relay/permissions-denied.log for denied paths
    ```
+4. If `webhookHealthy=false` and `lagSeconds > 60` for any provider, add a warning row.
+
+`--json` emits the same shape machine-readably.
+
+---
+
+### `relayfile integration`
+
+Manage provider integrations after initial setup.
+
+```
+relayfile integration connect <provider> [--workspace NAME] [--no-open] [--timeout 5m]
+relayfile integration list      [--workspace NAME] [--json]
+relayfile integration disconnect <provider> [--workspace NAME] [--yes]
+```
+
+**`connect` behavior:**
+
+1. Call `POST /api/v1/workspaces/{id}/integrations/connect-session` with the provider.
+2. Print the `connectLink`; open browser unless `--no-open`.
+3. Poll `GET /api/v1/workspaces/{id}/integrations/{provider}/status` every 2 s.
+4. On ready: `<provider> connected. Files will appear under <local-dir>/<provider> within ~30s.`
+5. On timeout (default 5 m): print progress hint and exit 0 (sync continues in background).
+6. Persist Nango connection ID to `.relay/integrations/<provider>.json`.
+7. Does **not** require remounting. The running mount loop picks up new files on the next cycle.
+
+**`list` output:**
+
+```
+provider     status    lag     last event
+github       ready     2s      just now
+notion       syncing   18s     5s ago
+linear       error     —       401 invalid_grant (3 min ago)
+```
+
+**`disconnect` behavior:**
+
+1. Prompt for confirmation unless `--yes`.
+2. `DELETE /api/v1/workspaces/{id}/integrations/{provider}/status`.
+3. Remove `<local-dir>/<provider>/` from the mirror.
+4. Write `.relay/disconnected/<provider>.json` marker.
+
+---
+
+### `relayfile pull`
+
+Force a reconcile of a path or the entire workspace, discarding stale remote-deleted files.
+
+```
+relayfile pull [PATH]
+```
+
+| Argument | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `PATH` | No | workspace root | Subtree or file to refresh |
+
+**Behavior:**
+
+1. Re-fetch the given subtree from the Cloud VFS.
+2. Discard local copies of files no longer present remotely (unless locally dirty).
+3. Locally modified (dirty) files are **not** discarded; if a remote change would overwrite them, they land in `.relay/conflicts/`.
+
+---
+
+### `relayfile permissions`
+
+Show writeback rules for a path.
+
+```
+relayfile permissions [PATH]
+```
+
+Reads `/<provider>/_PERMISSIONS.md` and the catalog for the given path (or workspace root). Prints which paths are writable and the expected schema.
+
+---
+
+### `relayfile ops`
+
+Inspect and replay dead-lettered writeback operations.
+
+```
+relayfile ops list   [--workspace NAME] [--json]
+relayfile ops replay <opId>
+```
+
+**`list` output:**
+
+```
+opId        path                                 code               attempts   created
+op_abc123   github/.../review.json               validation_error   3          2026-05-02T18:00Z
+```
+
+**`replay` behavior:**
+
+1. `POST /v1/workspaces/{id}/ops/{opId}/replay`.
+2. On success: delete `.relay/dead-letter/<opId>.json` and print `op_abc123 replayed successfully`.
+3. On failure: print the error and leave the dead-letter file in place.
+
+---
+
+### `relayfile stop`
+
+Signal a background mount daemon to shut down.
+
+```
+relayfile stop [workspace]
+```
+
+Sends SIGTERM to the PID in `.relay/mount.pid`. The daemon flushes pending writes (≤5 s) and exits cleanly.
+
+### `relayfile logs`
+
+Print the detached mount log for a workspace.
+
+```
+relayfile logs [workspace] [--lines 40]
+```
+
+Reads `<local-dir>/.relay/mount.log` and prints the requested tail.
 
 ---
 
@@ -387,8 +513,23 @@ These flags apply to all commands:
 
 ```
 ~/.relayfile/
-  credentials.json    # server URL + token (0600)
-  workspaces.json     # workspace name -> ID mapping + default
+  cloud-credentials.json    # Cloud login tokens (access + refresh) (0600)
+  credentials.json          # Relayfile VFS workspace token (0600)
+  workspaces.json           # workspace name → ID mapping + default + lastUsedAt
+
+<local-dir>/
+  <provider>/               # one top-level dir per connected provider
+  .relay/
+    state.json              # sync state (updated atomically after each cycle)
+    mount.pid               # PID of background daemon
+    mount.log               # daemon log (rotated at 10 MB × 3)
+    conflicts/              # one file per unresolved conflict
+      resolved/             # cleared conflicts (audit trail)
+    dead-letter/            # one JSON per permanently failed writeback op
+    disconnected/           # markers for removed integrations
+    permissions-denied.log  # append-only denial log
+    integrations/
+      <provider>.json       # Nango connectionId per provider
 ```
 
 ---
@@ -426,13 +567,20 @@ Error: not authenticated. Run 'relayfile login' or set RELAYFILE_TOKEN.
 | 1 | General error (network, server error, invalid input) |
 | 2 | Authentication failure (no token, token rejected) |
 | 3 | Resource not found (workspace doesn't exist) |
+| 10 | Cloud login failed (OAuth state mismatch or error) |
+| 11 | Cloud login timed out |
+| 20 | Workspace create/join failed |
+| 30 | Integration connect failed |
+| 31 | Integration not ready before deadline |
+| 40 | Initial sync not ready before deadline |
+| 50 | Mount initialization failed (includes FUSE unavailable) |
 | 130 | Interrupted (Ctrl+C) |
 
 ---
 
 ## Implementation plan
 
-### Phase 1 — Core (ship first)
+### Phase 1 — Core (shipped)
 
 1. `relayfile login` — API key auth, credential storage
 2. `relayfile mount` — wraps existing `mountsync` engine
@@ -440,18 +588,30 @@ Error: not authenticated. Run 'relayfile login' or set RELAYFILE_TOKEN.
 4. `relayfile export` — wraps export API
 5. `relayfile status` — workspace info
 
-### Phase 2 — Workspace management
+### Phase 2 — Workspace management (shipped)
 
 6. `relayfile workspace create`
 7. `relayfile workspace list`
 8. `relayfile workspace delete`
 
-### Phase 3 — Polish
+### Phase 3 — Cloud productization (v1, current)
 
-9. OAuth browser flow
-10. Auto-update / version check
-11. Shell completions (bash, zsh, fish)
-12. `relayfile doctor` — diagnose connectivity and auth issues
+9. `relayfile setup` / `relayfile` — guided Cloud setup wizard
+10. `relayfile integration connect/list/disconnect` — multi-provider management
+11. `relayfile status` extended — per-provider sync state, webhook health, conflict counts
+12. `relayfile mount --background` + `relayfile stop` — daemon mode
+13. `relayfile pull` — force reconcile
+14. `relayfile permissions` — writable path inspection
+15. `relayfile ops list/replay` — dead-letter visibility and recovery
+16. Cloud token refresh + VFS token rejoin (automatic, inside mount daemon)
+17. `.relay/state.json`, `.relay/conflicts/`, `.relay/dead-letter/` directories
+
+### Phase 4 — Polish (planned)
+
+18. `relayfile doctor` — diagnose connectivity and auth issues
+19. Auto-update / version check
+20. Shell completions (bash, zsh, fish)
+21. `relayfile install-service` — launchd/systemd/Windows service (out of scope for v1)
 
 ### Build target
 

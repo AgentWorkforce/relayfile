@@ -12,6 +12,6 @@ require (
 require golang.org/x/text v0.14.0 // indirect
 
 require (
-	golang.org/x/sys v0.28.0 // indirect
+	golang.org/x/sys v0.28.0
 	nhooyr.io/websocket v1.8.17
 )

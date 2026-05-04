@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -65,7 +66,7 @@ func main() {
 	intervalJitter := flag.Float64("interval-jitter", floatEnv("RELAYFILE_MOUNT_INTERVAL_JITTER", 0.2), "sync interval jitter ratio (0.0-1.0)")
 	timeout := flag.Duration("timeout", durationEnv("RELAYFILE_MOUNT_TIMEOUT", 15*time.Second), "per-sync timeout")
 	websocketEnabled := flag.Bool("websocket", boolEnv("RELAYFILE_MOUNT_WEBSOCKET", true), "enable websocket event streaming when available")
-	mode := flag.String("mode", envOrDefault("RELAYFILE_MOUNT_MODE", mountModePoll), "mount mode: poll or fuse")
+	mode := flag.String("mode", envOrDefault("RELAYFILE_MOUNT_MODE", mountModePoll), "mount mode: poll (synced mirror, recommended) or fuse")
 	fuse := flag.Bool("fuse", boolEnv("RELAYFILE_MOUNT_FUSE", false), "shortcut for --mode=fuse")
 	once := flag.Bool("once", false, "run one sync cycle and exit")
 	flag.Parse()
@@ -158,10 +159,13 @@ func runPollingMount(rootCtx context.Context, cfg mountConfig) error {
 		WebSocket:     boolPtr(cfg.websocketEnabled),
 		RootCtx:       rootCtx,
 		Logger:        log.Default(),
+		Mode:          cfg.mode,
+		Interval:      cfg.interval,
 	})
 	if err != nil {
 		return fmt.Errorf("initialize mount syncer: %w", err)
 	}
+	log.Printf("Mirror started at %s. Sync interval %s +/- %.0f%%. Public state: %s", cfg.localDir, cfg.interval.Round(time.Second), cfg.intervalJitter*100, filepath.Join(cfg.localDir, ".relay", "state.json"))
 
 	run := func(reconcile bool) {
 		ctx, cancel := context.WithTimeout(rootCtx, cfg.timeout)

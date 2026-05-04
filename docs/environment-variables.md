@@ -152,11 +152,15 @@ the `workspace_id`/`wks` claim in the active token, then the default stored by
 | `RELAYFILE_BASE_URL` | string | `https://api.relayfile.dev` for login fallback | Used when `RELAYFILE_SERVER` is unset |
 | `RELAYFILE_TOKEN` | string | unset | Used for `login` and as a token fallback before saved credentials |
 | `RELAYFILE_WORKSPACE` | string | unset | Workspace override for CLI commands when no workspace argument is supplied |
+| `RELAYFILE_CLOUD_API_URL` | string | `https://agentrelay.com/cloud` | Cloud control-plane URL used by `relayfile`, `relayfile setup`, and integration lifecycle commands |
+| `RELAYFILE_CLOUD_TOKEN` | string | unset | Cloud access token used for headless setup/integration flows; skips browser login when set |
 | `RELAYFILE_OBSERVER_URL` | string | `https://agentrelay.com/observer/file` | Hosted observer URL used by `relayfile observer` |
 | `RELAYFILE_REMOTE_PATH` | string | `/` | Mount command default |
 | `RELAYFILE_MOUNT_PROVIDER` | string | unset | Mount command provider filter |
 | `RELAYFILE_MOUNT_STATE_FILE` | string | unset | Mount command state-file default |
-| `RELAYFILE_MOUNT_INTERVAL` | duration | `2s` | Mount command interval default |
+| `RELAYFILE_MOUNT_MODE` | string | `poll` | Mount mode for `relayfile mount`; only `poll` is supported in this checkout |
+| `RELAYFILE_MOUNT_FUSE` | bool | `false` | Legacy opt-in checked by the CLI to reject unsupported FUSE mode with a clear error |
+| `RELAYFILE_MOUNT_INTERVAL` | duration | `30s` | Mount command interval default |
 | `RELAYFILE_MOUNT_INTERVAL_JITTER` | float | `0.2` | Mount command jitter default |
 | `RELAYFILE_MOUNT_TIMEOUT` | duration | `15s` | Mount command timeout default |
 | `RELAYFILE_MOUNT_WEBSOCKET` | bool | `true` | Mount command WebSocket default |

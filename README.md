@@ -48,16 +48,47 @@ This starts relayfile on `:9090` and relayauth on `:9091`, seeds a `ws_demo` wor
 
 ## Getting Started
 
-**Relayfile Cloud** — everything managed. Run the CLI, sign in with the hosted browser flow, choose an integration, and Relayfile mounts it as ordinary files for your agent:
+**Relayfile Cloud** — everything managed. Run the CLI, sign in with the hosted browser flow, choose an integration, and Relayfile mirrors it as ordinary files on disk for your agent:
 
 ```bash
 relayfile
 ```
 
-For non-interactive setup, provide the choices up front:
+This runs a guided wizard: Cloud login, workspace name, integration provider, local directory, and OAuth consent. Files appear under `./relayfile-mount/<provider>/` within 30 seconds of OAuth completing.
+
+For non-interactive / CI setup:
 
 ```bash
-relayfile setup --provider github --workspace my-project --local-dir ./relayfile-mount
+relayfile setup \
+  --cloud-token "$RELAYFILE_CLOUD_TOKEN" \
+  --provider github \
+  --workspace my-project \
+  --local-dir ./relayfile-mount \
+  --no-open \
+  --once
+```
+
+> **Note:** The default attachment is a **synced mirror**, not a kernel FUSE mount. Files are ordinary files on disk; a daemon polls the Cloud every 30 s and handles writeback. FUSE is available via `--mode=fuse` but is not required. See [docs/guides/vfs-cloud-setup.md](docs/guides/vfs-cloud-setup.md) for the full human guide including limitations, conflict resolution, and troubleshooting.
+
+After setup you can add more integrations without remounting:
+
+```bash
+relayfile integration connect notion
+relayfile integration connect linear
+relayfile integration list
+```
+
+Check live sync state at any time:
+
+```bash
+relayfile status
+```
+
+Run the sync loop in the background:
+
+```bash
+relayfile mount --background my-project ./relayfile-mount
+relayfile stop my-project
 ```
 
 **Self-hosted:**
@@ -175,12 +206,26 @@ docker compose up --build -d
 Mount a workspace as a local directory:
 
 ```bash
-# FUSE mount (real-time)
-relayfile mount ws_123 ./files --token $TOKEN
+# Synced mirror (default, recommended)
+relayfile mount ws_123 ./files
 
-# Polling sync (no FUSE required)
+# One-shot sync (CI/probe)
+relayfile mount ws_123 ./files --once
+
+# Background daemon
+relayfile mount --background ws_123 ./files
+relayfile stop ws_123
+
+# FUSE mount (opt-in, requires FUSE support)
+relayfile mount ws_123 ./files --mode=fuse
+
+# Self-hosted: polling sync without Cloud
 go run ./cmd/relayfile-mount --workspace ws_123 --local-dir ./files --interval 2s --token $TOKEN
 ```
+
+The default mode is a **synced mirror** (`--mode=poll`). It is not a real-time POSIX filesystem. Known differences: file handles are not stable across syncs, `mtime` reflects local write time only, directory listings can lag by up to 30 s. See [docs/guides/vfs-cloud-setup.md#known-limitations](docs/guides/vfs-cloud-setup.md#known-limitations).
+
+**For agents:** See [docs/guides/agent-vfs-usage.md](docs/guides/agent-vfs-usage.md) and the installable skill at [docs/skills/relayfile-workspace.md](docs/skills/relayfile-workspace.md).
 
 ## CLI Inspection
 
@@ -203,6 +248,34 @@ Open the hosted observer for the active workspace:
 relayfile observer
 relayfile observer ws_123 --no-open
 ```
+
+Inspect and recover dead-lettered writeback operations:
+
+```bash
+relayfile ops list
+relayfile ops replay op_abc123
+```
+
+Check which paths are writable for a provider:
+
+```bash
+relayfile permissions
+relayfile permissions github/repos/acme/api/pulls/
+```
+
+## Documentation
+
+| Guide | Audience |
+|-------|----------|
+| [docs/guides/getting-started.md](docs/guides/getting-started.md) | First steps with self-hosted Relayfile |
+| [docs/guides/vfs-cloud-setup.md](docs/guides/vfs-cloud-setup.md) | Human guide: Cloud setup, integrations, status, daemon, troubleshooting |
+| [docs/guides/agent-vfs-usage.md](docs/guides/agent-vfs-usage.md) | Agent guide: mount discovery, reads, writes, conflicts, writeback |
+| [docs/guides/cloud-integration.md](docs/guides/cloud-integration.md) | Cloud workflow model for orchestrators |
+| [docs/guides/collaboration.md](docs/guides/collaboration.md) | Multi-human and human+agent collaboration patterns |
+| [docs/skills/relayfile-workspace.md](docs/skills/relayfile-workspace.md) | Installable agent skill (copy to `.agents/skills/`) |
+| [docs/cli-design.md](docs/cli-design.md) | CLI command reference and design |
+| [docs/productized-cloud-mount-contract.md](docs/productized-cloud-mount-contract.md) | v1 product contract (normative) |
+| [docs/api-reference.md](docs/api-reference.md) | REST API reference |
 
 ## Changelogs
 
