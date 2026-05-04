@@ -30,6 +30,30 @@ import (
 
 var ErrConflict = errors.New("revision conflict")
 
+// ErrSchemaValidation is returned when the cloud rejects a writeback because
+// the body fails the adapter's declared schema (contract §8.2). The CLI
+// quarantines the offending local file and restores the prior remote
+// version instead of treating the failure as a fatal sync error.
+var ErrSchemaValidation = errors.New("schema validation failed")
+
+// SchemaValidationError carries the per-file schema-violation message the
+// cloud emits alongside `400 schema_validation_failed`.
+type SchemaValidationError struct {
+	Path    string
+	Message string
+}
+
+func (e *SchemaValidationError) Error() string {
+	if e == nil || strings.TrimSpace(e.Message) == "" {
+		return fmt.Sprintf("schema validation failed for %s", e.Path)
+	}
+	return fmt.Sprintf("schema validation failed for %s: %s", e.Path, e.Message)
+}
+
+func (e *SchemaValidationError) Is(target error) bool {
+	return target == ErrSchemaValidation
+}
+
 const defaultBulkFlushThreshold = 256
 
 type ConflictError struct {
@@ -851,6 +875,15 @@ func (s *Syncer) handleWriteError(
 		return s.materializeConflict(ctx, remotePath, localPath, snapshot, tracked)
 	}
 
+	var schemaErr *SchemaValidationError
+	if errors.As(err, &schemaErr) {
+		// Per contract §8.2, a schema-validation failure is a graceful
+		// per-file degradation: quarantine the local body, restore the
+		// last known remote, and let the user fix the offending file
+		// without aborting the cycle.
+		return s.materializeSchemaInvalid(ctx, remotePath, localPath, snapshot, tracked, schemaErr.Message)
+	}
+
 	var httpErr *HTTPError
 	if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusForbidden {
 		if !exists {
@@ -923,6 +956,89 @@ func (s *Syncer) materializeConflict(ctx context.Context, remotePath, localPath 
 	return nil
 }
 
+// materializeSchemaInvalid implements contract §8.2: park the local body in
+// .relay/conflicts/<path>.invalid.<ts>, restore the prior remote into the
+// original path, and clear the dirty/pending flags so reconcile does not
+// keep retrying the same invalid body. If the remote does not yet exist
+// (the offending write was a CREATE), the local file is removed so the
+// invalid body does not stay in the mirror.
+func (s *Syncer) materializeSchemaInvalid(
+	ctx context.Context,
+	remotePath, localPath string,
+	snapshot localSnapshot,
+	tracked trackedFile,
+	violation string,
+) error {
+	artifactPath, artifactErr := s.writeSchemaInvalidArtifact(remotePath, time.Now().UTC(), snapshot.RawContent)
+	if artifactErr != nil {
+		return artifactErr
+	}
+
+	violationDescription := strings.TrimSpace(violation)
+	if violationDescription == "" {
+		violationDescription = "body did not match the adapter schema"
+	}
+
+	remoteFile, readErr := s.client.ReadFile(ctx, s.workspace, remotePath)
+	if readErr != nil {
+		// No prior remote version to restore — typical for a CREATE that
+		// violated the schema. Remove the local file and stop tracking
+		// it so the next reconcile does not re-push.
+		_ = os.Remove(localPath)
+		delete(s.state.Files, remotePath)
+		s.logf("schema validation failed at %s (%s); local saved at %s; no prior remote version to restore",
+			remotePath, violationDescription, artifactPath)
+		return nil
+	}
+
+	remoteBytes, decodeErr := decodeRemoteFileContent(remoteFile)
+	if decodeErr != nil {
+		return decodeErr
+	}
+	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+		return err
+	}
+	if err := writeFileAtomic(localPath, remoteBytes, 0o644); err != nil {
+		return err
+	}
+	if err := s.applyLocalPermissions(localPath, s.canWritePath(remotePath)); err != nil {
+		return err
+	}
+
+	contentType := strings.TrimSpace(remoteFile.ContentType)
+	if contentType == "" {
+		contentType = snapshot.ContentType
+	}
+	s.state.Files[remotePath] = trackedFile{
+		Revision:    remoteFile.Revision,
+		ContentType: contentType,
+		Encoding:    normalizeEncoding(remoteFile.Encoding),
+		Hash:        hashBytes(remoteBytes),
+		ReadOnly:    !s.canWritePath(remotePath),
+	}
+	_ = tracked
+	s.logf("schema validation failed at %s (%s); local saved at %s, remote restored",
+		remotePath, violationDescription, artifactPath)
+	return nil
+}
+
+func (s *Syncer) writeSchemaInvalidArtifact(remotePath string, ts time.Time, content []byte) (string, error) {
+	if err := os.MkdirAll(s.conflictsDir, 0o755); err != nil {
+		return "", err
+	}
+	artifactPath := schemaInvalidArtifactPath(s.conflictsDir, remotePath, ts)
+	if err := os.MkdirAll(filepath.Dir(artifactPath), 0o755); err != nil {
+		return "", err
+	}
+	return artifactPath, writeFileAtomic(artifactPath, content, 0o644)
+}
+
+func schemaInvalidArtifactPath(baseDir, remotePath string, ts time.Time) string {
+	rel := strings.TrimPrefix(normalizeRemotePath(remotePath), "/")
+	stamp := ts.UTC().Format("20060102T150405Z")
+	return filepath.Join(baseDir, filepath.FromSlash(rel)+".invalid."+stamp)
+}
+
 func bulkWriteErrorAsError(writeErr BulkWriteError) error {
 	statusCode := 0
 	switch strings.TrimSpace(writeErr.Code) {
@@ -934,6 +1050,11 @@ func bulkWriteErrorAsError(writeErr BulkWriteError) error {
 		statusCode = http.StatusPreconditionFailed
 	case "conflict":
 		return &ConflictError{Path: normalizeRemotePath(writeErr.Path)}
+	case "schema_validation_failed", "validation_error":
+		return &SchemaValidationError{
+			Path:    normalizeRemotePath(writeErr.Path),
+			Message: writeErr.Message,
+		}
 	}
 	if statusCode != 0 || writeErr.Code != "" || writeErr.Message != "" {
 		return &HTTPError{

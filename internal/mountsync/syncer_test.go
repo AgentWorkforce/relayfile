@@ -1098,6 +1098,140 @@ func TestBulkWrite_PerFileConflictCreatesArtifactAndRefreshesRemote(t *testing.T
 	}
 }
 
+func TestBulkWrite_SchemaValidationQuarantinesLocalAndRestoresRemote(t *testing.T) {
+	rejectOnce := true
+	client := &fakeClient{
+		files: map[string]RemoteFile{
+			"/github/repos/acme/api/pulls/42/reviews/draft.json": {
+				Path:        "/github/repos/acme/api/pulls/42/reviews/draft.json",
+				Revision:    "rev_1",
+				ContentType: "application/json",
+				Content:     `{"event":"APPROVE"}`,
+			},
+		},
+		revisionCounter: 1,
+		bulkWriteResponseFunc: func(ctx context.Context, workspaceID string, files []BulkWriteFile) (BulkWriteResponse, error) {
+			if !rejectOnce {
+				return BulkWriteResponse{}, nil
+			}
+			rejectOnce = false
+			return BulkWriteResponse{
+				Written:    0,
+				ErrorCount: 1,
+				Errors: []BulkWriteError{{
+					Path:    "/github/repos/acme/api/pulls/42/reviews/draft.json",
+					Code:    "schema_validation_failed",
+					Message: "body.event must be one of APPROVE,REQUEST_CHANGES,COMMENT (line 3)",
+				}},
+			}, nil
+		},
+	}
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_mount_schema_invalid",
+		RemoteRoot:  "/github",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("initial sync failed: %v", err)
+	}
+
+	localPath := filepath.Join(localDir, "repos", "acme", "api", "pulls", "42", "reviews", "draft.json")
+	if err := os.WriteFile(localPath, []byte(`{"event":"PLEASE_APPROVE"}`), 0o644); err != nil {
+		t.Fatalf("write local draft failed: %v", err)
+	}
+
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("sync with schema validation failure failed: %v", err)
+	}
+
+	assertLocalFileContent(t, localPath, `{"event":"APPROVE"}`)
+
+	conflictsRoot := filepath.Join(localDir, ".relay", "conflicts", "github", "repos", "acme", "api", "pulls", "42", "reviews")
+	matches, err := filepath.Glob(filepath.Join(conflictsRoot, "draft.json.invalid.*"))
+	if err != nil {
+		t.Fatalf("glob conflict artifact failed: %v", err)
+	}
+	if len(matches) != 1 {
+		t.Fatalf("expected exactly one .invalid.<ts> artifact, got %d (%v)", len(matches), matches)
+	}
+	body, err := os.ReadFile(matches[0])
+	if err != nil {
+		t.Fatalf("read invalid artifact failed: %v", err)
+	}
+	if string(body) != `{"event":"PLEASE_APPROVE"}` {
+		t.Fatalf("expected invalid artifact to hold local body, got %q", body)
+	}
+
+	tracked := syncer.state.Files["/github/repos/acme/api/pulls/42/reviews/draft.json"]
+	if tracked.Dirty {
+		t.Fatalf("expected tracked entry to clear dirty flag after restore, got %+v", tracked)
+	}
+	if tracked.Revision != "rev_1" {
+		t.Fatalf("expected tracked entry to reflect restored remote revision, got %+v", tracked)
+	}
+}
+
+func TestBulkWrite_SchemaValidationOnCreateRemovesLocal(t *testing.T) {
+	rejectOnce := true
+	client := &fakeClient{
+		files: map[string]RemoteFile{},
+		bulkWriteResponseFunc: func(ctx context.Context, workspaceID string, files []BulkWriteFile) (BulkWriteResponse, error) {
+			if !rejectOnce {
+				return BulkWriteResponse{}, nil
+			}
+			rejectOnce = false
+			return BulkWriteResponse{
+				Written:    0,
+				ErrorCount: 1,
+				Errors: []BulkWriteError{{
+					Path:    "/github/repos/acme/api/pulls/42/reviews/draft.json",
+					Code:    "schema_validation_failed",
+					Message: "missing required property: event",
+				}},
+			}, nil
+		},
+	}
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_mount_schema_create_invalid",
+		RemoteRoot:  "/github",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+	localPath := filepath.Join(localDir, "repos", "acme", "api", "pulls", "42", "reviews", "draft.json")
+	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+		t.Fatalf("mkdir local path failed: %v", err)
+	}
+	if err := os.WriteFile(localPath, []byte(`{"unexpected":"shape"}`), 0o644); err != nil {
+		t.Fatalf("write local create body failed: %v", err)
+	}
+
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("sync with schema validation create failure failed: %v", err)
+	}
+
+	if _, err := os.Stat(localPath); !os.IsNotExist(err) {
+		t.Fatalf("expected invalid create body removed from mirror, got err=%v", err)
+	}
+	conflictsRoot := filepath.Join(localDir, ".relay", "conflicts", "github", "repos", "acme", "api", "pulls", "42", "reviews")
+	matches, err := filepath.Glob(filepath.Join(conflictsRoot, "draft.json.invalid.*"))
+	if err != nil {
+		t.Fatalf("glob conflict artifact failed: %v", err)
+	}
+	if len(matches) != 1 {
+		t.Fatalf("expected exactly one .invalid.<ts> artifact, got %d (%v)", len(matches), matches)
+	}
+	if _, ok := syncer.state.Files["/github/repos/acme/api/pulls/42/reviews/draft.json"]; ok {
+		t.Fatalf("expected tracked entry cleared for unrestorable schema-invalid create")
+	}
+}
+
 func TestBulkWrite_DeletesStayPerFile(t *testing.T) {
 	client := &fakeClient{
 		files: map[string]RemoteFile{
