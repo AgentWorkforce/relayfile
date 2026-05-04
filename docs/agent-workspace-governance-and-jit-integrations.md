@@ -322,6 +322,7 @@ runtime artifacts.
 
 ```ts
 type IntegrationBroker = "native" | "nango" | "composio" | "pipedream";
+type IntegrationSyncRunner = "nango" | "cloud-cron" | "broker-webhook";
 
 interface IntegrationSpec {
   id: string;
@@ -339,6 +340,7 @@ interface IntegrationSpec {
   requiredOAuthScopes: string[];
   schedule?: {
     enabled: boolean;
+    runner: IntegrationSyncRunner;
     interval: string;
     timezone?: string;
   };
@@ -399,6 +401,7 @@ interface DraftIntegrationManifest {
   vfsRoot?: string;
   schedule?: {
     enabled: boolean;
+    runner: IntegrationSyncRunner;
     interval: string;
     timezone?: string;
   };
@@ -468,8 +471,9 @@ interface BrokerExecutionPlan {
 }
 ```
 
-For brokered integrations, Nango should be used as the scheduled runner and
-dry-run harness, not necessarily as the customer OAuth owner:
+Brokered integrations support two background sync modes. The first mode uses
+Nango as the scheduled runner and dry-run harness, but not necessarily as the
+customer OAuth owner:
 
 ```text
 Nango schedule tick
@@ -486,6 +490,31 @@ metadata and injects auth headers before proxy execution. That provider is the
 bridge for broker-backed scheduled syncs. The Nango connection should store
 only the broker execution credential or reference needed by Cloud workers; it
 must not expose provider OAuth tokens to agents.
+
+The second mode bypasses Nango for steady-state background syncs:
+
+```text
+Cloud cron or relaycron schedule tick
+  -> Cloud loads the promoted IntegrationSpec and BrokerConnection
+  -> Cloud calls Composio or Pipedream provider package directly
+  -> broker executes read actions against the customer's connected account
+  -> Cloud normalizes records into the Relayfile mapping artifact
+  -> Cloud materializes the Relayfile VFS and records audit state
+```
+
+This mode is the preferred path when the broker already owns connection
+refresh, proxy execution, triggers, and account health. It lets Relayfile run
+background integrations without creating or operating a Nango sync for every
+long-tail brokered app. Nango remains useful for providers where it is the
+native integration layer, for compatibility with existing static integrations,
+or as an optional dry-run harness when the generated artifact is Nango-shaped.
+
+The runner must be explicit. `schedule.runner="nango"` means Nango emits the
+sync tick. `schedule.runner="cloud-cron"` means Cloud or `relaycron` emits the
+tick and uses Relayfile Providers directly. `schedule.runner="broker-webhook"`
+means Composio or Pipedream trigger/webhook subscriptions drive incremental
+sync, with Cloud responsible for debouncing, normalization, materialization,
+and replay.
 
 `../relayfile-providers/packages/composio` already exposes catalog,
 connected-account, action execution, trigger subscription, proxy, health, and
@@ -690,7 +719,7 @@ Required changes:
 
 Owns hosted workspace control plane, provider and broker connection state,
 static catalog, JIT draft APIs, sandbox orchestration, Nango dry runs,
-brokered scheduled syncs, and promotion.
+Cloud-owned broker sync runners, broker webhooks, and promotion.
 
 Required changes:
 
@@ -702,6 +731,8 @@ Required changes:
 6. Record provider connection ownership by user, org, and workspace.
 7. Add a broker registry for Composio and Pipedream app catalogs, connect
    sessions, account health, action execution plans, and trigger/webhook state.
+8. Add a Cloud-owned broker sync runner for promoted integrations whose
+   `schedule.runner` is `cloud-cron` or `broker-webhook`.
 
 ### 6.3 `../relayauth`
 
@@ -742,6 +773,8 @@ Required changes:
    webhook primitives behind bounded Cloud APIs.
 5. Keep `NangoUnauthProvider` as the bridge for scheduled broker-backed syncs
    where Nango runs the job but the customer OAuth account lives in the broker.
+6. Support direct Cloud execution for brokered background syncs where Cloud
+   calls Composio or Pipedream without a Nango sync in the loop.
 
 ### 6.6 `../sage`
 
@@ -801,10 +834,10 @@ enforcement.
 
 Given a customer selects a Composio or Pipedream app that Relayfile does not
 support as a static integration, Cloud can create a broker connect session,
-generate a bounded object/action manifest, run a broker-backed unauthenticated
-Nango dry run, schedule the promoted sync, materialize files under a
-collision-safe root, and enforce writeback policy through the promoted broker
-action IDs.
+generate a bounded object/action manifest, validate it in a sandbox, schedule
+the promoted sync through either Nango, Cloud cron, or broker webhooks,
+materialize files under a collision-safe root, and enforce writeback policy
+through the promoted broker action IDs.
 
 ---
 
