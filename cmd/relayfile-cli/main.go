@@ -618,9 +618,15 @@ func cloudAccessTokenExpiredSoon(creds cloudCredentials) bool {
 	return !time.Now().UTC().Before(expiry.Add(-60 * time.Second))
 }
 
+// ErrCloudRefreshExpired indicates the cloud refresh token cannot mint new
+// access tokens. The mount loop uses this to enter the read-only degraded
+// state described in the productized cloud-mount contract acceptance test
+// A9 ("Cloud refresh token expired").
+var ErrCloudRefreshExpired = errors.New("cloud session expired. Run 'relayfile login' to sign in again.")
+
 func refreshCloudCredentials(creds cloudCredentials) (cloudCredentials, error) {
 	if strings.TrimSpace(creds.RefreshToken) == "" {
-		return creds, errors.New("cloud session expired. Run 'relayfile login' to sign in again.")
+		return creds, ErrCloudRefreshExpired
 	}
 	client, err := newAPIClient(creds.APIURL, creds.AccessToken)
 	if err != nil {
@@ -633,7 +639,10 @@ func refreshCloudCredentials(creds cloudCredentials) (cloudCredentials, error) {
 	if err != nil {
 		var httpErr *apiError
 		if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusForbidden && strings.EqualFold(strings.TrimSpace(httpErr.Code), "invalid_grant") {
-			return creds, errors.New("cloud session expired. Run 'relayfile login' to sign in again.")
+			return creds, ErrCloudRefreshExpired
+		}
+		if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusUnauthorized {
+			return creds, ErrCloudRefreshExpired
 		}
 		return creds, fmt.Errorf("refresh cloud session: %w", err)
 	}
@@ -2360,7 +2369,8 @@ func runStatus(args []string, stdout io.Writer) error {
 		return err
 	}
 	record, _ := workspaceRecordByID(workspaceID)
-	snapshot := buildSyncStateSnapshot(status, workspaceID, defaultMountMode, defaultMountInterval, record.LocalDir, readDaemonPID(record.LocalDir), "")
+	persistedStallReason := readPersistedStallReason(record.LocalDir)
+	snapshot := buildSyncStateSnapshot(status, workspaceID, defaultMountMode, defaultMountInterval, record.LocalDir, readDaemonPID(record.LocalDir), persistedStallReason)
 	if *jsonOutput {
 		return writeJSON(stdout, snapshot)
 	}
@@ -2398,8 +2408,26 @@ func runStatus(args []string, stdout io.Writer) error {
 			fmt.Fprintln(stdout, "daemon: not running")
 		}
 	}
+	if persistedStallReason != "" {
+		fmt.Fprintf(stdout, "\nstall: %s\n", persistedStallReason)
+	}
 	fmt.Fprintf(stdout, "\npending writebacks: %d    conflicts: %d    denied: %d\n", snapshot.PendingWriteback, snapshot.PendingConflicts, snapshot.DeniedPaths)
 	return nil
+}
+
+func readPersistedStallReason(localDir string) string {
+	if localDir == "" {
+		return ""
+	}
+	payload, err := os.ReadFile(filepath.Join(localDir, ".relay", "state.json"))
+	if err != nil {
+		return ""
+	}
+	var snapshot syncStateFile
+	if err := json.Unmarshal(payload, &snapshot); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(snapshot.StallReason)
 }
 
 func runStop(args []string, stdout io.Writer) error {
@@ -3975,6 +4003,37 @@ func runMountLoop(rootCtx context.Context, syncer *mountsync.Syncer, localDir, w
 	}
 	lastSuccess := time.Now()
 	stallReason := ""
+	degraded := false
+	var lastDegradedNotice time.Time
+	const degradedRecoveryInterval = time.Minute
+	const degradedStallReason = "cloud session expired — run 'relayfile login' to refresh"
+
+	enterDegraded := func() {
+		if !degraded {
+			degraded = true
+			stallReason = degradedStallReason
+			lastDegradedNotice = time.Time{}
+			log.Printf("mount entering read-only degraded state: %s", degradedStallReason)
+		}
+	}
+	exitDegraded := func() {
+		if degraded {
+			degraded = false
+			stallReason = ""
+			lastDegradedNotice = time.Time{}
+			log.Printf("mount exiting degraded state; cloud session restored")
+		}
+	}
+	maybePrintRecovery := func() {
+		if !degraded {
+			return
+		}
+		if time.Since(lastDegradedNotice) < degradedRecoveryInterval {
+			return
+		}
+		log.Printf("mount degraded: %s", degradedStallReason)
+		lastDegradedNotice = time.Now()
+	}
 
 	refreshMountAuth := func(force bool) error {
 		if httpClient == nil {
@@ -3989,6 +4048,11 @@ func runMountLoop(rootCtx context.Context, syncer *mountsync.Syncer, localDir, w
 		}
 		cloudCreds, err = refreshCloudCredentialsIfNeeded(cloudCreds)
 		if err != nil {
+			// Surface the typed error so the loop can enter degraded
+			// state per A9. Other refresh errors stay non-fatal.
+			if errors.Is(err, ErrCloudRefreshExpired) {
+				return err
+			}
 			log.Printf("cloud session refresh failed: %v", err)
 			return nil
 		}
@@ -4047,6 +4111,22 @@ func runMountLoop(rootCtx context.Context, syncer *mountsync.Syncer, localDir, w
 	}
 
 	runCycle := func(reconcile bool) error {
+		if degraded {
+			// Try to recover by re-running auth refresh. If creds are
+			// still missing/expired, stay degraded and emit the
+			// recovery notice on the configured cadence.
+			if err := refreshMountAuth(true); err != nil {
+				if errors.Is(err, ErrCloudRefreshExpired) {
+					maybePrintRecovery()
+					writeSnapshot()
+					return err
+				}
+				log.Printf("mount degraded: refresh attempt failed: %v", err)
+				writeSnapshot()
+				return err
+			}
+			exitDegraded()
+		}
 		err := withAuthRefresh(func(ctx context.Context) error {
 			if reconcile {
 				return syncer.Reconcile(ctx)
@@ -4054,6 +4134,12 @@ func runMountLoop(rootCtx context.Context, syncer *mountsync.Syncer, localDir, w
 			return syncer.SyncOnce(ctx)
 		})
 		if err != nil {
+			if errors.Is(err, ErrCloudRefreshExpired) {
+				enterDegraded()
+				maybePrintRecovery()
+				writeSnapshot()
+				return err
+			}
 			stallReason = err.Error()
 			log.Printf("mount sync cycle failed: %v", err)
 			writeSnapshot()
@@ -4073,9 +4159,22 @@ func runMountLoop(rootCtx context.Context, syncer *mountsync.Syncer, localDir, w
 	}
 
 	watcher, err := mountsync.NewFileWatcher(localDir, func(relativePath string, op fsnotify.Op) {
+		if degraded {
+			// Local edit observed while we have no usable cloud session.
+			// Leave the dirty state in place so the next successful cycle
+			// after re-login picks it up; do not attempt to push now.
+			maybePrintRecovery()
+			return
+		}
 		if err := withAuthRefresh(func(ctx context.Context) error {
 			return syncer.HandleLocalChange(ctx, relativePath, op)
 		}); err != nil {
+			if errors.Is(err, ErrCloudRefreshExpired) {
+				enterDegraded()
+				maybePrintRecovery()
+				writeSnapshot()
+				return
+			}
 			log.Printf("mount local change failed: %v", err)
 		}
 		writeSnapshot()
@@ -4104,7 +4203,7 @@ func runMountLoop(rootCtx context.Context, syncer *mountsync.Syncer, localDir, w
 			if reconcile {
 				_ = runCycle(true)
 			}
-			if time.Since(lastSuccess) >= 10*time.Minute {
+			if !degraded && time.Since(lastSuccess) >= 10*time.Minute {
 				stallReason = "no successful reconcile for 10m"
 				log.Printf("mount stalled: %s", stallReason)
 				writeSnapshot()

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -916,6 +917,113 @@ func testJWTWithWorkspaceAndAgent(workspaceID, agentName string) string {
 	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none","typ":"JWT"}`))
 	payload := base64.RawURLEncoding.EncodeToString([]byte(`{"workspace_id":"` + workspaceID + `","agent_name":"` + agentName + `","aud":"relayfile"}`))
 	return header + "." + payload + ".sig"
+}
+
+func TestRefreshCloudCredentialsReturnsSentinelOnInvalidGrant(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/auth/token/refresh" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"code":"invalid_grant","message":"refresh token expired"}`))
+	}))
+	defer server.Close()
+
+	_, err := refreshCloudCredentials(cloudCredentials{
+		APIURL:       server.URL,
+		AccessToken:  "cld_old",
+		RefreshToken: "rt_expired",
+	})
+	if !errors.Is(err, ErrCloudRefreshExpired) {
+		t.Fatalf("expected ErrCloudRefreshExpired, got: %v", err)
+	}
+}
+
+func TestRefreshCloudCredentialsReturnsSentinelOnUnauthorized(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"code":"unauthorized","message":"unauthenticated"}`))
+	}))
+	defer server.Close()
+
+	_, err := refreshCloudCredentials(cloudCredentials{
+		APIURL:       server.URL,
+		AccessToken:  "cld_old",
+		RefreshToken: "rt_expired",
+	})
+	if !errors.Is(err, ErrCloudRefreshExpired) {
+		t.Fatalf("expected ErrCloudRefreshExpired, got: %v", err)
+	}
+}
+
+func TestRefreshCloudCredentialsReturnsSentinelWithoutRefreshToken(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	_, err := refreshCloudCredentials(cloudCredentials{
+		APIURL:      "https://cloud.example.test",
+		AccessToken: "cld_old",
+	})
+	if !errors.Is(err, ErrCloudRefreshExpired) {
+		t.Fatalf("expected ErrCloudRefreshExpired, got: %v", err)
+	}
+}
+
+func TestStatusSurfacesDegradedStallReason(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	localDir := t.TempDir()
+	if err := ensureMirrorLayout(localDir); err != nil {
+		t.Fatalf("ensureMirrorLayout failed: %v", err)
+	}
+	if _, err := upsertWorkspaceDetails(workspaceRecord{
+		Name:       "demo",
+		ID:         "ws_demo",
+		LocalDir:   localDir,
+		CreatedAt:  time.Now().UTC().Format(time.RFC3339),
+		LastUsedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("upsertWorkspaceDetails failed: %v", err)
+	}
+	persisted := syncStateFile{
+		WorkspaceID: "ws_demo",
+		Mode:        defaultMountMode,
+		StallReason: "cloud session expired — run 'relayfile login' to refresh",
+	}
+	if err := writeMirrorStateFile(localDir, persisted); err != nil {
+		t.Fatalf("writeMirrorStateFile failed: %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"workspaceId":"ws_demo","providers":[{"provider":"notion","status":"ready","lagSeconds":4,"watermarkTs":"2026-05-02T18:00:00Z"}]}`))
+	}))
+	defer server.Close()
+
+	if err := saveCredentials(credentials{Server: server.URL, Token: "token"}); err != nil {
+		t.Fatalf("saveCredentials failed: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := run([]string{"status", "demo"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("run status failed: %v", err)
+	}
+	got := stdout.String()
+	if !strings.Contains(got, "stall: cloud session expired") {
+		t.Fatalf("expected degraded stall reason in status output, got: %q", got)
+	}
+	if !strings.Contains(got, "relayfile login") {
+		t.Fatalf("expected recovery hint in status output, got: %q", got)
+	}
 }
 
 func TestStatusRendersWebhookUnhealthyWarning(t *testing.T) {
