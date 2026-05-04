@@ -2522,7 +2522,10 @@ func runStop(args []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if err := process.Signal(syscall.SIGTERM); err != nil {
+	// Platform-specific: SIGTERM on Unix, TerminateProcess on Windows.
+	// The Windows kernel only routes os.Kill through Process.Signal, so a
+	// hard-coded SIGTERM here would always fail there.
+	if err := signalDaemonStop(process); err != nil {
 		return err
 	}
 	fmt.Fprintf(stdout, "Stopped background mount for %s (pid %d)\n", record.Name, pid)
@@ -3637,11 +3640,20 @@ func markProviderDisconnected(localDir, provider string) error {
 	return nil
 }
 
+// providerRootDir maps a provider id to the directory name it occupies
+// inside the local mirror. The mapping must stay aligned with the
+// `vfsRoot` values that fallbackIntegrationCatalog and the cloud
+// catalog endpoint advertise — otherwise status probes and disconnect
+// cleanup would target the wrong path for that provider.
 func providerRootDir(provider string) string {
 	provider = normalizeProviderID(provider)
 	switch provider {
-	case "slack-sage":
+	case "slack", "slack-sage":
 		return "slack"
+	case "slack-my-senior-dev":
+		return "slack-msd"
+	case "slack-nightcto":
+		return "slack-nightcto"
 	default:
 		return provider
 	}

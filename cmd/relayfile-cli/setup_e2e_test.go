@@ -188,6 +188,43 @@ func TestA3EnsureCloudIntegrationSkipsConnectWhenAlreadyReady(t *testing.T) {
 	}
 }
 
+// TestProviderRootDirHandlesAllSlackVariants pins the mapping between
+// catalog provider ids and the directory each provider occupies inside
+// the local mirror. Drift here breaks status probes, integration disconnect
+// cleanup, and the connect "files will appear under <localDir>/<root>"
+// banner — so each Slack variant in fallbackIntegrationCatalog must be
+// represented.
+func TestProviderRootDirHandlesAllSlackVariants(t *testing.T) {
+	cases := []struct {
+		provider string
+		want     string
+	}{
+		{"github", "github"},
+		{"notion", "notion"},
+		{"linear", "linear"},
+		{"slack", "slack"},
+		{"slack-sage", "slack"},
+		{"slack-my-senior-dev", "slack-msd"},
+		{"slack-nightcto", "slack-nightcto"},
+	}
+	for _, tc := range cases {
+		if got := providerRootDir(tc.provider); got != tc.want {
+			t.Fatalf("providerRootDir(%q)=%q, want %q", tc.provider, got, tc.want)
+		}
+	}
+
+	// Cross-check against fallbackIntegrationCatalog so future catalog
+	// additions cannot quietly leave providerRootDir behind. Every entry
+	// in the catalog must round-trip: vfsRoot stripped of the leading
+	// slash MUST equal providerRootDir of the same id.
+	for _, entry := range fallbackIntegrationCatalog() {
+		want := strings.TrimPrefix(entry.VFSRoot, "/")
+		if got := providerRootDir(entry.ID); got != want {
+			t.Fatalf("providerRootDir(%q)=%q, but catalog vfsRoot=%q", entry.ID, got, entry.VFSRoot)
+		}
+	}
+}
+
 // TestA13MountHelpListsSyncedMirrorLimitations exercises contract A13: the
 // `relayfile mount --help` output must surface the §3.6 list of synced-
 // mirror limitations so the user does not assume kernel filesystem
