@@ -15,6 +15,7 @@ import (
 	"log"
 	mathrand "math/rand/v2"
 	"mime"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -35,17 +36,25 @@ import (
 
 const (
 	defaultServerURL        = "https://api.relayfile.dev"
+	defaultCloudAPIURL      = "https://agentrelay.com/cloud"
 	defaultObserverURL      = "https://agentrelay.com/observer/file"
 	configDirName           = ".relayfile"
 	websocketReconcileEvery = 10
 )
 
 type credentials struct {
-	Server       string `json:"server"`
-	Token        string `json:"token"`
-	RefreshToken string `json:"refreshToken,omitempty"`
-	ExpiresAt    string `json:"expiresAt,omitempty"`
-	UpdatedAt    string `json:"updatedAt,omitempty"`
+	Server    string `json:"server"`
+	Token     string `json:"token"`
+	UpdatedAt string `json:"updatedAt,omitempty"`
+}
+
+type cloudCredentials struct {
+	APIURL                string `json:"apiUrl"`
+	AccessToken           string `json:"accessToken"`
+	RefreshToken          string `json:"refreshToken,omitempty"`
+	AccessTokenExpiresAt  string `json:"accessTokenExpiresAt,omitempty"`
+	RefreshTokenExpiresAt string `json:"refreshTokenExpiresAt,omitempty"`
+	UpdatedAt             string `json:"updatedAt,omitempty"`
 }
 
 type workspaceCatalog struct {
@@ -150,6 +159,46 @@ type adminWorkspaceList struct {
 	Workspaces   json.RawMessage `json:"workspaces"`
 }
 
+type cloudWorkspaceCreateRequest struct {
+	Name string `json:"name,omitempty"`
+}
+
+type cloudWorkspaceCreateResponse struct {
+	WorkspaceID  string `json:"workspaceId"`
+	RelayfileURL string `json:"relayfileUrl,omitempty"`
+	CreatedAt    string `json:"createdAt,omitempty"`
+	Name         string `json:"name,omitempty"`
+}
+
+type cloudWorkspaceJoinRequest struct {
+	AgentName string   `json:"agentName,omitempty"`
+	Scopes    []string `json:"scopes,omitempty"`
+}
+
+type cloudWorkspaceJoinResponse struct {
+	WorkspaceID      string `json:"workspaceId"`
+	Token            string `json:"token"`
+	RelayfileURL     string `json:"relayfileUrl"`
+	WSURL            string `json:"wsUrl,omitempty"`
+	RelaycastAPIKey  string `json:"relaycastApiKey,omitempty"`
+	RelaycastBaseURL string `json:"relaycastBaseUrl,omitempty"`
+}
+
+type cloudConnectSessionRequest struct {
+	AllowedIntegrations []string `json:"allowedIntegrations,omitempty"`
+}
+
+type cloudConnectSessionResponse struct {
+	Token        string `json:"token,omitempty"`
+	ExpiresAt    string `json:"expiresAt,omitempty"`
+	ConnectLink  string `json:"connectLink,omitempty"`
+	ConnectionID string `json:"connectionId,omitempty"`
+}
+
+type cloudIntegrationReadyResponse struct {
+	Ready bool `json:"ready"`
+}
+
 type apiError struct {
 	StatusCode int
 	Code       string
@@ -173,11 +222,12 @@ func main() {
 
 func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
-		printUsage(stderr)
-		return nil
+		return runSetup(nil, stdin, stdout)
 	}
 
 	switch args[0] {
+	case "setup":
+		return runSetup(args[1:], stdin, stdout)
 	case "login":
 		return runLogin(args[1:], stdin, stdout)
 	case "workspace":
@@ -209,6 +259,8 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, `relayfile is the RelayFile CLI.
 
 Usage:
+  relayfile
+  relayfile setup [--provider PROVIDER] [--workspace NAME] [--local-dir DIR]
   relayfile login --server URL [--token TOKEN]
   relayfile workspace create NAME
   relayfile workspace use NAME
@@ -223,6 +275,7 @@ Usage:
   relayfile observer [WORKSPACE] [--no-open]
 
 Subcommands:
+  setup       Sign in, connect an integration, and mount the workspace
   login       Store credentials in ~/.relayfile/credentials.json
   workspace   Create, select, list, or delete locally tracked workspaces
   mount       Mirror a remote workspace to a local directory
@@ -232,6 +285,314 @@ Subcommands:
   export      Export a workspace as json, tar, or patch
   status      Show sync status for a workspace
   observer    Open the hosted file observer for a workspace`)
+}
+
+func runSetup(args []string, stdin io.Reader, stdout io.Writer) error {
+	fs := flag.NewFlagSet("setup", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	cloudAPIURL := fs.String("cloud-api-url", envOrDefault("RELAYFILE_CLOUD_API_URL", defaultCloudAPIURL), "Relayfile Cloud API URL")
+	cloudToken := fs.String("cloud-token", strings.TrimSpace(os.Getenv("RELAYFILE_CLOUD_TOKEN")), "Relayfile Cloud access token; skips browser login when set")
+	workspaceName := fs.String("workspace", "", "workspace name to create")
+	provider := fs.String("provider", "", "integration provider to connect; use none to skip")
+	localDirFlag := fs.String("local-dir", "", "local mount directory")
+	noOpen := fs.Bool("no-open", false, "print browser URLs instead of opening them")
+	skipMount := fs.Bool("skip-mount", false, "finish after setup without starting the mount process")
+	once := fs.Bool("once", false, "run one mount sync cycle and exit")
+	loginTimeout := fs.Duration("login-timeout", 5*time.Minute, "cloud login timeout")
+	connectTimeout := fs.Duration("connect-timeout", 5*time.Minute, "integration connection timeout")
+	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
+		"cloud-api-url":   true,
+		"cloud-token":     true,
+		"workspace":       true,
+		"provider":        true,
+		"local-dir":       true,
+		"no-open":         false,
+		"skip-mount":      false,
+		"once":            false,
+		"login-timeout":   true,
+		"connect-timeout": true,
+	})); err != nil {
+		return err
+	}
+	if fs.NArg() > 0 {
+		return errors.New("usage: relayfile setup [--provider PROVIDER] [--workspace NAME] [--local-dir DIR]")
+	}
+
+	cloudAPI := strings.TrimRight(strings.TrimSpace(*cloudAPIURL), "/")
+	if cloudAPI == "" {
+		cloudAPI = defaultCloudAPIURL
+	}
+
+	fmt.Fprintln(stdout, "Relayfile setup")
+	fmt.Fprintln(stdout, "This signs you in, connects an integration, and prepares a local VFS mount.")
+
+	tokenSet := cloudCredentials{
+		APIURL:      cloudAPI,
+		AccessToken: strings.TrimSpace(*cloudToken),
+		UpdatedAt:   time.Now().UTC().Format(time.RFC3339),
+	}
+	if tokenSet.AccessToken == "" {
+		var err error
+		tokenSet, err = runCloudLogin(cloudAPI, *loginTimeout, !*noOpen, stdout)
+		if err != nil {
+			return err
+		}
+		if err := saveCloudCredentials(tokenSet); err != nil {
+			return err
+		}
+	} else {
+		if err := saveCloudCredentials(tokenSet); err != nil {
+			return err
+		}
+	}
+
+	name := strings.TrimSpace(*workspaceName)
+	if name == "" {
+		defaultName := "relayfile-" + time.Now().UTC().Format("20060102-150405")
+		prompted, err := promptLine(stdin, stdout, fmt.Sprintf("Workspace name [%s]: ", defaultName))
+		if err != nil {
+			return err
+		}
+		name = strings.TrimSpace(prompted)
+		if name == "" {
+			name = defaultName
+		}
+	}
+
+	selectedProvider := strings.TrimSpace(*provider)
+	if selectedProvider == "" {
+		prompted, err := promptLine(stdin, stdout, "Integration (github, notion, linear, slack-sage, none) [github]: ")
+		if err != nil {
+			return err
+		}
+		selectedProvider = strings.TrimSpace(prompted)
+		if selectedProvider == "" {
+			selectedProvider = "github"
+		}
+	}
+	selectedProvider = strings.ToLower(selectedProvider)
+
+	localDir := strings.TrimSpace(*localDirFlag)
+	if localDir == "" {
+		prompted, err := promptLine(stdin, stdout, "Local mount directory [./relayfile-mount]: ")
+		if err != nil {
+			return err
+		}
+		localDir = strings.TrimSpace(prompted)
+		if localDir == "" {
+			localDir = "./relayfile-mount"
+		}
+	}
+
+	cloudClient, err := newAPIClient(cloudAPI, tokenSet.AccessToken)
+	if err != nil {
+		return err
+	}
+	var created cloudWorkspaceCreateResponse
+	if err := cloudClient.postJSON(context.Background(), "/api/v1/workspaces", cloudWorkspaceCreateRequest{Name: name}, &created); err != nil {
+		return fmt.Errorf("create cloud workspace: %w", err)
+	}
+	workspaceID := strings.TrimSpace(created.WorkspaceID)
+	if workspaceID == "" {
+		return errors.New("cloud workspace response missing workspaceId")
+	}
+
+	var joined cloudWorkspaceJoinResponse
+	if err := cloudClient.postJSON(context.Background(), fmt.Sprintf("/api/v1/workspaces/%s/join", url.PathEscape(workspaceID)), cloudWorkspaceJoinRequest{
+		AgentName: "relayfile-cli",
+		Scopes:    []string{"fs:read", "fs:write"},
+	}, &joined); err != nil {
+		return fmt.Errorf("join cloud workspace: %w", err)
+	}
+	if strings.TrimSpace(joined.WorkspaceID) == "" {
+		joined.WorkspaceID = workspaceID
+	}
+	if strings.TrimSpace(joined.Token) == "" {
+		return errors.New("cloud join response missing token")
+	}
+	if strings.TrimSpace(joined.RelayfileURL) == "" {
+		if strings.TrimSpace(created.RelayfileURL) == "" {
+			return errors.New("cloud join response missing relayfileUrl")
+		}
+		joined.RelayfileURL = created.RelayfileURL
+	}
+
+	if err := saveCredentials(credentials{
+		Server:    strings.TrimRight(joined.RelayfileURL, "/"),
+		Token:     joined.Token,
+		UpdatedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		return err
+	}
+	if _, err := upsertWorkspaceRecord(name, joined.WorkspaceID); err != nil {
+		return err
+	}
+	if _, err := setDefaultWorkspace(name); err != nil {
+		return err
+	}
+
+	fmt.Fprintf(stdout, "Workspace %s ready (id: %s)\n", name, joined.WorkspaceID)
+
+	if selectedProvider != "" && selectedProvider != "none" && selectedProvider != "skip" {
+		if err := connectCloudIntegration(cloudAPI, joined.WorkspaceID, joined.Token, selectedProvider, *connectTimeout, !*noOpen, stdout); err != nil {
+			return err
+		}
+	} else {
+		fmt.Fprintln(stdout, "Integration connection skipped")
+	}
+
+	mountArgs := []string{
+		"--server", strings.TrimRight(joined.RelayfileURL, "/"),
+		"--token", joined.Token,
+		joined.WorkspaceID,
+		localDir,
+	}
+	if *once {
+		mountArgs = append(mountArgs, "--once")
+	}
+	if *skipMount {
+		fmt.Fprintf(stdout, "Setup complete. Start the VFS mount with:\n  relayfile mount %s %s\n", joined.WorkspaceID, localDir)
+		return nil
+	}
+
+	fmt.Fprintf(stdout, "Starting VFS mount at %s\n", localDir)
+	return runMount(mountArgs)
+}
+
+func runCloudLogin(cloudAPIURL string, timeout time.Duration, shouldOpenBrowser bool, stdout io.Writer) (cloudCredentials, error) {
+	if timeout <= 0 {
+		timeout = 5 * time.Minute
+	}
+	state, err := randomURLSafe(24)
+	if err != nil {
+		return cloudCredentials{}, err
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return cloudCredentials{}, err
+	}
+	defer listener.Close()
+
+	tokenCh := make(chan cloudCredentials, 1)
+	errCh := make(chan error, 1)
+	server := &http.Server{}
+	server.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/callback" {
+			http.NotFound(w, r)
+			return
+		}
+		if got := r.URL.Query().Get("state"); got != state {
+			http.Error(w, "Relayfile Cloud login state mismatch", http.StatusBadRequest)
+			errCh <- errors.New("Relayfile Cloud login state mismatch")
+			return
+		}
+		if loginError := strings.TrimSpace(r.URL.Query().Get("error")); loginError != "" {
+			http.Error(w, "Relayfile Cloud login failed", http.StatusBadRequest)
+			errCh <- fmt.Errorf("Relayfile Cloud login failed: %s", loginError)
+			return
+		}
+		tokens, err := readCloudCredentialsFromQuery(r.URL.Query(), cloudAPIURL)
+		if err != nil {
+			http.Error(w, "Relayfile Cloud login callback was missing token fields", http.StatusBadRequest)
+			errCh <- err
+			return
+		}
+		fmt.Fprintln(w, "Relayfile Cloud login complete. You can close this tab.")
+		tokenCh <- tokens
+	})
+
+	go func() {
+		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			errCh <- err
+		}
+	}()
+	defer server.Close()
+
+	redirectURI := "http://" + listener.Addr().String() + "/callback"
+	loginURL, err := buildCloudURL(cloudAPIURL, "api/v1/cli/login")
+	if err != nil {
+		return cloudCredentials{}, err
+	}
+	query := loginURL.Query()
+	query.Set("redirect_uri", redirectURI)
+	query.Set("state", state)
+	loginURL.RawQuery = query.Encode()
+
+	fmt.Fprintf(stdout, "Sign in to Relayfile Cloud: %s\n", loginURL.String())
+	if shouldOpenBrowser {
+		if err := openBrowser(loginURL.String()); err != nil {
+			return cloudCredentials{}, fmt.Errorf("open cloud login: %w", err)
+		}
+	}
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case tokens := <-tokenCh:
+		return tokens, nil
+	case err := <-errCh:
+		return cloudCredentials{}, err
+	case <-timer.C:
+		return cloudCredentials{}, fmt.Errorf("Relayfile Cloud login timed out after %s", timeout)
+	}
+}
+
+func connectCloudIntegration(cloudAPIURL, workspaceID, workspaceToken, provider string, timeout time.Duration, shouldOpenBrowser bool, stdout io.Writer) error {
+	client, err := newAPIClient(cloudAPIURL, workspaceToken)
+	if err != nil {
+		return err
+	}
+	var session cloudConnectSessionResponse
+	if err := client.postJSON(context.Background(), fmt.Sprintf("/api/v1/workspaces/%s/integrations/connect-session", url.PathEscape(workspaceID)), cloudConnectSessionRequest{
+		AllowedIntegrations: []string{provider},
+	}, &session); err != nil {
+		return fmt.Errorf("create %s connect session: %w", provider, err)
+	}
+
+	connectionID := strings.TrimSpace(session.ConnectionID)
+	if connectionID == "" {
+		connectionID = workspaceID
+	}
+
+	if connectLink := strings.TrimSpace(session.ConnectLink); connectLink != "" {
+		fmt.Fprintf(stdout, "Connect %s: %s\n", provider, connectLink)
+		if shouldOpenBrowser {
+			if err := openBrowser(connectLink); err != nil {
+				return fmt.Errorf("open %s connect link: %w", provider, err)
+			}
+		}
+	} else {
+		fmt.Fprintf(stdout, "%s already has a hosted connect session\n", provider)
+	}
+
+	if timeout <= 0 {
+		timeout = 5 * time.Minute
+	}
+	deadline := time.Now().Add(timeout)
+	for {
+		ready, err := cloudIntegrationReady(client, workspaceID, provider, connectionID)
+		if err != nil {
+			return err
+		}
+		if ready {
+			fmt.Fprintf(stdout, "%s connected\n", provider)
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("timed out waiting for %s connection after %s", provider, timeout)
+		}
+		time.Sleep(2 * time.Second)
+	}
+}
+
+func cloudIntegrationReady(client *apiClient, workspaceID, provider, connectionID string) (bool, error) {
+	query := url.Values{}
+	query.Set("connectionId", connectionID)
+	var status cloudIntegrationReadyResponse
+	if err := client.getJSON(context.Background(), fmt.Sprintf("/api/v1/workspaces/%s/integrations/%s/status?%s", url.PathEscape(workspaceID), url.PathEscape(provider), query.Encode()), &status); err != nil {
+		return false, fmt.Errorf("check %s connection: %w", provider, err)
+	}
+	return status.Ready, nil
 }
 
 func runLogin(args []string, stdin io.Reader, stdout io.Writer) error {
@@ -1212,6 +1573,10 @@ func credentialsPath() string {
 	return filepath.Join(configDir(), "credentials.json")
 }
 
+func cloudCredentialsPath() string {
+	return filepath.Join(configDir(), "cloud-credentials.json")
+}
+
 func workspacesPath() string {
 	return filepath.Join(configDir(), "workspaces.json")
 }
@@ -1230,6 +1595,24 @@ func saveCredentials(creds credentials) error {
 	}
 	payload = append(payload, '\n')
 	return os.WriteFile(credentialsPath(), payload, 0o600)
+}
+
+func saveCloudCredentials(creds cloudCredentials) error {
+	if err := ensureConfigDir(); err != nil {
+		return err
+	}
+	if strings.TrimSpace(creds.APIURL) == "" {
+		creds.APIURL = defaultCloudAPIURL
+	}
+	if strings.TrimSpace(creds.UpdatedAt) == "" {
+		creds.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	}
+	payload, err := json.MarshalIndent(creds, "", "  ")
+	if err != nil {
+		return err
+	}
+	payload = append(payload, '\n')
+	return os.WriteFile(cloudCredentialsPath(), payload, 0o600)
 }
 
 func loadCredentials() (credentials, error) {
@@ -1386,6 +1769,53 @@ func removeWorkspace(name string) (bool, error) {
 	return true, saveWorkspaceCatalog(catalog)
 }
 
+func upsertWorkspaceRecord(name, id string) (workspaceRecord, error) {
+	name = strings.TrimSpace(name)
+	id = strings.TrimSpace(id)
+	if name == "" {
+		return workspaceRecord{}, errors.New("workspace name is required")
+	}
+	if id == "" {
+		id = name
+	}
+
+	catalog, err := loadWorkspaceCatalog()
+	if err != nil {
+		return workspaceRecord{}, err
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	for i := range catalog.Workspaces {
+		if catalog.Workspaces[i].Name == name || catalog.Workspaces[i].ID == id {
+			catalog.Workspaces[i].Name = name
+			catalog.Workspaces[i].ID = id
+			catalog.Workspaces[i].LastUsedAt = now
+			if strings.TrimSpace(catalog.Workspaces[i].CreatedAt) == "" {
+				catalog.Workspaces[i].CreatedAt = now
+			}
+			if err := saveWorkspaceCatalog(catalog); err != nil {
+				return workspaceRecord{}, err
+			}
+			return catalog.Workspaces[i], nil
+		}
+	}
+
+	record := workspaceRecord{
+		Name:       name,
+		ID:         id,
+		CreatedAt:  now,
+		LastUsedAt: now,
+	}
+	catalog.Workspaces = append(catalog.Workspaces, record)
+	if strings.TrimSpace(catalog.Default) == "" {
+		catalog.Default = name
+	}
+	if err := saveWorkspaceCatalog(catalog); err != nil {
+		return workspaceRecord{}, err
+	}
+	return record, nil
+}
+
 func resolveWorkspaceIDWithToken(value, token string) (string, error) {
 	value = strings.TrimSpace(value)
 	if value != "" {
@@ -1502,6 +1932,62 @@ func workspaceIDFromToken(token string) string {
 		}
 	}
 	return ""
+}
+
+func readCloudCredentialsFromQuery(values url.Values, fallbackAPIURL string) (cloudCredentials, error) {
+	accessToken := strings.TrimSpace(values.Get("access_token"))
+	refreshToken := strings.TrimSpace(values.Get("refresh_token"))
+	accessTokenExpiresAt := strings.TrimSpace(values.Get("access_token_expires_at"))
+	if accessToken == "" {
+		return cloudCredentials{}, errors.New("cloud login callback missing access_token")
+	}
+	if refreshToken == "" {
+		return cloudCredentials{}, errors.New("cloud login callback missing refresh_token")
+	}
+	if accessTokenExpiresAt == "" {
+		return cloudCredentials{}, errors.New("cloud login callback missing access_token_expires_at")
+	}
+	apiURL := strings.TrimRight(strings.TrimSpace(values.Get("api_url")), "/")
+	if apiURL == "" {
+		apiURL = strings.TrimRight(strings.TrimSpace(fallbackAPIURL), "/")
+	}
+	return cloudCredentials{
+		APIURL:                apiURL,
+		AccessToken:           accessToken,
+		RefreshToken:          refreshToken,
+		AccessTokenExpiresAt:  accessTokenExpiresAt,
+		RefreshTokenExpiresAt: strings.TrimSpace(values.Get("refresh_token_expires_at")),
+		UpdatedAt:             time.Now().UTC().Format(time.RFC3339),
+	}, nil
+}
+
+func buildCloudURL(baseURL, path string) (*url.URL, error) {
+	baseURL = strings.TrimSpace(baseURL)
+	if baseURL == "" {
+		baseURL = defaultCloudAPIURL
+	}
+	parsed, err := url.Parse(baseURL)
+	if err != nil {
+		return nil, err
+	}
+	if parsed.Scheme == "" || parsed.Host == "" {
+		return nil, fmt.Errorf("cloud API URL must be absolute: %s", baseURL)
+	}
+	if !strings.HasSuffix(parsed.Path, "/") {
+		parsed.Path += "/"
+	}
+	return parsed.ResolveReference(&url.URL{Path: strings.TrimLeft(path, "/")}), nil
+}
+
+func randomURLSafe(bytesCount int) (string, error) {
+	if bytesCount <= 0 {
+		bytesCount = 24
+	}
+	buf := make([]byte, bytesCount)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(buf), nil
 }
 
 func remoteWorkspaceNames(response adminWorkspaceList) []string {

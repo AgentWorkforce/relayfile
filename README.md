@@ -48,7 +48,17 @@ This starts relayfile on `:9090` and relayauth on `:9091`, seeds a `ws_demo` wor
 
 ## Getting Started
 
-**[Relayfile Cloud](https://relayfile.dev/pricing)** — everything managed. Sign up, get a token, connect your services from the dashboard.
+**Relayfile Cloud** — everything managed. Run the CLI, sign in with the hosted browser flow, choose an integration, and Relayfile mounts it as ordinary files for your agent:
+
+```bash
+relayfile
+```
+
+For non-interactive setup, provide the choices up front:
+
+```bash
+relayfile setup --provider github --workspace my-project --local-dir ./relayfile-mount
+```
 
 **Self-hosted:**
 
