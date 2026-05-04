@@ -1910,6 +1910,14 @@ func runMount(args []string) error {
 		"once":            false,
 		"local-dir":       true,
 	})); err != nil {
+		// `--help` / `-h` come back from flag.ContinueOnError as
+		// flag.ErrHelp. Per contract A13 §3.6, surface the synced-mirror
+		// limitations alongside the flag list so users know what the
+		// default mode does and does not provide.
+		if errors.Is(err, flag.ErrHelp) {
+			printMountHelp(os.Stdout)
+			return nil
+		}
 		return err
 	}
 	if fs.NArg() > 2 {
@@ -2026,6 +2034,55 @@ func runMount(args []string) error {
 	_, _ = upsertWorkspaceDetails(record)
 
 	return runMountLoop(rootCtx, syncer, absLocalDir, workspaceID, strings.TrimRight(strings.TrimSpace(*server), "/"), *timeout, *interval, *intervalJitter, *websocketEnabled, *once, *daemonized, pidFile, logFile)
+}
+
+// mountStartBanner formats the user-facing line printed when the mount loop
+// starts. Per contract A13 / §3.1, the banner identifies the default mode
+// as a "synced mirror" so users do not assume kernel-level FUSE semantics.
+func mountStartBanner(localDir string, interval time.Duration, intervalJitter float64) string {
+	return fmt.Sprintf(
+		"Synced mirror started at %s. Sync interval %s ±%.0f%%. Type 'relayfile status' for live state.",
+		localDir,
+		interval.Round(time.Second).String(),
+		intervalJitter*100,
+	)
+}
+
+// printMountHelp surfaces the contract §3.6 list of synced-mirror
+// limitations alongside `relayfile mount`'s flag summary so that
+// `relayfile mount --help` is self-describing per A13.
+func printMountHelp(w io.Writer) {
+	fmt.Fprintln(w, `Usage: relayfile mount [WORKSPACE] [LOCAL_DIR]
+
+Mirror a remote workspace to a local directory. The default mode is a
+synced mirror (--mode=poll): ordinary files on disk that a daemon polls
+the cloud for every 30 s and writes back through. FUSE is opt-in via
+--mode=fuse.
+
+Synced-mirror limitations (§3.6 of the productized cloud-mount contract):
+  - File handles are not stable across syncs; an editor that holds a
+    file open during a remote update will see content change underneath
+    it on the next reconcile.
+  - mtime reflects the local write time, not the source-of-truth event
+    time. Use .relay/state.json for ordering.
+  - Directory listings can briefly omit a newly created remote file
+    until the next reconcile (default 30 s) or a websocket event.
+  - inotify/fsevents watchers downstream of the mirror will see
+    synthetic create events on every reconcile of new content; debounce
+    >= 1 s if a downstream tool requires single-shot events.
+
+Common flags:
+  --workspace NAME     workspace name or id (defaults to the active workspace)
+  --local-dir DIR      local mirror directory (defaults to a relay-... folder)
+  --mode poll|fuse     poll (synced mirror, default) or fuse
+  --interval 30s       sync interval (default 30s)
+  --background         detach and keep syncing in the background
+  --once               run one sync cycle and exit (used by setup/CI)
+  --timeout 5m         per-sync timeout
+  --no-websocket       disable websocket event streaming
+
+See 'relayfile help' for the full command list and
+docs/guides/vfs-cloud-setup.md#known-limitations for details.`)
 }
 
 func runTree(args []string, stdout io.Writer) error {
@@ -4166,7 +4223,7 @@ func runMountLoop(rootCtx context.Context, syncer *mountsync.Syncer, localDir, w
 		return nil
 	}
 
-	log.Printf("Mirror started at %s. Sync interval %s ±%.0f%%. Type 'relayfile status' for live state.", localDir, interval.String(), intervalJitter*100)
+	log.Print(mountStartBanner(localDir, interval, intervalJitter))
 	initialErr := runCycle(true)
 	if once {
 		return initialErr
