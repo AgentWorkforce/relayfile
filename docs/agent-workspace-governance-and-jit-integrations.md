@@ -295,7 +295,7 @@ The current split is:
 | Workspace connection records | Cloud `workspace_integrations` storage | Cloud |
 | Nango sync definitions | `../sage/nango-integrations/*/syncs` | Cloud-managed generated artifacts |
 | VFS path/resource/writeback mapping DSL | `../relayfile-adapters/docs/MAPPING_YAML_SPEC.md` and adapter-core runtime | Relayfile Adapters |
-| Provider proxy/connection health primitives | `../relayfile-providers/packages/nango` | Relayfile Providers |
+| Provider proxy/connection health primitives | `../relayfile-providers/packages/nango`, `../relayfile-providers/packages/composio`, and `../relayfile-providers/packages/pipedream` | Relayfile Providers |
 
 The migration goal is to move provider object definitions out of Sage and into
 Cloud-managed integration specs backed by Relayfile Adapter mapping semantics.
@@ -305,9 +305,9 @@ Cloud-managed integration specs backed by Relayfile Adapter mapping semantics.
 ```text
 Customer intent
   -> DraftIntegration manifest
-  -> Provider connection or connect session
+  -> Native provider connection or broker connect session
   -> Sandbox compilation
-  -> Nango dry run
+  -> Nango dry run or broker-backed unauthenticated Nango dry run
   -> VFS preview
   -> Human/customer approval
   -> Promote to workspace integration
@@ -321,16 +321,27 @@ shape. Static specs may live in source control. JIT specs are workspace-scoped
 runtime artifacts.
 
 ```ts
+type IntegrationBroker = "native" | "nango" | "composio" | "pipedream";
+
 interface IntegrationSpec {
   id: string;
   kind: "static" | "jit";
   version: string;
   provider: string;
   providerConfigKey?: string;
+  broker: IntegrationBroker;
+  brokerAppId?: string;
+  brokerToolkitSlug?: string;
+  brokerConnectionId?: string;
   displayName: string;
   vfsRoot: string;
   connectionPolicy: "sponsor-user" | "tenant-delegated" | "explicit";
   requiredOAuthScopes: string[];
+  schedule?: {
+    enabled: boolean;
+    interval: string;
+    timezone?: string;
+  };
   objects: IntegrationObjectSpec[];
   writebacks: IntegrationWritebackSpec[];
   permissions: {
@@ -364,6 +375,14 @@ Provider config keys are Cloud-resolved. Product code should pass
 workspace/provider intent and must not hardcode raw Nango config keys unless it
 is Cloud integration infrastructure.
 
+`broker="native"` means Relayfile Cloud owns the provider catalog, connection
+flow, sync implementation, and adapter mapping. `broker="nango"` means Nango
+owns the provider auth/sync primitive directly. `broker="composio"` or
+`broker="pipedream"` means the broker owns the long-tail app catalog,
+customer connection flow, and action/tool execution surface, while Cloud still
+owns scheduling, sandbox validation, VFS projection, writeback policy, and
+audit.
+
 ### 5.4 Draft manifest
 
 ```ts
@@ -372,13 +391,23 @@ interface DraftIntegrationManifest {
   displayName: string;
   provider: string;
   providerConfigKey?: string;
+  broker?: IntegrationBroker;
+  brokerAppId?: string;
+  brokerToolkitSlug?: string;
+  brokerActions?: string[];
   connectionId?: string;
   vfsRoot?: string;
+  schedule?: {
+    enabled: boolean;
+    interval: string;
+    timezone?: string;
+  };
   source:
     | { kind: "openapi"; url: string }
     | { kind: "docs"; url: string; crawlPaths?: string[] }
     | { kind: "samples"; files: string[] }
-    | { kind: "nango-template"; templateId: string };
+    | { kind: "nango-template"; templateId: string }
+    | { kind: "broker-catalog"; broker: IntegrationBroker; appId: string };
   objects: Array<{
     name: string;
     listEndpoint?: string;
@@ -404,7 +433,75 @@ The manifest is intentionally close to the existing
 that JIT manifests are tenant/workspace scoped, generated or edited at runtime,
 and cannot be promoted without sandbox validation.
 
-### 5.5 Draft APIs
+### 5.5 Integration broker layer
+
+Relayfile should not register every long-tail OAuth app and object model by
+hand. Cloud may delegate app discovery, customer connection, token custody, and
+tool/action execution to integration brokers such as Composio and Pipedream.
+This gives customers broad catalog coverage without exposing thousands of tools
+to the agent context or requiring Relayfile to ship a first-party adapter for
+every app on day one.
+
+The broker layer must be explicit in the promoted integration record:
+
+```ts
+interface BrokerConnection {
+  broker: "composio" | "pipedream";
+  appId: string;
+  toolkitSlug?: string;
+  connectedAccountId: string;
+  externalUserId: string;
+  workspaceId: string;
+  orgId: string;
+  ownerUserId: string;
+  status: "pending" | "active" | "error" | "revoked";
+  grantedScopes?: string[];
+}
+
+interface BrokerExecutionPlan {
+  broker: "composio" | "pipedream";
+  readActions: string[];
+  writeActions: string[];
+  triggerSubscriptions?: string[];
+  objectMappings: IntegrationObjectSpec[];
+  writebacks: IntegrationWritebackSpec[];
+}
+```
+
+For brokered integrations, Nango should be used as the scheduled runner and
+dry-run harness, not necessarily as the customer OAuth owner:
+
+```text
+Nango schedule tick
+  -> unauthenticated sync reads broker credentials from connection metadata
+  -> sync calls Composio or Pipedream proxy/action APIs
+  -> broker executes against the customer's connected account
+  -> sync normalizes records into the Relayfile mapping artifact
+  -> Cloud materializes the Relayfile VFS and records audit state
+```
+
+`../relayfile-providers/packages/nango` already includes a
+`NangoUnauthProvider` pattern that reads credentials from Nango connection
+metadata and injects auth headers before proxy execution. That provider is the
+bridge for broker-backed scheduled syncs. The Nango connection should store
+only the broker execution credential or reference needed by Cloud workers; it
+must not expose provider OAuth tokens to agents.
+
+`../relayfile-providers/packages/composio` already exposes catalog,
+connected-account, action execution, trigger subscription, proxy, health, and
+webhook primitives. `../relayfile-providers/packages/pipedream` already
+exposes Connect tokens, accounts, app/component listing, trigger deployment,
+workflow invocation, proxy, health, and webhook primitives. Cloud should depend
+on those provider packages for broker operations instead of duplicating broker
+client code.
+
+The claim should be precise: brokered JIT gives Relayfile broad connectable
+catalog coverage immediately. It does not mean every app has a polished
+first-party filesystem projection immediately. Each brokered integration still
+needs a bounded object selection, generated mapping, dry-run evidence,
+approval, mounted path, and writeback policy before agents can use it.
+
+### 5.6 Draft APIs
 
 Cloud owns the hosted API:
 
@@ -428,7 +525,7 @@ const preview = await draft.preview();
 await draft.promote({ approvedBy: "user_jane" });
 ```
 
-### 5.6 Sandbox dry run
+### 5.7 Sandbox dry run
 
 Cloud must run every JIT draft through an isolated sandbox before promotion.
 
@@ -450,12 +547,15 @@ The dry run must:
 
 1. Use the customer's selected provider connection.
 2. Invoke Nango dry-run behavior through the Nango CLI or equivalent API.
-3. Limit network access to Nango, the target provider, Relayfile Cloud, and
-   configured package registries needed for the run.
-4. Cap object count, runtime, memory, and output size.
-5. Redact provider tokens and secrets from logs.
-6. Produce a deterministic artifact bundle:
+3. For brokered integrations, execute through Composio or Pipedream using the
+   broker connection selected by the customer.
+4. Limit network access to Nango, the target provider or broker, Relayfile
+   Cloud, and configured package registries needed for the run.
+5. Cap object count, runtime, memory, and output size.
+6. Redact provider tokens, broker tokens, and secrets from logs.
+7. Produce a deterministic artifact bundle:
    - normalized mapping YAML
+   - broker execution plan, when applicable
    - generated provider config metadata
    - object model schemas
    - sample VFS tree
@@ -463,6 +563,10 @@ The dry run must:
    - validation errors
    - required OAuth scopes
    - proposed writeback policies
+
+For brokered integrations, the dry run must also verify that every selected
+read action returns data with a stable enough schema to map into files, and
+that every selected write action has a declared payload schema and policy gate.
 
 Promotion is forbidden unless the dry run succeeds or a workspace admin
 explicitly approves a degraded promotion mode.
@@ -473,6 +577,7 @@ The dry-run result must include a typed diff:
 interface IntegrationDryRunResult {
   draftId: string;
   status: "succeeded" | "failed" | "degraded";
+  broker?: IntegrationBroker;
   recordsFetched: number;
   projectedFiles: Array<{ path: string; contentType: string; size: number }>;
   writebacksAvailable: string[];
@@ -482,7 +587,7 @@ interface IntegrationDryRunResult {
 }
 ```
 
-### 5.7 VFS preview
+### 5.8 VFS preview
 
 Before promotion, the customer and agent must be able to inspect a preview:
 
@@ -495,7 +600,7 @@ Before promotion, the customer and agent must be able to inspect a preview:
 
 Preview files are read-only and must not trigger provider writeback.
 
-### 5.8 Promotion
+### 5.9 Promotion
 
 Promotion creates a workspace-scoped integration record:
 
@@ -508,6 +613,8 @@ interface JitIntegrationRecord {
   createdByUserId: string;
   provider: string;
   providerConfigKey: string;
+  broker?: IntegrationBroker;
+  brokerConnectionId?: string;
   connectionId: string;
   vfsRoot: string;
   manifestHash: string;
@@ -538,12 +645,13 @@ Activation state must include:
 1. Integration spec version.
 2. Provider config key.
 3. Connection ID.
-4. Dry-run artifact ID.
-5. Deployed integration or generated artifact ID.
-6. Enabled object set.
-7. Manifest hash.
+4. Broker and broker connection ID, when applicable.
+5. Dry-run artifact ID.
+6. Deployed integration or generated artifact ID.
+7. Enabled object set.
+8. Manifest hash.
 
-### 5.9 Writeback policy for JIT integrations
+### 5.10 Writeback policy for JIT integrations
 
 JIT writebacks must use the same machine-readable policy model as static
 adapters. A writeback is allowed only when:
@@ -551,11 +659,15 @@ adapters. A writeback is allowed only when:
 1. The promoted manifest defines the writeback.
 2. The writeback was included in the dry-run artifact.
 3. The caller's Relayauth token includes the required Relayfile scope.
-4. The provider connection is active.
+4. The provider or broker connection is active.
 5. The payload validates against the promoted schema.
 
 If `dryRunSafe=false`, the dry run must validate schema and endpoint shape but
 must not execute the provider mutation.
+
+For brokered writebacks, Relayfile should invoke the promoted Composio or
+Pipedream action ID from the dry-run artifact. It must not let agents provide
+arbitrary broker action names at write time.
 
 ---
 
@@ -576,8 +688,9 @@ Required changes:
 
 ### 6.2 `../cloud`
 
-Owns hosted workspace control plane, provider connection state, static catalog,
-JIT draft APIs, sandbox orchestration, Nango dry runs, and promotion.
+Owns hosted workspace control plane, provider and broker connection state,
+static catalog, JIT draft APIs, sandbox orchestration, Nango dry runs,
+brokered scheduled syncs, and promotion.
 
 Required changes:
 
@@ -587,6 +700,8 @@ Required changes:
 4. Promote validated drafts into workspace integration records.
 5. Return static and JIT integrations through the same list/status/sync APIs.
 6. Record provider connection ownership by user, org, and workspace.
+7. Add a broker registry for Composio and Pipedream app catalogs, connect
+   sessions, account health, action execution plans, and trigger/webhook state.
 
 ### 6.3 `../relayauth`
 
@@ -614,7 +729,7 @@ Required changes:
 
 ### 6.5 `../relayfile-providers`
 
-Owns provider execution and Nango/Composio/Nango-like provider clients.
+Owns provider execution and Nango/Composio/Pipedream provider clients.
 
 Required changes:
 
@@ -622,6 +737,11 @@ Required changes:
    sponsor, provider connection, required OAuth scopes, and correlation ID.
 2. Deny execution for missing, revoked, or under-scoped provider connections.
 3. Expose a dry-run execution path that Cloud can call from the sandbox.
+4. Treat Composio and Pipedream as integration brokers, not agent-visible tool
+   surfaces: expose catalog, connection, proxy/action, trigger, health, and
+   webhook primitives behind bounded Cloud APIs.
+5. Keep `NangoUnauthProvider` as the bridge for scheduled broker-backed syncs
+   where Nango runs the job but the customer OAuth account lives in the broker.
 
 ### 6.6 `../sage`
 
@@ -677,6 +797,15 @@ After approval, the promoted JIT integration appears in integration listing,
 sync status, mounted path discovery, `_PERMISSIONS.md`, and writeback policy
 enforcement.
 
+### 7.7 Brokered long-tail integration
+
+Given a customer selects a Composio or Pipedream app that Relayfile does not
+support as a static integration, Cloud can create a broker connect session,
+generate a bounded object/action manifest, run a broker-backed unauthenticated
+Nango dry run, schedule the promoted sync, materialize files under a
+collision-safe root, and enforce writeback policy through the promoted broker
+action IDs.
+
 ---
 
 ## 8. Open Questions
@@ -693,6 +822,9 @@ enforcement.
    shared Agent Relay sandbox service?
 6. Should the JIT compiler be allowed to use an LLM to infer object mappings,
    or must v1 require explicit customer/admin manifests?
+7. For brokered integrations, should Cloud store broker connection IDs only,
+   or mirror a normalized `broker_connections` table for faster governance,
+   revocation, and audit queries?
 
 ---
 
