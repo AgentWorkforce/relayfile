@@ -1026,7 +1026,7 @@ func TestOpsListReadsLocalDeadLetterMirror(t *testing.T) {
 	}
 
 	var stdout bytes.Buffer
-	if err := run([]string{"ops", "list", "--workspace", "demo"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+	if err := run([]string{"ops", "list", "--workspace", "demo", "--no-refresh"}, strings.NewReader(""), &stdout, &stdout); err != nil {
 		t.Fatalf("run ops list failed: %v", err)
 	}
 	got := stdout.String()
@@ -1053,11 +1053,236 @@ func TestOpsListReportsEmptyWhenNoDeadLetterDir(t *testing.T) {
 	}
 
 	var stdout bytes.Buffer
-	if err := run([]string{"ops", "list", "--workspace", "demo"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+	if err := run([]string{"ops", "list", "--workspace", "demo", "--no-refresh"}, strings.NewReader(""), &stdout, &stdout); err != nil {
 		t.Fatalf("run ops list failed: %v", err)
 	}
 	if got := strings.TrimSpace(stdout.String()); got != "No dead-lettered ops" {
 		t.Fatalf("expected empty marker, got: %q", got)
+	}
+}
+
+func TestOpsListRefreshesMirrorFromServer(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	localDir := t.TempDir()
+	if err := ensureMirrorLayout(localDir); err != nil {
+		t.Fatalf("ensureMirrorLayout failed: %v", err)
+	}
+	dlDir := filepath.Join(localDir, ".relay", "dead-letter")
+	if err := os.MkdirAll(dlDir, 0o755); err != nil {
+		t.Fatalf("mkdir dead-letter failed: %v", err)
+	}
+	// Pre-existing record that the server no longer reports — must be pruned.
+	if err := os.WriteFile(filepath.Join(dlDir, "op_old.json"), []byte(`{"opId":"op_old"}`), 0o644); err != nil {
+		t.Fatalf("write stale record failed: %v", err)
+	}
+	if _, err := upsertWorkspaceDetails(workspaceRecord{
+		Name:       "demo",
+		ID:         "ws_demo",
+		LocalDir:   localDir,
+		CreatedAt:  time.Now().UTC().Format(time.RFC3339),
+		LastUsedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("upsertWorkspaceDetails failed: %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path != "/v1/workspaces/ws_demo/ops" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		if got := r.URL.Query().Get("status"); got != "dead_lettered" {
+			t.Fatalf("unexpected status filter: %q", got)
+		}
+		_, _ = w.Write([]byte(`{"items":[{"opId":"op_new","path":"/notion/page.json","status":"dead_lettered","attemptCount":3,"lastError":"schema validation failed: body must include event","createdAt":"2026-05-02T17:00:00Z","updatedAt":"2026-05-02T18:05:00Z"}]}`))
+	}))
+	defer server.Close()
+
+	if err := saveCredentials(credentials{Server: server.URL, Token: "token"}); err != nil {
+		t.Fatalf("saveCredentials failed: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := run([]string{"ops", "list", "--workspace", "demo"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("run ops list failed: %v", err)
+	}
+	got := stdout.String()
+	if !strings.Contains(got, "op_new") {
+		t.Fatalf("expected refreshed record op_new in output: %q", got)
+	}
+	if strings.Contains(got, "op_old") {
+		t.Fatalf("expected stale record op_old to be pruned, got: %q", got)
+	}
+	// Verify the new record landed on disk with the expected shape.
+	payload, err := os.ReadFile(filepath.Join(dlDir, "op_new.json"))
+	if err != nil {
+		t.Fatalf("read refreshed record failed: %v", err)
+	}
+	var record deadLetterRecord
+	if err := json.Unmarshal(payload, &record); err != nil {
+		t.Fatalf("unmarshal refreshed record failed: %v", err)
+	}
+	if record.Code != "validation_error" {
+		t.Fatalf("expected validation_error code, got %q", record.Code)
+	}
+	if !strings.HasSuffix(record.ReplayURL, "/v1/workspaces/ws_demo/ops/op_new/replay") {
+		t.Fatalf("unexpected replay URL: %q", record.ReplayURL)
+	}
+	if _, err := os.Stat(filepath.Join(dlDir, "op_old.json")); !os.IsNotExist(err) {
+		t.Fatalf("expected stale record removed, got err=%v", err)
+	}
+}
+
+func TestPullTriggersSyncRefreshForConnectedProviders(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	if _, err := upsertWorkspaceDetails(workspaceRecord{
+		Name:       "demo",
+		ID:         "ws_demo",
+		CreatedAt:  time.Now().UTC().Format(time.RFC3339),
+		LastUsedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("upsertWorkspaceDetails failed: %v", err)
+	}
+
+	refreshes := map[string]bool{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/workspaces/ws_demo/sync/status":
+			_, _ = w.Write([]byte(`{"workspaceId":"ws_demo","providers":[{"provider":"notion","status":"ready","lagSeconds":4},{"provider":"github","status":"ready","lagSeconds":1}]}`))
+		case "/v1/workspaces/ws_demo/sync/refresh":
+			if r.Method != http.MethodPost {
+				t.Fatalf("unexpected method: %s", r.Method)
+			}
+			var body struct {
+				Provider string `json:"provider"`
+				Reason   string `json:"reason"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("decode refresh body failed: %v", err)
+			}
+			if body.Reason != "manual" {
+				t.Fatalf("unexpected refresh reason: %q", body.Reason)
+			}
+			refreshes[body.Provider] = true
+			_, _ = w.Write([]byte(`{"status":"queued","id":"sync_job_1"}`))
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	if err := saveCredentials(credentials{Server: server.URL, Token: "token"}); err != nil {
+		t.Fatalf("saveCredentials failed: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := run([]string{"pull", "--workspace", "demo"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("run pull failed: %v\noutput:\n%s", err, stdout.String())
+	}
+	for _, provider := range []string{"notion", "github"} {
+		if !refreshes[provider] {
+			t.Fatalf("expected refresh for %s", provider)
+		}
+	}
+	if got := stdout.String(); !strings.Contains(got, "notion refresh queued") || !strings.Contains(got, "github refresh queued") {
+		t.Fatalf("unexpected pull output: %q", got)
+	}
+}
+
+func TestPullScopedToSingleProviderSkipsStatusCall(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	if _, err := upsertWorkspaceDetails(workspaceRecord{
+		Name:       "demo",
+		ID:         "ws_demo",
+		CreatedAt:  time.Now().UTC().Format(time.RFC3339),
+		LastUsedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("upsertWorkspaceDetails failed: %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path != "/v1/workspaces/ws_demo/sync/refresh" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"status":"queued","id":"sync_job_2"}`))
+	}))
+	defer server.Close()
+
+	if err := saveCredentials(credentials{Server: server.URL, Token: "token"}); err != nil {
+		t.Fatalf("saveCredentials failed: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := run([]string{"pull", "--workspace", "demo", "--provider", "notion", "--reason", "investigation"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("run pull failed: %v\noutput:\n%s", err, stdout.String())
+	}
+	if got := stdout.String(); !strings.Contains(got, "notion refresh queued") {
+		t.Fatalf("unexpected pull output: %q", got)
+	}
+}
+
+func TestIntegrationCatalogCacheServesWithinTTL(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/integrations/catalog" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		calls++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"providers":[{"id":"notion","displayName":"Notion","vfsRoot":"/notion"}],"version":"v1"}`))
+	}))
+	defer server.Close()
+
+	first, err := loadIntegrationCatalog(server.URL, "tok")
+	if err != nil {
+		t.Fatalf("loadIntegrationCatalog first call failed: %v", err)
+	}
+	second, err := loadIntegrationCatalog(server.URL, "tok")
+	if err != nil {
+		t.Fatalf("loadIntegrationCatalog second call failed: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("expected exactly 1 catalog fetch, got %d", calls)
+	}
+	if len(first) != 1 || first[0].ID != "notion" || len(second) != 1 || second[0].ID != "notion" {
+		t.Fatalf("unexpected catalog contents: %+v / %+v", first, second)
+	}
+}
+
+func TestIntegrationCatalogCacheRefetchesAfterInvalidate(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/integrations/catalog" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		calls++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"providers":[{"id":"notion","displayName":"Notion","vfsRoot":"/notion"}],"version":"v1"}`))
+	}))
+	defer server.Close()
+
+	if _, err := loadIntegrationCatalog(server.URL, "tok"); err != nil {
+		t.Fatalf("first call failed: %v", err)
+	}
+	invalidateIntegrationCatalogCache()
+	if _, err := loadIntegrationCatalog(server.URL, "tok"); err != nil {
+		t.Fatalf("post-invalidate call failed: %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("expected 2 catalog fetches after invalidate, got %d", calls)
 	}
 }
 

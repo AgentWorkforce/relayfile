@@ -318,6 +318,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		return runIntegration(args[1:], stdin, stdout)
 	case "ops":
 		return runOps(args[1:], stdin, stdout)
+	case "pull":
+		return runPull(args[1:], stdout)
 	case "mount":
 		return runMount(args[1:])
 	case "tree", "ls":
@@ -361,6 +363,7 @@ Usage:
   relayfile integration disconnect PROVIDER [--workspace NAME] [--yes]
   relayfile ops list [--workspace NAME] [--json]
   relayfile ops replay OPID [--workspace NAME]
+  relayfile pull [--workspace NAME] [--provider PROVIDER] [--reason TEXT]
   relayfile mount [WORKSPACE] [LOCAL_DIR]
   relayfile tree [WORKSPACE] [PATH] [--depth N]
   relayfile read [WORKSPACE] PATH
@@ -377,6 +380,7 @@ Subcommands:
   workspace   Create, select, list, or delete locally tracked workspaces
   integration Connect, list, or disconnect workspace integrations
   ops         List or replay dead-lettered writeback ops
+  pull        Trigger an immediate sync refresh for one or all providers
   mount       Mirror a remote workspace to a local directory; add --background to detach
   tree        List a remote workspace path
   read        Print a remote file's content
@@ -677,7 +681,67 @@ func normalizeProviderID(value string) string {
 	}
 }
 
+// integrationCatalogTTL bounds how long a cached catalog response remains
+// authoritative without revalidation per contract §6 / verdict §A12.
+const integrationCatalogTTL = time.Hour
+
+type integrationCatalogCacheEntry struct {
+	APIURL    string                            `json:"apiUrl"`
+	FetchedAt string                            `json:"fetchedAt"`
+	Version   string                            `json:"version,omitempty"`
+	Providers []integrationCatalogEntry         `json:"providers"`
+}
+
+func integrationCatalogCachePath() string {
+	return filepath.Join(configDir(), "catalog-cache.json")
+}
+
+func readIntegrationCatalogCache() (integrationCatalogCacheEntry, bool) {
+	payload, err := os.ReadFile(integrationCatalogCachePath())
+	if err != nil {
+		return integrationCatalogCacheEntry{}, false
+	}
+	var entry integrationCatalogCacheEntry
+	if err := json.Unmarshal(payload, &entry); err != nil {
+		return integrationCatalogCacheEntry{}, false
+	}
+	return entry, true
+}
+
+func writeIntegrationCatalogCache(entry integrationCatalogCacheEntry) error {
+	if err := ensureConfigDir(); err != nil {
+		return err
+	}
+	payload, err := json.MarshalIndent(entry, "", "  ")
+	if err != nil {
+		return err
+	}
+	return writeFileAtomically(integrationCatalogCachePath(), payload, 0o644)
+}
+
+func invalidateIntegrationCatalogCache() {
+	_ = os.Remove(integrationCatalogCachePath())
+}
+
+func cachedCatalogIsFresh(entry integrationCatalogCacheEntry, apiURL string) bool {
+	if entry.APIURL != apiURL || len(entry.Providers) == 0 {
+		return false
+	}
+	fetched, err := time.Parse(time.RFC3339, entry.FetchedAt)
+	if err != nil {
+		return false
+	}
+	return time.Since(fetched) < integrationCatalogTTL
+}
+
 func loadIntegrationCatalog(cloudAPIURL, accessToken string) ([]integrationCatalogEntry, error) {
+	if entry, ok := readIntegrationCatalogCache(); ok && cachedCatalogIsFresh(entry, cloudAPIURL) {
+		return entry.Providers, nil
+	}
+	return fetchIntegrationCatalog(cloudAPIURL, accessToken)
+}
+
+func fetchIntegrationCatalog(cloudAPIURL, accessToken string) ([]integrationCatalogEntry, error) {
 	client, err := newAPIClient(cloudAPIURL, accessToken)
 	if err != nil {
 		return fallbackIntegrationCatalog(), err
@@ -689,7 +753,20 @@ func loadIntegrationCatalog(cloudAPIURL, accessToken string) ([]integrationCatal
 	if len(payload.Providers) == 0 {
 		return fallbackIntegrationCatalog(), nil
 	}
+	_ = writeIntegrationCatalogCache(integrationCatalogCacheEntry{
+		APIURL:    cloudAPIURL,
+		FetchedAt: time.Now().UTC().Format(time.RFC3339),
+		Version:   payload.Version,
+		Providers: payload.Providers,
+	})
 	return payload.Providers, nil
+}
+
+// isAPIConflict reports whether err is a 409 from the cloud API. A 409 forces
+// catalog revalidation per contract verdict §A12.
+func isAPIConflict(err error) bool {
+	var apiErr *apiError
+	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusConflict
 }
 
 func fallbackIntegrationCatalog() []integrationCatalogEntry {
@@ -914,6 +991,13 @@ func connectCloudIntegration(cloudAPIURL, workspaceID, workspaceToken, provider,
 	if err := client.postJSON(context.Background(), fmt.Sprintf("/api/v1/workspaces/%s/integrations/connect-session", url.PathEscape(workspaceID)), cloudConnectSessionRequest{
 		AllowedIntegrations: []string{provider},
 	}, &session); err != nil {
+		// Per contract verdict §A12, a 409 from connect-session means the
+		// requested provider is no longer in the catalog. Drop the cached
+		// catalog so the next invocation pulls fresh provider ids before
+		// surfacing the error to the user.
+		if isAPIConflict(err) {
+			invalidateIntegrationCatalogCache()
+		}
 		return fmt.Errorf("create %s connect session: %w", provider, err)
 	}
 
@@ -1275,14 +1359,20 @@ func runOpsList(args []string, stdout io.Writer) error {
 	fs.SetOutput(io.Discard)
 	workspaceName := fs.String("workspace", "", "workspace name or id")
 	jsonOutput := fs.Bool("json", false, "emit JSON")
+	noRefresh := fs.Bool("no-refresh", false, "skip refreshing the local mirror from the server")
+	server := fs.String("server", "", "relayfile server URL override")
+	tokenOverride := fs.String("token", "", "relayfile token override")
 	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
-		"workspace": true,
-		"json":      false,
+		"workspace":  true,
+		"json":       false,
+		"no-refresh": false,
+		"server":     true,
+		"token":      true,
 	})); err != nil {
 		return err
 	}
 	if fs.NArg() > 0 {
-		return errors.New("usage: relayfile ops list [--workspace NAME] [--json]")
+		return errors.New("usage: relayfile ops list [--workspace NAME] [--json] [--no-refresh]")
 	}
 	record, err := resolveWorkspaceRecord(strings.TrimSpace(*workspaceName))
 	if err != nil {
@@ -1295,6 +1385,16 @@ func runOpsList(args []string, stdout io.Writer) error {
 		fmt.Fprintln(stdout, "No dead-lettered ops")
 		return nil
 	}
+
+	if !*noRefresh {
+		// Best-effort refresh: surface the warning but keep showing the
+		// local mirror so users can still see and replay known failures
+		// when offline.
+		if err := refreshDeadLetterMirror(record, strings.TrimSpace(*server), strings.TrimSpace(*tokenOverride)); err != nil {
+			fmt.Fprintf(stdout, "warning: could not refresh from server: %v\n", err)
+		}
+	}
+
 	records, err := readDeadLetterRecords(record.LocalDir)
 	if err != nil {
 		return err
@@ -1353,6 +1453,128 @@ func readDeadLetterRecords(localDir string) ([]deadLetterRecord, error) {
 	return records, nil
 }
 
+type opsListResponse struct {
+	Items []struct {
+		OpID          string  `json:"opId"`
+		Path          string  `json:"path,omitempty"`
+		Action        string  `json:"action,omitempty"`
+		Provider      string  `json:"provider,omitempty"`
+		Status        string  `json:"status"`
+		AttemptCount  int     `json:"attemptCount"`
+		LastError     *string `json:"lastError,omitempty"`
+		CreatedAt     string  `json:"createdAt,omitempty"`
+		UpdatedAt     string  `json:"updatedAt,omitempty"`
+		CorrelationID string  `json:"correlationId,omitempty"`
+	} `json:"items"`
+	NextCursor *string `json:"nextCursor,omitempty"`
+}
+
+// refreshDeadLetterMirror reconciles the local .relay/dead-letter/ directory
+// against the server's view per contract §8.4. New dead-lettered ops are
+// written; ops the server no longer reports as dead-lettered are pruned so
+// the local mirror does not show stale entries after replay or ack.
+func refreshDeadLetterMirror(record workspaceRecord, serverOverride, tokenOverride string) error {
+	if record.LocalDir == "" {
+		return nil
+	}
+	creds, err := loadCredentials()
+	if err != nil {
+		return err
+	}
+	tokenValue := resolveToken(tokenOverride, creds)
+	client, err := newAPIClient(resolveServer(serverOverride, creds), tokenValue)
+	if err != nil {
+		return err
+	}
+
+	var feed opsListResponse
+	if err := client.getJSON(
+		context.Background(),
+		fmt.Sprintf("/v1/workspaces/%s/ops?status=dead_lettered&limit=200", url.PathEscape(record.ID)),
+		&feed,
+	); err != nil {
+		return err
+	}
+
+	dir := deadLetterDirFor(record.LocalDir)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+
+	keep := make(map[string]struct{}, len(feed.Items))
+	baseURL := strings.TrimRight(client.baseURL, "/")
+	for _, item := range feed.Items {
+		opID := strings.TrimSpace(item.OpID)
+		if opID == "" {
+			continue
+		}
+		keep[opID] = struct{}{}
+		message := ""
+		if item.LastError != nil {
+			message = strings.TrimSpace(*item.LastError)
+		}
+		code := classifyDeadLetterCode(message)
+		dl := deadLetterRecord{
+			OpID:            opID,
+			Path:            item.Path,
+			Code:            code,
+			Message:         message,
+			CreatedAt:       item.CreatedAt,
+			LastAttemptedAt: item.UpdatedAt,
+			Attempts:        item.AttemptCount,
+			ReplayURL: fmt.Sprintf(
+				"%s/v1/workspaces/%s/ops/%s/replay",
+				baseURL,
+				url.PathEscape(record.ID),
+				url.PathEscape(opID),
+			),
+		}
+		payload, err := json.MarshalIndent(dl, "", "  ")
+		if err != nil {
+			return err
+		}
+		if err := writeFileAtomically(filepath.Join(dir, opID+".json"), payload, 0o644); err != nil {
+			return err
+		}
+	}
+
+	// Prune local records the server no longer reports as dead-lettered.
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		opID := strings.TrimSuffix(entry.Name(), ".json")
+		if _, ok := keep[opID]; ok {
+			continue
+		}
+		_ = os.Remove(filepath.Join(dir, entry.Name()))
+	}
+	return nil
+}
+
+func classifyDeadLetterCode(message string) string {
+	lower := strings.ToLower(message)
+	switch {
+	case strings.Contains(lower, "schema") || strings.Contains(lower, "validation"):
+		return "validation_error"
+	case strings.Contains(lower, "permission") || strings.Contains(lower, "forbidden"):
+		return "forbidden"
+	case strings.Contains(lower, "not found"):
+		return "not_found"
+	case message == "":
+		return "non_retryable"
+	default:
+		return "non_retryable"
+	}
+}
+
 func runOpsReplay(args []string, stdin io.Reader, stdout io.Writer) error {
 	_ = stdin
 	fs := flag.NewFlagSet("ops replay", flag.ContinueOnError)
@@ -1406,6 +1628,91 @@ func runOpsReplay(args []string, stdin io.Reader, stdout io.Writer) error {
 	}
 	fmt.Fprintf(stdout, "Replay queued for op %s\n", opID)
 	return nil
+}
+
+func runPull(args []string, stdout io.Writer) error {
+	fs := flag.NewFlagSet("pull", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	workspaceName := fs.String("workspace", "", "workspace name or id")
+	provider := fs.String("provider", "", "provider id (default: refresh all connected providers)")
+	reason := fs.String("reason", "manual", "free-form reason recorded server-side")
+	server := fs.String("server", "", "relayfile server URL override")
+	tokenOverride := fs.String("token", "", "relayfile token override")
+	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
+		"workspace": true,
+		"provider":  true,
+		"reason":    true,
+		"server":    true,
+		"token":     true,
+	})); err != nil {
+		return err
+	}
+	if fs.NArg() > 0 {
+		return errors.New("usage: relayfile pull [--workspace NAME] [--provider PROVIDER] [--reason TEXT]")
+	}
+
+	creds, err := loadCredentials()
+	if err != nil {
+		return err
+	}
+	tokenValue := resolveToken(*tokenOverride, creds)
+	client, err := newAPIClient(resolveServer(*server, creds), tokenValue)
+	if err != nil {
+		return err
+	}
+
+	workspaceID, err := resolveWorkspaceIDWithToken(strings.TrimSpace(*workspaceName), tokenValue)
+	if err != nil {
+		return err
+	}
+
+	providers, err := resolvePullProviders(client, workspaceID, strings.TrimSpace(*provider))
+	if err != nil {
+		return err
+	}
+	if len(providers) == 0 {
+		fmt.Fprintln(stdout, "No connected providers to refresh")
+		return nil
+	}
+
+	for _, p := range providers {
+		var queued struct {
+			Status string `json:"status"`
+			ID     string `json:"id"`
+		}
+		body := struct {
+			Provider string `json:"provider"`
+			Reason   string `json:"reason,omitempty"`
+		}{Provider: p, Reason: strings.TrimSpace(*reason)}
+		if err := client.postJSON(
+			context.Background(),
+			fmt.Sprintf("/v1/workspaces/%s/sync/refresh", url.PathEscape(workspaceID)),
+			body,
+			&queued,
+		); err != nil {
+			return fmt.Errorf("refresh %s: %w", p, err)
+		}
+		fmt.Fprintf(stdout, "%s refresh queued (%s)\n", p, defaultIfBlank(queued.ID, "queued"))
+	}
+	return nil
+}
+
+func resolvePullProviders(client *apiClient, workspaceID, requested string) ([]string, error) {
+	if requested != "" {
+		return []string{normalizeProviderID(requested)}, nil
+	}
+	status, err := fetchWorkspaceSyncStatus(client, workspaceID)
+	if err != nil {
+		return nil, err
+	}
+	providers := make([]string, 0, len(status.Providers))
+	for _, entry := range status.Providers {
+		if strings.TrimSpace(entry.Provider) == "" {
+			continue
+		}
+		providers = append(providers, entry.Provider)
+	}
+	return providers, nil
 }
 
 func runWorkspaceCreate(args []string, stdout io.Writer) error {
