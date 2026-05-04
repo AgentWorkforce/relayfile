@@ -331,6 +331,10 @@ class SyncProviderStatus:
     failure_codes: dict[str, int] | None = None
     dead_lettered_envelopes: int | None = None
     dead_lettered_ops: int | None = None
+    # Productized cloud-mount contract §7.4: cloud SHOULD set this to
+    # False when webhook delivery is degraded. Optional for backward
+    # compatibility with deployments that do not yet emit it.
+    webhook_healthy: bool | None = None
 
 
 @dataclass
