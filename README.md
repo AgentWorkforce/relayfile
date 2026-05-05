@@ -273,6 +273,8 @@ relayfile permissions github/repos/acme/api/pulls/
 | [docs/guides/cloud-integration.md](docs/guides/cloud-integration.md) | Cloud workflow model for orchestrators |
 | [docs/guides/collaboration.md](docs/guides/collaboration.md) | Multi-human and human+agent collaboration patterns |
 | [docs/skills/relayfile-workspace.md](docs/skills/relayfile-workspace.md) | Installable agent skill (copy to `.agents/skills/`) |
+| [docs/agent-workspace-governance-and-jit-integrations.md](docs/agent-workspace-governance-and-jit-integrations.md) | Consolidated agent workspace governance and just-in-time integration contract |
+| [docs/per-user-governance-contract.md](docs/per-user-governance-contract.md) | Cross-repo contract for per-user governance with relayauth |
 | [docs/cli-design.md](docs/cli-design.md) | CLI command reference and design |
 | [docs/productized-cloud-mount-contract.md](docs/productized-cloud-mount-contract.md) | v1 product contract (normative) |
 | [docs/api-reference.md](docs/api-reference.md) | REST API reference |
