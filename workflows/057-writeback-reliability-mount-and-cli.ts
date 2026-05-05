@@ -1,3 +1,4 @@
+// workflows/057-writeback-reliability-mount-and-cli.ts
 // Writeback Reliability — relayfile-side phases (1 + 4) of cloud spec PR #448.
 //
 // Phase 1: mount daemon currently drops local writes silently — a user edits
@@ -11,7 +12,7 @@
 //          subcommands so agents can introspect failures from the CLI rather
 //          than having to read CloudWatch.
 //
-// Pattern: relay-80-100. The workflow does not commit until:
+// Pattern: relay-80-100. The workflow does not sign off until:
 //   - new Go test exercises a 4xx response from a httptest server and asserts
 //     a dead-letter file gets written
 //   - `go build ./...` clean
@@ -28,11 +29,11 @@
 // Spec:     AgentWorkforce/cloud docs/architecture/writeback-reliability.md (PR #448)
 
 import { workflow } from '@agent-relay/sdk/workflows';
-import { ClaudeModels, CodexModels } from '@agent-relay/config';
 
 const BRANCH = 'fix/writeback-reliability';
+const WORKFLOW_ARTIFACT =
+  'workflows/057-writeback-reliability-mount-and-cli.ts';
 const MAIN_GO = 'cmd/relayfile-cli/main.go';
-const MAIN_TEST_GO = 'cmd/relayfile-cli/main_test.go';
 const DAEMON_TEST_GO = 'cmd/relayfile-cli/writeback_daemon_test.go';
 
 async function main() {
@@ -45,31 +46,27 @@ async function main() {
     .maxConcurrency(5)
     .timeout(3_600_000)
 
-    // ── Agents (codex implements, claude reviews) ────────────────────────
-    .agent('lead-codex', {
-      cli: 'codex',
-      model: CodexModels.GPT_5_4,
-      role:
-        'Lead + coordinator. Posts the work-split, monitors the channel, calls the merge gate after the reviewer signs off. Owns #wf-057-writeback-reliability.',
-      retries: 1,
-    })
+    // ── Agents (codex implements, claude reviews; no lead) ───────────────
+    // Codex-as-lead stomped on codex impl agents on the same channel
+    // (run 4fa4aff6, 2026-05-05) — both interpreted "owner" of the file
+    // literally. With only two phases × two implementers there's no
+    // coordinator to add: each impl reads the spec directly, the
+    // reviewer-claude is the inter-phase quality gate, the deterministic
+    // collect-evidence step is the merge gate.
     .agent('impl-daemon', {
       cli: 'codex',
-      model: CodexModels.GPT_5_4,
       role:
         'Phase 1: extend the mount daemon writeback push (cmd/relayfile-cli/main.go) to log every non-2xx response, increment a new failedWritebacks counter in state.json, and dead-letter to ~/relayfile-mount/.relay/dead-letter/<opId>.json on persistent failure. Add a Go test that uses httptest to simulate 4xx and asserts the dead-letter file appears.',
       retries: 2,
     })
     .agent('impl-cli', {
       cli: 'codex',
-      model: CodexModels.GPT_5_4,
       role:
         'Phase 4: add `writeback status` and `writeback retry` subcommands to the CLI dispatcher in cmd/relayfile-cli/main.go. `status` reads state.json + the dead-letter dir and prints pending / failed / dead-lettered counts and the most recent error per provider. `retry` re-enqueues a single dead-lettered op by id.',
       retries: 2,
     })
     .agent('tester', {
       cli: 'codex',
-      model: CodexModels.GPT_5_4,
       preset: 'worker',
       role:
         'Runs go test ./..., go build ./..., and the deterministic CLI E2E. Reads failures, fixes the right Go file, re-runs until green.',
@@ -77,16 +74,38 @@ async function main() {
     })
     .agent('reviewer-claude', {
       cli: 'claude',
-      model: ClaudeModels.OPUS,
       preset: 'reviewer',
       role:
         'Reviews diffs after each phase. Specifically checks: (a) failed writebacks actually dead-letter rather than getting silently swallowed, (b) the new CLI subcommands handle a missing dead-letter dir gracefully, (c) state.json schema additions are backwards-compatible with older mount versions.',
       retries: 1,
     })
 
+    // ── Runtime launch gate (resume anchor for Ricky local runner) ──────
+    .step('runtime-launch', {
+      type: 'deterministic',
+      command: [
+        'set -e',
+        'echo "Runtime launch gate: validating local workflow runtime dependencies"',
+        'if ! node -e "require.resolve(\'@agent-relay/sdk/workflows\')" >/dev/null 2>&1; then',
+        '  echo "WARN: @agent-relay/sdk/workflows is not resolvable; installing local Node dependencies."',
+        '  if [ -f package-lock.json ]; then',
+        '    npm ci --no-audit --no-fund',
+        '  else',
+        '    npm install --no-audit --no-fund',
+        '  fi',
+        'fi',
+        'node -e "require.resolve(\'@agent-relay/sdk/workflows\'); console.log(\'WORKFLOW_RUNTIME_READY\')"',
+        'node --version',
+        'echo "runtime_exit_code=0"',
+      ].join('\n'),
+      captureOutput: true,
+      failOnError: true,
+    })
+
     // ── Preflight (relayfile-flavoured: no npm install, just go) ─────────
     .step('setup-branch', {
       type: 'deterministic',
+      dependsOn: ['runtime-launch'],
       command: [
         'set -e',
         'git config user.email "agent@agent-relay.com"',
@@ -102,11 +121,13 @@ async function main() {
       dependsOn: ['setup-branch'],
       command: [
         'set -e',
-        'BRANCH=$(git rev-parse --abbrev-ref HEAD)',
-        `if [ "$BRANCH" != "${BRANCH}" ]; then echo "ERROR: wrong branch (expected ${BRANCH})"; exit 1; fi`,
-        // Files this workflow rewrites; everything else fails preflight.
-        'ALLOWED_DIRTY="cmd/relayfile-cli/main\\.go|cmd/relayfile-cli/main_test\\.go|cmd/relayfile-cli/writeback_daemon_test\\.go|cmd/relayfile-cli/writeback_status_test\\.go|go\\.mod|go\\.sum"',
-        'DIRTY=$(git diff --name-only | grep -vE "^(${ALLOWED_DIRTY})$" || true)',
+        'CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)',
+        `if [ "$CURRENT_BRANCH" != "${BRANCH}" ]; then echo "WARN: switching branch to ${BRANCH} for resume safety"; git checkout -B ${BRANCH}; fi`,
+        // Files this workflow rewrites plus workflow-local trajectory state.
+        // The `trail` instrumentation updates `.trajectories/*` during runs
+        // and this artifact can be edited while repairing/resuming.
+        `ALLOWED_DIRTY="cmd/relayfile-cli/main\\.go|cmd/relayfile-cli/main_test\\.go|cmd/relayfile-cli/writeback_daemon_test\\.go|cmd/relayfile-cli/writeback_status_test\\.go|go\\.mod|go\\.sum|${WORKFLOW_ARTIFACT.replace(/\//g, '\\/').replace(/\./g, '\\.')}|\\.trajectories/index\\.json|\\.trajectories/active/traj_.*\\.json|\\.trajectories/completed/.*"`,
+        'DIRTY=$({ git diff --name-only; git ls-files --others --exclude-standard; } | sort -u | grep -vE "^(${ALLOWED_DIRTY})$" || true)',
         'if [ -n "$DIRTY" ]; then echo "ERROR: unexpected tracked drift:"; echo "$DIRTY"; exit 1; fi',
         'if ! git diff --cached --quiet; then echo "ERROR: staging area is dirty"; git diff --cached --stat; exit 1; fi',
         'gh auth status >/dev/null 2>&1 || (echo "ERROR: gh CLI not authenticated"; exit 1)',
@@ -130,9 +151,31 @@ async function main() {
     .step('read-spec', {
       type: 'deterministic',
       dependsOn: ['preflight'],
-      // Spec lives in the cloud repo; fetch the raw file via gh.
-      command:
-        'gh api -H "Accept: application/vnd.github.v3.raw" /repos/AgentWorkforce/cloud/contents/docs/architecture/writeback-reliability.md',
+      // Prefer local spec copies for deterministic resumes; fall back to gh.
+      command: [
+        'set -e',
+        'read_spec_file() {',
+        '  spec_file="$1"',
+        '  if [ -f "$spec_file" ]; then',
+        '    sed -n "1,260p" "$spec_file"',
+        '    return 0',
+        '  fi',
+        '  return 1',
+        '}',
+        'if read_spec_file "docs/architecture/writeback-reliability.md"; then exit 0; fi',
+        'if read_spec_file "../cloud/docs/architecture/writeback-reliability.md"; then exit 0; fi',
+        // Some environments expose only one of these repo slugs; try both.
+        'if gh api -H "Accept: application/vnd.github.v3.raw" /repos/AgentWorkforce/cloud/contents/docs/architecture/writeback-reliability.md 2>/dev/null; then exit 0; fi',
+        'if gh api -H "Accept: application/vnd.github.v3.raw" /repos/agentworkforce/cloud/contents/docs/architecture/writeback-reliability.md 2>/dev/null; then exit 0; fi',
+        'echo "WARN: unable to fetch docs/architecture/writeback-reliability.md from local paths or GH; continuing with embedded acceptance contract."',
+        'cat <<\'SPEC_FALLBACK\'',
+        'Writeback reliability spec fallback:',
+        '- Phase 1: non-2xx writeback responses must be WARN-logged, counted in failedWritebacks, and persistent failures must dead-letter.',
+        '- Phase 4: add relayfile writeback status/retry CLI paths for operator-visible recovery.',
+        '- Hard gate: new daemon + status tests, go build ./..., and go test ./... must pass before signoff.',
+        'SPEC_FALLBACK',
+        'exit 0',
+      ].join('\n'),
       captureOutput: true,
       failOnError: true,
     })
@@ -151,9 +194,9 @@ async function main() {
         'if [ -n "$LINE" ]; then',
         `  START=$((LINE > 20 ? LINE - 20 : 1))`,
         `  END=$((LINE + 80))`,
-        `  sed -n "$START,$END\\p" ${MAIN_GO}`,
+        '  sed -n "${START},${END}p" ' + MAIN_GO,
         'fi',
-      ].join(' && '),
+      ].join('\n'),
       captureOutput: true,
       failOnError: true,
     })
@@ -174,31 +217,12 @@ async function main() {
       failOnError: true,
     })
 
-    // ── Lead posts the plan; impl-daemon and impl-cli start in parallel ──
-    .step('lead-coordinate', {
-      agent: 'lead-codex',
-      dependsOn: ['read-spec', 'read-writeback-region', 'read-cmd-dispatch'],
-      task: [
-        'You are the lead on #wf-057-writeback-reliability.',
-        '',
-        'Spec excerpt:',
-        '{{steps.read-spec.output}}',
-        '',
-        'Acceptance contract (LOCK these — do not relax):',
-        '  P1.1 Every non-2xx response from the cloud writeback PUT is logged at WARN with the response body (truncated to 1KB).',
-        '  P1.2 state.json gains a failedWritebacks counter (additive, defaults to 0 for older state files — backwards compatible).',
-        '  P1.3 On persistent failure (after retries exhausted), the daemon writes ~/relayfile-mount/.relay/dead-letter/<opId>.json with { opId, path, attempts, lastStatus, lastBody, ts }.',
-        '  P1.4 New Go test in cmd/relayfile-cli/writeback_daemon_test.go: spin up a httptest server that 400s, drive the daemon, assert a dead-letter file appears AND failedWritebacks > 0.',
-        '  P4.1 New subcommand `relayfile writeback status [WORKSPACE]` prints pending / failed / dead-lettered counts and the most recent error per provider.',
-        '  P4.2 New subcommand `relayfile writeback retry --opId OP` re-enqueues a dead-lettered op by id.',
-        '  P4.3 Both subcommands handle a missing dead-letter dir / state.json gracefully (don’t panic).',
-        '  P4.4 New Go test in cmd/relayfile-cli/writeback_status_test.go: builds the CLI, runs it against a fixture mount with known dead-letter files, asserts the human-readable output contains the expected counts.',
-        '',
-        'Workers: impl-daemon (P1), impl-cli (P4), tester (runs/fixes go test + go build), reviewer-claude (reviews diffs at each gate).',
-        '',
-        'Post the work-split as the first message. Do not call the merge gate until the reviewer-claude has approved both diffs.',
-      ].join('\n'),
-    })
+    // No lead step — codex-as-lead overrode codex impl agents on the same
+    // channel and stole file ownership (run 4fa4aff6, 2026-05-05). The
+    // implementer task prompts already encode the work-split, the spec is
+    // injected directly into each impl agent, and reviewer-claude provides
+    // the inter-phase quality gate. No coordinator needed for two phases
+    // × two implementers.
 
     // ──────────────────────────────────────────────────────────────────────
     // PHASE 1 — mount daemon: log + dead-letter on writeback failure
@@ -498,44 +522,32 @@ async function main() {
       failOnError: true,
     })
 
-    // ── Commit + push + PR ──────────────────────────────────────────────
-    .step('commit', {
+    // ── Final evidence + signoff (bounded side effects only) ────────────
+    .step('collect-evidence', {
       type: 'deterministic',
       dependsOn: ['go-test-all-final'],
       command: [
         'set -e',
-        // Explicit add list — never `git add -A`.
-        `git add ${MAIN_GO} ${MAIN_TEST_GO} ${DAEMON_TEST_GO} cmd/relayfile-cli/writeback_status_test.go go.mod go.sum 2>/dev/null || true`,
-        'MSG=$(mktemp)',
-        'printf "%s\\n" "fix(writeback): mount-daemon dead-letter + writeback status/retry CLI" "" "Implements relayfile-side phases (1, 4) of the writeback-reliability spec (AgentWorkforce/cloud#448)." "" "Phase 1 — mount daemon (cmd/relayfile-cli/main.go):" "- Every non-2xx response from the cloud writeback PUT is now logged at WARN with status + truncated body" "- New FailedWritebacks counter on the daemon state, persisted in state.json (additive, backwards compatible)" "- After retries exhausted, the daemon writes ~/relayfile-mount/.relay/dead-letter/<opId>.json with op metadata" "- New Go test (writeback_daemon_test.go) drives an httptest 4xx through the daemon and asserts the dead-letter file appears" "" "Phase 4 — CLI surfaces (cmd/relayfile-cli/main.go):" "- New \\\`relayfile writeback status [WORKSPACE]\\\` prints pending / failed / dead-lettered counts and most-recent error per provider; --json mode for machine consumption; non-zero exit iff there are failures so CI can gate" "- New \\\`relayfile writeback retry --opId OP [WORKSPACE]\\\` re-enqueues a dead-lettered op and removes the dead-letter file on success" "- Both gracefully handle missing dead-letter dir / state.json" "- New Go test (writeback_status_test.go) builds the binary and asserts output against a fixture mount" "" "Phases plus / 2 / 3 land in the cloud repo separately (AgentWorkforce/cloud workflow PR)." "" "Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>" > "$MSG"',
-        'git commit -F "$MSG"',
-        'rm -f "$MSG"',
-        'git log -1 --oneline',
+        'echo "=== git status --short ==="',
+        'git status --short',
+        'echo "---"',
+        'echo "=== diffstat ==="',
+        'git diff --stat -- cmd/relayfile-cli/main.go cmd/relayfile-cli/writeback_daemon_test.go cmd/relayfile-cli/writeback_status_test.go go.mod go.sum',
+        'echo "---"',
+        'echo "=== acceptance evidence ==="',
+        'go test -count=1 -run TestWritebackDeadLetter ./cmd/relayfile-cli/',
+        'go test -count=1 -run TestWritebackStatus ./cmd/relayfile-cli/',
+        'go build ./...',
+        'go test -count=1 ./...',
+        'echo "EVIDENCE_OK"',
       ].join(' && '),
       captureOutput: true,
       failOnError: true,
     })
-    .step('push', {
-      type: 'deterministic',
-      dependsOn: ['commit'],
-      command: `git push -u origin ${BRANCH}`,
-      captureOutput: true,
-      failOnError: true,
-    })
-    .step('open-pr', {
-      type: 'deterministic',
-      dependsOn: ['push'],
-      command: [
-        'set -e',
-        'BODY=$(mktemp)',
-        'printf "%s\\n" "## Summary" "" "Relayfile-side phases (1, 4) of the writeback-reliability spec — AgentWorkforce/cloud#448. The cloud-side phases (plus / 2 / 3) land in a sibling PR on the cloud repo." "" "**Phase 1 — mount daemon stops silently dropping writes.**" "" "Today the daemon flips \\\`pendingWriteback: 1 → 0\\\` even when the cloud never received the PUT. After this change:" "- every non-2xx is logged at WARN with status + truncated body" "- \\\`failedWritebacks\\\` counter is persisted in \\\`state.json\\\` (additive, backwards compatible)" "- after retries exhausted, daemon writes \\\`~/relayfile-mount/.relay/dead-letter/<opId>.json\\\` with op metadata" "- \\\`writeback_daemon_test.go\\\` drives an httptest 4xx through the daemon and asserts the dead-letter file appears" "" "**Phase 4 — CLI surfaces for writeback health.**" "" "- \\\`relayfile writeback status [WORKSPACE]\\\`: pending / failed / dead-lettered counts + most-recent error per provider; \\\`--json\\\` mode; non-zero exit iff failures" "- \\\`relayfile writeback retry --opId OP [WORKSPACE]\\\`: re-enqueues a dead-lettered op, removes the dead-letter file on success" "- both handle missing state.json / dead-letter dir gracefully" "- \\\`writeback_status_test.go\\\` builds the binary and asserts against a fixture mount" "" "## Test plan" "" "- [x] \\\`go build ./...\\\` clean" "- [x] \\\`go test ./...\\\` green (existing suite + 2 new tests)" "- [x] Phase 1 dead-letter test passes (httptest-driven)" "- [x] Phase 4 CLI test passes (fixture-mount-driven)" "- [ ] After merge: pair with cloud-side PR to validate end-to-end with a real Notion writeback" "" "Closes part of AgentWorkforce/cloud#448." "" "🤖 Generated with [Claude Code](https://claude.com/claude-code)" > "$BODY"',
-        `gh pr create --base main --head ${BRANCH} --title "fix(writeback): mount-daemon dead-letter + writeback status/retry CLI" --body-file "$BODY" | tee /tmp/wf057-pr-url.txt`,
-        'rm -f "$BODY"',
-        'echo "PR URL: $(cat /tmp/wf057-pr-url.txt)"',
-      ].join(' && '),
-      captureOutput: true,
-      failOnError: true,
-    })
+    // No lead-signoff agent step — collect-evidence is already deterministic
+    // and emits EVIDENCE_OK on success (failOnError: true). A codex agent
+    // writing a free-form summary on top of that adds nothing the human
+    // reviewer doesn't already see in `git status` and the PR diff.
 
     .onError('retry', { maxRetries: 2, retryDelayMs: 10_000 })
     .run({ cwd: process.cwd() });
