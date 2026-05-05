@@ -133,6 +133,55 @@ func TestWritebackStatusNoFailures(t *testing.T) {
 	}
 }
 
+// Regression for Codex/CodeRabbit feedback on PR #84:
+// `failedWritebacks` is a lifetime counter that only ever increments,
+// so once any transient 429/5xx fires, the previous gate
+// (`Failed > 0 || len(DeadLettered) > 0`) would keep `writeback status`
+// exiting non-zero forever — even after retries succeed and the
+// dead-letter queue is empty. The fix drives the exit code from
+// `len(DeadLettered) > 0` only; this test pins that contract.
+func TestWritebackStatusLifetimeCounterDoesNotFailExitCode(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	localDir := t.TempDir()
+	if err := ensureMirrorLayout(localDir); err != nil {
+		t.Fatalf("ensureMirrorLayout failed: %v", err)
+	}
+	// Lifetime counter is non-zero (a transient failure happened in the
+	// past) but no dead-letter files remain — retries succeeded.
+	statePayload := []byte(`{"pendingWriteback":0,"failedWritebacks":7}` + "\n")
+	if err := os.WriteFile(filepath.Join(localDir, ".relay", "state.json"), statePayload, 0o644); err != nil {
+		t.Fatalf("write state failed: %v", err)
+	}
+
+	if _, err := upsertWorkspaceDetails(workspaceRecord{
+		Name:       "demo",
+		ID:         "ws_demo",
+		LocalDir:   localDir,
+		CreatedAt:  time.Now().UTC().Format(time.RFC3339),
+		LastUsedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("upsertWorkspaceDetails failed: %v", err)
+	}
+
+	// Deliberately do NOT save credentials — `writeback status` against
+	// a known-local workspace must work offline.
+	var human bytes.Buffer
+	if err := run([]string{"writeback", "status", "demo"}, strings.NewReader(""), &human, &human); err != nil {
+		t.Fatalf("expected exit 0 when only the lifetime counter is non-zero, got %v", err)
+	}
+	got := human.String()
+	if !strings.Contains(got, "dead-lettered: 0") {
+		t.Fatalf("expected dead-lettered: 0 in output, got: %q", got)
+	}
+	// Lifetime counter still surfaces in the report for observability —
+	// it's just not a gating condition.
+	if !strings.Contains(got, "failed: 7") {
+		t.Fatalf("expected lifetime counter (failed: 7) to still surface in output, got: %q", got)
+	}
+}
+
 // Spec P4.3: "Both subcommands handle a missing dead-letter dir / state.json
 // gracefully — print 'no failures' and exit 0, do NOT panic." The
 // no-failures test above exercises the missing dead-letter dir path
@@ -264,7 +313,11 @@ func TestWritebackRetryRejectsMalformedRecord(t *testing.T) {
 		t.Fatalf("expected 'invalid dead-letter record' error, got %q", err.Error())
 	}
 	// The malformed file must NOT be removed — the user can inspect it.
-	if _, statErr := os.Stat(filepath.Join(dlDir, "op_garbled.json")); os.IsNotExist(statErr) {
-		t.Fatalf("malformed dead-letter file was removed despite retry failure")
+	// Use a strict nil-check on stat: any error (not just IsNotExist) is
+	// a regression worth surfacing. CodeRabbit flagged on PR #84 that
+	// the original IsNotExist-only check would silently pass on other
+	// stat errors.
+	if _, statErr := os.Stat(filepath.Join(dlDir, "op_garbled.json")); statErr != nil {
+		t.Fatalf("malformed dead-letter file unexpectedly inaccessible after retry failure: %v", statErr)
 	}
 }

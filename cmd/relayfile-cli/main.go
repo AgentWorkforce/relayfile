@@ -1438,7 +1438,13 @@ func runWritebackStatus(args []string, stdout io.Writer) error {
 	} else {
 		printWritebackStatus(stdout, record, report)
 	}
-	if report.Failed > 0 || len(report.DeadLettered) > 0 {
+	// Exit code reflects ACTIONABLE failures (writebacks still in the
+	// dead-letter queue) — not the lifetime `failedWritebacks` counter,
+	// which only ever increments. Codex/CodeRabbit flagged on PR #84:
+	// once any transient 429/5xx fires, the counter would keep this
+	// command exiting non-zero forever even after retries succeed.
+	// `Failed` and `Pending` stay in the report for observability.
+	if len(report.DeadLettered) > 0 {
 		return errWritebackFailuresPresent
 	}
 	return nil
@@ -1614,14 +1620,34 @@ func readDeadLetterRecords(localDir string) ([]deadLetterRecord, error) {
 }
 
 func resolveWorkspaceLikeStatus(value string) (string, workspaceRecord, error) {
+	// CodeRabbit flagged on PR #84: `writeback status` should work
+	// offline / with expired creds — it only inspects local mirror
+	// state. Try the local workspace registry first when the user
+	// supplies a name/id; only fall back to the credentials path when
+	// nothing local matches (or when no value was given and we need
+	// the JWT's `wks` claim to identify the default).
+	trimmed := strings.TrimSpace(value)
+	if trimmed != "" {
+		if local, ok := workspaceRecordByName(trimmed); ok {
+			workspaceID := strings.TrimSpace(local.ID)
+			if workspaceID == "" {
+				workspaceID = local.Name
+			}
+			return workspaceID, local, nil
+		}
+		if local, ok := workspaceRecordByID(trimmed); ok {
+			return strings.TrimSpace(local.ID), local, nil
+		}
+	}
+
 	creds, err := loadCredentials()
 	if err != nil {
 		return "", workspaceRecord{}, err
 	}
 	tokenValue := resolveToken("", creds)
 	workspaceID, err := resolveWorkspaceIDWithToken("", tokenValue)
-	if strings.TrimSpace(value) != "" {
-		workspaceID, err = resolveWorkspaceIDWithToken(value, tokenValue)
+	if trimmed != "" {
+		workspaceID, err = resolveWorkspaceIDWithToken(trimmed, tokenValue)
 	}
 	if err != nil {
 		return "", workspaceRecord{}, err
@@ -1762,10 +1788,17 @@ func retryDeadLetterWriteback(workspaceID string, record workspaceRecord, dl dea
 		Timeout:   defaultMountTimeout,
 		Transport: newWritebackFailureTransport(record.LocalDir, log.Default(), http.DefaultTransport),
 	})
+	// Read the live mount's remoteRoot from .relay/state.json instead
+	// of hardcoding "/". CodeRabbit flagged on PR #84: a mount created
+	// with `--remote-path /github` has dead-letter paths under /github,
+	// and retrying with RemoteRoot:"/" would look up `<localDir>/github/...`
+	// instead of `<localDir>/...`, so replay would fail even though the
+	// mirrored file exists.
+	remoteRoot := readMountRemoteRoot(record.LocalDir)
 	websocketDisabled := false
 	syncer, err := mountsync.NewSyncer(client, mountsync.SyncerOptions{
 		WorkspaceID: workspaceID,
-		RemoteRoot:  "/",
+		RemoteRoot:  remoteRoot,
 		LocalRoot:   record.LocalDir,
 		WebSocket:   &websocketDisabled,
 		RootCtx:     context.Background(),
@@ -1776,7 +1809,7 @@ func retryDeadLetterWriteback(workspaceID string, record workspaceRecord, dl dea
 	}
 
 	for _, remotePath := range paths {
-		relativePath, err := retryRelativePath(record.LocalDir, remotePath)
+		relativePath, err := retryRelativePath(record.LocalDir, remoteRoot, remotePath)
 		if err != nil {
 			return err
 		}
@@ -1785,6 +1818,30 @@ func retryDeadLetterWriteback(workspaceID string, record workspaceRecord, dl dea
 		}
 	}
 	return nil
+}
+
+// readMountRemoteRoot reads the live mount's remoteRoot from
+// <localDir>/.relay/state.json. Defaults to "/" when missing or
+// unparseable so retry on a root mount works without state.json
+// being present.
+func readMountRemoteRoot(localDir string) string {
+	if strings.TrimSpace(localDir) == "" {
+		return "/"
+	}
+	data, err := os.ReadFile(filepath.Join(localDir, ".relay", "state.json"))
+	if err != nil {
+		return "/"
+	}
+	var s struct {
+		RemoteRoot string `json:"remoteRoot"`
+	}
+	if json.Unmarshal(data, &s) != nil {
+		return "/"
+	}
+	if root := strings.TrimSpace(s.RemoteRoot); root != "" {
+		return root
+	}
+	return "/"
 }
 
 func deadLetterRetryPaths(raw string) []string {
@@ -1799,13 +1856,26 @@ func deadLetterRetryPaths(raw string) []string {
 	return paths
 }
 
-func retryRelativePath(localDir, remotePath string) (string, error) {
+func retryRelativePath(localDir, remoteRoot, remotePath string) (string, error) {
 	remotePath = normalizeWritebackFailurePath(remotePath)
 	if remotePath == "" || remotePath == "/" {
 		return "", fmt.Errorf("invalid retry path %q", remotePath)
 	}
-	relativePath := strings.TrimPrefix(remotePath, "/")
-	cleanRelative := filepath.Clean(filepath.FromSlash(relativePath))
+	// Strip the mount's remoteRoot from the dead-letter path so the
+	// remaining suffix can be joined to the local mirror's root. For
+	// a mount with RemoteRoot=/github and dead-letter path
+	// /github/file.md, this yields a relative path of `file.md` which
+	// correctly resolves to <localDir>/file.md.
+	root := normalizeWritebackFailurePath(remoteRoot)
+	relPath := remotePath
+	if root != "" && root != "/" {
+		if relPath != root && !strings.HasPrefix(relPath, root+"/") {
+			return "", fmt.Errorf("retry path %q is not under mount root %q", remotePath, root)
+		}
+		relPath = strings.TrimPrefix(relPath, root)
+	}
+	relPath = strings.TrimPrefix(relPath, "/")
+	cleanRelative := filepath.Clean(filepath.FromSlash(relPath))
 	if cleanRelative == "." || strings.HasPrefix(cleanRelative, ".."+string(os.PathSeparator)) || cleanRelative == ".." {
 		return "", fmt.Errorf("invalid retry path %q", remotePath)
 	}
