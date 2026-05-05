@@ -242,6 +242,11 @@ export interface SyncProviderStatus {
   failureCodes?: Record<string, number>;
   deadLetteredEnvelopes?: number;
   deadLetteredOps?: number;
+  // Productized cloud-mount contract §7.4: cloud SHOULD set this to
+  // false when webhook delivery is degraded so consumers can render the
+  // "falling back to periodic sync" warning. Optional for backward
+  // compatibility with deployments that do not yet emit it.
+  webhookHealthy?: boolean;
 }
 
 export interface SyncStatusResponse {
