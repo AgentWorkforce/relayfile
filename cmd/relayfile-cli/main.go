@@ -3002,15 +3002,22 @@ func runRestart(args []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
+	localDir := strings.TrimSpace(record.LocalDir)
+	if localDir == "" {
+		return fmt.Errorf("workspace %s has no recorded local mirror directory; run relayfile start %s <LOCAL_DIR>", record.Name, record.Name)
+	}
 
 	// Stop the current daemon if it's running. Tolerate "not running" so
 	// `restart` works as a safe "ensure running" verb.
-	if pid := readDaemonPID(record.LocalDir); pid != 0 {
-		if process, perr := os.FindProcess(pid); perr == nil {
-			if serr := signalDaemonStop(process); serr == nil {
-				fmt.Fprintf(stdout, "Stopped background mount for %s (pid %d)\n", record.Name, pid)
-			}
+	if pid := readDaemonPID(localDir); pid != 0 {
+		process, err := os.FindProcess(pid)
+		if err != nil {
+			return fmt.Errorf("failed to find background mount for %s (pid %d): %w", record.Name, pid, err)
 		}
+		if err := signalDaemonStop(process); err != nil {
+			return fmt.Errorf("failed to stop background mount for %s (pid %d): %w", record.Name, pid, err)
+		}
+		fmt.Fprintf(stdout, "Stopped background mount for %s (pid %d)\n", record.Name, pid)
 		// Give the process a brief moment to release pid/log files before
 		// the new daemon claims them. 500ms is enough on every platform we
 		// support; the existing daemon shuts down on SIGTERM in well under
@@ -3019,7 +3026,7 @@ func runRestart(args []string, stdout io.Writer) error {
 	}
 
 	// Start the new daemon. Default is --background; --foreground overrides.
-	mountArgs := []string{record.Name, record.LocalDir}
+	mountArgs := []string{record.Name, localDir}
 	if !*foreground {
 		mountArgs = append(mountArgs, "--background")
 	}

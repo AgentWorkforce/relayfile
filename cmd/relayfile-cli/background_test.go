@@ -140,6 +140,44 @@ func TestA14StopReportsErrorWhenNoDaemonRunning(t *testing.T) {
 	}
 }
 
+func TestRestartReturnsErrorWhenDaemonStopFails(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	localDir := t.TempDir()
+	if err := ensureMirrorLayout(localDir); err != nil {
+		t.Fatalf("ensureMirrorLayout failed: %v", err)
+	}
+	if _, err := upsertWorkspaceDetails(workspaceRecord{
+		Name:       "demo",
+		ID:         "ws_demo",
+		LocalDir:   localDir,
+		CreatedAt:  time.Now().UTC().Format(time.RFC3339),
+		LastUsedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("upsertWorkspaceDetails failed: %v", err)
+	}
+	if err := writeDaemonPIDState(mountPIDFile(localDir), daemonPIDState{
+		PID:         1 << 30,
+		WorkspaceID: "ws_demo",
+		LocalDir:    localDir,
+	}); err != nil {
+		t.Fatalf("writeDaemonPIDState failed: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	err := runRestart([]string{"demo"}, &stdout)
+	if err == nil {
+		t.Fatalf("expected restart to fail when daemon stop fails")
+	}
+	if !strings.Contains(err.Error(), "failed to stop background mount for demo") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if strings.Contains(stdout.String(), "Stopped background mount") {
+		t.Fatalf("restart reported stop success despite signal failure: %q", stdout.String())
+	}
+}
+
 // TestA2RunCloudLoginReturnsStateMismatchSentinel exercises productized
 // cloud-mount contract A2: when the OAuth callback's `state` parameter does
 // not match the value the CLI generated, runCloudLogin must return the
