@@ -147,7 +147,14 @@ class _OnWriteDispatcher:
         self._next_id = 1
         self._socket: OnWriteSocket | None = None
         self._thread: threading.Thread | None = None
-        self._stop = threading.Event()
+        # Each spawned worker thread owns its own stop event (captured at
+        # _start). When the last registration is removed we set the active
+        # thread's event and detach our reference so the next register() call
+        # can start a fresh thread with a fresh event. Keeping a single shared
+        # event across thread lifetimes meant a drained dispatcher stayed
+        # permanently stopped — re-subscribing on the same client appended a
+        # registration but never produced events.
+        self._stop: threading.Event | None = None
 
     def register(
         self,
@@ -183,9 +190,16 @@ class _OnWriteDispatcher:
         with self._lock:
             self._registrations = [registration for registration in self._registrations if registration.id != registration_id]
             if not self._registrations:
-                self._stop.set()
+                if self._stop is not None:
+                    self._stop.set()
                 if self._socket is not None:
                     self._socket.close()
+                # Detach: the worker thread owns its captured stop event and
+                # will exit on its own. Future register() calls start a fresh
+                # thread.
+                self._thread = None
+                self._stop = None
+                self._socket = None
 
     def _start(
         self,
@@ -202,26 +216,28 @@ class _OnWriteDispatcher:
             raise ValueError("on_write requires token or RELAYFILE_TOKEN")
 
         url = _build_websocket_url(base_url or os.getenv("RELAYFILE_BASE_URL") or DEFAULT_RELAYFILE_BASE_URL, workspace_id, resolved_token)
+        stop_event = threading.Event()
+        self._stop = stop_event
         self._thread = threading.Thread(
             target=self._run,
-            kwargs={"url": url, "factory": factory, "sleep": sleep},
+            kwargs={"url": url, "factory": factory, "sleep": sleep, "stop": stop_event},
             name="relayfile-on-write",
             daemon=True,
         )
         self._thread.start()
 
-    def _run(self, *, url: str, factory: WebSocketFactory, sleep: SleepFn) -> None:
+    def _run(self, *, url: str, factory: WebSocketFactory, sleep: SleepFn, stop: threading.Event) -> None:
         reconnect_attempt = 0
-        while not self._stop.is_set():
+        while not stop.is_set():
             try:
                 self._socket = factory(url)
-                while not self._stop.is_set():
+                while not stop.is_set():
                     raw = self._socket.recv()
                     if raw:
                         self._dispatch_raw(raw)
                         reconnect_attempt = 0
             except Exception:
-                if self._stop.is_set():
+                if stop.is_set():
                     return
                 delay = RECONNECT_DELAYS_SECONDS[min(reconnect_attempt, len(RECONNECT_DELAYS_SECONDS) - 1)]
                 reconnect_attempt += 1

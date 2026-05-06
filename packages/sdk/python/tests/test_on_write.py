@@ -220,3 +220,56 @@ def test_reconnect_backoff_uses_one_then_two_seconds() -> None:
     unsubscribe()
     assert delays[:2] == [1.0, 2.0]
     assert len(sockets) >= 2
+
+
+def test_dispatcher_restarts_after_full_drain() -> None:
+    """Regression: re-subscribing on the same client after the last unsubscribe
+    must spin up a fresh worker thread and deliver events. Previously the
+    dispatcher's stop event stayed permanently set and `_thread` stayed
+    non-None, so subsequent registrations silently never received anything.
+    """
+    client = RecordingClient()
+    sockets: list[FakeSocket] = []
+    factory_signal = threading.Event()
+
+    def factory(_: str) -> FakeSocket:
+        socket = FakeSocket()
+        sockets.append(socket)
+        factory_signal.set()
+        return socket
+
+    calls_one: list[str] = []
+    unsub_one = on_write(
+        "/linear/issues/**",
+        lambda evt: calls_one.append(evt.path),
+        client=client,
+        workspace_id="ws_acme",
+        base_url=BASE,
+        token="tok_test",
+        websocket_factory=factory,
+    )
+    assert factory_signal.wait(1)
+    sockets[0].emit(event("/linear/issues/PROJ-1"))
+    wait_for(lambda: calls_one == ["/linear/issues/PROJ-1"])
+
+    unsub_one()  # drain — dispatcher should reset internal state
+
+    # Re-subscribe on the same client.
+    factory_signal.clear()
+    calls_two: list[str] = []
+    unsub_two = on_write(
+        "/linear/issues/**",
+        lambda evt: calls_two.append(evt.path),
+        client=client,
+        workspace_id="ws_acme",
+        base_url=BASE,
+        token="tok_test",
+        websocket_factory=factory,
+    )
+    assert factory_signal.wait(1), "second registration did not start a worker"
+    assert len(sockets) == 2
+
+    sockets[1].emit(event("/linear/issues/PROJ-2"))
+    wait_for(lambda: calls_two == ["/linear/issues/PROJ-2"])
+
+    unsub_two()

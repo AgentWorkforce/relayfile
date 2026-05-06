@@ -177,6 +177,36 @@ describe("onWrite", () => {
     );
   });
 
+  it("stamps the subscribed workspaceId onto emitted events", async () => {
+    // Regression: RelayFileSync strips workspaceId from the FilesystemEvent
+    // shape, so toWriteEvent used to fall back to "" and break handlers that
+    // route by workspace. The dispatcher must thread the registered workspace
+    // through to the WriteEvent it hands to user code.
+    const client = makeClient();
+    const sockets: MockWebSocket[] = [];
+    const received: string[] = [];
+
+    onWrite(
+      "/notion/pages/calls/*/transcript",
+      (event) => received.push(event.workspaceId),
+      {
+        client,
+        workspaceId: "ws_acme",
+        token: "tok_test",
+        webSocketFactory: (url) => {
+          const socket = new MockWebSocket(url);
+          sockets.push(socket);
+          return socket;
+        }
+      }
+    );
+
+    emitFilesystemEvent(sockets[0]!, "/notion/pages/calls/call-1/transcript");
+    await flushPromises();
+
+    expect(received).toEqual(["ws_acme"]);
+  });
+
   it("reconnects with the 1s then 2s backoff schedule", async () => {
     vi.useFakeTimers();
     const client = makeClient();

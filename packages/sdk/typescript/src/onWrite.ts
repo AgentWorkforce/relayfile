@@ -107,6 +107,11 @@ class OnWriteDispatcher {
   private readonly registrations: OnWriteRegistration[] = [];
   private readonly patternChains = new Map<string, Promise<void>>();
   private sync?: RelayFileSync;
+  // Captured at first registration. RelayFileSync normalizes the FilesystemEvent
+  // shape and does not surface workspaceId on emitted events, so we thread the
+  // subscribed workspaceId through here and stamp it onto every WriteEvent we
+  // hand to user handlers.
+  private workspaceId?: string;
 
   constructor(client: OnWriteClient) {
     this.client = client;
@@ -116,6 +121,7 @@ class OnWriteDispatcher {
     registration: OnWriteRegistration,
     options: Required<Pick<OnWriteOptions, "workspaceId">> & Pick<OnWriteOptions, "signal" | "baseUrl" | "token" | "webSocketFactory">
   ): void {
+    this.workspaceId = options.workspaceId;
     this.registrations.push(registration);
     if (options.signal) {
       if (options.signal.aborted) {
@@ -160,7 +166,7 @@ class OnWriteDispatcher {
   }
 
   private async dispatch(event: FilesystemEvent): Promise<void> {
-    const writeEvent = toWriteEvent(event);
+    const writeEvent = toWriteEvent(event, this.workspaceId);
     if (!writeEvent) {
       return;
     }
@@ -248,14 +254,14 @@ function matchSegments(pattern: string[], path: string[]): boolean {
   return pattern.every((segment, index) => segment === "*" || segment === path[index]);
 }
 
-function toWriteEvent(event: FilesystemEvent): WriteEvent | null {
+function toWriteEvent(event: FilesystemEvent, workspaceId?: string): WriteEvent | null {
   const operation = operationFromEventType(event.type);
   if (!operation) {
     return null;
   }
   const raw = event as FilesystemEvent & Partial<WriteEvent> & { previousRevision?: string | null };
   return {
-    workspaceId: raw.workspaceId ?? "",
+    workspaceId: raw.workspaceId ?? workspaceId ?? "",
     path: event.path,
     operation,
     revision: event.revision,
