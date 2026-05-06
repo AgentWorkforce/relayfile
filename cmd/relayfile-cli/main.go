@@ -340,8 +340,13 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		return runWriteback(args[1:], stdout)
 	case "pull":
 		return runPull(args[1:], stdout)
-	case "mount":
+	case "mount", "start":
+		// `start` is the friendlier alias for `mount`. Same flags, same
+		// behavior — `mount` retains the historical name; `start` pairs
+		// naturally with `stop` and `restart`.
 		return runMount(args[1:])
+	case "restart":
+		return runRestart(args[1:], stdout)
 	case "tree", "ls":
 		return runTree(args[1:], stdout)
 	case "read", "cat":
@@ -387,12 +392,14 @@ Usage:
   relayfile writeback retry --opId OP [WORKSPACE]
   relayfile pull [--workspace NAME] [--provider PROVIDER] [--reason TEXT]
   relayfile mount [WORKSPACE] [LOCAL_DIR]
+  relayfile start [WORKSPACE] [LOCAL_DIR]            (alias for mount)
+  relayfile stop [WORKSPACE]
+  relayfile restart [WORKSPACE] [--foreground]
   relayfile tree [WORKSPACE] [PATH] [--depth N]
   relayfile read [WORKSPACE] PATH
   relayfile seed [WORKSPACE] [DIR]
   relayfile export [WORKSPACE] --format FORMAT [--output FILE]
   relayfile status [WORKSPACE]
-  relayfile stop [WORKSPACE]
   relayfile logs [WORKSPACE]
   relayfile observer [WORKSPACE] [--no-open]
 
@@ -409,12 +416,14 @@ Subcommands:
               Re-enqueue a local dead-lettered writeback op
   pull        Trigger an immediate sync refresh for one or all providers
   mount       Mirror a remote workspace to a local directory; add --background to detach
+  start       Alias for mount; pairs naturally with stop and restart
+  stop        Stop a background mount
+  restart     Stop and start a workspace's mount in one step (--foreground to attach)
   tree        List a remote workspace path
   read        Print a remote file's content
   seed        Upload a directory tree with bulk writes
   export      Export a workspace as json, tar, or patch
   status      Show sync status and local mirror state for a workspace
-  stop        Stop a background mount
   logs        Print the background mount log
   observer    Open the hosted file observer for a workspace`)
 }
@@ -2959,6 +2968,62 @@ func runStop(args []string, stdout io.Writer) error {
 	}
 	fmt.Fprintf(stdout, "Stopped background mount for %s (pid %d)\n", record.Name, pid)
 	return nil
+}
+
+// runRestart stops a running daemon (if any) and starts a fresh background
+// mount using the workspace's recorded localDir. This is the operationally
+// correct way to recover from a stalled daemon: the new daemon's initial
+// recursive walk re-subscribes to every directory in the mirror, which is
+// what the watcher needs after a sync-down created new nested subtrees
+// (see watcher.go addDirRecursive).
+//
+// Forwarded flags: any flag accepted by `mount` can be passed after the
+// workspace name and is propagated to the start phase. The restart always
+// runs in `--background` mode (the natural default for a long-running
+// mount); pass `--foreground` to override and run attached.
+func runRestart(args []string, stdout io.Writer) error {
+	fs := flag.NewFlagSet("restart", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	foreground := fs.Bool("foreground", false, "run the restarted mount in the foreground instead of detaching")
+	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
+		"foreground": false,
+	})); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			fmt.Fprintln(stdout, "usage: relayfile restart [WORKSPACE] [--foreground]")
+			return nil
+		}
+		return err
+	}
+	if fs.NArg() > 1 {
+		return errors.New("usage: relayfile restart [WORKSPACE] [--foreground]")
+	}
+
+	record, err := resolveWorkspaceRecord(firstArg(fs))
+	if err != nil {
+		return err
+	}
+
+	// Stop the current daemon if it's running. Tolerate "not running" so
+	// `restart` works as a safe "ensure running" verb.
+	if pid := readDaemonPID(record.LocalDir); pid != 0 {
+		if process, perr := os.FindProcess(pid); perr == nil {
+			if serr := signalDaemonStop(process); serr == nil {
+				fmt.Fprintf(stdout, "Stopped background mount for %s (pid %d)\n", record.Name, pid)
+			}
+		}
+		// Give the process a brief moment to release pid/log files before
+		// the new daemon claims them. 500ms is enough on every platform we
+		// support; the existing daemon shuts down on SIGTERM in well under
+		// 100ms in practice.
+		time.Sleep(500 * time.Millisecond)
+	}
+
+	// Start the new daemon. Default is --background; --foreground overrides.
+	mountArgs := []string{record.Name, record.LocalDir}
+	if !*foreground {
+		mountArgs = append(mountArgs, "--background")
+	}
+	return runMount(mountArgs)
 }
 
 func runLogs(args []string, stdout io.Writer) error {
