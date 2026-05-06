@@ -599,6 +599,8 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 		if raw := strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_FULL_PULL_EVERY")); raw != "" {
 			if parsed, perr := strconv.Atoi(raw); perr == nil {
 				fullPullEvery = parsed
+			} else if opts.Logger != nil {
+				opts.Logger.Printf("ignoring invalid RELAYFILE_MOUNT_FULL_PULL_EVERY=%q: %v", raw, perr)
 			}
 		}
 		if fullPullEvery == 0 {
@@ -1425,19 +1427,13 @@ func (s *Syncer) pullRemote(ctx context.Context, conflicted map[string]struct{})
 			if err := s.pullRemoteFull(ctx, conflicted); err != nil {
 				return err
 			}
-			// Refresh the events cursor so we don't replay events that
-			// preceded this full snapshot.
-			if s.wsConn == nil {
-				cursor, err := s.resolveLatestEventCursor(ctx)
-				if err != nil {
-					var httpErr *HTTPError
-					if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusNotFound {
-						return nil
-					}
-					return err
-				}
-				s.state.EventsCursor = cursor
-			}
+			// Intentionally leave s.state.EventsCursor unchanged. A naive
+			// resolveLatestEventCursor here introduces a race: any remote
+			// change committed after pullRemoteFull listed/read the tree
+			// but before the cursor resolution would be skipped forever
+			// (advanced past). Replaying from the prior cursor is safe —
+			// applyRemoteFile is idempotent and will no-op when on-disk
+			// content already matches.
 			return nil
 		}
 
@@ -1646,8 +1642,11 @@ func (s *Syncer) pullRemoteIncremental(ctx context.Context, conflicted map[strin
 						tracked.Revision == event.Revision &&
 						tracked.Hash != "" &&
 						tracked.Hash != event.ContentHash {
+						// Path is already in `changed` from the unconditional
+						// add above for file.created/file.updated; this branch
+						// exists purely to surface the rev-reuse anomaly in
+						// logs so operators can spot the cloud-side bug.
 						s.logf("revision %s reused for %s with divergent content hash (tracked=%s remote=%s); forcing re-fetch", event.Revision, remotePath, tracked.Hash, event.ContentHash)
-						changed[remotePath] = struct{}{}
 					}
 				}
 			case "file.deleted":

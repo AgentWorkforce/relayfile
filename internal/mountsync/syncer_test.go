@@ -3127,12 +3127,15 @@ func (c *fakeClient) appendEventWithHash(eventType, path, revision, contentHash 
 	})
 }
 
-// TestPullDetectsRevReuseViaContentHash exercises the defensive cross-check
-// that catches cloud-side revision reuse. The cloud is buggy: it serves new
-// content under the same revision identifier the daemon has already seen.
-// Without the ContentHash cross-check, the daemon would skip the re-fetch
-// because tracked.Revision == event.Revision. With the cross-check, the
-// hash divergence forces re-fetch and applyRemoteFile heals the local copy.
+// TestPullDetectsRevReuseViaContentHash exercises end-to-end recovery when
+// the cloud reuses a revision identifier with new content. file.updated
+// events are unconditionally added to the changed set today, so this test
+// would still pass even with the ContentHash cross-check removed; what it
+// validates is that applyRemoteFile re-hashes content and overwrites stale
+// local data when the cloud serves divergent bytes under a reused rev.
+// The ContentHash cross-check itself is a logging hook — see syncer.go
+// line ~1640 — which surfaces the rev-reuse anomaly to operators without
+// changing the changed-set membership.
 func TestPullDetectsRevReuseViaContentHash(t *testing.T) {
 	client := &fakeClient{
 		files: map[string]RemoteFile{
