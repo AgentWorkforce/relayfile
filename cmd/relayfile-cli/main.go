@@ -3015,14 +3015,22 @@ func runRestart(args []string, stdout io.Writer) error {
 			return fmt.Errorf("failed to find background mount for %s (pid %d): %w", record.Name, pid, err)
 		}
 		if err := signalDaemonStop(process); err != nil {
-			return fmt.Errorf("failed to stop background mount for %s (pid %d): %w", record.Name, pid, err)
+			if isProcessAlreadyGone(err) {
+				if rerr := os.Remove(mountPIDFile(localDir)); rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
+					return fmt.Errorf("failed to clear stale background mount state for %s (pid %d): %w", record.Name, pid, rerr)
+				}
+				fmt.Fprintf(stdout, "Cleared stale background mount state for %s (pid %d)\n", record.Name, pid)
+			} else {
+				return fmt.Errorf("failed to stop background mount for %s (pid %d): %w", record.Name, pid, err)
+			}
+		} else {
+			fmt.Fprintf(stdout, "Stopped background mount for %s (pid %d)\n", record.Name, pid)
+			// Give the process a brief moment to release pid/log files before
+			// the new daemon claims them. 500ms is enough on every platform we
+			// support; the existing daemon shuts down on SIGTERM in well under
+			// 100ms in practice.
+			time.Sleep(500 * time.Millisecond)
 		}
-		fmt.Fprintf(stdout, "Stopped background mount for %s (pid %d)\n", record.Name, pid)
-		// Give the process a brief moment to release pid/log files before
-		// the new daemon claims them. 500ms is enough on every platform we
-		// support; the existing daemon shuts down on SIGTERM in well under
-		// 100ms in practice.
-		time.Sleep(500 * time.Millisecond)
 	}
 
 	// Start the new daemon. Default is --background; --foreground overrides.
@@ -3031,6 +3039,10 @@ func runRestart(args []string, stdout io.Writer) error {
 		mountArgs = append(mountArgs, "--background")
 	}
 	return runMount(mountArgs)
+}
+
+func isProcessAlreadyGone(err error) bool {
+	return errors.Is(err, os.ErrProcessDone) || errors.Is(err, syscall.ESRCH)
 }
 
 func runLogs(args []string, stdout io.Writer) error {

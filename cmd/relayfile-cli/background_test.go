@@ -140,7 +140,7 @@ func TestA14StopReportsErrorWhenNoDaemonRunning(t *testing.T) {
 	}
 }
 
-func TestRestartReturnsErrorWhenDaemonStopFails(t *testing.T) {
+func TestRestartClearsStaleDaemonPID(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)
 
@@ -168,13 +168,19 @@ func TestRestartReturnsErrorWhenDaemonStopFails(t *testing.T) {
 	var stdout bytes.Buffer
 	err := runRestart([]string{"demo"}, &stdout)
 	if err == nil {
-		t.Fatalf("expected restart to fail when daemon stop fails")
+		t.Fatalf("expected restart to reach mount and fail without credentials")
 	}
-	if !strings.Contains(err.Error(), "failed to stop background mount for demo") {
+	if !strings.Contains(err.Error(), "token is required") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if strings.Contains(stdout.String(), "Stopped background mount") {
-		t.Fatalf("restart reported stop success despite signal failure: %q", stdout.String())
+		t.Fatalf("restart reported stop success for stale pid: %q", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "Cleared stale background mount state") {
+		t.Fatalf("restart did not report stale pid cleanup: %q", stdout.String())
+	}
+	if _, err := os.Stat(mountPIDFile(localDir)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected stale pid file to be removed, got err=%v", err)
 	}
 }
 
