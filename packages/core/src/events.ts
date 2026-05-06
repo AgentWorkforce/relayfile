@@ -19,6 +19,26 @@ export interface CreateEventInput {
   timestamp?: string;
 }
 
+export type WriteEventOperation = "create" | "update" | "delete";
+export type WriteEventSource = "webhook" | "agent" | "sync" | "api" | "cli";
+
+export interface WriteEventActor {
+  type: "agent" | "user" | "system";
+  id: string;
+}
+
+export interface WriteEvent {
+  workspaceId: string;
+  path: string;
+  operation: WriteEventOperation;
+  revision: string;
+  previousRevision: string | null;
+  timestamp: string;
+  source: WriteEventSource;
+  value?: unknown;
+  actor?: WriteEventActor;
+}
+
 export function createEvent(storage: StorageAdapter, input: CreateEventInput): EventRow {
   const event: EventRow = {
     eventId: storage.nextEventId(),

@@ -243,6 +243,25 @@ class FilesystemEvent:
 
 
 @dataclass
+class WriteEventActor:
+    type: str  # "agent" | "user" | "system"
+    id: str
+
+
+@dataclass
+class WriteEvent:
+    workspace_id: str
+    path: str
+    operation: str  # "create" | "update" | "delete"
+    revision: str
+    previous_revision: str | None
+    timestamp: str
+    source: str  # "webhook" | "agent" | "sync" | "api" | "cli"
+    value: Any | None = None
+    actor: WriteEventActor | dict[str, Any] | None = None
+
+
+@dataclass
 class EventFeedResponse:
     events: list[FilesystemEvent]
     next_cursor: str | None = None
