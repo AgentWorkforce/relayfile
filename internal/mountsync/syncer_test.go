@@ -122,6 +122,155 @@ func TestHandleLocalChangeIgnoresAlreadyTrackedContent(t *testing.T) {
 	}
 }
 
+// TestHandleLocalChangePushesOnChmodOnlyEvent pins the regression that
+// motivated the state-driven dispatch: editors (Vim, VSCode, JetBrains)
+// often end a save sequence with a Chmod event, and the per-path
+// debounce in the watcher only retains the *last* op within its 100ms
+// window. Pre-fix, an op of `fsnotify.Chmod` alone hit a no-op branch
+// and silently failed to queue a writeback for the new content. Now we
+// dispatch by file state — the file exists with new content, so we
+// hash-check and push the update.
+func TestHandleLocalChangePushesOnChmodOnlyEvent(t *testing.T) {
+	client := &fakeClient{
+		files: map[string]RemoteFile{
+			"/notion/Docs/A.md": {
+				Path:        "/notion/Docs/A.md",
+				Revision:    "rev_1",
+				ContentType: "text/markdown",
+				Content:     "# A",
+			},
+		},
+		revisionCounter: 1,
+	}
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_chmod_only",
+		RemoteRoot:  "/notion",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("initial sync failed: %v", err)
+	}
+
+	// Modify the file content as an editor would, then deliver only
+	// fsnotify.Chmod (the surviving op after debounce-collapse on macOS).
+	localFile := filepath.Join(localDir, "Docs", "A.md")
+	if err := os.WriteFile(localFile, []byte("# A — edited"), 0o644); err != nil {
+		t.Fatalf("edit local file: %v", err)
+	}
+
+	if err := syncer.HandleLocalChange(context.Background(), "Docs/A.md", fsnotify.Chmod); err != nil {
+		t.Fatalf("handle chmod-only event failed: %v", err)
+	}
+
+	if client.bulkWriteCalls == 0 && client.writeFileCalls == 0 {
+		t.Fatalf("expected chmod-only event with new content to push update; bulk=%d write=%d",
+			client.bulkWriteCalls, client.writeFileCalls)
+	}
+	remote := client.files["/notion/Docs/A.md"]
+	if remote.Content != "# A — edited" {
+		t.Fatalf("expected remote content to reflect local edit, got %q", remote.Content)
+	}
+}
+
+// TestHandleLocalChangeTreatsAtomicRenameAsUpdate pins the second
+// regression: editors that save-via-rename (Vim's default, many IDEs)
+// can deliver a Rename event for the target path even though the file
+// is still present afterward. Pre-fix, the Remove|Rename branch
+// blindly called pushSingleDelete and removed the cloud file. Now we
+// stat the path; if it exists, we route as an update.
+func TestHandleLocalChangeTreatsAtomicRenameAsUpdate(t *testing.T) {
+	client := &fakeClient{
+		files: map[string]RemoteFile{
+			"/notion/Docs/A.md": {
+				Path:        "/notion/Docs/A.md",
+				Revision:    "rev_1",
+				ContentType: "text/markdown",
+				Content:     "# A",
+			},
+		},
+		revisionCounter: 1,
+	}
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_atomic_rename",
+		RemoteRoot:  "/notion",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("initial sync failed: %v", err)
+	}
+
+	// Simulate atomic save-via-rename: write the new content (as if a
+	// .swp file had just been renamed over the target), then deliver
+	// only fsnotify.Rename for the target path.
+	localFile := filepath.Join(localDir, "Docs", "A.md")
+	if err := os.WriteFile(localFile, []byte("# A — atomically saved"), 0o644); err != nil {
+		t.Fatalf("write replacement content: %v", err)
+	}
+
+	if err := syncer.HandleLocalChange(context.Background(), "Docs/A.md", fsnotify.Rename); err != nil {
+		t.Fatalf("handle atomic rename failed: %v", err)
+	}
+
+	// Must have pushed the update, not deleted the file.
+	if _, exists := client.files["/notion/Docs/A.md"]; !exists {
+		t.Fatalf("atomic rename should not have deleted the cloud file")
+	}
+	remote := client.files["/notion/Docs/A.md"]
+	if remote.Content != "# A — atomically saved" {
+		t.Fatalf("expected remote content to reflect the atomically-renamed content, got %q",
+			remote.Content)
+	}
+}
+
+// TestHandleLocalChangeDeletesWhenFileGone confirms that an actual
+// removal — file no longer present on disk — still routes to a delete
+// post-fix. The Remove|Rename branch is gone, but the state-driven
+// dispatch must still treat a missing local file as a delete signal.
+func TestHandleLocalChangeDeletesWhenFileGone(t *testing.T) {
+	client := &fakeClient{
+		files: map[string]RemoteFile{
+			"/notion/Docs/A.md": {
+				Path:        "/notion/Docs/A.md",
+				Revision:    "rev_1",
+				ContentType: "text/markdown",
+				Content:     "# A",
+			},
+		},
+		revisionCounter: 1,
+	}
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_actual_delete",
+		RemoteRoot:  "/notion",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("initial sync failed: %v", err)
+	}
+
+	localFile := filepath.Join(localDir, "Docs", "A.md")
+	if err := os.Remove(localFile); err != nil {
+		t.Fatalf("remove local file: %v", err)
+	}
+	if err := syncer.HandleLocalChange(context.Background(), "Docs/A.md", fsnotify.Remove); err != nil {
+		t.Fatalf("handle remove failed: %v", err)
+	}
+	if _, exists := client.files["/notion/Docs/A.md"]; exists {
+		t.Fatalf("expected cloud file to be deleted after local removal")
+	}
+}
+
 func TestReconcileUsesExportSnapshotForInitialPull(t *testing.T) {
 	base := &fakeClient{
 		files: map[string]RemoteFile{
