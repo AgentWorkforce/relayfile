@@ -3115,3 +3115,168 @@ func (c *fakeClient) appendEvent(eventType, path, revision string) {
 		Revision: revision,
 	})
 }
+
+func (c *fakeClient) appendEventWithHash(eventType, path, revision, contentHash string) {
+	c.eventCounter++
+	c.events = append(c.events, FilesystemEvent{
+		EventID:     fmt.Sprintf("evt_%d", c.eventCounter),
+		Type:        eventType,
+		Path:        path,
+		Revision:    revision,
+		ContentHash: contentHash,
+	})
+}
+
+// TestPullDetectsRevReuseViaContentHash exercises end-to-end recovery when
+// the cloud reuses a revision identifier with new content. file.updated
+// events are unconditionally added to the changed set today, so this test
+// would still pass even with the ContentHash cross-check removed; what it
+// validates is that applyRemoteFile re-hashes content and overwrites stale
+// local data when the cloud serves divergent bytes under a reused rev.
+// The ContentHash cross-check itself is a logging hook — see syncer.go
+// line ~1640 — which surfaces the rev-reuse anomaly to operators without
+// changing the changed-set membership.
+func TestPullDetectsRevReuseViaContentHash(t *testing.T) {
+	client := &fakeClient{
+		files: map[string]RemoteFile{
+			"/notion/Docs/A.md": {
+				Path:        "/notion/Docs/A.md",
+				Revision:    "rev_96",
+				ContentType: "text/markdown",
+				Content:     "# A original",
+			},
+		},
+		events: []FilesystemEvent{
+			{
+				EventID:  "evt_1",
+				Type:     "file.created",
+				Path:     "/notion/Docs/A.md",
+				Revision: "rev_96",
+			},
+		},
+		revisionCounter: 96,
+		eventCounter:    1,
+	}
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_rev_reuse",
+		RemoteRoot:  "/notion",
+		LocalRoot:   localDir,
+		// Disable periodic full pull so we isolate the cross-check path.
+		FullPullEvery: -1,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("initial sync failed: %v", err)
+	}
+	localFile := filepath.Join(localDir, "Docs", "A.md")
+	if data, err := os.ReadFile(localFile); err != nil || string(data) != "# A original" {
+		t.Fatalf("expected initial content mirrored, got %q err=%v", string(data), err)
+	}
+
+	// Simulate the cloud bug: rev_96 is reused, but the content has
+	// changed. The events feed surfaces the new ContentHash so the daemon
+	// can detect the drift even though tracked.Revision == event.Revision.
+	newContent := "# A reused-rev"
+	newHash := hashBytes([]byte(newContent))
+	client.files["/notion/Docs/A.md"] = RemoteFile{
+		Path:        "/notion/Docs/A.md",
+		Revision:    "rev_96", // intentionally reused
+		ContentType: "text/markdown",
+		Content:     newContent,
+		ContentHash: newHash,
+	}
+	client.appendEventWithHash("file.updated", "/notion/Docs/A.md", "rev_96", newHash)
+
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("incremental sync after rev reuse failed: %v", err)
+	}
+
+	data, err := os.ReadFile(localFile)
+	if err != nil {
+		t.Fatalf("read local after rev reuse: %v", err)
+	}
+	if string(data) != newContent {
+		t.Fatalf("expected ContentHash divergence to trigger re-fetch; got %q want %q", string(data), newContent)
+	}
+}
+
+// TestPullPeriodicFullCycle asserts that every Nth incremental cycle, a
+// full tree pull is forced even when the events cursor is healthy. This is
+// the "trust but verify" mitigation for environments where the cloud has
+// not yet been updated to surface ContentHash. The full pull self-heals
+// any stale state because applyRemoteFile re-hashes content and overwrites
+// when on-disk hashes diverge.
+func TestPullPeriodicFullCycle(t *testing.T) {
+	client := &fakeClient{
+		files: map[string]RemoteFile{
+			"/notion/Docs/A.md": {
+				Path:        "/notion/Docs/A.md",
+				Revision:    "rev_1",
+				ContentType: "text/markdown",
+				Content:     "# A",
+			},
+		},
+		events: []FilesystemEvent{
+			{
+				EventID:  "evt_1",
+				Type:     "file.created",
+				Path:     "/notion/Docs/A.md",
+				Revision: "rev_1",
+			},
+		},
+		revisionCounter: 1,
+		eventCounter:    1,
+	}
+	localDir := t.TempDir()
+	const everyN = 3
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID:   "ws_periodic_full",
+		RemoteRoot:    "/notion",
+		LocalRoot:     localDir,
+		FullPullEvery: everyN,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+
+	// First sync bootstraps via full pull (EventsCursor empty).
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("bootstrap sync: %v", err)
+	}
+	if client.listTreeCalls != 1 {
+		t.Fatalf("expected 1 list-tree call after bootstrap, got %d", client.listTreeCalls)
+	}
+
+	// Subsequent syncs should run incremental. The Nth one (cycles >= N)
+	// should force a full pull. Counter increments before the check, so
+	// the Nth incremental call (3rd post-bootstrap sync) triggers the
+	// forced pull.
+	for i := 1; i < everyN; i++ {
+		if err := syncer.SyncOnce(context.Background()); err != nil {
+			t.Fatalf("incremental sync %d: %v", i, err)
+		}
+	}
+	if client.listTreeCalls != 1 {
+		t.Fatalf("expected list-tree calls to stay at 1 across %d incremental cycles, got %d", everyN-1, client.listTreeCalls)
+	}
+
+	// Nth incremental cycle: forces a full tree pull regardless of cursor
+	// health.
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("forced periodic full pull sync: %v", err)
+	}
+	if client.listTreeCalls != 2 {
+		t.Fatalf("expected periodic full pull to bump list-tree calls to 2, got %d", client.listTreeCalls)
+	}
+
+	// Counter resets — next cycle should be incremental again.
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("post-reset incremental sync: %v", err)
+	}
+	if client.listTreeCalls != 2 {
+		t.Fatalf("expected counter reset (no list-tree on cycle after periodic full pull); got %d", client.listTreeCalls)
+	}
+}
