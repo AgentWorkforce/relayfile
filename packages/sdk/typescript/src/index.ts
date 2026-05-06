@@ -53,6 +53,14 @@ export {
   type RelayFileSyncState
 } from "./sync.js";
 export {
+  onWrite,
+  pathMatches,
+  type OnWriteClient,
+  type OnWriteHandler,
+  type OnWriteHandlerError,
+  type OnWriteOptions
+} from "./onWrite.js";
+export {
   InvalidStateError,
   PayloadTooLargeError,
   QueueFullError,
@@ -147,6 +155,7 @@ export type {
   WriteQueuedResponse
 } from "./types.js";
 export type { ForkHandle, ForkOptions } from "@relayfile/core";
+export type { WriteEvent, WriteEventActor, WriteEventOperation, WriteEventSource } from "@relayfile/core";
 
 export { WritebackConsumer } from "./writeback-consumer.js";
 export type { WritebackHandler, WritebackConsumerOptions } from "./writeback-consumer.js";

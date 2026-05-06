@@ -13,6 +13,7 @@ from .provider import (
     WebhookInput,
     compute_canonical_path,
 )
+from .on_write import on_write, path_matches
 
 __all__ = [
     "RelayFileClient",
@@ -28,4 +29,6 @@ __all__ = [
     "ListProviderFilesOptions",
     "WatchProviderEventsOptions",
     "compute_canonical_path",
+    "on_write",
+    "path_matches",
 ]
