@@ -207,6 +207,84 @@ describe("onWrite", () => {
     expect(received).toEqual(["ws_acme"]);
   });
 
+  it("rejects a second registration on the same client with a different workspaceId", () => {
+    const client = makeClient();
+    const sockets: MockWebSocket[] = [];
+
+    onWrite(
+      "/notion/pages/calls/*/transcript",
+      () => undefined,
+      {
+        client,
+        workspaceId: "ws_acme",
+        token: "tok_test",
+        webSocketFactory: (url) => {
+          const socket = new MockWebSocket(url);
+          sockets.push(socket);
+          return socket;
+        }
+      }
+    );
+
+    expect(() =>
+      onWrite("/linear/issues/**", () => undefined, {
+        client,
+        workspaceId: "ws_other",
+        token: "tok_test"
+      })
+    ).toThrow(/same workspaceId/);
+
+    // The original socket remains the only one — we did not silently attach a
+    // ws_other registration to the ws_acme feed.
+    expect(sockets).toHaveLength(1);
+  });
+
+  it("isolates dispatch when the customer recordHandlerError implementation rejects", async () => {
+    const client = {
+      getEvents: vi.fn().mockResolvedValue({ events: [], nextCursor: null }),
+      recordHandlerError: vi.fn().mockRejectedValue(new Error("telemetry exploded"))
+    } as unknown as OnWriteClient;
+    const sockets: MockWebSocket[] = [];
+    const survivedCalls: string[] = [];
+    const consoleErrors: unknown[][] = [];
+    const errorSpy = vi.spyOn(console, "error").mockImplementation((...args) => {
+      consoleErrors.push(args);
+    });
+
+    onWrite(
+      "/linear/issues/**",
+      () => {
+        throw new Error("user handler boom");
+      },
+      {
+        client,
+        workspaceId: "ws_acme",
+        token: "tok_test",
+        webSocketFactory: (url) => {
+          const socket = new MockWebSocket(url);
+          sockets.push(socket);
+          return socket;
+        }
+      }
+    );
+    onWrite(
+      "/linear/issues/**",
+      (event) => survivedCalls.push(event.path),
+      { client, workspaceId: "ws_acme", token: "tok_test" }
+    );
+
+    emitFilesystemEvent(sockets[0]!, "/linear/issues/PROJ-1");
+    await flushPromises();
+
+    // The reporter rejected, but the second handler still ran for the same path.
+    expect(survivedCalls).toEqual(["/linear/issues/PROJ-1"]);
+    // We logged both the reporter failure and the original handler error.
+    const flat = consoleErrors.flat().map(String).join(" | ");
+    expect(flat).toMatch(/reporter failed/);
+    expect(flat).toMatch(/handler error/);
+    errorSpy.mockRestore();
+  });
+
   it("reconnects with the 1s then 2s backoff schedule", async () => {
     vi.useFakeTimers();
     const client = makeClient();

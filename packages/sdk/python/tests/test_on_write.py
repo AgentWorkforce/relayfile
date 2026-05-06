@@ -222,6 +222,93 @@ def test_reconnect_backoff_uses_one_then_two_seconds() -> None:
     assert len(sockets) >= 2
 
 
+def test_rejects_mixed_workspace_on_same_client() -> None:
+    """A single RelayFileClient is bound to one workspace. The second on_write
+    must not silently attach to the first workspace's socket — reject it.
+    """
+    client = RecordingClient()
+    sockets: list[FakeSocket] = []
+
+    def factory(_: str) -> FakeSocket:
+        socket = FakeSocket()
+        sockets.append(socket)
+        return socket
+
+    unsub = on_write(
+        "/notion/pages/calls/*/transcript",
+        lambda evt: None,
+        client=client,
+        workspace_id="ws_acme",
+        base_url=BASE,
+        token="tok_test",
+        websocket_factory=factory,
+    )
+
+    with pytest.raises(ValueError, match="same workspace_id"):
+        on_write(
+            "/linear/issues/**",
+            lambda evt: None,
+            client=client,
+            workspace_id="ws_other",
+            base_url=BASE,
+            token="tok_test",
+        )
+
+    assert len(sockets) == 1, "second registration must not have started a socket"
+    unsub()
+
+
+def test_isolates_dispatch_when_recorder_raises() -> None:
+    """recordHandlerError implementations that raise must not break sequential
+    dispatch for the pattern.
+    """
+
+    class ExplodingClient(RelayFileClient):
+        def __init__(self) -> None:
+            super().__init__(BASE, "tok_test")
+
+        def record_handler_error(self, payload: dict[str, Any]) -> None:
+            raise RuntimeError("telemetry exploded")
+
+    client = ExplodingClient()
+    sockets: list[FakeSocket] = []
+    survived: list[str] = []
+    socket_ready = threading.Event()
+
+    def factory(_: str) -> FakeSocket:
+        socket = FakeSocket()
+        sockets.append(socket)
+        socket_ready.set()
+        return socket
+
+    unsub_one = on_write(
+        "/linear/issues/**",
+        lambda _: (_ for _ in ()).throw(RuntimeError("user handler boom")),
+        client=client,
+        workspace_id="ws_acme",
+        base_url=BASE,
+        token="tok_test",
+        websocket_factory=factory,
+    )
+    unsub_two = on_write(
+        "/linear/issues/**",
+        lambda evt: survived.append(evt.path),
+        client=client,
+        workspace_id="ws_acme",
+        base_url=BASE,
+        token="tok_test",
+    )
+
+    assert socket_ready.wait(1)
+    sockets[0].emit(event("/linear/issues/PROJ-1"))
+
+    # The reporter raised, but the second handler still ran for this path.
+    wait_for(lambda: survived == ["/linear/issues/PROJ-1"])
+
+    unsub_one()
+    unsub_two()
+
+
 def test_dispatcher_restarts_after_full_drain() -> None:
     """Regression: re-subscribing on the same client after the last unsubscribe
     must spin up a fresh worker thread and deliver events. Previously the

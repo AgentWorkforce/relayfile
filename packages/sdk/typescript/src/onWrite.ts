@@ -76,9 +76,18 @@ export function onWrite(
     }
   }
 
+  // The dispatcher cache is keyed by client; a single shared WebSocket is
+  // bound to one workspace. v1 scopes a client to a single workspace per the
+  // design doc (Out-of-scope: "Cross-workspace subscriptions"). Reject
+  // mismatched workspaceId rather than silently attaching to the wrong feed.
   let dispatcher = dispatchers.get(client);
+  if (dispatcher && dispatcher.workspaceId !== workspaceId) {
+    throw new Error(
+      `onWrite registrations on the same client must use the same workspaceId. Existing="${dispatcher.workspaceId}", new="${workspaceId}". Construct a separate RelayFileClient per workspace.`
+    );
+  }
   if (!dispatcher) {
-    dispatcher = new OnWriteDispatcher(client);
+    dispatcher = new OnWriteDispatcher(client, workspaceId);
     dispatchers.set(client, dispatcher);
   }
 
@@ -104,24 +113,24 @@ export function onWrite(
 
 class OnWriteDispatcher {
   private readonly client: OnWriteClient;
+  // Captured at construction. RelayFileSync normalizes the FilesystemEvent
+  // shape and does not surface workspaceId on emitted events, so we stamp the
+  // subscribed workspaceId onto every WriteEvent we hand to user handlers.
+  // It also gates registrations: see the cross-workspace check in onWrite().
+  readonly workspaceId: string;
   private readonly registrations: OnWriteRegistration[] = [];
   private readonly patternChains = new Map<string, Promise<void>>();
   private sync?: RelayFileSync;
-  // Captured at first registration. RelayFileSync normalizes the FilesystemEvent
-  // shape and does not surface workspaceId on emitted events, so we thread the
-  // subscribed workspaceId through here and stamp it onto every WriteEvent we
-  // hand to user handlers.
-  private workspaceId?: string;
 
-  constructor(client: OnWriteClient) {
+  constructor(client: OnWriteClient, workspaceId: string) {
     this.client = client;
+    this.workspaceId = workspaceId;
   }
 
   register(
     registration: OnWriteRegistration,
     options: Required<Pick<OnWriteOptions, "workspaceId">> & Pick<OnWriteOptions, "signal" | "baseUrl" | "token" | "webSocketFactory">
   ): void {
-    this.workspaceId = options.workspaceId;
     this.registrations.push(registration);
     if (options.signal) {
       if (options.signal.aborted) {
@@ -202,10 +211,20 @@ class OnWriteDispatcher {
     }
   }
 
+  // The "handler errors do not propagate" guarantee covers the recorder too:
+  // if the customer's recordHandlerError implementation throws or rejects, fall
+  // back to console.error rather than letting the rejection bubble up the
+  // dispatch chain (which would skip subsequent handlers for the same pattern).
   private async recordHandlerError(error: OnWriteHandlerError): Promise<void> {
     if (typeof this.client.recordHandlerError === "function") {
-      await this.client.recordHandlerError(error);
-      return;
+      try {
+        await this.client.recordHandlerError(error);
+        return;
+      } catch (reportingError) {
+        if (typeof console !== "undefined" && typeof console.error === "function") {
+          console.error("Relayfile onWrite handler-error reporter failed", reportingError);
+        }
+      }
     }
     if (typeof console !== "undefined" && typeof console.error === "function") {
       console.error("Relayfile onWrite handler error", error);
@@ -242,6 +261,11 @@ function normalizePath(path: string): string[] {
   return trimmed.split("/").filter(Boolean);
 }
 
+// Trailing `**` matches **zero or more** trailing segments — same as gitignore
+// and standard glob conventions, and what the design doc specifies ("any
+// number of segments"). `/linear/issues/**` therefore matches both
+// `/linear/issues` (the collection root) and `/linear/issues/PROJ-1/comments`.
+// `*` matches exactly one segment; `**` is only valid as the last segment.
 function matchSegments(pattern: string[], path: string[]): boolean {
   if (pattern.length > 0 && pattern[pattern.length - 1] === "**") {
     const prefix = pattern.slice(0, -1);
@@ -259,17 +283,21 @@ function toWriteEvent(event: FilesystemEvent, workspaceId?: string): WriteEvent 
   if (!operation) {
     return null;
   }
-  const raw = event as FilesystemEvent & Partial<WriteEvent> & { previousRevision?: string | null };
+  // RelayFileSync currently surfaces only:
+  //   eventId, type, path, revision, origin, provider, correlationId, timestamp
+  // Fields the wider WriteEvent contract advertises but the wire format does
+  // not yet preserve — previousRevision, value, actor — are intentionally
+  // omitted/null here. Wiring them through the wire format and
+  // normalizeFilesystemEvent is a follow-up; v1 callers should treat
+  // previousRevision/value/actor as not-yet-populated.
   return {
-    workspaceId: raw.workspaceId ?? workspaceId ?? "",
+    workspaceId: workspaceId ?? "",
     path: event.path,
     operation,
     revision: event.revision,
-    previousRevision: raw.previousRevision ?? null,
+    previousRevision: null,
     timestamp: event.timestamp,
-    source: raw.source ?? sourceFromOrigin(event.origin),
-    value: raw.value,
-    actor: raw.actor
+    source: sourceFromOrigin(event.origin)
   };
 }
 

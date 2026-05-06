@@ -113,9 +113,19 @@ def _register(
     if not resolved_workspace_id:
         raise ValueError("on_write requires workspace_id or RELAYFILE_WORKSPACE_ID")
 
+    # The dispatcher cache is keyed by client; a single shared WebSocket is
+    # bound to one workspace. v1 scopes a client to a single workspace per the
+    # design doc (out-of-scope: cross-workspace subscriptions). Reject
+    # mismatched workspace_id rather than silently attaching to the wrong feed.
     dispatcher = _dispatchers.get(resolved_client)
+    if dispatcher is not None and dispatcher.workspace_id != resolved_workspace_id:
+        raise ValueError(
+            f"on_write registrations on the same client must use the same workspace_id. "
+            f'Existing="{dispatcher.workspace_id}", new="{resolved_workspace_id}". '
+            "Construct a separate RelayFileClient per workspace."
+        )
     if dispatcher is None:
-        dispatcher = _OnWriteDispatcher(resolved_client)
+        dispatcher = _OnWriteDispatcher(resolved_client, resolved_workspace_id)
         _dispatchers[resolved_client] = dispatcher
 
     return dispatcher.register(
@@ -139,8 +149,13 @@ class _Registration:
 
 
 class _OnWriteDispatcher:
-    def __init__(self, client: RelayFileClient) -> None:
+    def __init__(self, client: RelayFileClient, workspace_id: str) -> None:
         self._client = client
+        # Captured at construction. The wire format does not surface
+        # workspaceId on emitted events, so we stamp this onto every WriteEvent
+        # we hand to user handlers. It also gates registrations: see the
+        # cross-workspace check in _register().
+        self.workspace_id = workspace_id
         self._registrations: list[_Registration] = []
         self._lock = threading.RLock()
         self._pattern_locks: dict[str, threading.Lock] = {}
@@ -253,7 +268,7 @@ class _OnWriteDispatcher:
         if not isinstance(payload, dict):
             return
 
-        event = _to_write_event(payload)
+        event = _to_write_event(payload, self.workspace_id)
         if event is None:
             return
 
@@ -276,13 +291,20 @@ class _OnWriteDispatcher:
             self._record_handler_error(registration.pattern, event.path, exc)
 
     def _record_handler_error(self, pattern: str, path: str, error: Exception) -> None:
+        # The "handler errors do not propagate" guarantee covers the recorder
+        # too: if the customer's record_handler_error implementation raises,
+        # fall back to the logger rather than letting the exception bubble up
+        # the dispatch loop and break sequential dispatch for the pattern.
         payload = {"pattern": pattern, "path": path, "error": error, "retryable": False}
         recorder = getattr(self._client, "record_handler_error", None) or getattr(self._client, "recordHandlerError", None)
         if callable(recorder):
-            result = recorder(payload)
-            if hasattr(result, "__await__"):
-                asyncio.run(result)
-            return
+            try:
+                result = recorder(payload)
+                if hasattr(result, "__await__"):
+                    asyncio.run(result)
+                return
+            except Exception:
+                logging.getLogger(__name__).exception("Relayfile on_write handler-error reporter failed")
         logging.getLogger(__name__).exception("Relayfile on_write handler error", exc_info=error)
 
 
@@ -308,28 +330,39 @@ def _normalize_path(path: str) -> list[str]:
 
 
 def _match_segments(pattern: list[str], path: list[str]) -> bool:
+    # Trailing ``**`` matches **zero or more** trailing segments — same as
+    # gitignore and standard glob conventions, and what the design doc
+    # specifies ("any number of segments"). ``/linear/issues/**`` therefore
+    # matches both ``/linear/issues`` (the collection root) and
+    # ``/linear/issues/PROJ-1/comments``. ``*`` matches exactly one segment;
+    # ``**`` is only valid as the last segment.
     if pattern and pattern[-1] == "**":
         prefix = pattern[:-1]
         return len(path) >= len(prefix) and all(segment == "*" or segment == path[index] for index, segment in enumerate(prefix))
     return len(pattern) == len(path) and all(segment == "*" or segment == path[index] for index, segment in enumerate(pattern))
 
 
-def _to_write_event(payload: dict[str, Any]) -> WriteEvent | None:
+def _to_write_event(payload: dict[str, Any], workspace_id: str) -> WriteEvent | None:
     event_type = payload.get("type")
     operation = _operation_from_type(event_type)
     path = payload.get("path")
     if operation is None or not isinstance(path, str):
         return None
+    # The wire format currently surfaces only:
+    #   eventId, type, path, revision, origin, provider, correlationId, timestamp
+    # Fields the wider WriteEvent contract advertises but the wire format does
+    # not yet preserve — previous_revision, value, actor — are intentionally
+    # left as None here. Wiring them through the wire format is a follow-up.
     return WriteEvent(
-        workspace_id=str(payload.get("workspaceId") or payload.get("workspace_id") or ""),
+        workspace_id=workspace_id,
         path=path,
         operation=operation,
         revision=str(payload.get("revision") or ""),
-        previous_revision=payload.get("previousRevision") or payload.get("previous_revision"),
+        previous_revision=None,
         timestamp=str(payload.get("timestamp") or payload.get("ts") or ""),
-        source=str(payload.get("source") or _source_from_origin(payload.get("origin"))),
-        value=payload.get("value"),
-        actor=payload.get("actor"),
+        source=_source_from_origin(payload.get("origin")),
+        value=None,
+        actor=None,
     )
 
 

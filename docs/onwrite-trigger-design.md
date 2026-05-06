@@ -85,7 +85,7 @@ export interface OnWriteOptions {
  *
  * Pattern syntax (glob-like, single-segment wildcards only):
  *   /notion/pages/calls/* /transcript     (* matches one path segment)
- *   /linear/issues/**                     (** matches any number of segments)
+ *   /linear/issues/**                     (** matches zero or more trailing segments — including the collection root)
  *   /github/repos/acme/api/pulls/*        (* matches one segment)
  *
  * Multiple wildcards are supported. No regex.
@@ -158,6 +158,7 @@ Single grammar, both languages:
 | `/notion/pages/calls/*/transcript` | `/notion/pages/calls/2026-05-08/transcript` | ✅ |
 | `/notion/pages/calls/*/transcript` | `/notion/pages/calls/2026-05-08/notes/transcript` | ❌ (`*` is single-segment) |
 | `/linear/issues/**` | `/linear/issues/PROJ-441/comments/c-1` | ✅ |
+| `/linear/issues/**` | `/linear/issues` | ✅ (`**` includes the collection root) |
 | `/github/repos/*/*/pulls/*` | `/github/repos/acme/api/pulls/42` | ✅ |
 | `/hubspot/deals/*/stage` | `/hubspot/deals/4471/stage` | ✅ |
 
