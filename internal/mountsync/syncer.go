@@ -56,6 +56,15 @@ func (e *SchemaValidationError) Is(target error) bool {
 
 const defaultBulkFlushThreshold = 256
 
+// defaultFullPullEvery is the default cadence for the "trust but verify"
+// periodic full tree pull that runs from the incremental path. At 30s sync
+// intervals, 20 cycles is roughly every 10 minutes. This is the safety net
+// for cloud-side revision reuse: even when the events feed says "nothing
+// changed at rev_X," every Nth cycle we re-export the tree and let
+// applyRemoteFile re-hash and overwrite any drift between the daemon's
+// tracked.Hash and the actual remote content.
+const defaultFullPullEvery = 20
+
 type ConflictError struct {
 	Path string
 }
@@ -85,9 +94,10 @@ func (e *HTTPError) Error() string {
 }
 
 type TreeEntry struct {
-	Path     string `json:"path"`
-	Type     string `json:"type"`
-	Revision string `json:"revision"`
+	Path        string `json:"path"`
+	Type        string `json:"type"`
+	Revision    string `json:"revision"`
+	ContentHash string `json:"contentHash,omitempty"`
 }
 
 type TreeResponse struct {
@@ -97,12 +107,13 @@ type TreeResponse struct {
 }
 
 type FilesystemEvent struct {
-	EventID   string `json:"eventId"`
-	Type      string `json:"type"`
-	Path      string `json:"path"`
-	Revision  string `json:"revision"`
-	Provider  string `json:"provider,omitempty"`
-	Timestamp string `json:"timestamp,omitempty"`
+	EventID     string `json:"eventId"`
+	Type        string `json:"type"`
+	Path        string `json:"path"`
+	Revision    string `json:"revision"`
+	ContentHash string `json:"contentHash,omitempty"`
+	Provider    string `json:"provider,omitempty"`
+	Timestamp   string `json:"timestamp,omitempty"`
 }
 
 type EventFeed struct {
@@ -116,6 +127,7 @@ type RemoteFile struct {
 	ContentType string `json:"contentType"`
 	Content     string `json:"content"`
 	Encoding    string `json:"encoding,omitempty"`
+	ContentHash string `json:"contentHash,omitempty"`
 }
 
 type WriteResult struct {
@@ -386,6 +398,12 @@ type SyncerOptions struct {
 	Logger        Logger
 	Mode          string
 	Interval      time.Duration
+	// FullPullEvery controls how often the incremental pull path forces a
+	// full tree pull as a "trust but verify" safety net against cloud-side
+	// revision reuse (see fix/cloud-side-rev-reuse-defense). 0 means use
+	// the default (defaultFullPullEvery, ~10 min at 30s intervals). A
+	// negative value disables the periodic full pull entirely.
+	FullPullEvery int
 }
 
 type Logger interface {
@@ -417,6 +435,8 @@ type Syncer struct {
 	bulkFlushThreshold   int
 	mode                 string
 	interval             time.Duration
+	fullPullEvery        int
+	incrementalCycles    int
 	mu                   sync.Mutex
 }
 
@@ -574,6 +594,17 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 	if rootCtx == nil {
 		rootCtx = context.Background()
 	}
+	fullPullEvery := opts.FullPullEvery
+	if fullPullEvery == 0 {
+		if raw := strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_FULL_PULL_EVERY")); raw != "" {
+			if parsed, perr := strconv.Atoi(raw); perr == nil {
+				fullPullEvery = parsed
+			}
+		}
+		if fullPullEvery == 0 {
+			fullPullEvery = defaultFullPullEvery
+		}
+	}
 	return &Syncer{
 		client:               client,
 		workspace:            workspace,
@@ -594,6 +625,7 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 		bulkFlushThreshold:   defaultBulkFlushThreshold,
 		mode:                 strings.TrimSpace(opts.Mode),
 		interval:             opts.Interval,
+		fullPullEvery:        fullPullEvery,
 		state: mountState{
 			Files: map[string]trackedFile{},
 		},
@@ -1378,6 +1410,37 @@ func (s *Syncer) HTTPClient() (*HTTPClient, bool) {
 
 func (s *Syncer) pullRemote(ctx context.Context, conflicted map[string]struct{}) error {
 	if s.state.EventsCursor != "" {
+		// "Trust but verify": every Nth incremental cycle, force a full
+		// tree pull regardless of cursor health. This self-heals any stale
+		// state caused by cloud-side revision reuse — applyRemoteFile
+		// re-hashes content and overwrites when the on-disk hash diverges
+		// from what cloud now serves under the same revision identifier.
+		// Tracks production failure mode where rev counter rolled back
+		// mid-envelope, leaving the daemon and cloud both calling distinct
+		// content "rev_96".
+		s.incrementalCycles++
+		if s.fullPullEvery > 0 && s.incrementalCycles >= s.fullPullEvery {
+			s.incrementalCycles = 0
+			s.logf("forcing periodic full tree pull (every %d incremental cycles) as defense against cloud-side revision reuse", s.fullPullEvery)
+			if err := s.pullRemoteFull(ctx, conflicted); err != nil {
+				return err
+			}
+			// Refresh the events cursor so we don't replay events that
+			// preceded this full snapshot.
+			if s.wsConn == nil {
+				cursor, err := s.resolveLatestEventCursor(ctx)
+				if err != nil {
+					var httpErr *HTTPError
+					if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusNotFound {
+						return nil
+					}
+					return err
+				}
+				s.state.EventsCursor = cursor
+			}
+			return nil
+		}
+
 		nextCursor, err := s.pullRemoteIncremental(ctx, conflicted, s.state.EventsCursor)
 		if err == nil {
 			s.state.EventsCursor = nextCursor
@@ -1472,6 +1535,21 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 			if tracked, ok := s.state.Files[remotePath]; ok && tracked.Denied {
 				continue
 			}
+			// Defensive logging for cloud-side revision reuse: if the tree
+			// entry surfaces a content hash that diverges from what we
+			// tracked under the same revision, that's the production bug
+			// signature. applyRemoteFile already re-hashes content and
+			// overwrites local state when hashes diverge, so this is
+			// purely diagnostic — treat as changed (i.e. re-fetch, which
+			// the loop already does unconditionally).
+			if entry.ContentHash != "" {
+				if tracked, ok := s.state.Files[remotePath]; ok &&
+					tracked.Revision == entry.Revision &&
+					tracked.Hash != "" &&
+					tracked.Hash != entry.ContentHash {
+					s.logf("tree revision %s reused for %s with divergent content hash (tracked=%s remote=%s); refetching", entry.Revision, remotePath, tracked.Hash, entry.ContentHash)
+				}
+			}
 			file, err := s.client.ReadFile(ctx, s.workspace, remotePath)
 			if err != nil {
 				var httpErr *HTTPError
@@ -1553,6 +1631,25 @@ func (s *Syncer) pullRemoteIncremental(ctx context.Context, conflicted map[strin
 			case "file.created", "file.updated":
 				changed[remotePath] = struct{}{}
 				delete(deleted, remotePath)
+				// Defensive cross-check against cloud-side revision reuse:
+				// if cloud surfaces a content hash and it diverges from
+				// what we have tracked under the same revision, force a
+				// re-fetch even though the revision matches. Without this
+				// check, a buggy cloud that reuses a revision identifier
+				// for new content would leave the local file stale forever
+				// because the standard rev-equality short-circuit would
+				// hide the drift. The field is omitted on cloud versions
+				// that have not yet been updated, in which case this
+				// branch is a no-op.
+				if event.ContentHash != "" {
+					if tracked, ok := s.state.Files[remotePath]; ok &&
+						tracked.Revision == event.Revision &&
+						tracked.Hash != "" &&
+						tracked.Hash != event.ContentHash {
+						s.logf("revision %s reused for %s with divergent content hash (tracked=%s remote=%s); forcing re-fetch", event.Revision, remotePath, tracked.Hash, event.ContentHash)
+						changed[remotePath] = struct{}{}
+					}
+				}
 			case "file.deleted":
 				deleted[remotePath] = struct{}{}
 				delete(changed, remotePath)
