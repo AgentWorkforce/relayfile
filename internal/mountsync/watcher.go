@@ -19,6 +19,8 @@ type FileWatcher struct {
 	onChange func(relativePath string, op fsnotify.Op)
 	mu       sync.Mutex
 	debounce map[string]*time.Timer // debounce rapid events per file
+	closed   bool
+	wg       sync.WaitGroup
 }
 
 func NewFileWatcher(localDir string, onChange func(string, fsnotify.Op)) (*FileWatcher, error) {
@@ -101,14 +103,28 @@ func (fw *FileWatcher) shouldSkip(rel string) bool {
 
 func (fw *FileWatcher) queueChange(rel string, op fsnotify.Op) {
 	fw.mu.Lock()
-	if t, ok := fw.debounce[rel]; ok {
-		t.Stop()
+	if fw.closed {
+		fw.mu.Unlock()
+		return
 	}
+	if t, ok := fw.debounce[rel]; ok {
+		if t.Stop() {
+			fw.wg.Done()
+		}
+	}
+	fw.wg.Add(1)
 	fw.debounce[rel] = time.AfterFunc(100*time.Millisecond, func() {
-		fw.onChange(rel, op)
+		defer fw.wg.Done()
+
 		fw.mu.Lock()
+		if fw.closed {
+			delete(fw.debounce, rel)
+			fw.mu.Unlock()
+			return
+		}
 		delete(fw.debounce, rel)
 		fw.mu.Unlock()
+		fw.onChange(rel, op)
 	})
 	fw.mu.Unlock()
 }
@@ -153,5 +169,17 @@ func (fw *FileWatcher) addDirRecursive(base string) error {
 }
 
 func (fw *FileWatcher) Close() error {
-	return fw.watcher.Close()
+	fw.mu.Lock()
+	fw.closed = true
+	for rel, timer := range fw.debounce {
+		if timer.Stop() {
+			fw.wg.Done()
+		}
+		delete(fw.debounce, rel)
+	}
+	fw.mu.Unlock()
+
+	err := fw.watcher.Close()
+	fw.wg.Wait()
+	return err
 }
