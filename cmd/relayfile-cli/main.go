@@ -26,6 +26,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 	"unicode/utf8"
@@ -247,6 +248,7 @@ type syncStateFile struct {
 	PendingWriteback int                 `json:"pendingWriteback"`
 	PendingConflicts int                 `json:"pendingConflicts"`
 	DeniedPaths      int                 `json:"deniedPaths"`
+	FailedWritebacks uint64              `json:"failedWritebacks"`
 	StallReason      string              `json:"stallReason,omitempty"`
 	Daemon           *syncStateDaemon    `json:"daemon,omitempty"`
 }
@@ -280,6 +282,8 @@ type daemonPIDState struct {
 	LogFile     string `json:"logFile"`
 	StartedAt   string `json:"startedAt"`
 }
+
+var failedWritebacksStateMu sync.Mutex
 
 type apiError struct {
 	StatusCode int
@@ -332,6 +336,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		return runIntegration(args[1:], stdin, stdout)
 	case "ops":
 		return runOps(args[1:], stdin, stdout)
+	case "writeback":
+		return runWriteback(args[1:], stdout)
 	case "pull":
 		return runPull(args[1:], stdout)
 	case "mount":
@@ -377,6 +383,8 @@ Usage:
   relayfile integration disconnect PROVIDER [--workspace NAME] [--yes]
   relayfile ops list [--workspace NAME] [--json]
   relayfile ops replay OPID [--workspace NAME]
+  relayfile writeback status [WORKSPACE] [--json]
+  relayfile writeback retry --opId OP [WORKSPACE]
   relayfile pull [--workspace NAME] [--provider PROVIDER] [--reason TEXT]
   relayfile mount [WORKSPACE] [LOCAL_DIR]
   relayfile tree [WORKSPACE] [PATH] [--depth N]
@@ -394,6 +402,11 @@ Subcommands:
   workspace   Create, select, list, or delete locally tracked workspaces
   integration Connect, list, or disconnect workspace integrations
   ops         List or replay dead-lettered writeback ops
+  writeback   Inspect or retry local writeback failures
+  writeback status
+              Show local pending, failed, and dead-lettered writebacks
+  writeback retry
+              Re-enqueue a local dead-lettered writeback op
   pull        Trigger an immediate sync refresh for one or all providers
   mount       Mirror a remote workspace to a local directory; add --background to detach
   tree        List a remote workspace path
@@ -709,10 +722,10 @@ func normalizeProviderID(value string) string {
 const integrationCatalogTTL = time.Hour
 
 type integrationCatalogCacheEntry struct {
-	APIURL    string                            `json:"apiUrl"`
-	FetchedAt string                            `json:"fetchedAt"`
-	Version   string                            `json:"version,omitempty"`
-	Providers []integrationCatalogEntry         `json:"providers"`
+	APIURL    string                    `json:"apiUrl"`
+	FetchedAt string                    `json:"fetchedAt"`
+	Version   string                    `json:"version,omitempty"`
+	Providers []integrationCatalogEntry `json:"providers"`
 }
 
 func integrationCatalogCachePath() string {
@@ -1356,11 +1369,141 @@ type deadLetterRecord struct {
 	CreatedAt       string `json:"createdAt,omitempty"`
 	LastAttemptedAt string `json:"lastAttemptedAt,omitempty"`
 	Attempts        int    `json:"attempts,omitempty"`
+	LastStatus      int    `json:"lastStatus,omitempty"`
+	LastBody        string `json:"lastBody,omitempty"`
+	Timestamp       string `json:"ts,omitempty"`
 	ReplayURL       string `json:"replayUrl,omitempty"`
 }
 
+type writebackStatusDeadLetter struct {
+	OpID       string `json:"opId"`
+	Path       string `json:"path,omitempty"`
+	LastStatus int    `json:"lastStatus"`
+	TS         string `json:"ts,omitempty"`
+}
+
+type writebackStatusReport struct {
+	WorkspaceID         string                      `json:"workspaceId"`
+	Pending             int                         `json:"pending"`
+	Failed              uint64                      `json:"failed"`
+	DeadLettered        []writebackStatusDeadLetter `json:"deadLettered"`
+	LastErrorByProvider map[string]string           `json:"lastErrorByProvider"`
+}
+
+var errWritebackFailuresPresent = errors.New("writeback failures present")
+
 func deadLetterDirFor(localDir string) string {
 	return filepath.Join(localDir, ".relay", "dead-letter")
+}
+
+func runWriteback(args []string, stdout io.Writer) error {
+	if len(args) == 0 {
+		return errors.New("writeback subcommand is required: status or retry")
+	}
+	switch args[0] {
+	case "status":
+		return runWritebackStatus(args[1:], stdout)
+	case "retry":
+		return runWritebackRetry(args[1:], stdout)
+	default:
+		return fmt.Errorf("unknown writeback subcommand %q", args[0])
+	}
+}
+
+func runWritebackStatus(args []string, stdout io.Writer) error {
+	fs := flag.NewFlagSet("writeback status", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	jsonOutput := fs.Bool("json", false, "emit JSON")
+	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
+		"json": false,
+	})); err != nil {
+		return err
+	}
+	if fs.NArg() > 1 {
+		return errors.New("usage: relayfile writeback status [WORKSPACE] [--json]")
+	}
+
+	workspaceID, record, err := resolveWorkspaceLikeStatus(firstArg(fs))
+	if err != nil {
+		return err
+	}
+	report, err := buildWritebackStatusReport(workspaceID, record.LocalDir)
+	if err != nil {
+		return err
+	}
+	if *jsonOutput {
+		if err := writeJSON(stdout, report); err != nil {
+			return err
+		}
+	} else {
+		printWritebackStatus(stdout, record, report)
+	}
+	// Exit code reflects ACTIONABLE failures (writebacks still in the
+	// dead-letter queue) — not the lifetime `failedWritebacks` counter,
+	// which only ever increments. Codex/CodeRabbit flagged on PR #84:
+	// once any transient 429/5xx fires, the counter would keep this
+	// command exiting non-zero forever even after retries succeed.
+	// `Failed` and `Pending` stay in the report for observability.
+	if len(report.DeadLettered) > 0 {
+		return errWritebackFailuresPresent
+	}
+	return nil
+}
+
+func runWritebackRetry(args []string, stdout io.Writer) error {
+	fs := flag.NewFlagSet("writeback retry", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	opID := fs.String("opId", "", "dead-lettered operation id")
+	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
+		"opId": true,
+	})); err != nil {
+		return err
+	}
+	if fs.NArg() > 1 {
+		return errors.New("usage: relayfile writeback retry --opId OP [WORKSPACE]")
+	}
+	op := strings.TrimSpace(*opID)
+	if op == "" {
+		return errors.New("opId is required")
+	}
+	if strings.ContainsAny(op, `/\`) {
+		return fmt.Errorf("invalid opId %q", op)
+	}
+
+	workspaceID, record, err := resolveWorkspaceLikeStatus(firstArg(fs))
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(record.LocalDir) == "" {
+		return fmt.Errorf("unknown dead-letter op %q: workspace %s has no local mirror", op, workspaceID)
+	}
+	recordPath := filepath.Join(deadLetterDirFor(record.LocalDir), op+".json")
+	payload, err := os.ReadFile(recordPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("unknown dead-letter op %q", op)
+		}
+		return err
+	}
+	var dl deadLetterRecord
+	if err := json.Unmarshal(payload, &dl); err != nil {
+		return fmt.Errorf("invalid dead-letter record %s: %w", recordPath, err)
+	}
+	if strings.TrimSpace(dl.OpID) == "" {
+		dl.OpID = op
+	}
+	if dl.OpID != op {
+		return fmt.Errorf("dead-letter record %s contains opId %q, expected %q", recordPath, dl.OpID, op)
+	}
+
+	if err := retryDeadLetterWriteback(workspaceID, record, dl); err != nil {
+		return fmt.Errorf("retry op %s: %w", op, err)
+	}
+	if err := os.Remove(recordPath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("retry queued but failed to remove %s: %w", recordPath, err)
+	}
+	fmt.Fprintf(stdout, "Retry queued for op %s\n", op)
+	return nil
 }
 
 func runOps(args []string, stdin io.Reader, stdout io.Writer) error {
@@ -1474,6 +1617,289 @@ func readDeadLetterRecords(localDir string) ([]deadLetterRecord, error) {
 		return records[i].OpID < records[j].OpID
 	})
 	return records, nil
+}
+
+func resolveWorkspaceLikeStatus(value string) (string, workspaceRecord, error) {
+	// CodeRabbit flagged on PR #84: `writeback status` should work
+	// offline / with expired creds — it only inspects local mirror
+	// state. Try the local workspace registry first when the user
+	// supplies a name/id; only fall back to the credentials path when
+	// nothing local matches (or when no value was given and we need
+	// the JWT's `wks` claim to identify the default).
+	trimmed := strings.TrimSpace(value)
+	if trimmed != "" {
+		if local, ok := workspaceRecordByName(trimmed); ok {
+			workspaceID := strings.TrimSpace(local.ID)
+			if workspaceID == "" {
+				workspaceID = local.Name
+			}
+			return workspaceID, local, nil
+		}
+		if local, ok := workspaceRecordByID(trimmed); ok {
+			return strings.TrimSpace(local.ID), local, nil
+		}
+	}
+
+	creds, err := loadCredentials()
+	if err != nil {
+		return "", workspaceRecord{}, err
+	}
+	tokenValue := resolveToken("", creds)
+	workspaceID, err := resolveWorkspaceIDWithToken("", tokenValue)
+	if trimmed != "" {
+		workspaceID, err = resolveWorkspaceIDWithToken(trimmed, tokenValue)
+	}
+	if err != nil {
+		return "", workspaceRecord{}, err
+	}
+	record, _ := workspaceRecordByID(workspaceID)
+	if strings.TrimSpace(record.ID) == "" {
+		record.ID = workspaceID
+	}
+	if strings.TrimSpace(record.Name) == "" {
+		record.Name = workspaceID
+	}
+	return workspaceID, record, nil
+}
+
+func buildWritebackStatusReport(workspaceID, localDir string) (writebackStatusReport, error) {
+	report := writebackStatusReport{
+		WorkspaceID:         workspaceID,
+		DeadLettered:        []writebackStatusDeadLetter{},
+		LastErrorByProvider: map[string]string{},
+	}
+	if strings.TrimSpace(localDir) == "" {
+		return report, nil
+	}
+
+	state, err := readWritebackState(localDir)
+	if err != nil {
+		return writebackStatusReport{}, err
+	}
+	report.Pending = state.PendingWriteback
+	report.Failed = state.FailedWritebacks
+	for _, provider := range state.Providers {
+		name := strings.TrimSpace(provider.Provider)
+		lastError := strings.TrimSpace(provider.LastError)
+		if name != "" && lastError != "" {
+			report.LastErrorByProvider[name] = lastError
+		}
+	}
+
+	records, err := readDeadLetterRecords(localDir)
+	if err != nil {
+		return writebackStatusReport{}, err
+	}
+	report.DeadLettered = make([]writebackStatusDeadLetter, 0, len(records))
+	for _, record := range records {
+		report.DeadLettered = append(report.DeadLettered, writebackStatusDeadLetter{
+			OpID:       record.OpID,
+			Path:       record.Path,
+			LastStatus: record.LastStatus,
+			TS:         firstNonBlank(record.Timestamp, record.LastAttemptedAt, record.CreatedAt),
+		})
+	}
+	return report, nil
+}
+
+func readWritebackState(localDir string) (syncStateFile, error) {
+	payload, err := os.ReadFile(filepath.Join(localDir, ".relay", "state.json"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return syncStateFile{}, nil
+		}
+		return syncStateFile{}, err
+	}
+	var state syncStateFile
+	if err := json.Unmarshal(payload, &state); err != nil {
+		return syncStateFile{}, fmt.Errorf("invalid writeback state: %w", err)
+	}
+	return state, nil
+}
+
+func printWritebackStatus(stdout io.Writer, record workspaceRecord, report writebackStatusReport) {
+	workspaceLabel := report.WorkspaceID
+	if strings.TrimSpace(record.Name) != "" && record.Name != report.WorkspaceID {
+		workspaceLabel = fmt.Sprintf("%s (%s)", report.WorkspaceID, record.Name)
+	}
+	fmt.Fprintf(stdout, "workspace: %s\n", workspaceLabel)
+	if strings.TrimSpace(record.LocalDir) != "" {
+		fmt.Fprintf(stdout, "local mirror: %s\n", record.LocalDir)
+	} else {
+		fmt.Fprintln(stdout, "local mirror: not configured")
+	}
+	fmt.Fprintf(stdout, "pending: %d\n", report.Pending)
+	fmt.Fprintf(stdout, "failed: %d\n", report.Failed)
+	fmt.Fprintf(stdout, "dead-lettered: %d\n", len(report.DeadLettered))
+	if len(report.DeadLettered) > 0 {
+		fmt.Fprintln(stdout, "\nDead-lettered ops:")
+		fmt.Fprintln(stdout, "op_id\tpath\tlast_status\tts")
+		for _, item := range report.DeadLettered {
+			lastStatus := "-"
+			if item.LastStatus != 0 {
+				lastStatus = strconv.Itoa(item.LastStatus)
+			}
+			fmt.Fprintf(stdout, "%s\t%s\t%s\t%s\n",
+				item.OpID,
+				defaultIfBlank(item.Path, "-"),
+				lastStatus,
+				defaultIfBlank(item.TS, "-"),
+			)
+		}
+	}
+	if len(report.LastErrorByProvider) > 0 {
+		providers := make([]string, 0, len(report.LastErrorByProvider))
+		for provider := range report.LastErrorByProvider {
+			providers = append(providers, provider)
+		}
+		sort.Strings(providers)
+		fmt.Fprintln(stdout, "\nLast errors by provider:")
+		for _, provider := range providers {
+			fmt.Fprintf(stdout, "  %s: %s\n", provider, report.LastErrorByProvider[provider])
+		}
+	}
+	if report.Failed == 0 && len(report.DeadLettered) == 0 {
+		fmt.Fprintln(stdout, "\nno failures")
+	}
+}
+
+func retryDeadLetterWriteback(workspaceID string, record workspaceRecord, dl deadLetterRecord) error {
+	if strings.TrimSpace(record.LocalDir) == "" {
+		return errors.New("workspace has no local mirror")
+	}
+	paths := deadLetterRetryPaths(dl.Path)
+	if len(paths) == 0 {
+		return fmt.Errorf("dead-letter record %s has no retryable path", dl.OpID)
+	}
+
+	creds, err := loadCredentials()
+	if err != nil {
+		return err
+	}
+	tokenValue := resolveToken("", creds)
+	if tokenValue == "" {
+		return errors.New("token is required; run relayfile login or set RELAYFILE_TOKEN")
+	}
+	server := strings.TrimSpace(record.Server)
+	if server == "" {
+		server = resolveServer("", creds)
+	}
+	client := mountsync.NewHTTPClient(server, tokenValue, &http.Client{
+		Timeout:   defaultMountTimeout,
+		Transport: newWritebackFailureTransport(record.LocalDir, log.Default(), http.DefaultTransport),
+	})
+	// Read the live mount's remoteRoot from .relay/state.json instead
+	// of hardcoding "/". CodeRabbit flagged on PR #84: a mount created
+	// with `--remote-path /github` has dead-letter paths under /github,
+	// and retrying with RemoteRoot:"/" would look up `<localDir>/github/...`
+	// instead of `<localDir>/...`, so replay would fail even though the
+	// mirrored file exists.
+	remoteRoot := readMountRemoteRoot(record.LocalDir)
+	websocketDisabled := false
+	syncer, err := mountsync.NewSyncer(client, mountsync.SyncerOptions{
+		WorkspaceID: workspaceID,
+		RemoteRoot:  remoteRoot,
+		LocalRoot:   record.LocalDir,
+		WebSocket:   &websocketDisabled,
+		RootCtx:     context.Background(),
+		Logger:      log.Default(),
+	})
+	if err != nil {
+		return err
+	}
+
+	for _, remotePath := range paths {
+		relativePath, err := retryRelativePath(record.LocalDir, remoteRoot, remotePath)
+		if err != nil {
+			return err
+		}
+		if err := syncer.HandleLocalChange(context.Background(), relativePath, fsnotify.Write); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// readMountRemoteRoot reads the live mount's remoteRoot from
+// <localDir>/.relay/state.json. Defaults to "/" when missing or
+// unparseable so retry on a root mount works without state.json
+// being present.
+func readMountRemoteRoot(localDir string) string {
+	if strings.TrimSpace(localDir) == "" {
+		return "/"
+	}
+	data, err := os.ReadFile(filepath.Join(localDir, ".relay", "state.json"))
+	if err != nil {
+		return "/"
+	}
+	var s struct {
+		RemoteRoot string `json:"remoteRoot"`
+	}
+	if json.Unmarshal(data, &s) != nil {
+		return "/"
+	}
+	if root := strings.TrimSpace(s.RemoteRoot); root != "" {
+		return root
+	}
+	return "/"
+}
+
+func deadLetterRetryPaths(raw string) []string {
+	parts := strings.Split(raw, ",")
+	paths := make([]string, 0, len(parts))
+	for _, part := range parts {
+		path := normalizeWritebackFailurePath(part)
+		if path != "" {
+			paths = append(paths, path)
+		}
+	}
+	return paths
+}
+
+func retryRelativePath(localDir, remoteRoot, remotePath string) (string, error) {
+	remotePath = normalizeWritebackFailurePath(remotePath)
+	if remotePath == "" || remotePath == "/" {
+		return "", fmt.Errorf("invalid retry path %q", remotePath)
+	}
+	// Strip the mount's remoteRoot from the dead-letter path so the
+	// remaining suffix can be joined to the local mirror's root. For
+	// a mount with RemoteRoot=/github and dead-letter path
+	// /github/file.md, this yields a relative path of `file.md` which
+	// correctly resolves to <localDir>/file.md.
+	root := normalizeWritebackFailurePath(remoteRoot)
+	relPath := remotePath
+	if root != "" && root != "/" {
+		if relPath != root && !strings.HasPrefix(relPath, root+"/") {
+			return "", fmt.Errorf("retry path %q is not under mount root %q", remotePath, root)
+		}
+		relPath = strings.TrimPrefix(relPath, root)
+	}
+	relPath = strings.TrimPrefix(relPath, "/")
+	cleanRelative := filepath.Clean(filepath.FromSlash(relPath))
+	if cleanRelative == "." || strings.HasPrefix(cleanRelative, ".."+string(os.PathSeparator)) || cleanRelative == ".." {
+		return "", fmt.Errorf("invalid retry path %q", remotePath)
+	}
+	localPath := filepath.Join(localDir, cleanRelative)
+	info, err := os.Stat(localPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", fmt.Errorf("local file for retry path %s does not exist", remotePath)
+		}
+		return "", err
+	}
+	if info.IsDir() {
+		return "", fmt.Errorf("local retry path %s is a directory", remotePath)
+	}
+	return filepath.ToSlash(cleanRelative), nil
+}
+
+func firstNonBlank(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 type opsListResponse struct {
@@ -2001,7 +2427,10 @@ func runMount(args []string) error {
 	rootCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	client := mountsync.NewHTTPClient(*server, tokenValue, &http.Client{Timeout: *timeout})
+	client := mountsync.NewHTTPClient(*server, tokenValue, &http.Client{
+		Timeout:   *timeout,
+		Transport: newWritebackFailureTransport(absLocalDir, log.Default(), http.DefaultTransport),
+	})
 	syncer, err := mountsync.NewSyncer(client, mountsync.SyncerOptions{
 		WorkspaceID:   workspaceID,
 		RemoteRoot:    *remotePath,
@@ -3415,6 +3844,7 @@ func buildSyncStateSnapshot(status syncStatusResponse, workspaceID, mode string,
 		PendingWriteback: countDirtyTrackedFiles(localDir),
 		PendingConflicts: countFilesInDir(filepath.Join(localDir, ".relay", "conflicts")),
 		DeniedPaths:      countLines(filepath.Join(localDir, ".relay", "permissions-denied.log")),
+		FailedWritebacks: readPersistedFailedWritebacks(localDir),
 		StallReason:      stallReason,
 	}
 	if pid != 0 {
@@ -3456,6 +3886,11 @@ func writeMirrorStateFile(localDir string, snapshot syncStateFile) error {
 	if err := ensureMirrorLayout(localDir); err != nil {
 		return err
 	}
+	failedWritebacksStateMu.Lock()
+	defer failedWritebacksStateMu.Unlock()
+	if persisted := readPersistedFailedWritebacksUnlocked(localDir); persisted > snapshot.FailedWritebacks {
+		snapshot.FailedWritebacks = persisted
+	}
 	snapshot.LastReconcileAt = time.Now().UTC().Format(time.RFC3339)
 	payload, err := json.MarshalIndent(snapshot, "", "  ")
 	if err != nil {
@@ -3463,6 +3898,74 @@ func writeMirrorStateFile(localDir string, snapshot syncStateFile) error {
 	}
 	payload = append(payload, '\n')
 	return writeFileAtomically(filepath.Join(localDir, ".relay", "state.json"), payload, 0o644)
+}
+
+func readPersistedFailedWritebacks(localDir string) uint64 {
+	if localDir == "" {
+		return 0
+	}
+	failedWritebacksStateMu.Lock()
+	defer failedWritebacksStateMu.Unlock()
+	return readPersistedFailedWritebacksUnlocked(localDir)
+}
+
+func readPersistedFailedWritebacksUnlocked(localDir string) uint64 {
+	payload, err := os.ReadFile(filepath.Join(localDir, ".relay", "state.json"))
+	if err != nil {
+		return 0
+	}
+	var snapshot syncStateFile
+	if err := json.Unmarshal(payload, &snapshot); err != nil {
+		return 0
+	}
+	return snapshot.FailedWritebacks
+}
+
+func incrementFailedWritebacksInState(localDir string) error {
+	if strings.TrimSpace(localDir) == "" {
+		return nil
+	}
+	failedWritebacksStateMu.Lock()
+	defer failedWritebacksStateMu.Unlock()
+
+	statePath := filepath.Join(localDir, ".relay", "state.json")
+	document := map[string]any{}
+	if payload, err := os.ReadFile(statePath); err == nil {
+		_ = json.Unmarshal(payload, &document)
+	}
+	if document == nil {
+		document = map[string]any{}
+	}
+	document["failedWritebacks"] = uint64FromJSONValue(document["failedWritebacks"]) + 1
+	payload, err := json.MarshalIndent(document, "", "  ")
+	if err != nil {
+		return err
+	}
+	payload = append(payload, '\n')
+	if err := os.MkdirAll(filepath.Dir(statePath), 0o755); err != nil {
+		return err
+	}
+	return writeFileAtomically(statePath, payload, 0o644)
+}
+
+func uint64FromJSONValue(value any) uint64 {
+	switch v := value.(type) {
+	case float64:
+		if v > 0 {
+			return uint64(v)
+		}
+	case int:
+		if v > 0 {
+			return uint64(v)
+		}
+	case uint64:
+		return v
+	case json.Number:
+		if n, err := strconv.ParseUint(string(v), 10, 64); err == nil {
+			return n
+		}
+	}
+	return 0
 }
 
 func countDirtyTrackedFiles(localDir string) int {
@@ -3758,6 +4261,283 @@ func maxLagSeconds(providers []syncProviderStatus) int {
 
 func syncerClient(syncer *mountsync.Syncer) (*mountsync.HTTPClient, bool) {
 	return syncer.HTTPClient()
+}
+
+const (
+	writebackFailureBodyLimit = 1024
+	writebackMaxHTTPAttempts  = 4
+)
+
+type writebackFailureTransport struct {
+	base     http.RoundTripper
+	localDir string
+	logger   *log.Logger
+	mu       sync.Mutex
+	attempts map[string]int
+}
+
+type writebackFailureSample struct {
+	OpID          string
+	Path          string
+	Status        int
+	Body          string
+	BodyTruncated bool
+}
+
+type replayReadCloser struct {
+	reader io.Reader
+	closer io.Closer
+}
+
+func (r replayReadCloser) Read(p []byte) (int, error) {
+	return r.reader.Read(p)
+}
+
+func (r replayReadCloser) Close() error {
+	return r.closer.Close()
+}
+
+func newWritebackFailureTransport(localDir string, logger *log.Logger, base http.RoundTripper) *writebackFailureTransport {
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	if logger == nil {
+		logger = log.Default()
+	}
+	return &writebackFailureTransport{
+		base:     base,
+		localDir: localDir,
+		logger:   logger,
+		attempts: map[string]int{},
+	}
+}
+
+func (t *writebackFailureTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	writebackRequest := isWritebackRequest(req)
+	requestBody := ""
+	if writebackRequest {
+		requestBody = readAndRestoreWritebackRequestBody(req)
+	}
+	resp, err := t.base.RoundTrip(req)
+	if err != nil || resp == nil || !writebackRequest {
+		return resp, err
+	}
+	key := writebackAttemptKey(req)
+	if resp.StatusCode >= 200 && resp.StatusCode <= 299 {
+		t.clearAttempt(key)
+		return resp, nil
+	}
+
+	sample := sampleWritebackFailure(req, resp, requestBody)
+	attempts := t.recordFailureAttempt(key)
+	if t.logger != nil {
+		t.logger.Printf("WARN writeback request failed opId=%s path=%s status=%d bodyTruncated=%t body=%q",
+			sample.OpID, sample.Path, sample.Status, sample.BodyTruncated, sample.Body)
+	}
+	if err := incrementFailedWritebacksInState(t.localDir); err != nil && t.logger != nil {
+		t.logger.Printf("WARN failed to persist failedWritebacks path=%s error=%v", sample.Path, err)
+	}
+	if writebackRetriesExhausted(resp.StatusCode, attempts) {
+		if err := writeDeadLetterWriteback(t.localDir, sample, attempts); err != nil && t.logger != nil {
+			t.logger.Printf("WARN failed to write dead-letter opId=%s path=%s error=%v", sample.OpID, sample.Path, err)
+		}
+		t.clearAttempt(key)
+	}
+	return resp, nil
+}
+
+func isWritebackRequest(req *http.Request) bool {
+	if req == nil || req.URL == nil {
+		return false
+	}
+	switch req.Method {
+	case http.MethodPut:
+		return strings.HasSuffix(req.URL.Path, "/fs/file")
+	case http.MethodPost:
+		return strings.HasSuffix(req.URL.Path, "/fs/bulk")
+	default:
+		return false
+	}
+}
+
+func writebackAttemptKey(req *http.Request) string {
+	if req == nil || req.URL == nil {
+		return ""
+	}
+	return req.Method + " " + req.URL.String()
+}
+
+func (t *writebackFailureTransport) recordFailureAttempt(key string) int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.attempts[key]++
+	return t.attempts[key]
+}
+
+func (t *writebackFailureTransport) clearAttempt(key string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	delete(t.attempts, key)
+}
+
+func readAndRestoreWritebackRequestBody(req *http.Request) string {
+	if req == nil || req.Body == nil {
+		return ""
+	}
+	bodyBytes, err := io.ReadAll(req.Body)
+	if err != nil {
+		return ""
+	}
+	_ = req.Body.Close()
+	req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+	return string(bodyBytes)
+}
+
+func sampleWritebackFailure(req *http.Request, resp *http.Response, requestBody string) writebackFailureSample {
+	path := writebackFailurePath(req, requestBody)
+	var bodyBytes []byte
+	bodyTruncated := false
+	if resp.Body != nil {
+		bodyBytes, _ = io.ReadAll(io.LimitReader(resp.Body, writebackFailureBodyLimit))
+		bodyTruncated = responseBodyWasTruncated(resp, len(bodyBytes))
+		resp.Body = replayReadCloser{
+			reader: io.MultiReader(bytes.NewReader(bodyBytes), resp.Body),
+			closer: resp.Body,
+		}
+	}
+	body := string(bodyBytes)
+	opID := writebackFailureOpID(req, resp, body)
+	return writebackFailureSample{
+		OpID:          opID,
+		Path:          path,
+		Status:        resp.StatusCode,
+		Body:          body,
+		BodyTruncated: bodyTruncated,
+	}
+}
+
+func writebackFailurePath(req *http.Request, requestBody string) string {
+	if req == nil || req.URL == nil {
+		return ""
+	}
+	if req.Method == http.MethodPut {
+		return normalizeWritebackFailurePath(req.URL.Query().Get("path"))
+	}
+	if req.Method != http.MethodPost || !strings.HasSuffix(req.URL.Path, "/fs/bulk") {
+		return ""
+	}
+	var payload struct {
+		Files []struct {
+			Path string `json:"path"`
+		} `json:"files"`
+	}
+	if err := json.Unmarshal([]byte(requestBody), &payload); err != nil || len(payload.Files) == 0 {
+		return ""
+	}
+	paths := make([]string, 0, len(payload.Files))
+	for _, file := range payload.Files {
+		if path := normalizeWritebackFailurePath(file.Path); path != "" {
+			paths = append(paths, path)
+		}
+	}
+	return strings.Join(paths, ",")
+}
+
+func normalizeWritebackFailurePath(path string) string {
+	path = strings.TrimSpace(strings.ReplaceAll(path, "\\", "/"))
+	if path == "" {
+		return ""
+	}
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	for strings.Contains(path, "//") {
+		path = strings.ReplaceAll(path, "//", "/")
+	}
+	return path
+}
+
+func responseBodyWasTruncated(resp *http.Response, sampled int) bool {
+	if resp == nil {
+		return false
+	}
+	if resp.ContentLength > int64(sampled) {
+		return true
+	}
+	return resp.ContentLength < 0 && sampled == writebackFailureBodyLimit
+}
+
+func writebackFailureOpID(req *http.Request, resp *http.Response, body string) string {
+	for _, key := range []string{"X-Relayfile-Op-Id", "X-Operation-Id", "X-Op-Id"} {
+		if resp != nil {
+			if value := safeWritebackOpID(resp.Header.Get(key)); value != "" {
+				return value
+			}
+		}
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(body), &payload); err == nil {
+		for _, key := range []string{"opId", "opID", "operationId", "id"} {
+			if value, ok := payload[key].(string); ok {
+				if opID := safeWritebackOpID(value); opID != "" {
+					return opID
+				}
+			}
+		}
+	}
+	if req != nil {
+		if correlation := strings.TrimSpace(req.Header.Get("X-Correlation-Id")); correlation != "" {
+			return "op_failed_" + strings.TrimPrefix(correlation, "corr_")
+		}
+	}
+	return fmt.Sprintf("op_failed_%d", time.Now().UTC().UnixNano())
+}
+
+func safeWritebackOpID(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || value == "." || value == ".." || strings.ContainsAny(value, `/\`) {
+		return ""
+	}
+	return value
+}
+
+func writebackRetriesExhausted(status, attempts int) bool {
+	if status == http.StatusTooManyRequests || (status >= 500 && status <= 599) {
+		return attempts >= writebackMaxHTTPAttempts
+	}
+	return true
+}
+
+func writeDeadLetterWriteback(localDir string, sample writebackFailureSample, attempts int) error {
+	opID := safeWritebackOpID(sample.OpID)
+	if strings.TrimSpace(localDir) == "" || opID == "" {
+		return nil
+	}
+	record := struct {
+		OpID       string `json:"opId"`
+		Path       string `json:"path"`
+		Attempts   int    `json:"attempts"`
+		LastStatus int    `json:"lastStatus"`
+		LastBody   string `json:"lastBody"`
+		Timestamp  string `json:"ts"`
+	}{
+		OpID:       opID,
+		Path:       sample.Path,
+		Attempts:   attempts,
+		LastStatus: sample.Status,
+		LastBody:   sample.Body,
+		Timestamp:  time.Now().UTC().Format(time.RFC3339),
+	}
+	payload, err := json.MarshalIndent(record, "", "  ")
+	if err != nil {
+		return err
+	}
+	payload = append(payload, '\n')
+	dir := deadLetterDirFor(localDir)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	return writeFileAtomically(filepath.Join(dir, opID+".json"), payload, 0o644)
 }
 
 func relayfileTokenNeedsRefresh(token string) bool {

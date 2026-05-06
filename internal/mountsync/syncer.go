@@ -493,6 +493,7 @@ type publicState struct {
 	PendingWriteback          int                        `json:"pendingWriteback"`
 	PendingConflicts          int                        `json:"pendingConflicts"`
 	DeniedPaths               int                        `json:"deniedPaths"`
+	FailedWritebacks          uint64                     `json:"failedWritebacks,omitempty"`
 	LastError                 *statusError               `json:"lastError,omitempty"`
 	Files                     map[string]publicFileState `json:"files,omitempty"`
 }
@@ -2052,6 +2053,7 @@ func (s *Syncer) savePublicState() error {
 	if err != nil {
 		return err
 	}
+	failedWritebacks := s.readPublicFailedWritebacks()
 	deniedPaths := 0
 	pendingWriteback := 0
 	files := make(map[string]publicFileState, len(s.state.Files))
@@ -2145,6 +2147,7 @@ func (s *Syncer) savePublicState() error {
 		PendingWriteback:          pendingWriteback,
 		PendingConflicts:          pendingConflicts,
 		DeniedPaths:               deniedPaths,
+		FailedWritebacks:          failedWritebacks,
 		LastError:                 s.state.LastError,
 		Files:                     files,
 	}
@@ -2156,6 +2159,20 @@ func (s *Syncer) savePublicState() error {
 		return err
 	}
 	return writeFileAtomic(s.publicStatePath, publicBytes, 0o644)
+}
+
+func (s *Syncer) readPublicFailedWritebacks() uint64 {
+	payload, err := os.ReadFile(s.publicStatePath)
+	if err != nil {
+		return 0
+	}
+	var current struct {
+		FailedWritebacks uint64 `json:"failedWritebacks"`
+	}
+	if err := json.Unmarshal(payload, &current); err != nil {
+		return 0
+	}
+	return current.FailedWritebacks
 }
 
 func (s *Syncer) listConflictArtifacts() (map[string]int, int, error) {
