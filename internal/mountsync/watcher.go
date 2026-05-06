@@ -38,20 +38,7 @@ func NewFileWatcher(localDir string, onChange func(string, fsnotify.Op)) (*FileW
 // Skips .git, .relay, node_modules.
 func (fw *FileWatcher) Start(ctx context.Context) error {
 	// Walk localDir, add all dirs to watcher (fsnotify watches dirs, not files)
-	err := filepath.Walk(fw.localDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return nil // skip errors
-		}
-		if !info.IsDir() {
-			return nil
-		}
-		name := info.Name()
-		if name == ".git" || name == ".relay" || name == "node_modules" || name == ".relayfile-mount-state.json" {
-			return filepath.SkipDir
-		}
-		return fw.watcher.Add(path)
-	})
-	if err != nil {
+	if err := fw.addDirRecursive(fw.localDir); err != nil {
 		return err
 	}
 
@@ -74,11 +61,17 @@ func (fw *FileWatcher) Start(ctx context.Context) error {
 					continue
 				}
 
-				// If a new directory was created, add it to the watcher and
-				// emit synthetic create events for files already inside.
+				// If a new directory was created, recursively add it AND every
+				// subdirectory underneath to the watcher, then emit synthetic
+				// create events for files already inside. The recursive add is
+				// load-bearing: when a sync-down creates a nested tree (e.g.
+				// `notion/pages/<page>/blocks/`) in one operation, fsnotify
+				// only delivers an event for the topmost new directory. Adding
+				// only `event.Name` would leave the inner subdirs unwatched
+				// and any subsequent edits to files inside them silent.
 				if event.Op&fsnotify.Create != 0 {
 					if info, err := os.Stat(event.Name); err == nil && info.IsDir() {
-						_ = fw.watcher.Add(event.Name)
+						_ = fw.addDirRecursive(event.Name)
 						fw.emitExistingFileEvents(event.Name)
 					}
 				}
@@ -130,6 +123,31 @@ func (fw *FileWatcher) emitExistingFileEvents(base string) {
 			return nil
 		}
 		fw.queueChange(rel, fsnotify.Create)
+		return nil
+	})
+}
+
+// addDirRecursive walks `base` and adds every directory underneath it to the
+// fsnotify watcher, skipping `.git`, `.relay`, `node_modules`, and the
+// mount-state file. Used both at startup (to seed the watcher with the
+// existing tree) and at runtime (when a sync-down creates a new nested
+// directory structure that we need to start watching).
+func (fw *FileWatcher) addDirRecursive(base string) error {
+	return filepath.Walk(base, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil // skip errors; transient FS issues shouldn't kill the walk
+		}
+		if !info.IsDir() {
+			return nil
+		}
+		name := info.Name()
+		if name == ".git" || name == ".relay" || name == "node_modules" || name == ".relayfile-mount-state.json" {
+			return filepath.SkipDir
+		}
+		// Best-effort add. fsnotify returns an error for already-watched dirs
+		// on macOS/FSEvents in some cases; we ignore it because re-adding is
+		// a no-op semantically.
+		_ = fw.watcher.Add(path)
 		return nil
 	})
 }

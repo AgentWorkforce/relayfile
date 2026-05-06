@@ -262,3 +262,72 @@ func TestWatcherNewSubdirectory(t *testing.T) {
 		t.Fatalf("unexpected watcher path: %s", ev.path)
 	}
 }
+
+// TestWatcherNewNestedSubdirectoryTree pins the regression that motivated
+// the recursive add: when a sync-down (or any caller) creates a deeply
+// nested tree of new directories in one operation, fsnotify only delivers
+// a single Create event for the topmost new directory. If we add only
+// `event.Name` to the watcher, files written several levels deep in the
+// new tree never produce a Write event because the inner directories were
+// never subscribed to.
+//
+// Concrete production case: the Notion adapter mirrors a page like
+//   /notion/pages/demos--<hex>/blocks/<id>.json
+// in one MkdirAll-style operation. The bug surfaced as "agent edits the
+// file in their local mount but no writeback queues."
+func TestWatcherNewNestedSubdirectoryTree(t *testing.T) {
+	localDir := t.TempDir()
+	events, _, _ := startFileWatcher(t, localDir)
+
+	// Create three levels of new directories in one MkdirAll call. Mirrors
+	// what the sync-down does when a previously-unseen page lands.
+	deepDir := filepath.Join(localDir, "notion", "pages", "demo--abc")
+	if err := os.MkdirAll(deepDir, 0o755); err != nil {
+		t.Fatalf("create nested subdirectories: %v", err)
+	}
+	// Write a file at the bottom of the new tree. Pre-fix, this file's
+	// directory was never added to fsnotify, so no Write event fired.
+	target := filepath.Join(deepDir, "content.md")
+	if err := os.WriteFile(target, []byte("hello"), 0o644); err != nil {
+		t.Fatalf("write file in nested subdirectory: %v", err)
+	}
+
+	expected := filepath.ToSlash("notion/pages/demo--abc/content.md")
+	if _, ok := waitForWatcherEventPath(t, events, expected, 2*time.Second); !ok {
+		t.Fatalf("no watcher event for file in deeply nested new subdirectory tree")
+	}
+}
+
+// TestWatcherEditInNestedSubdirAfterSyncDown is the closest reproduction
+// of the production failure mode: a mount-daemon is running, a sync-down
+// creates a new nested tree (file already populated by the sync), and
+// then a user/agent edits the file. The edit must produce a Write event.
+func TestWatcherEditInNestedSubdirAfterSyncDown(t *testing.T) {
+	localDir := t.TempDir()
+	events, _, _ := startFileWatcher(t, localDir)
+
+	// Sync-down phase: nested tree appears, populated.
+	deepDir := filepath.Join(localDir, "notion", "pages", "demo--abc")
+	if err := os.MkdirAll(deepDir, 0o755); err != nil {
+		t.Fatalf("create nested subdirectories: %v", err)
+	}
+	target := filepath.Join(deepDir, "content.md")
+	if err := os.WriteFile(target, []byte("v1"), 0o644); err != nil {
+		t.Fatalf("seed file in nested subdirectory: %v", err)
+	}
+	// Drain any initial Create-side events so we can isolate the next Write.
+	expected := filepath.ToSlash("notion/pages/demo--abc/content.md")
+	_, _ = waitForWatcherEventPath(t, events, expected, 2*time.Second)
+
+	// Edit phase: user/agent overwrites the file.
+	if err := os.WriteFile(target, []byte("v2 — edited"), 0o644); err != nil {
+		t.Fatalf("edit file in nested subdirectory: %v", err)
+	}
+
+	// Must observe at least one event for the edited path. fsnotify can
+	// deliver this as Write or Create depending on platform/editor; either
+	// is fine — the point is that the watcher saw it.
+	if _, ok := waitForWatcherEventPath(t, events, expected, 2*time.Second); !ok {
+		t.Fatalf("no watcher event for edit in nested subdirectory created at runtime")
+	}
+}
