@@ -5,6 +5,13 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 
+const args = process.argv.slice(2);
+if (args[0] === "--version") {
+  const { version } = require("../package.json");
+  process.stdout.write(`${version}\n`);
+  process.exit(0);
+}
+
 const PLATFORM_MAP = {
   darwin: "darwin",
   linux: "linux",
@@ -44,7 +51,7 @@ if (!binPath) {
   process.exit(1);
 }
 
-const result = spawnSync(binPath, process.argv.slice(2), {
+const result = spawnSync(binPath, args, {
   stdio: "inherit",
 });
 
