@@ -771,6 +771,33 @@ func TestStatusIncludesLocalMirrorAndDaemonCounts(t *testing.T) {
 	}
 }
 
+func TestRestartRequiresRecordedLocalMirror(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	if err := saveWorkspaceCatalog(workspaceCatalog{
+		Default: "demo",
+		Workspaces: []workspaceRecord{{
+			Name:       "demo",
+			ID:         "ws_demo",
+			CreatedAt:  now,
+			LastUsedAt: now,
+		}},
+	}); err != nil {
+		t.Fatalf("saveWorkspaceCatalog failed: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	err := runRestart([]string{"demo"}, &stdout)
+	if err == nil {
+		t.Fatalf("expected restart to fail without a recorded local mirror")
+	}
+	if !strings.Contains(err.Error(), "no recorded local mirror directory") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestLogsPrintsTailForWorkspace(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)

@@ -140,6 +140,50 @@ func TestA14StopReportsErrorWhenNoDaemonRunning(t *testing.T) {
 	}
 }
 
+func TestRestartClearsStaleDaemonPID(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	localDir := t.TempDir()
+	if err := ensureMirrorLayout(localDir); err != nil {
+		t.Fatalf("ensureMirrorLayout failed: %v", err)
+	}
+	if _, err := upsertWorkspaceDetails(workspaceRecord{
+		Name:       "demo",
+		ID:         "ws_demo",
+		LocalDir:   localDir,
+		CreatedAt:  time.Now().UTC().Format(time.RFC3339),
+		LastUsedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("upsertWorkspaceDetails failed: %v", err)
+	}
+	if err := writeDaemonPIDState(mountPIDFile(localDir), daemonPIDState{
+		PID:         1 << 30,
+		WorkspaceID: "ws_demo",
+		LocalDir:    localDir,
+	}); err != nil {
+		t.Fatalf("writeDaemonPIDState failed: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	err := runRestart([]string{"demo"}, &stdout)
+	if err == nil {
+		t.Fatalf("expected restart to reach mount and fail without credentials")
+	}
+	if !strings.Contains(err.Error(), "token is required") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if strings.Contains(stdout.String(), "Stopped background mount") {
+		t.Fatalf("restart reported stop success for stale pid: %q", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "Cleared stale background mount state") {
+		t.Fatalf("restart did not report stale pid cleanup: %q", stdout.String())
+	}
+	if _, err := os.Stat(mountPIDFile(localDir)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected stale pid file to be removed, got err=%v", err)
+	}
+}
+
 // TestA2RunCloudLoginReturnsStateMismatchSentinel exercises productized
 // cloud-mount contract A2: when the OAuth callback's `state` parameter does
 // not match the value the CLI generated, runCloudLogin must return the

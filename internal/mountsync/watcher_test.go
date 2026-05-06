@@ -83,6 +83,23 @@ func assertNoWatcherEvents(t *testing.T, events <-chan watcherEvent, timeout tim
 	}
 }
 
+func TestWatcherCloseCancelsPendingDebounce(t *testing.T) {
+	localDir := t.TempDir()
+	events := make(chan watcherEvent, 1)
+	watcher, err := NewFileWatcher(localDir, func(relativePath string, op fsnotify.Op) {
+		events <- watcherEvent{path: filepath.ToSlash(relativePath), op: op}
+	})
+	if err != nil {
+		t.Fatalf("create file watcher: %v", err)
+	}
+
+	watcher.queueChange("notes.md", fsnotify.Write)
+	if err := watcher.Close(); err != nil {
+		t.Fatalf("close watcher: %v", err)
+	}
+	assertNoWatcherEvents(t, events, 150*time.Millisecond)
+}
+
 func TestWatcherDetectsFileWrite(t *testing.T) {
 	localDir := t.TempDir()
 	target := filepath.Join(localDir, "notes.md")
@@ -272,7 +289,9 @@ func TestWatcherNewSubdirectory(t *testing.T) {
 // never subscribed to.
 //
 // Concrete production case: the Notion adapter mirrors a page like
-//   /notion/pages/demos--<hex>/blocks/<id>.json
+//
+//	/notion/pages/demos--<hex>/blocks/<id>.json
+//
 // in one MkdirAll-style operation. The bug surfaced as "agent edits the
 // file in their local mount but no writeback queues."
 func TestWatcherNewNestedSubdirectoryTree(t *testing.T) {

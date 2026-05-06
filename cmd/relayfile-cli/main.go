@@ -340,8 +340,13 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		return runWriteback(args[1:], stdout)
 	case "pull":
 		return runPull(args[1:], stdout)
-	case "mount":
+	case "mount", "start":
+		// `start` is the friendlier alias for `mount`. Same flags, same
+		// behavior — `mount` retains the historical name; `start` pairs
+		// naturally with `stop` and `restart`.
 		return runMount(args[1:])
+	case "restart":
+		return runRestart(args[1:], stdout)
 	case "tree", "ls":
 		return runTree(args[1:], stdout)
 	case "read", "cat":
@@ -387,12 +392,14 @@ Usage:
   relayfile writeback retry --opId OP [WORKSPACE]
   relayfile pull [--workspace NAME] [--provider PROVIDER] [--reason TEXT]
   relayfile mount [WORKSPACE] [LOCAL_DIR]
+  relayfile start [WORKSPACE] [LOCAL_DIR]            (alias for mount)
+  relayfile stop [WORKSPACE]
+  relayfile restart [WORKSPACE] [--foreground]
   relayfile tree [WORKSPACE] [PATH] [--depth N]
   relayfile read [WORKSPACE] PATH
   relayfile seed [WORKSPACE] [DIR]
   relayfile export [WORKSPACE] --format FORMAT [--output FILE]
   relayfile status [WORKSPACE]
-  relayfile stop [WORKSPACE]
   relayfile logs [WORKSPACE]
   relayfile observer [WORKSPACE] [--no-open]
 
@@ -409,12 +416,14 @@ Subcommands:
               Re-enqueue a local dead-lettered writeback op
   pull        Trigger an immediate sync refresh for one or all providers
   mount       Mirror a remote workspace to a local directory; add --background to detach
+  start       Alias for mount; pairs naturally with stop and restart
+  stop        Stop a background mount
+  restart     Stop and start a workspace's mount in one step (--foreground to attach)
   tree        List a remote workspace path
   read        Print a remote file's content
   seed        Upload a directory tree with bulk writes
   export      Export a workspace as json, tar, or patch
   status      Show sync status and local mirror state for a workspace
-  stop        Stop a background mount
   logs        Print the background mount log
   observer    Open the hosted file observer for a workspace`)
 }
@@ -2959,6 +2968,131 @@ func runStop(args []string, stdout io.Writer) error {
 	}
 	fmt.Fprintf(stdout, "Stopped background mount for %s (pid %d)\n", record.Name, pid)
 	return nil
+}
+
+// runRestart stops a running daemon (if any) and starts a fresh background
+// mount using the workspace's recorded localDir. This is the operationally
+// correct way to recover from a stalled daemon: the new daemon's initial
+// recursive walk re-subscribes to every directory in the mirror, which is
+// what the watcher needs after a sync-down created new nested subtrees
+// (see watcher.go addDirRecursive).
+//
+// Forwarded flags: any flag accepted by `mount` can be passed after the
+// workspace name and is propagated to the start phase. The restart always
+// runs in `--background` mode (the natural default for a long-running
+// mount); pass `--foreground` to override and run attached.
+func runRestart(args []string, stdout io.Writer) error {
+	fs := flag.NewFlagSet("restart", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	foreground := fs.Bool("foreground", false, "run the restarted mount in the foreground instead of detaching")
+	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
+		"foreground": false,
+	})); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			fmt.Fprintln(stdout, "usage: relayfile restart [WORKSPACE] [--foreground]")
+			return nil
+		}
+		return err
+	}
+	if fs.NArg() > 1 {
+		return errors.New("usage: relayfile restart [WORKSPACE] [--foreground]")
+	}
+
+	record, err := resolveWorkspaceRecord(firstArg(fs))
+	if err != nil {
+		return err
+	}
+	// Reject workspaces that have no recorded local mirror — passing an
+	// empty positional `localDir` to runMount would cause it to fall back
+	// to `"."` and mirror into the caller's current working directory.
+	localDir := strings.TrimSpace(record.LocalDir)
+	if localDir == "" {
+		return fmt.Errorf(
+			"workspace %s has no recorded local mirror directory; run "+
+				"`relayfile start %s <LOCAL_DIR>` first to register one",
+			record.Name, record.Name,
+		)
+	}
+
+	// Stop the current daemon if it's running. Tolerate "not running" so
+	// `restart` works as a safe "ensure running" verb. If the signal fails
+	// because the process is already gone (stale pid file), clean up and
+	// proceed; any other failure aborts the restart so we don't race a
+	// second daemon against the first on the same pid file.
+	if pid := readDaemonPID(localDir); pid != 0 {
+		process, perr := os.FindProcess(pid)
+		if perr != nil {
+			return fmt.Errorf("failed to find background mount for %s (pid %d): %w", record.Name, pid, perr)
+		}
+		if serr := signalDaemonStop(process); serr != nil {
+			if isProcessAlreadyGone(serr) {
+				if rerr := os.Remove(mountPIDFile(localDir)); rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
+					return fmt.Errorf("failed to clear stale background mount state for %s (pid %d): %w", record.Name, pid, rerr)
+				}
+				fmt.Fprintf(stdout, "Cleared stale background mount state for %s (pid %d)\n", record.Name, pid)
+			} else {
+				return fmt.Errorf("failed to stop background mount for %s (pid %d): %w", record.Name, pid, serr)
+			}
+		} else {
+			fmt.Fprintf(stdout, "Stopped background mount for %s (pid %d)\n", record.Name, pid)
+			// Wait for the old daemon to actually release its pid file. A
+			// fixed sleep is fragile: if the old process takes longer to
+			// exit, its `defer os.Remove(pidFile)` would race the new
+			// daemon's pid write and silently delete it, leaving `status`,
+			// `stop`, and a later `restart` reporting "no daemon" against a
+			// process that was, in fact, running.
+			if werr := waitForDaemonExit(localDir, pid, 5*time.Second); werr != nil {
+				return fmt.Errorf("old daemon (pid %d) for %s did not exit cleanly: %w", pid, record.Name, werr)
+			}
+		}
+	}
+
+	// Start the new daemon. Default is --background; --foreground overrides.
+	mountArgs := []string{record.Name, localDir}
+	if !*foreground {
+		mountArgs = append(mountArgs, "--background")
+	}
+	return runMount(mountArgs)
+}
+
+// isProcessAlreadyGone reports whether a signal-delivery failure means the
+// target process has already exited. Treats both `os.ErrProcessDone` (the
+// modern Go check) and `syscall.ESRCH` (raw signal failure) as "gone".
+func isProcessAlreadyGone(err error) bool {
+	return errors.Is(err, os.ErrProcessDone) || errors.Is(err, syscall.ESRCH)
+}
+
+// waitForDaemonExit polls the pid file and the process itself, returning
+// nil once both have gone away. The pid-file check covers the clean-exit
+// case (the daemon's `defer os.Remove(pidFile)` runs). The process check
+// covers the case where the pid file lingers — for example if the daemon
+// was SIGKILL'd by something else after we sent SIGTERM.
+//
+// Returns an error only if the deadline is reached with the daemon still
+// alive AND the pid file still pointing at it. The default deadline (5s)
+// is generous: a healthy daemon shuts down in <100ms on every platform.
+func waitForDaemonExit(localDir string, oldPid int, timeout time.Duration) error {
+	const pollInterval = 50 * time.Millisecond
+	deadline := time.Now().Add(timeout)
+	for {
+		pidNow := readDaemonPID(localDir)
+		// Pid file gone, or it's been claimed by a different pid (which
+		// shouldn't happen mid-restart but is harmless if it does).
+		if pidNow == 0 || pidNow != oldPid {
+			return nil
+		}
+		// Process check: signal 0 reports liveness without delivering anything.
+		if process, perr := os.FindProcess(oldPid); perr == nil {
+			if serr := process.Signal(syscall.Signal(0)); serr != nil {
+				// Signal 0 failed — process is gone even if the pid file lingered.
+				return nil
+			}
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("daemon still alive after %s", timeout)
+		}
+		time.Sleep(pollInterval)
+	}
 }
 
 func runLogs(args []string, stdout io.Writer) error {
