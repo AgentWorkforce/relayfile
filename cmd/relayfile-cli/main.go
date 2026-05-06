@@ -3002,34 +3002,48 @@ func runRestart(args []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
+	// Reject workspaces that have no recorded local mirror — passing an
+	// empty positional `localDir` to runMount would cause it to fall back
+	// to `"."` and mirror into the caller's current working directory.
 	localDir := strings.TrimSpace(record.LocalDir)
 	if localDir == "" {
-		return fmt.Errorf("workspace %s has no recorded local mirror directory; run relayfile start %s <LOCAL_DIR>", record.Name, record.Name)
+		return fmt.Errorf(
+			"workspace %s has no recorded local mirror directory; run "+
+				"`relayfile start %s <LOCAL_DIR>` first to register one",
+			record.Name, record.Name,
+		)
 	}
 
 	// Stop the current daemon if it's running. Tolerate "not running" so
-	// `restart` works as a safe "ensure running" verb.
+	// `restart` works as a safe "ensure running" verb. If the signal fails
+	// because the process is already gone (stale pid file), clean up and
+	// proceed; any other failure aborts the restart so we don't race a
+	// second daemon against the first on the same pid file.
 	if pid := readDaemonPID(localDir); pid != 0 {
-		process, err := os.FindProcess(pid)
-		if err != nil {
-			return fmt.Errorf("failed to find background mount for %s (pid %d): %w", record.Name, pid, err)
+		process, perr := os.FindProcess(pid)
+		if perr != nil {
+			return fmt.Errorf("failed to find background mount for %s (pid %d): %w", record.Name, pid, perr)
 		}
-		if err := signalDaemonStop(process); err != nil {
-			if isProcessAlreadyGone(err) {
+		if serr := signalDaemonStop(process); serr != nil {
+			if isProcessAlreadyGone(serr) {
 				if rerr := os.Remove(mountPIDFile(localDir)); rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
 					return fmt.Errorf("failed to clear stale background mount state for %s (pid %d): %w", record.Name, pid, rerr)
 				}
 				fmt.Fprintf(stdout, "Cleared stale background mount state for %s (pid %d)\n", record.Name, pid)
 			} else {
-				return fmt.Errorf("failed to stop background mount for %s (pid %d): %w", record.Name, pid, err)
+				return fmt.Errorf("failed to stop background mount for %s (pid %d): %w", record.Name, pid, serr)
 			}
 		} else {
 			fmt.Fprintf(stdout, "Stopped background mount for %s (pid %d)\n", record.Name, pid)
-			// Give the process a brief moment to release pid/log files before
-			// the new daemon claims them. 500ms is enough on every platform we
-			// support; the existing daemon shuts down on SIGTERM in well under
-			// 100ms in practice.
-			time.Sleep(500 * time.Millisecond)
+			// Wait for the old daemon to actually release its pid file. A
+			// fixed sleep is fragile: if the old process takes longer to
+			// exit, its `defer os.Remove(pidFile)` would race the new
+			// daemon's pid write and silently delete it, leaving `status`,
+			// `stop`, and a later `restart` reporting "no daemon" against a
+			// process that was, in fact, running.
+			if werr := waitForDaemonExit(localDir, pid, 5*time.Second); werr != nil {
+				return fmt.Errorf("old daemon (pid %d) for %s did not exit cleanly: %w", pid, record.Name, werr)
+			}
 		}
 	}
 
@@ -3041,8 +3055,44 @@ func runRestart(args []string, stdout io.Writer) error {
 	return runMount(mountArgs)
 }
 
+// isProcessAlreadyGone reports whether a signal-delivery failure means the
+// target process has already exited. Treats both `os.ErrProcessDone` (the
+// modern Go check) and `syscall.ESRCH` (raw signal failure) as "gone".
 func isProcessAlreadyGone(err error) bool {
 	return errors.Is(err, os.ErrProcessDone) || errors.Is(err, syscall.ESRCH)
+}
+
+// waitForDaemonExit polls the pid file and the process itself, returning
+// nil once both have gone away. The pid-file check covers the clean-exit
+// case (the daemon's `defer os.Remove(pidFile)` runs). The process check
+// covers the case where the pid file lingers — for example if the daemon
+// was SIGKILL'd by something else after we sent SIGTERM.
+//
+// Returns an error only if the deadline is reached with the daemon still
+// alive AND the pid file still pointing at it. The default deadline (5s)
+// is generous: a healthy daemon shuts down in <100ms on every platform.
+func waitForDaemonExit(localDir string, oldPid int, timeout time.Duration) error {
+	const pollInterval = 50 * time.Millisecond
+	deadline := time.Now().Add(timeout)
+	for {
+		pidNow := readDaemonPID(localDir)
+		// Pid file gone, or it's been claimed by a different pid (which
+		// shouldn't happen mid-restart but is harmless if it does).
+		if pidNow == 0 || pidNow != oldPid {
+			return nil
+		}
+		// Process check: signal 0 reports liveness without delivering anything.
+		if process, perr := os.FindProcess(oldPid); perr == nil {
+			if serr := process.Signal(syscall.Signal(0)); serr != nil {
+				// Signal 0 failed — process is gone even if the pid file lingered.
+				return nil
+			}
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("daemon still alive after %s", timeout)
+		}
+		time.Sleep(pollInterval)
+	}
 }
 
 func runLogs(args []string, stdout io.Writer) error {
