@@ -626,6 +626,29 @@ func (s *Syncer) Reconcile(ctx context.Context) error {
 	return s.sync(ctx, true)
 }
 
+// HandleLocalChange routes a local filesystem event to the appropriate
+// writeback action.
+//
+// Routing is state-driven (does the file exist on disk?) rather than
+// op-driven (what flag did fsnotify deliver?). This is load-bearing on
+// macOS and behind several editors that perform atomic save-via-rename
+// or end a save with a Chmod:
+//
+//   - Vim, VSCode, JetBrains, and similar editors typically emit
+//     Write → Rename → Chmod or just Rename → Chmod. With per-path
+//     debouncing in queueChange, only the *last* op survives the 100ms
+//     window. If we routed by op alone, a save ending in Chmod would
+//     hit the no-op Chmod branch and silently never queue a writeback.
+//
+//   - An atomic rename-replace leaves the file present on disk. Routing
+//     a Rename op to `pushSingleDelete` would wrongly delete the cloud
+//     file even though the user just *saved* it.
+//
+// Instead: stat the local path, and dispatch by whether the file still
+// exists. The downstream handlers (`handleLocalWriteOrCreate`,
+// `pushSingleDelete`) hash-check internally and short-circuit if there
+// is no actual content change, so spurious events (Chmod-only on an
+// unmodified file) do not generate noise on the wire.
 func (s *Syncer) HandleLocalChange(ctx context.Context, relativePath string, op fsnotify.Op) error {
 	relativePath = filepath.ToSlash(strings.TrimSpace(filepath.Clean(relativePath)))
 	if relativePath == "" || relativePath == "." {
@@ -644,10 +667,6 @@ func (s *Syncer) HandleLocalChange(ctx context.Context, relativePath string, op 
 	}
 	localPath := filepath.Join(s.localDir, filepath.FromSlash(relativePath))
 
-	if info, statErr := os.Stat(localPath); statErr == nil && info.IsDir() {
-		return nil
-	}
-
 	saveWithStatus := func(run func() error) error {
 		if err := run(); err != nil {
 			s.markSyncError(err)
@@ -658,14 +677,27 @@ func (s *Syncer) HandleLocalChange(ctx context.Context, relativePath string, op 
 		return s.saveState()
 	}
 
-	switch {
-	case op&(fsnotify.Write|fsnotify.Create) != 0:
-		return saveWithStatus(func() error {
-			return s.handleLocalWriteOrCreate(ctx, remotePath, localPath)
-		})
-	case op&(fsnotify.Remove|fsnotify.Rename) != 0:
+	info, statErr := os.Stat(localPath)
+	if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
+		return statErr
+	}
+	fileExists := statErr == nil && !info.IsDir()
+	isDir := statErr == nil && info.IsDir()
+
+	if isDir {
+		return nil
+	}
+
+	if !fileExists {
+		// File is gone. If we tracked it (i.e. it once lived in the cloud),
+		// push the delete. If it never existed cloud-side, ignore — the
+		// event is from a transient file (e.g. an editor backup) we do not
+		// own. ReadOnly tracked files are reverted, not deleted.
 		tracked, exists := s.state.Files[remotePath]
-		if exists && tracked.ReadOnly {
+		if !exists {
+			return nil
+		}
+		if tracked.ReadOnly {
 			return saveWithStatus(func() error {
 				return s.revertReadonlyFile(ctx, remotePath, localPath, tracked, "")
 			})
@@ -673,17 +705,16 @@ func (s *Syncer) HandleLocalChange(ctx context.Context, relativePath string, op 
 		return saveWithStatus(func() error {
 			return s.pushSingleDelete(ctx, remotePath, localPath)
 		})
-	case op&fsnotify.Chmod != 0:
-		tracked, exists := s.state.Files[remotePath]
-		if exists && tracked.ReadOnly {
-			if err := s.applyLocalPermissions(localPath, false); err != nil && !errors.Is(err, os.ErrNotExist) {
-				s.markSyncError(err)
-				_ = s.saveState()
-				return err
-			}
-		}
 	}
-	return nil
+
+	// File exists. Treat any non-directory event as a potential update —
+	// `handleLocalWriteOrCreate` reads the file, hash-checks against the
+	// tracked snapshot, and short-circuits if nothing actually changed.
+	// This handles Write/Create/Rename(atomic-replace)/Chmod uniformly:
+	// the source of truth is the file's content, not the event flag.
+	return saveWithStatus(func() error {
+		return s.handleLocalWriteOrCreate(ctx, remotePath, localPath)
+	})
 }
 
 func (s *Syncer) handleLocalWriteOrCreate(ctx context.Context, remotePath, localPath string) error {
