@@ -1,4 +1,4 @@
-# Relay by Agent Relay: integration filesystem for agents
+# File by Agent Relay: integration filesystem for agents
 
 Turn files into the integration surface for agents.
 
