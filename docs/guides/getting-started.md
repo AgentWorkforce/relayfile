@@ -15,6 +15,7 @@ This starts relayfile on `http://localhost:9090`, relayauth on `http://localhost
 TOKEN="$(docker compose logs seed | awk '/token/ {print $NF}' | tail -1)"
 
 curl -H "Authorization: Bearer $TOKEN" \
+  -H "X-Correlation-Id: quickstart-tree" \
   "http://localhost:9090/v1/workspaces/ws_demo/fs/tree?path=/"
 ```
 
@@ -32,16 +33,22 @@ Your agent can now read and write files under `./relayfile-mount`.
 
 ## Run The Server Directly
 
-For local development without Docker:
+For local development without Docker, start the local token issuer:
+
+```bash
+node docker/relayauth/server.js
+```
+
+In another terminal, start relayfile:
 
 ```bash
 RELAYFILE_BACKEND_PROFILE=durable-local \
 RELAYFILE_DATA_DIR=.data \
-RELAYFILE_JWT_SECRET=dev-secret \
+RELAYAUTH_JWKS_URL=http://127.0.0.1:9091/.well-known/jwks.json \
 go run ./cmd/relayfile
 ```
 
-In another terminal:
+In a third terminal:
 
 ```bash
 export RELAYFILE_WORKSPACE=ws_demo

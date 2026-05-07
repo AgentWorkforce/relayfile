@@ -2,7 +2,11 @@ const http = require("node:http");
 const crypto = require("node:crypto");
 
 const PORT = 9091;
-const SECRET = process.env.RELAYFILE_JWT_SECRET || "dev-secret";
+const KEY_ID = process.env.RELAYAUTH_KEY_ID || "dev-relayauth-key";
+const { privateKey, publicKey } = crypto.generateKeyPairSync("rsa", {
+  modulusLength: 2048,
+});
+const jwk = publicKey.export({ format: "jwk" });
 
 function b64url(buf) {
   return Buffer.from(buf)
@@ -13,11 +17,12 @@ function b64url(buf) {
 }
 
 function sign(payload) {
-  const header = b64url(JSON.stringify({ alg: "HS256", typ: "JWT" }));
+  const header = b64url(JSON.stringify({ alg: "RS256", typ: "JWT", kid: KEY_ID }));
   const body = b64url(JSON.stringify(payload));
-  const sig = b64url(
-    crypto.createHmac("sha256", SECRET).update(`${header}.${body}`).digest()
-  );
+  const signer = crypto.createSign("RSA-SHA256");
+  signer.update(`${header}.${body}`);
+  signer.end();
+  const sig = b64url(signer.sign(privateKey));
   return `${header}.${body}.${sig}`;
 }
 
@@ -25,6 +30,15 @@ const server = http.createServer((req, res) => {
   if (req.method === "GET" && req.url === "/health") {
     res.writeHead(200, { "Content-Type": "application/json" });
     return res.end('{"status":"ok"}');
+  }
+
+  if (req.method === "GET" && req.url === "/.well-known/jwks.json") {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    return res.end(
+      JSON.stringify({
+        keys: [{ ...jwk, kid: KEY_ID, alg: "RS256", use: "sig" }],
+      })
+    );
   }
 
   if (req.method === "POST" && req.url === "/sign") {

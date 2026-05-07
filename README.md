@@ -27,9 +27,11 @@ Try the local API:
 TOKEN="$(docker compose logs seed | awk '/token/ {print $NF}' | tail -1)"
 
 curl -H "Authorization: Bearer $TOKEN" \
+  -H "X-Correlation-Id: quickstart-tree" \
   "http://localhost:9090/v1/workspaces/ws_demo/fs/tree?path=/"
 
 curl -H "Authorization: Bearer $TOKEN" \
+  -H "X-Correlation-Id: quickstart-read" \
   "http://localhost:9090/v1/workspaces/ws_demo/fs/file?path=/docs/welcome.md"
 ```
 
@@ -47,14 +49,22 @@ Now any local tool or agent can use `./relayfile-mount` like a normal directory.
 
 ## Local Development Without Docker
 
+Start the local token issuer:
+
+```bash
+node docker/relayauth/server.js
+```
+
+In another terminal, start relayfile:
+
 ```bash
 RELAYFILE_BACKEND_PROFILE=durable-local \
 RELAYFILE_DATA_DIR=.data \
-RELAYFILE_JWT_SECRET=dev-secret \
+RELAYAUTH_JWKS_URL=http://127.0.0.1:9091/.well-known/jwks.json \
 go run ./cmd/relayfile
 ```
 
-In another terminal:
+In a third terminal:
 
 ```bash
 export RELAYFILE_WORKSPACE=ws_demo

@@ -8,7 +8,7 @@ services:
     environment:
       RELAYFILE_ADDR: :8080
       RELAYFILE_BACKEND_PROFILE: memory
-      RELAYFILE_JWT_SECRET: ${RELAYFILE_JWT_SECRET:-dev-secret}
+      RELAYAUTH_JWKS_URL: http://relayauth:9091/.well-known/jwks.json
       RELAYFILE_INTERNAL_HMAC_SECRET: ${RELAYFILE_INTERNAL_HMAC_SECRET:-dev-internal-secret}
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8080/health"]
