@@ -97,9 +97,12 @@ func (fw *FileWatcher) Start(ctx context.Context) error {
 func (fw *FileWatcher) shouldSkip(rel string) bool {
 	parts := strings.SplitN(rel, string(os.PathSeparator), 2)
 	first := parts[0]
-	// Match the state file itself plus its writeFileAtomic temp variants
-	// (e.g. ".relayfile-mount-state.json.tmp-12345").
-	if strings.HasPrefix(first, ".relayfile-mount-state.json") {
+	// Match the state file itself and only its writeFileAtomic temp
+	// variants (e.g. ".relayfile-mount-state.json.tmp-12345"). A broader
+	// HasPrefix would silently swallow legitimate sibling files like
+	// ".relayfile-mount-state.json.backup" — those should sync normally.
+	if first == ".relayfile-mount-state.json" ||
+		strings.HasPrefix(first, ".relayfile-mount-state.json.tmp-") {
 		return true
 	}
 	return first == ".git" || first == ".relay" || first == "node_modules" ||

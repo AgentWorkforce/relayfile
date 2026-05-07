@@ -2739,18 +2739,28 @@ func waitWithContext(ctx context.Context, delay time.Duration) error {
 	}
 }
 
-func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
-	dir := filepath.Dir(path)
-	// Hide the temp by ensuring it starts with a single dot. Without this
-	// guard, a dot-prefixed target (e.g. .relayfile-mount-state.json) would
-	// get a "." prepended a second time and produce a temp like
-	// "..relayfile-mount-state.json.tmp-N", which the file watcher does not
-	// recognize as ours and racily picks up before the rename completes.
+// atomicTempPattern returns the pattern writeFileAtomic passes to
+// os.CreateTemp for a given target path. Extracted so the temp-naming
+// contract can be unit-tested directly — by the time writeFileAtomic
+// returns, the temp file has already been renamed or removed, so an
+// after-the-fact ReadDir cannot observe it.
+//
+// The pattern always produces a hidden temp (single-dot prefix), even
+// when the target itself is hidden. Pre-fix, this function double-
+// prefixed dot-leading targets and produced
+// "..relayfile-mount-state.json.tmp-*", which the file watcher's
+// shouldSkip didn't recognize as internal.
+func atomicTempPattern(path string) string {
 	base := filepath.Base(path)
 	if !strings.HasPrefix(base, ".") {
 		base = "." + base
 	}
-	tmpFile, err := os.CreateTemp(dir, base+".tmp-*")
+	return base + ".tmp-*"
+}
+
+func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
+	dir := filepath.Dir(path)
+	tmpFile, err := os.CreateTemp(dir, atomicTempPattern(path))
 	if err != nil {
 		return err
 	}

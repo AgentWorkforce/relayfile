@@ -230,6 +230,26 @@ func TestWatcherSkipsMountStateTempFiles(t *testing.T) {
 	assertNoWatcherEvents(t, events, 300*time.Millisecond)
 }
 
+// TestWatcherDoesNotSkipMountStateSiblings pins that the narrow skip
+// matches only the state file and its ".tmp-" variants — siblings that
+// merely share the prefix (e.g. a user-created
+// ".relayfile-mount-state.json.backup") still produce events and sync
+// like any other mount file.
+func TestWatcherDoesNotSkipMountStateSiblings(t *testing.T) {
+	localDir := t.TempDir()
+	events, _, _ := startFileWatcher(t, localDir)
+
+	sibling := filepath.Join(localDir, ".relayfile-mount-state.json.backup")
+	if err := os.WriteFile(sibling, []byte("{}"), 0o644); err != nil {
+		t.Fatalf("write sibling file: %v", err)
+	}
+
+	expected := filepath.ToSlash(".relayfile-mount-state.json.backup")
+	if _, ok := waitForWatcherEventPath(t, events, expected, time.Second); !ok {
+		t.Fatalf("expected an event for the .backup sibling; the skip is too broad")
+	}
+}
+
 func TestWatcherSkipsRelayDir(t *testing.T) {
 	localDir := t.TempDir()
 	events, _, _ := startFileWatcher(t, localDir)
