@@ -523,6 +523,83 @@ describe("RelayFileSync", () => {
     }
   });
 
+  it("forces recovery when a ws error fires with no successor close", async () => {
+    // Bug A (cortical-demo): some WebSocket implementations — notably Node's
+    // built-in WebSocket on auth-rejected upgrades, and proxies that abruptly
+    // RST after the handshake — emit `error` and then never deliver the
+    // matching `close`. Pre-fix, the dispatcher would emit the error and then
+    // sit idle forever (no reconnect, no polling). The error handler now arms
+    // a short grace timer; if no close arrives, it forces the same recovery
+    // path the close handler would have taken.
+    const sockets: MockWebSocket[] = [];
+    const sync = new RelayFileSync({
+      client: makeClient(),
+      workspaceId: "ws_acme",
+      baseUrl: "https://relay.test",
+      token: "ws_token",
+      reconnect: { minDelayMs: 5, maxDelayMs: 5 },
+      webSocketFactory: (url) => {
+        const socket = new MockWebSocket(url);
+        sockets.push(socket);
+        return socket;
+      }
+    });
+
+    const errors: unknown[] = [];
+    sync.on("error", (err) => errors.push(err));
+    sync.start();
+    expect(sockets).toHaveLength(1);
+
+    sockets[0]!.emit("open", {});
+    // Emit error WITHOUT a follow-up close — the failure mode the bug
+    // report reproduces. The grace window is 250ms so wait a touch longer.
+    sockets[0]!.emit("error", { type: "error" });
+    expect(errors).toHaveLength(1);
+
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    // After the grace window expires the SDK must have torn down socket[0]
+    // and opened a replacement (or, if reconnect were disabled, dropped to
+    // polling). With reconnect enabled the assertion is "second socket
+    // exists" — i.e. recovery happened.
+    expect(sockets.length).toBeGreaterThanOrEqual(2);
+
+    await sync.stop();
+  });
+
+  it("does NOT double-recover when a normal close follows the ws error", async () => {
+    // Companion to the above: when the error IS followed by a close (the
+    // well-behaved path), the close handler must clear the grace timer so
+    // we end up with a single replacement socket, not two.
+    const sockets: MockWebSocket[] = [];
+    const sync = new RelayFileSync({
+      client: makeClient(),
+      workspaceId: "ws_acme",
+      baseUrl: "https://relay.test",
+      token: "ws_token",
+      reconnect: { minDelayMs: 5, maxDelayMs: 5 },
+      webSocketFactory: (url) => {
+        const socket = new MockWebSocket(url);
+        sockets.push(socket);
+        return socket;
+      }
+    });
+
+    sync.start();
+    sockets[0]!.emit("open", {});
+    sockets[0]!.emit("error", { type: "error" });
+    // Close arrives before the grace timer fires.
+    sockets[0]!.emit("close", { code: 1006, reason: "dropped" });
+
+    // Wait long enough that the grace timer (250ms) would have fired AND
+    // the reconnect backoff (5ms) has already produced socket[1].
+    await new Promise((resolve) => setTimeout(resolve, 300));
+
+    // Exactly one replacement, not two — the grace timer was cleared.
+    expect(sockets).toHaveLength(2);
+
+    await sync.stop();
+  });
+
   it("reconnects after an unexpected close", async () => {
     const sockets: MockWebSocket[] = [];
     const sync = new RelayFileSync({

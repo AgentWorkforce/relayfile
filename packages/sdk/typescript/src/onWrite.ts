@@ -209,15 +209,31 @@ class OnWriteDispatcher {
 
     // Token resolution order:
     //  1. options.token (literal or factory) — back-compat for callers that
-    //     mint their own auth.
-    //  2. RELAYFILE_TOKEN env var.
-    //  3. fall through to undefined → RelayFileSync auto-derives from
-    //     `client.getToken()` (the recommended path; same JWT as REST).
-    // (Bug 1 fix: previously, omitting `token` here passed `undefined` and
-    // the WS handshake silently failed with no auth, dropping us into
-    // backwards-walking polling forever.)
-    const token: RelayFileSyncTokenProvider | undefined =
-      options.token ?? readEnv("RELAYFILE_TOKEN") ?? undefined;
+    //     mint their own auth out-of-band.
+    //  2. fall through to undefined → RelayFileSync auto-derives from
+    //     `client.getToken()` on every (re)connect. This is the recommended
+    //     path: it is the same JWT the REST surface is using AND it is
+    //     re-resolved on every reconnect, so an expired/rotated token gets
+    //     refreshed automatically by whatever provider the client wraps
+    //     (e.g. WorkspaceHandle's getOrRefreshToken).
+    //
+    // Bug 5: previously this fell through to a `readEnv("RELAYFILE_TOKEN")`
+    // literal when the caller omitted `options.token`. That env value is
+    // captured once at workspace-join time (e.g. by
+    // `WorkspaceHandle.mountEnv()`) and never refreshed, so it expires
+    // ~1 hour later and the WS upgrade then fails with an auth error
+    // (visible only as a JS-layer "ws error" with no successor close,
+    // leaving the dispatcher stalled forever). The env literal also
+    // shadowed the auto-derive fix from PR #96 whenever a caller happened
+    // to have RELAYFILE_TOKEN set in their environment, which is the
+    // common case for any workspace started via mountEnv. Auto-derive must
+    // win over the env literal whenever a client is available.
+    //
+    // The default-client path (constructed by `getDefaultClient()` when
+    // `options.client` is omitted) already wires RELAYFILE_TOKEN into the
+    // client's tokenProvider, so callers that depend on the env-only flow
+    // continue to work — `client.getToken()` returns the env value.
+    const token: RelayFileSyncTokenProvider | undefined = options.token;
 
     this.sync = RelayFileSync.connect({
       client: this.client,
