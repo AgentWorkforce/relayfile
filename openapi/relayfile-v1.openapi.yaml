@@ -18,6 +18,7 @@ servers:
     description: Staging
 tags:
   - name: Filesystem
+  - name: Forks
   - name: Events
   - name: Operations
   - name: Sync
@@ -79,13 +80,14 @@ paths:
           schema:
             type: integer
             minimum: 1
-            maximum: 10
-            default: 2
+            maximum: 100
+            default: 10
         - name: cursor
           in: query
           required: false
           schema:
             type: string
+        - $ref: '#/components/parameters/ForkId'
       responses:
         '200':
           description: Tree listing
@@ -149,6 +151,7 @@ paths:
       parameters:
         - $ref: '#/components/parameters/WorkspaceId'
         - $ref: '#/components/parameters/CorrelationId'
+        - $ref: '#/components/parameters/ForkId'
       requestBody:
         required: true
         content:
@@ -187,6 +190,7 @@ paths:
       parameters:
         - $ref: '#/components/parameters/WorkspaceId'
         - $ref: '#/components/parameters/CorrelationId'
+        - $ref: '#/components/parameters/ForkId'
         - name: format
           in: query
           required: false
@@ -241,6 +245,7 @@ paths:
           schema:
             type: string
             pattern: '^/.*'
+        - $ref: '#/components/parameters/ForkId'
       responses:
         '200':
           description: File read success
@@ -284,6 +289,7 @@ paths:
           schema:
             type: string
             pattern: '^/.*'
+        - $ref: '#/components/parameters/ForkId'
       requestBody:
         required: true
         content:
@@ -335,6 +341,7 @@ paths:
           schema:
             type: string
             pattern: '^/.*'
+        - $ref: '#/components/parameters/ForkId'
       responses:
         '202':
           description: Delete accepted and queued for provider write-back
@@ -467,6 +474,7 @@ paths:
             minimum: 1
             maximum: 1000
             default: 100
+        - $ref: '#/components/parameters/ForkId'
       responses:
         '200':
           description: Matching files page
@@ -480,6 +488,156 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /v1/workspaces/{workspaceId}/forks:
+    post:
+      tags: [Forks]
+      operationId: createFork
+      summary: Create a fork (isolated copy) of the workspace for staged proposals
+      description: |
+        Creates a fork of the workspace state that can be read and written
+        independently without affecting the main workspace. Fork writes are
+        committed atomically via the commit endpoint or discarded entirely.
+
+        An optional `proposalId` may be supplied to make fork creation
+        idempotent: a second call with the same `proposalId` returns 409 instead
+        of creating a duplicate. An optional `ttlSeconds` controls how long the
+        fork lives before it expires (server default applies when omitted).
+      security:
+        - BearerAuth: [fs:write]
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                proposalId:
+                  type: string
+                  description: Idempotency key — reusing the same value returns 409 if a fork already exists for this proposal.
+                ttlSeconds:
+                  type: integer
+                  format: int64
+                  minimum: 0
+                  description: Fork lifetime in seconds. Omit to use the server default.
+      responses:
+        '200':
+          description: Fork created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ForkHandle'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: A fork for this proposalId already exists
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /v1/workspaces/{workspaceId}/forks/{forkId}:
+    delete:
+      tags: [Forks]
+      operationId: discardFork
+      summary: Discard a fork and all staged changes
+      description: |
+        Permanently deletes the fork and all files staged within it.
+        This action is irreversible. Use when a proposal is rejected or
+        no longer needed.
+      security:
+        - BearerAuth: [fs:write]
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/CorrelationId'
+        - name: forkId
+          in: path
+          required: true
+          schema:
+            type: string
+            minLength: 1
+      responses:
+        '204':
+          description: Fork discarded
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /v1/workspaces/{workspaceId}/forks/{forkId}/commit:
+    post:
+      tags: [Forks]
+      operationId: commitFork
+      summary: Commit staged fork changes into the main workspace
+      description: |
+        Atomically merges all files staged in the fork into the main workspace.
+        Each file in the fork is permission-checked against the caller's JWT
+        claims (path scope and permission policy) before the commit proceeds.
+
+        Returns a conflict if any parent directory was moved since the fork was
+        created (`parent_moved`), or 410 Gone if the fork has expired.
+      security:
+        - BearerAuth: [fs:write]
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/CorrelationId'
+        - name: forkId
+          in: path
+          required: true
+          schema:
+            type: string
+            minLength: 1
+      responses:
+        '200':
+          description: Fork committed successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ForkCommitResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Commit denied by path scope or permission policy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Conflict — a parent directory was moved since the fork was created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ForkCommitConflictResponse'
+        '410':
+          description: Fork has expired and can no longer be committed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         '429':
           $ref: '#/components/responses/RateLimited'
         '500':
@@ -1423,6 +1581,16 @@ components:
         type: string
         minLength: 8
         maxLength: 128
+    ForkId:
+      name: forkId
+      in: query
+      required: false
+      description: |
+        When provided, operations read from or write to this fork rather than
+        the main workspace. Obtain a forkId by calling `POST /forks`.
+      schema:
+        type: string
+        minLength: 1
     IfMatch:
       name: If-Match
       in: header
@@ -1503,6 +1671,12 @@ components:
             $ref: '#/components/schemas/ErrorResponse'
     InternalError:
       description: Internal server error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Gone:
+      description: Resource has expired and is no longer available
       content:
         application/json:
           schema:
@@ -2514,6 +2688,55 @@ components:
             $ref: '#/components/schemas/BulkWriteError'
         correlationId:
           type: string
+
+    ForkHandle:
+      type: object
+      additionalProperties: false
+      required: [forkId, proposalId, workspaceId, expiresAt, parentRevision]
+      properties:
+        forkId:
+          type: string
+          description: Unique identifier for this fork. Pass as the `forkId` query parameter on filesystem endpoints.
+        proposalId:
+          type: string
+          description: Idempotency key supplied at creation time (empty string if none was provided).
+        workspaceId:
+          type: string
+        expiresAt:
+          type: string
+          format: date-time
+          description: UTC time after which the fork expires and can no longer be committed.
+        parentRevision:
+          type: string
+          description: Workspace revision at the time the fork was created.
+
+    ForkCommitResponse:
+      type: object
+      additionalProperties: false
+      required: [revision, writtenCount, deletedCount]
+      properties:
+        revision:
+          type: string
+          description: New workspace revision after the commit.
+        writtenCount:
+          type: integer
+          minimum: 0
+          description: Number of files written to the workspace.
+        deletedCount:
+          type: integer
+          minimum: 0
+          description: Number of files deleted from the workspace.
+
+    ForkCommitConflictResponse:
+      allOf:
+        - $ref: '#/components/schemas/ErrorResponse'
+        - type: object
+          additionalProperties: false
+          required: [currentRevision]
+          properties:
+            currentRevision:
+              type: string
+              description: Current revision of the moved parent directory.
 
     ConflictErrorResponse:
       allOf:

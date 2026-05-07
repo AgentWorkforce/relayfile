@@ -167,3 +167,16 @@ Your trajectory helps others understand:
 
 Future agents can query past trajectories to learn from your decisions.
 <!-- prpm:snippet:end @agent-workforce/trail-snippet@1.1.2 -->
+
+# OpenAPI Spec
+
+`openapi/relayfile-v1.openapi.yaml` is the authoritative HTTP contract for this service.
+
+Keep it in sync with `internal/httpapi/server.go` at all times:
+
+- Adding a handler → add the path entry to the spec.
+- Adding a query parameter → add it to the endpoint or to `components/parameters`.
+- Adding a request/response field → update `components/schemas`.
+- Adding a new status code → add it to the endpoint's `responses` map.
+
+After server changes, run `scripts/check-contract-surface.sh` to check for drift.
