@@ -230,6 +230,8 @@ export class RelayFileSync {
 
   private state: RelayFileSyncState = "idle";
   private cursor?: string;
+  private readonly polledEventIds: Set<string> = new Set();
+  private readonly polledEventOrder: string[] = [];
   private firstPollComplete = false;
   private socket?: RelayFileSyncSocket;
   private started = false;
@@ -380,11 +382,7 @@ export class RelayFileSync {
     // `token: await client.tokenProvider()` through every onWrite() call.
     // client.getToken is always async (returns a Promise), so we land on
     // the slow path here. That's fine: the WS open is async anyway.
-    const client = this.client as RelayFileClient & { getToken?: () => Promise<string | undefined> };
-    if (typeof client.getToken === "function") {
-      return client.getToken();
-    }
-    return undefined;
+    return this.client.getToken();
   }
 
   private openWebSocket(isReconnect: boolean): void {
@@ -563,8 +561,18 @@ export class RelayFileSync {
             signal: this.signal
           });
           const events = response.events ?? [];
-          if (this.firstPollComplete) {
-            pending.push(...events);
+          if (!this.firstPollComplete) {
+            for (const event of events) {
+              this.rememberPolledEvent(event.eventId);
+            }
+          } else {
+            for (const event of events) {
+              if (!event.eventId || this.polledEventIds.has(event.eventId)) {
+                continue;
+              }
+              this.rememberPolledEvent(event.eventId);
+              pending.push(event);
+            }
           }
           const nextCursor = response.nextCursor || null;
           if (events.length > 0) {
@@ -587,7 +595,6 @@ export class RelayFileSync {
             this.emit("event", event);
           }
         }
-         await this.sleep(this.pollIntervalMs);
         await this.sleep(this.pollIntervalMs);
       } catch (error) {
         if (this.isAbortError(error)) {
@@ -597,6 +604,20 @@ export class RelayFileSync {
         this.emit("error", error instanceof Error ? error : new Error("Polling failed."));
         const delayMs = this.computeReconnectDelayMs(retryAttempt);
         await this.sleep(delayMs);
+      }
+    }
+  }
+
+  private rememberPolledEvent(eventId: string | undefined): void {
+    if (!eventId || this.polledEventIds.has(eventId)) {
+      return;
+    }
+    this.polledEventIds.add(eventId);
+    this.polledEventOrder.push(eventId);
+    while (this.polledEventOrder.length > POLLING_DEDUPE_CACHE_LIMIT) {
+      const evicted = this.polledEventOrder.shift();
+      if (evicted) {
+        this.polledEventIds.delete(evicted);
       }
     }
   }
