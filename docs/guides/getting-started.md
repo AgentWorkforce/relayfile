@@ -1,178 +1,114 @@
-# Getting Started With RelayFile
+# Getting Started
 
-RelayFile gives multiple machines and agents a shared workspace-backed filesystem. A common flow is:
+Relayfile gives agents a file tree instead of an API surface. Start locally, seed files, mount them, and let the agent use normal filesystem tools.
 
-1. Start a RelayFile server locally or point the CLI at a hosted deployment.
-2. Log in and create a workspace.
-3. Seed the workspace from an existing project.
-4. Mount that workspace on one or more machines.
-5. Watch edits propagate through the shared tree.
+This repo is the file server and mount layer. For the rest of the ecosystem, see [relayfile-adapters](https://github.com/AgentWorkforce/relayfile-adapters) (`../relayfile-adapters` locally) for path mapping, webhook normalization, and writeback behavior, and [relayfile-providers](https://github.com/AgentWorkforce/relayfile-providers) (`../relayfile-providers` locally) for provider auth, API proxying, subscriptions, and connection health.
 
-## Prerequisites
-
-- For local development, install Go so you can run `go run ./cmd/relayfile`.
-- For hosted usage, you only need the RelayFile CLI plus a server URL and token.
-- If you want to mount the same workspace on multiple machines, each machine needs network access to the same RelayFile server.
-
-RelayFile works in two common modes:
-
-- local development: run the server from this repository with Go
-- hosted usage: point the CLI at a shared RelayFile deployment and skip the local server step
-
-## Start The Server Locally
-
-Run the API server from the repository root:
+## Local OSS Quickstart
 
 ```bash
-go run ./cmd/relayfile
+cd docker
+docker compose up --build
 ```
 
-By default the service listens on `http://127.0.0.1:8080`.
+This starts relayfile on `http://localhost:9090`, relayauth on `http://localhost:9091`, and creates a sample workspace named `ws_demo`.
 
-If you want durable local state instead of in-memory state, use:
+```bash
+TOKEN="$(docker compose logs seed | awk '/token/ {print $NF}' | tail -1)"
+
+curl -H "Authorization: Bearer $TOKEN" \
+  -H "X-Correlation-Id: quickstart-tree" \
+  "http://localhost:9090/v1/workspaces/ws_demo/fs/tree?path=/"
+```
+
+Mount the workspace:
+
+```bash
+cd ..
+RELAYFILE_TOKEN="$TOKEN" go run ./cmd/relayfile-mount \
+  --base-url http://localhost:9090 \
+  --workspace ws_demo \
+  --local-dir ./relayfile-mount
+```
+
+Your agent can now read and write files under `./relayfile-mount`.
+
+## Run The Server Directly
+
+For local development without Docker, start the local token issuer:
+
+```bash
+node docker/relayauth/server.js
+```
+
+In another terminal, start relayfile:
 
 ```bash
 RELAYFILE_BACKEND_PROFILE=durable-local \
 RELAYFILE_DATA_DIR=.data \
+RELAYAUTH_JWKS_URL=http://127.0.0.1:9091/.well-known/jwks.json \
 go run ./cmd/relayfile
 ```
 
-If you are using a hosted deployment instead, skip this step and replace `http://127.0.0.1:8080` in the examples below with your hosted server URL.
-
-## Log In And Create A Workspace
-
-Log in once so the CLI can store the server URL and token:
+In a third terminal:
 
 ```bash
-relayfile login --server http://127.0.0.1:8080 --token dev-token
+export RELAYFILE_WORKSPACE=ws_demo
+export RELAYFILE_TOKEN="$(./scripts/generate-dev-token.sh "$RELAYFILE_WORKSPACE")"
+
+go run ./cmd/relayfile-cli login \
+  --server http://127.0.0.1:8080 \
+  --token "$RELAYFILE_TOKEN"
+
+go run ./cmd/relayfile-cli seed "$RELAYFILE_WORKSPACE" ./examples
+go run ./cmd/relayfile-cli tree "$RELAYFILE_WORKSPACE" /
+go run ./cmd/relayfile-cli mount "$RELAYFILE_WORKSPACE" ./relayfile-mount
 ```
 
-Create a workspace for the project you want to sync:
+## Common Local Commands
 
 ```bash
-relayfile workspace create my-project
-relayfile workspace use my-project
+# Read remote tree and files without mounting
+go run ./cmd/relayfile-cli tree ws_demo /
+go run ./cmd/relayfile-cli read ws_demo /docs/welcome.md
+
+# One-shot sync for CI
+go run ./cmd/relayfile-cli mount ws_demo ./relayfile-mount --once
+
+# Export a workspace
+go run ./cmd/relayfile-cli export ws_demo --format tar --output ws_demo.tar
 ```
 
-List available workspaces:
+## Hosted Provider Files
+
+If the user wants Notion, Slack, Linear, GitHub, or other provider-backed files without running infrastructure, use hosted Agent Relay. Agent Relay Cloud runs the workspace, relayfile API, scoped auth, Nango OAuth, sync workers, and writeback workers.
+
+Use the hosted setup skill from [AgentWorkforce/skills#28](https://github.com/AgentWorkforce/skills/pull/28):
 
 ```bash
-relayfile workspace list
+relayfile setup \
+  --provider notion \
+  --workspace my-agent \
+  --local-dir ./relayfile-mount \
+  --no-open
 ```
 
-If your environment already assigns you a workspace ID, you can use that directly instead of creating one:
+That path connects to `agentrelay.com`, completes provider auth, waits for sync, and mounts provider files locally for the agent. The local directory is only the agent's file interface; the integration stack is hosted.
 
-```bash
-relayfile workspace use ws_123
-```
+## Fully Self-Hosted Provider Files
 
-`RELAYFILE_WORKSPACE=ws_123` also overrides the stored default for scripts and agent sessions.
+Relayfile alone is the VFS API. For provider-backed files end to end, self-host:
 
-If you are using a hosted deployment, the same login flow works with your hosted base URL:
+- relayfile
+- relayauth or another JWT issuer compatible with relayfile scopes
+- the [adapters](https://github.com/AgentWorkforce/relayfile-adapters) and [providers](https://github.com/AgentWorkforce/relayfile-providers) you need
+- Nango, if you want OAuth-backed provider sync/writeback without using hosted Agent Relay
 
-```bash
-relayfile login --server https://api.relayfile.dev --token YOUR_TOKEN
-```
-
-Open the hosted observer for the selected workspace:
-
-```bash
-relayfile observer
-```
-
-## Seed Files From A Project
-
-Upload an existing local directory into the workspace:
-
-```bash
-relayfile seed my-project ./src
-```
-
-Useful variants:
-
-```bash
-relayfile seed my-project .
-relayfile seed my-project ./src --exclude node_modules --exclude .git
-relayfile seed my-project ./src --dry-run
-```
-
-`seed` is the fastest way to populate a workspace before collaborators or agents mount it.
-
-## Mount On Two Machines
-
-After seeding, mount the same workspace on each machine that should participate.
-
-Machine A:
-
-```bash
-relayfile mount my-project ./src
-```
-
-Machine B:
-
-```bash
-relayfile mount my-project ./src
-```
-
-Both mounts point at the same remote workspace. RelayFile continuously syncs changes between the local directory and the server-backed virtual tree.
-
-If you want a one-shot sync instead of a long-running mount:
-
-```bash
-relayfile mount my-project ./src --once
-```
-
-## Watch Files Sync
-
-With both mounts running:
-
-1. Edit `./src/README.md` on Machine A.
-2. Save the file.
-3. Wait for the next sync cycle.
-4. The updated file appears on Machine B.
-
-With the default polling interval, changes usually arrive in about 1-2 seconds.
-
-If you want to watch the workspace status while testing:
-
-```bash
-relayfile status
-```
-
-The synced mirror also writes a machine-readable local status file at
-`<mount>/.relay/state.json`. That file is the authoritative local surface for:
-
-- sync freshness (`status`, `lastSuccessfulReconcileAt`, `staleAfter`)
-- pending local writeback (`pendingWriteback`, per-file `status`)
-- unresolved conflicts under `<mount>/.relay/conflicts/`
-- denied paths and the append-only `<mount>/.relay/permissions-denied.log`
-
-Binary files are materialized as raw bytes locally and written back with
-`encoding: "base64"` when needed. Large writes that the server rejects stay on
-disk locally and remain visible as `status: "writeback-pending"` in
-`.relay/state.json`; they are never silently dropped. Remote deletes stay
-per-file and only remove the local mirror when the tracked remote revision still
-matches.
-
-For direct VFS inspection without mounting:
-
-```bash
-relayfile tree / --depth 2
-relayfile tree /github --depth 5 --json
-relayfile read /github/repos/acme/api/pulls/42/metadata.json
-relayfile read /external/blob.bin --output blob.bin
-```
-
-For low-level API testing, you can also inspect the event feed directly:
-
-```bash
-curl -sS \
-  -H "Authorization: Bearer dev-token" \
-  "http://127.0.0.1:8080/v1/workspaces/my-project/fs/events?path=/&limit=20"
-```
+Keep third-party credentials in the provider layer. Relayfile should receive normalized files, webhooks, writeback operations, and `connectionId` metadata; it should not become the OAuth credential store.
 
 ## Next Steps
 
-- Collaboration patterns: [docs/guides/collaboration.md](collaboration.md)
-- Cloud workflow integration: [docs/guides/cloud-integration.md](cloud-integration.md)
-- REST contract details: [docs/api-reference.md](../api-reference.md)
+- [Cloud integration](cloud-integration.md)
+- [Agent VFS usage](agent-vfs-usage.md)
+- [API reference](../api-reference.md)
+- [Environment variables](../environment-variables.md)

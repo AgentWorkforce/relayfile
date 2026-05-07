@@ -1,98 +1,87 @@
-# RelayFile Cloud Integration
+# Cloud Integration
 
-RelayFile is the shared filesystem layer for Agent Relay cloud workflows. It gives each workflow run a workspace-backed tree that humans, automations, and cloud agents can mount at the same time.
+Hosted Agent Relay is the managed cloud path for provider-backed files. Agent Relay Cloud runs the workspace, relayfile API, scoped auth, Nango OAuth, provider sync workers, and writeback workers. The user's machine only needs a local mount when an agent or tool wants ordinary filesystem access.
 
-## How RelayFile Fits Into Cloud Workflows
+## Hosted Agent Relay
 
-A typical Agent Relay flow looks like this:
-
-1. A workflow run starts in the cloud.
-2. The orchestration layer creates or resolves a RelayFile workspace for that run.
-3. Agents mount the workspace into their sandbox snapshot.
-4. Humans can mount the same workspace locally.
-5. Everyone reads and writes the same project tree through RelayFile.
-
-This makes the filesystem a first-class workflow artifact instead of a side effect hidden inside one machine or one agent process.
-
-In practice, that means a workflow can create files once and keep them available across retries, sandbox restarts, and human review without copying artifacts between systems.
-
-## Automatic Workspace Creation Per Workflow Run
-
-Cloud orchestrators can create a fresh workspace for every workflow run so that:
-
-- each run is isolated from other runs
-- files remain attached to the run that produced them
-- replay and audit tooling can refer back to a stable workspace ID
-
-The user-facing CLI model is:
+Use the `setting-up-relayfile` skill from [AgentWorkforce/skills#28](https://github.com/AgentWorkforce/skills/pull/28) when an agent needs provider-backed files from `agentrelay.com`.
 
 ```bash
-relayfile workspace create workflow-2026-03-24-1234
-relayfile seed workflow-2026-03-24-1234 ./bootstrap
+relayfile setup \
+  --provider notion \
+  --workspace my-agent \
+  --local-dir ./relayfile-mount \
+  --no-open
 ```
 
-In hosted automation, the same lifecycle is usually driven by the control plane rather than by a human at a terminal.
+The skill covers the full hosted flow: cloud login, workspace creation, provider OAuth, initial sync, local mount verification, writeback checks, and recovery guidance. No relayfile server, relayauth service, Nango instance, adapter, or worker has to run on the user's machine.
 
-Typical control-plane sequence:
-
-1. create or resolve a workspace for the workflow run
-2. inject credentials into the sandbox
-3. start `relayfile-mount` against that workspace
-4. let agents read and write normal files under the mounted directory
-5. keep the workspace available for human inspection or downstream jobs
-
-## relayfile-mount In Sandbox Snapshots
-
-Inside a cloud sandbox, `relayfile-mount` acts as the local bridge between the sandbox filesystem and the RelayFile API.
-
-Typical sandbox mount:
+After setup, hand the agent the mount path:
 
 ```bash
-go run ./cmd/relayfile-mount \
-  --base-url https://relayfile.agent-relay.com \
-  --workspace ws_123 \
-  --remote-path / \
-  --local-dir /workspace \
-  --token "$RELAYFILE_TOKEN"
+export RELAYFILE_LOCAL_DIR="$PWD/relayfile-mount"
 ```
 
-The sandbox sees ordinary files under `/workspace`, but the source of truth is the RelayFile workspace. That means:
+The agent should read and write under `$RELAYFILE_LOCAL_DIR/<provider>/...` instead of calling provider APIs directly.
 
-- sandbox snapshots can be short-lived without losing shared files
-- agents can restart and reconnect to the same workspace
-- multiple agents can work against the same directory tree without shipping tarballs around
+## Local OSS vs Hosted Cloud
 
-## How Agents Share Files Via RelayFile
+Use local OSS for development, tests, or fully self-hosted deployments. Use hosted Agent Relay when the user wants provider-backed files to work without operating the stack.
 
-RelayFile turns file exchange into normal filesystem work:
+| Task | Local OSS | Hosted Agent Relay |
+|---|---|---|
+| Run relayfile API | user runs it | managed by Agent Relay Cloud |
+| Issue scoped relayfile tokens | user runs relayauth or compatible issuer | managed |
+| Mount files locally | `relayfile mount ws_demo ./relayfile-mount` | `relayfile setup --local-dir ./relayfile-mount` |
+| Connect Notion/Slack/Linear/GitHub | user runs provider stack | hosted OAuth flow |
+| Provider sync/writeback | user runs workers | managed |
+| Nango | user self-hosts/configures it | managed |
 
-- Agent A writes `/notes/plan.md`
-- Agent B mounts the same workspace and sees `/notes/plan.md`
-- A human reviews or edits the same file locally
-- writeback, event feeds, and operation logs preserve the sync history
+## Fully Self-Hosted Cloud-Like Setup
 
-This is especially useful for:
+To self-host the same end-to-end shape, run these pieces together:
 
-- generated code or patch files
-- logs and structured artifacts
-- prompts, plans, and handoff notes
-- exported bundles and review outputs
+- relayfile API
+- relayauth or compatible scoped JWT issuer
+- [relayfile-adapters](https://github.com/AgentWorkforce/relayfile-adapters) (`../relayfile-adapters` locally) for the systems you expose as files
+- [relayfile-providers](https://github.com/AgentWorkforce/relayfile-providers) (`../relayfile-providers` locally) for auth, API proxying, webhook subscriptions, connection health, sync, and writeback
+- Nango for OAuth-backed provider credentials and provider sync state
 
-## Shared Human And Agent Workspaces
+Relayfile should remain the VFS and operation log. Nango or an equivalent provider layer should own OAuth credentials.
 
-A practical pattern is:
+## Existing Connection IDs
 
-1. Human mounts `project-x` locally.
-2. Cloud agent mounts `project-x` inside its sandbox.
-3. Human edits requirements or reviews generated code.
-4. Agent writes implementation changes back into the same tree.
-5. Both sides see updates after the next sync cycle.
+Relayfile stores provider identity as `connectionId` metadata on files, webhook envelopes, operations, and writeback work. That lets you bring existing provider connections when the provider layer can use the ID.
 
-That avoids manual upload, download, and copy-paste loops.
+### Nango
+
+For self-hosted deployments, use the same Nango project that already contains the connection. Configure the Nango provider with the right host, secret key, and `providerConfigKey`, then link your relayfile workspace to the existing Nango `connectionId` before sync.
+
+The hosted Agent Relay CLI currently exposes a connect-session flow, not a public import command for arbitrary Nango connections. If a connection lives in a different Nango project, hosted Agent Relay cannot use it without a migration or a fresh hosted OAuth connection.
+
+Operationally, a self-hosted cloud-compatible link needs:
+
+```text
+workspace_id         relayfile workspace id
+provider             provider id, for example notion or github
+connection_id        existing Nango connection id
+provider_config_key  Nango provider config key
+metadata_json        readiness/sync metadata, if your worker uses it
+```
+
+Then trigger the provider's initial sync so relayfile receives files.
+
+### Composio
+
+Use the existing Composio connected account ID as relayfile's `connectionId`. Configure the Composio provider with your API key, verify the account with `getConnectedAccount` or `healthCheck`, and have your adapter/proxy calls use that ID for read/writeback.
+
+### Pipedream
+
+Use the existing Pipedream account ID as relayfile's `connectionId`. Configure the Pipedream provider with your Connect project credentials. Proxy calls also need the external user id, supplied through `x-pd-external-user-id`, `external_user_id`, or a resolver callback.
 
 ## Operational Notes
 
-- Use a unique workspace per workflow run when isolation matters more than continuity.
-- Reuse a long-lived workspace when a team wants a shared persistent project tree.
-- Use the sync, ops, and admin endpoints from [docs/api-reference.md](../api-reference.md) to inspect ingestion health, dead letters, and replay status.
-- For external providers, submit inbound events through `POST /v1/workspaces/{workspaceId}/webhooks/ingest` and consume outbound work through the writeback queue endpoints.
+- Use one workspace per isolated task or run.
+- Reuse a workspace when humans and agents need a shared persistent project tree.
+- Keep OAuth credentials out of relayfile. Store them in Nango, Composio, Pipedream, or your own provider layer.
+- Use [API reference](../api-reference.md) endpoints for tree reads, file writes, webhook ingestion, writeback status, and operation replay.
