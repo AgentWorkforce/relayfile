@@ -379,18 +379,17 @@ export class RelayFileSync {
   // for unauthenticated mode in tests/local-dev".
   private resolveWsTokenMaybeSync(): string | undefined | Promise<string | undefined> {
     if (this.tokenProvider) {
-      const result = this.tokenProvider();
       // Most production providers return synchronously (JWT pulled from a
       // mutable cell that a refresh task updates in the background), so the
       // sync path is the common case.
-      return result as string | Promise<string>;
+      return this.tokenProvider();
     }
     // Auto-derive from the client's tokenProvider — the same JWT the REST
     // surface is using. Bug 1 fix: callers no longer have to thread
     // `token: await client.tokenProvider()` through every onWrite() call.
     // client.getToken is always async (returns a Promise), so we land on
     // the slow path here. That's fine: the WS open is async anyway.
-    const client = this.client as RelayFileClient & { getToken?: () => Promise<string> };
+    const client = this.client as RelayFileClient & { getToken?: () => Promise<string | undefined> };
     if (typeof client.getToken === "function") {
       return client.getToken();
     }
