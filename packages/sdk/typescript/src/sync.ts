@@ -197,8 +197,22 @@ function normalizeFilesystemEvent(message: RelayFileSyncWireEvent): FilesystemEv
   };
 }
 
-function normalizeError(event: Event | ErrorEvent): Event | Error {
-  return event instanceof ErrorEvent && event.error instanceof Error ? event.error : event;
+// Exported for testing. `ErrorEvent` is a DOM/browser global that is not
+// available on every Node 22 runtime (for example Node 22.22.1), so we
+// duck-type the shape rather than referencing the global directly. Using
+// `instanceof ErrorEvent` here would throw
+// `ReferenceError: ErrorEvent is not defined` whenever the underlying
+// WebSocket emits an error event under Node.
+export function normalizeError(event: unknown): unknown {
+  if (
+    event !== null &&
+    typeof event === "object" &&
+    "error" in event &&
+    (event as { error: unknown }).error instanceof Error
+  ) {
+    return (event as { error: Error }).error;
+  }
+  return event;
 }
 
 export class RelayFileSync {
@@ -477,7 +491,7 @@ export class RelayFileSync {
         return;
       }
       debugLog("ws error", event);
-      this.emit("error", normalizeError(event));
+      this.emit("error", normalizeError(event) as Error | Event);
     });
 
     socket.addEventListener("close", (event) => {

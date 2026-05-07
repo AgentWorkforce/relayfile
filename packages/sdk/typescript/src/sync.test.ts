@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { RelayFileClient } from "./client.js";
-import { RelayFileSync } from "./sync.js";
+import { RelayFileSync, normalizeError } from "./sync.js";
 import type { FilesystemEvent } from "./types.js";
 
 class MockWebSocket {
@@ -549,5 +549,38 @@ describe("RelayFileSync", () => {
     expect(sockets).toHaveLength(2);
 
     await sync.stop();
+  });
+});
+
+describe("normalizeError", () => {
+  // Regression: under Node 22.22.1 the previous implementation referenced the
+  // browser-only `ErrorEvent` global via `instanceof`, which threw
+  // `ReferenceError: ErrorEvent is not defined` when the WebSocket emitted an
+  // error event. The duck-typed implementation must work even when no
+  // `ErrorEvent` global exists.
+  it("unwraps the inner Error from a plain ErrorEvent-shaped object without an ErrorEvent global", () => {
+    const originalErrorEvent = (globalThis as { ErrorEvent?: unknown }).ErrorEvent;
+    // Simulate the Node runtime that triggered the bug: no `ErrorEvent` global.
+    delete (globalThis as { ErrorEvent?: unknown }).ErrorEvent;
+    try {
+      const inner = new Error("boom");
+      const result = normalizeError({ type: "error", error: inner });
+      expect(result).toBe(inner);
+    } finally {
+      if (originalErrorEvent !== undefined) {
+        (globalThis as { ErrorEvent?: unknown }).ErrorEvent = originalErrorEvent;
+      }
+    }
+  });
+
+  it("returns the event unchanged when there is no wrapped Error", () => {
+    const event = { type: "error", message: "transient" };
+    expect(normalizeError(event)).toBe(event);
+  });
+
+  it("returns non-object inputs unchanged", () => {
+    expect(normalizeError(undefined)).toBeUndefined();
+    expect(normalizeError(null)).toBeNull();
+    expect(normalizeError("nope")).toBe("nope");
   });
 });
