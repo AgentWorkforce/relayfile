@@ -201,6 +201,61 @@ describe("RelayFileSync", () => {
     }
   });
 
+  // Pins CodeRabbit P1 on PR #93. The pongTimeoutMs option is documented as
+  // "how long to wait after sending a ping" — that timeout MUST be measured
+  // from `lastPingSentAt`, not from `lastFrameAt`. With ping=50, pong=200,
+  // a ping at t=50 must be allowed to remain unanswered until at least
+  // t=250 (50 + 200), not reconnect at t=200 (lastFrameAt + pongTimeoutMs).
+  it("measures pongTimeoutMs from the unanswered ping, not from the last frame", async () => {
+    vi.useFakeTimers();
+    try {
+      const sockets: MockWebSocket[] = [];
+      const sync = new RelayFileSync({
+        client: makeClient(),
+        workspaceId: "ws_acme",
+        baseUrl: "https://relay.test",
+        token: "ws_token",
+        pingIntervalMs: 50,
+        pongTimeoutMs: 200,
+        reconnect: { minDelayMs: 5, maxDelayMs: 5 },
+        webSocketFactory: (url) => {
+          const socket = new MockWebSocket(url);
+          sockets.push(socket);
+          return socket;
+        }
+      });
+
+      sync.start();
+      sockets[0]!.emit("open", {});
+
+      // First ping sent at ~t=50.
+      await vi.advanceTimersByTimeAsync(50);
+      expect(sockets[0]!.sent.length).toBe(1);
+
+      // At t=200 (50ms after open + 150ms of silence) the LEGACY logic
+      // would have measured `now - lastFrameAt = 200` against
+      // `pongTimeoutMs = 200` and tripped. The fixed logic measures from
+      // the ping at t=50: sincePing = 150 < 200 → still waiting, no
+      // reconnect.
+      await vi.advanceTimersByTimeAsync(150);
+      expect(sockets).toHaveLength(1);
+
+      // We also must NOT pile up additional pings while the first is
+      // outstanding — sent.length should still be 1.
+      expect(sockets[0]!.sent.length).toBe(1);
+
+      // At t=300 (250ms after the ping at t=50) sincePing crosses
+      // pongTimeoutMs and the watchdog trips. Add a few ms past that for
+      // the reconnect timer (delay 5ms) to actually fire.
+      await vi.advanceTimersByTimeAsync(120);
+      expect(sockets.length).toBeGreaterThanOrEqual(2);
+
+      await sync.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   // Pins Codex P2 from PR #93: forceReconnect (watchdog or failed-ping path)
   // swaps in a fresh socket BEFORE the OS-layer close event for the doomed
   // socket actually fires. If the close handler treated that stale event as

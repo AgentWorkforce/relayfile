@@ -480,12 +480,26 @@ export class RelayFileSync {
 
   private startPingLoop(socket: RelayFileSyncSocket): void {
     this.clearPingTimer();
-    // The "ping loop" doubles as the heartbeat watchdog: every tick we first
-    // check whether we have observed a frame recently, and if not we force a
-    // reconnect. This is the load-bearing fix for the silent socket-death
-    // failure mode where the server keeps broadcasting frames the JS layer
-    // never receives (e.g. NAT/LB idle drop, half-open TCP) and neither
-    // `error` nor `close` ever fires.
+    // The "ping loop" doubles as the heartbeat watchdog. The contract for
+    // pongTimeoutMs is "how long to wait, after sending a ping, before
+    // assuming the socket is dead." So the timeout window must be measured
+    // from `lastPingSentAt` — the moment we sent the unanswered ping — not
+    // from the last inbound frame. (CodeRabbit P1 on PR #93: with
+    // pingIntervalMs=30_000 + pongTimeoutMs=45_000, measuring from
+    // lastFrameAt would reconnect at t=60s — only 30s after the first
+    // ping went out, which violates the documented "wait 45s after a
+    // ping" semantics.)
+    //
+    // An unanswered ping = `lastPingSentAt > lastFrameAt`. Any inbound
+    // frame (event OR pong) advances lastFrameAt past lastPingSentAt and
+    // proves the socket is alive. While a ping is unanswered we DO NOT
+    // pile up another — that would just race the timeout window and make
+    // tuning meaningless.
+    //
+    // Load-bearing for the silent socket-death failure mode where the
+    // server keeps broadcasting frames the JS layer never receives (e.g.
+    // NAT/LB idle drop, half-open TCP) and neither `error` nor `close`
+    // ever fires.
     this.pingTimer = setInterval(() => {
       if (this.socket !== socket || this.stopped) {
         this.clearPingTimer();
@@ -493,19 +507,22 @@ export class RelayFileSync {
       }
 
       const now = Date.now();
-      // Only enforce the timeout once we've sent at least one ping on this
-      // socket: the first tick has no expectation of inbound traffic yet.
-      if (this.lastPingSentAt > 0) {
-        const sinceFrame = now - this.lastFrameAt;
-        if (sinceFrame > this.pongTimeoutMs) {
+      const hasOutstandingPing = this.lastPingSentAt > this.lastFrameAt;
+
+      if (hasOutstandingPing) {
+        const sincePing = now - this.lastPingSentAt;
+        if (sincePing > this.pongTimeoutMs) {
           debugLog("watchdog tripped — forcing reconnect", {
             workspaceId: this.workspaceId,
-            sinceFrameMs: sinceFrame,
+            sincePingMs: sincePing,
             pongTimeoutMs: this.pongTimeoutMs
           });
           this.forceReconnect(socket, "heartbeat-timeout");
           return;
         }
+        // Within the timeout — still waiting for the pong/frame. Don't
+        // pile up a second ping while one is outstanding.
+        return;
       }
 
       try {
