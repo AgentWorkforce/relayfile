@@ -355,9 +355,22 @@ export class RelayFileSync {
     });
 
     socket.addEventListener("close", (event) => {
-      if (this.socket === socket) {
-        this.socket = undefined;
+      // forceReconnect (called from the watchdog or a failed ping send) nulls
+      // out this.socket and opens a replacement before the OS-layer close
+      // event for the old socket actually fires. If this handler treated a
+      // stale close as authoritative it would (a) clearPingTimer() and kill
+      // the new socket's heartbeat and (b) potentially scheduleReconnect()
+      // a second time (the timer guard would skip it most of the time, but
+      // not after the timer has already fired). Either way: don't touch
+      // shared state when the socket we're attached to is no longer current.
+      if (this.socket !== socket) {
+        debugLog("ws close (stale, ignored)", {
+          code: event?.code,
+          reason: event?.reason,
+        });
+        return;
       }
+      this.socket = undefined;
       this.clearPingTimer();
       debugLog("ws close", { code: event?.code, reason: event?.reason, stopped: this.stopped });
       this.emit("close", event);

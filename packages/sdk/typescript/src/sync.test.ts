@@ -201,6 +201,69 @@ describe("RelayFileSync", () => {
     }
   });
 
+  // Pins Codex P2 from PR #93: forceReconnect (watchdog or failed-ping path)
+  // swaps in a fresh socket BEFORE the OS-layer close event for the doomed
+  // socket actually fires. If the close handler treated that stale event as
+  // authoritative it would clearPingTimer() — killing the new socket's
+  // heartbeat — and possibly schedule another reconnect after the timer
+  // had already fired. The handler must early-return when this.socket
+  // !== socket.
+  it("ignores stale close events for sockets already replaced by forceReconnect", async () => {
+    vi.useFakeTimers();
+    try {
+      const sockets: MockWebSocket[] = [];
+      const sync = new RelayFileSync({
+        client: makeClient(),
+        workspaceId: "ws_acme",
+        baseUrl: "https://relay.test",
+        token: "ws_token",
+        pingIntervalMs: 50,
+        pongTimeoutMs: 100,
+        reconnect: { minDelayMs: 5, maxDelayMs: 5 },
+        webSocketFactory: (url) => {
+          const socket = new MockWebSocket(url);
+          sockets.push(socket);
+          return socket;
+        }
+      });
+
+      sync.start();
+      sockets[0]!.emit("open", {});
+
+      // Force the watchdog to swap in socket #2 by starving socket #0 of
+      // frames past pongTimeoutMs.
+      await vi.advanceTimersByTimeAsync(50);  // first ping sent on #0
+      await vi.advanceTimersByTimeAsync(200); // watchdog trips → socket #1 created
+      expect(sockets.length).toBeGreaterThanOrEqual(2);
+
+      // New socket comes up and is healthy.
+      sockets[1]!.emit("open", {});
+      sockets[1]!.emit("message", {
+        data: JSON.stringify({ type: "pong", ts: "2026-05-07T00:00:00Z" })
+      });
+      const stableCount = sockets.length;
+      const sentOnNewBeforeStaleClose = sockets[1]!.sent.length;
+
+      // Now the OLD socket finally emits its close — long after it was
+      // replaced. Pre-fix, this would clearPingTimer() (killing the live
+      // socket's heartbeat) and scheduleReconnect() (creating a duplicate
+      // reconnect cycle). With the guard, both side effects must be skipped.
+      sockets[0]!.emit("close", { code: 4000, reason: "ping-send-failed" });
+
+      // The next ping interval should still tick on the live socket — proof
+      // that clearPingTimer was NOT called by the stale-close handler.
+      await vi.advanceTimersByTimeAsync(60);
+      expect(sockets[1]!.sent.length).toBeGreaterThan(sentOnNewBeforeStaleClose);
+
+      // No extra reconnect was scheduled — socket count is still stable.
+      expect(sockets.length).toBe(stableCount);
+
+      await sync.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("reconnects after an unexpected close", async () => {
     const sockets: MockWebSocket[] = [];
     const sync = new RelayFileSync({
