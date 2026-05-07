@@ -2,6 +2,8 @@
 
 Relayfile gives agents a file tree instead of an API surface. Start locally, seed files, mount them, and let the agent use normal filesystem tools.
 
+This repo is the file server and mount layer. For the rest of the ecosystem, see [relayfile-adapters](https://github.com/AgentWorkforce/relayfile-adapters) (`../relayfile-adapters` locally) for path mapping, webhook normalization, and writeback behavior, and [relayfile-providers](https://github.com/AgentWorkforce/relayfile-providers) (`../relayfile-providers` locally) for provider auth, API proxying, subscriptions, and connection health.
+
 ## Local OSS Quickstart
 
 ```bash
@@ -99,7 +101,7 @@ Relayfile alone is the VFS API. For provider-backed files end to end, self-host:
 
 - relayfile
 - relayauth or another JWT issuer compatible with relayfile scopes
-- the adapters/providers you need
+- the [adapters](https://github.com/AgentWorkforce/relayfile-adapters) and [providers](https://github.com/AgentWorkforce/relayfile-providers) you need
 - Nango, if you want OAuth-backed provider sync/writeback without using hosted Agent Relay
 
 Keep third-party credentials in the provider layer. Relayfile should receive normalized files, webhooks, writeback operations, and `connectionId` metadata; it should not become the OAuth credential store.

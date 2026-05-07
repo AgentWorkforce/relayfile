@@ -43,8 +43,8 @@ To self-host the same end-to-end shape, run these pieces together:
 
 - relayfile API
 - relayauth or compatible scoped JWT issuer
-- provider adapters for the systems you expose as files
-- provider workers for sync and writeback
+- [relayfile-adapters](https://github.com/AgentWorkforce/relayfile-adapters) (`../relayfile-adapters` locally) for the systems you expose as files
+- [relayfile-providers](https://github.com/AgentWorkforce/relayfile-providers) (`../relayfile-providers` locally) for auth, API proxying, webhook subscriptions, connection health, sync, and writeback
 - Nango for OAuth-backed provider credentials and provider sync state
 
 Relayfile should remain the VFS and operation log. Nango or an equivalent provider layer should own OAuth credentials.

@@ -79,6 +79,15 @@ go run ./cmd/relayfile-cli tree "$RELAYFILE_WORKSPACE" /
 go run ./cmd/relayfile-cli mount "$RELAYFILE_WORKSPACE" ./relayfile-mount --once
 ```
 
+## Ecosystem
+
+This repo is the file server and local mount layer. The wider Agent Relay file ecosystem also includes:
+
+- [relayfile-adapters](https://github.com/AgentWorkforce/relayfile-adapters) (`../relayfile-adapters` in the local workspace): maps provider webhooks and objects into relayfile paths, normalizes events, and defines writeback behavior.
+- [relayfile-providers](https://github.com/AgentWorkforce/relayfile-providers) (`../relayfile-providers` in the local workspace): handles provider auth, token lookup, API proxying, webhook subscriptions, and connection health.
+
+Hosted Agent Relay runs these pieces for you. Fully self-hosted provider-backed files need relayfile plus the adapter and provider repos for the systems you expose.
+
 ## Hosted Agent Relay
 
 If you want Notion, Slack, Linear, GitHub, or other provider-backed files without running any infrastructure, use hosted Agent Relay. Agent Relay Cloud runs the workspace, relayfile API, scoped auth, Nango OAuth, provider sync workers, and writeback workers for you.
@@ -105,7 +114,7 @@ Use the OSS repo when you want to run the file server yourself. Use hosted Agent
 | Provider sync/writeback | self-host workers | managed |
 | Nango | self-host for end-to-end OAuth | managed |
 
-For end-to-end self-hosting of provider-backed files, run relayfile, relayauth, the relevant adapters/providers, and Nango. Relayfile itself does not store third-party OAuth credentials.
+For end-to-end self-hosting of provider-backed files, run relayfile, relayauth, the relevant [adapters](https://github.com/AgentWorkforce/relayfile-adapters), [providers](https://github.com/AgentWorkforce/relayfile-providers), and Nango. Relayfile itself does not store third-party OAuth credentials.
 
 ## Bring Existing Connections
 
@@ -130,6 +139,8 @@ Pipedream:
 
 - [Getting started](docs/guides/getting-started.md)
 - [Cloud integration](docs/guides/cloud-integration.md)
+- [Adapters](https://github.com/AgentWorkforce/relayfile-adapters)
+- [Providers](https://github.com/AgentWorkforce/relayfile-providers)
 - [API reference](docs/api-reference.md)
 - [Docker quickstart](docker/README.md)
 - [OpenAPI spec](openapi/relayfile-v1.openapi.yaml)
