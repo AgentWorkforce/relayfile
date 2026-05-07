@@ -23,6 +23,11 @@ export interface RelayFileSyncOptions {
   preferPolling?: boolean;
   pollIntervalMs?: number;
   pingIntervalMs?: number;
+  // How long to wait after sending a ping before declaring the socket "muted"
+  // and forcing a reconnect. Defaults to 2x pingIntervalMs. Catches silent
+  // socket death (NAT/LB idle drop, half-open TCP) where the OS never delivers
+  // a close/error to the JS layer but frames have stopped arriving.
+  pongTimeoutMs?: number;
   reconnect?: boolean | RelayFileSyncReconnectOptions;
   signal?: AbortSignal;
   webSocketFactory?: (url: string) => RelayFileSyncSocket;
@@ -70,6 +75,24 @@ const DEFAULT_POLL_INTERVAL_MS = 5000;
 const DEFAULT_PING_INTERVAL_MS = 30000;
 const DEFAULT_RECONNECT_MIN_DELAY_MS = 250;
 const DEFAULT_RECONNECT_MAX_DELAY_MS = 5000;
+
+const debugEnabled = ((): boolean => {
+  try {
+    const value = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.RELAYFILE_SDK_DEBUG;
+    return value === "1" || value === "true";
+  } catch {
+    return false;
+  }
+})();
+
+function debugLog(...args: unknown[]): void {
+  if (!debugEnabled) {
+    return;
+  }
+  if (typeof console !== "undefined" && typeof console.error === "function") {
+    console.error("[relayfile-sdk:sync]", ...args);
+  }
+}
 
 function normalizeReconnectOptions(
   reconnect: RelayFileSyncOptions["reconnect"]
@@ -139,6 +162,7 @@ export class RelayFileSync {
   private readonly token?: string;
   private readonly pollIntervalMs: number;
   private readonly pingIntervalMs: number;
+  private readonly pongTimeoutMs: number;
   private readonly reconnect: RelayFileSyncReconnectConfig;
   private readonly preferPolling: boolean;
   private readonly signal?: AbortSignal;
@@ -162,6 +186,13 @@ export class RelayFileSync {
   private pollingPromise?: Promise<void>;
   private reconnectTimer?: ReturnType<typeof setTimeout>;
   private pingTimer?: ReturnType<typeof setInterval>;
+  // Tracks the last time *any* WebSocket frame was received (event, pong, or
+  // otherwise). The watchdog uses this to detect silent socket death.
+  private lastFrameAt = 0;
+  // Tracks when the most recent ping was sent. We only enforce the pong
+  // timeout once a ping has actually gone out; otherwise a quiet workspace
+  // (no broadcasts and no pings yet) would falsely trip the watchdog.
+  private lastPingSentAt = 0;
   private reconnectAttempts = 0;
   private readonly abortHandler?: () => void;
 
@@ -173,6 +204,10 @@ export class RelayFileSync {
     this.cursor = options.cursor;
     this.pollIntervalMs = Math.max(1, Math.floor(options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS));
     this.pingIntervalMs = Math.max(1, Math.floor(options.pingIntervalMs ?? DEFAULT_PING_INTERVAL_MS));
+    // Default the pong timeout to 2x ping interval so a single missed pong
+    // does not cause a flap, but two consecutive misses force a reconnect.
+    const defaultPongTimeoutMs = this.pingIntervalMs * 2;
+    this.pongTimeoutMs = Math.max(1, Math.floor(options.pongTimeoutMs ?? defaultPongTimeoutMs));
     this.reconnect = normalizeReconnectOptions(options.reconnect);
     this.preferPolling = options.preferPolling ?? false;
     this.signal = options.signal;
@@ -290,8 +325,14 @@ export class RelayFileSync {
         return;
       }
       this.reconnectAttempts = 0;
+      // Reset frame/ping bookkeeping for the freshly opened socket so the
+      // watchdog has a clean baseline. lastPingSentAt=0 disables the pong
+      // timeout until we actually send our first ping.
+      this.lastFrameAt = Date.now();
+      this.lastPingSentAt = 0;
       this.setState("open");
       this.startPingLoop(socket);
+      debugLog("ws open", { workspaceId: this.workspaceId });
       this.emit("open", event);
     });
 
@@ -299,6 +340,9 @@ export class RelayFileSync {
       if (this.socket !== socket || this.stopped) {
         return;
       }
+      // Stamp lastFrameAt for *any* inbound frame so the watchdog sees both
+      // application events and pongs as proof of life.
+      this.lastFrameAt = Date.now();
       this.handleSocketMessage(event);
     });
 
@@ -306,14 +350,29 @@ export class RelayFileSync {
       if (this.socket !== socket || this.stopped) {
         return;
       }
+      debugLog("ws error", event);
       this.emit("error", normalizeError(event));
     });
 
     socket.addEventListener("close", (event) => {
-      if (this.socket === socket) {
-        this.socket = undefined;
+      // forceReconnect (called from the watchdog or a failed ping send) nulls
+      // out this.socket and opens a replacement before the OS-layer close
+      // event for the old socket actually fires. If this handler treated a
+      // stale close as authoritative it would (a) clearPingTimer() and kill
+      // the new socket's heartbeat and (b) potentially scheduleReconnect()
+      // a second time (the timer guard would skip it most of the time, but
+      // not after the timer has already fired). Either way: don't touch
+      // shared state when the socket we're attached to is no longer current.
+      if (this.socket !== socket) {
+        debugLog("ws close (stale, ignored)", {
+          code: event?.code,
+          reason: event?.reason,
+        });
+        return;
       }
+      this.socket = undefined;
       this.clearPingTimer();
+      debugLog("ws close", { code: event?.code, reason: event?.reason, stopped: this.stopped });
       this.emit("close", event);
       if (this.stopped) {
         this.setState("closed");
@@ -406,6 +465,7 @@ export class RelayFileSync {
     }
 
     if (parsed.type === "pong") {
+      debugLog("pong", { timestamp: parsed.timestamp ?? parsed.ts });
       this.emit("pong", {
         type: "pong",
         timestamp: parsed.timestamp ?? parsed.ts
@@ -413,22 +473,95 @@ export class RelayFileSync {
       return;
     }
 
-    this.emit("event", normalizeFilesystemEvent(parsed));
+    const normalized = normalizeFilesystemEvent(parsed);
+    debugLog("event", { type: normalized.type, path: normalized.path, revision: normalized.revision });
+    this.emit("event", normalized);
   }
 
   private startPingLoop(socket: RelayFileSyncSocket): void {
     this.clearPingTimer();
+    // The "ping loop" doubles as the heartbeat watchdog. The contract for
+    // pongTimeoutMs is "how long to wait, after sending a ping, before
+    // assuming the socket is dead." So the timeout window must be measured
+    // from `lastPingSentAt` — the moment we sent the unanswered ping — not
+    // from the last inbound frame. (CodeRabbit P1 on PR #93: with
+    // pingIntervalMs=30_000 + pongTimeoutMs=45_000, measuring from
+    // lastFrameAt would reconnect at t=60s — only 30s after the first
+    // ping went out, which violates the documented "wait 45s after a
+    // ping" semantics.)
+    //
+    // An unanswered ping = `lastPingSentAt > lastFrameAt`. Any inbound
+    // frame (event OR pong) advances lastFrameAt past lastPingSentAt and
+    // proves the socket is alive. While a ping is unanswered we DO NOT
+    // pile up another — that would just race the timeout window and make
+    // tuning meaningless.
+    //
+    // Load-bearing for the silent socket-death failure mode where the
+    // server keeps broadcasting frames the JS layer never receives (e.g.
+    // NAT/LB idle drop, half-open TCP) and neither `error` nor `close`
+    // ever fires.
     this.pingTimer = setInterval(() => {
       if (this.socket !== socket || this.stopped) {
         this.clearPingTimer();
         return;
       }
+
+      const now = Date.now();
+      const hasOutstandingPing = this.lastPingSentAt > this.lastFrameAt;
+
+      if (hasOutstandingPing) {
+        const sincePing = now - this.lastPingSentAt;
+        if (sincePing > this.pongTimeoutMs) {
+          debugLog("watchdog tripped — forcing reconnect", {
+            workspaceId: this.workspaceId,
+            sincePingMs: sincePing,
+            pongTimeoutMs: this.pongTimeoutMs
+          });
+          this.forceReconnect(socket, "heartbeat-timeout");
+          return;
+        }
+        // Within the timeout — still waiting for the pong/frame. Don't
+        // pile up a second ping while one is outstanding.
+        return;
+      }
+
       try {
         socket.send(JSON.stringify({ type: "ping" }));
+        this.lastPingSentAt = now;
       } catch (error) {
+        debugLog("ping send failed", error);
         this.emit("error", error instanceof Error ? error : new Error("Failed to send WebSocket ping."));
+        // A failed send strongly implies the socket is dead. Force a
+        // reconnect rather than waiting for the next tick to notice.
+        this.forceReconnect(socket, "ping-send-failed");
       }
     }, this.pingIntervalMs);
+  }
+
+  // Tear down a socket that the watchdog or a failed send has decided is
+  // dead. We close it (so any later async events from the OS layer become
+  // no-ops via the `this.socket !== socket` guards) and trigger the standard
+  // reconnect path. Catches errors from `close()` because some socket
+  // implementations throw when closing an already-broken connection.
+  private forceReconnect(socket: RelayFileSyncSocket, reason: string): void {
+    this.clearPingTimer();
+    if (this.socket === socket) {
+      this.socket = undefined;
+    }
+    try {
+      socket.close(4000, reason);
+    } catch (error) {
+      debugLog("socket.close threw during forceReconnect", error);
+    }
+    if (this.stopped) {
+      this.setState("closed");
+      return;
+    }
+    if (!this.reconnect.enabled) {
+      this.startPolling();
+      return;
+    }
+    this.scheduleReconnect();
   }
 
   private scheduleReconnect(): void {
@@ -438,6 +571,7 @@ export class RelayFileSync {
     this.reconnectAttempts += 1;
     this.setState("reconnecting");
     const delayMs = this.computeReconnectDelayMs(this.reconnectAttempts);
+    debugLog("scheduling reconnect", { attempt: this.reconnectAttempts, delayMs });
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = undefined;
       if (this.stopped) {

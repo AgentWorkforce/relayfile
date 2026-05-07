@@ -285,6 +285,47 @@ describe("onWrite", () => {
     errorSpy.mockRestore();
   });
 
+  it("keeps delivering subsequent events to the same pattern after a handler throws", async () => {
+    // Regression for the "live event drop" bug: a single throwing handler
+    // must not break the per-pattern chain. Previously, an unhandled rejection
+    // in the chained promise would cause subsequent events for the same
+    // pattern to be silently swallowed.
+    const client = makeClient();
+    const sockets: MockWebSocket[] = [];
+    const received: string[] = [];
+
+    onWrite(
+      "/linear/issues/**",
+      (event) => {
+        if (event.path.endsWith("PROJ-1")) {
+          throw new Error("first event boom");
+        }
+        received.push(event.path);
+      },
+      {
+        client,
+        workspaceId: "ws_acme",
+        token: "tok_test",
+        webSocketFactory: (url) => {
+          const socket = new MockWebSocket(url);
+          sockets.push(socket);
+          return socket;
+        }
+      }
+    );
+
+    emitFilesystemEvent(sockets[0]!, "/linear/issues/PROJ-1");
+    await flushPromises();
+    emitFilesystemEvent(sockets[0]!, "/linear/issues/PROJ-2");
+    await flushPromises();
+    emitFilesystemEvent(sockets[0]!, "/linear/issues/PROJ-3");
+    await flushPromises();
+
+    // PROJ-1 threw; PROJ-2 and PROJ-3 must still have been delivered.
+    expect(received).toEqual(["/linear/issues/PROJ-2", "/linear/issues/PROJ-3"]);
+    expect(client.recordHandlerError).toHaveBeenCalledTimes(1);
+  });
+
   it("reconnects with the 1s then 2s backoff schedule", async () => {
     vi.useFakeTimers();
     const client = makeClient();

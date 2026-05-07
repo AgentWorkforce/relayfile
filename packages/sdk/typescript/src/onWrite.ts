@@ -25,6 +25,11 @@ export interface OnWriteOptions {
   baseUrl?: string;
   token?: string;
   webSocketFactory?: (url: string) => RelayFileSyncSocket;
+  // Override the WebSocket ping/heartbeat cadence. Lower values catch silent
+  // socket death faster at the cost of slightly more chatter; the default is
+  // tuned for production (30s ping, 60s pong timeout).
+  pingIntervalMs?: number;
+  pongTimeoutMs?: number;
 }
 
 interface OnWriteRegistration {
@@ -46,6 +51,24 @@ const DEFAULT_RECONNECT_MAX_DELAY_MS = 30000;
 const dispatchers = new WeakMap<OnWriteClient, OnWriteDispatcher>();
 let nextRegistrationId = 1;
 let defaultClient: OnWriteClient | undefined;
+
+const debugEnabled = ((): boolean => {
+  try {
+    const value = (globalThis as EnvironmentLike).process?.env?.RELAYFILE_SDK_DEBUG;
+    return value === "1" || value === "true";
+  } catch {
+    return false;
+  }
+})();
+
+function debugLog(...args: unknown[]): void {
+  if (!debugEnabled) {
+    return;
+  }
+  if (typeof console !== "undefined" && typeof console.error === "function") {
+    console.error("[relayfile-sdk:onWrite]", ...args);
+  }
+}
 
 export function pathMatches(pattern: string, path: string): boolean {
   const patternSegments = normalizePattern(pattern);
@@ -103,8 +126,12 @@ export function onWrite(
     signal: options.signal,
     baseUrl: options.baseUrl,
     token: options.token,
-    webSocketFactory: options.webSocketFactory
+    webSocketFactory: options.webSocketFactory,
+    pingIntervalMs: options.pingIntervalMs,
+    pongTimeoutMs: options.pongTimeoutMs
   });
+
+  debugLog("registered", { id: registration.id, pattern: normalizedPattern, workspaceId });
 
   return () => {
     dispatcher?.unregister(registration.id);
@@ -129,7 +156,8 @@ class OnWriteDispatcher {
 
   register(
     registration: OnWriteRegistration,
-    options: Required<Pick<OnWriteOptions, "workspaceId">> & Pick<OnWriteOptions, "signal" | "baseUrl" | "token" | "webSocketFactory">
+    options: Required<Pick<OnWriteOptions, "workspaceId">> &
+      Pick<OnWriteOptions, "signal" | "baseUrl" | "token" | "webSocketFactory" | "pingIntervalMs" | "pongTimeoutMs">
   ): void {
     this.registrations.push(registration);
     if (options.signal) {
@@ -153,7 +181,10 @@ class OnWriteDispatcher {
     }
   }
 
-  private ensureSync(options: Required<Pick<OnWriteOptions, "workspaceId">> & Pick<OnWriteOptions, "baseUrl" | "token" | "webSocketFactory">): void {
+  private ensureSync(
+    options: Required<Pick<OnWriteOptions, "workspaceId">> &
+      Pick<OnWriteOptions, "baseUrl" | "token" | "webSocketFactory" | "pingIntervalMs" | "pongTimeoutMs">
+  ): void {
     if (this.sync) {
       return;
     }
@@ -168,6 +199,8 @@ class OnWriteDispatcher {
         maxDelayMs: DEFAULT_RECONNECT_MAX_DELAY_MS
       },
       webSocketFactory: options.webSocketFactory,
+      pingIntervalMs: options.pingIntervalMs,
+      pongTimeoutMs: options.pongTimeoutMs,
       onEvent: (event) => {
         void this.dispatch(event);
       }
@@ -185,10 +218,27 @@ class OnWriteDispatcher {
         continue;
       }
 
+      debugLog("dispatch", {
+        registrationId: registration.id,
+        pattern: registration.pattern,
+        path: writeEvent.path,
+        operation: writeEvent.operation
+      });
+
+      // patternChains serializes handlers per pattern. runHandler is the only
+      // thing chained here and it already swallows handler errors, so the
+      // chain itself can never reject — but we still defensively `.catch`
+      // before chaining so a future refactor of runHandler cannot silently
+      // break the chain (which is the failure mode hypothesis 3 in the bug
+      // report).
       const previous = this.patternChains.get(registration.pattern) ?? Promise.resolve();
       const next = previous
         .catch(() => undefined)
-        .then(() => this.runHandler(registration, writeEvent));
+        .then(() => this.runHandler(registration, writeEvent))
+        .catch((error) => {
+          // Belt-and-braces: should be unreachable because runHandler catches.
+          debugLog("patternChain unexpectedly rejected", { pattern: registration.pattern, error });
+        });
       this.patternChains.set(registration.pattern, next);
       void next.finally(() => {
         if (this.patternChains.get(registration.pattern) === next) {
