@@ -2741,7 +2741,16 @@ func waitWithContext(ctx context.Context, delay time.Duration) error {
 
 func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
 	dir := filepath.Dir(path)
-	tmpFile, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*")
+	// Hide the temp by ensuring it starts with a single dot. Without this
+	// guard, a dot-prefixed target (e.g. .relayfile-mount-state.json) would
+	// get a "." prepended a second time and produce a temp like
+	// "..relayfile-mount-state.json.tmp-N", which the file watcher does not
+	// recognize as ours and racily picks up before the rename completes.
+	base := filepath.Base(path)
+	if !strings.HasPrefix(base, ".") {
+		base = "." + base
+	}
+	tmpFile, err := os.CreateTemp(dir, base+".tmp-*")
 	if err != nil {
 		return err
 	}

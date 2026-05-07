@@ -206,6 +206,30 @@ func TestWatcherSkipsNodeModules(t *testing.T) {
 	assertNoWatcherEvents(t, events, 300*time.Millisecond)
 }
 
+// TestWatcherSkipsMountStateTempFiles pins the bug where writeFileAtomic
+// produced temp files like ".relayfile-mount-state.json.tmp-12345" which
+// the watcher used to NOT recognize as ours (it only matched the exact
+// state-file name). The watcher would queue an upload for the temp file,
+// race the rename, fail with ENOENT, and bubble that error out of
+// saveState — blocking websocket-event apply and writeback queueing.
+func TestWatcherSkipsMountStateTempFiles(t *testing.T) {
+	localDir := t.TempDir()
+	events, _, _ := startFileWatcher(t, localDir)
+
+	// Same temp pattern writeFileAtomic produces for the state file.
+	tmp := filepath.Join(localDir, ".relayfile-mount-state.json.tmp-12345")
+	if err := os.WriteFile(tmp, []byte("{}"), 0o644); err != nil {
+		t.Fatalf("write temp state file: %v", err)
+	}
+	// Also exercise the state file itself.
+	state := filepath.Join(localDir, ".relayfile-mount-state.json")
+	if err := os.WriteFile(state, []byte("{}"), 0o644); err != nil {
+		t.Fatalf("write state file: %v", err)
+	}
+
+	assertNoWatcherEvents(t, events, 300*time.Millisecond)
+}
+
 func TestWatcherSkipsRelayDir(t *testing.T) {
 	localDir := t.TempDir()
 	events, _, _ := startFileWatcher(t, localDir)

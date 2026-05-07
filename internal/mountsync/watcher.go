@@ -97,8 +97,13 @@ func (fw *FileWatcher) Start(ctx context.Context) error {
 func (fw *FileWatcher) shouldSkip(rel string) bool {
 	parts := strings.SplitN(rel, string(os.PathSeparator), 2)
 	first := parts[0]
+	// Match the state file itself plus its writeFileAtomic temp variants
+	// (e.g. ".relayfile-mount-state.json.tmp-12345").
+	if strings.HasPrefix(first, ".relayfile-mount-state.json") {
+		return true
+	}
 	return first == ".git" || first == ".relay" || first == "node_modules" ||
-		first == ".relayfile-mount-state.json" || first == "_PERMISSIONS.md"
+		first == "_PERMISSIONS.md"
 }
 
 func (fw *FileWatcher) queueChange(rel string, op fsnotify.Op) {

@@ -2331,6 +2331,28 @@ func TestWriteFileAtomicFailureLeavesOriginalContent(t *testing.T) {
 	}
 }
 
+// TestWriteFileAtomicHidesTempForDotPrefixedTarget pins the bug where the
+// temp filename for a dot-prefixed target was double-dot-prefixed
+// ("..relayfile-mount-state.json.tmp-N"). The watcher's exact-name skip
+// missed those temps, so it raced its own state writes.
+func TestWriteFileAtomicHidesTempForDotPrefixedTarget(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".relayfile-mount-state.json")
+	if err := writeFileAtomic(path, []byte("{}"), 0o644); err != nil {
+		t.Fatalf("atomic write failed: %v", err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("readdir: %v", err)
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if strings.HasPrefix(name, "..") {
+			t.Fatalf("temp file used a double-dot prefix: %q", name)
+		}
+	}
+}
+
 type fakeClient struct {
 	files                 map[string]RemoteFile
 	events                []FilesystemEvent
