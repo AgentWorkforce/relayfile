@@ -1,6 +1,15 @@
 import type { RelayFileClient } from "./client.js";
 import type { EventOrigin, FilesystemEvent } from "./types.js";
 
+/**
+ * WebSocket auth source for {@link RelayFileSyncOptions.token}.
+ *
+ * The function form is preferred for production: it is re-invoked on every
+ * (re)connect, so token rotation/refresh propagates without restarting the
+ * sync. The plain string form is kept for backward compatibility and tests.
+ */
+export type RelayFileSyncTokenProvider = string | (() => string | Promise<string>);
+
 export type RelayFileSyncState = "idle" | "connecting" | "open" | "polling" | "reconnecting" | "closed";
 
 export interface RelayFileSyncPong {
@@ -18,7 +27,16 @@ export interface RelayFileSyncOptions {
   client: RelayFileClient;
   workspaceId: string;
   baseUrl?: string;
-  token?: string;
+  /**
+   * WebSocket auth token. Accepts either a literal string or a (sync/async)
+   * factory. The factory form is re-invoked on every (re)connect so token
+   * rotation propagates transparently.
+   *
+   * If omitted, sync resolves the token via `client.getToken()` on each
+   * connect — i.e. the same JWT the REST methods are using. Callers should
+   * normally NOT pass this and let it inherit from the client.
+   */
+  token?: RelayFileSyncTokenProvider;
   cursor?: string;
   preferPolling?: boolean;
   pollIntervalMs?: number;
@@ -32,6 +50,14 @@ export interface RelayFileSyncOptions {
   signal?: AbortSignal;
   webSocketFactory?: (url: string) => RelayFileSyncSocket;
   onEvent?: (event: FilesystemEvent) => void;
+  /**
+   * Notification hook invoked when the sync degrades to HTTP polling because
+   * the WebSocket failed to open or was rejected by the server. Live events
+   * will be delayed by `pollIntervalMs` while in this mode. Use this to
+   * surface a UI banner or alert; the SDK also emits `console.warn` and an
+   * `error` event regardless of whether this is wired.
+   */
+  onPollingFallback?: (info: { reason: string; cause?: unknown }) => void;
 }
 
 export interface RelayFileSyncSocket {
@@ -75,6 +101,26 @@ const DEFAULT_POLL_INTERVAL_MS = 5000;
 const DEFAULT_PING_INTERVAL_MS = 30000;
 const DEFAULT_RECONNECT_MIN_DELAY_MS = 250;
 const DEFAULT_RECONNECT_MAX_DELAY_MS = 5000;
+// Cap on the dedupe cache used in polling mode. Sized large enough that no
+// realistic workspace burst can churn through it within one poll interval
+// (the events API is itself capped at ~1000 per page), small enough to keep
+// memory bounded across long-lived processes.
+const POLLING_DEDUPE_CACHE_LIMIT = 2048;
+
+function warnPollingFallback(reason: string, cause?: unknown): void {
+  // Always-on warning (NOT gated by RELAYFILE_SDK_DEBUG) because silent
+  // degradation to polling has historically masked real auth/connectivity
+  // bugs for hours at a time. Customers running the SDK in a Node service
+  // see the warning in their normal logs without any opt-in.
+  if (typeof console === "undefined" || typeof console.warn !== "function") {
+    return;
+  }
+  const detail = cause instanceof Error ? cause.message : cause !== undefined ? String(cause) : "";
+  const suffix = detail ? ` (${reason}: ${detail})` : ` (${reason})`;
+  console.warn(
+    `[relayfile-sdk] WebSocket connect failed; falling back to HTTP polling. Live events will be delayed.${suffix}`
+  );
+}
 
 const debugEnabled = ((): boolean => {
   try {
@@ -159,7 +205,10 @@ export class RelayFileSync {
   private readonly client: RelayFileClient;
   private readonly workspaceId: string;
   private readonly baseUrl?: string;
-  private readonly token?: string;
+  // Resolved on every connect attempt (string form is wrapped into a constant
+  // factory at construction time). `undefined` means "fall back to
+  // client.getToken()" — same JWT the REST methods use.
+  private readonly tokenProvider?: () => string | Promise<string>;
   private readonly pollIntervalMs: number;
   private readonly pingIntervalMs: number;
   private readonly pongTimeoutMs: number;
@@ -167,6 +216,7 @@ export class RelayFileSync {
   private readonly preferPolling: boolean;
   private readonly signal?: AbortSignal;
   private readonly webSocketFactory: (url: string) => RelayFileSyncSocket;
+  private readonly onPollingFallback?: (info: { reason: string; cause?: unknown }) => void;
   private readonly handlers: {
     [K in RelayFileSyncEventName]: Set<RelayFileSyncHandlerMap[K]>;
   } = {
@@ -180,6 +230,16 @@ export class RelayFileSync {
 
   private state: RelayFileSyncState = "idle";
   private cursor?: string;
+  // Forward-progress polling: deduplicate by eventId across polls. The events
+  // endpoint's nextCursor walks BACKWARDS through history (older events) once
+  // you start following it, so the legacy approach of "advance the cursor on
+  // every page" walks the SDK off the live edge and never returns. We instead
+  // re-query the latest events on every tick and skip ones we have already
+  // delivered. See PR #98 for the empirical evidence (1624 stale events
+  // delivered in 90s while no live events ever surfaced).
+  private readonly polledEventIds: Set<string> = new Set();
+  private readonly polledEventOrder: string[] = [];
+  private firstPollComplete = false;
   private socket?: RelayFileSyncSocket;
   private started = false;
   private stopped = false;
@@ -200,8 +260,19 @@ export class RelayFileSync {
     this.client = options.client;
     this.workspaceId = options.workspaceId;
     this.baseUrl = options.baseUrl?.replace(/\/+$/, "");
-    this.token = options.token;
+    // Normalize token into a factory. `undefined` is preserved so the open
+    // path knows to fall back to `client.getToken()` (the recommended path —
+    // the WebSocket then auto-uses the same JWT the REST API is using).
+    if (options.token === undefined) {
+      this.tokenProvider = undefined;
+    } else if (typeof options.token === "function") {
+      this.tokenProvider = options.token;
+    } else {
+      const literal = options.token;
+      this.tokenProvider = () => literal;
+    }
     this.cursor = options.cursor;
+    this.onPollingFallback = options.onPollingFallback;
     this.pollIntervalMs = Math.max(1, Math.floor(options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS));
     this.pingIntervalMs = Math.max(1, Math.floor(options.pingIntervalMs ?? DEFAULT_PING_INTERVAL_MS));
     // Default the pong timeout to 2x ping interval so a single missed pong
@@ -253,7 +324,9 @@ export class RelayFileSync {
     }
     this.started = true;
     if (this.shouldUsePolling()) {
-      this.startPolling();
+      // Caller explicitly opted into polling, or there's no baseUrl to
+      // upgrade to wss. NOT a fallback — no warn here.
+      this.startPolling("explicit");
       return;
     }
     this.openWebSocket(false);
@@ -291,10 +364,77 @@ export class RelayFileSync {
   }
 
   private shouldUsePolling(): boolean {
-    return this.preferPolling || !this.baseUrl || !this.token;
+    // Token availability is no longer required up-front — the WS opener
+    // resolves it on demand from either `options.token` (a literal/factory)
+    // or `client.getToken()`. We only force polling when the caller asked
+    // for it or there is no baseUrl to derive a wss URL from.
+    return this.preferPolling || !this.baseUrl;
+  }
+
+  // Resolve a token for the WS upgrade. Returns either a string directly
+  // (sync fast-path; preserves the synchronous "start() → factory called"
+  // contract that pre-existed Bug 1's fix) or a Promise (async slow-path;
+  // factory is invoked on the next microtask). `undefined` means "no token
+  // available — the server may still accept the upgrade if it's configured
+  // for unauthenticated mode in tests/local-dev".
+  private resolveWsTokenMaybeSync(): string | undefined | Promise<string | undefined> {
+    if (this.tokenProvider) {
+      const result = this.tokenProvider();
+      // Most production providers return synchronously (JWT pulled from a
+      // mutable cell that a refresh task updates in the background), so the
+      // sync path is the common case.
+      return result as string | Promise<string>;
+    }
+    // Auto-derive from the client's tokenProvider — the same JWT the REST
+    // surface is using. Bug 1 fix: callers no longer have to thread
+    // `token: await client.tokenProvider()` through every onWrite() call.
+    // client.getToken is always async (returns a Promise), so we land on
+    // the slow path here. That's fine: the WS open is async anyway.
+    const client = this.client as RelayFileClient & { getToken?: () => Promise<string> };
+    if (typeof client.getToken === "function") {
+      return client.getToken();
+    }
+    return undefined;
   }
 
   private openWebSocket(isReconnect: boolean): void {
+    if (this.stopped) {
+      return;
+    }
+
+    this.setState(isReconnect ? "reconnecting" : "connecting");
+
+    // Resolve a fresh token on every (re)connect attempt. This is what
+    // makes mid-session token rotation transparent: the watchdog/close
+    // handler reconnects, we re-call the factory, and the new socket comes
+    // up with the new JWT. (Bug 4: pre-fix, the token was captured once at
+    // construction and a 4001/auth close on rotation triggered an infinite
+    // reconnect loop with the stale token.)
+    let resolved: string | undefined | Promise<string | undefined>;
+    try {
+      resolved = this.resolveWsTokenMaybeSync();
+    } catch (error) {
+      this.emit("error", error instanceof Error ? error : new Error("Failed to resolve WebSocket auth token."));
+      this.startPolling("token-resolution-failed", error);
+      return;
+    }
+
+    if (resolved && typeof (resolved as Promise<string>).then === "function") {
+      // Async path. The factory call gets deferred to the next microtask.
+      (resolved as Promise<string | undefined>).then(
+        (token) => this.openWebSocketWithToken(token),
+        (error) => {
+          this.emit("error", error instanceof Error ? error : new Error("Failed to resolve WebSocket auth token."));
+          this.startPolling("token-resolution-failed", error);
+        }
+      );
+      return;
+    }
+
+    this.openWebSocketWithToken(resolved as string | undefined);
+  }
+
+  private openWebSocketWithToken(token: string | undefined): void {
     if (this.stopped) {
       return;
     }
@@ -303,18 +443,16 @@ export class RelayFileSync {
     url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
     // Pass token in query string — the server authenticates during the HTTP
     // upgrade handshake via r.URL.Query().Get("token").
-    if (this.token) {
-      url.searchParams.set("token", this.token);
+    if (token) {
+      url.searchParams.set("token", token);
     }
-
-    this.setState(isReconnect ? "reconnecting" : "connecting");
 
     let socket: RelayFileSyncSocket;
     try {
       socket = this.webSocketFactory(url.toString());
     } catch (error) {
       this.emit("error", error instanceof Error ? error : new Error("Failed to create WebSocket connection."));
-      this.startPolling();
+      this.startPolling("ws-factory-threw", error);
       return;
     }
 
@@ -379,16 +517,28 @@ export class RelayFileSync {
         return;
       }
       if (!this.reconnect.enabled) {
-        this.startPolling();
+        this.startPolling("ws-closed-no-reconnect", { code: event?.code, reason: event?.reason });
         return;
       }
       this.scheduleReconnect();
     });
   }
 
-  private startPolling(): void {
+  private startPolling(reason: string = "fallback", cause?: unknown): void {
     if (this.pollingPromise || this.stopped) {
       return;
+    }
+    // Always-on warning + structured callback whenever we drop into polling
+    // *involuntarily*. `explicit` means the caller asked for it (preferPolling
+    // or no baseUrl) and we stay quiet — anything else is a real degradation
+    // signal that previously took hours to detect.
+    if (reason !== "explicit") {
+      warnPollingFallback(reason, cause);
+      try {
+        this.onPollingFallback?.({ reason, cause });
+      } catch (error) {
+        debugLog("onPollingFallback handler threw", error);
+      }
     }
     this.setState("polling");
     this.pollingPromise = this.pollLoop().finally(() => {
@@ -406,16 +556,48 @@ export class RelayFileSync {
         throw createAbortError();
       }
       try {
+        // Forward-progress polling: do NOT pass a cursor. The events feed's
+        // nextCursor walks backwards through history, so chaining cursors
+        // marches the SDK away from the live edge until it never returns
+        // to "now" (verified empirically: 1624 events delivered in 90s,
+        // all rev <= 2960 in a workspace at rev_4729). Instead, we ask
+        // for the latest page on every tick and dedupe by eventId. The
+        // events API caps `limit` at 1000; matching that gives a wide
+        // safety margin against bursts at the configured pollIntervalMs.
         const response = await this.client.getEvents(this.workspaceId, {
-          cursor: this.cursor,
+          limit: 1000,
           signal: this.signal
         });
         retryAttempt = 0;
-        for (const event of response.events) {
-          this.emit("event", event);
-        }
-        if (response.nextCursor) {
-          this.cursor = response.nextCursor;
+        // First poll is treated as "history catch-up" — emit nothing,
+        // just seed the dedupe cache. This avoids replaying every event in
+        // the workspace to the handler at startup. Subsequent polls deliver
+        // anything not in the cache, in chronological order.
+        const events = response.events ?? [];
+        if (!this.firstPollComplete) {
+          for (const event of events) {
+            this.rememberPolledEvent(event.eventId);
+          }
+          this.firstPollComplete = true;
+        } else {
+          // Sort newest-last so handlers see the natural revision order
+          // regardless of which direction the API returns. Fall back to
+          // input order when timestamps tie.
+          const fresh = events
+            .filter((event) => event.eventId && !this.polledEventIds.has(event.eventId))
+            .slice()
+            .sort((a, b) => {
+              const ta = Date.parse(a.timestamp);
+              const tb = Date.parse(b.timestamp);
+              if (Number.isFinite(ta) && Number.isFinite(tb) && ta !== tb) {
+                return ta - tb;
+              }
+              return 0;
+            });
+          for (const event of fresh) {
+            this.rememberPolledEvent(event.eventId);
+            this.emit("event", event);
+          }
         }
         await this.sleep(this.pollIntervalMs);
       } catch (error) {
@@ -426,6 +608,20 @@ export class RelayFileSync {
         this.emit("error", error instanceof Error ? error : new Error("Polling failed."));
         const delayMs = this.computeReconnectDelayMs(retryAttempt);
         await this.sleep(delayMs);
+      }
+    }
+  }
+
+  private rememberPolledEvent(eventId: string): void {
+    if (!eventId || this.polledEventIds.has(eventId)) {
+      return;
+    }
+    this.polledEventIds.add(eventId);
+    this.polledEventOrder.push(eventId);
+    while (this.polledEventOrder.length > POLLING_DEDUPE_CACHE_LIMIT) {
+      const evicted = this.polledEventOrder.shift();
+      if (evicted) {
+        this.polledEventIds.delete(evicted);
       }
     }
   }
@@ -558,7 +754,7 @@ export class RelayFileSync {
       return;
     }
     if (!this.reconnect.enabled) {
-      this.startPolling();
+      this.startPolling("forced-reconnect-no-retry", reason);
       return;
     }
     this.scheduleReconnect();

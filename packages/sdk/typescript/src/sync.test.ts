@@ -103,24 +103,50 @@ describe("RelayFileSync", () => {
     await sync.stop();
   });
 
-  it("falls back to polling when preferred", async () => {
+  it("falls back to polling when preferred and only delivers events that appear after the seed poll", async () => {
+    // PR #98: polling now treats the FIRST poll as a history catch-up — it
+    // seeds the dedupe cache without invoking handlers, then delivers any
+    // new events from subsequent polls. This avoids replaying the entire
+    // event log to the handler on startup. Events delivered post-seed are
+    // emitted in chronological order and deduped by eventId.
     const getEvents = vi
       .fn()
+      // First call (seed): a stale event the user has already processed.
+      // Pre-fix this would have been re-emitted; post-fix it is silently
+      // remembered.
       .mockResolvedValueOnce({
         events: [
           {
-            eventId: "evt_1",
+            eventId: "evt_seed",
             type: "file.created",
-            path: "/docs/new.md",
-            revision: "rev_1",
+            path: "/docs/already-seen.md",
+            revision: "rev_0",
             timestamp: "2026-03-26T00:00:00Z"
           }
         ],
-        nextCursor: "cur_1"
+        nextCursor: null
       })
+      // Second call: a fresh event PLUS the seed (still in the latest
+      // page). The fresh one should be delivered exactly once; the seed
+      // should be deduped.
       .mockResolvedValue({
-        events: [],
-        nextCursor: "cur_1"
+        events: [
+          {
+            eventId: "evt_seed",
+            type: "file.created",
+            path: "/docs/already-seen.md",
+            revision: "rev_0",
+            timestamp: "2026-03-26T00:00:00Z"
+          },
+          {
+            eventId: "evt_new",
+            type: "file.created",
+            path: "/docs/new.md",
+            revision: "rev_1",
+            timestamp: "2026-03-26T00:00:01Z"
+          }
+        ],
+        nextCursor: null
       });
 
     const sync = new RelayFileSync({
@@ -134,12 +160,169 @@ describe("RelayFileSync", () => {
     sync.on("event", (event) => events.push(event));
 
     sync.start();
-    await new Promise((resolve) => setTimeout(resolve, 12));
+    await new Promise((resolve) => setTimeout(resolve, 30));
     await sync.stop();
 
     expect(getEvents).toHaveBeenCalled();
-    expect(events[0]!.path).toBe("/docs/new.md");
+    // Seed page produced no handler invocations; only the new event made it.
+    expect(events.map((event) => event.path)).toEqual(["/docs/new.md"]);
     expect(sync.getState()).toBe("closed");
+  });
+
+  it("does not pass nextCursor when polling — forward-progress, not backwards-pagination", async () => {
+    // Bug 3: the events feed's nextCursor walks backwards through history.
+    // The legacy poll loop chained nextCursor on every page and walked the
+    // SDK off the live edge until it never returned. This regression test
+    // asserts the SDK never sends a cursor — every poll requests the
+    // latest events fresh and dedupes by eventId.
+    const calls: any[] = [];
+    const getEvents = vi.fn().mockImplementation((_workspaceId: string, options: any) => {
+      calls.push(options);
+      return Promise.resolve({ events: [], nextCursor: "cur_walks_backwards" });
+    });
+
+    const sync = new RelayFileSync({
+      client: makeClient(getEvents),
+      workspaceId: "ws_acme",
+      preferPolling: true,
+      pollIntervalMs: 5
+    });
+
+    sync.start();
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    await sync.stop();
+
+    expect(calls.length).toBeGreaterThanOrEqual(2);
+    for (const call of calls) {
+      expect(call.cursor).toBeUndefined();
+    }
+  });
+
+  it("logs a console.warn when WS factory throws and the SDK degrades to polling", async () => {
+    // Bug 2: when WS fails to open the SDK used to fall back to polling
+    // silently; only the `error` event surfaced, and most callers never
+    // subscribed. Now we always log on the always-on console.warn channel
+    // (NOT gated by RELAYFILE_SDK_DEBUG) and fire the optional
+    // onPollingFallback callback.
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const fallback = vi.fn();
+
+    const sync = new RelayFileSync({
+      client: makeClient(),
+      workspaceId: "ws_acme",
+      baseUrl: "https://relay.test",
+      token: "ws_token",
+      pollIntervalMs: 5,
+      reconnect: false,
+      webSocketFactory: () => {
+        throw new Error("connect failed");
+      },
+      onPollingFallback: fallback
+    });
+
+    sync.start();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    await sync.stop();
+
+    expect(warnSpy).toHaveBeenCalled();
+    const message = warnSpy.mock.calls.flat().map(String).join(" | ");
+    expect(message).toMatch(/\[relayfile-sdk\]/);
+    expect(message).toMatch(/falling back to HTTP polling/);
+    expect(fallback).toHaveBeenCalledWith(
+      expect.objectContaining({ reason: "ws-factory-threw" })
+    );
+    warnSpy.mockRestore();
+  });
+
+  it("does NOT log the polling-fallback warn when the caller explicitly opted into polling", async () => {
+    // The warn is for unintended degradation only. preferPolling=true is the
+    // user telling us "this is intentional, don't shout about it".
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const sync = new RelayFileSync({
+      client: makeClient(),
+      workspaceId: "ws_acme",
+      preferPolling: true,
+      pollIntervalMs: 5
+    });
+    sync.start();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    await sync.stop();
+
+    const messages = warnSpy.mock.calls.flat().map(String).join(" | ");
+    expect(messages).not.toMatch(/falling back to HTTP polling/);
+    warnSpy.mockRestore();
+  });
+
+  it("auto-derives the WS token from client.getToken when no token option is passed", async () => {
+    // Bug 1: when onWrite/RelayFileSync was constructed without an explicit
+    // `token`, the URL was built without one and the server rejected the
+    // upgrade silently. The new behavior is to call `client.getToken()`
+    // (the same JWT REST methods use) and put that on the URL.
+    const sockets: MockWebSocket[] = [];
+    const getToken = vi.fn().mockResolvedValue("client-derived-token");
+    const client = {
+      getEvents: vi.fn().mockResolvedValue({ events: [], nextCursor: null }),
+      getToken
+    } as unknown as RelayFileClient;
+
+    const sync = new RelayFileSync({
+      client,
+      workspaceId: "ws_acme",
+      baseUrl: "https://relay.test",
+      // NB: token deliberately omitted.
+      webSocketFactory: (url) => {
+        const socket = new MockWebSocket(url);
+        sockets.push(socket);
+        return socket;
+      }
+    });
+
+    sync.start();
+    // Token resolution is a Promise, so the factory call is deferred to a
+    // microtask. A single setTimeout(0) is enough to flush.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(getToken).toHaveBeenCalled();
+    expect(sockets).toHaveLength(1);
+    expect(sockets[0]!.url).toContain("token=client-derived-token");
+    await sync.stop();
+  });
+
+  it("re-resolves the token on every reconnect (handles mid-session token rotation)", async () => {
+    // Bug 4: the previous implementation captured `token` once at
+    // construction. If the JWT rotated mid-session, the watchdog reconnected
+    // with the SAME stale token and the server kept rejecting the upgrade —
+    // an infinite reconnect loop. The function form of `token` must be
+    // re-invoked on every reconnect attempt.
+    const tokens = ["t1", "t2", "t3"];
+    const sockets: MockWebSocket[] = [];
+    const sync = new RelayFileSync({
+      client: makeClient(),
+      workspaceId: "ws_acme",
+      baseUrl: "https://relay.test",
+      token: () => tokens.shift() ?? "tEXHAUSTED",
+      reconnect: { minDelayMs: 5, maxDelayMs: 5 },
+      webSocketFactory: (url) => {
+        const socket = new MockWebSocket(url);
+        sockets.push(socket);
+        return socket;
+      }
+    });
+
+    sync.start();
+    expect(sockets[0]!.url).toContain("token=t1");
+
+    sockets[0]!.emit("close", { code: 4001, reason: "auth" });
+    await new Promise((resolve) => setTimeout(resolve, 12));
+    expect(sockets.length).toBeGreaterThanOrEqual(2);
+    expect(sockets[1]!.url).toContain("token=t2");
+
+    sockets[1]!.emit("close", { code: 4001, reason: "auth" });
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(sockets.length).toBeGreaterThanOrEqual(3);
+    expect(sockets[2]!.url).toContain("token=t3");
+
+    await sync.stop();
   });
 
   it("force-reconnects when no frames arrive within the pong timeout (silent socket death)", async () => {
