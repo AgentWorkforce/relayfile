@@ -2331,6 +2331,46 @@ func TestWriteFileAtomicFailureLeavesOriginalContent(t *testing.T) {
 	}
 }
 
+// TestAtomicTempPatternHidesTempForDotPrefixedTarget pins the bug where
+// writeFileAtomic produced a double-dot-prefixed temp pattern for a
+// dot-prefixed target ("..relayfile-mount-state.json.tmp-*"). The
+// watcher's exact-name skip missed those temps, so it raced its own
+// state writes.
+//
+// The end-to-end TestWriteFileAtomicReplacesExistingFile above can't
+// observe this regression because the temp file is already gone by the
+// time the test reads the directory. Testing the pure pattern function
+// directly keeps the assertion deterministic.
+func TestAtomicTempPatternHidesTempForDotPrefixedTarget(t *testing.T) {
+	cases := []struct {
+		name string
+		path string
+		want string
+	}{
+		{
+			name: "dot prefixed target uses single dot",
+			path: "/x/.relayfile-mount-state.json",
+			want: ".relayfile-mount-state.json.tmp-*",
+		},
+		{
+			name: "regular file gets a leading dot to stay hidden",
+			path: "/x/notes.md",
+			want: ".notes.md.tmp-*",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := atomicTempPattern(tc.path)
+			if strings.HasPrefix(got, "..") {
+				t.Fatalf("temp pattern used a double-dot prefix: %q", got)
+			}
+			if got != tc.want {
+				t.Fatalf("unexpected temp pattern: got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 type fakeClient struct {
 	files                 map[string]RemoteFile
 	events                []FilesystemEvent

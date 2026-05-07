@@ -2739,9 +2739,28 @@ func waitWithContext(ctx context.Context, delay time.Duration) error {
 	}
 }
 
+// atomicTempPattern returns the pattern writeFileAtomic passes to
+// os.CreateTemp for a given target path. Extracted so the temp-naming
+// contract can be unit-tested directly — by the time writeFileAtomic
+// returns, the temp file has already been renamed or removed, so an
+// after-the-fact ReadDir cannot observe it.
+//
+// The pattern always produces a hidden temp (single-dot prefix), even
+// when the target itself is hidden. Pre-fix, this function double-
+// prefixed dot-leading targets and produced
+// "..relayfile-mount-state.json.tmp-*", which the file watcher's
+// shouldSkip didn't recognize as internal.
+func atomicTempPattern(path string) string {
+	base := filepath.Base(path)
+	if !strings.HasPrefix(base, ".") {
+		base = "." + base
+	}
+	return base + ".tmp-*"
+}
+
 func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
 	dir := filepath.Dir(path)
-	tmpFile, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*")
+	tmpFile, err := os.CreateTemp(dir, atomicTempPattern(path))
 	if err != nil {
 		return err
 	}
