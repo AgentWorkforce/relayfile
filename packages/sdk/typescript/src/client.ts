@@ -305,6 +305,21 @@ export class RelayFileClient {
     this.retryOptions = normalizeRetryOptions(options.retry);
   }
 
+  /**
+   * Resolve the current access token via the configured token provider.
+   *
+   * Components that need a fresh JWT for out-of-band auth (the WebSocket
+   * upgrade handshake, signed URLs, downstream services that proxy Relayfile
+   * tokens) should call this on every connection rather than caching the
+   * value, so token rotation/refresh propagates without restart.
+   *
+   * Always returns a Promise so callers don't need to special-case the
+   * sync-vs-async tokenProvider shapes.
+   */
+  async getToken(): Promise<string> {
+    return resolveToken(this.tokenProvider);
+  }
+
   async listTree(workspaceId: string, options: ListTreeOptions = {}): Promise<TreeResponse> {
     const query = buildQuery({
       path: options.path ?? "/",

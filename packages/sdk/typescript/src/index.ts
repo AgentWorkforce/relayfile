@@ -50,7 +50,8 @@ export {
   type RelayFileSyncPong,
   type RelayFileSyncReconnectOptions,
   type RelayFileSyncSocket,
-  type RelayFileSyncState
+  type RelayFileSyncState,
+  type RelayFileSyncTokenProvider
 } from "./sync.js";
 export {
   onWrite,

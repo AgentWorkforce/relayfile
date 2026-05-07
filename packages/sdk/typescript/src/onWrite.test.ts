@@ -326,10 +326,95 @@ describe("onWrite", () => {
     expect(client.recordHandlerError).toHaveBeenCalledTimes(1);
   });
 
+  it("auto-derives the WS token from client.getToken when no token option is passed", async () => {
+    // Bug 1: pre-fix, callers had to thread `await
+    // workspace.client().tokenProvider()` into every onWrite call. Omitting
+    // it caused the WebSocket URL to ship without a token, the server
+    // rejected the upgrade, and the SDK fell into degraded polling silently.
+    // After this PR, the dispatcher resolves the token from the client.
+    const getToken = vi.fn().mockResolvedValue("client-token");
+    const client = {
+      getEvents: vi.fn().mockResolvedValue({ events: [], nextCursor: null }),
+      recordHandlerError: vi.fn().mockResolvedValue(undefined),
+      getToken
+    } as unknown as OnWriteClient;
+    const sockets: MockWebSocket[] = [];
+
+    onWrite("/notion/pages/calls/*/transcript", () => undefined, {
+      client,
+      workspaceId: "ws_acme",
+      // NB: NO `token` option passed.
+      webSocketFactory: (url) => {
+        const socket = new MockWebSocket(url);
+        sockets.push(socket);
+        return socket;
+      }
+    });
+
+    // Token resolution is async (client.getToken returns a Promise) so the
+    // factory call lands on the next microtask.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(getToken).toHaveBeenCalled();
+    expect(sockets).toHaveLength(1);
+    expect(sockets[0]!.url).toContain("token=client-token");
+  });
+
+  it("accepts a function-form token option and re-invokes it on reconnect", async () => {
+    // Production callers should pass a factory rather than a literal so the
+    // token can rotate without restarting the dispatcher. The factory must
+    // be re-called on each reconnect.
+    const tokens = ["initial", "rotated"];
+    const tokenFactory = vi.fn().mockImplementation(() => tokens.shift() ?? "exhausted");
+    const sockets: MockWebSocket[] = [];
+
+    onWrite("/notion/pages/calls/*/transcript", () => undefined, {
+      client: makeClient(),
+      workspaceId: "ws_acme",
+      token: tokenFactory,
+      webSocketFactory: (url) => {
+        const socket = new MockWebSocket(url);
+        sockets.push(socket);
+        return socket;
+      }
+    });
+
+    expect(sockets[0]!.url).toContain("token=initial");
+    expect(tokenFactory).toHaveBeenCalledTimes(1);
+
+    // Trigger reconnect; the dispatcher reconnects via the configured backoff.
+    vi.useFakeTimers();
+    sockets[0]!.emit("close", { code: 4001, reason: "auth" });
+    await vi.advanceTimersByTimeAsync(1500);
+    vi.useRealTimers();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(sockets.length).toBeGreaterThanOrEqual(2);
+    expect(sockets[1]!.url).toContain("token=rotated");
+    expect(tokenFactory).toHaveBeenCalledTimes(2);
+  });
+
+  it("preserves the literal-string token form for back-compat", async () => {
+    // Old code that passes `token: someString` must continue to work.
+    const sockets: MockWebSocket[] = [];
+    onWrite("/notion/pages/calls/*/transcript", () => undefined, {
+      client: makeClient(),
+      workspaceId: "ws_acme",
+      token: "literal-token",
+      webSocketFactory: (url) => {
+        const socket = new MockWebSocket(url);
+        sockets.push(socket);
+        return socket;
+      }
+    });
+    expect(sockets[0]!.url).toContain("token=literal-token");
+  });
+
   it("reconnects with the 1s then 2s backoff schedule", async () => {
     vi.useFakeTimers();
     const client = makeClient();
     const sockets: MockWebSocket[] = [];
+
 
     onWrite("/github/repos/acme/api/pulls/*", () => undefined, {
       client,

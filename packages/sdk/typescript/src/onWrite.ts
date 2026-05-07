@@ -1,7 +1,7 @@
 import type { WriteEvent, WriteEventOperation, WriteEventSource } from "@relayfile/core";
 
 import { RelayFileClient, DEFAULT_RELAYFILE_BASE_URL } from "./client.js";
-import { RelayFileSync, type RelayFileSyncSocket } from "./sync.js";
+import { RelayFileSync, type RelayFileSyncSocket, type RelayFileSyncTokenProvider } from "./sync.js";
 import type { FilesystemEvent } from "./types.js";
 
 export type OnWriteHandler = (event: WriteEvent) => void | Promise<void>;
@@ -23,13 +23,30 @@ export interface OnWriteOptions {
   operations?: WriteEventOperation[];
   signal?: AbortSignal;
   baseUrl?: string;
-  token?: string;
+  /**
+   * Optional WebSocket auth override. Accepts the same `string | () =>
+   * string | Promise<string>` shape as the underlying sync.
+   *
+   * If omitted, onWrite auto-derives WS auth from `client.getToken()` — the
+   * same JWT the REST API is using — and re-resolves it on every reconnect
+   * so token rotation propagates without restart. **Most callers should
+   * leave this unset.** Passing a literal string is back-compat for older
+   * code; passing a factory is the right shape for production.
+   */
+  token?: RelayFileSyncTokenProvider;
   webSocketFactory?: (url: string) => RelayFileSyncSocket;
   // Override the WebSocket ping/heartbeat cadence. Lower values catch silent
   // socket death faster at the cost of slightly more chatter; the default is
   // tuned for production (30s ping, 60s pong timeout).
   pingIntervalMs?: number;
   pongTimeoutMs?: number;
+  /**
+   * Notification hook fired when the underlying sync degrades to HTTP
+   * polling because the WebSocket failed to open. Useful for surfacing a
+   * "live updates paused" banner. The SDK also `console.warn`s and emits
+   * an `error` regardless.
+   */
+  onPollingFallback?: (info: { reason: string; cause?: unknown }) => void;
 }
 
 interface OnWriteRegistration {
@@ -128,7 +145,8 @@ export function onWrite(
     token: options.token,
     webSocketFactory: options.webSocketFactory,
     pingIntervalMs: options.pingIntervalMs,
-    pongTimeoutMs: options.pongTimeoutMs
+    pongTimeoutMs: options.pongTimeoutMs,
+    onPollingFallback: options.onPollingFallback
   });
 
   debugLog("registered", { id: registration.id, pattern: normalizedPattern, workspaceId });
@@ -157,7 +175,7 @@ class OnWriteDispatcher {
   register(
     registration: OnWriteRegistration,
     options: Required<Pick<OnWriteOptions, "workspaceId">> &
-      Pick<OnWriteOptions, "signal" | "baseUrl" | "token" | "webSocketFactory" | "pingIntervalMs" | "pongTimeoutMs">
+      Pick<OnWriteOptions, "signal" | "baseUrl" | "token" | "webSocketFactory" | "pingIntervalMs" | "pongTimeoutMs" | "onPollingFallback">
   ): void {
     this.registrations.push(registration);
     if (options.signal) {
@@ -183,17 +201,29 @@ class OnWriteDispatcher {
 
   private ensureSync(
     options: Required<Pick<OnWriteOptions, "workspaceId">> &
-      Pick<OnWriteOptions, "baseUrl" | "token" | "webSocketFactory" | "pingIntervalMs" | "pongTimeoutMs">
+      Pick<OnWriteOptions, "baseUrl" | "token" | "webSocketFactory" | "pingIntervalMs" | "pongTimeoutMs" | "onPollingFallback">
   ): void {
     if (this.sync) {
       return;
     }
 
+    // Token resolution order:
+    //  1. options.token (literal or factory) — back-compat for callers that
+    //     mint their own auth.
+    //  2. RELAYFILE_TOKEN env var.
+    //  3. fall through to undefined → RelayFileSync auto-derives from
+    //     `client.getToken()` (the recommended path; same JWT as REST).
+    // (Bug 1 fix: previously, omitting `token` here passed `undefined` and
+    // the WS handshake silently failed with no auth, dropping us into
+    // backwards-walking polling forever.)
+    const token: RelayFileSyncTokenProvider | undefined =
+      options.token ?? readEnv("RELAYFILE_TOKEN") ?? undefined;
+
     this.sync = RelayFileSync.connect({
       client: this.client,
       workspaceId: options.workspaceId,
       baseUrl: options.baseUrl ?? readEnv("RELAYFILE_BASE_URL") ?? DEFAULT_RELAYFILE_BASE_URL,
-      token: options.token ?? readEnv("RELAYFILE_TOKEN"),
+      token,
       reconnect: {
         minDelayMs: DEFAULT_RECONNECT_MIN_DELAY_MS,
         maxDelayMs: DEFAULT_RECONNECT_MAX_DELAY_MS
@@ -201,6 +231,7 @@ class OnWriteDispatcher {
       webSocketFactory: options.webSocketFactory,
       pingIntervalMs: options.pingIntervalMs,
       pongTimeoutMs: options.pongTimeoutMs,
+      onPollingFallback: options.onPollingFallback,
       onEvent: (event) => {
         void this.dispatch(event);
       }
