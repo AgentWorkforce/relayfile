@@ -142,6 +142,65 @@ describe("RelayFileSync", () => {
     expect(sync.getState()).toBe("closed");
   });
 
+  it("force-reconnects when no frames arrive within the pong timeout (silent socket death)", async () => {
+    // Reproduces the "live event drop" failure mode: TCP/WS dies silently —
+    // no `error`, no `close` — and the JS layer happily considers the socket
+    // open. The watchdog should notice via `lastFrameAt` and force a fresh
+    // connection so we resume receiving broadcasts.
+    vi.useFakeTimers();
+    try {
+      const sockets: MockWebSocket[] = [];
+      const sync = new RelayFileSync({
+        client: makeClient(),
+        workspaceId: "ws_acme",
+        baseUrl: "https://relay.test",
+        token: "ws_token",
+        pingIntervalMs: 50,
+        pongTimeoutMs: 100,
+        reconnect: { minDelayMs: 5, maxDelayMs: 5 },
+        webSocketFactory: (url) => {
+          const socket = new MockWebSocket(url);
+          sockets.push(socket);
+          return socket;
+        }
+      });
+
+      sync.start();
+      sockets[0]!.emit("open", {});
+
+      // First tick (t=50): ping is sent; lastPingSentAt becomes non-zero,
+      // lastFrameAt is still the open timestamp. No reconnect yet because
+      // sinceFrame (~50) < pongTimeoutMs (100).
+      await vi.advanceTimersByTimeAsync(50);
+      expect(sockets[0]!.sent).toContain(JSON.stringify({ type: "ping" }));
+      expect(sockets).toHaveLength(1);
+
+      // Subsequent ticks with no inbound frames eventually push sinceFrame
+      // past pongTimeoutMs and the watchdog forces a reconnect. Advance well
+      // past the threshold + the reconnect delay so we observe the new socket.
+      await vi.advanceTimersByTimeAsync(200);
+      expect(sockets.length).toBeGreaterThanOrEqual(2);
+
+      // Once the new socket is open and we feed it a frame, the watchdog
+      // sees liveness and does NOT flap on the next tick.
+      sockets[1]!.emit("open", {});
+      sockets[1]!.emit("message", {
+        data: JSON.stringify({ type: "pong", ts: "2026-05-07T00:00:00Z" })
+      });
+      const beforeStable = sockets.length;
+      await vi.advanceTimersByTimeAsync(60);
+      sockets[1]!.emit("message", {
+        data: JSON.stringify({ type: "pong", ts: "2026-05-07T00:00:01Z" })
+      });
+      await vi.advanceTimersByTimeAsync(60);
+      expect(sockets).toHaveLength(beforeStable);
+
+      await sync.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("reconnects after an unexpected close", async () => {
     const sockets: MockWebSocket[] = [];
     const sync = new RelayFileSync({
