@@ -103,51 +103,49 @@ describe("RelayFileSync", () => {
     await sync.stop();
   });
 
-  it("falls back to polling when preferred and only delivers events that appear after the seed poll", async () => {
-    // PR #98: polling now treats the FIRST poll as a history catch-up — it
-    // seeds the dedupe cache without invoking handlers, then delivers any
-    // new events from subsequent polls. This avoids replaying the entire
-    // event log to the handler on startup. Events delivered post-seed are
-    // emitted in chronological order and deduped by eventId.
-    const getEvents = vi
-      .fn()
-      // First call (seed): a stale event the user has already processed.
-      // Pre-fix this would have been re-emitted; post-fix it is silently
-      // remembered.
+  it("falls back to polling when preferred, seeds to the live cursor, then emits only new events", async () => {
+    const getEvents = vi.fn();
+    getEvents
+      // First polling cycle drains history without emitting.
       .mockResolvedValueOnce({
         events: [
           {
-            eventId: "evt_seed",
+            eventId: "evt_1",
             type: "file.created",
-            path: "/docs/already-seen.md",
-            revision: "rev_0",
+            path: "/docs/old-1.md",
+            revision: "rev_1",
             timestamp: "2026-03-26T00:00:00Z"
           }
         ],
-        nextCursor: null
+        nextCursor: "evt_1"
       })
-      // Second call: a fresh event PLUS the seed (still in the latest
-      // page). The fresh one should be delivered exactly once; the seed
-      // should be deduped.
-      .mockResolvedValue({
+      .mockResolvedValueOnce({
         events: [
           {
-            eventId: "evt_seed",
+            eventId: "evt_2",
             type: "file.created",
-            path: "/docs/already-seen.md",
-            revision: "rev_0",
-            timestamp: "2026-03-26T00:00:00Z"
-          },
-          {
-            eventId: "evt_new",
-            type: "file.created",
-            path: "/docs/new.md",
-            revision: "rev_1",
+            path: "/docs/old-2.md",
+            revision: "rev_2",
             timestamp: "2026-03-26T00:00:01Z"
           }
         ],
         nextCursor: null
-      });
+      })
+      // Second polling cycle starts from the seeded live cursor and only
+      // returns fresh events appended since startup.
+      .mockResolvedValueOnce({
+        events: [
+          {
+            eventId: "evt_3",
+            type: "file.created",
+            path: "/docs/new.md",
+            revision: "rev_3",
+            timestamp: "2026-03-26T00:00:02Z"
+          }
+        ],
+        nextCursor: null
+      })
+      .mockResolvedValue({ events: [], nextCursor: null });
 
     const sync = new RelayFileSync({
       client: makeClient(getEvents),
@@ -163,22 +161,46 @@ describe("RelayFileSync", () => {
     await new Promise((resolve) => setTimeout(resolve, 30));
     await sync.stop();
 
-    expect(getEvents).toHaveBeenCalled();
-    // Seed page produced no handler invocations; only the new event made it.
     expect(events.map((event) => event.path)).toEqual(["/docs/new.md"]);
+    expect(getEvents.mock.calls[0]?.[1]?.cursor).toBeUndefined();
+    expect(getEvents.mock.calls[1]?.[1]?.cursor).toBe("evt_1");
+    expect(getEvents.mock.calls[2]?.[1]?.cursor).toBe("evt_2");
     expect(sync.getState()).toBe("closed");
   });
 
-  it("does not pass nextCursor when polling — forward-progress, not backwards-pagination", async () => {
-    // Bug 3: the events feed's nextCursor walks backwards through history.
-    // The legacy poll loop chained nextCursor on every page and walked the
-    // SDK off the live edge until it never returned. This regression test
-    // asserts the SDK never sends a cursor — every poll requests the
-    // latest events fresh and dedupes by eventId.
+  it("advances the polling cursor forward through history until it reaches the live edge", async () => {
     const calls: any[] = [];
     const getEvents = vi.fn().mockImplementation((_workspaceId: string, options: any) => {
       calls.push(options);
-      return Promise.resolve({ events: [], nextCursor: "cur_walks_backwards" });
+      if (!options.cursor) {
+        return Promise.resolve({
+          events: [
+            {
+              eventId: "evt_1",
+              type: "file.created",
+              path: "/docs/old-1.md",
+              revision: "rev_1",
+              timestamp: "2026-03-26T00:00:00Z"
+            }
+          ],
+          nextCursor: "evt_1"
+        });
+      }
+      if (options.cursor === "evt_1") {
+        return Promise.resolve({
+          events: [
+            {
+              eventId: "evt_2",
+              type: "file.created",
+              path: "/docs/old-2.md",
+              revision: "rev_2",
+              timestamp: "2026-03-26T00:00:01Z"
+            }
+          ],
+          nextCursor: null
+        });
+      }
+      return Promise.resolve({ events: [], nextCursor: null });
     });
 
     const sync = new RelayFileSync({
@@ -189,13 +211,12 @@ describe("RelayFileSync", () => {
     });
 
     sync.start();
-    await new Promise((resolve) => setTimeout(resolve, 25));
+    await new Promise((resolve) => setTimeout(resolve, 20));
     await sync.stop();
 
     expect(calls.length).toBeGreaterThanOrEqual(2);
-    for (const call of calls) {
-      expect(call.cursor).toBeUndefined();
-    }
+    expect(calls[0]?.cursor).toBeUndefined();
+    expect(calls[1]?.cursor).toBe("evt_1");
   });
 
   it("logs a console.warn when WS factory throws and the SDK degrades to polling", async () => {

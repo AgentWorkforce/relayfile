@@ -8,7 +8,7 @@ import type { EventOrigin, FilesystemEvent } from "./types.js";
  * (re)connect, so token rotation/refresh propagates without restarting the
  * sync. The plain string form is kept for backward compatibility and tests.
  */
-export type RelayFileSyncTokenProvider = string | (() => string | Promise<string>);
+export type RelayFileSyncTokenProvider = string | (() => string | undefined | Promise<string | undefined>);
 
 export type RelayFileSyncState = "idle" | "connecting" | "open" | "polling" | "reconnecting" | "closed";
 
@@ -208,7 +208,7 @@ export class RelayFileSync {
   // Resolved on every connect attempt (string form is wrapped into a constant
   // factory at construction time). `undefined` means "fall back to
   // client.getToken()" — same JWT the REST methods use.
-  private readonly tokenProvider?: () => string | Promise<string>;
+  private readonly tokenProvider?: () => string | undefined | Promise<string | undefined>;
   private readonly pollIntervalMs: number;
   private readonly pingIntervalMs: number;
   private readonly pongTimeoutMs: number;
@@ -230,15 +230,6 @@ export class RelayFileSync {
 
   private state: RelayFileSyncState = "idle";
   private cursor?: string;
-  // Forward-progress polling: deduplicate by eventId across polls. The events
-  // endpoint's nextCursor walks BACKWARDS through history (older events) once
-  // you start following it, so the legacy approach of "advance the cursor on
-  // every page" walks the SDK off the live edge and never returns. We instead
-  // re-query the latest events on every tick and skip ones we have already
-  // delivered. See PR #98 for the empirical evidence (1624 stale events
-  // delivered in 90s while no live events ever surfaced).
-  private readonly polledEventIds: Set<string> = new Set();
-  private readonly polledEventOrder: string[] = [];
   private firstPollComplete = false;
   private socket?: RelayFileSyncSocket;
   private started = false;
@@ -555,49 +546,48 @@ export class RelayFileSync {
         throw createAbortError();
       }
       try {
-        // Forward-progress polling: do NOT pass a cursor. The events feed's
-        // nextCursor walks backwards through history, so chaining cursors
-        // marches the SDK away from the live edge until it never returns
-        // to "now" (verified empirically: 1624 events delivered in 90s,
-        // all rev <= 2960 in a workspace at rev_4729). Instead, we ask
-        // for the latest page on every tick and dedupe by eventId. The
-        // events API caps `limit` at 1000; matching that gives a wide
-        // safety margin against bursts at the configured pollIntervalMs.
-        const response = await this.client.getEvents(this.workspaceId, {
-          limit: 1000,
-          signal: this.signal
-        });
-        retryAttempt = 0;
-        // First poll is treated as "history catch-up" — emit nothing,
-        // just seed the dedupe cache. This avoids replaying every event in
-        // the workspace to the handler at startup. Subsequent polls deliver
-        // anything not in the cache, in chronological order.
-        const events = response.events ?? [];
-        if (!this.firstPollComplete) {
-          for (const event of events) {
-            this.rememberPolledEvent(event.eventId);
+        // The current server implementation paginates events from oldest to
+        // newest. Empty cursor starts at index 0, and nextCursor advances
+        // forward through history. To avoid replaying the whole event log on
+        // startup while still preserving live forward progress, the first poll
+        // drains to the tip and seeds `this.cursor` without emitting. Later
+        // polls resume from that live cursor and emit only newly appended
+        // events.
+        let cursor = this.cursor;
+        let latestCursor = cursor;
+        const pending: FilesystemEvent[] = [];
+        for (;;) {
+          const response = await this.client.getEvents(this.workspaceId, {
+            cursor,
+            limit: 1000,
+            signal: this.signal
+          });
+          const events = response.events ?? [];
+          if (this.firstPollComplete) {
+            pending.push(...events);
           }
+          const nextCursor = response.nextCursor || null;
+          if (events.length > 0) {
+            latestCursor = events[events.length - 1]?.eventId ?? latestCursor;
+          }
+          if (nextCursor) {
+            latestCursor = nextCursor;
+          }
+          if (!nextCursor || nextCursor === cursor) {
+            break;
+          }
+          cursor = nextCursor;
+        }
+        retryAttempt = 0;
+        this.cursor = latestCursor;
+        if (!this.firstPollComplete) {
           this.firstPollComplete = true;
         } else {
-          // Sort newest-last so handlers see the natural revision order
-          // regardless of which direction the API returns. Fall back to
-          // input order when timestamps tie.
-          const fresh = events
-            .filter((event) => event.eventId && !this.polledEventIds.has(event.eventId))
-            .slice()
-            .sort((a, b) => {
-              const ta = Date.parse(a.timestamp);
-              const tb = Date.parse(b.timestamp);
-              if (Number.isFinite(ta) && Number.isFinite(tb) && ta !== tb) {
-                return ta - tb;
-              }
-              return 0;
-            });
-          for (const event of fresh) {
-            this.rememberPolledEvent(event.eventId);
+          for (const event of pending) {
             this.emit("event", event);
           }
         }
+         await this.sleep(this.pollIntervalMs);
         await this.sleep(this.pollIntervalMs);
       } catch (error) {
         if (this.isAbortError(error)) {
@@ -607,20 +597,6 @@ export class RelayFileSync {
         this.emit("error", error instanceof Error ? error : new Error("Polling failed."));
         const delayMs = this.computeReconnectDelayMs(retryAttempt);
         await this.sleep(delayMs);
-      }
-    }
-  }
-
-  private rememberPolledEvent(eventId: string): void {
-    if (!eventId || this.polledEventIds.has(eventId)) {
-      return;
-    }
-    this.polledEventIds.add(eventId);
-    this.polledEventOrder.push(eventId);
-    while (this.polledEventOrder.length > POLLING_DEDUPE_CACHE_LIMIT) {
-      const evicted = this.polledEventOrder.shift();
-      if (evicted) {
-        this.polledEventIds.delete(evicted);
       }
     }
   }
