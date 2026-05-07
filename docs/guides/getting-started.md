@@ -79,7 +79,9 @@ go run ./cmd/relayfile-cli export ws_demo --format tar --output ws_demo.tar
 
 ## Hosted Provider Files
 
-If the user wants Notion, Slack, Linear, or GitHub files from hosted `agentrelay.com`, use the hosted setup skill from [AgentWorkforce/skills#28](https://github.com/AgentWorkforce/skills/pull/28):
+If the user wants Notion, Slack, Linear, GitHub, or other provider-backed files without running infrastructure, use hosted Agent Relay. Agent Relay Cloud runs the workspace, relayfile API, scoped auth, Nango OAuth, sync workers, and writeback workers.
+
+Use the hosted setup skill from [AgentWorkforce/skills#28](https://github.com/AgentWorkforce/skills/pull/28):
 
 ```bash
 relayfile setup \
@@ -89,7 +91,7 @@ relayfile setup \
   --no-open
 ```
 
-That path gives the agent the same file-shaped workflow, but Agent Relay runs the cloud workspace, Nango OAuth, sync workers, and provider writeback.
+That path connects to `agentrelay.com`, completes provider auth, waits for sync, and mounts provider files locally for the agent. The local directory is only the agent's file interface; the integration stack is hosted.
 
 ## Fully Self-Hosted Provider Files
 

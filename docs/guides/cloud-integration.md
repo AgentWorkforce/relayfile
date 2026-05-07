@@ -1,22 +1,10 @@
 # Cloud Integration
 
-Relayfile can run as local OSS infrastructure or as the file layer inside hosted Agent Relay. The agent experience is the same: read files, write files, let the integration layer handle provider APIs.
+Hosted Agent Relay is the managed cloud path for provider-backed files. Agent Relay Cloud runs the workspace, relayfile API, scoped auth, Nango OAuth, provider sync workers, and writeback workers. The user's machine only needs a local mount when an agent or tool wants ordinary filesystem access.
 
-## Local OSS vs Hosted Agent Relay
+## Hosted Agent Relay
 
-| Task | Local OSS | Hosted Agent Relay |
-|---|---|---|
-| Start relayfile | `docker compose -f docker/docker-compose.yml up --build` | managed |
-| Create workspace | seeded `ws_demo` or CLI/API | `relayfile setup --workspace ...` |
-| Mount files locally | `relayfile mount ws_demo ./relayfile-mount` | `relayfile setup --local-dir ./relayfile-mount` |
-| Seed arbitrary local files | `relayfile seed ws_demo ./dir` | `relayfile seed <workspace> ./dir` |
-| Connect Notion/Slack/Linear/GitHub | self-host provider stack | hosted OAuth flow |
-| OAuth provider | run Nango yourself | managed Nango |
-| Agent instructions | normal filesystem tools | use the setup skill |
-
-## Hosted Setup With The Skill
-
-Use the `setting-up-relayfile` skill from [AgentWorkforce/skills#28](https://github.com/AgentWorkforce/skills/pull/28) when an agent needs provider-backed files from hosted `agentrelay.com`.
+Use the `setting-up-relayfile` skill from [AgentWorkforce/skills#28](https://github.com/AgentWorkforce/skills/pull/28) when an agent needs provider-backed files from `agentrelay.com`.
 
 ```bash
 relayfile setup \
@@ -26,7 +14,7 @@ relayfile setup \
   --no-open
 ```
 
-The skill covers the full hosted flow: cloud login, workspace creation, Nango OAuth, initial sync, local mount verification, writeback checks, and dead-letter recovery.
+The skill covers the full hosted flow: cloud login, workspace creation, provider OAuth, initial sync, local mount verification, writeback checks, and recovery guidance. No relayfile server, relayauth service, Nango instance, adapter, or worker has to run on the user's machine.
 
 After setup, hand the agent the mount path:
 
@@ -35,6 +23,19 @@ export RELAYFILE_LOCAL_DIR="$PWD/relayfile-mount"
 ```
 
 The agent should read and write under `$RELAYFILE_LOCAL_DIR/<provider>/...` instead of calling provider APIs directly.
+
+## Local OSS vs Hosted Cloud
+
+Use local OSS for development, tests, or fully self-hosted deployments. Use hosted Agent Relay when the user wants provider-backed files to work without operating the stack.
+
+| Task | Local OSS | Hosted Agent Relay |
+|---|---|---|
+| Run relayfile API | user runs it | managed by Agent Relay Cloud |
+| Issue scoped relayfile tokens | user runs relayauth or compatible issuer | managed |
+| Mount files locally | `relayfile mount ws_demo ./relayfile-mount` | `relayfile setup --local-dir ./relayfile-mount` |
+| Connect Notion/Slack/Linear/GitHub | user runs provider stack | hosted OAuth flow |
+| Provider sync/writeback | user runs workers | managed |
+| Nango | user self-hosts/configures it | managed |
 
 ## Fully Self-Hosted Cloud-Like Setup
 

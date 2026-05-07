@@ -81,17 +81,9 @@ go run ./cmd/relayfile-cli mount "$RELAYFILE_WORKSPACE" ./relayfile-mount --once
 
 ## Hosted Agent Relay
 
-The OSS repo is enough to run relayfile locally. If you want an agent to get provider-backed files from hosted `agentrelay.com` without self-hosting OAuth, use the `setting-up-relayfile` skill from [AgentWorkforce/skills#28](https://github.com/AgentWorkforce/skills/pull/28).
+If you want Notion, Slack, Linear, GitHub, or other provider-backed files without running any infrastructure, use hosted Agent Relay. Agent Relay Cloud runs the workspace, relayfile API, scoped auth, Nango OAuth, provider sync workers, and writeback workers for you.
 
-Local OSS:
-
-```bash
-docker compose -f docker/docker-compose.yml up --build
-go run ./cmd/relayfile-cli seed ws_demo ./examples
-go run ./cmd/relayfile-cli mount ws_demo ./relayfile-mount
-```
-
-Hosted cloud with the skill:
+Use the `setting-up-relayfile` skill from [AgentWorkforce/skills#28](https://github.com/AgentWorkforce/skills/pull/28) when an agent should set up hosted files:
 
 ```bash
 relayfile setup \
@@ -101,16 +93,17 @@ relayfile setup \
   --no-open
 ```
 
-Both paths give the agent files. The difference is who runs the integration layer:
+That command connects to `agentrelay.com`, creates or joins a cloud workspace, completes provider auth, waits for sync, and mounts the resulting files for the agent. The local directory is just the agent's file interface; the integration stack is hosted.
 
-| Need | Use local OSS | Use hosted Agent Relay |
+Use the OSS repo when you want to run the file server yourself. Use hosted Agent Relay when you want the whole integration path managed:
+
+| Need | Local OSS | Hosted Agent Relay |
 |---|---:|---:|
-| Local VFS API | yes | yes, managed |
-| Local directory mirror | yes | yes |
-| Seed files from disk | yes | yes |
-| OAuth for Notion, Slack, Linear, GitHub | self-host it | managed |
-| Provider sync and writeback workers | self-host them | managed |
-| Nango | self-host if you want end-to-end OAuth | managed |
+| Run relayfile locally | yes | no |
+| Mount files for an agent | yes | yes |
+| Provider OAuth | self-host provider auth | managed |
+| Provider sync/writeback | self-host workers | managed |
+| Nango | self-host for end-to-end OAuth | managed |
 
 For end-to-end self-hosting of provider-backed files, run relayfile, relayauth, the relevant adapters/providers, and Nango. Relayfile itself does not store third-party OAuth credentials.
 
