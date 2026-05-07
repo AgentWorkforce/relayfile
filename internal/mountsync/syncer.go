@@ -1412,6 +1412,30 @@ func (s *Syncer) HTTPClient() (*HTTPClient, bool) {
 
 func (s *Syncer) pullRemote(ctx context.Context, conflicted map[string]struct{}) error {
 	if s.state.EventsCursor != "" {
+		// Skip-if-no-events short-circuit. Most reconcile cycles on a
+		// quiet workspace have nothing to pull; turning that into a
+		// single cheap ListEvents probe avoids the worst-case full-tree
+		// fetch (sequential ReadFile per entry) that times out on
+		// workspaces with hundreds of files. If the events feed reports
+		// no new events since our last cursor, the local mirror is
+		// already up-to-date and we can return immediately. The caller
+		// (sync) then bumps LastSuccessfulReconcileAt so the stall
+		// detector stays clear.
+		//
+		// If the events feed itself is unavailable (404) we fall through
+		// to the existing incremental/full-pull path, which will hit the
+		// 404 again and degrade to the full-tree fetch. That preserves
+		// pre-fix behaviour for backends without an events feed.
+		feed, err := s.client.ListEvents(ctx, s.workspace, s.eventProvider, s.state.EventsCursor, 1)
+		if err == nil && len(feed.Events) == 0 {
+			// Quiet cycle. Periodic full-pull cadence is still tracked
+			// against incrementalCycles below to keep the trust-but-verify
+			// safety net intact, but only when there is actually work to
+			// do. Counting empty cycles toward the threshold would race
+			// the periodic full pull against the very condition the
+			// short-circuit is designed to avoid.
+			return nil
+		}
 		// "Trust but verify": every Nth incremental cycle, force a full
 		// tree pull regardless of cursor health. This self-heals any stale
 		// state caused by cloud-side revision reuse — applyRemoteFile
@@ -1448,6 +1472,47 @@ func (s *Syncer) pullRemote(ctx context.Context, conflicted map[string]struct{})
 		}
 		s.logf("events feed unavailable; falling back to full pull")
 		s.state.EventsCursor = ""
+	}
+
+	// Restart fast-path. When EventsCursor is empty but the state file
+	// already records tracked files AND a prior LastEventAt — meaning a
+	// previous daemon successfully observed events from this workspace
+	// — this is a daemon restart against a workspace we have synced
+	// before. The full-tree fetch (export or per-file ReadFile loop) on
+	// workspaces with hundreds of files routinely exceeds the per-cycle
+	// deadline (RELAYFILE_MOUNT_TIMEOUT, default 15s), trapping the
+	// daemon in a permanent stall:
+	//
+	//   mount sync cycle failed: context deadline exceeded
+	//   mount stalled: no successful reconcile for 10m
+	//
+	// Skip the bootstrap full pull: seed the events cursor against the
+	// current tip and trust the existing on-disk state. Any drift between
+	// local and remote will be caught either by the next incremental
+	// cycle (if events fired during downtime) or by the periodic full
+	// pull cadence (every fullPullEvery cycles). If resolving the cursor
+	// fails — including on backends without an events feed — fall
+	// through to the full pull as before so this is purely additive on
+	// supported backends.
+	//
+	// Gating on LastEventAt (in addition to len(Files) > 0) keeps the
+	// fast-path opt-in: callers and tests that hand-seed a state file
+	// without ever observing live events still go through the full pull
+	// (which is necessary for e.g. the denied-file teardown path).
+	if len(s.state.Files) > 0 && strings.TrimSpace(s.state.LastEventAt) != "" {
+		cursor, err := s.resolveLatestEventCursor(ctx)
+		if err == nil {
+			s.state.EventsCursor = cursor
+			s.logf("restart fast-path: seeded events cursor %q from %d tracked files; skipping bootstrap full pull", cursor, len(s.state.Files))
+			return nil
+		}
+		var httpErr *HTTPError
+		if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusNotFound {
+			// No events feed on this backend — fall through to the
+			// full-pull bootstrap path. (Pre-fix behaviour.)
+		} else {
+			s.logf("restart fast-path: cursor resolution failed (%v); falling through to full pull", err)
+		}
 	}
 
 	if err := s.pullRemoteFull(ctx, conflicted); err != nil {

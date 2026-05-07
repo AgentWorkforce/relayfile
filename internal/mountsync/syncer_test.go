@@ -2377,6 +2377,8 @@ type fakeClient struct {
 	revisionCounter       int
 	eventCounter          int
 	listTreeCalls         int
+	listEventsCalls       int
+	readFileCalls         int
 	writeFileCalls        int
 	bulkWriteCalls        int
 	bulkWriteBatches      [][]BulkWriteFile
@@ -2384,6 +2386,13 @@ type fakeClient struct {
 	bulkWriteResponseFunc func(ctx context.Context, workspaceID string, files []BulkWriteFile) (BulkWriteResponse, error)
 	deleteCalls           []deleteCall
 	eventsUnsupported     bool
+}
+
+// requestedReadCalls returns the cumulative number of ReadFile calls made
+// against this fake client. Used by tests asserting that quiet reconcile
+// cycles do not perform per-file remote reads.
+func (c *fakeClient) requestedReadCalls() int {
+	return c.readFileCalls
 }
 
 type deleteCall struct {
@@ -2448,6 +2457,7 @@ func (c *fakeClient) ListEvents(ctx context.Context, workspaceID, provider, curs
 	_ = ctx
 	_ = workspaceID
 	_ = provider
+	c.listEventsCalls++
 	if c.eventsUnsupported {
 		return EventFeed{}, &HTTPError{StatusCode: 404, Code: "not_found", Message: "not found"}
 	}
@@ -2485,6 +2495,7 @@ func (c *fakeClient) ListEvents(ctx context.Context, workspaceID, provider, curs
 func (c *fakeClient) ReadFile(ctx context.Context, workspaceID, path string) (RemoteFile, error) {
 	_ = ctx
 	_ = workspaceID
+	c.readFileCalls++
 	path = normalizeRemotePath(path)
 	file, ok := c.files[path]
 	if !ok {
@@ -3249,6 +3260,13 @@ func TestPullDetectsRevReuseViaContentHash(t *testing.T) {
 // not yet been updated to surface ContentHash. The full pull self-heals
 // any stale state because applyRemoteFile re-hashes content and overwrites
 // when on-disk hashes diverge.
+//
+// Note: each post-bootstrap cycle in this test appends a fresh event so
+// that the skip-if-no-events short-circuit (see pullRemote) does not
+// suppress incremental pulls. The periodic full-pull cadence is gated on
+// non-empty cycles; that is by design — when nothing has happened, there
+// is nothing to verify, and forcing a full-tree fetch on a quiet
+// workspace was the cause of the production reconcile-stall failure mode.
 func TestPullPeriodicFullCycle(t *testing.T) {
 	client := &fakeClient{
 		files: map[string]RemoteFile{
@@ -3293,8 +3311,11 @@ func TestPullPeriodicFullCycle(t *testing.T) {
 	// Subsequent syncs should run incremental. The Nth one (cycles >= N)
 	// should force a full pull. Counter increments before the check, so
 	// the Nth incremental call (3rd post-bootstrap sync) triggers the
-	// forced pull.
+	// forced pull. Append a fresh event before each cycle so that the
+	// skip-if-no-events short-circuit does not suppress the incremental
+	// pull and prevent the cadence counter from advancing.
 	for i := 1; i < everyN; i++ {
+		client.appendEvent("file.updated", "/notion/Docs/A.md", fmt.Sprintf("rev_step_%d", i))
 		if err := syncer.SyncOnce(context.Background()); err != nil {
 			t.Fatalf("incremental sync %d: %v", i, err)
 		}
@@ -3304,7 +3325,8 @@ func TestPullPeriodicFullCycle(t *testing.T) {
 	}
 
 	// Nth incremental cycle: forces a full tree pull regardless of cursor
-	// health.
+	// health. Again, append an event so the cycle is non-empty.
+	client.appendEvent("file.updated", "/notion/Docs/A.md", "rev_step_full")
 	if err := syncer.SyncOnce(context.Background()); err != nil {
 		t.Fatalf("forced periodic full pull sync: %v", err)
 	}
@@ -3312,11 +3334,256 @@ func TestPullPeriodicFullCycle(t *testing.T) {
 		t.Fatalf("expected periodic full pull to bump list-tree calls to 2, got %d", client.listTreeCalls)
 	}
 
-	// Counter resets — next cycle should be incremental again.
+	// Counter resets — next cycle should be incremental again. With no
+	// new events, the cycle short-circuits before any incremental work,
+	// so list-tree count is unchanged.
 	if err := syncer.SyncOnce(context.Background()); err != nil {
 		t.Fatalf("post-reset incremental sync: %v", err)
 	}
 	if client.listTreeCalls != 2 {
 		t.Fatalf("expected counter reset (no list-tree on cycle after periodic full pull); got %d", client.listTreeCalls)
+	}
+}
+
+// TestPullShortCircuitsWhenNoNewEvents pins the reconcile-stall fix.
+//
+// Pre-fix, every reconcile cycle on a workspace past the periodic
+// full-pull cadence (defaultFullPullEvery cycles) would fire a
+// pullRemoteFullTree, which on workspaces with hundreds of files
+// performs N+1 sequential ReadFile calls and routinely exceeds the
+// per-cycle 15s deadline (RELAYFILE_MOUNT_TIMEOUT). On Notion-shaped
+// workspaces (132 pages), this manifested as repeating log lines:
+//
+//	mount sync cycle failed: context deadline exceeded
+//	mount stalled: no successful reconcile for 10m
+//
+// Post-fix, pullRemote consults the events feed first with limit=1.
+// When ListEvents reports no new events since the cursor, the cycle
+// returns immediately without touching ListTree, ExportFiles, or
+// ReadFile. Only the cheap ListEvents probe is on the hot path.
+func TestPullShortCircuitsWhenNoNewEvents(t *testing.T) {
+	client := &fakeClient{
+		files: map[string]RemoteFile{
+			"/notion/Docs/A.md": {
+				Path:        "/notion/Docs/A.md",
+				Revision:    "rev_1",
+				ContentType: "text/markdown",
+				Content:     "# A",
+			},
+		},
+		events: []FilesystemEvent{
+			{
+				EventID:  "evt_1",
+				Type:     "file.created",
+				Path:     "/notion/Docs/A.md",
+				Revision: "rev_1",
+			},
+		},
+		revisionCounter: 1,
+		eventCounter:    1,
+	}
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_short_circuit",
+		RemoteRoot:  "/notion",
+		LocalRoot:   localDir,
+		// Use a very small cadence so that, absent the short-circuit,
+		// the test would deterministically trigger a full-tree pull on
+		// the second post-bootstrap cycle. With the short-circuit, no
+		// full pull should fire because no new events ever arrive.
+		FullPullEvery: 2,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+
+	// Bootstrap. This fires the initial full pull and resolves the
+	// events cursor.
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("bootstrap sync: %v", err)
+	}
+	listTreeAtBootstrap := client.listTreeCalls
+	readFileAtBootstrap := client.requestedReadCalls()
+
+	// Reset the events probe counter so we can measure post-bootstrap
+	// short-circuit calls in isolation.
+	client.listEventsCalls = 0
+
+	// Run several quiet reconcile cycles. With no new events on the
+	// feed, each cycle should:
+	//   1. Issue exactly one ListEvents probe.
+	//   2. NOT issue a ListTree call (would block reconcile on huge
+	//      workspaces).
+	//   3. NOT issue any ReadFile calls.
+	//   4. NOT increment the periodic-full-pull counter past the
+	//      threshold — even though we set FullPullEvery=2, the
+	//      short-circuit returns before the cadence counter advances.
+	const quietCycles = 5
+	for i := 0; i < quietCycles; i++ {
+		if err := syncer.Reconcile(context.Background()); err != nil {
+			t.Fatalf("quiet reconcile %d: %v", i, err)
+		}
+	}
+
+	if client.listEventsCalls != quietCycles {
+		t.Fatalf("expected exactly %d ListEvents probes (one per quiet cycle); got %d",
+			quietCycles, client.listEventsCalls)
+	}
+	if client.listTreeCalls != listTreeAtBootstrap {
+		t.Fatalf("expected no full-tree pulls during quiet cycles; list-tree went %d -> %d",
+			listTreeAtBootstrap, client.listTreeCalls)
+	}
+	if got := client.requestedReadCalls(); got != readFileAtBootstrap {
+		t.Fatalf("expected no ReadFile calls during quiet cycles; read-file went %d -> %d",
+			readFileAtBootstrap, got)
+	}
+
+	// Confirm the short-circuit still bumps LastSuccessfulReconcileAt
+	// so the daemon's stall detector stays clear.
+	status := readPublicState(t, localDir)
+	if strings.TrimSpace(status.LastSuccessfulReconcileAt) == "" {
+		t.Fatalf("expected short-circuited cycle to mark sync success; got empty LastSuccessfulReconcileAt")
+	}
+
+	// And once a real event arrives, the next reconcile must do work
+	// (no stale short-circuit).
+	client.files["/notion/Docs/A.md"] = RemoteFile{
+		Path:        "/notion/Docs/A.md",
+		Revision:    "rev_2",
+		ContentType: "text/markdown",
+		Content:     "# A v2",
+	}
+	client.appendEvent("file.updated", "/notion/Docs/A.md", "rev_2")
+	if err := syncer.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile with new event: %v", err)
+	}
+	if got := client.requestedReadCalls(); got <= readFileAtBootstrap {
+		t.Fatalf("expected new event to trigger ReadFile; read-file count %d", got)
+	}
+	data, err := os.ReadFile(filepath.Join(localDir, "Docs", "A.md"))
+	if err != nil {
+		t.Fatalf("read mirrored file: %v", err)
+	}
+	if string(data) != "# A v2" {
+		t.Fatalf("expected mirrored file to update after event; got %q", string(data))
+	}
+}
+
+// TestPullRestartFastPathSkipsFullPull pins the daemon-restart half of
+// the reconcile-stall fix.
+//
+// On restart against a workspace that has been synced before, the state
+// file persists tracked.Files but loses EventsCursor whenever the prior
+// daemon never completed a successful bootstrap (the failure mode this
+// PR fixes — once a workspace crosses the file-count threshold, the
+// initial full pull times out and the cursor is never seeded). Without
+// the fast-path, every restart re-tries that same doomed full pull and
+// the daemon stays stalled forever.
+//
+// The fix: when EventsCursor is empty but tracked.Files is non-empty,
+// trust the on-disk state and seed the cursor against the events tip
+// instead of performing the bootstrap full pull. The trust-but-verify
+// periodic full pull (every fullPullEvery cycles) eventually catches
+// any drift on a non-empty cycle.
+func TestPullRestartFastPathSkipsFullPull(t *testing.T) {
+	client := &fakeClient{
+		files: map[string]RemoteFile{
+			"/notion/Docs/A.md": {
+				Path:        "/notion/Docs/A.md",
+				Revision:    "rev_1",
+				ContentType: "text/markdown",
+				Content:     "# A",
+			},
+		},
+		events: []FilesystemEvent{
+			{
+				EventID:  "evt_seed",
+				Type:     "file.created",
+				Path:     "/notion/Docs/A.md",
+				Revision: "rev_1",
+			},
+		},
+		revisionCounter: 1,
+		eventCounter:    1,
+	}
+	localDir := t.TempDir()
+
+	// Pre-populate the state file as if a prior daemon had successfully
+	// mirrored the workspace but never resolved an events cursor (this
+	// is exactly the production failure mode: pullRemoteFull populated
+	// state.Files but resolveLatestEventCursor was never reached because
+	// the cycle's context deadline expired first). Note: we also need
+	// the local file on disk for state-load consistency.
+	if err := os.MkdirAll(filepath.Join(localDir, "Docs"), 0o755); err != nil {
+		t.Fatalf("mkdir local: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(localDir, "Docs", "A.md"), []byte("# A"), 0o644); err != nil {
+		t.Fatalf("seed local: %v", err)
+	}
+	persisted := mountState{
+		Files: map[string]trackedFile{
+			"/notion/Docs/A.md": {
+				Revision:    "rev_1",
+				ContentType: "text/markdown",
+				Hash:        hashBytes([]byte("# A")),
+			},
+		},
+		// EventsCursor intentionally empty — the prior daemon never got
+		// past the bootstrap full pull. LastEventAt set because a
+		// previous daemon did successfully observe events at some
+		// point; this is the production failure shape (state.json with
+		// tracked files + lastEventAt but null eventsCursor).
+		LastEventAt: time.Now().UTC().Add(-time.Minute).Format(time.RFC3339Nano),
+	}
+	stateBytes, err := json.Marshal(persisted)
+	if err != nil {
+		t.Fatalf("marshal seed state: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(localDir, ".relayfile-mount-state.json"), stateBytes, 0o644); err != nil {
+		t.Fatalf("write seed state: %v", err)
+	}
+
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_restart_fast_path",
+		RemoteRoot:  "/notion",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+
+	if err := syncer.Reconcile(context.Background()); err != nil {
+		t.Fatalf("restart reconcile: %v", err)
+	}
+
+	// The fast-path must:
+	//   (a) NOT call ListTree (the slow path that times out on big
+	//       workspaces).
+	//   (b) NOT call ReadFile (would scale per-file).
+	//   (c) Seed the events cursor against the current tip so the next
+	//       cycle uses the incremental path / short-circuit.
+	if client.listTreeCalls != 0 {
+		t.Fatalf("expected restart fast-path to skip ListTree; got %d calls", client.listTreeCalls)
+	}
+	if client.readFileCalls != 0 {
+		t.Fatalf("expected restart fast-path to skip ReadFile; got %d calls", client.readFileCalls)
+	}
+	status := readPublicState(t, localDir)
+	if strings.TrimSpace(status.LastSuccessfulReconcileAt) == "" {
+		t.Fatalf("expected restart fast-path to mark sync success")
+	}
+
+	// Quiet next cycle — short-circuit should now apply because the
+	// cursor was seeded.
+	listEventsBefore := client.listEventsCalls
+	if err := syncer.Reconcile(context.Background()); err != nil {
+		t.Fatalf("post-fast-path quiet reconcile: %v", err)
+	}
+	if client.listEventsCalls-listEventsBefore != 1 {
+		t.Fatalf("expected exactly one ListEvents probe on quiet cycle, got %d", client.listEventsCalls-listEventsBefore)
+	}
+	if client.listTreeCalls != 0 || client.readFileCalls != 0 {
+		t.Fatalf("expected quiet post-restart cycle to remain a pure no-op; tree=%d read=%d",
+			client.listTreeCalls, client.readFileCalls)
 	}
 }
