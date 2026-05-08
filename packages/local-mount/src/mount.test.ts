@@ -263,6 +263,35 @@ describe('createMount', () => {
     handle.cleanup();
   });
 
+  it('syncBack: skips files under default excluded paths', async () => {
+    write(path.join(projectDir, 'src/code.ts'), 'original');
+
+    const handle = createMount(projectDir, mountDir, {
+      ignoredPatterns: [],
+      readonlyPatterns: [],
+      excludeDirs: [],
+    });
+
+    write(path.join(handle.mountDir, 'src/code.ts'), 'changed');
+    write(path.join(handle.mountDir, 'dist/generated.js'), 'dist');
+    write(path.join(handle.mountDir, 'build/generated.js'), 'build');
+    write(path.join(handle.mountDir, 'node_modules/dep/index.js'), 'dep');
+    write(path.join(handle.mountDir, 'packages/web/node_modules/dep/index.js'), 'nested dep');
+    write(path.join(handle.mountDir, 'src/build/helper.ts'), 'source build');
+
+    const synced = await handle.syncBack();
+
+    expect(synced).toBe(2);
+    expect(readFileSync(path.join(projectDir, 'src/code.ts'), 'utf8')).toBe('changed');
+    expect(readFileSync(path.join(projectDir, 'src/build/helper.ts'), 'utf8')).toBe('source build');
+    expect(existsSync(path.join(projectDir, 'dist'))).toBe(false);
+    expect(existsSync(path.join(projectDir, 'build'))).toBe(false);
+    expect(existsSync(path.join(projectDir, 'node_modules'))).toBe(false);
+    expect(existsSync(path.join(projectDir, 'packages/web/node_modules'))).toBe(false);
+
+    handle.cleanup();
+  });
+
   it('syncBack: returns immediately when already aborted', async () => {
     write(path.join(projectDir, 'writable.txt'), 'original');
 

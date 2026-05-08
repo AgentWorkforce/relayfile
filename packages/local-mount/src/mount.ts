@@ -192,7 +192,8 @@ export function createMount(
           realProjectDir,
           readonlyMatcher,
           ignoredMatcher,
-          noSyncBackMatcher
+          noSyncBackMatcher,
+          (relPosix) => isExcludedPath(relPosix, excludeRules)
         );
         synced += syncedForFile;
 
@@ -515,14 +516,16 @@ function syncMountedFileBack(
   projectDir: string,
   readonlyMatcher: Ignore,
   ignoredMatcher: Ignore,
-  noSyncBackMatcher: Ignore
+  noSyncBackMatcher: Ignore,
+  isExcluded: (relPosix: string) => boolean
 ): number {
   const relative = resolveSyncRelativePath(
     sourceFile,
     mountDir,
     readonlyMatcher,
     ignoredMatcher,
-    noSyncBackMatcher
+    noSyncBackMatcher,
+    isExcluded
   );
   if (!relative) return 0;
 
@@ -542,7 +545,8 @@ function resolveSyncRelativePath(
   mountDir: string,
   readonlyMatcher: Ignore,
   ignoredMatcher: Ignore,
-  noSyncBackMatcher: Ignore
+  noSyncBackMatcher: Ignore,
+  isExcluded: (relPosix: string) => boolean
 ): string | null {
   const relative = path.relative(mountDir, sourceFile);
   if (relative === '' || relative.startsWith('..')) return null;
@@ -550,6 +554,7 @@ function resolveSyncRelativePath(
   if (relativePosix === MOUNT_README_FILENAME) return null;
   if (relativePosix === MOUNT_MARKER_FILENAME) return null;
   if (
+    isExcluded(relativePosix) ||
     isPathMatched(relative, readonlyMatcher) ||
     isPathMatched(relative, ignoredMatcher) ||
     isPathMatched(relative, noSyncBackMatcher)
