@@ -2,7 +2,6 @@ import {
   chmodSync,
   copyFileSync,
   existsSync,
-  linkSync,
   lstatSync,
   mkdirSync,
   readdirSync,
@@ -390,14 +389,9 @@ function copyMountedFile(
     return;
   }
 
-  const readonly = isPathMatched(relativePath, readonlyMatcher);
-  if (readonly && hardlinkMountedFile(safeSourcePath, safeMountPath)) {
-    return;
-  }
-
   copyFileSync(safeSourcePath, safeMountPath);
 
-  if (readonly) {
+  if (isPathMatched(relativePath, readonlyMatcher)) {
     chmodSync(safeMountPath, 0o444);
     return;
   }
@@ -596,19 +590,6 @@ function resolveSafeCopyTarget(
   return path.join(realParent, path.basename(candidatePath));
 }
 
-function hardlinkMountedFile(sourcePath: string, targetPath: string): boolean {
-  try {
-    linkSync(sourcePath, targetPath);
-    return true;
-  } catch (err) {
-    const code = (err as NodeJS.ErrnoException).code;
-    if (code === 'EXDEV' || code === 'EPERM') {
-      return false;
-    }
-    throw err;
-  }
-}
-
 function resolveVerifiedFilePath(rootPath: string, candidatePath: string): string | null {
   try {
     const realCandidate = realpathSync(candidatePath);
@@ -648,7 +629,7 @@ function buildMountReadme(
 This workspace is a mounted mirror of the project directory.
 File access is controlled by project-local .agentignore and .agentreadonly.
 
-## Read-only files (sync-back disabled)
+## Read-only files (cannot be modified)
 ${readonlyList}
 
 ## Hidden files (not available in this workspace)
@@ -657,8 +638,8 @@ ${ignoredList}
 ## Writable files
 All other files can be read and modified freely.
 
+If you get "permission denied", the file is read-only.
 Changes to read-only files are not synced back to the source project.
-When these files are hardlinked, writes to the mount path affect the same inode as the project path.
 Edits or permission changes to read-only files inside this mount may be discarded or overwritten when the mount is recreated.
 ${agentLine}`;
 }

@@ -354,10 +354,9 @@ function reconcile(
  *   • Otherwise → propagate the delete.
  *
  * `readonly` and `noSyncBack` both forbid mount→project. The split exists so
- * copied fallback readonly entries (e.g. `.agentreadonly` matches) can still be
- * chmodded 0o444, while noSyncBack entries (e.g. `.git/**` with
- * `includeGit: true`) stay writable in the mount so tools can mutate them
- * locally.
+ * the chmod 0o444 only fires for true readonly entries (e.g. `.agentreadonly`
+ * matches), while noSyncBack entries (e.g. `.git/**` when `includeGit: true`)
+ * stay writable in the mount so tools can mutate them locally.
  */
 function syncOneFile(
   relPosix: string,
@@ -486,7 +485,7 @@ function doProjectToMount(
     updateState(state, relPosix, target, projectAbs);
     return false;
   }
-  // A copied fallback readonly file can have mode 0o444, which blocks
+  // The mount copy of a readonly file has mode 0o444, which blocks
   // copyFileSync from overwriting it. Temporarily restore write permission.
   if (existsSync(target)) {
     try { chmodSync(target, 0o644); } catch { /* best effort */ }

@@ -13,7 +13,7 @@ export interface LaunchOnMountOptions {
   args: string[];
   /** Glob-style ignore patterns (files excluded entirely from the mount). */
   ignoredPatterns?: string[];
-  /** Glob-style readonly patterns (files hardlinked when possible and skipped on sync-back). */
+  /** Glob-style readonly patterns (files copied with mode 0o444). */
   readonlyPatterns?: string[];
   /** Extra directory names to exclude from the mount on top of defaults. */
   excludeDirs?: string[];

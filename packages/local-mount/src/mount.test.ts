@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
+  chmodSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -36,7 +37,7 @@ describe('createMount', () => {
     try { rmSync(path.dirname(mountDir), { recursive: true, force: true }); } catch { /* best effort */ }
   });
 
-  it('happy path: copies non-ignored files, hardlinks readonly files when possible, skips ignored', () => {
+  it('happy path: copies non-ignored files, chmods readonly to 0o444, skips ignored', () => {
     write(path.join(projectDir, 'src/code.ts'), 'code');
     write(path.join(projectDir, 'secrets/api-key.txt'), 'shhh');
     write(path.join(projectDir, 'docs/guide.md'), 'guide');
@@ -54,15 +55,14 @@ describe('createMount', () => {
     expect(existsSync(path.join(handle.mountDir, 'secrets/api-key.txt'))).toBe(false);
     expect(existsSync(path.join(handle.mountDir, 'secrets'))).toBe(false);
 
-    const sourceRo = statSync(path.join(projectDir, 'config.ro'));
-    const mountRo = statSync(path.join(handle.mountDir, 'config.ro'));
-    expect(mountRo.dev).toBe(sourceRo.dev);
-    expect(mountRo.ino).toBe(sourceRo.ino);
+    const roPath = path.join(handle.mountDir, 'config.ro');
+    const roMode = statSync(roPath).mode & 0o777;
+    expect(roMode).toBe(0o444);
+    expect(() => writeFileSync(roPath, 'should fail', 'utf8')).toThrow();
+    expect(readFileSync(path.join(projectDir, 'config.ro'), 'utf8')).toBe('frozen');
 
-    const sourceGuide = statSync(path.join(projectDir, 'docs/guide.md'));
-    const mountGuide = statSync(path.join(handle.mountDir, 'docs/guide.md'));
-    expect(mountGuide.dev).toBe(sourceGuide.dev);
-    expect(mountGuide.ino).toBe(sourceGuide.ino);
+    const guideMode = statSync(path.join(handle.mountDir, 'docs/guide.md')).mode & 0o777;
+    expect(guideMode).toBe(0o444);
 
     // Writable file retains something other than 0o444
     const writableMode = statSync(path.join(handle.mountDir, 'src/code.ts')).mode & 0o777;
@@ -226,10 +226,10 @@ describe('createMount', () => {
 
     // Modify writable file in mount
     writeFileSync(path.join(handle.mountDir, 'writable.txt'), 'changed', 'utf8');
-    // Replace the readonly hardlink with a mount-local file so the test can
-    // exercise syncBack filtering without mutating the source via the link.
+    // Modify "readonly" file directly (bypass chmod for test purposes)
+    // by writing it with write permissions first.
     const roPath = path.join(handle.mountDir, 'readonly.txt');
-    rmSync(roPath, { force: true });
+    chmodSync(roPath, 0o644);
     writeFileSync(roPath, 'tampered', 'utf8');
 
     // Add a net-new writable file in the mount
