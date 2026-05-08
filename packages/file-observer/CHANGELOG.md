@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _No unreleased changes._
 
+## [0.6.13] - 2026-05-08
+
+_No user-visible changes in this release._
+
 ## [0.6.11] - 2026-05-07
 
 _No user-visible changes in this release._
@@ -91,7 +95,8 @@ Initial release.
 ### Added
 - Dashboard workflow for visualizing relayfile filesystem activity in real time. ([#40])
 
-[Unreleased]: https://github.com/AgentWorkforce/relayfile/compare/v0.6.11...HEAD
+[Unreleased]: https://github.com/AgentWorkforce/relayfile/compare/v0.6.13...HEAD
+[0.6.13]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.6.13
 [0.6.11]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.6.11
 [0.6.10]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.6.10
 [0.6.9]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.6.9
