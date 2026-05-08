@@ -53,7 +53,7 @@ func (n *DirNode) Getattr(ctx context.Context, _ gofusefs.FileHandle, out *fuse.
 }
 
 func (n *DirNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*gofusefs.Inode, syscall.Errno) {
-	if child := n.GetChild(name); child != nil {
+	if child := n.lookupCachedChild(name); child != nil {
 		if existing, ok := child.Operations().(interface {
 			fillEntry(*fuse.EntryOut) syscall.Errno
 		}); ok {
@@ -67,7 +67,7 @@ func (n *DirNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (
 	if err != nil {
 		return nil, readErrno(err)
 	}
-	meta, ok := entries[name]
+	meta, _, ok := resolveDirectoryEntry(entries, name)
 	if !ok {
 		out.SetEntryTimeout(n.state.negativeTTL)
 		return nil, syscall.ENOENT
@@ -135,7 +135,7 @@ func (n *DirNode) Unlink(ctx context.Context, name string) syscall.Errno {
 	if err != nil {
 		return writeErrno(err)
 	}
-	meta, ok := entries[name]
+	meta, resolvedName, ok := resolveDirectoryEntry(entries, name)
 	if !ok {
 		return syscall.ENOENT
 	}
@@ -154,7 +154,11 @@ func (n *DirNode) Unlink(ctx context.Context, name string) syscall.Errno {
 		return writeErrno(err)
 	}
 	n.state.invalidate(meta.path)
-	n.RmChild(name)
+	if resolvedName == name || n.GetChild(name) == nil {
+		n.RmChild(resolvedName)
+		return 0
+	}
+	n.RmChild(resolvedName, name)
 	return 0
 }
 
@@ -166,4 +170,20 @@ func (n *DirNode) fillEntry(out *fuse.EntryOut) syscall.Errno {
 	}
 	meta.fillEntry(out, n.state)
 	return 0
+}
+
+func (n *DirNode) lookupCachedChild(name string) *gofusefs.Inode {
+	if child := n.GetChild(name); child != nil {
+		return child
+	}
+	children := n.Children()
+	names := make([]string, 0, len(children))
+	for childName := range children {
+		names = append(names, childName)
+	}
+	resolvedName, ok := resolveNameByID(names, name)
+	if !ok {
+		return nil
+	}
+	return n.GetChild(resolvedName)
 }

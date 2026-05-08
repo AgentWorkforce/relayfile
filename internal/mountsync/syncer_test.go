@@ -2274,6 +2274,15 @@ func TestRemoteToLocalAndLocalToRemotePath(t *testing.T) {
 	if remotePath != "/notion/Folder/File.md" {
 		t.Fatalf("unexpected remote path mapping: %s", remotePath)
 	}
+
+	nameIDPath := filepath.Join(localRoot, "Folder", "Human Name__01HXYZ.json")
+	nameIDRemotePath, err := localToRemotePath(localRoot, "/notion", nameIDPath)
+	if err != nil {
+		t.Fatalf("localToRemotePath for name/id basename failed: %v", err)
+	}
+	if nameIDRemotePath != "/notion/Folder/Human Name__01HXYZ.json" {
+		t.Fatalf("unexpected name/id remote path mapping: %s", nameIDRemotePath)
+	}
 }
 
 func TestInferProviderFromRoot(t *testing.T) {
