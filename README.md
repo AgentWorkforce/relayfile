@@ -2,21 +2,21 @@
 
 **The integration filesystem for agents.**
 
-Mount Linear, Notion, GitHub, Slack, HubSpot, Salesforce, and the rest of your SaaS stack under `~/relayfile-mount`. Every agent in your system reads them with `cat`, writes them by saving files, and coordinates through a real, ACL'd, real-time-synced filesystem.
+Mount Linear, Notion, GitHub, Slack, HubSpot, Salesforce, and the rest of your SaaS stack as a virtual filesystem. Every agent in your system reads them with `cat`, writes them by saving files, and coordinates through a real, ACL'd, real-time-synced filesystem. The mount can live anywhere — the SDK, CLI, and FUSE layer all let you choose where to expose it.
 
 LLMs are far better at reading files than calling typed tools — the file system is the most-trained-on API in existence. Relayfile leans on that instead of fighting it.
 
 ```bash
-$ ls ~/relayfile-mount
+$ ls mount/
 github  linear  notion  slack
 
-$ cat ~/relayfile-mount/linear/issues/AGE-12.json
+$ cat mount/linear/issues/AGE-12.json
 { "identifier": "AGE-12", "title": "Fix login bug", "state": "Todo", ... }
 
 $ echo '{"description":"Updated by reviewer agent"}' \
-    > ~/relayfile-mount/linear/issues/AGE-12.json   # PATCH back to Linear
+    > mount/linear/issues/AGE-12.json   # PATCH back to Linear
 
-$ grep -l '"state":"Todo"' ~/relayfile-mount/linear/issues/*.json
+$ grep -l '"state":"Todo"' mount/linear/issues/*.json
 ```
 
 That's the entire interface. No new SDK to learn, no MCP schemas eating your context window — just the bash and file-IO an agent already knows.
@@ -44,7 +44,7 @@ The "give agents a filesystem" idea is a healthy direction — relayfile isn't t
 
 **vs. MCP servers (Linear, Notion, Slack, GitHub, …).** MCP gives the agent a typed tool surface per integration. Strong for single, well-defined writes (`linear.create_issue(title, priority, …)` enforces the shape at call time). The cost is that each connected server loads tool schemas into the context window, and an LLM is more reliable reading a directory than juggling N typed APIs. Relayfile exposes the same integrations as paths you can `Read` / `Bash` / `Glob` — no schema overhead — with exhaustive enumeration where MCP returns API search results. The two compose well: relayfile for reads and synthesis, MCP for typed writes that need server-side validation.
 
-**vs. [Mirage](https://github.com/strukto-ai/mirage) and other virtual-filesystem-for-agents projects.** Mirage is doing thoughtful work in this space and it's worth a look. Their focus is **infrastructure and storage primitives** — S3, Postgres, Redis, GDrive, GCS, Mongo, SSH — mounted side-by-side as one tree. Relayfile's focus is **integrations** — the SaaS APIs where day-to-day agent work lives — with file-native writeback (PATCH / CREATE / DELETE through file ops), per-agent ACLs, real-time multi-agent sync, and a real OS mount under `~/relayfile-mount`. Different scopes, both useful; pick the one your work lives in (or run both).
+**vs. [Mirage](https://github.com/strukto-ai/mirage) and other virtual-filesystem-for-agents projects.** Mirage is doing thoughtful work in this space and it's worth a look. Their focus is **infrastructure and storage primitives** — S3, Postgres, Redis, GDrive, GCS, Mongo, SSH — mounted side-by-side as one tree. Relayfile's focus is **integrations** — the SaaS APIs where day-to-day agent work lives — with file-native writeback (PATCH / CREATE / DELETE through file ops), per-agent ACLs, real-time multi-agent sync, and a real OS mount you can put wherever fits your stack. Different scopes, both useful; pick the one your work lives in (or run both).
 
 **vs. rolling your own.** A single agent against a single backend can do fine with FUSE, Mountpoint, or direct SDK calls. Relayfile becomes worth it when you need multi-agent coordination, scoped capabilities, and a consistent read/write contract across many SaaS surfaces.
 
@@ -136,7 +136,7 @@ Hosted Agent Relay runs these pieces for you. Fully self-hosted provider-backed 
 
 If you want Notion, Slack, Linear, GitHub, or other provider-backed files without running any infrastructure, use hosted Agent Relay. Agent Relay Cloud runs the workspace, relayfile API, scoped auth, Nango OAuth, provider sync workers, and writeback workers for you.
 
-Use the `setting-up-relayfile` skill from [AgentWorkforce/skills#28](https://github.com/AgentWorkforce/skills/pull/28) when an agent should set up hosted files:
+Use the [`setting-up-relayfile` skill](https://github.com/AgentWorkforce/skills/blob/main/skills/setting-up-relayfile/SKILL.md) when an agent should set up hosted files:
 
 ```bash
 relayfile setup \
