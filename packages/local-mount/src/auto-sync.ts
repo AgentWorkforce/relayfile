@@ -152,8 +152,6 @@ export function startAutoSync(
     pendingDebounces.set(absPath, t);
   };
 
-  const ignoreGlobs = buildIgnoreGlobs(ctx);
-
   const subscribeTo = (root: string): Promise<AsyncSubscription> =>
     watcher.subscribe(
       root,
@@ -163,7 +161,7 @@ export function startAutoSync(
           schedulePathSync(root, ev.path);
         }
       },
-      { ignore: ignoreGlobs }
+      { ignore: buildIgnoreGlobs(ctx, root) }
     );
 
   let mountSub: AsyncSubscription | undefined;
@@ -238,16 +236,30 @@ export function startAutoSync(
   };
 }
 
-function buildIgnoreGlobs(ctx: AutoSyncContext): string[] {
-  // @parcel/watcher matches globs against absolute paths via globset. For each
-  // excluded directory name (defaults + user-supplied excludeDirs), emit globs
-  // that match both the directory itself and everything beneath it, anywhere
-  // under the watched root. The in-handler `isSyncCandidate` filter remains
-  // authoritative — this is just a perf hint so the watcher does not recurse
-  // into heavy trees like node_modules, .git, or .npm-cache.
+function buildIgnoreGlobs(ctx: AutoSyncContext, watchRoot: string): string[] {
+  // @parcel/watcher's wrapper splits each ignore entry by is-glob: globs are
+  // compiled by picomatch and matched as regexes against absolute event paths;
+  // non-globs are resolved as literal absolute paths. For each excluded entry
+  // (library defaults + user-supplied excludeDirs) we emit shapes that mirror
+  // `isExcludedPath`'s semantics, so a watcher-suppressed event never differs
+  // from what the in-handler filter would have rejected.
+  //
+  //   - Bare directory names (e.g. `node_modules`) match at any depth, so
+  //     emit `**/<name>` plus `**/<name>/**`. picomatch turns both into
+  //     depth-agnostic regexes that catch the dir and its descendants.
+  //   - Path-style entries (e.g. `build/cache`) are root-anchored prefixes
+  //     in `isExcludedPath` — they only match `<root>/build/cache`, NOT
+  //     `<root>/src/build/cache`. Emit absolute patterns rooted at the
+  //     watch dir so the watcher hides the same set: a literal absolute
+  //     path (which the wrapper routes to ignorePaths) plus an anchored
+  //     descendant glob.
   const globs: string[] = [];
   for (const name of ctx.excludedNames) {
-    globs.push(`**/${name}`, `**/${name}/**`);
+    if (name.includes('/')) {
+      globs.push(`${watchRoot}/${name}`, `${watchRoot}/${name}/**`);
+    } else {
+      globs.push(`**/${name}`, `**/${name}/**`);
+    }
   }
   return globs;
 }
