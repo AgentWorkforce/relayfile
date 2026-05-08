@@ -40,12 +40,17 @@ const mountEnv = workspace.mountEnv({
   remotePath: '/notion',
 })
 
-// Secret invite payload for a trusted co-worker agent
-const invite = workspace.agentInvite({
-  agentName: 'review-agent',
-  scopes: ['fs:read', 'relaycast:write'],
+// Secret invite payload for a trusted co-worker agent — same scopes as this
+// workspace's token (no per-invite downscoping).
+const invite = workspace.agentInvite({ agentName: 'review-agent' })
+
+// To grant a strictly narrower set of scopes, mint a fresh JWT via the cloud
+// API. The cloud rejects requests that exceed the calling token's grant.
+const scopedInvite = await workspace.agentInviteScoped({
+  agentName: 'notion-summarizer',
+  scopes: ['relayfile:fs:read:/notion/pages/*'],
 })
-// Never log invite — it contains credential material
+// Never log invites — they contain credential material
 ```
 
 For the full end-to-end journey, failure modes, and acceptance criteria see

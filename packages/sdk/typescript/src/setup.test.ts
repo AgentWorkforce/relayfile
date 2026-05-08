@@ -626,4 +626,92 @@ describe("RelayfileSetup", () => {
       "relaycast:write"
     ])
   })
+
+  it("agentInviteScoped mints a fresh JWT scoped to the requested subset", async () => {
+    const fetchMock = queueFetch(
+      makeJoinResponse("rf_jwt_lead", {
+        relaycastBaseUrl: "https://relaycast.staging.test"
+      }),
+      makeJoinResponse("rf_jwt_scoped", {
+        relaycastBaseUrl: "https://relaycast.staging.test"
+      })
+    )
+
+    const setup = new RelayfileSetup({
+      cloudApiUrl: "https://staging.agentrelay.com/cloud"
+    })
+    const handle = await setup.joinWorkspace("ws_123", {
+      agentName: "lead-agent",
+      scopes: ["fs:read", "fs:write", "relaycast:write"]
+    })
+
+    const invite = await handle.agentInviteScoped({
+      agentName: "review-agent",
+      scopes: ["relayfile:fs:read:/notion/pages/*"]
+    })
+
+    // Second fetch is the scoped join request.
+    expect(readRequestUrl(fetchMock, 1)).toBe(
+      "https://staging.agentrelay.com/cloud/api/v1/workspaces/ws_123/join"
+    )
+    expect(readRequestBody(fetchMock, 1)).toEqual({
+      agentName: "review-agent",
+      scopes: ["relayfile:fs:read:/notion/pages/*"]
+    })
+    expect(invite).toEqual({
+      workspaceId: "ws_123",
+      cloudApiUrl: "https://staging.agentrelay.com/cloud",
+      relayfileUrl: "https://relayfile.test",
+      relaycastApiKey: "rc_test",
+      relaycastBaseUrl: "https://relaycast.staging.test",
+      agentName: "review-agent",
+      scopes: ["relayfile:fs:read:/notion/pages/*"],
+      relayfileToken: "rf_jwt_scoped"
+    })
+  })
+
+  it("agentInviteScoped surfaces cloud-side scope rejection", async () => {
+    queueFetch(
+      makeJoinResponse("rf_jwt_lead"),
+      jsonResponse(
+        { error: "insufficient_scope", code: "insufficient_scope" },
+        { status: 403 }
+      )
+    )
+
+    const setup = new RelayfileSetup()
+    const handle = await setup.joinWorkspace("ws_123", {
+      agentName: "lead-agent",
+      scopes: ["fs:read"]
+    })
+
+    await expect(
+      handle.agentInviteScoped({
+        agentName: "review-agent",
+        scopes: ["fs:admin"]
+      })
+    ).rejects.toThrow()
+  })
+
+  it("agentInviteScoped omits relayfileToken when includeRelayfileToken is false", async () => {
+    queueFetch(
+      makeJoinResponse("rf_jwt_lead"),
+      makeJoinResponse("rf_jwt_scoped")
+    )
+
+    const setup = new RelayfileSetup()
+    const handle = await setup.joinWorkspace("ws_123", {
+      agentName: "lead-agent",
+      scopes: ["fs:read", "fs:write"]
+    })
+
+    const invite = await handle.agentInviteScoped({
+      agentName: "review-agent",
+      scopes: ["fs:read"],
+      includeRelayfileToken: false
+    })
+
+    expect("relayfileToken" in invite).toBe(false)
+    expect(invite.scopes).toEqual(["fs:read"])
+  })
 })

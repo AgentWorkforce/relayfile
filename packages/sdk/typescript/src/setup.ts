@@ -22,6 +22,7 @@ import {
   WORKSPACE_INTEGRATION_PROVIDERS,
   type AgentWorkspaceInvite,
   type AgentWorkspaceInviteOptions,
+  type AgentWorkspaceScopedInviteOptions,
   type ConnectIntegrationOptions,
   type ConnectIntegrationResult,
   type CreateWorkspaceOptions,
@@ -527,6 +528,13 @@ export class WorkspaceHandle {
     })
   }
 
+  /**
+   * Build an invite that hands a peer agent the calling workspace's existing
+   * JWT and metadata. The invite carries the SAME token this handle holds,
+   * with the SAME scopes — there is no per-invite downscoping. Use
+   * {@link agentInviteScoped} when the receiver should have a strictly
+   * narrower set of scopes than this workspace.
+   */
   agentInvite(options: AgentWorkspaceInviteOptions = {}): AgentWorkspaceInvite {
     const relaycastBaseUrl = this.resolveRelaycastBaseUrl(
       options.relaycastBaseUrl
@@ -539,12 +547,71 @@ export class WorkspaceHandle {
       relaycastApiKey: this.info.relaycastApiKey,
       relaycastBaseUrl,
       agentName: options.agentName ?? this._joinOptions.agentName,
-      scopes:
-        options.scopes && options.scopes.length > 0
-          ? [...options.scopes]
-          : [...this._joinOptions.scopes],
+      scopes: [...this._joinOptions.scopes],
       relayfileToken:
         options.includeRelayfileToken === false ? undefined : this.getToken(),
+      createdAt: this.info.createdAt,
+      name: this.info.name
+    })
+  }
+
+  /**
+   * Mint a fresh, downscoped relayfile JWT for a peer agent and return an
+   * invite carrying that token. Round-trips through the cloud join endpoint
+   * (`POST /api/v1/workspaces/{id}/join`), which signs a new JWT whose
+   * `scopes` claim is the requested subset of this workspace's grant. The
+   * cloud API rejects requests that exceed the calling workspace's scopes.
+   *
+   * Prefer this over {@link agentInvite} whenever the receiver should not
+   * inherit the full workspace token's reach (e.g. one agent that only needs
+   * `relayfile:fs:read:/notion/pages/*`). The caller's token is unaffected;
+   * a separate JWT is issued for the invitee.
+   *
+   * @example
+   * const invite = await workspace.agentInviteScoped({
+   *   agentName: 'notion-summarizer',
+   *   scopes: ['relayfile:fs:read:/notion/pages/*'],
+   * })
+   * // invite.relayfileToken is a JWT with scopes=['relayfile:fs:read:/notion/pages/*']
+   */
+  async agentInviteScoped(
+    options: AgentWorkspaceScopedInviteOptions = {}
+  ): Promise<AgentWorkspaceInvite> {
+    const relaycastBaseUrl = this.resolveRelaycastBaseUrl(
+      options.relaycastBaseUrl
+    )
+    const requestedScopes =
+      options.scopes && options.scopes.length > 0
+        ? [...options.scopes]
+        : [...this._joinOptions.scopes]
+    const agentName = options.agentName ?? this._joinOptions.agentName
+    const permissions = options.permissions ?? this._joinOptions.permissions
+
+    // Mint a per-invite JWT with the requested scopes. The cloud API enforces
+    // that requested scopes ⊆ caller's grant; an over-broad request is
+    // rejected at this boundary, not surfaced as a silently-wide token.
+    const joinResponse = await this._setup.joinWorkspaceResponse(
+      this.workspaceId,
+      {
+        agentName,
+        scopes: requestedScopes,
+        permissions
+      }
+    )
+
+    return compactObject({
+      workspaceId: this.workspaceId,
+      cloudApiUrl: this._setup.getCloudApiUrl(),
+      relayfileUrl: joinResponse.relayfileUrl ?? this.info.relayfileUrl,
+      relaycastApiKey:
+        joinResponse.relaycastApiKey ?? this.info.relaycastApiKey,
+      relaycastBaseUrl,
+      agentName,
+      scopes: requestedScopes,
+      relayfileToken:
+        options.includeRelayfileToken === false
+          ? undefined
+          : joinResponse.token,
       createdAt: this.info.createdAt,
       name: this.info.name
     })
