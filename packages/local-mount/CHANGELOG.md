@@ -6,6 +6,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+_No unreleased changes._
+
+## [0.6.14] - 2026-05-08
+
 ### Changed
 - `.npm-cache` is now excluded by default alongside `.git` and `node_modules`. Project-local npm caches accumulate tens of thousands of files (often hundreds of MB) that have no place inside an agent's mount; both the initial walk and the autosync `@parcel/watcher` subscription now skip them automatically. The `excludeDirs` option only adds to defaults — there is no way to opt the cache back in — so callers who need an npm cache visible inside the mount should point npm at a different location (e.g. via `npm_config_cache`) or populate it post-mount from `onBeforeLaunch`.
 - The autosync watcher now derives its ignore globs from the live `excludeDirs` set instead of a hardcoded probe list. User-supplied `excludeDirs` entries (not just the library defaults) now produce `@parcel/watcher` ignore globs, so custom heavy directories the caller declares are skipped at subscription time as well as during the initial walk. Bare directory names (e.g. `node_modules`) are matched at any depth, while path-style entries (e.g. `build/cache`) are anchored at each watch root — mirroring `isExcludedPath`'s root-anchored prefix semantics so the watcher hint never hides events that the canonical predicate would have allowed.
@@ -112,7 +116,8 @@ Initial release.
 - Directory-only ignore patterns (e.g. `cache/`) match directories without swallowing like-named files.
 - README documenting the mount lifecycle, dotfile semantics, and auto-sync behavior. ([#48])
 
-[Unreleased]: https://github.com/AgentWorkforce/relayfile/compare/v0.6.13...HEAD
+[Unreleased]: https://github.com/AgentWorkforce/relayfile/compare/v0.6.14...HEAD
+[0.6.14]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.6.14
 [0.6.13]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.6.13
 [0.6.11]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.6.11
 [0.6.10]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.6.10
