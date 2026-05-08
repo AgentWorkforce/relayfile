@@ -18,6 +18,11 @@ export interface LaunchOnMountOptions {
   /** Extra directory names to exclude from the mount on top of defaults. */
   excludeDirs?: string[];
   /**
+   * Include the built-in cache/build exclusion list. Defaults to true. `.git`
+   * remains excluded unless `includeGit` is true.
+   */
+  includeDefaultExcludeDirs?: boolean;
+  /**
    * Include the project's `.git` directory inside the mount with one-way
    * project→mount sync. Defaults to false. See {@link MountOptions.includeGit}
    * for details.
@@ -73,6 +78,7 @@ export async function launchOnMount(opts: LaunchOnMountOptions): Promise<LaunchO
     excludeDirs: opts.excludeDirs ?? [],
     agentName: opts.agentName,
     includeGit: opts.includeGit,
+    includeDefaultExcludeDirs: opts.includeDefaultExcludeDirs,
   });
 
   let syncedCount = 0;

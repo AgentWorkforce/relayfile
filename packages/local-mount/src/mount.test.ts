@@ -55,8 +55,11 @@ describe('createMount', () => {
     expect(existsSync(path.join(handle.mountDir, 'secrets/api-key.txt'))).toBe(false);
     expect(existsSync(path.join(handle.mountDir, 'secrets'))).toBe(false);
 
-    const roMode = statSync(path.join(handle.mountDir, 'config.ro')).mode & 0o777;
+    const roPath = path.join(handle.mountDir, 'config.ro');
+    const roMode = statSync(roPath).mode & 0o777;
     expect(roMode).toBe(0o444);
+    expect(() => writeFileSync(roPath, 'should fail', 'utf8')).toThrow();
+    expect(readFileSync(path.join(projectDir, 'config.ro'), 'utf8')).toBe('frozen');
 
     const guideMode = statSync(path.join(handle.mountDir, 'docs/guide.md')).mode & 0o777;
     expect(guideMode).toBe(0o444);
@@ -78,11 +81,35 @@ describe('createMount', () => {
     ).toThrow(/mountDir must be different from projectDir/);
   });
 
-  it('excludes .git, node_modules, and .npm-cache by default, but NOT .relay', () => {
+  it('excludes common cache and build output paths by default, but NOT .relay', () => {
     write(path.join(projectDir, '.git/HEAD'), 'ref');
     write(path.join(projectDir, 'node_modules/dep/index.js'), '1');
+    write(path.join(projectDir, 'packages/web/node_modules/dep/index.js'), 'nested dep');
     write(path.join(projectDir, '.npm-cache/_cacache/content-v2/sha512/aa/bb/blob'), 'cached');
+    write(path.join(projectDir, 'target/debug/app'), 'rust');
+    write(path.join(projectDir, '.next/cache/entry'), 'next');
+    write(path.join(projectDir, 'dist/bundle.js'), 'dist');
+    write(path.join(projectDir, 'build/output.js'), 'build');
+    write(path.join(projectDir, 'out/page.html'), 'out');
+    write(path.join(projectDir, '__pycache__/module.pyc'), 'python');
+    write(path.join(projectDir, '.pytest_cache/v/cache/nodeids'), 'pytest');
+    write(path.join(projectDir, '.mypy_cache/meta.json'), 'mypy');
+    write(path.join(projectDir, '.ruff_cache/CACHEDIR.TAG'), 'ruff');
+    write(path.join(projectDir, '.venv/bin/python'), 'venv');
+    write(path.join(projectDir, 'venv/bin/python'), 'venv');
+    write(path.join(projectDir, 'env/bin/python'), 'venv');
+    write(path.join(projectDir, '.gradle/caches/modules-2/files'), 'gradle');
+    write(path.join(projectDir, 'coverage/lcov.info'), 'coverage');
+    write(path.join(projectDir, '.nyc_output/out.json'), 'nyc');
+    write(path.join(projectDir, '.turbo/cache'), 'turbo');
+    write(path.join(projectDir, '.cache/tool/state'), 'cache');
+    write(path.join(projectDir, '.DS_Store'), 'metadata');
     write(path.join(projectDir, '.relay/state.json'), '{}');
+    write(path.join(projectDir, 'src/build/helper.ts'), 'nested build source');
+    write(path.join(projectDir, 'packages/env/config.ts'), 'nested env source');
+    write(path.join(projectDir, 'lib/out/formatter.ts'), 'nested out source');
+    write(path.join(projectDir, 'src/target/arm64.rs'), 'nested target source');
+    write(path.join(projectDir, 'test/coverage/reporter.ts'), 'nested coverage source');
     write(path.join(projectDir, 'keep.txt'), 'yes');
 
     const handle = createMount(projectDir, mountDir, {
@@ -94,9 +121,55 @@ describe('createMount', () => {
     expect(existsSync(path.join(handle.mountDir, 'keep.txt'))).toBe(true);
     expect(existsSync(path.join(handle.mountDir, '.git'))).toBe(false);
     expect(existsSync(path.join(handle.mountDir, 'node_modules'))).toBe(false);
+    expect(existsSync(path.join(handle.mountDir, 'packages/web/node_modules'))).toBe(false);
     expect(existsSync(path.join(handle.mountDir, '.npm-cache'))).toBe(false);
+    expect(existsSync(path.join(handle.mountDir, 'target'))).toBe(false);
+    expect(existsSync(path.join(handle.mountDir, '.next'))).toBe(false);
+    expect(existsSync(path.join(handle.mountDir, 'dist'))).toBe(false);
+    expect(existsSync(path.join(handle.mountDir, 'build'))).toBe(false);
+    expect(existsSync(path.join(handle.mountDir, 'out'))).toBe(false);
+    expect(existsSync(path.join(handle.mountDir, '__pycache__'))).toBe(false);
+    expect(existsSync(path.join(handle.mountDir, '.pytest_cache'))).toBe(false);
+    expect(existsSync(path.join(handle.mountDir, '.mypy_cache'))).toBe(false);
+    expect(existsSync(path.join(handle.mountDir, '.ruff_cache'))).toBe(false);
+    expect(existsSync(path.join(handle.mountDir, '.venv'))).toBe(false);
+    expect(existsSync(path.join(handle.mountDir, 'venv'))).toBe(false);
+    expect(existsSync(path.join(handle.mountDir, 'env'))).toBe(false);
+    expect(existsSync(path.join(handle.mountDir, '.gradle'))).toBe(false);
+    expect(existsSync(path.join(handle.mountDir, 'coverage'))).toBe(false);
+    expect(existsSync(path.join(handle.mountDir, '.nyc_output'))).toBe(false);
+    expect(existsSync(path.join(handle.mountDir, '.turbo'))).toBe(false);
+    expect(existsSync(path.join(handle.mountDir, '.cache'))).toBe(false);
+    expect(existsSync(path.join(handle.mountDir, '.DS_Store'))).toBe(false);
     // Regression: .relay must NOT be excluded by default anymore.
     expect(existsSync(path.join(handle.mountDir, '.relay/state.json'))).toBe(true);
+    // Generic build/cache names are root-level defaults, not any-depth matches.
+    expect(existsSync(path.join(handle.mountDir, 'src/build/helper.ts'))).toBe(true);
+    expect(existsSync(path.join(handle.mountDir, 'packages/env/config.ts'))).toBe(true);
+    expect(existsSync(path.join(handle.mountDir, 'lib/out/formatter.ts'))).toBe(true);
+    expect(existsSync(path.join(handle.mountDir, 'src/target/arm64.rs'))).toBe(true);
+    expect(existsSync(path.join(handle.mountDir, 'test/coverage/reporter.ts'))).toBe(true);
+
+    handle.cleanup();
+  });
+
+  it('can opt out of broad default excludes while keeping .git excluded by default', () => {
+    write(path.join(projectDir, '.git/HEAD'), 'ref');
+    write(path.join(projectDir, 'node_modules/dep/index.js'), '1');
+    write(path.join(projectDir, 'dist/bundle.js'), 'dist');
+    write(path.join(projectDir, '.cache/tool/state'), 'cache');
+
+    const handle = createMount(projectDir, mountDir, {
+      ignoredPatterns: [],
+      readonlyPatterns: [],
+      excludeDirs: [],
+      includeDefaultExcludeDirs: false,
+    });
+
+    expect(existsSync(path.join(handle.mountDir, '.git'))).toBe(false);
+    expect(existsSync(path.join(handle.mountDir, 'node_modules/dep/index.js'))).toBe(true);
+    expect(existsSync(path.join(handle.mountDir, 'dist/bundle.js'))).toBe(true);
+    expect(existsSync(path.join(handle.mountDir, '.cache/tool/state'))).toBe(true);
 
     handle.cleanup();
   });
@@ -167,7 +240,7 @@ describe('createMount', () => {
     // Modify writable file in mount
     writeFileSync(path.join(handle.mountDir, 'writable.txt'), 'changed', 'utf8');
     // Modify "readonly" file directly (bypass chmod for test purposes)
-    // by writing it with write permissions first
+    // by writing it with write permissions first.
     const roPath = path.join(handle.mountDir, 'readonly.txt');
     chmodSync(roPath, 0o644);
     writeFileSync(roPath, 'tampered', 'utf8');
@@ -186,6 +259,35 @@ describe('createMount', () => {
     expect(readFileSync(path.join(projectDir, 'new.txt'), 'utf8')).toBe('net-new');
     expect(readFileSync(path.join(projectDir, 'readonly.txt'), 'utf8')).toBe('original-ro');
     expect(existsSync(path.join(projectDir, '_MOUNT_README.md'))).toBe(false);
+
+    handle.cleanup();
+  });
+
+  it('syncBack: skips files under default excluded paths', async () => {
+    write(path.join(projectDir, 'src/code.ts'), 'original');
+
+    const handle = createMount(projectDir, mountDir, {
+      ignoredPatterns: [],
+      readonlyPatterns: [],
+      excludeDirs: [],
+    });
+
+    write(path.join(handle.mountDir, 'src/code.ts'), 'changed');
+    write(path.join(handle.mountDir, 'dist/generated.js'), 'dist');
+    write(path.join(handle.mountDir, 'build/generated.js'), 'build');
+    write(path.join(handle.mountDir, 'node_modules/dep/index.js'), 'dep');
+    write(path.join(handle.mountDir, 'packages/web/node_modules/dep/index.js'), 'nested dep');
+    write(path.join(handle.mountDir, 'src/build/helper.ts'), 'source build');
+
+    const synced = await handle.syncBack();
+
+    expect(synced).toBe(2);
+    expect(readFileSync(path.join(projectDir, 'src/code.ts'), 'utf8')).toBe('changed');
+    expect(readFileSync(path.join(projectDir, 'src/build/helper.ts'), 'utf8')).toBe('source build');
+    expect(existsSync(path.join(projectDir, 'dist'))).toBe(false);
+    expect(existsSync(path.join(projectDir, 'build'))).toBe(false);
+    expect(existsSync(path.join(projectDir, 'node_modules'))).toBe(false);
+    expect(existsSync(path.join(projectDir, 'packages/web/node_modules'))).toBe(false);
 
     handle.cleanup();
   });

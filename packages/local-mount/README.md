@@ -29,7 +29,7 @@ Behavior:
 - Copies regular files into the mount
 - Applies ignore rules from `ignoredPatterns`
 - Marks read-only matches as mode `0o444`
-- Excludes `.git`, `node_modules`, and `.npm-cache` by default. Pass `includeGit: true` to opt the project's `.git` directory back in (see [Including `.git`](#including-git))
+- Excludes `.git`, `node_modules`, `.npm-cache`, and common build/cache output directories by default. Pass `includeGit: true` to opt the project's `.git` directory back in (see [Including `.git`](#including-git))
 - Writes `_MOUNT_README.md` and `.relayfile-local-mount` into the mount
 - Skips syncing `_MOUNT_README.md`, `.relayfile-local-mount`, ignored files, read-only files, and symlinks back to the source project
 
@@ -109,6 +109,47 @@ Conflict and delete rules:
 - one side deleted and the other changed since last sync → recreate the missing file from the changed side
 - readonly paths never flow mount→project; project-side edits still flow into the mount (the mount copy is re-chmodded `0o444`)
 - `_MOUNT_README.md`, `.relayfile-local-mount`, ignored paths, and excluded directories never cross
+
+## Default Excludes
+
+By default, mounts skip directories and files that are usually large generated output
+or local caches. These names match at any path depth:
+
+```txt
+.git
+node_modules
+.npm-cache
+__pycache__
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.gradle
+.nyc_output
+.turbo
+.cache
+.DS_Store
+```
+
+These more generic names match only at the project root so source paths such as
+`src/build/` or `packages/env/` are still mounted:
+
+```txt
+target
+.next
+dist
+build
+out
+.venv
+venv
+env
+coverage
+```
+
+Pass `includeDefaultExcludeDirs: false` to opt out of the broad build/cache list.
+For safety, `.git` stays excluded unless you also pass `includeGit: true`.
+`excludeDirs` still appends to whichever default set is active; bare caller entries
+retain the historical any-depth behavior, while path-style entries are root-relative
+prefixes.
 
 ## Including `.git`
 
@@ -192,7 +233,7 @@ const result = await launchOnMount({
   mountDir,
   ignoredPatterns,
   readonlyPatterns,
-  excludeDirs: ['dist'],
+  excludeDirs: ['vendor-cache'],
   agentName: 'reviewer',
   onBeforeLaunch: async (dir) => {
     // Add extra instructions or scratch files inside the mount if needed.
