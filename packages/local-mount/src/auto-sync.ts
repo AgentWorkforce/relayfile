@@ -237,8 +237,13 @@ function buildIgnoreGlobs(ctx: AutoSyncContext): string[] {
   // exclusions rather than introspecting it. The in-handler `isSyncCandidate`
   // filter is authoritative — this is just a perf hint so the watcher doesn't
   // recurse into heavy trees like node_modules or .git.
+  //
+  // Anything in `DEFAULT_EXCLUDED_DIRS` (mount.ts) MUST appear here too. If
+  // it doesn't, the initial walk skips the dir but the watcher still
+  // subscribes to every file underneath, generating events that the in-handler
+  // filter then has to throw away — correct, but expensive on big caches.
   const globs: string[] = [];
-  const candidates = ['.git', 'node_modules', 'dist', 'build', '.next', '.cache'];
+  const candidates = ['.git', 'node_modules', '.npm-cache', 'dist', 'build', '.next', '.cache'];
   for (const name of candidates) {
     if (ctx.isExcluded(name)) {
       globs.push(`**/${name}`, `**/${name}/**`);
