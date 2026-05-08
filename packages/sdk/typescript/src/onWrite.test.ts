@@ -360,6 +360,58 @@ describe("onWrite", () => {
     expect(sockets[0]!.url).toContain("token=client-token");
   });
 
+  it("auto-derives from client.getToken even when RELAYFILE_TOKEN env is set", async () => {
+    // Bug 5 (cortical-demo): when the caller's environment had RELAYFILE_TOKEN
+    // set (the default for any workspace started via WorkspaceHandle.mountEnv,
+    // which writes the token at join-time and never refreshes it), the
+    // dispatcher used to fall back to that stale literal instead of calling
+    // `client.getToken()`. Result: ~1 hour after workspace-join, the
+    // RELAYFILE_TOKEN literal was expired, the WS upgrade failed with an
+    // auth error, and the dispatcher silently stalled.
+    //
+    // Fix: when the caller provides a client (either explicitly or via the
+    // default-client path), client.getToken() is the source of truth — the
+    // env literal is no longer a fallback that can shadow it. The default
+    // client itself wires RELAYFILE_TOKEN into its own tokenProvider, so
+    // env-only callers still work; this test asserts that an EXPLICIT client
+    // wins over RELAYFILE_TOKEN.
+    const originalEnv = process.env.RELAYFILE_TOKEN;
+    process.env.RELAYFILE_TOKEN = "stale-from-env-mountenv";
+    try {
+      const getToken = vi.fn().mockResolvedValue("fresh-from-client");
+      const client = {
+        getEvents: vi.fn().mockResolvedValue({ events: [], nextCursor: null }),
+        recordHandlerError: vi.fn().mockResolvedValue(undefined),
+        getToken
+      } as unknown as OnWriteClient;
+      const sockets: MockWebSocket[] = [];
+
+      onWrite("/notion/pages/calls/*/transcript", () => undefined, {
+        client,
+        workspaceId: "ws_acme",
+        // NB: NO `token` option passed; RELAYFILE_TOKEN must NOT shadow auto-derive.
+        webSocketFactory: (url) => {
+          const socket = new MockWebSocket(url);
+          sockets.push(socket);
+          return socket;
+        }
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(getToken).toHaveBeenCalled();
+      expect(sockets).toHaveLength(1);
+      expect(sockets[0]!.url).toContain("token=fresh-from-client");
+      expect(sockets[0]!.url).not.toContain("stale-from-env-mountenv");
+    } finally {
+      if (originalEnv === undefined) {
+        delete process.env.RELAYFILE_TOKEN;
+      } else {
+        process.env.RELAYFILE_TOKEN = originalEnv;
+      }
+    }
+  });
+
   it("accepts a function-form token option and re-invokes it on reconnect", async () => {
     // Production callers should pass a factory rather than a literal so the
     // token can rotate without restarting the dispatcher. The factory must
