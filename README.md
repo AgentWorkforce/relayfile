@@ -1,8 +1,52 @@
-# File by Agent Relay: integration filesystem for agents
+# Relayfile
 
-Turn files into the integration surface for agents.
+**The integration filesystem for agents.**
 
-Relayfile exposes a workspace as a simple virtual file tree. Agents read with `cat`, write by saving files, and relayfile records the operations, permissions, events, and writeback queue behind that tree.
+Mount Linear, Notion, GitHub, Slack, HubSpot, Salesforce, and the rest of your SaaS stack under `~/relayfile-mount`. Every agent in your system reads them with `cat`, writes them by saving files, and coordinates through a real, ACL'd, real-time-synced filesystem.
+
+LLMs are far better at reading files than calling typed tools — the file system is the most-trained-on API in existence. Relayfile leans on that instead of fighting it.
+
+```bash
+$ ls ~/relayfile-mount
+github  linear  notion  slack
+
+$ cat ~/relayfile-mount/linear/issues/AGE-12.json
+{ "identifier": "AGE-12", "title": "Fix login bug", "state": "Todo", ... }
+
+$ echo '{"description":"Updated by reviewer agent"}' \
+    > ~/relayfile-mount/linear/issues/AGE-12.json   # PATCH back to Linear
+
+$ grep -l '"state":"Todo"' ~/relayfile-mount/linear/issues/*.json
+```
+
+That's the entire interface. No new SDK to learn, no MCP schemas eating your context window — just the bash and file-IO an agent already knows.
+
+## Why files
+
+Three reasons:
+
+1. **Context efficiency.** A typical MCP setup loads 100+ tool schemas into every agent session before any work happens. Files load nothing — context cost is what the agent actually opens.
+2. **Completeness.** APIs return what their search ranks. `ls` returns what's there. For "what changed yesterday across these three integrations" type questions, exhaustive enumeration beats query-by-query retrieval.
+3. **Coordination.** Multiple agents working through the same filesystem can see each other's writes immediately, scoped by ACL. Multi-agent collaboration becomes a property of the substrate, not something each app re-implements.
+
+## What's in the box
+
+- **File-native reads.** `ls`, `cat`, `grep`, `find` — the agent's native vocabulary. No tool schemas in context.
+- **File-native writes.** PATCH a record by writing to its canonical path. CREATE by saving a draft filename. DELETE by removing the file. Per-resource schemas are discoverable in-tree (`<resource>/.schema.json`). See [relayfile-adapters](https://github.com/AgentWorkforce/relayfile-adapters).
+- **Per-agent ACLs.** Scope each agent's read/write surface via `.relayfile.acl`. Agents see only the paths they should — readonly on the rest of the tree.
+- **Real-time multi-agent sync.** Writes from one agent are visible to others on the next read. No commit/push/pull cycle, no merge.
+- **Real OS mount.** Native bash, native `find`/`grep`/`jq`/`rg`, no emulation gaps. Any process — agents, scripts, IDEs — can read or write the mount.
+- **Pluggable architecture.** A core file server plus [adapters](https://github.com/AgentWorkforce/relayfile-adapters) (per-integration logic) and [providers](https://github.com/AgentWorkforce/relayfile-providers) (auth/proxy via Nango, Composio, Pipedream). One provider integration unlocks tens of apps.
+
+## How relayfile compares
+
+The "give agents a filesystem" idea is a healthy direction — relayfile isn't the only project pointing at it.
+
+**vs. MCP servers (Linear, Notion, Slack, GitHub, …).** MCP gives the agent a typed tool surface per integration. Strong for single, well-defined writes (`linear.create_issue(title, priority, …)` enforces the shape at call time). The cost is that each connected server loads tool schemas into the context window, and an LLM is more reliable reading a directory than juggling N typed APIs. Relayfile exposes the same integrations as paths you can `Read` / `Bash` / `Glob` — no schema overhead — with exhaustive enumeration where MCP returns API search results. The two compose well: relayfile for reads and synthesis, MCP for typed writes that need server-side validation.
+
+**vs. [Mirage](https://github.com/strukto-ai/mirage) and other virtual-filesystem-for-agents projects.** Mirage is doing thoughtful work in this space and it's worth a look. Their focus is **infrastructure and storage primitives** — S3, Postgres, Redis, GDrive, GCS, Mongo, SSH — mounted side-by-side as one tree. Relayfile's focus is **integrations** — the SaaS APIs where day-to-day agent work lives — with file-native writeback (PATCH / CREATE / DELETE through file ops), per-agent ACLs, real-time multi-agent sync, and a real OS mount under `~/relayfile-mount`. Different scopes, both useful; pick the one your work lives in (or run both).
+
+**vs. rolling your own.** A single agent against a single backend can do fine with FUSE, Mountpoint, or direct SDK calls. Relayfile becomes worth it when you need multi-agent coordination, scoped capabilities, and a consistent read/write contract across many SaaS surfaces.
 
 ## Run Locally
 
