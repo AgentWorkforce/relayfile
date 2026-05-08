@@ -19,6 +19,15 @@ export interface AutoSyncContext {
   realProjectDir: string;
   isExcluded: (relPosix: string) => boolean;
   /**
+   * The exact set of normalized directory names/prefixes that drive
+   * `isExcluded` (i.e., {@link MountOptions.excludeDirs} merged with the
+   * library defaults). Used purely to hint `@parcel/watcher` which subtrees
+   * to skip subscribing to. The in-handler `isSyncCandidate` filter remains
+   * authoritative; this is just a perf hint that keeps the watcher from
+   * recursing into heavy trees like `node_modules` or `.npm-cache`.
+   */
+  excludedNames: readonly string[];
+  /**
    * Directory-only ignore patterns (ending in `/`) must only match when the
    * path is a directory. Callers that know the path's type pass `isDirectory`;
    * callers that don't should omit the second argument and fall back to the
@@ -143,8 +152,6 @@ export function startAutoSync(
     pendingDebounces.set(absPath, t);
   };
 
-  const ignoreGlobs = buildIgnoreGlobs(ctx);
-
   const subscribeTo = (root: string): Promise<AsyncSubscription> =>
     watcher.subscribe(
       root,
@@ -154,7 +161,7 @@ export function startAutoSync(
           schedulePathSync(root, ev.path);
         }
       },
-      { ignore: ignoreGlobs }
+      { ignore: buildIgnoreGlobs(ctx, root) }
     );
 
   let mountSub: AsyncSubscription | undefined;
@@ -229,18 +236,28 @@ export function startAutoSync(
   };
 }
 
-function buildIgnoreGlobs(ctx: AutoSyncContext): string[] {
-  // @parcel/watcher matches globs against absolute paths via globset. For each
-  // excluded directory name, ignore both the directory itself and everything
-  // beneath it, anywhere under the watched root. The `isExcluded` predicate is
-  // driven by a Set of directory names, so we probe a small set of common
-  // exclusions rather than introspecting it. The in-handler `isSyncCandidate`
-  // filter is authoritative — this is just a perf hint so the watcher doesn't
-  // recurse into heavy trees like node_modules or .git.
+function buildIgnoreGlobs(ctx: AutoSyncContext, watchRoot: string): string[] {
+  // @parcel/watcher's wrapper splits each ignore entry by is-glob: globs are
+  // compiled by picomatch and matched as regexes against absolute event paths;
+  // non-globs are resolved as literal absolute paths. For each excluded entry
+  // (library defaults + user-supplied excludeDirs) we emit shapes that mirror
+  // `isExcludedPath`'s semantics, so a watcher-suppressed event never differs
+  // from what the in-handler filter would have rejected.
+  //
+  //   - Bare directory names (e.g. `node_modules`) match at any depth, so
+  //     emit `**/<name>` plus `**/<name>/**`. picomatch turns both into
+  //     depth-agnostic regexes that catch the dir and its descendants.
+  //   - Path-style entries (e.g. `build/cache`) are root-anchored prefixes
+  //     in `isExcludedPath` — they only match `<root>/build/cache`, NOT
+  //     `<root>/src/build/cache`. Emit absolute patterns rooted at the
+  //     watch dir so the watcher hides the same set: a literal absolute
+  //     path (which the wrapper routes to ignorePaths) plus an anchored
+  //     descendant glob.
   const globs: string[] = [];
-  const candidates = ['.git', 'node_modules', 'dist', 'build', '.next', '.cache'];
-  for (const name of candidates) {
-    if (ctx.isExcluded(name)) {
+  for (const name of ctx.excludedNames) {
+    if (name.includes('/')) {
+      globs.push(`${watchRoot}/${name}`, `${watchRoot}/${name}/**`);
+    } else {
       globs.push(`**/${name}`, `**/${name}/**`);
     }
   }
