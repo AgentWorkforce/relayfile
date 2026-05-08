@@ -164,8 +164,8 @@ go run ./cmd/relayfile-cli mount "$RELAYFILE_WORKSPACE" ./relayfile-mount --once
 
 This repo is the file server and local mount layer. The wider Agent Relay file ecosystem also includes:
 
-- [relayfile-adapters](https://github.com/AgentWorkforce/relayfile-adapters) (`../relayfile-adapters` in the local workspace): maps provider webhooks and objects into relayfile paths, normalizes events, and defines writeback behavior.
-- [relayfile-providers](https://github.com/AgentWorkforce/relayfile-providers) (`../relayfile-providers` in the local workspace): handles provider auth, token lookup, API proxying, webhook subscriptions, and connection health.
+- [relayfile-adapters](https://github.com/AgentWorkforce/relayfile-adapters): maps provider webhooks and objects into relayfile paths, normalizes events, and defines writeback behavior.
+- [relayfile-providers](https://github.com/AgentWorkforce/relayfile-providers): handles provider auth, token lookup, API proxying, webhook subscriptions, and connection health.
 
 Hosted Agent Relay runs these pieces for you. Fully self-hosted provider-backed files need relayfile plus the adapter and provider repos for the systems you expose.
 
