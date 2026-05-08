@@ -63,28 +63,36 @@ export interface MountHandle {
   cleanup(): void;
 }
 
-const DEFAULT_EXCLUDED_DIRS = [
+interface ExcludeRules {
+  anyDepthNames: Set<string>;
+  rootPrefixes: Set<string>;
+}
+
+const DEFAULT_ANY_DEPTH_EXCLUDES = [
   '.git',
   'node_modules',
   '.npm-cache',
+  '__pycache__',
+  '.pytest_cache',
+  '.mypy_cache',
+  '.ruff_cache',
+  '.gradle',
+  '.nyc_output',
+  '.turbo',
+  '.cache',
+  '.DS_Store',
+];
+
+const DEFAULT_ROOT_EXCLUDES = [
   'target',
   '.next',
   'dist',
   'build',
   'out',
-  '__pycache__',
-  '.pytest_cache',
-  '.mypy_cache',
-  '.ruff_cache',
   '.venv',
   'venv',
   'env',
-  '.gradle',
   'coverage',
-  '.nyc_output',
-  '.turbo',
-  '.cache',
-  '.DS_Store',
 ];
 const MOUNT_README_FILENAME = '_MOUNT_README.md';
 const MOUNT_MARKER_FILENAME = '.relayfile-local-mount';
@@ -104,21 +112,11 @@ export function createMount(
   const readonlyMatcher = createPathMatcher(readonlyPatterns);
   const ignoredMatcher = createPathMatcher(ignoredPatterns);
   const includeDefaultExcludeDirs = options.includeDefaultExcludeDirs !== false;
-  // `.git` is in DEFAULT_EXCLUDED_DIRS so the mount stays small and git
+  // `.git` is in the default any-depth excludes so the mount stays small and git
   // operations don't accidentally cross-mutate the host repo. When the caller
   // opts in via `includeGit`, drop it from the defaults and instead route it
   // through the noSyncBack matcher below so it stays one-way.
-  const defaultExcludes = includeDefaultExcludeDirs
-    ? DEFAULT_EXCLUDED_DIRS
-    : ['.git'];
-  const activeDefaultExcludes = includeGit
-    ? defaultExcludes.filter((d) => d !== '.git')
-    : defaultExcludes;
-  const excludeSet = new Set(
-    [...activeDefaultExcludes, ...options.excludeDirs]
-      .map((entry) => normalizeRelativePosix(entry).replace(/^\/+|\/+$/g, ''))
-      .filter(Boolean)
-  );
+  const excludeRules = createExcludeRules(options.excludeDirs, includeGit, includeDefaultExcludeDirs);
   const noSyncBackPatterns = includeGit ? ['.git', '.git/**'] : [];
   const noSyncBackMatcher = createPathMatcher(noSyncBackPatterns);
 
@@ -145,7 +143,7 @@ export function createMount(
     resolvedProjectDir,
     realMountDir,
     realMountDir,
-    excludeSet,
+    excludeRules,
     readonlyMatcher,
     ignoredMatcher
   );
@@ -164,8 +162,9 @@ export function createMount(
   const autoSyncContext: AutoSyncContext = {
     realMountDir,
     realProjectDir: resolvedProjectDir,
-    isExcluded: (relPosix) => isExcludedPath(relPosix, excludeSet),
-    excludedNames: [...excludeSet],
+    isExcluded: (relPosix) => isExcludedPath(relPosix, excludeRules),
+    excludedAnyDepthNames: [...excludeRules.anyDepthNames],
+    excludedRootPrefixes: [...excludeRules.rootPrefixes],
     isIgnored: (relPosix, isDir) => isPathMatched(relPosix, ignoredMatcher, isDir),
     isReadonly: (relPosix) => isPathMatched(relPosix, readonlyMatcher),
     isNoSyncBack: (relPosix) => isPathMatched(relPosix, noSyncBackMatcher),
@@ -260,7 +259,7 @@ function walkProjectTree(
   currentDir: string,
   mountDir: string,
   currentMountDir: string,
-  excludeSet: Set<string>,
+  excludeRules: ExcludeRules,
   readonlyMatcher: Ignore,
   ignoredMatcher: Ignore
 ): void {
@@ -278,7 +277,7 @@ function walkProjectTree(
       continue;
     }
 
-    if (isExcludedPath(relativePath, excludeSet)) {
+    if (isExcludedPath(relativePath, excludeRules)) {
       continue;
     }
 
@@ -298,7 +297,7 @@ function walkProjectTree(
         absolutePath,
         mountDir,
         safeMountDir,
-        excludeSet,
+        excludeRules,
         readonlyMatcher,
         ignoredMatcher
       );
@@ -312,8 +311,7 @@ function walkProjectTree(
         absolutePath,
         mountPath,
         relativePath,
-        readonlyMatcher,
-        true
+        readonlyMatcher
       );
       continue;
     }
@@ -328,9 +326,7 @@ function walkProjectTree(
       absolutePath,
       mountPath,
       relativePath,
-      readonlyMatcher,
-      undefined,
-      true
+      readonlyMatcher
     );
   }
 }
@@ -341,8 +337,7 @@ function copySymlinkedFile(
   sourcePath: string,
   mountPath: string,
   relativePath: string,
-  readonlyMatcher: Ignore,
-  targetDirectoryReady = false
+  readonlyMatcher: Ignore
 ): void {
   let realSource: string;
   let resolvedStat: Stats;
@@ -364,8 +359,7 @@ function copySymlinkedFile(
     mountPath,
     relativePath,
     readonlyMatcher,
-    resolvedStat.mode,
-    targetDirectoryReady
+    resolvedStat.mode
   );
 }
 
@@ -376,10 +370,9 @@ function copyMountedFile(
   mountPath: string,
   relativePath: string,
   readonlyMatcher: Ignore,
-  sourceMode?: number,
-  targetDirectoryReady = false
+  sourceMode?: number
 ): void {
-  const safeMountPath = resolveSafeCopyTarget(mountDir, mountPath, { targetDirectoryReady });
+  const safeMountPath = resolveSafeCopyTarget(mountDir, mountPath);
   if (!safeMountPath) {
     return;
   }
@@ -445,6 +438,51 @@ function createPathMatcher(patterns: string[]): Ignore {
   return ignore().add(
     patterns.map((pattern) => pattern.trim()).filter((pattern) => pattern !== '' && !pattern.startsWith('#'))
   );
+}
+
+function createExcludeRules(
+  excludeDirs: string[],
+  includeGit: boolean,
+  includeDefaultExcludeDirs: boolean
+): ExcludeRules {
+  const anyDepthNames = new Set<string>();
+  const rootPrefixes = new Set<string>();
+
+  if (includeDefaultExcludeDirs) {
+    addExcludeEntries(anyDepthNames, rootPrefixes, DEFAULT_ANY_DEPTH_EXCLUDES, 'any-depth');
+    addExcludeEntries(anyDepthNames, rootPrefixes, DEFAULT_ROOT_EXCLUDES, 'root-prefix');
+  } else if (!includeGit) {
+    addExcludeEntries(anyDepthNames, rootPrefixes, ['.git'], 'any-depth');
+  }
+
+  if (includeGit) {
+    anyDepthNames.delete('.git');
+  }
+
+  // Preserve caller-supplied excludeDirs semantics: bare names match at any
+  // depth, while path-style entries are root-anchored prefixes.
+  addExcludeEntries(anyDepthNames, rootPrefixes, excludeDirs, 'legacy');
+
+  return { anyDepthNames, rootPrefixes };
+}
+
+function addExcludeEntries(
+  anyDepthNames: Set<string>,
+  rootPrefixes: Set<string>,
+  entries: string[],
+  mode: 'any-depth' | 'root-prefix' | 'legacy'
+): void {
+  for (const entry of entries) {
+    const normalized = normalizeRelativePosix(entry).replace(/^\/+|\/+$/g, '');
+    if (!normalized) {
+      continue;
+    }
+    if (mode === 'root-prefix' || (mode === 'legacy' && normalized.includes('/'))) {
+      rootPrefixes.add(normalized);
+    } else {
+      anyDepthNames.add(normalized);
+    }
+  }
 }
 
 function isPathMatched(relPath: string, matcher: Ignore, isDirectory = false): boolean {
@@ -549,13 +587,13 @@ function resolveVerifiedSyncTarget(projectDir: string, relativePath: string): st
   }
 }
 
-function isExcludedPath(relativePath: string, excludeSet: Set<string>): boolean {
+function isExcludedPath(relativePath: string, excludeRules: ExcludeRules): boolean {
   const normalized = normalizeRelativePosix(relativePath).replace(/^\/+|\/+$/g, '');
   if (!normalized) return false;
   const segments = normalized.split('/');
   return segments.some((segment, index) => {
     const prefix = segments.slice(0, index + 1).join('/');
-    return excludeSet.has(segment) || excludeSet.has(prefix);
+    return excludeRules.anyDepthNames.has(segment) || excludeRules.rootPrefixes.has(prefix);
   });
 }
 
@@ -565,23 +603,12 @@ function isPathWithinRoot(candidatePath: string, rootPath: string): boolean {
   return resolvedCandidate === resolvedRoot || resolvedCandidate.startsWith(`${resolvedRoot}${path.sep}`);
 }
 
-function resolveSafeCopyTarget(
-  rootPath: string,
-  candidatePath: string,
-  opts: { targetDirectoryReady?: boolean } = {}
-): string | null {
+function resolveSafeCopyTarget(rootPath: string, candidatePath: string): string | null {
   if (!isPathWithinRoot(candidatePath, rootPath)) {
     return null;
   }
 
   const parentPath = path.dirname(candidatePath);
-  if (opts.targetDirectoryReady) {
-    if (!isPathWithinRoot(parentPath, rootPath)) {
-      return null;
-    }
-    return path.join(parentPath, path.basename(candidatePath));
-  }
-
   const realParent = ensureDirectoryWithinRoot(rootPath, parentPath);
   if (!realParent) {
     return null;

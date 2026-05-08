@@ -84,6 +84,7 @@ describe('createMount', () => {
   it('excludes common cache and build output paths by default, but NOT .relay', () => {
     write(path.join(projectDir, '.git/HEAD'), 'ref');
     write(path.join(projectDir, 'node_modules/dep/index.js'), '1');
+    write(path.join(projectDir, 'packages/web/node_modules/dep/index.js'), 'nested dep');
     write(path.join(projectDir, '.npm-cache/_cacache/content-v2/sha512/aa/bb/blob'), 'cached');
     write(path.join(projectDir, 'target/debug/app'), 'rust');
     write(path.join(projectDir, '.next/cache/entry'), 'next');
@@ -104,6 +105,11 @@ describe('createMount', () => {
     write(path.join(projectDir, '.cache/tool/state'), 'cache');
     write(path.join(projectDir, '.DS_Store'), 'metadata');
     write(path.join(projectDir, '.relay/state.json'), '{}');
+    write(path.join(projectDir, 'src/build/helper.ts'), 'nested build source');
+    write(path.join(projectDir, 'packages/env/config.ts'), 'nested env source');
+    write(path.join(projectDir, 'lib/out/formatter.ts'), 'nested out source');
+    write(path.join(projectDir, 'src/target/arm64.rs'), 'nested target source');
+    write(path.join(projectDir, 'test/coverage/reporter.ts'), 'nested coverage source');
     write(path.join(projectDir, 'keep.txt'), 'yes');
 
     const handle = createMount(projectDir, mountDir, {
@@ -115,6 +121,7 @@ describe('createMount', () => {
     expect(existsSync(path.join(handle.mountDir, 'keep.txt'))).toBe(true);
     expect(existsSync(path.join(handle.mountDir, '.git'))).toBe(false);
     expect(existsSync(path.join(handle.mountDir, 'node_modules'))).toBe(false);
+    expect(existsSync(path.join(handle.mountDir, 'packages/web/node_modules'))).toBe(false);
     expect(existsSync(path.join(handle.mountDir, '.npm-cache'))).toBe(false);
     expect(existsSync(path.join(handle.mountDir, 'target'))).toBe(false);
     expect(existsSync(path.join(handle.mountDir, '.next'))).toBe(false);
@@ -136,6 +143,12 @@ describe('createMount', () => {
     expect(existsSync(path.join(handle.mountDir, '.DS_Store'))).toBe(false);
     // Regression: .relay must NOT be excluded by default anymore.
     expect(existsSync(path.join(handle.mountDir, '.relay/state.json'))).toBe(true);
+    // Generic build/cache names are root-level defaults, not any-depth matches.
+    expect(existsSync(path.join(handle.mountDir, 'src/build/helper.ts'))).toBe(true);
+    expect(existsSync(path.join(handle.mountDir, 'packages/env/config.ts'))).toBe(true);
+    expect(existsSync(path.join(handle.mountDir, 'lib/out/formatter.ts'))).toBe(true);
+    expect(existsSync(path.join(handle.mountDir, 'src/target/arm64.rs'))).toBe(true);
+    expect(existsSync(path.join(handle.mountDir, 'test/coverage/reporter.ts'))).toBe(true);
 
     handle.cleanup();
   });

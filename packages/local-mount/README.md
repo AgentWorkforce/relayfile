@@ -113,36 +113,43 @@ Conflict and delete rules:
 ## Default Excludes
 
 By default, mounts skip directories and files that are usually large generated output
-or local caches:
+or local caches. These names match at any path depth:
 
 ```txt
 .git
 node_modules
 .npm-cache
-target
-.next
-dist
-build
-out
 __pycache__
 .pytest_cache
 .mypy_cache
 .ruff_cache
-.venv
-venv
-env
 .gradle
-coverage
 .nyc_output
 .turbo
 .cache
 .DS_Store
 ```
 
+These more generic names match only at the project root so source paths such as
+`src/build/` or `packages/env/` are still mounted:
+
+```txt
+target
+.next
+dist
+build
+out
+.venv
+venv
+env
+coverage
+```
+
 Pass `includeDefaultExcludeDirs: false` to opt out of the broad build/cache list.
 For safety, `.git` stays excluded unless you also pass `includeGit: true`.
-`excludeDirs` still appends additional names or root-relative prefixes to whichever
-default set is active.
+`excludeDirs` still appends to whichever default set is active; bare caller entries
+retain the historical any-depth behavior, while path-style entries are root-relative
+prefixes.
 
 ## Including `.git`
 
