@@ -88,7 +88,7 @@ describe('launchOnMount', () => {
     let cleanedUp = false;
     let stopCalled = false;
 
-    const createSpy = vi.spyOn(mountModule, 'createMount').mockReturnValue({
+    const createSpy = vi.spyOn(mountModule, 'createMount').mockResolvedValue({
       mountDir,
       startAutoSync: () => ({
         stop: async () => {

@@ -63,11 +63,11 @@ const MOUNT_MARKER_FILENAME = '.relayfile-local-mount';
 const MOUNT_MARKER_CONTENT =
   'This directory is managed by @relayfile/local-mount. Do not place unrelated files here; the directory will be deleted when the mount is torn down.\n';
 
-export function createMount(
+export async function createMount(
   projectDir: string,
   mountDir: string,
   options: MountOptions
-): MountHandle {
+): Promise<MountHandle> {
   const resolvedProjectDir = realpathSync(projectDir);
   const resolvedMountDir = path.resolve(mountDir);
   const readonlyPatterns = [...options.readonlyPatterns];
@@ -108,7 +108,7 @@ export function createMount(
   const realMountDir = realpathSync(resolvedMountDir);
   writeFileSync(path.join(realMountDir, MOUNT_MARKER_FILENAME), MOUNT_MARKER_CONTENT, 'utf8');
 
-  walkProjectTree(
+  await walkProjectTree(
     resolvedProjectDir,
     resolvedProjectDir,
     realMountDir,
@@ -222,17 +222,29 @@ function assertMountDirSafeToRemove(mountDir: string, projectDir: string): void 
   }
 }
 
-function walkProjectTree(
+// Yield often enough that a consumer's setInterval (e.g. an `ora` spinner) can
+// tick during init even on flat directories with thousands of entries. The
+// goal is not throughput; it is keeping the parent event loop unblocked.
+const WALK_YIELD_EVERY = 64;
+
+async function walkProjectTree(
   projectDir: string,
   currentDir: string,
   mountDir: string,
   excludeSet: Set<string>,
   readonlyMatcher: Ignore,
   ignoredMatcher: Ignore
-): void {
+): Promise<void> {
+  await yieldToEventLoop();
   const entries = readdirSync(currentDir, { withFileTypes: true });
 
+  let processed = 0;
   for (const entry of entries) {
+    if (processed > 0 && processed % WALK_YIELD_EVERY === 0) {
+      await yieldToEventLoop();
+    }
+    processed += 1;
+
     const absolutePath = path.join(currentDir, entry.name);
     const relativePath = normalizeRelativePosix(path.relative(projectDir, absolutePath));
 
@@ -258,7 +270,7 @@ function walkProjectTree(
       if (!ensureDirectoryWithinRoot(mountDir, mountPath)) {
         continue;
       }
-      walkProjectTree(projectDir, absolutePath, mountDir, excludeSet, readonlyMatcher, ignoredMatcher);
+      await walkProjectTree(projectDir, absolutePath, mountDir, excludeSet, readonlyMatcher, ignoredMatcher);
       continue;
     }
 
@@ -273,6 +285,10 @@ function walkProjectTree(
 
     copyMountedFile(projectDir, mountDir, absolutePath, mountPath, relativePath, readonlyMatcher);
   }
+}
+
+function yieldToEventLoop(): Promise<void> {
+  return new Promise<void>((resolve) => setImmediate(resolve));
 }
 
 function copySymlinkedFile(

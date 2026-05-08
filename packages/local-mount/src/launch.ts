@@ -67,7 +67,7 @@ export interface LaunchOnMountResult {
  * exit code.
  */
 export async function launchOnMount(opts: LaunchOnMountOptions): Promise<LaunchOnMountResult> {
-  const handle: MountHandle = createMount(opts.projectDir, opts.mountDir, {
+  const handle: MountHandle = await createMount(opts.projectDir, opts.mountDir, {
     ignoredPatterns: opts.ignoredPatterns ?? [],
     readonlyPatterns: opts.readonlyPatterns ?? [],
     excludeDirs: opts.excludeDirs ?? [],
