@@ -6,6 +6,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+_No unreleased changes._
+
+## [0.7.0] - 2026-05-08
+
 ### Changed
 - **BREAKING:** `createMount` is now async and returns `Promise<MountHandle>`. The walker yields the event loop between directory entries during init, so a consumer's `setInterval` (e.g. an `ora` spinner) keeps firing while the mount is being built. Previously the synchronous walker froze the consumer's event loop for the entire init window, causing spinners to display a static frame. Callers must `await createMount(...)` — there is no `createMountSync`. `launchOnMount` already awaits it internally so its surface is unchanged. (#104)
 
@@ -121,7 +125,8 @@ Initial release.
 - Directory-only ignore patterns (e.g. `cache/`) match directories without swallowing like-named files.
 - README documenting the mount lifecycle, dotfile semantics, and auto-sync behavior. ([#48])
 
-[Unreleased]: https://github.com/AgentWorkforce/relayfile/compare/v0.6.15...HEAD
+[Unreleased]: https://github.com/AgentWorkforce/relayfile/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.7.0
 [0.6.15]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.6.15
 [0.6.14]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.6.14
 [0.6.13]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.6.13
