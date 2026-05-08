@@ -13,10 +13,15 @@ export interface LaunchOnMountOptions {
   args: string[];
   /** Glob-style ignore patterns (files excluded entirely from the mount). */
   ignoredPatterns?: string[];
-  /** Glob-style readonly patterns (files copied with mode 0o444). */
+  /** Glob-style readonly patterns (files hardlinked when possible and skipped on sync-back). */
   readonlyPatterns?: string[];
   /** Extra directory names to exclude from the mount on top of defaults. */
   excludeDirs?: string[];
+  /**
+   * Include the built-in cache/build exclusion list. Defaults to true. `.git`
+   * remains excluded unless `includeGit` is true.
+   */
+  includeDefaultExcludeDirs?: boolean;
   /**
    * Include the project's `.git` directory inside the mount with one-way
    * project→mount sync. Defaults to false. See {@link MountOptions.includeGit}
@@ -73,6 +78,7 @@ export async function launchOnMount(opts: LaunchOnMountOptions): Promise<LaunchO
     excludeDirs: opts.excludeDirs ?? [],
     agentName: opts.agentName,
     includeGit: opts.includeGit,
+    includeDefaultExcludeDirs: opts.includeDefaultExcludeDirs,
   });
 
   let syncedCount = 0;

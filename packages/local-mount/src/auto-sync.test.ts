@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
-  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -146,9 +145,10 @@ describe('startAutoSync', () => {
     const auto = handle.startAutoSync({ debounceMs: 50, scanIntervalMs: 10_000 });
     await auto.ready();
     try {
-      // Bypass the 0o444 permission for the test.
+      // Replace the readonly hardlink with a mount-local file so the test can
+      // exercise no-sync-back filtering without mutating the source via the link.
       const mountFile = path.join(handle.mountDir, 'locked.txt');
-      chmodSync(mountFile, 0o644);
+      rmSync(mountFile, { force: true });
       writeFileSync(mountFile, 'tampered', 'utf8');
 
       // Give autosync time to notice and choose not to propagate.

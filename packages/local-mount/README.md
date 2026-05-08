@@ -26,12 +26,17 @@ interface MountHandle {
 ```
 
 Behavior:
-- Copies regular files into the mount
+- Copies writable regular files into the mount
 - Applies ignore rules from `ignoredPatterns`
-- Marks read-only matches as mode `0o444`
-- Excludes `.git`, `node_modules`, and `.npm-cache` by default. Pass `includeGit: true` to opt the project's `.git` directory back in (see [Including `.git`](#including-git))
+- Hardlinks read-only matches when possible, falling back to a copied `0o444` file on cross-device or permission failures
+- Excludes `.git`, `node_modules`, `.npm-cache`, and common build/cache output directories by default. Pass `includeGit: true` to opt the project's `.git` directory back in (see [Including `.git`](#including-git))
 - Writes `_MOUNT_README.md` and `.relayfile-local-mount` into the mount
 - Skips syncing `_MOUNT_README.md`, `.relayfile-local-mount`, ignored files, read-only files, and symlinks back to the source project
+
+Read-only patterns are a sync policy, not a security boundary. When a read-only file
+is hardlinked into the mount, the mount path and project path share an inode; normal
+writes to either path affect the same file. The mount does not `chmod` hardlinked
+read-only files because that would also change the project file's mode.
 
 ### `readAgentDotfiles(projectDir, options?)`
 
@@ -107,8 +112,42 @@ Conflict and delete rules:
 - only one side changed → propagate that change
 - one side deleted and the other unchanged since last sync → propagate the delete
 - one side deleted and the other changed since last sync → recreate the missing file from the changed side
-- readonly paths never flow mount→project; project-side edits still flow into the mount (the mount copy is re-chmodded `0o444`)
+- readonly paths are ignored by sync-back; project-side edits still flow into the mount (through the shared hardlink when linked, or by overwriting and re-chmodding a copied fallback)
 - `_MOUNT_README.md`, `.relayfile-local-mount`, ignored paths, and excluded directories never cross
+
+## Default Excludes
+
+By default, mounts skip directories and files that are usually large generated output
+or local caches:
+
+```txt
+.git
+node_modules
+.npm-cache
+target
+.next
+dist
+build
+out
+__pycache__
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.venv
+venv
+env
+.gradle
+coverage
+.nyc_output
+.turbo
+.cache
+.DS_Store
+```
+
+Pass `includeDefaultExcludeDirs: false` to opt out of the broad build/cache list.
+For safety, `.git` stays excluded unless you also pass `includeGit: true`.
+`excludeDirs` still appends additional names or root-relative prefixes to whichever
+default set is active.
 
 ## Including `.git`
 
@@ -150,8 +189,9 @@ coverage/
 
 ### `.agentreadonly`
 
-Files matching these patterns are copied into the mount, but made read-only.
-Changes to those files are not synced back.
+Files matching these patterns are hardlinked into the mount when the filesystem
+allows it, or copied into the mount as `0o444` when hardlinking is not available.
+They are skipped by sync-back.
 
 Example:
 
@@ -192,7 +232,7 @@ const result = await launchOnMount({
   mountDir,
   ignoredPatterns,
   readonlyPatterns,
-  excludeDirs: ['dist'],
+  excludeDirs: ['vendor-cache'],
   agentName: 'reviewer',
   onBeforeLaunch: async (dir) => {
     // Add extra instructions or scratch files inside the mount if needed.
@@ -235,23 +275,29 @@ The implementation is intentionally conservative about `mountDir`:
 
 These checks help prevent accidental deletion of unrelated directories during mount recreation and cleanup.
 
-## Why copy instead of symlink?
+## Why not symlink everything?
 
-The mount is built by copying files rather than symlinking them. Symlinks would break several of the package's guarantees:
+The mount is built by copying writable files and hardlinking read-only files when
+possible, rather than symlinking the source tree. Symlinks would break several of
+the package's guarantees:
 
-1. **`.agentreadonly` can't be enforced.** Read-only is implemented by `chmod 0o444` on the mount copy. `chmod` follows symlinks, so applying it to a symlink would mark the *source* file read-only, flipping the project's permissions instead of restricting the agent's view.
-2. **The auto-sync conflict model assumes two distinct files.** Rules like "both sides changed → mount wins", "one side deleted → propagate", and "readonly paths never flow mount→project but project-side edits still flow into the mount" only make sense if mount and source are separate bytes. Through a symlink they're the same inode — there's no mount-side copy to re-chmod `0o444` after a project-side edit.
+1. **Writable files need containment.** A copy gives you a checkpoint: if the agent destroys files or writes garbage, the source is untouched until `syncBack()` filters and copies back.
+2. **The auto-sync conflict model assumes distinct writable files.** Rules like "both sides changed → mount wins" and "one side deleted → propagate" only make sense if the normal writable mount and source paths are separate bytes.
 3. **Editor save-via-rename breaks symlinks anyway.** Most editors save by writing a temp file and renaming it over the target, which replaces the symlink with a regular file and severs the link. A "live view" via symlinks isn't reliable in practice.
-4. **Containment.** A copy gives you a checkpoint: if the agent destroys files or writes garbage, the source is untouched until `syncBack()` filters and copies back. With symlinks, every keystroke is live on the project.
-5. **`.agentignore` hiding works fine with symlinks** (just don't link), but the readonly and conflict semantics still need copies — so a hybrid would be more complex than just copying everything.
+4. **`.agentignore` hiding works fine with symlinks** (just don't link), but writable sync semantics still need copies.
 
-Source-side symlinks that resolve to regular files inside the project *are* followed when building the mount; the resolved bytes are copied. Symlinks the agent creates inside the mount are skipped on sync-back.
+Read-only hardlinks are the narrow exception: they avoid byte-copying files that
+the mount should not sync back. The implementation never `chmod`s those hardlinks,
+because mode bits are inode metadata and changing them would mutate the source
+file's permissions.
+
+Source-side symlinks that resolve to regular files inside the project *are* followed when building the mount; they are materialized as regular mount entries using the same copy-or-hardlink rules. Symlinks the agent creates inside the mount are skipped on sync-back.
 
 ## Notes
 
 - Requires Node.js 18+
-- The current implementation copies files into the mount rather than creating filesystem-level FUSE mounts
-- Source symlinks are only copied when they resolve to regular files inside the source project
+- The current implementation materializes files into the mount rather than creating filesystem-level FUSE mounts
+- Source symlinks are only materialized when they resolve to regular files inside the source project
 
 ## License
 

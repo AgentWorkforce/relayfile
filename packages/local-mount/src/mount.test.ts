@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
-  chmodSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -37,7 +36,7 @@ describe('createMount', () => {
     try { rmSync(path.dirname(mountDir), { recursive: true, force: true }); } catch { /* best effort */ }
   });
 
-  it('happy path: copies non-ignored files, chmods readonly to 0o444, skips ignored', () => {
+  it('happy path: copies non-ignored files, hardlinks readonly files when possible, skips ignored', () => {
     write(path.join(projectDir, 'src/code.ts'), 'code');
     write(path.join(projectDir, 'secrets/api-key.txt'), 'shhh');
     write(path.join(projectDir, 'docs/guide.md'), 'guide');
@@ -55,11 +54,15 @@ describe('createMount', () => {
     expect(existsSync(path.join(handle.mountDir, 'secrets/api-key.txt'))).toBe(false);
     expect(existsSync(path.join(handle.mountDir, 'secrets'))).toBe(false);
 
-    const roMode = statSync(path.join(handle.mountDir, 'config.ro')).mode & 0o777;
-    expect(roMode).toBe(0o444);
+    const sourceRo = statSync(path.join(projectDir, 'config.ro'));
+    const mountRo = statSync(path.join(handle.mountDir, 'config.ro'));
+    expect(mountRo.dev).toBe(sourceRo.dev);
+    expect(mountRo.ino).toBe(sourceRo.ino);
 
-    const guideMode = statSync(path.join(handle.mountDir, 'docs/guide.md')).mode & 0o777;
-    expect(guideMode).toBe(0o444);
+    const sourceGuide = statSync(path.join(projectDir, 'docs/guide.md'));
+    const mountGuide = statSync(path.join(handle.mountDir, 'docs/guide.md'));
+    expect(mountGuide.dev).toBe(sourceGuide.dev);
+    expect(mountGuide.ino).toBe(sourceGuide.ino);
 
     // Writable file retains something other than 0o444
     const writableMode = statSync(path.join(handle.mountDir, 'src/code.ts')).mode & 0o777;
@@ -78,10 +81,28 @@ describe('createMount', () => {
     ).toThrow(/mountDir must be different from projectDir/);
   });
 
-  it('excludes .git, node_modules, and .npm-cache by default, but NOT .relay', () => {
+  it('excludes common cache and build output paths by default, but NOT .relay', () => {
     write(path.join(projectDir, '.git/HEAD'), 'ref');
     write(path.join(projectDir, 'node_modules/dep/index.js'), '1');
     write(path.join(projectDir, '.npm-cache/_cacache/content-v2/sha512/aa/bb/blob'), 'cached');
+    write(path.join(projectDir, 'target/debug/app'), 'rust');
+    write(path.join(projectDir, '.next/cache/entry'), 'next');
+    write(path.join(projectDir, 'dist/bundle.js'), 'dist');
+    write(path.join(projectDir, 'build/output.js'), 'build');
+    write(path.join(projectDir, 'out/page.html'), 'out');
+    write(path.join(projectDir, '__pycache__/module.pyc'), 'python');
+    write(path.join(projectDir, '.pytest_cache/v/cache/nodeids'), 'pytest');
+    write(path.join(projectDir, '.mypy_cache/meta.json'), 'mypy');
+    write(path.join(projectDir, '.ruff_cache/CACHEDIR.TAG'), 'ruff');
+    write(path.join(projectDir, '.venv/bin/python'), 'venv');
+    write(path.join(projectDir, 'venv/bin/python'), 'venv');
+    write(path.join(projectDir, 'env/bin/python'), 'venv');
+    write(path.join(projectDir, '.gradle/caches/modules-2/files'), 'gradle');
+    write(path.join(projectDir, 'coverage/lcov.info'), 'coverage');
+    write(path.join(projectDir, '.nyc_output/out.json'), 'nyc');
+    write(path.join(projectDir, '.turbo/cache'), 'turbo');
+    write(path.join(projectDir, '.cache/tool/state'), 'cache');
+    write(path.join(projectDir, '.DS_Store'), 'metadata');
     write(path.join(projectDir, '.relay/state.json'), '{}');
     write(path.join(projectDir, 'keep.txt'), 'yes');
 
@@ -95,8 +116,47 @@ describe('createMount', () => {
     expect(existsSync(path.join(handle.mountDir, '.git'))).toBe(false);
     expect(existsSync(path.join(handle.mountDir, 'node_modules'))).toBe(false);
     expect(existsSync(path.join(handle.mountDir, '.npm-cache'))).toBe(false);
+    expect(existsSync(path.join(handle.mountDir, 'target'))).toBe(false);
+    expect(existsSync(path.join(handle.mountDir, '.next'))).toBe(false);
+    expect(existsSync(path.join(handle.mountDir, 'dist'))).toBe(false);
+    expect(existsSync(path.join(handle.mountDir, 'build'))).toBe(false);
+    expect(existsSync(path.join(handle.mountDir, 'out'))).toBe(false);
+    expect(existsSync(path.join(handle.mountDir, '__pycache__'))).toBe(false);
+    expect(existsSync(path.join(handle.mountDir, '.pytest_cache'))).toBe(false);
+    expect(existsSync(path.join(handle.mountDir, '.mypy_cache'))).toBe(false);
+    expect(existsSync(path.join(handle.mountDir, '.ruff_cache'))).toBe(false);
+    expect(existsSync(path.join(handle.mountDir, '.venv'))).toBe(false);
+    expect(existsSync(path.join(handle.mountDir, 'venv'))).toBe(false);
+    expect(existsSync(path.join(handle.mountDir, 'env'))).toBe(false);
+    expect(existsSync(path.join(handle.mountDir, '.gradle'))).toBe(false);
+    expect(existsSync(path.join(handle.mountDir, 'coverage'))).toBe(false);
+    expect(existsSync(path.join(handle.mountDir, '.nyc_output'))).toBe(false);
+    expect(existsSync(path.join(handle.mountDir, '.turbo'))).toBe(false);
+    expect(existsSync(path.join(handle.mountDir, '.cache'))).toBe(false);
+    expect(existsSync(path.join(handle.mountDir, '.DS_Store'))).toBe(false);
     // Regression: .relay must NOT be excluded by default anymore.
     expect(existsSync(path.join(handle.mountDir, '.relay/state.json'))).toBe(true);
+
+    handle.cleanup();
+  });
+
+  it('can opt out of broad default excludes while keeping .git excluded by default', () => {
+    write(path.join(projectDir, '.git/HEAD'), 'ref');
+    write(path.join(projectDir, 'node_modules/dep/index.js'), '1');
+    write(path.join(projectDir, 'dist/bundle.js'), 'dist');
+    write(path.join(projectDir, '.cache/tool/state'), 'cache');
+
+    const handle = createMount(projectDir, mountDir, {
+      ignoredPatterns: [],
+      readonlyPatterns: [],
+      excludeDirs: [],
+      includeDefaultExcludeDirs: false,
+    });
+
+    expect(existsSync(path.join(handle.mountDir, '.git'))).toBe(false);
+    expect(existsSync(path.join(handle.mountDir, 'node_modules/dep/index.js'))).toBe(true);
+    expect(existsSync(path.join(handle.mountDir, 'dist/bundle.js'))).toBe(true);
+    expect(existsSync(path.join(handle.mountDir, '.cache/tool/state'))).toBe(true);
 
     handle.cleanup();
   });
@@ -166,10 +226,10 @@ describe('createMount', () => {
 
     // Modify writable file in mount
     writeFileSync(path.join(handle.mountDir, 'writable.txt'), 'changed', 'utf8');
-    // Modify "readonly" file directly (bypass chmod for test purposes)
-    // by writing it with write permissions first
+    // Replace the readonly hardlink with a mount-local file so the test can
+    // exercise syncBack filtering without mutating the source via the link.
     const roPath = path.join(handle.mountDir, 'readonly.txt');
-    chmodSync(roPath, 0o644);
+    rmSync(roPath, { force: true });
     writeFileSync(roPath, 'tampered', 'utf8');
 
     // Add a net-new writable file in the mount

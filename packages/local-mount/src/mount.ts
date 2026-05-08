@@ -2,6 +2,7 @@ import {
   chmodSync,
   copyFileSync,
   existsSync,
+  linkSync,
   lstatSync,
   mkdirSync,
   readdirSync,
@@ -43,6 +44,12 @@ export interface MountOptions {
    *   are discarded with the mount on cleanup. Push to a remote to keep them.
    */
   includeGit?: boolean;
+  /**
+   * Include the built-in list of large cache/build output directories in
+   * the mount exclusion set. Default: true. The `.git` directory remains
+   * excluded unless `includeGit` is true, even when this is false.
+   */
+  includeDefaultExcludeDirs?: boolean;
 }
 
 export interface MountHandle {
@@ -57,7 +64,29 @@ export interface MountHandle {
   cleanup(): void;
 }
 
-const DEFAULT_EXCLUDED_DIRS = ['.git', 'node_modules', '.npm-cache'];
+const DEFAULT_EXCLUDED_DIRS = [
+  '.git',
+  'node_modules',
+  '.npm-cache',
+  'target',
+  '.next',
+  'dist',
+  'build',
+  'out',
+  '__pycache__',
+  '.pytest_cache',
+  '.mypy_cache',
+  '.ruff_cache',
+  '.venv',
+  'venv',
+  'env',
+  '.gradle',
+  'coverage',
+  '.nyc_output',
+  '.turbo',
+  '.cache',
+  '.DS_Store',
+];
 const MOUNT_README_FILENAME = '_MOUNT_README.md';
 const MOUNT_MARKER_FILENAME = '.relayfile-local-mount';
 const MOUNT_MARKER_CONTENT =
@@ -75,15 +104,19 @@ export function createMount(
   const includeGit = options.includeGit === true;
   const readonlyMatcher = createPathMatcher(readonlyPatterns);
   const ignoredMatcher = createPathMatcher(ignoredPatterns);
+  const includeDefaultExcludeDirs = options.includeDefaultExcludeDirs !== false;
   // `.git` is in DEFAULT_EXCLUDED_DIRS so the mount stays small and git
   // operations don't accidentally cross-mutate the host repo. When the caller
   // opts in via `includeGit`, drop it from the defaults and instead route it
   // through the noSyncBack matcher below so it stays one-way.
-  const defaultExcludes = includeGit
-    ? DEFAULT_EXCLUDED_DIRS.filter((d) => d !== '.git')
-    : DEFAULT_EXCLUDED_DIRS;
+  const defaultExcludes = includeDefaultExcludeDirs
+    ? DEFAULT_EXCLUDED_DIRS
+    : ['.git'];
+  const activeDefaultExcludes = includeGit
+    ? defaultExcludes.filter((d) => d !== '.git')
+    : defaultExcludes;
   const excludeSet = new Set(
-    [...defaultExcludes, ...options.excludeDirs]
+    [...activeDefaultExcludes, ...options.excludeDirs]
       .map((entry) => normalizeRelativePosix(entry).replace(/^\/+|\/+$/g, ''))
       .filter(Boolean)
   );
@@ -111,6 +144,7 @@ export function createMount(
   walkProjectTree(
     resolvedProjectDir,
     resolvedProjectDir,
+    realMountDir,
     realMountDir,
     excludeSet,
     readonlyMatcher,
@@ -226,6 +260,7 @@ function walkProjectTree(
   projectDir: string,
   currentDir: string,
   mountDir: string,
+  currentMountDir: string,
   excludeSet: Set<string>,
   readonlyMatcher: Ignore,
   ignoredMatcher: Ignore
@@ -252,18 +287,35 @@ function walkProjectTree(
       continue;
     }
 
-    const mountPath = path.join(mountDir, relativePath);
+    const mountPath = path.join(currentMountDir, entry.name);
 
     if (entry.isDirectory()) {
-      if (!ensureDirectoryWithinRoot(mountDir, mountPath)) {
+      const safeMountDir = ensureDirectoryWithinRoot(mountDir, mountPath);
+      if (!safeMountDir) {
         continue;
       }
-      walkProjectTree(projectDir, absolutePath, mountDir, excludeSet, readonlyMatcher, ignoredMatcher);
+      walkProjectTree(
+        projectDir,
+        absolutePath,
+        mountDir,
+        safeMountDir,
+        excludeSet,
+        readonlyMatcher,
+        ignoredMatcher
+      );
       continue;
     }
 
     if (entry.isSymbolicLink()) {
-      copySymlinkedFile(projectDir, mountDir, absolutePath, mountPath, relativePath, readonlyMatcher);
+      copySymlinkedFile(
+        projectDir,
+        mountDir,
+        absolutePath,
+        mountPath,
+        relativePath,
+        readonlyMatcher,
+        true
+      );
       continue;
     }
 
@@ -271,7 +323,16 @@ function walkProjectTree(
       continue;
     }
 
-    copyMountedFile(projectDir, mountDir, absolutePath, mountPath, relativePath, readonlyMatcher);
+    copyMountedFile(
+      projectDir,
+      mountDir,
+      absolutePath,
+      mountPath,
+      relativePath,
+      readonlyMatcher,
+      undefined,
+      true
+    );
   }
 }
 
@@ -281,7 +342,8 @@ function copySymlinkedFile(
   sourcePath: string,
   mountPath: string,
   relativePath: string,
-  readonlyMatcher: Ignore
+  readonlyMatcher: Ignore,
+  targetDirectoryReady = false
 ): void {
   let realSource: string;
   let resolvedStat: Stats;
@@ -303,7 +365,8 @@ function copySymlinkedFile(
     mountPath,
     relativePath,
     readonlyMatcher,
-    resolvedStat.mode
+    resolvedStat.mode,
+    targetDirectoryReady
   );
 }
 
@@ -314,9 +377,10 @@ function copyMountedFile(
   mountPath: string,
   relativePath: string,
   readonlyMatcher: Ignore,
-  sourceMode?: number
+  sourceMode?: number,
+  targetDirectoryReady = false
 ): void {
-  const safeMountPath = resolveSafeCopyTarget(mountDir, mountPath);
+  const safeMountPath = resolveSafeCopyTarget(mountDir, mountPath, { targetDirectoryReady });
   if (!safeMountPath) {
     return;
   }
@@ -326,9 +390,14 @@ function copyMountedFile(
     return;
   }
 
+  const readonly = isPathMatched(relativePath, readonlyMatcher);
+  if (readonly && hardlinkMountedFile(safeSourcePath, safeMountPath)) {
+    return;
+  }
+
   copyFileSync(safeSourcePath, safeMountPath);
 
-  if (isPathMatched(relativePath, readonlyMatcher)) {
+  if (readonly) {
     chmodSync(safeMountPath, 0o444);
     return;
   }
@@ -341,17 +410,17 @@ function ensureDirectory(pathValue: string): void {
   mkdirSync(pathValue, { recursive: true });
 }
 
-function ensureDirectoryWithinRoot(rootPath: string, dirPath: string): boolean {
+function ensureDirectoryWithinRoot(rootPath: string, dirPath: string): string | null {
   if (!isPathWithinRoot(dirPath, rootPath)) {
-    return false;
+    return null;
   }
 
   try {
     ensureDirectory(dirPath);
     const realDir = realpathSync(dirPath);
-    return isPathWithinRoot(realDir, rootPath);
+    return isPathWithinRoot(realDir, rootPath) ? realDir : null;
   } catch {
-    return false;
+    return null;
   }
 }
 
@@ -502,25 +571,41 @@ function isPathWithinRoot(candidatePath: string, rootPath: string): boolean {
   return resolvedCandidate === resolvedRoot || resolvedCandidate.startsWith(`${resolvedRoot}${path.sep}`);
 }
 
-function resolveSafeCopyTarget(rootPath: string, candidatePath: string): string | null {
+function resolveSafeCopyTarget(
+  rootPath: string,
+  candidatePath: string,
+  opts: { targetDirectoryReady?: boolean } = {}
+): string | null {
   if (!isPathWithinRoot(candidatePath, rootPath)) {
     return null;
   }
 
   const parentPath = path.dirname(candidatePath);
-  if (!ensureDirectoryWithinRoot(rootPath, parentPath)) {
+  if (opts.targetDirectoryReady) {
+    if (!isPathWithinRoot(parentPath, rootPath)) {
+      return null;
+    }
+    return path.join(parentPath, path.basename(candidatePath));
+  }
+
+  const realParent = ensureDirectoryWithinRoot(rootPath, parentPath);
+  if (!realParent) {
     return null;
   }
 
-  try {
-    const realParent = realpathSync(parentPath);
-    if (!isPathWithinRoot(realParent, rootPath)) {
-      return null;
-    }
+  return path.join(realParent, path.basename(candidatePath));
+}
 
-    return path.join(realParent, path.basename(candidatePath));
-  } catch {
-    return null;
+function hardlinkMountedFile(sourcePath: string, targetPath: string): boolean {
+  try {
+    linkSync(sourcePath, targetPath);
+    return true;
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'EXDEV' || code === 'EPERM') {
+      return false;
+    }
+    throw err;
   }
 }
 
@@ -563,7 +648,7 @@ function buildMountReadme(
 This workspace is a mounted mirror of the project directory.
 File access is controlled by project-local .agentignore and .agentreadonly.
 
-## Read-only files (cannot be modified)
+## Read-only files (sync-back disabled)
 ${readonlyList}
 
 ## Hidden files (not available in this workspace)
@@ -572,8 +657,8 @@ ${ignoredList}
 ## Writable files
 All other files can be read and modified freely.
 
-If you get "permission denied", the file is read-only.
 Changes to read-only files are not synced back to the source project.
+When these files are hardlinked, writes to the mount path affect the same inode as the project path.
 Edits or permission changes to read-only files inside this mount may be discarded or overwritten when the mount is recreated.
 ${agentLine}`;
 }
