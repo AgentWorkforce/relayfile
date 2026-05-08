@@ -1,4 +1,6 @@
-# Relayfile
+<p align="center">
+  <img src="assets/banner.png" alt="Relayfile — the integration filesystem for agents" width="900">
+</p>
 
 **The integration filesystem for agents.**
 
@@ -29,6 +31,30 @@ Three reasons:
 2. **Completeness.** APIs return what their search ranks. `ls` returns what's there. For "what changed yesterday across these three integrations" type questions, exhaustive enumeration beats query-by-query retrieval.
 3. **Coordination.** Multiple agents working through the same filesystem can see each other's writes immediately, scoped by ACL. Multi-agent collaboration becomes a property of the substrate, not something each app re-implements.
 
+## Real-time multi-agent sync
+
+Most "filesystem for agents" projects assume one agent at a time. Relayfile assumes many.
+
+When agent A writes a file, agent B sees the new contents on the next read — within a second, no commit, no push, no merge. That's not polish; it's the difference between agents that *use* a filesystem and agents that *coordinate through* one.
+
+```
+# terminal 1: reviewer agent watching the ticket
+$ tail -F mount/linear/issues/AGE-12.json
+{ "title": "Fix login bug", "state": "Todo", ... }
+
+# terminal 2: implementer agent (writes after pushing the fix)
+$ echo '{"state":"In Review","description":"PR #42"}' \
+    > mount/linear/issues/AGE-12.json
+
+# terminal 1, ~half a second later — same file, new contents
+$ tail -F mount/linear/issues/AGE-12.json
+{ "title": "Fix login bug", "state": "In Review", ..., "description": "PR #42" }
+```
+
+Without write-through invalidation, this falls apart. Two agents on the same data either hit stale-read bugs (B reads a cached version after A wrote) or step on each other (last-write-wins, no notification). Some virtual-filesystem-for-agents projects have this as an open issue today; relayfile shipped it.
+
+This is what turns multi-agent collaboration into a property of the substrate instead of something every app has to reinvent. Reviewer agents watch implementer agents in real time. A persona-orchestrator agent watches workers' progress through their writes. None of that requires a coordination protocol on top of relayfile — **the filesystem is the protocol.**
+
 ## What's in the box
 
 - **File-native reads.** `ls`, `cat`, `grep`, `find` — the agent's native vocabulary. No tool schemas in context.
@@ -37,6 +63,17 @@ Three reasons:
 - **Real-time multi-agent sync.** Writes from one agent are visible to others on the next read. No commit/push/pull cycle, no merge.
 - **Real OS mount.** Native bash, native `find`/`grep`/`jq`/`rg`, no emulation gaps. Any process — agents, scripts, IDEs — can read or write the mount.
 - **Pluggable architecture.** A core file server plus [adapters](https://github.com/AgentWorkforce/relayfile-adapters) (per-integration logic) and [providers](https://github.com/AgentWorkforce/relayfile-providers) (auth/proxy via Nango, Composio, Pipedream). One provider integration unlocks tens of apps.
+
+## Works with
+
+Anything that can read and write files works with relayfile out of the box — that's the point. Confirmed integration recipes ship for:
+
+| Framework | Recipe |
+|---|---|
+| Claude Code | [setting-up-relayfile skill](https://github.com/AgentWorkforce/skills/blob/main/skills/setting-up-relayfile/SKILL.md) |
+| Anything that runs `bash` | works out of the box (it's a real OS mount) |
+
+More framework recipes (Vercel AI SDK, OpenAI Agents SDK, LangGraph, Pydantic AI) are landing as part of [#106](https://github.com/AgentWorkforce/relayfile/issues/106).
 
 ## How relayfile compares
 
