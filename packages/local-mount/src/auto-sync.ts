@@ -19,6 +19,15 @@ export interface AutoSyncContext {
   realProjectDir: string;
   isExcluded: (relPosix: string) => boolean;
   /**
+   * The exact set of normalized directory names/prefixes that drive
+   * `isExcluded` (i.e., {@link MountOptions.excludeDirs} merged with the
+   * library defaults). Used purely to hint `@parcel/watcher` which subtrees
+   * to skip subscribing to. The in-handler `isSyncCandidate` filter remains
+   * authoritative; this is just a perf hint that keeps the watcher from
+   * recursing into heavy trees like `node_modules` or `.npm-cache`.
+   */
+  excludedNames: readonly string[];
+  /**
    * Directory-only ignore patterns (ending in `/`) must only match when the
    * path is a directory. Callers that know the path's type pass `isDirectory`;
    * callers that don't should omit the second argument and fall back to the
@@ -231,23 +240,14 @@ export function startAutoSync(
 
 function buildIgnoreGlobs(ctx: AutoSyncContext): string[] {
   // @parcel/watcher matches globs against absolute paths via globset. For each
-  // excluded directory name, ignore both the directory itself and everything
-  // beneath it, anywhere under the watched root. The `isExcluded` predicate is
-  // driven by a Set of directory names, so we probe a small set of common
-  // exclusions rather than introspecting it. The in-handler `isSyncCandidate`
-  // filter is authoritative — this is just a perf hint so the watcher doesn't
-  // recurse into heavy trees like node_modules or .git.
-  //
-  // Anything in `DEFAULT_EXCLUDED_DIRS` (mount.ts) MUST appear here too. If
-  // it doesn't, the initial walk skips the dir but the watcher still
-  // subscribes to every file underneath, generating events that the in-handler
-  // filter then has to throw away — correct, but expensive on big caches.
+  // excluded directory name (defaults + user-supplied excludeDirs), emit globs
+  // that match both the directory itself and everything beneath it, anywhere
+  // under the watched root. The in-handler `isSyncCandidate` filter remains
+  // authoritative — this is just a perf hint so the watcher does not recurse
+  // into heavy trees like node_modules, .git, or .npm-cache.
   const globs: string[] = [];
-  const candidates = ['.git', 'node_modules', '.npm-cache', 'dist', 'build', '.next', '.cache'];
-  for (const name of candidates) {
-    if (ctx.isExcluded(name)) {
-      globs.push(`**/${name}`, `**/${name}/**`);
-    }
+  for (const name of ctx.excludedNames) {
+    globs.push(`**/${name}`, `**/${name}/**`);
   }
   return globs;
 }

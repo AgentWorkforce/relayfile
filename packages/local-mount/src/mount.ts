@@ -132,6 +132,7 @@ export function createMount(
     realMountDir,
     realProjectDir: resolvedProjectDir,
     isExcluded: (relPosix) => isExcludedPath(relPosix, excludeSet),
+    excludedNames: [...excludeSet],
     isIgnored: (relPosix, isDir) => isPathMatched(relPosix, ignoredMatcher, isDir),
     isReadonly: (relPosix) => isPathMatched(relPosix, readonlyMatcher),
     isNoSyncBack: (relPosix) => isPathMatched(relPosix, noSyncBackMatcher),
