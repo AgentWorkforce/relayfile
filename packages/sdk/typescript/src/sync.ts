@@ -262,6 +262,12 @@ export class RelayFileSync {
   // by the matching `close` (or by `stop()`); fires forceReconnect when
   // the OS layer fails to deliver a close after the error.
   private errorRecoveryTimer?: ReturnType<typeof setTimeout>;
+  // Tracks whether this.socket has reached the OPEN state. Reset every
+  // time we attach to a fresh socket; flipped true in the `open` handler.
+  // The error watchdog checks this so that a pre-open failure (auth reject,
+  // proxy RST during handshake, etc.) routes to polling rather than an
+  // infinite reconnect loop against a server that won't accept the WS.
+  private currentSocketHasOpened = false;
   // Tracks the last time *any* WebSocket frame was received (event, pong, or
   // otherwise). The watchdog uses this to detect silent socket death.
   private lastFrameAt = 0;
@@ -469,11 +475,13 @@ export class RelayFileSync {
     }
 
     this.socket = socket;
+    this.currentSocketHasOpened = false;
 
     socket.addEventListener("open", (event) => {
       if (this.socket !== socket || this.stopped) {
         return;
       }
+      this.currentSocketHasOpened = true;
       this.reconnectAttempts = 0;
       // Reset frame/ping bookkeeping for the freshly opened socket so the
       // watchdog has a clean baseline. lastPingSentAt=0 disables the pong
@@ -527,10 +535,20 @@ export class RelayFileSync {
         if (this.stopped || this.socket !== socket) {
           return;
         }
+        // If the socket never reached OPEN, this is a handshake-stage
+        // failure (auth rejection on upgrade, proxy RST, server cold
+        // start). Reconnecting in a tight loop just retries the same
+        // failing handshake. Drop straight into polling instead — that
+        // path tolerates 401/403/timeout and surfaces the error to the
+        // caller without burning the loop.
+        const preOpen = !this.currentSocketHasOpened;
         debugLog("ws error with no successor close — forcing recovery", {
-          workspaceId: this.workspaceId
+          workspaceId: this.workspaceId,
+          preOpen
         });
-        this.forceReconnect(socket, "ws-error-no-close");
+        this.forceReconnect(socket, preOpen ? "ws-error-pre-open" : "ws-error-no-close", {
+          preferPolling: preOpen
+        });
       }, ERROR_TO_CLOSE_GRACE_MS);
     });
 
@@ -790,7 +808,16 @@ export class RelayFileSync {
   // no-ops via the `this.socket !== socket` guards) and trigger the standard
   // reconnect path. Catches errors from `close()` because some socket
   // implementations throw when closing an already-broken connection.
-  private forceReconnect(socket: RelayFileSyncSocket, reason: string): void {
+  //
+  // `options.preferPolling` lets the caller force the polling fallback even
+  // when reconnect is enabled. Used by the error watchdog when the failed
+  // socket never reached OPEN (handshake-stage failure) — retrying the WS
+  // upgrade in a loop won't help when the server is rejecting at the upgrade.
+  private forceReconnect(
+    socket: RelayFileSyncSocket,
+    reason: string,
+    options?: { preferPolling?: boolean },
+  ): void {
     this.clearPingTimer();
     this.clearErrorRecoveryTimer();
     if (this.socket === socket) {
@@ -805,8 +832,11 @@ export class RelayFileSync {
       this.setState("closed");
       return;
     }
-    if (!this.reconnect.enabled) {
-      this.startPolling("forced-reconnect-no-retry", reason);
+    if (!this.reconnect.enabled || options?.preferPolling) {
+      this.startPolling(
+        options?.preferPolling ? "forced-polling-pre-open" : "forced-reconnect-no-retry",
+        reason,
+      );
       return;
     }
     this.scheduleReconnect();

@@ -566,6 +566,48 @@ describe("RelayFileSync", () => {
     await sync.stop();
   });
 
+  it("falls back to polling when the ws errors before reaching OPEN", async () => {
+    // CodeRabbit feedback on PR #99: a socket that errors during the
+    // upgrade handshake (auth rejected, proxy RST, server cold start
+    // returning 502) should NOT trigger an infinite WS reconnect loop —
+    // the same handshake will fail on every retry. Drop into polling
+    // instead so the caller still gets events and the underlying error
+    // surfaces via onPollingFallback.
+    const sockets: MockWebSocket[] = [];
+    const fallback = vi.fn();
+    const sync = new RelayFileSync({
+      client: makeClient(),
+      workspaceId: "ws_acme",
+      baseUrl: "https://relay.test",
+      token: "ws_token",
+      pollIntervalMs: 5,
+      reconnect: { minDelayMs: 5, maxDelayMs: 5 },
+      onPollingFallback: fallback,
+      webSocketFactory: (url) => {
+        const socket = new MockWebSocket(url);
+        sockets.push(socket);
+        return socket;
+      }
+    });
+
+    sync.start();
+    expect(sockets).toHaveLength(1);
+
+    // Emit error WITHOUT a preceding open — handshake-stage failure.
+    sockets[0]!.emit("error", { type: "error" });
+    // Wait past the 250ms grace window.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+
+    // Polling fallback fired with the pre-open reason — and crucially
+    // no second WS socket was opened (the loop would be pointless).
+    expect(fallback).toHaveBeenCalledWith(
+      expect.objectContaining({ reason: "forced-polling-pre-open" })
+    );
+    expect(sockets).toHaveLength(1);
+
+    await sync.stop();
+  });
+
   it("does NOT double-recover when a normal close follows the ws error", async () => {
     // Companion to the above: when the error IS followed by a close (the
     // well-behaved path), the close handler must clear the grace timer so
