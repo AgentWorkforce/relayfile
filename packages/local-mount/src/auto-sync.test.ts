@@ -53,7 +53,7 @@ describe('startAutoSync', () => {
   it('propagates mount→project edits without waiting for final syncBack', async () => {
     write(path.join(projectDir, 'file.txt'), 'original');
 
-    const handle = createMount(projectDir, mountDir, {
+    const handle = await createMount(projectDir, mountDir, {
       ignoredPatterns: [],
       readonlyPatterns: [],
       excludeDirs: [],
@@ -75,7 +75,7 @@ describe('startAutoSync', () => {
   it('propagates project→mount external edits', async () => {
     write(path.join(projectDir, 'file.txt'), 'original');
 
-    const handle = createMount(projectDir, mountDir, {
+    const handle = await createMount(projectDir, mountDir, {
       ignoredPatterns: [],
       readonlyPatterns: [],
       excludeDirs: [],
@@ -97,7 +97,7 @@ describe('startAutoSync', () => {
   it('propagates mount→project deletes', async () => {
     write(path.join(projectDir, 'file.txt'), 'original');
 
-    const handle = createMount(projectDir, mountDir, {
+    const handle = await createMount(projectDir, mountDir, {
       ignoredPatterns: [],
       readonlyPatterns: [],
       excludeDirs: [],
@@ -117,7 +117,7 @@ describe('startAutoSync', () => {
   it('propagates project→mount deletes', async () => {
     write(path.join(projectDir, 'file.txt'), 'original');
 
-    const handle = createMount(projectDir, mountDir, {
+    const handle = await createMount(projectDir, mountDir, {
       ignoredPatterns: [],
       readonlyPatterns: [],
       excludeDirs: [],
@@ -137,7 +137,7 @@ describe('startAutoSync', () => {
   it('respects readonly patterns: mount-side edits do not sync back', async () => {
     write(path.join(projectDir, 'locked.txt'), 'original');
 
-    const handle = createMount(projectDir, mountDir, {
+    const handle = await createMount(projectDir, mountDir, {
       ignoredPatterns: [],
       readonlyPatterns: ['locked.txt'],
       excludeDirs: [],
@@ -165,7 +165,7 @@ describe('startAutoSync', () => {
   it('readonly: project-side edits flow into the mount', async () => {
     write(path.join(projectDir, 'locked.txt'), 'original');
 
-    const handle = createMount(projectDir, mountDir, {
+    const handle = await createMount(projectDir, mountDir, {
       ignoredPatterns: [],
       readonlyPatterns: ['locked.txt'],
       excludeDirs: [],
@@ -187,7 +187,7 @@ describe('startAutoSync', () => {
   it('mount-wins: concurrent edits on both sides resolve to mount content', async () => {
     write(path.join(projectDir, 'file.txt'), 'original');
 
-    const handle = createMount(projectDir, mountDir, {
+    const handle = await createMount(projectDir, mountDir, {
       ignoredPatterns: [],
       readonlyPatterns: [],
       excludeDirs: [],
@@ -218,7 +218,7 @@ describe('startAutoSync', () => {
   it('ignored paths are never synced in either direction', async () => {
     write(path.join(projectDir, 'keep.txt'), 'keep');
 
-    const handle = createMount(projectDir, mountDir, {
+    const handle = await createMount(projectDir, mountDir, {
       ignoredPatterns: ['secrets/'],
       readonlyPatterns: [],
       excludeDirs: [],
@@ -248,7 +248,7 @@ describe('startAutoSync', () => {
     // path happens to include a segment of the same name must still sync.
     write(path.join(projectDir, 'docs/cache'), 'this is a file, not a dir');
 
-    const handle = createMount(projectDir, mountDir, {
+    const handle = await createMount(projectDir, mountDir, {
       ignoredPatterns: ['cache/'],
       readonlyPatterns: [],
       excludeDirs: [],
@@ -270,7 +270,7 @@ describe('startAutoSync', () => {
   it('periodic full scan catches changes even if watcher events are missed', async () => {
     write(path.join(projectDir, 'file.txt'), 'original');
 
-    const handle = createMount(projectDir, mountDir, {
+    const handle = await createMount(projectDir, mountDir, {
       ignoredPatterns: [],
       readonlyPatterns: [],
       excludeDirs: [],
@@ -294,7 +294,7 @@ describe('startAutoSync', () => {
   it('stop({ signal }) skips the draining reconcile when already aborted, but still closes watchers', async () => {
     write(path.join(projectDir, 'file.txt'), 'original');
 
-    const handle = createMount(projectDir, mountDir, {
+    const handle = await createMount(projectDir, mountDir, {
       ignoredPatterns: [],
       readonlyPatterns: [],
       excludeDirs: [],
@@ -323,7 +323,7 @@ describe('startAutoSync', () => {
   it('includeGit: project-side .git edits flow into the mount', async () => {
     write(path.join(projectDir, '.git/HEAD'), 'ref: refs/heads/main\n');
 
-    const handle = createMount(projectDir, mountDir, {
+    const handle = await createMount(projectDir, mountDir, {
       ignoredPatterns: [],
       readonlyPatterns: [],
       excludeDirs: [],
@@ -351,7 +351,7 @@ describe('startAutoSync', () => {
   it('includeGit: mount-side .git edits do NOT flow back to the project', async () => {
     write(path.join(projectDir, '.git/HEAD'), 'ref: refs/heads/main\n');
 
-    const handle = createMount(projectDir, mountDir, {
+    const handle = await createMount(projectDir, mountDir, {
       ignoredPatterns: [],
       readonlyPatterns: [],
       excludeDirs: [],
@@ -383,7 +383,7 @@ describe('startAutoSync', () => {
   });
 
   it('does not sync the _MOUNT_README.md or marker files', async () => {
-    const handle = createMount(projectDir, mountDir, {
+    const handle = await createMount(projectDir, mountDir, {
       ignoredPatterns: [],
       readonlyPatterns: [],
       excludeDirs: [],

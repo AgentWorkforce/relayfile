@@ -37,13 +37,13 @@ describe('createMount', () => {
     try { rmSync(path.dirname(mountDir), { recursive: true, force: true }); } catch { /* best effort */ }
   });
 
-  it('happy path: copies non-ignored files, chmods readonly to 0o444, skips ignored', () => {
+  it('happy path: copies non-ignored files, chmods readonly to 0o444, skips ignored', async () => {
     write(path.join(projectDir, 'src/code.ts'), 'code');
     write(path.join(projectDir, 'secrets/api-key.txt'), 'shhh');
     write(path.join(projectDir, 'docs/guide.md'), 'guide');
     write(path.join(projectDir, 'config.ro'), 'frozen');
 
-    const handle = createMount(projectDir, mountDir, {
+    const handle = await createMount(projectDir, mountDir, {
       ignoredPatterns: ['secrets/'],
       readonlyPatterns: ['*.ro', 'docs/**'],
       excludeDirs: [],
@@ -71,17 +71,17 @@ describe('createMount', () => {
     handle.cleanup();
   });
 
-  it('refuses mountDir === projectDir', () => {
-    expect(() =>
+  it('refuses mountDir === projectDir', async () => {
+    await expect(
       createMount(projectDir, projectDir, {
         ignoredPatterns: [],
         readonlyPatterns: [],
         excludeDirs: [],
       })
-    ).toThrow(/mountDir must be different from projectDir/);
+    ).rejects.toThrow(/mountDir must be different from projectDir/);
   });
 
-  it('excludes common cache and build output paths by default, but NOT .relay', () => {
+  it('excludes common cache and build output paths by default, but NOT .relay', async () => {
     write(path.join(projectDir, '.git/HEAD'), 'ref');
     write(path.join(projectDir, 'node_modules/dep/index.js'), '1');
     write(path.join(projectDir, 'packages/web/node_modules/dep/index.js'), 'nested dep');
@@ -112,7 +112,7 @@ describe('createMount', () => {
     write(path.join(projectDir, 'test/coverage/reporter.ts'), 'nested coverage source');
     write(path.join(projectDir, 'keep.txt'), 'yes');
 
-    const handle = createMount(projectDir, mountDir, {
+    const handle = await createMount(projectDir, mountDir, {
       ignoredPatterns: [],
       readonlyPatterns: [],
       excludeDirs: [],
@@ -153,13 +153,13 @@ describe('createMount', () => {
     handle.cleanup();
   });
 
-  it('can opt out of broad default excludes while keeping .git excluded by default', () => {
+  it('can opt out of broad default excludes while keeping .git excluded by default', async () => {
     write(path.join(projectDir, '.git/HEAD'), 'ref');
     write(path.join(projectDir, 'node_modules/dep/index.js'), '1');
     write(path.join(projectDir, 'dist/bundle.js'), 'dist');
     write(path.join(projectDir, '.cache/tool/state'), 'cache');
 
-    const handle = createMount(projectDir, mountDir, {
+    const handle = await createMount(projectDir, mountDir, {
       ignoredPatterns: [],
       readonlyPatterns: [],
       excludeDirs: [],
@@ -174,12 +174,12 @@ describe('createMount', () => {
     handle.cleanup();
   });
 
-  it('includeGit: copies .git into the mount and leaves it writable', () => {
+  it('includeGit: copies .git into the mount and leaves it writable', async () => {
     write(path.join(projectDir, '.git/HEAD'), 'ref: refs/heads/main\n');
     write(path.join(projectDir, '.git/refs/heads/main'), 'deadbeef\n');
     write(path.join(projectDir, 'src/code.ts'), 'code');
 
-    const handle = createMount(projectDir, mountDir, {
+    const handle = await createMount(projectDir, mountDir, {
       ignoredPatterns: [],
       readonlyPatterns: [],
       excludeDirs: [],
@@ -202,7 +202,7 @@ describe('createMount', () => {
     write(path.join(projectDir, '.git/HEAD'), 'ref: refs/heads/main\n');
     write(path.join(projectDir, 'src/code.ts'), 'code');
 
-    const handle = createMount(projectDir, mountDir, {
+    const handle = await createMount(projectDir, mountDir, {
       ignoredPatterns: [],
       readonlyPatterns: [],
       excludeDirs: [],
@@ -231,7 +231,7 @@ describe('createMount', () => {
     write(path.join(projectDir, 'writable.txt'), 'original');
     write(path.join(projectDir, 'readonly.txt'), 'original-ro');
 
-    const handle = createMount(projectDir, mountDir, {
+    const handle = await createMount(projectDir, mountDir, {
       ignoredPatterns: [],
       readonlyPatterns: ['readonly.txt'],
       excludeDirs: [],
@@ -266,7 +266,7 @@ describe('createMount', () => {
   it('syncBack: skips files under default excluded paths', async () => {
     write(path.join(projectDir, 'src/code.ts'), 'original');
 
-    const handle = createMount(projectDir, mountDir, {
+    const handle = await createMount(projectDir, mountDir, {
       ignoredPatterns: [],
       readonlyPatterns: [],
       excludeDirs: [],
@@ -295,7 +295,7 @@ describe('createMount', () => {
   it('syncBack: returns immediately when already aborted', async () => {
     write(path.join(projectDir, 'writable.txt'), 'original');
 
-    const handle = createMount(projectDir, mountDir, {
+    const handle = await createMount(projectDir, mountDir, {
       ignoredPatterns: [],
       readonlyPatterns: [],
       excludeDirs: [],
@@ -319,7 +319,7 @@ describe('createMount', () => {
     write(path.join(projectDir, 'b.txt'), 'b0');
     write(path.join(projectDir, 'c.txt'), 'c0');
 
-    const handle = createMount(projectDir, mountDir, {
+    const handle = await createMount(projectDir, mountDir, {
       ignoredPatterns: [],
       readonlyPatterns: [],
       excludeDirs: [],
@@ -344,6 +344,39 @@ describe('createMount', () => {
     ];
     expect(values.filter((value) => value.endsWith('1'))).toHaveLength(synced);
 
+    handle.cleanup();
+  });
+
+  // Regression for #104: a synchronous walker froze the consumer's event loop
+  // for the entire init window, so things like an `ora` spinner driven by
+  // setInterval would not animate. Drive a setInterval counter while
+  // createMount runs over a synthetic many-file tree and assert it advanced.
+  it('yields the event loop during init so consumer setInterval can fire', async () => {
+    const dirs = 50;
+    const filesPerDir = 100;
+    for (let d = 0; d < dirs; d += 1) {
+      for (let f = 0; f < filesPerDir; f += 1) {
+        write(path.join(projectDir, `d${d}`, `f${f}.txt`), 'x');
+      }
+    }
+
+    let ticks = 0;
+    const timer = setInterval(() => {
+      ticks += 1;
+    }, 5);
+
+    let handle;
+    try {
+      handle = await createMount(projectDir, mountDir, {
+        ignoredPatterns: [],
+        readonlyPatterns: [],
+        excludeDirs: [],
+      });
+    } finally {
+      clearInterval(timer);
+    }
+
+    expect(ticks).toBeGreaterThanOrEqual(2);
     handle.cleanup();
   });
 });

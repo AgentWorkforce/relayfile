@@ -72,15 +72,7 @@ export interface LaunchOnMountResult {
  * exit code.
  */
 export async function launchOnMount(opts: LaunchOnMountOptions): Promise<LaunchOnMountResult> {
-  const handle: MountHandle = createMount(opts.projectDir, opts.mountDir, {
-    ignoredPatterns: opts.ignoredPatterns ?? [],
-    readonlyPatterns: opts.readonlyPatterns ?? [],
-    excludeDirs: opts.excludeDirs ?? [],
-    agentName: opts.agentName,
-    includeGit: opts.includeGit,
-    includeDefaultExcludeDirs: opts.includeDefaultExcludeDirs,
-  });
-
+  let handle: MountHandle | undefined;
   let syncedCount = 0;
   let finalized = false;
   let autoSync: AutoSyncHandle | undefined;
@@ -95,17 +87,27 @@ export async function launchOnMount(opts: LaunchOnMountOptions): Promise<LaunchO
         autoSyncChanges = autoSync.totalChanges();
         autoSync = undefined;
       }
+      if (!handle) return;
       const finalSynced = await handle.syncBack({ signal: opts.shutdownSignal });
       syncedCount = autoSyncChanges + finalSynced;
       if (opts.onAfterSync) {
         await opts.onAfterSync(syncedCount);
       }
     } finally {
-      handle.cleanup();
+      handle?.cleanup();
     }
   };
 
   try {
+    handle = await createMount(opts.projectDir, opts.mountDir, {
+      ignoredPatterns: opts.ignoredPatterns ?? [],
+      readonlyPatterns: opts.readonlyPatterns ?? [],
+      excludeDirs: opts.excludeDirs ?? [],
+      agentName: opts.agentName,
+      includeGit: opts.includeGit,
+      includeDefaultExcludeDirs: opts.includeDefaultExcludeDirs,
+    });
+
     if (opts.onBeforeLaunch) {
       await opts.onBeforeLaunch(handle.mountDir);
     }
@@ -120,9 +122,10 @@ export async function launchOnMount(opts: LaunchOnMountOptions): Promise<LaunchO
       ...(opts.env ?? {}),
     };
 
+    const mountCwd = handle.mountDir;
     const exitCode = await new Promise<number>((resolve, reject) => {
       const child = spawn(opts.cli, opts.args, {
-        cwd: handle.mountDir,
+        cwd: mountCwd,
         stdio: 'inherit',
         env: envVars,
       });

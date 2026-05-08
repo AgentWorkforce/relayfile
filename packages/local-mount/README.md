@@ -14,9 +14,11 @@ npm install @relayfile/local-mount
 
 ### `createMount(projectDir, mountDir, options)`
 
-Builds a mounted copy of `projectDir` at `mountDir` and returns a handle:
+Builds a mounted copy of `projectDir` at `mountDir` and resolves with a handle:
 
 ```ts
+const handle = await createMount(projectDir, mountDir, options);
+
 interface MountHandle {
   mountDir: string;
   syncBack(opts?: { signal?: AbortSignal }): Promise<number>;
@@ -24,6 +26,8 @@ interface MountHandle {
   cleanup(): void;
 }
 ```
+
+`createMount` returns `Promise<MountHandle>`. The walker yields the event loop between directory entries so consumer-side timers (e.g. an `ora` spinner driven by `setInterval`) keep firing while the mount is being built.
 
 Behavior:
 - Copies regular files into the mount

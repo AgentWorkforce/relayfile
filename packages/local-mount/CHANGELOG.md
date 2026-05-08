@@ -6,7 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_No unreleased changes._
+### Changed
+- **BREAKING:** `createMount` is now async and returns `Promise<MountHandle>`. The walker yields the event loop between directory entries during init, so a consumer's `setInterval` (e.g. an `ora` spinner) keeps firing while the mount is being built. Previously the synchronous walker froze the consumer's event loop for the entire init window, causing spinners to display a static frame. Callers must `await createMount(...)` — there is no `createMountSync`. `launchOnMount` already awaits it internally so its surface is unchanged. (#104)
 
 ## [0.6.15] - 2026-05-08
 
