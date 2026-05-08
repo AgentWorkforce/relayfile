@@ -31,6 +31,7 @@ export {
   WORKSPACE_INTEGRATION_PROVIDERS,
   type AgentWorkspaceInvite,
   type AgentWorkspaceInviteOptions,
+  type AgentWorkspaceScopedInviteOptions,
   type ConnectIntegrationOptions,
   type ConnectIntegrationResult,
   type CreateWorkspaceOptions,

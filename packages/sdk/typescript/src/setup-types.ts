@@ -89,8 +89,26 @@ export type WorkspaceMountEnv = Record<string, string>
 
 export interface AgentWorkspaceInviteOptions {
   agentName?: string
-  scopes?: string[]
   relaycastBaseUrl?: string
+  includeRelayfileToken?: boolean
+}
+
+export interface AgentWorkspaceScopedInviteOptions {
+  /**
+   * Scopes to grant on the minted JWT. Must be a subset of the calling
+   * workspace token's grant; the cloud API rejects requests that exceed it.
+   * If omitted, falls back to the join-time scopes (effectively the same as
+   * the sync `agentInvite()`).
+   */
+  scopes?: string[]
+  agentName?: string
+  permissions?: WorkspacePermissions
+  relaycastBaseUrl?: string
+  /**
+   * Set false to omit `relayfileToken` from the returned invite — useful
+   * when the receiving agent already has a token and only needs the
+   * connection metadata.
+   */
   includeRelayfileToken?: boolean
 }
 

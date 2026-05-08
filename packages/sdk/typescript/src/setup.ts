@@ -22,6 +22,7 @@ import {
   WORKSPACE_INTEGRATION_PROVIDERS,
   type AgentWorkspaceInvite,
   type AgentWorkspaceInviteOptions,
+  type AgentWorkspaceScopedInviteOptions,
   type ConnectIntegrationOptions,
   type ConnectIntegrationResult,
   type CreateWorkspaceOptions,
@@ -230,7 +231,8 @@ export class RelayfileSetup {
 
   async joinWorkspaceResponse(
     workspaceId: string,
-    options: NormalizedJoinWorkspaceOptions
+    options: NormalizedJoinWorkspaceOptions,
+    overrides: { tokenProvider?: AccessTokenProvider } = {}
   ): Promise<ValidatedJoinWorkspaceResponse> {
     return validateJoinWorkspaceResponse(
       await this.requestJson({
@@ -241,7 +243,8 @@ export class RelayfileSetup {
           agentName: options.agentName,
           scopes: [...options.scopes],
           permissions: clonePermissions(options.permissions)
-        })
+        }),
+        tokenProvider: overrides.tokenProvider
       })
     )
   }
@@ -527,6 +530,13 @@ export class WorkspaceHandle {
     })
   }
 
+  /**
+   * Build an invite that hands a peer agent the calling workspace's existing
+   * JWT and metadata. The invite carries the SAME token this handle holds,
+   * with the SAME scopes — there is no per-invite downscoping. Use
+   * {@link agentInviteScoped} when the receiver should have a strictly
+   * narrower set of scopes than this workspace.
+   */
   agentInvite(options: AgentWorkspaceInviteOptions = {}): AgentWorkspaceInvite {
     const relaycastBaseUrl = this.resolveRelaycastBaseUrl(
       options.relaycastBaseUrl
@@ -539,12 +549,80 @@ export class WorkspaceHandle {
       relaycastApiKey: this.info.relaycastApiKey,
       relaycastBaseUrl,
       agentName: options.agentName ?? this._joinOptions.agentName,
-      scopes:
-        options.scopes && options.scopes.length > 0
-          ? [...options.scopes]
-          : [...this._joinOptions.scopes],
+      scopes: [...this._joinOptions.scopes],
       relayfileToken:
         options.includeRelayfileToken === false ? undefined : this.getToken(),
+      createdAt: this.info.createdAt,
+      name: this.info.name
+    })
+  }
+
+  /**
+   * Mint a fresh, downscoped relayfile JWT for a peer agent and return an
+   * invite carrying that token. Round-trips through the cloud join endpoint
+   * (`POST /api/v1/workspaces/{id}/join`), which signs a new JWT whose
+   * `scopes` claim is the requested subset of this workspace's grant. The
+   * cloud API rejects requests that exceed the calling workspace's scopes.
+   *
+   * Prefer this over {@link agentInvite} whenever the receiver should not
+   * inherit the full workspace token's reach (e.g. one agent that only needs
+   * `relayfile:fs:read:/notion/pages/*`). The caller's token is unaffected;
+   * a separate JWT is issued for the invitee.
+   *
+   * @example
+   * const invite = await workspace.agentInviteScoped({
+   *   agentName: 'notion-summarizer',
+   *   scopes: ['relayfile:fs:read:/notion/pages/*'],
+   * })
+   * // invite.relayfileToken is a JWT with scopes=['relayfile:fs:read:/notion/pages/*']
+   */
+  async agentInviteScoped(
+    options: AgentWorkspaceScopedInviteOptions = {}
+  ): Promise<AgentWorkspaceInvite> {
+    const requestedScopes =
+      options.scopes && options.scopes.length > 0
+        ? [...options.scopes]
+        : [...this._joinOptions.scopes]
+    const agentName = options.agentName ?? this._joinOptions.agentName
+    const permissions = options.permissions ?? this._joinOptions.permissions
+
+    // Authenticate the join with this handle's workspace JWT. Without it,
+    // the cloud cannot verify that requestedScopes ⊆ caller's grant, and
+    // anonymous (or permissive) endpoints would silently mint a wide token —
+    // exactly the failure this method is designed to prevent. The setup-
+    // level accessToken (used for createWorkspace/joinWorkspace at the
+    // workspace-bootstrap layer) is the wrong identity here; we want the
+    // workspace JWT itself to be the parent the cloud downscopes from.
+    const joinResponse = await this._setup.joinWorkspaceResponse(
+      this.workspaceId,
+      {
+        agentName,
+        scopes: requestedScopes,
+        permissions
+      },
+      { tokenProvider: async () => this.getOrRefreshToken() }
+    )
+
+    // Prefer a relaycastBaseUrl returned by the cloud over the cached one —
+    // the cloud is authoritative if it shipped a fresher value with the
+    // join response.
+    const relaycastBaseUrl = this.resolveRelaycastBaseUrl(
+      options.relaycastBaseUrl ?? joinResponse.relaycastBaseUrl
+    )
+
+    return compactObject({
+      workspaceId: this.workspaceId,
+      cloudApiUrl: this._setup.getCloudApiUrl(),
+      relayfileUrl: joinResponse.relayfileUrl ?? this.info.relayfileUrl,
+      relaycastApiKey:
+        joinResponse.relaycastApiKey ?? this.info.relaycastApiKey,
+      relaycastBaseUrl,
+      agentName,
+      scopes: requestedScopes,
+      relayfileToken:
+        options.includeRelayfileToken === false
+          ? undefined
+          : joinResponse.token,
       createdAt: this.info.createdAt,
       name: this.info.name
     })
