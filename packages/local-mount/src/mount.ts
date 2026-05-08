@@ -43,6 +43,12 @@ export interface MountOptions {
    *   are discarded with the mount on cleanup. Push to a remote to keep them.
    */
   includeGit?: boolean;
+  /**
+   * Include the built-in list of large cache/build output directories in
+   * the mount exclusion set. Default: true. The `.git` directory remains
+   * excluded unless `includeGit` is true, even when this is false.
+   */
+  includeDefaultExcludeDirs?: boolean;
 }
 
 export interface MountHandle {
@@ -57,7 +63,37 @@ export interface MountHandle {
   cleanup(): void;
 }
 
-const DEFAULT_EXCLUDED_DIRS = ['.git', 'node_modules', '.npm-cache'];
+interface ExcludeRules {
+  anyDepthNames: Set<string>;
+  rootPrefixes: Set<string>;
+}
+
+const DEFAULT_ANY_DEPTH_EXCLUDES = [
+  '.git',
+  'node_modules',
+  '.npm-cache',
+  '__pycache__',
+  '.pytest_cache',
+  '.mypy_cache',
+  '.ruff_cache',
+  '.gradle',
+  '.nyc_output',
+  '.turbo',
+  '.cache',
+  '.DS_Store',
+];
+
+const DEFAULT_ROOT_EXCLUDES = [
+  'target',
+  '.next',
+  'dist',
+  'build',
+  'out',
+  '.venv',
+  'venv',
+  'env',
+  'coverage',
+];
 const MOUNT_README_FILENAME = '_MOUNT_README.md';
 const MOUNT_MARKER_FILENAME = '.relayfile-local-mount';
 const MOUNT_MARKER_CONTENT =
@@ -75,18 +111,12 @@ export async function createMount(
   const includeGit = options.includeGit === true;
   const readonlyMatcher = createPathMatcher(readonlyPatterns);
   const ignoredMatcher = createPathMatcher(ignoredPatterns);
-  // `.git` is in DEFAULT_EXCLUDED_DIRS so the mount stays small and git
+  const includeDefaultExcludeDirs = options.includeDefaultExcludeDirs !== false;
+  // `.git` is in the default any-depth excludes so the mount stays small and git
   // operations don't accidentally cross-mutate the host repo. When the caller
   // opts in via `includeGit`, drop it from the defaults and instead route it
   // through the noSyncBack matcher below so it stays one-way.
-  const defaultExcludes = includeGit
-    ? DEFAULT_EXCLUDED_DIRS.filter((d) => d !== '.git')
-    : DEFAULT_EXCLUDED_DIRS;
-  const excludeSet = new Set(
-    [...defaultExcludes, ...options.excludeDirs]
-      .map((entry) => normalizeRelativePosix(entry).replace(/^\/+|\/+$/g, ''))
-      .filter(Boolean)
-  );
+  const excludeRules = createExcludeRules(options.excludeDirs, includeGit, includeDefaultExcludeDirs);
   const noSyncBackPatterns = includeGit ? ['.git', '.git/**'] : [];
   const noSyncBackMatcher = createPathMatcher(noSyncBackPatterns);
 
@@ -112,7 +142,8 @@ export async function createMount(
     resolvedProjectDir,
     resolvedProjectDir,
     realMountDir,
-    excludeSet,
+    realMountDir,
+    excludeRules,
     readonlyMatcher,
     ignoredMatcher
   );
@@ -131,8 +162,9 @@ export async function createMount(
   const autoSyncContext: AutoSyncContext = {
     realMountDir,
     realProjectDir: resolvedProjectDir,
-    isExcluded: (relPosix) => isExcludedPath(relPosix, excludeSet),
-    excludedNames: [...excludeSet],
+    isExcluded: (relPosix) => isExcludedPath(relPosix, excludeRules),
+    excludedAnyDepthNames: [...excludeRules.anyDepthNames],
+    excludedRootPrefixes: [...excludeRules.rootPrefixes],
     isIgnored: (relPosix, isDir) => isPathMatched(relPosix, ignoredMatcher, isDir),
     isReadonly: (relPosix) => isPathMatched(relPosix, readonlyMatcher),
     isNoSyncBack: (relPosix) => isPathMatched(relPosix, noSyncBackMatcher),
@@ -160,7 +192,8 @@ export async function createMount(
           realProjectDir,
           readonlyMatcher,
           ignoredMatcher,
-          noSyncBackMatcher
+          noSyncBackMatcher,
+          (relPosix) => isExcludedPath(relPosix, excludeRules)
         );
         synced += syncedForFile;
 
@@ -231,7 +264,8 @@ async function walkProjectTree(
   projectDir: string,
   currentDir: string,
   mountDir: string,
-  excludeSet: Set<string>,
+  currentMountDir: string,
+  excludeRules: ExcludeRules,
   readonlyMatcher: Ignore,
   ignoredMatcher: Ignore
 ): Promise<void> {
@@ -256,7 +290,7 @@ async function walkProjectTree(
       continue;
     }
 
-    if (isExcludedPath(relativePath, excludeSet)) {
+    if (isExcludedPath(relativePath, excludeRules)) {
       continue;
     }
 
@@ -264,18 +298,34 @@ async function walkProjectTree(
       continue;
     }
 
-    const mountPath = path.join(mountDir, relativePath);
+    const mountPath = path.join(currentMountDir, entry.name);
 
     if (entry.isDirectory()) {
-      if (!ensureDirectoryWithinRoot(mountDir, mountPath)) {
+      const safeMountDir = ensureDirectoryWithinRoot(mountDir, mountPath);
+      if (!safeMountDir) {
         continue;
       }
-      await walkProjectTree(projectDir, absolutePath, mountDir, excludeSet, readonlyMatcher, ignoredMatcher);
+      await walkProjectTree(
+        projectDir,
+        absolutePath,
+        mountDir,
+        safeMountDir,
+        excludeRules,
+        readonlyMatcher,
+        ignoredMatcher
+      );
       continue;
     }
 
     if (entry.isSymbolicLink()) {
-      copySymlinkedFile(projectDir, mountDir, absolutePath, mountPath, relativePath, readonlyMatcher);
+      copySymlinkedFile(
+        projectDir,
+        mountDir,
+        absolutePath,
+        mountPath,
+        relativePath,
+        readonlyMatcher
+      );
       continue;
     }
 
@@ -283,7 +333,14 @@ async function walkProjectTree(
       continue;
     }
 
-    copyMountedFile(projectDir, mountDir, absolutePath, mountPath, relativePath, readonlyMatcher);
+    copyMountedFile(
+      projectDir,
+      mountDir,
+      absolutePath,
+      mountPath,
+      relativePath,
+      readonlyMatcher
+    );
   }
 }
 
@@ -357,17 +414,17 @@ function ensureDirectory(pathValue: string): void {
   mkdirSync(pathValue, { recursive: true });
 }
 
-function ensureDirectoryWithinRoot(rootPath: string, dirPath: string): boolean {
+function ensureDirectoryWithinRoot(rootPath: string, dirPath: string): string | null {
   if (!isPathWithinRoot(dirPath, rootPath)) {
-    return false;
+    return null;
   }
 
   try {
     ensureDirectory(dirPath);
     const realDir = realpathSync(dirPath);
-    return isPathWithinRoot(realDir, rootPath);
+    return isPathWithinRoot(realDir, rootPath) ? realDir : null;
   } catch {
-    return false;
+    return null;
   }
 }
 
@@ -400,6 +457,51 @@ function createPathMatcher(patterns: string[]): Ignore {
   );
 }
 
+function createExcludeRules(
+  excludeDirs: string[],
+  includeGit: boolean,
+  includeDefaultExcludeDirs: boolean
+): ExcludeRules {
+  const anyDepthNames = new Set<string>();
+  const rootPrefixes = new Set<string>();
+
+  if (includeDefaultExcludeDirs) {
+    addExcludeEntries(anyDepthNames, rootPrefixes, DEFAULT_ANY_DEPTH_EXCLUDES, 'any-depth');
+    addExcludeEntries(anyDepthNames, rootPrefixes, DEFAULT_ROOT_EXCLUDES, 'root-prefix');
+  } else if (!includeGit) {
+    addExcludeEntries(anyDepthNames, rootPrefixes, ['.git'], 'any-depth');
+  }
+
+  if (includeGit) {
+    anyDepthNames.delete('.git');
+  }
+
+  // Preserve caller-supplied excludeDirs semantics: bare names match at any
+  // depth, while path-style entries are root-anchored prefixes.
+  addExcludeEntries(anyDepthNames, rootPrefixes, excludeDirs, 'legacy');
+
+  return { anyDepthNames, rootPrefixes };
+}
+
+function addExcludeEntries(
+  anyDepthNames: Set<string>,
+  rootPrefixes: Set<string>,
+  entries: string[],
+  mode: 'any-depth' | 'root-prefix' | 'legacy'
+): void {
+  for (const entry of entries) {
+    const normalized = normalizeRelativePosix(entry).replace(/^\/+|\/+$/g, '');
+    if (!normalized) {
+      continue;
+    }
+    if (mode === 'root-prefix' || (mode === 'legacy' && normalized.includes('/'))) {
+      rootPrefixes.add(normalized);
+    } else {
+      anyDepthNames.add(normalized);
+    }
+  }
+}
+
 function isPathMatched(relPath: string, matcher: Ignore, isDirectory = false): boolean {
   const normalized = normalizeRelativePosix(relPath);
   return matcher.ignores(normalized) || (isDirectory && matcher.ignores(`${normalized}/`));
@@ -430,14 +532,16 @@ function syncMountedFileBack(
   projectDir: string,
   readonlyMatcher: Ignore,
   ignoredMatcher: Ignore,
-  noSyncBackMatcher: Ignore
+  noSyncBackMatcher: Ignore,
+  isExcluded: (relPosix: string) => boolean
 ): number {
   const relative = resolveSyncRelativePath(
     sourceFile,
     mountDir,
     readonlyMatcher,
     ignoredMatcher,
-    noSyncBackMatcher
+    noSyncBackMatcher,
+    isExcluded
   );
   if (!relative) return 0;
 
@@ -457,7 +561,8 @@ function resolveSyncRelativePath(
   mountDir: string,
   readonlyMatcher: Ignore,
   ignoredMatcher: Ignore,
-  noSyncBackMatcher: Ignore
+  noSyncBackMatcher: Ignore,
+  isExcluded: (relPosix: string) => boolean
 ): string | null {
   const relative = path.relative(mountDir, sourceFile);
   if (relative === '' || relative.startsWith('..')) return null;
@@ -465,6 +570,7 @@ function resolveSyncRelativePath(
   if (relativePosix === MOUNT_README_FILENAME) return null;
   if (relativePosix === MOUNT_MARKER_FILENAME) return null;
   if (
+    isExcluded(relativePosix) ||
     isPathMatched(relative, readonlyMatcher) ||
     isPathMatched(relative, ignoredMatcher) ||
     isPathMatched(relative, noSyncBackMatcher)
@@ -502,13 +608,13 @@ function resolveVerifiedSyncTarget(projectDir: string, relativePath: string): st
   }
 }
 
-function isExcludedPath(relativePath: string, excludeSet: Set<string>): boolean {
+function isExcludedPath(relativePath: string, excludeRules: ExcludeRules): boolean {
   const normalized = normalizeRelativePosix(relativePath).replace(/^\/+|\/+$/g, '');
   if (!normalized) return false;
   const segments = normalized.split('/');
   return segments.some((segment, index) => {
     const prefix = segments.slice(0, index + 1).join('/');
-    return excludeSet.has(segment) || excludeSet.has(prefix);
+    return excludeRules.anyDepthNames.has(segment) || excludeRules.rootPrefixes.has(prefix);
   });
 }
 
@@ -524,20 +630,12 @@ function resolveSafeCopyTarget(rootPath: string, candidatePath: string): string 
   }
 
   const parentPath = path.dirname(candidatePath);
-  if (!ensureDirectoryWithinRoot(rootPath, parentPath)) {
+  const realParent = ensureDirectoryWithinRoot(rootPath, parentPath);
+  if (!realParent) {
     return null;
   }
 
-  try {
-    const realParent = realpathSync(parentPath);
-    if (!isPathWithinRoot(realParent, rootPath)) {
-      return null;
-    }
-
-    return path.join(realParent, path.basename(candidatePath));
-  } catch {
-    return null;
-  }
+  return path.join(realParent, path.basename(candidatePath));
 }
 
 function resolveVerifiedFilePath(rootPath: string, candidatePath: string): string | null {

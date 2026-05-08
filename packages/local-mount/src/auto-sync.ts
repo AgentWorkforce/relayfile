@@ -19,14 +19,17 @@ export interface AutoSyncContext {
   realProjectDir: string;
   isExcluded: (relPosix: string) => boolean;
   /**
-   * The exact set of normalized directory names/prefixes that drive
-   * `isExcluded` (i.e., {@link MountOptions.excludeDirs} merged with the
-   * library defaults). Used purely to hint `@parcel/watcher` which subtrees
-   * to skip subscribing to. The in-handler `isSyncCandidate` filter remains
-   * authoritative; this is just a perf hint that keeps the watcher from
-   * recursing into heavy trees like `node_modules` or `.npm-cache`.
+   * Normalized directory names that drive any-depth `isExcluded` matches.
+   * Used purely to hint `@parcel/watcher` which subtrees to skip subscribing
+   * to. The in-handler `isSyncCandidate` filter remains authoritative.
    */
-  excludedNames: readonly string[];
+  excludedAnyDepthNames: readonly string[];
+  /**
+   * Root-anchored excluded names/prefixes such as `build` or `packages/cache`.
+   * These are matched only from the watch root to avoid hiding legitimate
+   * nested source directories like `src/build`.
+   */
+  excludedRootPrefixes: readonly string[];
   /**
    * Directory-only ignore patterns (ending in `/`) must only match when the
    * path is a directory. Callers that know the path's type pass `isDirectory`;
@@ -244,22 +247,21 @@ function buildIgnoreGlobs(ctx: AutoSyncContext, watchRoot: string): string[] {
   // `isExcludedPath`'s semantics, so a watcher-suppressed event never differs
   // from what the in-handler filter would have rejected.
   //
-  //   - Bare directory names (e.g. `node_modules`) match at any depth, so
-  //     emit `**/<name>` plus `**/<name>/**`. picomatch turns both into
-  //     depth-agnostic regexes that catch the dir and its descendants.
-  //   - Path-style entries (e.g. `build/cache`) are root-anchored prefixes
+  //   - Any-depth names (e.g. `node_modules`) emit `**/<name>` plus
+  //     `**/<name>/**`. picomatch turns both into depth-agnostic regexes
+  //     that catch the dir and its descendants.
+  //   - Root prefixes (e.g. `build` or `build/cache`) are root-anchored
   //     in `isExcludedPath` — they only match `<root>/build/cache`, NOT
   //     `<root>/src/build/cache`. Emit absolute patterns rooted at the
   //     watch dir so the watcher hides the same set: a literal absolute
   //     path (which the wrapper routes to ignorePaths) plus an anchored
   //     descendant glob.
   const globs: string[] = [];
-  for (const name of ctx.excludedNames) {
-    if (name.includes('/')) {
-      globs.push(`${watchRoot}/${name}`, `${watchRoot}/${name}/**`);
-    } else {
-      globs.push(`**/${name}`, `**/${name}/**`);
-    }
+  for (const name of ctx.excludedAnyDepthNames) {
+    globs.push(`**/${name}`, `**/${name}/**`);
+  }
+  for (const prefix of ctx.excludedRootPrefixes) {
+    globs.push(`${watchRoot}/${prefix}`, `${watchRoot}/${prefix}/**`);
   }
   return globs;
 }
@@ -653,4 +655,3 @@ function walk(
     }
   }
 }
-
