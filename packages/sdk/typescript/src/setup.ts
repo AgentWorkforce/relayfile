@@ -231,7 +231,8 @@ export class RelayfileSetup {
 
   async joinWorkspaceResponse(
     workspaceId: string,
-    options: NormalizedJoinWorkspaceOptions
+    options: NormalizedJoinWorkspaceOptions,
+    overrides: { tokenProvider?: AccessTokenProvider } = {}
   ): Promise<ValidatedJoinWorkspaceResponse> {
     return validateJoinWorkspaceResponse(
       await this.requestJson({
@@ -242,7 +243,8 @@ export class RelayfileSetup {
           agentName: options.agentName,
           scopes: [...options.scopes],
           permissions: clonePermissions(options.permissions)
-        })
+        }),
+        tokenProvider: overrides.tokenProvider
       })
     )
   }
@@ -577,9 +579,6 @@ export class WorkspaceHandle {
   async agentInviteScoped(
     options: AgentWorkspaceScopedInviteOptions = {}
   ): Promise<AgentWorkspaceInvite> {
-    const relaycastBaseUrl = this.resolveRelaycastBaseUrl(
-      options.relaycastBaseUrl
-    )
     const requestedScopes =
       options.scopes && options.scopes.length > 0
         ? [...options.scopes]
@@ -587,16 +586,28 @@ export class WorkspaceHandle {
     const agentName = options.agentName ?? this._joinOptions.agentName
     const permissions = options.permissions ?? this._joinOptions.permissions
 
-    // Mint a per-invite JWT with the requested scopes. The cloud API enforces
-    // that requested scopes ⊆ caller's grant; an over-broad request is
-    // rejected at this boundary, not surfaced as a silently-wide token.
+    // Authenticate the join with this handle's workspace JWT. Without it,
+    // the cloud cannot verify that requestedScopes ⊆ caller's grant, and
+    // anonymous (or permissive) endpoints would silently mint a wide token —
+    // exactly the failure this method is designed to prevent. The setup-
+    // level accessToken (used for createWorkspace/joinWorkspace at the
+    // workspace-bootstrap layer) is the wrong identity here; we want the
+    // workspace JWT itself to be the parent the cloud downscopes from.
     const joinResponse = await this._setup.joinWorkspaceResponse(
       this.workspaceId,
       {
         agentName,
         scopes: requestedScopes,
         permissions
-      }
+      },
+      { tokenProvider: async () => this.getOrRefreshToken() }
+    )
+
+    // Prefer a relaycastBaseUrl returned by the cloud over the cached one —
+    // the cloud is authoritative if it shipped a fresher value with the
+    // join response.
+    const relaycastBaseUrl = this.resolveRelaycastBaseUrl(
+      options.relaycastBaseUrl ?? joinResponse.relaycastBaseUrl
     )
 
     return compactObject({

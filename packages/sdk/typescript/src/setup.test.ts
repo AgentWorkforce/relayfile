@@ -658,6 +658,13 @@ describe("RelayfileSetup", () => {
       agentName: "review-agent",
       scopes: ["relayfile:fs:read:/notion/pages/*"]
     })
+    // Authorization header carries the calling workspace JWT so the cloud
+    // can verify requestedScopes ⊆ caller's grant. Without this the cloud
+    // can't enforce subset semantics and a permissive endpoint would mint
+    // a silently-wide token.
+    expect(readRequestHeaders(fetchMock, 1).Authorization).toBe(
+      "Bearer rf_jwt_lead"
+    )
     expect(invite).toEqual({
       workspaceId: "ws_123",
       cloudApiUrl: "https://staging.agentrelay.com/cloud",
@@ -668,6 +675,30 @@ describe("RelayfileSetup", () => {
       scopes: ["relayfile:fs:read:/notion/pages/*"],
       relayfileToken: "rf_jwt_scoped"
     })
+  })
+
+  it("agentInviteScoped picks up a fresher relaycastBaseUrl from the join response", async () => {
+    queueFetch(
+      makeJoinResponse("rf_jwt_lead", {
+        relaycastBaseUrl: "https://relaycast.old.test"
+      }),
+      makeJoinResponse("rf_jwt_scoped", {
+        relaycastBaseUrl: "https://relaycast.new.test"
+      })
+    )
+
+    const setup = new RelayfileSetup()
+    const handle = await setup.joinWorkspace("ws_123", {
+      agentName: "lead-agent",
+      scopes: ["fs:read", "fs:write"]
+    })
+
+    const invite = await handle.agentInviteScoped({
+      agentName: "review-agent",
+      scopes: ["fs:read"]
+    })
+
+    expect(invite.relaycastBaseUrl).toBe("https://relaycast.new.test")
   })
 
   it("agentInviteScoped surfaces cloud-side scope rejection", async () => {
