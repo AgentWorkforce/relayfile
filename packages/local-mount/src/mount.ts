@@ -57,7 +57,7 @@ export interface MountHandle {
   cleanup(): void;
 }
 
-const DEFAULT_EXCLUDED_DIRS = ['.git', 'node_modules'];
+const DEFAULT_EXCLUDED_DIRS = ['.git', 'node_modules', '.npm-cache'];
 const MOUNT_README_FILENAME = '_MOUNT_README.md';
 const MOUNT_MARKER_FILENAME = '.relayfile-local-mount';
 const MOUNT_MARKER_CONTENT =

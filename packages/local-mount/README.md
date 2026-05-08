@@ -29,7 +29,7 @@ Behavior:
 - Copies regular files into the mount
 - Applies ignore rules from `ignoredPatterns`
 - Marks read-only matches as mode `0o444`
-- Excludes `.git` and `node_modules` by default. Pass `includeGit: true` to opt the project's `.git` directory back in (see [Including `.git`](#including-git))
+- Excludes `.git`, `node_modules`, and `.npm-cache` by default. Pass `includeGit: true` to opt the project's `.git` directory back in (see [Including `.git`](#including-git))
 - Writes `_MOUNT_README.md` and `.relayfile-local-mount` into the mount
 - Skips syncing `_MOUNT_README.md`, `.relayfile-local-mount`, ignored files, read-only files, and symlinks back to the source project
 

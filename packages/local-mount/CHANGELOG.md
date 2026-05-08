@@ -6,7 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_No unreleased changes._
+### Changed
+- `.npm-cache` is now excluded by default alongside `.git` and `node_modules`. Project-local npm caches accumulate tens of thousands of files (often hundreds of MB) that have no place inside an agent's mount; the initial walk now skips them automatically. The `excludeDirs` option only adds to defaults — there is no way to opt the cache back in — so callers who need an npm cache visible inside the mount should point npm at a different location (e.g. via `npm_config_cache`) or populate it post-mount from `onBeforeLaunch`.
 
 ## [0.6.11] - 2026-05-07
 

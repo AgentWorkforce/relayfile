@@ -78,9 +78,10 @@ describe('createMount', () => {
     ).toThrow(/mountDir must be different from projectDir/);
   });
 
-  it('excludes .git and node_modules by default, but NOT .relay', () => {
+  it('excludes .git, node_modules, and .npm-cache by default, but NOT .relay', () => {
     write(path.join(projectDir, '.git/HEAD'), 'ref');
     write(path.join(projectDir, 'node_modules/dep/index.js'), '1');
+    write(path.join(projectDir, '.npm-cache/_cacache/content-v2/sha512/aa/bb/blob'), 'cached');
     write(path.join(projectDir, '.relay/state.json'), '{}');
     write(path.join(projectDir, 'keep.txt'), 'yes');
 
@@ -93,6 +94,7 @@ describe('createMount', () => {
     expect(existsSync(path.join(handle.mountDir, 'keep.txt'))).toBe(true);
     expect(existsSync(path.join(handle.mountDir, '.git'))).toBe(false);
     expect(existsSync(path.join(handle.mountDir, 'node_modules'))).toBe(false);
+    expect(existsSync(path.join(handle.mountDir, '.npm-cache'))).toBe(false);
     // Regression: .relay must NOT be excluded by default anymore.
     expect(existsSync(path.join(handle.mountDir, '.relay/state.json'))).toBe(true);
 
