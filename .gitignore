@@ -24,6 +24,8 @@ Thumbs.db
 
 .agent-relay/
 .relay/
+.relayfile/evals/runs/
+evals/suites/*/cases.jsonl
 
 # Node (SDK)
 node_modules/
