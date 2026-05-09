@@ -298,6 +298,11 @@ export class RelayfileSetup {
     try {
       await waitForMountReady(launcherInstance.ready, normalized.signal)
     } catch (error) {
+      // If the abort signal fired before waitForMountReady got a chance to
+      // attach a Promise.race handler, ensureLauncher.ready will reject
+      // later. Attach a no-op rejection handler so Node 18+ does not surface
+      // an unhandledRejection (which terminates the process by default).
+      launcherInstance.ready.catch(() => {})
       await safeStopLauncher(launcherInstance)
       throw error
     }
