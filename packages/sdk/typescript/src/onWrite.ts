@@ -108,6 +108,7 @@ export function onWrite(
   if (!workspaceId) {
     throw new Error("onWrite requires options.workspaceId or RELAYFILE_WORKSPACE_ID.");
   }
+  const baseUrl = resolveOnWriteBaseUrl(options, client);
 
   const operations = new Set(options.operations ?? DEFAULT_OPERATIONS);
   for (const operation of operations) {
@@ -141,7 +142,7 @@ export function onWrite(
   dispatcher.register(registration, {
     workspaceId,
     signal: options.signal,
-    baseUrl: options.baseUrl,
+    baseUrl,
     token: options.token,
     webSocketFactory: options.webSocketFactory,
     pingIntervalMs: options.pingIntervalMs,
@@ -238,7 +239,7 @@ class OnWriteDispatcher {
     this.sync = RelayFileSync.connect({
       client: this.client,
       workspaceId: options.workspaceId,
-      baseUrl: options.baseUrl ?? readEnv("RELAYFILE_BASE_URL") ?? DEFAULT_RELAYFILE_BASE_URL,
+      baseUrl: options.baseUrl ?? DEFAULT_RELAYFILE_BASE_URL,
       token,
       reconnect: {
         minDelayMs: DEFAULT_RECONNECT_MIN_DELAY_MS,
@@ -433,6 +434,19 @@ function getDefaultClient(): OnWriteClient {
     }) as OnWriteClient;
   }
   return defaultClient;
+}
+
+function resolveOnWriteBaseUrl(options: OnWriteOptions, client: OnWriteClient): string {
+  if (options.baseUrl) {
+    return options.baseUrl;
+  }
+  if (!options.client) {
+    return readEnv("RELAYFILE_BASE_URL") ?? DEFAULT_RELAYFILE_BASE_URL;
+  }
+  if (client instanceof RelayFileClient) {
+    return client.getBaseUrl();
+  }
+  return DEFAULT_RELAYFILE_BASE_URL;
 }
 
 function readEnv(name: string): string | undefined {

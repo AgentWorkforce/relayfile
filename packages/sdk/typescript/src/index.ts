@@ -21,13 +21,22 @@ export {
   CloudAbortError,
   CloudApiError,
   CloudTimeoutError,
+  InvalidLocalDirError,
+  InvalidMountModeError,
+  InvalidRemotePathError,
   IntegrationConnectionTimeoutError,
   MalformedCloudResponseError,
   MissingConnectionIdError,
+  MountModeUnavailableError,
+  MountReadyTimeoutError,
+  MountSessionInputError,
+  ProviderNotConnectedError,
+  ProviderNotReadyError,
   RelayfileSetupError,
   UnknownProviderError
 } from "./setup-errors.js";
 export {
+  type EnsureMountedWorkspaceInput,
   WORKSPACE_INTEGRATION_PROVIDERS,
   type AgentWorkspaceInvite,
   type AgentWorkspaceInviteOptions,
@@ -36,6 +45,17 @@ export {
   type ConnectIntegrationResult,
   type CreateWorkspaceOptions,
   type JoinWorkspaceOptions,
+  type MountLauncher,
+  type MountLauncherEvent,
+  type MountLauncherInstance,
+  type MountLauncherStart,
+  type MountMode,
+  type MountSessionRequest,
+  type MountSessionResponse,
+  type MountSessionResult,
+  type MountedWorkspaceHandle,
+  type MountedWorkspaceStatus,
+  type MountWorkspaceInput,
   type RelayfileSetupOptions,
   type RelayfileSetupRetryOptions,
   type WaitForConnectionOptions,
@@ -45,6 +65,11 @@ export {
   type WorkspaceMountEnvOptions,
   type WorkspacePermissions
 } from "./setup-types.js";
+export {
+  createDefaultMountLauncher,
+  defaultMountLauncher,
+  readMountedWorkspaceStatus
+} from "./mount-launcher.js";
 export {
   RelayFileSync,
   type RelayFileSyncOptions,

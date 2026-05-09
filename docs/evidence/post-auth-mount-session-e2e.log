@@ -1,0 +1,16 @@
+Building workspace packages
+Packing @relayfile/core and @relayfile/sdk
+Starting mock Cloud and Relayfile services
+Installing packed artifacts into a temporary consumer
+Running mountWorkspace packaged scenario
+Verified mountWorkspace request path, body, authorization, env mapping, seeded /notion/research/brief.md sync, expiresAt, status(), env(), and stop()
+Running ensureMountedWorkspace verifyProvider=true success scenario
+Verified ensureMountedWorkspace verifyProvider=true success path
+Running ensureMountedWorkspace invited read-only scenario
+Verified ensureMountedWorkspace invited read-only path and MountHarnessPermissionError
+Running ensureMountedWorkspace verifyProvider=true failure scenario
+Verified ensureMountedWorkspace verifyProvider=true failure path
+Running mode="stream" rejection scenario
+Verified mode="stream" is rejected by the SDK before any HTTP request
+Evidence log written to /Users/khaliqgant/Projects/AgentWorkforce/.workflow-worktrees/post-auth-mount-session/relayfile/docs/evidence/post-auth-mount-session-e2e.log
+POST_AUTH_MOUNT_E2E_OK

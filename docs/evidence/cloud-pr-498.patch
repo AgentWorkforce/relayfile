@@ -1,0 +1,335 @@
+From 1a3e4fb028bff183e92c96c339a1b0c2ef915c41 Mon Sep 17 00:00:00 2001
+From: Miya <khaliqgant+miya@gmail.com>
+Date: Sat, 9 May 2026 09:15:29 +0200
+Subject: [PATCH] docs(relayfile): propose post-auth workspace mount DX
+
+---
+ .../relayfile-post-auth-mount-dx.md           | 319 ++++++++++++++++++
+ 1 file changed, 319 insertions(+)
+ create mode 100644 docs/architecture/relayfile-post-auth-mount-dx.md
+
+diff --git a/docs/architecture/relayfile-post-auth-mount-dx.md b/docs/architecture/relayfile-post-auth-mount-dx.md
+new file mode 100644
+index 00000000..8c172301
+--- /dev/null
++++ b/docs/architecture/relayfile-post-auth-mount-dx.md
+@@ -0,0 +1,319 @@
++# Relayfile post-auth mount DX for sandboxes
++
++## Status
++
++Proposed
++
++## Summary
++
++Cloud should expose a post-auth, workspace-attach flow that lets a sandbox mount an already-authorized Relayfile workspace with one call.
++
++Auth and provider login happen ahead of time in the product UI or backend. Inside the sandbox, the caller should not need to manually:
++
++- join a workspace
++- derive mount env vars
++- spawn `relayfile mount`
++- reason about token refresh
++
++Instead, the product should provide a single mount-oriented contract that attaches an existing workspace into a sandbox-local directory.
++
++## Problem
++
++Today the underlying pieces exist, but the DX boundary is too low-level for Daytona, E2B, and similar sandbox products.
++
++The current shape leaks internal seams:
++
++1. cloud auth/session
++2. workspace provisioning or join
++3. relayfile token minting
++4. mount env derivation
++5. local daemon launch and lifecycle
++
++That is fine for primitives, but awkward for product integration. Sandbox callers do not want to assemble a Relayfile mount from parts. They want: "attach this workspace into this directory".
++
++## Goals
++
++- Keep user login separate from sandbox mount
++- Support an already-existing cloud session or service token
++- Support an already-existing workspace id
++- Hide relayfile token minting and mount env shaping behind a single cloud contract
++- Hide daemon launch details behind a single SDK helper or launcher contract
++- Work well for Daytona, E2B, local laptop agents, and remote worker sandboxes
++- Preserve access control and workspace scoping already enforced by cloud
++
++## Non-goals
++
++- Replacing existing low-level Relayfile SDK primitives
++- Requiring FUSE in sandboxes
++- Running the Relayfile API server inside the sandbox
++- Solving provider connect UX inside the sandbox
++- Defining the full mount supervisor implementation in this doc
++
++## Product stance
++
++Auth should remain separate.
++
++The expected product flow is:
++
++1. user signs in to Cloud in app/web
++2. user selects or creates a workspace
++3. user connects providers in app/web
++4. Cloud or backend launches a sandbox
++5. sandbox receives a narrow, post-auth mount contract for that workspace
++6. sandbox attaches Relayfile locally and hands the local dir to the agent runtime
++
++This is a better boundary than bundling login into a quickstart helper.
++
++## Proposed user-facing API
++
++Two levels are recommended.
++
++### 1. Stable primitive: mount an existing workspace
++
++```ts
++const relayfile = new RelayfileSetup({
++  accessToken: cloudToken,
++});
++
++const mount = await relayfile.mountWorkspace({
++  workspaceId: "ws_123",
++  localDir: "/workspace/relayfile",
++});
++
++console.log(mount.localDir);
++```
++
++Behavior:
++
++- validates cloud access to `workspaceId`
++- obtains a short-lived Relayfile workspace token
++- derives mount env internally
++- starts the local mount process
++- waits until the mount is ready for filesystem use
++- returns a handle
++
++### 2. Optional convenience: ensure + mount
++
++```ts
++const mount = await relayfile.ensureMountedWorkspace({
++  workspace: "customer-support-room",
++  provider: "slack",
++  localDir: "/workspace/relayfile",
++});
++```
++
++Behavior:
++
++- resolves or creates the requested workspace
++- optionally verifies the requested provider is already connected
++- mounts it locally
++
++This is optional. The core product need is `mountWorkspace(...)`.
++
++## Proposed returned handle
++
++```ts
++type MountedWorkspaceHandle = {
++  workspaceId: string;
++  localDir: string;
++  remotePath: string;
++  mode: "poll" | "stream";
++  ready: boolean;
++  stop(): Promise<void>;
++  status(): Promise<{
++    ready: boolean;
++    pid?: number;
++    lastHeartbeatAt?: string;
++    mode: "poll" | "stream";
++  }>;
++  env(): Record<string, string>;
++};
++```
++
++Notes:
++
++- `env()` is exposed for debugging and advanced callers, not as the main path
++- `stop()` should terminate the child mount process or invoke the mount stop contract when backgrounded
++- `status()` should be stable enough for sandbox supervision and diagnostics
++
++## Proposed Cloud contract
++
++Cloud should own a first-class post-auth mount session endpoint.
++
++### Endpoint
++
++`POST /api/v1/workspaces/:workspaceId/relayfile/mount-session`
++
++### Request
++
++```json
++{
++  "localDir": "/workspace/relayfile",
++  "remotePath": "/",
++  "mode": "poll"
++}
++```
++
++### Response
++
++```json
++{
++  "workspaceId": "ws_123",
++  "relayfileBaseUrl": "https://relayfile.example.com",
++  "relayfileToken": "<short-lived-workspace-token>",
++  "remotePath": "/",
++  "localDir": "/workspace/relayfile",
++  "mode": "poll",
++  "expiresAt": "2026-05-09T08:30:00.000Z"
++}
++```
++
++### Semantics
++
++- caller must already be authenticated to Cloud
++- caller must have access to the workspace
++- returned token must be scoped to that workspace only
++- token should be short-lived
++- response is mount-oriented, not a generic workspace join blob
++- Cloud may mint this using existing Relayfile token machinery internally
++
++## Proposed SDK layering
++
++### Cloud SDK / product SDK
++
++Cloud-facing SDK should offer:
++
++```ts
++mountWorkspace(input: {
++  workspaceId: string;
++  localDir: string;
++  remotePath?: string;
++  mode?: "poll" | "stream";
++  background?: boolean;
++}): Promise<MountedWorkspaceHandle>
++```
++
++Internally it would:
++
++1. call the mount-session endpoint
++2. translate response into env vars
++3. launch `relayfile mount`
++4. wait for readiness
++5. return the handle
++
++### Relayfile SDK
++
++Existing low-level methods remain valid:
++
++- `mountEnv()`
++- workspace join/setup primitives
++- direct client usage without local mount
++
++But they become implementation details for most sandbox consumers.
++
++## Why this is better DX
++
++It matches the real mental model.
++
++The sandbox integrator is not asking:
++
++- how do I derive `RELAYFILE_TOKEN`?
++- how do I refresh workspace join state?
++- how do I construct mount env?
++
++They are asking:
++
++- how do I attach this workspace here?
++
++That should be one method and one server contract.
++
++## Sandbox examples
++
++### Daytona
++
++```ts
++const mount = await relayfile.mountWorkspace({
++  workspaceId,
++  localDir: "/workspace/relayfile",
++});
++
++agentRoot = mount.localDir;
++```
++
++### E2B
++
++```ts
++const mount = await relayfile.mountWorkspace({
++  workspaceId,
++  localDir: "/home/user/relayfile",
++  mode: "poll",
++});
++```
++
++### Local dev agent
++
++```ts
++const mount = await relayfile.mountWorkspace({
++  workspaceId,
++  localDir: "./.relayfile",
++});
++```
++
++## Lifecycle expectations
++
++Default expectations:
++
++- foreground mode when the sandbox runtime already supervises long-lived processes
++- optional background mode for bootstrap scripts
++- mount readiness must not resolve early before the directory is usable
++- token refresh should be automatic as long as the parent cloud session remains valid
++
++If automatic refresh is not supported in v1, the contract must say so explicitly and return a short-lived mount session intended only for short sandbox runs.
++
++## Security properties
++
++- no upstream provider secrets in sandbox env
++- no global Relayfile admin secret in sandbox env
++- only a workspace-scoped Relayfile token enters the sandbox
++- cloud access check happens before issuing mount session
++- mount session should be auditable by workspace and caller
++
++## Recommended implementation slices
++
++### Slice 1, spec + endpoint
++
++- add `POST /api/v1/workspaces/:workspaceId/relayfile/mount-session`
++- mint workspace-scoped Relayfile token
++- return mount-session payload
++- cover auth and workspace access behavior
++
++### Slice 2, SDK helper
++
++- add `mountWorkspace(...)` in the cloud-facing SDK or helper package
++- call mount-session endpoint
++- launch `relayfile mount`
++- wait for readiness
++- return handle
++
++### Slice 3, product integration
++
++- wire Daytona or workflow sandbox launch path to call `mountWorkspace(...)`
++- pass resulting `localDir` to agent runtime
++
++## Open questions
++
++1. Should Cloud return only the mount session payload, or should it also support a managed launcher endpoint for non-Node runtimes?
++2. Do we want `mountWorkspace(...)` on `RelayfileSetup`, or a Cloud-specific helper to avoid conflating direct Relayfile SDK concerns with hosted product orchestration?
++3. What is the v1 readiness signal, successful process spawn, status probe, or filesystem sentinel?
++4. Do we need explicit reconnect semantics for long-lived sandboxes that outlive the original cloud auth session?
++
++## Recommendation
++
++Adopt the post-auth mount-session contract and expose `mountWorkspace(...)` as the primary sandbox integration API.
++
++That gives us the right abstraction boundary:
++
++- auth is handled ahead of time
++- workspace authorization remains in Cloud
++- sandbox attachment becomes one call
++- low-level Relayfile pieces remain available without becoming the default product DX

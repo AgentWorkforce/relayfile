@@ -1,3 +1,4 @@
+import path from "node:path"
 import {
   RelayFileClient,
   type AccessTokenProvider
@@ -13,12 +14,19 @@ import {
   CloudAbortError,
   CloudApiError,
   CloudTimeoutError,
+  InvalidLocalDirError,
+  InvalidMountModeError,
+  InvalidRemotePathError,
   IntegrationConnectionTimeoutError,
   MalformedCloudResponseError,
   MissingConnectionIdError,
+  MountSessionInputError,
+  ProviderNotConnectedError,
+  ProviderNotReadyError,
   UnknownProviderError
 } from "./setup-errors.js"
 import {
+  type EnsureMountedWorkspaceInput,
   WORKSPACE_INTEGRATION_PROVIDERS,
   type AgentWorkspaceInvite,
   type AgentWorkspaceInviteOptions,
@@ -27,6 +35,14 @@ import {
   type ConnectIntegrationResult,
   type CreateWorkspaceOptions,
   type JoinWorkspaceOptions,
+  type MountLauncher,
+  type MountMode,
+  type MountSessionRequest,
+  type MountSessionResponse,
+  type MountSessionResult,
+  type MountedWorkspaceHandle,
+  type MountedWorkspaceStatus,
+  type MountWorkspaceInput,
   type RelayfileSetupOptions,
   type WaitForConnectionOptions,
   type WorkspaceMountEnv,
@@ -36,6 +52,10 @@ import {
   type WorkspacePermissions
 } from "./setup-types.js"
 import { RELAYFILE_SDK_VERSION } from "./version.js"
+import {
+  defaultMountLauncher,
+  readMountedWorkspaceStatus
+} from "./mount-launcher.js"
 
 export { RELAYFILE_SDK_VERSION } from "./version.js"
 
@@ -49,6 +69,8 @@ const DEFAULT_AGENT_NAME = "sdk-agent"
 const DEFAULT_SCOPES = ["fs:read", "fs:write"]
 const DEFAULT_WAIT_INTERVAL_MS = 2_000
 const DEFAULT_WAIT_TIMEOUT_MS = 300_000
+const DEFAULT_MOUNT_READY_TIMEOUT_MS = 60_000
+const DEFAULT_MOUNT_AGENT_NAME = "relayfile-mount"
 const TOKEN_REFRESH_AGE_MS = 55 * 60 * 1000
 
 interface CreateWorkspaceResponse {
@@ -85,6 +107,10 @@ interface ConnectSessionResponse {
 
 interface IntegrationStatusResponse {
   ready?: boolean
+  state?: string
+  initialSync?: {
+    state?: string
+  }
 }
 
 interface NormalizedRetryOptions {
@@ -97,6 +123,32 @@ interface NormalizedJoinWorkspaceOptions {
   agentName: string
   scopes: string[]
   permissions?: WorkspacePermissions
+}
+
+interface NormalizedMountWorkspaceInput {
+  workspace?: WorkspaceHandle
+  workspaceId?: string
+  localDir: string
+  remotePath: string
+  mode: MountMode
+  background: boolean
+  agentName?: string
+  scopes?: string[]
+  signal?: AbortSignal
+  launcher: MountLauncher
+  readyTimeoutMs: number
+}
+
+interface NormalizedEnsureMountedWorkspaceInput extends NormalizedMountWorkspaceInput {
+  provider?: WorkspaceIntegrationProvider
+  verifyProvider: boolean
+  providerReadyTimeoutMs: number
+}
+
+interface ValidatedIntegrationStatusResponse {
+  ready: boolean
+  state?: string
+  initialSyncState?: string
 }
 
 interface CloudRequestOptions {
@@ -229,6 +281,68 @@ export class RelayfileSetup {
     })
   }
 
+  async mountWorkspace(
+    input: MountWorkspaceInput
+  ): Promise<MountedWorkspaceHandle> {
+    const normalized = normalizeMountWorkspaceInput(input)
+    const workspace = await this.resolveWorkspaceForMount(normalized)
+    const mountSession = await this.createMountSession(workspace, normalized)
+    const launcher = normalized.launcher
+    const launcherInstance = await launcher.start({
+      env: buildMountLauncherEnv(mountSession),
+      signal: normalized.signal,
+      readyTimeoutMs: normalized.readyTimeoutMs,
+      background: normalized.background
+    })
+
+    try {
+      await waitForMountReady(launcherInstance.ready, normalized.signal)
+    } catch (error) {
+      await safeStopLauncher(launcherInstance)
+      throw error
+    }
+
+    return new MountedWorkspaceHandleImpl({
+      mountSession,
+      launcherInstance: normalized.background ? launcherInstance : undefined,
+      probeOnly: !normalized.background
+    })
+  }
+
+  async ensureMountedWorkspace(
+    input: EnsureMountedWorkspaceInput
+  ): Promise<MountedWorkspaceHandle> {
+    const normalized = normalizeEnsureMountedWorkspaceInput(input)
+    const workspace = await this.resolveWorkspaceForMount(normalized)
+
+    if (normalized.verifyProvider) {
+      if (!normalized.provider) {
+        throw new MountSessionInputError(
+          "provider required when verifyProvider=true"
+        )
+      }
+      await verifyWorkspaceProviderReady(
+        workspace,
+        normalized.provider,
+        normalized.providerReadyTimeoutMs,
+        normalized.signal
+      )
+    }
+
+    return this.mountWorkspace({
+      workspace,
+      localDir: normalized.localDir,
+      remotePath: normalized.remotePath,
+      mode: normalized.mode,
+      background: normalized.background,
+      agentName: normalized.agentName,
+      scopes: normalized.scopes,
+      signal: normalized.signal,
+      launcher: normalized.launcher,
+      readyTimeoutMs: normalized.readyTimeoutMs
+    })
+  }
+
   async joinWorkspaceResponse(
     workspaceId: string,
     options: NormalizedJoinWorkspaceOptions,
@@ -321,6 +435,49 @@ export class RelayfileSetup {
 
   getCloudApiUrl(): string {
     return this.cloudApiUrl
+  }
+
+  private async resolveWorkspaceForMount(
+    input: NormalizedMountWorkspaceInput
+  ): Promise<WorkspaceHandle> {
+    if (input.workspace) {
+      return input.workspace
+    }
+    return this.joinWorkspace(input.workspaceId!, {
+      agentName: input.agentName,
+      scopes: input.scopes
+    })
+  }
+
+  private async createMountSession(
+    workspace: WorkspaceHandle,
+    input: NormalizedMountWorkspaceInput
+  ): Promise<MountSessionResult> {
+    const request: MountSessionRequest = compactObject({
+      localDir: input.localDir,
+      remotePath: input.remotePath,
+      mode: input.mode,
+      agentName: normalizeNonEmptyString(input.agentName) ?? DEFAULT_MOUNT_AGENT_NAME,
+      scopes:
+        input.scopes && input.scopes.length > 0
+          ? [...input.scopes]
+          : undefined
+    })
+
+    try {
+      return validateMountSessionResponse(
+        await workspace.requestJson({
+          operation: "mountWorkspace",
+          method: "POST",
+          path: `api/v1/workspaces/${encodeURIComponent(workspace.workspaceId)}/relayfile/mount-session`,
+          body: request,
+          signal: input.signal
+        }),
+        input.localDir
+      )
+    } catch (error) {
+      throw mapMountSessionError(error, request)
+    }
   }
 }
 
@@ -455,10 +612,11 @@ export class WorkspaceHandle {
       const remainingMs = timeoutMs - elapsedMs
       let ready: boolean
       try {
-        ready = await this.getConnectionStatus(provider, connectionId, {
+        const status = await this.getConnectionStatus(provider, connectionId, {
           signal: options.signal,
           timeoutMs: remainingMs
         })
+        ready = status.ready
       } catch (error) {
         if (error instanceof CloudTimeoutError) {
           throw new IntegrationConnectionTimeoutError({
@@ -490,7 +648,11 @@ export class WorkspaceHandle {
     connectionId: string
   ): Promise<boolean> {
     assertProvider(provider)
-    return this.getConnectionStatus(provider, this.resolveConnectionId(provider, connectionId))
+    const status = await this.getConnectionStatus(
+      provider,
+      this.resolveConnectionId(provider, connectionId)
+    )
+    return status.ready
   }
 
   async disconnectIntegration(
@@ -509,6 +671,15 @@ export class WorkspaceHandle {
 
   getToken(): string {
     return this._token
+  }
+
+  async requestJson(
+    options: Omit<CloudRequestOptions, "tokenProvider">
+  ): Promise<unknown> {
+    return this._setup.requestJson({
+      ...options,
+      tokenProvider: async () => this.getOrRefreshToken()
+    })
   }
 
   mountEnv(options: WorkspaceMountEnvOptions = {}): WorkspaceMountEnv {
@@ -668,23 +839,21 @@ export class WorkspaceHandle {
     return resolved
   }
 
-  private async getConnectionStatus(
+  async getConnectionStatus(
     provider: WorkspaceIntegrationProvider,
     connectionId: string,
     options: { signal?: AbortSignal; timeoutMs?: number } = {}
-  ): Promise<boolean> {
+  ): Promise<ValidatedIntegrationStatusResponse> {
     const query = new URLSearchParams({ connectionId })
-    const response = validateIntegrationStatusResponse(
-      await this._setup.requestJson({
+    return validateIntegrationStatusResponse(
+      await this.requestJson({
         operation: "getIntegrationStatus",
         method: "GET",
         path: `api/v1/workspaces/${encodeURIComponent(this.workspaceId)}/integrations/${encodeURIComponent(provider)}/status?${query.toString()}`,
         signal: options.signal,
-        timeoutMs: options.timeoutMs,
-        tokenProvider: async () => this.getOrRefreshToken()
+        timeoutMs: options.timeoutMs
       })
     )
-    return response.ready
   }
 
   private resolveRelaycastBaseUrl(override?: string): string {
@@ -693,6 +862,76 @@ export class WorkspaceHandle {
       normalizeNonEmptyString(this.info.relaycastBaseUrl) ??
       DEFAULT_RELAYCAST_BASE_URL
     )
+  }
+}
+
+class MountedWorkspaceHandleImpl implements MountedWorkspaceHandle {
+  readonly workspaceId: string
+  readonly localDir: string
+  readonly remotePath: string
+  readonly mode: MountMode
+  readonly expiresAt: string | null
+  readonly suggestedRefreshAt: string | null
+
+  private readonly mountSession: MountSessionResult
+  private readonly launcherInstance?: Awaited<ReturnType<MountLauncher["start"]>>
+  private readonly probeOnly: boolean
+
+  private readySnapshot = true
+  private stopPromise?: Promise<void>
+
+  constructor(input: {
+    mountSession: MountSessionResult
+    launcherInstance?: Awaited<ReturnType<MountLauncher["start"]>>
+    probeOnly: boolean
+  }) {
+    this.mountSession = input.mountSession
+    this.workspaceId = input.mountSession.workspaceId
+    this.localDir = input.mountSession.localDir
+    this.remotePath = input.mountSession.remotePath
+    this.mode = input.mountSession.mode
+    this.expiresAt = input.mountSession.expiresAt
+    this.suggestedRefreshAt = input.mountSession.suggestedRefreshAt
+    this.launcherInstance = input.launcherInstance
+    this.probeOnly = input.probeOnly
+  }
+
+  get ready(): boolean {
+    return this.readySnapshot
+  }
+
+  env(): Record<string, string> {
+    return buildMountedWorkspaceEnv(this.mountSession)
+  }
+
+  async status(): Promise<MountedWorkspaceStatus> {
+    const status = await readMountedWorkspaceStatus({
+      localDir: this.localDir,
+      workspaceId: this.workspaceId,
+      remotePath: this.remotePath,
+      mode: this.mode,
+      relayfileBaseUrl: this.mountSession.relayfileBaseUrl,
+      relayfileToken: this.mountSession.relayfileToken,
+      expiresAt: this.expiresAt,
+      suggestedRefreshAt: this.suggestedRefreshAt,
+      pid: this.launcherInstance?.pid
+    })
+    this.readySnapshot = status.ready
+    return status
+  }
+
+  async stop(): Promise<void> {
+    if (!this.stopPromise) {
+      this.stopPromise = this.performStop()
+    }
+    await this.stopPromise
+  }
+
+  private async performStop(): Promise<void> {
+    if (this.probeOnly || !this.launcherInstance) {
+      return
+    }
+    await safeStopLauncher(this.launcherInstance)
   }
 }
 
@@ -776,9 +1015,32 @@ function validateConnectSessionResponse(
 
 function validateIntegrationStatusResponse(
   payload: unknown
-): Required<IntegrationStatusResponse> {
+): ValidatedIntegrationStatusResponse {
   return {
-    ready: requireBooleanField(payload, "ready")
+    ready: requireBooleanField(payload, "ready"),
+    state: readOptionalStringField(payload, "state"),
+    initialSyncState: readOptionalNestedStringField(payload, ["initialSync", "state"])
+  }
+}
+
+function validateMountSessionResponse(
+  payload: unknown,
+  localDir: string
+): MountSessionResult {
+  return {
+    workspaceId: requireStringField(payload, "workspaceId"),
+    relayfileBaseUrl: stripTrailingSlash(requireStringField(payload, "relayfileBaseUrl")),
+    relayfileToken: requireStringField(payload, "relayfileToken"),
+    wsUrl: requireStringField(payload, "wsUrl"),
+    remotePath: requireStringField(payload, "remotePath"),
+    localDir,
+    mode: requireMountModeField(payload, "mode"),
+    scopes: requireStringArrayField(payload, "scopes"),
+    tokenIssuedAt: readNullableStringField(payload, "tokenIssuedAt"),
+    expiresAt: readNullableStringField(payload, "expiresAt"),
+    suggestedRefreshAt: readNullableStringField(payload, "suggestedRefreshAt"),
+    relaycastApiKey: requireStringField(payload, "relaycastApiKey"),
+    relaycastBaseUrl: readOptionalStringField(payload, "relaycastBaseUrl")
   }
 }
 
@@ -801,12 +1063,57 @@ function readOptionalStringField(payload: unknown, field: string): string | unde
   return value
 }
 
+function readNullableStringField(payload: unknown, field: string): string | null {
+  const value = readField(payload, field)
+  if (value === null || value === undefined) {
+    return null
+  }
+  if (typeof value !== "string" || value.trim() === "") {
+    throw new MalformedCloudResponseError(field, payload)
+  }
+  return value
+}
+
+function readOptionalNestedStringField(
+  payload: unknown,
+  pathSegments: [string, string]
+): string | undefined {
+  const parent = readField(payload, pathSegments[0])
+  if (!parent || typeof parent !== "object" || Array.isArray(parent)) {
+    return undefined
+  }
+  const value = (parent as Record<string, unknown>)[pathSegments[1]]
+  if (value === undefined) {
+    return undefined
+  }
+  if (typeof value !== "string" || value.trim() === "") {
+    throw new MalformedCloudResponseError(pathSegments.join("."), payload)
+  }
+  return value
+}
+
 function requireBooleanField(payload: unknown, field: string): boolean {
   const value = readField(payload, field)
   if (typeof value !== "boolean") {
     throw new MalformedCloudResponseError(field, payload)
   }
   return value
+}
+
+function requireMountModeField(payload: unknown, field: string): MountMode {
+  const value = requireStringField(payload, field)
+  if (value !== "poll" && value !== "fuse") {
+    throw new MalformedCloudResponseError(field, payload)
+  }
+  return value
+}
+
+function requireStringArrayField(payload: unknown, field: string): string[] {
+  const value = readField(payload, field)
+  if (!Array.isArray(value) || value.some((entry) => typeof entry !== "string")) {
+    throw new MalformedCloudResponseError(field, payload)
+  }
+  return [...value]
 }
 
 function readField(payload: unknown, field: string): unknown {
@@ -818,6 +1125,80 @@ function readField(payload: unknown, field: string): unknown {
 
 function normalizeConnectionId(connectionId?: string): string | undefined {
   return normalizeNonEmptyString(connectionId)
+}
+
+function normalizeMountWorkspaceInput(
+  input: MountWorkspaceInput
+): NormalizedMountWorkspaceInput {
+  if (!!input.workspace === !!input.workspaceId) {
+    throw new MountSessionInputError(
+      "Exactly one of workspace or workspaceId must be provided."
+    )
+  }
+
+  const localDir = normalizeNonEmptyString(input.localDir)
+  if (!localDir) {
+    throw new InvalidLocalDirError(String(input.localDir ?? ""))
+  }
+
+  return {
+    workspace: input.workspace,
+    workspaceId: normalizeNonEmptyString(input.workspaceId),
+    localDir: path.resolve(localDir),
+    remotePath: normalizeMountRemotePath(input.remotePath),
+    mode: normalizeMountModeInput(input.mode),
+    background: input.background !== false,
+    agentName: normalizeNonEmptyString(input.agentName),
+    scopes:
+      input.scopes && input.scopes.length > 0 ? [...input.scopes] : undefined,
+    signal: input.signal,
+    launcher: input.launcher ?? defaultMountLauncher,
+    readyTimeoutMs: Math.max(
+      1,
+      Math.floor(input.readyTimeoutMs ?? DEFAULT_MOUNT_READY_TIMEOUT_MS)
+    )
+  }
+}
+
+function normalizeEnsureMountedWorkspaceInput(
+  input: EnsureMountedWorkspaceInput
+): NormalizedEnsureMountedWorkspaceInput {
+  const normalized = normalizeMountWorkspaceInput(input)
+  return {
+    ...normalized,
+    provider: input.provider,
+    verifyProvider: input.verifyProvider !== false,
+    providerReadyTimeoutMs: Math.max(
+      0,
+      Math.floor(input.providerReadyTimeoutMs ?? 0)
+    )
+  }
+}
+
+function normalizeMountModeInput(mode?: string): MountMode {
+  const normalized = normalizeNonEmptyString(mode) ?? "poll"
+  if (normalized !== "poll" && normalized !== "fuse") {
+    throw new InvalidMountModeError(normalized)
+  }
+  return normalized
+}
+
+function normalizeMountRemotePath(remotePath?: string): string {
+  const normalized = normalizeNonEmptyString(remotePath) ?? "/"
+  if (normalized.includes("\u0000")) {
+    throw new InvalidRemotePathError(normalized)
+  }
+  const segments = normalized.replace(/\\/g, "/").split("/")
+  if (segments.some((segment) => segment === "..")) {
+    throw new InvalidRemotePathError(normalized)
+  }
+  const resolved = path.posix.normalize(
+    normalized.startsWith("/") ? normalized : `/${normalized}`
+  )
+  if (!resolved.startsWith("/")) {
+    throw new InvalidRemotePathError(normalized)
+  }
+  return resolved === "/" ? "/" : resolved.replace(/\/+$/, "")
 }
 
 function normalizeNonEmptyString(value?: string): string | undefined {
@@ -852,6 +1233,40 @@ function compactStringRecord(
       return entryValue !== undefined
     })
   )
+}
+
+function buildMountedWorkspaceEnv(
+  mountSession: MountSessionResult
+): Record<string, string> {
+  const relaycastBaseUrl =
+    normalizeNonEmptyString(mountSession.relaycastBaseUrl) ??
+    DEFAULT_RELAYCAST_BASE_URL
+
+  return compactStringRecord({
+    RELAYFILE_BASE_URL: mountSession.relayfileBaseUrl,
+    RELAYFILE_TOKEN: mountSession.relayfileToken,
+    RELAYFILE_WORKSPACE: mountSession.workspaceId,
+    RELAYFILE_REMOTE_PATH: mountSession.remotePath,
+    RELAYFILE_LOCAL_DIR: mountSession.localDir,
+    RELAYFILE_MOUNT_MODE: mountSession.mode,
+    RELAYCAST_API_KEY: mountSession.relaycastApiKey,
+    RELAY_API_KEY: mountSession.relaycastApiKey,
+    RELAYCAST_BASE_URL: relaycastBaseUrl,
+    RELAY_BASE_URL: relaycastBaseUrl
+  })
+}
+
+function buildMountLauncherEnv(
+  mountSession: MountSessionResult
+): Record<string, string> {
+  return compactStringRecord({
+    ...buildMountedWorkspaceEnv(mountSession),
+    RELAYFILE_MOUNT_SCOPES: mountSession.scopes.join(" ")
+  })
+}
+
+function stripTrailingSlash(value: string): string {
+  return value.replace(/\/+$/, "")
 }
 
 function buildCloudUrl(baseUrl: string, path: string): string {
@@ -1017,4 +1432,127 @@ function throwIfAborted(
   if (signal?.aborted) {
     throw new CloudAbortError(operation)
   }
+}
+
+async function waitForMountReady(
+  ready: Promise<void>,
+  signal?: AbortSignal
+): Promise<void> {
+  if (!signal) {
+    await ready
+    return
+  }
+  if (signal.aborted) {
+    throw new CloudAbortError("mountWorkspace")
+  }
+  let onAbort: (() => void) | undefined
+  try {
+    await Promise.race([
+      ready,
+      new Promise<never>((_, reject) => {
+        onAbort = () => {
+          signal.removeEventListener("abort", onAbort!)
+          reject(new CloudAbortError("mountWorkspace"))
+        }
+        signal.addEventListener("abort", onAbort, { once: true })
+      })
+    ])
+  } finally {
+    if (onAbort) {
+      signal.removeEventListener("abort", onAbort)
+    }
+  }
+}
+
+async function safeStopLauncher(
+  launcherInstance: Awaited<ReturnType<MountLauncher["start"]>>
+): Promise<void> {
+  try {
+    await launcherInstance.stop()
+  } catch {
+    // stop is best-effort during cleanup
+  }
+}
+
+async function verifyWorkspaceProviderReady(
+  workspace: WorkspaceHandle,
+  provider: WorkspaceIntegrationProvider,
+  providerReadyTimeoutMs: number,
+  signal?: AbortSignal
+): Promise<void> {
+  const startedAt = Date.now()
+  const connectionId = workspace.workspaceId
+
+  for (;;) {
+    throwIfAborted(signal, "ensureMountedWorkspace")
+
+    const elapsedMs = Date.now() - startedAt
+    const remainingMs =
+      providerReadyTimeoutMs <= 0
+        ? undefined
+        : Math.max(1, providerReadyTimeoutMs - elapsedMs)
+
+    const status = await workspace.getConnectionStatus(provider, connectionId, {
+      signal,
+      timeoutMs: remainingMs
+    })
+
+    if (status.ready) {
+      return
+    }
+    // Integration status uses state="not_connected" to signal a provider that
+    // has never been connected. Other non-ready states still indicate a
+    // connected provider and map to ProviderNotReadyError.
+    if (status.state === "not_connected") {
+      throw new ProviderNotConnectedError(provider)
+    }
+
+    if (providerReadyTimeoutMs <= 0 || elapsedMs >= providerReadyTimeoutMs) {
+      throw new ProviderNotReadyError({
+        provider,
+        state: status.state,
+        initialSyncState: status.initialSyncState
+      })
+    }
+
+    const sleepMs = Math.min(
+      DEFAULT_WAIT_INTERVAL_MS,
+      Math.max(1, providerReadyTimeoutMs - elapsedMs)
+    )
+    await sleep(sleepMs, signal, "ensureMountedWorkspace")
+  }
+}
+
+function mapMountSessionError(
+  error: unknown,
+  request: MountSessionRequest
+): unknown {
+  if (!(error instanceof CloudApiError) || error.httpStatus !== 400) {
+    return error
+  }
+  const code = readCloudErrorCode(error.httpBody)
+  switch (code) {
+    case "invalid_mode":
+      return new InvalidMountModeError(request.mode ?? "poll")
+    case "invalid_local_dir":
+      return new InvalidLocalDirError(request.localDir)
+    case "invalid_remote_path":
+      return new InvalidRemotePathError(request.remotePath ?? "/")
+    default:
+      return error
+  }
+}
+
+function readCloudErrorCode(httpBody: unknown): string | undefined {
+  if (!httpBody || typeof httpBody !== "object" || Array.isArray(httpBody)) {
+    return undefined
+  }
+  const payload = httpBody as Record<string, unknown>
+  for (const field of ["code", "error"] as const) {
+    const value = payload[field]
+    if (typeof value === "string" && value.trim() !== "") {
+      return value
+    }
+  }
+  return undefined
 }
