@@ -1,0 +1,25 @@
+{
+  "id": "traj_brjdrgcnnwhs",
+  "version": 1,
+  "task": {
+    "title": "Specify initial relayfile integration E2E eval"
+  },
+  "status": "completed",
+  "startedAt": "2026-05-09T19:25:53.348Z",
+  "completedAt": "2026-05-09T19:29:16.033Z",
+  "agents": [],
+  "chapters": [],
+  "retrospective": {
+    "summary": "Added live initial integrations E2E eval spec for Relayfile covering setup, discovery, Linear, Slack, Notion, GitHub, and final health evidence.",
+    "approach": "Standard approach",
+    "confidence": 0.84
+  },
+  "commits": [],
+  "filesChanged": [],
+  "projectId": "relayfile",
+  "tags": [],
+  "_trace": {
+    "startRef": "6ad80744f930cf45aa055d38da19921ce435ec01",
+    "endRef": "6ad80744f930cf45aa055d38da19921ce435ec01"
+  }
+}
