@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "lastUpdated": "2026-05-09T18:27:13.442Z",
+  "lastUpdated": "2026-05-09T18:48:10.008Z",
   "trajectories": {
     "traj_mfyus7zfgxt2": {
       "title": "062-sdk-setup-client-workflow",
@@ -228,6 +228,13 @@
       "startedAt": "2026-05-09T18:25:18.473Z",
       "completedAt": "2026-05-09T18:27:13.341Z",
       "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-05/traj_4vdcwo2iy630.json"
+    },
+    "traj_h99ldnvo1d26": {
+      "title": "relayfile workspace current + active marker in 'workspace list'",
+      "status": "completed",
+      "startedAt": "2026-05-09T18:44:54.122Z",
+      "completedAt": "2026-05-09T18:48:09.889Z",
+      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-05/traj_h99ldnvo1d26.json"
     }
   }
 }
