@@ -15,7 +15,7 @@ The post-auth mount flow requires **two prior steps** before a sandbox can mount
 
 Only after these steps does the SDK issue the mount-session request. The resulting mounted workspace handle gives the sandbox access to the workspace's virtual filesystem as ordinary files in a local directory.
 
-```
+```text
 [Cloud auth] → [Provider connect] → mountWorkspace() → local files on disk
                      ↑
                skipped if verifyProvider: false
@@ -42,7 +42,7 @@ The scopes on the minted JWT are a subset of the caller's grant. If the caller p
 
 ## Cloud Endpoint Reference
 
-```
+```http
 POST /api/v1/workspaces/{workspaceId}/relayfile/mount-session
 Authorization: Bearer <workspace-JWT or cloud-access-token>
 Content-Type: application/json

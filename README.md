@@ -245,6 +245,42 @@ Use the OSS repo when you want to run the file server yourself. Use hosted Agent
 
 For end-to-end self-hosting of provider-backed files, run relayfile, relayauth, the relevant [adapters](https://github.com/AgentWorkforce/relayfile-adapters), [providers](https://github.com/AgentWorkforce/relayfile-providers), and Nango. Relayfile itself does not store third-party OAuth credentials.
 
+### Mount a workspace from a sandbox (TypeScript SDK)
+
+Once a user has signed in and connected their providers in Agent Relay Cloud, a sandbox (Daytona, E2B, an ephemeral container, your own runtime) can attach the workspace as local files in a single SDK call:
+
+```ts
+import { RelayfileSetup } from "@relayfile/sdk"
+
+const setup = new RelayfileSetup({ accessToken })
+
+const handle = await setup.mountWorkspace({
+  workspaceId: "rw_…",
+  localDir: "/workspace",
+})
+
+// /workspace is now a live mount of the workspace
+console.log(handle.status().expiresAt)
+await handle.stop()
+```
+
+Use `ensureMountedWorkspace` when you also want provider-readiness gating in the same call:
+
+```ts
+const handle = await setup.ensureMountedWorkspace({
+  workspace: { id: "rw_…" },
+  provider: "notion",
+  verifyProvider: true,
+  localDir: "/workspace",
+})
+```
+
+`ensureMountedWorkspace` throws `ProviderNotConnectedError` when the provider isn't connected, and `ProviderNotReadyError({ provider, state, initialSyncState })` when the connection exists but isn't ready by `providerReadyTimeoutMs`. Pass `verifyProvider: false` to skip the probe.
+
+The handle exposes `ready`, `expiresAt`, `suggestedRefreshAt`, `env()`, `status()`, and `stop()`. The SDK supervises the local `relayfile-mount` process for you and only resolves once the mount is reachable.
+
+This is the programmatic sibling of the `relayfile setup` CLI above — same outcome (a workspace mounted at a local directory), different entry point. Use the CLI for human-driven setup; use the SDK from inside an already-authorized sandbox or agent runtime. Full details in [docs/guides/post-auth-mount-session.md](docs/guides/post-auth-mount-session.md).
+
 ## Bring Existing Connections
 
 Relayfile tracks provider identity as `connectionId` metadata. The core OSS server can ingest events and queue writebacks with a `connectionId`, but the OAuth provider must be able to use that ID.
@@ -268,6 +304,7 @@ Pipedream:
 
 - [Getting started](docs/guides/getting-started.md)
 - [Cloud integration](docs/guides/cloud-integration.md)
+- [Post-auth mount session (SDK)](docs/guides/post-auth-mount-session.md)
 - [Adapters](https://github.com/AgentWorkforce/relayfile-adapters)
 - [Providers](https://github.com/AgentWorkforce/relayfile-providers)
 - [API reference](docs/api-reference.md)
