@@ -324,6 +324,9 @@ func (s *fsState) listDirectory(ctx context.Context, remotePath string) (map[str
 		}
 		entries[meta.name] = meta
 	}
+	if remotePath == s.remoteRoot {
+		entries[layoutFilename] = virtualLayoutMeta(s.remoteRoot)
+	}
 	s.putDir(remotePath, entries)
 	return entries, nil
 }
@@ -358,6 +361,9 @@ func (s *fsState) lookupMetadata(ctx context.Context, remotePath string) (nodeMe
 			modTime: time.Now(),
 		}, nil
 	}
+	if isVirtualLayoutPath(s.remoteRoot, remotePath) {
+		return virtualLayoutMeta(s.remoteRoot), nil
+	}
 	parentPath, name := splitParent(remotePath)
 	entries, err := s.listDirectory(ctx, parentPath)
 	if err != nil {
@@ -380,6 +386,9 @@ func (s *fsState) lookupMetadata(ctx context.Context, remotePath string) (nodeMe
 
 func (s *fsState) readFile(ctx context.Context, remotePath string) (mountsync.RemoteFile, error) {
 	remotePath = normalizeRemotePath(remotePath)
+	if isVirtualLayoutPath(s.remoteRoot, remotePath) {
+		return readVirtualLayout(s.remoteRoot), nil
+	}
 	if file, ok := s.getFile(remotePath); ok {
 		return file, nil
 	}

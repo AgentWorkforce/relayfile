@@ -2274,14 +2274,198 @@ func TestRemoteToLocalAndLocalToRemotePath(t *testing.T) {
 	if remotePath != "/notion/Folder/File.md" {
 		t.Fatalf("unexpected remote path mapping: %s", remotePath)
 	}
+}
 
-	nameIDPath := filepath.Join(localRoot, "Folder", "Human Name__01HXYZ.json")
-	nameIDRemotePath, err := localToRemotePath(localRoot, "/notion", nameIDPath)
+func TestApplyRemoteFile_IndexAndLayoutFiles(t *testing.T) {
+	t.Parallel()
+
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(&fakeClient{}, SyncerOptions{
+		WorkspaceID: "ws_index_layout",
+		RemoteRoot:  "/",
+		LocalRoot:   localDir,
+	})
 	if err != nil {
-		t.Fatalf("localToRemotePath for name/id basename failed: %v", err)
+		t.Fatalf("new syncer failed: %v", err)
 	}
-	if nameIDRemotePath != "/notion/Folder/Human Name__01HXYZ.json" {
-		t.Fatalf("unexpected name/id remote path mapping: %s", nameIDRemotePath)
+
+	indexBody := "{\n  \"title\": \"Caf\\u00e9 \\u2615\",\n  \"rows\": [\n    {\"title\": \"Alpha\", \"file\": \"alpha__page-1.md\"}\n  ]\n}\n"
+	layoutBody := "# notion layout\n\nRead `_index.json` first.\n"
+
+	if err := syncer.applyRemoteFile("/notion/pages/_index.json", RemoteFile{
+		Path:        "/notion/pages/_index.json",
+		Revision:    "rev_index",
+		ContentType: "application/json",
+		Content:     indexBody,
+	}, nil); err != nil {
+		t.Fatalf("applyRemoteFile(_index.json) failed: %v", err)
+	}
+	if err := syncer.applyRemoteFile("/notion/.layout.md", RemoteFile{
+		Path:        "/notion/.layout.md",
+		Revision:    "rev_layout",
+		ContentType: "text/markdown",
+		Content:     layoutBody,
+	}, nil); err != nil {
+		t.Fatalf("applyRemoteFile(.layout.md) failed: %v", err)
+	}
+
+	indexPath := filepath.Join(localDir, "notion", "pages", "_index.json")
+	layoutPath := filepath.Join(localDir, "notion", ".layout.md")
+	indexBytes, err := os.ReadFile(indexPath)
+	if err != nil {
+		t.Fatalf("read %s failed: %v", indexPath, err)
+	}
+	layoutBytes, err := os.ReadFile(layoutPath)
+	if err != nil {
+		t.Fatalf("read %s failed: %v", layoutPath, err)
+	}
+	if string(indexBytes) != indexBody {
+		t.Fatalf("_index.json content mismatch: got %q, want %q", string(indexBytes), indexBody)
+	}
+	if string(layoutBytes) != layoutBody {
+		t.Fatalf(".layout.md content mismatch: got %q, want %q", string(layoutBytes), layoutBody)
+	}
+	if got, want := hashBytes(indexBytes), hashBytes([]byte(indexBody)); got != want {
+		t.Fatalf("_index.json hash = %s, want %s", got, want)
+	}
+	if got, want := hashBytes(layoutBytes), hashBytes([]byte(layoutBody)); got != want {
+		t.Fatalf(".layout.md hash = %s, want %s", got, want)
+	}
+	if info, err := os.Stat(filepath.Join(localDir, "notion", "pages")); err != nil {
+		t.Fatalf("stat notion/pages failed: %v", err)
+	} else if !info.IsDir() {
+		t.Fatalf("expected notion/pages to be a directory")
+	}
+}
+
+func TestApplyRemoteFile_NestedIndexAndLayout(t *testing.T) {
+	t.Parallel()
+
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(&fakeClient{}, SyncerOptions{
+		WorkspaceID: "ws_nested_indexes",
+		RemoteRoot:  "/",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+
+	cases := []struct {
+		remotePath string
+		revision   string
+		content    string
+	}{
+		{
+			remotePath: "/linear/issues/_index.json",
+			revision:   "rev_linear",
+			content:    "{\n  \"rows\": [{\"title\": \"Bug 106\", \"file\": \"bug-106__issue-1.md\"}]\n}\n",
+		},
+		{
+			remotePath: "/github/repos/_index.json",
+			revision:   "rev_github",
+			content:    "{\n  \"rows\": [{\"title\": \"relayfile\", \"file\": \"relayfile__repo-1.md\"}]\n}\n",
+		},
+	}
+
+	for _, tc := range cases {
+		if err := syncer.applyRemoteFile(tc.remotePath, RemoteFile{
+			Path:        tc.remotePath,
+			Revision:    tc.revision,
+			ContentType: "application/json",
+			Content:     tc.content,
+		}, nil); err != nil {
+			t.Fatalf("applyRemoteFile(%s) failed: %v", tc.remotePath, err)
+		}
+		localPath := filepath.Join(localDir, filepath.FromSlash(strings.TrimPrefix(tc.remotePath, "/")))
+		data, err := os.ReadFile(localPath)
+		if err != nil {
+			t.Fatalf("read %s failed: %v", localPath, err)
+		}
+		if string(data) != tc.content {
+			t.Fatalf("%s content mismatch: got %q, want %q", localPath, string(data), tc.content)
+		}
+		if got, want := hashBytes(data), hashBytes([]byte(tc.content)); got != want {
+			t.Fatalf("%s hash = %s, want %s", localPath, got, want)
+		}
+		if info, err := os.Stat(filepath.Dir(localPath)); err != nil {
+			t.Fatalf("stat %s failed: %v", filepath.Dir(localPath), err)
+		} else if !info.IsDir() {
+			t.Fatalf("expected %s to be a directory", filepath.Dir(localPath))
+		}
+	}
+}
+
+func TestApplyRemoteSnapshot_PreservesNestedLayoutDotfiles(t *testing.T) {
+	t.Parallel()
+
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(&fakeClient{}, SyncerOptions{
+		WorkspaceID: "ws_snapshot_layout",
+		RemoteRoot:  "/",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+
+	remoteFiles := map[string]RemoteFile{
+		"/notion/.layout.md": {
+			Path:        "/notion/.layout.md",
+			Revision:    "rev_snapshot_layout",
+			ContentType: "text/markdown",
+			Content:     "# snapshot layout\n",
+		},
+		"/notion/pages/_index.json": {
+			Path:        "/notion/pages/_index.json",
+			Revision:    "rev_snapshot_index",
+			ContentType: "application/json",
+			Content:     "{\n  \"rows\": []\n}\n",
+		},
+	}
+	if err := syncer.applyRemoteSnapshot(remoteFiles, nil); err != nil {
+		t.Fatalf("applyRemoteSnapshot failed: %v", err)
+	}
+
+	assertLocalFileContent(t, filepath.Join(localDir, "notion", ".layout.md"), "# snapshot layout\n")
+	assertLocalFileContent(t, filepath.Join(localDir, "notion", "pages", "_index.json"), "{\n  \"rows\": []\n}\n")
+}
+
+func TestApplyWebSocketEvent_PreservesNestedLayoutDotfiles(t *testing.T) {
+	t.Parallel()
+
+	client := &fakeClient{
+		files: map[string]RemoteFile{
+			"/notion/.layout.md": {
+				Path:        "/notion/.layout.md",
+				Revision:    "rev_ws_layout",
+				ContentType: "text/markdown",
+				Content:     "# websocket layout\n",
+			},
+		},
+	}
+
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_event_layout",
+		RemoteRoot:  "/",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+
+	if err := syncer.applyWebSocketEvent(context.Background(), websocketEvent{
+		Type:      "file.updated",
+		Path:      "/notion/.layout.md",
+		Timestamp: "2026-05-09T00:00:00Z",
+	}); err != nil {
+		t.Fatalf("applyWebSocketEvent failed: %v", err)
+	}
+
+	assertLocalFileContent(t, filepath.Join(localDir, "notion", ".layout.md"), "# websocket layout\n")
+	if client.readFileCalls != 1 {
+		t.Fatalf("expected websocket layout update to perform one ReadFile, got %d", client.readFileCalls)
 	}
 }
 

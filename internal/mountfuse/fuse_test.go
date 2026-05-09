@@ -329,6 +329,7 @@ func TestDirNodeLookupAndReadAcceptsLegacyAndNameIDForms(t *testing.T) {
 	}
 	sort.Strings(gotNames)
 	wantNames := []string{
+		"LAYOUT.md",
 		"human-name__legacy-id.json",
 		"legacy-id.json",
 		"only-human__shared-id.json",
