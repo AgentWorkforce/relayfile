@@ -1,0 +1,328 @@
+{
+  "id": "compact_xl96yexa79wg",
+  "version": 1,
+  "type": "compacted",
+  "compactedAt": "2026-05-09T18:20:54.265Z",
+  "sourceTrajectories": [
+    "traj_6lyjg41p6a28",
+    "traj_xf18gkmtr3ib",
+    "traj_6fjv0fnvrc5e",
+    "traj_d3drzvodqpn7",
+    "traj_9khc36ax639i",
+    "traj_v1un6n66y38i",
+    "traj_ailh4waboewf",
+    "traj_hyqnsfininh5",
+    "traj_a6rfc30zag40",
+    "traj_z2klijcrwqed",
+    "traj_7x9nltybo08h",
+    "traj_wez7rl7pkfpn",
+    "traj_cdist8i8vdmd",
+    "traj_em3hvzpg1xmx",
+    "traj_qi3qmy5oveab",
+    "traj_dmoc4slub7ox",
+    "traj_i1f02867dkxn",
+    "traj_82lywlk9dcnc",
+    "traj_nixaonkglri1",
+    "traj_iuzm83ogm43k"
+  ],
+  "dateRange": {
+    "start": "2026-04-20T20:35:15.759Z",
+    "end": "2026-05-09T13:57:04.293Z"
+  },
+  "summary": {
+    "totalDecisions": 19,
+    "totalEvents": 27,
+    "uniqueAgents": [
+      "default",
+      "orchestrator"
+    ]
+  },
+  "decisionGroups": [
+    {
+      "category": "testing",
+      "decisions": [
+        {
+          "question": "Use fan-out workers with separate worktrees for the three independent follow-ups",
+          "chosen": "Use fan-out workers with separate worktrees for the three independent follow-ups",
+          "reasoning": "Tasks target independent branches and mostly disjoint files; separate worktrees keep parent repos clean and let tests run in parallel.",
+          "fromTrajectory": "traj_6fjv0fnvrc5e"
+        },
+        {
+          "question": "Add guided setup as bare relayfile and relayfile setup while preserving explicit subcommands",
+          "chosen": "Add guided setup as bare relayfile and relayfile setup while preserving explicit subcommands",
+          "reasoning": "The desired UX is low-friction for humans, but existing token-first subcommands are useful for CI and tests; a guided default layers on top without breaking scriptable surfaces.",
+          "fromTrajectory": "traj_ailh4waboewf"
+        },
+        {
+          "question": "Use one DAG with parallel implementation tracks and hard E2E gate",
+          "chosen": "Use one DAG with parallel implementation tracks and hard E2E gate",
+          "reasoning": "The golden path crosses relayfile SDK, cloud readiness, relaycast coordination, mount behavior, and docs. A DAG lets independent repo-specific agents work in parallel while deterministic gates force tests, packaged E2E, evidence, review, and separate commits before completion.",
+          "fromTrajectory": "traj_hyqnsfininh5"
+        },
+        {
+          "question": "Create a standalone golden-path spec",
+          "chosen": "Create a standalone golden-path spec",
+          "reasoning": "The setup-client spec is now an implementation contract for lower-level primitives. The Notion-to-mount-to-relaycast experience crosses relayfile, cloud, relaycast, and agent process handoff, so it needs its own product and acceptance spec rather than expanding the setup-client doc further.",
+          "fromTrajectory": "traj_a6rfc30zag40"
+        },
+        {
+          "question": "Addressed PR 65 spec-only feedback",
+          "chosen": "Addressed PR 65 spec-only feedback",
+          "reasoning": "Both comments pointed to docs/sdk-setup-client.md: connectIntegration auth wording and runtime export example. The implementation already used relayfile JWT auth and value exports, so the spec was corrected to match.",
+          "fromTrajectory": "traj_cdist8i8vdmd"
+        },
+        {
+          "question": "Kept workflow gate strict and fixed SDK contract",
+          "chosen": "Kept workflow gate strict and fixed SDK contract",
+          "reasoning": "The failed verify-edits-landed step was caused by the generated SDK exporting CloudTimeoutError instead of the spec-required IntegrationConnectionTimeoutError. Added the spec error class and updated waitForConnection/tests rather than weakening the workflow gate.",
+          "fromTrajectory": "traj_i1f02867dkxn"
+        },
+        {
+          "question": "Extracted shared RS256 local JWKS signer for script tests",
+          "chosen": "Extracted shared RS256 local JWKS signer for script tests",
+          "reasoning": "Both e2e.ts and conformance.ts minted duplicated HS256 tokens; a small shared helper keeps RSA key generation, JWKS serving, kid calculation, and signing consistent without adding dependencies.",
+          "fromTrajectory": "traj_nixaonkglri1"
+        }
+      ]
+    },
+    {
+      "category": "api",
+      "decisions": [
+        {
+          "question": "Kept relayfile checks local to the relayfile runner",
+          "chosen": "Kept relayfile checks local to the relayfile runner",
+          "reasoning": "The shared runHumanEvalCli helper does not expose a check-extension hook, so the runner uses shared loading/artifact APIs and appends relayfile-specific checks without forking the package.",
+          "fromTrajectory": "traj_9khc36ax639i"
+        },
+        {
+          "question": "Expose one-handle agent workspace helpers",
+          "chosen": "Expose one-handle agent workspace helpers",
+          "reasoning": "The existing WorkspaceHandle already holds relayfile token, workspace metadata, and relaycast API key, so connectNotion/waitForNotion/mountEnv/agentInvite keep the easy path on the object agents already receive without introducing a second setup abstraction.",
+          "fromTrajectory": "traj_z2klijcrwqed"
+        },
+        {
+          "question": "Reviewed only; no code changes",
+          "chosen": "Reviewed only; no code changes",
+          "reasoning": "The user requested a PR review, so findings should be reported without modifying the PR branch.",
+          "fromTrajectory": "traj_wez7rl7pkfpn"
+        },
+        {
+          "question": "Removed out-of-scope cloud churn before approval",
+          "chosen": "Removed out-of-scope cloud churn before approval",
+          "reasoning": "The reviewer correctly blocked approval because cloud script-generator/start-from files were unrelated to the SDK setup contract. I restored only those hunks and left untracked unrelated work alone.",
+          "fromTrajectory": "traj_qi3qmy5oveab"
+        },
+        {
+          "question": "Run generated cloud route test with Vitest",
+          "chosen": "Run generated cloud route test with Vitest",
+          "reasoning": "tests/sdk-setup-client-routes.test.ts uses vitest APIs and vi.mock; Node's tsx --test runner cannot execute it. The workflow now runs that file with vitest and keeps app-path/default-api-url on tsx --test.",
+          "fromTrajectory": "traj_i1f02867dkxn"
+        },
+        {
+          "question": "Use https://agentrelay.com/cloud as SDK setup default",
+          "chosen": "Use https://agentrelay.com/cloud as SDK setup default",
+          "reasoning": "../cloud/infra/web-routing.ts exports appUrl with /cloud and ../cloud/packages/cli/src/cli/constants.ts defaults CLOUD API to https://agentrelay.com/cloud; docs/sdk-setup-client.md currently points at obsolete app.agentrelay.com.",
+          "fromTrajectory": "traj_82lywlk9dcnc"
+        }
+      ]
+    },
+    {
+      "category": "other",
+      "decisions": [
+        {
+          "question": "Make createMount async (Promise<MountHandle>), not adding a new createMountAsync alongside",
+          "chosen": "Make createMount async (Promise<MountHandle>), not adding a new createMountAsync alongside",
+          "reasoning": "Issue lists this as the preferred option since the package is pre-1.0, only one known consumer (AgentWorkforce CLI), and avoids maintaining two near-identical entry points.",
+          "fromTrajectory": "traj_v1un6n66y38i"
+        },
+        {
+          "question": "Yield via setImmediate at directory entry + every 64 entries within a directory",
+          "chosen": "Yield via setImmediate at directory entry + every 64 entries within a directory",
+          "reasoning": "Issue says one yield per directory is enough. Adding 1-per-64 inside the loop covers worst-case flat directories with thousands of files without measurable perf impact.",
+          "fromTrajectory": "traj_v1un6n66y38i"
+        },
+        {
+          "question": "Use absolute evidence file path",
+          "chosen": "Use absolute evidence file path",
+          "reasoning": "capture-final-evidence changed into ../cloud inside its output block, so the final grep resolved docs/evidence relative to the cloud repo. The fix writes and checks the relayfile evidence path absolutely and uses git -C for both repos.",
+          "fromTrajectory": "traj_dmoc4slub7ox"
+        }
+      ]
+    },
+    {
+      "category": "tooling",
+      "decisions": [
+        {
+          "question": "Fix PR review by topologically sorting publish targets",
+          "chosen": "Fix PR review by topologically sorting publish targets",
+          "reasoning": "Syncing dependency ranges before publish is necessary for correct package metadata, so publish order must ensure selected internal dependencies such as adapter-core are published before dependents.",
+          "fromTrajectory": "traj_xf18gkmtr3ib"
+        },
+        {
+          "question": "Switched watcher from chokidar v4 to @parcel/watcher 2.5.6",
+          "chosen": "Switched watcher from chokidar v4 to @parcel/watcher 2.5.6",
+          "reasoning": "Chokidar v4's awaitWriteFinish polling + fs.watch teardown caused noticeable hangs on exit. @parcel/watcher uses native FSEvents/inotify/ReadDirectoryChangesW with clean async unsubscribe. Replaced awaitWriteFinish with a small per-path setTimeout debounce; reconcile loop + mtime/content check absorb the looser write semantics.",
+          "fromTrajectory": "traj_iuzm83ogm43k"
+        }
+      ]
+    },
+    {
+      "category": "naming",
+      "decisions": [
+        {
+          "question": "Use 255-byte segment guidance for Linear slug-prefixed canonical paths",
+          "chosen": "Use 255-byte segment guidance for Linear slug-prefixed canonical paths",
+          "reasoning": "Linear slug-prefixed filenames are generated by nameWithId, which truncates based on the 255-byte path segment budget rather than the 80-character by-title alias slug limit.",
+          "fromTrajectory": "traj_6lyjg41p6a28"
+        }
+      ]
+    }
+  ],
+  "keyLearnings": [],
+  "keyFindings": [],
+  "filesAffected": [],
+  "commits": [],
+  "narrative": "This run captures a dense stretch of work on the Relayfile project (SDK, cloud, adapters, CLI, eval harness, mount layer). The dominant arc was the SDK setup-client contract: workflow 062-sdk-setup-client.ts was authored with hard 80-to-100 validation gates, then iteratively repaired across multiple sessions — fixing the verify-edits-landed gate by adding the spec-required IntegrationConnectionTimeoutError to @relayfile/sdk and switching the generated cloud route test to Vitest (tsx --test couldn't run vi.mock), correcting capture-final-evidence to use absolute paths and git -C after a cd-in-redirect bug, and removing out-of-scope cloud script-generator churn before the review gate would approve. PR 65 review/feedback cycles aligned the implementation with docs/sdk-setup-client.md (relayfile JWT auth, runtime export of WORKSPACE_INTEGRATION_PROVIDERS, https://agentrelay.com/cloud as the canonical default per ../cloud/infra/web-routing.ts and packages/cli/src/cli/constants.ts).",
+  "decisions": [
+    {
+      "question": "How to package multiple independent follow-up PRs (cloud conventions, cloud sdk/core bump, adapters release pipeline)",
+      "chosen": "Fan-out workers in separate worktrees",
+      "reasoning": "Branches and files were mostly disjoint; isolated worktrees keep parent repos clean and let tests run in parallel.",
+      "impact": "Produced cloud#504, cloud#505, and relayfile-adapters#59 in one session; rebased cloud branches after cloud#503 merged."
+    },
+    {
+      "question": "Linear slug-prefixed canonical path truncation budget",
+      "chosen": "255-byte path-segment guidance, not 80-char alias slug",
+      "reasoning": "nameWithId truncates by the 255-byte filesystem segment budget rather than the by-title alias 80-char limit.",
+      "impact": "cloud#504 guidance corrected with regression assertions in cataloging-agent-linear."
+    },
+    {
+      "question": "relayfile-adapters publish ordering",
+      "chosen": "Topologically sort publish targets so adapter-core publishes before dependents",
+      "reasoning": "Dependency ranges are synced before publish; dependents need their internal deps already published.",
+      "impact": "relayfile-adapters#59 fixes stale adapter-core ranges; npm test + GitHub Build & Test pass."
+    },
+    {
+      "question": "Async createMount API shape (issue #104)",
+      "chosen": "Make createMount return Promise<MountHandle> directly; no parallel createMountAsync",
+      "reasoning": "Pre-1.0 package, single known consumer (AgentWorkforce CLI); avoids two near-identical entry points.",
+      "impact": "Walker yields via setImmediate per directory and every 64 entries in flat dirs; updated launch.ts and all mount/auto-sync/launch tests, added event-loop yield regression test."
+    },
+    {
+      "question": "Where to put relayfile-specific eval checks",
+      "chosen": "Local to the relayfile runner, reusing shared loading/artifact APIs",
+      "reasoning": "runHumanEvalCli has no check-extension hook; forking the package was unnecessary.",
+      "impact": "Added 5 suites / 13 cases, npm scripts, docs, gitignore; full+VFS+compile+list offline evals and typecheck all pass."
+    },
+    {
+      "question": "Guided CLI vs explicit subcommands",
+      "chosen": "Bare relayfile / relayfile setup as guided path on top of existing token-first subcommands",
+      "reasoning": "Humans want low friction; CI/tests still need scriptable surfaces.",
+      "impact": "Bare command runs cloud login → workspace create/join → Nango connect session → mount sync; CLI tests + go test ./... pass."
+    },
+    {
+      "question": "Agent workspace shape — second abstraction or extend WorkspaceHandle",
+      "chosen": "One-handle helpers on existing WorkspaceHandle (connectNotion, waitForNotion, mountEnv, agentInvite)",
+      "reasoning": "WorkspaceHandle already holds relayfile token, workspace metadata, and relaycast API key.",
+      "impact": "Avoids a second setup abstraction; covered by unit + packaged E2E."
+    },
+    {
+      "question": "Golden-path workflow shape",
+      "chosen": "Single DAG with parallel implementation tracks and hard E2E gate",
+      "reasoning": "Crosses relayfile SDK, cloud readiness, relaycast coordination, mount, docs — independent agents per repo with deterministic gates.",
+      "impact": "workflows/063-agent-workspace-golden-path.ts authored with acceptance lock, edit verification, test-fix-rerun, packaged E2E, evidence, review, separate commits."
+    },
+    {
+      "question": "Local-mount file watcher",
+      "chosen": "@parcel/watcher 2.5.6 over chokidar v4",
+      "reasoning": "Chokidar's awaitWriteFinish + fs.watch teardown caused exit hangs; @parcel/watcher uses native FSEvents/inotify/RDCW with prompt async unsubscribe.",
+      "impact": "Replaced awaitWriteFinish with per-path setTimeout debounce; reconcile loop + mtime/content check absorb looser write semantics; 22 tests pass; exit-hang resolved."
+    },
+    {
+      "question": "Auth strategy for relayfile e2e/conformance script harnesses",
+      "chosen": "RS256 with startup-local JWKS server, shared signer helper",
+      "reasoning": "Both scripts duplicated HS256 token minting; a shared helper centralizes RSA keygen, JWKS serving, kid, signing without new deps.",
+      "impact": "Scripts pass RELAYAUTH_JWKS_URL to spawned Go server and close JWKS listener during teardown."
+    }
+  ],
+  "conventions": [
+    {
+      "pattern": "80-to-100 workflow gates: verify-edits-landed, capture-final-evidence, verify-review-approved must stay strict; fix the contract or scope, never weaken the gate",
+      "rationale": "Workflow 062 demonstrated that gate failures revealed real spec drift (missing IntegrationConnectionTimeoutError, out-of-scope cloud churn) — relaxing them would have shipped wrong code.",
+      "scope": "All workflows under workflows/ that follow the relay-80-100 pattern."
+    },
+    {
+      "pattern": "Use absolute paths and `git -C <repo>` for evidence/check steps that touch multiple repos; never `cd` inside a redirected output block",
+      "rationale": "capture-final-evidence resolved docs/evidence relative to ../cloud after a cd inside the block, silently writing to the wrong repo.",
+      "scope": "Multi-repo workflow steps with shell redirection."
+    },
+    {
+      "pattern": "Choose test runner to match the test file: vitest for vi.mock-based tests, tsx --test for Node-runner-compatible tests",
+      "rationale": "Mixed runners in one workflow caused verify-edits-landed to fail when tsx tried to execute vi.mock.",
+      "scope": "Workflow-generated test invocations."
+    },
+    {
+      "pattern": "Treat docs/sdk-setup-client.md and ../cloud source files (infra/web-routing.ts, packages/cli/src/cli/constants.ts) as the authoritative SDK contract",
+      "rationale": "PR 65 review and workflow 062 both surfaced spec/impl drift; aligning the doc to ../cloud's appUrl='/cloud' fixed obsolete app.agentrelay.com references.",
+      "scope": "@relayfile/sdk setup client and any cloud routing assumptions."
+    },
+    {
+      "pattern": "Linear slug-prefixed canonical filenames truncate per the 255-byte path-segment budget, not the 80-char alias slug",
+      "rationale": "nameWithId is the source of truth; cataloging-agent-linear regression assertions encode this.",
+      "scope": "cloud canonical path documentation and any new alias-aware tooling."
+    },
+    {
+      "pattern": "Topologically sort publish targets when syncing internal dependency ranges before publish",
+      "rationale": "Dependents reference adapter-core's just-published version; out-of-order publishes leave stale ranges.",
+      "scope": "relayfile-adapters release pipeline and similar monorepo publishers."
+    },
+    {
+      "pattern": "Long-running init that loops over directories should yield via setImmediate at directory entry plus every 64 entries within a directory",
+      "rationale": "createMount async refactor — keeps consumer setInterval timers firing during heavy walks without measurable perf impact.",
+      "scope": "Walkers/scanners called from CLI init paths (launch.ts and similar)."
+    },
+    {
+      "pattern": "Extend the existing WorkspaceHandle with one-handle helpers rather than adding a second setup object",
+      "rationale": "WorkspaceHandle already aggregates the credentials and metadata downstream agents need.",
+      "scope": "@relayfile/sdk surface for agent workspace flows."
+    }
+  ],
+  "lessons": [
+    {
+      "lesson": "Workflow gate failures are usually spec/impl drift, not gate bugs",
+      "context": "Workflow 062 verify-edits-landed initially failed because the generated SDK exported CloudTimeoutError instead of IntegrationConnectionTimeoutError; multiple sessions to repair.",
+      "recommendation": "On gate failure, diff against docs/sdk-setup-client.md and fix the implementation; only adjust the gate when the gate genuinely tests the wrong thing (e.g., wrong runner)."
+    },
+    {
+      "lesson": "Never `cd` inside a `cmd > path` block when path is relative",
+      "context": "capture-final-evidence wrote to ../cloud/docs/evidence after switching directories mid-redirect.",
+      "recommendation": "Resolve evidence paths absolutely up-front and use `git -C <repo>` for per-repo git commands."
+    },
+    {
+      "lesson": "Native file watchers beat polling for clean process exit",
+      "context": "chokidar v4's awaitWriteFinish + fs.watch left timers/handles that hung exit in packages/local-mount.",
+      "recommendation": "Prefer @parcel/watcher (or platform-native) and implement debouncing with explicit setTimeout; rely on a reconcile loop + mtime/content check to absorb looser semantics."
+    },
+    {
+      "lesson": "Out-of-scope churn blocks reviews even when functionality is correct",
+      "context": "verify-review-approved on PR 65 failed due to unrelated cloud script-generator/start-from edits.",
+      "recommendation": "Restore unrelated hunks before review; keep untracked unrelated work outside the branch."
+    },
+    {
+      "lesson": "Pre-1.0 packages should change the function signature rather than ship parallel async/sync entry points",
+      "context": "createMount became Promise<MountHandle> directly per issue #104.",
+      "recommendation": "For single-consumer pre-1.0 APIs, prefer breaking change + consumer update over maintaining twin surfaces."
+    },
+    {
+      "lesson": "Trajectory noise can leak into dependency PRs",
+      "context": "Stray trajectory files were removed from cloud#505 during the fan-out follow-up.",
+      "recommendation": "Verify .trajectories/* exclusions or scrub before pushing dependency-only branches."
+    }
+  ],
+  "openQuestions": [
+    "CodeRabbit review on relayfile-adapters#59 still pending — does it require additional changes beyond the topological sort?",
+    "Workflow 063-agent-workspace-golden-path.ts is authored but its end-to-end execution outcome across relayfile/cloud/relaycast is not captured in these trajectories.",
+    "Should the per-64-entry yield interval in createMount be tunable for very deep or very flat trees, or is the fixed 64 sufficient long-term?",
+    "Are there other workflows currently mixing tsx --test and vitest test files that could hit the same verify-edits-landed false negative as workflow 062?"
+  ]
+}
