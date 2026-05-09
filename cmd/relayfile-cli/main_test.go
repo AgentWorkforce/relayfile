@@ -1499,3 +1499,107 @@ func TestOpsReplayPostsToCloudAndRemovesLocalRecord(t *testing.T) {
 		t.Fatalf("expected dead-letter record removed, got err=%v", err)
 	}
 }
+
+// TestLoginWithExplicitTokenPersistsServerCreds covers the legacy API-key
+// path: when --token is supplied, runLogin validates it against /health and
+// writes ~/.relayfile/credentials.json (no cloud creds touched).
+func TestLoginWithExplicitTokenPersistsServerCreds(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	var healthCalls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/health" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer rf_test" {
+			t.Fatalf("unexpected Authorization: %q", got)
+		}
+		healthCalls++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	if err := run([]string{"login", "--server", server.URL, "--token", "rf_test"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("run login failed: %v\noutput:\n%s", err, stdout.String())
+	}
+	if healthCalls != 1 {
+		t.Fatalf("expected 1 /health call, got %d", healthCalls)
+	}
+	creds, err := loadCredentials()
+	if err != nil {
+		t.Fatalf("loadCredentials failed: %v", err)
+	}
+	if creds.Token != "rf_test" {
+		t.Fatalf("expected stored token rf_test, got %q", creds.Token)
+	}
+	if _, err := os.Stat(cloudCredentialsPath()); !os.IsNotExist(err) {
+		t.Fatalf("expected no cloud credentials file written, got err=%v", err)
+	}
+}
+
+// TestLoginDefaultsToCloudBrowserFlow covers the new default behavior: when
+// no --token is provided, runLogin runs the cloud browser flow. We use
+// --cloud-token to skip the actual browser handshake — ensureCloudCredentials
+// short-circuits to writing cloud credentials when an explicit token is set.
+func TestLoginDefaultsToCloudBrowserFlow(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	var stdout bytes.Buffer
+	if err := run([]string{
+		"login",
+		"--cloud-api-url", "https://cloud.relayfile.test",
+		"--cloud-token", "cld_browser_token",
+	}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("run login failed: %v\noutput:\n%s", err, stdout.String())
+	}
+
+	got := stdout.String()
+	if !strings.Contains(got, "Signed in to Relayfile Cloud") {
+		t.Fatalf("expected cloud sign-in confirmation, got %q", got)
+	}
+	creds, err := loadCloudCredentials()
+	if err != nil {
+		t.Fatalf("loadCloudCredentials failed: %v", err)
+	}
+	if creds.AccessToken != "cld_browser_token" {
+		t.Fatalf("expected stored cloud access token, got %q", creds.AccessToken)
+	}
+	if creds.APIURL != "https://cloud.relayfile.test" {
+		t.Fatalf("expected APIURL stored, got %q", creds.APIURL)
+	}
+	if _, err := os.Stat(credentialsPath()); !os.IsNotExist(err) {
+		t.Fatalf("expected no server credentials written, got err=%v", err)
+	}
+}
+
+// TestLoginAPIKeyFlagPromptsForToken covers the opt-in legacy interactive
+// flow: --api-key forces runLogin to prompt for an API key on stdin instead
+// of running the cloud browser flow.
+func TestLoginAPIKeyFlagPromptsForToken(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer prompted_key" {
+			t.Fatalf("unexpected Authorization: %q", got)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	stdin := strings.NewReader("prompted_key\n")
+	var stdout bytes.Buffer
+	if err := run([]string{"login", "--api-key", "--server", server.URL}, stdin, &stdout, &stdout); err != nil {
+		t.Fatalf("run login --api-key failed: %v\noutput:\n%s", err, stdout.String())
+	}
+	creds, err := loadCredentials()
+	if err != nil {
+		t.Fatalf("loadCredentials failed: %v", err)
+	}
+	if creds.Token != "prompted_key" {
+		t.Fatalf("expected stored token prompted_key, got %q", creds.Token)
+	}
+}
