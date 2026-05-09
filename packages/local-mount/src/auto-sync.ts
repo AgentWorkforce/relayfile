@@ -64,10 +64,22 @@ export interface AutoSyncHandle {
   stop(opts?: { signal?: AbortSignal }): Promise<void>;
   /** Force a reconcile now; returns number of files copied/deleted. */
   reconcile(opts?: { signal?: AbortSignal }): Promise<number>;
+  /**
+   * Flush any pending debounced file events and run a full reconcile.
+   * Call this before checkpointing or exiting to ensure all recent writes
+   * have been synced — debounced events that haven't fired yet would
+   * otherwise be lost if the process exits before their timers expire.
+   */
+  flushPending(opts?: { signal?: AbortSignal }): Promise<number>;
   /** Cumulative files changed (copied or deleted) since autosync started. */
   totalChanges(): number;
   /** Resolves once both watchers have completed their initial scan. */
   ready(): Promise<void>;
+  /**
+   * True once both filesystem watchers are subscribed and active.
+   * When false, change detection relies solely on the periodic reconcile scan.
+   */
+  watchersHealthy(): boolean;
 }
 
 interface FileState {
@@ -169,6 +181,7 @@ export function startAutoSync(
 
   let mountSub: AsyncSubscription | undefined;
   let projectSub: AsyncSubscription | undefined;
+  let _watchersHealthy = false;
   // Subscribe in parallel but track each outcome independently. With
   // Promise.all, a failure on one side would reject before the other's
   // assignment ran and leak the succeeded subscription. allSettled lets us
@@ -181,6 +194,7 @@ export function startAutoSync(
     if (mountResult.status === 'fulfilled') mountSub = mountResult.value;
     if (projectResult.status === 'fulfilled') projectSub = projectResult.value;
     if (mountResult.status === 'fulfilled' && projectResult.status === 'fulfilled') {
+      _watchersHealthy = true;
       return;
     }
     await Promise.allSettled([
@@ -220,6 +234,7 @@ export function startAutoSync(
         mountSub?.unsubscribe(),
         projectSub?.unsubscribe(),
       ]);
+      _watchersHealthy = false;
       // Clear debounces *after* unsubscribe resolves: any timer scheduled
       // between stop() being called and the watcher actually quiescing is
       // gathered here, so none fire after stop() returns.
@@ -232,10 +247,18 @@ export function startAutoSync(
       await runReconcile(opts);
     },
     reconcile: runReconcile,
+    async flushPending(opts?: { signal?: AbortSignal }): Promise<number> {
+      // Cancel pending debounce timers — the reconcile below will catch
+      // any files those timers would have synced via mtime comparison.
+      for (const t of pendingDebounces.values()) clearTimeout(t);
+      pendingDebounces.clear();
+      return runReconcile(opts);
+    },
     totalChanges: () => totalChanges,
     ready: async () => {
       await watchersReady;
     },
+    watchersHealthy: () => _watchersHealthy,
   };
 }
 

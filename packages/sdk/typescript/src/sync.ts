@@ -17,6 +17,33 @@ export interface RelayFileSyncPong {
   timestamp?: string;
 }
 
+/**
+ * Point-in-time snapshot of sync connection health. Retrieve via
+ * {@link RelayFileSync.getHealthStatus}. Useful for long-running agent
+ * processes that need to surface connectivity issues or detect silent
+ * degradation to polling mode.
+ */
+export interface RelayFileSyncHealthStatus {
+  state: RelayFileSyncState;
+  /**
+   * True when the sync has involuntarily fallen back to HTTP polling.
+   * Live events will be delayed by `pollIntervalMs` while degraded.
+   */
+  degraded: boolean;
+  /** Reason string passed to the degradation path, if currently degraded. */
+  degradedReason?: string;
+  /** Unix timestamp (ms) when the current state was entered. */
+  stateEnteredAt: number;
+  /**
+   * Unix timestamp (ms) of the last inbound WebSocket frame (event or pong).
+   * Zero until the first frame arrives. A large gap between now and this value
+   * suggests a silent socket death that the watchdog has not yet detected.
+   */
+  lastFrameAt: number;
+  /** Reconnect attempts since the last successful WebSocket open. */
+  reconnectAttempts: number;
+}
+
 export interface RelayFileSyncReconnectOptions {
   enabled?: boolean;
   minDelayMs?: number;
@@ -58,6 +85,18 @@ export interface RelayFileSyncOptions {
    * `error` event regardless of whether this is wired.
    */
   onPollingFallback?: (info: { reason: string; cause?: unknown }) => void;
+  /**
+   * Called when the connection enters a degraded state (involuntary polling
+   * fallback). Long-running agents should monitor this and surface it to
+   * operators — degraded mode means events are delayed by `pollIntervalMs`.
+   */
+  onDegraded?: (info: { reason: string; state: RelayFileSyncState; cause?: unknown }) => void;
+  /**
+   * Called when the connection recovers from a degraded state back to a live
+   * WebSocket. Pair with {@link RelayFileSyncOptions.onDegraded} to track
+   * connectivity health over long-running sessions.
+   */
+  onRecovered?: () => void;
 }
 
 export interface RelayFileSyncSocket {
@@ -98,7 +137,7 @@ interface RelayFileSyncWireEvent {
 }
 
 const DEFAULT_POLL_INTERVAL_MS = 5000;
-const DEFAULT_PING_INTERVAL_MS = 30000;
+const DEFAULT_PING_INTERVAL_MS = 15000;
 const DEFAULT_RECONNECT_MIN_DELAY_MS = 250;
 const DEFAULT_RECONNECT_MAX_DELAY_MS = 5000;
 // Cap on the dedupe cache used in polling mode. Sized large enough that no
@@ -236,6 +275,8 @@ export class RelayFileSync {
   private readonly signal?: AbortSignal;
   private readonly webSocketFactory: (url: string) => RelayFileSyncSocket;
   private readonly onPollingFallback?: (info: { reason: string; cause?: unknown }) => void;
+  private readonly onDegraded?: (info: { reason: string; state: RelayFileSyncState; cause?: unknown }) => void;
+  private readonly onRecovered?: () => void;
   private readonly handlers: {
     [K in RelayFileSyncEventName]: Set<RelayFileSyncHandlerMap[K]>;
   } = {
@@ -248,6 +289,9 @@ export class RelayFileSync {
   };
 
   private state: RelayFileSyncState = "idle";
+  private stateEnteredAt: number = Date.now();
+  private degraded = false;
+  private degradedReason?: string;
   private cursor?: string;
   private readonly polledEventIds: Set<string> = new Set();
   private readonly polledEventOrder: string[] = [];
@@ -295,6 +339,8 @@ export class RelayFileSync {
     }
     this.cursor = options.cursor;
     this.onPollingFallback = options.onPollingFallback;
+    this.onDegraded = options.onDegraded;
+    this.onRecovered = options.onRecovered;
     this.pollIntervalMs = Math.max(1, Math.floor(options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS));
     this.pingIntervalMs = Math.max(1, Math.floor(options.pingIntervalMs ?? DEFAULT_PING_INTERVAL_MS));
     // Default the pong timeout to 2x ping interval so a single missed pong
@@ -338,6 +384,17 @@ export class RelayFileSync {
 
   getState(): RelayFileSyncState {
     return this.state;
+  }
+
+  getHealthStatus(): RelayFileSyncHealthStatus {
+    return {
+      state: this.state,
+      degraded: this.degraded,
+      degradedReason: this.degradedReason,
+      stateEnteredAt: this.stateEnteredAt,
+      lastFrameAt: this.lastFrameAt,
+      reconnectAttempts: this.reconnectAttempts,
+    };
   }
 
   start(): void {
@@ -488,6 +545,15 @@ export class RelayFileSync {
       // timeout until we actually send our first ping.
       this.lastFrameAt = Date.now();
       this.lastPingSentAt = 0;
+      if (this.degraded) {
+        this.degraded = false;
+        this.degradedReason = undefined;
+        try {
+          this.onRecovered?.();
+        } catch (error) {
+          debugLog("onRecovered handler threw", error);
+        }
+      }
       this.setState("open");
       this.startPingLoop(socket);
       debugLog("ws open", { workspaceId: this.workspaceId });
@@ -599,6 +665,15 @@ export class RelayFileSync {
         this.onPollingFallback?.({ reason, cause });
       } catch (error) {
         debugLog("onPollingFallback handler threw", error);
+      }
+      if (!this.degraded) {
+        this.degraded = true;
+        this.degradedReason = reason;
+        try {
+          this.onDegraded?.({ reason, state: "polling", cause });
+        } catch (error) {
+          debugLog("onDegraded handler threw", error);
+        }
       }
     }
     this.setState("polling");
@@ -893,6 +968,7 @@ export class RelayFileSync {
       return;
     }
     this.state = state;
+    this.stateEnteredAt = Date.now();
     this.emit("state", state);
   }
 

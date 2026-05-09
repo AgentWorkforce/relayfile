@@ -47,6 +47,7 @@ export {
 } from "./setup-types.js";
 export {
   RelayFileSync,
+  type RelayFileSyncHealthStatus,
   type RelayFileSyncOptions,
   type RelayFileSyncPong,
   type RelayFileSyncReconnectOptions,
