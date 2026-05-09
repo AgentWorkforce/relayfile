@@ -89,52 +89,62 @@ describe("onWrite", () => {
     const client = makeClient();
     const sockets: MockWebSocket[] = [];
     const calls: string[] = [];
+    const originalBaseUrl = process.env.RELAYFILE_BASE_URL;
 
-    const unsubscribeTranscript = onWrite(
-      "/notion/pages/calls/*/transcript",
-      (event) => calls.push(`transcript:${event.path}:${event.operation}:${event.source}`),
-      {
-        client,
-        workspaceId: "ws_acme",
-        token: "tok_test",
-        webSocketFactory: (url) => {
-          const socket = new MockWebSocket(url);
-          sockets.push(socket);
-          return socket;
+    process.env.RELAYFILE_BASE_URL = "http://127.0.0.1:8080";
+    try {
+      const unsubscribeTranscript = onWrite(
+        "/notion/pages/calls/*/transcript",
+        (event) => calls.push(`transcript:${event.path}:${event.operation}:${event.source}`),
+        {
+          client,
+          workspaceId: "ws_acme",
+          token: "tok_test",
+          webSocketFactory: (url) => {
+            const socket = new MockWebSocket(url);
+            sockets.push(socket);
+            return socket;
+          }
         }
+      );
+      const unsubscribeLinear = onWrite(
+        "/linear/issues/**",
+        (event) => calls.push(`linear:${event.path}`),
+        { client, workspaceId: "ws_acme", token: "tok_test" }
+      );
+      const unsubscribePull = onWrite(
+        "/github/repos/acme/api/pulls/*",
+        (event) => calls.push(`pull:${event.path}`),
+        { client, workspaceId: "ws_acme", token: "tok_test" }
+      );
+
+      expect(sockets).toHaveLength(1);
+      expect(sockets[0]!.url).toBe("wss://api.relayfile.dev/v1/workspaces/ws_acme/fs/ws?token=tok_test");
+
+      sockets[0]!.emit("open", {});
+      emitFilesystemEvent(sockets[0]!, "/notion/pages/calls/call-1/transcript");
+      emitFilesystemEvent(sockets[0]!, "/notion/pages/calls/call-1/notes/transcript");
+      emitFilesystemEvent(sockets[0]!, "/linear/issues/PROJ-441/comments/c-1");
+      emitFilesystemEvent(sockets[0]!, "/github/repos/acme/api/pulls/42", "file.created");
+
+      await flushPromises();
+
+      expect(calls).toEqual([
+        "transcript:/notion/pages/calls/call-1/transcript:update:sync",
+        "linear:/linear/issues/PROJ-441/comments/c-1",
+        "pull:/github/repos/acme/api/pulls/42"
+      ]);
+
+      unsubscribeTranscript();
+      unsubscribeLinear();
+      unsubscribePull();
+    } finally {
+      if (originalBaseUrl === undefined) {
+        delete process.env.RELAYFILE_BASE_URL;
+      } else {
+        process.env.RELAYFILE_BASE_URL = originalBaseUrl;
       }
-    );
-    const unsubscribeLinear = onWrite(
-      "/linear/issues/**",
-      (event) => calls.push(`linear:${event.path}`),
-      { client, workspaceId: "ws_acme", token: "tok_test" }
-    );
-    const unsubscribePull = onWrite(
-      "/github/repos/acme/api/pulls/*",
-      (event) => calls.push(`pull:${event.path}`),
-      { client, workspaceId: "ws_acme", token: "tok_test" }
-    );
-
-    expect(sockets).toHaveLength(1);
-    expect(sockets[0]!.url).toBe("wss://api.relayfile.dev/v1/workspaces/ws_acme/fs/ws?token=tok_test");
-
-    sockets[0]!.emit("open", {});
-    emitFilesystemEvent(sockets[0]!, "/notion/pages/calls/call-1/transcript");
-    emitFilesystemEvent(sockets[0]!, "/notion/pages/calls/call-1/notes/transcript");
-    emitFilesystemEvent(sockets[0]!, "/linear/issues/PROJ-441/comments/c-1");
-    emitFilesystemEvent(sockets[0]!, "/github/repos/acme/api/pulls/42", "file.created");
-
-    await flushPromises();
-
-    expect(calls).toEqual([
-      "transcript:/notion/pages/calls/call-1/transcript:update:sync",
-      "linear:/linear/issues/PROJ-441/comments/c-1",
-      "pull:/github/repos/acme/api/pulls/42"
-    ]);
-
-    unsubscribeTranscript();
-    unsubscribeLinear();
-    unsubscribePull();
+    }
   });
 
   it("isolates handler errors and records them", async () => {

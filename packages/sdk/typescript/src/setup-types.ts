@@ -1,3 +1,4 @@
+import type { WorkspaceHandle } from "./setup.js"
 import type { AccessTokenProvider } from "./client.js"
 
 export const WORKSPACE_INTEGRATION_PROVIDERS = [
@@ -86,6 +87,121 @@ export interface WorkspaceMountEnvOptions {
 }
 
 export type WorkspaceMountEnv = Record<string, string>
+
+export type MountMode = "poll" | "fuse"
+
+export interface MountSessionRequest {
+  localDir: string
+  remotePath?: string
+  mode?: MountMode
+  agentName?: string
+  scopes?: string[]
+  provider?: WorkspaceIntegrationProvider
+}
+
+export interface MountSessionResponse {
+  workspaceId: string
+  relayfileBaseUrl: string
+  relayfileToken: string
+  wsUrl: string
+  remotePath: string
+  localDir: string
+  mode: MountMode
+  scopes: string[]
+  tokenIssuedAt: string | null
+  expiresAt: string | null
+  suggestedRefreshAt: string | null
+  relaycastApiKey: string
+  relaycastBaseUrl?: string
+}
+
+export interface MountSessionResult {
+  workspaceId: string
+  relayfileBaseUrl: string
+  relayfileToken: string
+  wsUrl: string
+  remotePath: string
+  localDir: string
+  mode: MountMode
+  scopes: string[]
+  tokenIssuedAt: string | null
+  expiresAt: string | null
+  suggestedRefreshAt: string | null
+  relaycastApiKey: string
+  relaycastBaseUrl?: string
+}
+
+export interface MountedWorkspaceStatus {
+  ready: boolean
+  mode: MountMode
+  pid?: number
+  lastHeartbeatAt?: string
+  lastReconcileAt?: string
+  lastEventAt?: string
+  expiresAt: string | null
+  suggestedRefreshAt: string | null
+  pendingWriteback?: number
+  pendingConflicts?: number
+}
+
+export interface MountedWorkspaceHandle {
+  readonly workspaceId: string
+  readonly localDir: string
+  readonly remotePath: string
+  readonly mode: MountMode
+  readonly ready: boolean
+  readonly expiresAt: string | null
+  readonly suggestedRefreshAt: string | null
+
+  env(): Record<string, string>
+  status(): Promise<MountedWorkspaceStatus>
+  stop(): Promise<void>
+}
+
+export interface MountLauncherEvent {
+  type: string
+  [key: string]: unknown
+}
+
+export interface MountLauncherStart {
+  env: Record<string, string>
+  cwd?: string
+  signal?: AbortSignal
+  readyTimeoutMs: number
+  onEvent?: (event: MountLauncherEvent) => void
+  background?: boolean
+}
+
+export interface MountLauncherInstance {
+  pid?: number
+  ready: Promise<void>
+  status(): Promise<MountedWorkspaceStatus>
+  stop(): Promise<void>
+}
+
+export interface MountLauncher {
+  start(input: MountLauncherStart): Promise<MountLauncherInstance>
+}
+
+export interface MountWorkspaceInput {
+  workspace?: WorkspaceHandle
+  workspaceId?: string
+  localDir: string
+  remotePath?: string
+  mode?: MountMode
+  background?: boolean
+  agentName?: string
+  scopes?: string[]
+  signal?: AbortSignal
+  launcher?: MountLauncher
+  readyTimeoutMs?: number
+}
+
+export interface EnsureMountedWorkspaceInput extends MountWorkspaceInput {
+  provider?: WorkspaceIntegrationProvider
+  verifyProvider?: boolean
+  providerReadyTimeoutMs?: number
+}
 
 export interface AgentWorkspaceInviteOptions {
   agentName?: string

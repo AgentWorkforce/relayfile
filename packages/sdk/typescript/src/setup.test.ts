@@ -1,14 +1,26 @@
+import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises"
+import os from "node:os"
+import path from "node:path"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import { RelayFileClient } from "./client.js"
 import {
   CloudAbortError,
   CloudApiError,
   CloudTimeoutError,
+  InvalidLocalDirError,
+  InvalidMountModeError,
+  InvalidRemotePathError,
   IntegrationConnectionTimeoutError,
+  MountSessionInputError,
   MalformedCloudResponseError
 } from "./setup-errors.js"
 import { RelayfileSetup } from "./setup.js"
-import { type WaitForConnectionOptions } from "./setup-types.js"
+import {
+  type MountLauncher,
+  type MountWorkspaceInput,
+  type MountedWorkspaceStatus,
+  type WaitForConnectionOptions
+} from "./setup-types.js"
 
 function jsonResponse(body: unknown, init: ResponseInit = {}): Response {
   return new Response(JSON.stringify(body), {
@@ -58,6 +70,74 @@ function readRequestHeaders(
 ): Record<string, string> {
   const init = fetchMock.mock.calls[index]?.[1] as RequestInit | undefined
   return init?.headers as Record<string, string>
+}
+
+function makeMountSessionResponse(
+  overrides: Record<string, unknown> = {}
+): Response {
+  return jsonResponse({
+    workspaceId: "ws_123",
+    relayfileBaseUrl: "https://relayfile.mount.test/",
+    relayfileToken: "rf_mount_token",
+    wsUrl: "wss://relayfile.mount.test/ws",
+    remotePath: "/notion",
+    localDir: "/ignored/by/sdk",
+    mode: "poll",
+    scopes: ["fs:read", "fs:write"],
+    tokenIssuedAt: "2026-05-09T10:00:00.000Z",
+    expiresAt: "2026-05-09T11:00:00.000Z",
+    suggestedRefreshAt: "2026-05-09T10:55:00.000Z",
+    relaycastApiKey: "rc_mount",
+    relaycastBaseUrl: "https://relaycast.mount.test",
+    ...overrides
+  })
+}
+
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((innerResolve, innerReject) => {
+    resolve = innerResolve
+    reject = innerReject
+  })
+  return { promise, resolve, reject }
+}
+
+function createLauncherStub(
+  status: Partial<MountedWorkspaceStatus> = {}
+): {
+  launcher: MountLauncher
+  instance: {
+    pid: number
+    ready: Promise<void>
+    status: ReturnType<typeof vi.fn>
+    stop: ReturnType<typeof vi.fn>
+  }
+  readyControl: ReturnType<typeof deferred<void>>
+} {
+  const readyControl = deferred<void>()
+  const instance = {
+    pid: 4321,
+    ready: readyControl.promise,
+    status: vi.fn().mockResolvedValue({
+      ready: true,
+      mode: "poll",
+      expiresAt: null,
+      suggestedRefreshAt: null,
+      ...status
+    } satisfies MountedWorkspaceStatus),
+    stop: vi.fn().mockResolvedValue(undefined)
+  }
+  const launcher: MountLauncher = {
+    start: vi.fn().mockResolvedValue(instance)
+  }
+  return { launcher, instance, readyControl }
+}
+
+async function flushPromises(times = 3): Promise<void> {
+  for (let index = 0; index < times; index += 1) {
+    await Promise.resolve()
+  }
 }
 
 async function advanceTimers(options?: WaitForConnectionOptions): Promise<void> {
@@ -744,5 +824,467 @@ describe("RelayfileSetup", () => {
 
     expect("relayfileToken" in invite).toBe(false)
     expect(invite.scopes).toEqual(["fs:read"])
+  })
+
+  it("mountWorkspace posts the mount-session request, maps env, and returns a mounted handle", async () => {
+    const tempRoot = await mkdtemp(
+      path.join(os.tmpdir(), "relayfile-sdk-mount-workspace-")
+    )
+    const localDir = path.join(tempRoot, "mirror")
+    const fetchMock = queueFetch(
+      makeJoinResponse("rf_jwt_joined"),
+      makeMountSessionResponse()
+    )
+    const { launcher, instance, readyControl } = createLauncherStub()
+
+    try {
+      const setup = new RelayfileSetup()
+      const workspace = await setup.joinWorkspace("ws_123")
+      readyControl.resolve()
+      const handle = await setup.mountWorkspace({
+        workspace,
+        localDir,
+        remotePath: "/notion",
+        mode: "poll",
+        launcher
+      })
+
+      expect((launcher.start as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(1)
+      const launcherStart = (launcher.start as ReturnType<typeof vi.fn>).mock.calls[0][0]
+      expect(launcherStart.env).toMatchObject({
+        RELAYFILE_BASE_URL: "https://relayfile.mount.test",
+        RELAYFILE_TOKEN: "rf_mount_token",
+        RELAYFILE_WORKSPACE: "ws_123",
+        RELAYFILE_REMOTE_PATH: "/notion",
+        RELAYFILE_LOCAL_DIR: localDir,
+        RELAYFILE_MOUNT_MODE: "poll",
+        RELAYCAST_API_KEY: "rc_mount",
+        RELAY_API_KEY: "rc_mount",
+        RELAYCAST_BASE_URL: "https://relaycast.mount.test",
+        RELAY_BASE_URL: "https://relaycast.mount.test"
+      })
+
+      expect(readRequestUrl(fetchMock, 1)).toBe(
+        "https://agentrelay.com/cloud/api/v1/workspaces/ws_123/relayfile/mount-session"
+      )
+      expect(readRequestBody(fetchMock, 1)).toEqual({
+        localDir,
+        remotePath: "/notion",
+        mode: "poll",
+        agentName: "relayfile-mount"
+      })
+      expect(readRequestHeaders(fetchMock, 1).Authorization).toBe(
+        "Bearer rf_jwt_joined"
+      )
+      expect(handle.workspaceId).toBe("ws_123")
+      expect(handle.localDir).toBe(localDir)
+      expect(handle.remotePath).toBe("/notion")
+      expect(handle.mode).toBe("poll")
+      expect(handle.ready).toBe(true)
+      expect(handle.expiresAt).toBe("2026-05-09T11:00:00.000Z")
+      expect(handle.suggestedRefreshAt).toBe("2026-05-09T10:55:00.000Z")
+      expect(handle.env()).toMatchObject({
+        RELAYFILE_BASE_URL: "https://relayfile.mount.test",
+        RELAYFILE_TOKEN: "rf_mount_token",
+        RELAYFILE_WORKSPACE: "ws_123",
+        RELAYFILE_REMOTE_PATH: "/notion",
+        RELAYFILE_LOCAL_DIR: localDir,
+        RELAYFILE_MOUNT_MODE: "poll"
+      })
+
+      await handle.stop()
+      expect(instance.stop).toHaveBeenCalledTimes(1)
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true })
+    }
+  })
+
+  it("mountWorkspace joins by workspaceId before mounting", async () => {
+    const tempRoot = await mkdtemp(
+      path.join(os.tmpdir(), "relayfile-sdk-mount-by-id-")
+    )
+    const localDir = path.join(tempRoot, "mirror")
+    const fetchMock = queueFetch(
+      makeJoinResponse("rf_jwt_from_join"),
+      makeMountSessionResponse()
+    )
+    const { launcher, readyControl } = createLauncherStub()
+
+    try {
+      const setup = new RelayfileSetup()
+      const handlePromise = setup.mountWorkspace({
+        workspaceId: "ws_123",
+        localDir,
+        remotePath: "/notion",
+        launcher
+      })
+
+      readyControl.resolve()
+      await handlePromise
+
+      expect(readRequestUrl(fetchMock, 0)).toBe(
+        "https://agentrelay.com/cloud/api/v1/workspaces/ws_123/join"
+      )
+      expect(readRequestUrl(fetchMock, 1)).toBe(
+        "https://agentrelay.com/cloud/api/v1/workspaces/ws_123/relayfile/mount-session"
+      )
+      expect(readRequestHeaders(fetchMock, 1).Authorization).toBe(
+        "Bearer rf_jwt_from_join"
+      )
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true })
+    }
+  })
+
+  it("mountWorkspace rejects MountSessionInputError when both workspace and workspaceId are given", async () => {
+    const setup = new RelayfileSetup()
+
+    await expect(
+      setup.mountWorkspace({
+        workspace: {} as never,
+        workspaceId: "ws_123",
+        localDir: "/tmp/relayfile-mount"
+      } as MountWorkspaceInput)
+    ).rejects.toBeInstanceOf(MountSessionInputError)
+  })
+
+  it("mountWorkspace rejects MountSessionInputError when neither workspace nor workspaceId is given", async () => {
+    const setup = new RelayfileSetup()
+
+    await expect(
+      setup.mountWorkspace({
+        localDir: "/tmp/relayfile-mount"
+      } as MountWorkspaceInput)
+    ).rejects.toBeInstanceOf(MountSessionInputError)
+  })
+
+  it("mountWorkspace rejects unsupported stream mode before any HTTP request", async () => {
+    const fetchMock = vi.fn()
+    vi.stubGlobal("fetch", fetchMock)
+    const setup = new RelayfileSetup()
+
+    await expect(
+      setup.mountWorkspace({
+        workspaceId: "ws_123",
+        localDir: "/tmp/relayfile-mount",
+        mode: "stream" as unknown as "poll"
+      })
+    ).rejects.toBeInstanceOf(InvalidMountModeError)
+
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it("mountWorkspace maps Cloud mount-session validation errors from httpBody.error", async () => {
+    const tempRoot = await mkdtemp(
+      path.join(os.tmpdir(), "relayfile-sdk-mount-validation-")
+    )
+    const localDir = path.join(tempRoot, "mirror")
+
+    try {
+      const cases = [
+        {
+          body: { error: "invalid_mode" },
+          expected: InvalidMountModeError,
+          match: { code: "invalid_mount_mode", mode: "poll" }
+        },
+        {
+          body: { error: "invalid_local_dir" },
+          expected: InvalidLocalDirError,
+          match: { code: "invalid_local_dir", localDir }
+        },
+        {
+          body: { error: "invalid_remote_path" },
+          expected: InvalidRemotePathError,
+          match: { code: "invalid_remote_path", remotePath: "/notion" }
+        }
+      ] as const
+
+      for (const testCase of cases) {
+        queueFetch(
+          makeJoinResponse("rf_jwt_joined"),
+          jsonResponse(testCase.body, { status: 400 })
+        )
+        const setup = new RelayfileSetup()
+        const mountPromise = setup.mountWorkspace({
+          workspaceId: "ws_123",
+          localDir,
+          remotePath: "/notion"
+        })
+
+        await expect(mountPromise).rejects.toBeInstanceOf(testCase.expected)
+
+        await expect(mountPromise).rejects.toMatchObject(testCase.match)
+      }
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true })
+    }
+  })
+
+  it("mountWorkspace stops the launcher when aborted after the mount session response", async () => {
+    const tempRoot = await mkdtemp(
+      path.join(os.tmpdir(), "relayfile-sdk-mount-abort-")
+    )
+    const localDir = path.join(tempRoot, "mirror")
+    queueFetch(makeJoinResponse("rf_jwt_joined"), makeMountSessionResponse())
+    const { instance } = createLauncherStub()
+    const controller = new AbortController()
+    const launcher: MountLauncher = {
+      start: vi.fn().mockImplementation(async () => {
+        controller.abort()
+        return instance
+      })
+    }
+
+    try {
+      const setup = new RelayfileSetup()
+      const mountPromise = setup.mountWorkspace({
+        workspaceId: "ws_123",
+        localDir,
+        launcher,
+        signal: controller.signal
+      })
+
+      await expect(mountPromise).rejects.toBeInstanceOf(CloudAbortError)
+      expect((launcher.start as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(1)
+      expect(instance.stop).toHaveBeenCalledTimes(1)
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true })
+    }
+  })
+
+  it("ensureMountedWorkspace throws MountSessionInputError when verifyProvider=true and no provider is given", async () => {
+    const setup = new RelayfileSetup()
+
+    await expect(
+      setup.ensureMountedWorkspace({
+        workspace: {} as never,
+        localDir: "/tmp/relayfile-mount",
+        launcher: createLauncherStub().launcher
+      })
+    ).rejects.toBeInstanceOf(MountSessionInputError)
+  })
+
+  it("ensureMountedWorkspace throws ProviderNotConnectedError before posting mount-session", async () => {
+    const tempRoot = await mkdtemp(
+      path.join(os.tmpdir(), "relayfile-sdk-provider-disconnected-")
+    )
+    const localDir = path.join(tempRoot, "mirror")
+    const fetchMock = queueFetch(
+      makeJoinResponse("rf_jwt_joined"),
+      jsonResponse({ ready: false, state: "not_connected" })
+    )
+    const { launcher } = createLauncherStub()
+
+    try {
+      const setup = new RelayfileSetup()
+      await expect(
+        setup.ensureMountedWorkspace({
+          workspaceId: "ws_123",
+          provider: "notion",
+          localDir,
+          launcher
+        })
+      ).rejects.toMatchObject({
+        code: "provider_not_connected",
+        provider: "notion"
+      })
+
+      expect(fetchMock).toHaveBeenCalledTimes(2)
+      expect(readRequestUrl(fetchMock, 1)).toContain(
+        "/api/v1/workspaces/ws_123/integrations/notion/status?connectionId=ws_123"
+      )
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true })
+    }
+  })
+
+  it("ensureMountedWorkspace throws ProviderNotReadyError when verification is required", async () => {
+    const tempRoot = await mkdtemp(
+      path.join(os.tmpdir(), "relayfile-sdk-provider-not-ready-")
+    )
+    const localDir = path.join(tempRoot, "mirror")
+    const fetchMock = queueFetch(
+      makeJoinResponse("rf_jwt_joined"),
+      jsonResponse({
+        ready: false,
+        state: "syncing",
+        initialSync: { state: "queued" }
+      })
+    )
+    const { launcher } = createLauncherStub()
+
+    try {
+      const setup = new RelayfileSetup()
+      await expect(
+        setup.ensureMountedWorkspace({
+          workspaceId: "ws_123",
+          provider: "notion",
+          localDir,
+          launcher,
+          providerReadyTimeoutMs: 0
+        })
+      ).rejects.toMatchObject({
+        code: "provider_not_ready",
+        provider: "notion",
+        state: "syncing",
+        initialSyncState: "queued"
+      })
+
+      expect(fetchMock).toHaveBeenCalledTimes(2)
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true })
+    }
+  })
+
+  it("ensureMountedWorkspace skips provider verification when verifyProvider is false", async () => {
+    const tempRoot = await mkdtemp(
+      path.join(os.tmpdir(), "relayfile-sdk-provider-skip-")
+    )
+    const localDir = path.join(tempRoot, "mirror")
+    const fetchMock = queueFetch(
+      makeJoinResponse("rf_jwt_joined"),
+      makeMountSessionResponse()
+    )
+    const { launcher, readyControl } = createLauncherStub()
+
+    try {
+      const setup = new RelayfileSetup()
+      const handlePromise = setup.ensureMountedWorkspace({
+        workspaceId: "ws_123",
+        localDir,
+        verifyProvider: false,
+        launcher
+      })
+
+      readyControl.resolve()
+      await handlePromise
+
+      expect(fetchMock).toHaveBeenCalledTimes(2)
+      expect(readRequestUrl(fetchMock, 1)).toContain("/relayfile/mount-session")
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true })
+    }
+  })
+
+  it("mounted handle status reads .relay/state.json and keeps expiresAt fields stable", async () => {
+    const tempRoot = await mkdtemp(
+      path.join(os.tmpdir(), "relayfile-sdk-status-state-file-")
+    )
+    const localDir = path.join(tempRoot, "mirror")
+    queueFetch(makeJoinResponse("rf_jwt_joined"), makeMountSessionResponse())
+    const { launcher, readyControl } = createLauncherStub()
+
+    try {
+      const now = Date.now()
+      const lastReconcileAt = new Date(now - 1_000).toISOString()
+      const lastEventAt = new Date(now - 500).toISOString()
+      await mkdir(path.join(localDir, ".relay"), { recursive: true })
+      await writeFile(
+        path.join(localDir, ".relay", "state.json"),
+        JSON.stringify({
+          mode: "poll",
+          intervalMs: 30_000,
+          lastReconcileAt,
+          lastEventAt,
+          pendingWriteback: 2,
+          pendingConflicts: 1,
+          daemon: { pid: 9898 },
+          providers: [{ status: "ready" }]
+        }),
+        "utf8"
+      )
+
+      const setup = new RelayfileSetup()
+      const handlePromise = setup.mountWorkspace({
+        workspaceId: "ws_123",
+        localDir,
+        launcher
+      })
+
+      readyControl.resolve()
+      const handle = await handlePromise
+      const status = await handle.status()
+
+      expect(status).toMatchObject({
+        ready: true,
+        mode: "poll",
+        pid: 9898,
+        lastReconcileAt,
+        lastEventAt,
+        pendingWriteback: 2,
+        pendingConflicts: 1,
+        expiresAt: "2026-05-09T11:00:00.000Z",
+        suggestedRefreshAt: "2026-05-09T10:55:00.000Z"
+      })
+      expect(handle.ready).toBe(true)
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true })
+    }
+  })
+
+  it("mounted handle status falls back to an HTTP probe when state.json is absent", async () => {
+    const tempRoot = await mkdtemp(
+      path.join(os.tmpdir(), "relayfile-sdk-status-probe-")
+    )
+    const localDir = path.join(tempRoot, "mirror")
+    const fetchMock = queueFetch(
+      makeJoinResponse("rf_jwt_joined"),
+      makeMountSessionResponse(),
+      jsonResponse({ entries: [] })
+    )
+    const { launcher, readyControl } = createLauncherStub()
+
+    try {
+      const setup = new RelayfileSetup()
+      const handlePromise = setup.mountWorkspace({
+        workspaceId: "ws_123",
+        localDir,
+        launcher
+      })
+
+      readyControl.resolve()
+      const handle = await handlePromise
+      const status = await handle.status()
+
+      expect(status.ready).toBe(true)
+      expect(readRequestUrl(fetchMock, 2)).toBe(
+        "https://relayfile.mount.test/v1/workspaces/ws_123/fs/tree?path=%2Fnotion&depth=1"
+      )
+      expect(readRequestHeaders(fetchMock, 2).Authorization).toBe(
+        "Bearer rf_mount_token"
+      )
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true })
+    }
+  })
+
+  it("mounted handle stop is idempotent and never removes the local mirror", async () => {
+    const tempRoot = await mkdtemp(
+      path.join(os.tmpdir(), "relayfile-sdk-stop-idempotent-")
+    )
+    const localDir = path.join(tempRoot, "mirror")
+    queueFetch(makeJoinResponse("rf_jwt_joined"), makeMountSessionResponse())
+    const { launcher, instance, readyControl } = createLauncherStub()
+
+    try {
+      const setup = new RelayfileSetup()
+      const handlePromise = setup.mountWorkspace({
+        workspaceId: "ws_123",
+        localDir,
+        launcher
+      })
+
+      readyControl.resolve()
+      const handle = await handlePromise
+      await mkdir(localDir, { recursive: true })
+
+      await handle.stop()
+      await handle.stop()
+
+      expect(instance.stop).toHaveBeenCalledTimes(1)
+      expect((await stat(localDir)).isDirectory()).toBe(true)
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true })
+    }
   })
 })

@@ -107,6 +107,108 @@ export class MissingConnectionIdError extends RelayfileSetupError {
   }
 }
 
+export class MountSessionInputError extends RelayfileSetupError {
+  constructor(message: string) {
+    super(message, "mount_session_input_error")
+  }
+}
+
+export class InvalidMountModeError extends RelayfileSetupError {
+  readonly mode: string
+
+  constructor(mode: string) {
+    super(`Invalid mount mode "${mode}". Expected "poll" or "fuse".`, "invalid_mount_mode")
+    this.mode = mode
+  }
+}
+
+export class InvalidLocalDirError extends RelayfileSetupError {
+  readonly localDir: string
+
+  constructor(localDir: string, message?: string) {
+    super(
+      message ?? `Invalid localDir "${localDir}" for mount session.`,
+      "invalid_local_dir"
+    )
+    this.localDir = localDir
+  }
+}
+
+export class InvalidRemotePathError extends RelayfileSetupError {
+  readonly remotePath: string
+
+  constructor(remotePath: string, message?: string) {
+    super(
+      message ?? `Invalid remotePath "${remotePath}" for mount session.`,
+      "invalid_remote_path"
+    )
+    this.remotePath = remotePath
+  }
+}
+
+export class MountModeUnavailableError extends RelayfileSetupError {
+  readonly mode: string
+
+  constructor(mode: string, message?: string) {
+    super(
+      message ?? `Mount mode "${mode}" is unavailable in this environment.`,
+      "mount_mode_unavailable"
+    )
+    this.mode = mode
+  }
+}
+
+export class MountReadyTimeoutError extends RelayfileSetupError {
+  readonly localDir: string
+  readonly timeoutMs: number
+
+  constructor(localDir: string, timeoutMs: number) {
+    super(
+      `Timed out waiting for the mount at ${localDir} to become ready after ${timeoutMs}ms.`,
+      "mount_ready_timeout"
+    )
+    this.localDir = localDir
+    this.timeoutMs = timeoutMs
+  }
+}
+
+export class ProviderNotConnectedError extends RelayfileSetupError {
+  readonly provider: WorkspaceIntegrationProvider
+
+  constructor(provider: WorkspaceIntegrationProvider) {
+    super(
+      `Provider "${provider}" is not connected for this workspace.`,
+      "provider_not_connected"
+    )
+    this.provider = provider
+  }
+}
+
+export class ProviderNotReadyError extends RelayfileSetupError {
+  readonly provider: WorkspaceIntegrationProvider
+  readonly state?: string
+  readonly initialSyncState?: string
+
+  constructor(input: {
+    provider: WorkspaceIntegrationProvider
+    state?: string
+    initialSyncState?: string
+  }) {
+    const details = [input.state, input.initialSyncState]
+      .filter((value): value is string => typeof value === "string" && value.trim() !== "")
+      .join(", ")
+    super(
+      details
+        ? `Provider "${input.provider}" is connected but not ready (${details}).`
+        : `Provider "${input.provider}" is connected but not ready.`,
+      "provider_not_ready"
+    )
+    this.provider = input.provider
+    this.state = input.state
+    this.initialSyncState = input.initialSyncState
+  }
+}
+
 function readCloudErrorMessage(httpBody: unknown): string | undefined {
   if (!httpBody || typeof httpBody !== "object" || Array.isArray(httpBody)) {
     return undefined

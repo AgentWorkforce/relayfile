@@ -320,6 +320,17 @@ export class RelayFileClient {
     return resolveToken(this.tokenProvider);
   }
 
+  /**
+   * Return the normalized API base URL this client was constructed with.
+   *
+   * onWrite/sync consumers use this so an explicit RelayFileClient remains the
+   * source of truth for both HTTP and WebSocket traffic instead of letting a
+   * process-level env override silently redirect only the WS side.
+   */
+  getBaseUrl(): string {
+    return this.baseUrl;
+  }
+
   async listTree(workspaceId: string, options: ListTreeOptions = {}): Promise<TreeResponse> {
     const query = buildQuery({
       path: options.path ?? "/",
