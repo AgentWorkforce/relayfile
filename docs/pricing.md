@@ -167,6 +167,32 @@ Composio handles tool execution and agent-to-API calls. Relayfile provides the p
 
 ---
 
+### Executor Plan — $149/month
+
+For teams using Executor (open-source, bring-your-own-spec tool runtime) who need persistent shared state between agents.
+
+Executor handles tool execution, credential management, and on-demand API calls across OpenAPI, GraphQL, MCP, and Google Discovery sources. It does not do background sync, webhook ingestion, or data materialization — it's purely on-demand. Relayfile provides the persistent workspace agents read from and write to between tool calls, and the real-time fan-out that makes multi-agent state coherent over time.
+
+| Resource | Limit |
+|---|---|
+| Workspaces | 2 |
+| Integrations | 6 (Executor handles tool execution; relayfile handles state) |
+| Events/month | 500K |
+| Overage | $0.25/1K events |
+| Forks | ✓ |
+| ACLs | ✗ |
+| Support | Email |
+
+**Rationale:** Executor is MIT-licensed and free — there is no Executor bill to anchor against. The plan is priced at $149 rather than $199 because Executor's purely on-demand model generates lower event volumes than Composio: no background webhook ingestion, no scheduled sync, only file writes triggered by explicit tool calls. The relayfile value prop is actually stronger here than with Composio users: Executor teams are building everything from scratch with no pre-built catalog, no materialized state, no persistence infrastructure whatsoever. Relayfile fills that entire gap. Combined spend is ~$149/month — accessible for a developer who chose open-source tooling precisely to control costs.
+
+**Pitch:** "Executor gives your agents hands. Relayfile gives them shared memory."
+
+**Key distinction from Composio Plan:** Composio provides a managed catalog of 250+ pre-built integrations with its own persistence layer. Executor teams configure every integration themselves from raw specs. They need relayfile more — not less — because they have no other state infrastructure.
+
+**Distribution:** Executor Discord, Executor GitHub README, open-source community.
+
+---
+
 ### Pipedream Plan — $149/month
 
 For teams using Pipedream workflows who need a shared state layer between parallel workflows and agents.
@@ -200,6 +226,7 @@ Pipedream handles event-driven workflow automation. Relayfile provides the share
 | Growth | 5M | $0.15 |
 | Nango Plan | 3M | $0.15 |
 | Composio Plan | 1M | $0.20 |
+| Executor Plan | 500K | $0.25 |
 | Pipedream Plan | 500K | $0.25 |
 | Enterprise | Negotiated | Negotiated |
 
@@ -216,6 +243,7 @@ Overage rates decrease with plan tier — higher-paying customers get cheaper ov
 | Growth | $499 | ~$150–200 | ~60–70% |
 | Nango Plan | $299 | ~$50–80 (relayfile infra only; customer pays Nango) | ~70–75% |
 | Composio Plan | $199 | ~$40–60 | ~70% |
+| Executor Plan | $149 | ~$25–35 (no Nango layer; customer has no background sync) | ~77% |
 | Pipedream Plan | $149 | ~$30–40 | ~75% |
 | Enterprise | custom | negotiated | 75%+ |
 
@@ -225,14 +253,16 @@ Platform plans have higher gross margins than standard plans because the custome
 
 ## Competitive Anchoring
 
-| | Composio Pro | Nango Growth | Relayfile Growth |
-|---|---|---|---|
-| Price | $229/month | $500/month | $499/month |
-| Purpose | Tool call routing | OAuth + sync infrastructure | Coordination layer + real-time workspace |
-| Multi-agent conflict detection | ✗ | ✗ | ✓ |
-| Real-time WebSocket fan-out | ✗ | ✗ | ✓ |
-| Forks + ACLs | ✗ | ✗ | ✓ |
-| Semantic metadata + relations | ✗ | ✗ | ✓ |
-| Persistent shared workspace | ✗ | ✗ | ✓ |
+| | Executor | Composio Pro | Nango Growth | Relayfile Growth |
+|---|---|---|---|---|
+| Price | Free (MIT) | $229/month | $500/month | $499/month |
+| Purpose | BYO-spec tool execution runtime | Managed tool call catalog | OAuth + scheduled sync infrastructure | Coordination layer + real-time workspace |
+| Pre-built integration catalog | ✗ | ✓ (250+) | ✓ (250+) | — |
+| Background sync / webhook ingestion | ✗ | ✗ | ✓ | ✓ (via Nango) |
+| Persistent shared workspace | ✗ | ✗ | ✗ | ✓ |
+| Multi-agent conflict detection | ✗ | ✗ | ✗ | ✓ |
+| Real-time WebSocket fan-out | ✗ | ✗ | ✗ | ✓ |
+| Forks + ACLs | ✗ | ✗ | ✗ | ✓ |
+| Semantic metadata + relations | ✗ | ✗ | ✗ | ✓ |
 
-Relayfile Growth ($499) costs roughly the same as Nango Growth ($500) but delivers the coordination layer neither Nango nor Composio have. For a team already using Nango, the Nango Plan ($299) is the right entry point — they keep Nango for what it's good at and add relayfile for what they're missing.
+Executor is the open-source alternative to Composio for teams that want to own their tool execution stack. It has no persistence layer at all — making the relayfile gap larger, not smaller, than with Composio users. Relayfile Growth ($499) costs roughly the same as Nango Growth ($500) but delivers the coordination layer none of the others have. For a team already using Nango, the Nango Plan ($299) is the right entry point. For Executor or Composio teams, the respective platform plans are the conversion path.
