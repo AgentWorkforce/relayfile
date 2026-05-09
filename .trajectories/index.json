@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "lastUpdated": "2026-05-09T18:22:10.451Z",
+  "lastUpdated": "2026-05-09T18:27:13.442Z",
   "trajectories": {
     "traj_mfyus7zfgxt2": {
       "title": "062-sdk-setup-client-workflow",
@@ -221,6 +221,13 @@
       "completedAt": "2026-05-09T13:57:04.293Z",
       "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-05/traj_6lyjg41p6a28.json",
       "compactedInto": "compact_xl96yexa79wg"
+    },
+    "traj_4vdcwo2iy630": {
+      "title": "relayfile login: fall back to cloud browser flow when no --token",
+      "status": "completed",
+      "startedAt": "2026-05-09T18:25:18.473Z",
+      "completedAt": "2026-05-09T18:27:13.341Z",
+      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-05/traj_4vdcwo2iy630.json"
     }
   }
 }

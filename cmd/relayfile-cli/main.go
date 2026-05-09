@@ -378,7 +378,7 @@ func printUsage(w io.Writer) {
 Usage:
   relayfile
   relayfile setup [--provider PROVIDER] [--workspace NAME] [--local-dir DIR]
-  relayfile login --server URL [--token TOKEN]
+  relayfile login [--no-open] [--api-key] [--server URL] [--token TOKEN]
   relayfile workspace create NAME
   relayfile workspace use NAME
   relayfile workspace list
@@ -405,7 +405,7 @@ Usage:
 
 Subcommands:
   setup       Sign in, connect an integration, and mount the workspace
-  login       Store credentials in ~/.relayfile/credentials.json
+  login       Sign in via the Relayfile Cloud browser flow (or --api-key for self-hosted)
   workspace   Create, select, list, or delete locally tracked workspaces
   integration Connect, list, or disconnect workspace integrations
   ops         List or replay dead-lettered writeback ops
@@ -1140,28 +1140,64 @@ func waitForInitialSync(serverURL, token, workspaceID, provider, localDir string
 func runLogin(args []string, stdin io.Reader, stdout io.Writer) error {
 	fs := flag.NewFlagSet("login", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	server := fs.String("server", envOrDefault("RELAYFILE_SERVER", envOrDefault("RELAYFILE_BASE_URL", defaultServerURL)), "relayfile server URL")
-	token := fs.String("token", strings.TrimSpace(os.Getenv("RELAYFILE_TOKEN")), "API token")
-	if err := fs.Parse(args); err != nil {
+	server := fs.String("server", envOrDefault("RELAYFILE_SERVER", envOrDefault("RELAYFILE_BASE_URL", defaultServerURL)), "relayfile server URL (only used with --api-key)")
+	token := fs.String("token", strings.TrimSpace(os.Getenv("RELAYFILE_TOKEN")), "relayfile API token")
+	cloudAPIURL := fs.String("cloud-api-url", envOrDefault("RELAYFILE_CLOUD_API_URL", defaultCloudAPIURL), "Relayfile Cloud API URL")
+	cloudToken := fs.String("cloud-token", strings.TrimSpace(os.Getenv("RELAYFILE_CLOUD_TOKEN")), "Relayfile Cloud access token; skips browser login when set")
+	apiKey := fs.Bool("api-key", false, "use the legacy API-key flow against --server instead of the cloud browser login")
+	noOpen := fs.Bool("no-open", false, "print the cloud sign-in URL instead of opening it")
+	loginTimeout := fs.Duration("login-timeout", 5*time.Minute, "cloud login timeout")
+	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
+		"server":        true,
+		"token":         true,
+		"cloud-api-url": true,
+		"cloud-token":   true,
+		"api-key":       false,
+		"no-open":       false,
+		"login-timeout": true,
+	})); err != nil {
 		return err
 	}
 
-	serverValue := strings.TrimSpace(*server)
-	if serverValue == "" {
-		serverValue = defaultServerURL
-	}
 	tokenValue := strings.TrimSpace(*token)
-	if tokenValue == "" {
+
+	// Token explicitly provided → legacy server-credential flow.
+	if tokenValue != "" {
+		return loginWithAPIKey(strings.TrimSpace(*server), tokenValue, stdout)
+	}
+
+	// Legacy interactive prompt, opt-in.
+	if *apiKey {
 		prompted, err := promptLine(stdin, stdout, "API key: ")
 		if err != nil {
 			return err
 		}
-		tokenValue = strings.TrimSpace(prompted)
-	}
-	if tokenValue == "" {
-		return errors.New("token is required")
+		prompted = strings.TrimSpace(prompted)
+		if prompted == "" {
+			return errors.New("token is required")
+		}
+		return loginWithAPIKey(strings.TrimSpace(*server), prompted, stdout)
 	}
 
+	// Default: cloud browser flow.
+	cloudAPI := strings.TrimRight(strings.TrimSpace(*cloudAPIURL), "/")
+	if cloudAPI == "" {
+		cloudAPI = defaultCloudAPIURL
+	}
+	creds, err := ensureCloudCredentials(cloudAPI, strings.TrimSpace(*cloudToken), *loginTimeout, !*noOpen, stdout)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "Signed in to Relayfile Cloud at %s\n", creds.APIURL)
+	fmt.Fprintln(stdout, "Run 'relayfile setup' to create or join a workspace, or 'relayfile mount WORKSPACE' if you already have one.")
+	return nil
+}
+
+func loginWithAPIKey(serverValue, tokenValue string, stdout io.Writer) error {
+	serverValue = strings.TrimSpace(serverValue)
+	if serverValue == "" {
+		serverValue = defaultServerURL
+	}
 	req, err := http.NewRequest(http.MethodGet, strings.TrimRight(serverValue, "/")+"/health", nil)
 	if err != nil {
 		return err
