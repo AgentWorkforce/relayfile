@@ -328,6 +328,26 @@ func (s *fsState) listDirectory(ctx context.Context, remotePath string) (map[str
 	return entries, nil
 }
 
+func resolveDirectoryEntry(entries map[string]nodeMeta, requestedName string) (nodeMeta, string, bool) {
+	names := make([]string, 0, len(entries))
+	for name := range entries {
+		names = append(names, name)
+	}
+	if resolvedName, ok := resolveNameByID(names, requestedName); ok {
+		if meta, found := entries[resolvedName]; found {
+			return meta, resolvedName, true
+		}
+	}
+	// Direct exact-match fallback: covers basenames where the parsed ID is
+	// empty (e.g. "test__.json") and ID-based lookup cannot help. The
+	// ID-based lookup is preferred so that canonical (name__id) siblings win
+	// over legacy (id-only) basenames when both exist.
+	if meta, ok := entries[requestedName]; ok {
+		return meta, requestedName, true
+	}
+	return nodeMeta{}, "", false
+}
+
 func (s *fsState) lookupMetadata(ctx context.Context, remotePath string) (nodeMeta, error) {
 	remotePath = normalizeRemotePath(remotePath)
 	if remotePath == s.remoteRoot {
@@ -343,12 +363,13 @@ func (s *fsState) lookupMetadata(ctx context.Context, remotePath string) (nodeMe
 	if err != nil {
 		return nodeMeta{}, err
 	}
-	meta, ok := entries[name]
+	// Resolve legacy and new-style basenames through the shared nameid parser.
+	meta, _, ok := resolveDirectoryEntry(entries, name)
 	if !ok {
 		return nodeMeta{}, &mountsync.HTTPError{StatusCode: 404, Code: "not_found", Message: "not found"}
 	}
 	if meta.isFile() && meta.size == 0 {
-		if file, err := s.readFile(ctx, remotePath); err == nil {
+		if file, err := s.readFile(ctx, meta.path); err == nil {
 			meta.size = uint64(len(file.Content))
 			meta.revision = file.Revision
 			meta.contentType = file.ContentType
@@ -450,6 +471,52 @@ func splitParent(remotePath string) (string, string) {
 		return "/", ""
 	}
 	return normalizeRemotePath(path.Dir(remotePath)), path.Base(remotePath)
+}
+
+// nameWithId rebuilds the canonical basename from an already-clean name/id pair; it does not slugify raw titles.
+func nameWithId(name, id string) string {
+	stem := strings.TrimSpace(id)
+	if strings.TrimSpace(name) != "" {
+		stem = strings.TrimSpace(name) + "__" + stem
+	}
+	if stem == "" {
+		return ""
+	}
+	return stem + ".json"
+}
+
+func resolveNameByID(names []string, requestedName string) (string, bool) {
+	requestedID := IDFromBasename(requestedName)
+	if requestedID == "" {
+		return "", false
+	}
+	bestName := ""
+	bestScore := -1
+	for _, candidate := range names {
+		candidateName, candidateID := ParseNameID(candidate)
+		if candidateID != requestedID {
+			continue
+		}
+		score := 0
+		// Canonical preference: candidate must round-trip to itself when
+		// reconstructed from its parsed (name, id, extension). This works for
+		// any extension (including none, e.g. directories like
+		// "thread__01HXYZ" or files like "notes__abc.md").
+		if candidateName != "" {
+			ext := path.Ext(candidate)
+			if candidateName+"__"+candidateID+ext == candidate {
+				score = 1
+			}
+		}
+		if score > bestScore || (score == bestScore && (bestName == "" || candidate < bestName)) {
+			bestName = candidate
+			bestScore = score
+		}
+	}
+	if bestName == "" {
+		return "", false
+	}
+	return bestName, true
 }
 
 func joinRemotePath(parentPath, name string) string {

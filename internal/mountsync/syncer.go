@@ -2678,6 +2678,10 @@ func remoteToLocalPath(localRoot, remoteRoot, remotePath string) (string, error)
 }
 
 func localToRemotePath(localRoot, remoteRoot, localPath string) (string, error) {
+	// Wave 106 only makes mountfuse consumers tolerant of both `<id>.json`
+	// and `<name>__<id>.json` basenames. mountsync does not derive entity IDs
+	// from local basenames here; it mirrors the caller's relative path back to
+	// the remote root verbatim, so no name/id canonicalization is required.
 	rel, err := filepath.Rel(localRoot, localPath)
 	if err != nil {
 		return "", err
