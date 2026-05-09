@@ -6,10 +6,8 @@ import (
 	"hash/fnv"
 	"log"
 	"mime"
-	"os"
 	"path"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -165,7 +163,7 @@ func newFSState(cfg Config) *fsState {
 		inodeByPath: map[string]uint64{normalizeRemotePath(cfg.RemoteRoot): 1},
 		pathByInode: map[uint64]string{1: normalizeRemotePath(cfg.RemoteRoot)},
 	}
-	if cfg.LazyRepos || lazyGithubReposEnabled() {
+	if cfg.LazyRepos {
 		state.lazyRepos = NewLazyMaterializeCache()
 	}
 	return state
@@ -698,16 +696,4 @@ func contentTypeForPath(remotePath string) string {
 		}
 	}
 	return "text/plain; charset=utf-8"
-}
-
-func lazyGithubReposEnabled() bool {
-	raw := strings.TrimSpace(os.Getenv("RELAYFILE_LAZY_REPOS"))
-	if raw == "" {
-		raw = strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_LAZY_GITHUB_REPOS"))
-	}
-	if raw == "" {
-		return false
-	}
-	enabled, err := strconv.ParseBool(raw)
-	return err == nil && enabled
 }

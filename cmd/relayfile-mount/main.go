@@ -164,7 +164,7 @@ func runPollingMount(rootCtx context.Context, cfg mountConfig) error {
 		Logger:        log.Default(),
 		Mode:          cfg.mode,
 		Interval:      cfg.interval,
-		LazyRepos:     cfg.lazyRepos,
+		LazyRepos:     boolPtr(cfg.lazyRepos),
 	})
 	if err != nil {
 		return fmt.Errorf("initialize mount syncer: %w", err)
