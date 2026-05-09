@@ -148,7 +148,13 @@ function parseMetadata(lines = []) {
     const key = normalizeKey(match[1]);
     const value = parseScalar(match[2]);
     if (key === "tags") values.tags = splitCommaList(match[2]);
-    else if (key === "trials") values.trials = Number(value);
+    else if (key === "trials") {
+      const trials = Number(value);
+      if (!Number.isInteger(trials) || trials < 1) {
+        throw new Error("Trials must be a positive integer");
+      }
+      values.trials = trials;
+    }
     else if (key === "humanReview") values.humanReview = parseBoolean(value, "Human Review");
     else values[key] = value;
   }

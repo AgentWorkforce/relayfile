@@ -173,6 +173,7 @@ function normalizeMountPath(filePath) {
 function pathIsWithin(filePath, prefix) {
   const normalizedFile = normalizeMountPath(filePath);
   const normalizedPrefix = normalizeMountPath(prefix);
+  if (normalizedPrefix === "/") return true;
   return normalizedFile === normalizedPrefix || normalizedFile.startsWith(`${normalizedPrefix}/`);
 }
 

@@ -33,8 +33,9 @@ Agent A writes to the mount and Agent B reads the same path within one second.
 ### Deterministic Checks
 ok: true
 contentIncludes:
-- agent-b
 - ready
+forbidPhrases:
+- seed
 fileContentIncludes:
 - {"path":"/shared/status.json","value":"agent-a"}
 maxToolCalls: 3

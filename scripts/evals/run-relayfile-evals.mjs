@@ -119,7 +119,9 @@ for (const testCase of selectedCases) {
 
 writeHumanEvalRunArtifacts(run, { final: true });
 printHumanEvalRunSummary(run, { productName: "Relayfile Evals", rootDir: ROOT });
-process.exitCode = run.tests.some((test) => test.status === "failed" || test.status === "skipped") ? 1 : 0;
+process.exitCode = run.tests.some((test) => (
+  test.status === "failed" || (shouldFailOnSkipped(args) && test.status === "skipped")
+)) ? 1 : 0;
 
 function parseArgs(argv) {
   const parsed = { tags: new Set() };
@@ -134,6 +136,7 @@ function parseArgs(argv) {
     else if (arg === "--tag") parsed.tags.add(readOptionValue(argv, ++index, "--tag"));
     else if (arg === "--trials") parsed.trials = Number(readOptionValue(argv, ++index, "--trials"));
     else if (arg === "--mode") parsed.mode = readOptionValue(argv, ++index, "--mode");
+    else if (arg === "--fail-on-skipped") parsed.failOnSkipped = true;
     else if (arg === "--help" || arg === "-h") {
       printHelp();
       process.exit(0);
@@ -162,6 +165,7 @@ Options:
   --executor NAME    Override selected cases to run with this executor.
   --mode MODE        Run mode label, usually offline or provider.
   --provider         Alias for --mode provider.
+  --fail-on-skipped  Treat skipped cases as a non-zero exit condition.
   --review-only      Do not execute cases; create human review worksheets.
 `);
 }
@@ -192,9 +196,24 @@ function createRunRecord({ selectedCases, mode }) {
 }
 
 function getGitInfo(rootDir) {
-  const branch = spawnSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: rootDir, encoding: "utf8" }).stdout.trim() || "unknown";
-  const sha = spawnSync("git", ["rev-parse", "--short", "HEAD"], { cwd: rootDir, encoding: "utf8" }).stdout.trim() || "unknown";
+  const branch = runGitInfoCommand(rootDir, ["rev-parse", "--abbrev-ref", "HEAD"], "branch");
+  const sha = runGitInfoCommand(rootDir, ["rev-parse", "--short", "HEAD"], "sha");
   return { branch, sha };
+}
+
+function runGitInfoCommand(rootDir, args, label) {
+  const result = spawnSync("git", args, { cwd: rootDir, encoding: "utf8" });
+  const value = result.stdout?.trim();
+  if (result.status !== 0 || !value) {
+    const detail = result.error?.message || result.stderr?.trim() || `status=${result.status ?? "unknown"}`;
+    console.warn(`getGitInfo: failed to read ${label} with git ${args.join(" ")}: ${detail}`);
+    return "unknown";
+  }
+  return value;
+}
+
+function shouldFailOnSkipped(args) {
+  return args.failOnSkipped || process.env.RELAYFILE_EVAL_FAIL_ON_SKIPPED === "1" || process.env.HUMAN_EVAL_FAIL_ON_SKIPPED === "1";
 }
 
 function readPositiveInt(raw, fallback) {

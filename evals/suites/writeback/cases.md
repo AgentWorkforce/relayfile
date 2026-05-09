@@ -156,3 +156,55 @@ fileNotExists:
 
 ### Must Not
 - Mutate the canonical file after validation fails.
+
+## writeback.nested-readonly-rejected
+Executor: relayfile
+Kind: regression
+Tags: writeback, validation, nested
+Human Review: false
+
+### Message
+Write a nested read-only metadata field and surface the validation failure.
+
+### Mock
+```json
+{
+  "files": {
+    "/github/repos/AgentWorkforce/relay/issues/114.json": {
+      "number": 114,
+      "metadata": { "id": "original-node-id" },
+      "title": "Eval harness"
+    }
+  },
+  "readOnlyFields": {
+    "/github/repos/AgentWorkforce/relay/issues": ["metadata.id"]
+  }
+}
+```
+
+### Operations
+```json
+[
+  {
+    "op": "write",
+    "path": "/github/repos/AgentWorkforce/relay/issues/114.json",
+    "content": { "metadata": { "id": "changed-node-id" }, "title": "Attempted mutation" },
+    "writeback": { "adapter": "github", "mode": "patch" }
+  },
+  { "op": "read", "path": "/.relay/writeback-status.json" }
+]
+```
+
+### Deterministic Checks
+ok: true
+contentIncludes:
+- ReadOnlyFieldError
+fileContentIncludes:
+- {"path":"/.relay/writeback-status.json","value":"metadata.id"}
+- {"path":"/github/repos/AgentWorkforce/relay/issues/114.json","value":"original-node-id"}
+
+### Must
+- Reject nested read-only field mutation before queueing writeback.
+
+### Must Not
+- Only enforce top-level read-only fields.

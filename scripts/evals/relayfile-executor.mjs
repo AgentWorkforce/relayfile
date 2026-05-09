@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, rmSync, statSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -95,7 +95,12 @@ async function executeOperation(state, operation, mock) {
   const virtualPath = normalizeMountPath(operation.path);
   if (op === "read") {
     if (!allowRead(state, virtualPath, "read")) return;
-    const content = await readFile(resolveVirtualPath(state, virtualPath), "utf8");
+    const resolved = resolveVirtualPath(state, virtualPath);
+    const content = await readFile(resolved, "utf8").catch((error) => {
+      recordFileError(state, "read", virtualPath, error, operation);
+      return undefined;
+    });
+    if (content === undefined) return;
     state.toolCalls.push({ name: "read", path: virtualPath, bytes: Buffer.byteLength(content) });
     state.contentLines.push(`${label(operation)}read ${virtualPath}: ${preview(content)}`);
     return;
@@ -120,7 +125,11 @@ async function executeOperation(state, operation, mock) {
 
   if (op === "stat") {
     if (!allowRead(state, virtualPath, "stat")) return;
-    const stats = await stat(resolveVirtualPath(state, virtualPath));
+    const stats = await stat(resolveVirtualPath(state, virtualPath)).catch((error) => {
+      recordFileError(state, "stat", virtualPath, error, operation);
+      return undefined;
+    });
+    if (stats === undefined) return;
     state.toolCalls.push({ name: "stat", path: virtualPath, isFile: stats.isFile(), isDirectory: stats.isDirectory() });
     state.contentLines.push(`${label(operation)}stat ${virtualPath}: ${stats.isDirectory() ? "directory" : "file"}`);
     return;
@@ -158,11 +167,13 @@ async function executeOperation(state, operation, mock) {
       await writeVirtualFile(state, virtualPath, `${JSON.stringify(receipt, null, 2)}\n`);
       state.sideEffects.push({ kind: "wrote", path: virtualPath });
       queueWriteback(state, operation, virtualPath);
+      state.toolCalls.push({ name: op, path: virtualPath, bytes: Buffer.byteLength(JSON.stringify(receipt, null, 2)) });
       state.contentLines.push(`${label(operation)}created receipt ${virtualPath} -> ${receipt.path}`);
       return;
     }
 
-    const nextContent = op === "append" && existsSync(resolveVirtualPath(state, virtualPath))
+    const resolvedPath = resolveVirtualPath(state, virtualPath);
+    const nextContent = op === "append" && await pathExists(resolvedPath)
       ? `${await readFile(resolveVirtualPath(state, virtualPath), "utf8")}${content}`
       : content;
     await writeVirtualFile(state, virtualPath, nextContent);
@@ -252,8 +263,11 @@ async function grepVirtualTree(state, rootPath, pattern) {
 async function listFilesRecursive(state, rootPath) {
   const normalizedRoot = normalizeMountPath(rootPath);
   const resolvedRoot = resolveVirtualPath(state, normalizedRoot);
-  if (!existsSync(resolvedRoot)) return [];
-  const stats = statSync(resolvedRoot);
+  const stats = await stat(resolvedRoot).catch((error) => {
+    if (error?.code === "ENOENT") return undefined;
+    throw error;
+  });
+  if (!stats) return [];
   if (stats.isFile()) return [normalizedRoot];
 
   const result = [];
@@ -261,7 +275,7 @@ async function listFilesRecursive(state, rootPath) {
   for (const entry of entries.sort(compareStrings)) {
     const childPath = normalizeMountPath(path.posix.join(normalizedRoot, entry));
     if (accessForPath(state, childPath) === "none") continue;
-    const childStats = statSync(resolveVirtualPath(state, childPath));
+    const childStats = await stat(resolveVirtualPath(state, childPath));
     if (childStats.isDirectory()) result.push(...await listFilesRecursive(state, childPath));
     else result.push(childPath);
   }
@@ -305,7 +319,7 @@ function validateReadOnlyFields(state, virtualPath, content) {
   if (readOnlyFields.length === 0) return undefined;
   const parsed = tryParseJson(content);
   if (!parsed || typeof parsed !== "object") return undefined;
-  const rejected = readOnlyFields.find((field) => Object.prototype.hasOwnProperty.call(parsed, field));
+  const rejected = readOnlyFields.find((field) => hasPropertyPath(parsed, field));
   return rejected ? `ReadOnlyFieldError(${JSON.stringify(rejected)})` : undefined;
 }
 
@@ -405,7 +419,37 @@ function normalizeMountPath(filePath) {
 function pathIsWithin(filePath, prefix) {
   const normalizedFile = normalizeMountPath(filePath);
   const normalizedPrefix = normalizeMountPath(prefix);
+  if (normalizedPrefix === "/") return true;
   return normalizedFile === normalizedPrefix || normalizedFile.startsWith(`${normalizedPrefix}/`);
+}
+
+async function pathExists(filePath) {
+  try {
+    await stat(filePath);
+    return true;
+  } catch (error) {
+    if (error?.code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+function recordFileError(state, op, virtualPath, error, operation) {
+  const reason = error?.code === "ENOENT" ? "ENOENT" : String(error?.message ?? error);
+  state.sideEffects.push({ kind: "error", op, path: virtualPath, reason });
+  state.toolCalls.push({ name: op, path: virtualPath, error: reason });
+  state.contentLines.push(`${label(operation)}${op} ${virtualPath}: ${reason === "ENOENT" ? "file not found" : reason}`);
+}
+
+function hasPropertyPath(value, dottedPath) {
+  const segments = String(dottedPath).split(".").filter(Boolean);
+  if (segments.length === 0) return false;
+  let current = value;
+  for (const segment of segments) {
+    if (current === null || typeof current !== "object") return false;
+    if (!Object.prototype.hasOwnProperty.call(current, segment)) return false;
+    current = current[segment];
+  }
+  return true;
 }
 
 function tryParseJson(content) {

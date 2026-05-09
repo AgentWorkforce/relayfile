@@ -96,3 +96,48 @@ fileExists:
 
 ### Must Not
 - Leak restricted filenames in the visible output.
+
+## permissions.root-scope-denies-all
+Executor: relayfile
+Kind: regression
+Tags: permissions, acl, root
+Human Review: false
+
+### Message
+A root-scoped deny rule should apply to every path below the mount.
+
+### Mock
+```json
+{
+  "acl": [
+    { "pathPrefix": "/", "access": "none" }
+  ],
+  "files": {
+    "/linear/issues/LIN-1.json": { "identifier": "LIN-1", "title": "Hidden" }
+  }
+}
+```
+
+### Operations
+```json
+[
+  { "op": "list", "path": "/" },
+  { "op": "read", "path": "/linear/issues/LIN-1.json" }
+]
+```
+
+### Deterministic Checks
+ok: true
+contentIncludes:
+- denied by ACL
+aclDenied:
+- /
+- /linear/issues/LIN-1.json
+noFilesModified:
+- /
+
+### Must
+- Apply root ACL prefixes to all descendants.
+
+### Must Not
+- Treat `/` as `//` and accidentally allow descendants.
