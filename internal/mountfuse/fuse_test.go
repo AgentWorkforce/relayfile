@@ -730,11 +730,10 @@ func TestFuseAliasReaddirRefreshesAfterInvalidation(t *testing.T) {
 }
 
 func TestLazyMaterializeFiresOnceOnRepoStat(t *testing.T) {
-	t.Setenv("RELAYFILE_MOUNT_LAZY_GITHUB_REPOS", "true")
 
 	t.Run("repo stat and repeated readdir", func(t *testing.T) {
 		remote := newLazyGithubRepoRemote()
-		root := newMountTestRoot(t, remote, "ws_lazy_once")
+		root := newLazyMountTestRoot(t, remote, "ws_lazy_once")
 		repo := lookupDir(t, lookupDir(t, lookupDir(t, lookupDir(t, root, "github"), "repos"), "octocat"), "hello-world")
 
 		var out fuse.AttrOut
@@ -759,7 +758,7 @@ func TestLazyMaterializeFiresOnceOnRepoStat(t *testing.T) {
 
 	t.Run("missing owner or repo segments do not trigger", func(t *testing.T) {
 		remote := newLazyGithubRepoRemote()
-		root := newMountTestRoot(t, remote, "ws_lazy_missing_segments")
+		root := newLazyMountTestRoot(t, remote, "ws_lazy_missing_segments")
 		repos := lookupDir(t, lookupDir(t, root, "github"), "repos")
 		owner := lookupDir(t, repos, "octocat")
 
@@ -777,7 +776,7 @@ func TestLazyMaterializeFiresOnceOnRepoStat(t *testing.T) {
 
 	t.Run("multiple repos under same owner are independent", func(t *testing.T) {
 		remote := newLazyGithubRepoRemote()
-		root := newMountTestRoot(t, remote, "ws_lazy_multi_repo")
+		root := newLazyMountTestRoot(t, remote, "ws_lazy_multi_repo")
 		owner := lookupDir(t, lookupDir(t, lookupDir(t, root, "github"), "repos"), "octocat")
 		helloWorld := lookupDir(t, owner, "hello-world")
 		spoonKnife := lookupDir(t, owner, "spoon-knife")
@@ -806,7 +805,7 @@ func TestLazyMaterializeFiresOnceOnRepoStat(t *testing.T) {
 			remote.setMaterialized(owner, repo)
 			return nil
 		}
-		root := newMountTestRoot(t, remote, "ws_lazy_race")
+		root := newLazyMountTestRoot(t, remote, "ws_lazy_race")
 		repo := lookupDir(t, lookupDir(t, lookupDir(t, lookupDir(t, root, "github"), "repos"), "octocat"), "hello-world")
 
 		errnos := make(chan syscall.Errno, 2)
@@ -833,8 +832,16 @@ func TestLazyMaterializeFiresOnceOnRepoStat(t *testing.T) {
 	})
 }
 
+func TestLazyReposConfigOverridesEnv(t *testing.T) {
+	t.Setenv("RELAYFILE_LAZY_REPOS", "true")
+
+	root := newMountTestRoot(t, newLazyGithubRepoRemote(), "ws_lazy_env_override")
+	if root.state.lazyRepos != nil {
+		t.Fatal("expected explicit Config.LazyRepos=false to ignore lazy repos env fallback")
+	}
+}
+
 func TestLazyMaterializeRetriesAfterError(t *testing.T) {
-	t.Setenv("RELAYFILE_MOUNT_LAZY_GITHUB_REPOS", "true")
 
 	remote := newLazyGithubRepoRemote()
 	remote.lazyMaterializeFunc = func(_ context.Context, _ string, owner, repo string) error {
@@ -844,7 +851,7 @@ func TestLazyMaterializeRetriesAfterError(t *testing.T) {
 		remote.setMaterialized(owner, repo)
 		return nil
 	}
-	root := newMountTestRoot(t, remote, "ws_lazy_retry")
+	root := newLazyMountTestRoot(t, remote, "ws_lazy_retry")
 	repo := lookupDir(t, lookupDir(t, lookupDir(t, lookupDir(t, root, "github"), "repos"), "octocat"), "hello-world")
 
 	if _, errno := repo.Readdir(context.Background()); errno != syscall.EIO {
@@ -859,7 +866,6 @@ func TestLazyMaterializeRetriesAfterError(t *testing.T) {
 }
 
 func TestLazyMaterializeNoOpWhenRemoteDoesNotImplement(t *testing.T) {
-	t.Setenv("RELAYFILE_MOUNT_LAZY_GITHUB_REPOS", "true")
 
 	remote := &fakeRemoteClient{
 		trees: map[string]mountsync.TreeResponse{
@@ -884,7 +890,7 @@ func TestLazyMaterializeNoOpWhenRemoteDoesNotImplement(t *testing.T) {
 			},
 		},
 	}
-	root := newMountTestRoot(t, remote, "ws_lazy_noop")
+	root := newLazyMountTestRoot(t, remote, "ws_lazy_noop")
 	repo := lookupDir(t, lookupDir(t, lookupDir(t, lookupDir(t, root, "github"), "repos"), "octocat"), "hello-world")
 
 	if errno := repo.Getattr(context.Background(), nil, &fuse.AttrOut{}); errno != 0 {
@@ -896,7 +902,6 @@ func TestLazyMaterializeNoOpWhenRemoteDoesNotImplement(t *testing.T) {
 }
 
 func TestLazyMaterializeAllowsEmptyRepoTree(t *testing.T) {
-	t.Setenv("RELAYFILE_MOUNT_LAZY_GITHUB_REPOS", "true")
 
 	remote := &fakeLazyRemoteClient{
 		fakeRemoteClient: &fakeRemoteClient{},
@@ -926,7 +931,7 @@ func TestLazyMaterializeAllowsEmptyRepoTree(t *testing.T) {
 		return mountsync.TreeResponse{}, &mountsync.HTTPError{StatusCode: 404, Code: "not_found", Message: "tree not found"}
 	}
 
-	root := newMountTestRoot(t, remote, "ws_lazy_empty_repo")
+	root := newLazyMountTestRoot(t, remote, "ws_lazy_empty_repo")
 	repo := lookupDir(t, lookupDir(t, lookupDir(t, lookupDir(t, root, "github"), "repos"), "octocat"), "empty-repo")
 
 	if errno := repo.Getattr(context.Background(), nil, &fuse.AttrOut{}); errno != 0 {
@@ -1030,8 +1035,8 @@ func TestByStateOutsideIssuesPathRoundTrips(t *testing.T) {
 
 	remote := &fakeRemoteClient{
 		trees: map[string]mountsync.TreeResponse{
-			"/":        {Path: "/", Entries: []mountsync.TreeEntry{{Path: "/notion", Type: "directory"}}},
-			"/notion":  {Path: "/notion", Entries: []mountsync.TreeEntry{{Path: "/notion/by-state", Type: "directory"}}},
+			"/":       {Path: "/", Entries: []mountsync.TreeEntry{{Path: "/notion", Type: "directory"}}},
+			"/notion": {Path: "/notion", Entries: []mountsync.TreeEntry{{Path: "/notion/by-state", Type: "directory"}}},
 			"/notion/by-state": {
 				Path: "/notion/by-state",
 				Entries: []mountsync.TreeEntry{
@@ -1066,6 +1071,17 @@ func newMountTestRoot(t *testing.T, remote mountsync.RemoteClient, workspaceID s
 	t.Helper()
 
 	root, err := New(Config{Client: remote, WorkspaceID: workspaceID, RemoteRoot: "/"})
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	_ = gofusefs.NewNodeFS(root, &gofusefs.Options{})
+	return root
+}
+
+func newLazyMountTestRoot(t *testing.T, remote mountsync.RemoteClient, workspaceID string) *DirNode {
+	t.Helper()
+
+	root, err := New(Config{Client: remote, WorkspaceID: workspaceID, RemoteRoot: "/", LazyRepos: true})
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}

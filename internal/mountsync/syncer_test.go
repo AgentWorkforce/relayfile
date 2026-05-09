@@ -30,6 +30,10 @@ import (
 	"github.com/fsnotify/fsnotify"
 )
 
+func boolPtr(value bool) *bool {
+	return &value
+}
+
 func TestSyncOncePullsRemoteAndPushesLocalEdits(t *testing.T) {
 	client := &fakeClient{
 		files: map[string]RemoteFile{
@@ -123,6 +127,9 @@ func TestHandleLocalChangeIgnoresAlreadyTrackedContent(t *testing.T) {
 }
 
 func TestLazyReposSkipsEagerFetchOfIssuesOnStartup(t *testing.T) {
+	t.Setenv("RELAYFILE_LAZY_REPOS", "")
+	t.Setenv("RELAYFILE_MOUNT_LAZY_GITHUB_REPOS", "")
+
 	client := &fakeClient{
 		files: map[string]RemoteFile{
 			"/github/repos/octocat/hello-world/_index.json": {
@@ -145,7 +152,7 @@ func TestLazyReposSkipsEagerFetchOfIssuesOnStartup(t *testing.T) {
 		WorkspaceID: "ws_lazy_repos_on",
 		RemoteRoot:  "/",
 		LocalRoot:   localDir,
-		LazyRepos:   true,
+		LazyRepos:   boolPtr(true),
 	})
 	if err != nil {
 		t.Fatalf("new syncer failed: %v", err)
@@ -163,7 +170,90 @@ func TestLazyReposSkipsEagerFetchOfIssuesOnStartup(t *testing.T) {
 	}
 }
 
+func TestLazyReposDefaultsToEagerFetchOfIssues(t *testing.T) {
+	t.Setenv("RELAYFILE_LAZY_REPOS", "")
+	t.Setenv("RELAYFILE_MOUNT_LAZY_GITHUB_REPOS", "")
+
+	client := &fakeClient{
+		files: map[string]RemoteFile{
+			"/github/repos/octocat/hello-world/_index.json": {
+				Path:        "/github/repos/octocat/hello-world/_index.json",
+				Revision:    "rev_index",
+				ContentType: "application/json",
+				Content:     `{"repo":"hello-world"}`,
+			},
+			"/github/repos/octocat/hello-world/issues/issue-1.json": {
+				Path:        "/github/repos/octocat/hello-world/issues/issue-1.json",
+				Revision:    "rev_issue_1",
+				ContentType: "application/json",
+				Content:     `{"id":1}`,
+			},
+		},
+		revisionCounter: 2,
+	}
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_lazy_repos_default",
+		RemoteRoot:  "/",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("default sync failed: %v", err)
+	}
+
+	if got := client.readFileCallsByPath["/github/repos/octocat/hello-world/issues/issue-1.json"]; got < 1 {
+		t.Fatalf("expected eager issue reads by default, got %d", got)
+	}
+}
+
+func TestLazyReposEnvFallbackStillSkipsEagerFetchOfIssues(t *testing.T) {
+	t.Setenv("RELAYFILE_LAZY_REPOS", "true")
+	t.Setenv("RELAYFILE_MOUNT_LAZY_GITHUB_REPOS", "")
+
+	client := &fakeClient{
+		files: map[string]RemoteFile{
+			"/github/repos/octocat/hello-world/_index.json": {
+				Path:        "/github/repos/octocat/hello-world/_index.json",
+				Revision:    "rev_index",
+				ContentType: "application/json",
+				Content:     `{"repo":"hello-world"}`,
+			},
+			"/github/repos/octocat/hello-world/issues/issue-1.json": {
+				Path:        "/github/repos/octocat/hello-world/issues/issue-1.json",
+				Revision:    "rev_issue_1",
+				ContentType: "application/json",
+				Content:     `{"id":1}`,
+			},
+		},
+		revisionCounter: 2,
+	}
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_lazy_repos_env",
+		RemoteRoot:  "/",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("env lazy sync failed: %v", err)
+	}
+
+	if got := client.readFileCallsByPath["/github/repos/octocat/hello-world/issues/issue-1.json"]; got != 0 {
+		t.Fatalf("expected zero eager issue reads when env opts into lazy mode, got %d", got)
+	}
+}
+
 func TestLazyReposOffStillFetchesIssues(t *testing.T) {
+	t.Setenv("RELAYFILE_LAZY_REPOS", "")
+	t.Setenv("RELAYFILE_MOUNT_LAZY_GITHUB_REPOS", "")
+
 	client := &fakeClient{
 		files: map[string]RemoteFile{
 			"/github/repos/octocat/hello-world/_index.json": {
@@ -186,7 +276,7 @@ func TestLazyReposOffStillFetchesIssues(t *testing.T) {
 		WorkspaceID: "ws_lazy_repos_off",
 		RemoteRoot:  "/",
 		LocalRoot:   localDir,
-		LazyRepos:   false,
+		LazyRepos:   boolPtr(false),
 	})
 	if err != nil {
 		t.Fatalf("new syncer failed: %v", err)
@@ -198,6 +288,47 @@ func TestLazyReposOffStillFetchesIssues(t *testing.T) {
 
 	if got := client.readFileCallsByPath["/github/repos/octocat/hello-world/issues/issue-1.json"]; got < 1 {
 		t.Fatalf("expected eager issue reads when lazy mode is off, got %d", got)
+	}
+}
+
+func TestLazyReposExplicitFalseOverridesEnv(t *testing.T) {
+	t.Setenv("RELAYFILE_LAZY_REPOS", "true")
+	t.Setenv("RELAYFILE_MOUNT_LAZY_GITHUB_REPOS", "")
+
+	client := &fakeClient{
+		files: map[string]RemoteFile{
+			"/github/repos/octocat/hello-world/_index.json": {
+				Path:        "/github/repos/octocat/hello-world/_index.json",
+				Revision:    "rev_index",
+				ContentType: "application/json",
+				Content:     `{"repo":"hello-world"}`,
+			},
+			"/github/repos/octocat/hello-world/issues/issue-1.json": {
+				Path:        "/github/repos/octocat/hello-world/issues/issue-1.json",
+				Revision:    "rev_issue_1",
+				ContentType: "application/json",
+				Content:     `{"id":1}`,
+			},
+		},
+		revisionCounter: 2,
+	}
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_lazy_repos_explicit_false",
+		RemoteRoot:  "/",
+		LocalRoot:   localDir,
+		LazyRepos:   boolPtr(false),
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("explicit non-lazy sync failed: %v", err)
+	}
+
+	if got := client.readFileCallsByPath["/github/repos/octocat/hello-world/issues/issue-1.json"]; got < 1 {
+		t.Fatalf("expected eager issue reads when explicit lazy mode is off, got %d", got)
 	}
 }
 
@@ -3981,7 +4112,7 @@ func TestPullRestartFastPathPeriodicFullPullStillSkipsLazyGithubRepos(t *testing
 		WorkspaceID:   "ws_restart_lazy_periodic",
 		RemoteRoot:    "/",
 		LocalRoot:     localDir,
-		LazyRepos:     true,
+		LazyRepos:     boolPtr(true),
 		FullPullEvery: 2,
 	})
 	if err != nil {

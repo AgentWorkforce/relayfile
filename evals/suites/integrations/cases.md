@@ -37,7 +37,8 @@ List the open issues in the AgentWorkforce/relay GitHub repo through the relayfi
 ```json
 [
   { "op": "list", "path": "/github/repos/AgentWorkforce/relay/issues" },
-  { "op": "grep", "path": "/github/repos/AgentWorkforce/relay/issues", "pattern": "\"state\": \"open\"" }
+  { "op": "read", "path": "/github/repos/AgentWorkforce/relay/issues/805.json" },
+  { "op": "read", "path": "/github/repos/AgentWorkforce/relay/issues/815.json" }
 ]
 ```
 
@@ -47,9 +48,12 @@ contentIncludes:
 - 805.json
 - 815.json
 - state
+- Stabilize relayfile comparison evals
+- evals
+- Measure token cost against MCP
 fileExists:
 - /github/repos/AgentWorkforce/relay/issues/805.json
-maxToolCalls: 2
+maxToolCalls: 3
 
 ### Must
 - Answer from the filesystem-shaped GitHub data, not by invoking a GitHub MCP.

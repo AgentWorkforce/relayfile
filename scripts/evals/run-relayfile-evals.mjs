@@ -9,6 +9,7 @@ import {
   assertHumanEvalExpected,
   createDefaultHumanEvalExecutors,
   createHumanEvalRunRecord,
+  createSkippedEvalError,
   defaultRedactActual,
   humanEvalNeedsReview,
   loadDotenv,
@@ -25,6 +26,8 @@ import { createRelayfileExecutor } from "./relayfile-executor.mjs";
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const SUITES_DIR = path.join(ROOT, "evals", "suites");
 const RUNS_DIR = path.join(ROOT, ".relayfile", "evals", "runs");
+const DEFAULT_OPENROUTER_MODEL = "openai/gpt-oss-120b:free";
+const OPENROUTER_CHAT_COMPLETIONS_ENDPOINT = "https://openrouter.ai/api/v1/chat/completions";
 
 loadDotenv(path.join(ROOT, ".env"));
 
@@ -95,7 +98,11 @@ for (const testCase of selectedCases) {
         ? []
         : [...assertHumanEvalExpected(testCase, actual), ...assertRelayfileExpected(testCase, actual)];
       const deterministicPassed = args.reviewOnly || checks.every((check) => check.passed);
-      const needsHuman = humanEvalNeedsReview(testCase);
+      let needsHuman = humanEvalNeedsReview(testCase);
+      if (deterministicPassed && needsHuman && providerMode) {
+        checks.push(await reviewWithOpenRouter(testCase, actual, checks));
+        needsHuman = !checks.every((check) => check.passed);
+      }
 
       run.tests.push({
         ...trial,
@@ -164,10 +171,130 @@ Options:
   --trials N         Override trial count for every case.
   --executor NAME    Override selected cases to run with this executor.
   --mode MODE        Run mode label, usually offline or provider.
-  --provider         Alias for --mode provider.
+  --provider         Alias for --mode provider; also reviews human cases with OpenRouter.
   --fail-on-skipped  Treat skipped cases as a non-zero exit condition.
   --review-only      Do not execute cases; create human review worksheets.
 `);
+}
+
+async function reviewWithOpenRouter(testCase, actual, checks) {
+  const apiKey = process.env.OPENROUTER_API_KEY;
+  if (!apiKey) {
+    throw createSkippedEvalError("openrouter review skipped; OPENROUTER_API_KEY is missing");
+  }
+
+  const model = process.env.RELAYFILE_EVAL_OPENROUTER_MODEL
+    ?? process.env.HUMAN_EVAL_OPENROUTER_MODEL
+    ?? DEFAULT_OPENROUTER_MODEL;
+  const timeoutMs = readPositiveInt(process.env.RELAYFILE_EVAL_OPENROUTER_TIMEOUT_MS, 120_000);
+  const maxTokens = readPositiveInt(process.env.RELAYFILE_EVAL_OPENROUTER_MAX_TOKENS, 700);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch(OPENROUTER_CHAT_COMPLETIONS_ENDPOINT, {
+      method: "POST",
+      signal: controller.signal,
+      headers: {
+        authorization: `Bearer ${apiKey}`,
+        "content-type": "application/json",
+        "http-referer": process.env.GITHUB_SERVER_URL
+          ? `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY ?? ""}`
+          : "https://github.com/AgentWorkforce/relayfile",
+        "x-title": "Relayfile Evals",
+      },
+      body: JSON.stringify({
+        model,
+        temperature: 0,
+        max_tokens: maxTokens,
+        messages: [
+          {
+            role: "system",
+            content: [
+              "You are a strict evaluator for relayfile human-review evals.",
+              "Return only JSON with keys pass:boolean and reason:string.",
+              "Mark pass true only when the actual output satisfies every Must and violates no Must Not.",
+            ].join(" "),
+          },
+          {
+            role: "user",
+            content: buildReviewPrompt(testCase, actual, checks),
+          },
+        ],
+      }),
+    });
+
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const detail = typeof payload?.error?.message === "string" ? payload.error.message : JSON.stringify(payload);
+      throw new Error(`OpenRouter review failed: ${response.status} ${detail}`);
+    }
+
+    const content = contentFromOpenRouterChoice(payload?.choices?.[0]);
+    const verdict = parseOpenRouterVerdict(content);
+    return {
+      name: "openrouterReview",
+      passed: verdict.pass === true,
+      message: `model=${model}; ${verdict.reason || "no reason returned"}`,
+    };
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new Error(`OpenRouter review timed out after ${timeoutMs}ms`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function buildReviewPrompt(testCase, actual, checks) {
+  return JSON.stringify({
+    id: testCase.id,
+    suite: testCase.suite,
+    message: testCase.input?.message,
+    must: testCase.expected?.must ?? [],
+    mustNot: testCase.expected?.mustNot ?? [],
+    deterministicChecks: checks.map((check) => ({
+      name: check.name,
+      passed: check.passed,
+      message: check.message,
+    })),
+    actual: redactRelayfileActual(actual),
+  }, null, 2);
+}
+
+function contentFromOpenRouterChoice(choice) {
+  const message = choice?.message;
+  const direct = typeof message?.content === "string" ? message.content.trim() : "";
+  if (direct) return direct;
+
+  const contentParts = Array.isArray(message?.content) ? message.content : [];
+  return contentParts
+    .map((part) => {
+      if (typeof part === "string") return part;
+      if (typeof part?.text === "string") return part.text;
+      if (typeof part?.content === "string") return part.content;
+      return "";
+    })
+    .join("\n")
+    .trim();
+}
+
+function parseOpenRouterVerdict(content) {
+  const trimmed = String(content ?? "").trim();
+  const unfenced = trimmed.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
+  try {
+    const parsed = JSON.parse(unfenced);
+    return {
+      pass: parsed?.pass === true,
+      reason: typeof parsed?.reason === "string" ? parsed.reason : "",
+    };
+  } catch {
+    return {
+      pass: false,
+      reason: `OpenRouter did not return JSON verdict: ${trimmed.slice(0, 300)}`,
+    };
+  }
 }
 
 function listCases(cases) {

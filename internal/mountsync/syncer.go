@@ -424,7 +424,8 @@ type SyncerOptions struct {
 	// the default (defaultFullPullEvery, ~10 min at 30s intervals). A
 	// negative value disables the periodic full pull entirely.
 	FullPullEvery int
-	LazyRepos     bool
+	// LazyRepos controls lazy GitHub repo subtree hydration. nil falls back to env.
+	LazyRepos *bool
 }
 
 type Logger interface {
@@ -629,8 +630,16 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 			fullPullEvery = defaultFullPullEvery
 		}
 	}
-	lazyRepos := opts.LazyRepos
-	if raw := strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_LAZY_GITHUB_REPOS")); raw != "" {
+	lazyRepos := false
+	if opts.LazyRepos != nil {
+		lazyRepos = *opts.LazyRepos
+	} else if raw := strings.TrimSpace(os.Getenv("RELAYFILE_LAZY_REPOS")); raw != "" {
+		if parsed, perr := strconv.ParseBool(raw); perr == nil {
+			lazyRepos = parsed
+		} else if opts.Logger != nil {
+			opts.Logger.Printf("ignoring invalid RELAYFILE_LAZY_REPOS=%q: %v", raw, perr)
+		}
+	} else if raw := strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_LAZY_GITHUB_REPOS")); raw != "" {
 		if parsed, perr := strconv.ParseBool(raw); perr == nil {
 			lazyRepos = parsed
 		} else if opts.Logger != nil {

@@ -23,6 +23,33 @@ func TestFloatEnvFallsBackOnInvalid(t *testing.T) {
 	}
 }
 
+func TestLazyReposEnvDefaultsFalse(t *testing.T) {
+	t.Setenv("RELAYFILE_LAZY_REPOS", "")
+	t.Setenv("RELAYFILE_MOUNT_LAZY_GITHUB_REPOS", "")
+
+	if lazyReposEnv() {
+		t.Fatal("expected lazy repos to default false")
+	}
+}
+
+func TestLazyReposEnvParsesOptIn(t *testing.T) {
+	t.Setenv("RELAYFILE_LAZY_REPOS", "true")
+	t.Setenv("RELAYFILE_MOUNT_LAZY_GITHUB_REPOS", "")
+
+	if !lazyReposEnv() {
+		t.Fatal("expected RELAYFILE_LAZY_REPOS=true to opt in")
+	}
+}
+
+func TestLazyReposEnvSupportsLegacyName(t *testing.T) {
+	t.Setenv("RELAYFILE_LAZY_REPOS", "")
+	t.Setenv("RELAYFILE_MOUNT_LAZY_GITHUB_REPOS", "true")
+
+	if !lazyReposEnv() {
+		t.Fatal("expected legacy lazy repos env var to opt in")
+	}
+}
+
 func TestClampJitterRatio(t *testing.T) {
 	if got := clampJitterRatio(-0.1); got != 0 {
 		t.Fatalf("expected clamp to 0, got %f", got)

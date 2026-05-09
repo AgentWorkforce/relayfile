@@ -49,7 +49,7 @@ Entity files use the ` + "`<sanitized-name>__<id>`" + ` filename convention. Rec
 
 ## Lazy materialization
 
-When lazy mode is enabled, the ` + "`github/repos/<owner>/<repo>`" + ` subtree is populated on first read via ` + "`LazyMaterialize`" + `. The first stat or directory read may incur one-time latency while the repo content is materialized.
+GitHub repo subtrees are synced eagerly by default. For huge-org workspaces, opt in to lazy mode with ` + "`--lazy-repos`" + ` or ` + "`RELAYFILE_LAZY_REPOS=true`" + ` to populate ` + "`github/repos/<owner>/<repo>`" + ` on first read via ` + "`LazyMaterialize`" + `. The first stat or directory read may incur one-time latency while the repo content is materialized.
 
 ## Integration-specific layouts
 
