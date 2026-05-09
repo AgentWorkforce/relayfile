@@ -333,12 +333,19 @@ func resolveDirectoryEntry(entries map[string]nodeMeta, requestedName string) (n
 	for name := range entries {
 		names = append(names, name)
 	}
-	resolvedName, ok := resolveNameByID(names, requestedName)
-	if !ok {
-		return nodeMeta{}, "", false
+	if resolvedName, ok := resolveNameByID(names, requestedName); ok {
+		if meta, found := entries[resolvedName]; found {
+			return meta, resolvedName, true
+		}
 	}
-	meta, ok := entries[resolvedName]
-	return meta, resolvedName, ok
+	// Direct exact-match fallback: covers basenames where the parsed ID is
+	// empty (e.g. "test__.json") and ID-based lookup cannot help. The
+	// ID-based lookup is preferred so that canonical (name__id) siblings win
+	// over legacy (id-only) basenames when both exist.
+	if meta, ok := entries[requestedName]; ok {
+		return meta, requestedName, true
+	}
+	return nodeMeta{}, "", false
 }
 
 func (s *fsState) lookupMetadata(ctx context.Context, remotePath string) (nodeMeta, error) {
@@ -491,8 +498,15 @@ func resolveNameByID(names []string, requestedName string) (string, bool) {
 			continue
 		}
 		score := 0
-		if candidateName != "" && nameWithId(candidateName, candidateID) == candidate {
-			score = 1
+		// Canonical preference: candidate must round-trip to itself when
+		// reconstructed from its parsed (name, id, extension). This works for
+		// any extension (including none, e.g. directories like
+		// "thread__01HXYZ" or files like "notes__abc.md").
+		if candidateName != "" {
+			ext := path.Ext(candidate)
+			if candidateName+"__"+candidateID+ext == candidate {
+				score = 1
+			}
 		}
 		if score > bestScore || (score == bestScore && (bestName == "" || candidate < bestName)) {
 			bestName = candidate

@@ -1,6 +1,9 @@
 package mountfuse
 
-import "testing"
+import (
+	"syscall"
+	"testing"
+)
 
 func TestParseNameID(t *testing.T) {
 	t.Parallel()
@@ -152,6 +155,27 @@ func TestResolveNameByID(t *testing.T) {
 			wantName:      "",
 			wantOK:        false,
 		},
+		{
+			name:          "directory canonical wins over legacy",
+			names:         []string{"01HXYZ", "thread__01HXYZ"},
+			requestedName: "01HXYZ",
+			wantName:      "thread__01HXYZ",
+			wantOK:        true,
+		},
+		{
+			name:          "non-json extension canonical wins over legacy",
+			names:         []string{"abc.md", "notes__abc.md"},
+			requestedName: "abc.md",
+			wantName:      "notes__abc.md",
+			wantOK:        true,
+		},
+		{
+			name:          "non-json canonical exact match",
+			names:         []string{"abc.md", "notes__abc.md"},
+			requestedName: "notes__abc.md",
+			wantName:      "notes__abc.md",
+			wantOK:        true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -161,5 +185,23 @@ func TestResolveNameByID(t *testing.T) {
 				t.Fatalf("resolveNameByID(%v, %q) = (%q, %t), want (%q, %t)", tt.names, tt.requestedName, gotName, gotOK, tt.wantName, tt.wantOK)
 			}
 		})
+	}
+}
+
+func TestResolveDirectoryEntryExactMatchFallback(t *testing.T) {
+	t.Parallel()
+
+	// Basenames where the parsed ID is empty (stem ends with "__") would
+	// otherwise be unreachable via ID-based lookup. The exact-match fallback
+	// ensures they remain accessible.
+	entries := map[string]nodeMeta{
+		"test__.json": {name: "test__.json", path: "/test__.json", mode: syscall.S_IFREG | 0o644},
+	}
+	meta, resolved, ok := resolveDirectoryEntry(entries, "test__.json")
+	if !ok {
+		t.Fatalf("resolveDirectoryEntry exact-match fallback failed: ok=false")
+	}
+	if resolved != "test__.json" || meta.name != "test__.json" {
+		t.Fatalf("resolveDirectoryEntry exact match = (%+v, %q), want test__.json", meta, resolved)
 	}
 }
