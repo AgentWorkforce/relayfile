@@ -128,6 +128,27 @@ RELAYFILE_TOKEN="$TOKEN" go run ./cmd/relayfile-mount \
 
 Now any local tool or agent can use `./relayfile-mount` like a normal directory.
 
+## Running Evals
+
+Relayfile evals live under `evals/suites/*/cases.md` and compile to gitignored
+`cases.jsonl` files using the shared Agent Assistant human-eval harness.
+
+```bash
+npm run evals:list
+npm run evals -- --suite vfs-contracts
+npm run evals:offline
+```
+
+The default executor uses an isolated fixture-backed mount, so deterministic
+VFS, ACL, concurrency, and writeback cases run offline. Provider-backed or
+real-mount cases can opt into a configured mount with `RELAYFILE_MOUNT`,
+`RELAYFILE_WORKSPACE`, and `RELAYFILE_TOKEN`.
+
+To add a case, create a `## suite.case-id` block in a suite `cases.md` with
+`Message`, optional JSON `Mock`, JSON `Operations`, deterministic checks, and
+`Must` / `Must Not` reviewer notes. Run `npm run evals:compile` before running
+the suite.
+
 ## Local Development Without Docker
 
 Start the local token issuer:

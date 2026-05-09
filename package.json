@@ -1,4 +1,5 @@
 {
+  "name": "relayfile",
   "private": true,
   "version": "0.7.0",
   "description": "relayfile — real-time filesystem for humans and agents",
@@ -11,9 +12,14 @@
   "scripts": {
     "workflow": "agent-relay run",
     "build": "npm run build --workspace=packages/sdk/typescript && npm run build --workspace=packages/local-mount",
-    "typecheck": "npm run typecheck --workspace=packages/sdk/typescript && npm run typecheck --workspace=packages/local-mount"
+    "typecheck": "npm run typecheck --workspace=packages/sdk/typescript && npm run typecheck --workspace=packages/local-mount",
+    "evals:compile": "node scripts/evals/compile-cases.mjs",
+    "evals": "npm run evals:compile && node scripts/evals/run-relayfile-evals.mjs",
+    "evals:list": "npm run evals:compile && node scripts/evals/run-relayfile-evals.mjs --list",
+    "evals:offline": "npm run evals:compile && node scripts/evals/run-relayfile-evals.mjs --mode offline"
   },
   "devDependencies": {
+    "@agent-assistant/telemetry": "^0.4.31",
     "@agent-relay/sdk": "^4.0.28",
     "@agentworkforce/workload-router": "^0.3.0",
     "agent-trajectories": "^0.5.6",
