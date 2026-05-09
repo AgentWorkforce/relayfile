@@ -16,7 +16,8 @@
     "evals:compile": "node scripts/evals/compile-cases.mjs",
     "evals": "npm run evals:compile && node scripts/evals/run-relayfile-evals.mjs",
     "evals:list": "npm run evals:compile && node scripts/evals/run-relayfile-evals.mjs --list",
-    "evals:offline": "npm run evals:compile && node scripts/evals/run-relayfile-evals.mjs --mode offline"
+    "evals:offline": "npm run evals:compile && node scripts/evals/run-relayfile-evals.mjs --mode offline",
+    "evals:provider": "npm run evals:compile && node scripts/evals/run-relayfile-evals.mjs --provider"
   },
   "devDependencies": {
     "@agent-assistant/telemetry": "^0.4.31",
