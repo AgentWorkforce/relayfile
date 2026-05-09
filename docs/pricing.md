@@ -9,6 +9,8 @@ That distinction drives every pricing decision:
 - **Mirage** is open-source and free. Competing on storage or caching is unsustainable.
 - **Composio** has driven tool-call routing to near-zero ($0.15–$0.30/1K calls). Competing on routing price is a race to the bottom.
 - **Nango** charges $500/month for sync infrastructure. Relayfile sits on top of Nango and charges the same amount for a qualitatively different layer.
+- **Merge Agent Handler** charges $1,000/month for enterprise MCP tool execution with per-user OAuth and PII/PHI scanning. It is stateless — no persistent workspace, no agent-to-agent coordination.
+- **Paragon** handles multi-tenant data ingestion, tool calling, and workflow automation for AI product companies. It explicitly does not coordinate agents or manage shared state.
 - **MCP** is a free protocol. Relayfile's value is what happens after the tool call: persistent shared state, conflict detection, and real-time awareness.
 
 The integrations where relayfile's value is highest are multi-writer collaboration tools — Linear, Jira, GitHub, Notion — where humans and agents are concurrently editing the same records. Storage backends (S3, GCS, R2) have softer concurrency problems and are lower priority.
@@ -115,7 +117,7 @@ At Enterprise scale the build-it-yourself cost (3–6 weeks engineering, $24K–
 
 ## Platform Plans
 
-Customers arriving via Nango, Composio, or Pipedream have already paid for adjacent infrastructure. Charging them the full Growth rate ($499) on top of their existing spend creates sticker shock that kills conversion. Platform plans are priced to complement what the customer already pays, serve as distribution via each platform's marketplace, and reflect lower infrastructure costs where the customer's existing subscription handles part of the stack.
+Customers arriving via Nango, Composio, Merge, Paragon, Executor, or Pipedream have already paid for adjacent infrastructure. Charging them the full Growth rate ($499) on top of their existing spend creates sticker shock that kills conversion. Platform plans are priced to complement what the customer already pays, serve as distribution via each platform's marketplace, and reflect lower infrastructure costs where the customer's existing subscription handles part of the stack.
 
 ---
 
@@ -164,6 +166,58 @@ Composio handles tool execution and agent-to-API calls. Relayfile provides the p
 **Pitch:** "Composio gives your agents hands. Relayfile gives them shared memory."
 
 **Distribution:** Composio marketplace, Composio integration directory.
+
+---
+
+### Merge Plan — $349/month
+
+For AI product teams using Merge Agent Handler who need persistent multi-agent state alongside tool execution.
+
+Merge Agent Handler provides production-grade MCP access to 150+ pre-built connectors with per-user OAuth, inline PII/PHI scanning (Presidio), and full audit logs. What it doesn't provide: persistent agent state, multi-agent coordination, or real-time fan-out between agents. Relayfile fills that gap — the shared workspace agents read from and write to between Merge tool calls, with conflict detection and real-time awareness across concurrent agents.
+
+Merge also forwards inbound third-party webhooks (Slack events, Jira webhooks, GitHub events) as unified `inbound_webhook.received` events. Relayfile ingests these directly, giving the agent's working set a live view of third-party state without a separate Nango subscription.
+
+| Resource | Limit |
+|---|---|
+| Workspaces | 5 |
+| Integrations | Bring-your-own Merge (all connectors in the customer's Agent Handler Tool Pack) |
+| Events/month | 2M |
+| Overage | $0.20/1K events |
+| Forks + ACLs | ✓ |
+| Audit logs | ✓ |
+| Support | Priority |
+
+**Rationale:** Merge Agent Handler Pro is $1,000/month. Teams already committed to $1K/month for tool execution are enterprise buyers who will find $349 proportional. Relayfile's infrastructure costs are low on this plan because Merge handles all provider OAuth and API calls; relayfile only processes forwarded webhook events and manages coordination state. ~72% gross margin. Combined spend of $1,349/month for full tool-execution + coordination is coherent for an enterprise agent team.
+
+**Pitch:** "Merge Agent Handler gives your agents production-grade tools. Relayfile gives them the shared memory to coordinate across calls."
+
+**Distribution:** Merge partner directory, Merge Discord, enterprise referrals.
+
+---
+
+### Paragon Plan — $299/month
+
+For AI product companies using Paragon who need a coordination layer on top of Paragon's sync and action infrastructure.
+
+Paragon handles multi-tenant data ingestion (Managed Sync with normalized schemas and RBAC permissions graph), real-time tool calling (ActionKit + MCP), and async workflow orchestration. What Paragon explicitly does not provide: persistent shared agent state, multi-agent conflict detection, or real-time fan-out to connected agents. Relayfile provides the coordination workspace above Paragon's integration layer — where agents read each other's writes, resolve conflicts, and maintain a coherent shared view across concurrent operations.
+
+Paragon's Permissions API (a RBAC graph tracking which users can access which synced objects) maps directly to relayfile ACLs: Paragon defines who owns what data, relayfile enforces those boundaries on the shared workspace.
+
+| Resource | Limit |
+|---|---|
+| Workspaces | 5 |
+| Integrations | Bring-your-own Paragon (Managed Sync sources + ActionKit connectors the customer already has) |
+| Events/month | 3M |
+| Overage | $0.15/1K events |
+| Forks + ACLs | ✓ |
+| Audit logs | ✓ |
+| Support | Priority |
+
+**Rationale:** Paragon targets B2B SaaS and AI product companies with significant infrastructure commitments — pricing is opaque but typical spend is $500–2K/month. $299 anchors relayfile as a mid-weight complement, similar to the Nango Plan. Event limit is higher (3M) because Paragon's Managed Sync generates substantial ingestion volume from background sync across many connected tenants. Relayfile's infrastructure costs are lower because Paragon handles provider API rate limiting and schema normalization. ~68% gross margin.
+
+**Pitch:** "Paragon ingests and acts on your users' data. Relayfile is the coordination layer where your agents work on it together."
+
+**Distribution:** Paragon partner ecosystem, Paragon marketplace.
 
 ---
 
@@ -226,6 +280,8 @@ Pipedream handles event-driven workflow automation. Relayfile provides the share
 | Growth | 5M | $0.15 |
 | Nango Plan | 3M | $0.15 |
 | Composio Plan | 1M | $0.20 |
+| Merge Plan | 2M | $0.20 |
+| Paragon Plan | 3M | $0.15 |
 | Executor Plan | 500K | $0.25 |
 | Pipedream Plan | 500K | $0.25 |
 | Enterprise | Negotiated | Negotiated |
@@ -243,6 +299,8 @@ Overage rates decrease with plan tier — higher-paying customers get cheaper ov
 | Growth | $499 | ~$150–200 | ~60–70% |
 | Nango Plan | $299 | ~$50–80 (relayfile infra only; customer pays Nango) | ~70–75% |
 | Composio Plan | $199 | ~$40–60 | ~70% |
+| Merge Plan | $349 | ~$50–80 (Merge handles provider layer; relayfile processes forwarded events) | ~72% |
+| Paragon Plan | $299 | ~$60–95 (Paragon handles ingestion; relayfile processes coordination events) | ~68% |
 | Executor Plan | $149 | ~$25–35 (no Nango layer; customer has no background sync) | ~77% |
 | Pipedream Plan | $149 | ~$30–40 | ~75% |
 | Enterprise | custom | negotiated | 75%+ |
@@ -253,16 +311,20 @@ Platform plans have higher gross margins than standard plans because the custome
 
 ## Competitive Anchoring
 
-| | Executor | Composio Pro | Nango Growth | Relayfile Growth |
-|---|---|---|---|---|
-| Price | Free (MIT) | $229/month | $500/month | $499/month |
-| Purpose | BYO-spec tool execution runtime | Managed tool call catalog | OAuth + scheduled sync infrastructure | Coordination layer + real-time workspace |
-| Pre-built integration catalog | ✗ | ✓ (250+) | ✓ (250+) | — |
-| Background sync / webhook ingestion | ✗ | ✗ | ✓ | ✓ (via Nango) |
-| Persistent shared workspace | ✗ | ✗ | ✗ | ✓ |
-| Multi-agent conflict detection | ✗ | ✗ | ✗ | ✓ |
-| Real-time WebSocket fan-out | ✗ | ✗ | ✗ | ✓ |
-| Forks + ACLs | ✗ | ✗ | ✗ | ✓ |
-| Semantic metadata + relations | ✗ | ✗ | ✗ | ✓ |
+| | Executor | Composio Pro | Merge Agent Handler Pro | Paragon | Nango Growth | Relayfile Growth |
+|---|---|---|---|---|---|---|
+| Price | Free (MIT) | $229/month | $1,000/month | Custom (~$500–2K/month) | $500/month | $499/month |
+| Purpose | BYO-spec tool execution | Managed tool call catalog | Enterprise MCP + per-user OAuth | Multi-tenant sync + actions + workflows | OAuth + scheduled sync | Coordination layer + real-time workspace |
+| Pre-built integration catalog | ✗ | ✓ (250+) | ✓ (150+) | ✓ (130+) | ✓ (250+) | — |
+| Background sync / webhook ingestion | ✗ | ✗ | Inbound webhook forwarding | ✓ (Managed Sync) | ✓ | ✓ (via Nango) |
+| Per-user OAuth + credential management | BYO | ✓ | ✓ | ✓ | ✓ | — |
+| Inline PII/PHI scanning | ✗ | ✗ | ✓ (Presidio) | ✗ | ✗ | — |
+| RBAC permissions graph | ✗ | ✗ | ✗ | ✓ | ✗ | ✓ (ACLs) |
+| Persistent shared workspace | ✗ | ✗ | ✗ | ✗ | ✗ | ✓ |
+| Multi-agent conflict detection | ✗ | ✗ | ✗ | ✗ | ✗ | ✓ |
+| Real-time WebSocket fan-out | ✗ | ✗ | ✗ | ✗ | ✗ | ✓ |
+| Forks + semantic metadata | ✗ | ✗ | ✗ | ✗ | ✗ | ✓ |
 
-Executor is the open-source alternative to Composio for teams that want to own their tool execution stack. It has no persistence layer at all — making the relayfile gap larger, not smaller, than with Composio users. Relayfile Growth ($499) costs roughly the same as Nango Growth ($500) but delivers the coordination layer none of the others have. For a team already using Nango, the Nango Plan ($299) is the right entry point. For Executor or Composio teams, the respective platform plans are the conversion path.
+Every platform in this table solves the integration access problem (how do agents get data and execute actions). None of them solve the coordination problem (how do agents share state, detect conflicts, and stay in sync with each other in real time). That is the gap relayfile fills.
+
+Relayfile Growth ($499) costs roughly the same as Nango Growth ($500) but delivers the coordination layer none of the others have. For teams already using one of these platforms, the corresponding platform plan is the right entry point — priced to complement existing spend rather than replace it.
