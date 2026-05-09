@@ -193,7 +193,7 @@ func TestWorkspaceListIncludesEnvWorkspaceWhenRemoteListUnavailable(t *testing.T
 		t.Fatalf("run workspace list failed: %v", err)
 	}
 
-	if got := strings.TrimSpace(stdout.String()); got != "ws_env\n.relay/vfs\nrelay-test" {
+	if got := strings.TrimSpace(stdout.String()); got != "* ws_env\n  .relay/vfs\n  relay-test" {
 		t.Fatalf("unexpected workspace list output: %q", got)
 	}
 }
@@ -220,7 +220,7 @@ func TestWorkspaceListIncludesTokenWorkspaceWhenRemoteListUnavailable(t *testing
 		t.Fatalf("run workspace list failed: %v", err)
 	}
 
-	if got := strings.TrimSpace(stdout.String()); got != "ws_token" {
+	if got := strings.TrimSpace(stdout.String()); got != "* ws_token" {
 		t.Fatalf("unexpected workspace list output: %q", got)
 	}
 }
@@ -1601,5 +1601,106 @@ func TestLoginAPIKeyFlagPromptsForToken(t *testing.T) {
 	}
 	if creds.Token != "prompted_key" {
 		t.Fatalf("expected stored token prompted_key, got %q", creds.Token)
+	}
+}
+
+// TestWorkspaceCurrentPrintsActiveWorkspace covers the new
+// `relayfile workspace current` subcommand: it returns the workspace
+// resolveWorkspaceRecord("") would pick, and `--verbose` annotates it
+// with the resolution source.
+func TestWorkspaceCurrentPrintsActiveWorkspace(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+	if _, err := upsertWorkspace("alpha"); err != nil {
+		t.Fatalf("upsertWorkspace alpha failed: %v", err)
+	}
+	if _, err := setDefaultWorkspace("alpha"); err != nil {
+		t.Fatalf("setDefaultWorkspace failed: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := run([]string{"workspace", "current"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("run workspace current failed: %v\noutput:\n%s", err, stdout.String())
+	}
+	if got := strings.TrimSpace(stdout.String()); got != "alpha" {
+		t.Fatalf("unexpected workspace current output: %q", got)
+	}
+
+	stdout.Reset()
+	if err := run([]string{"workspace", "current", "--verbose"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("run workspace current --verbose failed: %v", err)
+	}
+	if got := strings.TrimSpace(stdout.String()); !strings.Contains(got, "source: default") {
+		t.Fatalf("expected verbose output to include source, got %q", got)
+	}
+}
+
+// TestWorkspaceCurrentReportsEnvOverride confirms env-var override beats
+// the catalog default, matching resolveWorkspaceRecord's precedence.
+func TestWorkspaceCurrentReportsEnvOverride(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+	if _, err := upsertWorkspace("alpha"); err != nil {
+		t.Fatalf("upsertWorkspace alpha failed: %v", err)
+	}
+	if _, err := setDefaultWorkspace("alpha"); err != nil {
+		t.Fatalf("setDefaultWorkspace failed: %v", err)
+	}
+	t.Setenv("RELAYFILE_WORKSPACE", "from_env")
+
+	var stdout bytes.Buffer
+	if err := run([]string{"workspace", "current", "--verbose"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("run workspace current failed: %v", err)
+	}
+	got := strings.TrimSpace(stdout.String())
+	if !strings.HasPrefix(got, "from_env") {
+		t.Fatalf("expected 'from_env' to win, got %q", got)
+	}
+	if !strings.Contains(got, "RELAYFILE_WORKSPACE") {
+		t.Fatalf("expected source to mention RELAYFILE_WORKSPACE, got %q", got)
+	}
+}
+
+// TestWorkspaceCurrentErrorsWhenNoneActive covers the error path: with
+// nothing in env/token/catalog, runWorkspaceCurrent returns an error
+// rather than printing an empty line.
+func TestWorkspaceCurrentErrorsWhenNoneActive(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	var stdout bytes.Buffer
+	err := run([]string{"workspace", "current"}, strings.NewReader(""), &stdout, &stdout)
+	if err == nil {
+		t.Fatalf("expected error when no active workspace, got output %q", stdout.String())
+	}
+	if !strings.Contains(err.Error(), "no active workspace") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// TestWorkspaceListNamesOnlyRestoresBareOutput verifies the --names-only
+// escape hatch for scripts that parsed the legacy unmarked output.
+func TestWorkspaceListNamesOnlyRestoresBareOutput(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+	t.Setenv("RELAYFILE_WORKSPACE", "ws_env")
+	if _, err := upsertWorkspace("alpha"); err != nil {
+		t.Fatalf("upsertWorkspace alpha failed: %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+	}))
+	defer server.Close()
+	if err := saveCredentials(credentials{Server: server.URL, Token: "token"}); err != nil {
+		t.Fatalf("saveCredentials failed: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := run([]string{"workspace", "list", "--names-only"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("run workspace list --names-only failed: %v", err)
+	}
+	if got := strings.TrimSpace(stdout.String()); got != "ws_env\nalpha" {
+		t.Fatalf("unexpected --names-only output: %q", got)
 	}
 }

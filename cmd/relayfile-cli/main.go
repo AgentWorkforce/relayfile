@@ -381,7 +381,8 @@ Usage:
   relayfile login [--no-open] [--api-key] [--server URL] [--token TOKEN]
   relayfile workspace create NAME
   relayfile workspace use NAME
-  relayfile workspace list
+  relayfile workspace list [--names-only]
+  relayfile workspace current [--verbose]
   relayfile workspace delete NAME [--yes]
   relayfile integration connect PROVIDER [--workspace NAME]
   relayfile integration list [--workspace NAME] [--json]
@@ -406,7 +407,7 @@ Usage:
 Subcommands:
   setup       Sign in, connect an integration, and mount the workspace
   login       Sign in via the Relayfile Cloud browser flow (or --api-key for self-hosted)
-  workspace   Create, select, list, or delete locally tracked workspaces
+  workspace   Create, select, list, show current, or delete locally tracked workspaces
   integration Connect, list, or disconnect workspace integrations
   ops         List or replay dead-lettered writeback ops
   writeback   Inspect or retry local writeback failures
@@ -1227,7 +1228,7 @@ func loginWithAPIKey(serverValue, tokenValue string, stdout io.Writer) error {
 
 func runWorkspace(args []string, stdin io.Reader, stdout io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("workspace subcommand is required: create, use, list, or delete")
+		return errors.New("workspace subcommand is required: create, use, list, current, or delete")
 	}
 	switch args[0] {
 	case "create":
@@ -1236,6 +1237,8 @@ func runWorkspace(args []string, stdin io.Reader, stdout io.Writer) error {
 		return runWorkspaceUse(args[1:], stdout)
 	case "list":
 		return runWorkspaceList(args[1:], stdout)
+	case "current":
+		return runWorkspaceCurrent(args[1:], stdout)
 	case "delete":
 		return runWorkspaceDelete(args[1:], stdin, stdout)
 	default:
@@ -2265,15 +2268,30 @@ func runWorkspaceList(args []string, stdout io.Writer) error {
 	fs.SetOutput(io.Discard)
 	server := fs.String("server", "", "relayfile server URL override")
 	token := fs.String("token", "", "relayfile token override")
+	namesOnly := fs.Bool("names-only", false, "print bare workspace names without an active marker")
 	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
-		"server": true,
-		"token":  true,
+		"server":     true,
+		"token":      true,
+		"names-only": false,
 	})); err != nil {
 		return err
 	}
 
 	creds, _ := loadCredentials()
 	tokenValue := resolveToken(*token, creds)
+	activeName, _ := activeWorkspaceName(tokenValue)
+	emit := func(name string) {
+		if *namesOnly || activeName == "" {
+			fmt.Fprintln(stdout, name)
+			return
+		}
+		marker := "  "
+		if name == activeName {
+			marker = "* "
+		}
+		fmt.Fprintln(stdout, marker+name)
+	}
+
 	client, err := newAPIClient(resolveServer(*server, creds), tokenValue)
 	if err == nil {
 		var remote adminWorkspaceList
@@ -2285,7 +2303,7 @@ func runWorkspaceList(args []string, stdout io.Writer) error {
 			names := remoteWorkspaceNames(remote)
 			if len(names) > 0 {
 				for _, name := range names {
-					fmt.Fprintln(stdout, name)
+					emit(name)
 				}
 				return nil
 			}
@@ -2297,7 +2315,72 @@ func runWorkspaceList(args []string, stdout io.Writer) error {
 		return err
 	}
 	for _, name := range workspaceCatalogNames(catalog, tokenValue) {
+		emit(name)
+	}
+	return nil
+}
+
+// activeWorkspaceName returns the name (preferred) or id of the workspace
+// that resolveWorkspaceRecord would pick when no explicit value is passed,
+// alongside a short human-readable source ("env RELAYFILE_WORKSPACE",
+// "token", "default") for diagnostics. Returns "" if no active workspace
+// can be resolved.
+func activeWorkspaceName(token string) (string, string) {
+	if envValue := strings.TrimSpace(os.Getenv("RELAYFILE_WORKSPACE")); envValue != "" {
+		if record, ok := workspaceRecordByName(envValue); ok {
+			return record.Name, "env RELAYFILE_WORKSPACE"
+		}
+		if record, ok := workspaceRecordByID(envValue); ok {
+			return record.Name, "env RELAYFILE_WORKSPACE"
+		}
+		return envValue, "env RELAYFILE_WORKSPACE"
+	}
+	if tokenWS := workspaceIDFromToken(token); tokenWS != "" {
+		if record, ok := workspaceRecordByID(tokenWS); ok {
+			return record.Name, "token"
+		}
+		return tokenWS, "token"
+	}
+	catalog, err := loadWorkspaceCatalog()
+	if err != nil {
+		return "", ""
+	}
+	if name := strings.TrimSpace(catalog.Default); name != "" {
+		return name, "default"
+	}
+	return "", ""
+}
+
+func runWorkspaceCurrent(args []string, stdout io.Writer) error {
+	fs := flag.NewFlagSet("workspace current", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	token := fs.String("token", "", "relayfile token override")
+	verbose := fs.Bool("verbose", false, "include workspace id and selection source")
+	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
+		"token":   true,
+		"verbose": false,
+	})); err != nil {
+		return err
+	}
+
+	creds, _ := loadCredentials()
+	tokenValue := resolveToken(*token, creds)
+	name, source := activeWorkspaceName(tokenValue)
+	if name == "" {
+		return errors.New("no active workspace; pass WORKSPACE, set RELAYFILE_WORKSPACE, or run 'relayfile workspace use NAME'")
+	}
+	if !*verbose {
 		fmt.Fprintln(stdout, name)
+		return nil
+	}
+	id := name
+	if record, ok := workspaceRecordByName(name); ok && strings.TrimSpace(record.ID) != "" {
+		id = record.ID
+	}
+	if id != "" && id != name {
+		fmt.Fprintf(stdout, "%s (id: %s, source: %s)\n", name, id, source)
+	} else {
+		fmt.Fprintf(stdout, "%s (source: %s)\n", name, source)
 	}
 	return nil
 }
