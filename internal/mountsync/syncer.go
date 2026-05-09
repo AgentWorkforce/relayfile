@@ -1820,6 +1820,9 @@ func (s *Syncer) applyRemoteFile(remotePath string, file RemoteFile, conflicted 
 	if err != nil {
 		return nil
 	}
+	// _index.json files and nested <integration>/.layout.md dotfiles are
+	// first-class remote payloads. Do not filter or normalize them here; only
+	// the internal .relayfile-mount-state.json family is reserved elsewhere.
 	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
 		return err
 	}
@@ -2678,10 +2681,6 @@ func remoteToLocalPath(localRoot, remoteRoot, remotePath string) (string, error)
 }
 
 func localToRemotePath(localRoot, remoteRoot, localPath string) (string, error) {
-	// Wave 106 only makes mountfuse consumers tolerant of both `<id>.json`
-	// and `<name>__<id>.json` basenames. mountsync does not derive entity IDs
-	// from local basenames here; it mirrors the caller's relative path back to
-	// the remote root verbatim, so no name/id canonicalization is required.
 	rel, err := filepath.Rel(localRoot, localPath)
 	if err != nil {
 		return "", err
