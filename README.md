@@ -23,6 +23,33 @@ $ grep -l '"state":"Todo"' mount/linear/issues/*.json
 
 That's the entire interface. No new SDK to learn, no MCP schemas eating your context window — just the bash and file-IO an agent already knows.
 
+## Mount layout
+
+Every mount is self-describing. The agent never needs to learn paths from documentation — `cat mount/LAYOUT.md` lists everything, and per-integration `<integration>/.layout.md` files document tree shapes. Each directory holds an `_index.json` with the rows it contains, and entity files follow a `<sanitized-name>__<id>` naming convention so identifiers are recoverable from any filename.
+
+```
+mount/
+├── LAYOUT.md                              # virtual, read-only — top-level guide
+├── _index.json                            # root listing
+├── linear/
+│   ├── .layout.md                         # linear-specific tree shape
+│   ├── issues/
+│   │   ├── _index.json
+│   │   ├── AGE-12__fix-login-bug.json     # canonical: <slug>__<id>
+│   │   ├── by-title/AGE-12-fix-login-bug.json
+│   │   ├── by-id/AGE-12.json
+│   │   └── by-state/in-progress/AGE-12__fix-login-bug.json
+│   └── users/by-name/dana.json
+└── github/
+    └── repos/
+        ├── _index.json
+        ├── acme/api/                      # lazily materialized on first stat
+        │   └── pulls/42__bump-deps/meta.json
+        └── by-name/acme__api.json
+```
+
+Four alias views ship out of the box: `by-title/` (slug lookups), `by-id/` (identifier lookups), `by-name/` (human-readable name lookups), and `by-state/` (grouped by issue/PR state). GitHub repo subtrees materialize lazily — the first `ls`/`stat` triggers a one-time fetch instead of paying upfront sync cost on workspaces with hundreds of repos.
+
 ## Why files
 
 Three reasons:
