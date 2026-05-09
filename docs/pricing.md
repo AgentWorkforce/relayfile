@@ -1,11 +1,32 @@
 # Relayfile Pricing
 
-## Principles
+## Positioning
 
-- Charge on **events** (webhook ingestions + file state changes) — the best proxy for coordination work done
-- Integrations are capped per tier to reflect real Nango infrastructure costs underneath
-- Platform plans (Nango, Composio, Pipedream) serve customers who arrive via those ecosystems with pricing tuned to each
-- Free tier is real enough to prototype with; not real enough to run in production
+Relayfile is not a better S3, a smarter webhook router, or a cheaper Nango. It is the **coordination layer** — the shared workspace where humans and agents read and write the same records at the same time, with conflict detection, real-time fan-out, forks, ACLs, and semantic metadata.
+
+That distinction drives every pricing decision:
+
+- **Mirage** is open-source and free. Competing on storage or caching is unsustainable.
+- **Composio** has driven tool-call routing to near-zero ($0.15–$0.30/1K calls). Competing on routing price is a race to the bottom.
+- **Nango** charges $500/month for sync infrastructure. Relayfile sits on top of Nango and charges the same amount for a qualitatively different layer.
+- **MCP** is a free protocol. Relayfile's value is what happens after the tool call: persistent shared state, conflict detection, and real-time awareness.
+
+The integrations where relayfile's value is highest are multi-writer collaboration tools — Linear, Jira, GitHub, Notion — where humans and agents are concurrently editing the same records. Storage backends (S3, GCS, R2) have softer concurrency problems and are lower priority.
+
+---
+
+## Billing Unit: Events
+
+**One event = one webhook ingested from a provider, or one file write via the API.**
+
+This is the right unit because:
+- Seats don't map to AI agents — agents aren't humans, aren't persistent, and can't be counted like people
+- Per-agent pricing is hard to enforce — agents are ephemeral processes that start and stop
+- Events scale proportionally with coordination work done and grow with the value relayfile delivers
+
+**Fan-out is always free.** Broadcasting one file change to 20 connected agents counts as one event, not 20. Charging for fan-out would penalize multi-agent usage — exactly the use case relayfile is built for.
+
+Bulk writes count as one event per file written. Fork commits count as one event per file in the fork.
 
 ---
 
@@ -26,6 +47,8 @@ For prototyping and individual developers evaluating the platform.
 | ACLs | ✗ |
 | Support | Community |
 
+The free tier is real enough to prototype with but not to run in production. Its purpose is conversion, not revenue.
+
 ---
 
 ### Starter — $79/month
@@ -44,13 +67,13 @@ For small teams shipping their first agent product.
 | ACLs | ✗ |
 | Support | Email |
 
-**Why $79:** Positioned above Composio Starter ($29) — we're not a tool call router, we're a coordination layer. Margins work at this price covering Nango Starter costs for 8 integrations.
+**Rationale:** Composio Starter is $29/month for 200K tool calls — pure routing with no coordination layer. Relayfile provides real-time fan-out, forks, and a persistent workspace that justifies a clear premium. $49 was considered but doesn't cover Nango Starter infrastructure costs (~$20–30/month for 8 integrations) at meaningful margin. $79 yields ~40% gross margin and positions relayfile above tool-call commoditization without being out of reach for a small team.
 
 ---
 
 ### Growth — $499/month
 
-For teams running agent products in production with real workloads.
+For teams running agent products in production.
 
 | Resource | Limit |
 |---|---|
@@ -65,7 +88,7 @@ For teams running agent products in production with real workloads.
 | Audit logs | ✓ |
 | Support | Priority (Slack) |
 
-**Why $499:** Covers Nango Growth costs (~$200/month for the integration infrastructure) at reasonable margin. Below Nango's own Growth plan ($500) only because relayfile is the coordination layer on top, not a replacement for Nango. Matches what a Composio Professional ($229) + Nango Starter ($50) customer would pay combined — and relayfile gives them both in one.
+**Rationale:** The Nango cost problem forced this number up from the initial $299 estimate. A Growth-tier customer using all integrations incurs ~$150–200/month in Nango infrastructure costs underneath. At $299 the margin is negative. At $499 it's ~60% gross margin — viable for a production service with support obligations. $499 also anchors neatly against Nango's own Growth plan ($500): relayfile costs the same as Nango but adds the entire coordination layer Nango doesn't have. Composio Professional is $229; relayfile at $499 is clearly premium but justified by multi-agent coordination, real-time fan-out, forks, and ACLs that Composio doesn't provide.
 
 ---
 
@@ -83,14 +106,16 @@ For organizations with compliance requirements, large workloads, or deployment c
 | Forks + ACLs + Audit logs | ✓ |
 | SSO / SAML | ✓ |
 | On-premise deployment | ✓ |
-| SLA | 99.9% uptime |
+| SLA | 99.9% uptime guarantee |
 | Support | Dedicated |
+
+At Enterprise scale the build-it-yourself cost (3–6 weeks engineering, $24K–$48K loaded cost plus ongoing maintenance) makes self-hosting economically irrational for most organizations. The SLA and on-premise option are the unlock for regulated industries.
 
 ---
 
 ## Platform Plans
 
-For customers who arrive via Nango, Composio, or Pipedream ecosystems. These plans are listed in each platform's marketplace or integration directory and priced to complement what the customer is already paying.
+Customers arriving via Nango, Composio, or Pipedream have already paid for adjacent infrastructure. Charging them the full Growth rate ($499) on top of their existing spend creates sticker shock that kills conversion. Platform plans are priced to complement what the customer already pays, serve as distribution via each platform's marketplace, and reflect lower infrastructure costs where the customer's existing subscription handles part of the stack.
 
 ---
 
@@ -98,7 +123,7 @@ For customers who arrive via Nango, Composio, or Pipedream ecosystems. These pla
 
 For teams already running Nango who need the coordination layer on top.
 
-Nango handles OAuth, token refresh, and scheduled sync. Relayfile connects to the customer's existing Nango instance and provides the real-time workspace, multi-agent coordination, and semantic layer on top. The customer keeps their Nango subscription separately.
+Nango handles OAuth, token refresh, and scheduled sync. Relayfile connects to the customer's existing Nango instance and adds the real-time workspace, multi-agent coordination, and semantic layer on top. The customer keeps their Nango subscription; relayfile only processes events and manages state.
 
 | Resource | Limit |
 |---|---|
@@ -110,11 +135,11 @@ Nango handles OAuth, token refresh, and scheduled sync. Relayfile connects to th
 | Audit logs | ✓ |
 | Support | Priority |
 
-**Positioning:** "You're already paying Nango for the sync layer. Relayfile makes that data usable by agents in real-time with no extra integration work." The customer's Nango connection count and sync quota come from their own Nango plan; relayfile only adds the coordination and fan-out layer.
+**Rationale:** The customer is already paying Nango $50–$500/month. Another $499 on top makes the combined bill $549–$999, which is a hard sell. At $299 the combined spend is $349–$799 — reasonable for a production agent team. Relayfile's infrastructure costs are genuinely lower here because Nango handles all provider API calls; relayfile only processes the resulting events and manages workspace state. ~65% gross margin at this price.
 
-**Listed on:** Nango integration directory, Nango partner page.
+**Pitch:** "You're already paying Nango for the sync layer. Relayfile makes that data usable by agents in real-time with no extra integration work."
 
-**Why $299 not $499:** The customer is already paying Nango ($50–$500/month). Asking for another $499 on top would make the total cost prohibitive. At $299 the combined spend is $349–$799, which is reasonable for a production agent team. Relayfile's infrastructure costs are lower here because Nango handles all the provider API calls; relayfile only processes events and manages state.
+**Distribution:** Nango integration directory, Nango partner page.
 
 ---
 
@@ -122,7 +147,7 @@ Nango handles OAuth, token refresh, and scheduled sync. Relayfile connects to th
 
 For teams using Composio for tool calls who need persistent shared state between agents.
 
-Composio handles tool execution and agent-to-API calls. Relayfile provides the persistent workspace that agents read from and write to between tool calls — the shared memory layer that makes multi-agent workflows coherent over time.
+Composio handles tool execution and agent-to-API calls. Relayfile provides the persistent workspace that agents read from and write to between tool calls — the shared memory that makes multi-agent workflows coherent over time.
 
 | Resource | Limit |
 |---|---|
@@ -131,22 +156,22 @@ Composio handles tool execution and agent-to-API calls. Relayfile provides the p
 | Events/month | 1M |
 | Overage | $0.20/1K events |
 | Forks | ✓ |
-| ACLs | ✗ (Growth add-on) |
+| ACLs | ✗ (upgrade to Growth) |
 | Support | Email |
 
-**Positioning:** "Composio gives your agents hands. Relayfile gives them shared memory." A Composio Professional customer ($229/month) adding relayfile at $199/month pays $428/month total for a complete multi-agent stack: tool execution + persistent coordination workspace.
+**Rationale:** Composio Professional is $229/month. Anchoring relayfile at $199 positions both as roughly equal weight in the stack, which reflects the actual split in responsibilities: Composio executes, relayfile remembers. Combined spend of ~$428/month for a full multi-agent stack — tool execution plus persistent coordination workspace — is a coherent value story for a team that's hit the coordination wall.
 
-**Listed on:** Composio marketplace, Composio integration directory.
+**Pitch:** "Composio gives your agents hands. Relayfile gives them shared memory."
 
-**Why $199:** Composio's own Pro plan is $229. Customers comparing total spend will anchor to that. At $199 relayfile feels like roughly equal weight in the stack, which reflects the actual split in responsibilities.
+**Distribution:** Composio marketplace, Composio integration directory.
 
 ---
 
 ### Pipedream Plan — $149/month
 
-For teams using Pipedream workflows who need a shared state layer between workflow steps and between agents running in parallel.
+For teams using Pipedream workflows who need a shared state layer between parallel workflows and agents.
 
-Pipedream handles event-driven workflow automation. Relayfile provides the shared workspace that multiple Pipedream workflows (and the agents they spawn) read from and write to — solving the coordination problem when parallel workflows need consistent shared state.
+Pipedream handles event-driven workflow automation. Relayfile provides the shared workspace that multiple parallel Pipedream workflows read from and write to consistently — solving the coordination problem when workflows running in parallel need coherent shared state.
 
 | Resource | Limit |
 |---|---|
@@ -158,19 +183,19 @@ Pipedream handles event-driven workflow automation. Relayfile provides the share
 | ACLs | ✗ |
 | Support | Email |
 
-**Positioning:** "Pipedream orchestrates your workflows. Relayfile is the shared filesystem they all read and write consistently." Pipedream's own paid plans start around $29–$49/month; relayfile at $149 is a meaningful add-on but justified for teams hitting the coordination wall with parallel workflows.
+**Rationale:** Pipedream's customer base skews toward developers and automation engineers who are cost-sensitive. Pipedream's own paid plans start around $29–$49/month; a $499 relayfile add-on would be a non-starter. $149 is the floor at which relayfile's infrastructure costs are covered for the event volume included. Combined spend of ~$200/month is accessible for a developer running production workflows.
 
-**Listed on:** Pipedream marketplace, Pipedream integration directory.
+**Pitch:** "Pipedream orchestrates your workflows. Relayfile is the shared filesystem they all read and write consistently."
 
-**Why $149:** Pipedream's customer base skews toward developers and automation engineers who are cost-sensitive. $149 is the floor at which relayfile's infrastructure costs are covered for the event volume included. A Pipedream paid customer adding relayfile spends ~$200/month combined — reasonable for a production workflow infrastructure.
+**Distribution:** Pipedream marketplace, Pipedream integration directory.
 
 ---
 
 ## Overage Rates Summary
 
-| Plan | Included events | Overage per 1K |
+| Plan | Included events/month | Overage per 1K events |
 |---|---|---|
-| Free | 25K | Not available — upgrade required |
+| Free | 25K | Upgrade required |
 | Starter | 500K | $0.25 |
 | Growth | 5M | $0.15 |
 | Nango Plan | 3M | $0.15 |
@@ -178,18 +203,23 @@ Pipedream handles event-driven workflow automation. Relayfile provides the share
 | Pipedream Plan | 500K | $0.25 |
 | Enterprise | Negotiated | Negotiated |
 
+Overage rates decrease with plan tier — higher-paying customers get cheaper overages as a volume reward and to avoid penalizing successful deployments.
+
 ---
 
-## What Counts as an Event
+## Gross Margin Model
 
-One event = one of the following:
+| Plan | Price | Est. Nango/infra cost | Est. gross margin |
+|---|---|---|---|
+| Free | $0 | ~$0 (within Nango free limits) | — |
+| Starter | $79 | ~$20–30 | ~60% |
+| Growth | $499 | ~$150–200 | ~60–70% |
+| Nango Plan | $299 | ~$50–80 (relayfile infra only; customer pays Nango) | ~70–75% |
+| Composio Plan | $199 | ~$40–60 | ~70% |
+| Pipedream Plan | $149 | ~$30–40 | ~75% |
+| Enterprise | custom | negotiated | 75%+ |
 
-- A webhook received from a provider (Linear issue updated, Slack message posted, etc.)
-- A file write via the REST API (`PUT /fs/file`)
-- A bulk write operation counts as one event per file written
-- A fork commit counts as one event per file in the fork
-
-WebSocket fan-out to agents does **not** count as events — broadcasting one file change to 20 agents is still one event. Charging for fan-out would penalize multi-agent usage, which is the core value proposition.
+Platform plans have higher gross margins than standard plans because the customer's existing platform subscription covers the expensive provider API layer. Relayfile only runs the coordination infrastructure.
 
 ---
 
@@ -198,11 +228,11 @@ WebSocket fan-out to agents does **not** count as events — broadcasting one fi
 | | Composio Pro | Nango Growth | Relayfile Growth |
 |---|---|---|---|
 | Price | $229/month | $500/month | $499/month |
-| What you get | Tool call routing | OAuth + sync infrastructure | Coordination layer + real-time workspace |
-| Multi-agent coordination | ✗ | ✗ | ✓ |
-| Real-time fan-out | ✗ | ✗ | ✓ |
+| Purpose | Tool call routing | OAuth + sync infrastructure | Coordination layer + real-time workspace |
+| Multi-agent conflict detection | ✗ | ✗ | ✓ |
+| Real-time WebSocket fan-out | ✗ | ✗ | ✓ |
 | Forks + ACLs | ✗ | ✗ | ✓ |
 | Semantic metadata + relations | ✗ | ✗ | ✓ |
-| Builds on Nango | — | Is Nango | Optional |
+| Persistent shared workspace | ✗ | ✗ | ✓ |
 
-Relayfile Growth at $499 costs roughly the same as Nango Growth ($500) but delivers the coordination layer they don't have. For a team already using Nango, the Nango Plan at $299 is the right entry point.
+Relayfile Growth ($499) costs roughly the same as Nango Growth ($500) but delivers the coordination layer neither Nango nor Composio have. For a team already using Nango, the Nango Plan ($299) is the right entry point — they keep Nango for what it's good at and add relayfile for what they're missing.
