@@ -102,6 +102,12 @@ Mount the same workspace on your laptop and your cloud dev environment. Edit loc
 
 Notion pages, GitHub files, Salesforce records, Linear tickets — all projected into one filesystem via webhook ingestion and writeback queues. Your agent reads a Notion doc the same way it reads a local markdown file. It writes back changes the same way too.
 
+### Webhooks for agents
+
+We do not just receive third-party webhooks. We understand them, normalize them, document their quirks, make them replayable, and turn them into trustworthy agent context.
+
+Most webhook platforms stop at delivery. RelayFile turns noisy external events into durable, provider-aware filesystem changes that agents can inspect, reason about, and act on. Hookdeck can protect the edge with buffering, replay, rate control, and operational visibility; RelayFile owns the semantic layer: provider event catalogs, idempotency, privacy-aware storage, normalized files, and agent-ready context.
+
 ---
 
 ## How It Works
@@ -124,7 +130,8 @@ Developer laptop                          Cloud sandbox (Agent A)
 1. Each client runs `relayfile mount`, which polls the RelayFile API for changes and pushes local edits.
 2. The RelayFile server holds the canonical state — revisions, content, metadata, event history.
 3. Writes use optimistic concurrency (`If-Match` with revision IDs). Conflicts are surfaced, never swallowed.
-4. External systems feed in via webhook ingestion. Changes flow back out via writeback queues.
+4. External systems feed in via protected webhook ingestion. Changes flow back out via writeback queues.
+5. Important semantic events can be broadcast into Relaycast channels so agent teams see what changed, why it matters, and which files or provider objects are now safe to inspect.
 
 ---
 
@@ -196,7 +203,8 @@ curl -s \
 **Key properties:**
 
 - **One workspace, one state** — each workspace has a single canonical state. No distributed consensus needed for reads or writes within a workspace.
-- **Queue-first ingestion** — webhook payloads are accepted fast (target: p95 < 200ms) and processed asynchronously. Deduplication, coalescing, and staleness checks happen in workers, not in the request path.
+- **Queue-first ingestion** — webhook payloads are accepted fast (target: p95 < 200ms) and processed asynchronously. Edge protection can come from Hookdeck; durable journaling, deduplication, coalescing, and staleness checks happen inside the RelayFile/Cloud pipeline.
+- **Webhook intelligence for agents** — provider-specific webhook behavior is captured as structured knowledge: signatures, retry behavior, idempotency keys, payload shapes, privacy rules, subscription lifecycles, and replay strategy. Agents receive normalized, trustworthy context rather than raw webhook noise.
 - **Optimistic concurrency everywhere** — all writes carry a revision precondition. No silent overwrites, no merge heuristics, no surprise data loss.
 - **Pluggable backends** — in-memory for dev, local files for durable-local, Postgres for production. Same API, same behavior.
 - **Mount daemon** — `relayfile-mount` is a single Go binary. Bake it into any Docker image or run it directly. It polls for remote changes and pushes local edits with conflict detection.

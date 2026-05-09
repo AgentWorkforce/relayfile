@@ -1,0 +1,53 @@
+{
+  "id": "traj_mi7u0mbgiwk5",
+  "version": 1,
+  "task": {
+    "title": "Document webhook intelligence positioning"
+  },
+  "status": "completed",
+  "startedAt": "2026-05-09T19:44:45.746Z",
+  "completedAt": "2026-05-09T19:46:05.719Z",
+  "agents": [
+    {
+      "name": "default",
+      "role": "lead",
+      "joinedAt": "2026-05-09T19:45:53.498Z"
+    }
+  ],
+  "chapters": [
+    {
+      "id": "chap_nifeh1va167f",
+      "title": "Work",
+      "agentName": "default",
+      "startedAt": "2026-05-09T19:45:53.498Z",
+      "endedAt": "2026-05-09T19:46:05.719Z",
+      "events": [
+        {
+          "ts": 1778355953501,
+          "type": "decision",
+          "content": "Documented webhooks-for-agents positioning: Documented webhooks-for-agents positioning",
+          "raw": {
+            "question": "Documented webhooks-for-agents positioning",
+            "chosen": "Documented webhooks-for-agents positioning",
+            "alternatives": [],
+            "reasoning": "The product should use Hookdeck for generic transport reliability while owning provider-specific webhook intelligence, normalization, replay semantics, and Relaycast agent-facing summaries."
+          },
+          "significance": "high"
+        }
+      ]
+    }
+  ],
+  "retrospective": {
+    "summary": "Documented webhook intelligence positioning: Hookdeck as managed edge gateway, Cloud/RelayFile as semantic webhook intelligence layer, and Relaycast as the agent-facing notification surface for normalized provider events.",
+    "approach": "Standard approach",
+    "confidence": 0.9
+  },
+  "commits": [],
+  "filesChanged": [],
+  "projectId": ".",
+  "tags": [],
+  "_trace": {
+    "startRef": "98cd3f48f8577582b6c2a15d3bc5b15eea470fa0",
+    "endRef": "98cd3f48f8577582b6c2a15d3bc5b15eea470fa0"
+  }
+}

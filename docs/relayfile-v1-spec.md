@@ -40,22 +40,42 @@ Agents need a filesystem-native way to consume and update external systems witho
 `relay-cloud` = auth, policy, ingress, audit authority.
 `relayfile` = sync processing, VFS state, write-back execution.
 
-2. Queue-first reliability:
+2. Managed edge, owned semantics:
+Use dedicated webhook ingress infrastructure such as Hookdeck for buffering,
+rate control, replay, local testing, and operational visibility. Do not make
+the edge gateway the product source of truth. `relay-cloud` and `relayfile`
+own verification, durable event journals, idempotency state, provider catalogs,
+privacy policy, normalized records, and agent-facing context.
+
+3. Queue-first reliability:
 No expensive sync logic in webhook request handlers.
 
-3. Provider identity over filesystem path:
+4. Provider identity over filesystem path:
 Canonical object identity uses provider IDs (e.g., external provider object ID).
 
-4. Fail-closed access:
+5. Fail-closed access:
 Policy must explicitly allow provider/file write actions.
 
-5. Deterministic conflict behavior:
+6. Deterministic conflict behavior:
 All writes use revision/etag preconditions.
+
+7. Webhooks for agents:
+We do not just receive third-party webhooks. We understand them, normalize
+them, document their quirks, make them replayable, and turn them into
+trustworthy agent context. Raw delivery data should remain replayable and
+auditable; normalized events should tell agents what changed, which files or
+provider objects are affected, and what follow-up actions are safe.
 
 ## 6. High-Level Architecture
 
 ```
 External Provider Webhooks
+        |
+        v
+edge webhook gateway (Hookdeck or equivalent)
+  - public receiving URL
+  - buffering + replay + rate control
+  - operational delivery logs
         |
         v
 relay-cloud ingress
@@ -72,6 +92,11 @@ relayfile ingest workers
   - emit fs events
         |
         +--> relayfile REST API + SDK
+        |
+        +--> relaycast notifications
+             - agent-readable event summaries
+             - links to affected files/provider objects
+             - handoff prompts for subscribed agents
         |
         +--> write-back workers (outbox)
                 - provider API updates
