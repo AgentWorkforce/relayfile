@@ -85,6 +85,7 @@ func (n *DirNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (
 }
 
 func (n *DirNode) Readdir(ctx context.Context) (gofusefs.DirStream, syscall.Errno) {
+	// Lazy GitHub materialization is keyed on the repo directory and is idempotent.
 	entries, err := n.state.listDirectory(ctx, n.path)
 	if err != nil {
 		return nil, readErrno(err)

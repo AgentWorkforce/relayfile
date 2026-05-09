@@ -4,6 +4,8 @@ import (
 	"context"
 	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 
@@ -16,8 +18,9 @@ import (
 // FuseClient wrapper. Each method returns pre-configured data or injected
 // errors.
 type fakeRemoteClient struct {
-	files map[string]mountsync.RemoteFile
-	trees map[string]mountsync.TreeResponse
+	files        map[string]mountsync.RemoteFile
+	trees        map[string]mountsync.TreeResponse
+	listTreeFunc func(path string) (mountsync.TreeResponse, error)
 
 	// Optional error injection — when non-nil the corresponding method
 	// returns this error instead of looking up data.
@@ -30,6 +33,9 @@ type fakeRemoteClient struct {
 func (f *fakeRemoteClient) ListTree(_ context.Context, _, path string, _ int, _ string) (mountsync.TreeResponse, error) {
 	if f.listTreeErr != nil {
 		return mountsync.TreeResponse{}, f.listTreeErr
+	}
+	if f.listTreeFunc != nil {
+		return f.listTreeFunc(normalizeRemotePath(path))
 	}
 	resp, ok := f.trees[path]
 	if !ok {
@@ -74,6 +80,45 @@ func (f *fakeRemoteClient) DeleteFile(_ context.Context, _, path, baseRevision s
 	_ = path
 	_ = baseRevision
 	return nil
+}
+
+type fakeLazyRemoteClient struct {
+	*fakeRemoteClient
+
+	mu                      sync.Mutex
+	lazyMaterializeCalls    int32
+	lazyMaterializeRequests []string
+	lazyMaterializeFunc     func(ctx context.Context, workspaceID, owner, repo string) error
+	materialized            map[string]bool
+}
+
+func (f *fakeLazyRemoteClient) LazyMaterialize(ctx context.Context, workspaceID, owner, repo string) error {
+	atomic.AddInt32(&f.lazyMaterializeCalls, 1)
+	f.mu.Lock()
+	f.lazyMaterializeRequests = append(f.lazyMaterializeRequests, owner+"/"+repo)
+	f.mu.Unlock()
+	if f.lazyMaterializeFunc != nil {
+		return f.lazyMaterializeFunc(ctx, workspaceID, owner, repo)
+	}
+	f.setMaterialized(owner, repo)
+	return nil
+}
+
+func (f *fakeLazyRemoteClient) setMaterialized(owner, repo string) {
+	key := owner + "/" + repo
+	f.mu.Lock()
+	if f.materialized == nil {
+		f.materialized = make(map[string]bool)
+	}
+	f.materialized[key] = true
+	f.mu.Unlock()
+}
+
+func (f *fakeLazyRemoteClient) isMaterialized(owner, repo string) bool {
+	key := owner + "/" + repo
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.materialized[key]
 }
 
 // ---------------------------------------------------------------------------
@@ -194,6 +239,26 @@ func TestFuseClientRemoveFile403(t *testing.T) {
 	errno := fc.RemoveFile(context.Background(), "/protected.txt", "r1")
 	if errno != syscall.EPERM {
 		t.Errorf("errno = %d, want EPERM (%d)", errno, syscall.EPERM)
+	}
+}
+
+func TestFuseClientLazyMaterialize(t *testing.T) {
+	remote := &fakeLazyRemoteClient{fakeRemoteClient: &fakeRemoteClient{}}
+	fc := NewFuseClient(remote, "ws1", "/")
+
+	errno := fc.LazyMaterialize(context.Background(), "octocat", "hello-world")
+	if errno != 0 {
+		t.Fatalf("LazyMaterialize errno = %d, want 0", errno)
+	}
+	if got := atomic.LoadInt32(&remote.lazyMaterializeCalls); got != 1 {
+		t.Fatalf("LazyMaterialize calls = %d, want 1", got)
+	}
+}
+
+func TestFuseClientLazyMaterializeNoOpWhenUnavailable(t *testing.T) {
+	fc := NewFuseClient(&fakeRemoteClient{}, "ws1", "/")
+	if errno := fc.LazyMaterialize(context.Background(), "octocat", "hello-world"); errno != 0 {
+		t.Fatalf("LazyMaterialize errno = %d, want 0", errno)
 	}
 }
 
@@ -664,7 +729,340 @@ func TestFuseAliasReaddirRefreshesAfterInvalidation(t *testing.T) {
 	}
 }
 
-func newMountTestRoot(t *testing.T, remote *fakeRemoteClient, workspaceID string) *DirNode {
+func TestLazyMaterializeFiresOnceOnRepoStat(t *testing.T) {
+	t.Setenv("RELAYFILE_MOUNT_LAZY_GITHUB_REPOS", "true")
+
+	t.Run("repo stat and repeated readdir", func(t *testing.T) {
+		remote := newLazyGithubRepoRemote()
+		root := newMountTestRoot(t, remote, "ws_lazy_once")
+		repo := lookupDir(t, lookupDir(t, lookupDir(t, lookupDir(t, root, "github"), "repos"), "octocat"), "hello-world")
+
+		var out fuse.AttrOut
+		if errno := repo.Getattr(context.Background(), nil, &out); errno != 0 {
+			t.Fatalf("Getattr(repo) errno = %d, want 0", errno)
+		}
+		first := readdirNames(t, repo)
+		second := readdirNames(t, repo)
+		if !equalSorted(first, []string{"_index.json", "issues"}) {
+			t.Fatalf("first Readdir(repo) = %v", first)
+		}
+		if !equalSorted(second, first) {
+			t.Fatalf("second Readdir(repo) = %v, want %v", second, first)
+		}
+		if got := atomic.LoadInt32(&remote.lazyMaterializeCalls); got != 1 {
+			t.Fatalf("LazyMaterialize calls = %d, want 1", got)
+		}
+		if got := strings.Join(remote.lazyMaterializeRequests, ","); got != "octocat/hello-world" {
+			t.Fatalf("LazyMaterialize requests = %q, want octocat/hello-world", got)
+		}
+	})
+
+	t.Run("missing owner or repo segments do not trigger", func(t *testing.T) {
+		remote := newLazyGithubRepoRemote()
+		root := newMountTestRoot(t, remote, "ws_lazy_missing_segments")
+		repos := lookupDir(t, lookupDir(t, root, "github"), "repos")
+		owner := lookupDir(t, repos, "octocat")
+
+		var reposAttr, ownerAttr fuse.AttrOut
+		if errno := repos.Getattr(context.Background(), nil, &reposAttr); errno != 0 {
+			t.Fatalf("Getattr(repos) errno = %d, want 0", errno)
+		}
+		if errno := owner.Getattr(context.Background(), nil, &ownerAttr); errno != 0 {
+			t.Fatalf("Getattr(owner) errno = %d, want 0", errno)
+		}
+		if got := atomic.LoadInt32(&remote.lazyMaterializeCalls); got != 0 {
+			t.Fatalf("LazyMaterialize calls = %d, want 0 for incomplete repo coordinates", got)
+		}
+	})
+
+	t.Run("multiple repos under same owner are independent", func(t *testing.T) {
+		remote := newLazyGithubRepoRemote()
+		root := newMountTestRoot(t, remote, "ws_lazy_multi_repo")
+		owner := lookupDir(t, lookupDir(t, lookupDir(t, root, "github"), "repos"), "octocat")
+		helloWorld := lookupDir(t, owner, "hello-world")
+		spoonKnife := lookupDir(t, owner, "spoon-knife")
+
+		if errno := helloWorld.Getattr(context.Background(), nil, &fuse.AttrOut{}); errno != 0 {
+			t.Fatalf("Getattr(hello-world) errno = %d, want 0", errno)
+		}
+		if errno := spoonKnife.Getattr(context.Background(), nil, &fuse.AttrOut{}); errno != 0 {
+			t.Fatalf("Getattr(spoon-knife) errno = %d, want 0", errno)
+		}
+		if got := atomic.LoadInt32(&remote.lazyMaterializeCalls); got != 2 {
+			t.Fatalf("LazyMaterialize calls = %d, want 2", got)
+		}
+		if !equalSorted(remote.lazyMaterializeRequests, []string{"octocat/hello-world", "octocat/spoon-knife"}) {
+			t.Fatalf("LazyMaterialize requests = %v", remote.lazyMaterializeRequests)
+		}
+	})
+
+	t.Run("concurrent stat races collapse to one rpc", func(t *testing.T) {
+		remote := newLazyGithubRepoRemote()
+		started := make(chan struct{}, 1)
+		release := make(chan struct{})
+		remote.lazyMaterializeFunc = func(_ context.Context, _ string, owner, repo string) error {
+			started <- struct{}{}
+			<-release
+			remote.setMaterialized(owner, repo)
+			return nil
+		}
+		root := newMountTestRoot(t, remote, "ws_lazy_race")
+		repo := lookupDir(t, lookupDir(t, lookupDir(t, lookupDir(t, root, "github"), "repos"), "octocat"), "hello-world")
+
+		errnos := make(chan syscall.Errno, 2)
+		var wg sync.WaitGroup
+		wg.Add(2)
+		for i := 0; i < 2; i++ {
+			go func() {
+				defer wg.Done()
+				errnos <- repo.Getattr(context.Background(), nil, &fuse.AttrOut{})
+			}()
+		}
+		<-started
+		close(release)
+		wg.Wait()
+		close(errnos)
+		for errno := range errnos {
+			if errno != 0 {
+				t.Fatalf("concurrent Getattr errno = %d, want 0", errno)
+			}
+		}
+		if got := atomic.LoadInt32(&remote.lazyMaterializeCalls); got != 1 {
+			t.Fatalf("LazyMaterialize calls = %d, want 1", got)
+		}
+	})
+}
+
+func TestLazyMaterializeRetriesAfterError(t *testing.T) {
+	t.Setenv("RELAYFILE_MOUNT_LAZY_GITHUB_REPOS", "true")
+
+	remote := newLazyGithubRepoRemote()
+	remote.lazyMaterializeFunc = func(_ context.Context, _ string, owner, repo string) error {
+		if atomic.LoadInt32(&remote.lazyMaterializeCalls) == 1 {
+			return &mountsync.HTTPError{StatusCode: 500, Code: "internal_error", Message: "boom"}
+		}
+		remote.setMaterialized(owner, repo)
+		return nil
+	}
+	root := newMountTestRoot(t, remote, "ws_lazy_retry")
+	repo := lookupDir(t, lookupDir(t, lookupDir(t, lookupDir(t, root, "github"), "repos"), "octocat"), "hello-world")
+
+	if _, errno := repo.Readdir(context.Background()); errno != syscall.EIO {
+		t.Fatalf("first Readdir errno = %d, want EIO (%d)", errno, syscall.EIO)
+	}
+	if names := readdirNames(t, repo); !equalSorted(names, []string{"_index.json", "issues"}) {
+		t.Fatalf("retry Readdir(repo) = %v", names)
+	}
+	if got := atomic.LoadInt32(&remote.lazyMaterializeCalls); got != 2 {
+		t.Fatalf("LazyMaterialize calls = %d, want 2 after retry", got)
+	}
+}
+
+func TestLazyMaterializeNoOpWhenRemoteDoesNotImplement(t *testing.T) {
+	t.Setenv("RELAYFILE_MOUNT_LAZY_GITHUB_REPOS", "true")
+
+	remote := &fakeRemoteClient{
+		trees: map[string]mountsync.TreeResponse{
+			"/":                     {Path: "/", Entries: []mountsync.TreeEntry{{Path: "/github", Type: "directory"}}},
+			"/github":               {Path: "/github", Entries: []mountsync.TreeEntry{{Path: "/github/repos", Type: "directory"}}},
+			"/github/repos":         {Path: "/github/repos", Entries: []mountsync.TreeEntry{{Path: "/github/repos/octocat", Type: "directory"}}},
+			"/github/repos/octocat": {Path: "/github/repos/octocat", Entries: []mountsync.TreeEntry{{Path: "/github/repos/octocat/hello-world", Type: "directory"}}},
+			"/github/repos/octocat/hello-world": {
+				Path: "/github/repos/octocat/hello-world",
+				Entries: []mountsync.TreeEntry{
+					{Path: "/github/repos/octocat/hello-world/_index.json", Type: "file", Revision: "r-index"},
+					{Path: "/github/repos/octocat/hello-world/issues", Type: "directory"},
+				},
+			},
+		},
+		files: map[string]mountsync.RemoteFile{
+			"/github/repos/octocat/hello-world/_index.json": {
+				Path:        "/github/repos/octocat/hello-world/_index.json",
+				Revision:    "r-index",
+				ContentType: "application/json",
+				Content:     `{"repo":"hello-world"}`,
+			},
+		},
+	}
+	root := newMountTestRoot(t, remote, "ws_lazy_noop")
+	repo := lookupDir(t, lookupDir(t, lookupDir(t, lookupDir(t, root, "github"), "repos"), "octocat"), "hello-world")
+
+	if errno := repo.Getattr(context.Background(), nil, &fuse.AttrOut{}); errno != 0 {
+		t.Fatalf("Getattr(repo) errno = %d, want 0", errno)
+	}
+	if names := readdirNames(t, repo); !equalSorted(names, []string{"_index.json", "issues"}) {
+		t.Fatalf("Readdir(repo) = %v", names)
+	}
+}
+
+func TestLazyMaterializeAllowsEmptyRepoTree(t *testing.T) {
+	t.Setenv("RELAYFILE_MOUNT_LAZY_GITHUB_REPOS", "true")
+
+	remote := &fakeLazyRemoteClient{
+		fakeRemoteClient: &fakeRemoteClient{},
+		materialized:     make(map[string]bool),
+	}
+	remote.listTreeFunc = func(path string) (mountsync.TreeResponse, error) {
+		switch path {
+		case "/":
+			return mountsync.TreeResponse{Path: path, Entries: []mountsync.TreeEntry{{Path: "/github", Type: "directory"}}}, nil
+		case "/github":
+			return mountsync.TreeResponse{Path: path, Entries: []mountsync.TreeEntry{{Path: "/github/repos", Type: "directory"}}}, nil
+		case "/github/repos":
+			return mountsync.TreeResponse{Path: path, Entries: []mountsync.TreeEntry{{Path: "/github/repos/octocat", Type: "directory"}}}, nil
+		case "/github/repos/octocat":
+			return mountsync.TreeResponse{
+				Path: path,
+				Entries: []mountsync.TreeEntry{
+					{Path: "/github/repos/octocat/empty-repo", Type: "directory"},
+				},
+			}, nil
+		case "/github/repos/octocat/empty-repo":
+			if !remote.isMaterialized("octocat", "empty-repo") {
+				return mountsync.TreeResponse{}, &mountsync.HTTPError{StatusCode: 404, Code: "not_found", Message: "not materialized"}
+			}
+			return mountsync.TreeResponse{Path: path, Entries: nil}, nil
+		}
+		return mountsync.TreeResponse{}, &mountsync.HTTPError{StatusCode: 404, Code: "not_found", Message: "tree not found"}
+	}
+
+	root := newMountTestRoot(t, remote, "ws_lazy_empty_repo")
+	repo := lookupDir(t, lookupDir(t, lookupDir(t, lookupDir(t, root, "github"), "repos"), "octocat"), "empty-repo")
+
+	if errno := repo.Getattr(context.Background(), nil, &fuse.AttrOut{}); errno != 0 {
+		t.Fatalf("Getattr(repo) errno = %d, want 0", errno)
+	}
+	if names := readdirNames(t, repo); len(names) != 0 {
+		t.Fatalf("Readdir(repo) = %v, want empty directory", names)
+	}
+	if names := readdirNames(t, repo); len(names) != 0 {
+		t.Fatalf("second Readdir(repo) = %v, want empty directory", names)
+	}
+	if got := atomic.LoadInt32(&remote.lazyMaterializeCalls); got != 1 {
+		t.Fatalf("LazyMaterialize calls = %d, want 1", got)
+	}
+}
+
+func TestFuseAliasByStateResolves(t *testing.T) {
+	t.Parallel()
+
+	const body = `{"identifier":"AGE-8","state":"in-progress"}`
+
+	remote := &fakeRemoteClient{
+		trees: map[string]mountsync.TreeResponse{
+			"/":              {Path: "/", Entries: []mountsync.TreeEntry{{Path: "/linear", Type: "directory"}}},
+			"/linear":        {Path: "/linear", Entries: []mountsync.TreeEntry{{Path: "/linear/issues", Type: "directory"}}},
+			"/linear/issues": {Path: "/linear/issues", Entries: []mountsync.TreeEntry{{Path: "/linear/issues/" + aliasByStateSegment, Type: "directory"}}},
+			"/linear/issues/" + aliasByStateSegment: {
+				Path: "/linear/issues/" + aliasByStateSegment,
+				Entries: []mountsync.TreeEntry{
+					{Path: "/linear/issues/" + aliasByStateSegment + "/in-progress", Type: "directory"},
+				},
+			},
+			"/linear/issues/" + aliasByStateSegment + "/in-progress": {
+				Path: "/linear/issues/" + aliasByStateSegment + "/in-progress",
+				Entries: []mountsync.TreeEntry{
+					{Path: "/linear/issues/" + aliasByStateSegment + "/in-progress/AGE-8.json", Type: "file", Revision: "r-age-8"},
+				},
+			},
+		},
+		files: map[string]mountsync.RemoteFile{
+			"/linear/issues/" + aliasByStateSegment + "/in-progress/AGE-8.json": {
+				Path:        "/linear/issues/" + aliasByStateSegment + "/in-progress/AGE-8.json",
+				Revision:    "r-age-8",
+				ContentType: "application/json",
+				Content:     body,
+			},
+		},
+	}
+
+	root := newMountTestRoot(t, remote, "ws_alias_by_state")
+	linear := lookupDir(t, root, "linear")
+	issues := lookupDir(t, linear, "issues")
+	byState := lookupDir(t, issues, aliasByStateSegment)
+	inProgress := lookupDir(t, byState, "in-progress")
+	fileNode, _ := lookupFile(t, inProgress, "AGE-8.json")
+	gotContent, gotContentType := readFileContent(t, fileNode)
+	if gotContent != body {
+		t.Fatalf("read AGE-8.json = %q, want %q", gotContent, body)
+	}
+	if gotContentType != "application/json" {
+		t.Fatalf("content type = %q, want application/json", gotContentType)
+	}
+}
+
+func TestFuseAliasByStateEmptyDirectory(t *testing.T) {
+	t.Parallel()
+
+	remote := &fakeRemoteClient{
+		trees: map[string]mountsync.TreeResponse{
+			"/":              {Path: "/", Entries: []mountsync.TreeEntry{{Path: "/linear", Type: "directory"}}},
+			"/linear":        {Path: "/linear", Entries: []mountsync.TreeEntry{{Path: "/linear/issues", Type: "directory"}}},
+			"/linear/issues": {Path: "/linear/issues", Entries: []mountsync.TreeEntry{{Path: "/linear/issues/" + aliasByStateSegment, Type: "directory"}}},
+			"/linear/issues/" + aliasByStateSegment: {
+				Path: "/linear/issues/" + aliasByStateSegment,
+				Entries: []mountsync.TreeEntry{
+					{Path: "/linear/issues/" + aliasByStateSegment + "/in-progress", Type: "directory"},
+				},
+			},
+			"/linear/issues/" + aliasByStateSegment + "/in-progress": {
+				Path:    "/linear/issues/" + aliasByStateSegment + "/in-progress",
+				Entries: nil,
+			},
+		},
+	}
+
+	root := newMountTestRoot(t, remote, "ws_alias_by_state_empty")
+	linear := lookupDir(t, root, "linear")
+	issues := lookupDir(t, linear, "issues")
+	byState := lookupDir(t, issues, aliasByStateSegment)
+	inProgress := lookupDir(t, byState, "in-progress")
+
+	if names := readdirNames(t, inProgress); len(names) != 0 {
+		t.Fatalf("Readdir(in-progress) = %v, want empty directory", names)
+	}
+}
+
+func TestByStateOutsideIssuesPathRoundTrips(t *testing.T) {
+	t.Parallel()
+
+	const body = `{"scope":"real-directory"}`
+
+	remote := &fakeRemoteClient{
+		trees: map[string]mountsync.TreeResponse{
+			"/":        {Path: "/", Entries: []mountsync.TreeEntry{{Path: "/notion", Type: "directory"}}},
+			"/notion":  {Path: "/notion", Entries: []mountsync.TreeEntry{{Path: "/notion/by-state", Type: "directory"}}},
+			"/notion/by-state": {
+				Path: "/notion/by-state",
+				Entries: []mountsync.TreeEntry{
+					{Path: "/notion/by-state/current.json", Type: "file", Revision: "r-current"},
+				},
+			},
+		},
+		files: map[string]mountsync.RemoteFile{
+			"/notion/by-state/current.json": {
+				Path:        "/notion/by-state/current.json",
+				Revision:    "r-current",
+				ContentType: "application/json",
+				Content:     body,
+			},
+		},
+	}
+
+	root := newMountTestRoot(t, remote, "ws_real_by_state")
+	notion := lookupDir(t, root, "notion")
+	byState := lookupDir(t, notion, "by-state")
+	fileNode, _ := lookupFile(t, byState, "current.json")
+	gotContent, gotContentType := readFileContent(t, fileNode)
+	if gotContent != body {
+		t.Fatalf("read current.json = %q, want %q", gotContent, body)
+	}
+	if gotContentType != "application/json" {
+		t.Fatalf("content type = %q, want application/json", gotContentType)
+	}
+}
+
+func newMountTestRoot(t *testing.T, remote mountsync.RemoteClient, workspaceID string) *DirNode {
 	t.Helper()
 
 	root, err := New(Config{Client: remote, WorkspaceID: workspaceID, RemoteRoot: "/"})
@@ -673,6 +1071,70 @@ func newMountTestRoot(t *testing.T, remote *fakeRemoteClient, workspaceID string
 	}
 	_ = gofusefs.NewNodeFS(root, &gofusefs.Options{})
 	return root
+}
+
+func newLazyGithubRepoRemote() *fakeLazyRemoteClient {
+	remote := &fakeLazyRemoteClient{
+		fakeRemoteClient: &fakeRemoteClient{
+			files: map[string]mountsync.RemoteFile{
+				"/github/repos/octocat/hello-world/_index.json": {
+					Path:        "/github/repos/octocat/hello-world/_index.json",
+					Revision:    "r-hello-index",
+					ContentType: "application/json",
+					Content:     `{"repo":"hello-world"}`,
+				},
+				"/github/repos/octocat/spoon-knife/_index.json": {
+					Path:        "/github/repos/octocat/spoon-knife/_index.json",
+					Revision:    "r-spoon-index",
+					ContentType: "application/json",
+					Content:     `{"repo":"spoon-knife"}`,
+				},
+			},
+		},
+		materialized: make(map[string]bool),
+	}
+	remote.listTreeFunc = func(path string) (mountsync.TreeResponse, error) {
+		switch path {
+		case "/":
+			return mountsync.TreeResponse{Path: path, Entries: []mountsync.TreeEntry{{Path: "/github", Type: "directory"}}}, nil
+		case "/github":
+			return mountsync.TreeResponse{Path: path, Entries: []mountsync.TreeEntry{{Path: "/github/repos", Type: "directory"}}}, nil
+		case "/github/repos":
+			return mountsync.TreeResponse{Path: path, Entries: []mountsync.TreeEntry{{Path: "/github/repos/octocat", Type: "directory"}}}, nil
+		case "/github/repos/octocat":
+			return mountsync.TreeResponse{
+				Path: path,
+				Entries: []mountsync.TreeEntry{
+					{Path: "/github/repos/octocat/hello-world", Type: "directory"},
+					{Path: "/github/repos/octocat/spoon-knife", Type: "directory"},
+				},
+			}, nil
+		case "/github/repos/octocat/hello-world":
+			if !remote.isMaterialized("octocat", "hello-world") {
+				return mountsync.TreeResponse{}, &mountsync.HTTPError{StatusCode: 404, Code: "not_found", Message: "not materialized"}
+			}
+			return mountsync.TreeResponse{
+				Path: path,
+				Entries: []mountsync.TreeEntry{
+					{Path: "/github/repos/octocat/hello-world/_index.json", Type: "file", Revision: "r-hello-index"},
+					{Path: "/github/repos/octocat/hello-world/issues", Type: "directory"},
+				},
+			}, nil
+		case "/github/repos/octocat/spoon-knife":
+			if !remote.isMaterialized("octocat", "spoon-knife") {
+				return mountsync.TreeResponse{}, &mountsync.HTTPError{StatusCode: 404, Code: "not_found", Message: "not materialized"}
+			}
+			return mountsync.TreeResponse{
+				Path: path,
+				Entries: []mountsync.TreeEntry{
+					{Path: "/github/repos/octocat/spoon-knife/_index.json", Type: "file", Revision: "r-spoon-index"},
+					{Path: "/github/repos/octocat/spoon-knife/issues", Type: "directory"},
+				},
+			}, nil
+		}
+		return mountsync.TreeResponse{}, &mountsync.HTTPError{StatusCode: 404, Code: "not_found", Message: "tree not found"}
+	}
+	return remote
 }
 
 func lookupDir(t *testing.T, parent *DirNode, name string) *DirNode {

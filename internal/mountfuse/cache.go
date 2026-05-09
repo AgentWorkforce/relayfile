@@ -29,6 +29,12 @@ type ContentEntry struct {
 	Data        []byte
 }
 
+type LazyMaterializeCache struct {
+	mu       sync.Mutex
+	marked   map[string]struct{}
+	inflight map[string]chan struct{}
+}
+
 // Cache is a thread-safe LRU cache with per-entry TTL expiration.
 // The order slice tracks LRU ordering with the most recently used
 // entry at the end.
@@ -53,6 +59,67 @@ func NewCache(maxEntries int) *Cache {
 		nowFunc:    time.Now,
 		refreshTTL: time.Second,
 	}
+}
+
+func NewLazyMaterializeCache() *LazyMaterializeCache {
+	return &LazyMaterializeCache{
+		marked:   make(map[string]struct{}),
+		inflight: make(map[string]chan struct{}),
+	}
+}
+
+func (c *LazyMaterializeCache) Mark(owner, repo string) bool {
+	if c == nil {
+		return false
+	}
+	key := owner + "/" + repo
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, ok := c.marked[key]; ok {
+		return false
+	}
+	c.marked[key] = struct{}{}
+	c.inflight[key] = make(chan struct{})
+	return true
+}
+
+func (c *LazyMaterializeCache) Forget(owner, repo string) {
+	if c == nil {
+		return
+	}
+	key := owner + "/" + repo
+	c.mu.Lock()
+	ch := c.inflight[key]
+	delete(c.inflight, key)
+	delete(c.marked, key)
+	c.mu.Unlock()
+	if ch != nil {
+		close(ch)
+	}
+}
+
+func (c *LazyMaterializeCache) Resolve(owner, repo string) {
+	if c == nil {
+		return
+	}
+	key := owner + "/" + repo
+	c.mu.Lock()
+	ch := c.inflight[key]
+	delete(c.inflight, key)
+	c.mu.Unlock()
+	if ch != nil {
+		close(ch)
+	}
+}
+
+func (c *LazyMaterializeCache) Wait(owner, repo string) chan struct{} {
+	if c == nil {
+		return nil
+	}
+	key := owner + "/" + repo
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.inflight[key]
 }
 
 func (c *Cache) now() time.Time {

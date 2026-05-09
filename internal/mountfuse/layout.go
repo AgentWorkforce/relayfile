@@ -14,6 +14,7 @@ const (
 	aliasByTitleSegment = "by-title"
 	aliasByIDSegment    = "by-id"
 	aliasByNameSegment  = "by-name"
+	aliasByStateSegment = "by-state"
 )
 
 const LayoutMarkdown = `# LAYOUT
@@ -38,9 +39,17 @@ Direct identifier aliases live under ` + "`linear/issues/" + aliasByIDSegment + 
 
 Direct name aliases live under ` + "`linear/users/" + aliasByNameSegment + "/<name>.json`" + ` and ` + "`github/repos/" + aliasByNameSegment + "/<owner>__<repo>.json`" + ` when those integrations export them.
 
+## Find by state
+
+State-grouped views live under ` + "`linear/issues/" + aliasByStateSegment + "/<state>/<file>.json`" + ` and ` + "`github/repos/<owner>/<repo>/issues/" + aliasByStateSegment + "/<state>/<file>.json`" + ` when those integrations export them.
+
 ## Filenames
 
 Entity files use the ` + "`<sanitized-name>__<id>`" + ` filename convention. Recover the id from the last ` + "`__`" + `-separated segment.
+
+## Lazy materialization
+
+When lazy mode is enabled, the ` + "`github/repos/<owner>/<repo>`" + ` subtree is populated on first read via ` + "`LazyMaterialize`" + `. The first stat or directory read may incur one-time latency while the repo content is materialized.
 
 ## Integration-specific layouts
 
