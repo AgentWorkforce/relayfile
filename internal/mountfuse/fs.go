@@ -325,6 +325,8 @@ func (s *fsState) listDirectory(ctx context.Context, remotePath string) (map[str
 		entries[meta.name] = meta
 	}
 	if remotePath == s.remoteRoot {
+		// Alias directories such as by-title/by-id are adapter-owned remote
+		// entries; the only synthesized root entry here is the virtual layout.
 		entries[layoutFilename] = virtualLayoutMeta(s.remoteRoot)
 	}
 	s.putDir(remotePath, entries)
@@ -413,8 +415,13 @@ func (s *fsState) treeEntryToMeta(entry mountsync.TreeEntry, parentPath string) 
 		return nodeMeta{}, false
 	}
 	mode := uint32(syscall.S_IFREG | defaultFileMode)
-	if strings.EqualFold(entry.Type, "directory") || strings.EqualFold(entry.Type, "dir") {
+	switch {
+	case strings.EqualFold(entry.Type, "directory"), strings.EqualFold(entry.Type, "dir"):
 		mode = syscall.S_IFDIR | defaultDirMode
+	case strings.EqualFold(entry.Type, "symlink"):
+		// Forward compatibility: if a future adapter emits symlink-like alias
+		// entries, surface them as readable files and let lazy reads populate
+		// size/revision details from ReadFile.
 	}
 	return nodeMeta{
 		path:     childPath,
