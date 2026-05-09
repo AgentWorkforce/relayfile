@@ -79,6 +79,17 @@ func (c *FuseClient) RemoveFile(ctx context.Context, path, revision string) sysc
 	return 0
 }
 
+func (c *FuseClient) LazyMaterialize(ctx context.Context, owner, repo string) syscall.Errno {
+	client, ok := c.remote.(mountsync.LazyMaterializeClient)
+	if !ok {
+		return 0
+	}
+	if err := client.LazyMaterialize(ctx, c.workspaceID, strings.TrimSpace(owner), strings.TrimSpace(repo)); err != nil {
+		return mapError(err)
+	}
+	return 0
+}
+
 // fullPath joins the remotePath prefix with the FUSE path, avoiding double slashes.
 func (c *FuseClient) fullPath(fusePath string) string {
 	prefix := strings.TrimRight(c.remotePath, "/")

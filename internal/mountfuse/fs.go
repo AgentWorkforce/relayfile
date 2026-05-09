@@ -6,8 +6,10 @@ import (
 	"hash/fnv"
 	"log"
 	"mime"
+	"os"
 	"path"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -108,6 +110,7 @@ type fsState struct {
 	cacheMu     sync.RWMutex
 	dirCache    map[string]cachedDir
 	fileCache   map[string]cachedFile
+	lazyRepos   *LazyMaterializeCache
 	inodeMu     sync.Mutex
 	inodeByPath map[string]uint64
 	pathByInode map[uint64]string
@@ -146,7 +149,7 @@ func newFSState(cfg Config) *fsState {
 	if negativeTTL <= 0 {
 		negativeTTL = defaultNegativeTTL
 	}
-	return &fsState{
+	state := &fsState{
 		client:      cfg.Client,
 		workspaceID: strings.TrimSpace(cfg.WorkspaceID),
 		remoteRoot:  normalizeRemotePath(cfg.RemoteRoot),
@@ -161,6 +164,10 @@ func newFSState(cfg Config) *fsState {
 		inodeByPath: map[string]uint64{normalizeRemotePath(cfg.RemoteRoot): 1},
 		pathByInode: map[uint64]string{1: normalizeRemotePath(cfg.RemoteRoot)},
 	}
+	if lazyGithubReposEnabled() {
+		state.lazyRepos = NewLazyMaterializeCache()
+	}
+	return state
 }
 
 func (s *fsState) logf(format string, args ...any) {
@@ -309,6 +316,9 @@ func (s *fsState) invalidate(remotePath string) {
 
 func (s *fsState) listDirectory(ctx context.Context, remotePath string) (map[string]nodeMeta, error) {
 	remotePath = normalizeRemotePath(remotePath)
+	if err := s.ensureGithubRepoMaterialized(ctx, remotePath); err != nil {
+		return nil, err
+	}
 	if entries, ok := s.getDir(remotePath); ok {
 		return entries, nil
 	}
@@ -325,8 +335,8 @@ func (s *fsState) listDirectory(ctx context.Context, remotePath string) (map[str
 		entries[meta.name] = meta
 	}
 	if remotePath == s.remoteRoot {
-		// Alias directories such as by-title/by-id are adapter-owned remote
-		// entries; the only synthesized root entry here is the virtual layout.
+		// Alias directories such as by-title/by-id/by-state are adapter-owned
+		// remote entries; the only synthesized root entry here is the virtual layout.
 		entries[layoutFilename] = virtualLayoutMeta(s.remoteRoot)
 	}
 	s.putDir(remotePath, entries)
@@ -355,6 +365,9 @@ func resolveDirectoryEntry(entries map[string]nodeMeta, requestedName string) (n
 
 func (s *fsState) lookupMetadata(ctx context.Context, remotePath string) (nodeMeta, error) {
 	remotePath = normalizeRemotePath(remotePath)
+	if err := s.ensureGithubRepoMaterialized(ctx, remotePath); err != nil {
+		return nodeMeta{}, err
+	}
 	if remotePath == s.remoteRoot {
 		return nodeMeta{
 			path:    remotePath,
@@ -430,6 +443,67 @@ func (s *fsState) treeEntryToMeta(entry mountsync.TreeEntry, parentPath string) 
 		revision: entry.Revision,
 		modTime:  time.Now(),
 	}, true
+}
+
+func (s *fsState) ensureGithubRepoMaterialized(ctx context.Context, remotePath string) error {
+	if s.lazyRepos == nil {
+		return nil
+	}
+	owner, repo, ok := parseGithubRepoCoords(s.remoteRoot, remotePath)
+	if !ok {
+		return nil
+	}
+	if s.lazyRepos.Mark(owner, repo) {
+		client, ok := s.client.(mountsync.LazyMaterializeClient)
+		if !ok {
+			s.lazyRepos.Resolve(owner, repo)
+			return nil
+		}
+		if err := client.LazyMaterialize(ctx, s.workspaceID, owner, repo); err != nil {
+			s.lazyRepos.Forget(owner, repo)
+			return err
+		}
+		s.lazyRepos.Resolve(owner, repo)
+		return nil
+	}
+	if ch := s.lazyRepos.Wait(owner, repo); ch != nil {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ch:
+		}
+	}
+	return nil
+}
+
+func parseGithubRepoCoords(remoteRoot, remotePath string) (owner, repo string, ok bool) {
+	remoteRoot = normalizeRemotePath(remoteRoot)
+	remotePath = normalizeRemotePath(remotePath)
+	if !isUnderRemoteRoot(remoteRoot, remotePath) {
+		return "", "", false
+	}
+	rel := strings.TrimPrefix(remotePath, remoteRoot)
+	rel = strings.TrimPrefix(rel, "/")
+	if rel == "" {
+		return "", "", false
+	}
+	segments := strings.Split(rel, "/")
+	if len(segments) < 4 || segments[0] != "github" || segments[1] != "repos" {
+		return "", "", false
+	}
+	if strings.TrimSpace(segments[2]) == "" || strings.TrimSpace(segments[3]) == "" {
+		return "", "", false
+	}
+	return segments[2], segments[3], true
+}
+
+func isUnderRemoteRoot(remoteRoot, remotePath string) bool {
+	remoteRoot = normalizeRemotePath(remoteRoot)
+	remotePath = normalizeRemotePath(remotePath)
+	if remoteRoot == "/" {
+		return remotePath == "/" || strings.HasPrefix(remotePath, "/")
+	}
+	return remotePath == remoteRoot || strings.HasPrefix(remotePath, remoteRoot+"/")
 }
 
 func (m nodeMeta) isDir() bool {
@@ -623,4 +697,13 @@ func contentTypeForPath(remotePath string) string {
 		}
 	}
 	return "text/plain; charset=utf-8"
+}
+
+func lazyGithubReposEnabled() bool {
+	raw := strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_LAZY_GITHUB_REPOS"))
+	if raw == "" {
+		return false
+	}
+	enabled, err := strconv.ParseBool(raw)
+	return err == nil && enabled
 }

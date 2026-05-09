@@ -147,6 +147,10 @@ type exportSnapshotClient interface {
 	ExportFiles(ctx context.Context, workspaceID, path string) ([]RemoteFile, error)
 }
 
+type LazyMaterializeClient interface {
+	LazyMaterialize(ctx context.Context, workspaceID, owner, repo string) error
+}
+
 type HTTPClient struct {
 	baseURL    string
 	token      string
@@ -293,6 +297,22 @@ func (c *HTTPClient) ExportFiles(ctx context.Context, workspaceID, path string) 
 	return files, nil
 }
 
+func (c *HTTPClient) LazyMaterialize(ctx context.Context, workspaceID, owner, repo string) error {
+	return c.doJSON(
+		ctx,
+		http.MethodPost,
+		fmt.Sprintf(
+			"/v1/workspaces/%s/integrations/github/repos/%s/%s/materialize",
+			url.PathEscape(workspaceID),
+			url.PathEscape(strings.TrimSpace(owner)),
+			url.PathEscape(strings.TrimSpace(repo)),
+		),
+		nil,
+		nil,
+		nil,
+	)
+}
+
 func (c *HTTPClient) doJSON(
 	ctx context.Context,
 	method, requestPath string,
@@ -404,6 +424,7 @@ type SyncerOptions struct {
 	// the default (defaultFullPullEvery, ~10 min at 30s intervals). A
 	// negative value disables the periodic full pull entirely.
 	FullPullEvery int
+	LazyRepos     bool
 }
 
 type Logger interface {
@@ -437,6 +458,7 @@ type Syncer struct {
 	interval             time.Duration
 	fullPullEvery        int
 	incrementalCycles    int
+	lazyRepos            bool
 	mu                   sync.Mutex
 }
 
@@ -607,6 +629,14 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 			fullPullEvery = defaultFullPullEvery
 		}
 	}
+	lazyRepos := opts.LazyRepos
+	if raw := strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_LAZY_GITHUB_REPOS")); raw != "" {
+		if parsed, perr := strconv.ParseBool(raw); perr == nil {
+			lazyRepos = parsed
+		} else if opts.Logger != nil {
+			opts.Logger.Printf("ignoring invalid RELAYFILE_MOUNT_LAZY_GITHUB_REPOS=%q: %v", raw, perr)
+		}
+	}
 	return &Syncer{
 		client:               client,
 		workspace:            workspace,
@@ -628,6 +658,7 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 		mode:                 strings.TrimSpace(opts.Mode),
 		interval:             opts.Interval,
 		fullPullEvery:        fullPullEvery,
+		lazyRepos:            lazyRepos,
 		state: mountState{
 			Files: map[string]trackedFile{},
 		},
@@ -1557,6 +1588,10 @@ func (s *Syncer) pullRemoteFullExport(ctx context.Context, client exportSnapshot
 		if remotePath == "/" || !isUnderRemoteRoot(s.remoteRoot, remotePath) {
 			continue
 		}
+		// Contract: lazy GitHub repos do not eagerly hydrate per-repo content at startup.
+		if s.lazyRepos && isUnderLazyGithubRepoSubtree(s.remoteRoot, remotePath) {
+			continue
+		}
 		if tracked, ok := s.state.Files[remotePath]; ok && tracked.Denied {
 			continue
 		}
@@ -1577,6 +1612,21 @@ func exportSnapshotUnsupported(err error) bool {
 	return httpErr.StatusCode == http.StatusBadRequest && strings.EqualFold(httpErr.Code, "bad_request")
 }
 
+func isUnderLazyGithubRepoSubtree(remoteRoot, remotePath string) bool {
+	remoteRoot = normalizeRemotePath(remoteRoot)
+	remotePath = normalizeRemotePath(remotePath)
+	if !isUnderRemoteRoot(remoteRoot, remotePath) {
+		return false
+	}
+	rel := strings.TrimPrefix(remotePath, remoteRoot)
+	rel = strings.TrimPrefix(rel, "/")
+	if rel == "" {
+		return false
+	}
+	segments := strings.Split(rel, "/")
+	return len(segments) >= 5 && segments[0] == "github" && segments[1] == "repos"
+}
+
 func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]struct{}) error {
 	remoteFiles := map[string]RemoteFile{}
 	cursor := ""
@@ -1591,6 +1641,10 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 			}
 			remotePath := normalizeRemotePath(entry.Path)
 			if !isUnderRemoteRoot(s.remoteRoot, remotePath) {
+				continue
+			}
+			// Contract: lazy GitHub repos do not eagerly hydrate per-repo content at startup.
+			if s.lazyRepos && isUnderLazyGithubRepoSubtree(s.remoteRoot, remotePath) {
 				continue
 			}
 			if tracked, ok := s.state.Files[remotePath]; ok && tracked.Denied {

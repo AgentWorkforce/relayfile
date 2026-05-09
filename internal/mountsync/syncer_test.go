@@ -122,6 +122,147 @@ func TestHandleLocalChangeIgnoresAlreadyTrackedContent(t *testing.T) {
 	}
 }
 
+func TestLazyReposSkipsEagerFetchOfIssuesOnStartup(t *testing.T) {
+	client := &fakeClient{
+		files: map[string]RemoteFile{
+			"/github/repos/octocat/hello-world/_index.json": {
+				Path:        "/github/repos/octocat/hello-world/_index.json",
+				Revision:    "rev_index",
+				ContentType: "application/json",
+				Content:     `{"repo":"hello-world"}`,
+			},
+			"/github/repos/octocat/hello-world/issues/issue-1.json": {
+				Path:        "/github/repos/octocat/hello-world/issues/issue-1.json",
+				Revision:    "rev_issue_1",
+				ContentType: "application/json",
+				Content:     `{"id":1}`,
+			},
+		},
+		revisionCounter: 2,
+	}
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_lazy_repos_on",
+		RemoteRoot:  "/",
+		LocalRoot:   localDir,
+		LazyRepos:   true,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("lazy-repos sync failed: %v", err)
+	}
+
+	if got := client.readFileCallsByPath["/github/repos/octocat/hello-world/issues/issue-1.json"]; got != 0 {
+		t.Fatalf("expected zero eager issue reads in lazy mode, got %d", got)
+	}
+	if client.listTreeCalls != 1 {
+		t.Fatalf("expected one bootstrap ListTree call, got %d", client.listTreeCalls)
+	}
+}
+
+func TestLazyReposOffStillFetchesIssues(t *testing.T) {
+	client := &fakeClient{
+		files: map[string]RemoteFile{
+			"/github/repos/octocat/hello-world/_index.json": {
+				Path:        "/github/repos/octocat/hello-world/_index.json",
+				Revision:    "rev_index",
+				ContentType: "application/json",
+				Content:     `{"repo":"hello-world"}`,
+			},
+			"/github/repos/octocat/hello-world/issues/issue-1.json": {
+				Path:        "/github/repos/octocat/hello-world/issues/issue-1.json",
+				Revision:    "rev_issue_1",
+				ContentType: "application/json",
+				Content:     `{"id":1}`,
+			},
+		},
+		revisionCounter: 2,
+	}
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_lazy_repos_off",
+		RemoteRoot:  "/",
+		LocalRoot:   localDir,
+		LazyRepos:   false,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("non-lazy sync failed: %v", err)
+	}
+
+	if got := client.readFileCallsByPath["/github/repos/octocat/hello-world/issues/issue-1.json"]; got < 1 {
+		t.Fatalf("expected eager issue reads when lazy mode is off, got %d", got)
+	}
+}
+
+func TestIsUnderLazyGithubRepoSubtree(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		remoteRoot string
+		remotePath string
+		want       bool
+	}{
+		{
+			name:       "repos root",
+			remoteRoot: "/",
+			remotePath: "/github/repos",
+			want:       false,
+		},
+		{
+			name:       "repo root",
+			remoteRoot: "/",
+			remotePath: "/github/repos/octocat/hello-world",
+			want:       false,
+		},
+		{
+			name:       "repo subtree file",
+			remoteRoot: "/",
+			remotePath: "/github/repos/octocat/hello-world/issues/issue-1.json",
+			want:       true,
+		},
+		{
+			name:       "repo subtree trailing slash",
+			remoteRoot: "/",
+			remotePath: "/github/repos/octocat/hello-world/issues/",
+			want:       true,
+		},
+		{
+			name:       "other integration",
+			remoteRoot: "/",
+			remotePath: "/notion/pages/x.json",
+			want:       false,
+		},
+		{
+			name:       "root github dir",
+			remoteRoot: "/",
+			remotePath: "/github",
+			want:       false,
+		},
+		{
+			name:       "nested remote root",
+			remoteRoot: "/relay",
+			remotePath: "/relay/github/repos/octocat/hello-world/issues/issue-1.json",
+			want:       true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isUnderLazyGithubRepoSubtree(tt.remoteRoot, tt.remotePath); got != tt.want {
+				t.Fatalf("isUnderLazyGithubRepoSubtree(%q, %q) = %v, want %v", tt.remoteRoot, tt.remotePath, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestHandleLocalChangePushesOnChmodOnlyEvent pins the regression that
 // motivated the state-driven dispatch: editors (Vim, VSCode, JetBrains)
 // often end a save sequence with a Chmod event, and the per-path
@@ -2572,6 +2713,7 @@ type fakeClient struct {
 	listTreeCalls         int
 	listEventsCalls       int
 	readFileCalls         int
+	readFileCallsByPath   map[string]int
 	writeFileCalls        int
 	bulkWriteCalls        int
 	bulkWriteBatches      [][]BulkWriteFile
@@ -2690,6 +2832,10 @@ func (c *fakeClient) ReadFile(ctx context.Context, workspaceID, path string) (Re
 	_ = workspaceID
 	c.readFileCalls++
 	path = normalizeRemotePath(path)
+	if c.readFileCallsByPath == nil {
+		c.readFileCallsByPath = make(map[string]int)
+	}
+	c.readFileCallsByPath[path]++
 	file, ok := c.files[path]
 	if !ok {
 		return RemoteFile{}, &HTTPError{StatusCode: 404, Code: "not_found", Message: "not found"}
@@ -3779,4 +3925,109 @@ func TestPullRestartFastPathSkipsFullPull(t *testing.T) {
 		t.Fatalf("expected quiet post-restart cycle to remain a pure no-op; tree=%d read=%d",
 			client.listTreeCalls, client.readFileCalls)
 	}
+}
+
+func TestPullRestartFastPathPeriodicFullPullStillSkipsLazyGithubRepos(t *testing.T) {
+	client := &fakeClient{
+		files: map[string]RemoteFile{
+			"/README.md": {
+				Path:        "/README.md",
+				Revision:    "rev_1",
+				ContentType: "text/markdown",
+				Content:     "# README v1",
+			},
+			"/github/repos/octocat/hello-world/_index.json": {
+				Path:        "/github/repos/octocat/hello-world/_index.json",
+				Revision:    "rev_repo_index",
+				ContentType: "application/json",
+				Content:     `{"repo":"hello-world"}`,
+			},
+			"/github/repos/octocat/hello-world/issues/issue-1.json": {
+				Path:        "/github/repos/octocat/hello-world/issues/issue-1.json",
+				Revision:    "rev_issue_1",
+				ContentType: "application/json",
+				Content:     `{"id":1}`,
+			},
+		},
+		events: []FilesystemEvent{
+			{
+				EventID:  "evt_seed",
+				Type:     "file.created",
+				Path:     "/README.md",
+				Revision: "rev_1",
+			},
+		},
+		revisionCounter: 1,
+		eventCounter:    1,
+	}
+	localDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(localDir, "README.md"), []byte("# README v1"), 0o644); err != nil {
+		t.Fatalf("seed local readme: %v", err)
+	}
+	if err := writeMountState(filepath.Join(localDir, ".relayfile-mount-state.json"), mountState{
+		Files: map[string]trackedFile{
+			"/README.md": {
+				Revision:    "rev_1",
+				ContentType: "text/markdown",
+				Hash:        hashBytes([]byte("# README v1")),
+			},
+		},
+		LastEventAt: time.Now().UTC().Add(-time.Minute).Format(time.RFC3339Nano),
+	}); err != nil {
+		t.Fatalf("write seed state: %v", err)
+	}
+
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID:   "ws_restart_lazy_periodic",
+		RemoteRoot:    "/",
+		LocalRoot:     localDir,
+		LazyRepos:     true,
+		FullPullEvery: 2,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+
+	if err := syncer.Reconcile(context.Background()); err != nil {
+		t.Fatalf("restart reconcile: %v", err)
+	}
+	if client.listTreeCalls != 0 {
+		t.Fatalf("expected restart fast-path to skip ListTree; got %d calls", client.listTreeCalls)
+	}
+	if client.readFileCalls != 0 {
+		t.Fatalf("expected restart fast-path to skip ReadFile; got %d calls", client.readFileCalls)
+	}
+
+	client.files["/README.md"] = RemoteFile{
+		Path:        "/README.md",
+		Revision:    "rev_2",
+		ContentType: "text/markdown",
+		Content:     "# README v2",
+	}
+	client.appendEvent("file.updated", "/README.md", "rev_2")
+	if err := syncer.Reconcile(context.Background()); err != nil {
+		t.Fatalf("incremental reconcile after restart: %v", err)
+	}
+
+	client.files["/README.md"] = RemoteFile{
+		Path:        "/README.md",
+		Revision:    "rev_3",
+		ContentType: "text/markdown",
+		Content:     "# README v3",
+	}
+	client.appendEvent("file.updated", "/README.md", "rev_3")
+	if err := syncer.Reconcile(context.Background()); err != nil {
+		t.Fatalf("periodic full-pull reconcile after restart: %v", err)
+	}
+
+	if client.listTreeCalls != 1 {
+		t.Fatalf("expected exactly one periodic ListTree call, got %d", client.listTreeCalls)
+	}
+	if got := client.readFileCallsByPath["/github/repos/octocat/hello-world/_index.json"]; got != 0 {
+		t.Fatalf("expected periodic full pull to skip repo _index reads in lazy mode, got %d", got)
+	}
+	if got := client.readFileCallsByPath["/github/repos/octocat/hello-world/issues/issue-1.json"]; got != 0 {
+		t.Fatalf("expected periodic full pull to skip issue reads in lazy mode, got %d", got)
+	}
+	assertLocalFileContent(t, filepath.Join(localDir, "README.md"), "# README v3")
 }
