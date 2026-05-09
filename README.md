@@ -260,7 +260,7 @@ const handle = await setup.mountWorkspace({
 })
 
 // /workspace is now a live mount of the workspace
-console.log(handle.status().expiresAt)
+console.log(handle.expiresAt)
 await handle.stop()
 ```
 
@@ -268,7 +268,7 @@ Use `ensureMountedWorkspace` when you also want provider-readiness gating in the
 
 ```ts
 const handle = await setup.ensureMountedWorkspace({
-  workspace: { id: "rw_…" },
+  workspaceId: "rw_…",
   provider: "notion",
   verifyProvider: true,
   localDir: "/workspace",
