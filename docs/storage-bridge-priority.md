@@ -27,7 +27,7 @@ These systems natively deliver HTTP webhook callbacks when files change. Integra
 
 Google Drive's Watch API allows subscribing to change notifications on any file, folder, or the entire drive. When a file is created, edited, moved, or deleted, Drive sends an HTTP POST to a registered callback URL. The notification includes the resource ID and a change token; the adapter then calls the Drive Changes API to fetch the delta.
 
-```
+```text
 User edits file in Google Drive
   │  (2–10s)
   ▼
@@ -66,7 +66,7 @@ Microsoft Graph subscriptions notify on changes to SharePoint document libraries
 
 SharePoint and OneDrive share the same Graph API surface — the same adapter handles both. SharePoint sites expose document libraries as drives; OneDrive is a personal drive. Both use the same subscription model.
 
-```
+```text
 User uploads file to SharePoint document library
   │
   ▼
@@ -98,7 +98,7 @@ SharePoint is the dominant enterprise document store. Organizations running Micr
 
 Dropbox webhooks notify when any change occurs in a connected account. The notification is intentionally minimal — it signals that something changed, without specifying what. The adapter then calls `/files/list_folder/continue` with a stored cursor to retrieve the actual delta. This two-step design is Dropbox's intentional architecture.
 
-```
+```text
 File added/modified/deleted in Dropbox
   │
   ▼
@@ -132,7 +132,7 @@ Gmail's Watch API routes change notifications through a Google Cloud Pub/Sub top
 
 Emails are surfaced in the relayfile workspace as files: each thread becomes a `.json` file at `/gmail/{account}/threads/{threadId}.json` containing the full thread with messages, labels, and attachments.
 
-```
+```text
 Email received or label changed
   │
   ▼
@@ -217,16 +217,16 @@ Already covered by the Nango SaaS bridge. Slack files are not a primary use case
 
 ## Priority Tier 3: Scheduled Sync Only (Lower Value-Add)
 
-These systems have no native push mechanism. Integration provides eventual consistency via Nango scheduled sync but not real-time awareness. Less differentiated from MCP or Mirage.
+These systems either have no native push mechanism or are listed here only for their fallback mode. Integration provides eventual consistency via Nango scheduled sync but not real-time awareness. Less differentiated from MCP or Mirage.
 
 | System | Best available | Typical lag |
 |---|---|---|
-| AWS S3 | SQS events (requires setup) or Nango poll | 1–5 min (Nango) |
+| AWS S3 | Tier 1 with SQS Event Notifications; Nango poll is fallback only | <10s with SQS; 1–5 min fallback |
 | SFTP | Poll | 5–60 min |
 | FTP | Poll | 5–60 min |
 | Local filesystem | inotify bridge | < 1s (but agent is local) |
 
-S3 moves to Tier 1 when SQS Event Notifications are configured — the poll fallback is Tier 3.
+S3 with SQS Event Notifications is Tier 1; polling via Nango or other pollers is a Tier 3 fallback.
 
 ---
 
@@ -236,13 +236,15 @@ S3 moves to Tier 1 when SQS Event Notifications are configured — the poll fall
 
 Drive and GCS share the Google OAuth model and the Cloud Pub/Sub infrastructure, making them natural to ship together.
 
-**Deliverables:**
+**MVP deliverables:**
 - Google Drive Watch API subscription manager (create, renew, delete)
 - Drive Changes API delta fetcher
-- GCS Pub/Sub notification bridge (from `storage-bridge-spec.md` Phase 1)
-- Storage adapter worker with Google Cloud Pub/Sub backend
+- GCS Pub/Sub notification bridge (from `storage-bridge-spec.md` Phase 2)
+
+**Deferred follow-up:**
+- Full Storage adapter worker with Google Cloud Pub/Sub backend
 - File path conventions for `/drive/{accountId}/{path}` and `/gcs/{bucket}/{key}`
-- Writeback for Drive (create, update, delete)
+- Drive writeback (create, update, delete)
 - Nango scheduled sync fallback for both
 
 **Why first:** Largest addressable market, shared infrastructure, Google OAuth already in Nango.
@@ -458,7 +460,7 @@ Systems **not** in Nango's catalog (S3, R2, Postgres, Redis, MongoDB, Supabase S
 
 | Metric | After Sprint 1 | After Sprint 2 | After Sprint 3 | After Sprint 5 |
 |---|---|---|---|---|
-| Total addressable users | ~3B (Google Workspace) | +1.5B (Microsoft 365) | +700M (Dropbox + Gmail) | +MongoDB + R2 developers |
+| Total addressable users | Approx. ~3B (Google Workspace) | Approx. +1.5B (Microsoft 365) | Illustrative +700M (Dropbox + Gmail) | +MongoDB + R2 developers |
 | Real-time integrations | 2 (Drive, GCS) | 5 (+SharePoint, OneDrive, Azure) | 7 (+Dropbox, Gmail) | 10 (+MongoDB, R2, Supabase) |
 | Scheduled fallback integrations | 2 | 5 | 7 | 13 (Nango catalog) |
 | Enterprise coverage | Google-stack | Full cloud | + Dropbox-heavy orgs | + MongoDB/CF developers |

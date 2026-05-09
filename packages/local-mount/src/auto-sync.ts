@@ -167,11 +167,16 @@ export function startAutoSync(
     pendingDebounces.set(absPath, t);
   };
 
-  const subscribeTo = (root: string): Promise<AsyncSubscription> =>
+  const subscribeTo = (root: string, markUnhealthy: () => void): Promise<AsyncSubscription> =>
     watcher.subscribe(
       root,
       (err, events) => {
-        if (err) { onError(err); return; }
+        if (err) {
+          markUnhealthy();
+          recomputeWatchersHealthy();
+          onError(err);
+          return;
+        }
         for (const ev of events) {
           schedulePathSync(root, ev.path);
         }
@@ -182,19 +187,26 @@ export function startAutoSync(
   let mountSub: AsyncSubscription | undefined;
   let projectSub: AsyncSubscription | undefined;
   let _watchersHealthy = false;
+  let _mountWatcherHealthy = false;
+  let _projectWatcherHealthy = false;
+  const recomputeWatchersHealthy = (): void => {
+    _watchersHealthy = _mountWatcherHealthy && _projectWatcherHealthy;
+  };
   // Subscribe in parallel but track each outcome independently. With
   // Promise.all, a failure on one side would reject before the other's
   // assignment ran and leak the succeeded subscription. allSettled lets us
   // tear down whichever fulfilled before re-throwing the first failure.
   const watchersReady = (async () => {
     const [mountResult, projectResult] = await Promise.allSettled([
-      subscribeTo(ctx.realMountDir),
-      subscribeTo(ctx.realProjectDir),
+      subscribeTo(ctx.realMountDir, () => { _mountWatcherHealthy = false; }),
+      subscribeTo(ctx.realProjectDir, () => { _projectWatcherHealthy = false; }),
     ]);
     if (mountResult.status === 'fulfilled') mountSub = mountResult.value;
     if (projectResult.status === 'fulfilled') projectSub = projectResult.value;
     if (mountResult.status === 'fulfilled' && projectResult.status === 'fulfilled') {
-      _watchersHealthy = true;
+      _mountWatcherHealthy = true;
+      _projectWatcherHealthy = true;
+      recomputeWatchersHealthy();
       return;
     }
     await Promise.allSettled([
@@ -235,6 +247,8 @@ export function startAutoSync(
         projectSub?.unsubscribe(),
       ]);
       _watchersHealthy = false;
+      _mountWatcherHealthy = false;
+      _projectWatcherHealthy = false;
       // Clear debounces *after* unsubscribe resolves: any timer scheduled
       // between stop() being called and the watcher actually quiescing is
       // gathered here, so none fire after stop() returns.

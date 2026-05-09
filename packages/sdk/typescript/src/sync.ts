@@ -370,6 +370,7 @@ export class RelayFileSync {
       if (this.signal.aborted) {
         this.stopped = true;
         this.state = "closed";
+        this.stateEnteredAt = Date.now();
       } else {
         this.signal.addEventListener("abort", this.abortHandler, { once: true });
       }
@@ -548,13 +549,15 @@ export class RelayFileSync {
       if (this.degraded) {
         this.degraded = false;
         this.degradedReason = undefined;
+        this.setState("open");
         try {
           this.onRecovered?.();
         } catch (error) {
           debugLog("onRecovered handler threw", error);
         }
+      } else {
+        this.setState("open");
       }
-      this.setState("open");
       this.startPingLoop(socket);
       debugLog("ws open", { workspaceId: this.workspaceId });
       this.emit("open", event);

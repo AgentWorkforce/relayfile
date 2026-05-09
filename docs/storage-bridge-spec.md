@@ -83,6 +83,8 @@ Different backends support different freshness levels. Operators choose a tier p
 
 The spec covers real-time and near-real-time tiers. Pull-only is the existing behavior with no storage bridge.
 
+Redis is an exception to the Nango-backed tiers: it is real-time-only via keyspace notifications unless operators provide a custom polling script. There is no built-in Nango fallback for Redis.
+
 ---
 
 ## Common Event Envelope
@@ -188,7 +190,7 @@ S3 natively emits object-level events (create, delete, restore) to SNS/SQS/Lambd
 
 #### Setup
 
-```
+```text
 S3 Bucket
   └── Event Notifications
         ├── ObjectCreated:* → SQS queue: relayfile-s3-{bucket}-events
@@ -286,22 +288,27 @@ CREATE OR REPLACE FUNCTION relayfile_notify_change()
 RETURNS trigger AS $$
 DECLARE
   payload json;
+  row_json json;
+  pk_column text := TG_ARGV[0];
 BEGIN
+  row_json := row_to_json(COALESCE(NEW, OLD));
   payload := json_build_object(
     'schema', TG_TABLE_SCHEMA,
     'table',  TG_TABLE_NAME,
     'op',     TG_OP,           -- INSERT, UPDATE, DELETE
-    'pk',     row_to_json(NEW).id  -- assumes id column; configurable
+    'pk',     row_json ->> pk_column
   );
   PERFORM pg_notify('relayfile_changes', payload::text);
-  RETURN NEW;
+  RETURN COALESCE(NEW, OLD);
 END;
 $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER relayfile_orders_change
 AFTER INSERT OR UPDATE OR DELETE ON orders
-FOR EACH ROW EXECUTE FUNCTION relayfile_notify_change();
+FOR EACH ROW EXECUTE FUNCTION relayfile_notify_change('id');
 ```
+
+Production trigger generation must pass the actual primary key column for each watched table, and composite primary keys should encode a stable JSON object rather than assuming a column named `id`.
 
 The bridge process connects to Postgres, executes `LISTEN relayfile_changes`, and processes notifications:
 
@@ -330,16 +337,31 @@ async function runPostgresListenBridge(config: PostgresBridgeConfig): Promise<vo
         "postgres.pk": String(payload.pk),
         "postgres.op": payload.op,
         "postgres.database": config.database,
+        "postgres.row_json": JSON.stringify(row ?? null),
       },
       workspaceId: config.workspaceId,
     };
     await publishToPubSub(event, config.pubSubTopic);
   });
 
-  // Reconnect on connection loss
-  client.on("error", async () => {
-    await sleep(5000);
-    runPostgresListenBridge(config); // restart
+  // Reconnect on connection loss with bounded exponential backoff.
+  client.on("error", async (error) => {
+    for (let attempt = 1; attempt <= config.maxReconnectAttempts; attempt += 1) {
+      const delayMs = Math.min(
+        config.maxReconnectDelayMs,
+        config.initialReconnectDelayMs * 2 ** (attempt - 1)
+      );
+      console.warn("Postgres LISTEN bridge reconnecting", { attempt, delayMs, error });
+      await sleep(delayMs);
+      try {
+        await client.end().catch(() => undefined);
+        await runPostgresListenBridge(config);
+        return;
+      } catch (restartError) {
+        error = restartError;
+      }
+    }
+    throw new Error(`Postgres LISTEN bridge failed after ${config.maxReconnectAttempts} reconnect attempts`);
   });
 }
 ```
@@ -412,7 +434,7 @@ Redis keyspace notifications emit events for key-level operations (`SET`, `DEL`,
 
 #### Redis configuration
 
-```
+```ini
 # redis.conf
 notify-keyspace-events KEA
 # K = keyspace events (channel: __keyspace@{db}__:{key})
@@ -493,6 +515,7 @@ async function runRedisBridge(config: RedisBridgeConfig): Promise<void> {
         "redis.key": key,
         "redis.operation": operation,
         "redis.host": config.host,
+        "redis.value": value == null ? "null" : value.toString(),
       },
       workspaceId: config.workspaceId,
     };
@@ -654,7 +677,7 @@ function mapAzureBlobEvent(event: EventGridEvent, workspaceId: string): StorageB
 
 For backends where real-time event bridges are not deployed, Nango's scheduled sync provides a near-real-time alternative. The flow:
 
-```
+```text
 Nango sync runs on schedule
   │  detects added/updated/deleted objects since last cursor
   ▼
@@ -704,27 +727,33 @@ Nango delivers this payload to the configured webhook endpoint when a sync run c
 ### Nango webhook → StorageBridgeEvent mapping
 
 ```typescript
+/**
+ * Accepts Nango records whose canonical resource id may be exposed as
+ * `key`, `id`, or `record_id`, depending on the provider sync model.
+ */
 function mapNangoSyncRecord(
   record: NangoSyncRecord,
   meta: NangoSyncWebhook,
   workspaceId: string
 ): StorageBridgeEvent {
+  const recordId = record.key || record.id || record.record_id;
+  const normalizedRecord = { ...record, key: recordId };
   const action = record._nango_metadata.action;
   const changeType: StorageBridgeEvent["changeType"] =
     action === "ADDED" ? "created" :
     action === "DELETED" ? "deleted" : "updated";
 
   // Source-specific path computation based on providerConfigKey
-  const relayfilePath = computeRelayfilePath(meta.providerConfigKey, record);
+  const relayfilePath = computeRelayfilePath(meta.providerConfigKey, normalizedRecord);
 
   return {
-    eventId: `nango-${meta.connectionId}-${meta.syncName}-${record.key ?? record.id}-${meta.queryTimeStamp}`,
+    eventId: `nango-${meta.connectionId}-${meta.syncName}-${recordId}-${meta.queryTimeStamp}`,
     occurredAt: record.lastModified ?? meta.queryTimeStamp,
     detectedAt: new Date().toISOString(),
     source: mapNangoProviderToSource(meta.providerConfigKey),
     changeType,
     relayfilePath,
-    resourceId: computeResourceId(meta.providerConfigKey, record),
+    resourceId: computeResourceId(meta.providerConfigKey, normalizedRecord),
     sizeBytes: record.size ?? null,
     fingerprint: record.etag ?? null,
     metadata: {
@@ -885,7 +914,7 @@ The pub/sub topic is the decoupling point between per-system bridges and the sto
 
 ### Topic naming convention
 
-```
+```text
 relayfile.storage.events.{workspace_id}
 ```
 
@@ -934,7 +963,7 @@ All storage bridge files carry standard `semantics.properties` in the relayfile 
 
 Agents can query across all storage bridge files with:
 
-```
+```http
 GET /v1/workspaces/{id}/fs/query?property=storage.source:s3
 GET /v1/workspaces/{id}/fs/query?property=s3.bucket:my-bucket
 ```
@@ -980,12 +1009,23 @@ async function writebackToPostgres(item: WritebackItem, config: PostgresWritebac
 
   const row = JSON.parse(Buffer.from(item.content, "base64").toString());
   const pkColumn = tableConfig.pk_columns[0]; // simplified; composite PK needs expansion
+  const quoteIdent = (ident: string) => {
+    if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(ident)) {
+      throw new Error(`Unsafe SQL identifier: ${ident}`);
+    }
+    return `"${ident.replace(/"/g, '""')}"`;
+  };
+  const schemaIdent = quoteIdent(schema);
+  const tableIdent = quoteIdent(table);
+  const pkIdent = quoteIdent(pkColumn);
+  const assignments = Object.keys(row)
+    .filter((key) => key !== pkColumn)
+    .map((key) => `${quoteIdent(key)} = EXCLUDED.${quoteIdent(key)}`)
+    .join(", ");
 
   await config.client.query(
-    `INSERT INTO ${schema}.${table} SELECT * FROM json_populate_record(null::${schema}.${table}, $1)
-     ON CONFLICT (${pkColumn}) DO UPDATE SET ${
-       Object.keys(row).filter(k => k !== pkColumn).map(k => `${k} = EXCLUDED.${k}`).join(", ")
-     }`,
+    `INSERT INTO ${schemaIdent}.${tableIdent} SELECT * FROM json_populate_record(null::${schemaIdent}.${tableIdent}, $1)
+     ON CONFLICT (${pkIdent}) DO UPDATE SET ${assignments}`,
     [JSON.stringify(row)]
   );
 }
@@ -1044,7 +1084,7 @@ Writeback is optional per source and requires explicit `writeback_enabled: true`
 
 Messages that fail after max retry attempts are routed to a dead-letter topic:
 
-```
+```text
 relayfile.storage.deadletter.{workspace_id}
 ```
 
@@ -1244,7 +1284,7 @@ Delivers value for the most common use case immediately with minimal operational
 
 ## Open Questions
 
-1. **Content size limit in pub/sub**: Should the pub/sub envelope always omit content (fetched by adapter), or include it for objects under a threshold (e.g., 256 KB) to avoid a second round-trip? Tradeoff: lower latency vs. higher pub/sub message costs.
+1. **Content size limit in pub/sub**: The pub/sub envelope must default to omitting content and letting the adapter fetch it on delivery. Operators may opt into embedding small payloads by setting a per-source `pubsub_content_threshold` (default `0`, with `256KB` as the recommended upper bound until measured otherwise). Before raising the threshold for high-volume sources, document a cost model that compares message cost, egress, and latency saved for representative event volumes.
 
 2. **Postgres schema changes**: What happens when a watched table gains or loses a column between sync runs? The adapter should detect schema drift and re-serialize rows with the new shape. Needs a schema registry or a "fetch current schema on startup" step.
 

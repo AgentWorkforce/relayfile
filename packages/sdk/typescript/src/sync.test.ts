@@ -309,6 +309,59 @@ describe("RelayFileSync", () => {
     await sync.stop();
   });
 
+  it("reports open health before invoking onRecovered", async () => {
+    const sockets: MockWebSocket[] = [];
+    let recoveredState: string | undefined;
+    const sync = new RelayFileSync({
+      client: makeClient(),
+      workspaceId: "ws_acme",
+      baseUrl: "https://relay.test",
+      token: "ws_token",
+      webSocketFactory: (url) => {
+        const socket = new MockWebSocket(url);
+        sockets.push(socket);
+        return socket;
+      },
+      onRecovered: () => {
+        recoveredState = sync.getHealthStatus().state;
+      }
+    });
+
+    sync.start();
+    (sync as unknown as { degraded: boolean; degradedReason?: string; state: string }).degraded = true;
+    (sync as unknown as { degraded: boolean; degradedReason?: string; state: string }).degradedReason = "test";
+    (sync as unknown as { degraded: boolean; degradedReason?: string; state: string }).state = "polling";
+
+    sockets[0]!.emit("open", {});
+
+    expect(recoveredState).toBe("open");
+    expect(sync.getHealthStatus()).toEqual(expect.objectContaining({
+      state: "open",
+      degraded: false,
+      degradedReason: undefined
+    }));
+
+    await sync.stop();
+  });
+
+  it("stamps health state entry time for an already-aborted signal", () => {
+    const controller = new AbortController();
+    controller.abort();
+    const before = Date.now();
+    const sync = new RelayFileSync({
+      client: makeClient(),
+      workspaceId: "ws_acme",
+      baseUrl: "https://relay.test",
+      token: "ws_token",
+      signal: controller.signal,
+      webSocketFactory: (url) => new MockWebSocket(url)
+    });
+
+    const health = sync.getHealthStatus();
+    expect(health.state).toBe("closed");
+    expect(health.stateEnteredAt).toBeGreaterThanOrEqual(before);
+  });
+
   it("re-resolves the token on every reconnect (handles mid-session token rotation)", async () => {
     // Bug 4: the previous implementation captured `token` once at
     // construction. If the JWT rotated mid-session, the watchdog reconnected
