@@ -23,6 +23,7 @@ func runFuseMount(ctx context.Context, cfg mountConfig) error {
 		Client:      httpClient,
 		WorkspaceID: cfg.workspaceID,
 		RemoteRoot:  cfg.remotePath,
+		LazyRepos:   cfg.lazyRepos,
 		Logger:      log.Default(),
 	}
 

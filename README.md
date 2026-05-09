@@ -43,12 +43,12 @@ mount/
 └── github/
     └── repos/
         ├── _index.json
-        ├── acme/api/                      # lazily materialized on first stat
+        ├── acme/api/
         │   └── pulls/42__bump-deps/meta.json
         └── by-name/acme__api.json
 ```
 
-Four alias views ship out of the box: `by-title/` (slug lookups), `by-id/` (identifier lookups), `by-name/` (human-readable name lookups), and `by-state/` (grouped by issue/PR state). GitHub repo subtrees materialize lazily — the first `ls`/`stat` triggers a one-time fetch instead of paying upfront sync cost on workspaces with hundreds of repos.
+Four alias views ship out of the box: `by-title/` (slug lookups), `by-id/` (identifier lookups), `by-name/` (human-readable name lookups), and `by-state/` (grouped by issue/PR state). GitHub repo subtrees can be materialized lazily (opt-in via `--lazy-repos`) for huge-org workspaces.
 
 ## Why files
 

@@ -630,7 +630,13 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 		}
 	}
 	lazyRepos := opts.LazyRepos
-	if raw := strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_LAZY_GITHUB_REPOS")); raw != "" {
+	if raw := strings.TrimSpace(os.Getenv("RELAYFILE_LAZY_REPOS")); raw != "" {
+		if parsed, perr := strconv.ParseBool(raw); perr == nil {
+			lazyRepos = parsed
+		} else if opts.Logger != nil {
+			opts.Logger.Printf("ignoring invalid RELAYFILE_LAZY_REPOS=%q: %v", raw, perr)
+		}
+	} else if raw := strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_LAZY_GITHUB_REPOS")); raw != "" {
 		if parsed, perr := strconv.ParseBool(raw); perr == nil {
 			lazyRepos = parsed
 		} else if opts.Logger != nil {

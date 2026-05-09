@@ -42,6 +42,7 @@ type mountConfig struct {
 	intervalJitter   float64
 	timeout          time.Duration
 	websocketEnabled bool
+	lazyRepos        bool
 	scopes           []string
 	once             bool
 	mode             string
@@ -66,6 +67,7 @@ func main() {
 	intervalJitter := flag.Float64("interval-jitter", floatEnv("RELAYFILE_MOUNT_INTERVAL_JITTER", 0.2), "sync interval jitter ratio (0.0-1.0)")
 	timeout := flag.Duration("timeout", durationEnv("RELAYFILE_MOUNT_TIMEOUT", 15*time.Second), "per-sync timeout")
 	websocketEnabled := flag.Bool("websocket", boolEnv("RELAYFILE_MOUNT_WEBSOCKET", true), "enable websocket event streaming when available")
+	lazyRepos := flag.Bool("lazy-repos", lazyReposEnv(), "lazily materialize GitHub repo subtrees on first access")
 	mode := flag.String("mode", envOrDefault("RELAYFILE_MOUNT_MODE", mountModePoll), "mount mode: poll (synced mirror, recommended) or fuse")
 	fuse := flag.Bool("fuse", boolEnv("RELAYFILE_MOUNT_FUSE", false), "shortcut for --mode=fuse")
 	once := flag.Bool("once", false, "run one sync cycle and exit")
@@ -107,6 +109,7 @@ func main() {
 		intervalJitter:   *intervalJitter,
 		timeout:          *timeout,
 		websocketEnabled: *websocketEnabled,
+		lazyRepos:        *lazyRepos,
 		scopes:           parseTokenScopes(strings.TrimSpace(*token)),
 		once:             *once,
 		mode:             resolvedMode,
@@ -161,6 +164,7 @@ func runPollingMount(rootCtx context.Context, cfg mountConfig) error {
 		Logger:        log.Default(),
 		Mode:          cfg.mode,
 		Interval:      cfg.interval,
+		LazyRepos:     cfg.lazyRepos,
 	})
 	if err != nil {
 		return fmt.Errorf("initialize mount syncer: %w", err)
@@ -268,6 +272,10 @@ func boolEnv(name string, fallback bool) bool {
 		return fallback
 	}
 	return value
+}
+
+func lazyReposEnv() bool {
+	return boolEnv("RELAYFILE_LAZY_REPOS", boolEnv("RELAYFILE_MOUNT_LAZY_GITHUB_REPOS", false))
 }
 
 func boolPtr(value bool) *bool {

@@ -41,6 +41,7 @@ type Config struct {
 	NegativeTimeout time.Duration
 	UID             uint32
 	GID             uint32
+	LazyRepos       bool
 	Logger          *log.Logger
 }
 
@@ -164,7 +165,7 @@ func newFSState(cfg Config) *fsState {
 		inodeByPath: map[string]uint64{normalizeRemotePath(cfg.RemoteRoot): 1},
 		pathByInode: map[uint64]string{1: normalizeRemotePath(cfg.RemoteRoot)},
 	}
-	if lazyGithubReposEnabled() {
+	if cfg.LazyRepos || lazyGithubReposEnabled() {
 		state.lazyRepos = NewLazyMaterializeCache()
 	}
 	return state
@@ -700,7 +701,10 @@ func contentTypeForPath(remotePath string) string {
 }
 
 func lazyGithubReposEnabled() bool {
-	raw := strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_LAZY_GITHUB_REPOS"))
+	raw := strings.TrimSpace(os.Getenv("RELAYFILE_LAZY_REPOS"))
+	if raw == "" {
+		raw = strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_LAZY_GITHUB_REPOS"))
+	}
 	if raw == "" {
 		return false
 	}
