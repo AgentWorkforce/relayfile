@@ -55,9 +55,15 @@ func TestLayoutMarkdownContainsRequiredAnchors(t *testing.T) {
 		"linear/issues/_index.json",
 		"github/repos/_index.json",
 		"find by title",
+		"by-title",
+		"by-id",
+		"by-name",
+		"notion/pages/by-title/",
+		"linear/issues/by-id/",
+		"linear/users/by-name/",
+		"github/repos/by-name/",
 		"__",
 		"<integration>/.layout.md",
-		"by-title / by-id aliases land in a later release",
 	}
 	for _, needle := range required {
 		if !strings.Contains(LayoutMarkdown, needle) {
@@ -107,6 +113,9 @@ func TestRootDirectorySynthesizesLayoutMarkdown(t *testing.T) {
 	}
 	if entryOut.Attr.Mode&syscall.S_IFMT != syscall.S_IFREG {
 		t.Fatalf("Lookup(%q) mode = %o, want regular file", layoutFilename, entryOut.Attr.Mode)
+	}
+	if perm := entryOut.Attr.Mode & 0o777; perm != 0o444 {
+		t.Fatalf("Lookup(%q) perm = %o, want 0444 (read-only)", layoutFilename, perm)
 	}
 	if entryOut.Attr.Size != uint64(len(LayoutMarkdown)) {
 		t.Fatalf("Lookup(%q) size = %d, want %d", layoutFilename, entryOut.Attr.Size, len(LayoutMarkdown))

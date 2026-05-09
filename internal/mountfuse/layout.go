@@ -8,9 +8,12 @@ import (
 )
 
 const (
-	layoutFilename    = "LAYOUT.md"
-	layoutRevision    = "virtual-layout"
-	layoutContentType = "text/markdown; charset=utf-8"
+	layoutFilename      = "LAYOUT.md"
+	layoutRevision      = "virtual-layout"
+	layoutContentType   = "text/markdown; charset=utf-8"
+	aliasByTitleSegment = "by-title"
+	aliasByIDSegment    = "by-id"
+	aliasByNameSegment  = "by-name"
 )
 
 const LayoutMarkdown = `# LAYOUT
@@ -25,6 +28,16 @@ This mount exposes upstream files together with navigation helpers.
 
 To ` + "`find by title`" + `, read the relevant ` + "`_index.json`" + ` file, find the matching row, then read the named file from that row.
 
+Direct title aliases also live under ` + "`notion/pages/" + aliasByTitleSegment + "/<title>.json`" + ` when that integration exports them.
+
+## Find by id
+
+Direct identifier aliases live under ` + "`linear/issues/" + aliasByIDSegment + "/<identifier>.json`" + ` when that integration exports them.
+
+## Find by name
+
+Direct name aliases live under ` + "`linear/users/" + aliasByNameSegment + "/<name>.json`" + ` and ` + "`github/repos/" + aliasByNameSegment + "/<owner>__<repo>.json`" + ` when those integrations export them.
+
 ## Filenames
 
 Entity files use the ` + "`<sanitized-name>__<id>`" + ` filename convention. Recover the id from the last ` + "`__`" + `-separated segment.
@@ -32,10 +45,6 @@ Entity files use the ` + "`<sanitized-name>__<id>`" + ` filename convention. Rec
 ## Integration-specific layouts
 
 See per-integration ` + "`<integration>/.layout.md`" + ` files for integration-specific tree shapes.
-
-## Forward note
-
-Direct by-title / by-id aliases land in a later release.
 `
 
 func layoutRemotePath(remoteRoot string) string {
@@ -50,7 +59,9 @@ func virtualLayoutMeta(remoteRoot string) nodeMeta {
 	return nodeMeta{
 		path:        layoutRemotePath(remoteRoot),
 		name:        layoutFilename,
-		mode:        syscall.S_IFREG | defaultFileMode,
+		// LAYOUT.md is a virtual read-only file; writes/deletes are not
+		// supported, so advertise 0o444 to surface that in the mount.
+		mode:        syscall.S_IFREG | 0o444,
 		revision:    layoutRevision,
 		size:        uint64(len(LayoutMarkdown)),
 		modTime:     time.Unix(0, 0).UTC(),
