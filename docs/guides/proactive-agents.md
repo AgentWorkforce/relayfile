@@ -112,6 +112,14 @@ You now own this infrastructure. You are responsible for queue health, dead-lett
 
 Relayfile handles endpoint registration, signature verification, deduplication, ordering, normalization, and state persistence. The agent sees none of it.
 
+More broadly, **relaycron, relaycast, and relayfile are all ways an agent can become proactive**:
+
+- **relaycron** wakes the agent up on time
+- **relayfile** wakes the agent up when the world changes
+- **relaycast** wakes the agent up when someone or something has something to say
+
+That is the core loop. A proactive cloud agent does not just run on a schedule. It can wake up because time passed, data changed, or a message arrived.
+
 ### Setup: connect your providers once
 
 ```typescript
@@ -136,6 +144,8 @@ sync.on('change', async (file) => {
   await agent.handle(file);
 });
 ```
+
+The same agent can also be woken up by relaycron ticks or relaycast messages. Relayfile is one part of the proactive runtime, not the only trigger.
 
 The agent receives a normalized file update — not a raw webhook payload. The affected file path, the previous state, and the current state are already resolved. The agent does not know which provider originated the event and does not need to.
 
@@ -200,3 +210,11 @@ A reactive agent waits. A proactive agent acts when the moment is right.
 - **Incident agent** starts a runbook the moment PagerDuty fires, not 60 seconds later when the next polling cycle runs.
 
 The difference between reactive and proactive is the difference between an assistant that needs to be asked and one that already handled it.
+
+In practice, that usually means combining three triggers:
+
+- **relaycron** for scheduled wakeups
+- **relayfile** for change-driven wakeups
+- **relaycast** for message-driven wakeups
+
+Together they give developers a very small mental model for proactive agents: give the agent a workspace, a clock, and an inbox.
