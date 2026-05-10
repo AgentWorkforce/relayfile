@@ -4,7 +4,27 @@
 
 "Multi-agent coordination layer" is the right description of what relayfile is, but it is the wrong pitch for today's market. Most teams are not running multiple peer agents writing to shared state. Pitching coordination for a pattern they don't yet have creates a timing mismatch — the product sounds like infrastructure for a future they haven't hit yet.
 
-The market that exists today is larger and more immediate, and relayfile serves it directly.
+The market that exists today is larger and more immediate. The academic research validates the architecture. The competitive landscape has clear gaps. And the enterprise opportunity is underserved by a small incumbent that relayfile can displace.
+
+---
+
+## Academic Validation
+
+Before the market framing, the architecture: a 2024 paper from Tsinghua, Huawei, and collaborators — *"Proactive Agent: Shifting LLM Agents from Reactive Responses to Active Assistance"* (arXiv:2410.12361) — empirically validates relayfile's core design choices across a benchmark of 6,790 training events and 233 real-world test cases.
+
+**What the paper proves:**
+
+1. **Push architecture, not polling, is the correct model for proactive agents.** The paper formalizes proactive agents as event stream consumers. An agent that polls cannot be proactive by definition — it is always acting on state that is N seconds old.
+
+2. **Persistent state per session is non-negotiable.** The paper proves mathematically that a stateless agent cannot infer intent. It has no basis for knowing what the user is building toward. Durable, queryable memory per session is a hard requirement, not an optimization.
+
+3. **Shared environmental state is the coordination primitive.** The paper's "Environment Gym" — a shared workspace that both agents and the simulated user read and write — is structurally identical to relayfile's VFS. Coordination happens through shared state, not direct message passing.
+
+4. **The hardest problem is calibrated restraint.** Without domain-specific fine-tuning, models "tend to provide as much assistance as possible, instead of necessary assistance." False alarms destroy user trust faster than missed detections. Even GPT-4o only achieves 64.60% F1 on proactive task prediction — the problem is hard at the frontier. This maps to relayfile's event normalization layer: not every webhook should fire the agent.
+
+5. **Multi-candidate fan-out dramatically outperforms single proposals.** Proposing three candidate tasks (Pred@3) and letting users filter improved GPT-4o from 64.60% to 77.72% F1. This is relayfile's fan-out model validated: broadcast to multiple agents, let the right one handle it.
+
+The paper's core quote: *"Currently, most existing LLM-based agents predominantly work in the reactive paradigm: they require explicit human instructions to initiate task completion and remain dormant in terms of providing services until prompted by user instructions."* That is the problem relayfile sells against.
 
 ---
 
@@ -12,7 +32,7 @@ The market that exists today is larger and more immediate, and relayfile serves 
 
 **Make your agent proactive with a few lines of code.**
 
-Today most agents are reactive — they respond when called. Relayfile makes them proactive: the agent knows when something changed in the outside world and acts without being polled or triggered manually. A Jira ticket moves to blocked, the agent is notified. A PR is merged, the agent updates its working state. A customer sends a message, the agent picks it up in real time.
+Today most cloud agents are reactive — they respond when called. Relayfile makes them proactive: the agent knows when something changed in the outside world and acts without being polled or manually triggered. A Jira ticket moves to blocked, the agent is notified. A PR is merged, the agent updates its working state. A customer sends a message, the agent picks it up in real time.
 
 That shift — from reactive to proactive — is one SDK call:
 
@@ -51,11 +71,13 @@ Every team shipping cloud agent products runs into the same class of failures. T
 
 Cloud agents have no filesystem. Between runs, between retries, between handoffs to a different instance, state must be stored somewhere. The default solution is a database table or a blob in S3. Neither supports real-time reads, concurrent writes, or conflict detection. Every team builds an ad hoc version of a shared workspace and none of them generalize.
 
+MindStudio, a popular agent-building platform, documents this gap directly in their blog: they recommend using Jira or Linear tickets as the shared state layer for multi-agent systems. That is a workaround, not a solution — and it is relayfile's market.
+
 ### Problem 2 — Stale reads
 
 The agent reads a record from an external system, spends time reasoning or executing multi-step tasks, and by the time it writes back the record has changed. The agent never knew. It overwrites the new state with a response based on the old one.
 
-This is the TOCTOU problem (time-of-check to time-of-use), endemic to every polling-based architecture. A 30-second polling interval means every agent action is based on state that is at least 30 seconds old. For cloud agents running long tasks, the drift can be minutes.
+This is the TOCTOU problem (time-of-check to time-of-use), endemic to every polling-based architecture. A 30-second polling interval means every agent action is based on state that is at least 30 seconds old. For cloud agents running long tasks, the drift can be minutes. The arXiv paper proves this is not solvable with better polling — the architecture must change to push.
 
 ### Problem 3 — Silent concurrent writes
 
@@ -71,7 +93,7 @@ The cloud agent starts a multi-step task. Halfway through, the context changes: 
 
 Every team building a cloud agent product builds the same pipeline from scratch: receive webhook, verify the signature (different format per provider), deduplicate, order, retry on failure, dead-letter, persist state, deliver to the agent. Then repeat for every provider.
 
-This is undifferentiated infrastructure. Every Tier 1 ICP below has already built a version of this and is maintaining it instead of building their actual product.
+This is undifferentiated infrastructure. Every Tier 1 ICP below has already built a version of this and is maintaining it instead of building their actual product. See `docs/guides/proactive-agents.md` for the concrete before/after.
 
 ### Problem 6 — State loss between agent sessions
 
@@ -79,43 +101,81 @@ A cloud agent run ends. The next run starts — scheduled, retried, or handed to
 
 ---
 
-## Why This Is Unserved
+## The Competitive Landscape
 
-| Layer | Existing tools | What they do | What they miss |
-|---|---|---|---|
-| Tool execution | Composio, Merge, Executor | Call the API on demand | No state between calls |
-| Data ingestion | Nango, Paragon Managed Sync | Get data in on a schedule | Polling latency; no conflict model |
-| **Persistent agent workspace** | **Nobody** | — | **Real-time currency; conflict detection; state across runs** |
+### What exists today and where it falls short
 
-Composio and Merge solve execution. Nango and Paragon solve ingestion. Nobody has standardized the layer where the cloud agent holds its working state between runs, knows in real time when something changed underneath it, and detects conflicts before acting on outdated information.
+**MindStudio** ($20/mo, 150K+ agents deployed): No-code visual workflow builder. 1,000+ integrations, 200+ models. Their proactive agent pattern is a "heartbeat" — polling every N minutes, wake, query APIs, reason, act. Their webhook trigger uses URL obscurity with no signature verification. They do not have a persistent shared workspace. Their own blog posts document the gap: they recommend file-based memory, shared SQLite, and issue trackers as state layers — all workarounds for the missing coordination layer. MindStudio is a natural distribution channel for relayfile, not a competitor.
 
----
+**Tonkean** (~$10K+/mo, F500 customers including Google, Workday, OpenAI): Enterprise G&A orchestration for procurement, legal, finance, and HR. The most technically sophisticated incumbent. Their patented async state engine handles durable workflow state with pause/resume on external events. Their context graph captures human decisions and cross-run lineage. Their proactive agents use webhook triggers and scheduled monitoring. This is real, well-designed infrastructure — for enterprise internal operations teams.
 
-## The Pitch
+Tonkean's moat is depth in G&A workflows. Their vulnerability is narrowness: they are an internal ops tool, not infrastructure for companies building agent products. They do not expose an SDK. They do not support companies shipping agents to their own customers. They raised $83M total with a $50M Series B in 2021 — four years ago, with no publicized Series C. They are a mid-sized company in a category that is about to get much larger.
 
-**Not:** "Relayfile is a coordination layer for multi-agent workflows."
+**Lindy, Relevance AI, Dust, n8n agents**: AI automation platforms that patch the state problem with workarounds (conversation memory, per-agent variables, ad hoc databases). None have a proper coordination layer. All are building for the same ICP as relayfile and all are paying the infrastructure tax.
 
-**Not:** "Relayfile is for developers building with AI agents." (Too broad — includes local dev use cases where it adds no value.)
+**Composio, Merge, Nango, Paragon**: Tool execution and data ingestion layers. They solve how agents call APIs and how data gets in. None of them solve the coordination layer — what the agent holds between reads and writes.
 
-**Yes:** "Make your agent proactive with a few lines of code." — and underneath that: a persistent cloud workspace, real-time event delivery, conflict-safe writes, and state that survives between runs, with none of the webhook infrastructure built by you.
+### The gap
 
-Multi-agent coordination is what customers grow into. The entry is simpler: the agent needs a workspace that exists between runs and knows when the world changed.
-
----
-
-## ICPs Today
-
-The right filter: **companies shipping cloud agents as a product**, where the agent runs in the vendor's infrastructure and has no local filesystem. Not developers using agents as tools on their own machines.
+| Layer | Existing tools | Gap |
+|---|---|---|
+| Tool execution | Composio, Merge, Executor | No state between calls |
+| Data ingestion | Nango, Paragon | Polling latency; no conflict model |
+| Workflow building | MindStudio, Lindy, Relevance AI | Ad hoc state workarounds |
+| Enterprise G&A ops | Tonkean | Only internal ops, not agent product companies; narrow vertical; stale funding |
+| **Persistent agent workspace** | **Nobody at the infrastructure layer** | **Real-time push, conflict detection, state across runs, for any use case** |
 
 ---
 
-### Tier 1 — AI Automation Platforms
+## The Enterprise Opportunity
 
-Cloud agents that take actions in users' SaaS tools on their behalf. The highest-density ICP: every company here is building the same coordination infrastructure from scratch, in their cloud, for every customer.
+Tonkean proves the enterprise pays for sophisticated agent state management. Their customers are paying $10K+/month for durable workflow state, context graphs, and proactive orchestration. The market is real.
+
+Tonkean's weaknesses are relayfile's opening:
+
+**Vertical lock-in.** Tonkean is purpose-built for G&A (procurement, legal, finance). An enterprise engineering team, IT ops team, or AI product team cannot use Tonkean for their use case. Relayfile is horizontal — the same coordination layer works for any agent workflow in any function.
+
+**Closed ecosystem.** Tonkean does not expose an SDK. You cannot embed Tonkean's state engine into your own product. Companies building internal AI agents or shipping AI features to their customers cannot use Tonkean as infrastructure — they must build on top of their workflow builder or not use it at all. Relayfile is infrastructure-first: the SDK is the product.
+
+**Funding gap.** The last publicized Tonkean round was a $50M Series B in 2021. The Cinch acquisition (December 2025) signals they needed inorganic growth. A well-capitalized, horizontally-positioned competitor with a developer-first go-to-market can move faster.
+
+**No agent product company story.** Tonkean targets procurement teams at large enterprises. Relayfile targets the companies those enterprises are buying AI products from — and the enterprises themselves building internal AI agents. These are different buyers with different needs, and Tonkean cannot serve both.
+
+### Enterprise go-to-market
+
+The enterprise play is not head-to-head with Tonkean on G&A workflow orchestration. It is the adjacent and larger opportunity: enterprises building internal AI agents across engineering, IT, customer success, and operations — and enterprises that are AI product companies themselves (Salesforce, SAP, ServiceNow building AI features for their customers).
+
+**Entry points:**
+
+1. **Engineering and DevOps teams at enterprises** — internal agents for code review automation, incident response, deployment coordination. Relayfile's integrations with GitHub, Linear, Jira, and PagerDuty are strongest here. The buyer is the VP of Engineering or Platform team, not procurement.
+
+2. **Enterprise AI product teams** — the team at Salesforce building Einstein, at SAP building Joule, at Zendesk building Fin. They need the coordination layer for the AI features they're shipping to their customers. Relayfile is infrastructure for their product, not a workflow tool for their ops.
+
+3. **System integrators** — Accenture, Deloitte, KPMG building AI solutions for enterprise clients. They need reusable coordination infrastructure they can embed in every engagement. Relayfile as a partner platform accelerates their delivery.
+
+**Enterprise requirements relayfile already has:**
+- On-premise and self-hosted deployment (Enterprise plan)
+- SSO / SAML
+- Audit logs
+- ACLs (workspace-level and file-level via relayauth)
+- 99.9% SLA
+- Dedicated support
+
+**What the enterprise pitch looks like:**
+
+*"Every enterprise building internal AI agents is writing the same infrastructure from scratch — webhook pipelines, state stores, conflict handling. Relayfile is that infrastructure, deployable on-premise, with the audit logs and access controls your security team requires. We are what Tonkean's state engine would be if it were an SDK you could embed anywhere, not a workflow builder you have to use."*
+
+---
+
+## ICPs
+
+### Tier 1 — AI Automation Platforms (Primary, Near-Term)
+
+Cloud agents that take actions in users' SaaS tools on their behalf. Every company here is building the same coordination infrastructure from scratch, in their cloud, for every customer.
 
 **Lindy, Relevance AI, Dust, n8n (agent mode), Zapier AI Actions, Make.com AI, Relay.app, Bardeen, Gumloop**
 
-The problem: The agent runs in the vendor's cloud. It needs a workspace scoped to each customer, a real-time feed of what's happening in that customer's tools, and persistent state across runs. Today they build polling loops, database flags, and custom webhook handlers. Relayfile replaces all of it.
+The agent runs in the vendor's cloud. It needs a workspace scoped to each customer, a real-time feed of what's changing in that customer's tools, and persistent state across runs. Today they build polling loops, database flags, and custom webhook handlers. Relayfile replaces all of it.
 
 ---
 
@@ -125,41 +185,63 @@ Cloud-hosted agents that work software tickets end-to-end without a human in the
 
 **Cognition (Devin), Factory, SWE-agent deployments, GitHub Copilot Workspace (cloud mode)**
 
-The problem: The agent runs in a cloud sandbox. It needs to know if the ticket scope changed mid-task, if a human pushed a conflicting change to the same branch, or if another agent instance was assigned to the same issue. There is no local filesystem — the working state must live somewhere durable between steps.
+The agent runs in a cloud sandbox with no local filesystem. Working state must live somewhere durable between steps. The agent needs to know if ticket scope changed mid-task, if a human pushed a conflicting commit, or if another instance was assigned to the same issue.
 
-Note: Cursor and Windsurf are primarily local developer tools and are not the ICP. Cloud-hosted, fully-autonomous agents are.
+Note: Cursor and Windsurf are primarily local developer tools and are not this ICP. Cloud-hosted autonomous agents are.
 
 ---
 
 ### Tier 1 — AI Customer Support Platforms
 
-Cloud agents that handle customer cases autonomously, often in parallel with human support agents working the same queue.
+Cloud agents handling customer cases autonomously, in parallel with human agents on the same queue.
 
 **Intercom (Fin), Zendesk AI, Salesforce Service Cloud AI, Freshdesk (Freddy), Kustomer AI, Forethought, Thankful**
 
-The problem: The AI agent runs in the vendor's cloud and drafts a resolution. A human support agent opens the same case 15 seconds later. Neither knows the other is active. One resolution goes out. The customer receives two responses, or the human's work is silently overwritten.
-
-These companies handle this today with queue locking and manual review — neither scales with AI volume.
+The AI agent runs in the vendor's cloud and drafts a resolution. A human support agent opens the same case 15 seconds later. Neither knows the other is active. Queue locking and manual review are the current solutions — neither scales with AI volume.
 
 ---
 
 ### Tier 1 — AI Sales and CRM Automation
 
-Cloud agents that enrich, update, and act on CRM records while humans are in active sales motions against the same data.
+Cloud agents enriching, updating, and acting on CRM records while humans are in active sales motions.
 
 **Clay, Amplemarket, Apollo.io AI, Outreach AI, HubSpot AI workflows, Salesforce Einstein agents**
 
-The problem: The enrichment agent runs in the vendor's cloud and updates contact fields. The sales rep opens the same contact during a live call and is looking at pre-enrichment data. Or the rep updates the deal stage while the agent is mid-write and one update is silently dropped.
+The enrichment agent runs in the vendor's cloud and updates contact fields. The sales rep opens the same contact during a live call and is looking at pre-enrichment data. Or the rep updates the deal stage while the agent is mid-write and one update is silently dropped.
 
 ---
 
 ### Tier 1 — AI DevOps and Incident Response
 
-Cloud agents that triage and take remediation actions during incidents, running concurrently with on-call engineers.
+Cloud agents triaging and taking remediation actions during incidents, running concurrently with on-call engineers.
 
 **PagerDuty AI, Incident.io AI, Rootly AI, Grafana Incident AI, FireHydrant, Cortex**
 
-The problem: The agent fires at 2am and starts running runbooks in the vendor's cloud. The on-call engineer wakes up and starts investigating independently. By the time they sync, the agent has taken actions the engineer didn't know about, and the engineer has updated the incident timeline with observations the agent didn't see.
+The agent fires at 2am and starts running runbooks. The on-call engineer wakes up and starts investigating independently. By the time they sync, the agent has taken actions the engineer didn't know about, and the engineer has updated the timeline with observations the agent didn't see.
+
+---
+
+### Tier 2 — Enterprise Internal AI Agents (Enterprise Play — Tonkean Territory)
+
+Large enterprises building internal AI agents across engineering, IT, finance, HR, and operations. This is the market Tonkean currently serves for G&A workflows — but Tonkean cannot serve engineering, IT, or product teams, and cannot be embedded in enterprise-built AI products.
+
+**F500 engineering teams, enterprise platform teams, AI centers of excellence**
+
+The agent runs in the enterprise's own infrastructure. It needs a coordination layer that works with their existing tools (Jira, ServiceNow, GitHub, Salesforce), can be deployed on-premise, passes their security review (SOC 2, HIPAA, FedRAMP as applicable), and exposes the audit trail their compliance team requires.
+
+Tonkean serves procurement teams in this segment. Relayfile serves engineering, IT, and AI product teams — and is embeddable as SDK infrastructure rather than requiring adoption of a new workflow builder.
+
+**The pitch:** *"Tonkean's state engine for your use case, deployed on your infrastructure, as an SDK you can embed anywhere."*
+
+---
+
+### Tier 2 — AI-Embedded SaaS Products (Enterprise Product Companies)
+
+Large SaaS companies building AI features where AI and humans write to the same records.
+
+**Salesforce (Einstein), SAP (Joule), ServiceNow AI, HubSpot AI, Zendesk AI, Atlassian Intelligence**
+
+These companies are shipping AI agents that operate on the same records as their customers' human users. Their AI features need conflict detection, real-time awareness, and state persistence — infrastructure that their current platforms don't provide. Relayfile is the coordination layer they embed in their product.
 
 ---
 
@@ -169,59 +251,53 @@ Cloud-hosted AI features inside work management tools that triage, assign, and u
 
 **Linear AI, Jira AI (Atlassian Intelligence), Asana AI, Monday.com AI, Notion AI**
 
-The problem: The AI triage feature runs as a background cloud process touching the same backlog a team lead is manually processing. At scale — hundreds of issues per hour — the backlog becomes incoherent because neither writer knows what the other changed.
+The AI triage feature runs as a background cloud process touching the same backlog a team lead is manually processing. At scale — hundreds of issues per hour — the backlog becomes incoherent because neither writer knows what the other changed.
 
 ---
 
 ### Tier 2 — AI Code Review and PR Automation
 
-Cloud agents that review pull requests based on a snapshot of the PR at trigger time.
+Cloud agents reviewing pull requests based on a snapshot of the PR at trigger time.
 
 **CodeRabbit, Greptile, Graphite, Trunk, Sourcegraph Cody (review mode)**
 
-The problem: The review agent runs in the vendor's cloud against the PR as it existed when triggered. The author pushes a new commit mid-review. The review comments are now based on stale code. The agent has no way to know the code changed without being fully re-triggered.
+The review agent runs against the PR as it existed when triggered. The author pushes a new commit mid-review. The review comments are now based on stale code. The agent has no way to know the code changed without being fully re-triggered.
 
 ---
 
 ### Tier 2 — Healthcare AI
 
-Cloud agents that read and write to patient records alongside clinicians, where a stale or conflicted write is a compliance failure.
+Cloud agents reading and writing to patient records alongside clinicians.
 
 **Ambience Healthcare, Nabla, Abridge, Nuance (DAX), Suki, Notable Health**
 
-The problem: The AI agent runs in the vendor's HIPAA-compliant cloud and pre-fills structured EHR fields while the clinician is simultaneously reviewing and dictating. An undetected conflict is not just a product bug — it is an auditable regulatory failure.
+An undetected conflict between the AI's write and the clinician's write is not just a product bug — it is an auditable regulatory failure. These companies need conflict detection that is provable, logged, and compliant.
 
 ---
 
 ### Tier 2 — AI-Powered E-Commerce Operations
 
-Cloud agents that manage pricing and inventory while human merchandisers are working the same catalog.
+Cloud agents managing pricing and inventory while human merchandisers are working the same catalog.
 
 **Shopify AI automation, Feedonomics, Linnworks AI, Akeneo AI**
 
-The problem: The AI pricing agent runs on a schedule in the vendor's cloud. The merchandiser is manually adjusting the same SKUs. One set of changes wins silently. The merchandiser's intentional strategy is overwritten, or the agent's campaign goes live at the wrong price.
+The AI pricing agent runs on a schedule and applies discount rules. The merchandiser is manually adjusting the same SKUs. One set of changes wins silently.
 
 ---
 
-### Tier 2 — AI DevOps and Incident Response *(see Tier 1)*
-
 ### Tier 3 — AI Research and Analysis Platforms
-
-Cloud agents that synthesize information across sources into shared outputs.
 
 **Perplexity (enterprise), Elicit, Brightwave, Hebbia**
 
-The problem: Multiple research sessions on overlapping topics each build their own view of source material in the vendor's cloud, with no shared representation of what has been found or what contradicts another session's findings.
+Multiple research sessions on overlapping topics with no shared representation of findings, contradictions, or in-progress work.
 
 ---
 
 ### Tier 3 — AI Content Operations
 
-Cloud-hosted AI that generates and revises content concurrently with human editors.
-
 **Jasper, Copy.ai, Writer**
 
-The problem: Multiple contributors and AI drafts converge on the same content asset with no conflict detection when a human edit and an AI revision both modify the same section.
+Multiple contributors and AI drafts converging on the same asset with no conflict detection.
 
 ---
 
@@ -229,7 +305,9 @@ The problem: Multiple contributors and AI drafts converge on the same content as
 
 Every company in Tier 1 has already built a version of this infrastructure. It took 4–12 weeks of engineering. It handles their specific topology and breaks when they add a new integration, change their agent framework, or scale to more concurrent runs.
 
-This is undifferentiated infrastructure: expensive to build, expensive to maintain, not a competitive advantage, and blocking higher-value work. Relayfile is what every company on this list should be buying instead of building.
+Tonkean proves the enterprise pays $10K+/month for a pre-built version of this. MindStudio's blog content proves the SMB pays in engineering time for workarounds. The arXiv paper proves the architecture (push events + persistent shared state) is the correct solution.
+
+Relayfile is what every company on this list should be buying instead of building — at a price point calibrated to their scale, deployable on their infrastructure, embeddable in their product.
 
 ---
 
@@ -237,8 +315,8 @@ This is undifferentiated infrastructure: expensive to build, expensive to mainta
 
 Teams do not buy relayfile for multi-agent coordination on day one. The natural progression:
 
-1. **Entry:** "Make my cloud agent proactive." Real-time event delivery, no polling, agent knows when the world changed.
-2. **Expansion:** "Give my agent persistent state across runs." Workspace survives between sessions, picks up where it left off.
-3. **Platform:** "Coordinate multiple agents and humans on the same shared records without conflicts." The full coordination layer.
+1. **Entry:** "Make my cloud agent proactive." Real-time event delivery, no polling, agent knows when the world changed. Single agent, immediate value.
+2. **Expansion:** "Give my agent persistent state across runs." Workspace survives between sessions, picks up where it left off. Multiple runs, coherent behavior.
+3. **Platform:** "Coordinate multiple agents and humans on the same shared records without conflicts." The full coordination layer. The Tonkean-level problem, solved at the infrastructure level for any use case.
 
-The entry pitch is unambiguous and solvable today. The platform pitch is where relayfile's full value is captured as agentic architectures mature.
+The entry pitch is unambiguous and solvable today. The enterprise pitch is the Tonkean displacement play for teams that cannot or will not adopt a G&A-specific workflow builder. The platform pitch is where relayfile's full value is captured as agentic architectures mature across every industry.
