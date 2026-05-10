@@ -107,9 +107,17 @@ A cloud agent run ends. The next run starts — scheduled, retried, or handed to
 
 **MindStudio** ($20/mo, 150K+ agents deployed): No-code visual workflow builder. 1,000+ integrations, 200+ models. Their proactive agent pattern is a "heartbeat" — polling every N minutes, wake, query APIs, reason, act. Their webhook trigger uses URL obscurity with no signature verification. They do not have a persistent shared workspace. Their own blog posts document the gap: they recommend file-based memory, shared SQLite, and issue trackers as state layers — all workarounds for the missing coordination layer. MindStudio is a natural distribution channel for relayfile, not a competitor.
 
-**Tonkean** (~$10K+/mo, F500 customers including Google, Workday, OpenAI): Enterprise G&A orchestration for procurement, legal, finance, and HR. The most technically sophisticated incumbent. Their patented async state engine handles durable workflow state with pause/resume on external events. Their context graph captures human decisions and cross-run lineage. Their proactive agents use webhook triggers and scheduled monitoring. This is real, well-designed infrastructure — for enterprise internal operations teams.
+**Tonkean** (~$10K+/mo minimum, F500 customers including Google, Workday, OpenAI): Enterprise G&A orchestration for procurement, legal, finance, and HR. The most technically sophisticated incumbent. Their patented async state engine handles durable workflow state with pause/resume on external events. Their context graph captures human decisions and cross-run lineage. This is real, well-designed infrastructure — for enterprise internal operations teams specifically.
 
-Tonkean's moat is depth in G&A workflows. Their vulnerability is narrowness: they are an internal ops tool, not infrastructure for companies building agent products. They do not expose an SDK. They do not support companies shipping agents to their own customers. They raised $83M total with a $50M Series B in 2021 — four years ago, with no publicized Series C. They are a mid-sized company in a category that is about to get much larger.
+The depth comes at a cost. Several hard constraints are documented in Tonkean's own materials:
+
+- **10-minute polling floor.** Tonkean's FAQ states the product is "asynchronous" and "not designed to call connected applications in real-time." Events are polled on a minimum 10-minute cycle. For incident response, sales enrichment during a live call, or any time-critical workflow, this is an architectural disqualifier — not a configuration issue.
+- **No SDK, no code escape hatch.** Tonkean is 100% no-code. There is no developer API, no programmable interface, no way to embed Tonkean's state engine into your own product. If your use case doesn't fit their workflow builder, you cannot use Tonkean.
+- **Mandatory professional services.** Every Tonkean deployment requires an Implementation Architect and Engineer running multi-month engagement workshops. There is no self-serve path. The sales motion is PS-heavy by design, which means long cycles, high CAC, and limited scalability.
+- **90-day data retention default.** Standard Tonkean plans retain workflow history for 90 days. For legal, procurement, and compliance workflows — their stated core verticals — this creates an audit risk unless customers negotiate custom retention, which requires enterprise contract escalation.
+- **Stale funding, slow growth signals.** Tonkean raised $83M total ($50M Series B in June 2021 — four years ago with no publicized Series C). Estimated ARR based on public signals is approximately $16M — slow growth relative to capital raised. The December 2025 Cinch acquisition signals inorganic growth strategy. Glassdoor reviews flag "too many layoffs" and "ineffective leadership, communication getting worse."
+
+Tonkean's moat is depth in G&A workflows. Their vulnerability is everything else: they cannot serve engineering teams, AI product companies, or anyone who needs real-time events, a developer API, or a deployable SDK. They raised $83M to serve a narrow vertical and are four years past their last funding event.
 
 **Lindy, Relevance AI, Dust, n8n agents**: AI automation platforms that patch the state problem with workarounds (conversation memory, per-agent variables, ad hoc databases). None have a proper coordination layer. All are building for the same ICP as relayfile and all are paying the infrastructure tax.
 
@@ -122,7 +130,7 @@ Tonkean's moat is depth in G&A workflows. Their vulnerability is narrowness: the
 | Tool execution | Composio, Merge, Executor | No state between calls |
 | Data ingestion | Nango, Paragon | Polling latency; no conflict model |
 | Workflow building | MindStudio, Lindy, Relevance AI | Ad hoc state workarounds |
-| Enterprise G&A ops | Tonkean | Only internal ops, not agent product companies; narrow vertical; stale funding |
+| Enterprise G&A ops | Tonkean | 10-min polling floor; no SDK; $10K+/mo + mandatory PS; G&A-only |
 | **Persistent agent workspace** | **Nobody at the infrastructure layer** | **Real-time push, conflict detection, state across runs, for any use case** |
 
 ---
@@ -131,15 +139,23 @@ Tonkean's moat is depth in G&A workflows. Their vulnerability is narrowness: the
 
 Tonkean proves the enterprise pays for sophisticated agent state management. Their customers are paying $10K+/month for durable workflow state, context graphs, and proactive orchestration. The market is real.
 
-Tonkean's weaknesses are relayfile's opening:
+Tonkean's weaknesses are relayfile's opening — eight specific gaps, each exploitable:
 
-**Vertical lock-in.** Tonkean is purpose-built for G&A (procurement, legal, finance). An enterprise engineering team, IT ops team, or AI product team cannot use Tonkean for their use case. Relayfile is horizontal — the same coordination layer works for any agent workflow in any function.
+**1. No real-time events.** The 10-minute polling floor is a hard architectural constraint, not a setting. Any workflow requiring near-real-time response — incident alerts, live-call enrichment, PR review, customer support — cannot use Tonkean. Relayfile delivers events in under a second via push.
 
-**Closed ecosystem.** Tonkean does not expose an SDK. You cannot embed Tonkean's state engine into your own product. Companies building internal AI agents or shipping AI features to their customers cannot use Tonkean as infrastructure — they must build on top of their workflow builder or not use it at all. Relayfile is infrastructure-first: the SDK is the product.
+**2. No programmable path.** Zero developer API, no SDK, no code escape hatch. If a use case doesn't fit the workflow builder UI, Tonkean cannot serve it. Engineering teams, AI product companies, and anyone who needs to embed state management in their own product are categorically excluded. Relayfile is SDK-first.
 
-**Funding gap.** The last publicized Tonkean round was a $50M Series B in 2021. The Cinch acquisition (December 2025) signals they needed inorganic growth. A well-capitalized, horizontally-positioned competitor with a developer-first go-to-market can move faster.
+**3. No self-serve.** Every Tonkean deployment requires a multi-month PS engagement. There is no trial, no free tier, no self-setup. The $10K+/month floor is structural — it funds the mandatory onboarding. Relayfile has a self-serve Growth plan at $99/month. Time-to-first-value is hours, not quarters.
 
-**No agent product company story.** Tonkean targets procurement teams at large enterprises. Relayfile targets the companies those enterprises are buying AI products from — and the enterprises themselves building internal AI agents. These are different buyers with different needs, and Tonkean cannot serve both.
+**4. No mid-market pricing.** The mandatory PS model and $10K+/month floor price out every company below ~200 employees. The mid-market (50–500 employees, $500–$5K/month budget) is entirely unserved by Tonkean. Relayfile captures this segment directly.
+
+**5. 90-day retention compliance risk.** Standard data retention is 90 days — creating audit exposure in the legal, procurement, and compliance verticals Tonkean explicitly targets. Enterprises requiring longer retention must negotiate custom contracts. Relayfile's Enterprise plan offers configurable retention with audit logs by default.
+
+**6. Vertical lock-in.** Tonkean is purpose-built for G&A (procurement, legal, finance, HR). Engineering, IT, DevOps, and AI product teams cannot use it for their workflows. Relayfile is horizontal — the same coordination layer for any agent workflow in any function.
+
+**7. No agent product company story.** Tonkean targets procurement teams inside large enterprises. It cannot be embedded in a product a company ships to its own customers. Relayfile is infrastructure for AI product companies — the buyers their enterprise customers are already purchasing from.
+
+**8. EMEA weakness.** Tonkean is US-headquartered with US-skewed customer references. European enterprises with GDPR-driven data residency requirements have limited Tonkean options. Relayfile's on-premise deployment and EU-region hosting address this directly.
 
 ### Enterprise go-to-market
 
@@ -163,7 +179,9 @@ The enterprise play is not head-to-head with Tonkean on G&A workflow orchestrati
 
 **What the enterprise pitch looks like:**
 
-*"Every enterprise building internal AI agents is writing the same infrastructure from scratch — webhook pipelines, state stores, conflict handling. Relayfile is that infrastructure, deployable on-premise, with the audit logs and access controls your security team requires. We are what Tonkean's state engine would be if it were an SDK you could embed anywhere, not a workflow builder you have to use."*
+*"Tonkean charges $10K+/month for G&A workflow orchestration with a 10-minute event delay, no developer API, and a mandatory six-month onboarding. Relayfile delivers the same durable state management and real-time event routing — as an SDK, on your infrastructure, with a self-serve path and sub-second event latency. If your team isn't procurement or legal, Tonkean cannot serve you. Relayfile can."*
+
+Or more simply: *"Tonkean's state engine for your use case, deployed on your infrastructure, as an SDK."*
 
 ---
 
