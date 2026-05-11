@@ -30,7 +30,7 @@ interface MountHandle {
 `createMount` returns `Promise<MountHandle>`. The walker yields the event loop between directory entries so consumer-side timers (e.g. an `ora` spinner driven by `setInterval`) keep firing while the mount is being built.
 
 Behavior:
-- Copies regular files into the mount
+- Copies regular files into the mount, requesting a filesystem reflink clone when the source and mount are on a compatible same-volume filesystem and falling back to a byte copy otherwise
 - Applies ignore rules from `ignoredPatterns`
 - Marks read-only matches as mode `0o444`
 - Excludes `.git`, `node_modules`, `.npm-cache`, and common build/cache output directories by default. Pass `includeGit: true` to opt the project's `.git` directory back in (see [Including `.git`](#including-git))
@@ -291,6 +291,8 @@ The mount is built by copying files rather than symlinking them. Symlinks would 
 5. **`.agentignore` hiding works fine with symlinks** (just don't link), but the readonly and conflict semantics still need copies — so a hybrid would be more complex than just copying everything.
 
 Source-side symlinks that resolve to regular files inside the project *are* followed when building the mount; the resolved bytes are copied. Symlinks the agent creates inside the mount are skipped on sync-back.
+
+On filesystems that support copy-on-write clones (for example APFS on macOS and btrfs/xfs/zfs on Linux), initial mount creation requests a non-forcing reflink copy. This preserves the distinct inode and copy-on-write semantics required above while avoiding an up-front byte copy when `projectDir` and `mountDir` are on the same filesystem. Unsupported filesystems and cross-device mounts fall back to ordinary copies.
 
 ## Notes
 
