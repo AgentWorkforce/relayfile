@@ -165,6 +165,59 @@ export interface FilesystemEvent {
   timestamp: string;
 }
 
+export interface ChangeEventResource {
+  path: string;
+  kind: string;
+  id: string;
+  provider: string;
+}
+
+export interface ChangeEventActor {
+  id: string;
+  displayName?: string;
+}
+
+export interface ChangeEventSummary {
+  title?: string;
+  status?: string;
+  priority?: string;
+  labels?: string[];
+  actor?: ChangeEventActor;
+  fieldsChanged?: string[];
+  tags?: string[];
+}
+
+/**
+ * Proactive runtime relayfile notification envelope.
+ *
+ * This differs from the lower-level FilesystemEvent feed above. The proactive
+ * runtime consumes a small, stable notification that points at the canonical
+ * payload in VFS instead of inlining provider payloads directly.
+ *
+ * M1 exposes the type so downstream packages can compile against the final
+ * shape before M2 wires live delivery.
+ */
+export interface ChangeEvent {
+  id: string;
+  workspace: string;
+  type: "relayfile.changed";
+  occurredAt: string;
+  attempt: number;
+  resource: ChangeEventResource;
+  summary: ChangeEventSummary;
+  digest?: string;
+}
+
+export interface Subscription {
+  unsubscribe(): void;
+}
+
+export interface ResourceAtEventResult {
+  path: string;
+  data: unknown;
+  digest: string;
+}
+
 export interface EventFeedResponse {
   events: FilesystemEvent[];
   nextCursor: string | null;

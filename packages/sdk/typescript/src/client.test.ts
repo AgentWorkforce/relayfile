@@ -31,6 +31,9 @@ import type {
   WritebackItem,
   AckWritebackInput,
   AckWritebackResponse,
+  ChangeEvent,
+  ResourceAtEventResult,
+  Subscription,
 } from "./types.js";
 
 // ---------------------------------------------------------------------------
@@ -62,6 +65,69 @@ function makeClient(fetchImpl: typeof fetch, opts?: { retry?: { maxRetries: numb
 // ---------------------------------------------------------------------------
 
 describe("RelayFileClient — existing methods", () => {
+  describe("proactive runtime contract stubs", () => {
+    it("exports ChangeEvent and Subscription-compatible shapes", () => {
+      const handle: Subscription = {
+        unsubscribe() {
+          // no-op
+        },
+      };
+
+      const event: ChangeEvent = {
+        id: "evt_1",
+        workspace: "ws_acme",
+        type: "relayfile.changed",
+        occurredAt: "2026-05-11T00:00:00.000Z",
+        attempt: 1,
+        resource: {
+          path: "/linear/issues/ENG-412.json",
+          kind: "linear.issue",
+          id: "ENG-412",
+          provider: "linear",
+        },
+        summary: {
+          title: "ENG-412",
+          status: "In Progress",
+          fieldsChanged: ["status"],
+        },
+        digest: "sha256:abc123",
+      };
+
+      const resource: ResourceAtEventResult = {
+        path: event.resource.path,
+        data: { id: "ENG-412" },
+        digest: event.digest ?? "sha256:abc123",
+      };
+
+      expect(typeof handle.unsubscribe).toBe("function");
+      expect(event.type).toBe("relayfile.changed");
+      expect(resource.path).toBe("/linear/issues/ENG-412.json");
+    });
+
+    it("subscribe throws a typed M2_NOT_IMPLEMENTED error", () => {
+      const client = makeClient(mockFetch({ path: "/", entries: [], nextCursor: null }));
+
+      try {
+        client.subscribe(["/linear/issues/**"], () => undefined);
+        throw new Error("expected subscribe to throw");
+      } catch (error) {
+        expect(error).toMatchObject({
+          name: "M2NotImplementedError",
+          code: "M2_NOT_IMPLEMENTED",
+        });
+      }
+    });
+
+    it("getResourceAtEvent throws a typed M2_NOT_IMPLEMENTED error", async () => {
+      const client = makeClient(mockFetch({ path: "/", entries: [], nextCursor: null }));
+
+      await expect(client.getResourceAtEvent("evt_1")).rejects.toMatchObject({
+        name: "M2NotImplementedError",
+        code: "M2_NOT_IMPLEMENTED",
+      });
+    });
+  });
+
   // ---- listTree ----
   describe("listTree", () => {
     it("returns tree entries for a workspace", async () => {

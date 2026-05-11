@@ -30,8 +30,10 @@ import {
   type OperationFeedResponse,
   type OperationStatusResponse,
   type QueuedResponse,
+  type ResourceAtEventResult,
   type ReadFileInput,
   type QueryFilesOptions,
+  type Subscription,
   type SyncIngressStatusResponse,
   type SyncStatusResponse,
   type TreeResponse,
@@ -40,7 +42,8 @@ import {
   type IngestWebhookInput,
   type WritebackItem,
   type AckWritebackInput,
-  type AckWritebackResponse
+  type AckWritebackResponse,
+  type ChangeEvent
 } from "./types.js";
 import type { ForkHandle } from "@relayfile/core";
 import {
@@ -119,6 +122,15 @@ const DEFAULT_RETRY_OPTIONS: NormalizedRetryOptions = {
   maxDelayMs: 2000,
   jitterRatio: 0.2
 };
+
+function createM2NotImplementedError(feature: string): Error & { code: "M2_NOT_IMPLEMENTED" } {
+  const error = new Error(`M2_NOT_IMPLEMENTED: ${feature} is reserved for proactive runtime M2.`) as Error & {
+    code: "M2_NOT_IMPLEMENTED";
+  };
+  error.name = "M2NotImplementedError";
+  error.code = "M2_NOT_IMPLEMENTED";
+  return error;
+}
 
 function normalizeRetryOptions(options?: RelayFileRetryOptions): NormalizedRetryOptions {
   const maxRetries = options?.maxRetries ?? DEFAULT_RETRY_OPTIONS.maxRetries;
@@ -493,6 +505,17 @@ export class RelayFileClient {
       correlationId: options.correlationId,
       signal: options.signal
     });
+  }
+
+  subscribe(globs: string[], onChange: (event: ChangeEvent) => void): Subscription {
+    void globs;
+    void onChange;
+    throw createM2NotImplementedError("RelayFileClient.subscribe(globs, onChange)");
+  }
+
+  async getResourceAtEvent(eventId: string): Promise<ResourceAtEventResult> {
+    void eventId;
+    throw createM2NotImplementedError("RelayFileClient.getResourceAtEvent(eventId)");
   }
 
   async exportWorkspace(options: ExportOptions): Promise<ExportJsonResponse | Blob> {
