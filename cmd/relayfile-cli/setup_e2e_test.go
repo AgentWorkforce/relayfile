@@ -174,7 +174,7 @@ func TestA3EnsureCloudIntegrationSkipsConnectWhenAlreadyReady(t *testing.T) {
 	defer server.Close()
 
 	var stdout bytes.Buffer
-	if err := ensureCloudIntegration(server.URL, "ws_demo", "rf_token", "notion", localDir, 5*time.Second, false, &stdout); err != nil {
+	if err := ensureCloudIntegration(server.URL, "ws_demo", "rf_token", "notion", "", localDir, 5*time.Second, false, &stdout); err != nil {
 		t.Fatalf("ensureCloudIntegration failed: %v", err)
 	}
 	if atomic.LoadInt32(&statusCalls) != 1 {
@@ -184,6 +184,58 @@ func TestA3EnsureCloudIntegrationSkipsConnectWhenAlreadyReady(t *testing.T) {
 		t.Fatalf("expected zero connect-session calls, got %d", connectCalls)
 	}
 	if !strings.Contains(stdout.String(), "notion already connected") {
+		t.Fatalf("expected 'already connected' notice on re-run, got: %q", stdout.String())
+	}
+}
+
+func TestEnsureCloudIntegrationReusesSavedConnectionForMatchingBackend(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	localDir := t.TempDir()
+	if err := ensureMirrorLayout(localDir); err != nil {
+		t.Fatalf("ensureMirrorLayout failed: %v", err)
+	}
+	if err := saveIntegrationConnection(localDir, integrationConnectionState{
+		Provider:     "github",
+		ConnectionID: "ca_existing",
+		Backend:      "composio",
+		ConnectedAt:  time.Now().UTC().Format(time.RFC3339),
+		UpdatedAt:    time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("saveIntegrationConnection failed: %v", err)
+	}
+
+	var statusCalls, connectCalls int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/workspaces/ws_demo/integrations/github/status":
+			atomic.AddInt32(&statusCalls, 1)
+			if got := r.URL.Query().Get("connectionId"); got != "ca_existing" {
+				t.Fatalf("expected status to use saved connection id, got %q", got)
+			}
+			_, _ = w.Write([]byte(`{"ready":true}`))
+		case "/api/v1/workspaces/ws_demo/integrations/connect-session":
+			atomic.AddInt32(&connectCalls, 1)
+			t.Fatalf("connect-session should be skipped when saved backend matches")
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	if err := ensureCloudIntegration(server.URL, "ws_demo", "rf_token", "github", "composio", localDir, 5*time.Second, false, &stdout); err != nil {
+		t.Fatalf("ensureCloudIntegration failed: %v", err)
+	}
+	if atomic.LoadInt32(&statusCalls) != 1 {
+		t.Fatalf("expected exactly one status check, got %d", statusCalls)
+	}
+	if atomic.LoadInt32(&connectCalls) != 0 {
+		t.Fatalf("expected zero connect-session calls, got %d", connectCalls)
+	}
+	if !strings.Contains(stdout.String(), "github already connected") {
 		t.Fatalf("expected 'already connected' notice on re-run, got: %q", stdout.String())
 	}
 }
