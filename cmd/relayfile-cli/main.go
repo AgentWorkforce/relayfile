@@ -1290,6 +1290,8 @@ func runLogin(args []string, stdin io.Reader, stdout io.Writer) error {
 				if perr := persistJoinedWorkspace(record, joined, creds.APIURL, record.LocalDir); perr == nil {
 					fmt.Fprintf(stdout, "Refreshed workspace token for %s (%s)\n", record.Name, record.ID)
 					return nil
+				} else if strings.TrimSpace(*workspaceFlag) != "" {
+					return fmt.Errorf("refresh workspace token: persist refreshed credentials: %w", perr)
 				} else {
 					fmt.Fprintf(stdout, "warning: workspace token refresh succeeded but persisting it failed: %v\n", perr)
 				}
