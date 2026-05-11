@@ -54,7 +54,7 @@ export interface MountOptions {
 
 export interface MountHandle {
   mountDir: string;
-  syncBack(opts?: { signal?: AbortSignal }): Promise<number>;
+  syncBack(opts?: { signal?: AbortSignal; paths?: Iterable<string> }): Promise<number>;
   /**
    * Start bidirectional auto-sync: watches both the mount and project trees
    * via @parcel/watcher and runs a full reconcile every `scanIntervalMs`
@@ -175,11 +175,13 @@ export async function createMount(
 
   return {
     mountDir: resolvedMountDir,
-    async syncBack(opts?: { signal?: AbortSignal }): Promise<number> {
+    async syncBack(opts?: { signal?: AbortSignal; paths?: Iterable<string> }): Promise<number> {
       let synced = 0;
       const realProjectDir = realpathSync(resolvedProjectDir);
       const realMountDir = realpathSync(resolvedMountDir);
-      const files = listFiles(realMountDir);
+      const files = opts?.paths
+        ? syncBackPathsToFiles(realMountDir, opts.paths)
+        : listFiles(realMountDir);
       const signal = opts?.signal;
 
       for (const sourceFile of files) {
@@ -199,7 +201,14 @@ export async function createMount(
         synced += syncedForFile;
 
         if (signal && syncedForFile > 0 && !signal.aborted) {
-          await new Promise<void>((resolve) => setImmediate(resolve));
+          // Intentionally uses setTimeout(resolve, 0) rather than the
+          // setImmediate-based yieldToEventLoop helper below: aborts
+          // mid-walk are scheduled via setTimeout (see mount.test.ts
+          // "syncBack: returns a partial count when aborted mid-walk"),
+          // and matching the same queue makes the abort observable
+          // between file syncs. setImmediate runs after timer
+          // callbacks in a single I/O cycle and races the abort.
+          await new Promise<void>((resolve) => setTimeout(resolve, 0));
         }
       }
 
@@ -446,6 +455,29 @@ function listFiles(baseDir: string): string[] {
     }
   }
   return files;
+}
+
+function syncBackPathsToFiles(mountDir: string, relPaths: Iterable<string>): string[] {
+  const files: string[] = [];
+  const seen = new Set<string>();
+  for (const relPath of relPaths) {
+    const sourceFile = resolveSyncBackSource(mountDir, relPath);
+    if (!sourceFile || seen.has(sourceFile)) {
+      continue;
+    }
+    seen.add(sourceFile);
+    files.push(sourceFile);
+  }
+  return files;
+}
+
+function resolveSyncBackSource(mountDir: string, relPath: string): string | null {
+  const normalized = normalizeRelativePosix(relPath);
+  if (!normalized || path.isAbsolute(normalized)) {
+    return null;
+  }
+  const candidate = path.resolve(mountDir, ...normalized.split('/').filter(Boolean));
+  return isPathWithinRoot(candidate, mountDir) ? candidate : null;
 }
 
 function normalizeRelativePosix(filePath: string): string {

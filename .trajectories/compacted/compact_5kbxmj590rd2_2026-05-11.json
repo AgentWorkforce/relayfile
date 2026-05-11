@@ -1,0 +1,37 @@
+{
+  "id": "compact_5kbxmj590rd2",
+  "version": 1,
+  "type": "compacted",
+  "compactedAt": "2026-05-11T19:53:45.799Z",
+  "sourceTrajectories": [
+    "traj_mip7ag0uwuhd"
+  ],
+  "dateRange": {
+    "start": "2026-05-11T19:45:44.947Z",
+    "end": "2026-05-11T19:53:43.104Z"
+  },
+  "summary": {
+    "totalDecisions": 1,
+    "totalEvents": 1,
+    "uniqueAgents": [
+      "default"
+    ]
+  },
+  "decisionGroups": [
+    {
+      "category": "tooling",
+      "decisions": [
+        {
+          "question": "Use explicit syncBack path lists from healthy auto-sync state",
+          "chosen": "Use explicit syncBack path lists from healthy auto-sync state",
+          "reasoning": "Direct syncBack remains the full-walk safety net; launchOnMount only passes dirty mount paths after watcher subscriptions stayed healthy, so degraded or disabled auto-sync keeps existing O(files) behavior.",
+          "fromTrajectory": "traj_mip7ag0uwuhd"
+        }
+      ]
+    }
+  ],
+  "keyLearnings": [],
+  "keyFindings": [],
+  "filesAffected": [],
+  "commits": []
+}

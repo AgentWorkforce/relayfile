@@ -76,19 +76,39 @@ export async function launchOnMount(opts: LaunchOnMountOptions): Promise<LaunchO
   let syncedCount = 0;
   let finalized = false;
   let autoSync: AutoSyncHandle | undefined;
+  let autoSyncReadyBeforeWrites = false;
 
   const finalize = async (): Promise<void> => {
     if (finalized) return;
     finalized = true;
     try {
       let autoSyncChanges = 0;
+      let finalSyncBackPaths: string[] | undefined;
       if (autoSync) {
         await autoSync.stop({ signal: opts.shutdownSignal });
         autoSyncChanges = autoSync.totalChanges();
+        if (autoSyncReadyBeforeWrites && autoSync.watchersHealthy()) {
+          const dirty = Array.from(autoSync.getDirtyPaths());
+          // Only take the fast path when there's at least one dirty
+          // path to sync. An empty dirty set is ambiguous after
+          // autoSync.stop() — the healthy-path flush already drained
+          // pending events, so the set could be empty either because
+          // nothing changed or because edits raced past the watcher
+          // (short-lived runs where the watcher hadn't enqueued
+          // anything before stop). Fall through to the full walk in
+          // that case as a safety net; it's cheap on no-change runs
+          // and prevents dropped mount edits at shutdown.
+          if (dirty.length > 0) {
+            finalSyncBackPaths = dirty;
+          }
+        }
         autoSync = undefined;
       }
       if (!handle) return;
-      const finalSynced = await handle.syncBack({ signal: opts.shutdownSignal });
+      const finalSynced = await handle.syncBack({
+        signal: opts.shutdownSignal,
+        ...(finalSyncBackPaths ? { paths: finalSyncBackPaths } : {}),
+      });
       syncedCount = autoSyncChanges + finalSynced;
       if (opts.onAfterSync) {
         await opts.onAfterSync(syncedCount);
@@ -108,13 +128,21 @@ export async function launchOnMount(opts: LaunchOnMountOptions): Promise<LaunchO
       includeDefaultExcludeDirs: opts.includeDefaultExcludeDirs,
     });
 
-    if (opts.onBeforeLaunch) {
-      await opts.onBeforeLaunch(handle.mountDir);
-    }
-
     if (opts.autoSync !== false) {
       const autoSyncOpts = typeof opts.autoSync === 'object' ? opts.autoSync : undefined;
       autoSync = handle.startAutoSync(autoSyncOpts);
+      try {
+        await autoSync.ready();
+        autoSyncReadyBeforeWrites = autoSync.watchersHealthy();
+      } catch {
+        // Keep launching with degraded auto-sync; shutdown will use the full
+        // syncBack sweep because dirty-path state was never trustworthy.
+        autoSyncReadyBeforeWrites = false;
+      }
+    }
+
+    if (opts.onBeforeLaunch) {
+      await opts.onBeforeLaunch(handle.mountDir);
     }
 
     const envVars: NodeJS.ProcessEnv = {

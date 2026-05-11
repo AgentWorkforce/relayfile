@@ -62,8 +62,14 @@ export interface AutoSyncOptions {
 
 export interface AutoSyncHandle {
   stop(opts?: { signal?: AbortSignal }): Promise<void>;
+  /** Drain currently debounced watcher events. Falls back to reconcile if watchers are degraded. */
+  flushPending(opts?: { signal?: AbortSignal }): Promise<number>;
   /** Force a reconcile now; returns number of files copied/deleted. */
   reconcile(opts?: { signal?: AbortSignal }): Promise<number>;
+  /** Mount-side paths that still need a final one-shot syncBack check. */
+  getDirtyPaths(): IterableIterator<string>;
+  /** True once both watchers subscribed and no watcher error has been observed. */
+  watchersHealthy(): boolean;
   /** Cumulative files changed (copied or deleted) since autosync started. */
   totalChanges(): number;
   /** Resolves once both watchers have completed their initial scan. */
@@ -74,6 +80,8 @@ interface FileState {
   mountMtimeMs?: number;
   projectMtimeMs?: number;
 }
+
+const STOP_EVENT_SETTLE_MS = 250;
 
 export function startAutoSync(
   ctx: AutoSyncContext,
@@ -89,9 +97,65 @@ export function startAutoSync(
 
   let syncing = false;
   let pending = false;
+  let stopping = false;
   let stopped = false;
+  let watchersReadySettled = false;
+  let watcherDegraded = false;
   let totalChanges = 0;
+  const pendingPaths = new Set<string>();
   const pendingDebounces = new Map<string, NodeJS.Timeout>();
+  const dirtyMountPaths = new Set<string>();
+
+  const watchersHealthy = (): boolean => watchersReadySettled && !watcherDegraded;
+
+  const markWatcherDegraded = (err: Error): void => {
+    watcherDegraded = true;
+    onError(err);
+  };
+
+  const clearPendingDebounces = (): void => {
+    for (const t of pendingDebounces.values()) clearTimeout(t);
+    pendingDebounces.clear();
+  };
+
+  const syncPath = (relPosix: string): number => {
+    if (!isSyncCandidate(relPosix, ctx)) {
+      dirtyMountPaths.delete(relPosix);
+      return 0;
+    }
+    try {
+      const changed = syncOneFile(relPosix, state, ctx);
+      dirtyMountPaths.delete(relPosix);
+      return changed ? 1 : 0;
+    } catch (err) {
+      onError(err as Error);
+      return 0;
+    }
+  };
+
+  const flushPendingPaths = async (opts?: { signal?: AbortSignal }): Promise<number> => {
+    const signal = opts?.signal;
+    if (signal?.aborted) {
+      return 0;
+    }
+
+    let count = 0;
+    let processed = 0;
+    for (const relPosix of Array.from(pendingPaths)) {
+      if (signal?.aborted) {
+        break;
+      }
+      pendingPaths.delete(relPosix);
+      count += syncPath(relPosix);
+      processed += 1;
+      if (signal && processed % 64 === 0 && !signal.aborted) {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+    }
+
+    totalChanges += count;
+    return count;
+  };
 
   const runReconcile = async (opts?: { signal?: AbortSignal }): Promise<number> => {
     const signal = opts?.signal;
@@ -104,8 +168,10 @@ export function startAutoSync(
     }
     syncing = true;
     let count = 0;
+    let completed = false;
     try {
       count = reconcile(state, ctx, onError, signal);
+      completed = !signal?.aborted;
     } catch (err) {
       onError(err as Error);
     } finally {
@@ -115,51 +181,71 @@ export function startAutoSync(
       pending = false;
       try {
         count += reconcile(state, ctx, onError, signal);
+        completed = !signal?.aborted;
       } catch (err) {
         onError(err as Error);
+        completed = false;
       }
+    }
+    if (completed) {
+      pendingPaths.clear();
+      dirtyMountPaths.clear();
     }
     totalChanges += count;
     return count;
   };
 
-  const syncPathFromRoot = (root: string, absPath: string): void => {
-    const rel = path.relative(root, absPath);
-    if (rel === '' || rel.startsWith('..')) return;
-    const relPosix = rel.split(path.sep).join('/');
-    if (!isSyncCandidate(relPosix, ctx)) return;
-    try {
-      const changed = syncOneFile(relPosix, state, ctx);
-      if (changed) totalChanges += 1;
-    } catch (err) {
-      onError(err as Error);
+  const flushPending = async (opts?: { signal?: AbortSignal }): Promise<number> => {
+    if (opts?.signal?.aborted) {
+      return 0;
     }
+    try {
+      await watchersReady;
+    } catch {
+      // Subscription setup failure is already marked degraded and surfaced.
+    }
+    if (opts?.signal?.aborted) {
+      return 0;
+    }
+
+    clearPendingDebounces();
+    if (!watchersHealthy()) {
+      return runReconcile(opts);
+    }
+    return flushPendingPaths(opts);
   };
 
   const schedulePathSync = (root: string, absPath: string): void => {
-    // Once stop() has begun, refuse to schedule new timers. Watcher
-    // callbacks can still fire during the unsubscribe await (native
-    // backends deliver queued events asynchronously); without this guard
-    // those events would create timers that outlive stop() and do file
-    // work against a mount the caller may have already cleaned up.
     if (stopped) return;
+    const relPosix = root === ctx.realMountDir
+      ? toRelPosix(absPath, ctx)
+      : toRelPosixFromProject(absPath, ctx);
+    if (relPosix === null || !isSyncCandidate(relPosix, ctx)) return;
+    pendingPaths.add(relPosix);
+    if (root === ctx.realMountDir) {
+      dirtyMountPaths.add(relPosix);
+    }
+    // During stop(), keep accepting queued watcher events so the final flush
+    // can process them, but don't create timers that could outlive teardown.
+    if (stopping) return;
     // Coalesce bursts of events for the same path. The reconcile path
     // re-checks content via mtime+bytes, so a partial-write event that
     // races a later write is harmless.
-    const existing = pendingDebounces.get(absPath);
+    const existing = pendingDebounces.get(relPosix);
     if (existing) clearTimeout(existing);
     const t = setTimeout(() => {
-      pendingDebounces.delete(absPath);
-      syncPathFromRoot(root, absPath);
+      pendingDebounces.delete(relPosix);
+      pendingPaths.delete(relPosix);
+      totalChanges += syncPath(relPosix);
     }, debounceMs);
-    pendingDebounces.set(absPath, t);
+    pendingDebounces.set(relPosix, t);
   };
 
   const subscribeTo = (root: string): Promise<AsyncSubscription> =>
     watcher.subscribe(
       root,
       (err, events) => {
-        if (err) { onError(err); return; }
+        if (err) { markWatcherDegraded(err); return; }
         for (const ev of events) {
           schedulePathSync(root, ev.path);
         }
@@ -181,8 +267,11 @@ export function startAutoSync(
     if (mountResult.status === 'fulfilled') mountSub = mountResult.value;
     if (projectResult.status === 'fulfilled') projectSub = projectResult.value;
     if (mountResult.status === 'fulfilled' && projectResult.status === 'fulfilled') {
+      watchersReadySettled = true;
       return;
     }
+    watchersReadySettled = true;
+    watcherDegraded = true;
     await Promise.allSettled([
       mountSub?.unsubscribe(),
       projectSub?.unsubscribe(),
@@ -196,7 +285,7 @@ export function startAutoSync(
   // If subscription setup fails, surface via onError rather than an unhandled
   // rejection. stop() still awaits the same promise and will observe the
   // rejection after the cleanup above has already run.
-  watchersReady.catch((err) => onError(err as Error));
+  watchersReady.catch((err) => markWatcherDegraded(err as Error));
 
   const interval = setInterval(() => {
     void runReconcile();
@@ -206,32 +295,42 @@ export function startAutoSync(
 
   return {
     async stop(opts?: { signal?: AbortSignal }) {
-      // Flip the flag first so any watcher callbacks delivered during the
-      // awaits below refuse to schedule new timers.
-      stopped = true;
-      clearInterval(interval);
       try {
         await watchersReady;
       } catch {
         // Setup failed and already cleaned up any partial subscription;
         // mountSub / projectSub were reset to undefined before the throw.
       }
+      if (!opts?.signal?.aborted && watchersHealthy()) {
+        await new Promise<void>((resolve) => setTimeout(resolve, STOP_EVENT_SETTLE_MS));
+      }
+      stopping = true;
+      clearInterval(interval);
+      clearPendingDebounces();
       await Promise.allSettled([
         mountSub?.unsubscribe(),
         projectSub?.unsubscribe(),
       ]);
-      // Clear debounces *after* unsubscribe resolves: any timer scheduled
-      // between stop() being called and the watcher actually quiescing is
-      // gathered here, so none fire after stop() returns.
-      for (const t of pendingDebounces.values()) clearTimeout(t);
-      pendingDebounces.clear();
+      clearPendingDebounces();
       if (opts?.signal?.aborted) {
+        stopped = true;
+        stopping = false;
         return;
       }
-      // Drain any pending work so callers can rely on "stopped means quiesced".
-      await runReconcile(opts);
+      // Drain pending watcher work when the watcher state is trusted; otherwise
+      // keep the historical full-reconcile safety net.
+      if (watchersHealthy()) {
+        await flushPendingPaths(opts);
+      } else {
+        await runReconcile(opts);
+      }
+      stopped = true;
+      stopping = false;
     },
+    flushPending,
     reconcile: runReconcile,
+    getDirtyPaths: () => new Set(dirtyMountPaths).values(),
+    watchersHealthy,
     totalChanges: () => totalChanges,
     ready: async () => {
       await watchersReady;
