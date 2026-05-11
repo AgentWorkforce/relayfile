@@ -6,6 +6,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+_No unreleased changes._
+
+## [0.7.7] - 2026-05-11
+
 ### Changed
 - `createMount` now requests non-forcing filesystem reflink clones for initial project-to-mount file copies, falling back to ordinary byte copies on unsupported filesystems or cross-device mounts. (#132)
 
@@ -150,7 +154,8 @@ Initial release.
 - Directory-only ignore patterns (e.g. `cache/`) match directories without swallowing like-named files.
 - README documenting the mount lifecycle, dotfile semantics, and auto-sync behavior. ([#48])
 
-[Unreleased]: https://github.com/AgentWorkforce/relayfile/compare/v0.7.6...HEAD
+[Unreleased]: https://github.com/AgentWorkforce/relayfile/compare/v0.7.7...HEAD
+[0.7.7]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.7.7
 [0.7.6]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.7.6
 [0.7.5]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.7.5
 [0.7.4]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.7.4
