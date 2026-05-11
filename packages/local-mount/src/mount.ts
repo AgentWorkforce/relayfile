@@ -1,5 +1,6 @@
 import {
   chmodSync,
+  constants as fsConstants,
   copyFileSync,
   existsSync,
   lstatSync,
@@ -399,7 +400,7 @@ function copyMountedFile(
     return;
   }
 
-  copyFileSync(safeSourcePath, safeMountPath);
+  copyFileSync(safeSourcePath, safeMountPath, fsConstants.COPYFILE_FICLONE);
 
   if (isPathMatched(relativePath, readonlyMatcher)) {
     chmodSync(safeMountPath, 0o444);
