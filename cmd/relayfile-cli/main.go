@@ -1251,6 +1251,10 @@ func runLogin(args []string, stdin io.Reader, stdout io.Writer) error {
 		return err
 	}
 
+	if *skipWorkspace && strings.TrimSpace(*workspaceFlag) != "" {
+		return errors.New("--workspace cannot be used with --skip-workspace-refresh: pick one")
+	}
+
 	tokenValue := strings.TrimSpace(*token)
 
 	// Token explicitly provided → legacy server-credential flow.

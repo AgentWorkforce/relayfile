@@ -1811,6 +1811,36 @@ func TestLoginSkipsWorkspaceRefreshWhenFlagSet(t *testing.T) {
 	}
 }
 
+// TestLoginRejectsWorkspaceWithSkipFlag asserts that passing both
+// --workspace and --skip-workspace-refresh fails fast with a clear
+// error. The two are contradictory — --skip-workspace-refresh silently
+// winning would make an explicit --workspace a no-op while the command
+// still reports success.
+func TestLoginRejectsWorkspaceWithSkipFlag(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	err := run([]string{
+		"login",
+		"--cloud-api-url", server.URL,
+		"--cloud-token", "cld_browser_token",
+		"--workspace", "demo",
+		"--skip-workspace-refresh",
+	}, strings.NewReader(""), &stdout, &stdout)
+	if err == nil {
+		t.Fatalf("expected error for contradictory flag combo, got nil\noutput:\n%s", stdout.String())
+	}
+	if !strings.Contains(err.Error(), "--workspace cannot be used with --skip-workspace-refresh") {
+		t.Fatalf("expected mutually-exclusive flag error, got %v", err)
+	}
+}
+
 // TestLoginExplicitWorkspaceReturnsErrorWhenPersistFails asserts that with
 // an explicit --workspace target, a failure to write the refreshed
 // workspace token to credentials.json surfaces as a non-zero exit / error
