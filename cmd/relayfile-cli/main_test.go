@@ -1712,6 +1712,105 @@ func TestLoginDefaultsToCloudBrowserFlow(t *testing.T) {
 	}
 }
 
+// TestLoginRefreshesWorkspaceTokenForDefaultWorkspace covers the fix for
+// the bug where `relayfile login` only refreshed cloud-credentials.json
+// even when a workspace was already registered locally. After login, the
+// data-plane JWT in credentials.json should also be refreshed via the
+// cloud's workspace join endpoint.
+func TestLoginRefreshesWorkspaceTokenForDefaultWorkspace(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	seen := map[string]bool{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/workspaces/ws_demo/join":
+			seen["join"] = true
+			if r.Method != http.MethodPost {
+				t.Fatalf("expected join POST, got %s", r.Method)
+			}
+			if got := r.Header.Get("Authorization"); got != "Bearer cld_browser_token" {
+				t.Fatalf("unexpected join Authorization: %q", got)
+			}
+			_, _ = w.Write([]byte(`{"workspaceId":"ws_demo","token":"rf_refreshed","relayfileUrl":"https://relayfile.test","wsUrl":"wss://relayfile.test/ws","relaycastApiKey":"rc_test"}`))
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	if _, err := upsertWorkspaceDetails(workspaceRecord{
+		Name: "demo",
+		ID:   "ws_demo",
+	}); err != nil {
+		t.Fatalf("upsertWorkspaceDetails failed: %v", err)
+	}
+	if _, err := setDefaultWorkspace("demo"); err != nil {
+		t.Fatalf("setDefaultWorkspace failed: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := run([]string{
+		"login",
+		"--cloud-api-url", server.URL,
+		"--cloud-token", "cld_browser_token",
+	}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("run login failed: %v\noutput:\n%s", err, stdout.String())
+	}
+
+	if !seen["join"] {
+		t.Fatalf("expected /workspaces/ws_demo/join request, none seen. output:\n%s", stdout.String())
+	}
+	got := stdout.String()
+	if !strings.Contains(got, "Refreshed workspace token for demo") {
+		t.Fatalf("expected refresh confirmation, got %q", got)
+	}
+	creds, err := loadCredentials()
+	if err != nil {
+		t.Fatalf("loadCredentials failed: %v", err)
+	}
+	if creds.Token != "rf_refreshed" {
+		t.Fatalf("expected refreshed workspace token, got %q", creds.Token)
+	}
+	if creds.Server != "https://relayfile.test" {
+		t.Fatalf("expected refreshed server URL, got %q", creds.Server)
+	}
+}
+
+// TestLoginSkipsWorkspaceRefreshWhenFlagSet covers --skip-workspace-refresh:
+// even with a workspace registered, no /join call should fire and
+// credentials.json must remain absent.
+func TestLoginSkipsWorkspaceRefreshWhenFlagSet(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+	}))
+	defer server.Close()
+
+	if _, err := upsertWorkspaceDetails(workspaceRecord{Name: "demo", ID: "ws_demo"}); err != nil {
+		t.Fatalf("upsertWorkspaceDetails failed: %v", err)
+	}
+	if _, err := setDefaultWorkspace("demo"); err != nil {
+		t.Fatalf("setDefaultWorkspace failed: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := run([]string{
+		"login",
+		"--cloud-api-url", server.URL,
+		"--cloud-token", "cld_browser_token",
+		"--skip-workspace-refresh",
+	}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("run login failed: %v\noutput:\n%s", err, stdout.String())
+	}
+
+	if _, err := os.Stat(credentialsPath()); !os.IsNotExist(err) {
+		t.Fatalf("expected no server credentials written with --skip-workspace-refresh, got err=%v", err)
+	}
+}
+
 // TestLoginAPIKeyFlagPromptsForToken covers the opt-in legacy interactive
 // flow: --api-key forces runLogin to prompt for an API key on stdin instead
 // of running the cloud browser flow.
