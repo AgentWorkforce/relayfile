@@ -1409,6 +1409,128 @@ func TestIntegrationCatalogCacheServesWithinTTL(t *testing.T) {
 	}
 }
 
+func TestIntegrationAvailableSearchesDynamicCatalog(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/integrations/catalog" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		if r.URL.Query().Get("dynamic") != "true" {
+			t.Fatalf("expected dynamic catalog query, got %s", r.URL.RawQuery)
+		}
+		if got := r.Header.Get("Authorization"); got != "" {
+			t.Fatalf("available catalog should not require auth, got %q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"providers":[{"id":"salesforce","displayName":"Salesforce","backend":"nango","backends":["nango"],"vfsRoot":"/salesforce"},{"id":"docker_hub","displayName":"Docker Hub","backend":"composio","backends":["composio"],"vfsRoot":"/docker_hub"}],"version":"v_dynamic"}`))
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	if err := run([]string{"integration", "search", "--cloud-api-url", server.URL, "--backend", "composio", "docker"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("run integration available failed: %v\noutput:\n%s", err, stdout.String())
+	}
+	got := stdout.String()
+	if !strings.Contains(got, "docker_hub") || !strings.Contains(got, "Docker Hub") {
+		t.Fatalf("expected docker_hub in output, got %q", got)
+	}
+	if strings.Contains(got, "salesforce") {
+		t.Fatalf("expected backend/search filter to exclude salesforce, got %q", got)
+	}
+}
+
+func TestIntegrationAvailableFallsBackWhenDynamicCatalogUnavailable(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/integrations/catalog" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		if r.URL.Query().Get("dynamic") != "true" {
+			t.Fatalf("expected dynamic catalog query, got %s", r.URL.RawQuery)
+		}
+		http.Error(w, "catalog unavailable", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	if err := run([]string{"integration", "available", "--cloud-api-url", server.URL, "--backend", "composio", "--search", "github"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("run integration available failed: %v\noutput:\n%s", err, stdout.String())
+	}
+	got := stdout.String()
+	if !strings.Contains(got, "github") || !strings.Contains(got, "GitHub") {
+		t.Fatalf("expected fallback github entry in output, got %q", got)
+	}
+}
+
+func TestIntegrationAvailableUsesDynamicCatalogCache(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/integrations/catalog" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		calls++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"providers":[{"id":"docker_hub","displayName":"Docker Hub","backend":"composio","backends":["composio"],"vfsRoot":"/docker_hub"}],"version":"v_dynamic"}`))
+	}))
+	defer server.Close()
+
+	for i := 0; i < 2; i++ {
+		var stdout bytes.Buffer
+		if err := run([]string{"integration", "search", "docker", "--cloud-api-url", server.URL}, strings.NewReader(""), &stdout, &stdout); err != nil {
+			t.Fatalf("run integration search failed: %v\noutput:\n%s", err, stdout.String())
+		}
+	}
+	if calls != 1 {
+		t.Fatalf("expected dynamic catalog cache to serve second search, got %d calls", calls)
+	}
+}
+
+func TestIntegrationCatalogCachesDynamicAndRegularSeparately(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	regularCalls := 0
+	dynamicCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/integrations/catalog" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Query().Get("dynamic") == "true" {
+			dynamicCalls++
+			_, _ = w.Write([]byte(`{"providers":[{"id":"docker_hub","displayName":"Docker Hub","backend":"composio","backends":["composio"],"vfsRoot":"/docker_hub"}],"version":"v_dynamic"}`))
+			return
+		}
+		regularCalls++
+		_, _ = w.Write([]byte(`{"providers":[{"id":"notion","displayName":"Notion","vfsRoot":"/notion"}],"version":"v_regular"}`))
+	}))
+	defer server.Close()
+
+	if _, err := loadIntegrationCatalog(server.URL, "tok"); err != nil {
+		t.Fatalf("loadIntegrationCatalog first call failed: %v", err)
+	}
+	var stdout bytes.Buffer
+	if err := run([]string{"integration", "search", "docker", "--cloud-api-url", server.URL}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("run integration search failed: %v\noutput:\n%s", err, stdout.String())
+	}
+	if _, err := loadIntegrationCatalog(server.URL, "tok"); err != nil {
+		t.Fatalf("loadIntegrationCatalog second call failed: %v", err)
+	}
+	if regularCalls != 1 {
+		t.Fatalf("expected regular catalog cache to survive dynamic fetch, got %d regular calls", regularCalls)
+	}
+	if dynamicCalls != 1 {
+		t.Fatalf("expected one dynamic catalog fetch, got %d", dynamicCalls)
+	}
+}
+
 func TestIntegrationCatalogCacheRefetchesAfterInvalidate(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)

@@ -223,11 +223,17 @@ type cloudIntegrationCatalogResponse struct {
 }
 
 type integrationCatalogEntry struct {
-	ID          string `json:"id"`
-	DisplayName string `json:"displayName,omitempty"`
-	ConfigKey   string `json:"configKey,omitempty"`
-	VFSRoot     string `json:"vfsRoot,omitempty"`
-	Deprecated  bool   `json:"deprecated,omitempty"`
+	ID          string   `json:"id"`
+	DisplayName string   `json:"displayName,omitempty"`
+	ConfigKey   string   `json:"configKey,omitempty"`
+	VFSRoot     string   `json:"vfsRoot,omitempty"`
+	Deprecated  bool     `json:"deprecated,omitempty"`
+	Backend     string   `json:"backend,omitempty"`
+	Backends    []string `json:"backends,omitempty"`
+	Sources     []string `json:"sources,omitempty"`
+	AuthMode    string   `json:"authMode,omitempty"`
+	Categories  []string `json:"categories,omitempty"`
+	Docs        string   `json:"docs,omitempty"`
 }
 
 type cloudIntegrationListEntry struct {
@@ -388,6 +394,8 @@ Usage:
   relayfile workspace current [--verbose]
   relayfile workspace delete NAME [--yes]
   relayfile integration connect PROVIDER [--backend BACKEND] [--workspace NAME]
+  relayfile integration available [--search QUERY] [--backend BACKEND] [--json] [--refresh]
+  relayfile integration search QUERY [--backend BACKEND] [--json] [--refresh]
   relayfile integration list [--workspace NAME] [--json]
   relayfile integration disconnect PROVIDER [--workspace NAME] [--yes]
   relayfile ops list [--workspace NAME] [--json]
@@ -411,7 +419,7 @@ Subcommands:
   setup       Sign in, connect an integration, and mount the workspace
   login       Sign in via the Relayfile Cloud browser flow (or --api-key for self-hosted)
   workspace   Create, select, list, show current, or delete locally tracked workspaces
-  integration Connect, list, or disconnect workspace integrations
+  integration Connect, discover, list, or disconnect workspace integrations
   ops         List or replay dead-lettered writeback ops
   writeback   Inspect or retry local writeback failures
   writeback status
@@ -759,12 +767,15 @@ type integrationCatalogCacheEntry struct {
 	Providers []integrationCatalogEntry `json:"providers"`
 }
 
-func integrationCatalogCachePath() string {
+func integrationCatalogCachePath(cacheKey string) string {
+	if strings.Contains(cacheKey, "?dynamic=true") {
+		return filepath.Join(configDir(), "catalog-cache-dynamic.json")
+	}
 	return filepath.Join(configDir(), "catalog-cache.json")
 }
 
-func readIntegrationCatalogCache() (integrationCatalogCacheEntry, bool) {
-	payload, err := os.ReadFile(integrationCatalogCachePath())
+func readIntegrationCatalogCache(cacheKey string) (integrationCatalogCacheEntry, bool) {
+	payload, err := os.ReadFile(integrationCatalogCachePath(cacheKey))
 	if err != nil {
 		return integrationCatalogCacheEntry{}, false
 	}
@@ -783,11 +794,12 @@ func writeIntegrationCatalogCache(entry integrationCatalogCacheEntry) error {
 	if err != nil {
 		return err
 	}
-	return writeFileAtomically(integrationCatalogCachePath(), payload, 0o644)
+	return writeFileAtomically(integrationCatalogCachePath(entry.APIURL), payload, 0o644)
 }
 
 func invalidateIntegrationCatalogCache() {
-	_ = os.Remove(integrationCatalogCachePath())
+	_ = os.Remove(integrationCatalogCachePath(""))
+	_ = os.Remove(integrationCatalogCachePath("?dynamic=true"))
 }
 
 func cachedCatalogIsFresh(entry integrationCatalogCacheEntry, apiURL string) bool {
@@ -802,26 +814,72 @@ func cachedCatalogIsFresh(entry integrationCatalogCacheEntry, apiURL string) boo
 }
 
 func loadIntegrationCatalog(cloudAPIURL, accessToken string) ([]integrationCatalogEntry, error) {
-	if entry, ok := readIntegrationCatalogCache(); ok && cachedCatalogIsFresh(entry, cloudAPIURL) {
+	if entry, ok := readIntegrationCatalogCache(cloudAPIURL); ok && cachedCatalogIsFresh(entry, cloudAPIURL) {
 		return entry.Providers, nil
 	}
 	return fetchIntegrationCatalog(cloudAPIURL, accessToken)
 }
 
+func dynamicIntegrationCatalogCacheKey(cloudAPIURL string) string {
+	return strings.TrimRight(cloudAPIURL, "/") + "?dynamic=true"
+}
+
+func loadAvailableIntegrationCatalog(cloudAPIURL string, refresh bool) ([]integrationCatalogEntry, error) {
+	cacheKey := dynamicIntegrationCatalogCacheKey(cloudAPIURL)
+	if !refresh {
+		if entry, ok := readIntegrationCatalogCache(cacheKey); ok && cachedCatalogIsFresh(entry, cacheKey) {
+			return entry.Providers, nil
+		}
+	}
+	return fetchIntegrationCatalogPath(cloudAPIURL, "", true, cacheKey)
+}
+
 func fetchIntegrationCatalog(cloudAPIURL, accessToken string) ([]integrationCatalogEntry, error) {
-	client, err := newAPIClient(cloudAPIURL, accessToken)
+	return fetchIntegrationCatalogPath(cloudAPIURL, accessToken, false, cloudAPIURL)
+}
+
+func fetchIntegrationCatalogPath(cloudAPIURL, accessToken string, dynamic bool, cacheKey string) ([]integrationCatalogEntry, error) {
+	cloudAPIURL = strings.TrimRight(strings.TrimSpace(cloudAPIURL), "/")
+	if cloudAPIURL == "" {
+		cloudAPIURL = defaultCloudAPIURL
+	}
+	catalogURL, err := url.Parse(cloudAPIURL + "/api/v1/integrations/catalog")
 	if err != nil {
-		return fallbackIntegrationCatalog(), err
+		return fallbackIntegrationCatalog(), nil
+	}
+	if dynamic {
+		query := catalogURL.Query()
+		query.Set("dynamic", "true")
+		catalogURL.RawQuery = query.Encode()
+	}
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, catalogURL.String(), nil)
+	if err != nil {
+		return fallbackIntegrationCatalog(), nil
+	}
+	if strings.TrimSpace(accessToken) != "" {
+		req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(accessToken))
 	}
 	var payload cloudIntegrationCatalogResponse
-	if err := client.getJSON(context.Background(), "/api/v1/integrations/catalog", &payload); err != nil {
-		return fallbackIntegrationCatalog(), err
+	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	if err != nil {
+		return fallbackIntegrationCatalog(), nil
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fallbackIntegrationCatalog(), nil
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fallbackIntegrationCatalog(), nil
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return fallbackIntegrationCatalog(), nil
 	}
 	if len(payload.Providers) == 0 {
 		return fallbackIntegrationCatalog(), nil
 	}
 	_ = writeIntegrationCatalogCache(integrationCatalogCacheEntry{
-		APIURL:    cloudAPIURL,
+		APIURL:    cacheKey,
 		FetchedAt: time.Now().UTC().Format(time.RFC3339),
 		Version:   payload.Version,
 		Providers: payload.Providers,
@@ -1277,11 +1335,15 @@ func runWorkspace(args []string, stdin io.Reader, stdout io.Writer) error {
 
 func runIntegration(args []string, stdin io.Reader, stdout io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("integration subcommand is required: connect, list, or disconnect")
+		return errors.New("integration subcommand is required: connect, available, search, list, or disconnect")
 	}
 	switch args[0] {
 	case "connect":
 		return runIntegrationConnect(args[1:], stdin, stdout)
+	case "available", "catalog", "providers":
+		return runIntegrationAvailable(args[1:], stdout)
+	case "search":
+		return runIntegrationSearch(args[1:], stdout)
 	case "list":
 		return runIntegrationList(args[1:], stdout)
 	case "disconnect":
@@ -1335,6 +1397,163 @@ func runIntegrationConnect(args []string, stdin io.Reader, stdout io.Writer) err
 		return err
 	}
 	return waitForInitialSync(joined.RelayfileURL, joined.Token, record.ID, provider, record.LocalDir, *timeout, stdout)
+}
+
+func runIntegrationSearch(args []string, stdout io.Writer) error {
+	fs := flag.NewFlagSet("integration search", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	cloudAPIURL := fs.String("cloud-api-url", envOrDefault("RELAYFILE_CLOUD_API_URL", defaultCloudAPIURL), "Relayfile Cloud API URL")
+	backend := fs.String("backend", "", "filter by backend (nango or composio)")
+	jsonOutput := fs.Bool("json", false, "emit JSON")
+	refresh := fs.Bool("refresh", false, "refresh the cached provider catalog")
+	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
+		"cloud-api-url": true,
+		"backend":       true,
+		"json":          false,
+		"refresh":       false,
+	})); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return errors.New("usage: relayfile integration search QUERY [--backend BACKEND] [--json] [--refresh]")
+	}
+	availableArgs := []string{
+		"--cloud-api-url", *cloudAPIURL,
+		"--search", fs.Arg(0),
+	}
+	if strings.TrimSpace(*backend) != "" {
+		availableArgs = append(availableArgs, "--backend", *backend)
+	}
+	if *jsonOutput {
+		availableArgs = append(availableArgs, "--json")
+	}
+	if *refresh {
+		availableArgs = append(availableArgs, "--refresh")
+	}
+	return runIntegrationAvailable(availableArgs, stdout)
+}
+
+func runIntegrationAvailable(args []string, stdout io.Writer) error {
+	fs := flag.NewFlagSet("integration available", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	cloudAPIURL := fs.String("cloud-api-url", envOrDefault("RELAYFILE_CLOUD_API_URL", defaultCloudAPIURL), "Relayfile Cloud API URL")
+	backend := fs.String("backend", "", "filter by backend (nango or composio)")
+	search := fs.String("search", "", "search provider id, display name, category, or backend")
+	jsonOutput := fs.Bool("json", false, "emit JSON")
+	refresh := fs.Bool("refresh", false, "refresh the cached provider catalog")
+	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
+		"cloud-api-url": true,
+		"backend":       true,
+		"search":        true,
+		"json":          false,
+		"refresh":       false,
+	})); err != nil {
+		return err
+	}
+	if fs.NArg() > 0 {
+		return errors.New("usage: relayfile integration available [--search QUERY] [--backend BACKEND] [--json] [--refresh]")
+	}
+	requestedBackend, err := normalizeIntegrationBackend(*backend)
+	if err != nil {
+		return err
+	}
+	entries, err := loadAvailableIntegrationCatalog(strings.TrimSpace(*cloudAPIURL), *refresh)
+	if err != nil {
+		return err
+	}
+	filterBackend := requestedBackend
+	if filterBackend != "" && !catalogEntriesHaveBackendMetadata(entries) {
+		filterBackend = ""
+	}
+	entries = filterIntegrationCatalog(entries, filterBackend, strings.TrimSpace(*search))
+	if *jsonOutput {
+		return writeJSON(stdout, entries)
+	}
+	if len(entries) == 0 {
+		fmt.Fprintln(stdout, "No matching integrations")
+		return nil
+	}
+	fmt.Fprintln(stdout, "provider\tdisplay_name\tbackends\tvfs_root")
+	for _, entry := range entries {
+		fmt.Fprintf(
+			stdout,
+			"%s\t%s\t%s\t%s\n",
+			entry.ID,
+			defaultIfBlank(entry.DisplayName, "-"),
+			formatCatalogBackends(entry),
+			defaultIfBlank(entry.VFSRoot, "-"),
+		)
+	}
+	return nil
+}
+
+func filterIntegrationCatalog(entries []integrationCatalogEntry, backend, query string) []integrationCatalogEntry {
+	filtered := make([]integrationCatalogEntry, 0, len(entries))
+	query = strings.ToLower(strings.TrimSpace(query))
+	for _, entry := range entries {
+		if backend != "" && !catalogEntrySupportsBackend(entry, backend) {
+			continue
+		}
+		if query != "" && !catalogEntryMatchesQuery(entry, query) {
+			continue
+		}
+		filtered = append(filtered, entry)
+	}
+	return filtered
+}
+
+func catalogEntrySupportsBackend(entry integrationCatalogEntry, backend string) bool {
+	if strings.EqualFold(entry.Backend, backend) {
+		return true
+	}
+	for _, candidate := range entry.Backends {
+		if strings.EqualFold(candidate, backend) {
+			return true
+		}
+	}
+	return false
+}
+
+func catalogEntriesHaveBackendMetadata(entries []integrationCatalogEntry) bool {
+	for _, entry := range entries {
+		if strings.TrimSpace(entry.Backend) != "" || len(entry.Backends) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func catalogEntryMatchesQuery(entry integrationCatalogEntry, query string) bool {
+	values := []string{
+		entry.ID,
+		entry.DisplayName,
+		entry.ConfigKey,
+		entry.VFSRoot,
+		entry.Backend,
+		entry.AuthMode,
+		entry.Docs,
+	}
+	values = append(values, entry.Backends...)
+	values = append(values, entry.Sources...)
+	values = append(values, entry.Categories...)
+	for _, value := range values {
+		if strings.Contains(strings.ToLower(value), query) {
+			return true
+		}
+	}
+	return false
+}
+
+func formatCatalogBackends(entry integrationCatalogEntry) string {
+	backends := append([]string{}, entry.Backends...)
+	if len(backends) == 0 && strings.TrimSpace(entry.Backend) != "" {
+		backends = append(backends, strings.TrimSpace(entry.Backend))
+	}
+	if len(backends) == 0 {
+		return "-"
+	}
+	sort.Strings(backends)
+	return strings.Join(backends, ",")
 }
 
 func runIntegrationList(args []string, stdout io.Writer) error {

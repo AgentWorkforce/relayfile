@@ -31,7 +31,7 @@ func TestA12CatalogRevalidatedAfterCloudConflict(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("seed catalog cache failed: %v", err)
 	}
-	if _, err := os.Stat(integrationCatalogCachePath()); err != nil {
+	if _, err := os.Stat(integrationCatalogCachePath("")); err != nil {
 		t.Fatalf("expected seeded cache file, got err=%v", err)
 	}
 
@@ -64,7 +64,7 @@ func TestA12CatalogRevalidatedAfterCloudConflict(t *testing.T) {
 	if got := atomic.LoadInt32(&connectCalls); got != 1 {
 		t.Fatalf("expected exactly 1 connect-session call, got %d", got)
 	}
-	if _, err := os.Stat(integrationCatalogCachePath()); !os.IsNotExist(err) {
+	if _, err := os.Stat(integrationCatalogCachePath("")); !os.IsNotExist(err) {
 		t.Fatalf("expected catalog cache invalidated after 409, got err=%v", err)
 	}
 }
