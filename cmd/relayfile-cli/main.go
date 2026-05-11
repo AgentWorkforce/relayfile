@@ -726,7 +726,7 @@ func providerPromptText(entries []integrationCatalogEntry) string {
 		ids = append(ids, id)
 	}
 	if len(ids) == 0 {
-		ids = []string{"github", "notion", "linear", "slack-sage", "none"}
+		ids = []string{"github", "notion", "linear", "slack", "none"}
 	}
 	if !containsString(ids, "none") {
 		ids = append(ids, "none")
@@ -738,7 +738,7 @@ func normalizeProviderID(value string) string {
 	value = strings.ToLower(strings.TrimSpace(value))
 	switch value {
 	case "slack", "slack-sage":
-		return "slack-sage"
+		return "slack"
 	default:
 		return value
 	}
@@ -899,7 +899,7 @@ func fallbackIntegrationCatalog() []integrationCatalogEntry {
 		{ID: "github", DisplayName: "GitHub", VFSRoot: "/github"},
 		{ID: "notion", DisplayName: "Notion", VFSRoot: "/notion"},
 		{ID: "linear", DisplayName: "Linear", VFSRoot: "/linear"},
-		{ID: "slack-sage", DisplayName: "Slack", VFSRoot: "/slack"},
+		{ID: "slack", DisplayName: "Slack", VFSRoot: "/slack"},
 		{ID: "slack-my-senior-dev", DisplayName: "Slack (MSD)", VFSRoot: "/slack-msd"},
 		{ID: "slack-nightcto", DisplayName: "Slack (NightCTO)", VFSRoot: "/slack-nightcto"},
 	}

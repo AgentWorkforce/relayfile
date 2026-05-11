@@ -1815,6 +1815,55 @@ func TestWorkspaceCurrentErrorsWhenNoneActive(t *testing.T) {
 	}
 }
 
+// TestNormalizeProviderIDCanonicalizesSlackAlias asserts that both the
+// canonical provider id ("slack") and the demoted alias ("slack-sage")
+// normalize to the canonical id. Before this fix the function returned
+// "slack-sage" for both inputs, poisoning every connect-session request
+// with the demoted alias even after the cloud registry migrated to
+// "slack" with "slack-sage" retained only as a backwards-compat alias.
+func TestNormalizeProviderIDCanonicalizesSlackAlias(t *testing.T) {
+	cases := []struct {
+		input string
+		want  string
+	}{
+		{"slack", "slack"},
+		{"slack-sage", "slack"},
+		{"Slack", "slack"},
+		{"  slack-sage  ", "slack"},
+		{"github", "github"},
+		{"linear", "linear"},
+		{"notion", "notion"},
+		{"slack-my-senior-dev", "slack-my-senior-dev"},
+	}
+	for _, tc := range cases {
+		if got := normalizeProviderID(tc.input); got != tc.want {
+			t.Fatalf("normalizeProviderID(%q) = %q, want %q", tc.input, got, tc.want)
+		}
+	}
+}
+
+// TestFallbackIntegrationCatalogUsesCanonicalSlackId guards the offline
+// fallback catalog so it advertises "slack" rather than "slack-sage"
+// when the cloud catalog endpoint is unreachable.
+func TestFallbackIntegrationCatalogUsesCanonicalSlackId(t *testing.T) {
+	entries := fallbackIntegrationCatalog()
+	var slack *integrationCatalogEntry
+	for i := range entries {
+		if entries[i].ID == "slack-sage" {
+			t.Fatalf("fallback catalog still advertises legacy id slack-sage: %#v", entries[i])
+		}
+		if entries[i].ID == "slack" {
+			slack = &entries[i]
+		}
+	}
+	if slack == nil {
+		t.Fatalf("fallback catalog missing canonical slack entry: %#v", entries)
+	}
+	if slack.VFSRoot != "/slack" {
+		t.Fatalf("expected slack VFSRoot /slack, got %q", slack.VFSRoot)
+	}
+}
+
 // TestWorkspaceListNamesOnlyRestoresBareOutput verifies the --names-only
 // escape hatch for scripts that parsed the legacy unmarked output.
 func TestWorkspaceListNamesOnlyRestoresBareOutput(t *testing.T) {
