@@ -54,6 +54,26 @@ describe('launchOnMount', () => {
     expect(existsSync(mountDir)).toBe(false);
   });
 
+  it('syncs files written by onBeforeLaunch when auto-sync is enabled', async () => {
+    let syncedSeen = -1;
+    const result = await launchOnMount({
+      cli: '/bin/sh',
+      projectDir,
+      mountDir,
+      args: ['-c', 'exit 0'],
+      onBeforeLaunch: (md) => {
+        writeFileSync(path.join(md, 'prelaunch.txt'), 'ready', 'utf8');
+      },
+      onAfterSync: (n) => {
+        syncedSeen = n;
+      },
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(readFileSync(path.join(projectDir, 'prelaunch.txt'), 'utf8')).toBe('ready');
+    expect(syncedSeen).toBe(1);
+  });
+
   it('propagates a non-zero exit code from the child', async () => {
     const result = await launchOnMount({
       cli: '/bin/sh',
@@ -81,6 +101,93 @@ describe('launchOnMount', () => {
     expect(result.exitCode).toBe(0);
   });
 
+  it('waits for auto-sync readiness before invoking onBeforeLaunch', async () => {
+    mkdirSync(mountDir, { recursive: true });
+
+    let readyResolved = false;
+    let beforeLaunchSawReady = false;
+    let syncBackPaths: string[] | undefined;
+
+    const createSpy = vi.spyOn(mountModule, 'createMount').mockResolvedValue({
+      mountDir,
+      startAutoSync: () => ({
+        stop: async () => {},
+        flushPending: async () => 0,
+        reconcile: async () => 0,
+        getDirtyPaths: () => ['tracked.txt'][Symbol.iterator](),
+        watchersHealthy: () => true,
+        totalChanges: () => 0,
+        ready: async () => {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+          readyResolved = true;
+        },
+      }),
+      syncBack: async ({ paths } = {}) => {
+        syncBackPaths = paths ? Array.from(paths) : undefined;
+        return 0;
+      },
+      cleanup: () => {},
+    });
+
+    try {
+      const result = await launchOnMount({
+        cli: '/bin/sh',
+        projectDir,
+        mountDir,
+        args: ['-c', 'exit 0'],
+        onBeforeLaunch: () => {
+          beforeLaunchSawReady = readyResolved;
+        },
+      });
+
+      expect(result.exitCode).toBe(0);
+      expect(beforeLaunchSawReady).toBe(true);
+      expect(syncBackPaths).toEqual(['tracked.txt']);
+    } finally {
+      createSpy.mockRestore();
+    }
+  });
+
+  it('falls back to full syncBack when auto-sync readiness fails', async () => {
+    mkdirSync(mountDir, { recursive: true });
+
+    let syncBackPaths: string[] | undefined;
+
+    const createSpy = vi.spyOn(mountModule, 'createMount').mockResolvedValue({
+      mountDir,
+      startAutoSync: () => ({
+        stop: async () => {},
+        flushPending: async () => 0,
+        reconcile: async () => 0,
+        getDirtyPaths: () => ['tracked.txt'][Symbol.iterator](),
+        watchersHealthy: () => true,
+        totalChanges: () => 0,
+        ready: async () => {
+          throw new Error('watcher failed');
+        },
+      }),
+      syncBack: async ({ paths } = {}) => {
+        syncBackPaths = paths ? Array.from(paths) : undefined;
+        return 0;
+      },
+      cleanup: () => {},
+    });
+
+    try {
+      const result = await launchOnMount({
+        cli: '/bin/sh',
+        projectDir,
+        mountDir,
+        args: ['-c', 'exit 0'],
+      });
+
+      expect(result.exitCode).toBe(0);
+      expect(syncBackPaths).toBeUndefined();
+    } finally {
+      createSpy.mockRestore();
+    }
+  });
+
   it('fires onAfterSync with a partial count and still cleans up when shutdownSignal aborts after child exit', async () => {
     mkdirSync(mountDir, { recursive: true });
 
@@ -94,7 +201,10 @@ describe('launchOnMount', () => {
         stop: async () => {
           stopCalled = true;
         },
+        flushPending: async () => 0,
         reconcile: async () => 0,
+        getDirtyPaths: () => [][Symbol.iterator](),
+        watchersHealthy: () => true,
         totalChanges: () => 0,
         ready: async () => {},
       }),

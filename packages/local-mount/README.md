@@ -21,7 +21,7 @@ const handle = await createMount(projectDir, mountDir, options);
 
 interface MountHandle {
   mountDir: string;
-  syncBack(opts?: { signal?: AbortSignal }): Promise<number>;
+  syncBack(opts?: { signal?: AbortSignal; paths?: Iterable<string> }): Promise<number>;
   startAutoSync(opts?: AutoSyncOptions): AutoSyncHandle;
   cleanup(): void;
 }
@@ -58,8 +58,8 @@ const { ignoredPatterns, readonlyPatterns } = readAgentDotfiles(projectDir, {
 
 High-level helper that:
 1. creates a mount,
-2. starts bidirectional auto-sync (see below, controllable via `autoSync`),
-3. runs a CLI inside the mount,
+2. starts bidirectional auto-sync (see below, controllable via `autoSync`) and waits for the watchers to be ready when auto-sync is enabled,
+3. runs `onBeforeLaunch`, then runs a CLI inside the mount,
 4. forwards `SIGINT` and `SIGTERM`,
 5. stops auto-sync and runs a final sync-back pass after the child exits,
 6. cleans up the mount directory.
@@ -84,7 +84,10 @@ interface AutoSyncOptions {
 
 interface AutoSyncHandle {
   stop(opts?: { signal?: AbortSignal }): Promise<void>;
+  flushPending(opts?: { signal?: AbortSignal }): Promise<number>;
   reconcile(opts?: { signal?: AbortSignal }): Promise<number>;
+  getDirtyPaths(): IterableIterator<string>;
+  watchersHealthy(): boolean;
   totalChanges(): number;
   ready(): Promise<void>;
 }
@@ -103,6 +106,7 @@ launchOnMount({ /* ... */, autoSync: { scanIntervalMs: 5_000, debounceMs: 100 } 
 How it works:
 - [@parcel/watcher](https://www.npmjs.com/package/@parcel/watcher) watches both the mount and the project tree using native FSEvents/inotify/ReadDirectoryChangesW
 - every `scanIntervalMs`, a full reconcile walks both trees as a safety net for missed events
+- watcher events are tracked as dirty paths, so shutdown can flush pending path-level work and make the final sync-back proportional to the number of mount-side changes when the watcher state stayed healthy
 - `stop({ signal })` still closes watchers if aborted, but skips the final draining reconcile
 - per-file `mtime` is tracked at the last sync, so the scan skips files that haven't changed
 
@@ -266,6 +270,8 @@ console.log(result.exitCode);
 The returned number is the count of files written back to `projectDir` in that pass. `syncBack()` never deletes — delete propagation is handled by auto-sync.
 
 `syncBack({ signal })` checks for aborts between files. If the signal aborts during shutdown, it returns the partial count accumulated so far instead of throwing, which lets callers report a partial sync and still run cleanup.
+
+`syncBack({ paths })` limits the pass to explicit mount-relative paths. This is used by auto-sync shutdown after `watchersHealthy()` confirms both watchers subscribed and no watcher error was observed; otherwise callers should omit `paths` to keep the full-walk safety net.
 
 `reconcile({ signal })` and the internal tree walk also poll for aborts between file visits so an in-flight draining scan can stop cooperatively.
 

@@ -6,7 +6,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_No unreleased changes._
+### Changed
+- `launchOnMount` now uses auto-sync's dirty path state for the final sync-back when watcher subscriptions stayed healthy, avoiding a full mount-tree walk on idle or low-change sessions. The full sweep remains the fallback when auto-sync is disabled or watcher state is degraded. (#134)
+- `launchOnMount` now waits for auto-sync watcher readiness before running `onBeforeLaunch` or spawning the child process, so the dirty-path final sync-back cannot miss short-lived writes made before watcher events are trusted. (#134)
 
 ## [0.7.7] - 2026-05-11
 

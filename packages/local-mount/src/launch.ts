@@ -76,19 +76,27 @@ export async function launchOnMount(opts: LaunchOnMountOptions): Promise<LaunchO
   let syncedCount = 0;
   let finalized = false;
   let autoSync: AutoSyncHandle | undefined;
+  let autoSyncReadyBeforeWrites = false;
 
   const finalize = async (): Promise<void> => {
     if (finalized) return;
     finalized = true;
     try {
       let autoSyncChanges = 0;
+      let finalSyncBackPaths: string[] | undefined;
       if (autoSync) {
         await autoSync.stop({ signal: opts.shutdownSignal });
         autoSyncChanges = autoSync.totalChanges();
+        if (autoSyncReadyBeforeWrites && autoSync.watchersHealthy()) {
+          finalSyncBackPaths = Array.from(autoSync.getDirtyPaths());
+        }
         autoSync = undefined;
       }
       if (!handle) return;
-      const finalSynced = await handle.syncBack({ signal: opts.shutdownSignal });
+      const finalSynced = await handle.syncBack({
+        signal: opts.shutdownSignal,
+        ...(finalSyncBackPaths ? { paths: finalSyncBackPaths } : {}),
+      });
       syncedCount = autoSyncChanges + finalSynced;
       if (opts.onAfterSync) {
         await opts.onAfterSync(syncedCount);
@@ -108,13 +116,21 @@ export async function launchOnMount(opts: LaunchOnMountOptions): Promise<LaunchO
       includeDefaultExcludeDirs: opts.includeDefaultExcludeDirs,
     });
 
-    if (opts.onBeforeLaunch) {
-      await opts.onBeforeLaunch(handle.mountDir);
-    }
-
     if (opts.autoSync !== false) {
       const autoSyncOpts = typeof opts.autoSync === 'object' ? opts.autoSync : undefined;
       autoSync = handle.startAutoSync(autoSyncOpts);
+      try {
+        await autoSync.ready();
+        autoSyncReadyBeforeWrites = autoSync.watchersHealthy();
+      } catch {
+        // Keep launching with degraded auto-sync; shutdown will use the full
+        // syncBack sweep because dirty-path state was never trustworthy.
+        autoSyncReadyBeforeWrites = false;
+      }
+    }
+
+    if (opts.onBeforeLaunch) {
+      await opts.onBeforeLaunch(handle.mountDir);
     }
 
     const envVars: NodeJS.ProcessEnv = {

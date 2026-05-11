@@ -263,6 +263,28 @@ describe('createMount', () => {
     handle.cleanup();
   });
 
+  it('syncBack: explicit paths skip unrelated mount changes', async () => {
+    write(path.join(projectDir, 'a.txt'), 'a0');
+    write(path.join(projectDir, 'b.txt'), 'b0');
+
+    const handle = await createMount(projectDir, mountDir, {
+      ignoredPatterns: [],
+      readonlyPatterns: [],
+      excludeDirs: [],
+    });
+
+    writeFileSync(path.join(handle.mountDir, 'a.txt'), 'a1', 'utf8');
+    writeFileSync(path.join(handle.mountDir, 'b.txt'), 'b1', 'utf8');
+
+    const synced = await handle.syncBack({ paths: ['a.txt'] });
+
+    expect(synced).toBe(1);
+    expect(readFileSync(path.join(projectDir, 'a.txt'), 'utf8')).toBe('a1');
+    expect(readFileSync(path.join(projectDir, 'b.txt'), 'utf8')).toBe('b0');
+
+    handle.cleanup();
+  });
+
   it('syncBack: skips files under default excluded paths', async () => {
     write(path.join(projectDir, 'src/code.ts'), 'original');
 
