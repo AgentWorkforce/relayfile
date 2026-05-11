@@ -148,6 +148,56 @@ describe('launchOnMount', () => {
     }
   });
 
+  it('falls back to full syncBack when watchers are healthy but no dirty paths were captured', async () => {
+    // Repro for the dropped-edits race flagged in #138 review: when the
+    // watcher stays healthy but doesn't observe any path before stop()
+    // (e.g. short-lived child writes that race past the watcher, or
+    // edits the watcher missed), getDirtyPaths returns empty. Passing
+    // paths: [] to syncBack would skip the walk entirely and silently
+    // drop those edits. The fix is to fall through to the full walk
+    // when the dirty set is empty.
+    mkdirSync(mountDir, { recursive: true });
+
+    let syncBackPaths: string[] | undefined;
+    let syncBackCalled = false;
+
+    const createSpy = vi.spyOn(mountModule, 'createMount').mockResolvedValue({
+      mountDir,
+      startAutoSync: () => ({
+        stop: async () => {},
+        flushPending: async () => 0,
+        reconcile: async () => 0,
+        getDirtyPaths: () => [][Symbol.iterator](),
+        watchersHealthy: () => true,
+        totalChanges: () => 0,
+        ready: async () => {},
+      }),
+      syncBack: async ({ paths } = {}) => {
+        syncBackCalled = true;
+        syncBackPaths = paths ? Array.from(paths) : undefined;
+        return 0;
+      },
+      cleanup: () => {},
+    });
+
+    try {
+      const result = await launchOnMount({
+        cli: '/bin/sh',
+        projectDir,
+        mountDir,
+        args: ['-c', 'exit 0'],
+      });
+
+      expect(result.exitCode).toBe(0);
+      expect(syncBackCalled).toBe(true);
+      // paths must NOT be passed when the dirty set is empty — otherwise
+      // syncBack({ paths: [] }) iterates zero files and skips the walk.
+      expect(syncBackPaths).toBeUndefined();
+    } finally {
+      createSpy.mockRestore();
+    }
+  });
+
   it('falls back to full syncBack when auto-sync readiness fails', async () => {
     mkdirSync(mountDir, { recursive: true });
 

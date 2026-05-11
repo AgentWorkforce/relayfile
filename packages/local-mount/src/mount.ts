@@ -201,6 +201,13 @@ export async function createMount(
         synced += syncedForFile;
 
         if (signal && syncedForFile > 0 && !signal.aborted) {
+          // Intentionally uses setTimeout(resolve, 0) rather than the
+          // setImmediate-based yieldToEventLoop helper below: aborts
+          // mid-walk are scheduled via setTimeout (see mount.test.ts
+          // "syncBack: returns a partial count when aborted mid-walk"),
+          // and matching the same queue makes the abort observable
+          // between file syncs. setImmediate runs after timer
+          // callbacks in a single I/O cycle and races the abort.
           await new Promise<void>((resolve) => setTimeout(resolve, 0));
         }
       }
