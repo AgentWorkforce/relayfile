@@ -206,6 +206,7 @@ type cloudConnectSessionResponse struct {
 	ExpiresAt    string `json:"expiresAt,omitempty"`
 	ConnectLink  string `json:"connectLink,omitempty"`
 	ConnectionID string `json:"connectionId,omitempty"`
+	Backend      string `json:"backend,omitempty"`
 }
 
 type cloudIntegrationReadyResponse struct {
@@ -272,6 +273,7 @@ type syncStateDaemon struct {
 type integrationConnectionState struct {
 	Provider     string `json:"provider"`
 	ConnectionID string `json:"connectionId,omitempty"`
+	Backend      string `json:"backend,omitempty"`
 	ConnectedAt  string `json:"connectedAt,omitempty"`
 	UpdatedAt    string `json:"updatedAt,omitempty"`
 }
@@ -1037,8 +1039,10 @@ func runCloudLogin(cloudAPIURL string, timeout time.Duration, shouldOpenBrowser 
 }
 
 func ensureCloudIntegration(cloudAPIURL, workspaceID, workspaceToken, provider, requestedBackend, localDir string, timeout time.Duration, shouldOpenBrowser bool, stdout io.Writer) error {
-	connectionID := loadSavedConnectionID(localDir, provider)
-	if connectionID != "" && requestedBackend == "" {
+	savedConnection := loadSavedConnection(localDir, provider)
+	connectionID := strings.TrimSpace(savedConnection.ConnectionID)
+	savedBackend := strings.TrimSpace(savedConnection.Backend)
+	if connectionID != "" && (requestedBackend == "" || requestedBackend == savedBackend) {
 		if ready, err := cloudIntegrationReady(cloudAPIURL, workspaceID, workspaceToken, provider, connectionID); err == nil && ready {
 			fmt.Fprintf(stdout, "%s already connected\n", provider)
 			return nil
@@ -1071,9 +1075,14 @@ func connectCloudIntegration(cloudAPIURL, workspaceID, workspaceToken, provider,
 	if connectionID == "" {
 		connectionID = workspaceID
 	}
+	backend := strings.TrimSpace(session.Backend)
+	if backend == "" {
+		backend = requestedBackend
+	}
 	_ = saveIntegrationConnection(localDir, integrationConnectionState{
 		Provider:     provider,
 		ConnectionID: connectionID,
+		Backend:      backend,
 		ConnectedAt:  time.Now().UTC().Format(time.RFC3339),
 		UpdatedAt:    time.Now().UTC().Format(time.RFC3339),
 	})
@@ -4383,18 +4392,23 @@ func saveIntegrationConnection(localDir string, state integrationConnectionState
 	return writeFileAtomically(integrationConnectionPath(localDir, state.Provider), payload, 0o644)
 }
 
-func loadSavedConnectionID(localDir, provider string) string {
+func loadSavedConnection(localDir, provider string) integrationConnectionState {
 	if localDir == "" || strings.TrimSpace(provider) == "" {
-		return ""
+		return integrationConnectionState{}
 	}
 	payload, err := os.ReadFile(integrationConnectionPath(localDir, provider))
 	if err != nil {
-		return ""
+		return integrationConnectionState{}
 	}
 	var state integrationConnectionState
 	if err := json.Unmarshal(payload, &state); err != nil {
-		return ""
+		return integrationConnectionState{}
 	}
+	return state
+}
+
+func loadSavedConnectionID(localDir, provider string) string {
+	state := loadSavedConnection(localDir, provider)
 	return strings.TrimSpace(state.ConnectionID)
 }
 
