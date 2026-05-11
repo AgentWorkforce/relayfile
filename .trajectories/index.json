@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "lastUpdated": "2026-05-09T19:29:16.149Z",
+  "lastUpdated": "2026-05-11T18:14:13.633Z",
   "trajectories": {
     "traj_mfyus7zfgxt2": {
       "title": "062-sdk-setup-client-workflow",
@@ -242,6 +242,13 @@
       "startedAt": "2026-05-09T19:25:53.348Z",
       "completedAt": "2026-05-09T19:29:16.033Z",
       "path": ".trajectories/completed/2026-05/traj_brjdrgcnnwhs.json"
+    },
+    "traj_tdywz0ni0z1a": {
+      "title": "Fix issue 132",
+      "status": "completed",
+      "startedAt": "2026-05-11T18:12:11.347Z",
+      "completedAt": "2026-05-11T18:14:13.466Z",
+      "path": ".trajectories/completed/2026-05/traj_tdywz0ni0z1a.json"
     }
   }
 }

@@ -6,7 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_No unreleased changes._
+### Changed
+- `createMount` now requests non-forcing filesystem reflink clones for initial project-to-mount file copies, falling back to ordinary byte copies on unsupported filesystems or cross-device mounts. (#132)
 
 ## [0.7.6] - 2026-05-11
 
