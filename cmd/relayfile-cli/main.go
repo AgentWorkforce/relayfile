@@ -1235,16 +1235,24 @@ func runLogin(args []string, stdin io.Reader, stdout io.Writer) error {
 	apiKey := fs.Bool("api-key", false, "use the legacy API-key flow against --server instead of the cloud browser login")
 	noOpen := fs.Bool("no-open", false, "print the cloud sign-in URL instead of opening it")
 	loginTimeout := fs.Duration("login-timeout", 5*time.Minute, "cloud login timeout")
+	workspaceFlag := fs.String("workspace", "", "workspace name or id to refresh; defaults to the active workspace")
+	skipWorkspace := fs.Bool("skip-workspace-refresh", false, "sign into the cloud only; do not refresh the workspace token")
 	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
-		"server":        true,
-		"token":         true,
-		"cloud-api-url": true,
-		"cloud-token":   true,
-		"api-key":       false,
-		"no-open":       false,
-		"login-timeout": true,
+		"server":                 true,
+		"token":                  true,
+		"cloud-api-url":          true,
+		"cloud-token":            true,
+		"api-key":                false,
+		"no-open":                false,
+		"login-timeout":          true,
+		"workspace":              true,
+		"skip-workspace-refresh": false,
 	})); err != nil {
 		return err
+	}
+
+	if *skipWorkspace && strings.TrimSpace(*workspaceFlag) != "" {
+		return errors.New("--workspace cannot be used with --skip-workspace-refresh: pick one")
 	}
 
 	tokenValue := strings.TrimSpace(*token)
@@ -1277,6 +1285,30 @@ func runLogin(args []string, stdin io.Reader, stdout io.Writer) error {
 		return err
 	}
 	fmt.Fprintf(stdout, "Signed in to Relayfile Cloud at %s\n", creds.APIURL)
+
+	if !*skipWorkspace {
+		record, rerr := resolveWorkspaceRecord(strings.TrimSpace(*workspaceFlag))
+		if rerr == nil {
+			joined, jerr := joinWorkspaceViaCloud(creds, record.ID, record.AgentName, record.Scopes)
+			if jerr == nil {
+				if perr := persistJoinedWorkspace(record, joined, creds.APIURL, record.LocalDir); perr == nil {
+					fmt.Fprintf(stdout, "Refreshed workspace token for %s (%s)\n", record.Name, record.ID)
+					return nil
+				} else if strings.TrimSpace(*workspaceFlag) != "" {
+					return fmt.Errorf("refresh workspace token: persist refreshed credentials: %w", perr)
+				} else {
+					fmt.Fprintf(stdout, "warning: workspace token refresh succeeded but persisting it failed: %v\n", perr)
+				}
+			} else if strings.TrimSpace(*workspaceFlag) != "" {
+				return fmt.Errorf("refresh workspace token: %w", jerr)
+			} else {
+				fmt.Fprintf(stdout, "warning: could not refresh workspace token for %s: %v\n", record.Name, jerr)
+			}
+		} else if strings.TrimSpace(*workspaceFlag) != "" {
+			return rerr
+		}
+	}
+
 	fmt.Fprintln(stdout, "Run 'relayfile setup' to create or join a workspace, or 'relayfile mount WORKSPACE' if you already have one.")
 	return nil
 }
