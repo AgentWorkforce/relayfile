@@ -198,6 +198,7 @@ type cloudWorkspaceJoinResponse struct {
 
 type cloudConnectSessionRequest struct {
 	AllowedIntegrations []string `json:"allowedIntegrations,omitempty"`
+	RequestedBackend    string   `json:"requestedBackend,omitempty"`
 }
 
 type cloudConnectSessionResponse struct {
@@ -377,14 +378,14 @@ func printUsage(w io.Writer) {
 
 Usage:
   relayfile
-  relayfile setup [--provider PROVIDER] [--workspace NAME] [--local-dir DIR]
+  relayfile setup [--provider PROVIDER] [--backend BACKEND] [--workspace NAME] [--local-dir DIR]
   relayfile login [--no-open] [--api-key] [--server URL] [--token TOKEN]
   relayfile workspace create NAME
   relayfile workspace use NAME
   relayfile workspace list [--names-only]
   relayfile workspace current [--verbose]
   relayfile workspace delete NAME [--yes]
-  relayfile integration connect PROVIDER [--workspace NAME]
+  relayfile integration connect PROVIDER [--backend BACKEND] [--workspace NAME]
   relayfile integration list [--workspace NAME] [--json]
   relayfile integration disconnect PROVIDER [--workspace NAME] [--yes]
   relayfile ops list [--workspace NAME] [--json]
@@ -436,6 +437,7 @@ func runSetup(args []string, stdin io.Reader, stdout io.Writer) error {
 	cloudToken := fs.String("cloud-token", strings.TrimSpace(os.Getenv("RELAYFILE_CLOUD_TOKEN")), "Relayfile Cloud access token; skips browser login when set")
 	workspaceName := fs.String("workspace", "", "workspace name to create")
 	provider := fs.String("provider", "", "integration provider to connect; use none to skip")
+	backend := fs.String("backend", "", "integration backend to request (nango or composio)")
 	localDirFlag := fs.String("local-dir", "", "local mount directory")
 	noOpen := fs.Bool("no-open", false, "print browser URLs instead of opening them")
 	skipMount := fs.Bool("skip-mount", false, "finish after setup without starting the mount process")
@@ -447,6 +449,7 @@ func runSetup(args []string, stdin io.Reader, stdout io.Writer) error {
 		"cloud-token":     true,
 		"workspace":       true,
 		"provider":        true,
+		"backend":         true,
 		"local-dir":       true,
 		"no-open":         false,
 		"skip-mount":      false,
@@ -457,7 +460,7 @@ func runSetup(args []string, stdin io.Reader, stdout io.Writer) error {
 		return err
 	}
 	if fs.NArg() > 0 {
-		return errors.New("usage: relayfile setup [--provider PROVIDER] [--workspace NAME] [--local-dir DIR]")
+		return errors.New("usage: relayfile setup [--provider PROVIDER] [--backend BACKEND] [--workspace NAME] [--local-dir DIR]")
 	}
 
 	cloudAPI := strings.TrimRight(strings.TrimSpace(*cloudAPIURL), "/")
@@ -498,6 +501,10 @@ func runSetup(args []string, stdin io.Reader, stdout io.Writer) error {
 		}
 	}
 	selectedProvider = normalizeProviderID(selectedProvider)
+	requestedBackend, err := normalizeIntegrationBackend(*backend)
+	if err != nil {
+		return err
+	}
 
 	localDir := strings.TrimSpace(*localDirFlag)
 	if localDir == "" {
@@ -539,11 +546,11 @@ func runSetup(args []string, stdin io.Reader, stdout io.Writer) error {
 
 	if selectedProvider != "" && selectedProvider != "none" && selectedProvider != "skip" {
 		if createdWorkspace {
-			if err := connectCloudIntegration(tokenSet.APIURL, record.ID, joined.Token, selectedProvider, absLocalDir, *connectTimeout, !*noOpen, stdout); err != nil {
+			if err := connectCloudIntegration(tokenSet.APIURL, record.ID, joined.Token, selectedProvider, requestedBackend, absLocalDir, *connectTimeout, !*noOpen, stdout); err != nil {
 				return err
 			}
 		} else {
-			if err := ensureCloudIntegration(tokenSet.APIURL, record.ID, joined.Token, selectedProvider, absLocalDir, *connectTimeout, !*noOpen, stdout); err != nil {
+			if err := ensureCloudIntegration(tokenSet.APIURL, record.ID, joined.Token, selectedProvider, requestedBackend, absLocalDir, *connectTimeout, !*noOpen, stdout); err != nil {
 				return err
 			}
 		}
@@ -724,6 +731,18 @@ func normalizeProviderID(value string) string {
 		return "slack-sage"
 	default:
 		return value
+	}
+}
+
+func normalizeIntegrationBackend(value string) (string, error) {
+	value = strings.ToLower(strings.TrimSpace(value))
+	switch value {
+	case "", "default":
+		return "", nil
+	case "nango", "composio":
+		return value, nil
+	default:
+		return "", fmt.Errorf("unsupported integration backend %q (expected nango or composio)", value)
 	}
 }
 
@@ -1017,18 +1036,18 @@ func runCloudLogin(cloudAPIURL string, timeout time.Duration, shouldOpenBrowser 
 	}
 }
 
-func ensureCloudIntegration(cloudAPIURL, workspaceID, workspaceToken, provider, localDir string, timeout time.Duration, shouldOpenBrowser bool, stdout io.Writer) error {
+func ensureCloudIntegration(cloudAPIURL, workspaceID, workspaceToken, provider, requestedBackend, localDir string, timeout time.Duration, shouldOpenBrowser bool, stdout io.Writer) error {
 	connectionID := loadSavedConnectionID(localDir, provider)
-	if connectionID != "" {
+	if connectionID != "" && requestedBackend == "" {
 		if ready, err := cloudIntegrationReady(cloudAPIURL, workspaceID, workspaceToken, provider, connectionID); err == nil && ready {
 			fmt.Fprintf(stdout, "%s already connected\n", provider)
 			return nil
 		}
 	}
-	return connectCloudIntegration(cloudAPIURL, workspaceID, workspaceToken, provider, localDir, timeout, shouldOpenBrowser, stdout)
+	return connectCloudIntegration(cloudAPIURL, workspaceID, workspaceToken, provider, requestedBackend, localDir, timeout, shouldOpenBrowser, stdout)
 }
 
-func connectCloudIntegration(cloudAPIURL, workspaceID, workspaceToken, provider, localDir string, timeout time.Duration, shouldOpenBrowser bool, stdout io.Writer) error {
+func connectCloudIntegration(cloudAPIURL, workspaceID, workspaceToken, provider, requestedBackend, localDir string, timeout time.Duration, shouldOpenBrowser bool, stdout io.Writer) error {
 	client, err := newAPIClient(cloudAPIURL, workspaceToken)
 	if err != nil {
 		return err
@@ -1036,6 +1055,7 @@ func connectCloudIntegration(cloudAPIURL, workspaceID, workspaceToken, provider,
 	var session cloudConnectSessionResponse
 	if err := client.postJSON(context.Background(), fmt.Sprintf("/api/v1/workspaces/%s/integrations/connect-session", url.PathEscape(workspaceID)), cloudConnectSessionRequest{
 		AllowedIntegrations: []string{provider},
+		RequestedBackend:    requestedBackend,
 	}, &session); err != nil {
 		// Per contract verdict §A12, a 409 from connect-session means the
 		// requested provider is no longer in the catalog. Drop the cached
@@ -1267,20 +1287,26 @@ func runIntegrationConnect(args []string, stdin io.Reader, stdout io.Writer) err
 	fs.SetOutput(io.Discard)
 	workspaceName := fs.String("workspace", "", "workspace name or id")
 	cloudAPIURL := fs.String("cloud-api-url", envOrDefault("RELAYFILE_CLOUD_API_URL", defaultCloudAPIURL), "Relayfile Cloud API URL")
+	backend := fs.String("backend", "", "integration backend to request (nango or composio)")
 	noOpen := fs.Bool("no-open", false, "print the hosted URL instead of opening it")
 	timeout := fs.Duration("timeout", 5*time.Minute, "integration readiness timeout")
 	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
 		"workspace":     true,
 		"cloud-api-url": true,
+		"backend":       true,
 		"no-open":       false,
 		"timeout":       true,
 	})); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return errors.New("usage: relayfile integration connect PROVIDER [--workspace NAME] [--no-open] [--timeout 5m]")
+		return errors.New("usage: relayfile integration connect PROVIDER [--backend BACKEND] [--workspace NAME] [--no-open] [--timeout 5m]")
 	}
 	provider := normalizeProviderID(fs.Arg(0))
+	requestedBackend, err := normalizeIntegrationBackend(*backend)
+	if err != nil {
+		return err
+	}
 	record, err := resolveWorkspaceRecord(strings.TrimSpace(*workspaceName))
 	if err != nil {
 		return err
@@ -1296,7 +1322,7 @@ func runIntegrationConnect(args []string, stdin io.Reader, stdout io.Writer) err
 	if err := persistJoinedWorkspace(record, joined, cloudCreds.APIURL, record.LocalDir); err != nil {
 		return err
 	}
-	if err := ensureCloudIntegration(cloudCreds.APIURL, record.ID, joined.Token, provider, record.LocalDir, *timeout, !*noOpen, stdout); err != nil {
+	if err := ensureCloudIntegration(cloudCreds.APIURL, record.ID, joined.Token, provider, requestedBackend, record.LocalDir, *timeout, !*noOpen, stdout); err != nil {
 		return err
 	}
 	return waitForInitialSync(joined.RelayfileURL, joined.Token, record.ID, provider, record.LocalDir, *timeout, stdout)

@@ -54,7 +54,7 @@ func TestA12CatalogRevalidatedAfterCloudConflict(t *testing.T) {
 		t.Fatalf("ensureMirrorLayout failed: %v", err)
 	}
 
-	err := connectCloudIntegration(server.URL, "ws_demo", "tok", "deprecated-provider", localDir, 0, false, &stubWriter{})
+	err := connectCloudIntegration(server.URL, "ws_demo", "tok", "deprecated-provider", "", localDir, 0, false, &stubWriter{})
 	if err == nil {
 		t.Fatalf("expected error from connect-session 409, got nil")
 	}

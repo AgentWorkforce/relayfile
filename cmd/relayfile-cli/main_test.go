@@ -655,6 +655,16 @@ func TestIntegrationConnectRefreshesCloudAccessTokenAndReusesWorkspace(t *testin
 			if got := r.Header.Get("Authorization"); got != "Bearer rf_join" {
 				t.Fatalf("unexpected connect Authorization: %q", got)
 			}
+			var body cloudConnectSessionRequest
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("decode connect body failed: %v", err)
+			}
+			if len(body.AllowedIntegrations) != 1 || body.AllowedIntegrations[0] != "notion" {
+				t.Fatalf("unexpected allowed integrations: %#v", body.AllowedIntegrations)
+			}
+			if body.RequestedBackend != "composio" {
+				t.Fatalf("expected requested backend composio, got %q", body.RequestedBackend)
+			}
 			_, _ = w.Write([]byte(`{"connectLink":"https://connect.test/notion","connectionId":"conn_789"}`))
 		case "/api/v1/workspaces/ws_123/integrations/notion/status":
 			seen["status"] = true
@@ -685,6 +695,7 @@ func TestIntegrationConnectRefreshesCloudAccessTokenAndReusesWorkspace(t *testin
 		"integration", "connect", "notion",
 		"--workspace", "demo",
 		"--cloud-api-url", server.URL,
+		"--backend", "composio",
 		"--no-open",
 		"--timeout", "1s",
 	}, strings.NewReader(""), &stdout, &stdout)

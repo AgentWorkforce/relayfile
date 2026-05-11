@@ -174,7 +174,7 @@ func TestA3EnsureCloudIntegrationSkipsConnectWhenAlreadyReady(t *testing.T) {
 	defer server.Close()
 
 	var stdout bytes.Buffer
-	if err := ensureCloudIntegration(server.URL, "ws_demo", "rf_token", "notion", localDir, 5*time.Second, false, &stdout); err != nil {
+	if err := ensureCloudIntegration(server.URL, "ws_demo", "rf_token", "notion", "", localDir, 5*time.Second, false, &stdout); err != nil {
 		t.Fatalf("ensureCloudIntegration failed: %v", err)
 	}
 	if atomic.LoadInt32(&statusCalls) != 1 {
