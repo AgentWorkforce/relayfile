@@ -6,6 +6,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+_No unreleased changes._
+
+## [0.7.8] - 2026-05-11
+
 ### Changed
 - `launchOnMount` now uses auto-sync's dirty path state for the final sync-back when watcher subscriptions stayed healthy, avoiding a full mount-tree walk on idle or low-change sessions. The full sweep remains the fallback when auto-sync is disabled or watcher state is degraded. (#134)
 - `launchOnMount` now waits for auto-sync watcher readiness before running `onBeforeLaunch` or spawning the child process, so the dirty-path final sync-back cannot miss short-lived writes made before watcher events are trusted. (#134)
@@ -156,7 +160,8 @@ Initial release.
 - Directory-only ignore patterns (e.g. `cache/`) match directories without swallowing like-named files.
 - README documenting the mount lifecycle, dotfile semantics, and auto-sync behavior. ([#48])
 
-[Unreleased]: https://github.com/AgentWorkforce/relayfile/compare/v0.7.7...HEAD
+[Unreleased]: https://github.com/AgentWorkforce/relayfile/compare/v0.7.8...HEAD
+[0.7.8]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.7.8
 [0.7.7]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.7.7
 [0.7.6]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.7.6
 [0.7.5]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.7.5
