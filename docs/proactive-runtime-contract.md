@@ -1,26 +1,22 @@
 # Proactive Runtime Contract
 
-This document captures the `relayfile` surfaces that the proactive runtime expects across milestones. M1 only adds contract markers and typed SDK stubs. Data-trigger delivery, change-log reads, and adapter implementations land in M2+.
+This document captures the `relayfile` surfaces the proactive runtime consumes in M2. The TypeScript SDK now exposes a live change stream, retained change lookups, and event-to-resource expansion hooks without renaming the M1 public surface.
 
-## M1 Scope
+The `ChangeEvent` contract below intentionally aligns with the proactive runtime's spec §3.2 `RelayfileChangeEvent` envelope so `relayfile`, `@agent-relay/events`, and the gateway can share one canonical notification shape.
 
-M1 establishes stable public names so the gateway and `@agent-relay/*` packages can compile against the final surface now and replace the stubbed implementations later without renaming APIs.
+The M2 TypeScript SDK behavior is:
 
-The `ChangeEvent` contract below is intentionally aligned with the proactive runtime's spec §3.2 `RelayfileChangeEvent` envelope so M2 can swap the local definition for a one-line type alias instead of a breaking rename.
-
-The TypeScript SDK exposes the required M1 stubs and reserves the replay helper names that the gateway will consume later:
-
-- `subscribe(globs, onChange)` exists in the public client and throws `M2_NOT_IMPLEMENTED`.
-- `getResourceAtEvent(eventId)` exists in the public client and throws `M2_NOT_IMPLEMENTED`.
-- `listChangesSince(isoTimestamp)` exists in the public client and throws `M2_NOT_IMPLEMENTED`.
-- `listLastNChanges(limit)` exists in the public client and throws `M2_NOT_IMPLEMENTED`.
+- `subscribe(globs, onChange, options?)` opens a workspace-scoped change stream, multiplexed over one WebSocket transport per `(client, workspace, aclToken)` tuple.
+- `open(options)` boots that same transport and optionally primes retained replay data into the local change cache.
+- `getResourceAtEvent(eventId)` resolves the canonical payload for a retained event from the local cache first, then falls back to the retained change-log API.
+- `listChangesSince(isoTimestamp)` and `listLastNChanges(limit)` return retained `ChangeEvent` envelopes and attach the same `expand()` helper as live events.
 
 ## DLQ Path Scheme
 
 The proactive runtime gateway writes final-failure events into the workspace filesystem at:
 
 ```text
-/_dlq/<event-id>.json
+/_dlq/<workspace>/<event-id>.json
 ```
 
 This path scheme is the cross-repo contract between the gateway and `relayfile`.
@@ -29,11 +25,12 @@ Requirements:
 
 - The path is treated like a normal workspace file path for write, read, list, and delete semantics.
 - The gateway owns writes to `/_dlq/**`; agents and tooling may inspect, replay, or purge these files later.
-- Workspace identity lives in the JSON payload and surrounding runtime metadata rather than in an extra path segment.
+- The workspace path segment mirrors the gateway's write key so DLQ artifacts stay partitioned by workspace inside a shared mount.
+- Workspace identity is also duplicated in the JSON payload and surrounding runtime metadata for downstream replay tooling.
 
 ## `subscribe(globs[], onChange)` Contract
 
-`relayfile` will expose:
+`relayfile` exposes:
 
 ```ts
 subscribe(
@@ -41,24 +38,24 @@ subscribe(
   onChange: (event: ChangeEvent) => void,
   options?: {
     coalesce?: "none" | "fire-once";
+    coalesceMs?: number;
     pathScope?: string[];
+    aclToken?: string;
     drainMs?: number;
   },
 ): Subscription
 ```
 
-M1 behavior:
-
-- The method is present on the public SDK.
-- The method throws `M2_NOT_IMPLEMENTED`.
-
 M2 behavior:
 
 - The client registers one or more path globs for change notifications.
-- Delivery is multiplexed over WebSocket transport.
+- Delivery is multiplexed over WebSocket transport, shared per `(client, workspace, aclToken)` tuple.
 - Each logical occurrence has a stable `event.id` so downstream runtime dedup can key on `(workspace, agentId, event.id)`.
 - The shape aligns with spec §3.2 `RelayfileChangeEvent` so the M2 event SDK can alias it directly.
-- The optional `options` bag reserves the coalesce hint, future path-scoped subscriptions, and drain semantics without forcing a later method rename.
+- `options.aclToken` scopes the underlying watch to that token's visible paths. For M2, any valid workspace token is accepted; narrower path-scoped tokens land with the auth work.
+- `options.pathScope` is an additional client-side path filter on top of the token's visibility.
+- Rapid writes to the same path collapse into a single callback when coalescing is enabled. The default coalesce window is `200ms`, overridable with `options.coalesceMs`.
+- `unsubscribe()` removes the subscription and waits for in-flight handlers to drain, bounded by `options.drainMs` when provided.
 
 ### `ChangeEvent` shape
 
@@ -96,7 +93,9 @@ Notes:
 - `resource.path` points at the canonical normalized payload inside relayfile.
 - `summary` stays small and routing-friendly; large payload fields remain in VFS until explicitly fetched.
 - `digest` is the hash of the current canonical resource state when available.
-- `expand("full")` resolves through `getResourceAtEvent(event.id)` in M2. M1 publishes the type shape and stub so downstream packages can compile now.
+- `expand("summary")` resolves locally from the delivered envelope.
+- `expand("full")` resolves through `getResourceAtEvent(event.id)`.
+- `expand("diff")` and `expand("thread")` remain reserved for later milestones and currently raise `M2_NOT_IMPLEMENTED`.
 - `agentId` is optional on the notification envelope and carries the producer-side agent identity when the source runtime can preserve it.
 - Retry `attempt` is owned by the proactive-runtime gateway, not relayfile. Relayfile emits stable logical change events; the gateway wraps those events with delivery-attempt metadata when it redelivers them.
 
@@ -117,9 +116,9 @@ type ChangeStreamConnectionOptions = ReplayOptions & {
 open(options: ChangeStreamConnectionOptions): ChangeStreamConnection
 ```
 
-The M1 SDK method throws `M2_NOT_IMPLEMENTED`, but its presence prevents
-downstream packages from inventing incompatible transport-bootstrap shapes
-before M2 lands.
+The transport is now live in the TypeScript SDK. `open(options)` exists mainly
+for callers that want to establish the shared watch transport early and/or seed
+the local retained change cache before subscriptions attach.
 
 ### `Subscription` shape
 
@@ -131,7 +130,7 @@ type Subscription = {
 };
 ```
 
-M2 will return an active subscription handle that unregisters the watch when `unsubscribe()` is called and resolves after in-flight handlers have drained or `options.drainMs` elapses.
+M2 returns an active subscription handle that unregisters the watch when `unsubscribe()` is called and resolves after in-flight handlers have drained or `options.drainMs` elapses.
 
 ## Change-Log Retention
 
@@ -144,7 +143,10 @@ Contract:
 - The retained log must be sufficient to support replay-on-start, `getResourceAtEvent(eventId)`, and future diff expansion.
 - The retained log must also back `listChangesSince(iso)` and `listLastNChanges(n)`, which M1 reserves as public SDK names for `replayOnStart: "since:<iso>"` and `replayOnStart: "last:<n>"`.
 
-M1 only documents this requirement. Storage implementation lands in M2.
+The SDK assumes the backend retains enough change-log data to satisfy these APIs
+for at least the configured retention window. The local SDK cache mirrors the
+same contract opportunistically for already-delivered events, but durable
+retention remains a backend responsibility.
 
 ## Path-Scoped Subscriptions
 
@@ -156,7 +158,9 @@ Contract:
 - Paths outside the caller's scope are silently omitted rather than partially redacted.
 - The scope model follows workspace and path-scoped token rules introduced in M5.
 
-M1 only documents the contract. Enforcement lands with the M5 auth work.
+M2 wires the optional `aclToken` through the watch transport so server-side path
+visibility can participate in filtering. Fine-grained path-scoped tokens land
+with the M5 auth work.
 
 ## Coalesce And Replay Hooks
 
@@ -165,13 +169,15 @@ The proactive runtime reserves two relayfile-facing hooks for post-M1 fan-in beh
 - `listChangesSince(isoTimestamp)` for replaying retained events from an ISO cursor.
 - `listLastNChanges(limit)` for replaying the last N retained events on startup.
 
-These are M1 SDK stubs that throw `M2_NOT_IMPLEMENTED`. The names are locked now so the gateway and runtime can compile against the final replay contract without a later rename.
+These are live M2 SDK methods. They normalize retained envelopes into the same
+`ChangeEvent` objects the live stream emits and feed the local event/resource
+cache used by `getResourceAtEvent(eventId)`.
 
 Relayfile also needs to preserve a stable `resource.path` on every `ChangeEvent`. Runtime-side coalescing (`options.coalesceMs`) keys on the normalized path plus workspace and therefore depends on that path being durable and consistent across retries.
 
 ## `getResourceAtEvent(eventId)` Contract
 
-`relayfile` will expose:
+`relayfile` exposes:
 
 ```ts
 getResourceAtEvent(eventId: string): Promise<{
@@ -181,18 +187,15 @@ getResourceAtEvent(eventId: string): Promise<{
 }>
 ```
 
-M1 behavior:
-
-- The method is present on the public SDK.
-- The method throws `M2_NOT_IMPLEMENTED`.
-
 M2 behavior:
 
-- Resolve `eventId` through the retained change log.
+- Resolve `eventId` through the local delivered-event cache first.
+- On a cold cache, resolve `eventId` through the retained change log.
 - Read the canonical normalized payload stored at the corresponding resource path.
 - Return the resource path, normalized payload, and canonical digest.
 
-This is the read path the gateway and SDK call from proactive runtime `event.expand("full")` for relayfile-backed events. M1 keeps the type signature stable now so M2 can replace the stub with the real change-log lookup in one line.
+This is the read path the gateway and SDK call from proactive runtime
+`event.expand("full")` for relayfile-backed events.
 
 ## `buildSummary(payload)` Adapter Contract
 

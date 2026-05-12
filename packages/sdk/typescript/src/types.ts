@@ -250,7 +250,9 @@ export interface ChangeEvent {
 
 export interface SubscribeOptions {
   coalesce?: "none" | "fire-once";
+  coalesceMs?: number;
   pathScope?: string[];
+  aclToken?: string;
   drainMs?: number;
 }
 
@@ -265,6 +267,7 @@ export type ReplayOptions =
 
 export type ChangeStreamConnectionOptions = ReplayOptions & {
   workspaceId: string;
+  aclToken?: string;
 };
 
 export interface ChangeStreamConnection extends Subscription {

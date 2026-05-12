@@ -56,10 +56,83 @@ function mockFetch(body: unknown, status = 200, headers: Record<string, string> 
   } as unknown as Response);
 }
 
-function makeClient(fetchImpl: typeof fetch, opts?: { retry?: { maxRetries: number } }) {
+function makeWorkspaceToken(workspaceId = "ws_acme", agentName = "agent-test"): string {
+  const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString("base64url");
+  return `${encode({ alg: "HS256", typ: "JWT" })}.${encode({
+    workspace_id: workspaceId,
+    agent_name: agentName,
+    aud: ["relayfile"],
+  })}.sig`;
+}
+
+function flushMicrotasks(): Promise<void> {
+  return Promise.resolve().then(() => undefined).then(() => undefined);
+}
+
+async function waitForWebSocket(): Promise<ProactiveMockWebSocket> {
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    const socket = ProactiveMockWebSocket.instances[0];
+    if (socket) {
+      return socket;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  throw new Error("Timed out waiting for the proactive runtime websocket.");
+}
+
+async function waitForExpectation(check: () => void): Promise<void> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    try {
+      check();
+      return;
+    } catch (error) {
+      lastError = error;
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+  }
+  throw lastError;
+}
+
+class ProactiveMockWebSocket {
+  static instances: ProactiveMockWebSocket[] = [];
+
+  readonly url: string;
+  sent: string[] = [];
+  private readonly listeners = new Map<string, Set<(event: any) => void>>();
+
+  constructor(url: string) {
+    this.url = url;
+    ProactiveMockWebSocket.instances.push(this);
+  }
+
+  addEventListener(type: string, handler: (event: any) => void): void {
+    if (!this.listeners.has(type)) {
+      this.listeners.set(type, new Set());
+    }
+    this.listeners.get(type)!.add(handler);
+  }
+
+  send(data: string): void {
+    this.sent.push(data);
+  }
+
+  close = vi.fn();
+
+  emit(type: string, event: any): void {
+    for (const handler of this.listeners.get(type) ?? []) {
+      handler(event);
+    }
+  }
+}
+
+function makeClient(
+  fetchImpl: typeof fetch,
+  opts?: { retry?: { maxRetries: number }; token?: string }
+) {
   return new RelayFileClient({
     baseUrl: "https://relay.test",
-    token: "tok_test",
+    token: opts?.token ?? "tok_test",
     fetchImpl,
     retry: opts?.retry ?? { maxRetries: 0 },
   });
@@ -70,7 +143,16 @@ function makeClient(fetchImpl: typeof fetch, opts?: { retry?: { maxRetries: numb
 // ---------------------------------------------------------------------------
 
 describe("RelayFileClient — existing methods", () => {
-  describe("proactive runtime contract stubs", () => {
+  describe("proactive runtime change APIs", () => {
+    beforeEach(() => {
+      ProactiveMockWebSocket.instances = [];
+      Object.defineProperty(globalThis, "WebSocket", {
+        configurable: true,
+        writable: true,
+        value: ProactiveMockWebSocket as unknown as typeof WebSocket,
+      });
+    });
+
     it("exports ChangeEvent and Subscription-compatible shapes", () => {
       const handle: Subscription = {
         async unsubscribe() {
@@ -136,54 +218,383 @@ describe("RelayFileClient — existing methods", () => {
       expect(connection.ready).toBeInstanceOf(Promise);
     });
 
-    it("subscribe returns a no-op Subscription handle in M1", async () => {
-      const client = makeClient(mockFetch({ path: "/", entries: [], nextCursor: null }));
+    it("subscribe multiplexes one workspace websocket and materializes matching change events", async () => {
+      const fetchImpl = vi.fn(async (url: string) => {
+        if (url.includes("/fs/file?path=%2Flinear%2Fissues%2FENG-412.json")) {
+          return {
+            ok: true,
+            status: 200,
+            headers: new Headers({ "content-type": "application/json" }),
+            json: async () => ({
+              path: "/linear/issues/ENG-412.json",
+              revision: "rev_2",
+              contentType: "application/json",
+              content: JSON.stringify({
+                id: "ENG-412",
+                provider: "linear",
+                kind: "linear.issue",
+                title: "ENG-412",
+                status: "In Progress",
+              }),
+            }),
+            text: async () => "",
+          } as unknown as Response;
+        }
+        throw new Error(`Unexpected fetch URL: ${url}`);
+      });
+      const client = makeClient(fetchImpl as unknown as typeof fetch, {
+        token: makeWorkspaceToken("ws_acme", "support-agent"),
+      });
+      const issueHandler = vi.fn();
+      const broadHandler = vi.fn();
 
-      const handle = client.subscribe(
+      const issueHandle = client.subscribe(
         ["/linear/issues/**"],
-        () => undefined,
-        { coalesce: "fire-once", pathScope: ["/linear/issues/**"] },
+        issueHandler,
+        { coalesce: "none", pathScope: ["/linear/issues/**"] },
+      );
+      const broadHandle = client.subscribe(
+        ["/linear/**"],
+        broadHandler,
+        { coalesce: "none" },
       );
 
-      expect(typeof handle.unsubscribe).toBe("function");
-      await expect(handle.unsubscribe()).resolves.toBeUndefined();
+      const socket = await waitForWebSocket();
+      expect(ProactiveMockWebSocket.instances).toHaveLength(1);
+      socket.emit("open", {});
+      socket.emit("message", {
+        data: JSON.stringify({
+          eventId: "evt_linear_1",
+          type: "file.updated",
+          path: "/linear/issues/ENG-412.json",
+          revision: "rev_2",
+          timestamp: "2026-05-11T00:00:00.000Z",
+        } satisfies FilesystemEvent),
+      });
+
+      await waitForExpectation(() => {
+        expect(issueHandler).toHaveBeenCalledTimes(1);
+        expect(broadHandler).toHaveBeenCalledTimes(1);
+      });
+      expect(issueHandler.mock.calls[0]?.[0]).toMatchObject({
+        id: "evt_linear_1",
+        workspace: "ws_acme",
+        agentId: "support-agent",
+        type: "relayfile.changed",
+        resource: {
+          path: "/linear/issues/ENG-412.json",
+          kind: "linear.issue",
+          id: "ENG-412",
+          provider: "linear",
+        },
+        summary: {
+          title: "ENG-412",
+          status: "In Progress",
+        },
+      });
+
+      await issueHandle.unsubscribe();
+      await broadHandle.unsubscribe();
     });
 
-    it("getResourceAtEvent throws a typed M2_NOT_IMPLEMENTED error", async () => {
-      const client = makeClient(mockFetch({ path: "/", entries: [], nextCursor: null }));
+    it("subscribe uses the acl token transport and coalesces rapid writes to one event", async () => {
+      vi.useFakeTimers();
+      try {
+        const scopedToken = makeWorkspaceToken("ws_acme", "scoped-agent");
+        const fetchImpl = vi.fn(async (url: string) => {
+          if (url.includes("/fs/file?path=%2Flinear%2Fissues%2FENG-7.json")) {
+            return {
+              ok: true,
+              status: 200,
+              headers: new Headers({ "content-type": "application/json" }),
+              json: async () => ({
+                path: "/linear/issues/ENG-7.json",
+                revision: "rev_2",
+                contentType: "application/json",
+                content: JSON.stringify({
+                  id: "ENG-7",
+                  provider: "linear",
+                  kind: "linear.issue",
+                  title: "ENG-7",
+                  status: "Done",
+                }),
+              }),
+              text: async () => "",
+            } as unknown as Response;
+          }
+          throw new Error(`Unexpected fetch URL: ${url}`);
+        });
+        const client = makeClient(fetchImpl as unknown as typeof fetch, {
+          token: makeWorkspaceToken("ws_acme", "default-agent"),
+        });
+        const handler = vi.fn();
 
-      await expect(client.getResourceAtEvent("evt_1")).rejects.toMatchObject({
+        const handle = client.subscribe(
+          ["/linear/issues/**"],
+          handler,
+          { aclToken: scopedToken, coalesce: "fire-once", coalesceMs: 50 },
+        );
+
+        await vi.advanceTimersByTimeAsync(0);
+        const socket = ProactiveMockWebSocket.instances[0]!;
+        expect(socket.url).toContain(`token=${scopedToken}`);
+        socket.emit("open", {});
+        socket.emit("message", {
+          data: JSON.stringify({
+            eventId: "evt_linear_1",
+            type: "file.updated",
+            path: "/linear/issues/ENG-7.json",
+            revision: "rev_1",
+            timestamp: "2026-05-11T00:00:00.000Z",
+          } satisfies FilesystemEvent),
+        });
+        socket.emit("message", {
+          data: JSON.stringify({
+            eventId: "evt_linear_2",
+            type: "file.updated",
+            path: "/linear/issues/ENG-7.json",
+            revision: "rev_2",
+            timestamp: "2026-05-11T00:00:00.050Z",
+          } satisfies FilesystemEvent),
+        });
+
+        await vi.advanceTimersByTimeAsync(60);
+        vi.useRealTimers();
+        await waitForExpectation(() => {
+          expect(handler).toHaveBeenCalledTimes(1);
+        });
+
+        expect(handler.mock.calls[0]?.[0]).toMatchObject({
+          id: "evt_linear_2",
+          summary: {
+            title: "ENG-7",
+            status: "Done",
+          },
+        });
+        expect(fetchImpl).toHaveBeenCalledTimes(1);
+
+        await handle.unsubscribe();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("getResourceAtEvent reuses the retained cache before calling the API", async () => {
+      const fetchImpl = vi.fn(async (url: string) => {
+        if (url.includes("/fs/file?path=%2Flinear%2Fissues%2FENG-9.json")) {
+          return {
+            ok: true,
+            status: 200,
+            headers: new Headers({ "content-type": "application/json" }),
+            json: async () => ({
+              path: "/linear/issues/ENG-9.json",
+              revision: "rev_1",
+              contentType: "application/json",
+              content: JSON.stringify({
+                id: "ENG-9",
+                provider: "linear",
+                kind: "linear.issue",
+                title: "ENG-9",
+              }),
+            }),
+            text: async () => "",
+          } as unknown as Response;
+        }
+        if (url.includes("/fs/changes/resource")) {
+          throw new Error("resource endpoint should not be used when the cache is warm");
+        }
+        throw new Error(`Unexpected fetch URL: ${url}`);
+      });
+      const client = makeClient(fetchImpl as unknown as typeof fetch, {
+        token: makeWorkspaceToken("ws_acme", "support-agent"),
+      });
+
+      let receivedEvent: ChangeEvent | undefined;
+      const handle = client.subscribe(
+        ["/linear/issues/**"],
+        (event) => {
+          receivedEvent = event;
+        },
+        { coalesce: "none" },
+      );
+
+      const socket = await waitForWebSocket();
+      socket.emit("open", {});
+      socket.emit("message", {
+        data: JSON.stringify({
+          eventId: "evt_linear_cache",
+          type: "file.updated",
+          path: "/linear/issues/ENG-9.json",
+          revision: "rev_1",
+          timestamp: "2026-05-11T00:00:00.000Z",
+        } satisfies FilesystemEvent),
+      });
+
+      await waitForExpectation(() => {
+        expect(receivedEvent).toBeDefined();
+      });
+      const resource = await client.getResourceAtEvent(receivedEvent!.id);
+      expect(resource).toMatchObject({
+        path: "/linear/issues/ENG-9.json",
+        data: { id: "ENG-9", provider: "linear", kind: "linear.issue", title: "ENG-9" },
+      });
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+
+      await handle.unsubscribe();
+    });
+
+    it("open returns a ready handle and primes replay-on-start through the change log", async () => {
+      const fetchImpl = vi.fn(async (url: string) => {
+        if (url.includes("/fs/changes?since=")) {
+          return {
+            ok: true,
+            status: 200,
+            headers: new Headers({ "content-type": "application/json" }),
+            json: async () => ({
+              events: [
+                {
+                  id: "evt_replay_1",
+                  workspace: "ws_acme",
+                  type: "relayfile.changed",
+                  occurredAt: "2026-05-11T00:00:00.000Z",
+                  resource: {
+                    path: "/linear/issues/ENG-100.json",
+                    kind: "linear.issue",
+                    id: "ENG-100",
+                    provider: "linear",
+                  },
+                  summary: {
+                    title: "ENG-100",
+                    status: "Todo",
+                  },
+                  digest: "sha256:replay",
+                },
+              ],
+            }),
+            text: async () => "",
+          } as unknown as Response;
+        }
+        throw new Error(`Unexpected fetch URL: ${url}`);
+      });
+      const client = makeClient(fetchImpl as unknown as typeof fetch, {
+        token: makeWorkspaceToken("ws_acme", "support-agent"),
+      });
+
+      const connection = client.open({
+        workspaceId: "ws_acme",
+        replayOnStart: "since:2026-05-11T00:00:00.000Z",
+      });
+
+      const socket = await waitForWebSocket();
+      socket.emit("open", {});
+      await expect(connection.ready).resolves.toBeUndefined();
+
+      const replayed = await client.listLastNChanges(1);
+      expect(replayed.events[0]).toMatchObject({
+        id: "evt_replay_1",
+        resource: {
+          path: "/linear/issues/ENG-100.json",
+        },
+      });
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+
+      await connection.unsubscribe();
+    });
+
+    it("listChangesSince fetches retained events and wires expand()", async () => {
+      const fetchImpl = vi.fn(async (url: string) => {
+        if (url.includes("/fs/changes?since=")) {
+          return {
+            ok: true,
+            status: 200,
+            headers: new Headers({ "content-type": "application/json" }),
+            json: async () => ({
+              events: [
+                {
+                  id: "evt_history_1",
+                  workspace: "ws_acme",
+                  type: "relayfile.changed",
+                  occurredAt: "2026-05-11T00:00:00.000Z",
+                  resource: {
+                    path: "/linear/issues/ENG-55.json",
+                    kind: "linear.issue",
+                    id: "ENG-55",
+                    provider: "linear",
+                  },
+                  summary: {
+                    title: "ENG-55",
+                    status: "Done",
+                  },
+                  digest: "sha256:history",
+                },
+              ],
+            }),
+            text: async () => "",
+          } as unknown as Response;
+        }
+        if (url.includes("/fs/changes/resource?eventId=evt_history_1")) {
+          return {
+            ok: true,
+            status: 200,
+            headers: new Headers({ "content-type": "application/json" }),
+            json: async () => ({
+              path: "/linear/issues/ENG-55.json",
+              data: { id: "ENG-55", title: "ENG-55" },
+              digest: "sha256:history",
+            }),
+            text: async () => "",
+          } as unknown as Response;
+        }
+        throw new Error(`Unexpected fetch URL: ${url}`);
+      });
+      const client = makeClient(fetchImpl as unknown as typeof fetch, {
+        token: makeWorkspaceToken("ws_acme", "support-agent"),
+      });
+
+      const result = await client.listChangesSince("2026-05-11T00:00:00.000Z");
+      expect(result.events[0]).toMatchObject({
+        id: "evt_history_1",
+        summary: {
+          title: "ENG-55",
+          status: "Done",
+        },
+      });
+      await expect(result.events[0]!.expand("full")).resolves.toMatchObject({
+        level: "full",
+        path: "/linear/issues/ENG-55.json",
+        data: { id: "ENG-55", title: "ENG-55" },
+      });
+      await expect(result.events[0]!.expand("diff")).rejects.toMatchObject({
         name: "M2NotImplementedError",
         code: "M2_NOT_IMPLEMENTED",
       });
     });
 
-    it("open throws a typed M2_NOT_IMPLEMENTED error", () => {
-      const client = makeClient(mockFetch({ path: "/", entries: [], nextCursor: null }));
-
-      expect(() =>
-        client.open({
-          workspaceId: "ws_acme",
-          replayOnStart: "since:2026-05-11T00:00:00.000Z",
-        }),
-      ).toThrowError(/M2_NOT_IMPLEMENTED/);
-    });
-
-    it("listChangesSince throws a typed M2_NOT_IMPLEMENTED error", async () => {
-      const client = makeClient(mockFetch({ path: "/", entries: [], nextCursor: null }));
-
-      await expect(client.listChangesSince("2026-05-11T00:00:00.000Z")).rejects.toMatchObject({
-        name: "M2NotImplementedError",
-        code: "M2_NOT_IMPLEMENTED",
+    it("getResourceAtEvent falls back to the retained change-log endpoint when the cache is cold", async () => {
+      const fetchImpl = vi.fn(async (url: string) => {
+        if (url.includes("/fs/changes/resource?eventId=evt_rest_1")) {
+          return {
+            ok: true,
+            status: 200,
+            headers: new Headers({ "content-type": "application/json" }),
+            json: async () => ({
+              path: "/linear/issues/ENG-77.json",
+              data: { id: "ENG-77", title: "ENG-77" },
+              digest: "sha256:rest",
+            }),
+            text: async () => "",
+          } as unknown as Response;
+        }
+        throw new Error(`Unexpected fetch URL: ${url}`);
       });
-    });
+      const client = makeClient(fetchImpl as unknown as typeof fetch, {
+        token: makeWorkspaceToken("ws_acme", "support-agent"),
+      });
 
-    it("listLastNChanges throws a typed M2_NOT_IMPLEMENTED error", async () => {
-      const client = makeClient(mockFetch({ path: "/", entries: [], nextCursor: null }));
-
-      await expect(client.listLastNChanges(10)).rejects.toMatchObject({
-        name: "M2NotImplementedError",
-        code: "M2_NOT_IMPLEMENTED",
+      await expect(client.getResourceAtEvent("evt_rest_1")).resolves.toMatchObject({
+        path: "/linear/issues/ENG-77.json",
+        data: { id: "ENG-77", title: "ENG-77" },
+        digest: "sha256:rest",
       });
     });
   });
