@@ -601,6 +601,72 @@ func TestSetupCreatesWorkspaceConnectsIntegrationAndSkipsMount(t *testing.T) {
 	}
 }
 
+func TestSetupJiraRunsSitePickerAfterFreshConnect(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	seen := map[string]bool{}
+	var picked map[string]any
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/workspaces":
+			seen["create"] = true
+			_, _ = w.Write([]byte(`{"workspaceId":"ws_123","relayfileUrl":"https://relayfile.test","createdAt":"2026-05-01T00:00:00Z","name":"demo"}`))
+		case "/api/v1/workspaces/ws_123/join":
+			seen["join"] = true
+			_, _ = w.Write([]byte(`{"workspaceId":"ws_123","token":"rf_join","relayfileUrl":"https://relayfile.test","wsUrl":"wss://relayfile.test/ws","relaycastApiKey":"rc_test"}`))
+		case "/api/v1/workspaces/ws_123/integrations/connect-session":
+			seen["connect"] = true
+			_, _ = w.Write([]byte(`{"connectionId":"conn_jira","connectLink":"","backend":"nango"}`))
+		case "/api/v1/workspaces/ws_123/integrations/jira/status":
+			seen["status"] = true
+			_, _ = w.Write([]byte(`{"ready":true,"state":"ready","provider":"jira","backend":"nango"}`))
+		case "/api/v1/workspaces/ws_123/integrations/jira/accessible-resources":
+			seen["accessible-resources"] = true
+			_, _ = w.Write([]byte(`{"ok":true,"resources":[{"id":"cloud-1","url":"https://foo.atlassian.net","name":"Foo"}]}`))
+		case "/api/v1/workspaces/ws_123/integrations/jira/metadata":
+			seen["metadata"] = true
+			if r.Method != http.MethodPut {
+				t.Fatalf("expected metadata PUT, got %s", r.Method)
+			}
+			var body map[string]map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("decode metadata body failed: %v", err)
+			}
+			picked = body["metadata"]
+			_, _ = w.Write([]byte(`{"ok":true,"metadata":` + jsonMarshalOrPanic(picked) + `}`))
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	err := run([]string{
+		"setup",
+		"--cloud-api-url", server.URL,
+		"--cloud-token", "cld_test",
+		"--workspace", "demo",
+		"--provider", "jira",
+		"--local-dir", "./vfs",
+		"--no-open",
+		"--skip-mount",
+	}, strings.NewReader(""), &stdout, &stdout)
+	if err != nil {
+		t.Fatalf("run setup failed: %v\noutput:\n%s", err, stdout.String())
+	}
+	for _, key := range []string{"create", "join", "connect", "status", "accessible-resources", "metadata"} {
+		if !seen[key] {
+			t.Fatalf("expected %s request", key)
+		}
+	}
+	if picked["cloudId"] != "cloud-1" || picked["baseUrl"] != "https://foo.atlassian.net" {
+		t.Fatalf("unexpected site metadata: %#v", picked)
+	}
+}
+
 func TestIntegrationConnectRefreshesCloudAccessTokenAndReusesWorkspace(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)
@@ -1712,6 +1778,243 @@ func TestLoginDefaultsToCloudBrowserFlow(t *testing.T) {
 	}
 }
 
+// TestLoginRefreshesWorkspaceTokenForDefaultWorkspace covers the fix for
+// the bug where `relayfile login` only refreshed cloud-credentials.json
+// even when a workspace was already registered locally. After login, the
+// data-plane JWT in credentials.json should also be refreshed via the
+// cloud's workspace join endpoint.
+func TestLoginRefreshesWorkspaceTokenForDefaultWorkspace(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	seen := map[string]bool{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/workspaces/ws_demo/join":
+			seen["join"] = true
+			if r.Method != http.MethodPost {
+				t.Fatalf("expected join POST, got %s", r.Method)
+			}
+			if got := r.Header.Get("Authorization"); got != "Bearer cld_browser_token" {
+				t.Fatalf("unexpected join Authorization: %q", got)
+			}
+			_, _ = w.Write([]byte(`{"workspaceId":"ws_demo","token":"rf_refreshed","relayfileUrl":"https://relayfile.test","wsUrl":"wss://relayfile.test/ws","relaycastApiKey":"rc_test"}`))
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	if _, err := upsertWorkspaceDetails(workspaceRecord{
+		Name: "demo",
+		ID:   "ws_demo",
+	}); err != nil {
+		t.Fatalf("upsertWorkspaceDetails failed: %v", err)
+	}
+	if _, err := setDefaultWorkspace("demo"); err != nil {
+		t.Fatalf("setDefaultWorkspace failed: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := run([]string{
+		"login",
+		"--cloud-api-url", server.URL,
+		"--cloud-token", "cld_browser_token",
+	}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("run login failed: %v\noutput:\n%s", err, stdout.String())
+	}
+
+	if !seen["join"] {
+		t.Fatalf("expected /workspaces/ws_demo/join request, none seen. output:\n%s", stdout.String())
+	}
+	got := stdout.String()
+	if !strings.Contains(got, "Refreshed workspace token for demo") {
+		t.Fatalf("expected refresh confirmation, got %q", got)
+	}
+	creds, err := loadCredentials()
+	if err != nil {
+		t.Fatalf("loadCredentials failed: %v", err)
+	}
+	if creds.Token != "rf_refreshed" {
+		t.Fatalf("expected refreshed workspace token, got %q", creds.Token)
+	}
+	if creds.Server != "https://relayfile.test" {
+		t.Fatalf("expected refreshed server URL, got %q", creds.Server)
+	}
+}
+
+// TestLoginSkipsWorkspaceRefreshWhenFlagSet covers --skip-workspace-refresh:
+// even with a workspace registered, no /join call should fire and
+// credentials.json must remain absent.
+func TestLoginSkipsWorkspaceRefreshWhenFlagSet(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+	}))
+	defer server.Close()
+
+	if _, err := upsertWorkspaceDetails(workspaceRecord{Name: "demo", ID: "ws_demo"}); err != nil {
+		t.Fatalf("upsertWorkspaceDetails failed: %v", err)
+	}
+	if _, err := setDefaultWorkspace("demo"); err != nil {
+		t.Fatalf("setDefaultWorkspace failed: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := run([]string{
+		"login",
+		"--cloud-api-url", server.URL,
+		"--cloud-token", "cld_browser_token",
+		"--skip-workspace-refresh",
+	}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("run login failed: %v\noutput:\n%s", err, stdout.String())
+	}
+
+	if _, err := os.Stat(credentialsPath()); !os.IsNotExist(err) {
+		t.Fatalf("expected no server credentials written with --skip-workspace-refresh, got err=%v", err)
+	}
+}
+
+// TestLoginRejectsWorkspaceWithSkipFlag asserts that passing both
+// --workspace and --skip-workspace-refresh fails fast with a clear
+// error. The two are contradictory — --skip-workspace-refresh silently
+// winning would make an explicit --workspace a no-op while the command
+// still reports success.
+func TestLoginRejectsWorkspaceWithSkipFlag(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	err := run([]string{
+		"login",
+		"--cloud-api-url", server.URL,
+		"--cloud-token", "cld_browser_token",
+		"--workspace", "demo",
+		"--skip-workspace-refresh",
+	}, strings.NewReader(""), &stdout, &stdout)
+	if err == nil {
+		t.Fatalf("expected error for contradictory flag combo, got nil\noutput:\n%s", stdout.String())
+	}
+	if !strings.Contains(err.Error(), "--workspace cannot be used with --skip-workspace-refresh") {
+		t.Fatalf("expected mutually-exclusive flag error, got %v", err)
+	}
+}
+
+// TestLoginExplicitWorkspaceReturnsErrorWhenPersistFails asserts that with
+// an explicit --workspace target, a failure to write the refreshed
+// workspace token to credentials.json surfaces as a non-zero exit / error
+// — symmetric with the join and resolve failure branches. Before this
+// guard, a persist failure was downgraded to a warning even under
+// --workspace, so the command reported success while leaving the on-disk
+// JWT stale.
+func TestLoginExplicitWorkspaceReturnsErrorWhenPersistFails(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	clearRelayfileEnv(t)
+
+	seen := map[string]bool{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/workspaces/ws_demo/join":
+			seen["join"] = true
+			_, _ = w.Write([]byte(`{"workspaceId":"ws_demo","token":"rf_refreshed","relayfileUrl":"https://relayfile.test","wsUrl":"wss://relayfile.test/ws","relaycastApiKey":"rc_test"}`))
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	if _, err := upsertWorkspaceDetails(workspaceRecord{Name: "demo", ID: "ws_demo"}); err != nil {
+		t.Fatalf("upsertWorkspaceDetails failed: %v", err)
+	}
+	if _, err := setDefaultWorkspace("demo"); err != nil {
+		t.Fatalf("setDefaultWorkspace failed: %v", err)
+	}
+
+	// Force only the credentials.json rename to fail by pre-creating
+	// that exact path as a directory. writeFileAtomically still
+	// succeeds at CreateTemp/Write/Chmod/Close; only the final
+	// os.Rename(tmp, credentialsPath()) errors because the destination
+	// is a non-empty directory. cloud-credentials.json (different
+	// path) writes normally.
+	if err := os.MkdirAll(credentialsPath(), 0o755); err != nil {
+		t.Fatalf("pre-create credentials path as dir failed: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(credentialsPath(), "blocker"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("write blocker file failed: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	err := run([]string{
+		"login",
+		"--cloud-api-url", server.URL,
+		"--cloud-token", "cld_browser_token",
+		"--workspace", "demo",
+	}, strings.NewReader(""), &stdout, &stdout)
+	if err == nil {
+		t.Fatalf("expected error for explicit --workspace with persist failure, got nil\noutput:\n%s", stdout.String())
+	}
+	if !strings.Contains(err.Error(), "persist refreshed credentials") {
+		t.Fatalf("expected persist failure in error, got %v", err)
+	}
+	if !seen["join"] {
+		t.Fatalf("expected /workspaces/ws_demo/join to have been called before persist; seen=%v", seen)
+	}
+}
+
+// TestLoginDefaultWorkspaceWarnsWhenPersistFails confirms the unchanged
+// behavior for the implicit default-workspace path: persist failures
+// remain a warning so the cloud login itself still counts as successful.
+func TestLoginDefaultWorkspaceWarnsWhenPersistFails(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	clearRelayfileEnv(t)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/workspaces/ws_demo/join":
+			_, _ = w.Write([]byte(`{"workspaceId":"ws_demo","token":"rf_refreshed","relayfileUrl":"https://relayfile.test","wsUrl":"wss://relayfile.test/ws","relaycastApiKey":"rc_test"}`))
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	if _, err := upsertWorkspaceDetails(workspaceRecord{Name: "demo", ID: "ws_demo"}); err != nil {
+		t.Fatalf("upsertWorkspaceDetails failed: %v", err)
+	}
+	if _, err := setDefaultWorkspace("demo"); err != nil {
+		t.Fatalf("setDefaultWorkspace failed: %v", err)
+	}
+
+	if err := os.MkdirAll(credentialsPath(), 0o755); err != nil {
+		t.Fatalf("pre-create credentials path as dir failed: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(credentialsPath(), "blocker"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("write blocker file failed: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := run([]string{
+		"login",
+		"--cloud-api-url", server.URL,
+		"--cloud-token", "cld_browser_token",
+	}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("default-workspace login should not error on persist failure: %v\noutput:\n%s", err, stdout.String())
+	}
+	got := stdout.String()
+	if !strings.Contains(got, "warning: workspace token refresh succeeded but persisting it failed") {
+		t.Fatalf("expected persist-failure warning in output, got %q", got)
+	}
+}
+
 // TestLoginAPIKeyFlagPromptsForToken covers the opt-in legacy interactive
 // flow: --api-key forces runLogin to prompt for an API key on stdin instead
 // of running the cloud browser flow.
@@ -1815,6 +2118,55 @@ func TestWorkspaceCurrentErrorsWhenNoneActive(t *testing.T) {
 	}
 }
 
+// TestNormalizeProviderIDCanonicalizesSlackAlias asserts that both the
+// canonical provider id ("slack") and the demoted alias ("slack-sage")
+// normalize to the canonical id. Before this fix the function returned
+// "slack-sage" for both inputs, poisoning every connect-session request
+// with the demoted alias even after the cloud registry migrated to
+// "slack" with "slack-sage" retained only as a backwards-compat alias.
+func TestNormalizeProviderIDCanonicalizesSlackAlias(t *testing.T) {
+	cases := []struct {
+		input string
+		want  string
+	}{
+		{"slack", "slack"},
+		{"slack-sage", "slack"},
+		{"Slack", "slack"},
+		{"  slack-sage  ", "slack"},
+		{"github", "github"},
+		{"linear", "linear"},
+		{"notion", "notion"},
+		{"slack-my-senior-dev", "slack-my-senior-dev"},
+	}
+	for _, tc := range cases {
+		if got := normalizeProviderID(tc.input); got != tc.want {
+			t.Fatalf("normalizeProviderID(%q) = %q, want %q", tc.input, got, tc.want)
+		}
+	}
+}
+
+// TestFallbackIntegrationCatalogUsesCanonicalSlackId guards the offline
+// fallback catalog so it advertises "slack" rather than "slack-sage"
+// when the cloud catalog endpoint is unreachable.
+func TestFallbackIntegrationCatalogUsesCanonicalSlackId(t *testing.T) {
+	entries := fallbackIntegrationCatalog()
+	var slack *integrationCatalogEntry
+	for i := range entries {
+		if entries[i].ID == "slack-sage" {
+			t.Fatalf("fallback catalog still advertises legacy id slack-sage: %#v", entries[i])
+		}
+		if entries[i].ID == "slack" {
+			slack = &entries[i]
+		}
+	}
+	if slack == nil {
+		t.Fatalf("fallback catalog missing canonical slack entry: %#v", entries)
+	}
+	if slack.VFSRoot != "/slack" {
+		t.Fatalf("expected slack VFSRoot /slack, got %q", slack.VFSRoot)
+	}
+}
+
 // TestWorkspaceListNamesOnlyRestoresBareOutput verifies the --names-only
 // escape hatch for scripts that parsed the legacy unmarked output.
 func TestWorkspaceListNamesOnlyRestoresBareOutput(t *testing.T) {
@@ -1839,5 +2191,745 @@ func TestWorkspaceListNamesOnlyRestoresBareOutput(t *testing.T) {
 	}
 	if got := strings.TrimSpace(stdout.String()); got != "ws_env\nalpha" {
 		t.Fatalf("unexpected --names-only output: %q", got)
+	}
+}
+
+// adoptTestServer wires the cloud endpoints the adopt verb exercises:
+// token refresh (so credential bootstrap succeeds), workspace join (mints
+// the relayfile JWT for the workspace), and the new POST .../adopt route.
+// Each test injects its own adopt handler so it can simulate the four
+// distinct outcomes — success (fresh insert), success (replacement),
+// 409 refusal, 404 missing-connection — without rebuilding the rest of
+// the bootstrap chain.
+func newAdoptTestServer(t *testing.T, adoptHandler func(http.ResponseWriter, *http.Request)) (*httptest.Server, map[string]int) {
+	t.Helper()
+	seen := map[string]int{}
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/api/v1/auth/token/refresh":
+			if r.Method != http.MethodPost {
+				t.Errorf("expected refresh POST, got %s", r.Method)
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			if got := r.Header.Get("Authorization"); got != "Bearer cld_old" {
+				t.Errorf("unexpected refresh Authorization: %q", got)
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			var body cloudTokenRefreshRequest
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode refresh body failed: %v", err)
+				http.Error(w, "bad request", http.StatusBadRequest)
+				return
+			}
+			if body.RefreshToken != "refresh_123" {
+				t.Errorf("unexpected refresh token: %q", body.RefreshToken)
+				http.Error(w, "bad request", http.StatusBadRequest)
+				return
+			}
+			seen["refresh"]++
+			_, _ = w.Write([]byte(`{"apiUrl":"` + server.URL + `","accessToken":"cld_new","refreshToken":"refresh_123","accessTokenExpiresAt":"2030-05-01T00:00:00Z"}`))
+		case r.URL.Path == "/api/v1/workspaces/ws_123/join":
+			if r.Method != http.MethodPost {
+				t.Errorf("expected join POST, got %s", r.Method)
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			if got := r.Header.Get("Authorization"); got != "Bearer cld_new" {
+				t.Errorf("unexpected join Authorization: %q", got)
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			var body cloudWorkspaceJoinRequest
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode join body failed: %v", err)
+				http.Error(w, "bad request", http.StatusBadRequest)
+				return
+			}
+			if body.AgentName != "relayfile-cli" {
+				t.Errorf("unexpected join agentName: %q", body.AgentName)
+				http.Error(w, "bad request", http.StatusBadRequest)
+				return
+			}
+			if len(body.Scopes) != len(defaultJoinScopes) || body.Scopes[0] != defaultJoinScopes[0] || body.Scopes[1] != defaultJoinScopes[1] {
+				t.Errorf("unexpected join scopes: %#v", body.Scopes)
+				http.Error(w, "bad request", http.StatusBadRequest)
+				return
+			}
+			seen["join"]++
+			_, _ = w.Write([]byte(`{"workspaceId":"ws_123","token":"rf_join","relayfileUrl":"` + server.URL + `"}`))
+		case r.URL.Path == "/api/v1/workspaces/ws_123/integrations/github/adopt" && r.Method == http.MethodPost:
+			seen["adopt"]++
+			adoptHandler(w, r)
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	return server, seen
+}
+
+func setupAdoptWorkspace(t *testing.T) (workspaceRecord, string) {
+	t.Helper()
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+	localDir := t.TempDir()
+	record, err := upsertWorkspaceDetails(workspaceRecord{
+		Name:       "demo",
+		ID:         "ws_123",
+		LocalDir:   localDir,
+		AgentName:  "relayfile-cli",
+		Scopes:     append([]string(nil), defaultJoinScopes...),
+		CreatedAt:  time.Now().UTC().Format(time.RFC3339),
+		LastUsedAt: time.Now().UTC().Format(time.RFC3339),
+	})
+	if err != nil {
+		t.Fatalf("upsertWorkspaceDetails failed: %v", err)
+	}
+	if err := saveCloudCredentials(cloudCredentials{
+		APIURL:               "https://stale.example.test",
+		AccessToken:          "cld_old",
+		RefreshToken:         "refresh_123",
+		AccessTokenExpiresAt: time.Now().Add(-time.Minute).UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("saveCloudCredentials failed: %v", err)
+	}
+	return record, localDir
+}
+
+func pointAdoptCloudCredentials(t *testing.T, apiURL string) {
+	t.Helper()
+	creds, err := loadCloudCredentials()
+	if err != nil {
+		t.Fatalf("loadCloudCredentials failed: %v", err)
+	}
+	creds.APIURL = apiURL
+	if err := saveCloudCredentials(creds); err != nil {
+		t.Fatalf("saveCloudCredentials(update) failed: %v", err)
+	}
+}
+
+func TestIntegrationAdoptForwardsConnectionIdAndPersistsLocalState(t *testing.T) {
+	// Happy path: operator runs `relayfile integration adopt github
+	// --connection-id conn_adopt` against a workspace whose row Cloud has
+	// not yet seen. Cloud returns ok with no replacedConnectionId; the CLI
+	// must (1) POST the request body in the expected shape, (2) persist
+	// the new local connection state so subsequent mount / status probes
+	// pick it up, and (3) print a single-line confirmation that does NOT
+	// mention a replaced connection.
+	record, localDir := setupAdoptWorkspace(t)
+	server, seen := newAdoptTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode adopt body failed: %v", err)
+		}
+		if body["connectionId"] != "conn_adopt_new" {
+			t.Fatalf("unexpected connectionId: %q", body["connectionId"])
+		}
+		if body["providerConfigKey"] != "github-relay" {
+			t.Fatalf("unexpected providerConfigKey: %q", body["providerConfigKey"])
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer rf_join" {
+			t.Fatalf("unexpected Authorization: %q", got)
+		}
+		_, _ = w.Write([]byte(`{"ok":true,"connectionId":"conn_adopt_new"}`))
+	})
+	defer server.Close()
+	pointAdoptCloudCredentials(t, server.URL)
+
+	var stdout bytes.Buffer
+	err := run([]string{
+		"integration", "adopt", "github",
+		"--connection-id", "conn_adopt_new",
+		"--provider-config-key", "github-relay",
+		"--workspace", "demo",
+		"--cloud-api-url", server.URL,
+		"--yes",
+	}, strings.NewReader(""), &stdout, &stdout)
+	if err != nil {
+		t.Fatalf("run integration adopt failed: %v\noutput:\n%s", err, stdout.String())
+	}
+	if seen["adopt"] != 1 {
+		t.Fatalf("expected 1 adopt call, got %d", seen["adopt"])
+	}
+	got := stdout.String()
+	if !strings.Contains(got, "github adopted into workspace demo") {
+		t.Fatalf("unexpected output (missing confirmation): %q", got)
+	}
+	if strings.Contains(got, "replaced previous connection") {
+		t.Fatalf("did not expect replacement note on fresh insert: %q", got)
+	}
+	state := loadSavedConnection(localDir, "github")
+	if state.ConnectionID != "conn_adopt_new" || state.Backend != "nango" {
+		t.Fatalf("unexpected saved integration connection: %#v", state)
+	}
+	_ = record
+}
+
+func TestIntegrationAdoptReportsReplacedConnection(t *testing.T) {
+	// Stale-row migration path: Cloud detected the existing row pointed at
+	// a connection Nango reports as gone, swapped it atomically, and
+	// returned replacedConnectionId. The CLI must surface that id to the
+	// operator so they know an old binding was overwritten — silent
+	// replacement here would hide a meaningful state change.
+	_, localDir := setupAdoptWorkspace(t)
+	server, _ := newAdoptTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"ok":true,"connectionId":"conn_new","replacedConnectionId":"conn_old_dead"}`))
+	})
+	defer server.Close()
+	pointAdoptCloudCredentials(t, server.URL)
+
+	var stdout bytes.Buffer
+	if err := run([]string{
+		"integration", "adopt", "github",
+		"--connection-id", "conn_new",
+		"--workspace", "demo",
+		"--cloud-api-url", server.URL,
+		"--yes",
+	}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("run integration adopt failed: %v\noutput:\n%s", err, stdout.String())
+	}
+	got := stdout.String()
+	if !strings.Contains(got, "replaced previous connection conn_old_dead") {
+		t.Fatalf("expected replacement note in output, got: %q", got)
+	}
+	state := loadSavedConnection(localDir, "github")
+	if state.ConnectionID != "conn_new" {
+		t.Fatalf("expected local state to bind conn_new, got %#v", state)
+	}
+}
+
+func TestIntegrationAdoptReturnsErrorOnConflictAndPreservesLocalState(t *testing.T) {
+	// Refusal path: Cloud reports a 409 (e.g. another connection is still
+	// live for this workspace + provider). The CLI must return a non-nil
+	// error so the shell exit code is non-zero, AND must NOT overwrite the
+	// local saved connection — the operator should see no local drift from
+	// a failed adopt.
+	_, localDir := setupAdoptWorkspace(t)
+	// Prime existing local state so we can prove it survives.
+	if err := saveIntegrationConnection(localDir, integrationConnectionState{
+		Provider:     "github",
+		ConnectionID: "conn_existing_local",
+		Backend:      "nango",
+	}); err != nil {
+		t.Fatalf("seed saveIntegrationConnection failed: %v", err)
+	}
+	server, _ := newAdoptTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"ok":false,"code":"existing_connection_live_or_unknown","error":"Workspace ws_123 already has a live github connection (conn_live). Disconnect it first."}`))
+	})
+	defer server.Close()
+	pointAdoptCloudCredentials(t, server.URL)
+
+	var stdout bytes.Buffer
+	err := run([]string{
+		"integration", "adopt", "github",
+		"--connection-id", "conn_intruder",
+		"--workspace", "demo",
+		"--cloud-api-url", server.URL,
+		"--yes",
+	}, strings.NewReader(""), &stdout, &stdout)
+	if err == nil {
+		t.Fatalf("expected error on 409, got nil; stdout=%q", stdout.String())
+	}
+	if !strings.Contains(err.Error(), "Disconnect it first") {
+		t.Fatalf("expected error to surface Cloud message, got: %v", err)
+	}
+	var httpErr *apiError
+	if !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusConflict {
+		t.Fatalf("expected apiError with 409 status, got %#v", err)
+	}
+	state := loadSavedConnection(localDir, "github")
+	if state.ConnectionID != "conn_existing_local" {
+		t.Fatalf("expected local state to be preserved, got %#v", state)
+	}
+}
+
+func TestIntegrationAdoptRequiresConnectionID(t *testing.T) {
+	// Flag validation: omitting --connection-id must fail before the CLI
+	// even hits the network. Otherwise the operator could silently POST
+	// an empty body and get a confusing 400 from Cloud.
+	_, _ = setupAdoptWorkspace(t)
+	var stdout bytes.Buffer
+	err := run([]string{
+		"integration", "adopt", "github",
+		"--workspace", "demo",
+		"--yes",
+	}, strings.NewReader(""), &stdout, &stdout)
+	if err == nil {
+		t.Fatalf("expected error when --connection-id is missing; stdout=%q", stdout.String())
+	}
+	if !strings.Contains(err.Error(), "connection-id") {
+		t.Fatalf("expected error to mention --connection-id, got: %v", err)
+	}
+}
+
+func TestIntegrationAdoptRejectsUnsafeProvider(t *testing.T) {
+	var stdout bytes.Buffer
+	err := run([]string{
+		"integration", "adopt", "../github",
+		"--connection-id", "conn_adopt",
+		"--workspace", "demo",
+		"--yes",
+	}, strings.NewReader(""), &stdout, &stdout)
+	if err == nil {
+		t.Fatalf("expected error for unsafe provider; stdout=%q", stdout.String())
+	}
+	if !strings.Contains(err.Error(), "invalid provider") {
+		t.Fatalf("expected invalid provider error, got: %v", err)
+	}
+}
+
+func TestIntegrationAdoptClearsDisconnectMarker(t *testing.T) {
+	// After a `disconnect` the CLI writes a marker file under
+	// .relay/disconnected/{provider}.json. Adopting the provider again
+	// must clear that marker so the status probe stops reporting the
+	// workspace as disconnected — otherwise the operator gets a stale
+	// "disconnected" reading for a workspace they just adopted into.
+	_, localDir := setupAdoptWorkspace(t)
+	if err := markProviderDisconnected(localDir, "github"); err != nil {
+		t.Fatalf("markProviderDisconnected failed: %v", err)
+	}
+	markerPath := filepath.Join(localDir, ".relay", "disconnected", "github.json")
+	if _, err := os.Stat(markerPath); err != nil {
+		t.Fatalf("expected disconnect marker to exist, got: %v", err)
+	}
+	server, _ := newAdoptTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"ok":true,"connectionId":"conn_adopt"}`))
+	})
+	defer server.Close()
+	pointAdoptCloudCredentials(t, server.URL)
+
+	var stdout bytes.Buffer
+	if err := run([]string{
+		"integration", "adopt", "github",
+		"--connection-id", "conn_adopt",
+		"--workspace", "demo",
+		"--cloud-api-url", server.URL,
+		"--yes",
+	}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("run integration adopt failed: %v", err)
+	}
+	if _, err := os.Stat(markerPath); !os.IsNotExist(err) {
+		t.Fatalf("expected disconnect marker to be removed, got: %v", err)
+	}
+}
+
+// ----------------------------------------------------------------------
+// Integration set-metadata + post-OAuth Atlassian site picker
+// ----------------------------------------------------------------------
+
+// newSetMetadataTestServer mirrors newAdoptTestServer but stubs the
+// metadata PUT endpoint so set-metadata happy-path tests can record
+// the request body and return a canned response.
+func newSetMetadataTestServer(t *testing.T, metadataHandler func(http.ResponseWriter, *http.Request)) (*httptest.Server, map[string]int) {
+	t.Helper()
+	seen := map[string]int{}
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/api/v1/auth/token/refresh":
+			seen["refresh"]++
+			_, _ = w.Write([]byte(`{"apiUrl":"` + server.URL + `","accessToken":"cld_new","refreshToken":"refresh_123","accessTokenExpiresAt":"2030-05-01T00:00:00Z"}`))
+		case r.URL.Path == "/api/v1/workspaces/ws_123/join":
+			seen["join"]++
+			_, _ = w.Write([]byte(`{"workspaceId":"ws_123","token":"rf_join","relayfileUrl":"` + server.URL + `"}`))
+		case strings.HasSuffix(r.URL.Path, "/metadata") && r.Method == http.MethodPut:
+			seen["metadata"]++
+			metadataHandler(w, r)
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	return server, seen
+}
+
+func TestIntegrationSetMetadataHappyPath(t *testing.T) {
+	// Operator runs `relayfile integration set-metadata jira cloudId=... baseUrl=...`.
+	// The CLI must parse KEY=VALUE args, PUT them under
+	// /api/v1/workspaces/.../metadata wrapped in { metadata: { ... } },
+	// and exit 0 on cloud's 200.
+	_, _ = setupAdoptWorkspace(t)
+	server, seen := newSetMetadataTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode metadata body failed: %v", err)
+		}
+		md := body["metadata"]
+		if md["cloudId"] != "cloud-1" || md["baseUrl"] != "https://foo.atlassian.net" {
+			t.Fatalf("unexpected metadata body: %#v", md)
+		}
+		if r.URL.Path != "/api/v1/workspaces/ws_123/integrations/jira/metadata" {
+			t.Fatalf("unexpected metadata path: %q", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"ok":true,"metadata":{"cloudId":"cloud-1","baseUrl":"https://foo.atlassian.net"}}`))
+	})
+	defer server.Close()
+	pointAdoptCloudCredentials(t, server.URL)
+
+	var stdout bytes.Buffer
+	if err := run([]string{
+		"integration", "set-metadata", "jira",
+		"cloudId=cloud-1",
+		"baseUrl=https://foo.atlassian.net",
+		"--workspace", "demo",
+		"--cloud-api-url", server.URL,
+		"--yes",
+	}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("set-metadata failed: %v\noutput:\n%s", err, stdout.String())
+	}
+	if seen["metadata"] != 1 {
+		t.Fatalf("expected 1 metadata PUT, got %d", seen["metadata"])
+	}
+	if !strings.Contains(stdout.String(), "jira metadata updated") {
+		t.Fatalf("expected confirmation in output: %q", stdout.String())
+	}
+}
+
+func TestIntegrationSetMetadataRejectsMissingArgs(t *testing.T) {
+	// Missing KEY=VALUE args must fail before we hit the network so the
+	// operator sees usage text instead of a confusing cloud 400.
+	_, _ = setupAdoptWorkspace(t)
+	var stdout bytes.Buffer
+	err := run([]string{
+		"integration", "set-metadata", "jira",
+		"--workspace", "demo",
+		"--yes",
+	}, strings.NewReader(""), &stdout, &stdout)
+	if err == nil {
+		t.Fatalf("expected error when no KEY=VALUE pairs provided")
+	}
+	if !strings.Contains(err.Error(), "KEY=VALUE") {
+		t.Fatalf("expected usage hint in error, got: %v", err)
+	}
+}
+
+func TestIntegrationSetMetadataRejectsMalformedPair(t *testing.T) {
+	_, _ = setupAdoptWorkspace(t)
+	var stdout bytes.Buffer
+	err := run([]string{
+		"integration", "set-metadata", "jira",
+		"this-is-not-a-pair",
+		"--workspace", "demo",
+		"--yes",
+	}, strings.NewReader(""), &stdout, &stdout)
+	if err == nil {
+		t.Fatalf("expected error for malformed metadata arg")
+	}
+	if !strings.Contains(err.Error(), "KEY=VALUE form") {
+		t.Fatalf("expected KEY=VALUE form error, got: %v", err)
+	}
+}
+
+func TestIntegrationSetMetadataRejectsNestedKey(t *testing.T) {
+	_, _ = setupAdoptWorkspace(t)
+	var stdout bytes.Buffer
+	err := run([]string{
+		"integration", "set-metadata", "jira",
+		"site.cloudId=cloud-1",
+		"--workspace", "demo",
+		"--yes",
+	}, strings.NewReader(""), &stdout, &stdout)
+	if err == nil {
+		t.Fatalf("expected error for nested-looking metadata key")
+	}
+	if !strings.Contains(err.Error(), "must be flat") {
+		t.Fatalf("expected flat key error, got: %v", err)
+	}
+}
+
+// newConnectJiraTestServer stubs the cloud routes the
+// `integration connect jira` path touches: refresh+join, the
+// connect-session POST, the status GET (which the wait loop polls), the
+// accessible-resources GET (post-OAuth picker), and the metadata PUT.
+// `sites` controls how many sites accessible-resources returns; `chosen`
+// receives the metadata PUT body so the test can assert on what was set.
+func newConnectJiraTestServer(t *testing.T, sites []accessibleResourceEntry, chosen *map[string]any) (*httptest.Server, map[string]int) {
+	t.Helper()
+	seen := map[string]int{}
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/api/v1/auth/token/refresh":
+			seen["refresh"]++
+			_, _ = w.Write([]byte(`{"apiUrl":"` + server.URL + `","accessToken":"cld_new","refreshToken":"refresh_123","accessTokenExpiresAt":"2030-05-01T00:00:00Z"}`))
+		case r.URL.Path == "/api/v1/workspaces/ws_123/join":
+			seen["join"]++
+			_, _ = w.Write([]byte(`{"workspaceId":"ws_123","token":"rf_join","relayfileUrl":"` + server.URL + `"}`))
+		case r.URL.Path == "/api/v1/workspaces/ws_123/integrations/connect-session" && r.Method == http.MethodPost:
+			seen["connect-session"]++
+			_, _ = w.Write([]byte(`{"connectionId":"conn_jira","connectLink":"","backend":"nango"}`))
+		case r.URL.Path == "/api/v1/workspaces/ws_123/integrations/jira/status":
+			seen["status"]++
+			_, _ = w.Write([]byte(`{"ready":true,"state":"ready","provider":"jira","backend":"nango"}`))
+		case r.URL.Path == "/api/v1/workspaces/ws_123/integrations/jira/accessible-resources":
+			seen["accessible-resources"]++
+			payload := struct {
+				OK        bool                      `json:"ok"`
+				Resources []accessibleResourceEntry `json:"resources"`
+			}{OK: true, Resources: sites}
+			_ = json.NewEncoder(w).Encode(payload)
+		case r.URL.Path == "/api/v1/workspaces/ws_123/integrations/jira/metadata" && r.Method == http.MethodPut:
+			seen["metadata"]++
+			var body map[string]map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("decode metadata body failed: %v", err)
+			}
+			if chosen != nil {
+				*chosen = body["metadata"]
+			}
+			_, _ = w.Write([]byte(`{"ok":true,"metadata":` + jsonMarshalOrPanic(body["metadata"]) + `}`))
+		case r.URL.Path == "/v1/workspaces/ws_123/sync/status":
+			// waitForInitialSync calls the relayfile data plane; stub it
+			// out with a "complete" reading so the test doesn't hang.
+			seen["sync-status"]++
+			_, _ = w.Write([]byte(`{"workspaceId":"ws_123","providers":[{"provider":"jira","status":"ready","lagSeconds":0}]}`))
+		case strings.HasPrefix(r.URL.Path, "/v1/workspaces/ws_123/fs/tree"):
+			_, _ = w.Write([]byte(`{"entries":[]}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":"unexpected request"}`))
+		}
+	}))
+	return server, seen
+}
+
+func jsonMarshalOrPanic(value any) string {
+	b, err := json.Marshal(value)
+	if err != nil {
+		panic(err)
+	}
+	return string(b)
+}
+
+func TestIntegrationConnectJiraAutoSelectsSingleSite(t *testing.T) {
+	// One Atlassian site: the picker should auto-bind it without prompting.
+	// Importantly this also proves the picker fires at all on jira/confluence
+	// (i.e. isAtlassianProvider returns true and runAtlassianSitePicker is
+	// dispatched).
+	_, _ = setupAdoptWorkspace(t)
+	sites := []accessibleResourceEntry{
+		{ID: "cloud-only", URL: "https://only.atlassian.net", Name: "Only Site"},
+	}
+	var picked map[string]any
+	server, seen := newConnectJiraTestServer(t, sites, &picked)
+	defer server.Close()
+	pointAdoptCloudCredentials(t, server.URL)
+
+	var stdout bytes.Buffer
+	err := run([]string{
+		"integration", "connect", "jira",
+		"--workspace", "demo",
+		"--cloud-api-url", server.URL,
+		"--no-open",
+		"--timeout", "5s",
+	}, strings.NewReader(""), &stdout, &stdout)
+	if err != nil {
+		t.Fatalf("integration connect jira failed: %v\noutput:\n%s", err, stdout.String())
+	}
+	if seen["accessible-resources"] == 0 {
+		t.Fatalf("expected accessible-resources to be called for jira")
+	}
+	if seen["metadata"] == 0 {
+		t.Fatalf("expected metadata PUT to fire for the only site")
+	}
+	if picked["cloudId"] != "cloud-only" || picked["baseUrl"] != "https://only.atlassian.net" {
+		t.Fatalf("unexpected auto-selected metadata: %#v", picked)
+	}
+	if !strings.Contains(stdout.String(), "Auto-selected site") {
+		t.Fatalf("expected auto-select log line, got: %q", stdout.String())
+	}
+}
+
+func TestIntegrationConnectJiraPromptsAndSetsSelectedSite(t *testing.T) {
+	// Multi-site path: operator picks site 2 via stdin. We assert (a) the
+	// numbered picker rendered, (b) the chosen site's cloudId+baseUrl were
+	// PUT to /metadata, and (c) the connect flow completed without hanging.
+	_, _ = setupAdoptWorkspace(t)
+	sites := []accessibleResourceEntry{
+		{ID: "cloud-1", URL: "https://foo.atlassian.net"},
+		{ID: "cloud-2", URL: "https://bar.atlassian.net"},
+		{ID: "cloud-3", URL: "https://baz.atlassian.net"},
+	}
+	var picked map[string]any
+	server, _ := newConnectJiraTestServer(t, sites, &picked)
+	defer server.Close()
+	pointAdoptCloudCredentials(t, server.URL)
+
+	var stdout bytes.Buffer
+	if err := run([]string{
+		"integration", "connect", "jira",
+		"--workspace", "demo",
+		"--cloud-api-url", server.URL,
+		"--no-open",
+		"--timeout", "5s",
+	}, strings.NewReader("2\n"), &stdout, &stdout); err != nil {
+		t.Fatalf("integration connect jira failed: %v\noutput:\n%s", err, stdout.String())
+	}
+	if picked["cloudId"] != "cloud-2" || picked["baseUrl"] != "https://bar.atlassian.net" {
+		t.Fatalf("expected site 2 to be picked, got %#v", picked)
+	}
+	got := stdout.String()
+	if !strings.Contains(got, "Multiple Atlassian sites available") {
+		t.Fatalf("expected multi-site prompt header in output: %q", got)
+	}
+	if !strings.Contains(got, "cloudId=cloud-1") || !strings.Contains(got, "cloudId=cloud-3") {
+		t.Fatalf("expected picker to list all sites, got: %q", got)
+	}
+}
+
+func TestIntegrationConnectJiraDefaultsToFirstSiteOnBlankInput(t *testing.T) {
+	// Operator just hits Enter at the picker. The CLI must default to the
+	// first site rather than re-prompting or erroring out.
+	_, _ = setupAdoptWorkspace(t)
+	sites := []accessibleResourceEntry{
+		{ID: "cloud-a", URL: "https://a.atlassian.net"},
+		{ID: "cloud-b", URL: "https://b.atlassian.net"},
+	}
+	var picked map[string]any
+	server, _ := newConnectJiraTestServer(t, sites, &picked)
+	defer server.Close()
+	pointAdoptCloudCredentials(t, server.URL)
+
+	var stdout bytes.Buffer
+	if err := run([]string{
+		"integration", "connect", "jira",
+		"--workspace", "demo",
+		"--cloud-api-url", server.URL,
+		"--no-open",
+		"--timeout", "5s",
+	}, strings.NewReader("\n"), &stdout, &stdout); err != nil {
+		t.Fatalf("integration connect jira failed: %v\noutput:\n%s", err, stdout.String())
+	}
+	if picked["cloudId"] != "cloud-a" {
+		t.Fatalf("expected default site to be picked, got %#v", picked)
+	}
+}
+
+func TestIntegrationConnectJiraRetriesOnInvalidInputThenErrors(t *testing.T) {
+	// Three invalid attempts in a row must abort with a clear error so a
+	// dumb-pipe stdin doesn't spin forever. We don't care which exact
+	// invalid value we send, only that the CLI gives up after the cap.
+	_, _ = setupAdoptWorkspace(t)
+	sites := []accessibleResourceEntry{
+		{ID: "cloud-1", URL: "https://foo.atlassian.net"},
+		{ID: "cloud-2", URL: "https://bar.atlassian.net"},
+	}
+	server, _ := newConnectJiraTestServer(t, sites, nil)
+	defer server.Close()
+	pointAdoptCloudCredentials(t, server.URL)
+
+	var stdout bytes.Buffer
+	err := run([]string{
+		"integration", "connect", "jira",
+		"--workspace", "demo",
+		"--cloud-api-url", server.URL,
+		"--no-open",
+		"--timeout", "5s",
+	}, strings.NewReader("nope\n9999\nstill-bad\n"), &stdout, &stdout)
+	if err == nil {
+		t.Fatalf("expected error after exhausted prompt attempts; stdout=%q", stdout.String())
+	}
+	if !strings.Contains(err.Error(), "valid site selection") {
+		t.Fatalf("expected error to mention site selection, got: %v", err)
+	}
+}
+
+func TestIntegrationConnectJiraAlreadyConnectedSkipsPicker(t *testing.T) {
+	_, localDir := setupAdoptWorkspace(t)
+	if err := saveIntegrationConnection(localDir, integrationConnectionState{
+		Provider:     "jira",
+		ConnectionID: "conn_jira",
+		Backend:      "nango",
+		ConnectedAt:  time.Now().UTC().Format(time.RFC3339),
+		UpdatedAt:    time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("save integration connection failed: %v", err)
+	}
+
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/api/v1/auth/token/refresh":
+			_, _ = w.Write([]byte(`{"apiUrl":"` + server.URL + `","accessToken":"cld_new","refreshToken":"refresh_123","accessTokenExpiresAt":"2030-05-01T00:00:00Z"}`))
+		case r.URL.Path == "/api/v1/workspaces/ws_123/join":
+			_, _ = w.Write([]byte(`{"workspaceId":"ws_123","token":"rf_join","relayfileUrl":"` + server.URL + `"}`))
+		case r.URL.Path == "/api/v1/workspaces/ws_123/integrations/jira/status":
+			if got := r.URL.Query().Get("connectionId"); got != "conn_jira" {
+				t.Fatalf("unexpected connectionId: %q", got)
+			}
+			_, _ = w.Write([]byte(`{"ready":true,"state":"ready","provider":"jira","backend":"nango"}`))
+		case r.URL.Path == "/v1/workspaces/ws_123/sync/status":
+			_, _ = w.Write([]byte(`{"workspaceId":"ws_123","providers":[{"provider":"jira","status":"ready","lagSeconds":0}]}`))
+		case strings.Contains(r.URL.Path, "/accessible-resources"):
+			t.Fatalf("accessible-resources must not be called for already-connected jira, hit: %s", r.URL.Path)
+		case strings.HasSuffix(r.URL.Path, "/metadata"):
+			t.Fatalf("metadata PUT must not fire for already-connected jira, hit: %s", r.URL.Path)
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	pointAdoptCloudCredentials(t, server.URL)
+
+	var stdout bytes.Buffer
+	if err := run([]string{
+		"integration", "connect", "jira",
+		"--workspace", "demo",
+		"--cloud-api-url", server.URL,
+		"--no-open",
+		"--timeout", "5s",
+	}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("integration connect jira failed: %v\noutput:\n%s", err, stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "jira already connected") {
+		t.Fatalf("expected already-connected message, got: %q", stdout.String())
+	}
+}
+
+func TestIntegrationConnectNonAtlassianSkipsPicker(t *testing.T) {
+	// Non-Atlassian providers must NOT invoke the picker — the existing
+	// connect flow has to keep working unchanged. We verify by stubbing a
+	// cloud that fails the test if accessible-resources is ever called.
+	_, _ = setupAdoptWorkspace(t)
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/api/v1/auth/token/refresh":
+			_, _ = w.Write([]byte(`{"apiUrl":"` + server.URL + `","accessToken":"cld_new","refreshToken":"refresh_123","accessTokenExpiresAt":"2030-05-01T00:00:00Z"}`))
+		case r.URL.Path == "/api/v1/workspaces/ws_123/join":
+			_, _ = w.Write([]byte(`{"workspaceId":"ws_123","token":"rf_join","relayfileUrl":"` + server.URL + `"}`))
+		case r.URL.Path == "/api/v1/workspaces/ws_123/integrations/connect-session":
+			_, _ = w.Write([]byte(`{"connectionId":"conn_github","connectLink":"","backend":"nango"}`))
+		case r.URL.Path == "/api/v1/workspaces/ws_123/integrations/github/status":
+			_, _ = w.Write([]byte(`{"ready":true,"state":"ready","provider":"github","backend":"nango"}`))
+		case r.URL.Path == "/v1/workspaces/ws_123/sync/status":
+			_, _ = w.Write([]byte(`{"workspaceId":"ws_123","providers":[{"provider":"github","status":"ready","lagSeconds":0}]}`))
+		case strings.Contains(r.URL.Path, "/accessible-resources"):
+			t.Fatalf("accessible-resources must not be called for non-Atlassian providers, hit: %s", r.URL.Path)
+		case strings.HasSuffix(r.URL.Path, "/metadata"):
+			t.Fatalf("metadata PUT must not fire for non-Atlassian providers, hit: %s", r.URL.Path)
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	pointAdoptCloudCredentials(t, server.URL)
+
+	var stdout bytes.Buffer
+	if err := run([]string{
+		"integration", "connect", "github",
+		"--workspace", "demo",
+		"--cloud-api-url", server.URL,
+		"--no-open",
+		"--timeout", "5s",
+	}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("integration connect github failed: %v", err)
 	}
 }

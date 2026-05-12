@@ -6,14 +6,14 @@
       "title": "062-sdk-setup-client-workflow",
       "status": "active",
       "startedAt": "2026-04-30T16:53:07.629Z",
-      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/active/traj_mfyus7zfgxt2.json"
+      "path": ".trajectories/active/traj_mfyus7zfgxt2.json"
     },
     "traj_82lywlk9dcnc": {
       "title": "Write SDK setup client workflow from spec",
       "status": "completed",
       "startedAt": "2026-04-30T16:43:24.651Z",
       "completedAt": "2026-04-30T16:51:07.147Z",
-      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-04/traj_82lywlk9dcnc.json",
+      "path": ".trajectories/completed/2026-04/traj_82lywlk9dcnc.json",
       "compactedInto": "compact_xl96yexa79wg"
     },
     "traj_iuzm83ogm43k": {
@@ -21,7 +21,7 @@
       "status": "completed",
       "startedAt": "2026-04-20T20:35:15.759Z",
       "completedAt": "2026-04-20T20:58:15.412Z",
-      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-04/traj_iuzm83ogm43k.json",
+      "path": ".trajectories/completed/2026-04/traj_iuzm83ogm43k.json",
       "compactedInto": "compact_xl96yexa79wg"
     },
     "traj_nixaonkglri1": {
@@ -29,7 +29,7 @@
       "status": "completed",
       "startedAt": "2026-04-24T09:06:31.046Z",
       "completedAt": "2026-04-24T09:10:42.425Z",
-      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-04/traj_nixaonkglri1.json",
+      "path": ".trajectories/completed/2026-04/traj_nixaonkglri1.json",
       "compactedInto": "compact_xl96yexa79wg"
     },
     "traj_i1f02867dkxn": {
@@ -37,35 +37,35 @@
       "status": "completed",
       "startedAt": "2026-04-30T17:07:38.811Z",
       "completedAt": "2026-04-30T17:10:18.837Z",
-      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-04/traj_i1f02867dkxn.json",
+      "path": ".trajectories/completed/2026-04/traj_i1f02867dkxn.json",
       "compactedInto": "compact_xl96yexa79wg"
     },
     "traj_ubq95azheqpt": {
       "title": "062-sdk-setup-client-workflow",
       "status": "active",
       "startedAt": "2026-04-30T17:12:22.684Z",
-      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/active/traj_ubq95azheqpt.json"
+      "path": ".trajectories/active/traj_ubq95azheqpt.json"
     },
     "traj_dmoc4slub7ox": {
       "title": "Fix SDK setup workflow evidence path",
       "status": "completed",
       "startedAt": "2026-04-30T17:33:11.390Z",
       "completedAt": "2026-04-30T17:34:29.265Z",
-      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-04/traj_dmoc4slub7ox.json",
+      "path": ".trajectories/completed/2026-04/traj_dmoc4slub7ox.json",
       "compactedInto": "compact_xl96yexa79wg"
     },
     "traj_cojnals16pf9": {
       "title": "062-sdk-setup-client-workflow",
       "status": "active",
       "startedAt": "2026-04-30T17:35:02.672Z",
-      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/active/traj_cojnals16pf9.json"
+      "path": ".trajectories/active/traj_cojnals16pf9.json"
     },
     "traj_qi3qmy5oveab": {
       "title": "Resolve SDK setup review gate",
       "status": "completed",
       "startedAt": "2026-04-30T17:41:15.457Z",
       "completedAt": "2026-04-30T17:43:16.297Z",
-      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-04/traj_qi3qmy5oveab.json",
+      "path": ".trajectories/completed/2026-04/traj_qi3qmy5oveab.json",
       "compactedInto": "compact_xl96yexa79wg"
     },
     "traj_em3hvzpg1xmx": {
@@ -73,7 +73,7 @@
       "status": "completed",
       "startedAt": "2026-04-30T17:43:56.110Z",
       "completedAt": "2026-04-30T17:43:59.041Z",
-      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-04/traj_em3hvzpg1xmx.json",
+      "path": ".trajectories/completed/2026-04/traj_em3hvzpg1xmx.json",
       "compactedInto": "compact_xl96yexa79wg"
     },
     "traj_cdist8i8vdmd": {
@@ -81,7 +81,7 @@
       "status": "completed",
       "startedAt": "2026-04-30T20:10:45.916Z",
       "completedAt": "2026-04-30T20:11:29.126Z",
-      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-04/traj_cdist8i8vdmd.json",
+      "path": ".trajectories/completed/2026-04/traj_cdist8i8vdmd.json",
       "compactedInto": "compact_xl96yexa79wg"
     },
     "traj_wez7rl7pkfpn": {
@@ -89,7 +89,7 @@
       "status": "completed",
       "startedAt": "2026-04-30T20:31:59.188Z",
       "completedAt": "2026-04-30T20:31:59.361Z",
-      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-04/traj_wez7rl7pkfpn.json",
+      "path": ".trajectories/completed/2026-04/traj_wez7rl7pkfpn.json",
       "compactedInto": "compact_xl96yexa79wg"
     },
     "traj_7x9nltybo08h": {
@@ -97,7 +97,7 @@
       "status": "completed",
       "startedAt": "2026-04-30T21:07:25.621Z",
       "completedAt": "2026-04-30T21:08:20.135Z",
-      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-04/traj_7x9nltybo08h.json",
+      "path": ".trajectories/completed/2026-04/traj_7x9nltybo08h.json",
       "compactedInto": "compact_xl96yexa79wg"
     },
     "traj_z2klijcrwqed": {
@@ -105,7 +105,7 @@
       "status": "completed",
       "startedAt": "2026-05-01T14:58:15.412Z",
       "completedAt": "2026-05-01T15:06:23.351Z",
-      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-05/traj_z2klijcrwqed.json",
+      "path": ".trajectories/completed/2026-05/traj_z2klijcrwqed.json",
       "compactedInto": "compact_xl96yexa79wg"
     },
     "traj_a6rfc30zag40": {
@@ -113,7 +113,7 @@
       "status": "completed",
       "startedAt": "2026-05-01T15:09:58.013Z",
       "completedAt": "2026-05-01T15:12:08.390Z",
-      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-05/traj_a6rfc30zag40.json",
+      "path": ".trajectories/completed/2026-05/traj_a6rfc30zag40.json",
       "compactedInto": "compact_xl96yexa79wg"
     },
     "traj_hyqnsfininh5": {
@@ -121,7 +121,7 @@
       "status": "completed",
       "startedAt": "2026-05-01T15:22:05.684Z",
       "completedAt": "2026-05-01T15:27:12.578Z",
-      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-05/traj_hyqnsfininh5.json",
+      "path": ".trajectories/completed/2026-05/traj_hyqnsfininh5.json",
       "compactedInto": "compact_xl96yexa79wg"
     },
     "traj_ailh4waboewf": {
@@ -129,7 +129,7 @@
       "status": "completed",
       "startedAt": "2026-05-01T23:39:39.687Z",
       "completedAt": "2026-05-01T23:45:39.611Z",
-      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-05/traj_ailh4waboewf.json",
+      "path": ".trajectories/completed/2026-05/traj_ailh4waboewf.json",
       "compactedInto": "compact_xl96yexa79wg"
     },
     "traj_ozxb98dy7hk5": {
@@ -137,49 +137,49 @@
       "status": "completed",
       "startedAt": "2026-05-04T10:00:09.507Z",
       "completedAt": "2026-05-04T10:01:10.778Z",
-      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-05/traj_ozxb98dy7hk5.json"
+      "path": ".trajectories/completed/2026-05/traj_ozxb98dy7hk5.json"
     },
     "traj_rnldje4mr6nw": {
       "title": "Research relayfile positioning vs MCP and CLI",
       "status": "completed",
       "startedAt": "2026-05-04T10:01:57.596Z",
       "completedAt": "2026-05-04T10:01:57.776Z",
-      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-05/traj_rnldje4mr6nw.json"
+      "path": ".trajectories/completed/2026-05/traj_rnldje4mr6nw.json"
     },
     "traj_78fn1fyq1m4d": {
       "title": "Explain relayfile relayauth governance model",
       "status": "completed",
       "startedAt": "2026-05-04T10:16:51.523Z",
       "completedAt": "2026-05-04T10:17:37.753Z",
-      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-05/traj_78fn1fyq1m4d.json"
+      "path": ".trajectories/completed/2026-05/traj_78fn1fyq1m4d.json"
     },
     "traj_aomtlnb3g5sa": {
       "title": "Identify relayfile relayauth changes for per-user governance",
       "status": "completed",
       "startedAt": "2026-05-04T10:22:29.278Z",
       "completedAt": "2026-05-04T10:22:29.396Z",
-      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-05/traj_aomtlnb3g5sa.json"
+      "path": ".trajectories/completed/2026-05/traj_aomtlnb3g5sa.json"
     },
     "traj_5uxheavo6d3q": {
       "title": "Write per-user relayfile governance spec",
       "status": "completed",
       "startedAt": "2026-05-04T10:25:24.905Z",
       "completedAt": "2026-05-04T10:27:40.891Z",
-      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-05/traj_5uxheavo6d3q.json"
+      "path": ".trajectories/completed/2026-05/traj_5uxheavo6d3q.json"
     },
     "traj_2nl6e3gqkvki": {
       "title": "Document programmatic Notion connect interface",
       "status": "completed",
       "startedAt": "2026-05-04T10:38:33.363Z",
       "completedAt": "2026-05-04T10:40:25.800Z",
-      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-05/traj_2nl6e3gqkvki.json"
+      "path": ".trajectories/completed/2026-05/traj_2nl6e3gqkvki.json"
     },
     "traj_v1un6n66y38i": {
       "title": "Async createMount — issue #104",
       "status": "completed",
       "startedAt": "2026-05-08T17:27:24.218Z",
       "completedAt": "2026-05-08T17:31:22.965Z",
-      "path": "/Users/will/Projects/relayfile/.claude/worktrees/issue-104-async-create-mount/.trajectories/completed/2026-05/traj_v1un6n66y38i.json",
+      "path": ".trajectories/completed/2026-05/traj_v1un6n66y38i.json",
       "compactedInto": "compact_xl96yexa79wg"
     },
     "traj_9khc36ax639i": {
@@ -203,7 +203,7 @@
       "status": "completed",
       "startedAt": "2026-05-09T13:35:32.701Z",
       "completedAt": "2026-05-09T13:45:18.302Z",
-      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-05/traj_6fjv0fnvrc5e.json",
+      "path": ".trajectories/completed/2026-05/traj_6fjv0fnvrc5e.json",
       "compactedInto": "compact_xl96yexa79wg"
     },
     "traj_xf18gkmtr3ib": {
@@ -211,7 +211,7 @@
       "status": "completed",
       "startedAt": "2026-05-09T13:50:45.476Z",
       "completedAt": "2026-05-09T13:54:43.281Z",
-      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-05/traj_xf18gkmtr3ib.json",
+      "path": ".trajectories/completed/2026-05/traj_xf18gkmtr3ib.json",
       "compactedInto": "compact_xl96yexa79wg"
     },
     "traj_6lyjg41p6a28": {
@@ -219,7 +219,7 @@
       "status": "completed",
       "startedAt": "2026-05-09T13:55:09.128Z",
       "completedAt": "2026-05-09T13:57:04.293Z",
-      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-05/traj_6lyjg41p6a28.json",
+      "path": ".trajectories/completed/2026-05/traj_6lyjg41p6a28.json",
       "compactedInto": "compact_xl96yexa79wg"
     },
     "traj_4vdcwo2iy630": {
@@ -227,14 +227,14 @@
       "status": "completed",
       "startedAt": "2026-05-09T18:25:18.473Z",
       "completedAt": "2026-05-09T18:27:13.341Z",
-      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-05/traj_4vdcwo2iy630.json"
+      "path": ".trajectories/completed/2026-05/traj_4vdcwo2iy630.json"
     },
     "traj_h99ldnvo1d26": {
       "title": "relayfile workspace current + active marker in 'workspace list'",
       "status": "completed",
       "startedAt": "2026-05-09T18:44:54.122Z",
       "completedAt": "2026-05-09T18:48:09.889Z",
-      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-05/traj_h99ldnvo1d26.json"
+      "path": ".trajectories/completed/2026-05/traj_h99ldnvo1d26.json"
     },
     "traj_brjdrgcnnwhs": {
       "title": "Specify initial relayfile integration E2E eval",

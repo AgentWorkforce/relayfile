@@ -328,6 +328,344 @@ describe("RelayfileSetup", () => {
     expect(readRequestUrl(fetchMock, 3)).toBe("https://staging.agentrelay.com/base/cloud/api/v1/workspaces/ws_123/integrations/github/status")
   })
 
+  it("adopts an existing Nango connection via POST /integrations/{provider}/adopt", async () => {
+    // Operator path: a Nango connection has already been minted out-of-band
+    // (UI or third-party flow). The SDK's adopt method posts the
+    // connectionId to Cloud's adopt route, threads the auth token, and
+    // surfaces the replacedConnectionId so callers can tell whether they
+    // migrated a stale row. The CLI surface (`relayfile integration adopt`)
+    // sits on top of this method, so any regression in the request shape
+    // or the response parsing would break the operator workflow.
+    const fetchMock = queueFetch(
+      makeJoinResponse(),
+      jsonResponse({
+        ok: true,
+        connectionId: "conn_adopt_new",
+        replacedConnectionId: "conn_adopt_old"
+      })
+    )
+
+    const setup = new RelayfileSetup({
+      cloudApiUrl: "https://staging.agentrelay.com/base/cloud"
+    })
+    const handle = await setup.joinWorkspace("ws_123")
+    const result = await handle.adoptIntegration("github", "conn_adopt_new", {
+      providerConfigKey: "github-relay"
+    })
+
+    expect(result).toEqual({
+      connectionId: "conn_adopt_new",
+      replacedConnectionId: "conn_adopt_old"
+    })
+    expect(readRequestUrl(fetchMock, 1)).toBe(
+      "https://staging.agentrelay.com/base/cloud/api/v1/workspaces/ws_123/integrations/github/adopt"
+    )
+    expect(readRequestBody(fetchMock, 1)).toEqual({
+      connectionId: "conn_adopt_new",
+      providerConfigKey: "github-relay"
+    })
+    expect(readRequestHeaders(fetchMock, 1).Authorization).toBe("Bearer rf_jwt_1")
+  })
+
+  it("omits replacedConnectionId from adoptIntegration result when the row was a fresh insert", async () => {
+    // Cloud only returns replacedConnectionId on the stale-row migration
+    // path; for a fresh insert the field is absent. The SDK must not
+    // fabricate it (e.g. by echoing the request connectionId), because
+    // callers use the presence/absence of replacedConnectionId to decide
+    // whether to warn the operator that an old binding was overwritten.
+    queueFetch(
+      makeJoinResponse(),
+      jsonResponse({ ok: true, connectionId: "conn_fresh" })
+    )
+
+    const setup = new RelayfileSetup({
+      cloudApiUrl: "https://staging.agentrelay.com/base/cloud"
+    })
+    const handle = await setup.joinWorkspace("ws_123")
+    const result = await handle.adoptIntegration("notion", "conn_fresh")
+
+    expect(result).toEqual({ connectionId: "conn_fresh" })
+    expect("replacedConnectionId" in result).toBe(false)
+  })
+
+  it("propagates Cloud 409 conflicts from adoptIntegration as CloudApiError", async () => {
+    // Conflict semantics must surface to the CLI so it can render the
+    // operator-facing message and exit non-zero. The body's `code` field
+    // tells the CLI which mitigation to suggest (disconnect first vs.
+    // re-target a different workspace).
+    queueFetch(
+      makeJoinResponse(),
+      jsonResponse(
+        {
+          ok: false,
+          code: "existing_connection_live_or_unknown",
+          error: "Workspace ws_123 already has a live github connection",
+          existingConnectionId: "conn_live"
+        },
+        { status: 409 }
+      )
+    )
+
+    const setup = new RelayfileSetup({
+      cloudApiUrl: "https://staging.agentrelay.com/base/cloud",
+      retry: { maxRetries: 0, baseDelayMs: 1 }
+    })
+    const handle = await setup.joinWorkspace("ws_123")
+    await expect(
+      handle.adoptIntegration("github", "conn_intruder")
+    ).rejects.toMatchObject({
+      httpStatus: 409,
+      httpBody: expect.objectContaining({
+        code: "existing_connection_live_or_unknown"
+      })
+    } satisfies Partial<CloudApiError>)
+  })
+
+  it("lists accessible resources via GET /integrations/{provider}/accessible-resources", async () => {
+    // The post-OAuth picker flow for Jira/Confluence: the CLI calls this to
+    // figure out which Atlassian sites the operator's OAuth grant covers
+    // so it can render a numbered picker. The SDK has to round-trip the
+    // shape exactly because the CLI's prompt parses each entry's id+url
+    // and feeds them into setIntegrationMetadata.
+    const fetchMock = queueFetch(
+      makeJoinResponse(),
+      jsonResponse({
+        ok: true,
+        resources: [
+          {
+            id: "cloud-1",
+            url: "https://foo.atlassian.net",
+            name: "Foo",
+            scopes: ["read:jira-work"]
+          },
+          { id: "cloud-2", url: "https://bar.atlassian.net" }
+        ]
+      })
+    )
+
+    const setup = new RelayfileSetup({
+      cloudApiUrl: "https://staging.agentrelay.com/base/cloud"
+    })
+    const handle = await setup.joinWorkspace("ws_123")
+    const resources = await handle.listAccessibleResources("jira")
+
+    expect(resources).toEqual([
+      {
+        id: "cloud-1",
+        url: "https://foo.atlassian.net",
+        name: "Foo",
+        scopes: ["read:jira-work"]
+      },
+      { id: "cloud-2", url: "https://bar.atlassian.net" }
+    ])
+    expect(readRequestUrl(fetchMock, 1)).toBe(
+      "https://staging.agentrelay.com/base/cloud/api/v1/workspaces/ws_123/integrations/jira/accessible-resources"
+    )
+    expect(readRequestHeaders(fetchMock, 1).Authorization).toBe("Bearer rf_jwt_1")
+  })
+
+  it("normalizes listAccessibleResources provider casing and rejects blank providers", async () => {
+    const fetchMock = queueFetch(
+      makeJoinResponse(),
+      jsonResponse({
+        ok: true,
+        resources: [{ id: "cloud-1", url: "https://foo.atlassian.net" }]
+      })
+    )
+
+    const setup = new RelayfileSetup({ cloudApiUrl: "https://cloud.test" })
+    const handle = await setup.joinWorkspace("ws_123")
+    await expect(handle.listAccessibleResources("  JiRa  ")).resolves.toEqual([
+      { id: "cloud-1", url: "https://foo.atlassian.net" }
+    ])
+    expect(readRequestUrl(fetchMock, 1)).toBe(
+      "https://cloud.test/api/v1/workspaces/ws_123/integrations/jira/accessible-resources"
+    )
+    expect(readRequestHeaders(fetchMock, 1).Authorization).toBe("Bearer rf_jwt_1")
+
+    await expect(handle.listAccessibleResources("")).rejects.toThrow(
+      /provider is required/
+    )
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it("listAccessibleResources filters out entries missing id or url", async () => {
+    // Defense in depth: if Cloud ever loosens its normalization, the SDK
+    // still refuses to return junk entries that the CLI would crash on.
+    queueFetch(
+      makeJoinResponse(),
+      jsonResponse({
+        ok: true,
+        resources: [
+          { id: "cloud-1", url: "https://foo.atlassian.net" },
+          { id: "cloud-2" },
+          { url: "https://baz.atlassian.net" },
+          null,
+          "not-an-object"
+        ]
+      })
+    )
+
+    const setup = new RelayfileSetup({ cloudApiUrl: "https://cloud.test" })
+    const handle = await setup.joinWorkspace("ws_123")
+    const resources = await handle.listAccessibleResources("jira")
+
+    expect(resources).toEqual([
+      { id: "cloud-1", url: "https://foo.atlassian.net" }
+    ])
+  })
+
+  it("listAccessibleResources surfaces Cloud's provider_has_no_accessible_resources as CloudApiError", async () => {
+    // Cloud returns 400 with code=provider_has_no_accessible_resources for
+    // non-Atlassian providers. The SDK must surface that as CloudApiError
+    // so callers can branch on the code instead of silently treating it
+    // like an empty list.
+    queueFetch(
+      makeJoinResponse(),
+      jsonResponse(
+        {
+          ok: false,
+          code: "provider_has_no_accessible_resources",
+          error: "Provider \"github\" does not expose accessible resources"
+        },
+        { status: 400 }
+      )
+    )
+
+    const setup = new RelayfileSetup({
+      cloudApiUrl: "https://cloud.test",
+      retry: { maxRetries: 0, baseDelayMs: 1 }
+    })
+    const handle = await setup.joinWorkspace("ws_123")
+    await expect(
+      handle.listAccessibleResources("github")
+    ).rejects.toMatchObject({
+      httpStatus: 400,
+      httpBody: expect.objectContaining({
+        code: "provider_has_no_accessible_resources"
+      })
+    } satisfies Partial<CloudApiError>)
+  })
+
+  it("sets integration metadata via PUT /integrations/{provider}/metadata", async () => {
+    // The second half of the post-OAuth picker: after listAccessibleResources
+    // returns multiple sites and the operator picks one, the CLI calls
+    // this with { cloudId, baseUrl }. Cloud forwards to nango.setMetadata
+    // and echoes the value back; the SDK returns whatever Cloud echoed so
+    // CLI confirmation messages reflect the canonical stored shape.
+    const fetchMock = queueFetch(
+      makeJoinResponse(),
+      jsonResponse({
+        ok: true,
+        metadata: {
+          cloudId: "cloud-1",
+          baseUrl: "https://foo.atlassian.net"
+        }
+      })
+    )
+
+    const setup = new RelayfileSetup({
+      cloudApiUrl: "https://staging.agentrelay.com/base/cloud"
+    })
+    const handle = await setup.joinWorkspace("ws_123")
+    const updated = await handle.setIntegrationMetadata("jira", {
+      cloudId: "cloud-1",
+      baseUrl: "https://foo.atlassian.net"
+    })
+
+    expect(updated).toEqual({
+      cloudId: "cloud-1",
+      baseUrl: "https://foo.atlassian.net"
+    })
+    expect(readRequestUrl(fetchMock, 1)).toBe(
+      "https://staging.agentrelay.com/base/cloud/api/v1/workspaces/ws_123/integrations/jira/metadata"
+    )
+    expect(readRequestBody(fetchMock, 1)).toEqual({
+      metadata: {
+        cloudId: "cloud-1",
+        baseUrl: "https://foo.atlassian.net"
+      }
+    })
+    const init = fetchMock.mock.calls[1]?.[1] as RequestInit
+    expect(init.method).toBe("PUT")
+  })
+
+  it("setIntegrationMetadata rejects non-object metadata locally before hitting Cloud", async () => {
+    // We catch this in the SDK so the operator-facing error message is
+    // immediate ("metadata must be a plain object") rather than an
+    // unhelpful Cloud 400 round-trip.
+    const fetchMock = queueFetch(makeJoinResponse())
+    const setup = new RelayfileSetup({ cloudApiUrl: "https://cloud.test" })
+    const handle = await setup.joinWorkspace("ws_123")
+    // @ts-expect-error - exercising runtime guard
+    await expect(handle.setIntegrationMetadata("jira", "nope")).rejects.toThrow(
+      /metadata must be a plain object/
+    )
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    // @ts-expect-error - exercising runtime guard
+    await expect(handle.setIntegrationMetadata("jira", null)).rejects.toThrow(
+      /metadata must be a plain object/
+    )
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    await expect(
+      // @ts-expect-error - exercising runtime guard
+      handle.setIntegrationMetadata("jira", ["array"])
+    ).rejects.toThrow(/metadata must be a plain object/)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    await expect(
+      // @ts-expect-error - exercising runtime guard
+      handle.setIntegrationMetadata("jira", new Date())
+    ).rejects.toThrow(/metadata must be a plain object/)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    await expect(
+      // @ts-expect-error - exercising runtime guard
+      handle.setIntegrationMetadata("jira", new Map())
+    ).rejects.toThrow(/metadata must be a plain object/)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it("setIntegrationMetadata surfaces Cloud 400 invalid_metadata as CloudApiError", async () => {
+    queueFetch(
+      makeJoinResponse(),
+      jsonResponse(
+        {
+          ok: false,
+          code: "invalid_metadata",
+          error: "metadata key \"_internal\" is reserved by the Nango backend"
+        },
+        { status: 400 }
+      )
+    )
+
+    const setup = new RelayfileSetup({
+      cloudApiUrl: "https://cloud.test",
+      retry: { maxRetries: 0, baseDelayMs: 1 }
+    })
+    const handle = await setup.joinWorkspace("ws_123")
+    await expect(
+      handle.setIntegrationMetadata("jira", { _internal: "nope" })
+    ).rejects.toMatchObject({
+      httpStatus: 400,
+      httpBody: expect.objectContaining({ code: "invalid_metadata" })
+    } satisfies Partial<CloudApiError>)
+  })
+
+  it("setIntegrationMetadata rejects malformed Cloud metadata responses", async () => {
+    queueFetch(
+      makeJoinResponse(),
+      jsonResponse({
+        ok: true,
+        metadata: []
+      })
+    )
+
+    const setup = new RelayfileSetup({ cloudApiUrl: "https://cloud.test" })
+    const handle = await setup.joinWorkspace("ws_123")
+    await expect(
+      handle.setIntegrationMetadata("jira", { cloudId: "cloud-1" })
+    ).rejects.toThrow(/expected metadata to be a plain object/)
+  })
+
   it("throws CloudApiError with parsed body on createWorkspace failure", async () => {
     queueFetch(
       jsonResponse(

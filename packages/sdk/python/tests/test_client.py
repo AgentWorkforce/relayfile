@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 
 import httpx
 import pytest
@@ -15,6 +16,7 @@ from relayfile import (
     QueueFullError,
     RelayFileApiError,
     RelayFileClient,
+    RetryOptions,
     RevisionConflictError,
     compute_canonical_path,
 )
@@ -516,3 +518,278 @@ class TestAsyncClient:
             )
             res = await client.ingest_webhook(inp)
             assert res["status"] == "queued"
+
+
+# ---------------------------------------------------------------------------
+# Integration setup (accessible-resources + metadata)
+# ---------------------------------------------------------------------------
+
+
+CLOUD_BASE = "https://cloud.test"
+
+
+class TestIntegrationSetupSync:
+    @respx.mock
+    def test_list_accessible_resources_normalizes_payload(self) -> None:
+        # Sync path mirrors the TS SDK contract: cloud returns
+        # { ok, resources: [...] }, the SDK strips entries missing id/url
+        # so the CLI's picker can't crash on partial Atlassian output.
+        respx.get(
+            f"{CLOUD_BASE}/api/v1/workspaces/ws_acme/integrations/jira/accessible-resources"
+        ).mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "resources": [
+                        {"id": "cloud-1", "url": "https://foo.atlassian.net", "name": "Foo"},
+                        {"id": "cloud-2", "url": "https://bar.atlassian.net"},
+                        {"id": "cloud-3"},
+                        {"url": "https://baz.atlassian.net"},
+                        None,
+                    ],
+                },
+            )
+        )
+        client = RelayFileClient(BASE, "tok_test", cloud_base_url=CLOUD_BASE)
+        resources = client.list_accessible_resources("ws_acme", "jira")
+        assert resources == [
+            {"id": "cloud-1", "url": "https://foo.atlassian.net", "name": "Foo"},
+            {"id": "cloud-2", "url": "https://bar.atlassian.net"},
+        ]
+        # Authorization header must come from the token provider.
+        req = respx.calls.last.request
+        assert req.headers["Authorization"] == "Bearer tok_test"
+
+    @respx.mock
+    def test_list_accessible_resources_surfaces_cloud_error(self) -> None:
+        respx.get(
+            f"{CLOUD_BASE}/api/v1/workspaces/ws_acme/integrations/github/accessible-resources"
+        ).mock(
+            return_value=httpx.Response(
+                400,
+                json={
+                    "ok": False,
+                    "code": "provider_has_no_accessible_resources",
+                    "error": "Provider \"github\" does not expose accessible resources",
+                },
+            )
+        )
+        client = RelayFileClient(
+            BASE, "tok_test", cloud_base_url=CLOUD_BASE,
+            retry=RetryOptions(max_retries=0, base_delay_ms=1),
+        )
+        with pytest.raises(RelayFileApiError) as exc_info:
+            client.list_accessible_resources("ws_acme", "github")
+        assert exc_info.value.status == 400
+        assert exc_info.value.code == "provider_has_no_accessible_resources"
+
+    @respx.mock
+    def test_set_integration_metadata_forwards_payload(self) -> None:
+        captured: dict[str, Any] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["body"] = json.loads(request.content.decode())
+            captured["method"] = request.method
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "metadata": {
+                        "cloudId": "cloud-1",
+                        "baseUrl": "https://foo.atlassian.net",
+                    },
+                },
+            )
+
+        respx.put(
+            f"{CLOUD_BASE}/api/v1/workspaces/ws_acme/integrations/jira/metadata"
+        ).mock(side_effect=handler)
+
+        client = RelayFileClient(BASE, "tok_test", cloud_base_url=CLOUD_BASE)
+        result = client.set_integration_metadata(
+            "ws_acme",
+            "jira",
+            {"cloudId": "cloud-1", "baseUrl": "https://foo.atlassian.net"},
+        )
+        assert result == {
+            "cloudId": "cloud-1",
+            "baseUrl": "https://foo.atlassian.net",
+        }
+        assert captured["method"] == "PUT"
+        assert captured["body"] == {
+            "metadata": {
+                "cloudId": "cloud-1",
+                "baseUrl": "https://foo.atlassian.net",
+            }
+        }
+
+    def test_set_integration_metadata_rejects_non_dict_locally(self) -> None:
+        # Operator-facing guard: we don't even hit cloud for type errors,
+        # so the failure mode is a Python ValueError instead of a cloud
+        # 400 round-trip.
+        client = RelayFileClient(BASE, "tok_test", cloud_base_url=CLOUD_BASE)
+        with pytest.raises(ValueError):
+            client.set_integration_metadata("ws_acme", "jira", "not-a-dict")  # type: ignore[arg-type]
+        with pytest.raises(ValueError):
+            client.set_integration_metadata("ws_acme", "", {})
+
+    @respx.mock
+    def test_set_integration_metadata_surfaces_cloud_invalid_metadata(self) -> None:
+        respx.put(
+            f"{CLOUD_BASE}/api/v1/workspaces/ws_acme/integrations/jira/metadata"
+        ).mock(
+            return_value=httpx.Response(
+                400,
+                json={
+                    "ok": False,
+                    "code": "invalid_metadata",
+                    "error": "metadata key \"_internal\" is reserved by the Nango backend",
+                },
+            )
+        )
+        client = RelayFileClient(
+            BASE, "tok_test", cloud_base_url=CLOUD_BASE,
+            retry=RetryOptions(max_retries=0, base_delay_ms=1),
+        )
+        with pytest.raises(RelayFileApiError) as exc_info:
+            client.set_integration_metadata("ws_acme", "jira", {"_internal": "nope"})
+        assert exc_info.value.status == 400
+        assert exc_info.value.code == "invalid_metadata"
+
+    @respx.mock
+    def test_set_integration_metadata_rejects_malformed_cloud_response(self) -> None:
+        respx.put(
+            f"{CLOUD_BASE}/api/v1/workspaces/ws_acme/integrations/jira/metadata"
+        ).mock(return_value=httpx.Response(200, json={"ok": True, "metadata": []}))
+        client = RelayFileClient(BASE, "tok_test", cloud_base_url=CLOUD_BASE)
+        with pytest.raises(ValueError, match="expected object field"):
+            client.set_integration_metadata("ws_acme", "jira", {"cloudId": "cloud-1"})
+
+
+class TestIntegrationSetupAsync:
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_list_accessible_resources(self) -> None:
+        respx.get(
+            f"{CLOUD_BASE}/api/v1/workspaces/ws_acme/integrations/jira/accessible-resources"
+        ).mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "resources": [
+                        {"id": "cloud-1", "url": "https://foo.atlassian.net"}
+                    ],
+                },
+            )
+        )
+        async with AsyncRelayFileClient(
+            BASE, "tok_test", cloud_base_url=CLOUD_BASE
+        ) as client:
+            resources = await client.list_accessible_resources("ws_acme", "jira")
+        assert resources == [
+            {"id": "cloud-1", "url": "https://foo.atlassian.net"}
+        ]
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_set_integration_metadata(self) -> None:
+        respx.put(
+            f"{CLOUD_BASE}/api/v1/workspaces/ws_acme/integrations/jira/metadata"
+        ).mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "metadata": {"cloudId": "cloud-1"},
+                },
+            )
+        )
+        async with AsyncRelayFileClient(
+            BASE, "tok_test", cloud_base_url=CLOUD_BASE
+        ) as client:
+            result = await client.set_integration_metadata(
+                "ws_acme", "jira", {"cloudId": "cloud-1"}
+            )
+        assert result == {"cloudId": "cloud-1"}
+
+    @pytest.mark.asyncio
+    async def test_set_integration_metadata_rejects_non_dict_locally(self) -> None:
+        async with AsyncRelayFileClient(
+            BASE, "tok_test", cloud_base_url=CLOUD_BASE
+        ) as client:
+            with pytest.raises(ValueError):
+                await client.set_integration_metadata(
+                    "ws_acme", "jira", "not-a-dict"  # type: ignore[arg-type]
+                )
+            with pytest.raises(ValueError):
+                await client.set_integration_metadata("ws_acme", "", {})
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_list_accessible_resources_surfaces_cloud_error(self) -> None:
+        respx.get(
+            f"{CLOUD_BASE}/api/v1/workspaces/ws_acme/integrations/github/accessible-resources"
+        ).mock(
+            return_value=httpx.Response(
+                400,
+                json={
+                    "ok": False,
+                    "code": "provider_has_no_accessible_resources",
+                    "error": "Provider \"github\" does not expose accessible resources",
+                },
+            )
+        )
+        async with AsyncRelayFileClient(
+            BASE,
+            "tok_test",
+            cloud_base_url=CLOUD_BASE,
+            retry=RetryOptions(max_retries=0, base_delay_ms=1),
+        ) as client:
+            with pytest.raises(RelayFileApiError) as exc_info:
+                await client.list_accessible_resources("ws_acme", "github")
+        assert exc_info.value.status == 400
+        assert exc_info.value.code == "provider_has_no_accessible_resources"
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_set_integration_metadata_surfaces_cloud_invalid_metadata(self) -> None:
+        respx.put(
+            f"{CLOUD_BASE}/api/v1/workspaces/ws_acme/integrations/jira/metadata"
+        ).mock(
+            return_value=httpx.Response(
+                400,
+                json={
+                    "ok": False,
+                    "code": "invalid_metadata",
+                    "error": "metadata key \"_internal\" is reserved by the Nango backend",
+                },
+            )
+        )
+        async with AsyncRelayFileClient(
+            BASE,
+            "tok_test",
+            cloud_base_url=CLOUD_BASE,
+            retry=RetryOptions(max_retries=0, base_delay_ms=1),
+        ) as client:
+            with pytest.raises(RelayFileApiError) as exc_info:
+                await client.set_integration_metadata(
+                    "ws_acme", "jira", {"_internal": "nope"}
+                )
+        assert exc_info.value.status == 400
+        assert exc_info.value.code == "invalid_metadata"
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_set_integration_metadata_rejects_malformed_cloud_response(self) -> None:
+        respx.put(
+            f"{CLOUD_BASE}/api/v1/workspaces/ws_acme/integrations/jira/metadata"
+        ).mock(return_value=httpx.Response(200, json={"ok": True}))
+        async with AsyncRelayFileClient(
+            BASE, "tok_test", cloud_base_url=CLOUD_BASE
+        ) as client:
+            with pytest.raises(ValueError, match="expected object field"):
+                await client.set_integration_metadata(
+                    "ws_acme", "jira", {"cloudId": "cloud-1"}
+                )

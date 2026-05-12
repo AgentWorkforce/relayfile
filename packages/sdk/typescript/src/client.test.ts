@@ -720,6 +720,123 @@ describe("RelayFileClient — existing methods", () => {
       await handle.unsubscribe();
     });
 
+    it("moves refreshed change-log entries to the newest cache position before pruning", async () => {
+      let now = 0;
+      const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
+      const fetchImpl = vi.fn(async (url: string) => {
+        const fileMatch = url.match(/\/fs\/file\?path=([^&]+)/);
+        if (fileMatch) {
+          const path = decodeURIComponent(fileMatch[1]!);
+          const id = path.match(/ENG-(\d+)/)?.[1] ?? "0";
+          return {
+            ok: true,
+            status: 200,
+            headers: new Headers({ "content-type": "application/json" }),
+            json: async () => ({
+              path,
+              revision: `rev_${id}`,
+              contentType: "application/json",
+              content: JSON.stringify({
+                id: `ENG-${id}`,
+                provider: "linear",
+                kind: "linear.issue",
+                title: `ENG-${id}`,
+              }),
+            }),
+            text: async () => "",
+          } as unknown as Response;
+        }
+        if (url.includes("/fs/changes?last=1")) {
+          return {
+            ok: true,
+            status: 200,
+            headers: new Headers({ "content-type": "application/json" }),
+            json: async () => ({
+              events: [
+                {
+                  id: "evt_a",
+                  workspace: "ws_acme",
+                  type: "relayfile.changed",
+                  occurredAt: "2026-05-11T00:00:00.000Z",
+                  resource: {
+                    path: "/linear/issues/ENG-1.json",
+                    kind: "linear.issue",
+                    id: "ENG-1",
+                    provider: "linear",
+                  },
+                  summary: {
+                    title: "ENG-1",
+                  },
+                  digest: "sha256:a",
+                },
+              ],
+            }),
+            text: async () => "",
+          } as unknown as Response;
+        }
+        if (url.includes("/fs/changes?last=3")) {
+          return {
+            ok: true,
+            status: 200,
+            headers: new Headers({ "content-type": "application/json" }),
+            json: async () => ({ events: [] }),
+            text: async () => "",
+          } as unknown as Response;
+        }
+        throw new Error(`Unexpected fetch URL: ${url}`);
+      });
+      const client = new RelayFileClient({
+        baseUrl: "https://relay.test",
+        token: makeWorkspaceToken("ws_acme", "support-agent"),
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+        retry: { maxRetries: 0 },
+        changeLog: { retentionMs: 20, maxEntries: 10 },
+      });
+      let handle: Subscription | undefined;
+
+      try {
+        handle = client.subscribe(
+          ["/linear/issues/**"],
+          () => {
+            // no-op
+          },
+          { coalesce: "none" },
+        );
+
+        const socket = await waitForWebSocket();
+        socket.emit("open", {});
+        for (const [eventId, issueId, storedAt] of [
+          ["evt_a", "1", 0],
+          ["evt_b", "2", 1],
+          ["evt_c", "3", 2],
+        ] as const) {
+          now = storedAt;
+          socket.emit("message", {
+            data: JSON.stringify({
+              eventId,
+              type: "file.updated",
+              path: `/linear/issues/ENG-${issueId}.json`,
+              revision: `rev_${issueId}`,
+              timestamp: `2026-05-11T00:00:0${storedAt}.000Z`,
+            } satisfies FilesystemEvent),
+          });
+          await waitForExpectation(() => {
+            expect(fetchImpl).toHaveBeenCalledTimes(storedAt + 1);
+          });
+        }
+
+        now = 10;
+        await client.listLastNChanges(1);
+
+        now = 25;
+        const retained = await client.listLastNChanges(3);
+        expect(retained.events.map((event) => event.id)).toEqual(["evt_a"]);
+      } finally {
+        nowSpy.mockRestore();
+        await handle?.unsubscribe();
+      }
+    });
+
     it("honors configurable local change-log retention before falling back to the retained endpoint", async () => {
       const fetchImpl = vi.fn(async (url: string) => {
         if (url.includes("/fs/file?path=%2Flinear%2Fissues%2FENG-91.json")) {

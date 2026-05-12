@@ -674,6 +674,183 @@ export class WorkspaceHandle {
     this._pendingConnections.delete(provider)
   }
 
+  /**
+   * Bind an existing Nango connection to this workspace + provider slot
+   * without going through the OAuth re-mint flow. Use this when an operator
+   * has already minted the connection out-of-band (Nango UI, third-party
+   * setup) and just wants Cloud to start routing sync webhooks for it.
+   *
+   * The Cloud-side adopt route validates that the Nango connection exists
+   * upstream and that its end-user/workspace tag matches this workspace.
+   * On success returns the bound `connectionId` and, when a stale prior
+   * row was atomically replaced, a `replacedConnectionId` so callers can
+   * surface that a migration happened.
+   *
+   * Failure modes (HTTP body carries `code`):
+   *   - `connection_not_found` (404): Nango doesn't know this connectionId
+   *   - `workspace_mismatch` (409): connection belongs to a different
+   *     workspace; the body includes `pathWorkspaceId` and
+   *     `connectionWorkspaceId`
+   *   - `existing_connection_live_or_unknown` (409): a different
+   *     connection is already bound here and is either still live
+   *     upstream or has indeterminate state; operator must disconnect
+   *     first
+   */
+  async adoptIntegration(
+    provider: WorkspaceIntegrationProvider,
+    connectionId: string,
+    options: { providerConfigKey?: string } = {}
+  ): Promise<{ connectionId: string; replacedConnectionId?: string }> {
+    assertProvider(provider)
+    const trimmedConnectionId = connectionId?.trim()
+    if (!trimmedConnectionId) {
+      throw new Error("connectionId is required to adopt an integration")
+    }
+    const body: Record<string, unknown> = { connectionId: trimmedConnectionId }
+    const providerConfigKey = options.providerConfigKey?.trim()
+    if (providerConfigKey) {
+      body.providerConfigKey = providerConfigKey
+    }
+    const response = (await this._setup.requestJson({
+      operation: "adoptIntegration",
+      method: "POST",
+      path: `api/v1/workspaces/${encodeURIComponent(this.workspaceId)}/integrations/${encodeURIComponent(provider)}/adopt`,
+      body,
+      tokenProvider: async () => this.getOrRefreshToken()
+    })) as {
+      connectionId?: unknown
+      replacedConnectionId?: unknown
+    }
+    const boundConnectionId =
+      typeof response.connectionId === "string" && response.connectionId.trim()
+        ? response.connectionId.trim()
+        : trimmedConnectionId
+    const replacedConnectionId =
+      typeof response.replacedConnectionId === "string" &&
+      response.replacedConnectionId.trim()
+        ? response.replacedConnectionId.trim()
+        : undefined
+    this._pendingConnections.delete(provider)
+    return replacedConnectionId
+      ? { connectionId: boundConnectionId, replacedConnectionId }
+      : { connectionId: boundConnectionId }
+  }
+
+  /**
+   * List the upstream resources the current connection's OAuth grant
+   * covers. Today only Atlassian-family providers (`jira`, `confluence`)
+   * have meaningful entries here — every Atlassian OAuth grant can cover
+   * multiple sites (cloudIds), and the operator needs to bind one of them
+   * to this workspace via {@link setIntegrationMetadata} before sync can
+   * run.
+   *
+   * Cloud returns 400 `provider_has_no_accessible_resources` for providers
+   * that don't model this concept (currently everything non-Atlassian);
+   * that error surfaces here as a `CloudApiError` so callers can handle
+   * it explicitly rather than treating an empty list as ambiguous.
+   *
+   * @example
+   * ```ts
+   * const sites = await workspace.listAccessibleResources("jira")
+   * if (sites.length > 1) {
+   *   const choice = await promptOperator(sites)
+   *   await workspace.setIntegrationMetadata("jira", {
+   *     cloudId: choice.id,
+   *     baseUrl: choice.url
+   *   })
+   * }
+   * ```
+   */
+  async listAccessibleResources(
+    provider: WorkspaceIntegrationProvider | string
+  ): Promise<
+    Array<{
+      id: string
+      url: string
+      name?: string
+      scopes?: string[]
+      avatarUrl?: string
+    }>
+  > {
+    const normalized = normalizeProviderId(provider)
+    const response = (await this._setup.requestJson({
+      operation: "listAccessibleResources",
+      method: "GET",
+      path: `api/v1/workspaces/${encodeURIComponent(this.workspaceId)}/integrations/${encodeURIComponent(normalized)}/accessible-resources`,
+      tokenProvider: async () => this.getOrRefreshToken()
+    })) as { resources?: unknown }
+    if (!response || !Array.isArray(response.resources)) {
+      return []
+    }
+    return response.resources
+      .filter(
+        (
+          entry: unknown
+        ): entry is {
+          id: string
+          url: string
+          name?: string
+          scopes?: string[]
+          avatarUrl?: string
+        } => {
+          if (!entry || typeof entry !== "object") return false
+          const record = entry as Record<string, unknown>
+          return (
+            typeof record.id === "string" &&
+            record.id.length > 0 &&
+            typeof record.url === "string" &&
+            record.url.length > 0
+          )
+        }
+      )
+      .map((entry) => ({ ...entry }))
+  }
+
+  /**
+   * Set the operator-controlled metadata namespace on the workspace's
+   * connection for `provider`. The cloud route forwards the payload to
+   * Nango's `setMetadata` (full-replacement, not merge), so the value
+   * passed here becomes the connection's metadata wholesale. Callers that
+   * want merge semantics should read existing metadata first.
+   *
+   * This is the second half of the post-OAuth picker flow for Jira /
+   * Confluence (see {@link listAccessibleResources}), but is intentionally
+   * general-purpose — any provider whose sync requires operator-supplied
+   * connection-level config (e.g. a non-default API host) can use this.
+   *
+   * The cloud side rejects top-level keys that look like Nango plumbing
+   * (`_*`, `connection_*`, `auth_*`, `provider_config_key`, `connection_id`)
+   * with `code: "invalid_metadata"` so a typo can't clobber the connection.
+   *
+   * @example
+   * ```ts
+   * await workspace.setIntegrationMetadata("jira", {
+   *   cloudId: "abc-123",
+   *   baseUrl: "https://foo.atlassian.net"
+   * })
+   * ```
+   */
+  async setIntegrationMetadata(
+    provider: WorkspaceIntegrationProvider | string,
+    metadata: Record<string, unknown>
+  ): Promise<Record<string, unknown>> {
+    const normalized = normalizeProviderId(provider)
+    if (!isPlainRecord(metadata)) {
+      throw new Error("metadata must be a plain object")
+    }
+    const response = (await this._setup.requestJson({
+      operation: "setIntegrationMetadata",
+      method: "PUT",
+      path: `api/v1/workspaces/${encodeURIComponent(this.workspaceId)}/integrations/${encodeURIComponent(normalized)}/metadata`,
+      body: { metadata },
+      tokenProvider: async () => this.getOrRefreshToken()
+    })) as { metadata?: unknown }
+    if (isPlainRecord(response?.metadata)) {
+      return { ...response.metadata }
+    }
+    throw new Error("invalid cloud response: expected metadata to be a plain object")
+  }
+
   getToken(): string {
     return this._token
   }
@@ -938,6 +1115,28 @@ class MountedWorkspaceHandleImpl implements MountedWorkspaceHandle {
     }
     await safeStopLauncher(this.launcherInstance)
   }
+}
+
+// The metadata + accessible-resources verbs accept `WorkspaceIntegrationProvider | string`
+// so operators can target dynamically-discovered providers (Composio toolkit
+// slugs, future Atlassian-family additions) without an SDK release. We still
+// strip trailing whitespace and lower-case so consumers don't have to.
+function normalizeProviderId(
+  provider: WorkspaceIntegrationProvider | string
+): string {
+  const trimmed = typeof provider === "string" ? provider.trim() : ""
+  if (!trimmed) {
+    throw new Error("provider is required")
+  }
+  return trimmed.toLowerCase()
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return false
+  }
+  const proto = Object.getPrototypeOf(value)
+  return proto === Object.prototype || proto === null
 }
 
 function assertProvider(provider: string): asserts provider is WorkspaceIntegrationProvider {

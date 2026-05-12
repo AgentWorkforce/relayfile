@@ -395,11 +395,12 @@ class WorkspaceChangeLogCache {
         }
       : record;
     if (existing) {
-      this.byId.set(merged.wire.id, merged);
       const index = this.entries.findIndex((entry) => entry.wire.id === merged.wire.id);
       if (index >= 0) {
-        this.entries[index] = merged;
+        this.entries.splice(index, 1);
       }
+      this.entries.push(merged);
+      this.byId.set(merged.wire.id, merged);
       return merged;
     }
     this.entries.push(merged);
