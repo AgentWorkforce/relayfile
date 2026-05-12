@@ -464,6 +464,31 @@ describe("RelayfileSetup", () => {
     expect(readRequestHeaders(fetchMock, 1).Authorization).toBe("Bearer rf_jwt_1")
   })
 
+  it("normalizes listAccessibleResources provider casing and rejects blank providers", async () => {
+    const fetchMock = queueFetch(
+      makeJoinResponse(),
+      jsonResponse({
+        ok: true,
+        resources: [{ id: "cloud-1", url: "https://foo.atlassian.net" }]
+      })
+    )
+
+    const setup = new RelayfileSetup({ cloudApiUrl: "https://cloud.test" })
+    const handle = await setup.joinWorkspace("ws_123")
+    await expect(handle.listAccessibleResources("  JiRa  ")).resolves.toEqual([
+      { id: "cloud-1", url: "https://foo.atlassian.net" }
+    ])
+    expect(readRequestUrl(fetchMock, 1)).toBe(
+      "https://cloud.test/api/v1/workspaces/ws_123/integrations/jira/accessible-resources"
+    )
+    expect(readRequestHeaders(fetchMock, 1).Authorization).toBe("Bearer rf_jwt_1")
+
+    await expect(handle.listAccessibleResources("")).rejects.toThrow(
+      /provider is required/
+    )
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
   it("listAccessibleResources filters out entries missing id or url", async () => {
     // Defense in depth: if Cloud ever loosens its normalization, the SDK
     // still refuses to return junk entries that the CLI would crash on.
@@ -569,21 +594,34 @@ describe("RelayfileSetup", () => {
     // We catch this in the SDK so the operator-facing error message is
     // immediate ("metadata must be a plain object") rather than an
     // unhelpful Cloud 400 round-trip.
-    queueFetch(makeJoinResponse())
+    const fetchMock = queueFetch(makeJoinResponse())
     const setup = new RelayfileSetup({ cloudApiUrl: "https://cloud.test" })
     const handle = await setup.joinWorkspace("ws_123")
     // @ts-expect-error - exercising runtime guard
     await expect(handle.setIntegrationMetadata("jira", "nope")).rejects.toThrow(
       /metadata must be a plain object/
     )
+    expect(fetchMock).toHaveBeenCalledTimes(1)
     // @ts-expect-error - exercising runtime guard
     await expect(handle.setIntegrationMetadata("jira", null)).rejects.toThrow(
       /metadata must be a plain object/
     )
+    expect(fetchMock).toHaveBeenCalledTimes(1)
     await expect(
       // @ts-expect-error - exercising runtime guard
       handle.setIntegrationMetadata("jira", ["array"])
     ).rejects.toThrow(/metadata must be a plain object/)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    await expect(
+      // @ts-expect-error - exercising runtime guard
+      handle.setIntegrationMetadata("jira", new Date())
+    ).rejects.toThrow(/metadata must be a plain object/)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    await expect(
+      // @ts-expect-error - exercising runtime guard
+      handle.setIntegrationMetadata("jira", new Map())
+    ).rejects.toThrow(/metadata must be a plain object/)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 
   it("setIntegrationMetadata surfaces Cloud 400 invalid_metadata as CloudApiError", async () => {
@@ -610,6 +648,22 @@ describe("RelayfileSetup", () => {
       httpStatus: 400,
       httpBody: expect.objectContaining({ code: "invalid_metadata" })
     } satisfies Partial<CloudApiError>)
+  })
+
+  it("setIntegrationMetadata rejects malformed Cloud metadata responses", async () => {
+    queueFetch(
+      makeJoinResponse(),
+      jsonResponse({
+        ok: true,
+        metadata: []
+      })
+    )
+
+    const setup = new RelayfileSetup({ cloudApiUrl: "https://cloud.test" })
+    const handle = await setup.joinWorkspace("ws_123")
+    await expect(
+      handle.setIntegrationMetadata("jira", { cloudId: "cloud-1" })
+    ).rejects.toThrow(/expected metadata to be a plain object/)
   })
 
   it("throws CloudApiError with parsed body on createWorkspace failure", async () => {

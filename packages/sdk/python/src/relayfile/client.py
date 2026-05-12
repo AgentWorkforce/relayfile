@@ -254,6 +254,16 @@ def _coerce_resource_entries(payload: Any) -> list[dict[str, Any]]:
     return out
 
 
+def _coerce_metadata_response(payload: Any) -> dict[str, Any]:
+    if isinstance(payload, dict):
+        metadata = payload.get("metadata")
+        if isinstance(metadata, dict):
+            return metadata
+    raise ValueError(
+        f"invalid cloud response: expected object field `metadata`, got {payload!r}"
+    )
+
+
 class RelayFileClient:
     """Synchronous RelayFile SDK client with retry support."""
 
@@ -877,11 +887,7 @@ class RelayFileClient:
             correlation_id=correlation_id,
             base_url=self._cloud_base_url,
         )
-        if isinstance(payload, dict):
-            updated = payload.get("metadata")
-            if isinstance(updated, dict):
-                return updated
-        return metadata
+        return _coerce_metadata_response(payload)
 
 
 # ======================================================================
@@ -1497,8 +1503,4 @@ class AsyncRelayFileClient:
             correlation_id=correlation_id,
             base_url=self._cloud_base_url,
         )
-        if isinstance(payload, dict):
-            updated = payload.get("metadata")
-            if isinstance(updated, dict):
-                return updated
-        return metadata
+        return _coerce_metadata_response(payload)

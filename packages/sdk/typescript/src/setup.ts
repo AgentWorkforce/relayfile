@@ -835,7 +835,7 @@ export class WorkspaceHandle {
     metadata: Record<string, unknown>
   ): Promise<Record<string, unknown>> {
     const normalized = normalizeProviderId(provider)
-    if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
+    if (!isPlainRecord(metadata)) {
       throw new Error("metadata must be a plain object")
     }
     const response = (await this._setup.requestJson({
@@ -845,10 +845,10 @@ export class WorkspaceHandle {
       body: { metadata },
       tokenProvider: async () => this.getOrRefreshToken()
     })) as { metadata?: unknown }
-    if (response && typeof response.metadata === "object" && response.metadata !== null) {
-      return response.metadata as Record<string, unknown>
+    if (isPlainRecord(response?.metadata)) {
+      return { ...response.metadata }
     }
-    return metadata
+    throw new Error("invalid cloud response: expected metadata to be a plain object")
   }
 
   getToken(): string {
@@ -1129,6 +1129,14 @@ function normalizeProviderId(
     throw new Error("provider is required")
   }
   return trimmed.toLowerCase()
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return false
+  }
+  const proto = Object.getPrototypeOf(value)
+  return proto === Object.prototype || proto === null
 }
 
 function assertProvider(provider: string): asserts provider is WorkspaceIntegrationProvider {

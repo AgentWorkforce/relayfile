@@ -558,12 +558,21 @@ func runSetup(args []string, stdin io.Reader, stdout io.Writer) error {
 	}
 
 	if selectedProvider != "" && selectedProvider != "none" && selectedProvider != "skip" {
+		createdConnection := false
 		if createdWorkspace {
 			if err := connectCloudIntegration(tokenSet.APIURL, record.ID, joined.Token, selectedProvider, requestedBackend, absLocalDir, *connectTimeout, !*noOpen, stdout); err != nil {
 				return err
 			}
+			createdConnection = true
 		} else {
-			if err := ensureCloudIntegration(tokenSet.APIURL, record.ID, joined.Token, selectedProvider, requestedBackend, absLocalDir, *connectTimeout, !*noOpen, stdout); err != nil {
+			var err error
+			createdConnection, err = ensureCloudIntegration(tokenSet.APIURL, record.ID, joined.Token, selectedProvider, requestedBackend, absLocalDir, *connectTimeout, !*noOpen, stdout)
+			if err != nil {
+				return err
+			}
+		}
+		if createdConnection && isAtlassianProvider(selectedProvider) {
+			if err := runAtlassianSitePicker(tokenSet.APIURL, record.ID, joined.Token, selectedProvider, stdin, stdout); err != nil {
 				return err
 			}
 		}
@@ -1118,17 +1127,20 @@ func runCloudLogin(cloudAPIURL string, timeout time.Duration, shouldOpenBrowser 
 	}
 }
 
-func ensureCloudIntegration(cloudAPIURL, workspaceID, workspaceToken, provider, requestedBackend, localDir string, timeout time.Duration, shouldOpenBrowser bool, stdout io.Writer) error {
+func ensureCloudIntegration(cloudAPIURL, workspaceID, workspaceToken, provider, requestedBackend, localDir string, timeout time.Duration, shouldOpenBrowser bool, stdout io.Writer) (bool, error) {
 	savedConnection := loadSavedConnection(localDir, provider)
 	connectionID := strings.TrimSpace(savedConnection.ConnectionID)
 	savedBackend := strings.TrimSpace(savedConnection.Backend)
 	if connectionID != "" && (requestedBackend == "" || requestedBackend == savedBackend) {
 		if ready, err := cloudIntegrationReady(cloudAPIURL, workspaceID, workspaceToken, provider, connectionID); err == nil && ready {
 			fmt.Fprintf(stdout, "%s already connected\n", provider)
-			return nil
+			return false, nil
 		}
 	}
-	return connectCloudIntegration(cloudAPIURL, workspaceID, workspaceToken, provider, requestedBackend, localDir, timeout, shouldOpenBrowser, stdout)
+	if err := connectCloudIntegration(cloudAPIURL, workspaceID, workspaceToken, provider, requestedBackend, localDir, timeout, shouldOpenBrowser, stdout); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func connectCloudIntegration(cloudAPIURL, workspaceID, workspaceToken, provider, requestedBackend, localDir string, timeout time.Duration, shouldOpenBrowser bool, stdout io.Writer) error {
@@ -1451,7 +1463,8 @@ func runIntegrationConnect(args []string, stdin io.Reader, stdout io.Writer) err
 	if err := persistJoinedWorkspace(record, joined, cloudCreds.APIURL, record.LocalDir); err != nil {
 		return err
 	}
-	if err := ensureCloudIntegration(cloudCreds.APIURL, record.ID, joined.Token, provider, requestedBackend, record.LocalDir, *timeout, !*noOpen, stdout); err != nil {
+	createdConnection, err := ensureCloudIntegration(cloudCreds.APIURL, record.ID, joined.Token, provider, requestedBackend, record.LocalDir, *timeout, !*noOpen, stdout)
+	if err != nil {
 		return err
 	}
 	// Atlassian-family providers: a single OAuth grant can cover multiple
@@ -1461,7 +1474,7 @@ func runIntegrationConnect(args []string, stdin io.Reader, stdout io.Writer) err
 	// on the initial sync, so the operator picks a target without having
 	// to dive into the Nango dashboard. For other providers this is a
 	// no-op so we preserve the existing flow.
-	if isAtlassianProvider(provider) {
+	if createdConnection && isAtlassianProvider(provider) {
 		if err := runAtlassianSitePicker(cloudCreds.APIURL, record.ID, joined.Token, provider, stdin, stdout); err != nil {
 			return err
 		}
@@ -2051,6 +2064,9 @@ func runIntegrationSetMetadata(args []string, stdin io.Reader, stdout io.Writer)
 		value = strings.TrimSpace(value)
 		if key == "" {
 			return fmt.Errorf("metadata argument %q has an empty key", raw)
+		}
+		if strings.ContainsAny(key, ".[]") {
+			return fmt.Errorf("metadata key %q must be flat; nested keys are not supported yet", key)
 		}
 		metadata[key] = value
 	}

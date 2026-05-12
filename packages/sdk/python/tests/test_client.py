@@ -657,6 +657,15 @@ class TestIntegrationSetupSync:
         assert exc_info.value.status == 400
         assert exc_info.value.code == "invalid_metadata"
 
+    @respx.mock
+    def test_set_integration_metadata_rejects_malformed_cloud_response(self) -> None:
+        respx.put(
+            f"{CLOUD_BASE}/api/v1/workspaces/ws_acme/integrations/jira/metadata"
+        ).mock(return_value=httpx.Response(200, json={"ok": True, "metadata": []}))
+        client = RelayFileClient(BASE, "tok_test", cloud_base_url=CLOUD_BASE)
+        with pytest.raises(ValueError, match="expected object field"):
+            client.set_integration_metadata("ws_acme", "jira", {"cloudId": "cloud-1"})
+
 
 class TestIntegrationSetupAsync:
     @respx.mock
@@ -704,3 +713,83 @@ class TestIntegrationSetupAsync:
                 "ws_acme", "jira", {"cloudId": "cloud-1"}
             )
         assert result == {"cloudId": "cloud-1"}
+
+    @pytest.mark.asyncio
+    async def test_set_integration_metadata_rejects_non_dict_locally(self) -> None:
+        async with AsyncRelayFileClient(
+            BASE, "tok_test", cloud_base_url=CLOUD_BASE
+        ) as client:
+            with pytest.raises(ValueError):
+                await client.set_integration_metadata(
+                    "ws_acme", "jira", "not-a-dict"  # type: ignore[arg-type]
+                )
+            with pytest.raises(ValueError):
+                await client.set_integration_metadata("ws_acme", "", {})
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_list_accessible_resources_surfaces_cloud_error(self) -> None:
+        respx.get(
+            f"{CLOUD_BASE}/api/v1/workspaces/ws_acme/integrations/github/accessible-resources"
+        ).mock(
+            return_value=httpx.Response(
+                400,
+                json={
+                    "ok": False,
+                    "code": "provider_has_no_accessible_resources",
+                    "error": "Provider \"github\" does not expose accessible resources",
+                },
+            )
+        )
+        async with AsyncRelayFileClient(
+            BASE,
+            "tok_test",
+            cloud_base_url=CLOUD_BASE,
+            retry=RetryOptions(max_retries=0, base_delay_ms=1),
+        ) as client:
+            with pytest.raises(RelayFileApiError) as exc_info:
+                await client.list_accessible_resources("ws_acme", "github")
+        assert exc_info.value.status == 400
+        assert exc_info.value.code == "provider_has_no_accessible_resources"
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_set_integration_metadata_surfaces_cloud_invalid_metadata(self) -> None:
+        respx.put(
+            f"{CLOUD_BASE}/api/v1/workspaces/ws_acme/integrations/jira/metadata"
+        ).mock(
+            return_value=httpx.Response(
+                400,
+                json={
+                    "ok": False,
+                    "code": "invalid_metadata",
+                    "error": "metadata key \"_internal\" is reserved by the Nango backend",
+                },
+            )
+        )
+        async with AsyncRelayFileClient(
+            BASE,
+            "tok_test",
+            cloud_base_url=CLOUD_BASE,
+            retry=RetryOptions(max_retries=0, base_delay_ms=1),
+        ) as client:
+            with pytest.raises(RelayFileApiError) as exc_info:
+                await client.set_integration_metadata(
+                    "ws_acme", "jira", {"_internal": "nope"}
+                )
+        assert exc_info.value.status == 400
+        assert exc_info.value.code == "invalid_metadata"
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_set_integration_metadata_rejects_malformed_cloud_response(self) -> None:
+        respx.put(
+            f"{CLOUD_BASE}/api/v1/workspaces/ws_acme/integrations/jira/metadata"
+        ).mock(return_value=httpx.Response(200, json={"ok": True}))
+        async with AsyncRelayFileClient(
+            BASE, "tok_test", cloud_base_url=CLOUD_BASE
+        ) as client:
+            with pytest.raises(ValueError, match="expected object field"):
+                await client.set_integration_metadata(
+                    "ws_acme", "jira", {"cloudId": "cloud-1"}
+                )
