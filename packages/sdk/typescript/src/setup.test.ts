@@ -328,6 +328,99 @@ describe("RelayfileSetup", () => {
     expect(readRequestUrl(fetchMock, 3)).toBe("https://staging.agentrelay.com/base/cloud/api/v1/workspaces/ws_123/integrations/github/status")
   })
 
+  it("adopts an existing Nango connection via POST /integrations/{provider}/adopt", async () => {
+    // Operator path: a Nango connection has already been minted out-of-band
+    // (UI or third-party flow). The SDK's adopt method posts the
+    // connectionId to Cloud's adopt route, threads the auth token, and
+    // surfaces the replacedConnectionId so callers can tell whether they
+    // migrated a stale row. The CLI surface (`relayfile integration adopt`)
+    // sits on top of this method, so any regression in the request shape
+    // or the response parsing would break the operator workflow.
+    const fetchMock = queueFetch(
+      makeJoinResponse(),
+      jsonResponse({
+        ok: true,
+        connectionId: "conn_adopt_new",
+        replacedConnectionId: "conn_adopt_old"
+      })
+    )
+
+    const setup = new RelayfileSetup({
+      cloudApiUrl: "https://staging.agentrelay.com/base/cloud"
+    })
+    const handle = await setup.joinWorkspace("ws_123")
+    const result = await handle.adoptIntegration("github", "conn_adopt_new", {
+      providerConfigKey: "github-relay"
+    })
+
+    expect(result).toEqual({
+      connectionId: "conn_adopt_new",
+      replacedConnectionId: "conn_adopt_old"
+    })
+    expect(readRequestUrl(fetchMock, 1)).toBe(
+      "https://staging.agentrelay.com/base/cloud/api/v1/workspaces/ws_123/integrations/github/adopt"
+    )
+    expect(readRequestBody(fetchMock, 1)).toEqual({
+      connectionId: "conn_adopt_new",
+      providerConfigKey: "github-relay"
+    })
+    expect(readRequestHeaders(fetchMock, 1).Authorization).toBe("Bearer rf_jwt_1")
+  })
+
+  it("omits replacedConnectionId from adoptIntegration result when the row was a fresh insert", async () => {
+    // Cloud only returns replacedConnectionId on the stale-row migration
+    // path; for a fresh insert the field is absent. The SDK must not
+    // fabricate it (e.g. by echoing the request connectionId), because
+    // callers use the presence/absence of replacedConnectionId to decide
+    // whether to warn the operator that an old binding was overwritten.
+    queueFetch(
+      makeJoinResponse(),
+      jsonResponse({ ok: true, connectionId: "conn_fresh" })
+    )
+
+    const setup = new RelayfileSetup({
+      cloudApiUrl: "https://staging.agentrelay.com/base/cloud"
+    })
+    const handle = await setup.joinWorkspace("ws_123")
+    const result = await handle.adoptIntegration("notion", "conn_fresh")
+
+    expect(result).toEqual({ connectionId: "conn_fresh" })
+    expect("replacedConnectionId" in result).toBe(false)
+  })
+
+  it("propagates Cloud 409 conflicts from adoptIntegration as CloudApiError", async () => {
+    // Conflict semantics must surface to the CLI so it can render the
+    // operator-facing message and exit non-zero. The body's `code` field
+    // tells the CLI which mitigation to suggest (disconnect first vs.
+    // re-target a different workspace).
+    queueFetch(
+      makeJoinResponse(),
+      jsonResponse(
+        {
+          ok: false,
+          code: "existing_connection_live_or_unknown",
+          error: "Workspace ws_123 already has a live github connection",
+          existingConnectionId: "conn_live"
+        },
+        { status: 409 }
+      )
+    )
+
+    const setup = new RelayfileSetup({
+      cloudApiUrl: "https://staging.agentrelay.com/base/cloud",
+      retry: { maxRetries: 0, baseDelayMs: 1 }
+    })
+    const handle = await setup.joinWorkspace("ws_123")
+    await expect(
+      handle.adoptIntegration("github", "conn_intruder")
+    ).rejects.toMatchObject({
+      httpStatus: 409,
+      httpBody: expect.objectContaining({
+        code: "existing_connection_live_or_unknown"
+      })
+    } satisfies Partial<CloudApiError>)
+  })
+
   it("throws CloudApiError with parsed body on createWorkspace failure", async () => {
     queueFetch(
       jsonResponse(

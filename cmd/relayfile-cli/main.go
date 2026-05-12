@@ -398,6 +398,7 @@ Usage:
   relayfile integration search QUERY [--backend BACKEND] [--json] [--refresh]
   relayfile integration list [--workspace NAME] [--json]
   relayfile integration disconnect PROVIDER [--workspace NAME] [--yes]
+  relayfile integration adopt PROVIDER --connection-id ID [--workspace NAME] [--provider-config-key KEY] [--yes]
   relayfile ops list [--workspace NAME] [--json]
   relayfile ops replay OPID [--workspace NAME]
   relayfile writeback status [WORKSPACE] [--json]
@@ -419,7 +420,7 @@ Subcommands:
   setup       Sign in, connect an integration, and mount the workspace
   login       Sign in via the Relayfile Cloud browser flow (or --api-key for self-hosted)
   workspace   Create, select, list, show current, or delete locally tracked workspaces
-  integration Connect, discover, list, or disconnect workspace integrations
+  integration Connect, discover, list, disconnect, or adopt workspace integrations
   ops         List or replay dead-lettered writeback ops
   writeback   Inspect or retry local writeback failures
   writeback status
@@ -742,6 +743,25 @@ func normalizeProviderID(value string) string {
 	default:
 		return value
 	}
+}
+
+func validateLocalProviderID(provider string) error {
+	if provider == "" {
+		return errors.New("provider is required")
+	}
+	for _, ch := range provider {
+		if ch >= 'a' && ch <= 'z' {
+			continue
+		}
+		if ch >= '0' && ch <= '9' {
+			continue
+		}
+		if ch == '-' || ch == '_' {
+			continue
+		}
+		return fmt.Errorf("invalid provider %q (use lowercase letters, numbers, dashes, or underscores)", provider)
+	}
+	return nil
 }
 
 func normalizeIntegrationBackend(value string) (string, error) {
@@ -1367,7 +1387,7 @@ func runWorkspace(args []string, stdin io.Reader, stdout io.Writer) error {
 
 func runIntegration(args []string, stdin io.Reader, stdout io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("integration subcommand is required: connect, available, search, list, or disconnect")
+		return errors.New("integration subcommand is required: connect, available, search, list, disconnect, or adopt")
 	}
 	switch args[0] {
 	case "connect":
@@ -1380,6 +1400,8 @@ func runIntegration(args []string, stdin io.Reader, stdout io.Writer) error {
 		return runIntegrationList(args[1:], stdout)
 	case "disconnect":
 		return runIntegrationDisconnect(args[1:], stdin, stdout)
+	case "adopt":
+		return runIntegrationAdopt(args[1:], stdin, stdout)
 	default:
 		return fmt.Errorf("unknown integration subcommand %q", args[0])
 	}
@@ -1689,6 +1711,134 @@ func runIntegrationDisconnect(args []string, stdin io.Reader, stdout io.Writer) 
 		return err
 	}
 	fmt.Fprintf(stdout, "%s disconnected from workspace %s\n", provider, record.Name)
+	return nil
+}
+
+// runIntegrationAdopt asks Cloud to bind an existing Nango connection to the
+// current workspace + provider slot without re-running OAuth. Mirrors
+// runIntegrationDisconnect's flag parsing and confirmation prompt because the
+// failure mode of a bad adopt (overwriting a live binding for a different
+// tenant) is comparable to that of a bad disconnect.
+//
+// The local on-disk state is updated via saveIntegrationConnection so the
+// mount + status probes pick up the new connectionId without requiring the
+// operator to also run `relayfile integration connect` afterwards. We do this
+// only after Cloud reports success, so a 409/404 from Cloud leaves the local
+// state untouched.
+func runIntegrationAdopt(args []string, stdin io.Reader, stdout io.Writer) error {
+	fs := flag.NewFlagSet("integration adopt", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	workspaceName := fs.String("workspace", "", "workspace name or id")
+	cloudAPIURL := fs.String("cloud-api-url", envOrDefault("RELAYFILE_CLOUD_API_URL", defaultCloudAPIURL), "Relayfile Cloud API URL")
+	connectionID := fs.String("connection-id", "", "Nango connection id to adopt (required)")
+	providerConfigKey := fs.String("provider-config-key", "", "optional Nango providerConfigKey override")
+	yes := fs.Bool("yes", false, "skip confirmation")
+	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
+		"workspace":           true,
+		"cloud-api-url":       true,
+		"connection-id":       true,
+		"provider-config-key": true,
+		"yes":                 false,
+	})); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return errors.New("usage: relayfile integration adopt PROVIDER --connection-id ID [--workspace NAME] [--provider-config-key KEY] [--yes]")
+	}
+	provider := normalizeProviderID(fs.Arg(0))
+	if err := validateLocalProviderID(provider); err != nil {
+		return err
+	}
+	trimmedConnectionID := strings.TrimSpace(*connectionID)
+	if trimmedConnectionID == "" {
+		return errors.New("--connection-id is required")
+	}
+	trimmedProviderConfigKey := strings.TrimSpace(*providerConfigKey)
+	record, err := resolveWorkspaceRecord(strings.TrimSpace(*workspaceName))
+	if err != nil {
+		return err
+	}
+	if !*yes {
+		answer, err := promptLine(stdin, stdout, fmt.Sprintf("Adopt %s connection %q into workspace %q? [y/N]: ", provider, trimmedConnectionID, record.Name))
+		if err != nil {
+			return err
+		}
+		answer = strings.ToLower(strings.TrimSpace(answer))
+		if answer != "y" && answer != "yes" {
+			fmt.Fprintln(stdout, "Aborted")
+			return nil
+		}
+	}
+	cloudCreds, err := ensureCloudCredentials(strings.TrimSpace(*cloudAPIURL), "", 5*time.Minute, false, io.Discard)
+	if err != nil {
+		return err
+	}
+	joined, err := joinWorkspaceViaCloud(cloudCreds, record.ID, record.AgentName, record.Scopes)
+	if err != nil {
+		return err
+	}
+	client, err := newAPIClient(cloudCreds.APIURL, joined.Token)
+	if err != nil {
+		return err
+	}
+	requestBody := map[string]string{"connectionId": trimmedConnectionID}
+	if trimmedProviderConfigKey != "" {
+		requestBody["providerConfigKey"] = trimmedProviderConfigKey
+	}
+	bodyBytes, err := json.Marshal(requestBody)
+	if err != nil {
+		return err
+	}
+	respBody, _, err := client.do(
+		context.Background(),
+		http.MethodPost,
+		fmt.Sprintf("/api/v1/workspaces/%s/integrations/%s/adopt", url.PathEscape(record.ID), url.PathEscape(provider)),
+		bodyBytes,
+	)
+	if err != nil {
+		return err
+	}
+	var parsed struct {
+		Ok                   bool   `json:"ok"`
+		ConnectionID         string `json:"connectionId"`
+		ReplacedConnectionID string `json:"replacedConnectionId"`
+	}
+	if len(respBody) > 0 {
+		if err := json.Unmarshal(respBody, &parsed); err != nil {
+			return fmt.Errorf("parse adopt response: %w", err)
+		}
+	}
+	boundConnectionID := strings.TrimSpace(parsed.ConnectionID)
+	if boundConnectionID == "" {
+		boundConnectionID = trimmedConnectionID
+	}
+	// Persist the new binding locally only after Cloud confirms success.
+	// On a 4xx the saved connection on disk still reflects the previous
+	// state, which is what the operator wants — a failed adopt is a no-op
+	// for the workspace's local view.
+	if err := saveIntegrationConnection(record.LocalDir, integrationConnectionState{
+		Provider:     provider,
+		ConnectionID: boundConnectionID,
+		Backend:      "nango",
+		ConnectedAt:  time.Now().UTC().Format(time.RFC3339),
+		UpdatedAt:    time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		return err
+	}
+	// Remove any disconnect marker left from a prior `disconnect` so the
+	// status probe doesn't keep reporting the workspace as disconnected.
+	if record.LocalDir != "" {
+		markerPath := filepath.Join(record.LocalDir, ".relay", "disconnected", provider+".json")
+		if err := os.Remove(markerPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("remove disconnect marker: %w", err)
+		}
+	}
+	replaced := strings.TrimSpace(parsed.ReplacedConnectionID)
+	if replaced != "" {
+		fmt.Fprintf(stdout, "%s adopted into workspace %s (connectionId=%s, replaced previous connection %s)\n", provider, record.Name, boundConnectionID, replaced)
+	} else {
+		fmt.Fprintf(stdout, "%s adopted into workspace %s (connectionId=%s)\n", provider, record.Name, boundConnectionID)
+	}
 	return nil
 }
 
@@ -3696,9 +3846,17 @@ func (c *apiClient) do(ctx context.Context, method, path string, body []byte) ([
 	var errPayload struct {
 		Code    string `json:"code"`
 		Message string `json:"message"`
+		// Cloud's Next.js routes typically return `{ error, code }` rather
+		// than `{ message, code }`. Accept either so commands that hit
+		// either shape (e.g. adopt vs. join) produce consistent messages
+		// instead of falling through to the raw JSON blob.
+		Error string `json:"error"`
 	}
 	if len(payload) > 0 {
 		_ = json.Unmarshal(payload, &errPayload)
+	}
+	if errPayload.Message == "" {
+		errPayload.Message = errPayload.Error
 	}
 	if errPayload.Message == "" {
 		errPayload.Message = strings.TrimSpace(string(payload))

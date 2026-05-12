@@ -2127,3 +2127,326 @@ func TestWorkspaceListNamesOnlyRestoresBareOutput(t *testing.T) {
 		t.Fatalf("unexpected --names-only output: %q", got)
 	}
 }
+
+// adoptTestServer wires the cloud endpoints the adopt verb exercises:
+// token refresh (so credential bootstrap succeeds), workspace join (mints
+// the relayfile JWT for the workspace), and the new POST .../adopt route.
+// Each test injects its own adopt handler so it can simulate the four
+// distinct outcomes — success (fresh insert), success (replacement),
+// 409 refusal, 404 missing-connection — without rebuilding the rest of
+// the bootstrap chain.
+func newAdoptTestServer(t *testing.T, adoptHandler func(http.ResponseWriter, *http.Request)) (*httptest.Server, map[string]int) {
+	t.Helper()
+	seen := map[string]int{}
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/api/v1/auth/token/refresh":
+			if r.Method != http.MethodPost {
+				t.Errorf("expected refresh POST, got %s", r.Method)
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			if got := r.Header.Get("Authorization"); got != "Bearer cld_old" {
+				t.Errorf("unexpected refresh Authorization: %q", got)
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			var body cloudTokenRefreshRequest
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode refresh body failed: %v", err)
+				http.Error(w, "bad request", http.StatusBadRequest)
+				return
+			}
+			if body.RefreshToken != "refresh_123" {
+				t.Errorf("unexpected refresh token: %q", body.RefreshToken)
+				http.Error(w, "bad request", http.StatusBadRequest)
+				return
+			}
+			seen["refresh"]++
+			_, _ = w.Write([]byte(`{"apiUrl":"` + server.URL + `","accessToken":"cld_new","refreshToken":"refresh_123","accessTokenExpiresAt":"2030-05-01T00:00:00Z"}`))
+		case r.URL.Path == "/api/v1/workspaces/ws_123/join":
+			if r.Method != http.MethodPost {
+				t.Errorf("expected join POST, got %s", r.Method)
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			if got := r.Header.Get("Authorization"); got != "Bearer cld_new" {
+				t.Errorf("unexpected join Authorization: %q", got)
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			var body cloudWorkspaceJoinRequest
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode join body failed: %v", err)
+				http.Error(w, "bad request", http.StatusBadRequest)
+				return
+			}
+			if body.AgentName != "relayfile-cli" {
+				t.Errorf("unexpected join agentName: %q", body.AgentName)
+				http.Error(w, "bad request", http.StatusBadRequest)
+				return
+			}
+			if len(body.Scopes) != len(defaultJoinScopes) || body.Scopes[0] != defaultJoinScopes[0] || body.Scopes[1] != defaultJoinScopes[1] {
+				t.Errorf("unexpected join scopes: %#v", body.Scopes)
+				http.Error(w, "bad request", http.StatusBadRequest)
+				return
+			}
+			seen["join"]++
+			_, _ = w.Write([]byte(`{"workspaceId":"ws_123","token":"rf_join","relayfileUrl":"` + server.URL + `"}`))
+		case r.URL.Path == "/api/v1/workspaces/ws_123/integrations/github/adopt" && r.Method == http.MethodPost:
+			seen["adopt"]++
+			adoptHandler(w, r)
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	return server, seen
+}
+
+func setupAdoptWorkspace(t *testing.T) (workspaceRecord, string) {
+	t.Helper()
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+	localDir := t.TempDir()
+	record, err := upsertWorkspaceDetails(workspaceRecord{
+		Name:       "demo",
+		ID:         "ws_123",
+		LocalDir:   localDir,
+		AgentName:  "relayfile-cli",
+		Scopes:     append([]string(nil), defaultJoinScopes...),
+		CreatedAt:  time.Now().UTC().Format(time.RFC3339),
+		LastUsedAt: time.Now().UTC().Format(time.RFC3339),
+	})
+	if err != nil {
+		t.Fatalf("upsertWorkspaceDetails failed: %v", err)
+	}
+	if err := saveCloudCredentials(cloudCredentials{
+		APIURL:               "https://stale.example.test",
+		AccessToken:          "cld_old",
+		RefreshToken:         "refresh_123",
+		AccessTokenExpiresAt: time.Now().Add(-time.Minute).UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("saveCloudCredentials failed: %v", err)
+	}
+	return record, localDir
+}
+
+func pointAdoptCloudCredentials(t *testing.T, apiURL string) {
+	t.Helper()
+	creds, err := loadCloudCredentials()
+	if err != nil {
+		t.Fatalf("loadCloudCredentials failed: %v", err)
+	}
+	creds.APIURL = apiURL
+	if err := saveCloudCredentials(creds); err != nil {
+		t.Fatalf("saveCloudCredentials(update) failed: %v", err)
+	}
+}
+
+func TestIntegrationAdoptForwardsConnectionIdAndPersistsLocalState(t *testing.T) {
+	// Happy path: operator runs `relayfile integration adopt github
+	// --connection-id conn_adopt` against a workspace whose row Cloud has
+	// not yet seen. Cloud returns ok with no replacedConnectionId; the CLI
+	// must (1) POST the request body in the expected shape, (2) persist
+	// the new local connection state so subsequent mount / status probes
+	// pick it up, and (3) print a single-line confirmation that does NOT
+	// mention a replaced connection.
+	record, localDir := setupAdoptWorkspace(t)
+	server, seen := newAdoptTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode adopt body failed: %v", err)
+		}
+		if body["connectionId"] != "conn_adopt_new" {
+			t.Fatalf("unexpected connectionId: %q", body["connectionId"])
+		}
+		if body["providerConfigKey"] != "github-relay" {
+			t.Fatalf("unexpected providerConfigKey: %q", body["providerConfigKey"])
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer rf_join" {
+			t.Fatalf("unexpected Authorization: %q", got)
+		}
+		_, _ = w.Write([]byte(`{"ok":true,"connectionId":"conn_adopt_new"}`))
+	})
+	defer server.Close()
+	pointAdoptCloudCredentials(t, server.URL)
+
+	var stdout bytes.Buffer
+	err := run([]string{
+		"integration", "adopt", "github",
+		"--connection-id", "conn_adopt_new",
+		"--provider-config-key", "github-relay",
+		"--workspace", "demo",
+		"--cloud-api-url", server.URL,
+		"--yes",
+	}, strings.NewReader(""), &stdout, &stdout)
+	if err != nil {
+		t.Fatalf("run integration adopt failed: %v\noutput:\n%s", err, stdout.String())
+	}
+	if seen["adopt"] != 1 {
+		t.Fatalf("expected 1 adopt call, got %d", seen["adopt"])
+	}
+	got := stdout.String()
+	if !strings.Contains(got, "github adopted into workspace demo") {
+		t.Fatalf("unexpected output (missing confirmation): %q", got)
+	}
+	if strings.Contains(got, "replaced previous connection") {
+		t.Fatalf("did not expect replacement note on fresh insert: %q", got)
+	}
+	state := loadSavedConnection(localDir, "github")
+	if state.ConnectionID != "conn_adopt_new" || state.Backend != "nango" {
+		t.Fatalf("unexpected saved integration connection: %#v", state)
+	}
+	_ = record
+}
+
+func TestIntegrationAdoptReportsReplacedConnection(t *testing.T) {
+	// Stale-row migration path: Cloud detected the existing row pointed at
+	// a connection Nango reports as gone, swapped it atomically, and
+	// returned replacedConnectionId. The CLI must surface that id to the
+	// operator so they know an old binding was overwritten — silent
+	// replacement here would hide a meaningful state change.
+	_, localDir := setupAdoptWorkspace(t)
+	server, _ := newAdoptTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"ok":true,"connectionId":"conn_new","replacedConnectionId":"conn_old_dead"}`))
+	})
+	defer server.Close()
+	pointAdoptCloudCredentials(t, server.URL)
+
+	var stdout bytes.Buffer
+	if err := run([]string{
+		"integration", "adopt", "github",
+		"--connection-id", "conn_new",
+		"--workspace", "demo",
+		"--cloud-api-url", server.URL,
+		"--yes",
+	}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("run integration adopt failed: %v\noutput:\n%s", err, stdout.String())
+	}
+	got := stdout.String()
+	if !strings.Contains(got, "replaced previous connection conn_old_dead") {
+		t.Fatalf("expected replacement note in output, got: %q", got)
+	}
+	state := loadSavedConnection(localDir, "github")
+	if state.ConnectionID != "conn_new" {
+		t.Fatalf("expected local state to bind conn_new, got %#v", state)
+	}
+}
+
+func TestIntegrationAdoptReturnsErrorOnConflictAndPreservesLocalState(t *testing.T) {
+	// Refusal path: Cloud reports a 409 (e.g. another connection is still
+	// live for this workspace + provider). The CLI must return a non-nil
+	// error so the shell exit code is non-zero, AND must NOT overwrite the
+	// local saved connection — the operator should see no local drift from
+	// a failed adopt.
+	_, localDir := setupAdoptWorkspace(t)
+	// Prime existing local state so we can prove it survives.
+	if err := saveIntegrationConnection(localDir, integrationConnectionState{
+		Provider:     "github",
+		ConnectionID: "conn_existing_local",
+		Backend:      "nango",
+	}); err != nil {
+		t.Fatalf("seed saveIntegrationConnection failed: %v", err)
+	}
+	server, _ := newAdoptTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"ok":false,"code":"existing_connection_live_or_unknown","error":"Workspace ws_123 already has a live github connection (conn_live). Disconnect it first."}`))
+	})
+	defer server.Close()
+	pointAdoptCloudCredentials(t, server.URL)
+
+	var stdout bytes.Buffer
+	err := run([]string{
+		"integration", "adopt", "github",
+		"--connection-id", "conn_intruder",
+		"--workspace", "demo",
+		"--cloud-api-url", server.URL,
+		"--yes",
+	}, strings.NewReader(""), &stdout, &stdout)
+	if err == nil {
+		t.Fatalf("expected error on 409, got nil; stdout=%q", stdout.String())
+	}
+	if !strings.Contains(err.Error(), "Disconnect it first") {
+		t.Fatalf("expected error to surface Cloud message, got: %v", err)
+	}
+	var httpErr *apiError
+	if !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusConflict {
+		t.Fatalf("expected apiError with 409 status, got %#v", err)
+	}
+	state := loadSavedConnection(localDir, "github")
+	if state.ConnectionID != "conn_existing_local" {
+		t.Fatalf("expected local state to be preserved, got %#v", state)
+	}
+}
+
+func TestIntegrationAdoptRequiresConnectionID(t *testing.T) {
+	// Flag validation: omitting --connection-id must fail before the CLI
+	// even hits the network. Otherwise the operator could silently POST
+	// an empty body and get a confusing 400 from Cloud.
+	_, _ = setupAdoptWorkspace(t)
+	var stdout bytes.Buffer
+	err := run([]string{
+		"integration", "adopt", "github",
+		"--workspace", "demo",
+		"--yes",
+	}, strings.NewReader(""), &stdout, &stdout)
+	if err == nil {
+		t.Fatalf("expected error when --connection-id is missing; stdout=%q", stdout.String())
+	}
+	if !strings.Contains(err.Error(), "connection-id") {
+		t.Fatalf("expected error to mention --connection-id, got: %v", err)
+	}
+}
+
+func TestIntegrationAdoptRejectsUnsafeProvider(t *testing.T) {
+	var stdout bytes.Buffer
+	err := run([]string{
+		"integration", "adopt", "../github",
+		"--connection-id", "conn_adopt",
+		"--workspace", "demo",
+		"--yes",
+	}, strings.NewReader(""), &stdout, &stdout)
+	if err == nil {
+		t.Fatalf("expected error for unsafe provider; stdout=%q", stdout.String())
+	}
+	if !strings.Contains(err.Error(), "invalid provider") {
+		t.Fatalf("expected invalid provider error, got: %v", err)
+	}
+}
+
+func TestIntegrationAdoptClearsDisconnectMarker(t *testing.T) {
+	// After a `disconnect` the CLI writes a marker file under
+	// .relay/disconnected/{provider}.json. Adopting the provider again
+	// must clear that marker so the status probe stops reporting the
+	// workspace as disconnected — otherwise the operator gets a stale
+	// "disconnected" reading for a workspace they just adopted into.
+	_, localDir := setupAdoptWorkspace(t)
+	if err := markProviderDisconnected(localDir, "github"); err != nil {
+		t.Fatalf("markProviderDisconnected failed: %v", err)
+	}
+	markerPath := filepath.Join(localDir, ".relay", "disconnected", "github.json")
+	if _, err := os.Stat(markerPath); err != nil {
+		t.Fatalf("expected disconnect marker to exist, got: %v", err)
+	}
+	server, _ := newAdoptTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"ok":true,"connectionId":"conn_adopt"}`))
+	})
+	defer server.Close()
+	pointAdoptCloudCredentials(t, server.URL)
+
+	var stdout bytes.Buffer
+	if err := run([]string{
+		"integration", "adopt", "github",
+		"--connection-id", "conn_adopt",
+		"--workspace", "demo",
+		"--cloud-api-url", server.URL,
+		"--yes",
+	}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("run integration adopt failed: %v", err)
+	}
+	if _, err := os.Stat(markerPath); !os.IsNotExist(err) {
+		t.Fatalf("expected disconnect marker to be removed, got: %v", err)
+	}
+}
