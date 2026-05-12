@@ -6,6 +6,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs';
 import os from 'node:os';
@@ -405,6 +406,43 @@ describe('startAutoSync', () => {
         'ref: refs/heads/main\n'
       );
       expect(existsSync(path.join(projectDir, '.git/COMMIT_EDITMSG'))).toBe(false);
+    } finally {
+      await auto.stop();
+      handle.cleanup();
+    }
+  });
+
+  it('first-time reconcile detects divergence even when size and mtime match on both sides', async () => {
+    // Regression for the cautious-compare path in primeState / first-time
+    // syncOneFile: those call sites must keep doing a byte comparison rather
+    // than trusting size+mtime, since two independently-created files can
+    // coincide on stats while differing on bytes. If they were to fall back
+    // to a cheap mtime+size check, this test would treat the two files as
+    // equal and leave the project side stale.
+    write(path.join(projectDir, 'file.txt'), 'AAA');
+
+    const handle = await createMount(projectDir, mountDir, {
+      ignoredPatterns: [],
+      readonlyPatterns: [],
+      excludeDirs: [],
+    });
+
+    // Replace both copies with same-size bytes that don't match, then force
+    // both sides to the same backdated mtime. Without a strict byte compare
+    // the priming / first-reconcile would consider these equal.
+    writeFileSync(path.join(projectDir, 'file.txt'), 'BBB', 'utf8');
+    writeFileSync(path.join(handle.mountDir, 'file.txt'), 'XXX', 'utf8');
+    const backdated = new Date('2020-01-01T00:00:00Z');
+    utimesSync(path.join(projectDir, 'file.txt'), backdated, backdated);
+    utimesSync(path.join(handle.mountDir, 'file.txt'), backdated, backdated);
+
+    const auto = handle.startAutoSync({ debounceMs: 10, scanIntervalMs: 10_000 });
+    await auto.ready();
+    try {
+      await auto.reconcile();
+      // Mount-wins on tiebreak: both sides converge to the mount bytes.
+      expect(readFileSync(path.join(projectDir, 'file.txt'), 'utf8')).toBe('XXX');
+      expect(readFileSync(path.join(handle.mountDir, 'file.txt'), 'utf8')).toBe('XXX');
     } finally {
       await auto.stop();
       handle.cleanup();

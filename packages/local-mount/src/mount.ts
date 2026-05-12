@@ -547,10 +547,15 @@ function hasSameContent(left: string, right: string): boolean {
     if (leftStat.size !== rightStat.size) {
       return false;
     }
-    // Same size: fall back to a full byte comparison. Buffer.equals short-
-    // circuits internally but we still read both files; for very large files
-    // callers may want a streaming approach, though in practice mounts are
-    // dominated by source code where this is cheap.
+    // Rsync-style fast path: matching size + mtime means the file hasn't been
+    // touched since we last wrote it through, so the would-be write is a no-op.
+    // Without this, a sync-back walks every reachable file's full bytes even
+    // when nothing has changed.
+    if (leftStat.mtimeMs === rightStat.mtimeMs) {
+      return true;
+    }
+    // Same size, different mtime: fall back to a byte comparison so a real
+    // edit that happens to land on the same length still gets detected.
     const leftContent = readFileSync(left);
     const rightContent = readFileSync(right);
     return leftContent.equals(rightContent);
