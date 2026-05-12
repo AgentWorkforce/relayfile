@@ -220,6 +220,38 @@ def _throw_for_error(status: int, payload: Any, headers: httpx.Headers) -> None:
 
 
 DEFAULT_RELAYFILE_BASE_URL = "https://api.relayfile.dev"
+DEFAULT_RELAYFILE_CLOUD_BASE_URL = "https://agentrelay.com/cloud"
+
+
+def _normalize_provider_id(provider: str) -> str:
+    # Mirrors the TS SDK: the metadata + accessible-resources verbs accept
+    # any string so operators can target dynamically-discovered providers.
+    # We only trim + lowercase here; cloud rejects unknown ids with a typed
+    # 404 (`unknown_provider`).
+    if not isinstance(provider, str):
+        raise ValueError("provider must be a string")
+    trimmed = provider.strip()
+    if not trimmed:
+        raise ValueError("provider is required")
+    return trimmed.lower()
+
+
+def _coerce_resource_entries(payload: Any) -> list[dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return []
+    resources = payload.get("resources")
+    if not isinstance(resources, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for entry in resources:
+        if not isinstance(entry, dict):
+            continue
+        rid = entry.get("id")
+        url = entry.get("url")
+        if not isinstance(rid, str) or not rid or not isinstance(url, str) or not url:
+            continue
+        out.append(dict(entry))
+    return out
 
 
 class RelayFileClient:
@@ -234,8 +266,15 @@ class RelayFileClient:
         user_agent: str | None = None,
         retry: RetryOptions | None = None,
         http_client: httpx.Client | None = None,
+        cloud_base_url: str | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
+        # Integration setup verbs (list_accessible_resources +
+        # set_integration_metadata) target the cloud control plane, which
+        # is a different service from the relayfile data plane. Default to
+        # the public agentrelay.com/cloud host when the caller hasn't
+        # supplied an override.
+        self._cloud_base_url = (cloud_base_url or DEFAULT_RELAYFILE_CLOUD_BASE_URL).rstrip("/")
         self._token_provider = token
         self._user_agent = user_agent
         self._retry = _normalize_retry(retry)
@@ -264,6 +303,7 @@ class RelayFileClient:
         headers: dict[str, str] | None = None,
         json_body: Any = None,
         correlation_id: str | None = None,
+        base_url: str | None = None,
     ) -> Any:
         resp = self._request_response(
             method,
@@ -271,6 +311,7 @@ class RelayFileClient:
             headers=headers,
             json_body=json_body,
             correlation_id=correlation_id,
+            base_url=base_url,
         )
         return _read_payload(resp)
 
@@ -282,6 +323,7 @@ class RelayFileClient:
         headers: dict[str, str] | None = None,
         json_body: Any = None,
         correlation_id: str | None = None,
+        base_url: str | None = None,
     ) -> httpx.Response:
         base_headers = _merge_headers(
             headers,
@@ -290,7 +332,7 @@ class RelayFileClient:
             has_json_body=json_body is not None,
         )
 
-        url = f"{self._base_url}{path}"
+        url = f"{(base_url or self._base_url).rstrip('/')}{path}"
         retries = 0
 
         while True:
@@ -776,6 +818,71 @@ class RelayFileClient:
             correlation_id=correlation_id,
         )
 
+    # ------------------------------------------------------------------
+    # Integration setup (cloud control plane)
+    # ------------------------------------------------------------------
+
+    def list_accessible_resources(
+        self,
+        workspace_id: str,
+        provider: str,
+        *,
+        correlation_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """List the upstream resources the connection's OAuth grant covers.
+
+        Today this is only meaningful for Atlassian-family providers
+        (``jira``, ``confluence``); for everything else cloud returns a
+        400 with ``code="provider_has_no_accessible_resources"`` which
+        surfaces here as a ``RelayFileApiError`` so callers can branch on
+        the code rather than treating an empty list as ambiguous.
+
+        Use the returned ``id`` / ``url`` pair to call
+        :meth:`set_integration_metadata` with ``{"cloudId": id,
+        "baseUrl": url}``.
+        """
+        normalized = _normalize_provider_id(provider)
+        payload = self._request(
+            "GET",
+            f"/api/v1/workspaces/{_enc(workspace_id)}/integrations/{_enc(normalized)}/accessible-resources",
+            correlation_id=correlation_id,
+            base_url=self._cloud_base_url,
+        )
+        return _coerce_resource_entries(payload)
+
+    def set_integration_metadata(
+        self,
+        workspace_id: str,
+        provider: str,
+        metadata: dict[str, Any],
+        *,
+        correlation_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Replace the connection metadata namespace for ``provider``.
+
+        Wraps cloud's PUT .../metadata, which forwards to
+        ``nango.setMetadata`` (full replacement, not merge). The cloud
+        side rejects top-level keys that look like Nango plumbing
+        (``_*``, ``connection_*``, ``auth_*``,
+        ``provider_config_key``, ``connection_id``) with
+        ``code="invalid_metadata"``.
+        """
+        if not isinstance(metadata, dict):
+            raise ValueError("metadata must be a dict")
+        normalized = _normalize_provider_id(provider)
+        payload = self._request(
+            "PUT",
+            f"/api/v1/workspaces/{_enc(workspace_id)}/integrations/{_enc(normalized)}/metadata",
+            json_body={"metadata": metadata},
+            correlation_id=correlation_id,
+            base_url=self._cloud_base_url,
+        )
+        if isinstance(payload, dict):
+            updated = payload.get("metadata")
+            if isinstance(updated, dict):
+                return updated
+        return metadata
+
 
 # ======================================================================
 # Async client
@@ -794,8 +901,12 @@ class AsyncRelayFileClient:
         user_agent: str | None = None,
         retry: RetryOptions | None = None,
         http_client: httpx.AsyncClient | None = None,
+        cloud_base_url: str | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
+        # See the sync client for why integration setup verbs target a
+        # different base URL.
+        self._cloud_base_url = (cloud_base_url or DEFAULT_RELAYFILE_CLOUD_BASE_URL).rstrip("/")
         self._token_provider = token
         self._user_agent = user_agent
         self._retry = _normalize_retry(retry)
@@ -824,6 +935,7 @@ class AsyncRelayFileClient:
         headers: dict[str, str] | None = None,
         json_body: Any = None,
         correlation_id: str | None = None,
+        base_url: str | None = None,
     ) -> Any:
         import asyncio
         resp = await self._request_response(
@@ -832,6 +944,7 @@ class AsyncRelayFileClient:
             headers=headers,
             json_body=json_body,
             correlation_id=correlation_id,
+            base_url=base_url,
         )
         return _read_payload(resp)
 
@@ -843,6 +956,7 @@ class AsyncRelayFileClient:
         headers: dict[str, str] | None = None,
         json_body: Any = None,
         correlation_id: str | None = None,
+        base_url: str | None = None,
     ) -> httpx.Response:
         import asyncio
         base_headers = _merge_headers(
@@ -852,7 +966,7 @@ class AsyncRelayFileClient:
             has_json_body=json_body is not None,
         )
 
-        url = f"{self._base_url}{path}"
+        url = f"{(base_url or self._base_url).rstrip('/')}{path}"
         retries = 0
 
         while True:
@@ -1342,3 +1456,49 @@ class AsyncRelayFileClient:
             f"/v1/admin/replay/op/{_enc(op_id)}",
             correlation_id=correlation_id,
         )
+
+    # ------------------------------------------------------------------
+    # Integration setup (cloud control plane)
+    # ------------------------------------------------------------------
+
+    async def list_accessible_resources(
+        self,
+        workspace_id: str,
+        provider: str,
+        *,
+        correlation_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Async version of :meth:`RelayFileClient.list_accessible_resources`."""
+        normalized = _normalize_provider_id(provider)
+        payload = await self._request(
+            "GET",
+            f"/api/v1/workspaces/{_enc(workspace_id)}/integrations/{_enc(normalized)}/accessible-resources",
+            correlation_id=correlation_id,
+            base_url=self._cloud_base_url,
+        )
+        return _coerce_resource_entries(payload)
+
+    async def set_integration_metadata(
+        self,
+        workspace_id: str,
+        provider: str,
+        metadata: dict[str, Any],
+        *,
+        correlation_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Async version of :meth:`RelayFileClient.set_integration_metadata`."""
+        if not isinstance(metadata, dict):
+            raise ValueError("metadata must be a dict")
+        normalized = _normalize_provider_id(provider)
+        payload = await self._request(
+            "PUT",
+            f"/api/v1/workspaces/{_enc(workspace_id)}/integrations/{_enc(normalized)}/metadata",
+            json_body={"metadata": metadata},
+            correlation_id=correlation_id,
+            base_url=self._cloud_base_url,
+        )
+        if isinstance(payload, dict):
+            updated = payload.get("metadata")
+            if isinstance(updated, dict):
+                return updated
+        return metadata
