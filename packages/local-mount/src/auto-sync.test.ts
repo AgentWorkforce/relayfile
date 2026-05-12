@@ -6,6 +6,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
   utimesSync,
   writeFileSync,
 } from 'node:fs';
@@ -430,19 +431,27 @@ describe('startAutoSync', () => {
     // Replace both copies with same-size bytes that don't match, then force
     // both sides to the same backdated mtime. Without a strict byte compare
     // the priming / first-reconcile would consider these equal.
-    writeFileSync(path.join(projectDir, 'file.txt'), 'BBB', 'utf8');
-    writeFileSync(path.join(handle.mountDir, 'file.txt'), 'XXX', 'utf8');
+    const projectFile = path.join(projectDir, 'file.txt');
+    const mountFile = path.join(handle.mountDir, 'file.txt');
+    writeFileSync(projectFile, 'BBB', 'utf8');
+    writeFileSync(mountFile, 'XXX', 'utf8');
     const backdated = new Date('2020-01-01T00:00:00Z');
-    utimesSync(path.join(projectDir, 'file.txt'), backdated, backdated);
-    utimesSync(path.join(handle.mountDir, 'file.txt'), backdated, backdated);
+    utimesSync(projectFile, backdated, backdated);
+    utimesSync(mountFile, backdated, backdated);
+    // Sanity-check the precondition: the test only exercises the strict-
+    // compare path if size + mtime really do match on both sides. Some
+    // filesystems round mtime coarsely; if these asserts ever fail the
+    // test is silently passing for the wrong reason.
+    expect(statSync(projectFile).size).toBe(statSync(mountFile).size);
+    expect(statSync(projectFile).mtimeMs).toBe(statSync(mountFile).mtimeMs);
 
     const auto = handle.startAutoSync({ debounceMs: 10, scanIntervalMs: 10_000 });
     await auto.ready();
     try {
       await auto.reconcile();
       // Mount-wins on tiebreak: both sides converge to the mount bytes.
-      expect(readFileSync(path.join(projectDir, 'file.txt'), 'utf8')).toBe('XXX');
-      expect(readFileSync(path.join(handle.mountDir, 'file.txt'), 'utf8')).toBe('XXX');
+      expect(readFileSync(projectFile, 'utf8')).toBe('XXX');
+      expect(readFileSync(mountFile, 'utf8')).toBe('XXX');
     } finally {
       await auto.stop();
       handle.cleanup();
