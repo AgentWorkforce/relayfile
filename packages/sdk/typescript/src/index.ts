@@ -2,6 +2,7 @@ export {
   RelayFileClient,
   DEFAULT_RELAYFILE_BASE_URL,
   type AccessTokenProvider,
+  type RelayFileChangeLogOptions,
   type ConnectWebSocketOptions,
   type RelayFileClientOptions,
   type RelayFileRetryOptions,

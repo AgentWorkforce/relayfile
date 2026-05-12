@@ -474,6 +474,35 @@ describe("RelayFileClient — existing methods", () => {
             text: async () => "",
           } as unknown as Response;
         }
+        if (url.includes("/fs/changes?last=1")) {
+          return {
+            ok: true,
+            status: 200,
+            headers: new Headers({ "content-type": "application/json" }),
+            json: async () => ({
+              events: [
+                {
+                  id: "evt_replay_1",
+                  workspace: "ws_acme",
+                  type: "relayfile.changed",
+                  occurredAt: "2026-05-11T00:00:00.000Z",
+                  resource: {
+                    path: "/linear/issues/ENG-100.json",
+                    kind: "linear.issue",
+                    id: "ENG-100",
+                    provider: "linear",
+                  },
+                  summary: {
+                    title: "ENG-100",
+                    status: "Todo",
+                  },
+                  digest: "sha256:replay",
+                },
+              ],
+            }),
+            text: async () => "",
+          } as unknown as Response;
+        }
         throw new Error(`Unexpected fetch URL: ${url}`);
       });
       const client = makeClient(fetchImpl as unknown as typeof fetch, {
@@ -496,7 +525,7 @@ describe("RelayFileClient — existing methods", () => {
           path: "/linear/issues/ENG-100.json",
         },
       });
-      expect(fetchImpl).toHaveBeenCalledTimes(1);
+      expect(fetchImpl).toHaveBeenCalledTimes(2);
 
       await connection.unsubscribe();
     });
@@ -596,6 +625,185 @@ describe("RelayFileClient — existing methods", () => {
         data: { id: "ENG-77", title: "ENG-77" },
         digest: "sha256:rest",
       });
+    });
+
+    it("listLastNChanges preserves hydrated resources when replay refreshes the same event id", async () => {
+      const fetchImpl = vi.fn(async (url: string) => {
+        if (url.includes("/fs/file?path=%2Flinear%2Fissues%2FENG-9.json")) {
+          return {
+            ok: true,
+            status: 200,
+            headers: new Headers({ "content-type": "application/json" }),
+            json: async () => ({
+              path: "/linear/issues/ENG-9.json",
+              revision: "rev_1",
+              contentType: "application/json",
+              content: JSON.stringify({
+                id: "ENG-9",
+                provider: "linear",
+                kind: "linear.issue",
+                title: "ENG-9",
+              }),
+            }),
+            text: async () => "",
+          } as unknown as Response;
+        }
+        if (url.includes("/fs/changes?last=1")) {
+          return {
+            ok: true,
+            status: 200,
+            headers: new Headers({ "content-type": "application/json" }),
+            json: async () => ({
+              events: [
+                {
+                  id: "evt_linear_cache",
+                  workspace: "ws_acme",
+                  type: "relayfile.changed",
+                  occurredAt: "2026-05-11T00:00:00.000Z",
+                  resource: {
+                    path: "/linear/issues/ENG-9.json",
+                    kind: "linear.issue",
+                    id: "ENG-9",
+                    provider: "linear",
+                  },
+                  summary: {
+                    title: "ENG-9",
+                  },
+                  digest: "sha256:cached",
+                },
+              ],
+            }),
+            text: async () => "",
+          } as unknown as Response;
+        }
+        if (url.includes("/fs/changes/resource?eventId=evt_linear_cache")) {
+          throw new Error("resource endpoint should not be used after replay refresh when the resource is already hydrated");
+        }
+        throw new Error(`Unexpected fetch URL: ${url}`);
+      });
+      const client = makeClient(fetchImpl as unknown as typeof fetch, {
+        token: makeWorkspaceToken("ws_acme", "support-agent"),
+      });
+
+      const handle = client.subscribe(
+        ["/linear/issues/**"],
+        () => {
+          // no-op
+        },
+        { coalesce: "none" },
+      );
+
+      const socket = await waitForWebSocket();
+      socket.emit("open", {});
+      socket.emit("message", {
+        data: JSON.stringify({
+          eventId: "evt_linear_cache",
+          type: "file.updated",
+          path: "/linear/issues/ENG-9.json",
+          revision: "rev_1",
+          timestamp: "2026-05-11T00:00:00.000Z",
+        } satisfies FilesystemEvent),
+      });
+
+      await waitForExpectation(() => {
+        expect(fetchImpl).toHaveBeenCalledTimes(1);
+      });
+
+      const replayed = await client.listLastNChanges(1);
+      await expect(replayed.events[0]!.expand("full")).resolves.toMatchObject({
+        level: "full",
+        path: "/linear/issues/ENG-9.json",
+        data: { id: "ENG-9", provider: "linear", kind: "linear.issue", title: "ENG-9" },
+      });
+      expect(fetchImpl).toHaveBeenCalledTimes(2);
+
+      await handle.unsubscribe();
+    });
+
+    it("honors configurable local change-log retention before falling back to the retained endpoint", async () => {
+      vi.useFakeTimers();
+      try {
+        const fetchImpl = vi.fn(async (url: string) => {
+          if (url.includes("/fs/file?path=%2Flinear%2Fissues%2FENG-91.json")) {
+            return {
+              ok: true,
+              status: 200,
+              headers: new Headers({ "content-type": "application/json" }),
+              json: async () => ({
+                path: "/linear/issues/ENG-91.json",
+                revision: "rev_1",
+                contentType: "application/json",
+                content: JSON.stringify({
+                  id: "ENG-91",
+                  provider: "linear",
+                  kind: "linear.issue",
+                  title: "ENG-91",
+                }),
+              }),
+              text: async () => "",
+            } as unknown as Response;
+          }
+          if (url.includes("/fs/changes/resource?eventId=evt_retention_1")) {
+            return {
+              ok: true,
+              status: 200,
+              headers: new Headers({ "content-type": "application/json" }),
+              json: async () => ({
+                path: "/linear/issues/ENG-91.json",
+                data: { id: "ENG-91", title: "ENG-91", from: "retained-endpoint" },
+                digest: "sha256:retained",
+              }),
+              text: async () => "",
+            } as unknown as Response;
+          }
+          throw new Error(`Unexpected fetch URL: ${url}`);
+        });
+        const client = new RelayFileClient({
+          baseUrl: "https://relay.test",
+          token: makeWorkspaceToken("ws_acme", "support-agent"),
+          fetchImpl: fetchImpl as unknown as typeof fetch,
+          retry: { maxRetries: 0 },
+          changeLog: { retentionMs: 10, maxEntries: 5 },
+        });
+
+        const handle = client.subscribe(
+          ["/linear/issues/**"],
+          () => {
+            // no-op
+          },
+          { coalesce: "none" },
+        );
+
+        await vi.advanceTimersByTimeAsync(0);
+        const socket = ProactiveMockWebSocket.instances[0]!;
+        socket.emit("open", {});
+        socket.emit("message", {
+          data: JSON.stringify({
+            eventId: "evt_retention_1",
+            type: "file.updated",
+            path: "/linear/issues/ENG-91.json",
+            revision: "rev_1",
+            timestamp: "2026-05-11T00:00:00.000Z",
+          } satisfies FilesystemEvent),
+        });
+
+        await flushMicrotasks();
+        await flushMicrotasks();
+        expect(fetchImpl).toHaveBeenCalledTimes(1);
+
+        await vi.advanceTimersByTimeAsync(20);
+
+        await expect(client.getResourceAtEvent("evt_retention_1")).resolves.toMatchObject({
+          path: "/linear/issues/ENG-91.json",
+          data: { id: "ENG-91", title: "ENG-91", from: "retained-endpoint" },
+          digest: "sha256:retained",
+        });
+        expect(fetchImpl).toHaveBeenCalledTimes(2);
+
+        await handle.unsubscribe();
+      } finally {
+        vi.useRealTimers();
+      }
     });
   });
 

@@ -148,6 +148,23 @@ for at least the configured retention window. The local SDK cache mirrors the
 same contract opportunistically for already-delivered events, but durable
 retention remains a backend responsibility.
 
+For the local SDK mirror, `RelayFileClient` accepts:
+
+```ts
+new RelayFileClient({
+  token,
+  changeLog: {
+    retentionMs: 7 * 24 * 60 * 60 * 1000,
+    maxEntries: 10_000,
+  },
+});
+```
+
+Those settings apply per workspace inside the client process and control the
+ring buffer used by live subscriptions, replay priming, and
+`getResourceAtEvent(eventId)` cache hits. They do not replace the backend's
+durable retained change log.
+
 ## Path-Scoped Subscriptions
 
 The proactive runtime will use path-scoped subscriptions for multi-agent ACLs.

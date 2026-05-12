@@ -76,6 +76,19 @@ export interface RelayFileRetryOptions {
   jitterRatio?: number;
 }
 
+export interface RelayFileChangeLogOptions {
+  /**
+   * Local retained-change cache TTL in milliseconds.
+   *
+   * This mirrors the backend retention window opportunistically for delivered
+   * or replayed events; durable change-log retention remains a server-side
+   * responsibility.
+   */
+  retentionMs?: number;
+  /** Maximum number of retained change entries to keep per workspace locally. */
+  maxEntries?: number;
+}
+
 /** Default base URL for the hosted Relayfile API */
 export const DEFAULT_RELAYFILE_BASE_URL = "https://api.relayfile.dev";
 
@@ -92,6 +105,7 @@ export interface RelayFileClientOptions {
   fetchImpl?: typeof fetch;
   userAgent?: string;
   retry?: RelayFileRetryOptions;
+  changeLog?: RelayFileChangeLogOptions;
 }
 
 interface NormalizedRetryOptions {
@@ -99,6 +113,11 @@ interface NormalizedRetryOptions {
   baseDelayMs: number;
   maxDelayMs: number;
   jitterRatio: number;
+}
+
+interface NormalizedChangeLogOptions {
+  retentionMs: number;
+  maxEntries: number;
 }
 
 interface ExportJsonApiResponseShape {
@@ -161,6 +180,7 @@ interface CachedChangeRecord {
 
 const changeStreamManagers = new WeakMap<RelayFileClient, Map<string, RelayFileChangeStreamManager>>();
 const changeLogCaches = new WeakMap<RelayFileClient, Map<string, WorkspaceChangeLogCache>>();
+const changeLogSettings = new WeakMap<RelayFileClient, NormalizedChangeLogOptions>();
 
 function createM2NotImplementedError(feature: string): Error & { code: "M2_NOT_IMPLEMENTED" } {
   const error = new Error(`M2_NOT_IMPLEMENTED: ${feature} is reserved for proactive runtime M2.`) as Error & {
@@ -181,6 +201,19 @@ function normalizeRetryOptions(options?: RelayFileRetryOptions): NormalizedRetry
     baseDelayMs: Math.max(1, Math.floor(baseDelayMs)),
     maxDelayMs: Math.max(1, Math.floor(maxDelayMs)),
     jitterRatio: Math.max(0, Math.min(1, jitterRatio))
+  };
+}
+
+function normalizeChangeLogOptions(options?: RelayFileChangeLogOptions): NormalizedChangeLogOptions {
+  const retentionMs = options?.retentionMs ?? DEFAULT_CHANGE_LOG_RETENTION_MS;
+  const maxEntries = options?.maxEntries ?? DEFAULT_CHANGE_LOG_MAX_ENTRIES;
+  return {
+    retentionMs: Number.isFinite(retentionMs) && retentionMs >= 0
+      ? Math.floor(retentionMs)
+      : DEFAULT_CHANGE_LOG_RETENTION_MS,
+    maxEntries: Number.isFinite(maxEntries) && maxEntries > 0
+      ? Math.floor(maxEntries)
+      : DEFAULT_CHANGE_LOG_MAX_ENTRIES
   };
 }
 
@@ -353,16 +386,23 @@ class WorkspaceChangeLogCache {
   record(record: CachedChangeRecord): void {
     this.prune(Date.now());
     const existing = this.byId.get(record.wire.id);
+    const merged = existing
+      ? {
+          wire: record.wire,
+          resource: record.resource.data !== null ? record.resource : existing.resource,
+          storedAt: record.storedAt
+        }
+      : record;
     if (existing) {
-      this.byId.set(record.wire.id, record);
-      const index = this.entries.findIndex((entry) => entry.wire.id === record.wire.id);
+      this.byId.set(merged.wire.id, merged);
+      const index = this.entries.findIndex((entry) => entry.wire.id === merged.wire.id);
       if (index >= 0) {
-        this.entries[index] = record;
+        this.entries[index] = merged;
       }
       return;
     }
-    this.entries.push(record);
-    this.byId.set(record.wire.id, record);
+    this.entries.push(merged);
+    this.byId.set(merged.wire.id, merged);
     while (this.entries.length > this.maxEntries) {
       const removed = this.entries.shift();
       if (removed) {
@@ -668,9 +708,25 @@ function getChangeLogCache(client: RelayFileClient, workspaceId: string): Worksp
   if (existing) {
     return existing;
   }
-  const cache = new WorkspaceChangeLogCache();
+  const settings = changeLogSettings.get(client) ?? normalizeChangeLogOptions();
+  const cache = new WorkspaceChangeLogCache(settings.retentionMs, settings.maxEntries);
   workspaceCaches.set(workspaceId, cache);
   return cache;
+}
+
+function mergeChangeRecords(records: CachedChangeRecord[]): CachedChangeRecord[] {
+  const deduped = new Map<string, CachedChangeRecord>();
+  for (const record of records) {
+    deduped.set(record.wire.id, record);
+  }
+  return Array.from(deduped.values()).sort((left, right) => {
+    const leftOccurredAt = Date.parse(left.wire.occurredAt);
+    const rightOccurredAt = Date.parse(right.wire.occurredAt);
+    if (leftOccurredAt !== rightOccurredAt) {
+      return leftOccurredAt - rightOccurredAt;
+    }
+    return left.storedAt - right.storedAt;
+  });
 }
 
 function normalizeChangePattern(pattern: string): string[] {
@@ -1079,6 +1135,7 @@ export class RelayFileClient {
     this.fetchImpl = options.fetchImpl ?? fetch.bind(globalThis);
     this.userAgent = options.userAgent;
     this.retryOptions = normalizeRetryOptions(options.retry);
+    changeLogSettings.set(this, normalizeChangeLogOptions(options.changeLog));
   }
 
   /**
@@ -1271,13 +1328,6 @@ export class RelayFileClient {
     });
   }
 
-  /**
-   * M1 proactive runtime contract stub.
-   *
-   * Live data-trigger delivery is deferred to M2; the public method exists now
-   * so downstream packages can compile against the final surface without
-   * waiting for the WebSocket and change-log plumbing to land.
-   */
   subscribe(
     globs: string[],
     onChange: (event: ChangeEvent) => void,
@@ -1302,13 +1352,6 @@ export class RelayFileClient {
     };
   }
 
-  /**
-   * M1 proactive runtime transport stub.
-   *
-   * M2 will open the dedicated change-stream transport that powers
-   * `subscribe()` and replay-on-start delivery. M1 reserves the public entry
-   * point now so downstream packages can type against the final API surface.
-   */
   open(options: ChangeStreamConnectionOptions): ChangeStreamConnection {
     const manager = getStreamManager(this, options.workspaceId, options.aclToken, this.baseUrl);
     const connection = manager.open();
@@ -1323,13 +1366,6 @@ export class RelayFileClient {
     };
   }
 
-  /**
-   * M1 proactive runtime contract stub used by `event.expand(\"full\")`.
-   *
-   * M2 will resolve the stable `eventId` through relayfile's retained change
-   * log and return the canonical normalized payload stored at the resource
-   * path.
-   */
   async getResourceAtEvent(eventId: string): Promise<ResourceAtEventResult> {
     const workspaceId = await this.resolveWorkspaceId();
     const cached = getChangeLogCache(this, workspaceId).get(eventId);
@@ -1342,50 +1378,53 @@ export class RelayFileClient {
     });
   }
 
-  /**
-   * M1 proactive runtime contract stub used by replay-on-start flows.
-   *
-   * M2 will resolve retained change-log entries newer than the supplied ISO
-   * timestamp.
-   */
   async listChangesSince(isoTimestamp: string): Promise<ChangeLogQueryResult> {
     const workspaceId = await this.resolveWorkspaceId();
     const cache = getChangeLogCache(this, workspaceId);
     const cached = cache.listSince(isoTimestamp);
-    if (cached.length > 0) {
-      return {
-        events: cached.map((record) => toChangeEvent(this, record))
-      };
+    let records = cached;
+    try {
+      const payload = await this.request<{ events?: unknown[] }>({
+        method: "GET",
+        path: `/v1/workspaces/${encodeURIComponent(workspaceId)}/fs/changes${buildQuery({ since: isoTimestamp })}`
+      });
+      records = mergeChangeRecords([
+        ...cached,
+        ...(payload.events ?? []).map((event) => this.cacheWireChangeEvent(workspaceId, normalizeWireChangeEvent(event)))
+      ]);
+    } catch (error) {
+      if (cached.length === 0) {
+        throw error;
+      }
     }
-    const payload = await this.request<{ events?: unknown[] }>({
-      method: "GET",
-      path: `/v1/workspaces/${encodeURIComponent(workspaceId)}/fs/changes${buildQuery({ since: isoTimestamp })}`
-    });
-    const records = (payload.events ?? []).map((event) => this.cacheWireChangeEvent(workspaceId, normalizeWireChangeEvent(event)));
     return {
       events: records.map((record) => toChangeEvent(this, record))
     };
   }
 
-  /**
-   * M1 proactive runtime contract stub used by replay-on-start flows.
-   *
-   * M2 will return the last N retained change events for the workspace.
-   */
   async listLastNChanges(limit: number): Promise<ChangeLogQueryResult> {
+    const safeLimit = Math.max(0, Math.floor(limit));
+    if (safeLimit === 0) {
+      return { events: [] };
+    }
     const workspaceId = await this.resolveWorkspaceId();
     const cache = getChangeLogCache(this, workspaceId);
-    const cached = cache.listLastN(limit);
-    if (cached.length > 0) {
-      return {
-        events: cached.map((record) => toChangeEvent(this, record))
-      };
+    const cached = cache.listLastN(safeLimit);
+    let records = cached;
+    try {
+      const payload = await this.request<{ events?: unknown[] }>({
+        method: "GET",
+        path: `/v1/workspaces/${encodeURIComponent(workspaceId)}/fs/changes${buildQuery({ last: safeLimit })}`
+      });
+      records = mergeChangeRecords([
+        ...cached,
+        ...(payload.events ?? []).map((event) => this.cacheWireChangeEvent(workspaceId, normalizeWireChangeEvent(event)))
+      ]).slice(-safeLimit);
+    } catch (error) {
+      if (cached.length === 0) {
+        throw error;
+      }
     }
-    const payload = await this.request<{ events?: unknown[] }>({
-      method: "GET",
-      path: `/v1/workspaces/${encodeURIComponent(workspaceId)}/fs/changes${buildQuery({ last: limit })}`
-    });
-    const records = (payload.events ?? []).map((event) => this.cacheWireChangeEvent(workspaceId, normalizeWireChangeEvent(event)));
     return {
       events: records.map((record) => toChangeEvent(this, record))
     };
