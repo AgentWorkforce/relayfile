@@ -184,8 +184,47 @@ export interface ChangeEventSummary {
   labels?: string[];
   actor?: ChangeEventActor;
   fieldsChanged?: string[];
+  /** Optional compact tag list. Producers must cap this at 8 entries. */
   tags?: string[];
 }
+
+/**
+ * Canonical lightweight event summary shape exported for proactive-runtime
+ * adapters. `buildSummary(payload)` should return this exact structure.
+ */
+export type EventSummary = ChangeEventSummary;
+
+export type ExpansionLevel = "summary" | "full" | "diff" | "thread";
+
+export interface SummaryExpansion {
+  level: "summary";
+  path: string;
+  summary: ChangeEventSummary;
+}
+
+export interface FullExpansion<TData = unknown> {
+  level: "full";
+  path: string;
+  data: TData;
+}
+
+export interface DiffExpansion {
+  level: "diff";
+  path: string;
+  diff: Record<string, unknown>;
+}
+
+export interface ThreadExpansion {
+  level: "thread";
+  path: string;
+  thread: Record<string, unknown>;
+}
+
+export type Expansion<L extends ExpansionLevel = ExpansionLevel> =
+  L extends "summary" ? SummaryExpansion
+    : L extends "full" ? FullExpansion
+      : L extends "diff" ? DiffExpansion
+        : ThreadExpansion;
 
 /**
  * Proactive runtime relayfile notification envelope.
@@ -200,22 +239,46 @@ export interface ChangeEventSummary {
 export interface ChangeEvent {
   id: string;
   workspace: string;
+  agentId?: string;
   type: "relayfile.changed";
   occurredAt: string;
-  attempt: number;
   resource: ChangeEventResource;
   summary: ChangeEventSummary;
+  expand<L extends ExpansionLevel = "summary">(level?: L): Promise<Expansion<L>>;
   digest?: string;
 }
 
+export interface SubscribeOptions {
+  coalesce?: "none" | "fire-once";
+  pathScope?: string[];
+  drainMs?: number;
+}
+
 export interface Subscription {
-  unsubscribe(): void;
+  unsubscribe(): Promise<void>;
+}
+
+export type ReplayOptions =
+  | { replayOnStart?: "none" }
+  | { replayOnStart: `since:${string}` }
+  | { replayOnStart: `last:${number}` };
+
+export type ChangeStreamConnectionOptions = ReplayOptions & {
+  workspaceId: string;
+};
+
+export interface ChangeStreamConnection extends Subscription {
+  readonly ready: Promise<void>;
 }
 
 export interface ResourceAtEventResult {
   path: string;
   data: unknown;
   digest: string;
+}
+
+export interface ChangeLogQueryResult {
+  events: ChangeEvent[];
 }
 
 export interface EventFeedResponse {

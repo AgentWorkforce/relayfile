@@ -12,6 +12,7 @@
   "scripts": {
     "workflow": "agent-relay run",
     "build": "npm run build --workspace=packages/sdk/typescript && npm run build --workspace=packages/local-mount",
+    "test": "npm run test --workspace=packages/core && npm run test --workspace=packages/sdk/typescript && npm run test --workspace=packages/local-mount && npm --prefix packages/file-observer test",
     "typecheck": "npm run typecheck --workspace=packages/sdk/typescript && npm run typecheck --workspace=packages/local-mount",
     "evals:compile": "node scripts/evals/compile-cases.mjs",
     "evals": "npm run evals:compile && node scripts/evals/run-relayfile-evals.mjs",

@@ -32,7 +32,12 @@ import type {
   AckWritebackInput,
   AckWritebackResponse,
   ChangeEvent,
+  ChangeStreamConnection,
+  Expansion,
+  EventSummary,
+  ReplayOptions,
   ResourceAtEventResult,
+  SubscribeOptions,
   Subscription,
 } from "./types.js";
 
@@ -68,7 +73,7 @@ describe("RelayFileClient — existing methods", () => {
   describe("proactive runtime contract stubs", () => {
     it("exports ChangeEvent and Subscription-compatible shapes", () => {
       const handle: Subscription = {
-        unsubscribe() {
+        async unsubscribe() {
           // no-op
         },
       };
@@ -76,9 +81,9 @@ describe("RelayFileClient — existing methods", () => {
       const event: ChangeEvent = {
         id: "evt_1",
         workspace: "ws_acme",
+        agentId: "support-agent",
         type: "relayfile.changed",
         occurredAt: "2026-05-11T00:00:00.000Z",
-        attempt: 1,
         resource: {
           path: "/linear/issues/ENG-412.json",
           kind: "linear.issue",
@@ -90,6 +95,16 @@ describe("RelayFileClient — existing methods", () => {
           status: "In Progress",
           fieldsChanged: ["status"],
         },
+        expand: async () =>
+          ({
+            level: "summary",
+            path: "/linear/issues/ENG-412.json",
+            summary: {
+              title: "ENG-412",
+              status: "In Progress",
+              fieldsChanged: ["status"],
+            },
+          }) as Expansion,
         digest: "sha256:abc123",
       };
 
@@ -98,30 +113,75 @@ describe("RelayFileClient — existing methods", () => {
         data: { id: "ENG-412" },
         digest: event.digest ?? "sha256:abc123",
       };
+      const summary: EventSummary = event.summary;
+      const replay: ReplayOptions = { replayOnStart: "last:25" };
+      const subscribeOptions: SubscribeOptions = {
+        coalesce: "fire-once",
+        pathScope: ["/linear/issues/**"],
+        drainMs: 5_000,
+      };
+      const connection: ChangeStreamConnection = {
+        ready: Promise.resolve(),
+        async unsubscribe() {
+          // no-op
+        },
+      };
 
       expect(typeof handle.unsubscribe).toBe("function");
       expect(event.type).toBe("relayfile.changed");
       expect(resource.path).toBe("/linear/issues/ENG-412.json");
+      expect(summary.title).toBe("ENG-412");
+      expect(replay.replayOnStart).toBe("last:25");
+      expect(subscribeOptions.coalesce).toBe("fire-once");
+      expect(connection.ready).toBeInstanceOf(Promise);
     });
 
-    it("subscribe throws a typed M2_NOT_IMPLEMENTED error", () => {
+    it("subscribe returns a no-op Subscription handle in M1", async () => {
       const client = makeClient(mockFetch({ path: "/", entries: [], nextCursor: null }));
 
-      try {
-        client.subscribe(["/linear/issues/**"], () => undefined);
-        throw new Error("expected subscribe to throw");
-      } catch (error) {
-        expect(error).toMatchObject({
-          name: "M2NotImplementedError",
-          code: "M2_NOT_IMPLEMENTED",
-        });
-      }
+      const handle = client.subscribe(
+        ["/linear/issues/**"],
+        () => undefined,
+        { coalesce: "fire-once", pathScope: ["/linear/issues/**"] },
+      );
+
+      expect(typeof handle.unsubscribe).toBe("function");
+      await expect(handle.unsubscribe()).resolves.toBeUndefined();
     });
 
     it("getResourceAtEvent throws a typed M2_NOT_IMPLEMENTED error", async () => {
       const client = makeClient(mockFetch({ path: "/", entries: [], nextCursor: null }));
 
       await expect(client.getResourceAtEvent("evt_1")).rejects.toMatchObject({
+        name: "M2NotImplementedError",
+        code: "M2_NOT_IMPLEMENTED",
+      });
+    });
+
+    it("open throws a typed M2_NOT_IMPLEMENTED error", () => {
+      const client = makeClient(mockFetch({ path: "/", entries: [], nextCursor: null }));
+
+      expect(() =>
+        client.open({
+          workspaceId: "ws_acme",
+          replayOnStart: "since:2026-05-11T00:00:00.000Z",
+        }),
+      ).toThrowError(/M2_NOT_IMPLEMENTED/);
+    });
+
+    it("listChangesSince throws a typed M2_NOT_IMPLEMENTED error", async () => {
+      const client = makeClient(mockFetch({ path: "/", entries: [], nextCursor: null }));
+
+      await expect(client.listChangesSince("2026-05-11T00:00:00.000Z")).rejects.toMatchObject({
+        name: "M2NotImplementedError",
+        code: "M2_NOT_IMPLEMENTED",
+      });
+    });
+
+    it("listLastNChanges throws a typed M2_NOT_IMPLEMENTED error", async () => {
+      const client = makeClient(mockFetch({ path: "/", entries: [], nextCursor: null }));
+
+      await expect(client.listLastNChanges(10)).rejects.toMatchObject({
         name: "M2NotImplementedError",
         code: "M2_NOT_IMPLEMENTED",
       });
@@ -1140,5 +1200,29 @@ describe("RelayFileClient — edge cases", () => {
     const url = f.mock.calls[0]![0] as string;
     // Default path is /
     expect(url).toContain("path=%2F");
+  });
+
+  it("allows DLQ-prefixed paths through the normal file APIs", async () => {
+    const writeFetch = mockFetch({
+      opId: "op_dlq",
+      status: "queued",
+      targetRevision: "rev_dlq",
+    } satisfies WriteQueuedResponse);
+    const client = makeClient(writeFetch);
+
+    await client.writeFile({
+      workspaceId: "ws_acme",
+      path: "/_dlq/evt_dlq.json",
+      content: JSON.stringify({ eventId: "evt_dlq" }),
+      contentType: "application/json",
+    });
+
+    expect((writeFetch.mock.calls[0]![0] as string)).toContain(
+      "/v1/workspaces/ws_acme/fs/file?path=%2F_dlq%2Fevt_dlq.json",
+    );
+    expect(JSON.parse((writeFetch.mock.calls[0]![1] as RequestInit).body as string)).toMatchObject({
+      contentType: "application/json",
+      content: JSON.stringify({ eventId: "evt_dlq" }),
+    });
   });
 });

@@ -43,7 +43,11 @@ import {
   type WritebackItem,
   type AckWritebackInput,
   type AckWritebackResponse,
-  type ChangeEvent
+  type ChangeEvent,
+  type ChangeLogQueryResult,
+  type ChangeStreamConnection,
+  type ChangeStreamConnectionOptions,
+  type SubscribeOptions
 } from "./types.js";
 import type { ForkHandle } from "@relayfile/core";
 import {
@@ -507,15 +511,72 @@ export class RelayFileClient {
     });
   }
 
-  subscribe(globs: string[], onChange: (event: ChangeEvent) => void): Subscription {
+  /**
+   * M1 proactive runtime contract stub.
+   *
+   * Live data-trigger delivery is deferred to M2; the public method exists now
+   * so downstream packages can compile against the final surface without
+   * waiting for the WebSocket and change-log plumbing to land.
+   */
+  subscribe(
+    globs: string[],
+    onChange: (event: ChangeEvent) => void,
+    options?: SubscribeOptions,
+  ): Subscription {
     void globs;
     void onChange;
-    throw createM2NotImplementedError("RelayFileClient.subscribe(globs, onChange)");
+    void options;
+    return {
+      async unsubscribe(): Promise<void> {
+        // M1 no-op handle so downstream runtimes can boot and shut down
+        // cleanly before live delivery lands in M2.
+      },
+    };
   }
 
+  /**
+   * M1 proactive runtime transport stub.
+   *
+   * M2 will open the dedicated change-stream transport that powers
+   * `subscribe()` and replay-on-start delivery. M1 reserves the public entry
+   * point now so downstream packages can type against the final API surface.
+   */
+  open(options: ChangeStreamConnectionOptions): ChangeStreamConnection {
+    void options;
+    throw createM2NotImplementedError("RelayFileClient.open(options)");
+  }
+
+  /**
+   * M1 proactive runtime contract stub used by `event.expand(\"full\")`.
+   *
+   * M2 will resolve the stable `eventId` through relayfile's retained change
+   * log and return the canonical normalized payload stored at the resource
+   * path.
+   */
   async getResourceAtEvent(eventId: string): Promise<ResourceAtEventResult> {
     void eventId;
     throw createM2NotImplementedError("RelayFileClient.getResourceAtEvent(eventId)");
+  }
+
+  /**
+   * M1 proactive runtime contract stub used by replay-on-start flows.
+   *
+   * M2 will resolve retained change-log entries newer than the supplied ISO
+   * timestamp.
+   */
+  async listChangesSince(isoTimestamp: string): Promise<ChangeLogQueryResult> {
+    void isoTimestamp;
+    throw createM2NotImplementedError("RelayFileClient.listChangesSince(isoTimestamp)");
+  }
+
+  /**
+   * M1 proactive runtime contract stub used by replay-on-start flows.
+   *
+   * M2 will return the last N retained change events for the workspace.
+   */
+  async listLastNChanges(limit: number): Promise<ChangeLogQueryResult> {
+    void limit;
+    throw createM2NotImplementedError("RelayFileClient.listLastNChanges(limit)");
   }
 
   async exportWorkspace(options: ExportOptions): Promise<ExportJsonResponse | Blob> {
