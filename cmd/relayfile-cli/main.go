@@ -394,11 +394,13 @@ Usage:
   relayfile workspace current [--verbose]
   relayfile workspace delete NAME [--yes]
   relayfile integration connect PROVIDER [--backend BACKEND] [--workspace NAME]
+    (for jira/confluence: prompts for the Atlassian site to bind after OAuth completes)
   relayfile integration available [--search QUERY] [--backend BACKEND] [--json] [--refresh]
   relayfile integration search QUERY [--backend BACKEND] [--json] [--refresh]
   relayfile integration list [--workspace NAME] [--json]
   relayfile integration disconnect PROVIDER [--workspace NAME] [--yes]
   relayfile integration adopt PROVIDER --connection-id ID [--workspace NAME] [--provider-config-key KEY] [--yes]
+  relayfile integration set-metadata PROVIDER KEY=VALUE [KEY=VALUE...] [--workspace NAME] [--yes]
   relayfile ops list [--workspace NAME] [--json]
   relayfile ops replay OPID [--workspace NAME]
   relayfile writeback status [WORKSPACE] [--json]
@@ -556,12 +558,21 @@ func runSetup(args []string, stdin io.Reader, stdout io.Writer) error {
 	}
 
 	if selectedProvider != "" && selectedProvider != "none" && selectedProvider != "skip" {
+		createdConnection := false
 		if createdWorkspace {
 			if err := connectCloudIntegration(tokenSet.APIURL, record.ID, joined.Token, selectedProvider, requestedBackend, absLocalDir, *connectTimeout, !*noOpen, stdout); err != nil {
 				return err
 			}
+			createdConnection = true
 		} else {
-			if err := ensureCloudIntegration(tokenSet.APIURL, record.ID, joined.Token, selectedProvider, requestedBackend, absLocalDir, *connectTimeout, !*noOpen, stdout); err != nil {
+			var err error
+			createdConnection, err = ensureCloudIntegration(tokenSet.APIURL, record.ID, joined.Token, selectedProvider, requestedBackend, absLocalDir, *connectTimeout, !*noOpen, stdout)
+			if err != nil {
+				return err
+			}
+		}
+		if createdConnection && isAtlassianProvider(selectedProvider) {
+			if err := runAtlassianSitePicker(tokenSet.APIURL, record.ID, joined.Token, selectedProvider, stdin, stdout); err != nil {
 				return err
 			}
 		}
@@ -1116,17 +1127,20 @@ func runCloudLogin(cloudAPIURL string, timeout time.Duration, shouldOpenBrowser 
 	}
 }
 
-func ensureCloudIntegration(cloudAPIURL, workspaceID, workspaceToken, provider, requestedBackend, localDir string, timeout time.Duration, shouldOpenBrowser bool, stdout io.Writer) error {
+func ensureCloudIntegration(cloudAPIURL, workspaceID, workspaceToken, provider, requestedBackend, localDir string, timeout time.Duration, shouldOpenBrowser bool, stdout io.Writer) (bool, error) {
 	savedConnection := loadSavedConnection(localDir, provider)
 	connectionID := strings.TrimSpace(savedConnection.ConnectionID)
 	savedBackend := strings.TrimSpace(savedConnection.Backend)
 	if connectionID != "" && (requestedBackend == "" || requestedBackend == savedBackend) {
 		if ready, err := cloudIntegrationReady(cloudAPIURL, workspaceID, workspaceToken, provider, connectionID); err == nil && ready {
 			fmt.Fprintf(stdout, "%s already connected\n", provider)
-			return nil
+			return false, nil
 		}
 	}
-	return connectCloudIntegration(cloudAPIURL, workspaceID, workspaceToken, provider, requestedBackend, localDir, timeout, shouldOpenBrowser, stdout)
+	if err := connectCloudIntegration(cloudAPIURL, workspaceID, workspaceToken, provider, requestedBackend, localDir, timeout, shouldOpenBrowser, stdout); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func connectCloudIntegration(cloudAPIURL, workspaceID, workspaceToken, provider, requestedBackend, localDir string, timeout time.Duration, shouldOpenBrowser bool, stdout io.Writer) error {
@@ -1387,7 +1401,7 @@ func runWorkspace(args []string, stdin io.Reader, stdout io.Writer) error {
 
 func runIntegration(args []string, stdin io.Reader, stdout io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("integration subcommand is required: connect, available, search, list, disconnect, or adopt")
+		return errors.New("integration subcommand is required: connect, available, search, list, disconnect, adopt, or set-metadata")
 	}
 	switch args[0] {
 	case "connect":
@@ -1402,6 +1416,8 @@ func runIntegration(args []string, stdin io.Reader, stdout io.Writer) error {
 		return runIntegrationDisconnect(args[1:], stdin, stdout)
 	case "adopt":
 		return runIntegrationAdopt(args[1:], stdin, stdout)
+	case "set-metadata":
+		return runIntegrationSetMetadata(args[1:], stdin, stdout)
 	default:
 		return fmt.Errorf("unknown integration subcommand %q", args[0])
 	}
@@ -1447,10 +1463,172 @@ func runIntegrationConnect(args []string, stdin io.Reader, stdout io.Writer) err
 	if err := persistJoinedWorkspace(record, joined, cloudCreds.APIURL, record.LocalDir); err != nil {
 		return err
 	}
-	if err := ensureCloudIntegration(cloudCreds.APIURL, record.ID, joined.Token, provider, requestedBackend, record.LocalDir, *timeout, !*noOpen, stdout); err != nil {
+	createdConnection, err := ensureCloudIntegration(cloudCreds.APIURL, record.ID, joined.Token, provider, requestedBackend, record.LocalDir, *timeout, !*noOpen, stdout)
+	if err != nil {
 		return err
 	}
+	// Atlassian-family providers: a single OAuth grant can cover multiple
+	// sites (cloudIds). Cloud's Jira/Confluence sync bails with a clear
+	// error if `metadata.cloudId` is unset and the grant has >1 site.
+	// Run the site picker here, after OAuth completes but before we wait
+	// on the initial sync, so the operator picks a target without having
+	// to dive into the Nango dashboard. For other providers this is a
+	// no-op so we preserve the existing flow.
+	if createdConnection && isAtlassianProvider(provider) {
+		if err := runAtlassianSitePicker(cloudCreds.APIURL, record.ID, joined.Token, provider, stdin, stdout); err != nil {
+			return err
+		}
+	}
 	return waitForInitialSync(joined.RelayfileURL, joined.Token, record.ID, provider, record.LocalDir, *timeout, stdout)
+}
+
+func isAtlassianProvider(provider string) bool {
+	switch provider {
+	case "jira", "confluence":
+		return true
+	}
+	return false
+}
+
+// accessibleResourceEntry mirrors the SDK-facing shape returned by Cloud's
+// GET .../accessible-resources route. Cloud already normalizes the upstream
+// Atlassian payload, so the CLI only needs id+url here. We keep name and
+// avatarUrl so the picker can render a friendly label.
+type accessibleResourceEntry struct {
+	ID        string   `json:"id"`
+	URL       string   `json:"url"`
+	Name      string   `json:"name,omitempty"`
+	Scopes    []string `json:"scopes,omitempty"`
+	AvatarURL string   `json:"avatarUrl,omitempty"`
+}
+
+type accessibleResourcesResponse struct {
+	OK        bool                      `json:"ok"`
+	Resources []accessibleResourceEntry `json:"resources"`
+}
+
+// runAtlassianSitePicker fetches the accessible resources for `provider`
+// and, depending on how many came back, either:
+//   - 0: warns and exits (something is upstream-wrong; surfacing as error
+//     prevents the operator from sitting through a 5-minute initial-sync
+//     wait that will never succeed).
+//   - 1: auto-binds the single site as { cloudId, baseUrl } and logs a
+//     "auto-selected" line so the operator sees what happened.
+//   - >1: prompts interactively with a numbered picker. Default to 1 on
+//     blank input, validate range, retry up to 3 times on invalid input.
+//
+// The picked metadata is forwarded to Cloud's PUT .../metadata which
+// hands it to nango.setMetadata. On success the CLI prints a confirmation
+// before falling through to the initial-sync wait so the operator knows
+// which site they bound.
+func runAtlassianSitePicker(cloudAPIURL, workspaceID, workspaceToken, provider string, stdin io.Reader, stdout io.Writer) error {
+	client, err := newAPIClient(cloudAPIURL, workspaceToken)
+	if err != nil {
+		return err
+	}
+	var resp accessibleResourcesResponse
+	if err := client.getJSON(
+		context.Background(),
+		fmt.Sprintf("/api/v1/workspaces/%s/integrations/%s/accessible-resources", url.PathEscape(workspaceID), url.PathEscape(provider)),
+		&resp,
+	); err != nil {
+		return fmt.Errorf("list %s accessible resources: %w", provider, err)
+	}
+	resources := resp.Resources
+	if len(resources) == 0 {
+		// Upstream gave us zero sites — there's nothing we can bind, so
+		// continuing the connect flow would just bake in a guaranteed
+		// failure later. Fail fast with a message that points at the
+		// likely root causes (revoked OAuth grant or missing scopes).
+		fmt.Fprintf(stdout, "Warning: %s reports zero accessible sites for this OAuth grant.\n", provider)
+		fmt.Fprintln(stdout, "  Check that the operator who completed OAuth has access to at least one Atlassian site,")
+		fmt.Fprintln(stdout, "  and that the grant covers the required scopes.")
+		return fmt.Errorf("%s accessible-resources returned 0 sites", provider)
+	}
+	var chosen accessibleResourceEntry
+	if len(resources) == 1 {
+		chosen = resources[0]
+		label := chosen.URL
+		if chosen.Name != "" {
+			label = fmt.Sprintf("%s (%s)", chosen.Name, chosen.URL)
+		}
+		fmt.Fprintf(stdout, "Auto-selected site %s for %s\n", label, provider)
+	} else {
+		picked, err := promptAtlassianSiteChoice(resources, stdin, stdout)
+		if err != nil {
+			return err
+		}
+		chosen = picked
+	}
+	metadata := map[string]any{
+		"cloudId": chosen.ID,
+		"baseUrl": chosen.URL,
+	}
+	bodyBytes, err := json.Marshal(map[string]any{"metadata": metadata})
+	if err != nil {
+		return err
+	}
+	if _, _, err := client.do(
+		context.Background(),
+		http.MethodPut,
+		fmt.Sprintf("/api/v1/workspaces/%s/integrations/%s/metadata", url.PathEscape(workspaceID), url.PathEscape(provider)),
+		bodyBytes,
+	); err != nil {
+		return fmt.Errorf("set %s metadata: %w", provider, err)
+	}
+	fmt.Fprintf(stdout, "%s metadata set: cloudId=%s baseUrl=%s\n", provider, chosen.ID, chosen.URL)
+	return nil
+}
+
+// promptAtlassianSiteChoice renders the numbered picker and parses the
+// operator's response. Defaults to entry 1 on blank input. Retries up to
+// 3 times on invalid input (non-numeric or out-of-range) before erroring
+// out so an automated/dumb-pipe stdin doesn't loop forever.
+//
+// We construct a single bufio.Reader for the entire picker rather than
+// going through `promptLine`, because `promptLine` creates a new bufio
+// reader per call and drops any bytes the previous call buffered past
+// the first newline — which breaks the retry loop when stdin is a
+// pre-loaded reader (as in tests / piped scripts).
+func promptAtlassianSiteChoice(resources []accessibleResourceEntry, stdin io.Reader, stdout io.Writer) (accessibleResourceEntry, error) {
+	fmt.Fprintln(stdout, "Multiple Atlassian sites available; choose which to bind to this workspace:")
+	for i, r := range resources {
+		label := r.URL
+		if r.Name != "" {
+			label = fmt.Sprintf("%s  (%s)", r.URL, r.Name)
+		}
+		fmt.Fprintf(stdout, "  [%d] %s  (cloudId=%s)\n", i+1, label, r.ID)
+	}
+	reader := bufio.NewReader(stdin)
+	const maxAttempts = 3
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		if _, err := io.WriteString(stdout, "Site number [1]: "); err != nil {
+			return accessibleResourceEntry{}, err
+		}
+		raw, err := reader.ReadString('\n')
+		if err != nil && !errors.Is(err, io.EOF) {
+			return accessibleResourceEntry{}, err
+		}
+		answer := strings.TrimSpace(raw)
+		if answer == "" {
+			// Two cases: operator hit enter (default to 1) OR stdin is
+			// closed/exhausted. Either way the "default to 1" behaviour
+			// is operator-friendly and matches the prompt text.
+			if errors.Is(err, io.EOF) && raw == "" {
+				// Truly empty stdin — accept default and bail before we
+				// loop forever on the same EOF.
+				return resources[0], nil
+			}
+			return resources[0], nil
+		}
+		idx, err := strconv.Atoi(answer)
+		if err != nil || idx < 1 || idx > len(resources) {
+			fmt.Fprintf(stdout, "Invalid choice %q; pick a number between 1 and %d.\n", answer, len(resources))
+			continue
+		}
+		return resources[idx-1], nil
+	}
+	return accessibleResourceEntry{}, fmt.Errorf("could not read a valid site selection after %d attempts", maxAttempts)
 }
 
 func runIntegrationSearch(args []string, stdout io.Writer) error {
@@ -1839,6 +2017,110 @@ func runIntegrationAdopt(args []string, stdin io.Reader, stdout io.Writer) error
 	} else {
 		fmt.Fprintf(stdout, "%s adopted into workspace %s (connectionId=%s)\n", provider, record.Name, boundConnectionID)
 	}
+	return nil
+}
+
+// runIntegrationSetMetadata is a general-purpose verb for writing operator-
+// controlled connection metadata. Today the Atlassian post-OAuth picker
+// (`integration connect jira`) uses the same endpoint to set `cloudId` and
+// `baseUrl` automatically. This verb exists for the cases the auto-picker
+// doesn't cover: changing metadata post-connect, setting non-Atlassian
+// connection-level config (e.g. linear `team_id`, a custom API host), or
+// scripting metadata writes from CI.
+//
+// Cloud forwards the payload to `nango.setMetadata` (full replacement, not
+// merge). v1 accepts flat KEY=VALUE pairs only; nested keys are documented
+// as a future enhancement so the prompt and confirmation stay legible.
+func runIntegrationSetMetadata(args []string, stdin io.Reader, stdout io.Writer) error {
+	fs := flag.NewFlagSet("integration set-metadata", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	workspaceName := fs.String("workspace", "", "workspace name or id")
+	cloudAPIURL := fs.String("cloud-api-url", envOrDefault("RELAYFILE_CLOUD_API_URL", defaultCloudAPIURL), "Relayfile Cloud API URL")
+	yes := fs.Bool("yes", false, "skip confirmation")
+	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
+		"workspace":     true,
+		"cloud-api-url": true,
+		"yes":           false,
+	})); err != nil {
+		return err
+	}
+	rest := fs.Args()
+	if len(rest) < 2 {
+		return errors.New("usage: relayfile integration set-metadata PROVIDER KEY=VALUE [KEY=VALUE...] [--workspace NAME] [--yes]\n\n" +
+			"  v1 accepts flat KEY=VALUE pairs only; nested keys are not yet supported.\n" +
+			"  Example: relayfile integration set-metadata jira cloudId=abc-123 baseUrl=https://foo.atlassian.net")
+	}
+	provider := normalizeProviderID(rest[0])
+	if err := validateLocalProviderID(provider); err != nil {
+		return err
+	}
+	metadata := map[string]any{}
+	for _, raw := range rest[1:] {
+		key, value, ok := strings.Cut(raw, "=")
+		if !ok {
+			return fmt.Errorf("metadata argument %q is not in KEY=VALUE form", raw)
+		}
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		if key == "" {
+			return fmt.Errorf("metadata argument %q has an empty key", raw)
+		}
+		if strings.ContainsAny(key, ".[]") {
+			return fmt.Errorf("metadata key %q must be flat; nested keys are not supported yet", key)
+		}
+		metadata[key] = value
+	}
+	record, err := resolveWorkspaceRecord(strings.TrimSpace(*workspaceName))
+	if err != nil {
+		return err
+	}
+	if !*yes {
+		fmt.Fprintf(stdout, "About to set %s metadata in workspace %q:\n", provider, record.Name)
+		// Print keys in alphabetical order so the confirmation is stable
+		// across runs and easy to eyeball.
+		keys := make([]string, 0, len(metadata))
+		for k := range metadata {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			fmt.Fprintf(stdout, "  %s = %v\n", k, metadata[k])
+		}
+		answer, err := promptLine(stdin, stdout, "Continue? [y/N]: ")
+		if err != nil {
+			return err
+		}
+		answer = strings.ToLower(strings.TrimSpace(answer))
+		if answer != "y" && answer != "yes" {
+			fmt.Fprintln(stdout, "Aborted")
+			return nil
+		}
+	}
+	cloudCreds, err := ensureCloudCredentials(strings.TrimSpace(*cloudAPIURL), "", 5*time.Minute, false, io.Discard)
+	if err != nil {
+		return err
+	}
+	joined, err := joinWorkspaceViaCloud(cloudCreds, record.ID, record.AgentName, record.Scopes)
+	if err != nil {
+		return err
+	}
+	client, err := newAPIClient(cloudCreds.APIURL, joined.Token)
+	if err != nil {
+		return err
+	}
+	bodyBytes, err := json.Marshal(map[string]any{"metadata": metadata})
+	if err != nil {
+		return err
+	}
+	if _, _, err := client.do(
+		context.Background(),
+		http.MethodPut,
+		fmt.Sprintf("/api/v1/workspaces/%s/integrations/%s/metadata", url.PathEscape(record.ID), url.PathEscape(provider)),
+		bodyBytes,
+	); err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "%s metadata updated in workspace %s\n", provider, record.Name)
 	return nil
 }
 
