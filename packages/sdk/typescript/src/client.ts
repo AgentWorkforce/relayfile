@@ -181,6 +181,7 @@ interface CachedChangeRecord {
 const changeStreamManagers = new WeakMap<RelayFileClient, Map<string, RelayFileChangeStreamManager>>();
 const changeLogCaches = new WeakMap<RelayFileClient, Map<string, WorkspaceChangeLogCache>>();
 const changeLogSettings = new WeakMap<RelayFileClient, NormalizedChangeLogOptions>();
+const pendingChangeHydrations = new WeakMap<RelayFileClient, Map<string, Map<string, Promise<CachedChangeRecord | null>>>>();
 
 function createM2NotImplementedError(feature: string): Error & { code: "M2_NOT_IMPLEMENTED" } {
   const error = new Error(`M2_NOT_IMPLEMENTED: ${feature} is reserved for proactive runtime M2.`) as Error & {
@@ -603,11 +604,28 @@ class RelayFileChangeStreamManager {
     if (!shouldPublishFilesystemEvent(event)) {
       return null;
     }
-    const cached = getChangeLogCache(this.client, this.workspaceId).get(normalizeChangeEventId(event, this.workspaceId));
+    const eventId = normalizeChangeEventId(event, this.workspaceId);
+    const cache = getChangeLogCache(this.client, this.workspaceId);
+    const cached = cache.get(eventId);
     if (cached) {
       return toChangeEvent(this.client, cached);
     }
-    const record = await materializeChangeRecord(this.client, this.workspaceId, event);
+    const hydrations = getPendingChangeHydrations(this.client, this.workspaceId);
+    const pending = hydrations.get(eventId);
+    if (pending) {
+      const record = await pending;
+      return record ? toChangeEvent(this.client, record) : null;
+    }
+    const inFlight = materializeChangeRecord(this.client, this.workspaceId, event);
+    hydrations.set(eventId, inFlight);
+    let record: CachedChangeRecord | null;
+    try {
+      record = await inFlight;
+    } finally {
+      if (hydrations.get(eventId) === inFlight) {
+        hydrations.delete(eventId);
+      }
+    }
     return record ? toChangeEvent(this.client, record) : null;
   }
 
@@ -713,6 +731,24 @@ function getChangeLogCache(client: RelayFileClient, workspaceId: string): Worksp
   const cache = new WorkspaceChangeLogCache(settings.retentionMs, settings.maxEntries);
   workspaceCaches.set(workspaceId, cache);
   return cache;
+}
+
+function getPendingChangeHydrations(
+  client: RelayFileClient,
+  workspaceId: string
+): Map<string, Promise<CachedChangeRecord | null>> {
+  let workspaceHydrations = pendingChangeHydrations.get(client);
+  if (!workspaceHydrations) {
+    workspaceHydrations = new Map();
+    pendingChangeHydrations.set(client, workspaceHydrations);
+  }
+  const existing = workspaceHydrations.get(workspaceId);
+  if (existing) {
+    return existing;
+  }
+  const hydrations = new Map<string, Promise<CachedChangeRecord | null>>();
+  workspaceHydrations.set(workspaceId, hydrations);
+  return hydrations;
 }
 
 function mergeChangeRecords(records: CachedChangeRecord[]): CachedChangeRecord[] {
@@ -1369,9 +1405,22 @@ export class RelayFileClient {
 
   async getResourceAtEvent(eventId: string): Promise<ResourceAtEventResult> {
     const workspaceId = await this.resolveWorkspaceId();
-    const cached = getChangeLogCache(this, workspaceId).get(eventId);
+    const cache = getChangeLogCache(this, workspaceId);
+    const cached = cache.get(eventId);
     if (cached && cached.resource.data !== null) {
       return cached.resource;
+    }
+    const pending = getPendingChangeHydrations(this, workspaceId).get(eventId);
+    if (pending) {
+      try {
+        await pending;
+      } catch {
+        // Fall through to the retained lookup endpoint if live hydration fails.
+      }
+      const hydrated = cache.get(eventId);
+      if (hydrated && hydrated.resource.data !== null) {
+        return hydrated.resource;
+      }
     }
     return this.request<ResourceAtEventResult>({
       method: "GET",
