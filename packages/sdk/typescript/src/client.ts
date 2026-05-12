@@ -383,7 +383,7 @@ class WorkspaceChangeLogCache {
     private readonly maxEntries = DEFAULT_CHANGE_LOG_MAX_ENTRIES
   ) {}
 
-  record(record: CachedChangeRecord): void {
+  record(record: CachedChangeRecord): CachedChangeRecord {
     this.prune(Date.now());
     const existing = this.byId.get(record.wire.id);
     const merged = existing
@@ -399,7 +399,7 @@ class WorkspaceChangeLogCache {
       if (index >= 0) {
         this.entries[index] = merged;
       }
-      return;
+      return merged;
     }
     this.entries.push(merged);
     this.byId.set(merged.wire.id, merged);
@@ -409,6 +409,7 @@ class WorkspaceChangeLogCache {
         this.byId.delete(removed.wire.id);
       }
     }
+    return merged;
   }
 
   get(eventId: string): CachedChangeRecord | undefined {
@@ -1746,8 +1747,7 @@ export class RelayFileClient {
       },
       storedAt: Date.now()
     };
-    getChangeLogCache(this, workspaceId).record(record);
-    return record;
+    return getChangeLogCache(this, workspaceId).record(record);
   }
 
   private async primeReplayCache(options: ChangeStreamConnectionOptions): Promise<void> {

@@ -16,7 +16,7 @@ The M2 TypeScript SDK behavior is:
 The proactive runtime gateway writes final-failure events into the workspace filesystem at:
 
 ```text
-/_dlq/<workspace>/<event-id>.json
+/_dlq/<event-id>.json
 ```
 
 This path scheme is the cross-repo contract between the gateway and `relayfile`.
@@ -25,8 +25,7 @@ Requirements:
 
 - The path is treated like a normal workspace file path for write, read, list, and delete semantics.
 - The gateway owns writes to `/_dlq/**`; agents and tooling may inspect, replay, or purge these files later.
-- The workspace path segment mirrors the gateway's write key so DLQ artifacts stay partitioned by workspace inside a shared mount.
-- Workspace identity is also duplicated in the JSON payload and surrounding runtime metadata for downstream replay tooling.
+- Workspace identity lives in the file payload and surrounding runtime metadata rather than in the filename itself.
 
 ## `subscribe(globs[], onChange)` Contract
 
@@ -65,6 +64,7 @@ The `ChangeEvent` contract is notification-first. It is not the raw provider pay
 type ChangeEvent = {
   id: string;
   workspace: string;
+  agentId?: string;
   type: "relayfile.changed";
   occurredAt: string;
   resource: {
@@ -111,6 +111,7 @@ type ReplayOptions =
 
 type ChangeStreamConnectionOptions = ReplayOptions & {
   workspaceId: string;
+  aclToken?: string;
 };
 
 open(options: ChangeStreamConnectionOptions): ChangeStreamConnection
@@ -147,6 +148,15 @@ The SDK assumes the backend retains enough change-log data to satisfy these APIs
 for at least the configured retention window. The local SDK cache mirrors the
 same contract opportunistically for already-delivered events, but durable
 retention remains a backend responsibility.
+
+The retained lookup HTTP routes consumed by the SDK are:
+
+- `GET /v1/workspaces/{id}/fs/changes?since=<iso>`
+- `GET /v1/workspaces/{id}/fs/changes?last=<n>`
+- `GET /v1/workspaces/{id}/fs/changes/resource?eventId=<id>`
+
+These are the backend contract surfaces the SDK expects when a cold-cache
+lookup cannot be satisfied locally.
 
 For the local SDK mirror, `RelayFileClient` accepts:
 

@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- Document the proactive runtime relayfile contract in `docs/proactive-runtime-contract.md`, including the gateway DLQ path scheme `/_dlq/<workspace>/<event-id>.json`, the `subscribe(globs, onChange)` and `getResourceAtEvent(eventId)` contracts, the canonical `EventSummary` adapter shape, and the reserved change-stream transport bootstrap types.
+- Document the proactive runtime relayfile contract in `docs/proactive-runtime-contract.md`, including the gateway DLQ path scheme `/_dlq/<event-id>.json`, the `subscribe(globs, onChange)` and `getResourceAtEvent(eventId)` contracts, the canonical `EventSummary` adapter shape, and the reserved change-stream transport bootstrap types.
 - Ship the M2 proactive-runtime change surfaces on `RelayFileClient`: `subscribe(globs, onChange, options?)`, `open(options)`, `getResourceAtEvent(eventId)`, `listChangesSince(isoTimestamp)`, and `listLastNChanges(limit)` now use the shared WebSocket transport, retained change-log lookups, and event expansion hooks.
 - Add configurable local per-workspace retained-change cache settings via `new RelayFileClient({ changeLog: { retentionMs, maxEntries } })` and preserve hydrated resource payloads when retained replay refreshes an already-cached event.
 
