@@ -745,6 +745,25 @@ func normalizeProviderID(value string) string {
 	}
 }
 
+func validateLocalProviderID(provider string) error {
+	if provider == "" {
+		return errors.New("provider is required")
+	}
+	for _, ch := range provider {
+		if ch >= 'a' && ch <= 'z' {
+			continue
+		}
+		if ch >= '0' && ch <= '9' {
+			continue
+		}
+		if ch == '-' || ch == '_' {
+			continue
+		}
+		return fmt.Errorf("invalid provider %q (use lowercase letters, numbers, dashes, or underscores)", provider)
+	}
+	return nil
+}
+
 func normalizeIntegrationBackend(value string) (string, error) {
 	value = strings.ToLower(strings.TrimSpace(value))
 	switch value {
@@ -1727,6 +1746,9 @@ func runIntegrationAdopt(args []string, stdin io.Reader, stdout io.Writer) error
 		return errors.New("usage: relayfile integration adopt PROVIDER --connection-id ID [--workspace NAME] [--provider-config-key KEY] [--yes]")
 	}
 	provider := normalizeProviderID(fs.Arg(0))
+	if err := validateLocalProviderID(provider); err != nil {
+		return err
+	}
 	trimmedConnectionID := strings.TrimSpace(*connectionID)
 	if trimmedConnectionID == "" {
 		return errors.New("--connection-id is required")
@@ -1806,7 +1828,10 @@ func runIntegrationAdopt(args []string, stdin io.Reader, stdout io.Writer) error
 	// Remove any disconnect marker left from a prior `disconnect` so the
 	// status probe doesn't keep reporting the workspace as disconnected.
 	if record.LocalDir != "" {
-		_ = os.Remove(filepath.Join(record.LocalDir, ".relay", "disconnected", provider+".json"))
+		markerPath := filepath.Join(record.LocalDir, ".relay", "disconnected", provider+".json")
+		if err := os.Remove(markerPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("remove disconnect marker: %w", err)
+		}
 	}
 	replaced := strings.TrimSpace(parsed.ReplacedConnectionID)
 	if replaced != "" {

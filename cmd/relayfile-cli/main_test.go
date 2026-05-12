@@ -2143,9 +2143,56 @@ func newAdoptTestServer(t *testing.T, adoptHandler func(http.ResponseWriter, *ht
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.URL.Path == "/api/v1/auth/token/refresh":
+			if r.Method != http.MethodPost {
+				t.Errorf("expected refresh POST, got %s", r.Method)
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			if got := r.Header.Get("Authorization"); got != "Bearer cld_old" {
+				t.Errorf("unexpected refresh Authorization: %q", got)
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			var body cloudTokenRefreshRequest
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode refresh body failed: %v", err)
+				http.Error(w, "bad request", http.StatusBadRequest)
+				return
+			}
+			if body.RefreshToken != "refresh_123" {
+				t.Errorf("unexpected refresh token: %q", body.RefreshToken)
+				http.Error(w, "bad request", http.StatusBadRequest)
+				return
+			}
 			seen["refresh"]++
 			_, _ = w.Write([]byte(`{"apiUrl":"` + server.URL + `","accessToken":"cld_new","refreshToken":"refresh_123","accessTokenExpiresAt":"2030-05-01T00:00:00Z"}`))
 		case r.URL.Path == "/api/v1/workspaces/ws_123/join":
+			if r.Method != http.MethodPost {
+				t.Errorf("expected join POST, got %s", r.Method)
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			if got := r.Header.Get("Authorization"); got != "Bearer cld_new" {
+				t.Errorf("unexpected join Authorization: %q", got)
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			var body cloudWorkspaceJoinRequest
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode join body failed: %v", err)
+				http.Error(w, "bad request", http.StatusBadRequest)
+				return
+			}
+			if body.AgentName != "relayfile-cli" {
+				t.Errorf("unexpected join agentName: %q", body.AgentName)
+				http.Error(w, "bad request", http.StatusBadRequest)
+				return
+			}
+			if len(body.Scopes) != len(defaultJoinScopes) || body.Scopes[0] != defaultJoinScopes[0] || body.Scopes[1] != defaultJoinScopes[1] {
+				t.Errorf("unexpected join scopes: %#v", body.Scopes)
+				http.Error(w, "bad request", http.StatusBadRequest)
+				return
+			}
 			seen["join"]++
 			_, _ = w.Write([]byte(`{"workspaceId":"ws_123","token":"rf_join","relayfileUrl":"` + server.URL + `"}`))
 		case r.URL.Path == "/api/v1/workspaces/ws_123/integrations/github/adopt" && r.Method == http.MethodPost:
@@ -2186,6 +2233,18 @@ func setupAdoptWorkspace(t *testing.T) (workspaceRecord, string) {
 	return record, localDir
 }
 
+func pointAdoptCloudCredentials(t *testing.T, apiURL string) {
+	t.Helper()
+	creds, err := loadCloudCredentials()
+	if err != nil {
+		t.Fatalf("loadCloudCredentials failed: %v", err)
+	}
+	creds.APIURL = apiURL
+	if err := saveCloudCredentials(creds); err != nil {
+		t.Fatalf("saveCloudCredentials(update) failed: %v", err)
+	}
+}
+
 func TestIntegrationAdoptForwardsConnectionIdAndPersistsLocalState(t *testing.T) {
 	// Happy path: operator runs `relayfile integration adopt github
 	// --connection-id conn_adopt` against a workspace whose row Cloud has
@@ -2212,17 +2271,10 @@ func TestIntegrationAdoptForwardsConnectionIdAndPersistsLocalState(t *testing.T)
 		_, _ = w.Write([]byte(`{"ok":true,"connectionId":"conn_adopt_new"}`))
 	})
 	defer server.Close()
-	creds, err := loadCloudCredentials()
-	if err != nil {
-		t.Fatalf("loadCloudCredentials failed: %v", err)
-	}
-	creds.APIURL = server.URL
-	if err := saveCloudCredentials(creds); err != nil {
-		t.Fatalf("saveCloudCredentials(update) failed: %v", err)
-	}
+	pointAdoptCloudCredentials(t, server.URL)
 
 	var stdout bytes.Buffer
-	err = run([]string{
+	err := run([]string{
 		"integration", "adopt", "github",
 		"--connection-id", "conn_adopt_new",
 		"--provider-config-key", "github-relay",
@@ -2261,9 +2313,7 @@ func TestIntegrationAdoptReportsReplacedConnection(t *testing.T) {
 		_, _ = w.Write([]byte(`{"ok":true,"connectionId":"conn_new","replacedConnectionId":"conn_old_dead"}`))
 	})
 	defer server.Close()
-	creds, _ := loadCloudCredentials()
-	creds.APIURL = server.URL
-	_ = saveCloudCredentials(creds)
+	pointAdoptCloudCredentials(t, server.URL)
 
 	var stdout bytes.Buffer
 	if err := run([]string{
@@ -2305,9 +2355,7 @@ func TestIntegrationAdoptReturnsErrorOnConflictAndPreservesLocalState(t *testing
 		_, _ = w.Write([]byte(`{"ok":false,"code":"existing_connection_live_or_unknown","error":"Workspace ws_123 already has a live github connection (conn_live). Disconnect it first."}`))
 	})
 	defer server.Close()
-	creds, _ := loadCloudCredentials()
-	creds.APIURL = server.URL
-	_ = saveCloudCredentials(creds)
+	pointAdoptCloudCredentials(t, server.URL)
 
 	var stdout bytes.Buffer
 	err := run([]string{
@@ -2352,6 +2400,22 @@ func TestIntegrationAdoptRequiresConnectionID(t *testing.T) {
 	}
 }
 
+func TestIntegrationAdoptRejectsUnsafeProvider(t *testing.T) {
+	var stdout bytes.Buffer
+	err := run([]string{
+		"integration", "adopt", "../github",
+		"--connection-id", "conn_adopt",
+		"--workspace", "demo",
+		"--yes",
+	}, strings.NewReader(""), &stdout, &stdout)
+	if err == nil {
+		t.Fatalf("expected error for unsafe provider; stdout=%q", stdout.String())
+	}
+	if !strings.Contains(err.Error(), "invalid provider") {
+		t.Fatalf("expected invalid provider error, got: %v", err)
+	}
+}
+
 func TestIntegrationAdoptClearsDisconnectMarker(t *testing.T) {
 	// After a `disconnect` the CLI writes a marker file under
 	// .relay/disconnected/{provider}.json. Adopting the provider again
@@ -2370,9 +2434,7 @@ func TestIntegrationAdoptClearsDisconnectMarker(t *testing.T) {
 		_, _ = w.Write([]byte(`{"ok":true,"connectionId":"conn_adopt"}`))
 	})
 	defer server.Close()
-	creds, _ := loadCloudCredentials()
-	creds.APIURL = server.URL
-	_ = saveCloudCredentials(creds)
+	pointAdoptCloudCredentials(t, server.URL)
 
 	var stdout bytes.Buffer
 	if err := run([]string{
