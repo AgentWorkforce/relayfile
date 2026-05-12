@@ -721,89 +721,81 @@ describe("RelayFileClient — existing methods", () => {
     });
 
     it("honors configurable local change-log retention before falling back to the retained endpoint", async () => {
-      vi.useFakeTimers();
-      try {
-        const fetchImpl = vi.fn(async (url: string) => {
-          if (url.includes("/fs/file?path=%2Flinear%2Fissues%2FENG-91.json")) {
-            return {
-              ok: true,
-              status: 200,
-              headers: new Headers({ "content-type": "application/json" }),
-              json: async () => ({
-                path: "/linear/issues/ENG-91.json",
-                revision: "rev_1",
-                contentType: "application/json",
-                content: JSON.stringify({
-                  id: "ENG-91",
-                  provider: "linear",
-                  kind: "linear.issue",
-                  title: "ENG-91",
-                }),
+      const fetchImpl = vi.fn(async (url: string) => {
+        if (url.includes("/fs/file?path=%2Flinear%2Fissues%2FENG-91.json")) {
+          return {
+            ok: true,
+            status: 200,
+            headers: new Headers({ "content-type": "application/json" }),
+            json: async () => ({
+              path: "/linear/issues/ENG-91.json",
+              revision: "rev_1",
+              contentType: "application/json",
+              content: JSON.stringify({
+                id: "ENG-91",
+                provider: "linear",
+                kind: "linear.issue",
+                title: "ENG-91",
               }),
-              text: async () => "",
-            } as unknown as Response;
-          }
-          if (url.includes("/fs/changes/resource?eventId=evt_retention_1")) {
-            return {
-              ok: true,
-              status: 200,
-              headers: new Headers({ "content-type": "application/json" }),
-              json: async () => ({
-                path: "/linear/issues/ENG-91.json",
-                data: { id: "ENG-91", title: "ENG-91", from: "retained-endpoint" },
-                digest: "sha256:retained",
-              }),
-              text: async () => "",
-            } as unknown as Response;
-          }
-          throw new Error(`Unexpected fetch URL: ${url}`);
-        });
-        const client = new RelayFileClient({
-          baseUrl: "https://relay.test",
-          token: makeWorkspaceToken("ws_acme", "support-agent"),
-          fetchImpl: fetchImpl as unknown as typeof fetch,
-          retry: { maxRetries: 0 },
-          changeLog: { retentionMs: 10, maxEntries: 5 },
-        });
+            }),
+            text: async () => "",
+          } as unknown as Response;
+        }
+        if (url.includes("/fs/changes/resource?eventId=evt_retention_1")) {
+          return {
+            ok: true,
+            status: 200,
+            headers: new Headers({ "content-type": "application/json" }),
+            json: async () => ({
+              path: "/linear/issues/ENG-91.json",
+              data: { id: "ENG-91", title: "ENG-91", from: "retained-endpoint" },
+              digest: "sha256:retained",
+            }),
+            text: async () => "",
+          } as unknown as Response;
+        }
+        throw new Error(`Unexpected fetch URL: ${url}`);
+      });
+      const client = new RelayFileClient({
+        baseUrl: "https://relay.test",
+        token: makeWorkspaceToken("ws_acme", "support-agent"),
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+        retry: { maxRetries: 0 },
+        changeLog: { retentionMs: 0, maxEntries: 5 },
+      });
 
-        const handle = client.subscribe(
-          ["/linear/issues/**"],
-          () => {
-            // no-op
-          },
-          { coalesce: "none" },
-        );
+      const handle = client.subscribe(
+        ["/linear/issues/**"],
+        () => {
+          // no-op
+        },
+        { coalesce: "none" },
+      );
 
-        await vi.advanceTimersByTimeAsync(0);
-        const socket = ProactiveMockWebSocket.instances[0]!;
-        socket.emit("open", {});
-        socket.emit("message", {
-          data: JSON.stringify({
-            eventId: "evt_retention_1",
-            type: "file.updated",
-            path: "/linear/issues/ENG-91.json",
-            revision: "rev_1",
-            timestamp: "2026-05-11T00:00:00.000Z",
-          } satisfies FilesystemEvent),
-        });
-
-        await flushMicrotasks();
-        await flushMicrotasks();
-        expect(fetchImpl).toHaveBeenCalledTimes(1);
-
-        await vi.advanceTimersByTimeAsync(20);
-
-        await expect(client.getResourceAtEvent("evt_retention_1")).resolves.toMatchObject({
+      const socket = await waitForWebSocket();
+      socket.emit("open", {});
+      socket.emit("message", {
+        data: JSON.stringify({
+          eventId: "evt_retention_1",
+          type: "file.updated",
           path: "/linear/issues/ENG-91.json",
-          data: { id: "ENG-91", title: "ENG-91", from: "retained-endpoint" },
-          digest: "sha256:retained",
-        });
-        expect(fetchImpl).toHaveBeenCalledTimes(2);
+          revision: "rev_1",
+          timestamp: "2026-05-11T00:00:00.000Z",
+        } satisfies FilesystemEvent),
+      });
 
-        await handle.unsubscribe();
-      } finally {
-        vi.useRealTimers();
-      }
+      await flushMicrotasks();
+      await flushMicrotasks();
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+
+      await expect(client.getResourceAtEvent("evt_retention_1")).resolves.toMatchObject({
+        path: "/linear/issues/ENG-91.json",
+        data: { id: "ENG-91", title: "ENG-91", from: "retained-endpoint" },
+        digest: "sha256:retained",
+      });
+      expect(fetchImpl).toHaveBeenCalledTimes(2);
+
+      await handle.unsubscribe();
     });
   });
 
