@@ -674,6 +674,68 @@ export class WorkspaceHandle {
     this._pendingConnections.delete(provider)
   }
 
+  /**
+   * Bind an existing Nango connection to this workspace + provider slot
+   * without going through the OAuth re-mint flow. Use this when an operator
+   * has already minted the connection out-of-band (Nango UI, third-party
+   * setup) and just wants Cloud to start routing sync webhooks for it.
+   *
+   * The Cloud-side adopt route validates that the Nango connection exists
+   * upstream and that its end-user/workspace tag matches this workspace.
+   * On success returns the bound `connectionId` and, when a stale prior
+   * row was atomically replaced, a `replacedConnectionId` so callers can
+   * surface that a migration happened.
+   *
+   * Failure modes (HTTP body carries `code`):
+   *   - `connection_not_found` (404): Nango doesn't know this connectionId
+   *   - `workspace_mismatch` (409): connection belongs to a different
+   *     workspace; the body includes `pathWorkspaceId` and
+   *     `connectionWorkspaceId`
+   *   - `existing_connection_live_or_unknown` (409): a different
+   *     connection is already bound here and is either still live
+   *     upstream or has indeterminate state; operator must disconnect
+   *     first
+   */
+  async adoptIntegration(
+    provider: WorkspaceIntegrationProvider,
+    connectionId: string,
+    options: { providerConfigKey?: string } = {}
+  ): Promise<{ connectionId: string; replacedConnectionId?: string }> {
+    assertProvider(provider)
+    const trimmedConnectionId = connectionId?.trim()
+    if (!trimmedConnectionId) {
+      throw new Error("connectionId is required to adopt an integration")
+    }
+    const body: Record<string, unknown> = { connectionId: trimmedConnectionId }
+    const providerConfigKey = options.providerConfigKey?.trim()
+    if (providerConfigKey) {
+      body.providerConfigKey = providerConfigKey
+    }
+    const response = (await this._setup.requestJson({
+      operation: "adoptIntegration",
+      method: "POST",
+      path: `api/v1/workspaces/${encodeURIComponent(this.workspaceId)}/integrations/${encodeURIComponent(provider)}/adopt`,
+      body,
+      tokenProvider: async () => this.getOrRefreshToken()
+    })) as {
+      connectionId?: unknown
+      replacedConnectionId?: unknown
+    }
+    const boundConnectionId =
+      typeof response.connectionId === "string" && response.connectionId.trim()
+        ? response.connectionId.trim()
+        : trimmedConnectionId
+    const replacedConnectionId =
+      typeof response.replacedConnectionId === "string" &&
+      response.replacedConnectionId.trim()
+        ? response.replacedConnectionId.trim()
+        : undefined
+    this._pendingConnections.delete(provider)
+    return replacedConnectionId
+      ? { connectionId: boundConnectionId, replacedConnectionId }
+      : { connectionId: boundConnectionId }
+  }
+
   getToken(): string {
     return this._token
   }
