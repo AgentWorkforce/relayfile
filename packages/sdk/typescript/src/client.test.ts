@@ -31,6 +31,14 @@ import type {
   WritebackItem,
   AckWritebackInput,
   AckWritebackResponse,
+  ChangeEvent,
+  ChangeStreamConnection,
+  Expansion,
+  EventSummary,
+  ReplayOptions,
+  ResourceAtEventResult,
+  SubscribeOptions,
+  Subscription,
 } from "./types.js";
 
 // ---------------------------------------------------------------------------
@@ -48,10 +56,83 @@ function mockFetch(body: unknown, status = 200, headers: Record<string, string> 
   } as unknown as Response);
 }
 
-function makeClient(fetchImpl: typeof fetch, opts?: { retry?: { maxRetries: number } }) {
+function makeWorkspaceToken(workspaceId = "ws_acme", agentName = "agent-test"): string {
+  const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString("base64url");
+  return `${encode({ alg: "HS256", typ: "JWT" })}.${encode({
+    workspace_id: workspaceId,
+    agent_name: agentName,
+    aud: ["relayfile"],
+  })}.sig`;
+}
+
+function flushMicrotasks(): Promise<void> {
+  return Promise.resolve().then(() => undefined).then(() => undefined);
+}
+
+async function waitForWebSocket(): Promise<ProactiveMockWebSocket> {
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    const socket = ProactiveMockWebSocket.instances[0];
+    if (socket) {
+      return socket;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  throw new Error("Timed out waiting for the proactive runtime websocket.");
+}
+
+async function waitForExpectation(check: () => void): Promise<void> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    try {
+      check();
+      return;
+    } catch (error) {
+      lastError = error;
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+  }
+  throw lastError;
+}
+
+class ProactiveMockWebSocket {
+  static instances: ProactiveMockWebSocket[] = [];
+
+  readonly url: string;
+  sent: string[] = [];
+  private readonly listeners = new Map<string, Set<(event: any) => void>>();
+
+  constructor(url: string) {
+    this.url = url;
+    ProactiveMockWebSocket.instances.push(this);
+  }
+
+  addEventListener(type: string, handler: (event: any) => void): void {
+    if (!this.listeners.has(type)) {
+      this.listeners.set(type, new Set());
+    }
+    this.listeners.get(type)!.add(handler);
+  }
+
+  send(data: string): void {
+    this.sent.push(data);
+  }
+
+  close = vi.fn();
+
+  emit(type: string, event: any): void {
+    for (const handler of this.listeners.get(type) ?? []) {
+      handler(event);
+    }
+  }
+}
+
+function makeClient(
+  fetchImpl: typeof fetch,
+  opts?: { retry?: { maxRetries: number }; token?: string }
+) {
   return new RelayFileClient({
     baseUrl: "https://relay.test",
-    token: "tok_test",
+    token: opts?.token ?? "tok_test",
     fetchImpl,
     retry: opts?.retry ?? { maxRetries: 0 },
   });
@@ -62,6 +143,950 @@ function makeClient(fetchImpl: typeof fetch, opts?: { retry?: { maxRetries: numb
 // ---------------------------------------------------------------------------
 
 describe("RelayFileClient — existing methods", () => {
+  describe("proactive runtime change APIs", () => {
+    beforeEach(() => {
+      ProactiveMockWebSocket.instances = [];
+      Object.defineProperty(globalThis, "WebSocket", {
+        configurable: true,
+        writable: true,
+        value: ProactiveMockWebSocket as unknown as typeof WebSocket,
+      });
+    });
+
+    it("exports ChangeEvent and Subscription-compatible shapes", () => {
+      const handle: Subscription = {
+        async unsubscribe() {
+          // no-op
+        },
+      };
+
+      const event: ChangeEvent = {
+        id: "evt_1",
+        workspace: "ws_acme",
+        agentId: "support-agent",
+        type: "relayfile.changed",
+        occurredAt: "2026-05-11T00:00:00.000Z",
+        resource: {
+          path: "/linear/issues/ENG-412.json",
+          kind: "linear.issue",
+          id: "ENG-412",
+          provider: "linear",
+        },
+        summary: {
+          title: "ENG-412",
+          status: "In Progress",
+          fieldsChanged: ["status"],
+        },
+        expand: async () =>
+          ({
+            level: "summary",
+            path: "/linear/issues/ENG-412.json",
+            summary: {
+              title: "ENG-412",
+              status: "In Progress",
+              fieldsChanged: ["status"],
+            },
+          }) as Expansion,
+        digest: "sha256:abc123",
+      };
+
+      const resource: ResourceAtEventResult = {
+        path: event.resource.path,
+        data: { id: "ENG-412" },
+        digest: event.digest ?? "sha256:abc123",
+      };
+      const summary: EventSummary = event.summary;
+      const replay: ReplayOptions = { replayOnStart: "last:25" };
+      const subscribeOptions: SubscribeOptions = {
+        coalesce: "fire-once",
+        pathScope: ["/linear/issues/**"],
+        drainMs: 5_000,
+      };
+      const connection: ChangeStreamConnection = {
+        ready: Promise.resolve(),
+        async unsubscribe() {
+          // no-op
+        },
+      };
+
+      expect(typeof handle.unsubscribe).toBe("function");
+      expect(event.type).toBe("relayfile.changed");
+      expect(resource.path).toBe("/linear/issues/ENG-412.json");
+      expect(summary.title).toBe("ENG-412");
+      expect(replay.replayOnStart).toBe("last:25");
+      expect(subscribeOptions.coalesce).toBe("fire-once");
+      expect(connection.ready).toBeInstanceOf(Promise);
+    });
+
+    it("subscribe multiplexes one workspace websocket and materializes matching change events", async () => {
+      const fetchImpl = vi.fn(async (url: string) => {
+        if (url.includes("/fs/file?path=%2Flinear%2Fissues%2FENG-412.json")) {
+          return {
+            ok: true,
+            status: 200,
+            headers: new Headers({ "content-type": "application/json" }),
+            json: async () => ({
+              path: "/linear/issues/ENG-412.json",
+              revision: "rev_2",
+              contentType: "application/json",
+              content: JSON.stringify({
+                id: "ENG-412",
+                provider: "linear",
+                kind: "linear.issue",
+                title: "ENG-412",
+                status: "In Progress",
+              }),
+            }),
+            text: async () => "",
+          } as unknown as Response;
+        }
+        throw new Error(`Unexpected fetch URL: ${url}`);
+      });
+      const client = makeClient(fetchImpl as unknown as typeof fetch, {
+        token: makeWorkspaceToken("ws_acme", "support-agent"),
+      });
+      const issueHandler = vi.fn();
+      const broadHandler = vi.fn();
+
+      const issueHandle = client.subscribe(
+        ["/linear/issues/**"],
+        issueHandler,
+        { coalesce: "none", pathScope: ["/linear/issues/**"] },
+      );
+      const broadHandle = client.subscribe(
+        ["/linear/**"],
+        broadHandler,
+        { coalesce: "none" },
+      );
+
+      const socket = await waitForWebSocket();
+      expect(ProactiveMockWebSocket.instances).toHaveLength(1);
+      socket.emit("open", {});
+      socket.emit("message", {
+        data: JSON.stringify({
+          eventId: "evt_linear_1",
+          type: "file.updated",
+          path: "/linear/issues/ENG-412.json",
+          revision: "rev_2",
+          timestamp: "2026-05-11T00:00:00.000Z",
+        } satisfies FilesystemEvent),
+      });
+
+      await waitForExpectation(() => {
+        expect(issueHandler).toHaveBeenCalledTimes(1);
+        expect(broadHandler).toHaveBeenCalledTimes(1);
+      });
+      expect(issueHandler.mock.calls[0]?.[0]).toMatchObject({
+        id: "evt_linear_1",
+        workspace: "ws_acme",
+        agentId: "support-agent",
+        type: "relayfile.changed",
+        resource: {
+          path: "/linear/issues/ENG-412.json",
+          kind: "linear.issue",
+          id: "ENG-412",
+          provider: "linear",
+        },
+        summary: {
+          title: "ENG-412",
+          status: "In Progress",
+        },
+      });
+
+      await issueHandle.unsubscribe();
+      await broadHandle.unsubscribe();
+    });
+
+    it("subscribe uses the acl token transport and coalesces rapid writes to one event", async () => {
+      vi.useFakeTimers();
+      try {
+        const scopedToken = makeWorkspaceToken("ws_acme", "scoped-agent");
+        const fetchImpl = vi.fn(async (url: string, init?: RequestInit) => {
+          if (url.includes("/fs/file?path=%2Flinear%2Fissues%2FENG-7.json")) {
+            expect(init?.headers).toMatchObject({
+              Authorization: `Bearer ${scopedToken}`,
+            });
+            return {
+              ok: true,
+              status: 200,
+              headers: new Headers({ "content-type": "application/json" }),
+              json: async () => ({
+                path: "/linear/issues/ENG-7.json",
+                revision: "rev_2",
+                contentType: "application/json",
+                content: JSON.stringify({
+                  id: "ENG-7",
+                  provider: "linear",
+                  kind: "linear.issue",
+                  title: "ENG-7",
+                  status: "Done",
+                }),
+              }),
+              text: async () => "",
+            } as unknown as Response;
+          }
+          throw new Error(`Unexpected fetch URL: ${url}`);
+        });
+        const client = makeClient(fetchImpl as unknown as typeof fetch, {
+          token: makeWorkspaceToken("ws_acme", "default-agent"),
+        });
+        const handler = vi.fn();
+
+        const handle = client.subscribe(
+          ["/linear/issues/**"],
+          handler,
+          { aclToken: scopedToken, coalesce: "fire-once", coalesceMs: 50 },
+        );
+
+        await vi.advanceTimersByTimeAsync(0);
+        const socket = ProactiveMockWebSocket.instances[0]!;
+        expect(socket.url).toContain(`token=${scopedToken}`);
+        socket.emit("open", {});
+        socket.emit("message", {
+          data: JSON.stringify({
+            eventId: "evt_linear_1",
+            type: "file.updated",
+            path: "/linear/issues/ENG-7.json",
+            revision: "rev_1",
+            timestamp: "2026-05-11T00:00:00.000Z",
+          } satisfies FilesystemEvent),
+        });
+        socket.emit("message", {
+          data: JSON.stringify({
+            eventId: "evt_linear_2",
+            type: "file.updated",
+            path: "/linear/issues/ENG-7.json",
+            revision: "rev_2",
+            timestamp: "2026-05-11T00:00:00.050Z",
+          } satisfies FilesystemEvent),
+        });
+
+        await vi.advanceTimersByTimeAsync(60);
+        vi.useRealTimers();
+        await waitForExpectation(() => {
+          expect(handler).toHaveBeenCalledTimes(1);
+        });
+
+        expect(handler.mock.calls[0]?.[0]).toMatchObject({
+          id: "evt_linear_2",
+          agentId: "scoped-agent",
+          summary: {
+            title: "ENG-7",
+            status: "Done",
+          },
+        });
+        expect(fetchImpl).toHaveBeenCalledTimes(1);
+
+        await handle.unsubscribe();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("surfaces subscribe setup failures through unsubscribe", async () => {
+      const fetchImpl = vi.fn();
+      const client = makeClient(fetchImpl as unknown as typeof fetch, {
+        token: "not-a-workspace-jwt",
+      });
+
+      const handle = client.subscribe(
+        ["/linear/issues/**"],
+        () => {
+          // no-op
+        },
+        { coalesce: "none" },
+      );
+
+      await expect(handle.unsubscribe()).rejects.toThrow(
+        "RelayFile proactive-runtime APIs require a workspace-scoped JWT",
+      );
+      expect(fetchImpl).not.toHaveBeenCalled();
+    });
+
+    it("getResourceAtEvent reuses the retained cache before calling the API", async () => {
+      const fetchImpl = vi.fn(async (url: string) => {
+        if (url.includes("/fs/file?path=%2Flinear%2Fissues%2FENG-9.json")) {
+          return {
+            ok: true,
+            status: 200,
+            headers: new Headers({ "content-type": "application/json" }),
+            json: async () => ({
+              path: "/linear/issues/ENG-9.json",
+              revision: "rev_1",
+              contentType: "application/json",
+              content: JSON.stringify({
+                id: "ENG-9",
+                provider: "linear",
+                kind: "linear.issue",
+                title: "ENG-9",
+              }),
+            }),
+            text: async () => "",
+          } as unknown as Response;
+        }
+        if (url.includes("/fs/changes/resource")) {
+          throw new Error("resource endpoint should not be used when the cache is warm");
+        }
+        throw new Error(`Unexpected fetch URL: ${url}`);
+      });
+      const client = makeClient(fetchImpl as unknown as typeof fetch, {
+        token: makeWorkspaceToken("ws_acme", "support-agent"),
+      });
+
+      let receivedEvent: ChangeEvent | undefined;
+      const handle = client.subscribe(
+        ["/linear/issues/**"],
+        (event) => {
+          receivedEvent = event;
+        },
+        { coalesce: "none" },
+      );
+
+      const socket = await waitForWebSocket();
+      socket.emit("open", {});
+      socket.emit("message", {
+        data: JSON.stringify({
+          eventId: "evt_linear_cache",
+          type: "file.updated",
+          path: "/linear/issues/ENG-9.json",
+          revision: "rev_1",
+          timestamp: "2026-05-11T00:00:00.000Z",
+        } satisfies FilesystemEvent),
+      });
+
+      await waitForExpectation(() => {
+        expect(receivedEvent).toBeDefined();
+      });
+      const resource = await client.getResourceAtEvent(receivedEvent!.id);
+      expect(resource).toMatchObject({
+        path: "/linear/issues/ENG-9.json",
+        data: { id: "ENG-9", provider: "linear", kind: "linear.issue", title: "ENG-9" },
+      });
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+
+      await handle.unsubscribe();
+    });
+
+    it("computes fallback digests without exposing file content", async () => {
+      const cryptoDescriptor = Object.getOwnPropertyDescriptor(globalThis, "crypto");
+      Object.defineProperty(globalThis, "crypto", {
+        configurable: true,
+        value: {
+          randomUUID: () => "digest-test",
+        },
+      });
+      const secretContent = "secret-change-payload";
+      const fetchImpl = vi.fn(async (url: string) => {
+        if (url.includes("/fs/file?path=%2Flinear%2Fissues%2FENG-12.json")) {
+          return {
+            ok: true,
+            status: 200,
+            headers: new Headers({ "content-type": "application/json" }),
+            json: async () => ({
+              path: "/linear/issues/ENG-12.json",
+              revision: "rev_1",
+              contentType: "text/plain",
+              content: secretContent,
+            }),
+            text: async () => "",
+          } as unknown as Response;
+        }
+        throw new Error(`Unexpected fetch URL: ${url}`);
+      });
+      const client = makeClient(fetchImpl as unknown as typeof fetch, {
+        token: makeWorkspaceToken("ws_acme", "support-agent"),
+      });
+      let receivedEvent: ChangeEvent | undefined;
+      let handle: Subscription | undefined;
+
+      try {
+        handle = client.subscribe(
+          ["/linear/issues/**"],
+          (event) => {
+            receivedEvent = event;
+          },
+          { coalesce: "none" },
+        );
+
+        const socket = await waitForWebSocket();
+        socket.emit("open", {});
+        socket.emit("message", {
+          data: JSON.stringify({
+            eventId: "evt_digest_1",
+            type: "file.updated",
+            path: "/linear/issues/ENG-12.json",
+            revision: "rev_1",
+            timestamp: "2026-05-11T00:00:00.000Z",
+          } satisfies FilesystemEvent),
+        });
+
+        await waitForExpectation(() => {
+          expect(receivedEvent).toBeDefined();
+        });
+        expect(receivedEvent!.digest).toMatch(/^sha256:[a-f0-9]{64}$/);
+        expect(receivedEvent!.digest).not.toContain(secretContent);
+      } finally {
+        await handle?.unsubscribe();
+        if (cryptoDescriptor) {
+          Object.defineProperty(globalThis, "crypto", cryptoDescriptor);
+        }
+      }
+    });
+
+    it("open returns a ready handle and primes replay-on-start through the change log", async () => {
+      const fetchImpl = vi.fn(async (url: string) => {
+        if (url.includes("/fs/changes?since=")) {
+          return {
+            ok: true,
+            status: 200,
+            headers: new Headers({ "content-type": "application/json" }),
+            json: async () => ({
+              events: [
+                {
+                  id: "evt_replay_1",
+                  workspace: "ws_acme",
+                  type: "relayfile.changed",
+                  occurredAt: "2026-05-11T00:00:00.000Z",
+                  resource: {
+                    path: "/linear/issues/ENG-100.json",
+                    kind: "linear.issue",
+                    id: "ENG-100",
+                    provider: "linear",
+                  },
+                  summary: {
+                    title: "ENG-100",
+                    status: "Todo",
+                  },
+                  digest: "sha256:replay",
+                },
+              ],
+            }),
+            text: async () => "",
+          } as unknown as Response;
+        }
+        if (url.includes("/fs/changes?last=1")) {
+          return {
+            ok: true,
+            status: 200,
+            headers: new Headers({ "content-type": "application/json" }),
+            json: async () => ({
+              events: [
+                {
+                  id: "evt_replay_1",
+                  workspace: "ws_acme",
+                  type: "relayfile.changed",
+                  occurredAt: "2026-05-11T00:00:00.000Z",
+                  resource: {
+                    path: "/linear/issues/ENG-100.json",
+                    kind: "linear.issue",
+                    id: "ENG-100",
+                    provider: "linear",
+                  },
+                  summary: {
+                    title: "ENG-100",
+                    status: "Todo",
+                  },
+                  digest: "sha256:replay",
+                },
+              ],
+            }),
+            text: async () => "",
+          } as unknown as Response;
+        }
+        throw new Error(`Unexpected fetch URL: ${url}`);
+      });
+      const client = makeClient(fetchImpl as unknown as typeof fetch, {
+        token: makeWorkspaceToken("ws_acme", "support-agent"),
+      });
+
+      const connection = client.open({
+        workspaceId: "ws_acme",
+        replayOnStart: "since:2026-05-11T00:00:00.000Z",
+      });
+
+      const socket = await waitForWebSocket();
+      socket.emit("open", {});
+      await expect(connection.ready).resolves.toBeUndefined();
+
+      const replayed = await client.listLastNChanges(1);
+      expect(replayed.events[0]).toMatchObject({
+        id: "evt_replay_1",
+        resource: {
+          path: "/linear/issues/ENG-100.json",
+        },
+      });
+      expect(fetchImpl).toHaveBeenCalledTimes(2);
+
+      await connection.unsubscribe();
+    });
+
+    it("keeps acl token context for replayed change expansion", async () => {
+      const scopedToken = makeWorkspaceToken("ws_scoped", "scoped-agent");
+      const fetchImpl = vi.fn(async (url: string, init?: RequestInit) => {
+        if (url.includes("/fs/changes?last=1")) {
+          expect(init?.headers).toMatchObject({
+            Authorization: `Bearer ${scopedToken}`,
+          });
+          return {
+            ok: true,
+            status: 200,
+            headers: new Headers({ "content-type": "application/json" }),
+            json: async () => ({
+              events: [
+                {
+                  id: "evt_scoped_replay_1",
+                  workspace: "ws_scoped",
+                  agentId: "scoped-agent",
+                  type: "relayfile.changed",
+                  occurredAt: "2026-05-11T00:00:00.000Z",
+                  resource: {
+                    path: "/linear/issues/ENG-200.json",
+                    kind: "linear.issue",
+                    id: "ENG-200",
+                    provider: "linear",
+                  },
+                  summary: {
+                    title: "ENG-200",
+                  },
+                  digest: "sha256:scoped",
+                },
+              ],
+            }),
+            text: async () => "",
+          } as unknown as Response;
+        }
+        if (url.includes("/fs/changes/resource?eventId=evt_scoped_replay_1")) {
+          expect(init?.headers).toMatchObject({
+            Authorization: `Bearer ${scopedToken}`,
+          });
+          return {
+            ok: true,
+            status: 200,
+            headers: new Headers({ "content-type": "application/json" }),
+            json: async () => ({
+              path: "/linear/issues/ENG-200.json",
+              data: { id: "ENG-200", title: "ENG-200", scoped: true },
+              digest: "sha256:scoped",
+            }),
+            text: async () => "",
+          } as unknown as Response;
+        }
+        throw new Error(`Unexpected fetch URL: ${url}`);
+      });
+      const client = makeClient(fetchImpl as unknown as typeof fetch, {
+        token: makeWorkspaceToken("ws_default", "default-agent"),
+      });
+
+      const connection = client.open({
+        workspaceId: "ws_scoped",
+        aclToken: scopedToken,
+        replayOnStart: "last:1",
+      });
+
+      const socket = await waitForWebSocket();
+      socket.emit("open", {});
+      await expect(connection.ready).resolves.toBeUndefined();
+
+      const replayed = await client.listLastNChanges(1, {
+        workspaceId: "ws_scoped",
+        token: scopedToken,
+      });
+      await expect(replayed.events[0]!.expand("full")).resolves.toMatchObject({
+        level: "full",
+        path: "/linear/issues/ENG-200.json",
+        data: { id: "ENG-200", title: "ENG-200", scoped: true },
+      });
+      expect(fetchImpl).toHaveBeenCalledTimes(3);
+
+      await connection.unsubscribe();
+    });
+
+    it("listChangesSince fetches retained events and wires expand()", async () => {
+      const fetchImpl = vi.fn(async (url: string) => {
+        if (url.includes("/fs/changes?since=")) {
+          return {
+            ok: true,
+            status: 200,
+            headers: new Headers({ "content-type": "application/json" }),
+            json: async () => ({
+              events: [
+                {
+                  id: "evt_history_1",
+                  workspace: "ws_acme",
+                  type: "relayfile.changed",
+                  occurredAt: "2026-05-11T00:00:00.000Z",
+                  resource: {
+                    path: "/linear/issues/ENG-55.json",
+                    kind: "linear.issue",
+                    id: "ENG-55",
+                    provider: "linear",
+                  },
+                  summary: {
+                    title: "ENG-55",
+                    status: "Done",
+                  },
+                  digest: "sha256:history",
+                },
+              ],
+            }),
+            text: async () => "",
+          } as unknown as Response;
+        }
+        if (url.includes("/fs/changes/resource?eventId=evt_history_1")) {
+          return {
+            ok: true,
+            status: 200,
+            headers: new Headers({ "content-type": "application/json" }),
+            json: async () => ({
+              path: "/linear/issues/ENG-55.json",
+              data: { id: "ENG-55", title: "ENG-55" },
+              digest: "sha256:history",
+            }),
+            text: async () => "",
+          } as unknown as Response;
+        }
+        throw new Error(`Unexpected fetch URL: ${url}`);
+      });
+      const client = makeClient(fetchImpl as unknown as typeof fetch, {
+        token: makeWorkspaceToken("ws_acme", "support-agent"),
+      });
+
+      const result = await client.listChangesSince("2026-05-11T00:00:00.000Z");
+      expect(result.events[0]).toMatchObject({
+        id: "evt_history_1",
+        summary: {
+          title: "ENG-55",
+          status: "Done",
+        },
+      });
+      await expect(result.events[0]!.expand("full")).resolves.toMatchObject({
+        level: "full",
+        path: "/linear/issues/ENG-55.json",
+        data: { id: "ENG-55", title: "ENG-55" },
+      });
+      await expect(result.events[0]!.expand("diff")).rejects.toMatchObject({
+        name: "M2NotImplementedError",
+        code: "M2_NOT_IMPLEMENTED",
+      });
+    });
+
+    it("getResourceAtEvent falls back to the retained change-log endpoint when the cache is cold", async () => {
+      const fetchImpl = vi.fn(async (url: string) => {
+        if (url.includes("/fs/changes/resource?eventId=evt_rest_1")) {
+          return {
+            ok: true,
+            status: 200,
+            headers: new Headers({ "content-type": "application/json" }),
+            json: async () => ({
+              path: "/linear/issues/ENG-77.json",
+              data: { id: "ENG-77", title: "ENG-77" },
+              digest: "sha256:rest",
+            }),
+            text: async () => "",
+          } as unknown as Response;
+        }
+        throw new Error(`Unexpected fetch URL: ${url}`);
+      });
+      const client = makeClient(fetchImpl as unknown as typeof fetch, {
+        token: makeWorkspaceToken("ws_acme", "support-agent"),
+      });
+
+      await expect(client.getResourceAtEvent("evt_rest_1")).resolves.toMatchObject({
+        path: "/linear/issues/ENG-77.json",
+        data: { id: "ENG-77", title: "ENG-77" },
+        digest: "sha256:rest",
+      });
+    });
+
+    it("listLastNChanges preserves hydrated resources when replay refreshes the same event id", async () => {
+      const fetchImpl = vi.fn(async (url: string) => {
+        if (url.includes("/fs/file?path=%2Flinear%2Fissues%2FENG-9.json")) {
+          return {
+            ok: true,
+            status: 200,
+            headers: new Headers({ "content-type": "application/json" }),
+            json: async () => ({
+              path: "/linear/issues/ENG-9.json",
+              revision: "rev_1",
+              contentType: "application/json",
+              content: JSON.stringify({
+                id: "ENG-9",
+                provider: "linear",
+                kind: "linear.issue",
+                title: "ENG-9",
+              }),
+            }),
+            text: async () => "",
+          } as unknown as Response;
+        }
+        if (url.includes("/fs/changes?last=1")) {
+          return {
+            ok: true,
+            status: 200,
+            headers: new Headers({ "content-type": "application/json" }),
+            json: async () => ({
+              events: [
+                {
+                  id: "evt_linear_cache",
+                  workspace: "ws_acme",
+                  type: "relayfile.changed",
+                  occurredAt: "2026-05-11T00:00:00.000Z",
+                  resource: {
+                    path: "/linear/issues/ENG-9.json",
+                    kind: "linear.issue",
+                    id: "ENG-9",
+                    provider: "linear",
+                  },
+                  summary: {
+                    title: "ENG-9",
+                  },
+                  digest: "sha256:cached",
+                },
+              ],
+            }),
+            text: async () => "",
+          } as unknown as Response;
+        }
+        if (url.includes("/fs/changes/resource?eventId=evt_linear_cache")) {
+          throw new Error("resource endpoint should not be used after replay refresh when the resource is already hydrated");
+        }
+        throw new Error(`Unexpected fetch URL: ${url}`);
+      });
+      const client = makeClient(fetchImpl as unknown as typeof fetch, {
+        token: makeWorkspaceToken("ws_acme", "support-agent"),
+      });
+
+      const handle = client.subscribe(
+        ["/linear/issues/**"],
+        () => {
+          // no-op
+        },
+        { coalesce: "none" },
+      );
+
+      const socket = await waitForWebSocket();
+      socket.emit("open", {});
+      socket.emit("message", {
+        data: JSON.stringify({
+          eventId: "evt_linear_cache",
+          type: "file.updated",
+          path: "/linear/issues/ENG-9.json",
+          revision: "rev_1",
+          timestamp: "2026-05-11T00:00:00.000Z",
+        } satisfies FilesystemEvent),
+      });
+
+      await waitForExpectation(() => {
+        expect(fetchImpl).toHaveBeenCalledTimes(1);
+      });
+
+      const replayed = await client.listLastNChanges(1);
+      await expect(replayed.events[0]!.expand("full")).resolves.toMatchObject({
+        level: "full",
+        path: "/linear/issues/ENG-9.json",
+        data: { id: "ENG-9", provider: "linear", kind: "linear.issue", title: "ENG-9" },
+      });
+      expect(fetchImpl).toHaveBeenCalledTimes(2);
+
+      await handle.unsubscribe();
+    });
+
+    it("moves refreshed change-log entries to the newest cache position before pruning", async () => {
+      let now = 0;
+      const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
+      const fetchImpl = vi.fn(async (url: string) => {
+        const fileMatch = url.match(/\/fs\/file\?path=([^&]+)/);
+        if (fileMatch) {
+          const path = decodeURIComponent(fileMatch[1]!);
+          const id = path.match(/ENG-(\d+)/)?.[1] ?? "0";
+          return {
+            ok: true,
+            status: 200,
+            headers: new Headers({ "content-type": "application/json" }),
+            json: async () => ({
+              path,
+              revision: `rev_${id}`,
+              contentType: "application/json",
+              content: JSON.stringify({
+                id: `ENG-${id}`,
+                provider: "linear",
+                kind: "linear.issue",
+                title: `ENG-${id}`,
+              }),
+            }),
+            text: async () => "",
+          } as unknown as Response;
+        }
+        if (url.includes("/fs/changes?last=1")) {
+          return {
+            ok: true,
+            status: 200,
+            headers: new Headers({ "content-type": "application/json" }),
+            json: async () => ({
+              events: [
+                {
+                  id: "evt_a",
+                  workspace: "ws_acme",
+                  type: "relayfile.changed",
+                  occurredAt: "2026-05-11T00:00:00.000Z",
+                  resource: {
+                    path: "/linear/issues/ENG-1.json",
+                    kind: "linear.issue",
+                    id: "ENG-1",
+                    provider: "linear",
+                  },
+                  summary: {
+                    title: "ENG-1",
+                  },
+                  digest: "sha256:a",
+                },
+              ],
+            }),
+            text: async () => "",
+          } as unknown as Response;
+        }
+        if (url.includes("/fs/changes?last=3")) {
+          return {
+            ok: true,
+            status: 200,
+            headers: new Headers({ "content-type": "application/json" }),
+            json: async () => ({ events: [] }),
+            text: async () => "",
+          } as unknown as Response;
+        }
+        throw new Error(`Unexpected fetch URL: ${url}`);
+      });
+      const client = new RelayFileClient({
+        baseUrl: "https://relay.test",
+        token: makeWorkspaceToken("ws_acme", "support-agent"),
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+        retry: { maxRetries: 0 },
+        changeLog: { retentionMs: 20, maxEntries: 10 },
+      });
+      let handle: Subscription | undefined;
+
+      try {
+        handle = client.subscribe(
+          ["/linear/issues/**"],
+          () => {
+            // no-op
+          },
+          { coalesce: "none" },
+        );
+
+        const socket = await waitForWebSocket();
+        socket.emit("open", {});
+        for (const [eventId, issueId, storedAt] of [
+          ["evt_a", "1", 0],
+          ["evt_b", "2", 1],
+          ["evt_c", "3", 2],
+        ] as const) {
+          now = storedAt;
+          socket.emit("message", {
+            data: JSON.stringify({
+              eventId,
+              type: "file.updated",
+              path: `/linear/issues/ENG-${issueId}.json`,
+              revision: `rev_${issueId}`,
+              timestamp: `2026-05-11T00:00:0${storedAt}.000Z`,
+            } satisfies FilesystemEvent),
+          });
+          await waitForExpectation(() => {
+            expect(fetchImpl).toHaveBeenCalledTimes(storedAt + 1);
+          });
+        }
+
+        now = 10;
+        await client.listLastNChanges(1);
+
+        now = 25;
+        const retained = await client.listLastNChanges(3);
+        expect(retained.events.map((event) => event.id)).toEqual(["evt_a"]);
+      } finally {
+        nowSpy.mockRestore();
+        await handle?.unsubscribe();
+      }
+    });
+
+    it("honors configurable local change-log retention before falling back to the retained endpoint", async () => {
+      const fetchImpl = vi.fn(async (url: string) => {
+        if (url.includes("/fs/file?path=%2Flinear%2Fissues%2FENG-91.json")) {
+          return {
+            ok: true,
+            status: 200,
+            headers: new Headers({ "content-type": "application/json" }),
+            json: async () => ({
+              path: "/linear/issues/ENG-91.json",
+              revision: "rev_1",
+              contentType: "application/json",
+              content: JSON.stringify({
+                id: "ENG-91",
+                provider: "linear",
+                kind: "linear.issue",
+                title: "ENG-91",
+              }),
+            }),
+            text: async () => "",
+          } as unknown as Response;
+        }
+        if (url.includes("/fs/changes/resource?eventId=evt_retention_1")) {
+          return {
+            ok: true,
+            status: 200,
+            headers: new Headers({ "content-type": "application/json" }),
+            json: async () => ({
+              path: "/linear/issues/ENG-91.json",
+              data: { id: "ENG-91", title: "ENG-91", from: "retained-endpoint" },
+              digest: "sha256:retained",
+            }),
+            text: async () => "",
+          } as unknown as Response;
+        }
+        throw new Error(`Unexpected fetch URL: ${url}`);
+      });
+      const client = new RelayFileClient({
+        baseUrl: "https://relay.test",
+        token: makeWorkspaceToken("ws_acme", "support-agent"),
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+        retry: { maxRetries: 0 },
+        changeLog: { retentionMs: 0, maxEntries: 5 },
+      });
+
+      const handle = client.subscribe(
+        ["/linear/issues/**"],
+        () => {
+          // no-op
+        },
+        { coalesce: "none" },
+      );
+
+      const socket = await waitForWebSocket();
+      socket.emit("open", {});
+      socket.emit("message", {
+        data: JSON.stringify({
+          eventId: "evt_retention_1",
+          type: "file.updated",
+          path: "/linear/issues/ENG-91.json",
+          revision: "rev_1",
+          timestamp: "2026-05-11T00:00:00.000Z",
+        } satisfies FilesystemEvent),
+      });
+
+      await flushMicrotasks();
+      await flushMicrotasks();
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+
+      await expect(client.getResourceAtEvent("evt_retention_1")).resolves.toMatchObject({
+        path: "/linear/issues/ENG-91.json",
+        data: { id: "ENG-91", title: "ENG-91", from: "retained-endpoint" },
+        digest: "sha256:retained",
+      });
+      expect(fetchImpl).toHaveBeenCalledTimes(2);
+
+      await handle.unsubscribe();
+    });
+  });
+
   // ---- listTree ----
   describe("listTree", () => {
     it("returns tree entries for a workspace", async () => {
@@ -1074,5 +2099,29 @@ describe("RelayFileClient — edge cases", () => {
     const url = f.mock.calls[0]![0] as string;
     // Default path is /
     expect(url).toContain("path=%2F");
+  });
+
+  it("allows DLQ-prefixed paths through the normal file APIs", async () => {
+    const writeFetch = mockFetch({
+      opId: "op_dlq",
+      status: "queued",
+      targetRevision: "rev_dlq",
+    } satisfies WriteQueuedResponse);
+    const client = makeClient(writeFetch);
+
+    await client.writeFile({
+      workspaceId: "ws_acme",
+      path: "/_dlq/evt_dlq.json",
+      content: JSON.stringify({ eventId: "evt_dlq" }),
+      contentType: "application/json",
+    });
+
+    expect((writeFetch.mock.calls[0]![0] as string)).toContain(
+      "/v1/workspaces/ws_acme/fs/file?path=%2F_dlq%2Fevt_dlq.json",
+    );
+    expect(JSON.parse((writeFetch.mock.calls[0]![1] as RequestInit).body as string)).toMatchObject({
+      contentType: "application/json",
+      content: JSON.stringify({ eventId: "evt_dlq" }),
+    });
   });
 });

@@ -30,8 +30,10 @@ import {
   type OperationFeedResponse,
   type OperationStatusResponse,
   type QueuedResponse,
+  type ResourceAtEventResult,
   type ReadFileInput,
   type QueryFilesOptions,
+  type Subscription,
   type SyncIngressStatusResponse,
   type SyncStatusResponse,
   type TreeResponse,
@@ -40,9 +42,17 @@ import {
   type IngestWebhookInput,
   type WritebackItem,
   type AckWritebackInput,
-  type AckWritebackResponse
+  type AckWritebackResponse,
+  type ChangeEvent,
+  type ChangeLogQueryResult,
+  type ChangeStreamConnection,
+  type ChangeStreamConnectionOptions,
+  type Expansion,
+  type ExpansionLevel,
+  type SubscribeOptions
 } from "./types.js";
 import type { ForkHandle } from "@relayfile/core";
+import { RelayFileSync } from "./sync.js";
 import {
   InvalidStateError,
   PayloadTooLargeError,
@@ -66,6 +76,19 @@ export interface RelayFileRetryOptions {
   jitterRatio?: number;
 }
 
+export interface RelayFileChangeLogOptions {
+  /**
+   * Local retained-change cache TTL in milliseconds.
+   *
+   * This mirrors the backend retention window opportunistically for delivered
+   * or replayed events; durable change-log retention remains a server-side
+   * responsibility.
+   */
+  retentionMs?: number;
+  /** Maximum number of retained change entries to keep per workspace locally. */
+  maxEntries?: number;
+}
+
 /** Default base URL for the hosted Relayfile API */
 export const DEFAULT_RELAYFILE_BASE_URL = "https://api.relayfile.dev";
 
@@ -82,6 +105,7 @@ export interface RelayFileClientOptions {
   fetchImpl?: typeof fetch;
   userAgent?: string;
   retry?: RelayFileRetryOptions;
+  changeLog?: RelayFileChangeLogOptions;
 }
 
 interface NormalizedRetryOptions {
@@ -89,6 +113,11 @@ interface NormalizedRetryOptions {
   baseDelayMs: number;
   maxDelayMs: number;
   jitterRatio: number;
+}
+
+interface NormalizedChangeLogOptions {
+  retentionMs: number;
+  maxEntries: number;
 }
 
 interface ExportJsonApiResponseShape {
@@ -120,6 +149,55 @@ const DEFAULT_RETRY_OPTIONS: NormalizedRetryOptions = {
   jitterRatio: 0.2
 };
 
+const DEFAULT_CHANGE_COALESCE_MS = 200;
+const DEFAULT_CHANGE_LOG_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+const DEFAULT_CHANGE_LOG_MAX_ENTRIES = 10_000;
+const CLIENT_TOKEN_STREAM_KEY = "__client__";
+
+type JsonObject = Record<string, unknown>;
+
+interface JwtClaimsShape {
+  workspace_id?: unknown;
+  agent_name?: unknown;
+}
+
+interface ChangeEventWireShape {
+  id: string;
+  workspace: string;
+  agentId?: string;
+  type: "relayfile.changed";
+  occurredAt: string;
+  resource: ChangeEvent["resource"];
+  summary: ChangeEvent["summary"];
+  digest?: string;
+}
+
+interface ProactiveRequestContext {
+  workspaceId: string;
+  token?: string;
+}
+
+interface CachedChangeRecord {
+  wire: ChangeEventWireShape;
+  resource: ResourceAtEventResult;
+  storedAt: number;
+  context?: ProactiveRequestContext;
+}
+
+const changeStreamManagers = new WeakMap<RelayFileClient, Map<string, RelayFileChangeStreamManager>>();
+const changeLogCaches = new WeakMap<RelayFileClient, Map<string, WorkspaceChangeLogCache>>();
+const changeLogSettings = new WeakMap<RelayFileClient, NormalizedChangeLogOptions>();
+const pendingChangeHydrations = new WeakMap<RelayFileClient, Map<string, Map<string, Promise<CachedChangeRecord | null>>>>();
+
+function createM2NotImplementedError(feature: string): Error & { code: "M2_NOT_IMPLEMENTED" } {
+  const error = new Error(`M2_NOT_IMPLEMENTED: ${feature} is reserved for proactive runtime M2.`) as Error & {
+    code: "M2_NOT_IMPLEMENTED";
+  };
+  error.name = "M2NotImplementedError";
+  error.code = "M2_NOT_IMPLEMENTED";
+  return error;
+}
+
 function normalizeRetryOptions(options?: RelayFileRetryOptions): NormalizedRetryOptions {
   const maxRetries = options?.maxRetries ?? DEFAULT_RETRY_OPTIONS.maxRetries;
   const baseDelayMs = options?.baseDelayMs ?? DEFAULT_RETRY_OPTIONS.baseDelayMs;
@@ -130,6 +208,19 @@ function normalizeRetryOptions(options?: RelayFileRetryOptions): NormalizedRetry
     baseDelayMs: Math.max(1, Math.floor(baseDelayMs)),
     maxDelayMs: Math.max(1, Math.floor(maxDelayMs)),
     jitterRatio: Math.max(0, Math.min(1, jitterRatio))
+  };
+}
+
+function normalizeChangeLogOptions(options?: RelayFileChangeLogOptions): NormalizedChangeLogOptions {
+  const retentionMs = options?.retentionMs ?? DEFAULT_CHANGE_LOG_RETENTION_MS;
+  const maxEntries = options?.maxEntries ?? DEFAULT_CHANGE_LOG_MAX_ENTRIES;
+  return {
+    retentionMs: Number.isFinite(retentionMs) && retentionMs >= 0
+      ? Math.floor(retentionMs)
+      : DEFAULT_CHANGE_LOG_RETENTION_MS,
+    maxEntries: Number.isFinite(maxEntries) && maxEntries > 0
+      ? Math.floor(maxEntries)
+      : DEFAULT_CHANGE_LOG_MAX_ENTRIES
   };
 }
 
@@ -290,6 +381,811 @@ class RelayFileWebSocketConnection implements WebSocketConnection {
   }
 }
 
+class WorkspaceChangeLogCache {
+  private readonly entries: CachedChangeRecord[] = [];
+  private readonly byId = new Map<string, CachedChangeRecord>();
+
+  constructor(
+    private readonly retentionMs = DEFAULT_CHANGE_LOG_RETENTION_MS,
+    private readonly maxEntries = DEFAULT_CHANGE_LOG_MAX_ENTRIES
+  ) {}
+
+  record(record: CachedChangeRecord): CachedChangeRecord {
+    this.prune(Date.now());
+    const existing = this.byId.get(record.wire.id);
+    const merged = existing
+      ? {
+          wire: record.wire,
+          resource: record.resource.data !== null ? record.resource : existing.resource,
+          storedAt: record.storedAt,
+          context: record.context ?? existing.context
+        }
+      : record;
+    if (existing) {
+      const index = this.entries.findIndex((entry) => entry.wire.id === merged.wire.id);
+      if (index >= 0) {
+        this.entries.splice(index, 1);
+      }
+      this.entries.push(merged);
+      this.byId.set(merged.wire.id, merged);
+      return merged;
+    }
+    this.entries.push(merged);
+    this.byId.set(merged.wire.id, merged);
+    while (this.entries.length > this.maxEntries) {
+      const removed = this.entries.shift();
+      if (removed) {
+        this.byId.delete(removed.wire.id);
+      }
+    }
+    return merged;
+  }
+
+  get(eventId: string): CachedChangeRecord | undefined {
+    this.prune(Date.now());
+    return this.byId.get(eventId);
+  }
+
+  listSince(isoTimestamp: string): CachedChangeRecord[] {
+    this.prune(Date.now());
+    const threshold = Date.parse(isoTimestamp);
+    if (!Number.isFinite(threshold)) {
+      throw new Error(`Invalid ISO timestamp: ${isoTimestamp}`);
+    }
+    return this.entries.filter((entry) => Date.parse(entry.wire.occurredAt) >= threshold);
+  }
+
+  listLastN(limit: number): CachedChangeRecord[] {
+    this.prune(Date.now());
+    const safeLimit = Math.max(0, Math.floor(limit));
+    if (safeLimit === 0) {
+      return [];
+    }
+    return this.entries.slice(-safeLimit);
+  }
+
+  private prune(now: number): void {
+    while (this.entries.length > 0) {
+      const first = this.entries[0];
+      if (!first) {
+        return;
+      }
+      if (now - first.storedAt < this.retentionMs) {
+        return;
+      }
+      this.entries.shift();
+      this.byId.delete(first.wire.id);
+    }
+  }
+}
+
+class RelayFileChangeSubscription {
+  private active = true;
+  private readonly globPatterns: string[][];
+  private readonly pathScopes: string[][] | null;
+  private readonly inFlight = new Set<Promise<void>>();
+  private readonly pendingByPath = new Map<
+    string,
+    { event: FilesystemEvent; timer: ReturnType<typeof setTimeout> }
+  >();
+  private readonly coalesceMs: number;
+  private readonly shouldCoalesce: boolean;
+
+  constructor(
+    private readonly manager: RelayFileChangeStreamManager,
+    globs: string[],
+    private readonly onChange: (event: ChangeEvent) => void,
+    private readonly options?: SubscribeOptions
+  ) {
+    this.globPatterns = globs.map((pattern) => normalizeChangePattern(pattern));
+    this.pathScopes = options?.pathScope?.length ? options.pathScope.map((pattern) => normalizeChangePattern(pattern)) : null;
+    this.shouldCoalesce = (options?.coalesce ?? "fire-once") !== "none";
+    this.coalesceMs = Math.max(0, Math.floor(options?.coalesceMs ?? DEFAULT_CHANGE_COALESCE_MS));
+  }
+
+  push(event: FilesystemEvent): void {
+    if (!this.active || !shouldPublishFilesystemEvent(event) || !this.matches(event.path)) {
+      return;
+    }
+    if (!this.shouldCoalesce) {
+      this.dispatch(event);
+      return;
+    }
+    const existing = this.pendingByPath.get(event.path);
+    if (existing) {
+      clearTimeout(existing.timer);
+    }
+    const timer = setTimeout(() => {
+      this.pendingByPath.delete(event.path);
+      if (!this.active) {
+        return;
+      }
+      this.dispatch(event);
+    }, this.coalesceMs);
+    this.pendingByPath.set(event.path, { event, timer });
+  }
+
+  async close(): Promise<void> {
+    this.active = false;
+    for (const pending of this.pendingByPath.values()) {
+      clearTimeout(pending.timer);
+    }
+    this.pendingByPath.clear();
+
+    const drain = Promise.allSettled(Array.from(this.inFlight));
+    const drainMs = this.options?.drainMs;
+    if (typeof drainMs === "number" && Number.isFinite(drainMs) && drainMs >= 0) {
+      await Promise.race([
+        drain,
+        new Promise<void>((resolve) => {
+          setTimeout(resolve, drainMs);
+        })
+      ]);
+      return;
+    }
+    await drain;
+  }
+
+  private matches(path: string): boolean {
+    const pathSegments = normalizeChangePath(path);
+    const matchesGlob = this.globPatterns.some((pattern) => matchChangeSegments(pattern, pathSegments));
+    if (!matchesGlob) {
+      return false;
+    }
+    if (!this.pathScopes) {
+      return true;
+    }
+    return this.pathScopes.some((pattern) => matchChangeSegments(pattern, pathSegments));
+  }
+
+  private dispatch(event: FilesystemEvent): void {
+    const task = this.manager.materialize(event)
+      .then((changeEvent) => {
+        if (!this.active || !changeEvent) {
+          return;
+        }
+        return Promise.resolve(this.onChange(changeEvent));
+      })
+      .catch((error) => {
+        if (typeof console !== "undefined" && typeof console.error === "function") {
+          console.error("RelayFile subscribe handler failed", error);
+        }
+      })
+      .finally(() => {
+        this.inFlight.delete(task);
+      });
+    this.inFlight.add(task);
+  }
+}
+
+class RelayFileChangeStreamManager {
+  private readonly subscriptions = new Set<RelayFileChangeSubscription>();
+  private openHandleCount = 0;
+  private sync?: RelayFileSync;
+  private readyResolved = false;
+  private readonly readyInternal: Promise<void>;
+  private resolveReady!: () => void;
+  private rejectReady!: (reason?: unknown) => void;
+
+  constructor(
+    private readonly client: RelayFileClient,
+    private readonly workspaceId: string,
+    private readonly token: string | undefined,
+    private readonly baseUrl: string
+  ) {
+    this.readyInternal = new Promise<void>((resolve, reject) => {
+      this.resolveReady = resolve;
+      this.rejectReady = reject;
+    });
+  }
+
+  get ready(): Promise<void> {
+    return this.readyInternal;
+  }
+
+  addSubscription(globs: string[], onChange: (event: ChangeEvent) => void, options?: SubscribeOptions): Subscription {
+    const subscription = new RelayFileChangeSubscription(this, globs, onChange, options);
+    this.subscriptions.add(subscription);
+    this.ensureStarted();
+    return {
+      unsubscribe: async () => {
+        this.subscriptions.delete(subscription);
+        await subscription.close();
+        await this.maybeStop();
+      }
+    };
+  }
+
+  open(): ChangeStreamConnection {
+    this.openHandleCount += 1;
+    this.ensureStarted();
+    return {
+      ready: this.ready,
+      unsubscribe: async () => {
+        this.openHandleCount = Math.max(0, this.openHandleCount - 1);
+        await this.maybeStop();
+      }
+    };
+  }
+
+  async materialize(event: FilesystemEvent): Promise<ChangeEvent | null> {
+    if (!shouldPublishFilesystemEvent(event)) {
+      return null;
+    }
+    const eventId = normalizeChangeEventId(event, this.workspaceId);
+    const cache = getChangeLogCache(this.client, this.workspaceId);
+    const cached = cache.get(eventId);
+    if (cached) {
+      return toChangeEvent(this.client, cached, { workspaceId: this.workspaceId, token: this.token });
+    }
+    const hydrations = getPendingChangeHydrations(this.client, this.workspaceId);
+    const pending = hydrations.get(eventId);
+    if (pending) {
+      const record = await pending;
+      return record ? toChangeEvent(this.client, record, { workspaceId: this.workspaceId, token: this.token }) : null;
+    }
+    const inFlight = materializeChangeRecord(this.client, this.workspaceId, event, this.token);
+    hydrations.set(eventId, inFlight);
+    let record: CachedChangeRecord | null;
+    try {
+      record = await inFlight;
+    } finally {
+      if (hydrations.get(eventId) === inFlight) {
+        hydrations.delete(eventId);
+      }
+    }
+    return record ? toChangeEvent(this.client, record, { workspaceId: this.workspaceId, token: this.token }) : null;
+  }
+
+  private ensureStarted(): void {
+    if (this.sync) {
+      return;
+    }
+    const sync = new RelayFileSync({
+      client: this.client,
+      workspaceId: this.workspaceId,
+      baseUrl: this.baseUrl,
+      token: this.token,
+      onPollingFallback: () => {
+        this.resolveReadyOnce();
+      }
+    });
+    sync.on("open", () => {
+      this.resolveReadyOnce();
+    });
+    sync.on("state", (state) => {
+      if (state === "polling") {
+        this.resolveReadyOnce();
+      }
+    });
+    sync.on("error", (error) => {
+      if (!this.readyResolved) {
+        this.rejectReady(error);
+      }
+    });
+    sync.on("event", (event) => {
+      for (const subscription of this.subscriptions) {
+        subscription.push(event);
+      }
+    });
+    this.sync = sync;
+    sync.start();
+    if (sync.getState() === "polling") {
+      this.resolveReadyOnce();
+    }
+  }
+
+  private resolveReadyOnce(): void {
+    if (this.readyResolved) {
+      return;
+    }
+    this.readyResolved = true;
+    this.resolveReady();
+  }
+
+  private async maybeStop(): Promise<void> {
+    if (this.openHandleCount > 0 || this.subscriptions.size > 0) {
+      return;
+    }
+    if (this.sync) {
+      const sync = this.sync;
+      this.sync = undefined;
+      await sync.stop();
+    }
+    const managers = changeStreamManagers.get(this.client);
+    if (!managers) {
+      return;
+    }
+    for (const [key, manager] of managers.entries()) {
+      if (manager === this) {
+        managers.delete(key);
+      }
+    }
+  }
+}
+
+function getStreamManager(
+  client: RelayFileClient,
+  workspaceId: string,
+  token: string | undefined,
+  baseUrl: string
+): RelayFileChangeStreamManager {
+  let managers = changeStreamManagers.get(client);
+  if (!managers) {
+    managers = new Map();
+    changeStreamManagers.set(client, managers);
+  }
+  const key = `${workspaceId}:${token ?? CLIENT_TOKEN_STREAM_KEY}`;
+  const existing = managers.get(key);
+  if (existing) {
+    return existing;
+  }
+  const manager = new RelayFileChangeStreamManager(client, workspaceId, token, baseUrl);
+  managers.set(key, manager);
+  return manager;
+}
+
+function getChangeLogCache(client: RelayFileClient, workspaceId: string): WorkspaceChangeLogCache {
+  let workspaceCaches = changeLogCaches.get(client);
+  if (!workspaceCaches) {
+    workspaceCaches = new Map();
+    changeLogCaches.set(client, workspaceCaches);
+  }
+  const existing = workspaceCaches.get(workspaceId);
+  if (existing) {
+    return existing;
+  }
+  const settings = changeLogSettings.get(client) ?? normalizeChangeLogOptions();
+  const cache = new WorkspaceChangeLogCache(settings.retentionMs, settings.maxEntries);
+  workspaceCaches.set(workspaceId, cache);
+  return cache;
+}
+
+function getPendingChangeHydrations(
+  client: RelayFileClient,
+  workspaceId: string
+): Map<string, Promise<CachedChangeRecord | null>> {
+  let workspaceHydrations = pendingChangeHydrations.get(client);
+  if (!workspaceHydrations) {
+    workspaceHydrations = new Map();
+    pendingChangeHydrations.set(client, workspaceHydrations);
+  }
+  const existing = workspaceHydrations.get(workspaceId);
+  if (existing) {
+    return existing;
+  }
+  const hydrations = new Map<string, Promise<CachedChangeRecord | null>>();
+  workspaceHydrations.set(workspaceId, hydrations);
+  return hydrations;
+}
+
+function mergeChangeRecords(records: CachedChangeRecord[]): CachedChangeRecord[] {
+  const deduped = new Map<string, CachedChangeRecord>();
+  for (const record of records) {
+    deduped.set(record.wire.id, record);
+  }
+  return Array.from(deduped.values()).sort((left, right) => {
+    const leftOccurredAt = Date.parse(left.wire.occurredAt);
+    const rightOccurredAt = Date.parse(right.wire.occurredAt);
+    if (leftOccurredAt !== rightOccurredAt) {
+      return leftOccurredAt - rightOccurredAt;
+    }
+    return left.storedAt - right.storedAt;
+  });
+}
+
+function normalizeChangePattern(pattern: string): string[] {
+  if (typeof pattern !== "string" || pattern.length === 0) {
+    throw new Error("subscribe globs must be non-empty strings.");
+  }
+  if (!pattern.startsWith("/")) {
+    throw new Error("subscribe globs must start with '/'.");
+  }
+  if (pattern.includes("//")) {
+    throw new Error("subscribe globs cannot contain empty path segments.");
+  }
+  const segments = normalizeChangePath(pattern);
+  const recursiveIndex = segments.indexOf("**");
+  if (recursiveIndex >= 0 && recursiveIndex !== segments.length - 1) {
+    throw new Error("subscribe globs only support '**' as the trailing segment.");
+  }
+  return segments;
+}
+
+function normalizeChangePath(path: string): string[] {
+  const normalized = path.startsWith("/") ? path : `/${path}`;
+  const trimmed = normalized.replace(/\/+$/, "");
+  if (trimmed === "") {
+    return [];
+  }
+  return trimmed.split("/").filter(Boolean);
+}
+
+function matchChangeSegments(pattern: string[], path: string[]): boolean {
+  if (pattern.length > 0 && pattern[pattern.length - 1] === "**") {
+    const prefix = pattern.slice(0, -1);
+    return path.length >= prefix.length && prefix.every((segment, index) => segment === "*" || segment === path[index]);
+  }
+  if (pattern.length !== path.length) {
+    return false;
+  }
+  return pattern.every((segment, index) => segment === "*" || segment === path[index]);
+}
+
+function shouldPublishFilesystemEvent(event: FilesystemEvent): boolean {
+  return event.type === "file.created" || event.type === "file.updated" || event.type === "file.deleted";
+}
+
+function decodeBase64Url(value: string): string {
+  const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
+  const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "=");
+  if (typeof atob === "function") {
+    const decoded = atob(padded);
+    return decodeURIComponent(Array.from(decoded).map((char) => `%${char.charCodeAt(0).toString(16).padStart(2, "0")}`).join(""));
+  }
+  const bufferCtor = (globalThis as { Buffer?: typeof Buffer }).Buffer;
+  if (bufferCtor) {
+    return bufferCtor.from(padded, "base64").toString("utf8");
+  }
+  throw new Error("No base64 decoder is available in this environment.");
+}
+
+function getWorkspaceIdFromToken(token: string): string | undefined {
+  const parts = token.split(".");
+  if (parts.length < 2) {
+    return undefined;
+  }
+  try {
+    const parsed = JSON.parse(decodeBase64Url(parts[1] ?? "")) as JwtClaimsShape;
+    return typeof parsed.workspace_id === "string" && parsed.workspace_id.length > 0 ? parsed.workspace_id : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function getAgentIdFromToken(token: string): string | undefined {
+  const parts = token.split(".");
+  if (parts.length < 2) {
+    return undefined;
+  }
+  try {
+    const parsed = JSON.parse(decodeBase64Url(parts[1] ?? "")) as JwtClaimsShape;
+    return typeof parsed.agent_name === "string" && parsed.agent_name.length > 0 ? parsed.agent_name : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function getSingleKnownWorkspaceId(client: RelayFileClient): string | undefined {
+  const workspaceIds = new Set<string>();
+  for (const registry of [changeStreamManagers.get(client), changeLogCaches.get(client)]) {
+    if (!registry) {
+      continue;
+    }
+    for (const key of registry.keys()) {
+      workspaceIds.add(key.split(":")[0] ?? key);
+    }
+  }
+  return workspaceIds.size === 1 ? Array.from(workspaceIds)[0] : undefined;
+}
+
+function inferProviderFromPath(path: string): string {
+  return normalizeChangePath(path)[0] ?? "relayfile";
+}
+
+function singularizeSegment(segment: string): string {
+  return segment.endsWith("s") && segment.length > 1 ? segment.slice(0, -1) : segment;
+}
+
+function stripExtension(value: string): string {
+  return value.replace(/\.[^/.]+$/, "");
+}
+
+function inferResourceMetadata(path: string, data: unknown): ChangeEvent["resource"] {
+  const segments = normalizeChangePath(path);
+  const provider = readStringField(data, ["provider"]) ?? inferProviderFromPath(path);
+  const kind = readStringField(data, ["kind", "resourceType"])
+    ?? readStringField(data, ["type"])
+    ?? `${provider}.${singularizeSegment(segments[1] ?? "resource")}`;
+  const id = readStringField(data, ["id", "resourceId", "key"])
+    ?? stripExtension(segments[segments.length - 1] ?? path);
+  return {
+    path,
+    kind,
+    id,
+    provider
+  };
+}
+
+function readStringField(data: unknown, keys: string[]): string | undefined {
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    return undefined;
+  }
+  const record = data as JsonObject;
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === "string" && value.trim().length > 0) {
+      return value.trim();
+    }
+  }
+  return undefined;
+}
+
+function readStringArrayField(data: unknown, keys: string[]): string[] | undefined {
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    return undefined;
+  }
+  const record = data as JsonObject;
+  for (const key of keys) {
+    const value = record[key];
+    if (Array.isArray(value)) {
+      const items = value.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0).map((entry) => entry.trim());
+      if (items.length > 0) {
+        return items;
+      }
+    }
+  }
+  return undefined;
+}
+
+function readActorField(data: unknown): ChangeEvent["summary"]["actor"] | undefined {
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    return undefined;
+  }
+  const record = data as JsonObject;
+  const rawActor = record.actor ?? record.assignee ?? record.author;
+  if (typeof rawActor === "string" && rawActor.trim().length > 0) {
+    return { id: rawActor.trim() };
+  }
+  if (!rawActor || typeof rawActor !== "object" || Array.isArray(rawActor)) {
+    return undefined;
+  }
+  const actorRecord = rawActor as JsonObject;
+  const id = typeof actorRecord.id === "string" ? actorRecord.id.trim() : undefined;
+  if (!id) {
+    return undefined;
+  }
+  const displayName = typeof actorRecord.displayName === "string"
+    ? actorRecord.displayName.trim()
+    : typeof actorRecord.name === "string"
+      ? actorRecord.name.trim()
+      : undefined;
+  return { id, ...(displayName ? { displayName } : {}) };
+}
+
+function truncateString(value: string, maxLength: number): string {
+  return value.length <= maxLength ? value : `${value.slice(0, Math.max(0, maxLength - 3))}...`;
+}
+
+function basename(path: string): string {
+  const parts = normalizeChangePath(path);
+  return parts[parts.length - 1] ?? path;
+}
+
+function buildChangeSummary(path: string, data: unknown): ChangeEvent["summary"] {
+  const title = readStringField(data, ["title", "name", "summary", "subject"]) ?? stripExtension(basename(path));
+  const summary: ChangeEvent["summary"] = {
+    title: truncateString(title, 120)
+  };
+  const status = readStringField(data, ["status", "state"]);
+  if (status) {
+    summary.status = status;
+  }
+  const priority = readStringField(data, ["priority"]);
+  if (priority) {
+    summary.priority = priority;
+  }
+  const labels = readStringArrayField(data, ["labels"]);
+  if (labels) {
+    summary.labels = labels.slice(0, 8);
+  }
+  const actor = readActorField(data);
+  if (actor) {
+    summary.actor = actor;
+  }
+  const fieldsChanged = readStringArrayField(data, ["fieldsChanged", "changedFields"]);
+  if (fieldsChanged) {
+    summary.fieldsChanged = fieldsChanged;
+  }
+  const tags = readStringArrayField(data, ["tags"]);
+  if (tags) {
+    summary.tags = tags.slice(0, 8);
+  }
+  return summary;
+}
+
+function decodeFilePayload(file: FileReadResponse): unknown {
+  if (file.encoding === "base64") {
+    return {
+      contentBase64: file.content,
+      contentType: file.contentType,
+      encoding: "base64"
+    };
+  }
+  const looksJson = file.contentType.includes("json") || file.path.endsWith(".json");
+  if (looksJson) {
+    try {
+      return JSON.parse(file.content) as unknown;
+    } catch {
+      // Fall through to the raw string when payloads are malformed.
+    }
+  }
+  return file.content;
+}
+
+async function sha256Hex(value: string): Promise<string> {
+  let subtle: { digest(algorithm: AlgorithmIdentifier, data: BufferSource): Promise<ArrayBuffer> } | undefined = globalThis.crypto?.subtle;
+  if (!subtle) {
+    try {
+      const nodeCrypto = await import("node:crypto");
+      subtle = nodeCrypto.webcrypto?.subtle as typeof subtle;
+      if (!subtle) {
+        return `sha256:${nodeCrypto.createHash("sha256").update(value).digest("hex")}`;
+      }
+    } catch {
+      // Fall through to the non-content fallback below.
+    }
+  }
+  if (!subtle) {
+    const nonce = globalThis.crypto?.randomUUID?.() ?? `unavailable-${Date.now().toString(36)}`;
+    return `sha256:unavailable:${nonce}`;
+  }
+  const hash = await subtle.digest("SHA-256", new TextEncoder().encode(value));
+  const bytes = new Uint8Array(hash);
+  return `sha256:${Array.from(bytes).map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+}
+
+function normalizeChangeEventId(event: FilesystemEvent, workspaceId: string): string {
+  if (event.eventId && !event.eventId.startsWith("ws:")) {
+    return event.eventId;
+  }
+  return [
+    "relayfile",
+    workspaceId,
+    event.type,
+    event.path,
+    event.revision,
+    event.timestamp
+  ].join(":");
+}
+
+function toChangeEvent(
+  client: RelayFileClient,
+  record: CachedChangeRecord,
+  contextOverride?: ProactiveRequestContext
+): ChangeEvent {
+  const context = contextOverride ?? record.context ?? { workspaceId: record.wire.workspace };
+  return {
+    ...record.wire,
+    expand: async <L extends ExpansionLevel = "summary">(level?: L): Promise<Expansion<L>> => {
+      const normalizedLevel = (level ?? "summary") as ExpansionLevel;
+      if (normalizedLevel === "summary") {
+        return {
+          level: normalizedLevel,
+          path: record.wire.resource.path,
+          summary: record.wire.summary
+        } as Expansion<L>;
+      }
+      if (normalizedLevel === "full") {
+        const resource = await client.getResourceAtEvent(record.wire.id, context);
+        return {
+          level: normalizedLevel,
+          path: resource.path,
+          data: resource.data
+        } as Expansion<L>;
+      }
+      throw createM2NotImplementedError(`ChangeEvent.expand(${JSON.stringify(normalizedLevel)})`);
+    }
+  };
+}
+
+function normalizeWireChangeEvent(payload: unknown): ChangeEventWireShape {
+  const data = (payload ?? {}) as Record<string, unknown>;
+  const resource = (data.resource ?? {}) as Record<string, unknown>;
+  const summary = (data.summary ?? {}) as Record<string, unknown>;
+  return {
+    id: typeof data.id === "string" ? data.id : "",
+    workspace: typeof data.workspace === "string" ? data.workspace : "",
+    agentId: typeof data.agentId === "string" ? data.agentId : undefined,
+    type: "relayfile.changed",
+    occurredAt: typeof data.occurredAt === "string" ? data.occurredAt : new Date().toISOString(),
+    resource: {
+      path: typeof resource.path === "string" ? resource.path : "",
+      kind: typeof resource.kind === "string" ? resource.kind : "relayfile.resource",
+      id: typeof resource.id === "string" ? resource.id : "",
+      provider: typeof resource.provider === "string" ? resource.provider : "relayfile"
+    },
+    summary: {
+      ...(typeof summary.title === "string" ? { title: summary.title } : {}),
+      ...(typeof summary.status === "string" ? { status: summary.status } : {}),
+      ...(typeof summary.priority === "string" ? { priority: summary.priority } : {}),
+      ...(Array.isArray(summary.labels) ? { labels: summary.labels.filter((entry): entry is string => typeof entry === "string") } : {}),
+      ...(summary.actor && typeof summary.actor === "object"
+        ? {
+            actor: {
+              id: typeof (summary.actor as Record<string, unknown>).id === "string" ? (summary.actor as Record<string, unknown>).id as string : "",
+              ...(typeof (summary.actor as Record<string, unknown>).displayName === "string"
+                ? { displayName: (summary.actor as Record<string, unknown>).displayName as string }
+                : {})
+            }
+          }
+        : {}),
+      ...(Array.isArray(summary.fieldsChanged)
+        ? { fieldsChanged: summary.fieldsChanged.filter((entry): entry is string => typeof entry === "string") }
+        : {}),
+      ...(Array.isArray(summary.tags) ? { tags: summary.tags.filter((entry): entry is string => typeof entry === "string").slice(0, 8) } : {})
+    },
+    ...(typeof data.digest === "string" ? { digest: data.digest } : {})
+  };
+}
+
+async function materializeChangeRecord(
+  client: RelayFileClient,
+  workspaceId: string,
+  event: FilesystemEvent,
+  token?: string
+): Promise<CachedChangeRecord | null> {
+  const eventId = normalizeChangeEventId(event, workspaceId);
+  const occurredAt = event.timestamp || new Date().toISOString();
+  const fallbackDigest = event.revision ? `revision:${event.revision}` : `deleted:${occurredAt}`;
+  const fallbackResource: ResourceAtEventResult = {
+    path: event.path,
+    data: { path: event.path, deleted: event.type === "file.deleted" },
+    digest: fallbackDigest
+  };
+
+  let tokenAgentId: string | undefined;
+  try {
+    tokenAgentId = getAgentIdFromToken(token ?? await client.getToken());
+  } catch {
+    tokenAgentId = undefined;
+  }
+
+  let resource = fallbackResource;
+  let wire: ChangeEventWireShape = {
+    id: eventId,
+    workspace: workspaceId,
+    ...(tokenAgentId ? { agentId: tokenAgentId } : {}),
+    type: "relayfile.changed",
+    occurredAt,
+    resource: inferResourceMetadata(event.path, resource.data),
+    summary: buildChangeSummary(event.path, resource.data),
+    digest: resource.digest
+  };
+
+  if (event.type !== "file.deleted") {
+    try {
+      const file = await client.readFile({ workspaceId, path: event.path, token } as ReadFileInput & { token?: string });
+      const data = decodeFilePayload(file);
+      const digest = await sha256Hex(file.content);
+      resource = {
+        path: event.path,
+        data,
+        digest
+      };
+      wire = {
+        ...wire,
+        resource: inferResourceMetadata(event.path, data),
+        summary: buildChangeSummary(event.path, data),
+        digest
+      };
+    } catch (error) {
+      if (typeof console !== "undefined" && typeof console.warn === "function") {
+        console.warn(`[relayfile-sdk] Failed to materialize change event for ${event.path}; falling back to path-only summary.`, error);
+      }
+    }
+  }
+
+  const record: CachedChangeRecord = {
+    wire,
+    resource,
+    storedAt: Date.now(),
+    context: { workspaceId, token }
+  };
+  getChangeLogCache(client, workspaceId).record(record);
+  return record;
+}
+
 export class RelayFileClient {
   private readonly baseUrl: string;
   private readonly tokenProvider: AccessTokenProvider;
@@ -303,6 +1199,7 @@ export class RelayFileClient {
     this.fetchImpl = options.fetchImpl ?? fetch.bind(globalThis);
     this.userAgent = options.userAgent;
     this.retryOptions = normalizeRetryOptions(options.retry);
+    changeLogSettings.set(this, normalizeChangeLogOptions(options.changeLog));
   }
 
   /**
@@ -367,7 +1264,8 @@ export class RelayFileClient {
       method: "GET",
       path: `/v1/workspaces/${encodeURIComponent(input.workspaceId)}/fs/file${query}`,
       correlationId: input.correlationId,
-      signal: input.signal
+      signal: input.signal,
+      tokenOverride: (input as ReadFileInput & { token?: string }).token
     });
   }
 
@@ -493,6 +1391,121 @@ export class RelayFileClient {
       correlationId: options.correlationId,
       signal: options.signal
     });
+  }
+
+  subscribe(
+    globs: string[],
+    onChange: (event: ChangeEvent) => void,
+    options?: SubscribeOptions,
+  ): Subscription {
+    const setup = this.resolveWorkspaceId(options?.aclToken)
+      .then((workspaceId) => {
+        const manager = getStreamManager(this, workspaceId, options?.aclToken, this.baseUrl);
+        return manager.addSubscription(globs, onChange, options);
+      });
+    return {
+      async unsubscribe(): Promise<void> {
+        const subscription = await setup;
+        await subscription.unsubscribe();
+      },
+    };
+  }
+
+  open(options: ChangeStreamConnectionOptions): ChangeStreamConnection {
+    const manager = getStreamManager(this, options.workspaceId, options.aclToken, this.baseUrl);
+    const connection = manager.open();
+    const replay = this.primeReplayCache(options).catch((error) => {
+      if (typeof console !== "undefined" && typeof console.error === "function") {
+        console.error("RelayFile change-stream replay initialization failed", error);
+      }
+    });
+    return {
+      ready: Promise.all([connection.ready, replay]).then(() => undefined),
+      unsubscribe: () => connection.unsubscribe()
+    };
+  }
+
+  async getResourceAtEvent(eventId: string, context?: ProactiveRequestContext): Promise<ResourceAtEventResult> {
+    const workspaceId = context?.workspaceId ?? await this.resolveWorkspaceId(context?.token);
+    const effectiveContext = context ?? { workspaceId };
+    const cache = getChangeLogCache(this, workspaceId);
+    const cached = cache.get(eventId);
+    if (cached && cached.resource.data !== null) {
+      return cached.resource;
+    }
+    const pending = getPendingChangeHydrations(this, workspaceId).get(eventId);
+    if (pending) {
+      try {
+        await pending;
+      } catch {
+        // Fall through to the retained lookup endpoint if live hydration fails.
+      }
+      const hydrated = cache.get(eventId);
+      if (hydrated && hydrated.resource.data !== null) {
+        return hydrated.resource;
+      }
+    }
+    return this.request<ResourceAtEventResult>({
+      method: "GET",
+      path: `/v1/workspaces/${encodeURIComponent(workspaceId)}/fs/changes/resource${buildQuery({ eventId })}`,
+      tokenOverride: effectiveContext.token
+    });
+  }
+
+  async listChangesSince(isoTimestamp: string, context?: ProactiveRequestContext): Promise<ChangeLogQueryResult> {
+    const workspaceId = context?.workspaceId ?? await this.resolveWorkspaceId(context?.token);
+    const effectiveContext = context ?? { workspaceId };
+    const cache = getChangeLogCache(this, workspaceId);
+    const cached = cache.listSince(isoTimestamp);
+    let records = cached;
+    try {
+      const payload = await this.request<{ events?: unknown[] }>({
+        method: "GET",
+        path: `/v1/workspaces/${encodeURIComponent(workspaceId)}/fs/changes${buildQuery({ since: isoTimestamp })}`,
+        tokenOverride: effectiveContext.token
+      });
+      records = mergeChangeRecords([
+        ...cached,
+        ...(payload.events ?? []).map((event) => this.cacheWireChangeEvent(workspaceId, normalizeWireChangeEvent(event), effectiveContext))
+      ]);
+    } catch (error) {
+      if (cached.length === 0) {
+        throw error;
+      }
+    }
+    return {
+      events: records.map((record) => toChangeEvent(this, record, context))
+    };
+  }
+
+  async listLastNChanges(limit: number, context?: ProactiveRequestContext): Promise<ChangeLogQueryResult> {
+    const safeLimit = Math.max(0, Math.floor(limit));
+    if (safeLimit === 0) {
+      return { events: [] };
+    }
+    const workspaceId = context?.workspaceId ?? await this.resolveWorkspaceId(context?.token);
+    const effectiveContext = context ?? { workspaceId };
+    const cache = getChangeLogCache(this, workspaceId);
+    const cached = cache.listLastN(safeLimit);
+    let records = cached;
+    try {
+      const payload = await this.request<{ events?: unknown[] }>({
+        method: "GET",
+        path: `/v1/workspaces/${encodeURIComponent(workspaceId)}/fs/changes${buildQuery({ last: safeLimit })}`,
+        tokenOverride: effectiveContext.token
+      });
+      records = mergeChangeRecords([
+        ...cached,
+        ...(payload.events ?? []).map((event) => this.cacheWireChangeEvent(workspaceId, normalizeWireChangeEvent(event), effectiveContext))
+      ]).slice(-safeLimit);
+    } catch (error) {
+      if (cached.length === 0) {
+        throw error;
+      }
+    }
+    return {
+      events: records.map((record) => toChangeEvent(this, record, context))
+    };
   }
 
   async exportWorkspace(options: ExportOptions): Promise<ExportJsonResponse | Blob> {
@@ -801,6 +1814,54 @@ export class RelayFileClient {
     });
   }
 
+  private cacheWireChangeEvent(
+    workspaceId: string,
+    wire: ChangeEventWireShape,
+    context?: ProactiveRequestContext
+  ): CachedChangeRecord {
+    const record: CachedChangeRecord = {
+      wire,
+      resource: {
+        path: wire.resource.path,
+        data: null,
+        digest: wire.digest ?? `event:${wire.id}`
+      },
+      storedAt: Date.now(),
+      context: context ?? { workspaceId }
+    };
+    return getChangeLogCache(this, workspaceId).record(record);
+  }
+
+  private async primeReplayCache(options: ChangeStreamConnectionOptions): Promise<void> {
+    if (!options.replayOnStart || options.replayOnStart === "none") {
+      return;
+    }
+    if (options.replayOnStart.startsWith("since:")) {
+      await this.listChangesSince(
+        options.replayOnStart.slice("since:".length),
+        { workspaceId: options.workspaceId, token: options.aclToken }
+      );
+      return;
+    }
+    if (options.replayOnStart.startsWith("last:")) {
+      const limit = Number.parseInt(options.replayOnStart.slice("last:".length), 10);
+      await this.listLastNChanges(limit, { workspaceId: options.workspaceId, token: options.aclToken });
+    }
+  }
+
+  private async resolveWorkspaceId(tokenOverride?: string): Promise<string> {
+    const knownWorkspaceId = getSingleKnownWorkspaceId(this);
+    if (knownWorkspaceId) {
+      return knownWorkspaceId;
+    }
+    const token = tokenOverride ?? await this.getToken();
+    const workspaceId = getWorkspaceIdFromToken(token);
+    if (workspaceId) {
+      return workspaceId;
+    }
+    throw new Error("RelayFile proactive-runtime APIs require a workspace-scoped JWT with a workspace_id claim.");
+  }
+
   private async request<T>(params: {
     method: string;
     path: string;
@@ -808,6 +1869,7 @@ export class RelayFileClient {
     body?: unknown;
     correlationId?: string;
     signal?: AbortSignal;
+    tokenOverride?: string;
   }): Promise<T> {
     const response = await this.performRequest(params);
     const payload = await this.readPayload(response);
@@ -822,6 +1884,7 @@ export class RelayFileClient {
     correlationId?: string;
     signal?: AbortSignal;
     accept?: string;
+    tokenOverride?: string;
   }): Promise<Response> {
     const existingCorrelationId = getHeaderValue(params.headers, "X-Correlation-Id");
     const correlationId = existingCorrelationId ?? params.correlationId ?? generateCorrelationId();
@@ -844,7 +1907,7 @@ export class RelayFileClient {
     let retries = 0;
     const url = `${this.baseUrl}${params.path}`;
     for (;;) {
-      const token = await resolveToken(this.tokenProvider);
+      const token = params.tokenOverride ?? await resolveToken(this.tokenProvider);
       const headers: Record<string, string> = {
         Authorization: `Bearer ${token}`,
         ...baseHeaders

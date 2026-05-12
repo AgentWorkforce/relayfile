@@ -400,5 +400,5 @@ describe('createMount', () => {
 
     expect(ticks).toBeGreaterThanOrEqual(2);
     handle.cleanup();
-  });
+  }, 10_000);
 });

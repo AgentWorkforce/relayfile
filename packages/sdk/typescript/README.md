@@ -81,7 +81,11 @@ import { RelayFileClient } from "@relayfile/sdk";
 
 const client = new RelayFileClient({
   baseUrl: "https://api.relayfile.com",
-  token: process.env.RELAYFILE_TOKEN ?? ""
+  token: process.env.RELAYFILE_TOKEN ?? "",
+  changeLog: {
+    retentionMs: 7 * 24 * 60 * 60 * 1000,
+    maxEntries: 10_000
+  }
 });
 
 const workspaceId = "workspace_123";
@@ -107,6 +111,8 @@ await client.writeFile({
 ```
 
 Use a relayfile JWT whose claims include `workspace_id`, `agent_name`, and `aud: ["relayfile"]`. The SDK adds `X-Correlation-Id` automatically for API calls.
+
+The optional `changeLog` block configures the SDK's local per-workspace retained-change mirror used by `subscribe()`, `open({ replayOnStart })`, and `getResourceAtEvent(eventId)`. Durable retention still lives on the Relayfile backend.
 
 ## Full Docs
 
