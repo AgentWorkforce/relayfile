@@ -301,8 +301,11 @@ describe("RelayFileClient — existing methods", () => {
       vi.useFakeTimers();
       try {
         const scopedToken = makeWorkspaceToken("ws_acme", "scoped-agent");
-        const fetchImpl = vi.fn(async (url: string) => {
+        const fetchImpl = vi.fn(async (url: string, init?: RequestInit) => {
           if (url.includes("/fs/file?path=%2Flinear%2Fissues%2FENG-7.json")) {
+            expect(init?.headers).toMatchObject({
+              Authorization: `Bearer ${scopedToken}`,
+            });
             return {
               ok: true,
               status: 200,
@@ -366,6 +369,7 @@ describe("RelayFileClient — existing methods", () => {
 
         expect(handler.mock.calls[0]?.[0]).toMatchObject({
           id: "evt_linear_2",
+          agentId: "scoped-agent",
           summary: {
             title: "ENG-7",
             status: "Done",
@@ -377,6 +381,26 @@ describe("RelayFileClient — existing methods", () => {
       } finally {
         vi.useRealTimers();
       }
+    });
+
+    it("surfaces subscribe setup failures through unsubscribe", async () => {
+      const fetchImpl = vi.fn();
+      const client = makeClient(fetchImpl as unknown as typeof fetch, {
+        token: "not-a-workspace-jwt",
+      });
+
+      const handle = client.subscribe(
+        ["/linear/issues/**"],
+        () => {
+          // no-op
+        },
+        { coalesce: "none" },
+      );
+
+      await expect(handle.unsubscribe()).rejects.toThrow(
+        "RelayFile proactive-runtime APIs require a workspace-scoped JWT",
+      );
+      expect(fetchImpl).not.toHaveBeenCalled();
     });
 
     it("getResourceAtEvent reuses the retained cache before calling the API", async () => {
@@ -441,6 +465,72 @@ describe("RelayFileClient — existing methods", () => {
       expect(fetchImpl).toHaveBeenCalledTimes(1);
 
       await handle.unsubscribe();
+    });
+
+    it("computes fallback digests without exposing file content", async () => {
+      const cryptoDescriptor = Object.getOwnPropertyDescriptor(globalThis, "crypto");
+      Object.defineProperty(globalThis, "crypto", {
+        configurable: true,
+        value: {
+          randomUUID: () => "digest-test",
+        },
+      });
+      const secretContent = "secret-change-payload";
+      const fetchImpl = vi.fn(async (url: string) => {
+        if (url.includes("/fs/file?path=%2Flinear%2Fissues%2FENG-12.json")) {
+          return {
+            ok: true,
+            status: 200,
+            headers: new Headers({ "content-type": "application/json" }),
+            json: async () => ({
+              path: "/linear/issues/ENG-12.json",
+              revision: "rev_1",
+              contentType: "text/plain",
+              content: secretContent,
+            }),
+            text: async () => "",
+          } as unknown as Response;
+        }
+        throw new Error(`Unexpected fetch URL: ${url}`);
+      });
+      const client = makeClient(fetchImpl as unknown as typeof fetch, {
+        token: makeWorkspaceToken("ws_acme", "support-agent"),
+      });
+      let receivedEvent: ChangeEvent | undefined;
+      let handle: Subscription | undefined;
+
+      try {
+        handle = client.subscribe(
+          ["/linear/issues/**"],
+          (event) => {
+            receivedEvent = event;
+          },
+          { coalesce: "none" },
+        );
+
+        const socket = await waitForWebSocket();
+        socket.emit("open", {});
+        socket.emit("message", {
+          data: JSON.stringify({
+            eventId: "evt_digest_1",
+            type: "file.updated",
+            path: "/linear/issues/ENG-12.json",
+            revision: "rev_1",
+            timestamp: "2026-05-11T00:00:00.000Z",
+          } satisfies FilesystemEvent),
+        });
+
+        await waitForExpectation(() => {
+          expect(receivedEvent).toBeDefined();
+        });
+        expect(receivedEvent!.digest).toMatch(/^sha256:[a-f0-9]{64}$/);
+        expect(receivedEvent!.digest).not.toContain(secretContent);
+      } finally {
+        await handle?.unsubscribe();
+        if (cryptoDescriptor) {
+          Object.defineProperty(globalThis, "crypto", cryptoDescriptor);
+        }
+      }
     });
 
     it("open returns a ready handle and primes replay-on-start through the change log", async () => {
@@ -526,6 +616,87 @@ describe("RelayFileClient — existing methods", () => {
         },
       });
       expect(fetchImpl).toHaveBeenCalledTimes(2);
+
+      await connection.unsubscribe();
+    });
+
+    it("keeps acl token context for replayed change expansion", async () => {
+      const scopedToken = makeWorkspaceToken("ws_scoped", "scoped-agent");
+      const fetchImpl = vi.fn(async (url: string, init?: RequestInit) => {
+        if (url.includes("/fs/changes?last=1")) {
+          expect(init?.headers).toMatchObject({
+            Authorization: `Bearer ${scopedToken}`,
+          });
+          return {
+            ok: true,
+            status: 200,
+            headers: new Headers({ "content-type": "application/json" }),
+            json: async () => ({
+              events: [
+                {
+                  id: "evt_scoped_replay_1",
+                  workspace: "ws_scoped",
+                  agentId: "scoped-agent",
+                  type: "relayfile.changed",
+                  occurredAt: "2026-05-11T00:00:00.000Z",
+                  resource: {
+                    path: "/linear/issues/ENG-200.json",
+                    kind: "linear.issue",
+                    id: "ENG-200",
+                    provider: "linear",
+                  },
+                  summary: {
+                    title: "ENG-200",
+                  },
+                  digest: "sha256:scoped",
+                },
+              ],
+            }),
+            text: async () => "",
+          } as unknown as Response;
+        }
+        if (url.includes("/fs/changes/resource?eventId=evt_scoped_replay_1")) {
+          expect(init?.headers).toMatchObject({
+            Authorization: `Bearer ${scopedToken}`,
+          });
+          return {
+            ok: true,
+            status: 200,
+            headers: new Headers({ "content-type": "application/json" }),
+            json: async () => ({
+              path: "/linear/issues/ENG-200.json",
+              data: { id: "ENG-200", title: "ENG-200", scoped: true },
+              digest: "sha256:scoped",
+            }),
+            text: async () => "",
+          } as unknown as Response;
+        }
+        throw new Error(`Unexpected fetch URL: ${url}`);
+      });
+      const client = makeClient(fetchImpl as unknown as typeof fetch, {
+        token: makeWorkspaceToken("ws_default", "default-agent"),
+      });
+
+      const connection = client.open({
+        workspaceId: "ws_scoped",
+        aclToken: scopedToken,
+        replayOnStart: "last:1",
+      });
+
+      const socket = await waitForWebSocket();
+      socket.emit("open", {});
+      await expect(connection.ready).resolves.toBeUndefined();
+
+      const replayed = await client.listLastNChanges(1, {
+        workspaceId: "ws_scoped",
+        token: scopedToken,
+      });
+      await expect(replayed.events[0]!.expand("full")).resolves.toMatchObject({
+        level: "full",
+        path: "/linear/issues/ENG-200.json",
+        data: { id: "ENG-200", title: "ENG-200", scoped: true },
+      });
+      expect(fetchImpl).toHaveBeenCalledTimes(3);
 
       await connection.unsubscribe();
     });
