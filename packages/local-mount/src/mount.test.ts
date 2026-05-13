@@ -71,6 +71,48 @@ describe('createMount', () => {
     handle.cleanup();
   });
 
+  it('allow-list pattern with trailing-slash negation re-includes the directory', async () => {
+    // Regression: previously `["/*", "!web/", "!web/**"]` produced an empty
+    // mount because isPathMatched OR'd the bare-name check (`/*` matches
+    // `web`) before the trailing-slash negation could counter it. The walker
+    // then skipped `web` and never recursed.
+    write(path.join(projectDir, 'web/content/post.md'), 'post');
+    write(path.join(projectDir, 'web/index.html'), 'home');
+    write(path.join(projectDir, 'secrets/api-key.txt'), 'shhh');
+    write(path.join(projectDir, 'README.md'), 'readme');
+
+    const handle = await createMount(projectDir, mountDir, {
+      ignoredPatterns: ['/*', '!web/', '!web/**'],
+      readonlyPatterns: [],
+      excludeDirs: [],
+    });
+
+    expect(existsSync(path.join(handle.mountDir, 'web/content/post.md'))).toBe(true);
+    expect(existsSync(path.join(handle.mountDir, 'web/index.html'))).toBe(true);
+    expect(existsSync(path.join(handle.mountDir, 'secrets'))).toBe(false);
+    expect(existsSync(path.join(handle.mountDir, 'README.md'))).toBe(false);
+
+    handle.cleanup();
+  });
+
+  it('allow-list pattern without trailing slash also works (bare-name negation)', async () => {
+    // The `!web` form (no slash) also keeps working — it negates both the
+    // bare-name and trailing-slash forms.
+    write(path.join(projectDir, 'web/post.md'), 'post');
+    write(path.join(projectDir, 'README.md'), 'readme');
+
+    const handle = await createMount(projectDir, mountDir, {
+      ignoredPatterns: ['/*', '!web', '!web/**'],
+      readonlyPatterns: [],
+      excludeDirs: [],
+    });
+
+    expect(existsSync(path.join(handle.mountDir, 'web/post.md'))).toBe(true);
+    expect(existsSync(path.join(handle.mountDir, 'README.md'))).toBe(false);
+
+    handle.cleanup();
+  });
+
   it('refuses mountDir === projectDir', async () => {
     await expect(
       createMount(projectDir, projectDir, {
