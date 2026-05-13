@@ -2739,6 +2739,51 @@ func TestApplyWebSocketEvent_PreservesNestedLayoutDotfiles(t *testing.T) {
 	if client.readFileCalls != 1 {
 		t.Fatalf("expected websocket layout update to perform one ReadFile, got %d", client.readFileCalls)
 	}
+	if strings.TrimSpace(syncer.state.LastSuccessfulReconcileAt) == "" {
+		t.Fatalf("expected websocket apply to mark sync success")
+	}
+	if syncer.state.LastError != nil {
+		t.Fatalf("expected websocket apply to clear last error, got %#v", syncer.state.LastError)
+	}
+	if got := syncer.state.LastEventAt; got != "2026-05-09T00:00:00Z" {
+		t.Fatalf("expected websocket timestamp to be preserved, got %q", got)
+	}
+}
+
+func TestScanLocalFilesSkipsSymlinkedDirectories(t *testing.T) {
+	t.Parallel()
+
+	localDir := t.TempDir()
+	targetDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(targetDir, "ignored.txt"), []byte("ignored"), 0o644); err != nil {
+		t.Fatalf("seed target dir failed: %v", err)
+	}
+	if err := os.Symlink(targetDir, filepath.Join(localDir, "node_modules_link")); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(localDir, "note.md"), []byte("# ok"), 0o644); err != nil {
+		t.Fatalf("seed local file failed: %v", err)
+	}
+
+	syncer, err := NewSyncer(&fakeClient{}, SyncerOptions{
+		WorkspaceID: "ws_scan_symlink_dir",
+		RemoteRoot:  "/",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+
+	files, err := syncer.scanLocalFiles()
+	if err != nil {
+		t.Fatalf("scanLocalFiles failed: %v", err)
+	}
+	if _, ok := files["/note.md"]; !ok {
+		t.Fatalf("expected regular file to be scanned, got keys %#v", files)
+	}
+	if _, ok := files["/node_modules_link"]; ok {
+		t.Fatalf("expected symlinked directory to be skipped")
+	}
 }
 
 func TestInferProviderFromRoot(t *testing.T) {
