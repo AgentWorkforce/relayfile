@@ -145,6 +145,25 @@ async function executeOperation(state, operation, mock) {
     return;
   }
 
+  if (op === "materializeWebhook") {
+    const provider = String(operation.provider ?? operation.adapter ?? "").trim();
+    if (!provider) throw new Error(`materializeWebhook operation is missing provider: ${JSON.stringify(operation)}`);
+    const rawContent = operation.content === undefined ? {} : operation.content;
+    const content = typeof rawContent === "string" ? rawContent : `${JSON.stringify(rawContent, null, 2)}\n`;
+    await writeVirtualFile(state, virtualPath, content);
+    const effect = {
+      kind: "webhookMaterialized",
+      provider,
+      path: virtualPath,
+      receivedAt: operation.receivedAt,
+      source: operation.source,
+    };
+    state.sideEffects.push(effect);
+    state.toolCalls.push({ name: "materializeWebhook", provider, path: virtualPath });
+    state.contentLines.push(`${label(operation)}webhook ${provider} materialized ${virtualPath}: ${preview(content)}`);
+    return;
+  }
+
   if (op === "write" || op === "append") {
     if (!allowWrite(state, virtualPath, op)) return;
     const rawContent = operation.content === undefined ? "" : operation.content;

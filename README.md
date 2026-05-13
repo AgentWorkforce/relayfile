@@ -163,6 +163,7 @@ Relayfile evals live under `evals/suites/*/cases.md` and compile to gitignored
 ```bash
 npm run evals:list
 npm run evals -- --suite vfs-contracts
+npm run evals -- --suite provider-readiness
 npm run evals:offline
 ```
 
