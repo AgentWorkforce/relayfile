@@ -297,6 +297,68 @@ describe("RelayFileClient — existing methods", () => {
       await broadHandle.unsubscribe();
     });
 
+    it("uses a bounded fallback digest when WebCrypto is unavailable", async () => {
+      const originalCrypto = Object.getOwnPropertyDescriptor(globalThis, "crypto");
+      Object.defineProperty(globalThis, "crypto", {
+        configurable: true,
+        value: {
+          randomUUID: () => "00000000-0000-4000-8000-000000000000",
+        },
+      });
+      try {
+        const fileContent = "private file content that must not become the digest";
+        const fetchImpl = vi.fn(async (url: string) => {
+          if (url.includes("/fs/file?path=%2Fnotes%2Fprivate.txt")) {
+            return {
+              ok: true,
+              status: 200,
+              headers: new Headers({ "content-type": "application/json" }),
+              json: async () => ({
+                path: "/notes/private.txt",
+                revision: "rev_1",
+                contentType: "text/plain",
+                content: fileContent,
+              }),
+              text: async () => "",
+            } as unknown as Response;
+          }
+          throw new Error(`Unexpected fetch URL: ${url}`);
+        });
+        const client = makeClient(fetchImpl as unknown as typeof fetch, {
+          token: makeWorkspaceToken("ws_acme", "support-agent"),
+        });
+        const handler = vi.fn();
+
+        const handle = client.subscribe(["/notes/**"], handler, { coalesce: "none" });
+        const socket = await waitForWebSocket();
+        socket.emit("open", {});
+        socket.emit("message", {
+          data: JSON.stringify({
+            eventId: "evt_note_1",
+            type: "file.updated",
+            path: "/notes/private.txt",
+            revision: "rev_1",
+            timestamp: "2026-05-11T00:00:00.000Z",
+          } satisfies FilesystemEvent),
+        });
+
+        await waitForExpectation(() => {
+          expect(handler).toHaveBeenCalledTimes(1);
+        });
+        const event = handler.mock.calls[0]?.[0] as ChangeEvent;
+        expect(event.digest).toMatch(/^sha256-fallback:[0-9a-f]{8}$/);
+        expect(event.digest).not.toContain(fileContent);
+
+        await handle.unsubscribe();
+      } finally {
+        if (originalCrypto) {
+          Object.defineProperty(globalThis, "crypto", originalCrypto);
+        } else {
+          delete (globalThis as { crypto?: Crypto }).crypto;
+        }
+      }
+    });
+
     it("subscribe uses the acl token transport and coalesces rapid writes to one event", async () => {
       vi.useFakeTimers();
       try {
