@@ -1,11 +1,35 @@
 # Custom Digest Functions — Implementation Spec
 
 **Status:** Proposed
-**Affects:** `internal/digest`, `internal/wasmrun` (new), `cmd/relayfile-cli`, `packages/sdk/typescript`, `relayfile-adapters/packages/core`, control plane (workspace function storage)
+**Affects:** `AgentWorkforce/relayfile` (`internal/digest`, `internal/wasmrun` (new), `cmd/relayfile-cli`, `packages/sdk/typescript`), `AgentWorkforce/cloud` (workspace function storage, compile/deploy API, admin scope), `AgentWorkforce/relayfile-adapters` only through the base digest contract dependency
 **Depends on:** `workspace-primitives-spec.md` work items 1 + 2 (base digest pipeline + adapter `digest()` contract)
 **Pairs with:** `proactive-runtime-contract.md`, `LAYOUT.md`
 
 ---
+
+## Repo Routing for Implementers
+
+This follow-on spec is explicitly cross-repo. Do not assign it to a relayfile-only agent.
+
+| Repo | Owns in this spec | Local root |
+|---|---|---|
+| `AgentWorkforce/relayfile` | Local CLI commands, SDK types, mount-daemon digest invocation, `internal/wasmrun`, sandbox execution, deterministic host bridge, local `digest function test`, and daemon-side warnings. | `../relayfile` |
+| `AgentWorkforce/cloud` | Deploy/list/show/disable/logs API backing the CLI, TypeScript-to-WASM compilation service, function storage tables, workspace-admin authorization scope, module signing, and daemon distribution channel. | `../cloud` |
+| `AgentWorkforce/relayfile-adapters` | No direct custom-function work beyond the base `DigestHandler` contract from `workspace-primitives-spec.md` work item 2. | `../relayfile-adapters` |
+| `AgentWorkforce/skills` | Follow-up `daily-digest` skill docs after M1 ships. | `../skills` |
+| `AgentWorkforce/relay` | Follow-up blog/tutorial copy after M1 ships. | `../relay` |
+
+**Worktree and PR rule:** for every repo an agent touches, create or use a dedicated worktree for that repo and open a separate PR from that repo. Use matching branch names where possible, and make every PR body cross-link the dependent PRs in the other repos. Do not mix changes for multiple repos into one working tree, one branch, or one PR.
+
+**PR split to give agents:**
+
+1. `relayfile-adapters` and `relayfile`: finish `workspace-primitives-spec.md` work items 1 + 2 first. This spec is blocked until those PRs merge or are available as dependency branches.
+2. `cloud`: implement storage, compile/deploy APIs, signing, admin scope, and function distribution.
+3. `relayfile`: implement CLI verbs, local test runner, `internal/wasmrun`, daemon pull/cache/invoke behavior, and digest renderer warning integration.
+4. `relayfile` + `cloud`: run the cross-repo integration proof that deploys a fixture function through cloud, pulls it into the daemon, and renders a digest section.
+5. `skills` / `relay`: update docs only after the runtime behavior is proven.
+
+If a single agent is coordinating the whole feature, tell it to preserve that same per-repo worktree and PR split while coordinating evidence across the dependency branches. The acceptance criteria should cite evidence from both `relayfile` and `cloud`.
 
 ## Problem
 
@@ -113,6 +137,9 @@ relayfile digest function deploy ./digests/eng-roadmap.ts
 
 ## Compilation pipeline
 
+**Primary repo:** `AgentWorkforce/cloud`.
+**Supporting repo:** `AgentWorkforce/relayfile` for the CLI request/response contract and local `digest function test`.
+
 **Source:** TypeScript (`.ts`) or JavaScript (`.js`) implementing the `DigestHandler` interface.
 
 **Stage 1 — bundle.** `esbuild` (already in the relayfile-cli toolchain via Composio adapter pipeline) compiles + tree-shakes to a single CommonJS module. Strip imports of `@relayfile/sdk` types (they're erased at runtime).
@@ -128,6 +155,9 @@ relayfile digest function deploy ./digests/eng-roadmap.ts
 Alternative considered: ship per-customer WASM directly (no JS engine). Rejected for M1 — requires a TS-to-WASM frontend (AssemblyScript) that's awkward for the kind of dataflow customers will actually write. QuickJS-in-WASM gives us JS ergonomics at a fixed ~3× startup cost over native, which is fine for a 30s-coalesced job.
 
 ## Runtime: `internal/wasmrun`
+
+**Primary repo:** `AgentWorkforce/relayfile`.
+**Supporting repo:** `AgentWorkforce/cloud` only for the signed module envelope and distribution protocol consumed by the daemon.
 
 **Engine:** [wazero](https://github.com/tetratelabs/wazero) — pure-Go, zero CGO, AOT-cacheable. Adds to `go.mod` as a single dependency; no toolchain change.
 
@@ -156,6 +186,9 @@ That's it. No `fetch`, no `fs`, no `crypto.randomUUID()` (replaced by a determin
 
 ## API surface seen by the customer module
 
+**Primary repo:** `AgentWorkforce/relayfile`.
+**Supporting repo:** `AgentWorkforce/relayfile-adapters` only if the base `DigestContext` type remains sourced from adapter-core instead of being re-exported from the relayfile SDK.
+
 Same `DigestContext`, `DigestBullet`, `DigestSection` types defined in `workspace-primitives-spec.md` work item 2 — re-exported from `@relayfile/sdk` so customer code imports them naturally.
 
 Additional context fields available to customer modules but not first-party adapters:
@@ -171,6 +204,9 @@ interface DigestContext {
 The `provider` field on `DigestSection` is customer-controlled — they pick the heading. Sections from custom functions render under their chosen name in the digest body, sorted after first-party adapter sections (alphabetical within each group).
 
 ## Storage & lifecycle
+
+**Primary repo:** `AgentWorkforce/cloud`.
+**Supporting repo:** `AgentWorkforce/relayfile` for daemon cache semantics and status/log display.
 
 **Control plane tables** (new migration on the cloud-side `workspace_digest_functions` table):
 
@@ -197,6 +233,9 @@ create table workspace_digest_functions (
 - Daemon caches compiled modules under `~/.relayfile/cache/wasm/<content_hash>.wasm`. Eviction by LRU.
 
 ## CLI
+
+**Primary repo:** `AgentWorkforce/relayfile`.
+**Supporting repo:** `AgentWorkforce/cloud` for every command except `digest function test`, which must run locally without cloud.
 
 ```bash
 relayfile digest function deploy <path>           # compile + upload

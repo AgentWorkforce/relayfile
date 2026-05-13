@@ -1,11 +1,35 @@
 # Workspace Primitives — Implementation Spec
 
 **Status:** Proposed
-**Affects:** `internal/mountfuse`, `internal/mountsync`, `cmd/relayfile-cli`, `packages/core`, `packages/sdk/typescript`, `packages/sdk/python`, `relayfile-adapters/packages/core`, `relayfile-adapters/packages/<adapter>`
+**Affects:** `AgentWorkforce/relayfile` (`internal/mountfuse`, `internal/mountsync`, `cmd/relayfile-cli`, `packages/core`, `packages/sdk/typescript`, `packages/sdk/python`, `schemas/`), `AgentWorkforce/relayfile-adapters` (`packages/core`, `packages/<adapter>`)
 **Pairs with:** `LAYOUT.md`, `onwrite-trigger-design.md`, `canonical-file-schema-ownership-boundary.md`
 **Drives skills:** [`activity-summary`](https://github.com/AgentWorkforce/skills/tree/main/skills/activity-summary), [`daily-digest`](https://github.com/AgentWorkforce/skills/tree/main/skills/daily-digest), [`writeback-as-files`](https://github.com/AgentWorkforce/skills/tree/main/skills/writeback-as-files), [`workspace-layout`](https://github.com/AgentWorkforce/skills/tree/main/skills/workspace-layout)
 
 ---
+
+## Repo Routing for Implementers
+
+This spec should not be handed to one agent as a single-repo task. Split work by the repo that owns the code being changed:
+
+| Repo | Owns in this spec | Local root |
+|---|---|---|
+| `AgentWorkforce/relayfile` | Mount daemon, FUSE virtual files, CLI commands, TypeScript/Python SDK exports, schema files, integration tests, and this spec PR. | `../relayfile` |
+| `AgentWorkforce/relayfile-adapters` | Adapter-core contracts plus first-party adapter exports such as `digest()` and `layoutManifest()`. | `../relayfile-adapters` |
+| `AgentWorkforce/skills` | Follow-up edits only if implementation scope changes and the published skills need wording updates. | `../skills` |
+| `AgentWorkforce/relay` | Follow-up blog copy only if product claims need to be delayed or reframed. | `../relay` |
+
+Default routing: start implementation in `AgentWorkforce/relayfile` unless the work item explicitly says adapter-core or first-party adapter exports are required.
+
+**Worktree and PR rule:** for every repo an agent touches, create or use a dedicated worktree for that repo and open a separate PR from that repo. Use matching branch names where possible, and make every PR body cross-link the dependent PRs in the other repos. Do not mix changes for multiple repos into one working tree, one branch, or one PR.
+
+**PR split to give agents:**
+
+1. `relayfile`: work item 5 (`writeback list`) can ship alone.
+2. `relayfile` + `relayfile-adapters`: work items 1 and 2 ship together because the daemon needs the digest pipeline and adapters need the `digest()` contract.
+3. `relayfile`: work item 6 (`.error.json`) follows item 5.
+4. `relayfile` + `relayfile-adapters`: work item 3 (`.layout.md`) needs relayfile virtual-file work plus adapter layout manifests.
+5. `relayfile`: work item 4 (`.schema.json`) follows item 3; involve `relayfile-adapters` only if schema metadata must be emitted from adapter manifests.
+6. `relayfile`: work item 7 is documentation-only.
 
 ## Problem
 
@@ -44,6 +68,10 @@ After this spec lands, an agent following the four `@agent-relay/*` skills can:
 ---
 
 ## Work item 1 — Digest generator
+
+**Primary repo:** `AgentWorkforce/relayfile`.
+**Supporting repo:** `AgentWorkforce/relayfile-adapters` only for the adapter contract in work item 2.
+**Agent handoff:** Give this to a relayfile agent that owns Go daemon code, CLI wiring, SDK event behavior, and tests.
 
 ### Current state
 
@@ -92,6 +120,10 @@ events: 47                # raw change-event count over the window
 ---
 
 ## Work item 2 — Adapter `digest()` SDK contract
+
+**Primary repo:** `AgentWorkforce/relayfile-adapters`.
+**Supporting repo:** `AgentWorkforce/relayfile` for consuming the contract from the digest generator in work item 1 and exporting public SDK types if needed.
+**Agent handoff:** Give this to an adapters agent. It should not edit mount daemon code except through a coordinated relayfile PR.
 
 ### Current state
 
@@ -147,6 +179,10 @@ Returning `null` means "ran successfully, no activity in the window". Throwing s
 
 ## Work item 3 — Per-provider `.layout.md` materialization
 
+**Primary repo:** `AgentWorkforce/relayfile`.
+**Supporting repo:** `AgentWorkforce/relayfile-adapters` for the `layoutManifest()` contract and first-party provider manifests.
+**Agent handoff:** Split into two agents or two PRs: relayfile owns virtual-file rendering; adapters owns manifest shape and provider data.
+
 ### Current state
 
 - `internal/mountfuse/layout.go:56` references `<integration>/.layout.md` files.
@@ -179,6 +215,10 @@ Each connected provider produces a real `<mount>/<provider>/.layout.md` describi
 ---
 
 ## Work item 4 — `<resource>/.schema.json` sibling files
+
+**Primary repo:** `AgentWorkforce/relayfile`.
+**Supporting repo:** `AgentWorkforce/relayfile-adapters` only if schema discovery needs adapter-provided writeback action metadata.
+**Agent handoff:** Start in relayfile because the served schema files and virtual paths live there; loop in adapters if the implementation cannot derive writebackable resources from relayfile's existing registry.
 
 ### Current state
 
@@ -219,6 +259,10 @@ For every writebackable resource, a virtual sibling file appears next to the wri
 
 ## Work item 5 — `relayfile writeback list` CLI subcommand
 
+**Primary repo:** `AgentWorkforce/relayfile`.
+**Supporting repo:** none expected.
+**Agent handoff:** Give this to a relayfile CLI agent; it is independent and should be the first implementation PR.
+
 ### Current state
 
 `cmd/relayfile-cli/main.go:2220` registers `writeback retry --opId OP`. No `list` subcommand exists. `writeback status` exists for a single op.
@@ -244,6 +288,10 @@ relayfile writeback list --state pending|dead|succeeded|failed [--workspace WS] 
 ---
 
 ## Work item 6 — Dead-letter `.error.json` sidecars
+
+**Primary repo:** `AgentWorkforce/relayfile`.
+**Supporting repo:** none expected unless provider-specific error normalization is missing from adapters.
+**Agent handoff:** Give this to a relayfile agent after work item 5 lands so `writeback list --state dead --json` can expose the sidecar fields.
 
 ### Current state
 
@@ -280,6 +328,10 @@ When a writeback exhausts retries, the daemon writes both the original payload a
 
 ## Work item 7 — `wb-<timestamp>.json` naming convention (documentation only)
 
+**Primary repo:** `AgentWorkforce/relayfile`.
+**Supporting repo:** `AgentWorkforce/skills` only if the skill examples diverge from the final convention.
+**Agent handoff:** Keep this with the relayfile layout-doc PR; it should not block code work.
+
 ### Current state
 
 The skill recommends `wb-<unix-ts>.json` as the conventional agent-authored writeback filename. The codebase does not enforce or prefer this.
@@ -297,8 +349,8 @@ Promote this from skill-doc-only to a documented convention in `relayfile/docs/L
 
 ## Sequencing
 
-1. **Work item 1 + 2** (digests + adapter contract) can land together. Single PR.
-2. **Work item 3** (per-provider `.layout.md`) is independent. Single PR.
+1. **Work item 1 + 2** (digests + adapter contract) can land together as coordinated `relayfile` and `relayfile-adapters` PRs.
+2. **Work item 3** (per-provider `.layout.md`) is independent, but likely needs coordinated `relayfile` and `relayfile-adapters` PRs if provider manifests are introduced.
 3. **Work item 4** (`<resource>/.schema.json`) depends on work item 3 only for the layout doc that points at it.
 4. **Work item 5** (CLI `list`) is independent.
 5. **Work item 6** (`.error.json` sidecars) depends on work item 5 for the JSON output integration.
