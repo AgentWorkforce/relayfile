@@ -124,12 +124,15 @@ Tags: integrations, notion, comparison, headline
 Human Review: true
 
 ### Message
-Answer "What did I work on yesterday across GitHub, Linear, and Notion?" from a fixture-seeded mount.
+Use /Users/khaliqgant/Projects/AgentWorkforce/relayfile/mount-verify — start by reading LAYOUT.md, then .skills/activity-summary.md — to answer: What did I work on yesterday (2026-05-12) across GH/Linear/Notion?
+
+### Use Configured Mount
+mountRoot: /Users/khaliqgant/Projects/AgentWorkforce/relayfile/mount-verify
 
 ### Mock
 ```json
 {
-  "yesterday": "2026-05-08",
+  "yesterday": "2026-05-12",
   "comparison": {
     "mcpMatches": 0,
     "mcpToolCalls": 12,
@@ -140,55 +143,73 @@ Answer "What did I work on yesterday across GitHub, Linear, and Notion?" from a 
     "mcpMissed": "Khaliq's To Dos was visible as a Notion page file and did not require a title-exact MCP fetch."
   },
   "files": {
-    "/notion/pages/khaliqs-to-dos.json": {
-      "title": "Khaliq's To Dos",
-      "lastEdited": "2026-05-08T18:12:00Z",
-      "content": ["Finish relayfile eval harness", "Compare MCP token cost"]
-    },
-    "/github/repos/AgentWorkforce/relay/pulls/815.json": {
-      "number": 815,
-      "updatedAt": "2026-05-08T21:07:00Z",
-      "title": "Measure relayfile navigation cost"
-    },
-    "/linear/issues/by-state/Todo/LIN-42.json": {
-      "identifier": "LIN-42",
-      "updatedAt": "2026-05-08T12:30:00Z",
-      "title": "Compare Relayfile with MCP"
-    }
+    "/notion/pages/_index.json": "pre-existing; filtered with jq date startswith(\"2026-05-12\")",
+    "/linear/issues/_index.json": "pre-existing; filtered with jq date startswith(\"2026-05-12\")",
+    "/linear/issues/by-title/relayfile-specific-tests.json": "pre-existing title lookup",
+    "/notion/pages/by-title/khaliqs-to-dos__<short_id>.json": "pre-existing title lookup"
   }
 }
+```
+
+### Expected jq commands
+The agent should run these (or equivalent) as the primary discovery path:
+
+```bash
+# Read skill first
+cat .skills/activity-summary.md
+
+# Linear: one jq command over the index
+jq '.[] | select(.updated | startswith("2026-05-12"))' linear/issues/_index.json
+
+# Notion: one jq command over the index
+jq '.[] | select(.updated | startswith("2026-05-12"))' notion/pages/_index.json
+
+# GitHub: one jq command over the repo index
+jq '.[] | select(.updated | startswith("2026-05-12"))' \
+  github/repos/AgentWorkforce/relayfile/issues/_index.json
 ```
 
 ### Operations
 ```json
 [
-  {
-    "op": "synthesizeYesterday",
-    "date": "2026-05-08",
-    "paths": ["/github", "/linear", "/notion"]
-  }
+  { "op": "read", "path": "/LAYOUT.md" },
+  { "op": "read", "path": "/.skills/activity-summary.md" },
+  { "op": "jqFilter", "path": "/linear/issues/_index.json",
+    "filter": ".[] | select(.updated | startswith(\"2026-05-12\"))" },
+  { "op": "jqFilter", "path": "/notion/pages/_index.json",
+    "filter": ".[] | select(.updated | startswith(\"2026-05-12\"))" }
 ]
 ```
 
 ### Deterministic Checks
 ok: true
 contentIncludes:
+- activity-summary
+- _index.json
+- 2026-05-12
 - Khaliq's To Dos
-- Measure relayfile navigation cost
-- Compare Relayfile with MCP
-- mcp missed
+- Integration Tracking
+- Relayfile
 fileExists:
-- /notion/pages/khaliqs-to-dos.json
+- /.skills/activity-summary.md
+- /notion/pages/_index.json
+- /linear/issues/_index.json
 metricLessThan:
 - {"left":"relayfileTokens","right":"mcpTokens"}
 - {"left":"relayfileCostUsd","right":"mcpCostUsd"}
 metricGreaterThan:
 - {"left":"relayfileMatches","right":"mcpMatches"}
-maxToolCalls: 1
+maxToolCalls: 6
 
 ### Must
-- Prefer local filesystem search over exact-title Notion MCP lookup.
-- Include cross-integration evidence from GitHub, Linear, and Notion.
+- Read LAYOUT.md first, then .skills/activity-summary.md before any exploration.
+- Use `_index.json` + jq date filtering as the primary path — not `find -newermt`,
+  not iterating individual files.
+- Report results from all three providers: GitHub, Linear, and Notion.
+- Use `linear/issues/by-title/` for named-issue lookups, not a full directory scan.
 
 ### Must Not
 - Drop the Notion page because the title is fuzzy or apostrophe-normalized.
+- Iterate over individual issue/page files to find the date — that is O(n) and
+  the skill explicitly forbids it.
+- Skip reading the skill file before doing discovery.

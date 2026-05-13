@@ -1513,7 +1513,6 @@ func (s *Server) handleTree(w http.ResponseWriter, r *http.Request, workspaceID,
 			}
 		}
 		resp.Entries = filtered
-		resp.NextCursor = nil
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

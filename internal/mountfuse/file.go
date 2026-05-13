@@ -69,6 +69,9 @@ func (n *FileNode) Getattr(ctx context.Context, _ gofusefs.FileHandle, out *fuse
 }
 
 func (n *FileNode) Open(ctx context.Context, flags uint32) (gofusefs.FileHandle, uint32, syscall.Errno) {
+	if isReadOnlyVirtualPath(n.state.remoteRoot, n.path) && flags&(syscall.O_WRONLY|syscall.O_RDWR|syscall.O_TRUNC) != 0 {
+		return nil, 0, syscall.EACCES
+	}
 	file, err := n.state.readFile(ctx, n.path)
 	if err != nil {
 		return nil, 0, readErrno(err)
@@ -106,10 +109,14 @@ func (n *FileNode) metadata(ctx context.Context) (nodeMeta, error) {
 		modTime = time.Now()
 		contentType = file.ContentType
 	}
+	mode := uint32(syscall.S_IFREG | defaultFileMode)
+	if isReadOnlyVirtualPath(n.state.remoteRoot, n.path) {
+		mode = syscall.S_IFREG | 0o444
+	}
 	return nodeMeta{
 		path:        n.path,
 		name:        pathBase(n.path),
-		mode:        syscall.S_IFREG | defaultFileMode,
+		mode:        mode,
 		revision:    revision,
 		size:        size,
 		modTime:     zeroTimeToNow(modTime),
@@ -248,9 +255,13 @@ func (h *FileHandle) flush(ctx context.Context) syscall.Errno {
 
 func (n *FileNode) fillEntry(out *fuse.EntryOut) syscall.Errno {
 	n.mu.RLock()
+	mode := uint32(syscall.S_IFREG | defaultFileMode)
+	if isReadOnlyVirtualPath(n.state.remoteRoot, n.path) {
+		mode = syscall.S_IFREG | 0o444
+	}
 	meta := nodeMeta{
 		path:        n.path,
-		mode:        syscall.S_IFREG | defaultFileMode,
+		mode:        mode,
 		revision:    n.revision,
 		size:        n.size,
 		modTime:     zeroTimeToNow(n.modTime),

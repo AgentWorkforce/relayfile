@@ -2,6 +2,7 @@ package mountfuse
 
 import (
 	"context"
+	"encoding/json"
 	"sort"
 	"strings"
 	"sync"
@@ -1064,6 +1065,215 @@ func TestByStateOutsideIssuesPathRoundTrips(t *testing.T) {
 	}
 	if gotContentType != "application/json" {
 		t.Fatalf("content type = %q, want application/json", gotContentType)
+	}
+}
+
+func TestProviderLayoutVisibleAndReadable(t *testing.T) {
+	t.Parallel()
+
+	remote := &fakeRemoteClient{
+		trees: map[string]mountsync.TreeResponse{
+			"/": {
+				Path: "/",
+				Entries: []mountsync.TreeEntry{
+					{Path: "/linear", Type: "directory"},
+				},
+			},
+			"/linear": {
+				Path: "/linear",
+				Entries: []mountsync.TreeEntry{
+					{Path: "/linear/issues", Type: "directory"},
+				},
+			},
+		},
+	}
+	root, err := New(Config{
+		Client:      remote,
+		WorkspaceID: "ws_provider_layout",
+		RemoteRoot:  "/",
+		LayoutManifests: map[string]LayoutManifest{
+			"linear": {
+				Provider:            "linear",
+				ResourceDirectories: []string{"issues"},
+				AliasSegments: []string{
+					aliasByIDSegment,
+					aliasByNameSegment,
+					aliasByStateSegment,
+					aliasByTitleSegment,
+				},
+				WritebackResources: []string{"comments"},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	_ = gofusefs.NewNodeFS(root, &gofusefs.Options{})
+
+	linear := lookupDir(t, root, "linear")
+	if names := readdirNames(t, linear); !equalSorted(names, []string{providerLayoutFilename, "issues"}) {
+		t.Fatalf("Readdir(/linear) = %v, want layout and issues", names)
+	}
+	layoutNode, entryOut := lookupFile(t, linear, providerLayoutFilename)
+	if perm := entryOut.Attr.Mode & 0o777; perm != 0o444 {
+		t.Fatalf("provider layout permissions = %o, want 0444", perm)
+	}
+	body, contentType := readFileContent(t, layoutNode)
+	if contentType != layoutContentType {
+		t.Fatalf("provider layout content type = %q, want %q", contentType, layoutContentType)
+	}
+	for _, needle := range []string{
+		"linear layout",
+		"issues/",
+		aliasByIDSegment,
+		aliasByNameSegment,
+		aliasByStateSegment,
+		aliasByTitleSegment,
+		"comments/.schema.json",
+	} {
+		if !strings.Contains(body, needle) {
+			t.Fatalf("provider layout missing %q:\n%s", needle, body)
+		}
+	}
+}
+
+func TestResourceSchemaReadableAndReadOnly(t *testing.T) {
+	t.Parallel()
+
+	remote := &fakeRemoteClient{
+		trees: map[string]mountsync.TreeResponse{
+			"/": {
+				Path: "/",
+				Entries: []mountsync.TreeEntry{
+					{Path: "/github", Type: "directory"},
+				},
+			},
+			"/github": {
+				Path: "/github",
+				Entries: []mountsync.TreeEntry{
+					{Path: "/github/repos", Type: "directory"},
+				},
+			},
+			"/github/repos": {
+				Path: "/github/repos",
+				Entries: []mountsync.TreeEntry{
+					{Path: "/github/repos/octocat", Type: "directory"},
+				},
+			},
+			"/github/repos/octocat": {
+				Path: "/github/repos/octocat",
+				Entries: []mountsync.TreeEntry{
+					{Path: "/github/repos/octocat/hello-world", Type: "directory"},
+				},
+			},
+			"/github/repos/octocat/hello-world": {
+				Path: "/github/repos/octocat/hello-world",
+				Entries: []mountsync.TreeEntry{
+					{Path: "/github/repos/octocat/hello-world/issues", Type: "directory"},
+				},
+			},
+			"/github/repos/octocat/hello-world/issues": {
+				Path:    "/github/repos/octocat/hello-world/issues",
+				Entries: nil,
+			},
+		},
+	}
+
+	root := newMountTestRoot(t, remote, "ws_resource_schema")
+	issues := lookupDir(t, lookupDir(t, lookupDir(t, lookupDir(t, lookupDir(t, root, "github"), "repos"), "octocat"), "hello-world"), "issues")
+	if names := readdirNames(t, issues); !equalSorted(names, []string{schemaFilename}) {
+		t.Fatalf("Readdir(issues) = %v, want schema file", names)
+	}
+	schemaNode, entryOut := lookupFile(t, issues, schemaFilename)
+	if perm := entryOut.Attr.Mode & 0o777; perm != 0o444 {
+		t.Fatalf("schema permissions = %o, want 0444", perm)
+	}
+	body, contentType := readFileContent(t, schemaNode)
+	if contentType != schemaContentType {
+		t.Fatalf("schema content type = %q, want %q", contentType, schemaContentType)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal([]byte(body), &decoded); err != nil {
+		t.Fatalf("schema is not valid JSON: %v\n%s", err, body)
+	}
+	if decoded["$schema"] == "" {
+		t.Fatalf("schema missing $schema: %v", decoded)
+	}
+	if _, _, errno := schemaNode.Open(context.Background(), syscall.O_WRONLY); errno != syscall.EACCES {
+		t.Fatalf("Open(schema, O_WRONLY) errno = %d, want EACCES", errno)
+	}
+}
+
+func TestDeadLetterErrorSidecarReadable(t *testing.T) {
+	t.Parallel()
+
+	const errorBody = `{"code":"schema_violation","message":"bad payload","attempts":4}`
+	remote := &fakeRemoteClient{
+		trees: map[string]mountsync.TreeResponse{
+			"/": {
+				Path: "/",
+				Entries: []mountsync.TreeEntry{
+					{Path: "/.relay", Type: "directory"},
+				},
+			},
+			"/.relay": {
+				Path: "/.relay",
+				Entries: []mountsync.TreeEntry{
+					{Path: "/.relay/dead-letter", Type: "directory"},
+				},
+			},
+			"/.relay/dead-letter": {
+				Path: "/.relay/dead-letter",
+				Entries: []mountsync.TreeEntry{
+					{Path: "/.relay/dead-letter/wb-1715600000.json", Type: "file", Revision: "r-payload"},
+					{Path: "/.relay/dead-letter/wb-1715600000.error.json", Type: "file", Revision: "r-error"},
+				},
+			},
+		},
+		files: map[string]mountsync.RemoteFile{
+			"/.relay/dead-letter/wb-1715600000.json": {
+				Path:        "/.relay/dead-letter/wb-1715600000.json",
+				Revision:    "r-payload",
+				ContentType: "application/json",
+				Content:     `{"opId":"op_1"}`,
+			},
+			"/.relay/dead-letter/wb-1715600000.error.json": {
+				Path:        "/.relay/dead-letter/wb-1715600000.error.json",
+				Revision:    "r-error",
+				ContentType: "application/json",
+				Content:     errorBody,
+			},
+		},
+	}
+
+	root := newMountTestRoot(t, remote, "ws_dead_letter_error")
+	deadLetter := lookupDir(t, lookupDir(t, root, ".relay"), "dead-letter")
+	names := readdirNames(t, deadLetter)
+	if !equalSorted(names, []string{"wb-1715600000.json", "wb-1715600000.error.json"}) {
+		t.Fatalf("Readdir(dead-letter) = %v, want payload and error sidecar", names)
+	}
+	errorNode, errorEntry := lookupFile(t, deadLetter, "wb-1715600000.error.json")
+	body, contentType := readFileContent(t, errorNode)
+	if body != errorBody {
+		t.Fatalf("read error sidecar = %q, want %q", body, errorBody)
+	}
+	if contentType != "application/json" {
+		t.Fatalf("error sidecar content type = %q, want application/json", contentType)
+	}
+	// Lead plan §4 gate 6: dead-letter `.error.json` sidecars are read-only;
+	// writes/truncations must surface as EACCES so agents cannot mutate the
+	// daemon's deterministic failure record.
+	if perm := errorEntry.Attr.Mode & 0o777; perm != 0o444 {
+		t.Fatalf("error sidecar permissions = %o, want 0444", perm)
+	}
+	if _, _, errno := errorNode.Open(context.Background(), syscall.O_WRONLY); errno != syscall.EACCES {
+		t.Fatalf("Open(error sidecar, O_WRONLY) errno = %d, want EACCES", errno)
+	}
+	if _, _, errno := errorNode.Open(context.Background(), syscall.O_RDWR); errno != syscall.EACCES {
+		t.Fatalf("Open(error sidecar, O_RDWR) errno = %d, want EACCES", errno)
+	}
+	if _, _, errno := errorNode.Open(context.Background(), syscall.O_WRONLY|syscall.O_TRUNC); errno != syscall.EACCES {
+		t.Fatalf("Open(error sidecar, O_WRONLY|O_TRUNC) errno = %d, want EACCES", errno)
 	}
 }
 

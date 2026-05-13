@@ -17,28 +17,12 @@ from .errors import (
     RevisionConflictError,
 )
 from .types import (
-    AckResponse,
     AckWritebackInput,
-    AckWritebackResponse,
-    AdminIngressStatusResponse,
-    AdminSyncStatusResponse,
-    BackendStatusResponse,
-    DeadLetterFeedResponse,
-    DeadLetterItem,
     DeleteFileInput,
-    EventFeedResponse,
-    FileQueryResponse,
-    FileReadResponse,
     IngestWebhookInput,
-    OperationFeedResponse,
-    OperationStatusResponse,
-    QueuedResponse,
-    SyncIngressStatusResponse,
-    SyncStatusResponse,
-    TreeResponse,
     WritebackItem,
+    WritebackState,
     WriteFileInput,
-    WriteQueuedResponse,
 )
 
 AccessTokenProvider = Union[str, Callable[[], str]]
@@ -99,7 +83,11 @@ def _enc(segment: str) -> str:
 
 
 def _build_query(params: dict[str, Any]) -> str:
-    filtered = {k: (str(v).lower() if isinstance(v, bool) else str(v)) for k, v in params.items() if v is not None}
+    filtered = {
+        k: (str(v).lower() if isinstance(v, bool) else str(v))
+        for k, v in params.items()
+        if v is not None
+    }
     return f"?{urlencode(filtered)}" if filtered else ""
 
 
@@ -184,8 +172,11 @@ def _throw_for_error(status: int, payload: Any, headers: httpx.Headers) -> None:
         )
     if status == 409 and code == "invalid_state":
         raise InvalidStateError(
-            status=status, code=code, message=message,
-            correlation_id=cid, details=details,
+            status=status,
+            code=code,
+            message=message,
+            correlation_id=cid,
+            details=details,
         )
     if status == 429 and code == "queue_full":
         retry_after: int | None = None
@@ -198,19 +189,27 @@ def _throw_for_error(status: int, payload: Any, headers: httpx.Headers) -> None:
             except ValueError:
                 pass
         raise QueueFullError(
-            status=status, code=code, message=message,
-            correlation_id=cid, details=details,
+            status=status,
+            code=code,
+            message=message,
+            correlation_id=cid,
+            details=details,
             retry_after_seconds=retry_after,
         )
     if status == 413:
         raise PayloadTooLargeError(
-            status=status, code=data.get("code", "payload_too_large"),
+            status=status,
+            code=data.get("code", "payload_too_large"),
             message=data.get("message", "Request payload exceeds configured limit"),
-            correlation_id=cid, details=details,
+            correlation_id=cid,
+            details=details,
         )
     raise RelayFileApiError(
-        status=status, code=code, message=message,
-        correlation_id=cid, details=details,
+        status=status,
+        code=code,
+        message=message,
+        correlation_id=cid,
+        details=details,
     )
 
 
@@ -264,6 +263,13 @@ def _coerce_metadata_response(payload: Any) -> dict[str, Any]:
     )
 
 
+def _coerce_writeback_items(payload: Any) -> list[WritebackItem]:
+    rows = payload.get("items") if isinstance(payload, dict) else payload
+    if not isinstance(rows, list):
+        return []
+    return [WritebackItem.from_dict(row) for row in rows if isinstance(row, dict)]
+
+
 class RelayFileClient:
     """Synchronous RelayFile SDK client with retry support."""
 
@@ -284,7 +290,9 @@ class RelayFileClient:
         # is a different service from the relayfile data plane. Default to
         # the public agentrelay.com/cloud host when the caller hasn't
         # supplied an override.
-        self._cloud_base_url = (cloud_base_url or DEFAULT_RELAYFILE_CLOUD_BASE_URL).rstrip("/")
+        self._cloud_base_url = (
+            cloud_base_url or DEFAULT_RELAYFILE_CLOUD_BASE_URL
+        ).rstrip("/")
         self._token_provider = token
         self._user_agent = user_agent
         self._retry = _normalize_retry(retry)
@@ -351,8 +359,12 @@ class RelayFileClient:
 
             try:
                 resp = self._client.request(
-                    method, url, headers=req_headers,
-                    content=json.dumps(json_body).encode() if json_body is not None else None,
+                    method,
+                    url,
+                    headers=req_headers,
+                    content=json.dumps(json_body).encode()
+                    if json_body is not None
+                    else None,
                 )
             except httpx.TransportError:
                 if retries < self._retry.max_retries:
@@ -369,7 +381,10 @@ class RelayFileClient:
             if _should_retry(resp.status_code, retries, self._retry.max_retries):
                 retries += 1
                 time.sleep(
-                    _compute_delay(self._retry, retries, resp.headers.get("retry-after")) / 1000
+                    _compute_delay(
+                        self._retry, retries, resp.headers.get("retry-after")
+                    )
+                    / 1000
                 )
                 continue
 
@@ -424,9 +439,13 @@ class RelayFileClient:
         correlation_id: str | None = None,
     ) -> dict[str, Any]:
         params: dict[str, Any] = {
-            "path": path, "provider": provider,
-            "relation": relation, "permission": permission,
-            "comment": comment, "cursor": cursor, "limit": limit,
+            "path": path,
+            "provider": provider,
+            "relation": relation,
+            "permission": permission,
+            "comment": comment,
+            "cursor": cursor,
+            "limit": limit,
         }
         if properties:
             for k, v in properties.items():
@@ -516,6 +535,13 @@ class RelayFileClient:
         limit: int | None = None,
         correlation_id: str | None = None,
     ) -> dict[str, Any]:
+        """List filesystem events.
+
+        Digest artifacts are reported as ordinary ``file.created`` and
+        ``file.updated`` events at ``DIGEST_PATHS``; filter returned events
+        by those paths to subscribe to deterministic digest updates.
+        """
+
         query = _build_query({"provider": provider, "cursor": cursor, "limit": limit})
         return self._request(
             "GET",
@@ -551,10 +577,15 @@ class RelayFileClient:
         limit: int | None = None,
         correlation_id: str | None = None,
     ) -> dict[str, Any]:
-        query = _build_query({
-            "status": status, "action": action, "provider": provider,
-            "cursor": cursor, "limit": limit,
-        })
+        query = _build_query(
+            {
+                "status": status,
+                "action": action,
+                "provider": provider,
+                "cursor": cursor,
+                "limit": limit,
+            }
+        )
         return self._request(
             "GET",
             f"/v1/workspaces/{_enc(workspace_id)}/ops{query}",
@@ -701,15 +732,45 @@ class RelayFileClient:
             correlation_id=input.correlation_id,
         )
 
+    def list_writebacks(
+        self,
+        workspace_id: str,
+        *,
+        state: WritebackState,
+        correlation_id: str | None = None,
+    ) -> list[WritebackItem]:
+        """List writeback items for the given state.
+
+        Currently only ``state="pending"`` is wired against the authoritative
+        HTTP contract (``GET /v1/workspaces/{workspaceId}/writeback/pending``).
+        Other states will raise :class:`NotImplementedError` until the
+        state-filtered endpoint is added to ``openapi/relayfile-v1.openapi.yaml``
+        and ``internal/httpapi/server.go`` by the ``update-relayfile-cli`` slice
+        (workspace-primitives work item 5).
+        """
+        if state != "pending":
+            raise NotImplementedError(
+                "list_writebacks(state=%r) requires the state-filtered writeback "
+                "endpoint, which is not yet present in the authoritative OpenAPI "
+                "contract. Track the update-relayfile-cli slice "
+                "(workspace-primitives work item 5)." % (state,)
+            )
+        payload = self._request(
+            "GET",
+            f"/v1/workspaces/{_enc(workspace_id)}/writeback/pending",
+            correlation_id=correlation_id,
+        )
+        return _coerce_writeback_items(payload)
+
     def list_pending_writebacks(
         self,
         workspace_id: str,
         *,
         correlation_id: str | None = None,
-    ) -> list[dict[str, Any]]:
-        return self._request(
-            "GET",
-            f"/v1/workspaces/{_enc(workspace_id)}/writeback/pending",
+    ) -> list[WritebackItem]:
+        return self.list_writebacks(
+            workspace_id,
+            state="pending",
             correlation_id=correlation_id,
         )
 
@@ -728,9 +789,7 @@ class RelayFileClient:
     def get_backend_status(
         self, *, correlation_id: str | None = None
     ) -> dict[str, Any]:
-        return self._request(
-            "GET", "/v1/admin/backends", correlation_id=correlation_id
-        )
+        return self._request("GET", "/v1/admin/backends", correlation_id=correlation_id)
 
     def get_admin_ingress_status(
         self,
@@ -750,21 +809,23 @@ class RelayFileClient:
         include_alerts: bool | None = None,
         correlation_id: str | None = None,
     ) -> dict[str, Any]:
-        query = _build_query({
-            "workspaceId": workspace_id,
-            "provider": provider,
-            "alertProfile": alert_profile,
-            "pendingThreshold": pending_threshold,
-            "deadLetterThreshold": dead_letter_threshold,
-            "staleThreshold": stale_threshold,
-            "dropRateThreshold": drop_rate_threshold,
-            "nonZeroOnly": non_zero_only,
-            "maxAlerts": max_alerts,
-            "cursor": cursor,
-            "limit": limit,
-            "includeWorkspaces": include_workspaces,
-            "includeAlerts": include_alerts,
-        })
+        query = _build_query(
+            {
+                "workspaceId": workspace_id,
+                "provider": provider,
+                "alertProfile": alert_profile,
+                "pendingThreshold": pending_threshold,
+                "deadLetterThreshold": dead_letter_threshold,
+                "staleThreshold": stale_threshold,
+                "dropRateThreshold": drop_rate_threshold,
+                "nonZeroOnly": non_zero_only,
+                "maxAlerts": max_alerts,
+                "cursor": cursor,
+                "limit": limit,
+                "includeWorkspaces": include_workspaces,
+                "includeAlerts": include_alerts,
+            }
+        )
         return self._request(
             "GET", f"/v1/admin/ingress{query}", correlation_id=correlation_id
         )
@@ -786,20 +847,22 @@ class RelayFileClient:
         include_alerts: bool | None = None,
         correlation_id: str | None = None,
     ) -> dict[str, Any]:
-        query = _build_query({
-            "workspaceId": workspace_id,
-            "provider": provider,
-            "nonZeroOnly": non_zero_only,
-            "cursor": cursor,
-            "limit": limit,
-            "includeWorkspaces": include_workspaces,
-            "statusErrorThreshold": status_error_threshold,
-            "lagSecondsThreshold": lag_seconds_threshold,
-            "deadLetteredEnvelopesThreshold": dead_lettered_envelopes_threshold,
-            "deadLetteredOpsThreshold": dead_lettered_ops_threshold,
-            "maxAlerts": max_alerts,
-            "includeAlerts": include_alerts,
-        })
+        query = _build_query(
+            {
+                "workspaceId": workspace_id,
+                "provider": provider,
+                "nonZeroOnly": non_zero_only,
+                "cursor": cursor,
+                "limit": limit,
+                "includeWorkspaces": include_workspaces,
+                "statusErrorThreshold": status_error_threshold,
+                "lagSecondsThreshold": lag_seconds_threshold,
+                "deadLetteredEnvelopesThreshold": dead_lettered_envelopes_threshold,
+                "deadLetteredOpsThreshold": dead_lettered_ops_threshold,
+                "maxAlerts": max_alerts,
+                "includeAlerts": include_alerts,
+            }
+        )
         return self._request(
             "GET", f"/v1/admin/sync{query}", correlation_id=correlation_id
         )
@@ -912,7 +975,9 @@ class AsyncRelayFileClient:
         self._base_url = base_url.rstrip("/")
         # See the sync client for why integration setup verbs target a
         # different base URL.
-        self._cloud_base_url = (cloud_base_url or DEFAULT_RELAYFILE_CLOUD_BASE_URL).rstrip("/")
+        self._cloud_base_url = (
+            cloud_base_url or DEFAULT_RELAYFILE_CLOUD_BASE_URL
+        ).rstrip("/")
         self._token_provider = token
         self._user_agent = user_agent
         self._retry = _normalize_retry(retry)
@@ -943,7 +1008,6 @@ class AsyncRelayFileClient:
         correlation_id: str | None = None,
         base_url: str | None = None,
     ) -> Any:
-        import asyncio
         resp = await self._request_response(
             method,
             path,
@@ -965,6 +1029,7 @@ class AsyncRelayFileClient:
         base_url: str | None = None,
     ) -> httpx.Response:
         import asyncio
+
         base_headers = _merge_headers(
             headers,
             correlation_id=correlation_id,
@@ -981,8 +1046,12 @@ class AsyncRelayFileClient:
 
             try:
                 resp = await self._client.request(
-                    method, url, headers=req_headers,
-                    content=json.dumps(json_body).encode() if json_body is not None else None,
+                    method,
+                    url,
+                    headers=req_headers,
+                    content=json.dumps(json_body).encode()
+                    if json_body is not None
+                    else None,
                 )
             except httpx.TransportError:
                 if retries < self._retry.max_retries:
@@ -1059,9 +1128,13 @@ class AsyncRelayFileClient:
         correlation_id: str | None = None,
     ) -> dict[str, Any]:
         params: dict[str, Any] = {
-            "path": path, "provider": provider,
-            "relation": relation, "permission": permission,
-            "comment": comment, "cursor": cursor, "limit": limit,
+            "path": path,
+            "provider": provider,
+            "relation": relation,
+            "permission": permission,
+            "comment": comment,
+            "cursor": cursor,
+            "limit": limit,
         }
         if properties:
             for k, v in properties.items():
@@ -1151,6 +1224,13 @@ class AsyncRelayFileClient:
         limit: int | None = None,
         correlation_id: str | None = None,
     ) -> dict[str, Any]:
+        """List filesystem events.
+
+        Digest artifacts are reported as ordinary ``file.created`` and
+        ``file.updated`` events at ``DIGEST_PATHS``; filter returned events
+        by those paths to subscribe to deterministic digest updates.
+        """
+
         query = _build_query({"provider": provider, "cursor": cursor, "limit": limit})
         return await self._request(
             "GET",
@@ -1186,10 +1266,15 @@ class AsyncRelayFileClient:
         limit: int | None = None,
         correlation_id: str | None = None,
     ) -> dict[str, Any]:
-        query = _build_query({
-            "status": status, "action": action, "provider": provider,
-            "cursor": cursor, "limit": limit,
-        })
+        query = _build_query(
+            {
+                "status": status,
+                "action": action,
+                "provider": provider,
+                "cursor": cursor,
+                "limit": limit,
+            }
+        )
         return await self._request(
             "GET",
             f"/v1/workspaces/{_enc(workspace_id)}/ops{query}",
@@ -1336,15 +1421,42 @@ class AsyncRelayFileClient:
             correlation_id=input.correlation_id,
         )
 
+    async def list_writebacks(
+        self,
+        workspace_id: str,
+        *,
+        state: WritebackState,
+        correlation_id: str | None = None,
+    ) -> list[WritebackItem]:
+        """Async parity of :meth:`RelayFileClient.list_writebacks`.
+
+        Currently only ``state="pending"`` is wired against the authoritative
+        HTTP contract; other states raise :class:`NotImplementedError` until
+        the state-filtered endpoint lands (see sync docstring).
+        """
+        if state != "pending":
+            raise NotImplementedError(
+                "list_writebacks(state=%r) requires the state-filtered writeback "
+                "endpoint, which is not yet present in the authoritative OpenAPI "
+                "contract. Track the update-relayfile-cli slice "
+                "(workspace-primitives work item 5)." % (state,)
+            )
+        payload = await self._request(
+            "GET",
+            f"/v1/workspaces/{_enc(workspace_id)}/writeback/pending",
+            correlation_id=correlation_id,
+        )
+        return _coerce_writeback_items(payload)
+
     async def list_pending_writebacks(
         self,
         workspace_id: str,
         *,
         correlation_id: str | None = None,
-    ) -> list[dict[str, Any]]:
-        return await self._request(
-            "GET",
-            f"/v1/workspaces/{_enc(workspace_id)}/writeback/pending",
+    ) -> list[WritebackItem]:
+        return await self.list_writebacks(
+            workspace_id,
+            state="pending",
             correlation_id=correlation_id,
         )
 
@@ -1385,21 +1497,23 @@ class AsyncRelayFileClient:
         include_alerts: bool | None = None,
         correlation_id: str | None = None,
     ) -> dict[str, Any]:
-        query = _build_query({
-            "workspaceId": workspace_id,
-            "provider": provider,
-            "alertProfile": alert_profile,
-            "pendingThreshold": pending_threshold,
-            "deadLetterThreshold": dead_letter_threshold,
-            "staleThreshold": stale_threshold,
-            "dropRateThreshold": drop_rate_threshold,
-            "nonZeroOnly": non_zero_only,
-            "maxAlerts": max_alerts,
-            "cursor": cursor,
-            "limit": limit,
-            "includeWorkspaces": include_workspaces,
-            "includeAlerts": include_alerts,
-        })
+        query = _build_query(
+            {
+                "workspaceId": workspace_id,
+                "provider": provider,
+                "alertProfile": alert_profile,
+                "pendingThreshold": pending_threshold,
+                "deadLetterThreshold": dead_letter_threshold,
+                "staleThreshold": stale_threshold,
+                "dropRateThreshold": drop_rate_threshold,
+                "nonZeroOnly": non_zero_only,
+                "maxAlerts": max_alerts,
+                "cursor": cursor,
+                "limit": limit,
+                "includeWorkspaces": include_workspaces,
+                "includeAlerts": include_alerts,
+            }
+        )
         return await self._request(
             "GET", f"/v1/admin/ingress{query}", correlation_id=correlation_id
         )
@@ -1421,20 +1535,22 @@ class AsyncRelayFileClient:
         include_alerts: bool | None = None,
         correlation_id: str | None = None,
     ) -> dict[str, Any]:
-        query = _build_query({
-            "workspaceId": workspace_id,
-            "provider": provider,
-            "nonZeroOnly": non_zero_only,
-            "cursor": cursor,
-            "limit": limit,
-            "includeWorkspaces": include_workspaces,
-            "statusErrorThreshold": status_error_threshold,
-            "lagSecondsThreshold": lag_seconds_threshold,
-            "deadLetteredEnvelopesThreshold": dead_lettered_envelopes_threshold,
-            "deadLetteredOpsThreshold": dead_lettered_ops_threshold,
-            "maxAlerts": max_alerts,
-            "includeAlerts": include_alerts,
-        })
+        query = _build_query(
+            {
+                "workspaceId": workspace_id,
+                "provider": provider,
+                "nonZeroOnly": non_zero_only,
+                "cursor": cursor,
+                "limit": limit,
+                "includeWorkspaces": include_workspaces,
+                "statusErrorThreshold": status_error_threshold,
+                "lagSecondsThreshold": lag_seconds_threshold,
+                "deadLetteredEnvelopesThreshold": dead_lettered_envelopes_threshold,
+                "deadLetteredOpsThreshold": dead_lettered_ops_threshold,
+                "maxAlerts": max_alerts,
+                "includeAlerts": include_alerts,
+            }
+        )
         return await self._request(
             "GET", f"/v1/admin/sync{query}", correlation_id=correlation_id
         )

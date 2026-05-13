@@ -30,7 +30,9 @@ class OnWriteSocket(Protocol):
 WebSocketFactory = Callable[[str], OnWriteSocket]
 SleepFn = Callable[[float], None]
 
-_dispatchers: weakref.WeakKeyDictionary[RelayFileClient, "_OnWriteDispatcher"] = weakref.WeakKeyDictionary()
+_dispatchers: weakref.WeakKeyDictionary[RelayFileClient, "_OnWriteDispatcher"] = (
+    weakref.WeakKeyDictionary()
+)
 _default_client: RelayFileClient | None = None
 
 
@@ -141,7 +143,13 @@ def _register(
 
 
 class _Registration:
-    def __init__(self, registration_id: int, pattern: str, operations: set[str], handler: OnWriteHandler) -> None:
+    def __init__(
+        self,
+        registration_id: int,
+        pattern: str,
+        operations: set[str],
+        handler: OnWriteHandler,
+    ) -> None:
         self.id = registration_id
         self.pattern = pattern
         self.operations = operations
@@ -203,7 +211,11 @@ class _OnWriteDispatcher:
 
     def unregister(self, registration_id: int) -> None:
         with self._lock:
-            self._registrations = [registration for registration in self._registrations if registration.id != registration_id]
+            self._registrations = [
+                registration
+                for registration in self._registrations
+                if registration.id != registration_id
+            ]
             if not self._registrations:
                 if self._stop is not None:
                     self._stop.set()
@@ -230,7 +242,11 @@ class _OnWriteDispatcher:
         if not resolved_token:
             raise ValueError("on_write requires token or RELAYFILE_TOKEN")
 
-        url = _build_websocket_url(base_url or os.getenv("RELAYFILE_BASE_URL") or DEFAULT_RELAYFILE_BASE_URL, workspace_id, resolved_token)
+        url = _build_websocket_url(
+            base_url or os.getenv("RELAYFILE_BASE_URL") or DEFAULT_RELAYFILE_BASE_URL,
+            workspace_id,
+            resolved_token,
+        )
         stop_event = threading.Event()
         self._stop = stop_event
         self._thread = threading.Thread(
@@ -241,7 +257,14 @@ class _OnWriteDispatcher:
         )
         self._thread.start()
 
-    def _run(self, *, url: str, factory: WebSocketFactory, sleep: SleepFn, stop: threading.Event) -> None:
+    def _run(
+        self,
+        *,
+        url: str,
+        factory: WebSocketFactory,
+        sleep: SleepFn,
+        stop: threading.Event,
+    ) -> None:
         reconnect_attempt = 0
         while not stop.is_set():
             try:
@@ -254,7 +277,9 @@ class _OnWriteDispatcher:
             except Exception:
                 if stop.is_set():
                     return
-                delay = RECONNECT_DELAYS_SECONDS[min(reconnect_attempt, len(RECONNECT_DELAYS_SECONDS) - 1)]
+                delay = RECONNECT_DELAYS_SECONDS[
+                    min(reconnect_attempt, len(RECONNECT_DELAYS_SECONDS) - 1)
+                ]
                 reconnect_attempt += 1
                 sleep(delay)
             finally:
@@ -276,9 +301,13 @@ class _OnWriteDispatcher:
             registrations = list(self._registrations)
 
         for registration in registrations:
-            if event.operation not in registration.operations or not path_matches(registration.pattern, event.path):
+            if event.operation not in registration.operations or not path_matches(
+                registration.pattern, event.path
+            ):
                 continue
-            pattern_lock = self._pattern_locks.setdefault(registration.pattern, threading.Lock())
+            pattern_lock = self._pattern_locks.setdefault(
+                registration.pattern, threading.Lock()
+            )
             with pattern_lock:
                 self._run_handler(registration, event)
 
@@ -296,7 +325,9 @@ class _OnWriteDispatcher:
         # fall back to the logger rather than letting the exception bubble up
         # the dispatch loop and break sequential dispatch for the pattern.
         payload = {"pattern": pattern, "path": path, "error": error, "retryable": False}
-        recorder = getattr(self._client, "record_handler_error", None) or getattr(self._client, "recordHandlerError", None)
+        recorder = getattr(self._client, "record_handler_error", None) or getattr(
+            self._client, "recordHandlerError", None
+        )
         if callable(recorder):
             try:
                 result = recorder(payload)
@@ -304,8 +335,12 @@ class _OnWriteDispatcher:
                     asyncio.run(result)
                 return
             except Exception:
-                logging.getLogger(__name__).exception("Relayfile on_write handler-error reporter failed")
-        logging.getLogger(__name__).exception("Relayfile on_write handler error", exc_info=error)
+                logging.getLogger(__name__).exception(
+                    "Relayfile on_write handler-error reporter failed"
+                )
+        logging.getLogger(__name__).exception(
+            "Relayfile on_write handler error", exc_info=error
+        )
 
 
 def _normalize_pattern(pattern: str) -> list[str]:
@@ -338,8 +373,14 @@ def _match_segments(pattern: list[str], path: list[str]) -> bool:
     # ``**`` is only valid as the last segment.
     if pattern and pattern[-1] == "**":
         prefix = pattern[:-1]
-        return len(path) >= len(prefix) and all(segment == "*" or segment == path[index] for index, segment in enumerate(prefix))
-    return len(pattern) == len(path) and all(segment == "*" or segment == path[index] for index, segment in enumerate(pattern))
+        return len(path) >= len(prefix) and all(
+            segment == "*" or segment == path[index]
+            for index, segment in enumerate(prefix)
+        )
+    return len(pattern) == len(path) and all(
+        segment == "*" or segment == path[index]
+        for index, segment in enumerate(pattern)
+    )
 
 
 def _to_write_event(payload: dict[str, Any], workspace_id: str) -> WriteEvent | None:
@@ -397,7 +438,9 @@ def _default_websocket_factory(url: str) -> OnWriteSocket:
     try:
         import websocket  # type: ignore[import-not-found]
     except ImportError as exc:
-        raise RuntimeError("Install websocket-client or pass websocket_factory to use on_write.") from exc
+        raise RuntimeError(
+            "Install websocket-client or pass websocket_factory to use on_write."
+        ) from exc
     return websocket.create_connection(url)
 
 
@@ -407,5 +450,7 @@ def _get_default_client() -> RelayFileClient:
         token = os.getenv("RELAYFILE_TOKEN")
         if not token:
             raise ValueError("on_write requires client or RELAYFILE_TOKEN")
-        _default_client = RelayFileClient(os.getenv("RELAYFILE_BASE_URL") or DEFAULT_RELAYFILE_BASE_URL, token)
+        _default_client = RelayFileClient(
+            os.getenv("RELAYFILE_BASE_URL") or DEFAULT_RELAYFILE_BASE_URL, token
+        )
     return _default_client

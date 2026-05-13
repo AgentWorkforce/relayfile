@@ -32,6 +32,7 @@ var (
 const DirectoryPermissionMarkerFile = ".relayfile.acl"
 const DefaultForkTTLSeconds int64 = 7 * 24 * 60 * 60
 const MaxForkTTLSeconds int64 = 30 * 24 * 60 * 60
+const maxTreeEntriesPerPage = 1000
 
 type ConflictError struct {
 	ExpectedRevision      string
@@ -1093,8 +1094,9 @@ func (s *Store) ListTree(workspaceID, path string, depth int, cursor string) (Tr
 		entries = append(entries, entry)
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Path < entries[j].Path })
+	entries, nextCursor := paginateTreeEntries(entries, cursor)
 
-	return TreeResponse{Path: base, Entries: entries, NextCursor: nil}, nil
+	return TreeResponse{Path: base, Entries: entries, NextCursor: nextCursor}, nil
 }
 
 func (s *Store) ReadFile(workspaceID, path string) (File, error) {
@@ -4244,16 +4246,35 @@ func listTreeFromFiles(files map[string]File, path string, depth int, cursor str
 		entries = append(entries, entry)
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Path < entries[j].Path })
+	entries, nextCursor := paginateTreeEntries(entries, cursor)
+
+	return TreeResponse{Path: base, Entries: entries, NextCursor: nextCursor}
+}
+
+func paginateTreeEntries(entries []TreeEntry, cursor string) ([]TreeEntry, *string) {
+	start := 0
 	if cursor != "" {
 		for index, entry := range entries {
 			if entry.Path == cursor {
-				entries = entries[index+1:]
+				start = index + 1
 				break
 			}
 		}
 	}
+	if start >= len(entries) {
+		return []TreeEntry{}, nil
+	}
 
-	return TreeResponse{Path: base, Entries: entries, NextCursor: nil}
+	end := start + maxTreeEntriesPerPage
+	if end > len(entries) {
+		end = len(entries)
+	}
+	page := append([]TreeEntry(nil), entries[start:end]...)
+	if end >= len(entries) {
+		return page, nil
+	}
+	cursorValue := page[len(page)-1].Path
+	return page, &cursorValue
 }
 
 func queryFilesFromMap(files map[string]File, req FileQueryRequest) (FileQueryResponse, error) {

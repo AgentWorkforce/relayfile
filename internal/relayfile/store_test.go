@@ -1061,6 +1061,53 @@ func TestListTreeHonorsDepth(t *testing.T) {
 	}
 }
 
+func TestListTreePaginatesBoundedEntries(t *testing.T) {
+	store := NewStore()
+	t.Cleanup(store.Close)
+
+	for index := 0; index < maxTreeEntriesPerPage+2; index++ {
+		path := fmt.Sprintf("/external/File%04d.md", index)
+		if _, err := store.WriteFile(WriteRequest{
+			WorkspaceID:   "ws_tree_paged",
+			Path:          path,
+			IfMatch:       "0",
+			ContentType:   "text/markdown",
+			Content:       "# paged",
+			CorrelationID: fmt.Sprintf("corr_tree_paged_%04d", index),
+		}); err != nil {
+			t.Fatalf("write failed for %s: %v", path, err)
+		}
+	}
+
+	pageOne, err := store.ListTree("ws_tree_paged", "/external", 1, "")
+	if err != nil {
+		t.Fatalf("list tree page one failed: %v", err)
+	}
+	if len(pageOne.Entries) != maxTreeEntriesPerPage {
+		t.Fatalf("expected %d page-one entries, got %d", maxTreeEntriesPerPage, len(pageOne.Entries))
+	}
+	if pageOne.NextCursor == nil {
+		t.Fatalf("expected page-one next cursor")
+	}
+	if *pageOne.NextCursor != "/external/File0999.md" {
+		t.Fatalf("unexpected page-one next cursor: %q", *pageOne.NextCursor)
+	}
+
+	pageTwo, err := store.ListTree("ws_tree_paged", "/external", 1, *pageOne.NextCursor)
+	if err != nil {
+		t.Fatalf("list tree page two failed: %v", err)
+	}
+	if len(pageTwo.Entries) != 2 {
+		t.Fatalf("expected 2 page-two entries, got %d", len(pageTwo.Entries))
+	}
+	if pageTwo.Entries[0].Path != "/external/File1000.md" || pageTwo.Entries[1].Path != "/external/File1001.md" {
+		t.Fatalf("unexpected page-two entries: %+v", pageTwo.Entries)
+	}
+	if pageTwo.NextCursor != nil {
+		t.Fatalf("expected nil page-two next cursor, got %q", *pageTwo.NextCursor)
+	}
+}
+
 func TestQueryFilesSupportsSemanticFilters(t *testing.T) {
 	store := NewStore()
 	t.Cleanup(store.Close)

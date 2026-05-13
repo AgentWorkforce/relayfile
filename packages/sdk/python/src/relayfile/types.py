@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any, Literal, TypedDict
+from typing import Any, Literal, Protocol, TypedDict
 
 
 class _RelayFileJwtClaimsRequired(TypedDict):
@@ -32,6 +33,13 @@ class RelayFileJwtClaims(_RelayFileJwtClaimsRequired, total=False):
 
 ContentEncoding = Literal["utf-8", "base64"]
 WritebackState = Literal["pending", "succeeded", "failed", "dead_lettered"]
+WritebackActionType = Literal["file_upsert", "file_delete"]
+WritebackDeadLetterErrorCode = Literal[
+    "schema_violation",
+    "provider_4xx",
+    "provider_5xx_exhausted",
+    "timeout",
+]
 ExportFormat = Literal["tar", "json", "patch"]
 
 
@@ -232,6 +240,14 @@ class ConflictErrorResponse:
 
 @dataclass
 class FilesystemEvent:
+    """Filesystem event row.
+
+    Digest generation is exposed through ordinary ``file.created`` and
+    ``file.updated`` events at the paths in ``relayfile.DIGEST_PATHS``.
+    Consumers can filter returned events by those paths after calling
+    ``RelayFileClient.get_events``.
+    """
+
     event_id: str
     type: str
     path: str
@@ -265,6 +281,68 @@ class WriteEvent:
 class EventFeedResponse:
     events: list[FilesystemEvent]
     next_cursor: str | None = None
+
+
+@dataclass
+class DigestWindow:
+    """Inclusive/exclusive ISO-8601 window for a digest run."""
+
+    from_: str
+    to: str
+
+
+@dataclass
+class DigestBullet:
+    text: str
+    canonical_path: str
+
+
+@dataclass
+class DigestSection:
+    provider: str
+    bullets: list[DigestBullet]
+
+
+class DigestContext(Protocol):
+    provider: str
+    window: DigestWindow
+
+    def change_events(
+        self,
+        filter: dict[str, list[str]] | None = None,
+    ) -> Awaitable[list[dict[str, Any]]]: ...
+
+
+DigestHandler = Callable[[DigestContext], Awaitable[DigestSection | None]]
+
+
+@dataclass
+class WritebackSchemaRef:
+    provider: str
+    resource: str
+    path: str
+
+
+@dataclass
+class LayoutManifestAlias:
+    segment: str
+    description: str | None = None
+
+
+@dataclass
+class LayoutManifestResource:
+    name: str
+    canonical_filename: str
+    writeback_actions: list[str] | None = None
+    writeback_schemas: list[WritebackSchemaRef] | None = None
+    aliases: list[LayoutManifestAlias] | None = None
+
+
+@dataclass
+class LayoutManifest:
+    provider: str
+    materialization: Literal["eager", "lazy"]
+    resources: list[LayoutManifestResource]
 
 
 @dataclass
@@ -454,12 +532,107 @@ class IngestWebhookInput:
 
 
 @dataclass
+class DeadLetterErrorPayload:
+    code: WritebackDeadLetterErrorCode
+    message: str
+    attempts: int
+    first_attempt_at: str
+    last_attempt_at: str
+    op_id: str
+    provider_status: int | None = None
+    provider_response: dict[str, Any] | None = None
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> DeadLetterErrorPayload:
+        return cls(
+            code=data["code"],
+            message=data["message"],
+            attempts=data["attempts"],
+            first_attempt_at=_get(data, "firstAttemptAt", "first_attempt_at"),
+            last_attempt_at=_get(data, "lastAttemptAt", "last_attempt_at"),
+            op_id=_get(data, "opId", "op_id"),
+            provider_status=_get_optional(
+                data,
+                "providerStatus",
+                "provider_status",
+            ),
+            provider_response=_get_optional(
+                data,
+                "providerResponse",
+                "provider_response",
+            ),
+        )
+
+
+WritebackDeadLetterError = DeadLetterErrorPayload
+
+
+@dataclass
 class WritebackItem:
     id: str
     workspace_id: str
     path: str
     revision: str
     correlation_id: str | None = None
+    state: WritebackState | None = None
+    op_id: str | None = None
+    provider: str | None = None
+    action: WritebackActionType | None = None
+    attempt_count: int | None = None
+    last_attempt_at: str | None = None
+    first_attempt_at: str | None = None
+    created_at: str | None = None
+    error: DeadLetterErrorPayload | None = None
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> WritebackItem:
+        raw_error = data.get("error")
+        error = (
+            DeadLetterErrorPayload.from_dict(raw_error)
+            if isinstance(raw_error, dict)
+            else None
+        )
+        return cls(
+            id=data["id"],
+            workspace_id=_get(data, "workspaceId", "workspace_id"),
+            path=data["path"],
+            revision=data["revision"],
+            correlation_id=_get_optional(data, "correlationId", "correlation_id"),
+            state=data.get("state"),
+            op_id=_get_optional(data, "opId", "op_id"),
+            provider=data.get("provider"),
+            action=data.get("action"),
+            attempt_count=_get_optional(data, "attemptCount", "attempt_count"),
+            last_attempt_at=_get_optional(
+                data,
+                "lastAttemptAt",
+                "last_attempt_at",
+            ),
+            first_attempt_at=_get_optional(
+                data,
+                "firstAttemptAt",
+                "first_attempt_at",
+            ),
+            created_at=_get_optional(data, "createdAt", "created_at"),
+            error=error,
+        )
+
+
+@dataclass
+class WritebackItemDetail(WritebackItem):
+    error: DeadLetterErrorPayload | None = None
+
+
+def _get(data: dict[str, Any], camel: str, snake: str) -> Any:
+    if camel in data:
+        return data[camel]
+    return data[snake]
+
+
+def _get_optional(data: dict[str, Any], camel: str, snake: str) -> Any | None:
+    if camel in data:
+        return data[camel]
+    return data.get(snake)
 
 
 @dataclass
@@ -557,8 +730,12 @@ class AdminIngressStatusResponse:
     coalesced_total: int = 0
     suppressed_total: int = 0
     stale_total: int = 0
-    thresholds: AdminIngressAlertThresholds = field(default_factory=AdminIngressAlertThresholds)
-    alert_totals: AdminIngressAlertTotals = field(default_factory=AdminIngressAlertTotals)
+    thresholds: AdminIngressAlertThresholds = field(
+        default_factory=AdminIngressAlertThresholds
+    )
+    alert_totals: AdminIngressAlertTotals = field(
+        default_factory=AdminIngressAlertTotals
+    )
     alerts_truncated: bool = False
     alerts: list[AdminIngressAlert] = field(default_factory=list)
     workspaces: dict[str, SyncIngressStatusResponse] = field(default_factory=dict)
@@ -622,7 +799,9 @@ class AdminSyncStatusResponse:
     paused_count: int = 0
     dead_lettered_envelopes_total: int = 0
     dead_lettered_ops_total: int = 0
-    thresholds: AdminSyncAlertThresholds = field(default_factory=AdminSyncAlertThresholds)
+    thresholds: AdminSyncAlertThresholds = field(
+        default_factory=AdminSyncAlertThresholds
+    )
     alert_totals: AdminSyncAlertTotals = field(default_factory=AdminSyncAlertTotals)
     alerts_truncated: bool = False
     alerts: list[AdminSyncAlert] = field(default_factory=list)
