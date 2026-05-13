@@ -174,8 +174,12 @@ func TestA3EnsureCloudIntegrationSkipsConnectWhenAlreadyReady(t *testing.T) {
 	defer server.Close()
 
 	var stdout bytes.Buffer
-	if err := ensureCloudIntegration(server.URL, "ws_demo", "rf_token", "notion", "", localDir, 5*time.Second, false, &stdout); err != nil {
+	created, err := ensureCloudIntegration(server.URL, "ws_demo", "rf_token", "notion", "", localDir, 5*time.Second, false, &stdout)
+	if err != nil {
 		t.Fatalf("ensureCloudIntegration failed: %v", err)
+	}
+	if created {
+		t.Fatalf("expected existing connection to be reused")
 	}
 	if atomic.LoadInt32(&statusCalls) != 1 {
 		t.Fatalf("expected exactly one status check, got %d", statusCalls)
@@ -226,8 +230,12 @@ func TestEnsureCloudIntegrationReusesSavedConnectionForMatchingBackend(t *testin
 	defer server.Close()
 
 	var stdout bytes.Buffer
-	if err := ensureCloudIntegration(server.URL, "ws_demo", "rf_token", "github", "composio", localDir, 5*time.Second, false, &stdout); err != nil {
+	created, err := ensureCloudIntegration(server.URL, "ws_demo", "rf_token", "github", "composio", localDir, 5*time.Second, false, &stdout)
+	if err != nil {
 		t.Fatalf("ensureCloudIntegration failed: %v", err)
+	}
+	if created {
+		t.Fatalf("expected existing connection to be reused")
 	}
 	if atomic.LoadInt32(&statusCalls) != 1 {
 		t.Fatalf("expected exactly one status check, got %d", statusCalls)

@@ -297,74 +297,15 @@ describe("RelayFileClient — existing methods", () => {
       await broadHandle.unsubscribe();
     });
 
-    it("uses a bounded fallback digest when WebCrypto is unavailable", async () => {
-      const originalCrypto = Object.getOwnPropertyDescriptor(globalThis, "crypto");
-      Object.defineProperty(globalThis, "crypto", {
-        configurable: true,
-        value: {
-          randomUUID: () => "00000000-0000-4000-8000-000000000000",
-        },
-      });
-      try {
-        const fileContent = "private file content that must not become the digest";
-        const fetchImpl = vi.fn(async (url: string) => {
-          if (url.includes("/fs/file?path=%2Fnotes%2Fprivate.txt")) {
-            return {
-              ok: true,
-              status: 200,
-              headers: new Headers({ "content-type": "application/json" }),
-              json: async () => ({
-                path: "/notes/private.txt",
-                revision: "rev_1",
-                contentType: "text/plain",
-                content: fileContent,
-              }),
-              text: async () => "",
-            } as unknown as Response;
-          }
-          throw new Error(`Unexpected fetch URL: ${url}`);
-        });
-        const client = makeClient(fetchImpl as unknown as typeof fetch, {
-          token: makeWorkspaceToken("ws_acme", "support-agent"),
-        });
-        const handler = vi.fn();
-
-        const handle = client.subscribe(["/notes/**"], handler, { coalesce: "none" });
-        const socket = await waitForWebSocket();
-        socket.emit("open", {});
-        socket.emit("message", {
-          data: JSON.stringify({
-            eventId: "evt_note_1",
-            type: "file.updated",
-            path: "/notes/private.txt",
-            revision: "rev_1",
-            timestamp: "2026-05-11T00:00:00.000Z",
-          } satisfies FilesystemEvent),
-        });
-
-        await waitForExpectation(() => {
-          expect(handler).toHaveBeenCalledTimes(1);
-        });
-        const event = handler.mock.calls[0]?.[0] as ChangeEvent;
-        expect(event.digest).toMatch(/^sha256-fallback:[0-9a-f]{8}$/);
-        expect(event.digest).not.toContain(fileContent);
-
-        await handle.unsubscribe();
-      } finally {
-        if (originalCrypto) {
-          Object.defineProperty(globalThis, "crypto", originalCrypto);
-        } else {
-          delete (globalThis as { crypto?: Crypto }).crypto;
-        }
-      }
-    });
-
     it("subscribe uses the acl token transport and coalesces rapid writes to one event", async () => {
       vi.useFakeTimers();
       try {
         const scopedToken = makeWorkspaceToken("ws_acme", "scoped-agent");
-        const fetchImpl = vi.fn(async (url: string) => {
+        const fetchImpl = vi.fn(async (url: string, init?: RequestInit) => {
           if (url.includes("/fs/file?path=%2Flinear%2Fissues%2FENG-7.json")) {
+            expect(init?.headers).toMatchObject({
+              Authorization: `Bearer ${scopedToken}`,
+            });
             return {
               ok: true,
               status: 200,
@@ -428,6 +369,7 @@ describe("RelayFileClient — existing methods", () => {
 
         expect(handler.mock.calls[0]?.[0]).toMatchObject({
           id: "evt_linear_2",
+          agentId: "scoped-agent",
           summary: {
             title: "ENG-7",
             status: "Done",
@@ -439,6 +381,26 @@ describe("RelayFileClient — existing methods", () => {
       } finally {
         vi.useRealTimers();
       }
+    });
+
+    it("surfaces subscribe setup failures through unsubscribe", async () => {
+      const fetchImpl = vi.fn();
+      const client = makeClient(fetchImpl as unknown as typeof fetch, {
+        token: "not-a-workspace-jwt",
+      });
+
+      const handle = client.subscribe(
+        ["/linear/issues/**"],
+        () => {
+          // no-op
+        },
+        { coalesce: "none" },
+      );
+
+      await expect(handle.unsubscribe()).rejects.toThrow(
+        "RelayFile proactive-runtime APIs require a workspace-scoped JWT",
+      );
+      expect(fetchImpl).not.toHaveBeenCalled();
     });
 
     it("getResourceAtEvent reuses the retained cache before calling the API", async () => {
@@ -503,6 +465,72 @@ describe("RelayFileClient — existing methods", () => {
       expect(fetchImpl).toHaveBeenCalledTimes(1);
 
       await handle.unsubscribe();
+    });
+
+    it("computes fallback digests without exposing file content", async () => {
+      const cryptoDescriptor = Object.getOwnPropertyDescriptor(globalThis, "crypto");
+      Object.defineProperty(globalThis, "crypto", {
+        configurable: true,
+        value: {
+          randomUUID: () => "digest-test",
+        },
+      });
+      const secretContent = "secret-change-payload";
+      const fetchImpl = vi.fn(async (url: string) => {
+        if (url.includes("/fs/file?path=%2Flinear%2Fissues%2FENG-12.json")) {
+          return {
+            ok: true,
+            status: 200,
+            headers: new Headers({ "content-type": "application/json" }),
+            json: async () => ({
+              path: "/linear/issues/ENG-12.json",
+              revision: "rev_1",
+              contentType: "text/plain",
+              content: secretContent,
+            }),
+            text: async () => "",
+          } as unknown as Response;
+        }
+        throw new Error(`Unexpected fetch URL: ${url}`);
+      });
+      const client = makeClient(fetchImpl as unknown as typeof fetch, {
+        token: makeWorkspaceToken("ws_acme", "support-agent"),
+      });
+      let receivedEvent: ChangeEvent | undefined;
+      let handle: Subscription | undefined;
+
+      try {
+        handle = client.subscribe(
+          ["/linear/issues/**"],
+          (event) => {
+            receivedEvent = event;
+          },
+          { coalesce: "none" },
+        );
+
+        const socket = await waitForWebSocket();
+        socket.emit("open", {});
+        socket.emit("message", {
+          data: JSON.stringify({
+            eventId: "evt_digest_1",
+            type: "file.updated",
+            path: "/linear/issues/ENG-12.json",
+            revision: "rev_1",
+            timestamp: "2026-05-11T00:00:00.000Z",
+          } satisfies FilesystemEvent),
+        });
+
+        await waitForExpectation(() => {
+          expect(receivedEvent).toBeDefined();
+        });
+        expect(receivedEvent!.digest).toMatch(/^sha256:[a-f0-9]{64}$/);
+        expect(receivedEvent!.digest).not.toContain(secretContent);
+      } finally {
+        await handle?.unsubscribe();
+        if (cryptoDescriptor) {
+          Object.defineProperty(globalThis, "crypto", cryptoDescriptor);
+        }
+      }
     });
 
     it("open returns a ready handle and primes replay-on-start through the change log", async () => {
@@ -588,6 +616,87 @@ describe("RelayFileClient — existing methods", () => {
         },
       });
       expect(fetchImpl).toHaveBeenCalledTimes(2);
+
+      await connection.unsubscribe();
+    });
+
+    it("keeps acl token context for replayed change expansion", async () => {
+      const scopedToken = makeWorkspaceToken("ws_scoped", "scoped-agent");
+      const fetchImpl = vi.fn(async (url: string, init?: RequestInit) => {
+        if (url.includes("/fs/changes?last=1")) {
+          expect(init?.headers).toMatchObject({
+            Authorization: `Bearer ${scopedToken}`,
+          });
+          return {
+            ok: true,
+            status: 200,
+            headers: new Headers({ "content-type": "application/json" }),
+            json: async () => ({
+              events: [
+                {
+                  id: "evt_scoped_replay_1",
+                  workspace: "ws_scoped",
+                  agentId: "scoped-agent",
+                  type: "relayfile.changed",
+                  occurredAt: "2026-05-11T00:00:00.000Z",
+                  resource: {
+                    path: "/linear/issues/ENG-200.json",
+                    kind: "linear.issue",
+                    id: "ENG-200",
+                    provider: "linear",
+                  },
+                  summary: {
+                    title: "ENG-200",
+                  },
+                  digest: "sha256:scoped",
+                },
+              ],
+            }),
+            text: async () => "",
+          } as unknown as Response;
+        }
+        if (url.includes("/fs/changes/resource?eventId=evt_scoped_replay_1")) {
+          expect(init?.headers).toMatchObject({
+            Authorization: `Bearer ${scopedToken}`,
+          });
+          return {
+            ok: true,
+            status: 200,
+            headers: new Headers({ "content-type": "application/json" }),
+            json: async () => ({
+              path: "/linear/issues/ENG-200.json",
+              data: { id: "ENG-200", title: "ENG-200", scoped: true },
+              digest: "sha256:scoped",
+            }),
+            text: async () => "",
+          } as unknown as Response;
+        }
+        throw new Error(`Unexpected fetch URL: ${url}`);
+      });
+      const client = makeClient(fetchImpl as unknown as typeof fetch, {
+        token: makeWorkspaceToken("ws_default", "default-agent"),
+      });
+
+      const connection = client.open({
+        workspaceId: "ws_scoped",
+        aclToken: scopedToken,
+        replayOnStart: "last:1",
+      });
+
+      const socket = await waitForWebSocket();
+      socket.emit("open", {});
+      await expect(connection.ready).resolves.toBeUndefined();
+
+      const replayed = await client.listLastNChanges(1, {
+        workspaceId: "ws_scoped",
+        token: scopedToken,
+      });
+      await expect(replayed.events[0]!.expand("full")).resolves.toMatchObject({
+        level: "full",
+        path: "/linear/issues/ENG-200.json",
+        data: { id: "ENG-200", title: "ENG-200", scoped: true },
+      });
+      expect(fetchImpl).toHaveBeenCalledTimes(3);
 
       await connection.unsubscribe();
     });
@@ -780,6 +889,123 @@ describe("RelayFileClient — existing methods", () => {
       expect(fetchImpl).toHaveBeenCalledTimes(2);
 
       await handle.unsubscribe();
+    });
+
+    it("moves refreshed change-log entries to the newest cache position before pruning", async () => {
+      let now = 0;
+      const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
+      const fetchImpl = vi.fn(async (url: string) => {
+        const fileMatch = url.match(/\/fs\/file\?path=([^&]+)/);
+        if (fileMatch) {
+          const path = decodeURIComponent(fileMatch[1]!);
+          const id = path.match(/ENG-(\d+)/)?.[1] ?? "0";
+          return {
+            ok: true,
+            status: 200,
+            headers: new Headers({ "content-type": "application/json" }),
+            json: async () => ({
+              path,
+              revision: `rev_${id}`,
+              contentType: "application/json",
+              content: JSON.stringify({
+                id: `ENG-${id}`,
+                provider: "linear",
+                kind: "linear.issue",
+                title: `ENG-${id}`,
+              }),
+            }),
+            text: async () => "",
+          } as unknown as Response;
+        }
+        if (url.includes("/fs/changes?last=1")) {
+          return {
+            ok: true,
+            status: 200,
+            headers: new Headers({ "content-type": "application/json" }),
+            json: async () => ({
+              events: [
+                {
+                  id: "evt_a",
+                  workspace: "ws_acme",
+                  type: "relayfile.changed",
+                  occurredAt: "2026-05-11T00:00:00.000Z",
+                  resource: {
+                    path: "/linear/issues/ENG-1.json",
+                    kind: "linear.issue",
+                    id: "ENG-1",
+                    provider: "linear",
+                  },
+                  summary: {
+                    title: "ENG-1",
+                  },
+                  digest: "sha256:a",
+                },
+              ],
+            }),
+            text: async () => "",
+          } as unknown as Response;
+        }
+        if (url.includes("/fs/changes?last=3")) {
+          return {
+            ok: true,
+            status: 200,
+            headers: new Headers({ "content-type": "application/json" }),
+            json: async () => ({ events: [] }),
+            text: async () => "",
+          } as unknown as Response;
+        }
+        throw new Error(`Unexpected fetch URL: ${url}`);
+      });
+      const client = new RelayFileClient({
+        baseUrl: "https://relay.test",
+        token: makeWorkspaceToken("ws_acme", "support-agent"),
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+        retry: { maxRetries: 0 },
+        changeLog: { retentionMs: 20, maxEntries: 10 },
+      });
+      let handle: Subscription | undefined;
+
+      try {
+        handle = client.subscribe(
+          ["/linear/issues/**"],
+          () => {
+            // no-op
+          },
+          { coalesce: "none" },
+        );
+
+        const socket = await waitForWebSocket();
+        socket.emit("open", {});
+        for (const [eventId, issueId, storedAt] of [
+          ["evt_a", "1", 0],
+          ["evt_b", "2", 1],
+          ["evt_c", "3", 2],
+        ] as const) {
+          now = storedAt;
+          socket.emit("message", {
+            data: JSON.stringify({
+              eventId,
+              type: "file.updated",
+              path: `/linear/issues/ENG-${issueId}.json`,
+              revision: `rev_${issueId}`,
+              timestamp: `2026-05-11T00:00:0${storedAt}.000Z`,
+            } satisfies FilesystemEvent),
+          });
+          await waitForExpectation(() => {
+            expect(fetchImpl).toHaveBeenCalledTimes(storedAt + 1);
+          });
+        }
+
+        now = 10;
+        await client.listLastNChanges(1);
+
+        now = 25;
+        const retained = await client.listLastNChanges(3);
+        expect(retained.events.map((event) => event.id)).toEqual(["evt_a"]);
+      } finally {
+        nowSpy.mockRestore();
+        await handle?.unsubscribe();
+      }
     });
 
     it("honors configurable local change-log retention before falling back to the retained endpoint", async () => {

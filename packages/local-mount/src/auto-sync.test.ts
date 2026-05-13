@@ -72,6 +72,35 @@ describe('startAutoSync', () => {
     }
   });
 
+  it('tracks dirty mount paths and flushes pending debounced writes', async () => {
+    write(path.join(projectDir, 'file.txt'), 'original');
+
+    const handle = await createMount(projectDir, mountDir, {
+      ignoredPatterns: [],
+      readonlyPatterns: [],
+      excludeDirs: [],
+    });
+
+    const auto = handle.startAutoSync({ debounceMs: 10_000, scanIntervalMs: 10_000 });
+    await auto.ready();
+    try {
+      expect(auto.watchersHealthy()).toBe(true);
+      writeFileSync(path.join(handle.mountDir, 'file.txt'), 'changed', 'utf8');
+
+      await waitFor(() => Array.from(auto.getDirtyPaths()).includes('file.txt'));
+      expect(readFileSync(path.join(projectDir, 'file.txt'), 'utf8')).toBe('original');
+
+      const flushed = await auto.flushPending();
+
+      expect(flushed).toBe(1);
+      expect(readFileSync(path.join(projectDir, 'file.txt'), 'utf8')).toBe('changed');
+      expect(Array.from(auto.getDirtyPaths())).toEqual([]);
+    } finally {
+      await auto.stop();
+      handle.cleanup();
+    }
+  });
+
   it('propagates project→mount external edits', async () => {
     write(path.join(projectDir, 'file.txt'), 'original');
 

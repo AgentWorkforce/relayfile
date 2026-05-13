@@ -172,10 +172,16 @@ interface ChangeEventWireShape {
   digest?: string;
 }
 
+interface ProactiveRequestContext {
+  workspaceId: string;
+  token?: string;
+}
+
 interface CachedChangeRecord {
   wire: ChangeEventWireShape;
   resource: ResourceAtEventResult;
   storedAt: number;
+  context?: ProactiveRequestContext;
 }
 
 const changeStreamManagers = new WeakMap<RelayFileClient, Map<string, RelayFileChangeStreamManager>>();
@@ -391,15 +397,17 @@ class WorkspaceChangeLogCache {
       ? {
           wire: record.wire,
           resource: record.resource.data !== null ? record.resource : existing.resource,
-          storedAt: record.storedAt
+          storedAt: record.storedAt,
+          context: record.context ?? existing.context
         }
       : record;
     if (existing) {
-      this.byId.set(merged.wire.id, merged);
       const index = this.entries.findIndex((entry) => entry.wire.id === merged.wire.id);
       if (index >= 0) {
-        this.entries[index] = merged;
+        this.entries.splice(index, 1);
       }
+      this.entries.push(merged);
+      this.byId.set(merged.wire.id, merged);
       return merged;
     }
     this.entries.push(merged);
@@ -608,15 +616,15 @@ class RelayFileChangeStreamManager {
     const cache = getChangeLogCache(this.client, this.workspaceId);
     const cached = cache.get(eventId);
     if (cached) {
-      return toChangeEvent(this.client, cached);
+      return toChangeEvent(this.client, cached, { workspaceId: this.workspaceId, token: this.token });
     }
     const hydrations = getPendingChangeHydrations(this.client, this.workspaceId);
     const pending = hydrations.get(eventId);
     if (pending) {
       const record = await pending;
-      return record ? toChangeEvent(this.client, record) : null;
+      return record ? toChangeEvent(this.client, record, { workspaceId: this.workspaceId, token: this.token }) : null;
     }
-    const inFlight = materializeChangeRecord(this.client, this.workspaceId, event);
+    const inFlight = materializeChangeRecord(this.client, this.workspaceId, event, this.token);
     hydrations.set(eventId, inFlight);
     let record: CachedChangeRecord | null;
     try {
@@ -626,7 +634,7 @@ class RelayFileChangeStreamManager {
         hydrations.delete(eventId);
       }
     }
-    return record ? toChangeEvent(this.client, record) : null;
+    return record ? toChangeEvent(this.client, record, { workspaceId: this.workspaceId, token: this.token }) : null;
   }
 
   private ensureStarted(): void {
@@ -1006,14 +1014,21 @@ function decodeFilePayload(file: FileReadResponse): unknown {
 }
 
 async function sha256Hex(value: string): Promise<string> {
-  const subtle = globalThis.crypto?.subtle;
+  let subtle: { digest(algorithm: AlgorithmIdentifier, data: BufferSource): Promise<ArrayBuffer> } | undefined = globalThis.crypto?.subtle;
   if (!subtle) {
-    let hash = 0x811c9dc5;
-    for (let i = 0; i < value.length; i += 1) {
-      hash ^= value.charCodeAt(i);
-      hash = Math.imul(hash, 0x01000193);
+    try {
+      const nodeCrypto = await import("node:crypto");
+      subtle = nodeCrypto.webcrypto?.subtle as typeof subtle;
+      if (!subtle) {
+        return `sha256:${nodeCrypto.createHash("sha256").update(value).digest("hex")}`;
+      }
+    } catch {
+      // Fall through to the non-content fallback below.
     }
-    return `sha256-fallback:${(hash >>> 0).toString(16).padStart(8, "0")}`;
+  }
+  if (!subtle) {
+    const nonce = globalThis.crypto?.randomUUID?.() ?? `unavailable-${Date.now().toString(36)}`;
+    return `sha256:unavailable:${nonce}`;
   }
   const hash = await subtle.digest("SHA-256", new TextEncoder().encode(value));
   const bytes = new Uint8Array(hash);
@@ -1034,7 +1049,12 @@ function normalizeChangeEventId(event: FilesystemEvent, workspaceId: string): st
   ].join(":");
 }
 
-function toChangeEvent(client: RelayFileClient, record: CachedChangeRecord): ChangeEvent {
+function toChangeEvent(
+  client: RelayFileClient,
+  record: CachedChangeRecord,
+  contextOverride?: ProactiveRequestContext
+): ChangeEvent {
+  const context = contextOverride ?? record.context ?? { workspaceId: record.wire.workspace };
   return {
     ...record.wire,
     expand: async <L extends ExpansionLevel = "summary">(level?: L): Promise<Expansion<L>> => {
@@ -1047,7 +1067,7 @@ function toChangeEvent(client: RelayFileClient, record: CachedChangeRecord): Cha
         } as Expansion<L>;
       }
       if (normalizedLevel === "full") {
-        const resource = await client.getResourceAtEvent(record.wire.id);
+        const resource = await client.getResourceAtEvent(record.wire.id, context);
         return {
           level: normalizedLevel,
           path: resource.path,
@@ -1102,7 +1122,8 @@ function normalizeWireChangeEvent(payload: unknown): ChangeEventWireShape {
 async function materializeChangeRecord(
   client: RelayFileClient,
   workspaceId: string,
-  event: FilesystemEvent
+  event: FilesystemEvent,
+  token?: string
 ): Promise<CachedChangeRecord | null> {
   const eventId = normalizeChangeEventId(event, workspaceId);
   const occurredAt = event.timestamp || new Date().toISOString();
@@ -1115,7 +1136,7 @@ async function materializeChangeRecord(
 
   let tokenAgentId: string | undefined;
   try {
-    tokenAgentId = getAgentIdFromToken(await client.getToken());
+    tokenAgentId = getAgentIdFromToken(token ?? await client.getToken());
   } catch {
     tokenAgentId = undefined;
   }
@@ -1134,7 +1155,7 @@ async function materializeChangeRecord(
 
   if (event.type !== "file.deleted") {
     try {
-      const file = await client.readFile(workspaceId, event.path);
+      const file = await client.readFile({ workspaceId, path: event.path, token } as ReadFileInput & { token?: string });
       const data = decodeFilePayload(file);
       const digest = await sha256Hex(file.content);
       resource = {
@@ -1158,7 +1179,8 @@ async function materializeChangeRecord(
   const record: CachedChangeRecord = {
     wire,
     resource,
-    storedAt: Date.now()
+    storedAt: Date.now(),
+    context: { workspaceId, token }
   };
   getChangeLogCache(client, workspaceId).record(record);
   return record;
@@ -1242,7 +1264,8 @@ export class RelayFileClient {
       method: "GET",
       path: `/v1/workspaces/${encodeURIComponent(input.workspaceId)}/fs/file${query}`,
       correlationId: input.correlationId,
-      signal: input.signal
+      signal: input.signal,
+      tokenOverride: (input as ReadFileInput & { token?: string }).token
     });
   }
 
@@ -1379,17 +1402,11 @@ export class RelayFileClient {
       .then((workspaceId) => {
         const manager = getStreamManager(this, workspaceId, options?.aclToken, this.baseUrl);
         return manager.addSubscription(globs, onChange, options);
-      })
-      .catch((error) => {
-        if (typeof console !== "undefined" && typeof console.error === "function") {
-          console.error("RelayFile subscribe initialization failed", error);
-        }
-        return null;
       });
     return {
       async unsubscribe(): Promise<void> {
         const subscription = await setup;
-        await subscription?.unsubscribe();
+        await subscription.unsubscribe();
       },
     };
   }
@@ -1408,8 +1425,9 @@ export class RelayFileClient {
     };
   }
 
-  async getResourceAtEvent(eventId: string): Promise<ResourceAtEventResult> {
-    const workspaceId = await this.resolveWorkspaceId();
+  async getResourceAtEvent(eventId: string, context?: ProactiveRequestContext): Promise<ResourceAtEventResult> {
+    const workspaceId = context?.workspaceId ?? await this.resolveWorkspaceId(context?.token);
+    const effectiveContext = context ?? { workspaceId };
     const cache = getChangeLogCache(this, workspaceId);
     const cached = cache.get(eventId);
     if (cached && cached.resource.data !== null) {
@@ -1429,23 +1447,26 @@ export class RelayFileClient {
     }
     return this.request<ResourceAtEventResult>({
       method: "GET",
-      path: `/v1/workspaces/${encodeURIComponent(workspaceId)}/fs/changes/resource${buildQuery({ eventId })}`
+      path: `/v1/workspaces/${encodeURIComponent(workspaceId)}/fs/changes/resource${buildQuery({ eventId })}`,
+      tokenOverride: effectiveContext.token
     });
   }
 
-  async listChangesSince(isoTimestamp: string): Promise<ChangeLogQueryResult> {
-    const workspaceId = await this.resolveWorkspaceId();
+  async listChangesSince(isoTimestamp: string, context?: ProactiveRequestContext): Promise<ChangeLogQueryResult> {
+    const workspaceId = context?.workspaceId ?? await this.resolveWorkspaceId(context?.token);
+    const effectiveContext = context ?? { workspaceId };
     const cache = getChangeLogCache(this, workspaceId);
     const cached = cache.listSince(isoTimestamp);
     let records = cached;
     try {
       const payload = await this.request<{ events?: unknown[] }>({
         method: "GET",
-        path: `/v1/workspaces/${encodeURIComponent(workspaceId)}/fs/changes${buildQuery({ since: isoTimestamp })}`
+        path: `/v1/workspaces/${encodeURIComponent(workspaceId)}/fs/changes${buildQuery({ since: isoTimestamp })}`,
+        tokenOverride: effectiveContext.token
       });
       records = mergeChangeRecords([
         ...cached,
-        ...(payload.events ?? []).map((event) => this.cacheWireChangeEvent(workspaceId, normalizeWireChangeEvent(event)))
+        ...(payload.events ?? []).map((event) => this.cacheWireChangeEvent(workspaceId, normalizeWireChangeEvent(event), effectiveContext))
       ]);
     } catch (error) {
       if (cached.length === 0) {
@@ -1453,27 +1474,29 @@ export class RelayFileClient {
       }
     }
     return {
-      events: records.map((record) => toChangeEvent(this, record))
+      events: records.map((record) => toChangeEvent(this, record, context))
     };
   }
 
-  async listLastNChanges(limit: number): Promise<ChangeLogQueryResult> {
+  async listLastNChanges(limit: number, context?: ProactiveRequestContext): Promise<ChangeLogQueryResult> {
     const safeLimit = Math.max(0, Math.floor(limit));
     if (safeLimit === 0) {
       return { events: [] };
     }
-    const workspaceId = await this.resolveWorkspaceId();
+    const workspaceId = context?.workspaceId ?? await this.resolveWorkspaceId(context?.token);
+    const effectiveContext = context ?? { workspaceId };
     const cache = getChangeLogCache(this, workspaceId);
     const cached = cache.listLastN(safeLimit);
     let records = cached;
     try {
       const payload = await this.request<{ events?: unknown[] }>({
         method: "GET",
-        path: `/v1/workspaces/${encodeURIComponent(workspaceId)}/fs/changes${buildQuery({ last: safeLimit })}`
+        path: `/v1/workspaces/${encodeURIComponent(workspaceId)}/fs/changes${buildQuery({ last: safeLimit })}`,
+        tokenOverride: effectiveContext.token
       });
       records = mergeChangeRecords([
         ...cached,
-        ...(payload.events ?? []).map((event) => this.cacheWireChangeEvent(workspaceId, normalizeWireChangeEvent(event)))
+        ...(payload.events ?? []).map((event) => this.cacheWireChangeEvent(workspaceId, normalizeWireChangeEvent(event), effectiveContext))
       ]).slice(-safeLimit);
     } catch (error) {
       if (cached.length === 0) {
@@ -1481,7 +1504,7 @@ export class RelayFileClient {
       }
     }
     return {
-      events: records.map((record) => toChangeEvent(this, record))
+      events: records.map((record) => toChangeEvent(this, record, context))
     };
   }
 
@@ -1791,7 +1814,11 @@ export class RelayFileClient {
     });
   }
 
-  private cacheWireChangeEvent(workspaceId: string, wire: ChangeEventWireShape): CachedChangeRecord {
+  private cacheWireChangeEvent(
+    workspaceId: string,
+    wire: ChangeEventWireShape,
+    context?: ProactiveRequestContext
+  ): CachedChangeRecord {
     const record: CachedChangeRecord = {
       wire,
       resource: {
@@ -1799,7 +1826,8 @@ export class RelayFileClient {
         data: null,
         digest: wire.digest ?? `event:${wire.id}`
       },
-      storedAt: Date.now()
+      storedAt: Date.now(),
+      context: context ?? { workspaceId }
     };
     return getChangeLogCache(this, workspaceId).record(record);
   }
@@ -1809,12 +1837,15 @@ export class RelayFileClient {
       return;
     }
     if (options.replayOnStart.startsWith("since:")) {
-      await this.listChangesSince(options.replayOnStart.slice("since:".length));
+      await this.listChangesSince(
+        options.replayOnStart.slice("since:".length),
+        { workspaceId: options.workspaceId, token: options.aclToken }
+      );
       return;
     }
     if (options.replayOnStart.startsWith("last:")) {
       const limit = Number.parseInt(options.replayOnStart.slice("last:".length), 10);
-      await this.listLastNChanges(limit);
+      await this.listLastNChanges(limit, { workspaceId: options.workspaceId, token: options.aclToken });
     }
   }
 
@@ -1838,6 +1869,7 @@ export class RelayFileClient {
     body?: unknown;
     correlationId?: string;
     signal?: AbortSignal;
+    tokenOverride?: string;
   }): Promise<T> {
     const response = await this.performRequest(params);
     const payload = await this.readPayload(response);
@@ -1852,6 +1884,7 @@ export class RelayFileClient {
     correlationId?: string;
     signal?: AbortSignal;
     accept?: string;
+    tokenOverride?: string;
   }): Promise<Response> {
     const existingCorrelationId = getHeaderValue(params.headers, "X-Correlation-Id");
     const correlationId = existingCorrelationId ?? params.correlationId ?? generateCorrelationId();
@@ -1874,7 +1907,7 @@ export class RelayFileClient {
     let retries = 0;
     const url = `${this.baseUrl}${params.path}`;
     for (;;) {
-      const token = await resolveToken(this.tokenProvider);
+      const token = params.tokenOverride ?? await resolveToken(this.tokenProvider);
       const headers: Record<string, string> = {
         Authorization: `Bearer ${token}`,
         ...baseHeaders
