@@ -537,7 +537,18 @@ function addExcludeEntries(
 
 function isPathMatched(relPath: string, matcher: Ignore, isDirectory = false): boolean {
   const normalized = normalizeRelativePosix(relPath);
-  return matcher.ignores(normalized) || (isDirectory && matcher.ignores(`${normalized}/`));
+  // For directories, ask the matcher about the trailing-slash form — that's
+  // the canonical "is this directory ignored?" question in gitignore semantics
+  // and is what makes trailing-slash negations (`!dir/`) actually take effect.
+  // The previous implementation OR'd the bare-name check first, which short-
+  // circuited to "ignored" when a pattern like `/*` matched the bare name —
+  // even if a later `!dir/` negated the directory form. The slash form is
+  // safe for bare-name patterns too: `ignore` treats `node_modules` as
+  // matching both `node_modules` and `node_modules/`.
+  if (isDirectory) {
+    return matcher.ignores(`${normalized}/`);
+  }
+  return matcher.ignores(normalized);
 }
 
 function hasSameContent(left: string, right: string): boolean {
