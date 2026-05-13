@@ -6,6 +6,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+_No unreleased changes._
+
+## [0.7.12] - 2026-05-13
+
 ### Added
 - Document the proactive runtime relayfile contract in `docs/proactive-runtime-contract.md`, including the gateway DLQ path scheme `/_dlq/<event-id>.json`, the `subscribe(globs, onChange)` and `getResourceAtEvent(eventId)` contracts, the canonical `EventSummary` adapter shape, and the reserved change-stream transport bootstrap types.
 - Ship the M2 proactive-runtime change surfaces on `RelayFileClient`: `subscribe(globs, onChange, options?)`, `open(options)`, `getResourceAtEvent(eventId)`, `listChangesSince(isoTimestamp)`, and `listLastNChanges(limit)` now use the shared WebSocket transport, retained change-log lookups, and event expansion hooks.
@@ -157,7 +161,8 @@ _No user-visible changes in this release._
 ### Fixed
 - Bind `fetch` to `globalThis` so the SDK runs on Cloudflare Workers without `TypeError: Illegal invocation`. ([#41])
 
-[Unreleased]: https://github.com/AgentWorkforce/relayfile/compare/v0.7.11...HEAD
+[Unreleased]: https://github.com/AgentWorkforce/relayfile/compare/v0.7.12...HEAD
+[0.7.12]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.7.12
 [0.7.11]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.7.11
 [0.7.10]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.7.10
 [0.7.9]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.7.9
