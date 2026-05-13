@@ -1396,6 +1396,7 @@ func (s *Syncer) applyWebSocketEvent(ctx context.Context, event websocketEvent) 
 		if err := s.applyRemoteFile(remotePath, file, nil); err != nil {
 			return err
 		}
+		s.markSyncSuccess()
 		return s.saveState()
 	case "file.deleted":
 		remotePath := normalizeRemotePath(event.Path)
@@ -1408,6 +1409,7 @@ func (s *Syncer) applyWebSocketEvent(ctx context.Context, event websocketEvent) 
 		if err := s.applyRemoteDelete(remotePath, nil); err != nil {
 			return err
 		}
+		s.markSyncSuccess()
 		return s.saveState()
 	default:
 		return nil
@@ -2228,6 +2230,13 @@ func (s *Syncer) scanLocalFiles() (map[string]localSnapshot, error) {
 		}
 		absPath, err := filepath.Abs(path)
 		if err == nil && absPath == statePathAbs {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() {
 			return nil
 		}
 		remotePath, err := localToRemotePath(s.localRoot, s.remoteRoot, path)
