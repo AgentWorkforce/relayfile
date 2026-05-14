@@ -14,8 +14,11 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+	"github.com/santhosh-tekuri/jsonschema/v6"
 
 	"github.com/agentworkforce/relayfile/internal/mountsync"
+	"github.com/agentworkforce/relayfile/internal/writeback"
+	schemaassets "github.com/agentworkforce/relayfile/schemas"
 )
 
 func TestWritebackDaemonDeadLettersHTTP400(t *testing.T) {
@@ -128,6 +131,67 @@ func TestWritebackDaemonDeadLettersHTTP400(t *testing.T) {
 	}
 	if record.LastBody != lastBody {
 		t.Fatalf("expected lastBody %q, got %q", lastBody, record.LastBody)
+	}
+
+	// Work item 6 acceptance: retry-exhaustion must atomically land the
+	// canonical `<opID>.error.json` sidecar alongside the legacy payload
+	// record and that sidecar must validate against the embedded JSON
+	// Schema. The previous fix-loop iteration was reviewed FAIL because
+	// only the payload was asserted — keep both assertions co-located.
+	sidecarPath := filepath.Join(localDir, ".relay", "dead-letter", opID+".error.json")
+	waitForFile(t, sidecarPath, "dead-letter error sidecar")
+	sidecarBytes, err := os.ReadFile(sidecarPath)
+	if err != nil {
+		t.Fatalf("read dead-letter sidecar failed: %v", err)
+	}
+	var sidecar map[string]any
+	if err := json.Unmarshal(sidecarBytes, &sidecar); err != nil {
+		t.Fatalf("parse dead-letter sidecar failed: %v\npayload:\n%s", err, string(sidecarBytes))
+	}
+	if got, _ := sidecar["opId"].(string); got != opID {
+		t.Fatalf("sidecar opId = %q, want %q", got, opID)
+	}
+	// HTTP 400 maps to `provider_4xx` per classifyDeadLetterSidecarCode.
+	if got, _ := sidecar["code"].(string); got != string(writeback.CodeProvider4xx) {
+		t.Fatalf("sidecar code = %q, want %q", got, writeback.CodeProvider4xx)
+	}
+	if got, _ := sidecar["providerStatus"].(float64); int(got) != http.StatusBadRequest {
+		t.Fatalf("sidecar providerStatus = %v, want %d", sidecar["providerStatus"], http.StatusBadRequest)
+	}
+	if got, _ := sidecar["attempts"].(float64); int(got) < 1 {
+		t.Fatalf("sidecar attempts = %v, want >= 1", sidecar["attempts"])
+	}
+	if _, ok := sidecar["providerResponse"]; !ok {
+		t.Fatalf("sidecar missing providerResponse: %v", sidecar)
+	}
+
+	// Round-trip the sidecar through the same JSON Schema validator the
+	// daemon embeds. Any drift between Go marshalling and the schema would
+	// surface here.
+	schemaBytes, err := schemaassets.FS.ReadFile(writeback.SchemaPath)
+	if err != nil {
+		t.Fatalf("read embedded schema: %v", err)
+	}
+	var schemaDoc any
+	if err := json.Unmarshal(schemaBytes, &schemaDoc); err != nil {
+		t.Fatalf("parse embedded schema: %v", err)
+	}
+	compiler := jsonschema.NewCompiler()
+	compiler.DefaultDraft(jsonschema.Draft7)
+	compiler.AssertFormat()
+	if err := compiler.AddResource(writeback.SchemaPath, schemaDoc); err != nil {
+		t.Fatalf("add schema resource: %v", err)
+	}
+	compiled, err := compiler.Compile(writeback.SchemaPath)
+	if err != nil {
+		t.Fatalf("compile schema: %v", err)
+	}
+	var sidecarValue any
+	if err := json.Unmarshal(sidecarBytes, &sidecarValue); err != nil {
+		t.Fatalf("re-parse sidecar for schema validation: %v", err)
+	}
+	if err := compiled.Validate(sidecarValue); err != nil {
+		t.Fatalf("sidecar failed embedded schema validation: %v\npayload:\n%s", err, string(sidecarBytes))
 	}
 
 	var snapshot syncStateFile

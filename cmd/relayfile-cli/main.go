@@ -32,6 +32,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/agentworkforce/relayfile/internal/mountsync"
+	"github.com/agentworkforce/relayfile/internal/writeback"
 	"github.com/fsnotify/fsnotify"
 )
 
@@ -356,6 +357,10 @@ func main() {
 }
 
 func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
+	if wantsHelp(args) {
+		printHelpForArgs(args, stdout)
+		return nil
+	}
 	if len(args) == 0 {
 		return runSetup(nil, stdin, stdout)
 	}
@@ -373,6 +378,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		return runOps(args[1:], stdin, stdout)
 	case "writeback":
 		return runWriteback(args[1:], stdout)
+	case "digest":
+		return runDigest(args[1:], stdout)
 	case "pull":
 		return runPull(args[1:], stdout)
 	case "mount", "start":
@@ -407,6 +414,163 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	}
 }
 
+func wantsHelp(args []string) bool {
+	for _, arg := range args {
+		if arg == "-h" || arg == "--help" {
+			return true
+		}
+	}
+	return false
+}
+
+func printHelpForArgs(args []string, stdout io.Writer) {
+	if len(args) == 0 {
+		printUsage(stdout)
+		return
+	}
+	command := args[0]
+	if command == "-h" || command == "--help" {
+		printUsage(stdout)
+		return
+	}
+	subcommand := ""
+	if len(args) > 1 && !strings.HasPrefix(args[1], "-") {
+		subcommand = args[1]
+	}
+
+	switch command {
+	case "setup":
+		fmt.Fprintln(stdout, "Usage: relayfile setup [--provider PROVIDER] [--backend BACKEND] [--workspace NAME] [--local-dir DIR]")
+	case "login":
+		fmt.Fprintln(stdout, "Usage: relayfile login [--no-open] [--api-key] [--server URL] [--token TOKEN]")
+	case "workspace":
+		printWorkspaceUsage(stdout, subcommand)
+	case "integration":
+		printIntegrationUsage(stdout, subcommand)
+	case "ops":
+		printOpsUsage(stdout, subcommand)
+	case "writeback":
+		printWritebackUsage(stdout, subcommand)
+	case "digest":
+		printDigestUsage(stdout, subcommand)
+	case "pull":
+		fmt.Fprintln(stdout, "Usage: relayfile pull [--workspace NAME] [--provider PROVIDER] [--reason TEXT]")
+	case "mount", "start":
+		printMountHelp(stdout)
+	case "restart":
+		fmt.Fprintln(stdout, "Usage: relayfile restart [WORKSPACE] [--foreground]")
+	case "tree", "ls":
+		fmt.Fprintln(stdout, "Usage: relayfile tree [WORKSPACE] [PATH] [--depth N] [--json]")
+	case "read", "cat":
+		fmt.Fprintln(stdout, "Usage: relayfile read [WORKSPACE] PATH [--output FILE] [--json]")
+	case "seed":
+		fmt.Fprintln(stdout, "Usage: relayfile seed [WORKSPACE] [DIR]")
+	case "export":
+		fmt.Fprintln(stdout, "Usage: relayfile export [WORKSPACE] --format FORMAT [--output FILE]")
+	case "status":
+		fmt.Fprintln(stdout, "Usage: relayfile status [WORKSPACE] [--json]")
+	case "stop":
+		fmt.Fprintln(stdout, "Usage: relayfile stop [WORKSPACE]")
+	case "logs":
+		fmt.Fprintln(stdout, "Usage: relayfile logs [WORKSPACE] [--lines N]")
+	case "observer":
+		fmt.Fprintln(stdout, "Usage: relayfile observer [WORKSPACE] [--no-open]")
+	case "help":
+		printUsage(stdout)
+	default:
+		printUsage(stdout)
+	}
+}
+
+func printWorkspaceUsage(w io.Writer, subcommand string) {
+	switch subcommand {
+	case "create":
+		fmt.Fprintln(w, "Usage: relayfile workspace create NAME")
+	case "use":
+		fmt.Fprintln(w, "Usage: relayfile workspace use NAME")
+	case "list":
+		fmt.Fprintln(w, "Usage: relayfile workspace list [--names-only]")
+	case "current":
+		fmt.Fprintln(w, "Usage: relayfile workspace current [--verbose]")
+	case "delete":
+		fmt.Fprintln(w, "Usage: relayfile workspace delete NAME [--yes]")
+	default:
+		fmt.Fprintln(w, `Usage:
+  relayfile workspace create NAME
+  relayfile workspace use NAME
+  relayfile workspace list [--names-only]
+  relayfile workspace current [--verbose]
+  relayfile workspace delete NAME [--yes]`)
+	}
+}
+
+func printIntegrationUsage(w io.Writer, subcommand string) {
+	switch subcommand {
+	case "connect":
+		fmt.Fprintln(w, "Usage: relayfile integration connect PROVIDER [--backend BACKEND] [--workspace NAME] [--no-open] [--timeout 5m]")
+	case "available", "catalog", "providers":
+		fmt.Fprintln(w, "Usage: relayfile integration available [--search QUERY] [--backend BACKEND] [--json] [--refresh]")
+	case "search":
+		fmt.Fprintln(w, "Usage: relayfile integration search QUERY [--backend BACKEND] [--json] [--refresh]")
+	case "list":
+		fmt.Fprintln(w, "Usage: relayfile integration list [--workspace NAME] [--json]")
+	case "disconnect":
+		fmt.Fprintln(w, "Usage: relayfile integration disconnect PROVIDER [--workspace NAME] [--yes]")
+	case "adopt":
+		fmt.Fprintln(w, "Usage: relayfile integration adopt PROVIDER --connection-id ID [--workspace NAME] [--provider-config-key KEY] [--yes]")
+	case "set-metadata":
+		fmt.Fprintln(w, "Usage: relayfile integration set-metadata PROVIDER KEY=VALUE [KEY=VALUE...] [--workspace NAME] [--yes]")
+	default:
+		fmt.Fprintln(w, `Usage:
+  relayfile integration connect PROVIDER [--backend BACKEND] [--workspace NAME]
+  relayfile integration available [--search QUERY] [--backend BACKEND] [--json] [--refresh]
+  relayfile integration search QUERY [--backend BACKEND] [--json] [--refresh]
+  relayfile integration list [--workspace NAME] [--json]
+  relayfile integration disconnect PROVIDER [--workspace NAME] [--yes]
+  relayfile integration adopt PROVIDER --connection-id ID [--workspace NAME] [--provider-config-key KEY] [--yes]
+  relayfile integration set-metadata PROVIDER KEY=VALUE [KEY=VALUE...] [--workspace NAME] [--yes]`)
+	}
+}
+
+func printOpsUsage(w io.Writer, subcommand string) {
+	switch subcommand {
+	case "list":
+		fmt.Fprintln(w, "Usage: relayfile ops list [--workspace NAME] [--json] [--no-refresh]")
+	case "replay":
+		fmt.Fprintln(w, "Usage: relayfile ops replay OPID [--workspace NAME]")
+	default:
+		fmt.Fprintln(w, `Usage:
+  relayfile ops list [--workspace NAME] [--json]
+  relayfile ops replay OPID [--workspace NAME]`)
+	}
+}
+
+func printWritebackUsage(w io.Writer, subcommand string) {
+	switch subcommand {
+	case "list":
+		fmt.Fprintln(w, writebackListUsage)
+	case "status":
+		fmt.Fprintln(w, "Usage: relayfile writeback status [WORKSPACE] [--json]")
+	case "retry":
+		fmt.Fprintln(w, "Usage: relayfile writeback retry --opId OP [WORKSPACE]")
+	default:
+		fmt.Fprintln(w, `Usage:
+  relayfile writeback list --state pending|dead|succeeded|failed [--workspace WS] [--json]
+  relayfile writeback status [WORKSPACE] [--json]
+  relayfile writeback retry --opId OP [WORKSPACE]`)
+	}
+}
+
+func printDigestUsage(w io.Writer, subcommand string) {
+	switch subcommand {
+	case "rebuild":
+		fmt.Fprintln(w, digestRebuildUsage)
+	default:
+		fmt.Fprintln(w, `Usage:
+  relayfile digest rebuild --window yesterday|today [--workspace NAME]`)
+	}
+}
+
 func printUsage(w io.Writer) {
 	fmt.Fprintln(w, `relayfile is the RelayFile CLI.
 
@@ -429,8 +593,10 @@ Usage:
   relayfile integration set-metadata PROVIDER KEY=VALUE [KEY=VALUE...] [--workspace NAME] [--yes]
   relayfile ops list [--workspace NAME] [--json]
   relayfile ops replay OPID [--workspace NAME]
+  relayfile writeback list --state pending|dead|succeeded|failed [--workspace WS] [--json]
   relayfile writeback status [WORKSPACE] [--json]
   relayfile writeback retry --opId OP [WORKSPACE]
+  relayfile digest rebuild --window yesterday|today [--workspace NAME]
   relayfile pull [--workspace NAME] [--provider PROVIDER] [--reason TEXT]
   relayfile mount [WORKSPACE] [LOCAL_DIR]
   relayfile start [WORKSPACE] [LOCAL_DIR]            (alias for mount)
@@ -451,10 +617,15 @@ Subcommands:
   integration Connect, discover, list, disconnect, or adopt workspace integrations
   ops         List or replay dead-lettered writeback ops
   writeback   Inspect or retry local writeback failures
+  writeback list
+              List local writeback items by state
   writeback status
               Show local pending, failed, and dead-lettered writebacks
   writeback retry
               Re-enqueue a local dead-lettered writeback op
+  digest      Regenerate workspace digests
+  digest rebuild
+              Regenerate digests/yesterday.md or digests/today.md
   pull        Trigger an immediate sync refresh for one or all providers
   mount       Mirror a remote workspace to a local directory; add --background to detach
   start       Alias for mount; pairs naturally with stop and restart
@@ -2167,6 +2338,17 @@ type deadLetterRecord struct {
 	ReplayURL       string `json:"replayUrl,omitempty"`
 }
 
+type deadLetterErrorDetail struct {
+	Code             string          `json:"code"`
+	Message          string          `json:"message"`
+	ProviderStatus   int             `json:"providerStatus,omitempty"`
+	ProviderResponse json.RawMessage `json:"providerResponse,omitempty"`
+	Attempts         int             `json:"attempts"`
+	FirstAttemptAt   string          `json:"firstAttemptAt"`
+	LastAttemptAt    string          `json:"lastAttemptAt"`
+	OpID             string          `json:"opId"`
+}
+
 type writebackStatusDeadLetter struct {
 	OpID       string `json:"opId"`
 	Path       string `json:"path,omitempty"`
@@ -2188,11 +2370,17 @@ func deadLetterDirFor(localDir string) string {
 	return filepath.Join(localDir, ".relay", "dead-letter")
 }
 
+func deadLetterErrorPathFor(localDir, opID string) string {
+	return filepath.Join(deadLetterDirFor(localDir), opID+".error.json")
+}
+
 func runWriteback(args []string, stdout io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("writeback subcommand is required: status or retry")
+		return errors.New("writeback subcommand is required: list, status, or retry")
 	}
 	switch args[0] {
+	case "list":
+		return runWritebackList(args[1:], stdout)
 	case "status":
 		return runWritebackStatus(args[1:], stdout)
 	case "retry":
@@ -2388,7 +2576,7 @@ func readDeadLetterRecords(localDir string) ([]deadLetterRecord, error) {
 	}
 	records := make([]deadLetterRecord, 0, len(entries))
 	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") || strings.HasSuffix(entry.Name(), ".error.json") {
 			continue
 		}
 		payload, err := os.ReadFile(filepath.Join(dir, entry.Name()))
@@ -5377,6 +5565,10 @@ type writebackFailureTransport struct {
 	logger   *log.Logger
 	mu       sync.Mutex
 	attempts map[string]int
+	// firstAttemptAt tracks the timestamp of the first failed attempt per
+	// request key so the dead-letter sidecar can populate `firstAttemptAt`
+	// when retries are exhausted.
+	firstAttemptAt map[string]time.Time
 }
 
 type writebackFailureSample struct {
@@ -5408,10 +5600,11 @@ func newWritebackFailureTransport(localDir string, logger *log.Logger, base http
 		logger = log.Default()
 	}
 	return &writebackFailureTransport{
-		base:     base,
-		localDir: localDir,
-		logger:   logger,
-		attempts: map[string]int{},
+		base:           base,
+		localDir:       localDir,
+		logger:         logger,
+		attempts:       map[string]int{},
+		firstAttemptAt: map[string]time.Time{},
 	}
 }
 
@@ -5432,7 +5625,7 @@ func (t *writebackFailureTransport) RoundTrip(req *http.Request) (*http.Response
 	}
 
 	sample := sampleWritebackFailure(req, resp, requestBody)
-	attempts := t.recordFailureAttempt(key)
+	attempts, firstAttemptAt := t.recordFailureAttempt(key)
 	if t.logger != nil {
 		t.logger.Printf("WARN writeback request failed opId=%s path=%s status=%d bodyTruncated=%t body=%q",
 			sample.OpID, sample.Path, sample.Status, sample.BodyTruncated, sample.Body)
@@ -5441,7 +5634,7 @@ func (t *writebackFailureTransport) RoundTrip(req *http.Request) (*http.Response
 		t.logger.Printf("WARN failed to persist failedWritebacks path=%s error=%v", sample.Path, err)
 	}
 	if writebackRetriesExhausted(resp.StatusCode, attempts) {
-		if err := writeDeadLetterWriteback(t.localDir, sample, attempts); err != nil && t.logger != nil {
+		if err := writeDeadLetterWriteback(t.localDir, sample, attempts, firstAttemptAt); err != nil && t.logger != nil {
 			t.logger.Printf("WARN failed to write dead-letter opId=%s path=%s error=%v", sample.OpID, sample.Path, err)
 		}
 		t.clearAttempt(key)
@@ -5470,17 +5663,21 @@ func writebackAttemptKey(req *http.Request) string {
 	return req.Method + " " + req.URL.String()
 }
 
-func (t *writebackFailureTransport) recordFailureAttempt(key string) int {
+func (t *writebackFailureTransport) recordFailureAttempt(key string) (int, time.Time) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.attempts[key]++
-	return t.attempts[key]
+	if _, ok := t.firstAttemptAt[key]; !ok {
+		t.firstAttemptAt[key] = time.Now().UTC()
+	}
+	return t.attempts[key], t.firstAttemptAt[key]
 }
 
 func (t *writebackFailureTransport) clearAttempt(key string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	delete(t.attempts, key)
+	delete(t.firstAttemptAt, key)
 }
 
 func readAndRestoreWritebackRequestBody(req *http.Request) string {
@@ -5611,10 +5808,14 @@ func writebackRetriesExhausted(status, attempts int) bool {
 	return true
 }
 
-func writeDeadLetterWriteback(localDir string, sample writebackFailureSample, attempts int) error {
+func writeDeadLetterWriteback(localDir string, sample writebackFailureSample, attempts int, firstAttemptAt time.Time) error {
 	opID := safeWritebackOpID(sample.OpID)
 	if strings.TrimSpace(localDir) == "" || opID == "" {
 		return nil
+	}
+	now := time.Now().UTC()
+	if firstAttemptAt.IsZero() {
+		firstAttemptAt = now
 	}
 	record := struct {
 		OpID       string `json:"opId"`
@@ -5629,18 +5830,113 @@ func writeDeadLetterWriteback(localDir string, sample writebackFailureSample, at
 		Attempts:   attempts,
 		LastStatus: sample.Status,
 		LastBody:   sample.Body,
-		Timestamp:  time.Now().UTC().Format(time.RFC3339),
+		Timestamp:  now.Format(time.RFC3339),
 	}
 	payload, err := json.MarshalIndent(record, "", "  ")
 	if err != nil {
 		return err
 	}
 	payload = append(payload, '\n')
+	// Marshal the sidecar BEFORE either file lands on disk so a sidecar
+	// serialization error fails the whole operation without leaving an
+	// orphan payload. Consumers (CLI `writeback list`, FUSE readers,
+	// replay tooling) rely on both files being present together.
+	sidecar, err := writeback.MarshalSidecar(writeback.ErrorContext{
+		Code:             classifyDeadLetterSidecarCode(sample.Status),
+		Message:          deadLetterErrorMessage(sample),
+		ProviderStatus:   sample.Status,
+		ProviderResponse: deadLetterProviderResponse(sample),
+		Attempts:         attempts,
+		FirstAttemptAt:   firstAttemptAt,
+		LastAttemptAt:    now,
+		OpID:             opID,
+	})
+	if err != nil {
+		return err
+	}
 	dir := deadLetterDirFor(localDir)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	return writeFileAtomically(filepath.Join(dir, opID+".json"), payload, 0o644)
+	payloadPath := filepath.Join(dir, opID+".json")
+	sidecarPath := deadLetterErrorPathFor(localDir, opID)
+	if err := writeFileAtomically(payloadPath, payload, 0o644); err != nil {
+		return err
+	}
+	// If the sidecar write fails after the payload has landed, remove the
+	// payload so the dead-letter directory never holds a half-committed
+	// record. Best-effort: a remove failure is still surfaced as the
+	// underlying sidecar-write error, not masked.
+	if err := writeFileAtomically(sidecarPath, sidecar, 0o644); err != nil {
+		_ = os.Remove(payloadPath)
+		return err
+	}
+	return nil
+}
+
+// classifyDeadLetterSidecarCode maps an upstream HTTP status to the four
+// sidecar codes enumerated in `schemas/relay/dead-letter-error.schema.json`.
+// 4xx (non-429) is non-retryable provider error; 5xx and 429 retried until
+// exhaustion become `provider_5xx_exhausted`. Statuses below 400 or zero
+// indicate a transport-level failure recorded as a timeout.
+func classifyDeadLetterSidecarCode(status int) writeback.ErrorCode {
+	switch {
+	case status >= 400 && status < 500 && status != http.StatusTooManyRequests:
+		return writeback.CodeProvider4xx
+	case status == http.StatusTooManyRequests, status >= 500 && status <= 599:
+		return writeback.CodeProvider5xxExhaust
+	default:
+		return writeback.CodeTimeout
+	}
+}
+
+func deadLetterErrorMessage(sample writebackFailureSample) string {
+	if msg := strings.TrimSpace(sample.Body); msg != "" {
+		return fmt.Sprintf("writeback failed with HTTP %d: %s", sample.Status, msg)
+	}
+	return fmt.Sprintf("writeback failed with HTTP %d after retries", sample.Status)
+}
+
+// deadLetterProviderResponse returns the provider response body as either a
+// decoded object/array (matching the schema's `type: ["object", "array"]`)
+// or, when the body is not JSON, an envelope object preserving the raw bytes.
+// Returning `nil` would drop the field entirely; the lead plan requires the
+// raw upstream response be retained for replay/debugging.
+func deadLetterProviderResponse(sample writebackFailureSample) interface{} {
+	body := strings.TrimSpace(sample.Body)
+	if body == "" {
+		return nil
+	}
+	var decoded interface{}
+	if err := json.Unmarshal([]byte(body), &decoded); err == nil {
+		switch decoded.(type) {
+		case map[string]interface{}, []interface{}:
+			return decoded
+		}
+	}
+	return map[string]interface{}{
+		"raw":       sample.Body,
+		"truncated": sample.BodyTruncated,
+	}
+}
+
+func readDeadLetterErrorSidecar(localDir, opID string) (deadLetterErrorDetail, bool, error) {
+	opID = safeWritebackOpID(opID)
+	if strings.TrimSpace(localDir) == "" || opID == "" {
+		return deadLetterErrorDetail{}, false, nil
+	}
+	payload, err := os.ReadFile(deadLetterErrorPathFor(localDir, opID))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return deadLetterErrorDetail{}, false, nil
+		}
+		return deadLetterErrorDetail{}, false, err
+	}
+	var detail deadLetterErrorDetail
+	if err := json.Unmarshal(payload, &detail); err != nil {
+		return deadLetterErrorDetail{}, false, fmt.Errorf("invalid dead-letter sidecar %s: %w", deadLetterErrorPathFor(localDir, opID), err)
+	}
+	return detail, true, nil
 }
 
 func relayfileTokenNeedsRefresh(token string) bool {

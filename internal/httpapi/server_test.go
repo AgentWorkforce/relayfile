@@ -13,6 +13,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -1274,6 +1275,71 @@ func TestTreeEndpointHonorsDepth(t *testing.T) {
 		if expectedType != entry.Type {
 			t.Fatalf("expected %s to be %s, got %s", entry.Path, expectedType, entry.Type)
 		}
+	}
+}
+
+func TestTreeEndpointPaginatesBoundedEntries(t *testing.T) {
+	store := relayfile.NewStore()
+	t.Cleanup(store.Close)
+	server := NewServer(store)
+	token := mustTestJWT(t, "dev-secret", "ws_tree_api_paged", "Worker1", []string{"fs:read"}, time.Now().Add(time.Hour))
+
+	for index := 0; index < 1002; index++ {
+		path := fmt.Sprintf("/notion/Paged/File%04d.md", index)
+		if _, err := store.WriteFile(relayfile.WriteRequest{
+			WorkspaceID:   "ws_tree_api_paged",
+			Path:          path,
+			IfMatch:       "0",
+			ContentType:   "text/markdown",
+			Content:       "# paged",
+			CorrelationID: fmt.Sprintf("corr_tree_api_paged_%04d", index),
+		}); err != nil {
+			t.Fatalf("write failed for %s: %v", path, err)
+		}
+	}
+
+	pageOneResp := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/workspaces/ws_tree_api_paged/fs/tree?path=/notion/Paged&depth=1",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_tree_api_paged_read_1",
+		},
+	})
+	if pageOneResp.Code != http.StatusOK {
+		t.Fatalf("expected 200 page-one tree, got %d (%s)", pageOneResp.Code, pageOneResp.Body.String())
+	}
+	var pageOne relayfile.TreeResponse
+	if err := json.NewDecoder(pageOneResp.Body).Decode(&pageOne); err != nil {
+		t.Fatalf("decode page-one tree response: %v", err)
+	}
+	if len(pageOne.Entries) != 1000 {
+		t.Fatalf("expected 1000 page-one entries, got %d", len(pageOne.Entries))
+	}
+	if pageOne.NextCursor == nil || *pageOne.NextCursor != "/notion/Paged/File0999.md" {
+		t.Fatalf("unexpected page-one next cursor: %v", pageOne.NextCursor)
+	}
+
+	pageTwoResp := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/workspaces/ws_tree_api_paged/fs/tree?path=/notion/Paged&depth=1&cursor=" + url.QueryEscape(*pageOne.NextCursor),
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_tree_api_paged_read_2",
+		},
+	})
+	if pageTwoResp.Code != http.StatusOK {
+		t.Fatalf("expected 200 page-two tree, got %d (%s)", pageTwoResp.Code, pageTwoResp.Body.String())
+	}
+	var pageTwo relayfile.TreeResponse
+	if err := json.NewDecoder(pageTwoResp.Body).Decode(&pageTwo); err != nil {
+		t.Fatalf("decode page-two tree response: %v", err)
+	}
+	if len(pageTwo.Entries) != 2 {
+		t.Fatalf("expected 2 page-two entries, got %d", len(pageTwo.Entries))
+	}
+	if pageTwo.NextCursor != nil {
+		t.Fatalf("expected nil page-two next cursor, got %q", *pageTwo.NextCursor)
 	}
 }
 

@@ -30,6 +30,8 @@ DEFAULT_PATH_PREFIXES: dict[str, str] = {
     "twilio": "/twilio",
 }
 
+DIGEST_PATHS: tuple[str, str] = ("digests/yesterday.md", "digests/today.md")
+
 
 @dataclass
 class WebhookInput:
@@ -63,6 +65,24 @@ def compute_canonical_path(provider: str, object_type: str, object_id: str) -> s
     return f"{prefix}/{object_type}/{object_id}.json"
 
 
+def _norm_segment(value: str, *, name: str) -> str:
+    trimmed = value.strip().strip("/")
+    if not trimmed:
+        raise ValueError(f"{name} is required")
+    return trimmed
+
+
+def provider_layout_path(provider: str) -> str:
+    return f"{_norm_segment(provider, name='provider')}/.layout.md"
+
+
+def resource_schema_path(provider: str, resource_path: str) -> str:
+    return (
+        f"{_norm_segment(provider, name='provider')}/"
+        f"{_norm_segment(resource_path, name='resource_path')}/.schema.json"
+    )
+
+
 class IntegrationProvider(ABC):
     def __init__(self, client: RelayFileClient) -> None:
         self._client = client
@@ -91,9 +111,7 @@ class IntegrationProvider(ABC):
     ) -> list[dict[str, Any]]:
         prefix = DEFAULT_PATH_PREFIXES.get(options.provider, f"/{options.provider}")
         path_filter = (
-            f"{prefix}/{options.object_type}/"
-            if options.object_type
-            else f"{prefix}/"
+            f"{prefix}/{options.object_type}/" if options.object_type else f"{prefix}/"
         )
 
         properties: dict[str, str] = {"provider": options.provider}

@@ -128,6 +128,7 @@ export interface FileQueryResponse {
 }
 
 export type WritebackState = "pending" | "succeeded" | "failed" | "dead_lettered";
+export type WritebackListState = WritebackState | "dead";
 
 export interface WriteQueuedResponse {
   opId: string;
@@ -246,6 +247,63 @@ export interface ChangeEvent {
   summary: ChangeEventSummary;
   expand<L extends ExpansionLevel = "summary">(level?: L): Promise<Expansion<L>>;
   digest?: string;
+}
+
+export interface DigestWindow {
+  /** ISO 8601, inclusive. */
+  readonly from: string;
+  /** ISO 8601, exclusive. */
+  readonly to: string;
+}
+
+export interface DigestBullet {
+  /** One-line past-tense description, e.g. "AGE-16 moved to in-review". */
+  readonly text: string;
+  /** Mount-relative canonical path the bullet points at. */
+  readonly canonicalPath: string;
+}
+
+export interface DigestSection {
+  readonly provider: string;
+  readonly bullets: readonly DigestBullet[];
+}
+
+export interface DigestContext {
+  readonly provider: string;
+  readonly window: DigestWindow;
+  changeEvents(filter?: {
+    providers?: string[];
+    paths?: string[];
+  }): Promise<readonly ChangeEvent[]>;
+}
+
+export type DigestHandler = (ctx: DigestContext) => Promise<DigestSection | null>;
+
+export interface WritebackSchemaRef {
+  readonly provider: string;
+  readonly resource: string;
+  /** Mount-relative path to the served `.schema.json` virtual file. */
+  readonly path: string;
+}
+
+export interface LayoutManifestAlias {
+  /** e.g. "by-title", "by-id", "by-edited". */
+  readonly segment: string;
+  readonly description?: string;
+}
+
+export interface LayoutManifestResource {
+  readonly name: string;
+  readonly canonicalFilename: string;
+  readonly writebackActions?: readonly string[];
+  readonly writebackSchemas?: readonly WritebackSchemaRef[];
+  readonly aliases?: readonly LayoutManifestAlias[];
+}
+
+export interface LayoutManifest {
+  readonly provider: string;
+  readonly materialization: "eager" | "lazy";
+  readonly resources: readonly LayoutManifestResource[];
 }
 
 export interface SubscribeOptions {
@@ -712,12 +770,46 @@ export interface IngestWebhookInput {
   signal?: AbortSignal;
 }
 
+export type WritebackDeadLetterErrorCode =
+  | "schema_violation"
+  | "provider_4xx"
+  | "provider_5xx_exhausted"
+  | "timeout";
+
+export interface WritebackDeadLetterError {
+  code: WritebackDeadLetterErrorCode;
+  message: string;
+  providerStatus?: number;
+  providerResponse?: Record<string, unknown>;
+  attempts: number;
+  firstAttemptAt: string;
+  lastAttemptAt: string;
+  opId: string;
+}
+
 export interface WritebackItem {
   id: string;
   workspaceId: string;
   path: string;
   revision: string;
   correlationId: string;
+  state?: WritebackListState;
+  provider?: string;
+  action?: WritebackActionType;
+  ts?: string;
+  code?: WritebackDeadLetterErrorCode | string;
+  message?: string;
+  providerStatus?: number;
+  providerResponse?: Record<string, unknown>;
+  attempts?: number;
+  firstAttemptAt?: string;
+  enqueuedAt?: string;
+  lastAttemptAt?: string;
+  error?: WritebackDeadLetterError;
+}
+
+export interface WritebackItemDetail extends WritebackItem {
+  error?: WritebackDeadLetterError;
 }
 
 export interface AckWritebackInput {
