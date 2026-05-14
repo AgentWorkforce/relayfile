@@ -867,7 +867,8 @@ func TestConnectCloudIntegrationAcceptsWorkspaceScopedGitHubStatus(t *testing.T)
 	clearRelayfileEnv(t)
 
 	localDir := t.TempDir()
-	seenWorkspaceStatus := false
+	var seenConnectionScopedStatus atomic.Bool
+	var seenWorkspaceStatus atomic.Bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
@@ -879,9 +880,10 @@ func TestConnectCloudIntegrationAcceptsWorkspaceScopedGitHubStatus(t *testing.T)
 		case "/api/v1/workspaces/ws_123/integrations/github/status":
 			switch r.URL.Query().Get("connectionId") {
 			case "conn_session":
+				seenConnectionScopedStatus.Store(true)
 				_, _ = w.Write([]byte(`{"ready":false,"state":"not_connected","connectionId":"conn_session"}`))
 			case "":
-				seenWorkspaceStatus = true
+				seenWorkspaceStatus.Store(true)
 				_, _ = w.Write([]byte(`{"ready":false,"state":"oauth_connected","provider":"github","connectionId":"conn_actual"}`))
 			default:
 				t.Fatalf("unexpected connectionId query: %q", r.URL.Query().Get("connectionId"))
@@ -896,7 +898,10 @@ func TestConnectCloudIntegrationAcceptsWorkspaceScopedGitHubStatus(t *testing.T)
 	if err := connectCloudIntegration(server.URL, "ws_123", "rf_join", "github", "nango", localDir, time.Second, false, &stdout); err != nil {
 		t.Fatalf("connectCloudIntegration failed: %v\noutput:\n%s", err, stdout.String())
 	}
-	if !seenWorkspaceStatus {
+	if !seenConnectionScopedStatus.Load() {
+		t.Fatalf("expected connection-scoped status probe before workspace fallback")
+	}
+	if !seenWorkspaceStatus.Load() {
 		t.Fatalf("expected workspace-scoped status fallback")
 	}
 	if got := stdout.String(); !strings.Contains(got, "github connected") {
