@@ -1,0 +1,187 @@
+{
+  "id": "compact_ol00md0ndw3y",
+  "version": 1,
+  "type": "compacted",
+  "compactedAt": "2026-05-14T10:07:00.087Z",
+  "sourceTrajectories": [
+    "traj_74bqkvousktt",
+    "traj_6y5t0i2h2tyg",
+    "traj_tdywz0ni0z1a",
+    "traj_brjdrgcnnwhs",
+    "traj_h99ldnvo1d26",
+    "traj_4vdcwo2iy630"
+  ],
+  "dateRange": {
+    "start": "2026-05-09T18:25:18.473Z",
+    "end": "2026-05-14T10:06:56.418Z"
+  },
+  "summary": {
+    "totalDecisions": 8,
+    "totalEvents": 11,
+    "uniqueAgents": [
+      "default"
+    ]
+  },
+  "decisionGroups": [
+    {
+      "category": "tooling",
+      "decisions": [
+        {
+          "question": "Build core before SDK in the root build script",
+          "chosen": "Build core before SDK in the root build script",
+          "reasoning": "The provider eval workflow builds packages before running evals; the TypeScript SDK imports @relayfile/core declarations, so a fresh CI install must compile core first.",
+          "fromTrajectory": "traj_74bqkvousktt"
+        },
+        {
+          "question": "Normalized integrations eval configured-mount section to JSON boolean",
+          "chosen": "Normalized integrations eval configured-mount section to JSON boolean",
+          "reasoning": "The eval compiler parses Use Configured Mount as JSON and maps it to input.useConfiguredMount, so the previous mountRoot text prevented every eval run from compiling.",
+          "fromTrajectory": "traj_74bqkvousktt"
+        },
+        {
+          "question": "Scoped CI provider evals to provider-readiness",
+          "chosen": "Scoped CI provider evals to provider-readiness",
+          "reasoning": "The repository eval tree includes live/manual initial E2E prose cases and a non-provider-readiness integration operation that are not executable in CI. PR 149 adds provider-readiness evals, so the action runs that concrete suite.",
+          "fromTrajectory": "traj_74bqkvousktt"
+        }
+      ]
+    },
+    {
+      "category": "other",
+      "decisions": [
+        {
+          "question": "Resolved materializeWebhook conflict by combining path validation with ACL enforcement",
+          "chosen": "Resolved materializeWebhook conflict by combining path validation with ACL enforcement",
+          "reasoning": "PR branch rejects missing/root webhook paths; main enforces write ACLs. The merged behavior should perform both checks before materializing webhook payloads.",
+          "fromTrajectory": "traj_74bqkvousktt"
+        },
+        {
+          "question": "Use COPYFILE_FICLONE only for initial mount copies",
+          "chosen": "Use COPYFILE_FICLONE only for initial mount copies",
+          "reasoning": "Issue 132 targets createMount's project-to-mount mirror; sync-back and autosync behavior should remain unchanged unless separately scoped.",
+          "fromTrajectory": "traj_tdywz0ni0z1a"
+        }
+      ]
+    },
+    {
+      "category": "architecture",
+      "decisions": [
+        {
+          "question": "Added Relayfile provider eval workflow with summary and PR comment helpers",
+          "chosen": "Added Relayfile provider eval workflow with summary and PR comment helpers",
+          "reasoning": "Sage and Ricky run provider evals on internal PRs/main pushes with OpenRouter free model, summaries, comments, and artifacts; Relayfile now follows that pattern with its own .relayfile run directory.",
+          "fromTrajectory": "traj_74bqkvousktt"
+        }
+      ]
+    },
+    {
+      "category": "security",
+      "decisions": [
+        {
+          "question": "Intercept help flags at the top-level dispatcher",
+          "chosen": "Intercept help flags at the top-level dispatcher",
+          "reasoning": "This lets -h/--help work before subcommand validation, credential loading, or network calls, and keeps aliases consistent.",
+          "fromTrajectory": "traj_6y5t0i2h2tyg"
+        }
+      ]
+    },
+    {
+      "category": "api",
+      "decisions": [
+        {
+          "question": "When no --token is provided, runLogin will trigger ensureCloudCredentials (browser flow) instead of prompting for API key",
+          "chosen": "When no --token is provided, runLogin will trigger ensureCloudCredentials (browser flow) instead of prompting for API key",
+          "reasoning": "Matches what 'relayfile setup' already does. Old API-key prompt path stays available behind --api-key flag for self-hosted users who don't have cloud.",
+          "fromTrajectory": "traj_4vdcwo2iy630"
+        }
+      ]
+    }
+  ],
+  "keyLearnings": [],
+  "keyFindings": [],
+  "filesAffected": [],
+  "commits": [],
+  "narrative": "Six short sessions over May 9–14 hardened the Relayfile CLI, fixed a file-copy bug, and stood up CI-driven provider-readiness evals. The CLI gained centralized -h/--help handling in cmd/relayfile-cli/main.go (intercepted at the top-level dispatcher before subcommand validation or credential loading), a 'workspace current' subcommand with an active-workspace marker in 'workspace list', and a cloud browser login fallback when --token is absent (mirroring 'relayfile setup'). Issue 132 was fixed in packages/local-mount by switching createMount's initial project-to-mount copy to Node's non-forcing COPYFILE_FICLONE flag, scoped only to initial copies—sync-back and autosync paths were deliberately left unchanged. The largest session resolved merge conflicts on PR 149 and added a GitHub Actions workflow for provider-readiness evals. The materializeWebhook conflict was resolved by combining the PR branch's path-validation guard (reject missing/root webhook paths) with main's write-ACL enforcement—both checks now run before materialization. The CI workflow follows the OpenRouter free-model pattern already used by Sage and Ricky, with summary generation, PR comment helpers, and artifact uploads. A build-order fix ensures @relayfile/core compiles before the TypeScript SDK, and the integrations eval's configured-mount section was normalized from prose to a JSON boolean so the eval compiler can parse it. An initial live E2E integration eval spec was also authored covering setup, discovery, Linear, Slack, Notion, GitHub, and health-evidence stages, though it is not yet wired into CI (only provider-readiness evals run there).",
+  "decisions": [
+    {
+      "question": "How to resolve the materializeWebhook merge conflict between path validation and ACL enforcement?",
+      "chosen": "Combined both guards: reject missing/root webhook paths (PR branch) AND enforce write ACLs (main) before materializing webhook payloads.",
+      "reasoning": "Both checks are load-bearing—path validation prevents invalid materializations, ACL enforcement prevents unauthorized writes. They are independent preconditions.",
+      "impact": "internal/mountfuse/fs.go materializeWebhook now performs two-phase validation; future webhook handlers must satisfy both checks."
+    },
+    {
+      "question": "Where to intercept -h/--help flags in the CLI?",
+      "chosen": "Top-level dispatcher in cmd/relayfile-cli/main.go, before subcommand validation, credential loading, or network calls.",
+      "reasoning": "Ensures help works for root commands, command groups, subcommands, and aliases consistently without side effects.",
+      "impact": "All future CLI commands get help handling for free; no per-command wiring needed."
+    },
+    {
+      "question": "Which copy flag to use for issue 132 (reflink copies)?",
+      "chosen": "Node's COPYFILE_FICLONE (non-forcing) for createMount initial copies only.",
+      "reasoning": "Issue 132 specifically targets the initial project-to-mount mirror. Sync-back and autosync should remain unchanged unless separately scoped. Non-forcing means graceful fallback on filesystems without reflink support.",
+      "impact": "packages/local-mount createMount path; a mocked copy-mode regression test was added."
+    },
+    {
+      "question": "How to handle relayfile login when --token is absent?",
+      "chosen": "Fall back to ensureCloudCredentials (browser flow), matching 'relayfile setup'. Legacy API-key prompt preserved behind --api-key flag.",
+      "reasoning": "Consistency with existing setup flow; self-hosted users retain --api-key escape hatch.",
+      "impact": "New flags: --cloud-api-url, --cloud-token, --no-open, --login-timeout added to login command."
+    },
+    {
+      "question": "Which eval suites should run in CI?",
+      "chosen": "Scoped CI to provider-readiness evals only.",
+      "reasoning": "The eval tree includes live/manual E2E prose cases and non-provider-readiness integration operations that cannot run in CI. Provider-readiness is the concrete, automatable suite from PR 149.",
+      "impact": ".github/workflows eval action runs only evals/suites that are CI-safe; integration E2E spec exists but is not wired to CI yet."
+    },
+    {
+      "question": "How to order the root build script?",
+      "chosen": "Build @relayfile/core before the TypeScript SDK.",
+      "reasoning": "SDK imports core's declarations; fresh CI installs fail without core compiled first.",
+      "impact": "Root package.json build script ordering; affects all CI workflows that build packages."
+    }
+  ],
+  "conventions": [
+    {
+      "pattern": "Eval configured-mount sections use JSON booleans, not prose text",
+      "rationale": "The eval compiler parses 'Use Configured Mount' as JSON and maps it to input.useConfiguredMount; prose values break compilation.",
+      "scope": "evals/suites/integrations/cases.md and any future eval case files"
+    },
+    {
+      "pattern": "CI eval workflows use OpenRouter free-model pattern with summary, PR comment, and artifact upload",
+      "rationale": "Matches existing Sage/Ricky eval CI pattern; keeps eval cost at zero for PR checks.",
+      "scope": ".github/workflows provider eval actions"
+    },
+    {
+      "pattern": "CLI help handled at dispatcher level, not per-command",
+      "rationale": "Prevents side effects (credential loading, network calls) when user just wants help text.",
+      "scope": "cmd/relayfile-cli/main.go dispatcher"
+    },
+    {
+      "pattern": "Scope file-copy flag changes to the specific code path mentioned in the issue",
+      "rationale": "Avoids unintended behavior changes in sync-back or autosync paths.",
+      "scope": "packages/local-mount copy operations"
+    }
+  ],
+  "lessons": [
+    {
+      "lesson": "Build dependency order matters for CI but is invisible locally when packages are already compiled.",
+      "context": "The TypeScript SDK failed to build in CI because @relayfile/core wasn't compiled first; locally this never surfaced because incremental builds kept core's output around.",
+      "recommendation": "When adding cross-package imports, verify the root build script compiles dependencies first and test with a clean install (rm -rf node_modules && npm ci && npm run build)."
+    },
+    {
+      "lesson": "Eval case files are code—their field values must match the compiler's expected types exactly.",
+      "context": "The integrations eval had prose in the configured-mount field where the compiler expected a JSON boolean, silently breaking every eval run.",
+      "recommendation": "Add a CI lint step or dry-run compilation check for eval case files to catch type mismatches before merge."
+    },
+    {
+      "lesson": "Merge conflicts between independent safety checks should combine both checks, not pick one.",
+      "context": "materializeWebhook had path validation on one branch and ACL enforcement on another; both are necessary preconditions.",
+      "recommendation": "When resolving conflicts between guards/validators, default to AND-ing them unless they are mutually exclusive."
+    }
+  ],
+  "openQuestions": [
+    "The live integration E2E eval spec (setup, discovery, Linear, Slack, Notion, GitHub, health) is authored but not wired into CI—when and how should it run?",
+    "Full root npm test exposes a file-observer install split issue that was verified separately but not fixed—is this tracked?",
+    "Should COPYFILE_FICLONE be extended to sync-back and autosync paths, or is the initial-copy-only scope permanent?"
+  ]
+}

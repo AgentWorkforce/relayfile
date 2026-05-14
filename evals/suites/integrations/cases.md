@@ -127,7 +127,7 @@ Human Review: true
 Use the configured mount (mountRoot below) — start by reading LAYOUT.md, then .skills/activity-summary.md — to answer: What did I work on yesterday (2026-05-12) across GH/Linear/Notion?
 
 ### Use Configured Mount
-mountRoot: ./mount-verify
+true
 
 ### Mock
 ```json

@@ -79,6 +79,31 @@ export function assertRelayfileExpected(testCase, actualInput) {
     );
   }
 
+  for (const item of asArray(expected.webhookMaterialized)) {
+    const { provider, path } = objectCheck(item, "webhookMaterialized");
+    const normalized = normalizeMountPath(path);
+    addCheck(
+      checks,
+      `webhookMaterialized:${provider}:${normalized}`,
+      actual.sideEffects.some((effect) => (
+        effect.kind === "webhookMaterialized"
+        && effect.provider === provider
+        && normalizeMountPath(effect.path) === normalized
+      )),
+      `expected webhook materialization for ${provider}:${normalized}`,
+    );
+  }
+
+  if (expected.deadLettered !== undefined) {
+    const deadLetteredCount = actual.sideEffects.filter((effect) => effect.kind === "deadLettered").length;
+    addCheck(
+      checks,
+      "deadLettered",
+      deadLetteredCount === Number(expected.deadLettered),
+      `expected ${expected.deadLettered} dead-lettered writebacks, got ${deadLetteredCount}`,
+    );
+  }
+
   for (const prefix of asArray(expected.noFilesModified)) {
     const normalized = normalizeMountPath(prefix);
     const modified = actual.filesModified.filter((filePath) => pathIsWithin(filePath, normalized));
