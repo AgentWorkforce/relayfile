@@ -49,8 +49,17 @@ export interface AutoSyncContext {
 }
 
 export interface AutoSyncOptions {
-  /** Full-reconcile interval as a safety net. Default: 10_000ms. */
+  /**
+   * Degraded-watcher full-reconcile interval as a safety net. Default: 10_000ms.
+   * Set to 0 or Infinity to disable periodic full reconciles.
+   */
   scanIntervalMs?: number;
+  /**
+   * Full-reconcile interval while both watcher subscriptions are healthy.
+   * Default: 60_000ms, or `scanIntervalMs` when that option is explicitly set.
+   * Set to 0 or Infinity to disable healthy-watcher full reconciles.
+   */
+  healthyScanIntervalMs?: number;
   /**
    * Per-path event debounce in ms. Rapid watcher events for the same path
    * are coalesced into a single sync. Default: 50.
@@ -82,12 +91,36 @@ interface FileState {
 }
 
 const STOP_EVENT_SETTLE_MS = 250;
+const DEFAULT_SCAN_INTERVAL_MS = 10_000;
+const DEFAULT_HEALTHY_SCAN_INTERVAL_MS = 60_000;
+
+function normalizeScanInterval(
+  name: string,
+  value: number | undefined,
+  fallback: number
+): number | null {
+  const interval = value ?? fallback;
+  if (interval === 0 || interval === Infinity) return null;
+  if (!Number.isFinite(interval) || interval < 0) {
+    throw new RangeError(`${name} must be a finite non-negative number, 0, or Infinity`);
+  }
+  return interval;
+}
 
 export function startAutoSync(
   ctx: AutoSyncContext,
   opts: AutoSyncOptions = {}
 ): AutoSyncHandle {
-  const scanIntervalMs = opts.scanIntervalMs ?? 10_000;
+  const scanIntervalMs = normalizeScanInterval(
+    'scanIntervalMs',
+    opts.scanIntervalMs,
+    DEFAULT_SCAN_INTERVAL_MS
+  );
+  const healthyScanIntervalMs = normalizeScanInterval(
+    'healthyScanIntervalMs',
+    opts.healthyScanIntervalMs,
+    opts.scanIntervalMs === undefined ? DEFAULT_HEALTHY_SCAN_INTERVAL_MS : opts.scanIntervalMs
+  );
   const debounceMs = opts.debounceMs ?? 50;
   const onError = opts.onError ?? (() => { /* ignore by default */ });
 
@@ -107,11 +140,6 @@ export function startAutoSync(
   const dirtyMountPaths = new Set<string>();
 
   const watchersHealthy = (): boolean => watchersReadySettled && !watcherDegraded;
-
-  const markWatcherDegraded = (err: Error): void => {
-    watcherDegraded = true;
-    onError(err);
-  };
 
   const clearPendingDebounces = (): void => {
     for (const t of pendingDebounces.values()) clearTimeout(t);
@@ -195,6 +223,49 @@ export function startAutoSync(
     return count;
   };
 
+  let periodicTimer: NodeJS.Timeout | undefined;
+  let periodicReconcileRunning = false;
+
+  const clearPeriodicReconcile = (): void => {
+    if (periodicTimer) {
+      clearTimeout(periodicTimer);
+      periodicTimer = undefined;
+    }
+  };
+
+  const nextScanInterval = (): number | null => {
+    return watchersHealthy() ? healthyScanIntervalMs : scanIntervalMs;
+  };
+
+  const schedulePeriodicReconcile = (): void => {
+    clearPeriodicReconcile();
+    if (stopping || stopped) return;
+
+    const delay = nextScanInterval();
+    if (delay === null) return;
+
+    periodicTimer = setTimeout(() => {
+      periodicTimer = undefined;
+      periodicReconcileRunning = true;
+      void runReconcile().finally(() => {
+        periodicReconcileRunning = false;
+        schedulePeriodicReconcile();
+      });
+    }, delay);
+    periodicTimer.unref?.();
+  };
+
+  const reschedulePeriodicReconcile = (): void => {
+    if (periodicReconcileRunning) return;
+    schedulePeriodicReconcile();
+  };
+
+  const markWatcherDegraded = (err: Error): void => {
+    watcherDegraded = true;
+    reschedulePeriodicReconcile();
+    onError(err);
+  };
+
   const flushPending = async (opts?: { signal?: AbortSignal }): Promise<number> => {
     if (opts?.signal?.aborted) {
       return 0;
@@ -268,10 +339,12 @@ export function startAutoSync(
     if (projectResult.status === 'fulfilled') projectSub = projectResult.value;
     if (mountResult.status === 'fulfilled' && projectResult.status === 'fulfilled') {
       watchersReadySettled = true;
+      reschedulePeriodicReconcile();
       return;
     }
     watchersReadySettled = true;
     watcherDegraded = true;
+    reschedulePeriodicReconcile();
     await Promise.allSettled([
       mountSub?.unsubscribe(),
       projectSub?.unsubscribe(),
@@ -287,11 +360,7 @@ export function startAutoSync(
   // rejection after the cleanup above has already run.
   watchersReady.catch((err) => markWatcherDegraded(err as Error));
 
-  const interval = setInterval(() => {
-    void runReconcile();
-  }, scanIntervalMs);
-  // Do not keep the event loop alive just because of our scan timer.
-  interval.unref?.();
+  schedulePeriodicReconcile();
 
   return {
     async stop(opts?: { signal?: AbortSignal }) {
@@ -305,7 +374,7 @@ export function startAutoSync(
         await new Promise<void>((resolve) => setTimeout(resolve, STOP_EVENT_SETTLE_MS));
       }
       stopping = true;
-      clearInterval(interval);
+      clearPeriodicReconcile();
       clearPendingDebounces();
       await Promise.allSettled([
         mountSub?.unsubscribe(),

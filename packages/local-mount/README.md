@@ -74,8 +74,10 @@ By default, `launchOnMount` keeps the mount and project directory in sync contin
 
 ```ts
 interface AutoSyncOptions {
-  /** Full-reconcile interval as a safety net. Default: 10_000 ms. */
+  /** Degraded-watcher full-reconcile interval. Default: 10_000 ms. 0/Infinity disables periodic scans. */
   scanIntervalMs?: number;
+  /** Healthy-watcher full-reconcile interval. Default: 60_000 ms, or scanIntervalMs when set. */
+  healthyScanIntervalMs?: number;
   /** Per-path event debounce in ms. Default: 50 ms. */
   debounceMs?: number;
   /** Invoked on sync errors. Defaults to swallowing them. */
@@ -100,12 +102,16 @@ Control it from `launchOnMount`:
 launchOnMount({ /* ... */, autoSync: false });
 
 // Tune it.
-launchOnMount({ /* ... */, autoSync: { scanIntervalMs: 5_000, debounceMs: 100 } });
+launchOnMount({ /* ... */, autoSync: { healthyScanIntervalMs: 120_000, debounceMs: 100 } });
+
+// Disable periodic full reconciles and rely on watcher events.
+launchOnMount({ /* ... */, autoSync: { scanIntervalMs: 0 } });
 ```
 
 How it works:
 - [@parcel/watcher](https://www.npmjs.com/package/@parcel/watcher) watches both the mount and the project tree using native FSEvents/inotify/ReadDirectoryChangesW
-- every `scanIntervalMs`, a full reconcile walks both trees as a safety net for missed events
+- every `healthyScanIntervalMs` while watchers are healthy, a full reconcile walks both trees as a low-frequency safety net for missed events
+- if watcher setup fails or a watcher reports an error, full reconciles fall back to `scanIntervalMs`
 - watcher events are tracked as dirty paths, so shutdown can flush pending path-level work and make the final sync-back proportional to the number of mount-side changes when the watcher state stayed healthy
 - `stop({ signal })` still closes watchers if aborted, but skips the final draining reconcile
 - per-file `mtime` is tracked at the last sync, so the scan skips files that haven't changed
