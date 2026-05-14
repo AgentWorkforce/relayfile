@@ -23,6 +23,31 @@ $ grep -l '"state":"Todo"' mount/linear/issues/*.json
 
 That's the entire interface. No new SDK to learn, no MCP schemas eating your context window — just the bash and file-IO an agent already knows.
 
+## Quick paths
+
+- **Hosted integrations:** `npx relayfile setup --provider notion --workspace research-room --local-dir ./relayfile-mount`
+- **Local OSS:** run the Docker stack below, then mount `ws_demo` as a normal directory.
+- **Sandbox SDK:** use `RelayfileSetup.ensureMountedWorkspace()` when your runtime already has a cloud access token.
+- **Programmatic agents:** wrap `RelayFileClient.readFile()` / `writeFile()` as one tool inside Vercel AI SDK, Claude Agent SDK, OpenAI Agents SDK, or any custom harness.
+
+```ts
+import { RelayFileClient } from "@relayfile/sdk"
+
+const files = new RelayFileClient({ token: process.env.RELAYFILE_TOKEN! })
+
+// Use this as the body of a Vercel AI SDK tool, Claude SDK MCP tool,
+// OpenAI Agents SDK tool, or your own agent runtime callback.
+export async function readRelayfile(path: string) {
+  return files.readFile("rw_123", path)
+}
+```
+
+Common workflows:
+
+- Read `/digests/yesterday.md`, then drill into `/github`, `/linear`, and `/notion` only when needed.
+- Create or patch provider records by writing JSON to canonical paths such as `/linear/issues/...`.
+- Give each worker only the paths it needs, e.g. read Notion and write Linear follow-ups.
+
 ## Mount layout
 
 Every mount is self-describing. The agent never needs to learn paths from documentation — `cat mount/LAYOUT.md` lists everything, and per-integration `<integration>/.layout.md` files document tree shapes. Each directory holds an `_index.json` with the rows it contains, and entity files follow a `<sanitized-name>__<id>` naming convention so identifiers are recoverable from any filename.
