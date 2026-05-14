@@ -43,6 +43,9 @@ type mountConfig struct {
 	timeout          time.Duration
 	websocketEnabled bool
 	lazyRepos        bool
+	lowMemory        bool
+	pprofAddr        string
+	memlogInterval   time.Duration
 	scopes           []string
 	once             bool
 	mode             string
@@ -68,6 +71,9 @@ func main() {
 	timeout := flag.Duration("timeout", durationEnv("RELAYFILE_MOUNT_TIMEOUT", 15*time.Second), "per-sync timeout")
 	websocketEnabled := flag.Bool("websocket", boolEnv("RELAYFILE_MOUNT_WEBSOCKET", true), "enable websocket event streaming when available")
 	lazyRepos := flag.Bool("lazy-repos", lazyReposEnv(), "lazily materialize GitHub repo subtrees on first access")
+	lowMemory := flag.Bool("low-memory", boolEnv("RELAYFILE_MOUNT_LOW_MEMORY", false), "reduce mount memory use by omitting per-file public state and deferring content reads")
+	pprofAddr := flag.String("pprof-addr", strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_PPROF_ADDR")), "optional pprof listen address, e.g. 127.0.0.1:6060")
+	memlogInterval := flag.Duration("memlog-interval", durationEnv("RELAYFILE_MOUNT_MEMLOG_INTERVAL", 0), "optional interval for logging runtime memory stats")
 	mode := flag.String("mode", envOrDefault("RELAYFILE_MOUNT_MODE", mountModePoll), "mount mode: poll (synced mirror, recommended) or fuse")
 	fuse := flag.Bool("fuse", boolEnv("RELAYFILE_MOUNT_FUSE", false), "shortcut for --mode=fuse")
 	once := flag.Bool("once", false, "run one sync cycle and exit")
@@ -110,6 +116,9 @@ func main() {
 		timeout:          *timeout,
 		websocketEnabled: *websocketEnabled,
 		lazyRepos:        *lazyRepos,
+		lowMemory:        *lowMemory,
+		pprofAddr:        strings.TrimSpace(*pprofAddr),
+		memlogInterval:   *memlogInterval,
 		scopes:           parseTokenScopes(strings.TrimSpace(*token)),
 		once:             *once,
 		mode:             resolvedMode,
@@ -165,9 +174,13 @@ func runPollingMount(rootCtx context.Context, cfg mountConfig) error {
 		Mode:          cfg.mode,
 		Interval:      cfg.interval,
 		LazyRepos:     boolPtr(cfg.lazyRepos),
+		LowMemory:     boolPtr(cfg.lowMemory),
 	})
 	if err != nil {
 		return fmt.Errorf("initialize mount syncer: %w", err)
+	}
+	if _, err := mountsync.StartDiagnostics(rootCtx, cfg.pprofAddr, cfg.memlogInterval, log.Default()); err != nil {
+		return fmt.Errorf("start diagnostics: %w", err)
 	}
 	log.Printf("Mirror started at %s. Sync interval %s +/- %.0f%%. Public state: %s", cfg.localDir, cfg.interval.Round(time.Second), cfg.intervalJitter*100, filepath.Join(cfg.localDir, ".relay", "state.json"))
 

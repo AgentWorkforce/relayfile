@@ -3094,8 +3094,50 @@ func TestScanLocalFilesSkipsSymlinkedDirectories(t *testing.T) {
 	if _, ok := files["/note.md"]; !ok {
 		t.Fatalf("expected regular file to be scanned, got keys %#v", files)
 	}
+	if got := files["/note.md"]; len(got.RawContent) != 0 || got.WireContent != "" {
+		t.Fatalf("expected scanLocalFiles to defer content reads, got raw=%d wire=%q", len(got.RawContent), got.WireContent)
+	}
 	if _, ok := files["/node_modules_link"]; ok {
 		t.Fatalf("expected symlinked directory to be skipped")
+	}
+}
+
+func TestLowMemoryPublicStateOmitsPerFileDetails(t *testing.T) {
+	t.Parallel()
+
+	localDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(localDir, "new.md"), []byte("# local"), 0o644); err != nil {
+		t.Fatalf("seed local file failed: %v", err)
+	}
+	syncer, err := NewSyncer(&fakeClient{}, SyncerOptions{
+		WorkspaceID: "ws_low_memory_public_state",
+		RemoteRoot:  "/",
+		LocalRoot:   localDir,
+		LowMemory:   boolPtr(true),
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+	syncer.state.Files["/tracked.md"] = trackedFile{
+		Revision:    "rev_1",
+		ContentType: "text/markdown",
+		Hash:        hashString("# tracked"),
+		Dirty:       true,
+	}
+
+	if err := syncer.saveState(); err != nil {
+		t.Fatalf("save state failed: %v", err)
+	}
+
+	state := readPublicState(t, localDir)
+	if !state.LowMemory {
+		t.Fatalf("expected public state to record low-memory mode")
+	}
+	if len(state.Files) != 0 {
+		t.Fatalf("expected low-memory public state to omit per-file details, got %#v", state.Files)
+	}
+	if state.PendingWriteback != 1 {
+		t.Fatalf("expected only tracked dirty file to count as pending, got %d", state.PendingWriteback)
 	}
 }
 
