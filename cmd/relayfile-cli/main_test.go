@@ -846,12 +846,70 @@ func TestIntegrationConnectRefreshesCloudAccessTokenAndReusesWorkspace(t *testin
 			t.Fatalf("expected %s request", key)
 		}
 	}
-	if got := stdout.String(); !strings.Contains(got, "notion connected") {
+	got := stdout.String()
+	if !strings.Contains(got, "notion connected") {
 		t.Fatalf("unexpected integration connect output: %q", got)
+	}
+	if !strings.Contains(got, "keep this command running while initial sync finishes") {
+		t.Fatalf("expected connected-but-still-working guidance, got %q", got)
+	}
+	if !strings.Contains(got, "Waiting for notion initial sync. Leave this command running") {
+		t.Fatalf("expected initial sync wait guidance, got %q", got)
 	}
 	state := loadSavedConnection(localDir, "notion")
 	if state.ConnectionID != "conn_789" || state.Backend != "composio" {
 		t.Fatalf("unexpected saved integration connection: %#v", state)
+	}
+}
+
+func TestConnectCloudIntegrationAcceptsWorkspaceScopedGitHubStatus(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	localDir := t.TempDir()
+	var seenConnectionScopedStatus atomic.Bool
+	var seenWorkspaceStatus atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/workspaces/ws_123/integrations/connect-session":
+			if r.Method != http.MethodPost {
+				t.Fatalf("expected connect POST, got %s", r.Method)
+			}
+			_, _ = w.Write([]byte(`{"connectLink":"https://connect.test/github","connectionId":"conn_session","backend":"nango"}`))
+		case "/api/v1/workspaces/ws_123/integrations/github/status":
+			switch r.URL.Query().Get("connectionId") {
+			case "conn_session":
+				seenConnectionScopedStatus.Store(true)
+				_, _ = w.Write([]byte(`{"ready":false,"state":"not_connected","connectionId":"conn_session"}`))
+			case "":
+				seenWorkspaceStatus.Store(true)
+				_, _ = w.Write([]byte(`{"ready":false,"state":"oauth_connected","provider":"github","connectionId":"conn_actual"}`))
+			default:
+				t.Fatalf("unexpected connectionId query: %q", r.URL.Query().Get("connectionId"))
+			}
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	if err := connectCloudIntegration(server.URL, "ws_123", "rf_join", "github", "nango", localDir, time.Second, false, &stdout); err != nil {
+		t.Fatalf("connectCloudIntegration failed: %v\noutput:\n%s", err, stdout.String())
+	}
+	if !seenConnectionScopedStatus.Load() {
+		t.Fatalf("expected connection-scoped status probe before workspace fallback")
+	}
+	if !seenWorkspaceStatus.Load() {
+		t.Fatalf("expected workspace-scoped status fallback")
+	}
+	if got := stdout.String(); !strings.Contains(got, "github connected") {
+		t.Fatalf("expected connected output, got %q", got)
+	}
+	state := loadSavedConnection(localDir, "github")
+	if state.ConnectionID != "conn_actual" || state.Backend != "nango" {
+		t.Fatalf("expected resolved github connection to be saved, got %#v", state)
 	}
 }
 
