@@ -237,7 +237,10 @@ type cloudConnectSessionResponse struct {
 }
 
 type cloudIntegrationReadyResponse struct {
-	Ready bool `json:"ready"`
+	Ready        bool   `json:"ready"`
+	Provider     string `json:"provider,omitempty"`
+	ConnectionID string `json:"connectionId,omitempty"`
+	State        string `json:"state,omitempty"`
 }
 
 type cloudTokenRefreshRequest struct {
@@ -1392,12 +1395,28 @@ func connectCloudIntegration(cloudAPIURL, workspaceID, workspaceToken, provider,
 	}
 	deadline := time.Now().Add(timeout)
 	for {
-		ready, err := cloudIntegrationReady(cloudAPIURL, workspaceID, workspaceToken, provider, connectionID)
+		status, err := cloudIntegrationStatus(cloudAPIURL, workspaceID, workspaceToken, provider, connectionID)
 		if err != nil {
 			return err
 		}
-		if ready {
-			fmt.Fprintf(stdout, "%s connected. Files will appear under %s/%s within ~30s.\n", provider, localDir, providerRootDir(provider))
+		if !cloudIntegrationConnected(status) && connectionID != "" {
+			fallbackStatus, fallbackErr := cloudIntegrationStatus(cloudAPIURL, workspaceID, workspaceToken, provider, "")
+			if fallbackErr == nil && cloudIntegrationConnected(fallbackStatus) {
+				status = fallbackStatus
+			}
+		}
+		if cloudIntegrationConnected(status) {
+			if resolvedConnectionID := strings.TrimSpace(status.ConnectionID); resolvedConnectionID != "" && resolvedConnectionID != connectionID {
+				connectionID = resolvedConnectionID
+				_ = saveIntegrationConnection(localDir, integrationConnectionState{
+					Provider:     provider,
+					ConnectionID: connectionID,
+					Backend:      backend,
+					ConnectedAt:  time.Now().UTC().Format(time.RFC3339),
+					UpdatedAt:    time.Now().UTC().Format(time.RFC3339),
+				})
+			}
+			fmt.Fprintf(stdout, "%s connected. Relayfile is preparing files in the background; keep this command running while initial sync finishes. Files will appear under %s/%s.\n", provider, localDir, providerRootDir(provider))
 			return nil
 		}
 		if time.Now().After(deadline) {
@@ -1408,9 +1427,17 @@ func connectCloudIntegration(cloudAPIURL, workspaceID, workspaceToken, provider,
 }
 
 func cloudIntegrationReady(cloudAPIURL, workspaceID, workspaceToken, provider, connectionID string) (bool, error) {
-	client, err := newAPIClient(cloudAPIURL, workspaceToken)
+	status, err := cloudIntegrationStatus(cloudAPIURL, workspaceID, workspaceToken, provider, connectionID)
 	if err != nil {
 		return false, err
+	}
+	return cloudIntegrationConnected(status), nil
+}
+
+func cloudIntegrationStatus(cloudAPIURL, workspaceID, workspaceToken, provider, connectionID string) (cloudIntegrationReadyResponse, error) {
+	client, err := newAPIClient(cloudAPIURL, workspaceToken)
+	if err != nil {
+		return cloudIntegrationReadyResponse{}, err
 	}
 	query := url.Values{}
 	if strings.TrimSpace(connectionID) != "" {
@@ -1418,9 +1445,21 @@ func cloudIntegrationReady(cloudAPIURL, workspaceID, workspaceToken, provider, c
 	}
 	var status cloudIntegrationReadyResponse
 	if err := client.getJSON(context.Background(), fmt.Sprintf("/api/v1/workspaces/%s/integrations/%s/status?%s", url.PathEscape(workspaceID), url.PathEscape(provider), query.Encode()), &status); err != nil {
-		return false, fmt.Errorf("check %s connection: %w", provider, err)
+		return cloudIntegrationReadyResponse{}, fmt.Errorf("check %s connection: %w", provider, err)
 	}
-	return status.Ready, nil
+	return status, nil
+}
+
+func cloudIntegrationConnected(status cloudIntegrationReadyResponse) bool {
+	if status.Ready {
+		return true
+	}
+	switch strings.TrimSpace(strings.ToLower(status.State)) {
+	case "connected", "oauth_connected", "sync_queued", "syncing", "ready":
+		return true
+	default:
+		return false
+	}
 }
 
 func waitForInitialSync(serverURL, token, workspaceID, provider, localDir string, timeout time.Duration, stdout io.Writer) error {
@@ -1431,6 +1470,7 @@ func waitForInitialSync(serverURL, token, workspaceID, provider, localDir string
 	if err != nil {
 		return err
 	}
+	fmt.Fprintf(stdout, "Waiting for %s initial sync. Leave this command running; Relayfile is preparing files in the background.\n", provider)
 	deadline := time.Now().Add(timeout)
 	lastPrinted := time.Time{}
 	for {
@@ -1446,6 +1486,8 @@ func waitForInitialSync(serverURL, token, workspaceID, provider, localDir string
 			lastPrinted = time.Now()
 			if ok {
 				fmt.Fprintf(stdout, "Syncing %s... lag %ds status=%s\n", provider, providerStatus.LagSeconds, providerStatus.Status)
+			} else {
+				fmt.Fprintf(stdout, "Waiting for %s sync status...\n", provider)
 			}
 		}
 		if time.Now().After(deadline) {
