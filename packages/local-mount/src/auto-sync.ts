@@ -93,6 +93,7 @@ interface FileState {
 const STOP_EVENT_SETTLE_MS = 250;
 const DEFAULT_SCAN_INTERVAL_MS = 10_000;
 const DEFAULT_HEALTHY_SCAN_INTERVAL_MS = 60_000;
+const MAX_SCAN_INTERVAL_MS = 2_147_483_647;
 
 function normalizeScanInterval(
   name: string,
@@ -101,8 +102,10 @@ function normalizeScanInterval(
 ): number | null {
   const interval = value ?? fallback;
   if (interval === 0 || interval === Infinity) return null;
-  if (!Number.isFinite(interval) || interval < 0) {
-    throw new RangeError(`${name} must be a finite non-negative number, 0, or Infinity`);
+  if (!Number.isFinite(interval) || interval < 0 || interval > MAX_SCAN_INTERVAL_MS) {
+    throw new RangeError(
+      `${name} must be between 0 and ${MAX_SCAN_INTERVAL_MS}, or Infinity`
+    );
   }
   return interval;
 }
@@ -261,8 +264,11 @@ export function startAutoSync(
   };
 
   const markWatcherDegraded = (err: Error): void => {
+    const alreadyDegraded = watcherDegraded;
     watcherDegraded = true;
-    reschedulePeriodicReconcile();
+    if (!alreadyDegraded) {
+      reschedulePeriodicReconcile();
+    }
     onError(err);
   };
 

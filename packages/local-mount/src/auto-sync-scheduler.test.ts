@@ -103,6 +103,17 @@ describe('startAutoSync scheduler policy', () => {
     }
   );
 
+  it('rejects scan intervals that exceed the setTimeout maximum', () => {
+    const ctx = syncContext(mountDir, projectDir);
+
+    expect(() =>
+      startAutoSync(ctx, { scanIntervalMs: 2_147_483_648 })
+    ).toThrow(RangeError);
+    expect(() =>
+      startAutoSync(ctx, { healthyScanIntervalMs: 2_147_483_648 })
+    ).toThrow(RangeError);
+  });
+
   it('uses the longer healthy scan interval once watcher subscriptions are ready', async () => {
     write(path.join(projectDir, 'file.txt'), 'original');
     write(path.join(mountDir, 'file.txt'), 'original');
