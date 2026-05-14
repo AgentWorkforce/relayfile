@@ -137,6 +137,13 @@ export interface StorageAdapter {
   enqueueWriteback(item: WritebackItem): void;
   getPendingWritebacks(): WritebackItem[];
 
+  // ── Writeback schema discovery (optional) ──────────────────────────
+  /**
+   * Optional: return the schema identifier the daemon validates this
+   * writeback resource against. Return null if no schema is registered.
+   */
+  getWritebackSchemaId?(provider: string, resource: string): string | null;
+
   // ── Webhook envelopes ──────────────────────────────────────────────
   getEnvelopeByDelivery?(
     workspaceId: string,

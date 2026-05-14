@@ -1,6 +1,9 @@
 package mountfuse
 
 import (
+	"path"
+	"sort"
+	"strings"
 	"syscall"
 	"time"
 
@@ -8,14 +11,24 @@ import (
 )
 
 const (
-	layoutFilename      = "LAYOUT.md"
-	layoutRevision      = "virtual-layout"
-	layoutContentType   = "text/markdown; charset=utf-8"
-	aliasByTitleSegment = "by-title"
-	aliasByIDSegment    = "by-id"
-	aliasByNameSegment  = "by-name"
-	aliasByStateSegment = "by-state"
+	layoutFilename         = "LAYOUT.md"
+	layoutRevision         = "virtual-layout"
+	providerLayoutFilename = ".layout.md"
+	providerLayoutRevision = "virtual-provider-layout"
+	layoutContentType      = "text/markdown; charset=utf-8"
+	aliasByTitleSegment    = "by-title"
+	aliasByIDSegment       = "by-id"
+	aliasByNameSegment     = "by-name"
+	aliasByStateSegment    = "by-state"
 )
+
+type LayoutManifest struct {
+	Provider            string
+	ResourceDirectories []string
+	AliasSegments       []string
+	WritebackResources  []string
+	LazyMaterialization bool
+}
 
 const LayoutMarkdown = `# LAYOUT
 
@@ -66,8 +79,8 @@ func isVirtualLayoutPath(remoteRoot, remotePath string) bool {
 
 func virtualLayoutMeta(remoteRoot string) nodeMeta {
 	return nodeMeta{
-		path:        layoutRemotePath(remoteRoot),
-		name:        layoutFilename,
+		path: layoutRemotePath(remoteRoot),
+		name: layoutFilename,
 		// LAYOUT.md is a virtual read-only file; writes/deletes are not
 		// supported, so advertise 0o444 to surface that in the mount.
 		mode:        syscall.S_IFREG | 0o444,
@@ -86,4 +99,181 @@ func readVirtualLayout(remoteRoot string) mountsync.RemoteFile {
 		ContentType: meta.contentType,
 		Content:     LayoutMarkdown,
 	}
+}
+
+func providerLayoutMarkdown(manifest LayoutManifest) string {
+	manifest = normalizeLayoutManifest(manifest)
+	var b strings.Builder
+	b.WriteString("# ")
+	b.WriteString(manifest.Provider)
+	b.WriteString(" layout\n\n")
+	b.WriteString("This file describes the mounted workspace layout for `")
+	b.WriteString(manifest.Provider)
+	b.WriteString("`.\n\n")
+	b.WriteString("## Resource directories\n\n")
+	if len(manifest.ResourceDirectories) == 0 {
+		b.WriteString("_No resource directories have been advertised yet._\n\n")
+	} else {
+		for _, resource := range manifest.ResourceDirectories {
+			b.WriteString("- `")
+			b.WriteString(resource)
+			b.WriteString("/`\n")
+		}
+		b.WriteString("\n")
+	}
+	b.WriteString("## Filenames\n\n")
+	b.WriteString("Entity files use the `<identifier>__<uuid>.json` convention when a stable provider identifier is available.\n\n")
+	b.WriteString("## Alias indexes\n\n")
+	if len(manifest.AliasSegments) == 0 {
+		b.WriteString("_No alias indexes have been advertised yet._\n\n")
+	} else {
+		for _, segment := range manifest.AliasSegments {
+			b.WriteString("- `")
+			b.WriteString(segment)
+			b.WriteString("/`\n")
+		}
+		b.WriteString("\n")
+	}
+	b.WriteString("## Writeback\n\n")
+	if len(manifest.WritebackResources) == 0 {
+		b.WriteString("_No writeback resources have been advertised yet._\n\n")
+	} else {
+		for _, resource := range manifest.WritebackResources {
+			b.WriteString("- `")
+			b.WriteString(resource)
+			b.WriteString("/.schema.json`\n")
+		}
+		b.WriteString("\n")
+	}
+	b.WriteString("Use `wb-<timestamp>.json` as the recommended filename for agent-authored writeback payloads.\n\n")
+	b.WriteString("## Materialization\n\n")
+	if manifest.LazyMaterialization {
+		b.WriteString("This provider may materialize large subtrees lazily on first access.\n")
+	} else {
+		b.WriteString("This provider is expected to expose its advertised tree eagerly.\n")
+	}
+	return b.String()
+}
+
+func providerLayoutRemotePath(remoteRoot, provider string) string {
+	return joinRemotePath(joinRemotePath(remoteRoot, provider), providerLayoutFilename)
+}
+
+func isVirtualProviderLayoutPath(remoteRoot, remotePath string) (string, bool) {
+	remotePath = normalizeRemotePath(remotePath)
+	if path.Base(remotePath) != providerLayoutFilename {
+		return "", false
+	}
+	parentPath, _ := splitParent(remotePath)
+	return providerRootSegment(remoteRoot, parentPath)
+}
+
+func virtualProviderLayoutMeta(remoteRoot string, manifest LayoutManifest) nodeMeta {
+	manifest = normalizeLayoutManifest(manifest)
+	content := providerLayoutMarkdown(manifest)
+	return nodeMeta{
+		path:        providerLayoutRemotePath(remoteRoot, manifest.Provider),
+		name:        providerLayoutFilename,
+		mode:        syscall.S_IFREG | 0o444,
+		revision:    providerLayoutRevision,
+		size:        uint64(len(content)),
+		modTime:     time.Unix(0, 0).UTC(),
+		contentType: layoutContentType,
+	}
+}
+
+func readVirtualProviderLayout(remoteRoot string, manifest LayoutManifest) mountsync.RemoteFile {
+	meta := virtualProviderLayoutMeta(remoteRoot, manifest)
+	return mountsync.RemoteFile{
+		Path:        meta.path,
+		Revision:    meta.revision,
+		ContentType: meta.contentType,
+		Content:     providerLayoutMarkdown(manifest),
+	}
+}
+
+func normalizeLayoutManifests(in map[string]LayoutManifest) map[string]LayoutManifest {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]LayoutManifest, len(in))
+	for key, manifest := range in {
+		if manifest.Provider == "" {
+			manifest.Provider = key
+		}
+		manifest = normalizeLayoutManifest(manifest)
+		if manifest.Provider == "" {
+			continue
+		}
+		out[manifest.Provider] = manifest
+	}
+	return out
+}
+
+func normalizeLayoutManifest(manifest LayoutManifest) LayoutManifest {
+	manifest.Provider = strings.TrimSpace(manifest.Provider)
+	manifest.ResourceDirectories = cleanUniqueSorted(manifest.ResourceDirectories)
+	manifest.AliasSegments = cleanUniqueSorted(manifest.AliasSegments)
+	manifest.WritebackResources = cleanUniqueSorted(manifest.WritebackResources)
+	return manifest
+}
+
+func (s *fsState) layoutManifest(provider string) LayoutManifest {
+	provider = strings.TrimSpace(provider)
+	if manifest, ok := s.manifests[provider]; ok {
+		return manifest
+	}
+	return LayoutManifest{
+		Provider: provider,
+		AliasSegments: []string{
+			aliasByIDSegment,
+			aliasByNameSegment,
+			aliasByStateSegment,
+			aliasByTitleSegment,
+		},
+	}
+}
+
+func providerRootSegment(remoteRoot, remotePath string) (string, bool) {
+	rel, ok := relativeToRemoteRoot(remoteRoot, remotePath)
+	if !ok || rel == "" || strings.Contains(rel, "/") {
+		return "", false
+	}
+	return rel, true
+}
+
+func relativeToRemoteRoot(remoteRoot, remotePath string) (string, bool) {
+	remoteRoot = normalizeRemotePath(remoteRoot)
+	remotePath = normalizeRemotePath(remotePath)
+	if !isUnderRemoteRoot(remoteRoot, remotePath) {
+		return "", false
+	}
+	if remotePath == remoteRoot {
+		return "", true
+	}
+	if remoteRoot == "/" {
+		return strings.TrimPrefix(remotePath, "/"), true
+	}
+	return strings.TrimPrefix(remotePath, remoteRoot+"/"), true
+}
+
+func cleanUniqueSorted(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	seen := map[string]struct{}{}
+	cleaned := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.Trim(strings.TrimSpace(value), "/")
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		cleaned = append(cleaned, value)
+	}
+	sort.Strings(cleaned)
+	return cleaned
 }

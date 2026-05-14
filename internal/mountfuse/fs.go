@@ -34,6 +34,7 @@ type Config struct {
 	Client          mountsync.RemoteClient
 	WorkspaceID     string
 	RemoteRoot      string
+	LayoutManifests map[string]LayoutManifest
 	AttrTTL         time.Duration
 	EntryTTL        time.Duration
 	NegativeTimeout time.Duration
@@ -106,6 +107,7 @@ type fsState struct {
 	uid         uint32
 	gid         uint32
 	logger      *log.Logger
+	manifests   map[string]LayoutManifest
 	cacheMu     sync.RWMutex
 	dirCache    map[string]cachedDir
 	fileCache   map[string]cachedFile
@@ -158,6 +160,7 @@ func newFSState(cfg Config) *fsState {
 		uid:         cfg.UID,
 		gid:         cfg.GID,
 		logger:      cfg.Logger,
+		manifests:   normalizeLayoutManifests(cfg.LayoutManifests),
 		dirCache:    make(map[string]cachedDir),
 		fileCache:   make(map[string]cachedFile),
 		inodeByPath: map[string]uint64{normalizeRemotePath(cfg.RemoteRoot): 1},
@@ -338,6 +341,15 @@ func (s *fsState) listDirectory(ctx context.Context, remotePath string) (map[str
 		// remote entries; the only synthesized root entry here is the virtual layout.
 		entries[layoutFilename] = virtualLayoutMeta(s.remoteRoot)
 	}
+	if provider, ok := providerRootSegment(s.remoteRoot, remotePath); ok {
+		manifest := s.layoutManifest(provider)
+		entries[providerLayoutFilename] = virtualProviderLayoutMeta(s.remoteRoot, manifest)
+	}
+	if provider, resource, ok := virtualSchemaForDirectory(s.remoteRoot, remotePath); ok {
+		if payload, present := loadResourceSchema(provider, resource); present {
+			entries[schemaFilename] = virtualSchemaMeta(remotePath, provider, resource, payload)
+		}
+	}
 	s.putDir(remotePath, entries)
 	return entries, nil
 }
@@ -378,6 +390,15 @@ func (s *fsState) lookupMetadata(ctx context.Context, remotePath string) (nodeMe
 	if isVirtualLayoutPath(s.remoteRoot, remotePath) {
 		return virtualLayoutMeta(s.remoteRoot), nil
 	}
+	if provider, ok := isVirtualProviderLayoutPath(s.remoteRoot, remotePath); ok {
+		return virtualProviderLayoutMeta(s.remoteRoot, s.layoutManifest(provider)), nil
+	}
+	if provider, resource, ok := isVirtualSchemaPath(s.remoteRoot, remotePath); ok {
+		if payload, present := loadResourceSchema(provider, resource); present {
+			parentPath, _ := splitParent(remotePath)
+			return virtualSchemaMeta(parentPath, provider, resource, payload), nil
+		}
+	}
 	parentPath, name := splitParent(remotePath)
 	entries, err := s.listDirectory(ctx, parentPath)
 	if err != nil {
@@ -402,6 +423,15 @@ func (s *fsState) readFile(ctx context.Context, remotePath string) (mountsync.Re
 	remotePath = normalizeRemotePath(remotePath)
 	if isVirtualLayoutPath(s.remoteRoot, remotePath) {
 		return readVirtualLayout(s.remoteRoot), nil
+	}
+	if provider, ok := isVirtualProviderLayoutPath(s.remoteRoot, remotePath); ok {
+		return readVirtualProviderLayout(s.remoteRoot, s.layoutManifest(provider)), nil
+	}
+	if provider, resource, ok := isVirtualSchemaPath(s.remoteRoot, remotePath); ok {
+		if payload, present := loadResourceSchema(provider, resource); present {
+			parentPath, _ := splitParent(remotePath)
+			return readVirtualSchema(parentPath, provider, resource, payload), nil
+		}
 	}
 	if file, ok := s.getFile(remotePath); ok {
 		return file, nil
@@ -434,6 +464,9 @@ func (s *fsState) treeEntryToMeta(entry mountsync.TreeEntry, parentPath string) 
 		// Forward compatibility: if a future adapter emits symlink-like alias
 		// entries, surface them as readable files and let lazy reads populate
 		// size/revision details from ReadFile.
+	}
+	if mode&syscall.S_IFREG != 0 && isReadOnlyVirtualPath(s.remoteRoot, childPath) {
+		mode = syscall.S_IFREG | 0o444
 	}
 	return nodeMeta{
 		path:     childPath,

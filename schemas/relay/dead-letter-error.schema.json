@@ -1,0 +1,54 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://relayfile.agentworkforce.dev/schemas/relay/dead-letter-error.schema.json",
+  "title": "Relayfile dead-letter error sidecar",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "code",
+    "message",
+    "attempts",
+    "firstAttemptAt",
+    "lastAttemptAt",
+    "opId"
+  ],
+  "properties": {
+    "code": {
+      "type": "string",
+      "enum": [
+        "schema_violation",
+        "provider_4xx",
+        "provider_5xx_exhausted",
+        "timeout"
+      ]
+    },
+    "message": {
+      "type": "string",
+      "minLength": 1
+    },
+    "providerStatus": {
+      "type": "integer",
+      "minimum": 100,
+      "maximum": 599
+    },
+    "providerResponse": {
+      "type": ["object", "array"]
+    },
+    "attempts": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "firstAttemptAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "lastAttemptAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "opId": {
+      "type": "string",
+      "minLength": 1
+    }
+  }
+}

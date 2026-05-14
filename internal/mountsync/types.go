@@ -23,6 +23,16 @@ type BulkWriteResponse struct {
 
 var ErrEmptyBulkWrite = errors.New("bulk write requires at least one file")
 
+type ProviderLayoutManifest struct {
+	Provider      string
+	Resources     []string
+	AliasSegments []string
+}
+
+type ProviderLayoutRegistrar interface {
+	RegisterProviderLayout(provider string, manifest ProviderLayoutManifest) error
+}
+
 func (r BulkWriteResponse) resultsByPath() map[string]BulkWriteResult {
 	byPath := make(map[string]BulkWriteResult, len(r.Results))
 	for _, result := range r.Results {

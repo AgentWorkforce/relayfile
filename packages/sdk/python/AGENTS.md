@@ -7,3 +7,6 @@ Keep the Python SDK idiomatic and in parity with the TypeScript surface.
 - Maintain both sync and async client behavior when adding endpoints or retry/error handling.
 - Test HTTP behavior with `pytest`, `pytest-asyncio`, `respx`, and `httpx.Response` mocks under `tests/`.
 - Verify with `pytest packages/sdk/python/tests`.
+- Workspace primitive SDK changes should remain additive: mirror the TypeScript
+  type surface, expose path helpers for digest/layout/schema virtual files, and
+  avoid adding client methods until the HTTP OpenAPI contract exists.

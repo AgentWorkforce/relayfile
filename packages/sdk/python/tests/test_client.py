@@ -1,4 +1,5 @@
 """Tests for the RelayFile Python SDK client."""
+
 from __future__ import annotations
 
 import json
@@ -10,7 +11,7 @@ import respx
 
 from relayfile import (
     AsyncRelayFileClient,
-    IntegrationProvider,
+    DeadLetterErrorPayload,
     InvalidStateError,
     PayloadTooLargeError,
     QueueFullError,
@@ -18,6 +19,7 @@ from relayfile import (
     RelayFileClient,
     RetryOptions,
     RevisionConflictError,
+    WritebackItem,
     compute_canonical_path,
 )
 from relayfile.types import (
@@ -40,7 +42,11 @@ class TestRelayFileClient:
 
     @respx.mock
     def test_list_tree(self) -> None:
-        payload = {"path": "/", "entries": [{"path": "/zendesk", "type": "dir", "revision": "rev_1"}], "nextCursor": None}
+        payload = {
+            "path": "/",
+            "entries": [{"path": "/zendesk", "type": "dir", "revision": "rev_1"}],
+            "nextCursor": None,
+        }
         respx.get(f"{BASE}/v1/workspaces/ws_acme/fs/tree").mock(
             return_value=httpx.Response(200, json=payload)
         )
@@ -52,7 +58,9 @@ class TestRelayFileClient:
     @respx.mock
     def test_list_tree_params(self) -> None:
         respx.get(f"{BASE}/v1/workspaces/ws_acme/fs/tree").mock(
-            return_value=httpx.Response(200, json={"path": "/", "entries": [], "nextCursor": None})
+            return_value=httpx.Response(
+                200, json={"path": "/", "entries": [], "nextCursor": None}
+            )
         )
         client = self._client()
         client.list_tree("ws_acme", path="/zendesk", depth=2, cursor="abc")
@@ -62,7 +70,12 @@ class TestRelayFileClient:
 
     @respx.mock
     def test_read_file(self) -> None:
-        payload = {"path": "/f.json", "revision": "rev_3", "contentType": "application/json", "content": '{"id":1}'}
+        payload = {
+            "path": "/f.json",
+            "revision": "rev_3",
+            "contentType": "application/json",
+            "content": '{"id":1}',
+        }
         respx.get(f"{BASE}/v1/workspaces/ws_acme/fs/file").mock(
             return_value=httpx.Response(200, json=payload)
         )
@@ -77,7 +90,9 @@ class TestRelayFileClient:
             return_value=httpx.Response(200, json=payload)
         )
         client = self._client()
-        inp = WriteFileInput(workspace_id="ws_acme", path="/f.json", base_revision="rev_3", content="{}")
+        inp = WriteFileInput(
+            workspace_id="ws_acme", path="/f.json", base_revision="rev_3", content="{}"
+        )
         res = client.write_file(inp)
         assert res["opId"] == "op_1"
         req = respx.calls.last.request
@@ -86,7 +101,12 @@ class TestRelayFileClient:
 
     @respx.mock
     def test_bulk_write(self) -> None:
-        payload = {"written": 2, "errorCount": 0, "errors": [], "correlationId": "corr_bulk"}
+        payload = {
+            "written": 2,
+            "errorCount": 0,
+            "errors": [],
+            "correlationId": "corr_bulk",
+        }
         respx.post(f"{BASE}/v1/workspaces/ws_acme/fs/bulk").mock(
             return_value=httpx.Response(202, json=payload)
         )
@@ -112,7 +132,9 @@ class TestRelayFileClient:
             return_value=httpx.Response(200, json=payload)
         )
         client = self._client()
-        res = client.query_files("ws_acme", provider="zendesk", properties={"provider.status": "open"})
+        res = client.query_files(
+            "ws_acme", provider="zendesk", properties={"provider.status": "open"}
+        )
         assert res["items"] == []
         req = respx.calls.last.request
         assert b"provider=zendesk" in req.url.raw_path
@@ -131,8 +153,18 @@ class TestRelayFileClient:
     @respx.mock
     def test_export_workspace_json(self) -> None:
         payload = [
-            {"path": "/a.md", "revision": "rev_1", "contentType": "text/markdown", "content": "# A"},
-            {"path": "/b.md", "revision": "rev_2", "contentType": "text/markdown", "content": "# B"},
+            {
+                "path": "/a.md",
+                "revision": "rev_1",
+                "contentType": "text/markdown",
+                "content": "# A",
+            },
+            {
+                "path": "/b.md",
+                "revision": "rev_2",
+                "contentType": "text/markdown",
+                "content": "# B",
+            },
         ]
         respx.get(f"{BASE}/v1/workspaces/ws_acme/fs/export").mock(
             return_value=httpx.Response(200, json=payload)
@@ -148,7 +180,9 @@ class TestRelayFileClient:
     def test_export_workspace_tar(self) -> None:
         payload = b"tar-bytes"
         respx.get(f"{BASE}/v1/workspaces/ws_acme/fs/export").mock(
-            return_value=httpx.Response(200, content=payload, headers={"content-type": "application/gzip"})
+            return_value=httpx.Response(
+                200, content=payload, headers={"content-type": "application/gzip"}
+            )
         )
         client = self._client()
         res = client.export_workspace("ws_acme", format="tar")
@@ -191,10 +225,14 @@ class TestRelayFileClient:
     @respx.mock
     def test_get_backend_status(self) -> None:
         payload = {
-            "backendProfile": "memory", "stateBackend": "memory://",
-            "envelopeQueue": "memory://", "envelopeQueueDepth": 0,
-            "envelopeQueueCapacity": 1000, "writebackQueue": "memory://",
-            "writebackQueueDepth": 0, "writebackQueueCapacity": 100,
+            "backendProfile": "memory",
+            "stateBackend": "memory://",
+            "envelopeQueue": "memory://",
+            "envelopeQueueDepth": 0,
+            "envelopeQueueCapacity": 1000,
+            "writebackQueue": "memory://",
+            "writebackQueueDepth": 0,
+            "writebackQueueCapacity": 100,
         }
         respx.get(f"{BASE}/v1/admin/backends").mock(
             return_value=httpx.Response(200, json=payload)
@@ -215,7 +253,10 @@ class TestRelayFileClient:
 
     @respx.mock
     def test_get_sync_status(self) -> None:
-        payload = {"workspaceId": "ws_acme", "providers": [{"provider": "zendesk", "status": "healthy"}]}
+        payload = {
+            "workspaceId": "ws_acme",
+            "providers": [{"provider": "zendesk", "status": "healthy"}],
+        }
         respx.get(f"{BASE}/v1/workspaces/ws_acme/sync/status").mock(
             return_value=httpx.Response(200, json=payload)
         )
@@ -289,15 +330,107 @@ class TestWebhookWriteback:
         assert body["headers"]["X-GitHub-Event"] == "issues"
 
     @respx.mock
-    def test_list_pending_writebacks(self) -> None:
-        payload = [{"id": "wb_1", "workspaceId": "ws_acme", "path": "/zendesk/tickets/48291.json", "revision": "rev_5"}]
+    def test_list_writebacks_pending(self) -> None:
+        payload = [
+            {
+                "id": "wb_1",
+                "workspaceId": "ws_acme",
+                "path": "/zendesk/tickets/48291.json",
+                "revision": "rev_5",
+                "correlationId": "corr_1",
+                "state": "pending",
+                "opId": "op_1",
+                "provider": "zendesk",
+                "action": "file_upsert",
+                "attemptCount": 0,
+                "createdAt": "2026-05-13T14:29:59Z",
+            }
+        ]
+        respx.get(f"{BASE}/v1/workspaces/ws_acme/writeback/pending").mock(
+            return_value=httpx.Response(200, json=payload)
+        )
+        client = self._client()
+        res = client.list_writebacks("ws_acme", state="pending")
+        assert len(res) == 1
+        assert isinstance(res[0], WritebackItem)
+        assert res[0].path == "/zendesk/tickets/48291.json"
+        assert res[0].state == "pending"
+        assert res[0].action == "file_upsert"
+        assert res[0].attempt_count == 0
+        assert respx.calls.last.request.url.path.endswith("/writeback/pending")
+
+    def test_list_writebacks_dead_blocked_on_server_contract(self) -> None:
+        """The state-filtered writeback endpoint is not in OpenAPI yet.
+
+        Calling ``list_writebacks`` with a non-``pending`` state must raise
+        :class:`NotImplementedError` until the ``update-relayfile-cli`` slice
+        lands ``GET /v1/workspaces/{ws}/writeback?state=…``.
+        """
+        client = self._client()
+        with pytest.raises(NotImplementedError, match="state-filtered"):
+            client.list_writebacks("ws_acme", state="dead_lettered")
+
+    def test_list_writebacks_dead_payload_coercion_via_from_dict(self) -> None:
+        """The on-the-wire dead-letter row coerces into ``DeadLetterErrorPayload``.
+
+        Validates the SDK is ready for the state-filtered endpoint without
+        depending on a server that does not yet exist. When the server contract
+        lands, the integration path becomes trivial because the deserializer is
+        already covered here.
+        """
+        row = {
+            "id": "wb_dead",
+            "workspaceId": "ws_acme",
+            "path": "/linear/issues/AGE-16__abc/comments/wb-1778700000.json",
+            "revision": "rev_7",
+            "state": "dead_lettered",
+            "opId": "op_dead",
+            "provider": "linear",
+            "action": "file_upsert",
+            "attemptCount": 4,
+            "firstAttemptAt": "2026-05-13T14:30:01Z",
+            "lastAttemptAt": "2026-05-13T14:32:07Z",
+            "error": {
+                "code": "schema_violation",
+                "message": "Comment body is required",
+                "providerStatus": 422,
+                "providerResponse": {"field": "body"},
+                "attempts": 4,
+                "firstAttemptAt": "2026-05-13T14:30:01Z",
+                "lastAttemptAt": "2026-05-13T14:32:07Z",
+                "opId": "op_dead",
+            },
+        }
+        item = WritebackItem.from_dict(row)
+        assert item.state == "dead_lettered"
+        assert isinstance(item.error, DeadLetterErrorPayload)
+        assert item.error.provider_status == 422
+        assert item.error.provider_response == {"field": "body"}
+
+    def test_list_writebacks_requires_state(self) -> None:
+        client = self._client()
+        with pytest.raises(TypeError):
+            client.list_writebacks("ws_acme")  # type: ignore[call-arg]
+
+    @respx.mock
+    def test_list_pending_writebacks_back_compat(self) -> None:
+        payload = [
+            {
+                "id": "wb_1",
+                "workspaceId": "ws_acme",
+                "path": "/zendesk/tickets/48291.json",
+                "revision": "rev_5",
+                "state": "pending",
+            }
+        ]
         respx.get(f"{BASE}/v1/workspaces/ws_acme/writeback/pending").mock(
             return_value=httpx.Response(200, json=payload)
         )
         client = self._client()
         res = client.list_pending_writebacks("ws_acme")
         assert len(res) == 1
-        assert res[0]["path"] == "/zendesk/tickets/48291.json"
+        assert res[0].state == "pending"
+        assert respx.calls.last.request.url.path.endswith("/writeback/pending")
 
     @respx.mock
     def test_ack_writeback_success(self) -> None:
@@ -317,7 +450,12 @@ class TestWebhookWriteback:
             return_value=httpx.Response(200, json=payload)
         )
         client = self._client()
-        inp = AckWritebackInput(workspace_id="ws_acme", item_id="wb_2", success=False, error="Provider returned 403")
+        inp = AckWritebackInput(
+            workspace_id="ws_acme",
+            item_id="wb_2",
+            success=False,
+            error="Provider returned 403",
+        )
         client.ack_writeback(inp)
         body = json.loads(respx.calls.last.request.content)
         assert body["success"] is False
@@ -336,15 +474,24 @@ class TestErrorHandling:
     @respx.mock
     def test_revision_conflict_error(self) -> None:
         body = {
-            "code": "revision_conflict", "message": "Conflict",
-            "expectedRevision": "rev_old", "currentRevision": "rev_new",
+            "code": "revision_conflict",
+            "message": "Conflict",
+            "expectedRevision": "rev_old",
+            "currentRevision": "rev_new",
         }
         respx.put(f"{BASE}/v1/workspaces/ws_1/fs/file").mock(
             return_value=httpx.Response(409, json=body)
         )
         client = self._client()
         with pytest.raises(RevisionConflictError) as exc_info:
-            client.write_file(WriteFileInput(workspace_id="ws_1", path="/f.json", base_revision="rev_old", content="{}"))
+            client.write_file(
+                WriteFileInput(
+                    workspace_id="ws_1",
+                    path="/f.json",
+                    base_revision="rev_old",
+                    content="{}",
+                )
+            )
         assert exc_info.value.expected_revision == "rev_old"
         assert exc_info.value.current_revision == "rev_new"
 
@@ -366,7 +513,14 @@ class TestErrorHandling:
         )
         client = self._client()
         with pytest.raises(QueueFullError) as exc_info:
-            client.write_file(WriteFileInput(workspace_id="ws_1", path="/f.json", base_revision="rev_1", content="{}"))
+            client.write_file(
+                WriteFileInput(
+                    workspace_id="ws_1",
+                    path="/f.json",
+                    base_revision="rev_1",
+                    content="{}",
+                )
+            )
         assert exc_info.value.retry_after_seconds == 5
 
     @respx.mock
@@ -377,7 +531,14 @@ class TestErrorHandling:
         )
         client = self._client()
         with pytest.raises(PayloadTooLargeError):
-            client.write_file(WriteFileInput(workspace_id="ws_1", path="/f.json", base_revision="rev_1", content="x" * 10000))
+            client.write_file(
+                WriteFileInput(
+                    workspace_id="ws_1",
+                    path="/f.json",
+                    base_revision="rev_1",
+                    content="x" * 10000,
+                )
+            )
 
     @respx.mock
     def test_generic_api_error(self) -> None:
@@ -399,7 +560,9 @@ class TestAuthHeaders:
     @respx.mock
     def test_bearer_token(self) -> None:
         respx.get(f"{BASE}/v1/workspaces/ws_1/fs/tree").mock(
-            return_value=httpx.Response(200, json={"path": "/", "entries": [], "nextCursor": None})
+            return_value=httpx.Response(
+                200, json={"path": "/", "entries": [], "nextCursor": None}
+            )
         )
         client = RelayFileClient(BASE, "tok_test")
         client.list_tree("ws_1")
@@ -409,7 +572,9 @@ class TestAuthHeaders:
     @respx.mock
     def test_correlation_id(self) -> None:
         respx.get(f"{BASE}/v1/workspaces/ws_1/fs/tree").mock(
-            return_value=httpx.Response(200, json={"path": "/", "entries": [], "nextCursor": None})
+            return_value=httpx.Response(
+                200, json={"path": "/", "entries": [], "nextCursor": None}
+            )
         )
         client = RelayFileClient(BASE, "tok_test")
         client.list_tree("ws_1", correlation_id="corr_custom")
@@ -419,7 +584,9 @@ class TestAuthHeaders:
     @respx.mock
     def test_auto_correlation_id(self) -> None:
         respx.get(f"{BASE}/v1/workspaces/ws_1/fs/tree").mock(
-            return_value=httpx.Response(200, json={"path": "/", "entries": [], "nextCursor": None})
+            return_value=httpx.Response(
+                200, json={"path": "/", "entries": [], "nextCursor": None}
+            )
         )
         client = RelayFileClient(BASE, "tok_test")
         client.list_tree("ws_1")
@@ -429,7 +596,9 @@ class TestAuthHeaders:
     @respx.mock
     def test_custom_user_agent(self) -> None:
         respx.get(f"{BASE}/v1/workspaces/ws_1/fs/tree").mock(
-            return_value=httpx.Response(200, json={"path": "/", "entries": [], "nextCursor": None})
+            return_value=httpx.Response(
+                200, json={"path": "/", "entries": [], "nextCursor": None}
+            )
         )
         client = RelayFileClient(BASE, "tok_test", user_agent="my-agent/1.0")
         client.list_tree("ws_1")
@@ -439,7 +608,9 @@ class TestAuthHeaders:
     @respx.mock
     def test_trailing_slash_stripped(self) -> None:
         respx.get(f"{BASE}/v1/workspaces/ws_1/fs/tree").mock(
-            return_value=httpx.Response(200, json={"path": "/", "entries": [], "nextCursor": None})
+            return_value=httpx.Response(
+                200, json={"path": "/", "entries": [], "nextCursor": None}
+            )
         )
         client = RelayFileClient(BASE + "///", "tok_test")
         client.list_tree("ws_1")
@@ -454,10 +625,15 @@ class TestAuthHeaders:
 
 class TestProviderAbstractions:
     def test_compute_canonical_path_known_provider(self) -> None:
-        assert compute_canonical_path("github", "issues", "42") == "/github/issues/42.json"
+        assert (
+            compute_canonical_path("github", "issues", "42") == "/github/issues/42.json"
+        )
 
     def test_compute_canonical_path_unknown_provider(self) -> None:
-        assert compute_canonical_path("custom", "events", "abc") == "/custom/events/abc.json"
+        assert (
+            compute_canonical_path("custom", "events", "abc")
+            == "/custom/events/abc.json"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -480,7 +656,12 @@ class TestAsyncClient:
     @respx.mock
     @pytest.mark.asyncio
     async def test_bulk_write(self) -> None:
-        payload = {"written": 1, "errorCount": 0, "errors": [], "correlationId": "corr_bulk"}
+        payload = {
+            "written": 1,
+            "errorCount": 0,
+            "errors": [],
+            "correlationId": "corr_bulk",
+        }
         respx.post(f"{BASE}/v1/workspaces/ws_acme/fs/bulk").mock(
             return_value=httpx.Response(202, json=payload)
         )
@@ -495,7 +676,14 @@ class TestAsyncClient:
     @respx.mock
     @pytest.mark.asyncio
     async def test_export_workspace_json(self) -> None:
-        payload = [{"path": "/a.md", "revision": "rev_1", "contentType": "text/markdown", "content": "# A"}]
+        payload = [
+            {
+                "path": "/a.md",
+                "revision": "rev_1",
+                "contentType": "text/markdown",
+                "content": "# A",
+            }
+        ]
         respx.get(f"{BASE}/v1/workspaces/ws_acme/fs/export").mock(
             return_value=httpx.Response(200, json=payload)
         )
@@ -512,12 +700,68 @@ class TestAsyncClient:
         )
         async with AsyncRelayFileClient(BASE, "tok_test") as client:
             inp = IngestWebhookInput(
-                workspace_id="ws_acme", provider="zendesk",
-                event_type="file.updated", path="/zendesk/tickets/1.json",
+                workspace_id="ws_acme",
+                provider="zendesk",
+                event_type="file.updated",
+                path="/zendesk/tickets/1.json",
                 data={"id": 1},
             )
             res = await client.ingest_webhook(inp)
             assert res["status"] == "queued"
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_list_writebacks_pending(self) -> None:
+        payload = [
+            {
+                "id": "wb_1",
+                "workspaceId": "ws_acme",
+                "path": "/zendesk/tickets/48291.json",
+                "revision": "rev_5",
+                "state": "pending",
+                "attemptCount": 0,
+            }
+        ]
+        respx.get(f"{BASE}/v1/workspaces/ws_acme/writeback/pending").mock(
+            return_value=httpx.Response(200, json=payload)
+        )
+        async with AsyncRelayFileClient(BASE, "tok_test") as client:
+            res = await client.list_writebacks("ws_acme", state="pending")
+        assert isinstance(res[0], WritebackItem)
+        assert res[0].state == "pending"
+        assert respx.calls.last.request.url.path.endswith("/writeback/pending")
+
+    @pytest.mark.asyncio
+    async def test_list_writebacks_dead_blocked_on_server_contract(self) -> None:
+        async with AsyncRelayFileClient(BASE, "tok_test") as client:
+            with pytest.raises(NotImplementedError, match="state-filtered"):
+                await client.list_writebacks("ws_acme", state="dead_lettered")
+
+    @pytest.mark.asyncio
+    async def test_list_writebacks_requires_state(self) -> None:
+        async with AsyncRelayFileClient(BASE, "tok_test") as client:
+            with pytest.raises(TypeError):
+                await client.list_writebacks("ws_acme")  # type: ignore[call-arg]
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_list_pending_writebacks_back_compat(self) -> None:
+        payload = [
+            {
+                "id": "wb_1",
+                "workspaceId": "ws_acme",
+                "path": "/zendesk/tickets/48291.json",
+                "revision": "rev_5",
+                "state": "pending",
+            }
+        ]
+        respx.get(f"{BASE}/v1/workspaces/ws_acme/writeback/pending").mock(
+            return_value=httpx.Response(200, json=payload)
+        )
+        async with AsyncRelayFileClient(BASE, "tok_test") as client:
+            res = await client.list_pending_writebacks("ws_acme")
+        assert res[0].state == "pending"
+        assert respx.calls.last.request.url.path.endswith("/writeback/pending")
 
 
 # ---------------------------------------------------------------------------
@@ -542,7 +786,11 @@ class TestIntegrationSetupSync:
                 json={
                     "ok": True,
                     "resources": [
-                        {"id": "cloud-1", "url": "https://foo.atlassian.net", "name": "Foo"},
+                        {
+                            "id": "cloud-1",
+                            "url": "https://foo.atlassian.net",
+                            "name": "Foo",
+                        },
                         {"id": "cloud-2", "url": "https://bar.atlassian.net"},
                         {"id": "cloud-3"},
                         {"url": "https://baz.atlassian.net"},
@@ -571,12 +819,14 @@ class TestIntegrationSetupSync:
                 json={
                     "ok": False,
                     "code": "provider_has_no_accessible_resources",
-                    "error": "Provider \"github\" does not expose accessible resources",
+                    "error": 'Provider "github" does not expose accessible resources',
                 },
             )
         )
         client = RelayFileClient(
-            BASE, "tok_test", cloud_base_url=CLOUD_BASE,
+            BASE,
+            "tok_test",
+            cloud_base_url=CLOUD_BASE,
             retry=RetryOptions(max_retries=0, base_delay_ms=1),
         )
         with pytest.raises(RelayFileApiError) as exc_info:
@@ -644,12 +894,14 @@ class TestIntegrationSetupSync:
                 json={
                     "ok": False,
                     "code": "invalid_metadata",
-                    "error": "metadata key \"_internal\" is reserved by the Nango backend",
+                    "error": 'metadata key "_internal" is reserved by the Nango backend',
                 },
             )
         )
         client = RelayFileClient(
-            BASE, "tok_test", cloud_base_url=CLOUD_BASE,
+            BASE,
+            "tok_test",
+            cloud_base_url=CLOUD_BASE,
             retry=RetryOptions(max_retries=0, base_delay_ms=1),
         )
         with pytest.raises(RelayFileApiError) as exc_info:
@@ -688,9 +940,7 @@ class TestIntegrationSetupAsync:
             BASE, "tok_test", cloud_base_url=CLOUD_BASE
         ) as client:
             resources = await client.list_accessible_resources("ws_acme", "jira")
-        assert resources == [
-            {"id": "cloud-1", "url": "https://foo.atlassian.net"}
-        ]
+        assert resources == [{"id": "cloud-1", "url": "https://foo.atlassian.net"}]
 
     @respx.mock
     @pytest.mark.asyncio
@@ -721,7 +971,9 @@ class TestIntegrationSetupAsync:
         ) as client:
             with pytest.raises(ValueError):
                 await client.set_integration_metadata(
-                    "ws_acme", "jira", "not-a-dict"  # type: ignore[arg-type]
+                    "ws_acme",
+                    "jira",
+                    "not-a-dict",  # type: ignore[arg-type]
                 )
             with pytest.raises(ValueError):
                 await client.set_integration_metadata("ws_acme", "", {})
@@ -737,7 +989,7 @@ class TestIntegrationSetupAsync:
                 json={
                     "ok": False,
                     "code": "provider_has_no_accessible_resources",
-                    "error": "Provider \"github\" does not expose accessible resources",
+                    "error": 'Provider "github" does not expose accessible resources',
                 },
             )
         )
@@ -754,7 +1006,9 @@ class TestIntegrationSetupAsync:
 
     @respx.mock
     @pytest.mark.asyncio
-    async def test_set_integration_metadata_surfaces_cloud_invalid_metadata(self) -> None:
+    async def test_set_integration_metadata_surfaces_cloud_invalid_metadata(
+        self,
+    ) -> None:
         respx.put(
             f"{CLOUD_BASE}/api/v1/workspaces/ws_acme/integrations/jira/metadata"
         ).mock(
@@ -763,7 +1017,7 @@ class TestIntegrationSetupAsync:
                 json={
                     "ok": False,
                     "code": "invalid_metadata",
-                    "error": "metadata key \"_internal\" is reserved by the Nango backend",
+                    "error": 'metadata key "_internal" is reserved by the Nango backend',
                 },
             )
         )
@@ -782,7 +1036,9 @@ class TestIntegrationSetupAsync:
 
     @respx.mock
     @pytest.mark.asyncio
-    async def test_set_integration_metadata_rejects_malformed_cloud_response(self) -> None:
+    async def test_set_integration_metadata_rejects_malformed_cloud_response(
+        self,
+    ) -> None:
         respx.put(
             f"{CLOUD_BASE}/api/v1/workspaces/ws_acme/integrations/jira/metadata"
         ).mock(return_value=httpx.Response(200, json={"ok": True}))
