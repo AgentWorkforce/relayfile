@@ -72,6 +72,35 @@ advanced hosts that already provide a valid Cloud bearer token. After Cloud auth
 complete the Notion OAuth flow as described in
 [`docs/agent-workspace-golden-path.md`](../../../docs/agent-workspace-golden-path.md).
 
+## Custom Digest Functions
+
+`RelayfileSetup` workspace handles can deploy and operate custom digest
+functions through Agent Relay Cloud:
+
+```ts
+import {
+  RelayfileSetup,
+  digestFunctionSourceFromText,
+} from "@relayfile/sdk"
+import { promises as fs } from "node:fs"
+
+const setup = new RelayfileSetup({ accessToken })
+const workspace = await setup.joinWorkspace("my-agent")
+
+await workspace.deployDigestFunction({
+  slug: "eng-roadmap",
+  displayName: "Eng Roadmap",
+  source: digestFunctionSourceFromText({
+    path: "digests/eng-roadmap.ts",
+    contents: await fs.readFile("digests/eng-roadmap.ts", "utf8"),
+  }),
+})
+```
+
+See [custom digest functions](../../../docs/guides/custom-digest-functions.md)
+for the function contract, local test loop, CLI commands, SDK lifecycle methods,
+and M1 runtime limits.
+
 ---
 
 ## Low-Level Client Example

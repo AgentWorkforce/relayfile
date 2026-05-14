@@ -304,6 +304,7 @@ Pipedream:
 
 - [Getting started](docs/guides/getting-started.md)
 - [Cloud integration](docs/guides/cloud-integration.md)
+- [Custom digest functions](docs/guides/custom-digest-functions.md)
 - [Post-auth mount session (SDK)](docs/guides/post-auth-mount-session.md)
 - [Adapters](https://github.com/AgentWorkforce/relayfile-adapters)
 - [Providers](https://github.com/AgentWorkforce/relayfile-providers)
