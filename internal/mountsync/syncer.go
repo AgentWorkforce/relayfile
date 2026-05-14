@@ -13,9 +13,11 @@ import (
 	"mime"
 	"net"
 	"net/http"
+	"net/http/pprof"
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -433,6 +435,9 @@ type SyncerOptions struct {
 	FullPullEvery int
 	// LazyRepos controls lazy GitHub repo subtree hydration. nil falls back to env.
 	LazyRepos *bool
+	// LowMemory avoids expensive diagnostic/public-state scans and large
+	// in-memory snapshots. nil falls back to RELAYFILE_MOUNT_LOW_MEMORY.
+	LowMemory *bool
 	// ProviderLayoutRegistrar receives deterministic per-provider layout
 	// manifests derived from remote snapshots. The FUSE layer can implement
 	// this to expose virtual <provider>/.layout.md files without coupling
@@ -442,6 +447,94 @@ type SyncerOptions struct {
 
 type Logger interface {
 	Printf(format string, args ...any)
+}
+
+func StartDiagnostics(ctx context.Context, addr string, memlogInterval time.Duration, logger Logger) (*http.Server, error) {
+	addr = strings.TrimSpace(addr)
+	if addr == "" && memlogInterval <= 0 {
+		return nil, nil
+	}
+	if logger == nil {
+		logger = noopLogger{}
+	}
+	if memlogInterval > 0 {
+		go logMemoryStats(ctx, memlogInterval, logger)
+	}
+	if addr == "" {
+		return nil, nil
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/debug/pprof/", pprof.Index)
+	mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+	server := &http.Server{
+		Addr:              addr,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = server.Shutdown(shutdownCtx)
+	}()
+	go func() {
+		logger.Printf("relayfile diagnostics listening on http://%s/debug/pprof/", addr)
+		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			logger.Printf("relayfile diagnostics server failed: %v", err)
+		}
+	}()
+	return server, nil
+}
+
+type noopLogger struct{}
+
+func (noopLogger) Printf(string, ...any) {}
+
+func logMemoryStats(ctx context.Context, interval time.Duration, logger Logger) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		logMemoryStatSample(logger)
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func logMemoryStatSample(logger Logger) {
+	var stats runtime.MemStats
+	runtime.ReadMemStats(&stats)
+	logger.Printf(
+		"relayfile memory: alloc=%s total_alloc=%s sys=%s heap_alloc=%s heap_sys=%s heap_objects=%d goroutines=%d next_gc=%s num_gc=%d",
+		formatBytes(stats.Alloc),
+		formatBytes(stats.TotalAlloc),
+		formatBytes(stats.Sys),
+		formatBytes(stats.HeapAlloc),
+		formatBytes(stats.HeapSys),
+		stats.HeapObjects,
+		runtime.NumGoroutine(),
+		formatBytes(stats.NextGC),
+		stats.NumGC,
+	)
+}
+
+func formatBytes(value uint64) string {
+	const unit = 1024
+	if value < unit {
+		return fmt.Sprintf("%dB", value)
+	}
+	div, exp := uint64(unit), 0
+	for n := value / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f%ciB", float64(value)/float64(div), "KMGTPE"[exp])
 }
 
 type Syncer struct {
@@ -472,6 +565,7 @@ type Syncer struct {
 	fullPullEvery        int
 	incrementalCycles    int
 	lazyRepos            bool
+	lowMemory            bool
 	layoutRegistrar      ProviderLayoutRegistrar
 	mu                   sync.Mutex
 }
@@ -552,6 +646,7 @@ type publicState struct {
 	FailedWritebacks          uint64                     `json:"failedWritebacks,omitempty"`
 	LastError                 *statusError               `json:"lastError,omitempty"`
 	Files                     map[string]publicFileState `json:"files,omitempty"`
+	LowMemory                 bool                       `json:"lowMemory,omitempty"`
 }
 
 type publicStateFlags struct {
@@ -659,6 +754,20 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 			opts.Logger.Printf("ignoring invalid RELAYFILE_MOUNT_LAZY_GITHUB_REPOS=%q: %v", raw, perr)
 		}
 	}
+	lowMemory := false
+	if opts.LowMemory != nil {
+		lowMemory = *opts.LowMemory
+	} else if raw := strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_LOW_MEMORY")); raw != "" {
+		if parsed, perr := strconv.ParseBool(raw); perr == nil {
+			lowMemory = parsed
+		} else if opts.Logger != nil {
+			opts.Logger.Printf("ignoring invalid RELAYFILE_MOUNT_LOW_MEMORY=%q: %v", raw, perr)
+		}
+	}
+	bulkFlushThreshold := defaultBulkFlushThreshold
+	if lowMemory {
+		bulkFlushThreshold = 16
+	}
 	return &Syncer{
 		client:               client,
 		workspace:            workspace,
@@ -676,11 +785,12 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 		rootCtx:              rootCtx,
 		logger:               opts.Logger,
 		denialLogPath:        filepath.Join(localRoot, ".relay", "permissions-denied.log"),
-		bulkFlushThreshold:   defaultBulkFlushThreshold,
+		bulkFlushThreshold:   bulkFlushThreshold,
 		mode:                 strings.TrimSpace(opts.Mode),
 		interval:             opts.Interval,
 		fullPullEvery:        fullPullEvery,
 		lazyRepos:            lazyRepos,
+		lowMemory:            lowMemory,
 		layoutRegistrar:      opts.ProviderLayoutRegistrar,
 		state: mountState{
 			Files: map[string]trackedFile{},
@@ -806,14 +916,13 @@ func (s *Syncer) HandleLocalChange(ctx context.Context, relativePath string, op 
 }
 
 func (s *Syncer) handleLocalWriteOrCreate(ctx context.Context, remotePath, localPath string) error {
-	snapshotContent, err := os.ReadFile(localPath)
+	snapshot, err := readLocalSnapshot(localPath, true)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return s.pushSingleDelete(ctx, remotePath, localPath)
 		}
 		return err
 	}
-	snapshot := newLocalSnapshot(localPath, snapshotContent)
 	tracked, exists := s.state.Files[remotePath]
 	if exists && tracked.ReadOnly {
 		return s.revertReadonlyFile(ctx, remotePath, localPath, tracked, snapshot.ContentType)
@@ -1624,9 +1733,12 @@ func (s *Syncer) pullRemoteFullExport(ctx context.Context, client exportSnapshot
 		}
 		return true, err
 	}
-	remoteFiles := map[string]RemoteFile{}
-	for _, file := range files {
-		remotePath := normalizeRemotePath(file.Path)
+	sort.Slice(files, func(i, j int) bool {
+		return normalizeRemotePath(files[i].Path) < normalizeRemotePath(files[j].Path)
+	})
+	remotePaths := map[string]struct{}{}
+	for i := range files {
+		remotePath := normalizeRemotePath(files[i].Path)
 		if remotePath == "/" || !isUnderRemoteRoot(s.remoteRoot, remotePath) {
 			continue
 		}
@@ -1637,10 +1749,14 @@ func (s *Syncer) pullRemoteFullExport(ctx context.Context, client exportSnapshot
 		if tracked, ok := s.state.Files[remotePath]; ok && tracked.Denied {
 			continue
 		}
-		file.Path = remotePath
-		remoteFiles[remotePath] = file
+		files[i].Path = remotePath
+		if err := s.applyRemoteFile(remotePath, files[i], conflicted); err != nil {
+			return true, err
+		}
+		remotePaths[remotePath] = struct{}{}
+		files[i].Content = ""
 	}
-	return true, s.applyRemoteSnapshot(remoteFiles, conflicted)
+	return true, s.applyRemoteSnapshotDeletes(remotePaths, conflicted)
 }
 
 func exportSnapshotUnsupported(err error) bool {
@@ -1670,7 +1786,7 @@ func isUnderLazyGithubRepoSubtree(remoteRoot, remotePath string) bool {
 }
 
 func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]struct{}) error {
-	remoteFiles := map[string]RemoteFile{}
+	remotePaths := map[string]struct{}{}
 	cursor := ""
 	for {
 		page, err := s.client.ListTree(ctx, s.workspace, s.remoteRoot, 10, cursor)
@@ -1719,7 +1835,10 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 				}
 				return err
 			}
-			remoteFiles[remotePath] = file
+			if err := s.applyRemoteFile(remotePath, file, conflicted); err != nil {
+				return err
+			}
+			remotePaths[remotePath] = struct{}{}
 		}
 		if page.NextCursor == nil || *page.NextCursor == "" {
 			break
@@ -1727,7 +1846,7 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 		cursor = *page.NextCursor
 	}
 
-	return s.applyRemoteSnapshot(remoteFiles, conflicted)
+	return s.applyRemoteSnapshotDeletes(remotePaths, conflicted)
 }
 
 func (s *Syncer) applyRemoteSnapshot(remoteFiles map[string]RemoteFile, conflicted map[string]struct{}) error {
@@ -1762,13 +1881,46 @@ func (s *Syncer) applyRemoteSnapshot(remoteFiles map[string]RemoteFile, conflict
 	return nil
 }
 
+func (s *Syncer) applyRemoteSnapshotDeletes(remotePaths map[string]struct{}, conflicted map[string]struct{}) error {
+	if err := s.materializeProviderLayoutsFromPaths(remotePaths); err != nil {
+		return err
+	}
+
+	statePaths := make([]string, 0, len(s.state.Files))
+	for remotePath := range s.state.Files {
+		statePaths = append(statePaths, remotePath)
+	}
+	sort.Strings(statePaths)
+	for _, remotePath := range statePaths {
+		if _, ok := remotePaths[remotePath]; ok {
+			continue
+		}
+		if err := s.applyRemoteDelete(remotePath, conflicted); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (s *Syncer) materializeProviderLayouts(remoteFiles map[string]RemoteFile) error {
 	if s.layoutRegistrar == nil {
 		return nil
 	}
 
-	providerResources := map[string]map[string]struct{}{}
+	remotePaths := make(map[string]struct{}, len(remoteFiles))
 	for remotePath := range remoteFiles {
+		remotePaths[remotePath] = struct{}{}
+	}
+	return s.materializeProviderLayoutsFromPaths(remotePaths)
+}
+
+func (s *Syncer) materializeProviderLayoutsFromPaths(remotePaths map[string]struct{}) error {
+	if s.layoutRegistrar == nil {
+		return nil
+	}
+
+	providerResources := map[string]map[string]struct{}{}
+	for remotePath := range remotePaths {
 		provider, resource, ok := providerLayoutParts(s.remoteRoot, remotePath)
 		if !ok {
 			continue
@@ -2299,6 +2451,11 @@ func (s *Syncer) pushLocal(ctx context.Context) (map[string]struct{}, error) {
 		if exists && tracked.WriteDenied && tracked.DeniedHash == snapshot.Hash {
 			continue
 		}
+		fullSnapshot, err := readLocalSnapshot(localPath, true)
+		if err != nil {
+			return nil, err
+		}
+		snapshot = fullSnapshot
 		pendingWrite, err := s.preparePendingBulkWrite(ctx, remotePath, localPath, snapshot, tracked, exists)
 		if err != nil {
 			return nil, err
@@ -2426,11 +2583,11 @@ func (s *Syncer) scanLocalFiles() (map[string]localSnapshot, error) {
 		if err != nil {
 			return nil
 		}
-		data, err := os.ReadFile(path)
+		snapshot, err := readLocalSnapshot(path, false)
 		if err != nil {
 			return err
 		}
-		results[remotePath] = newLocalSnapshot(path, data)
+		results[remotePath] = snapshot
 		return nil
 	})
 	if err != nil {
@@ -2495,9 +2652,13 @@ func (s *Syncer) saveState() error {
 }
 
 func (s *Syncer) savePublicState() error {
-	currentFiles, err := s.scanLocalFiles()
-	if err != nil {
-		return err
+	currentFiles := map[string]localSnapshot{}
+	if !s.lowMemory {
+		var err error
+		currentFiles, err = s.scanLocalFiles()
+		if err != nil {
+			return err
+		}
 	}
 	conflictsByPath, pendingConflicts, err := s.listConflictArtifacts()
 	if err != nil {
@@ -2506,7 +2667,10 @@ func (s *Syncer) savePublicState() error {
 	failedWritebacks := s.readPublicFailedWritebacks()
 	deniedPaths := 0
 	pendingWriteback := 0
-	files := make(map[string]publicFileState, len(s.state.Files))
+	var files map[string]publicFileState
+	if !s.lowMemory {
+		files = make(map[string]publicFileState, len(s.state.Files))
+	}
 
 	for remotePath, tracked := range s.state.Files {
 		fileStatus := "ready"
@@ -2520,12 +2684,14 @@ func (s *Syncer) savePublicState() error {
 		case tracked.Dirty:
 			fileStatus = "writeback-pending"
 		}
-		if snapshot, ok := currentFiles[remotePath]; ok {
-			if tracked.Hash != snapshot.Hash && fileStatus == "ready" {
+		if !s.lowMemory {
+			if snapshot, ok := currentFiles[remotePath]; ok {
+				if tracked.Hash != snapshot.Hash && fileStatus == "ready" {
+					fileStatus = "writeback-pending"
+				}
+			} else if !tracked.Denied && !tracked.WriteDenied && tracked.Hash != "" && fileStatus == "ready" {
 				fileStatus = "writeback-pending"
 			}
-		} else if !tracked.Denied && !tracked.WriteDenied && tracked.Hash != "" && fileStatus == "ready" {
-			fileStatus = "writeback-pending"
 		}
 		if fileStatus == "writeback-pending" {
 			pendingWriteback++
@@ -2533,26 +2699,30 @@ func (s *Syncer) savePublicState() error {
 		if tracked.Denied || tracked.WriteDenied {
 			deniedPaths++
 		}
-		files[remotePath] = publicFileState{
-			Revision:    tracked.Revision,
-			ContentType: tracked.ContentType,
-			Encoding:    tracked.Encoding,
-			Dirty:       tracked.Dirty,
-			Denied:      tracked.Denied,
-			WriteDenied: tracked.WriteDenied,
-			ReadOnly:    tracked.ReadOnly,
-			Status:      fileStatus,
+		if !s.lowMemory {
+			files[remotePath] = publicFileState{
+				Revision:    tracked.Revision,
+				ContentType: tracked.ContentType,
+				Encoding:    tracked.Encoding,
+				Dirty:       tracked.Dirty,
+				Denied:      tracked.Denied,
+				WriteDenied: tracked.WriteDenied,
+				ReadOnly:    tracked.ReadOnly,
+				Status:      fileStatus,
+			}
 		}
 	}
-	for remotePath, snapshot := range currentFiles {
-		if _, ok := files[remotePath]; ok {
-			continue
-		}
-		pendingWriteback++
-		files[remotePath] = publicFileState{
-			ContentType: snapshot.ContentType,
-			Encoding:    snapshot.Encoding,
-			Status:      "writeback-pending",
+	if !s.lowMemory {
+		for remotePath, snapshot := range currentFiles {
+			if _, ok := files[remotePath]; ok {
+				continue
+			}
+			pendingWriteback++
+			files[remotePath] = publicFileState{
+				ContentType: snapshot.ContentType,
+				Encoding:    snapshot.Encoding,
+				Status:      "writeback-pending",
+			}
 		}
 	}
 
@@ -2600,6 +2770,7 @@ func (s *Syncer) savePublicState() error {
 		FailedWritebacks:          failedWritebacks,
 		LastError:                 s.state.LastError,
 		Files:                     files,
+		LowMemory:                 s.lowMemory,
 	}
 	if err := os.MkdirAll(filepath.Dir(s.publicStatePath), 0o755); err != nil {
 		return err
@@ -2755,12 +2926,35 @@ func newLocalSnapshot(path string, data []byte) localSnapshot {
 		wireContent = base64.StdEncoding.EncodeToString(data)
 	}
 	return localSnapshot{
-		RawContent:  append([]byte(nil), data...),
+		RawContent:  data,
 		WireContent: wireContent,
 		ContentType: contentType,
 		Encoding:    encoding,
 		Hash:        hashBytes(data),
 	}
+}
+
+func readLocalSnapshot(path string, includeContent bool) (localSnapshot, error) {
+	if includeContent {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return localSnapshot{}, err
+		}
+		return newLocalSnapshot(path, data), nil
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return localSnapshot{}, err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return localSnapshot{}, err
+	}
+	return localSnapshot{
+		ContentType: detectContentType(path),
+		Hash:        hex.EncodeToString(h.Sum(nil)),
+	}, nil
 }
 
 func shouldEncodeLocalContentAsBase64(data []byte, contentType string) bool {

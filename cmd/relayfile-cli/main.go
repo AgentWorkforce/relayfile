@@ -3415,6 +3415,9 @@ func runMount(args []string) error {
 	intervalJitter := fs.Float64("interval-jitter", floatEnv("RELAYFILE_MOUNT_INTERVAL_JITTER", 0.2), "sync interval jitter ratio (0.0-1.0)")
 	timeout := fs.Duration("timeout", durationEnv("RELAYFILE_MOUNT_TIMEOUT", defaultMountTimeout), "per-sync timeout")
 	websocketEnabled := fs.Bool("websocket", boolEnv("RELAYFILE_MOUNT_WEBSOCKET", true), "enable websocket event streaming when available")
+	lowMemory := fs.Bool("low-memory", boolEnv("RELAYFILE_MOUNT_LOW_MEMORY", false), "reduce mount memory use by omitting per-file public state and deferring content reads")
+	pprofAddr := fs.String("pprof-addr", strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_PPROF_ADDR")), "optional pprof listen address, e.g. 127.0.0.1:6060")
+	memlogInterval := fs.Duration("memlog-interval", durationEnv("RELAYFILE_MOUNT_MEMLOG_INTERVAL", 0), "optional interval for logging runtime memory stats")
 	background := fs.Bool("background", false, "detach and keep syncing in the background")
 	pidFileFlag := fs.String("pid-file", "", "pid file path for background mode")
 	logFileFlag := fs.String("log-file", "", "log file path for background mode")
@@ -3431,6 +3434,9 @@ func runMount(args []string) error {
 		"interval-jitter": true,
 		"timeout":         true,
 		"websocket":       false,
+		"low-memory":      false,
+		"pprof-addr":      true,
+		"memlog-interval": true,
 		"background":      false,
 		"pid-file":        true,
 		"log-file":        true,
@@ -3540,11 +3546,15 @@ func runMount(args []string) error {
 		LocalRoot:     absLocalDir,
 		StateFile:     strings.TrimSpace(*stateFile),
 		WebSocket:     boolPtr(*websocketEnabled),
+		LowMemory:     boolPtr(*lowMemory),
 		RootCtx:       rootCtx,
 		Logger:        log.Default(),
 	})
 	if err != nil {
 		return fmt.Errorf("failed to initialize mount syncer: %w", err)
+	}
+	if _, err := mountsync.StartDiagnostics(rootCtx, strings.TrimSpace(*pprofAddr), *memlogInterval, log.Default()); err != nil {
+		return fmt.Errorf("start diagnostics: %w", err)
 	}
 	if _, err := upsertWorkspace(workspaceID); err != nil {
 		return err
@@ -3611,6 +3621,9 @@ Common flags:
   --once               run one sync cycle and exit (used by setup/CI)
   --timeout 5m         per-sync timeout
   --no-websocket       disable websocket event streaming
+  --low-memory         skip detailed per-file public state and defer content reads
+  --pprof-addr ADDR    expose pprof diagnostics, e.g. 127.0.0.1:6060
+  --memlog-interval 1m log runtime memory stats periodically
 
 See 'relayfile help' for the full command list and
 docs/guides/vfs-cloud-setup.md#known-limitations for details.`)
