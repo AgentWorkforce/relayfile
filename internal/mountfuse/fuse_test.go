@@ -1196,7 +1196,8 @@ func TestResourceSchemaReadableAndReadOnly(t *testing.T) {
 	if err := json.Unmarshal([]byte(body), &decoded); err != nil {
 		t.Fatalf("schema is not valid JSON: %v\n%s", err, body)
 	}
-	if decoded["$schema"] == "" {
+	schemaURL, ok := decoded["$schema"].(string)
+	if !ok || strings.TrimSpace(schemaURL) == "" {
 		t.Fatalf("schema missing $schema: %v", decoded)
 	}
 	if _, _, errno := schemaNode.Open(context.Background(), syscall.O_WRONLY); errno != syscall.EACCES {

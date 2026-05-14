@@ -135,11 +135,15 @@ func TestEmptyWindow(t *testing.T) {
 	}
 }
 
-func TestSkipsProviderWithoutDigest(t *testing.T) {
-	// Caller doesn't list "slack" in Providers, so even an event from slack
-	// should not introduce a section. Events for unlisted providers are
-	// dropped; counted in `events` only because the spec defines `events`
-	// as the raw event count.
+func TestEventFromUnlistedProviderStillRenders(t *testing.T) {
+	// `Providers` enumerates the adapters connected at digest time. The
+	// generator must still render any event that actually arrived in the
+	// window, even from a provider not declared in Providers, so the
+	// frontmatter `events` count stays consistent with the visible
+	// bullets and operators don't see "47 events" with only some of them
+	// listed. Upstream filtering of which adapters export `digest()` is
+	// the layer that decides participation; once an event reaches Run,
+	// it MUST be rendered.
 	events := []ChangeEvent{{
 		Provider:      "slack",
 		Timestamp:     time.Date(2026, 5, 12, 8, 0, 0, 0, time.UTC),
@@ -158,14 +162,30 @@ func TestSkipsProviderWithoutDigest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	for _, s := range rep.Sections {
-		if s.Provider == "slack" {
-			t.Fatal("unexpected slack section")
+	var slackSection *DigestSection
+	for i := range rep.Sections {
+		if rep.Sections[i].Provider == "slack" {
+			slackSection = &rep.Sections[i]
+			break
 		}
 	}
+	if slackSection == nil {
+		t.Fatal("expected slack section for slack event")
+	}
+	if len(slackSection.Bullets) != 1 {
+		t.Fatalf("slack bullets = %d, want 1", len(slackSection.Bullets))
+	}
+	var found bool
 	for _, p := range rep.Meta.Providers {
 		if p == "slack" {
-			t.Fatal("slack appeared in providers frontmatter")
+			found = true
+			break
 		}
+	}
+	if !found {
+		t.Fatal("slack missing from frontmatter providers")
+	}
+	if rep.Meta.Events != len(events) {
+		t.Fatalf("meta.events = %d, want %d", rep.Meta.Events, len(events))
 	}
 }

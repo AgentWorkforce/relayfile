@@ -5557,20 +5557,10 @@ func writeDeadLetterWriteback(localDir string, sample writebackFailureSample, at
 		return err
 	}
 	payload = append(payload, '\n')
-	dir := deadLetterDirFor(localDir)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
-	}
-	payloadPath := filepath.Join(dir, opID+".json")
-	if err := writeFileAtomically(payloadPath, payload, 0o644); err != nil {
-		return err
-	}
-	// Co-write the canonical `.error.json` sidecar so retry-exhaustion
-	// lands both files atomically and consumers (CLI `writeback list`, FUSE
-	// readers, replay tooling) can read structured failure context against
-	// `schemas/relay/dead-letter-error.schema.json`. The sidecar lives
-	// alongside the payload at `<opID>.error.json` matching the CLI's
-	// `deadLetterErrorPathFor` reader convention.
+	// Marshal the sidecar BEFORE either file lands on disk so a sidecar
+	// serialization error fails the whole operation without leaving an
+	// orphan payload. Consumers (CLI `writeback list`, FUSE readers,
+	// replay tooling) rely on both files being present together.
 	sidecar, err := writeback.MarshalSidecar(writeback.ErrorContext{
 		Code:             classifyDeadLetterSidecarCode(sample.Status),
 		Message:          deadLetterErrorMessage(sample),
@@ -5584,7 +5574,24 @@ func writeDeadLetterWriteback(localDir string, sample writebackFailureSample, at
 	if err != nil {
 		return err
 	}
-	return writeFileAtomically(deadLetterErrorPathFor(localDir, opID), sidecar, 0o644)
+	dir := deadLetterDirFor(localDir)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	payloadPath := filepath.Join(dir, opID+".json")
+	sidecarPath := deadLetterErrorPathFor(localDir, opID)
+	if err := writeFileAtomically(payloadPath, payload, 0o644); err != nil {
+		return err
+	}
+	// If the sidecar write fails after the payload has landed, remove the
+	// payload so the dead-letter directory never holds a half-committed
+	// record. Best-effort: a remove failure is still surfaced as the
+	// underlying sidecar-write error, not masked.
+	if err := writeFileAtomically(sidecarPath, sidecar, 0o644); err != nil {
+		_ = os.Remove(payloadPath)
+		return err
+	}
+	return nil
 }
 
 // classifyDeadLetterSidecarCode maps an upstream HTTP status to the four
@@ -5598,8 +5605,6 @@ func classifyDeadLetterSidecarCode(status int) writeback.ErrorCode {
 		return writeback.CodeProvider4xx
 	case status == http.StatusTooManyRequests, status >= 500 && status <= 599:
 		return writeback.CodeProvider5xxExhaust
-	case status > 0 && status < 400:
-		return writeback.CodeProvider4xx
 	default:
 		return writeback.CodeTimeout
 	}

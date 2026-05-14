@@ -34,6 +34,13 @@ func Run(ctx context.Context, src ChangeEventSource, w Window) (Report, error) {
 	}
 
 	providers := append([]string(nil), w.Providers...)
+	// Include any event provider not present in w.Providers so its bullets
+	// still render and the events count stays consistent with what's shown.
+	for _, ev := range events {
+		if ev.Provider != "" {
+			providers = append(providers, ev.Provider)
+		}
+	}
 	sort.Strings(providers)
 	providers = dedupe(providers)
 
@@ -49,7 +56,17 @@ func Run(ctx context.Context, src ChangeEventSource, w Window) (Report, error) {
 	for _, p := range providers {
 		evs := bucket[p]
 		sort.SliceStable(evs, func(i, j int) bool {
-			return evs[i].Timestamp.Before(evs[j].Timestamp)
+			a, b := evs[i], evs[j]
+			if !a.Timestamp.Equal(b.Timestamp) {
+				return a.Timestamp.Before(b.Timestamp)
+			}
+			if a.Identifier != b.Identifier {
+				return a.Identifier < b.Identifier
+			}
+			if a.Verb != b.Verb {
+				return a.Verb < b.Verb
+			}
+			return a.CanonicalPath < b.CanonicalPath
 		})
 		bullets := make([]DigestBullet, 0, len(evs))
 		for _, e := range evs {

@@ -124,10 +124,10 @@ Tags: integrations, notion, comparison, headline
 Human Review: true
 
 ### Message
-Use /Users/khaliqgant/Projects/AgentWorkforce/relayfile/mount-verify — start by reading LAYOUT.md, then .skills/activity-summary.md — to answer: What did I work on yesterday (2026-05-12) across GH/Linear/Notion?
+Use the configured mount (mountRoot below) — start by reading LAYOUT.md, then .skills/activity-summary.md — to answer: What did I work on yesterday (2026-05-12) across GH/Linear/Notion?
 
 ### Use Configured Mount
-mountRoot: /Users/khaliqgant/Projects/AgentWorkforce/relayfile/mount-verify
+mountRoot: ./mount-verify
 
 ### Mock
 ```json
@@ -174,6 +174,8 @@ jq '.[] | select(.updated | startswith("2026-05-12"))' \
 [
   { "op": "read", "path": "/LAYOUT.md" },
   { "op": "read", "path": "/.skills/activity-summary.md" },
+  { "op": "jqFilter", "path": "/github/repos/AgentWorkforce/relayfile/issues/_index.json",
+    "filter": ".[] | select(.updated | startswith(\"2026-05-12\"))" },
   { "op": "jqFilter", "path": "/linear/issues/_index.json",
     "filter": ".[] | select(.updated | startswith(\"2026-05-12\"))" },
   { "op": "jqFilter", "path": "/notion/pages/_index.json",

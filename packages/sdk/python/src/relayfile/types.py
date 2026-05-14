@@ -33,6 +33,17 @@ class RelayFileJwtClaims(_RelayFileJwtClaimsRequired, total=False):
 
 ContentEncoding = Literal["utf-8", "base64"]
 WritebackState = Literal["pending", "succeeded", "failed", "dead_lettered"]
+# WritebackListState mirrors the broader set of state filters the `writeback
+# list` CLI accepts ("dead" is the CLI alias for "dead_lettered" surfaced in
+# `--state dead` and in JSON list rows). Keep the typed surface aligned with
+# the TS SDK so consumers can round-trip rows from either client.
+WritebackListState = Literal[
+    "pending",
+    "succeeded",
+    "failed",
+    "dead_lettered",
+    "dead",
+]
 WritebackActionType = Literal["file_upsert", "file_delete"]
 WritebackDeadLetterErrorCode = Literal[
     "schema_violation",
@@ -309,7 +320,7 @@ class DigestContext(Protocol):
 
     def change_events(
         self,
-        filter: dict[str, list[str]] | None = None,
+        event_filter: dict[str, list[str]] | None = None,
     ) -> Awaitable[list[dict[str, Any]]]: ...
 
 
@@ -574,7 +585,7 @@ class WritebackItem:
     path: str
     revision: str
     correlation_id: str | None = None
-    state: WritebackState | None = None
+    state: WritebackListState | None = None
     op_id: str | None = None
     provider: str | None = None
     action: WritebackActionType | None = None
@@ -592,6 +603,16 @@ class WritebackItem:
             if isinstance(raw_error, dict)
             else None
         )
+        # `writeback list` rows from the new CLI use `attempts` and
+        # `enqueuedAt`; legacy detail rows still use the camel/snake variants.
+        # Accept either source so the SDK type surface stays aligned with both
+        # the TS SDK and the new server payload contract.
+        attempts = data["attempts"] if "attempts" in data else _get_optional(
+            data, "attemptCount", "attempt_count",
+        )
+        created_at = data["enqueuedAt"] if "enqueuedAt" in data else _get_optional(
+            data, "createdAt", "created_at",
+        )
         return cls(
             id=data["id"],
             workspace_id=_get(data, "workspaceId", "workspace_id"),
@@ -602,7 +623,7 @@ class WritebackItem:
             op_id=_get_optional(data, "opId", "op_id"),
             provider=data.get("provider"),
             action=data.get("action"),
-            attempt_count=_get_optional(data, "attemptCount", "attempt_count"),
+            attempt_count=attempts,
             last_attempt_at=_get_optional(
                 data,
                 "lastAttemptAt",
@@ -613,7 +634,7 @@ class WritebackItem:
                 "firstAttemptAt",
                 "first_attempt_at",
             ),
-            created_at=_get_optional(data, "createdAt", "created_at"),
+            created_at=created_at,
             error=error,
         )
 

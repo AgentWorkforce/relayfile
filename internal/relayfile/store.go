@@ -1094,7 +1094,10 @@ func (s *Store) ListTree(workspaceID, path string, depth int, cursor string) (Tr
 		entries = append(entries, entry)
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Path < entries[j].Path })
-	entries, nextCursor := paginateTreeEntries(entries, cursor)
+	entries, nextCursor, err := paginateTreeEntries(entries, cursor)
+	if err != nil {
+		return TreeResponse{}, err
+	}
 
 	return TreeResponse{Path: base, Entries: entries, NextCursor: nextCursor}, nil
 }
@@ -1863,7 +1866,7 @@ func (s *Store) ListForkTree(workspaceID, forkID, path string, depth int, cursor
 		return TreeResponse{}, err
 	}
 	files := s.mergedForkFilesLocked(fork)
-	return listTreeFromFiles(files, path, depth, cursor), nil
+	return listTreeFromFiles(files, path, depth, cursor)
 }
 
 func (s *Store) QueryForkFiles(workspaceID, forkID string, req FileQueryRequest) (FileQueryResponse, error) {
@@ -4193,7 +4196,7 @@ func (s *Store) mergedForkFilesLocked(fork *forkState) map[string]File {
 	return files
 }
 
-func listTreeFromFiles(files map[string]File, path string, depth int, cursor string) TreeResponse {
+func listTreeFromFiles(files map[string]File, path string, depth int, cursor string) (TreeResponse, error) {
 	base := normalizePath(path)
 	if depth <= 0 {
 		depth = 1
@@ -4246,23 +4249,35 @@ func listTreeFromFiles(files map[string]File, path string, depth int, cursor str
 		entries = append(entries, entry)
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Path < entries[j].Path })
-	entries, nextCursor := paginateTreeEntries(entries, cursor)
+	entries, nextCursor, err := paginateTreeEntries(entries, cursor)
+	if err != nil {
+		return TreeResponse{}, err
+	}
 
-	return TreeResponse{Path: base, Entries: entries, NextCursor: nextCursor}
+	return TreeResponse{Path: base, Entries: entries, NextCursor: nextCursor}, nil
 }
 
-func paginateTreeEntries(entries []TreeEntry, cursor string) ([]TreeEntry, *string) {
+// paginateTreeEntries slices the supplied entries with the supplied cursor.
+// A non-empty cursor that doesn't match any entry returns ErrInvalidInput so
+// stale/typo cursors are rejected rather than silently restarting pagination
+// at page 1 (which previously caused duplicate-page loops for clients).
+func paginateTreeEntries(entries []TreeEntry, cursor string) ([]TreeEntry, *string, error) {
 	start := 0
 	if cursor != "" {
+		found := false
 		for index, entry := range entries {
 			if entry.Path == cursor {
 				start = index + 1
+				found = true
 				break
 			}
 		}
+		if !found {
+			return nil, nil, ErrInvalidInput
+		}
 	}
 	if start >= len(entries) {
-		return []TreeEntry{}, nil
+		return []TreeEntry{}, nil, nil
 	}
 
 	end := start + maxTreeEntriesPerPage
@@ -4271,10 +4286,10 @@ func paginateTreeEntries(entries []TreeEntry, cursor string) ([]TreeEntry, *stri
 	}
 	page := append([]TreeEntry(nil), entries[start:end]...)
 	if end >= len(entries) {
-		return page, nil
+		return page, nil, nil
 	}
 	cursorValue := page[len(page)-1].Path
-	return page, &cursorValue
+	return page, &cursorValue, nil
 }
 
 func queryFilesFromMap(files map[string]File, req FileQueryRequest) (FileQueryResponse, error) {
