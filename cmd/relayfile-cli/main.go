@@ -331,6 +331,10 @@ func main() {
 }
 
 func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
+	if wantsHelp(args) {
+		printHelpForArgs(args, stdout)
+		return nil
+	}
 	if len(args) == 0 {
 		return runSetup(nil, stdin, stdout)
 	}
@@ -381,6 +385,163 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	default:
 		printUsage(stderr)
 		return fmt.Errorf("unknown subcommand %q", args[0])
+	}
+}
+
+func wantsHelp(args []string) bool {
+	for _, arg := range args {
+		if arg == "-h" || arg == "--help" {
+			return true
+		}
+	}
+	return false
+}
+
+func printHelpForArgs(args []string, stdout io.Writer) {
+	if len(args) == 0 {
+		printUsage(stdout)
+		return
+	}
+	command := args[0]
+	if command == "-h" || command == "--help" {
+		printUsage(stdout)
+		return
+	}
+	subcommand := ""
+	if len(args) > 1 && !strings.HasPrefix(args[1], "-") {
+		subcommand = args[1]
+	}
+
+	switch command {
+	case "setup":
+		fmt.Fprintln(stdout, "Usage: relayfile setup [--provider PROVIDER] [--backend BACKEND] [--workspace NAME] [--local-dir DIR]")
+	case "login":
+		fmt.Fprintln(stdout, "Usage: relayfile login [--no-open] [--api-key] [--server URL] [--token TOKEN]")
+	case "workspace":
+		printWorkspaceUsage(stdout, subcommand)
+	case "integration":
+		printIntegrationUsage(stdout, subcommand)
+	case "ops":
+		printOpsUsage(stdout, subcommand)
+	case "writeback":
+		printWritebackUsage(stdout, subcommand)
+	case "digest":
+		printDigestUsage(stdout, subcommand)
+	case "pull":
+		fmt.Fprintln(stdout, "Usage: relayfile pull [--workspace NAME] [--provider PROVIDER] [--reason TEXT]")
+	case "mount", "start":
+		printMountHelp(stdout)
+	case "restart":
+		fmt.Fprintln(stdout, "Usage: relayfile restart [WORKSPACE] [--foreground]")
+	case "tree", "ls":
+		fmt.Fprintln(stdout, "Usage: relayfile tree [WORKSPACE] [PATH] [--depth N] [--json]")
+	case "read", "cat":
+		fmt.Fprintln(stdout, "Usage: relayfile read [WORKSPACE] PATH [--output FILE] [--json]")
+	case "seed":
+		fmt.Fprintln(stdout, "Usage: relayfile seed [WORKSPACE] [DIR]")
+	case "export":
+		fmt.Fprintln(stdout, "Usage: relayfile export [WORKSPACE] --format FORMAT [--output FILE]")
+	case "status":
+		fmt.Fprintln(stdout, "Usage: relayfile status [WORKSPACE] [--json]")
+	case "stop":
+		fmt.Fprintln(stdout, "Usage: relayfile stop [WORKSPACE]")
+	case "logs":
+		fmt.Fprintln(stdout, "Usage: relayfile logs [WORKSPACE] [--lines N]")
+	case "observer":
+		fmt.Fprintln(stdout, "Usage: relayfile observer [WORKSPACE] [--no-open]")
+	case "help":
+		printUsage(stdout)
+	default:
+		printUsage(stdout)
+	}
+}
+
+func printWorkspaceUsage(w io.Writer, subcommand string) {
+	switch subcommand {
+	case "create":
+		fmt.Fprintln(w, "Usage: relayfile workspace create NAME")
+	case "use":
+		fmt.Fprintln(w, "Usage: relayfile workspace use NAME")
+	case "list":
+		fmt.Fprintln(w, "Usage: relayfile workspace list [--names-only]")
+	case "current":
+		fmt.Fprintln(w, "Usage: relayfile workspace current [--verbose]")
+	case "delete":
+		fmt.Fprintln(w, "Usage: relayfile workspace delete NAME [--yes]")
+	default:
+		fmt.Fprintln(w, `Usage:
+  relayfile workspace create NAME
+  relayfile workspace use NAME
+  relayfile workspace list [--names-only]
+  relayfile workspace current [--verbose]
+  relayfile workspace delete NAME [--yes]`)
+	}
+}
+
+func printIntegrationUsage(w io.Writer, subcommand string) {
+	switch subcommand {
+	case "connect":
+		fmt.Fprintln(w, "Usage: relayfile integration connect PROVIDER [--backend BACKEND] [--workspace NAME] [--no-open] [--timeout 5m]")
+	case "available", "catalog", "providers":
+		fmt.Fprintln(w, "Usage: relayfile integration available [--search QUERY] [--backend BACKEND] [--json] [--refresh]")
+	case "search":
+		fmt.Fprintln(w, "Usage: relayfile integration search QUERY [--backend BACKEND] [--json] [--refresh]")
+	case "list":
+		fmt.Fprintln(w, "Usage: relayfile integration list [--workspace NAME] [--json]")
+	case "disconnect":
+		fmt.Fprintln(w, "Usage: relayfile integration disconnect PROVIDER [--workspace NAME] [--yes]")
+	case "adopt":
+		fmt.Fprintln(w, "Usage: relayfile integration adopt PROVIDER --connection-id ID [--workspace NAME] [--provider-config-key KEY] [--yes]")
+	case "set-metadata":
+		fmt.Fprintln(w, "Usage: relayfile integration set-metadata PROVIDER KEY=VALUE [KEY=VALUE...] [--workspace NAME] [--yes]")
+	default:
+		fmt.Fprintln(w, `Usage:
+  relayfile integration connect PROVIDER [--backend BACKEND] [--workspace NAME]
+  relayfile integration available [--search QUERY] [--backend BACKEND] [--json] [--refresh]
+  relayfile integration search QUERY [--backend BACKEND] [--json] [--refresh]
+  relayfile integration list [--workspace NAME] [--json]
+  relayfile integration disconnect PROVIDER [--workspace NAME] [--yes]
+  relayfile integration adopt PROVIDER --connection-id ID [--workspace NAME] [--provider-config-key KEY] [--yes]
+  relayfile integration set-metadata PROVIDER KEY=VALUE [KEY=VALUE...] [--workspace NAME] [--yes]`)
+	}
+}
+
+func printOpsUsage(w io.Writer, subcommand string) {
+	switch subcommand {
+	case "list":
+		fmt.Fprintln(w, "Usage: relayfile ops list [--workspace NAME] [--json] [--no-refresh]")
+	case "replay":
+		fmt.Fprintln(w, "Usage: relayfile ops replay OPID [--workspace NAME]")
+	default:
+		fmt.Fprintln(w, `Usage:
+  relayfile ops list [--workspace NAME] [--json]
+  relayfile ops replay OPID [--workspace NAME]`)
+	}
+}
+
+func printWritebackUsage(w io.Writer, subcommand string) {
+	switch subcommand {
+	case "list":
+		fmt.Fprintln(w, writebackListUsage)
+	case "status":
+		fmt.Fprintln(w, "Usage: relayfile writeback status [WORKSPACE] [--json]")
+	case "retry":
+		fmt.Fprintln(w, "Usage: relayfile writeback retry --opId OP [WORKSPACE]")
+	default:
+		fmt.Fprintln(w, `Usage:
+  relayfile writeback list --state pending|dead|succeeded|failed [--workspace WS] [--json]
+  relayfile writeback status [WORKSPACE] [--json]
+  relayfile writeback retry --opId OP [WORKSPACE]`)
+	}
+}
+
+func printDigestUsage(w io.Writer, subcommand string) {
+	switch subcommand {
+	case "rebuild":
+		fmt.Fprintln(w, digestRebuildUsage)
+	default:
+		fmt.Fprintln(w, `Usage:
+  relayfile digest rebuild --window yesterday|today [--workspace NAME]`)
 	}
 }
 
