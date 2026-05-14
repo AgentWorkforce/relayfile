@@ -83,5 +83,6 @@ Use the existing Pipedream account ID as relayfile's `connectionId`. Configure t
 
 - Use one workspace per isolated task or run.
 - Reuse a workspace when humans and agents need a shared persistent project tree.
+- Use [custom digest functions](custom-digest-functions.md) when workspace-specific summary logic should run before an agent prompt.
 - Keep OAuth credentials out of relayfile. Store them in Nango, Composio, Pipedream, or your own provider layer.
 - Use [API reference](../api-reference.md) endpoints for tree reads, file writes, webhook ingestion, writeback status, and operation replay.

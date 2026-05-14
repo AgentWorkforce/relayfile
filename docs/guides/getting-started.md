@@ -109,6 +109,7 @@ Keep third-party credentials in the provider layer. Relayfile should receive nor
 ## Next Steps
 
 - [Cloud integration](cloud-integration.md)
+- [Custom digest functions](custom-digest-functions.md)
 - [Agent VFS usage](agent-vfs-usage.md)
 - [API reference](../api-reference.md)
 - [Environment variables](../environment-variables.md)
