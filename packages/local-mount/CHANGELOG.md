@@ -6,6 +6,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+_No unreleased changes._
+
+## [0.7.18] - 2026-05-14
+
 ### Changed
 - `startAutoSync` now runs periodic full reconciles on a slower default cadence while watcher subscriptions are healthy, falls back to the existing 10s cadence when watchers are degraded, and accepts `scanIntervalMs: 0` or `Infinity` to disable periodic full reconciles. (#135)
 
@@ -197,7 +201,8 @@ Initial release.
 - Directory-only ignore patterns (e.g. `cache/`) match directories without swallowing like-named files.
 - README documenting the mount lifecycle, dotfile semantics, and auto-sync behavior. ([#48])
 
-[Unreleased]: https://github.com/AgentWorkforce/relayfile/compare/v0.7.17...HEAD
+[Unreleased]: https://github.com/AgentWorkforce/relayfile/compare/v0.7.18...HEAD
+[0.7.18]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.7.18
 [0.7.17]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.7.17
 [0.7.16]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.7.16
 [0.7.15]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.7.15
