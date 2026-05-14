@@ -328,6 +328,11 @@ type apiError struct {
 	StatusCode int
 	Code       string
 	Message    string
+	// RetryAfter carries the parsed `Retry-After` response header when the
+	// server returns 429 or 503. Zero means "no hint was provided" — callers
+	// (in particular politePoll) should fall back to their own backoff
+	// schedule in that case.
+	RetryAfter time.Duration
 }
 
 func (e *apiError) Error() string {
@@ -335,6 +340,29 @@ func (e *apiError) Error() string {
 		return fmt.Sprintf("http %d: %s", e.StatusCode, e.Message)
 	}
 	return fmt.Sprintf("http %d %s: %s", e.StatusCode, e.Code, e.Message)
+}
+
+// parseRetryAfter parses an HTTP Retry-After header value. The spec allows
+// either a delta-seconds integer or an HTTP-date; we accept both and return
+// zero for anything we can't parse (callers treat zero as "use default
+// backoff").
+func parseRetryAfter(value string) time.Duration {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0
+	}
+	if seconds, err := strconv.Atoi(value); err == nil {
+		if seconds < 0 {
+			return 0
+		}
+		return time.Duration(seconds) * time.Second
+	}
+	if t, err := http.ParseTime(value); err == nil {
+		if d := time.Until(t); d > 0 {
+			return d
+		}
+	}
+	return 0
 }
 
 // cloudLoginStateMismatchExitCode is the exit code mandated by productized
@@ -1393,11 +1421,15 @@ func connectCloudIntegration(cloudAPIURL, workspaceID, workspaceToken, provider,
 	if timeout <= 0 {
 		timeout = 5 * time.Minute
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
 	deadline := time.Now().Add(timeout)
-	for {
+	var pollErr error
+	pollErr = politePoll(ctx, func(pollCtx context.Context) pollResult {
 		status, err := cloudIntegrationStatus(cloudAPIURL, workspaceID, workspaceToken, provider, connectionID)
 		if err != nil {
-			return err
+			pollErr = err
+			return pollResult{err: err, httpStatus: httpStatusFromErr(err), retryAfter: retryAfterFromErr(err), done: true}
 		}
 		if !cloudIntegrationConnected(status) && connectionID != "" {
 			fallbackStatus, fallbackErr := cloudIntegrationStatus(cloudAPIURL, workspaceID, workspaceToken, provider, "")
@@ -1417,13 +1449,18 @@ func connectCloudIntegration(cloudAPIURL, workspaceID, workspaceToken, provider,
 				})
 			}
 			fmt.Fprintf(stdout, "%s connected. Relayfile is preparing files in the background; keep this command running while initial sync finishes. Files will appear under %s/%s.\n", provider, localDir, providerRootDir(provider))
-			return nil
+			pollErr = nil
+			return pollResult{done: true}
 		}
-		if time.Now().After(deadline) {
-			return fmt.Errorf("timed out waiting for %s connection after %s", provider, timeout)
-		}
-		time.Sleep(2 * time.Second)
+		return pollResult{}
+	}, politeOpts{})
+	if pollErr != nil {
+		return pollErr
 	}
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) || time.Now().After(deadline) {
+		return fmt.Errorf("timed out waiting for %s connection after %s", provider, timeout)
+	}
+	return nil
 }
 
 func cloudIntegrationReady(cloudAPIURL, workspaceID, workspaceToken, provider, connectionID string) (bool, error) {
@@ -1471,16 +1508,23 @@ func waitForInitialSync(serverURL, token, workspaceID, provider, localDir string
 		return err
 	}
 	fmt.Fprintf(stdout, "Waiting for %s initial sync. Leave this command running; Relayfile is preparing files in the background.\n", provider)
-	deadline := time.Now().Add(timeout)
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
 	lastPrinted := time.Time{}
-	for {
+	var finalStatus syncStatusResponse
+	var ready bool
+	pollErr := politePoll(ctx, func(pollCtx context.Context) pollResult {
 		status, err := fetchWorkspaceSyncStatus(client, workspaceID)
 		if err != nil {
-			return err
+			return pollResult{err: err, httpStatus: httpStatusFromErr(err), retryAfter: retryAfterFromErr(err)}
 		}
 		providerStatus, ok := syncProviderByName(status, provider)
 		if ok && providerReadyForMirror(client, workspaceID, provider, providerStatus) {
-			return writeMirrorStateFile(localDir, buildSyncStateSnapshot(status, workspaceID, defaultMountMode, defaultMountInterval, localDir, readDaemonPID(localDir), ""))
+			finalStatus = status
+			ready = true
+			return pollResult{done: true}
 		}
 		if time.Since(lastPrinted) >= 5*time.Second {
 			lastPrinted = time.Now()
@@ -1490,12 +1534,45 @@ func waitForInitialSync(serverURL, token, workspaceID, provider, localDir string
 				fmt.Fprintf(stdout, "Waiting for %s sync status...\n", provider)
 			}
 		}
-		if time.Now().After(deadline) {
-			fmt.Fprintf(stdout, "%s still syncing in the background. Files will continue to populate. See 'relayfile status'.\n", provider)
-			return nil
-		}
-		time.Sleep(2 * time.Second)
+		return pollResult{}
+	}, politeOpts{})
+
+	if ready {
+		return writeMirrorStateFile(localDir, buildSyncStateSnapshot(finalStatus, workspaceID, defaultMountMode, defaultMountInterval, localDir, readDaemonPID(localDir), ""))
 	}
+	if pollErr != nil && !errors.Is(pollErr, context.DeadlineExceeded) && !errors.Is(pollErr, context.Canceled) {
+		return pollErr
+	}
+	fmt.Fprintf(stdout, "%s still syncing in the background. Files will continue to populate. See 'relayfile status'.\n", provider)
+	return nil
+}
+
+// httpStatusFromErr extracts the HTTP status code from an apiError, returning
+// 0 for network errors or non-apiError errors so that politePoll treats them
+// as "transport failure, back off exponentially".
+func httpStatusFromErr(err error) int {
+	if err == nil {
+		return 0
+	}
+	var apiErr *apiError
+	if errors.As(err, &apiErr) {
+		return apiErr.StatusCode
+	}
+	return 0
+}
+
+// retryAfterFromErr extracts the parsed Retry-After hint from an apiError.
+// Returns zero if there's no hint (e.g. a transport error or a response
+// without the header).
+func retryAfterFromErr(err error) time.Duration {
+	if err == nil {
+		return 0
+	}
+	var apiErr *apiError
+	if errors.As(err, &apiErr) {
+		return apiErr.RetryAfter
+	}
+	return 0
 }
 
 func runLogin(args []string, stdin io.Reader, stdout io.Writer) error {
@@ -4425,6 +4502,7 @@ func (c *apiClient) do(ctx context.Context, method, path string, body []byte) ([
 		StatusCode: resp.StatusCode,
 		Code:       errPayload.Code,
 		Message:    errPayload.Message,
+		RetryAfter: parseRetryAfter(resp.Header.Get("Retry-After")),
 	}
 }
 
@@ -6412,17 +6490,51 @@ func runMountLoop(rootCtx context.Context, syncer *mountsync.Syncer, localDir, w
 		return err
 	}
 
+	// writeSnapshot is invoked from many places: each periodic sync cycle, each
+	// auth refresh, and — most dangerously — every fsnotify event from the
+	// local file watcher. A noisy editor that touches one file repeatedly can
+	// fire 30+ events per second, and each one used to call
+	// fetchWorkspaceSyncStatus directly. That's the polling-storm shape we hit
+	// on 2026-05-14. Wrap the status fetch in a per-daemon rate gate so that
+	// snapshots are still written from cached state but the upstream API is
+	// hit no more than once per syncStatusMinPollInterval.
+	var (
+		snapshotMu          sync.Mutex
+		lastSnapshotStatus  syncStatusResponse
+		lastSnapshotFetchAt time.Time
+		hasCachedStatus     bool
+	)
 	writeSnapshot := func() {
 		if httpClient == nil {
 			return
 		}
-		client, err := newAPIClient(serverURL, httpClient.Token())
-		if err != nil {
-			return
-		}
-		status, err := fetchWorkspaceSyncStatus(client, workspaceID)
-		if err != nil {
-			return
+		snapshotMu.Lock()
+		needFetch := !hasCachedStatus || time.Since(lastSnapshotFetchAt) >= syncStatusMinPollInterval
+		cached := lastSnapshotStatus
+		snapshotMu.Unlock()
+
+		status := cached
+		if needFetch {
+			client, err := newAPIClient(serverURL, httpClient.Token())
+			if err != nil {
+				return
+			}
+			fetched, err := fetchWorkspaceSyncStatus(client, workspaceID)
+			if err != nil {
+				// Fetch failed; fall back to cached snapshot if we have one,
+				// otherwise skip this write — we'd rather have a stale
+				// snapshot than spin retrying on every file event.
+				if !hasCachedStatus {
+					return
+				}
+			} else {
+				snapshotMu.Lock()
+				lastSnapshotStatus = fetched
+				lastSnapshotFetchAt = time.Now()
+				hasCachedStatus = true
+				snapshotMu.Unlock()
+				status = fetched
+			}
 		}
 		_ = writeMirrorStateFile(localDir, buildSyncStateSnapshot(status, workspaceID, defaultMountMode, interval, localDir, readDaemonPID(localDir), stallReason))
 	}
