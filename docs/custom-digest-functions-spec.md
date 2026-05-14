@@ -29,6 +29,10 @@ This follow-on spec is explicitly cross-repo. Do not assign it to a relayfile-on
 4. `relayfile` + `cloud`: run the cross-repo integration proof that deploys a fixture function through cloud, pulls it into the daemon, and renders a digest section.
 5. `skills` / `relay`: update docs only after the runtime behavior is proven.
 
+**Ricky cloud-slice instruction:** when running PR split 2 from the `AgentWorkforce/cloud` worktree, include this instruction verbatim in the Ricky kickoff:
+
+> Implement only the `AgentWorkforce/cloud` slice of `custom-digest-functions-spec.md`: workspace function storage, TypeScript-to-WASM compile/deploy APIs, deploy/list/show/disable/logs endpoints, workspace-admin authorization scope, module signing, and daemon distribution. Do not edit `relayfile`, `relayfile-adapters`, `skills`, or `relay`; reference those repos only as dependency context and produce a separate cloud PR.
+
 If a single agent is coordinating the whole feature, tell it to preserve that same per-repo worktree and PR split while coordinating evidence across the dependency branches. The acceptance criteria should cite evidence from both `relayfile` and `cloud`.
 
 ## Problem

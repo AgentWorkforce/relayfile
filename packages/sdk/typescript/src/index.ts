@@ -110,6 +110,27 @@ export type {
 } from "./connection.js";
 
 export type {
+  DigestBullet,
+  DigestChangeEventFilter,
+  DigestContext,
+  DigestHandler,
+  DigestSection,
+  DigestRuntime,
+  DigestSourceFile,
+  DigestFunctionSource,
+  DeployDigestFunctionInput,
+  DigestFunctionDeployResponse,
+  DigestFunctionSummary,
+  DigestFunctionListResponse,
+  DigestFunctionDetail,
+  DigestFunctionDisableResponse,
+  DigestFunctionLogEntry,
+  DigestFunctionLogsResponse,
+  ListDigestFunctionsOptions,
+  GetDigestFunctionLogsOptions
+} from "./digest.js";
+export { digestFunctionSourceFromText } from "./digest.js";
+export type {
   AckResponse,
   AckWritebackInput,
   AckWritebackResponse,
