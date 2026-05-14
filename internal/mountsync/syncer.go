@@ -2684,12 +2684,14 @@ func (s *Syncer) savePublicState() error {
 		case tracked.Dirty:
 			fileStatus = "writeback-pending"
 		}
-		if snapshot, ok := currentFiles[remotePath]; ok {
-			if tracked.Hash != snapshot.Hash && fileStatus == "ready" {
+		if !s.lowMemory {
+			if snapshot, ok := currentFiles[remotePath]; ok {
+				if tracked.Hash != snapshot.Hash && fileStatus == "ready" {
+					fileStatus = "writeback-pending"
+				}
+			} else if !tracked.Denied && !tracked.WriteDenied && tracked.Hash != "" && fileStatus == "ready" {
 				fileStatus = "writeback-pending"
 			}
-		} else if !tracked.Denied && !tracked.WriteDenied && tracked.Hash != "" && fileStatus == "ready" {
-			fileStatus = "writeback-pending"
 		}
 		if fileStatus == "writeback-pending" {
 			pendingWriteback++

@@ -3124,6 +3124,11 @@ func TestLowMemoryPublicStateOmitsPerFileDetails(t *testing.T) {
 		Hash:        hashString("# tracked"),
 		Dirty:       true,
 	}
+	syncer.state.Files["/clean.md"] = trackedFile{
+		Revision:    "rev_2",
+		ContentType: "text/markdown",
+		Hash:        hashString("# clean"),
+	}
 
 	if err := syncer.saveState(); err != nil {
 		t.Fatalf("save state failed: %v", err)
@@ -3138,6 +3143,9 @@ func TestLowMemoryPublicStateOmitsPerFileDetails(t *testing.T) {
 	}
 	if state.PendingWriteback != 1 {
 		t.Fatalf("expected only tracked dirty file to count as pending, got %d", state.PendingWriteback)
+	}
+	if !state.States.HasPendingWriteback {
+		t.Fatalf("expected dirty tracked file to keep pending writeback flag set")
 	}
 }
 
