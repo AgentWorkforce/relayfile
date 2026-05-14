@@ -343,6 +343,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		return runWorkspace(args[1:], stdin, stdout)
 	case "integration":
 		return runIntegration(args[1:], stdin, stdout)
+	case "digest":
+		return runDigest(args[1:], stdout)
 	case "ops":
 		return runOps(args[1:], stdin, stdout)
 	case "writeback":
@@ -401,6 +403,12 @@ Usage:
   relayfile integration disconnect PROVIDER [--workspace NAME] [--yes]
   relayfile integration adopt PROVIDER --connection-id ID [--workspace NAME] [--provider-config-key KEY] [--yes]
   relayfile integration set-metadata PROVIDER KEY=VALUE [KEY=VALUE...] [--workspace NAME] [--yes]
+  relayfile digest function deploy PATH [--workspace NAME] [--name NAME] [--json]
+  relayfile digest function list [--workspace NAME] [--json]
+  relayfile digest function show NAME [--workspace NAME] [--json]
+  relayfile digest function disable NAME [--workspace NAME]
+  relayfile digest function logs NAME [--workspace NAME] [--tail]
+  relayfile digest function test PATH [--fixture EVENTS_JSON]
   relayfile ops list [--workspace NAME] [--json]
   relayfile ops replay OPID [--workspace NAME]
   relayfile writeback status [WORKSPACE] [--json]
@@ -423,6 +431,7 @@ Subcommands:
   login       Sign in via the Relayfile Cloud browser flow (or --api-key for self-hosted)
   workspace   Create, select, list, show current, or delete locally tracked workspaces
   integration Connect, discover, list, disconnect, or adopt workspace integrations
+  digest      Manage and test custom digest functions
   ops         List or replay dead-lettered writeback ops
   writeback   Inspect or retry local writeback failures
   writeback status

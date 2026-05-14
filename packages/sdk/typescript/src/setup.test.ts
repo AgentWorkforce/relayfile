@@ -328,6 +328,78 @@ describe("RelayfileSetup", () => {
     expect(readRequestUrl(fetchMock, 3)).toBe("https://staging.agentrelay.com/base/cloud/api/v1/workspaces/ws_123/integrations/github/status")
   })
 
+  it("deploys and reads digest functions through the workspace cloud API", async () => {
+    const fetchMock = queueFetch(
+      makeJoinResponse(),
+      jsonResponse({
+        digestFunctionId: "df_123",
+        version: 1,
+        status: "active",
+        sha256: "sha256:abc"
+      }),
+      jsonResponse({
+        digestFunctions: [
+          {
+            digestFunctionId: "df_123",
+            name: "roadmap",
+            version: 1,
+            status: "active",
+            sha256: "sha256:abc",
+            bytes: 64,
+            createdAt: "2026-05-13T00:00:00.000Z"
+          }
+        ],
+        nextCursor: null
+      }),
+      jsonResponse({
+        digestFunctionId: "df_123",
+        logs: [],
+        nextCursor: null
+      })
+    )
+
+    const setup = new RelayfileSetup({
+      cloudApiUrl: "https://staging.agentrelay.com/base/cloud",
+      accessToken: "cloud_at"
+    })
+    const handle = await setup.joinWorkspace("ws_123")
+
+    await handle.deployDigestFunction({
+      slug: "roadmap",
+      displayName: "Roadmap",
+      source: {
+        runtime: "node20",
+        entrypoint: "roadmap.ts",
+        files: [{ path: "roadmap.ts", contents: "export const digest = async () => null" }]
+      }
+    })
+    await handle.listDigestFunctions({ limit: 10 })
+    await handle.getDigestFunctionLogs("df_123", {
+      since: new Date("2026-05-13T00:00:00.000Z"),
+      limit: 25
+    })
+
+    expect(readRequestUrl(fetchMock, 1)).toBe(
+      "https://staging.agentrelay.com/base/cloud/api/v1/workspaces/ws_123/digest-functions"
+    )
+    expect(readRequestBody(fetchMock, 1)).toEqual({
+      slug: "roadmap",
+      displayName: "Roadmap",
+      source: {
+        runtime: "node20",
+        entrypoint: "roadmap.ts",
+        files: [{ path: "roadmap.ts", contents: "export const digest = async () => null" }]
+      }
+    })
+    expect(readRequestUrl(fetchMock, 2)).toBe(
+      "https://staging.agentrelay.com/base/cloud/api/v1/workspaces/ws_123/digest-functions?limit=10"
+    )
+    expect(readRequestUrl(fetchMock, 3)).toBe(
+      "https://staging.agentrelay.com/base/cloud/api/v1/workspaces/ws_123/digest-functions/df_123/logs?since=2026-05-13T00%3A00%3A00.000Z&limit=25"
+    )
+    expect(readRequestHeaders(fetchMock, 1).Authorization).toBe("Bearer cloud_at")
+  })
+
   it("adopts an existing Nango connection via POST /integrations/{provider}/adopt", async () => {
     // Operator path: a Nango connection has already been minted out-of-band
     // (UI or third-party flow). The SDK's adopt method posts the

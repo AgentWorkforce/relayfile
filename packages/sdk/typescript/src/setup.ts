@@ -56,6 +56,16 @@ import {
   defaultMountLauncher,
   readMountedWorkspaceStatus
 } from "./mount-launcher.js"
+import type {
+  DeployDigestFunctionInput,
+  DigestFunctionDeployResponse,
+  DigestFunctionDetail,
+  DigestFunctionDisableResponse,
+  DigestFunctionListResponse,
+  DigestFunctionLogsResponse,
+  GetDigestFunctionLogsOptions,
+  ListDigestFunctionsOptions
+} from "./digest.js"
 
 export { RELAYFILE_SDK_VERSION } from "./version.js"
 
@@ -523,6 +533,70 @@ export class WorkspaceHandle {
       })
     }
     return this._client
+  }
+
+  async deployDigestFunction(
+    input: DeployDigestFunctionInput
+  ): Promise<DigestFunctionDeployResponse> {
+    return this._setup.requestJson({
+      operation: "deployDigestFunction",
+      method: "POST",
+      path: `api/v1/workspaces/${encodeURIComponent(this.workspaceId)}/digest-functions`,
+      body: {
+        slug: input.slug,
+        displayName: input.displayName ?? undefined,
+        source: input.source
+      }
+    }) as Promise<DigestFunctionDeployResponse>
+  }
+
+  async listDigestFunctions(
+    options: ListDigestFunctionsOptions = {}
+  ): Promise<DigestFunctionListResponse> {
+    const query = buildQueryString({
+      cursor: options.cursor,
+      limit: options.limit
+    })
+    return this._setup.requestJson({
+      operation: "listDigestFunctions",
+      method: "GET",
+      path: `api/v1/workspaces/${encodeURIComponent(this.workspaceId)}/digest-functions${query}`
+    }) as Promise<DigestFunctionListResponse>
+  }
+
+  async getDigestFunction(
+    digestFunctionId: string
+  ): Promise<DigestFunctionDetail> {
+    return this._setup.requestJson({
+      operation: "getDigestFunction",
+      method: "GET",
+      path: `api/v1/workspaces/${encodeURIComponent(this.workspaceId)}/digest-functions/${encodeURIComponent(digestFunctionId)}`
+    }) as Promise<DigestFunctionDetail>
+  }
+
+  async disableDigestFunction(
+    digestFunctionId: string
+  ): Promise<DigestFunctionDisableResponse> {
+    return this._setup.requestJson({
+      operation: "disableDigestFunction",
+      method: "POST",
+      path: `api/v1/workspaces/${encodeURIComponent(this.workspaceId)}/digest-functions/${encodeURIComponent(digestFunctionId)}/disable`
+    }) as Promise<DigestFunctionDisableResponse>
+  }
+
+  async getDigestFunctionLogs(
+    digestFunctionId: string,
+    options: GetDigestFunctionLogsOptions = {}
+  ): Promise<DigestFunctionLogsResponse> {
+    const query = buildQueryString({
+      since: options.since instanceof Date ? options.since.toISOString() : options.since,
+      limit: options.limit
+    })
+    return this._setup.requestJson({
+      operation: "getDigestFunctionLogs",
+      method: "GET",
+      path: `api/v1/workspaces/${encodeURIComponent(this.workspaceId)}/digest-functions/${encodeURIComponent(digestFunctionId)}/logs${query}`
+    }) as Promise<DigestFunctionLogsResponse>
   }
 
   async connectIntegration(
@@ -1479,6 +1553,19 @@ function buildCloudUrl(baseUrl: string, path: string): string {
     base.pathname = `${base.pathname}/`
   }
   return new URL(path.replace(/^\/+/, ""), base).toString()
+}
+
+function buildQueryString(
+  params: Record<string, string | number | boolean | undefined>
+): string {
+  const query = new URLSearchParams()
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== undefined) {
+      query.set(key, String(value))
+    }
+  }
+  const encoded = query.toString()
+  return encoded ? `?${encoded}` : ""
 }
 
 async function resolveToken(

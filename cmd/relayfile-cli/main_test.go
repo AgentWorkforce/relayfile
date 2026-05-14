@@ -122,6 +122,57 @@ func parseBrowserFragment(t *testing.T, rawURL string) url.Values {
 	return fragment
 }
 
+func TestDigestFunctionTestRejectsNetworkFetchBeforeFixtureRead(t *testing.T) {
+	dir := t.TempDir()
+	sourcePath := filepath.Join(dir, "eng-roadmap.ts")
+	if err := os.WriteFile(sourcePath, []byte(`export const digest = async () => fetch('https://example.test');`), 0o600); err != nil {
+		t.Fatalf("write digest function fixture: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	err := run([]string{"digest", "function", "test", sourcePath, "--fixture", filepath.Join(dir, "missing-events.json")}, strings.NewReader(""), &stdout, &stdout)
+	if err == nil {
+		t.Fatalf("expected network preflight error")
+	}
+	if got := err.Error(); !strings.Contains(got, `network API "fetch" is not available`) {
+		t.Fatalf("expected fetch isolation error, got %q", got)
+	}
+	if strings.Contains(err.Error(), "missing-events.json") {
+		t.Fatalf("expected fetch isolation before fixture read, got %q", err.Error())
+	}
+}
+
+func TestDigestFunctionTestAllowsFetchTextInCommentsAndStringsAndRendersFunctionOutput(t *testing.T) {
+	dir := t.TempDir()
+	sourcePath := filepath.Join(dir, "eng-roadmap.js")
+	if err := os.WriteFile(sourcePath, []byte(`// fetch('https://example.test') is documented but not called
+module.exports = async function digest() {
+  return { provider: "Eng Roadmap", bullets: [{ text: "literal fetch text", canonicalPath: "/roadmap/a" }] };
+};
+`), 0o600); err != nil {
+		t.Fatalf("write digest function fixture: %v", err)
+	}
+	fixturePath := filepath.Join(dir, "events.json")
+	if err := os.WriteFile(fixturePath, []byte(`[{"id":"evt_1"},{"id":"evt_2"}]`), 0o600); err != nil {
+		t.Fatalf("write events fixture: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := run([]string{"digest", "function", "test", sourcePath, "--fixture", fixturePath}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("expected rendered Markdown, got error: %v", err)
+	}
+	got := stdout.String()
+	if !strings.Contains(got, "## Eng Roadmap") {
+		t.Fatalf("expected function section header, got %q", got)
+	}
+	if !strings.Contains(got, "events: 2") {
+		t.Fatalf("expected fixture event count in rendered Markdown, got %q", got)
+	}
+	if !strings.Contains(got, "literal fetch text - [/roadmap/a]") {
+		t.Fatalf("expected function bullet in rendered Markdown, got %q", got)
+	}
+}
+
 func TestWorkspaceUseSetsDefaultWorkspace(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)
