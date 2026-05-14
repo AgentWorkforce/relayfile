@@ -243,7 +243,7 @@ func TestDigestFunctionTestOfflineRendersSection(t *testing.T) {
 	defer server.Close()
 	t.Setenv("RELAYFILE_SERVER", server.URL)
 
-	sourcePath := filepath.Join("testdata", "digest", "eng-roadmap.ts")
+	sourcePath := filepath.Join("testdata", "digest", "eng-roadmap.js")
 	fixturePath := filepath.Join("testdata", "digest", "events.json")
 	var stdout bytes.Buffer
 	if err := run([]string{"digest", "function", "test", sourcePath, "--fixture", fixturePath}, strings.NewReader(""), &stdout, &stdout); err != nil {
@@ -267,8 +267,8 @@ func TestDigestFunctionTestOfflineRendersSection(t *testing.T) {
 
 func TestDigestFunctionTestMatchesDotGlobPatterns(t *testing.T) {
 	dir := t.TempDir()
-	sourcePath := filepath.Join(dir, "markdown.ts")
-	source := []byte(`export const digest = async (ctx) => {
+	sourcePath := filepath.Join(dir, "markdown.js")
+	source := []byte(`module.exports = async function digest(ctx) {
   const events = await ctx.changeEvents({ paths: ["*.md"] });
   return {
     provider: "Markdown",

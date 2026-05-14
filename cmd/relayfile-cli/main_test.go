@@ -144,9 +144,11 @@ func TestDigestFunctionTestRejectsNetworkFetchBeforeFixtureRead(t *testing.T) {
 
 func TestDigestFunctionTestAllowsFetchTextInCommentsAndStringsAndRendersFunctionOutput(t *testing.T) {
 	dir := t.TempDir()
-	sourcePath := filepath.Join(dir, "eng-roadmap.ts")
+	sourcePath := filepath.Join(dir, "eng-roadmap.js")
 	if err := os.WriteFile(sourcePath, []byte(`// fetch('https://example.test') is documented but not called
-export const digest = async () => ({ provider: "Eng Roadmap", bullets: [{ text: "literal fetch text", canonicalPath: "/roadmap/a" }] });
+module.exports = async function digest() {
+  return { provider: "Eng Roadmap", bullets: [{ text: "literal fetch text", canonicalPath: "/roadmap/a" }] };
+};
 `), 0o600); err != nil {
 		t.Fatalf("write digest function fixture: %v", err)
 	}

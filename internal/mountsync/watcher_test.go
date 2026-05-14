@@ -2,7 +2,6 @@ package mountsync
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -267,18 +266,22 @@ func TestWatcherSkipsRelayDir(t *testing.T) {
 
 func TestWatcherDebounce(t *testing.T) {
 	localDir := t.TempDir()
-	target := filepath.Join(localDir, "burst.txt")
-	if err := os.WriteFile(target, []byte("start"), 0o644); err != nil {
-		t.Fatalf("seed file: %v", err)
+	events := make(chan watcherEvent, 16)
+	watcher, err := NewFileWatcher(localDir, func(relativePath string, op fsnotify.Op) {
+		events <- watcherEvent{
+			path: filepath.ToSlash(relativePath),
+			op:   op,
+		}
+	})
+	if err != nil {
+		t.Fatalf("create file watcher: %v", err)
 	}
-
-	events, _, _ := startFileWatcher(t, localDir)
+	t.Cleanup(func() {
+		_ = watcher.Close()
+	})
 
 	for i := 0; i < 5; i++ {
-		content := []byte(fmt.Sprintf("v%d", i))
-		if err := os.WriteFile(target, content, 0o644); err != nil {
-			t.Fatalf("write burst file: %v", err)
-		}
+		watcher.queueChange("burst.txt", fsnotify.Write)
 		if i < 4 {
 			time.Sleep(10 * time.Millisecond)
 		}
