@@ -66,12 +66,21 @@ class RecordingClient(RelayFileClient):
 
 
 def test_path_matches_requested_patterns() -> None:
-    assert path_matches("/notion/pages/calls/*/transcript", "/notion/pages/calls/2026-05-08/transcript")
-    assert not path_matches("/notion/pages/calls/*/transcript", "/notion/pages/calls/2026-05-08/notes/transcript")
+    assert path_matches(
+        "/notion/pages/calls/*/transcript", "/notion/pages/calls/2026-05-08/transcript"
+    )
+    assert not path_matches(
+        "/notion/pages/calls/*/transcript",
+        "/notion/pages/calls/2026-05-08/notes/transcript",
+    )
     assert path_matches("/linear/issues/**", "/linear/issues/PROJ-441/comments/c-1")
     assert path_matches("/linear/issues/**", "/linear/issues")
-    assert path_matches("/github/repos/acme/api/pulls/*", "/github/repos/acme/api/pulls/42")
-    assert not path_matches("/github/repos/acme/api/pulls/*", "/github/repos/acme/api/pulls/42/files")
+    assert path_matches(
+        "/github/repos/acme/api/pulls/*", "/github/repos/acme/api/pulls/42"
+    )
+    assert not path_matches(
+        "/github/repos/acme/api/pulls/*", "/github/repos/acme/api/pulls/42/files"
+    )
 
 
 def test_invalid_pattern_throws_synchronously() -> None:
@@ -80,7 +89,12 @@ def test_invalid_pattern_throws_synchronously() -> None:
     with pytest.raises(ValueError, match="trailing"):
         path_matches("/linear/**/comments", "/linear/PROJ-1/comments")
     with pytest.raises(ValueError, match="empty"):
-        on_write("/linear//issues/*", lambda event: None, client=RecordingClient(), workspace_id="ws_acme")
+        on_write(
+            "/linear//issues/*",
+            lambda event: None,
+            client=RecordingClient(),
+            workspace_id="ws_acme",
+        )
 
 
 def test_on_write_dispatches_matching_events_and_shares_socket() -> None:

@@ -65,6 +65,13 @@ const defaultBulkFlushThreshold = 256
 // tracked.Hash and the actual remote content.
 const defaultFullPullEvery = 20
 
+var providerLayoutAliasSegments = []string{
+	"by-title",
+	"by-id",
+	"by-name",
+	"by-state",
+}
+
 type ConflictError struct {
 	Path string
 }
@@ -426,6 +433,11 @@ type SyncerOptions struct {
 	FullPullEvery int
 	// LazyRepos controls lazy GitHub repo subtree hydration. nil falls back to env.
 	LazyRepos *bool
+	// ProviderLayoutRegistrar receives deterministic per-provider layout
+	// manifests derived from remote snapshots. The FUSE layer can implement
+	// this to expose virtual <provider>/.layout.md files without coupling
+	// mountsync back to mountfuse.
+	ProviderLayoutRegistrar ProviderLayoutRegistrar
 }
 
 type Logger interface {
@@ -460,6 +472,7 @@ type Syncer struct {
 	fullPullEvery        int
 	incrementalCycles    int
 	lazyRepos            bool
+	layoutRegistrar      ProviderLayoutRegistrar
 	mu                   sync.Mutex
 }
 
@@ -668,6 +681,7 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 		interval:             opts.Interval,
 		fullPullEvery:        fullPullEvery,
 		lazyRepos:            lazyRepos,
+		layoutRegistrar:      opts.ProviderLayoutRegistrar,
 		state: mountState{
 			Files: map[string]trackedFile{},
 		},
@@ -1411,6 +1425,23 @@ func (s *Syncer) applyWebSocketEvent(ctx context.Context, event websocketEvent) 
 		}
 		s.markSyncSuccess()
 		return s.saveState()
+	case "directory.created":
+		remotePath := normalizeRemotePath(event.Path)
+		if remotePath == "/" || !isUnderRemoteRoot(s.remoteRoot, remotePath) {
+			return nil
+		}
+		provider, _, ok := providerLayoutParts(s.remoteRoot, remotePath)
+		if !ok {
+			return nil
+		}
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		s.state.LastEventAt = eventAt
+		if err := s.ensureProviderLayout(provider); err != nil {
+			return err
+		}
+		s.markSyncSuccess()
+		return s.saveState()
 	default:
 		return nil
 	}
@@ -1711,6 +1742,9 @@ func (s *Syncer) applyRemoteSnapshot(remoteFiles map[string]RemoteFile, conflict
 			return err
 		}
 	}
+	if err := s.materializeProviderLayouts(remoteFiles); err != nil {
+		return err
+	}
 
 	statePaths := make([]string, 0, len(s.state.Files))
 	for remotePath := range s.state.Files {
@@ -1726,6 +1760,152 @@ func (s *Syncer) applyRemoteSnapshot(remoteFiles map[string]RemoteFile, conflict
 		}
 	}
 	return nil
+}
+
+func (s *Syncer) materializeProviderLayouts(remoteFiles map[string]RemoteFile) error {
+	if s.layoutRegistrar == nil {
+		return nil
+	}
+
+	providerResources := map[string]map[string]struct{}{}
+	for remotePath := range remoteFiles {
+		provider, resource, ok := providerLayoutParts(s.remoteRoot, remotePath)
+		if !ok {
+			continue
+		}
+		if _, ok := providerResources[provider]; !ok {
+			providerResources[provider] = map[string]struct{}{}
+		}
+		if resource != "" {
+			providerResources[provider][resource] = struct{}{}
+		}
+	}
+
+	providers := make([]string, 0, len(providerResources))
+	for provider := range providerResources {
+		providers = append(providers, provider)
+	}
+	sort.Strings(providers)
+	for _, provider := range providers {
+		manifest := providerLayoutManifest(provider, providerResources[provider])
+		if err := s.layoutRegistrar.RegisterProviderLayout(provider, manifest); err != nil {
+			return fmt.Errorf("register provider layout for %s: %w", provider, err)
+		}
+	}
+	return nil
+}
+
+func (s *Syncer) ensureProviderLayout(provider string) error {
+	if s.layoutRegistrar == nil {
+		return nil
+	}
+	provider = strings.TrimSpace(provider)
+	if provider == "" || isReservedProviderLayoutSegment(provider) {
+		return nil
+	}
+	return s.layoutRegistrar.RegisterProviderLayout(provider, providerLayoutManifest(provider, nil))
+}
+
+func providerLayoutManifest(provider string, resources map[string]struct{}) ProviderLayoutManifest {
+	resourceNames := make([]string, 0, len(resources))
+	for resource := range resources {
+		resourceNames = append(resourceNames, resource)
+	}
+	sort.Strings(resourceNames)
+	return ProviderLayoutManifest{
+		Provider:      provider,
+		Resources:     resourceNames,
+		AliasSegments: append([]string(nil), providerLayoutAliasSegments...),
+	}
+}
+
+func providerLayoutParts(remoteRoot, remotePath string) (provider, resource string, ok bool) {
+	remoteRoot = normalizeRemotePath(remoteRoot)
+	remotePath = normalizeRemotePath(remotePath)
+	if !isUnderRemoteRoot(remoteRoot, remotePath) {
+		return "", "", false
+	}
+
+	rel := strings.TrimPrefix(remotePath, remoteRoot)
+	if remoteRoot == "/" {
+		rel = strings.TrimPrefix(remotePath, "/")
+	} else {
+		rel = strings.TrimPrefix(rel, "/")
+	}
+	rel = strings.Trim(rel, "/")
+	rootSegments := providerLayoutPathSegments(remoteRoot)
+	relSegments := providerLayoutPathSegments(rel)
+	if remoteRoot != "/" && len(rootSegments) > 0 {
+		provider = strings.TrimSpace(rootSegments[0])
+		if provider == "" || isReservedProviderLayoutSegment(provider) {
+			return "", "", false
+		}
+		if len(rootSegments) > 1 {
+			resource = providerLayoutRootResourceSegment(rootSegments[1:])
+		}
+		if resource == "" {
+			resource = providerLayoutResourceSegment(relSegments)
+		}
+		return provider, resource, true
+	}
+	if len(relSegments) == 0 {
+		return "", "", false
+	}
+
+	provider = strings.TrimSpace(relSegments[0])
+	if provider == "" || isReservedProviderLayoutSegment(provider) {
+		return "", "", false
+	}
+	resource = providerLayoutResourceSegment(relSegments[1:])
+	return provider, resource, true
+}
+
+func providerLayoutPathSegments(path string) []string {
+	path = strings.Trim(path, "/")
+	if path == "" {
+		return nil
+	}
+	return strings.Split(path, "/")
+}
+
+func providerLayoutRootResourceSegment(segments []string) string {
+	if len(segments) == 0 {
+		return ""
+	}
+	return providerLayoutCleanResourceSegment(segments[0])
+}
+
+func providerLayoutResourceSegment(segments []string) string {
+	if len(segments) < 2 {
+		return ""
+	}
+	return providerLayoutCleanResourceSegment(segments[0])
+}
+
+func providerLayoutCleanResourceSegment(segment string) string {
+	candidate := strings.TrimSpace(segment)
+	if candidate == "" || isReservedProviderLayoutSegment(candidate) || isProviderLayoutAliasSegment(candidate) {
+		return ""
+	}
+	return candidate
+}
+
+func isReservedProviderLayoutSegment(segment string) bool {
+	switch strings.TrimSpace(segment) {
+	case "", ".relay", "digests", "_index.json", "LAYOUT.md", ".relayfile-mount-state.json":
+		return true
+	default:
+		return false
+	}
+}
+
+func isProviderLayoutAliasSegment(segment string) bool {
+	for _, alias := range providerLayoutAliasSegments {
+		if segment == alias {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Syncer) pullRemoteIncremental(ctx context.Context, conflicted map[string]struct{}, cursor string) (string, error) {
@@ -1888,6 +2068,9 @@ func (s *Syncer) applyRemoteFile(remotePath string, file RemoteFile, conflicted 
 	// _index.json files and nested <integration>/.layout.md dotfiles are
 	// first-class remote payloads. Do not filter or normalize them here; only
 	// the internal .relayfile-mount-state.json family is reserved elsewhere.
+	// Virtual <provider>/.layout.md manifests are registered from snapshots by
+	// materializeProviderLayouts; remote-supplied .layout.md payloads still
+	// pass through to disk unchanged.
 	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
 		return err
 	}

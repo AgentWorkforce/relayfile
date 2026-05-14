@@ -151,19 +151,21 @@ async function executeOperation(state, operation, mock) {
     if (!rawPath || webhookPath === "/") {
       throw new Error(`materializeWebhook operation is missing or invalid path: ${JSON.stringify(operation)}`);
     }
+    if (!allowWrite(state, webhookPath, op)) return;
+
     const provider = String(operation.provider ?? operation.adapter ?? "").trim();
     if (!provider) throw new Error(`materializeWebhook operation is missing provider: ${JSON.stringify(operation)}`);
+
     const rawContent = operation.content === undefined ? {} : operation.content;
     const content = typeof rawContent === "string" ? rawContent : `${JSON.stringify(rawContent, null, 2)}\n`;
     await writeVirtualFile(state, webhookPath, content);
-    const effect = {
+    state.sideEffects.push({
       kind: "webhookMaterialized",
       provider,
       path: webhookPath,
       receivedAt: operation.receivedAt,
       source: operation.source,
-    };
-    state.sideEffects.push(effect);
+    });
     state.toolCalls.push({ name: "materializeWebhook", provider, path: webhookPath });
     state.contentLines.push(`${label(operation)}webhook ${provider} materialized ${webhookPath}: ${preview(content)}`);
     return;

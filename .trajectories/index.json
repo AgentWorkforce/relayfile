@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "lastUpdated": "2026-05-12T01:43:49.076Z",
+  "lastUpdated": "2026-05-14T10:07:59.184Z",
   "trajectories": {
     "traj_mfyus7zfgxt2": {
       "title": "062-sdk-setup-client-workflow",
@@ -221,34 +221,6 @@
       "completedAt": "2026-05-09T13:57:04.293Z",
       "path": ".trajectories/completed/2026-05/traj_6lyjg41p6a28.json",
       "compactedInto": "compact_xl96yexa79wg"
-    },
-    "traj_4vdcwo2iy630": {
-      "title": "relayfile login: fall back to cloud browser flow when no --token",
-      "status": "completed",
-      "startedAt": "2026-05-09T18:25:18.473Z",
-      "completedAt": "2026-05-09T18:27:13.341Z",
-      "path": ".trajectories/completed/2026-05/traj_4vdcwo2iy630.json"
-    },
-    "traj_h99ldnvo1d26": {
-      "title": "relayfile workspace current + active marker in 'workspace list'",
-      "status": "completed",
-      "startedAt": "2026-05-09T18:44:54.122Z",
-      "completedAt": "2026-05-09T18:48:09.889Z",
-      "path": ".trajectories/completed/2026-05/traj_h99ldnvo1d26.json"
-    },
-    "traj_brjdrgcnnwhs": {
-      "title": "Specify initial relayfile integration E2E eval",
-      "status": "completed",
-      "startedAt": "2026-05-09T19:25:53.348Z",
-      "completedAt": "2026-05-09T19:29:16.033Z",
-      "path": ".trajectories/completed/2026-05/traj_brjdrgcnnwhs.json"
-    },
-    "traj_tdywz0ni0z1a": {
-      "title": "Fix issue 132",
-      "status": "completed",
-      "startedAt": "2026-05-11T18:12:11.347Z",
-      "completedAt": "2026-05-11T18:14:13.466Z",
-      "path": ".trajectories/completed/2026-05/traj_tdywz0ni0z1a.json"
     },
     "traj_a8szuw8b3yt8": {
       "title": "Add proactive runtime contract markers for relayfile M1",

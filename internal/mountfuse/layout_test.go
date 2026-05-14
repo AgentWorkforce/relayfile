@@ -75,6 +75,63 @@ func TestLayoutMarkdownContainsRequiredAnchors(t *testing.T) {
 	}
 }
 
+func TestProviderLayoutMarkdownDeterministic(t *testing.T) {
+	t.Parallel()
+
+	manifest := LayoutManifest{
+		Provider:            "linear",
+		ResourceDirectories: []string{"projects", "issues", "issues"},
+		AliasSegments:       []string{aliasByStateSegment, aliasByIDSegment, aliasByIDSegment},
+		WritebackResources:  []string{"state-transitions", "comments"},
+	}
+
+	first := providerLayoutMarkdown(manifest)
+	second := providerLayoutMarkdown(manifest)
+	if first != second {
+		t.Fatal("providerLayoutMarkdown is not deterministic")
+	}
+	for _, needle := range []string{
+		"linear layout",
+		"issues/",
+		"projects/",
+		aliasByIDSegment,
+		aliasByStateSegment,
+		"comments/.schema.json",
+		"state-transitions/.schema.json",
+		"wb-<timestamp>.json",
+	} {
+		if !strings.Contains(first, needle) {
+			t.Fatalf("provider layout missing %q:\n%s", needle, first)
+		}
+	}
+}
+
+func TestIsVirtualProviderLayoutPath(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		remoteRoot string
+		remotePath string
+		want       string
+		wantOK     bool
+	}{
+		{name: "root provider", remoteRoot: "/", remotePath: "/linear/.layout.md", want: "linear", wantOK: true},
+		{name: "prefixed root", remoteRoot: "/external", remotePath: "/external/github/.layout.md", want: "github", wantOK: true},
+		{name: "root layout", remoteRoot: "/", remotePath: "/LAYOUT.md", wantOK: false},
+		{name: "nested layout", remoteRoot: "/", remotePath: "/github/repos/.layout.md", wantOK: false},
+		{name: "outside root", remoteRoot: "/external", remotePath: "/github/.layout.md", wantOK: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := isVirtualProviderLayoutPath(tt.remoteRoot, tt.remotePath)
+			if ok != tt.wantOK || got != tt.want {
+				t.Fatalf("isVirtualProviderLayoutPath(%q, %q) = (%q, %v), want (%q, %v)", tt.remoteRoot, tt.remotePath, got, ok, tt.want, tt.wantOK)
+			}
+		})
+	}
+}
+
 func TestRootDirectorySynthesizesLayoutMarkdown(t *testing.T) {
 	t.Parallel()
 

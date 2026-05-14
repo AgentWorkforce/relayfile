@@ -18,6 +18,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -32,6 +33,20 @@ import (
 
 func boolPtr(value bool) *bool {
 	return &value
+}
+
+type fakeProviderLayoutRegistrar struct {
+	calls    []string
+	manifest map[string]ProviderLayoutManifest
+}
+
+func (r *fakeProviderLayoutRegistrar) RegisterProviderLayout(provider string, manifest ProviderLayoutManifest) error {
+	if r.manifest == nil {
+		r.manifest = map[string]ProviderLayoutManifest{}
+	}
+	r.calls = append(r.calls, provider)
+	r.manifest[provider] = manifest
+	return nil
 }
 
 func TestSyncOncePullsRemoteAndPushesLocalEdits(t *testing.T) {
@@ -2703,6 +2718,263 @@ func TestApplyRemoteSnapshot_PreservesNestedLayoutDotfiles(t *testing.T) {
 	assertLocalFileContent(t, filepath.Join(localDir, "notion", "pages", "_index.json"), "{\n  \"rows\": []\n}\n")
 }
 
+func TestApplyRemoteSnapshot_MaterializesProviderLayouts(t *testing.T) {
+	t.Parallel()
+
+	localDir := t.TempDir()
+	registrar := &fakeProviderLayoutRegistrar{}
+	syncer, err := NewSyncer(&fakeClient{}, SyncerOptions{
+		WorkspaceID:             "ws_snapshot_provider_layouts",
+		RemoteRoot:              "/",
+		LocalRoot:               localDir,
+		ProviderLayoutRegistrar: registrar,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+
+	remoteFiles := map[string]RemoteFile{
+		"/linear/issues/AGE-16__issue-1.json": {
+			Path:        "/linear/issues/AGE-16__issue-1.json",
+			Revision:    "rev_linear_issue",
+			ContentType: "application/json",
+			Content:     `{"identifier":"AGE-16"}`,
+		},
+		"/linear/issues/by-state/open/AGE-16__issue-1.json": {
+			Path:        "/linear/issues/by-state/open/AGE-16__issue-1.json",
+			Revision:    "rev_linear_alias",
+			ContentType: "application/json",
+			Content:     `{"identifier":"AGE-16"}`,
+		},
+		"/notion/pages/page-1.md": {
+			Path:        "/notion/pages/page-1.md",
+			Revision:    "rev_notion_page",
+			ContentType: "text/markdown",
+			Content:     "# Page",
+		},
+		"/github/repos/octocat/hello-world/README.md": {
+			Path:        "/github/repos/octocat/hello-world/README.md",
+			Revision:    "rev_github_readme",
+			ContentType: "text/markdown",
+			Content:     "# hello-world",
+		},
+		"/digests/yesterday.md": {
+			Path:        "/digests/yesterday.md",
+			Revision:    "rev_digest",
+			ContentType: "text/markdown",
+			Content:     "_no activity_",
+		},
+		"/.relay/dead-letter/payload.json": {
+			Path:        "/.relay/dead-letter/payload.json",
+			Revision:    "rev_dead",
+			ContentType: "application/json",
+			Content:     `{}`,
+		},
+	}
+
+	if err := syncer.applyRemoteSnapshot(remoteFiles, nil); err != nil {
+		t.Fatalf("applyRemoteSnapshot failed: %v", err)
+	}
+
+	if got, want := registrar.calls, []string{"github", "linear", "notion"}; !slices.Equal(got, want) {
+		t.Fatalf("registered providers = %#v, want %#v", got, want)
+	}
+	if got, want := registrar.manifest["linear"].Resources, []string{"issues"}; !slices.Equal(got, want) {
+		t.Fatalf("linear resources = %#v, want %#v", got, want)
+	}
+	if got, want := registrar.manifest["github"].Resources, []string{"repos"}; !slices.Equal(got, want) {
+		t.Fatalf("github resources = %#v, want %#v", got, want)
+	}
+	if got, want := registrar.manifest["notion"].Resources, []string{"pages"}; !slices.Equal(got, want) {
+		t.Fatalf("notion resources = %#v, want %#v", got, want)
+	}
+	if got, want := registrar.manifest["linear"].AliasSegments, providerLayoutAliasSegments; !slices.Equal(got, want) {
+		t.Fatalf("alias segments = %#v, want %#v", got, want)
+	}
+	if _, ok := registrar.manifest["digests"]; ok {
+		t.Fatalf("reserved digests root should not be registered as a provider")
+	}
+	if _, ok := registrar.manifest[".relay"]; ok {
+		t.Fatalf("reserved .relay root should not be registered as a provider")
+	}
+	if _, err := os.Stat(filepath.Join(localDir, "linear", ".layout.md")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("provider layout registration should not write a disk .layout.md, stat err=%v", err)
+	}
+}
+
+func TestApplyRemoteSnapshot_RemoteLayoutPassthroughStillRegistersProviderLayout(t *testing.T) {
+	t.Parallel()
+
+	localDir := t.TempDir()
+	registrar := &fakeProviderLayoutRegistrar{}
+	syncer, err := NewSyncer(&fakeClient{}, SyncerOptions{
+		WorkspaceID:             "ws_snapshot_layout_passthrough",
+		RemoteRoot:              "/",
+		LocalRoot:               localDir,
+		ProviderLayoutRegistrar: registrar,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+
+	remoteFiles := map[string]RemoteFile{
+		"/notion/.layout.md": {
+			Path:        "/notion/.layout.md",
+			Revision:    "rev_snapshot_layout",
+			ContentType: "text/markdown",
+			Content:     "# remote-authored\n",
+		},
+		"/notion/pages/page-1.md": {
+			Path:        "/notion/pages/page-1.md",
+			Revision:    "rev_page",
+			ContentType: "text/markdown",
+			Content:     "# Page",
+		},
+	}
+	if err := syncer.applyRemoteSnapshot(remoteFiles, nil); err != nil {
+		t.Fatalf("applyRemoteSnapshot failed: %v", err)
+	}
+
+	assertLocalFileContent(t, filepath.Join(localDir, "notion", ".layout.md"), "# remote-authored\n")
+	manifest, ok := registrar.manifest["notion"]
+	if !ok {
+		t.Fatalf("expected notion provider layout to be registered")
+	}
+	if got, want := manifest.Resources, []string{"pages"}; !slices.Equal(got, want) {
+		t.Fatalf("notion resources = %#v, want %#v", got, want)
+	}
+}
+
+func TestApplyRemoteSnapshot_ProviderLayoutsNoRegistrarNoOp(t *testing.T) {
+	t.Parallel()
+
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(&fakeClient{}, SyncerOptions{
+		WorkspaceID: "ws_snapshot_provider_layouts_no_registrar",
+		RemoteRoot:  "/",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+
+	if err := syncer.applyRemoteSnapshot(map[string]RemoteFile{
+		"/linear/issues/AGE-16__issue-1.json": {
+			Path:        "/linear/issues/AGE-16__issue-1.json",
+			Revision:    "rev_linear_issue",
+			ContentType: "application/json",
+			Content:     `{"identifier":"AGE-16"}`,
+		},
+	}, nil); err != nil {
+		t.Fatalf("applyRemoteSnapshot without registrar failed: %v", err)
+	}
+}
+
+func TestApplyRemoteSnapshot_ProviderLayoutsSkipReservedRoots(t *testing.T) {
+	t.Parallel()
+
+	localDir := t.TempDir()
+	registrar := &fakeProviderLayoutRegistrar{}
+	syncer, err := NewSyncer(&fakeClient{}, SyncerOptions{
+		WorkspaceID:             "ws_snapshot_provider_layouts_reserved",
+		RemoteRoot:              "/",
+		LocalRoot:               localDir,
+		ProviderLayoutRegistrar: registrar,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+
+	if err := syncer.applyRemoteSnapshot(map[string]RemoteFile{
+		"/.relay/dead-letter/payload.json": {
+			Path:        "/.relay/dead-letter/payload.json",
+			Revision:    "rev_dead_letter",
+			ContentType: "application/json",
+			Content:     `{}`,
+		},
+		"/digests/yesterday.md": {
+			Path:        "/digests/yesterday.md",
+			Revision:    "rev_digest",
+			ContentType: "text/markdown",
+			Content:     "_no activity_",
+		},
+		"/_index.json": {
+			Path:        "/_index.json",
+			Revision:    "rev_index",
+			ContentType: "application/json",
+			Content:     `{"rows":[]}`,
+		},
+		"/LAYOUT.md": {
+			Path:        "/LAYOUT.md",
+			Revision:    "rev_layout",
+			ContentType: "text/markdown",
+			Content:     "# Layout\n",
+		},
+		"/.relayfile-mount-state.json": {
+			Path:        "/.relayfile-mount-state.json",
+			Revision:    "rev_state",
+			ContentType: "application/json",
+			Content:     `{}`,
+		},
+	}, nil); err != nil {
+		t.Fatalf("applyRemoteSnapshot failed: %v", err)
+	}
+
+	if len(registrar.calls) != 0 {
+		t.Fatalf("reserved roots registered provider layouts: %#v", registrar.calls)
+	}
+}
+
+func TestApplyRemoteSnapshot_ProviderLayoutsUseNonRootProvider(t *testing.T) {
+	t.Parallel()
+
+	localDir := t.TempDir()
+	registrar := &fakeProviderLayoutRegistrar{}
+	syncer, err := NewSyncer(&fakeClient{}, SyncerOptions{
+		WorkspaceID:             "ws_snapshot_provider_layouts_subroot",
+		RemoteRoot:              "/notion",
+		LocalRoot:               localDir,
+		ProviderLayoutRegistrar: registrar,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+
+	if err := syncer.applyRemoteSnapshot(map[string]RemoteFile{
+		"/notion/pages/page-1.md": {
+			Path:        "/notion/pages/page-1.md",
+			Revision:    "rev_page",
+			ContentType: "text/markdown",
+			Content:     "# Page",
+		},
+	}, nil); err != nil {
+		t.Fatalf("applyRemoteSnapshot failed: %v", err)
+	}
+
+	if got, want := registrar.calls, []string{"notion"}; !slices.Equal(got, want) {
+		t.Fatalf("registered providers = %#v, want %#v", got, want)
+	}
+	if got, want := registrar.manifest["notion"].Resources, []string{"pages"}; !slices.Equal(got, want) {
+		t.Fatalf("notion resources = %#v, want %#v", got, want)
+	}
+	if _, ok := registrar.manifest["pages"]; ok {
+		t.Fatalf("remote root child should not be registered as a provider")
+	}
+}
+
+func TestProviderLayoutPartsUsesResourceFromNonRootRemoteRoot(t *testing.T) {
+	provider, resource, ok := providerLayoutParts("/github/repos", "/github/repos/octocat/hello-world/README.md")
+	if !ok {
+		t.Fatalf("expected provider layout parts")
+	}
+	if provider != "github" {
+		t.Fatalf("provider = %q, want github", provider)
+	}
+	if resource != "repos" {
+		t.Fatalf("resource = %q, want repos", resource)
+	}
+}
+
 func TestApplyWebSocketEvent_PreservesNestedLayoutDotfiles(t *testing.T) {
 	t.Parallel()
 
@@ -2746,6 +3018,47 @@ func TestApplyWebSocketEvent_PreservesNestedLayoutDotfiles(t *testing.T) {
 		t.Fatalf("expected websocket apply to clear last error, got %#v", syncer.state.LastError)
 	}
 	if got := syncer.state.LastEventAt; got != "2026-05-09T00:00:00Z" {
+		t.Fatalf("expected websocket timestamp to be preserved, got %q", got)
+	}
+}
+
+func TestApplyWebSocketEvent_DirectoryCreatedTriggersProviderLayout(t *testing.T) {
+	t.Parallel()
+
+	registrar := &fakeProviderLayoutRegistrar{}
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(&fakeClient{}, SyncerOptions{
+		WorkspaceID:             "ws_event_provider_layout",
+		RemoteRoot:              "/",
+		LocalRoot:               localDir,
+		ProviderLayoutRegistrar: registrar,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+
+	if err := syncer.applyWebSocketEvent(context.Background(), websocketEvent{
+		Type:      "directory.created",
+		Path:      "/linear/",
+		Timestamp: "2026-05-09T01:02:03Z",
+	}); err != nil {
+		t.Fatalf("applyWebSocketEvent failed: %v", err)
+	}
+
+	manifest, ok := registrar.manifest["linear"]
+	if !ok {
+		t.Fatalf("expected linear provider layout to be registered")
+	}
+	if manifest.Provider != "linear" {
+		t.Fatalf("manifest provider = %q, want linear", manifest.Provider)
+	}
+	if len(manifest.Resources) != 0 {
+		t.Fatalf("directory event manifest resources = %#v, want empty", manifest.Resources)
+	}
+	if strings.TrimSpace(syncer.state.LastSuccessfulReconcileAt) == "" {
+		t.Fatalf("expected directory-created apply to mark sync success")
+	}
+	if got := syncer.state.LastEventAt; got != "2026-05-09T01:02:03Z" {
 		t.Fatalf("expected websocket timestamp to be preserved, got %q", got)
 	}
 }

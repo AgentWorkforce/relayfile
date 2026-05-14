@@ -122,6 +122,78 @@ func parseBrowserFragment(t *testing.T, rawURL string) url.Values {
 	return fragment
 }
 
+func TestHelpFlagPrintsUsageForCommandsAndSubcommands(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "root short", args: []string{"-h"}, want: "relayfile is the RelayFile CLI."},
+		{name: "root long", args: []string{"--help"}, want: "relayfile is the RelayFile CLI."},
+		{name: "setup", args: []string{"setup", "-h"}, want: "Usage: relayfile setup"},
+		{name: "login", args: []string{"login", "-h"}, want: "Usage: relayfile login"},
+		{name: "workspace group", args: []string{"workspace", "-h"}, want: "relayfile workspace create NAME"},
+		{name: "workspace create", args: []string{"workspace", "create", "-h"}, want: "Usage: relayfile workspace create NAME"},
+		{name: "workspace use", args: []string{"workspace", "use", "-h"}, want: "Usage: relayfile workspace use NAME"},
+		{name: "workspace list", args: []string{"workspace", "list", "-h"}, want: "Usage: relayfile workspace list"},
+		{name: "workspace current", args: []string{"workspace", "current", "-h"}, want: "Usage: relayfile workspace current"},
+		{name: "workspace delete", args: []string{"workspace", "delete", "-h"}, want: "Usage: relayfile workspace delete NAME"},
+		{name: "integration group", args: []string{"integration", "-h"}, want: "relayfile integration search QUERY"},
+		{name: "integration connect", args: []string{"integration", "connect", "-h"}, want: "Usage: relayfile integration connect PROVIDER"},
+		{name: "integration available", args: []string{"integration", "available", "-h"}, want: "Usage: relayfile integration available"},
+		{name: "integration catalog alias", args: []string{"integration", "catalog", "-h"}, want: "Usage: relayfile integration available"},
+		{name: "integration providers alias", args: []string{"integration", "providers", "-h"}, want: "Usage: relayfile integration available"},
+		{name: "integration search", args: []string{"integration", "search", "-h"}, want: "Usage: relayfile integration search QUERY"},
+		{name: "integration search after query", args: []string{"integration", "search", "docker", "-h"}, want: "Usage: relayfile integration search QUERY"},
+		{name: "integration list", args: []string{"integration", "list", "-h"}, want: "Usage: relayfile integration list"},
+		{name: "integration disconnect", args: []string{"integration", "disconnect", "-h"}, want: "Usage: relayfile integration disconnect PROVIDER"},
+		{name: "integration adopt", args: []string{"integration", "adopt", "-h"}, want: "Usage: relayfile integration adopt PROVIDER"},
+		{name: "integration set metadata", args: []string{"integration", "set-metadata", "-h"}, want: "Usage: relayfile integration set-metadata PROVIDER"},
+		{name: "ops group", args: []string{"ops", "-h"}, want: "relayfile ops replay OPID"},
+		{name: "ops list", args: []string{"ops", "list", "-h"}, want: "Usage: relayfile ops list"},
+		{name: "ops replay", args: []string{"ops", "replay", "-h"}, want: "Usage: relayfile ops replay OPID"},
+		{name: "writeback group", args: []string{"writeback", "-h"}, want: "relayfile writeback retry --opId OP"},
+		{name: "writeback list", args: []string{"writeback", "list", "-h"}, want: writebackListUsage},
+		{name: "writeback status", args: []string{"writeback", "status", "-h"}, want: "Usage: relayfile writeback status"},
+		{name: "writeback retry", args: []string{"writeback", "retry", "-h"}, want: "Usage: relayfile writeback retry --opId OP"},
+		{name: "digest group", args: []string{"digest", "-h"}, want: "relayfile digest rebuild"},
+		{name: "digest rebuild", args: []string{"digest", "rebuild", "-h"}, want: digestRebuildUsage},
+		{name: "pull", args: []string{"pull", "-h"}, want: "Usage: relayfile pull"},
+		{name: "mount", args: []string{"mount", "-h"}, want: "Usage: relayfile mount"},
+		{name: "start alias", args: []string{"start", "-h"}, want: "Usage: relayfile mount"},
+		{name: "restart", args: []string{"restart", "-h"}, want: "Usage: relayfile restart"},
+		{name: "tree", args: []string{"tree", "-h"}, want: "Usage: relayfile tree"},
+		{name: "ls alias", args: []string{"ls", "-h"}, want: "Usage: relayfile tree"},
+		{name: "read", args: []string{"read", "-h"}, want: "Usage: relayfile read"},
+		{name: "cat alias", args: []string{"cat", "-h"}, want: "Usage: relayfile read"},
+		{name: "seed", args: []string{"seed", "-h"}, want: "Usage: relayfile seed"},
+		{name: "export", args: []string{"export", "-h"}, want: "Usage: relayfile export"},
+		{name: "status", args: []string{"status", "-h"}, want: "Usage: relayfile status"},
+		{name: "stop", args: []string{"stop", "-h"}, want: "Usage: relayfile stop"},
+		{name: "logs", args: []string{"logs", "-h"}, want: "Usage: relayfile logs"},
+		{name: "observer", args: []string{"observer", "-h"}, want: "Usage: relayfile observer"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			clearRelayfileEnv(t)
+
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			if err := run(tc.args, strings.NewReader(""), &stdout, &stderr); err != nil {
+				t.Fatalf("run(%v) returned error: %v\nstdout:\n%s\nstderr:\n%s", tc.args, err, stdout.String(), stderr.String())
+			}
+			if got := stdout.String(); !strings.Contains(got, tc.want) {
+				t.Fatalf("expected help output to contain %q, got:\n%s", tc.want, got)
+			}
+			if got := stderr.String(); got != "" {
+				t.Fatalf("expected no stderr for help, got %q", got)
+			}
+		})
+	}
+}
+
 func TestWorkspaceUseSetsDefaultWorkspace(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)

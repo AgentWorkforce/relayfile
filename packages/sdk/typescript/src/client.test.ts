@@ -2001,13 +2001,36 @@ describe("RelayFileClient — new webhook/writeback methods", () => {
         revision: "rev_5",
         correlationId: "corr_1",
       },
+      {
+        id: "wb_dead",
+        workspaceId: "ws_acme",
+        path: "/linear/issues/AGE-16__issue_1/comments/wb-1715600000.json",
+        revision: "rev_6",
+        correlationId: "corr_dead",
+        state: "dead_lettered",
+        provider: "linear",
+        action: "file_upsert",
+        attempts: 4,
+        lastAttemptAt: "2026-05-13T10:04:00Z",
+        error: {
+          code: "schema_violation",
+          message: "Comment body is required",
+          providerStatus: 422,
+          providerResponse: { field: "body" },
+          attempts: 4,
+          firstAttemptAt: "2026-05-13T10:00:00Z",
+          lastAttemptAt: "2026-05-13T10:04:00Z",
+          opId: "op_01HX",
+        },
+      },
     ];
     const f = mockFetch(payload);
     const client = makeClient(f);
 
     const res = await client.listPendingWritebacks("ws_acme");
-    expect(res).toHaveLength(1);
+    expect(res).toHaveLength(2);
     expect(res[0]!.path).toBe("/zendesk/tickets/48291.json");
+    expect(res[1]!.error?.code).toBe("schema_violation");
     const url = f.mock.calls[0]![0] as string;
     expect(url).toContain("/v1/workspaces/ws_acme/writeback/pending");
     const init = f.mock.calls[0]![1] as RequestInit;
