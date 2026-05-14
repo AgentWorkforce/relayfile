@@ -6,7 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_No unreleased changes._
+### Changed
+- `startAutoSync` now runs periodic full reconciles on a slower default cadence while watcher subscriptions are healthy, falls back to the existing 10s cadence when watchers are degraded, and accepts `scanIntervalMs: 0` or `Infinity` to disable periodic full reconciles. (#135)
 
 ## [0.7.17] - 2026-05-14
 

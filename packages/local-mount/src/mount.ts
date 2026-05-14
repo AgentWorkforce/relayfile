@@ -57,8 +57,9 @@ export interface MountHandle {
   syncBack(opts?: { signal?: AbortSignal; paths?: Iterable<string> }): Promise<number>;
   /**
    * Start bidirectional auto-sync: watches both the mount and project trees
-   * via @parcel/watcher and runs a full reconcile every `scanIntervalMs`
-   * as a safety net. Returns a handle you must `stop()` before teardown.
+   * via @parcel/watcher and runs periodic full reconciles as a safety net,
+   * with a slower cadence while watchers are healthy. Returns a handle you
+   * must `stop()` before teardown.
    */
   startAutoSync(opts?: AutoSyncOptions): AutoSyncHandle;
   cleanup(): void;
