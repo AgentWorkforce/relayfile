@@ -17,7 +17,11 @@ func loadEventsJSONL(t *testing.T, path string) []ChangeEvent {
 	if err != nil {
 		t.Fatalf("open %s: %v", path, err)
 	}
-	defer f.Close()
+	defer func() {
+		if cerr := f.Close(); cerr != nil {
+			t.Errorf("close %s: %v", path, cerr)
+		}
+	}()
 	var out []ChangeEvent
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
