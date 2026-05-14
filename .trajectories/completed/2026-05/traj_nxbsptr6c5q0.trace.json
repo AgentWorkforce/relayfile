@@ -1,0 +1,57 @@
+{
+  "version": "1.0.0",
+  "id": "b0f91259-f493-48b6-9f58-c3d211e12fac",
+  "timestamp": "2026-05-14T09:50:46.136Z",
+  "trajectory": "traj_nxbsptr6c5q0",
+  "files": [
+    {
+      "path": "cmd/relayfile-cli/main.go",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 144,
+              "end_line": 170,
+              "revision": "dd37469def96ee6c2868b11649839b69dce09c4a"
+            },
+            {
+              "start_line": 3732,
+              "end_line": 3743,
+              "revision": "dd37469def96ee6c2868b11649839b69dce09c4a"
+            },
+            {
+              "start_line": 3764,
+              "end_line": 3772,
+              "revision": "dd37469def96ee6c2868b11649839b69dce09c4a"
+            },
+            {
+              "start_line": 4813,
+              "end_line": 4855,
+              "revision": "dd37469def96ee6c2868b11649839b69dce09c4a"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "cmd/relayfile-cli/main_test.go",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 1178,
+              "end_line": 1231,
+              "revision": "dd37469def96ee6c2868b11649839b69dce09c4a"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
