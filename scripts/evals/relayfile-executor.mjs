@@ -151,6 +151,7 @@ async function executeOperation(state, operation, mock) {
     if (!rawPath || webhookPath === "/") {
       throw new Error(`materializeWebhook operation is missing or invalid path: ${JSON.stringify(operation)}`);
     }
+    if (!allowWrite(state, webhookPath, op)) return;
 
     const provider = String(operation.provider ?? operation.adapter ?? "").trim();
     if (!provider) throw new Error(`materializeWebhook operation is missing provider: ${JSON.stringify(operation)}`);
