@@ -265,6 +265,44 @@ func TestDigestFunctionTestOfflineRendersSection(t *testing.T) {
 	}
 }
 
+func TestDigestFunctionTestMatchesDotGlobPatterns(t *testing.T) {
+	dir := t.TempDir()
+	sourcePath := filepath.Join(dir, "markdown.ts")
+	source := []byte(`export const digest = async (ctx) => {
+  const events = await ctx.changeEvents({ paths: ["*.md"] });
+  return {
+    provider: "Markdown",
+    bullets: events.map((event) => ({
+      text: event.summary?.title ?? event.resource?.id ?? event.id,
+      canonicalPath: event.resource?.path ?? event.path,
+    })),
+  };
+};`)
+	if err := os.WriteFile(sourcePath, source, 0o600); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+	fixturePath := filepath.Join(dir, "events.json")
+	fixture := []byte(`[
+  {"id":"evt_md","path":"readme.md","resource":{"id":"readme","path":"readme.md"},"summary":{"title":"readme.md changed"}},
+  {"id":"evt_txt","path":"notes.txt","resource":{"id":"notes","path":"notes.txt"},"summary":{"title":"notes.txt changed"}}
+]`)
+	if err := os.WriteFile(fixturePath, fixture, 0o600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := run([]string{"digest", "function", "test", sourcePath, "--fixture", fixturePath}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("test failed: %v\noutput:\n%s", err, stdout.String())
+	}
+	got := stdout.String()
+	if !strings.Contains(got, "- readme.md changed - [readme.md]") {
+		t.Fatalf("expected markdown event to match *.md:\n%s", got)
+	}
+	if strings.Contains(got, "notes.txt") {
+		t.Fatalf("unexpected txt event matched *.md:\n%s", got)
+	}
+}
+
 func TestDigestFunctionTestBadFixture(t *testing.T) {
 	dir := t.TempDir()
 	sourcePath := filepath.Join(dir, "eng-roadmap.ts")

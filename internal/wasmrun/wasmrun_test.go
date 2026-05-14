@@ -175,6 +175,32 @@ func TestEngineInvokeWarningClassification(t *testing.T) {
 	}
 }
 
+func TestEngineInvokeDoesNotClassifyMissingMemoryAsOOM(t *testing.T) {
+	ctx := context.Background()
+	missingMemoryErr := errors.New("wasmrun: guest module exposes no memory")
+	engine, err := NewEngine(ctx, Options{
+		Runner: ModuleRunnerFunc(func(context.Context, Invocation) (*DigestSection, error) {
+			return nil, missingMemoryErr
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close(ctx)
+	mod, err := engine.Compile(ctx, signedTestModule("missing-memory", minimalWASM))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, warnings, err := engine.Invoke(ctx, mod, DigestContext{FunctionID: "missing-memory"})
+	if !errors.Is(err, missingMemoryErr) {
+		t.Fatalf("expected %v, got %v", missingMemoryErr, err)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("missing-memory errors should not be classified as OOM, got %#v", warnings)
+	}
+}
+
 func TestEngineInvokeSoftWarning(t *testing.T) {
 	ctx := context.Background()
 	engine, err := NewEngine(ctx, Options{

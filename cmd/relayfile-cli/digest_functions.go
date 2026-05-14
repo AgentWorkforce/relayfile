@@ -654,7 +654,7 @@ function globToRegExp(pattern) {
     } else if (ch === "?") {
       out += "[^/]";
     } else if ("\\.+^$|()[]{}".includes(ch)) {
-      out += "\\\\" + ch;
+      out += "\\" + ch;
     } else {
       out += ch;
     }

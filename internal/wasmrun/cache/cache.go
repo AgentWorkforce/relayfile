@@ -53,7 +53,6 @@ type Cache interface {
 type Options struct {
 	Dir      string
 	MaxBytes int64
-	Verify   bool
 }
 
 type FileCache struct {
@@ -89,9 +88,6 @@ func Open(opts Options) (*FileCache, error) {
 		maxBytes: opts.MaxBytes,
 		verify:   true,
 		now:      time.Now,
-	}
-	if opts.Verify {
-		c.verify = true
 	}
 	if err := c.recover(); err != nil {
 		return nil, err

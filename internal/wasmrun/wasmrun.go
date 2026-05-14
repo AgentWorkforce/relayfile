@@ -324,5 +324,5 @@ func hasWarning(warnings []Warning, kind WarningKind) bool {
 
 func isOOM(err error) bool {
 	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "out of memory") || strings.Contains(msg, "oom") || strings.Contains(msg, "memory")
+	return strings.Contains(msg, "out of memory") || strings.Contains(msg, "oom") || strings.Contains(msg, "memory limit")
 }
