@@ -1178,6 +1178,54 @@ func TestStatusRendersWebhookUnhealthyWarning(t *testing.T) {
 	}
 }
 
+func TestStatusExplainsLaggingProviderWithoutWatermark(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	localDir := t.TempDir()
+	if err := ensureMirrorLayout(localDir); err != nil {
+		t.Fatalf("ensureMirrorLayout failed: %v", err)
+	}
+	if _, err := upsertWorkspaceDetails(workspaceRecord{
+		Name:       "demo",
+		ID:         "ws_demo",
+		LocalDir:   localDir,
+		CreatedAt:  time.Now().UTC().Format(time.RFC3339),
+		LastUsedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("upsertWorkspaceDetails failed: %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/workspaces/ws_demo/sync/status":
+			_, _ = w.Write([]byte(`{"workspaceId":"ws_demo","providers":[{"provider":"github","status":"lagging","lagSeconds":0}]}`))
+		case "/v1/workspaces/ws_demo/sync/ingress":
+			_, _ = w.Write([]byte(`{"workspaceId":"ws_demo","queueDepth":0,"pendingTotal":0,"deadLetterTotal":0,"acceptedTotal":55,"ingressByProvider":{"linear":{"acceptedTotal":55,"pendingTotal":0}}}`))
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	if err := saveCredentials(credentials{Server: server.URL, Token: "token"}); err != nil {
+		t.Fatalf("saveCredentials failed: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := run([]string{"status", "demo"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("run status failed: %v", err)
+	}
+	got := stdout.String()
+	if !strings.Contains(got, "github       lagging  lag 0s") {
+		t.Fatalf("expected lagging provider row, got: %q", got)
+	}
+	if !strings.Contains(got, "reason: no sync cursor or watermark; no ingress events recorded") {
+		t.Fatalf("expected lag reason in status output, got: %q", got)
+	}
+}
+
 func TestStatusOmitsWebhookWarningWhenHealthy(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)

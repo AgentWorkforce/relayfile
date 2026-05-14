@@ -144,6 +144,27 @@ type syncProviderStatus struct {
 	WebhookHealthy        *bool          `json:"webhookHealthy,omitempty"`
 }
 
+type syncIngressStatusResponse struct {
+	WorkspaceID          string                               `json:"workspaceId"`
+	QueueDepth           int                                  `json:"queueDepth"`
+	PendingTotal         int                                  `json:"pendingTotal"`
+	DeadLetterTotal      int                                  `json:"deadLetterTotal"`
+	DeadLetterByProvider map[string]int                       `json:"deadLetterByProvider"`
+	AcceptedTotal        int                                  `json:"acceptedTotal"`
+	IngressByProvider    map[string]syncIngressProviderStatus `json:"ingressByProvider"`
+}
+
+type syncIngressProviderStatus struct {
+	AcceptedTotal           int `json:"acceptedTotal"`
+	DroppedTotal            int `json:"droppedTotal"`
+	DedupedTotal            int `json:"dedupedTotal"`
+	CoalescedTotal          int `json:"coalescedTotal"`
+	PendingTotal            int `json:"pendingTotal"`
+	OldestPendingAgeSeconds int `json:"oldestPendingAgeSeconds"`
+	SuppressedTotal         int `json:"suppressedTotal"`
+	StaleTotal              int `json:"staleTotal"`
+}
+
 type exportedFile struct {
 	Path        string `json:"path"`
 	Revision    string `json:"revision"`
@@ -3711,6 +3732,12 @@ func runStatus(args []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
+	var ingress *syncIngressStatusResponse
+	if statusNeedsIngressDiagnostics(status) {
+		if ingressStatus, err := fetchWorkspaceSyncIngressStatus(client, workspaceID); err == nil {
+			ingress = &ingressStatus
+		}
+	}
 	if _, err := upsertWorkspace(workspaceID); err != nil {
 		return err
 	}
@@ -3736,6 +3763,9 @@ func runStatus(args []string, stdout io.Writer) error {
 		}
 		if provider.LastError != nil && strings.TrimSpace(*provider.LastError) != "" {
 			line += "   last error: " + strings.TrimSpace(*provider.LastError)
+		}
+		if reason := syncProviderLagReason(provider, ingress); reason != "" {
+			line += "   reason: " + reason
 		}
 		fmt.Fprintln(stdout, line)
 		// Contract §7.4: warn when the webhook is unhealthy and the watermark
@@ -4781,6 +4811,43 @@ func fetchWorkspaceSyncStatus(client *apiClient, workspaceID string) (syncStatus
 		return syncStatusResponse{}, err
 	}
 	return status, nil
+}
+
+func fetchWorkspaceSyncIngressStatus(client *apiClient, workspaceID string) (syncIngressStatusResponse, error) {
+	var status syncIngressStatusResponse
+	if err := client.getJSON(context.Background(), fmt.Sprintf("/v1/workspaces/%s/sync/ingress", url.PathEscape(workspaceID)), &status); err != nil {
+		return syncIngressStatusResponse{}, err
+	}
+	return status, nil
+}
+
+func statusNeedsIngressDiagnostics(status syncStatusResponse) bool {
+	for _, provider := range status.Providers {
+		if provider.Status == "lagging" && provider.LagSeconds == 0 && provider.Cursor == nil && provider.WatermarkTs == nil {
+			return true
+		}
+	}
+	return false
+}
+
+func syncProviderLagReason(provider syncProviderStatus, ingress *syncIngressStatusResponse) string {
+	if provider.Status != "lagging" || provider.LagSeconds != 0 || provider.Cursor != nil || provider.WatermarkTs != nil {
+		return ""
+	}
+	if ingress == nil {
+		return "no sync cursor or watermark reported"
+	}
+	providerIngress, ok := ingress.IngressByProvider[provider.Provider]
+	if !ok {
+		return "no sync cursor or watermark; no ingress events recorded"
+	}
+	if providerIngress.PendingTotal > 0 {
+		return fmt.Sprintf("%d pending ingress event(s), oldest %s", providerIngress.PendingTotal, formatLag(providerIngress.OldestPendingAgeSeconds))
+	}
+	if providerIngress.AcceptedTotal > 0 {
+		return fmt.Sprintf("%d ingress event(s) accepted but no cursor or watermark reported", providerIngress.AcceptedTotal)
+	}
+	return "no sync cursor or watermark; no ingress events recorded"
 }
 
 func syncProviderByName(status syncStatusResponse, provider string) (syncProviderStatus, bool) {
