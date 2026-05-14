@@ -151,6 +151,11 @@ type syncIngressStatusResponse struct {
 	DeadLetterTotal      int                                  `json:"deadLetterTotal"`
 	DeadLetterByProvider map[string]int                       `json:"deadLetterByProvider"`
 	AcceptedTotal        int                                  `json:"acceptedTotal"`
+	DroppedTotal         int                                  `json:"droppedTotal"`
+	DedupedTotal         int                                  `json:"dedupedTotal"`
+	CoalescedTotal       int                                  `json:"coalescedTotal"`
+	SuppressedTotal      int                                  `json:"suppressedTotal"`
+	StaleTotal           int                                  `json:"staleTotal"`
 	IngressByProvider    map[string]syncIngressProviderStatus `json:"ingressByProvider"`
 }
 
@@ -3754,7 +3759,7 @@ func runStatus(args []string, stdout io.Writer) error {
 	fmt.Fprintf(stdout, "workspace %s   mode: %s   lag: %s\n", workspaceLabel, snapshot.Mode, formatLag(maxLagSeconds(status.Providers)))
 	for _, provider := range status.Providers {
 		lastEvent := "-"
-		if provider.WatermarkTs != nil {
+		if hasNonEmptyString(provider.WatermarkTs) {
 			lastEvent = humanizeRecentTime(strings.TrimSpace(*provider.WatermarkTs))
 		}
 		line := fmt.Sprintf("  %-12s %-8s lag %s", provider.Provider, provider.Status, formatLag(provider.LagSeconds))
@@ -4823,7 +4828,7 @@ func fetchWorkspaceSyncIngressStatus(client *apiClient, workspaceID string) (syn
 
 func statusNeedsIngressDiagnostics(status syncStatusResponse) bool {
 	for _, provider := range status.Providers {
-		if provider.Status == "lagging" && provider.LagSeconds == 0 && provider.Cursor == nil && provider.WatermarkTs == nil {
+		if provider.Status == "lagging" && provider.LagSeconds == 0 && !hasNonEmptyString(provider.Cursor) && !hasNonEmptyString(provider.WatermarkTs) {
 			return true
 		}
 	}
@@ -4831,15 +4836,18 @@ func statusNeedsIngressDiagnostics(status syncStatusResponse) bool {
 }
 
 func syncProviderLagReason(provider syncProviderStatus, ingress *syncIngressStatusResponse) string {
-	if provider.Status != "lagging" || provider.LagSeconds != 0 || provider.Cursor != nil || provider.WatermarkTs != nil {
+	if provider.Status != "lagging" || provider.LagSeconds != 0 || hasNonEmptyString(provider.Cursor) || hasNonEmptyString(provider.WatermarkTs) {
 		return ""
 	}
 	if ingress == nil {
 		return "no sync cursor or watermark reported"
 	}
-	providerIngress, ok := ingress.IngressByProvider[provider.Provider]
+	providerIngress, ok := ingressProviderStatusFor(ingress, provider.Provider)
 	if !ok {
-		return "no sync cursor or watermark; no ingress events recorded"
+		if observed := unattributedIngressObservedTotal(ingress); observed > 0 {
+			return fmt.Sprintf("no sync cursor or watermark; %d workspace ingress event(s) observed without provider breakdown", observed)
+		}
+		return "no sync cursor or watermark; no provider-specific ingress events recorded"
 	}
 	if providerIngress.PendingTotal > 0 {
 		return fmt.Sprintf("%d pending ingress event(s), oldest %s", providerIngress.PendingTotal, formatLag(providerIngress.OldestPendingAgeSeconds))
@@ -4847,7 +4855,51 @@ func syncProviderLagReason(provider syncProviderStatus, ingress *syncIngressStat
 	if providerIngress.AcceptedTotal > 0 {
 		return fmt.Sprintf("%d ingress event(s) accepted but no cursor or watermark reported", providerIngress.AcceptedTotal)
 	}
-	return "no sync cursor or watermark; no ingress events recorded"
+	if observed := ingressProviderObservedTotal(providerIngress); observed > 0 {
+		return fmt.Sprintf("%d ingress event(s) observed but no cursor or watermark reported", observed)
+	}
+	return "no sync cursor or watermark; no provider-specific ingress events recorded"
+}
+
+func hasNonEmptyString(value *string) bool {
+	return value != nil && strings.TrimSpace(*value) != ""
+}
+
+func ingressProviderStatusFor(ingress *syncIngressStatusResponse, provider string) (syncIngressProviderStatus, bool) {
+	if ingress == nil || len(ingress.IngressByProvider) == 0 {
+		return syncIngressProviderStatus{}, false
+	}
+	if status, ok := ingress.IngressByProvider[provider]; ok {
+		return status, true
+	}
+	normalizedProvider := normalizeProviderID(provider)
+	if status, ok := ingress.IngressByProvider[normalizedProvider]; ok {
+		return status, true
+	}
+	for key, status := range ingress.IngressByProvider {
+		if normalizeProviderID(key) == normalizedProvider {
+			return status, true
+		}
+	}
+	return syncIngressProviderStatus{}, false
+}
+
+func ingressProviderObservedTotal(status syncIngressProviderStatus) int {
+	return status.DroppedTotal + status.DedupedTotal + status.CoalescedTotal + status.SuppressedTotal + status.StaleTotal
+}
+
+func unattributedIngressObservedTotal(ingress *syncIngressStatusResponse) int {
+	if ingress == nil {
+		return 0
+	}
+	total := ingress.DroppedTotal + ingress.DedupedTotal + ingress.CoalescedTotal + ingress.SuppressedTotal + ingress.StaleTotal
+	for _, provider := range ingress.IngressByProvider {
+		total -= ingressProviderObservedTotal(provider)
+	}
+	if total < 0 {
+		return 0
+	}
+	return total
 }
 
 func syncProviderByName(status syncStatusResponse, provider string) (syncProviderStatus, bool) {

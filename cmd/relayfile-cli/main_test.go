@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -1196,12 +1197,14 @@ func TestStatusExplainsLaggingProviderWithoutWatermark(t *testing.T) {
 		t.Fatalf("upsertWorkspaceDetails failed: %v", err)
 	}
 
+	var ingressCalls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/v1/workspaces/ws_demo/sync/status":
-			_, _ = w.Write([]byte(`{"workspaceId":"ws_demo","providers":[{"provider":"github","status":"lagging","lagSeconds":0}]}`))
+			_, _ = w.Write([]byte(`{"workspaceId":"ws_demo","providers":[{"provider":"github","status":"lagging","cursor":"","watermarkTs":" ","lagSeconds":0}]}`))
 		case "/v1/workspaces/ws_demo/sync/ingress":
+			ingressCalls.Add(1)
 			_, _ = w.Write([]byte(`{"workspaceId":"ws_demo","queueDepth":0,"pendingTotal":0,"deadLetterTotal":0,"acceptedTotal":55,"ingressByProvider":{"linear":{"acceptedTotal":55,"pendingTotal":0}}}`))
 		default:
 			t.Fatalf("unexpected path: %s", r.URL.Path)
@@ -1221,8 +1224,31 @@ func TestStatusExplainsLaggingProviderWithoutWatermark(t *testing.T) {
 	if !strings.Contains(got, "github       lagging  lag 0s") {
 		t.Fatalf("expected lagging provider row, got: %q", got)
 	}
-	if !strings.Contains(got, "reason: no sync cursor or watermark; no ingress events recorded") {
+	if !strings.Contains(got, "reason: no sync cursor or watermark; no provider-specific ingress events recorded") {
 		t.Fatalf("expected lag reason in status output, got: %q", got)
+	}
+	if ingressCalls.Load() != 1 {
+		t.Fatalf("expected status command to request /sync/ingress once, got %d", ingressCalls.Load())
+	}
+}
+
+func TestSyncProviderLagReasonUsesAliasesAndObservedCounters(t *testing.T) {
+	blank := ""
+	provider := syncProviderStatus{
+		Provider:    "slack-sage",
+		Status:      "lagging",
+		Cursor:      &blank,
+		WatermarkTs: &blank,
+	}
+	ingress := &syncIngressStatusResponse{
+		IngressByProvider: map[string]syncIngressProviderStatus{
+			"slack": {DedupedTotal: 2, CoalescedTotal: 1},
+		},
+	}
+
+	got := syncProviderLagReason(provider, ingress)
+	if !strings.Contains(got, "3 ingress event(s) observed") {
+		t.Fatalf("expected alias ingress observation reason, got %q", got)
 	}
 }
 
