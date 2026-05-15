@@ -180,3 +180,21 @@ Keep it in sync with `internal/httpapi/server.go` at all times:
 - Adding a new status code → add it to the endpoint's `responses` map.
 
 After server changes, run `scripts/check-contract-surface.sh` to check for drift.
+
+# Digest Runtime Contract
+
+Relayfile runtime changes that write provider records must keep
+`/digests/today.md` and `/digests/yesterday.md` current.
+
+- Any new ingest, sync, bulk-write, or provider mutation path must emit
+  filesystem events and trigger digest regeneration for non-digest paths.
+- Digest regeneration must not recurse on `/digests/*` writes, but digest file
+  updates must still emit normal file events so mounted workspaces receive the
+  changed digest files.
+- Preserve terminal provider state as data. Do not represent `closed`,
+  `merged`, `archived`, `completed`, `canceled`, or `resolved` as a file delete
+  unless the upstream object was actually deleted.
+- Add tests for both the event path and the digest artifact path when changing
+  ingest behavior.
+
+Full rule: `.claude/rules/relayfile-integration-digests.md`.
