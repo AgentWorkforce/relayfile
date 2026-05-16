@@ -79,6 +79,7 @@ type workspaceRecord struct {
 	CloudAPIURL string   `json:"cloudApiUrl,omitempty"`
 	AgentName   string   `json:"agentName,omitempty"`
 	Scopes      []string `json:"scopes,omitempty"`
+	Timezone    string   `json:"timezone,omitempty"`
 }
 
 type apiClient struct {
@@ -570,7 +571,7 @@ func printDigestUsage(w io.Writer, subcommand string) {
 		fmt.Fprintln(w, digestRebuildUsage)
 	default:
 		fmt.Fprintln(w, `Usage:
-  relayfile digest rebuild --window yesterday|today [--workspace NAME]`)
+  relayfile digest rebuild --window today|yesterday|this-week|last-week|YYYY-MM-DD [--workspace NAME] [--json]`)
 	}
 }
 
@@ -599,7 +600,7 @@ Usage:
   relayfile writeback list --state pending|dead|succeeded|failed [--workspace WS] [--json]
   relayfile writeback status [WORKSPACE] [--json]
   relayfile writeback retry --opId OP [WORKSPACE]
-  relayfile digest rebuild --window yesterday|today [--workspace NAME]
+  relayfile digest rebuild --window today|yesterday|this-week|last-week|YYYY-MM-DD [--workspace NAME] [--json]
   relayfile pull [--workspace NAME] [--provider PROVIDER] [--reason TEXT]
   relayfile mount [WORKSPACE] [LOCAL_DIR]
   relayfile start [WORKSPACE] [LOCAL_DIR]            (alias for mount)
@@ -628,7 +629,7 @@ Subcommands:
               Re-enqueue a local dead-lettered writeback op
   digest      Regenerate workspace digests
   digest rebuild
-              Regenerate digests/yesterday.md or digests/today.md
+              Regenerate daily, weekly, or date-stamped digest artifacts
   pull        Trigger an immediate sync refresh for one or all providers
   mount       Mirror a remote workspace to a local directory; add --background to detach
   start       Alias for mount; pairs naturally with stop and restart
@@ -4796,6 +4797,7 @@ func upsertWorkspaceDetails(record workspaceRecord) (workspaceRecord, error) {
 	record.Server = strings.TrimRight(strings.TrimSpace(record.Server), "/")
 	record.CloudAPIURL = strings.TrimRight(strings.TrimSpace(record.CloudAPIURL), "/")
 	record.AgentName = strings.TrimSpace(record.AgentName)
+	record.Timezone = strings.TrimSpace(record.Timezone)
 	if len(record.Scopes) == 0 {
 		record.Scopes = append([]string(nil), defaultJoinScopes...)
 	}
@@ -4852,6 +4854,9 @@ func mergeWorkspaceRecords(current, update workspaceRecord) workspaceRecord {
 	}
 	if update.AgentName != "" {
 		merged.AgentName = update.AgentName
+	}
+	if update.Timezone != "" {
+		merged.Timezone = update.Timezone
 	}
 	if len(update.Scopes) > 0 {
 		merged.Scopes = append([]string(nil), update.Scopes...)

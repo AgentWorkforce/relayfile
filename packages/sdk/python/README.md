@@ -11,14 +11,29 @@ layout, schema, and writeback tooling.
 from relayfile import (
     DIGEST_PATHS,
     RelayFileClient,
+    is_digest_path,
     provider_layout_path,
     resource_schema_path,
 )
 
 client = RelayFileClient("https://api.relayfile.dev", token_provider)
 
-# Subscribe or poll for file.created/file.updated events at these paths.
-print(DIGEST_PATHS)  # ("digests/yesterday.md", "digests/today.md")
+# DIGEST_PATHS is the literal anchor-path taxonomy: the rolling daily
+# files plus rolling and closing-window weekly files. Closed-window daily
+# artifacts use the date-stamped form ``digests/YYYY-MM-DD.md``; filter
+# events through ``is_digest_path`` to subscribe to the full taxonomy
+# (anchor paths plus date-stamped form).
+print(DIGEST_PATHS)
+# (
+#     "digests/yesterday.md",
+#     "digests/today.md",
+#     "digests/this-week.md",
+#     "digests/last-week.md",
+# )
+assert is_digest_path("digests/today.md")
+assert is_digest_path("digests/2026-05-12.md")
+assert is_digest_path("digests/this-week.md")
+assert is_digest_path("digests/last-week.md")
 
 # Read provider layout documentation.
 layout = client.read_file(workspace_id, provider_layout_path("linear"))

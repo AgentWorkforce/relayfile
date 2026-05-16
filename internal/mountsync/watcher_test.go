@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/agentworkforce/relayfile/internal/digest"
 	"github.com/fsnotify/fsnotify"
 )
 
@@ -204,6 +206,390 @@ func TestWatcherSkipsNodeModules(t *testing.T) {
 	}
 
 	assertNoWatcherEvents(t, events, 300*time.Millisecond)
+}
+
+// TestWatcherEmitsYesterdayDigestFileNoRecursion covers the lead-plan F7
+// requirement for the yesterday slice: a write to `digests/yesterday.md`
+// must produce a filesystem event for mounted observers (gate E) AND the
+// shared digest-source classifier `digest.IsDigestPath` must flag the path
+// so the regen pipeline's recursion guard drops it. This pairs the
+// existing `TestDateStampedDigestDoesNotReEnterRegeneration` (date-stamped
+// sibling) with the same proof for the rolling-yesterday artifact.
+func TestWatcherEmitsYesterdayDigestFileNoRecursion(t *testing.T) {
+	localDir := t.TempDir()
+	events, _, _ := startFileWatcher(t, localDir)
+
+	digestFile := filepath.Join(localDir, "digests", "yesterday.md")
+	if err := os.MkdirAll(filepath.Dir(digestFile), 0o755); err != nil {
+		t.Fatalf("create digest dir: %v", err)
+	}
+	if err := os.WriteFile(digestFile, []byte("# digest yesterday\n"), 0o644); err != nil {
+		t.Fatalf("write digest file: %v", err)
+	}
+
+	ev, ok := waitForWatcherEventPath(t, events, "digests/yesterday.md", time.Second)
+	if !ok {
+		t.Fatalf("no watcher event for digests/yesterday.md within timeout")
+	}
+	if ev.op&fsnotify.Create == 0 && ev.op&fsnotify.Write == 0 {
+		t.Fatalf("expected create or write op, got %s", ev.op)
+	}
+
+	if !digest.IsDigestPath("digests/yesterday.md") {
+		t.Fatal("digest.IsDigestPath(\"digests/yesterday.md\") = false; recursion-guard predicate must cover yesterday.md")
+	}
+
+	// Sanity: a non-digest write next to it still classifies as a regen
+	// trigger, so the predicate isn't accidentally over-broad.
+	if digest.IsDigestPath("notion/pages/by-title/foo.json") {
+		t.Fatal("digest.IsDigestPath classified a non-digest path as a digest artifact")
+	}
+}
+
+// TestCloseLocalDayInternalMarkerDoesNotReEnterRegeneration exercises the
+// actual yesterday close-write path, not just a synthetic write to
+// digests/yesterday.md. The public artifact must be visible to watchers and
+// classified by the digest recursion guard; internal marker/temp files must
+// stay under .relay so they are skipped before they can become source events.
+func TestCloseLocalDayInternalMarkerDoesNotReEnterRegeneration(t *testing.T) {
+	localDir := t.TempDir()
+	if strings.HasPrefix(filepath.ToSlash(digest.YesterdayMarkerPath), "digests/") {
+		t.Fatalf("YesterdayMarkerPath = %q, want watcher-skipped .relay path, not digests/.state", digest.YesterdayMarkerPath)
+	}
+	legacyMarker := "digests/.state/yesterday.lock"
+	if digest.YesterdayMarkerPath == legacyMarker {
+		t.Fatalf("YesterdayMarkerPath regressed to legacy watched path %q", legacyMarker)
+	}
+	if err := os.MkdirAll(filepath.Join(localDir, "digests"), 0o755); err != nil {
+		t.Fatalf("create digest dir: %v", err)
+	}
+	events, _, _ := startFileWatcher(t, localDir)
+
+	now := time.Date(2026, 5, 13, 0, 5, 0, 0, time.UTC)
+	_, err := digest.CloseLocalDay(
+		context.Background(),
+		localDir,
+		digest.SliceSource{Items: []digest.ChangeEvent{{
+			Provider:      "github",
+			Timestamp:     time.Date(2026, 5, 12, 12, 0, 0, 0, time.UTC),
+			Identifier:    "PR-1",
+			Verb:          "updated",
+			CanonicalPath: "github/repos/x/pulls/by-id/1.json",
+		}}},
+		now,
+		[]string{"github"},
+		time.UTC,
+	)
+	if err != nil {
+		t.Fatalf("CloseLocalDay: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(localDir, filepath.FromSlash(digest.YesterdayMarkerPath))); err != nil {
+		t.Fatalf("marker was not written under %s: %v", digest.YesterdayMarkerPath, err)
+	}
+
+	observed := map[string]fsnotify.Op{}
+	deadline := time.After(2 * time.Second)
+collect:
+	for {
+		select {
+		case ev := <-events:
+			observed[ev.path] = observed[ev.path] | ev.op
+		case <-deadline:
+			break collect
+		}
+	}
+
+	if _, ok := observed["digests/yesterday.md"]; !ok {
+		t.Fatalf("expected watcher event for digests/yesterday.md, observed=%v", observed)
+	}
+	for path := range observed {
+		switch path {
+		case digest.YesterdayMarkerPath:
+			t.Fatalf("internal marker %q was emitted by watcher; it must stay under skipped .relay state", path)
+		case legacyMarker:
+			t.Fatalf("legacy marker %q was emitted by watcher; this path would bypass the digest recursion guard", path)
+		}
+		if strings.HasPrefix(path, "digests/") && !digest.IsDigestPath(path) {
+			t.Fatalf("watched digest-tree path %q is not classified by digest.IsDigestPath; regeneration would re-enter", path)
+		}
+	}
+}
+
+// TestWatcherEmitsLastWeekDigestFileNoRecursion covers acceptance check #5
+// for the `update-last-week` slice: a write to `digests/last-week.md` must
+// produce a normal filesystem event (so mount observers + hosted listeners
+// see the new file) AND the shared digest-source classifier
+// `digest.IsDigestPath` must flag the path so the regen pipeline's
+// recursion guard drops it, per
+// `.claude/rules/relayfile-integration-digests.md`. Mirrors the
+// yesterday-slice sibling above.
+func TestWatcherEmitsLastWeekDigestFileNoRecursion(t *testing.T) {
+	localDir := t.TempDir()
+	events, _, _ := startFileWatcher(t, localDir)
+
+	digestFile := filepath.Join(localDir, "digests", "last-week.md")
+	if err := os.MkdirAll(filepath.Dir(digestFile), 0o755); err != nil {
+		t.Fatalf("create digest dir: %v", err)
+	}
+	if err := os.WriteFile(digestFile, []byte("# digest last-week\n"), 0o644); err != nil {
+		t.Fatalf("write digest file: %v", err)
+	}
+
+	ev, ok := waitForWatcherEventPath(t, events, "digests/last-week.md", time.Second)
+	if !ok {
+		t.Fatalf("no watcher event for digests/last-week.md within timeout")
+	}
+	if ev.op&fsnotify.Create == 0 && ev.op&fsnotify.Write == 0 {
+		t.Fatalf("expected create or write op, got %s", ev.op)
+	}
+
+	if !digest.IsDigestPath("digests/last-week.md") {
+		t.Fatal("digest.IsDigestPath(\"digests/last-week.md\") = false; recursion-guard predicate must cover last-week.md")
+	}
+	// Near-miss spellings must NOT be classified as digest paths — a
+	// regression here would silently drop legitimate provider writes from
+	// regeneration.
+	for _, near := range []string{
+		"digests/last-weak.md",
+		"digests/last-week.txt",
+		"digests/last_week.md",
+	} {
+		if digest.IsDigestPath(near) {
+			t.Fatalf("digest.IsDigestPath(%q) = true; near-miss must not be treated as a digest artifact", near)
+		}
+	}
+}
+
+// TestWriteLastWeekDoesNotExposeWatchedTempFiles exercises the real
+// temp+rename writer. The final digest must be emitted for mounted observers,
+// but any temp files must stay under watcher-skipped internal state so the
+// rolling coalescer cannot schedule regeneration from last-week's own write.
+func TestWriteLastWeekDoesNotExposeWatchedTempFiles(t *testing.T) {
+	localDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(localDir, "digests"), 0o755); err != nil {
+		t.Fatalf("create digest dir: %v", err)
+	}
+	events, _, _ := startFileWatcher(t, localDir)
+
+	window := digest.LastWeekWindow(
+		time.Date(2026, 5, 4, 0, 0, 0, 0, time.UTC),
+		time.Date(2026, 5, 11, 0, 5, 0, 0, time.UTC),
+		[]string{"github"},
+		time.UTC,
+	)
+	result, err := digest.WriteLastWeek(
+		context.Background(),
+		localDir,
+		digest.SliceSource{Items: []digest.ChangeEvent{{
+			Provider:      "github",
+			Timestamp:     time.Date(2026, 5, 8, 12, 0, 0, 0, time.UTC),
+			Identifier:    "PR-last-week",
+			Verb:          "merged",
+			CanonicalPath: "github/repos/x/pulls/by-id/last-week.json",
+		}}},
+		window,
+	)
+	if err != nil {
+		t.Fatalf("WriteLastWeek: %v", err)
+	}
+	if !result.Written || result.Path != digest.LastWeekPath {
+		t.Fatalf("WriteLastWeek result = %#v, want written %s", result, digest.LastWeekPath)
+	}
+
+	observed := map[string]fsnotify.Op{}
+	deadline := time.After(2 * time.Second)
+collect:
+	for {
+		select {
+		case ev := <-events:
+			observed[ev.path] = observed[ev.path] | ev.op
+		case <-deadline:
+			break collect
+		}
+	}
+
+	if _, ok := observed[digest.LastWeekPath]; !ok {
+		t.Fatalf("expected watcher event for %s, observed=%v", digest.LastWeekPath, observed)
+	}
+	coalescer := &RollingDigestCoalescer{
+		Interval: 30 * time.Second,
+		Now:      func() time.Time { return time.Date(2026, 5, 11, 0, 5, 0, 0, time.UTC) },
+	}
+	for path := range observed {
+		if strings.HasPrefix(path, ".relay/") {
+			t.Fatalf("internal digest temp path %q was emitted by watcher", path)
+		}
+		if strings.HasPrefix(path, "digests/") {
+			if !digest.IsDigestPath(path) {
+				t.Fatalf("watched digest-tree path %q is not classified by digest.IsDigestPath; regeneration would re-enter", path)
+			}
+			if coalescer.ObserveChange(path) {
+				t.Fatalf("rolling coalescer scheduled a flush from digest writer path %q", path)
+			}
+		}
+	}
+}
+
+func TestWatcherEmitsDateStampedDigestFiles(t *testing.T) {
+	localDir := t.TempDir()
+	events, _, _ := startFileWatcher(t, localDir)
+
+	digestFile := filepath.Join(localDir, "digests", "2026-05-12.md")
+	if err := os.MkdirAll(filepath.Dir(digestFile), 0o755); err != nil {
+		t.Fatalf("create digest dir: %v", err)
+	}
+	if err := os.WriteFile(digestFile, []byte("# digest\n"), 0o644); err != nil {
+		t.Fatalf("write digest file: %v", err)
+	}
+
+	ev, ok := waitForWatcherEventPath(t, events, "digests/2026-05-12.md", time.Second)
+	if !ok {
+		t.Fatalf("no watcher event for date-stamped digest within timeout")
+	}
+	if ev.op&fsnotify.Create == 0 && ev.op&fsnotify.Write == 0 {
+		t.Fatalf("expected create or write op, got %s", ev.op)
+	}
+}
+
+// TestDateStampedDigestDoesNotReEnterRegeneration pins the parent-spec
+// no-recursion contract called out in
+// `.claude/rules/relayfile-integration-digests.md` and CLAUDE.md's Digest
+// Runtime Contract: a write to `/digests/<YYYY-MM-DD>.md` must produce a
+// normal filesystem event (so mounts see the new file) but must NOT be
+// re-ingested as a digest-source event — otherwise digest regeneration
+// would loop on its own output. The digest-source classifier is
+// `digest.IsDigestPath`. This test exercises both halves: the watcher
+// emits an event for the digest path, the classifier flags that path so
+// the regen pipeline drops it, and a sibling non-digest write under the
+// same workspace still classifies as a regen-trigger.
+func TestDateStampedDigestDoesNotReEnterRegeneration(t *testing.T) {
+	localDir := t.TempDir()
+	events, _, _ := startFileWatcher(t, localDir)
+
+	digestFile := filepath.Join(localDir, "digests", "2026-05-12.md")
+	if err := os.MkdirAll(filepath.Dir(digestFile), 0o755); err != nil {
+		t.Fatalf("create digest dir: %v", err)
+	}
+	if err := os.WriteFile(digestFile, []byte("# digest\n"), 0o644); err != nil {
+		t.Fatalf("write digest file: %v", err)
+	}
+
+	otherFile := filepath.Join(localDir, "notion", "pages", "demo.json")
+	if err := os.MkdirAll(filepath.Dir(otherFile), 0o755); err != nil {
+		t.Fatalf("create notion dir: %v", err)
+	}
+	if err := os.WriteFile(otherFile, []byte("{}"), 0o644); err != nil {
+		t.Fatalf("write non-digest file: %v", err)
+	}
+
+	// Drain events for up to a second, recording each observed path. Both
+	// the digest and non-digest writes must produce watcher events.
+	observed := map[string]fsnotify.Op{}
+	deadline := time.After(2 * time.Second)
+collect:
+	for {
+		select {
+		case ev := <-events:
+			observed[ev.path] = observed[ev.path] | ev.op
+			if _, sawDigest := observed["digests/2026-05-12.md"]; sawDigest {
+				if _, sawOther := observed["notion/pages/demo.json"]; sawOther {
+					break collect
+				}
+			}
+		case <-deadline:
+			break collect
+		}
+	}
+
+	if _, ok := observed["digests/2026-05-12.md"]; !ok {
+		t.Fatalf("expected watcher event for digests/2026-05-12.md, observed=%v", observed)
+	}
+	if _, ok := observed["notion/pages/demo.json"]; !ok {
+		t.Fatalf("expected watcher event for non-digest path, observed=%v", observed)
+	}
+
+	// The digest-source classifier (digest.IsDigestPath) is the gate the
+	// regeneration pipeline uses to drop digest writes. Exercise it with
+	// the exact paths the watcher just produced. If a future refactor
+	// removes or weakens this classifier, this assertion catches the tight
+	// write→ingest→write loop that would result.
+	for path := range observed {
+		isDigest := digest.IsDigestPath(path)
+		switch path {
+		case "digests/2026-05-12.md":
+			if !isDigest {
+				t.Fatalf("digest.IsDigestPath(%q) = false; regeneration would re-enter on the date-stamped digest", path)
+			}
+		case "notion/pages/demo.json":
+			if isDigest {
+				t.Fatalf("digest.IsDigestPath(%q) = true; non-digest writes would be silently dropped", path)
+			}
+		}
+	}
+}
+
+// TestThisWeekDigestDoesNotReEnterRegeneration mirrors the date-stamped
+// digest no-recursion test for the rolling weekly artifact
+// `/digests/this-week.md`. The watcher must emit a normal fs event for the
+// rewrite so mount observers see the change, and `digest.IsDigestPath` must
+// classify the path as a digest so the regen pipeline drops it instead of
+// looping on its own output.
+func TestThisWeekDigestDoesNotReEnterRegeneration(t *testing.T) {
+	localDir := t.TempDir()
+	events, _, _ := startFileWatcher(t, localDir)
+
+	digestFile := filepath.Join(localDir, "digests", "this-week.md")
+	if err := os.MkdirAll(filepath.Dir(digestFile), 0o755); err != nil {
+		t.Fatalf("create digest dir: %v", err)
+	}
+	if err := os.WriteFile(digestFile, []byte("# this-week\n"), 0o644); err != nil {
+		t.Fatalf("write digest file: %v", err)
+	}
+
+	otherFile := filepath.Join(localDir, "linear", "issues", "demo.json")
+	if err := os.MkdirAll(filepath.Dir(otherFile), 0o755); err != nil {
+		t.Fatalf("create linear dir: %v", err)
+	}
+	if err := os.WriteFile(otherFile, []byte("{}"), 0o644); err != nil {
+		t.Fatalf("write non-digest file: %v", err)
+	}
+
+	observed := map[string]fsnotify.Op{}
+	deadline := time.After(2 * time.Second)
+collect:
+	for {
+		select {
+		case ev := <-events:
+			observed[ev.path] = observed[ev.path] | ev.op
+			if _, sawDigest := observed["digests/this-week.md"]; sawDigest {
+				if _, sawOther := observed["linear/issues/demo.json"]; sawOther {
+					break collect
+				}
+			}
+		case <-deadline:
+			break collect
+		}
+	}
+
+	if _, ok := observed["digests/this-week.md"]; !ok {
+		t.Fatalf("expected watcher event for digests/this-week.md, observed=%v", observed)
+	}
+	if _, ok := observed["linear/issues/demo.json"]; !ok {
+		t.Fatalf("expected watcher event for non-digest path, observed=%v", observed)
+	}
+	for path := range observed {
+		isDigest := digest.IsDigestPath(path)
+		switch path {
+		case "digests/this-week.md":
+			if !isDigest {
+				t.Fatalf("digest.IsDigestPath(%q) = false; regeneration would re-enter on the rolling weekly digest", path)
+			}
+		case "linear/issues/demo.json":
+			if isDigest {
+				t.Fatalf("digest.IsDigestPath(%q) = true; non-digest writes would be silently dropped", path)
+			}
+		}
+	}
 }
 
 // TestWatcherSkipsMountStateTempFiles pins the bug where writeFileAtomic

@@ -342,8 +342,9 @@ func (s *fsState) listDirectory(ctx context.Context, remotePath string) (map[str
 		entries[layoutFilename] = virtualLayoutMeta(s.remoteRoot)
 	}
 	if provider, ok := providerRootSegment(s.remoteRoot, remotePath); ok {
-		manifest := s.layoutManifest(provider)
+		manifest := s.providerLayoutManifest(ctx, provider)
 		entries[providerLayoutFilename] = virtualProviderLayoutMeta(s.remoteRoot, manifest)
+		entries[legacyProviderLayoutFilename] = legacyVirtualProviderLayoutMeta(s.remoteRoot, manifest)
 	}
 	if provider, resource, ok := virtualSchemaForDirectory(s.remoteRoot, remotePath); ok {
 		if payload, present := loadResourceSchema(provider, resource); present {
@@ -391,7 +392,7 @@ func (s *fsState) lookupMetadata(ctx context.Context, remotePath string) (nodeMe
 		return virtualLayoutMeta(s.remoteRoot), nil
 	}
 	if provider, ok := isVirtualProviderLayoutPath(s.remoteRoot, remotePath); ok {
-		return virtualProviderLayoutMeta(s.remoteRoot, s.layoutManifest(provider)), nil
+		return virtualProviderLayoutMetaForFilename(s.remoteRoot, s.providerLayoutManifest(ctx, provider), path.Base(remotePath)), nil
 	}
 	if provider, resource, ok := isVirtualSchemaPath(s.remoteRoot, remotePath); ok {
 		if payload, present := loadResourceSchema(provider, resource); present {
@@ -425,7 +426,7 @@ func (s *fsState) readFile(ctx context.Context, remotePath string) (mountsync.Re
 		return readVirtualLayout(s.remoteRoot), nil
 	}
 	if provider, ok := isVirtualProviderLayoutPath(s.remoteRoot, remotePath); ok {
-		return readVirtualProviderLayout(s.remoteRoot, s.layoutManifest(provider)), nil
+		return readVirtualProviderLayoutForFilename(s.remoteRoot, s.providerLayoutManifest(ctx, provider), path.Base(remotePath)), nil
 	}
 	if provider, resource, ok := isVirtualSchemaPath(s.remoteRoot, remotePath); ok {
 		if payload, present := loadResourceSchema(provider, resource); present {

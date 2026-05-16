@@ -538,8 +538,13 @@ class RelayFileClient:
         """List filesystem events.
 
         Digest artifacts are reported as ordinary ``file.created`` and
-        ``file.updated`` events at ``DIGEST_PATHS``; filter returned events
-        by those paths to subscribe to deterministic digest updates.
+        ``file.updated`` events. ``DIGEST_PATHS`` holds the literal rolling
+        anchor paths, including ``digests/today.md``,
+        ``digests/yesterday.md``, ``digests/this-week.md``, and
+        ``digests/last-week.md``; closed-window daily artifacts use the
+        date-stamped form
+        ``digests/YYYY-MM-DD.md``. Filter returned events through
+        ``relayfile.is_digest_path`` to subscribe to the full taxonomy.
         """
 
         query = _build_query({"provider": provider, "cursor": cursor, "limit": limit})
@@ -1227,8 +1232,13 @@ class AsyncRelayFileClient:
         """List filesystem events.
 
         Digest artifacts are reported as ordinary ``file.created`` and
-        ``file.updated`` events at ``DIGEST_PATHS``; filter returned events
-        by those paths to subscribe to deterministic digest updates.
+        ``file.updated`` events. ``DIGEST_PATHS`` holds the literal rolling
+        anchor paths, including ``digests/today.md``,
+        ``digests/yesterday.md``, ``digests/this-week.md``, and
+        ``digests/last-week.md``; closed-window daily artifacts use the
+        date-stamped form
+        ``digests/YYYY-MM-DD.md``. Filter returned events through
+        ``relayfile.is_digest_path`` to subscribe to the full taxonomy.
         """
 
         query = _build_query({"provider": provider, "cursor": cursor, "limit": limit})
