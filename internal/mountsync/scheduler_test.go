@@ -214,6 +214,56 @@ func TestCoalescer_30s(t *testing.T) {
 	}
 }
 
+// Regression: a plain debounce that resets dueAt on every change starves
+// forever when provider events arrive faster than the interval — today.md /
+// this-week.md would never regenerate under sustained churn. MaxDelay caps
+// the deferral so regeneration still fires.
+func TestCoalescer_MaxDelayPreventsStarvation(t *testing.T) {
+	now := time.Date(2026, 5, 13, 12, 0, 0, 0, time.UTC)
+	coalescer := &RollingDigestCoalescer{
+		Interval: 30 * time.Second,
+		MaxDelay: 2 * time.Minute,
+		Now:      func() time.Time { return now },
+	}
+	if !coalescer.ObserveChange("github/repos/x/issues/1.json") {
+		t.Fatal("first provider write should schedule regeneration")
+	}
+	// Sustained churn: a change every 10s for 5 minutes. A naive debounce
+	// would push dueAt forward on every call and never fire.
+	dueFiredWithinCap := false
+	for elapsed := time.Duration(0); elapsed <= 5*time.Minute; elapsed += 10 * time.Second {
+		now = now.Add(10 * time.Second)
+		coalescer.ObserveChange("github/repos/x/issues/1.json")
+		if coalescer.Due() {
+			dueFiredWithinCap = true
+			// Must not be deferred past first-pending + MaxDelay (+ one
+			// observation step of slack).
+			if elapsed > 2*time.Minute+10*time.Second {
+				t.Fatalf("regeneration deferred too long under sustained churn: %s", elapsed)
+			}
+			break
+		}
+	}
+	if !dueFiredWithinCap {
+		t.Fatal("coalescer starved: never became Due under sustained sub-interval churn")
+	}
+
+	// After a flush the cap window resets for the next batch.
+	coalescer.MarkFlushed()
+	if coalescer.Due() {
+		t.Fatal("coalescer should not be due immediately after flush")
+	}
+	coalescer.ObserveChange("github/repos/x/issues/2.json")
+	now = now.Add(29 * time.Second)
+	if coalescer.Due() {
+		t.Fatal("post-flush batch should still debounce normally (not due at 29s)")
+	}
+	now = now.Add(time.Second)
+	if !coalescer.Due() {
+		t.Fatal("post-flush batch should be due at 30s")
+	}
+}
+
 func TestRollingDigestJobsFlushAfterCoalescingWindow(t *testing.T) {
 	now := time.Date(2026, 5, 15, 12, 0, 0, 0, time.UTC)
 	root := t.TempDir()

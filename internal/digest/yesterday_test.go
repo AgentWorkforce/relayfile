@@ -284,11 +284,12 @@ func TestWriteYesterdayImmutableAgainstLaterDayEvents(t *testing.T) {
 		CanonicalPath: "github/repos/AgentWorkforce__workforce/pulls/by-id/92.json",
 	})
 
-	// Caller re-runs the closing-day digest with the SAME closed-day window
-	// and the SAME 2026-05-12 event set (later-day events are partitioned
-	// out by the caller per the spec's window contract — they belong in
-	// today.md, not yesterday). The writer must skip the write.
-	second, err := WriteYesterday(context.Background(), root, SliceSource{Items: events}, w)
+	// Re-run the closing-day digest with a source that now ALSO contains a
+	// later-day (2026-05-13) event. Immutability is pinned by the per-day
+	// marker, not by the caller pre-filtering the source: once yesterday.md
+	// is closed for 2026-05-12, a re-close for that date must skip the write
+	// even if the source is contaminated with out-of-window events.
+	second, err := WriteYesterday(context.Background(), root, SliceSource{Items: laterEvents}, w)
 	if err != nil {
 		t.Fatalf("WriteYesterday second: %v", err)
 	}

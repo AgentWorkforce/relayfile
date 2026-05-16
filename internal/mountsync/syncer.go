@@ -881,12 +881,14 @@ func (s *Syncer) HandleLocalChange(ctx context.Context, relativePath string, op 
 	if relativePath == "" || relativePath == "." {
 		return nil
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// ObserveChange mutates coalescer state that Due()/MarkFlushed() read
+	// under s.mu (runRollingDigestJobsLocked). It must run under the same
+	// lock — calling it before Lock() is a data race on pending/dueAt.
 	if s.rollingCoalescer != nil {
 		s.rollingCoalescer.ObserveChange(relativePath)
 	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	if err := s.loadState(); err != nil {
 		return err
 	}
