@@ -25,3 +25,11 @@ func configureDetachedProcess(cmd *exec.Cmd) error {
 func signalDaemonStop(process *os.Process) error {
 	return process.Kill()
 }
+
+// processExecutablePath is a no-op on Windows: resolving another
+// process's image path needs OpenProcess/QueryFullProcessImageName and
+// the extra privileges/handling are not worth it for this guard. Callers
+// fall back to the workspace-id and local-dir identity checks.
+func processExecutablePath(pid int) (path string, known bool) {
+	return "", false
+}

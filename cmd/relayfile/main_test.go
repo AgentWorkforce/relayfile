@@ -252,6 +252,36 @@ func TestBuildStorageBackendsFromEnvDurableLocalProfile(t *testing.T) {
 	}
 }
 
+func TestStorageProfileDurableLocalResolvesRelativeDataDir(t *testing.T) {
+	t.Setenv("RELAYFILE_BACKEND_PROFILE", "durable-local")
+	t.Setenv("RELAYFILE_DATA_DIR", ".data")
+
+	stateDSN, envDSN, wbDSN, err := storageProfileDefaultsFromEnv()
+	if err != nil {
+		t.Fatalf("storageProfileDefaultsFromEnv failed: %v", err)
+	}
+	absData, err := filepath.Abs(".data")
+	if err != nil {
+		t.Fatalf("filepath.Abs failed: %v", err)
+	}
+	cases := map[string]string{
+		stateDSN: "file://" + filepath.Join(absData, "state.json"),
+		envDSN:   "file://" + filepath.Join(absData, "envelope-queue.json"),
+		wbDSN:    "file://" + filepath.Join(absData, "writeback-queue.json"),
+	}
+	for got, want := range cases {
+		if got != want {
+			t.Fatalf("durable-local DSN = %q, want %q", got, want)
+		}
+		// Regression guard: a relative data dir previously produced
+		// "file://.data/state.json", which url.Parse resolves with
+		// host=".data" and path="/state.json" — i.e. filesystem root.
+		if strings.HasPrefix(got, "file://.") {
+			t.Fatalf("DSN %q is host-relative and resolves to filesystem root", got)
+		}
+	}
+}
+
 func TestBuildStorageBackendsFromEnvProductionProfile(t *testing.T) {
 	t.Setenv("RELAYFILE_BACKEND_PROFILE", "production")
 	t.Setenv("RELAYFILE_PRODUCTION_DSN", "postgres://localhost/relayfile?sslmode=disable")

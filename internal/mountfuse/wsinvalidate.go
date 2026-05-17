@@ -181,8 +181,9 @@ func (w *WSInvalidator) websocketURL() (string, error) {
 		return "", fmt.Errorf("unsupported base URL scheme %q", base.Scheme)
 	}
 	base.Path = fmt.Sprintf("/v1/workspaces/%s/fs/ws", url.PathEscape(w.workspaceID))
-	q := base.Query()
-	q.Set("token", w.token)
-	base.RawQuery = q.Encode()
+	// The bearer token is supplied via the Authorization header in
+	// listenOnce. Keeping it out of the URL query string avoids leaking
+	// the credential into reverse-proxy access logs, diagnostics, and
+	// error messages.
 	return base.String(), nil
 }
