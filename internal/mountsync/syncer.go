@@ -598,11 +598,12 @@ type trackedFile struct {
 }
 
 type localSnapshot struct {
-	RawContent  []byte
-	WireContent string
-	ContentType string
-	Encoding    string
-	Hash        string
+	RawContent    []byte
+	WireContent   string
+	ContentType   string
+	Encoding      string
+	Hash          string
+	SkipWriteback bool
 }
 
 type pendingBulkWrite struct {
@@ -1160,6 +1161,10 @@ func (s *Syncer) materializeConflict(ctx context.Context, remotePath, localPath 
 	if decodeErr != nil {
 		return decodeErr
 	}
+	if err := s.assertNotMountRoot(localPath); err != nil {
+		s.logf("skipping conflict materialization for %s: %v", remotePath, err)
+		return nil
+	}
 	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
 		return err
 	}
@@ -1223,6 +1228,10 @@ func (s *Syncer) materializeSchemaInvalid(
 	remoteBytes, decodeErr := decodeRemoteFileContent(remoteFile)
 	if decodeErr != nil {
 		return decodeErr
+	}
+	if err := s.assertNotMountRoot(localPath); err != nil {
+		s.logf("skipping schema-invalid materialization for %s: %v", remotePath, err)
+		return nil
 	}
 	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
 		return err
@@ -1304,6 +1313,10 @@ func (s *Syncer) bulkFlushThresholdValue() int {
 
 func (s *Syncer) revertReadonlyFile(ctx context.Context, remotePath, localPath string, tracked trackedFile, fallbackContentType string) error {
 	s.logDenial("WRITE_DENIED", remotePath, "agent does not have write permission")
+	if err := s.assertNotMountRoot(localPath); err != nil {
+		s.logf("skipping readonly revert for %s: %v", remotePath, err)
+		return nil
+	}
 	remoteFile, readErr := s.client.ReadFile(ctx, s.workspace, remotePath)
 	if readErr == nil {
 		remoteBytes, decodeErr := decodeRemoteFileContent(remoteFile)
@@ -1756,6 +1769,18 @@ func (s *Syncer) pullRemoteFullExport(ctx context.Context, client exportSnapshot
 		remotePaths[remotePath] = struct{}{}
 		files[i].Content = ""
 	}
+
+	// Circuit breaker: an empty or drastically truncated export response
+	// (degraded cloud / partial provider listing) would otherwise authorize
+	// applyRemoteSnapshotDeletes to wipe every locally-mirrored file.
+	// Skip the delete pass when the fresh listing is unsafe; the next
+	// healthy cycle will reconcile correctly. Mirrors the safeguard in
+	// pullRemoteFullTree.
+	if s.snapshotDeleteUnsafe(len(remotePaths)) {
+		s.logf("skipping snapshot delete pass (export): fresh remote export has %d files but %d are tracked locally (suspected partial/empty cloud export); preserving local state", len(remotePaths), len(s.state.Files))
+		return true, nil
+	}
+
 	return true, s.applyRemoteSnapshotDeletes(remotePaths, conflicted)
 }
 
@@ -1846,7 +1871,97 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 		cursor = *page.NextCursor
 	}
 
+	// Circuit breaker: a cloud OOM / 5xx storm can return a successful but
+	// empty or drastically truncated tree. Treating that as authoritative
+	// would delete every locally-mirrored file. If we have a meaningful
+	// amount of tracked state but the fresh listing came back empty (or
+	// shrank past the safety ratio), skip the delete pass and leave local
+	// state intact — the next healthy cycle will reconcile correctly.
+	if s.snapshotDeleteUnsafe(len(remotePaths)) {
+		s.logf("skipping snapshot delete pass: fresh remote tree has %d files but %d are tracked locally (suspected partial/empty cloud listing); preserving local state", len(remotePaths), len(s.state.Files))
+		return nil
+	}
+
 	return s.applyRemoteSnapshotDeletes(remotePaths, conflicted)
+}
+
+// snapshotDeleteUnsafe reports whether running snapshot-driven deletes is
+// unsafe given how many files the fresh remote listing returned versus how
+// many we currently track. It guards against a degraded cloud response
+// (empty or drastically truncated tree) wiping the local mirror.
+func (s *Syncer) snapshotDeleteUnsafe(remoteCount int) bool {
+	tracked := s.reconcilableTrackedFileCount()
+	if tracked == 0 {
+		return false
+	}
+	// Empty fresh listing while we track files is the classic OOM/500
+	// signature — never delete on that basis.
+	if remoteCount == 0 {
+		return true
+	}
+	// Configurable floor for "drastic shrink". By default, refuse the
+	// delete pass if the fresh listing dropped to less than 50% of tracked
+	// files while tracking a non-trivial number of files.
+	const minTrackedForRatioCheck = 10
+	ratio := snapshotDeleteMinRatio()
+	if tracked >= minTrackedForRatioCheck && float64(remoteCount) < float64(tracked)*ratio {
+		return true
+	}
+	return false
+}
+
+func (s *Syncer) reconcilableTrackedFileCount() int {
+	tracked := 0
+	for _, file := range s.state.Files {
+		// Keep this baseline aligned with applyRemoteDelete: these states
+		// do not result in snapshot-driven local deletes, so they should
+		// not make a filtered remotePaths listing look unsafe.
+		if file.Denied || file.WriteDenied || file.Dirty {
+			continue
+		}
+		tracked++
+	}
+	return tracked
+}
+
+// snapshotDeleteMinRatio is the minimum fraction of tracked files the fresh
+// remote listing must contain before snapshot deletes are allowed. Tunable
+// via RELAYFILE_SNAPSHOT_DELETE_MIN_RATIO (clamped to (0,1]); defaults to 0.5.
+func snapshotDeleteMinRatio() float64 {
+	const def = 0.5
+	raw := strings.TrimSpace(os.Getenv("RELAYFILE_SNAPSHOT_DELETE_MIN_RATIO"))
+	if raw == "" {
+		return def
+	}
+	v, err := strconv.ParseFloat(raw, 64)
+	if err != nil || v <= 0 || v > 1 {
+		return def
+	}
+	return v
+}
+
+// defaultMaxWritebackBytes caps the size of a local file eligible for
+// writeback. The clobber incident involved an ~11MB file renamed over the
+// mount root; 8MB is a generous text/document ceiling that keeps such
+// pathological payloads out of the sync pipeline by default.
+const defaultMaxWritebackBytes int64 = 8 << 20
+
+// maxWritebackBytes returns the writeback body size cap in bytes.
+// Configurable via RELAYFILE_MAX_WRITEBACK_BYTES (positive integer).
+// A value of 0 or a negative override disables the cap.
+func maxWritebackBytes() int64 {
+	raw := strings.TrimSpace(os.Getenv("RELAYFILE_MAX_WRITEBACK_BYTES"))
+	if raw == "" {
+		return defaultMaxWritebackBytes
+	}
+	v, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return defaultMaxWritebackBytes
+	}
+	if v <= 0 {
+		return 0
+	}
+	return v
 }
 
 func (s *Syncer) applyRemoteSnapshot(remoteFiles map[string]RemoteFile, conflicted map[string]struct{}) error {
@@ -2207,6 +2322,10 @@ func (s *Syncer) applyRemoteFile(remotePath string, file RemoteFile, conflicted 
 		if err != nil {
 			return nil
 		}
+		if err := s.assertNotMountRoot(localPath); err != nil {
+			s.logf("skipping remote file %s: %v", remotePath, err)
+			return nil
+		}
 		if err := s.applyLocalPermissions(localPath, canWrite); err != nil {
 			return err
 		}
@@ -2215,6 +2334,10 @@ func (s *Syncer) applyRemoteFile(remotePath string, file RemoteFile, conflicted 
 	}
 	localPath, err := remoteToLocalPath(s.localRoot, s.remoteRoot, remotePath)
 	if err != nil {
+		return nil
+	}
+	if err := s.assertNotMountRoot(localPath); err != nil {
+		s.logf("skipping remote file %s: %v", remotePath, err)
 		return nil
 	}
 	// _index.json files and nested <integration>/.layout.md dotfiles are
@@ -2371,6 +2494,11 @@ func (s *Syncer) applyRemoteDelete(remotePath string, conflicted map[string]stru
 		delete(s.state.Files, remotePath)
 		return nil
 	}
+	if err := s.assertNotMountRoot(localPath); err != nil {
+		s.logf("skipping remote delete for %s: %v", remotePath, err)
+		delete(s.state.Files, remotePath)
+		return nil
+	}
 	currentBytes, readErr := os.ReadFile(localPath)
 	if readErr == nil && hashBytes(currentBytes) == tracked.Hash {
 		_ = os.Remove(localPath)
@@ -2404,6 +2532,10 @@ func (s *Syncer) pushLocal(ctx context.Context) (map[string]struct{}, error) {
 		canWrite := s.canWritePath(remotePath)
 		tracked.ReadOnly = !canWrite
 		if exists && tracked.Denied {
+			if err := s.assertNotMountRoot(localPath); err != nil {
+				s.logf("skipping denied-file removal for %s: %v", remotePath, err)
+				continue
+			}
 			if err := os.Remove(localPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 				return nil, err
 			}
@@ -2449,6 +2581,9 @@ func (s *Syncer) pushLocal(ctx context.Context) (map[string]struct{}, error) {
 		// Hash differs from DeniedHash and we fall through to pushSingleFile
 		// which will retry (and may succeed or log a fresh denial).
 		if exists && tracked.WriteDenied && tracked.DeniedHash == snapshot.Hash {
+			continue
+		}
+		if snapshot.SkipWriteback {
 			continue
 		}
 		fullSnapshot, err := readLocalSnapshot(localPath, true)
@@ -2568,6 +2703,14 @@ func (s *Syncer) scanLocalFiles() (map[string]localSnapshot, error) {
 			}
 			return nil
 		}
+		// Data-loss guard: skip any top-level entry whose name collides
+		// with the mount directory's own basename (round-trip-onto-root).
+		if rel, relErr := filepath.Rel(s.localRoot, path); relErr == nil {
+			first := strings.SplitN(rel, string(os.PathSeparator), 2)[0]
+			if reservedTopLevel(first) || first == filepath.Base(s.localRoot) {
+				return nil
+			}
+		}
 		absPath, err := filepath.Abs(path)
 		if err == nil && absPath == statePathAbs {
 			return nil
@@ -2577,6 +2720,23 @@ func (s *Syncer) scanLocalFiles() (map[string]localSnapshot, error) {
 			return err
 		}
 		if !info.Mode().IsRegular() {
+			return nil
+		}
+		// Writeback body size cap: an oversized local file must not be
+		// enqueued for writeback (it both stresses the cloud and was part
+		// of the clobber pathology). Surface it and skip.
+		if max := maxWritebackBytes(); max > 0 && info.Size() > max {
+			s.logf("skipping oversized local file %s (%d bytes > %d byte writeback cap); not enqueued", path, info.Size(), max)
+			snapshot, err := readLocalSnapshot(path, false)
+			if err != nil {
+				return err
+			}
+			snapshot.SkipWriteback = true
+			remotePath, err := localToRemotePath(s.localRoot, s.remoteRoot, path)
+			if err != nil {
+				return nil
+			}
+			results[remotePath] = snapshot
 			return nil
 		}
 		remotePath, err := localToRemotePath(s.localRoot, s.remoteRoot, path)
@@ -2686,7 +2846,9 @@ func (s *Syncer) savePublicState() error {
 		}
 		if !s.lowMemory {
 			if snapshot, ok := currentFiles[remotePath]; ok {
-				if tracked.Hash != snapshot.Hash && fileStatus == "ready" {
+				if snapshot.SkipWriteback && !tracked.Denied && !tracked.WriteDenied {
+					fileStatus = "writeback-skipped"
+				} else if tracked.Hash != snapshot.Hash && fileStatus == "ready" {
 					fileStatus = "writeback-pending"
 				}
 			} else if !tracked.Denied && !tracked.WriteDenied && tracked.Hash != "" && fileStatus == "ready" {
@@ -2715,6 +2877,14 @@ func (s *Syncer) savePublicState() error {
 	if !s.lowMemory {
 		for remotePath, snapshot := range currentFiles {
 			if _, ok := files[remotePath]; ok {
+				continue
+			}
+			if snapshot.SkipWriteback {
+				files[remotePath] = publicFileState{
+					ContentType: snapshot.ContentType,
+					Encoding:    snapshot.Encoding,
+					Status:      "writeback-skipped",
+				}
 				continue
 			}
 			pendingWriteback++
@@ -3122,8 +3292,18 @@ func remoteToLocalPath(localRoot, remoteRoot, remotePath string) (string, error)
 		return "", fmt.Errorf("path %s escapes local root", remotePath)
 	}
 	joined := filepath.Join(localRoot, filepath.FromSlash(rel))
-	// Final safety check: resolved path must be under localRoot.
-	if !strings.HasPrefix(filepath.Clean(joined), localRoot+string(filepath.Separator)) && filepath.Clean(joined) != localRoot {
+	cleanJoined := filepath.Clean(joined)
+	// Data-loss guard: a remote path whose only relative component is the
+	// basename of the mount directory (e.g. remoteRoot="/" and
+	// remotePath="/relayfile-mount" when localRoot=".../relayfile-mount")
+	// resolves directly onto the mount root itself. Writing a file there
+	// would clobber the entire mount directory. Reject it — only genuine
+	// children may map onto the local tree.
+	if cleanJoined == localRoot {
+		return "", fmt.Errorf("remote path %s resolves onto the mount root %s", remotePath, localRoot)
+	}
+	// Final safety check: resolved path must be strictly under localRoot.
+	if !strings.HasPrefix(cleanJoined, localRoot+string(filepath.Separator)) {
 		return "", fmt.Errorf("resolved path %s escapes local root %s", joined, localRoot)
 	}
 	return joined, nil
@@ -3142,10 +3322,35 @@ func localToRemotePath(localRoot, remoteRoot, localPath string) (string, error) 
 		return "", fmt.Errorf("path %s escapes local root", localPath)
 	}
 	remoteRoot = normalizeRemotePath(remoteRoot)
+	var remotePath string
 	if remoteRoot == "/" {
-		return normalizeRemotePath("/" + rel), nil
+		remotePath = normalizeRemotePath("/" + rel)
+	} else {
+		remotePath = normalizeRemotePath(remoteRoot + "/" + rel)
 	}
-	return normalizeRemotePath(remoteRoot + "/" + rel), nil
+	// Data-loss guard: refuse to generate a remote path that would
+	// round-trip back onto the mount root via remoteToLocalPath. This
+	// happens when a child file's name equals the mount-dir basename
+	// (e.g. localRoot=".../relayfile-mount" with a child
+	// "relayfile-mount" mapping to remote "/relayfile-mount", which
+	// then resolves back onto the root directory).
+	if back, err := remoteToLocalPath(localRoot, remoteRoot, remotePath); err != nil {
+		return "", fmt.Errorf("local path %s maps to a remote path that escapes the mount root: %w", localPath, err)
+	} else if filepath.Clean(back) == filepath.Clean(localRoot) {
+		return "", fmt.Errorf("local path %s maps to remote %s which round-trips onto the mount root", localPath, remotePath)
+	}
+	return remotePath, nil
+}
+
+// assertNotMountRoot is a defense-in-depth guard: it returns an error if
+// localPath, once cleaned, equals the mount root. Callers that mutate the
+// filesystem (writes, deletes) invoke this to ensure a malformed or
+// adversarial remote path can never operate on the mount directory itself.
+func (s *Syncer) assertNotMountRoot(localPath string) error {
+	if filepath.Clean(localPath) == filepath.Clean(s.localRoot) {
+		return fmt.Errorf("refusing filesystem operation on mount root %s", s.localRoot)
+	}
+	return nil
 }
 
 func detectContentType(path string) string {
@@ -3298,6 +3503,13 @@ func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
 	}
 	if err := tmpFile.Close(); err != nil {
 		return err
+	}
+	// Data-loss guard: never rename a file over an existing directory.
+	// os.Rename onto a directory would (on some platforms) or would
+	// otherwise be the mechanism by which the mount root was clobbered
+	// by an 11MB file. If the target exists and is a directory, refuse.
+	if info, err := os.Lstat(path); err == nil && info.IsDir() {
+		return fmt.Errorf("refusing to replace directory %s with a file", path)
 	}
 	if err := os.Rename(tmpName, path); err != nil {
 		return err
