@@ -67,6 +67,34 @@ const defaultBulkFlushThreshold = 256
 // tracked.Hash and the actual remote content.
 const defaultFullPullEvery = 20
 
+// Bootstrap / cursor timeout defaults. The bootstrap default is the
+// "unbounded while making progress" sentinel (<=0): the heavy full-tree
+// pull is allowed to run as long as it keeps applying files within
+// defaultBootstrapIdleTimeout. The cursor resolution gets its own short
+// independent deadline so it can never hang an otherwise healthy cycle.
+const (
+	defaultBootstrapTimeout     = 0 * time.Second
+	defaultBootstrapIdleTimeout = 90 * time.Second
+	defaultCursorTimeout        = 20 * time.Second
+)
+
+// resolveDurationEnv returns the option value if non-zero, else parses the
+// named env var, else falls back to def. A negative option/env keeps its
+// (possibly sentinel) value.
+func resolveDurationEnv(opt time.Duration, env string, def time.Duration, logger Logger) time.Duration {
+	if opt != 0 {
+		return opt
+	}
+	if raw := strings.TrimSpace(os.Getenv(env)); raw != "" {
+		if parsed, err := time.ParseDuration(raw); err == nil {
+			return parsed
+		} else if logger != nil {
+			logger.Printf("ignoring invalid %s=%q: %v", env, raw, err)
+		}
+	}
+	return def
+}
+
 var providerLayoutAliasSegments = []string{
 	"by-title",
 	"by-id",
@@ -433,6 +461,22 @@ type SyncerOptions struct {
 	// the default (defaultFullPullEvery, ~10 min at 30s intervals). A
 	// negative value disables the periodic full pull entirely.
 	FullPullEvery int
+	// BootstrapTimeout caps the one-time full-tree bootstrap / periodic
+	// full pull. It is derived from the Syncer's RootCtx (NOT the inbound
+	// per-cycle ctx) so a tiny per-cycle deadline cannot starve a large
+	// initial mirror. 0 falls back to env RELAYFILE_BOOTSTRAP_TIMEOUT;
+	// the resolved default is the "unbounded while making progress"
+	// sentinel (<=0): the bootstrap runs to completion as long as it keeps
+	// applying files within the idle window.
+	BootstrapTimeout time.Duration
+	// CursorTimeout bounds resolveLatestEventCursor with its OWN short
+	// deadline derived from RootCtx. 0 falls back to env
+	// RELAYFILE_CURSOR_TIMEOUT, default 20s.
+	CursorTimeout time.Duration
+	// ForceFullReconcile, when non-nil and true, forces one full reconcile
+	// regardless of BootstrapComplete (escape hatch / clobber-remnant
+	// recovery). nil falls back to env RELAYFILE_FORCE_FULL_RECONCILE.
+	ForceFullReconcile *bool
 	// LazyRepos controls lazy GitHub repo subtree hydration. nil falls back to env.
 	LazyRepos *bool
 	// LowMemory avoids expensive diagnostic/public-state scans and large
@@ -563,6 +607,10 @@ type Syncer struct {
 	mode                 string
 	interval             time.Duration
 	fullPullEvery        int
+	cursorTimeout        time.Duration
+	bootstrapTimeout     time.Duration
+	bootstrapIdleTimeout time.Duration
+	forceFullReconcile   bool
 	incrementalCycles    int
 	lazyRepos            bool
 	lowMemory            bool
@@ -793,6 +841,25 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 			fullPullEvery = defaultFullPullEvery
 		}
 	}
+	cursorTimeout := resolveDurationEnv(opts.CursorTimeout, "RELAYFILE_CURSOR_TIMEOUT", defaultCursorTimeout, opts.Logger)
+	if cursorTimeout <= 0 {
+		cursorTimeout = defaultCursorTimeout
+	}
+	bootstrapTimeout := resolveDurationEnv(opts.BootstrapTimeout, "RELAYFILE_BOOTSTRAP_TIMEOUT", defaultBootstrapTimeout, opts.Logger)
+	bootstrapIdleTimeout := resolveDurationEnv(0, "RELAYFILE_BOOTSTRAP_IDLE_TIMEOUT", defaultBootstrapIdleTimeout, opts.Logger)
+	if bootstrapIdleTimeout <= 0 {
+		bootstrapIdleTimeout = defaultBootstrapIdleTimeout
+	}
+	forceFullReconcile := false
+	if opts.ForceFullReconcile != nil {
+		forceFullReconcile = *opts.ForceFullReconcile
+	} else if raw := strings.TrimSpace(os.Getenv("RELAYFILE_FORCE_FULL_RECONCILE")); raw != "" {
+		if parsed, perr := strconv.ParseBool(raw); perr == nil {
+			forceFullReconcile = parsed
+		} else if opts.Logger != nil {
+			opts.Logger.Printf("ignoring invalid RELAYFILE_FORCE_FULL_RECONCILE=%q: %v", raw, perr)
+		}
+	}
 	lazyRepos := false
 	if opts.LazyRepos != nil {
 		lazyRepos = *opts.LazyRepos
@@ -844,6 +911,10 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 		mode:                 strings.TrimSpace(opts.Mode),
 		interval:             opts.Interval,
 		fullPullEvery:        fullPullEvery,
+		cursorTimeout:        cursorTimeout,
+		bootstrapTimeout:     bootstrapTimeout,
+		bootstrapIdleTimeout: bootstrapIdleTimeout,
+		forceFullReconcile:   forceFullReconcile,
 		lazyRepos:            lazyRepos,
 		lowMemory:            lowMemory,
 		layoutRegistrar:      opts.ProviderLayoutRegistrar,
@@ -2501,10 +2572,17 @@ func (s *Syncer) pullRemoteIncremental(ctx context.Context, conflicted map[strin
 }
 
 func (s *Syncer) resolveLatestEventCursor(ctx context.Context) (string, error) {
+	// Derive an OWN short deadline from rootCtx so a slow/hanging events
+	// feed can never wedge an otherwise healthy cycle (and is independent
+	// of whatever inbound per-cycle/bootstrap ctx the caller passed). The
+	// signature/return contract is unchanged; the inbound ctx is honored
+	// only for cancellation via rootCtx propagation.
+	cctx, cancel := context.WithTimeout(s.rootCtx, s.cursorTimeout)
+	defer cancel()
 	cursor := ""
 	latest := ""
 	for {
-		feed, err := s.client.ListEvents(ctx, s.workspace, s.eventProvider, cursor, 1000)
+		feed, err := s.client.ListEvents(cctx, s.workspace, s.eventProvider, cursor, 1000)
 		if err != nil {
 			return "", err
 		}
