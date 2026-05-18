@@ -1265,6 +1265,37 @@ func TestStatusSurfacesDegradedStallReason(t *testing.T) {
 	}
 }
 
+func TestReadGuardCountersAcceptsMirrorStateGuardsShape(t *testing.T) {
+	localDir := t.TempDir()
+	if err := writeMirrorStateFile(localDir, syncStateFile{
+		WorkspaceID: "ws_demo",
+		Mode:        defaultMountMode,
+		Guards: &syncStateGuards{
+			SkippedOversizeWriteback: 3,
+			SnapshotDeleteBlocked:    2,
+			LastAppliedRevision:      "rev_9",
+			Circuit: &syncStateGuardCirc{
+				Open:       true,
+				OpenEvents: 1,
+				Failures:   4,
+			},
+		},
+	}); err != nil {
+		t.Fatalf("writeMirrorStateFile failed: %v", err)
+	}
+
+	got := readGuardCounters(localDir)
+	if got == nil {
+		t.Fatalf("expected guard counters")
+	}
+	if got.SkippedOversizeWriteback != 3 || got.SnapshotDeleteBlocked != 2 || got.LastAppliedRevision != "rev_9" {
+		t.Fatalf("unexpected guard counters: %#v", got)
+	}
+	if got.Circuit == nil || !got.Circuit.Open || got.Circuit.OpenEvents != 1 || got.Circuit.Failures != 4 {
+		t.Fatalf("unexpected circuit counters: %#v", got.Circuit)
+	}
+}
+
 func TestStatusRendersWebhookUnhealthyWarning(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)
