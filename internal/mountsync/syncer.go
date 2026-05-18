@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -1751,6 +1752,74 @@ func (s *Syncer) HTTPClient() (*HTTPClient, bool) {
 	return client, ok
 }
 
+// bootstrapProgress carries the watchdog "touch" mechanism back to the
+// heavy full-pull loops so they can signal liveness. touch() is a no-op
+// in hard-cap mode.
+type bootstrapProgress struct {
+	last *atomic.Int64
+}
+
+func (p bootstrapProgress) touch() {
+	if p.last != nil {
+		p.last.Store(time.Now().UnixNano())
+	}
+}
+
+// bootstrapContext returns a context for the heavy one-time bootstrap /
+// periodic full-tree pull. It is derived from s.rootCtx (NOT the inbound
+// per-cycle ctx) so a tiny RELAYFILE_MOUNT_TIMEOUT cannot starve a large
+// initial mirror. Two modes:
+//
+//   - hard-cap (bootstrapTimeout > 0): WithTimeout(rootCtx, bootstrapTimeout).
+//   - progress-extension (default, bootstrapTimeout <= 0): WithCancel +
+//     a watchdog goroutine that cancels only if no progress touch() has
+//     landed within bootstrapIdleTimeout.
+//
+// Callers MUST defer the returned CancelFunc on every exit path; doing so
+// also tears the watchdog goroutine down (no leak).
+func (s *Syncer) bootstrapContext(parent context.Context) (context.Context, context.CancelFunc, bootstrapProgress) {
+	_ = parent // intentionally derive from rootCtx, not the per-cycle ctx
+	if s.bootstrapTimeout > 0 {
+		ctx, cancel := context.WithTimeout(s.rootCtx, s.bootstrapTimeout)
+		return ctx, cancel, bootstrapProgress{}
+	}
+	ctx, cancel := context.WithCancel(s.rootCtx)
+	prog := bootstrapProgress{last: &atomic.Int64{}}
+	prog.touch()
+	idle := s.bootstrapIdleTimeout
+	if idle <= 0 {
+		idle = defaultBootstrapIdleTimeout
+	}
+	done := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-done:
+				return
+			case <-ticker.C:
+				last := prog.last.Load()
+				if last == 0 {
+					continue
+				}
+				if time.Since(time.Unix(0, last)) > idle {
+					s.logf("bootstrap watchdog: no progress for %s; cancelling full pull (will resume next cycle)", idle)
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+	wrapped := func() {
+		close(done)
+		cancel()
+	}
+	return ctx, wrapped, prog
+}
+
 func (s *Syncer) pullRemote(ctx context.Context, conflicted map[string]struct{}) error {
 	if s.state.EventsCursor != "" {
 		// Skip-if-no-events short-circuit. Most reconcile cycles on a
@@ -1789,7 +1858,14 @@ func (s *Syncer) pullRemote(ctx context.Context, conflicted map[string]struct{})
 		if s.fullPullEvery > 0 && s.incrementalCycles >= s.fullPullEvery {
 			s.incrementalCycles = 0
 			s.logf("forcing periodic full tree pull (every %d incremental cycles) as defense against cloud-side revision reuse", s.fullPullEvery)
-			if err := s.pullRemoteFull(ctx, conflicted); err != nil {
+			// Periodic full pull is the same heavy op as bootstrap — give
+			// it the rootCtx-derived bootstrap deadline, not the tiny
+			// per-cycle one. The surrounding ListEvents probe above stays
+			// on the inbound per-cycle ctx (no latency regression).
+			bctx, bcancel, bprog := s.bootstrapContext(ctx)
+			err := s.pullRemoteFull(bctx, conflicted, bprog)
+			bcancel()
+			if err != nil {
 				return err
 			}
 			// Intentionally leave s.state.EventsCursor unchanged. A naive
@@ -1856,13 +1932,20 @@ func (s *Syncer) pullRemote(ctx context.Context, conflicted map[string]struct{})
 		}
 	}
 
-	if err := s.pullRemoteFull(ctx, conflicted); err != nil {
+	// Bootstrap / full-pull path. Derive the deadline from rootCtx (NOT
+	// the inbound per-cycle ctx) so a large initial mirror is not starved
+	// by a tiny RELAYFILE_MOUNT_TIMEOUT. resolveLatestEventCursor already
+	// owns its own short rootCtx-derived deadline (Step 3) so it is also
+	// safe under a tiny inbound ctx.
+	bctx, bcancel, bprog := s.bootstrapContext(ctx)
+	defer bcancel()
+	if err := s.pullRemoteFull(bctx, conflicted, bprog); err != nil {
 		return err
 	}
 	if s.wsConn != nil {
 		return nil
 	}
-	cursor, err := s.resolveLatestEventCursor(ctx)
+	cursor, err := s.resolveLatestEventCursor(bctx)
 	if err != nil {
 		var httpErr *HTTPError
 		if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusNotFound {
@@ -1874,17 +1957,17 @@ func (s *Syncer) pullRemote(ctx context.Context, conflicted map[string]struct{})
 	return nil
 }
 
-func (s *Syncer) pullRemoteFull(ctx context.Context, conflicted map[string]struct{}) error {
+func (s *Syncer) pullRemoteFull(ctx context.Context, conflicted map[string]struct{}, prog bootstrapProgress) error {
 	if client, ok := s.client.(exportSnapshotClient); ok {
-		used, err := s.pullRemoteFullExport(ctx, client, conflicted)
+		used, err := s.pullRemoteFullExport(ctx, client, conflicted, prog)
 		if used {
 			return err
 		}
 	}
-	return s.pullRemoteFullTree(ctx, conflicted)
+	return s.pullRemoteFullTree(ctx, conflicted, prog)
 }
 
-func (s *Syncer) pullRemoteFullExport(ctx context.Context, client exportSnapshotClient, conflicted map[string]struct{}) (bool, error) {
+func (s *Syncer) pullRemoteFullExport(ctx context.Context, client exportSnapshotClient, conflicted map[string]struct{}, prog bootstrapProgress) (bool, error) {
 	files, err := client.ExportFiles(ctx, s.workspace, s.remoteRoot)
 	if err != nil {
 		if exportSnapshotUnsupported(err) {
@@ -1918,6 +2001,7 @@ func (s *Syncer) pullRemoteFullExport(ctx context.Context, client exportSnapshot
 		if err := s.applyRemoteFile(remotePath, files[i], conflicted); err != nil {
 			return true, err
 		}
+		prog.touch()
 		remotePaths[remotePath] = struct{}{}
 		files[i].Content = ""
 	}
@@ -1930,10 +2014,19 @@ func (s *Syncer) pullRemoteFullExport(ctx context.Context, client exportSnapshot
 	// pullRemoteFullTree.
 	if s.snapshotDeleteUnsafe(len(remotePaths)) {
 		s.logf("skipping snapshot delete pass (export): fresh remote export has %d files but %d are tracked locally (suspected partial/empty cloud export); preserving local state", len(remotePaths), len(s.state.Files))
+		// Export is atomic — a full snapshot was applied even if the
+		// delete pass is deferred for safety. Bootstrap is complete.
+		s.markBootstrapComplete()
 		return true, nil
 	}
 
-	return true, s.applyRemoteSnapshotDeletesRev(remotePaths, conflicted, maxObservedRevision)
+	if err := s.applyRemoteSnapshotDeletesRev(remotePaths, conflicted, maxObservedRevision); err != nil {
+		return true, err
+	}
+	// Export is atomic: a successful ExportFiles + apply is a complete
+	// one-shot mirror with no resume cursor.
+	s.markBootstrapComplete()
+	return true, nil
 }
 
 func exportSnapshotUnsupported(err error) bool {
@@ -1962,17 +2055,35 @@ func isUnderLazyGithubRepoSubtree(remoteRoot, remotePath string) bool {
 	return len(segments) >= 5 && segments[0] == "github" && segments[1] == "repos"
 }
 
-func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]struct{}) error {
+func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]struct{}, prog bootstrapProgress) error {
 	remotePaths := map[string]struct{}{}
+	// Resumable bootstrap: if a prior bootstrap was interrupted mid-tree,
+	// pick traversal back up from the persisted cursor rather than
+	// re-reading everything. startedFromEmpty tracks whether this process
+	// traversed the WHOLE tree (empty start -> NextCursor==nil): only then
+	// is the snapshot delete pass authoritative. Resuming from a persisted
+	// cursor means we did not observe the full remote set this cycle, so
+	// the delete pass is skipped (next full cycle does the authoritative
+	// delete) — preserving the #164/#165 mount-root-clobber invariants.
 	cursor := ""
+	if !s.state.BootstrapComplete && strings.TrimSpace(s.state.BootstrapCursor) != "" {
+		cursor = s.state.BootstrapCursor
+		s.logf("resuming bootstrap full-tree pull from persisted cursor (%d files already synced)", s.state.BootstrapFilesSynced)
+	}
+	startedFromEmpty := cursor == ""
+	if s.state.BootstrapStartedAt == "" {
+		s.state.BootstrapStartedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	}
 	maxObservedRevision := ""
 	for {
-		page, err := s.client.ListTree(ctx, s.workspace, s.remoteRoot, 10, cursor)
+		page, err := s.client.ListTree(ctx, s.workspace, s.remoteRoot, 200, cursor)
 		if err != nil {
 			s.recordCloudFailure(err)
 			return err
 		}
 		s.recordCloudSuccess()
+		prog.touch()
+		filesThisPage := 0
 		for _, entry := range page.Entries {
 			if entry.Type != "file" {
 				continue
@@ -2021,12 +2132,24 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 			if err := s.applyRemoteFile(remotePath, file, conflicted); err != nil {
 				return err
 			}
+			prog.touch()
 			remotePaths[remotePath] = struct{}{}
+			filesThisPage++
 		}
 		if page.NextCursor == nil || *page.NextCursor == "" {
 			break
 		}
 		cursor = *page.NextCursor
+		// Persist the resume point + progress so an interrupted bootstrap
+		// (timeout, crash, watchdog cancel) picks up here next cycle
+		// instead of restarting the whole tree.
+		if !s.state.BootstrapComplete {
+			s.state.BootstrapCursor = cursor
+			s.state.BootstrapFilesSynced += filesThisPage
+			if err := s.saveState(); err != nil {
+				return err
+			}
+		}
 	}
 
 	// Circuit breaker: a cloud OOM / 5xx storm can return a successful but
@@ -2041,7 +2164,44 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 		return nil
 	}
 
-	return s.applyRemoteSnapshotDeletesRev(remotePaths, conflicted, maxObservedRevision)
+	// Resumed/partial traversal safety: only run the authoritative
+	// snapshot delete pass when this process traversed the ENTIRE tree
+	// (started from an empty cursor and reached NextCursor==nil). If the
+	// traversal began from a persisted resume cursor, remotePaths only
+	// covers the tail of the tree, so deleting "everything not in
+	// remotePaths" would wipe the already-mirrored prefix — exactly the
+	// #164/#165 clobber failure mode. Skip the delete pass this cycle;
+	// the next full cycle (fresh empty-cursor traversal) does the
+	// authoritative delete.
+	if !startedFromEmpty {
+		s.logf("skipping snapshot delete pass: bootstrap resumed from a persisted cursor so the fresh listing is partial; deferring deletes to the next full cycle")
+		// Bootstrap is now complete (we reached the end of the tree),
+		// just not authoritative for deletes this cycle.
+		s.markBootstrapComplete()
+		return nil
+	}
+
+	if err := s.applyRemoteSnapshotDeletesRev(remotePaths, conflicted, maxObservedRevision); err != nil {
+		return err
+	}
+	s.markBootstrapComplete()
+	return nil
+}
+
+// markBootstrapComplete records that a full-tree (or export) pull has
+// fully mirrored the remote at least once. Completion is set ONLY here
+// (and the export path) — never in markSyncSuccess — so the fast-path
+// gate (Step 5) cannot be satisfied by a partial pull.
+func (s *Syncer) markBootstrapComplete() {
+	s.state.BootstrapComplete = true
+	s.state.BootstrapCursor = ""
+	s.state.BootstrapStartedAt = ""
+	s.state.BootstrapFilesSynced = 0
+	s.state.BootstrapFilesTotal = 0
+	// One-shot escape hatch / clobber-remnant recovery: after a single
+	// successful full reconcile, clear the in-memory force flag so
+	// subsequent cycles can use the fast-path again.
+	s.forceFullReconcile = false
 }
 
 // snapshotDeleteUnsafe reports whether running snapshot-driven deletes is

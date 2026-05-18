@@ -41,6 +41,9 @@ type mountConfig struct {
 	interval         time.Duration
 	intervalJitter   float64
 	timeout          time.Duration
+	bootstrapTimeout time.Duration
+	cursorTimeout    time.Duration
+	forceFullRecon   bool
 	websocketEnabled bool
 	lazyRepos        bool
 	lowMemory        bool
@@ -69,6 +72,9 @@ func main() {
 	interval := flag.Duration("interval", durationEnv("RELAYFILE_MOUNT_INTERVAL", 30*time.Second), "sync interval")
 	intervalJitter := flag.Float64("interval-jitter", floatEnv("RELAYFILE_MOUNT_INTERVAL_JITTER", 0.2), "sync interval jitter ratio (0.0-1.0)")
 	timeout := flag.Duration("timeout", durationEnv("RELAYFILE_MOUNT_TIMEOUT", 15*time.Second), "per-sync timeout")
+	bootstrapTimeout := flag.Duration("bootstrap-timeout", durationEnv("RELAYFILE_BOOTSTRAP_TIMEOUT", 0), "hard cap for the one-time/full-tree bootstrap pull (0 = unbounded while making progress)")
+	cursorTimeout := flag.Duration("cursor-timeout", durationEnv("RELAYFILE_CURSOR_TIMEOUT", 20*time.Second), "independent timeout for events-cursor resolution")
+	fullReconcile := flag.Bool("full-reconcile", boolEnv("RELAYFILE_FORCE_FULL_RECONCILE", false), "force one full reconcile regardless of bootstrap-complete state (escape hatch)")
 	websocketEnabled := flag.Bool("websocket", boolEnv("RELAYFILE_MOUNT_WEBSOCKET", true), "enable websocket event streaming when available")
 	lazyRepos := flag.Bool("lazy-repos", lazyReposEnv(), "lazily materialize GitHub repo subtrees on first access")
 	lowMemory := flag.Bool("low-memory", boolEnv("RELAYFILE_MOUNT_LOW_MEMORY", false), "reduce mount memory use by omitting per-file public state and deferring content reads")
@@ -114,6 +120,9 @@ func main() {
 		interval:         *interval,
 		intervalJitter:   *intervalJitter,
 		timeout:          *timeout,
+		bootstrapTimeout: *bootstrapTimeout,
+		cursorTimeout:    *cursorTimeout,
+		forceFullRecon:   *fullReconcile,
 		websocketEnabled: *websocketEnabled,
 		lazyRepos:        *lazyRepos,
 		lowMemory:        *lowMemory,
@@ -162,19 +171,22 @@ func executeMount(rootCtx context.Context, cfg mountConfig, runPoll pollRunner, 
 func runPollingMount(rootCtx context.Context, cfg mountConfig) error {
 	client := mountsync.NewHTTPClient(cfg.baseURL, cfg.token, &http.Client{Timeout: cfg.timeout})
 	syncer, err := mountsync.NewSyncer(client, mountsync.SyncerOptions{
-		WorkspaceID:   cfg.workspaceID,
-		RemoteRoot:    cfg.remotePath,
-		EventProvider: cfg.eventProvider,
-		LocalRoot:     cfg.localDir,
-		StateFile:     cfg.stateFile,
-		Scopes:        cfg.scopes,
-		WebSocket:     boolPtr(cfg.websocketEnabled),
-		RootCtx:       rootCtx,
-		Logger:        log.Default(),
-		Mode:          cfg.mode,
-		Interval:      cfg.interval,
-		LazyRepos:     boolPtr(cfg.lazyRepos),
-		LowMemory:     boolPtr(cfg.lowMemory),
+		WorkspaceID:        cfg.workspaceID,
+		RemoteRoot:         cfg.remotePath,
+		EventProvider:      cfg.eventProvider,
+		LocalRoot:          cfg.localDir,
+		StateFile:          cfg.stateFile,
+		Scopes:             cfg.scopes,
+		WebSocket:          boolPtr(cfg.websocketEnabled),
+		RootCtx:            rootCtx,
+		Logger:             log.Default(),
+		Mode:               cfg.mode,
+		Interval:           cfg.interval,
+		LazyRepos:          boolPtr(cfg.lazyRepos),
+		LowMemory:          boolPtr(cfg.lowMemory),
+		BootstrapTimeout:   cfg.bootstrapTimeout,
+		CursorTimeout:      cfg.cursorTimeout,
+		ForceFullReconcile: boolPtr(cfg.forceFullRecon),
 	})
 	if err != nil {
 		return fmt.Errorf("initialize mount syncer: %w", err)

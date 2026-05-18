@@ -3626,6 +3626,9 @@ func runMount(args []string) error {
 	interval := fs.Duration("interval", durationEnv("RELAYFILE_MOUNT_INTERVAL", defaultMountInterval), "sync interval")
 	intervalJitter := fs.Float64("interval-jitter", floatEnv("RELAYFILE_MOUNT_INTERVAL_JITTER", 0.2), "sync interval jitter ratio (0.0-1.0)")
 	timeout := fs.Duration("timeout", durationEnv("RELAYFILE_MOUNT_TIMEOUT", defaultMountTimeout), "per-sync timeout")
+	bootstrapTimeout := fs.Duration("bootstrap-timeout", durationEnv("RELAYFILE_BOOTSTRAP_TIMEOUT", 0), "hard cap for the one-time/full-tree bootstrap pull (0 = unbounded while making progress)")
+	cursorTimeout := fs.Duration("cursor-timeout", durationEnv("RELAYFILE_CURSOR_TIMEOUT", 20*time.Second), "independent timeout for events-cursor resolution")
+	fullReconcile := fs.Bool("full-reconcile", boolEnv("RELAYFILE_FORCE_FULL_RECONCILE", false), "force one full reconcile regardless of bootstrap-complete state (escape hatch)")
 	websocketEnabled := fs.Bool("websocket", boolEnv("RELAYFILE_MOUNT_WEBSOCKET", true), "enable websocket event streaming when available")
 	lowMemory := fs.Bool("low-memory", boolEnv("RELAYFILE_MOUNT_LOW_MEMORY", false), "reduce mount memory use by omitting per-file public state and deferring content reads")
 	pprofAddr := fs.String("pprof-addr", strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_PPROF_ADDR")), "optional pprof listen address, e.g. 127.0.0.1:6060")
@@ -3646,6 +3649,9 @@ func runMount(args []string) error {
 		"interval":            true,
 		"interval-jitter":     true,
 		"timeout":             true,
+		"bootstrap-timeout":   true,
+		"cursor-timeout":      true,
+		"full-reconcile":      false,
 		"websocket":           false,
 		"low-memory":          false,
 		"pprof-addr":          true,
@@ -3763,15 +3769,18 @@ func runMount(args []string) error {
 		Transport: newWritebackFailureTransport(absLocalDir, log.Default(), http.DefaultTransport),
 	})
 	syncer, err := mountsync.NewSyncer(client, mountsync.SyncerOptions{
-		WorkspaceID:   workspaceID,
-		RemoteRoot:    *remotePath,
-		EventProvider: strings.TrimSpace(*eventProvider),
-		LocalRoot:     absLocalDir,
-		StateFile:     strings.TrimSpace(*stateFile),
-		WebSocket:     boolPtr(*websocketEnabled),
-		LowMemory:     boolPtr(*lowMemory),
-		RootCtx:       rootCtx,
-		Logger:        log.Default(),
+		WorkspaceID:        workspaceID,
+		RemoteRoot:         *remotePath,
+		EventProvider:      strings.TrimSpace(*eventProvider),
+		LocalRoot:          absLocalDir,
+		StateFile:          strings.TrimSpace(*stateFile),
+		WebSocket:          boolPtr(*websocketEnabled),
+		LowMemory:          boolPtr(*lowMemory),
+		RootCtx:            rootCtx,
+		Logger:             log.Default(),
+		BootstrapTimeout:   *bootstrapTimeout,
+		CursorTimeout:      *cursorTimeout,
+		ForceFullReconcile: boolPtr(*fullReconcile),
 	})
 	if err != nil {
 		return fmt.Errorf("failed to initialize mount syncer: %w", err)
