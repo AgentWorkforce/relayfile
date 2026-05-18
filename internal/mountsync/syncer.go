@@ -1160,6 +1160,10 @@ func (s *Syncer) materializeConflict(ctx context.Context, remotePath, localPath 
 	if decodeErr != nil {
 		return decodeErr
 	}
+	if err := s.assertNotMountRoot(localPath); err != nil {
+		s.logf("skipping conflict materialization for %s: %v", remotePath, err)
+		return nil
+	}
 	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
 		return err
 	}
@@ -1223,6 +1227,10 @@ func (s *Syncer) materializeSchemaInvalid(
 	remoteBytes, decodeErr := decodeRemoteFileContent(remoteFile)
 	if decodeErr != nil {
 		return decodeErr
+	}
+	if err := s.assertNotMountRoot(localPath); err != nil {
+		s.logf("skipping schema-invalid materialization for %s: %v", remotePath, err)
+		return nil
 	}
 	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
 		return err
@@ -1304,6 +1312,10 @@ func (s *Syncer) bulkFlushThresholdValue() int {
 
 func (s *Syncer) revertReadonlyFile(ctx context.Context, remotePath, localPath string, tracked trackedFile, fallbackContentType string) error {
 	s.logDenial("WRITE_DENIED", remotePath, "agent does not have write permission")
+	if err := s.assertNotMountRoot(localPath); err != nil {
+		s.logf("skipping readonly revert for %s: %v", remotePath, err)
+		return nil
+	}
 	remoteFile, readErr := s.client.ReadFile(ctx, s.workspace, remotePath)
 	if readErr == nil {
 		remoteBytes, decodeErr := decodeRemoteFileContent(remoteFile)
@@ -1756,6 +1768,18 @@ func (s *Syncer) pullRemoteFullExport(ctx context.Context, client exportSnapshot
 		remotePaths[remotePath] = struct{}{}
 		files[i].Content = ""
 	}
+
+	// Circuit breaker: an empty or drastically truncated export response
+	// (degraded cloud / partial provider listing) would otherwise authorize
+	// applyRemoteSnapshotDeletes to wipe every locally-mirrored file.
+	// Skip the delete pass when the fresh listing is unsafe; the next
+	// healthy cycle will reconcile correctly. Mirrors the safeguard in
+	// pullRemoteFullTree.
+	if s.snapshotDeleteUnsafe(len(remotePaths)) {
+		s.logf("skipping snapshot delete pass (export): fresh remote export has %d files but %d are tracked locally (suspected partial/empty cloud export); preserving local state", len(remotePaths), len(s.state.Files))
+		return true, nil
+	}
+
 	return true, s.applyRemoteSnapshotDeletes(remotePaths, conflicted)
 }
 

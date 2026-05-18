@@ -225,6 +225,60 @@ func TestPullDoesNotDeleteLocalFilesWhenCloudTreeEmpty(t *testing.T) {
 	}
 }
 
+// TestPullDoesNotDeleteLocalFilesWhenCloudExportEmpty mirrors
+// TestPullDoesNotDeleteLocalFilesWhenCloudTreeEmpty for the export path:
+// a cloud export response that comes back empty while local state tracks
+// files must NOT delete the local mirror.
+func TestPullDoesNotDeleteLocalFilesWhenCloudExportEmpty(t *testing.T) {
+	disableWS := false
+	localDir := t.TempDir()
+
+	// Seed a tracked, mirrored file locally.
+	mirrored := filepath.Join(localDir, "keep.md")
+	if err := os.WriteFile(mirrored, []byte("# keep me"), 0o644); err != nil {
+		t.Fatalf("seed mirrored file: %v", err)
+	}
+	stateFile := filepath.Join(localDir, ".relayfile-mount-state.json")
+	if err := writeMountState(stateFile, mountState{
+		Files: map[string]trackedFile{
+			"/notion/keep.md": {Revision: "rev_1", ContentType: "text/markdown", Hash: hashString("# keep me")},
+		},
+	}); err != nil {
+		t.Fatalf("seed state: %v", err)
+	}
+
+	// fakeExportClient with NO files -> ExportFiles returns an empty
+	// slice. The syncer should detect the unsafe response and preserve
+	// the local mirror instead of running applyRemoteSnapshotDeletes.
+	fc := &fakeExportClient{
+		fakeClient: &fakeClient{files: map[string]RemoteFile{}, eventsUnsupported: true},
+	}
+	syncer, err := NewSyncer(fc, SyncerOptions{
+		WorkspaceID: "ws_empty_export",
+		RemoteRoot:  "/notion",
+		LocalRoot:   localDir,
+		WebSocket:   &disableWS,
+		StateFile:   stateFile,
+	})
+	if err != nil {
+		t.Fatalf("new syncer: %v", err)
+	}
+
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("sync against empty cloud export failed: %v", err)
+	}
+
+	// Confirm the export path was actually exercised so the test fails
+	// loudly if the syncer silently falls back to ListTree.
+	if fc.exportCalls == 0 {
+		t.Fatalf("expected at least one ExportFiles call; got 0 (export path not exercised)")
+	}
+
+	if b, rErr := os.ReadFile(mirrored); rErr != nil || string(b) != "# keep me" {
+		t.Fatalf("local mirrored file was deleted/corrupted by empty cloud export: err=%v contents=%q", rErr, string(b))
+	}
+}
+
 // TestMountRootBasenameCollisionNeverClobbered is the top-level
 // regression: a mount whose basename collides with a child file name must
 // never sync that child onto the root nor destroy the mount directory.
