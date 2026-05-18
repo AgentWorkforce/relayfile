@@ -290,6 +290,36 @@ type syncStateFile struct {
 	FailedWritebacks uint64              `json:"failedWritebacks"`
 	StallReason      string              `json:"stallReason,omitempty"`
 	Daemon           *syncStateDaemon    `json:"daemon,omitempty"`
+	// Guards surfaces defensive-guard telemetry from the in-process
+	// mountsync state. Existing consumers can ignore the field; it is
+	// additive and uses omitempty. Counters come from .relay/state.json.
+	Guards *syncStateGuards `json:"guards,omitempty"`
+}
+
+// syncStateGuards mirrors mountsync.telemetryCounters and the circuit
+// breaker snapshot at the CLI status surface, so operators (and any
+// scripted consumer of `relayfile status --json`) can see breaker state
+// and guard activity without parsing the underlying .relay/state.json.
+type syncStateGuards struct {
+	SkippedOversizeWriteback uint64              `json:"skippedOversizeWriteback,omitempty"`
+	DeniedRootTarget         uint64              `json:"deniedRootTarget,omitempty"`
+	SnapshotDeleteBlocked    uint64              `json:"snapshotDeleteBlocked,omitempty"`
+	CircuitOpenEvents        uint64              `json:"circuitOpenEvents,omitempty"`
+	TombstonesPending        uint64              `json:"tombstonesPending,omitempty"`
+	TombstonesConfirmed      uint64              `json:"tombstonesConfirmed,omitempty"`
+	TombstonesAgedOut        uint64              `json:"tombstonesAgedOut,omitempty"`
+	LastAppliedRevision      string              `json:"lastAppliedRevision,omitempty"`
+	Circuit                  *syncStateGuardCirc `json:"circuit,omitempty"`
+}
+
+// syncStateGuardCirc is the JSON shape of the cloud-error circuit breaker
+// state surfaced via status. Mirrors mountsync.CircuitState fields.
+type syncStateGuardCirc struct {
+	Open       bool   `json:"open"`
+	OpenedAt   string `json:"openedAt,omitempty"`
+	OpenEvents uint64 `json:"openEvents,omitempty"`
+	Failures   int    `json:"failures,omitempty"`
+	NextRetry  string `json:"nextRetry,omitempty"`
 }
 
 type syncStateProvider struct {
@@ -321,6 +351,10 @@ type daemonPIDState struct {
 	LocalDir    string `json:"localDir"`
 	LogFile     string `json:"logFile"`
 	StartedAt   string `json:"startedAt"`
+	// Executable is the resolved path of the daemon binary. It lets
+	// stop/restart confirm a recorded PID still belongs to a relayfile
+	// daemon before signaling it, guarding against PID reuse.
+	Executable string `json:"executable,omitempty"`
 }
 
 var failedWritebacksStateMu sync.Mutex
@@ -1162,6 +1196,78 @@ func fallbackIntegrationCatalog() []integrationCatalogEntry {
 		{ID: "slack", DisplayName: "Slack", VFSRoot: "/slack"},
 		{ID: "slack-my-senior-dev", DisplayName: "Slack (MSD)", VFSRoot: "/slack-msd"},
 		{ID: "slack-nightcto", DisplayName: "Slack (NightCTO)", VFSRoot: "/slack-nightcto"},
+	}
+}
+
+// preflightMountRootInvariant enforces the recovery-mode contract before
+// the daemon recreates a mount layout under absLocalDir. The clobber
+// pathology is: a regular file at the path that used to be the mount
+// directory. Recreating around it would silently restart the data-loss
+// signature, so we refuse unless the operator explicitly acknowledges via
+// --reset-after-clobber (or RELAYFILE_RESET_AFTER_CLOBBER=1).
+//
+// Plain "missing root" (the fresh-install case) is allowed without the
+// flag, but only when the parent of localDir exists — we refuse to mount
+// at a path whose parent itself is missing or a file (likely a typo).
+func preflightMountRootInvariant(absLocalDir string, ack bool) error {
+	clean := filepath.Clean(absLocalDir)
+	info, err := os.Lstat(clean)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// Fresh-install / first-mount case. Require the parent to be
+			// a directory; otherwise refuse to create the mount in a
+			// likely-bogus location.
+			parent := filepath.Dir(clean)
+			pInfo, pErr := os.Lstat(parent)
+			if pErr != nil {
+				return fmt.Errorf("mount parent %s is not accessible: %w", parent, pErr)
+			}
+			if !pInfo.IsDir() {
+				return fmt.Errorf("mount parent %s is not a directory; refusing to create %s underneath",
+					parent, clean)
+			}
+			return nil
+		}
+		return fmt.Errorf("inspect mount root %s: %w", clean, err)
+	}
+	if info.IsDir() {
+		return nil
+	}
+	// Not a directory — this is the clobber signature.
+	if !ack {
+		path, _ := mountsync.WriteIncidentReport(clean, &mountsync.MountRootInvariantError{
+			Path:   clean,
+			Kind:   classifyMountRootKind(info),
+			Reason: fmt.Sprintf("mount root is not a directory (mode=%s, size=%d)", info.Mode().String(), info.Size()),
+		})
+		return fmt.Errorf(
+			"refusing to start mount: %s exists but is not a directory (mode=%s). "+
+				"This matches the clobber data-loss signature. Inspect the path, "+
+				"back up anything you need, move it aside, then re-run with "+
+				"--reset-after-clobber (or RELAYFILE_RESET_AFTER_CLOBBER=1). "+
+				"Incident report: %s",
+			clean, info.Mode().String(), path)
+	}
+	// Acknowledged. Move the offending file aside (do not rm — let the
+	// operator examine it) and then let ensureMirrorLayout recreate the
+	// directory.
+	backup := fmt.Sprintf("%s.clobbered-%s", clean, time.Now().UTC().Format("20060102T150405Z"))
+	if err := os.Rename(clean, backup); err != nil {
+		return fmt.Errorf("move clobbered mount root aside: %w", err)
+	}
+	log.Printf("mount root clobber acknowledged: %s moved to %s; recreating clean mount", clean, backup)
+	return nil
+}
+
+// classifyMountRootKind reports the kind string used in incident reports.
+func classifyMountRootKind(info os.FileInfo) string {
+	switch {
+	case info.Mode().IsRegular():
+		return "regular_file"
+	case info.Mode()&os.ModeSymlink != 0:
+		return "symlink"
+	default:
+		return "other"
 	}
 }
 
@@ -2602,6 +2708,10 @@ func runWritebackRetry(args []string, stdout io.Writer) error {
 	if err := os.Remove(recordPath); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("retry queued but failed to remove %s: %w", recordPath, err)
 	}
+	sidecarPath := deadLetterErrorPathFor(record.LocalDir, op)
+	if err := os.Remove(sidecarPath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("retry queued but failed to remove %s: %w", sidecarPath, err)
+	}
 	fmt.Fprintf(stdout, "Retry queued for op %s\n", op)
 	return nil
 }
@@ -3053,8 +3163,11 @@ func refreshDeadLetterMirror(record workspaceRecord, serverOverride, tokenOverri
 	keep := make(map[string]struct{}, len(feed.Items))
 	baseURL := strings.TrimRight(client.baseURL, "/")
 	for _, item := range feed.Items {
-		opID := strings.TrimSpace(item.OpID)
+		opID := safeWritebackOpID(item.OpID)
 		if opID == "" {
+			if trimmed := strings.TrimSpace(item.OpID); trimmed != "" {
+				fmt.Fprintf(os.Stderr, "warning: skipping dead-letter op with unsafe id %q\n", trimmed)
+			}
 			continue
 		}
 		keep[opID] = struct{}{}
@@ -3087,7 +3200,10 @@ func refreshDeadLetterMirror(record workspaceRecord, serverOverride, tokenOverri
 		}
 	}
 
-	// Prune local records the server no longer reports as dead-lettered.
+	// Prune local payload records the server no longer reports as
+	// dead-lettered. Diagnostic sidecars (<opID>.error.json) are bound to
+	// their payload's lifecycle: they are skipped here and removed together
+	// with the payload, never evaluated as standalone payload records.
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -3096,14 +3212,16 @@ func refreshDeadLetterMirror(record workspaceRecord, serverOverride, tokenOverri
 		return err
 	}
 	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".json") || strings.HasSuffix(name, ".error.json") {
 			continue
 		}
-		opID := strings.TrimSuffix(entry.Name(), ".json")
+		opID := strings.TrimSuffix(name, ".json")
 		if _, ok := keep[opID]; ok {
 			continue
 		}
-		_ = os.Remove(filepath.Join(dir, entry.Name()))
+		_ = os.Remove(filepath.Join(dir, name))
+		_ = os.Remove(deadLetterErrorPathFor(record.LocalDir, opID))
 	}
 	return nil
 }
@@ -3173,6 +3291,10 @@ func runOpsReplay(args []string, stdin io.Reader, stdout io.Writer) error {
 		path := filepath.Join(deadLetterDirFor(record.LocalDir), opID+".json")
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 			fmt.Fprintf(stdout, "warning: replay queued but failed to remove %s: %v\n", path, err)
+		}
+		sidecar := deadLetterErrorPathFor(record.LocalDir, opID)
+		if err := os.Remove(sidecar); err != nil && !os.IsNotExist(err) {
+			fmt.Fprintf(stdout, "warning: replay queued but failed to remove %s: %v\n", sidecar, err)
 		}
 	}
 	fmt.Fprintf(stdout, "Replay queued for op %s\n", opID)
@@ -3501,26 +3623,28 @@ func runMount(args []string) error {
 	logFileFlag := fs.String("log-file", "", "log file path for background mode")
 	daemonized := fs.Bool("daemonized", false, "internal flag used by relayfile mount --background")
 	once := fs.Bool("once", false, "run one sync cycle and exit")
+	resetAfterClobber := fs.Bool("reset-after-clobber", boolEnv("RELAYFILE_RESET_AFTER_CLOBBER", false), "acknowledge a mount-root clobber and authorize daemon to recreate the directory")
 	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
-		"server":          true,
-		"token":           true,
-		"remote-path":     true,
-		"provider":        true,
-		"state-file":      true,
-		"mode":            true,
-		"interval":        true,
-		"interval-jitter": true,
-		"timeout":         true,
-		"websocket":       false,
-		"low-memory":      false,
-		"pprof-addr":      true,
-		"memlog-interval": true,
-		"background":      false,
-		"pid-file":        true,
-		"log-file":        true,
-		"daemonized":      false,
-		"once":            false,
-		"local-dir":       true,
+		"server":              true,
+		"token":               true,
+		"remote-path":         true,
+		"provider":            true,
+		"state-file":          true,
+		"mode":                true,
+		"interval":            true,
+		"interval-jitter":     true,
+		"timeout":             true,
+		"websocket":           false,
+		"low-memory":          false,
+		"pprof-addr":          true,
+		"memlog-interval":     true,
+		"background":          false,
+		"pid-file":            true,
+		"log-file":            true,
+		"daemonized":          false,
+		"once":                false,
+		"reset-after-clobber": false,
+		"local-dir":           true,
 	})); err != nil {
 		// `--help` / `-h` come back from flag.ContinueOnError as
 		// flag.ErrHelp. Per contract A13 §3.6, surface the synced-mirror
@@ -3567,6 +3691,14 @@ func runMount(args []string) error {
 	if err != nil {
 		return err
 	}
+	// Recovery-mode precheck: refuse to (re)create a mount root if a prior
+	// run's directory was clobbered (replaced by a file, or missing in a
+	// surprising way) unless the operator explicitly acknowledges. The
+	// acknowledgment flag also tolerates the "missing root" case so that
+	// fresh installs continue to work.
+	if err := preflightMountRootInvariant(absLocalDir, *resetAfterClobber); err != nil {
+		return err
+	}
 	if err := ensureMirrorLayout(absLocalDir); err != nil {
 		return err
 	}
@@ -3604,6 +3736,7 @@ func runMount(args []string) error {
 			LocalDir:    absLocalDir,
 			LogFile:     logFile,
 			StartedAt:   time.Now().UTC().Format(time.RFC3339),
+			Executable:  resolvedSelfExecutable(),
 		}); err != nil {
 			return err
 		}
@@ -4145,9 +4278,19 @@ func runStop(args []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	pid := readDaemonPID(record.LocalDir)
+	pid, verified := verifyDaemonProcess(record.LocalDir, record.ID)
 	if pid == 0 {
 		return fmt.Errorf("no running mount found for workspace %s", record.Name)
+	}
+	if !verified {
+		// The pid file points at a process that is not this workspace's
+		// daemon (PID reuse or a tampered/stale pid file). Clear the
+		// stale state rather than signaling an unrelated process.
+		if rerr := os.Remove(mountPIDFile(record.LocalDir)); rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
+			return fmt.Errorf("failed to clear stale background mount state for %s: %w", record.Name, rerr)
+		}
+		fmt.Fprintf(stdout, "Cleared stale background mount state for %s (pid %d was not a relayfile daemon)\n", record.Name, pid)
+		return nil
 	}
 	process, err := os.FindProcess(pid)
 	if err != nil {
@@ -4212,30 +4355,39 @@ func runRestart(args []string, stdout io.Writer) error {
 	// because the process is already gone (stale pid file), clean up and
 	// proceed; any other failure aborts the restart so we don't race a
 	// second daemon against the first on the same pid file.
-	if pid := readDaemonPID(localDir); pid != 0 {
-		process, perr := os.FindProcess(pid)
-		if perr != nil {
-			return fmt.Errorf("failed to find background mount for %s (pid %d): %w", record.Name, pid, perr)
-		}
-		if serr := signalDaemonStop(process); serr != nil {
-			if isProcessAlreadyGone(serr) {
-				if rerr := os.Remove(mountPIDFile(localDir)); rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
-					return fmt.Errorf("failed to clear stale background mount state for %s (pid %d): %w", record.Name, pid, rerr)
-				}
-				fmt.Fprintf(stdout, "Cleared stale background mount state for %s (pid %d)\n", record.Name, pid)
-			} else {
-				return fmt.Errorf("failed to stop background mount for %s (pid %d): %w", record.Name, pid, serr)
+	if pid, verified := verifyDaemonProcess(localDir, record.ID); pid != 0 {
+		if !verified {
+			// Stale/tampered pid file pointing at a non-daemon process.
+			// Clear it and continue as a safe "ensure running" verb.
+			if rerr := os.Remove(mountPIDFile(localDir)); rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
+				return fmt.Errorf("failed to clear stale background mount state for %s (pid %d): %w", record.Name, pid, rerr)
 			}
+			fmt.Fprintf(stdout, "Cleared stale background mount state for %s (pid %d was not a relayfile daemon)\n", record.Name, pid)
 		} else {
-			fmt.Fprintf(stdout, "Stopped background mount for %s (pid %d)\n", record.Name, pid)
-			// Wait for the old daemon to actually release its pid file. A
-			// fixed sleep is fragile: if the old process takes longer to
-			// exit, its `defer os.Remove(pidFile)` would race the new
-			// daemon's pid write and silently delete it, leaving `status`,
-			// `stop`, and a later `restart` reporting "no daemon" against a
-			// process that was, in fact, running.
-			if werr := waitForDaemonExit(localDir, pid, 5*time.Second); werr != nil {
-				return fmt.Errorf("old daemon (pid %d) for %s did not exit cleanly: %w", pid, record.Name, werr)
+			process, perr := os.FindProcess(pid)
+			if perr != nil {
+				return fmt.Errorf("failed to find background mount for %s (pid %d): %w", record.Name, pid, perr)
+			}
+			if serr := signalDaemonStop(process); serr != nil {
+				if isProcessAlreadyGone(serr) {
+					if rerr := os.Remove(mountPIDFile(localDir)); rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
+						return fmt.Errorf("failed to clear stale background mount state for %s (pid %d): %w", record.Name, pid, rerr)
+					}
+					fmt.Fprintf(stdout, "Cleared stale background mount state for %s (pid %d)\n", record.Name, pid)
+				} else {
+					return fmt.Errorf("failed to stop background mount for %s (pid %d): %w", record.Name, pid, serr)
+				}
+			} else {
+				fmt.Fprintf(stdout, "Stopped background mount for %s (pid %d)\n", record.Name, pid)
+				// Wait for the old daemon to actually release its pid file. A
+				// fixed sleep is fragile: if the old process takes longer to
+				// exit, its `defer os.Remove(pidFile)` would race the new
+				// daemon's pid write and silently delete it, leaving `status`,
+				// `stop`, and a later `restart` reporting "no daemon" against a
+				// process that was, in fact, running.
+				if werr := waitForDaemonExit(localDir, pid, 5*time.Second); werr != nil {
+					return fmt.Errorf("old daemon (pid %d) for %s did not exit cleanly: %w", pid, record.Name, werr)
+				}
 			}
 		}
 	}
@@ -5300,7 +5452,81 @@ func buildSyncStateSnapshot(status syncStatusResponse, workspaceID, mode string,
 	}
 	snapshot.Providers = providers
 	snapshot.LastEventAt = lastEvent
+	snapshot.Guards = readGuardCounters(localDir)
 	return snapshot
+}
+
+// readGuardCounters reads the mountsync public state file under
+// .relay/state.json and copies the telemetry counters + circuit snapshot
+// into the CLI-surface shape. Returns nil if the state file is missing
+// or unparseable; this is purely additive status, never load-bearing.
+func readGuardCounters(localDir string) *syncStateGuards {
+	if localDir == "" {
+		return nil
+	}
+	payload, err := os.ReadFile(filepath.Join(localDir, ".relay", "state.json"))
+	if err != nil {
+		return nil
+	}
+	var view struct {
+		Counters struct {
+			SkippedOversizeWriteback uint64 `json:"skippedOversizeWriteback"`
+			DeniedRootTarget         uint64 `json:"deniedRootTarget"`
+			SnapshotDeleteBlocked    uint64 `json:"snapshotDeleteBlocked"`
+			CircuitOpenEvents        uint64 `json:"circuitOpenEvents"`
+			TombstonesPending        uint64 `json:"tombstonesPending"`
+			TombstonesConfirmed      uint64 `json:"tombstonesConfirmed"`
+			TombstonesAgedOut        uint64 `json:"tombstonesAgedOut"`
+		} `json:"counters"`
+		LastAppliedRevision string `json:"lastAppliedRevision"`
+		Circuit             *struct {
+			Open       bool   `json:"open"`
+			OpenedAt   string `json:"openedAt"`
+			OpenEvents uint64 `json:"openEvents"`
+			Failures   int    `json:"failures"`
+			NextRetry  string `json:"nextRetry"`
+		} `json:"circuit"`
+		Guards *syncStateGuards `json:"guards"`
+	}
+	if err := json.Unmarshal(payload, &view); err != nil {
+		return nil
+	}
+	if view.Guards != nil {
+		return view.Guards
+	}
+	// If everything is zero/empty, return nil so the JSON stays compact.
+	zero := view.Counters.SkippedOversizeWriteback == 0 &&
+		view.Counters.DeniedRootTarget == 0 &&
+		view.Counters.SnapshotDeleteBlocked == 0 &&
+		view.Counters.CircuitOpenEvents == 0 &&
+		view.Counters.TombstonesPending == 0 &&
+		view.Counters.TombstonesConfirmed == 0 &&
+		view.Counters.TombstonesAgedOut == 0 &&
+		view.LastAppliedRevision == "" &&
+		view.Circuit == nil
+	if zero {
+		return nil
+	}
+	g := &syncStateGuards{
+		SkippedOversizeWriteback: view.Counters.SkippedOversizeWriteback,
+		DeniedRootTarget:         view.Counters.DeniedRootTarget,
+		SnapshotDeleteBlocked:    view.Counters.SnapshotDeleteBlocked,
+		CircuitOpenEvents:        view.Counters.CircuitOpenEvents,
+		TombstonesPending:        view.Counters.TombstonesPending,
+		TombstonesConfirmed:      view.Counters.TombstonesConfirmed,
+		TombstonesAgedOut:        view.Counters.TombstonesAgedOut,
+		LastAppliedRevision:      view.LastAppliedRevision,
+	}
+	if view.Circuit != nil {
+		g.Circuit = &syncStateGuardCirc{
+			Open:       view.Circuit.Open,
+			OpenedAt:   view.Circuit.OpenedAt,
+			OpenEvents: view.Circuit.OpenEvents,
+			Failures:   view.Circuit.Failures,
+			NextRetry:  view.Circuit.NextRetry,
+		}
+	}
+	return g
 }
 
 func writeMirrorStateFile(localDir string, snapshot syncStateFile) error {
@@ -5480,6 +5706,79 @@ func readDaemonPID(localDir string) int {
 		return 0
 	}
 	return pid
+}
+
+// readDaemonPIDState returns the structured pid state. ok is false for a
+// missing, legacy bare-int, or unparseable pid file.
+func readDaemonPIDState(localDir string) (daemonPIDState, bool) {
+	if localDir == "" {
+		return daemonPIDState{}, false
+	}
+	payload, err := os.ReadFile(mountPIDFile(localDir))
+	if err != nil {
+		return daemonPIDState{}, false
+	}
+	var state daemonPIDState
+	if json.Unmarshal(payload, &state) == nil && state.PID > 0 {
+		return state, true
+	}
+	return daemonPIDState{}, false
+}
+
+func resolvedSelfExecutable() string {
+	exe, err := os.Executable()
+	if err != nil {
+		return ""
+	}
+	if resolved, rerr := filepath.EvalSymlinks(exe); rerr == nil {
+		return resolved
+	}
+	return exe
+}
+
+// verifyDaemonProcess decides whether the PID recorded for a workspace
+// genuinely belongs to that workspace's relayfile daemon. It guards
+// stop/restart against PID reuse and tampered/stale pid files causing a
+// SIGTERM to an unrelated same-user process.
+//
+// Returns the recorded pid and whether it is safe to signal. When pid is
+// non-zero but verified is false, the pid file is stale/tampered and the
+// caller should clear it instead of signaling.
+func verifyDaemonProcess(localDir, workspaceID string) (pid int, verified bool) {
+	state, structured := readDaemonPIDState(localDir)
+	if !structured {
+		// Legacy bare-int or unreadable pid file: preserve the prior
+		// liveness-only behavior so pre-existing daemons keep working.
+		legacy := readDaemonPID(localDir)
+		return legacy, legacy != 0
+	}
+	if state.PID <= 0 {
+		return 0, false
+	}
+	if ws := strings.TrimSpace(workspaceID); ws != "" &&
+		strings.TrimSpace(state.WorkspaceID) != "" && state.WorkspaceID != ws {
+		return state.PID, false
+	}
+	if absLocal, err := filepath.Abs(localDir); err == nil && strings.TrimSpace(state.LocalDir) != "" {
+		if filepath.Clean(state.LocalDir) != filepath.Clean(absLocal) {
+			return state.PID, false
+		}
+	}
+	// Best-effort: when the platform lets us resolve the running
+	// process's executable, it must match the recorded daemon binary.
+	if exe, known := processExecutablePath(state.PID); known {
+		if state.Executable == "" {
+			return state.PID, false
+		}
+		want := state.Executable
+		if resolved, rerr := filepath.EvalSymlinks(exe); rerr == nil {
+			exe = resolved
+		}
+		if filepath.Clean(exe) != filepath.Clean(want) {
+			return state.PID, false
+		}
+	}
+	return state.PID, true
 }
 
 func rotateLogFile(path string) error {

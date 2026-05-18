@@ -46,6 +46,15 @@ func TestA14BackgroundModeWritesPidAndStopSignalsCleanly(t *testing.T) {
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start sleep subprocess failed: %v", err)
 	}
+	// verifyDaemonProcess confirms a recorded PID still belongs to a
+	// relayfile daemon by matching the running process's executable
+	// against daemonPIDState.Executable (guards against PID reuse). The
+	// test's stand-in daemon is `sleep`, so record its resolved binary
+	// path; otherwise stop() would treat it as a stale/foreign PID.
+	daemonExe := cmd.Path
+	if resolved, rerr := filepath.EvalSymlinks(cmd.Path); rerr == nil {
+		daemonExe = resolved
+	}
 	t.Cleanup(func() {
 		if cmd.Process != nil {
 			_ = cmd.Process.Kill()
@@ -61,6 +70,7 @@ func TestA14BackgroundModeWritesPidAndStopSignalsCleanly(t *testing.T) {
 		LocalDir:    localDir,
 		LogFile:     logFile,
 		StartedAt:   time.Now().UTC().Format(time.RFC3339),
+		Executable:  daemonExe,
 	}); err != nil {
 		t.Fatalf("writeDaemonPIDState failed: %v", err)
 	}

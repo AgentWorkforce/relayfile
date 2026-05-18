@@ -105,8 +105,26 @@ func (fw *FileWatcher) shouldSkip(rel string) bool {
 		strings.HasPrefix(first, ".relayfile-mount-state.json.tmp-") {
 		return true
 	}
-	return first == ".git" || first == ".relay" || first == "node_modules" ||
-		first == "_PERMISSIONS.md"
+	if reservedTopLevel(first) {
+		return true
+	}
+	// Data-loss guard: a top-level entry whose name equals the mount
+	// directory's own basename is the round-trip-onto-root collision.
+	// Never sync it.
+	if fw.localDir != "" && first == filepath.Base(filepath.Clean(fw.localDir)) {
+		return true
+	}
+	return false
+}
+
+// reservedTopLevel reports whether a top-level entry name is internal
+// bookkeeping that must never participate in sync. Centralized so the
+// watcher and scanLocalFiles stay in agreement. This list applies to
+// top-level entries, including files such as _PERMISSIONS.md; addDirRecursive
+// is directory-only and skips a different sentinel for the mount state file.
+func reservedTopLevel(name string) bool {
+	return name == ".git" || name == ".relay" || name == "node_modules" ||
+		name == "_PERMISSIONS.md"
 }
 
 func (fw *FileWatcher) queueChange(rel string, op fsnotify.Op) {
@@ -153,7 +171,7 @@ func (fw *FileWatcher) emitExistingFileEvents(base string) {
 
 // addDirRecursive walks `base` and adds every directory underneath it to the
 // fsnotify watcher, skipping `.git`, `.relay`, `node_modules`, and the
-// mount-state file. Used both at startup (to seed the watcher with the
+// mount-state file sentinel. Used both at startup (to seed the watcher with the
 // existing tree) and at runtime (when a sync-down creates a new nested
 // directory structure that we need to start watching).
 func (fw *FileWatcher) addDirRecursive(base string) error {

@@ -15,10 +15,29 @@ import (
 )
 
 func main() {
-	addr := os.Getenv("RELAYFILE_ADDR")
+	addrEnv := strings.TrimSpace(os.Getenv("RELAYFILE_ADDR"))
+	addr := addrEnv
 	if addr == "" {
 		addr = ":8080"
 	}
+
+	// The internal webhook endpoint can turn HMAC-authenticated envelopes
+	// into workspace file changes. An empty secret makes the server fall
+	// back to the public, predictable "dev-internal-secret" constant — so
+	// require an explicit secret in normal operation, and only allow the
+	// built-in dev secret behind an explicit dev mode that is pinned to
+	// loopback so it cannot be reached off-host.
+	internalSecret := os.Getenv("RELAYFILE_INTERNAL_HMAC_SECRET")
+	if strings.TrimSpace(internalSecret) == "" {
+		if !boolEnv("RELAYFILE_DEV_MODE", false) {
+			log.Fatalf("RELAYFILE_INTERNAL_HMAC_SECRET must be set; refusing to start with the built-in development secret. Set a strong secret, or set RELAYFILE_DEV_MODE=1 for local development (binds to loopback).")
+		}
+		if addrEnv == "" {
+			addr = "127.0.0.1:8080"
+		}
+		log.Println("WARNING: RELAYFILE_DEV_MODE enabled with the built-in internal HMAC secret — local development only, do not use in production")
+	}
+
 	stateBackend, envelopeQueue, writebackQueue, err := buildStorageBackendsFromEnv()
 	if err != nil {
 		log.Fatalf("failed to initialize storage backends: %v", err)
@@ -46,7 +65,7 @@ func main() {
 	})
 	server, err := httpapi.NewServerWithConfig(store, httpapi.ServerConfig{
 		JWKSURL:            strings.TrimSpace(os.Getenv("RELAYAUTH_JWKS_URL")),
-		InternalHMACSecret: os.Getenv("RELAYFILE_INTERNAL_HMAC_SECRET"),
+		InternalHMACSecret: internalSecret,
 		InternalMaxSkew:    durationEnv("RELAYFILE_INTERNAL_MAX_SKEW", 5*time.Minute),
 		RateLimitMax:       intEnv("RELAYFILE_RATE_LIMIT_MAX", 0),
 		RateLimitWindow:    durationEnv("RELAYFILE_RATE_LIMIT_WINDOW", time.Minute),
@@ -220,9 +239,19 @@ func storageProfileDefaultsFromEnv() (stateBackendDSN, envelopeQueueDSN, writeba
 		}
 		return productionDSN, productionDSN, productionDSN, nil
 	case "durable-local", "local-durable":
-		return "file://" + filepath.Join(dataDir, "state.json"),
-			"file://" + filepath.Join(dataDir, "envelope-queue.json"),
-			"file://" + filepath.Join(dataDir, "writeback-queue.json"),
+		// dataDir is commonly relative (defaults to ".relayfile"). A
+		// "file://" + relative-path string parses with the first path
+		// segment as the URL host, so the DSN consumer would resolve it
+		// to filesystem root (/state.json). Resolve to an absolute path
+		// and emit a fully-qualified file:// URL so the configured data
+		// dir is honored.
+		absDir, absErr := filepath.Abs(dataDir)
+		if absErr != nil {
+			return "", "", "", fmt.Errorf("resolve RELAYFILE_DATA_DIR %q: %w", dataDir, absErr)
+		}
+		return "file://" + filepath.Join(absDir, "state.json"),
+			"file://" + filepath.Join(absDir, "envelope-queue.json"),
+			"file://" + filepath.Join(absDir, "writeback-queue.json"),
 			nil
 	default:
 		return "", "", "", fmt.Errorf("unsupported RELAYFILE_BACKEND_PROFILE: %s", profile)
