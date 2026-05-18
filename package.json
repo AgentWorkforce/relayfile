@@ -7,13 +7,16 @@
     "packages/core",
     "packages/sdk/typescript",
     "packages/cli",
-    "packages/local-mount"
+    "packages/local-mount",
+    "packages/file-observer"
   ],
   "scripts": {
     "workflow": "agent-relay run",
-    "build": "npm run build --workspace=packages/core && npm run build --workspace=packages/sdk/typescript && npm run build --workspace=packages/local-mount",
-    "test": "npm run test --workspace=packages/core && npm run test --workspace=packages/sdk/typescript && npm run test --workspace=packages/local-mount && npm --prefix packages/file-observer test",
-    "typecheck": "npm run typecheck --workspace=packages/sdk/typescript && npm run typecheck --workspace=packages/local-mount",
+    "build": "npm run build --workspace=packages/core && npm run build --workspace=packages/sdk/typescript && npm run build --workspace=packages/local-mount && npm run build --workspace=packages/cli",
+    "test": "npm run test --workspace=packages/core && npm run test --workspace=packages/sdk/typescript && npm run test --workspace=packages/local-mount && npm run test --workspace=@relayfile/file-observer && npm run test:go",
+    "test:go": "go test ./...",
+    "typecheck": "npm run typecheck --workspace=packages/sdk/typescript && npm run typecheck --workspace=packages/local-mount && npm run typecheck:go",
+    "typecheck:go": "go vet ./...",
     "evals:compile": "node scripts/evals/compile-cases.mjs",
     "evals": "npm run evals:compile && node scripts/evals/run-relayfile-evals.mjs",
     "evals:list": "npm run evals:compile && node scripts/evals/run-relayfile-evals.mjs --list",

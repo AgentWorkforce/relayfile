@@ -1554,6 +1554,80 @@ func TestOpsListRefreshesMirrorFromServer(t *testing.T) {
 	}
 }
 
+func TestOpsListRefreshRejectsUnsafeOpIDAndKeepsSidecar(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	localDir := t.TempDir()
+	if err := ensureMirrorLayout(localDir); err != nil {
+		t.Fatalf("ensureMirrorLayout failed: %v", err)
+	}
+	dlDir := filepath.Join(localDir, ".relay", "dead-letter")
+	if err := os.MkdirAll(dlDir, 0o755); err != nil {
+		t.Fatalf("mkdir dead-letter failed: %v", err)
+	}
+	// Diagnostic sidecar for a still-live op — must survive a refresh.
+	if err := os.WriteFile(filepath.Join(dlDir, "op_keep.error.json"), []byte(`{"providerResponse":"boom"}`), 0o644); err != nil {
+		t.Fatalf("write sidecar failed: %v", err)
+	}
+	// Stale payload the server no longer reports — must be pruned along
+	// with any matching sidecar.
+	if err := os.WriteFile(filepath.Join(dlDir, "op_old.json"), []byte(`{"opId":"op_old"}`), 0o644); err != nil {
+		t.Fatalf("write stale record failed: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dlDir, "op_old.error.json"), []byte(`{}`), 0o644); err != nil {
+		t.Fatalf("write stale sidecar failed: %v", err)
+	}
+	if _, err := upsertWorkspaceDetails(workspaceRecord{
+		Name:       "demo",
+		ID:         "ws_demo",
+		LocalDir:   localDir,
+		CreatedAt:  time.Now().UTC().Format(time.RFC3339),
+		LastUsedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("upsertWorkspaceDetails failed: %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"items":[` +
+			`{"opId":"op_keep","path":"/n/p.json","status":"dead_lettered","lastError":"schema validation failed"},` +
+			`{"opId":"../../pwn","path":"/n/x.json","status":"dead_lettered","lastError":"oops"}` +
+			`]}`))
+	}))
+	defer server.Close()
+
+	if err := saveCredentials(credentials{Server: server.URL, Token: "token"}); err != nil {
+		t.Fatalf("saveCredentials failed: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := run([]string{"ops", "list", "--workspace", "demo"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("run ops list failed: %v", err)
+	}
+
+	// The traversal op id must not escape the dead-letter directory.
+	traversal := filepath.Join(localDir, "pwn.json")
+	if _, err := os.Stat(traversal); !os.IsNotExist(err) {
+		t.Fatalf("unsafe opId escaped dead-letter dir: %s exists (err=%v)", traversal, err)
+	}
+	if _, err := os.Stat(filepath.Join(dlDir, "op_keep.json")); err != nil {
+		t.Fatalf("expected op_keep payload written: %v", err)
+	}
+	// Sidecar for a still-live op must be preserved, not pruned as if it
+	// were a standalone payload named "op_keep.error".
+	if _, err := os.Stat(filepath.Join(dlDir, "op_keep.error.json")); err != nil {
+		t.Fatalf("expected op_keep.error.json preserved: %v", err)
+	}
+	// Stale payload and its sidecar must both be removed.
+	if _, err := os.Stat(filepath.Join(dlDir, "op_old.json")); !os.IsNotExist(err) {
+		t.Fatalf("expected stale op_old.json pruned, err=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dlDir, "op_old.error.json")); !os.IsNotExist(err) {
+		t.Fatalf("expected stale op_old.error.json pruned, err=%v", err)
+	}
+}
+
 func TestPullTriggersSyncRefreshForConnectedProviders(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)

@@ -320,6 +320,10 @@ type daemonPIDState struct {
 	LocalDir    string `json:"localDir"`
 	LogFile     string `json:"logFile"`
 	StartedAt   string `json:"startedAt"`
+	// Executable is the resolved path of the daemon binary. It lets
+	// stop/restart confirm a recorded PID still belongs to a relayfile
+	// daemon before signaling it, guarding against PID reuse.
+	Executable string `json:"executable,omitempty"`
 }
 
 var failedWritebacksStateMu sync.Mutex
@@ -2601,6 +2605,10 @@ func runWritebackRetry(args []string, stdout io.Writer) error {
 	if err := os.Remove(recordPath); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("retry queued but failed to remove %s: %w", recordPath, err)
 	}
+	sidecarPath := deadLetterErrorPathFor(record.LocalDir, op)
+	if err := os.Remove(sidecarPath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("retry queued but failed to remove %s: %w", sidecarPath, err)
+	}
 	fmt.Fprintf(stdout, "Retry queued for op %s\n", op)
 	return nil
 }
@@ -3052,8 +3060,11 @@ func refreshDeadLetterMirror(record workspaceRecord, serverOverride, tokenOverri
 	keep := make(map[string]struct{}, len(feed.Items))
 	baseURL := strings.TrimRight(client.baseURL, "/")
 	for _, item := range feed.Items {
-		opID := strings.TrimSpace(item.OpID)
+		opID := safeWritebackOpID(item.OpID)
 		if opID == "" {
+			if trimmed := strings.TrimSpace(item.OpID); trimmed != "" {
+				fmt.Fprintf(os.Stderr, "warning: skipping dead-letter op with unsafe id %q\n", trimmed)
+			}
 			continue
 		}
 		keep[opID] = struct{}{}
@@ -3086,7 +3097,10 @@ func refreshDeadLetterMirror(record workspaceRecord, serverOverride, tokenOverri
 		}
 	}
 
-	// Prune local records the server no longer reports as dead-lettered.
+	// Prune local payload records the server no longer reports as
+	// dead-lettered. Diagnostic sidecars (<opID>.error.json) are bound to
+	// their payload's lifecycle: they are skipped here and removed together
+	// with the payload, never evaluated as standalone payload records.
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -3095,14 +3109,16 @@ func refreshDeadLetterMirror(record workspaceRecord, serverOverride, tokenOverri
 		return err
 	}
 	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".json") || strings.HasSuffix(name, ".error.json") {
 			continue
 		}
-		opID := strings.TrimSuffix(entry.Name(), ".json")
+		opID := strings.TrimSuffix(name, ".json")
 		if _, ok := keep[opID]; ok {
 			continue
 		}
-		_ = os.Remove(filepath.Join(dir, entry.Name()))
+		_ = os.Remove(filepath.Join(dir, name))
+		_ = os.Remove(deadLetterErrorPathFor(record.LocalDir, opID))
 	}
 	return nil
 }
@@ -3172,6 +3188,10 @@ func runOpsReplay(args []string, stdin io.Reader, stdout io.Writer) error {
 		path := filepath.Join(deadLetterDirFor(record.LocalDir), opID+".json")
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 			fmt.Fprintf(stdout, "warning: replay queued but failed to remove %s: %v\n", path, err)
+		}
+		sidecar := deadLetterErrorPathFor(record.LocalDir, opID)
+		if err := os.Remove(sidecar); err != nil && !os.IsNotExist(err) {
+			fmt.Fprintf(stdout, "warning: replay queued but failed to remove %s: %v\n", sidecar, err)
 		}
 	}
 	fmt.Fprintf(stdout, "Replay queued for op %s\n", opID)
@@ -3603,6 +3623,7 @@ func runMount(args []string) error {
 			LocalDir:    absLocalDir,
 			LogFile:     logFile,
 			StartedAt:   time.Now().UTC().Format(time.RFC3339),
+			Executable:  resolvedSelfExecutable(),
 		}); err != nil {
 			return err
 		}
@@ -4144,9 +4165,19 @@ func runStop(args []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	pid := readDaemonPID(record.LocalDir)
+	pid, verified := verifyDaemonProcess(record.LocalDir, record.ID)
 	if pid == 0 {
 		return fmt.Errorf("no running mount found for workspace %s", record.Name)
+	}
+	if !verified {
+		// The pid file points at a process that is not this workspace's
+		// daemon (PID reuse or a tampered/stale pid file). Clear the
+		// stale state rather than signaling an unrelated process.
+		if rerr := os.Remove(mountPIDFile(record.LocalDir)); rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
+			return fmt.Errorf("failed to clear stale background mount state for %s: %w", record.Name, rerr)
+		}
+		fmt.Fprintf(stdout, "Cleared stale background mount state for %s (pid %d was not a relayfile daemon)\n", record.Name, pid)
+		return nil
 	}
 	process, err := os.FindProcess(pid)
 	if err != nil {
@@ -4211,30 +4242,39 @@ func runRestart(args []string, stdout io.Writer) error {
 	// because the process is already gone (stale pid file), clean up and
 	// proceed; any other failure aborts the restart so we don't race a
 	// second daemon against the first on the same pid file.
-	if pid := readDaemonPID(localDir); pid != 0 {
-		process, perr := os.FindProcess(pid)
-		if perr != nil {
-			return fmt.Errorf("failed to find background mount for %s (pid %d): %w", record.Name, pid, perr)
-		}
-		if serr := signalDaemonStop(process); serr != nil {
-			if isProcessAlreadyGone(serr) {
-				if rerr := os.Remove(mountPIDFile(localDir)); rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
-					return fmt.Errorf("failed to clear stale background mount state for %s (pid %d): %w", record.Name, pid, rerr)
-				}
-				fmt.Fprintf(stdout, "Cleared stale background mount state for %s (pid %d)\n", record.Name, pid)
-			} else {
-				return fmt.Errorf("failed to stop background mount for %s (pid %d): %w", record.Name, pid, serr)
+	if pid, verified := verifyDaemonProcess(localDir, record.ID); pid != 0 {
+		if !verified {
+			// Stale/tampered pid file pointing at a non-daemon process.
+			// Clear it and continue as a safe "ensure running" verb.
+			if rerr := os.Remove(mountPIDFile(localDir)); rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
+				return fmt.Errorf("failed to clear stale background mount state for %s (pid %d): %w", record.Name, pid, rerr)
 			}
+			fmt.Fprintf(stdout, "Cleared stale background mount state for %s (pid %d was not a relayfile daemon)\n", record.Name, pid)
 		} else {
-			fmt.Fprintf(stdout, "Stopped background mount for %s (pid %d)\n", record.Name, pid)
-			// Wait for the old daemon to actually release its pid file. A
-			// fixed sleep is fragile: if the old process takes longer to
-			// exit, its `defer os.Remove(pidFile)` would race the new
-			// daemon's pid write and silently delete it, leaving `status`,
-			// `stop`, and a later `restart` reporting "no daemon" against a
-			// process that was, in fact, running.
-			if werr := waitForDaemonExit(localDir, pid, 5*time.Second); werr != nil {
-				return fmt.Errorf("old daemon (pid %d) for %s did not exit cleanly: %w", pid, record.Name, werr)
+			process, perr := os.FindProcess(pid)
+			if perr != nil {
+				return fmt.Errorf("failed to find background mount for %s (pid %d): %w", record.Name, pid, perr)
+			}
+			if serr := signalDaemonStop(process); serr != nil {
+				if isProcessAlreadyGone(serr) {
+					if rerr := os.Remove(mountPIDFile(localDir)); rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
+						return fmt.Errorf("failed to clear stale background mount state for %s (pid %d): %w", record.Name, pid, rerr)
+					}
+					fmt.Fprintf(stdout, "Cleared stale background mount state for %s (pid %d)\n", record.Name, pid)
+				} else {
+					return fmt.Errorf("failed to stop background mount for %s (pid %d): %w", record.Name, pid, serr)
+				}
+			} else {
+				fmt.Fprintf(stdout, "Stopped background mount for %s (pid %d)\n", record.Name, pid)
+				// Wait for the old daemon to actually release its pid file. A
+				// fixed sleep is fragile: if the old process takes longer to
+				// exit, its `defer os.Remove(pidFile)` would race the new
+				// daemon's pid write and silently delete it, leaving `status`,
+				// `stop`, and a later `restart` reporting "no daemon" against a
+				// process that was, in fact, running.
+				if werr := waitForDaemonExit(localDir, pid, 5*time.Second); werr != nil {
+					return fmt.Errorf("old daemon (pid %d) for %s did not exit cleanly: %w", pid, record.Name, werr)
+				}
 			}
 		}
 	}
@@ -5475,6 +5515,79 @@ func readDaemonPID(localDir string) int {
 		return 0
 	}
 	return pid
+}
+
+// readDaemonPIDState returns the structured pid state. ok is false for a
+// missing, legacy bare-int, or unparseable pid file.
+func readDaemonPIDState(localDir string) (daemonPIDState, bool) {
+	if localDir == "" {
+		return daemonPIDState{}, false
+	}
+	payload, err := os.ReadFile(mountPIDFile(localDir))
+	if err != nil {
+		return daemonPIDState{}, false
+	}
+	var state daemonPIDState
+	if json.Unmarshal(payload, &state) == nil && state.PID > 0 {
+		return state, true
+	}
+	return daemonPIDState{}, false
+}
+
+func resolvedSelfExecutable() string {
+	exe, err := os.Executable()
+	if err != nil {
+		return ""
+	}
+	if resolved, rerr := filepath.EvalSymlinks(exe); rerr == nil {
+		return resolved
+	}
+	return exe
+}
+
+// verifyDaemonProcess decides whether the PID recorded for a workspace
+// genuinely belongs to that workspace's relayfile daemon. It guards
+// stop/restart against PID reuse and tampered/stale pid files causing a
+// SIGTERM to an unrelated same-user process.
+//
+// Returns the recorded pid and whether it is safe to signal. When pid is
+// non-zero but verified is false, the pid file is stale/tampered and the
+// caller should clear it instead of signaling.
+func verifyDaemonProcess(localDir, workspaceID string) (pid int, verified bool) {
+	state, structured := readDaemonPIDState(localDir)
+	if !structured {
+		// Legacy bare-int or unreadable pid file: preserve the prior
+		// liveness-only behavior so pre-existing daemons keep working.
+		legacy := readDaemonPID(localDir)
+		return legacy, legacy != 0
+	}
+	if state.PID <= 0 {
+		return 0, false
+	}
+	if ws := strings.TrimSpace(workspaceID); ws != "" &&
+		strings.TrimSpace(state.WorkspaceID) != "" && state.WorkspaceID != ws {
+		return state.PID, false
+	}
+	if absLocal, err := filepath.Abs(localDir); err == nil && strings.TrimSpace(state.LocalDir) != "" {
+		if filepath.Clean(state.LocalDir) != filepath.Clean(absLocal) {
+			return state.PID, false
+		}
+	}
+	// Best-effort: when the platform lets us resolve the running
+	// process's executable, it must match the recorded daemon binary.
+	if exe, known := processExecutablePath(state.PID); known {
+		if state.Executable == "" {
+			return state.PID, false
+		}
+		want := state.Executable
+		if resolved, rerr := filepath.EvalSymlinks(exe); rerr == nil {
+			exe = resolved
+		}
+		if filepath.Clean(exe) != filepath.Clean(want) {
+			return state.PID, false
+		}
+	}
+	return state.PID, true
 }
 
 func rotateLogFile(path string) error {
