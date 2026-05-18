@@ -585,6 +585,17 @@ type mountState struct {
 	LastAppliedRevision string `json:"lastAppliedRevision,omitempty"`
 	// Counters carries telemetry that the public status JSON surfaces.
 	Counters telemetryCounters `json:"counters,omitempty"`
+	// Bootstrap* track the one-time full-tree bootstrap so it can resume
+	// after interruption and so the fast-path can refuse to short-circuit
+	// until the workspace has been fully mirrored at least once. All fields
+	// are additive/omitempty: legacy state files load with zero values
+	// (BootstrapComplete=false), which self-heals by forcing a full
+	// reconcile on the next cycle.
+	BootstrapComplete    bool   `json:"bootstrapComplete,omitempty"`
+	BootstrapCursor      string `json:"bootstrapCursor,omitempty"`
+	BootstrapFilesSynced int    `json:"bootstrapFilesSynced,omitempty"`
+	BootstrapFilesTotal  int    `json:"bootstrapFilesTotal,omitempty"`
+	BootstrapStartedAt   string `json:"bootstrapStartedAt,omitempty"`
 }
 
 // telemetryCounters tracks defensive-guard activity so operators can see at
@@ -679,6 +690,18 @@ type publicState struct {
 	// LastAppliedRevision is the highest cloud revision the daemon has
 	// reconciled. Useful for operator status display.
 	LastAppliedRevision string `json:"lastAppliedRevision,omitempty"`
+	// Bootstrap surfaces in-progress full-tree bootstrap so operators see
+	// "bootstrapping N/M files" instead of a misleading stall. The resume
+	// cursor is intentionally NOT exposed (internal-only).
+	Bootstrap *bootstrapStatus `json:"bootstrap,omitempty"`
+}
+
+// bootstrapStatus is the public, cursor-free view of bootstrap progress.
+type bootstrapStatus struct {
+	Phase       string `json:"phase"`
+	FilesSynced int    `json:"filesSynced"`
+	FilesTotal  int    `json:"filesTotal,omitempty"`
+	StartedAt   string `json:"startedAt,omitempty"`
 }
 
 type publicStateFlags struct {

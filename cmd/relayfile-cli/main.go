@@ -293,6 +293,19 @@ type syncStateFile struct {
 	// mountsync state. Existing consumers can ignore the field; it is
 	// additive and uses omitempty. Counters come from .relay/state.json.
 	Guards *syncStateGuards `json:"guards,omitempty"`
+	// Bootstrap mirrors the in-progress full-tree bootstrap state from
+	// .relay/state.json so `relayfile status` can show progress instead of
+	// a misleading stall. Additive/omitempty; nil when not bootstrapping.
+	Bootstrap *syncStateBootstrap `json:"bootstrap,omitempty"`
+}
+
+// syncStateBootstrap is the CLI-surface mirror of mountsync's public
+// bootstrap status block.
+type syncStateBootstrap struct {
+	Phase       string `json:"phase"`
+	FilesSynced int    `json:"filesSynced"`
+	FilesTotal  int    `json:"filesTotal,omitempty"`
+	StartedAt   string `json:"startedAt,omitempty"`
 }
 
 // syncStateGuards mirrors mountsync.telemetryCounters and the circuit
@@ -5448,7 +5461,29 @@ func buildSyncStateSnapshot(status syncStatusResponse, workspaceID, mode string,
 	snapshot.Providers = providers
 	snapshot.LastEventAt = lastEvent
 	snapshot.Guards = readGuardCounters(localDir)
+	snapshot.Bootstrap = readBootstrapStatus(localDir)
 	return snapshot
+}
+
+// readBootstrapStatus reads the bootstrap progress block from the
+// mountsync public state file under .relay/state.json. Returns nil if the
+// file is missing, unparseable, or there is no bootstrap in progress.
+// Purely additive status, never load-bearing.
+func readBootstrapStatus(localDir string) *syncStateBootstrap {
+	if localDir == "" {
+		return nil
+	}
+	payload, err := os.ReadFile(filepath.Join(localDir, ".relay", "state.json"))
+	if err != nil {
+		return nil
+	}
+	var view struct {
+		Bootstrap *syncStateBootstrap `json:"bootstrap"`
+	}
+	if err := json.Unmarshal(payload, &view); err != nil {
+		return nil
+	}
+	return view.Bootstrap
 }
 
 // readGuardCounters reads the mountsync public state file under
