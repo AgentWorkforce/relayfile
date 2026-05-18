@@ -567,6 +567,7 @@ type Syncer struct {
 	lazyRepos            bool
 	lowMemory            bool
 	layoutRegistrar      ProviderLayoutRegistrar
+	circuit              *CloudErrorCircuit
 	mu                   sync.Mutex
 }
 
@@ -577,6 +578,26 @@ type mountState struct {
 	LastSuccessfulReconcileAt string                 `json:"lastSuccessfulReconcileAt,omitempty"`
 	LastEventAt               string                 `json:"lastEventAt,omitempty"`
 	LastError                 *statusError           `json:"lastError,omitempty"`
+	// LastAppliedRevision is the highest cloud revision the daemon has
+	// successfully reconciled. Snapshot deletes refuse to fire unless the
+	// freshly-observed revision strictly advances past this value, which
+	// prevents an older replayed listing from authorizing destructive ops.
+	LastAppliedRevision string `json:"lastAppliedRevision,omitempty"`
+	// Counters carries telemetry that the public status JSON surfaces.
+	Counters telemetryCounters `json:"counters,omitempty"`
+}
+
+// telemetryCounters tracks defensive-guard activity so operators can see at
+// a glance whether the breaker has fired, oversized writebacks have been
+// dropped, root-target denials have hit, etc.
+type telemetryCounters struct {
+	SkippedOversizeWriteback uint64 `json:"skippedOversizeWriteback,omitempty"`
+	DeniedRootTarget         uint64 `json:"deniedRootTarget,omitempty"`
+	SnapshotDeleteBlocked    uint64 `json:"snapshotDeleteBlocked,omitempty"`
+	CircuitOpenEvents        uint64 `json:"circuitOpenEvents,omitempty"`
+	TombstonesPending        uint64 `json:"tombstonesPending,omitempty"`
+	TombstonesConfirmed      uint64 `json:"tombstonesConfirmed,omitempty"`
+	TombstonesAgedOut        uint64 `json:"tombstonesAgedOut,omitempty"`
 }
 
 type trackedFile struct {
@@ -648,6 +669,16 @@ type publicState struct {
 	LastError                 *statusError               `json:"lastError,omitempty"`
 	Files                     map[string]publicFileState `json:"files,omitempty"`
 	LowMemory                 bool                       `json:"lowMemory,omitempty"`
+	// Counters mirrors the in-state telemetry counters so consumers of
+	// .relay/state.json can see breaker activity, oversize-writeback
+	// drops, and tombstone progress without parsing the private state
+	// file. Existing consumers can ignore unknown fields.
+	Counters telemetryCounters `json:"counters,omitempty"`
+	// Circuit summarises the cloud-error breaker state.
+	Circuit *CircuitState `json:"circuit,omitempty"`
+	// LastAppliedRevision is the highest cloud revision the daemon has
+	// reconciled. Useful for operator status display.
+	LastAppliedRevision string `json:"lastAppliedRevision,omitempty"`
 }
 
 type publicStateFlags struct {
@@ -793,11 +824,15 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 		lazyRepos:            lazyRepos,
 		lowMemory:            lowMemory,
 		layoutRegistrar:      opts.ProviderLayoutRegistrar,
+		circuit:              NewCloudErrorCircuit(),
 		state: mountState{
 			Files: map[string]trackedFile{},
 		},
 	}, nil
 }
+
+// Circuit returns the cloud-error breaker for tests and status reporters.
+func (s *Syncer) Circuit() *CloudErrorCircuit { return s.circuit }
 
 func parseScopesFromJWT(token string) []string {
 	parts := strings.Split(strings.TrimSpace(token), ".")
@@ -1010,6 +1045,13 @@ func (s *Syncer) flushPendingBulkWrites(ctx context.Context, pending []pendingBu
 	if len(pending) == 0 {
 		return nil
 	}
+	// Circuit breaker: while open, refuse writebacks. The local dirty
+	// state is preserved (pendingWrite.tracked is unchanged) so the next
+	// healthy cycle picks the pending bytes back up.
+	if s.circuit != nil && s.circuit.IsOpen() {
+		s.logf("writeback flush refused: cloud-error circuit breaker is open; %d file(s) remain pending", len(pending))
+		return nil
+	}
 	files := make([]BulkWriteFile, 0, len(pending))
 	for _, pendingWrite := range pending {
 		files = append(files, BulkWriteFile{
@@ -1022,8 +1064,10 @@ func (s *Syncer) flushPendingBulkWrites(ctx context.Context, pending []pendingBu
 
 	response, err := s.client.WriteFilesBulk(ctx, s.workspace, files)
 	if err != nil {
+		s.recordCloudFailure(err)
 		return err
 	}
+	s.recordCloudSuccess()
 
 	errorsByPath := make(map[string]BulkWriteError, len(response.Errors))
 	for _, writeErr := range response.Errors {
@@ -1399,6 +1443,14 @@ func (s *Syncer) pushSingleDelete(ctx context.Context, remotePath, localPath str
 }
 
 func (s *Syncer) sync(ctx context.Context, forcePoll bool) error {
+	// Top-of-cycle invariant: the mount root must exist and be a
+	// directory. If a previous cycle, an external process, or a cloud
+	// clobber wiped it out, refuse to continue rather than recreating
+	// it under the daemon's feet. The recovery path is gated behind an
+	// explicit operator acknowledgment (--reset-after-clobber).
+	if err := s.assertMountRootInvariant(); err != nil {
+		return err
+	}
 	s.mu.Lock()
 	if err := s.loadState(); err != nil {
 		s.mu.Unlock()
@@ -1744,16 +1796,22 @@ func (s *Syncer) pullRemoteFullExport(ctx context.Context, client exportSnapshot
 		if exportSnapshotUnsupported(err) {
 			return false, nil
 		}
+		s.recordCloudFailure(err)
 		return true, err
 	}
+	s.recordCloudSuccess()
 	sort.Slice(files, func(i, j int) bool {
 		return normalizeRemotePath(files[i].Path) < normalizeRemotePath(files[j].Path)
 	})
 	remotePaths := map[string]struct{}{}
+	maxObservedRevision := ""
 	for i := range files {
 		remotePath := normalizeRemotePath(files[i].Path)
 		if remotePath == "/" || !isUnderRemoteRoot(s.remoteRoot, remotePath) {
 			continue
+		}
+		if revisionAdvances(maxObservedRevision, files[i].Revision) {
+			maxObservedRevision = files[i].Revision
 		}
 		// Contract: lazy GitHub repos do not eagerly hydrate per-repo content at startup.
 		if s.lazyRepos && isUnderLazyGithubRepoSubtree(s.remoteRoot, remotePath) {
@@ -1772,7 +1830,7 @@ func (s *Syncer) pullRemoteFullExport(ctx context.Context, client exportSnapshot
 
 	// Circuit breaker: an empty or drastically truncated export response
 	// (degraded cloud / partial provider listing) would otherwise authorize
-	// applyRemoteSnapshotDeletes to wipe every locally-mirrored file.
+	// applyRemoteSnapshotDeletesRev to wipe every locally-mirrored file.
 	// Skip the delete pass when the fresh listing is unsafe; the next
 	// healthy cycle will reconcile correctly. Mirrors the safeguard in
 	// pullRemoteFullTree.
@@ -1781,7 +1839,7 @@ func (s *Syncer) pullRemoteFullExport(ctx context.Context, client exportSnapshot
 		return true, nil
 	}
 
-	return true, s.applyRemoteSnapshotDeletes(remotePaths, conflicted)
+	return true, s.applyRemoteSnapshotDeletesRev(remotePaths, conflicted, maxObservedRevision)
 }
 
 func exportSnapshotUnsupported(err error) bool {
@@ -1813,14 +1871,20 @@ func isUnderLazyGithubRepoSubtree(remoteRoot, remotePath string) bool {
 func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]struct{}) error {
 	remotePaths := map[string]struct{}{}
 	cursor := ""
+	maxObservedRevision := ""
 	for {
 		page, err := s.client.ListTree(ctx, s.workspace, s.remoteRoot, 10, cursor)
 		if err != nil {
+			s.recordCloudFailure(err)
 			return err
 		}
+		s.recordCloudSuccess()
 		for _, entry := range page.Entries {
 			if entry.Type != "file" {
 				continue
+			}
+			if revisionAdvances(maxObservedRevision, entry.Revision) {
+				maxObservedRevision = entry.Revision
 			}
 			remotePath := normalizeRemotePath(entry.Path)
 			if !isUnderRemoteRoot(s.remoteRoot, remotePath) {
@@ -1878,11 +1942,12 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 	// shrank past the safety ratio), skip the delete pass and leave local
 	// state intact — the next healthy cycle will reconcile correctly.
 	if s.snapshotDeleteUnsafe(len(remotePaths)) {
+		s.state.Counters.SnapshotDeleteBlocked++
 		s.logf("skipping snapshot delete pass: fresh remote tree has %d files but %d are tracked locally (suspected partial/empty cloud listing); preserving local state", len(remotePaths), len(s.state.Files))
 		return nil
 	}
 
-	return s.applyRemoteSnapshotDeletes(remotePaths, conflicted)
+	return s.applyRemoteSnapshotDeletesRev(remotePaths, conflicted, maxObservedRevision)
 }
 
 // snapshotDeleteUnsafe reports whether running snapshot-driven deletes is
@@ -1938,6 +2003,38 @@ func snapshotDeleteMinRatio() float64 {
 		return def
 	}
 	return v
+}
+
+// recordCloudFailure feeds the cloud-error circuit when a remote call
+// returns a 5xx, gateway timeout, or transport-level reset. Non-failure
+// errors (e.g. 404 not found, 401 unauthorized, 4xx contract violations)
+// do NOT count — they indicate logical state, not a cloud outage.
+func (s *Syncer) recordCloudFailure(err error) {
+	if s.circuit == nil || err == nil {
+		return
+	}
+	var httpErr *HTTPError
+	if errors.As(err, &httpErr) {
+		if IsCloudFailureStatus(httpErr.StatusCode) {
+			if s.circuit.RecordFailure() {
+				s.logf("cloud-error circuit breaker opened: %d failures within window", s.circuit.Snapshot().Failures)
+			}
+		}
+		return
+	}
+	if IsCloudFailureError(err) {
+		if s.circuit.RecordFailure() {
+			s.logf("cloud-error circuit breaker opened: transport failure %v", err)
+		}
+	}
+}
+
+// recordCloudSuccess feeds the breaker on a successful remote call.
+func (s *Syncer) recordCloudSuccess() {
+	if s.circuit == nil {
+		return
+	}
+	s.circuit.RecordSuccess()
 }
 
 // defaultMaxWritebackBytes caps the size of a local file eligible for
@@ -1997,8 +2094,49 @@ func (s *Syncer) applyRemoteSnapshot(remoteFiles map[string]RemoteFile, conflict
 }
 
 func (s *Syncer) applyRemoteSnapshotDeletes(remotePaths map[string]struct{}, conflicted map[string]struct{}) error {
+	return s.applyRemoteSnapshotDeletesRev(remotePaths, conflicted, "")
+}
+
+// applyRemoteSnapshotDeletesRev is the revision-gated, tombstone-protected
+// snapshot delete pass. observedRevision is the maximum revision seen
+// across the fresh listing (empty string means "unknown / no advancement
+// signal" — destructive deletes are then refused even after tombstone
+// confirmation).
+//
+// Protocol:
+//  1. Refuse the destructive pass entirely when the cloud-error circuit
+//     is open (read-only mirror remains; the next healthy cycle catches
+//     up). Layout materialization is still safe to run.
+//  2. Refuse when the observedRevision does not strictly advance past
+//     state.LastAppliedRevision — an older or equal listing must not
+//     authorize deletes.
+//  3. For every tracked path missing from the fresh listing, write or
+//     confirm a tombstone under .relay/pending-deletes. Only the second
+//     consecutive confirmation actually deletes; the first observation
+//     is recorded and skipped.
+//  4. After the pass, prune tombstones for paths that have reappeared.
+//  5. On a clean pass, advance state.LastAppliedRevision.
+func (s *Syncer) applyRemoteSnapshotDeletesRev(remotePaths map[string]struct{}, conflicted map[string]struct{}, observedRevision string) error {
 	if err := s.materializeProviderLayoutsFromPaths(remotePaths); err != nil {
 		return err
+	}
+
+	// Circuit breaker: while open, refuse destructive ops entirely.
+	if s.circuit != nil && s.circuit.IsOpen() {
+		s.state.Counters.SnapshotDeleteBlocked++
+		s.logf("snapshot delete pass refused: cloud-error circuit breaker is open; %d tracked files preserved", len(s.state.Files))
+		return nil
+	}
+
+	// Revision gate: refuse to act on a listing that does not strictly
+	// advance the highest-applied revision. revisionAdvances treats an
+	// empty observedRevision as "unknown" — which is also refused. An
+	// empty stored LastAppliedRevision allows the first advancement.
+	if !revisionAdvances(s.state.LastAppliedRevision, observedRevision) {
+		s.state.Counters.SnapshotDeleteBlocked++
+		s.logf("snapshot delete pass refused: observed revision %q does not advance past last applied %q",
+			observedRevision, s.state.LastAppliedRevision)
+		return nil
 	}
 
 	statePaths := make([]string, 0, len(s.state.Files))
@@ -2006,15 +2144,73 @@ func (s *Syncer) applyRemoteSnapshotDeletes(remotePaths map[string]struct{}, con
 		statePaths = append(statePaths, remotePath)
 	}
 	sort.Strings(statePaths)
+
+	stillMissing := map[string]struct{}{}
 	for _, remotePath := range statePaths {
 		if _, ok := remotePaths[remotePath]; ok {
+			continue
+		}
+		stillMissing[remotePath] = struct{}{}
+		allow, tErr := s.observePendingDelete(remotePath, observedRevision)
+		if tErr != nil {
+			s.logf("tombstone update failed for %s: %v", remotePath, tErr)
+			continue
+		}
+		if !allow {
+			// First observation (or aged-out reset) — record and skip.
 			continue
 		}
 		if err := s.applyRemoteDelete(remotePath, conflicted); err != nil {
 			return err
 		}
+		// Confirmed delete fired; clear the marker.
+		s.removeTombstone(remotePath)
+		delete(stillMissing, remotePath)
+	}
+
+	// Drop markers whose paths have reappeared.
+	s.pruneStaleTombstones(stillMissing)
+
+	// Advance the gate on a clean, non-empty observation.
+	if observedRevision != "" {
+		s.state.LastAppliedRevision = observedRevision
 	}
 	return nil
+}
+
+// revisionAdvances reports whether observed is strictly newer than last.
+// Revisions in this codebase look like "rev_<int>" (see fakeClient) but
+// real cloud revisions may be opaque; we compare numerically when both
+// match the rev_<int> shape, and lexicographically otherwise. An empty
+// observed is never an advancement.
+func revisionAdvances(last, observed string) bool {
+	observed = strings.TrimSpace(observed)
+	last = strings.TrimSpace(last)
+	if observed == "" {
+		return false
+	}
+	if last == "" {
+		return true
+	}
+	if a, aOk := parseRevSeq(last); aOk {
+		if b, bOk := parseRevSeq(observed); bOk {
+			return b > a
+		}
+	}
+	return observed > last
+}
+
+// parseRevSeq extracts the integer portion of a "rev_<int>" identifier.
+func parseRevSeq(rev string) (int64, bool) {
+	rev = strings.TrimSpace(rev)
+	if !strings.HasPrefix(rev, "rev_") {
+		return 0, false
+	}
+	n, err := strconv.ParseInt(strings.TrimPrefix(rev, "rev_"), 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return n, true
 }
 
 func (s *Syncer) materializeProviderLayouts(remoteFiles map[string]RemoteFile) error {
@@ -2737,6 +2933,7 @@ func (s *Syncer) scanLocalFiles() (map[string]localSnapshot, error) {
 				return nil
 			}
 			results[remotePath] = snapshot
+			s.state.Counters.SkippedOversizeWriteback++
 			return nil
 		}
 		remotePath, err := localToRemotePath(s.localRoot, s.remoteRoot, path)
@@ -2941,6 +3138,19 @@ func (s *Syncer) savePublicState() error {
 		LastError:                 s.state.LastError,
 		Files:                     files,
 		LowMemory:                 s.lowMemory,
+		Counters:                  s.state.Counters,
+		LastAppliedRevision:       s.state.LastAppliedRevision,
+	}
+	if s.circuit != nil {
+		snap := s.circuit.Snapshot()
+		// Reconcile the in-state CircuitOpenEvents counter with the
+		// breaker's own counter so the .relay/state.json view is the
+		// canonical surface for operators.
+		if snap.OpenEvents > s.state.Counters.CircuitOpenEvents {
+			s.state.Counters.CircuitOpenEvents = snap.OpenEvents
+			public.Counters.CircuitOpenEvents = snap.OpenEvents
+		}
+		public.Circuit = &snap
 	}
 	if err := os.MkdirAll(filepath.Dir(s.publicStatePath), 0o755); err != nil {
 		return err
@@ -3310,17 +3520,16 @@ func remoteToLocalPath(localRoot, remoteRoot, remotePath string) (string, error)
 }
 
 func localToRemotePath(localRoot, remoteRoot, localPath string) (string, error) {
-	rel, err := filepath.Rel(localRoot, localPath)
+	// Boundary gate: route through the typed RelativeRemotePath constructor
+	// so the round-trip-onto-root collision (a child whose name equals the
+	// mount-dir basename) is rejected by construction. Existing callers
+	// still receive the legacy string return value; the newtype is purely
+	// defensive here. Empty / "." / leading-".." paths are also rejected.
+	typed, err := RelativeRemotePathFromLocal(localRoot, localPath)
 	if err != nil {
 		return "", err
 	}
-	if rel == "." {
-		return "", fmt.Errorf("local root is not a file")
-	}
-	rel = filepath.ToSlash(rel)
-	if strings.HasPrefix(rel, "../") || rel == ".." {
-		return "", fmt.Errorf("path %s escapes local root", localPath)
-	}
+	rel := typed.Slash()
 	remoteRoot = normalizeRemotePath(remoteRoot)
 	var remotePath string
 	if remoteRoot == "/" {
@@ -3348,6 +3557,7 @@ func localToRemotePath(localRoot, remoteRoot, localPath string) (string, error) 
 // adversarial remote path can never operate on the mount directory itself.
 func (s *Syncer) assertNotMountRoot(localPath string) error {
 	if filepath.Clean(localPath) == filepath.Clean(s.localRoot) {
+		s.state.Counters.DeniedRootTarget++
 		return fmt.Errorf("refusing filesystem operation on mount root %s", s.localRoot)
 	}
 	return nil
