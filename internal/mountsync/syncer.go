@@ -1912,11 +1912,21 @@ func (s *Syncer) pullRemote(ctx context.Context, conflicted map[string]struct{})
 	// through to the full pull as before so this is purely additive on
 	// supported backends.
 	//
-	// Gating on LastEventAt (in addition to len(Files) > 0) keeps the
-	// fast-path opt-in: callers and tests that hand-seed a state file
-	// without ever observing live events still go through the full pull
-	// (which is necessary for e.g. the denied-file teardown path).
-	if len(s.state.Files) > 0 && strings.TrimSpace(s.state.LastEventAt) != "" {
+	// Correctness gate: the restart fast-path may ONLY skip the bootstrap
+	// full pull when the workspace has been *completely* mirrored at least
+	// once (BootstrapComplete). The previous LastEventAt heuristic let a
+	// partially-populated state file (e.g. a clobber remnant, or a state
+	// written by an interrupted prior bootstrap) short-circuit the full
+	// pull forever, leaving the mirror permanently incomplete
+	// (rw_517d60b6). BootstrapComplete is set only by a full-tree/export
+	// pull that mirrored the whole remote, so it is the authoritative
+	// signal. The escape hatch / clobber-remnant auto-recovery falls out
+	// for free: a non-empty Files map with BootstrapComplete=false (or an
+	// explicit --full-reconcile) forces the full pull below.
+	if len(s.state.Files) > 0 && !s.state.BootstrapComplete {
+		s.logf("detected non-empty state without completed bootstrap; forcing full reconcile (%d tracked files)", len(s.state.Files))
+	}
+	if s.state.BootstrapComplete && !s.forceFullReconcile && len(s.state.Files) > 0 {
 		cursor, err := s.resolveLatestEventCursor(ctx)
 		if err == nil {
 			s.state.EventsCursor = cursor
