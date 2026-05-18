@@ -245,6 +245,10 @@ ${B}${CYAN}╔══════════════════════
       RELAYAUTH_JWKS_URL: rs256Auth.jwksUrl,
       [DISABLE_SHARED_SECRET_JWT_ENV]: 'false',
       RELAYFILE_EXTERNAL_WRITEBACK: 'false',
+      // The server now refuses to fall back to the built-in dev internal
+      // HMAC secret unless RELAYFILE_DEV_MODE=1. Provide an explicit
+      // ephemeral secret so the smoke test exercises the production path.
+      RELAYFILE_INTERNAL_HMAC_SECRET: 'e2e-smoke-internal-hmac-secret',
     });
     server.stderr?.on('data', (d: Buffer) => {
       const line = d.toString().trim();
