@@ -119,7 +119,9 @@ func (fw *FileWatcher) shouldSkip(rel string) bool {
 
 // reservedTopLevel reports whether a top-level entry name is internal
 // bookkeeping that must never participate in sync. Centralized so the
-// watcher and scanLocalFiles stay in agreement.
+// watcher and scanLocalFiles stay in agreement. This list applies to
+// top-level entries, including files such as _PERMISSIONS.md; addDirRecursive
+// is directory-only and skips a different sentinel for the mount state file.
 func reservedTopLevel(name string) bool {
 	return name == ".git" || name == ".relay" || name == "node_modules" ||
 		name == "_PERMISSIONS.md"
@@ -169,7 +171,7 @@ func (fw *FileWatcher) emitExistingFileEvents(base string) {
 
 // addDirRecursive walks `base` and adds every directory underneath it to the
 // fsnotify watcher, skipping `.git`, `.relay`, `node_modules`, and the
-// mount-state file. Used both at startup (to seed the watcher with the
+// mount-state file sentinel. Used both at startup (to seed the watcher with the
 // existing tree) and at runtime (when a sync-down creates a new nested
 // directory structure that we need to start watching).
 func (fw *FileWatcher) addDirRecursive(base string) error {

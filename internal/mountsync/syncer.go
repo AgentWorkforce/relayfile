@@ -598,11 +598,12 @@ type trackedFile struct {
 }
 
 type localSnapshot struct {
-	RawContent  []byte
-	WireContent string
-	ContentType string
-	Encoding    string
-	Hash        string
+	RawContent    []byte
+	WireContent   string
+	ContentType   string
+	Encoding      string
+	Hash          string
+	SkipWriteback bool
 }
 
 type pendingBulkWrite struct {
@@ -2568,6 +2569,9 @@ func (s *Syncer) pushLocal(ctx context.Context) (map[string]struct{}, error) {
 		if exists && tracked.WriteDenied && tracked.DeniedHash == snapshot.Hash {
 			continue
 		}
+		if snapshot.SkipWriteback {
+			continue
+		}
 		fullSnapshot, err := readLocalSnapshot(localPath, true)
 		if err != nil {
 			return nil, err
@@ -2709,6 +2713,16 @@ func (s *Syncer) scanLocalFiles() (map[string]localSnapshot, error) {
 		// of the clobber pathology). Surface it and skip.
 		if max := maxWritebackBytes(); max > 0 && info.Size() > max {
 			s.logf("skipping oversized local file %s (%d bytes > %d byte writeback cap); not enqueued", path, info.Size(), max)
+			snapshot, err := readLocalSnapshot(path, false)
+			if err != nil {
+				return err
+			}
+			snapshot.SkipWriteback = true
+			remotePath, err := localToRemotePath(s.localRoot, s.remoteRoot, path)
+			if err != nil {
+				return nil
+			}
+			results[remotePath] = snapshot
 			return nil
 		}
 		remotePath, err := localToRemotePath(s.localRoot, s.remoteRoot, path)

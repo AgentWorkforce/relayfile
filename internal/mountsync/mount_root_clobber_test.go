@@ -155,6 +155,8 @@ func TestAssertNotMountRoot(t *testing.T) {
 // drastically truncated fresh remote listing does not authorize a delete
 // pass when meaningful local state is tracked.
 func TestSnapshotDeleteUnsafeCircuitBreaker(t *testing.T) {
+	t.Setenv("RELAYFILE_SNAPSHOT_DELETE_MIN_RATIO", "0.5")
+
 	mk := func(n int) *Syncer {
 		files := make(map[string]trackedFile, n)
 		for i := 0; i < n; i++ {
@@ -370,12 +372,19 @@ func TestOversizedFileSkippedByWritebackCap(t *testing.T) {
 	}
 
 	// The small file should have been pushed; the huge one must not be.
+	sawSmallWriteback := false
 	for _, batch := range fc.bulkWriteBatches {
 		for _, f := range batch {
+			if strings.Contains(f.Path, "small.txt") {
+				sawSmallWriteback = true
+			}
 			if strings.Contains(f.Path, "huge.bin") {
 				t.Fatalf("oversized file was enqueued for writeback: %s", f.Path)
 			}
 		}
+	}
+	if !sawSmallWriteback {
+		t.Fatalf("expected small.txt to be enqueued for writeback; batches=%#v", fc.bulkWriteBatches)
 	}
 
 	sawSkipLog := false
@@ -389,3 +398,58 @@ func TestOversizedFileSkippedByWritebackCap(t *testing.T) {
 	}
 }
 
+// TestOversizedTrackedFileDoesNotBecomeRemoteDelete verifies that an
+// oversized local file still counts as present during the delete phase.
+func TestOversizedTrackedFileDoesNotBecomeRemoteDelete(t *testing.T) {
+	t.Setenv("RELAYFILE_MAX_WRITEBACK_BYTES", "1024")
+
+	disableWS := false
+	localDir := t.TempDir()
+	huge := filepath.Join(localDir, "huge.bin")
+	if err := os.WriteFile(huge, make([]byte, 4096), 0o644); err != nil {
+		t.Fatalf("write huge file: %v", err)
+	}
+
+	remotePath := "/huge.bin"
+	stateFile := filepath.Join(localDir, ".relayfile-mount-state.json")
+	if err := writeMountState(stateFile, mountState{
+		Files: map[string]trackedFile{
+			remotePath: {Revision: "rev_1", ContentType: "application/octet-stream", Hash: hashString("old")},
+		},
+	}); err != nil {
+		t.Fatalf("seed state: %v", err)
+	}
+
+	fc := &fakeClient{
+		files: map[string]RemoteFile{
+			remotePath: {
+				Path:        remotePath,
+				Revision:    "rev_1",
+				ContentType: "application/octet-stream",
+				Content:     "old",
+			},
+		},
+		eventsUnsupported: true,
+	}
+	syncer, err := NewSyncer(fc, SyncerOptions{
+		WorkspaceID: "ws_size_cap_delete",
+		RemoteRoot:  "/",
+		LocalRoot:   localDir,
+		WebSocket:   &disableWS,
+		StateFile:   stateFile,
+	})
+	if err != nil {
+		t.Fatalf("new syncer: %v", err)
+	}
+
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("sync failed: %v", err)
+	}
+
+	if len(fc.deleteCalls) != 0 {
+		t.Fatalf("oversized tracked file triggered remote delete: %#v", fc.deleteCalls)
+	}
+	if _, ok := fc.files[remotePath]; !ok {
+		t.Fatalf("remote oversized file was deleted")
+	}
+}
