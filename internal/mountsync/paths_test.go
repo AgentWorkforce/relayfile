@@ -38,6 +38,9 @@ func TestNewRelativeRemotePath_Accepts(t *testing.T) {
 		{"leading-dot-slash", "./sub/doc.md", "mount", "sub/doc.md"},
 		{"nested-with-basename-segment", "sub/mount/doc.md", "mount", "sub/mount/doc.md"},
 		{"backslash-input", filepath.Join("sub", "doc.md"), "mount", "sub/doc.md"},
+		{"leading-space", " doc.md", "mount", " doc.md"},
+		{"trailing-space", "doc.md ", "mount", "doc.md "},
+		{"spaceful-basename", "mount", "mount ", "mount"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

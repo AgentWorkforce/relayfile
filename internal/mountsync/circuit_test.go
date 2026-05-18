@@ -51,6 +51,35 @@ func TestCircuitTripsAndCools(t *testing.T) {
 	}
 }
 
+func TestCircuitClosedSuccessKeepsSlidingFailures(t *testing.T) {
+	t.Setenv("RELAYFILE_CB_WINDOW", "1m")
+	t.Setenv("RELAYFILE_CB_THRESHOLD", "3")
+	t.Setenv("RELAYFILE_CB_COOLDOWN", "10s")
+
+	c := NewCloudErrorCircuit()
+	clock := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
+	c.SetClock(func() time.Time { return clock })
+
+	if c.RecordFailure() {
+		t.Fatalf("first failure should not trip")
+	}
+	clock = clock.Add(10 * time.Second)
+	c.RecordSuccess()
+	if got := c.Snapshot().Failures; got != 1 {
+		t.Fatalf("closed-state success must preserve in-window failures, got %d", got)
+	}
+	clock = clock.Add(10 * time.Second)
+	if c.RecordFailure() {
+		t.Fatalf("second failure should not trip")
+	}
+	clock = clock.Add(10 * time.Second)
+	c.RecordSuccess()
+	clock = clock.Add(10 * time.Second)
+	if !c.RecordFailure() {
+		t.Fatalf("third in-window failure should trip despite intervening successes")
+	}
+}
+
 func TestIsCloudFailureStatus(t *testing.T) {
 	cases := map[int]bool{
 		200: false,

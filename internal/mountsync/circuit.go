@@ -85,15 +85,8 @@ func (c *CloudErrorCircuit) RecordFailure() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	now := c.now()
-	// Evict failures outside the window.
-	cutoff := now.Add(-c.window)
-	pruned := c.failures[:0]
-	for _, t := range c.failures {
-		if t.After(cutoff) {
-			pruned = append(pruned, t)
-		}
-	}
-	c.failures = append(pruned, now)
+	c.pruneFailuresLocked(now)
+	c.failures = append(c.failures, now)
 	tripped := false
 	if len(c.failures) >= c.threshold && !c.open {
 		c.open = true
@@ -114,7 +107,7 @@ func (c *CloudErrorCircuit) RecordSuccess() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if !c.open {
-		c.failures = c.failures[:0]
+		c.pruneFailuresLocked(c.now())
 		return
 	}
 	if c.now().After(c.nextRetry) {
@@ -123,6 +116,17 @@ func (c *CloudErrorCircuit) RecordSuccess() {
 		c.openedAt = time.Time{}
 		c.nextRetry = time.Time{}
 	}
+}
+
+func (c *CloudErrorCircuit) pruneFailuresLocked(now time.Time) {
+	cutoff := now.Add(-c.window)
+	pruned := c.failures[:0]
+	for _, t := range c.failures {
+		if t.After(cutoff) {
+			pruned = append(pruned, t)
+		}
+	}
+	c.failures = pruned
 }
 
 // IsOpen reports the current breaker state. If the cooldown has elapsed,

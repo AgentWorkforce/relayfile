@@ -110,11 +110,12 @@ func WriteIncidentReport(localRoot string, invariantErr *MountRootInvariantError
 	ts := time.Now().UTC().Format("20060102T150405Z")
 	filename := fmt.Sprintf("INCIDENT-%s.md", ts)
 
-	candidates := []string{
-		filepath.Join(localRoot, ".relay"),
-		filepath.Dir(filepath.Clean(localRoot)),
-		os.TempDir(),
+	cleanRoot := filepath.Clean(localRoot)
+	candidates := []string{}
+	if info, statErr := os.Lstat(cleanRoot); statErr == nil && info.IsDir() {
+		candidates = append(candidates, filepath.Join(cleanRoot, ".relay"))
 	}
+	candidates = append(candidates, filepath.Dir(cleanRoot), os.TempDir())
 
 	body := buildIncidentBody(localRoot, invariantErr, ts)
 

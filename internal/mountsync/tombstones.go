@@ -99,24 +99,13 @@ func (s *Syncer) observePendingDelete(remotePath, observedRevision string) (allo
 		return false, err
 	}
 	if existing == nil {
-		s.state.Counters.TombstonesPending++
-		t := pendingDeleteTombstone{
-			Path:             remotePath,
-			FirstObservedAt:  now,
-			LastObservedAt:   now,
-			Attempts:         1,
-			ObservedRevision: observedRevision,
-		}
-		if err := s.writeTombstone(&t); err != nil {
-			return false, err
-		}
-		return false, nil
+		return s.recordPendingDeleteObservation(remotePath, observedRevision, now)
 	}
 	// Age out stale tombstones that never confirmed.
 	if now.Sub(existing.FirstObservedAt) > tombstoneMaxAge {
 		s.state.Counters.TombstonesAgedOut++
 		s.removeTombstone(remotePath)
-		return false, nil
+		return s.recordPendingDeleteObservation(remotePath, observedRevision, now)
 	}
 	existing.LastObservedAt = now
 	existing.Attempts++
@@ -134,6 +123,21 @@ func (s *Syncer) observePendingDelete(remotePath, observedRevision string) (allo
 		return true, nil
 	}
 	return false, s.writeTombstone(existing)
+}
+
+func (s *Syncer) recordPendingDeleteObservation(remotePath, observedRevision string, now time.Time) (bool, error) {
+	s.state.Counters.TombstonesPending++
+	t := pendingDeleteTombstone{
+		Path:             remotePath,
+		FirstObservedAt:  now,
+		LastObservedAt:   now,
+		Attempts:         1,
+		ObservedRevision: observedRevision,
+	}
+	if err := s.writeTombstone(&t); err != nil {
+		return false, err
+	}
+	return false, nil
 }
 
 // pruneStaleTombstones drops markers for paths that no longer appear in the

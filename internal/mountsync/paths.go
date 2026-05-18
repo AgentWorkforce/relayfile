@@ -54,7 +54,6 @@ func (p RelativeRemotePath) IsZero() bool { return p.rel == "" }
 // accepts either OS-separator or slash-separator input and always
 // normalizes to slashes.
 func NewRelativeRemotePath(rel, mountBasename string) (RelativeRemotePath, error) {
-	rel = strings.TrimSpace(rel)
 	if rel == "" {
 		return RelativeRemotePath{}, fmt.Errorf("relative path is empty")
 	}
@@ -101,11 +100,10 @@ func NewRelativeRemotePath(rel, mountBasename string) (RelativeRemotePath, error
 	// root when joined with localRoot's parent under remoteRoot="/". This
 	// is the production data-loss signature; reject up-front.
 	if mountBasename != "" {
-		mb := strings.TrimSpace(mountBasename)
 		// Only the single-segment form actually round-trips onto the root;
 		// nested forms like "sub/<mountBasename>" remain safe.
-		if cleaned == mb {
-			return RelativeRemotePath{}, fmt.Errorf("relative path %q collides with mount directory basename %q", rel, mb)
+		if cleaned == mountBasename {
+			return RelativeRemotePath{}, fmt.Errorf("relative path %q collides with mount directory basename %q", rel, mountBasename)
 		}
 	}
 	return RelativeRemotePath{rel: cleaned}, nil

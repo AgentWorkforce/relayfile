@@ -73,6 +73,9 @@ func TestWriteIncidentReport_FallsBackToParent(t *testing.T) {
 	if !strings.HasPrefix(path, parent) {
 		t.Fatalf("expected report under parent %s, got %s", parent, path)
 	}
+	if _, statErr := os.Stat(root); !os.IsNotExist(statErr) {
+		t.Fatalf("incident report must not recreate missing mount root; stat err=%v", statErr)
+	}
 	body, _ := os.ReadFile(path)
 	if !strings.Contains(string(body), "mount-root invariant incident") {
 		t.Fatalf("incident body missing header: %s", string(body))

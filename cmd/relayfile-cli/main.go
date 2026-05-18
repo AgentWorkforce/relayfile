@@ -300,15 +300,15 @@ type syncStateFile struct {
 // scripted consumer of `relayfile status --json`) can see breaker state
 // and guard activity without parsing the underlying .relay/state.json.
 type syncStateGuards struct {
-	SkippedOversizeWriteback uint64               `json:"skippedOversizeWriteback,omitempty"`
-	DeniedRootTarget         uint64               `json:"deniedRootTarget,omitempty"`
-	SnapshotDeleteBlocked    uint64               `json:"snapshotDeleteBlocked,omitempty"`
-	CircuitOpenEvents        uint64               `json:"circuitOpenEvents,omitempty"`
-	TombstonesPending        uint64               `json:"tombstonesPending,omitempty"`
-	TombstonesConfirmed      uint64               `json:"tombstonesConfirmed,omitempty"`
-	TombstonesAgedOut        uint64               `json:"tombstonesAgedOut,omitempty"`
-	LastAppliedRevision      string               `json:"lastAppliedRevision,omitempty"`
-	Circuit                  *syncStateGuardCirc  `json:"circuit,omitempty"`
+	SkippedOversizeWriteback uint64              `json:"skippedOversizeWriteback,omitempty"`
+	DeniedRootTarget         uint64              `json:"deniedRootTarget,omitempty"`
+	SnapshotDeleteBlocked    uint64              `json:"snapshotDeleteBlocked,omitempty"`
+	CircuitOpenEvents        uint64              `json:"circuitOpenEvents,omitempty"`
+	TombstonesPending        uint64              `json:"tombstonesPending,omitempty"`
+	TombstonesConfirmed      uint64              `json:"tombstonesConfirmed,omitempty"`
+	TombstonesAgedOut        uint64              `json:"tombstonesAgedOut,omitempty"`
+	LastAppliedRevision      string              `json:"lastAppliedRevision,omitempty"`
+	Circuit                  *syncStateGuardCirc `json:"circuit,omitempty"`
 }
 
 // syncStateGuardCirc is the JSON shape of the cloud-error circuit breaker
@@ -3624,22 +3624,22 @@ func runMount(args []string) error {
 	once := fs.Bool("once", false, "run one sync cycle and exit")
 	resetAfterClobber := fs.Bool("reset-after-clobber", boolEnv("RELAYFILE_RESET_AFTER_CLOBBER", false), "acknowledge a mount-root clobber and authorize daemon to recreate the directory")
 	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
-		"server":          true,
-		"token":           true,
-		"remote-path":     true,
-		"provider":        true,
-		"state-file":      true,
-		"mode":            true,
-		"interval":        true,
-		"interval-jitter": true,
-		"timeout":         true,
-		"websocket":       false,
-		"low-memory":      false,
-		"pprof-addr":      true,
-		"memlog-interval": true,
-		"background":      false,
-		"pid-file":        true,
-		"log-file":        true,
+		"server":              true,
+		"token":               true,
+		"remote-path":         true,
+		"provider":            true,
+		"state-file":          true,
+		"mode":                true,
+		"interval":            true,
+		"interval-jitter":     true,
+		"timeout":             true,
+		"websocket":           false,
+		"low-memory":          false,
+		"pprof-addr":          true,
+		"memlog-interval":     true,
+		"background":          false,
+		"pid-file":            true,
+		"log-file":            true,
 		"daemonized":          false,
 		"once":                false,
 		"reset-after-clobber": false,
@@ -5481,9 +5481,13 @@ func readGuardCounters(localDir string) *syncStateGuards {
 			Failures   int    `json:"failures"`
 			NextRetry  string `json:"nextRetry"`
 		} `json:"circuit"`
+		Guards *syncStateGuards `json:"guards"`
 	}
 	if err := json.Unmarshal(payload, &view); err != nil {
 		return nil
+	}
+	if view.Guards != nil {
+		return view.Guards
 	}
 	// If everything is zero/empty, return nil so the JSON stays compact.
 	zero := view.Counters.SkippedOversizeWriteback == 0 &&

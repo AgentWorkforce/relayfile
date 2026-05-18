@@ -2,9 +2,11 @@ package mountsync
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // TestTombstoneTwoPhaseDelete asserts a missing path is NOT deleted on the
@@ -174,5 +176,45 @@ func TestPruneStaleTombstonesClearsReappeared(t *testing.T) {
 	s.pruneStaleTombstones(map[string]struct{}{})
 	if _, err := os.Stat(s.tombstoneFile("/gone.md")); !os.IsNotExist(err) {
 		t.Fatalf("expected tombstone to be pruned; err=%v", err)
+	}
+}
+
+func TestObservePendingDeleteAgedOutReobservesCurrentPass(t *testing.T) {
+	localDir := t.TempDir()
+	s := &Syncer{
+		localRoot: localDir,
+		state:     mountState{Files: map[string]trackedFile{}},
+	}
+	old := time.Now().UTC().Add(-(tombstoneMaxAge + time.Hour))
+	if err := s.writeTombstone(&pendingDeleteTombstone{
+		Path:             "/gone.md",
+		FirstObservedAt:  old,
+		LastObservedAt:   old,
+		Attempts:         1,
+		ObservedRevision: "rev_1",
+	}); err != nil {
+		t.Fatalf("seed old tombstone: %v", err)
+	}
+
+	allow, err := s.observePendingDelete("/gone.md", "rev_9")
+	if err != nil {
+		t.Fatalf("observe: %v", err)
+	}
+	if allow {
+		t.Fatalf("aged-out tombstone should reset observation, not allow delete")
+	}
+	data, err := os.ReadFile(s.tombstoneFile("/gone.md"))
+	if err != nil {
+		t.Fatalf("expected refreshed tombstone: %v", err)
+	}
+	var got pendingDeleteTombstone
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("decode refreshed tombstone: %v", err)
+	}
+	if got.Attempts != 1 || got.ObservedRevision != "rev_9" || !got.FirstObservedAt.After(old) {
+		t.Fatalf("expected tombstone to be reset in current pass, got %#v", got)
+	}
+	if s.state.Counters.TombstonesAgedOut != 1 || s.state.Counters.TombstonesPending != 1 {
+		t.Fatalf("unexpected counters after reset: %#v", s.state.Counters)
 	}
 }
