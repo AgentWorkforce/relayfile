@@ -1872,10 +1872,16 @@ func (s *Syncer) pullRemote(ctx context.Context, conflicted map[string]struct{})
 			// it the rootCtx-derived bootstrap deadline, not the tiny
 			// per-cycle one. The surrounding ListEvents probe above stays
 			// on the inbound per-cycle ctx (no latency regression).
-			bctx, bcancel, bprog := s.bootstrapContext(ctx)
-			err := s.pullRemoteFull(bctx, conflicted, bprog)
-			bcancel()
-			if err != nil {
+			// Bound the bootstrap context cancel to this one operation
+			// with a closure so the watchdog is always torn down — even
+			// if pullRemoteFull panics — without the defer accumulating
+			// across loop iterations. Matches the deferred-cancel pattern
+			// used on the post-fast-path full-pull sibling below.
+			if err := func() error {
+				bctx, bcancel, bprog := s.bootstrapContext(ctx)
+				defer bcancel()
+				return s.pullRemoteFull(bctx, conflicted, bprog)
+			}(); err != nil {
 				return err
 			}
 			// Intentionally leave s.state.EventsCursor unchanged. A naive
