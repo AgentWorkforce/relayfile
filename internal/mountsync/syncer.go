@@ -199,13 +199,76 @@ type HTTPClient struct {
 	maxDelay   time.Duration
 }
 
+// NewSyncTransport builds the *http.Transport used by every mount-daemon
+// HTTP client. It deliberately sets GRANULAR timeouts that bound the parts
+// of a request that can wedge against an unresponsive server (connect, TLS
+// handshake, time-to-first-byte) but imposes NO total-request deadline.
+//
+// Why no total-request cap: the bootstrap full-tree pull on a large
+// workspace legitimately streams a multi-MB body for far longer than the
+// per-cycle RELAYFILE_MOUNT_TIMEOUT (default 15s). An http.Client.Timeout
+// is a whole-request wall-clock that net/http enforces INDEPENDENT of
+// context — it kills the body read mid-stream regardless of how the
+// caller scoped its context. That is precisely the gap that left the
+// 581-file workspace stuck ("request canceled ... while reading body").
+// Cancellation of a genuinely stuck transfer is instead the job of the
+// caller's context: the per-cycle ctx for incremental sync, the
+// progress-extending bootstrap ctx (+ idle watchdog) for the full pull,
+// and the cursor ctx for event-cursor resolution. ResponseHeaderTimeout
+// still bounds a server that accepts the connection but never starts
+// responding, without ever capping a body that is actively progressing.
+func NewSyncTransport() *http.Transport {
+	return &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   10 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          100,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: 30 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+		// Intentionally NO total-request timeout here and the owning
+		// http.Client MUST keep Timeout == 0 (see NewHTTPClient).
+	}
+}
+
+// NewSyncHTTPClient returns an *http.Client wired with NewSyncTransport and
+// — critically — Timeout: 0. base, if non-nil, is chained beneath the sync
+// transport (used to layer the writeback-failure RoundTripper) and is
+// responsible for delegating to a NewSyncTransport()-style transport.
+func NewSyncHTTPClient() *http.Client {
+	return &http.Client{
+		Timeout:   0, // no whole-request cap; context is the cancel mechanism
+		Transport: NewSyncTransport(),
+	}
+}
+
 func NewHTTPClient(baseURL, token string, httpClient *http.Client) *HTTPClient {
 	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
 	if baseURL == "" {
 		baseURL = "http://127.0.0.1:8080"
 	}
 	if httpClient == nil {
-		httpClient = &http.Client{Timeout: 15 * time.Second}
+		// Default to the no-whole-request-timeout sync client so callers
+		// that pass nil (tests, embedders) inherit the bootstrap-safe
+		// behaviour rather than the old blunt 15s cap.
+		httpClient = NewSyncHTTPClient()
+	} else if httpClient.Timeout != 0 {
+		// A caller passed an explicit whole-request Timeout. That cap is
+		// fatal to the bootstrap full-pull (net/http enforces it
+		// independent of context, killing a long-but-progressing body
+		// read). Normalize it away and ensure a granular sync transport
+		// is in place; cancellation remains fully covered by the
+		// per-cycle / bootstrap / cursor contexts. This guarantees the
+		// bootstrap path is never whole-request-capped no matter how the
+		// client was constructed.
+		httpClient.Timeout = 0
+		if httpClient.Transport == nil {
+			httpClient.Transport = NewSyncTransport()
+		}
 	}
 	return &HTTPClient{
 		baseURL:    baseURL,

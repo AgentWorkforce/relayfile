@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"log"
 	"math/rand"
-	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -169,7 +168,12 @@ func executeMount(rootCtx context.Context, cfg mountConfig, runPoll pollRunner, 
 }
 
 func runPollingMount(rootCtx context.Context, cfg mountConfig) error {
-	client := mountsync.NewHTTPClient(cfg.baseURL, cfg.token, &http.Client{Timeout: cfg.timeout})
+	// No whole-request Timeout: net/http enforces http.Client.Timeout
+	// independent of context and would abort a long-but-progressing
+	// bootstrap body read mid-stream. Cancellation is owned by the
+	// per-cycle / bootstrap / cursor contexts; NewSyncHTTPClient wires a
+	// transport that bounds connect/handshake/time-to-first-byte only.
+	client := mountsync.NewHTTPClient(cfg.baseURL, cfg.token, mountsync.NewSyncHTTPClient())
 	syncer, err := mountsync.NewSyncer(client, mountsync.SyncerOptions{
 		WorkspaceID:        cfg.workspaceID,
 		RemoteRoot:         cfg.remotePath,

@@ -3006,9 +3006,13 @@ func retryDeadLetterWriteback(workspaceID string, record workspaceRecord, dl dea
 	if server == "" {
 		server = resolveServer("", creds)
 	}
+	// No whole-request Timeout: net/http enforces http.Client.Timeout
+	// independent of context and would kill a long-but-progressing
+	// bootstrap body read. Cancellation is owned by the per-cycle /
+	// bootstrap / cursor contexts; the sync transport bounds
+	// connect/handshake/time-to-first-byte instead.
 	client := mountsync.NewHTTPClient(server, tokenValue, &http.Client{
-		Timeout:   defaultMountTimeout,
-		Transport: newWritebackFailureTransport(record.LocalDir, log.Default(), http.DefaultTransport),
+		Transport: newWritebackFailureTransport(record.LocalDir, log.Default(), mountsync.NewSyncTransport()),
 	})
 	// Read the live mount's remoteRoot from .relay/state.json instead
 	// of hardcoding "/". CodeRabbit flagged on PR #84: a mount created
@@ -3764,9 +3768,12 @@ func runMount(args []string) error {
 	rootCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// No whole-request Timeout (see dead-letter syncer above): the
+	// bootstrap full-pull streams large bodies well past *timeout, and
+	// net/http's http.Client.Timeout would abort it mid-stream regardless
+	// of context. Per-cycle/bootstrap/cursor contexts own cancellation.
 	client := mountsync.NewHTTPClient(*server, tokenValue, &http.Client{
-		Timeout:   *timeout,
-		Transport: newWritebackFailureTransport(absLocalDir, log.Default(), http.DefaultTransport),
+		Transport: newWritebackFailureTransport(absLocalDir, log.Default(), mountsync.NewSyncTransport()),
 	})
 	syncer, err := mountsync.NewSyncer(client, mountsync.SyncerOptions{
 		WorkspaceID:        workspaceID,
