@@ -361,6 +361,10 @@ func TestForceFullReconcileEnvOverridesCompleteFlag(t *testing.T) {
 	if err := writeMountState(filepath.Join(localDir, ".relayfile-mount-state.json"), seed); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
+	// Provide a usable events tip so the fast-path can legitimately
+	// engage once the force flag clears (an empty feed would correctly
+	// force a full pull every cycle).
+	client.events = []FilesystemEvent{{EventID: "evt_1", Type: "file.updated", Path: "/f/00000.txt", Revision: "rev_0"}}
 	s := newBootstrapSyncer(t, client, localDir, SyncerOptions{RootCtx: context.Background()})
 	if !s.forceFullReconcile {
 		t.Fatalf("expected forceFullReconcile resolved true from env")

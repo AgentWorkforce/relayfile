@@ -1938,10 +1938,24 @@ func (s *Syncer) pullRemote(ctx context.Context, conflicted map[string]struct{})
 	}
 	if s.state.BootstrapComplete && !s.forceFullReconcile && len(s.state.Files) > 0 {
 		cursor, err := s.resolveLatestEventCursor(ctx)
-		if err == nil {
+		if err == nil && strings.TrimSpace(cursor) != "" {
+			// Only short-circuit when the events feed yielded a real
+			// tip. An empty cursor means the feed has no usable
+			// watermark (no events, or an always-empty/unusable feed):
+			// seeding "" and returning would skip the full pull AND
+			// never re-arm the periodic full-pull cadence (which keys
+			// off a non-empty EventsCursor), so new remote files would
+			// never land. Fall through to the full pull instead — it is
+			// idempotent and self-heals. This restores the safety the
+			// old LastEventAt gate provided without reintroducing the
+			// rw_517d60b6 partial-mirror hazard (still gated on
+			// BootstrapComplete).
 			s.state.EventsCursor = cursor
 			s.logf("restart fast-path: seeded events cursor %q from %d tracked files; skipping bootstrap full pull", cursor, len(s.state.Files))
 			return nil
+		}
+		if err == nil {
+			s.logf("restart fast-path: events feed returned no usable cursor; falling through to full pull")
 		}
 		var httpErr *HTTPError
 		if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusNotFound {
