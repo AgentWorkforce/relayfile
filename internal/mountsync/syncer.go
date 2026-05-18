@@ -1790,9 +1790,19 @@ func (s *Syncer) bootstrapContext(parent context.Context) (context.Context, cont
 	if idle <= 0 {
 		idle = defaultBootstrapIdleTimeout
 	}
+	// Poll at most every 10s, but for short idle windows poll
+	// proportionally faster so cancellation lands promptly (and tests
+	// stay fast). Never below 10ms.
+	pollEvery := 10 * time.Second
+	if third := idle / 3; third < pollEvery {
+		pollEvery = third
+	}
+	if pollEvery < 10*time.Millisecond {
+		pollEvery = 10 * time.Millisecond
+	}
 	done := make(chan struct{})
 	go func() {
-		ticker := time.NewTicker(10 * time.Second)
+		ticker := time.NewTicker(pollEvery)
 		defer ticker.Stop()
 		for {
 			select {
