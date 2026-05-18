@@ -4264,7 +4264,19 @@ func runStatus(args []string, stdout io.Writer) error {
 			fmt.Fprintln(stdout, "daemon: not running")
 		}
 	}
-	if persistedStallReason != "" {
+	if snapshot.Bootstrap != nil {
+		// Initial mirror in progress: show progress instead of a
+		// misleading generic stall.
+		line := fmt.Sprintf("\nbootstrapping: %d", snapshot.Bootstrap.FilesSynced)
+		if snapshot.Bootstrap.FilesTotal > 0 {
+			line += fmt.Sprintf("/%d", snapshot.Bootstrap.FilesTotal)
+		}
+		line += " files"
+		if started := strings.TrimSpace(snapshot.Bootstrap.StartedAt); started != "" {
+			line += " (started " + humanizeRecentTime(started) + ")"
+		}
+		fmt.Fprintln(stdout, line)
+	} else if persistedStallReason != "" {
 		fmt.Fprintf(stdout, "\nstall: %s\n", persistedStallReason)
 	}
 	fmt.Fprintf(stdout, "\npending writebacks: %d    conflicts: %d    denied: %d\n", snapshot.PendingWriteback, snapshot.PendingConflicts, snapshot.DeniedPaths)
@@ -6912,6 +6924,16 @@ func runMountLoop(rootCtx context.Context, syncer *mountsync.Syncer, localDir, w
 				writeSnapshot()
 				return err
 			}
+			// Mid-bootstrap, a per-cycle deadline exceeded is expected
+			// progress, not a stall: the rootCtx-derived bootstrap
+			// context keeps the heavy pull alive across cycles and
+			// persists a resume cursor. Suppress the scary "stall:".
+			if bs := readBootstrapStatus(localDir); bs != nil {
+				stallReason = ""
+				log.Printf("mount bootstrapping: %d/%d files (in progress)", bs.FilesSynced, bs.FilesTotal)
+				writeSnapshot()
+				return err
+			}
 			stallReason = err.Error()
 			log.Printf("mount sync cycle failed: %v", err)
 			writeSnapshot()
@@ -6976,9 +6998,17 @@ func runMountLoop(rootCtx context.Context, syncer *mountsync.Syncer, localDir, w
 				_ = runCycle(true)
 			}
 			if !degraded && time.Since(lastSuccess) >= 10*time.Minute {
-				stallReason = "no successful reconcile for 10m"
-				log.Printf("mount stalled: %s", stallReason)
-				writeSnapshot()
+				if bs := readBootstrapStatus(localDir); bs != nil {
+					// Long-running initial mirror is making progress
+					// across cycles — not a stall.
+					stallReason = ""
+					log.Printf("mount bootstrapping: %d/%d files (in progress)", bs.FilesSynced, bs.FilesTotal)
+					writeSnapshot()
+				} else {
+					stallReason = "no successful reconcile for 10m"
+					log.Printf("mount stalled: %s", stallReason)
+					writeSnapshot()
+				}
 			}
 			timer.Reset(jitteredIntervalWithSample(interval, intervalJitter, mathrand.Float64()))
 		}

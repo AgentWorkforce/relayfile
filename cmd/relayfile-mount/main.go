@@ -206,6 +206,12 @@ func runPollingMount(rootCtx context.Context, cfg mountConfig) error {
 			err = syncer.SyncOnce(ctx)
 		}
 		if err != nil {
+			if errors.Is(err, context.DeadlineExceeded) {
+				if synced, total, ok := readBootstrapProgress(cfg.localDir); ok {
+					log.Printf("mount bootstrapping: %d/%d files (in progress)", synced, total)
+					return
+				}
+			}
 			log.Printf("mount sync cycle failed: %v", err)
 			return
 		}
@@ -250,6 +256,29 @@ func runPollingMount(rootCtx context.Context, cfg mountConfig) error {
 			timer.Reset(jitteredIntervalWithSample(cfg.interval, cfg.intervalJitter, rng.Float64()))
 		}
 	}
+}
+
+// readBootstrapProgress reads the in-progress bootstrap block from the
+// mountsync public state file. ok is false when there is no bootstrap in
+// progress (or the file is missing/unparseable).
+func readBootstrapProgress(localDir string) (synced, total int, ok bool) {
+	if strings.TrimSpace(localDir) == "" {
+		return 0, 0, false
+	}
+	payload, err := os.ReadFile(filepath.Join(localDir, ".relay", "state.json"))
+	if err != nil {
+		return 0, 0, false
+	}
+	var view struct {
+		Bootstrap *struct {
+			FilesSynced int `json:"filesSynced"`
+			FilesTotal  int `json:"filesTotal"`
+		} `json:"bootstrap"`
+	}
+	if err := json.Unmarshal(payload, &view); err != nil || view.Bootstrap == nil {
+		return 0, 0, false
+	}
+	return view.Bootstrap.FilesSynced, view.Bootstrap.FilesTotal, true
 }
 
 func envOrDefault(name, fallback string) string {

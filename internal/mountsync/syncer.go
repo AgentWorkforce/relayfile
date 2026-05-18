@@ -3386,6 +3386,21 @@ func (s *Syncer) savePublicState() error {
 		status = "stale"
 	}
 
+	// Bootstrap-in-progress overrides "stale"/"ready": surface explicit
+	// progress so operators (and the CLI status surface) see
+	// "bootstrapping N/M" instead of a misleading stall while a large
+	// initial mirror is still running.
+	var bootstrap *bootstrapStatus
+	if !s.state.BootstrapComplete && strings.TrimSpace(s.state.BootstrapStartedAt) != "" {
+		status = "bootstrapping"
+		bootstrap = &bootstrapStatus{
+			Phase:       "bootstrapping",
+			FilesSynced: s.state.BootstrapFilesSynced,
+			FilesTotal:  s.state.BootstrapFilesTotal,
+			StartedAt:   s.state.BootstrapStartedAt,
+		}
+	}
+
 	mode := s.mode
 	if mode == "" {
 		mode = "poll"
@@ -3411,6 +3426,7 @@ func (s *Syncer) savePublicState() error {
 		LowMemory:                 s.lowMemory,
 		Counters:                  s.state.Counters,
 		LastAppliedRevision:       s.state.LastAppliedRevision,
+		Bootstrap:                 bootstrap,
 	}
 	if s.circuit != nil {
 		snap := s.circuit.Snapshot()
