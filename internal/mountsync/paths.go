@@ -6,6 +6,14 @@ import (
 	"strings"
 )
 
+// MaxRemotePathLen is the upper bound (in bytes) on a single relative
+// remote path. It exists to defend against a misbehaving provider
+// returning a multi-KB path that would otherwise be propagated through
+// the rest of the pipeline (state files, log lines, OS path APIs). The
+// limit matches typical POSIX PATH_MAX so it does not artificially
+// exclude any path the underlying filesystem could actually represent.
+const MaxRemotePathLen = 4096
+
 // RelativeRemotePath is a typed wrapper around the relative-path form used
 // when constructing remote paths from local files (and vice versa). It
 // exists to make a class of clobber bugs impossible by construction:
@@ -49,6 +57,19 @@ func NewRelativeRemotePath(rel, mountBasename string) (RelativeRemotePath, error
 	rel = strings.TrimSpace(rel)
 	if rel == "" {
 		return RelativeRemotePath{}, fmt.Errorf("relative path is empty")
+	}
+	// NUL bytes are silently truncated by some libc / syscall paths,
+	// which turns "safe.txt\x00/../../etc/passwd" into a confused-deputy
+	// hazard. A misbehaving provider must never be able to plant one.
+	if strings.IndexByte(rel, 0) >= 0 {
+		return RelativeRemotePath{}, fmt.Errorf("relative path contains NUL byte")
+	}
+	// Cap path length. Provider responses that exceed POSIX PATH_MAX
+	// cannot represent a real filesystem target and indicate a degraded
+	// or hostile upstream; reject at construction so the rest of the
+	// pipeline never sees them.
+	if len(rel) > MaxRemotePathLen {
+		return RelativeRemotePath{}, fmt.Errorf("relative path exceeds %d bytes (got %d)", MaxRemotePathLen, len(rel))
 	}
 	rel = filepath.ToSlash(rel)
 	// Reject explicit roots / dots.
