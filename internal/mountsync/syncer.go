@@ -1890,7 +1890,7 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 // many we currently track. It guards against a degraded cloud response
 // (empty or drastically truncated tree) wiping the local mirror.
 func (s *Syncer) snapshotDeleteUnsafe(remoteCount int) bool {
-	tracked := len(s.state.Files)
+	tracked := s.reconcilableTrackedFileCount()
 	if tracked == 0 {
 		return false
 	}
@@ -1908,6 +1908,20 @@ func (s *Syncer) snapshotDeleteUnsafe(remoteCount int) bool {
 		return true
 	}
 	return false
+}
+
+func (s *Syncer) reconcilableTrackedFileCount() int {
+	tracked := 0
+	for _, file := range s.state.Files {
+		// Keep this baseline aligned with applyRemoteDelete: these states
+		// do not result in snapshot-driven local deletes, so they should
+		// not make a filtered remotePaths listing look unsafe.
+		if file.Denied || file.WriteDenied || file.Dirty {
+			continue
+		}
+		tracked++
+	}
+	return tracked
 }
 
 // snapshotDeleteMinRatio is the minimum fraction of tracked files the fresh
@@ -2832,7 +2846,9 @@ func (s *Syncer) savePublicState() error {
 		}
 		if !s.lowMemory {
 			if snapshot, ok := currentFiles[remotePath]; ok {
-				if tracked.Hash != snapshot.Hash && fileStatus == "ready" {
+				if snapshot.SkipWriteback && !tracked.Denied && !tracked.WriteDenied {
+					fileStatus = "writeback-skipped"
+				} else if tracked.Hash != snapshot.Hash && fileStatus == "ready" {
 					fileStatus = "writeback-pending"
 				}
 			} else if !tracked.Denied && !tracked.WriteDenied && tracked.Hash != "" && fileStatus == "ready" {
@@ -2861,6 +2877,14 @@ func (s *Syncer) savePublicState() error {
 	if !s.lowMemory {
 		for remotePath, snapshot := range currentFiles {
 			if _, ok := files[remotePath]; ok {
+				continue
+			}
+			if snapshot.SkipWriteback {
+				files[remotePath] = publicFileState{
+					ContentType: snapshot.ContentType,
+					Encoding:    snapshot.Encoding,
+					Status:      "writeback-skipped",
+				}
 				continue
 			}
 			pendingWriteback++

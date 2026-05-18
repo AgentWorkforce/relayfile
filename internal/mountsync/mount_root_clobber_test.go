@@ -182,6 +182,24 @@ func TestSnapshotDeleteUnsafeCircuitBreaker(t *testing.T) {
 	if mk(3).snapshotDeleteUnsafe(1) {
 		t.Fatalf("small tracked set below ratio-check floor must be safe")
 	}
+
+	filtered := mk(9)
+	for i := 0; i < 20; i++ {
+		filtered.state.Files[fmt.Sprintf("/denied%d.txt", i)] = trackedFile{Denied: true}
+		filtered.state.Files[fmt.Sprintf("/write-denied%d.txt", i)] = trackedFile{WriteDenied: true}
+		filtered.state.Files[fmt.Sprintf("/dirty%d.txt", i)] = trackedFile{Dirty: true}
+	}
+	if filtered.snapshotDeleteUnsafe(1) {
+		t.Fatalf("non-reconcilable tracked files must not trip the ratio check")
+	}
+	onlyNonReconcilable := &Syncer{state: mountState{Files: map[string]trackedFile{
+		"/denied.txt":       {Denied: true},
+		"/write-denied.txt": {WriteDenied: true},
+		"/dirty.txt":        {Dirty: true},
+	}}}
+	if onlyNonReconcilable.snapshotDeleteUnsafe(0) {
+		t.Fatalf("empty listing with no reconcilable tracked files must be safe")
+	}
 }
 
 // TestPullDoesNotDeleteLocalFilesWhenCloudTreeEmpty exercises the
@@ -396,6 +414,14 @@ func TestOversizedFileSkippedByWritebackCap(t *testing.T) {
 	if !sawSkipLog {
 		t.Fatalf("expected oversized-file skip to be surfaced in logs; got %v", logger.lines)
 	}
+
+	state := readPublicState(t, localDir)
+	if state.PendingWriteback != 0 || state.States.HasPendingWriteback || state.Status == "writeback-pending" {
+		t.Fatalf("oversized skipped file should not count as pending writeback: %+v", state)
+	}
+	if got := state.Files["/huge.bin"].Status; got != "writeback-skipped" {
+		t.Fatalf("expected huge.bin to be marked writeback-skipped, got %q", got)
+	}
 }
 
 // TestOversizedTrackedFileDoesNotBecomeRemoteDelete verifies that an
@@ -451,5 +477,10 @@ func TestOversizedTrackedFileDoesNotBecomeRemoteDelete(t *testing.T) {
 	}
 	if _, ok := fc.files[remotePath]; !ok {
 		t.Fatalf("remote oversized file was deleted")
+	}
+
+	state := readPublicState(t, localDir)
+	if state.PendingWriteback != 0 || state.Files[remotePath].Status != "writeback-skipped" {
+		t.Fatalf("oversized tracked file should be skipped, not pending: %+v", state)
 	}
 }
