@@ -33,6 +33,10 @@ type Window struct {
 	GeneratedAt time.Time      // UTC; used for `generated_at`
 	Providers   []string       // connected providers (incl. zero-activity ones)
 	TZ          *time.Location // workspace timezone; used for the `date` field
+	// Closing marks this run as a close-window write (the produced report
+	// captures a fully-closed local day, e.g. `digests/yesterday.md`). It is
+	// metadata for callers; self-host relayfile rendering remains exhaustive.
+	Closing bool
 }
 
 // Meta is the frontmatter bundle attached to a rendered digest.

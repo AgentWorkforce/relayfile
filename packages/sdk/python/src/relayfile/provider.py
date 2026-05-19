@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import re
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
+from datetime import date
 from dataclasses import dataclass
 from threading import Event
 from time import sleep
@@ -30,7 +32,41 @@ DEFAULT_PATH_PREFIXES: dict[str, str] = {
     "twilio": "/twilio",
 }
 
-DIGEST_PATHS: tuple[str, str] = ("digests/yesterday.md", "digests/today.md")
+DIGEST_PATHS: tuple[str, ...] = (
+    "digests/yesterday.md",
+    "digests/today.md",
+    "digests/this-week.md",
+    "digests/last-week.md",
+)
+
+# Pattern for the canonical date-stamped digest path. Mirrors
+# IsDateStampedPath in internal/digest/date_stamped.go: literal "digests/"
+# prefix, ISO-8601 YYYY-MM-DD date, ".md" suffix.
+DATE_STAMPED_DIGEST_PATH_PATTERN = re.compile(r"^digests/(\d{4})-(\d{2})-(\d{2})\.md$")
+
+
+def is_digest_path(path: str) -> bool:
+    """Return True if path is a recognized v1 digest artifact.
+
+    Matches the literal anchor paths in ``DIGEST_PATHS`` as well as the
+    date-stamped closed-window form ``digests/YYYY-MM-DD.md`` with a valid
+    calendar date. Mirrors ``IsDigestPath`` in
+    ``internal/digest/date_stamped.go``: leading and trailing slashes are
+    stripped before matching.
+    """
+
+    normalized = path.strip().lstrip("/").rstrip("/")
+    if normalized in DIGEST_PATHS:
+        return True
+    match = DATE_STAMPED_DIGEST_PATH_PATTERN.match(normalized)
+    if match is None:
+        return False
+    year, month, day = (int(g) for g in match.groups())
+    try:
+        date(year, month, day)
+    except ValueError:
+        return False
+    return True
 
 
 @dataclass

@@ -321,6 +321,9 @@ func (s *fsState) listDirectory(ctx context.Context, remotePath string) (map[str
 	if err := s.ensureGithubRepoMaterialized(ctx, remotePath); err != nil {
 		return nil, err
 	}
+	if isVirtualSkillsDirPath(s.remoteRoot, remotePath) {
+		return virtualSkillsDirectory(s.remoteRoot), nil
+	}
 	if entries, ok := s.getDir(remotePath); ok {
 		return entries, nil
 	}
@@ -338,12 +341,13 @@ func (s *fsState) listDirectory(ctx context.Context, remotePath string) (map[str
 	}
 	if remotePath == s.remoteRoot {
 		// Alias directories such as by-title/by-id/by-state are adapter-owned
-		// remote entries; the only synthesized root entry here is the virtual layout.
-		entries[layoutFilename] = virtualLayoutMeta(s.remoteRoot)
+		// remote entries; root-level guidance files are synthesized here.
+		virtualRootDirectoryEntries(s.remoteRoot, entries)
 	}
 	if provider, ok := providerRootSegment(s.remoteRoot, remotePath); ok {
-		manifest := s.layoutManifest(provider)
+		manifest := s.providerLayoutManifest(ctx, provider)
 		entries[providerLayoutFilename] = virtualProviderLayoutMeta(s.remoteRoot, manifest)
+		entries[legacyProviderLayoutFilename] = legacyVirtualProviderLayoutMeta(s.remoteRoot, manifest)
 	}
 	if provider, resource, ok := virtualSchemaForDirectory(s.remoteRoot, remotePath); ok {
 		if payload, present := loadResourceSchema(provider, resource); present {
@@ -387,11 +391,17 @@ func (s *fsState) lookupMetadata(ctx context.Context, remotePath string) (nodeMe
 			modTime: time.Now(),
 		}, nil
 	}
+	if isVirtualSkillsDirPath(s.remoteRoot, remotePath) {
+		return virtualSkillsDirMeta(s.remoteRoot), nil
+	}
+	if isVirtualActivitySummaryPath(s.remoteRoot, remotePath) {
+		return virtualActivitySummaryMeta(s.remoteRoot), nil
+	}
 	if isVirtualLayoutPath(s.remoteRoot, remotePath) {
 		return virtualLayoutMeta(s.remoteRoot), nil
 	}
 	if provider, ok := isVirtualProviderLayoutPath(s.remoteRoot, remotePath); ok {
-		return virtualProviderLayoutMeta(s.remoteRoot, s.layoutManifest(provider)), nil
+		return virtualProviderLayoutMetaForFilename(s.remoteRoot, s.providerLayoutManifest(ctx, provider), path.Base(remotePath)), nil
 	}
 	if provider, resource, ok := isVirtualSchemaPath(s.remoteRoot, remotePath); ok {
 		if payload, present := loadResourceSchema(provider, resource); present {
@@ -421,11 +431,14 @@ func (s *fsState) lookupMetadata(ctx context.Context, remotePath string) (nodeMe
 
 func (s *fsState) readFile(ctx context.Context, remotePath string) (mountsync.RemoteFile, error) {
 	remotePath = normalizeRemotePath(remotePath)
+	if isVirtualActivitySummaryPath(s.remoteRoot, remotePath) {
+		return readVirtualActivitySummary(s.remoteRoot), nil
+	}
 	if isVirtualLayoutPath(s.remoteRoot, remotePath) {
 		return readVirtualLayout(s.remoteRoot), nil
 	}
 	if provider, ok := isVirtualProviderLayoutPath(s.remoteRoot, remotePath); ok {
-		return readVirtualProviderLayout(s.remoteRoot, s.layoutManifest(provider)), nil
+		return readVirtualProviderLayoutForFilename(s.remoteRoot, s.providerLayoutManifest(ctx, provider), path.Base(remotePath)), nil
 	}
 	if provider, resource, ok := isVirtualSchemaPath(s.remoteRoot, remotePath); ok {
 		if payload, present := loadResourceSchema(provider, resource); present {

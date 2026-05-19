@@ -1,6 +1,7 @@
 package mountfuse
 
 import (
+	"context"
 	"path"
 	"sort"
 	"strings"
@@ -11,15 +12,23 @@ import (
 )
 
 const (
-	layoutFilename         = "LAYOUT.md"
-	layoutRevision         = "virtual-layout"
-	providerLayoutFilename = ".layout.md"
-	providerLayoutRevision = "virtual-provider-layout"
-	layoutContentType      = "text/markdown; charset=utf-8"
-	aliasByTitleSegment    = "by-title"
-	aliasByIDSegment       = "by-id"
-	aliasByNameSegment     = "by-name"
-	aliasByStateSegment    = "by-state"
+	layoutFilename = "LAYOUT.md"
+	layoutRevision = "virtual-layout"
+	// providerLayoutFilename is the canonical per-provider layout filename.
+	// PR39 Work Item A canonicalized on LAYOUT.md across runtime, fixtures,
+	// and the workspace-layout skill contract. The legacy ".layout.md"
+	// dotfile remains a virtual compatibility path for agents still following
+	// the pre-canonical provider layout contract.
+	providerLayoutFilename       = "LAYOUT.md"
+	legacyProviderLayoutFilename = ".layout.md"
+	providerLayoutRevision       = "virtual-provider-layout-v2"
+	layoutContentType            = "text/markdown; charset=utf-8"
+	aliasByTitleSegment          = "by-title"
+	aliasByIDSegment             = "by-id"
+	aliasByNameSegment           = "by-name"
+	aliasByStateSegment          = "by-state"
+	aliasByEditedSegment         = "by-edited"
+	providerLayoutDeriveDepth    = 4
 )
 
 type LayoutManifest struct {
@@ -56,6 +65,10 @@ Direct name aliases live under ` + "`linear/users/" + aliasByNameSegment + "/<na
 
 State-grouped views live under ` + "`linear/issues/" + aliasByStateSegment + "/<state>/<file>.json`" + ` and ` + "`github/repos/<owner>/<repo>/issues/" + aliasByStateSegment + "/<state>/<file>.json`" + ` when those integrations export them.
 
+## Find by edited date
+
+Edited-date views live under ` + "`notion/pages/" + aliasByEditedSegment + "/YYYY-MM-DD/<file>.json`" + ` and equivalent issue or page resources when those integrations export them. Use these date buckets for activity-summary fallback lookups instead of recursive search.
+
 ## Filenames
 
 Entity files use the ` + "`<sanitized-name>__<id>`" + ` filename convention. Recover the id from the last ` + "`__`" + `-separated segment.
@@ -66,7 +79,7 @@ GitHub repo subtrees are synced eagerly by default. For huge-org workspaces, opt
 
 ## Integration-specific layouts
 
-See per-integration ` + "`<integration>/.layout.md`" + ` files for integration-specific tree shapes.
+See per-integration ` + "`<integration>/LAYOUT.md`" + ` files for integration-specific tree shapes.
 `
 
 func layoutRemotePath(remoteRoot string) string {
@@ -122,7 +135,7 @@ func providerLayoutMarkdown(manifest LayoutManifest) string {
 		b.WriteString("\n")
 	}
 	b.WriteString("## Filenames\n\n")
-	b.WriteString("Entity files use the `<identifier>__<uuid>.json` convention when a stable provider identifier is available.\n\n")
+	b.WriteString("Entity files use the `<identifier>__<id>.json` convention when a stable provider identifier is available. Recover the provider id from the last `__`-separated segment.\n\n")
 	b.WriteString("## Alias indexes\n\n")
 	if len(manifest.AliasSegments) == 0 {
 		b.WriteString("_No alias indexes have been advertised yet._\n\n")
@@ -141,7 +154,9 @@ func providerLayoutMarkdown(manifest LayoutManifest) string {
 		for _, resource := range manifest.WritebackResources {
 			b.WriteString("- `")
 			b.WriteString(resource)
-			b.WriteString("/.schema.json`\n")
+			b.WriteString("/` (schema: `")
+			b.WriteString(resource)
+			b.WriteString("/.schema.json`)\n")
 		}
 		b.WriteString("\n")
 	}
@@ -159,9 +174,13 @@ func providerLayoutRemotePath(remoteRoot, provider string) string {
 	return joinRemotePath(joinRemotePath(remoteRoot, provider), providerLayoutFilename)
 }
 
+func isProviderLayoutFilename(filename string) bool {
+	return filename == providerLayoutFilename || filename == legacyProviderLayoutFilename
+}
+
 func isVirtualProviderLayoutPath(remoteRoot, remotePath string) (string, bool) {
 	remotePath = normalizeRemotePath(remotePath)
-	if path.Base(remotePath) != providerLayoutFilename {
+	if !isProviderLayoutFilename(path.Base(remotePath)) {
 		return "", false
 	}
 	parentPath, _ := splitParent(remotePath)
@@ -169,11 +188,22 @@ func isVirtualProviderLayoutPath(remoteRoot, remotePath string) (string, bool) {
 }
 
 func virtualProviderLayoutMeta(remoteRoot string, manifest LayoutManifest) nodeMeta {
+	return virtualProviderLayoutMetaForFilename(remoteRoot, manifest, providerLayoutFilename)
+}
+
+func legacyVirtualProviderLayoutMeta(remoteRoot string, manifest LayoutManifest) nodeMeta {
+	return virtualProviderLayoutMetaForFilename(remoteRoot, manifest, legacyProviderLayoutFilename)
+}
+
+func virtualProviderLayoutMetaForFilename(remoteRoot string, manifest LayoutManifest, filename string) nodeMeta {
 	manifest = normalizeLayoutManifest(manifest)
+	if !isProviderLayoutFilename(filename) {
+		filename = providerLayoutFilename
+	}
 	content := providerLayoutMarkdown(manifest)
 	return nodeMeta{
-		path:        providerLayoutRemotePath(remoteRoot, manifest.Provider),
-		name:        providerLayoutFilename,
+		path:        joinRemotePath(joinRemotePath(remoteRoot, manifest.Provider), filename),
+		name:        filename,
 		mode:        syscall.S_IFREG | 0o444,
 		revision:    providerLayoutRevision,
 		size:        uint64(len(content)),
@@ -183,7 +213,15 @@ func virtualProviderLayoutMeta(remoteRoot string, manifest LayoutManifest) nodeM
 }
 
 func readVirtualProviderLayout(remoteRoot string, manifest LayoutManifest) mountsync.RemoteFile {
-	meta := virtualProviderLayoutMeta(remoteRoot, manifest)
+	return readVirtualProviderLayoutForFilename(remoteRoot, manifest, providerLayoutFilename)
+}
+
+func readLegacyVirtualProviderLayout(remoteRoot string, manifest LayoutManifest) mountsync.RemoteFile {
+	return readVirtualProviderLayoutForFilename(remoteRoot, manifest, legacyProviderLayoutFilename)
+}
+
+func readVirtualProviderLayoutForFilename(remoteRoot string, manifest LayoutManifest, filename string) mountsync.RemoteFile {
+	meta := virtualProviderLayoutMetaForFilename(remoteRoot, manifest, filename)
 	return mountsync.RemoteFile{
 		Path:        meta.path,
 		Revision:    meta.revision,
@@ -220,17 +258,128 @@ func normalizeLayoutManifest(manifest LayoutManifest) LayoutManifest {
 
 func (s *fsState) layoutManifest(provider string) LayoutManifest {
 	provider = strings.TrimSpace(provider)
-	if manifest, ok := s.manifests[provider]; ok {
+	if manifest, ok := s.configuredLayoutManifest(provider); ok {
 		return manifest
 	}
 	return LayoutManifest{
 		Provider: provider,
-		AliasSegments: []string{
-			aliasByIDSegment,
-			aliasByNameSegment,
-			aliasByStateSegment,
-			aliasByTitleSegment,
-		},
+	}
+}
+
+func (s *fsState) configuredLayoutManifest(provider string) (LayoutManifest, bool) {
+	provider = strings.TrimSpace(provider)
+	if provider == "" || len(s.manifests) == 0 {
+		return LayoutManifest{}, false
+	}
+	manifest, ok := s.manifests[provider]
+	return manifest, ok
+}
+
+func (s *fsState) providerLayoutManifest(ctx context.Context, provider string) LayoutManifest {
+	provider = strings.TrimSpace(provider)
+	if manifest, ok := s.configuredLayoutManifest(provider); ok {
+		return manifest
+	}
+	manifest, err := s.deriveProviderLayoutManifest(ctx, provider)
+	if err != nil {
+		s.logf("derive provider layout for %s: %v", provider, err)
+		return LayoutManifest{Provider: provider}
+	}
+	return manifest
+}
+
+func (s *fsState) deriveProviderLayoutManifest(ctx context.Context, provider string) (LayoutManifest, error) {
+	manifest := LayoutManifest{
+		Provider:            strings.TrimSpace(provider),
+		LazyMaterialization: s.lazyRepos != nil && strings.TrimSpace(provider) == "github",
+	}
+	if manifest.Provider == "" || s.client == nil {
+		return manifest, nil
+	}
+
+	resources := map[string]struct{}{}
+	aliases := map[string]struct{}{}
+	providerRoot := joinRemotePath(s.remoteRoot, manifest.Provider)
+	cursor := ""
+	for {
+		resp, err := s.client.ListTree(ctx, s.workspaceID, providerRoot, providerLayoutDeriveDepth, cursor)
+		if err != nil {
+			return manifest, err
+		}
+		for _, entry := range resp.Entries {
+			rel, ok := relativeToRemoteRoot(providerRoot, entry.Path)
+			if !ok || rel == "" {
+				continue
+			}
+			segments := providerLayoutPathSegments(rel)
+			if len(segments) == 0 {
+				continue
+			}
+			if providerLayoutResourceSegment(segments[0]) != "" && (len(segments) > 1 || isTreeDirectory(entry.Type)) {
+				resources[segments[0]] = struct{}{}
+			}
+			for _, segment := range segments[1:] {
+				if isProviderLayoutAliasSegment(segment) {
+					aliases[segment] = struct{}{}
+				}
+			}
+		}
+		if resp.NextCursor == nil || strings.TrimSpace(*resp.NextCursor) == "" {
+			break
+		}
+		cursor = strings.TrimSpace(*resp.NextCursor)
+	}
+
+	for resource := range resources {
+		manifest.ResourceDirectories = append(manifest.ResourceDirectories, resource)
+	}
+	for alias := range aliases {
+		manifest.AliasSegments = append(manifest.AliasSegments, alias)
+	}
+	return normalizeLayoutManifest(manifest), nil
+}
+
+func isTreeDirectory(entryType string) bool {
+	return strings.EqualFold(entryType, "directory") || strings.EqualFold(entryType, "dir")
+}
+
+func providerLayoutPathSegments(remotePath string) []string {
+	remotePath = strings.Trim(remotePath, "/")
+	if remotePath == "" {
+		return nil
+	}
+	return strings.Split(remotePath, "/")
+}
+
+func providerLayoutResourceSegment(segment string) string {
+	segment = strings.TrimSpace(segment)
+	switch {
+	case segment == "":
+		return ""
+	case isProviderLayoutAliasSegment(segment):
+		return ""
+	case isProviderLayoutReservedSegment(segment):
+		return ""
+	default:
+		return segment
+	}
+}
+
+func isProviderLayoutAliasSegment(segment string) bool {
+	switch strings.TrimSpace(segment) {
+	case aliasByTitleSegment, aliasByIDSegment, aliasByNameSegment, aliasByStateSegment, aliasByEditedSegment:
+		return true
+	default:
+		return false
+	}
+}
+
+func isProviderLayoutReservedSegment(segment string) bool {
+	switch strings.TrimSpace(segment) {
+	case "", ".relay", "digests", "_index.json", layoutFilename, legacyProviderLayoutFilename, ".relayfile-mount-state.json":
+		return true
+	default:
+		return false
 	}
 }
 

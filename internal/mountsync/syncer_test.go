@@ -2764,6 +2764,12 @@ func TestApplyRemoteSnapshot_MaterializesProviderLayouts(t *testing.T) {
 			ContentType: "text/markdown",
 			Content:     "_no activity_",
 		},
+		"/.skills/activity-summary.md": {
+			Path:        "/.skills/activity-summary.md",
+			Revision:    "rev_activity_summary",
+			ContentType: "text/markdown",
+			Content:     "# activity-summary\n",
+		},
 		"/.relay/dead-letter/payload.json": {
 			Path:        "/.relay/dead-letter/payload.json",
 			Revision:    "rev_dead",
@@ -2788,8 +2794,11 @@ func TestApplyRemoteSnapshot_MaterializesProviderLayouts(t *testing.T) {
 	if got, want := registrar.manifest["notion"].Resources, []string{"pages"}; !slices.Equal(got, want) {
 		t.Fatalf("notion resources = %#v, want %#v", got, want)
 	}
-	if got, want := registrar.manifest["linear"].AliasSegments, providerLayoutAliasSegments; !slices.Equal(got, want) {
+	if got, want := registrar.manifest["linear"].AliasSegments, []string{"by-state"}; !slices.Equal(got, want) {
 		t.Fatalf("alias segments = %#v, want %#v", got, want)
+	}
+	if slices.Contains(registrar.manifest["linear"].AliasSegments, "by-edited") {
+		t.Fatalf("linear canonical layout unexpectedly advertised by-edited: %#v", registrar.manifest["linear"].AliasSegments)
 	}
 	if _, ok := registrar.manifest["digests"]; ok {
 		t.Fatalf("reserved digests root should not be registered as a provider")
@@ -2797,8 +2806,127 @@ func TestApplyRemoteSnapshot_MaterializesProviderLayouts(t *testing.T) {
 	if _, ok := registrar.manifest[".relay"]; ok {
 		t.Fatalf("reserved .relay root should not be registered as a provider")
 	}
+	if _, ok := registrar.manifest[".skills"]; ok {
+		t.Fatalf("reserved .skills root should not be registered as a provider")
+	}
 	if _, err := os.Stat(filepath.Join(localDir, "linear", ".layout.md")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("provider layout registration should not write a disk .layout.md, stat err=%v", err)
+	}
+}
+
+func TestApplyRemoteSnapshot_ProviderLayoutDoesNotAdvertiseAliasesForCanonicalFiles(t *testing.T) {
+	t.Parallel()
+
+	localDir := t.TempDir()
+	registrar := &fakeProviderLayoutRegistrar{}
+	syncer, err := NewSyncer(&fakeClient{}, SyncerOptions{
+		WorkspaceID:             "ws_snapshot_provider_layouts_no_by_edited",
+		RemoteRoot:              "/",
+		LocalRoot:               localDir,
+		ProviderLayoutRegistrar: registrar,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+
+	if err := syncer.applyRemoteSnapshot(map[string]RemoteFile{
+		"/linear/issues/AGE-16__issue-1.json": {
+			Path:        "/linear/issues/AGE-16__issue-1.json",
+			Revision:    "rev_linear_issue",
+			ContentType: "application/json",
+			Content:     `{"identifier":"AGE-16"}`,
+		},
+	}, nil); err != nil {
+		t.Fatalf("applyRemoteSnapshot failed: %v", err)
+	}
+
+	manifest, ok := registrar.manifest["linear"]
+	if !ok {
+		t.Fatalf("expected linear provider layout to be registered")
+	}
+	if got, want := manifest.Resources, []string{"issues"}; !slices.Equal(got, want) {
+		t.Fatalf("linear resources = %#v, want %#v", got, want)
+	}
+	if len(manifest.AliasSegments) != 0 {
+		t.Fatalf("canonical-only provider layout advertised aliases: %#v", manifest.AliasSegments)
+	}
+}
+
+func TestApplyRemoteSnapshot_ProviderLayoutAdvertisesOnlyObservedAliasesForProvider(t *testing.T) {
+	t.Parallel()
+
+	localDir := t.TempDir()
+	registrar := &fakeProviderLayoutRegistrar{}
+	syncer, err := NewSyncer(&fakeClient{}, SyncerOptions{
+		WorkspaceID:             "ws_snapshot_provider_layouts_observed_by_edited",
+		RemoteRoot:              "/",
+		LocalRoot:               localDir,
+		ProviderLayoutRegistrar: registrar,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+
+	if err := syncer.applyRemoteSnapshot(map[string]RemoteFile{
+		"/linear/issues/by-id/AGE-16.json": {
+			Path:        "/linear/issues/by-id/AGE-16.json",
+			Revision:    "rev_linear_by_id",
+			ContentType: "application/json",
+			Content:     `{"identifier":"AGE-16"}`,
+		},
+		"/linear/issues/by-state/open/AGE-16__issue-1.json": {
+			Path:        "/linear/issues/by-state/open/AGE-16__issue-1.json",
+			Revision:    "rev_linear_by_state",
+			ContentType: "application/json",
+			Content:     `{"identifier":"AGE-16"}`,
+		},
+		"/notion/pages/by-edited/2026-05-12/page-123__123.json": {
+			Path:        "/notion/pages/by-edited/2026-05-12/page-123__123.json",
+			Revision:    "rev_notion_by_edited",
+			ContentType: "application/json",
+			Content:     `{"id":"123"}`,
+		},
+		"/notion/pages/by-title/Roadmap.json": {
+			Path:        "/notion/pages/by-title/Roadmap.json",
+			Revision:    "rev_notion_by_title",
+			ContentType: "application/json",
+			Content:     `{"id":"roadmap"}`,
+		},
+		"/github/repos/by-name/octocat__hello-world.json": {
+			Path:        "/github/repos/by-name/octocat__hello-world.json",
+			Revision:    "rev_github_by_name",
+			ContentType: "application/json",
+			Content:     `{"name":"hello-world"}`,
+		},
+	}, nil); err != nil {
+		t.Fatalf("applyRemoteSnapshot failed: %v", err)
+	}
+
+	linearManifest, ok := registrar.manifest["linear"]
+	if !ok {
+		t.Fatalf("expected linear provider layout to be registered")
+	}
+	if got, want := linearManifest.AliasSegments, []string{"by-id", "by-state"}; !slices.Equal(got, want) {
+		t.Fatalf("linear aliases = %#v, want %#v", got, want)
+	}
+
+	notionManifest, ok := registrar.manifest["notion"]
+	if !ok {
+		t.Fatalf("expected notion provider layout to be registered")
+	}
+	if got, want := notionManifest.Resources, []string{"pages"}; !slices.Equal(got, want) {
+		t.Fatalf("notion resources = %#v, want %#v", got, want)
+	}
+	if got, want := notionManifest.AliasSegments, []string{"by-edited", "by-title"}; !slices.Equal(got, want) {
+		t.Fatalf("notion aliases = %#v, want %#v", got, want)
+	}
+
+	githubManifest, ok := registrar.manifest["github"]
+	if !ok {
+		t.Fatalf("expected github provider layout to be registered")
+	}
+	if got, want := githubManifest.AliasSegments, []string{"by-name"}; !slices.Equal(got, want) {
+		t.Fatalf("github aliases = %#v, want %#v", got, want)
 	}
 }
 
@@ -2898,6 +3026,12 @@ func TestApplyRemoteSnapshot_ProviderLayoutsSkipReservedRoots(t *testing.T) {
 			ContentType: "text/markdown",
 			Content:     "_no activity_",
 		},
+		"/.skills/activity-summary.md": {
+			Path:        "/.skills/activity-summary.md",
+			Revision:    "rev_activity_summary",
+			ContentType: "text/markdown",
+			Content:     "# activity-summary\n",
+		},
 		"/_index.json": {
 			Path:        "/_index.json",
 			Revision:    "rev_index",
@@ -2972,6 +3106,19 @@ func TestProviderLayoutPartsUsesResourceFromNonRootRemoteRoot(t *testing.T) {
 	}
 	if resource != "repos" {
 		t.Fatalf("resource = %q, want repos", resource)
+	}
+}
+
+func TestProviderLayoutPartsKeepsResourceForByEditedAliases(t *testing.T) {
+	provider, resource, ok := providerLayoutParts("/", "/notion/pages/by-edited/2026-05-12/page-123__123.json")
+	if !ok {
+		t.Fatalf("expected provider layout parts")
+	}
+	if provider != "notion" {
+		t.Fatalf("provider = %q, want notion", provider)
+	}
+	if resource != "pages" {
+		t.Fatalf("resource = %q, want pages", resource)
 	}
 }
 
@@ -3386,6 +3533,9 @@ func (c *fakeClient) WriteFile(ctx context.Context, workspaceID, path, baseRevis
 	_ = ctx
 	_ = workspaceID
 	c.writeFileCalls++
+	if c.files == nil {
+		c.files = make(map[string]RemoteFile)
+	}
 	path = normalizeRemotePath(path)
 	current, exists := c.files[path]
 	if !exists && baseRevision != "0" {
@@ -3415,6 +3565,9 @@ func (c *fakeClient) WriteFilesBulk(ctx context.Context, workspaceID string, fil
 	_ = workspaceID
 	if len(files) == 0 {
 		return BulkWriteResponse{}, ErrEmptyBulkWrite
+	}
+	if c.files == nil {
+		c.files = make(map[string]RemoteFile)
 	}
 
 	c.bulkWriteCalls++

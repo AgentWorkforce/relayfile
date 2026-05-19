@@ -1,10 +1,10 @@
 // Package digest builds the deterministic activity-summary file written
 // to `digests/<cover>.md` after every workspace change-event window.
 //
-// The package is intentionally I/O free: callers supply a Window (date,
-// timezone, connected providers, generated-at timestamp) and a
-// ChangeEventSource. The package coalesces events, sorts them
-// deterministically, and renders Markdown with YAML frontmatter.
+// Callers supply a Window (date, timezone, connected providers,
+// generated-at timestamp) and a ChangeEventSource. The package coalesces
+// events, sorts them deterministically, and renders Markdown with YAML
+// frontmatter. Closed date-stamped windows can also be written idempotently.
 package digest
 
 import (
@@ -13,6 +13,25 @@ import (
 	"sort"
 	"time"
 )
+
+// WarningCoverageTruncated is retained as the historical warning prefix so
+// callers and tests can assert self-host runs no longer emit it. Relayfile's
+// shared renderer is exhaustive; any cloud-specific cap must live outside this
+// package with its own explicit policy.
+const WarningCoverageTruncated = "digest.coverage.truncated"
+
+// DigestCoverageCap is retained only for compatibility with older tests and
+// cloud-facing policy code. Run and RunClosing do not enforce it for self-host
+// relayfile digests.
+const DigestCoverageCap = 500
+
+// RunClosing is a convenience wrapper that runs Run with `w.Closing = true`,
+// documenting that the produced artifact covers a closed window. Self-host
+// relayfile digests are exhaustive: no truncation or coverage warning is added.
+func RunClosing(ctx context.Context, src ChangeEventSource, w Window) (Report, error) {
+	w.Closing = true
+	return Run(ctx, src, w)
+}
 
 // Run coalesces the supplied window's events into a Report. The report is
 // deterministic: the same Window + Events input always yields the same

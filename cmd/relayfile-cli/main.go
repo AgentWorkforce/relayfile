@@ -79,6 +79,7 @@ type workspaceRecord struct {
 	CloudAPIURL string   `json:"cloudApiUrl,omitempty"`
 	AgentName   string   `json:"agentName,omitempty"`
 	Scopes      []string `json:"scopes,omitempty"`
+	Timezone    string   `json:"timezone,omitempty"`
 }
 
 type apiClient struct {
@@ -278,6 +279,7 @@ type cloudIntegrationListEntry struct {
 
 type syncStateFile struct {
 	WorkspaceID      string              `json:"workspaceId"`
+	RemoteRoot       string              `json:"remoteRoot,omitempty"`
 	Mode             string              `json:"mode"`
 	LastReconcileAt  string              `json:"lastReconcileAt,omitempty"`
 	LastEventAt      string              `json:"lastEventAt,omitempty"`
@@ -633,7 +635,7 @@ func printWritebackUsage(w io.Writer, subcommand string) {
 		fmt.Fprintln(w, "Usage: relayfile writeback retry --opId OP [WORKSPACE]")
 	default:
 		fmt.Fprintln(w, `Usage:
-  relayfile writeback list --state pending|dead|succeeded|failed [--workspace WS] [--json]
+  relayfile writeback list --state pending|dead [--workspace WS] [--json]
   relayfile writeback status [WORKSPACE] [--json]
   relayfile writeback retry --opId OP [WORKSPACE]`)
 	}
@@ -645,7 +647,7 @@ func printDigestUsage(w io.Writer, subcommand string) {
 		fmt.Fprintln(w, digestRebuildUsage)
 	default:
 		fmt.Fprintln(w, `Usage:
-  relayfile digest rebuild --window yesterday|today [--workspace NAME]`)
+  relayfile digest rebuild --window today|yesterday|YYYY-MM-DD|this-week|last-week [--workspace NAME] [--json]`)
 	}
 }
 
@@ -671,10 +673,10 @@ Usage:
   relayfile integration set-metadata PROVIDER KEY=VALUE [KEY=VALUE...] [--workspace NAME] [--yes]
   relayfile ops list [--workspace NAME] [--json]
   relayfile ops replay OPID [--workspace NAME]
-  relayfile writeback list --state pending|dead|succeeded|failed [--workspace WS] [--json]
+  relayfile writeback list --state pending|dead [--workspace WS] [--json]
   relayfile writeback status [WORKSPACE] [--json]
   relayfile writeback retry --opId OP [WORKSPACE]
-  relayfile digest rebuild --window yesterday|today [--workspace NAME]
+  relayfile digest rebuild --window today|yesterday|YYYY-MM-DD|this-week|last-week [--workspace NAME] [--json]
   relayfile pull [--workspace NAME] [--provider PROVIDER] [--reason TEXT]
   relayfile mount [WORKSPACE] [LOCAL_DIR]
   relayfile start [WORKSPACE] [LOCAL_DIR]            (alias for mount)
@@ -703,7 +705,7 @@ Subcommands:
               Re-enqueue a local dead-lettered writeback op
   digest      Regenerate workspace digests
   digest rebuild
-              Regenerate digests/yesterday.md or digests/today.md
+              Regenerate daily, weekly, or date-stamped digest artifacts
   pull        Trigger an immediate sync refresh for one or all providers
   mount       Mirror a remote workspace to a local directory; add --background to detach
   start       Alias for mount; pairs naturally with stop and restart
@@ -1287,6 +1289,27 @@ func ensureMirrorLayout(localDir string) error {
 	if err := os.MkdirAll(localDir, 0o755); err != nil {
 		return err
 	}
+	if err := os.MkdirAll(filepath.Join(localDir, "digests"), 0o755); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Join(localDir, ".skills"), 0o755); err != nil {
+		return err
+	}
+	skillPath := filepath.Join(localDir, ".skills", "activity-summary.md")
+	skillContent := []byte(activitySummarySkillMarkdown)
+	if current, err := os.ReadFile(skillPath); err == nil {
+		if !bytes.Equal(current, skillContent) {
+			if err := writeFileAtomically(skillPath, skillContent, 0o644); err != nil {
+				return err
+			}
+		}
+	} else if errors.Is(err, os.ErrNotExist) {
+		if err := writeFileAtomically(skillPath, skillContent, 0o644); err != nil {
+			return err
+		}
+	} else {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Join(localDir, ".relay"), 0o755); err != nil {
 		return err
 	}
@@ -1298,6 +1321,16 @@ func ensureMirrorLayout(localDir string) error {
 	}
 	return os.MkdirAll(filepath.Join(localDir, ".relay", "conflicts"), 0o755)
 }
+
+const activitySummarySkillMarkdown = `# activity-summary
+
+Start activity questions from the digest surface before walking provider trees.
+
+- Read ` + "`digests/yesterday.md`" + ` for yesterday, ` + "`digests/today.md`" + ` for today, or ` + "`digests/YYYY-MM-DD.md`" + ` for a specific UTC date.
+- If a digest is missing or stale, run ` + "`relayfile digest rebuild --window yesterday`" + `, ` + "`--window today`" + `, ` + "`--window YYYY-MM-DD`" + `, ` + "`--window this-week`" + `, or ` + "`--window last-week`" + `.
+- Use provider ` + "`_index.json`" + ` files for date filtering and only open individual entity files after the index has narrowed the set.
+- Read ` + "`LAYOUT.md`" + ` and provider ` + "`<integration>/.layout.md`" + ` files when you need path conventions or alias views.
+`
 
 func ensureWorkspaceForSetup(cloud cloudCredentials, name, localDir string) (workspaceRecord, bool, error) {
 	if record, ok := workspaceRecordByName(name); ok {
@@ -5078,6 +5111,7 @@ func upsertWorkspaceDetails(record workspaceRecord) (workspaceRecord, error) {
 	record.Server = strings.TrimRight(strings.TrimSpace(record.Server), "/")
 	record.CloudAPIURL = strings.TrimRight(strings.TrimSpace(record.CloudAPIURL), "/")
 	record.AgentName = strings.TrimSpace(record.AgentName)
+	record.Timezone = strings.TrimSpace(record.Timezone)
 	if len(record.Scopes) == 0 {
 		record.Scopes = append([]string(nil), defaultJoinScopes...)
 	}
@@ -5134,6 +5168,9 @@ func mergeWorkspaceRecords(current, update workspaceRecord) workspaceRecord {
 	}
 	if update.AgentName != "" {
 		merged.AgentName = update.AgentName
+	}
+	if update.Timezone != "" {
+		merged.Timezone = update.Timezone
 	}
 	if len(update.Scopes) > 0 {
 		merged.Scopes = append([]string(nil), update.Scopes...)
@@ -5462,6 +5499,7 @@ func providerReadyForMirror(client *apiClient, workspaceID, provider string, sta
 func buildSyncStateSnapshot(status syncStatusResponse, workspaceID, mode string, interval time.Duration, localDir string, pid int, stallReason string) syncStateFile {
 	snapshot := syncStateFile{
 		WorkspaceID:      workspaceID,
+		RemoteRoot:       readMountRemoteRoot(localDir),
 		Mode:             defaultIfBlank(mode, defaultMountMode),
 		IntervalMs:       interval.Milliseconds(),
 		PendingWriteback: countDirtyTrackedFiles(localDir),

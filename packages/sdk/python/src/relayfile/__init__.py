@@ -7,12 +7,14 @@ from .errors import (
     PayloadTooLargeError,
 )
 from .provider import (
+    DATE_STAMPED_DIGEST_PATH_PATTERN,
     DIGEST_PATHS,
     IntegrationProvider,
     ListProviderFilesOptions,
     WatchProviderEventsOptions,
     WebhookInput,
     compute_canonical_path,
+    is_digest_path,
     provider_layout_path,
     resource_schema_path,
 )
@@ -47,6 +49,8 @@ __all__ = [
     "PayloadTooLargeError",
     "IntegrationProvider",
     "DIGEST_PATHS",
+    "DATE_STAMPED_DIGEST_PATH_PATTERN",
+    "is_digest_path",
     "WebhookInput",
     "ListProviderFilesOptions",
     "WatchProviderEventsOptions",

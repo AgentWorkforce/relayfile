@@ -1,16 +1,19 @@
 package main
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 )
 
-const writebackListUsage = "usage: relayfile writeback list --state pending|dead|succeeded|failed [--workspace WS] [--json]"
+const writebackListUsage = "usage: relayfile writeback list --state pending|dead [--workspace WS] [--json]"
 
 // writebackListItem mirrors the WritebackItem TypeScript shape exported from
 // packages/sdk/typescript/src/types.ts. Field names must stay in sync.
@@ -36,7 +39,7 @@ type writebackListItem struct {
 func runWritebackList(args []string, stdout io.Writer) error {
 	fs := flag.NewFlagSet("writeback list", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	state := fs.String("state", "", "writeback state: pending, dead, succeeded, or failed")
+	state := fs.String("state", "", "writeback state: pending or dead")
 	workspace := fs.String("workspace", "", "workspace name or id")
 	jsonOutput := fs.Bool("json", false, "emit JSON")
 	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
@@ -75,7 +78,7 @@ func runWritebackList(args []string, stdout io.Writer) error {
 
 func validWritebackListState(state string) bool {
 	switch state {
-	case "pending", "dead", "succeeded", "failed":
+	case "pending", "dead":
 		return true
 	default:
 		return false
@@ -83,19 +86,166 @@ func validWritebackListState(state string) bool {
 }
 
 // listLocalWritebackItems returns per-operation writeback rows for the given
-// state. Only `dead` is sourced from per-op records on disk
-// (`<localDir>/.relay/dead-letter/`). `pending`, `succeeded`, and `failed`
-// are aggregate counters in the writeback status report today and have no
-// row-level history, so this command refuses to fabricate rows for them per
-// the workspace-primitives WI5 lead plan (non-goal #9).
+// state. `pending` is sourced from dirty tracked files in
+// `<localDir>/.relayfile-mount-state.json`; `dead` is sourced from per-op
+// records under `<localDir>/.relay/dead-letter/`. Aggregate counters in
+// `.relay/state.json` are deliberately not expanded into synthetic rows.
 func listLocalWritebackItems(workspaceID, localDir, state string) ([]writebackListItem, error) {
+	if strings.TrimSpace(localDir) == "" {
+		return []writebackListItem{}, nil
+	}
 	if state == "dead" {
-		if strings.TrimSpace(localDir) == "" {
-			return []writebackListItem{}, nil
-		}
 		return readDeadWritebackItems(workspaceID, localDir)
 	}
-	return nil, fmt.Errorf("%s state not yet tracked; see workspace-primitives WI5", state)
+	return readPendingWritebackItems(workspaceID, localDir)
+}
+
+func readPendingWritebackItems(workspaceID, localDir string) ([]writebackListItem, error) {
+	var state struct {
+		Files map[string]struct {
+			Revision    string `json:"revision"`
+			Hash        string `json:"hash"`
+			Dirty       bool   `json:"dirty"`
+			Denied      bool   `json:"denied"`
+			WriteDenied bool   `json:"writeDenied"`
+			ReadOnly    bool   `json:"readonly"`
+		} `json:"files"`
+	}
+	payload, err := os.ReadFile(filepath.Join(localDir, ".relayfile-mount-state.json"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return []writebackListItem{}, nil
+		}
+		return nil, err
+	}
+	if err := json.Unmarshal(payload, &state); err != nil {
+		return nil, fmt.Errorf("invalid mount state: %w", err)
+	}
+	remoteRoot := readMountRemoteRoot(localDir)
+	localHashes, err := localWritebackHashes(localDir, remoteRoot)
+	if err != nil {
+		return nil, err
+	}
+	items := make([]writebackListItem, 0, len(state.Files)+len(localHashes))
+	seen := map[string]struct{}{}
+	for rawPath, tracked := range state.Files {
+		path := normalizeWritebackListPath(rawPath)
+		seen[path] = struct{}{}
+		if tracked.ReadOnly {
+			continue
+		}
+		localHash, hasLocal := localHashes[path]
+		pending := tracked.Dirty
+		if !pending && !tracked.Denied && !tracked.WriteDenied {
+			switch {
+			case hasLocal && tracked.Hash != "" && localHash != tracked.Hash:
+				pending = true
+			case !hasLocal && tracked.Hash != "":
+				pending = true
+			}
+		}
+		if !pending {
+			continue
+		}
+		item := writebackListItem{
+			ID:            defaultIfBlank(path, rawPath),
+			WorkspaceID:   workspaceID,
+			Path:          path,
+			Revision:      strings.TrimSpace(tracked.Revision),
+			CorrelationID: defaultIfBlank(path, rawPath),
+			State:         "pending",
+			Provider:      providerFromPath(path),
+		}
+		items = append(items, item)
+	}
+	for path := range localHashes {
+		if _, ok := seen[path]; ok {
+			continue
+		}
+		items = append(items, writebackListItem{
+			ID:            path,
+			WorkspaceID:   workspaceID,
+			Path:          path,
+			CorrelationID: path,
+			State:         "pending",
+			Provider:      providerFromPath(path),
+		})
+	}
+	sortWritebackListItems(items)
+	return items, nil
+}
+
+func localWritebackHashes(localDir, remoteRoot string) (map[string]string, error) {
+	hashes := map[string]string{}
+	err := filepath.WalkDir(localDir, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, relErr := filepath.Rel(localDir, path)
+		if relErr != nil || rel == "." {
+			return relErr
+		}
+		first := strings.SplitN(rel, string(os.PathSeparator), 2)[0]
+		if entry.IsDir() {
+			if first == entry.Name() && writebackListReservedTopLevel(first) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if first == ".relayfile-mount-state.json" ||
+			strings.HasPrefix(first, ".relayfile-mount-state.json.tmp-") ||
+			writebackListReservedTopLevel(first) {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() {
+			return nil
+		}
+		hash, err := hashLocalWritebackFile(path)
+		if err != nil {
+			return err
+		}
+		hashes[remotePathForLocalRel(remoteRoot, filepath.ToSlash(rel))] = hash
+		return nil
+	})
+	return hashes, err
+}
+
+func remotePathForLocalRel(remoteRoot, rel string) string {
+	rel = strings.Trim(strings.TrimSpace(filepath.ToSlash(rel)), "/")
+	root := normalizeWritebackListPath(remoteRoot)
+	if root == "" || root == "/" {
+		if rel == "" {
+			return "/"
+		}
+		return normalizeWritebackListPath(rel)
+	}
+	if rel == "" {
+		return root
+	}
+	return normalizeWritebackListPath(strings.TrimRight(root, "/") + "/" + rel)
+}
+
+func writebackListReservedTopLevel(name string) bool {
+	return name == ".git" || name == ".relay" || name == ".skills" ||
+		name == "digests" || name == "node_modules" ||
+		name == "_PERMISSIONS.md"
+}
+
+func hashLocalWritebackFile(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%x", h.Sum(nil)), nil
 }
 
 func readDeadWritebackItems(workspaceID, localDir string) ([]writebackListItem, error) {
