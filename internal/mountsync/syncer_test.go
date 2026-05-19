@@ -4412,6 +4412,12 @@ func TestPullRestartFastPathSkipsFullPull(t *testing.T) {
 		// point; this is the production failure shape (state.json with
 		// tracked files + lastEventAt but null eventsCursor).
 		LastEventAt: time.Now().UTC().Add(-time.Minute).Format(time.RFC3339Nano),
+		// BootstrapComplete is now the authoritative fast-path gate
+		// (the LastEventAt heuristic was unsafe — it let a partial
+		// mirror short-circuit the full pull forever, rw_517d60b6).
+		// A genuine prior restart that fully mirrored the workspace
+		// would have this set; seed it so the fast-path engages.
+		BootstrapComplete: true,
 	}
 	stateBytes, err := json.Marshal(persisted)
 	if err != nil {
@@ -4512,6 +4518,11 @@ func TestPullRestartFastPathPeriodicFullPullStillSkipsLazyGithubRepos(t *testing
 			},
 		},
 		LastEventAt: time.Now().UTC().Add(-time.Minute).Format(time.RFC3339Nano),
+		// BootstrapComplete: the workspace was fully mirrored by a prior
+		// daemon, so the restart fast-path may legitimately skip the
+		// bootstrap full pull (authoritative gate, replaces the unsafe
+		// LastEventAt-only heuristic).
+		BootstrapComplete: true,
 	}); err != nil {
 		t.Fatalf("write seed state: %v", err)
 	}

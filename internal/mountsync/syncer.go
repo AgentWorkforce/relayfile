@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -66,6 +67,34 @@ const defaultBulkFlushThreshold = 256
 // applyRemoteFile re-hash and overwrite any drift between the daemon's
 // tracked.Hash and the actual remote content.
 const defaultFullPullEvery = 20
+
+// Bootstrap / cursor timeout defaults. The bootstrap default is the
+// "unbounded while making progress" sentinel (<=0): the heavy full-tree
+// pull is allowed to run as long as it keeps applying files within
+// defaultBootstrapIdleTimeout. The cursor resolution gets its own short
+// independent deadline so it can never hang an otherwise healthy cycle.
+const (
+	defaultBootstrapTimeout     = 0 * time.Second
+	defaultBootstrapIdleTimeout = 90 * time.Second
+	defaultCursorTimeout        = 20 * time.Second
+)
+
+// resolveDurationEnv returns the option value if non-zero, else parses the
+// named env var, else falls back to def. A negative option/env keeps its
+// (possibly sentinel) value.
+func resolveDurationEnv(opt time.Duration, env string, def time.Duration, logger Logger) time.Duration {
+	if opt != 0 {
+		return opt
+	}
+	if raw := strings.TrimSpace(os.Getenv(env)); raw != "" {
+		if parsed, err := time.ParseDuration(raw); err == nil {
+			return parsed
+		} else if logger != nil {
+			logger.Printf("ignoring invalid %s=%q: %v", env, raw, err)
+		}
+	}
+	return def
+}
 
 var providerLayoutAliasSegments = []string{
 	"by-title",
@@ -170,13 +199,69 @@ type HTTPClient struct {
 	maxDelay   time.Duration
 }
 
+// NewSyncTransport builds the *http.Transport used by every mount-daemon
+// HTTP client. It deliberately sets GRANULAR timeouts that bound the parts
+// of a request that can wedge against an unresponsive server (connect, TLS
+// handshake, time-to-first-byte) but imposes NO total-request deadline.
+//
+// Why no total-request cap: the bootstrap full-tree pull on a large
+// workspace legitimately streams a multi-MB body for far longer than the
+// per-cycle RELAYFILE_MOUNT_TIMEOUT (default 15s). An http.Client.Timeout
+// is a whole-request wall-clock that net/http enforces INDEPENDENT of
+// context — it kills the body read mid-stream regardless of how the
+// caller scoped its context. That is precisely the gap that left the
+// 581-file workspace stuck ("request canceled ... while reading body").
+// Cancellation of a genuinely stuck transfer is instead the job of the
+// caller's context: the per-cycle ctx for incremental sync, the
+// progress-extending bootstrap ctx (+ idle watchdog) for the full pull,
+// and the cursor ctx for event-cursor resolution. ResponseHeaderTimeout
+// still bounds a server that accepts the connection but never starts
+// responding, without ever capping a body that is actively progressing.
+func NewSyncTransport() *http.Transport {
+	return &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   10 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          100,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: 30 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+		// Intentionally NO total-request timeout here. Bootstrap/poll
+		// callers should pair this transport with http.Client.Timeout == 0.
+	}
+}
+
+// NewSyncHTTPClient returns an *http.Client wired with NewSyncTransport and
+// — critically — Timeout: 0. base, if non-nil, is chained beneath the sync
+// transport (used to layer the writeback-failure RoundTripper) and is
+// responsible for delegating to a NewSyncTransport()-style transport.
+func NewSyncHTTPClient() *http.Client {
+	return &http.Client{
+		Timeout:   0, // no whole-request cap; context is the cancel mechanism
+		Transport: NewSyncTransport(),
+	}
+}
+
 func NewHTTPClient(baseURL, token string, httpClient *http.Client) *HTTPClient {
 	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
 	if baseURL == "" {
 		baseURL = "http://127.0.0.1:8080"
 	}
 	if httpClient == nil {
-		httpClient = &http.Client{Timeout: 15 * time.Second}
+		// Default to the no-whole-request-timeout sync client so callers
+		// that pass nil (tests, embedders) inherit the bootstrap-safe
+		// behaviour rather than the old blunt 15s cap.
+		httpClient = NewSyncHTTPClient()
+	} else {
+		// Do not mutate the caller's client. Poll/bootstrap code that needs
+		// no whole-request cap passes NewSyncHTTPClient explicitly; other
+		// callers (notably FUSE) may intentionally rely on Timeout.
+		cloned := *httpClient
+		httpClient = &cloned
 	}
 	return &HTTPClient{
 		baseURL:    baseURL,
@@ -433,6 +518,22 @@ type SyncerOptions struct {
 	// the default (defaultFullPullEvery, ~10 min at 30s intervals). A
 	// negative value disables the periodic full pull entirely.
 	FullPullEvery int
+	// BootstrapTimeout caps the one-time full-tree bootstrap / periodic
+	// full pull. It is derived from the Syncer's RootCtx (NOT the inbound
+	// per-cycle ctx) so a tiny per-cycle deadline cannot starve a large
+	// initial mirror. 0 falls back to env RELAYFILE_BOOTSTRAP_TIMEOUT;
+	// the resolved default is the "unbounded while making progress"
+	// sentinel (<=0): the bootstrap runs to completion as long as it keeps
+	// applying files within the idle window.
+	BootstrapTimeout time.Duration
+	// CursorTimeout bounds resolveLatestEventCursor with its OWN short
+	// deadline derived from RootCtx. 0 falls back to env
+	// RELAYFILE_CURSOR_TIMEOUT, default 20s.
+	CursorTimeout time.Duration
+	// ForceFullReconcile, when non-nil and true, forces one full reconcile
+	// regardless of BootstrapComplete (escape hatch / clobber-remnant
+	// recovery). nil falls back to env RELAYFILE_FORCE_FULL_RECONCILE.
+	ForceFullReconcile *bool
 	// LazyRepos controls lazy GitHub repo subtree hydration. nil falls back to env.
 	LazyRepos *bool
 	// LowMemory avoids expensive diagnostic/public-state scans and large
@@ -563,6 +664,10 @@ type Syncer struct {
 	mode                 string
 	interval             time.Duration
 	fullPullEvery        int
+	cursorTimeout        time.Duration
+	bootstrapTimeout     time.Duration
+	bootstrapIdleTimeout time.Duration
+	forceFullReconcile   bool
 	incrementalCycles    int
 	lazyRepos            bool
 	lowMemory            bool
@@ -585,6 +690,17 @@ type mountState struct {
 	LastAppliedRevision string `json:"lastAppliedRevision,omitempty"`
 	// Counters carries telemetry that the public status JSON surfaces.
 	Counters telemetryCounters `json:"counters,omitempty"`
+	// Bootstrap* track the one-time full-tree bootstrap so it can resume
+	// after interruption and so the fast-path can refuse to short-circuit
+	// until the workspace has been fully mirrored at least once. All fields
+	// are additive/omitempty: legacy state files load with zero values
+	// (BootstrapComplete=false), which self-heals by forcing a full
+	// reconcile on the next cycle.
+	BootstrapComplete    bool   `json:"bootstrapComplete,omitempty"`
+	BootstrapCursor      string `json:"bootstrapCursor,omitempty"`
+	BootstrapFilesSynced int    `json:"bootstrapFilesSynced,omitempty"`
+	BootstrapFilesTotal  int    `json:"bootstrapFilesTotal,omitempty"`
+	BootstrapStartedAt   string `json:"bootstrapStartedAt,omitempty"`
 }
 
 // telemetryCounters tracks defensive-guard activity so operators can see at
@@ -679,6 +795,18 @@ type publicState struct {
 	// LastAppliedRevision is the highest cloud revision the daemon has
 	// reconciled. Useful for operator status display.
 	LastAppliedRevision string `json:"lastAppliedRevision,omitempty"`
+	// Bootstrap surfaces in-progress full-tree bootstrap so operators see
+	// "bootstrapping N/M files" instead of a misleading stall. The resume
+	// cursor is intentionally NOT exposed (internal-only).
+	Bootstrap *bootstrapStatus `json:"bootstrap,omitempty"`
+}
+
+// bootstrapStatus is the public, cursor-free view of bootstrap progress.
+type bootstrapStatus struct {
+	Phase       string `json:"phase"`
+	FilesSynced int    `json:"filesSynced"`
+	FilesTotal  int    `json:"filesTotal,omitempty"`
+	StartedAt   string `json:"startedAt,omitempty"`
 }
 
 type publicStateFlags struct {
@@ -770,6 +898,25 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 			fullPullEvery = defaultFullPullEvery
 		}
 	}
+	cursorTimeout := resolveDurationEnv(opts.CursorTimeout, "RELAYFILE_CURSOR_TIMEOUT", defaultCursorTimeout, opts.Logger)
+	if cursorTimeout <= 0 {
+		cursorTimeout = defaultCursorTimeout
+	}
+	bootstrapTimeout := resolveDurationEnv(opts.BootstrapTimeout, "RELAYFILE_BOOTSTRAP_TIMEOUT", defaultBootstrapTimeout, opts.Logger)
+	bootstrapIdleTimeout := resolveDurationEnv(0, "RELAYFILE_BOOTSTRAP_IDLE_TIMEOUT", defaultBootstrapIdleTimeout, opts.Logger)
+	if bootstrapIdleTimeout <= 0 {
+		bootstrapIdleTimeout = defaultBootstrapIdleTimeout
+	}
+	forceFullReconcile := false
+	if opts.ForceFullReconcile != nil {
+		forceFullReconcile = *opts.ForceFullReconcile
+	} else if raw := strings.TrimSpace(os.Getenv("RELAYFILE_FORCE_FULL_RECONCILE")); raw != "" {
+		if parsed, perr := strconv.ParseBool(raw); perr == nil {
+			forceFullReconcile = parsed
+		} else if opts.Logger != nil {
+			opts.Logger.Printf("ignoring invalid RELAYFILE_FORCE_FULL_RECONCILE=%q: %v", raw, perr)
+		}
+	}
 	lazyRepos := false
 	if opts.LazyRepos != nil {
 		lazyRepos = *opts.LazyRepos
@@ -821,6 +968,10 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 		mode:                 strings.TrimSpace(opts.Mode),
 		interval:             opts.Interval,
 		fullPullEvery:        fullPullEvery,
+		cursorTimeout:        cursorTimeout,
+		bootstrapTimeout:     bootstrapTimeout,
+		bootstrapIdleTimeout: bootstrapIdleTimeout,
+		forceFullReconcile:   forceFullReconcile,
 		lazyRepos:            lazyRepos,
 		lowMemory:            lowMemory,
 		layoutRegistrar:      opts.ProviderLayoutRegistrar,
@@ -1657,6 +1808,84 @@ func (s *Syncer) HTTPClient() (*HTTPClient, bool) {
 	return client, ok
 }
 
+// bootstrapProgress carries the watchdog "touch" mechanism back to the
+// heavy full-pull loops so they can signal liveness. touch() is a no-op
+// in hard-cap mode.
+type bootstrapProgress struct {
+	last *atomic.Int64
+}
+
+func (p bootstrapProgress) touch() {
+	if p.last != nil {
+		p.last.Store(time.Now().UnixNano())
+	}
+}
+
+// bootstrapContext returns a context for the heavy one-time bootstrap /
+// periodic full-tree pull. It is derived from s.rootCtx (NOT the inbound
+// per-cycle ctx) so a tiny RELAYFILE_MOUNT_TIMEOUT cannot starve a large
+// initial mirror. Two modes:
+//
+//   - hard-cap (bootstrapTimeout > 0): WithTimeout(rootCtx, bootstrapTimeout).
+//   - progress-extension (default, bootstrapTimeout <= 0): WithCancel +
+//     a watchdog goroutine that cancels only if no progress touch() has
+//     landed within bootstrapIdleTimeout.
+//
+// Callers MUST defer the returned CancelFunc on every exit path; doing so
+// also tears the watchdog goroutine down (no leak).
+func (s *Syncer) bootstrapContext(parent context.Context) (context.Context, context.CancelFunc, bootstrapProgress) {
+	_ = parent // intentionally derive from rootCtx, not the per-cycle ctx
+	if s.bootstrapTimeout > 0 {
+		ctx, cancel := context.WithTimeout(s.rootCtx, s.bootstrapTimeout)
+		return ctx, cancel, bootstrapProgress{}
+	}
+	ctx, cancel := context.WithCancel(s.rootCtx)
+	prog := bootstrapProgress{last: &atomic.Int64{}}
+	prog.touch()
+	idle := s.bootstrapIdleTimeout
+	if idle <= 0 {
+		idle = defaultBootstrapIdleTimeout
+	}
+	// Poll at most every 10s, but for short idle windows poll
+	// proportionally faster so cancellation lands promptly (and tests
+	// stay fast). Never below 10ms.
+	pollEvery := 10 * time.Second
+	if third := idle / 3; third < pollEvery {
+		pollEvery = third
+	}
+	if pollEvery < 10*time.Millisecond {
+		pollEvery = 10 * time.Millisecond
+	}
+	done := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(pollEvery)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-done:
+				return
+			case <-ticker.C:
+				last := prog.last.Load()
+				if last == 0 {
+					continue
+				}
+				if time.Since(time.Unix(0, last)) > idle {
+					s.logf("bootstrap watchdog: no progress for %s; cancelling full pull (will resume next cycle)", idle)
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+	wrapped := func() {
+		close(done)
+		cancel()
+	}
+	return ctx, wrapped, prog
+}
+
 func (s *Syncer) pullRemote(ctx context.Context, conflicted map[string]struct{}) error {
 	if s.state.EventsCursor != "" {
 		// Skip-if-no-events short-circuit. Most reconcile cycles on a
@@ -1695,7 +1924,20 @@ func (s *Syncer) pullRemote(ctx context.Context, conflicted map[string]struct{})
 		if s.fullPullEvery > 0 && s.incrementalCycles >= s.fullPullEvery {
 			s.incrementalCycles = 0
 			s.logf("forcing periodic full tree pull (every %d incremental cycles) as defense against cloud-side revision reuse", s.fullPullEvery)
-			if err := s.pullRemoteFull(ctx, conflicted); err != nil {
+			// Periodic full pull is the same heavy op as bootstrap — give
+			// it the rootCtx-derived bootstrap deadline, not the tiny
+			// per-cycle one. The surrounding ListEvents probe above stays
+			// on the inbound per-cycle ctx (no latency regression).
+			// Bound the bootstrap context cancel to this one operation
+			// with a closure so the watchdog is always torn down — even
+			// if pullRemoteFull panics — without the defer accumulating
+			// across loop iterations. Matches the deferred-cancel pattern
+			// used on the post-fast-path full-pull sibling below.
+			if err := func() error {
+				bctx, bcancel, bprog := s.bootstrapContext(ctx)
+				defer bcancel()
+				return s.pullRemoteFull(bctx, conflicted, bprog)
+			}(); err != nil {
 				return err
 			}
 			// Intentionally leave s.state.EventsCursor unchanged. A naive
@@ -1742,16 +1984,40 @@ func (s *Syncer) pullRemote(ctx context.Context, conflicted map[string]struct{})
 	// through to the full pull as before so this is purely additive on
 	// supported backends.
 	//
-	// Gating on LastEventAt (in addition to len(Files) > 0) keeps the
-	// fast-path opt-in: callers and tests that hand-seed a state file
-	// without ever observing live events still go through the full pull
-	// (which is necessary for e.g. the denied-file teardown path).
-	if len(s.state.Files) > 0 && strings.TrimSpace(s.state.LastEventAt) != "" {
+	// Correctness gate: the restart fast-path may ONLY skip the bootstrap
+	// full pull when the workspace has been *completely* mirrored at least
+	// once (BootstrapComplete). The previous LastEventAt heuristic let a
+	// partially-populated state file (e.g. a clobber remnant, or a state
+	// written by an interrupted prior bootstrap) short-circuit the full
+	// pull forever, leaving the mirror permanently incomplete
+	// (rw_517d60b6). BootstrapComplete is set only by a full-tree/export
+	// pull that mirrored the whole remote, so it is the authoritative
+	// signal. The escape hatch / clobber-remnant auto-recovery falls out
+	// for free: a non-empty Files map with BootstrapComplete=false (or an
+	// explicit --full-reconcile) forces the full pull below.
+	if len(s.state.Files) > 0 && !s.state.BootstrapComplete {
+		s.logf("detected non-empty state without completed bootstrap; forcing full reconcile (%d tracked files)", len(s.state.Files))
+	}
+	if s.state.BootstrapComplete && !s.forceFullReconcile && len(s.state.Files) > 0 {
 		cursor, err := s.resolveLatestEventCursor(ctx)
-		if err == nil {
+		if err == nil && strings.TrimSpace(cursor) != "" {
+			// Only short-circuit when the events feed yielded a real
+			// tip. An empty cursor means the feed has no usable
+			// watermark (no events, or an always-empty/unusable feed):
+			// seeding "" and returning would skip the full pull AND
+			// never re-arm the periodic full-pull cadence (which keys
+			// off a non-empty EventsCursor), so new remote files would
+			// never land. Fall through to the full pull instead — it is
+			// idempotent and self-heals. This restores the safety the
+			// old LastEventAt gate provided without reintroducing the
+			// rw_517d60b6 partial-mirror hazard (still gated on
+			// BootstrapComplete).
 			s.state.EventsCursor = cursor
 			s.logf("restart fast-path: seeded events cursor %q from %d tracked files; skipping bootstrap full pull", cursor, len(s.state.Files))
 			return nil
+		}
+		if err == nil {
+			s.logf("restart fast-path: events feed returned no usable cursor; falling through to full pull")
 		}
 		var httpErr *HTTPError
 		if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusNotFound {
@@ -1762,13 +2028,20 @@ func (s *Syncer) pullRemote(ctx context.Context, conflicted map[string]struct{})
 		}
 	}
 
-	if err := s.pullRemoteFull(ctx, conflicted); err != nil {
+	// Bootstrap / full-pull path. Derive the deadline from rootCtx (NOT
+	// the inbound per-cycle ctx) so a large initial mirror is not starved
+	// by a tiny RELAYFILE_MOUNT_TIMEOUT. resolveLatestEventCursor already
+	// owns its own short rootCtx-derived deadline (Step 3) so it is also
+	// safe under a tiny inbound ctx.
+	bctx, bcancel, bprog := s.bootstrapContext(ctx)
+	defer bcancel()
+	if err := s.pullRemoteFull(bctx, conflicted, bprog); err != nil {
 		return err
 	}
 	if s.wsConn != nil {
 		return nil
 	}
-	cursor, err := s.resolveLatestEventCursor(ctx)
+	cursor, err := s.resolveLatestEventCursor(bctx)
 	if err != nil {
 		var httpErr *HTTPError
 		if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusNotFound {
@@ -1780,17 +2053,17 @@ func (s *Syncer) pullRemote(ctx context.Context, conflicted map[string]struct{})
 	return nil
 }
 
-func (s *Syncer) pullRemoteFull(ctx context.Context, conflicted map[string]struct{}) error {
+func (s *Syncer) pullRemoteFull(ctx context.Context, conflicted map[string]struct{}, prog bootstrapProgress) error {
 	if client, ok := s.client.(exportSnapshotClient); ok {
-		used, err := s.pullRemoteFullExport(ctx, client, conflicted)
+		used, err := s.pullRemoteFullExport(ctx, client, conflicted, prog)
 		if used {
 			return err
 		}
 	}
-	return s.pullRemoteFullTree(ctx, conflicted)
+	return s.pullRemoteFullTree(ctx, conflicted, prog)
 }
 
-func (s *Syncer) pullRemoteFullExport(ctx context.Context, client exportSnapshotClient, conflicted map[string]struct{}) (bool, error) {
+func (s *Syncer) pullRemoteFullExport(ctx context.Context, client exportSnapshotClient, conflicted map[string]struct{}, prog bootstrapProgress) (bool, error) {
 	files, err := client.ExportFiles(ctx, s.workspace, s.remoteRoot)
 	if err != nil {
 		if exportSnapshotUnsupported(err) {
@@ -1824,6 +2097,7 @@ func (s *Syncer) pullRemoteFullExport(ctx context.Context, client exportSnapshot
 		if err := s.applyRemoteFile(remotePath, files[i], conflicted); err != nil {
 			return true, err
 		}
+		prog.touch()
 		remotePaths[remotePath] = struct{}{}
 		files[i].Content = ""
 	}
@@ -1836,10 +2110,19 @@ func (s *Syncer) pullRemoteFullExport(ctx context.Context, client exportSnapshot
 	// pullRemoteFullTree.
 	if s.snapshotDeleteUnsafe(len(remotePaths)) {
 		s.logf("skipping snapshot delete pass (export): fresh remote export has %d files but %d are tracked locally (suspected partial/empty cloud export); preserving local state", len(remotePaths), len(s.state.Files))
+		// Export is atomic — a full snapshot was applied even if the
+		// delete pass is deferred for safety. Bootstrap is complete.
+		s.markBootstrapComplete()
 		return true, nil
 	}
 
-	return true, s.applyRemoteSnapshotDeletesRev(remotePaths, conflicted, maxObservedRevision)
+	if err := s.applyRemoteSnapshotDeletesRev(remotePaths, conflicted, maxObservedRevision); err != nil {
+		return true, err
+	}
+	// Export is atomic: a successful ExportFiles + apply is a complete
+	// one-shot mirror with no resume cursor.
+	s.markBootstrapComplete()
+	return true, nil
 }
 
 func exportSnapshotUnsupported(err error) bool {
@@ -1868,17 +2151,35 @@ func isUnderLazyGithubRepoSubtree(remoteRoot, remotePath string) bool {
 	return len(segments) >= 5 && segments[0] == "github" && segments[1] == "repos"
 }
 
-func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]struct{}) error {
+func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]struct{}, prog bootstrapProgress) error {
 	remotePaths := map[string]struct{}{}
+	// Resumable bootstrap: if a prior bootstrap was interrupted mid-tree,
+	// pick traversal back up from the persisted cursor rather than
+	// re-reading everything. startedFromEmpty tracks whether this process
+	// traversed the WHOLE tree (empty start -> NextCursor==nil): only then
+	// is the snapshot delete pass authoritative. Resuming from a persisted
+	// cursor means we did not observe the full remote set this cycle, so
+	// the delete pass is skipped (next full cycle does the authoritative
+	// delete) — preserving the #164/#165 mount-root-clobber invariants.
 	cursor := ""
+	if !s.state.BootstrapComplete && strings.TrimSpace(s.state.BootstrapCursor) != "" {
+		cursor = s.state.BootstrapCursor
+		s.logf("resuming bootstrap full-tree pull from persisted cursor (%d files already synced)", s.state.BootstrapFilesSynced)
+	}
+	startedFromEmpty := cursor == ""
+	if s.state.BootstrapStartedAt == "" {
+		s.state.BootstrapStartedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	}
 	maxObservedRevision := ""
 	for {
-		page, err := s.client.ListTree(ctx, s.workspace, s.remoteRoot, 10, cursor)
+		page, err := s.client.ListTree(ctx, s.workspace, s.remoteRoot, 200, cursor)
 		if err != nil {
 			s.recordCloudFailure(err)
 			return err
 		}
 		s.recordCloudSuccess()
+		prog.touch()
+		filesThisPage := 0
 		for _, entry := range page.Entries {
 			if entry.Type != "file" {
 				continue
@@ -1927,12 +2228,41 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 			if err := s.applyRemoteFile(remotePath, file, conflicted); err != nil {
 				return err
 			}
+			prog.touch()
 			remotePaths[remotePath] = struct{}{}
+			filesThisPage++
 		}
 		if page.NextCursor == nil || *page.NextCursor == "" {
 			break
 		}
 		cursor = *page.NextCursor
+		// Persist the resume point + progress so an interrupted bootstrap
+		// (timeout, crash, watchdog cancel) picks up here next cycle
+		// instead of restarting the whole tree.
+		if !s.state.BootstrapComplete {
+			s.state.BootstrapCursor = cursor
+			s.state.BootstrapFilesSynced += filesThisPage
+			if err := s.saveState(); err != nil {
+				return err
+			}
+		}
+	}
+
+	// Resumed/partial traversal safety: only run the authoritative
+	// snapshot delete pass when this process traversed the ENTIRE tree
+	// (started from an empty cursor and reached NextCursor==nil). If the
+	// traversal began from a persisted resume cursor, remotePaths only
+	// covers the tail of the tree, so deleting "everything not in
+	// remotePaths" would wipe the already-mirrored prefix — exactly the
+	// #164/#165 clobber failure mode. Skip the delete pass this cycle;
+	// the next full cycle (fresh empty-cursor traversal) does the
+	// authoritative delete.
+	if !startedFromEmpty {
+		s.logf("skipping snapshot delete pass: bootstrap resumed from a persisted cursor so the fresh listing is partial; deferring deletes to the next full cycle")
+		// Bootstrap is now complete (we reached the end of the tree),
+		// just not authoritative for deletes this cycle.
+		s.markBootstrapComplete()
+		return nil
 	}
 
 	// Circuit breaker: a cloud OOM / 5xx storm can return a successful but
@@ -1947,7 +2277,27 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 		return nil
 	}
 
-	return s.applyRemoteSnapshotDeletesRev(remotePaths, conflicted, maxObservedRevision)
+	if err := s.applyRemoteSnapshotDeletesRev(remotePaths, conflicted, maxObservedRevision); err != nil {
+		return err
+	}
+	s.markBootstrapComplete()
+	return nil
+}
+
+// markBootstrapComplete records that a full-tree (or export) pull has
+// fully mirrored the remote at least once. Completion is set ONLY here
+// (and the export path) — never in markSyncSuccess — so the fast-path
+// gate (Step 5) cannot be satisfied by a partial pull.
+func (s *Syncer) markBootstrapComplete() {
+	s.state.BootstrapComplete = true
+	s.state.BootstrapCursor = ""
+	s.state.BootstrapStartedAt = ""
+	s.state.BootstrapFilesSynced = 0
+	s.state.BootstrapFilesTotal = 0
+	// One-shot escape hatch / clobber-remnant recovery: after a single
+	// successful full reconcile, clear the in-memory force flag so
+	// subsequent cycles can use the fast-path again.
+	s.forceFullReconcile = false
 }
 
 // snapshotDeleteUnsafe reports whether running snapshot-driven deletes is
@@ -2478,10 +2828,17 @@ func (s *Syncer) pullRemoteIncremental(ctx context.Context, conflicted map[strin
 }
 
 func (s *Syncer) resolveLatestEventCursor(ctx context.Context) (string, error) {
+	// Derive an OWN short deadline from rootCtx so a slow/hanging events
+	// feed can never wedge an otherwise healthy cycle (and is independent
+	// of whatever inbound per-cycle/bootstrap ctx the caller passed). The
+	// signature/return contract is unchanged; the inbound ctx is honored
+	// only for cancellation via rootCtx propagation.
+	cctx, cancel := context.WithTimeout(s.rootCtx, s.cursorTimeout)
+	defer cancel()
 	cursor := ""
 	latest := ""
 	for {
-		feed, err := s.client.ListEvents(ctx, s.workspace, s.eventProvider, cursor, 1000)
+		feed, err := s.client.ListEvents(cctx, s.workspace, s.eventProvider, cursor, 1000)
 		if err != nil {
 			return "", err
 		}
@@ -3115,6 +3472,21 @@ func (s *Syncer) savePublicState() error {
 		status = "stale"
 	}
 
+	// Bootstrap-in-progress overrides "stale"/"ready": surface explicit
+	// progress so operators (and the CLI status surface) see
+	// "bootstrapping N/M" instead of a misleading stall while a large
+	// initial mirror is still running.
+	var bootstrap *bootstrapStatus
+	if !s.state.BootstrapComplete && strings.TrimSpace(s.state.BootstrapStartedAt) != "" {
+		status = "bootstrapping"
+		bootstrap = &bootstrapStatus{
+			Phase:       "bootstrapping",
+			FilesSynced: s.state.BootstrapFilesSynced,
+			FilesTotal:  s.state.BootstrapFilesTotal,
+			StartedAt:   s.state.BootstrapStartedAt,
+		}
+	}
+
 	mode := s.mode
 	if mode == "" {
 		mode = "poll"
@@ -3140,6 +3512,7 @@ func (s *Syncer) savePublicState() error {
 		LowMemory:                 s.lowMemory,
 		Counters:                  s.state.Counters,
 		LastAppliedRevision:       s.state.LastAppliedRevision,
+		Bootstrap:                 bootstrap,
 	}
 	if s.circuit != nil {
 		snap := s.circuit.Snapshot()

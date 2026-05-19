@@ -293,6 +293,19 @@ type syncStateFile struct {
 	// mountsync state. Existing consumers can ignore the field; it is
 	// additive and uses omitempty. Counters come from .relay/state.json.
 	Guards *syncStateGuards `json:"guards,omitempty"`
+	// Bootstrap mirrors the in-progress full-tree bootstrap state from
+	// .relay/state.json so `relayfile status` can show progress instead of
+	// a misleading stall. Additive/omitempty; nil when not bootstrapping.
+	Bootstrap *syncStateBootstrap `json:"bootstrap,omitempty"`
+}
+
+// syncStateBootstrap is the CLI-surface mirror of mountsync's public
+// bootstrap status block.
+type syncStateBootstrap struct {
+	Phase       string `json:"phase"`
+	FilesSynced int    `json:"filesSynced"`
+	FilesTotal  int    `json:"filesTotal,omitempty"`
+	StartedAt   string `json:"startedAt,omitempty"`
 }
 
 // syncStateGuards mirrors mountsync.telemetryCounters and the circuit
@@ -2993,9 +3006,17 @@ func retryDeadLetterWriteback(workspaceID string, record workspaceRecord, dl dea
 	if server == "" {
 		server = resolveServer("", creds)
 	}
+	retryTimeout := durationEnv("RELAYFILE_MOUNT_TIMEOUT", defaultMountTimeout)
+	if retryTimeout <= 0 {
+		retryTimeout = defaultMountTimeout
+	}
+	// No whole-request Timeout: net/http enforces http.Client.Timeout
+	// independent of context and would kill a long-but-progressing
+	// bootstrap body read. Cancellation is owned by the per-cycle /
+	// bootstrap / cursor contexts; the sync transport bounds
+	// connect/handshake/time-to-first-byte instead.
 	client := mountsync.NewHTTPClient(server, tokenValue, &http.Client{
-		Timeout:   defaultMountTimeout,
-		Transport: newWritebackFailureTransport(record.LocalDir, log.Default(), http.DefaultTransport),
+		Transport: newWritebackFailureTransport(record.LocalDir, log.Default(), mountsync.NewSyncTransport()),
 	})
 	// Read the live mount's remoteRoot from .relay/state.json instead
 	// of hardcoding "/". CodeRabbit flagged on PR #84: a mount created
@@ -3022,7 +3043,10 @@ func retryDeadLetterWriteback(workspaceID string, record workspaceRecord, dl dea
 		if err != nil {
 			return err
 		}
-		if err := syncer.HandleLocalChange(context.Background(), relativePath, fsnotify.Write); err != nil {
+		retryCtx, cancel := context.WithTimeout(context.Background(), retryTimeout)
+		err = syncer.HandleLocalChange(retryCtx, relativePath, fsnotify.Write)
+		cancel()
+		if err != nil {
 			return err
 		}
 	}
@@ -3613,6 +3637,9 @@ func runMount(args []string) error {
 	interval := fs.Duration("interval", durationEnv("RELAYFILE_MOUNT_INTERVAL", defaultMountInterval), "sync interval")
 	intervalJitter := fs.Float64("interval-jitter", floatEnv("RELAYFILE_MOUNT_INTERVAL_JITTER", 0.2), "sync interval jitter ratio (0.0-1.0)")
 	timeout := fs.Duration("timeout", durationEnv("RELAYFILE_MOUNT_TIMEOUT", defaultMountTimeout), "per-sync timeout")
+	bootstrapTimeout := fs.Duration("bootstrap-timeout", durationEnv("RELAYFILE_BOOTSTRAP_TIMEOUT", 0), "hard cap for the one-time/full-tree bootstrap pull (0 = unbounded while making progress)")
+	cursorTimeout := fs.Duration("cursor-timeout", durationEnv("RELAYFILE_CURSOR_TIMEOUT", 20*time.Second), "independent timeout for events-cursor resolution")
+	fullReconcile := fs.Bool("full-reconcile", boolEnv("RELAYFILE_FORCE_FULL_RECONCILE", false), "force one full reconcile regardless of bootstrap-complete state (escape hatch)")
 	websocketEnabled := fs.Bool("websocket", boolEnv("RELAYFILE_MOUNT_WEBSOCKET", true), "enable websocket event streaming when available")
 	lowMemory := fs.Bool("low-memory", boolEnv("RELAYFILE_MOUNT_LOW_MEMORY", false), "reduce mount memory use by omitting per-file public state and deferring content reads")
 	pprofAddr := fs.String("pprof-addr", strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_PPROF_ADDR")), "optional pprof listen address, e.g. 127.0.0.1:6060")
@@ -3633,6 +3660,9 @@ func runMount(args []string) error {
 		"interval":            true,
 		"interval-jitter":     true,
 		"timeout":             true,
+		"bootstrap-timeout":   true,
+		"cursor-timeout":      true,
+		"full-reconcile":      false,
 		"websocket":           false,
 		"low-memory":          false,
 		"pprof-addr":          true,
@@ -3745,20 +3775,26 @@ func runMount(args []string) error {
 	rootCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// No whole-request Timeout (see dead-letter syncer above): the
+	// bootstrap full-pull streams large bodies well past *timeout, and
+	// net/http's http.Client.Timeout would abort it mid-stream regardless
+	// of context. Per-cycle/bootstrap/cursor contexts own cancellation.
 	client := mountsync.NewHTTPClient(*server, tokenValue, &http.Client{
-		Timeout:   *timeout,
-		Transport: newWritebackFailureTransport(absLocalDir, log.Default(), http.DefaultTransport),
+		Transport: newWritebackFailureTransport(absLocalDir, log.Default(), mountsync.NewSyncTransport()),
 	})
 	syncer, err := mountsync.NewSyncer(client, mountsync.SyncerOptions{
-		WorkspaceID:   workspaceID,
-		RemoteRoot:    *remotePath,
-		EventProvider: strings.TrimSpace(*eventProvider),
-		LocalRoot:     absLocalDir,
-		StateFile:     strings.TrimSpace(*stateFile),
-		WebSocket:     boolPtr(*websocketEnabled),
-		LowMemory:     boolPtr(*lowMemory),
-		RootCtx:       rootCtx,
-		Logger:        log.Default(),
+		WorkspaceID:        workspaceID,
+		RemoteRoot:         *remotePath,
+		EventProvider:      strings.TrimSpace(*eventProvider),
+		LocalRoot:          absLocalDir,
+		StateFile:          strings.TrimSpace(*stateFile),
+		WebSocket:          boolPtr(*websocketEnabled),
+		LowMemory:          boolPtr(*lowMemory),
+		RootCtx:            rootCtx,
+		Logger:             log.Default(),
+		BootstrapTimeout:   *bootstrapTimeout,
+		CursorTimeout:      *cursorTimeout,
+		ForceFullReconcile: boolPtr(*fullReconcile),
 	})
 	if err != nil {
 		return fmt.Errorf("failed to initialize mount syncer: %w", err)
@@ -3830,6 +3866,10 @@ Common flags:
   --background         detach and keep syncing in the background
   --once               run one sync cycle and exit (used by setup/CI)
   --timeout 5m         per-sync timeout
+  --bootstrap-timeout 0s
+                       hard cap for initial/full-tree bootstrap (0 = progress-based)
+  --cursor-timeout 20s timeout for events-cursor resolution
+  --full-reconcile     force one full reconcile regardless of bootstrap state
   --no-websocket       disable websocket event streaming
   --low-memory         skip detailed per-file public state and defer content reads
   --pprof-addr ADDR    expose pprof diagnostics, e.g. 127.0.0.1:6060
@@ -4242,7 +4282,19 @@ func runStatus(args []string, stdout io.Writer) error {
 			fmt.Fprintln(stdout, "daemon: not running")
 		}
 	}
-	if persistedStallReason != "" {
+	if snapshot.Bootstrap != nil {
+		// Initial mirror in progress: show progress instead of a
+		// misleading generic stall.
+		line := fmt.Sprintf("\nbootstrapping: %d", snapshot.Bootstrap.FilesSynced)
+		if snapshot.Bootstrap.FilesTotal > 0 {
+			line += fmt.Sprintf("/%d", snapshot.Bootstrap.FilesTotal)
+		}
+		line += " files"
+		if started := strings.TrimSpace(snapshot.Bootstrap.StartedAt); started != "" {
+			line += " (started " + humanizeRecentTime(started) + ")"
+		}
+		fmt.Fprintln(stdout, line)
+	} else if persistedStallReason != "" {
 		fmt.Fprintf(stdout, "\nstall: %s\n", persistedStallReason)
 	}
 	fmt.Fprintf(stdout, "\npending writebacks: %d    conflicts: %d    denied: %d\n", snapshot.PendingWriteback, snapshot.PendingConflicts, snapshot.DeniedPaths)
@@ -5448,7 +5500,29 @@ func buildSyncStateSnapshot(status syncStatusResponse, workspaceID, mode string,
 	snapshot.Providers = providers
 	snapshot.LastEventAt = lastEvent
 	snapshot.Guards = readGuardCounters(localDir)
+	snapshot.Bootstrap = readBootstrapStatus(localDir)
 	return snapshot
+}
+
+// readBootstrapStatus reads the bootstrap progress block from the
+// mountsync public state file under .relay/state.json. Returns nil if the
+// file is missing, unparseable, or there is no bootstrap in progress.
+// Purely additive status, never load-bearing.
+func readBootstrapStatus(localDir string) *syncStateBootstrap {
+	if localDir == "" {
+		return nil
+	}
+	payload, err := os.ReadFile(filepath.Join(localDir, ".relay", "state.json"))
+	if err != nil {
+		return nil
+	}
+	var view struct {
+		Bootstrap *syncStateBootstrap `json:"bootstrap"`
+	}
+	if err := json.Unmarshal(payload, &view); err != nil {
+		return nil
+	}
+	return view.Bootstrap
 }
 
 // readGuardCounters reads the mountsync public state file under
@@ -6868,6 +6942,19 @@ func runMountLoop(rootCtx context.Context, syncer *mountsync.Syncer, localDir, w
 				writeSnapshot()
 				return err
 			}
+			// Mid-bootstrap, a per-cycle deadline exceeded is expected
+			// progress, not a stall: the rootCtx-derived bootstrap
+			// context keeps the heavy pull alive across cycles and
+			// persists a resume cursor. Suppress the scary "stall:"
+			// only for that expected timeout case.
+			if errors.Is(err, context.DeadlineExceeded) {
+				if bs := readBootstrapStatus(localDir); bs != nil {
+					stallReason = ""
+					log.Printf("mount bootstrapping: %d/%d files (in progress)", bs.FilesSynced, bs.FilesTotal)
+					writeSnapshot()
+					return err
+				}
+			}
 			stallReason = err.Error()
 			log.Printf("mount sync cycle failed: %v", err)
 			writeSnapshot()
@@ -6932,9 +7019,17 @@ func runMountLoop(rootCtx context.Context, syncer *mountsync.Syncer, localDir, w
 				_ = runCycle(true)
 			}
 			if !degraded && time.Since(lastSuccess) >= 10*time.Minute {
-				stallReason = "no successful reconcile for 10m"
-				log.Printf("mount stalled: %s", stallReason)
-				writeSnapshot()
+				if bs := readBootstrapStatus(localDir); bs != nil {
+					// Long-running initial mirror is making progress
+					// across cycles — not a stall.
+					stallReason = ""
+					log.Printf("mount bootstrapping: %d/%d files (in progress)", bs.FilesSynced, bs.FilesTotal)
+					writeSnapshot()
+				} else {
+					stallReason = "no successful reconcile for 10m"
+					log.Printf("mount stalled: %s", stallReason)
+					writeSnapshot()
+				}
 			}
 			timer.Reset(jitteredIntervalWithSample(interval, intervalJitter, mathrand.Float64()))
 		}
