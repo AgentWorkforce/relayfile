@@ -35,7 +35,7 @@ assert is_digest_path("digests/2026-05-12.md")
 assert is_digest_path("digests/this-week.md")
 assert is_digest_path("digests/last-week.md")
 
-# Read provider layout documentation.
+# Read canonical provider layout documentation.
 layout = client.read_file(workspace_id, provider_layout_path("linear"))
 
 # Read a writeback schema served beside a writeback resource.

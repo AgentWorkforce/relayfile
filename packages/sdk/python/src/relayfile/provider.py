@@ -109,7 +109,7 @@ def _norm_segment(value: str, *, name: str) -> str:
 
 
 def provider_layout_path(provider: str) -> str:
-    return f"{_norm_segment(provider, name='provider')}/.layout.md"
+    return f"{_norm_segment(provider, name='provider')}/LAYOUT.md"
 
 
 def resource_schema_path(provider: str, resource_path: str) -> str:

@@ -19,7 +19,7 @@ Start activity questions from the digest surface before walking provider trees.
 - Read ` + "`digests/yesterday.md`" + ` for yesterday, ` + "`digests/today.md`" + ` for today, or ` + "`digests/YYYY-MM-DD.md`" + ` for a specific UTC date.
 - If a digest is missing or stale, run ` + "`relayfile digest rebuild --window yesterday`" + `, ` + "`--window today`" + `, ` + "`--window YYYY-MM-DD`" + `, ` + "`--window this-week`" + `, or ` + "`--window last-week`" + `.
 - Use provider ` + "`_index.json`" + ` files for date filtering and only open individual entity files after the index has narrowed the set.
-- Read ` + "`LAYOUT.md`" + ` and provider ` + "`<integration>/.layout.md`" + ` files when you need path conventions or alias views.
+- Read ` + "`LAYOUT.md`" + ` and provider ` + "`<integration>/LAYOUT.md`" + ` files when you need path conventions or alias views.
 `
 )
 
