@@ -167,6 +167,14 @@ func WriteToday(ctx context.Context, mountRoot string, src ChangeEventSource, pr
 		_ = os.Remove(tmpName)
 		return TodayWriteResult{}, err
 	}
+	// os.CreateTemp makes 0600; digests must be readable by other
+	// processes (mount/FUSE/agents). Match the writeFileAtomic 0644
+	// convention before the rename publishes the file.
+	if err := tmp.Chmod(0o644); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return TodayWriteResult{}, err
+	}
 	if err := tmp.Close(); err != nil {
 		_ = os.Remove(tmpName)
 		return TodayWriteResult{}, err

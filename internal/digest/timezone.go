@@ -25,14 +25,14 @@ func ResolveTZ(config WorkspaceTZConfig) (*time.Location, error) {
 	if raw := strings.TrimSpace(config.Timezone); raw != "" {
 		loc, err := time.LoadLocation(raw)
 		if err != nil {
-			return nil, fmt.Errorf("%w: %s", ErrInvalidTimezone, raw)
+			return nil, fmt.Errorf("%w: %s: %v", ErrInvalidTimezone, raw, err)
 		}
 		return loc, nil
 	}
 	if raw := strings.TrimSpace(os.Getenv("RELAYFILE_TZ")); raw != "" {
 		loc, err := time.LoadLocation(raw)
 		if err != nil {
-			return nil, fmt.Errorf("%w: %s", ErrInvalidTimezone, raw)
+			return nil, fmt.Errorf("%w: %s: %v", ErrInvalidTimezone, raw, err)
 		}
 		return loc, nil
 	}

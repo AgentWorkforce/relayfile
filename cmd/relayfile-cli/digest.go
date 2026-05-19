@@ -15,7 +15,7 @@ import (
 	digestpkg "github.com/agentworkforce/relayfile/internal/digest"
 )
 
-const digestRebuildUsage = "usage: relayfile digest rebuild --window today|yesterday|this-week|last-week|YYYY-MM-DD [--workspace NAME] [--json]"
+const digestRebuildUsage = "usage: relayfile digest rebuild --window today|yesterday|YYYY-MM-DD|this-week|last-week [--workspace NAME] [--json]"
 
 // digestRebuilder is the seam over the internal/digest generator. The CLI ships
 // a stub today; the real implementation lands when work item 1 of the
@@ -170,10 +170,12 @@ func (localDigestRebuilder) Rebuild(ctx context.Context, opts digestRebuildOptio
 		warnings = append(warnings, res.Report.Meta.Warnings...)
 	case "yesterday":
 		closedDay := localDateOnlyCLI(now.In(tz).AddDate(0, 0, -1), tz)
-		_ = os.Remove(filepath.Join(localDir, filepath.FromSlash(digestpkg.YesterdayPath)))
-		_ = os.Remove(filepath.Join(localDir, filepath.FromSlash(digestpkg.YesterdayMarkerPath)))
 		dateStampedPath := digestpkg.DateStampedPath(closedDay, tz)
-		_ = os.Remove(filepath.Join(localDir, filepath.FromSlash(dateStampedPath)))
+		for _, p := range []string{digestpkg.YesterdayPath, digestpkg.YesterdayMarkerPath, dateStampedPath} {
+			if err := removeForRebuild(filepath.Join(localDir, filepath.FromSlash(p))); err != nil {
+				return digestRebuildResult{}, err
+			}
+		}
 		res, err := digestpkg.CloseLocalDayFor(ctx, localDir, src, closedDay, now, providers, tz)
 		if err != nil {
 			return digestRebuildResult{}, err
@@ -195,7 +197,9 @@ func (localDigestRebuilder) Rebuild(ctx context.Context, opts digestRebuildOptio
 		warnings = append(warnings, res.Report.Meta.Warnings...)
 	case "last-week":
 		weekStart := digestpkg.MondayStart(now, tz).AddDate(0, 0, -7)
-		_ = os.Remove(filepath.Join(localDir, filepath.FromSlash(digestpkg.LastWeekPath)))
+		if err := removeForRebuild(filepath.Join(localDir, filepath.FromSlash(digestpkg.LastWeekPath))); err != nil {
+			return digestRebuildResult{}, err
+		}
 		w := digestpkg.LastWeekWindow(weekStart, now, providers, tz)
 		res, err := digestpkg.WriteLastWeek(ctx, localDir, src, w)
 		if err != nil {
@@ -213,7 +217,9 @@ func (localDigestRebuilder) Rebuild(ctx context.Context, opts digestRebuildOptio
 			return digestRebuildResult{}, fmt.Errorf("digest window %s is in the future", opts.Window)
 		}
 		target := digestpkg.DateStampedPath(date, tz)
-		_ = os.Remove(filepath.Join(localDir, filepath.FromSlash(target)))
+		if err := removeForRebuild(filepath.Join(localDir, filepath.FromSlash(target))); err != nil {
+			return digestRebuildResult{}, err
+		}
 		res, err := digestpkg.WriteDateStamped(ctx, localDir, src, digestpkg.DateStampedWindow(date, now, providers, tz))
 		if err != nil {
 			return digestRebuildResult{}, err
@@ -250,7 +256,11 @@ func (s localMirrorDigestSource) Events(_ digestpkg.Window) ([]digestpkg.ChangeE
 		rel = filepath.ToSlash(rel)
 		if entry.IsDir() {
 			switch strings.Split(rel, "/")[0] {
-			case ".git", ".relay", "node_modules":
+			// `digests` holds generated output, never source change events
+			// (each file is skipped individually below anyway). Skip the
+			// whole subtree — consistent with collectDigestProviders — so a
+			// large accumulated digests/ tree isn't walked file-by-file.
+			case ".git", ".relay", "node_modules", "digests":
 				return filepath.SkipDir
 			}
 			return nil
@@ -298,4 +308,16 @@ func collectDigestProviders(localDir string) ([]string, error) {
 func localDateOnlyCLI(t time.Time, tz *time.Location) time.Time {
 	t = t.In(tz)
 	return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, tz)
+}
+
+// removeForRebuild deletes an artifact/marker ahead of a forced rebuild.
+// A missing file is the expected case (nothing to clear). Any other
+// failure (permission/IO) must surface: silently ignoring it lets a
+// surviving immutability marker make the "rebuild" a no-op that returns
+// stale content while reporting success.
+func removeForRebuild(path string) error {
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("digest rebuild: clear %s: %w", path, err)
+	}
+	return nil
 }

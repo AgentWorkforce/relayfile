@@ -647,7 +647,7 @@ func printDigestUsage(w io.Writer, subcommand string) {
 		fmt.Fprintln(w, digestRebuildUsage)
 	default:
 		fmt.Fprintln(w, `Usage:
-  relayfile digest rebuild --window today|yesterday|this-week|last-week|YYYY-MM-DD [--workspace NAME] [--json]`)
+  relayfile digest rebuild --window today|yesterday|YYYY-MM-DD|this-week|last-week [--workspace NAME] [--json]`)
 	}
 }
 
@@ -676,7 +676,7 @@ Usage:
   relayfile writeback list --state pending|dead [--workspace WS] [--json]
   relayfile writeback status [WORKSPACE] [--json]
   relayfile writeback retry --opId OP [WORKSPACE]
-  relayfile digest rebuild --window today|yesterday|this-week|last-week|YYYY-MM-DD [--workspace NAME] [--json]
+  relayfile digest rebuild --window today|yesterday|YYYY-MM-DD|this-week|last-week [--workspace NAME] [--json]
   relayfile pull [--workspace NAME] [--provider PROVIDER] [--reason TEXT]
   relayfile mount [WORKSPACE] [LOCAL_DIR]
   relayfile start [WORKSPACE] [LOCAL_DIR]            (alias for mount)

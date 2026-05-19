@@ -152,16 +152,23 @@ func WriteYesterday(ctx context.Context, mountRoot string, src ChangeEventSource
 		// Close for this local day already happened; treat the artifact as
 		// immutable. Re-read so the caller still gets a populated result.
 		existing, readErr := os.ReadFile(localPath)
-		if readErr != nil {
+		switch {
+		case readErr == nil:
+			return YesterdayWriteResult{
+				Path:    path,
+				Report:  Report{Meta: Meta{Date: localDateStr, Covers: "yesterday"}, Sections: nil},
+				Written: false,
+				Skipped: true,
+				Bytes:   existing,
+			}, nil
+		case errors.Is(readErr, os.ErrNotExist):
+			// Stale marker: the close was recorded but the artifact is gone
+			// (manually deleted, lost on a partial filesystem, never
+			// persisted). Hard-failing here would wedge the close pipeline
+			// for this day forever. Fall through and regenerate.
+		default:
 			return YesterdayWriteResult{}, fmt.Errorf("digest: marker present but yesterday.md unreadable: %w", readErr)
 		}
-		return YesterdayWriteResult{
-			Path:    path,
-			Report:  Report{Meta: Meta{Date: localDateStr, Covers: "yesterday"}, Sections: nil},
-			Written: false,
-			Skipped: true,
-			Bytes:   existing,
-		}, nil
 	}
 
 	_, content, rep, err := RenderYesterday(ctx, src, w)

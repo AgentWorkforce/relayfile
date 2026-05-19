@@ -37,8 +37,9 @@ func NewFileWatcher(localDir string, onChange func(string, fsnotify.Op)) (*FileW
 }
 
 // Start begins watching. Recursively adds all subdirectories.
-// Skips internal runtime trees such as .git, .relay, .skills, digests, and
-// node_modules.
+// Skips internal runtime trees such as .git, .relay, .skills, and node_modules.
+// Digest files are deliberately watched: they must emit normal mount events,
+// while HandleLocalChange still refuses to write them back upstream.
 func (fw *FileWatcher) Start(ctx context.Context) error {
 	// Walk localDir, add all dirs to watcher (fsnotify watches dirs, not files)
 	if err := fw.addDirRecursive(fw.localDir); err != nil {
@@ -106,7 +107,7 @@ func (fw *FileWatcher) shouldSkip(rel string) bool {
 		strings.HasPrefix(first, ".relayfile-mount-state.json.tmp-") {
 		return true
 	}
-	if reservedTopLevel(first) {
+	if watcherIgnoredTopLevel(first) {
 		return true
 	}
 	// Data-loss guard: a top-level entry whose name equals the mount
@@ -171,6 +172,10 @@ func (fw *FileWatcher) emitExistingFileEvents(base string) {
 	})
 }
 
+func watcherIgnoredTopLevel(name string) bool {
+	return reservedTopLevel(name) && name != "digests"
+}
+
 // addDirRecursive walks `base` and adds every directory underneath it to the
 // fsnotify watcher, skipping top-level internal runtime trees. Used both at startup (to seed the watcher with the
 // existing tree) and at runtime (when a sync-down creates a new nested
@@ -204,7 +209,7 @@ func (fw *FileWatcher) isTopLevelReservedDir(path, name string) bool {
 	if first != name {
 		return false
 	}
-	return reservedTopLevel(name)
+	return watcherIgnoredTopLevel(name)
 }
 
 func (fw *FileWatcher) Close() error {

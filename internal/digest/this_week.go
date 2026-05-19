@@ -149,6 +149,13 @@ func WriteThisWeek(ctx context.Context, mountRoot string, src ChangeEventSource,
 		_ = os.Remove(tmpName)
 		return ThisWeekWriteResult{}, err
 	}
+	// os.CreateTemp makes 0600; match the 0644 convention used by the
+	// other window writers so the digest is readable by mount/agents.
+	if err := os.Chmod(tmpName, 0o644); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return ThisWeekWriteResult{}, err
+	}
 	if err := tmp.Close(); err != nil {
 		_ = os.Remove(tmpName)
 		return ThisWeekWriteResult{}, err
@@ -159,4 +166,3 @@ func WriteThisWeek(ctx context.Context, mountRoot string, src ChangeEventSource,
 	}
 	return ThisWeekWriteResult{Path: path, Report: rep, Written: true}, nil
 }
-

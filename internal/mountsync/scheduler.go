@@ -37,28 +37,64 @@ type CloseScheduler struct {
 
 // RollingDigestCoalescer batches noisy provider changes before rewriting
 // rolling digest artifacts such as today.md and this-week.md.
+//
+// Concurrency: this type has no internal locking. All three methods
+// (ObserveChange, Due, MarkFlushed) must be called under the owning
+// Syncer's `s.mu` so pending/dueAt/firstPendingAt are read and written
+// from a single synchronization point.
 type RollingDigestCoalescer struct {
 	Interval time.Duration
+	// MaxDelay caps how long regeneration can be deferred under sustained
+	// change pressure. A plain debounce that resets dueAt on every change
+	// starves indefinitely when events arrive faster than Interval — today.md
+	// / this-week.md would never rebuild. Defaults to 5 * effective interval
+	// when unset.
+	MaxDelay time.Duration
 	Now      func() time.Time
 
-	pending bool
-	dueAt   time.Time
+	pending        bool
+	dueAt          time.Time
+	firstPendingAt time.Time
+}
+
+func (c *RollingDigestCoalescer) clock() time.Time {
+	if c.Now != nil {
+		return c.Now()
+	}
+	return time.Now()
+}
+
+func (c *RollingDigestCoalescer) effectiveInterval() time.Duration {
+	if c.Interval > 0 {
+		return c.Interval
+	}
+	return 30 * time.Second
+}
+
+func (c *RollingDigestCoalescer) effectiveMaxDelay() time.Duration {
+	if c.MaxDelay > 0 {
+		return c.MaxDelay
+	}
+	return 5 * c.effectiveInterval()
 }
 
 func (c *RollingDigestCoalescer) ObserveChange(path string) bool {
 	if digest.IsDigestPath(path) {
 		return false
 	}
-	now := time.Now()
-	if c.Now != nil {
-		now = c.Now()
+	now := c.clock()
+	if !c.pending {
+		c.pending = true
+		c.firstPendingAt = now
 	}
-	interval := c.Interval
-	if interval <= 0 {
-		interval = 30 * time.Second
+	// Normal debounce pushes the deadline out by one interval per change,
+	// but never past firstPendingAt+MaxDelay so sustained churn cannot
+	// defer regeneration forever.
+	candidate := now.Add(c.effectiveInterval())
+	if hardDeadline := c.firstPendingAt.Add(c.effectiveMaxDelay()); candidate.After(hardDeadline) {
+		candidate = hardDeadline
 	}
-	c.pending = true
-	c.dueAt = now.Add(interval)
+	c.dueAt = candidate
 	return true
 }
 
@@ -66,16 +102,13 @@ func (c *RollingDigestCoalescer) Due() bool {
 	if !c.pending {
 		return false
 	}
-	now := time.Now()
-	if c.Now != nil {
-		now = c.Now()
-	}
-	return !now.Before(c.dueAt)
+	return !c.clock().Before(c.dueAt)
 }
 
 func (c *RollingDigestCoalescer) MarkFlushed() {
 	c.pending = false
 	c.dueAt = time.Time{}
+	c.firstPendingAt = time.Time{}
 }
 
 // Tick runs the close pipeline for every local day that has closed since

@@ -135,7 +135,7 @@ func providerLayoutMarkdown(manifest LayoutManifest) string {
 		b.WriteString("\n")
 	}
 	b.WriteString("## Filenames\n\n")
-	b.WriteString("Entity files use the `<identifier>__<uuid>.json` convention when a stable provider identifier is available. Recover the provider id from the last `__`-separated segment.\n\n")
+	b.WriteString("Entity files use the `<identifier>__<id>.json` convention when a stable provider identifier is available. Recover the provider id from the last `__`-separated segment.\n\n")
 	b.WriteString("## Alias indexes\n\n")
 	if len(manifest.AliasSegments) == 0 {
 		b.WriteString("_No alias indexes have been advertised yet._\n\n")
@@ -172,10 +172,6 @@ func providerLayoutMarkdown(manifest LayoutManifest) string {
 
 func providerLayoutRemotePath(remoteRoot, provider string) string {
 	return joinRemotePath(joinRemotePath(remoteRoot, provider), providerLayoutFilename)
-}
-
-func legacyProviderLayoutRemotePath(remoteRoot, provider string) string {
-	return joinRemotePath(joinRemotePath(remoteRoot, provider), legacyProviderLayoutFilename)
 }
 
 func isProviderLayoutFilename(filename string) bool {
