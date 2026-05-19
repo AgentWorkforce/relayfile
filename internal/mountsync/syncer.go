@@ -1039,6 +1039,9 @@ func (s *Syncer) HandleLocalChange(ctx context.Context, relativePath string, op 
 	if relativePath == "" || relativePath == "." {
 		return nil
 	}
+	if first := strings.SplitN(relativePath, "/", 2)[0]; reservedTopLevel(first) {
+		return nil
+	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -2705,7 +2708,7 @@ func providerLayoutCleanResourceSegment(segment string) string {
 
 func isReservedProviderLayoutSegment(segment string) bool {
 	switch strings.TrimSpace(segment) {
-	case "", ".relay", "digests", "_index.json", "LAYOUT.md", ".relayfile-mount-state.json":
+	case "", ".relay", ".skills", "digests", "_index.json", "LAYOUT.md", ".relayfile-mount-state.json":
 		return true
 	default:
 		return false

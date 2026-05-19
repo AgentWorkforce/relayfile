@@ -1475,7 +1475,7 @@ paths:
               schema:
                 type: array
                 items:
-                  $ref: '#/components/schemas/WritebackItem'
+                  $ref: '#/components/schemas/WritebackPendingItem'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
@@ -2610,10 +2610,67 @@ components:
           type: object
           additionalProperties: true
 
-    WritebackItem:
+    WritebackDeadLetterError:
+      type: object
+      additionalProperties: false
+      required: [code, message, attempts, firstAttemptAt, lastAttemptAt, opId]
+      properties:
+        code:
+          type: string
+          description: Dead-letter classification code
+          enum: [schema_violation, provider_4xx, provider_5xx_exhausted, timeout]
+        message:
+          type: string
+          description: Human-readable failure details
+        providerStatus:
+          type: integer
+          description: HTTP status returned by the provider, when available
+        providerResponse:
+          type: object
+          additionalProperties: true
+          description: Provider error response body, when available
+        attempts:
+          type: integer
+          minimum: 1
+          description: Number of delivery attempts; must be at least 1 when first/last attempt timestamps are present
+        firstAttemptAt:
+          type: string
+          format: date-time
+          description: Timestamp of the first delivery attempt
+        lastAttemptAt:
+          type: string
+          format: date-time
+          description: Timestamp of the most recent delivery attempt
+        opId:
+          type: string
+          description: Operation ID associated with the failed writeback
+
+    WritebackPendingItem:
       type: object
       additionalProperties: false
       required: [id, workspaceId, path, revision, correlationId]
+      properties:
+        id:
+          type: string
+          description: Operation ID for this pending writeback
+        workspaceId:
+          type: string
+          description: Workspace identifier
+        path:
+          type: string
+          description: Virtual filesystem path
+          pattern: '^/.*'
+        revision:
+          type: string
+          description: Current file revision
+        correlationId:
+          type: string
+          description: Correlation ID for tracing
+
+    WritebackItem:
+      type: object
+      additionalProperties: false
+      required: [id, workspaceId, path, revision, correlationId, state]
       properties:
         id:
           type: string
@@ -2631,6 +2688,62 @@ components:
         correlationId:
           type: string
           description: Correlation ID for tracing
+        state:
+          type: string
+          description: Writeback queue state, when returned by stateful list endpoints
+          enum: [pending, succeeded, failed, dead_lettered, dead]
+        opId:
+          type: string
+          description: Operation ID alias used by legacy/detail payloads
+        provider:
+          type: string
+          description: Provider responsible for applying this writeback
+        action:
+          type: string
+          description: Provider writeback action name
+        ts:
+          type: string
+          format: date-time
+          description: Event timestamp associated with the writeback
+        code:
+          type: string
+          description: Dead-letter or provider failure classification
+        message:
+          type: string
+          description: Human-readable failure details
+        providerStatus:
+          type: integer
+          description: HTTP status returned by the provider, when available
+        providerResponse:
+          type: object
+          additionalProperties: true
+          description: Provider error response body, when available
+        attempts:
+          type: integer
+          minimum: 0
+          description: Number of delivery attempts
+        attemptCount:
+          type: integer
+          minimum: 0
+          description: Legacy alias for attempts
+        firstAttemptAt:
+          type: string
+          format: date-time
+          description: Timestamp of the first delivery attempt
+        enqueuedAt:
+          type: string
+          format: date-time
+          description: Timestamp when the writeback entered the queue
+        createdAt:
+          type: string
+          format: date-time
+          description: Legacy alias for enqueuedAt
+        lastAttemptAt:
+          type: string
+          format: date-time
+          description: Timestamp of the most recent delivery attempt
+        error:
+          $ref: '#/components/schemas/WritebackDeadLetterError'
 
     BulkWriteRequest:
       type: object

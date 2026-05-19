@@ -2764,6 +2764,12 @@ func TestApplyRemoteSnapshot_MaterializesProviderLayouts(t *testing.T) {
 			ContentType: "text/markdown",
 			Content:     "_no activity_",
 		},
+		"/.skills/activity-summary.md": {
+			Path:        "/.skills/activity-summary.md",
+			Revision:    "rev_activity_summary",
+			ContentType: "text/markdown",
+			Content:     "# activity-summary\n",
+		},
 		"/.relay/dead-letter/payload.json": {
 			Path:        "/.relay/dead-letter/payload.json",
 			Revision:    "rev_dead",
@@ -2796,6 +2802,9 @@ func TestApplyRemoteSnapshot_MaterializesProviderLayouts(t *testing.T) {
 	}
 	if _, ok := registrar.manifest[".relay"]; ok {
 		t.Fatalf("reserved .relay root should not be registered as a provider")
+	}
+	if _, ok := registrar.manifest[".skills"]; ok {
+		t.Fatalf("reserved .skills root should not be registered as a provider")
 	}
 	if _, err := os.Stat(filepath.Join(localDir, "linear", ".layout.md")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("provider layout registration should not write a disk .layout.md, stat err=%v", err)
@@ -2897,6 +2906,12 @@ func TestApplyRemoteSnapshot_ProviderLayoutsSkipReservedRoots(t *testing.T) {
 			Revision:    "rev_digest",
 			ContentType: "text/markdown",
 			Content:     "_no activity_",
+		},
+		"/.skills/activity-summary.md": {
+			Path:        "/.skills/activity-summary.md",
+			Revision:    "rev_activity_summary",
+			ContentType: "text/markdown",
+			Content:     "# activity-summary\n",
 		},
 		"/_index.json": {
 			Path:        "/_index.json",

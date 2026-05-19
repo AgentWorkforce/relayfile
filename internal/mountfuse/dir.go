@@ -104,6 +104,9 @@ func (n *DirNode) Mkdir(ctx context.Context, name string, mode uint32, out *fuse
 }
 
 func (n *DirNode) Create(ctx context.Context, name string, flags uint32, mode uint32, out *fuse.EntryOut) (*gofusefs.Inode, gofusefs.FileHandle, uint32, syscall.Errno) {
+	if isVirtualSkillsDirPath(n.state.remoteRoot, n.path) {
+		return nil, nil, 0, syscall.EACCES
+	}
 	remotePath := joinRemotePath(n.path, name)
 	meta := nodeMeta{
 		path:        remotePath,
@@ -143,6 +146,9 @@ func (n *DirNode) Unlink(ctx context.Context, name string) syscall.Errno {
 	}
 	if meta.isDir() {
 		return syscall.EISDIR
+	}
+	if isReadOnlyVirtualPath(n.state.remoteRoot, meta.path) {
+		return syscall.EACCES
 	}
 	baseRevision := meta.revision
 	if baseRevision == "" {

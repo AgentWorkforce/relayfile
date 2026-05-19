@@ -69,11 +69,187 @@ func TestWritebackListUnknownStateErrors(t *testing.T) {
 	}
 }
 
-// TestWritebackListPendingNotYetTracked guards against fabricating per-op
-// pending rows from aggregate counters. The writeback status report only
-// carries an int count, so this command must error rather than synthesize
-// provider-summary rows.
-func TestWritebackListPendingNotYetTracked(t *testing.T) {
+func TestWritebackListPendingFromDirtyMountState(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	localDir := t.TempDir()
+	if err := ensureMirrorLayout(localDir); err != nil {
+		t.Fatalf("ensureMirrorLayout failed: %v", err)
+	}
+	mountState := []byte(`{"files":{
+  "/linear/issues/LIN-1.json":{"revision":"rev_1","dirty":true},
+  "/notion/pages/Page.json":{"revision":"rev_2","dirty":false}
+}}`)
+	if err := os.WriteFile(filepath.Join(localDir, ".relayfile-mount-state.json"), mountState, 0o644); err != nil {
+		t.Fatalf("write mount state failed: %v", err)
+	}
+	upsertWritebackListWorkspace(t, localDir)
+
+	var out bytes.Buffer
+	if err := run([]string{"writeback", "list", "--state", "pending", "--workspace", "demo", "--json"}, strings.NewReader(""), &out, &out); err != nil {
+		t.Fatalf("run writeback list pending failed: %v", err)
+	}
+	var items []writebackListSDKItem
+	if err := json.Unmarshal(out.Bytes(), &items); err != nil {
+		t.Fatalf("parse pending JSON failed: %v\npayload:\n%s", err, out.String())
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected 1 pending row, got %d: %+v", len(items), items)
+	}
+	if items[0].State != "pending" || items[0].Path != "/linear/issues/LIN-1.json" || items[0].Provider != "linear" || items[0].Revision != "rev_1" {
+		t.Fatalf("unexpected pending row: %+v", items[0])
+	}
+}
+
+func TestWritebackListPendingIncludesHashDriftMissingAndUntrackedFiles(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	localDir := t.TempDir()
+	if err := ensureMirrorLayout(localDir); err != nil {
+		t.Fatalf("ensureMirrorLayout failed: %v", err)
+	}
+	unchangedPath := filepath.Join(localDir, "linear", "issues", "LIN-1.json")
+	changedPath := filepath.Join(localDir, "linear", "issues", "LIN-2.json")
+	untrackedPath := filepath.Join(localDir, "github", "issues", "draft.json")
+	for _, path := range []string{unchangedPath, changedPath, untrackedPath} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("mkdir %s failed: %v", filepath.Dir(path), err)
+		}
+	}
+	if err := os.WriteFile(unchangedPath, []byte("same"), 0o644); err != nil {
+		t.Fatalf("write unchanged failed: %v", err)
+	}
+	if err := os.WriteFile(changedPath, []byte("new local body"), 0o644); err != nil {
+		t.Fatalf("write changed failed: %v", err)
+	}
+	if err := os.WriteFile(untrackedPath, []byte("new file"), 0o644); err != nil {
+		t.Fatalf("write untracked failed: %v", err)
+	}
+	unchangedHash, err := hashLocalWritebackFile(unchangedPath)
+	if err != nil {
+		t.Fatalf("hash unchanged failed: %v", err)
+	}
+	mountState := []byte(`{"files":{
+  "/linear/issues/LIN-1.json":{"revision":"rev_1","hash":"` + unchangedHash + `"},
+  "/linear/issues/LIN-2.json":{"revision":"rev_2","hash":"old_hash"},
+  "/linear/issues/LIN-3.json":{"revision":"rev_3","hash":"deleted_hash"},
+  "/linear/issues/LIN-4.json":{"revision":"rev_4","hash":"denied_hash","writeDenied":true}
+}}`)
+	if err := os.WriteFile(filepath.Join(localDir, ".relayfile-mount-state.json"), mountState, 0o644); err != nil {
+		t.Fatalf("write mount state failed: %v", err)
+	}
+	upsertWritebackListWorkspace(t, localDir)
+
+	var out bytes.Buffer
+	if err := run([]string{"writeback", "list", "--state", "pending", "--workspace", "demo", "--json"}, strings.NewReader(""), &out, &out); err != nil {
+		t.Fatalf("run writeback list pending failed: %v", err)
+	}
+	var items []writebackListSDKItem
+	if err := json.Unmarshal(out.Bytes(), &items); err != nil {
+		t.Fatalf("parse pending JSON failed: %v\npayload:\n%s", err, out.String())
+	}
+	paths := make([]string, 0, len(items))
+	for _, item := range items {
+		paths = append(paths, item.Path)
+	}
+	want := []string{"/github/issues/draft.json", "/linear/issues/LIN-2.json", "/linear/issues/LIN-3.json"}
+	if strings.Join(paths, ",") != strings.Join(want, ",") {
+		t.Fatalf("pending paths = %v, want %v", paths, want)
+	}
+}
+
+func TestWritebackListPendingUsesRemoteRootForNonRootMount(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	localDir := t.TempDir()
+	if err := ensureMirrorLayout(localDir); err != nil {
+		t.Fatalf("ensureMirrorLayout failed: %v", err)
+	}
+	changedPath := filepath.Join(localDir, "pages", "page-1.json")
+	untrackedPath := filepath.Join(localDir, "pages", "draft.json")
+	for _, path := range []string{changedPath, untrackedPath} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("mkdir %s failed: %v", filepath.Dir(path), err)
+		}
+	}
+	if err := os.WriteFile(changedPath, []byte("new local body"), 0o644); err != nil {
+		t.Fatalf("write changed failed: %v", err)
+	}
+	if err := os.WriteFile(untrackedPath, []byte("new draft"), 0o644); err != nil {
+		t.Fatalf("write untracked failed: %v", err)
+	}
+	mountState := []byte(`{"files":{
+  "/notion/pages/page-1.json":{"revision":"rev_1","hash":"old_hash"},
+  "/notion/pages/page-2.json":{"revision":"rev_2","hash":"deleted_hash"}
+}}`)
+	if err := os.WriteFile(filepath.Join(localDir, ".relayfile-mount-state.json"), mountState, 0o644); err != nil {
+		t.Fatalf("write mount state failed: %v", err)
+	}
+	writeWritebackListState(t, localDir, syncStateFile{WorkspaceID: "ws_demo", RemoteRoot: "/notion"})
+	upsertWritebackListWorkspace(t, localDir)
+
+	var out bytes.Buffer
+	if err := run([]string{"writeback", "list", "--state", "pending", "--workspace", "demo", "--json"}, strings.NewReader(""), &out, &out); err != nil {
+		t.Fatalf("run writeback list pending failed: %v", err)
+	}
+	var items []writebackListSDKItem
+	if err := json.Unmarshal(out.Bytes(), &items); err != nil {
+		t.Fatalf("parse pending JSON failed: %v\npayload:\n%s", err, out.String())
+	}
+	paths := make([]string, 0, len(items))
+	for _, item := range items {
+		paths = append(paths, item.Path)
+		if item.Provider != "notion" {
+			t.Fatalf("expected notion provider for %+v", item)
+		}
+	}
+	want := []string{"/notion/pages/draft.json", "/notion/pages/page-1.json", "/notion/pages/page-2.json"}
+	if strings.Join(paths, ",") != strings.Join(want, ",") {
+		t.Fatalf("pending paths = %v, want %v", paths, want)
+	}
+}
+
+func TestWritebackListPendingSkipsReadonlyTrackedFiles(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	localDir := t.TempDir()
+	if err := ensureMirrorLayout(localDir); err != nil {
+		t.Fatalf("ensureMirrorLayout failed: %v", err)
+	}
+	readonlyPath := filepath.Join(localDir, "linear", "issues", "LIN-1.json")
+	if err := os.MkdirAll(filepath.Dir(readonlyPath), 0o755); err != nil {
+		t.Fatalf("mkdir readonly dir failed: %v", err)
+	}
+	if err := os.WriteFile(readonlyPath, []byte("changed but readonly"), 0o644); err != nil {
+		t.Fatalf("write readonly failed: %v", err)
+	}
+	mountState := []byte(`{"files":{
+  "/linear/issues/LIN-1.json":{"revision":"rev_1","hash":"old_hash","readonly":true},
+  "/linear/issues/LIN-2.json":{"revision":"rev_2","hash":"deleted_hash","readonly":true}
+}}`)
+	if err := os.WriteFile(filepath.Join(localDir, ".relayfile-mount-state.json"), mountState, 0o644); err != nil {
+		t.Fatalf("write mount state failed: %v", err)
+	}
+	upsertWritebackListWorkspace(t, localDir)
+
+	var out bytes.Buffer
+	if err := run([]string{"writeback", "list", "--state", "pending", "--workspace", "demo", "--json"}, strings.NewReader(""), &out, &out); err != nil {
+		t.Fatalf("run writeback list pending failed: %v", err)
+	}
+	var items []writebackListSDKItem
+	if err := json.Unmarshal(out.Bytes(), &items); err != nil {
+		t.Fatalf("parse pending JSON failed: %v\npayload:\n%s", err, out.String())
+	}
+	if len(items) != 0 {
+		t.Fatalf("expected no readonly pending rows, got %+v", items)
+	}
+}
+
+func TestWritebackListDoesNotFabricatePendingFromAggregateCounter(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)
 
@@ -92,44 +268,15 @@ func TestWritebackListPendingNotYetTracked(t *testing.T) {
 	upsertWritebackListWorkspace(t, localDir)
 
 	var out bytes.Buffer
-	err := run([]string{"writeback", "list", "--state", "pending", "--workspace", "demo", "--json"}, strings.NewReader(""), &out, &out)
-	if err == nil {
-		t.Fatalf("expected pending state not-yet-tracked error, got nil; output: %s", out.String())
+	if err := run([]string{"writeback", "list", "--state", "pending", "--workspace", "demo", "--json"}, strings.NewReader(""), &out, &out); err != nil {
+		t.Fatalf("run writeback list pending failed: %v", err)
 	}
-	if !strings.Contains(err.Error(), "not yet tracked") {
-		t.Fatalf("expected 'not yet tracked' in error, got %q", err.Error())
+	var items []writebackListSDKItem
+	if err := json.Unmarshal(out.Bytes(), &items); err != nil {
+		t.Fatalf("parse pending JSON failed: %v\npayload:\n%s", err, out.String())
 	}
-}
-
-func TestWritebackListSucceededAndFailedNotYetTracked(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	clearRelayfileEnv(t)
-
-	localDir := t.TempDir()
-	if err := ensureMirrorLayout(localDir); err != nil {
-		t.Fatalf("ensureMirrorLayout failed: %v", err)
-	}
-	state := syncStateFile{
-		WorkspaceID: "ws_demo",
-		Providers: []syncStateProvider{
-			{Provider: "linear", LastEventAt: "2026-05-12T10:00:00Z", LastError: "rate limited"},
-		},
-	}
-	writeWritebackListState(t, localDir, state)
-	upsertWritebackListWorkspace(t, localDir)
-
-	for _, st := range []string{"succeeded", "failed"} {
-		var out bytes.Buffer
-		err := run([]string{"writeback", "list", "--state", st, "--workspace", "demo", "--json"}, strings.NewReader(""), &out, &out)
-		if err == nil {
-			t.Fatalf("expected %s not-yet-tracked error, got nil; output: %s", st, out.String())
-		}
-		if !strings.Contains(err.Error(), "not yet tracked") {
-			t.Fatalf("[%s] expected 'not yet tracked' in error, got %q", st, err.Error())
-		}
-		if !strings.Contains(err.Error(), "workspace-primitives WI5") {
-			t.Fatalf("[%s] expected spec reference in error, got %q", st, err.Error())
-		}
+	if len(items) != 0 {
+		t.Fatalf("expected no fabricated pending rows, got %+v", items)
 	}
 }
 

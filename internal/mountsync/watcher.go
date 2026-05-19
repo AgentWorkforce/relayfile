@@ -37,7 +37,8 @@ func NewFileWatcher(localDir string, onChange func(string, fsnotify.Op)) (*FileW
 }
 
 // Start begins watching. Recursively adds all subdirectories.
-// Skips .git, .relay, node_modules.
+// Skips internal runtime trees such as .git, .relay, .skills, digests, and
+// node_modules.
 func (fw *FileWatcher) Start(ctx context.Context) error {
 	// Walk localDir, add all dirs to watcher (fsnotify watches dirs, not files)
 	if err := fw.addDirRecursive(fw.localDir); err != nil {
@@ -123,7 +124,8 @@ func (fw *FileWatcher) shouldSkip(rel string) bool {
 // top-level entries, including files such as _PERMISSIONS.md; addDirRecursive
 // is directory-only and skips a different sentinel for the mount state file.
 func reservedTopLevel(name string) bool {
-	return name == ".git" || name == ".relay" || name == "node_modules" ||
+	return name == ".git" || name == ".relay" || name == ".skills" ||
+		name == "digests" || name == "node_modules" ||
 		name == "_PERMISSIONS.md"
 }
 
@@ -170,8 +172,7 @@ func (fw *FileWatcher) emitExistingFileEvents(base string) {
 }
 
 // addDirRecursive walks `base` and adds every directory underneath it to the
-// fsnotify watcher, skipping `.git`, `.relay`, `node_modules`, and the
-// mount-state file sentinel. Used both at startup (to seed the watcher with the
+// fsnotify watcher, skipping top-level internal runtime trees. Used both at startup (to seed the watcher with the
 // existing tree) and at runtime (when a sync-down creates a new nested
 // directory structure that we need to start watching).
 func (fw *FileWatcher) addDirRecursive(base string) error {
@@ -183,7 +184,7 @@ func (fw *FileWatcher) addDirRecursive(base string) error {
 			return nil
 		}
 		name := info.Name()
-		if name == ".git" || name == ".relay" || name == "node_modules" || name == ".relayfile-mount-state.json" {
+		if fw.isTopLevelReservedDir(path, name) {
 			return filepath.SkipDir
 		}
 		// Best-effort add. fsnotify returns an error for already-watched dirs
@@ -192,6 +193,18 @@ func (fw *FileWatcher) addDirRecursive(base string) error {
 		_ = fw.watcher.Add(path)
 		return nil
 	})
+}
+
+func (fw *FileWatcher) isTopLevelReservedDir(path, name string) bool {
+	rel, err := filepath.Rel(fw.localDir, path)
+	if err != nil || rel == "." {
+		return false
+	}
+	first := strings.SplitN(rel, string(os.PathSeparator), 2)[0]
+	if first != name {
+		return false
+	}
+	return reservedTopLevel(name)
 }
 
 func (fw *FileWatcher) Close() error {

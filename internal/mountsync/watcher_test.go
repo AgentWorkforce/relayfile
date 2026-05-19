@@ -394,3 +394,22 @@ func TestWatcherEditInNestedSubdirAfterSyncDown(t *testing.T) {
 		t.Fatalf("no watcher event for edit in nested subdirectory created at runtime")
 	}
 }
+
+func TestWatcherDoesNotSkipNestedReservedNameDirectories(t *testing.T) {
+	localDir := t.TempDir()
+	events, _, _ := startFileWatcher(t, localDir)
+
+	nestedDir := filepath.Join(localDir, "notion", "pages", "by-title", "digests")
+	if err := os.MkdirAll(nestedDir, 0o755); err != nil {
+		t.Fatalf("create nested reserved-name directory: %v", err)
+	}
+	target := filepath.Join(nestedDir, "page.json")
+	if err := os.WriteFile(target, []byte(`{"id":"page"}`), 0o644); err != nil {
+		t.Fatalf("write file in nested reserved-name directory: %v", err)
+	}
+
+	expected := filepath.ToSlash("notion/pages/by-title/digests/page.json")
+	if _, ok := waitForWatcherEventPath(t, events, expected, 2*time.Second); !ok {
+		t.Fatalf("no watcher event for nested reserved-name directory path")
+	}
+}

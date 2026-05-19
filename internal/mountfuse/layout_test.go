@@ -162,8 +162,8 @@ func TestRootDirectorySynthesizesLayoutMarkdown(t *testing.T) {
 		gotNames = append(gotNames, entry.Name)
 	}
 	sort.Strings(gotNames)
-	if len(gotNames) != 1 || gotNames[0] != layoutFilename {
-		t.Fatalf("Readdir names = %v, want [%s]", gotNames, layoutFilename)
+	if len(gotNames) != 2 || gotNames[0] != skillsDirname || gotNames[1] != layoutFilename {
+		t.Fatalf("Readdir names = %v, want [%s %s]", gotNames, skillsDirname, layoutFilename)
 	}
 
 	var entryOut fuse.EntryOut
@@ -215,6 +215,73 @@ func TestRootDirectorySynthesizesLayoutMarkdown(t *testing.T) {
 	}
 	if len(remote.readFilePaths) != 0 {
 		t.Fatalf("expected virtual layout reads to avoid RemoteClient.ReadFile, got %v", remote.readFilePaths)
+	}
+}
+
+func TestSkillsDirectorySynthesizesActivitySummary(t *testing.T) {
+	t.Parallel()
+
+	remote := &layoutRemoteClient{
+		trees: map[string]mountsync.TreeResponse{
+			"/": {Path: "/", Entries: nil},
+		},
+	}
+	root, err := New(Config{Client: remote, WorkspaceID: "ws_activity_summary", RemoteRoot: "/"})
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	_ = gofusefs.NewNodeFS(root, &gofusefs.Options{})
+
+	ctx := context.Background()
+	var skillsOut fuse.EntryOut
+	skillsNode, lookupErrno := root.Lookup(ctx, skillsDirname, &skillsOut)
+	if lookupErrno != 0 {
+		t.Fatalf("Lookup(%q) errno = %d, want 0", skillsDirname, lookupErrno)
+	}
+	if skillsOut.Attr.Mode&syscall.S_IFMT != syscall.S_IFDIR {
+		t.Fatalf("Lookup(%q) mode = %o, want directory", skillsDirname, skillsOut.Attr.Mode)
+	}
+	skillsDir, ok := skillsNode.Operations().(*DirNode)
+	if !ok {
+		t.Fatalf("Lookup(%q) returned %T, want *DirNode", skillsDirname, skillsNode.Operations())
+	}
+	var activityOut fuse.EntryOut
+	activityNode, activityErrno := skillsDir.Lookup(ctx, activitySummaryFilename, &activityOut)
+	if activityErrno != 0 {
+		t.Fatalf("Lookup(%q) errno = %d, want 0", activitySummaryFilename, activityErrno)
+	}
+	if perm := activityOut.Attr.Mode & 0o777; perm != 0o444 {
+		t.Fatalf("activity summary permissions = %o, want 0444", perm)
+	}
+	fileNode, ok := activityNode.Operations().(*FileNode)
+	if !ok {
+		t.Fatalf("Lookup(%q) returned %T, want *FileNode", activitySummaryFilename, activityNode.Operations())
+	}
+	handle, _, openErrno := fileNode.Open(ctx, 0)
+	if openErrno != 0 {
+		t.Fatalf("Open(%q) errno = %d, want 0", activitySummaryFilename, openErrno)
+	}
+	fileHandle, ok := handle.(*FileHandle)
+	if !ok {
+		t.Fatalf("Open(%q) returned %T, want *FileHandle", activitySummaryFilename, handle)
+	}
+	result, readErrno := fileHandle.Read(ctx, make([]byte, len(ActivitySummarySkillMarkdown)+16), 0)
+	if readErrno != 0 {
+		t.Fatalf("Read(%q) errno = %d, want 0", activitySummaryFilename, readErrno)
+	}
+	data, status := result.Bytes(nil)
+	if status != 0 {
+		t.Fatalf("Read(%q) status = %d, want 0", activitySummaryFilename, status)
+	}
+	result.Done()
+	body := string(data)
+	for _, needle := range []string{"activity-summary", "digests/yesterday.md", "_index.json", "LAYOUT.md"} {
+		if !strings.Contains(body, needle) {
+			t.Fatalf("activity summary missing %q:\n%s", needle, body)
+		}
+	}
+	if len(remote.readFilePaths) != 0 {
+		t.Fatalf("expected virtual activity-summary reads to avoid RemoteClient.ReadFile, got %v", remote.readFilePaths)
 	}
 }
 

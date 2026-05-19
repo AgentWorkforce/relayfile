@@ -21,6 +21,9 @@ var bundledResourceSchemas = map[string]string{
 }
 
 func isReadOnlyVirtualPath(remoteRoot, remotePath string) bool {
+	if isVirtualActivitySummaryPath(remoteRoot, remotePath) {
+		return true
+	}
 	if isVirtualLayoutPath(remoteRoot, remotePath) {
 		return true
 	}

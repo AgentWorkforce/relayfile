@@ -157,7 +157,7 @@ func TestHelpFlagPrintsUsageForCommandsAndSubcommands(t *testing.T) {
 		{name: "writeback list", args: []string{"writeback", "list", "-h"}, want: writebackListUsage},
 		{name: "writeback status", args: []string{"writeback", "status", "-h"}, want: "Usage: relayfile writeback status"},
 		{name: "writeback retry", args: []string{"writeback", "retry", "-h"}, want: "Usage: relayfile writeback retry --opId OP"},
-		{name: "digest group", args: []string{"digest", "-h"}, want: "relayfile digest rebuild"},
+		{name: "digest group", args: []string{"digest", "-h"}, want: "today|yesterday|YYYY-MM-DD|this-week|last-week"},
 		{name: "digest rebuild", args: []string{"digest", "rebuild", "-h"}, want: digestRebuildUsage},
 		{name: "pull", args: []string{"pull", "-h"}, want: "Usage: relayfile pull"},
 		{name: "mount", args: []string{"mount", "-h"}, want: "Usage: relayfile mount"},
@@ -569,6 +569,7 @@ func TestBuildCloudURLKeepsBasePath(t *testing.T) {
 func TestSetupCreatesWorkspaceConnectsIntegrationAndSkipsMount(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)
+	t.Cleanup(func() { _ = os.RemoveAll("vfs") })
 
 	seen := map[string]bool{}
 	var server *httptest.Server
@@ -677,6 +678,7 @@ func TestSetupCreatesWorkspaceConnectsIntegrationAndSkipsMount(t *testing.T) {
 func TestSetupJiraRunsSitePickerAfterFreshConnect(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)
+	t.Cleanup(func() { _ = os.RemoveAll("vfs") })
 
 	seen := map[string]bool{}
 	var picked map[string]any
@@ -1262,6 +1264,43 @@ func TestStatusSurfacesDegradedStallReason(t *testing.T) {
 	}
 	if !strings.Contains(got, "relayfile login") {
 		t.Fatalf("expected recovery hint in status output, got: %q", got)
+	}
+}
+
+func TestEnsureMirrorLayoutDoesNotRewriteUnchangedSkill(t *testing.T) {
+	localDir := t.TempDir()
+	if err := ensureMirrorLayout(localDir); err != nil {
+		t.Fatalf("ensureMirrorLayout failed: %v", err)
+	}
+	skillPath := filepath.Join(localDir, ".skills", "activity-summary.md")
+	before, err := os.Stat(skillPath)
+	if err != nil {
+		t.Fatalf("stat skill before second layout failed: %v", err)
+	}
+	if err := ensureMirrorLayout(localDir); err != nil {
+		t.Fatalf("second ensureMirrorLayout failed: %v", err)
+	}
+	after, err := os.Stat(skillPath)
+	if err != nil {
+		t.Fatalf("stat skill after second layout failed: %v", err)
+	}
+	if !os.SameFile(before, after) {
+		t.Fatalf("expected unchanged skill file not to be atomically replaced")
+	}
+}
+
+func TestBuildSyncStateSnapshotPreservesRemoteRoot(t *testing.T) {
+	localDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(localDir, ".relay"), 0o755); err != nil {
+		t.Fatalf("mkdir .relay failed: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(localDir, ".relay", "state.json"), []byte(`{"remoteRoot":"/notion"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write state failed: %v", err)
+	}
+
+	snapshot := buildSyncStateSnapshot(syncStatusResponse{}, "ws_demo", defaultMountMode, defaultMountInterval, localDir, 0, "")
+	if snapshot.RemoteRoot != "/notion" {
+		t.Fatalf("expected remoteRoot to be preserved, got %q", snapshot.RemoteRoot)
 	}
 }
 
