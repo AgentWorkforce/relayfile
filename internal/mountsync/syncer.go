@@ -230,8 +230,8 @@ func NewSyncTransport() *http.Transport {
 		TLSHandshakeTimeout:   10 * time.Second,
 		ResponseHeaderTimeout: 30 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
-		// Intentionally NO total-request timeout here and the owning
-		// http.Client MUST keep Timeout == 0 (see NewHTTPClient).
+		// Intentionally NO total-request timeout here. Bootstrap/poll
+		// callers should pair this transport with http.Client.Timeout == 0.
 	}
 }
 
@@ -256,19 +256,12 @@ func NewHTTPClient(baseURL, token string, httpClient *http.Client) *HTTPClient {
 		// that pass nil (tests, embedders) inherit the bootstrap-safe
 		// behaviour rather than the old blunt 15s cap.
 		httpClient = NewSyncHTTPClient()
-	} else if httpClient.Timeout != 0 {
-		// A caller passed an explicit whole-request Timeout. That cap is
-		// fatal to the bootstrap full-pull (net/http enforces it
-		// independent of context, killing a long-but-progressing body
-		// read). Normalize it away and ensure a granular sync transport
-		// is in place; cancellation remains fully covered by the
-		// per-cycle / bootstrap / cursor contexts. This guarantees the
-		// bootstrap path is never whole-request-capped no matter how the
-		// client was constructed.
-		httpClient.Timeout = 0
-		if httpClient.Transport == nil {
-			httpClient.Transport = NewSyncTransport()
-		}
+	} else {
+		// Do not mutate the caller's client. Poll/bootstrap code that needs
+		// no whole-request cap passes NewSyncHTTPClient explicitly; other
+		// callers (notably FUSE) may intentionally rely on Timeout.
+		cloned := *httpClient
+		httpClient = &cloned
 	}
 	return &HTTPClient{
 		baseURL:    baseURL,
@@ -2255,18 +2248,6 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 		}
 	}
 
-	// Circuit breaker: a cloud OOM / 5xx storm can return a successful but
-	// empty or drastically truncated tree. Treating that as authoritative
-	// would delete every locally-mirrored file. If we have a meaningful
-	// amount of tracked state but the fresh listing came back empty (or
-	// shrank past the safety ratio), skip the delete pass and leave local
-	// state intact — the next healthy cycle will reconcile correctly.
-	if s.snapshotDeleteUnsafe(len(remotePaths)) {
-		s.state.Counters.SnapshotDeleteBlocked++
-		s.logf("skipping snapshot delete pass: fresh remote tree has %d files but %d are tracked locally (suspected partial/empty cloud listing); preserving local state", len(remotePaths), len(s.state.Files))
-		return nil
-	}
-
 	// Resumed/partial traversal safety: only run the authoritative
 	// snapshot delete pass when this process traversed the ENTIRE tree
 	// (started from an empty cursor and reached NextCursor==nil). If the
@@ -2281,6 +2262,18 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 		// Bootstrap is now complete (we reached the end of the tree),
 		// just not authoritative for deletes this cycle.
 		s.markBootstrapComplete()
+		return nil
+	}
+
+	// Circuit breaker: a cloud OOM / 5xx storm can return a successful but
+	// empty or drastically truncated tree. Treating that as authoritative
+	// would delete every locally-mirrored file. If we have a meaningful
+	// amount of tracked state but the fresh listing came back empty (or
+	// shrank past the safety ratio), skip the delete pass and leave local
+	// state intact — the next healthy cycle will reconcile correctly.
+	if s.snapshotDeleteUnsafe(len(remotePaths)) {
+		s.state.Counters.SnapshotDeleteBlocked++
+		s.logf("skipping snapshot delete pass: fresh remote tree has %d files but %d are tracked locally (suspected partial/empty cloud listing); preserving local state", len(remotePaths), len(s.state.Files))
 		return nil
 	}
 

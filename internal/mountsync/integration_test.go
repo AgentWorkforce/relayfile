@@ -366,7 +366,7 @@ func TestLargeWorkspaceChaosEventuallyConverges(t *testing.T) {
 		if info, statErr := os.Lstat(localDir); statErr != nil || !info.IsDir() {
 			t.Fatalf("cycle %d: mount root clobbered", i)
 		}
-		if countLocalFiles(t, localDir) >= fileCount {
+		if countLocalFiles(t, localDir) == fileCount {
 			converged = true
 		}
 	}

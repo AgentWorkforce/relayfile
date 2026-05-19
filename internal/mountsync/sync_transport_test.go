@@ -40,18 +40,20 @@ func TestSyncTransportHasNoWholeRequestTimeout(t *testing.T) {
 	}
 }
 
-// TestNewHTTPClientNormalizesExplicitTimeout proves the back-compat path:
-// even when a caller passes an *http.Client with an explicit non-zero
-// whole-request Timeout (the old construction shape), NewHTTPClient strips
-// it so the bootstrap path can never be whole-request-capped.
-func TestNewHTTPClientNormalizesExplicitTimeout(t *testing.T) {
+// TestNewHTTPClientPreservesSuppliedClientTimeout proves NewHTTPClient does
+// not mutate or silently relax caller-owned request bounds. Poll/bootstrap
+// paths that need no whole-request cap pass NewSyncHTTPClient explicitly.
+func TestNewHTTPClientPreservesSuppliedClientTimeout(t *testing.T) {
 	supplied := &http.Client{Timeout: 15 * time.Second}
-	_ = NewHTTPClient("http://example.invalid", "tok", supplied)
-	if supplied.Timeout != 0 {
-		t.Fatalf("NewHTTPClient must normalize an explicit Timeout to 0; got %s", supplied.Timeout)
+	client := NewHTTPClient("http://example.invalid", "tok", supplied)
+	if supplied.Timeout != 15*time.Second {
+		t.Fatalf("NewHTTPClient mutated supplied Timeout to %s", supplied.Timeout)
 	}
-	if supplied.Transport == nil {
-		t.Fatal("expected a granular sync transport to be installed when none was set")
+	if client.httpClient == supplied {
+		t.Fatal("expected NewHTTPClient to clone the supplied client")
+	}
+	if client.httpClient.Timeout != 15*time.Second {
+		t.Fatalf("expected cloned client to preserve Timeout, got %s", client.httpClient.Timeout)
 	}
 }
 

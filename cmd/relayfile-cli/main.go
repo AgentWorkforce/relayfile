@@ -3006,6 +3006,10 @@ func retryDeadLetterWriteback(workspaceID string, record workspaceRecord, dl dea
 	if server == "" {
 		server = resolveServer("", creds)
 	}
+	retryTimeout := durationEnv("RELAYFILE_MOUNT_TIMEOUT", defaultMountTimeout)
+	if retryTimeout <= 0 {
+		retryTimeout = defaultMountTimeout
+	}
 	// No whole-request Timeout: net/http enforces http.Client.Timeout
 	// independent of context and would kill a long-but-progressing
 	// bootstrap body read. Cancellation is owned by the per-cycle /
@@ -3039,7 +3043,10 @@ func retryDeadLetterWriteback(workspaceID string, record workspaceRecord, dl dea
 		if err != nil {
 			return err
 		}
-		if err := syncer.HandleLocalChange(context.Background(), relativePath, fsnotify.Write); err != nil {
+		retryCtx, cancel := context.WithTimeout(context.Background(), retryTimeout)
+		err = syncer.HandleLocalChange(retryCtx, relativePath, fsnotify.Write)
+		cancel()
+		if err != nil {
 			return err
 		}
 	}
@@ -3859,6 +3866,10 @@ Common flags:
   --background         detach and keep syncing in the background
   --once               run one sync cycle and exit (used by setup/CI)
   --timeout 5m         per-sync timeout
+  --bootstrap-timeout 0s
+                       hard cap for initial/full-tree bootstrap (0 = progress-based)
+  --cursor-timeout 20s timeout for events-cursor resolution
+  --full-reconcile     force one full reconcile regardless of bootstrap state
   --no-websocket       disable websocket event streaming
   --low-memory         skip detailed per-file public state and defer content reads
   --pprof-addr ADDR    expose pprof diagnostics, e.g. 127.0.0.1:6060
@@ -6934,12 +6945,15 @@ func runMountLoop(rootCtx context.Context, syncer *mountsync.Syncer, localDir, w
 			// Mid-bootstrap, a per-cycle deadline exceeded is expected
 			// progress, not a stall: the rootCtx-derived bootstrap
 			// context keeps the heavy pull alive across cycles and
-			// persists a resume cursor. Suppress the scary "stall:".
-			if bs := readBootstrapStatus(localDir); bs != nil {
-				stallReason = ""
-				log.Printf("mount bootstrapping: %d/%d files (in progress)", bs.FilesSynced, bs.FilesTotal)
-				writeSnapshot()
-				return err
+			// persists a resume cursor. Suppress the scary "stall:"
+			// only for that expected timeout case.
+			if errors.Is(err, context.DeadlineExceeded) {
+				if bs := readBootstrapStatus(localDir); bs != nil {
+					stallReason = ""
+					log.Printf("mount bootstrapping: %d/%d files (in progress)", bs.FilesSynced, bs.FilesTotal)
+					writeSnapshot()
+					return err
+				}
 			}
 			stallReason = err.Error()
 			log.Printf("mount sync cycle failed: %v", err)

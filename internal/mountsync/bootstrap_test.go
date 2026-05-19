@@ -250,11 +250,15 @@ func TestBootstrapProgressExtension(t *testing.T) {
 			RootCtx: context.Background(),
 		})
 		s.bootstrapIdleTimeout = 80 * time.Millisecond
-		ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
+		start := time.Now()
+		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 		defer cancel()
 		err := s.Reconcile(ctx)
 		if err == nil {
 			t.Fatalf("expected cancellation error when client stalls past idle window")
+		}
+		if elapsed := time.Since(start); elapsed < s.bootstrapIdleTimeout {
+			t.Fatalf("expected watchdog cancellation after %s, got %v after %s", s.bootstrapIdleTimeout, err, elapsed)
 		}
 	})
 }
@@ -464,7 +468,7 @@ func readPublicStateFile(t *testing.T, localDir string) publicState {
 // partial listing — protects the #164/#165 mount-root-clobber invariants.
 func TestResumedTraversalSkipsSnapshotDeletePass(t *testing.T) {
 	client := newBootstrapClient(40, 10)
-	client.listTreeFailAt = 3
+	client.listTreeFailAt = 4
 	client.listTreeFailErr = &HTTPError{StatusCode: 502, Code: "bad_gateway", Message: "boom"}
 	client.listTreeFailOnce = true
 	localDir := t.TempDir()
@@ -487,6 +491,16 @@ func TestResumedTraversalSkipsSnapshotDeletePass(t *testing.T) {
 	}
 	if got := countLocalFiles(t, localDir); got != 40 {
 		t.Fatalf("resumed traversal lost mirrored files: expected 40, got %d (prefix was clobbered by an unsafe delete pass)", got)
+	}
+	st := loadPersistedState(t, localDir)
+	if !st.BootstrapComplete {
+		t.Fatalf("expected resumed traversal to mark bootstrap complete")
+	}
+	if st.BootstrapCursor != "" {
+		t.Fatalf("expected resumed traversal to clear cursor, got %q", st.BootstrapCursor)
+	}
+	if st.Counters.SnapshotDeleteBlocked != 0 {
+		t.Fatalf("expected resumed traversal to bypass degraded-listing breaker, got %d blocked deletes", st.Counters.SnapshotDeleteBlocked)
 	}
 }
 
