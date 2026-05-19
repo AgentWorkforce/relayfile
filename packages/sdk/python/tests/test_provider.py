@@ -66,8 +66,8 @@ def test_date_stamped_digest_pattern_is_exposed() -> None:
 
 
 def test_provider_layout_path_normalizes_provider_segment() -> None:
-    assert provider_layout_path("linear") == "linear/.layout.md"
-    assert provider_layout_path("/notion/") == "notion/.layout.md"
+    assert provider_layout_path("linear") == "linear/LAYOUT.md"
+    assert provider_layout_path("/notion/") == "notion/LAYOUT.md"
 
 
 def test_resource_schema_path_normalizes_segments() -> None:
