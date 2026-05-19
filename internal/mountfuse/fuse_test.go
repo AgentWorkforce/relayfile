@@ -1029,6 +1029,59 @@ func TestFuseAliasByStateEmptyDirectory(t *testing.T) {
 	}
 }
 
+func TestFuseAliasByEditedDateResolves(t *testing.T) {
+	t.Parallel()
+
+	const body = `{"id":"page-123","last_edited_time":"2026-05-12T14:30:00Z"}`
+
+	remote := &fakeRemoteClient{
+		trees: map[string]mountsync.TreeResponse{
+			"/":       {Path: "/", Entries: []mountsync.TreeEntry{{Path: "/notion", Type: "directory"}}},
+			"/notion": {Path: "/notion", Entries: []mountsync.TreeEntry{{Path: "/notion/pages", Type: "directory"}}},
+			"/notion/pages": {Path: "/notion/pages", Entries: []mountsync.TreeEntry{
+				{Path: "/notion/pages/" + aliasByEditedSegment, Type: "directory"},
+			}},
+			"/notion/pages/" + aliasByEditedSegment: {
+				Path: "/notion/pages/" + aliasByEditedSegment,
+				Entries: []mountsync.TreeEntry{
+					{Path: "/notion/pages/" + aliasByEditedSegment + "/2026-05-12", Type: "directory"},
+				},
+			},
+			"/notion/pages/" + aliasByEditedSegment + "/2026-05-12": {
+				Path: "/notion/pages/" + aliasByEditedSegment + "/2026-05-12",
+				Entries: []mountsync.TreeEntry{
+					{Path: "/notion/pages/" + aliasByEditedSegment + "/2026-05-12/page-123__123.json", Type: "file", Revision: "r-page-123"},
+				},
+			},
+		},
+		files: map[string]mountsync.RemoteFile{
+			"/notion/pages/" + aliasByEditedSegment + "/2026-05-12/page-123__123.json": {
+				Path:        "/notion/pages/" + aliasByEditedSegment + "/2026-05-12/page-123__123.json",
+				Revision:    "r-page-123",
+				ContentType: "application/json",
+				Content:     body,
+			},
+		},
+	}
+
+	root := newMountTestRoot(t, remote, "ws_alias_by_edited")
+	notion := lookupDir(t, root, "notion")
+	pages := lookupDir(t, notion, "pages")
+	byEdited := lookupDir(t, pages, aliasByEditedSegment)
+	editedDate := lookupDir(t, byEdited, "2026-05-12")
+	if names := readdirNames(t, editedDate); !equalSorted(names, []string{"page-123__123.json"}) {
+		t.Fatalf("Readdir(by-edited date) = %v, want page alias", names)
+	}
+	fileNode, _ := lookupFile(t, editedDate, "page-123__123.json")
+	gotContent, gotContentType := readFileContent(t, fileNode)
+	if gotContent != body {
+		t.Fatalf("read page alias = %q, want %q", gotContent, body)
+	}
+	if gotContentType != "application/json" {
+		t.Fatalf("content type = %q, want application/json", gotContentType)
+	}
+}
+
 func TestByStateOutsideIssuesPathRoundTrips(t *testing.T) {
 	t.Parallel()
 
@@ -1097,6 +1150,7 @@ func TestProviderLayoutVisibleAndReadable(t *testing.T) {
 				ResourceDirectories: []string{"issues"},
 				AliasSegments: []string{
 					aliasByIDSegment,
+					aliasByEditedSegment,
 					aliasByNameSegment,
 					aliasByStateSegment,
 					aliasByTitleSegment,
@@ -1111,7 +1165,7 @@ func TestProviderLayoutVisibleAndReadable(t *testing.T) {
 	_ = gofusefs.NewNodeFS(root, &gofusefs.Options{})
 
 	linear := lookupDir(t, root, "linear")
-	if names := readdirNames(t, linear); !equalSorted(names, []string{providerLayoutFilename, "issues"}) {
+	if names := readdirNames(t, linear); !equalSorted(names, []string{legacyProviderLayoutFilename, providerLayoutFilename, "issues"}) {
 		t.Fatalf("Readdir(/linear) = %v, want layout and issues", names)
 	}
 	layoutNode, entryOut := lookupFile(t, linear, providerLayoutFilename)
@@ -1125,6 +1179,7 @@ func TestProviderLayoutVisibleAndReadable(t *testing.T) {
 	for _, needle := range []string{
 		"linear layout",
 		"issues/",
+		aliasByEditedSegment,
 		aliasByIDSegment,
 		aliasByNameSegment,
 		aliasByStateSegment,
@@ -1133,6 +1188,84 @@ func TestProviderLayoutVisibleAndReadable(t *testing.T) {
 	} {
 		if !strings.Contains(body, needle) {
 			t.Fatalf("provider layout missing %q:\n%s", needle, body)
+		}
+	}
+
+	legacyLayoutNode, legacyEntryOut := lookupFile(t, linear, legacyProviderLayoutFilename)
+	if perm := legacyEntryOut.Attr.Mode & 0o777; perm != 0o444 {
+		t.Fatalf("legacy provider layout permissions = %o, want 0444", perm)
+	}
+	legacyBody, legacyContentType := readFileContent(t, legacyLayoutNode)
+	if legacyContentType != layoutContentType {
+		t.Fatalf("legacy provider layout content type = %q, want %q", legacyContentType, layoutContentType)
+	}
+	if legacyBody != body {
+		t.Fatalf("legacy provider layout content differed from canonical content")
+	}
+}
+
+func TestProviderLayoutDerivedFromRemoteTreeWithoutInjectedManifest(t *testing.T) {
+	t.Parallel()
+
+	remote := &fakeRemoteClient{
+		trees: map[string]mountsync.TreeResponse{
+			"/": {
+				Path: "/",
+				Entries: []mountsync.TreeEntry{
+					{Path: "/linear", Type: "directory"},
+				},
+			},
+			"/linear": {
+				Path: "/linear",
+				Entries: []mountsync.TreeEntry{
+					{Path: "/linear/issues", Type: "directory"},
+					{Path: "/linear/issues/AGE-16__issue-1.json", Type: "file", Revision: "r-issue"},
+					{Path: "/linear/issues/by-id", Type: "directory"},
+					{Path: "/linear/issues/by-id/AGE-16.json", Type: "file", Revision: "r-by-id"},
+					{Path: "/linear/issues/by-state", Type: "directory"},
+					{Path: "/linear/issues/by-state/open", Type: "directory"},
+					{Path: "/linear/issues/by-state/open/AGE-16__issue-1.json", Type: "file", Revision: "r-by-state"},
+				},
+			},
+		},
+	}
+	root, err := New(Config{
+		Client:      remote,
+		WorkspaceID: "ws_provider_layout_derived",
+		RemoteRoot:  "/",
+	})
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	_ = gofusefs.NewNodeFS(root, &gofusefs.Options{})
+
+	linear := lookupDir(t, root, "linear")
+	if names := readdirNames(t, linear); !equalSorted(names, []string{legacyProviderLayoutFilename, providerLayoutFilename, "issues"}) {
+		t.Fatalf("Readdir(/linear) = %v, want layout and issues", names)
+	}
+
+	layoutNode, _ := lookupFile(t, linear, providerLayoutFilename)
+	body, contentType := readFileContent(t, layoutNode)
+	if contentType != layoutContentType {
+		t.Fatalf("provider layout content type = %q, want %q", contentType, layoutContentType)
+	}
+	for _, needle := range []string{
+		"linear layout",
+		"`issues/`",
+		"`" + aliasByIDSegment + "/`",
+		"`" + aliasByStateSegment + "/`",
+	} {
+		if !strings.Contains(body, needle) {
+			t.Fatalf("derived provider layout missing %q:\n%s", needle, body)
+		}
+	}
+	for _, forbidden := range []string{
+		"_No resource directories have been advertised yet._",
+		"_No alias indexes have been advertised yet._",
+		"`" + aliasByEditedSegment + "/`",
+	} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("derived provider layout unexpectedly contained %q:\n%s", forbidden, body)
 		}
 	}
 }

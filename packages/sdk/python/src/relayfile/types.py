@@ -254,8 +254,9 @@ class FilesystemEvent:
     """Filesystem event row.
 
     Digest generation is exposed through ordinary ``file.created`` and
-    ``file.updated`` events at the paths in ``relayfile.DIGEST_PATHS``.
-    Consumers can filter returned events by those paths after calling
+    ``file.updated`` events at paths recognized by ``relayfile.is_digest_path``:
+    the anchors in ``relayfile.DIGEST_PATHS`` plus date-stamped closed-day
+    files. Consumers can filter returned events after calling
     ``RelayFileClient.get_events``.
     """
 

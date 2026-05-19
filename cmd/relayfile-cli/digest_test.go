@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -46,7 +47,7 @@ func TestDigestUnknownWindowErrors(t *testing.T) {
 	if err := ensureMirrorLayout(localDir); err != nil {
 		t.Fatalf("ensureMirrorLayout failed: %v", err)
 	}
-	upsertDigestWorkspace(t, localDir)
+	upsertDigestWorkspace(t, localDir, "")
 
 	var stderr bytes.Buffer
 	err := run([]string{"digest", "rebuild", "--window", "monday", "--workspace", "demo"}, strings.NewReader(""), &stderr, &stderr)
@@ -72,7 +73,7 @@ func TestDigestUnknownSubcommandErrors(t *testing.T) {
 	}
 }
 
-func TestDigestRebuildCallsRebuilder(t *testing.T) {
+func TestDigestRebuildCallsInjectedRebuilder(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)
 
@@ -80,7 +81,7 @@ func TestDigestRebuildCallsRebuilder(t *testing.T) {
 	if err := ensureMirrorLayout(localDir); err != nil {
 		t.Fatalf("ensureMirrorLayout failed: %v", err)
 	}
-	upsertDigestWorkspace(t, localDir)
+	upsertDigestWorkspace(t, localDir, "Europe/Oslo")
 
 	fake := &fakeDigestRebuilder{result: digestRebuildResult{Path: localDir + "/digests/yesterday.md", Events: 3}}
 	var stdout bytes.Buffer
@@ -92,14 +93,11 @@ func TestDigestRebuildCallsRebuilder(t *testing.T) {
 	if !fake.called {
 		t.Fatalf("expected rebuilder to be called")
 	}
-	if fake.opts.Window != "yesterday" {
-		t.Fatalf("expected window=yesterday, got %q", fake.opts.Window)
+	if fake.opts.Window != "yesterday" || fake.opts.WorkspaceID != "ws_demo" || fake.opts.LocalDir != localDir {
+		t.Fatalf("unexpected opts: %+v", fake.opts)
 	}
-	if fake.opts.WorkspaceID != "ws_demo" {
-		t.Fatalf("expected workspaceId=ws_demo, got %q", fake.opts.WorkspaceID)
-	}
-	if fake.opts.LocalDir != localDir {
-		t.Fatalf("expected localDir=%q, got %q", localDir, fake.opts.LocalDir)
+	if fake.opts.Timezone != "Europe/Oslo" {
+		t.Fatalf("expected configured timezone in opts, got %q", fake.opts.Timezone)
 	}
 	if !strings.Contains(stdout.String(), "Regenerated ") || !strings.Contains(stdout.String(), "events=3") {
 		t.Fatalf("expected success line with event count, got %q", stdout.String())
@@ -114,7 +112,7 @@ func TestDigestRebuildSurfacesError(t *testing.T) {
 	if err := ensureMirrorLayout(localDir); err != nil {
 		t.Fatalf("ensureMirrorLayout failed: %v", err)
 	}
-	upsertDigestWorkspace(t, localDir)
+	upsertDigestWorkspace(t, localDir, "")
 
 	fake := &fakeDigestRebuilder{err: errors.New("boom")}
 	var stdout bytes.Buffer
@@ -122,61 +120,168 @@ func TestDigestRebuildSurfacesError(t *testing.T) {
 	withDigestRebuilder(fake, func() {
 		got = run([]string{"digest", "rebuild", "--window", "today", "--workspace", "demo"}, strings.NewReader(""), &stdout, &stdout)
 	})
-	if got == nil {
-		t.Fatalf("expected error, got nil")
-	}
-	if !strings.Contains(got.Error(), "boom") {
-		t.Fatalf("expected error to wrap rebuilder error, got %q", got.Error())
+	if got == nil || !strings.Contains(got.Error(), "boom") {
+		t.Fatalf("expected boom error, got %v", got)
 	}
 }
 
-func TestDigestRebuildWritesDateStampedDigestAndAlias(t *testing.T) {
+func TestDigestRebuildRealWindows(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)
+	t.Setenv("RELAYFILE_TZ", "UTC")
+	now := time.Date(2026, 5, 15, 12, 0, 0, 0, time.UTC)
+	withDigestNow(now, func() {
+		localDir := t.TempDir()
+		seedDigestMirror(t, localDir, now)
+		upsertDigestWorkspace(t, localDir, "UTC")
 
-	localDir := t.TempDir()
-	if err := ensureMirrorLayout(localDir); err != nil {
-		t.Fatalf("ensureMirrorLayout failed: %v", err)
-	}
-	indexDir := filepath.Join(localDir, "linear", "issues")
-	if err := os.MkdirAll(indexDir, 0o755); err != nil {
-		t.Fatalf("mkdir index dir failed: %v", err)
-	}
-	indexPayload := `[
-  {"identifier":"LIN-1","title":"Integration Tracking","updated":"2026-05-12T10:00:00Z","path":"/linear/issues/LIN-1.json"},
-  {"identifier":"LIN-2","title":"Outside Window","updated":"2026-05-11T10:00:00Z","path":"/linear/issues/LIN-2.json"}
-]`
-	if err := os.WriteFile(filepath.Join(indexDir, "_index.json"), []byte(indexPayload), 0o644); err != nil {
-		t.Fatalf("write index failed: %v", err)
-	}
-	upsertDigestWorkspace(t, localDir)
+		for _, window := range []string{"today", "yesterday", "this-week", "last-week", "2026-05-15", "2026-05-12"} {
+			var stdout bytes.Buffer
+			if err := run([]string{"digest", "rebuild", "--window", window, "--workspace", "demo"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+				t.Fatalf("digest rebuild %s failed: %v", window, err)
+			}
+			if !strings.Contains(stdout.String(), "Regenerated ") {
+				t.Fatalf("digest rebuild %s missing success output: %q", window, stdout.String())
+			}
+		}
 
-	var stdout bytes.Buffer
-	withDigestRebuilder(localDigestRebuilder{now: func() time.Time {
-		return time.Date(2026, 5, 13, 12, 0, 0, 0, time.UTC)
-	}}, func() {
-		if err := run([]string{"digest", "rebuild", "--window", "yesterday", "--workspace", "demo"}, strings.NewReader(""), &stdout, &stdout); err != nil {
-			t.Fatalf("run digest rebuild failed: %v\nstdout:\n%s", err, stdout.String())
+		for _, rel := range []string{
+			"digests/today.md",
+			"digests/yesterday.md",
+			"digests/this-week.md",
+			"digests/last-week.md",
+			"digests/2026-05-15.md",
+			"digests/2026-05-12.md",
+		} {
+			if _, err := os.Stat(filepath.Join(localDir, filepath.FromSlash(rel))); err != nil {
+				t.Fatalf("expected %s to be written: %v", rel, err)
+			}
 		}
 	})
-	for _, rel := range []string{"digests/2026-05-12.md", "digests/yesterday.md"} {
-		body, err := os.ReadFile(filepath.Join(localDir, filepath.FromSlash(rel)))
+}
+
+func TestDigestRebuildYesterdayWritesDateStampedSibling(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+	t.Setenv("RELAYFILE_TZ", "UTC")
+	now := time.Date(2026, 5, 15, 12, 0, 0, 0, time.UTC)
+	withDigestNow(now, func() {
+		localDir := t.TempDir()
+		seedDigestMirror(t, localDir, now)
+		upsertDigestWorkspace(t, localDir, "UTC")
+
+		var stdout bytes.Buffer
+		if err := run([]string{"digest", "rebuild", "--window", "yesterday", "--workspace", "demo"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+			t.Fatalf("digest rebuild yesterday failed: %v", err)
+		}
+		for _, rel := range []string{"digests/yesterday.md", "digests/2026-05-14.md"} {
+			if _, err := os.Stat(filepath.Join(localDir, filepath.FromSlash(rel))); err != nil {
+				t.Fatalf("expected %s to be written by isolated yesterday rebuild: %v", rel, err)
+			}
+		}
+		body, err := os.ReadFile(filepath.Join(localDir, "digests", "2026-05-14.md"))
 		if err != nil {
-			t.Fatalf("read %s failed: %v", rel, err)
+			t.Fatalf("read date-stamped sibling: %v", err)
 		}
-		got := string(body)
-		for _, needle := range []string{"date: 2026-05-12", "covers: yesterday", "events: 1", "LIN-1", "/linear/issues/LIN-1.json"} {
-			if !strings.Contains(got, needle) {
-				t.Fatalf("%s missing %q:\n%s", rel, needle, got)
-			}
+		if !bytes.Contains(body, []byte("linear/issues/2.md")) || bytes.Contains(body, []byte("github/issues/1.md")) {
+			t.Fatalf("date-stamped sibling did not cover only the closed local day:\n%s", body)
 		}
-	}
-	if !strings.Contains(stdout.String(), "events=1") {
-		t.Fatalf("expected event count in stdout, got %q", stdout.String())
-	}
+	})
 }
 
-func TestDigestRebuildUsesRemoteRootForNonRootMount(t *testing.T) {
+func TestDigestRebuildPastDateWithNoEvents(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+	t.Setenv("RELAYFILE_TZ", "UTC")
+	withDigestNow(time.Date(2026, 5, 15, 12, 0, 0, 0, time.UTC), func() {
+		localDir := t.TempDir()
+		if err := ensureMirrorLayout(localDir); err != nil {
+			t.Fatalf("ensureMirrorLayout failed: %v", err)
+		}
+		if err := os.MkdirAll(filepath.Join(localDir, "github"), 0o755); err != nil {
+			t.Fatalf("mkdir provider: %v", err)
+		}
+		upsertDigestWorkspace(t, localDir, "UTC")
+
+		var stdout bytes.Buffer
+		if err := run([]string{"digest", "rebuild", "--window", "2026-05-12", "--workspace", "demo"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+			t.Fatalf("digest rebuild no-events date failed: %v", err)
+		}
+		body, err := os.ReadFile(filepath.Join(localDir, "digests", "2026-05-12.md"))
+		if err != nil {
+			t.Fatalf("read date digest: %v", err)
+		}
+		if !bytes.Contains(body, []byte("events: 0")) || !bytes.Contains(body, []byte("_no activity_")) {
+			t.Fatalf("no-event digest missing expected body:\n%s", body)
+		}
+	})
+}
+
+func TestDigestRebuildPastDateExcludesNewerFiles(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+	t.Setenv("RELAYFILE_TZ", "UTC")
+	withDigestNow(time.Date(2026, 5, 15, 12, 0, 0, 0, time.UTC), func() {
+		localDir := t.TempDir()
+		if err := ensureMirrorLayout(localDir); err != nil {
+			t.Fatalf("ensureMirrorLayout failed: %v", err)
+		}
+		files := map[string]time.Time{
+			"github/issues/old.md": time.Date(2026, 5, 12, 12, 0, 0, 0, time.UTC),
+			"github/issues/new.md": time.Date(2026, 5, 15, 12, 0, 0, 0, time.UTC),
+		}
+		for rel, mod := range files {
+			path := filepath.Join(localDir, filepath.FromSlash(rel))
+			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+				t.Fatalf("mkdir %s: %v", rel, err)
+			}
+			if err := os.WriteFile(path, []byte(rel), 0o644); err != nil {
+				t.Fatalf("write %s: %v", rel, err)
+			}
+			if err := os.Chtimes(path, mod, mod); err != nil {
+				t.Fatalf("chtimes %s: %v", rel, err)
+			}
+		}
+		upsertDigestWorkspace(t, localDir, "UTC")
+
+		var stdout bytes.Buffer
+		if err := run([]string{"digest", "rebuild", "--window", "2026-05-12", "--workspace", "demo"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+			t.Fatalf("digest rebuild past date failed: %v", err)
+		}
+		body, err := os.ReadFile(filepath.Join(localDir, "digests", "2026-05-12.md"))
+		if err != nil {
+			t.Fatalf("read rebuilt digest: %v", err)
+		}
+		if !bytes.Contains(body, []byte("github/issues/old.md")) || bytes.Contains(body, []byte("github/issues/new.md")) {
+			t.Fatalf("past date rebuild included files outside the requested day:\n%s", body)
+		}
+	})
+}
+
+func TestDigestRebuildDateErrors(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+	t.Setenv("RELAYFILE_TZ", "UTC")
+	withDigestNow(time.Date(2026, 5, 15, 12, 0, 0, 0, time.UTC), func() {
+		localDir := t.TempDir()
+		if err := ensureMirrorLayout(localDir); err != nil {
+			t.Fatalf("ensureMirrorLayout failed: %v", err)
+		}
+		upsertDigestWorkspace(t, localDir, "UTC")
+
+		var stdout bytes.Buffer
+		err := run([]string{"digest", "rebuild", "--window", "2026-05-16", "--workspace", "demo"}, strings.NewReader(""), &stdout, &stdout)
+		if err == nil || !strings.Contains(err.Error(), "future") {
+			t.Fatalf("expected future date error, got %v", err)
+		}
+		err = run([]string{"digest", "rebuild", "--window", "2026-02-30", "--workspace", "demo"}, strings.NewReader(""), &stdout, &stdout)
+		if err == nil || !strings.Contains(err.Error(), "unknown window") {
+			t.Fatalf("expected malformed date error, got %v", err)
+		}
+	})
+}
+
+func TestDigestRebuildJSONIncludesWarningsWhenPresent(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)
 
@@ -184,190 +289,117 @@ func TestDigestRebuildUsesRemoteRootForNonRootMount(t *testing.T) {
 	if err := ensureMirrorLayout(localDir); err != nil {
 		t.Fatalf("ensureMirrorLayout failed: %v", err)
 	}
-	indexDir := filepath.Join(localDir, "pages")
-	if err := os.MkdirAll(indexDir, 0o755); err != nil {
-		t.Fatalf("mkdir index dir failed: %v", err)
-	}
-	indexPayload := `[
-  {"identifier":"page-1","title":"Rooted Page","updated":"2026-05-12T10:00:00Z"}
-]`
-	if err := os.WriteFile(filepath.Join(indexDir, "_index.json"), []byte(indexPayload), 0o644); err != nil {
-		t.Fatalf("write index failed: %v", err)
-	}
-	writeWritebackListState(t, localDir, syncStateFile{WorkspaceID: "ws_demo", RemoteRoot: "/notion"})
-	upsertDigestWorkspace(t, localDir)
+	upsertDigestWorkspace(t, localDir, "UTC")
 
+	fake := &fakeDigestRebuilder{result: digestRebuildResult{
+		Path:     filepath.Join(localDir, "digests", "today.md"),
+		Events:   1,
+		Warnings: []string{"example warning"},
+	}}
 	var stdout bytes.Buffer
-	withDigestRebuilder(localDigestRebuilder{now: func() time.Time {
-		return time.Date(2026, 5, 13, 12, 0, 0, 0, time.UTC)
-	}}, func() {
-		if err := run([]string{"digest", "rebuild", "--window", "yesterday", "--workspace", "demo"}, strings.NewReader(""), &stdout, &stdout); err != nil {
-			t.Fatalf("run digest rebuild failed: %v\nstdout:\n%s", err, stdout.String())
+	withDigestRebuilder(fake, func() {
+		if err := run([]string{"digest", "rebuild", "--window", "today", "--workspace", "demo", "--json"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+			t.Fatalf("digest rebuild json failed: %v", err)
 		}
 	})
-	body, err := os.ReadFile(filepath.Join(localDir, "digests", "yesterday.md"))
-	if err != nil {
-		t.Fatalf("read yesterday digest failed: %v", err)
+	var got digestRebuildResult
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("json output invalid: %v\n%s", err, stdout.String())
 	}
-	got := string(body)
-	for _, needle := range []string{"events: 1", "page-1", "/notion/pages/_index.json"} {
-		if !strings.Contains(got, needle) {
-			t.Fatalf("digest missing %q:\n%s", needle, got)
-		}
-	}
-	if strings.Contains(got, "/pages/_index.json") && !strings.Contains(got, "/notion/pages/_index.json") {
-		t.Fatalf("digest used local-relative path instead of remote root:\n%s", got)
+	if len(got.Warnings) != 1 || got.Warnings[0] != "example warning" {
+		t.Fatalf("warnings missing from json result: %+v", got)
 	}
 }
 
-func TestDigestRebuildReadsRowsIndexesAndNestedDigestNamedDirectories(t *testing.T) {
+func TestDigestRebuildJSONAndForceReplace(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)
-
-	localDir := t.TempDir()
-	if err := ensureMirrorLayout(localDir); err != nil {
-		t.Fatalf("ensureMirrorLayout failed: %v", err)
-	}
-	indexDir := filepath.Join(localDir, "notion", "pages")
-	nestedDir := filepath.Join(localDir, "notion", "pages", "by-title", "digests")
-	for _, dir := range []string{indexDir, nestedDir} {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			t.Fatalf("mkdir %s failed: %v", dir, err)
+	t.Setenv("RELAYFILE_TZ", "UTC")
+	withDigestNow(time.Date(2026, 5, 15, 12, 0, 0, 0, time.UTC), func() {
+		localDir := t.TempDir()
+		seedDigestMirror(t, localDir, time.Date(2026, 5, 15, 12, 0, 0, 0, time.UTC))
+		oldPath := filepath.Join(localDir, "github", "issues", "old.md")
+		if err := os.MkdirAll(filepath.Dir(oldPath), 0o755); err != nil {
+			t.Fatalf("mkdir old issue: %v", err)
 		}
-	}
-	indexPayload := `{"rows":[
-  {"id":"page-1","title":"Release Plan","lastEditedAt":"2026-05-12T10:00:00Z","path":"/notion/pages/page-1/content.md"},
-  {"id":"page-2","title":"Nested Digest Page","last_edited_at":"2026-05-12T11:00:00Z","path":"/notion/pages/by-title/digests/page-2.json"}
-]}`
-	if err := os.WriteFile(filepath.Join(indexDir, "_index.json"), []byte(indexPayload), 0o644); err != nil {
-		t.Fatalf("write rows index failed: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(nestedDir, "_index.json"), []byte(`[{"id":"page-3","updated":"2026-05-12T12:00:00Z","path":"/notion/pages/by-title/digests/page-3.json"}]`), 0o644); err != nil {
-		t.Fatalf("write nested index failed: %v", err)
-	}
-	upsertDigestWorkspace(t, localDir)
-
-	var stdout bytes.Buffer
-	withDigestRebuilder(localDigestRebuilder{now: func() time.Time {
-		return time.Date(2026, 5, 13, 12, 0, 0, 0, time.UTC)
-	}}, func() {
-		if err := run([]string{"digest", "rebuild", "--window", "yesterday", "--workspace", "demo"}, strings.NewReader(""), &stdout, &stdout); err != nil {
-			t.Fatalf("run digest rebuild failed: %v\nstdout:\n%s", err, stdout.String())
+		if err := os.WriteFile(oldPath, []byte("old"), 0o644); err != nil {
+			t.Fatalf("write old issue: %v", err)
 		}
-	})
-	body, err := os.ReadFile(filepath.Join(localDir, "digests", "yesterday.md"))
-	if err != nil {
-		t.Fatalf("read yesterday digest failed: %v", err)
-	}
-	got := string(body)
-	for _, needle := range []string{"events: 3", "Release Plan", "Nested Digest Page", "page-3"} {
-		if !strings.Contains(got, needle) {
-			t.Fatalf("digest missing %q:\n%s", needle, got)
+		oldTime := time.Date(2026, 5, 12, 12, 0, 0, 0, time.UTC)
+		if err := os.Chtimes(oldPath, oldTime, oldTime); err != nil {
+			t.Fatalf("chtimes old issue: %v", err)
 		}
-	}
-}
+		upsertDigestWorkspace(t, localDir, "UTC")
 
-func TestDigestWindowsResolveInUTC(t *testing.T) {
-	now := time.Date(2026, 5, 18, 1, 2, 3, 0, time.UTC)
-	tests := []struct {
-		window string
-		want   []string
-	}{
-		{window: "today", want: []string{"2026-05-18"}},
-		{window: "yesterday", want: []string{"2026-05-17"}},
-		{window: "2026-05-12", want: []string{"2026-05-12"}},
-		{window: "this-week", want: []string{"2026-05-18"}},
-		{window: "last-week", want: []string{"2026-05-11"}},
-	}
-	for _, tt := range tests {
-		t.Run(tt.window, func(t *testing.T) {
-			windows, err := resolveDigestWindows(tt.window, now)
-			if err != nil {
-				t.Fatalf("resolveDigestWindows failed: %v", err)
-			}
-			if len(windows) != len(tt.want) {
-				t.Fatalf("window count = %d, want %d: %+v", len(windows), len(tt.want), windows)
-			}
-			for i, want := range tt.want {
-				if got := windows[i].Date.Format("2006-01-02"); got != want {
-					t.Fatalf("windows[%d] = %s, want %s", i, got, want)
-				}
-			}
-		})
-	}
-}
+		target := filepath.Join(localDir, "digests", "2026-05-12.md")
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			t.Fatalf("mkdir digest dir: %v", err)
+		}
+		if err := os.WriteFile(target, []byte("stale"), 0o644); err != nil {
+			t.Fatalf("write stale digest: %v", err)
+		}
 
-func TestDigestRebuildWritesWeeklyDigestFile(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	clearRelayfileEnv(t)
-
-	localDir := t.TempDir()
-	if err := ensureMirrorLayout(localDir); err != nil {
-		t.Fatalf("ensureMirrorLayout failed: %v", err)
-	}
-	indexDir := filepath.Join(localDir, "linear", "issues")
-	if err := os.MkdirAll(indexDir, 0o755); err != nil {
-		t.Fatalf("mkdir index dir failed: %v", err)
-	}
-	indexPayload := `[
-  {"identifier":"LIN-1","updated":"2026-05-12T10:00:00Z","path":"/linear/issues/LIN-1.json"},
-  {"identifier":"LIN-2","updated":"2026-05-17T10:00:00Z","path":"/linear/issues/LIN-2.json"},
-  {"identifier":"LIN-3","updated":"2026-05-18T10:00:00Z","path":"/linear/issues/LIN-3.json"}
-]`
-	if err := os.WriteFile(filepath.Join(indexDir, "_index.json"), []byte(indexPayload), 0o644); err != nil {
-		t.Fatalf("write index failed: %v", err)
-	}
-	upsertDigestWorkspace(t, localDir)
-
-	var stdout bytes.Buffer
-	withDigestRebuilder(localDigestRebuilder{now: func() time.Time {
-		return time.Date(2026, 5, 18, 12, 0, 0, 0, time.UTC)
-	}}, func() {
-		if err := run([]string{"digest", "rebuild", "--window", "last-week", "--workspace", "demo"}, strings.NewReader(""), &stdout, &stdout); err != nil {
-			t.Fatalf("run digest rebuild failed: %v\nstdout:\n%s", err, stdout.String())
+		var stdout bytes.Buffer
+		if err := run([]string{"digest", "rebuild", "--window", "2026-05-12", "--workspace", "demo", "--json"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+			t.Fatalf("digest rebuild json failed: %v", err)
+		}
+		var got digestRebuildResult
+		if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+			t.Fatalf("json output invalid: %v\n%s", err, stdout.String())
+		}
+		if got.WorkspaceID != "ws_demo" || got.Window != "2026-05-12" || got.Events == 0 {
+			t.Fatalf("unexpected json result: %+v", got)
+		}
+		if got.Warnings != nil {
+			t.Fatalf("expected warnings to be omitted for clean rebuild, got %+v", got.Warnings)
+		}
+		body, err := os.ReadFile(target)
+		if err != nil {
+			t.Fatalf("read rebuilt digest: %v", err)
+		}
+		if bytes.Equal(body, []byte("stale")) || !bytes.Contains(body, []byte("github/issues/old.md")) {
+			t.Fatalf("force rebuild did not replace stale digest:\n%s", body)
 		}
 	})
-
-	body, err := os.ReadFile(filepath.Join(localDir, "digests", "last-week.md"))
-	if err != nil {
-		t.Fatalf("read last-week digest failed: %v", err)
-	}
-	got := string(body)
-	for _, needle := range []string{"date: 2026-05-11", "covers: last-week", "events: 2", "LIN-1", "LIN-2"} {
-		if !strings.Contains(got, needle) {
-			t.Fatalf("last-week digest missing %q:\n%s", needle, got)
-		}
-	}
-	if strings.Contains(got, "LIN-3") {
-		t.Fatalf("last-week digest included current-week event:\n%s", got)
-	}
-	if _, err := os.Stat(filepath.Join(localDir, "digests", "2026-05-11.md")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("last-week rebuild should write last-week.md, not first daily file; stat err=%v", err)
-	}
 }
 
-func TestEnsureMirrorLayoutMaterializesActivitySummarySkill(t *testing.T) {
-	localDir := t.TempDir()
+func seedDigestMirror(t *testing.T, localDir string, now time.Time) {
+	t.Helper()
 	if err := ensureMirrorLayout(localDir); err != nil {
 		t.Fatalf("ensureMirrorLayout failed: %v", err)
 	}
-	body, err := os.ReadFile(filepath.Join(localDir, ".skills", "activity-summary.md"))
-	if err != nil {
-		t.Fatalf("read activity-summary skill failed: %v", err)
+	files := map[string]time.Time{
+		"github/issues/1.md": now,
+		"linear/issues/2.md": now.AddDate(0, 0, -1),
 	}
-	for _, needle := range []string{"activity-summary", "digests/yesterday.md", "_index.json", "LAYOUT.md"} {
-		if !strings.Contains(string(body), needle) {
-			t.Fatalf("activity-summary skill missing %q:\n%s", needle, string(body))
+	for rel, mod := range files {
+		path := filepath.Join(localDir, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", rel, err)
+		}
+		if err := os.WriteFile(path, []byte(rel), 0o644); err != nil {
+			t.Fatalf("write %s: %v", rel, err)
+		}
+		if err := os.Chtimes(path, mod, mod); err != nil {
+			t.Fatalf("chtimes %s: %v", rel, err)
 		}
 	}
 }
 
-func upsertDigestWorkspace(t *testing.T, localDir string) {
+func withDigestNow(now time.Time, fn func()) {
+	prev := digestNow
+	digestNow = func() time.Time { return now }
+	defer func() { digestNow = prev }()
+	fn()
+}
+
+func upsertDigestWorkspace(t *testing.T, localDir, timezone string) {
 	t.Helper()
 	if _, err := upsertWorkspaceDetails(workspaceRecord{
 		Name:       "demo",
 		ID:         "ws_demo",
 		LocalDir:   localDir,
+		Timezone:   timezone,
 		CreatedAt:  time.Now().UTC().Format(time.RFC3339),
 		LastUsedAt: time.Now().UTC().Format(time.RFC3339),
 	}); err != nil {

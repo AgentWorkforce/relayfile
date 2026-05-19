@@ -26,6 +26,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/agentworkforce/relayfile/internal/digest"
 	"github.com/fsnotify/fsnotify"
 	"nhooyr.io/websocket"
 	"nhooyr.io/websocket/wsjson"
@@ -99,6 +100,7 @@ func resolveDurationEnv(opt time.Duration, env string, def time.Duration, logger
 var providerLayoutAliasSegments = []string{
 	"by-title",
 	"by-id",
+	"by-edited",
 	"by-name",
 	"by-state",
 }
@@ -540,10 +542,14 @@ type SyncerOptions struct {
 	// in-memory snapshots. nil falls back to RELAYFILE_MOUNT_LOW_MEMORY.
 	LowMemory *bool
 	// ProviderLayoutRegistrar receives deterministic per-provider layout
-	// manifests derived from remote snapshots. The FUSE layer can implement
-	// this to expose virtual <provider>/.layout.md files without coupling
-	// mountsync back to mountfuse.
+	// manifests derived from remote snapshots. Mount layers can implement
+	// this to expose virtual <provider>/LAYOUT.md files; legacy
+	// <provider>/.layout.md remains a compatibility alias.
 	ProviderLayoutRegistrar ProviderLayoutRegistrar
+	DigestSource            digest.ChangeEventSource
+	DigestProviders         []string
+	DigestTimezone          string
+	DigestNow               func() time.Time
 }
 
 type Logger interface {
@@ -672,6 +678,8 @@ type Syncer struct {
 	lazyRepos            bool
 	lowMemory            bool
 	layoutRegistrar      ProviderLayoutRegistrar
+	closeScheduler       *CloseScheduler
+	rollingCoalescer     *RollingDigestCoalescer
 	circuit              *CloudErrorCircuit
 	mu                   sync.Mutex
 }
@@ -947,6 +955,25 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 	if lowMemory {
 		bulkFlushThreshold = 16
 	}
+	var closeScheduler *CloseScheduler
+	var rollingCoalescer *RollingDigestCoalescer
+	if opts.DigestSource != nil {
+		tz, err := digest.ResolveTZ(digest.WorkspaceTZConfig{Timezone: opts.DigestTimezone})
+		if err != nil {
+			return nil, err
+		}
+		closeScheduler = &CloseScheduler{
+			MountRoot: localRoot,
+			TZ:        tz,
+			Providers: append([]string(nil), opts.DigestProviders...),
+			Source:    opts.DigestSource,
+			Now:       opts.DigestNow,
+		}
+		rollingCoalescer = &RollingDigestCoalescer{
+			Interval: 30 * time.Second,
+			Now:      opts.DigestNow,
+		}
+	}
 	return &Syncer{
 		client:               client,
 		workspace:            workspace,
@@ -975,6 +1002,8 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 		lazyRepos:            lazyRepos,
 		lowMemory:            lowMemory,
 		layoutRegistrar:      opts.ProviderLayoutRegistrar,
+		closeScheduler:       closeScheduler,
+		rollingCoalescer:     rollingCoalescer,
 		circuit:              NewCloudErrorCircuit(),
 		state: mountState{
 			Files: map[string]trackedFile{},
@@ -1045,6 +1074,12 @@ func (s *Syncer) HandleLocalChange(ctx context.Context, relativePath string, op 
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// ObserveChange mutates coalescer state that Due()/MarkFlushed() read
+	// under s.mu (runRollingDigestJobsLocked). It must run under the same
+	// lock to avoid races while the watcher is processing local churn.
+	if s.rollingCoalescer != nil {
+		s.rollingCoalescer.ObserveChange(relativePath)
+	}
 	if err := s.loadState(); err != nil {
 		return err
 	}
@@ -1626,6 +1661,16 @@ func (s *Syncer) sync(ctx context.Context, forcePoll bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.markReconcileStarted()
+	if err := s.runClosingDigestJobsLocked(ctx); err != nil {
+		s.markSyncError(err)
+		_ = s.saveState()
+		return err
+	}
+	if err := s.runRollingDigestJobsLocked(ctx); err != nil {
+		s.markSyncError(err)
+		_ = s.saveState()
+		return err
+	}
 
 	conflicted, err := s.pushLocal(ctx)
 	if err != nil {
@@ -1645,6 +1690,37 @@ func (s *Syncer) sync(ctx context.Context, forcePoll bool) error {
 	}
 	s.markSyncSuccess()
 	return s.saveState()
+}
+
+func (s *Syncer) runClosingDigestJobsLocked(ctx context.Context) error {
+	if s.closeScheduler == nil {
+		return nil
+	}
+	_, err := s.closeScheduler.Tick(ctx)
+	return err
+}
+
+func (s *Syncer) runRollingDigestJobsLocked(ctx context.Context) error {
+	if s.rollingCoalescer == nil || s.closeScheduler == nil || !s.rollingCoalescer.Due() {
+		return nil
+	}
+	tz := s.closeScheduler.TZ
+	if tz == nil {
+		tz = time.UTC
+	}
+	clock := s.closeScheduler.Now
+	if clock == nil {
+		clock = time.Now
+	}
+	now := clock()
+	if _, err := digest.WriteToday(ctx, s.closeScheduler.MountRoot, s.closeScheduler.Source, s.closeScheduler.Providers, now, tz, digest.BuildOptions{}); err != nil {
+		return err
+	}
+	if _, err := digest.WriteThisWeek(ctx, s.closeScheduler.MountRoot, s.closeScheduler.Source, digest.ThisWeekWindow(now, now, s.closeScheduler.Providers, tz)); err != nil {
+		return err
+	}
+	s.rollingCoalescer.MarkFlushed()
+	return nil
 }
 
 func (s *Syncer) connectWebSocket(ctx context.Context) error {
@@ -2583,27 +2659,39 @@ func (s *Syncer) materializeProviderLayoutsFromPaths(remotePaths map[string]stru
 		return nil
 	}
 
-	providerResources := map[string]map[string]struct{}{}
+	providerManifests := map[string]struct {
+		resources map[string]struct{}
+		aliases   map[string]struct{}
+	}{}
 	for remotePath := range remotePaths {
-		provider, resource, ok := providerLayoutParts(s.remoteRoot, remotePath)
+		provider, resource, alias, ok := providerLayoutPartsWithAlias(s.remoteRoot, remotePath)
 		if !ok {
 			continue
 		}
-		if _, ok := providerResources[provider]; !ok {
-			providerResources[provider] = map[string]struct{}{}
+		manifest := providerManifests[provider]
+		if manifest.resources == nil {
+			manifest.resources = map[string]struct{}{}
 		}
 		if resource != "" {
-			providerResources[provider][resource] = struct{}{}
+			manifest.resources[resource] = struct{}{}
 		}
+		if alias != "" {
+			if manifest.aliases == nil {
+				manifest.aliases = map[string]struct{}{}
+			}
+			manifest.aliases[alias] = struct{}{}
+		}
+		providerManifests[provider] = manifest
 	}
 
-	providers := make([]string, 0, len(providerResources))
-	for provider := range providerResources {
+	providers := make([]string, 0, len(providerManifests))
+	for provider := range providerManifests {
 		providers = append(providers, provider)
 	}
 	sort.Strings(providers)
 	for _, provider := range providers {
-		manifest := providerLayoutManifest(provider, providerResources[provider])
+		parts := providerManifests[provider]
+		manifest := providerLayoutManifest(provider, parts.resources, parts.aliases)
 		if err := s.layoutRegistrar.RegisterProviderLayout(provider, manifest); err != nil {
 			return fmt.Errorf("register provider layout for %s: %w", provider, err)
 		}
@@ -2619,27 +2707,45 @@ func (s *Syncer) ensureProviderLayout(provider string) error {
 	if provider == "" || isReservedProviderLayoutSegment(provider) {
 		return nil
 	}
-	return s.layoutRegistrar.RegisterProviderLayout(provider, providerLayoutManifest(provider, nil))
+	return s.layoutRegistrar.RegisterProviderLayout(provider, providerLayoutManifest(provider, nil, nil))
 }
 
-func providerLayoutManifest(provider string, resources map[string]struct{}) ProviderLayoutManifest {
+func providerLayoutManifest(provider string, resources map[string]struct{}, observedAliases map[string]struct{}) ProviderLayoutManifest {
 	resourceNames := make([]string, 0, len(resources))
 	for resource := range resources {
 		resourceNames = append(resourceNames, resource)
 	}
 	sort.Strings(resourceNames)
+
+	aliases := make(map[string]struct{}, len(observedAliases))
+	for alias := range observedAliases {
+		if isProviderLayoutAliasSegment(alias) {
+			aliases[alias] = struct{}{}
+		}
+	}
+	aliasNames := make([]string, 0, len(aliases))
+	for alias := range aliases {
+		aliasNames = append(aliasNames, alias)
+	}
+	sort.Strings(aliasNames)
+
 	return ProviderLayoutManifest{
 		Provider:      provider,
 		Resources:     resourceNames,
-		AliasSegments: append([]string(nil), providerLayoutAliasSegments...),
+		AliasSegments: aliasNames,
 	}
 }
 
 func providerLayoutParts(remoteRoot, remotePath string) (provider, resource string, ok bool) {
+	provider, resource, _, ok = providerLayoutPartsWithAlias(remoteRoot, remotePath)
+	return provider, resource, ok
+}
+
+func providerLayoutPartsWithAlias(remoteRoot, remotePath string) (provider, resource, alias string, ok bool) {
 	remoteRoot = normalizeRemotePath(remoteRoot)
 	remotePath = normalizeRemotePath(remotePath)
 	if !isUnderRemoteRoot(remoteRoot, remotePath) {
-		return "", "", false
+		return "", "", "", false
 	}
 
 	rel := strings.TrimPrefix(remotePath, remoteRoot)
@@ -2654,7 +2760,7 @@ func providerLayoutParts(remoteRoot, remotePath string) (provider, resource stri
 	if remoteRoot != "/" && len(rootSegments) > 0 {
 		provider = strings.TrimSpace(rootSegments[0])
 		if provider == "" || isReservedProviderLayoutSegment(provider) {
-			return "", "", false
+			return "", "", "", false
 		}
 		if len(rootSegments) > 1 {
 			resource = providerLayoutRootResourceSegment(rootSegments[1:])
@@ -2662,18 +2768,20 @@ func providerLayoutParts(remoteRoot, remotePath string) (provider, resource stri
 		if resource == "" {
 			resource = providerLayoutResourceSegment(relSegments)
 		}
-		return provider, resource, true
+		alias = providerLayoutAliasSegment(append(rootSegments[1:], relSegments...))
+		return provider, resource, alias, true
 	}
 	if len(relSegments) == 0 {
-		return "", "", false
+		return "", "", "", false
 	}
 
 	provider = strings.TrimSpace(relSegments[0])
 	if provider == "" || isReservedProviderLayoutSegment(provider) {
-		return "", "", false
+		return "", "", "", false
 	}
 	resource = providerLayoutResourceSegment(relSegments[1:])
-	return provider, resource, true
+	alias = providerLayoutAliasSegment(relSegments[1:])
+	return provider, resource, alias, true
 }
 
 func providerLayoutPathSegments(path string) []string {
@@ -2704,6 +2812,16 @@ func providerLayoutCleanResourceSegment(segment string) string {
 		return ""
 	}
 	return candidate
+}
+
+func providerLayoutAliasSegment(segments []string) string {
+	for _, segment := range segments {
+		candidate := strings.TrimSpace(segment)
+		if isProviderLayoutAliasSegment(candidate) {
+			return candidate
+		}
+	}
+	return ""
 }
 
 func isReservedProviderLayoutSegment(segment string) bool {
