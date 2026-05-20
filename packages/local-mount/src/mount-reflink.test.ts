@@ -33,6 +33,15 @@ function write(file: string, body: string): void {
   writeFileSync(file, body, 'utf8');
 }
 
+async function waitFor(check: () => boolean, timeoutMs = 5000): Promise<void> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (check()) return;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(`waitFor timed out after ${timeoutMs}ms`);
+}
+
 describe('createMount reflink copies', () => {
   let projectDir: string;
   let mountDir: string;
@@ -64,10 +73,49 @@ describe('createMount reflink copies', () => {
       fsConstants.COPYFILE_FICLONE
     );
     expect(existsSync(path.join(handle.mountDir, 'src/code.ts'))).toBe(true);
+    expect(handle.initialFileCount).toBe(1);
+    expect(handle.initialMountDurationMs).toBeGreaterThanOrEqual(0);
 
     writeFileSync(path.join(handle.mountDir, 'src/code.ts'), 'mount-only edit', 'utf8');
     expect(readFileSync(path.join(projectDir, 'src/code.ts'), 'utf8')).toBe('original');
 
     handle.cleanup();
+  });
+
+  it('requests non-forcing filesystem reflinks for auto-sync copies', async () => {
+    write(path.join(projectDir, 'file.txt'), 'original');
+
+    const handle = await createMount(projectDir, mountDir, {
+      ignoredPatterns: [],
+      readonlyPatterns: [],
+      excludeDirs: [],
+    });
+    const auto = handle.startAutoSync({ debounceMs: 50, scanIntervalMs: 10_000 });
+    await auto.ready();
+    copyFileSyncMock.mockClear();
+
+    try {
+      writeFileSync(path.join(handle.mountDir, 'file.txt'), 'edited-in-mount', 'utf8');
+      await waitFor(() => readFileSync(path.join(projectDir, 'file.txt'), 'utf8') === 'edited-in-mount');
+      expect(copyFileSyncMock).toHaveBeenCalledWith(
+        expect.stringMatching(/file\.txt$/),
+        expect.stringMatching(/file\.txt$/),
+        fsConstants.COPYFILE_FICLONE
+      );
+
+      copyFileSyncMock.mockClear();
+      writeFileSync(path.join(projectDir, 'file.txt'), 'edited-in-project', 'utf8');
+      await waitFor(() =>
+        readFileSync(path.join(handle.mountDir, 'file.txt'), 'utf8') === 'edited-in-project'
+      );
+      expect(copyFileSyncMock).toHaveBeenCalledWith(
+        expect.stringMatching(/file\.txt$/),
+        expect.stringMatching(/file\.txt$/),
+        fsConstants.COPYFILE_FICLONE
+      );
+    } finally {
+      await auto.stop();
+      handle.cleanup();
+    }
   });
 });

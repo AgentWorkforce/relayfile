@@ -6,7 +6,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_No unreleased changes._
+### Changed
+- Initial mount and auto-sync file copies now request filesystem reflinks when available, while preserving byte-copy fallback behavior on filesystems without copy-on-write support.
+- `createMount` now reports `initialFileCount` and `initialMountDurationMs` on the returned handle for caller-side mount setup telemetry.
 
 ## [0.7.23] - 2026-05-19
 

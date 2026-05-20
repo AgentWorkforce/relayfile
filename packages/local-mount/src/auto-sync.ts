@@ -1,5 +1,6 @@
 import {
   chmodSync,
+  constants as fsConstants,
   copyFileSync,
   existsSync,
   lstatSync,
@@ -641,7 +642,7 @@ function doMountToProject(
     updateState(state, relPosix, mountAbs, target);
     return false;
   }
-  copyFileSync(mountAbs, target);
+  copyFileSync(mountAbs, target, fsConstants.COPYFILE_FICLONE);
   updateState(state, relPosix, mountAbs, target);
   return true;
 }
@@ -666,7 +667,7 @@ function doProjectToMount(
   if (existsSync(target)) {
     try { chmodSync(target, 0o644); } catch { /* best effort */ }
   }
-  copyFileSync(projectAbs, target);
+  copyFileSync(projectAbs, target, fsConstants.COPYFILE_FICLONE);
   if (readonly) {
     try { chmodSync(target, 0o444); } catch { /* best effort */ }
   } else {
