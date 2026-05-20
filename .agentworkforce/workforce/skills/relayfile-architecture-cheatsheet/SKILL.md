@@ -1,3 +1,8 @@
+---
+name: relayfile-architecture-cheatsheet
+description: Use when investigating Relayfile cloud, mount daemon, provider sync, discovery, writeback, digest generation, token handling, WorkspaceDO behavior, or architecture during integration verification and debugging.
+---
+
 # Relayfile Architecture Cheatsheet
 
 Compressed working-memory model of how Relayfile is laid out, so verification agents can trace failures without re-deriving the architecture each session. Read at the start of any task that touches the cloud or mount daemon.

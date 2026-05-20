@@ -1,3 +1,8 @@
+---
+name: integration-verification-playbook
+description: Use when verifying Relayfile provider integrations end-to-end against a real workspace, including auth, OAuth connect, sync, file-tree shape, discovery materialization, outbound writeback, inbound webhook checks, evidence capture, and issue filing.
+---
+
 # Integration Verification Playbook
 
 The canonical methodology for proving — with empirical evidence against a real Relayfile workspace — that a provider integration actually works end-to-end. Read this in full at the start of every verification task. Update it whenever a new failure mode appears.
