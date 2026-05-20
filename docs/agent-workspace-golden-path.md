@@ -69,7 +69,7 @@ The target user experience is:
 The TypeScript path should feel like this:
 
 ```ts
-import { RelayfileSetup } from '@relayfile/sdk'
+import { RelayfileSetup } from '@relayfile/sdk/cli'
 
 const setup = await RelayfileSetup.login({
   onLoginUrl: (url) => {

@@ -118,7 +118,7 @@ npm install @relayfile/sdk
 Use when you already have a `WorkspaceHandle` or a bare `workspaceId`. No provider check is performed — the caller is responsible for knowing the provider is ready.
 
 ```ts
-import { RelayfileSetup } from "@relayfile/sdk";
+import { RelayfileSetup } from "@relayfile/sdk/cli";
 
 const setup = await RelayfileSetup.login();
 const workspace = await setup.joinWorkspace("ws_abc123");
@@ -176,7 +176,8 @@ Exactly one of `workspace` / `workspaceId` must be provided. Passing both or nei
 Use when the workspace has an integration provider that must be connected before mounting. This is the standard entry point for sandbox integrators.
 
 ```ts
-import { RelayfileSetup, ProviderNotConnectedError, ProviderNotReadyError } from "@relayfile/sdk";
+import { ProviderNotConnectedError, ProviderNotReadyError } from "@relayfile/sdk";
+import { RelayfileSetup } from "@relayfile/sdk/cli";
 
 const setup = await RelayfileSetup.login();
 const workspace = await setup.joinWorkspace("ws_abc123");
@@ -275,7 +276,8 @@ When `verifyProvider: true` and no `provider` is supplied, the SDK throws `Mount
 ## Daytona Example
 
 ```ts
-import { RelayfileSetup, ProviderNotConnectedError } from "@relayfile/sdk";
+import { ProviderNotConnectedError } from "@relayfile/sdk";
+import { RelayfileSetup } from "@relayfile/sdk/cli";
 import Daytona from "@daytonaio/sdk";
 
 const daytona = new Daytona();
@@ -317,7 +319,7 @@ await daytona.delete(sandbox);
 ## E2B Example
 
 ```ts
-import { RelayfileSetup } from "@relayfile/sdk";
+import { RelayfileSetup } from "@relayfile/sdk/cli";
 import { Sandbox } from "e2b";
 
 const setup = await RelayfileSetup.login();
@@ -344,7 +346,8 @@ await sandbox.kill();
 ## Local / CI Example
 
 ```ts
-import { RelayfileSetup, MountReadyTimeoutError } from "@relayfile/sdk";
+import { MountReadyTimeoutError } from "@relayfile/sdk";
+import { RelayfileSetup } from "@relayfile/sdk/cli";
 import { execFile } from "node:child_process";
 import path from "node:path";
 
@@ -393,7 +396,7 @@ console.log("Probe ready:", handle.ready);
 Production code uses the bundled launcher (which runs `relayfile-mount`). Tests inject the in-process `startMountHarness` harness from `@relayfile/sdk/mount-harness` to avoid spawning a real process:
 
 ```ts
-import { RelayfileSetup } from "@relayfile/sdk";
+import { RelayfileSetup } from "@relayfile/sdk/cli";
 import { startMountHarness } from "@relayfile/sdk/mount-harness";
 
 const harnessLauncher = {

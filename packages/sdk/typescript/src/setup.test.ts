@@ -15,6 +15,7 @@ import {
   MalformedCloudResponseError
 } from "./setup-errors.js"
 import { RelayfileSetup } from "./setup.js"
+import { RelayfileSetup as RelayfileCliSetup } from "./cli/setup.js"
 import {
   type MountLauncher,
   type MountWorkspaceInput,
@@ -178,7 +179,7 @@ describe("RelayfileSetup", () => {
   it("logs in through the cloud callback URL and returns an authenticated setup", async () => {
     const loginUrls: string[] = []
     const onTokens = vi.fn()
-    const loginPromise = RelayfileSetup.login({
+    const loginPromise = RelayfileCliSetup.login({
       cloudApiUrl: "https://cloud.test/base",
       state: "state_test",
       timeoutMs: 5_000,
@@ -224,9 +225,15 @@ describe("RelayfileSetup", () => {
     })
   })
 
+  it("keeps interactive cloud login out of the default Worker-safe entry", async () => {
+    await expect(RelayfileSetup.login()).rejects.toMatchObject({
+      code: "node_only_sdk_feature"
+    })
+  })
+
   it("prints the cloud login URL by default", async () => {
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => {})
-    const loginPromise = RelayfileSetup.login({
+    const loginPromise = RelayfileCliSetup.login({
       cloudApiUrl: "https://cloud.test/base",
       state: "state_console",
       timeoutMs: 5_000
@@ -249,7 +256,7 @@ describe("RelayfileSetup", () => {
     )
 
     await fetch(callbackUrl)
-    await expect(loginPromise).resolves.toBeInstanceOf(RelayfileSetup)
+    await expect(loginPromise).resolves.toBeInstanceOf(RelayfileCliSetup)
   })
 
   it("creates a setup from cloud tokens and refreshes before requests", async () => {
@@ -1532,11 +1539,12 @@ describe("RelayfileSetup", () => {
         "utf8"
       )
 
-      const setup = new RelayfileSetup()
+      const setup = new RelayfileCliSetup()
       const handlePromise = setup.mountWorkspace({
         workspaceId: "ws_123",
         localDir,
-        launcher
+        launcher,
+        background: false
       })
 
       readyControl.resolve()
@@ -1573,11 +1581,12 @@ describe("RelayfileSetup", () => {
     const { launcher, readyControl } = createLauncherStub()
 
     try {
-      const setup = new RelayfileSetup()
+      const setup = new RelayfileCliSetup()
       const handlePromise = setup.mountWorkspace({
         workspaceId: "ws_123",
         localDir,
-        launcher
+        launcher,
+        background: false
       })
 
       readyControl.resolve()
