@@ -54,6 +54,8 @@ export interface MountOptions {
 
 export interface MountHandle {
   mountDir: string;
+  initialFileCount?: number;
+  initialMountDurationMs?: number;
   syncBack(opts?: { signal?: AbortSignal; paths?: Iterable<string> }): Promise<number>;
   /**
    * Start bidirectional auto-sync: watches both the mount and project trees
@@ -140,7 +142,8 @@ export async function createMount(
   const realMountDir = realpathSync(resolvedMountDir);
   writeFileSync(path.join(realMountDir, MOUNT_MARKER_FILENAME), MOUNT_MARKER_CONTENT, 'utf8');
 
-  await walkProjectTree(
+  const initialMountStartedAt = Date.now();
+  const initialFileCount = await walkProjectTree(
     resolvedProjectDir,
     resolvedProjectDir,
     realMountDir,
@@ -149,6 +152,7 @@ export async function createMount(
     readonlyMatcher,
     ignoredMatcher
   );
+  const initialMountDurationMs = Date.now() - initialMountStartedAt;
 
   const readmePath = resolveSafeCopyTarget(realMountDir, path.join(realMountDir, MOUNT_README_FILENAME));
   if (!readmePath) {
@@ -176,6 +180,8 @@ export async function createMount(
 
   return {
     mountDir: resolvedMountDir,
+    initialFileCount,
+    initialMountDurationMs,
     async syncBack(opts?: { signal?: AbortSignal; paths?: Iterable<string> }): Promise<number> {
       let synced = 0;
       const realProjectDir = realpathSync(resolvedProjectDir);
@@ -279,11 +285,12 @@ async function walkProjectTree(
   excludeRules: ExcludeRules,
   readonlyMatcher: Ignore,
   ignoredMatcher: Ignore
-): Promise<void> {
+): Promise<number> {
   await yieldToEventLoop();
   const entries = readdirSync(currentDir, { withFileTypes: true });
 
   let processed = 0;
+  let copiedFiles = 0;
   for (const entry of entries) {
     if (processed > 0 && processed % WALK_YIELD_EVERY === 0) {
       await yieldToEventLoop();
@@ -316,7 +323,7 @@ async function walkProjectTree(
       if (!safeMountDir) {
         continue;
       }
-      await walkProjectTree(
+      copiedFiles += await walkProjectTree(
         projectDir,
         absolutePath,
         mountDir,
@@ -329,14 +336,16 @@ async function walkProjectTree(
     }
 
     if (entry.isSymbolicLink()) {
-      copySymlinkedFile(
+      if (copySymlinkedFile(
         projectDir,
         mountDir,
         absolutePath,
         mountPath,
         relativePath,
         readonlyMatcher
-      );
+      )) {
+        copiedFiles += 1;
+      }
       continue;
     }
 
@@ -344,15 +353,19 @@ async function walkProjectTree(
       continue;
     }
 
-    copyMountedFile(
+    if (copyMountedFile(
       projectDir,
       mountDir,
       absolutePath,
       mountPath,
       relativePath,
       readonlyMatcher
-    );
+    )) {
+      copiedFiles += 1;
+    }
   }
+
+  return copiedFiles;
 }
 
 function yieldToEventLoop(): Promise<void> {
@@ -366,21 +379,21 @@ function copySymlinkedFile(
   mountPath: string,
   relativePath: string,
   readonlyMatcher: Ignore
-): void {
+): boolean {
   let realSource: string;
   let resolvedStat: Stats;
   try {
     realSource = realpathSync(sourcePath);
     resolvedStat = statSync(sourcePath);
   } catch {
-    return;
+    return false;
   }
 
   if (!isPathWithinRoot(realSource, projectDir) || !resolvedStat.isFile()) {
-    return;
+    return false;
   }
 
-  copyMountedFile(
+  return copyMountedFile(
     projectDir,
     mountDir,
     realSource,
@@ -399,26 +412,27 @@ function copyMountedFile(
   relativePath: string,
   readonlyMatcher: Ignore,
   sourceMode?: number
-): void {
+): boolean {
   const safeMountPath = resolveSafeCopyTarget(mountDir, mountPath);
   if (!safeMountPath) {
-    return;
+    return false;
   }
 
   const safeSourcePath = resolveVerifiedFilePath(sourceRoot, sourcePath);
   if (!safeSourcePath) {
-    return;
+    return false;
   }
 
   copyFileSync(safeSourcePath, safeMountPath, fsConstants.COPYFILE_FICLONE);
 
   if (isPathMatched(relativePath, readonlyMatcher)) {
     chmodSync(safeMountPath, 0o444);
-    return;
+    return true;
   }
 
   const mode = sourceMode ?? statSync(safeSourcePath).mode;
   chmodSync(safeMountPath, mode & 0o777);
+  return true;
 }
 
 function ensureDirectory(pathValue: string): void {

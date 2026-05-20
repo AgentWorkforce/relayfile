@@ -21,6 +21,8 @@ const handle = await createMount(projectDir, mountDir, options);
 
 interface MountHandle {
   mountDir: string;
+  initialFileCount?: number;
+  initialMountDurationMs?: number;
   syncBack(opts?: { signal?: AbortSignal; paths?: Iterable<string> }): Promise<number>;
   startAutoSync(opts?: AutoSyncOptions): AutoSyncHandle;
   cleanup(): void;
@@ -28,6 +30,7 @@ interface MountHandle {
 ```
 
 `createMount` returns `Promise<MountHandle>`. The walker yields the event loop between directory entries so consumer-side timers (e.g. an `ora` spinner driven by `setInterval`) keep firing while the mount is being built.
+The returned handle includes initial mount timing and copied-file count metadata so callers can report setup performance.
 
 Behavior:
 - Copies regular files into the mount, requesting a filesystem reflink clone when the source and mount are on a compatible same-volume filesystem and falling back to a byte copy otherwise
