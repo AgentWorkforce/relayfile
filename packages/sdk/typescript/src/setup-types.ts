@@ -144,6 +144,18 @@ export interface MountedWorkspaceStatus {
   pendingConflicts?: number
 }
 
+export interface ReadMountedWorkspaceStatusInput {
+  localDir: string
+  workspaceId: string
+  remotePath: string
+  mode: MountMode
+  relayfileBaseUrl: string
+  relayfileToken: string
+  expiresAt: string | null
+  suggestedRefreshAt: string | null
+  pid?: number
+}
+
 export interface MountedWorkspaceHandle {
   readonly workspaceId: string
   readonly localDir: string

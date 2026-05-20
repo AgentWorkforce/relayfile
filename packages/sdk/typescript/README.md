@@ -15,7 +15,7 @@ The recommended way to use `@relayfile/sdk` in an agent workflow is through
 environment variable generation for `relayfile-mount`, and agent invites.
 
 ```ts
-import { RelayfileSetup } from '@relayfile/sdk'
+import { RelayfileSetup } from '@relayfile/sdk/cli'
 
 const setup = await RelayfileSetup.login({
   onLoginUrl: (url) => console.log(`Sign in to Relayfile Cloud: ${url}`),
@@ -71,6 +71,12 @@ You can still pass `accessToken` directly to `new RelayfileSetup()` in CI or
 advanced hosts that already provide a valid Cloud bearer token. After Cloud auth,
 complete the Notion OAuth flow as described in
 [`docs/agent-workspace-golden-path.md`](../../../docs/agent-workspace-golden-path.md).
+
+The default `@relayfile/sdk` entry point is safe for Worker-style bundles and
+does not statically import the CLI-only mount launcher or local browser login
+helpers. Import interactive login and local mount launcher utilities from
+`@relayfile/sdk/cli`, `@relayfile/sdk/cloud-login`, or
+`@relayfile/sdk/mount-launcher`.
 
 ---
 

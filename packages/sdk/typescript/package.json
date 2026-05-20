@@ -5,6 +5,31 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./cli": {
+      "types": "./dist/cli/index.d.ts",
+      "default": "./dist/cli/index.js"
+    },
+    "./cloud-login": {
+      "types": "./dist/cloud-login.d.ts",
+      "default": "./dist/cloud-login.js"
+    },
+    "./mount-launcher": {
+      "types": "./dist/mount-launcher.d.ts",
+      "default": "./dist/mount-launcher.js"
+    },
+    "./mount-harness": {
+      "types": "./dist/mount-harness.d.ts",
+      "default": "./dist/mount-harness.js"
+    },
+    "./dist/*": "./dist/*",
+    "./package.json": "./package.json"
+  },
+  "sideEffects": false,
   "files": [
     "dist"
   ],

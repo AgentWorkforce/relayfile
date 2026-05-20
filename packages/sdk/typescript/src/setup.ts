@@ -1,15 +1,13 @@
-import path from "node:path"
 import {
   RelayFileClient,
   type AccessTokenProvider
 } from "./client.js"
 import {
   createRelayfileCloudAccessTokenProvider,
-  runRelayfileCloudLogin,
-  type RelayfileCloudLoginOptions,
   type RelayfileCloudTokenSet,
   type RelayfileCloudTokenSetupOptions
-} from "./cloud-login.js"
+} from "./cloud-token-provider.js"
+import type { RelayfileCloudLoginOptions } from "./cloud-login.js"
 import {
   CloudAbortError,
   CloudApiError,
@@ -23,6 +21,7 @@ import {
   MountSessionInputError,
   ProviderNotConnectedError,
   ProviderNotReadyError,
+  RelayfileSetupError,
   UnknownProviderError
 } from "./setup-errors.js"
 import {
@@ -36,6 +35,7 @@ import {
   type CreateWorkspaceOptions,
   type JoinWorkspaceOptions,
   type MountLauncher,
+  type MountLauncherInstance,
   type MountMode,
   type MountSessionRequest,
   type MountSessionResponse,
@@ -43,6 +43,7 @@ import {
   type MountedWorkspaceHandle,
   type MountedWorkspaceStatus,
   type MountWorkspaceInput,
+  type ReadMountedWorkspaceStatusInput,
   type RelayfileSetupOptions,
   type WaitForConnectionOptions,
   type WorkspaceMountEnv,
@@ -52,10 +53,6 @@ import {
   type WorkspacePermissions
 } from "./setup-types.js"
 import { RELAYFILE_SDK_VERSION } from "./version.js"
-import {
-  defaultMountLauncher,
-  readMountedWorkspaceStatus
-} from "./mount-launcher.js"
 
 export { RELAYFILE_SDK_VERSION } from "./version.js"
 
@@ -72,6 +69,15 @@ const DEFAULT_WAIT_TIMEOUT_MS = 300_000
 const DEFAULT_MOUNT_READY_TIMEOUT_MS = 60_000
 const DEFAULT_MOUNT_AGENT_NAME = "relayfile-mount"
 const TOKEN_REFRESH_AGE_MS = 55 * 60 * 1000
+
+const nodeOnlyMountLauncher: MountLauncher = {
+  async start(): Promise<MountLauncherInstance> {
+    throw new RelayfileSetupError(
+      "The default relayfile-mount launcher is only available from @relayfile/sdk/cli. Import RelayfileSetup from @relayfile/sdk/cli or pass a custom launcher to mountWorkspace().",
+      "node_only_sdk_feature"
+    )
+  }
+}
 
 interface CreateWorkspaceResponse {
   workspaceId?: string
@@ -135,7 +141,7 @@ interface NormalizedMountWorkspaceInput {
   agentName?: string
   scopes?: string[]
   signal?: AbortSignal
-  launcher: MountLauncher
+  launcher?: MountLauncher
   readyTimeoutMs: number
 }
 
@@ -177,16 +183,11 @@ export class RelayfileSetup {
   static async login(
     options: RelayfileCloudLoginOptions = {}
   ): Promise<RelayfileSetup> {
-    const cloudApiUrl = options.cloudApiUrl ?? DEFAULT_CLOUD_API_URL
-    const tokens = await runRelayfileCloudLogin({
-      ...options,
-      cloudApiUrl
-    })
-    await options.onTokens?.({ ...tokens })
-    return RelayfileSetup.fromCloudTokens(tokens, {
-      ...options,
-      cloudApiUrl: tokens.apiUrl ?? cloudApiUrl
-    })
+    void options
+    throw new RelayfileSetupError(
+      "RelayfileSetup.login() starts a local HTTP callback server and is only available from @relayfile/sdk/cli. Import RelayfileSetup from @relayfile/sdk/cli for interactive Cloud login.",
+      "node_only_sdk_feature"
+    )
   }
 
   static fromCloudTokens(
@@ -287,7 +288,7 @@ export class RelayfileSetup {
     const normalized = normalizeMountWorkspaceInput(input)
     const workspace = await this.resolveWorkspaceForMount(normalized)
     const mountSession = await this.createMountSession(workspace, normalized)
-    const launcher = normalized.launcher
+    const launcher = normalized.launcher ?? this.getDefaultMountLauncher()
     const launcherInstance = await launcher.start({
       env: buildMountLauncherEnv(mountSession),
       signal: normalized.signal,
@@ -310,7 +311,8 @@ export class RelayfileSetup {
     return new MountedWorkspaceHandleImpl({
       mountSession,
       launcherInstance: normalized.background ? launcherInstance : undefined,
-      probeOnly: !normalized.background
+      probeOnly: !normalized.background,
+      readStatus: (statusInput) => this.readMountedWorkspaceStatus(statusInput)
     })
   }
 
@@ -440,6 +442,22 @@ export class RelayfileSetup {
 
   getCloudApiUrl(): string {
     return this.cloudApiUrl
+  }
+
+  protected getDefaultMountLauncher(): MountLauncher {
+    return nodeOnlyMountLauncher
+  }
+
+  protected async readMountedWorkspaceStatus(
+    input: ReadMountedWorkspaceStatusInput
+  ): Promise<MountedWorkspaceStatus> {
+    return {
+      ready: true,
+      mode: input.mode,
+      pid: input.pid,
+      expiresAt: input.expiresAt,
+      suggestedRefreshAt: input.suggestedRefreshAt
+    }
   }
 
   private async resolveWorkspaceForMount(
@@ -1058,6 +1076,9 @@ class MountedWorkspaceHandleImpl implements MountedWorkspaceHandle {
   private readonly mountSession: MountSessionResult
   private readonly launcherInstance?: Awaited<ReturnType<MountLauncher["start"]>>
   private readonly probeOnly: boolean
+  private readonly readStatus: (
+    input: ReadMountedWorkspaceStatusInput
+  ) => Promise<MountedWorkspaceStatus>
 
   private readySnapshot = true
   private stopPromise?: Promise<void>
@@ -1066,6 +1087,9 @@ class MountedWorkspaceHandleImpl implements MountedWorkspaceHandle {
     mountSession: MountSessionResult
     launcherInstance?: Awaited<ReturnType<MountLauncher["start"]>>
     probeOnly: boolean
+    readStatus: (
+      input: ReadMountedWorkspaceStatusInput
+    ) => Promise<MountedWorkspaceStatus>
   }) {
     this.mountSession = input.mountSession
     this.workspaceId = input.mountSession.workspaceId
@@ -1076,6 +1100,7 @@ class MountedWorkspaceHandleImpl implements MountedWorkspaceHandle {
     this.suggestedRefreshAt = input.mountSession.suggestedRefreshAt
     this.launcherInstance = input.launcherInstance
     this.probeOnly = input.probeOnly
+    this.readStatus = input.readStatus
   }
 
   get ready(): boolean {
@@ -1087,7 +1112,18 @@ class MountedWorkspaceHandleImpl implements MountedWorkspaceHandle {
   }
 
   async status(): Promise<MountedWorkspaceStatus> {
-    const status = await readMountedWorkspaceStatus({
+    if (this.launcherInstance) {
+      const status = await this.launcherInstance.status()
+      const mergedStatus = {
+        ...status,
+        expiresAt: this.expiresAt,
+        suggestedRefreshAt: this.suggestedRefreshAt
+      }
+      this.readySnapshot = mergedStatus.ready
+      return mergedStatus
+    }
+
+    const status = await this.readStatus({
       localDir: this.localDir,
       workspaceId: this.workspaceId,
       remotePath: this.remotePath,
@@ -1348,7 +1384,7 @@ function normalizeMountWorkspaceInput(
   return {
     workspace: input.workspace,
     workspaceId: normalizeNonEmptyString(input.workspaceId),
-    localDir: path.resolve(localDir),
+    localDir: resolveLocalDir(localDir),
     remotePath: normalizeMountRemotePath(input.remotePath),
     mode: normalizeMountModeInput(input.mode),
     background: input.background !== false,
@@ -1356,7 +1392,7 @@ function normalizeMountWorkspaceInput(
     scopes:
       input.scopes && input.scopes.length > 0 ? [...input.scopes] : undefined,
     signal: input.signal,
-    launcher: input.launcher ?? defaultMountLauncher,
+    launcher: input.launcher,
     readyTimeoutMs: Math.max(
       1,
       Math.floor(input.readyTimeoutMs ?? DEFAULT_MOUNT_READY_TIMEOUT_MS)
@@ -1396,13 +1432,69 @@ function normalizeMountRemotePath(remotePath?: string): string {
   if (segments.some((segment) => segment === "..")) {
     throw new InvalidRemotePathError(normalized)
   }
-  const resolved = path.posix.normalize(
+  const resolved = normalizePosixPath(
     normalized.startsWith("/") ? normalized : `/${normalized}`
   )
   if (!resolved.startsWith("/")) {
     throw new InvalidRemotePathError(normalized)
   }
   return resolved === "/" ? "/" : resolved.replace(/\/+$/, "")
+}
+
+function resolveLocalDir(localDir: string): string {
+  const normalized = localDir.replace(/\\/g, "/")
+  if (isAbsolutePathLike(normalized)) {
+    return normalizePosixPath(normalized)
+  }
+  const cwd = readProcessCwd()
+  if (!cwd) {
+    return normalized
+  }
+  return normalizePosixPath(`${cwd.replace(/\\/g, "/")}/${normalized}`)
+}
+
+function isAbsolutePathLike(value: string): boolean {
+  return value.startsWith("/") || /^[A-Za-z]:\//.test(value)
+}
+
+function readProcessCwd(): string | undefined {
+  const maybeProcess = (globalThis as {
+    process?: { cwd?: () => string }
+  }).process
+  try {
+    return maybeProcess?.cwd?.()
+  } catch {
+    return undefined
+  }
+}
+
+function normalizePosixPath(value: string): string {
+  const isDrivePath = /^[A-Za-z]:\//.test(value)
+  const prefix = isDrivePath
+    ? value.slice(0, 3)
+    : value.startsWith("/")
+      ? "/"
+      : ""
+  const rest = isDrivePath ? value.slice(3) : value
+  const segments: string[] = []
+  for (const segment of rest.split("/")) {
+    if (!segment || segment === ".") {
+      continue
+    }
+    if (segment === "..") {
+      segments.pop()
+      continue
+    }
+    segments.push(segment)
+  }
+  const joined = segments.join("/")
+  if (prefix === "/") {
+    return joined ? `/${joined}` : "/"
+  }
+  if (prefix) {
+    return joined ? `${prefix}${joined}` : prefix
+  }
+  return joined || "."
 }
 
 function normalizeNonEmptyString(value?: string): string | undefined {

@@ -57,6 +57,7 @@ export {
   type MountedWorkspaceHandle,
   type MountedWorkspaceStatus,
   type MountWorkspaceInput,
+  type ReadMountedWorkspaceStatusInput,
   type RelayfileSetupOptions,
   type RelayfileSetupRetryOptions,
   type WaitForConnectionOptions,
@@ -66,11 +67,6 @@ export {
   type WorkspaceMountEnvOptions,
   type WorkspacePermissions
 } from "./setup-types.js";
-export {
-  createDefaultMountLauncher,
-  defaultMountLauncher,
-  readMountedWorkspaceStatus
-} from "./mount-launcher.js";
 export {
   RelayFileSync,
   type RelayFileSyncOptions,

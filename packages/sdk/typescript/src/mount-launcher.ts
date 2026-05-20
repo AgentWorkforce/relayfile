@@ -24,7 +24,8 @@ import type {
   MountLauncherInstance,
   MountLauncherStart,
   MountMode,
-  MountedWorkspaceStatus
+  MountedWorkspaceStatus,
+  ReadMountedWorkspaceStatusInput
 } from "./setup-types.js"
 
 const DEFAULT_READY_POLL_INTERVAL_MS = 250
@@ -37,18 +38,6 @@ interface DefaultMountLauncherOptions {
   spawnImpl?: typeof spawn
   now?: () => number
   readyPollIntervalMs?: number
-}
-
-interface ReadMountedWorkspaceStatusInput {
-  localDir: string
-  workspaceId: string
-  remotePath: string
-  mode: MountMode
-  relayfileBaseUrl: string
-  relayfileToken: string
-  expiresAt: string | null
-  suggestedRefreshAt: string | null
-  pid?: number
 }
 
 interface MountStateFile {
