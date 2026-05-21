@@ -661,6 +661,121 @@ func TestReconcileFallsBackToTreeWhenExportJSONTruncated(t *testing.T) {
 	assertLocalFileContent(t, filepath.Join(localDir, "Docs", "A.md"), "# A")
 }
 
+func TestReconcileFallsBackToTreeWhenExportDurableObjectOverloaded(t *testing.T) {
+	base := &fakeClient{
+		files: map[string]RemoteFile{
+			"/notion/Docs/A.md": {
+				Path:        "/notion/Docs/A.md",
+				Revision:    "rev_1",
+				ContentType: "text/markdown",
+				Content:     "# A",
+			},
+		},
+	}
+	client := &fakeExportClient{
+		fakeClient: base,
+		exportErr: &HTTPError{
+			StatusCode: 500,
+			Code:       "internal_error",
+			Message:    "Durable Object is overloaded. Requests queued for too long.",
+		},
+	}
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_overloaded_export",
+		RemoteRoot:  "/notion",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+
+	if err := syncer.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile should fall back to tree after DO overload: %v", err)
+	}
+
+	if client.exportCalls != 1 {
+		t.Fatalf("expected one export snapshot attempt, got %d", client.exportCalls)
+	}
+	if base.listTreeCalls != 1 {
+		t.Fatalf("expected DO overload to fall back to list tree once, got %d calls", base.listTreeCalls)
+	}
+	if client.readFileCalls != 1 {
+		t.Fatalf("expected tree fallback to read one file, got %d calls", client.readFileCalls)
+	}
+	assertLocalFileContent(t, filepath.Join(localDir, "Docs", "A.md"), "# A")
+}
+
+func TestExportSnapshotOverloadedClassification(t *testing.T) {
+	unsupported := []error{
+		&HTTPError{StatusCode: 500, Code: "internal_error", Message: "Durable Object is overloaded. Requests queued for too long."},
+		&HTTPError{StatusCode: 503, Message: "Worker overloaded"},
+		errors.New("http 500 internal_error: Durable Object is overloaded. Requests queued for too long."),
+		&HTTPError{StatusCode: 413, Code: "payload_too_large", Message: "workspace export body is 3524788058 bytes, which exceeds the export body limit of 134217728; use paginated tree/read APIs instead"},
+	}
+	for _, err := range unsupported {
+		if !exportSnapshotUnsupported(err) {
+			t.Fatalf("expected error to be classified as unsupported: %v", err)
+		}
+	}
+
+	supported := []error{
+		&HTTPError{StatusCode: 500, Code: "internal_error", Message: "boom"},
+		&HTTPError{StatusCode: 502, Message: "bad gateway"},
+		errors.New("http2: server sent GOAWAY and closed the connection"),
+	}
+	for _, err := range supported {
+		if exportSnapshotUnsupported(err) {
+			t.Fatalf("expected transient error to retry export, not fall back: %v", err)
+		}
+	}
+}
+
+func TestReconcileFallsBackToTreeWhenExportPayloadTooLarge(t *testing.T) {
+	base := &fakeClient{
+		files: map[string]RemoteFile{
+			"/notion/Docs/A.md": {
+				Path:        "/notion/Docs/A.md",
+				Revision:    "rev_1",
+				ContentType: "text/markdown",
+				Content:     "# A",
+			},
+		},
+	}
+	client := &fakeExportClient{
+		fakeClient: base,
+		exportErr: &HTTPError{
+			StatusCode: 413,
+			Code:       "payload_too_large",
+			Message:    "workspace export body is 3524788058 bytes, which exceeds the export body limit of 134217728; use paginated tree/read APIs instead",
+		},
+	}
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_oversized_export",
+		RemoteRoot:  "/notion",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+
+	if err := syncer.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile should fall back to tree after 413: %v", err)
+	}
+
+	if client.exportCalls != 1 {
+		t.Fatalf("expected one export snapshot attempt, got %d", client.exportCalls)
+	}
+	if base.listTreeCalls != 1 {
+		t.Fatalf("expected 413 to fall back to list tree once, got %d calls", base.listTreeCalls)
+	}
+	if client.readFileCalls != 1 {
+		t.Fatalf("expected tree fallback to read one file, got %d calls", client.readFileCalls)
+	}
+	assertLocalFileContent(t, filepath.Join(localDir, "Docs", "A.md"), "# A")
+}
+
 func TestSyncOnceCreatesAndDeletesRemoteFiles(t *testing.T) {
 	client := &fakeClient{
 		files:           map[string]RemoteFile{},
