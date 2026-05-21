@@ -1781,6 +1781,9 @@ components:
           type: string
         revision:
           type: string
+        contentHash:
+          type: string
+          description: SHA-256 hash of the decoded file bytes
         contentType:
           type: string
         content:

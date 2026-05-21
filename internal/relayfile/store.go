@@ -93,6 +93,7 @@ type FileSemantics struct {
 type File struct {
 	Path             string        `json:"path"`
 	Revision         string        `json:"revision"`
+	ContentHash      string        `json:"contentHash,omitempty"`
 	ContentType      string        `json:"contentType"`
 	Content          string        `json:"content"`
 	Encoding         string        `json:"encoding,omitempty"`
@@ -1076,7 +1077,7 @@ func (s *Store) ListTree(workspaceID, path string, depth int, cursor string) (Tr
 					Path:             child,
 					Type:             "file",
 					Revision:         file.Revision,
-					ContentHash:      contentHashForFile(file),
+					ContentHash:      storedContentHashForFile(file),
 					Provider:         file.Provider,
 					ProviderObjectID: file.ProviderObjectID,
 					Size:             int64(len(file.Content)),
@@ -1296,6 +1297,7 @@ func (s *Store) WriteFile(req WriteRequest) (WriteResult, error) {
 		ws.Files[path] = File{
 			Path:         path,
 			Revision:     revision,
+			ContentHash:  contentHashForEncodedContent(req.Content, encoding),
 			ContentType:  contentType,
 			Content:      req.Content,
 			Encoding:     encoding,
@@ -1325,6 +1327,7 @@ func (s *Store) WriteFile(req WriteRequest) (WriteResult, error) {
 	existing.ContentType = contentType
 	existing.Content = req.Content
 	existing.Encoding = encoding
+	existing.ContentHash = contentHashForEncodedContent(req.Content, encoding)
 	existing.LastEditedAt = now
 	if !isZeroSemantics(semantics) {
 		existing.Semantics = semantics
@@ -1401,6 +1404,7 @@ func (s *Store) BulkWrite(workspaceID string, files []BulkWriteFile) (int, []Bul
 		file.ContentType = contentType
 		file.Content = input.Content
 		file.Encoding = encoding
+		file.ContentHash = contentHashForEncodedContent(input.Content, encoding)
 		if file.Provider == "" {
 			file.Provider = inferProviderFromPath(path)
 		}
@@ -3269,7 +3273,7 @@ func (s *Store) recordWriteLocked(ws *workspaceState, path, revision, eventType,
 
 	contentHash := ""
 	if eventType != "file.deleted" {
-		contentHash = contentHashForFile(ws.Files[path])
+		contentHash = storedContentHashForFile(ws.Files[path])
 	}
 	event := Event{
 		EventID:       s.nextEventIDLocked(),
@@ -3816,6 +3820,7 @@ func (s *Store) applyProviderUpsertLocked(ws *workspaceState, provider string, a
 	file := File{
 		Path:             path,
 		Revision:         revision,
+		ContentHash:      contentHashForEncodedContent(content, ""),
 		ContentType:      contentType,
 		Content:          content,
 		Encoding:         "",
@@ -3842,7 +3847,7 @@ func (s *Store) applyProviderUpsertLocked(ws *workspaceState, provider string, a
 		Type:          fsEvent,
 		Path:          path,
 		Revision:      revision,
-		ContentHash:   contentHashForFile(file),
+		ContentHash:   storedContentHashForFile(file),
 		Origin:        "provider_sync",
 		Provider:      provider,
 		CorrelationID: correlationID,
@@ -3902,6 +3907,9 @@ func (s *Store) loadFromDisk() error {
 			if ws.Files == nil {
 				ws.Files = map[string]File{}
 			}
+			for path, file := range ws.Files {
+				ws.Files[path] = ensureStoredContentHash(file)
+			}
 			if ws.Ops == nil {
 				ws.Ops = map[string]OperationStatus{}
 			}
@@ -3918,6 +3926,14 @@ func (s *Store) loadFromDisk() error {
 		for _, fork := range s.forks {
 			if fork.Overlay == nil {
 				fork.Overlay = map[string]ForkOverlayEntry{}
+			}
+			for path, entry := range fork.Overlay {
+				if entry.File == nil {
+					continue
+				}
+				file := ensureStoredContentHash(*entry.File)
+				entry.File = &file
+				fork.Overlay[path] = entry
 			}
 		}
 	}
@@ -4155,6 +4171,7 @@ func (s *Store) writeForkOverlayLocked(fork *forkState, req WriteRequest, existi
 	file := File{
 		Path:         path,
 		Revision:     revision,
+		ContentHash:  contentHashForEncodedContent(req.Content, req.Encoding),
 		ContentType:  contentType,
 		Content:      req.Content,
 		Encoding:     req.Encoding,
@@ -4238,7 +4255,7 @@ func listTreeFromFiles(files map[string]File, path string, depth int, cursor str
 					Path:             child,
 					Type:             "file",
 					Revision:         file.Revision,
-					ContentHash:      contentHashForFile(file),
+					ContentHash:      storedContentHashForFile(file),
 					Provider:         file.Provider,
 					ProviderObjectID: file.ProviderObjectID,
 					Size:             int64(len(file.Content)),
@@ -4776,16 +4793,34 @@ func validateEncodedContent(content, encoding string) error {
 }
 
 func contentHashForFile(file File) string {
-	data := []byte(file.Content)
-	if normalizeEncodingForHash(file.Encoding) == "base64" {
-		if decoded, err := base64.StdEncoding.DecodeString(file.Content); err == nil {
+	return contentHashForEncodedContent(file.Content, file.Encoding)
+}
+
+func contentHashForEncodedContent(content, encoding string) string {
+	data := []byte(content)
+	if normalizeEncodingForHash(encoding) == "base64" {
+		if decoded, err := base64.StdEncoding.DecodeString(content); err == nil {
 			data = decoded
-		} else if decoded, err := base64.RawStdEncoding.DecodeString(file.Content); err == nil {
+		} else if decoded, err := base64.RawStdEncoding.DecodeString(content); err == nil {
 			data = decoded
 		}
 	}
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])
+}
+
+func storedContentHashForFile(file File) string {
+	if strings.TrimSpace(file.ContentHash) != "" {
+		return file.ContentHash
+	}
+	return contentHashForFile(file)
+}
+
+func ensureStoredContentHash(file File) File {
+	if strings.TrimSpace(file.ContentHash) == "" {
+		file.ContentHash = contentHashForFile(file)
+	}
+	return file
 }
 
 func normalizeEncodingForHash(raw string) string {

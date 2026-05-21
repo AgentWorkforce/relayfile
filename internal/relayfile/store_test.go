@@ -1067,6 +1067,78 @@ func TestListTreeHonorsDepth(t *testing.T) {
 	}
 }
 
+func TestListTreeUsesStoredContentHash(t *testing.T) {
+	store := NewStore()
+	t.Cleanup(store.Close)
+
+	if _, err := store.WriteFile(WriteRequest{
+		WorkspaceID:   "ws_tree_hash",
+		Path:          "/external/Product/Roadmap.md",
+		IfMatch:       "0",
+		ContentType:   "text/markdown",
+		Content:       "# roadmap",
+		CorrelationID: "corr_tree_hash",
+	}); err != nil {
+		t.Fatalf("write failed: %v", err)
+	}
+
+	store.mu.Lock()
+	file := store.workspaces["ws_tree_hash"].Files["/external/Product/Roadmap.md"]
+	file.ContentHash = "stored-content-hash"
+	store.workspaces["ws_tree_hash"].Files["/external/Product/Roadmap.md"] = file
+	store.mu.Unlock()
+
+	tree, err := store.ListTree("ws_tree_hash", "/external/Product", 1, "")
+	if err != nil {
+		t.Fatalf("list tree failed: %v", err)
+	}
+	if len(tree.Entries) != 1 {
+		t.Fatalf("expected one tree entry, got %d", len(tree.Entries))
+	}
+	if tree.Entries[0].ContentHash != "stored-content-hash" {
+		t.Fatalf("expected stored contentHash, got %q", tree.Entries[0].ContentHash)
+	}
+}
+
+func TestLoadFromDiskBackfillsContentHash(t *testing.T) {
+	backend := &memoryStateBackend{
+		loaded: true,
+		snapshot: persistedState{
+			Workspaces: map[string]*workspaceState{
+				"ws_loaded_hash": {
+					Files: map[string]File{
+						"/external/Product/Roadmap.md": {
+							Path:        "/external/Product/Roadmap.md",
+							Revision:    "rev_loaded",
+							ContentType: "text/markdown",
+							Content:     "# loaded",
+						},
+					},
+				},
+			},
+		},
+	}
+	store := NewStoreWithOptions(StoreOptions{StateBackend: backend, DisableWorkers: true})
+	t.Cleanup(store.Close)
+
+	file, err := store.ReadFile("ws_loaded_hash", "/external/Product/Roadmap.md")
+	if err != nil {
+		t.Fatalf("read failed: %v", err)
+	}
+	want := contentHashForEncodedContent("# loaded", "")
+	if file.ContentHash != want {
+		t.Fatalf("expected backfilled contentHash %q, got %q", want, file.ContentHash)
+	}
+
+	tree, err := store.ListTree("ws_loaded_hash", "/external/Product", 1, "")
+	if err != nil {
+		t.Fatalf("list tree failed: %v", err)
+	}
+	if len(tree.Entries) != 1 || tree.Entries[0].ContentHash != want {
+		t.Fatalf("expected tree entry with backfilled contentHash %q, got %+v", want, tree.Entries)
+	}
+}
+
 func TestListTreePaginatesBoundedEntries(t *testing.T) {
 	store := NewStore()
 	t.Cleanup(store.Close)
