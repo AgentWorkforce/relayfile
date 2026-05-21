@@ -1051,6 +1051,128 @@ func TestStatusIncludesLocalMirrorAndDaemonCounts(t *testing.T) {
 	}
 }
 
+func TestStatusRendersExpiredCloudSessionAuthLine(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	localDir := t.TempDir()
+	if err := ensureMirrorLayout(localDir); err != nil {
+		t.Fatalf("ensureMirrorLayout failed: %v", err)
+	}
+	if _, err := upsertWorkspaceDetails(workspaceRecord{
+		Name:       "demo",
+		ID:         "ws_demo",
+		LocalDir:   localDir,
+		CreatedAt:  time.Now().UTC().Format(time.RFC3339),
+		LastUsedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("upsertWorkspaceDetails failed: %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"workspaceId":"ws_demo","providers":[]}`))
+	}))
+	defer server.Close()
+	if err := saveCredentials(credentials{Server: server.URL, Token: "token"}); err != nil {
+		t.Fatalf("saveCredentials failed: %v", err)
+	}
+	if err := saveCloudCredentials(cloudCredentials{
+		APIURL:                "https://cloud.relayfile.test",
+		AccessToken:           "cloud_token",
+		AccessTokenExpiresAt:  time.Now().UTC().Add(-time.Minute).Format(time.RFC3339),
+		RefreshToken:          "refresh_token",
+		RefreshTokenExpiresAt: time.Now().UTC().Add(-time.Minute).Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("saveCloudCredentials failed: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := run([]string{"status", "demo"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("run status failed: %v", err)
+	}
+	if got := stdout.String(); !strings.Contains(got, "auth: cloud session expired - run 'relayfile login'") {
+		t.Fatalf("expected expired auth line, got %q", got)
+	}
+}
+
+func TestStatusWarnsWhenDaemonPredatesLastLogin(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	localDir := t.TempDir()
+	if err := ensureMirrorLayout(localDir); err != nil {
+		t.Fatalf("ensureMirrorLayout failed: %v", err)
+	}
+	startedAt := time.Now().UTC().Add(-time.Hour)
+	if err := writeDaemonPIDState(mountPIDFile(localDir), daemonPIDState{
+		PID:         4242,
+		WorkspaceID: "ws_demo",
+		LocalDir:    localDir,
+		StartedAt:   startedAt.Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("writeDaemonPIDState failed: %v", err)
+	}
+	if _, err := upsertWorkspaceDetails(workspaceRecord{
+		Name:       "demo",
+		ID:         "ws_demo",
+		LocalDir:   localDir,
+		CreatedAt:  startedAt.Format(time.RFC3339),
+		LastUsedAt: startedAt.Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("upsertWorkspaceDetails failed: %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"workspaceId":"ws_demo","providers":[]}`))
+	}))
+	defer server.Close()
+	if err := saveCredentials(credentials{Server: server.URL, Token: "token"}); err != nil {
+		t.Fatalf("saveCredentials failed: %v", err)
+	}
+	loginTime := startedAt.Add(30 * time.Minute)
+	if err := os.Chtimes(credentialsPath(), loginTime, loginTime); err != nil {
+		t.Fatalf("chtimes credentials failed: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := run([]string{"status", "demo"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("run status failed: %v", err)
+	}
+	if got := stdout.String(); !strings.Contains(got, "auth: daemon predates last login - restart the daemon") {
+		t.Fatalf("expected daemon stale auth line, got %q", got)
+	}
+}
+
+func TestStatusUnauthorizedReturnsLoginHint(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	if _, err := upsertWorkspaceDetails(workspaceRecord{
+		Name:      "demo",
+		ID:        "ws_demo",
+		CreatedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("upsertWorkspaceDetails failed: %v", err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"message":"Token has expired"}`))
+	}))
+	defer server.Close()
+	if err := saveCredentials(credentials{Server: server.URL, Token: "expired"}); err != nil {
+		t.Fatalf("saveCredentials failed: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	err := run([]string{"status", "demo"}, strings.NewReader(""), &stdout, &stdout)
+	if !errors.Is(err, ErrCloudRefreshExpired) {
+		t.Fatalf("expected ErrCloudRefreshExpired, got %v", err)
+	}
+}
+
 func TestStatusSurfacesOrphanDaemonFromProcessScan(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)
@@ -2599,6 +2721,12 @@ func TestOpsReplayPostsToCloudAndRemovesLocalRecord(t *testing.T) {
 func TestLoginWithExplicitTokenPersistsServerCreds(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)
+	if err := saveCloudCredentials(cloudCredentials{
+		APIURL:      "https://cloud.relayfile.test",
+		AccessToken: "stale_cloud_token",
+	}); err != nil {
+		t.Fatalf("saveCloudCredentials failed: %v", err)
+	}
 
 	var healthCalls int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -2628,7 +2756,7 @@ func TestLoginWithExplicitTokenPersistsServerCreds(t *testing.T) {
 		t.Fatalf("expected stored token rf_test, got %q", creds.Token)
 	}
 	if _, err := os.Stat(cloudCredentialsPath()); !os.IsNotExist(err) {
-		t.Fatalf("expected no cloud credentials file written, got err=%v", err)
+		t.Fatalf("expected stale cloud credentials removed, got err=%v", err)
 	}
 }
 
@@ -2639,6 +2767,12 @@ func TestLoginWithExplicitTokenPersistsServerCreds(t *testing.T) {
 func TestLoginDefaultsToCloudBrowserFlow(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)
+	if err := saveCredentials(credentials{
+		Server: "https://relayfile-old.test",
+		Token:  "stale_server_token",
+	}); err != nil {
+		t.Fatalf("saveCredentials failed: %v", err)
+	}
 
 	var stdout bytes.Buffer
 	if err := run([]string{
@@ -2664,7 +2798,7 @@ func TestLoginDefaultsToCloudBrowserFlow(t *testing.T) {
 		t.Fatalf("expected APIURL stored, got %q", creds.APIURL)
 	}
 	if _, err := os.Stat(credentialsPath()); !os.IsNotExist(err) {
-		t.Fatalf("expected no server credentials written, got err=%v", err)
+		t.Fatalf("expected stale server credentials removed, got err=%v", err)
 	}
 }
 
@@ -2730,6 +2864,19 @@ func TestLoginRefreshesWorkspaceTokenForDefaultWorkspace(t *testing.T) {
 	}
 	if creds.Server != "https://relayfile.test" {
 		t.Fatalf("expected refreshed server URL, got %q", creds.Server)
+	}
+	if strings.TrimSpace(creds.UpdatedAt) == "" {
+		t.Fatalf("expected credentials updatedAt to be set")
+	}
+	cloud, err := loadCloudCredentials()
+	if err != nil {
+		t.Fatalf("loadCloudCredentials failed: %v", err)
+	}
+	if cloud.AccessToken != "cld_browser_token" {
+		t.Fatalf("expected refreshed cloud token to remain stored, got %q", cloud.AccessToken)
+	}
+	if strings.TrimSpace(cloud.UpdatedAt) == "" {
+		t.Fatalf("expected cloud credentials updatedAt to be set")
 	}
 }
 
