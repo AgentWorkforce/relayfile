@@ -1863,6 +1863,9 @@ func runLogin(args []string, stdin io.Reader, stdout io.Writer) error {
 		}
 	}
 
+	if err := removeCredentialFile(credentialsPath()); err != nil {
+		fmt.Fprintf(stdout, "warning: could not clear stale server credentials: %v\n", err)
+	}
 	fmt.Fprintln(stdout, "Run 'relayfile setup' to create or join a workspace, or 'relayfile mount WORKSPACE' if you already have one.")
 	return nil
 }
@@ -1894,6 +1897,9 @@ func loginWithAPIKey(serverValue, tokenValue string, stdout io.Writer) error {
 	}
 	if err := saveCredentials(creds); err != nil {
 		return err
+	}
+	if err := removeCredentialFile(cloudCredentialsPath()); err != nil {
+		return fmt.Errorf("clear stale cloud credentials: %w", err)
 	}
 	fmt.Fprintf(stdout, "Stored credentials for %s\n", creds.Server)
 	return nil
@@ -4437,6 +4443,9 @@ func runStatus(args []string, stdout io.Writer) error {
 	}
 	status, err := fetchWorkspaceSyncStatus(client, workspaceID)
 	if err != nil {
+		if isUnauthorizedAPIError(err) {
+			return ErrCloudRefreshExpired
+		}
 		return err
 	}
 	var ingress *syncIngressStatusResponse
@@ -4459,6 +4468,9 @@ func runStatus(args []string, stdout io.Writer) error {
 		workspaceLabel = fmt.Sprintf("%s (%s)", workspaceID, record.Name)
 	}
 	fmt.Fprintf(stdout, "workspace %s   mode: %s   lag: %s\n", workspaceLabel, snapshot.Mode, formatLag(maxLagSeconds(status.Providers)))
+	if authLine := statusAuthLine(record.LocalDir, time.Now().UTC()); authLine != "" {
+		fmt.Fprintln(stdout, authLine)
+	}
 	for _, provider := range status.Providers {
 		lastEvent := "-"
 		if hasNonEmptyString(provider.WatermarkTs) {
@@ -4519,6 +4531,87 @@ func readPersistedStallReason(localDir string) string {
 		return ""
 	}
 	return strings.TrimSpace(snapshot.StallReason)
+}
+
+func statusAuthLine(localDir string, now time.Time) string {
+	if line := daemonCredentialFreshnessAuthLine(localDir); line != "" {
+		return line
+	}
+	return cloudCredentialAuthLine(now)
+}
+
+func daemonCredentialFreshnessAuthLine(localDir string) string {
+	state, ok := readDaemonPIDState(localDir)
+	if !ok || strings.TrimSpace(state.StartedAt) == "" {
+		return ""
+	}
+	startedAt, ok := parseRFC3339(state.StartedAt)
+	if !ok {
+		return ""
+	}
+	latest, ok := latestCredentialModTime(credentialsPath(), cloudCredentialsPath())
+	if ok && latest.After(startedAt) {
+		return "auth: daemon predates last login - restart the daemon"
+	}
+	return ""
+}
+
+func latestCredentialModTime(paths ...string) (time.Time, bool) {
+	var latest time.Time
+	found := false
+	for _, path := range paths {
+		info, err := os.Stat(path)
+		if err != nil {
+			continue
+		}
+		if !found || info.ModTime().After(latest) {
+			latest = info.ModTime()
+			found = true
+		}
+	}
+	return latest, found
+}
+
+func cloudCredentialAuthLine(now time.Time) string {
+	if _, err := os.Stat(cloudCredentialsPath()); errors.Is(err, os.ErrNotExist) {
+		return "auth: server credentials only"
+	}
+	creds, err := loadCloudCredentials()
+	if err != nil {
+		return "auth: cloud credentials unreadable - run 'relayfile login'"
+	}
+	if strings.TrimSpace(creds.AccessToken) == "" {
+		return "auth: cloud access token missing - run 'relayfile login'"
+	}
+	if expiry, ok := parseRFC3339(creds.RefreshTokenExpiresAt); ok && !now.Before(expiry) {
+		return "auth: cloud session expired - run 'relayfile login'"
+	}
+	if expiry, ok := parseRFC3339(creds.AccessTokenExpiresAt); ok {
+		remaining := expiry.Sub(now)
+		if remaining <= 0 {
+			return "auth: access token expired - run 'relayfile login'"
+		}
+		if remaining <= 15*time.Minute {
+			return fmt.Sprintf("auth: access token expires in %s", formatAuthDuration(remaining))
+		}
+	}
+	return "auth: ok"
+}
+
+func formatAuthDuration(d time.Duration) string {
+	if d <= 0 {
+		return "0m"
+	}
+	minutes := int((d + time.Minute - time.Nanosecond) / time.Minute)
+	if minutes < 1 {
+		return "<1m"
+	}
+	return fmt.Sprintf("%dm", minutes)
+}
+
+func isUnauthorizedAPIError(err error) bool {
+	var apiErr *apiError
+	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusUnauthorized
 }
 
 func runStop(args []string, stdout io.Writer) error {
@@ -4984,6 +5077,13 @@ func saveCredentials(creds credentials) error {
 	}
 	payload = append(payload, '\n')
 	return writeFileAtomically(credentialsPath(), payload, 0o600)
+}
+
+func removeCredentialFile(path string) error {
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
 }
 
 func saveCloudCredentials(creds cloudCredentials) error {
