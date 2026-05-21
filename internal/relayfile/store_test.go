@@ -1058,6 +1058,12 @@ func TestListTreeHonorsDepth(t *testing.T) {
 		if expectedType != entry.Type {
 			t.Fatalf("expected %s to be %s, got %s", entry.Path, expectedType, entry.Type)
 		}
+		if entry.Type == "file" && entry.ContentHash == "" {
+			t.Fatalf("expected contentHash on file tree entry: %+v", entry)
+		}
+		if entry.Type == "dir" && entry.ContentHash != "" {
+			t.Fatalf("expected no contentHash on dir tree entry: %+v", entry)
+		}
 	}
 }
 
@@ -1308,6 +1314,9 @@ func TestStoreEventsAndOps(t *testing.T) {
 	}
 	if len(feed.Events) == 0 {
 		t.Fatalf("expected at least one event")
+	}
+	if feed.Events[0].ContentHash == "" {
+		t.Fatalf("expected contentHash on file event: %+v", feed.Events[0])
 	}
 
 	op, err := store.GetOperation("ws_2", write.OpID)

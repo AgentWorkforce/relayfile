@@ -13,10 +13,11 @@ import (
 )
 
 type fileEventMessage struct {
-	Type      string `json:"type"`
-	Path      string `json:"path,omitempty"`
-	Revision  string `json:"revision,omitempty"`
-	Timestamp string `json:"timestamp,omitempty"`
+	Type        string `json:"type"`
+	Path        string `json:"path,omitempty"`
+	Revision    string `json:"revision,omitempty"`
+	ContentHash string `json:"contentHash,omitempty"`
+	Timestamp   string `json:"timestamp,omitempty"`
 }
 
 type websocketClientMessage struct {
@@ -132,9 +133,10 @@ func (s *Server) readWebSocketMessages(ctx context.Context, conn *websocket.Conn
 
 func (s *Server) writeWebSocketEvent(ctx context.Context, conn *websocket.Conn, event relayfile.Event) error {
 	return wsjson.Write(ctx, conn, fileEventMessage{
-		Type:      event.Type,
-		Path:      event.Path,
-		Revision:  event.Revision,
-		Timestamp: event.Timestamp,
+		Type:        event.Type,
+		Path:        event.Path,
+		Revision:    event.Revision,
+		ContentHash: event.ContentHash,
+		Timestamp:   event.Timestamp,
 	})
 }

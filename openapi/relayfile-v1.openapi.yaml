@@ -198,6 +198,13 @@ paths:
             type: string
             enum: [json, tar, patch]
             default: json
+        - name: path
+          in: query
+          required: false
+          description: Export only files under this workspace path prefix
+          schema:
+            type: string
+            default: /
       responses:
         '200':
           description: Export data in requested format
@@ -1695,6 +1702,9 @@ components:
           enum: [file, dir]
         revision:
           type: string
+        contentHash:
+          type: string
+          description: SHA-256 hash of the decoded file bytes; omitted for directories
         provider:
           type: string
         providerObjectId:
@@ -1901,6 +1911,9 @@ components:
           type: string
         revision:
           type: string
+        contentHash:
+          type: string
+          description: SHA-256 hash of the decoded file bytes for create/update events
         origin:
           type: string
           enum: [provider_sync, agent_write, system]

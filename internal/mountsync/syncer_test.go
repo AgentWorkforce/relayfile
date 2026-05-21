@@ -646,6 +646,102 @@ func TestSyncOnceCreatesAndDeletesRemoteFiles(t *testing.T) {
 	}
 }
 
+func TestPullRemoteFullTreeSkipsReadFileWhenLocalHashMatchesContentHash(t *testing.T) {
+	content := "# A"
+	remotePath := "/notion/Docs/A.md"
+	client := &fakeClient{
+		files: map[string]RemoteFile{
+			remotePath: {
+				Path:        remotePath,
+				Revision:    "rev_1",
+				ContentType: "text/markdown",
+				Content:     content,
+				ContentHash: hashString(content),
+			},
+		},
+		revisionCounter: 1,
+	}
+	localDir := t.TempDir()
+	localPath := filepath.Join(localDir, "Docs", "A.md")
+	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+		t.Fatalf("mkdir local dir failed: %v", err)
+	}
+	if err := os.WriteFile(localPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("seed local file failed: %v", err)
+	}
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_mount_skip_hash",
+		RemoteRoot:  "/notion",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+
+	if err := syncer.pullRemoteFullTree(context.Background(), nil, bootstrapProgress{}); err != nil {
+		t.Fatalf("pull full tree failed: %v", err)
+	}
+
+	if got := client.requestedReadCalls(); got != 0 {
+		t.Fatalf("expected matching contentHash to skip ReadFile, got %d read(s)", got)
+	}
+	tracked := syncer.state.Files[remotePath]
+	if tracked.Revision != "rev_1" || tracked.Hash != hashString(content) || tracked.Dirty {
+		t.Fatalf("unexpected tracked state after skip: %+v", tracked)
+	}
+	assertLocalFileContent(t, localPath, content)
+}
+
+func TestReconcileBootstrapSkipsMatchingKeptMirrorBeforePushLocal(t *testing.T) {
+	content := "# A"
+	remotePath := "/notion/Docs/A.md"
+	client := &fakeClient{
+		files: map[string]RemoteFile{
+			remotePath: {
+				Path:        remotePath,
+				Revision:    "rev_1",
+				ContentType: "text/markdown",
+				Content:     content,
+				ContentHash: hashString(content),
+			},
+		},
+		revisionCounter: 1,
+	}
+	localDir := t.TempDir()
+	localPath := filepath.Join(localDir, "Docs", "A.md")
+	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+		t.Fatalf("mkdir local dir failed: %v", err)
+	}
+	if err := os.WriteFile(localPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("seed kept mirror failed: %v", err)
+	}
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_mount_kept_mirror",
+		RemoteRoot:  "/notion",
+		LocalRoot:   localDir,
+		WebSocket:   boolPtr(false),
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+
+	if err := syncer.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile failed: %v", err)
+	}
+
+	if got := client.requestedReadCalls(); got != 0 {
+		t.Fatalf("expected matching kept mirror to skip ReadFile, got %d read(s)", got)
+	}
+	if client.bulkWriteCalls != 0 {
+		t.Fatalf("expected bootstrap to track kept mirror before pushLocal, got %d bulk write(s)", client.bulkWriteCalls)
+	}
+	tracked := syncer.state.Files[remotePath]
+	if tracked.Revision != "rev_1" || tracked.Hash != hashString(content) || tracked.Dirty {
+		t.Fatalf("unexpected tracked state after reconcile: %+v", tracked)
+	}
+	assertLocalFileContent(t, localPath, content)
+}
+
 func TestSyncOnceWritesPublicStateFile(t *testing.T) {
 	client := &fakeClient{
 		files: map[string]RemoteFile{
@@ -3439,6 +3535,7 @@ func TestAtomicTempPatternHidesTempForDotPrefixedTarget(t *testing.T) {
 }
 
 type fakeClient struct {
+	mu                    sync.Mutex
 	files                 map[string]RemoteFile
 	events                []FilesystemEvent
 	revisionCounter       int
@@ -3464,6 +3561,8 @@ type fakeClient struct {
 // against this fake client. Used by tests asserting that quiet reconcile
 // cycles do not perform per-file remote reads.
 func (c *fakeClient) requestedReadCalls() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	return c.readFileCalls
 }
 
@@ -3512,9 +3611,10 @@ func (c *fakeClient) ListTree(ctx context.Context, workspaceID, path string, dep
 			continue
 		}
 		entries = append(entries, TreeEntry{
-			Path:     remotePath,
-			Type:     "file",
-			Revision: file.Revision,
+			Path:        remotePath,
+			Type:        "file",
+			Revision:    file.Revision,
+			ContentHash: file.ContentHash,
 		})
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Path < entries[j].Path })
@@ -3570,6 +3670,8 @@ func (c *fakeClient) ListEvents(ctx context.Context, workspaceID, provider, curs
 func (c *fakeClient) ReadFile(ctx context.Context, workspaceID, path string) (RemoteFile, error) {
 	_ = ctx
 	_ = workspaceID
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.readFileCalls++
 	path = normalizeRemotePath(path)
 	if c.readFileCallsByPath == nil {
