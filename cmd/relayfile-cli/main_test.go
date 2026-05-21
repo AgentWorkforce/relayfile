@@ -1051,6 +1051,57 @@ func TestStatusIncludesLocalMirrorAndDaemonCounts(t *testing.T) {
 	}
 }
 
+func TestStatusSurfacesOrphanDaemonFromProcessScan(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	localDir := t.TempDir()
+	if err := ensureMirrorLayout(localDir); err != nil {
+		t.Fatalf("ensureMirrorLayout failed: %v", err)
+	}
+	if _, err := upsertWorkspaceDetails(workspaceRecord{
+		Name:       "demo",
+		ID:         "ws_demo",
+		LocalDir:   localDir,
+		CreatedAt:  time.Now().UTC().Format(time.RFC3339),
+		LastUsedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("upsertWorkspaceDetails failed: %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path != "/v1/workspaces/ws_demo/sync/status" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"workspaceId":"ws_demo","providers":[]}`))
+	}))
+	defer server.Close()
+	if err := saveCredentials(credentials{
+		Server: server.URL,
+		Token:  "token",
+	}); err != nil {
+		t.Fatalf("saveCredentials failed: %v", err)
+	}
+
+	oldList := listProcessCommands
+	listProcessCommands = func() ([]processCommandSnapshot, error) {
+		return []processCommandSnapshot{{
+			PID:     7777,
+			Command: "relayfile mount ws_demo " + localDir + " --daemonized",
+		}}, nil
+	}
+	t.Cleanup(func() { listProcessCommands = oldList })
+
+	var stdout bytes.Buffer
+	if err := run([]string{"status", "demo"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("run status failed: %v", err)
+	}
+	if got := stdout.String(); !strings.Contains(got, "daemon: orphan (pid 7777)") {
+		t.Fatalf("expected orphan daemon status, got %q", got)
+	}
+}
+
 func TestRestartRequiresRecordedLocalMirror(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)

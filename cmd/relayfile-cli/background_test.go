@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -147,6 +148,117 @@ func TestA14StopReportsErrorWhenNoDaemonRunning(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "no running mount") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestStopDiscoversOrphanDaemonWithoutPIDFile(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	localDir := t.TempDir()
+	if err := ensureMirrorLayout(localDir); err != nil {
+		t.Fatalf("ensureMirrorLayout failed: %v", err)
+	}
+	if _, err := upsertWorkspaceDetails(workspaceRecord{
+		Name:       "demo",
+		ID:         "ws_demo",
+		LocalDir:   localDir,
+		CreatedAt:  time.Now().UTC().Format(time.RFC3339),
+		LastUsedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("upsertWorkspaceDetails failed: %v", err)
+	}
+
+	cmd := exec.Command("sleep", "30")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start sleep subprocess failed: %v", err)
+	}
+	t.Cleanup(func() {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		_, _ = cmd.Process.Wait()
+	})
+
+	oldList := listProcessCommands
+	calls := 0
+	listProcessCommands = func() ([]processCommandSnapshot, error) {
+		calls++
+		if calls == 1 {
+			return []processCommandSnapshot{{
+				PID:     cmd.Process.Pid,
+				Command: "relayfile mount ws_demo " + localDir + " --daemonized",
+			}}, nil
+		}
+		return nil, nil
+	}
+	t.Cleanup(func() { listProcessCommands = oldList })
+
+	var stdout bytes.Buffer
+	if err := run([]string{"stop", "demo"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("run stop failed: %v\noutput:\n%s", err, stdout.String())
+	}
+	if got := stdout.String(); !strings.Contains(got, "Stopped background mount for demo") ||
+		!strings.Contains(got, strconv.Itoa(cmd.Process.Pid)) {
+		t.Fatalf("unexpected stop output: %q", got)
+	}
+
+	exited := make(chan error, 1)
+	go func() {
+		_, err := cmd.Process.Wait()
+		exited <- err
+	}()
+	select {
+	case err := <-exited:
+		var exitErr *exec.ExitError
+		if err != nil && !errors.As(err, &exitErr) {
+			t.Fatalf("subprocess exited with unexpected error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("orphan subprocess did not exit within 5s of SIGTERM")
+	}
+}
+
+func TestMountBackgroundRefusesExistingDaemonFromProcessScan(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	localDir := t.TempDir()
+	if _, err := upsertWorkspaceDetails(workspaceRecord{
+		Name:       "demo",
+		ID:         "ws_demo",
+		LocalDir:   localDir,
+		CreatedAt:  time.Now().UTC().Format(time.RFC3339),
+		LastUsedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("upsertWorkspaceDetails failed: %v", err)
+	}
+	if err := saveCredentials(credentials{
+		Server: defaultServerURL,
+		Token:  testJWTWithWorkspace("ws_demo"),
+	}); err != nil {
+		t.Fatalf("saveCredentials failed: %v", err)
+	}
+
+	oldList := listProcessCommands
+	listProcessCommands = func() ([]processCommandSnapshot, error) {
+		return []processCommandSnapshot{{
+			PID:     7777,
+			Command: "relayfile mount demo " + localDir + " --daemonized",
+		}}, nil
+	}
+	t.Cleanup(func() { listProcessCommands = oldList })
+
+	var stdout bytes.Buffer
+	err := run([]string{"mount", "demo", "--background"}, strings.NewReader(""), &stdout, &stdout)
+	if err == nil {
+		t.Fatalf("expected mount --background to refuse an existing daemon")
+	}
+	if !strings.Contains(err.Error(), "already has a running mount") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if strings.Contains(stdout.String(), "Mirror started in background") {
+		t.Fatalf("mount should not have spawned a background daemon: %q", stdout.String())
 	}
 }
 
