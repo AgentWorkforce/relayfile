@@ -1107,6 +1107,53 @@ func TestSyncOnceFallsBackToFullPullWhenEventsUnavailable(t *testing.T) {
 	}
 }
 
+func TestFullReconcileBypassesQuietEventsShortCircuit(t *testing.T) {
+	client := &fakeClient{
+		files: map[string]RemoteFile{
+			"/notion/Docs/A.md": {
+				Path:        "/notion/Docs/A.md",
+				Revision:    "rev_1",
+				ContentType: "text/markdown",
+				Content:     "# A",
+			},
+		},
+		events: []FilesystemEvent{
+			{
+				EventID:  "evt_1",
+				Type:     "file.created",
+				Path:     "/notion/Docs/A.md",
+				Revision: "rev_1",
+			},
+		},
+		revisionCounter: 1,
+		eventCounter:    1,
+	}
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_force_full_quiet",
+		RemoteRoot:  "/notion",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("initial sync failed: %v", err)
+	}
+
+	client.files["/notion/Docs/B.md"] = RemoteFile{
+		Path:        "/notion/Docs/B.md",
+		Revision:    "rev_2",
+		ContentType: "text/markdown",
+		Content:     "# B",
+	}
+	syncer.forceFullReconcile = true
+	if err := syncer.Reconcile(context.Background()); err != nil {
+		t.Fatalf("forced reconcile failed: %v", err)
+	}
+	assertLocalFileContent(t, filepath.Join(localDir, "Docs", "B.md"), "# B")
+}
+
 func TestBulkSeedThenSync(t *testing.T) {
 	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
 	t.Cleanup(store.Close)
@@ -4418,11 +4465,9 @@ func TestPullShortCircuitsWhenNoNewEvents(t *testing.T) {
 		WorkspaceID: "ws_short_circuit",
 		RemoteRoot:  "/notion",
 		LocalRoot:   localDir,
-		// Use a very small cadence so that, absent the short-circuit,
-		// the test would deterministically trigger a full-tree pull on
-		// the second post-bootstrap cycle. With the short-circuit, no
-		// full pull should fire because no new events ever arrive.
-		FullPullEvery: 2,
+		// Disable the periodic full-pull cadence so this test isolates
+		// the quiet-cycle short-circuit itself.
+		FullPullEvery: -1,
 	})
 	if err != nil {
 		t.Fatalf("new syncer failed: %v", err)
@@ -4440,15 +4485,14 @@ func TestPullShortCircuitsWhenNoNewEvents(t *testing.T) {
 	// short-circuit calls in isolation.
 	client.listEventsCalls = 0
 
-	// Run several quiet reconcile cycles. With no new events on the
+	// Run several quiet reconcile cycles with periodic full pulls disabled.
+	// With no new events on the
 	// feed, each cycle should:
 	//   1. Issue exactly one ListEvents probe.
 	//   2. NOT issue a ListTree call (would block reconcile on huge
 	//      workspaces).
 	//   3. NOT issue any ReadFile calls.
-	//   4. NOT increment the periodic-full-pull counter past the
-	//      threshold — even though we set FullPullEvery=2, the
-	//      short-circuit returns before the cadence counter advances.
+	//   4. Mark the cycle successful so status does not report a stall.
 	const quietCycles = 5
 	for i := 0; i < quietCycles; i++ {
 		if err := syncer.Reconcile(context.Background()); err != nil {
@@ -4498,6 +4542,59 @@ func TestPullShortCircuitsWhenNoNewEvents(t *testing.T) {
 	if string(data) != "# A v2" {
 		t.Fatalf("expected mirrored file to update after event; got %q", string(data))
 	}
+}
+
+func TestQuietEventCyclesEventuallyRunPeriodicFullPull(t *testing.T) {
+	client := &fakeClient{
+		files: map[string]RemoteFile{
+			"/notion/Docs/A.md": {
+				Path:        "/notion/Docs/A.md",
+				Revision:    "rev_1",
+				ContentType: "text/markdown",
+				Content:     "# A",
+			},
+		},
+		events: []FilesystemEvent{
+			{
+				EventID:  "evt_1",
+				Type:     "file.created",
+				Path:     "/notion/Docs/A.md",
+				Revision: "rev_1",
+			},
+		},
+		revisionCounter: 1,
+		eventCounter:    1,
+	}
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID:   "ws_quiet_periodic_full",
+		RemoteRoot:    "/notion",
+		LocalRoot:     localDir,
+		FullPullEvery: 2,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("bootstrap sync: %v", err)
+	}
+
+	client.files["/notion/Docs/B.md"] = RemoteFile{
+		Path:        "/notion/Docs/B.md",
+		Revision:    "rev_2",
+		ContentType: "text/markdown",
+		Content:     "# B",
+	}
+	if err := syncer.Reconcile(context.Background()); err != nil {
+		t.Fatalf("first quiet reconcile: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(localDir, "Docs", "B.md")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("quiet cycle before cadence should not pull B.md yet; stat err=%v", err)
+	}
+	if err := syncer.Reconcile(context.Background()); err != nil {
+		t.Fatalf("second quiet reconcile: %v", err)
+	}
+	assertLocalFileContent(t, filepath.Join(localDir, "Docs", "B.md"), "# B")
 }
 
 // TestPullRestartFastPathSkipsFullPull pins the daemon-restart half of

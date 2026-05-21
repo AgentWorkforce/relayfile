@@ -1966,31 +1966,21 @@ func (s *Syncer) bootstrapContext(parent context.Context) (context.Context, cont
 }
 
 func (s *Syncer) pullRemote(ctx context.Context, conflicted map[string]struct{}) error {
-	if s.state.EventsCursor != "" {
+	if s.state.EventsCursor != "" && !s.forceFullReconcile {
 		// Skip-if-no-events short-circuit. Most reconcile cycles on a
 		// quiet workspace have nothing to pull; turning that into a
 		// single cheap ListEvents probe avoids the worst-case full-tree
 		// fetch (sequential ReadFile per entry) that times out on
 		// workspaces with hundreds of files. If the events feed reports
-		// no new events since our last cursor, the local mirror is
-		// already up-to-date and we can return immediately. The caller
-		// (sync) then bumps LastSuccessfulReconcileAt so the stall
-		// detector stays clear.
+		// no new events since our last cursor, we can usually return
+		// immediately. The low-frequency periodic full-pull cadence still
+		// bypasses the short-circuit so records written without fs events
+		// eventually self-heal.
 		//
 		// If the events feed itself is unavailable (404) we fall through
 		// to the existing incremental/full-pull path, which will hit the
 		// 404 again and degrade to the full-tree fetch. That preserves
 		// pre-fix behaviour for backends without an events feed.
-		feed, err := s.client.ListEvents(ctx, s.workspace, s.eventProvider, s.state.EventsCursor, 1)
-		if err == nil && len(feed.Events) == 0 {
-			// Quiet cycle. Periodic full-pull cadence is still tracked
-			// against incrementalCycles below to keep the trust-but-verify
-			// safety net intact, but only when there is actually work to
-			// do. Counting empty cycles toward the threshold would race
-			// the periodic full pull against the very condition the
-			// short-circuit is designed to avoid.
-			return nil
-		}
 		// "Trust but verify": every Nth incremental cycle, force a full
 		// tree pull regardless of cursor health. This self-heals any stale
 		// state caused by cloud-side revision reuse — applyRemoteFile
@@ -1999,10 +1989,9 @@ func (s *Syncer) pullRemote(ctx context.Context, conflicted map[string]struct{})
 		// Tracks production failure mode where rev counter rolled back
 		// mid-envelope, leaving the daemon and cloud both calling distinct
 		// content "rev_96".
-		s.incrementalCycles++
-		if s.fullPullEvery > 0 && s.incrementalCycles >= s.fullPullEvery {
+		forceFullPull := func(reason string) error {
 			s.incrementalCycles = 0
-			s.logf("forcing periodic full tree pull (every %d incremental cycles) as defense against cloud-side revision reuse", s.fullPullEvery)
+			s.logf("%s", reason)
 			// Periodic full pull is the same heavy op as bootstrap — give
 			// it the rootCtx-derived bootstrap deadline, not the tiny
 			// per-cycle one. The surrounding ListEvents probe above stays
@@ -2027,6 +2016,20 @@ func (s *Syncer) pullRemote(ctx context.Context, conflicted map[string]struct{})
 			// applyRemoteFile is idempotent and will no-op when on-disk
 			// content already matches.
 			return nil
+		}
+		feed, err := s.client.ListEvents(ctx, s.workspace, s.eventProvider, s.state.EventsCursor, 1)
+		if err == nil && len(feed.Events) == 0 {
+			if s.fullPullEvery > 0 {
+				s.incrementalCycles++
+				if s.incrementalCycles >= s.fullPullEvery {
+					return forceFullPull(fmt.Sprintf("forcing periodic full tree pull (every %d quiet/incremental cycles) as defense against cloud-side revision reuse and missing events", s.fullPullEvery))
+				}
+			}
+			return nil
+		}
+		s.incrementalCycles++
+		if s.fullPullEvery > 0 && s.incrementalCycles >= s.fullPullEvery {
+			return forceFullPull(fmt.Sprintf("forcing periodic full tree pull (every %d quiet/incremental cycles) as defense against cloud-side revision reuse and missing events", s.fullPullEvery))
 		}
 
 		nextCursor, err := s.pullRemoteIncremental(ctx, conflicted, s.state.EventsCursor)

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -391,6 +392,59 @@ func TestForceFullReconcileEnvOverridesCompleteFlag(t *testing.T) {
 	}
 	if client.listTreeCalls.Load() != callsAfterForce {
 		t.Fatalf("expected fast-path to engage after force cleared; ListTree calls went %d -> %d", callsAfterForce, client.listTreeCalls.Load())
+	}
+}
+
+func TestForceFullReconcileBypassesEventsShortCircuit(t *testing.T) {
+	t.Setenv("RELAYFILE_FORCE_FULL_RECONCILE", "1")
+	client := newBootstrapClient(5, 10)
+	newPath := "/linear/projects/779cbfda.json"
+	client.files[newPath] = RemoteFile{
+		Path:        newPath,
+		Revision:    "rev_46580",
+		ContentType: "application/json",
+		Content:     `{"id":"779cbfda"}`,
+	}
+	localDir := t.TempDir()
+
+	seed := mountState{
+		Files:             map[string]trackedFile{},
+		BootstrapComplete: true,
+		EventsCursor:      "evt_stale",
+		LastEventAt:       time.Now().UTC().Add(-13 * time.Hour).Format(time.RFC3339Nano),
+	}
+	for p, f := range client.files {
+		if p == newPath {
+			continue
+		}
+		seed.Files[p] = trackedFile{Revision: f.Revision, ContentType: f.ContentType, Hash: hashBytes([]byte(f.Content))}
+		onDisk := filepath.Join(localDir, filepath.FromSlash(strings.TrimPrefix(p, "/")))
+		if err := os.MkdirAll(filepath.Dir(onDisk), 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(onDisk, []byte(f.Content), 0o644); err != nil {
+			t.Fatalf("seed disk file: %v", err)
+		}
+	}
+	if err := writeMountState(filepath.Join(localDir, ".relayfile-mount-state.json"), seed); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	client.events = nil
+	s := newBootstrapSyncer(t, client, localDir, SyncerOptions{RootCtx: context.Background()})
+	if !s.forceFullReconcile {
+		t.Fatalf("expected forceFullReconcile resolved true from env")
+	}
+
+	if err := s.Reconcile(context.Background()); err != nil {
+		t.Fatalf("forced reconcile: %v", err)
+	}
+	if client.listTreeCalls.Load() == 0 {
+		t.Fatalf("forced reconcile must run a full tree pull despite a non-empty EventsCursor + quiet feed")
+	}
+	newOnDisk := filepath.Join(localDir, filepath.FromSlash(strings.TrimPrefix(newPath, "/")))
+	if _, err := os.Stat(newOnDisk); err != nil {
+		t.Fatalf("forced reconcile did not pull newer remote record %s into the mirror: %v", newPath, err)
 	}
 }
 

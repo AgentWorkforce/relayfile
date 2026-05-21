@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -362,6 +363,71 @@ func TestTreeUsesEnvWorkspaceWhenWorkspaceArgOmitted(t *testing.T) {
 	}
 
 	if got := stdout.String(); !strings.Contains(got, "Tree /github") {
+		t.Fatalf("expected tree header, got %q", got)
+	}
+}
+
+func TestTreeTreatsPathLikeSingleArgAsRemotePath(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+	t.Setenv("RELAYFILE_WORKSPACE", "ws_env")
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/workspaces/ws_env/fs/tree" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		if got := r.URL.Query().Get("path"); got != "/linear/projects" {
+			t.Fatalf("expected path /linear/projects, got %q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"path":"/linear/projects","entries":[],"nextCursor":null}`))
+	}))
+	defer server.Close()
+
+	if err := saveCredentials(credentials{
+		Server: server.URL,
+		Token:  "token",
+	}); err != nil {
+		t.Fatalf("saveCredentials failed: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := run([]string{"tree", "linear/projects"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("run tree failed: %v", err)
+	}
+	if got := stdout.String(); !strings.Contains(got, "Tree /linear/projects") {
+		t.Fatalf("expected tree header, got %q", got)
+	}
+}
+
+func TestTreePreservesUncatalogedSlashWorkspaceWhenRootIsUnknown(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.EscapedPath(); got != "/v1/workspaces/team%2Fproject/fs/tree" {
+			t.Fatalf("unexpected escaped path: %s", got)
+		}
+		if got := r.URL.Query().Get("path"); got != "/" {
+			t.Fatalf("expected root path, got %q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"path":"/","entries":[],"nextCursor":null}`))
+	}))
+	defer server.Close()
+
+	if err := saveCredentials(credentials{
+		Server: server.URL,
+		Token:  "token",
+	}); err != nil {
+		t.Fatalf("saveCredentials failed: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := run([]string{"tree", "team/project"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("run tree failed: %v", err)
+	}
+	if got := stdout.String(); !strings.Contains(got, "Tree /") {
 		t.Fatalf("expected tree header, got %q", got)
 	}
 }
@@ -1009,6 +1075,233 @@ func TestRestartRequiresRecordedLocalMirror(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "no recorded local mirror directory") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestMountRequiresLocalDirWhenWorkspaceHasNoRecordedMirror(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	if err := saveWorkspaceCatalog(workspaceCatalog{
+		Default: "demo",
+		Workspaces: []workspaceRecord{{
+			Name:       "demo",
+			ID:         "ws_demo",
+			CreatedAt:  now,
+			LastUsedAt: now,
+		}},
+	}); err != nil {
+		t.Fatalf("saveWorkspaceCatalog failed: %v", err)
+	}
+	if err := saveCredentials(credentials{
+		Server: defaultServerURL,
+		Token:  testJWTWithWorkspace("ws_demo"),
+	}); err != nil {
+		t.Fatalf("saveCredentials failed: %v", err)
+	}
+
+	err := run([]string{"mount", "demo", "--once", "--websocket=false"}, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
+	if err == nil {
+		t.Fatalf("expected mount without LOCAL_DIR to fail when no localDir is recorded")
+	}
+	if !strings.Contains(err.Error(), "no recorded local mirror directory") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestMountUsesRecordedLocalDirWhenOmitted(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	localDir := t.TempDir()
+	now := time.Now().UTC().Format(time.RFC3339)
+	if err := saveWorkspaceCatalog(workspaceCatalog{
+		Default: "demo",
+		Workspaces: []workspaceRecord{{
+			Name:       "demo",
+			ID:         "ws_demo",
+			LocalDir:   localDir,
+			CreatedAt:  now,
+			LastUsedAt: now,
+		}},
+	}); err != nil {
+		t.Fatalf("saveWorkspaceCatalog failed: %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/workspaces/ws_demo/fs/export":
+			_, _ = w.Write([]byte(`[{"path":"/notion/Docs/A.md","revision":"rev_1","contentType":"text/markdown","content":"# A"}]`))
+		case "/v1/workspaces/ws_demo/fs/events":
+			_, _ = w.Write([]byte(`{"events":[{"eventId":"evt_1","type":"file.created","path":"/notion/Docs/A.md","revision":"rev_1"}]}`))
+		case "/v1/workspaces/ws_demo/sync/status":
+			_, _ = w.Write([]byte(`{"workspaceId":"ws_demo","providers":[]}`))
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	if err := saveCredentials(credentials{
+		Server: server.URL,
+		Token:  testJWTWithWorkspace("ws_demo"),
+	}); err != nil {
+		t.Fatalf("saveCredentials failed: %v", err)
+	}
+
+	if err := run([]string{"mount", "demo", "--once", "--websocket=false"}, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
+		t.Fatalf("run mount failed: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(localDir, "notion", "Docs", "A.md"))
+	if err != nil {
+		t.Fatalf("expected file under recorded localDir: %v", err)
+	}
+	if string(data) != "# A" {
+		t.Fatalf("unexpected mirrored content: %q", data)
+	}
+}
+
+func TestMountRefusesExplicitLocalDirThatRehomesRecordedMirror(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	localDir := t.TempDir()
+	otherDir := filepath.Join(t.TempDir(), "other-mirror")
+	now := time.Now().UTC().Format(time.RFC3339)
+	if err := saveWorkspaceCatalog(workspaceCatalog{
+		Default: "demo",
+		Workspaces: []workspaceRecord{{
+			Name:       "demo",
+			ID:         "ws_demo",
+			LocalDir:   localDir,
+			CreatedAt:  now,
+			LastUsedAt: now,
+		}},
+	}); err != nil {
+		t.Fatalf("saveWorkspaceCatalog failed: %v", err)
+	}
+	if err := saveCredentials(credentials{
+		Server: defaultServerURL,
+		Token:  testJWTWithWorkspace("ws_demo"),
+	}); err != nil {
+		t.Fatalf("saveCredentials failed: %v", err)
+	}
+
+	err := run([]string{"mount", "demo", otherDir, "--once", "--websocket=false"}, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
+	if err == nil {
+		t.Fatalf("expected mount to refuse re-homing a recorded mirror")
+	}
+	if !strings.Contains(err.Error(), "refusing to silently re-home") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(otherDir, ".relay")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("refused re-home should not initialize other mirror dir; stat err=%v", statErr)
+	}
+}
+
+func TestMountRehomeRefusesRunningRecordedDaemon(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	localDir := t.TempDir()
+	otherDir := filepath.Join(t.TempDir(), "other-mirror")
+	now := time.Now().UTC().Format(time.RFC3339)
+	if err := saveWorkspaceCatalog(workspaceCatalog{
+		Default: "demo",
+		Workspaces: []workspaceRecord{{
+			Name:       "demo",
+			ID:         "ws_demo",
+			LocalDir:   localDir,
+			CreatedAt:  now,
+			LastUsedAt: now,
+		}},
+	}); err != nil {
+		t.Fatalf("saveWorkspaceCatalog failed: %v", err)
+	}
+	if err := ensureMirrorLayout(localDir); err != nil {
+		t.Fatalf("ensureMirrorLayout failed: %v", err)
+	}
+	if err := os.WriteFile(mountPIDFile(localDir), []byte(strconv.Itoa(os.Getpid())+"\n"), 0o644); err != nil {
+		t.Fatalf("write legacy pid failed: %v", err)
+	}
+	if err := saveCredentials(credentials{
+		Server: defaultServerURL,
+		Token:  testJWTWithWorkspace("ws_demo"),
+	}); err != nil {
+		t.Fatalf("saveCredentials failed: %v", err)
+	}
+
+	err := run([]string{"mount", "demo", otherDir, "--rehome", "--once", "--websocket=false"}, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
+	if err == nil {
+		t.Fatalf("expected rehome to refuse while old mirror has a running daemon")
+	}
+	if !strings.Contains(err.Error(), "has a running mount") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(otherDir, ".relay")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("refused rehome should not initialize other mirror dir; stat err=%v", statErr)
+	}
+}
+
+func TestMountRehomeAllowsExplicitMoveAndPersistsLocalDir(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	localDir := t.TempDir()
+	otherDir := t.TempDir()
+	now := time.Now().UTC().Format(time.RFC3339)
+	if err := saveWorkspaceCatalog(workspaceCatalog{
+		Default: "demo",
+		Workspaces: []workspaceRecord{{
+			Name:       "demo",
+			ID:         "ws_demo",
+			LocalDir:   localDir,
+			CreatedAt:  now,
+			LastUsedAt: now,
+		}},
+	}); err != nil {
+		t.Fatalf("saveWorkspaceCatalog failed: %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/workspaces/ws_demo/fs/export":
+			_, _ = w.Write([]byte(`[{"path":"/notion/Docs/Rehomed.md","revision":"rev_1","contentType":"text/markdown","content":"# Rehomed"}]`))
+		case "/v1/workspaces/ws_demo/fs/events":
+			_, _ = w.Write([]byte(`{"events":[{"eventId":"evt_1","type":"file.created","path":"/notion/Docs/Rehomed.md","revision":"rev_1"}]}`))
+		case "/v1/workspaces/ws_demo/sync/status":
+			_, _ = w.Write([]byte(`{"workspaceId":"ws_demo","providers":[]}`))
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	if err := saveCredentials(credentials{
+		Server: server.URL,
+		Token:  testJWTWithWorkspace("ws_demo"),
+	}); err != nil {
+		t.Fatalf("saveCredentials failed: %v", err)
+	}
+
+	if err := run([]string{"mount", "demo", otherDir, "--rehome", "--once", "--websocket=false"}, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
+		t.Fatalf("run mount --rehome failed: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(otherDir, "notion", "Docs", "Rehomed.md"))
+	if err != nil {
+		t.Fatalf("expected file under rehomed localDir: %v", err)
+	}
+	if string(data) != "# Rehomed" {
+		t.Fatalf("unexpected mirrored content: %q", data)
+	}
+	record, ok := workspaceRecordByID("ws_demo")
+	if !ok {
+		t.Fatalf("expected workspace record")
+	}
+	wantLocalDir, _ := filepath.Abs(otherDir)
+	if record.LocalDir != wantLocalDir {
+		t.Fatalf("LocalDir = %q, want %q", record.LocalDir, wantLocalDir)
 	}
 }
 
