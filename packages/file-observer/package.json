@@ -1,6 +1,6 @@
 {
   "name": "@relayfile/file-observer",
-  "version": "0.7.32",
+  "version": "0.7.33",
   "description": "RelayFile observer dashboard for browsing synced workspace files and metadata",
   "files": [
     "src",
