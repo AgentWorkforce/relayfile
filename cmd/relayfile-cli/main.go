@@ -1863,10 +1863,12 @@ func runLogin(args []string, stdin io.Reader, stdout io.Writer) error {
 		}
 	}
 
-	if err := removeCredentialFile(credentialsPath()); err != nil {
-		fmt.Fprintf(stdout, "warning: could not clear stale server credentials: %v\n", err)
+	if !*skipWorkspace {
+		if err := removeCredentialFile(credentialsPath()); err != nil {
+			fmt.Fprintf(stdout, "warning: could not clear stale server credentials: %v\n", err)
+		}
+		fmt.Fprintln(stdout, "Run 'relayfile setup' to create or join a workspace, or 'relayfile mount WORKSPACE' if you already have one.")
 	}
-	fmt.Fprintln(stdout, "Run 'relayfile setup' to create or join a workspace, or 'relayfile mount WORKSPACE' if you already have one.")
 	return nil
 }
 

@@ -2882,10 +2882,16 @@ func TestLoginRefreshesWorkspaceTokenForDefaultWorkspace(t *testing.T) {
 
 // TestLoginSkipsWorkspaceRefreshWhenFlagSet covers --skip-workspace-refresh:
 // even with a workspace registered, no /join call should fire and
-// credentials.json must remain absent.
+// existing credentials.json must be preserved.
 func TestLoginSkipsWorkspaceRefreshWhenFlagSet(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)
+	if err := saveCredentials(credentials{
+		Server: "https://relayfile-old.test",
+		Token:  "stale_server_token",
+	}); err != nil {
+		t.Fatalf("saveCredentials failed: %v", err)
+	}
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
@@ -2909,8 +2915,18 @@ func TestLoginSkipsWorkspaceRefreshWhenFlagSet(t *testing.T) {
 		t.Fatalf("run login failed: %v\noutput:\n%s", err, stdout.String())
 	}
 
-	if _, err := os.Stat(credentialsPath()); !os.IsNotExist(err) {
-		t.Fatalf("expected no server credentials written with --skip-workspace-refresh, got err=%v", err)
+	creds, err := loadCredentials()
+	if err != nil {
+		t.Fatalf("loadCredentials failed: %v", err)
+	}
+	if creds.Server != "https://relayfile-old.test" {
+		t.Fatalf("expected existing server credentials preserved, got server %q", creds.Server)
+	}
+	if creds.Token != "stale_server_token" {
+		t.Fatalf("expected existing server token preserved, got %q", creds.Token)
+	}
+	if strings.Contains(stdout.String(), "Run 'relayfile setup'") {
+		t.Fatalf("expected no workspace setup hint with --skip-workspace-refresh, got %q", stdout.String())
 	}
 }
 
