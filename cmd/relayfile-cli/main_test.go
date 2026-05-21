@@ -1213,6 +1213,27 @@ func TestMountUsesLegacyRecordedLocalDirWhenOmitted(t *testing.T) {
 	}
 }
 
+func TestShouldRegisterMountPID(t *testing.T) {
+	tests := []struct {
+		name       string
+		daemonized bool
+		once       bool
+		want       bool
+	}{
+		{name: "background child", daemonized: true, once: false, want: true},
+		{name: "foreground loop", daemonized: false, once: false, want: true},
+		{name: "one shot", daemonized: false, once: true, want: false},
+		{name: "daemonized one shot still visible", daemonized: true, once: true, want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := shouldRegisterMountPID(tt.daemonized, tt.once); got != tt.want {
+				t.Fatalf("shouldRegisterMountPID(%v, %v) = %v, want %v", tt.daemonized, tt.once, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestMountRefusesExplicitLocalDirThatRehomesRecordedMirror(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)
@@ -1333,9 +1354,9 @@ func TestMountRehomeRefusesUnverifiedRecordedDaemon(t *testing.T) {
 
 	err := run([]string{"mount", "demo", otherDir, "--rehome", "--once", "--websocket=false"}, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
 	if err == nil {
-		t.Fatalf("expected rehome to refuse unverified background mount state")
+		t.Fatalf("expected rehome to refuse unverified mount state")
 	}
-	if !strings.Contains(err.Error(), "unverified background mount state") {
+	if !strings.Contains(err.Error(), "unverified mount state") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if _, statErr := os.Stat(mountPIDFile(localDir)); statErr != nil {

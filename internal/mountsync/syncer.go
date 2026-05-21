@@ -675,6 +675,7 @@ type Syncer struct {
 	bootstrapIdleTimeout time.Duration
 	forceFullReconcile   bool
 	incrementalCycles    int
+	oversizedLogged      map[string]struct{}
 	lazyRepos            bool
 	lowMemory            bool
 	layoutRegistrar      ProviderLayoutRegistrar
@@ -999,6 +1000,7 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 		bootstrapTimeout:     bootstrapTimeout,
 		bootstrapIdleTimeout: bootstrapIdleTimeout,
 		forceFullReconcile:   forceFullReconcile,
+		oversizedLogged:      map[string]struct{}{},
 		lazyRepos:            lazyRepos,
 		lowMemory:            lowMemory,
 		layoutRegistrar:      opts.ProviderLayoutRegistrar,
@@ -2037,6 +2039,9 @@ func (s *Syncer) pullRemote(ctx context.Context, conflicted map[string]struct{})
 			s.state.EventsCursor = nextCursor
 			return nil
 		}
+		if strings.TrimSpace(nextCursor) != "" && nextCursor != s.state.EventsCursor {
+			s.state.EventsCursor = nextCursor
+		}
 		var httpErr *HTTPError
 		if !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusNotFound {
 			return err
@@ -2846,22 +2851,25 @@ func isProviderLayoutAliasSegment(segment string) bool {
 }
 
 func (s *Syncer) pullRemoteIncremental(ctx context.Context, conflicted map[string]struct{}, cursor string) (string, error) {
-	changed := map[string]struct{}{}
-	deleted := map[string]struct{}{}
 	currentCursor := strings.TrimSpace(cursor)
+	safeCursor := currentCursor
 
 	for {
 		feed, err := s.client.ListEvents(ctx, s.workspace, s.eventProvider, currentCursor, 500)
 		if err != nil {
-			return cursor, err
+			return safeCursor, err
 		}
+		changed := map[string]struct{}{}
+		deleted := map[string]struct{}{}
+		pageCursor := currentCursor
+		pageLastEventAt := ""
 		for _, event := range feed.Events {
 			eventID := strings.TrimSpace(event.EventID)
 			if eventID != "" {
-				currentCursor = eventID
+				pageCursor = eventID
 			}
 			if ts := strings.TrimSpace(event.Timestamp); ts != "" {
-				s.state.LastEventAt = ts
+				pageLastEventAt = ts
 			}
 			remotePath := normalizeRemotePath(event.Path)
 			if remotePath == "/" || !isUnderRemoteRoot(s.remoteRoot, remotePath) {
@@ -2901,12 +2909,32 @@ func (s *Syncer) pullRemoteIncremental(ctx context.Context, conflicted map[strin
 				delete(changed, remotePath)
 			}
 		}
+		if err := s.applyIncrementalChanges(ctx, changed, deleted, conflicted); err != nil {
+			return safeCursor, err
+		}
+		if pageLastEventAt != "" {
+			s.state.LastEventAt = pageLastEventAt
+		}
+		if strings.TrimSpace(pageCursor) != "" {
+			currentCursor = strings.TrimSpace(pageCursor)
+			safeCursor = currentCursor
+		}
 		if feed.NextCursor == nil || *feed.NextCursor == "" {
 			break
 		}
-		currentCursor = *feed.NextCursor
+		currentCursor = strings.TrimSpace(*feed.NextCursor)
+		if currentCursor != "" {
+			safeCursor = currentCursor
+		}
 	}
 
+	if safeCursor == "" {
+		safeCursor = cursor
+	}
+	return safeCursor, nil
+}
+
+func (s *Syncer) applyIncrementalChanges(ctx context.Context, changed, deleted map[string]struct{}, conflicted map[string]struct{}) error {
 	changedPaths := make([]string, 0, len(changed))
 	for remotePath := range changed {
 		changedPaths = append(changedPaths, remotePath)
@@ -2923,14 +2951,14 @@ func (s *Syncer) pullRemoteIncremental(ctx context.Context, conflicted map[strin
 			if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusForbidden {
 				s.logf("skipping denied file: %s", remotePath)
 				if markErr := s.markReadDenied(remotePath); markErr != nil {
-					return cursor, markErr
+					return markErr
 				}
 				continue
 			}
-			return cursor, err
+			return err
 		}
 		if err := s.applyRemoteFile(remotePath, file, conflicted); err != nil {
-			return cursor, err
+			return err
 		}
 	}
 
@@ -2941,14 +2969,10 @@ func (s *Syncer) pullRemoteIncremental(ctx context.Context, conflicted map[strin
 	sort.Strings(deletedPaths)
 	for _, remotePath := range deletedPaths {
 		if err := s.applyRemoteDelete(remotePath, conflicted); err != nil {
-			return cursor, err
+			return err
 		}
 	}
-
-	if currentCursor == "" {
-		currentCursor = cursor
-	}
-	return currentCursor, nil
+	return nil
 }
 
 func (s *Syncer) resolveLatestEventCursor(ctx context.Context) (string, error) {
@@ -3403,16 +3427,23 @@ func (s *Syncer) scanLocalFiles() (map[string]localSnapshot, error) {
 		// enqueued for writeback (it both stresses the cloud and was part
 		// of the clobber pathology). Surface it and skip.
 		if max := maxWritebackBytes(); max > 0 && info.Size() > max {
-			s.logf("skipping oversized local file %s (%d bytes > %d byte writeback cap); not enqueued", path, info.Size(), max)
+			remotePath, err := localToRemotePath(s.localRoot, s.remoteRoot, path)
+			if err != nil {
+				return nil
+			}
+			logKey := fmt.Sprintf("%s:%d:%d", remotePath, info.Size(), max)
+			if s.oversizedLogged == nil {
+				s.oversizedLogged = map[string]struct{}{}
+			}
+			if _, seen := s.oversizedLogged[logKey]; !seen {
+				s.logf("skipping oversized local file %s (%d bytes > %d byte writeback cap); not enqueued", path, info.Size(), max)
+				s.oversizedLogged[logKey] = struct{}{}
+			}
 			snapshot, err := readLocalSnapshot(path, false)
 			if err != nil {
 				return err
 			}
 			snapshot.SkipWriteback = true
-			remotePath, err := localToRemotePath(s.localRoot, s.remoteRoot, path)
-			if err != nil {
-				return nil
-			}
 			results[remotePath] = snapshot
 			s.state.Counters.SkippedOversizeWriteback++
 			return nil

@@ -3792,8 +3792,8 @@ func runMount(args []string) error {
 			}
 			if pid != 0 && !verified {
 				return fmt.Errorf(
-					"workspace %s has unverified background mount state at %s (pid %d); "+
-						"stop the existing daemon or remove %s after confirming it is stale before re-homing to %s",
+					"workspace %s has unverified mount state at %s (pid %d); "+
+						"stop the existing mount or remove %s after confirming it is stale before re-homing to %s",
 					workspaceID, absRecorded, pid, mountPIDFile(recordedLocalDir), absLocalDir,
 				)
 			}
@@ -3834,10 +3834,13 @@ func runMount(args []string) error {
 	if *background && !*daemonized {
 		return spawnBackgroundMountProcess(args, absLocalDir, pidFile, logFile)
 	}
+	registerPID := shouldRegisterMountPID(*daemonized, *once)
 	if *daemonized {
 		if err := rotateLogFile(logFile); err != nil {
 			return err
 		}
+	}
+	if registerPID {
 		if err := writeDaemonPIDState(pidFile, daemonPIDState{
 			PID:         os.Getpid(),
 			WorkspaceID: workspaceID,
@@ -3902,6 +3905,10 @@ func runMount(args []string) error {
 	_, _ = upsertWorkspaceDetails(record)
 
 	return runMountLoop(rootCtx, syncer, absLocalDir, workspaceID, strings.TrimRight(strings.TrimSpace(*server), "/"), *timeout, *interval, *intervalJitter, *websocketEnabled, *once, *daemonized, pidFile, logFile)
+}
+
+func shouldRegisterMountPID(daemonized, once bool) bool {
+	return daemonized || !once
 }
 
 // mountStartBanner formats the user-facing line printed when the mount loop

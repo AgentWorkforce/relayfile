@@ -3454,6 +3454,8 @@ type fakeClient struct {
 	bulkWriteResponseFunc func(ctx context.Context, workspaceID string, files []BulkWriteFile) (BulkWriteResponse, error)
 	deleteCalls           []deleteCall
 	eventsUnsupported     bool
+	listEventsErrAfter    int
+	listEventsErr         error
 }
 
 // requestedReadCalls returns the cumulative number of ReadFile calls made
@@ -3528,6 +3530,9 @@ func (c *fakeClient) ListEvents(ctx context.Context, workspaceID, provider, curs
 	c.listEventsCalls++
 	if c.eventsUnsupported {
 		return EventFeed{}, &HTTPError{StatusCode: 404, Code: "not_found", Message: "not found"}
+	}
+	if c.listEventsErr != nil && c.listEventsCalls > c.listEventsErrAfter {
+		return EventFeed{}, c.listEventsErr
 	}
 	if limit <= 0 {
 		limit = 200
@@ -4541,6 +4546,123 @@ func TestPullShortCircuitsWhenNoNewEvents(t *testing.T) {
 	}
 	if string(data) != "# A v2" {
 		t.Fatalf("expected mirrored file to update after event; got %q", string(data))
+	}
+}
+
+func TestPullRemoteIncrementalPersistsAppliedPageCursorOnListEventsError(t *testing.T) {
+	files := map[string]RemoteFile{}
+	events := make([]FilesystemEvent, 0, 501)
+	for i := 1; i <= 501; i++ {
+		remotePath := fmt.Sprintf("/notion/Docs/%03d.md", i)
+		revision := fmt.Sprintf("rev_%03d", i)
+		files[remotePath] = RemoteFile{
+			Path:        remotePath,
+			Revision:    revision,
+			ContentType: "text/markdown",
+			Content:     fmt.Sprintf("# %03d", i),
+		}
+		events = append(events, FilesystemEvent{
+			EventID:  fmt.Sprintf("evt_%03d", i),
+			Type:     "file.created",
+			Path:     remotePath,
+			Revision: revision,
+		})
+	}
+	client := &fakeClient{
+		files:              files,
+		events:             events,
+		revisionCounter:    501,
+		eventCounter:       501,
+		listEventsErrAfter: 2,
+		listEventsErr:      context.DeadlineExceeded,
+	}
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID:      "ws_backlog",
+		RemoteRoot:       "/notion",
+		LocalRoot:        localDir,
+		FullPullEvery:    -1,
+		WebSocket:        boolPtr(false),
+		CursorTimeout:    time.Second,
+		BootstrapTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+	syncer.loaded = true
+	syncer.state = mountState{
+		Files:             map[string]trackedFile{},
+		EventsCursor:      "evt_000",
+		BootstrapComplete: true,
+	}
+
+	err = syncer.Reconcile(context.Background())
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected list-events deadline after first applied page, got %v", err)
+	}
+	if got := syncer.state.EventsCursor; got != "evt_500" {
+		t.Fatalf("EventsCursor = %q, want first applied page cursor evt_500", got)
+	}
+	if _, err := os.ReadFile(filepath.Join(localDir, "Docs", "500.md")); err != nil {
+		t.Fatalf("expected page-one file to be applied before cursor advance: %v", err)
+	}
+	if _, err := os.ReadFile(filepath.Join(localDir, "Docs", "501.md")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("event after failed page should not be applied yet; stat err=%v", err)
+	}
+
+	client.listEventsErr = nil
+	if err := syncer.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile after backlog error failed: %v", err)
+	}
+	if got := syncer.state.EventsCursor; got != "evt_501" {
+		t.Fatalf("EventsCursor = %q, want final cursor evt_501", got)
+	}
+	data, err := os.ReadFile(filepath.Join(localDir, "Docs", "501.md"))
+	if err != nil {
+		t.Fatalf("expected remaining event to apply on retry: %v", err)
+	}
+	if string(data) != "# 501" {
+		t.Fatalf("unexpected remaining file content: %q", data)
+	}
+}
+
+func TestScanLocalFilesLogsOversizedFileOncePerSize(t *testing.T) {
+	t.Setenv("RELAYFILE_MAX_WRITEBACK_BYTES", "4")
+
+	localDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(localDir, "big.md"), []byte("too large"), 0o644); err != nil {
+		t.Fatalf("write oversized file: %v", err)
+	}
+	logger := &captureLogger{}
+	syncer, err := NewSyncer(&fakeClient{files: map[string]RemoteFile{}}, SyncerOptions{
+		WorkspaceID:   "ws_oversized",
+		RemoteRoot:    "/",
+		LocalRoot:     localDir,
+		Logger:        logger,
+		FullPullEvery: -1,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+
+	for i := 0; i < 2; i++ {
+		files, err := syncer.scanLocalFiles()
+		if err != nil {
+			t.Fatalf("scan %d failed: %v", i, err)
+		}
+		if snapshot, ok := files["/big.md"]; !ok || !snapshot.SkipWriteback {
+			t.Fatalf("scan %d did not mark oversized file as skipped: %#v", i, files["/big.md"])
+		}
+	}
+
+	oversizedLogs := 0
+	for _, line := range logger.lines {
+		if strings.Contains(line, "skipping oversized local file") {
+			oversizedLogs++
+		}
+	}
+	if oversizedLogs != 1 {
+		t.Fatalf("expected one oversized-file log across repeated scans, got %d lines: %#v", oversizedLogs, logger.lines)
 	}
 }
 
