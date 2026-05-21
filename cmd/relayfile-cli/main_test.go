@@ -1600,6 +1600,68 @@ func TestRefreshCloudCredentialsReturnsSentinelOnInvalidGrant(t *testing.T) {
 	}
 }
 
+func TestRefreshCloudCredentialsRetriesWithReloadedDiskTokenOnAuthRejection(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	var refreshTokens []string
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/auth/token/refresh" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		var body cloudTokenRefreshRequest
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode refresh body failed: %v", err)
+		}
+		refreshTokens = append(refreshTokens, body.RefreshToken)
+		switch body.RefreshToken {
+		case "rt_stale":
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"code":"invalid_grant","message":"Invalid or expired refresh token"}`))
+		case "rt_disk":
+			_, _ = w.Write([]byte(`{"apiUrl":"` + server.URL + `","accessToken":"cld_new","refreshToken":"rt_new","accessTokenExpiresAt":"2030-05-01T00:00:00Z","refreshTokenExpiresAt":"2030-06-01T00:00:00Z"}`))
+		default:
+			t.Fatalf("unexpected refresh token: %q", body.RefreshToken)
+		}
+	}))
+	defer server.Close()
+
+	if err := saveCloudCredentials(cloudCredentials{
+		APIURL:               server.URL,
+		AccessToken:          "cld_disk_old",
+		RefreshToken:         "rt_disk",
+		AccessTokenExpiresAt: time.Now().Add(-time.Minute).UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("saveCloudCredentials failed: %v", err)
+	}
+
+	refreshed, err := refreshCloudCredentials(cloudCredentials{
+		APIURL:               server.URL,
+		AccessToken:          "cld_stale",
+		RefreshToken:         "rt_stale",
+		AccessTokenExpiresAt: time.Now().Add(-time.Minute).UTC().Format(time.RFC3339),
+	})
+	if err != nil {
+		t.Fatalf("refreshCloudCredentials failed: %v", err)
+	}
+	if refreshed.AccessToken != "cld_new" || refreshed.RefreshToken != "rt_new" {
+		t.Fatalf("unexpected refreshed credentials: %#v", refreshed)
+	}
+	if got := strings.Join(refreshTokens, ","); got != "rt_stale,rt_disk" {
+		t.Fatalf("unexpected refresh token attempts: %s", got)
+	}
+
+	diskCreds, err := loadCloudCredentials()
+	if err != nil {
+		t.Fatalf("loadCloudCredentials failed: %v", err)
+	}
+	if diskCreds.AccessToken != "cld_new" || diskCreds.RefreshToken != "rt_new" {
+		t.Fatalf("expected refreshed credentials on disk, got: %#v", diskCreds)
+	}
+}
+
 func TestRefreshCloudCredentialsReturnsSentinelOnUnauthorized(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)

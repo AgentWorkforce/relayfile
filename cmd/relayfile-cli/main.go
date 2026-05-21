@@ -970,6 +970,37 @@ func refreshCloudCredentials(creds cloudCredentials) (cloudCredentials, error) {
 	if strings.TrimSpace(creds.RefreshToken) == "" {
 		return creds, ErrCloudRefreshExpired
 	}
+	refreshed, err := refreshCloudCredentialsOnce(creds)
+	if err == nil {
+		return refreshed, nil
+	}
+	if !isCloudRefreshAuthRejection(err) {
+		return creds, fmt.Errorf("refresh cloud session: %w", err)
+	}
+
+	diskCreds, diskErr := loadCloudCredentials()
+	if diskErr == nil {
+		if strings.TrimSpace(diskCreds.APIURL) == "" {
+			diskCreds.APIURL = creds.APIURL
+		}
+		diskChanged := !sameCloudRefreshMaterial(creds, diskCreds)
+		if diskChanged && !cloudAccessTokenExpiredSoon(diskCreds) {
+			return diskCreds, nil
+		}
+		if diskChanged {
+			refreshed, retryErr := refreshCloudCredentialsOnce(diskCreds)
+			if retryErr == nil {
+				return refreshed, nil
+			}
+			if !isCloudRefreshAuthRejection(retryErr) {
+				return diskCreds, fmt.Errorf("refresh cloud session: %w", retryErr)
+			}
+		}
+	}
+	return creds, ErrCloudRefreshExpired
+}
+
+func refreshCloudCredentialsOnce(creds cloudCredentials) (cloudCredentials, error) {
 	client, err := newAPIClient(creds.APIURL, creds.AccessToken)
 	if err != nil {
 		return creds, err
@@ -979,14 +1010,7 @@ func refreshCloudCredentials(creds cloudCredentials) (cloudCredentials, error) {
 		RefreshToken: creds.RefreshToken,
 	}, &refreshed)
 	if err != nil {
-		var httpErr *apiError
-		if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusForbidden && strings.EqualFold(strings.TrimSpace(httpErr.Code), "invalid_grant") {
-			return creds, ErrCloudRefreshExpired
-		}
-		if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusUnauthorized {
-			return creds, ErrCloudRefreshExpired
-		}
-		return creds, fmt.Errorf("refresh cloud session: %w", err)
+		return creds, err
 	}
 	if strings.TrimSpace(refreshed.APIURL) == "" {
 		refreshed.APIURL = creds.APIURL
@@ -1002,6 +1026,22 @@ func refreshCloudCredentials(creds cloudCredentials) (cloudCredentials, error) {
 		return creds, err
 	}
 	return refreshed, nil
+}
+
+func isCloudRefreshAuthRejection(err error) bool {
+	var httpErr *apiError
+	if !errors.As(err, &httpErr) {
+		return false
+	}
+	return httpErr.StatusCode == http.StatusUnauthorized || httpErr.StatusCode == http.StatusForbidden
+}
+
+func sameCloudRefreshMaterial(a, b cloudCredentials) bool {
+	return strings.TrimSpace(a.APIURL) == strings.TrimSpace(b.APIURL) &&
+		strings.TrimSpace(a.AccessToken) == strings.TrimSpace(b.AccessToken) &&
+		strings.TrimSpace(a.AccessTokenExpiresAt) == strings.TrimSpace(b.AccessTokenExpiresAt) &&
+		strings.TrimSpace(a.RefreshToken) == strings.TrimSpace(b.RefreshToken) &&
+		strings.TrimSpace(a.RefreshTokenExpiresAt) == strings.TrimSpace(b.RefreshTokenExpiresAt)
 }
 
 func providerPromptText(entries []integrationCatalogEntry) string {
