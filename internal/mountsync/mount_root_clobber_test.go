@@ -480,7 +480,7 @@ func TestOversizedTrackedFileDoesNotBecomeRemoteDelete(t *testing.T) {
 	}
 
 	state := readPublicState(t, localDir)
-	if state.PendingWriteback != 0 || state.Files[remotePath].Status != "writeback-skipped" {
-		t.Fatalf("oversized tracked file should be skipped, not pending: %+v", state)
+	if state.PendingWriteback != 0 || state.Files[remotePath].Status != "ready" {
+		t.Fatalf("oversized tracked drift should settle without writeback: %+v", state)
 	}
 }
