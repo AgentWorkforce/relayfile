@@ -1319,6 +1319,31 @@ func TestStoreEventsAndOps(t *testing.T) {
 		t.Fatalf("expected contentHash on file event: %+v", feed.Events[0])
 	}
 
+	if _, err := store.DeleteFile(DeleteRequest{
+		WorkspaceID:   "ws_2",
+		Path:          "/external/Product/Roadmap.md",
+		IfMatch:       write.TargetRevision,
+		CorrelationID: "corr_evt_delete",
+	}); err != nil {
+		t.Fatalf("delete failed: %v", err)
+	}
+	feed, err = store.GetEvents("ws_2", "", "", 100)
+	if err != nil {
+		t.Fatalf("events after delete failed: %v", err)
+	}
+	foundDelete := false
+	for _, event := range feed.Events {
+		if event.Type == "file.deleted" && event.Path == "/external/Product/Roadmap.md" {
+			foundDelete = true
+			if event.ContentHash != "" {
+				t.Fatalf("expected delete event to omit contentHash, got %+v", event)
+			}
+		}
+	}
+	if !foundDelete {
+		t.Fatalf("expected delete event in feed: %+v", feed.Events)
+	}
+
 	op, err := store.GetOperation("ws_2", write.OpID)
 	if err != nil {
 		t.Fatalf("op lookup failed: %v", err)

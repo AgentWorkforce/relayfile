@@ -3267,12 +3267,16 @@ func (s *Store) recordWriteLocked(ws *workspaceState, path, revision, eventType,
 	}
 	ws.Ops[opID] = op
 
+	contentHash := ""
+	if eventType != "file.deleted" {
+		contentHash = contentHashForFile(ws.Files[path])
+	}
 	event := Event{
 		EventID:       s.nextEventIDLocked(),
 		Type:          eventType,
 		Path:          path,
 		Revision:      revision,
-		ContentHash:   contentHashForFile(ws.Files[path]),
+		ContentHash:   contentHash,
 		Origin:        "agent_write",
 		Provider:      provider,
 		CorrelationID: correlationID,
