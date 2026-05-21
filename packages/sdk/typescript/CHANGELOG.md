@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _No unreleased changes._
 
+## [0.7.29] - 2026-05-21
+
+_No user-visible changes in this release._
+
 ## [0.7.28] - 2026-05-21
 
 _No user-visible changes in this release._
@@ -223,7 +227,8 @@ _No user-visible changes in this release._
 ### Fixed
 - Bind `fetch` to `globalThis` so the SDK runs on Cloudflare Workers without `TypeError: Illegal invocation`. ([#41])
 
-[Unreleased]: https://github.com/AgentWorkforce/relayfile/compare/v0.7.28...HEAD
+[Unreleased]: https://github.com/AgentWorkforce/relayfile/compare/v0.7.29...HEAD
+[0.7.29]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.7.29
 [0.7.28]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.7.28
 [0.7.27]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.7.27
 [0.7.26]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.7.26

@@ -1,7 +1,7 @@
 {
   "name": "relayfile",
   "private": true,
-  "version": "0.7.28",
+  "version": "0.7.29",
   "description": "relayfile — real-time filesystem for humans and agents",
   "workspaces": [
     "packages/core",
