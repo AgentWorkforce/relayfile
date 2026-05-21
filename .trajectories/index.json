@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "lastUpdated": "2026-05-18T19:14:56.208Z",
+  "lastUpdated": "2026-05-21T09:02:24.648Z",
   "trajectories": {
     "traj_mfyus7zfgxt2": {
       "title": "062-sdk-setup-client-workflow",
@@ -256,6 +256,20 @@
       "startedAt": "2026-05-18T18:45:52.924Z",
       "completedAt": "2026-05-18T19:14:56.067Z",
       "path": ".trajectories/completed/2026-05/traj_onpf37fwj1mj.json"
+    },
+    "traj_wzwo03w1kb1x": {
+      "title": "autofix-swarm-Agentworkforce-relayfile-workflow",
+      "status": "completed",
+      "startedAt": "2026-05-21T08:52:34.142Z",
+      "completedAt": "2026-05-21T09:02:24.642Z",
+      "path": "/Users/khaliqgant/Projects/AgentWorkforce/.msd-autofix-b09c607b/.trajectories/completed/2026-05/traj_wzwo03w1kb1x.json"
+    },
+    "traj_5310ok4zat2n": {
+      "title": "Fix relayfile CLI rehome legacy LocalDir and pid verification",
+      "status": "completed",
+      "startedAt": "2026-05-21T08:54:30.035Z",
+      "completedAt": "2026-05-21T08:54:30.166Z",
+      "path": "/Users/khaliqgant/Projects/AgentWorkforce/.msd-autofix-b09c607b/.trajectories/completed/2026-05/traj_5310ok4zat2n.json"
     }
   }
 }

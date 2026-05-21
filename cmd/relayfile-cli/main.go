@@ -464,8 +464,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		return runPull(args[1:], stdout)
 	case "mount", "start":
 		// `start` is the friendlier alias for `mount`. Same flags, same
-		// behavior — `mount` retains the historical name; `start` pairs
-		// naturally with `stop` and `restart`.
+		// foreground/background behavior; pass --background to detach.
 		return runMount(args[1:])
 	case "restart":
 		return runRestart(args[1:], stdout)
@@ -679,7 +678,7 @@ Usage:
   relayfile digest rebuild --window today|yesterday|YYYY-MM-DD|this-week|last-week [--workspace NAME] [--json]
   relayfile pull [--workspace NAME] [--provider PROVIDER] [--reason TEXT]
   relayfile mount [WORKSPACE] [LOCAL_DIR]
-  relayfile start [WORKSPACE] [LOCAL_DIR]            (alias for mount)
+  relayfile start [WORKSPACE] [LOCAL_DIR]            (alias for mount; pass --background to detach)
   relayfile stop [WORKSPACE]
   relayfile restart [WORKSPACE] [--foreground]
   relayfile tree [WORKSPACE] [PATH] [--depth N]
@@ -708,7 +707,7 @@ Subcommands:
               Regenerate daily, weekly, or date-stamped digest artifacts
   pull        Trigger an immediate sync refresh for one or all providers
   mount       Mirror a remote workspace to a local directory; add --background to detach
-  start       Alias for mount; pairs naturally with stop and restart
+  start       Alias for mount; pass --background to detach
   stop        Stop a background mount
   restart     Stop and start a workspace's mount in one step (--foreground to attach)
   tree        List a remote workspace path
@@ -3683,6 +3682,7 @@ func runMount(args []string) error {
 	daemonized := fs.Bool("daemonized", false, "internal flag used by relayfile mount --background")
 	once := fs.Bool("once", false, "run one sync cycle and exit")
 	resetAfterClobber := fs.Bool("reset-after-clobber", boolEnv("RELAYFILE_RESET_AFTER_CLOBBER", false), "acknowledge a mount-root clobber and authorize daemon to recreate the directory")
+	rehome := fs.Bool("rehome", false, "allow re-homing an already-registered workspace mirror to a different LOCAL_DIR")
 	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
 		"server":              true,
 		"token":               true,
@@ -3706,6 +3706,7 @@ func runMount(args []string) error {
 		"daemonized":          false,
 		"once":                false,
 		"reset-after-clobber": false,
+		"rehome":              false,
 		"local-dir":           true,
 	})); err != nil {
 		// `--help` / `-h` come back from flag.ContinueOnError as
@@ -3723,7 +3724,8 @@ func runMount(args []string) error {
 	}
 
 	workspaceID := ""
-	localDir := "."
+	localDir := ""
+	localDirExplicit := false
 	tokenValue := strings.TrimSpace(*token)
 	if tokenValue == "" {
 		return errors.New("token is required; run relayfile login or pass --token")
@@ -3733,25 +3735,69 @@ func runMount(args []string) error {
 	case 0:
 		workspaceID, err = resolveWorkspaceIDWithToken("", tokenValue)
 		localDir = strings.TrimSpace(*localDirFlag)
+		localDirExplicit = localDir != ""
 	case 1:
 		workspaceID, err = resolveWorkspaceIDWithToken(fs.Arg(0), tokenValue)
 		localDir = strings.TrimSpace(*localDirFlag)
+		localDirExplicit = localDir != ""
 	case 2:
 		if strings.TrimSpace(*localDirFlag) != "" {
 			return errors.New("local directory specified twice")
 		}
 		workspaceID, err = resolveWorkspaceIDWithToken(fs.Arg(0), tokenValue)
 		localDir = fs.Arg(1)
+		localDirExplicit = true
 	}
 	if err != nil {
 		return err
 	}
+	recordedLocalDir := ""
+	if record, ok := workspaceRecordByID(workspaceID); ok {
+		recordedLocalDir = strings.TrimSpace(record.LocalDir)
+	} else if record, ok := workspaceRecordByName(workspaceID); ok && strings.TrimSpace(record.ID) == "" {
+		recordedLocalDir = strings.TrimSpace(record.LocalDir)
+	}
 	if localDir == "" {
-		localDir = "."
+		localDir = recordedLocalDir
+	}
+	if localDir == "" {
+		return fmt.Errorf(
+			"workspace %s has no recorded local mirror directory; pass LOCAL_DIR or --local-dir to choose one",
+			workspaceID,
+		)
 	}
 	absLocalDir, err := filepath.Abs(localDir)
 	if err != nil {
 		return err
+	}
+	if localDirExplicit && recordedLocalDir != "" {
+		absRecorded, aerr := filepath.Abs(recordedLocalDir)
+		if aerr != nil {
+			absRecorded = recordedLocalDir
+		}
+		if absRecorded != absLocalDir && !*rehome {
+			return fmt.Errorf(
+				"workspace %s is already mirrored at %s; refusing to silently re-home it to %s.\n"+
+					"Pass --rehome to move the mirror there, or omit LOCAL_DIR to use the registered directory",
+				workspaceID, absRecorded, absLocalDir,
+			)
+		}
+		if absRecorded != absLocalDir && *rehome {
+			pid, verified := verifyDaemonProcess(recordedLocalDir, workspaceID)
+			if pid != 0 && verified {
+				return fmt.Errorf(
+					"workspace %s has a running mount at %s (pid %d); stop it before re-homing to %s",
+					workspaceID, absRecorded, pid, absLocalDir,
+				)
+			}
+			if pid != 0 && !verified {
+				return fmt.Errorf(
+					"workspace %s has unverified background mount state at %s (pid %d); "+
+						"stop the existing daemon or remove %s after confirming it is stale before re-homing to %s",
+					workspaceID, absRecorded, pid, mountPIDFile(recordedLocalDir), absLocalDir,
+				)
+			}
+		}
 	}
 	// Recovery-mode precheck: refuse to (re)create a mount root if a prior
 	// run's directory was clobbered (replaced by a file, or missing in a
@@ -3843,7 +3889,9 @@ func runMount(args []string) error {
 	if record.Name == "" {
 		record.Name = workspaceID
 	}
-	record.LocalDir = absLocalDir
+	if localDirExplicit || strings.TrimSpace(record.LocalDir) == "" {
+		record.LocalDir = absLocalDir
+	}
 	record.Server = strings.TrimRight(strings.TrimSpace(*server), "/")
 	if record.AgentName == "" {
 		record.AgentName = "relayfile-cli"
@@ -3893,7 +3941,7 @@ Synced-mirror limitations (§3.6 of the productized cloud-mount contract):
 
 Common flags:
   --workspace NAME     workspace name or id (defaults to the active workspace)
-  --local-dir DIR      local mirror directory (defaults to a relay-... folder)
+  --local-dir DIR      local mirror directory (defaults to the recorded mirror)
   --mode poll|fuse     poll (synced mirror, default) or fuse
   --interval 30s       sync interval (default 30s)
   --background         detach and keep syncing in the background
@@ -3903,6 +3951,7 @@ Common flags:
                        hard cap for initial/full-tree bootstrap (0 = progress-based)
   --cursor-timeout 20s timeout for events-cursor resolution
   --full-reconcile     force one full reconcile regardless of bootstrap state
+  --rehome             allow moving an already-registered mirror to a new LOCAL_DIR
   --no-websocket       disable websocket event streaming
   --low-memory         skip detailed per-file public state and defer content reads
   --pprof-addr ADDR    expose pprof diagnostics, e.g. 127.0.0.1:6060
@@ -3950,9 +3999,9 @@ func runTree(args []string, stdout io.Writer) error {
 		workspaceID, err = resolveWorkspaceIDWithToken("", tokenValue)
 	case 1:
 		arg := strings.TrimSpace(fs.Arg(0))
-		if strings.HasPrefix(arg, "/") {
+		if looksLikeRemotePathArg(arg) {
 			workspaceID, err = resolveWorkspaceIDWithToken("", tokenValue)
-			remotePath = arg
+			remotePath = normalizeCLIPathArg(arg)
 		} else {
 			workspaceID, err = resolveWorkspaceIDWithToken(arg, tokenValue)
 		}
@@ -4017,6 +4066,58 @@ func runTree(args []string, stdout io.Writer) error {
 		fmt.Fprintf(stdout, "next cursor: %s\n", strings.TrimSpace(*tree.NextCursor))
 	}
 	return nil
+}
+
+func looksLikeRemotePathArg(arg string) bool {
+	arg = strings.TrimSpace(arg)
+	if arg == "" {
+		return false
+	}
+	if strings.HasPrefix(arg, "/") {
+		return true
+	}
+	if _, ok := catalogWorkspaceID(arg); ok {
+		return false
+	}
+	first, _, ok := strings.Cut(arg, "/")
+	if !ok {
+		return false
+	}
+	return knownRemoteRootSegment(first)
+}
+
+func normalizeCLIPathArg(arg string) string {
+	arg = strings.TrimSpace(arg)
+	if arg == "" || strings.HasPrefix(arg, "/") {
+		return arg
+	}
+	return "/" + arg
+}
+
+func knownRemoteRootSegment(segment string) bool {
+	segment = strings.Trim(strings.TrimSpace(segment), "/")
+	if segment == "" {
+		return false
+	}
+	switch segment {
+	case "digests", ".skills", ".relay":
+		return true
+	}
+	for _, entry := range fallbackIntegrationCatalog() {
+		root := strings.Trim(strings.TrimSpace(entry.VFSRoot), "/")
+		if root != "" && segment == root {
+			return true
+		}
+		if dir := providerRootDir(entry.ID); dir != "" && segment == dir {
+			return true
+		}
+	}
+	switch segment {
+	case "google-mail", "google-calendar", "jira", "confluence":
+		return true
+	default:
+		return false
+	}
 }
 
 func runRead(args []string, stdout io.Writer) error {
