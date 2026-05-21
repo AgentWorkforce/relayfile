@@ -3754,6 +3754,8 @@ func runMount(args []string) error {
 	recordedLocalDir := ""
 	if record, ok := workspaceRecordByID(workspaceID); ok {
 		recordedLocalDir = strings.TrimSpace(record.LocalDir)
+	} else if record, ok := workspaceRecordByName(workspaceID); ok && strings.TrimSpace(record.ID) == "" {
+		recordedLocalDir = strings.TrimSpace(record.LocalDir)
 	}
 	if localDir == "" {
 		localDir = recordedLocalDir
@@ -3789,9 +3791,11 @@ func runMount(args []string) error {
 				)
 			}
 			if pid != 0 && !verified {
-				if rerr := os.Remove(mountPIDFile(recordedLocalDir)); rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
-					return fmt.Errorf("failed to clear stale background mount state for %s: %w", workspaceID, rerr)
-				}
+				return fmt.Errorf(
+					"workspace %s has unverified background mount state at %s (pid %d); "+
+						"stop the existing daemon or remove %s after confirming it is stale before re-homing to %s",
+					workspaceID, absRecorded, pid, mountPIDFile(recordedLocalDir), absLocalDir,
+				)
 			}
 		}
 	}

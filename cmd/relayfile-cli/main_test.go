@@ -1162,6 +1162,57 @@ func TestMountUsesRecordedLocalDirWhenOmitted(t *testing.T) {
 	}
 }
 
+func TestMountUsesLegacyRecordedLocalDirWhenOmitted(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	localDir := t.TempDir()
+	now := time.Now().UTC().Format(time.RFC3339)
+	if err := saveWorkspaceCatalog(workspaceCatalog{
+		Default: "demo",
+		Workspaces: []workspaceRecord{{
+			Name:       "demo",
+			LocalDir:   localDir,
+			CreatedAt:  now,
+			LastUsedAt: now,
+		}},
+	}); err != nil {
+		t.Fatalf("saveWorkspaceCatalog failed: %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/workspaces/demo/fs/export":
+			_, _ = w.Write([]byte(`[{"path":"/notion/Docs/Legacy.md","revision":"rev_1","contentType":"text/markdown","content":"# Legacy"}]`))
+		case "/v1/workspaces/demo/fs/events":
+			_, _ = w.Write([]byte(`{"events":[{"eventId":"evt_1","type":"file.created","path":"/notion/Docs/Legacy.md","revision":"rev_1"}]}`))
+		case "/v1/workspaces/demo/sync/status":
+			_, _ = w.Write([]byte(`{"workspaceId":"demo","providers":[]}`))
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	if err := saveCredentials(credentials{
+		Server: server.URL,
+		Token:  testJWTWithWorkspace("demo"),
+	}); err != nil {
+		t.Fatalf("saveCredentials failed: %v", err)
+	}
+
+	if err := run([]string{"mount", "demo", "--once", "--websocket=false"}, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
+		t.Fatalf("run mount failed: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(localDir, "notion", "Docs", "Legacy.md"))
+	if err != nil {
+		t.Fatalf("expected file under legacy recorded localDir: %v", err)
+	}
+	if string(data) != "# Legacy" {
+		t.Fatalf("unexpected mirrored content: %q", data)
+	}
+}
+
 func TestMountRefusesExplicitLocalDirThatRehomesRecordedMirror(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)
@@ -1238,6 +1289,57 @@ func TestMountRehomeRefusesRunningRecordedDaemon(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "has a running mount") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(otherDir, ".relay")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("refused rehome should not initialize other mirror dir; stat err=%v", statErr)
+	}
+}
+
+func TestMountRehomeRefusesUnverifiedRecordedDaemon(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	localDir := t.TempDir()
+	otherDir := filepath.Join(t.TempDir(), "other-mirror")
+	now := time.Now().UTC().Format(time.RFC3339)
+	if err := saveWorkspaceCatalog(workspaceCatalog{
+		Default: "demo",
+		Workspaces: []workspaceRecord{{
+			Name:       "demo",
+			ID:         "ws_demo",
+			LocalDir:   localDir,
+			CreatedAt:  now,
+			LastUsedAt: now,
+		}},
+	}); err != nil {
+		t.Fatalf("saveWorkspaceCatalog failed: %v", err)
+	}
+	if err := ensureMirrorLayout(localDir); err != nil {
+		t.Fatalf("ensureMirrorLayout failed: %v", err)
+	}
+	if err := writeDaemonPIDState(mountPIDFile(localDir), daemonPIDState{
+		PID:         os.Getpid(),
+		WorkspaceID: "ws_other",
+		LocalDir:    localDir,
+	}); err != nil {
+		t.Fatalf("write daemon pid state failed: %v", err)
+	}
+	if err := saveCredentials(credentials{
+		Server: defaultServerURL,
+		Token:  testJWTWithWorkspace("ws_demo"),
+	}); err != nil {
+		t.Fatalf("saveCredentials failed: %v", err)
+	}
+
+	err := run([]string{"mount", "demo", otherDir, "--rehome", "--once", "--websocket=false"}, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
+	if err == nil {
+		t.Fatalf("expected rehome to refuse unverified background mount state")
+	}
+	if !strings.Contains(err.Error(), "unverified background mount state") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, statErr := os.Stat(mountPIDFile(localDir)); statErr != nil {
+		t.Fatalf("unverified pid file should remain in place: %v", statErr)
 	}
 	if _, statErr := os.Stat(filepath.Join(otherDir, ".relay")); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("refused rehome should not initialize other mirror dir; stat err=%v", statErr)
