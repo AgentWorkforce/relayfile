@@ -35,6 +35,21 @@ func boolPtr(value bool) *bool {
 	return &value
 }
 
+func markLocalDirtyForTest(t *testing.T, syncer *Syncer, remotePath, localPath string) {
+	t.Helper()
+	snapshot, err := readLocalSnapshot(localPath, true)
+	if err != nil {
+		t.Fatalf("read dirty snapshot for %s: %v", remotePath, err)
+	}
+	tracked := syncer.state.Files[normalizeRemotePath(remotePath)]
+	tracked.ContentType = snapshot.ContentType
+	tracked.Encoding = normalizeEncoding(snapshot.Encoding)
+	tracked.Hash = snapshot.Hash
+	tracked.Dirty = true
+	tracked.DeletePending = false
+	syncer.state.Files[normalizeRemotePath(remotePath)] = tracked
+}
+
 type fakeProviderLayoutRegistrar struct {
 	calls    []string
 	manifest map[string]ProviderLayoutManifest
@@ -87,8 +102,8 @@ func TestSyncOncePullsRemoteAndPushesLocalEdits(t *testing.T) {
 	if err := os.WriteFile(localFile, []byte("# A edited"), 0o644); err != nil {
 		t.Fatalf("write local edit failed: %v", err)
 	}
-	if err := syncer.SyncOnce(context.Background()); err != nil {
-		t.Fatalf("sync after edit failed: %v", err)
+	if err := syncer.HandleLocalChange(context.Background(), "Docs/A.md", fsnotify.Write); err != nil {
+		t.Fatalf("handle local edit failed: %v", err)
 	}
 
 	remote := client.files["/notion/Docs/A.md"]
@@ -638,8 +653,8 @@ func TestSyncOnceCreatesAndDeletesRemoteFiles(t *testing.T) {
 	if err := os.Remove(localFile); err != nil {
 		t.Fatalf("remove local file failed: %v", err)
 	}
-	if err := syncer.SyncOnce(context.Background()); err != nil {
-		t.Fatalf("sync delete failed: %v", err)
+	if err := syncer.HandleLocalChange(context.Background(), "Docs/New.md", fsnotify.Remove); err != nil {
+		t.Fatalf("handle delete failed: %v", err)
 	}
 	if _, ok := client.files["/notion/Docs/New.md"]; ok {
 		t.Fatalf("expected remote file to be deleted")
@@ -727,8 +742,8 @@ func TestBinaryFileRoundTripsThroughMirror(t *testing.T) {
 	if err := os.WriteFile(localPath, updated, 0o644); err != nil {
 		t.Fatalf("write binary local edit failed: %v", err)
 	}
-	if err := syncer.SyncOnce(context.Background()); err != nil {
-		t.Fatalf("binary roundtrip sync failed: %v", err)
+	if err := syncer.HandleLocalChange(context.Background(), "blob.bin", fsnotify.Write); err != nil {
+		t.Fatalf("binary local change failed: %v", err)
 	}
 
 	remote := client.files["/external/blob.bin"]
@@ -869,12 +884,14 @@ func TestBulkWrite_MixedCreateAndUpdateBatch(t *testing.T) {
 		t.Fatalf("initial sync failed: %v", err)
 	}
 
-	if err := os.WriteFile(filepath.Join(localDir, "Docs", "A.md"), []byte("# A updated"), 0o644); err != nil {
+	localA := filepath.Join(localDir, "Docs", "A.md")
+	if err := os.WriteFile(localA, []byte("# A updated"), 0o644); err != nil {
 		t.Fatalf("update local file failed: %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(localDir, "Docs", "B.md"), []byte("# B"), 0o644); err != nil {
 		t.Fatalf("create local file failed: %v", err)
 	}
+	markLocalDirtyForTest(t, syncer, "/notion/Docs/A.md", localA)
 
 	client.bulkWriteCalls = 0
 	client.bulkWriteBatches = nil
@@ -934,6 +951,7 @@ func TestBulkWrite_OverwritesRemoteChangeInSingleCycle(t *testing.T) {
 	if err := os.WriteFile(localFile, []byte("# local"), 0o644); err != nil {
 		t.Fatalf("write local edit failed: %v", err)
 	}
+	markLocalDirtyForTest(t, syncer, "/notion/Docs/A.md", localFile)
 	if err := syncer.SyncOnce(context.Background()); err != nil {
 		t.Fatalf("bulk write sync failed: %v", err)
 	}
@@ -1410,6 +1428,190 @@ func TestBulkWrite_ChunkAtThreshold(t *testing.T) {
 	}
 }
 
+func TestBulkWrite_ChunksBySerializedRequestSize(t *testing.T) {
+	t.Setenv("RELAYFILE_MAX_WRITEBACK_BATCH_BYTES", "650")
+
+	client := &fakeClient{
+		files: map[string]RemoteFile{},
+	}
+	localDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(localDir, "Docs"), 0o755); err != nil {
+		t.Fatalf("mkdir docs failed: %v", err)
+	}
+	for idx := 0; idx < 4; idx++ {
+		name := fmt.Sprintf("Chunk%02d.md", idx+1)
+		path := filepath.Join(localDir, "Docs", name)
+		if err := os.WriteFile(path, []byte(strings.Repeat(name, 20)), 0o644); err != nil {
+			t.Fatalf("seed file %s failed: %v", name, err)
+		}
+	}
+
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_mount_chunked_bulk_bytes",
+		RemoteRoot:  "/notion",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("chunked sync failed: %v", err)
+	}
+
+	if client.bulkWriteCalls < 2 {
+		t.Fatalf("expected serialized-size chunking to split bulk writes, got %d call(s)", client.bulkWriteCalls)
+	}
+	for idx, batch := range client.bulkWriteBatches {
+		if size := bulkWriteRequestSize(batch); size > maxWritebackBatchBytes() {
+			t.Fatalf("batch %d serialized to %d bytes, over cap %d", idx, size, maxWritebackBatchBytes())
+		}
+	}
+}
+
+func TestPushLocalRequiresDirtyForTrackedHashDrift(t *testing.T) {
+	client := &fakeClient{
+		files: map[string]RemoteFile{
+			"/notion/Docs/A.md": {
+				Path:        "/notion/Docs/A.md",
+				Revision:    "rev_1",
+				ContentType: "text/markdown",
+				Content:     "# A",
+			},
+		},
+		revisionCounter: 1,
+	}
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_mount_hash_drift_no_push",
+		RemoteRoot:  "/notion",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("initial sync failed: %v", err)
+	}
+
+	localFile := filepath.Join(localDir, "Docs", "A.md")
+	if err := os.WriteFile(localFile, []byte("# local drift"), 0o644); err != nil {
+		t.Fatalf("write local drift failed: %v", err)
+	}
+	client.bulkWriteCalls = 0
+	client.bulkWriteBatches = nil
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("sync after local drift failed: %v", err)
+	}
+
+	if client.bulkWriteCalls != 0 {
+		t.Fatalf("expected tracked hash drift without Dirty state not to write back, got %d bulk calls", client.bulkWriteCalls)
+	}
+	if got := client.files["/notion/Docs/A.md"].Content; got != "# A" {
+		t.Fatalf("expected remote content to remain unchanged, got %q", got)
+	}
+}
+
+func TestRemotePullOverwritesUnmarkedLocalDrift(t *testing.T) {
+	client := &fakeClient{
+		files: map[string]RemoteFile{
+			"/notion/Docs/A.md": {
+				Path:        "/notion/Docs/A.md",
+				Revision:    "rev_1",
+				ContentType: "text/markdown",
+				Content:     "# A",
+			},
+		},
+		events: []FilesystemEvent{{
+			EventID:  "evt_1",
+			Type:     "file.created",
+			Path:     "/notion/Docs/A.md",
+			Revision: "rev_1",
+		}},
+		revisionCounter: 1,
+		eventCounter:    1,
+	}
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_mount_remote_overwrites_unmarked_drift",
+		RemoteRoot:  "/notion",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("initial sync failed: %v", err)
+	}
+
+	localFile := filepath.Join(localDir, "Docs", "A.md")
+	if err := os.WriteFile(localFile, []byte("# local drift"), 0o644); err != nil {
+		t.Fatalf("write local drift failed: %v", err)
+	}
+	client.files["/notion/Docs/A.md"] = RemoteFile{
+		Path:        "/notion/Docs/A.md",
+		Revision:    "rev_2",
+		ContentType: "text/markdown",
+		Content:     "# remote v2",
+	}
+	client.appendEvent("file.updated", "/notion/Docs/A.md", "rev_2")
+	client.bulkWriteCalls = 0
+	client.bulkWriteBatches = nil
+
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("sync after remote update failed: %v", err)
+	}
+
+	if client.bulkWriteCalls != 0 {
+		t.Fatalf("expected remote pull not to write back unmarked local drift, got %d bulk calls", client.bulkWriteCalls)
+	}
+	assertLocalFileContent(t, localFile, "# remote v2")
+	if syncer.state.Files["/notion/Docs/A.md"].Dirty {
+		t.Fatalf("expected remote pull to keep tracked file clean")
+	}
+}
+
+func TestMissingTrackedFileRequiresDeletePending(t *testing.T) {
+	client := &fakeClient{
+		files: map[string]RemoteFile{
+			"/notion/Docs/A.md": {
+				Path:        "/notion/Docs/A.md",
+				Revision:    "rev_1",
+				ContentType: "text/markdown",
+				Content:     "# A",
+			},
+		},
+		revisionCounter: 1,
+	}
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_mount_missing_without_delete_event",
+		RemoteRoot:  "/notion",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("initial sync failed: %v", err)
+	}
+
+	localFile := filepath.Join(localDir, "Docs", "A.md")
+	if err := os.Remove(localFile); err != nil {
+		t.Fatalf("remove local file failed: %v", err)
+	}
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("sync after unmarked local removal failed: %v", err)
+	}
+
+	if len(client.deleteCalls) != 0 {
+		t.Fatalf("expected no remote delete without deletePending, got %+v", client.deleteCalls)
+	}
+	if _, exists := client.files["/notion/Docs/A.md"]; !exists {
+		t.Fatalf("expected remote file to remain after unmarked local removal")
+	}
+}
+
 func TestBulkWrite_PartialErrors(t *testing.T) {
 	client := &fakeClient{
 		files: map[string]RemoteFile{},
@@ -1522,6 +1724,7 @@ func TestBulkWrite_PerFileConflictCreatesArtifactAndRefreshesRemote(t *testing.T
 	if err := os.WriteFile(localA, []byte("# local A"), 0o644); err != nil {
 		t.Fatalf("write local A failed: %v", err)
 	}
+	markLocalDirtyForTest(t, syncer, "/notion/Docs/A.md", localA)
 	localB := filepath.Join(localDir, "Docs", "B.md")
 	if err := os.WriteFile(localB, []byte("# local B"), 0o644); err != nil {
 		t.Fatalf("write local B failed: %v", err)
@@ -1566,6 +1769,7 @@ func TestBulkWrite_PerFileConflictCreatesArtifactAndRefreshesRemote(t *testing.T
 	if err := os.WriteFile(localA, []byte("# local A resolved"), 0o644); err != nil {
 		t.Fatalf("write resolved local A failed: %v", err)
 	}
+	markLocalDirtyForTest(t, syncer, "/notion/Docs/A.md", localA)
 	if err := syncer.SyncOnce(context.Background()); err != nil {
 		t.Fatalf("resolved retry sync failed: %v", err)
 	}
@@ -1626,6 +1830,7 @@ func TestBulkWrite_SchemaValidationQuarantinesLocalAndRestoresRemote(t *testing.
 	if err := os.WriteFile(localPath, []byte(`{"event":"PLEASE_APPROVE"}`), 0o644); err != nil {
 		t.Fatalf("write local draft failed: %v", err)
 	}
+	markLocalDirtyForTest(t, syncer, "/github/repos/acme/api/pulls/42/reviews/draft.json", localPath)
 
 	if err := syncer.SyncOnce(context.Background()); err != nil {
 		t.Fatalf("sync with schema validation failure failed: %v", err)
@@ -1748,8 +1953,8 @@ func TestBulkWrite_DeletesStayPerFile(t *testing.T) {
 	if err := os.Remove(localPath); err != nil {
 		t.Fatalf("remove local file failed: %v", err)
 	}
-	if err := syncer.SyncOnce(context.Background()); err != nil {
-		t.Fatalf("delete sync failed: %v", err)
+	if err := syncer.HandleLocalChange(context.Background(), "Docs/A.md", fsnotify.Remove); err != nil {
+		t.Fatalf("delete local change failed: %v", err)
 	}
 
 	if client.bulkWriteCalls != 0 {
@@ -1796,6 +2001,7 @@ func TestBulkWrite_ReconcileUsesResponseRevision(t *testing.T) {
 	if err := os.WriteFile(localPath, []byte("# A updated"), 0o644); err != nil {
 		t.Fatalf("write local file failed: %v", err)
 	}
+	markLocalDirtyForTest(t, syncer, "/notion/Docs/A.md", localPath)
 	if err := syncer.SyncOnce(context.Background()); err != nil {
 		t.Fatalf("bulk write sync failed: %v", err)
 	}

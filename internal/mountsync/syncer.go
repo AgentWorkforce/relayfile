@@ -739,6 +739,9 @@ type trackedFile struct {
 	Encoding    string `json:"encoding,omitempty"`
 	Hash        string `json:"hash"`
 	Dirty       bool   `json:"dirty,omitempty"`
+	// DeletePending is set only by an observed local delete. A missing file
+	// during a scan is not enough evidence to delete cloud state.
+	DeletePending bool `json:"deletePending,omitempty"`
 	// Denied — the server denied reading this path. The local copy (if any)
 	// has been removed and future syncs ignore it.
 	Denied bool `json:"denied,omitempty"`
@@ -1231,6 +1234,17 @@ func (s *Syncer) preparePendingBulkWrite(
 		}
 	}
 
+	tracked.ContentType = snapshot.ContentType
+	tracked.Encoding = normalizeEncoding(snapshot.Encoding)
+	tracked.Hash = snapshot.Hash
+	tracked.Dirty = true
+	tracked.DeletePending = false
+	tracked.Denied = false
+	tracked.WriteDenied = false
+	tracked.DeniedHash = ""
+	tracked.ReadOnly = false
+	s.state.Files[remotePath] = tracked
+
 	return &pendingBulkWrite{
 		remotePath: remotePath,
 		localPath:  localPath,
@@ -1251,6 +1265,15 @@ func (s *Syncer) flushPendingBulkWrites(ctx context.Context, pending []pendingBu
 		s.logf("writeback flush refused: cloud-error circuit breaker is open; %d file(s) remain pending", len(pending))
 		return nil
 	}
+	for _, chunk := range chunkPendingBulkWrites(pending, maxWritebackBatchBytes()) {
+		if err := s.flushPendingBulkWriteChunk(ctx, chunk, conflicted); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Syncer) flushPendingBulkWriteChunk(ctx context.Context, pending []pendingBulkWrite, conflicted map[string]struct{}) error {
 	files := make([]BulkWriteFile, 0, len(pending))
 	for _, pendingWrite := range pending {
 		files = append(files, BulkWriteFile{
@@ -1300,6 +1323,53 @@ func (s *Syncer) flushPendingBulkWrites(ctx context.Context, pending []pendingBu
 		}
 	}
 	return firstErr
+}
+
+func bulkWriteFilesForPending(pending []pendingBulkWrite) []BulkWriteFile {
+	files := make([]BulkWriteFile, 0, len(pending))
+	for _, pendingWrite := range pending {
+		files = append(files, BulkWriteFile{
+			Path:        pendingWrite.remotePath,
+			ContentType: pendingWrite.snapshot.ContentType,
+			Content:     pendingWrite.snapshot.WireContent,
+			Encoding:    pendingWrite.snapshot.Encoding,
+		})
+	}
+	return files
+}
+
+func chunkPendingBulkWrites(pending []pendingBulkWrite, maxBytes int64) [][]pendingBulkWrite {
+	if len(pending) == 0 {
+		return nil
+	}
+	if maxBytes <= 0 {
+		return [][]pendingBulkWrite{pending}
+	}
+	chunks := make([][]pendingBulkWrite, 0, 1)
+	current := make([]pendingBulkWrite, 0, len(pending))
+	for _, item := range pending {
+		candidate := append(append([]pendingBulkWrite(nil), current...), item)
+		if len(current) > 0 && bulkWriteRequestSize(bulkWriteFilesForPending(candidate)) > maxBytes {
+			chunks = append(chunks, current)
+			current = current[:0]
+		}
+		current = append(current, item)
+	}
+	if len(current) > 0 {
+		chunks = append(chunks, current)
+	}
+	return chunks
+}
+
+func bulkWriteRequestSize(files []BulkWriteFile) int64 {
+	body := struct {
+		Files []BulkWriteFile `json:"files"`
+	}{Files: files}
+	data, err := json.Marshal(body)
+	if err != nil {
+		return 0
+	}
+	return int64(len(data))
 }
 
 func (s *Syncer) reconcileBulkWrite(ctx context.Context, pendingWrite pendingBulkWrite, revision string) error {
@@ -1617,6 +1687,10 @@ func (s *Syncer) pushSingleDelete(ctx context.Context, remotePath, localPath str
 		return s.revertReadonlyFile(ctx, remotePath, localPath, tracked, "")
 	}
 
+	tracked.DeletePending = true
+	tracked.Dirty = false
+	s.state.Files[remotePath] = tracked
+
 	err := s.client.DeleteFile(ctx, s.workspace, remotePath, tracked.Revision)
 	if err != nil {
 		var httpErr *HTTPError
@@ -1625,6 +1699,8 @@ func (s *Syncer) pushSingleDelete(ctx context.Context, remotePath, localPath str
 			return nil
 		}
 		if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusForbidden {
+			tracked.DeletePending = false
+			s.state.Files[remotePath] = tracked
 			return s.revertReadonlyFile(ctx, remotePath, localPath, tracked, "")
 		}
 		if errors.Is(err, ErrConflict) {
@@ -2341,9 +2417,11 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 		if !s.state.BootstrapComplete {
 			s.state.BootstrapCursor = cursor
 			s.state.BootstrapFilesSynced += filesThisPage
+			prog.touch()
 			if err := s.saveState(); err != nil {
 				return err
 			}
+			prog.touch()
 		}
 	}
 
@@ -2492,6 +2570,11 @@ func (s *Syncer) recordCloudSuccess() {
 // pathological payloads out of the sync pipeline by default.
 const defaultMaxWritebackBytes int64 = 8 << 20
 
+// defaultMaxWritebackBatchBytes caps the serialized /fs/bulk request body.
+// The cloud rejects requests above roughly 10 MiB; 8 MiB leaves room for
+// transport and schema overhead while still batching normal writebacks.
+const defaultMaxWritebackBatchBytes int64 = 8 << 20
+
 // maxWritebackBytes returns the writeback body size cap in bytes.
 // Configurable via RELAYFILE_MAX_WRITEBACK_BYTES (positive integer).
 // A value of 0 or a negative override disables the cap.
@@ -2503,6 +2586,21 @@ func maxWritebackBytes() int64 {
 	v, err := strconv.ParseInt(raw, 10, 64)
 	if err != nil {
 		return defaultMaxWritebackBytes
+	}
+	if v <= 0 {
+		return 0
+	}
+	return v
+}
+
+func maxWritebackBatchBytes() int64 {
+	raw := strings.TrimSpace(os.Getenv("RELAYFILE_MAX_WRITEBACK_BATCH_BYTES"))
+	if raw == "" {
+		return defaultMaxWritebackBatchBytes
+	}
+	v, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return defaultMaxWritebackBatchBytes
 	}
 	if v <= 0 {
 		return 0
@@ -3122,17 +3220,6 @@ func (s *Syncer) applyRemoteFile(remotePath string, file RemoteFile, conflicted 
 		localHash := hashBytes(current)
 		if localHash == remoteHash {
 			shouldWrite = false
-		} else if tracked, ok := s.state.Files[remotePath]; ok && localHash != tracked.Hash {
-			// Local file was modified since last sync — mark dirty and preserve the local edit
-			tracked.Revision = file.Revision
-			tracked.ContentType = file.ContentType
-			tracked.Hash = localHash
-			tracked.Dirty = true
-			if err := s.applyLocalPermissions(localPath, canWrite); err != nil {
-				return err
-			}
-			s.state.Files[remotePath] = tracked
-			return nil
 		}
 	}
 	if shouldWrite {
@@ -3353,6 +3440,13 @@ func (s *Syncer) pushLocal(ctx context.Context) (map[string]struct{}, error) {
 		if snapshot.SkipWriteback {
 			continue
 		}
+		if exists && !tracked.Dirty {
+			tracked.ContentType = snapshot.ContentType
+			tracked.Encoding = normalizeEncoding(snapshot.Encoding)
+			tracked.ReadOnly = false
+			s.state.Files[remotePath] = tracked
+			continue
+		}
 		fullSnapshot, err := readLocalSnapshot(localPath, true)
 		if err != nil {
 			return nil, err
@@ -3395,6 +3489,10 @@ func (s *Syncer) pushLocal(ctx context.Context) (map[string]struct{}, error) {
 			continue
 		}
 		if _, ok := localFiles[remotePath]; ok {
+			continue
+		}
+		if !tracked.DeletePending {
+			s.state.Files[remotePath] = tracked
 			continue
 		}
 		err := s.client.DeleteFile(ctx, s.workspace, remotePath, tracked.Revision)
@@ -3616,17 +3714,15 @@ func (s *Syncer) savePublicState() error {
 			fileStatus = "write-denied"
 		case tracked.Denied:
 			fileStatus = "read-denied"
-		case tracked.Dirty:
+		case tracked.Dirty || tracked.DeletePending:
 			fileStatus = "writeback-pending"
 		}
 		if !s.lowMemory {
 			if snapshot, ok := currentFiles[remotePath]; ok {
 				if snapshot.SkipWriteback && !tracked.Denied && !tracked.WriteDenied {
 					fileStatus = "writeback-skipped"
-				} else if tracked.Hash != snapshot.Hash && fileStatus == "ready" {
-					fileStatus = "writeback-pending"
 				}
-			} else if !tracked.Denied && !tracked.WriteDenied && tracked.Hash != "" && fileStatus == "ready" {
+			} else if tracked.DeletePending && !tracked.Denied && !tracked.WriteDenied && fileStatus == "ready" {
 				fileStatus = "writeback-pending"
 			}
 		}
