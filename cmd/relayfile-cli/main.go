@@ -6085,10 +6085,13 @@ func discoverMountDaemonProcesses(localDir, workspaceID, workspaceName string) (
 
 func mountDaemonCommandMatches(command, localDir, workspaceID, workspaceName string) bool {
 	command = strings.TrimSpace(command)
-	if command == "" || !strings.Contains(strings.ToLower(command), "relayfile") {
+	if command == "" {
 		return false
 	}
 	fields := strings.Fields(command)
+	if len(fields) == 0 || !isRelayfileExecutable(fields[0]) {
+		return false
+	}
 	if !commandHasMountSubcommand(fields) || commandHasOnceFlag(fields) {
 		return false
 	}
@@ -6100,6 +6103,18 @@ func mountDaemonCommandMatches(command, localDir, workspaceID, workspaceName str
 		return true
 	}
 	return false
+}
+
+func isRelayfileExecutable(arg0 string) bool {
+	base := strings.ToLower(filepath.Base(strings.TrimSpace(arg0)))
+	base = strings.TrimSuffix(base, ".exe")
+	if base == "" {
+		return false
+	}
+	if base == "relayfile" {
+		return true
+	}
+	return strings.HasPrefix(base, "relayfile-cli")
 }
 
 func commandHasMountSubcommand(fields []string) bool {
