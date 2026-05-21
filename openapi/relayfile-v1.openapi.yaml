@@ -205,6 +205,7 @@ paths:
           schema:
             type: string
             default: /
+            pattern: '^/.*'
       responses:
         '200':
           description: Export data in requested format
@@ -1780,6 +1781,9 @@ components:
           type: string
         revision:
           type: string
+        contentHash:
+          type: string
+          description: SHA-256 hash of the decoded file bytes
         contentType:
           type: string
         content:

@@ -2524,6 +2524,7 @@ func (s *Syncer) trySkipBootstrapRead(remotePath string, entry TreeEntry) (bool,
 		if errors.Is(err, os.ErrNotExist) {
 			return false, nil
 		}
+		s.logf("local hash probe failed for %s (%s): %v", remotePath, localPath, err)
 		return false, nil
 	}
 	if snapshot.Hash != entry.ContentHash {
