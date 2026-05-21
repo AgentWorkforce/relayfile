@@ -3456,6 +3456,8 @@ type fakeClient struct {
 	eventsUnsupported     bool
 	listEventsErrAfter    int
 	listEventsErr         error
+	readFileErrAfter      int
+	readFileErr           error
 }
 
 // requestedReadCalls returns the cumulative number of ReadFile calls made
@@ -3574,6 +3576,9 @@ func (c *fakeClient) ReadFile(ctx context.Context, workspaceID, path string) (Re
 		c.readFileCallsByPath = make(map[string]int)
 	}
 	c.readFileCallsByPath[path]++
+	if c.readFileErr != nil && c.readFileCalls > c.readFileErrAfter {
+		return RemoteFile{}, c.readFileErr
+	}
 	file, ok := c.files[path]
 	if !ok {
 		return RemoteFile{}, &HTTPError{StatusCode: 404, Code: "not_found", Message: "not found"}
@@ -4623,6 +4628,200 @@ func TestPullRemoteIncrementalPersistsAppliedPageCursorOnListEventsError(t *test
 	}
 	if string(data) != "# 501" {
 		t.Fatalf("unexpected remaining file content: %q", data)
+	}
+}
+
+func TestPullRemoteIncrementalResumesWithinAppliedPage(t *testing.T) {
+	files := map[string]RemoteFile{}
+	events := make([]FilesystemEvent, 0, 10)
+	for i := 1; i <= 10; i++ {
+		remotePath := fmt.Sprintf("/notion/Docs/%03d.md", i)
+		revision := fmt.Sprintf("rev_%03d", i)
+		files[remotePath] = RemoteFile{
+			Path:        remotePath,
+			Revision:    revision,
+			ContentType: "text/markdown",
+			Content:     fmt.Sprintf("# %03d", i),
+		}
+		events = append(events, FilesystemEvent{
+			EventID:  fmt.Sprintf("evt_%03d", i),
+			Type:     "file.created",
+			Path:     remotePath,
+			Revision: revision,
+		})
+	}
+	client := &fakeClient{
+		files:            files,
+		events:           events,
+		revisionCounter:  10,
+		eventCounter:     10,
+		readFileErrAfter: 3,
+		readFileErr:      context.DeadlineExceeded,
+	}
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID:      "ws_page_resume",
+		RemoteRoot:       "/notion",
+		LocalRoot:        localDir,
+		FullPullEvery:    -1,
+		WebSocket:        boolPtr(false),
+		CursorTimeout:    time.Second,
+		BootstrapTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+	syncer.loaded = true
+	syncer.state = mountState{
+		Files:             map[string]trackedFile{},
+		EventsCursor:      "evt_000",
+		BootstrapComplete: true,
+	}
+
+	err = syncer.Reconcile(context.Background())
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected read-file deadline inside first page, got %v", err)
+	}
+	if got := syncer.state.EventsCursor; got != "evt_000" {
+		t.Fatalf("EventsCursor should stay on the unapplied page cursor; got %q", got)
+	}
+	if syncer.state.IncrementalCheckpoint == nil {
+		t.Fatalf("expected checkpoint after partial page")
+	}
+	if checkpoint := *syncer.state.IncrementalCheckpoint; checkpoint.Cursor != "evt_000" ||
+		checkpoint.PageCursor != "evt_010" ||
+		checkpoint.Phase != "changed" ||
+		checkpoint.Path != "/notion/Docs/003.md" {
+		t.Fatalf("unexpected checkpoint after partial page: %#v", checkpoint)
+	}
+	for i := 1; i <= 3; i++ {
+		path := filepath.Join(localDir, "Docs", fmt.Sprintf("%03d.md", i))
+		if _, err := os.ReadFile(path); err != nil {
+			t.Fatalf("expected file %03d to be applied before timeout: %v", i, err)
+		}
+	}
+
+	client.readFileErr = nil
+	before := make(map[string]int, len(client.readFileCallsByPath))
+	for path, calls := range client.readFileCallsByPath {
+		before[path] = calls
+	}
+	if err := syncer.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile after partial page failed: %v", err)
+	}
+	for i := 1; i <= 3; i++ {
+		remotePath := fmt.Sprintf("/notion/Docs/%03d.md", i)
+		if got := client.readFileCallsByPath[remotePath]; got != before[remotePath] {
+			t.Fatalf("expected %s to be skipped on resume; read calls went %d -> %d", remotePath, before[remotePath], got)
+		}
+	}
+	if got := client.readFileCallsByPath["/notion/Docs/004.md"]; got == 0 {
+		t.Fatalf("expected resume to continue after checkpoint path")
+	}
+	if got := syncer.state.EventsCursor; got != "evt_010" {
+		t.Fatalf("EventsCursor = %q, want completed page cursor evt_010", got)
+	}
+	if checkpoint := syncer.state.IncrementalCheckpoint; checkpoint != nil {
+		t.Fatalf("expected checkpoint to clear after completed page, got %#v", checkpoint)
+	}
+	data, err := os.ReadFile(filepath.Join(localDir, "Docs", "010.md"))
+	if err != nil {
+		t.Fatalf("expected final file to apply on resume: %v", err)
+	}
+	if string(data) != "# 010" {
+		t.Fatalf("unexpected final file content: %q", data)
+	}
+}
+
+func TestPullRemoteIncrementalCheckpointPreservesChangedPath404Delete(t *testing.T) {
+	files := map[string]RemoteFile{
+		"/notion/Docs/002.md": {
+			Path:        "/notion/Docs/002.md",
+			Revision:    "rev_002",
+			ContentType: "text/markdown",
+			Content:     "# 002",
+		},
+		"/notion/Docs/003.md": {
+			Path:        "/notion/Docs/003.md",
+			Revision:    "rev_003",
+			ContentType: "text/markdown",
+			Content:     "# 003",
+		},
+	}
+	client := &fakeClient{
+		files: files,
+		events: []FilesystemEvent{
+			{EventID: "evt_001", Type: "file.updated", Path: "/notion/Docs/001.md", Revision: "rev_001"},
+			{EventID: "evt_002", Type: "file.updated", Path: "/notion/Docs/002.md", Revision: "rev_002"},
+			{EventID: "evt_003", Type: "file.updated", Path: "/notion/Docs/003.md", Revision: "rev_003"},
+		},
+		revisionCounter:  3,
+		eventCounter:     3,
+		readFileErrAfter: 2,
+		readFileErr:      context.DeadlineExceeded,
+	}
+	localDir := t.TempDir()
+	localPath := filepath.Join(localDir, "Docs", "001.md")
+	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+		t.Fatalf("mkdir local doc dir: %v", err)
+	}
+	if err := os.WriteFile(localPath, []byte("# stale"), 0o644); err != nil {
+		t.Fatalf("write stale local file: %v", err)
+	}
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID:      "ws_page_404_resume",
+		RemoteRoot:       "/notion",
+		LocalRoot:        localDir,
+		FullPullEvery:    -1,
+		WebSocket:        boolPtr(false),
+		CursorTimeout:    time.Second,
+		BootstrapTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+	syncer.loaded = true
+	syncer.state = mountState{
+		Files: map[string]trackedFile{
+			"/notion/Docs/001.md": {
+				Revision:    "rev_old",
+				ContentType: "text/markdown",
+				Hash:        hashBytes([]byte("# stale")),
+			},
+		},
+		EventsCursor:      "evt_000",
+		BootstrapComplete: true,
+	}
+
+	err = syncer.Reconcile(context.Background())
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected read-file deadline after checkpointed 404 delete, got %v", err)
+	}
+	if _, err := os.Stat(localPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected 404 changed path to delete stale local file before timeout; stat err=%v", err)
+	}
+	if _, ok := syncer.state.Files["/notion/Docs/001.md"]; ok {
+		t.Fatalf("expected 404 changed path to be removed from tracked state")
+	}
+	if checkpoint := syncer.state.IncrementalCheckpoint; checkpoint == nil ||
+		checkpoint.Phase != "changed" ||
+		checkpoint.Path != "/notion/Docs/002.md" {
+		t.Fatalf("unexpected checkpoint after partial changed page with 404: %#v", checkpoint)
+	}
+
+	before404Reads := client.readFileCallsByPath["/notion/Docs/001.md"]
+	client.readFileErr = nil
+	if err := syncer.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile after checkpointed 404 delete failed: %v", err)
+	}
+	if got := client.readFileCallsByPath["/notion/Docs/001.md"]; got != before404Reads {
+		t.Fatalf("expected deleted 404 path to be checkpointed and skipped on resume; read calls went %d -> %d", before404Reads, got)
+	}
+	if got := syncer.state.EventsCursor; got != "evt_003" {
+		t.Fatalf("EventsCursor = %q, want completed page cursor evt_003", got)
+	}
+	if checkpoint := syncer.state.IncrementalCheckpoint; checkpoint != nil {
+		t.Fatalf("expected checkpoint to clear after completed page, got %#v", checkpoint)
 	}
 }
 
