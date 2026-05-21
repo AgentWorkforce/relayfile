@@ -620,6 +620,47 @@ func TestReconcileUsesExportSnapshotForInitialPull(t *testing.T) {
 	}
 }
 
+func TestReconcileFallsBackToTreeWhenExportJSONTruncated(t *testing.T) {
+	base := &fakeClient{
+		files: map[string]RemoteFile{
+			"/notion/Docs/A.md": {
+				Path:        "/notion/Docs/A.md",
+				Revision:    "rev_1",
+				ContentType: "text/markdown",
+				Content:     "# A",
+			},
+		},
+	}
+	client := &fakeExportClient{
+		fakeClient: base,
+		exportErr:  errors.New("unexpected end of JSON input"),
+	}
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_truncated_export",
+		RemoteRoot:  "/notion",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+
+	if err := syncer.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile should fall back to tree after truncated export: %v", err)
+	}
+
+	if client.exportCalls != 1 {
+		t.Fatalf("expected one export snapshot attempt, got %d", client.exportCalls)
+	}
+	if base.listTreeCalls != 1 {
+		t.Fatalf("expected truncated export to fall back to list tree once, got %d calls", base.listTreeCalls)
+	}
+	if client.readFileCalls != 1 {
+		t.Fatalf("expected tree fallback to read one file, got %d calls", client.readFileCalls)
+	}
+	assertLocalFileContent(t, filepath.Join(localDir, "Docs", "A.md"), "# A")
+}
+
 func TestSyncOnceCreatesAndDeletesRemoteFiles(t *testing.T) {
 	client := &fakeClient{
 		files:           map[string]RemoteFile{},
@@ -3781,11 +3822,16 @@ type fakeExportClient struct {
 	*fakeClient
 	exportCalls   int
 	readFileCalls int
+	exportErr     error
 }
 
 func (c *fakeExportClient) ExportFiles(ctx context.Context, workspaceID, path string) ([]RemoteFile, error) {
 	_ = ctx
 	_ = workspaceID
+	c.exportCalls++
+	if c.exportErr != nil {
+		return nil, c.exportErr
+	}
 	base := normalizeRemotePath(path)
 	files := make([]RemoteFile, 0, len(c.files))
 	for remotePath, file := range c.files {
@@ -3795,7 +3841,6 @@ func (c *fakeExportClient) ExportFiles(ctx context.Context, workspaceID, path st
 		files = append(files, file)
 	}
 	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
-	c.exportCalls++
 	return files, nil
 }
 

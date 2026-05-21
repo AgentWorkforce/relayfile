@@ -2314,6 +2314,9 @@ func (s *Syncer) pullRemoteFullExport(ctx context.Context, client exportSnapshot
 }
 
 func exportSnapshotUnsupported(err error) bool {
+	if exportSnapshotTruncated(err) {
+		return true
+	}
 	var httpErr *HTTPError
 	if !errors.As(err, &httpErr) {
 		return false
@@ -2322,6 +2325,20 @@ func exportSnapshotUnsupported(err error) bool {
 		return true
 	}
 	return httpErr.StatusCode == http.StatusBadRequest && strings.EqualFold(httpErr.Code, "bad_request")
+}
+
+func exportSnapshotTruncated(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	var syntaxErr *json.SyntaxError
+	if errors.As(err, &syntaxErr) {
+		return true
+	}
+	return strings.Contains(err.Error(), "unexpected end of JSON input")
 }
 
 func isUnderLazyGithubRepoSubtree(remoteRoot, remotePath string) bool {
