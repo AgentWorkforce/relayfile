@@ -1350,7 +1350,7 @@ func chunkPendingBulkWrites(pending []pendingBulkWrite, maxBytes int64) [][]pend
 	for _, item := range pending {
 		candidate := append(append([]pendingBulkWrite(nil), current...), item)
 		if len(current) > 0 && bulkWriteRequestSize(bulkWriteFilesForPending(candidate)) > maxBytes {
-			chunks = append(chunks, current)
+			chunks = append(chunks, append([]pendingBulkWrite(nil), current...))
 			current = current[:0]
 		}
 		current = append(current, item)
