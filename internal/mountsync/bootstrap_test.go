@@ -116,6 +116,20 @@ func (c *bootstrapClient) ListTree(ctx context.Context, workspaceID, path string
 	return resp, nil
 }
 
+func (c *bootstrapClient) LatestEventID(ctx context.Context, workspaceID, provider string) (string, error) {
+	if c.listEventsSleep > 0 {
+		select {
+		case <-time.After(c.listEventsSleep):
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+	}
+	if len(c.events) == 0 {
+		return "", nil
+	}
+	return c.events[len(c.events)-1].EventID, nil
+}
+
 func (c *bootstrapClient) ListEvents(ctx context.Context, workspaceID, provider, cursor string, limit int) (EventFeed, error) {
 	if c.listEventsSleep > 0 {
 		select {

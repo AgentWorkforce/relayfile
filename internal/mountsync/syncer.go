@@ -178,6 +178,14 @@ type WriteResult struct {
 type RemoteClient interface {
 	ListTree(ctx context.Context, workspaceID, path string, depth int, cursor string) (TreeResponse, error)
 	ListEvents(ctx context.Context, workspaceID, provider, cursor string, limit int) (EventFeed, error)
+	// LatestEventID returns the most recent event id for the workspace
+	// (optionally filtered by provider) in a single round trip, using the
+	// `direction=desc&limit=1` shape on /fs/events. Returns "" when the
+	// workspace has no events. Implementations may return an HTTPError with
+	// status 400 or 404 to signal that the server does not support the
+	// descending-direction query; callers should treat that as a fallthrough
+	// to the legacy page-walk.
+	LatestEventID(ctx context.Context, workspaceID, provider string) (string, error)
 	ReadFile(ctx context.Context, workspaceID, path string) (RemoteFile, error)
 	WriteFile(ctx context.Context, workspaceID, path, baseRevision, contentType, content string) (WriteResult, error)
 	WriteFilesBulk(ctx context.Context, workspaceID string, files []BulkWriteFile) (BulkWriteResponse, error)
@@ -304,6 +312,25 @@ func (c *HTTPClient) ListEvents(ctx context.Context, workspaceID, provider, curs
 	var out EventFeed
 	err := c.doJSON(ctx, http.MethodGet, fmt.Sprintf("/v1/workspaces/%s/fs/events?%s", url.PathEscape(workspaceID), q.Encode()), nil, nil, &out)
 	return out, err
+}
+
+func (c *HTTPClient) LatestEventID(ctx context.Context, workspaceID, provider string) (string, error) {
+	q := url.Values{}
+	if strings.TrimSpace(provider) != "" {
+		q.Set("provider", strings.TrimSpace(provider))
+	}
+	q.Set("direction", "desc")
+	q.Set("limit", "1")
+	var out EventFeed
+	if err := c.doJSON(ctx, http.MethodGet,
+		fmt.Sprintf("/v1/workspaces/%s/fs/events?%s", url.PathEscape(workspaceID), q.Encode()),
+		nil, nil, &out); err != nil {
+		return "", err
+	}
+	if len(out.Events) == 0 {
+		return "", nil
+	}
+	return strings.TrimSpace(out.Events[0].EventID), nil
 }
 
 func (c *HTTPClient) ReadFile(ctx context.Context, workspaceID, path string) (RemoteFile, error) {
@@ -3341,6 +3368,22 @@ func (s *Syncer) resolveLatestEventCursor(ctx context.Context) (string, error) {
 	// only for cancellation via rootCtx propagation.
 	cctx, cancel := context.WithTimeout(s.rootCtx, s.cursorTimeout)
 	defer cancel()
+
+	// Preferred path (post cloud#927): /fs/events?direction=desc&limit=1
+	// returns the latest event id in one round trip. Walking the whole feed
+	// to the tail is O(N) pages and reliably exceeded cursorTimeout on
+	// workspaces with >~50k events.
+	if latest, err := s.client.LatestEventID(cctx, s.workspace, s.eventProvider); err == nil {
+		return latest, nil
+	} else {
+		var httpErr *HTTPError
+		if !errors.As(err, &httpErr) || (httpErr.StatusCode != http.StatusBadRequest && httpErr.StatusCode != http.StatusNotFound) {
+			return "", err
+		}
+		// Fall through: older self-host cloud may not yet support
+		// direction=desc; degrade to the legacy page-walk.
+	}
+
 	cursor := ""
 	latest := ""
 	for {

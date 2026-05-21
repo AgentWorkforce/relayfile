@@ -776,6 +776,75 @@ func TestReconcileFallsBackToTreeWhenExportPayloadTooLarge(t *testing.T) {
 	assertLocalFileContent(t, filepath.Join(localDir, "Docs", "A.md"), "# A")
 }
 
+// TestResolveLatestEventCursorPrefersLatestEventID guards against regressing
+// from the one-shot /fs/events?direction=desc&limit=1 lookup back to the
+// O(N) page-walk. resolveLatestEventCursor must call LatestEventID first and
+// MUST NOT issue any ListEvents calls when LatestEventID succeeds, because
+// the page-walk reliably exceeds cursorTimeout on workspaces with large
+// event histories (cloud#926).
+func TestResolveLatestEventCursorPrefersLatestEventID(t *testing.T) {
+	client := &fakeClient{
+		files: map[string]RemoteFile{},
+		events: []FilesystemEvent{
+			{EventID: "evt_1"}, {EventID: "evt_2"}, {EventID: "evt_3"},
+		},
+	}
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_latest",
+		LocalRoot:   t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+	cursor, err := syncer.resolveLatestEventCursor(context.Background())
+	if err != nil {
+		t.Fatalf("resolveLatestEventCursor failed: %v", err)
+	}
+	if cursor != "evt_3" {
+		t.Fatalf("expected latest cursor evt_3, got %q", cursor)
+	}
+	if client.latestEventIDCalls != 1 {
+		t.Fatalf("expected exactly 1 LatestEventID call, got %d", client.latestEventIDCalls)
+	}
+	if client.listEventsCalls != 0 {
+		t.Fatalf("expected zero ListEvents calls (one-shot path), got %d", client.listEventsCalls)
+	}
+}
+
+// TestResolveLatestEventCursorFallsBackOnUnsupported covers older self-host
+// cloud deployments that don't implement direction=desc. A 400 bad_request
+// from LatestEventID must transparently fall through to the legacy
+// page-walk, not surface as a cycle failure.
+func TestResolveLatestEventCursorFallsBackOnUnsupported(t *testing.T) {
+	client := &fakeClient{
+		files: map[string]RemoteFile{},
+		events: []FilesystemEvent{
+			{EventID: "evt_1"}, {EventID: "evt_2"}, {EventID: "evt_3"},
+		},
+		latestEventIDUnsupported: true,
+	}
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_legacy",
+		LocalRoot:   t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+	cursor, err := syncer.resolveLatestEventCursor(context.Background())
+	if err != nil {
+		t.Fatalf("resolveLatestEventCursor failed: %v", err)
+	}
+	if cursor != "evt_3" {
+		t.Fatalf("expected legacy fallback to return latest evt_3, got %q", cursor)
+	}
+	if client.latestEventIDCalls != 1 {
+		t.Fatalf("expected one LatestEventID attempt before fallback, got %d", client.latestEventIDCalls)
+	}
+	if client.listEventsCalls == 0 {
+		t.Fatalf("expected fallback to use ListEvents page-walk, got 0 calls")
+	}
+}
+
 func TestSyncOnceCreatesAndDeletesRemoteFiles(t *testing.T) {
 	client := &fakeClient{
 		files:           map[string]RemoteFile{},
@@ -3904,6 +3973,9 @@ type fakeClient struct {
 	eventCounter          int
 	listTreeCalls         int
 	listEventsCalls       int
+	latestEventIDCalls    int
+	latestEventIDErr      error
+	latestEventIDUnsupported bool
 	readFileCalls         int
 	readFileCallsByPath   map[string]int
 	writeFileCalls        int
@@ -3989,6 +4061,28 @@ func (c *fakeClient) ListTree(ctx context.Context, workspaceID, path string, dep
 		Entries:    entries,
 		NextCursor: nil,
 	}, nil
+}
+
+func (c *fakeClient) LatestEventID(ctx context.Context, workspaceID, provider string) (string, error) {
+	_ = ctx
+	_ = workspaceID
+	_ = provider
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.latestEventIDCalls++
+	if c.latestEventIDUnsupported {
+		return "", &HTTPError{StatusCode: http.StatusBadRequest, Code: "bad_request", Message: "direction=desc unsupported"}
+	}
+	if c.latestEventIDErr != nil {
+		return "", c.latestEventIDErr
+	}
+	if c.eventsUnsupported {
+		return "", &HTTPError{StatusCode: 404, Code: "not_found", Message: "not found"}
+	}
+	if len(c.events) == 0 {
+		return "", nil
+	}
+	return c.events[len(c.events)-1].EventID, nil
 }
 
 func (c *fakeClient) ListEvents(ctx context.Context, workspaceID, provider, cursor string, limit int) (EventFeed, error) {
