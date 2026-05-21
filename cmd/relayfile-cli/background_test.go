@@ -313,6 +313,71 @@ func TestMountBackgroundRefusesExistingDaemonFromProcessScan(t *testing.T) {
 	}
 }
 
+// TestMountDaemonCommandMatchesRequiresRelayfileExecutable guards against a
+// regression where a parent shell (or pipeline sibling like `tee`) whose argv
+// happens to contain "relayfile mount <workspace> <localDir>" was matched as a
+// competing daemon, breaking `relayfile mount --background` whenever it was
+// invoked from a shell wrapper that captured the same command line.
+func TestMountDaemonCommandMatchesRequiresRelayfileExecutable(t *testing.T) {
+	localDir := "/private/tmp/relayfile-mount"
+	workspaceID := "ws_demo"
+	workspaceName := "demo"
+
+	nonMatching := []struct {
+		name    string
+		command string
+	}{
+		{
+			name:    "zsh -c wrapper",
+			command: "zsh -c relayfile mount " + workspaceID + " " + localDir + " --background",
+		},
+		{
+			name:    "bash -c wrapper",
+			command: "bash -c relayfile mount " + workspaceID + " " + localDir + " --background",
+		},
+		{
+			name:    "tee sibling with relayfile in log path",
+			command: "tee /tmp/relayfile-mount-start.log",
+		},
+		{
+			name:    "claude tool invocation including localDir",
+			command: "claude --workspace " + workspaceID + " " + localDir,
+		},
+	}
+	for _, tc := range nonMatching {
+		t.Run(tc.name, func(t *testing.T) {
+			if mountDaemonCommandMatches(tc.command, localDir, workspaceID, workspaceName) {
+				t.Fatalf("expected non-relayfile argv[0] not to match: %q", tc.command)
+			}
+		})
+	}
+
+	matching := []struct {
+		name    string
+		command string
+	}{
+		{
+			name:    "bare relayfile binary",
+			command: "relayfile mount " + workspaceID + " " + localDir + " --daemonized",
+		},
+		{
+			name:    "absolute path to relayfile",
+			command: "/usr/local/bin/relayfile mount " + workspaceID + " " + localDir + " --daemonized",
+		},
+		{
+			name:    "platform-suffixed relayfile-cli binary",
+			command: "/opt/relayfile/relayfile-cli-darwin-arm64 mount " + workspaceID + " " + localDir + " --daemonized",
+		},
+	}
+	for _, tc := range matching {
+		t.Run(tc.name, func(t *testing.T) {
+			if !mountDaemonCommandMatches(tc.command, localDir, workspaceID, workspaceName) {
+				t.Fatalf("expected real relayfile daemon to match: %q", tc.command)
+			}
+		})
+	}
+}
+
 func TestRestartClearsStaleDaemonPID(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)
