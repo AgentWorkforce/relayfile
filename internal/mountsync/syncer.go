@@ -2314,7 +2314,7 @@ func (s *Syncer) pullRemoteFullExport(ctx context.Context, client exportSnapshot
 }
 
 func exportSnapshotUnsupported(err error) bool {
-	if exportSnapshotTruncated(err) {
+	if exportSnapshotTruncated(err) || exportSnapshotOverloaded(err) {
 		return true
 	}
 	var httpErr *HTTPError
@@ -2324,7 +2324,37 @@ func exportSnapshotUnsupported(err error) bool {
 	if httpErr.StatusCode == http.StatusNotFound {
 		return true
 	}
+	// The full-tree export serializes the entire workspace into one body.
+	// Large workspaces exceed the cloud export cap, which responds 413 and
+	// explicitly directs clients to the paginated tree/read APIs. Fall
+	// through to pullRemoteFullTree rather than retrying an export that can
+	// never fit.
+	if httpErr.StatusCode == http.StatusRequestEntityTooLarge {
+		return true
+	}
 	return httpErr.StatusCode == http.StatusBadRequest && strings.EqualFold(httpErr.Code, "bad_request")
+}
+
+// exportSnapshotOverloaded reports whether err is a cloud Durable Object
+// overload (HTTP 5xx with an "overloaded" signal). The single full-tree
+// export forces the DO to serialize the entire workspace in one invocation;
+// on large workspaces that reliably trips the DO's request-queue/memory
+// limits and the cycle spins on the export forever. Treating it as
+// "unsupported" lets pullRemoteFull fall through to pullRemoteFullTree, whose
+// paginated ListTree + per-file reads are individually bounded and resume
+// from the persisted cursor. A bare 5xx without the overload signal is left
+// alone so genuinely transient server errors still retry the export.
+func exportSnapshotOverloaded(err error) bool {
+	if err == nil {
+		return false
+	}
+	var httpErr *HTTPError
+	if errors.As(err, &httpErr) {
+		if httpErr.StatusCode >= 500 && strings.Contains(strings.ToLower(httpErr.Message), "overloaded") {
+			return true
+		}
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "durable object is overloaded")
 }
 
 func exportSnapshotTruncated(err error) bool {
