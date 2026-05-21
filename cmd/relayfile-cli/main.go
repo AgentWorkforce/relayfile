@@ -371,7 +371,20 @@ type daemonPIDState struct {
 	Executable string `json:"executable,omitempty"`
 }
 
+type mountDaemonProcess struct {
+	PID     int
+	Command string
+	Source  string
+}
+
+type processCommandSnapshot struct {
+	PID     int
+	Command string
+}
+
 var failedWritebacksStateMu sync.Mutex
+
+var listProcessCommands = defaultListProcessCommands
 
 type apiError struct {
 	StatusCode int
@@ -3871,6 +3884,21 @@ func runMount(args []string) error {
 		logFile = mountLogFile(absLocalDir)
 	}
 
+	if shouldRefuseCompetingMount(*daemonized, *once) {
+		running, _, derr := runningMountDaemons(absLocalDir, workspaceID, workspaceNameForStart(workspaceID))
+		if derr != nil {
+			return fmt.Errorf("check for existing mount daemon: %w", derr)
+		}
+		if len(running) > 0 {
+			return fmt.Errorf(
+				"workspace %s already has a running mount for %s (%s); stop it before starting another",
+				workspaceID,
+				absLocalDir,
+				formatDaemonPIDs(running),
+			)
+		}
+	}
+
 	if *background && !*daemonized {
 		return spawnBackgroundMountProcess(args, absLocalDir, pidFile, logFile)
 	}
@@ -4457,11 +4485,7 @@ func runStatus(args []string, stdout io.Writer) error {
 	}
 	if record.LocalDir != "" {
 		fmt.Fprintf(stdout, "\nlocal mirror: %s\n", record.LocalDir)
-		if pid := readDaemonPID(record.LocalDir); pid != 0 {
-			fmt.Fprintf(stdout, "daemon: running (pid %d)\n", pid)
-		} else {
-			fmt.Fprintln(stdout, "daemon: not running")
-		}
+		fmt.Fprintln(stdout, daemonStatusLine(record))
 	}
 	if snapshot.Bootstrap != nil {
 		// Initial mirror in progress: show progress instead of a
@@ -4510,32 +4534,7 @@ func runStop(args []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	pid, verified := verifyDaemonProcess(record.LocalDir, record.ID)
-	if pid == 0 {
-		return fmt.Errorf("no running mount found for workspace %s", record.Name)
-	}
-	if !verified {
-		// The pid file points at a process that is not this workspace's
-		// daemon (PID reuse or a tampered/stale pid file). Clear the
-		// stale state rather than signaling an unrelated process.
-		if rerr := os.Remove(mountPIDFile(record.LocalDir)); rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
-			return fmt.Errorf("failed to clear stale background mount state for %s: %w", record.Name, rerr)
-		}
-		fmt.Fprintf(stdout, "Cleared stale background mount state for %s (pid %d was not a relayfile daemon)\n", record.Name, pid)
-		return nil
-	}
-	process, err := os.FindProcess(pid)
-	if err != nil {
-		return err
-	}
-	// Platform-specific: SIGTERM on Unix, TerminateProcess on Windows.
-	// The Windows kernel only routes os.Kill through Process.Signal, so a
-	// hard-coded SIGTERM here would always fail there.
-	if err := signalDaemonStop(process); err != nil {
-		return err
-	}
-	fmt.Fprintf(stdout, "Stopped background mount for %s (pid %d)\n", record.Name, pid)
-	return nil
+	return stopWorkspaceMountDaemons(record, stdout, false)
 }
 
 // runRestart stops a running daemon (if any) and starts a fresh background
@@ -4583,45 +4582,9 @@ func runRestart(args []string, stdout io.Writer) error {
 	}
 
 	// Stop the current daemon if it's running. Tolerate "not running" so
-	// `restart` works as a safe "ensure running" verb. If the signal fails
-	// because the process is already gone (stale pid file), clean up and
-	// proceed; any other failure aborts the restart so we don't race a
-	// second daemon against the first on the same pid file.
-	if pid, verified := verifyDaemonProcess(localDir, record.ID); pid != 0 {
-		if !verified {
-			// Stale/tampered pid file pointing at a non-daemon process.
-			// Clear it and continue as a safe "ensure running" verb.
-			if rerr := os.Remove(mountPIDFile(localDir)); rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
-				return fmt.Errorf("failed to clear stale background mount state for %s (pid %d): %w", record.Name, pid, rerr)
-			}
-			fmt.Fprintf(stdout, "Cleared stale background mount state for %s (pid %d was not a relayfile daemon)\n", record.Name, pid)
-		} else {
-			process, perr := os.FindProcess(pid)
-			if perr != nil {
-				return fmt.Errorf("failed to find background mount for %s (pid %d): %w", record.Name, pid, perr)
-			}
-			if serr := signalDaemonStop(process); serr != nil {
-				if isProcessAlreadyGone(serr) {
-					if rerr := os.Remove(mountPIDFile(localDir)); rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
-						return fmt.Errorf("failed to clear stale background mount state for %s (pid %d): %w", record.Name, pid, rerr)
-					}
-					fmt.Fprintf(stdout, "Cleared stale background mount state for %s (pid %d)\n", record.Name, pid)
-				} else {
-					return fmt.Errorf("failed to stop background mount for %s (pid %d): %w", record.Name, pid, serr)
-				}
-			} else {
-				fmt.Fprintf(stdout, "Stopped background mount for %s (pid %d)\n", record.Name, pid)
-				// Wait for the old daemon to actually release its pid file. A
-				// fixed sleep is fragile: if the old process takes longer to
-				// exit, its `defer os.Remove(pidFile)` would race the new
-				// daemon's pid write and silently delete it, leaving `status`,
-				// `stop`, and a later `restart` reporting "no daemon" against a
-				// process that was, in fact, running.
-				if werr := waitForDaemonExit(localDir, pid, 5*time.Second); werr != nil {
-					return fmt.Errorf("old daemon (pid %d) for %s did not exit cleanly: %w", pid, record.Name, werr)
-				}
-			}
-		}
+	// `restart` works as a safe "ensure running" verb.
+	if err := stopWorkspaceMountDaemons(record, stdout, true); err != nil {
+		return err
 	}
 
 	// Start the new daemon. Default is --background; --foreground overrides.
@@ -6034,6 +5997,398 @@ func verifyDaemonProcess(localDir, workspaceID string) (pid int, verified bool) 
 		}
 	}
 	return state.PID, true
+}
+
+func shouldRefuseCompetingMount(daemonized, once bool) bool {
+	return !daemonized && !once
+}
+
+func workspaceNameForStart(workspaceID string) string {
+	if record, ok := workspaceRecordByID(workspaceID); ok && strings.TrimSpace(record.Name) != "" {
+		return record.Name
+	}
+	if record, ok := workspaceRecordByName(workspaceID); ok && strings.TrimSpace(record.Name) != "" {
+		return record.Name
+	}
+	return workspaceID
+}
+
+func runningMountDaemons(localDir, workspaceID, workspaceName string) ([]mountDaemonProcess, int, error) {
+	processes := make([]mountDaemonProcess, 0, 2)
+	seen := map[int]struct{}{}
+	stalePID := 0
+
+	discovered, err := discoverMountDaemonProcesses(localDir, workspaceID, workspaceName)
+	if err != nil {
+		return processes, stalePID, err
+	}
+	for _, process := range discovered {
+		if process.PID == os.Getpid() {
+			continue
+		}
+		if _, ok := seen[process.PID]; ok {
+			continue
+		}
+		processes = append(processes, process)
+		seen[process.PID] = struct{}{}
+	}
+
+	if pid, verified, strong := verifyDaemonProcessForDiscovery(localDir, workspaceID); pid != 0 {
+		_, foundByScan := seen[pid]
+		switch {
+		case verified && strong && !foundByScan:
+			processes = append(processes, mountDaemonProcess{PID: pid, Source: "pidfile"})
+			seen[pid] = struct{}{}
+		case verified && foundByScan:
+			for i := range processes {
+				if processes[i].PID == pid {
+					processes[i].Source = "pidfile"
+					break
+				}
+			}
+		default:
+			stalePID = pid
+		}
+	}
+	return processes, stalePID, nil
+}
+
+func verifyDaemonProcessForDiscovery(localDir, workspaceID string) (pid int, verified bool, strong bool) {
+	if state, structured := readDaemonPIDState(localDir); structured {
+		pid, verified = verifyDaemonProcess(localDir, workspaceID)
+		return pid, verified, verified && state.PID == pid
+	}
+	pid, verified = verifyDaemonProcess(localDir, workspaceID)
+	return pid, verified, false
+}
+
+func discoverMountDaemonProcesses(localDir, workspaceID, workspaceName string) ([]mountDaemonProcess, error) {
+	snapshots, err := listProcessCommands()
+	if err != nil {
+		return nil, err
+	}
+	processes := make([]mountDaemonProcess, 0)
+	for _, snapshot := range snapshots {
+		if snapshot.PID <= 0 || snapshot.PID == os.Getpid() {
+			continue
+		}
+		if mountDaemonCommandMatches(snapshot.Command, localDir, workspaceID, workspaceName) {
+			processes = append(processes, mountDaemonProcess{
+				PID:     snapshot.PID,
+				Command: snapshot.Command,
+				Source:  "process-scan",
+			})
+		}
+	}
+	return processes, nil
+}
+
+func mountDaemonCommandMatches(command, localDir, workspaceID, workspaceName string) bool {
+	command = strings.TrimSpace(command)
+	if command == "" || !strings.Contains(strings.ToLower(command), "relayfile") {
+		return false
+	}
+	fields := strings.Fields(command)
+	if !commandHasMountSubcommand(fields) || commandHasOnceFlag(fields) {
+		return false
+	}
+	targets := daemonWorkspaceTargets(workspaceID, workspaceName)
+	if commandMatchesWorkspace(fields, targets) {
+		return true
+	}
+	if commandMatchesLocalDir(command, fields, localDir) {
+		return true
+	}
+	return false
+}
+
+func commandHasMountSubcommand(fields []string) bool {
+	for _, field := range fields {
+		if field == "mount" || field == "start" {
+			return true
+		}
+	}
+	return false
+}
+
+func commandHasOnceFlag(fields []string) bool {
+	for _, field := range fields {
+		if field == "--once" || field == "-once" {
+			return true
+		}
+		if strings.HasPrefix(field, "--once=") || strings.HasPrefix(field, "-once=") {
+			value := strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(field, "--once="), "-once="))
+			if value == "" {
+				return true
+			}
+			parsed, err := strconv.ParseBool(value)
+			return err != nil || parsed
+		}
+	}
+	return false
+}
+
+func daemonWorkspaceTargets(workspaceID, workspaceName string) []string {
+	seen := map[string]struct{}{}
+	targets := make([]string, 0, 2)
+	for _, value := range []string{workspaceID, workspaceName} {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		targets = append(targets, value)
+	}
+	return targets
+}
+
+func commandMatchesWorkspace(fields []string, targets []string) bool {
+	if len(targets) == 0 {
+		return false
+	}
+	for i, field := range fields {
+		for _, target := range targets {
+			if field == target {
+				return true
+			}
+			if strings.HasPrefix(field, "--workspace=") && strings.TrimPrefix(field, "--workspace=") == target {
+				return true
+			}
+			if (field == "--workspace" || field == "-workspace") && i+1 < len(fields) && fields[i+1] == target {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func commandMatchesLocalDir(_ string, fields []string, localDir string) bool {
+	localDir = strings.TrimSpace(localDir)
+	if localDir == "" {
+		return false
+	}
+	absLocal, err := filepath.Abs(localDir)
+	if err == nil {
+		localDir = absLocal
+	}
+	cleanLocal := filepath.Clean(localDir)
+	for i, field := range fields {
+		if pathTokenMatchesLocalDir(field, cleanLocal) {
+			return true
+		}
+		if strings.HasPrefix(field, "--local-dir=") &&
+			pathTokenMatchesLocalDir(strings.TrimPrefix(field, "--local-dir="), cleanLocal) {
+			return true
+		}
+		if (field == "--local-dir" || field == "-local-dir") && i+1 < len(fields) &&
+			pathTokenMatchesLocalDir(fields[i+1], cleanLocal) {
+			return true
+		}
+	}
+	return false
+}
+
+func pathTokenMatchesLocalDir(token, cleanLocal string) bool {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return false
+	}
+	absToken, err := filepath.Abs(token)
+	if err == nil {
+		token = absToken
+	}
+	cleanToken := filepath.Clean(token)
+	return cleanToken == cleanLocal ||
+		strings.HasPrefix(cleanToken, cleanLocal+string(os.PathSeparator))
+}
+
+func defaultListProcessCommands() ([]processCommandSnapshot, error) {
+	if runtime.GOOS == "windows" {
+		return nil, nil
+	}
+	out, err := exec.Command("ps", "-axo", "pid=,command=").Output()
+	if err != nil {
+		return nil, err
+	}
+	return parseProcessCommandSnapshot(out), nil
+}
+
+func parseProcessCommandSnapshot(out []byte) []processCommandSnapshot {
+	lines := strings.Split(string(out), "\n")
+	snapshots := make([]processCommandSnapshot, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		pid, err := strconv.Atoi(fields[0])
+		if err != nil || pid <= 0 {
+			continue
+		}
+		command := strings.TrimSpace(strings.TrimPrefix(line, fields[0]))
+		if command == "" {
+			continue
+		}
+		snapshots = append(snapshots, processCommandSnapshot{PID: pid, Command: command})
+	}
+	return snapshots
+}
+
+func daemonStatusLine(record workspaceRecord) string {
+	running, _, err := runningMountDaemons(record.LocalDir, record.ID, record.Name)
+	if err != nil {
+		if pid := readDaemonPID(record.LocalDir); pid != 0 {
+			return fmt.Sprintf("daemon: running (pid %d)", pid)
+		}
+		return "daemon: not running"
+	}
+	if len(running) == 0 {
+		return "daemon: not running"
+	}
+	if hasPIDFileDaemon(running) {
+		pidfileDaemons, orphanDaemons := partitionDaemonSources(running)
+		if len(orphanDaemons) > 0 {
+			return fmt.Sprintf("daemon: running (%s); orphan (%s)", formatDaemonPIDs(pidfileDaemons), formatDaemonPIDs(orphanDaemons))
+		}
+		return fmt.Sprintf("daemon: running (%s)", formatDaemonPIDs(pidfileDaemons))
+	}
+	return fmt.Sprintf("daemon: orphan (%s)", formatDaemonPIDs(running))
+}
+
+func partitionDaemonSources(processes []mountDaemonProcess) ([]mountDaemonProcess, []mountDaemonProcess) {
+	pidfileDaemons := make([]mountDaemonProcess, 0, len(processes))
+	orphanDaemons := make([]mountDaemonProcess, 0)
+	for _, process := range processes {
+		if process.Source == "pidfile" {
+			pidfileDaemons = append(pidfileDaemons, process)
+			continue
+		}
+		orphanDaemons = append(orphanDaemons, process)
+	}
+	return pidfileDaemons, orphanDaemons
+}
+
+func hasPIDFileDaemon(processes []mountDaemonProcess) bool {
+	for _, process := range processes {
+		if process.Source == "pidfile" {
+			return true
+		}
+	}
+	return false
+}
+
+func formatDaemonPIDs(processes []mountDaemonProcess) string {
+	pids := make([]int, 0, len(processes))
+	seen := map[int]struct{}{}
+	for _, process := range processes {
+		if process.PID <= 0 {
+			continue
+		}
+		if _, ok := seen[process.PID]; ok {
+			continue
+		}
+		seen[process.PID] = struct{}{}
+		pids = append(pids, process.PID)
+	}
+	sort.Ints(pids)
+	parts := make([]string, 0, len(pids))
+	for _, pid := range pids {
+		parts = append(parts, fmt.Sprintf("pid %d", pid))
+	}
+	return strings.Join(parts, ", ")
+}
+
+func stopWorkspaceMountDaemons(record workspaceRecord, stdout io.Writer, tolerateMissing bool) error {
+	running, stalePID, err := runningMountDaemons(record.LocalDir, record.ID, record.Name)
+	if err != nil {
+		return fmt.Errorf("discover running mounts for %s: %w", record.Name, err)
+	}
+	if stalePID != 0 {
+		if rerr := os.Remove(mountPIDFile(record.LocalDir)); rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
+			return fmt.Errorf("failed to clear stale background mount state for %s: %w", record.Name, rerr)
+		}
+		fmt.Fprintf(stdout, "Cleared stale background mount state for %s (pid %d was not a relayfile daemon)\n", record.Name, stalePID)
+	}
+	if len(running) == 0 {
+		if stalePID != 0 {
+			return nil
+		}
+		if tolerateMissing {
+			return nil
+		}
+		return fmt.Errorf("no running mount found for workspace %s", record.Name)
+	}
+	stopped := make([]mountDaemonProcess, 0, len(running))
+	for _, daemon := range running {
+		process, perr := os.FindProcess(daemon.PID)
+		if perr != nil {
+			return fmt.Errorf("failed to find background mount for %s (pid %d): %w", record.Name, daemon.PID, perr)
+		}
+		if serr := signalDaemonStop(process); serr != nil {
+			if isProcessAlreadyGone(serr) {
+				if rerr := os.Remove(mountPIDFile(record.LocalDir)); rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
+					return fmt.Errorf("failed to clear stale background mount state for %s (pid %d): %w", record.Name, daemon.PID, rerr)
+				}
+				fmt.Fprintf(stdout, "Cleared stale background mount state for %s (pid %d)\n", record.Name, daemon.PID)
+				continue
+			}
+			return fmt.Errorf("failed to stop background mount for %s (pid %d): %w", record.Name, daemon.PID, serr)
+		}
+		stopped = append(stopped, daemon)
+	}
+	if len(stopped) == 0 {
+		return nil
+	}
+	if werr := waitForDaemonDiscoveryClear(record.LocalDir, record.ID, record.Name, stopped, 5*time.Second); werr != nil {
+		return werr
+	}
+	_ = os.Remove(mountPIDFile(record.LocalDir))
+	fmt.Fprintf(stdout, "Stopped background mount for %s (%s)\n", record.Name, formatDaemonPIDs(stopped))
+	return nil
+}
+
+func waitForDaemonDiscoveryClear(localDir, workspaceID, workspaceName string, signaled []mountDaemonProcess, timeout time.Duration) error {
+	if len(signaled) == 0 {
+		return nil
+	}
+	const pollInterval = 50 * time.Millisecond
+	deadline := time.Now().Add(timeout)
+	for {
+		running, err := discoverMountDaemonProcesses(localDir, workspaceID, workspaceName)
+		if err != nil {
+			return fmt.Errorf("confirm daemon stop: %w", err)
+		}
+		if !daemonIntersection(signaled, running) {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("daemon still alive after %s (%s)", timeout, formatDaemonPIDs(running))
+		}
+		time.Sleep(pollInterval)
+	}
+}
+
+func daemonIntersection(left, right []mountDaemonProcess) bool {
+	if len(left) == 0 || len(right) == 0 {
+		return false
+	}
+	seen := map[int]struct{}{}
+	for _, process := range left {
+		seen[process.PID] = struct{}{}
+	}
+	for _, process := range right {
+		if _, ok := seen[process.PID]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 func rotateLogFile(path string) error {
