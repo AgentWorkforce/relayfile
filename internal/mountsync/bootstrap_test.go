@@ -38,6 +38,8 @@ type bootstrapClient struct {
 
 	listTreeCalls atomic.Int64
 	readFileCalls atomic.Int64
+	activeReads   atomic.Int64
+	maxActiveRead atomic.Int64
 }
 
 func newBootstrapClient(fileCount, pageSize int) *bootstrapClient {
@@ -104,7 +106,7 @@ func (c *bootstrapClient) ListTree(ctx context.Context, workspaceID, path string
 	entries := make([]TreeEntry, 0, end-start)
 	for _, p := range paths[start:end] {
 		f := c.files[p]
-		entries = append(entries, TreeEntry{Path: p, Type: "file", Revision: f.Revision})
+		entries = append(entries, TreeEntry{Path: p, Type: "file", Revision: f.Revision, ContentHash: f.ContentHash})
 	}
 	resp := TreeResponse{Path: normalizeRemotePath(path), Entries: entries}
 	if end < len(paths) {
@@ -130,6 +132,14 @@ func (c *bootstrapClient) ListEvents(ctx context.Context, workspaceID, provider,
 
 func (c *bootstrapClient) ReadFile(ctx context.Context, workspaceID, path string) (RemoteFile, error) {
 	c.readFileCalls.Add(1)
+	active := c.activeReads.Add(1)
+	for {
+		currentMax := c.maxActiveRead.Load()
+		if active <= currentMax || c.maxActiveRead.CompareAndSwap(currentMax, active) {
+			break
+		}
+	}
+	defer c.activeReads.Add(-1)
 	if c.readFileSleep > 0 {
 		select {
 		case <-time.After(c.readFileSleep):
@@ -191,6 +201,27 @@ func defaultIf(v, def string) string {
 		return def
 	}
 	return v
+}
+
+func TestBootstrapReadsFilesWithBoundedParallelism(t *testing.T) {
+	t.Setenv("RELAYFILE_BOOTSTRAP_READ_CONCURRENCY", "4")
+	client := newBootstrapClient(12, 12)
+	client.readFileSleep = 25 * time.Millisecond
+	localDir := t.TempDir()
+	s := newBootstrapSyncer(t, client, localDir, SyncerOptions{
+		RootCtx: context.Background(),
+	})
+
+	if err := s.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile failed: %v", err)
+	}
+
+	if got := client.maxActiveRead.Load(); got < 2 || got > 4 {
+		t.Fatalf("expected bounded parallel reads between 2 and 4, got %d", got)
+	}
+	if got, want := client.readFileCalls.Load(), int64(12); got != want {
+		t.Fatalf("expected %d ReadFile calls, got %d", want, got)
+	}
 }
 
 // TestBootstrapTimeoutDecoupledFromCycleTimeout: a tiny inbound per-cycle

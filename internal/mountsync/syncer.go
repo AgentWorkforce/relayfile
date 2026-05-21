@@ -78,6 +78,7 @@ const (
 	defaultBootstrapTimeout     = 0 * time.Second
 	defaultBootstrapIdleTimeout = 90 * time.Second
 	defaultCursorTimeout        = 20 * time.Second
+	defaultBootstrapReadWorkers = 16
 )
 
 // resolveDurationEnv returns the option value if non-zero, else parses the
@@ -1758,6 +1759,18 @@ func (s *Syncer) sync(ctx context.Context, forcePoll bool) error {
 		return err
 	}
 
+	conflicted := map[string]struct{}{}
+	didPoll := false
+	if !s.state.BootstrapComplete || s.forceFullReconcile {
+		if err := s.pullRemote(ctx, conflicted); err != nil {
+			s.markSyncError(err)
+			_ = s.saveState()
+			return err
+		}
+		s.bootstrapped = true
+		didPoll = true
+	}
+
 	conflicted, err := s.pushLocal(ctx)
 	if err != nil {
 		s.markSyncError(err)
@@ -1765,7 +1778,7 @@ func (s *Syncer) sync(ctx context.Context, forcePoll bool) error {
 		return err
 	}
 
-	shouldPoll := forcePoll || !s.bootstrapped || s.wsConn == nil
+	shouldPoll := !didPoll && (forcePoll || !s.bootstrapped || s.wsConn == nil)
 	if shouldPoll {
 		if err := s.pullRemote(ctx, conflicted); err != nil {
 			s.markSyncError(err)
@@ -2355,6 +2368,7 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 		s.recordCloudSuccess()
 		prog.touch()
 		filesThisPage := 0
+		readJobs := make([]bootstrapReadJob, 0, len(page.Entries))
 		for _, entry := range page.Entries {
 			if entry.Type != "file" {
 				continue
@@ -2388,23 +2402,38 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 					s.logf("tree revision %s reused for %s with divergent content hash (tracked=%s remote=%s); refetching", entry.Revision, remotePath, tracked.Hash, entry.ContentHash)
 				}
 			}
-			file, err := s.client.ReadFile(ctx, s.workspace, remotePath)
+			skipped, err := s.trySkipBootstrapRead(remotePath, entry)
 			if err != nil {
+				return err
+			}
+			if skipped {
+				prog.touch()
+				remotePaths[remotePath] = struct{}{}
+				filesThisPage++
+				continue
+			}
+			readJobs = append(readJobs, bootstrapReadJob{
+				Index:      len(readJobs),
+				RemotePath: remotePath,
+			})
+		}
+		for _, result := range s.readBootstrapFiles(ctx, readJobs, prog) {
+			if result.Err != nil {
 				var httpErr *HTTPError
-				if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusForbidden {
-					s.logf("skipping denied file: %s", remotePath)
-					if markErr := s.markReadDenied(remotePath); markErr != nil {
+				if errors.As(result.Err, &httpErr) && httpErr.StatusCode == http.StatusForbidden {
+					s.logf("skipping denied file: %s", result.RemotePath)
+					if markErr := s.markReadDenied(result.RemotePath); markErr != nil {
 						return markErr
 					}
 					continue
 				}
-				return err
+				return result.Err
 			}
-			if err := s.applyRemoteFile(remotePath, file, conflicted); err != nil {
+			if err := s.applyRemoteFile(result.RemotePath, result.File, conflicted); err != nil {
 				return err
 			}
 			prog.touch()
-			remotePaths[remotePath] = struct{}{}
+			remotePaths[result.RemotePath] = struct{}{}
 			filesThisPage++
 		}
 		if page.NextCursor == nil || *page.NextCursor == "" {
@@ -2459,6 +2488,123 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 	}
 	s.markBootstrapComplete()
 	return nil
+}
+
+type bootstrapReadJob struct {
+	Index      int
+	RemotePath string
+}
+
+type bootstrapReadResult struct {
+	Index      int
+	RemotePath string
+	File       RemoteFile
+	Err        error
+}
+
+func (s *Syncer) trySkipBootstrapRead(remotePath string, entry TreeEntry) (bool, error) {
+	if strings.TrimSpace(entry.ContentHash) == "" {
+		return false, nil
+	}
+	if tracked, ok := s.state.Files[remotePath]; ok {
+		if tracked.Dirty || tracked.Denied {
+			return false, nil
+		}
+	}
+	localPath, err := remoteToLocalPath(s.localRoot, s.remoteRoot, remotePath)
+	if err != nil {
+		return false, nil
+	}
+	if err := s.assertNotMountRoot(localPath); err != nil {
+		s.logf("skipping local hash probe for %s: %v", remotePath, err)
+		return false, nil
+	}
+	snapshot, err := readLocalSnapshot(localPath, false)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, nil
+	}
+	if snapshot.Hash != entry.ContentHash {
+		return false, nil
+	}
+	canWrite := s.canWritePath(remotePath)
+	if err := s.applyLocalPermissions(localPath, canWrite); err != nil {
+		return false, err
+	}
+	s.state.Files[remotePath] = trackedFile{
+		Revision:    entry.Revision,
+		ContentType: snapshot.ContentType,
+		Hash:        snapshot.Hash,
+		Dirty:       false,
+		Denied:      false,
+		ReadOnly:    !canWrite,
+	}
+	return true, nil
+}
+
+func (s *Syncer) readBootstrapFiles(ctx context.Context, jobs []bootstrapReadJob, prog bootstrapProgress) []bootstrapReadResult {
+	if len(jobs) == 0 {
+		return nil
+	}
+	workers := bootstrapReadWorkers()
+	if workers > len(jobs) {
+		workers = len(jobs)
+	}
+	readCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	jobCh := make(chan bootstrapReadJob, len(jobs))
+	for _, job := range jobs {
+		jobCh <- job
+	}
+	close(jobCh)
+
+	resultCh := make(chan bootstrapReadResult, len(jobs))
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for job := range jobCh {
+				file, err := s.client.ReadFile(readCtx, s.workspace, job.RemotePath)
+				if err == nil {
+					prog.touch()
+				}
+				resultCh <- bootstrapReadResult{
+					Index:      job.Index,
+					RemotePath: job.RemotePath,
+					File:       file,
+					Err:        err,
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	close(resultCh)
+
+	results := make([]bootstrapReadResult, 0, len(jobs))
+	for result := range resultCh {
+		results = append(results, result)
+	}
+	sort.Slice(results, func(i, j int) bool { return results[i].Index < results[j].Index })
+	return results
+}
+
+func bootstrapReadWorkers() int {
+	raw := strings.TrimSpace(os.Getenv("RELAYFILE_BOOTSTRAP_READ_CONCURRENCY"))
+	if raw == "" {
+		return defaultBootstrapReadWorkers
+	}
+	v, err := strconv.Atoi(raw)
+	if err != nil || v <= 0 {
+		return defaultBootstrapReadWorkers
+	}
+	if v > 64 {
+		return 64
+	}
+	return v
 }
 
 // markBootstrapComplete records that a full-tree (or export) pull has

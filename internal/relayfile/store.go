@@ -3,7 +3,9 @@ package relayfile
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -64,6 +66,7 @@ type TreeEntry struct {
 	Path             string `json:"path"`
 	Type             string `json:"type"`
 	Revision         string `json:"revision"`
+	ContentHash      string `json:"contentHash,omitempty"`
 	Provider         string `json:"provider,omitempty"`
 	ProviderObjectID string `json:"providerObjectId,omitempty"`
 	Size             int64  `json:"size,omitempty"`
@@ -144,6 +147,7 @@ type Event struct {
 	Type          string `json:"type"`
 	Path          string `json:"path"`
 	Revision      string `json:"revision"`
+	ContentHash   string `json:"contentHash,omitempty"`
 	Origin        string `json:"origin"`
 	Provider      string `json:"provider,omitempty"`
 	CorrelationID string `json:"correlationId"`
@@ -1072,6 +1076,7 @@ func (s *Store) ListTree(workspaceID, path string, depth int, cursor string) (Tr
 					Path:             child,
 					Type:             "file",
 					Revision:         file.Revision,
+					ContentHash:      contentHashForFile(file),
 					Provider:         file.Provider,
 					ProviderObjectID: file.ProviderObjectID,
 					Size:             int64(len(file.Content)),
@@ -3262,11 +3267,16 @@ func (s *Store) recordWriteLocked(ws *workspaceState, path, revision, eventType,
 	}
 	ws.Ops[opID] = op
 
+	contentHash := ""
+	if eventType != "file.deleted" {
+		contentHash = contentHashForFile(ws.Files[path])
+	}
 	event := Event{
 		EventID:       s.nextEventIDLocked(),
 		Type:          eventType,
 		Path:          path,
 		Revision:      revision,
+		ContentHash:   contentHash,
 		Origin:        "agent_write",
 		Provider:      provider,
 		CorrelationID: correlationID,
@@ -3832,6 +3842,7 @@ func (s *Store) applyProviderUpsertLocked(ws *workspaceState, provider string, a
 		Type:          fsEvent,
 		Path:          path,
 		Revision:      revision,
+		ContentHash:   contentHashForFile(file),
 		Origin:        "provider_sync",
 		Provider:      provider,
 		CorrelationID: correlationID,
@@ -4227,6 +4238,7 @@ func listTreeFromFiles(files map[string]File, path string, depth int, cursor str
 					Path:             child,
 					Type:             "file",
 					Revision:         file.Revision,
+					ContentHash:      contentHashForFile(file),
 					Provider:         file.Provider,
 					ProviderObjectID: file.ProviderObjectID,
 					Size:             int64(len(file.Content)),
@@ -4761,6 +4773,28 @@ func validateEncodedContent(content, encoding string) error {
 		return nil
 	}
 	return ErrInvalidInput
+}
+
+func contentHashForFile(file File) string {
+	data := []byte(file.Content)
+	if normalizeEncodingForHash(file.Encoding) == "base64" {
+		if decoded, err := base64.StdEncoding.DecodeString(file.Content); err == nil {
+			data = decoded
+		} else if decoded, err := base64.RawStdEncoding.DecodeString(file.Content); err == nil {
+			data = decoded
+		}
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
+func normalizeEncodingForHash(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "base64":
+		return "base64"
+	default:
+		return ""
+	}
 }
 
 func providerWatermarkKey(provider string, action ApplyAction) string {
