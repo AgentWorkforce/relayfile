@@ -6017,14 +6017,6 @@ func runningMountDaemons(localDir, workspaceID, workspaceName string) ([]mountDa
 	processes := make([]mountDaemonProcess, 0, 2)
 	seen := map[int]struct{}{}
 	stalePID := 0
-	if pid, verified := verifyDaemonProcess(localDir, workspaceID); pid != 0 {
-		if verified {
-			processes = append(processes, mountDaemonProcess{PID: pid, Source: "pidfile"})
-			seen[pid] = struct{}{}
-		} else {
-			stalePID = pid
-		}
-	}
 
 	discovered, err := discoverMountDaemonProcesses(localDir, workspaceID, workspaceName)
 	if err != nil {
@@ -6040,7 +6032,34 @@ func runningMountDaemons(localDir, workspaceID, workspaceName string) ([]mountDa
 		processes = append(processes, process)
 		seen[process.PID] = struct{}{}
 	}
+
+	if pid, verified, strong := verifyDaemonProcessForDiscovery(localDir, workspaceID); pid != 0 {
+		_, foundByScan := seen[pid]
+		switch {
+		case verified && strong && !foundByScan:
+			processes = append(processes, mountDaemonProcess{PID: pid, Source: "pidfile"})
+			seen[pid] = struct{}{}
+		case verified && foundByScan:
+			for i := range processes {
+				if processes[i].PID == pid {
+					processes[i].Source = "pidfile"
+					break
+				}
+			}
+		default:
+			stalePID = pid
+		}
+	}
 	return processes, stalePID, nil
+}
+
+func verifyDaemonProcessForDiscovery(localDir, workspaceID string) (pid int, verified bool, strong bool) {
+	if state, structured := readDaemonPIDState(localDir); structured {
+		pid, verified = verifyDaemonProcess(localDir, workspaceID)
+		return pid, verified, verified && state.PID == pid
+	}
+	pid, verified = verifyDaemonProcess(localDir, workspaceID)
+	return pid, verified, false
 }
 
 func discoverMountDaemonProcesses(localDir, workspaceID, workspaceName string) ([]mountDaemonProcess, error) {
@@ -6085,7 +6104,7 @@ func mountDaemonCommandMatches(command, localDir, workspaceID, workspaceName str
 
 func commandHasMountSubcommand(fields []string) bool {
 	for _, field := range fields {
-		if field == "mount" {
+		if field == "mount" || field == "start" {
 			return true
 		}
 	}
@@ -6146,7 +6165,7 @@ func commandMatchesWorkspace(fields []string, targets []string) bool {
 	return false
 }
 
-func commandMatchesLocalDir(command string, fields []string, localDir string) bool {
+func commandMatchesLocalDir(_ string, fields []string, localDir string) bool {
 	localDir = strings.TrimSpace(localDir)
 	if localDir == "" {
 		return false
@@ -6156,23 +6175,34 @@ func commandMatchesLocalDir(command string, fields []string, localDir string) bo
 		localDir = absLocal
 	}
 	cleanLocal := filepath.Clean(localDir)
-	if strings.Contains(command, localDir) {
-		return true
-	}
 	for i, field := range fields {
-		if filepath.Clean(field) == cleanLocal {
+		if pathTokenMatchesLocalDir(field, cleanLocal) {
 			return true
 		}
 		if strings.HasPrefix(field, "--local-dir=") &&
-			filepath.Clean(strings.TrimPrefix(field, "--local-dir=")) == cleanLocal {
+			pathTokenMatchesLocalDir(strings.TrimPrefix(field, "--local-dir="), cleanLocal) {
 			return true
 		}
 		if (field == "--local-dir" || field == "-local-dir") && i+1 < len(fields) &&
-			filepath.Clean(fields[i+1]) == cleanLocal {
+			pathTokenMatchesLocalDir(fields[i+1], cleanLocal) {
 			return true
 		}
 	}
 	return false
+}
+
+func pathTokenMatchesLocalDir(token, cleanLocal string) bool {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return false
+	}
+	absToken, err := filepath.Abs(token)
+	if err == nil {
+		token = absToken
+	}
+	cleanToken := filepath.Clean(token)
+	return cleanToken == cleanLocal ||
+		strings.HasPrefix(cleanToken, cleanLocal+string(os.PathSeparator))
 }
 
 func defaultListProcessCommands() ([]processCommandSnapshot, error) {
@@ -6287,6 +6317,9 @@ func stopWorkspaceMountDaemons(record workspaceRecord, stdout io.Writer, tolerat
 		fmt.Fprintf(stdout, "Cleared stale background mount state for %s (pid %d was not a relayfile daemon)\n", record.Name, stalePID)
 	}
 	if len(running) == 0 {
+		if stalePID != 0 {
+			return nil
+		}
 		if tolerateMissing {
 			return nil
 		}

@@ -1102,6 +1102,19 @@ func TestStatusSurfacesOrphanDaemonFromProcessScan(t *testing.T) {
 	}
 }
 
+func TestMountDaemonCommandMatchesStartAliasAndLocalDirBoundaries(t *testing.T) {
+	localDir := filepath.Join(t.TempDir(), "ws")
+	if !mountDaemonCommandMatches("relayfile start demo "+localDir+" --daemonized", localDir, "ws_demo", "demo") {
+		t.Fatalf("expected relayfile start alias to match daemon command")
+	}
+	if mountDaemonCommandMatches("relayfile mount other "+localDir+"-old --daemonized", localDir, "ws_demo", "demo") {
+		t.Fatalf("expected sibling path with shared prefix not to match")
+	}
+	if !mountDaemonCommandMatches("relayfile mount other "+filepath.Join(localDir, "nested")+" --daemonized", localDir, "ws_demo", "demo") {
+		t.Fatalf("expected localDir subpath token to match")
+	}
+}
+
 func TestRestartRequiresRecordedLocalMirror(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)

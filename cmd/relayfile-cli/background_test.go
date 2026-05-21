@@ -219,6 +219,57 @@ func TestStopDiscoversOrphanDaemonWithoutPIDFile(t *testing.T) {
 	}
 }
 
+func TestStopClearsLegacyPIDWithoutProcessScanMatch(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	localDir := t.TempDir()
+	if err := ensureMirrorLayout(localDir); err != nil {
+		t.Fatalf("ensureMirrorLayout failed: %v", err)
+	}
+	if _, err := upsertWorkspaceDetails(workspaceRecord{
+		Name:       "demo",
+		ID:         "ws_demo",
+		LocalDir:   localDir,
+		CreatedAt:  time.Now().UTC().Format(time.RFC3339),
+		LastUsedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("upsertWorkspaceDetails failed: %v", err)
+	}
+
+	cmd := exec.Command("sleep", "30")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start sleep subprocess failed: %v", err)
+	}
+	t.Cleanup(func() {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		_, _ = cmd.Process.Wait()
+	})
+	if err := os.WriteFile(mountPIDFile(localDir), []byte(strconv.Itoa(cmd.Process.Pid)+"\n"), 0o644); err != nil {
+		t.Fatalf("write legacy pid failed: %v", err)
+	}
+
+	oldList := listProcessCommands
+	listProcessCommands = func() ([]processCommandSnapshot, error) { return nil, nil }
+	t.Cleanup(func() { listProcessCommands = oldList })
+
+	var stdout bytes.Buffer
+	if err := run([]string{"stop", "demo"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("run stop failed: %v\noutput:\n%s", err, stdout.String())
+	}
+	if got := stdout.String(); !strings.Contains(got, "Cleared stale background mount state") {
+		t.Fatalf("expected stale cleanup output, got %q", got)
+	}
+	if _, err := os.Stat(mountPIDFile(localDir)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected legacy pid file to be removed, got %v", err)
+	}
+	if err := cmd.Process.Signal(syscall.Signal(0)); err != nil {
+		t.Fatalf("legacy pid without process scan match should not be signaled, got %v", err)
+	}
+}
+
 func TestMountBackgroundRefusesExistingDaemonFromProcessScan(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)
