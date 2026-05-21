@@ -688,6 +688,7 @@ type Syncer struct {
 type mountState struct {
 	Files                     map[string]trackedFile `json:"files"`
 	EventsCursor              string                 `json:"eventsCursor,omitempty"`
+	IncrementalCheckpoint     *incrementalCheckpoint `json:"incrementalCheckpoint,omitempty"`
 	LastReconcileAt           string                 `json:"lastReconcileAt,omitempty"`
 	LastSuccessfulReconcileAt string                 `json:"lastSuccessfulReconcileAt,omitempty"`
 	LastEventAt               string                 `json:"lastEventAt,omitempty"`
@@ -710,6 +711,13 @@ type mountState struct {
 	BootstrapFilesSynced int    `json:"bootstrapFilesSynced,omitempty"`
 	BootstrapFilesTotal  int    `json:"bootstrapFilesTotal,omitempty"`
 	BootstrapStartedAt   string `json:"bootstrapStartedAt,omitempty"`
+}
+
+type incrementalCheckpoint struct {
+	Cursor     string `json:"cursor,omitempty"`
+	PageCursor string `json:"pageCursor,omitempty"`
+	Phase      string `json:"phase,omitempty"`
+	Path       string `json:"path,omitempty"`
 }
 
 // telemetryCounters tracks defensive-guard activity so operators can see at
@@ -2017,6 +2025,7 @@ func (s *Syncer) pullRemote(ctx context.Context, conflicted map[string]struct{})
 			// (advanced past). Replaying from the prior cursor is safe —
 			// applyRemoteFile is idempotent and will no-op when on-disk
 			// content already matches.
+			s.state.IncrementalCheckpoint = nil
 			return nil
 		}
 		feed, err := s.client.ListEvents(ctx, s.workspace, s.eventProvider, s.state.EventsCursor, 1)
@@ -2048,6 +2057,7 @@ func (s *Syncer) pullRemote(ctx context.Context, conflicted map[string]struct{})
 		}
 		s.logf("events feed unavailable; falling back to full pull")
 		s.state.EventsCursor = ""
+		s.state.IncrementalCheckpoint = nil
 	}
 
 	// Restart fast-path. When EventsCursor is empty but the state file
@@ -2100,6 +2110,7 @@ func (s *Syncer) pullRemote(ctx context.Context, conflicted map[string]struct{})
 			// rw_517d60b6 partial-mirror hazard (still gated on
 			// BootstrapComplete).
 			s.state.EventsCursor = cursor
+			s.state.IncrementalCheckpoint = nil
 			s.logf("restart fast-path: seeded events cursor %q from %d tracked files; skipping bootstrap full pull", cursor, len(s.state.Files))
 			return nil
 		}
@@ -2125,6 +2136,7 @@ func (s *Syncer) pullRemote(ctx context.Context, conflicted map[string]struct{})
 	if err := s.pullRemoteFull(bctx, conflicted, bprog); err != nil {
 		return err
 	}
+	s.state.IncrementalCheckpoint = nil
 	if s.wsConn != nil {
 		return nil
 	}
@@ -2855,6 +2867,7 @@ func (s *Syncer) pullRemoteIncremental(ctx context.Context, conflicted map[strin
 	safeCursor := currentCursor
 
 	for {
+		pageStartCursor := currentCursor
 		feed, err := s.client.ListEvents(ctx, s.workspace, s.eventProvider, currentCursor, 500)
 		if err != nil {
 			return safeCursor, err
@@ -2909,9 +2922,11 @@ func (s *Syncer) pullRemoteIncremental(ctx context.Context, conflicted map[strin
 				delete(changed, remotePath)
 			}
 		}
-		if err := s.applyIncrementalChanges(ctx, changed, deleted, conflicted); err != nil {
+		checkpoint := s.incrementalCheckpointForPage(pageStartCursor, pageCursor)
+		if err := s.applyIncrementalChanges(ctx, changed, deleted, conflicted, pageStartCursor, pageCursor, checkpoint); err != nil {
 			return safeCursor, err
 		}
+		s.state.IncrementalCheckpoint = nil
 		if pageLastEventAt != "" {
 			s.state.LastEventAt = pageLastEventAt
 		}
@@ -2934,18 +2949,54 @@ func (s *Syncer) pullRemoteIncremental(ctx context.Context, conflicted map[strin
 	return safeCursor, nil
 }
 
-func (s *Syncer) applyIncrementalChanges(ctx context.Context, changed, deleted map[string]struct{}, conflicted map[string]struct{}) error {
+func (s *Syncer) incrementalCheckpointForPage(cursor, pageCursor string) incrementalCheckpoint {
+	if s.state.IncrementalCheckpoint == nil {
+		return incrementalCheckpoint{}
+	}
+	checkpoint := *s.state.IncrementalCheckpoint
+	checkpoint.Cursor = strings.TrimSpace(checkpoint.Cursor)
+	checkpoint.PageCursor = strings.TrimSpace(checkpoint.PageCursor)
+	checkpoint.Phase = strings.TrimSpace(checkpoint.Phase)
+	checkpoint.Path = normalizeRemotePath(checkpoint.Path)
+	if checkpoint.Cursor != strings.TrimSpace(cursor) || checkpoint.PageCursor != strings.TrimSpace(pageCursor) {
+		return incrementalCheckpoint{}
+	}
+	if checkpoint.Phase != "changed" && checkpoint.Phase != "deleted" {
+		return incrementalCheckpoint{}
+	}
+	if checkpoint.Path == "/" || strings.TrimSpace(checkpoint.Path) == "" {
+		return incrementalCheckpoint{}
+	}
+	return checkpoint
+}
+
+func (s *Syncer) applyIncrementalChanges(
+	ctx context.Context,
+	changed, deleted map[string]struct{},
+	conflicted map[string]struct{},
+	pageStartCursor, pageCursor string,
+	checkpoint incrementalCheckpoint,
+) error {
 	changedPaths := make([]string, 0, len(changed))
 	for remotePath := range changed {
 		changedPaths = append(changedPaths, remotePath)
 	}
 	sort.Strings(changedPaths)
 	for _, remotePath := range changedPaths {
+		if checkpoint.Phase == "changed" && remotePath <= checkpoint.Path {
+			continue
+		}
+		if checkpoint.Phase == "deleted" {
+			continue
+		}
 		file, err := s.client.ReadFile(ctx, s.workspace, remotePath)
 		if err != nil {
 			var httpErr *HTTPError
 			if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusNotFound {
-				deleted[remotePath] = struct{}{}
+				if err := s.applyRemoteDelete(remotePath, conflicted); err != nil {
+					return err
+				}
+				s.markIncrementalCheckpoint(pageStartCursor, pageCursor, "changed", remotePath)
 				continue
 			}
 			if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusForbidden {
@@ -2953,6 +3004,7 @@ func (s *Syncer) applyIncrementalChanges(ctx context.Context, changed, deleted m
 				if markErr := s.markReadDenied(remotePath); markErr != nil {
 					return markErr
 				}
+				s.markIncrementalCheckpoint(pageStartCursor, pageCursor, "changed", remotePath)
 				continue
 			}
 			return err
@@ -2960,6 +3012,7 @@ func (s *Syncer) applyIncrementalChanges(ctx context.Context, changed, deleted m
 		if err := s.applyRemoteFile(remotePath, file, conflicted); err != nil {
 			return err
 		}
+		s.markIncrementalCheckpoint(pageStartCursor, pageCursor, "changed", remotePath)
 	}
 
 	deletedPaths := make([]string, 0, len(deleted))
@@ -2968,11 +3021,24 @@ func (s *Syncer) applyIncrementalChanges(ctx context.Context, changed, deleted m
 	}
 	sort.Strings(deletedPaths)
 	for _, remotePath := range deletedPaths {
+		if checkpoint.Phase == "deleted" && remotePath <= checkpoint.Path {
+			continue
+		}
 		if err := s.applyRemoteDelete(remotePath, conflicted); err != nil {
 			return err
 		}
+		s.markIncrementalCheckpoint(pageStartCursor, pageCursor, "deleted", remotePath)
 	}
 	return nil
+}
+
+func (s *Syncer) markIncrementalCheckpoint(pageStartCursor, pageCursor, phase, remotePath string) {
+	s.state.IncrementalCheckpoint = &incrementalCheckpoint{
+		Cursor:     strings.TrimSpace(pageStartCursor),
+		PageCursor: strings.TrimSpace(pageCursor),
+		Phase:      strings.TrimSpace(phase),
+		Path:       normalizeRemotePath(remotePath),
+	}
 }
 
 func (s *Syncer) resolveLatestEventCursor(ctx context.Context) (string, error) {
