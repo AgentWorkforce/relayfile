@@ -60,8 +60,12 @@ func TestA14BackgroundModeWritesPidAndStopSignalsCleanly(t *testing.T) {
 		if cmd.Process != nil {
 			_ = cmd.Process.Kill()
 		}
-		_, _ = cmd.Process.Wait()
 	})
+	exited := make(chan error, 1)
+	go func() {
+		_, err := cmd.Process.Wait()
+		exited <- err
+	}()
 
 	pidFile := mountPIDFile(localDir)
 	logFile := mountLogFile(localDir)
@@ -97,11 +101,6 @@ func TestA14BackgroundModeWritesPidAndStopSignalsCleanly(t *testing.T) {
 	}
 
 	deadline := time.Now().Add(5 * time.Second)
-	exited := make(chan error, 1)
-	go func() {
-		_, err := cmd.Process.Wait()
-		exited <- err
-	}()
 	select {
 	case err := <-exited:
 		if err == nil {
@@ -118,6 +117,119 @@ func TestA14BackgroundModeWritesPidAndStopSignalsCleanly(t *testing.T) {
 		t.Fatalf("subprocess exited with unexpected error: %v", err)
 	case <-time.After(time.Until(deadline)):
 		t.Fatalf("subprocess did not exit within 5s of SIGTERM")
+	}
+}
+
+func TestStopEscalatesToKillWhenDaemonIgnoresTerm(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	oldGracefulTimeout := daemonGracefulStopTimeout
+	oldForceTimeout := daemonForceStopTimeout
+	daemonGracefulStopTimeout = 100 * time.Millisecond
+	daemonForceStopTimeout = 2 * time.Second
+	t.Cleanup(func() {
+		daemonGracefulStopTimeout = oldGracefulTimeout
+		daemonForceStopTimeout = oldForceTimeout
+	})
+
+	localDir := t.TempDir()
+	if err := ensureMirrorLayout(localDir); err != nil {
+		t.Fatalf("ensureMirrorLayout failed: %v", err)
+	}
+	if _, err := upsertWorkspaceDetails(workspaceRecord{
+		Name:       "demo",
+		ID:         "ws_demo",
+		LocalDir:   localDir,
+		CreatedAt:  time.Now().UTC().Format(time.RFC3339),
+		LastUsedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("upsertWorkspaceDetails failed: %v", err)
+	}
+
+	cmd := exec.Command("sh", "-c", "trap '' TERM; exec sleep 30")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start TERM-ignoring subprocess failed: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	exited := make(chan error, 1)
+	done := make(chan struct{})
+	go func() {
+		exited <- cmd.Wait()
+		close(done)
+	}()
+	waited := false
+	t.Cleanup(func() {
+		if waited {
+			return
+		}
+		select {
+		case <-done:
+			<-exited
+		default:
+			if cmd.Process != nil {
+				_ = cmd.Process.Kill()
+			}
+			<-done
+			<-exited
+		}
+	})
+
+	daemonExe, lerr := exec.LookPath("sleep")
+	if lerr != nil {
+		t.Fatalf("look up sleep executable failed: %v", lerr)
+	}
+	if resolved, rerr := filepath.EvalSymlinks(daemonExe); rerr == nil {
+		daemonExe = resolved
+	}
+	if err := writeDaemonPIDState(mountPIDFile(localDir), daemonPIDState{
+		PID:         cmd.Process.Pid,
+		WorkspaceID: "ws_demo",
+		LocalDir:    localDir,
+		Executable:  daemonExe,
+	}); err != nil {
+		t.Fatalf("writeDaemonPIDState failed: %v", err)
+	}
+
+	oldList := listProcessCommands
+	listProcessCommands = func() ([]processCommandSnapshot, error) {
+		select {
+		case <-done:
+			return nil, nil
+		default:
+			return []processCommandSnapshot{{
+				PID:     cmd.Process.Pid,
+				Command: "relayfile mount demo " + localDir + " --daemonized",
+			}}, nil
+		}
+	}
+	t.Cleanup(func() { listProcessCommands = oldList })
+
+	var stdout bytes.Buffer
+	if err := run([]string{"stop", "demo"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("run stop failed: %v\noutput:\n%s", err, stdout.String())
+	}
+	got := stdout.String()
+	if !strings.Contains(got, "did not exit after SIGTERM; sending SIGKILL") ||
+		!strings.Contains(got, "Stopped background mount for demo") {
+		t.Fatalf("expected force-stop output, got %q", got)
+	}
+	if _, err := os.Stat(mountPIDFile(localDir)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected pid file to be removed after force stop, got %v", err)
+	}
+
+	select {
+	case err := <-exited:
+		waited = true
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) {
+			t.Fatalf("expected signal exit after force stop, got %v", err)
+		}
+		if status, ok := exitErr.Sys().(syscall.WaitStatus); !ok || !status.Signaled() || status.Signal() != syscall.SIGKILL {
+			t.Fatalf("expected SIGKILL exit after force stop, got %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("subprocess did not exit after force stop")
 	}
 }
 
@@ -173,11 +285,20 @@ func TestStopDiscoversOrphanDaemonWithoutPIDFile(t *testing.T) {
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start sleep subprocess failed: %v", err)
 	}
+	exited := make(chan error, 1)
+	go func() {
+		_, err := cmd.Process.Wait()
+		exited <- err
+	}()
+	waited := false
 	t.Cleanup(func() {
+		if waited {
+			return
+		}
 		if cmd.Process != nil {
 			_ = cmd.Process.Kill()
 		}
-		_, _ = cmd.Process.Wait()
+		<-exited
 	})
 
 	oldList := listProcessCommands
@@ -203,13 +324,9 @@ func TestStopDiscoversOrphanDaemonWithoutPIDFile(t *testing.T) {
 		t.Fatalf("unexpected stop output: %q", got)
 	}
 
-	exited := make(chan error, 1)
-	go func() {
-		_, err := cmd.Process.Wait()
-		exited <- err
-	}()
 	select {
 	case err := <-exited:
+		waited = true
 		var exitErr *exec.ExitError
 		if err != nil && !errors.As(err, &exitErr) {
 			t.Fatalf("subprocess exited with unexpected error: %v", err)
@@ -310,6 +427,67 @@ func TestMountBackgroundRefusesExistingDaemonFromProcessScan(t *testing.T) {
 	}
 	if strings.Contains(stdout.String(), "Mirror started in background") {
 		t.Fatalf("mount should not have spawned a background daemon: %q", stdout.String())
+	}
+}
+
+func TestMountBackgroundClearsDeadStructuredPIDBeforeStart(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	localDir := t.TempDir()
+	if err := ensureMirrorLayout(localDir); err != nil {
+		t.Fatalf("ensureMirrorLayout failed: %v", err)
+	}
+	if _, err := upsertWorkspaceDetails(workspaceRecord{
+		Name:       "demo",
+		ID:         "ws_demo",
+		LocalDir:   localDir,
+		CreatedAt:  time.Now().UTC().Format(time.RFC3339),
+		LastUsedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("upsertWorkspaceDetails failed: %v", err)
+	}
+	if err := saveCredentials(credentials{
+		Server: defaultServerURL,
+		Token:  testJWTWithWorkspace("ws_demo"),
+	}); err != nil {
+		t.Fatalf("saveCredentials failed: %v", err)
+	}
+	if err := writeDaemonPIDState(mountPIDFile(localDir), daemonPIDState{
+		PID:         1 << 30,
+		WorkspaceID: "ws_demo",
+		LocalDir:    localDir,
+	}); err != nil {
+		t.Fatalf("writeDaemonPIDState failed: %v", err)
+	}
+
+	oldList := listProcessCommands
+	listProcessCommands = func() ([]processCommandSnapshot, error) { return nil, nil }
+	t.Cleanup(func() { listProcessCommands = oldList })
+
+	oldSpawn := spawnBackgroundMountProcessFn
+	spawned := false
+	spawnBackgroundMountProcessFn = func(originalArgs []string, absLocalDir, pidFile, logFile string) error {
+		spawned = true
+		if absLocalDir != localDir {
+			t.Fatalf("spawn localDir = %q, want %q", absLocalDir, localDir)
+		}
+		if _, err := os.Stat(pidFile); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("expected stale pid file to be cleared before spawn, got %v", err)
+		}
+		return nil
+	}
+	t.Cleanup(func() { spawnBackgroundMountProcessFn = oldSpawn })
+
+	var stdout bytes.Buffer
+	if err := run([]string{"mount", "demo", "--background"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("run mount failed: %v\noutput:\n%s", err, stdout.String())
+	}
+	if !spawned {
+		t.Fatalf("expected mount to proceed after clearing stale pid file")
+	}
+	if _, err := os.Stat(mountPIDFile(localDir)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected stale pid file to remain cleared, got %v", err)
 	}
 }
 

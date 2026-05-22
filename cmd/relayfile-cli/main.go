@@ -3893,9 +3893,14 @@ func runMount(args []string) error {
 	}
 
 	if shouldRefuseCompetingMount(*daemonized, *once) {
-		running, _, derr := runningMountDaemons(absLocalDir, workspaceID, workspaceNameForStart(workspaceID))
+		running, stalePID, derr := runningMountDaemons(absLocalDir, workspaceID, workspaceNameForStart(workspaceID))
 		if derr != nil {
 			return fmt.Errorf("check for existing mount daemon: %w", derr)
+		}
+		if stalePID != 0 {
+			if rerr := os.Remove(mountPIDFile(absLocalDir)); rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
+				return fmt.Errorf("failed to clear stale background mount state for %s: %w", workspaceID, rerr)
+			}
 		}
 		if len(running) > 0 {
 			return fmt.Errorf(
@@ -3908,7 +3913,7 @@ func runMount(args []string) error {
 	}
 
 	if *background && !*daemonized {
-		return spawnBackgroundMountProcess(args, absLocalDir, pidFile, logFile)
+		return spawnBackgroundMountProcessFn(args, absLocalDir, pidFile, logFile)
 	}
 	registerPID := shouldRegisterMountPID(*daemonized, *once)
 	if *daemonized {
@@ -4695,6 +4700,18 @@ func runRestart(args []string, stdout io.Writer) error {
 // modern Go check) and `syscall.ESRCH` (raw signal failure) as "gone".
 func isProcessAlreadyGone(err error) bool {
 	return errors.Is(err, os.ErrProcessDone) || errors.Is(err, syscall.ESRCH)
+}
+
+func processAlive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	process, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	err = process.Signal(syscall.Signal(0))
+	return err == nil || !isProcessAlreadyGone(err)
 }
 
 // waitForDaemonExit polls the pid file and the process itself, returning
@@ -6138,6 +6155,8 @@ func runningMountDaemons(localDir, workspaceID, workspaceName string) ([]mountDa
 	if pid, verified, strong := verifyDaemonProcessForDiscovery(localDir, workspaceID); pid != 0 {
 		_, foundByScan := seen[pid]
 		switch {
+		case !processAlive(pid):
+			stalePID = pid
 		case verified && strong && !foundByScan:
 			processes = append(processes, mountDaemonProcess{PID: pid, Source: "pidfile"})
 			seen[pid] = struct{}{}
@@ -6367,6 +6386,9 @@ func daemonStatusLine(record workspaceRecord) string {
 		return "daemon: not running"
 	}
 	if len(running) == 0 {
+		if pid := readDaemonPID(record.LocalDir); pid != 0 {
+			return fmt.Sprintf("daemon: running (pid %d)", pid)
+		}
 		return "daemon: not running"
 	}
 	if hasPIDFileDaemon(running) {
@@ -6422,6 +6444,11 @@ func formatDaemonPIDs(processes []mountDaemonProcess) string {
 	return strings.Join(parts, ", ")
 }
 
+var (
+	daemonGracefulStopTimeout = 5 * time.Second
+	daemonForceStopTimeout    = 2 * time.Second
+)
+
 func stopWorkspaceMountDaemons(record workspaceRecord, stdout io.Writer, tolerateMissing bool) error {
 	running, stalePID, err := runningMountDaemons(record.LocalDir, record.ID, record.Name)
 	if err != nil {
@@ -6463,12 +6490,37 @@ func stopWorkspaceMountDaemons(record workspaceRecord, stdout io.Writer, tolerat
 	if len(stopped) == 0 {
 		return nil
 	}
-	if werr := waitForDaemonDiscoveryClear(record.LocalDir, record.ID, record.Name, stopped, 5*time.Second); werr != nil {
-		return werr
+	if werr := waitForDaemonDiscoveryClear(record.LocalDir, record.ID, record.Name, stopped, daemonGracefulStopTimeout); werr != nil {
+		var aliveErr daemonStillAliveError
+		if !errors.As(werr, &aliveErr) {
+			return werr
+		}
+		fmt.Fprintf(stdout, "Background mount for %s did not exit after SIGTERM; sending SIGKILL (%s)\n", record.Name, formatDaemonPIDs(stopped))
+		for _, daemon := range stopped {
+			process, perr := os.FindProcess(daemon.PID)
+			if perr != nil {
+				return fmt.Errorf("failed to find background mount for %s (pid %d) for force stop: %w", record.Name, daemon.PID, perr)
+			}
+			if kerr := forceDaemonStop(process); kerr != nil && !isProcessAlreadyGone(kerr) {
+				return fmt.Errorf("failed to force stop background mount for %s (pid %d): %w", record.Name, daemon.PID, kerr)
+			}
+		}
+		if werr := waitForDaemonDiscoveryClear(record.LocalDir, record.ID, record.Name, stopped, daemonForceStopTimeout); werr != nil {
+			return werr
+		}
 	}
 	_ = os.Remove(mountPIDFile(record.LocalDir))
 	fmt.Fprintf(stdout, "Stopped background mount for %s (%s)\n", record.Name, formatDaemonPIDs(stopped))
 	return nil
+}
+
+type daemonStillAliveError struct {
+	timeout time.Duration
+	running []mountDaemonProcess
+}
+
+func (e daemonStillAliveError) Error() string {
+	return fmt.Sprintf("daemon still alive after %s (%s)", e.timeout, formatDaemonPIDs(e.running))
 }
 
 func waitForDaemonDiscoveryClear(localDir, workspaceID, workspaceName string, signaled []mountDaemonProcess, timeout time.Duration) error {
@@ -6482,30 +6534,46 @@ func waitForDaemonDiscoveryClear(localDir, workspaceID, workspaceName string, si
 		if err != nil {
 			return fmt.Errorf("confirm daemon stop: %w", err)
 		}
-		if !daemonIntersection(signaled, running) {
+		stillAlive := signaledDaemonsStillAlive(signaled, running)
+		if len(stillAlive) == 0 {
 			return nil
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("daemon still alive after %s (%s)", timeout, formatDaemonPIDs(running))
+			return daemonStillAliveError{timeout: timeout, running: stillAlive}
 		}
 		time.Sleep(pollInterval)
 	}
 }
 
-func daemonIntersection(left, right []mountDaemonProcess) bool {
-	if len(left) == 0 || len(right) == 0 {
-		return false
+func signaledDaemonsStillAlive(signaled, discovered []mountDaemonProcess) []mountDaemonProcess {
+	if len(signaled) == 0 {
+		return nil
 	}
-	seen := map[int]struct{}{}
-	for _, process := range left {
-		seen[process.PID] = struct{}{}
-	}
-	for _, process := range right {
-		if _, ok := seen[process.PID]; ok {
-			return true
+	discoveredByPID := map[int]mountDaemonProcess{}
+	for _, daemon := range discovered {
+		if daemon.PID > 0 {
+			discoveredByPID[daemon.PID] = daemon
 		}
 	}
-	return false
+	stillAlive := make([]mountDaemonProcess, 0, len(signaled))
+	seen := map[int]struct{}{}
+	for _, daemon := range signaled {
+		if daemon.PID <= 0 {
+			continue
+		}
+		if _, ok := seen[daemon.PID]; ok {
+			continue
+		}
+		seen[daemon.PID] = struct{}{}
+		if discoveredDaemon, ok := discoveredByPID[daemon.PID]; ok {
+			stillAlive = append(stillAlive, discoveredDaemon)
+			continue
+		}
+		if processAlive(daemon.PID) {
+			stillAlive = append(stillAlive, daemon)
+		}
+	}
+	return stillAlive
 }
 
 func rotateLogFile(path string) error {
@@ -7372,6 +7440,8 @@ func jitteredIntervalWithSample(base time.Duration, jitterRatio, sample float64)
 	}
 	return delay
 }
+
+var spawnBackgroundMountProcessFn = spawnBackgroundMountProcess
 
 func spawnBackgroundMountProcess(originalArgs []string, localDir, pidFile, logFile string) error {
 	if err := ensureMirrorLayout(localDir); err != nil {
