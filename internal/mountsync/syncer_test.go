@@ -3966,29 +3966,32 @@ func TestAtomicTempPatternHidesTempForDotPrefixedTarget(t *testing.T) {
 }
 
 type fakeClient struct {
-	mu                    sync.Mutex
-	files                 map[string]RemoteFile
-	events                []FilesystemEvent
-	revisionCounter       int
-	eventCounter          int
-	listTreeCalls         int
-	listEventsCalls       int
-	latestEventIDCalls    int
-	latestEventIDErr      error
-	latestEventIDUnsupported bool
-	readFileCalls         int
-	readFileCallsByPath   map[string]int
-	writeFileCalls        int
-	bulkWriteCalls        int
-	bulkWriteBatches      [][]BulkWriteFile
-	lastBulkWriteResponse BulkWriteResponse
-	bulkWriteResponseFunc func(ctx context.Context, workspaceID string, files []BulkWriteFile) (BulkWriteResponse, error)
-	deleteCalls           []deleteCall
-	eventsUnsupported     bool
-	listEventsErrAfter    int
-	listEventsErr         error
-	readFileErrAfter      int
-	readFileErr           error
+	mu                         sync.Mutex
+	files                      map[string]RemoteFile
+	events                     []FilesystemEvent
+	revisionCounter            int
+	eventCounter               int
+	listTreeCalls              int
+	listEventsCalls            int
+	latestEventIDCalls         int
+	latestEventIDErr           error
+	latestEventIDUnsupported   bool
+	readFileCalls              int
+	readFileCallsByPath        map[string]int
+	writeFileCalls             int
+	bulkWriteCalls             int
+	bulkWriteBatches           [][]BulkWriteFile
+	lastBulkWriteResponse      BulkWriteResponse
+	bulkWriteResponseFunc      func(ctx context.Context, workspaceID string, files []BulkWriteFile) (BulkWriteResponse, error)
+	deleteCalls                []deleteCall
+	eventsUnsupported          bool
+	listEventsErrAfter         int
+	listEventsErr              error
+	listEventsHook             func(call int, cursor string, limit int)
+	listEventsNextCursorByCall map[int]string
+	eventCursorAliases         map[string]string
+	readFileErrAfter           int
+	readFileErr                error
 }
 
 // requestedReadCalls returns the cumulative number of ReadFile calls made
@@ -4090,6 +4093,9 @@ func (c *fakeClient) ListEvents(ctx context.Context, workspaceID, provider, curs
 	_ = workspaceID
 	_ = provider
 	c.listEventsCalls++
+	if c.listEventsHook != nil {
+		c.listEventsHook(c.listEventsCalls, cursor, limit)
+	}
 	if c.eventsUnsupported {
 		return EventFeed{}, &HTTPError{StatusCode: 404, Code: "not_found", Message: "not found"}
 	}
@@ -4101,8 +4107,14 @@ func (c *fakeClient) ListEvents(ctx context.Context, workspaceID, provider, curs
 	}
 	start := 0
 	if cursor != "" {
+		searchCursor := cursor
+		if c.eventCursorAliases != nil {
+			if aliased, ok := c.eventCursorAliases[cursor]; ok {
+				searchCursor = aliased
+			}
+		}
 		for i := range c.events {
-			if c.events[i].EventID == cursor {
+			if c.events[i].EventID == searchCursor {
 				start = i + 1
 				break
 			}
@@ -4119,6 +4131,11 @@ func (c *fakeClient) ListEvents(ctx context.Context, workspaceID, provider, curs
 	var nextCursor *string
 	if end < len(c.events) {
 		next := c.events[end-1].EventID
+		if c.listEventsNextCursorByCall != nil {
+			if override, ok := c.listEventsNextCursorByCall[c.listEventsCalls]; ok {
+				next = override
+			}
+		}
 		nextCursor = &next
 	}
 	return EventFeed{
@@ -5135,15 +5152,45 @@ func TestPullRemoteIncrementalPersistsAppliedPageCursorOnListEventsError(t *test
 			Revision: revision,
 		})
 	}
-	client := &fakeClient{
-		files:              files,
-		events:             events,
-		revisionCounter:    501,
-		eventCounter:       501,
-		listEventsErrAfter: 2,
-		listEventsErr:      context.DeadlineExceeded,
-	}
 	localDir := t.TempDir()
+	statePath := filepath.Join(localDir, ".relayfile-mount-state.json")
+	var checkpointErr error
+	var sawResumeCursor bool
+	client := &fakeClient{
+		files:                      files,
+		events:                     events,
+		revisionCounter:            501,
+		eventCounter:               501,
+		listEventsErrAfter:         2,
+		listEventsErr:              context.DeadlineExceeded,
+		listEventsNextCursorByCall: map[int]string{2: "cursor_after_500"},
+		eventCursorAliases:         map[string]string{"cursor_after_500": "evt_500"},
+		listEventsHook: func(call int, cursor string, limit int) {
+			if call == 3 && cursor == "cursor_after_500" {
+				sawResumeCursor = true
+			}
+			if call != 3 {
+				return
+			}
+			data, err := os.ReadFile(statePath)
+			if err != nil {
+				checkpointErr = fmt.Errorf("read persisted checkpoint before next page: %w", err)
+				return
+			}
+			var persisted mountState
+			if err := json.Unmarshal(data, &persisted); err != nil {
+				checkpointErr = fmt.Errorf("unmarshal persisted checkpoint before next page: %w", err)
+				return
+			}
+			if persisted.EventsCursor != "cursor_after_500" {
+				checkpointErr = fmt.Errorf("persisted EventsCursor before next page = %q, want cursor_after_500", persisted.EventsCursor)
+				return
+			}
+			if persisted.IncrementalCheckpoint != nil {
+				checkpointErr = fmt.Errorf("persisted IncrementalCheckpoint before next page = %#v, want nil", persisted.IncrementalCheckpoint)
+			}
+		},
+	}
 	syncer, err := NewSyncer(client, SyncerOptions{
 		WorkspaceID:      "ws_backlog",
 		RemoteRoot:       "/notion",
@@ -5163,12 +5210,30 @@ func TestPullRemoteIncrementalPersistsAppliedPageCursorOnListEventsError(t *test
 		BootstrapComplete: true,
 	}
 
-	err = syncer.Reconcile(context.Background())
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("expected list-events deadline after first applied page, got %v", err)
+	if err := syncer.Reconcile(context.Background()); err != nil {
+		t.Fatalf("expected list-events deadline after first applied page to end cleanly after cursor checkpoint, got %v", err)
 	}
-	if got := syncer.state.EventsCursor; got != "evt_500" {
-		t.Fatalf("EventsCursor = %q, want first applied page cursor evt_500", got)
+	if checkpointErr != nil {
+		t.Fatal(checkpointErr)
+	}
+	if !sawResumeCursor {
+		t.Fatalf("expected next ListEvents request to use persisted feed resume cursor")
+	}
+	if got := syncer.state.EventsCursor; got != "cursor_after_500" {
+		t.Fatalf("EventsCursor = %q, want first applied page cursor cursor_after_500", got)
+	}
+	if syncer.state.LastError != nil {
+		t.Fatalf("expected checkpointed deadline to avoid recording a sync error, got %#v", syncer.state.LastError)
+	}
+	if !syncer.state.IncrementalBacklogDraining {
+		t.Fatalf("expected backlog-draining state while event feed still has more pages")
+	}
+	status := readPublicState(t, localDir)
+	if status.Status != "syncing" || !status.States.Syncing {
+		t.Fatalf("expected public state to report syncing while draining backlog, got %+v", status)
+	}
+	if strings.TrimSpace(status.LastSuccessfulReconcileAt) != "" {
+		t.Fatalf("partial backlog progress should not advance LastSuccessfulReconcileAt, got %q", status.LastSuccessfulReconcileAt)
 	}
 	if _, err := os.ReadFile(filepath.Join(localDir, "Docs", "500.md")); err != nil {
 		t.Fatalf("expected page-one file to be applied before cursor advance: %v", err)
@@ -5184,12 +5249,68 @@ func TestPullRemoteIncrementalPersistsAppliedPageCursorOnListEventsError(t *test
 	if got := syncer.state.EventsCursor; got != "evt_501" {
 		t.Fatalf("EventsCursor = %q, want final cursor evt_501", got)
 	}
+	if syncer.state.IncrementalBacklogDraining {
+		t.Fatalf("expected backlog-draining state to clear after reaching feed tail")
+	}
+	status = readPublicState(t, localDir)
+	if status.Status != "ready" || status.States.Syncing {
+		t.Fatalf("expected public state to return ready after reaching feed tail, got %+v", status)
+	}
+	if strings.TrimSpace(status.LastSuccessfulReconcileAt) == "" {
+		t.Fatalf("expected completed backlog sync to mark LastSuccessfulReconcileAt")
+	}
 	data, err := os.ReadFile(filepath.Join(localDir, "Docs", "501.md"))
 	if err != nil {
 		t.Fatalf("expected remaining event to apply on retry: %v", err)
 	}
 	if string(data) != "# 501" {
 		t.Fatalf("unexpected remaining file content: %q", data)
+	}
+}
+
+func TestPullRemoteIncrementalReturnsDeadlineWhenNoPageProgress(t *testing.T) {
+	client := &fakeClient{
+		files:              map[string]RemoteFile{},
+		events:             []FilesystemEvent{{EventID: "evt_001", Type: "file.created", Path: "/notion/Docs/001.md", Revision: "rev_001"}},
+		listEventsErrAfter: 0,
+		listEventsErr:      context.DeadlineExceeded,
+	}
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID:      "ws_no_progress_deadline",
+		RemoteRoot:       "/notion",
+		LocalRoot:        localDir,
+		FullPullEvery:    -1,
+		WebSocket:        boolPtr(false),
+		CursorTimeout:    time.Second,
+		BootstrapTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+	syncer.loaded = true
+	syncer.state = mountState{
+		Files:             map[string]trackedFile{},
+		EventsCursor:      "evt_000",
+		BootstrapComplete: true,
+	}
+
+	err = syncer.Reconcile(context.Background())
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected deadline before page progress to be returned, got %v", err)
+	}
+	if got := syncer.state.EventsCursor; got != "evt_000" {
+		t.Fatalf("EventsCursor = %q, want unchanged evt_000", got)
+	}
+	if syncer.state.IncrementalBacklogDraining {
+		t.Fatalf("deadline before page progress should not mark backlog draining")
+	}
+	if syncer.state.LastError == nil {
+		t.Fatalf("expected no-progress deadline to record LastError")
+	}
+	status := readPublicState(t, localDir)
+	if status.LastError == nil || status.Status == "syncing" || status.States.Syncing {
+		t.Fatalf("expected public state to record no-progress error without syncing status, got %+v", status)
 	}
 }
 
@@ -5256,6 +5377,21 @@ func TestPullRemoteIncrementalResumesWithinAppliedPage(t *testing.T) {
 		checkpoint.Path != "/notion/Docs/003.md" {
 		t.Fatalf("unexpected checkpoint after partial page: %#v", checkpoint)
 	}
+	var persisted mountState
+	stateBytes, err := os.ReadFile(filepath.Join(localDir, ".relayfile-mount-state.json"))
+	if err != nil {
+		t.Fatalf("read persisted partial-page checkpoint: %v", err)
+	}
+	if err := json.Unmarshal(stateBytes, &persisted); err != nil {
+		t.Fatalf("unmarshal persisted partial-page checkpoint: %v", err)
+	}
+	if checkpoint := persisted.IncrementalCheckpoint; checkpoint == nil ||
+		checkpoint.Cursor != "evt_000" ||
+		checkpoint.PageCursor != "evt_010" ||
+		checkpoint.Phase != "changed" ||
+		checkpoint.Path != "/notion/Docs/003.md" {
+		t.Fatalf("unexpected persisted checkpoint after partial page: %#v", checkpoint)
+	}
 	for i := 1; i <= 3; i++ {
 		path := filepath.Join(localDir, "Docs", fmt.Sprintf("%03d.md", i))
 		if _, err := os.ReadFile(path); err != nil {
@@ -5268,7 +5404,19 @@ func TestPullRemoteIncrementalResumesWithinAppliedPage(t *testing.T) {
 	for path, calls := range client.readFileCallsByPath {
 		before[path] = calls
 	}
-	if err := syncer.Reconcile(context.Background()); err != nil {
+	resumedSyncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID:      "ws_page_resume",
+		RemoteRoot:       "/notion",
+		LocalRoot:        localDir,
+		FullPullEvery:    -1,
+		WebSocket:        boolPtr(false),
+		CursorTimeout:    time.Second,
+		BootstrapTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatalf("new resumed syncer failed: %v", err)
+	}
+	if err := resumedSyncer.Reconcile(context.Background()); err != nil {
 		t.Fatalf("reconcile after partial page failed: %v", err)
 	}
 	for i := 1; i <= 3; i++ {
@@ -5280,10 +5428,10 @@ func TestPullRemoteIncrementalResumesWithinAppliedPage(t *testing.T) {
 	if got := client.readFileCallsByPath["/notion/Docs/004.md"]; got == 0 {
 		t.Fatalf("expected resume to continue after checkpoint path")
 	}
-	if got := syncer.state.EventsCursor; got != "evt_010" {
+	if got := resumedSyncer.state.EventsCursor; got != "evt_010" {
 		t.Fatalf("EventsCursor = %q, want completed page cursor evt_010", got)
 	}
-	if checkpoint := syncer.state.IncrementalCheckpoint; checkpoint != nil {
+	if checkpoint := resumedSyncer.state.IncrementalCheckpoint; checkpoint != nil {
 		t.Fatalf("expected checkpoint to clear after completed page, got %#v", checkpoint)
 	}
 	data, err := os.ReadFile(filepath.Join(localDir, "Docs", "010.md"))
@@ -5370,19 +5518,44 @@ func TestPullRemoteIncrementalCheckpointPreservesChangedPath404Delete(t *testing
 		checkpoint.Path != "/notion/Docs/002.md" {
 		t.Fatalf("unexpected checkpoint after partial changed page with 404: %#v", checkpoint)
 	}
+	stateBytes, err := os.ReadFile(filepath.Join(localDir, ".relayfile-mount-state.json"))
+	if err != nil {
+		t.Fatalf("read persisted 404 checkpoint: %v", err)
+	}
+	var persisted mountState
+	if err := json.Unmarshal(stateBytes, &persisted); err != nil {
+		t.Fatalf("unmarshal persisted 404 checkpoint: %v", err)
+	}
+	if checkpoint := persisted.IncrementalCheckpoint; checkpoint == nil ||
+		checkpoint.Phase != "changed" ||
+		checkpoint.Path != "/notion/Docs/002.md" {
+		t.Fatalf("unexpected persisted 404 checkpoint: %#v", checkpoint)
+	}
 
 	before404Reads := client.readFileCallsByPath["/notion/Docs/001.md"]
 	client.readFileErr = nil
-	if err := syncer.Reconcile(context.Background()); err != nil {
+	resumedSyncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID:      "ws_page_404_resume",
+		RemoteRoot:       "/notion",
+		LocalRoot:        localDir,
+		FullPullEvery:    -1,
+		WebSocket:        boolPtr(false),
+		CursorTimeout:    time.Second,
+		BootstrapTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatalf("new resumed syncer failed: %v", err)
+	}
+	if err := resumedSyncer.Reconcile(context.Background()); err != nil {
 		t.Fatalf("reconcile after checkpointed 404 delete failed: %v", err)
 	}
 	if got := client.readFileCallsByPath["/notion/Docs/001.md"]; got != before404Reads {
 		t.Fatalf("expected deleted 404 path to be checkpointed and skipped on resume; read calls went %d -> %d", before404Reads, got)
 	}
-	if got := syncer.state.EventsCursor; got != "evt_003" {
+	if got := resumedSyncer.state.EventsCursor; got != "evt_003" {
 		t.Fatalf("EventsCursor = %q, want completed page cursor evt_003", got)
 	}
-	if checkpoint := syncer.state.IncrementalCheckpoint; checkpoint != nil {
+	if checkpoint := resumedSyncer.state.IncrementalCheckpoint; checkpoint != nil {
 		t.Fatalf("expected checkpoint to clear after completed page, got %#v", checkpoint)
 	}
 }
