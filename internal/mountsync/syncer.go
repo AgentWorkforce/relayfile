@@ -714,13 +714,14 @@ type Syncer struct {
 }
 
 type mountState struct {
-	Files                     map[string]trackedFile `json:"files"`
-	EventsCursor              string                 `json:"eventsCursor,omitempty"`
-	IncrementalCheckpoint     *incrementalCheckpoint `json:"incrementalCheckpoint,omitempty"`
-	LastReconcileAt           string                 `json:"lastReconcileAt,omitempty"`
-	LastSuccessfulReconcileAt string                 `json:"lastSuccessfulReconcileAt,omitempty"`
-	LastEventAt               string                 `json:"lastEventAt,omitempty"`
-	LastError                 *statusError           `json:"lastError,omitempty"`
+	Files                      map[string]trackedFile `json:"files"`
+	EventsCursor               string                 `json:"eventsCursor,omitempty"`
+	IncrementalCheckpoint      *incrementalCheckpoint `json:"incrementalCheckpoint,omitempty"`
+	IncrementalBacklogDraining bool                   `json:"incrementalBacklogDraining,omitempty"`
+	LastReconcileAt            string                 `json:"lastReconcileAt,omitempty"`
+	LastSuccessfulReconcileAt  string                 `json:"lastSuccessfulReconcileAt,omitempty"`
+	LastEventAt                string                 `json:"lastEventAt,omitempty"`
+	LastError                  *statusError           `json:"lastError,omitempty"`
 	// LastAppliedRevision is the highest cloud revision the daemon has
 	// successfully reconciled. Snapshot deletes refuse to fire unless the
 	// freshly-observed revision strictly advances past this value, which
@@ -860,6 +861,7 @@ type bootstrapStatus struct {
 type publicStateFlags struct {
 	Stale               bool `json:"stale"`
 	Offline             bool `json:"offline"`
+	Syncing             bool `json:"syncing,omitempty"`
 	HasConflicts        bool `json:"hasConflicts"`
 	HasPendingWriteback bool `json:"hasPendingWriteback"`
 }
@@ -2142,10 +2144,12 @@ func (s *Syncer) pullRemote(ctx context.Context, conflicted map[string]struct{})
 			// applyRemoteFile is idempotent and will no-op when on-disk
 			// content already matches.
 			s.state.IncrementalCheckpoint = nil
+			s.state.IncrementalBacklogDraining = false
 			return nil
 		}
 		feed, err := s.client.ListEvents(ctx, s.workspace, s.eventProvider, s.state.EventsCursor, 1)
 		if err == nil && len(feed.Events) == 0 {
+			s.state.IncrementalBacklogDraining = false
 			if s.fullPullEvery > 0 {
 				s.incrementalCycles++
 				if s.incrementalCycles >= s.fullPullEvery {
@@ -2174,6 +2178,7 @@ func (s *Syncer) pullRemote(ctx context.Context, conflicted map[string]struct{})
 		s.logf("events feed unavailable; falling back to full pull")
 		s.state.EventsCursor = ""
 		s.state.IncrementalCheckpoint = nil
+		s.state.IncrementalBacklogDraining = false
 	}
 
 	// Restart fast-path. When EventsCursor is empty but the state file
@@ -2227,6 +2232,7 @@ func (s *Syncer) pullRemote(ctx context.Context, conflicted map[string]struct{})
 			// BootstrapComplete).
 			s.state.EventsCursor = cursor
 			s.state.IncrementalCheckpoint = nil
+			s.state.IncrementalBacklogDraining = false
 			s.logf("restart fast-path: seeded events cursor %q from %d tracked files; skipping bootstrap full pull", cursor, len(s.state.Files))
 			return nil
 		}
@@ -2253,6 +2259,7 @@ func (s *Syncer) pullRemote(ctx context.Context, conflicted map[string]struct{})
 		return err
 	}
 	s.state.IncrementalCheckpoint = nil
+	s.state.IncrementalBacklogDraining = false
 	if s.wsConn != nil {
 		return nil
 	}
@@ -3184,11 +3191,16 @@ func isProviderLayoutAliasSegment(segment string) bool {
 func (s *Syncer) pullRemoteIncremental(ctx context.Context, conflicted map[string]struct{}, cursor string) (string, error) {
 	currentCursor := strings.TrimSpace(cursor)
 	safeCursor := currentCursor
+	madeProgress := false
 
 	for {
 		pageStartCursor := currentCursor
 		feed, err := s.client.ListEvents(ctx, s.workspace, s.eventProvider, currentCursor, 500)
 		if err != nil {
+			if madeProgress && errors.Is(err, context.DeadlineExceeded) {
+				s.state.IncrementalBacklogDraining = true
+				return safeCursor, nil
+			}
 			return safeCursor, err
 		}
 		changed := map[string]struct{}{}
@@ -3245,15 +3257,31 @@ func (s *Syncer) pullRemoteIncremental(ctx context.Context, conflicted map[strin
 		if err := s.applyIncrementalChanges(ctx, changed, deleted, conflicted, pageStartCursor, pageCursor, checkpoint); err != nil {
 			return safeCursor, err
 		}
-		s.state.IncrementalCheckpoint = nil
-		if pageLastEventAt != "" {
-			s.state.LastEventAt = pageLastEventAt
+		hasMore := feed.NextCursor != nil && strings.TrimSpace(*feed.NextCursor) != ""
+		resumeCursor := strings.TrimSpace(pageCursor)
+		if hasMore {
+			resumeCursor = strings.TrimSpace(*feed.NextCursor)
 		}
 		if strings.TrimSpace(pageCursor) != "" {
 			currentCursor = strings.TrimSpace(pageCursor)
 			safeCursor = currentCursor
 		}
-		if feed.NextCursor == nil || *feed.NextCursor == "" {
+		if resumeCursor != "" {
+			s.state.EventsCursor = resumeCursor
+			safeCursor = resumeCursor
+			madeProgress = resumeCursor != strings.TrimSpace(cursor)
+		}
+		s.state.IncrementalBacklogDraining = hasMore
+		s.state.IncrementalCheckpoint = nil
+		if pageLastEventAt != "" {
+			s.state.LastEventAt = pageLastEventAt
+		}
+		if resumeCursor != "" {
+			if err := s.saveState(); err != nil {
+				return safeCursor, err
+			}
+		}
+		if !hasMore {
 			break
 		}
 		currentCursor = strings.TrimSpace(*feed.NextCursor)
@@ -4006,6 +4034,7 @@ func (s *Syncer) savePublicState() error {
 
 	states := publicStateFlags{
 		Offline:             s.state.LastError != nil && s.state.LastError.Kind == "offline",
+		Syncing:             s.state.IncrementalBacklogDraining,
 		HasConflicts:        pendingConflicts > 0,
 		HasPendingWriteback: pendingWriteback > 0,
 	}
@@ -4022,6 +4051,8 @@ func (s *Syncer) savePublicState() error {
 		status = "conflict"
 	case states.HasPendingWriteback:
 		status = "writeback-pending"
+	case states.Syncing:
+		status = "syncing"
 	case states.Stale:
 		status = "stale"
 	}
@@ -4174,7 +4205,9 @@ func (s *Syncer) markReconcileStarted() {
 func (s *Syncer) markSyncSuccess() {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	s.state.LastReconcileAt = now
-	s.state.LastSuccessfulReconcileAt = now
+	if !s.state.IncrementalBacklogDraining {
+		s.state.LastSuccessfulReconcileAt = now
+	}
 	s.state.LastError = nil
 }
 
