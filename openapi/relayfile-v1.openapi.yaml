@@ -400,6 +400,19 @@ paths:
             minimum: 1
             maximum: 1000
             default: 200
+        - name: direction
+          in: query
+          required: false
+          description: |
+            Iteration direction. `asc` (default) walks events newer than
+            `cursor` oldest-first — the normal incremental sync path.
+            `desc` walks newest-first and is intended for callers that just
+            need the tail of the feed (e.g. `direction=desc&limit=1` to
+            seed an events cursor without paginating the whole history).
+          schema:
+            type: string
+            enum: [asc, desc]
+            default: asc
       responses:
         '200':
           description: Event feed page
@@ -407,6 +420,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/EventFeedResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':

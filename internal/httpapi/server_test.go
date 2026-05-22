@@ -2006,6 +2006,46 @@ func TestEventsAndSyncStatus(t *testing.T) {
 		}
 	}
 
+	// direction=desc&limit=1 must return the NEWEST event, not the oldest
+	// (and crucially must not silently ignore the direction param — see
+	// review feedback on PR #196 / cloud#926).
+	descResp := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/workspaces/ws_2/fs/events?direction=desc&limit=1",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_evt_desc",
+		},
+	})
+	if descResp.Code != http.StatusOK {
+		t.Fatalf("expected 200 on direction=desc, got %d (%s)", descResp.Code, descResp.Body.String())
+	}
+	var descFeed relayfile.EventFeed
+	if err := json.NewDecoder(descResp.Body).Decode(&descFeed); err != nil {
+		t.Fatalf("decode desc events response: %v", err)
+	}
+	if len(descFeed.Events) != 1 {
+		t.Fatalf("expected 1 event for desc&limit=1, got %d", len(descFeed.Events))
+	}
+	if len(feed.Events) > 0 {
+		newest := feed.Events[len(feed.Events)-1]
+		if descFeed.Events[0].EventID != newest.EventID {
+			t.Fatalf("desc&limit=1 must return newest event (%q), got %q", newest.EventID, descFeed.Events[0].EventID)
+		}
+	}
+
+	badDirResp := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/workspaces/ws_2/fs/events?direction=sideways&limit=1",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_evt_bad_dir",
+		},
+	})
+	if badDirResp.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 on unknown direction, got %d (%s)", badDirResp.Code, badDirResp.Body.String())
+	}
+
 	syncResp := doRequest(t, server, request{
 		method: http.MethodGet,
 		path:   "/v1/workspaces/ws_2/sync/status",
