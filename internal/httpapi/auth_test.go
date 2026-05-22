@@ -10,6 +10,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -214,6 +215,83 @@ func TestParseBearerRS256HappyPath(t *testing.T) {
 	}
 	if hits.Load() != 1 {
 		t.Fatalf("expected one JWKS fetch, got %d", hits.Load())
+	}
+}
+
+// Regression coverage for the relayauth token-prefix bug: tokens minted
+// via relayauth's `/v1/tokens/path` come back wrapped as
+// `relay_pa_<jwt>`. Pre-fix, `parseBearer` would split on `.`, end up
+// with `relay_pa_<header_b64>` as `parts[0]`, and fail the JSON
+// unmarshal with a 401 "invalid jwt header" — silently breaking every
+// caller that authenticated with a relayauth-wrapped token. Pin that
+// the strip happens BEFORE the dot-split so the underlying JWT verifies
+// just like a bare token.
+func TestParseBearerStripsRelayauthTokenPrefixes(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now().UTC()
+	privateKey := mustRSATestKey(t)
+
+	jwksServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(jwksDocument{
+			Keys: []jwkKey{mustRSATestJWK("kid-1", &privateKey.PublicKey)},
+		})
+	}))
+	defer jwksServer.Close()
+
+	rawJWT := mustTestRS256JWT(t, privateKey, "kid-1", map[string]any{
+		"wks":    "ws-rs",
+		"sub":    "RelayfileGoWorker",
+		"scopes": []string{"fs:read"},
+		"exp":    now.Add(time.Hour).Unix(),
+		"aud":    "relayfile",
+	})
+
+	prefixes := []string{
+		"relay_pa_",
+		"relay_ws_",
+		"relay_id_",
+	}
+	for _, prefix := range prefixes {
+		prefix := prefix // capture
+		t.Run(strings.TrimSuffix(prefix, "_"), func(t *testing.T) {
+			claims, authErr := parseBearer("Bearer "+prefix+rawJWT, newBearerVerifier(ServerConfig{
+				JWKSURL:          jwksServer.URL,
+				JWKSFetchTimeout: time.Second,
+			}), now)
+			if authErr != nil {
+				t.Fatalf("parseBearer with %q prefix returned auth error: %+v", prefix, authErr)
+			}
+			if claims.WorkspaceID != "ws-rs" {
+				t.Fatalf("expected workspace ws-rs, got %q", claims.WorkspaceID)
+			}
+			if claims.AgentName != "RelayfileGoWorker" {
+				t.Fatalf("expected subject RelayfileGoWorker, got %q", claims.AgentName)
+			}
+		})
+	}
+
+	// Sanity: a bare JWT (no prefix) still parses correctly so we didn't
+	// break the direct `/v1/tokens` mint path that doesn't wrap.
+	claims, authErr := parseBearer("Bearer "+rawJWT, newBearerVerifier(ServerConfig{
+		JWKSURL:          jwksServer.URL,
+		JWKSFetchTimeout: time.Second,
+	}), now)
+	if authErr != nil {
+		t.Fatalf("parseBearer with bare JWT returned auth error: %+v", authErr)
+	}
+	if claims.WorkspaceID != "ws-rs" {
+		t.Fatalf("expected workspace ws-rs from bare JWT, got %q", claims.WorkspaceID)
+	}
+
+	// And: garbage that happens to start with `relay_pa_` but isn't a JWT
+	// still rejects cleanly (header decode fails AFTER the strip).
+	_, authErr = parseBearer("Bearer relay_pa_not.a.jwt", newBearerVerifier(ServerConfig{
+		JWKSURL:          jwksServer.URL,
+		JWKSFetchTimeout: time.Second,
+	}), now)
+	if authErr == nil {
+		t.Fatal("expected auth error for non-JWT after prefix strip")
 	}
 }
 
