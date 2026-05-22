@@ -865,11 +865,10 @@ func runSetup(args []string, stdin io.Reader, stdout io.Writer) error {
 				return err
 			}
 		}
-		if !*skipMount {
-			if err := waitForInitialSync(joined.RelayfileURL, joined.Token, record.ID, selectedProvider, absLocalDir, *connectTimeout, stdout); err != nil {
-				return err
-			}
-		}
+		// We used to poll /sync/status here until the provider reported
+		// `ready`. That hung forever for providers without a sync handler
+		// (e.g. docker_hub) and was redundant for providers that do sync —
+		// the mount daemon below polls /sync/status on its own cadence.
 	} else {
 		fmt.Fprintln(stdout, "Integration connection skipped")
 	}
@@ -1652,7 +1651,7 @@ func connectCloudIntegration(cloudAPIURL, workspaceID, workspaceToken, provider,
 					UpdatedAt:    time.Now().UTC().Format(time.RFC3339),
 				})
 			}
-			fmt.Fprintf(stdout, "%s connected. Relayfile is preparing files in the background; keep this command running while initial sync finishes. Files will appear under %s/%s.\n", provider, localDir, providerRootDir(provider))
+			fmt.Fprintf(stdout, "%s connected. Files will appear under %s/%s as Relayfile syncs in the background; keep this command running while the mount is active.\n", provider, localDir, providerRootDir(provider))
 			pollErr = nil
 			return pollResult{done: true}
 		}

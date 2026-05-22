@@ -918,7 +918,7 @@ func TestIntegrationConnectRefreshesCloudAccessTokenAndReusesWorkspace(t *testin
 	if !strings.Contains(got, "notion connected") {
 		t.Fatalf("unexpected integration connect output: %q", got)
 	}
-	if !strings.Contains(got, "keep this command running while initial sync finishes") {
+	if !strings.Contains(got, "keep this command running while the mount is active") {
 		t.Fatalf("expected connected-but-still-working guidance, got %q", got)
 	}
 	if !strings.Contains(got, "Waiting for notion initial sync. Leave this command running") {
