@@ -2259,6 +2259,7 @@ func (s *Syncer) pullRemote(ctx context.Context, conflicted map[string]struct{})
 		return err
 	}
 	s.state.IncrementalCheckpoint = nil
+	s.state.IncrementalBacklogDraining = false
 	if s.wsConn != nil {
 		return nil
 	}

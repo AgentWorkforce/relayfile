@@ -1479,6 +1479,10 @@ func TestFullReconcileBypassesQuietEventsShortCircuit(t *testing.T) {
 	if err := syncer.SyncOnce(context.Background()); err != nil {
 		t.Fatalf("initial sync failed: %v", err)
 	}
+	syncer.state.IncrementalBacklogDraining = true
+	if err := syncer.saveState(); err != nil {
+		t.Fatalf("persist stale backlog-draining state: %v", err)
+	}
 
 	client.files["/notion/Docs/B.md"] = RemoteFile{
 		Path:        "/notion/Docs/B.md",
@@ -1489,6 +1493,13 @@ func TestFullReconcileBypassesQuietEventsShortCircuit(t *testing.T) {
 	syncer.forceFullReconcile = true
 	if err := syncer.Reconcile(context.Background()); err != nil {
 		t.Fatalf("forced reconcile failed: %v", err)
+	}
+	if syncer.state.IncrementalBacklogDraining {
+		t.Fatalf("forced full reconcile should clear stale backlog-draining state")
+	}
+	status := readPublicState(t, localDir)
+	if status.Status != "ready" || status.States.Syncing {
+		t.Fatalf("expected forced full reconcile to report ready, got %+v", status)
 	}
 	assertLocalFileContent(t, filepath.Join(localDir, "Docs", "B.md"), "# B")
 }
