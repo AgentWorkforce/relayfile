@@ -115,6 +115,44 @@ func authorizeBearer(authHeader string, verifier *bearerVerifier, workspaceID, r
 	return claims, nil
 }
 
+// relayauthTokenPrefixes are the token-class prefixes that relayauth's
+// `/v1/tokens/*` endpoints attach to the access tokens they issue. The
+// prefix encodes the token class for clients that route by token type
+// (path-scoped vs workspace-scoped vs identity), but it is NOT part of
+// the RS256 JWT — the actual JWS string sits AFTER the prefix.
+//
+// Before this list existed, `parseBearer` split the prefixed bearer on
+// `.`, ended up with `relay_pa_<header_b64>` as `parts[0]`, and either
+// got an unparseable JSON header or a base64-decode error. Both paths
+// returned a 401 "invalid jwt header" / "invalid jwt format" even
+// though the underlying JWT was perfectly valid. The relayfile-mount
+// daemon (which uses these tokens as Bearer creds) sat in an infinite
+// 401 retry loop, which silently broke every proactive-runtime fire
+// that depended on it for writeback flushing.
+//
+// Keep this in sync with the prefixes minted by relayauth's
+// `packages/server/src/routes/tokens.ts` (`relay_pa_*` for path-access,
+// `relay_ws_*` for workspace, `relay_id_*` for identity).
+var relayauthTokenPrefixes = []string{
+	"relay_pa_",
+	"relay_ws_",
+	"relay_id_",
+}
+
+// stripRelayauthTokenPrefix removes the leading `relay_<class>_` prefix
+// emitted by relayauth's token-mint endpoints so the remainder can be
+// parsed as a standard RS256 JWT. Returns the raw input unchanged if no
+// known prefix is present (so plain JWTs minted directly via
+// `/v1/tokens` with no token-class wrapper still work).
+func stripRelayauthTokenPrefix(raw string) string {
+	for _, prefix := range relayauthTokenPrefixes {
+		if strings.HasPrefix(raw, prefix) {
+			return strings.TrimPrefix(raw, prefix)
+		}
+	}
+	return raw
+}
+
 func parseBearer(authHeader string, verifier *bearerVerifier, now time.Time) (tokenClaims, *authError) {
 	if !strings.HasPrefix(authHeader, "Bearer ") {
 		return tokenClaims{}, &authError{
@@ -124,6 +162,7 @@ func parseBearer(authHeader string, verifier *bearerVerifier, now time.Time) (to
 		}
 	}
 	raw := strings.TrimSpace(strings.TrimPrefix(authHeader, "Bearer "))
+	raw = stripRelayauthTokenPrefix(raw)
 	parts := strings.Split(raw, ".")
 	if len(parts) != 3 {
 		return tokenClaims{}, &authError{
