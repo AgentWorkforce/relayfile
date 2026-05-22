@@ -34,3 +34,8 @@ func processExecutablePath(pid int) (path string, known bool) {
 func signalDaemonStop(process *os.Process) error {
 	return process.Signal(syscall.SIGTERM)
 }
+
+// forceDaemonStop terminates a daemon that ignored the graceful stop signal.
+func forceDaemonStop(process *os.Process) error {
+	return process.Kill()
+}

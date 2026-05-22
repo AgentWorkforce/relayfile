@@ -26,6 +26,12 @@ func signalDaemonStop(process *os.Process) error {
 	return process.Kill()
 }
 
+// forceDaemonStop terminates a daemon that did not exit after the first stop
+// request. Windows has no stronger portable signal than TerminateProcess.
+func forceDaemonStop(process *os.Process) error {
+	return process.Kill()
+}
+
 // processExecutablePath is a no-op on Windows: resolving another
 // process's image path needs OpenProcess/QueryFullProcessImageName and
 // the extra privileges/handling are not worth it for this guard. Callers
