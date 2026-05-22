@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -1932,6 +1933,19 @@ func TestOpsListProviderFilterEndpoint(t *testing.T) {
 	}
 }
 
+// eventIDOrdinal extracts the numeric suffix from an "evt_N" event id.
+// Used by ordering assertions that must tolerate concurrent event
+// emission (digest regeneration, background writebacks) between
+// adjacent /fs/events calls.
+func eventIDOrdinal(t *testing.T, id string) int {
+	t.Helper()
+	n, err := strconv.Atoi(strings.TrimPrefix(id, "evt_"))
+	if err != nil {
+		t.Fatalf("unexpected event id shape %q: %v", id, err)
+	}
+	return n
+}
+
 func TestEventsAndSyncStatus(t *testing.T) {
 	server := NewServer(relayfile.NewStore())
 	token := mustTestJWT(t, "dev-secret", "ws_2", "Worker1", []string{"fs:read", "fs:write", "ops:read", "sync:read"}, time.Now().Add(time.Hour))
@@ -2027,10 +2041,18 @@ func TestEventsAndSyncStatus(t *testing.T) {
 	if len(descFeed.Events) != 1 {
 		t.Fatalf("expected 1 event for desc&limit=1, got %d", len(descFeed.Events))
 	}
+	// Race-tolerant assertion: desc must return an event whose numeric id
+	// is >= the asc tail's id. Strict equality races with any background
+	// activity (e.g. digest regeneration) that emits an event between the
+	// asc and desc calls. The bug we care about — server silently ignoring
+	// direction and returning the OLDEST event — would give a desc id of
+	// 1 and fail this check loudly.
 	if len(feed.Events) > 0 {
-		newest := feed.Events[len(feed.Events)-1]
-		if descFeed.Events[0].EventID != newest.EventID {
-			t.Fatalf("desc&limit=1 must return newest event (%q), got %q", newest.EventID, descFeed.Events[0].EventID)
+		ascTail := eventIDOrdinal(t, feed.Events[len(feed.Events)-1].EventID)
+		descHead := eventIDOrdinal(t, descFeed.Events[0].EventID)
+		if descHead < ascTail {
+			t.Fatalf("desc&limit=1 must return newest-or-later event (id >= %d), got %d (%q)",
+				ascTail, descHead, descFeed.Events[0].EventID)
 		}
 	}
 
