@@ -75,10 +75,11 @@ const defaultFullPullEvery = 20
 // defaultBootstrapIdleTimeout. The cursor resolution gets its own short
 // independent deadline so it can never hang an otherwise healthy cycle.
 const (
-	defaultBootstrapTimeout     = 0 * time.Second
-	defaultBootstrapIdleTimeout = 90 * time.Second
-	defaultCursorTimeout        = 20 * time.Second
-	defaultBootstrapReadWorkers = 16
+	defaultBootstrapTimeout          = 0 * time.Second
+	defaultBootstrapIdleTimeout      = 90 * time.Second
+	defaultCursorTimeout             = 20 * time.Second
+	defaultBootstrapReadWorkers      = 16
+	defaultIncrementalEventPageLimit = 50
 )
 
 // resolveDurationEnv returns the option value if non-zero, else parses the
@@ -3195,7 +3196,7 @@ func (s *Syncer) pullRemoteIncremental(ctx context.Context, conflicted map[strin
 
 	for {
 		pageStartCursor := currentCursor
-		feed, err := s.client.ListEvents(ctx, s.workspace, s.eventProvider, currentCursor, 500)
+		feed, err := s.client.ListEvents(ctx, s.workspace, s.eventProvider, currentCursor, defaultIncrementalEventPageLimit)
 		if err != nil {
 			if madeProgress && errors.Is(err, context.DeadlineExceeded) {
 				s.state.IncrementalBacklogDraining = true
@@ -3203,7 +3204,7 @@ func (s *Syncer) pullRemoteIncremental(ctx context.Context, conflicted map[strin
 			}
 			return safeCursor, err
 		}
-		changed := map[string]struct{}{}
+		changed := map[string]FilesystemEvent{}
 		deleted := map[string]struct{}{}
 		pageCursor := currentCursor
 		pageLastEventAt := ""
@@ -3224,7 +3225,7 @@ func (s *Syncer) pullRemoteIncremental(ctx context.Context, conflicted map[strin
 			}
 			switch event.Type {
 			case "file.created", "file.updated":
-				changed[remotePath] = struct{}{}
+				changed[remotePath] = event
 				delete(deleted, remotePath)
 				// Defensive cross-check against cloud-side revision reuse:
 				// if cloud surfaces a content hash and it diverges from
@@ -3319,7 +3320,8 @@ func (s *Syncer) incrementalCheckpointForPage(cursor, pageCursor string) increme
 
 func (s *Syncer) applyIncrementalChanges(
 	ctx context.Context,
-	changed, deleted map[string]struct{},
+	changed map[string]FilesystemEvent,
+	deleted map[string]struct{},
 	conflicted map[string]struct{},
 	pageStartCursor, pageCursor string,
 	checkpoint incrementalCheckpoint,
@@ -3330,10 +3332,25 @@ func (s *Syncer) applyIncrementalChanges(
 	}
 	sort.Strings(changedPaths)
 	for _, remotePath := range changedPaths {
+		event := changed[remotePath]
 		if checkpoint.Phase == "changed" && remotePath <= checkpoint.Path {
 			continue
 		}
 		if checkpoint.Phase == "deleted" {
+			continue
+		}
+		if conflicted != nil {
+			if _, skip := conflicted[remotePath]; skip {
+				s.markIncrementalCheckpoint(pageStartCursor, pageCursor, "changed", remotePath)
+				continue
+			}
+		}
+		skipped, err := s.trySkipIncrementalRead(remotePath, event)
+		if err != nil {
+			return err
+		}
+		if skipped {
+			s.markIncrementalCheckpoint(pageStartCursor, pageCursor, "changed", remotePath)
 			continue
 		}
 		file, err := s.client.ReadFile(ctx, s.workspace, remotePath)
@@ -3377,6 +3394,53 @@ func (s *Syncer) applyIncrementalChanges(
 		s.markIncrementalCheckpoint(pageStartCursor, pageCursor, "deleted", remotePath)
 	}
 	return nil
+}
+
+func (s *Syncer) trySkipIncrementalRead(remotePath string, event FilesystemEvent) (bool, error) {
+	contentHash := strings.TrimSpace(event.ContentHash)
+	if contentHash == "" {
+		return false, nil
+	}
+	tracked, ok := s.state.Files[remotePath]
+	if ok && (tracked.Dirty || tracked.Denied) {
+		return false, nil
+	}
+	localPath, err := remoteToLocalPath(s.localRoot, s.remoteRoot, remotePath)
+	if err != nil {
+		return false, nil
+	}
+	if err := s.assertNotMountRoot(localPath); err != nil {
+		s.logf("skipping local hash probe for %s: %v", remotePath, err)
+		return false, nil
+	}
+	snapshot, err := readLocalSnapshot(localPath, false)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		s.logf("local hash probe failed for %s (%s): %v", remotePath, localPath, err)
+		return false, nil
+	}
+	if snapshot.Hash != contentHash {
+		return false, nil
+	}
+	canWrite := s.canWritePath(remotePath)
+	if err := s.applyLocalPermissions(localPath, canWrite); err != nil {
+		return false, err
+	}
+	revision := strings.TrimSpace(event.Revision)
+	if revision == "" {
+		revision = tracked.Revision
+	}
+	s.state.Files[remotePath] = trackedFile{
+		Revision:    revision,
+		ContentType: snapshot.ContentType,
+		Hash:        snapshot.Hash,
+		Dirty:       false,
+		Denied:      false,
+		ReadOnly:    !canWrite,
+	}
+	return true, nil
 }
 
 func (s *Syncer) markIncrementalCheckpoint(pageStartCursor, pageCursor, phase, remotePath string) {

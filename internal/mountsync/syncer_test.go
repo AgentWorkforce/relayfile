@@ -4932,6 +4932,79 @@ func TestPullDetectsRevReuseViaContentHash(t *testing.T) {
 	}
 }
 
+func TestPullRemoteIncrementalSkipsReadFileWhenLocalHashMatchesContentHash(t *testing.T) {
+	content := "# A"
+	remotePath := "/notion/Docs/A.md"
+	contentHash := hashString(content)
+	client := &fakeClient{
+		files: map[string]RemoteFile{
+			remotePath: {
+				Path:        remotePath,
+				Revision:    "rev_2",
+				ContentType: "text/markdown",
+				Content:     content,
+				ContentHash: contentHash,
+			},
+		},
+		events: []FilesystemEvent{
+			{
+				EventID:     "evt_1",
+				Type:        "file.updated",
+				Path:        remotePath,
+				Revision:    "rev_2",
+				ContentHash: contentHash,
+			},
+		},
+		revisionCounter: 2,
+		eventCounter:    1,
+	}
+	localDir := t.TempDir()
+	localPath := filepath.Join(localDir, "Docs", "A.md")
+	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+		t.Fatalf("mkdir local dir failed: %v", err)
+	}
+	if err := os.WriteFile(localPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("seed local file failed: %v", err)
+	}
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID:      "ws_incremental_skip_hash",
+		RemoteRoot:       "/notion",
+		LocalRoot:        localDir,
+		FullPullEvery:    -1,
+		WebSocket:        boolPtr(false),
+		CursorTimeout:    time.Second,
+		BootstrapTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+	syncer.loaded = true
+	syncer.state = mountState{
+		Files: map[string]trackedFile{
+			remotePath: {
+				Revision:    "rev_1",
+				ContentType: "text/markdown",
+				Hash:        contentHash,
+			},
+		},
+		EventsCursor:      "evt_0",
+		BootstrapComplete: true,
+	}
+
+	if err := syncer.Reconcile(context.Background()); err != nil {
+		t.Fatalf("incremental sync failed: %v", err)
+	}
+
+	if got := client.requestedReadCalls(); got != 0 {
+		t.Fatalf("expected matching incremental contentHash to skip ReadFile, got %d read(s)", got)
+	}
+	tracked := syncer.state.Files[remotePath]
+	if tracked.Revision != "rev_2" || tracked.Hash != contentHash || tracked.Dirty {
+		t.Fatalf("unexpected tracked state after incremental skip: %+v", tracked)
+	}
+	assertLocalFileContent(t, localPath, content)
+}
+
 // TestPullPeriodicFullCycle asserts that every Nth incremental cycle, a
 // full tree pull is forced even when the events cursor is healthy. This is
 // the "trust but verify" mitigation for environments where the cloud has
@@ -5146,8 +5219,9 @@ func TestPullShortCircuitsWhenNoNewEvents(t *testing.T) {
 
 func TestPullRemoteIncrementalPersistsAppliedPageCursorOnListEventsError(t *testing.T) {
 	files := map[string]RemoteFile{}
-	events := make([]FilesystemEvent, 0, 501)
-	for i := 1; i <= 501; i++ {
+	pageLimit := defaultIncrementalEventPageLimit
+	events := make([]FilesystemEvent, 0, pageLimit+1)
+	for i := 1; i <= pageLimit+1; i++ {
 		remotePath := fmt.Sprintf("/notion/Docs/%03d.md", i)
 		revision := fmt.Sprintf("rev_%03d", i)
 		files[remotePath] = RemoteFile{
@@ -5170,14 +5244,17 @@ func TestPullRemoteIncrementalPersistsAppliedPageCursorOnListEventsError(t *test
 	client := &fakeClient{
 		files:                      files,
 		events:                     events,
-		revisionCounter:            501,
-		eventCounter:               501,
+		revisionCounter:            pageLimit + 1,
+		eventCounter:               pageLimit + 1,
 		listEventsErrAfter:         2,
 		listEventsErr:              context.DeadlineExceeded,
-		listEventsNextCursorByCall: map[int]string{2: "cursor_after_500"},
-		eventCursorAliases:         map[string]string{"cursor_after_500": "evt_500"},
+		listEventsNextCursorByCall: map[int]string{2: "cursor_after_page"},
+		eventCursorAliases:         map[string]string{"cursor_after_page": fmt.Sprintf("evt_%03d", pageLimit)},
 		listEventsHook: func(call int, cursor string, limit int) {
-			if call == 3 && cursor == "cursor_after_500" {
+			if call == 2 && limit != defaultIncrementalEventPageLimit {
+				checkpointErr = fmt.Errorf("incremental ListEvents limit = %d, want %d", limit, defaultIncrementalEventPageLimit)
+			}
+			if call == 3 && cursor == "cursor_after_page" {
 				sawResumeCursor = true
 			}
 			if call != 3 {
@@ -5193,8 +5270,8 @@ func TestPullRemoteIncrementalPersistsAppliedPageCursorOnListEventsError(t *test
 				checkpointErr = fmt.Errorf("unmarshal persisted checkpoint before next page: %w", err)
 				return
 			}
-			if persisted.EventsCursor != "cursor_after_500" {
-				checkpointErr = fmt.Errorf("persisted EventsCursor before next page = %q, want cursor_after_500", persisted.EventsCursor)
+			if persisted.EventsCursor != "cursor_after_page" {
+				checkpointErr = fmt.Errorf("persisted EventsCursor before next page = %q, want cursor_after_page", persisted.EventsCursor)
 				return
 			}
 			if persisted.IncrementalCheckpoint != nil {
@@ -5230,8 +5307,8 @@ func TestPullRemoteIncrementalPersistsAppliedPageCursorOnListEventsError(t *test
 	if !sawResumeCursor {
 		t.Fatalf("expected next ListEvents request to use persisted feed resume cursor")
 	}
-	if got := syncer.state.EventsCursor; got != "cursor_after_500" {
-		t.Fatalf("EventsCursor = %q, want first applied page cursor cursor_after_500", got)
+	if got := syncer.state.EventsCursor; got != "cursor_after_page" {
+		t.Fatalf("EventsCursor = %q, want first applied page cursor cursor_after_page", got)
 	}
 	if syncer.state.LastError != nil {
 		t.Fatalf("expected checkpointed deadline to avoid recording a sync error, got %#v", syncer.state.LastError)
@@ -5246,10 +5323,10 @@ func TestPullRemoteIncrementalPersistsAppliedPageCursorOnListEventsError(t *test
 	if strings.TrimSpace(status.LastSuccessfulReconcileAt) != "" {
 		t.Fatalf("partial backlog progress should not advance LastSuccessfulReconcileAt, got %q", status.LastSuccessfulReconcileAt)
 	}
-	if _, err := os.ReadFile(filepath.Join(localDir, "Docs", "500.md")); err != nil {
+	if _, err := os.ReadFile(filepath.Join(localDir, "Docs", fmt.Sprintf("%03d.md", pageLimit))); err != nil {
 		t.Fatalf("expected page-one file to be applied before cursor advance: %v", err)
 	}
-	if _, err := os.ReadFile(filepath.Join(localDir, "Docs", "501.md")); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.ReadFile(filepath.Join(localDir, "Docs", fmt.Sprintf("%03d.md", pageLimit+1))); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("event after failed page should not be applied yet; stat err=%v", err)
 	}
 
@@ -5257,8 +5334,9 @@ func TestPullRemoteIncrementalPersistsAppliedPageCursorOnListEventsError(t *test
 	if err := syncer.Reconcile(context.Background()); err != nil {
 		t.Fatalf("reconcile after backlog error failed: %v", err)
 	}
-	if got := syncer.state.EventsCursor; got != "evt_501" {
-		t.Fatalf("EventsCursor = %q, want final cursor evt_501", got)
+	wantFinalCursor := fmt.Sprintf("evt_%03d", pageLimit+1)
+	if got := syncer.state.EventsCursor; got != wantFinalCursor {
+		t.Fatalf("EventsCursor = %q, want final cursor %s", got, wantFinalCursor)
 	}
 	if syncer.state.IncrementalBacklogDraining {
 		t.Fatalf("expected backlog-draining state to clear after reaching feed tail")
@@ -5270,11 +5348,12 @@ func TestPullRemoteIncrementalPersistsAppliedPageCursorOnListEventsError(t *test
 	if strings.TrimSpace(status.LastSuccessfulReconcileAt) == "" {
 		t.Fatalf("expected completed backlog sync to mark LastSuccessfulReconcileAt")
 	}
-	data, err := os.ReadFile(filepath.Join(localDir, "Docs", "501.md"))
+	data, err := os.ReadFile(filepath.Join(localDir, "Docs", fmt.Sprintf("%03d.md", pageLimit+1)))
 	if err != nil {
 		t.Fatalf("expected remaining event to apply on retry: %v", err)
 	}
-	if string(data) != "# 501" {
+	wantContent := fmt.Sprintf("# %03d", pageLimit+1)
+	if string(data) != wantContent {
 		t.Fatalf("unexpected remaining file content: %q", data)
 	}
 }
