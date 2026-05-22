@@ -1956,6 +1956,72 @@ func (s *Store) GetEvents(workspaceID, provider, cursor string, limit int) (Even
 	return EventFeed{Events: chunk, NextCursor: nextCursor}, nil
 }
 
+// GetEventsTail returns up to `limit` events for the workspace in reverse
+// chronological order (newest first), optionally filtered by provider.
+// Mirrors the cloud's /fs/events?direction=desc semantics so daemon
+// clients can resolve the latest event id in one round trip instead of
+// paginating the whole feed.
+//
+// `cursor` is treated as an exclusive upper bound: only events older than
+// (occurring before) the cursored event are returned. Pass "" to start
+// from the newest event. When more older events remain, the returned
+// NextCursor points to the oldest event in the returned page so a
+// follow-up call with that cursor advances to the next older page.
+func (s *Store) GetEventsTail(workspaceID, provider, cursor string, limit int) (EventFeed, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	ws, ok := s.workspaces[workspaceID]
+	if !ok || len(ws.Events) == 0 {
+		return EventFeed{Events: []Event{}, NextCursor: nil}, nil
+	}
+	if limit <= 0 {
+		limit = 200
+	}
+	events := ws.Events
+	normalizedProvider := normalizeProvider(provider)
+	if normalizedProvider != "" {
+		filtered := make([]Event, 0, len(ws.Events))
+		for _, event := range ws.Events {
+			if eventProvider(event) == normalizedProvider {
+				filtered = append(filtered, event)
+			}
+		}
+		events = filtered
+	}
+	if len(events) == 0 {
+		return EventFeed{Events: []Event{}, NextCursor: nil}, nil
+	}
+	end := len(events)
+	if cursor != "" {
+		end = 0
+		for i := range events {
+			if events[i].EventID == cursor {
+				end = i
+				break
+			}
+		}
+	}
+	if end <= 0 {
+		return EventFeed{Events: []Event{}, NextCursor: nil}, nil
+	}
+	start := end - limit
+	if start < 0 {
+		start = 0
+	}
+	tail := events[start:end]
+	chunk := make([]Event, len(tail))
+	for i := range tail {
+		chunk[i] = tail[len(tail)-1-i]
+	}
+	var nextCursor *string
+	if start > 0 {
+		next := events[start].EventID
+		nextCursor = &next
+	}
+	return EventFeed{Events: chunk, NextCursor: nextCursor}, nil
+}
+
 func (s *Store) GetRecentEvents(workspaceID string, limit int) ([]Event, error) {
 	if workspaceID == "" {
 		return []Event{}, ErrInvalidInput

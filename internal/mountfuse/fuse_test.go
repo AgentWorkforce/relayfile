@@ -49,6 +49,10 @@ func (f *fakeRemoteClient) ListEvents(_ context.Context, _, _, _ string, _ int) 
 	return mountsync.EventFeed{}, nil
 }
 
+func (f *fakeRemoteClient) LatestEventID(_ context.Context, _, _ string) (string, error) {
+	return "", nil
+}
+
 func (f *fakeRemoteClient) ReadFile(_ context.Context, _, path string) (mountsync.RemoteFile, error) {
 	if f.readFileErr != nil {
 		return mountsync.RemoteFile{}, f.readFileErr

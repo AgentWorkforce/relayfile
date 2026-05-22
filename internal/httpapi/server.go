@@ -1821,12 +1821,26 @@ func (s *Server) handleDeleteFile(w http.ResponseWriter, r *http.Request, worksp
 
 func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request, workspaceID, correlationID string) {
 	limit := parseBoundedInt(r.URL.Query().Get("limit"), 200, 1, 1000)
-	feed, err := s.store.GetEvents(workspaceID, r.URL.Query().Get("provider"), r.URL.Query().Get("cursor"), limit)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal_error", err.Error(), correlationID)
-		return
+	provider := r.URL.Query().Get("provider")
+	direction := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("direction")))
+	switch direction {
+	case "", "asc":
+		feed, err := s.store.GetEvents(workspaceID, provider, r.URL.Query().Get("cursor"), limit)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "internal_error", err.Error(), correlationID)
+			return
+		}
+		writeJSON(w, http.StatusOK, feed)
+	case "desc":
+		feed, err := s.store.GetEventsTail(workspaceID, provider, r.URL.Query().Get("cursor"), limit)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "internal_error", err.Error(), correlationID)
+			return
+		}
+		writeJSON(w, http.StatusOK, feed)
+	default:
+		writeError(w, http.StatusBadRequest, "bad_request", fmt.Sprintf("unsupported direction %q (must be asc or desc)", direction), correlationID)
 	}
-	writeJSON(w, http.StatusOK, feed)
 }
 
 func (s *Server) handleQueryFiles(w http.ResponseWriter, r *http.Request, workspaceID, correlationID string, claims tokenClaims) {

@@ -30,6 +30,10 @@ func (c *layoutRemoteClient) ListEvents(_ context.Context, _, _, _ string, _ int
 	return mountsync.EventFeed{}, nil
 }
 
+func (c *layoutRemoteClient) LatestEventID(_ context.Context, _, _ string) (string, error) {
+	return "", nil
+}
+
 func (c *layoutRemoteClient) ReadFile(_ context.Context, _, path string) (mountsync.RemoteFile, error) {
 	c.readFilePaths = append(c.readFilePaths, path)
 	return mountsync.RemoteFile{}, &mountsync.HTTPError{StatusCode: 404, Code: "not_found", Message: "file not found"}

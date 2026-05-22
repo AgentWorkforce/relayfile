@@ -2006,6 +2006,92 @@ func TestEventsAndSyncStatus(t *testing.T) {
 		}
 	}
 
+	// direction=desc&limit=1 must return the NEWEST event, not the oldest
+	// (and crucially must not silently ignore the direction param — see
+	// review feedback on PR #196 / cloud#926).
+	descResp := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/workspaces/ws_2/fs/events?direction=desc&limit=1",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_evt_desc",
+		},
+	})
+	if descResp.Code != http.StatusOK {
+		t.Fatalf("expected 200 on direction=desc, got %d (%s)", descResp.Code, descResp.Body.String())
+	}
+	var descFeed relayfile.EventFeed
+	if err := json.NewDecoder(descResp.Body).Decode(&descFeed); err != nil {
+		t.Fatalf("decode desc events response: %v", err)
+	}
+	if len(descFeed.Events) != 1 {
+		t.Fatalf("expected 1 event for desc&limit=1, got %d", len(descFeed.Events))
+	}
+	if len(feed.Events) > 0 {
+		newest := feed.Events[len(feed.Events)-1]
+		if descFeed.Events[0].EventID != newest.EventID {
+			t.Fatalf("desc&limit=1 must return newest event (%q), got %q", newest.EventID, descFeed.Events[0].EventID)
+		}
+	}
+
+	badDirResp := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/workspaces/ws_2/fs/events?direction=sideways&limit=1",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_evt_bad_dir",
+		},
+	})
+	if badDirResp.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 on unknown direction, got %d (%s)", badDirResp.Code, badDirResp.Body.String())
+	}
+
+	// Descending pagination must respect cursor: a follow-up call using
+	// the previous page's NextCursor walks one page older, never repeats
+	// the newest page. CodeRabbit caught the original GetEventsTail
+	// signature omitting cursor entirely — guard against regressing back
+	// to that.
+	descPage1 := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/workspaces/ws_2/fs/events?direction=desc&limit=1",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_evt_desc_p1",
+		},
+	})
+	if descPage1.Code != http.StatusOK {
+		t.Fatalf("desc page1: expected 200, got %d (%s)", descPage1.Code, descPage1.Body.String())
+	}
+	var descPage1Feed relayfile.EventFeed
+	if err := json.NewDecoder(descPage1.Body).Decode(&descPage1Feed); err != nil {
+		t.Fatalf("decode desc page1: %v", err)
+	}
+	if len(descPage1Feed.Events) != 1 || descPage1Feed.NextCursor == nil || *descPage1Feed.NextCursor == "" {
+		t.Fatalf("desc page1: expected 1 event + a non-empty NextCursor, got events=%d nextCursor=%v",
+			len(descPage1Feed.Events), descPage1Feed.NextCursor)
+	}
+	descPage2 := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/workspaces/ws_2/fs/events?direction=desc&limit=1&cursor=" + *descPage1Feed.NextCursor,
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_evt_desc_p2",
+		},
+	})
+	if descPage2.Code != http.StatusOK {
+		t.Fatalf("desc page2: expected 200, got %d (%s)", descPage2.Code, descPage2.Body.String())
+	}
+	var descPage2Feed relayfile.EventFeed
+	if err := json.NewDecoder(descPage2.Body).Decode(&descPage2Feed); err != nil {
+		t.Fatalf("decode desc page2: %v", err)
+	}
+	if len(descPage2Feed.Events) != 1 {
+		t.Fatalf("desc page2: expected 1 event, got %d", len(descPage2Feed.Events))
+	}
+	if descPage2Feed.Events[0].EventID == descPage1Feed.Events[0].EventID {
+		t.Fatalf("desc page2: must advance past page1; both returned %q", descPage2Feed.Events[0].EventID)
+	}
+
 	syncResp := doRequest(t, server, request{
 		method: http.MethodGet,
 		path:   "/v1/workspaces/ws_2/sync/status",
