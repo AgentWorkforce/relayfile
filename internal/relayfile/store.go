@@ -1956,12 +1956,18 @@ func (s *Store) GetEvents(workspaceID, provider, cursor string, limit int) (Even
 	return EventFeed{Events: chunk, NextCursor: nextCursor}, nil
 }
 
-// GetEventsTail returns the last `limit` events for the workspace in
-// reverse chronological order (newest first), optionally filtered by
-// provider. Mirrors the cloud's /fs/events?direction=desc semantics so
-// daemon clients can resolve the latest event id in one round trip
-// instead of paginating the whole feed.
-func (s *Store) GetEventsTail(workspaceID, provider string, limit int) (EventFeed, error) {
+// GetEventsTail returns up to `limit` events for the workspace in reverse
+// chronological order (newest first), optionally filtered by provider.
+// Mirrors the cloud's /fs/events?direction=desc semantics so daemon
+// clients can resolve the latest event id in one round trip instead of
+// paginating the whole feed.
+//
+// `cursor` is treated as an exclusive upper bound: only events older than
+// (occurring before) the cursored event are returned. Pass "" to start
+// from the newest event. When more older events remain, the returned
+// NextCursor points to the oldest event in the returned page so a
+// follow-up call with that cursor advances to the next older page.
+func (s *Store) GetEventsTail(workspaceID, provider, cursor string, limit int) (EventFeed, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -1986,11 +1992,24 @@ func (s *Store) GetEventsTail(workspaceID, provider string, limit int) (EventFee
 	if len(events) == 0 {
 		return EventFeed{Events: []Event{}, NextCursor: nil}, nil
 	}
-	start := len(events) - limit
+	end := len(events)
+	if cursor != "" {
+		end = 0
+		for i := range events {
+			if events[i].EventID == cursor {
+				end = i
+				break
+			}
+		}
+	}
+	if end <= 0 {
+		return EventFeed{Events: []Event{}, NextCursor: nil}, nil
+	}
+	start := end - limit
 	if start < 0 {
 		start = 0
 	}
-	tail := events[start:]
+	tail := events[start:end]
 	chunk := make([]Event, len(tail))
 	for i := range tail {
 		chunk[i] = tail[len(tail)-1-i]

@@ -1832,7 +1832,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request, workspaceI
 		}
 		writeJSON(w, http.StatusOK, feed)
 	case "desc":
-		feed, err := s.store.GetEventsTail(workspaceID, provider, limit)
+		feed, err := s.store.GetEventsTail(workspaceID, provider, r.URL.Query().Get("cursor"), limit)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "internal_error", err.Error(), correlationID)
 			return
