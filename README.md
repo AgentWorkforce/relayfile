@@ -178,6 +178,22 @@ RELAYFILE_TOKEN="$TOKEN" go run ./cmd/relayfile-mount \
   --local-dir ./relayfile-mount
 ```
 
+Limit the daemon to one or more remote subtrees by repeating
+`--remote-path`. Each subtree is mirrored under the matching path inside
+`--local-dir`, which avoids full-workspace export pulls on large workspaces:
+
+```bash
+RELAYFILE_TOKEN="$TOKEN" go run ./cmd/relayfile-mount \
+  --base-url http://localhost:9090 \
+  --workspace ws_demo \
+  --local-dir ./relayfile-mount \
+  --remote-path /github \
+  --remote-path /slack/channels/proj-cloud
+```
+
+For long path lists, pass `--paths-file ./paths.json`; the file may be a JSON
+array of remote roots or a newline-separated list.
+
 Now any local tool or agent can use `./relayfile-mount` like a normal directory.
 
 ## Running Evals

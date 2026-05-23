@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -34,6 +35,7 @@ type mountConfig struct {
 	token            string
 	workspaceID      string
 	remotePath       string
+	remotePaths      []string
 	eventProvider    string
 	localDir         string
 	stateFile        string
@@ -64,7 +66,9 @@ func main() {
 	baseURL := flag.String("base-url", envOrDefault("RELAYFILE_BASE_URL", "http://127.0.0.1:8080"), "relayfile base URL")
 	token := flag.String("token", strings.TrimSpace(os.Getenv("RELAYFILE_TOKEN")), "bearer token")
 	workspaceID := flag.String("workspace", strings.TrimSpace(os.Getenv("RELAYFILE_WORKSPACE")), "workspace ID")
-	remotePath := flag.String("remote-path", envOrDefault("RELAYFILE_REMOTE_PATH", "/"), "remote root path")
+	var remotePaths repeatedStringFlag
+	flag.Var(&remotePaths, "remote-path", "remote root path (may be repeated)")
+	pathsFile := flag.String("paths-file", strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_PATHS_FILE")), "file containing remote root paths, as JSON array or newline-separated list")
 	eventProvider := flag.String("provider", strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_PROVIDER")), "event provider filter")
 	localDir := flag.String("local-dir", strings.TrimSpace(os.Getenv("RELAYFILE_LOCAL_DIR")), "local mirror directory")
 	stateFile := flag.String("state-file", strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_STATE_FILE")), "state file path")
@@ -99,6 +103,11 @@ func main() {
 	if *timeout <= 0 {
 		*timeout = 15 * time.Second
 	}
+	fileRemotePaths, err := readRemotePathsFile(*pathsFile)
+	if err != nil {
+		log.Fatalf("read paths-file: %v", err)
+	}
+	allRemotePaths := append(remotePaths.Values(), fileRemotePaths...)
 	*intervalJitter = clampJitterRatio(*intervalJitter)
 	resolvedMode, err := resolveMountMode(*mode, *fuse)
 	if err != nil {
@@ -112,7 +121,8 @@ func main() {
 		baseURL:          *baseURL,
 		token:            strings.TrimSpace(*token),
 		workspaceID:      strings.TrimSpace(*workspaceID),
-		remotePath:       *remotePath,
+		remotePath:       firstRemotePath(allRemotePaths, envOrDefault("RELAYFILE_REMOTE_PATH", "/")),
+		remotePaths:      normalizeRemotePaths(allRemotePaths, envOrDefault("RELAYFILE_REMOTE_PATH", "/")),
 		eventProvider:    strings.TrimSpace(*eventProvider),
 		localDir:         *localDir,
 		stateFile:        *stateFile,
@@ -168,6 +178,108 @@ func executeMount(rootCtx context.Context, cfg mountConfig, runPoll pollRunner, 
 }
 
 func runPollingMount(rootCtx context.Context, cfg mountConfig) error {
+	remotePaths := cfg.remotePaths
+	if len(remotePaths) == 0 {
+		remotePaths = []string{cfg.remotePath}
+	}
+	if len(remotePaths) > 1 || (len(remotePaths) == 1 && normalizeMountRemotePath(remotePaths[0]) != "/") {
+		return runScopedPollingMounts(rootCtx, cfg, remotePaths)
+	}
+	return runSinglePollingMount(rootCtx, cfg)
+}
+
+func runScopedPollingMounts(rootCtx context.Context, cfg mountConfig, remotePaths []string) error {
+	return runScopedPollingMountsWithRunner(rootCtx, cfg, remotePaths, runSinglePollingMount)
+}
+
+func runScopedPollingMountsWithRunner(
+	rootCtx context.Context,
+	cfg mountConfig,
+	remotePaths []string,
+	run pollRunner,
+) error {
+	type scopedMount struct {
+		cfg mountConfig
+	}
+	scopedMounts := make([]scopedMount, 0, len(remotePaths))
+	seen := map[string]struct{}{}
+	for _, remotePath := range remotePaths {
+		remotePath := normalizeMountRemotePath(remotePath)
+		if _, ok := seen[remotePath]; ok {
+			continue
+		}
+		seen[remotePath] = struct{}{}
+		scoped := cfg
+		scoped.remotePath = remotePath
+		scoped.remotePaths = nil
+		scoped.localDir = scopedLocalDir(cfg.localDir, remotePath)
+		scoped.stateFile = scopedStateFile(cfg.stateFile, remotePath)
+		if err := os.MkdirAll(scoped.localDir, 0o755); err != nil {
+			return fmt.Errorf("create scoped local dir for %s: %w", remotePath, err)
+		}
+		scopedMounts = append(scopedMounts, scopedMount{cfg: scoped})
+	}
+	if len(scopedMounts) == 0 {
+		return nil
+	}
+	ctx, cancel := context.WithCancel(rootCtx)
+	defer cancel()
+	errCh := make(chan error, len(remotePaths))
+	var wg sync.WaitGroup
+	for _, mount := range scopedMounts {
+		mount := mount
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errCh <- run(ctx, mount.cfg)
+		}()
+	}
+	go func() {
+		wg.Wait()
+		close(errCh)
+	}()
+	var firstErr error
+	for err := range errCh {
+		if err != nil && firstErr == nil {
+			firstErr = err
+			cancel()
+		}
+	}
+	return firstErr
+}
+
+func readRemotePathsFile(path string) ([]string, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return nil, nil
+	}
+	payload, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	trimmed := strings.TrimSpace(string(payload))
+	if trimmed == "" {
+		return nil, nil
+	}
+	var jsonPaths []string
+	if strings.HasPrefix(trimmed, "[") {
+		if err := json.Unmarshal(payload, &jsonPaths); err != nil {
+			return nil, err
+		}
+		return jsonPaths, nil
+	}
+	var paths []string
+	for _, line := range strings.Split(trimmed, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		paths = append(paths, line)
+	}
+	return paths, nil
+}
+
+func runSinglePollingMount(rootCtx context.Context, cfg mountConfig) error {
 	// No whole-request Timeout: net/http enforces http.Client.Timeout
 	// independent of context and would abort a long-but-progressing
 	// bootstrap body read mid-stream. Cancellation is owned by the
@@ -260,6 +372,94 @@ func runPollingMount(rootCtx context.Context, cfg mountConfig) error {
 			timer.Reset(jitteredIntervalWithSample(cfg.interval, cfg.intervalJitter, rng.Float64()))
 		}
 	}
+}
+
+type repeatedStringFlag []string
+
+func (f *repeatedStringFlag) String() string {
+	return strings.Join(*f, ",")
+}
+
+func (f *repeatedStringFlag) Set(value string) error {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return nil
+	}
+	*f = append(*f, trimmed)
+	return nil
+}
+
+func (f repeatedStringFlag) Values() []string {
+	return append([]string(nil), f...)
+}
+
+func firstRemotePath(paths []string, fallback string) string {
+	normalized := normalizeRemotePaths(paths, fallback)
+	if len(normalized) == 0 {
+		return "/"
+	}
+	return normalized[0]
+}
+
+func normalizeRemotePaths(paths []string, fallback string) []string {
+	if len(paths) == 0 {
+		paths = []string{fallback}
+	}
+	seen := map[string]struct{}{}
+	normalized := make([]string, 0, len(paths))
+	for _, path := range paths {
+		cleaned := normalizeMountRemotePath(path)
+		if _, ok := seen[cleaned]; ok {
+			continue
+		}
+		seen[cleaned] = struct{}{}
+		normalized = append(normalized, cleaned)
+	}
+	if len(normalized) == 0 {
+		return []string{"/"}
+	}
+	return normalized
+}
+
+func normalizeMountRemotePath(path string) string {
+	trimmed := strings.TrimSpace(path)
+	if trimmed == "" || trimmed == "/" {
+		return "/"
+	}
+	trimmed = strings.ReplaceAll(trimmed, "\\", "/")
+	if !strings.HasPrefix(trimmed, "/") {
+		trimmed = "/" + trimmed
+	}
+	cleaned := filepath.Clean(trimmed)
+	if cleaned == "." || cleaned == string(filepath.Separator) {
+		return "/"
+	}
+	return filepath.ToSlash(cleaned)
+}
+
+func scopedLocalDir(localRoot, remotePath string) string {
+	remotePath = normalizeMountRemotePath(remotePath)
+	if remotePath == "/" {
+		return localRoot
+	}
+	return filepath.Join(localRoot, filepath.FromSlash(strings.TrimPrefix(remotePath, "/")))
+}
+
+func scopedStateFile(stateFile, remotePath string) string {
+	if strings.TrimSpace(stateFile) == "" {
+		return ""
+	}
+	remotePath = normalizeMountRemotePath(remotePath)
+	if remotePath == "/" {
+		return stateFile
+	}
+	ext := filepath.Ext(stateFile)
+	base := strings.TrimSuffix(stateFile, ext)
+	suffix := strings.NewReplacer("/", "-", "\\", "-", ":", "-").Replace(strings.Trim(remotePath, "/"))
+	if suffix == "" {
+		suffix = "root"
+	}
+	return base + "-" + suffix + ext
 }
 
 // readBootstrapProgress reads the in-progress bootstrap block from the

@@ -3,6 +3,11 @@ package main
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -186,4 +191,106 @@ func TestExecuteMountRejectsUnsupportedMode(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected unsupported mode error")
 	}
+}
+
+func TestNormalizeRemotePathsDedupesRepeatedFlagValues(t *testing.T) {
+	got := normalizeRemotePaths(
+		[]string{"/github/repos/acme/cloud", "github/repos/acme/cloud/", "/slack/channels/proj-cloud"},
+		"/",
+	)
+	want := []string{"/github/repos/acme/cloud", "/slack/channels/proj-cloud"}
+	if len(got) != len(want) {
+		t.Fatalf("expected %d paths, got %d: %v", len(want), len(got), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("path %d: expected %q, got %q", i, want[i], got[i])
+		}
+	}
+}
+
+func TestScopedLocalDirKeepsProviderPrefixUnderMountRoot(t *testing.T) {
+	got := scopedLocalDir("/workspace", "/github/repos/acme/cloud")
+	want := filepath.Join("/workspace", "github", "repos", "acme", "cloud")
+	if got != want {
+		t.Fatalf("expected %q, got %q", want, got)
+	}
+}
+
+func TestRunScopedPollingMountsCancelsSiblingsOnFirstError(t *testing.T) {
+	wantErr := errors.New("boom")
+	var canceled atomic.Bool
+	started := make(chan string, 2)
+	releaseFailingMount := make(chan struct{})
+	var once sync.Once
+
+	err := runScopedPollingMountsWithRunner(
+		context.Background(),
+		mountConfig{localDir: t.TempDir(), stateFile: filepath.Join(t.TempDir(), "state.json")},
+		[]string{"/github", "/slack"},
+		func(ctx context.Context, cfg mountConfig) error {
+			started <- cfg.remotePath
+			if strings.HasSuffix(cfg.remotePath, "/github") {
+				<-releaseFailingMount
+				return wantErr
+			}
+			once.Do(func() { close(releaseFailingMount) })
+			<-ctx.Done()
+			canceled.Store(true)
+			return nil
+		},
+	)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("expected first error %v, got %v", wantErr, err)
+	}
+	if !canceled.Load() {
+		t.Fatal("expected sibling mount to observe context cancellation")
+	}
+	close(started)
+	seen := map[string]bool{}
+	for path := range started {
+		seen[path] = true
+	}
+	if !seen["/github"] || !seen["/slack"] {
+		t.Fatalf("expected both scoped mounts to start, saw %v", seen)
+	}
+}
+
+func TestReadRemotePathsFileSupportsJSONAndLines(t *testing.T) {
+	dir := t.TempDir()
+	jsonPath := filepath.Join(dir, "paths.json")
+	if err := os.WriteFile(jsonPath, []byte(`["/github","/linear/issues"]`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	jsonPaths, err := readRemotePathsFile(jsonPath)
+	if err != nil {
+		t.Fatalf("read json paths: %v", err)
+	}
+	if want := []string{"/github", "/linear/issues"}; !stringSlicesEqual(jsonPaths, want) {
+		t.Fatalf("expected json paths %v, got %v", want, jsonPaths)
+	}
+
+	linesPath := filepath.Join(dir, "paths.txt")
+	if err := os.WriteFile(linesPath, []byte("\n# comment\n/github/repos/acme/cloud\n/slack/channels/proj-cloud\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	linePaths, err := readRemotePathsFile(linesPath)
+	if err != nil {
+		t.Fatalf("read line paths: %v", err)
+	}
+	if want := []string{"/github/repos/acme/cloud", "/slack/channels/proj-cloud"}; !stringSlicesEqual(linePaths, want) {
+		t.Fatalf("expected line paths %v, got %v", want, linePaths)
+	}
+}
+
+func stringSlicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
