@@ -5,6 +5,9 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -211,6 +214,45 @@ func TestScopedLocalDirKeepsProviderPrefixUnderMountRoot(t *testing.T) {
 	want := filepath.Join("/workspace", "github", "repos", "acme", "cloud")
 	if got != want {
 		t.Fatalf("expected %q, got %q", want, got)
+	}
+}
+
+func TestRunScopedPollingMountsCancelsSiblingsOnFirstError(t *testing.T) {
+	wantErr := errors.New("boom")
+	var canceled atomic.Bool
+	started := make(chan string, 2)
+	releaseFailingMount := make(chan struct{})
+	var once sync.Once
+
+	err := runScopedPollingMountsWithRunner(
+		context.Background(),
+		mountConfig{localDir: t.TempDir(), stateFile: filepath.Join(t.TempDir(), "state.json")},
+		[]string{"/github", "/slack"},
+		func(ctx context.Context, cfg mountConfig) error {
+			started <- cfg.remotePath
+			if strings.HasSuffix(cfg.remotePath, "/github") {
+				<-releaseFailingMount
+				return wantErr
+			}
+			once.Do(func() { close(releaseFailingMount) })
+			<-ctx.Done()
+			canceled.Store(true)
+			return nil
+		},
+	)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("expected first error %v, got %v", wantErr, err)
+	}
+	if !canceled.Load() {
+		t.Fatal("expected sibling mount to observe context cancellation")
+	}
+	close(started)
+	seen := map[string]bool{}
+	for path := range started {
+		seen[path] = true
+	}
+	if !seen["/github"] || !seen["/slack"] {
+		t.Fatalf("expected both scoped mounts to start, saw %v", seen)
 	}
 }
 

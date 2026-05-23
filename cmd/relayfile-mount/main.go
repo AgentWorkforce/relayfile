@@ -189,6 +189,15 @@ func runPollingMount(rootCtx context.Context, cfg mountConfig) error {
 }
 
 func runScopedPollingMounts(rootCtx context.Context, cfg mountConfig, remotePaths []string) error {
+	return runScopedPollingMountsWithRunner(rootCtx, cfg, remotePaths, runSinglePollingMount)
+}
+
+func runScopedPollingMountsWithRunner(
+	rootCtx context.Context,
+	cfg mountConfig,
+	remotePaths []string,
+	run pollRunner,
+) error {
 	type scopedMount struct {
 		cfg mountConfig
 	}
@@ -222,7 +231,7 @@ func runScopedPollingMounts(rootCtx context.Context, cfg mountConfig, remotePath
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			errCh <- runSinglePollingMount(ctx, mount.cfg)
+			errCh <- run(ctx, mount.cfg)
 		}()
 	}
 	go func() {
