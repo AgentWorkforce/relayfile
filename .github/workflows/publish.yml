@@ -430,6 +430,18 @@ jobs:
           done
           chmod +x mount-binaries/relayfile-mount-*
 
+      - name: Generate checksums
+        run: |
+          set -euo pipefail
+          # Publish a checksums.txt alongside the release binaries. Downstream
+          # consumers (e.g. agent-relay's relayfile-binary.ts verifyChecksum)
+          # require it and match entries by basename, so we cd into each dir to
+          # emit basenames (not paths). This is mandatory for the cloud Daytona
+          # mount daemon download to verify; do not drop it.
+          ( cd mount-binaries && sha256sum relayfile-mount-* ) > checksums.txt
+          ( cd packages/cli/bin && sha256sum relayfile-cli-* ) >> checksums.txt
+          cat checksums.txt
+
       - name: Commit version bump and create tag
         env:
           NEW_VERSION: ${{ needs.build.outputs.new_version }}
@@ -495,6 +507,7 @@ jobs:
           files: |
             packages/cli/bin/relayfile-cli-*
             mount-binaries/relayfile-mount-*
+            checksums.txt
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
