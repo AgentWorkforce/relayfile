@@ -116,6 +116,41 @@ describe('workspace-seeder', () => {
     }
   });
 
+  it('seedWorkspace surfaces errorCount from bulk-write responses', async () => {
+    const workspace = await createWorkspace({
+      'alpha.txt': 'alpha payload',
+    });
+
+    try {
+      vi.spyOn(RelayFileClient.prototype, 'bulkWrite').mockImplementation(async () => {
+        throw new Error('fall back to HTTP');
+      });
+
+      const fetchMock = vi.fn(async () =>
+        jsonResponseText(
+          JSON.stringify({
+            written: 0,
+            errorCount: 1,
+            errors: [{ path: '/alpha.txt', error: 'permission denied' }],
+          })
+        )
+      );
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+      await expect(
+        seedWorkspace(
+          'https://relay.example',
+          'admin-token',
+          'workspace-errs',
+          workspace.dir,
+          []
+        )
+      ).rejects.toThrow(/workspace-errs/u);
+    } finally {
+      await workspace.cleanup();
+    }
+  });
+
   it('seedAclRules formats ACL files for root and nested directories', async () => {
     vi.spyOn(RelayFileClient.prototype, 'bulkWrite').mockImplementation(async () => {
       throw new Error('fall back to HTTP');

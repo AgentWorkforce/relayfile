@@ -117,9 +117,22 @@ function collectSeedPaths(
   rootDir: string,
   currentRelative: string,
   excludeDirs: Set<string>,
-  output: string[]
+  output: string[],
+  visited: Set<string> = new Set()
 ): void {
   const absoluteDir = path.join(rootDir, currentRelative);
+  let realDir: string;
+  try {
+    realDir = fs.realpathSync(absoluteDir);
+  } catch {
+    return;
+  }
+  if (visited.has(realDir)) {
+    // Cycle guard: a symlinked directory pointed back to an ancestor.
+    return;
+  }
+  visited.add(realDir);
+
   const entries = fs.readdirSync(absoluteDir, { withFileTypes: true });
 
   for (const entry of entries) {
@@ -138,7 +151,7 @@ function collectSeedPaths(
     }
 
     if (entry.isDirectory()) {
-      collectSeedPaths(rootDir, nextRelative, excludeDirs, output);
+      collectSeedPaths(rootDir, nextRelative, excludeDirs, output, visited);
       continue;
     }
 
@@ -155,7 +168,7 @@ function collectSeedPaths(
         }
         const stat = fs.statSync(resolved);
         if (stat.isDirectory()) {
-          collectSeedPaths(rootDir, nextRelative, excludeDirs, output);
+          collectSeedPaths(rootDir, nextRelative, excludeDirs, output, visited);
           continue;
         }
         if (stat.isFile()) {
@@ -360,6 +373,8 @@ export async function seedWorkspace(
     .map((filePath) => buildSeedFilePayload(filePath, rootDir));
 
   let seededCount = 0;
+  let totalErrorCount = 0;
+  const collectedErrors: unknown[] = [];
   for (let index = 0; index < allFiles.length; index += BATCH_SIZE) {
     const batch = allFiles.slice(index, index + BATCH_SIZE);
     const batchIndex = Math.floor(index / BATCH_SIZE);
@@ -371,6 +386,19 @@ export async function seedWorkspace(
       `seed-workspace-${workspace}-${Date.now()}-${batchIndex}`
     );
     seededCount += result.written;
+    totalErrorCount += result.errorCount;
+    if (Array.isArray(result.errors)) {
+      collectedErrors.push(...result.errors);
+    } else if (result.errors && result.errorCount > 0) {
+      collectedErrors.push(result.errors);
+    }
+  }
+
+  if (totalErrorCount > 0) {
+    const details = collectedErrors.length > 0 ? JSON.stringify(collectedErrors) : '[]';
+    throw new Error(
+      `seedWorkspace had ${totalErrorCount} error(s) for workspace ${workspace}: ${details}`
+    );
   }
 
   return seededCount;
@@ -455,6 +483,46 @@ interface ImportResponseShape {
   imported?: number;
 }
 
+/**
+ * Test whether a workspace-relative file path is covered by an exclude entry.
+ *
+ * Exclude entries can be either a single directory/file name (matched against
+ * any path segment) or a nested relative path like `build/output` (matched
+ * against any contiguous run of segments at any depth). Both single-name and
+ * nested matches must align on segment boundaries.
+ */
+function isExcludedRelativePath(relativePath: string, excludes: Set<string>): boolean {
+  const segments = relativePath.split('/');
+  if (DEFAULT_EXCLUDED_FILES.has(segments[segments.length - 1] ?? '')) {
+    return true;
+  }
+  for (const exclude of excludes) {
+    if (!exclude) continue;
+    if (!exclude.includes('/')) {
+      if (segments.some((seg) => seg === exclude)) {
+        return true;
+      }
+      continue;
+    }
+    const excludeSegments = exclude.split('/').filter(Boolean);
+    if (excludeSegments.length === 0) continue;
+    const limit = segments.length - excludeSegments.length;
+    for (let start = 0; start <= limit; start++) {
+      let matched = true;
+      for (let i = 0; i < excludeSegments.length; i++) {
+        if (segments[start + i] !== excludeSegments[i]) {
+          matched = false;
+          break;
+        }
+      }
+      if (matched) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 function getGitTrackedFiles(rootDir: string): string[] | null {
   try {
     const output = execSync('git ls-files -z --cached --others --exclude-standard', {
@@ -522,19 +590,16 @@ export async function seedWorkspaceTar(
 
   const gitFiles = getGitTrackedFiles(rootDir);
   const rawFiles = gitFiles ?? collectAllFiles(rootDir, excludes);
-  const files = gitFiles
-    ? rawFiles.filter((f) => {
-        const segments = f.split('/');
-        if (DEFAULT_EXCLUDED_FILES.has(segments[segments.length - 1])) return false;
-        return !segments.some((seg) => excludes.has(seg));
-      })
-    : rawFiles;
+  const files = gitFiles ? rawFiles.filter((f) => !isExcludedRelativePath(f, excludes)) : rawFiles;
 
   if (files.length === 0) {
     return 0;
   }
 
   const tarball = await createTarBuffer(rootDir, files);
+  // Detach into a plain Uint8Array view so we don't expose the underlying
+  // Node Buffer pool through the request body.
+  const body = new Uint8Array(tarball.buffer, tarball.byteOffset, tarball.byteLength).slice();
 
   const url = `${normalizeBaseUrl(baseUrl)}/v1/workspaces/${encodeURIComponent(workspace)}/fs/import`;
   const response = await fetch(url, {
@@ -544,7 +609,7 @@ export async function seedWorkspaceTar(
       'Content-Type': 'application/gzip',
       'X-Correlation-Id': `seed-tar-${workspace}-${Date.now()}`,
     },
-    body: tarball.buffer.slice(tarball.byteOffset, tarball.byteOffset + tarball.byteLength) as ArrayBuffer,
+    body,
   });
 
   if (response.status === 404) {

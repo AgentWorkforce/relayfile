@@ -342,9 +342,26 @@ export async function ensureRelayfileMount(config: MountConfig): Promise<MountHa
     throw new Error(`missing relayfile mount binary: ${binaryPath}`);
   }
 
-  const mountPoint =
-    config.mountPoint ?? (await mkdtemp(path.join(os.tmpdir(), `relayfile-mount-${config.workspace}-`)));
-  mkdirSync(mountPoint, { recursive: true });
+  // Track whether we created the mountPoint ourselves. We must only `rm` the
+  // directory on shutdown/failure when this function owns it — never when a
+  // caller passed their own path, since that could destroy unrelated user data.
+  let mountPoint: string;
+  let ownsMountPoint: boolean;
+  if (config.mountPoint) {
+    mountPoint = config.mountPoint;
+    ownsMountPoint = false;
+    mkdirSync(mountPoint, { recursive: true });
+  } else {
+    mountPoint = await mkdtemp(path.join(os.tmpdir(), `relayfile-mount-${config.workspace}-`));
+    ownsMountPoint = true;
+  }
+
+  const cleanupMountPoint = async (): Promise<void> => {
+    if (!ownsMountPoint) {
+      return;
+    }
+    await rm(mountPoint, { recursive: true, force: true }).catch(() => undefined);
+  };
 
   const mountBaseArgs = [
     '--base-url',
@@ -392,13 +409,13 @@ export async function ensureRelayfileMount(config: MountConfig): Promise<MountHa
     if (mountProc) {
       await stopMountProcess(mountProc).catch(() => undefined);
     }
-    await rm(mountPoint, { recursive: true, force: true }).catch(() => undefined);
+    await cleanupMountPoint();
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(`${startupPhase} failed for ${config.workspace}: ${message}`);
   }
 
   if (!mountProc || typeof mountProc.pid !== 'number') {
-    await rm(mountPoint, { recursive: true, force: true }).catch(() => undefined);
+    await cleanupMountPoint();
     throw new Error(`mount process startup failed for ${config.workspace}: missing process id`);
   }
 
@@ -413,7 +430,7 @@ export async function ensureRelayfileMount(config: MountConfig): Promise<MountHa
       }
       stopped = true;
       await stopMountProcess(mountProc).catch(() => undefined);
-      await rm(mountPoint, { recursive: true, force: true }).catch(() => undefined);
+      await cleanupMountPoint();
     },
   };
 }

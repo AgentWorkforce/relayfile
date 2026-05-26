@@ -230,6 +230,37 @@ describe('seedWorkspaceTar', () => {
     expect(entries).not.toContain('ignored-by-git/skip.txt');
   });
 
+  it('honors nested excludeDirs paths when filtering git ls-files output', async () => {
+    const projectDir = makeTempDir('relay-seed-project-');
+    fs.mkdirSync(path.join(projectDir, 'src'), { recursive: true });
+    fs.mkdirSync(path.join(projectDir, 'packages', 'app', 'build'), { recursive: true });
+
+    fs.writeFileSync(path.join(projectDir, 'src', 'app.ts'), 'export const app = true;\n');
+    fs.writeFileSync(path.join(projectDir, 'packages', 'app', 'build', 'bundle.js'), '// generated\n');
+    fs.writeFileSync(path.join(projectDir, 'packages', 'app', 'index.ts'), 'export {};\n');
+
+    execSyncMock.mockReturnValue(
+      ['src/app.ts', 'packages/app/build/bundle.js', 'packages/app/index.ts'].join('\0')
+    );
+
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ imported: 2 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const imported = await seedWorkspaceTar(
+      'https://relayfile.example/',
+      'token',
+      'rw_demo',
+      projectDir,
+      ['packages/app/build']
+    );
+
+    expect(imported).toBe(2);
+    const [, init] = fetchMock.mock.calls[0];
+    const entries = await extractTarballEntries(init.body);
+    expect(entries).toEqual(expect.arrayContaining(['packages/app/index.ts', 'src/app.ts']));
+    expect(entries).not.toContain('packages/app/build/bundle.js');
+  });
+
   it('does not fall back to a directory walk when git ls-files succeeds with no files', async () => {
     const projectDir = makeTempDir('relay-seed-project-');
     fs.mkdirSync(path.join(projectDir, 'ignored-by-git'), { recursive: true });
