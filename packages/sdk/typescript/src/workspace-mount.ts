@@ -1,4 +1,4 @@
-import { execSync, spawn, type ChildProcess } from 'node:child_process';
+import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   accessSync,
@@ -229,7 +229,9 @@ function resignBinaryForMacOS(binaryPath: string): void {
   }
 
   try {
-    execSync(`codesign --force --sign - "${binaryPath}"`, { stdio: 'pipe' });
+    // Pass the binary path as a separate argv entry so shell metacharacters
+    // in the cache path cannot break or hijack the codesign invocation.
+    execFileSync('codesign', ['--force', '--sign', '-', binaryPath], { stdio: 'pipe' });
   } catch {
     // Ignore best-effort re-sign failures.
   }
@@ -280,10 +282,37 @@ async function ensureRelayfileMountBinary(binaryPath?: string): Promise<string> 
   }
 }
 
-async function runCommandCapture(command: string, args: string[], env: NodeJS.ProcessEnv): Promise<string> {
+const DEFAULT_COMMAND_TIMEOUT_MS = 5 * 60 * 1000;
+
+async function runCommandCapture(
+  command: string,
+  args: string[],
+  env: NodeJS.ProcessEnv,
+  timeoutMs: number = DEFAULT_COMMAND_TIMEOUT_MS
+): Promise<string> {
   return await new Promise((resolve, reject) => {
     const proc = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'], env });
     let output = '';
+    let settled = false;
+
+    const settle = (fn: () => void): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      fn();
+    };
+
+    const timer = setTimeout(() => {
+      // Best-effort terminate the stalled child so we don't leak the process.
+      try {
+        proc.kill('SIGTERM');
+      } catch {
+        // Ignore kill failures; the timeout error below is what matters.
+      }
+      settle(() => reject(new Error(`command timed out after ${timeoutMs}ms`)));
+    }, timeoutMs);
 
     proc.stdout.setEncoding('utf8');
     proc.stderr.setEncoding('utf8');
@@ -296,18 +325,18 @@ async function runCommandCapture(command: string, args: string[], env: NodeJS.Pr
     });
 
     proc.on('error', (error) => {
-      reject(error);
+      settle(() => reject(error));
     });
 
     proc.on('close', (code, signal) => {
       if (code === 0) {
-        resolve(output);
+        settle(() => resolve(output));
         return;
       }
 
       const reason = signal ? `signal ${signal}` : `exit code ${typeof code === 'number' ? code : 'unknown'}`;
       const detail = output.trim();
-      reject(new Error(detail || `command failed with ${reason}`));
+      settle(() => reject(new Error(detail || `command failed with ${reason}`)));
     });
   });
 }
@@ -419,18 +448,23 @@ export async function ensureRelayfileMount(config: MountConfig): Promise<MountHa
     throw new Error(`mount process startup failed for ${config.workspace}: missing process id`);
   }
 
-  let stopped = false;
+  let stopPromise: Promise<void> | undefined;
+  const startedMountProc = mountProc;
 
   return {
     pid: mountProc.pid,
     mountPoint,
     async stop(): Promise<void> {
-      if (stopped) {
-        return;
+      if (!stopPromise) {
+        // Memoize the in-flight shutdown so concurrent callers all await the
+        // same termination + cleanup sequence instead of returning early
+        // before stopMountProcess and cleanupMountPoint have settled.
+        stopPromise = (async (): Promise<void> => {
+          await stopMountProcess(startedMountProc).catch(() => undefined);
+          await cleanupMountPoint();
+        })();
       }
-      stopped = true;
-      await stopMountProcess(mountProc).catch(() => undefined);
-      await cleanupMountPoint();
+      await stopPromise;
     },
   };
 }
