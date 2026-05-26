@@ -55,7 +55,7 @@
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
-    "@relayfile/core": "0.7.40",
+    "@relayfile/core": "0.8.0",
     "ignore": "^7.0.5",
     "tar": "^7.5.10"
   },
