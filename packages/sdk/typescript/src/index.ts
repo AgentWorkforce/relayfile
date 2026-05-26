@@ -215,3 +215,16 @@ export type { WriteEvent, WriteEventActor, WriteEventOperation, WriteEventSource
 export { WritebackConsumer } from "./writeback-consumer.js";
 export type { WritebackHandler, WritebackConsumerOptions } from "./writeback-consumer.js";
 export * from "./integration-adapter.js";
+
+// Agent workspace provisioning (used by @agent-relay/cloud and
+// @relayflows/core to seed workspaces and mount them for agent processes).
+export {
+  createWorkspaceIfNeeded,
+  seedAclRules,
+  seedWorkspace,
+  seedWorkflowAcls,
+  seedWorkspaceTar,
+} from "./workspace-seeder.js";
+
+export { ensureRelayfileMount } from "./workspace-mount.js";
+export type { MountConfig, MountHandle } from "./workspace-mount.js";
