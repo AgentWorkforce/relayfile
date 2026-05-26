@@ -50,6 +50,115 @@ func markLocalDirtyForTest(t *testing.T, syncer *Syncer, remotePath, localPath s
 	syncer.state.Files[normalizeRemotePath(remotePath)] = tracked
 }
 
+func TestHTTPClientRetryDelayHonorsRetryAfter(t *testing.T) {
+	client := NewHTTPClient("https://example.test", "token", nil)
+	if got := client.retryDelay(1, "30"); got != 30*time.Second {
+		t.Fatalf("expected Retry-After 30s, got %s", got)
+	}
+	if got := client.retryDelay(1, "999"); got != defaultRetryAfterMaxDelay {
+		t.Fatalf("expected Retry-After cap %s, got %s", defaultRetryAfterMaxDelay, got)
+	}
+}
+
+func TestWebSocketReconnectDelayBounds(t *testing.T) {
+	if got := websocketReconnectDelay(1); got < defaultWebSocketReconnectBase || got > defaultWebSocketReconnectBase+defaultWebSocketReconnectJitter {
+		t.Fatalf("first reconnect delay out of bounds: %s", got)
+	}
+	if got := websocketReconnectDelay(20); got < defaultWebSocketReconnectMax-defaultWebSocketReconnectJitter || got > defaultWebSocketReconnectMax {
+		t.Fatalf("capped reconnect delay out of bounds: %s", got)
+	}
+}
+
+func TestWebSocketConnectDueRespectsScheduledBackoff(t *testing.T) {
+	syncer := &Syncer{websocket: true}
+	now := time.Now()
+	if !syncer.websocketConnectDueLocked(now) {
+		t.Fatal("expected websocket connect to be due before a backoff is scheduled")
+	}
+	syncer.wsNextAttempt = now.Add(time.Minute)
+	if syncer.websocketConnectDueLocked(now) {
+		t.Fatal("expected websocket connect to wait for scheduled backoff")
+	}
+	syncer.wsNextAttempt = time.Time{}
+	syncer.wsConnecting = true
+	if syncer.websocketConnectDueLocked(now) {
+		t.Fatal("expected websocket connect to wait while another dial is in progress")
+	}
+}
+
+func TestMaintainWebSocketHonorsRetryAfter(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "17")
+		http.Error(w, "busy", http.StatusTooManyRequests)
+	}))
+	defer server.Close()
+
+	client := NewHTTPClient(server.URL, "token", server.Client())
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_retry_after",
+		RemoteRoot:  "/",
+		LocalRoot:   t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer failed: %v", err)
+	}
+
+	before := time.Now()
+	if err := syncer.MaintainWebSocket(context.Background()); err == nil {
+		t.Fatal("expected websocket dial to fail")
+	}
+
+	syncer.mu.Lock()
+	nextAttempt := syncer.wsNextAttempt
+	connecting := syncer.wsConnecting
+	syncer.mu.Unlock()
+
+	if connecting {
+		t.Fatal("expected websocket connecting flag to be cleared after failed dial")
+	}
+	if nextAttempt.Before(before.Add(16*time.Second)) || nextAttempt.After(before.Add(18*time.Second)) {
+		t.Fatalf("expected Retry-After based reconnect around 17s, got %s from now", time.Until(nextAttempt))
+	}
+}
+
+func TestWebSocketConnectFailureDoesNotClearNewGeneration(t *testing.T) {
+	syncer := &Syncer{
+		websocket:    true,
+		wsConnecting: true,
+		wsGeneration: 2,
+	}
+
+	syncer.finishWebSocketConnectFailure(1, 17*time.Second)
+
+	syncer.mu.Lock()
+	defer syncer.mu.Unlock()
+	if !syncer.wsConnecting {
+		t.Fatal("stale dial failure cleared the current generation's connecting flag")
+	}
+	if !syncer.wsNextAttempt.IsZero() {
+		t.Fatalf("stale dial failure scheduled backoff for current generation: %s", syncer.wsNextAttempt)
+	}
+}
+
+func TestResetWebSocketInvalidatesInFlightDialGeneration(t *testing.T) {
+	syncer := &Syncer{
+		websocket:    true,
+		wsConnecting: true,
+	}
+
+	syncer.ResetWebSocket()
+	syncer.finishWebSocketConnectFailure(0, 17*time.Second)
+
+	syncer.mu.Lock()
+	defer syncer.mu.Unlock()
+	if syncer.wsGeneration != 1 {
+		t.Fatalf("expected reset to advance websocket generation, got %d", syncer.wsGeneration)
+	}
+	if !syncer.wsNextAttempt.IsZero() {
+		t.Fatalf("stale dial scheduled backoff after reset: %s", syncer.wsNextAttempt)
+	}
+}
+
 type fakeProviderLayoutRegistrar struct {
 	calls    []string
 	manifest map[string]ProviderLayoutManifest

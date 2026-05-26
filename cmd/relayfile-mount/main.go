@@ -26,6 +26,7 @@ const (
 	mountModePoll           = "poll"
 	mountModeFuse           = "fuse"
 	websocketReconcileEvery = 10
+	minMountPollInterval    = 5 * time.Second
 )
 
 var errFuseModeUnavailable = errors.New("fuse mode is not available in this build")
@@ -100,6 +101,7 @@ func main() {
 	if *interval <= 0 {
 		*interval = 30 * time.Second
 	}
+	*interval = enforcePollIntervalFloor(*interval)
 	if *timeout <= 0 {
 		*timeout = 15 * time.Second
 	}
@@ -357,15 +359,25 @@ func runSinglePollingMount(rootCtx context.Context, cfg mountConfig) error {
 	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
 	timer := time.NewTimer(jitteredIntervalWithSample(cfg.interval, cfg.intervalJitter, rng.Float64()))
 	defer timer.Stop()
+	wsTicker := time.NewTicker(mountsync.DefaultWebSocketMaintenanceEvery)
+	defer wsTicker.Stop()
 	cycle := 0
 	for {
 		select {
 		case <-rootCtx.Done():
 			log.Printf("mount sync stopping: %v", rootCtx.Err())
 			return nil
+		case <-wsTicker.C:
+			if cfg.websocketEnabled {
+				ctx, cancel := context.WithTimeout(rootCtx, cfg.timeout)
+				if err := syncer.MaintainWebSocket(ctx); err != nil {
+					log.Printf("websocket unavailable; using polling sync: %v", err)
+				}
+				cancel()
+			}
 		case <-timer.C:
 			cycle++
-			reconcile := !cfg.websocketEnabled || cycle%websocketReconcileEvery == 0
+			reconcile := shouldReconcileMountCycle(cfg.websocketEnabled, cycle)
 			if reconcile {
 				run(true)
 			}
@@ -624,6 +636,10 @@ func normalizeTokenScopes(raw any) []string {
 	return values
 }
 
+func shouldReconcileMountCycle(websocketEnabled bool, cycle int) bool {
+	return !websocketEnabled || cycle%websocketReconcileEvery == 0
+}
+
 func clampJitterRatio(value float64) float64 {
 	if value < 0 {
 		return 0
@@ -634,13 +650,20 @@ func clampJitterRatio(value float64) float64 {
 	return value
 }
 
+func enforcePollIntervalFloor(interval time.Duration) time.Duration {
+	if interval > 0 && interval < minMountPollInterval {
+		return minMountPollInterval
+	}
+	return interval
+}
+
 func jitteredIntervalWithSample(base time.Duration, jitterRatio, sample float64) time.Duration {
 	if base <= 0 {
 		return 0
 	}
 	jitterRatio = clampJitterRatio(jitterRatio)
 	if jitterRatio == 0 {
-		return base
+		return enforcePollIntervalFloor(base)
 	}
 	if sample < 0 {
 		sample = 0
@@ -655,5 +678,5 @@ func jitteredIntervalWithSample(base time.Duration, jitterRatio, sample float64)
 	if delay < time.Millisecond {
 		return time.Millisecond
 	}
-	return delay
+	return enforcePollIntervalFloor(delay)
 }
