@@ -6,7 +6,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_No unreleased changes._
+### Added
+
+- Agent workspace provisioning helpers, formerly published as part of
+  `@agent-relay/sdk`:
+  - `createWorkspaceIfNeeded`, `seedAclRules`, `seedWorkspace`,
+    `seedWorkflowAcls`, `seedWorkspaceTar` from
+    `@relayfile/sdk/workspace-seeder`
+  - `ensureRelayfileMount` + `MountConfig` / `MountHandle` from
+    `@relayfile/sdk/workspace-mount`
+
+  These are `RelayFileClient` wrappers and `relayfile-mount` lifecycle
+  helpers. They statically import `node:child_process`, `node:fs`, and
+  `node:path`, so they are only available via the explicit subpaths to
+  keep the default `@relayfile/sdk` entry free of CLI-only Node modules
+  for browser and edge consumers.
 
 ## [0.7.40] - 2026-05-25
 
