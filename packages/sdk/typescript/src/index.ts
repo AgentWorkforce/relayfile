@@ -216,15 +216,10 @@ export { WritebackConsumer } from "./writeback-consumer.js";
 export type { WritebackHandler, WritebackConsumerOptions } from "./writeback-consumer.js";
 export * from "./integration-adapter.js";
 
-// Agent workspace provisioning (used by @agent-relay/cloud and
-// @relayflows/core to seed workspaces and mount them for agent processes).
-export {
-  createWorkspaceIfNeeded,
-  seedAclRules,
-  seedWorkspace,
-  seedWorkflowAcls,
-  seedWorkspaceTar,
-} from "./workspace-seeder.js";
-
-export { ensureRelayfileMount } from "./workspace-mount.js";
-export type { MountConfig, MountHandle } from "./workspace-mount.js";
+// Agent workspace provisioning helpers (`seedWorkspace`, `seedAclRules`,
+// `ensureRelayfileMount`, …) live in CLI-only modules that statically pull in
+// `node:child_process`, `node:fs`, and `node:path`. They are intentionally
+// excluded from the default entry so browser/edge consumers stay node-free.
+// Import them from the explicit subpaths instead:
+//   `@relayfile/sdk/workspace-seeder`
+//   `@relayfile/sdk/workspace-mount`
