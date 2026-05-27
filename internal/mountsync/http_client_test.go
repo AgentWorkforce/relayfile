@@ -1,6 +1,8 @@
 package mountsync
 
 import (
+	"archive/tar"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -106,6 +108,75 @@ func TestHTTPClientExportFilesUsesPathFilter(t *testing.T) {
 	}
 	if files[0].Path != "/github/repos/demo/README.md" || files[0].Revision != "rev_1" || files[0].Content != "# Demo" {
 		t.Fatalf("unexpected exported file: %+v", files[0])
+	}
+}
+
+func TestHTTPClientExportGithubWorkingTreeTarUsesRawTarContract(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/workspaces/ws_tar/fs/export" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if r.URL.Query().Get("format") != "tar" {
+			t.Fatalf("expected tar export format, got %q", r.URL.Query().Get("format"))
+		}
+		if r.URL.Query().Get("decode") != "github-working-tree" {
+			t.Fatalf("expected github-working-tree decode, got %q", r.URL.Query().Get("decode"))
+		}
+		if r.URL.Query().Get("pathPrefix") != "/github/repos/AgentWorkforce/cloud/contents" {
+			t.Fatalf("unexpected pathPrefix %q", r.URL.Query().Get("pathPrefix"))
+		}
+		if r.URL.Query().Get("headSha") != "head123" {
+			t.Fatalf("unexpected headSha %q", r.URL.Query().Get("headSha"))
+		}
+		if r.URL.Query().Get("gzip") != "0" {
+			t.Fatalf("expected gzip=0 raw tar request, got %q", r.URL.Query().Get("gzip"))
+		}
+		var buf bytes.Buffer
+		tw := tar.NewWriter(&buf)
+		if err := tw.WriteHeader(&tar.Header{Name: "README.md", Mode: 0o644, Size: int64(len("# Cloud\n"))}); err != nil {
+			t.Fatalf("write tar header: %v", err)
+		}
+		if _, err := tw.Write([]byte("# Cloud\n")); err != nil {
+			t.Fatalf("write tar body: %v", err)
+		}
+		if err := tw.Close(); err != nil {
+			t.Fatalf("close tar: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/x-tar")
+		_, _ = w.Write(buf.Bytes())
+	}))
+	defer server.Close()
+
+	client := NewHTTPClient(server.URL, "token", server.Client())
+	out, err := client.ExportGithubWorkingTreeTar(context.Background(), "ws_tar", GithubWorkingTreeSeedRequest{
+		Owner:      "AgentWorkforce",
+		Repo:       "cloud",
+		PathPrefix: "/github/repos/AgentWorkforce/cloud/contents",
+		HeadSHA:    "head123",
+		Gzip:       false,
+	})
+	if err != nil {
+		t.Fatalf("export github working-tree tar failed: %v", err)
+	}
+	defer out.Body.Close()
+	if out.ContentType != "application/x-tar" {
+		t.Fatalf("expected content type application/x-tar, got %q", out.ContentType)
+	}
+	tr := tar.NewReader(out.Body)
+	header, err := tr.Next()
+	if err != nil {
+		t.Fatalf("read tar header: %v", err)
+	}
+	if header.Name != "README.md" {
+		t.Fatalf("unexpected tar entry %q", header.Name)
+	}
+	data, err := io.ReadAll(tr)
+	if err != nil {
+		t.Fatalf("read tar content: %v", err)
+	}
+	if string(data) != "# Cloud\n" {
+		t.Fatalf("unexpected tar content %q", string(data))
 	}
 }
 

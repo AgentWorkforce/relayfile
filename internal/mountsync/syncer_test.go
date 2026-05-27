@@ -1,6 +1,7 @@
 package mountsync
 
 import (
+	"archive/tar"
 	"bytes"
 	"context"
 	"crypto"
@@ -1039,6 +1040,187 @@ func TestPullRemoteFullTreeSkipsReadFileWhenLocalHashMatchesContentHash(t *testi
 		t.Fatalf("unexpected tracked state after skip: %+v", tracked)
 	}
 	assertLocalFileContent(t, localPath, content)
+}
+
+func TestPullRemoteFullGithubWorkingTreeTarSeedsAndStoresCursor(t *testing.T) {
+	localDir := t.TempDir()
+	contentsRoot := "/github/repos/AgentWorkforce/cloud/contents"
+	headSHA := "head123"
+	readme := []byte("# Cloud\n")
+	app := []byte("export const ok = true;\n")
+	readmeRemote := contentsRoot + "/README.md@" + headSHA + ".json"
+	appRemote := contentsRoot + "/src/app.ts@" + headSHA + ".json"
+	sentinelPath := "/github/repos/AgentWorkforce/cloud/.relayfile/clone.json"
+	client := &fakeExportClient{
+		fakeClient: &fakeClient{
+			files: map[string]RemoteFile{
+				sentinelPath: {
+					Path:        sentinelPath,
+					Revision:    "rev_1",
+					ContentType: "application/json",
+					Content:     `{"headSha":"` + headSHA + `","defaultBranch":"main"}`,
+				},
+				readmeRemote: {
+					Path:        readmeRemote,
+					Revision:    "rev_2",
+					ContentType: "application/json",
+					Content:     string(readme),
+					ContentHash: hashBytes(readme),
+				},
+				appRemote: {
+					Path:        appRemote,
+					Revision:    "rev_3",
+					ContentType: "application/json",
+					Content:     string(app),
+					ContentHash: hashBytes(app),
+				},
+			},
+			events: []FilesystemEvent{
+				{EventID: "evt_1", Type: "file.created", Path: readmeRemote, Revision: "rev_2", ContentHash: hashBytes(readme)},
+				{EventID: "evt_2", Type: "file.updated", Path: sentinelPath, Revision: "rev_1"},
+			},
+		},
+		tarFiles: map[string][]byte{
+			"README.md":  readme,
+			"src/app.ts": app,
+		},
+	}
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID:   "ws_tar_seed",
+		RemoteRoot:    contentsRoot,
+		LocalRoot:     localDir,
+		StateFile:     filepath.Join(localDir, ".relayfile-mount-state.json"),
+		WebSocket:     boolPtr(false),
+		FullPullEvery: -1,
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer failed: %v", err)
+	}
+	if err := syncer.Reconcile(context.Background()); err != nil {
+		t.Fatalf("Reconcile failed: %v", err)
+	}
+	if client.tarCalls != 1 {
+		t.Fatalf("expected github tar export to be used once, got %d", client.tarCalls)
+	}
+	gotReadme, err := os.ReadFile(filepath.Join(localDir, "README.md"))
+	if err != nil {
+		t.Fatalf("read seeded README: %v", err)
+	}
+	if !bytes.Equal(gotReadme, readme) {
+		t.Fatalf("unexpected README content: %q", string(gotReadme))
+	}
+	if _, err := os.Stat(filepath.Join(localDir, "README.md@"+headSHA+".json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected decoded working-tree path without relayfile suffix, stat err=%v", err)
+	}
+	if syncer.state.EventsCursor != "evt_2" {
+		t.Fatalf("expected events cursor at clone sentinel evt_2, got %q", syncer.state.EventsCursor)
+	}
+	if syncer.state.GithubWorkingTreeHeadSHA != headSHA {
+		t.Fatalf("expected head sha persisted, got %q", syncer.state.GithubWorkingTreeHeadSHA)
+	}
+	if tracked := syncer.state.Files[readmeRemote]; tracked.Hash != hashBytes(readme) || tracked.Revision != "rev_2" {
+		t.Fatalf("unexpected tracked README state: %+v", tracked)
+	}
+	if got := syncer.localRelativeToRemotePath("src/app.ts"); got != appRemote {
+		t.Fatalf("local write path should map back to content object with head sha: got %q want %q", got, appRemote)
+	}
+}
+
+func TestParseGithubCloneManifestAcceptsSnakeCaseCursor(t *testing.T) {
+	manifest, ok := parseGithubCloneManifest([]byte(`{
+		"head_sha": "head123",
+		"default_branch": "main",
+		"events_cursor": "evt_cursor",
+		"event_id": "evt_id"
+	}`))
+	if !ok {
+		t.Fatalf("expected snake_case clone manifest to parse")
+	}
+	if manifest.HeadSHA != "head123" {
+		t.Fatalf("unexpected head sha %q", manifest.HeadSHA)
+	}
+	if manifest.EventsCursor != "evt_cursor" {
+		t.Fatalf("unexpected events cursor %q", manifest.EventsCursor)
+	}
+	if manifest.EventID != "evt_id" {
+		t.Fatalf("unexpected event id %q", manifest.EventID)
+	}
+}
+
+func TestGithubWorkingTreeLocalMappingPrefersCurrentHeadSHA(t *testing.T) {
+	localDir := t.TempDir()
+	contentsRoot := "/github/repos/AgentWorkforce/cloud/contents"
+	oldRemote := contentsRoot + "/src/app.ts@oldsha.json"
+	newRemote := contentsRoot + "/src/app.ts@newsha.json"
+	syncer, err := NewSyncer(&fakeClient{}, SyncerOptions{
+		WorkspaceID:   "ws_head_change",
+		RemoteRoot:    contentsRoot,
+		LocalRoot:     localDir,
+		StateFile:     filepath.Join(localDir, ".relayfile-mount-state.json"),
+		WebSocket:     boolPtr(false),
+		FullPullEvery: -1,
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer failed: %v", err)
+	}
+	syncer.githubWorkingTree.HeadSHA = "newsha"
+	syncer.state.Files = map[string]trackedFile{
+		oldRemote: {Revision: "rev_999", Hash: "old"},
+		newRemote: {Revision: "rev_010", Hash: "new"},
+	}
+
+	if got := syncer.localRelativeToRemotePath("src/app.ts"); got != newRemote {
+		t.Fatalf("local write path should prefer current head object: got %q want %q", got, newRemote)
+	}
+}
+
+func TestGithubWorkingTreeTarSeedRejectsDuplicateEntries(t *testing.T) {
+	localDir := t.TempDir()
+	contentsRoot := "/github/repos/AgentWorkforce/cloud/contents"
+	headSHA := "head123"
+	readme := []byte("# Cloud\n")
+	readmeRemote := contentsRoot + "/README.md@" + headSHA + ".json"
+	syncer, err := NewSyncer(&fakeClient{}, SyncerOptions{
+		WorkspaceID:   "ws_dup_tar",
+		RemoteRoot:    contentsRoot,
+		LocalRoot:     localDir,
+		StateFile:     filepath.Join(localDir, ".relayfile-mount-state.json"),
+		WebSocket:     boolPtr(false),
+		FullPullEvery: -1,
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer failed: %v", err)
+	}
+	syncer.githubWorkingTree.HeadSHA = headSHA
+	syncer.state.Files = map[string]trackedFile{}
+
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	for i := 0; i < 2; i++ {
+		if err := tw.WriteHeader(&tar.Header{Name: "README.md", Mode: 0o644, Size: int64(len(readme))}); err != nil {
+			t.Fatalf("write tar header: %v", err)
+		}
+		if _, err := tw.Write(readme); err != nil {
+			t.Fatalf("write tar body: %v", err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatalf("close tar: %v", err)
+	}
+
+	_, err = syncer.applyGithubWorkingTreeTarSeed(GithubWorkingTreeTar{
+		Body:        io.NopCloser(bytes.NewReader(buf.Bytes())),
+		ContentType: "application/x-tar",
+	}, map[string]githubTreeFile{
+		"README.md": {
+			RemotePath:  readmeRemote,
+			Revision:    "rev_1",
+			ContentHash: hashBytes(readme),
+		},
+	}, nil, bootstrapProgress{})
+	if err == nil || !strings.Contains(err.Error(), "duplicate file README.md") {
+		t.Fatalf("expected duplicate tar entry error, got %v", err)
+	}
 }
 
 func TestReconcileBootstrapSkipsMatchingKeptMirrorBeforePushLocal(t *testing.T) {
@@ -4131,6 +4313,9 @@ type deleteCall struct {
 type fakeExportClient struct {
 	*fakeClient
 	exportCalls   int
+	tarCalls      int
+	tarFiles      map[string][]byte
+	tarErr        error
 	readFileCalls int
 	exportErr     error
 }
@@ -4157,6 +4342,39 @@ func (c *fakeExportClient) ExportFiles(ctx context.Context, workspaceID, path st
 func (c *fakeExportClient) ReadFile(ctx context.Context, workspaceID, path string) (RemoteFile, error) {
 	c.readFileCalls++
 	return c.fakeClient.ReadFile(ctx, workspaceID, path)
+}
+
+func (c *fakeExportClient) ExportGithubWorkingTreeTar(ctx context.Context, workspaceID string, seed GithubWorkingTreeSeedRequest) (GithubWorkingTreeTar, error) {
+	_ = ctx
+	_ = workspaceID
+	_ = seed
+	c.tarCalls++
+	if c.tarErr != nil {
+		return GithubWorkingTreeTar{}, c.tarErr
+	}
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	names := make([]string, 0, len(c.tarFiles))
+	for name := range c.tarFiles {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		data := c.tarFiles[name]
+		if err := tw.WriteHeader(&tar.Header{Name: name, Mode: 0o644, Size: int64(len(data))}); err != nil {
+			return GithubWorkingTreeTar{}, err
+		}
+		if _, err := tw.Write(data); err != nil {
+			return GithubWorkingTreeTar{}, err
+		}
+	}
+	if err := tw.Close(); err != nil {
+		return GithubWorkingTreeTar{}, err
+	}
+	return GithubWorkingTreeTar{
+		Body:        io.NopCloser(bytes.NewReader(buf.Bytes())),
+		ContentType: "application/x-tar",
+	}, nil
 }
 
 func (c *fakeClient) ListTree(ctx context.Context, workspaceID, path string, depth int, cursor string) (TreeResponse, error) {

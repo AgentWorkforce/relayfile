@@ -1,7 +1,10 @@
 package mountsync
 
 import (
+	"archive/tar"
+	"bufio"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
@@ -145,6 +148,8 @@ type TreeEntry struct {
 	Type        string `json:"type"`
 	Revision    string `json:"revision"`
 	ContentHash string `json:"contentHash,omitempty"`
+	Size        int64  `json:"size,omitempty"`
+	Encoding    string `json:"encoding,omitempty"`
 }
 
 type TreeResponse struct {
@@ -200,6 +205,23 @@ type RemoteClient interface {
 
 type exportSnapshotClient interface {
 	ExportFiles(ctx context.Context, workspaceID, path string) ([]RemoteFile, error)
+}
+
+type githubWorkingTreeTarClient interface {
+	ExportGithubWorkingTreeTar(ctx context.Context, workspaceID string, seed GithubWorkingTreeSeedRequest) (GithubWorkingTreeTar, error)
+}
+
+type GithubWorkingTreeSeedRequest struct {
+	Owner      string
+	Repo       string
+	PathPrefix string
+	HeadSHA    string
+	Gzip       bool
+}
+
+type GithubWorkingTreeTar struct {
+	Body        io.ReadCloser
+	ContentType string
 }
 
 type LazyMaterializeClient interface {
@@ -425,6 +447,64 @@ func (c *HTTPClient) ExportFiles(ctx context.Context, workspaceID, path string) 
 		})
 	}
 	return files, nil
+}
+
+func (c *HTTPClient) ExportGithubWorkingTreeTar(ctx context.Context, workspaceID string, seed GithubWorkingTreeSeedRequest) (GithubWorkingTreeTar, error) {
+	q := url.Values{}
+	q.Set("format", "tar")
+	q.Set("decode", "github-working-tree")
+	q.Set("pathPrefix", normalizeRemotePath(seed.PathPrefix))
+	q.Set("headSha", strings.TrimSpace(seed.HeadSHA))
+	if !seed.Gzip {
+		q.Set("gzip", "0")
+	}
+	requestPath := fmt.Sprintf("/v1/workspaces/%s/fs/export?%s", url.PathEscape(workspaceID), q.Encode())
+
+	for attempt := 0; ; attempt++ {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+requestPath, nil)
+		if err != nil {
+			return GithubWorkingTreeTar{}, err
+		}
+		req.Header.Set("Authorization", "Bearer "+c.Token())
+		req.Header.Set("X-Correlation-Id", correlationID())
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			if attempt < c.maxRetries {
+				if waitErr := waitWithContext(ctx, c.retryDelay(attempt+1, "")); waitErr != nil {
+					return GithubWorkingTreeTar{}, waitErr
+				}
+				continue
+			}
+			return GithubWorkingTreeTar{}, err
+		}
+		if resp.StatusCode >= 200 && resp.StatusCode <= 299 {
+			return GithubWorkingTreeTar{
+				Body:        resp.Body,
+				ContentType: resp.Header.Get("Content-Type"),
+			}, nil
+		}
+		payloadBytes, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		_ = resp.Body.Close()
+		if readErr != nil {
+			return GithubWorkingTreeTar{}, readErr
+		}
+		if (resp.StatusCode == http.StatusTooManyRequests || (resp.StatusCode >= 500 && resp.StatusCode <= 599)) && attempt < c.maxRetries {
+			if waitErr := waitWithContext(ctx, c.retryDelay(attempt+1, resp.Header.Get("Retry-After"))); waitErr != nil {
+				return GithubWorkingTreeTar{}, waitErr
+			}
+			continue
+		}
+		var errPayload struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		}
+		_ = json.Unmarshal(payloadBytes, &errPayload)
+		return GithubWorkingTreeTar{}, &HTTPError{
+			StatusCode: resp.StatusCode,
+			Code:       errPayload.Code,
+			Message:    errPayload.Message,
+		}
+	}
 }
 
 func (c *HTTPClient) LazyMaterialize(ctx context.Context, workspaceID, owner, repo string) error {
@@ -717,6 +797,7 @@ type Syncer struct {
 	lazyRepos            bool
 	lowMemory            bool
 	layoutRegistrar      ProviderLayoutRegistrar
+	githubWorkingTree    *githubWorkingTreeMount
 	closeScheduler       *CloseScheduler
 	rollingCoalescer     *RollingDigestCoalescer
 	circuit              *CloudErrorCircuit
@@ -745,11 +826,12 @@ type mountState struct {
 	// are additive/omitempty: legacy state files load with zero values
 	// (BootstrapComplete=false), which self-heals by forcing a full
 	// reconcile on the next cycle.
-	BootstrapComplete    bool   `json:"bootstrapComplete,omitempty"`
-	BootstrapCursor      string `json:"bootstrapCursor,omitempty"`
-	BootstrapFilesSynced int    `json:"bootstrapFilesSynced,omitempty"`
-	BootstrapFilesTotal  int    `json:"bootstrapFilesTotal,omitempty"`
-	BootstrapStartedAt   string `json:"bootstrapStartedAt,omitempty"`
+	BootstrapComplete        bool   `json:"bootstrapComplete,omitempty"`
+	BootstrapCursor          string `json:"bootstrapCursor,omitempty"`
+	BootstrapFilesSynced     int    `json:"bootstrapFilesSynced,omitempty"`
+	BootstrapFilesTotal      int    `json:"bootstrapFilesTotal,omitempty"`
+	BootstrapStartedAt       string `json:"bootstrapStartedAt,omitempty"`
+	GithubWorkingTreeHeadSHA string `json:"githubWorkingTreeHeadSha,omitempty"`
 }
 
 type incrementalCheckpoint struct {
@@ -791,6 +873,14 @@ type trackedFile struct {
 	WriteDenied bool   `json:"writeDenied,omitempty"`
 	DeniedHash  string `json:"deniedHash,omitempty"`
 	ReadOnly    bool   `json:"readonly,omitempty"`
+}
+
+type githubWorkingTreeMount struct {
+	Owner        string
+	Repo         string
+	RepoRoot     string
+	ContentsRoot string
+	HeadSHA      string
 }
 
 type localSnapshot struct {
@@ -1026,6 +1116,7 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 			Now:      opts.DigestNow,
 		}
 	}
+	githubWorkingTree := detectGithubWorkingTreeMount(remoteRoot)
 	return &Syncer{
 		client:               client,
 		workspace:            workspace,
@@ -1055,6 +1146,7 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 		lazyRepos:            lazyRepos,
 		lowMemory:            lowMemory,
 		layoutRegistrar:      opts.ProviderLayoutRegistrar,
+		githubWorkingTree:    githubWorkingTree,
 		closeScheduler:       closeScheduler,
 		rollingCoalescer:     rollingCoalescer,
 		circuit:              NewCloudErrorCircuit(),
@@ -1137,7 +1229,7 @@ func (s *Syncer) HandleLocalChange(ctx context.Context, relativePath string, op 
 		return err
 	}
 
-	remotePath := normalizeRemotePath(filepath.Join(s.remoteRoot, filepath.FromSlash(relativePath)))
+	remotePath := s.localRelativeToRemotePath(relativePath)
 	if remotePath == "/" || !isUnderRemoteRoot(s.remoteRoot, remotePath) {
 		return nil
 	}
@@ -2362,6 +2454,9 @@ func (s *Syncer) pullRemote(ctx context.Context, conflicted map[string]struct{})
 	if s.wsConn != nil {
 		return nil
 	}
+	if strings.TrimSpace(s.state.EventsCursor) != "" {
+		return nil
+	}
 	cursor, err := s.resolveLatestEventCursor(bctx)
 	if err != nil {
 		var httpErr *HTTPError
@@ -2375,6 +2470,12 @@ func (s *Syncer) pullRemote(ctx context.Context, conflicted map[string]struct{})
 }
 
 func (s *Syncer) pullRemoteFull(ctx context.Context, conflicted map[string]struct{}, prog bootstrapProgress) error {
+	if client, ok := s.client.(githubWorkingTreeTarClient); ok {
+		used, err := s.pullRemoteFullGithubTarSeed(ctx, client, conflicted, prog)
+		if used {
+			return err
+		}
+	}
 	if client, ok := s.client.(exportSnapshotClient); ok {
 		used, err := s.pullRemoteFullExport(ctx, client, conflicted, prog)
 		if used {
@@ -2382,6 +2483,99 @@ func (s *Syncer) pullRemoteFull(ctx context.Context, conflicted map[string]struc
 		}
 	}
 	return s.pullRemoteFullTree(ctx, conflicted, prog)
+}
+
+type githubCloneManifest struct {
+	HeadSHA       string
+	DefaultBranch string
+	EventsCursor  string
+	EventID       string
+	Path          string
+}
+
+func (s *Syncer) pullRemoteFullGithubTarSeed(ctx context.Context, client githubWorkingTreeTarClient, conflicted map[string]struct{}, prog bootstrapProgress) (bool, error) {
+	if s.githubWorkingTree == nil || s.lazyRepos {
+		return false, nil
+	}
+	manifest, err := s.readGithubCloneManifest(ctx)
+	if err != nil {
+		if exportSnapshotUnsupported(err) {
+			return false, nil
+		}
+		s.logf("github tar seed unavailable: read clone manifest failed: %v", err)
+		return false, nil
+	}
+	headSHA := strings.TrimSpace(manifest.HeadSHA)
+	if headSHA == "" {
+		return false, nil
+	}
+	s.githubWorkingTree.HeadSHA = headSHA
+	s.state.GithubWorkingTreeHeadSHA = headSHA
+
+	cursor := strings.TrimSpace(manifest.EventsCursor)
+	if cursor == "" {
+		cursor = strings.TrimSpace(manifest.EventID)
+	}
+	if cursor == "" {
+		cursor, err = s.resolveGithubCloneManifestCursor(ctx, manifest)
+		if err != nil {
+			s.logf("github tar seed unavailable: resolve clone manifest cursor failed: %v", err)
+			return false, nil
+		}
+	}
+	if cursor == "" {
+		s.logf("github tar seed unavailable: clone manifest has no event cursor")
+		return false, nil
+	}
+
+	tree, maxObservedRevision, err := s.githubWorkingTreeSnapshot(ctx, prog)
+	if err != nil {
+		s.logf("github tar seed unavailable: tree verification snapshot failed: %v", err)
+		return false, nil
+	}
+	if len(tree) == 0 {
+		return false, nil
+	}
+
+	tarBody, err := client.ExportGithubWorkingTreeTar(ctx, s.workspace, GithubWorkingTreeSeedRequest{
+		Owner:      s.githubWorkingTree.Owner,
+		Repo:       s.githubWorkingTree.Repo,
+		PathPrefix: s.githubWorkingTree.ContentsRoot,
+		HeadSHA:    headSHA,
+		Gzip:       false,
+	})
+	if err != nil {
+		if exportSnapshotUnsupported(err) {
+			return false, nil
+		}
+		s.recordCloudFailure(err)
+		return true, err
+	}
+	defer tarBody.Body.Close()
+	s.recordCloudSuccess()
+
+	remotePaths, err := s.applyGithubWorkingTreeTarSeed(tarBody, tree, conflicted, prog)
+	if err != nil {
+		return true, err
+	}
+	if len(remotePaths) != len(tree) {
+		return true, fmt.Errorf("github tar seed verification failed: tar contained %d verified files, tree expected %d", len(remotePaths), len(tree))
+	}
+	if s.snapshotDeleteUnsafe(len(remotePaths)) {
+		s.logf("skipping snapshot delete pass (github tar seed): fresh remote tree has %d files but %d are tracked locally (suspected partial/empty cloud listing); preserving local state", len(remotePaths), len(s.state.Files))
+		s.markBootstrapComplete()
+		s.state.EventsCursor = cursor
+		return true, nil
+	}
+	if err := s.applyRemoteSnapshotDeletesRev(remotePaths, conflicted, maxObservedRevision); err != nil {
+		return true, err
+	}
+	s.markBootstrapComplete()
+	s.state.EventsCursor = cursor
+	s.state.IncrementalCheckpoint = nil
+	s.state.IncrementalBacklogDraining = false
+	s.logf("github tar seed complete for %s/%s at %s: %d files, events cursor %q", s.githubWorkingTree.Owner, s.githubWorkingTree.Repo, headSHA, len(remotePaths), cursor)
+	return true, nil
 }
 
 func (s *Syncer) pullRemoteFullExport(ctx context.Context, client exportSnapshotClient, conflicted map[string]struct{}, prog bootstrapProgress) (bool, error) {
@@ -2444,6 +2638,249 @@ func (s *Syncer) pullRemoteFullExport(ctx context.Context, client exportSnapshot
 	// one-shot mirror with no resume cursor.
 	s.markBootstrapComplete()
 	return true, nil
+}
+
+func (s *Syncer) readGithubCloneManifest(ctx context.Context) (githubCloneManifest, error) {
+	if s.githubWorkingTree == nil {
+		return githubCloneManifest{}, fmt.Errorf("not a github working-tree mount")
+	}
+	paths := []string{s.githubWorkingTree.cloneSentinelPath(), s.githubWorkingTree.legacyMetaPath()}
+	var lastErr error
+	for _, manifestPath := range paths {
+		file, err := s.client.ReadFile(ctx, s.workspace, manifestPath)
+		if err != nil {
+			var httpErr *HTTPError
+			if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusNotFound {
+				lastErr = err
+				continue
+			}
+			return githubCloneManifest{}, err
+		}
+		payload, err := decodeRemoteFileContent(file)
+		if err != nil {
+			return githubCloneManifest{}, err
+		}
+		manifest, ok := parseGithubCloneManifest(payload)
+		if !ok {
+			lastErr = fmt.Errorf("clone manifest %s missing headSha", manifestPath)
+			continue
+		}
+		manifest.Path = manifestPath
+		return manifest, nil
+	}
+	if lastErr != nil {
+		return githubCloneManifest{}, lastErr
+	}
+	return githubCloneManifest{}, &HTTPError{StatusCode: http.StatusNotFound, Code: "not_found", Message: "github clone manifest not found"}
+}
+
+func parseGithubCloneManifest(payload []byte) (githubCloneManifest, bool) {
+	var raw map[string]any
+	if err := json.Unmarshal(payload, &raw); err != nil {
+		return githubCloneManifest{}, false
+	}
+	read := func(keys ...string) string {
+		for _, key := range keys {
+			if value, ok := raw[key].(string); ok && strings.TrimSpace(value) != "" {
+				return strings.TrimSpace(value)
+			}
+		}
+		return ""
+	}
+	manifest := githubCloneManifest{
+		HeadSHA:       read("headSha", "headSHA", "head_sha"),
+		DefaultBranch: read("defaultBranch", "default_branch"),
+		EventsCursor:  read("eventsCursor", "events_cursor", "eventCursor", "event_cursor", "fsEventsCursor", "fs_events_cursor", "cursor"),
+		EventID:       read("eventId", "eventID", "event_id"),
+	}
+	return manifest, manifest.HeadSHA != ""
+}
+
+func (s *Syncer) resolveGithubCloneManifestCursor(ctx context.Context, manifest githubCloneManifest) (string, error) {
+	manifestPath := normalizeRemotePath(manifest.Path)
+	if manifestPath == "/" {
+		return "", nil
+	}
+	cursor := ""
+	latest := ""
+	for {
+		feed, err := s.client.ListEvents(ctx, s.workspace, s.eventProvider, cursor, 200)
+		if err != nil {
+			return "", err
+		}
+		for _, event := range feed.Events {
+			if normalizeRemotePath(event.Path) == manifestPath && strings.TrimSpace(event.EventID) != "" {
+				latest = strings.TrimSpace(event.EventID)
+			}
+		}
+		if feed.NextCursor == nil || strings.TrimSpace(*feed.NextCursor) == "" {
+			break
+		}
+		cursor = strings.TrimSpace(*feed.NextCursor)
+	}
+	return latest, nil
+}
+
+type githubTreeFile struct {
+	RemotePath  string
+	Revision    string
+	ContentHash string
+	Encoding    string
+}
+
+func (s *Syncer) githubWorkingTreeSnapshot(ctx context.Context, prog bootstrapProgress) (map[string]githubTreeFile, string, error) {
+	files := map[string]githubTreeFile{}
+	cursor := ""
+	maxObservedRevision := ""
+	for {
+		page, err := s.client.ListTree(ctx, s.workspace, s.githubWorkingTree.ContentsRoot, 200, cursor)
+		if err != nil {
+			return nil, "", err
+		}
+		s.recordCloudSuccess()
+		prog.touch()
+		for _, entry := range page.Entries {
+			if entry.Type != "file" {
+				continue
+			}
+			if revisionAdvances(maxObservedRevision, entry.Revision) {
+				maxObservedRevision = entry.Revision
+			}
+			if headSHA := strings.TrimSpace(s.githubWorkingTree.HeadSHA); headSHA != "" && !strings.HasSuffix(normalizeRemotePath(entry.Path), "@"+headSHA+".json") {
+				continue
+			}
+			rel, ok := s.githubWorkingTree.remotePathToWorkingTreeRel(entry.Path)
+			if !ok {
+				continue
+			}
+			contentHash := strings.TrimSpace(entry.ContentHash)
+			if contentHash == "" {
+				return nil, "", fmt.Errorf("tree entry %s missing contentHash", entry.Path)
+			}
+			files[rel] = githubTreeFile{
+				RemotePath:  normalizeRemotePath(entry.Path),
+				Revision:    entry.Revision,
+				ContentHash: contentHash,
+				Encoding:    normalizeEncoding(entry.Encoding),
+			}
+		}
+		if page.NextCursor == nil || strings.TrimSpace(*page.NextCursor) == "" {
+			break
+		}
+		cursor = strings.TrimSpace(*page.NextCursor)
+	}
+	return files, maxObservedRevision, nil
+}
+
+func (s *Syncer) applyGithubWorkingTreeTarSeed(tarBody GithubWorkingTreeTar, tree map[string]githubTreeFile, conflicted map[string]struct{}, prog bootstrapProgress) (map[string]struct{}, error) {
+	reader := io.Reader(tarBody.Body)
+	buffered := bufio.NewReader(reader)
+	if strings.Contains(strings.ToLower(tarBody.ContentType), "gzip") {
+		gz, err := gzip.NewReader(buffered)
+		if err != nil {
+			return nil, err
+		}
+		defer gz.Close()
+		reader = gz
+	} else {
+		reader = buffered
+	}
+	tr := tar.NewReader(reader)
+	remotePaths := map[string]struct{}{}
+	seen := map[string]struct{}{}
+	for {
+		header, err := tr.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		if header == nil || header.FileInfo().IsDir() {
+			continue
+		}
+		if header.Typeflag != tar.TypeReg && header.Typeflag != tar.TypeRegA {
+			continue
+		}
+		rel := filepath.ToSlash(filepath.Clean(strings.TrimSpace(header.Name)))
+		rel = strings.TrimPrefix(rel, "/")
+		if rel == "" || rel == "." || strings.HasPrefix(rel, "../") || strings.Contains(rel, "/../") {
+			return nil, fmt.Errorf("github tar seed contains unsafe path %q", header.Name)
+		}
+		if _, ok := seen[rel]; ok {
+			return nil, fmt.Errorf("github tar seed contains duplicate file %s", rel)
+		}
+		seen[rel] = struct{}{}
+		meta, ok := tree[rel]
+		if !ok {
+			return nil, fmt.Errorf("github tar seed contains unexpected file %s", rel)
+		}
+		if conflicted != nil {
+			if _, skip := conflicted[meta.RemotePath]; skip {
+				remotePaths[meta.RemotePath] = struct{}{}
+				continue
+			}
+		}
+		data, err := io.ReadAll(tr)
+		if err != nil {
+			return nil, err
+		}
+		hash := hashBytes(data)
+		if hash != meta.ContentHash {
+			return nil, fmt.Errorf("github tar seed contentHash mismatch for %s: tar=%s tree=%s", rel, hash, meta.ContentHash)
+		}
+		localPath, err := safeLocalPath(s.localRoot, rel)
+		if err != nil {
+			return nil, err
+		}
+		if err := s.assertNotMountRoot(localPath); err != nil {
+			return nil, err
+		}
+		tracked := s.state.Files[meta.RemotePath]
+		canWrite := s.canWritePath(meta.RemotePath)
+		if tracked.Dirty {
+			if err := s.applyLocalPermissions(localPath, canWrite); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return nil, err
+			}
+			tracked.ReadOnly = !canWrite
+			s.state.Files[meta.RemotePath] = tracked
+			remotePaths[meta.RemotePath] = struct{}{}
+			continue
+		}
+		if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+			return nil, err
+		}
+		shouldWrite := true
+		if current, err := os.ReadFile(localPath); err == nil && hashBytes(current) == hash {
+			shouldWrite = false
+		}
+		if shouldWrite {
+			if err := writeFileAtomic(localPath, data, 0o644); err != nil {
+				return nil, err
+			}
+		}
+		if err := s.applyLocalPermissions(localPath, canWrite); err != nil {
+			return nil, err
+		}
+		contentType := detectContentType(localPath)
+		s.state.Files[meta.RemotePath] = trackedFile{
+			Revision:    meta.Revision,
+			ContentType: contentType,
+			Encoding:    meta.Encoding,
+			Hash:        hash,
+			Dirty:       false,
+			Denied:      false,
+			ReadOnly:    !canWrite,
+		}
+		remotePaths[meta.RemotePath] = struct{}{}
+		prog.touch()
+	}
+	for rel, meta := range tree {
+		if _, ok := remotePaths[meta.RemotePath]; !ok {
+			return nil, fmt.Errorf("github tar seed missing tree file %s", rel)
+		}
+	}
+	return remotePaths, nil
 }
 
 func exportSnapshotUnsupported(err error) bool {
@@ -2691,7 +3128,7 @@ func (s *Syncer) trySkipBootstrapRead(remotePath string, entry TreeEntry) (bool,
 			return false, nil
 		}
 	}
-	localPath, err := remoteToLocalPath(s.localRoot, s.remoteRoot, remotePath)
+	localPath, err := s.remoteToLocalPath(remotePath)
 	if err != nil {
 		return false, nil
 	}
@@ -3503,7 +3940,7 @@ func (s *Syncer) trySkipIncrementalRead(remotePath string, event FilesystemEvent
 	if ok && (tracked.Dirty || tracked.Denied) {
 		return false, nil
 	}
-	localPath, err := remoteToLocalPath(s.localRoot, s.remoteRoot, remotePath)
+	localPath, err := s.remoteToLocalPath(remotePath)
 	if err != nil {
 		return false, nil
 	}
@@ -3610,7 +4047,7 @@ func (s *Syncer) applyRemoteFile(remotePath string, file RemoteFile, conflicted 
 	tracked.ReadOnly = !canWrite
 	tracked.Denied = false
 	if tracked.Dirty {
-		localPath, err := remoteToLocalPath(s.localRoot, s.remoteRoot, remotePath)
+		localPath, err := s.remoteToLocalPath(remotePath)
 		if err != nil {
 			return nil
 		}
@@ -3624,7 +4061,7 @@ func (s *Syncer) applyRemoteFile(remotePath string, file RemoteFile, conflicted 
 		s.state.Files[remotePath] = tracked
 		return nil
 	}
-	localPath, err := remoteToLocalPath(s.localRoot, s.remoteRoot, remotePath)
+	localPath, err := s.remoteToLocalPath(remotePath)
 	if err != nil {
 		return nil
 	}
@@ -3770,7 +4207,7 @@ func (s *Syncer) applyRemoteDelete(remotePath string, conflicted map[string]stru
 	if tracked.WriteDenied {
 		return nil
 	}
-	localPath, err := remoteToLocalPath(s.localRoot, s.remoteRoot, remotePath)
+	localPath, err := s.remoteToLocalPath(remotePath)
 	if err != nil {
 		delete(s.state.Files, remotePath)
 		return nil
@@ -3806,7 +4243,7 @@ func (s *Syncer) pushLocal(ctx context.Context) (map[string]struct{}, error) {
 	for _, remotePath := range localRemotePaths {
 		snapshot := localFiles[remotePath]
 		tracked, exists := s.state.Files[remotePath]
-		localPath, err := remoteToLocalPath(s.localRoot, s.remoteRoot, remotePath)
+		localPath, err := s.remoteToLocalPath(remotePath)
 		if err != nil {
 			return nil, err
 		}
@@ -3953,7 +4390,7 @@ func (s *Syncer) markReadDenied(remotePath string) error {
 	tracked.ReadOnly = false
 	s.state.Files[remotePath] = tracked
 
-	localPath, err := remoteToLocalPath(s.localRoot, s.remoteRoot, remotePath)
+	localPath, err := s.remoteToLocalPath(remotePath)
 	if err != nil {
 		return nil
 	}
@@ -3981,6 +4418,7 @@ func (s *Syncer) applyWriteDenied(ctx context.Context, remotePath, localPath str
 
 func (s *Syncer) scanLocalFiles() (map[string]localSnapshot, error) {
 	results := map[string]localSnapshot{}
+	githubPathIndex := s.githubWorkingTreePathIndex()
 	statePathAbs, err := filepath.Abs(s.stateFile)
 	if err != nil {
 		return nil, err
@@ -4018,7 +4456,7 @@ func (s *Syncer) scanLocalFiles() (map[string]localSnapshot, error) {
 		// enqueued for writeback (it both stresses the cloud and was part
 		// of the clobber pathology). Surface it and skip.
 		if max := maxWritebackBytes(); max > 0 && info.Size() > max {
-			remotePath, err := localToRemotePath(s.localRoot, s.remoteRoot, path)
+			remotePath, err := s.localPathToRemotePath(path, githubPathIndex)
 			if err != nil {
 				return nil
 			}
@@ -4039,7 +4477,7 @@ func (s *Syncer) scanLocalFiles() (map[string]localSnapshot, error) {
 			s.state.Counters.SkippedOversizeWriteback++
 			return nil
 		}
-		remotePath, err := localToRemotePath(s.localRoot, s.remoteRoot, path)
+		remotePath, err := s.localPathToRemotePath(path, githubPathIndex)
 		if err != nil {
 			return nil
 		}
@@ -4094,6 +4532,9 @@ func (s *Syncer) loadState() error {
 		state.Files = map[string]trackedFile{}
 	}
 	s.state = state
+	if s.githubWorkingTree != nil && strings.TrimSpace(s.state.GithubWorkingTreeHeadSHA) != "" {
+		s.githubWorkingTree.HeadSHA = strings.TrimSpace(s.state.GithubWorkingTreeHeadSHA)
+	}
 	return nil
 }
 
@@ -4639,6 +5080,198 @@ func remoteToLocalPath(localRoot, remoteRoot, remotePath string) (string, error)
 		return "", fmt.Errorf("resolved path %s escapes local root %s", joined, localRoot)
 	}
 	return joined, nil
+}
+
+func (s *Syncer) remoteToLocalPath(remotePath string) (string, error) {
+	if s.githubWorkingTree != nil {
+		if rel, ok := s.githubWorkingTree.remotePathToWorkingTreeRel(remotePath); ok {
+			return safeLocalPath(s.localRoot, rel)
+		}
+	}
+	return remoteToLocalPath(s.localRoot, s.remoteRoot, remotePath)
+}
+
+func (s *Syncer) localPathToRemotePath(localPath string, githubPathIndex map[string]string) (string, error) {
+	if s.githubWorkingTree != nil {
+		rel, err := RelativeRemotePathFromLocal(s.localRoot, localPath)
+		if err != nil {
+			return "", err
+		}
+		if remotePath := s.githubRemotePathForWorkingTreeRel(rel.Slash(), githubPathIndex); remotePath != "" {
+			return remotePath, nil
+		}
+		return s.githubWorkingTree.workingTreeRelToRemotePath(rel.Slash()), nil
+	}
+	return localToRemotePath(s.localRoot, s.remoteRoot, localPath)
+}
+
+func (s *Syncer) localRelativeToRemotePath(relativePath string) string {
+	relativePath = filepath.ToSlash(strings.TrimSpace(relativePath))
+	if s.githubWorkingTree != nil {
+		if remotePath := s.githubRemotePathForWorkingTreeRel(relativePath, nil); remotePath != "" {
+			return remotePath
+		}
+		return s.githubWorkingTree.workingTreeRelToRemotePath(relativePath)
+	}
+	return normalizeRemotePath(filepath.Join(s.remoteRoot, filepath.FromSlash(relativePath)))
+}
+
+func (s *Syncer) githubRemotePathForWorkingTreeRel(rel string, githubPathIndex map[string]string) string {
+	if s.githubWorkingTree == nil || len(s.state.Files) == 0 {
+		return ""
+	}
+	rel = filepath.ToSlash(filepath.Clean(filepath.ToSlash(strings.TrimSpace(rel))))
+	rel = strings.TrimPrefix(rel, "/")
+	if githubPathIndex != nil {
+		return githubPathIndex[rel]
+	}
+	return s.githubWorkingTreePathIndex()[rel]
+}
+
+func (s *Syncer) githubWorkingTreePathIndex() map[string]string {
+	if s.githubWorkingTree == nil || len(s.state.Files) == 0 {
+		return nil
+	}
+	index := map[string]string{}
+	revisions := map[string]string{}
+	paths := make([]string, 0, len(s.state.Files))
+	for remotePath := range s.state.Files {
+		paths = append(paths, remotePath)
+	}
+	sort.Strings(paths)
+	for _, remotePath := range paths {
+		rel, ok := s.githubWorkingTree.remotePathToWorkingTreeRel(remotePath)
+		if !ok {
+			continue
+		}
+		current := index[rel]
+		revision := s.state.Files[remotePath].Revision
+		if current == "" || s.githubWorkingTreePathCandidatePreferred(remotePath, revision, current, revisions[rel]) {
+			index[rel] = remotePath
+			revisions[rel] = revision
+		}
+	}
+	return index
+}
+
+func (s *Syncer) githubWorkingTreePathCandidatePreferred(candidatePath, candidateRevision, currentPath, currentRevision string) bool {
+	candidateMatchesHead := s.githubWorkingTreeRemotePathMatchesHead(candidatePath)
+	currentMatchesHead := s.githubWorkingTreeRemotePathMatchesHead(currentPath)
+	if candidateMatchesHead != currentMatchesHead {
+		return candidateMatchesHead
+	}
+	return revisionAdvances(currentRevision, candidateRevision)
+}
+
+func (s *Syncer) githubWorkingTreeRemotePathMatchesHead(remotePath string) bool {
+	if s.githubWorkingTree == nil {
+		return false
+	}
+	headSHA := strings.TrimSpace(s.githubWorkingTree.HeadSHA)
+	if headSHA == "" {
+		return false
+	}
+	return strings.HasSuffix(normalizeRemotePath(remotePath), "@"+headSHA+".json")
+}
+
+func safeLocalPath(localRoot, rel string) (string, error) {
+	localRoot = filepath.Clean(localRoot)
+	rel = filepath.ToSlash(strings.TrimSpace(rel))
+	if rel == "" || rel == "." || strings.HasPrefix(rel, "/") {
+		return "", fmt.Errorf("invalid working tree path %q", rel)
+	}
+	cleanRel := filepath.ToSlash(filepath.Clean(rel))
+	if cleanRel == "." || cleanRel == ".." || strings.HasPrefix(cleanRel, "../") || strings.Contains(cleanRel, "/../") {
+		return "", fmt.Errorf("path %s escapes local root", rel)
+	}
+	joined := filepath.Join(localRoot, filepath.FromSlash(cleanRel))
+	cleanJoined := filepath.Clean(joined)
+	if cleanJoined == localRoot {
+		return "", fmt.Errorf("path %s resolves onto the mount root %s", rel, localRoot)
+	}
+	if !strings.HasPrefix(cleanJoined, localRoot+string(filepath.Separator)) {
+		return "", fmt.Errorf("resolved path %s escapes local root %s", joined, localRoot)
+	}
+	return cleanJoined, nil
+}
+
+func detectGithubWorkingTreeMount(remoteRoot string) *githubWorkingTreeMount {
+	remoteRoot = normalizeRemotePath(remoteRoot)
+	segments := strings.Split(strings.Trim(remoteRoot, "/"), "/")
+	if len(segments) != 5 || segments[0] != "github" || segments[1] != "repos" || segments[4] != "contents" {
+		return nil
+	}
+	owner, err := url.PathUnescape(segments[2])
+	if err != nil || strings.TrimSpace(owner) == "" {
+		return nil
+	}
+	repo, err := url.PathUnescape(segments[3])
+	if err != nil || strings.TrimSpace(repo) == "" {
+		return nil
+	}
+	repoRoot := normalizeRemotePath(strings.Join(segments[:4], "/"))
+	return &githubWorkingTreeMount{
+		Owner:        owner,
+		Repo:         repo,
+		RepoRoot:     repoRoot,
+		ContentsRoot: remoteRoot,
+	}
+}
+
+func (g *githubWorkingTreeMount) cloneSentinelPath() string {
+	return normalizeRemotePath(g.RepoRoot + "/.relayfile/clone.json")
+}
+
+func (g *githubWorkingTreeMount) legacyMetaPath() string {
+	return normalizeRemotePath(g.RepoRoot + "/meta.json")
+}
+
+func (g *githubWorkingTreeMount) remotePathToWorkingTreeRel(remotePath string) (string, bool) {
+	remotePath = normalizeRemotePath(remotePath)
+	if !isUnderRemoteRoot(g.ContentsRoot, remotePath) {
+		return "", false
+	}
+	rel := strings.TrimPrefix(remotePath, g.ContentsRoot)
+	rel = strings.TrimPrefix(rel, "/")
+	rel = strings.TrimSpace(rel)
+	if rel == "" {
+		return "", false
+	}
+	suffix := "@" + strings.TrimSpace(g.HeadSHA) + ".json"
+	if strings.TrimSpace(g.HeadSHA) != "" && strings.HasSuffix(rel, suffix) {
+		rel = strings.TrimSuffix(rel, suffix)
+	} else if idx := strings.LastIndex(rel, "@"); idx >= 0 && strings.HasSuffix(rel, ".json") {
+		rel = rel[:idx]
+	} else {
+		return "", false
+	}
+	parts := strings.Split(rel, "/")
+	for i, part := range parts {
+		decoded, err := url.PathUnescape(part)
+		if err != nil {
+			return "", false
+		}
+		parts[i] = decoded
+	}
+	return filepath.ToSlash(filepath.Clean(strings.Join(parts, "/"))), true
+}
+
+func (g *githubWorkingTreeMount) workingTreeRelToRemotePath(rel string) string {
+	rel = filepath.ToSlash(strings.TrimSpace(filepath.Clean(filepath.ToSlash(rel))))
+	rel = strings.TrimPrefix(rel, "/")
+	if rel == "" || rel == "." {
+		return g.ContentsRoot
+	}
+	parts := strings.Split(rel, "/")
+	for i, part := range parts {
+		parts[i] = url.PathEscape(part)
+	}
+	suffix := ""
+	if strings.TrimSpace(g.HeadSHA) != "" {
+		suffix = "@" + strings.TrimSpace(g.HeadSHA) + ".json"
+	}
+	parts[len(parts)-1] += suffix
+	return normalizeRemotePath(g.ContentsRoot + "/" + strings.Join(parts, "/"))
 }
 
 func localToRemotePath(localRoot, remoteRoot, localPath string) (string, error) {
