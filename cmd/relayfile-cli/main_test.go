@@ -167,6 +167,7 @@ func TestHelpFlagPrintsUsageForCommandsAndSubcommands(t *testing.T) {
 		{name: "login", args: []string{"login", "-h"}, want: "Usage: relayfile login"},
 		{name: "workspace group", args: []string{"workspace", "-h"}, want: "relayfile workspace create NAME"},
 		{name: "workspace create", args: []string{"workspace", "create", "-h"}, want: "Usage: relayfile workspace create NAME"},
+		{name: "workspace join", args: []string{"workspace", "join", "-h"}, want: "Usage: relayfile workspace join WORKSPACE_ID"},
 		{name: "workspace use", args: []string{"workspace", "use", "-h"}, want: "Usage: relayfile workspace use NAME"},
 		{name: "workspace list", args: []string{"workspace", "list", "-h"}, want: "Usage: relayfile workspace list"},
 		{name: "workspace current", args: []string{"workspace", "current", "-h"}, want: "Usage: relayfile workspace current"},
@@ -227,6 +228,20 @@ func TestHelpFlagPrintsUsageForCommandsAndSubcommands(t *testing.T) {
 	}
 }
 
+func TestWorkspaceRequiresSubcommandMentionsJoin(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	var stdout bytes.Buffer
+	err := run([]string{"workspace"}, strings.NewReader(""), &stdout, &stdout)
+	if err == nil {
+		t.Fatal("expected workspace without subcommand to fail")
+	}
+	if got := err.Error(); !strings.Contains(got, "create, join, use, list, current, or delete") {
+		t.Fatalf("workspace subcommand error = %q", got)
+	}
+}
+
 func TestWorkspaceUseSetsDefaultWorkspace(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)
@@ -245,6 +260,386 @@ func TestWorkspaceUseSetsDefaultWorkspace(t *testing.T) {
 	}
 	if got := stdout.String(); !strings.Contains(got, "Default workspace set to ws_cloud") {
 		t.Fatalf("unexpected workspace use output: %q", got)
+	}
+}
+
+func TestWorkspaceJoinMintsReadOnlyCloudToken(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	if err := saveCloudCredentials(cloudCredentials{
+		APIURL:      "http://placeholder.test",
+		AccessToken: "cld_access",
+	}); err != nil {
+		t.Fatalf("saveCloudCredentials failed: %v", err)
+	}
+
+	var seenJoin bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/workspaces/ws_cloud/join" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		seenJoin = true
+		if got := r.Header.Get("Authorization"); got != "Bearer cld_access" {
+			t.Fatalf("unexpected join Authorization: %q", got)
+		}
+		var body cloudWorkspaceJoinRequest
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode join body: %v", err)
+		}
+		if got, want := strings.Join(body.Scopes, ","), "relayfile:fs:read:*"; got != want {
+			t.Fatalf("join scopes = %q, want %q", got, want)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"workspaceId":"ws_cloud","token":"rf_read","relayfileUrl":"https://relayfile.test"}`))
+	}))
+	defer server.Close()
+	cloudCreds, err := loadCloudCredentials()
+	if err != nil {
+		t.Fatalf("loadCloudCredentials failed: %v", err)
+	}
+	cloudCreds.APIURL = server.URL
+	if err := saveCloudCredentials(cloudCreds); err != nil {
+		t.Fatalf("saveCloudCredentials(server URL) failed: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := run([]string{"workspace", "join", "ws_cloud", "--name", "cloud-prod", "--cloud-api-url", server.URL}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("run workspace join failed: %v", err)
+	}
+	if !seenJoin {
+		t.Fatalf("expected cloud join call")
+	}
+	creds, err := loadCredentials()
+	if err != nil {
+		t.Fatalf("loadCredentials failed: %v", err)
+	}
+	if creds.Token != "rf_read" || creds.Server != "https://relayfile.test" {
+		t.Fatalf("unexpected persisted credentials: %#v", creds)
+	}
+	record, ok := workspaceRecordByID("ws_cloud")
+	if !ok {
+		t.Fatalf("expected workspace catalog record")
+	}
+	if record.Name != "cloud-prod" || strings.Join(record.Scopes, ",") != "relayfile:fs:read:*" {
+		t.Fatalf("unexpected workspace record: %#v", record)
+	}
+	if got := stdout.String(); !strings.Contains(got, "Joined workspace cloud-prod") {
+		t.Fatalf("unexpected stdout: %q", got)
+	}
+}
+
+func TestTreeJoinsCloudWorkspaceWithoutServerCredentials(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	if err := saveCloudCredentials(cloudCredentials{
+		APIURL:      "http://placeholder.test",
+		AccessToken: "cld_access",
+	}); err != nil {
+		t.Fatalf("saveCloudCredentials failed: %v", err)
+	}
+	if _, err := upsertWorkspaceDetails(workspaceRecord{
+		Name:      "cloud-prod",
+		ID:        "ws_cloud",
+		CreatedAt: time.Now().UTC().Format(time.RFC3339),
+		AgentName: "relayfile-cli",
+		Scopes:    append([]string(nil), defaultJoinScopes...),
+	}); err != nil {
+		t.Fatalf("upsertWorkspaceDetails failed: %v", err)
+	}
+
+	var joinCount int
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/workspaces/ws_cloud/join":
+			joinCount++
+			if got := r.Header.Get("Authorization"); got != "Bearer cld_access" {
+				t.Fatalf("unexpected join Authorization: %q", got)
+			}
+			var body cloudWorkspaceJoinRequest
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("decode join body: %v", err)
+			}
+			if got, want := strings.Join(body.Scopes, ","), "relayfile:fs:read:*"; got != want {
+				t.Fatalf("join scopes = %q, want %q", got, want)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"workspaceId":"rw_cloud","token":"rf_join","relayfileUrl":"` + server.URL + `"}`))
+		case "/v1/workspaces/rw_cloud/fs/tree":
+			if got := r.Header.Get("Authorization"); got != "Bearer rf_join" {
+				t.Fatalf("unexpected tree Authorization: %q", got)
+			}
+			if got := r.URL.Query().Get("path"); got != "/google-mail" {
+				t.Fatalf("unexpected tree path: %q", got)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"path":"/google-mail","entries":[]}`))
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	cloudCreds, err := loadCloudCredentials()
+	if err != nil {
+		t.Fatalf("loadCloudCredentials failed: %v", err)
+	}
+	cloudCreds.APIURL = server.URL
+	if err := saveCloudCredentials(cloudCreds); err != nil {
+		t.Fatalf("saveCloudCredentials(server URL) failed: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := run([]string{"tree", "ws_cloud", "/google-mail"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("run tree failed: %v", err)
+	}
+	if joinCount != 1 {
+		t.Fatalf("expected 1 join, got %d", joinCount)
+	}
+	if got := stdout.String(); !strings.Contains(got, "Tree /google-mail") {
+		t.Fatalf("unexpected stdout: %q", got)
+	}
+}
+
+func TestTreeRefreshesExpiredCloudWorkspaceTokenAndRetriesCanonicalWorkspace(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	if err := saveCloudCredentials(cloudCredentials{
+		APIURL:      "http://placeholder.test",
+		AccessToken: "cld_access",
+	}); err != nil {
+		t.Fatalf("saveCloudCredentials failed: %v", err)
+	}
+	oldToken := testJWTWithWorkspaceAndAgent("ws_cloud", "old")
+	if err := saveCredentials(credentials{
+		Server: "http://placeholder.test",
+		Token:  oldToken,
+	}); err != nil {
+		t.Fatalf("saveCredentials failed: %v", err)
+	}
+	if _, err := upsertWorkspaceDetails(workspaceRecord{
+		Name:      "cloud-prod",
+		ID:        "ws_cloud",
+		CreatedAt: time.Now().UTC().Format(time.RFC3339),
+		AgentName: "relayfile-cli",
+		Scopes:    append([]string(nil), defaultInspectScopes...),
+	}); err != nil {
+		t.Fatalf("upsertWorkspaceDetails failed: %v", err)
+	}
+	if _, err := setDefaultWorkspace("cloud-prod"); err != nil {
+		t.Fatalf("setDefaultWorkspace failed: %v", err)
+	}
+
+	var joinCount int
+	var treeCount int
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/workspaces/ws_cloud/join":
+			joinCount++
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"workspaceId":"rw_cloud","token":"rf_new","relayfileUrl":"` + server.URL + `"}`))
+		case "/v1/workspaces/ws_cloud/fs/tree":
+			treeCount++
+			if got := r.Header.Get("Authorization"); got != "Bearer "+oldToken {
+				t.Fatalf("expected first tree to use old token, got %q", got)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"message":"Token has expired"}`))
+		case "/v1/workspaces/rw_cloud/fs/tree":
+			treeCount++
+			if got := r.Header.Get("Authorization"); got != "Bearer rf_new" {
+				t.Fatalf("unexpected refreshed tree Authorization: %q", got)
+			}
+			if got := r.URL.Query().Get("path"); got != "/google-mail" {
+				t.Fatalf("unexpected tree path: %q", got)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"path":"/google-mail","entries":[]}`))
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	creds, err := loadCredentials()
+	if err != nil {
+		t.Fatalf("loadCredentials failed: %v", err)
+	}
+	creds.Server = server.URL
+	if err := saveCredentials(creds); err != nil {
+		t.Fatalf("saveCredentials(server URL) failed: %v", err)
+	}
+	cloudCreds, err := loadCloudCredentials()
+	if err != nil {
+		t.Fatalf("loadCloudCredentials failed: %v", err)
+	}
+	cloudCreds.APIURL = server.URL
+	if err := saveCloudCredentials(cloudCreds); err != nil {
+		t.Fatalf("saveCloudCredentials(server URL) failed: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := run([]string{"tree", "cloud-prod", "/google-mail"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("run tree failed: %v", err)
+	}
+	if joinCount != 1 || treeCount != 2 {
+		t.Fatalf("joinCount/treeCount = %d/%d, want 1/2", joinCount, treeCount)
+	}
+	record, ok := workspaceRecordByName("cloud-prod")
+	if !ok {
+		t.Fatalf("expected refreshed workspace catalog record")
+	}
+	if record.ID != "rw_cloud" {
+		t.Fatalf("workspace record ID = %q, want rw_cloud", record.ID)
+	}
+	if record.Server != server.URL {
+		t.Fatalf("workspace record Server = %q, want %q", record.Server, server.URL)
+	}
+	if record.CloudAPIURL != server.URL {
+		t.Fatalf("workspace record CloudAPIURL = %q, want %q", record.CloudAPIURL, server.URL)
+	}
+	if record.LastUsedAt == "" {
+		t.Fatal("workspace record LastUsedAt was not refreshed")
+	}
+	catalog, err := loadWorkspaceCatalog()
+	if err != nil {
+		t.Fatalf("loadWorkspaceCatalog failed: %v", err)
+	}
+	if catalog.Default != "cloud-prod" {
+		t.Fatalf("default workspace = %q, want cloud-prod", catalog.Default)
+	}
+	if got := stdout.String(); !strings.Contains(got, "Tree /google-mail") {
+		t.Fatalf("unexpected stdout: %q", got)
+	}
+}
+
+func TestReadRefreshesCloudWorkspaceTokenAfterUnauthorized(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	if err := saveCloudCredentials(cloudCredentials{
+		APIURL:      "http://placeholder.test",
+		AccessToken: "cld_access",
+	}); err != nil {
+		t.Fatalf("saveCloudCredentials failed: %v", err)
+	}
+	oldToken := testJWTWithWorkspaceAndAgent("ws_cloud", "old")
+	if err := saveCredentials(credentials{
+		Server: "http://placeholder.test",
+		Token:  oldToken,
+	}); err != nil {
+		t.Fatalf("saveCredentials failed: %v", err)
+	}
+	if _, err := upsertWorkspaceDetails(workspaceRecord{
+		Name:      "cloud-prod",
+		ID:        "ws_cloud",
+		CreatedAt: time.Now().UTC().Format(time.RFC3339),
+		AgentName: "relayfile-cli",
+		Scopes:    append([]string(nil), defaultInspectScopes...),
+	}); err != nil {
+		t.Fatalf("upsertWorkspaceDetails failed: %v", err)
+	}
+	if _, err := upsertWorkspaceDetails(workspaceRecord{
+		Name:      "other-prod",
+		ID:        "ws_other",
+		CreatedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("upsertWorkspaceDetails(other) failed: %v", err)
+	}
+	if _, err := setDefaultWorkspace("other-prod"); err != nil {
+		t.Fatalf("setDefaultWorkspace(other) failed: %v", err)
+	}
+
+	var readCount int
+	var joinCount int
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/workspaces/ws_cloud/join":
+			joinCount++
+			if got := r.Header.Get("Authorization"); got != "Bearer cld_access" {
+				t.Fatalf("unexpected join Authorization: %q", got)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"workspaceId":"rw_cloud","token":"rf_new","relayfileUrl":"` + server.URL + `"}`))
+		case "/v1/workspaces/ws_cloud/fs/file":
+			readCount++
+			if got := r.Header.Get("Authorization"); got != "Bearer "+oldToken {
+				t.Fatalf("expected first read to use old token, got %q", got)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"message":"Token has expired"}`))
+			return
+		case "/v1/workspaces/rw_cloud/fs/file":
+			readCount++
+			if got := r.Header.Get("Authorization"); got != "Bearer rf_new" {
+				t.Fatalf("unexpected refreshed read Authorization: %q", got)
+			}
+			if got := r.URL.Query().Get("path"); got != "/google-mail/msg.json" {
+				t.Fatalf("unexpected read path: %q", got)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"path":"/google-mail/msg.json","revision":"1","contentType":"application/json","content":"ok"}`))
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	creds, err := loadCredentials()
+	if err != nil {
+		t.Fatalf("loadCredentials failed: %v", err)
+	}
+	creds.Server = server.URL
+	if err := saveCredentials(creds); err != nil {
+		t.Fatalf("saveCredentials(server URL) failed: %v", err)
+	}
+	cloudCreds, err := loadCloudCredentials()
+	if err != nil {
+		t.Fatalf("loadCloudCredentials failed: %v", err)
+	}
+	cloudCreds.APIURL = server.URL
+	if err := saveCloudCredentials(cloudCreds); err != nil {
+		t.Fatalf("saveCloudCredentials(server URL) failed: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := run([]string{"read", "cloud-prod", "/google-mail/msg.json"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("run read failed: %v", err)
+	}
+	if joinCount != 1 || readCount != 2 {
+		t.Fatalf("joinCount/readCount = %d/%d, want 1/2", joinCount, readCount)
+	}
+	record, ok := workspaceRecordByName("cloud-prod")
+	if !ok {
+		t.Fatalf("expected refreshed workspace catalog record")
+	}
+	if record.ID != "rw_cloud" {
+		t.Fatalf("workspace record ID = %q, want rw_cloud", record.ID)
+	}
+	if record.Server != server.URL {
+		t.Fatalf("workspace record Server = %q, want %q", record.Server, server.URL)
+	}
+	if record.CloudAPIURL != server.URL {
+		t.Fatalf("workspace record CloudAPIURL = %q, want %q", record.CloudAPIURL, server.URL)
+	}
+	if record.LastUsedAt == "" {
+		t.Fatal("workspace record LastUsedAt was not refreshed")
+	}
+	catalog, err := loadWorkspaceCatalog()
+	if err != nil {
+		t.Fatalf("loadWorkspaceCatalog failed: %v", err)
+	}
+	if catalog.Default != "other-prod" {
+		t.Fatalf("default workspace = %q, want other-prod", catalog.Default)
+	}
+	if got := stdout.String(); got != "ok" {
+		t.Fatalf("unexpected stdout: %q", got)
 	}
 }
 
