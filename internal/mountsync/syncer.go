@@ -80,6 +80,11 @@ const (
 	defaultCursorTimeout             = 20 * time.Second
 	defaultBootstrapReadWorkers      = 16
 	defaultIncrementalEventPageLimit = 50
+	defaultRetryAfterMaxDelay        = 60 * time.Second
+	defaultWebSocketReconnectBase    = 1 * time.Second
+	defaultWebSocketReconnectMax     = 60 * time.Second
+	defaultWebSocketReconnectJitter  = 200 * time.Millisecond
+	DefaultWebSocketMaintenanceEvery = 1 * time.Second
 )
 
 // resolveDurationEnv returns the option value if non-zero, else parses the
@@ -281,7 +286,7 @@ func NewHTTPClient(baseURL, token string, httpClient *http.Client) *HTTPClient {
 		httpClient: httpClient,
 		maxRetries: 3,
 		baseDelay:  100 * time.Millisecond,
-		maxDelay:   2 * time.Second,
+		maxDelay:   defaultRetryAfterMaxDelay,
 	}
 }
 
@@ -695,6 +700,10 @@ type Syncer struct {
 	rootCtx              context.Context
 	wsConn               *websocket.Conn
 	wsCancel             context.CancelFunc
+	wsNextAttempt        time.Time
+	wsReconnectFailures  int
+	wsConnecting         bool
+	wsGeneration         int64
 	bulkFlushThreshold   int
 	mode                 string
 	interval             time.Duration
@@ -1763,15 +1772,10 @@ func (s *Syncer) sync(ctx context.Context, forcePoll bool) error {
 		return err
 	}
 
-	// Check if websocket connection is needed while holding the lock,
-	// then release before connecting to avoid deadlock with readWebSocketLoop.
-	needsWS := s.websocket && s.wsConn == nil
 	s.mu.Unlock()
 
-	if needsWS {
-		if err := s.connectWebSocket(ctx); err != nil {
-			s.logf("websocket unavailable; using polling sync: %v", err)
-		}
+	if err := s.MaintainWebSocket(ctx); err != nil {
+		s.logf("websocket unavailable; using polling sync: %v", err)
 	}
 
 	// Re-acquire lock for the remainder of the sync operation.
@@ -1854,35 +1858,53 @@ func (s *Syncer) runRollingDigestJobsLocked(ctx context.Context) error {
 
 func (s *Syncer) connectWebSocket(ctx context.Context) error {
 	s.mu.Lock()
-	if !s.websocket || s.wsConn != nil {
+	if !s.websocketConnectDueLocked(time.Now()) {
 		s.mu.Unlock()
 		return nil
 	}
+	s.wsConnecting = true
+	generation := s.wsGeneration
 	s.mu.Unlock()
 
 	httpClient, ok := s.client.(*HTTPClient)
 	if !ok {
+		s.finishWebSocketConnectFailure(generation, 0)
 		return nil
 	}
 
 	wsURL, err := httpClient.websocketURL(s.workspace)
 	if err != nil {
+		s.finishWebSocketConnectFailure(generation, 0)
 		return err
 	}
-	conn, _, err := websocket.Dial(ctx, wsURL, &websocket.DialOptions{
+	conn, response, err := websocket.Dial(ctx, wsURL, &websocket.DialOptions{
 		HTTPHeader: http.Header{
 			"Authorization": []string{"Bearer " + httpClient.Token()},
 		},
 	})
 	if err != nil {
-		return err
+		retryAfter := retryAfterFromResponse(response)
+		s.finishWebSocketConnectFailure(generation, retryAfter)
+		return webSocketDialError{err: err, retryAfter: retryAfter}
 	}
 
 	readCtx, cancel := context.WithCancel(s.rootCtx)
 
 	s.mu.Lock()
+	if s.wsGeneration != generation || s.wsConn != nil {
+		if s.wsGeneration == generation {
+			s.wsConnecting = false
+		}
+		s.mu.Unlock()
+		cancel()
+		_ = conn.Close(websocket.StatusNormalClosure, "")
+		return nil
+	}
+	s.wsConnecting = false
 	s.wsConn = conn
 	s.wsCancel = cancel
+	s.wsNextAttempt = time.Time{}
+	s.wsReconnectFailures = 0
 	s.mu.Unlock()
 
 	go s.readWebSocketLoop(readCtx, conn)
@@ -1994,6 +2016,7 @@ func (s *Syncer) handleWebSocketDisconnect(conn *websocket.Conn) {
 		s.wsCancel = nil
 	}
 	s.wsConn = nil
+	s.scheduleWebSocketReconnectLocked(0)
 }
 
 func (s *Syncer) ResetWebSocket() {
@@ -2002,6 +2025,10 @@ func (s *Syncer) ResetWebSocket() {
 	cancel := s.wsCancel
 	s.wsConn = nil
 	s.wsCancel = nil
+	s.wsNextAttempt = time.Time{}
+	s.wsReconnectFailures = 0
+	s.wsConnecting = false
+	s.wsGeneration++
 	s.mu.Unlock()
 	if cancel != nil {
 		cancel()
@@ -2009,6 +2036,77 @@ func (s *Syncer) ResetWebSocket() {
 	if conn != nil {
 		_ = conn.Close(websocket.StatusNormalClosure, "")
 	}
+}
+
+func (s *Syncer) MaintainWebSocket(ctx context.Context) error {
+	s.mu.Lock()
+	needsWS := s.websocketConnectDueLocked(time.Now())
+	s.mu.Unlock()
+	if !needsWS {
+		return nil
+	}
+	if err := s.connectWebSocket(ctx); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Syncer) websocketConnectDueLocked(now time.Time) bool {
+	if !s.websocket || s.wsConn != nil || s.wsConnecting {
+		return false
+	}
+	return s.wsNextAttempt.IsZero() || !now.Before(s.wsNextAttempt)
+}
+
+func (s *Syncer) scheduleWebSocketReconnectLocked(retryAfter time.Duration) {
+	if s.wsConn != nil {
+		return
+	}
+	s.wsReconnectFailures++
+	delay := retryAfter
+	if delay <= 0 {
+		delay = websocketReconnectDelay(s.wsReconnectFailures)
+	}
+	if delay > defaultWebSocketReconnectMax {
+		delay = defaultWebSocketReconnectMax
+	}
+	s.wsNextAttempt = time.Now().Add(delay)
+}
+
+func (s *Syncer) finishWebSocketConnectFailure(
+	generation int64,
+	retryAfter time.Duration,
+) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.wsGeneration != generation {
+		return
+	}
+	s.wsConnecting = false
+	s.scheduleWebSocketReconnectLocked(retryAfter)
+}
+
+func websocketReconnectDelay(failures int) time.Duration {
+	if failures <= 0 {
+		failures = 1
+	}
+	delay := defaultWebSocketReconnectBase
+	for i := 1; i < failures; i++ {
+		delay *= 2
+		if delay >= defaultWebSocketReconnectMax {
+			delay = defaultWebSocketReconnectMax
+			break
+		}
+	}
+	jitter := time.Duration(time.Now().UnixNano()%int64(defaultWebSocketReconnectJitter*2)) - defaultWebSocketReconnectJitter
+	delay += jitter
+	if delay < defaultWebSocketReconnectBase {
+		return defaultWebSocketReconnectBase
+	}
+	if delay > defaultWebSocketReconnectMax {
+		return defaultWebSocketReconnectMax
+	}
+	return delay
 }
 
 func (s *Syncer) HTTPClient() (*HTTPClient, bool) {
@@ -4637,10 +4735,33 @@ func (c *HTTPClient) websocketURL(workspaceID string) (string, error) {
 	return base.String(), nil
 }
 
+type webSocketDialError struct {
+	err        error
+	retryAfter time.Duration
+}
+
+func (e webSocketDialError) Error() string {
+	if e.err == nil {
+		return "websocket dial failed"
+	}
+	return e.err.Error()
+}
+
+func (e webSocketDialError) Unwrap() error {
+	return e.err
+}
+
+func retryAfterFromResponse(response *http.Response) time.Duration {
+	if response == nil {
+		return 0
+	}
+	return parseRetryAfter(response.Header.Get("Retry-After"))
+}
+
 func (c *HTTPClient) retryDelay(attempt int, retryAfterHeader string) time.Duration {
 	maxDelay := c.maxDelay
 	if maxDelay <= 0 {
-		maxDelay = 2 * time.Second
+		maxDelay = defaultRetryAfterMaxDelay
 	}
 	if retryAfter := parseRetryAfter(retryAfterHeader); retryAfter > 0 {
 		if retryAfter > maxDelay {

@@ -201,12 +201,12 @@ func TestProductizedCloudMountE2EProof(t *testing.T) {
 	}
 
 	if err := saveCloudCredentials(cloudCredentials{
-		APIURL:               cloud.URL(),
-		AccessToken:          cloud.expiredAccessToken,
-		RefreshToken:         cloud.refreshToken,
-		AccessTokenExpiresAt: time.Now().Add(-time.Minute).UTC().Format(time.RFC3339),
+		APIURL:                cloud.URL(),
+		AccessToken:           cloud.expiredAccessToken,
+		RefreshToken:          cloud.refreshToken,
+		AccessTokenExpiresAt:  time.Now().Add(-time.Minute).UTC().Format(time.RFC3339),
 		RefreshTokenExpiresAt: time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
-		UpdatedAt:            time.Now().UTC().Format(time.RFC3339),
+		UpdatedAt:             time.Now().UTC().Format(time.RFC3339),
 	}); err != nil {
 		t.Fatalf("saveCloudCredentials failed: %v", err)
 	}
@@ -216,7 +216,7 @@ func TestProductizedCloudMountE2EProof(t *testing.T) {
 		t.Fatalf("currentRelayToken failed: %v", err)
 	}
 	relay.RejectToken(currentToken)
-	waitForCondition(t, 5*time.Second, "cloud token refresh + workspace rejoin", func() bool {
+	waitForCondition(t, 12*time.Second, "cloud token refresh + workspace rejoin", func() bool {
 		creds, loadErr := loadCredentials()
 		if loadErr != nil {
 			return false
@@ -283,12 +283,12 @@ type productizedProviderStatus struct {
 func newProductizedRelayfileMock(t *testing.T) *productizedRelayfileMock {
 	t.Helper()
 	mock := &productizedRelayfileMock{
-		t:             t,
-		files:         map[string]productizedRemoteFile{},
-		providers:     map[string]*productizedProviderStatus{},
-		validTokens:   map[string]struct{}{},
+		t:              t,
+		files:          map[string]productizedRemoteFile{},
+		providers:      map[string]*productizedProviderStatus{},
+		validTokens:    map[string]struct{}{},
 		rejectedTokens: map[string]struct{}{},
-		conflictOnce:  map[string]struct{}{},
+		conflictOnce:   map[string]struct{}{},
 	}
 	mock.server = httptest.NewServer(http.HandlerFunc(mock.serveHTTP))
 	return mock
@@ -686,8 +686,8 @@ func (m *productizedCloudMock) serveJoinWorkspace(w http.ResponseWriter, r *http
 
 	m.relay.ActivateToken(token)
 	writeMockJSON(w, http.StatusOK, cloudWorkspaceJoinResponse{
-		WorkspaceID: m.workspaceID,
-		Token:       token,
+		WorkspaceID:  m.workspaceID,
+		Token:        token,
 		RelayfileURL: m.relay.URL(),
 	})
 }
@@ -801,7 +801,7 @@ func waitForFile(t *testing.T, path, description string) {
 
 func assertFileContentEventually(t *testing.T, path, want string) {
 	t.Helper()
-	waitForCondition(t, 5*time.Second, path, func() bool {
+	waitForCondition(t, 12*time.Second, path, func() bool {
 		data, err := os.ReadFile(path)
 		return err == nil && string(data) == want
 	})

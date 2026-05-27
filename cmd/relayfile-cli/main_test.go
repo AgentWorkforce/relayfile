@@ -55,6 +55,37 @@ func TestResolveServerDefaultsToHostedRelayfile(t *testing.T) {
 	}
 }
 
+func TestEnforcePollIntervalFloor(t *testing.T) {
+	if got := enforcePollIntervalFloor(time.Second); got != minMountPollInterval {
+		t.Fatalf("expected interval floor %s, got %s", minMountPollInterval, got)
+	}
+	if got := enforcePollIntervalFloor(defaultMountInterval); got != defaultMountInterval {
+		t.Fatalf("expected default interval passthrough, got %s", got)
+	}
+	if got := jitteredIntervalWithSample(minMountPollInterval, 0.2, 0); got != minMountPollInterval {
+		t.Fatalf("expected jittered interval floor %s, got %s", minMountPollInterval, got)
+	}
+	if got := jitteredIntervalWithSample(time.Second, 0, 0.5); got != minMountPollInterval {
+		t.Fatalf("expected non-jittered interval floor %s, got %s", minMountPollInterval, got)
+	}
+}
+
+func TestWebSocketMaintenanceDoesNotLowerReconcileCadence(t *testing.T) {
+	for cycle := 1; cycle < websocketReconcileEvery; cycle++ {
+		if shouldReconcileMountCycle(true, cycle) {
+			t.Fatalf("websocket-enabled cycle %d reconciled before cadence floor", cycle)
+		}
+	}
+	if !shouldReconcileMountCycle(true, websocketReconcileEvery) {
+		t.Fatalf("expected websocket-enabled cycle %d to reconcile", websocketReconcileEvery)
+	}
+	for cycle := 1; cycle <= websocketReconcileEvery; cycle++ {
+		if !shouldReconcileMountCycle(false, cycle) {
+			t.Fatalf("expected websocket-disabled cycle %d to reconcile", cycle)
+		}
+	}
+}
+
 func TestObserverPrintsFragmentLaunchURL(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)

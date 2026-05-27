@@ -44,6 +44,7 @@ const (
 	websocketReconcileEvery = 10
 	defaultMountMode        = "poll"
 	defaultMountInterval    = 30 * time.Second
+	minMountPollInterval    = 5 * time.Second
 	defaultMountTimeout     = 15 * time.Second
 )
 
@@ -3877,6 +3878,7 @@ func runMount(args []string) error {
 	if *interval <= 0 {
 		*interval = defaultMountInterval
 	}
+	*interval = enforcePollIntervalFloor(*interval)
 	if *timeout <= 0 {
 		*timeout = defaultMountTimeout
 	}
@@ -7416,13 +7418,20 @@ func clampJitterRatio(value float64) float64 {
 	return value
 }
 
+func enforcePollIntervalFloor(interval time.Duration) time.Duration {
+	if interval > 0 && interval < minMountPollInterval {
+		return minMountPollInterval
+	}
+	return interval
+}
+
 func jitteredIntervalWithSample(base time.Duration, jitterRatio, sample float64) time.Duration {
 	if base <= 0 {
 		return 0
 	}
 	jitterRatio = clampJitterRatio(jitterRatio)
 	if jitterRatio == 0 {
-		return base
+		return enforcePollIntervalFloor(base)
 	}
 	if sample < 0 {
 		sample = 0
@@ -7437,7 +7446,7 @@ func jitteredIntervalWithSample(base time.Duration, jitterRatio, sample float64)
 	if delay < time.Millisecond {
 		return time.Millisecond
 	}
-	return delay
+	return enforcePollIntervalFloor(delay)
 }
 
 var spawnBackgroundMountProcessFn = spawnBackgroundMountProcess
@@ -7488,6 +7497,7 @@ func spawnBackgroundMountProcess(originalArgs []string, localDir, pidFile, logFi
 }
 
 func runMountLoop(rootCtx context.Context, syncer *mountsync.Syncer, localDir, workspaceID, serverURL string, timeout, interval time.Duration, intervalJitter float64, websocketEnabled, once, daemonized bool, pidFile, logFile string) error {
+	interval = enforcePollIntervalFloor(interval)
 	httpClient, _ := syncerClient(syncer)
 	record, _ := workspaceRecordByID(workspaceID)
 	if record.ID == "" {
@@ -7732,6 +7742,8 @@ func runMountLoop(rootCtx context.Context, syncer *mountsync.Syncer, localDir, w
 
 	timer := time.NewTimer(jitteredIntervalWithSample(interval, intervalJitter, mathrand.Float64()))
 	defer timer.Stop()
+	wsTicker := time.NewTicker(mountsync.DefaultWebSocketMaintenanceEvery)
+	defer wsTicker.Stop()
 	cycle := 0
 	for {
 		select {
@@ -7739,9 +7751,17 @@ func runMountLoop(rootCtx context.Context, syncer *mountsync.Syncer, localDir, w
 			log.Printf("mount sync stopping: %v", rootCtx.Err())
 			writeSnapshot()
 			return nil
+		case <-wsTicker.C:
+			if websocketEnabled {
+				ctx, cancel := context.WithTimeout(rootCtx, timeout)
+				if err := syncer.MaintainWebSocket(ctx); err != nil {
+					log.Printf("websocket unavailable; using polling sync: %v", err)
+				}
+				cancel()
+			}
 		case <-timer.C:
 			cycle++
-			reconcile := !websocketEnabled || cycle%websocketReconcileEvery == 0
+			reconcile := shouldReconcileMountCycle(websocketEnabled, cycle)
 			if reconcile {
 				_ = runCycle(true)
 			}
@@ -7761,6 +7781,10 @@ func runMountLoop(rootCtx context.Context, syncer *mountsync.Syncer, localDir, w
 			timer.Reset(jitteredIntervalWithSample(interval, intervalJitter, mathrand.Float64()))
 		}
 	}
+}
+
+func shouldReconcileMountCycle(websocketEnabled bool, cycle int) bool {
+	return !websocketEnabled || cycle%websocketReconcileEvery == 0
 }
 
 func correlationID() string {
