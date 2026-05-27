@@ -72,16 +72,17 @@ type workspaceCatalog struct {
 }
 
 type workspaceRecord struct {
-	Name        string   `json:"name"`
-	ID          string   `json:"id,omitempty"`
-	CreatedAt   string   `json:"createdAt"`
-	LastUsedAt  string   `json:"lastUsedAt,omitempty"`
-	LocalDir    string   `json:"localDir,omitempty"`
-	Server      string   `json:"server,omitempty"`
-	CloudAPIURL string   `json:"cloudApiUrl,omitempty"`
-	AgentName   string   `json:"agentName,omitempty"`
-	Scopes      []string `json:"scopes,omitempty"`
-	Timezone    string   `json:"timezone,omitempty"`
+	Name             string   `json:"name"`
+	ID               string   `json:"id,omitempty"`
+	RelayWorkspaceID string   `json:"relayWorkspaceId,omitempty"`
+	CreatedAt        string   `json:"createdAt"`
+	LastUsedAt       string   `json:"lastUsedAt,omitempty"`
+	LocalDir         string   `json:"localDir,omitempty"`
+	Server           string   `json:"server,omitempty"`
+	CloudAPIURL      string   `json:"cloudApiUrl,omitempty"`
+	AgentName        string   `json:"agentName,omitempty"`
+	Scopes           []string `json:"scopes,omitempty"`
+	Timezone         string   `json:"timezone,omitempty"`
 }
 
 type apiClient struct {
@@ -1441,7 +1442,11 @@ func persistJoinedWorkspace(record workspaceRecord, joined cloudWorkspaceJoinRes
 		return workspaceRecord{}, err
 	}
 	if joinedWorkspaceID := strings.TrimSpace(joined.WorkspaceID); joinedWorkspaceID != "" {
-		record.ID = joinedWorkspaceID
+		if strings.TrimSpace(record.ID) == "" {
+			record.ID = joinedWorkspaceID
+		} else if joinedWorkspaceID != strings.TrimSpace(record.ID) {
+			record.RelayWorkspaceID = joinedWorkspaceID
+		}
 	}
 	record.Server = serverURL
 	record.LocalDir = localDir
@@ -1465,6 +1470,16 @@ func persistJoinedWorkspace(record workspaceRecord, joined cloudWorkspaceJoinRes
 		return workspaceRecord{}, err
 	}
 	return persisted, nil
+}
+
+func relayWorkspaceIDForRecord(record workspaceRecord, joined cloudWorkspaceJoinResponse) string {
+	if relayID := strings.TrimSpace(joined.WorkspaceID); relayID != "" {
+		return relayID
+	}
+	if relayID := strings.TrimSpace(record.RelayWorkspaceID); relayID != "" {
+		return relayID
+	}
+	return strings.TrimSpace(record.ID)
 }
 
 func joinWorkspaceViaCloud(cloud cloudCredentials, workspaceID, agentName string, scopes []string) (cloudWorkspaceJoinResponse, error) {
@@ -2015,6 +2030,10 @@ func runIntegrationConnect(args []string, stdin io.Reader, stdout io.Writer) err
 	if err != nil {
 		return err
 	}
+	relayWorkspaceID := relayWorkspaceIDForRecord(record, joined)
+	if relayWorkspaceID != "" && relayWorkspaceID != record.ID {
+		fmt.Fprintf(stdout, "Workspace: %s (Relayfile runtime: %s)\n", record.ID, relayWorkspaceID)
+	}
 	// Atlassian-family providers: a single OAuth grant can cover multiple
 	// sites (cloudIds). Cloud's Jira/Confluence sync bails with a clear
 	// error if `metadata.cloudId` is unset and the grant has >1 site.
@@ -2027,7 +2046,7 @@ func runIntegrationConnect(args []string, stdin io.Reader, stdout io.Writer) err
 			return err
 		}
 	}
-	return waitForInitialSync(joined.RelayfileURL, joined.Token, record.ID, provider, record.LocalDir, *timeout, stdout)
+	return waitForInitialSync(joined.RelayfileURL, joined.Token, relayWorkspaceID, provider, record.LocalDir, *timeout, stdout)
 }
 
 func isAtlassianProvider(provider string) bool {
@@ -2374,6 +2393,10 @@ func runIntegrationList(args []string, stdout io.Writer) error {
 	}
 	if *jsonOutput {
 		return writeJSON(stdout, entries)
+	}
+	relayWorkspaceID := relayWorkspaceIDForRecord(record, joined)
+	if relayWorkspaceID != "" && relayWorkspaceID != record.ID {
+		fmt.Fprintf(stdout, "Workspace: %s (Relayfile runtime: %s)\n", record.ID, relayWorkspaceID)
 	}
 	if len(entries) == 0 {
 		fmt.Fprintln(stdout, "No integrations connected")
@@ -5580,6 +5603,9 @@ func mergeWorkspaceRecords(current, update workspaceRecord) workspaceRecord {
 	if update.ID != "" {
 		merged.ID = update.ID
 	}
+	if update.RelayWorkspaceID != "" {
+		merged.RelayWorkspaceID = update.RelayWorkspaceID
+	}
 	if update.CreatedAt != "" {
 		merged.CreatedAt = update.CreatedAt
 	}
@@ -5628,7 +5654,7 @@ func workspaceRecordByID(id string) (workspaceRecord, bool) {
 	}
 	id = strings.TrimSpace(id)
 	for _, record := range catalog.Workspaces {
-		if record.ID == id {
+		if record.ID == id || record.RelayWorkspaceID == id {
 			return record, true
 		}
 	}
