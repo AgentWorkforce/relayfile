@@ -300,6 +300,8 @@ func TestA13MountHelpListsSyncedMirrorLimitations(t *testing.T) {
 		"Directory listings can briefly omit",
 		"inotify/fsevents",
 		"--mode poll|fuse",
+		"--state-dir DIR",
+		"--state-file FILE",
 	} {
 		if !strings.Contains(got, fragment) {
 			t.Fatalf("expected mount --help to contain %q, got:\n%s", fragment, got)

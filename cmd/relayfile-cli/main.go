@@ -3834,6 +3834,8 @@ func runMount(args []string) error {
 	remotePath := fs.String("remote-path", envOrDefault("RELAYFILE_REMOTE_PATH", "/"), "remote root path")
 	eventProvider := fs.String("provider", strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_PROVIDER")), "event provider filter")
 	stateFile := fs.String("state-file", strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_STATE_FILE")), "state file path")
+	stateDir := fs.String("state-dir", envOrDefault("RELAYFILE_MOUNT_STATE_DIR", mountsync.DefaultMountStateDir()), "directory for private mount state")
+	mountKind := fs.String("mount-kind", envOrDefault("RELAYFILE_MOUNT_KIND", mountsync.MountKindDaemon), "private state identity kind: daemon, flush, or initial-sync")
 	localDirFlag := fs.String("local-dir", "", "local mirror directory")
 	mode := fs.String("mode", envOrDefault("RELAYFILE_MOUNT_MODE", defaultMountMode), "mount mode: poll (recommended) or fuse")
 	interval := fs.Duration("interval", durationEnv("RELAYFILE_MOUNT_INTERVAL", defaultMountInterval), "sync interval")
@@ -3859,6 +3861,8 @@ func runMount(args []string) error {
 		"remote-path":         true,
 		"provider":            true,
 		"state-file":          true,
+		"state-dir":           true,
+		"mount-kind":          true,
 		"mode":                true,
 		"interval":            true,
 		"interval-jitter":     true,
@@ -4061,6 +4065,9 @@ func runMount(args []string) error {
 		EventProvider:      strings.TrimSpace(*eventProvider),
 		LocalRoot:          absLocalDir,
 		StateFile:          strings.TrimSpace(*stateFile),
+		StateDir:           strings.TrimSpace(*stateDir),
+		MountKind:          strings.TrimSpace(*mountKind),
+		ValidateState:      true,
 		WebSocket:          boolPtr(*websocketEnabled),
 		LowMemory:          boolPtr(*lowMemory),
 		RootCtx:            rootCtx,
@@ -4149,6 +4156,8 @@ Common flags:
                        hard cap for initial/full-tree bootstrap (0 = progress-based)
   --cursor-timeout 20s timeout for events-cursor resolution
   --full-reconcile     force one full reconcile regardless of bootstrap state
+  --state-dir DIR      private mount state directory (default $HOME/.relayfile-mount-state)
+  --state-file FILE    exact private state file override; wins over --state-dir
   --rehome             allow moving an already-registered mirror to a new LOCAL_DIR
   --no-websocket       disable websocket event streaming
   --low-memory         skip detailed per-file public state and defer content reads
