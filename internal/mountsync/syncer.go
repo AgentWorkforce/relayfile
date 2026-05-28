@@ -1045,7 +1045,9 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 	}
 	if opts.ValidateState && !statePath.Override {
 		if moved, err := QuarantineLegacyMountState(localRoot, statePath.StateDir); err != nil {
-			return nil, err
+			if opts.Logger != nil {
+				opts.Logger.Printf("warning: failed to quarantine legacy private mount state: %v", err)
+			}
 		} else if len(moved) > 0 && opts.Logger != nil {
 			opts.Logger.Printf("quarantined %d legacy private mount state file(s) outside mounted tree", len(moved))
 		}

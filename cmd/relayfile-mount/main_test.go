@@ -277,29 +277,23 @@ func TestRunScopedPollingMountsKeepsSharedStateDirForHashResolver(t *testing.T) 
 	}
 }
 
-func TestRunScopedPollingMountsKeepsExactStateFileOverride(t *testing.T) {
+func TestRunScopedPollingMountsRejectsSharedExactStateFileOverride(t *testing.T) {
 	stateFile := filepath.Join(t.TempDir(), "state.json")
-	var got []mountConfig
 
 	err := runScopedPollingMountsWithRunner(
 		context.Background(),
 		mountConfig{localDir: t.TempDir(), stateDir: t.TempDir(), stateFile: stateFile},
 		[]string{"/github", "/slack"},
 		func(_ context.Context, cfg mountConfig) error {
-			got = append(got, cfg)
+			t.Fatalf("runner should not start with shared state-file override: %+v", cfg)
 			return nil
 		},
 	)
-	if err != nil {
-		t.Fatalf("runScopedPollingMountsWithRunner returned error: %v", err)
+	if err == nil {
+		t.Fatal("expected shared state-file override to be rejected")
 	}
-	if len(got) != 2 {
-		t.Fatalf("expected 2 scoped mounts, got %d", len(got))
-	}
-	for _, cfg := range got {
-		if cfg.stateFile != stateFile {
-			t.Fatalf("expected exact state-file override %q, got %q", stateFile, cfg.stateFile)
-		}
+	if !strings.Contains(err.Error(), "use --state-dir") {
+		t.Fatalf("expected state-dir guidance, got %v", err)
 	}
 }
 
@@ -312,7 +306,7 @@ func TestRunScopedPollingMountsCancelsSiblingsOnFirstError(t *testing.T) {
 
 	err := runScopedPollingMountsWithRunner(
 		context.Background(),
-		mountConfig{localDir: t.TempDir(), stateFile: filepath.Join(t.TempDir(), "state.json")},
+		mountConfig{localDir: t.TempDir(), stateDir: t.TempDir()},
 		[]string{"/github", "/slack"},
 		func(ctx context.Context, cfg mountConfig) error {
 			started <- cfg.remotePath

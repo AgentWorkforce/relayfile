@@ -211,6 +211,9 @@ func runScopedPollingMountsWithRunner(
 	}
 	scopedMounts := make([]scopedMount, 0, len(remotePaths))
 	seen := map[string]struct{}{}
+	if len(remotePaths) > 1 && strings.TrimSpace(cfg.stateFile) != "" {
+		return fmt.Errorf("--state-file cannot be shared across multiple scoped mounts; use --state-dir instead")
+	}
 	for _, remotePath := range remotePaths {
 		remotePath := normalizeMountRemotePath(remotePath)
 		if _, ok := seen[remotePath]; ok {

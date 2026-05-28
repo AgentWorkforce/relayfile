@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -146,7 +147,7 @@ func QuarantineLegacyMountState(localRoot, stateDir string) ([]string, error) {
 			}
 			return moved, err
 		}
-		if info.IsDir() {
+		if info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 			continue
 		}
 		if err := os.MkdirAll(quarantineDir, 0o700); err != nil {
@@ -154,12 +155,37 @@ func QuarantineLegacyMountState(localRoot, stateDir string) ([]string, error) {
 		}
 		target := filepath.Join(quarantineDir, filepath.Base(localRoot)+"-"+filepath.Base(candidate))
 		target = uniqueQuarantinePath(target)
-		if err := os.Rename(candidate, target); err != nil {
+		if err := moveRegularFile(candidate, target, info.Mode().Perm()); err != nil {
 			return moved, err
 		}
 		moved = append(moved, target)
 	}
 	return moved, nil
+}
+
+func moveRegularFile(src, dst string, perm os.FileMode) error {
+	if err := os.Rename(src, dst); err == nil {
+		return nil
+	}
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_EXCL|os.O_WRONLY, perm)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		_ = os.Remove(dst)
+		return err
+	}
+	if err := out.Close(); err != nil {
+		_ = os.Remove(dst)
+		return err
+	}
+	return os.Remove(src)
 }
 
 func legacyStateCandidates(localRoot string) ([]string, error) {
