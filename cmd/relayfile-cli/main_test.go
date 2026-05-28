@@ -493,8 +493,11 @@ func TestTreeRefreshesExpiredCloudWorkspaceTokenAndRetriesCanonicalWorkspace(t *
 	if !ok {
 		t.Fatalf("expected refreshed workspace catalog record")
 	}
-	if record.ID != "rw_cloud" {
-		t.Fatalf("workspace record ID = %q, want rw_cloud", record.ID)
+	if record.ID != "ws_cloud" {
+		t.Fatalf("workspace record ID = %q, want ws_cloud", record.ID)
+	}
+	if record.RelayWorkspaceID != "rw_cloud" {
+		t.Fatalf("relay workspace ID = %q, want rw_cloud", record.RelayWorkspaceID)
 	}
 	if record.Server != server.URL {
 		t.Fatalf("workspace record Server = %q, want %q", record.Server, server.URL)
@@ -619,8 +622,11 @@ func TestReadRefreshesCloudWorkspaceTokenAfterUnauthorized(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected refreshed workspace catalog record")
 	}
-	if record.ID != "rw_cloud" {
-		t.Fatalf("workspace record ID = %q, want rw_cloud", record.ID)
+	if record.ID != "ws_cloud" {
+		t.Fatalf("workspace record ID = %q, want ws_cloud", record.ID)
+	}
+	if record.RelayWorkspaceID != "rw_cloud" {
+		t.Fatalf("relay workspace ID = %q, want rw_cloud", record.RelayWorkspaceID)
 	}
 	if record.Server != server.URL {
 		t.Fatalf("workspace record Server = %q, want %q", record.Server, server.URL)
@@ -4410,5 +4416,66 @@ func TestIntegrationConnectNonAtlassianSkipsPicker(t *testing.T) {
 		"--timeout", "5s",
 	}, strings.NewReader(""), &stdout, &stdout); err != nil {
 		t.Fatalf("integration connect github failed: %v", err)
+	}
+}
+
+func TestIntegrationConnectKeepsSelectedWorkspaceAndUsesJoinedRelayWorkspaceForSync(t *testing.T) {
+	record, _ := setupAdoptWorkspace(t)
+	record.ID = "50587328-441d-4acb-b8f3-dbe1b3c5de99"
+	if _, err := upsertWorkspaceDetails(record); err != nil {
+		t.Fatalf("upsert app workspace record failed: %v", err)
+	}
+
+	var server *httptest.Server
+	seen := map[string]int{}
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		seen[r.URL.Path]++
+		switch r.URL.Path {
+		case "/api/v1/auth/token/refresh":
+			_, _ = w.Write([]byte(`{"apiUrl":"` + server.URL + `","accessToken":"cld_new","refreshToken":"refresh_123","accessTokenExpiresAt":"2030-05-01T00:00:00Z"}`))
+		case "/api/v1/workspaces/50587328-441d-4acb-b8f3-dbe1b3c5de99/join":
+			_, _ = w.Write([]byte(`{"workspaceId":"rw_7ccfea89","token":"rf_join","relayfileUrl":"` + server.URL + `"}`))
+		case "/api/v1/workspaces/50587328-441d-4acb-b8f3-dbe1b3c5de99/integrations/connect-session":
+			_, _ = w.Write([]byte(`{"connectionId":"conn_slack","connectLink":"","backend":"nango"}`))
+		case "/api/v1/workspaces/50587328-441d-4acb-b8f3-dbe1b3c5de99/integrations/slack/status":
+			_, _ = w.Write([]byte(`{"ready":true,"state":"ready","provider":"slack","backend":"nango"}`))
+		case "/v1/workspaces/rw_7ccfea89/sync/status":
+			_, _ = w.Write([]byte(`{"workspaceId":"rw_7ccfea89","providers":[{"provider":"slack","status":"ready","lagSeconds":0}]}`))
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	pointAdoptCloudCredentials(t, server.URL)
+
+	var stdout bytes.Buffer
+	if err := run([]string{
+		"integration", "connect", "slack",
+		"--workspace", "demo",
+		"--cloud-api-url", server.URL,
+		"--no-open",
+		"--timeout", "5s",
+	}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("integration connect slack failed: %v\noutput:\n%s", err, stdout.String())
+	}
+	if seen["/api/v1/workspaces/50587328-441d-4acb-b8f3-dbe1b3c5de99/integrations/connect-session"] != 1 {
+		t.Fatalf("connect-session did not use selected app workspace; seen=%v", seen)
+	}
+	if seen["/v1/workspaces/rw_7ccfea89/sync/status"] == 0 {
+		t.Fatalf("sync wait did not use joined relay workspace; seen=%v", seen)
+	}
+	persisted, ok := workspaceRecordByName("demo")
+	if !ok {
+		t.Fatal("expected persisted workspace record")
+	}
+	if persisted.ID != "50587328-441d-4acb-b8f3-dbe1b3c5de99" {
+		t.Fatalf("workspace ID = %q, want selected app workspace", persisted.ID)
+	}
+	if persisted.RelayWorkspaceID != "rw_7ccfea89" {
+		t.Fatalf("relay workspace ID = %q, want rw_7ccfea89", persisted.RelayWorkspaceID)
+	}
+	if !strings.Contains(stdout.String(), "Relayfile runtime: rw_7ccfea89") {
+		t.Fatalf("expected explicit runtime workspace output, got %q", stdout.String())
 	}
 }
