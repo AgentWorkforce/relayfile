@@ -621,6 +621,9 @@ type SyncerOptions struct {
 	RemoteRoot    string
 	LocalRoot     string
 	StateFile     string
+	StateDir      string
+	MountKind     string
+	ValidateState bool
 	EventProvider string
 	Scopes        []string
 	WebSocket     *bool
@@ -998,10 +1001,23 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 	if eventProvider == "" {
 		eventProvider = inferProviderFromRoot(remoteRoot)
 	}
-	stateFile := strings.TrimSpace(opts.StateFile)
-	if stateFile == "" {
-		stateFile = filepath.Join(localRoot, ".relayfile-mount-state.json")
+	stateFileOpt := opts.StateFile
+	if strings.TrimSpace(stateFileOpt) == "" && strings.TrimSpace(opts.StateDir) == "" && !opts.ValidateState {
+		stateFileOpt = filepath.Join(localRoot, LegacyMountStateFileName)
 	}
+	statePath, err := ResolveMountStatePath(MountStatePathOptions{
+		WorkspaceID:     workspace,
+		RemoteRoot:      remoteRoot,
+		LocalRoot:       localRoot,
+		StateFile:       stateFileOpt,
+		StateDir:        opts.StateDir,
+		MountKind:       opts.MountKind,
+		ValidateOutside: opts.ValidateState,
+	})
+	if err != nil {
+		return nil, err
+	}
+	stateFile := statePath.StateFile
 	publicStatePath := filepath.Join(localRoot, ".relay", "state.json")
 	conflictsDir := filepath.Join(localRoot, ".relay", "conflicts")
 	resolvedConflictsDir := filepath.Join(conflictsDir, "resolved")
@@ -1026,6 +1042,13 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 	}
 	if err := os.MkdirAll(deadLetterDir, 0o755); err != nil {
 		return nil, err
+	}
+	if opts.ValidateState && !statePath.Override {
+		if moved, err := QuarantineLegacyMountState(localRoot, statePath.StateDir); err != nil {
+			return nil, err
+		} else if len(moved) > 0 && opts.Logger != nil {
+			opts.Logger.Printf("quarantined %d legacy private mount state file(s) outside mounted tree", len(moved))
+		}
 	}
 	websocketEnabled := true
 	if opts.WebSocket != nil {

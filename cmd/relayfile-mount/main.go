@@ -40,6 +40,8 @@ type mountConfig struct {
 	eventProvider    string
 	localDir         string
 	stateFile        string
+	stateDir         string
+	mountKind        string
 	interval         time.Duration
 	intervalJitter   float64
 	timeout          time.Duration
@@ -73,6 +75,8 @@ func main() {
 	eventProvider := flag.String("provider", strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_PROVIDER")), "event provider filter")
 	localDir := flag.String("local-dir", strings.TrimSpace(os.Getenv("RELAYFILE_LOCAL_DIR")), "local mirror directory")
 	stateFile := flag.String("state-file", strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_STATE_FILE")), "state file path")
+	stateDir := flag.String("state-dir", envOrDefault("RELAYFILE_MOUNT_STATE_DIR", mountsync.DefaultMountStateDir()), "directory for private mount state")
+	mountKind := flag.String("mount-kind", envOrDefault("RELAYFILE_MOUNT_KIND", mountsync.MountKindDaemon), "private state identity kind: daemon, flush, or initial-sync")
 	interval := flag.Duration("interval", durationEnv("RELAYFILE_MOUNT_INTERVAL", 30*time.Second), "sync interval")
 	intervalJitter := flag.Float64("interval-jitter", floatEnv("RELAYFILE_MOUNT_INTERVAL_JITTER", 0.2), "sync interval jitter ratio (0.0-1.0)")
 	timeout := flag.Duration("timeout", durationEnv("RELAYFILE_MOUNT_TIMEOUT", 15*time.Second), "per-sync timeout")
@@ -128,6 +132,8 @@ func main() {
 		eventProvider:    strings.TrimSpace(*eventProvider),
 		localDir:         *localDir,
 		stateFile:        *stateFile,
+		stateDir:         *stateDir,
+		mountKind:        *mountKind,
 		interval:         *interval,
 		intervalJitter:   *intervalJitter,
 		timeout:          *timeout,
@@ -215,7 +221,7 @@ func runScopedPollingMountsWithRunner(
 		scoped.remotePath = remotePath
 		scoped.remotePaths = nil
 		scoped.localDir = scopedLocalDir(cfg.localDir, remotePath)
-		scoped.stateFile = scopedStateFile(cfg.stateFile, remotePath)
+		scoped.stateFile = cfg.stateFile
 		if err := os.MkdirAll(scoped.localDir, 0o755); err != nil {
 			return fmt.Errorf("create scoped local dir for %s: %w", remotePath, err)
 		}
@@ -294,6 +300,9 @@ func runSinglePollingMount(rootCtx context.Context, cfg mountConfig) error {
 		EventProvider:      cfg.eventProvider,
 		LocalRoot:          cfg.localDir,
 		StateFile:          cfg.stateFile,
+		StateDir:           cfg.stateDir,
+		MountKind:          cfg.mountKind,
+		ValidateState:      true,
 		Scopes:             cfg.scopes,
 		WebSocket:          boolPtr(cfg.websocketEnabled),
 		RootCtx:            rootCtx,
@@ -455,23 +464,6 @@ func scopedLocalDir(localRoot, remotePath string) string {
 		return localRoot
 	}
 	return filepath.Join(localRoot, filepath.FromSlash(strings.TrimPrefix(remotePath, "/")))
-}
-
-func scopedStateFile(stateFile, remotePath string) string {
-	if strings.TrimSpace(stateFile) == "" {
-		return ""
-	}
-	remotePath = normalizeMountRemotePath(remotePath)
-	if remotePath == "/" {
-		return stateFile
-	}
-	ext := filepath.Ext(stateFile)
-	base := strings.TrimSuffix(stateFile, ext)
-	suffix := strings.NewReplacer("/", "-", "\\", "-", ":", "-").Replace(strings.Trim(remotePath, "/"))
-	if suffix == "" {
-		suffix = "root"
-	}
-	return base + "-" + suffix + ext
 }
 
 // readBootstrapProgress reads the in-progress bootstrap block from the
