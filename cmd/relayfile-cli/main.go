@@ -1444,7 +1444,7 @@ func persistJoinedWorkspace(record workspaceRecord, joined cloudWorkspaceJoinRes
 	if joinedWorkspaceID := strings.TrimSpace(joined.WorkspaceID); joinedWorkspaceID != "" {
 		if strings.TrimSpace(record.ID) == "" {
 			record.ID = joinedWorkspaceID
-		} else if joinedWorkspaceID != strings.TrimSpace(record.ID) {
+		} else {
 			record.RelayWorkspaceID = joinedWorkspaceID
 		}
 	}
@@ -4259,11 +4259,14 @@ func (c *workspaceCommandClient) refreshFromCloud() error {
 	if err != nil {
 		return err
 	}
+	requestedWorkspaceID := c.workspaceID
 	if joinedWorkspaceID := strings.TrimSpace(joined.WorkspaceID); joinedWorkspaceID != "" {
 		c.workspaceID = joinedWorkspaceID
 	}
 	record := c.record
-	record.ID = c.workspaceID
+	if strings.TrimSpace(record.ID) == "" {
+		record.ID = strings.TrimSpace(requestedWorkspaceID)
+	}
 	record.Scopes = append([]string(nil), c.scopes...)
 	record, err = persistJoinedWorkspace(record, joined, cloudCreds.APIURL, record.LocalDir, false)
 	if err != nil {

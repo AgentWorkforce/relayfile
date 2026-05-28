@@ -493,8 +493,11 @@ func TestTreeRefreshesExpiredCloudWorkspaceTokenAndRetriesCanonicalWorkspace(t *
 	if !ok {
 		t.Fatalf("expected refreshed workspace catalog record")
 	}
-	if record.ID != "rw_cloud" {
-		t.Fatalf("workspace record ID = %q, want rw_cloud", record.ID)
+	if record.ID != "ws_cloud" {
+		t.Fatalf("workspace record ID = %q, want ws_cloud", record.ID)
+	}
+	if record.RelayWorkspaceID != "rw_cloud" {
+		t.Fatalf("relay workspace ID = %q, want rw_cloud", record.RelayWorkspaceID)
 	}
 	if record.Server != server.URL {
 		t.Fatalf("workspace record Server = %q, want %q", record.Server, server.URL)
@@ -619,8 +622,11 @@ func TestReadRefreshesCloudWorkspaceTokenAfterUnauthorized(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected refreshed workspace catalog record")
 	}
-	if record.ID != "rw_cloud" {
-		t.Fatalf("workspace record ID = %q, want rw_cloud", record.ID)
+	if record.ID != "ws_cloud" {
+		t.Fatalf("workspace record ID = %q, want ws_cloud", record.ID)
+	}
+	if record.RelayWorkspaceID != "rw_cloud" {
+		t.Fatalf("relay workspace ID = %q, want rw_cloud", record.RelayWorkspaceID)
 	}
 	if record.Server != server.URL {
 		t.Fatalf("workspace record Server = %q, want %q", record.Server, server.URL)
