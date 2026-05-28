@@ -41,9 +41,6 @@ type MountStatePath struct {
 }
 
 func DefaultMountStateDir() string {
-	if home := strings.TrimSpace(os.Getenv("HOME")); home != "" {
-		return filepath.Join(home, DefaultMountStateDirName)
-	}
 	if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
 		return filepath.Join(home, DefaultMountStateDirName)
 	}
@@ -51,9 +48,13 @@ func DefaultMountStateDir() string {
 }
 
 func ResolveMountStatePath(opts MountStatePathOptions) (MountStatePath, error) {
-	localRoot := filepath.Clean(strings.TrimSpace(opts.LocalRoot))
-	if localRoot == "" || localRoot == "." {
+	localRootInput := strings.TrimSpace(opts.LocalRoot)
+	if localRootInput == "" {
 		return MountStatePath{}, fmt.Errorf("local root is required")
+	}
+	localRoot, err := cleanAbsolutePath(localRootInput)
+	if err != nil {
+		return MountStatePath{}, fmt.Errorf("local root: %w", err)
 	}
 	kind := NormalizeMountKind(opts.MountKind)
 	stateFile := strings.TrimSpace(opts.StateFile)
@@ -110,10 +111,18 @@ func NormalizeMountKind(kind string) string {
 }
 
 func MountStateID(workspaceID, remoteRoot, localRoot, mountKind string) string {
+	localRoot = strings.TrimSpace(localRoot)
+	if localRoot == "" {
+		localRoot = filepath.Clean(localRoot)
+	} else if cleaned, err := cleanAbsolutePath(localRoot); err == nil {
+		localRoot = cleaned
+	} else {
+		localRoot = filepath.Clean(localRoot)
+	}
 	input := strings.Join([]string{
 		strings.TrimSpace(workspaceID),
 		normalizeRemotePath(remoteRoot),
-		filepath.Clean(strings.TrimSpace(localRoot)),
+		localRoot,
 		NormalizeMountKind(mountKind),
 	}, "\x00")
 	sum := sha256.Sum256([]byte(input))
@@ -121,9 +130,13 @@ func MountStateID(workspaceID, remoteRoot, localRoot, mountKind string) string {
 }
 
 func QuarantineLegacyMountState(localRoot, stateDir string) ([]string, error) {
-	localRoot = filepath.Clean(strings.TrimSpace(localRoot))
-	if localRoot == "" || localRoot == "." {
+	localRootInput := strings.TrimSpace(localRoot)
+	if localRootInput == "" {
 		return nil, nil
+	}
+	localRoot, err := cleanAbsolutePath(localRootInput)
+	if err != nil {
+		return nil, err
 	}
 	stateDir = strings.TrimSpace(stateDir)
 	if stateDir == "" {

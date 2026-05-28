@@ -46,6 +46,56 @@ func TestResolveMountStatePathUsesStateDirAndStableMountID(t *testing.T) {
 	}
 }
 
+func TestResolveMountStatePathCanonicalizesRelativeLocalRoot(t *testing.T) {
+	parent := t.TempDir()
+	localName := "mount"
+	localDir := filepath.Join(parent, localName)
+	if err := os.MkdirAll(localDir, 0o755); err != nil {
+		t.Fatalf("mkdir local dir: %v", err)
+	}
+	stateDir := t.TempDir()
+	originalWD, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("get working directory: %v", err)
+	}
+	if err := os.Chdir(localDir); err != nil {
+		t.Fatalf("chdir local dir: %v", err)
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("get local working directory: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(originalWD); err != nil {
+			t.Fatalf("restore working directory: %v", err)
+		}
+	})
+
+	relative, err := ResolveMountStatePath(MountStatePathOptions{
+		WorkspaceID:     "rw_123",
+		RemoteRoot:      "/github/repos/AgentWorkforce/relayfile",
+		LocalRoot:       ".",
+		StateDir:        stateDir,
+		ValidateOutside: true,
+	})
+	if err != nil {
+		t.Fatalf("ResolveMountStatePath(dot local root) failed: %v", err)
+	}
+	absolute, err := ResolveMountStatePath(MountStatePathOptions{
+		WorkspaceID:     "rw_123",
+		RemoteRoot:      "/github/repos/AgentWorkforce/relayfile",
+		LocalRoot:       cwd,
+		StateDir:        stateDir,
+		ValidateOutside: true,
+	})
+	if err != nil {
+		t.Fatalf("ResolveMountStatePath(absolute) failed: %v", err)
+	}
+	if relative.MountID != absolute.MountID {
+		t.Fatalf("expected relative and absolute local roots to share mount id, got %q and %q", relative.MountID, absolute.MountID)
+	}
+}
+
 func TestResolveMountStatePathMountKindSeparatesState(t *testing.T) {
 	stateDir := t.TempDir()
 	localDir := t.TempDir()

@@ -250,6 +250,7 @@ func TestScopedLocalDirKeepsProviderPrefixUnderMountRoot(t *testing.T) {
 
 func TestRunScopedPollingMountsKeepsSharedStateDirForHashResolver(t *testing.T) {
 	stateDir := t.TempDir()
+	var gotMu sync.Mutex
 	var got []mountConfig
 
 	err := runScopedPollingMountsWithRunner(
@@ -257,6 +258,8 @@ func TestRunScopedPollingMountsKeepsSharedStateDirForHashResolver(t *testing.T) 
 		mountConfig{localDir: t.TempDir(), stateDir: stateDir},
 		[]string{"/github", "/slack"},
 		func(_ context.Context, cfg mountConfig) error {
+			gotMu.Lock()
+			defer gotMu.Unlock()
 			got = append(got, cfg)
 			return nil
 		},
