@@ -4277,6 +4277,7 @@ type fakeClient struct {
 	listEventsCalls            int
 	latestEventIDCalls         int
 	latestEventIDErr           error
+	latestEventIDHook          func(call int) (string, error)
 	latestEventIDUnsupported   bool
 	readFileCalls              int
 	readFileCallsByPath        map[string]int
@@ -4411,6 +4412,9 @@ func (c *fakeClient) LatestEventID(ctx context.Context, workspaceID, provider st
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.latestEventIDCalls++
+	if c.latestEventIDHook != nil {
+		return c.latestEventIDHook(c.latestEventIDCalls)
+	}
 	if c.latestEventIDUnsupported {
 		return "", &HTTPError{StatusCode: http.StatusBadRequest, Code: "bad_request", Message: "direction=desc unsupported"}
 	}
@@ -6192,6 +6196,221 @@ func TestPullRestartFastPathSkipsFullPull(t *testing.T) {
 	if client.listTreeCalls != 0 || client.readFileCalls != 0 {
 		t.Fatalf("expected quiet post-restart cycle to remain a pure no-op; tree=%d read=%d",
 			client.listTreeCalls, client.readFileCalls)
+	}
+}
+
+func TestPullReusedMountWithPersistedCursorUsesIncrementalOnly(t *testing.T) {
+	client := &fakeClient{
+		files: map[string]RemoteFile{
+			"/notion/Docs/A.md": {
+				Path:        "/notion/Docs/A.md",
+				Revision:    "rev_2",
+				ContentType: "text/markdown",
+				Content:     "# A v2",
+			},
+		},
+		events: []FilesystemEvent{
+			{
+				EventID:  "evt_1",
+				Type:     "file.created",
+				Path:     "/notion/Docs/A.md",
+				Revision: "rev_1",
+			},
+			{
+				EventID:  "evt_2",
+				Type:     "file.updated",
+				Path:     "/notion/Docs/A.md",
+				Revision: "rev_2",
+			},
+		},
+		revisionCounter: 2,
+		eventCounter:    2,
+	}
+	localDir := t.TempDir()
+	localPath := filepath.Join(localDir, "Docs", "A.md")
+	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+		t.Fatalf("mkdir local: %v", err)
+	}
+	if err := os.WriteFile(localPath, []byte("# A v1"), 0o644); err != nil {
+		t.Fatalf("seed local: %v", err)
+	}
+	if err := writeMountState(filepath.Join(localDir, ".relayfile-mount-state.json"), mountState{
+		Files: map[string]trackedFile{
+			"/notion/Docs/A.md": {
+				Revision:    "rev_1",
+				ContentType: "text/markdown",
+				Hash:        hashBytes([]byte("# A v1")),
+			},
+		},
+		EventsCursor:      "evt_1",
+		BootstrapComplete: true,
+	}); err != nil {
+		t.Fatalf("write seed state: %v", err)
+	}
+
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_reuse_cursor",
+		RemoteRoot:  "/notion",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+
+	if err := syncer.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reused cursor reconcile: %v", err)
+	}
+
+	if client.listTreeCalls != 0 {
+		t.Fatalf("expected persisted cursor reuse to skip full tree pull; got %d ListTree call(s)", client.listTreeCalls)
+	}
+	if client.latestEventIDCalls != 0 {
+		t.Fatalf("expected persisted cursor reuse not to resolve latest cursor; got %d call(s)", client.latestEventIDCalls)
+	}
+	assertLocalFileContent(t, localPath, "# A v2")
+	if got := strings.TrimSpace(syncer.state.EventsCursor); got != "evt_2" {
+		t.Fatalf("expected cursor to advance to evt_2, got %q", got)
+	}
+}
+
+func TestPullRestartFastPathRetriesCursorDeadlineBeforeFullPull(t *testing.T) {
+	client := &fakeClient{
+		files: map[string]RemoteFile{
+			"/notion/Docs/A.md": {
+				Path:        "/notion/Docs/A.md",
+				Revision:    "rev_1",
+				ContentType: "text/markdown",
+				Content:     "# A",
+			},
+		},
+		events: []FilesystemEvent{
+			{
+				EventID:  "evt_seed",
+				Type:     "file.created",
+				Path:     "/notion/Docs/A.md",
+				Revision: "rev_1",
+			},
+		},
+		revisionCounter: 1,
+		eventCounter:    1,
+	}
+	client.latestEventIDHook = func(call int) (string, error) {
+		if call == 1 {
+			return "", context.DeadlineExceeded
+		}
+		return "evt_seed", nil
+	}
+	localDir := t.TempDir()
+	localPath := filepath.Join(localDir, "Docs", "A.md")
+	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+		t.Fatalf("mkdir local: %v", err)
+	}
+	if err := os.WriteFile(localPath, []byte("# A"), 0o644); err != nil {
+		t.Fatalf("seed local: %v", err)
+	}
+	if err := writeMountState(filepath.Join(localDir, ".relayfile-mount-state.json"), mountState{
+		Files: map[string]trackedFile{
+			"/notion/Docs/A.md": {
+				Revision:    "rev_1",
+				ContentType: "text/markdown",
+				Hash:        hashBytes([]byte("# A")),
+			},
+		},
+		BootstrapComplete: true,
+	}); err != nil {
+		t.Fatalf("write seed state: %v", err)
+	}
+
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID:   "ws_restart_cursor_retry",
+		RemoteRoot:    "/notion",
+		LocalRoot:     localDir,
+		CursorTimeout: 10 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+
+	if err := syncer.Reconcile(context.Background()); err != nil {
+		t.Fatalf("restart reconcile should retry cursor resolution: %v", err)
+	}
+
+	if client.latestEventIDCalls != 2 {
+		t.Fatalf("expected cursor resolution to retry once, got %d call(s)", client.latestEventIDCalls)
+	}
+	if client.listTreeCalls != 0 || client.readFileCalls != 0 {
+		t.Fatalf("expected retrying fast-path to avoid full pull; tree=%d read=%d", client.listTreeCalls, client.readFileCalls)
+	}
+	if got := strings.TrimSpace(syncer.state.EventsCursor); got != "evt_seed" {
+		t.Fatalf("expected retry to seed evt_seed, got %q", got)
+	}
+}
+
+func TestPullRestartFastPathTimeoutDoesNotFallBackToFullPull(t *testing.T) {
+	client := &fakeClient{
+		files: map[string]RemoteFile{
+			"/notion/Docs/A.md": {
+				Path:        "/notion/Docs/A.md",
+				Revision:    "rev_1",
+				ContentType: "text/markdown",
+				Content:     "# A",
+			},
+		},
+		events: []FilesystemEvent{
+			{
+				EventID:  "evt_seed",
+				Type:     "file.created",
+				Path:     "/notion/Docs/A.md",
+				Revision: "rev_1",
+			},
+		},
+		latestEventIDErr: context.DeadlineExceeded,
+		revisionCounter:  1,
+		eventCounter:     1,
+	}
+	localDir := t.TempDir()
+	localPath := filepath.Join(localDir, "Docs", "A.md")
+	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+		t.Fatalf("mkdir local: %v", err)
+	}
+	if err := os.WriteFile(localPath, []byte("# A"), 0o644); err != nil {
+		t.Fatalf("seed local: %v", err)
+	}
+	if err := writeMountState(filepath.Join(localDir, ".relayfile-mount-state.json"), mountState{
+		Files: map[string]trackedFile{
+			"/notion/Docs/A.md": {
+				Revision:    "rev_1",
+				ContentType: "text/markdown",
+				Hash:        hashBytes([]byte("# A")),
+			},
+		},
+		BootstrapComplete: true,
+	}); err != nil {
+		t.Fatalf("write seed state: %v", err)
+	}
+
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID:   "ws_restart_cursor_timeout",
+		RemoteRoot:    "/notion",
+		LocalRoot:     localDir,
+		CursorTimeout: 10 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+
+	if err := syncer.Reconcile(context.Background()); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected deadline after cursor retries, got %v", err)
+	}
+
+	if client.latestEventIDCalls != defaultCursorResolutionAttempts {
+		t.Fatalf("expected %d cursor attempts, got %d", defaultCursorResolutionAttempts, client.latestEventIDCalls)
+	}
+	if client.listTreeCalls != 0 || client.readFileCalls != 0 {
+		t.Fatalf("expected cursor timeout to avoid full pull fallback; tree=%d read=%d", client.listTreeCalls, client.readFileCalls)
+	}
+	if got := strings.TrimSpace(syncer.state.EventsCursor); got != "" {
+		t.Fatalf("expected cursor to remain empty after failed resolution, got %q", got)
 	}
 }
 
