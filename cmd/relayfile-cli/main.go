@@ -3842,7 +3842,7 @@ func runMount(args []string) error {
 	intervalJitter := fs.Float64("interval-jitter", floatEnv("RELAYFILE_MOUNT_INTERVAL_JITTER", 0.2), "sync interval jitter ratio (0.0-1.0)")
 	timeout := fs.Duration("timeout", durationEnv("RELAYFILE_MOUNT_TIMEOUT", defaultMountTimeout), "per-sync timeout")
 	bootstrapTimeout := fs.Duration("bootstrap-timeout", durationEnv("RELAYFILE_BOOTSTRAP_TIMEOUT", 0), "hard cap for the one-time/full-tree bootstrap pull (0 = unbounded while making progress)")
-	cursorTimeout := fs.Duration("cursor-timeout", durationEnv("RELAYFILE_CURSOR_TIMEOUT", 20*time.Second), "independent timeout for events-cursor resolution")
+	cursorTimeout := fs.Duration("cursor-timeout", durationEnv("RELAYFILE_CURSOR_TIMEOUT", 60*time.Second), "independent timeout for events-cursor resolution")
 	fullReconcile := fs.Bool("full-reconcile", boolEnv("RELAYFILE_FORCE_FULL_RECONCILE", false), "force one full reconcile regardless of bootstrap-complete state (escape hatch)")
 	websocketEnabled := fs.Bool("websocket", boolEnv("RELAYFILE_MOUNT_WEBSOCKET", true), "enable websocket event streaming when available")
 	lowMemory := fs.Bool("low-memory", boolEnv("RELAYFILE_MOUNT_LOW_MEMORY", false), "reduce mount memory use by omitting per-file public state and deferring content reads")
@@ -4154,7 +4154,7 @@ Common flags:
   --timeout 5m         per-sync timeout
   --bootstrap-timeout 0s
                        hard cap for initial/full-tree bootstrap (0 = progress-based)
-  --cursor-timeout 20s timeout for events-cursor resolution
+  --cursor-timeout 60s timeout for events-cursor resolution
   --full-reconcile     force one full reconcile regardless of bootstrap state
   --state-dir DIR      private mount state directory (default $HOME/.relayfile-mount-state)
   --state-file FILE    exact private state file override; wins over --state-dir

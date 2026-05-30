@@ -80,7 +80,9 @@ const defaultFullPullEvery = 20
 const (
 	defaultBootstrapTimeout          = 0 * time.Second
 	defaultBootstrapIdleTimeout      = 90 * time.Second
-	defaultCursorTimeout             = 20 * time.Second
+	defaultCursorTimeout             = 60 * time.Second
+	defaultCursorResolutionAttempts  = 3
+	defaultCursorRetryBaseDelay      = 250 * time.Millisecond
 	defaultBootstrapReadWorkers      = 16
 	defaultIncrementalEventPageLimit = 50
 	defaultRetryAfterMaxDelay        = 60 * time.Second
@@ -645,9 +647,11 @@ type SyncerOptions struct {
 	// sentinel (<=0): the bootstrap runs to completion as long as it keeps
 	// applying files within the idle window.
 	BootstrapTimeout time.Duration
-	// CursorTimeout bounds resolveLatestEventCursor with its OWN short
-	// deadline derived from RootCtx. 0 falls back to env
-	// RELAYFILE_CURSOR_TIMEOUT, default 20s.
+	// CursorTimeout bounds each resolveLatestEventCursor attempt with its OWN
+	// deadline derived from RootCtx. Timeout-class failures are retried with
+	// backoff before the caller decides whether a full pull is safe.
+	//
+	// 0 falls back to env RELAYFILE_CURSOR_TIMEOUT, default 60s.
 	CursorTimeout time.Duration
 	// ForceFullReconcile, when non-nil and true, forces one full reconcile
 	// regardless of BootstrapComplete (escape hatch / clobber-remnant
@@ -2459,6 +2463,15 @@ func (s *Syncer) pullRemote(ctx context.Context, conflicted map[string]struct{})
 		if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusNotFound {
 			// No events feed on this backend — fall through to the
 			// full-pull bootstrap path. (Pre-fix behaviour.)
+		} else if isCursorResolutionRetryable(err) {
+			// A completed prior bootstrap with tracked files is reusable
+			// state. Under load, falling through from a transient cursor
+			// timeout to a full export recreates the production stall loop:
+			// full export exceeds the bootstrap watchdog, the cursor stays
+			// empty, and the next reuse repeats the same expensive path.
+			// Surface the cycle failure instead; the daemon will retry the
+			// cheap cursor path next reconcile without destroying progress.
+			return err
 		} else {
 			s.logf("restart fast-path: cursor resolution failed (%v); falling through to full pull", err)
 		}
@@ -4013,12 +4026,42 @@ func (s *Syncer) markIncrementalCheckpoint(pageStartCursor, pageCursor, phase, r
 }
 
 func (s *Syncer) resolveLatestEventCursor(ctx context.Context) (string, error) {
-	// Derive an OWN short deadline from rootCtx so a slow/hanging events
-	// feed can never wedge an otherwise healthy cycle (and is independent
-	// of whatever inbound per-cycle/bootstrap ctx the caller passed). The
-	// signature/return contract is unchanged; the inbound ctx is honored
-	// only for cancellation via rootCtx propagation.
-	cctx, cancel := context.WithTimeout(s.rootCtx, s.cursorTimeout)
+	var lastErr error
+	attempts := defaultCursorResolutionAttempts
+	if attempts < 1 {
+		attempts = 1
+	}
+	for attempt := 0; attempt < attempts; attempt++ {
+		cursor, err := s.resolveLatestEventCursorOnce(ctx, s.cursorTimeout)
+		if err == nil {
+			return cursor, nil
+		}
+		lastErr = err
+		if !isCursorResolutionRetryable(err) || attempt == attempts-1 {
+			return "", err
+		}
+		delay := cursorResolutionRetryDelay(s.cursorTimeout, attempt)
+		s.logf("cursor resolution attempt %d/%d failed (%v); retrying in %s", attempt+1, attempts, err, delay)
+		if waitErr := waitWithContext(s.rootCtx, delay); waitErr != nil {
+			return "", waitErr
+		}
+	}
+	if lastErr != nil {
+		return "", lastErr
+	}
+	return "", nil
+}
+
+func (s *Syncer) resolveLatestEventCursorOnce(ctx context.Context, timeout time.Duration) (string, error) {
+	// Derive an OWN deadline from rootCtx so a slow/hanging events feed can
+	// never wedge an otherwise healthy cycle (and is independent of whatever
+	// inbound per-cycle/bootstrap ctx the caller passed). The signature/return
+	// contract is unchanged; the inbound ctx is observed only for cancellation
+	// before starting an attempt.
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	cctx, cancel := context.WithTimeout(s.rootCtx, timeout)
 	defer cancel()
 
 	// Preferred path (post cloud#927): /fs/events?direction=desc&limit=1
@@ -4055,6 +4098,38 @@ func (s *Syncer) resolveLatestEventCursor(ctx context.Context) (string, error) {
 		cursor = *feed.NextCursor
 	}
 	return latest, nil
+}
+
+func isCursorResolutionRetryable(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
+}
+
+func cursorResolutionRetryDelay(timeout time.Duration, attempt int) time.Duration {
+	if attempt < 0 {
+		attempt = 0
+	}
+	delay := defaultCursorRetryBaseDelay
+	for i := 0; i < attempt; i++ {
+		delay *= 2
+	}
+	maxDelay := 2 * time.Second
+	if timeout > 0 && timeout/10 < maxDelay {
+		maxDelay = timeout / 10
+	}
+	if maxDelay < time.Millisecond {
+		maxDelay = time.Millisecond
+	}
+	if delay > maxDelay {
+		return maxDelay
+	}
+	return delay
 }
 
 func (s *Syncer) applyRemoteFile(remotePath string, file RemoteFile, conflicted map[string]struct{}) error {

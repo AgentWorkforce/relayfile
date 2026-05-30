@@ -81,7 +81,7 @@ func main() {
 	intervalJitter := flag.Float64("interval-jitter", floatEnv("RELAYFILE_MOUNT_INTERVAL_JITTER", 0.2), "sync interval jitter ratio (0.0-1.0)")
 	timeout := flag.Duration("timeout", durationEnv("RELAYFILE_MOUNT_TIMEOUT", 15*time.Second), "per-sync timeout")
 	bootstrapTimeout := flag.Duration("bootstrap-timeout", durationEnv("RELAYFILE_BOOTSTRAP_TIMEOUT", 0), "hard cap for the one-time/full-tree bootstrap pull (0 = unbounded while making progress)")
-	cursorTimeout := flag.Duration("cursor-timeout", durationEnv("RELAYFILE_CURSOR_TIMEOUT", 20*time.Second), "independent timeout for events-cursor resolution")
+	cursorTimeout := flag.Duration("cursor-timeout", durationEnv("RELAYFILE_CURSOR_TIMEOUT", 60*time.Second), "independent timeout for events-cursor resolution")
 	fullReconcile := flag.Bool("full-reconcile", boolEnv("RELAYFILE_FORCE_FULL_RECONCILE", false), "force one full reconcile regardless of bootstrap-complete state (escape hatch)")
 	websocketEnabled := flag.Bool("websocket", boolEnv("RELAYFILE_MOUNT_WEBSOCKET", true), "enable websocket event streaming when available")
 	lazyRepos := flag.Bool("lazy-repos", lazyReposEnv(), "lazily materialize GitHub repo subtrees on first access")
