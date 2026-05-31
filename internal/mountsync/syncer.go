@@ -1115,6 +1115,9 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 	// misconfiguration can't let the export outlive the watchdog (which would
 	// defeat the fall-through and re-create the #1499/#1516 stall loop).
 	if maxExportTimeout := bootstrapIdleTimeout * 3 / 4; maxExportTimeout > 0 && exportTimeout > maxExportTimeout {
+		if opts.Logger != nil {
+			opts.Logger.Printf("clamping exportTimeout from %s to %s (must stay strictly under bootstrapIdleTimeout %s so the export yields to the resumable tree pull before the watchdog fires)", exportTimeout, maxExportTimeout, bootstrapIdleTimeout)
+		}
 		exportTimeout = maxExportTimeout
 	}
 	forceFullReconcile := false
