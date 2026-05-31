@@ -1,0 +1,77 @@
+{
+  "id": "traj_jttezvdd41jp",
+  "version": 1,
+  "task": {
+    "title": "Review and fix PR #223"
+  },
+  "status": "completed",
+  "startedAt": "2026-05-31T06:44:08.222Z",
+  "completedAt": "2026-05-31T06:49:40.024Z",
+  "agents": [
+    {
+      "name": "default",
+      "role": "lead",
+      "joinedAt": "2026-05-31T06:44:46.507Z"
+    }
+  ],
+  "chapters": [
+    {
+      "id": "chap_icp3as4fbal6",
+      "title": "Work",
+      "agentName": "default",
+      "startedAt": "2026-05-31T06:44:46.507Z",
+      "endedAt": "2026-05-31T06:49:40.024Z",
+      "events": [
+        {
+          "ts": 1780209886508,
+          "type": "decision",
+          "content": "Investigate export timeout relative to hard bootstrap timeout: Investigate export timeout relative to hard bootstrap timeout",
+          "raw": {
+            "question": "Investigate export timeout relative to hard bootstrap timeout",
+            "chosen": "Investigate export timeout relative to hard bootstrap timeout",
+            "alternatives": [],
+            "reasoning": "PR clamps export timeout below idle watchdog but bootstrap hard-cap mode can still cancel the parent before the export sub-deadline, preventing same-cycle tree fallback."
+          },
+          "significance": "high"
+        },
+        {
+          "ts": 1780209945061,
+          "type": "decision",
+          "content": "Clamp export timeout below hard bootstrap caps and narrow 429 fallback: Clamp export timeout below hard bootstrap caps and narrow 429 fallback",
+          "raw": {
+            "question": "Clamp export timeout below hard bootstrap caps and narrow 429 fallback",
+            "chosen": "Clamp export timeout below hard bootstrap caps and narrow 429 fallback",
+            "alternatives": [],
+            "reasoning": "A positive BootstrapTimeout can otherwise cancel the parent context before the export sub-deadline fires, and only workspace_busy 429s are evidence that the atomic export path is the overloaded component."
+          },
+          "significance": "high"
+        },
+        {
+          "ts": 1780210168602,
+          "type": "reflection",
+          "content": "Reviewed PR export fallback changes, fixed hard-cap timeout race and narrowed 429 fallback to workspace_busy; full Go tests and vet passed locally.",
+          "raw": {
+            "confidence": 0.9
+          },
+          "significance": "high",
+          "tags": [
+            "confidence:0.9"
+          ]
+        }
+      ]
+    }
+  ],
+  "retrospective": {
+    "summary": "Reviewed PR #223 export fallback changes; fixed export timeout clamping for hard bootstrap caps, narrowed 429 fallback to workspace_busy, added regression coverage, and verified go test ./... plus go vet ./... with a temporary Go 1.22 toolchain.",
+    "approach": "Standard approach",
+    "confidence": 0.9
+  },
+  "commits": [],
+  "filesChanged": [],
+  "projectId": "/home/daytona/workspace",
+  "tags": [],
+  "_trace": {
+    "startRef": "94061893e95d67b0deef3abe58f501edb1b2448b",
+    "endRef": "94061893e95d67b0deef3abe58f501edb1b2448b"
+  }
+}

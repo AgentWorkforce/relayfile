@@ -1109,12 +1109,20 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 	if exportTimeout <= 0 {
 		exportTimeout = defaultExportTimeout
 	}
-	// The export's own deadline MUST elapse before the no-progress bootstrap
-	// watchdog so a slow export yields to the resumable tree pull while the
-	// bootstrap ctx is still alive. Clamp to a fraction of the idle window so a
-	// misconfiguration can't let the export outlive the watchdog (which would
-	// defeat the fall-through and re-create the #1499/#1516 stall loop).
-	if maxExportTimeout := bootstrapIdleTimeout * 3 / 4; maxExportTimeout > 0 && exportTimeout > maxExportTimeout {
+	// The export's own deadline MUST elapse before the bootstrap context can
+	// be canceled so a slow export yields to the resumable tree pull while the
+	// bootstrap ctx is still alive. Clamp to a fraction of the active bootstrap
+	// window so misconfiguration can't let the export outlive either the
+	// no-progress watchdog or a hard bootstrap cap (which would defeat the
+	// fall-through and re-create the #1499/#1516 stall loop).
+	maxExportTimeout := bootstrapIdleTimeout * 3 / 4
+	if bootstrapTimeout > 0 {
+		hardCapMax := bootstrapTimeout * 3 / 4
+		if maxExportTimeout <= 0 || hardCapMax < maxExportTimeout {
+			maxExportTimeout = hardCapMax
+		}
+	}
+	if maxExportTimeout > 0 && exportTimeout > maxExportTimeout {
 		exportTimeout = maxExportTimeout
 	}
 	forceFullReconcile := false
@@ -3011,8 +3019,10 @@ func exportSnapshotUnsupported(err error) bool {
 	// export keeps contending for the one overloaded invocation; fall through
 	// to pullRemoteFullTree, whose paginated ListTree + per-file reads are
 	// individually bounded, individually retried, and resume from the persisted
-	// cursor instead of restarting the whole export.
-	if httpErr.StatusCode == http.StatusTooManyRequests {
+	// cursor instead of restarting the whole export. Other 429 classes (for
+	// example global rate limits or queue pressure) are not export-specific and
+	// should remain visible to the caller after retries are exhausted.
+	if httpErr.StatusCode == http.StatusTooManyRequests && strings.EqualFold(httpErr.Code, "workspace_busy") {
 		return true
 	}
 	return httpErr.StatusCode == http.StatusBadRequest && strings.EqualFold(httpErr.Code, "bad_request")
