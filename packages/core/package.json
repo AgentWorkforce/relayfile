@@ -1,6 +1,6 @@
 {
   "name": "@relayfile/core",
-  "version": "0.8.5",
+  "version": "0.8.6",
   "description": "Shared business logic for relayfile — file operations, ACL, queries, events, and writeback lifecycle",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
