@@ -664,12 +664,13 @@ type SyncerOptions struct {
 	// 0 falls back to env RELAYFILE_CURSOR_TIMEOUT, default 60s.
 	CursorTimeout time.Duration
 	// ExportTimeout bounds each atomic full-tree export (ExportFiles) with its
-	// OWN deadline derived from the bootstrap ctx, kept strictly under
-	// bootstrapIdleTimeout. When the export does not finish in time the syncer
-	// falls through to the resumable, per-page pullRemoteFullTree instead of
-	// retrying a doomed one-shot export. 0 falls back to env
-	// RELAYFILE_EXPORT_TIMEOUT, default 45s; values >= bootstrapIdleTimeout are
-	// clamped below it so the fall-through always fires before the watchdog.
+	// OWN deadline derived from the bootstrap ctx, kept strictly under the
+	// active bootstrap window. When the export does not finish in time the
+	// syncer falls through to the resumable, per-page pullRemoteFullTree
+	// instead of retrying a doomed one-shot export. 0 falls back to env
+	// RELAYFILE_EXPORT_TIMEOUT, default 45s; values >= bootstrapIdleTimeout or
+	// a positive BootstrapTimeout are clamped below the smaller window so the
+	// fall-through always fires before the parent bootstrap ctx is canceled.
 	ExportTimeout time.Duration
 	// ForceFullReconcile, when non-nil and true, forces one full reconcile
 	// regardless of BootstrapComplete (escape hatch / clobber-remnant
@@ -1126,7 +1127,7 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 	}
 	if maxExportTimeout > 0 && exportTimeout > maxExportTimeout {
 		if opts.Logger != nil {
-			opts.Logger.Printf("clamping exportTimeout from %s to %s (must stay strictly under the active bootstrap window — no-progress watchdog %s, hard cap %s — so the export yields to the resumable tree pull before the bootstrap ctx is canceled)", exportTimeout, maxExportTimeout, bootstrapIdleTimeout, bootstrapTimeout)
+			opts.Logger.Printf("clamping exportTimeout from %s to %s (must stay strictly under the active bootstrap window: no-progress watchdog %s, hard cap %s, so the export yields to the resumable tree pull before the bootstrap ctx is canceled)", exportTimeout, maxExportTimeout, bootstrapIdleTimeout, bootstrapTimeout)
 		}
 		exportTimeout = maxExportTimeout
 	}
