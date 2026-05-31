@@ -833,6 +833,8 @@ func TestExportSnapshotOverloadedClassification(t *testing.T) {
 	supported := []error{
 		&HTTPError{StatusCode: 500, Code: "internal_error", Message: "boom"},
 		&HTTPError{StatusCode: 502, Message: "bad gateway"},
+		&HTTPError{StatusCode: 429, Code: "rate_limited", Message: "rate limit exceeded"},
+		&HTTPError{StatusCode: 429, Code: "queue_full", Message: "cloud write queue is full"},
 		errors.New("http2: server sent GOAWAY and closed the connection"),
 	}
 	for _, err := range supported {
@@ -932,6 +934,51 @@ func TestReconcileFallsBackToTreeWhenExportExceedsSubDeadline(t *testing.T) {
 	assertLocalFileContent(t, filepath.Join(localDir, "Docs", "A.md"), "# A")
 	if !syncer.state.BootstrapComplete {
 		t.Fatalf("tree fallback should complete the bootstrap; loop would otherwise persist")
+	}
+}
+
+// TestReconcileFallsBackToTreeWhenExportExceedsHardBootstrapCap covers the
+// companion clamp: when a positive RELAYFILE_BOOTSTRAP_TIMEOUT (hard cap) is
+// shorter than the configured export sub-deadline, exportTimeout is clamped
+// below the hard cap so the export still yields to the resumable tree pull
+// while the parent bootstrap ctx is alive (rather than the hard cap cancelling
+// the parent first and propagating instead of falling through).
+func TestReconcileFallsBackToTreeWhenExportExceedsHardBootstrapCap(t *testing.T) {
+	base := &fakeClient{
+		files: map[string]RemoteFile{
+			"/notion/Docs/A.md": {
+				Path:        "/notion/Docs/A.md",
+				Revision:    "rev_1",
+				ContentType: "text/markdown",
+				Content:     "# A",
+			},
+		},
+	}
+	client := &fakeExportClient{fakeClient: base, exportBlockUntilCancel: true}
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID:      "ws_slow_export_hard_cap",
+		RemoteRoot:       "/notion",
+		LocalRoot:        localDir,
+		BootstrapTimeout: 200 * time.Millisecond,
+		ExportTimeout:    time.Second,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+
+	if err := syncer.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile should fall back to tree before hard bootstrap cap: %v", err)
+	}
+	if client.exportCalls != 1 {
+		t.Fatalf("expected one export snapshot attempt, got %d", client.exportCalls)
+	}
+	if base.listTreeCalls != 1 {
+		t.Fatalf("expected hard-cap-clamped export to fall back to list tree once, got %d calls", base.listTreeCalls)
+	}
+	assertLocalFileContent(t, filepath.Join(localDir, "Docs", "A.md"), "# A")
+	if !syncer.state.BootstrapComplete {
+		t.Fatalf("tree fallback should complete the bootstrap before the hard cap")
 	}
 }
 
