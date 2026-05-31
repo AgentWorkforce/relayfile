@@ -1,289 +1,181 @@
 {
   "version": 1,
-  "lastUpdated": "2026-05-28T07:49:59.646Z",
+  "lastUpdated": "2026-05-31T19:49:49.793Z",
   "trajectories": {
-    "traj_mfyus7zfgxt2": {
-      "title": "062-sdk-setup-client-workflow",
-      "status": "active",
-      "startedAt": "2026-04-30T16:53:07.629Z",
-      "path": ".trajectories/active/traj_mfyus7zfgxt2.json"
+    "traj_7x9nltybo08h": {
+      "title": "Update PR 65 usage instructions",
+      "status": "completed",
+      "startedAt": "2026-04-30T21:07:25.621Z",
+      "completedAt": "2026-04-30T21:08:20.135Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-04/traj_7x9nltybo08h.json"
     },
     "traj_82lywlk9dcnc": {
       "title": "Write SDK setup client workflow from spec",
       "status": "completed",
       "startedAt": "2026-04-30T16:43:24.651Z",
       "completedAt": "2026-04-30T16:51:07.147Z",
-      "path": ".trajectories/completed/2026-04/traj_82lywlk9dcnc.json",
-      "compactedInto": "compact_xl96yexa79wg"
-    },
-    "traj_iuzm83ogm43k": {
-      "title": "Replace chokidar with @parcel/watcher in local-mount",
-      "status": "completed",
-      "startedAt": "2026-04-20T20:35:15.759Z",
-      "completedAt": "2026-04-20T20:58:15.412Z",
-      "path": ".trajectories/completed/2026-04/traj_iuzm83ogm43k.json",
-      "compactedInto": "compact_xl96yexa79wg"
-    },
-    "traj_nixaonkglri1": {
-      "title": "Migrate relayfile e2e and conformance scripts to RS256 local JWKS",
-      "status": "completed",
-      "startedAt": "2026-04-24T09:06:31.046Z",
-      "completedAt": "2026-04-24T09:10:42.425Z",
-      "path": ".trajectories/completed/2026-04/traj_nixaonkglri1.json",
-      "compactedInto": "compact_xl96yexa79wg"
-    },
-    "traj_i1f02867dkxn": {
-      "title": "Fix SDK setup workflow verify gate",
-      "status": "completed",
-      "startedAt": "2026-04-30T17:07:38.811Z",
-      "completedAt": "2026-04-30T17:10:18.837Z",
-      "path": ".trajectories/completed/2026-04/traj_i1f02867dkxn.json",
-      "compactedInto": "compact_xl96yexa79wg"
-    },
-    "traj_ubq95azheqpt": {
-      "title": "062-sdk-setup-client-workflow",
-      "status": "active",
-      "startedAt": "2026-04-30T17:12:22.684Z",
-      "path": ".trajectories/active/traj_ubq95azheqpt.json"
-    },
-    "traj_dmoc4slub7ox": {
-      "title": "Fix SDK setup workflow evidence path",
-      "status": "completed",
-      "startedAt": "2026-04-30T17:33:11.390Z",
-      "completedAt": "2026-04-30T17:34:29.265Z",
-      "path": ".trajectories/completed/2026-04/traj_dmoc4slub7ox.json",
-      "compactedInto": "compact_xl96yexa79wg"
-    },
-    "traj_cojnals16pf9": {
-      "title": "062-sdk-setup-client-workflow",
-      "status": "active",
-      "startedAt": "2026-04-30T17:35:02.672Z",
-      "path": ".trajectories/active/traj_cojnals16pf9.json"
-    },
-    "traj_qi3qmy5oveab": {
-      "title": "Resolve SDK setup review gate",
-      "status": "completed",
-      "startedAt": "2026-04-30T17:41:15.457Z",
-      "completedAt": "2026-04-30T17:43:16.297Z",
-      "path": ".trajectories/completed/2026-04/traj_qi3qmy5oveab.json",
-      "compactedInto": "compact_xl96yexa79wg"
-    },
-    "traj_em3hvzpg1xmx": {
-      "title": "062-sdk-setup-client-workflow",
-      "status": "completed",
-      "startedAt": "2026-04-30T17:43:56.110Z",
-      "completedAt": "2026-04-30T17:43:59.041Z",
-      "path": ".trajectories/completed/2026-04/traj_em3hvzpg1xmx.json",
-      "compactedInto": "compact_xl96yexa79wg"
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-04/traj_82lywlk9dcnc.json"
     },
     "traj_cdist8i8vdmd": {
       "title": "Address PR 65 feedback",
       "status": "completed",
       "startedAt": "2026-04-30T20:10:45.916Z",
       "completedAt": "2026-04-30T20:11:29.126Z",
-      "path": ".trajectories/completed/2026-04/traj_cdist8i8vdmd.json",
-      "compactedInto": "compact_xl96yexa79wg"
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-04/traj_cdist8i8vdmd.json"
+    },
+    "traj_dmoc4slub7ox": {
+      "title": "Fix SDK setup workflow evidence path",
+      "status": "completed",
+      "startedAt": "2026-04-30T17:33:11.390Z",
+      "completedAt": "2026-04-30T17:34:29.265Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-04/traj_dmoc4slub7ox.json"
+    },
+    "traj_em3hvzpg1xmx": {
+      "title": "062-sdk-setup-client-workflow",
+      "status": "completed",
+      "startedAt": "2026-04-30T17:43:56.110Z",
+      "completedAt": "2026-04-30T17:43:59.041Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-04/traj_em3hvzpg1xmx.json"
+    },
+    "traj_i1f02867dkxn": {
+      "title": "Fix SDK setup workflow verify gate",
+      "status": "completed",
+      "startedAt": "2026-04-30T17:07:38.811Z",
+      "completedAt": "2026-04-30T17:10:18.837Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-04/traj_i1f02867dkxn.json"
+    },
+    "traj_iuzm83ogm43k": {
+      "title": "Replace chokidar with @parcel/watcher in local-mount",
+      "status": "completed",
+      "startedAt": "2026-04-20T20:35:15.759Z",
+      "completedAt": "2026-04-20T20:58:15.412Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-04/traj_iuzm83ogm43k.json"
+    },
+    "traj_mfyus7zfgxt2": {
+      "title": "062-sdk-setup-client-workflow",
+      "status": "completed",
+      "startedAt": "2026-04-30T16:53:07.629Z",
+      "completedAt": "2026-04-30T17:05:01.326Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-04/traj_mfyus7zfgxt2.json"
+    },
+    "traj_nixaonkglri1": {
+      "title": "Migrate relayfile e2e and conformance scripts to RS256 local JWKS",
+      "status": "completed",
+      "startedAt": "2026-04-24T09:06:31.046Z",
+      "completedAt": "2026-04-24T09:10:42.425Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-04/traj_nixaonkglri1.json"
+    },
+    "traj_qi3qmy5oveab": {
+      "title": "Resolve SDK setup review gate",
+      "status": "completed",
+      "startedAt": "2026-04-30T17:41:15.457Z",
+      "completedAt": "2026-04-30T17:43:16.297Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-04/traj_qi3qmy5oveab.json"
+    },
+    "traj_ubq95azheqpt": {
+      "title": "062-sdk-setup-client-workflow",
+      "status": "completed",
+      "startedAt": "2026-04-30T17:12:22.684Z",
+      "completedAt": "2026-04-30T17:23:57.490Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-04/traj_ubq95azheqpt.json"
     },
     "traj_wez7rl7pkfpn": {
       "title": "Review PR 65 implementation against spec",
       "status": "completed",
       "startedAt": "2026-04-30T20:31:59.188Z",
       "completedAt": "2026-04-30T20:31:59.361Z",
-      "path": ".trajectories/completed/2026-04/traj_wez7rl7pkfpn.json",
-      "compactedInto": "compact_xl96yexa79wg"
-    },
-    "traj_7x9nltybo08h": {
-      "title": "Update PR 65 usage instructions",
-      "status": "completed",
-      "startedAt": "2026-04-30T21:07:25.621Z",
-      "completedAt": "2026-04-30T21:08:20.135Z",
-      "path": ".trajectories/completed/2026-04/traj_7x9nltybo08h.json",
-      "compactedInto": "compact_xl96yexa79wg"
-    },
-    "traj_z2klijcrwqed": {
-      "title": "Design simple agent workspace connect flow",
-      "status": "completed",
-      "startedAt": "2026-05-01T14:58:15.412Z",
-      "completedAt": "2026-05-01T15:06:23.351Z",
-      "path": ".trajectories/completed/2026-05/traj_z2klijcrwqed.json",
-      "compactedInto": "compact_xl96yexa79wg"
-    },
-    "traj_a6rfc30zag40": {
-      "title": "Draft agent workspace golden path spec",
-      "status": "completed",
-      "startedAt": "2026-05-01T15:09:58.013Z",
-      "completedAt": "2026-05-01T15:12:08.390Z",
-      "path": ".trajectories/completed/2026-05/traj_a6rfc30zag40.json",
-      "compactedInto": "compact_xl96yexa79wg"
-    },
-    "traj_hyqnsfininh5": {
-      "title": "Write agent workspace implementation workflow",
-      "status": "completed",
-      "startedAt": "2026-05-01T15:22:05.684Z",
-      "completedAt": "2026-05-01T15:27:12.578Z",
-      "path": ".trajectories/completed/2026-05/traj_hyqnsfininh5.json",
-      "compactedInto": "compact_xl96yexa79wg"
-    },
-    "traj_ailh4waboewf": {
-      "title": "Design relayfile low-friction cloud login and integration mount flow",
-      "status": "completed",
-      "startedAt": "2026-05-01T23:39:39.687Z",
-      "completedAt": "2026-05-01T23:45:39.611Z",
-      "path": ".trajectories/completed/2026-05/traj_ailh4waboewf.json",
-      "compactedInto": "compact_xl96yexa79wg"
-    },
-    "traj_ozxb98dy7hk5": {
-      "title": "Research relayfile positioning vs MCP and CLI",
-      "status": "completed",
-      "startedAt": "2026-05-04T10:00:09.507Z",
-      "completedAt": "2026-05-04T10:01:10.778Z",
-      "path": ".trajectories/completed/2026-05/traj_ozxb98dy7hk5.json"
-    },
-    "traj_rnldje4mr6nw": {
-      "title": "Research relayfile positioning vs MCP and CLI",
-      "status": "completed",
-      "startedAt": "2026-05-04T10:01:57.596Z",
-      "completedAt": "2026-05-04T10:01:57.776Z",
-      "path": ".trajectories/completed/2026-05/traj_rnldje4mr6nw.json"
-    },
-    "traj_78fn1fyq1m4d": {
-      "title": "Explain relayfile relayauth governance model",
-      "status": "completed",
-      "startedAt": "2026-05-04T10:16:51.523Z",
-      "completedAt": "2026-05-04T10:17:37.753Z",
-      "path": ".trajectories/completed/2026-05/traj_78fn1fyq1m4d.json"
-    },
-    "traj_aomtlnb3g5sa": {
-      "title": "Identify relayfile relayauth changes for per-user governance",
-      "status": "completed",
-      "startedAt": "2026-05-04T10:22:29.278Z",
-      "completedAt": "2026-05-04T10:22:29.396Z",
-      "path": ".trajectories/completed/2026-05/traj_aomtlnb3g5sa.json"
-    },
-    "traj_5uxheavo6d3q": {
-      "title": "Write per-user relayfile governance spec",
-      "status": "completed",
-      "startedAt": "2026-05-04T10:25:24.905Z",
-      "completedAt": "2026-05-04T10:27:40.891Z",
-      "path": ".trajectories/completed/2026-05/traj_5uxheavo6d3q.json"
-    },
-    "traj_2nl6e3gqkvki": {
-      "title": "Document programmatic Notion connect interface",
-      "status": "completed",
-      "startedAt": "2026-05-04T10:38:33.363Z",
-      "completedAt": "2026-05-04T10:40:25.800Z",
-      "path": ".trajectories/completed/2026-05/traj_2nl6e3gqkvki.json"
-    },
-    "traj_v1un6n66y38i": {
-      "title": "Async createMount — issue #104",
-      "status": "completed",
-      "startedAt": "2026-05-08T17:27:24.218Z",
-      "completedAt": "2026-05-08T17:31:22.965Z",
-      "path": ".trajectories/completed/2026-05/traj_v1un6n66y38i.json",
-      "compactedInto": "compact_xl96yexa79wg"
-    },
-    "traj_9khc36ax639i": {
-      "title": "Add relayfile eval harness",
-      "status": "completed",
-      "startedAt": "2026-05-08T23:08:09.607Z",
-      "completedAt": "2026-05-08T23:18:24.282Z",
-      "path": ".trajectories/completed/2026-05/traj_9khc36ax639i.json",
-      "compactedInto": "compact_xl96yexa79wg"
-    },
-    "traj_d3drzvodqpn7": {
-      "title": "Address PR 114 comments",
-      "status": "completed",
-      "startedAt": "2026-05-09T08:39:35.473Z",
-      "completedAt": "2026-05-09T08:42:45.202Z",
-      "path": ".trajectories/completed/2026-05/traj_d3drzvodqpn7.json",
-      "compactedInto": "compact_xl96yexa79wg"
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-04/traj_wez7rl7pkfpn.json"
     },
     "traj_6fjv0fnvrc5e": {
       "title": "Relayfile follow-up PRs: cloud conventions, cloud sdk/core bump, adapters release pipeline investigation",
       "status": "completed",
       "startedAt": "2026-05-09T13:35:32.701Z",
       "completedAt": "2026-05-09T13:45:18.302Z",
-      "path": ".trajectories/completed/2026-05/traj_6fjv0fnvrc5e.json",
-      "compactedInto": "compact_xl96yexa79wg"
-    },
-    "traj_xf18gkmtr3ib": {
-      "title": "Address PR comments on relayfile-adapters#59",
-      "status": "completed",
-      "startedAt": "2026-05-09T13:50:45.476Z",
-      "completedAt": "2026-05-09T13:54:43.281Z",
-      "path": ".trajectories/completed/2026-05/traj_xf18gkmtr3ib.json",
-      "compactedInto": "compact_xl96yexa79wg"
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_6fjv0fnvrc5e.json"
     },
     "traj_6lyjg41p6a28": {
       "title": "Address PR comments on cloud#504 Linear conventions",
       "status": "completed",
       "startedAt": "2026-05-09T13:55:09.128Z",
       "completedAt": "2026-05-09T13:57:04.293Z",
-      "path": ".trajectories/completed/2026-05/traj_6lyjg41p6a28.json",
-      "compactedInto": "compact_xl96yexa79wg"
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_6lyjg41p6a28.json"
     },
-    "traj_a8szuw8b3yt8": {
-      "title": "Add proactive runtime contract markers for relayfile M1",
+    "traj_9khc36ax639i": {
+      "title": "Add relayfile eval harness",
       "status": "completed",
-      "startedAt": "2026-05-11T21:47:36.074Z",
-      "completedAt": "2026-05-11T21:49:35.589Z",
-      "path": ".trajectories/completed/2026-05/traj_a8szuw8b3yt8.json"
+      "startedAt": "2026-05-08T23:08:09.607Z",
+      "completedAt": "2026-05-08T23:18:24.282Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_9khc36ax639i.json"
     },
-    "traj_62i8dhll2w9n": {
-      "title": "Implement relayfile subscribe, event lookup, retention, and contract updates",
+    "traj_a6rfc30zag40": {
+      "title": "Draft agent workspace golden path spec",
       "status": "completed",
-      "startedAt": "2026-05-12T01:29:17.382Z",
-      "completedAt": "2026-05-12T01:43:48.965Z",
-      "path": ".trajectories/completed/2026-05/traj_62i8dhll2w9n.json"
+      "startedAt": "2026-05-01T15:09:58.013Z",
+      "completedAt": "2026-05-01T15:12:08.390Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_a6rfc30zag40.json"
+    },
+    "traj_ailh4waboewf": {
+      "title": "Design relayfile low-friction cloud login and integration mount flow",
+      "status": "completed",
+      "startedAt": "2026-05-01T23:39:39.687Z",
+      "completedAt": "2026-05-01T23:45:39.611Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_ailh4waboewf.json"
+    },
+    "traj_d3drzvodqpn7": {
+      "title": "Address PR 114 comments",
+      "status": "completed",
+      "startedAt": "2026-05-09T08:39:35.473Z",
+      "completedAt": "2026-05-09T08:42:45.202Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_d3drzvodqpn7.json"
+    },
+    "traj_hyqnsfininh5": {
+      "title": "Write agent workspace implementation workflow",
+      "status": "completed",
+      "startedAt": "2026-05-01T15:22:05.684Z",
+      "completedAt": "2026-05-01T15:27:12.578Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_hyqnsfininh5.json"
     },
     "traj_nxbsptr6c5q0": {
       "title": "Investigate local lag and open status diagnostics PR",
       "status": "completed",
       "startedAt": "2026-05-14T09:46:57.122Z",
       "completedAt": "2026-05-14T09:50:46.065Z",
-      "path": ".trajectories/completed/2026-05/traj_nxbsptr6c5q0.json"
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_nxbsptr6c5q0.json"
     },
     "traj_qrt7hh3ht8nk": {
       "title": "Investigate confusing relayfile lagging status",
       "status": "completed",
       "startedAt": "2026-05-14T09:38:05.074Z",
       "completedAt": "2026-05-14T09:42:53.566Z",
-      "path": ".trajectories/completed/2026-05/traj_qrt7hh3ht8nk.json"
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_qrt7hh3ht8nk.json"
     },
-    "traj_onpf37fwj1mj": {
-      "title": "Implement resumable bootstrap + decoupled timeouts for large-workspace mount sync",
+    "traj_v1un6n66y38i": {
+      "title": "Async createMount — issue #104",
       "status": "completed",
-      "startedAt": "2026-05-18T18:45:52.924Z",
-      "completedAt": "2026-05-18T19:14:56.067Z",
-      "path": ".trajectories/completed/2026-05/traj_onpf37fwj1mj.json"
+      "startedAt": "2026-05-08T17:27:24.218Z",
+      "completedAt": "2026-05-08T17:31:22.965Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_v1un6n66y38i.json"
     },
-    "traj_wzwo03w1kb1x": {
-      "title": "autofix-swarm-Agentworkforce-relayfile-workflow",
+    "traj_xf18gkmtr3ib": {
+      "title": "Address PR comments on relayfile-adapters#59",
       "status": "completed",
-      "startedAt": "2026-05-21T08:52:34.142Z",
-      "completedAt": "2026-05-21T09:02:24.642Z",
-      "path": "/Users/khaliqgant/Projects/AgentWorkforce/.msd-autofix-b09c607b/.trajectories/completed/2026-05/traj_wzwo03w1kb1x.json"
+      "startedAt": "2026-05-09T13:50:45.476Z",
+      "completedAt": "2026-05-09T13:54:43.281Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_xf18gkmtr3ib.json"
     },
-    "traj_5310ok4zat2n": {
-      "title": "Fix relayfile CLI rehome legacy LocalDir and pid verification",
+    "traj_z2klijcrwqed": {
+      "title": "Design simple agent workspace connect flow",
       "status": "completed",
-      "startedAt": "2026-05-21T08:54:30.035Z",
-      "completedAt": "2026-05-21T08:54:30.166Z",
-      "path": "/Users/khaliqgant/Projects/AgentWorkforce/.msd-autofix-b09c607b/.trajectories/completed/2026-05/traj_5310ok4zat2n.json"
+      "startedAt": "2026-05-01T14:58:15.412Z",
+      "completedAt": "2026-05-01T15:06:23.351Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_z2klijcrwqed.json"
     },
-    "traj_eud9obtnr1br": {
-      "title": "Fix relayfile auth refresh and status warnings for issues 188 and 189",
+    "traj_kz5qjhyo18c4": {
+      "title": "Review and fix PR #226 ACL changes",
       "status": "completed",
-      "startedAt": "2026-05-21T13:14:23.504Z",
-      "completedAt": "2026-05-21T13:20:34.729Z",
-      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile-issues-188-189/.trajectories/completed/2026-05/traj_eud9obtnr1br.json"
-    },
-    "traj_0meitjjmvpf2": {
-      "title": "Address relayfile PR 215 feedback",
-      "status": "completed",
-      "startedAt": "2026-05-28T07:48:35.401Z",
-      "completedAt": "2026-05-28T07:49:59.552Z",
-      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile-issue-214/.trajectories/completed/2026-05/traj_0meitjjmvpf2.json"
+      "startedAt": "2026-05-31T19:49:49.109Z",
+      "completedAt": "2026-05-31T19:49:49.751Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_kz5qjhyo18c4.json"
     }
   }
 }

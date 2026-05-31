@@ -3,7 +3,11 @@ import { exportWorkspaceJson } from "./export.js";
 import { queryFiles } from "./query.js";
 import type { FileRow, StorageAdapter } from "./storage.js";
 import { listTree } from "./tree.js";
-import { filePermissionAllows, type TokenClaims } from "./acl.js";
+import {
+  filePermissionAllows,
+  type ScopeMatchContext,
+  type TokenClaims,
+} from "./acl.js";
 
 function claimsWith(scopes: string[]): TokenClaims {
   return {
@@ -70,7 +74,7 @@ describe("ACL scope matching", () => {
     ];
     const repo = storage(rows);
     const scopeMatches = vi.fn(
-      (scope: string, tokenClaims: TokenClaims | null, context) =>
+      (scope: string, tokenClaims: TokenClaims | null, context: ScopeMatchContext) =>
         scope === "relayfile:fs:read:/github/LAYOUT.md" &&
         tokenClaims?.scopes.has("relayfile:fs:read:/github/*") === true &&
         context.action === "read" &&
