@@ -11,6 +11,7 @@ import type { StorageAdapter, FileRow, Paginated, PaginationOptions } from "./st
 import {
   filePermissionAllows,
   resolveFilePermissions,
+  type PermissionEvaluationOptions,
   type TokenClaims,
 } from "./acl.js";
 
@@ -39,6 +40,7 @@ export function queryFiles(
   storage: StorageAdapter,
   options: QueryOptions,
   claims: TokenClaims | null,
+  aclOptions: PermissionEvaluationOptions = {},
 ): Paginated<QueryResultItem> {
   const base = normalizePath(options.path ?? "/");
   const provider = normalizeProvider(options.provider);
@@ -84,7 +86,13 @@ export function queryFiles(
     if (!propertiesMatch(semantics.properties, expectedProperties)) {
       continue;
     }
-    if (!filePermissionAllows(effectivePermissions, workspaceId, claims)) {
+    if (
+      !filePermissionAllows(effectivePermissions, workspaceId, claims, {
+        ...aclOptions,
+        action: aclOptions.action ?? "read",
+        requestedPath: row.path,
+      })
+    ) {
       continue;
     }
 

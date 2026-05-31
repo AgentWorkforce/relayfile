@@ -8,7 +8,7 @@
  */
 
 import type { StorageAdapter, FileRow } from "./storage.js";
-import type { TokenClaims } from "./acl.js";
+import type { PermissionEvaluationOptions, TokenClaims } from "./acl.js";
 import { filePermissionAllows, resolveFilePermissions } from "./acl.js";
 
 export type ExportFormat = "json" | "tar" | "patch";
@@ -16,6 +16,7 @@ export type ExportFormat = "json" | "tar" | "patch";
 export function exportWorkspaceJson(
   storage: StorageAdapter,
   claims: TokenClaims | null,
+  aclOptions: PermissionEvaluationOptions = {},
 ): FileRow[] {
   const workspaceId = storage.getWorkspaceId();
 
@@ -28,6 +29,11 @@ export function exportWorkspaceJson(
         resolveFilePermissions(storage, row.path, true),
         workspaceId,
         claims,
+        {
+          ...aclOptions,
+          action: aclOptions.action ?? "read",
+          requestedPath: row.path,
+        },
       ),
     )
     .map((row) => materializeFile(storage, row));
@@ -36,15 +42,17 @@ export function exportWorkspaceJson(
 export function exportWorkspacePatch(
   storage: StorageAdapter,
   claims: TokenClaims | null,
+  aclOptions: PermissionEvaluationOptions = {},
 ): string {
-  return buildUnifiedPatch(exportWorkspaceJson(storage, claims));
+  return buildUnifiedPatch(exportWorkspaceJson(storage, claims, aclOptions));
 }
 
 export async function exportWorkspaceTarGzip(
   storage: StorageAdapter,
   claims: TokenClaims | null,
+  aclOptions: PermissionEvaluationOptions = {},
 ): Promise<ArrayBuffer> {
-  return buildTarGzip(exportWorkspaceJson(storage, claims));
+  return buildTarGzip(exportWorkspaceJson(storage, claims, aclOptions));
 }
 
 export function buildUnifiedPatch(files: FileRow[]): string {
