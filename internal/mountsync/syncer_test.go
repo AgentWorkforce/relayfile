@@ -822,6 +822,7 @@ func TestExportSnapshotOverloadedClassification(t *testing.T) {
 		&HTTPError{StatusCode: 503, Message: "Worker overloaded"},
 		errors.New("http 500 internal_error: Durable Object is overloaded. Requests queued for too long."),
 		&HTTPError{StatusCode: 413, Code: "payload_too_large", Message: "workspace export body is 3524788058 bytes, which exceeds the export body limit of 134217728; use paginated tree/read APIs instead"},
+		&HTTPError{StatusCode: 429, Code: "workspace_busy", Message: "workspace durable object is busy; retry after the advertised delay"},
 	}
 	for _, err := range unsupported {
 		if !exportSnapshotUnsupported(err) {
@@ -884,6 +885,200 @@ func TestReconcileFallsBackToTreeWhenExportPayloadTooLarge(t *testing.T) {
 		t.Fatalf("expected tree fallback to read one file, got %d calls", client.readFileCalls)
 	}
 	assertLocalFileContent(t, filepath.Join(localDir, "Docs", "A.md"), "# A")
+}
+
+// TestReconcileFallsBackToTreeWhenExportExceedsSubDeadline is the core #1499/
+// #1516 convergence regression: a slow atomic export that would otherwise run
+// until the no-progress bootstrap watchdog cancels it (with zero files applied
+// and no resume cursor -> permanent "non-empty without completed bootstrap"
+// loop) must instead hit its OWN short sub-deadline while the bootstrap ctx is
+// still alive, and fall through to the resumable, per-page pullRemoteFullTree.
+func TestReconcileFallsBackToTreeWhenExportExceedsSubDeadline(t *testing.T) {
+	base := &fakeClient{
+		files: map[string]RemoteFile{
+			"/notion/Docs/A.md": {
+				Path:        "/notion/Docs/A.md",
+				Revision:    "rev_1",
+				ContentType: "text/markdown",
+				Content:     "# A",
+			},
+		},
+	}
+	client := &fakeExportClient{fakeClient: base, exportBlockUntilCancel: true}
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID:   "ws_slow_export",
+		RemoteRoot:    "/notion",
+		LocalRoot:     localDir,
+		ExportTimeout: 50 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+
+	if err := syncer.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile should fall back to tree after export sub-deadline: %v", err)
+	}
+
+	if client.exportCalls != 1 {
+		t.Fatalf("expected one export snapshot attempt, got %d", client.exportCalls)
+	}
+	if base.listTreeCalls != 1 {
+		t.Fatalf("expected slow export to fall back to list tree once, got %d calls", base.listTreeCalls)
+	}
+	if client.readFileCalls != 1 {
+		t.Fatalf("expected tree fallback to read one file, got %d calls", client.readFileCalls)
+	}
+	assertLocalFileContent(t, filepath.Join(localDir, "Docs", "A.md"), "# A")
+	if !syncer.state.BootstrapComplete {
+		t.Fatalf("tree fallback should complete the bootstrap; loop would otherwise persist")
+	}
+}
+
+// TestReconcileFallsBackToTreeWhenExportWorkspaceBusy covers the HTTP 429
+// workspace_busy signal (ProbeV085's prod evidence): after doJSON exhausts its
+// Retry-After backoff, the busy DO surfaces a 429 that must fall through to the
+// per-file-bounded tree path instead of retrying the contended atomic export.
+func TestReconcileFallsBackToTreeWhenExportWorkspaceBusy(t *testing.T) {
+	base := &fakeClient{
+		files: map[string]RemoteFile{
+			"/notion/Docs/A.md": {
+				Path:        "/notion/Docs/A.md",
+				Revision:    "rev_1",
+				ContentType: "text/markdown",
+				Content:     "# A",
+			},
+		},
+	}
+	client := &fakeExportClient{
+		fakeClient: base,
+		exportErr: &HTTPError{
+			StatusCode: 429,
+			Code:       "workspace_busy",
+			Message:    "workspace durable object is busy; retry after the advertised delay",
+		},
+	}
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_busy_export",
+		RemoteRoot:  "/notion",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+
+	if err := syncer.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile should fall back to tree after 429 workspace_busy: %v", err)
+	}
+	if client.exportCalls != 1 {
+		t.Fatalf("expected one export snapshot attempt, got %d", client.exportCalls)
+	}
+	if base.listTreeCalls != 1 {
+		t.Fatalf("expected 429 workspace_busy to fall back to list tree once, got %d calls", base.listTreeCalls)
+	}
+	assertLocalFileContent(t, filepath.Join(localDir, "Docs", "A.md"), "# A")
+}
+
+// TestExportEmptyButPopulatedTreeRecoversViaTreePull covers the empty-200
+// export (ProbeV085's "fresh remote export has 0 files but N tracked locally"):
+// a successful-but-empty export for a workspace we KNOW has tracked files must
+// NOT markBootstrapComplete (locking in the stale/empty mirror); it falls
+// through to the tree pull, which re-reads the real content via a different
+// cloud code path and recovers.
+func TestExportEmptyButPopulatedTreeRecoversViaTreePull(t *testing.T) {
+	disableWS := false
+	base := &fakeClient{
+		files: map[string]RemoteFile{
+			"/notion/Docs/A.md": {
+				Path:        "/notion/Docs/A.md",
+				Revision:    "rev_1",
+				ContentType: "text/markdown",
+				Content:     "# A",
+			},
+		},
+	}
+	client := &fakeExportClient{fakeClient: base, exportReturnsEmpty: true}
+	localDir := t.TempDir()
+	stateFile := filepath.Join(localDir, ".relayfile-mount-state.json")
+	if err := writeMountState(stateFile, mountState{
+		Files: map[string]trackedFile{
+			"/notion/Docs/A.md": {Revision: "rev_1", ContentType: "text/markdown", Hash: hashString("# A")},
+		},
+	}); err != nil {
+		t.Fatalf("seed state: %v", err)
+	}
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_empty200_export",
+		RemoteRoot:  "/notion",
+		LocalRoot:   localDir,
+		StateFile:   stateFile,
+		WebSocket:   &disableWS,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+
+	if err := syncer.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile should recover via tree pull after empty-200 export: %v", err)
+	}
+	if client.exportCalls != 1 {
+		t.Fatalf("expected one export snapshot attempt, got %d", client.exportCalls)
+	}
+	if base.listTreeCalls != 1 {
+		t.Fatalf("expected empty-200 export to fall back to list tree once, got %d calls", base.listTreeCalls)
+	}
+	assertLocalFileContent(t, filepath.Join(localDir, "Docs", "A.md"), "# A")
+	if !syncer.state.BootstrapComplete {
+		t.Fatalf("tree recovery should complete bootstrap; empty export must not have short-circuited it")
+	}
+}
+
+// TestFailedExportDoesNotAdvanceCursorOrCompleteBootstrap pins the pivotal
+// cursor-safety property: a propagated export failure (a transient 5xx that is
+// retried as an export, not a fall-through) must not advance EventsCursor nor
+// mark the bootstrap complete, so the next cycle re-attempts cleanly instead of
+// short-circuiting past unsynced content.
+func TestFailedExportDoesNotAdvanceCursorOrCompleteBootstrap(t *testing.T) {
+	base := &fakeClient{
+		files: map[string]RemoteFile{
+			"/notion/Docs/A.md": {
+				Path:        "/notion/Docs/A.md",
+				Revision:    "rev_1",
+				ContentType: "text/markdown",
+				Content:     "# A",
+			},
+		},
+	}
+	client := &fakeExportClient{
+		fakeClient: base,
+		exportErr:  &HTTPError{StatusCode: 502, Message: "bad gateway"},
+	}
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_failed_export",
+		RemoteRoot:  "/notion",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+
+	if err := syncer.Reconcile(context.Background()); err == nil {
+		t.Fatalf("expected a propagated 502 export error, got nil")
+	}
+	if client.exportCalls != 1 {
+		t.Fatalf("expected one export snapshot attempt, got %d", client.exportCalls)
+	}
+	if base.listTreeCalls != 0 {
+		t.Fatalf("transient 5xx should retry export, not fall to tree; got %d list tree calls", base.listTreeCalls)
+	}
+	if strings.TrimSpace(syncer.state.EventsCursor) != "" {
+		t.Fatalf("failed export must not advance the events cursor, got %q", syncer.state.EventsCursor)
+	}
+	if syncer.state.BootstrapComplete {
+		t.Fatalf("failed export must not mark bootstrap complete")
+	}
 }
 
 // TestResolveLatestEventCursorPrefersLatestEventID guards against regressing
@@ -4319,14 +4514,28 @@ type fakeExportClient struct {
 	tarErr        error
 	readFileCalls int
 	exportErr     error
+	// exportBlockUntilCancel makes ExportFiles block until its ctx is
+	// cancelled, simulating a slow atomic export that exceeds the export
+	// sub-deadline (or the bootstrap watchdog).
+	exportBlockUntilCancel bool
+	// exportReturnsEmpty makes ExportFiles return a successful but empty
+	// slice regardless of the populated tree, simulating the production
+	// empty-200 export for a workspace that DOES have records.
+	exportReturnsEmpty bool
 }
 
 func (c *fakeExportClient) ExportFiles(ctx context.Context, workspaceID, path string) ([]RemoteFile, error) {
-	_ = ctx
 	_ = workspaceID
 	c.exportCalls++
+	if c.exportBlockUntilCancel {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
 	if c.exportErr != nil {
 		return nil, c.exportErr
+	}
+	if c.exportReturnsEmpty {
+		return []RemoteFile{}, nil
 	}
 	base := normalizeRemotePath(path)
 	files := make([]RemoteFile, 0, len(c.files))

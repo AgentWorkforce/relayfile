@@ -78,9 +78,19 @@ const defaultFullPullEvery = 20
 // defaultBootstrapIdleTimeout. The cursor resolution gets its own short
 // independent deadline so it can never hang an otherwise healthy cycle.
 const (
-	defaultBootstrapTimeout          = 0 * time.Second
-	defaultBootstrapIdleTimeout      = 90 * time.Second
-	defaultCursorTimeout             = 60 * time.Second
+	defaultBootstrapTimeout     = 0 * time.Second
+	defaultBootstrapIdleTimeout = 90 * time.Second
+	defaultCursorTimeout        = 60 * time.Second
+	// defaultExportTimeout bounds the single atomic full-tree export so a slow
+	// or 429-contended export yields to the resumable pullRemoteFullTree BEFORE
+	// the no-progress bootstrap watchdog (defaultBootstrapIdleTimeout) cancels
+	// the whole bootstrap. ExportFiles reports NO incremental progress until
+	// its whole body returns, so without this bound a doomed export can burn
+	// the entire watchdog window and be cancelled with zero files applied —
+	// and, having no resume cursor, restart from scratch every cycle (the
+	// #1499/#1516 non-convergence loop). Must stay strictly under
+	// defaultBootstrapIdleTimeout.
+	defaultExportTimeout             = 45 * time.Second
 	defaultCursorResolutionAttempts  = 3
 	defaultCursorRetryBaseDelay      = 250 * time.Millisecond
 	defaultBootstrapReadWorkers      = 16
@@ -653,6 +663,14 @@ type SyncerOptions struct {
 	//
 	// 0 falls back to env RELAYFILE_CURSOR_TIMEOUT, default 60s.
 	CursorTimeout time.Duration
+	// ExportTimeout bounds each atomic full-tree export (ExportFiles) with its
+	// OWN deadline derived from the bootstrap ctx, kept strictly under
+	// bootstrapIdleTimeout. When the export does not finish in time the syncer
+	// falls through to the resumable, per-page pullRemoteFullTree instead of
+	// retrying a doomed one-shot export. 0 falls back to env
+	// RELAYFILE_EXPORT_TIMEOUT, default 45s; values >= bootstrapIdleTimeout are
+	// clamped below it so the fall-through always fires before the watchdog.
+	ExportTimeout time.Duration
 	// ForceFullReconcile, when non-nil and true, forces one full reconcile
 	// regardless of BootstrapComplete (escape hatch / clobber-remnant
 	// recovery). nil falls back to env RELAYFILE_FORCE_FULL_RECONCILE.
@@ -796,6 +814,7 @@ type Syncer struct {
 	interval             time.Duration
 	fullPullEvery        int
 	cursorTimeout        time.Duration
+	exportTimeout        time.Duration
 	bootstrapTimeout     time.Duration
 	bootstrapIdleTimeout time.Duration
 	forceFullReconcile   bool
@@ -1086,6 +1105,18 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 	if bootstrapIdleTimeout <= 0 {
 		bootstrapIdleTimeout = defaultBootstrapIdleTimeout
 	}
+	exportTimeout := resolveDurationEnv(opts.ExportTimeout, "RELAYFILE_EXPORT_TIMEOUT", defaultExportTimeout, opts.Logger)
+	if exportTimeout <= 0 {
+		exportTimeout = defaultExportTimeout
+	}
+	// The export's own deadline MUST elapse before the no-progress bootstrap
+	// watchdog so a slow export yields to the resumable tree pull while the
+	// bootstrap ctx is still alive. Clamp to a fraction of the idle window so a
+	// misconfiguration can't let the export outlive the watchdog (which would
+	// defeat the fall-through and re-create the #1499/#1516 stall loop).
+	if maxExportTimeout := bootstrapIdleTimeout * 3 / 4; maxExportTimeout > 0 && exportTimeout > maxExportTimeout {
+		exportTimeout = maxExportTimeout
+	}
 	forceFullReconcile := false
 	if opts.ForceFullReconcile != nil {
 		forceFullReconcile = *opts.ForceFullReconcile
@@ -1168,6 +1199,7 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 		interval:             opts.Interval,
 		fullPullEvery:        fullPullEvery,
 		cursorTimeout:        cursorTimeout,
+		exportTimeout:        exportTimeout,
 		bootstrapTimeout:     bootstrapTimeout,
 		bootstrapIdleTimeout: bootstrapIdleTimeout,
 		forceFullReconcile:   forceFullReconcile,
@@ -2617,9 +2649,36 @@ func (s *Syncer) pullRemoteFullGithubTarSeed(ctx context.Context, client githubW
 }
 
 func (s *Syncer) pullRemoteFullExport(ctx context.Context, client exportSnapshotClient, conflicted map[string]struct{}, prog bootstrapProgress) (bool, error) {
-	files, err := client.ExportFiles(ctx, s.workspace, s.remoteRoot)
+	// Bound the atomic export with its OWN deadline, strictly under the
+	// no-progress bootstrap watchdog. ExportFiles is a single HTTP call that
+	// reports NO incremental progress until the whole body returns, so on a
+	// large/slow/429-throttled workspace it can consume the entire watchdog
+	// window and be cancelled with zero files applied — and, being a one-shot
+	// mirror with no resume cursor, every retry restarts from scratch and is
+	// cancelled again (the #1499/#1516 "non-empty without completed bootstrap
+	// -> forcing full reconcile" loop). The sub-deadline makes a doomed export
+	// fail EARLY, while the parent bootstrap ctx is still alive, so we can fall
+	// through to the resumable, per-page pullRemoteFullTree.
+	exportCtx := ctx
+	if s.exportTimeout > 0 {
+		var cancel context.CancelFunc
+		exportCtx, cancel = context.WithTimeout(ctx, s.exportTimeout)
+		defer cancel()
+	}
+	files, err := client.ExportFiles(exportCtx, s.workspace, s.remoteRoot)
 	if err != nil {
 		if exportSnapshotUnsupported(err) {
+			return false, nil
+		}
+		// The export's own sub-deadline elapsed (or it was otherwise
+		// cancelled) while the PARENT bootstrap ctx is still alive: the atomic
+		// export is too slow/contended for this workspace. Yield to the
+		// resumable tree pull rather than retrying a doomed full export. If the
+		// parent ctx itself is done (the outer watchdog fired), propagate — the
+		// next cycle's shorter export sub-deadline fires before the watchdog
+		// and converges via the tree path.
+		if ctx.Err() == nil && exportCtx.Err() != nil {
+			s.logf("export snapshot did not complete within %s; falling back to resumable tree pull", s.exportTimeout)
 			return false, nil
 		}
 		s.recordCloudFailure(err)
@@ -2662,11 +2721,18 @@ func (s *Syncer) pullRemoteFullExport(ctx context.Context, client exportSnapshot
 	// healthy cycle will reconcile correctly. Mirrors the safeguard in
 	// pullRemoteFullTree.
 	if s.snapshotDeleteUnsafe(len(remotePaths)) {
-		s.logf("skipping snapshot delete pass (export): fresh remote export has %d files but %d are tracked locally (suspected partial/empty cloud export); preserving local state", len(remotePaths), len(s.state.Files))
-		// Export is atomic — a full snapshot was applied even if the
-		// delete pass is deferred for safety. Bootstrap is complete.
-		s.markBootstrapComplete()
-		return true, nil
+		// A 0/drastically-shrunk export for a workspace we KNOW has tracked
+		// files is NOT an authoritative mirror (the production empty-200
+		// export, #1499/#1516). Do NOT markBootstrapComplete here: that would
+		// lock in the stale/empty snapshot and let the restart fast-path skip
+		// recovery forever. Fall through to pullRemoteFullTree, whose paginated
+		// ListTree re-reads the real content via a DIFFERENT cloud code path
+		// and only marks bootstrap complete on a full traversal. If the tree
+		// listing is ALSO empty, its own circuit breaker preserves local state
+		// without marking complete, so the next cycle retries instead of
+		// converging on an empty mirror.
+		s.logf("export returned %d files but %d are tracked locally (suspected partial/empty cloud export); falling back to tree pull for an authoritative listing", len(remotePaths), len(s.state.Files))
+		return false, nil
 	}
 
 	if err := s.applyRemoteSnapshotDeletesRev(remotePaths, conflicted, maxObservedRevision); err != nil {
@@ -2938,6 +3004,15 @@ func exportSnapshotUnsupported(err error) bool {
 	// through to pullRemoteFullTree rather than retrying an export that can
 	// never fit.
 	if httpErr.StatusCode == http.StatusRequestEntityTooLarge {
+		return true
+	}
+	// HTTP 429 workspace_busy: the WorkspaceDO is persistently busy and doJSON
+	// has already exhausted its Retry-After backoff. Retrying the same atomic
+	// export keeps contending for the one overloaded invocation; fall through
+	// to pullRemoteFullTree, whose paginated ListTree + per-file reads are
+	// individually bounded, individually retried, and resume from the persisted
+	// cursor instead of restarting the whole export.
+	if httpErr.StatusCode == http.StatusTooManyRequests {
 		return true
 	}
 	return httpErr.StatusCode == http.StatusBadRequest && strings.EqualFold(httpErr.Code, "bad_request")
