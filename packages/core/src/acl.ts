@@ -31,6 +31,22 @@ export interface ParsedPermissionRule {
   value: string;
 }
 
+export interface ScopeMatchContext {
+  workspaceId: string;
+  requestedPath?: string;
+  action?: "read" | "write" | "manage";
+}
+
+export interface PermissionEvaluationOptions {
+  scopeMatches?: (
+    scope: string,
+    claims: TokenClaims | null,
+    context: ScopeMatchContext,
+  ) => boolean;
+  requestedPath?: string;
+  action?: "read" | "write" | "manage";
+}
+
 // ---------------------------------------------------------------------------
 // Functions — agent-3: extract from workspace.ts
 // ---------------------------------------------------------------------------
@@ -87,6 +103,7 @@ export function filePermissionAllows(
   permissions: string[] | undefined,
   workspaceId: string,
   claims: TokenClaims | null,
+  options: PermissionEvaluationOptions = {},
 ): boolean {
   if (!permissions || permissions.length === 0) {
     return true;
@@ -107,7 +124,13 @@ export function filePermissionAllows(
         match = true;
         break;
       case "scope":
-        match = claims?.scopes.has(rule.value) ?? false;
+        match = options.scopeMatches
+          ? options.scopeMatches(rule.value, claims, {
+              workspaceId,
+              requestedPath: options.requestedPath,
+              action: options.action,
+            })
+          : (claims?.scopes.has(rule.value) ?? false);
         break;
       case "agent":
         match = claims?.agentName === rule.value;
