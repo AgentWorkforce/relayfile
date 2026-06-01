@@ -4322,12 +4322,12 @@ func (s *Syncer) canWritePath(filePath string) bool {
 }
 
 func scopeGrantsWrite(scope, filePath string) bool {
-	scope = strings.ToLower(strings.TrimSpace(scope))
+	scope = strings.TrimSpace(scope)
 	if scope == "" {
 		return false
 	}
 	// Short-form scope without plane prefix.
-	if scope == "fs:write" || scope == "fs:manage" {
+	if strings.EqualFold(scope, "fs:write") || strings.EqualFold(scope, "fs:manage") {
 		return true
 	}
 
@@ -4336,9 +4336,9 @@ func scopeGrantsWrite(scope, filePath string) bool {
 		return false
 	}
 
-	plane := segments[0]
-	res := segments[1]
-	act := segments[2]
+	plane := strings.ToLower(strings.TrimSpace(segments[0]))
+	res := strings.ToLower(strings.TrimSpace(segments[1]))
+	act := strings.ToLower(strings.TrimSpace(segments[2]))
 
 	// Plane must be "relayfile" or wildcard.
 	if plane != "relayfile" && plane != "*" {

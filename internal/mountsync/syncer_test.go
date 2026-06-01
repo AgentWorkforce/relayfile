@@ -3198,6 +3198,21 @@ func TestCanWritePathWithRelayauthScopes(t *testing.T) {
 	}
 }
 
+func TestScopeGrantsWritePreservesPathCase(t *testing.T) {
+	if !scopeGrantsWrite("relayfile:fs:write:/README.md/*", "/README.md") {
+		t.Fatalf("write scope over /README.md must grant /README.md (case preserved)")
+	}
+	if !scopeGrantsWrite("relayfile:fs:write:/packages/web/lib/MyComponent/*", "/packages/web/lib/MyComponent/index.ts") {
+		t.Fatalf("write scope over /packages/web/lib/MyComponent must grant files under it")
+	}
+	if !scopeGrantsWrite("RELAYFILE:FS:WRITE:/Foo/*", "/Foo/bar.ts") {
+		t.Fatalf("plane/resource/action must stay case-insensitive")
+	}
+	if scopeGrantsWrite("relayfile:fs:write:/Foo/*", "/foo/bar.ts") {
+		t.Fatalf("case-mismatched path must NOT be granted (paths are case-sensitive)")
+	}
+}
+
 func TestCanReadPathWithPerFileScopes(t *testing.T) {
 	scopes := map[string]struct{}{
 		"relayfile:fs:read:/src/app.ts": {},
