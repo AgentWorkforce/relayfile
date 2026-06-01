@@ -209,7 +209,10 @@ function validateRunDataPlaneScopes(scopes, paths, runRoot) {
     );
   }
   const expectedPath = tokenPath(runRoot);
-  if (!Array.isArray(paths) || paths.length !== 1) {
+  if (!Array.isArray(paths) || paths.length === 0) {
+    throw new Error(`data-plane token for ${runRoot} has no paths`);
+  }
+  if (paths.length !== 1) {
     throw new Error(`data-plane token for ${runRoot} returned unexpected paths ${JSON.stringify(paths)}`);
   }
   if (String(paths[0] ?? "").trim() !== expectedPath) {
@@ -979,7 +982,7 @@ async function selfTest() {
         undefined,
         runRoot,
       ),
-    /unexpected paths/,
+    /has no paths/,
   );
   assert.throws(
     () =>
@@ -988,7 +991,7 @@ async function selfTest() {
         [],
         runRoot,
       ),
-    /unexpected paths/,
+    /has no paths/,
   );
   assert.throws(
     () =>

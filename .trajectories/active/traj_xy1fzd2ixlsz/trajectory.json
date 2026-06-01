@@ -1,0 +1,78 @@
+{
+  "id": "traj_xy1fzd2ixlsz",
+  "version": 1,
+  "task": {
+    "title": "Review and fix PR #234"
+  },
+  "status": "active",
+  "startedAt": "2026-06-01T08:06:07.072Z",
+  "agents": [
+    {
+      "name": "default",
+      "role": "lead",
+      "joinedAt": "2026-06-01T08:07:03.978Z"
+    }
+  ],
+  "chapters": [
+    {
+      "id": "chap_j0th9od6wpjn",
+      "title": "Work",
+      "agentName": "default",
+      "startedAt": "2026-06-01T08:07:03.978Z",
+      "events": [
+        {
+          "ts": 1780301223978,
+          "type": "decision",
+          "content": "Scoped review to tier2 load harness diff: Scoped review to tier2 load harness diff",
+          "raw": {
+            "question": "Scoped review to tier2 load harness diff",
+            "chosen": "Scoped review to tier2 load harness diff",
+            "alternatives": [],
+            "reasoning": "PR #234 changed only test/load/tier2-cfdo-scoped-writeback.mjs; local bot review files refer to unrelated prior PR files and are outside this PR impact surface."
+          },
+          "significance": "high"
+        },
+        {
+          "ts": 1780301239267,
+          "type": "reflection",
+          "content": "Focused review found no PR-scoped code breakage; executable JS guardrails pass locally, while broader Go and Vitest suites are unavailable because required toolchain/dependencies are absent.",
+          "raw": {
+            "focalPoints": [
+              "pr-diff",
+              "validation",
+              "local-ci"
+            ],
+            "confidence": 0.78
+          },
+          "significance": "high",
+          "tags": [
+            "focal:pr-diff",
+            "focal:validation",
+            "focal:local-ci",
+            "confidence:0.78"
+          ]
+        },
+        {
+          "ts": 1780301264175,
+          "type": "decision",
+          "content": "Separated missing token paths from malformed token paths: Separated missing token paths from malformed token paths",
+          "raw": {
+            "question": "Separated missing token paths from malformed token paths",
+            "chosen": "Separated missing token paths from malformed token paths",
+            "alternatives": [],
+            "reasoning": "Gemini review requested explicit rejection of undefined or empty paths; distinct errors make the data-plane mint contract clearer while preserving duplicate/wrong-root rejection."
+          },
+          "significance": "high"
+        }
+      ]
+    }
+  ],
+  "commits": [],
+  "filesChanged": [],
+  "projectId": "/home/daytona/workspace",
+  "tags": [],
+  "_trace": {
+    "startRef": "afdf778804e473bdb7770cc5026d83e648d841bf",
+    "endRef": "afdf778804e473bdb7770cc5026d83e648d841bf"
+  }
+}
