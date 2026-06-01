@@ -48,6 +48,9 @@ outside that root are not scanned or written. Daemon-side token-scope filtering
 is complementary and is covered by the Tier-1 syncer fixture plus this harness's
 mint-time path-token validator.
 
+The mount state file is placed outside each member's mounted local root so
+harness bookkeeping never becomes part of the scoped writeback surface.
+
 The acceptance bar is the absence of the #1602 failure mode under N concurrent
 scoped writebacks: no 500/object-reset/context-deadline. Graceful backpressure
 as `429 workspace_busy` with `Retry-After` is acceptable at the effective
