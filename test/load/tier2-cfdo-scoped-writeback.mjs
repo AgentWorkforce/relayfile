@@ -103,6 +103,10 @@ function pathScope(root) {
   return `relayfile:fs:write:${normalizeRemotePath(root)}/*`;
 }
 
+function readPathScope(root) {
+  return `relayfile:fs:read:${normalizeRemotePath(root)}/*`;
+}
+
 function tokenPath(root) {
   return `${normalizeRemotePath(root)}/*`;
 }
@@ -167,6 +171,49 @@ function validateMemberWriteScopes(scopes, assignedRoot) {
     throw new Error(
       `member token for ${assignedRoot} is missing exact write scope ${requiredWriteScope}`,
     );
+  }
+}
+
+function validateRunDataPlaneScopes(scopes, paths, runRoot) {
+  if (!Array.isArray(scopes) || scopes.length === 0) {
+    throw new Error(`data-plane token for ${runRoot} has no scopes`);
+  }
+  const requiredReadScope = readPathScope(runRoot);
+  const requiredWriteScope = pathScope(runRoot);
+  let sawRead = false;
+  let sawWrite = false;
+  for (const scope of scopes) {
+    const value = String(scope ?? "").trim();
+    if (isBroadOrAdminScope(value)) {
+      throw new Error(`data-plane token for ${runRoot} has broad/admin scope ${scope}`);
+    }
+    if (value.startsWith("relayfile:fs:read:")) {
+      if (value !== requiredReadScope) {
+        throw new Error(`data-plane token for ${runRoot} has wrong-root read scope ${scope}`);
+      }
+      sawRead = true;
+      continue;
+    }
+    if (value.startsWith("relayfile:fs:write:")) {
+      if (value !== requiredWriteScope) {
+        throw new Error(`data-plane token for ${runRoot} has wrong-root write scope ${scope}`);
+      }
+      sawWrite = true;
+      continue;
+    }
+    throw new Error(`data-plane token for ${runRoot} has unsupported scope ${scope}`);
+  }
+  if (!sawRead || !sawWrite) {
+    throw new Error(
+      `data-plane token for ${runRoot} must include exact read/write scopes ${requiredReadScope} and ${requiredWriteScope}`,
+    );
+  }
+  const expectedPath = tokenPath(runRoot);
+  if (!Array.isArray(paths) || paths.length !== 1) {
+    throw new Error(`data-plane token for ${runRoot} returned unexpected paths ${JSON.stringify(paths)}`);
+  }
+  if (String(paths[0] ?? "").trim() !== expectedPath) {
+    throw new Error(`data-plane token for ${runRoot} returned unexpected paths ${JSON.stringify(paths)}`);
   }
 }
 
@@ -395,10 +442,13 @@ async function mintRunDataPlaneToken(config) {
   if (typeof accessToken !== "string" || accessToken.trim() === "") {
     throw new Error("data-plane token mint did not return accessToken");
   }
+  const scopes = scopesFromToken(accessToken);
+  const paths = response.body?.paths;
+  validateRunDataPlaneScopes(scopes, paths, runRoot);
   return {
     token: accessToken,
-    scopes: scopesFromToken(accessToken),
-    paths: response.body?.paths,
+    scopes,
+    paths,
     status: response.status,
     durationMs: response.durationMs,
   };
@@ -884,6 +934,70 @@ async function selfTest() {
         "/team-tier2/run/member-1",
       ),
     /wrong-root write scope/,
+  );
+  const runRoot = "/team-tier2/run";
+  validateRunDataPlaneScopes(
+    [readPathScope(runRoot), pathScope(runRoot)],
+    [tokenPath(runRoot)],
+    runRoot,
+  );
+  assert.throws(
+    () => validateRunDataPlaneScopes([pathScope(runRoot)], [tokenPath(runRoot)], runRoot),
+    /must include exact read\/write scopes/,
+  );
+  assert.throws(
+    () =>
+      validateRunDataPlaneScopes(
+        [readPathScope(runRoot), "relayfile:fs:write:/team-tier2/*"],
+        [tokenPath(runRoot)],
+        runRoot,
+      ),
+    /wrong-root write scope/,
+  );
+  assert.throws(
+    () =>
+      validateRunDataPlaneScopes(
+        [readPathScope(runRoot), "relayfile:fs:write:*"],
+        [tokenPath(runRoot)],
+        runRoot,
+      ),
+    /broad\/admin scope/,
+  );
+  assert.throws(
+    () =>
+      validateRunDataPlaneScopes(
+        [readPathScope(runRoot), pathScope(runRoot)],
+        ["/team-tier2/*"],
+        runRoot,
+      ),
+    /unexpected paths/,
+  );
+  assert.throws(
+    () =>
+      validateRunDataPlaneScopes(
+        [readPathScope(runRoot), pathScope(runRoot)],
+        undefined,
+        runRoot,
+      ),
+    /unexpected paths/,
+  );
+  assert.throws(
+    () =>
+      validateRunDataPlaneScopes(
+        [readPathScope(runRoot), pathScope(runRoot)],
+        [],
+        runRoot,
+      ),
+    /unexpected paths/,
+  );
+  assert.throws(
+    () =>
+      validateRunDataPlaneScopes(
+        [readPathScope(runRoot), pathScope(runRoot)],
+        [tokenPath(runRoot), tokenPath(runRoot)],
+        runRoot,
+      ),
+    /unexpected paths/,
   );
   const memberAFailed = {
     member: "member-1",
