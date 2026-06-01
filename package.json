@@ -22,7 +22,9 @@
     "evals": "npm run evals:compile && node scripts/evals/run-relayfile-evals.mjs",
     "evals:list": "npm run evals:compile && node scripts/evals/run-relayfile-evals.mjs --list",
     "evals:offline": "npm run evals:compile && node scripts/evals/run-relayfile-evals.mjs --mode offline",
-    "evals:provider": "npm run evals:compile && node scripts/evals/run-relayfile-evals.mjs --provider"
+    "evals:provider": "npm run evals:compile && node scripts/evals/run-relayfile-evals.mjs --provider",
+    "test:load:tier2-scoped-writeback": "node test/load/tier2-cfdo-scoped-writeback.mjs",
+    "test:load:tier2-scoped-writeback:self-test": "node test/load/tier2-cfdo-scoped-writeback.mjs --self-test"
   },
   "devDependencies": {
     "@agent-assistant/telemetry": "^0.4.31",
