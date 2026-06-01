@@ -1708,10 +1708,13 @@ func TestStatusSurfacesOrphanDaemonFromProcessScan(t *testing.T) {
 	}
 }
 
-func TestMountDaemonCommandMatchesStartAliasAndLocalDirBoundaries(t *testing.T) {
+func TestMountDaemonCommandMatchesAliasesAndLocalDirBoundaries(t *testing.T) {
 	localDir := filepath.Join(t.TempDir(), "ws")
 	if !mountDaemonCommandMatches("relayfile start demo "+localDir+" --daemonized", localDir, "ws_demo", "demo") {
 		t.Fatalf("expected relayfile start alias to match daemon command")
+	}
+	if !mountDaemonCommandMatches("relayfile on demo "+localDir+" --daemonized", localDir, "ws_demo", "demo") {
+		t.Fatalf("expected relayfile on alias to match daemon command")
 	}
 	if mountDaemonCommandMatches("relayfile mount other "+localDir+"-old --daemonized", localDir, "ws_demo", "demo") {
 		t.Fatalf("expected sibling path with shared prefix not to match")

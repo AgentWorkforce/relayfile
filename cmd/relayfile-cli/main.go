@@ -6484,7 +6484,7 @@ func isRelayfileExecutable(arg0 string) bool {
 
 func commandHasMountSubcommand(fields []string) bool {
 	for _, field := range fields {
-		if field == "mount" || field == "start" {
+		if field == "mount" || field == "start" || field == "on" {
 			return true
 		}
 	}
