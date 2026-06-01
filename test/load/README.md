@@ -28,9 +28,11 @@ RELAYFILE_TIER2_WORKSPACE_TOKEN=<workspace-token> \
 npm run test:load:tier2-scoped-writeback
 ```
 
-`RELAYFILE_TIER2_WORKSPACE_TOKEN` is always required because the harness seeds
-and verifies the Relayfile workspace directly. `RELAYFILE_TIER2_RELAYAUTH_API_KEY`
-is optional; when omitted, the workspace token is also used to mint path tokens.
+Alternatively, provide `RELAYFILE_TIER2_RELAYAUTH_API_KEY=<relayauth-api-key>`
+instead of `RELAYFILE_TIER2_WORKSPACE_TOKEN`; the harness mints a temporary
+workspace token before minting scoped path tokens. When a workspace token is
+provided directly, it must be able to mint RelayAuth path tokens. The harness
+uses a run-scoped data-plane path token to seed and verify Relayfile contents.
 Direct Relayfile and RelayAuth API calls are bounded by
 `RELAYFILE_TIER2_API_TIMEOUT_MS`, defaulting to 45000 ms.
 

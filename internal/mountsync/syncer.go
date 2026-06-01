@@ -248,6 +248,7 @@ type HTTPClient struct {
 	maxRetries       int
 	baseDelay        time.Duration
 	maxDelay         time.Duration
+	httpStatusLogMu  sync.RWMutex
 	httpStatusLogger Logger
 }
 
@@ -326,16 +327,21 @@ func NewHTTPClient(baseURL, token string, httpClient *http.Client) *HTTPClient {
 }
 
 func (c *HTTPClient) SetHTTPStatusLogger(logger Logger) {
+	c.httpStatusLogMu.Lock()
+	defer c.httpStatusLogMu.Unlock()
 	c.httpStatusLogger = logger
 }
 
 func (c *HTTPClient) logHTTPStatus(method, requestPath string, statusCode int, retryAfter string, attempt int) {
-	if c.httpStatusLogger == nil {
+	c.httpStatusLogMu.RLock()
+	logger := c.httpStatusLogger
+	c.httpStatusLogMu.RUnlock()
+	if logger == nil {
 		return
 	}
 	retryAfter = strings.TrimSpace(retryAfter)
 	if retryAfter == "" {
-		c.httpStatusLogger.Printf(
+		logger.Printf(
 			"relayfile http %d method=%s path=%s attempt=%d",
 			statusCode,
 			method,
@@ -344,7 +350,7 @@ func (c *HTTPClient) logHTTPStatus(method, requestPath string, statusCode int, r
 		)
 		return
 	}
-	c.httpStatusLogger.Printf(
+	logger.Printf(
 		"relayfile http %d method=%s path=%s retry-after=%q attempt=%d",
 		statusCode,
 		method,

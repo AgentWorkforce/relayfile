@@ -18,6 +18,9 @@ func init() {
 
 func runFuseMount(ctx context.Context, cfg mountConfig) error {
 	httpClient := mountsync.NewHTTPClient(cfg.baseURL, cfg.token, &http.Client{Timeout: cfg.timeout})
+	if cfg.logHTTPStatus {
+		httpClient.SetHTTPStatusLogger(log.Default())
+	}
 
 	fuseCfg := mountfuse.Config{
 		Client:      httpClient,
