@@ -53,6 +53,7 @@ type mountConfig struct {
 	lowMemory        bool
 	pprofAddr        string
 	memlogInterval   time.Duration
+	logHTTPStatus    bool
 	scopes           []string
 	once             bool
 	mode             string
@@ -88,6 +89,7 @@ func main() {
 	lowMemory := flag.Bool("low-memory", boolEnv("RELAYFILE_MOUNT_LOW_MEMORY", false), "reduce mount memory use by omitting per-file public state and deferring content reads")
 	pprofAddr := flag.String("pprof-addr", strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_PPROF_ADDR")), "optional pprof listen address, e.g. 127.0.0.1:6060")
 	memlogInterval := flag.Duration("memlog-interval", durationEnv("RELAYFILE_MOUNT_MEMLOG_INTERVAL", 0), "optional interval for logging runtime memory stats")
+	logHTTPStatus := flag.Bool("log-http-status", boolEnv("RELAYFILE_MOUNT_LOG_HTTP_STATUS", false), "log Relayfile HTTP response statuses for mount observability")
 	mode := flag.String("mode", envOrDefault("RELAYFILE_MOUNT_MODE", mountModePoll), "mount mode: poll (synced mirror, recommended) or fuse")
 	fuse := flag.Bool("fuse", boolEnv("RELAYFILE_MOUNT_FUSE", false), "shortcut for --mode=fuse")
 	once := flag.Bool("once", false, "run one sync cycle and exit")
@@ -145,6 +147,7 @@ func main() {
 		lowMemory:        *lowMemory,
 		pprofAddr:        strings.TrimSpace(*pprofAddr),
 		memlogInterval:   *memlogInterval,
+		logHTTPStatus:    *logHTTPStatus,
 		scopes:           parseTokenScopes(strings.TrimSpace(*token)),
 		once:             *once,
 		mode:             resolvedMode,
@@ -297,6 +300,9 @@ func runSinglePollingMount(rootCtx context.Context, cfg mountConfig) error {
 	// per-cycle / bootstrap / cursor contexts; NewSyncHTTPClient wires a
 	// transport that bounds connect/handshake/time-to-first-byte only.
 	client := mountsync.NewHTTPClient(cfg.baseURL, cfg.token, mountsync.NewSyncHTTPClient())
+	if cfg.logHTTPStatus {
+		client.SetHTTPStatusLogger(log.Default())
+	}
 	syncer, err := mountsync.NewSyncer(client, mountsync.SyncerOptions{
 		WorkspaceID:        cfg.workspaceID,
 		RemoteRoot:         cfg.remotePath,

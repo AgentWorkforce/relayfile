@@ -16,7 +16,6 @@ const REQUIRED_ENV = [
   "RELAYFILE_TIER2_RELAYFILE_URL",
   "RELAYFILE_TIER2_RELAYAUTH_URL",
   "RELAYFILE_TIER2_WORKSPACE_ID",
-  "RELAYFILE_TIER2_WORKSPACE_TOKEN",
 ];
 
 function nowIso() {
@@ -36,7 +35,8 @@ Required for a real run:
   RELAYFILE_TIER2_RELAYAUTH_URL=https://dev-<stage>-api.relayauth.dev
   RELAYFILE_TIER2_WORKSPACE_ID=<disposable-workspace-id>
   RELAYFILE_TIER2_WORKSPACE_TOKEN=<workspace-token>
-  RELAYFILE_TIER2_RELAYAUTH_API_KEY=<relayauth-api-key>  # optional for minting
+    # OR
+  RELAYFILE_TIER2_RELAYAUTH_API_KEY=<relayauth-api-key>  # mints a workspace token first
 
 Optional:
   RELAYFILE_TIER2_MEMBER_COUNT=6
@@ -101,6 +101,10 @@ function normalizeRemotePath(raw) {
 
 function pathScope(root) {
   return `relayfile:fs:write:${normalizeRemotePath(root)}/*`;
+}
+
+function tokenPath(root) {
+  return `${normalizeRemotePath(root)}/*`;
 }
 
 function scopedLocalDir(localRoot, remotePath) {
@@ -203,6 +207,9 @@ function missingCredentialReasons(env = process.env) {
   if (trimEnv("RELAYFILE_TIER2_RUN", env) !== "1") {
     missing.push("RELAYFILE_TIER2_RUN=1");
   }
+  if (!trimEnv("RELAYFILE_TIER2_WORKSPACE_TOKEN", env) && !trimEnv("RELAYFILE_TIER2_RELAYAUTH_API_KEY", env)) {
+    missing.push("RELAYFILE_TIER2_WORKSPACE_TOKEN or RELAYFILE_TIER2_RELAYAUTH_API_KEY");
+  }
   return missing;
 }
 
@@ -210,9 +217,10 @@ function buildConfig() {
   const runId =
     trimEnv("RELAYFILE_TIER2_RUN_ID") ||
     `tier2-${new Date().toISOString().replace(/[:.]/g, "-")}`;
+  const normalizedRunId = runId.toLowerCase();
   return {
     startedAt: nowIso(),
-    runId,
+    runId: normalizedRunId,
     relayfileUrl: normalizeBaseUrl(trimEnv("RELAYFILE_TIER2_RELAYFILE_URL"), "RELAYFILE_TIER2_RELAYFILE_URL"),
     relayauthUrl: normalizeBaseUrl(trimEnv("RELAYFILE_TIER2_RELAYAUTH_URL"), "RELAYFILE_TIER2_RELAYAUTH_URL"),
     workspaceId: trimEnv("RELAYFILE_TIER2_WORKSPACE_ID"),
@@ -267,6 +275,7 @@ async function requestJSON(config, { method, api = "relayfile", path: requestPat
       headers: {
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
         ...(body ? { "Content-Type": "application/json" } : {}),
+        ...(api === "relayfile" ? { "X-Correlation-Id": `tier2-${config.runId}` } : {}),
         ...headers,
       },
       body: body ? JSON.stringify(body) : undefined,
@@ -305,20 +314,50 @@ async function requestJSON(config, { method, api = "relayfile", path: requestPat
   };
 }
 
-async function mintPathToken(config, member) {
-  const headers = {};
-  if (config.relayAuthApiKey) {
-    headers["x-api-key"] = config.relayAuthApiKey;
+async function mintWorkspaceToken(config) {
+  const response = await requestJSON(config, {
+    api: "relayauth",
+    method: "POST",
+    path: "/v1/tokens/workspace",
+    headers: {
+      "x-api-key": config.relayAuthApiKey,
+    },
+    body: {
+      workspaceId: config.workspaceId,
+      name: `tier2-cfdo-${config.runId}`,
+      scopes: ["relayauth:token:create:*", "relayfile:fs:read:*", "relayfile:fs:write:*"],
+    },
+  });
+  if (!response.ok) {
+    throw new Error(`workspace token mint failed: ${response.status} ${JSON.stringify(response.body ?? response.text)}`);
   }
+  const workspaceToken = response.body?.key;
+  if (typeof workspaceToken !== "string" || !workspaceToken.startsWith("relay_ws_")) {
+    throw new Error("workspace token mint did not return a relay_ws_ key");
+  }
+  config.workspaceToken = workspaceToken;
+  return {
+    status: response.status,
+    durationMs: response.durationMs,
+    tokenPrefix: workspaceToken.slice(0, 9),
+    workspaceToken: {
+      id: response.body?.workspaceToken?.id,
+      kind: response.body?.workspaceToken?.kind,
+      workspaceId: response.body?.workspaceToken?.workspaceId,
+      scopes: response.body?.workspaceToken?.scopes,
+    },
+  };
+}
+
+async function mintPathToken(config, member) {
   const response = await requestJSON(config, {
     api: "relayauth",
     method: "POST",
     path: "/v1/tokens/path",
-    token: config.relayAuthApiKey ? "" : config.workspaceToken,
-    headers,
+    token: config.workspaceToken,
     body: {
       workspaceId: config.workspaceId,
-      paths: [member.remoteRoot],
+      paths: [tokenPath(member.remoteRoot)],
       ttlSeconds: config.tokenTtlSeconds,
       agentName: `tier2-member-${member.index}`,
     },
@@ -335,6 +374,36 @@ async function mintPathToken(config, member) {
   return { token: accessToken, scopes, mintResponse: response };
 }
 
+async function mintRunDataPlaneToken(config) {
+  const runRoot = `/team-tier2/${config.runId}`;
+  const response = await requestJSON(config, {
+    api: "relayauth",
+    method: "POST",
+    path: "/v1/tokens/path",
+    token: config.workspaceToken,
+    body: {
+      workspaceId: config.workspaceId,
+      paths: [tokenPath(runRoot)],
+      ttlSeconds: config.tokenTtlSeconds,
+      agentName: "tier2-data-plane",
+    },
+  });
+  if (!response.ok) {
+    throw new Error(`data-plane token mint failed: ${response.status} ${JSON.stringify(response.body ?? response.text)}`);
+  }
+  const accessToken = response.body?.accessToken;
+  if (typeof accessToken !== "string" || accessToken.trim() === "") {
+    throw new Error("data-plane token mint did not return accessToken");
+  }
+  return {
+    token: accessToken,
+    scopes: scopesFromToken(accessToken),
+    paths: response.body?.paths,
+    status: response.status,
+    durationMs: response.durationMs,
+  };
+}
+
 async function seedRemote(config, members) {
   const files = members.map((member) => ({
     path: `${member.remoteRoot}/README.md`,
@@ -344,7 +413,7 @@ async function seedRemote(config, members) {
   const response = await requestJSON(config, {
     method: "POST",
     path: `/v1/workspaces/${encodeURIComponent(config.workspaceId)}/fs/bulk`,
-    token: config.workspaceToken,
+    token: config.dataPlaneToken,
     body: { files },
   });
   if (!response.ok) {
@@ -358,7 +427,7 @@ async function readRemoteFile(config, remotePath) {
   return requestJSON(config, {
     method: "GET",
     path: `/v1/workspaces/${encodeURIComponent(config.workspaceId)}/fs/file?${query.toString()}`,
-    token: config.workspaceToken,
+    token: config.dataPlaneToken,
   });
 }
 
@@ -448,6 +517,7 @@ async function runMountOnce(config, binaryPath, member, phase, extraArgs = []) {
     config.mountTimeout,
     "--bootstrap-timeout",
     "0",
+    "--log-http-status",
     ...extraArgs,
   ];
   const started = Date.now();
@@ -580,7 +650,7 @@ async function directAdmissionProbe(config, members) {
       requestJSON(config, {
         method: "POST",
         path: `/v1/workspaces/${encodeURIComponent(config.workspaceId)}/fs/bulk`,
-        token: config.workspaceToken,
+        token: config.dataPlaneToken,
         headers: { "X-Relayfile-Write-Class": "foreground_content" },
         body: { files: [file] },
       }),
@@ -651,7 +721,7 @@ async function runHarness() {
       writesPerMember: config.writesPerMember,
       apiTimeoutMs: config.apiTimeoutMs,
       mountTimeout: config.mountTimeout,
-      tokenSource: config.relayAuthApiKey ? "relayauth-api-key" : "workspace-token",
+      tokenSource: config.relayAuthApiKey ? "relayauth-api-key-via-workspace-token" : "workspace-token",
       evidencePath: config.evidencePath,
     },
     workRoot,
@@ -662,11 +732,21 @@ async function runHarness() {
     })),
   });
   try {
+    if (config.relayAuthApiKey) {
+      evidence.workspaceTokenMint = await mintWorkspaceToken(config);
+    }
     const binaryPath = await buildMountBinary(workRoot);
     evidence.binary = { path: binaryPath };
 
     await prepareMemberRoots(config, workRoot, members);
-    evidence.seed = { remote: await seedRemote(config, members) };
+    const dataPlaneToken = await mintRunDataPlaneToken(config);
+    config.dataPlaneToken = dataPlaneToken.token;
+    evidence.dataPlaneToken = {
+      paths: dataPlaneToken.paths,
+      scopes: dataPlaneToken.scopes,
+      status: dataPlaneToken.status,
+      durationMs: dataPlaneToken.durationMs,
+    };
 
     for (const member of members) {
       const tokenResult = await mintPathToken(config, member);
@@ -678,6 +758,7 @@ async function runHarness() {
       remoteRoot: member.remoteRoot,
       scopes: member.scopes,
     }));
+    evidence.seed = { remote: await seedRemote(config, members) };
 
     const initialMounts = await Promise.all(
       members.map((member) => runMountOnce(config, binaryPath, member, "bootstrap")),
@@ -691,7 +772,7 @@ async function runHarness() {
 
     await writeMemberChanges(config, members);
     const writebackMounts = await Promise.all(
-      members.map((member) => runMountOnce(config, binaryPath, member, "writeback", ["--full-reconcile"])),
+      members.map((member) => runMountOnce(config, binaryPath, member, "writeback")),
     );
     evidence.mounts = [...initialMounts, ...writebackMounts].map(redactMountResult);
     assertNoPathology(writebackMounts);
@@ -764,6 +845,7 @@ async function selfTest() {
   );
   const good = [pathScope("/team-tier2/run/member-1"), "relayfile:fs:read:/team-tier2/run/member-1/*"];
   validateMemberWriteScopes(good, "/team-tier2/run/member-1");
+  assert.equal(tokenPath("/team-tier2/run/member-1"), "/team-tier2/run/member-1/*");
   assert.throws(() => validateMemberWriteScopes([], "/team-tier2/run/member-1"), /no scopes/);
   assert.throws(() => validateMemberWriteScopes(["fs:write"], "/team-tier2/run/member-1"), /broad/);
   assert.throws(() => validateMemberWriteScopes([pathScope("/team-tier2/run/member-1"), "relayfile:fs:write"], "/team-tier2/run/member-1"), /broad/);
@@ -842,7 +924,9 @@ async function selfTest() {
   }
   const missing = missingCredentialReasons({});
   assert(missing.includes("RELAYFILE_TIER2_RUN=1"));
-  assert(missing.includes("RELAYFILE_TIER2_WORKSPACE_TOKEN"));
+  assert(missing.includes("RELAYFILE_TIER2_WORKSPACE_TOKEN or RELAYFILE_TIER2_RELAYAUTH_API_KEY"));
+  assert(!missingCredentialReasons({ RELAYFILE_TIER2_WORKSPACE_TOKEN: "relay_ws_test" }).includes("RELAYFILE_TIER2_WORKSPACE_TOKEN or RELAYFILE_TIER2_RELAYAUTH_API_KEY"));
+  assert(!missingCredentialReasons({ RELAYFILE_TIER2_RELAYAUTH_API_KEY: "rak_test" }).includes("RELAYFILE_TIER2_WORKSPACE_TOKEN or RELAYFILE_TIER2_RELAYAUTH_API_KEY"));
   console.log("tier2 harness self-test passed");
 }
 

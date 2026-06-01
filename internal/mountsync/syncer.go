@@ -241,13 +241,15 @@ type LazyMaterializeClient interface {
 }
 
 type HTTPClient struct {
-	baseURL    string
-	token      string
-	tokenMu    sync.RWMutex
-	httpClient *http.Client
-	maxRetries int
-	baseDelay  time.Duration
-	maxDelay   time.Duration
+	baseURL          string
+	token            string
+	tokenMu          sync.RWMutex
+	httpClient       *http.Client
+	maxRetries       int
+	baseDelay        time.Duration
+	maxDelay         time.Duration
+	httpStatusLogMu  sync.RWMutex
+	httpStatusLogger Logger
 }
 
 // NewSyncTransport builds the *http.Transport used by every mount-daemon
@@ -322,6 +324,40 @@ func NewHTTPClient(baseURL, token string, httpClient *http.Client) *HTTPClient {
 		baseDelay:  100 * time.Millisecond,
 		maxDelay:   defaultRetryAfterMaxDelay,
 	}
+}
+
+func (c *HTTPClient) SetHTTPStatusLogger(logger Logger) {
+	c.httpStatusLogMu.Lock()
+	defer c.httpStatusLogMu.Unlock()
+	c.httpStatusLogger = logger
+}
+
+func (c *HTTPClient) logHTTPStatus(method, requestPath string, statusCode int, retryAfter string, attempt int) {
+	c.httpStatusLogMu.RLock()
+	logger := c.httpStatusLogger
+	c.httpStatusLogMu.RUnlock()
+	if logger == nil {
+		return
+	}
+	retryAfter = strings.TrimSpace(retryAfter)
+	if retryAfter == "" {
+		logger.Printf(
+			"relayfile http %d method=%s path=%s attempt=%d",
+			statusCode,
+			method,
+			requestPath,
+			attempt+1,
+		)
+		return
+	}
+	logger.Printf(
+		"relayfile http %d method=%s path=%s retry-after=%q attempt=%d",
+		statusCode,
+		method,
+		requestPath,
+		retryAfter,
+		attempt+1,
+	)
 }
 
 func (c *HTTPClient) ListTree(ctx context.Context, workspaceID, path string, depth int, cursor string) (TreeResponse, error) {
@@ -490,6 +526,7 @@ func (c *HTTPClient) ExportGithubWorkingTreeTar(ctx context.Context, workspaceID
 			return GithubWorkingTreeTar{}, err
 		}
 		if resp.StatusCode >= 200 && resp.StatusCode <= 299 {
+			c.logHTTPStatus(http.MethodGet, requestPath, resp.StatusCode, resp.Header.Get("Retry-After"), attempt)
 			return GithubWorkingTreeTar{
 				Body:        resp.Body,
 				ContentType: resp.Header.Get("Content-Type"),
@@ -500,6 +537,7 @@ func (c *HTTPClient) ExportGithubWorkingTreeTar(ctx context.Context, workspaceID
 		if readErr != nil {
 			return GithubWorkingTreeTar{}, readErr
 		}
+		c.logHTTPStatus(http.MethodGet, requestPath, resp.StatusCode, resp.Header.Get("Retry-After"), attempt)
 		if (resp.StatusCode == http.StatusTooManyRequests || (resp.StatusCode >= 500 && resp.StatusCode <= 599)) && attempt < c.maxRetries {
 			if waitErr := waitWithContext(ctx, c.retryDelay(attempt+1, resp.Header.Get("Retry-After"))); waitErr != nil {
 				return GithubWorkingTreeTar{}, waitErr
@@ -585,6 +623,7 @@ func (c *HTTPClient) doJSON(
 		if readErr != nil {
 			return readErr
 		}
+		c.logHTTPStatus(method, requestPath, resp.StatusCode, resp.Header.Get("Retry-After"), attempt)
 
 		if resp.StatusCode >= 200 && resp.StatusCode <= 299 {
 			if out == nil || len(payloadBytes) == 0 {
