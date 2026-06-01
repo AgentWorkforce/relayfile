@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 )
@@ -42,6 +43,46 @@ func TestHTTPClientRetriesTransientFailure(t *testing.T) {
 	}
 	if atomic.LoadInt32(&calls) != 2 {
 		t.Fatalf("expected exactly 2 calls (1 retry), got %d", atomic.LoadInt32(&calls))
+	}
+}
+
+func TestHTTPClientLogsRetriedHTTPStatus(t *testing.T) {
+	var calls int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		call := atomic.AddInt32(&calls, 1)
+		if call == 1 {
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Retry-After", "0")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"code":"workspace_busy","reason":"write_admission_limit"}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"path":"/notion","entries":[],"nextCursor":null}`))
+	}))
+	defer server.Close()
+
+	logger := &captureLogger{}
+	client := NewHTTPClient(server.URL, "token", server.Client())
+	client.SetHTTPStatusLogger(logger)
+
+	if _, err := client.ListTree(context.Background(), "ws_retry", "/notion", 2, ""); err != nil {
+		t.Fatalf("expected retry to recover from transient 429, got error: %v", err)
+	}
+	logs := strings.Join(logger.lines, "\n")
+	if !strings.Contains(logs, "relayfile http 429") {
+		t.Fatalf("expected retried 429 status to be logged, got %q", logs)
+	}
+	if !strings.Contains(logs, `retry-after="0"`) {
+		t.Fatalf("expected Retry-After header to be logged, got %q", logs)
+	}
+	if !strings.Contains(logs, "relayfile http 200") {
+		t.Fatalf("expected final 200 status to be logged, got %q", logs)
+	}
+	for _, line := range logger.lines {
+		if strings.Contains(line, "relayfile http 200") && strings.Contains(line, "retry-after=") {
+			t.Fatalf("did not expect Retry-After field on final 200 log line %q", line)
+		}
 	}
 }
 
