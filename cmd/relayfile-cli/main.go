@@ -478,9 +478,10 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		return runDigest(args[1:], stdout)
 	case "pull":
 		return runPull(args[1:], stdout)
-	case "mount", "start":
-		// `start` is the friendlier alias for `mount`. Same flags, same
-		// foreground/background behavior; pass --background to detach.
+	case "mount", "start", "on":
+		// `start` and `on` are friendlier aliases for `mount`. Same flags,
+		// same foreground/background behavior; pass --background to detach.
+		// `on` migrates the agent-relay `relay on` mount UX into relayfile.
 		return runMount(args[1:])
 	case "restart":
 		return runRestart(args[1:], stdout)
@@ -494,7 +495,9 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		return runExport(args[1:], stdout)
 	case "status":
 		return runStatus(args[1:], stdout)
-	case "stop":
+	case "stop", "off":
+		// `off` is the friendlier alias for `stop`, migrating the
+		// agent-relay `relay off` unmount UX into relayfile.
 		return runStop(args[1:], stdout)
 	case "logs":
 		return runLogs(args[1:], stdout)
@@ -550,7 +553,7 @@ func printHelpForArgs(args []string, stdout io.Writer) {
 		printDigestUsage(stdout, subcommand)
 	case "pull":
 		fmt.Fprintln(stdout, "Usage: relayfile pull [--workspace NAME] [--provider PROVIDER] [--reason TEXT]")
-	case "mount", "start":
+	case "mount", "start", "on":
 		printMountHelp(stdout)
 	case "restart":
 		fmt.Fprintln(stdout, "Usage: relayfile restart [WORKSPACE] [--foreground]")
@@ -564,7 +567,7 @@ func printHelpForArgs(args []string, stdout io.Writer) {
 		fmt.Fprintln(stdout, "Usage: relayfile export [WORKSPACE] --format FORMAT [--output FILE]")
 	case "status":
 		fmt.Fprintln(stdout, "Usage: relayfile status [WORKSPACE] [--json]")
-	case "stop":
+	case "stop", "off":
 		fmt.Fprintln(stdout, "Usage: relayfile stop [WORKSPACE]")
 	case "logs":
 		fmt.Fprintln(stdout, "Usage: relayfile logs [WORKSPACE] [--lines N]")
@@ -699,7 +702,9 @@ Usage:
   relayfile pull [--workspace NAME] [--provider PROVIDER] [--reason TEXT]
   relayfile mount [WORKSPACE] [LOCAL_DIR]
   relayfile start [WORKSPACE] [LOCAL_DIR]            (alias for mount; pass --background to detach)
+  relayfile on [WORKSPACE] [LOCAL_DIR]              (alias for mount; pass --background to detach)
   relayfile stop [WORKSPACE]
+  relayfile off [WORKSPACE]                         (alias for stop)
   relayfile restart [WORKSPACE] [--foreground]
   relayfile tree [WORKSPACE] [PATH] [--depth N]
   relayfile read [WORKSPACE] PATH
@@ -728,7 +733,9 @@ Subcommands:
   pull        Trigger an immediate sync refresh for one or all providers
   mount       Mirror a remote workspace to a local directory; add --background to detach
   start       Alias for mount; pass --background to detach
+  on          Alias for mount; pass --background to detach
   stop        Stop a background mount
+  off         Alias for stop
   restart     Stop and start a workspace's mount in one step (--foreground to attach)
   tree        List a remote workspace path
   read        Print a remote file's content

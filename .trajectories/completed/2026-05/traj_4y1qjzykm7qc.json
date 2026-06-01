@@ -1,0 +1,58 @@
+{
+  "id": "traj_4y1qjzykm7qc",
+  "version": 1,
+  "task": {
+    "title": "Migrate legacy agent-relay on/off mount UX into relayfile Go CLI"
+  },
+  "status": "completed",
+  "startedAt": "2026-06-01T03:36:01.085Z",
+  "completedAt": "2026-06-01T03:41:22.353Z",
+  "agents": [
+    {
+      "name": "default",
+      "role": "lead",
+      "joinedAt": "2026-06-01T03:36:14.982Z"
+    }
+  ],
+  "chapters": [
+    {
+      "id": "chap_sks2uofjv4ny",
+      "title": "Work",
+      "agentName": "default",
+      "startedAt": "2026-06-01T03:36:14.982Z",
+      "endedAt": "2026-06-01T03:41:22.353Z",
+      "events": [
+        {
+          "ts": 1780284974983,
+          "type": "decision",
+          "content": "Map legacy on/off to relayfile mount/stop via on=mount and off=stop aliases: Map legacy on/off to relayfile mount/stop via on=mount and off=stop aliases",
+          "raw": {
+            "question": "Map legacy on/off to relayfile mount/stop via on=mount and off=stop aliases",
+            "chosen": "Map legacy on/off to relayfile mount/stop via on=mount and off=stop aliases",
+            "alternatives": [],
+            "reasoning": "relayfile is the mount substrate only (not an agent launcher). Legacy 'on' mounted provider files into the workspace; relayfile 'mount'/'start' already does that. Legacy 'off' stopped the mount; relayfile 'stop' does that. Adding on/off as aliases preserves the migrated mount UX with minimal surface and matches existing start/mount and stop verbs."
+          },
+          "significance": "high"
+        }
+      ]
+    }
+  ],
+  "retrospective": {
+    "summary": "Added on/off aliases to relayfile CLI mapping legacy agent-relay relay on/off mount UX to mount/stop; help text, usage, docs, and dispatch tests added; full suite green",
+    "approach": "Standard approach",
+    "confidence": 0.85
+  },
+  "commits": [
+    "1386546"
+  ],
+  "filesChanged": [
+    "internal/mountsync/team_scoped_measurement_test.go"
+  ],
+  "projectId": "/Users/will/Projects/AgentWorkforce/relayfile",
+  "tags": [],
+  "_trace": {
+    "startRef": "0c54aa4e0c806950bc4d35c99ef428a10e978034",
+    "endRef": "1386546ec5234bb9ce7cd01e05b273117a3c4d1a",
+    "traceId": "12d7b2a3-9bf8-4aa8-8fc0-b4aa36c205bd"
+  }
+}

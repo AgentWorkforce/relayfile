@@ -195,6 +195,7 @@ func TestHelpFlagPrintsUsageForCommandsAndSubcommands(t *testing.T) {
 		{name: "pull", args: []string{"pull", "-h"}, want: "Usage: relayfile pull"},
 		{name: "mount", args: []string{"mount", "-h"}, want: "Usage: relayfile mount"},
 		{name: "start alias", args: []string{"start", "-h"}, want: "Usage: relayfile mount"},
+		{name: "on alias", args: []string{"on", "-h"}, want: "Usage: relayfile mount"},
 		{name: "restart", args: []string{"restart", "-h"}, want: "Usage: relayfile restart"},
 		{name: "tree", args: []string{"tree", "-h"}, want: "Usage: relayfile tree"},
 		{name: "ls alias", args: []string{"ls", "-h"}, want: "Usage: relayfile tree"},
@@ -204,6 +205,7 @@ func TestHelpFlagPrintsUsageForCommandsAndSubcommands(t *testing.T) {
 		{name: "export", args: []string{"export", "-h"}, want: "Usage: relayfile export"},
 		{name: "status", args: []string{"status", "-h"}, want: "Usage: relayfile status"},
 		{name: "stop", args: []string{"stop", "-h"}, want: "Usage: relayfile stop"},
+		{name: "off alias", args: []string{"off", "-h"}, want: "Usage: relayfile stop"},
 		{name: "logs", args: []string{"logs", "-h"}, want: "Usage: relayfile logs"},
 		{name: "observer", args: []string{"observer", "-h"}, want: "Usage: relayfile observer"},
 	}
@@ -226,6 +228,56 @@ func TestHelpFlagPrintsUsageForCommandsAndSubcommands(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestOnOffAliasesDispatchLikeMountAndStop verifies that the `on` and `off`
+// verbs migrated from the agent-relay CLI route to the same handlers as
+// `mount` and `stop`. We assert on the handler-specific error surfaced for an
+// identical invocation: `on`/`mount` with no credentials demand a token, and
+// `off`/`stop` for an unknown workspace report the same not-found error.
+func TestOnOffAliasesDispatchLikeMountAndStop(t *testing.T) {
+	const unknownWorkspace = "ws_does_not_exist"
+
+	runVerb := func(t *testing.T, args []string) (string, error) {
+		t.Helper()
+		t.Setenv("HOME", t.TempDir())
+		clearRelayfileEnv(t)
+		var stdout, stderr bytes.Buffer
+		err := run(args, strings.NewReader(""), &stdout, &stderr)
+		return stdout.String(), err
+	}
+
+	t.Run("on matches mount when token is missing", func(t *testing.T) {
+		_, mountErr := runVerb(t, []string{"mount", unknownWorkspace})
+		_, onErr := runVerb(t, []string{"on", unknownWorkspace})
+		if mountErr == nil || onErr == nil {
+			t.Fatalf("expected both mount and on to error without a token; mount=%v on=%v", mountErr, onErr)
+		}
+		if mountErr.Error() != onErr.Error() {
+			t.Fatalf("on did not dispatch like mount: mount=%q on=%q", mountErr.Error(), onErr.Error())
+		}
+		if !strings.Contains(onErr.Error(), "token is required") {
+			t.Fatalf("expected token-required error from on alias, got %q", onErr.Error())
+		}
+	})
+
+	t.Run("off matches stop for an unknown workspace", func(t *testing.T) {
+		_, stopErr := runVerb(t, []string{"stop", unknownWorkspace})
+		_, offErr := runVerb(t, []string{"off", unknownWorkspace})
+		if stopErr == nil || offErr == nil {
+			t.Fatalf("expected both stop and off to error for unknown workspace; stop=%v off=%v", stopErr, offErr)
+		}
+		// Each invocation runs under its own temp HOME, so the workspaces.json
+		// path embedded in the error differs. Compare the stable, path-free
+		// prefix to prove `off` reached the same handler as `stop`.
+		const wantPrefix = `workspace "` + unknownWorkspace + `" not found`
+		if !strings.HasPrefix(stopErr.Error(), wantPrefix) {
+			t.Fatalf("unexpected stop error shape: %q", stopErr.Error())
+		}
+		if !strings.HasPrefix(offErr.Error(), wantPrefix) {
+			t.Fatalf("off did not dispatch like stop: %q", offErr.Error())
+		}
+	})
 }
 
 func TestWorkspaceRequiresSubcommandMentionsJoin(t *testing.T) {

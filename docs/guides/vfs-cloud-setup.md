@@ -163,6 +163,17 @@ This is not an error. Poll sync continues; the provider will recover its webhook
 
 ## Starting and Stopping the Sync Loop
 
+`mount` has two friendlier aliases: `start` and `on` both start the sync loop,
+and `off` stops it (an alias for `stop`). The `on`/`off` pair migrates the
+`relay on` / `relay off` mount UX from the agent-relay CLI into relayfile, so
+those muscle-memory verbs keep working:
+
+```bash
+relayfile on my-project ./relayfile-mount             # alias for mount
+relayfile on --background my-project ./relayfile-mount # detach
+relayfile off my-project                              # alias for stop
+```
+
 ### Foreground (default)
 
 ```bash
