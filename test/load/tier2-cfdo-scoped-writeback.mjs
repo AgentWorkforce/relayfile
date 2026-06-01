@@ -103,17 +103,39 @@ function pathScope(root) {
   return `relayfile:fs:write:${normalizeRemotePath(root)}/*`;
 }
 
+function scopedLocalDir(localRoot, remotePath) {
+  const normalized = normalizeRemotePath(remotePath);
+  if (normalized === "/") return localRoot;
+  return path.join(localRoot, ...normalized.slice(1).split("/"));
+}
+
 function isBroadOrAdminScope(scope) {
-  const value = String(scope ?? "").trim();
+  const value = String(scope ?? "").trim().toLowerCase();
   if (!value) return false;
+  const segments = value.split(":", 4);
+  const grantsWrite =
+    segments.length >= 3 &&
+    (segments[0] === "relayfile" || segments[0] === "*") &&
+    (segments[1] === "fs" || segments[1] === "*") &&
+    (segments[2] === "write" || segments[2] === "manage" || segments[2] === "*");
   return (
     value === "fs:write" ||
     value === "fs:manage" ||
+    value === "relayfile:fs:write" ||
+    value === "relayfile:fs:write:*" ||
     value === "relayfile:fs:write:/*" ||
+    value === "relayfile:fs:manage" ||
+    value === "relayfile:fs:manage:*" ||
     value === "relayfile:fs:manage:/*" ||
     value.startsWith("admin:") ||
-    value.startsWith("relayfile:fs:manage:")
+    value.startsWith("relayfile:fs:manage:") ||
+    (grantsWrite && (segments[0] === "*" || segments[1] === "*" || segments[2] === "*"))
   );
+}
+
+function isAllowedReadScope(scope) {
+  const value = String(scope ?? "").trim().toLowerCase();
+  return value === "relayfile:fs:read" || value.startsWith("relayfile:fs:read:");
 }
 
 function validateMemberWriteScopes(scopes, assignedRoot) {
@@ -131,6 +153,10 @@ function validateMemberWriteScopes(scopes, assignedRoot) {
       if (String(scope).trim() !== requiredWriteScope) {
         throw new Error(`member token for ${assignedRoot} has wrong-root write scope ${scope}`);
       }
+      continue;
+    }
+    if (!isAllowedReadScope(scope)) {
+      throw new Error(`member token for ${assignedRoot} has unsupported non-read scope ${scope}`);
     }
   }
   if (writeScopes === 0) {
@@ -411,9 +437,9 @@ async function runMountOnce(config, binaryPath, member, phase, extraArgs = []) {
     "--remote-path",
     member.remoteRoot,
     "--local-dir",
-    member.liveRoot,
+    member.mountLocalDir,
     "--state-file",
-    path.join(member.liveRoot, ".relayfile-mount-state.json"),
+    member.stateFile,
     "--mode",
     "poll",
     "--websocket=false",
@@ -469,9 +495,12 @@ function assertNoPathology(mounts) {
 async function prepareMemberRoots(config, workRoot, members) {
   for (const member of members) {
     member.seedRoot = path.join(workRoot, "members", member.name, "seed", "project", "cloud");
-    member.liveRoot = path.join(member.seedRoot, "packages", member.name);
+    member.mountLocalDir = path.join(member.seedRoot, "packages");
+    member.liveRoot = scopedLocalDir(member.mountLocalDir, member.remoteRoot);
+    member.stateFile = path.join(workRoot, "state", member.name, ".relayfile-mount-state.json");
     member.outOfScopeLocalPath = path.join(member.seedRoot, "outside", `${member.name}-SHOULD_NOT_WRITE.md`);
     await mkdir(member.liveRoot, { recursive: true });
+    await mkdir(path.dirname(member.stateFile), { recursive: true });
     await mkdir(path.dirname(member.outOfScopeLocalPath), { recursive: true });
     await writeFile(
       path.join(member.liveRoot, "README.md"),
@@ -503,45 +532,51 @@ async function writeMemberChanges(config, members) {
 
 async function verifyRemoteVisibility(config, members) {
   const checks = [];
+  const failures = [];
   for (const member of members) {
     for (const expected of member.expectedRemoteFiles) {
       const response = await readRemoteFile(config, expected.path);
-      checks.push({
+      const check = {
         member: member.name,
         path: expected.path,
         status: response.status,
         ok: response.ok,
         contentMatches: response.body?.content === expected.content,
-      });
+      };
+      checks.push(check);
       if (!response.ok || response.body?.content !== expected.content) {
-        throw new Error(`remote visibility failed for ${expected.path}: status ${response.status}`);
+        failures.push(`remote visibility failed for ${expected.path}: status ${response.status}`);
       }
     }
     const outOfScopeRemote = `/team-tier2/${config.runId}/outside/${member.name}-SHOULD_NOT_WRITE.md`;
     const outResponse = await readRemoteFile(config, outOfScopeRemote);
-    checks.push({
+    const outOfScopeCheck = {
       member: member.name,
       path: outOfScopeRemote,
       status: outResponse.status,
       ok: outResponse.ok,
       expectedMissing: true,
-    });
+    };
+    checks.push(outOfScopeCheck);
     if (outResponse.ok) {
-      throw new Error(`out-of-scope sentinel unexpectedly reached remote: ${outOfScopeRemote}`);
+      failures.push(`out-of-scope sentinel unexpectedly reached remote: ${outOfScopeRemote}`);
     }
   }
-  return checks;
+  return { checks, failures };
 }
 
 async function directAdmissionProbe(config, members) {
-  const files = members.map((member, index) => ({
-    path: `${member.remoteRoot}/admission-probe-${Date.now()}-${index}.md`,
-    contentType: "text/markdown",
-    content: `admission probe ${member.name} ${config.runId}\n`,
+  const probes = members.map((member, index) => ({
+    member,
+    file: {
+      path: `${member.remoteRoot}/admission-probe-${Date.now()}-${index}.md`,
+      contentType: "text/markdown",
+      content: `admission probe ${member.name} ${config.runId}\n`,
+    },
   }));
   const started = Date.now();
   const responses = await Promise.all(
-    files.map((file) =>
+    probes.map(({ file }) =>
       requestJSON(config, {
         method: "POST",
         path: `/v1/workspaces/${encodeURIComponent(config.workspaceId)}/fs/bulk`,
@@ -553,13 +588,47 @@ async function directAdmissionProbe(config, members) {
   );
   return {
     durationMs: Date.now() - started,
-    responses: responses.map((response) => ({
+    responses: responses.map((response, index) => ({
+      member: probes[index].member.name,
       status: response.status,
       retryAfter: response.retryAfter,
       code: response.body?.code,
       reason: response.body?.reason,
       durationMs: response.durationMs,
     })),
+  };
+}
+
+function sawGracefulBackpressureForMember(memberName, mounts, admissionProbe) {
+  return (
+    mounts.some(
+      (mount) =>
+        mount.member === memberName &&
+        mount.observations.saw429 &&
+        mount.observations.sawRetryAfter,
+    ) ||
+    admissionProbe.responses.some(
+      (response) =>
+        response.member === memberName &&
+        response.status === 429 &&
+        Boolean(response.retryAfter),
+    )
+  );
+}
+
+function buildSummary(mounts, admissionProbe) {
+  return {
+    observed429:
+      mounts.some((mount) => mount.observations.saw429) ||
+      admissionProbe.responses.some((response) => response.status === 429),
+    observedRetryAfter:
+      admissionProbe.responses.some((response) => response.retryAfter) ||
+      mounts.some((mount) => mount.observations.sawRetryAfter),
+    observed500:
+      mounts.some((mount) => mount.observations.sawHttp500) ||
+      admissionProbe.responses.some((response) => response.status >= 500),
+    observedContextDeadline: mounts.some((mount) => mount.observations.sawContextDeadline),
+    observedObjectReset: mounts.some((mount) => mount.observations.sawObjectReset),
   };
 }
 
@@ -613,6 +682,7 @@ async function runHarness() {
     const initialMounts = await Promise.all(
       members.map((member) => runMountOnce(config, binaryPath, member, "bootstrap")),
     );
+    evidence.mounts = initialMounts.map(redactMountResult);
     assertNoPathology(initialMounts);
     const failedInitial = initialMounts.filter((mount) => mount.exitCode !== 0);
     if (failedInitial.length > 0) {
@@ -623,32 +693,29 @@ async function runHarness() {
     const writebackMounts = await Promise.all(
       members.map((member) => runMountOnce(config, binaryPath, member, "writeback", ["--full-reconcile"])),
     );
+    evidence.mounts = [...initialMounts, ...writebackMounts].map(redactMountResult);
     assertNoPathology(writebackMounts);
 
-    const visibilityChecks = await verifyRemoteVisibility(config, members);
+    const visibility = await verifyRemoteVisibility(config, members);
+    evidence.remoteVisibility = visibility.checks;
+    if (visibility.failures.length > 0) {
+      throw new Error(visibility.failures.join("; "));
+    }
     const admissionProbe = await directAdmissionProbe(config, members);
+    evidence.admissionProbe = admissionProbe;
 
     const failedWriteback = writebackMounts.filter((mount) => mount.exitCode !== 0);
-    const observed429 = [...initialMounts, ...writebackMounts].some((mount) => mount.observations.saw429) ||
-      admissionProbe.responses.some((response) => response.status === 429);
-    if (failedWriteback.length > 0 && !observed429) {
-      throw new Error(`writeback mount failed without graceful 429 evidence: ${failedWriteback.map((m) => `${m.member}:${m.exitCode}`).join(", ")}`);
+    const ungracefulFailedWriteback = failedWriteback.filter(
+      (mount) =>
+        !sawGracefulBackpressureForMember(mount.member, [...initialMounts, ...writebackMounts], admissionProbe),
+    );
+    if (ungracefulFailedWriteback.length > 0) {
+      throw new Error(`writeback mount failed without same-member graceful 429 evidence: ${ungracefulFailedWriteback.map((m) => `${m.member}:${m.exitCode}`).join(", ")}`);
     }
 
     evidence.status = "passed";
     evidence.completedAt = nowIso();
-    evidence.mounts = [...initialMounts, ...writebackMounts].map(redactMountResult);
-    evidence.remoteVisibility = visibilityChecks;
-    evidence.admissionProbe = admissionProbe;
-    evidence.summary = {
-      observed429,
-      observedRetryAfter: admissionProbe.responses.some((response) => response.retryAfter) ||
-        evidence.mounts.some((mount) => mount.observations.sawRetryAfter),
-      observed500: evidence.mounts.some((mount) => mount.observations.sawHttp500) ||
-        admissionProbe.responses.some((response) => response.status >= 500),
-      observedContextDeadline: evidence.mounts.some((mount) => mount.observations.sawContextDeadline),
-      observedObjectReset: evidence.mounts.some((mount) => mount.observations.sawObjectReset),
-    };
+    evidence.summary = buildSummary([...initialMounts, ...writebackMounts], admissionProbe);
     if (evidence.summary.observed500 || evidence.summary.observedContextDeadline || evidence.summary.observedObjectReset) {
       evidence.status = "failed";
       throw new Error(`observed #1602-class pathology: ${JSON.stringify(evidence.summary)}`);
@@ -691,13 +758,37 @@ function tail(text, limit = 4000) {
 }
 
 async function selfTest() {
+  assert.equal(
+    scopedLocalDir("/workspace", "/team-tier2/run/member-1"),
+    path.join("/workspace", "team-tier2", "run", "member-1"),
+  );
   const good = [pathScope("/team-tier2/run/member-1"), "relayfile:fs:read:/team-tier2/run/member-1/*"];
   validateMemberWriteScopes(good, "/team-tier2/run/member-1");
   assert.throws(() => validateMemberWriteScopes([], "/team-tier2/run/member-1"), /no scopes/);
   assert.throws(() => validateMemberWriteScopes(["fs:write"], "/team-tier2/run/member-1"), /broad/);
+  assert.throws(() => validateMemberWriteScopes([pathScope("/team-tier2/run/member-1"), "relayfile:fs:write"], "/team-tier2/run/member-1"), /broad/);
+  assert.throws(() => validateMemberWriteScopes(["relayfile:fs:write:*"], "/team-tier2/run/member-1"), /broad/);
   assert.throws(() => validateMemberWriteScopes(["relayfile:fs:write:/*"], "/team-tier2/run/member-1"), /broad/);
+  assert.throws(() => validateMemberWriteScopes([pathScope("/team-tier2/run/member-1"), "*:*:*:*"], "/team-tier2/run/member-1"), /broad/);
+  assert.throws(() => validateMemberWriteScopes([pathScope("/team-tier2/run/member-1"), "relayfile:*:*:*"], "/team-tier2/run/member-1"), /broad/);
+  assert.throws(() => validateMemberWriteScopes([pathScope("/team-tier2/run/member-1"), "relayfile:fs:*:*"], "/team-tier2/run/member-1"), /broad/);
+  assert.throws(() => validateMemberWriteScopes([pathScope("/team-tier2/run/member-1"), "relayfile:*:write:*"], "/team-tier2/run/member-1"), /broad/);
+  assert.throws(() => validateMemberWriteScopes([pathScope("/team-tier2/run/member-1"), "*"], "/team-tier2/run/member-1"), /unsupported non-read/);
+  assert.throws(() => validateMemberWriteScopes([pathScope("/team-tier2/run/member-1"), "sync:read"], "/team-tier2/run/member-1"), /unsupported non-read/);
   assert.throws(
-    () => validateMemberWriteScopes(["relayfile:fs:manage:/team-tier2/run/member-1/*"], "/team-tier2/run/member-1"),
+    () =>
+      validateMemberWriteScopes(
+        [pathScope("/team-tier2/run/member-1"), "relayfile:fs:manage:/team-tier2/run/member-1/*"],
+        "/team-tier2/run/member-1",
+      ),
+    /broad/,
+  );
+  assert.throws(
+    () =>
+      validateMemberWriteScopes(
+        [pathScope("/team-tier2/run/member-1"), "relayfile:fs:manage"],
+        "/team-tier2/run/member-1",
+      ),
     /broad/,
   );
   assert.throws(
@@ -711,6 +802,26 @@ async function selfTest() {
         "/team-tier2/run/member-1",
       ),
     /wrong-root write scope/,
+  );
+  const memberAFailed = {
+    member: "member-1",
+    observations: { saw429: false, sawRetryAfter: false },
+  };
+  const memberBBackpressure = {
+    member: "member-2",
+    observations: { saw429: true, sawRetryAfter: true },
+  };
+  assert.equal(
+    sawGracefulBackpressureForMember("member-1", [memberAFailed, memberBBackpressure], {
+      responses: [{ member: "member-2", status: 429, retryAfter: "5" }],
+    }),
+    false,
+  );
+  assert.equal(
+    sawGracefulBackpressureForMember("member-1", [memberAFailed], {
+      responses: [{ member: "member-1", status: 429, retryAfter: "5" }],
+    }),
+    true,
   );
   const scrubbed = tail(
     "Authorization: Bearer relay_ws_header.payload.signature token=relay_pa_header.payload.signature",
