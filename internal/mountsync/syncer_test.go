@@ -5156,43 +5156,7 @@ func canReadPath(scopes map[string]struct{}, path string) bool {
 }
 
 func canWritePathForScope(scope, path string) bool {
-	scope = strings.TrimSpace(scope)
-	if scope == "fs:write" {
-		return true
-	}
-	parts := strings.Split(scope, ":")
-	if len(parts) < 3 {
-		return false
-	}
-	plane := strings.ToLower(parts[0])
-	resource := strings.ToLower(parts[1])
-	action := strings.ToLower(parts[2])
-	if plane != "relayfile" && plane != "*" {
-		return false
-	}
-	if resource != "fs" && resource != "*" {
-		return false
-	}
-	if action != "write" && action != "manage" && action != "*" {
-		return false
-	}
-
-	pathPattern := ""
-	if len(parts) >= 4 {
-		pathPattern = strings.TrimSpace(parts[3])
-	}
-	if pathPattern == "" || pathPattern == "*" {
-		return true
-	}
-	if strings.HasSuffix(pathPattern, "/*") {
-		base := strings.TrimSuffix(pathPattern, "/*")
-		if base == "" {
-			return true
-		}
-		return path == base || strings.HasPrefix(path, base+"/")
-	}
-
-	return path == normalizeRemotePath(pathPattern)
+	return scopeGrantsWrite(scope, path)
 }
 
 func canReadPathForScope(scope, path string) bool {
