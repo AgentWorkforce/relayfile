@@ -206,6 +206,7 @@ func TestTeamTier1MemberSyncerRejectsBroadWriteScopes(t *testing.T) {
 		{name: "parent broad write mixed with assigned write", scopes: []string{"relayfile:fs:write:/project/cloud/*", "relayfile:fs:write:" + assignedRoot + "/*"}},
 		{name: "admin token", scopes: []string{"admin:read", "fs:write"}},
 		{name: "wrong assigned path", scopes: []string{"relayfile:fs:write:/project/cloud/packages/other/*"}},
+		{name: "exact assigned path without subtree wildcard", scopes: []string{"relayfile:fs:write:" + assignedRoot}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -256,8 +257,10 @@ func validateTier1MemberWriteScopes(scopes []string, assignedRoot string) error 
 		case strings.HasPrefix(scope, "relayfile:fs:write:"):
 			writeScopes++
 			path := strings.TrimPrefix(scope, "relayfile:fs:write:")
-			path = strings.TrimSuffix(path, "*")
-			path = strings.TrimSuffix(path, "/")
+			if !strings.HasSuffix(path, "/*") {
+				return fmt.Errorf("team member write scope %q must cover assigned root children %s/*", scope, assigned)
+			}
+			path = strings.TrimSuffix(path, "/*")
 			if path == "" || path == "/" || normalizeRemotePath(path) != assigned {
 				return fmt.Errorf("team member write scope %q must equal assigned root %s", scope, assigned)
 			}
