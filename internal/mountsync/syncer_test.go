@@ -512,6 +512,18 @@ func TestIsUnderLazyGithubRepoSubtree(t *testing.T) {
 			want:       false,
 		},
 		{
+			name:       "slack integration",
+			remoteRoot: "/",
+			remotePath: "/slack/channels/C123/messages/1711111000_000100.json",
+			want:       false,
+		},
+		{
+			name:       "memory integration",
+			remoteRoot: "/",
+			remotePath: "/memory/workspace/daily-ship.md",
+			want:       false,
+		},
+		{
 			name:       "root github dir",
 			remoteRoot: "/",
 			remotePath: "/github",
@@ -522,6 +534,30 @@ func TestIsUnderLazyGithubRepoSubtree(t *testing.T) {
 			remoteRoot: "/relay",
 			remotePath: "/relay/github/repos/octocat/hello-world/issues/issue-1.json",
 			want:       true,
+		},
+		{
+			name:       "scoped org remote root repo subtree file",
+			remoteRoot: "/github/repos/AgentWorkforce",
+			remotePath: "/github/repos/AgentWorkforce/cloud/pulls/123.json",
+			want:       true,
+		},
+		{
+			name:       "scoped org and repo remote root repo subtree file",
+			remoteRoot: "/github/repos/AgentWorkforce/cloud/pulls",
+			remotePath: "/github/repos/AgentWorkforce/cloud/pulls/123.json",
+			want:       true,
+		},
+		{
+			name:       "scoped org remote root repo root",
+			remoteRoot: "/github/repos/AgentWorkforce",
+			remotePath: "/github/repos/AgentWorkforce/cloud",
+			want:       false,
+		},
+		{
+			name:       "outside scoped org remote root",
+			remoteRoot: "/github/repos/AgentWorkforce",
+			remotePath: "/github/repos/OtherOrg/cloud/pulls/123.json",
+			want:       false,
 		},
 	}
 

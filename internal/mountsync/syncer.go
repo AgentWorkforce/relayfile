@@ -3114,13 +3114,21 @@ func isUnderLazyGithubRepoSubtree(remoteRoot, remotePath string) bool {
 	if !isUnderRemoteRoot(remoteRoot, remotePath) {
 		return false
 	}
-	rel := strings.TrimPrefix(remotePath, remoteRoot)
-	rel = strings.TrimPrefix(rel, "/")
-	if rel == "" {
+	absolute := strings.TrimPrefix(remotePath, "/")
+	return isLazyGithubRepoSubtreePath(absolute)
+}
+
+func isLazyGithubRepoSubtreePath(path string) bool {
+	if path == "" {
 		return false
 	}
-	segments := strings.Split(rel, "/")
-	return len(segments) >= 5 && segments[0] == "github" && segments[1] == "repos"
+	segments := strings.Split(path, "/")
+	for i := 0; i+1 < len(segments); i++ {
+		if segments[i] == "github" && segments[i+1] == "repos" {
+			return len(segments[i:]) >= 5
+		}
+	}
+	return false
 }
 
 func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]struct{}, prog bootstrapProgress) error {
