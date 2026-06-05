@@ -68,7 +68,7 @@ describe("RelayFileSync", () => {
 
     sync.start();
     expect(sockets).toHaveLength(1);
-    expect(sockets[0]!.url).toBe("wss://relay.test/v1/workspaces/ws_acme/fs/ws?token=ws_token");
+    expect(sockets[0]!.url).toBe("wss://relay.test/v1/workspaces/ws_acme/fs/ws?token=ws_token&from=now");
 
     sockets[0]!.emit("open", {});
     sockets[0]!.emit("message", {
@@ -101,6 +101,47 @@ describe("RelayFileSync", () => {
     expect(sockets[0]!.sent).toContain(JSON.stringify({ type: "ping" }));
 
     await sync.stop();
+  });
+
+  it("sends exclusive cursor and path filters on WebSocket connect and reconnect", async () => {
+    vi.useFakeTimers();
+    const sockets: MockWebSocket[] = [];
+    const sync = new RelayFileSync({
+      client: makeClient(),
+      workspaceId: "ws_acme",
+      baseUrl: "https://relay.test",
+      token: "ws_token",
+      cursor: "evt_10",
+      paths: ["/slack/channels/C1/**"],
+      reconnect: { minDelayMs: 1, maxDelayMs: 1 },
+      webSocketFactory: (url) => {
+        const socket = new MockWebSocket(url);
+        sockets.push(socket);
+        return socket;
+      }
+    });
+
+    sync.start();
+    expect(sockets[0]!.url).toBe("wss://relay.test/v1/workspaces/ws_acme/fs/ws?token=ws_token&cursor=evt_10&path=%2Fslack%2Fchannels%2FC1%2F**");
+    sockets[0]!.emit("open", {});
+    sockets[0]!.emit("message", {
+      data: JSON.stringify({
+        eventId: "evt_11",
+        type: "file.updated",
+        path: "/slack/channels/C1/messages/1.json",
+        revision: "rev_11",
+        timestamp: "2026-03-26T00:00:00Z"
+      })
+    });
+    sockets[0]!.emit("close", { code: 1006, reason: "lost" });
+
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(sockets).toHaveLength(2);
+    expect(sockets[1]!.url).toBe("wss://relay.test/v1/workspaces/ws_acme/fs/ws?token=ws_token&cursor=evt_11&path=%2Fslack%2Fchannels%2FC1%2F**");
+
+    await sync.stop();
+    vi.useRealTimers();
   });
 
   it("falls back to polling when preferred, seeds to the live cursor, then emits only new events", async () => {

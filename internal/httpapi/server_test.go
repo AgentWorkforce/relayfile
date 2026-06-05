@@ -147,6 +147,278 @@ func TestFileEventsWebSocketCatchUpAndPingPong(t *testing.T) {
 	if live["path"] != "/notion/Docs/Two.md" {
 		t.Fatalf("unexpected live event path: %v", live["path"])
 	}
+	if live["origin"] != "agent_write" {
+		t.Fatalf("expected live write event origin=agent_write, got %v", live["origin"])
+	}
+}
+
+func TestFileEventsWebSocketFromNowSkipsBackfillOnSubscribeAndReconnect(t *testing.T) {
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
+	t.Cleanup(store.Close)
+
+	if _, err := store.WriteFile(relayfile.WriteRequest{
+		WorkspaceID: "ws_socket_now",
+		Path:        "/slack/channels/C1/messages/old.json",
+		IfMatch:     "0",
+		ContentType: "application/json",
+		Content:     "{}",
+	}); err != nil {
+		t.Fatalf("seed write failed: %v", err)
+	}
+
+	server := httptest.NewServer(NewServer(store))
+	defer server.Close()
+
+	token := mustTestJWT(t, "dev-secret", "ws_socket_now", "Worker1", []string{"fs:read"}, time.Now().Add(time.Hour))
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/workspaces/ws_socket_now/fs/ws?token=" + token + "&from=now"
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	conn, _, err := websocket.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatalf("websocket dial failed: %v", err)
+	}
+	if err := wsjson.Write(ctx, conn, map[string]any{"type": "ping"}); err != nil {
+		t.Fatalf("write ping failed: %v", err)
+	}
+	var pong map[string]any
+	if err := wsjson.Read(ctx, conn, &pong); err != nil {
+		t.Fatalf("read pong failed: %v", err)
+	}
+	if pong["type"] != "pong" {
+		t.Fatalf("from=now must not backfill seeded event before pong, got %+v", pong)
+	}
+	_ = conn.Close(websocket.StatusNormalClosure, "")
+
+	if _, err := store.WriteFile(relayfile.WriteRequest{
+		WorkspaceID: "ws_socket_now",
+		Path:        "/slack/channels/C1/messages/disconnected.json",
+		IfMatch:     "0",
+		ContentType: "application/json",
+		Content:     "{}",
+	}); err != nil {
+		t.Fatalf("disconnected write failed: %v", err)
+	}
+
+	conn, _, err = websocket.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatalf("reconnect websocket dial failed: %v", err)
+	}
+	defer conn.Close(websocket.StatusNormalClosure, "")
+	if err := wsjson.Write(ctx, conn, map[string]any{"type": "ping"}); err != nil {
+		t.Fatalf("write reconnect ping failed: %v", err)
+	}
+	pong = map[string]any{}
+	if err := wsjson.Read(ctx, conn, &pong); err != nil {
+		t.Fatalf("read reconnect pong failed: %v", err)
+	}
+	if pong["type"] != "pong" {
+		t.Fatalf("from=now reconnect must not backfill disconnected event before pong, got %+v", pong)
+	}
+
+	if _, err := store.WriteFile(relayfile.WriteRequest{
+		WorkspaceID: "ws_socket_now",
+		Path:        "/slack/channels/C1/messages/live.json",
+		IfMatch:     "0",
+		ContentType: "application/json",
+		Content:     "{}",
+	}); err != nil {
+		t.Fatalf("live write failed: %v", err)
+	}
+	var live map[string]any
+	if err := wsjson.Read(ctx, conn, &live); err != nil {
+		t.Fatalf("read live event failed: %v", err)
+	}
+	if live["path"] != "/slack/channels/C1/messages/live.json" {
+		t.Fatalf("unexpected live path after from=now reconnect: %+v", live)
+	}
+}
+
+func TestFileEventsWebSocketCursorCatchUpIsExclusive(t *testing.T) {
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
+	t.Cleanup(store.Close)
+
+	for _, path := range []string{"/docs/one.md", "/docs/two.md", "/docs/three.md"} {
+		if _, err := store.WriteFile(relayfile.WriteRequest{
+			WorkspaceID: "ws_socket_cursor",
+			Path:        path,
+			IfMatch:     "0",
+			ContentType: "text/markdown",
+			Content:     "# doc",
+		}); err != nil {
+			t.Fatalf("seed write %s failed: %v", path, err)
+		}
+	}
+	feed, err := store.GetEvents("ws_socket_cursor", "", "", 100)
+	if err != nil {
+		t.Fatalf("get events failed: %v", err)
+	}
+	if len(feed.Events) != 3 {
+		t.Fatalf("expected 3 seeded events, got %d", len(feed.Events))
+	}
+
+	server := httptest.NewServer(NewServer(store))
+	defer server.Close()
+
+	token := mustTestJWT(t, "dev-secret", "ws_socket_cursor", "Worker1", []string{"fs:read"}, time.Now().Add(time.Hour))
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/workspaces/ws_socket_cursor/fs/ws?token=" + token + "&cursor=" + url.QueryEscape(feed.Events[0].EventID)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	conn, _, err := websocket.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatalf("websocket dial failed: %v", err)
+	}
+	defer conn.Close(websocket.StatusNormalClosure, "")
+
+	var event map[string]any
+	if err := wsjson.Read(ctx, conn, &event); err != nil {
+		t.Fatalf("read first cursor catch-up event failed: %v", err)
+	}
+	if event["eventId"] != feed.Events[1].EventID || event["path"] != "/docs/two.md" {
+		t.Fatalf("expected exclusive cursor catch-up to start at second event, got %+v", event)
+	}
+	if err := wsjson.Read(ctx, conn, &event); err != nil {
+		t.Fatalf("read second cursor catch-up event failed: %v", err)
+	}
+	if event["eventId"] != feed.Events[2].EventID || event["path"] != "/docs/three.md" {
+		t.Fatalf("expected second catch-up event after cursor, got %+v", event)
+	}
+	if err := wsjson.Write(ctx, conn, map[string]any{"type": "ping"}); err != nil {
+		t.Fatalf("write ping failed: %v", err)
+	}
+	var pong map[string]any
+	if err := wsjson.Read(ctx, conn, &pong); err != nil {
+		t.Fatalf("read pong failed: %v", err)
+	}
+	if pong["type"] != "pong" {
+		t.Fatalf("expected no additional catch-up events before pong, got %+v", pong)
+	}
+}
+
+func TestFileEventsWebSocketPathFilterConstrainsServerFanout(t *testing.T) {
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
+	t.Cleanup(store.Close)
+
+	server := httptest.NewServer(NewServer(store))
+	defer server.Close()
+
+	token := mustTestJWT(t, "dev-secret", "ws_socket_path", "Worker1", []string{"fs:read"}, time.Now().Add(time.Hour))
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/workspaces/ws_socket_path/fs/ws?token=" + token + "&from=now&path=" + url.QueryEscape("/slack/channels/C1/**")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	conn, _, err := websocket.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatalf("websocket dial failed: %v", err)
+	}
+	defer conn.Close(websocket.StatusNormalClosure, "")
+
+	if _, err := store.WriteFile(relayfile.WriteRequest{
+		WorkspaceID: "ws_socket_path",
+		Path:        "/slack/channels/C2/messages/ignored.json",
+		IfMatch:     "0",
+		ContentType: "application/json",
+		Content:     "{}",
+	}); err != nil {
+		t.Fatalf("non-matching write failed: %v", err)
+	}
+	type readResult struct {
+		event map[string]any
+		err   error
+	}
+	readCh := make(chan readResult, 1)
+	go func() {
+		var event map[string]any
+		err := wsjson.Read(ctx, conn, &event)
+		readCh <- readResult{event: event, err: err}
+	}()
+	select {
+	case result := <-readCh:
+		if result.err != nil {
+			t.Fatalf("read after non-matching write failed: %v", result.err)
+		}
+		t.Fatalf("path filter must suppress non-matching event, got %+v", result.event)
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	if _, err := store.WriteFile(relayfile.WriteRequest{
+		WorkspaceID: "ws_socket_path",
+		Path:        "/slack/channels/C1/messages/live.json",
+		IfMatch:     "0",
+		ContentType: "application/json",
+		Content:     "{}",
+	}); err != nil {
+		t.Fatalf("matching write failed: %v", err)
+	}
+	var event map[string]any
+	select {
+	case result := <-readCh:
+		if result.err != nil {
+			t.Fatalf("read matching event failed: %v", result.err)
+		}
+		event = result.event
+	case <-ctx.Done():
+		t.Fatalf("timed out waiting for matching event: %v", ctx.Err())
+	}
+	if event["path"] != "/slack/channels/C1/messages/live.json" {
+		t.Fatalf("expected matching path event, got %+v", event)
+	}
+}
+
+func TestFileEventsWebSocketWritebackMaterializationCarriesAgentWriteOrigin(t *testing.T) {
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{
+		ProviderWriteAction: func(action relayfile.WritebackAction) error {
+			return nil
+		},
+	})
+	t.Cleanup(store.Close)
+
+	server := httptest.NewServer(NewServer(store))
+	defer server.Close()
+
+	token := mustTestJWT(t, "dev-secret", "ws_socket_writeback_origin", "Worker1", []string{"fs:read", "fs:write"}, time.Now().Add(time.Hour))
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/workspaces/ws_socket_writeback_origin/fs/ws?token=" + token + "&from=now&path=" + url.QueryEscape("/external/**")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	conn, _, err := websocket.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatalf("websocket dial failed: %v", err)
+	}
+	defer conn.Close(websocket.StatusNormalClosure, "")
+
+	writeResp := doRequest(t, NewServer(store), request{
+		method: http.MethodPut,
+		path:   "/v1/workspaces/ws_socket_writeback_origin/fs/file?path=/external/Writeback.md",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_ws_writeback_origin",
+			"If-Match":         "0",
+		},
+		body: map[string]any{
+			"contentType": "text/markdown",
+			"content":     "# writeback",
+		},
+	})
+	if writeResp.Code != http.StatusAccepted {
+		t.Fatalf("expected 202 write, got %d (%s)", writeResp.Code, writeResp.Body.String())
+	}
+
+	var event map[string]any
+	if err := wsjson.Read(ctx, conn, &event); err != nil {
+		t.Fatalf("read writeback materialization event failed: %v", err)
+	}
+	if event["type"] != "file.created" || event["path"] != "/external/Writeback.md" {
+		t.Fatalf("expected writeback materialization file.created event, got %+v", event)
+	}
+	if event["origin"] != "agent_write" {
+		t.Fatalf("expected writeback materialization origin=agent_write, got %+v", event)
+	}
 }
 
 func TestLifecycleAndConflicts(t *testing.T) {

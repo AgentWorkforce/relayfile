@@ -73,6 +73,7 @@ export {
   type RelayFileSyncPong,
   type RelayFileSyncReconnectOptions,
   type RelayFileSyncSocket,
+  type RelayFileSyncStart,
   type RelayFileSyncState,
   type RelayFileSyncTokenProvider
 } from "./sync.js";

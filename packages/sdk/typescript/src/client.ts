@@ -139,6 +139,9 @@ export interface WebSocketConnection {
 
 export interface ConnectWebSocketOptions {
   token?: string;
+  from?: "now" | "legacy";
+  cursor?: string;
+  paths?: string[];
   onEvent?: (event: FilesystemEvent) => void;
 }
 
@@ -155,6 +158,11 @@ const DEFAULT_CHANGE_LOG_MAX_ENTRIES = 10_000;
 const CLIENT_TOKEN_STREAM_KEY = "__client__";
 
 type JsonObject = Record<string, unknown>;
+
+interface StreamStartOptions {
+  from?: "now" | "legacy";
+  cursor?: string;
+}
 
 interface JwtClaimsShape {
   workspace_id?: unknown;
@@ -526,6 +534,15 @@ class RelayFileChangeSubscription {
     await drain;
   }
 
+  serverPathFilters(): string[] {
+    const filters = new Set<string>();
+    const patterns = this.pathScopes ?? this.globPatterns;
+    for (const pattern of patterns) {
+      filters.add(`/${pattern.join("/")}`);
+    }
+    return Array.from(filters);
+  }
+
   private matches(path: string): boolean {
     const pathSegments = normalizeChangePath(path);
     const matchesGlob = this.globPatterns.some((pattern) => matchChangeSegments(pattern, pathSegments));
@@ -562,6 +579,7 @@ class RelayFileChangeStreamManager {
   private readonly subscriptions = new Set<RelayFileChangeSubscription>();
   private openHandleCount = 0;
   private sync?: RelayFileSync;
+  private activePathFilterKey?: string;
   private readyResolved = false;
   private readonly readyInternal: Promise<void>;
   private resolveReady!: () => void;
@@ -571,7 +589,8 @@ class RelayFileChangeStreamManager {
     private readonly client: RelayFileClient,
     private readonly workspaceId: string,
     private readonly token: string | undefined,
-    private readonly baseUrl: string
+    private readonly baseUrl: string,
+    private readonly startOptions: StreamStartOptions
   ) {
     this.readyInternal = new Promise<void>((resolve, reject) => {
       this.resolveReady = resolve;
@@ -586,11 +605,13 @@ class RelayFileChangeStreamManager {
   addSubscription(globs: string[], onChange: (event: ChangeEvent) => void, options?: SubscribeOptions): Subscription {
     const subscription = new RelayFileChangeSubscription(this, globs, onChange, options);
     this.subscriptions.add(subscription);
+    this.restartIfPathScopeChanged();
     this.ensureStarted();
     return {
       unsubscribe: async () => {
         this.subscriptions.delete(subscription);
         await subscription.close();
+        this.restartIfPathScopeChanged();
         await this.maybeStop();
       }
     };
@@ -598,11 +619,13 @@ class RelayFileChangeStreamManager {
 
   open(): ChangeStreamConnection {
     this.openHandleCount += 1;
+    this.restartIfPathScopeChanged();
     this.ensureStarted();
     return {
       ready: this.ready,
       unsubscribe: async () => {
         this.openHandleCount = Math.max(0, this.openHandleCount - 1);
+        this.restartIfPathScopeChanged();
         await this.maybeStop();
       }
     };
@@ -641,11 +664,16 @@ class RelayFileChangeStreamManager {
     if (this.sync) {
       return;
     }
+    const paths = this.serverPathFilters();
+    this.activePathFilterKey = paths.join("\n");
     const sync = new RelayFileSync({
       client: this.client,
       workspaceId: this.workspaceId,
       baseUrl: this.baseUrl,
       token: this.token,
+      from: this.startOptions.from,
+      cursor: this.startOptions.cursor,
+      paths,
       onPollingFallback: () => {
         this.resolveReadyOnce();
       }
@@ -675,6 +703,36 @@ class RelayFileChangeStreamManager {
     }
   }
 
+  private restartIfPathScopeChanged(): void {
+    if (!this.sync) {
+      return;
+    }
+    const nextKey = this.serverPathFilters().join("\n");
+    const currentKey = this.activePathFilterKey;
+    if (nextKey === currentKey) {
+      return;
+    }
+    const sync = this.sync;
+    this.sync = undefined;
+    void sync.stop();
+    if (this.openHandleCount > 0 || this.subscriptions.size > 0) {
+      this.ensureStarted();
+    }
+  }
+
+  private serverPathFilters(): string[] {
+    if (this.openHandleCount > 0) {
+      return [];
+    }
+    const filters = new Set<string>();
+    for (const subscription of this.subscriptions) {
+      for (const path of subscription.serverPathFilters()) {
+        filters.add(path);
+      }
+    }
+    return Array.from(filters).sort();
+  }
+
   private resolveReadyOnce(): void {
     if (this.readyResolved) {
       return;
@@ -690,6 +748,7 @@ class RelayFileChangeStreamManager {
     if (this.sync) {
       const sync = this.sync;
       this.sync = undefined;
+      this.activePathFilterKey = undefined;
       await sync.stop();
     }
     const managers = changeStreamManagers.get(this.client);
@@ -708,19 +767,23 @@ function getStreamManager(
   client: RelayFileClient,
   workspaceId: string,
   token: string | undefined,
-  baseUrl: string
+  baseUrl: string,
+  startOptions: StreamStartOptions = {}
 ): RelayFileChangeStreamManager {
   let managers = changeStreamManagers.get(client);
   if (!managers) {
     managers = new Map();
     changeStreamManagers.set(client, managers);
   }
-  const key = `${workspaceId}:${token ?? CLIENT_TOKEN_STREAM_KEY}`;
+  const key = `${workspaceId}:${token ?? CLIENT_TOKEN_STREAM_KEY}:${startOptions.from ?? "now"}:${startOptions.cursor ?? ""}`;
   const existing = managers.get(key);
   if (existing) {
     return existing;
   }
-  const manager = new RelayFileChangeStreamManager(client, workspaceId, token, baseUrl);
+  const manager = new RelayFileChangeStreamManager(client, workspaceId, token, baseUrl, {
+    from: startOptions.from,
+    cursor: startOptions.cursor
+  });
   managers.set(key, manager);
   return manager;
 }
@@ -1400,7 +1463,7 @@ export class RelayFileClient {
   ): Subscription {
     const setup = this.resolveWorkspaceId(options?.aclToken)
       .then((workspaceId) => {
-        const manager = getStreamManager(this, workspaceId, options?.aclToken, this.baseUrl);
+        const manager = getStreamManager(this, workspaceId, options?.aclToken, this.baseUrl, options);
         return manager.addSubscription(globs, onChange, options);
       });
     return {
@@ -1412,7 +1475,7 @@ export class RelayFileClient {
   }
 
   open(options: ChangeStreamConnectionOptions): ChangeStreamConnection {
-    const manager = getStreamManager(this, options.workspaceId, options.aclToken, this.baseUrl);
+    const manager = getStreamManager(this, options.workspaceId, options.aclToken, this.baseUrl, options);
     const connection = manager.open();
     const replay = this.primeReplayCache(options).catch((error) => {
       if (typeof console !== "undefined" && typeof console.error === "function") {
@@ -1535,6 +1598,14 @@ export class RelayFileClient {
     const url = new URL(`${this.baseUrl}/v1/workspaces/${encodeURIComponent(workspaceId)}/fs/ws`);
     url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
     url.searchParams.set("token", token);
+    if (options.cursor) {
+      url.searchParams.set("cursor", options.cursor);
+    } else if ((options.from ?? "now") === "now") {
+      url.searchParams.set("from", "now");
+    }
+    for (const path of options.paths ?? []) {
+      url.searchParams.append("path", path);
+    }
 
     const socket = new WebSocket(url.toString());
     return new RelayFileWebSocketConnection(socket, options.onEvent);

@@ -6,7 +6,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_No unreleased changes._
+### Added
+
+- WebSocket subscriptions now send `from=now` by default, support exclusive
+  `cursor` resume, and forward exact `path` filters for server-side scoped
+  catch-up and live delivery.
 
 ## [0.8.9] - 2026-06-02
 

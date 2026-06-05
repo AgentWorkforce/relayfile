@@ -2043,6 +2043,51 @@ func (s *Store) GetRecentEvents(workspaceID string, limit int) ([]Event, error) 
 	return append([]Event(nil), ws.Events[start:]...), nil
 }
 
+func (s *Store) GetEventsAfterCursor(workspaceID, cursor string, limit int) ([]Event, error) {
+	if workspaceID == "" || strings.TrimSpace(cursor) == "" {
+		return []Event{}, ErrInvalidInput
+	}
+	if limit <= 0 {
+		return []Event{}, nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	ws, ok := s.workspaces[workspaceID]
+	if !ok || len(ws.Events) == 0 {
+		return []Event{}, nil
+	}
+	cursorOrdinal, ok := parseEventIDOrdinal(cursor)
+	if !ok {
+		return []Event{}, nil
+	}
+	index := sort.Search(len(ws.Events), func(i int) bool {
+		ordinal, ok := parseEventIDOrdinal(ws.Events[i].EventID)
+		return ok && ordinal >= cursorOrdinal
+	})
+	if index >= len(ws.Events) || ws.Events[index].EventID != cursor {
+		return []Event{}, nil
+	}
+	start := index + 1
+	if start >= len(ws.Events) {
+		return []Event{}, nil
+	}
+	end := start + limit
+	if end > len(ws.Events) {
+		end = len(ws.Events)
+	}
+	return append([]Event(nil), ws.Events[start:end]...), nil
+}
+
+func parseEventIDOrdinal(eventID string) (uint64, bool) {
+	value := strings.TrimPrefix(strings.TrimSpace(eventID), "evt_")
+	if value == "" || value == eventID {
+		return 0, false
+	}
+	ordinal, err := strconv.ParseUint(value, 10, 64)
+	return ordinal, err == nil
+}
+
 func (s *Store) Subscribe(workspaceID string, ch chan<- Event) func() {
 	workspaceID = strings.TrimSpace(workspaceID)
 	if workspaceID == "" || ch == nil {
