@@ -129,6 +129,18 @@ func parseWebSocketSubscriptionOptions(r *http.Request) websocketSubscriptionOpt
 }
 
 func (s *Server) webSocketCatchUpEvents(workspaceID string, options websocketSubscriptionOptions) ([]relayfile.Event, error) {
+	if len(options.Paths) > 0 {
+		matchesPath := func(event relayfile.Event) bool {
+			return webSocketEventMatchesPaths(event, options.Paths)
+		}
+		if options.Cursor != "" {
+			return s.store.GetEventsAfterCursorMatching(workspaceID, options.Cursor, 100, matchesPath)
+		}
+		if options.From == "now" {
+			return []relayfile.Event{}, nil
+		}
+		return s.store.GetRecentEventsMatching(workspaceID, 100, matchesPath)
+	}
 	if options.Cursor != "" {
 		return s.store.GetEventsAfterCursor(workspaceID, options.Cursor, 100)
 	}

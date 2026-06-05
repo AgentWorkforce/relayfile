@@ -2043,6 +2043,33 @@ func (s *Store) GetRecentEvents(workspaceID string, limit int) ([]Event, error) 
 	return append([]Event(nil), ws.Events[start:]...), nil
 }
 
+func (s *Store) GetRecentEventsMatching(workspaceID string, limit int, match func(Event) bool) ([]Event, error) {
+	if workspaceID == "" {
+		return []Event{}, ErrInvalidInput
+	}
+	if limit <= 0 {
+		return []Event{}, nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	ws, ok := s.workspaces[workspaceID]
+	if !ok || len(ws.Events) == 0 {
+		return []Event{}, nil
+	}
+	matched := make([]Event, 0, limit)
+	for i := len(ws.Events) - 1; i >= 0 && len(matched) < limit; i-- {
+		event := ws.Events[i]
+		if match == nil || match(event) {
+			matched = append(matched, event)
+		}
+	}
+	for i, j := 0, len(matched)-1; i < j; i, j = i+1, j-1 {
+		matched[i], matched[j] = matched[j], matched[i]
+	}
+	return matched, nil
+}
+
 func (s *Store) GetEventsAfterCursor(workspaceID, cursor string, limit int) ([]Event, error) {
 	if workspaceID == "" || strings.TrimSpace(cursor) == "" {
 		return []Event{}, ErrInvalidInput
@@ -2077,6 +2104,41 @@ func (s *Store) GetEventsAfterCursor(workspaceID, cursor string, limit int) ([]E
 		end = len(ws.Events)
 	}
 	return append([]Event(nil), ws.Events[start:end]...), nil
+}
+
+func (s *Store) GetEventsAfterCursorMatching(workspaceID, cursor string, limit int, match func(Event) bool) ([]Event, error) {
+	if workspaceID == "" || strings.TrimSpace(cursor) == "" {
+		return []Event{}, ErrInvalidInput
+	}
+	if limit <= 0 {
+		return []Event{}, nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	ws, ok := s.workspaces[workspaceID]
+	if !ok || len(ws.Events) == 0 {
+		return []Event{}, nil
+	}
+	cursorOrdinal, ok := parseEventIDOrdinal(cursor)
+	if !ok {
+		return []Event{}, nil
+	}
+	index := sort.Search(len(ws.Events), func(i int) bool {
+		ordinal, ok := parseEventIDOrdinal(ws.Events[i].EventID)
+		return ok && ordinal >= cursorOrdinal
+	})
+	if index >= len(ws.Events) || ws.Events[index].EventID != cursor {
+		return []Event{}, nil
+	}
+	events := make([]Event, 0, limit)
+	for i := index + 1; i < len(ws.Events) && len(events) < limit; i++ {
+		event := ws.Events[i]
+		if match == nil || match(event) {
+			events = append(events, event)
+		}
+	}
+	return events, nil
 }
 
 func parseEventIDOrdinal(eventID string) (uint64, bool) {

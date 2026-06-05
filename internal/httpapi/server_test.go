@@ -298,6 +298,85 @@ func TestFileEventsWebSocketCursorCatchUpIsExclusive(t *testing.T) {
 	}
 }
 
+func TestFileEventsWebSocketCursorCatchUpPathFilterLimitsAfterFiltering(t *testing.T) {
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
+	t.Cleanup(store.Close)
+
+	if _, err := store.WriteFile(relayfile.WriteRequest{
+		WorkspaceID: "ws_socket_cursor_path",
+		Path:        "/docs/cursor.md",
+		IfMatch:     "0",
+		ContentType: "text/markdown",
+		Content:     "# cursor",
+	}); err != nil {
+		t.Fatalf("cursor seed write failed: %v", err)
+	}
+	feed, err := store.GetEvents("ws_socket_cursor_path", "", "", 10)
+	if err != nil {
+		t.Fatalf("get cursor event failed: %v", err)
+	}
+	if len(feed.Events) != 1 {
+		t.Fatalf("expected cursor seed event, got %d", len(feed.Events))
+	}
+	cursor := feed.Events[0].EventID
+
+	for i := 0; i < 101; i++ {
+		if _, err := store.WriteFile(relayfile.WriteRequest{
+			WorkspaceID: "ws_socket_cursor_path",
+			Path:        fmt.Sprintf("/other/%03d.md", i),
+			IfMatch:     "0",
+			ContentType: "text/markdown",
+			Content:     "# ignored",
+		}); err != nil {
+			t.Fatalf("ignored write %d failed: %v", i, err)
+		}
+	}
+	if _, err := store.WriteFile(relayfile.WriteRequest{
+		WorkspaceID: "ws_socket_cursor_path",
+		Path:        "/slack/channels/C1/messages/after-gap.json",
+		IfMatch:     "0",
+		ContentType: "application/json",
+		Content:     "{}",
+	}); err != nil {
+		t.Fatalf("matching write failed: %v", err)
+	}
+
+	server := httptest.NewServer(NewServer(store))
+	defer server.Close()
+
+	token := mustTestJWT(t, "dev-secret", "ws_socket_cursor_path", "Worker1", []string{"fs:read"}, time.Now().Add(time.Hour))
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/workspaces/ws_socket_cursor_path/fs/ws?token=" + token +
+		"&cursor=" + url.QueryEscape(cursor) +
+		"&path=" + url.QueryEscape("/slack/channels/C1/**")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	conn, _, err := websocket.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatalf("websocket dial failed: %v", err)
+	}
+	defer conn.Close(websocket.StatusNormalClosure, "")
+
+	var event map[string]any
+	if err := wsjson.Read(ctx, conn, &event); err != nil {
+		t.Fatalf("read filtered cursor catch-up event failed: %v", err)
+	}
+	if event["path"] != "/slack/channels/C1/messages/after-gap.json" {
+		t.Fatalf("expected path-filtered catch-up after ignored gap, got %+v", event)
+	}
+	if err := wsjson.Write(ctx, conn, map[string]any{"type": "ping"}); err != nil {
+		t.Fatalf("write ping failed: %v", err)
+	}
+	var pong map[string]any
+	if err := wsjson.Read(ctx, conn, &pong); err != nil {
+		t.Fatalf("read pong failed: %v", err)
+	}
+	if pong["type"] != "pong" {
+		t.Fatalf("expected no additional filtered catch-up before pong, got %+v", pong)
+	}
+}
+
 func TestFileEventsWebSocketPathFilterConstrainsServerFanout(t *testing.T) {
 	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
 	t.Cleanup(store.Close)
