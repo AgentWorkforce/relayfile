@@ -259,8 +259,11 @@ describe("RelayFileClient — existing methods", () => {
         { coalesce: "none" },
       );
 
-      const socket = await waitForWebSocket();
-      expect(ProactiveMockWebSocket.instances).toHaveLength(1);
+      await waitForExpectation(() => {
+        const lastSocket = ProactiveMockWebSocket.instances[ProactiveMockWebSocket.instances.length - 1];
+        expect(lastSocket?.url).toBe("wss://relay.test/v1/workspaces/ws_acme/fs/ws?token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ3b3Jrc3BhY2VfaWQiOiJ3c19hY21lIiwiYWdlbnRfbmFtZSI6InN1cHBvcnQtYWdlbnQiLCJhdWQiOlsicmVsYXlmaWxlIl19.sig&from=now&path=%2Flinear%2F**&path=%2Flinear%2Fissues%2F**");
+      });
+      const socket = ProactiveMockWebSocket.instances[ProactiveMockWebSocket.instances.length - 1]!;
       socket.emit("open", {});
       socket.emit("message", {
         data: JSON.stringify({
@@ -1385,7 +1388,20 @@ describe("RelayFileClient — existing methods", () => {
       client.connectWebSocket("ws_acme", { token: "ws_token" });
 
       expect(MockWebSocket.instances).toHaveLength(1);
-      expect(MockWebSocket.instances[0]!.url).toBe("wss://relay.test/v1/workspaces/ws_acme/fs/ws?token=ws_token");
+      expect(MockWebSocket.instances[0]!.url).toBe("wss://relay.test/v1/workspaces/ws_acme/fs/ws?token=ws_token&from=now");
+    });
+
+    it("forwards cursor and path filters to the WebSocket endpoint", () => {
+      const client = makeClient(mockFetch({ path: "/", entries: [], nextCursor: null }));
+
+      client.connectWebSocket("ws_acme", {
+        token: "ws_token",
+        cursor: "evt_42",
+        paths: ["/slack/channels/C1/**", "/github/repos/acme/api/pulls/*"]
+      });
+
+      expect(MockWebSocket.instances).toHaveLength(1);
+      expect(MockWebSocket.instances[0]!.url).toBe("wss://relay.test/v1/workspaces/ws_acme/fs/ws?token=ws_token&cursor=evt_42&path=%2Fslack%2Fchannels%2FC1%2F**&path=%2Fgithub%2Frepos%2Facme%2Fapi%2Fpulls%2F*");
     });
 
     it("emits parsed filesystem events to the event handler", () => {

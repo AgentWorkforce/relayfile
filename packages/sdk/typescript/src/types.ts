@@ -310,6 +310,8 @@ export interface SubscribeOptions {
   coalesce?: "none" | "fire-once";
   coalesceMs?: number;
   pathScope?: string[];
+  from?: "now" | "legacy";
+  cursor?: string;
   aclToken?: string;
   drainMs?: number;
 }
@@ -326,6 +328,8 @@ export type ReplayOptions =
 export type ChangeStreamConnectionOptions = ReplayOptions & {
   workspaceId: string;
   aclToken?: string;
+  from?: "now" | "legacy";
+  cursor?: string;
 };
 
 export interface ChangeStreamConnection extends Subscription {

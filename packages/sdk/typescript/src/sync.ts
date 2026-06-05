@@ -11,6 +11,7 @@ import type { EventOrigin, FilesystemEvent } from "./types.js";
 export type RelayFileSyncTokenProvider = string | (() => string | undefined | Promise<string | undefined>);
 
 export type RelayFileSyncState = "idle" | "connecting" | "open" | "polling" | "reconnecting" | "closed";
+export type RelayFileSyncStart = "now" | "legacy";
 
 export interface RelayFileSyncPong {
   type: "pong";
@@ -37,7 +38,9 @@ export interface RelayFileSyncOptions {
    * normally NOT pass this and let it inherit from the client.
    */
   token?: RelayFileSyncTokenProvider;
+  from?: RelayFileSyncStart;
   cursor?: string;
+  paths?: string[];
   preferPolling?: boolean;
   pollIntervalMs?: number;
   pingIntervalMs?: number;
@@ -58,6 +61,52 @@ export interface RelayFileSyncOptions {
    * `error` event regardless of whether this is wired.
    */
   onPollingFallback?: (info: { reason: string; cause?: unknown }) => void;
+}
+
+function normalizeWebSocketPathFilters(paths: string[] | undefined): string[] {
+  const seen = new Set<string>();
+  const normalized: string[] = [];
+  for (const value of paths ?? []) {
+    const path = typeof value === "string" ? value.trim() : "";
+    if (!path) {
+      continue;
+    }
+    const absolute = path.startsWith("/") ? path : `/${path}`;
+    if (seen.has(absolute)) {
+      continue;
+    }
+    seen.add(absolute);
+    normalized.push(absolute);
+  }
+  return normalized;
+}
+
+function pathMatchesAnyFilter(filters: string[], path: string): boolean {
+  if (filters.length === 0) {
+    return true;
+  }
+  const pathSegments = normalizePathSegments(path);
+  return filters.some((filter) => matchPathSegments(normalizePathSegments(filter), pathSegments));
+}
+
+function normalizePathSegments(path: string): string[] {
+  const absolute = path.startsWith("/") ? path : `/${path}`;
+  const trimmed = absolute.replace(/\/+$/, "");
+  if (!trimmed) {
+    return [];
+  }
+  return trimmed.split("/").filter(Boolean);
+}
+
+function matchPathSegments(pattern: string[], path: string[]): boolean {
+  if (pattern.length > 0 && pattern[pattern.length - 1] === "**") {
+    const prefix = pattern.slice(0, -1);
+    return path.length >= prefix.length && prefix.every((segment, index) => segment === "*" || segment === path[index]);
+  }
+  if (pattern.length !== path.length) {
+    return false;
+  }
+  return pattern.every((segment, index) => segment === "*" || segment === path[index]);
 }
 
 export interface RelayFileSyncSocket {
@@ -249,6 +298,8 @@ export class RelayFileSync {
 
   private state: RelayFileSyncState = "idle";
   private cursor?: string;
+  private readonly from: RelayFileSyncStart;
+  private readonly paths: string[];
   private readonly polledEventIds: Set<string> = new Set();
   private readonly polledEventOrder: string[] = [];
   private firstPollComplete = false;
@@ -293,7 +344,9 @@ export class RelayFileSync {
       const literal = options.token;
       this.tokenProvider = () => literal;
     }
+    this.from = options.from ?? "now";
     this.cursor = options.cursor;
+    this.paths = normalizeWebSocketPathFilters(options.paths);
     this.onPollingFallback = options.onPollingFallback;
     this.pollIntervalMs = Math.max(1, Math.floor(options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS));
     this.pingIntervalMs = Math.max(1, Math.floor(options.pingIntervalMs ?? DEFAULT_PING_INTERVAL_MS));
@@ -463,6 +516,14 @@ export class RelayFileSync {
     // upgrade handshake via r.URL.Query().Get("token").
     if (token) {
       url.searchParams.set("token", token);
+    }
+    if (this.cursor) {
+      url.searchParams.set("cursor", this.cursor);
+    } else if (this.from === "now") {
+      url.searchParams.set("from", "now");
+    }
+    for (const path of this.paths) {
+      url.searchParams.append("path", path);
     }
 
     let socket: RelayFileSyncSocket;
@@ -665,7 +726,7 @@ export class RelayFileSync {
           this.firstPollComplete = true;
         } else {
           for (const event of pending) {
-            this.emit("event", event);
+            this.emitFilesystemEvent(event);
           }
         }
         await this.sleep(this.pollIntervalMs);
@@ -739,8 +800,18 @@ export class RelayFileSync {
     }
 
     const normalized = normalizeFilesystemEvent(parsed);
+    if (parsed.eventId) {
+      this.cursor = parsed.eventId;
+    }
     debugLog("event", { type: normalized.type, path: normalized.path, revision: normalized.revision });
-    this.emit("event", normalized);
+    this.emitFilesystemEvent(normalized);
+  }
+
+  private emitFilesystemEvent(event: FilesystemEvent): void {
+    if (!pathMatchesAnyFilter(this.paths, event.path)) {
+      return;
+    }
+    this.emit("event", event);
   }
 
   private startPingLoop(socket: RelayFileSyncSocket): void {
