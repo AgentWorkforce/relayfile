@@ -41,6 +41,26 @@ const defaultDeleteStormWindow = time.Minute
 // recorded so the breaker stays latched while a storm is ongoing; the window
 // must go quiet before deletes are admitted again.
 func (s *Store) admitDeleteLocked(workspaceID string, now time.Time) error {
+	if s.deleteStormThreshold <= 0 {
+		return nil
+	}
+	window := s.deleteStormWindow
+	if window <= 0 {
+		window = defaultDeleteStormWindow
+	}
+	cutoff := now.Add(-window)
+	admissions := s.deleteStormAdmissions[workspaceID]
+	kept := admissions[:0]
+	for _, ts := range admissions {
+		if ts.After(cutoff) {
+			kept = append(kept, ts)
+		}
+	}
+	if len(kept) >= s.deleteStormThreshold {
+		s.deleteStormAdmissions[workspaceID] = append(kept, now)
+		return ErrDeleteStormRejected
+	}
+	s.deleteStormAdmissions[workspaceID] = append(kept, now)
 	return nil
 }
 
@@ -52,4 +72,33 @@ func (s *Store) admitDeleteLocked(workspaceID string, now time.Time) error {
 // quarantined op is a deliberate operator action (ack it, or a future
 // explicit release API) — never automatic.
 func (s *Store) quarantineBootDeleteStorms() {
+	if s.deleteStormThreshold <= 0 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	changed := false
+	for _, ws := range s.workspaces {
+		stormOps := make([]string, 0)
+		for opID, op := range ws.Ops {
+			if (op.Status == "pending" || op.Status == "running") && op.Action == string(WritebackActionFileDelete) {
+				stormOps = append(stormOps, opID)
+			}
+		}
+		if len(stormOps) <= s.deleteStormThreshold {
+			continue
+		}
+		nowTS := nowRFC3339NanoUTC()
+		for _, opID := range stormOps {
+			op := ws.Ops[opID]
+			op.Status = "quarantined"
+			op.NextAttemptAt = nil
+			op.UpdatedAt = nowTS
+			ws.Ops[opID] = op
+		}
+		changed = true
+	}
+	if changed {
+		_ = s.saveLocked()
+	}
 }
