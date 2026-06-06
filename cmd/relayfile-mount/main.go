@@ -25,6 +25,10 @@ import (
 const (
 	mountModePoll           = "poll"
 	mountModeFuse           = "fuse"
+	localLayoutExact        = "exact"
+	localLayoutScoped       = "scoped"
+	syncModeMirror          = "mirror"
+	syncModeWriteOnly       = "write-only"
 	websocketReconcileEvery = 10
 	minMountPollInterval    = 5 * time.Second
 )
@@ -39,9 +43,11 @@ type mountConfig struct {
 	remotePaths      []string
 	eventProvider    string
 	localDir         string
+	localLayout      string
 	stateFile        string
 	stateDir         string
 	mountKind        string
+	syncMode         string
 	interval         time.Duration
 	intervalJitter   float64
 	timeout          time.Duration
@@ -75,9 +81,11 @@ func main() {
 	pathsFile := flag.String("paths-file", strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_PATHS_FILE")), "file containing remote root paths, as JSON array or newline-separated list")
 	eventProvider := flag.String("provider", strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_PROVIDER")), "event provider filter")
 	localDir := flag.String("local-dir", strings.TrimSpace(os.Getenv("RELAYFILE_LOCAL_DIR")), "local mirror directory")
+	localLayout := flag.String("local-layout", envOrDefault("RELAYFILE_MOUNT_LOCAL_LAYOUT", localLayoutExact), "local directory layout: exact (local-dir is mirror root) or scoped (remote path is appended under local-dir)")
 	stateFile := flag.String("state-file", strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_STATE_FILE")), "state file path")
 	stateDir := flag.String("state-dir", envOrDefault("RELAYFILE_MOUNT_STATE_DIR", mountsync.DefaultMountStateDir()), "directory for private mount state")
 	mountKind := flag.String("mount-kind", envOrDefault("RELAYFILE_MOUNT_KIND", mountsync.MountKindDaemon), "private state identity kind: daemon, flush, or initial-sync")
+	syncModeFlag := flag.String("sync-mode", envOrDefault("RELAYFILE_MOUNT_SYNC_MODE", syncModeMirror), "sync behavior: mirror (pull and push) or write-only (push local changes without mirroring provider history)")
 	interval := flag.Duration("interval", durationEnv("RELAYFILE_MOUNT_INTERVAL", 30*time.Second), "sync interval")
 	intervalJitter := flag.Float64("interval-jitter", floatEnv("RELAYFILE_MOUNT_INTERVAL_JITTER", 0.2), "sync interval jitter ratio (0.0-1.0)")
 	timeout := flag.Duration("timeout", durationEnv("RELAYFILE_MOUNT_TIMEOUT", 15*time.Second), "per-sync timeout")
@@ -121,6 +129,14 @@ func main() {
 	if err != nil {
 		log.Fatalf("invalid mount mode: %v", err)
 	}
+	resolvedLocalLayout, err := resolveLocalLayout(*localLayout)
+	if err != nil {
+		log.Fatalf("invalid local layout: %v", err)
+	}
+	resolvedSyncMode, err := resolveSyncMode(*syncModeFlag)
+	if err != nil {
+		log.Fatalf("invalid sync mode: %v", err)
+	}
 
 	rootCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -133,9 +149,11 @@ func main() {
 		remotePaths:      normalizeRemotePaths(allRemotePaths, envOrDefault("RELAYFILE_REMOTE_PATH", "/")),
 		eventProvider:    strings.TrimSpace(*eventProvider),
 		localDir:         *localDir,
+		localLayout:      resolvedLocalLayout,
 		stateFile:        *stateFile,
 		stateDir:         *stateDir,
 		mountKind:        *mountKind,
+		syncMode:         resolvedSyncMode,
 		interval:         *interval,
 		intervalJitter:   *intervalJitter,
 		timeout:          *timeout,
@@ -177,6 +195,32 @@ func resolveMountMode(mode string, fuse bool) (string, error) {
 	}
 }
 
+func resolveLocalLayout(layout string) (string, error) {
+	normalized := strings.ToLower(strings.TrimSpace(layout))
+	if normalized == "" {
+		return localLayoutExact, nil
+	}
+	switch normalized {
+	case localLayoutExact, localLayoutScoped:
+		return normalized, nil
+	default:
+		return "", fmt.Errorf("%q (supported: %s, %s)", layout, localLayoutExact, localLayoutScoped)
+	}
+}
+
+func resolveSyncMode(mode string) (string, error) {
+	normalized := strings.ToLower(strings.TrimSpace(mode))
+	if normalized == "" {
+		return syncModeMirror, nil
+	}
+	switch normalized {
+	case syncModeMirror, syncModeWriteOnly:
+		return normalized, nil
+	default:
+		return "", fmt.Errorf("%q (supported: %s, %s)", mode, syncModeMirror, syncModeWriteOnly)
+	}
+}
+
 func executeMount(rootCtx context.Context, cfg mountConfig, runPoll pollRunner, runFuse fuseRunner) error {
 	switch cfg.mode {
 	case mountModePoll:
@@ -189,14 +233,23 @@ func executeMount(rootCtx context.Context, cfg mountConfig, runPoll pollRunner, 
 }
 
 func runPollingMount(rootCtx context.Context, cfg mountConfig) error {
+	return runPollingMountWithRunner(rootCtx, cfg, runSinglePollingMount)
+}
+
+func runPollingMountWithRunner(rootCtx context.Context, cfg mountConfig, run pollRunner) error {
 	remotePaths := cfg.remotePaths
 	if len(remotePaths) == 0 {
 		remotePaths = []string{cfg.remotePath}
 	}
-	if len(remotePaths) > 1 || (len(remotePaths) == 1 && normalizeMountRemotePath(remotePaths[0]) != "/") {
-		return runScopedPollingMounts(rootCtx, cfg, remotePaths)
+	if cfg.localLayout == localLayoutScoped {
+		return runScopedPollingMountsWithRunner(rootCtx, cfg, remotePaths, run)
 	}
-	return runSinglePollingMount(rootCtx, cfg)
+	if len(remotePaths) > 1 {
+		return fmt.Errorf("multiple --remote-path values require --local-layout=%s", localLayoutScoped)
+	}
+	cfg.remotePath = normalizeMountRemotePath(remotePaths[0])
+	cfg.remotePaths = nil
+	return run(rootCtx, cfg)
 }
 
 func runScopedPollingMounts(rootCtx context.Context, cfg mountConfig, remotePaths []string) error {
@@ -323,6 +376,7 @@ func runSinglePollingMount(rootCtx context.Context, cfg mountConfig) error {
 		BootstrapTimeout:   cfg.bootstrapTimeout,
 		CursorTimeout:      cfg.cursorTimeout,
 		ForceFullReconcile: boolPtr(cfg.forceFullRecon),
+		SyncMode:           cfg.syncMode,
 	})
 	if err != nil {
 		return fmt.Errorf("initialize mount syncer: %w", err)
@@ -330,6 +384,7 @@ func runSinglePollingMount(rootCtx context.Context, cfg mountConfig) error {
 	if _, err := mountsync.StartDiagnostics(rootCtx, cfg.pprofAddr, cfg.memlogInterval, log.Default()); err != nil {
 		return fmt.Errorf("start diagnostics: %w", err)
 	}
+	log.Printf("%s", mountStartupLogLine(cfg))
 	log.Printf("Mirror started at %s. Sync interval %s +/- %.0f%%. Public state: %s", cfg.localDir, cfg.interval.Round(time.Second), cfg.intervalJitter*100, filepath.Join(cfg.localDir, ".relay", "state.json"))
 
 	run := func(reconcile bool) {
@@ -386,7 +441,7 @@ func runSinglePollingMount(rootCtx context.Context, cfg mountConfig) error {
 			log.Printf("mount sync stopping: %v", rootCtx.Err())
 			return nil
 		case <-wsTicker.C:
-			if cfg.websocketEnabled {
+			if mountWebSocketEnabled(cfg) {
 				ctx, cancel := context.WithTimeout(rootCtx, cfg.timeout)
 				if err := syncer.MaintainWebSocket(ctx); err != nil {
 					log.Printf("websocket unavailable; using polling sync: %v", err)
@@ -395,7 +450,7 @@ func runSinglePollingMount(rootCtx context.Context, cfg mountConfig) error {
 			}
 		case <-timer.C:
 			cycle++
-			reconcile := shouldReconcileMountCycle(cfg.websocketEnabled, cycle)
+			reconcile := shouldReconcileMountCycle(mountWebSocketEnabled(cfg), cycle)
 			if reconcile {
 				run(true)
 			}
@@ -473,6 +528,26 @@ func scopedLocalDir(localRoot, remotePath string) string {
 		return localRoot
 	}
 	return filepath.Join(localRoot, filepath.FromSlash(strings.TrimPrefix(remotePath, "/")))
+}
+
+func mountStartupLogLine(cfg mountConfig) string {
+	layout := cfg.localLayout
+	if layout == "" {
+		layout = localLayoutExact
+	}
+	syncMode := cfg.syncMode
+	if syncMode == "" {
+		syncMode = syncModeMirror
+	}
+	return fmt.Sprintf(
+		"mount layout=%s remote=%s local=%s sync=%s mode=%s state=%s",
+		layout,
+		normalizeMountRemotePath(cfg.remotePath),
+		cfg.localDir,
+		syncMode,
+		cfg.mode,
+		filepath.Join(cfg.localDir, ".relay", "state.json"),
+	)
 }
 
 // readBootstrapProgress reads the in-progress bootstrap block from the
@@ -639,6 +714,10 @@ func normalizeTokenScopes(raw any) []string {
 
 func shouldReconcileMountCycle(websocketEnabled bool, cycle int) bool {
 	return !websocketEnabled || cycle%websocketReconcileEvery == 0
+}
+
+func mountWebSocketEnabled(cfg mountConfig) bool {
+	return cfg.websocketEnabled && cfg.syncMode != syncModeWriteOnly
 }
 
 func clampJitterRatio(value float64) float64 {

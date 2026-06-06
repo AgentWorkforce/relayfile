@@ -681,6 +681,7 @@ type SyncerOptions struct {
 	RootCtx       context.Context
 	Logger        Logger
 	Mode          string
+	SyncMode      string
 	Interval      time.Duration
 	// FullPullEvery controls how often the incremental pull path forces a
 	// full tree pull as a "trust but verify" safety net against cloud-side
@@ -779,6 +780,15 @@ type noopLogger struct{}
 
 func (noopLogger) Printf(string, ...any) {}
 
+func normalizeSyncMode(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "write-only":
+		return "write-only"
+	default:
+		return "mirror"
+	}
+}
+
 func logMemoryStats(ctx context.Context, interval time.Duration, logger Logger) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -861,6 +871,7 @@ type Syncer struct {
 	oversizedLogged      map[string]struct{}
 	lazyRepos            bool
 	lowMemory            bool
+	writeOnly            bool
 	layoutRegistrar      ProviderLayoutRegistrar
 	githubWorkingTree    *githubWorkingTreeMount
 	closeScheduler       *CloseScheduler
@@ -985,6 +996,7 @@ type publicState struct {
 	RemoteRoot                string                     `json:"remoteRoot"`
 	LocalRoot                 string                     `json:"localRoot"`
 	Mode                      string                     `json:"mode"`
+	SyncMode                  string                     `json:"syncMode,omitempty"`
 	IntervalMs                int64                      `json:"intervalMs"`
 	LastReconcileAt           string                     `json:"lastReconcileAt,omitempty"`
 	LastSuccessfulReconcileAt string                     `json:"lastSuccessfulReconcileAt,omitempty"`
@@ -1248,6 +1260,7 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 		denialLogPath:        filepath.Join(localRoot, ".relay", "permissions-denied.log"),
 		bulkFlushThreshold:   bulkFlushThreshold,
 		mode:                 strings.TrimSpace(opts.Mode),
+		writeOnly:            normalizeSyncMode(opts.SyncMode) == "write-only",
 		interval:             opts.Interval,
 		fullPullEvery:        fullPullEvery,
 		cursorTimeout:        cursorTimeout,
@@ -1979,8 +1992,10 @@ func (s *Syncer) sync(ctx context.Context, forcePoll bool) error {
 
 	s.mu.Unlock()
 
-	if err := s.MaintainWebSocket(ctx); err != nil {
-		s.logf("websocket unavailable; using polling sync: %v", err)
+	if !s.writeOnly {
+		if err := s.MaintainWebSocket(ctx); err != nil {
+			s.logf("websocket unavailable; using polling sync: %v", err)
+		}
 	}
 
 	// Re-acquire lock for the remainder of the sync operation.
@@ -2000,7 +2015,11 @@ func (s *Syncer) sync(ctx context.Context, forcePoll bool) error {
 
 	conflicted := map[string]struct{}{}
 	didPoll := false
-	if !s.state.BootstrapComplete || s.forceFullReconcile {
+	if s.writeOnly {
+		if !s.state.BootstrapComplete {
+			s.markBootstrapComplete()
+		}
+	} else if !s.state.BootstrapComplete || s.forceFullReconcile {
 		if err := s.pullRemote(ctx, conflicted); err != nil {
 			s.markSyncError(err)
 			_ = s.saveState()
@@ -2018,7 +2037,7 @@ func (s *Syncer) sync(ctx context.Context, forcePoll bool) error {
 	}
 
 	shouldPoll := !didPoll && (forcePoll || !s.bootstrapped || s.wsConn == nil)
-	if shouldPoll {
+	if shouldPoll && !s.writeOnly {
 		if err := s.pullRemote(ctx, conflicted); err != nil {
 			s.markSyncError(err)
 			_ = s.saveState()
@@ -4916,11 +4935,16 @@ func (s *Syncer) savePublicState() error {
 	if mode == "" {
 		mode = "poll"
 	}
+	syncMode := "mirror"
+	if s.writeOnly {
+		syncMode = "write-only"
+	}
 	public := publicState{
 		WorkspaceID:               s.workspace,
 		RemoteRoot:                s.remoteRoot,
 		LocalRoot:                 s.localRoot,
 		Mode:                      mode,
+		SyncMode:                  syncMode,
 		IntervalMs:                s.interval.Milliseconds(),
 		LastReconcileAt:           s.state.LastReconcileAt,
 		LastSuccessfulReconcileAt: s.state.LastSuccessfulReconcileAt,
