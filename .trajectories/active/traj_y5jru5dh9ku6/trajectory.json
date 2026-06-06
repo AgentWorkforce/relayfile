@@ -6,8 +6,35 @@
   },
   "status": "active",
   "startedAt": "2026-06-06T00:15:50.055Z",
-  "agents": [],
-  "chapters": [],
+  "agents": [
+    {
+      "name": "default",
+      "role": "lead",
+      "joinedAt": "2026-06-06T09:27:18.748Z"
+    }
+  ],
+  "chapters": [
+    {
+      "id": "chap_1joxkiyzka18",
+      "title": "Work",
+      "agentName": "default",
+      "startedAt": "2026-06-06T09:27:18.748Z",
+      "events": [
+        {
+          "ts": 1780738038749,
+          "type": "decision",
+          "content": "Flush cloud-login callback responses before signaling result: Flush cloud-login callback responses before signaling result",
+          "raw": {
+            "question": "Flush cloud-login callback responses before signaling result",
+            "chosen": "Flush cloud-login callback responses before signaling result",
+            "alternatives": [],
+            "reasoning": "The handler could send errCh/tokenCh before net/http flushed the response; runCloudLogin then returned and closed the server, making clients intermittently see EOF."
+          },
+          "significance": "high"
+        }
+      ]
+    }
+  ],
   "commits": [],
   "filesChanged": [],
   "projectId": "/home/daytona/workspace",

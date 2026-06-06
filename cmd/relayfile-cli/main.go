@@ -1533,27 +1533,34 @@ func runCloudLogin(cloudAPIURL string, timeout time.Duration, shouldOpenBrowser 
 	errCh := make(chan error, 1)
 	server := &http.Server{}
 	server.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		flushResponse := func() {
+			_ = http.NewResponseController(w).Flush()
+		}
 		if r.URL.Path != "/callback" {
 			http.NotFound(w, r)
 			return
 		}
 		if got := r.URL.Query().Get("state"); got != state {
 			http.Error(w, "Relayfile Cloud login state mismatch", http.StatusBadRequest)
+			flushResponse()
 			errCh <- ErrCloudLoginStateMismatch
 			return
 		}
 		if loginError := strings.TrimSpace(r.URL.Query().Get("error")); loginError != "" {
 			http.Error(w, "Relayfile Cloud login failed", http.StatusBadRequest)
+			flushResponse()
 			errCh <- fmt.Errorf("Relayfile Cloud login failed: %s", loginError)
 			return
 		}
 		tokens, err := readCloudCredentialsFromQuery(r.URL.Query(), cloudAPIURL)
 		if err != nil {
 			http.Error(w, "Relayfile Cloud login callback was missing token fields", http.StatusBadRequest)
+			flushResponse()
 			errCh <- err
 			return
 		}
 		fmt.Fprintln(w, "Relayfile Cloud login complete. You can close this tab.")
+		flushResponse()
 		tokenCh <- tokens
 	})
 

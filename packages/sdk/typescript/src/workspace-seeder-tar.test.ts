@@ -8,7 +8,7 @@ const bulkWriteMock = vi.hoisted(() => vi.fn());
 const relayFileClientMock = vi.hoisted(() => vi.fn());
 const execSyncMock = vi.hoisted(() => vi.fn());
 
-vi.mock('@relayfile/sdk', () => ({
+vi.mock('./client.js', () => ({
   RelayFileClient: relayFileClientMock.mockImplementation(() => ({
     bulkWrite: bulkWriteMock,
   })),
