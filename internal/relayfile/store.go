@@ -358,6 +358,14 @@ type StoreOptions struct {
 	WritebackWorkers       int
 	ProviderMaxConcurrency int
 	Adapters               []ProviderAdapter
+	// DeleteStormThreshold enables the delete-storm breaker (#249) when > 0:
+	// a workspace admitting more than this many file_delete mutations within
+	// DeleteStormWindow gets further deletes refused, and a boot-time scan
+	// quarantines rehydrated pending delete bursts instead of re-arming them.
+	DeleteStormThreshold int
+	// DeleteStormWindow is the sliding window for DeleteStormThreshold
+	// (default 1m when the breaker is enabled).
+	DeleteStormWindow time.Duration
 }
 
 type ProviderWriteFunc func(workspaceID, path, revision string) error
@@ -476,6 +484,9 @@ type Store struct {
 	providerSemaphores      map[string]chan struct{}
 	subscribers             map[string]map[uint64]chan<- Event
 	subscriberCounter       uint64
+	deleteStormThreshold    int
+	deleteStormWindow       time.Duration
+	deleteStormAdmissions   map[string][]time.Time
 	closed                  chan struct{}
 	queueCtx                context.Context
 	queueCancel             context.CancelFunc
@@ -878,12 +889,19 @@ func NewStoreWithOptions(opts StoreOptions) *Store {
 		providerMaxConcurrency:  providerMaxConcurrency,
 		providerSemaphores:      map[string]chan struct{}{},
 		subscribers:             map[string]map[uint64]chan<- Event{},
+		deleteStormThreshold:    opts.DeleteStormThreshold,
+		deleteStormWindow:       opts.DeleteStormWindow,
+		deleteStormAdmissions:   map[string][]time.Time{},
 		closed:                  make(chan struct{}),
 		queueCtx:                queueCtx,
 		queueCancel:             queueCancel,
 	}
 	s.seedQueuedIndexesFromQueues()
 	_ = s.loadFromDisk()
+	// #249: quarantine rehydrated delete storms BEFORE the boot re-enqueue
+	// scan below — a deploy is a restart, and the scan would otherwise hand
+	// a pending file_delete burst to the new executor.
+	s.quarantineBootDeleteStorms()
 	s.rebuildForkIndexesLocked()
 	s.rebuildCoalesceIndexLocked()
 	s.scheduleForkExpiryTimers()
@@ -1480,6 +1498,13 @@ func (s *Store) DeleteFile(req DeleteRequest) (WriteResult, error) {
 			CurrentRevision:       existing.Revision,
 			CurrentContentPreview: truncatePreview(existing.Content),
 		}
+	}
+	// #249: the delete-storm breaker refuses the fs mutation itself — the
+	// 2026-06-06 incident destroyed records even though every provider call
+	// failed, so guarding only the writeback would guard the wrong harm.
+	if err := s.admitDeleteLocked(req.WorkspaceID, time.Now().UTC()); err != nil {
+		s.mu.Unlock()
+		return WriteResult{}, err
 	}
 	delete(ws.Files, path)
 

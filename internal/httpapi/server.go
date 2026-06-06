@@ -1823,6 +1823,12 @@ func (s *Server) handleDeleteFile(w http.ResponseWriter, r *http.Request, worksp
 			writeError(w, http.StatusNotFound, "not_found", err.Error(), correlationID)
 		case relayfile.ErrMissingPrecondition:
 			writeError(w, http.StatusPreconditionFailed, "precondition_failed", err.Error(), correlationID)
+		case relayfile.ErrDeleteStormRejected:
+			// #249: deliberate breaker trip, not a server fault — 429 tells
+			// well-behaved clients to back off and makes storms visible in
+			// access logs as a distinct class.
+			w.Header().Set("Retry-After", "60")
+			writeError(w, http.StatusTooManyRequests, "delete_storm_rejected", err.Error(), correlationID)
 		default:
 			writeError(w, http.StatusInternalServerError, "internal_error", err.Error(), correlationID)
 		}
