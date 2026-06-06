@@ -34,6 +34,7 @@ type wsEvent struct {
 type WSInvalidator struct {
 	baseURL     string
 	token       string
+	tokenFunc   func() string
 	workspaceID string
 	state       *fsState
 	logger      *log.Logger
@@ -42,12 +43,19 @@ type WSInvalidator struct {
 // NewWSInvalidator creates a WSInvalidator that will connect to the event
 // stream at baseURL for the given workspace, invalidating cached state.
 func NewWSInvalidator(baseURL, token, workspaceID string, state *fsState, logger *log.Logger) *WSInvalidator {
+	return NewWSInvalidatorWithTokenFunc(baseURL, token, nil, workspaceID, state, logger)
+}
+
+// NewWSInvalidatorWithTokenFunc creates a WSInvalidator that reads the bearer
+// token from tokenFunc before each WebSocket connection attempt.
+func NewWSInvalidatorWithTokenFunc(baseURL, fallbackToken string, tokenFunc func() string, workspaceID string, state *fsState, logger *log.Logger) *WSInvalidator {
 	if logger == nil {
 		logger = log.Default()
 	}
 	return &WSInvalidator{
 		baseURL:     baseURL,
-		token:       token,
+		token:       fallbackToken,
+		tokenFunc:   tokenFunc,
 		workspaceID: workspaceID,
 		state:       state,
 		logger:      logger,
@@ -125,7 +133,7 @@ func (w *WSInvalidator) listenOnce(ctx context.Context) error {
 
 	conn, _, err := websocket.Dial(ctx, wsURL, &websocket.DialOptions{
 		HTTPHeader: http.Header{
-			"Authorization": []string{"Bearer " + w.token},
+			"Authorization": []string{"Bearer " + w.currentToken()},
 		},
 	})
 	if err != nil {
@@ -163,6 +171,15 @@ func (w *WSInvalidator) handleEvent(event wsEvent) {
 		w.state.invalidate(event.Path)
 		w.logger.Printf("mountfuse: ws invalidated %s (%s)", event.Path, eventType)
 	}
+}
+
+func (w *WSInvalidator) currentToken() string {
+	if w.tokenFunc != nil {
+		if token := strings.TrimSpace(w.tokenFunc()); token != "" {
+			return token
+		}
+	}
+	return strings.TrimSpace(w.token)
 }
 
 func (w *WSInvalidator) websocketURL() (string, error) {
