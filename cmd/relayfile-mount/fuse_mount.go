@@ -18,6 +18,7 @@ func init() {
 
 func runFuseMount(ctx context.Context, cfg mountConfig) error {
 	httpClient := mountsync.NewHTTPClient(cfg.baseURL, cfg.token, &http.Client{Timeout: cfg.timeout})
+	installCredsFileRefresh(httpClient, cfg)
 	if cfg.logHTTPStatus {
 		httpClient.SetHTTPStatusLogger(log.Default())
 	}
@@ -43,7 +44,7 @@ func runFuseMount(ctx context.Context, cfg mountConfig) error {
 
 	// Start WebSocket invalidation if enabled.
 	if cfg.websocketEnabled {
-		invalidator := mountfuse.NewWSInvalidator(cfg.baseURL, cfg.token, cfg.workspaceID, mounted.Root.State(), log.Default())
+		invalidator := mountfuse.NewWSInvalidatorWithTokenFunc(cfg.baseURL, cfg.token, httpClient.Token, cfg.workspaceID, mounted.Root.State(), log.Default())
 		go invalidator.Run(mountCtx)
 	}
 
