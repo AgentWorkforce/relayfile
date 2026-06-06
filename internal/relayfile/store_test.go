@@ -4272,6 +4272,47 @@ func TestProviderWriteActionReceivesFileUpsertPayload(t *testing.T) {
 	}
 }
 
+func TestBulkWriteContentIdentityReachesProviderWriteAction(t *testing.T) {
+	actions := make(chan WritebackAction, 1)
+	store := NewStoreWithOptions(StoreOptions{
+		ProviderWriteAction: func(action WritebackAction) error {
+			actions <- action
+			return nil
+		},
+	})
+	t.Cleanup(store.Close)
+
+	identity := &ContentIdentity{
+		Kind:       "mount-writeback-create-draft",
+		Key:        "ws_bulk_identity:/external/Draft.md:abc123",
+		TTLSeconds: 2592000,
+	}
+	written, _, errs := store.BulkWrite("ws_bulk_identity", []BulkWriteFile{{
+		Path:            "/external/Draft.md",
+		ContentType:     "text/markdown",
+		Content:         "# draft",
+		ContentIdentity: identity,
+	}})
+	if len(errs) != 0 {
+		t.Fatalf("bulk write returned errors: %+v", errs)
+	}
+	if written != 1 {
+		t.Fatalf("expected one bulk write, got %d", written)
+	}
+
+	select {
+	case action := <-actions:
+		if action.ContentIdentity == nil {
+			t.Fatal("expected content identity on provider write action")
+		}
+		if *action.ContentIdentity != *identity {
+			t.Fatalf("provider write content identity = %+v, want %+v", action.ContentIdentity, identity)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("expected provider write action callback")
+	}
+}
+
 func TestProviderWriteActionReceivesFileDeletePayload(t *testing.T) {
 	actions := make(chan WritebackAction, 10)
 	store := NewStoreWithOptions(StoreOptions{
@@ -4744,5 +4785,42 @@ func TestExternalWritebackModeKeepsItemsInQueue(t *testing.T) {
 		if op.Status == "succeeded" {
 			t.Fatalf("expected op not to be processed by internal worker, but got status succeeded")
 		}
+	}
+}
+
+func TestBulkWriteContentIdentityAppearsInPendingWritebacks(t *testing.T) {
+	store := NewStoreWithOptions(StoreOptions{
+		ExternalWritebackMode: true,
+	})
+	t.Cleanup(store.Close)
+
+	identity := &ContentIdentity{
+		Kind:       "mount-writeback-create-draft",
+		Key:        "ws_ext_identity:/external/Draft.md:abc123",
+		TTLSeconds: 2592000,
+	}
+	written, _, errs := store.BulkWrite("ws_ext_identity", []BulkWriteFile{{
+		Path:            "/external/Draft.md",
+		ContentType:     "text/markdown",
+		Content:         "# external draft",
+		ContentIdentity: identity,
+	}})
+	if len(errs) != 0 {
+		t.Fatalf("bulk write returned errors: %+v", errs)
+	}
+	if written != 1 {
+		t.Fatalf("expected one bulk write, got %d", written)
+	}
+
+	pending := store.GetPendingWritebacks("ws_ext_identity")
+	if len(pending) != 1 {
+		t.Fatalf("expected one pending writeback, got %+v", pending)
+	}
+	rawIdentity, ok := pending[0]["contentIdentity"].(*ContentIdentity)
+	if !ok || rawIdentity == nil {
+		t.Fatalf("expected pending content identity, got %+v", pending[0]["contentIdentity"])
+	}
+	if *rawIdentity != *identity {
+		t.Fatalf("pending content identity = %+v, want %+v", rawIdentity, identity)
 	}
 }

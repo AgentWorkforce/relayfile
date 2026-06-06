@@ -2460,6 +2460,8 @@ components:
         providerResult:
           type: object
           additionalProperties: true
+        contentIdentity:
+          $ref: '#/components/schemas/ContentIdentity'
         correlationId:
           type: string
         createdAt:
@@ -2847,6 +2849,8 @@ components:
         correlationId:
           type: string
           description: Correlation ID for tracing
+        contentIdentity:
+          $ref: '#/components/schemas/ContentIdentity'
 
     WritebackItem:
       type: object
