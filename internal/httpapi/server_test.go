@@ -392,6 +392,25 @@ func TestFileEventsWebSocketWritebackMaterializationCarriesAgentWriteOrigin(t *t
 	}
 	defer conn.Close(websocket.StatusNormalClosure, "")
 
+	// Flake fix (#245): websocket.Dial returns once the HTTP upgrade
+	// completes, but the server registers its store subscription slightly
+	// later — a write landing in that window is lost for a from=now
+	// subscriber (no catch-up), which made this test time out on loaded CI
+	// runners. The ping→pong round-trip is a deterministic barrier: the pong
+	// is only written by the handler's main loop, which starts after the
+	// subscription is live (the sibling from=now tests use the same
+	// pattern).
+	if err := wsjson.Write(ctx, conn, map[string]any{"type": "ping"}); err != nil {
+		t.Fatalf("write ping failed: %v", err)
+	}
+	var pong map[string]any
+	if err := wsjson.Read(ctx, conn, &pong); err != nil {
+		t.Fatalf("read pong failed: %v", err)
+	}
+	if pong["type"] != "pong" {
+		t.Fatalf("from=now must not backfill before pong, got %+v", pong)
+	}
+
 	writeResp := doRequest(t, NewServer(store), request{
 		method: http.MethodPut,
 		path:   "/v1/workspaces/ws_socket_writeback_origin/fs/file?path=/external/Writeback.md",
@@ -409,12 +428,20 @@ func TestFileEventsWebSocketWritebackMaterializationCarriesAgentWriteOrigin(t *t
 		t.Fatalf("expected 202 write, got %d (%s)", writeResp.Code, writeResp.Body.String())
 	}
 
+	// Order-tolerant scan (#245): await the materialization event rather
+	// than asserting the first frame. The origin assertion below stays
+	// strict — the tolerance is about WHICH frame carries the event, never
+	// about what origin it carries.
 	var event map[string]any
-	if err := wsjson.Read(ctx, conn, &event); err != nil {
-		t.Fatalf("read writeback materialization event failed: %v", err)
-	}
-	if event["type"] != "file.created" || event["path"] != "/external/Writeback.md" {
-		t.Fatalf("expected writeback materialization file.created event, got %+v", event)
+	for {
+		var frame map[string]any
+		if err := wsjson.Read(ctx, conn, &frame); err != nil {
+			t.Fatalf("read writeback materialization event failed: %v", err)
+		}
+		if frame["type"] == "file.created" && frame["path"] == "/external/Writeback.md" {
+			event = frame
+			break
+		}
 	}
 	if event["origin"] != "agent_write" {
 		t.Fatalf("expected writeback materialization origin=agent_write, got %+v", event)

@@ -183,6 +183,14 @@ func (s *Store) reconcileAckedDraftLocked(workspaceID string, ws *workspaceState
 	// later provider sync upsert for the same object converges onto one file
 	// (applyProviderUpsertLocked treats the object id as authoritative and
 	// relocates the previous path).
+	//
+	// Revision convention: the file.deleted/file.created pair below shares
+	// ONE revision — the rename is a single atomic state transition of one
+	// logical file, and the two events are two views of that one move. This
+	// deliberately differs from applyProviderUpsertLocked's relocate, which
+	// uses two revisions because it genuinely is two transitions (remove the
+	// stale projection, then upsert content that may differ). Event
+	// consumers are eventId-keyed, so neither convention affects cursors.
 	nowTS := nowRFC3339NanoUTC()
 	revision := s.nextRevisionLocked()
 	delete(ws.Files, draftPath)
