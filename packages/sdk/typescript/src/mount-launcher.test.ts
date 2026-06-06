@@ -218,4 +218,52 @@ describe("default mount launcher", () => {
       await rm(tempRoot, { recursive: true, force: true })
     }
   })
+
+  it("reads scoped-layout state from the resolved mount root", async () => {
+    const tempRoot = await mkdtemp(
+      path.join(os.tmpdir(), "relayfile-default-launcher-scoped-status-")
+    )
+    const localDir = path.join(tempRoot, "mirror")
+    const scopedDir = path.join(localDir, "slack", "channels", "C123")
+    const fetchMock = vi.fn()
+    vi.stubGlobal("fetch", fetchMock)
+
+    try {
+      const lastReconcileAt = new Date(Date.now() - 1_000).toISOString()
+      await mkdir(path.join(scopedDir, ".relay"), { recursive: true })
+      await writeFile(
+        path.join(scopedDir, ".relay", "state.json"),
+        JSON.stringify({
+          mode: "poll",
+          intervalMs: 30_000,
+          lastReconcileAt,
+          daemon: { pid: 8888 },
+          providers: [{ status: "ready" }]
+        }),
+        "utf8"
+      )
+
+      const status = await readMountedWorkspaceStatus({
+        localDir,
+        workspaceId: "ws_123",
+        remotePath: "/slack/channels/C123",
+        mode: "poll",
+        localLayout: "scoped",
+        relayfileBaseUrl: "https://relayfile.mount.test",
+        relayfileToken: "rf_mount_token",
+        expiresAt: null,
+        suggestedRefreshAt: null
+      })
+
+      expect(status).toMatchObject({
+        ready: true,
+        mode: "poll",
+        pid: 8888,
+        lastReconcileAt
+      })
+      expect(fetchMock).not.toHaveBeenCalled()
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true })
+    }
+  })
 })

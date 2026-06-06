@@ -225,6 +225,69 @@ func TestSyncOncePullsRemoteAndPushesLocalEdits(t *testing.T) {
 	}
 }
 
+func TestSyncOnceWriteOnlySkipsRemotePullButPushesLocalFiles(t *testing.T) {
+	client := &fakeClient{
+		files: map[string]RemoteFile{
+			"/slack/channels/C123/messages/history.json": {
+				Path:        "/slack/channels/C123/messages/history.json",
+				Revision:    "rev_1",
+				ContentType: "application/json",
+				Content:     `{"text":"history"}`,
+			},
+		},
+		revisionCounter: 1,
+	}
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_write_only",
+		RemoteRoot:  "/slack/channels/C123/messages",
+		LocalRoot:   localDir,
+		SyncMode:    "write-only",
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+
+	localDraft := filepath.Join(localDir, "wb-pear-ack.json")
+	if err := os.WriteFile(localDraft, []byte(`{"text":"ack"}`), 0o644); err != nil {
+		t.Fatalf("write local draft failed: %v", err)
+	}
+
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("write-only sync failed: %v", err)
+	}
+
+	if client.listTreeCalls != 0 || client.listEventsCalls != 0 || client.readFileCalls != 0 {
+		t.Fatalf("write-only sync should not pull remote records; tree=%d events=%d read=%d", client.listTreeCalls, client.listEventsCalls, client.readFileCalls)
+	}
+	if got := len(client.bulkWriteBatches); got != 1 {
+		t.Fatalf("expected one bulk write batch, got %d", got)
+	}
+	if got, want := client.bulkWriteBatches[0][0].Path, "/slack/channels/C123/messages/wb-pear-ack.json"; got != want {
+		t.Fatalf("expected canonical write path %q, got %q", want, got)
+	}
+	if _, err := os.Stat(filepath.Join(localDir, ".relay", "dead-letter")); err != nil {
+		t.Fatalf("expected write-only mount to keep dead-letter feedback dir: %v", err)
+	}
+	var public struct {
+		Mode     string `json:"mode"`
+		SyncMode string `json:"syncMode"`
+	}
+	data, err := os.ReadFile(filepath.Join(localDir, ".relay", "state.json"))
+	if err != nil {
+		t.Fatalf("read public state: %v", err)
+	}
+	if err := json.Unmarshal(data, &public); err != nil {
+		t.Fatalf("decode public state: %v", err)
+	}
+	if public.Mode != "poll" || public.SyncMode != "write-only" {
+		t.Fatalf("expected public state mode poll/write-only, got %+v", public)
+	}
+	if _, err := os.Stat(filepath.Join(localDir, "history.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("write-only sync mirrored provider history, stat err=%v", err)
+	}
+}
+
 func TestHandleLocalChangeIgnoresAlreadyTrackedContent(t *testing.T) {
 	client := &fakeClient{
 		files: map[string]RemoteFile{
