@@ -2753,7 +2753,7 @@ func deadLetterErrorPathFor(localDir, opID string) string {
 
 func runWriteback(args []string, stdout io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("writeback subcommand is required: list, status, or retry")
+		return errors.New("writeback subcommand is required: list, status, retry, or sweep-drafts")
 	}
 	switch args[0] {
 	case "list":

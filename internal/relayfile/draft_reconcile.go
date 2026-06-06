@@ -114,6 +114,9 @@ func isDraftFileBasename(basename string) bool {
 // enqueueWriteback, so the mutation cannot create operations or writebacks.
 func (s *Store) reconcileAckedDraftLocked(workspaceID string, ws *workspaceState, op OperationStatus, ack WritebackAck, correlationID string) DraftDisposition {
 	none := DraftDisposition{Action: "none"}
+	if ws.ProviderIndex == nil {
+		ws.ProviderIndex = map[string]string{}
+	}
 	externalID := strings.TrimSpace(ack.ExternalID)
 	if externalID == "" {
 		return none
@@ -288,6 +291,9 @@ func (s *Store) SweepWritebackDrafts(workspaceID string, req SweepDraftsRequest)
 	}
 	for _, pattern := range req.Patterns {
 		if _, err := path.Match(pattern, "probe.json"); err != nil {
+			return SweepDraftsResult{}, ErrInvalidInput
+		}
+		if strings.ContainsAny(pattern, `/\`) {
 			return SweepDraftsResult{}, ErrInvalidInput
 		}
 	}
