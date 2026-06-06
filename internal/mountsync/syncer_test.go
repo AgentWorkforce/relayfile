@@ -1812,6 +1812,149 @@ func TestBulkWrite_SingleCallForNFiles(t *testing.T) {
 	}
 }
 
+func TestBulkWrite_ContentIdentityGoldenVector(t *testing.T) {
+	const (
+		workspaceID = "ws_test"
+		remotePath  = "/slack/channels/C123/messages/messages 5ab77d67.json"
+		content     = "{\"channel\":\"C123\",\"text\":\"hello writeback idempotency\"}\n"
+		contentHash = "751f9591557700f69b5ceefcdec7ead8563a10f0a712c501a5028699be021511"
+		key         = "ws_test:/slack/channels/C123/messages/messages 5ab77d67.json:751f9591557700f69b5ceefcdec7ead8563a10f0a712c501a5028699be021511"
+	)
+
+	snapshot := newLocalSnapshot(remotePath, []byte(content))
+	if snapshot.Hash != contentHash {
+		t.Fatalf("golden vector hash = %q, want %q", snapshot.Hash, contentHash)
+	}
+	files := bulkWriteFilesForPending(workspaceID, []pendingBulkWrite{{
+		remotePath: remotePath,
+		snapshot:   snapshot,
+	}})
+	if len(files) != 1 {
+		t.Fatalf("expected one bulk file, got %d", len(files))
+	}
+	if files[0].Path != remotePath {
+		t.Fatalf("bulk file path = %q, want %q", files[0].Path, remotePath)
+	}
+	identity := files[0].ContentIdentity
+	if identity == nil {
+		t.Fatal("expected content identity on bulk file")
+	}
+	if identity.Kind != mountWritebackCreateDraftContentIdentityKind {
+		t.Fatalf("content identity kind = %q, want %q", identity.Kind, mountWritebackCreateDraftContentIdentityKind)
+	}
+	if identity.Key != key {
+		t.Fatalf("content identity key = %q, want %q", identity.Key, key)
+	}
+	if identity.TTLSeconds != mountWritebackCreateDraftContentIdentityTTLSeconds {
+		t.Fatalf("content identity ttl = %d, want %d", identity.TTLSeconds, mountWritebackCreateDraftContentIdentityTTLSeconds)
+	}
+	if identity.TTLSeconds != 2592000 {
+		t.Fatalf("golden vector ttl = %d, want 2592000", identity.TTLSeconds)
+	}
+	if strings.TrimSpace(identity.Key) != identity.Key {
+		t.Fatalf("golden vector key should be trim-stable: %q", identity.Key)
+	}
+	if !strings.Contains(identity.Key, "messages 5ab77d67.json") {
+		t.Fatalf("golden vector key should preserve the internal path space: %q", identity.Key)
+	}
+}
+
+func TestBulkWrite_ContentIdentityStabilityAndIsolation(t *testing.T) {
+	const (
+		workspaceID = "ws_test"
+		remotePath  = "/slack/channels/C123/messages/messages 5ab77d67.json"
+	)
+
+	snapshot := newLocalSnapshot(remotePath, []byte("{\"text\":\"same\"}\n"))
+	files := bulkWriteFilesForPending(workspaceID, []pendingBulkWrite{{
+		remotePath: remotePath,
+		snapshot:   snapshot,
+	}})
+	reupload := bulkWriteFilesForPending(workspaceID, []pendingBulkWrite{{
+		remotePath: remotePath,
+		snapshot:   snapshot,
+	}})
+	if files[0].ContentIdentity == nil || reupload[0].ContentIdentity == nil {
+		t.Fatal("expected content identity on both bulk files")
+	}
+	if files[0].ContentIdentity.Key != reupload[0].ContentIdentity.Key {
+		t.Fatalf("same draft re-upload key changed: %q vs %q", files[0].ContentIdentity.Key, reupload[0].ContentIdentity.Key)
+	}
+
+	edited := bulkWriteFilesForPending(workspaceID, []pendingBulkWrite{{
+		remotePath: remotePath,
+		snapshot:   newLocalSnapshot(remotePath, []byte("{\"text\":\"edited\"}\n")),
+	}})
+	if edited[0].ContentIdentity.Key == files[0].ContentIdentity.Key {
+		t.Fatalf("edited draft content should change key %q", edited[0].ContentIdentity.Key)
+	}
+
+	otherPath := bulkWriteFilesForPending(workspaceID, []pendingBulkWrite{{
+		remotePath: "/slack/channels/C123/messages/messages other.json",
+		snapshot:   snapshot,
+	}})
+	if otherPath[0].ContentIdentity.Key == files[0].ContentIdentity.Key {
+		t.Fatalf("different draft path should change key %q", otherPath[0].ContentIdentity.Key)
+	}
+
+	otherWorkspace := bulkWriteFilesForPending("ws_other", []pendingBulkWrite{{
+		remotePath: remotePath,
+		snapshot:   snapshot,
+	}})
+	if otherWorkspace[0].ContentIdentity.Key == files[0].ContentIdentity.Key {
+		t.Fatalf("different workspace should change key %q", otherWorkspace[0].ContentIdentity.Key)
+	}
+}
+
+func TestBulkWrite_FlushSendsContentIdentity(t *testing.T) {
+	const (
+		workspaceID = "ws_test"
+		content     = "{\"channel\":\"C123\",\"text\":\"hello writeback idempotency\"}\n"
+		key         = "ws_test:/slack/channels/C123/messages/messages 5ab77d67.json:751f9591557700f69b5ceefcdec7ead8563a10f0a712c501a5028699be021511"
+	)
+
+	client := &fakeClient{files: map[string]RemoteFile{}}
+	localDir := t.TempDir()
+	messageDir := filepath.Join(localDir, "slack", "channels", "C123", "messages")
+	if err := os.MkdirAll(messageDir, 0o755); err != nil {
+		t.Fatalf("mkdir message dir failed: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(messageDir, "messages 5ab77d67.json"), []byte(content), 0o644); err != nil {
+		t.Fatalf("write draft failed: %v", err)
+	}
+
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: workspaceID,
+		RemoteRoot:  "/",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("sync once failed: %v", err)
+	}
+	if got := len(client.bulkWriteBatches); got != 1 {
+		t.Fatalf("expected one bulk write batch, got %d", got)
+	}
+	if got := len(client.bulkWriteBatches[0]); got != 1 {
+		t.Fatalf("expected one bulk write file, got %d", got)
+	}
+	identity := client.bulkWriteBatches[0][0].ContentIdentity
+	if identity == nil {
+		t.Fatal("expected flushed bulk file to carry content identity")
+	}
+	if identity.Kind != mountWritebackCreateDraftContentIdentityKind {
+		t.Fatalf("flushed identity kind = %q, want %q", identity.Kind, mountWritebackCreateDraftContentIdentityKind)
+	}
+	if identity.Key != key {
+		t.Fatalf("flushed identity key = %q, want %q", identity.Key, key)
+	}
+	if identity.TTLSeconds != 2592000 {
+		t.Fatalf("flushed identity ttl = %d, want 2592000", identity.TTLSeconds)
+	}
+}
+
 func TestBulkWrite_MixedCreateAndUpdateBatch(t *testing.T) {
 	client := &fakeClient{
 		files: map[string]RemoteFile{

@@ -171,11 +171,18 @@ type WriteRequest struct {
 	CorrelationID string
 }
 
+type ContentIdentity struct {
+	Kind       string `json:"kind"`
+	Key        string `json:"key"`
+	TTLSeconds int    `json:"ttlSeconds,omitempty"`
+}
+
 type BulkWriteFile struct {
-	Path        string `json:"path"`
-	ContentType string `json:"contentType"`
-	Content     string `json:"content"`
-	Encoding    string `json:"encoding"`
+	Path            string           `json:"path"`
+	ContentType     string           `json:"contentType"`
+	Content         string           `json:"content"`
+	Encoding        string           `json:"encoding"`
+	ContentIdentity *ContentIdentity `json:"contentIdentity,omitempty"`
 }
 
 type BulkWriteError struct {
