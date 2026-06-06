@@ -86,6 +86,88 @@ func TestHTTPClientLogsRetriedHTTPStatus(t *testing.T) {
 	}
 }
 
+func TestHTTPClientRefreshesTokenOnceOnUnauthorized(t *testing.T) {
+	var calls int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		call := atomic.AddInt32(&calls, 1)
+		switch call {
+		case 1:
+			if got := r.Header.Get("Authorization"); got != "Bearer old-token" {
+				t.Fatalf("expected first request to use old token, got %q", got)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"code":"unauthorized","message":"Token has expired"}`))
+		case 2:
+			if got := r.Header.Get("Authorization"); got != "Bearer new-token" {
+				t.Fatalf("expected retried request to use refreshed token, got %q", got)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"path":"/slack","entries":[],"nextCursor":null}`))
+		default:
+			t.Fatalf("unexpected call %d", call)
+		}
+	}))
+	defer server.Close()
+
+	client := NewHTTPClient(server.URL, "old-token", server.Client())
+	var refreshCalls int32
+	client.SetTokenRefreshFunc(func(currentToken string) (string, bool, error) {
+		atomic.AddInt32(&refreshCalls, 1)
+		if currentToken != "old-token" {
+			t.Fatalf("expected refresh to receive old-token, got %q", currentToken)
+		}
+		return "new-token", true, nil
+	})
+
+	tree, err := client.ListTree(context.Background(), "ws_auth", "/slack", 1, "")
+	if err != nil {
+		t.Fatalf("expected auth refresh to recover request, got %v", err)
+	}
+	if tree.Path != "/slack" {
+		t.Fatalf("expected refreshed response path /slack, got %q", tree.Path)
+	}
+	if got := atomic.LoadInt32(&refreshCalls); got != 1 {
+		t.Fatalf("expected one token refresh, got %d", got)
+	}
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Fatalf("expected original request plus one retry, got %d", got)
+	}
+	if got := client.Token(); got != "new-token" {
+		t.Fatalf("expected client token to update, got %q", got)
+	}
+}
+
+func TestHTTPClientDoesNotSpinWhenUnauthorizedTokenUnchanged(t *testing.T) {
+	var calls int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"code":"unauthorized","message":"Token has expired"}`))
+	}))
+	defer server.Close()
+
+	client := NewHTTPClient(server.URL, "old-token", server.Client())
+	var refreshCalls int32
+	client.SetTokenRefreshFunc(func(currentToken string) (string, bool, error) {
+		atomic.AddInt32(&refreshCalls, 1)
+		return currentToken, false, nil
+	})
+
+	_, err := client.ListTree(context.Background(), "ws_auth", "/slack", 1, "")
+	var httpErr *HTTPError
+	if !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected unauthorized HTTPError, got %v", err)
+	}
+	if got := atomic.LoadInt32(&refreshCalls); got != 1 {
+		t.Fatalf("expected one token refresh attempt, got %d", got)
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("expected no retry when token is unchanged, got %d calls", got)
+	}
+}
+
 func TestHTTPClientListEvents(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/workspaces/ws_events/fs/events" {

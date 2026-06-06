@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,6 +12,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/agentworkforce/relayfile/internal/mountsync"
 )
 
 func TestFloatEnvParsesValue(t *testing.T) {
@@ -297,6 +301,107 @@ func TestExecuteMountRejectsUnsupportedMode(t *testing.T) {
 	)
 	if err == nil {
 		t.Fatal("expected unsupported mode error")
+	}
+}
+
+func TestReadMountCredsTokenSupportsAdvisoryFields(t *testing.T) {
+	credsFile := filepath.Join(t.TempDir(), "creds.json")
+	if err := os.WriteFile(credsFile, []byte(`{
+		"token": " relay_pa_new ",
+		"mintedAt": "2026-06-06T14:00:00Z",
+		"expiresAt": null
+	}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	token, err := readMountCredsToken(credsFile)
+	if err != nil {
+		t.Fatalf("read creds token: %v", err)
+	}
+	if token != "relay_pa_new" {
+		t.Fatalf("expected trimmed token, got %q", token)
+	}
+}
+
+func TestReadMountCredsTokenRejectsMissingToken(t *testing.T) {
+	credsFile := filepath.Join(t.TempDir(), "creds.json")
+	if err := os.WriteFile(credsFile, []byte(`{"mintedAt":"2026-06-06T14:00:00Z"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := readMountCredsToken(credsFile); err == nil || !strings.Contains(err.Error(), "missing token") {
+		t.Fatalf("expected missing-token error, got %v", err)
+	}
+}
+
+func TestInstallCredsFileRefreshReloadsChangedToken(t *testing.T) {
+	credsFile := filepath.Join(t.TempDir(), "creds.json")
+	if err := os.WriteFile(credsFile, []byte(`{"token":"new-token"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var calls int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		call := atomic.AddInt32(&calls, 1)
+		switch call {
+		case 1:
+			if got := r.Header.Get("Authorization"); got != "Bearer old-token" {
+				t.Fatalf("expected first request to use old token, got %q", got)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"code":"unauthorized","message":"Token has expired"}`))
+		case 2:
+			if got := r.Header.Get("Authorization"); got != "Bearer new-token" {
+				t.Fatalf("expected retry to use creds-file token, got %q", got)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"path":"/slack","entries":[],"nextCursor":null}`))
+		default:
+			t.Fatalf("unexpected call %d", call)
+		}
+	}))
+	defer server.Close()
+
+	client := mountsync.NewHTTPClient(server.URL, "old-token", server.Client())
+	installCredsFileRefresh(client, mountConfig{credsFile: credsFile})
+
+	if _, err := client.ListTree(context.Background(), "ws_auth", "/slack", 1, ""); err != nil {
+		t.Fatalf("expected creds-file refresh to recover request: %v", err)
+	}
+	if got := client.Token(); got != "new-token" {
+		t.Fatalf("expected client token to update, got %q", got)
+	}
+}
+
+func TestInstallCredsFileRefreshToleratesParseFailureWithoutRetry(t *testing.T) {
+	credsFile := filepath.Join(t.TempDir(), "creds.json")
+	if err := os.WriteFile(credsFile, []byte(`{"token":`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var calls int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"code":"unauthorized","message":"Token has expired"}`))
+	}))
+	defer server.Close()
+
+	client := mountsync.NewHTTPClient(server.URL, "old-token", server.Client())
+	installCredsFileRefresh(client, mountConfig{credsFile: credsFile})
+
+	_, err := client.ListTree(context.Background(), "ws_auth", "/slack", 1, "")
+	var httpErr *mountsync.HTTPError
+	if !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected original unauthorized error, got %v", err)
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("expected no retry after parse failure, got %d calls", got)
+	}
+	if got := client.Token(); got != "old-token" {
+		t.Fatalf("expected old token to stay installed, got %q", got)
 	}
 }
 

@@ -38,6 +38,7 @@ var errFuseModeUnavailable = errors.New("fuse mode is not available in this buil
 type mountConfig struct {
 	baseURL          string
 	token            string
+	credsFile        string
 	workspaceID      string
 	remotePath       string
 	remotePaths      []string
@@ -75,6 +76,7 @@ var defaultFuseRunner fuseRunner = func(context.Context, mountConfig) error {
 func main() {
 	baseURL := flag.String("base-url", envOrDefault("RELAYFILE_BASE_URL", "http://127.0.0.1:8080"), "relayfile base URL")
 	token := flag.String("token", strings.TrimSpace(os.Getenv("RELAYFILE_TOKEN")), "bearer token")
+	credsFile := flag.String("creds-file", strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_CREDS_FILE")), "JSON credentials file containing a relayfile bearer token; takes precedence over --token")
 	workspaceID := flag.String("workspace", strings.TrimSpace(os.Getenv("RELAYFILE_WORKSPACE")), "workspace ID")
 	var remotePaths repeatedStringFlag
 	flag.Var(&remotePaths, "remote-path", "remote root path (may be repeated)")
@@ -103,8 +105,17 @@ func main() {
 	once := flag.Bool("once", false, "run one sync cycle and exit")
 	flag.Parse()
 
-	if strings.TrimSpace(*token) == "" {
-		log.Fatalf("token is required (--token or RELAYFILE_TOKEN)")
+	resolvedToken := strings.TrimSpace(*token)
+	resolvedCredsFile := strings.TrimSpace(*credsFile)
+	if resolvedCredsFile != "" {
+		credsToken, err := readMountCredsToken(resolvedCredsFile)
+		if err != nil {
+			log.Fatalf("read creds-file: %v", err)
+		}
+		resolvedToken = credsToken
+	}
+	if resolvedToken == "" {
+		log.Fatalf("token is required (--token, RELAYFILE_TOKEN, or --creds-file)")
 	}
 	if strings.TrimSpace(*workspaceID) == "" {
 		log.Fatalf("workspace is required (--workspace or RELAYFILE_WORKSPACE)")
@@ -143,7 +154,8 @@ func main() {
 
 	cfg := mountConfig{
 		baseURL:          *baseURL,
-		token:            strings.TrimSpace(*token),
+		token:            resolvedToken,
+		credsFile:        resolvedCredsFile,
 		workspaceID:      strings.TrimSpace(*workspaceID),
 		remotePath:       firstRemotePath(allRemotePaths, envOrDefault("RELAYFILE_REMOTE_PATH", "/")),
 		remotePaths:      normalizeRemotePaths(allRemotePaths, envOrDefault("RELAYFILE_REMOTE_PATH", "/")),
@@ -166,7 +178,7 @@ func main() {
 		pprofAddr:        strings.TrimSpace(*pprofAddr),
 		memlogInterval:   *memlogInterval,
 		logHTTPStatus:    *logHTTPStatus,
-		scopes:           parseTokenScopes(strings.TrimSpace(*token)),
+		scopes:           parseTokenScopes(resolvedToken),
 		once:             *once,
 		mode:             resolvedMode,
 	}
@@ -353,6 +365,7 @@ func runSinglePollingMount(rootCtx context.Context, cfg mountConfig) error {
 	// per-cycle / bootstrap / cursor contexts; NewSyncHTTPClient wires a
 	// transport that bounds connect/handshake/time-to-first-byte only.
 	client := mountsync.NewHTTPClient(cfg.baseURL, cfg.token, mountsync.NewSyncHTTPClient())
+	installCredsFileRefresh(client, cfg)
 	if cfg.logHTTPStatus {
 		client.SetHTTPStatusLogger(log.Default())
 	}
@@ -457,6 +470,46 @@ func runSinglePollingMount(rootCtx context.Context, cfg mountConfig) error {
 			timer.Reset(jitteredIntervalWithSample(cfg.interval, cfg.intervalJitter, rng.Float64()))
 		}
 	}
+}
+
+type mountCredsFile struct {
+	Token string `json:"token"`
+}
+
+func readMountCredsToken(path string) (string, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return "", errors.New("path is required")
+	}
+	payload, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	var creds mountCredsFile
+	if err := json.Unmarshal(payload, &creds); err != nil {
+		return "", err
+	}
+	token := strings.TrimSpace(creds.Token)
+	if token == "" {
+		return "", errors.New("missing token")
+	}
+	return token, nil
+}
+
+func installCredsFileRefresh(client *mountsync.HTTPClient, cfg mountConfig) {
+	credsFile := strings.TrimSpace(cfg.credsFile)
+	if client == nil || credsFile == "" {
+		return
+	}
+	client.SetTokenRefreshFunc(func(currentToken string) (string, bool, error) {
+		token, err := readMountCredsToken(credsFile)
+		if err != nil {
+			log.Printf("relayfile creds-file refresh failed: %v", err)
+			return "", false, err
+		}
+		changed := token != strings.TrimSpace(currentToken)
+		return token, changed, nil
+	})
 }
 
 type repeatedStringFlag []string

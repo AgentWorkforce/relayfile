@@ -244,6 +244,8 @@ type HTTPClient struct {
 	baseURL          string
 	token            string
 	tokenMu          sync.RWMutex
+	tokenRefreshMu   sync.RWMutex
+	tokenRefreshFunc AuthTokenRefreshFunc
 	httpClient       *http.Client
 	maxRetries       int
 	baseDelay        time.Duration
@@ -251,6 +253,11 @@ type HTTPClient struct {
 	httpStatusLogMu  sync.RWMutex
 	httpStatusLogger Logger
 }
+
+// AuthTokenRefreshFunc returns a replacement bearer token after the current
+// token has been rejected by the server. changed must be true only when the
+// replacement token should be installed and the failed request retried.
+type AuthTokenRefreshFunc func(currentToken string) (newToken string, changed bool, err error)
 
 // NewSyncTransport builds the *http.Transport used by every mount-daemon
 // HTTP client. It deliberately sets GRANULAR timeouts that bound the parts
@@ -330,6 +337,12 @@ func (c *HTTPClient) SetHTTPStatusLogger(logger Logger) {
 	c.httpStatusLogMu.Lock()
 	defer c.httpStatusLogMu.Unlock()
 	c.httpStatusLogger = logger
+}
+
+func (c *HTTPClient) SetTokenRefreshFunc(refresh AuthTokenRefreshFunc) {
+	c.tokenRefreshMu.Lock()
+	defer c.tokenRefreshMu.Unlock()
+	c.tokenRefreshFunc = refresh
 }
 
 func (c *HTTPClient) logHTTPStatus(method, requestPath string, statusCode int, retryAfter string, attempt int) {
@@ -508,6 +521,7 @@ func (c *HTTPClient) ExportGithubWorkingTreeTar(ctx context.Context, workspaceID
 	}
 	requestPath := fmt.Sprintf("/v1/workspaces/%s/fs/export?%s", url.PathEscape(workspaceID), q.Encode())
 
+	authRefreshTried := false
 	for attempt := 0; ; attempt++ {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+requestPath, nil)
 		if err != nil {
@@ -538,6 +552,12 @@ func (c *HTTPClient) ExportGithubWorkingTreeTar(ctx context.Context, workspaceID
 			return GithubWorkingTreeTar{}, readErr
 		}
 		c.logHTTPStatus(http.MethodGet, requestPath, resp.StatusCode, resp.Header.Get("Retry-After"), attempt)
+		if resp.StatusCode == http.StatusUnauthorized && !authRefreshTried {
+			authRefreshTried = true
+			if c.refreshTokenAfterUnauthorized() {
+				continue
+			}
+		}
 		if (resp.StatusCode == http.StatusTooManyRequests || (resp.StatusCode >= 500 && resp.StatusCode <= 599)) && attempt < c.maxRetries {
 			if waitErr := waitWithContext(ctx, c.retryDelay(attempt+1, resp.Header.Get("Retry-After"))); waitErr != nil {
 				return GithubWorkingTreeTar{}, waitErr
@@ -588,6 +608,7 @@ func (c *HTTPClient) doJSON(
 			return err
 		}
 	}
+	authRefreshTried := false
 	for attempt := 0; ; attempt++ {
 		var bodyReader io.Reader
 		if bodyBytes != nil {
@@ -632,6 +653,13 @@ func (c *HTTPClient) doJSON(
 			return json.Unmarshal(payloadBytes, out)
 		}
 
+		if resp.StatusCode == http.StatusUnauthorized && !authRefreshTried {
+			authRefreshTried = true
+			if c.refreshTokenAfterUnauthorized() {
+				continue
+			}
+		}
+
 		if (resp.StatusCode == http.StatusTooManyRequests || (resp.StatusCode >= 500 && resp.StatusCode <= 599)) && attempt < c.maxRetries {
 			if waitErr := waitWithContext(ctx, c.retryDelay(attempt+1, resp.Header.Get("Retry-After"))); waitErr != nil {
 				return waitErr
@@ -665,6 +693,26 @@ func (c *HTTPClient) SetToken(token string) {
 	c.tokenMu.Lock()
 	c.token = strings.TrimSpace(token)
 	c.tokenMu.Unlock()
+}
+
+func (c *HTTPClient) refreshTokenAfterUnauthorized() bool {
+	c.tokenRefreshMu.RLock()
+	refresh := c.tokenRefreshFunc
+	c.tokenRefreshMu.RUnlock()
+	if refresh == nil {
+		return false
+	}
+	current := c.Token()
+	next, changed, err := refresh(current)
+	if err != nil || !changed {
+		return false
+	}
+	next = strings.TrimSpace(next)
+	if next == "" || next == current {
+		return false
+	}
+	c.SetToken(next)
+	return true
 }
 
 type SyncerOptions struct {
