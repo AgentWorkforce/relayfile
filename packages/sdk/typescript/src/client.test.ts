@@ -1176,10 +1176,18 @@ describe("RelayFileClient — existing methods", () => {
         path: "/github/push/abc123.json",
         baseRevision: "rev_3",
         content: "{}",
-        contentIdentity: { kind: "github.push", key: "abc123" },
+        contentIdentity: {
+          kind: "github.push",
+          key: "abc123",
+          ttlSeconds: 2592000,
+        },
       });
       const body = JSON.parse((f.mock.calls[0]![1] as RequestInit).body as string);
-      expect(body.contentIdentity).toEqual({ kind: "github.push", key: "abc123" });
+      expect(body.contentIdentity).toEqual({
+        kind: "github.push",
+        key: "abc123",
+        ttlSeconds: 2592000,
+      });
     });
 
     it("omits contentIdentity from the body when not provided", async () => {
@@ -1270,7 +1278,15 @@ describe("RelayFileClient — existing methods", () => {
       const res: BulkWriteResponse = await client.bulkWrite({
         workspaceId: "ws_acme",
         files: [
-          { path: "/a.md", content: "a" },
+          {
+            path: "/a.md",
+            content: "a",
+            contentIdentity: {
+              kind: "mount-writeback-create-draft",
+              key: "ws_acme:/a.md:hash",
+              ttlSeconds: 2592000,
+            },
+          },
           { path: "/b.md", content: "b", encoding: "utf-8" },
         ],
       });
@@ -1292,7 +1308,15 @@ describe("RelayFileClient — existing methods", () => {
       expect(init.method).toBe("POST");
       expect(JSON.parse(init.body as string)).toEqual({
         files: [
-          { path: "/a.md", content: "a" },
+          {
+            path: "/a.md",
+            content: "a",
+            contentIdentity: {
+              kind: "mount-writeback-create-draft",
+              key: "ws_acme:/a.md:hash",
+              ttlSeconds: 2592000,
+            },
+          },
           { path: "/b.md", content: "b", encoding: "utf-8" },
         ],
       });

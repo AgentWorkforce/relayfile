@@ -104,6 +104,12 @@ func isDraftFileBasename(basename string) bool {
 	return draftFileBasenamePattern.MatchString(basename)
 }
 
+// IsDraftFilePath reports whether a path matches the relayfile-owned
+// draftFile() create-draft basename contract.
+func IsDraftFilePath(filePath string) bool {
+	return isDraftFileBasename(basenameOf(filePath))
+}
+
 // reconcileAckedDraftLocked applies the draftFile() rename contract after a
 // successful externally-executed writeback: the agent-authored draft is
 // renamed to the canonical id (or removed when the canonical record already

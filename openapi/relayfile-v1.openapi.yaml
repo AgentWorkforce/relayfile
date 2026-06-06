@@ -2460,6 +2460,8 @@ components:
         providerResult:
           type: object
           additionalProperties: true
+        contentIdentity:
+          $ref: '#/components/schemas/ContentIdentity'
         correlationId:
           type: string
         createdAt:
@@ -2847,6 +2849,8 @@ components:
         correlationId:
           type: string
           description: Correlation ID for tracing
+        contentIdentity:
+          $ref: '#/components/schemas/ContentIdentity'
 
     WritebackItem:
       type: object
@@ -2952,6 +2956,26 @@ components:
         encoding:
           type: string
           description: Content encoding, e.g. "base64" for binary data
+        contentIdentity:
+          $ref: '#/components/schemas/ContentIdentity'
+
+    ContentIdentity:
+      type: object
+      additionalProperties: false
+      required: [kind, key]
+      properties:
+        kind:
+          type: string
+          minLength: 1
+          description: Dedupe namespace for this write identity
+        key:
+          type: string
+          minLength: 1
+          description: Caller-provided idempotency key within the namespace
+        ttlSeconds:
+          type: integer
+          minimum: 0
+          description: Optional lifetime for the dedupe identity in seconds
 
     BulkWriteError:
       type: object

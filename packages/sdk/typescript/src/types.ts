@@ -59,6 +59,7 @@ export interface FileSemantics {
 export interface ContentIdentity {
   kind: string;
   key: string;
+  ttlSeconds?: number;
 }
 
 export interface FileReadResponse {

@@ -30,6 +30,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/agentworkforce/relayfile/internal/digest"
+	"github.com/agentworkforce/relayfile/internal/relayfile"
 	"github.com/fsnotify/fsnotify"
 	"nhooyr.io/websocket"
 	"nhooyr.io/websocket/wsjson"
@@ -62,6 +63,11 @@ func (e *SchemaValidationError) Is(target error) bool {
 }
 
 const defaultBulkFlushThreshold = 256
+
+const (
+	mountWritebackCreateDraftContentIdentityKind       = "mount-writeback-create-draft"
+	mountWritebackCreateDraftContentIdentityTTLSeconds = 2592000
+)
 
 // defaultFullPullEvery is the default cadence for the "trust but verify"
 // periodic full tree pull that runs from the incremental path. At 30s sync
@@ -1577,7 +1583,7 @@ func (s *Syncer) flushPendingBulkWrites(ctx context.Context, pending []pendingBu
 		s.logf("writeback flush refused: cloud-error circuit breaker is open; %d file(s) remain pending", len(pending))
 		return nil
 	}
-	for _, chunk := range chunkPendingBulkWrites(pending, maxWritebackBatchBytes()) {
+	for _, chunk := range chunkPendingBulkWrites(s.workspace, pending, maxWritebackBatchBytes()) {
 		if err := s.flushPendingBulkWriteChunk(ctx, chunk, conflicted); err != nil {
 			return err
 		}
@@ -1586,16 +1592,7 @@ func (s *Syncer) flushPendingBulkWrites(ctx context.Context, pending []pendingBu
 }
 
 func (s *Syncer) flushPendingBulkWriteChunk(ctx context.Context, pending []pendingBulkWrite, conflicted map[string]struct{}) error {
-	files := make([]BulkWriteFile, 0, len(pending))
-	for _, pendingWrite := range pending {
-		files = append(files, BulkWriteFile{
-			Path:        pendingWrite.remotePath,
-			ContentType: pendingWrite.snapshot.ContentType,
-			Content:     pendingWrite.snapshot.WireContent,
-			Encoding:    pendingWrite.snapshot.Encoding,
-		})
-	}
-
+	files := bulkWriteFilesForPending(s.workspace, pending)
 	response, err := s.client.WriteFilesBulk(ctx, s.workspace, files)
 	if err != nil {
 		s.recordCloudFailure(err)
@@ -1637,20 +1634,36 @@ func (s *Syncer) flushPendingBulkWriteChunk(ctx context.Context, pending []pendi
 	return firstErr
 }
 
-func bulkWriteFilesForPending(pending []pendingBulkWrite) []BulkWriteFile {
+func bulkWriteFilesForPending(workspaceID string, pending []pendingBulkWrite) []BulkWriteFile {
 	files := make([]BulkWriteFile, 0, len(pending))
 	for _, pendingWrite := range pending {
 		files = append(files, BulkWriteFile{
-			Path:        pendingWrite.remotePath,
-			ContentType: pendingWrite.snapshot.ContentType,
-			Content:     pendingWrite.snapshot.WireContent,
-			Encoding:    pendingWrite.snapshot.Encoding,
+			Path:            pendingWrite.remotePath,
+			ContentType:     pendingWrite.snapshot.ContentType,
+			Content:         pendingWrite.snapshot.WireContent,
+			Encoding:        pendingWrite.snapshot.Encoding,
+			ContentIdentity: mountWritebackCreateDraftContentIdentity(workspaceID, pendingWrite.remotePath, pendingWrite.snapshot.Hash),
 		})
 	}
 	return files
 }
 
-func chunkPendingBulkWrites(pending []pendingBulkWrite, maxBytes int64) [][]pendingBulkWrite {
+func mountWritebackCreateDraftContentIdentity(workspaceID, normalizedRemotePath, contentHash string) *ContentIdentity {
+	if !relayfile.IsDraftFilePath(normalizedRemotePath) {
+		return nil
+	}
+	return newMountWritebackCreateDraftContentIdentity(workspaceID, normalizedRemotePath, contentHash)
+}
+
+func newMountWritebackCreateDraftContentIdentity(workspaceID, normalizedRemotePath, contentHash string) *ContentIdentity {
+	return &ContentIdentity{
+		Kind:       mountWritebackCreateDraftContentIdentityKind,
+		Key:        fmt.Sprintf("%s:%s:%s", workspaceID, normalizedRemotePath, contentHash),
+		TTLSeconds: mountWritebackCreateDraftContentIdentityTTLSeconds,
+	}
+}
+
+func chunkPendingBulkWrites(workspaceID string, pending []pendingBulkWrite, maxBytes int64) [][]pendingBulkWrite {
 	if len(pending) == 0 {
 		return nil
 	}
@@ -1661,7 +1674,7 @@ func chunkPendingBulkWrites(pending []pendingBulkWrite, maxBytes int64) [][]pend
 	current := make([]pendingBulkWrite, 0, len(pending))
 	for _, item := range pending {
 		candidate := append(append([]pendingBulkWrite(nil), current...), item)
-		if len(current) > 0 && bulkWriteRequestSize(bulkWriteFilesForPending(candidate)) > maxBytes {
+		if len(current) > 0 && bulkWriteRequestSize(bulkWriteFilesForPending(workspaceID, candidate)) > maxBytes {
 			chunks = append(chunks, append([]pendingBulkWrite(nil), current...))
 			current = current[:0]
 		}

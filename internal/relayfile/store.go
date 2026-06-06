@@ -171,11 +171,29 @@ type WriteRequest struct {
 	CorrelationID string
 }
 
+type ContentIdentity struct {
+	Kind       string `json:"kind"`
+	Key        string `json:"key"`
+	TTLSeconds int    `json:"ttlSeconds,omitempty"`
+}
+
+func cloneContentIdentity(identity *ContentIdentity) *ContentIdentity {
+	if identity == nil {
+		return nil
+	}
+	return &ContentIdentity{
+		Kind:       identity.Kind,
+		Key:        identity.Key,
+		TTLSeconds: identity.TTLSeconds,
+	}
+}
+
 type BulkWriteFile struct {
-	Path        string `json:"path"`
-	ContentType string `json:"contentType"`
-	Content     string `json:"content"`
-	Encoding    string `json:"encoding"`
+	Path            string           `json:"path"`
+	ContentType     string           `json:"contentType"`
+	Content         string           `json:"content"`
+	Encoding        string           `json:"encoding"`
+	ContentIdentity *ContentIdentity `json:"contentIdentity,omitempty"`
 }
 
 type BulkWriteError struct {
@@ -208,20 +226,21 @@ type WriteResult struct {
 }
 
 type OperationStatus struct {
-	OpID           string         `json:"opId"`
-	Path           string         `json:"path,omitempty"`
-	Revision       string         `json:"revision,omitempty"`
-	Action         string         `json:"action,omitempty"`
-	Provider       string         `json:"provider,omitempty"`
-	Status         string         `json:"status"`
-	AttemptCount   int            `json:"attemptCount"`
-	NextAttemptAt  *string        `json:"nextAttemptAt,omitempty"`
-	LastError      *string        `json:"lastError,omitempty"`
-	ProviderResult map[string]any `json:"providerResult,omitempty"`
-	CorrelationID  string         `json:"correlationId,omitempty"`
-	CreatedAt      string         `json:"createdAt,omitempty"`
-	UpdatedAt      string         `json:"updatedAt,omitempty"`
-	CompletedAt    *string        `json:"completedAt,omitempty"`
+	OpID            string           `json:"opId"`
+	Path            string           `json:"path,omitempty"`
+	Revision        string           `json:"revision,omitempty"`
+	Action          string           `json:"action,omitempty"`
+	Provider        string           `json:"provider,omitempty"`
+	Status          string           `json:"status"`
+	AttemptCount    int              `json:"attemptCount"`
+	NextAttemptAt   *string          `json:"nextAttemptAt,omitempty"`
+	LastError       *string          `json:"lastError,omitempty"`
+	ProviderResult  map[string]any   `json:"providerResult,omitempty"`
+	ContentIdentity *ContentIdentity `json:"contentIdentity,omitempty"`
+	CorrelationID   string           `json:"correlationId,omitempty"`
+	CreatedAt       string           `json:"createdAt,omitempty"`
+	UpdatedAt       string           `json:"updatedAt,omitempty"`
+	CompletedAt     *string          `json:"completedAt,omitempty"`
 }
 
 type OperationFeed struct {
@@ -392,6 +411,7 @@ type WritebackAction struct {
 	Type             WritebackActionType `json:"type"`
 	ContentType      string              `json:"contentType,omitempty"`
 	Content          string              `json:"content,omitempty"`
+	ContentIdentity  *ContentIdentity    `json:"contentIdentity,omitempty"`
 	Provider         string              `json:"provider,omitempty"`
 	ProviderObjectID string              `json:"providerObjectId,omitempty"`
 	CorrelationID    string              `json:"correlationId,omitempty"`
@@ -512,11 +532,12 @@ type workspaceState struct {
 }
 
 type WritebackQueueItem struct {
-	WorkspaceID   string `json:"workspaceId"`
-	OpID          string `json:"opId"`
-	Path          string `json:"path"`
-	Revision      string `json:"revision"`
-	CorrelationID string `json:"correlationId"`
+	WorkspaceID     string           `json:"workspaceId"`
+	OpID            string           `json:"opId"`
+	Path            string           `json:"path"`
+	Revision        string           `json:"revision"`
+	ContentIdentity *ContentIdentity `json:"contentIdentity,omitempty"`
+	CorrelationID   string           `json:"correlationId"`
 }
 
 type writebackTask = WritebackQueueItem
@@ -967,11 +988,12 @@ func NewStoreWithOptions(opts StoreOptions) *Store {
 					continue
 				}
 				task := writebackTask{
-					WorkspaceID:   workspaceID,
-					OpID:          opID,
-					Path:          op.Path,
-					Revision:      op.Revision,
-					CorrelationID: op.CorrelationID,
+					WorkspaceID:     workspaceID,
+					OpID:            opID,
+					Path:            op.Path,
+					Revision:        op.Revision,
+					ContentIdentity: cloneContentIdentity(op.ContentIdentity),
+					CorrelationID:   op.CorrelationID,
 				}
 				delay := time.Duration(0)
 				if op.NextAttemptAt != nil {
@@ -1443,7 +1465,7 @@ func (s *Store) BulkWrite(workspaceID string, files []BulkWriteFile) (int, []Bul
 		if existed {
 			eventType = "file.updated"
 		}
-		result, task := s.recordWriteLocked(ws, path, revision, eventType, file.Provider, "")
+		result, task := s.recordWriteWithContentIdentityLocked(ws, path, revision, eventType, file.Provider, "", input.ContentIdentity)
 		_ = result
 		results = append(results, BulkWriteResult{
 			Path:        path,
@@ -3070,13 +3092,19 @@ func (s *Store) GetPendingWritebacks(workspaceID string) []map[string]any {
 		if op.Status != "pending" && op.Status != "running" {
 			continue
 		}
-		result = append(result, map[string]any{
+		itemOut := map[string]any{
 			"id":            item.OpID,
 			"workspaceId":   item.WorkspaceID,
 			"path":          item.Path,
 			"revision":      item.Revision,
 			"correlationId": item.CorrelationID,
-		})
+		}
+		if item.ContentIdentity != nil {
+			itemOut["contentIdentity"] = item.ContentIdentity
+		} else if op.ContentIdentity != nil {
+			itemOut["contentIdentity"] = op.ContentIdentity
+		}
+		result = append(result, itemOut)
 	}
 	return result
 }
@@ -3420,22 +3448,27 @@ func nowRFC3339NanoUTC() string {
 }
 
 func (s *Store) recordWriteLocked(ws *workspaceState, path, revision, eventType, provider, correlationID string) (WriteResult, writebackTask) {
+	return s.recordWriteWithContentIdentityLocked(ws, path, revision, eventType, provider, correlationID, nil)
+}
+
+func (s *Store) recordWriteWithContentIdentityLocked(ws *workspaceState, path, revision, eventType, provider, correlationID string, contentIdentity *ContentIdentity) (WriteResult, writebackTask) {
 	if provider == "" {
 	}
 	workspaceID := s.workspaceIDForStateLocked(ws)
 	opID := s.nextOperationIDLocked()
 	nowTS := nowRFC3339NanoUTC()
 	op := OperationStatus{
-		OpID:          opID,
-		Path:          path,
-		Revision:      revision,
-		Action:        string(writebackActionFromEventType(eventType)),
-		Provider:      provider,
-		Status:        "pending",
-		AttemptCount:  0,
-		CorrelationID: correlationID,
-		CreatedAt:     nowTS,
-		UpdatedAt:     nowTS,
+		OpID:            opID,
+		Path:            path,
+		Revision:        revision,
+		Action:          string(writebackActionFromEventType(eventType)),
+		Provider:        provider,
+		Status:          "pending",
+		AttemptCount:    0,
+		ContentIdentity: cloneContentIdentity(contentIdentity),
+		CorrelationID:   correlationID,
+		CreatedAt:       nowTS,
+		UpdatedAt:       nowTS,
 	}
 	ws.Ops[opID] = op
 
@@ -3460,7 +3493,7 @@ func (s *Store) recordWriteLocked(ws *workspaceState, path, revision, eventType,
 	result.Writeback.Provider = provider
 	result.Writeback.State = "pending"
 
-	task := writebackTask{WorkspaceID: workspaceID, OpID: opID, Path: path, Revision: revision, CorrelationID: correlationID}
+	task := writebackTask{WorkspaceID: workspaceID, OpID: opID, Path: path, Revision: revision, ContentIdentity: cloneContentIdentity(contentIdentity), CorrelationID: correlationID}
 	return result, task
 }
 
@@ -3806,10 +3839,14 @@ func (s *Store) processWriteback(task writebackTask) {
 		task.Revision = op.Revision
 	}
 	writeAction := WritebackAction{
-		WorkspaceID:   task.WorkspaceID,
-		Path:          task.Path,
-		Revision:      task.Revision,
-		CorrelationID: task.CorrelationID,
+		WorkspaceID:     task.WorkspaceID,
+		Path:            task.Path,
+		Revision:        task.Revision,
+		ContentIdentity: cloneContentIdentity(task.ContentIdentity),
+		CorrelationID:   task.CorrelationID,
+	}
+	if writeAction.ContentIdentity == nil {
+		writeAction.ContentIdentity = cloneContentIdentity(op.ContentIdentity)
 	}
 	if op.Provider != "" {
 		writeAction.Provider = op.Provider

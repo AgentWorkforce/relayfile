@@ -23,6 +23,7 @@ describe("dedup type contracts", () => {
     const identity: ContentIdentity = {
       kind: "push",
       key: "repo:abc:main",
+      ttlSeconds: 300,
     };
     const store: DedupStore = {
       async has(key) {
