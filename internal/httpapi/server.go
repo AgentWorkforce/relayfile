@@ -2201,9 +2201,12 @@ func (s *Server) handleWritebackAck(w http.ResponseWriter, r *http.Request, work
 	}
 
 	ack := relayfile.WritebackAck{}
-	if ok, ok2 := payload["success"].(bool); ok2 {
-		ack.Success = ok
+	success, ok := payload["success"].(bool)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "bad_request", "success must be a boolean", correlationID)
+		return
 	}
+	ack.Success = success
 	if e, ok := payload["error"].(string); ok {
 		ack.Error = e
 	}

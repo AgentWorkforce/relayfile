@@ -111,6 +111,7 @@ export type {
 export type {
   AckResponse,
   AckWritebackInput,
+  AckWritebackDraftDisposition,
   AckWritebackResponse,
   AdminIngressAlert,
   AdminIngressAlertProfile,
@@ -199,6 +200,8 @@ export type {
   SyncProviderStatusState,
   SyncRefreshRequest,
   SyncStatusResponse,
+  SweepWritebackDraftsInput,
+  SweepWritebackDraftsResponse,
   TreeEntry,
   TreeResponse,
   WritebackActionType,

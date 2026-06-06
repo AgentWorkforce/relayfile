@@ -127,6 +127,25 @@ func TestAckWithExternalIDRenamesDraftToCanonicalID(t *testing.T) {
 	}
 }
 
+func TestAckWithExternalIDInitializesLegacyNilProviderIndex(t *testing.T) {
+	store := newExternalStore(t)
+	draftPath := "/slack/channels/C0ALQ06AAUT/messages/messages " + draftUUIDA + ".json"
+	result := writeDraft(t, store, "ws_1", draftPath, `{"text":"hi"}`)
+	store.mu.Lock()
+	store.workspaces["ws_1"].ProviderIndex = nil
+	store.mu.Unlock()
+
+	if _, err := store.AcknowledgeWriteback("ws_1", result.OpID, WritebackAck{
+		Success:    true,
+		ExternalID: "1780018871.351819",
+	}, "corr_ack_1"); err != nil {
+		t.Fatalf("ack with nil provider index failed: %v", err)
+	}
+	if _, err := store.ReadFile("ws_1", "/slack/channels/C0ALQ06AAUT/messages/1780018871.351819.json"); err != nil {
+		t.Fatalf("expected canonical-id file after ack: %v", err)
+	}
+}
+
 func TestAckRenameIsClassificationExempt(t *testing.T) {
 	store := newExternalStore(t)
 	draftPath := "/slack/channels/C0ALQ06AAUT/messages/messages " + draftUUIDA + ".json"
@@ -617,6 +636,15 @@ func TestSweepRejectsBlankWorkspace(t *testing.T) {
 	}
 	if _, err := store.SweepWritebackDrafts("ws_unknown", SweepDraftsRequest{}); err != ErrNotFound {
 		t.Fatalf("expected ErrNotFound for unknown workspace, got %v", err)
+	}
+}
+
+func TestSweepRejectsPatternsWithPathSeparators(t *testing.T) {
+	store := newExternalStore(t)
+	for _, pattern := range []string{"drafts/*.json", `drafts\*.json`} {
+		if _, err := store.SweepWritebackDrafts("ws_1", SweepDraftsRequest{Patterns: []string{pattern}}); err != ErrInvalidInput {
+			t.Fatalf("expected ErrInvalidInput for pattern %q, got %v", pattern, err)
+		}
 	}
 }
 

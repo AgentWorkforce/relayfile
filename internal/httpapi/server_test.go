@@ -5820,6 +5820,54 @@ func TestWritebackAckWithExternalIDReconcilesDraft(t *testing.T) {
 	}
 }
 
+func TestWritebackAckRejectsMissingSuccess(t *testing.T) {
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{ExternalWritebackMode: true})
+	defer store.Close()
+	server := NewServer(store)
+	token := mustTestJWT(t, "dev-secret", "ws_1", "Worker1", []string{"fs:write", "sync:read", "sync:trigger"}, time.Now().Add(time.Hour))
+
+	writeResp := doRequest(t, server, request{
+		method: http.MethodPut,
+		path:   "/v1/workspaces/ws_1/fs/file?path=" + url.QueryEscape("/slack/channels/C0ALQ06AAUT/messages/messages 0e89a031-65f0-480e-a823-ab1d94b324ea.json"),
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_write_1",
+			"If-Match":         "0",
+		},
+		body: map[string]any{
+			"contentType": "application/json",
+			"content":     `{"text":"hi"}`,
+		},
+	})
+	if writeResp.Code != http.StatusAccepted {
+		t.Fatalf("expected 202 on draft write, got %d (%s)", writeResp.Code, writeResp.Body.String())
+	}
+	var writeResult relayfile.WriteResult
+	if err := json.NewDecoder(writeResp.Body).Decode(&writeResult); err != nil {
+		t.Fatalf("failed to decode write response: %v", err)
+	}
+
+	ackResp := doRequest(t, server, request{
+		method: http.MethodPost,
+		path:   "/v1/workspaces/ws_1/writeback/" + writeResult.OpID + "/ack",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_ack_1",
+		},
+		body: map[string]any{"error": "missing success"},
+	})
+	if ackResp.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 on malformed ack, got %d (%s)", ackResp.Code, ackResp.Body.String())
+	}
+	ops, err := store.ListOperations("ws_1", "", "", "", "", 10)
+	if err != nil {
+		t.Fatalf("list operations failed: %v", err)
+	}
+	if len(ops.Items) != 1 || ops.Items[0].Status != "pending" {
+		t.Fatalf("malformed ack must leave operation pending, got %+v", ops.Items)
+	}
+}
+
 // Issue #242: POST /writeback/sweep-drafts drains accumulated draft residue.
 func TestWritebackSweepDraftsEndpoint(t *testing.T) {
 	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{ExternalWritebackMode: true})

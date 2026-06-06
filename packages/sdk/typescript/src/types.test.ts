@@ -3,6 +3,9 @@ import type {
   DigestHandler,
   DigestSection,
   LayoutManifest,
+  SweepWritebackDraftsInput,
+  SweepWritebackDraftsResponse,
+  AckWritebackDraftDisposition,
   WritebackDeadLetterError,
   WritebackDeadLetterErrorCode,
   WritebackItem,
@@ -84,6 +87,30 @@ describe("workspace primitive public types", () => {
 
     expectTypeOf(item).toMatchTypeOf<WritebackItem>();
     expect(item.state).toBe("dead");
+  });
+
+  it("exports writeback ack and sweep public types", () => {
+    const draft = {
+      action: "renamed",
+      from: "/slack/channels/C/messages/messages 0e89a031-65f0-480e-a823-ab1d94b324ea.json",
+      to: "/slack/channels/C/messages/1780018871.351819.json"
+    } satisfies AckWritebackDraftDisposition;
+    const input = {
+      workspaceId: "ws_acme",
+      pathPrefix: "/slack/channels/C",
+      patterns: ["wb-*.json"],
+      apply: false
+    } satisfies SweepWritebackDraftsInput;
+    const response = {
+      dryRun: true,
+      scanned: 1,
+      removed: [{ path: draft.from, reason: "space-uuid-draft" }],
+      skipped: []
+    } satisfies SweepWritebackDraftsResponse;
+
+    expectTypeOf(input).toMatchTypeOf<SweepWritebackDraftsInput>();
+    expectTypeOf(response).toMatchTypeOf<SweepWritebackDraftsResponse>();
+    expect(response.removed[0]?.path).toBe(draft.from);
   });
 
   it("accepts digest handlers that return null or a section", async () => {
