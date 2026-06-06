@@ -43,7 +43,27 @@ func main() {
 		log.Fatalf("failed to initialize storage backends: %v", err)
 	}
 
-	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{
+	store := relayfile.NewStoreWithOptions(storeOptionsFromEnv(stateBackend, envelopeQueue, writebackQueue))
+	server, err := httpapi.NewServerWithConfig(store, httpapi.ServerConfig{
+		JWKSURL:            strings.TrimSpace(os.Getenv("RELAYAUTH_JWKS_URL")),
+		InternalHMACSecret: internalSecret,
+		InternalMaxSkew:    durationEnv("RELAYFILE_INTERNAL_MAX_SKEW", 5*time.Minute),
+		RateLimitMax:       intEnv("RELAYFILE_RATE_LIMIT_MAX", 0),
+		RateLimitWindow:    durationEnv("RELAYFILE_RATE_LIMIT_WINDOW", time.Minute),
+		MaxBodyBytes:       int64Env("RELAYFILE_MAX_BODY_BYTES", 0),
+	})
+	if err != nil {
+		log.Fatalf("invalid relayfile server config: %v", err)
+	}
+
+	log.Printf("relayfile listening on %s", addr)
+	if err := http.ListenAndServe(addr, server); err != nil {
+		log.Fatalf("server failed: %v", err)
+	}
+}
+
+func storeOptionsFromEnv(stateBackend relayfile.StateBackend, envelopeQueue relayfile.EnvelopeQueue, writebackQueue relayfile.WritebackQueue) relayfile.StoreOptions {
+	return relayfile.StoreOptions{
 		StateBackend:           stateBackend,
 		StateFile:              os.Getenv("RELAYFILE_STATE_FILE"),
 		MaxWritebackAttempts:   intEnv("RELAYFILE_MAX_WRITEBACK_ATTEMPTS", 0),
@@ -62,22 +82,12 @@ func main() {
 		Adapters:               buildAdaptersFromEnv(),
 		BackendProfile:         strings.TrimSpace(os.Getenv("RELAYFILE_BACKEND_PROFILE")),
 		ExternalWritebackMode:  boolEnv("RELAYFILE_EXTERNAL_WRITEBACK", true),
-	})
-	server, err := httpapi.NewServerWithConfig(store, httpapi.ServerConfig{
-		JWKSURL:            strings.TrimSpace(os.Getenv("RELAYAUTH_JWKS_URL")),
-		InternalHMACSecret: internalSecret,
-		InternalMaxSkew:    durationEnv("RELAYFILE_INTERNAL_MAX_SKEW", 5*time.Minute),
-		RateLimitMax:       intEnv("RELAYFILE_RATE_LIMIT_MAX", 0),
-		RateLimitWindow:    durationEnv("RELAYFILE_RATE_LIMIT_WINDOW", time.Minute),
-		MaxBodyBytes:       int64Env("RELAYFILE_MAX_BODY_BYTES", 0),
-	})
-	if err != nil {
-		log.Fatalf("invalid relayfile server config: %v", err)
-	}
-
-	log.Printf("relayfile listening on %s", addr)
-	if err := http.ListenAndServe(addr, server); err != nil {
-		log.Fatalf("server failed: %v", err)
+		DeleteStormThreshold:   intEnv("RELAYFILE_DELETE_STORM_THRESHOLD", 0),
+		DeleteStormWindow:      durationEnv("RELAYFILE_DELETE_STORM_WINDOW", 0),
+		StaleRunningOpThreshold: durationEnv(
+			"RELAYFILE_STALE_RUNNING_OP_THRESHOLD",
+			0,
+		),
 	}
 }
 

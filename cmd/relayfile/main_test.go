@@ -73,6 +73,23 @@ func TestEnvHelpersUseFallbackWhenUnset(t *testing.T) {
 	}
 }
 
+func TestStoreOptionsFromEnvIncludesDeleteStormAndStaleRunningGates(t *testing.T) {
+	t.Setenv("RELAYFILE_DELETE_STORM_THRESHOLD", "25")
+	t.Setenv("RELAYFILE_DELETE_STORM_WINDOW", "2m")
+	t.Setenv("RELAYFILE_STALE_RUNNING_OP_THRESHOLD", "15m")
+
+	opts := storeOptionsFromEnv(nil, nil, nil)
+	if opts.DeleteStormThreshold != 25 {
+		t.Fatalf("expected delete storm threshold 25, got %d", opts.DeleteStormThreshold)
+	}
+	if opts.DeleteStormWindow != 2*time.Minute {
+		t.Fatalf("expected delete storm window 2m, got %s", opts.DeleteStormWindow)
+	}
+	if opts.StaleRunningOpThreshold != 15*time.Minute {
+		t.Fatalf("expected stale running op threshold 15m, got %s", opts.StaleRunningOpThreshold)
+	}
+}
+
 func TestBuildStateBackendFromEnvUnset(t *testing.T) {
 	t.Setenv("RELAYFILE_STATE_BACKEND_DSN", "")
 	t.Setenv("RELAYFILE_STATE_FILE", "")

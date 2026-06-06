@@ -370,7 +370,8 @@ export type OperationStatus =
   | "succeeded"
   | "failed"
   | "dead_lettered"
-  | "canceled";
+  | "canceled"
+  | "quarantined";
 
 export type WritebackActionType = "file_upsert" | "file_delete";
 
