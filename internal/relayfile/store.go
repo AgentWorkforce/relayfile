@@ -366,6 +366,13 @@ type StoreOptions struct {
 	// DeleteStormWindow is the sliding window for DeleteStormThreshold
 	// (default 1m when the breaker is enabled).
 	DeleteStormWindow time.Duration
+	// StaleRunningOpThreshold enables the boot staleness gate (#249,
+	// op_20440 class) when > 0: an op found "running" at boot whose
+	// UpdatedAt is older than this is quarantined instead of re-armed —
+	// verb-agnostic, since a stuck-running upsert is an armed duplicate
+	// just like a stuck delete. Fresh running ops keep at-least-once
+	// crash semantics.
+	StaleRunningOpThreshold time.Duration
 }
 
 type ProviderWriteFunc func(workspaceID, path, revision string) error
