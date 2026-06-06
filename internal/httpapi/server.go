@@ -2195,17 +2195,24 @@ func (s *Server) handleWritebackAck(w http.ResponseWriter, r *http.Request, work
 		return
 	}
 
-	success := false
+	ack := relayfile.WritebackAck{}
 	if ok, ok2 := payload["success"].(bool); ok2 {
-		success = ok
+		ack.Success = ok
 	}
-
-	errMsg := ""
 	if e, ok := payload["error"].(string); ok {
-		errMsg = e
+		ack.Error = e
+	}
+	// Issue #242: a successful ack may carry the provider-assigned id (and
+	// optionally the canonical projection path) so the service can reconcile
+	// the agent-authored draft file per the draftFile() rename contract.
+	if externalID, ok := payload["externalId"].(string); ok {
+		ack.ExternalID = externalID
+	}
+	if canonicalPath, ok := payload["canonicalPath"].(string); ok {
+		ack.CanonicalPath = canonicalPath
 	}
 
-	resp, err := s.store.AcknowledgeWriteback(workspaceID, itemID, success, errMsg, correlationID)
+	resp, err := s.store.AcknowledgeWriteback(workspaceID, itemID, ack, correlationID)
 	if err != nil {
 		if err == relayfile.ErrNotFound {
 			writeError(w, http.StatusNotFound, "not_found", err.Error(), correlationID)
