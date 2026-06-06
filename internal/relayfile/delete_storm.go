@@ -71,26 +71,67 @@ func (s *Store) admitDeleteLocked(workspaceID string, now time.Time) error {
 // consumers never see them, and ReplayOperation refuses them. Releasing a
 // quarantined op is a deliberate operator action (ack it, or a future
 // explicit release API) — never automatic.
+// Two verb-asymmetric rules, matching the two armed classes the 2026-06-06
+// incident produced:
+//
+//   - DELETE STORMS: a rehydrated pending/running file_delete burst above
+//     DeleteStormThreshold is the storm signature at a different entry point.
+//   - STALE RUNNING (op_20440 class, verb-agnostic): any op still "running"
+//     at boot executed in a previous process life — its executor is dead.
+//     Ones older than StaleRunningOpThreshold are abandoned and quarantined;
+//     fresher ones keep the existing at-least-once crash semantics and
+//     re-arm as before. A stuck-running upsert is an armed provider
+//     duplicate exactly like a stuck delete.
 func (s *Store) quarantineBootDeleteStorms() {
-	if s.deleteStormThreshold <= 0 {
+	if s.deleteStormThreshold <= 0 && s.staleRunningOpThreshold <= 0 {
 		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	now := time.Now().UTC()
 	changed := false
 	for _, ws := range s.workspaces {
-		stormOps := make([]string, 0)
-		for opID, op := range ws.Ops {
-			if (op.Status == "pending" || op.Status == "running") && op.Action == string(WritebackActionFileDelete) {
-				stormOps = append(stormOps, opID)
+		quarantine := make([]string, 0)
+
+		if s.deleteStormThreshold > 0 {
+			stormOps := make([]string, 0)
+			for opID, op := range ws.Ops {
+				if (op.Status == "pending" || op.Status == "running") && op.Action == string(WritebackActionFileDelete) {
+					stormOps = append(stormOps, opID)
+				}
+			}
+			if len(stormOps) > s.deleteStormThreshold {
+				quarantine = append(quarantine, stormOps...)
 			}
 		}
-		if len(stormOps) <= s.deleteStormThreshold {
+
+		if s.staleRunningOpThreshold > 0 {
+			for opID, op := range ws.Ops {
+				if op.Status != "running" {
+					continue
+				}
+				updatedAt, err := time.Parse(time.RFC3339Nano, op.UpdatedAt)
+				if err != nil {
+					// Unparseable age on an op from a dead process life:
+					// treat as stale rather than re-arm blind.
+					quarantine = append(quarantine, opID)
+					continue
+				}
+				if now.Sub(updatedAt) > s.staleRunningOpThreshold {
+					quarantine = append(quarantine, opID)
+				}
+			}
+		}
+
+		if len(quarantine) == 0 {
 			continue
 		}
 		nowTS := nowRFC3339NanoUTC()
-		for _, opID := range stormOps {
+		for _, opID := range quarantine {
 			op := ws.Ops[opID]
+			if op.Status == "quarantined" {
+				continue
+			}
 			op.Status = "quarantined"
 			op.NextAttemptAt = nil
 			op.UpdatedAt = nowTS

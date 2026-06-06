@@ -494,6 +494,7 @@ type Store struct {
 	deleteStormThreshold    int
 	deleteStormWindow       time.Duration
 	deleteStormAdmissions   map[string][]time.Time
+	staleRunningOpThreshold time.Duration
 	closed                  chan struct{}
 	queueCtx                context.Context
 	queueCancel             context.CancelFunc
@@ -899,6 +900,7 @@ func NewStoreWithOptions(opts StoreOptions) *Store {
 		deleteStormThreshold:    opts.DeleteStormThreshold,
 		deleteStormWindow:       opts.DeleteStormWindow,
 		deleteStormAdmissions:   map[string][]time.Time{},
+		staleRunningOpThreshold: opts.StaleRunningOpThreshold,
 		closed:                  make(chan struct{}),
 		queueCtx:                queueCtx,
 		queueCancel:             queueCancel,
