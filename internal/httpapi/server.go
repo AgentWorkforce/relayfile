@@ -219,6 +219,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		requiredScope = "sync:trigger"
 		route = "writeback_ack"
 	case len(parts) == 5 && parts[3] == "writeback" && parts[4] == "sweep-drafts" && r.Method == http.MethodPost:
+		// sync:trigger (not fs:write) is deliberate: the sweep is a
+		// writeback-lifecycle operation in the same family as
+		// /writeback/{id}/ack above, and the tokens operationally available
+		// to run it (mount / writeback-consumer tokens) carry sync:trigger.
+		// The destructive surface is compensated in the store: dry-run by
+		// default, strict draft name-shape matching, and provider-linked +
+		// pending-writeback guards.
 		requiredScope = "sync:trigger"
 		route = "writeback_sweep_drafts"
 	default:
