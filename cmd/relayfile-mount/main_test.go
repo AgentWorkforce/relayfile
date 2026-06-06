@@ -114,6 +114,16 @@ func TestWebSocketMaintenanceDoesNotLowerReconcileCadence(t *testing.T) {
 	}
 }
 
+func TestWriteOnlyMountDisablesWebSocketCadence(t *testing.T) {
+	cfg := mountConfig{websocketEnabled: true, syncMode: syncModeWriteOnly}
+	if mountWebSocketEnabled(cfg) {
+		t.Fatal("write-only mount should not maintain websocket connections")
+	}
+	if !shouldReconcileMountCycle(mountWebSocketEnabled(cfg), 1) {
+		t.Fatal("write-only mount should keep regular reconcile cadence")
+	}
+}
+
 func TestResolveMountMode(t *testing.T) {
 	tests := []struct {
 		name    string

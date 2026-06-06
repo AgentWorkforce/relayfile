@@ -441,7 +441,7 @@ func runSinglePollingMount(rootCtx context.Context, cfg mountConfig) error {
 			log.Printf("mount sync stopping: %v", rootCtx.Err())
 			return nil
 		case <-wsTicker.C:
-			if cfg.websocketEnabled {
+			if mountWebSocketEnabled(cfg) {
 				ctx, cancel := context.WithTimeout(rootCtx, cfg.timeout)
 				if err := syncer.MaintainWebSocket(ctx); err != nil {
 					log.Printf("websocket unavailable; using polling sync: %v", err)
@@ -450,7 +450,7 @@ func runSinglePollingMount(rootCtx context.Context, cfg mountConfig) error {
 			}
 		case <-timer.C:
 			cycle++
-			reconcile := shouldReconcileMountCycle(cfg.websocketEnabled, cycle)
+			reconcile := shouldReconcileMountCycle(mountWebSocketEnabled(cfg), cycle)
 			if reconcile {
 				run(true)
 			}
@@ -714,6 +714,10 @@ func normalizeTokenScopes(raw any) []string {
 
 func shouldReconcileMountCycle(websocketEnabled bool, cycle int) bool {
 	return !websocketEnabled || cycle%websocketReconcileEvery == 0
+}
+
+func mountWebSocketEnabled(cfg mountConfig) bool {
+	return cfg.websocketEnabled && cfg.syncMode != syncModeWriteOnly
 }
 
 func clampJitterRatio(value float64) float64 {
