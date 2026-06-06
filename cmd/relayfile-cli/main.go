@@ -5750,7 +5750,7 @@ func catalogWorkspaceIDFromCatalog(catalog workspaceCatalog, name string) (strin
 		return "", false
 	}
 	for _, workspace := range catalog.Workspaces {
-		if workspace.Name == name || workspace.ID == name {
+		if workspace.Name == name || workspace.ID == name || workspace.RelayWorkspaceID == name {
 			if strings.TrimSpace(workspace.ID) != "" {
 				return strings.TrimSpace(workspace.ID), true
 			}

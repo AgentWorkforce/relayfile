@@ -163,6 +163,40 @@ func TestWritebackSweepDraftsRejectsExtraArgs(t *testing.T) {
 	}
 }
 
+func TestWritebackSweepDraftsResolvesRelayWorkspaceIDFromCatalog(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/workspaces/ws_local/writeback/sweep-drafts" {
+			t.Fatalf("unexpected request path: %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"dryRun": true, "scanned": 0, "removed": [], "skipped": []}`))
+	}))
+	defer server.Close()
+
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+	if err := saveCredentials(credentials{Server: server.URL, Token: "rf_token"}); err != nil {
+		t.Fatalf("saveCredentials failed: %v", err)
+	}
+	if _, err := upsertWorkspaceDetails(workspaceRecord{
+		Name:             "cloud-prod",
+		ID:               "ws_local",
+		RelayWorkspaceID: "rw_legacy",
+		CreatedAt:        time.Now().UTC().Format(time.RFC3339),
+		AgentName:        "relayfile-cli",
+	}); err != nil {
+		t.Fatalf("upsertWorkspaceDetails failed: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := run(
+		[]string{"writeback", "sweep-drafts", "rw_legacy"},
+		strings.NewReader(""), &stdout, &stdout,
+	); err != nil {
+		t.Fatalf("run writeback sweep-drafts failed: %v", err)
+	}
+}
+
 func TestWritebackMissingSubcommandMentionsSweepDrafts(t *testing.T) {
 	var stdout bytes.Buffer
 	err := run([]string{"writeback"}, strings.NewReader(""), &stdout, &stdout)

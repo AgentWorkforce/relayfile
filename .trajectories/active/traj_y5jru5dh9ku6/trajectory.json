@@ -6,8 +6,35 @@
   },
   "status": "active",
   "startedAt": "2026-06-06T00:15:50.055Z",
-  "agents": [],
-  "chapters": [],
+  "agents": [
+    {
+      "name": "default",
+      "role": "lead",
+      "joinedAt": "2026-06-06T09:30:48.346Z"
+    }
+  ],
+  "chapters": [
+    {
+      "id": "chap_4bdecpwon7td",
+      "title": "Work",
+      "agentName": "default",
+      "startedAt": "2026-06-06T09:30:48.346Z",
+      "events": [
+        {
+          "ts": 1780738248347,
+          "type": "decision",
+          "content": "Validated ack strictness against OpenAPI and SDK callers: Validated ack strictness against OpenAPI and SDK callers",
+          "raw": {
+            "question": "Validated ack strictness against OpenAPI and SDK callers",
+            "chosen": "Validated ack strictness against OpenAPI and SDK callers",
+            "alternatives": [],
+            "reasoning": "The OpenAPI request body already requires boolean success and TypeScript/Python clients send success on ack, so rejecting missing/non-boolean success matches the current HTTP contract."
+          },
+          "significance": "high"
+        }
+      ]
+    }
+  ],
   "commits": [],
   "filesChanged": [],
   "projectId": "/home/daytona/workspace",
