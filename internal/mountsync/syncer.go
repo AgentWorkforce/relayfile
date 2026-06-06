@@ -30,6 +30,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/agentworkforce/relayfile/internal/digest"
+	"github.com/agentworkforce/relayfile/internal/relayfile"
 	"github.com/fsnotify/fsnotify"
 	"nhooyr.io/websocket"
 	"nhooyr.io/websocket/wsjson"
@@ -1641,10 +1642,17 @@ func bulkWriteFilesForPending(workspaceID string, pending []pendingBulkWrite) []
 			ContentType:     pendingWrite.snapshot.ContentType,
 			Content:         pendingWrite.snapshot.WireContent,
 			Encoding:        pendingWrite.snapshot.Encoding,
-			ContentIdentity: newMountWritebackCreateDraftContentIdentity(workspaceID, pendingWrite.remotePath, pendingWrite.snapshot.Hash),
+			ContentIdentity: mountWritebackCreateDraftContentIdentity(workspaceID, pendingWrite.remotePath, pendingWrite.snapshot.Hash),
 		})
 	}
 	return files
+}
+
+func mountWritebackCreateDraftContentIdentity(workspaceID, normalizedRemotePath, contentHash string) *ContentIdentity {
+	if !relayfile.IsDraftFilePath(normalizedRemotePath) {
+		return nil
+	}
+	return newMountWritebackCreateDraftContentIdentity(workspaceID, normalizedRemotePath, contentHash)
 }
 
 func newMountWritebackCreateDraftContentIdentity(workspaceID, normalizedRemotePath, contentHash string) *ContentIdentity {

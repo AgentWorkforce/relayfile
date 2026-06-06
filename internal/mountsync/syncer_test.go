@@ -1825,20 +1825,7 @@ func TestBulkWrite_ContentIdentityGoldenVector(t *testing.T) {
 	if snapshot.Hash != contentHash {
 		t.Fatalf("golden vector hash = %q, want %q", snapshot.Hash, contentHash)
 	}
-	files := bulkWriteFilesForPending(workspaceID, []pendingBulkWrite{{
-		remotePath: remotePath,
-		snapshot:   snapshot,
-	}})
-	if len(files) != 1 {
-		t.Fatalf("expected one bulk file, got %d", len(files))
-	}
-	if files[0].Path != remotePath {
-		t.Fatalf("bulk file path = %q, want %q", files[0].Path, remotePath)
-	}
-	identity := files[0].ContentIdentity
-	if identity == nil {
-		t.Fatal("expected content identity on bulk file")
-	}
+	identity := newMountWritebackCreateDraftContentIdentity(workspaceID, remotePath, snapshot.Hash)
 	if identity.Kind != mountWritebackCreateDraftContentIdentityKind {
 		t.Fatalf("content identity kind = %q, want %q", identity.Kind, mountWritebackCreateDraftContentIdentityKind)
 	}
@@ -1862,7 +1849,7 @@ func TestBulkWrite_ContentIdentityGoldenVector(t *testing.T) {
 func TestBulkWrite_ContentIdentityStabilityAndIsolation(t *testing.T) {
 	const (
 		workspaceID = "ws_test"
-		remotePath  = "/slack/channels/C123/messages/messages 5ab77d67.json"
+		remotePath  = "/slack/channels/C123/messages/messages 5ab77d67-1111-4111-8111-123456789abc.json"
 	)
 
 	snapshot := newLocalSnapshot(remotePath, []byte("{\"text\":\"same\"}\n"))
@@ -1890,7 +1877,7 @@ func TestBulkWrite_ContentIdentityStabilityAndIsolation(t *testing.T) {
 	}
 
 	otherPath := bulkWriteFilesForPending(workspaceID, []pendingBulkWrite{{
-		remotePath: "/slack/channels/C123/messages/messages other.json",
+		remotePath: "/slack/channels/C123/messages/messages 6ab77d67-2222-4222-8222-123456789abc.json",
 		snapshot:   snapshot,
 	}})
 	if otherPath[0].ContentIdentity.Key == files[0].ContentIdentity.Key {
@@ -1906,11 +1893,58 @@ func TestBulkWrite_ContentIdentityStabilityAndIsolation(t *testing.T) {
 	}
 }
 
+func TestBulkWrite_ContentIdentityOnlyForCreateDraftPaths(t *testing.T) {
+	const workspaceID = "ws_test"
+	snapshot := newLocalSnapshot("/notion/pages/pages 5ab77d67-1111-4111-8111-123456789abc.json", []byte("{}\n"))
+
+	draft := bulkWriteFilesForPending(workspaceID, []pendingBulkWrite{{
+		remotePath: "/notion/pages/pages 5ab77d67-1111-4111-8111-123456789abc.json",
+		snapshot:   snapshot,
+	}})
+	if draft[0].ContentIdentity == nil {
+		t.Fatal("expected content identity for space-uuid create draft path")
+	}
+
+	stable := bulkWriteFilesForPending(workspaceID, []pendingBulkWrite{{
+		remotePath: "/notion/pages/page-1.md",
+		snapshot:   snapshot,
+	}})
+	if stable[0].ContentIdentity != nil {
+		t.Fatalf("stable non-draft path should not carry content identity: %+v", stable[0].ContentIdentity)
+	}
+
+	nonUUID := bulkWriteFilesForPending(workspaceID, []pendingBulkWrite{{
+		remotePath: "/slack/channels/C123/messages/messages not-a-uuid.json",
+		snapshot:   snapshot,
+	}})
+	if nonUUID[0].ContentIdentity != nil {
+		t.Fatalf("non-uuid draft-like path should not carry content identity: %+v", nonUUID[0].ContentIdentity)
+	}
+}
+
+func TestBulkWrite_ContentIdentityOmittedForStablePathRevert(t *testing.T) {
+	const (
+		workspaceID = "ws_test"
+		remotePath  = "/notion/pages/page-1.md"
+	)
+
+	for _, content := range []string{"# C\n", "# D\n", "# C\n"} {
+		files := bulkWriteFilesForPending(workspaceID, []pendingBulkWrite{{
+			remotePath: remotePath,
+			snapshot:   newLocalSnapshot(remotePath, []byte(content)),
+		}})
+		if files[0].ContentIdentity != nil {
+			t.Fatalf("stable path content %q should not carry content identity: %+v", content, files[0].ContentIdentity)
+		}
+	}
+}
+
 func TestBulkWrite_FlushSendsContentIdentity(t *testing.T) {
 	const (
 		workspaceID = "ws_test"
 		content     = "{\"channel\":\"C123\",\"text\":\"hello writeback idempotency\"}\n"
-		key         = "ws_test:/slack/channels/C123/messages/messages 5ab77d67.json:751f9591557700f69b5ceefcdec7ead8563a10f0a712c501a5028699be021511"
+		draftID     = "5ab77d67-1111-4111-8111-123456789abc"
+		key         = "ws_test:/slack/channels/C123/messages/messages 5ab77d67-1111-4111-8111-123456789abc.json:751f9591557700f69b5ceefcdec7ead8563a10f0a712c501a5028699be021511"
 	)
 
 	client := &fakeClient{files: map[string]RemoteFile{}}
@@ -1919,7 +1953,7 @@ func TestBulkWrite_FlushSendsContentIdentity(t *testing.T) {
 	if err := os.MkdirAll(messageDir, 0o755); err != nil {
 		t.Fatalf("mkdir message dir failed: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(messageDir, "messages 5ab77d67.json"), []byte(content), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(messageDir, "messages "+draftID+".json"), []byte(content), 0o644); err != nil {
 		t.Fatalf("write draft failed: %v", err)
 	}
 
