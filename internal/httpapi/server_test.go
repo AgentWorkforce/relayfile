@@ -5741,6 +5741,182 @@ func TestWritebackQueueACK(t *testing.T) {
 	}
 }
 
+// Issue #242: an ack carrying externalId reconciles the agent-authored draft
+// (draftFile() rename contract) and reports the disposition.
+func TestWritebackAckWithExternalIDReconcilesDraft(t *testing.T) {
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{ExternalWritebackMode: true})
+	defer store.Close()
+	server := NewServer(store)
+	token := mustTestJWT(t, "dev-secret", "ws_1", "Worker1", []string{"fs:read", "fs:write", "sync:read", "sync:trigger"}, time.Now().Add(time.Hour))
+
+	draftPath := "/slack/channels/C0ALQ06AAUT/messages/messages 0e89a031-65f0-480e-a823-ab1d94b324ea.json"
+	writeResp := doRequest(t, server, request{
+		method: http.MethodPut,
+		path:   "/v1/workspaces/ws_1/fs/file?path=" + url.QueryEscape(draftPath),
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_write_1",
+			"If-Match":         "0",
+		},
+		body: map[string]any{
+			"contentType": "application/json",
+			"content":     `{"text":"hi"}`,
+		},
+	})
+	if writeResp.Code != http.StatusAccepted {
+		t.Fatalf("expected 202 on draft write, got %d (%s)", writeResp.Code, writeResp.Body.String())
+	}
+	var writeResult relayfile.WriteResult
+	if err := json.NewDecoder(writeResp.Body).Decode(&writeResult); err != nil {
+		t.Fatalf("failed to decode write response: %v", err)
+	}
+
+	ackResp := doRequest(t, server, request{
+		method: http.MethodPost,
+		path:   "/v1/workspaces/ws_1/writeback/" + writeResult.OpID + "/ack",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_ack_1",
+		},
+		body: map[string]any{
+			"success":    true,
+			"externalId": "1780018871.351819",
+		},
+	})
+	if ackResp.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK on ack, got %d (%s)", ackResp.Code, ackResp.Body.String())
+	}
+	var ackBody map[string]any
+	if err := json.NewDecoder(ackResp.Body).Decode(&ackBody); err != nil {
+		t.Fatalf("failed to decode ack response: %v", err)
+	}
+	draft, _ := ackBody["draft"].(map[string]any)
+	if draft == nil || draft["action"] != "renamed" {
+		t.Fatalf("expected renamed draft disposition, got %v", ackBody)
+	}
+
+	readDraft := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/workspaces/ws_1/fs/file?path=" + url.QueryEscape(draftPath),
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_read_1",
+		},
+	})
+	if readDraft.Code != http.StatusNotFound {
+		t.Fatalf("expected draft gone after ack, got %d", readDraft.Code)
+	}
+	canonicalPath := "/slack/channels/C0ALQ06AAUT/messages/1780018871.351819.json"
+	readCanonical := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/workspaces/ws_1/fs/file?path=" + url.QueryEscape(canonicalPath),
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_read_2",
+		},
+	})
+	if readCanonical.Code != http.StatusOK {
+		t.Fatalf("expected canonical-id file after ack, got %d (%s)", readCanonical.Code, readCanonical.Body.String())
+	}
+}
+
+// Issue #242: POST /writeback/sweep-drafts drains accumulated draft residue.
+func TestWritebackSweepDraftsEndpoint(t *testing.T) {
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{ExternalWritebackMode: true})
+	defer store.Close()
+	server := NewServer(store)
+	token := mustTestJWT(t, "dev-secret", "ws_1", "Worker1", []string{"fs:read", "fs:write", "sync:read", "sync:trigger"}, time.Now().Add(time.Hour))
+
+	draftPath := "/slack/channels/C0ALQ06AAUT/messages/messages 0e89a031-65f0-480e-a823-ab1d94b324ea.json"
+	writeResp := doRequest(t, server, request{
+		method: http.MethodPut,
+		path:   "/v1/workspaces/ws_1/fs/file?path=" + url.QueryEscape(draftPath),
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_write_1",
+			"If-Match":         "0",
+		},
+		body: map[string]any{
+			"contentType": "application/json",
+			"content":     `{"text":"old"}`,
+		},
+	})
+	if writeResp.Code != http.StatusAccepted {
+		t.Fatalf("expected 202 on draft write, got %d (%s)", writeResp.Code, writeResp.Body.String())
+	}
+	var writeResult relayfile.WriteResult
+	if err := json.NewDecoder(writeResp.Body).Decode(&writeResult); err != nil {
+		t.Fatalf("failed to decode write response: %v", err)
+	}
+	// Mark the writeback delivered (legacy path, no externalId) so the file
+	// becomes residue rather than an in-flight draft.
+	ackResp := doRequest(t, server, request{
+		method: http.MethodPost,
+		path:   "/v1/workspaces/ws_1/writeback/" + writeResult.OpID + "/ack",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_ack_1",
+		},
+		body: map[string]any{"success": true},
+	})
+	if ackResp.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK on ack, got %d (%s)", ackResp.Code, ackResp.Body.String())
+	}
+
+	// Default is a dry run: candidates reported, nothing removed.
+	dryResp := doRequest(t, server, request{
+		method: http.MethodPost,
+		path:   "/v1/workspaces/ws_1/writeback/sweep-drafts",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_sweep_1",
+		},
+		body: map[string]any{},
+	})
+	if dryResp.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK on dry-run sweep, got %d (%s)", dryResp.Code, dryResp.Body.String())
+	}
+	var dryResult relayfile.SweepDraftsResult
+	if err := json.NewDecoder(dryResp.Body).Decode(&dryResult); err != nil {
+		t.Fatalf("failed to decode sweep response: %v", err)
+	}
+	if !dryResult.DryRun || len(dryResult.Removed) != 1 || dryResult.Removed[0].Path != draftPath {
+		t.Fatalf("unexpected dry-run result: %+v", dryResult)
+	}
+
+	applyResp := doRequest(t, server, request{
+		method: http.MethodPost,
+		path:   "/v1/workspaces/ws_1/writeback/sweep-drafts",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_sweep_2",
+		},
+		body: map[string]any{"apply": true},
+	})
+	if applyResp.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK on apply sweep, got %d (%s)", applyResp.Code, applyResp.Body.String())
+	}
+	var applyResult relayfile.SweepDraftsResult
+	if err := json.NewDecoder(applyResp.Body).Decode(&applyResult); err != nil {
+		t.Fatalf("failed to decode sweep response: %v", err)
+	}
+	if applyResult.DryRun || len(applyResult.Removed) != 1 {
+		t.Fatalf("unexpected apply result: %+v", applyResult)
+	}
+
+	readDraft := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/workspaces/ws_1/fs/file?path=" + url.QueryEscape(draftPath),
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_read_1",
+		},
+	})
+	if readDraft.Code != http.StatusNotFound {
+		t.Fatalf("expected residue gone after apply sweep, got %d", readDraft.Code)
+	}
+}
+
 type request struct {
 	method  string
 	path    string

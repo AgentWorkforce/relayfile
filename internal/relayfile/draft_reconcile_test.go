@@ -72,15 +72,22 @@ func eventsForPath(t *testing.T, store *Store, workspaceID, path string) []Event
 	return matched
 }
 
-// assertNoAgentWriteMutation pins the classification-exemption property: a
-// service-side draft rename/removal must never look like an agent mutation.
-func assertNoAgentWriteMutation(t *testing.T, store *Store, workspaceID, path string) {
+// agentWriteEventCount counts adapter-actionable agent_write events. The
+// classification-exemption property is that a service-side draft mutation
+// adds ZERO of these (the draft's original creation legitimately is one).
+func agentWriteEventCount(t *testing.T, store *Store, workspaceID string) int {
 	t.Helper()
-	for _, event := range eventsForPath(t, store, workspaceID, path) {
-		if event.Origin == "agent_write" && (event.Type == "file.deleted" || event.Type == "file.created") {
-			t.Fatalf("draft mutation at %s emitted adapter-actionable agent_write event %s — this re-classifies as a writeback", path, event.Type)
+	feed, err := store.GetEvents(workspaceID, "", "", 1000)
+	if err != nil {
+		t.Fatalf("get events failed: %v", err)
+	}
+	count := 0
+	for _, event := range feed.Events {
+		if event.Origin == "agent_write" {
+			count++
 		}
 	}
+	return count
 }
 
 func TestAckWithExternalIDRenamesDraftToCanonicalID(t *testing.T) {
@@ -126,6 +133,7 @@ func TestAckRenameIsClassificationExempt(t *testing.T) {
 	result := writeDraft(t, store, "ws_1", draftPath, `{"text":"hi"}`)
 
 	opsBefore := opCount(t, store, "ws_1")
+	agentWritesBefore := agentWriteEventCount(t, store, "ws_1")
 	if _, err := store.AcknowledgeWriteback("ws_1", result.OpID, WritebackAck{
 		Success:    true,
 		ExternalID: "1780018871.351819",
@@ -139,8 +147,9 @@ func TestAckRenameIsClassificationExempt(t *testing.T) {
 	if pending := store.GetPendingWritebacks("ws_1"); len(pending) != 0 {
 		t.Fatalf("draft rename enqueued new writebacks: %v", pending)
 	}
-	assertNoAgentWriteMutation(t, store, "ws_1", draftPath)
-	assertNoAgentWriteMutation(t, store, "ws_1", "/slack/channels/C0ALQ06AAUT/messages/1780018871.351819.json")
+	if got := agentWriteEventCount(t, store, "ws_1"); got != agentWritesBefore {
+		t.Fatalf("draft rename emitted agent_write events: before=%d after=%d — this re-classifies as a writeback", agentWritesBefore, got)
+	}
 
 	// The rename must be observable to subscribers as system-origin events.
 	deleted := eventsForPath(t, store, "ws_1", draftPath)
@@ -174,6 +183,7 @@ func TestAckWhenCanonicalAlreadyMaterializedRemovesDraft(t *testing.T) {
 	store.mu.Unlock()
 
 	opsBefore := opCount(t, store, "ws_1")
+	agentWritesBefore := agentWriteEventCount(t, store, "ws_1")
 	resp, err := store.AcknowledgeWriteback("ws_1", result.OpID, WritebackAck{
 		Success:    true,
 		ExternalID: "1780018871.351819",
@@ -201,7 +211,9 @@ func TestAckWhenCanonicalAlreadyMaterializedRemovesDraft(t *testing.T) {
 	if pending := store.GetPendingWritebacks("ws_1"); len(pending) != 0 {
 		t.Fatalf("draft removal enqueued new writebacks: %v", pending)
 	}
-	assertNoAgentWriteMutation(t, store, "ws_1", draftPath)
+	if got := agentWriteEventCount(t, store, "ws_1"); got != agentWritesBefore {
+		t.Fatalf("draft removal emitted agent_write events: before=%d after=%d — this re-classifies as a writeback (chat.delete risk)", agentWritesBefore, got)
+	}
 }
 
 func TestAckWithCanonicalPathOverride(t *testing.T) {
@@ -566,6 +578,7 @@ func TestSweepIsClassificationExempt(t *testing.T) {
 	seedResidueFile(t, store, "ws_1", classD, `{"text":"ack2"}`)
 
 	opsBefore := opCount(t, store, "ws_1")
+	agentWritesBefore := agentWriteEventCount(t, store, "ws_1")
 	if _, err := store.SweepWritebackDrafts("ws_1", SweepDraftsRequest{
 		Patterns:      []string{"wb-*.json"},
 		Apply:         true,
@@ -580,8 +593,10 @@ func TestSweepIsClassificationExempt(t *testing.T) {
 	if pending := store.GetPendingWritebacks("ws_1"); len(pending) != 0 {
 		t.Fatalf("sweep enqueued writebacks: %v", pending)
 	}
+	if got := agentWriteEventCount(t, store, "ws_1"); got != agentWritesBefore {
+		t.Fatalf("sweep emitted agent_write events: before=%d after=%d", agentWritesBefore, got)
+	}
 	for _, path := range []string{residue, classD} {
-		assertNoAgentWriteMutation(t, store, "ws_1", path)
 		events := eventsForPath(t, store, "ws_1", path)
 		var sawSystemDelete bool
 		for _, event := range events {

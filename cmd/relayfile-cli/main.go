@@ -651,11 +651,14 @@ func printWritebackUsage(w io.Writer, subcommand string) {
 		fmt.Fprintln(w, "Usage: relayfile writeback status [WORKSPACE] [--json]")
 	case "retry":
 		fmt.Fprintln(w, "Usage: relayfile writeback retry --opId OP [WORKSPACE]")
+	case "sweep-drafts":
+		fmt.Fprintln(w, writebackSweepUsage)
 	default:
 		fmt.Fprintln(w, `Usage:
   relayfile writeback list --state pending|dead [--workspace WS] [--json]
   relayfile writeback status [WORKSPACE] [--json]
-  relayfile writeback retry --opId OP [WORKSPACE]`)
+  relayfile writeback retry --opId OP [WORKSPACE]
+  relayfile writeback sweep-drafts [WORKSPACE] [--path-prefix PREFIX] [--pattern GLOB ...] [--apply] [--json]`)
 	}
 }
 
@@ -2759,6 +2762,8 @@ func runWriteback(args []string, stdout io.Writer) error {
 		return runWritebackStatus(args[1:], stdout)
 	case "retry":
 		return runWritebackRetry(args[1:], stdout)
+	case "sweep-drafts":
+		return runWritebackSweepDrafts(args[1:], stdout)
 	default:
 		return fmt.Errorf("unknown writeback subcommand %q", args[0])
 	}

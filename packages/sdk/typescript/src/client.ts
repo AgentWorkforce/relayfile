@@ -43,6 +43,8 @@ import {
   type WritebackItem,
   type AckWritebackInput,
   type AckWritebackResponse,
+  type SweepWritebackDraftsInput,
+  type SweepWritebackDraftsResponse,
   type ChangeEvent,
   type ChangeLogQueryResult,
   type ChangeStreamConnection,
@@ -1879,7 +1881,27 @@ export class RelayFileClient {
       correlationId: input.correlationId,
       body: {
         success: input.success,
-        error: input.error
+        error: input.error,
+        externalId: input.externalId,
+        canonicalPath: input.canonicalPath
+      },
+      signal: input.signal
+    });
+  }
+
+  /**
+   * One-time residue sweep for accumulated writeback drafts (issue #242).
+   * Dry run unless `apply` is true; classification-exempt service-side.
+   */
+  async sweepWritebackDrafts(input: SweepWritebackDraftsInput): Promise<SweepWritebackDraftsResponse> {
+    return this.request<SweepWritebackDraftsResponse>({
+      method: "POST",
+      path: `/v1/workspaces/${encodeURIComponent(input.workspaceId)}/writeback/sweep-drafts`,
+      correlationId: input.correlationId,
+      body: {
+        pathPrefix: input.pathPrefix,
+        patterns: input.patterns,
+        apply: input.apply === true
       },
       signal: input.signal
     });

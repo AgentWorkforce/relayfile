@@ -218,6 +218,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case len(parts) == 6 && parts[3] == "writeback" && parts[5] == "ack" && r.Method == http.MethodPost:
 		requiredScope = "sync:trigger"
 		route = "writeback_ack"
+	case len(parts) == 5 && parts[3] == "writeback" && parts[4] == "sweep-drafts" && r.Method == http.MethodPost:
+		requiredScope = "sync:trigger"
+		route = "writeback_sweep_drafts"
 	default:
 		writeError(w, http.StatusNotFound, "not_found", "route not found", getCorrelationID(r))
 		return
@@ -318,6 +321,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleWritebackPending(w, r, workspaceID, correlationID)
 	case "writeback_ack":
 		s.handleWritebackAck(w, r, workspaceID, parts[4], correlationID)
+	case "writeback_sweep_drafts":
+		s.handleWritebackSweepDrafts(w, r, workspaceID, correlationID)
 	default:
 		writeError(w, http.StatusNotFound, "not_found", "route not found", correlationID)
 	}
@@ -2223,6 +2228,41 @@ func (s *Server) handleWritebackAck(w http.ResponseWriter, r *http.Request, work
 	}
 
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// handleWritebackSweepDrafts handles POST /v1/workspaces/{workspaceId}/writeback/sweep-drafts
+// One-time residue drain for accumulated writeback drafts (issue #242). Dry
+// run unless the body sets "apply": true. The sweep is classification-exempt:
+// it can never enqueue new writebacks.
+func (s *Server) handleWritebackSweepDrafts(w http.ResponseWriter, r *http.Request, workspaceID, correlationID string) {
+	var payload struct {
+		PathPrefix string   `json:"pathPrefix"`
+		Patterns   []string `json:"patterns"`
+		Apply      bool     `json:"apply"`
+	}
+	if !s.decodeJSONBody(w, r, correlationID, &payload) {
+		return
+	}
+
+	result, err := s.store.SweepWritebackDrafts(workspaceID, relayfile.SweepDraftsRequest{
+		PathPrefix:    payload.PathPrefix,
+		Patterns:      payload.Patterns,
+		Apply:         payload.Apply,
+		CorrelationID: correlationID,
+	})
+	if err != nil {
+		switch {
+		case errors.Is(err, relayfile.ErrInvalidInput):
+			writeError(w, http.StatusBadRequest, "bad_request", err.Error(), correlationID)
+		case errors.Is(err, relayfile.ErrNotFound):
+			writeError(w, http.StatusNotFound, "not_found", err.Error(), correlationID)
+		default:
+			writeError(w, http.StatusInternalServerError, "internal_error", err.Error(), correlationID)
+		}
+		return
+	}
+
+	writeJSON(w, http.StatusOK, result)
 }
 
 func getCorrelationID(r *http.Request) string {
