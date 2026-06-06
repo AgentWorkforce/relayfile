@@ -3047,8 +3047,11 @@ func (s *Store) GetPendingWritebacks(workspaceID string) []map[string]any {
 	return result
 }
 
-// AcknowledgeWriteback acknowledges a writeback item as processed
-func (s *Store) AcknowledgeWriteback(workspaceID, itemID string, success bool, errMsg, correlationID string) (map[string]any, error) {
+// AcknowledgeWriteback acknowledges a writeback item as processed. On a
+// successful ack carrying an ExternalID it also reconciles the agent-authored
+// draft file per the draftFile() rename contract (issue #242); that mutation
+// is classification-exempt and can never enqueue a new writeback.
+func (s *Store) AcknowledgeWriteback(workspaceID, itemID string, ack WritebackAck, correlationID string) (map[string]any, error) {
 	if workspaceID == "" || itemID == "" {
 		return nil, ErrInvalidInput
 	}
@@ -3069,13 +3072,20 @@ func (s *Store) AcknowledgeWriteback(workspaceID, itemID string, success bool, e
 
 	// Update operation status based on acknowledgment
 	nowTS := nowRFC3339NanoUTC()
-	if success {
+	if ack.Success {
 		op.Status = "succeeded"
 		op.LastError = nil
 		op.CompletedAt = &nowTS
+		if externalID := strings.TrimSpace(ack.ExternalID); externalID != "" {
+			if op.ProviderResult == nil {
+				op.ProviderResult = map[string]any{}
+			}
+			op.ProviderResult["externalId"] = externalID
+		}
 	} else {
 		op.Status = "dead_lettered"
-		if errMsg != "" {
+		if ack.Error != "" {
+			errMsg := ack.Error
 			op.LastError = &errMsg
 		}
 		op.CompletedAt = &nowTS
@@ -3084,14 +3094,27 @@ func (s *Store) AcknowledgeWriteback(workspaceID, itemID string, success bool, e
 	op.UpdatedAt = nowTS
 
 	ws.Ops[itemID] = op
-	_ = s.saveLocked()
 
-	return map[string]any{
+	response := map[string]any{
 		"status":        "acknowledged",
 		"id":            itemID,
 		"correlationId": correlationID,
-		"success":       success,
-	}, nil
+		"success":       ack.Success,
+	}
+	if ack.Success && strings.TrimSpace(ack.ExternalID) != "" {
+		disposition := s.reconcileAckedDraftLocked(workspaceID, ws, op, ack, correlationID)
+		draft := map[string]any{"action": disposition.Action}
+		if disposition.From != "" {
+			draft["from"] = disposition.From
+		}
+		if disposition.To != "" {
+			draft["to"] = disposition.To
+		}
+		response["draft"] = draft
+	}
+	_ = s.saveLocked()
+
+	return response, nil
 }
 
 func (s *Store) TriggerSyncRefresh(workspaceID, provider, reason, correlationID string) (QueuedResponse, error) {
