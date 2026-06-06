@@ -523,11 +523,12 @@ func (c *HTTPClient) ExportGithubWorkingTreeTar(ctx context.Context, workspaceID
 
 	authRefreshTried := false
 	for attempt := 0; ; attempt++ {
+		requestToken := c.Token()
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+requestPath, nil)
 		if err != nil {
 			return GithubWorkingTreeTar{}, err
 		}
-		req.Header.Set("Authorization", "Bearer "+c.Token())
+		req.Header.Set("Authorization", "Bearer "+requestToken)
 		req.Header.Set("X-Correlation-Id", correlationID())
 		resp, err := c.httpClient.Do(req)
 		if err != nil {
@@ -554,7 +555,7 @@ func (c *HTTPClient) ExportGithubWorkingTreeTar(ctx context.Context, workspaceID
 		c.logHTTPStatus(http.MethodGet, requestPath, resp.StatusCode, resp.Header.Get("Retry-After"), attempt)
 		if resp.StatusCode == http.StatusUnauthorized && !authRefreshTried {
 			authRefreshTried = true
-			if c.refreshTokenAfterUnauthorized() {
+			if c.refreshTokenAfterUnauthorized(requestToken) {
 				continue
 			}
 		}
@@ -614,11 +615,12 @@ func (c *HTTPClient) doJSON(
 		if bodyBytes != nil {
 			bodyReader = bytes.NewReader(bodyBytes)
 		}
+		requestToken := c.Token()
 		req, err := http.NewRequestWithContext(ctx, method, c.baseURL+requestPath, bodyReader)
 		if err != nil {
 			return err
 		}
-		req.Header.Set("Authorization", "Bearer "+c.Token())
+		req.Header.Set("Authorization", "Bearer "+requestToken)
 		req.Header.Set("X-Correlation-Id", correlationID())
 		if body != nil {
 			req.Header.Set("Content-Type", "application/json")
@@ -655,7 +657,7 @@ func (c *HTTPClient) doJSON(
 
 		if resp.StatusCode == http.StatusUnauthorized && !authRefreshTried {
 			authRefreshTried = true
-			if c.refreshTokenAfterUnauthorized() {
+			if c.refreshTokenAfterUnauthorized(requestToken) {
 				continue
 			}
 		}
@@ -695,14 +697,18 @@ func (c *HTTPClient) SetToken(token string) {
 	c.tokenMu.Unlock()
 }
 
-func (c *HTTPClient) refreshTokenAfterUnauthorized() bool {
+func (c *HTTPClient) refreshTokenAfterUnauthorized(attemptedToken string) bool {
+	attemptedToken = strings.TrimSpace(attemptedToken)
+	current := c.Token()
+	if attemptedToken != "" && current != attemptedToken {
+		return true
+	}
 	c.tokenRefreshMu.RLock()
 	refresh := c.tokenRefreshFunc
 	c.tokenRefreshMu.RUnlock()
 	if refresh == nil {
 		return false
 	}
-	current := c.Token()
 	next, changed, err := refresh(current)
 	if err != nil || !changed {
 		return false
