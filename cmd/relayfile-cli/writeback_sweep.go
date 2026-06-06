@@ -66,15 +66,16 @@ func runWritebackSweepDrafts(args []string, stdout io.Writer) error {
 		return errors.New(writebackSweepUsage)
 	}
 
-	record, err := resolveWorkspaceRecord(firstArg(fs))
-	if err != nil {
-		return err
-	}
 	creds, err := loadCredentials()
 	if err != nil {
 		return err
 	}
-	client, err := newAPIClient(resolveServer(*server, creds), resolveToken(*tokenOverride, creds))
+	tokenValue := resolveToken(*tokenOverride, creds)
+	workspaceID, err := resolveWorkspaceIDWithToken(firstArg(fs), tokenValue)
+	if err != nil {
+		return err
+	}
+	client, err := newAPIClient(resolveServer(*server, creds), tokenValue)
 	if err != nil {
 		return err
 	}
@@ -87,7 +88,7 @@ func runWritebackSweepDrafts(args []string, stdout io.Writer) error {
 	var result sweepDraftsResult
 	if err := client.postJSON(
 		context.Background(),
-		fmt.Sprintf("/v1/workspaces/%s/writeback/sweep-drafts", url.PathEscape(record.ID)),
+		fmt.Sprintf("/v1/workspaces/%s/writeback/sweep-drafts", url.PathEscape(workspaceID)),
 		requestBody,
 		&result,
 	); err != nil {

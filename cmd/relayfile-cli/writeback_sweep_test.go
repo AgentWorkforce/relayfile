@@ -128,6 +128,31 @@ func TestWritebackSweepDraftsApplyAndJSON(t *testing.T) {
 	}
 }
 
+func TestWritebackSweepDraftsUsesTokenWorkspaceWithoutPositionalArg(t *testing.T) {
+	overrideToken := testJWTWithWorkspace("rw_token")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/workspaces/rw_token/writeback/sweep-drafts" {
+			t.Fatalf("unexpected request path: %s", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer "+overrideToken {
+			t.Fatalf("unexpected Authorization: %q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"dryRun": true, "scanned": 0, "removed": [], "skipped": []}`))
+	}))
+	defer server.Close()
+
+	setupSweepWorkspace(t, server.URL)
+	var stdout bytes.Buffer
+	err := run(
+		[]string{"writeback", "sweep-drafts", "--token", overrideToken},
+		strings.NewReader(""), &stdout, &stdout,
+	)
+	if err != nil {
+		t.Fatalf("run writeback sweep-drafts with token override failed: %v", err)
+	}
+}
+
 func TestWritebackSweepDraftsRejectsExtraArgs(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)
@@ -135,5 +160,13 @@ func TestWritebackSweepDraftsRejectsExtraArgs(t *testing.T) {
 	err := run([]string{"writeback", "sweep-drafts", "ws_a", "ws_b"}, strings.NewReader(""), &stdout, &stdout)
 	if err == nil || !strings.Contains(err.Error(), "usage: relayfile writeback sweep-drafts") {
 		t.Fatalf("expected usage error, got %v", err)
+	}
+}
+
+func TestWritebackMissingSubcommandMentionsSweepDrafts(t *testing.T) {
+	var stdout bytes.Buffer
+	err := run([]string{"writeback"}, strings.NewReader(""), &stdout, &stdout)
+	if err == nil || !strings.Contains(err.Error(), "sweep-drafts") {
+		t.Fatalf("expected missing subcommand error to mention sweep-drafts, got %v", err)
 	}
 }
