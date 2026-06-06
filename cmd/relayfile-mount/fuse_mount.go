@@ -44,7 +44,9 @@ func runFuseMount(ctx context.Context, cfg mountConfig) error {
 
 	// Start WebSocket invalidation if enabled.
 	if cfg.websocketEnabled {
-		invalidator := mountfuse.NewWSInvalidatorWithTokenFunc(cfg.baseURL, cfg.token, httpClient.Token, cfg.workspaceID, mounted.Root.State(), log.Default())
+		invalidator := mountfuse.NewWSInvalidatorWithTokenFunc(cfg.baseURL, cfg.token, func() string {
+			return currentMountClientToken(httpClient, cfg)
+		}, cfg.workspaceID, mounted.Root.State(), log.Default())
 		go invalidator.Run(mountCtx)
 	}
 

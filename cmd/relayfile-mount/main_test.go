@@ -405,6 +405,40 @@ func TestInstallCredsFileRefreshToleratesParseFailureWithoutRetry(t *testing.T) 
 	}
 }
 
+func TestCurrentMountClientTokenReadsLatestCredsFile(t *testing.T) {
+	credsFile := filepath.Join(t.TempDir(), "creds.json")
+	if err := os.WriteFile(credsFile, []byte(`{"token":"new-token"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	client := mountsync.NewHTTPClient("http://relayfile.invalid", "old-token", nil)
+
+	got := currentMountClientToken(client, mountConfig{token: "old-token", credsFile: credsFile})
+	if got != "new-token" {
+		t.Fatalf("expected latest creds-file token, got %q", got)
+	}
+	if got := client.Token(); got != "new-token" {
+		t.Fatalf("expected client token to update, got %q", got)
+	}
+}
+
+func TestCurrentMountClientTokenFallsBackOnCredsFileReadFailure(t *testing.T) {
+	credsFile := filepath.Join(t.TempDir(), "creds.json")
+	if err := os.WriteFile(credsFile, []byte(`{"token":`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	client := mountsync.NewHTTPClient("http://relayfile.invalid", "old-token", nil)
+
+	got := currentMountClientToken(client, mountConfig{token: "old-token", credsFile: credsFile})
+	if got != "old-token" {
+		t.Fatalf("expected fallback client token, got %q", got)
+	}
+	if got := client.Token(); got != "old-token" {
+		t.Fatalf("expected client token to remain installed, got %q", got)
+	}
+}
+
 func TestNormalizeRemotePathsDedupesRepeatedFlagValues(t *testing.T) {
 	got := normalizeRemotePaths(
 		[]string{"/github/repos/acme/cloud", "github/repos/acme/cloud/", "/slack/channels/proj-cloud"},

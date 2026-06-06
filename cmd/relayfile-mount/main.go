@@ -512,6 +512,25 @@ func installCredsFileRefresh(client *mountsync.HTTPClient, cfg mountConfig) {
 	})
 }
 
+func currentMountClientToken(client *mountsync.HTTPClient, cfg mountConfig) string {
+	if client == nil {
+		return strings.TrimSpace(cfg.token)
+	}
+	credsFile := strings.TrimSpace(cfg.credsFile)
+	if credsFile == "" {
+		return client.Token()
+	}
+	token, err := readMountCredsToken(credsFile)
+	if err != nil {
+		log.Printf("relayfile creds-file token read failed: %v", err)
+		return client.Token()
+	}
+	if token != client.Token() {
+		client.SetToken(token)
+	}
+	return token
+}
+
 type repeatedStringFlag []string
 
 func (f *repeatedStringFlag) String() string {
