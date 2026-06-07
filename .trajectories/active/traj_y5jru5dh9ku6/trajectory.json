@@ -6,8 +6,47 @@
   },
   "status": "active",
   "startedAt": "2026-06-06T00:15:50.055Z",
-  "agents": [],
-  "chapters": [],
+  "agents": [
+    {
+      "name": "default",
+      "role": "lead",
+      "joinedAt": "2026-06-07T15:55:00.093Z"
+    }
+  ],
+  "chapters": [
+    {
+      "id": "chap_krw4gjdmzw08",
+      "title": "Work",
+      "agentName": "default",
+      "startedAt": "2026-06-07T15:55:00.093Z",
+      "events": [
+        {
+          "ts": 1780847700094,
+          "type": "decision",
+          "content": "Validated PR bot comments before editing: Validated PR bot comments before editing",
+          "raw": {
+            "question": "Validated PR bot comments before editing",
+            "chosen": "Validated PR bot comments before editing",
+            "alternatives": [],
+            "reasoning": "Fetched PR #255 discussion via GitHub connector; available bot comments had no actionable findings against current checkout."
+          },
+          "significance": "high"
+        },
+        {
+          "ts": 1780847812604,
+          "type": "reflection",
+          "content": "PR #255 review found no actionable bot findings; focused auth package tests pass after installing Go.",
+          "raw": {
+            "confidence": 0.82
+          },
+          "significance": "high",
+          "tags": [
+            "confidence:0.82"
+          ]
+        }
+      ]
+    }
+  ],
   "commits": [],
   "filesChanged": [],
   "projectId": "/home/daytona/workspace",
