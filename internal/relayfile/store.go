@@ -3999,7 +3999,8 @@ func canonicalizeSlackChannelAliasPath(files map[string]File, rawPath string) st
 			continue
 		}
 		candidate := fileParts[2]
-		if strings.HasPrefix(candidate, channelSegment+"__") {
+		candidateID, _, hasAlias := strings.Cut(candidate, "__")
+		if hasAlias && candidateID == channelSegment {
 			candidates = append(candidates, candidate)
 		}
 	}

@@ -3495,6 +3495,50 @@ func TestEnvelopePipelineCanonicalizesSlackChannelAliasPath(t *testing.T) {
 	}
 }
 
+func TestEnvelopePipelineDoesNotCanonicalizeSlackChannelAliasByPrefix(t *testing.T) {
+	store := NewStore()
+	t.Cleanup(store.Close)
+	workspaceID := "ws_slack_alias_prefix"
+
+	_, err := store.IngestEnvelope(WebhookEnvelopeRequest{
+		EnvelopeID:  "env_slack_alias_prefix_channel",
+		WorkspaceID: workspaceID,
+		Provider:    "slack",
+		DeliveryID:  "delivery_slack_alias_prefix_channel",
+		ReceivedAt:  time.Now().UTC().Format(time.RFC3339Nano),
+		Payload: map[string]any{
+			"event_type":  "file.updated",
+			"path":        "/slack/channels/C123__general/meta.json",
+			"content":     `{"id":"C123","name":"general"}`,
+			"contentType": "application/json",
+		},
+	})
+	if err != nil {
+		t.Fatalf("ingest slack channel alias failed: %v", err)
+	}
+	waitForFileContent(t, store, workspaceID, "/slack/channels/C123__general/meta.json", `{"id":"C123","name":"general"}`)
+
+	_, err = store.IngestEnvelope(WebhookEnvelopeRequest{
+		EnvelopeID:  "env_slack_alias_prefix_message",
+		WorkspaceID: workspaceID,
+		Provider:    "slack",
+		DeliveryID:  "delivery_slack_alias_prefix_message",
+		ReceivedAt:  time.Now().UTC().Format(time.RFC3339Nano),
+		Payload: map[string]any{
+			"event_type":  "file.updated",
+			"path":        "/slack/channels/C1/messages/1711111111_000100/meta.json",
+			"content":     `{"text":"different channel"}`,
+			"contentType": "application/json",
+		},
+	})
+	if err != nil {
+		t.Fatalf("ingest slack message failed: %v", err)
+	}
+
+	waitForFileContent(t, store, workspaceID, "/slack/channels/C1/messages/1711111111_000100/meta.json", `{"text":"different channel"}`)
+	waitForNotFound(t, store, workspaceID, "/slack/channels/C123__general/messages/1711111111_000100/meta.json")
+}
+
 func TestEnvelopePipelineIgnoresSlackPathOutsideProviderScope(t *testing.T) {
 	store := NewStore()
 	t.Cleanup(store.Close)
