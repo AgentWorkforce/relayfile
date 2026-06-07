@@ -684,6 +684,14 @@ function canonicalizeExistingProviderAliasPath(
   if (normalizeProvider(provider) !== "slack") {
     return path;
   }
+  const parts = path.slice(1).split("/");
+  if (parts.length < 3 || parts[0] !== "slack" || parts[1] !== "channels") {
+    return path;
+  }
+  const channelSegment = parts[2];
+  if (!channelSegment || channelSegment.includes("__")) {
+    return path;
+  }
   return canonicalizeSlackChannelAliasPath(storage.listFiles(), path);
 }
 

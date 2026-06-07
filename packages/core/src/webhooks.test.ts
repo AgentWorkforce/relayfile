@@ -82,6 +82,63 @@ describe("webhook Slack path canonicalization", () => {
       storage.getFile("/slack/channels/C123/messages/1711111111_000100/meta.json"),
     ).toBeNull();
     expect(storage.events.at(-1)?.path).toBe(canonicalPath);
+    expect(storage.listFilesCalls).toBe(1);
+  });
+
+  it("does not scan storage when Slack channel alias resolution is unnecessary", () => {
+    const storage = new MemoryStorage([
+      fileRow("/slack/channels/C123__engineering/meta.json", {
+        content: '{"id":"C123","name":"engineering"}',
+        provider: "slack",
+      }),
+    ]);
+
+    const aliasedResult = applyWebhookEnvelope(storage, {
+      envelopeId: "env_aliased",
+      workspaceId: "ws_core",
+      provider: "slack",
+      deliveryId: "delivery_aliased",
+      receivedAt: "2026-06-07T20:00:00.000Z",
+      payload: {
+        provider: "slack",
+        event_type: "file.updated",
+        path: "/slack/channels/C123__engineering/messages/1711111111_000100/meta.json",
+        content: '{"text":"hello"}',
+        contentType: "application/json",
+      },
+      correlationId: "corr_aliased",
+      status: "queued",
+      attemptCount: 0,
+      lastError: null,
+    });
+    const dmResult = applyWebhookEnvelope(storage, {
+      envelopeId: "env_dm",
+      workspaceId: "ws_core",
+      provider: "slack",
+      deliveryId: "delivery_dm",
+      receivedAt: "2026-06-07T20:00:01.000Z",
+      payload: {
+        provider: "slack",
+        event_type: "file.updated",
+        path: "/slack/dms/D123/messages/1711111111_000100/meta.json",
+        content: '{"text":"dm"}',
+        contentType: "application/json",
+      },
+      correlationId: "corr_dm",
+      status: "queued",
+      attemptCount: 0,
+      lastError: null,
+    });
+
+    expect(aliasedResult).toMatchObject({
+      status: "processed",
+      path: "/slack/channels/C123__engineering/messages/1711111111_000100/meta.json",
+    });
+    expect(dmResult).toMatchObject({
+      status: "processed",
+      path: "/slack/dms/D123/messages/1711111111_000100/meta.json",
+    });
+    expect(storage.listFilesCalls).toBe(0);
   });
 
   it("ignores Slack envelopes targeting paths outside the Slack provider root", () => {
@@ -174,6 +231,7 @@ class MemoryStorage implements StorageAdapter {
   deliveryAliases = new Map<string, string>();
   revisionCounter = 1;
   eventCounter = 1;
+  listFilesCalls = 0;
 
   constructor(files: FileRow[] = []) {
     for (const file of files) {
@@ -186,6 +244,7 @@ class MemoryStorage implements StorageAdapter {
   }
 
   listFiles(): FileRow[] {
+    this.listFilesCalls += 1;
     return Array.from(this.files.values());
   }
 
