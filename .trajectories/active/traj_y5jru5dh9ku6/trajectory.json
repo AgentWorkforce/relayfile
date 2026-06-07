@@ -103,6 +103,18 @@
             "reasoning": "Current checkout canonicalizes Slack provider-relative paths in normalizeEnvelope, but ingestWebhook re-normalizes payload.path without provider and rejects /channels/... as invalid_input before queueing."
           },
           "significance": "high"
+        },
+        {
+          "ts": 1780865780297,
+          "type": "decision",
+          "content": "Align SDK core dependency with bumped workspace core: Align SDK core dependency with bumped workspace core",
+          "raw": {
+            "question": "Align SDK core dependency with bumped workspace core",
+            "chosen": "Align SDK core dependency with bumped workspace core",
+            "alternatives": [],
+            "reasoning": "Current checkout bumps packages/core to 0.8.17 but packages/sdk/typescript still pins @relayfile/core 0.8.16, so npm resolves a nested registry package instead of the PR workspace package."
+          },
+          "significance": "high"
         }
       ]
     }
