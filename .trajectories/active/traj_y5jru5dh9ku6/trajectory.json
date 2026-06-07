@@ -91,6 +91,18 @@
           "tags": [
             "confidence:0.86"
           ]
+        },
+        {
+          "ts": 1780864647303,
+          "type": "decision",
+          "content": "Patch ingestWebhook to pass provider into normalizeEnvelopePath: Patch ingestWebhook to pass provider into normalizeEnvelopePath",
+          "raw": {
+            "question": "Patch ingestWebhook to pass provider into normalizeEnvelopePath",
+            "chosen": "Patch ingestWebhook to pass provider into normalizeEnvelopePath",
+            "alternatives": [],
+            "reasoning": "Current checkout canonicalizes Slack provider-relative paths in normalizeEnvelope, but ingestWebhook re-normalizes payload.path without provider and rejects /channels/... as invalid_input before queueing."
+          },
+          "significance": "high"
         }
       ]
     }

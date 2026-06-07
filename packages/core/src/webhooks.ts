@@ -146,7 +146,7 @@ export function ingestWebhook(
   const normalized = normalizeEnvelope(input, now);
   const provider = asOptionalString(normalized.provider) ?? "";
   const payload = asRecord(normalized.payload);
-  const path = normalizeEnvelopePath({ payload });
+  const path = normalizeEnvelopePath({ payload, provider });
   const receivedAt = asOptionalString(normalized.receivedAt) ?? now();
   const workspaceId = storage.getWorkspaceId();
   const deliveryId =
@@ -698,16 +698,11 @@ function canonicalizeSlackChannelAliasPath(files: { path: string }[], rawPath: s
     return path;
   }
 
+  const prefix = `/slack/channels/${channelSegment}__`;
   const candidates = files
-    .map((file) => normalizePath(file.path).slice(1).split("/"))
-    .filter(
-      (fileParts) =>
-        fileParts.length >= 3 &&
-        fileParts[0] === "slack" &&
-        fileParts[1] === "channels" &&
-        fileParts[2]?.startsWith(`${channelSegment}__`),
-    )
-    .map((fileParts) => fileParts[2] as string)
+    .map((file) => normalizePath(file.path))
+    .filter((filePath) => filePath.startsWith(prefix))
+    .map((filePath) => filePath.slice(1).split("/")[2] as string)
     .sort();
 
   if (candidates.length === 0) {
