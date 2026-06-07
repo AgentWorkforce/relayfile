@@ -369,6 +369,69 @@ func TestFileEventsWebSocketPathFilterConstrainsServerFanout(t *testing.T) {
 	}
 }
 
+func TestFileEventsWebSocketEnforcesPathScopedMountGrant(t *testing.T) {
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
+	t.Cleanup(store.Close)
+
+	server := httptest.NewServer(NewServer(store))
+	defer server.Close()
+
+	token := mustTestJWT(t, "dev-secret", "ws_socket_scope", "MountSync", []string{
+		"fs:read",
+		"workspace:mount-sponsor:read:/allowed/**",
+	}, time.Now().Add(time.Hour))
+
+	tests := []struct {
+		name     string
+		query    string
+		wantCode int
+	}{
+		{
+			name:     "allows subscribed path inside grant",
+			query:    "&from=now&path=" + url.QueryEscape("/allowed/**"),
+			wantCode: http.StatusSwitchingProtocols,
+		},
+		{
+			name:     "denies subscribed path outside grant",
+			query:    "&from=now&path=" + url.QueryEscape("/secret/**"),
+			wantCode: http.StatusForbidden,
+		},
+		{
+			name:     "denies whole workspace subscription",
+			query:    "&from=now",
+			wantCode: http.StatusForbidden,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/workspaces/ws_socket_scope/fs/ws?token=" + token + tt.query
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+
+			conn, resp, err := websocket.Dial(ctx, wsURL, nil)
+			if tt.wantCode == http.StatusSwitchingProtocols {
+				if err != nil {
+					t.Fatalf("websocket dial failed: %v", err)
+				}
+				defer conn.Close(websocket.StatusNormalClosure, "")
+				return
+			}
+			if err == nil {
+				defer conn.Close(websocket.StatusNormalClosure, "")
+				t.Fatalf("expected websocket dial to fail with %d", tt.wantCode)
+			}
+			if resp == nil {
+				t.Fatalf("expected websocket dial response with status %d, got nil response: %v", tt.wantCode, err)
+			}
+			if resp.StatusCode != tt.wantCode {
+				t.Fatalf("expected websocket status %d, got %d", tt.wantCode, resp.StatusCode)
+			}
+		})
+	}
+}
+
 func TestFileEventsWebSocketWritebackMaterializationCarriesAgentWriteOrigin(t *testing.T) {
 	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{
 		ProviderWriteAction: func(action relayfile.WritebackAction) error {
@@ -1889,6 +1952,81 @@ func TestQueryFilesEnforcesPathScopedMountGrant(t *testing.T) {
 				if payload.Items[i].Path != wantPath {
 					t.Fatalf("expected query item %d path %q, got %q", i, wantPath, payload.Items[i].Path)
 				}
+			}
+		})
+	}
+}
+
+func TestTreeAndEventsEnforcePathScopedMountGrant(t *testing.T) {
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
+	t.Cleanup(store.Close)
+
+	workspaceID := "ws_tree_events_scope"
+	if written, _, errs := store.BulkWrite(workspaceID, []relayfile.BulkWriteFile{
+		{Path: "/allowed/A.md", ContentType: "text/markdown", Content: "# A"},
+		{Path: "/secret/B.md", ContentType: "text/markdown", Content: "# B"},
+	}); written != 2 || len(errs) != 0 {
+		t.Fatalf("seed bulk write failed: written=%d errs=%+v", written, errs)
+	}
+
+	server := NewServer(store)
+	scopedToken := mustTestJWT(t, "dev-secret", workspaceID, "MountSync", []string{
+		"fs:read",
+		"workspace:mount-sponsor:read:/allowed/**",
+	}, time.Now().Add(time.Hour))
+	fullToken := mustTestJWT(t, "dev-secret", workspaceID, "Worker1", []string{"fs:read"}, time.Now().Add(time.Hour))
+
+	tests := []struct {
+		name     string
+		token    string
+		path     string
+		wantCode int
+	}{
+		{
+			name:     "path-scoped mount token can read tree inside subtree",
+			token:    scopedToken,
+			path:     "/v1/workspaces/" + workspaceID + "/fs/tree?path=/allowed",
+			wantCode: http.StatusOK,
+		},
+		{
+			name:     "path-scoped mount token cannot read tree outside subtree",
+			token:    scopedToken,
+			path:     "/v1/workspaces/" + workspaceID + "/fs/tree?path=/secret",
+			wantCode: http.StatusForbidden,
+		},
+		{
+			name:     "path-scoped mount token cannot read whole tree by omitting path",
+			token:    scopedToken,
+			path:     "/v1/workspaces/" + workspaceID + "/fs/tree",
+			wantCode: http.StatusForbidden,
+		},
+		{
+			name:     "path-scoped mount token cannot read whole event stream",
+			token:    scopedToken,
+			path:     "/v1/workspaces/" + workspaceID + "/fs/events?limit=10",
+			wantCode: http.StatusForbidden,
+		},
+		{
+			name:     "pure bare fs read token can still read whole event stream",
+			token:    fullToken,
+			path:     "/v1/workspaces/" + workspaceID + "/fs/events?limit=10",
+			wantCode: http.StatusOK,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			resp := doRequest(t, server, request{
+				method: http.MethodGet,
+				path:   tt.path,
+				headers: map[string]string{
+					"Authorization":    "Bearer " + tt.token,
+					"X-Correlation-Id": "corr_tree_events_scope",
+				},
+			})
+			if resp.Code != tt.wantCode {
+				t.Fatalf("expected %d, got %d (%s)", tt.wantCode, resp.Code, resp.Body.String())
 			}
 		})
 	}

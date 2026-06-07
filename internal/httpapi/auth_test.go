@@ -135,6 +135,16 @@ func TestScopeMatchesPath(t *testing.T) {
 			want: false,
 		},
 		{
+			name:     "bare read with workspace path grant denies empty path",
+			required: "fs:read",
+			granted: map[string]struct{}{
+				"fs:read": {},
+				"workspace:mount-sponsor:read:/slack/messages/**": {},
+			},
+			path: "",
+			want: false,
+		},
+		{
 			name:     "pure bare read remains full access",
 			required: "fs:read",
 			granted:  map[string]struct{}{"fs:read": {}},
@@ -231,39 +241,59 @@ func TestAuthorizeBearerEnforcesPathScopedMountGrants(t *testing.T) {
 
 	tests := []struct {
 		name       string
+		required   string
 		scopes     []string
 		path       string
 		wantStatus int
 	}{
 		{
 			name:       "bare fs read plus workspace path grant allows inside subtree",
+			required:   "fs:read",
 			scopes:     []string{"fs:read", "workspace:mount-sponsor:read:/slack/messages/**"},
 			path:       "/slack/messages/thread-1.json",
 			wantStatus: 0,
 		},
 		{
 			name:       "bare fs read plus workspace path grant denies outside subtree",
+			required:   "fs:read",
 			scopes:     []string{"fs:read", "workspace:mount-sponsor:read:/slack/messages/**"},
 			path:       "/slack/users/user-1.json",
 			wantStatus: http.StatusForbidden,
 		},
 		{
 			name:       "workspace path grant without bare read allows inside subtree",
+			required:   "fs:read",
 			scopes:     []string{"workspace:mount-sponsor:read:/slack/messages/**"},
 			path:       "/slack/messages/thread-1.json",
 			wantStatus: 0,
 		},
 		{
 			name:       "workspace path grant without bare read denies outside subtree",
+			required:   "fs:read",
 			scopes:     []string{"workspace:mount-sponsor:read:/slack/messages/**"},
 			path:       "/slack/users/user-1.json",
 			wantStatus: http.StatusForbidden,
 		},
 		{
 			name:       "pure bare fs read remains full access",
+			required:   "fs:read",
 			scopes:     []string{"fs:read"},
 			path:       "/slack/users/user-1.json",
 			wantStatus: 0,
+		},
+		{
+			name:       "bare fs write plus workspace path grant allows inside subtree",
+			required:   "fs:write",
+			scopes:     []string{"fs:write", "workspace:mount-sponsor:write:/slack/messages/**"},
+			path:       "/slack/messages/thread-1.json",
+			wantStatus: 0,
+		},
+		{
+			name:       "bare fs write plus workspace path grant denies outside subtree",
+			required:   "fs:write",
+			scopes:     []string{"fs:write", "workspace:mount-sponsor:write:/slack/messages/**"},
+			path:       "/slack/users/user-1.json",
+			wantStatus: http.StatusForbidden,
 		},
 	}
 
@@ -278,7 +308,7 @@ func TestAuthorizeBearerEnforcesPathScopedMountGrants(t *testing.T) {
 				"aud":    "relayfile",
 			})
 
-			_, authErr := authorizeBearer("Bearer "+token, verifier, "ws-mount", "fs:read", tt.path, now)
+			_, authErr := authorizeBearer("Bearer "+token, verifier, "ws-mount", tt.required, tt.path, now)
 			if tt.wantStatus == 0 {
 				if authErr != nil {
 					t.Fatalf("authorizeBearer returned auth error: %+v", authErr)

@@ -450,10 +450,13 @@ func scopeMatchesPath(granted map[string]struct{}, required string, filePath str
 		if !ok {
 			continue
 		}
-		if scopePath == "*" || filePath == "" {
+		if scopePath == "*" {
 			return true
 		}
 		hasNarrowPathGrant = true
+		if filePath == "" {
+			continue
+		}
 		if scopePathMatches(scopePath, filePath) {
 			return true
 		}
