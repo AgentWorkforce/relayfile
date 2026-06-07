@@ -184,6 +184,7 @@ export function ingestWebhook(
   const coalesced = findCoalescedEnvelope(
     queued,
     payload,
+    provider,
     receivedAt,
     options.coalesceWindowMs ?? DEFAULT_COALESCE_WINDOW_MS,
   );
@@ -248,12 +249,14 @@ export function normalizeEnvelope(
 ): Partial<EnvelopeRow> {
   const provider = normalizeProvider(input.provider);
   const eventType = normalizeEventType(input.eventType);
-  const path = normalizePath(input.path ?? "");
+  const canonicalPath = input.path?.trim()
+    ? canonicalProviderEnvelopePath(provider, input.path)
+    : null;
   const correlationId = input.correlationId?.trim() ?? "";
   const receivedAt = normalizeIsoDate(input.timestamp) ?? now();
   const deliveryId = input.deliveryId?.trim();
 
-  if (!provider || !eventType || !input.path?.trim()) {
+  if (!provider || !eventType || !input.path?.trim() || !canonicalPath) {
     return {
       provider,
       deliveryId,
@@ -272,7 +275,7 @@ export function normalizeEnvelope(
     payload: {
       provider,
       event_type: eventType,
-      path,
+      path: canonicalPath,
       timestamp: receivedAt,
       data: asRecord(input.data),
       delivery_id: deliveryId,
@@ -282,7 +285,7 @@ export function normalizeEnvelope(
 }
 
 export function normalizeEnvelopeEvent(
-  envelope: Pick<EnvelopeRow, "payload" | "receivedAt">,
+  envelope: Pick<EnvelopeRow, "payload" | "receivedAt"> & Partial<Pick<EnvelopeRow, "provider">>,
 ): EnvelopeEvent | null {
   const payload = envelope.payload;
   const eventType = normalizeEnvelopeEventType(payload);
@@ -290,7 +293,10 @@ export function normalizeEnvelopeEvent(
     return null;
   }
 
-  const path = normalizePath(asOptionalString(payload.path) ?? "/");
+  const path = normalizeEnvelopePath(envelope);
+  if (!path) {
+    return null;
+  }
   const data = asRecord(payload.data);
   const body = Object.keys(data).length > 0 ? data : payload;
   const timestamp =
@@ -322,10 +328,13 @@ export function normalizeEnvelopeEvent(
 }
 
 export function normalizeEnvelopePath(
-  envelope: Pick<EnvelopeRow, "payload">,
+  envelope: Pick<EnvelopeRow, "payload"> & Partial<Pick<EnvelopeRow, "provider">>,
 ): string | null {
   const path = asOptionalString(envelope.payload.path);
-  return path ? normalizePath(path) : null;
+  const provider =
+    asOptionalString(envelope.provider) ??
+    asOptionalString(envelope.payload.provider);
+  return path ? canonicalProviderEnvelopePath(provider, path) : null;
 }
 
 export function applyWebhookEnvelope(
@@ -333,8 +342,8 @@ export function applyWebhookEnvelope(
   envelope: EnvelopeRow,
   options: ApplyEnvelopeOptions = {},
 ): ApplyEnvelopeResult {
-  const event = normalizeEnvelopeEvent(envelope);
-  if (!event) {
+  const normalizedEvent = normalizeEnvelopeEvent(envelope);
+  if (!normalizedEvent) {
     return {
       status: "ignored",
       eventType: null,
@@ -342,6 +351,7 @@ export function applyWebhookEnvelope(
       revision: null,
     };
   }
+  const event = canonicalizeEnvelopeEventPath(storage, envelope.provider, normalizedEvent);
 
   if (options.shouldSuppress?.(envelope, event)) {
     const revision = appendSyncEvent(
@@ -573,17 +583,18 @@ function appendSyncEvent(
 function findCoalescedEnvelope(
   envelopes: EnvelopeRow[],
   payload: Record<string, unknown>,
+  provider: string,
   receivedAt: string,
   windowMs: number,
 ): EnvelopeRow | null {
-  const key = coalesceObjectKey(payload);
+  const key = coalesceObjectKey(payload, provider);
   if (!key) {
     return null;
   }
 
   let match: EnvelopeRow | null = null;
   for (const envelope of envelopes) {
-    if (coalesceObjectKey(envelope.payload) !== key) {
+    if (coalesceObjectKey(envelope.payload, envelope.provider) !== key) {
       continue;
     }
     if (!withinCoalesceWindow(envelope.receivedAt, receivedAt, windowMs)) {
@@ -606,7 +617,7 @@ function deliveryMatches(envelope: EnvelopeRow, deliveryId: string): boolean {
   return envelope.deliveryId === deliveryId || envelope.deliveryIds?.includes(deliveryId) === true;
 }
 
-function coalesceObjectKey(payload: Record<string, unknown>): string {
+function coalesceObjectKey(payload: Record<string, unknown>, provider?: string): string {
   const data = asRecord(payload.data);
   const providerObjectId =
     asOptionalString(data.providerObjectId) ??
@@ -619,8 +630,92 @@ function coalesceObjectKey(payload: Record<string, unknown>): string {
     return `object:${providerObjectId}`;
   }
 
-  const path = normalizeEnvelopePath({ payload });
+  const path = normalizeEnvelopePath({ payload, provider });
   return path && path !== "/" ? `path:${path}` : "";
+}
+
+const PROVIDER_RELATIVE_PATH_ROOTS: Record<string, Set<string>> = {
+  slack: new Set(["channels", "dms", "teams", "users"]),
+};
+
+function canonicalProviderEnvelopePath(provider: string | undefined, rawPath: string): string | null {
+  const path = normalizePath(rawPath);
+  const normalizedProvider = normalizeProvider(provider);
+  if (!normalizedProvider || path === "/") {
+    return path;
+  }
+
+  const relativeRoots = PROVIDER_RELATIVE_PATH_ROOTS[normalizedProvider];
+  if (!relativeRoots) {
+    return path;
+  }
+
+  const trimmed = path.slice(1);
+  if (
+    trimmed === normalizedProvider ||
+    trimmed.startsWith(`${normalizedProvider}/`)
+  ) {
+    return path;
+  }
+
+  const [firstSegment] = trimmed.split("/", 1);
+  if (firstSegment && relativeRoots.has(firstSegment)) {
+    return normalizePath(`/${normalizedProvider}/${trimmed}`);
+  }
+
+  return null;
+}
+
+function canonicalizeEnvelopeEventPath(
+  storage: StorageAdapter,
+  provider: string,
+  event: EnvelopeEvent,
+): EnvelopeEvent {
+  const path = canonicalizeExistingProviderAliasPath(storage, provider, event.path);
+  return path === event.path ? event : { ...event, path };
+}
+
+function canonicalizeExistingProviderAliasPath(
+  storage: StorageAdapter,
+  provider: string,
+  rawPath: string,
+): string {
+  const path = normalizePath(rawPath);
+  if (normalizeProvider(provider) !== "slack") {
+    return path;
+  }
+  return canonicalizeSlackChannelAliasPath(storage.listFiles(), path);
+}
+
+function canonicalizeSlackChannelAliasPath(files: { path: string }[], rawPath: string): string {
+  const path = normalizePath(rawPath);
+  const parts = path.slice(1).split("/");
+  if (parts.length < 3 || parts[0] !== "slack" || parts[1] !== "channels") {
+    return path;
+  }
+  const channelSegment = parts[2];
+  if (!channelSegment || channelSegment.includes("__")) {
+    return path;
+  }
+
+  const candidates = files
+    .map((file) => normalizePath(file.path).slice(1).split("/"))
+    .filter(
+      (fileParts) =>
+        fileParts.length >= 3 &&
+        fileParts[0] === "slack" &&
+        fileParts[1] === "channels" &&
+        fileParts[2]?.startsWith(`${channelSegment}__`),
+    )
+    .map((fileParts) => fileParts[2] as string)
+    .sort();
+
+  if (candidates.length === 0) {
+    return path;
+  }
+
+  parts[2] = candidates[0] as string;
+  return normalizePath(`/${parts.join("/")}`);
 }
 
 function withinCoalesceWindow(
