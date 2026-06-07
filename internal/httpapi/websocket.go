@@ -35,10 +35,23 @@ type websocketSubscriptionOptions struct {
 }
 
 func (s *Server) handleFileEventsWebSocket(w http.ResponseWriter, r *http.Request, workspaceID string) {
-	claims, authErr := authorizeBearer("Bearer "+strings.TrimSpace(r.URL.Query().Get("token")), s.bearerVerifier, workspaceID, "fs:read", "", time.Now().UTC())
+	options := parseWebSocketSubscriptionOptions(r)
+	scopePath := "/"
+	if len(options.Paths) > 0 {
+		scopePath = options.Paths[0]
+	}
+	claims, authErr := authorizeBearer("Bearer "+strings.TrimSpace(r.URL.Query().Get("token")), s.bearerVerifier, workspaceID, "fs:read", scopePath, time.Now().UTC())
 	if authErr != nil {
 		writeError(w, authErr.status, authErr.code, authErr.message, "")
 		return
+	}
+	if len(options.Paths) > 1 {
+		for _, path := range options.Paths[1:] {
+			if !scopeMatchesPath(claims.Scopes, "fs:read", path) {
+				writeError(w, http.StatusForbidden, "forbidden", "missing required scope: fs:read", "")
+				return
+			}
+		}
 	}
 	if s.rateLimiter != nil {
 		key := workspaceID + "|" + claims.AgentName
@@ -57,7 +70,6 @@ func (s *Server) handleFileEventsWebSocket(w http.ResponseWriter, r *http.Reques
 	defer conn.Close(websocket.StatusNormalClosure, "")
 
 	ctx := r.Context()
-	options := parseWebSocketSubscriptionOptions(r)
 
 	// Subscribe FIRST, then catch up, so no events are missed in between.
 	subscriptionCh := make(chan relayfile.Event, 256)

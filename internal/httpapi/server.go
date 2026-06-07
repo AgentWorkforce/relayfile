@@ -241,8 +241,14 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	scopePath := ""
 	if requiredScope == "fs:read" || requiredScope == "fs:write" {
 		switch route {
+		case "tree":
+			scopePath = normalizeRoutePath(r.URL.Query().Get("path"))
 		case "read_file", "write_file", "delete_file":
 			scopePath = strings.TrimSpace(r.URL.Query().Get("path"))
+		case "export", "query_files":
+			scopePath = normalizeRoutePath(r.URL.Query().Get("path"))
+		case "events":
+			scopePath = "/"
 		}
 	}
 	claims, authErr := authorizeBearer(r.Header.Get("Authorization"), s.bearerVerifier, workspaceID, requiredScope, scopePath, time.Now().UTC())
