@@ -638,6 +638,12 @@ const PROVIDER_RELATIVE_PATH_ROOTS: Record<string, Set<string>> = {
   slack: new Set(["channels", "dms", "teams", "users"]),
 };
 
+type RawSlackChannelAliasPath = {
+  path: string;
+  parts: string[];
+  channelSegment: string;
+};
+
 function canonicalProviderEnvelopePath(provider: string | undefined, rawPath: string): string | null {
   const path = normalizePath(rawPath);
   const normalizedProvider = normalizeProvider(provider);
@@ -684,27 +690,18 @@ function canonicalizeExistingProviderAliasPath(
   if (normalizeProvider(provider) !== "slack") {
     return path;
   }
-  const parts = path.slice(1).split("/");
-  if (parts.length < 3 || parts[0] !== "slack" || parts[1] !== "channels") {
-    return path;
-  }
-  const channelSegment = parts[2];
-  if (!channelSegment || channelSegment.includes("__")) {
+  if (!parseRawSlackChannelAliasPath(path)) {
     return path;
   }
   return canonicalizeSlackChannelAliasPath(storage.listFiles(), path);
 }
 
 function canonicalizeSlackChannelAliasPath(files: { path: string }[], rawPath: string): string {
-  const path = normalizePath(rawPath);
-  const parts = path.slice(1).split("/");
-  if (parts.length < 3 || parts[0] !== "slack" || parts[1] !== "channels") {
-    return path;
+  const parsed = parseRawSlackChannelAliasPath(rawPath);
+  if (!parsed) {
+    return normalizePath(rawPath);
   }
-  const channelSegment = parts[2];
-  if (!channelSegment || channelSegment.includes("__")) {
-    return path;
-  }
+  const { path, parts, channelSegment } = parsed;
 
   const prefix = `/slack/channels/${channelSegment}__`;
   const candidates = files
@@ -719,6 +716,19 @@ function canonicalizeSlackChannelAliasPath(files: { path: string }[], rawPath: s
 
   parts[2] = candidates[0] as string;
   return normalizePath(`/${parts.join("/")}`);
+}
+
+function parseRawSlackChannelAliasPath(rawPath: string): RawSlackChannelAliasPath | null {
+  const path = normalizePath(rawPath);
+  const parts = path.slice(1).split("/");
+  if (parts.length < 3 || parts[0] !== "slack" || parts[1] !== "channels") {
+    return null;
+  }
+  const channelSegment = parts[2];
+  if (!channelSegment || channelSegment.includes("__")) {
+    return null;
+  }
+  return { path, parts, channelSegment };
 }
 
 function withinCoalesceWindow(

@@ -82,8 +82,7 @@ async function waitForWebSocket(): Promise<ProactiveMockWebSocket> {
 
 async function waitForExpectation(check: () => void): Promise<void> {
   let lastError: unknown;
-  const deadline = Date.now() + 5_000;
-  while (Date.now() <= deadline) {
+  for (let attempt = 0; attempt < 500; attempt += 1) {
     try {
       check();
       return;
