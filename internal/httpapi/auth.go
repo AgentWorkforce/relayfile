@@ -437,10 +437,6 @@ func scopeMatches(granted map[string]struct{}, required string) bool {
 }
 
 func scopeMatchesPath(granted map[string]struct{}, required string, filePath string) bool {
-	if _, ok := granted[required]; ok {
-		return true
-	}
-
 	filePath = strings.TrimSpace(filePath)
 	parts := strings.SplitN(required, ":", 2)
 	if len(parts) != 2 {
@@ -448,47 +444,81 @@ func scopeMatchesPath(granted map[string]struct{}, required string, filePath str
 	}
 	resource, action := parts[0], parts[1]
 
+	hasNarrowPathGrant := false
 	for scope := range granted {
-		segments := strings.SplitN(scope, ":", 4)
-		if len(segments) < 3 {
+		scopePath, ok := pathScopeForRequired(scope, resource, action)
+		if !ok {
 			continue
 		}
-
-		plane, res, act := segments[0], segments[1], segments[2]
-		scopePath := "*"
-		if len(segments) == 4 {
-			scopePath = segments[3]
+		if scopePath == "*" || filePath == "" {
+			return true
 		}
-
-		if plane != "relayfile" && plane != "*" {
-			continue
+		hasNarrowPathGrant = true
+		if scopePathMatches(scopePath, filePath) {
+			return true
 		}
+	}
+
+	if _, ok := granted[required]; ok {
+		return !hasNarrowPathGrant
+	}
+	return false
+}
+
+func pathScopeForRequired(scope, resource, action string) (string, bool) {
+	segments := strings.SplitN(scope, ":", 4)
+	if len(segments) < 3 {
+		return "", false
+	}
+
+	switch segments[0] {
+	case "relayfile", "*":
+		res, act := segments[1], segments[2]
 		if res != resource && res != "*" {
-			continue
+			return "", false
 		}
-		if act != action && act != "*" {
-			if act != "manage" || (action != "read" && action != "write") {
-				continue
-			}
+		if !scopeActionMatches(act, action) {
+			return "", false
 		}
+		if len(segments) == 4 {
+			return strings.TrimSpace(segments[3]), true
+		}
+		return "*", true
+	case "workspace":
+		act := segments[2]
+		if resource != "fs" || !scopeActionMatches(act, action) {
+			return "", false
+		}
+		if len(segments) == 4 {
+			return strings.TrimSpace(segments[3]), true
+		}
+		return "*", true
+	default:
+		return "", false
+	}
+}
 
-		if scopePath == "*" {
-			return true
-		}
-		if filePath == "" {
-			return true
-		}
+func scopeActionMatches(granted, required string) bool {
+	if granted == required || granted == "*" {
+		return true
+	}
+	return granted == "manage" && (required == "read" || required == "write")
+}
+
+func scopePathMatches(scopePath, filePath string) bool {
+	if scopePath == filePath {
+		return true
+	}
+	if strings.HasSuffix(scopePath, "/**") {
+		scopeDir := strings.TrimSuffix(scopePath, "/**")
+		return filePath == scopeDir || strings.HasPrefix(filePath, scopeDir+"/")
+	}
+	if strings.HasSuffix(scopePath, "/*") {
 		scopeDir := strings.TrimSuffix(scopePath, "/*")
-		scopeDir = strings.TrimSuffix(scopeDir, "*")
-		if scopePath == filePath {
-			return true
-		}
-		if strings.HasSuffix(scopePath, "/*") && strings.HasPrefix(filePath, scopeDir+"/") {
-			return true
-		}
-		if strings.HasSuffix(scopePath, "*") && strings.HasPrefix(filePath, scopeDir) {
-			return true
-		}
+		return strings.HasPrefix(filePath, scopeDir+"/")
+	}
+	if strings.HasSuffix(scopePath, "*") {
+		return strings.HasPrefix(filePath, strings.TrimSuffix(scopePath, "*"))
 	}
 	return false
 }
