@@ -243,6 +243,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		switch route {
 		case "read_file", "write_file", "delete_file":
 			scopePath = strings.TrimSpace(r.URL.Query().Get("path"))
+		case "export", "query_files":
+			scopePath = normalizeRoutePath(r.URL.Query().Get("path"))
 		}
 	}
 	claims, authErr := authorizeBearer(r.Header.Get("Authorization"), s.bearerVerifier, workspaceID, requiredScope, scopePath, time.Now().UTC())

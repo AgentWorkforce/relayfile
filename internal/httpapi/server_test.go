@@ -1277,6 +1277,94 @@ func TestExportJSONPathFilter(t *testing.T) {
 	}
 }
 
+func TestExportEnforcesPathScopedMountGrant(t *testing.T) {
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
+	t.Cleanup(store.Close)
+
+	workspaceID := "ws_export_scope"
+	if written, _, errs := store.BulkWrite(workspaceID, []relayfile.BulkWriteFile{
+		{Path: "/allowed/A.md", ContentType: "text/markdown", Content: "# A"},
+		{Path: "/secret/B.md", ContentType: "text/markdown", Content: "# B"},
+	}); written != 2 || len(errs) != 0 {
+		t.Fatalf("seed bulk write failed: written=%d errs=%+v", written, errs)
+	}
+
+	server := NewServer(store)
+	scopedToken := mustTestJWT(t, "dev-secret", workspaceID, "MountSync", []string{
+		"fs:read",
+		"workspace:mount-sponsor:read:/allowed/**",
+	}, time.Now().Add(time.Hour))
+	fullToken := mustTestJWT(t, "dev-secret", workspaceID, "Worker1", []string{"fs:read"}, time.Now().Add(time.Hour))
+
+	tests := []struct {
+		name      string
+		token     string
+		path      string
+		wantCode  int
+		wantFiles []string
+	}{
+		{
+			name:      "path-scoped mount token exports inside subtree",
+			token:     scopedToken,
+			path:      "/v1/workspaces/" + workspaceID + "/fs/export?format=json&path=/allowed",
+			wantCode:  http.StatusOK,
+			wantFiles: []string{"/allowed/A.md"},
+		},
+		{
+			name:     "path-scoped mount token cannot export outside subtree",
+			token:    scopedToken,
+			path:     "/v1/workspaces/" + workspaceID + "/fs/export?format=json&path=/secret",
+			wantCode: http.StatusForbidden,
+		},
+		{
+			name:     "path-scoped mount token cannot export whole workspace by omitting path",
+			token:    scopedToken,
+			path:     "/v1/workspaces/" + workspaceID + "/fs/export?format=json",
+			wantCode: http.StatusForbidden,
+		},
+		{
+			name:      "pure bare fs read token can still export whole workspace",
+			token:     fullToken,
+			path:      "/v1/workspaces/" + workspaceID + "/fs/export?format=json",
+			wantCode:  http.StatusOK,
+			wantFiles: []string{"/allowed/A.md", "/secret/B.md"},
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			resp := doRequest(t, server, request{
+				method: http.MethodGet,
+				path:   tt.path,
+				headers: map[string]string{
+					"Authorization":    "Bearer " + tt.token,
+					"X-Correlation-Id": "corr_export_scope",
+				},
+			})
+			if resp.Code != tt.wantCode {
+				t.Fatalf("expected %d, got %d (%s)", tt.wantCode, resp.Code, resp.Body.String())
+			}
+			if tt.wantCode != http.StatusOK {
+				return
+			}
+
+			var files []relayfile.File
+			if err := json.NewDecoder(resp.Body).Decode(&files); err != nil {
+				t.Fatalf("decode export response: %v", err)
+			}
+			if len(files) != len(tt.wantFiles) {
+				t.Fatalf("expected %d exported files, got %d: %+v", len(tt.wantFiles), len(files), files)
+			}
+			for i, wantPath := range tt.wantFiles {
+				if files[i].Path != wantPath {
+					t.Fatalf("expected exported file %d path %q, got %q", i, wantPath, files[i].Path)
+				}
+			}
+		})
+	}
+}
+
 func TestExportTar(t *testing.T) {
 	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
 	t.Cleanup(store.Close)
@@ -1715,6 +1803,94 @@ func TestQueryFilesEndpoint(t *testing.T) {
 	}
 	if queryPayload.Items[0].Properties["stage"] != "seed" {
 		t.Fatalf("expected stage semantic, got %q", queryPayload.Items[0].Properties["stage"])
+	}
+}
+
+func TestQueryFilesEnforcesPathScopedMountGrant(t *testing.T) {
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
+	t.Cleanup(store.Close)
+
+	workspaceID := "ws_query_scope"
+	if written, _, errs := store.BulkWrite(workspaceID, []relayfile.BulkWriteFile{
+		{Path: "/allowed/A.md", ContentType: "text/markdown", Content: "# A"},
+		{Path: "/secret/B.md", ContentType: "text/markdown", Content: "# B"},
+	}); written != 2 || len(errs) != 0 {
+		t.Fatalf("seed bulk write failed: written=%d errs=%+v", written, errs)
+	}
+
+	server := NewServer(store)
+	scopedToken := mustTestJWT(t, "dev-secret", workspaceID, "MountSync", []string{
+		"fs:read",
+		"workspace:mount-sponsor:read:/allowed/**",
+	}, time.Now().Add(time.Hour))
+	fullToken := mustTestJWT(t, "dev-secret", workspaceID, "Worker1", []string{"fs:read"}, time.Now().Add(time.Hour))
+
+	tests := []struct {
+		name      string
+		token     string
+		path      string
+		wantCode  int
+		wantItems []string
+	}{
+		{
+			name:      "path-scoped mount token queries inside subtree",
+			token:     scopedToken,
+			path:      "/v1/workspaces/" + workspaceID + "/fs/query?path=/allowed",
+			wantCode:  http.StatusOK,
+			wantItems: []string{"/allowed/A.md"},
+		},
+		{
+			name:     "path-scoped mount token cannot query outside subtree",
+			token:    scopedToken,
+			path:     "/v1/workspaces/" + workspaceID + "/fs/query?path=/secret",
+			wantCode: http.StatusForbidden,
+		},
+		{
+			name:     "path-scoped mount token cannot query whole workspace by omitting path",
+			token:    scopedToken,
+			path:     "/v1/workspaces/" + workspaceID + "/fs/query",
+			wantCode: http.StatusForbidden,
+		},
+		{
+			name:      "pure bare fs read token can still query whole workspace",
+			token:     fullToken,
+			path:      "/v1/workspaces/" + workspaceID + "/fs/query",
+			wantCode:  http.StatusOK,
+			wantItems: []string{"/allowed/A.md", "/secret/B.md"},
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			resp := doRequest(t, server, request{
+				method: http.MethodGet,
+				path:   tt.path,
+				headers: map[string]string{
+					"Authorization":    "Bearer " + tt.token,
+					"X-Correlation-Id": "corr_query_scope",
+				},
+			})
+			if resp.Code != tt.wantCode {
+				t.Fatalf("expected %d, got %d (%s)", tt.wantCode, resp.Code, resp.Body.String())
+			}
+			if tt.wantCode != http.StatusOK {
+				return
+			}
+
+			var payload relayfile.FileQueryResponse
+			if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode query response: %v", err)
+			}
+			if len(payload.Items) != len(tt.wantItems) {
+				t.Fatalf("expected %d query items, got %d: %+v", len(tt.wantItems), len(payload.Items), payload.Items)
+			}
+			for i, wantPath := range tt.wantItems {
+				if payload.Items[i].Path != wantPath {
+					t.Fatalf("expected query item %d path %q, got %q", i, wantPath, payload.Items[i].Path)
+				}
+			}
+		})
 	}
 }
 
