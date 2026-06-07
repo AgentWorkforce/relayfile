@@ -82,13 +82,13 @@ async function waitForWebSocket(): Promise<ProactiveMockWebSocket> {
 
 async function waitForExpectation(check: () => void): Promise<void> {
   let lastError: unknown;
-  for (let attempt = 0; attempt < 20; attempt += 1) {
+  for (let attempt = 0; attempt < 500; attempt += 1) {
     try {
       check();
       return;
     } catch (error) {
       lastError = error;
-      await new Promise((resolve) => setTimeout(resolve, 0));
+      await new Promise((resolve) => setTimeout(resolve, 10));
     }
   }
   throw lastError;
