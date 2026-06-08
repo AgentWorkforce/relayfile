@@ -6751,6 +6751,181 @@ func TestPullRemoteIncrementalPersistentReadNotReadyAfterTTLAdvancesAsDelete(t *
 	assertLocalFileContent(t, filepath.Join(localDir, "Docs", "after.md"), "# after")
 }
 
+func TestPullRemoteIncrementalRecreatedPathAfterMarkerClearGetsFreshTTL(t *testing.T) {
+	const remotePath = "/notion/Docs/recreated.md"
+	ttl := time.Minute
+	oldMarker := time.Now().UTC().Add(-ttl - time.Minute).Format(time.RFC3339Nano)
+	client := &fakeClient{
+		files: map[string]RemoteFile{},
+		events: []FilesystemEvent{
+			{EventID: "evt_001", Type: "file.created", Path: remotePath, Revision: "rev_recreated"},
+		},
+		revisionCounter: 1,
+		eventCounter:    1,
+	}
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID:                "ws_not_ready_recreated_fresh_ttl",
+		RemoteRoot:                 "/notion",
+		LocalRoot:                  localDir,
+		FullPullEvery:              -1,
+		WebSocket:                  boolPtr(false),
+		CursorTimeout:              time.Second,
+		BootstrapTimeout:           time.Second,
+		IncrementalReadNotReadyTTL: ttl,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+	syncer.loaded = true
+	syncer.state = mountState{
+		Files:             map[string]trackedFile{},
+		EventsCursor:      "evt_000",
+		BootstrapComplete: true,
+		IncrementalReadNotReadySince: map[string]string{
+			remotePath: oldMarker,
+		},
+	}
+
+	if err := syncer.applyRemoteFile(remotePath, RemoteFile{
+		Path:        remotePath,
+		Revision:    "rev_old_incarnation",
+		ContentType: "text/markdown",
+		Content:     "# old incarnation",
+	}, nil); err != nil {
+		t.Fatalf("apply old incarnation: %v", err)
+	}
+	if syncer.state.IncrementalReadNotReadySince != nil {
+		t.Fatalf("expected successful materialization to clear stale marker, got %#v", syncer.state.IncrementalReadNotReadySince)
+	}
+
+	err = syncer.Reconcile(context.Background())
+	var notReadyErr *IncrementalReadNotReadyError
+	if !errors.As(err, &notReadyErr) || notReadyErr.Path != remotePath {
+		t.Fatalf("expected recreated path 404 to get fresh retry window, got %v", err)
+	}
+	if got := syncer.state.EventsCursor; got != "evt_000" {
+		t.Fatalf("EventsCursor = %q, want unchanged evt_000", got)
+	}
+	gotMarker := syncer.state.IncrementalReadNotReadySince[remotePath]
+	if gotMarker == "" {
+		t.Fatalf("expected recreated path to record a fresh read-not-ready marker")
+	}
+	if gotMarker == oldMarker {
+		t.Fatalf("expected recreated path marker to be refreshed, still %q", gotMarker)
+	}
+	if _, ok := syncer.state.Files[remotePath]; !ok {
+		t.Fatalf("fresh retry should not delete recreated path state")
+	}
+	assertLocalFileContent(t, filepath.Join(localDir, "Docs", "recreated.md"), "# old incarnation")
+}
+
+func TestApplyWebSocketEventClearsReadNotReadyMarker(t *testing.T) {
+	const remotePath = "/notion/Docs/ws.md"
+	client := &fakeClient{
+		files: map[string]RemoteFile{
+			remotePath: {
+				Path:        remotePath,
+				Revision:    "rev_ws",
+				ContentType: "text/markdown",
+				Content:     "# websocket",
+			},
+		},
+	}
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_event_clears_not_ready",
+		RemoteRoot:  "/notion",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+	syncer.state.IncrementalReadNotReadySince = map[string]string{
+		remotePath: time.Now().UTC().Add(-time.Hour).Format(time.RFC3339Nano),
+	}
+
+	if err := syncer.applyWebSocketEvent(context.Background(), websocketEvent{
+		Type:      "file.updated",
+		Path:      remotePath,
+		Timestamp: "2026-06-08T12:00:00Z",
+	}); err != nil {
+		t.Fatalf("apply websocket event: %v", err)
+	}
+	if syncer.state.IncrementalReadNotReadySince != nil {
+		t.Fatalf("expected websocket materialization to clear marker, got %#v", syncer.state.IncrementalReadNotReadySince)
+	}
+	assertLocalFileContent(t, filepath.Join(localDir, "Docs", "ws.md"), "# websocket")
+}
+
+func TestApplyRemoteSnapshotDeletesRevClearsReadNotReadyMarkerAfterConfirmedDelete(t *testing.T) {
+	const remotePath = "/notion/Docs/deleted.md"
+	localDir := t.TempDir()
+	localPath := filepath.Join(localDir, "Docs", "deleted.md")
+	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+		t.Fatalf("mkdir local doc dir: %v", err)
+	}
+	if err := os.WriteFile(localPath, []byte("# deleted"), 0o644); err != nil {
+		t.Fatalf("write local doc: %v", err)
+	}
+	syncer, err := NewSyncer(&fakeClient{}, SyncerOptions{
+		WorkspaceID: "ws_snapshot_delete_clears_not_ready",
+		RemoteRoot:  "/notion",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+	syncer.state.Files[remotePath] = trackedFile{
+		Revision:    "rev_old",
+		ContentType: "text/markdown",
+		Hash:        hashBytes([]byte("# deleted")),
+	}
+	syncer.state.LastAppliedRevision = "rev_001"
+	syncer.state.IncrementalReadNotReadySince = map[string]string{
+		remotePath: time.Now().UTC().Add(-time.Hour).Format(time.RFC3339Nano),
+	}
+
+	if err := syncer.applyRemoteSnapshotDeletesRev(map[string]struct{}{}, nil, "rev_002"); err != nil {
+		t.Fatalf("first snapshot delete observation: %v", err)
+	}
+	if syncer.state.IncrementalReadNotReadySince == nil {
+		t.Fatalf("first tombstone observation should not clear marker before delete succeeds")
+	}
+	if err := syncer.applyRemoteSnapshotDeletesRev(map[string]struct{}{}, nil, "rev_003"); err != nil {
+		t.Fatalf("confirmed snapshot delete: %v", err)
+	}
+	if syncer.state.IncrementalReadNotReadySince != nil {
+		t.Fatalf("expected confirmed snapshot delete to clear marker, got %#v", syncer.state.IncrementalReadNotReadySince)
+	}
+	if _, ok := syncer.state.Files[remotePath]; ok {
+		t.Fatalf("expected confirmed snapshot delete to remove tracked state")
+	}
+	if _, err := os.Stat(localPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected confirmed snapshot delete to remove local file; stat err=%v", err)
+	}
+}
+
+func TestMarkBootstrapCompleteClearsReadNotReadyMarkers(t *testing.T) {
+	syncer, err := NewSyncer(&fakeClient{}, SyncerOptions{
+		WorkspaceID: "ws_bootstrap_clears_not_ready",
+		RemoteRoot:  "/notion",
+		LocalRoot:   t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+	syncer.state.IncrementalReadNotReadySince = map[string]string{
+		"/notion/Docs/a.md": time.Now().UTC().Add(-time.Hour).Format(time.RFC3339Nano),
+	}
+
+	syncer.markBootstrapComplete()
+
+	if syncer.state.IncrementalReadNotReadySince != nil {
+		t.Fatalf("expected bootstrap completion to clear markers, got %#v", syncer.state.IncrementalReadNotReadySince)
+	}
+}
+
 func TestPullRemoteIncrementalDeleteEventStillDeletes(t *testing.T) {
 	client := &fakeClient{
 		files: map[string]RemoteFile{},

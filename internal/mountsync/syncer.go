@@ -2568,6 +2568,7 @@ func (s *Syncer) pullRemote(ctx context.Context, conflicted map[string]struct{})
 			// content already matches.
 			s.state.IncrementalCheckpoint = nil
 			s.state.IncrementalBacklogDraining = false
+			s.clearAllIncrementalReadNotReady()
 			return nil
 		}
 		feed, err := s.client.ListEvents(ctx, s.workspace, s.eventProvider, s.state.EventsCursor, 1)
@@ -2606,6 +2607,7 @@ func (s *Syncer) pullRemote(ctx context.Context, conflicted map[string]struct{})
 		s.state.EventsCursor = ""
 		s.state.IncrementalCheckpoint = nil
 		s.state.IncrementalBacklogDraining = false
+		s.clearAllIncrementalReadNotReady()
 	}
 
 	// Restart fast-path. When EventsCursor is empty but the state file
@@ -2696,6 +2698,7 @@ func (s *Syncer) pullRemote(ctx context.Context, conflicted map[string]struct{})
 	}
 	s.state.IncrementalCheckpoint = nil
 	s.state.IncrementalBacklogDraining = false
+	s.clearAllIncrementalReadNotReady()
 	if s.wsConn != nil {
 		return nil
 	}
@@ -3533,6 +3536,7 @@ func (s *Syncer) markBootstrapComplete() {
 	s.state.BootstrapStartedAt = ""
 	s.state.BootstrapFilesSynced = 0
 	s.state.BootstrapFilesTotal = 0
+	s.clearAllIncrementalReadNotReady()
 	// One-shot escape hatch / clobber-remnant recovery: after a single
 	// successful full reconcile, clear the in-memory force flag so
 	// subsequent cycles can use the fast-path again.
@@ -4193,7 +4197,6 @@ func (s *Syncer) applyIncrementalChanges(
 			if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusNotFound {
 				if s.incrementalReadNotReadyExpired(remotePath, time.Now().UTC()) {
 					s.logf("changed event for %s remained unreadable for at least %s; treating as deleted and advancing events cursor", remotePath, s.readNotReadyTTL)
-					s.clearIncrementalReadNotReady(remotePath)
 					if err := s.applyRemoteDelete(remotePath, conflicted); err != nil {
 						return err
 					}
@@ -4222,7 +4225,6 @@ func (s *Syncer) applyIncrementalChanges(
 		if err := s.applyRemoteFile(remotePath, file, conflicted); err != nil {
 			return err
 		}
-		s.clearIncrementalReadNotReady(remotePath)
 		s.markIncrementalCheckpoint(pageStartCursor, pageCursor, "changed", remotePath)
 	}
 
@@ -4238,7 +4240,6 @@ func (s *Syncer) applyIncrementalChanges(
 		if err := s.applyRemoteDelete(remotePath, conflicted); err != nil {
 			return err
 		}
-		s.clearIncrementalReadNotReady(remotePath)
 		s.markIncrementalCheckpoint(pageStartCursor, pageCursor, "deleted", remotePath)
 	}
 	return nil
@@ -4326,6 +4327,10 @@ func (s *Syncer) clearIncrementalReadNotReady(remotePath string) {
 	if len(s.state.IncrementalReadNotReadySince) == 0 {
 		s.state.IncrementalReadNotReadySince = nil
 	}
+}
+
+func (s *Syncer) clearAllIncrementalReadNotReady() {
+	s.state.IncrementalReadNotReadySince = nil
 }
 
 func (s *Syncer) resolveLatestEventCursor(ctx context.Context) (string, error) {
@@ -4435,7 +4440,12 @@ func cursorResolutionRetryDelay(timeout time.Duration, attempt int) time.Duratio
 	return delay
 }
 
-func (s *Syncer) applyRemoteFile(remotePath string, file RemoteFile, conflicted map[string]struct{}) error {
+func (s *Syncer) applyRemoteFile(remotePath string, file RemoteFile, conflicted map[string]struct{}) (err error) {
+	defer func() {
+		if err == nil {
+			s.clearIncrementalReadNotReady(remotePath)
+		}
+	}()
 	if conflicted != nil {
 		if _, skip := conflicted[remotePath]; skip {
 			return nil
@@ -4592,7 +4602,12 @@ func scopeGrantsWrite(scope, filePath string) bool {
 	return true
 }
 
-func (s *Syncer) applyRemoteDelete(remotePath string, conflicted map[string]struct{}) error {
+func (s *Syncer) applyRemoteDelete(remotePath string, conflicted map[string]struct{}) (err error) {
+	defer func() {
+		if err == nil {
+			s.clearIncrementalReadNotReady(remotePath)
+		}
+	}()
 	if conflicted != nil {
 		if _, skip := conflicted[remotePath]; skip {
 			return nil
