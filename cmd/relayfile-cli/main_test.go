@@ -2408,6 +2408,7 @@ func TestReadGuardCountersAcceptsMirrorStateGuardsShape(t *testing.T) {
 		Guards: &syncStateGuards{
 			SkippedOversizeWriteback: 3,
 			SnapshotDeleteBlocked:    2,
+			PathCollisionQuarantined: 5,
 			LastAppliedRevision:      "rev_9",
 			Circuit: &syncStateGuardCirc{
 				Open:       true,
@@ -2423,11 +2424,31 @@ func TestReadGuardCountersAcceptsMirrorStateGuardsShape(t *testing.T) {
 	if got == nil {
 		t.Fatalf("expected guard counters")
 	}
-	if got.SkippedOversizeWriteback != 3 || got.SnapshotDeleteBlocked != 2 || got.LastAppliedRevision != "rev_9" {
+	if got.SkippedOversizeWriteback != 3 || got.SnapshotDeleteBlocked != 2 || got.PathCollisionQuarantined != 5 || got.LastAppliedRevision != "rev_9" {
 		t.Fatalf("unexpected guard counters: %#v", got)
 	}
 	if got.Circuit == nil || !got.Circuit.Open || got.Circuit.OpenEvents != 1 || got.Circuit.Failures != 4 {
 		t.Fatalf("unexpected circuit counters: %#v", got.Circuit)
+	}
+}
+
+func TestReadGuardCountersAcceptsMountsyncCountersShape(t *testing.T) {
+	localDir := t.TempDir()
+	stateDir := filepath.Join(localDir, ".relay")
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		t.Fatalf("mkdir .relay failed: %v", err)
+	}
+	payload := []byte(`{"counters":{"pathCollisionQuarantined":7}}` + "\n")
+	if err := os.WriteFile(filepath.Join(stateDir, "state.json"), payload, 0o644); err != nil {
+		t.Fatalf("write state failed: %v", err)
+	}
+
+	got := readGuardCounters(localDir)
+	if got == nil {
+		t.Fatalf("expected guard counters")
+	}
+	if got.PathCollisionQuarantined != 7 {
+		t.Fatalf("expected path collision counter, got %#v", got)
 	}
 }
 
