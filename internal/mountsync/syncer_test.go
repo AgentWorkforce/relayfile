@@ -6660,6 +6660,91 @@ func TestPullRemoteIncrementalDeleteEventStillDeletes(t *testing.T) {
 	}
 }
 
+func TestPullRemoteIncrementalStaleCreated404AdvancesToPagedDelete(t *testing.T) {
+	const missingRemotePath = "/notion/Docs/ghost.md"
+	oldTimestamp := time.Now().UTC().Add(-(incrementalReadNotReadyGrace + time.Minute)).Format(time.RFC3339Nano)
+	client := &fakeClient{
+		files: map[string]RemoteFile{},
+		events: []FilesystemEvent{
+			{
+				EventID:   "evt_001",
+				Type:      "file.created",
+				Path:      missingRemotePath,
+				Revision:  "rev_ghost",
+				Timestamp: oldTimestamp,
+			},
+		},
+		revisionCounter: 1,
+		eventCounter:    1,
+	}
+	for i := 2; i <= defaultIncrementalEventPageLimit; i++ {
+		remotePath := fmt.Sprintf("/notion/Docs/%03d.md", i)
+		revision := fmt.Sprintf("rev_%03d", i)
+		client.files[remotePath] = RemoteFile{
+			Path:        remotePath,
+			Revision:    revision,
+			ContentType: "text/markdown",
+			Content:     fmt.Sprintf("# %03d", i),
+		}
+		client.events = append(client.events, FilesystemEvent{
+			EventID:   fmt.Sprintf("evt_%03d", i),
+			Type:      "file.updated",
+			Path:      remotePath,
+			Revision:  revision,
+			Timestamp: oldTimestamp,
+		})
+		client.eventCounter = i
+	}
+	client.eventCounter++
+	client.events = append(client.events, FilesystemEvent{
+		EventID:   fmt.Sprintf("evt_%03d", client.eventCounter),
+		Type:      "file.deleted",
+		Path:      missingRemotePath,
+		Revision:  "rev_ghost",
+		Timestamp: oldTimestamp,
+	})
+
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID:      "ws_stale_created_404_paged_delete",
+		RemoteRoot:       "/notion",
+		LocalRoot:        localDir,
+		FullPullEvery:    -1,
+		WebSocket:        boolPtr(false),
+		CursorTimeout:    time.Second,
+		BootstrapTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+	syncer.loaded = true
+	syncer.state = mountState{
+		Files:             map[string]trackedFile{},
+		EventsCursor:      "evt_000",
+		BootstrapComplete: true,
+	}
+
+	if err := syncer.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile stale created 404 followed by paged delete: %v", err)
+	}
+	if got := client.listEventsCalls; got < 2 {
+		t.Fatalf("expected reconcile to continue to second event page, ListEvents calls = %d", got)
+	}
+	if got := syncer.state.EventsCursor; got != "evt_051" {
+		t.Fatalf("EventsCursor = %q, want evt_051", got)
+	}
+	if checkpoint := syncer.state.IncrementalCheckpoint; checkpoint != nil {
+		t.Fatalf("expected checkpoint to clear after completed page, got %#v", checkpoint)
+	}
+	if _, ok := syncer.state.Files[missingRemotePath]; ok {
+		t.Fatalf("expected stale missing path to remain untracked")
+	}
+	if _, err := os.Stat(filepath.Join(localDir, "Docs", "ghost.md")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected stale missing path to remain absent locally; stat err=%v", err)
+	}
+	assertLocalFileContent(t, filepath.Join(localDir, "Docs", "050.md"), "# 050")
+}
+
 func TestScanLocalFilesLogsOversizedFileOncePerSize(t *testing.T) {
 	t.Setenv("RELAYFILE_MAX_WRITEBACK_BYTES", "4")
 

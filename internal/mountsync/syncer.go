@@ -101,6 +101,7 @@ const (
 	defaultCursorRetryBaseDelay      = 250 * time.Millisecond
 	defaultBootstrapReadWorkers      = 16
 	defaultIncrementalEventPageLimit = 50
+	incrementalReadNotReadyGrace     = 10 * time.Minute
 	defaultRetryAfterMaxDelay        = 60 * time.Second
 	defaultWebSocketReconnectBase    = 1 * time.Second
 	defaultWebSocketReconnectMax     = 60 * time.Second
@@ -4172,6 +4173,14 @@ func (s *Syncer) applyIncrementalChanges(
 		if err != nil {
 			var httpErr *HTTPError
 			if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusNotFound {
+				if incrementalEventPastReadNotReadyGrace(event) {
+					s.logf("changed event for %s is still unreadable after %s; treating as deleted", remotePath, incrementalReadNotReadyGrace)
+					if err := s.applyRemoteDelete(remotePath, conflicted); err != nil {
+						return err
+					}
+					s.markIncrementalCheckpoint(pageStartCursor, pageCursor, "changed", remotePath)
+					continue
+				}
 				s.logf("changed event for %s is not readable yet; preserving events cursor for retry", remotePath)
 				return &IncrementalReadNotReadyError{
 					Path:       remotePath,
@@ -4211,6 +4220,18 @@ func (s *Syncer) applyIncrementalChanges(
 		s.markIncrementalCheckpoint(pageStartCursor, pageCursor, "deleted", remotePath)
 	}
 	return nil
+}
+
+func incrementalEventPastReadNotReadyGrace(event FilesystemEvent) bool {
+	timestamp := strings.TrimSpace(event.Timestamp)
+	if timestamp == "" {
+		return false
+	}
+	occurredAt, err := time.Parse(time.RFC3339Nano, timestamp)
+	if err != nil {
+		return false
+	}
+	return time.Since(occurredAt) > incrementalReadNotReadyGrace
 }
 
 func (s *Syncer) trySkipIncrementalRead(remotePath string, event FilesystemEvent) (bool, error) {

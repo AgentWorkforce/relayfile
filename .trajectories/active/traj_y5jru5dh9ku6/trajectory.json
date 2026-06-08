@@ -103,6 +103,36 @@
             "reasoning": "Current checkout canonicalizes Slack provider-relative paths in normalizeEnvelope, but ingestWebhook re-normalizes payload.path without provider and rejects /channels/... as invalid_input before queueing."
           },
           "significance": "high"
+        },
+        {
+          "ts": 1780917736348,
+          "type": "decision",
+          "content": "Bound stale incremental read 404 retries by event timestamp: Bound stale incremental read 404 retries by event timestamp",
+          "raw": {
+            "question": "Bound stale incremental read 404 retries by event timestamp",
+            "chosen": "Bound stale incremental read 404 retries by event timestamp",
+            "alternatives": [],
+            "reasoning": "Fresh 404s can be eventual-consistency misses, but old created/updated events that still 404 can permanently stall cursor advancement before later delete events."
+          },
+          "significance": "high"
+        },
+        {
+          "ts": 1780917777379,
+          "type": "reflection",
+          "content": "Validated bot liveness finding as current; implementing timestamp-bounded retry fallback plus focused regression before broader package checks",
+          "raw": {
+            "focalPoints": [
+              "review-comments",
+              "verification"
+            ],
+            "confidence": 0.82
+          },
+          "significance": "high",
+          "tags": [
+            "focal:review-comments",
+            "focal:verification",
+            "confidence:0.82"
+          ]
         }
       ]
     }
