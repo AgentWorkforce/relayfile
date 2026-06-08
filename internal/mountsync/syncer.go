@@ -26,6 +26,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 	"unicode/utf8"
 
@@ -1016,6 +1017,29 @@ type telemetryCounters struct {
 	TombstonesPending        uint64 `json:"tombstonesPending,omitempty"`
 	TombstonesConfirmed      uint64 `json:"tombstonesConfirmed,omitempty"`
 	TombstonesAgedOut        uint64 `json:"tombstonesAgedOut,omitempty"`
+	// PathCollisionQuarantined counts apply attempts skipped because a remote
+	// path could not be represented on the local filesystem — an ancestor
+	// component exists as a regular file (or the target is a directory). The
+	// fix belongs in the emitting adapter (do not emit one name as both a file
+	// and a directory); the daemon quarantines the path so a single collision
+	// can't wedge the whole mount. See isRemotePathCollision.
+	PathCollisionQuarantined uint64 `json:"pathCollisionQuarantined,omitempty"`
+}
+
+// isRemotePathCollision reports whether err is a POSIX path-shape collision:
+// an ancestor path component is a regular file (ENOTDIR), or the target name is
+// already a directory / already exists with the wrong type (EISDIR/EEXIST).
+// This happens when an adapter emits the same name as both a file and a
+// directory — e.g. the Slack adapter writing a thread reply leaf
+// `replies/<ts>.json` while also nesting that reply's children under a
+// directory at the same stem. Such a path can never be materialized here, so
+// failing the sync cycle on it would wedge the mount forever (bootstrap never
+// completes, the teardown writeback flush hangs and is killed at its timeout,
+// and the run is marked FAILED). The daemon logs + counts it and moves on.
+func isRemotePathCollision(err error) bool {
+	return errors.Is(err, syscall.ENOTDIR) ||
+		errors.Is(err, syscall.EISDIR) ||
+		errors.Is(err, syscall.EEXIST)
 }
 
 type trackedFile struct {
@@ -4489,6 +4513,11 @@ func (s *Syncer) applyRemoteFile(remotePath string, file RemoteFile, conflicted 
 	// materializeProviderLayouts; remote-supplied .layout.md payloads still
 	// pass through to disk unchanged.
 	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+		if isRemotePathCollision(err) {
+			s.state.Counters.PathCollisionQuarantined++
+			s.logf("quarantining remote path %s: cannot create parent directory (%v); skipping so the sync cycle can complete — fix is adapter-side (a name emitted as both a file and a directory)", remotePath, err)
+			return nil
+		}
 		return err
 	}
 	remoteHash := hashBytes(remoteBytes)
@@ -4501,6 +4530,11 @@ func (s *Syncer) applyRemoteFile(remotePath string, file RemoteFile, conflicted 
 	}
 	if shouldWrite {
 		if err := writeFileAtomic(localPath, remoteBytes, 0o644); err != nil {
+			if isRemotePathCollision(err) {
+				s.state.Counters.PathCollisionQuarantined++
+				s.logf("quarantining remote path %s: cannot write file (%v); skipping so the sync cycle can complete", remotePath, err)
+				return nil
+			}
 			return err
 		}
 	}

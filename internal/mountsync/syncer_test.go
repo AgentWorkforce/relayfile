@@ -4034,6 +4034,65 @@ func TestApplyRemoteFile_IndexAndLayoutFiles(t *testing.T) {
 	}
 }
 
+// TestApplyRemoteFile_QuarantinesPathCollision pins the resilience fix for the
+// Slack-adapter file/dir collision: a thread reply emitted as a leaf file
+// `replies/<ts>.json` whose children are also nested under a directory at the
+// same stem. The child cannot be materialized (its parent is a regular file →
+// ENOTDIR), but that single path must NOT fail the apply — it is quarantined so
+// the sync cycle completes and bootstrap can finish. Before the fix this
+// returned ENOTDIR, which aborted every cycle and wedged the mount forever.
+func TestApplyRemoteFile_QuarantinesPathCollision(t *testing.T) {
+	t.Parallel()
+
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(&fakeClient{}, SyncerOptions{
+		WorkspaceID: "ws_path_collision",
+		RemoteRoot:  "/",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+
+	// The reply leaf applies fine as a regular file.
+	leaf := "/slack/channels/C1/threads/T1/replies/1780911014_625209.json"
+	if err := syncer.applyRemoteFile(leaf, RemoteFile{
+		Path:        leaf,
+		Revision:    "rev_leaf",
+		ContentType: "application/json",
+		Content:     "{\"text\":\"reply\"}\n",
+	}, nil); err != nil {
+		t.Fatalf("applyRemoteFile(leaf) failed: %v", err)
+	}
+
+	// A child UNDER the leaf forces mkdir of a path whose parent is a regular
+	// file. With the fix this is quarantined (nil error), not propagated.
+	child := leaf + "/reactions/tada--U1.json"
+	if err := syncer.applyRemoteFile(child, RemoteFile{
+		Path:        child,
+		Revision:    "rev_child",
+		ContentType: "application/json",
+		Content:     "{\"emoji\":\"tada\"}\n",
+	}, nil); err != nil {
+		t.Fatalf("applyRemoteFile(child) should quarantine the collision, got error: %v", err)
+	}
+
+	// The collision counter advanced, the leaf is intact, and the colliding
+	// child was not (and cannot be) materialized.
+	if got := syncer.state.Counters.PathCollisionQuarantined; got == 0 {
+		t.Fatalf("expected PathCollisionQuarantined > 0, got %d", got)
+	}
+	leafLocal := filepath.Join(localDir, "slack", "channels", "C1", "threads", "T1", "replies", "1780911014_625209.json")
+	if info, err := os.Stat(leafLocal); err != nil {
+		t.Fatalf("stat leaf failed: %v", err)
+	} else if info.IsDir() {
+		t.Fatalf("expected reply leaf to be a regular file, got directory")
+	}
+	if _, ok := syncer.state.Files[child]; ok {
+		t.Fatalf("quarantined child must not be recorded as a tracked file")
+	}
+}
+
 func TestApplyRemoteFile_NestedIndexAndLayout(t *testing.T) {
 	t.Parallel()
 
