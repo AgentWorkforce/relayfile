@@ -4,8 +4,9 @@
   "task": {
     "title": "Review and fix PR #243"
   },
-  "status": "active",
+  "status": "completed",
   "startedAt": "2026-06-06T00:15:50.055Z",
+  "completedAt": "2026-06-08T11:32:55.667Z",
   "agents": [
     {
       "name": "default",
@@ -19,6 +20,7 @@
       "title": "Work",
       "agentName": "default",
       "startedAt": "2026-06-07T15:55:00.093Z",
+      "endedAt": "2026-06-08T11:32:55.667Z",
       "events": [
         {
           "ts": 1780847700094,
@@ -103,10 +105,51 @@
             "reasoning": "Current checkout canonicalizes Slack provider-relative paths in normalizeEnvelope, but ingestWebhook re-normalizes payload.path without provider and rejects /channels/... as invalid_input before queueing."
           },
           "significance": "high"
+        },
+        {
+          "ts": 1780917850236,
+          "type": "decision",
+          "content": "Validated read-not-ready state persistence through sync error save path: Validated read-not-ready state persistence through sync error save path",
+          "raw": {
+            "question": "Validated read-not-ready state persistence through sync error save path",
+            "chosen": "Validated read-not-ready state persistence through sync error save path",
+            "alternatives": [],
+            "reasoning": "Reconcile delegates to sync, and sync marks errors then saves state before returning pullRemote errors, so IncrementalReadNotReadySince is persisted on retry errors."
+          },
+          "significance": "high"
+        },
+        {
+          "ts": 1780918357471,
+          "type": "decision",
+          "content": "Centralized read-not-ready cleanup in remote apply helpers: Centralized read-not-ready cleanup in remote apply helpers",
+          "raw": {
+            "question": "Centralized read-not-ready cleanup in remote apply helpers",
+            "chosen": "Centralized read-not-ready cleanup in remote apply helpers",
+            "alternatives": [],
+            "reasoning": "WebSocket and full-pull paths call applyRemoteFile/applyRemoteDelete outside applyIncrementalChanges, so helper-level cleanup prevents stale TTL timestamps from affecting future recreates."
+          },
+          "significance": "high"
+        },
+        {
+          "ts": 1780918357563,
+          "type": "reflection",
+          "content": "PR #259 reviewed; bot findings validated and fixed in mountsync helpers; focused and package tests pass",
+          "raw": {
+            "confidence": 0.9
+          },
+          "significance": "high",
+          "tags": [
+            "confidence:0.9"
+          ]
         }
       ]
     }
   ],
+  "retrospective": {
+    "summary": "Reviewed PR #259, fixed validated read-not-ready cleanup findings in mountsync, and verified focused/package Go tests locally.",
+    "approach": "Standard approach",
+    "confidence": 0.9
+  },
   "commits": [],
   "filesChanged": [],
   "projectId": "/home/daytona/workspace",

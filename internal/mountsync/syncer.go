@@ -4193,10 +4193,10 @@ func (s *Syncer) applyIncrementalChanges(
 			if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusNotFound {
 				if s.incrementalReadNotReadyExpired(remotePath, time.Now().UTC()) {
 					s.logf("changed event for %s remained unreadable for at least %s; treating as deleted and advancing events cursor", remotePath, s.readNotReadyTTL)
-					s.clearIncrementalReadNotReady(remotePath)
 					if err := s.applyRemoteDelete(remotePath, conflicted); err != nil {
 						return err
 					}
+					s.clearIncrementalReadNotReady(remotePath)
 					s.markIncrementalCheckpoint(pageStartCursor, pageCursor, "changed", remotePath)
 					continue
 				}
@@ -4445,6 +4445,7 @@ func (s *Syncer) applyRemoteFile(remotePath string, file RemoteFile, conflicted 
 	if err != nil {
 		return err
 	}
+	s.clearIncrementalReadNotReady(remotePath)
 	tracked := s.state.Files[remotePath]
 	canWrite := s.canWritePath(remotePath)
 	tracked.ReadOnly = !canWrite
@@ -4600,24 +4601,29 @@ func (s *Syncer) applyRemoteDelete(remotePath string, conflicted map[string]stru
 	}
 	tracked, ok := s.state.Files[remotePath]
 	if !ok || tracked.Dirty {
+		s.clearIncrementalReadNotReady(remotePath)
 		return nil
 	}
 	if tracked.Denied {
+		s.clearIncrementalReadNotReady(remotePath)
 		return nil
 	}
 	// Write-denied files were never on the remote — absence from the remote
 	// snapshot is expected and must not trigger a local delete.
 	if tracked.WriteDenied {
+		s.clearIncrementalReadNotReady(remotePath)
 		return nil
 	}
 	localPath, err := s.remoteToLocalPath(remotePath)
 	if err != nil {
 		delete(s.state.Files, remotePath)
+		s.clearIncrementalReadNotReady(remotePath)
 		return nil
 	}
 	if err := s.assertNotMountRoot(localPath); err != nil {
 		s.logf("skipping remote delete for %s: %v", remotePath, err)
 		delete(s.state.Files, remotePath)
+		s.clearIncrementalReadNotReady(remotePath)
 		return nil
 	}
 	currentBytes, readErr := os.ReadFile(localPath)
@@ -4625,6 +4631,7 @@ func (s *Syncer) applyRemoteDelete(remotePath string, conflicted map[string]stru
 		_ = os.Remove(localPath)
 	}
 	delete(s.state.Files, remotePath)
+	s.clearIncrementalReadNotReady(remotePath)
 	return nil
 }
 

@@ -6751,6 +6751,60 @@ func TestPullRemoteIncrementalPersistentReadNotReadyAfterTTLAdvancesAsDelete(t *
 	assertLocalFileContent(t, filepath.Join(localDir, "Docs", "after.md"), "# after")
 }
 
+func TestApplyRemoteFileClearsIncrementalReadNotReady(t *testing.T) {
+	const remotePath = "/notion/Docs/materialized.md"
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(&fakeClient{files: map[string]RemoteFile{}}, SyncerOptions{
+		WorkspaceID:   "ws_apply_file_clears_not_ready",
+		RemoteRoot:    "/notion",
+		LocalRoot:     localDir,
+		FullPullEvery: -1,
+		WebSocket:     boolPtr(false),
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+	syncer.state = mountState{
+		Files: map[string]trackedFile{},
+		IncrementalReadNotReadySince: map[string]string{
+			remotePath: time.Now().UTC().Add(-time.Hour).Format(time.RFC3339Nano),
+		},
+	}
+
+	if err := syncer.applyRemoteFile(remotePath, RemoteFile{
+		Path:        remotePath,
+		Revision:    "rev_001",
+		ContentType: "text/markdown",
+		Content:     "# materialized",
+	}, nil); err != nil {
+		t.Fatalf("apply remote file failed: %v", err)
+	}
+	if syncer.state.IncrementalReadNotReadySince != nil {
+		t.Fatalf("expected read-not-ready state to clear after remote file apply, got %#v", syncer.state.IncrementalReadNotReadySince)
+	}
+}
+
+func TestApplyRemoteDeleteClearsIncrementalReadNotReadyForUntrackedPath(t *testing.T) {
+	const remotePath = "/notion/Docs/gone.md"
+	syncer := &Syncer{
+		remoteRoot: "/notion",
+		localDir:   t.TempDir(),
+		state: mountState{
+			Files: map[string]trackedFile{},
+			IncrementalReadNotReadySince: map[string]string{
+				remotePath: time.Now().UTC().Add(-time.Hour).Format(time.RFC3339Nano),
+			},
+		},
+	}
+
+	if err := syncer.applyRemoteDelete(remotePath, nil); err != nil {
+		t.Fatalf("apply remote delete failed: %v", err)
+	}
+	if syncer.state.IncrementalReadNotReadySince != nil {
+		t.Fatalf("expected read-not-ready state to clear after remote delete, got %#v", syncer.state.IncrementalReadNotReadySince)
+	}
+}
+
 func TestPullRemoteIncrementalDeleteEventStillDeletes(t *testing.T) {
 	client := &fakeClient{
 		files: map[string]RemoteFile{},
