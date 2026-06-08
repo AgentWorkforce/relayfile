@@ -95,6 +95,51 @@ func TestParseGenericEnvelopeFileCreated(t *testing.T) {
 	}
 }
 
+func TestParseGenericEnvelopeCanonicalizesSlackProviderRelativePath(t *testing.T) {
+	actions, err := ParseGenericEnvelope(WebhookEnvelopeRequest{
+		Provider: "slack",
+		Payload: map[string]any{
+			"path":        "/channels/C123/messages/1711111111_000100/meta.json",
+			"event_type":  "file.updated",
+			"content":     `{"text":"hello"}`,
+			"contentType": "application/json",
+		},
+	})
+	if err != nil {
+		t.Fatalf("parse envelope failed: %v", err)
+	}
+	if len(actions) != 1 {
+		t.Fatalf("expected one action, got %d", len(actions))
+	}
+	action := actions[0]
+	if action.Type != ActionFileUpsert {
+		t.Fatalf("expected ActionFileUpsert, got %v", action.Type)
+	}
+	if action.Path != "/slack/channels/C123/messages/1711111111_000100/meta.json" {
+		t.Fatalf("unexpected canonical slack path: %s", action.Path)
+	}
+}
+
+func TestParseGenericEnvelopeIgnoresSlackPathOutsideProviderScope(t *testing.T) {
+	actions, err := ParseGenericEnvelope(WebhookEnvelopeRequest{
+		Provider: "slack",
+		Payload: map[string]any{
+			"path":       "/github/repos/acme/cloud/issues/1.json",
+			"event_type": "file.updated",
+			"content":    `{"title":"wrong provider"}`,
+		},
+	})
+	if err != nil {
+		t.Fatalf("parse envelope failed: %v", err)
+	}
+	if len(actions) != 1 {
+		t.Fatalf("expected one action, got %d", len(actions))
+	}
+	if actions[0].Type != ActionIgnored {
+		t.Fatalf("expected ActionIgnored for out-of-scope slack path, got %v", actions[0].Type)
+	}
+}
+
 func TestParseGenericEnvelopeUnknownEventType(t *testing.T) {
 	actions, err := ParseGenericEnvelope(WebhookEnvelopeRequest{
 		Provider: "unknown",

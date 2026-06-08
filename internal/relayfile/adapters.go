@@ -67,6 +67,10 @@ func ParseGenericEnvelope(req WebhookEnvelopeRequest) ([]ApplyAction, error) {
 			return []ApplyAction{{Type: ActionIgnored}}, nil
 		}
 	}
+	canonicalPath, pathAllowed := canonicalProviderEnvelopePath(req.Provider, path)
+	if !pathAllowed {
+		return []ApplyAction{{Type: ActionIgnored}}, nil
+	}
 
 	switch {
 	case eventType == "file.created" || eventType == "file.updated":
@@ -79,7 +83,7 @@ func ParseGenericEnvelope(req WebhookEnvelopeRequest) ([]ApplyAction, error) {
 		return []ApplyAction{
 			{
 				Type:             ActionFileUpsert,
-				Path:             normalizePath(path),
+				Path:             canonicalPath,
 				Content:          content,
 				ContentType:      contentType,
 				ProviderObjectID: providerObjectID,
@@ -91,7 +95,7 @@ func ParseGenericEnvelope(req WebhookEnvelopeRequest) ([]ApplyAction, error) {
 		return []ApplyAction{
 			{
 				Type:             ActionFileDelete,
-				Path:             normalizePath(path),
+				Path:             canonicalPath,
 				ProviderObjectID: providerObjectID,
 			},
 		}, nil
@@ -100,6 +104,40 @@ func ParseGenericEnvelope(req WebhookEnvelopeRequest) ([]ApplyAction, error) {
 		// Unknown event type - ignore
 		return []ApplyAction{{Type: ActionIgnored}}, nil
 	}
+}
+
+var providerRelativePathRoots = map[string]map[string]struct{}{
+	"slack": {
+		"channels": {},
+		"dms":      {},
+		"teams":    {},
+		"users":    {},
+	},
+}
+
+func canonicalProviderEnvelopePath(provider, rawPath string) (string, bool) {
+	path := normalizePath(rawPath)
+	provider = normalizeProvider(provider)
+	if provider == "" || path == "/" {
+		return path, true
+	}
+
+	relativeRoots, enforceProviderRoot := providerRelativePathRoots[provider]
+	if !enforceProviderRoot {
+		return path, true
+	}
+
+	trimmed := strings.TrimPrefix(path, "/")
+	if trimmed == provider || strings.HasPrefix(trimmed, provider+"/") {
+		return path, true
+	}
+
+	firstSegment, _, _ := strings.Cut(trimmed, "/")
+	if _, ok := relativeRoots[firstSegment]; ok {
+		return normalizePath("/" + provider + "/" + trimmed), true
+	}
+
+	return path, false
 }
 
 func extractSemantics(payload map[string]any) FileSemantics {

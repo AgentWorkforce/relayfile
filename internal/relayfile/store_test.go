@@ -3432,6 +3432,140 @@ func TestEnvelopePipelineAppliesGenericUpsertMoveDelete(t *testing.T) {
 	waitForNotFound(t, store, "ws_pipe", "/external/Engineering/Moved.md")
 }
 
+func TestEnvelopePipelineCanonicalizesSlackChannelAliasPath(t *testing.T) {
+	store := NewStore()
+	t.Cleanup(store.Close)
+	receivedAt := time.Now().UTC().Format(time.RFC3339Nano)
+	workspaceID := "ws_slack_alias"
+
+	_, err := store.IngestEnvelope(WebhookEnvelopeRequest{
+		EnvelopeID:  "env_slack_alias_channel",
+		WorkspaceID: workspaceID,
+		Provider:    "slack",
+		DeliveryID:  "delivery_slack_alias_channel",
+		ReceivedAt:  receivedAt,
+		Payload: map[string]any{
+			"event_type":  "file.updated",
+			"path":        "/slack/channels/C0B8ZL2L9GC__pear-pty-investigation/meta.json",
+			"content":     `{"id":"C0B8ZL2L9GC","name":"pear-pty-investigation"}`,
+			"contentType": "application/json",
+		},
+		CorrelationID: "corr_slack_alias_channel",
+	})
+	if err != nil {
+		t.Fatalf("ingest slack channel alias failed: %v", err)
+	}
+	waitForFileContent(t, store, workspaceID, "/slack/channels/C0B8ZL2L9GC__pear-pty-investigation/meta.json", `{"id":"C0B8ZL2L9GC","name":"pear-pty-investigation"}`)
+
+	_, err = store.IngestEnvelope(WebhookEnvelopeRequest{
+		EnvelopeID:  "env_slack_alias_message",
+		WorkspaceID: workspaceID,
+		Provider:    "slack",
+		DeliveryID:  "delivery_slack_alias_message",
+		ReceivedAt:  time.Now().UTC().Format(time.RFC3339Nano),
+		Payload: map[string]any{
+			"event_type":  "file.updated",
+			"path":        "/slack/channels/C0B8ZL2L9GC/messages/1711111111_000100/meta.json",
+			"content":     `{"text":"public message"}`,
+			"contentType": "application/json",
+		},
+		CorrelationID: "corr_slack_alias_message",
+	})
+	if err != nil {
+		t.Fatalf("ingest slack message failed: %v", err)
+	}
+
+	canonicalMessagePath := "/slack/channels/C0B8ZL2L9GC__pear-pty-investigation/messages/1711111111_000100/meta.json"
+	waitForFileContent(t, store, workspaceID, canonicalMessagePath, `{"text":"public message"}`)
+	waitForNotFound(t, store, workspaceID, "/slack/channels/C0B8ZL2L9GC/messages/1711111111_000100/meta.json")
+
+	feed, err := store.GetEvents(workspaceID, "slack", "", 10)
+	if err != nil {
+		t.Fatalf("get slack events failed: %v", err)
+	}
+	foundCanonicalEvent := false
+	for _, event := range feed.Events {
+		if event.Path == canonicalMessagePath && event.Type == "file.created" {
+			foundCanonicalEvent = true
+			break
+		}
+	}
+	if !foundCanonicalEvent {
+		t.Fatalf("expected canonical slack message event in feed, got %+v", feed.Events)
+	}
+}
+
+func TestEnvelopePipelineDoesNotCanonicalizeSlackChannelAliasByPrefix(t *testing.T) {
+	store := NewStore()
+	t.Cleanup(store.Close)
+	workspaceID := "ws_slack_alias_prefix"
+
+	_, err := store.IngestEnvelope(WebhookEnvelopeRequest{
+		EnvelopeID:  "env_slack_alias_prefix_channel",
+		WorkspaceID: workspaceID,
+		Provider:    "slack",
+		DeliveryID:  "delivery_slack_alias_prefix_channel",
+		ReceivedAt:  time.Now().UTC().Format(time.RFC3339Nano),
+		Payload: map[string]any{
+			"event_type":  "file.updated",
+			"path":        "/slack/channels/C123__general/meta.json",
+			"content":     `{"id":"C123","name":"general"}`,
+			"contentType": "application/json",
+		},
+	})
+	if err != nil {
+		t.Fatalf("ingest slack channel alias failed: %v", err)
+	}
+	waitForFileContent(t, store, workspaceID, "/slack/channels/C123__general/meta.json", `{"id":"C123","name":"general"}`)
+
+	_, err = store.IngestEnvelope(WebhookEnvelopeRequest{
+		EnvelopeID:  "env_slack_alias_prefix_message",
+		WorkspaceID: workspaceID,
+		Provider:    "slack",
+		DeliveryID:  "delivery_slack_alias_prefix_message",
+		ReceivedAt:  time.Now().UTC().Format(time.RFC3339Nano),
+		Payload: map[string]any{
+			"event_type":  "file.updated",
+			"path":        "/slack/channels/C1/messages/1711111111_000100/meta.json",
+			"content":     `{"text":"different channel"}`,
+			"contentType": "application/json",
+		},
+	})
+	if err != nil {
+		t.Fatalf("ingest slack message failed: %v", err)
+	}
+
+	waitForFileContent(t, store, workspaceID, "/slack/channels/C1/messages/1711111111_000100/meta.json", `{"text":"different channel"}`)
+	waitForNotFound(t, store, workspaceID, "/slack/channels/C123__general/messages/1711111111_000100/meta.json")
+}
+
+func TestEnvelopePipelineIgnoresSlackPathOutsideProviderScope(t *testing.T) {
+	store := NewStore()
+	t.Cleanup(store.Close)
+	workspaceID := "ws_slack_scope"
+
+	_, err := store.IngestEnvelope(WebhookEnvelopeRequest{
+		EnvelopeID:  "env_slack_scope_1",
+		WorkspaceID: workspaceID,
+		Provider:    "slack",
+		DeliveryID:  "delivery_slack_scope_1",
+		ReceivedAt:  time.Now().UTC().Format(time.RFC3339Nano),
+		Payload: map[string]any{
+			"event_type":  "file.updated",
+			"path":        "/github/repos/acme/cloud/issues/1.json",
+			"content":     `{"title":"wrong provider"}`,
+			"contentType": "application/json",
+		},
+		CorrelationID: "corr_slack_scope_1",
+	})
+	if err != nil {
+		t.Fatalf("ingest out-of-scope slack envelope failed: %v", err)
+	}
+
+	waitForSyncIgnoredEvent(t, store, workspaceID, "slack")
+	waitForNotFound(t, store, workspaceID, "/github/repos/acme/cloud/issues/1.json")
+}
+
 func TestEnvelopeStalenessSkipsOlderUpsertForSameObject(t *testing.T) {
 	store := NewStore()
 	t.Cleanup(store.Close)
@@ -4705,6 +4839,24 @@ func waitForNotFound(t *testing.T, store *Store, workspaceID, path string) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("expected %s to be deleted", path)
+}
+
+func waitForSyncIgnoredEvent(t *testing.T, store *Store, workspaceID, provider string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		feed, err := store.GetEvents(workspaceID, provider, "", 20)
+		if err == nil {
+			for _, event := range feed.Events {
+				if event.Type == "sync.ignored" {
+					return
+				}
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	feed, _ := store.GetEvents(workspaceID, provider, "", 20)
+	t.Fatalf("expected sync.ignored event for provider %s, got %+v", provider, feed.Events)
 }
 
 func waitForOpStatus(t *testing.T, store *Store, workspaceID, opID, status string) {

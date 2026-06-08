@@ -3771,6 +3771,7 @@ func (s *Store) processEnvelope(envelopeID string) {
 		return
 	}
 	for _, action := range actions {
+		action = canonicalizeProviderActionLocked(ws, req.Provider, action)
 		if s.isStaleProviderActionLocked(ws, req.Provider, action, req.ReceivedAt) {
 			s.appendWorkspaceEventLocked(req.WorkspaceID, ws, Event{
 				EventID:       s.nextEventIDLocked(),
@@ -4093,6 +4094,61 @@ func (s *Store) applyProviderDeleteLocked(ws *workspaceState, provider string, a
 		CorrelationID: correlationID,
 		Timestamp:     now,
 	})
+}
+
+func canonicalizeProviderActionLocked(ws *workspaceState, provider string, action ApplyAction) ApplyAction {
+	switch action.Type {
+	case ActionFileUpsert, ActionFileDelete:
+	default:
+		return action
+	}
+	canonicalPath, ok := canonicalProviderEnvelopePath(provider, action.Path)
+	if !ok {
+		action.Type = ActionIgnored
+		action.Path = "/"
+		return action
+	}
+	action.Path = canonicalizeExistingProviderAliasPath(ws, provider, canonicalPath)
+	return action
+}
+
+func canonicalizeExistingProviderAliasPath(ws *workspaceState, provider, rawPath string) string {
+	path := normalizePath(rawPath)
+	if ws == nil || normalizeProvider(provider) != "slack" {
+		return path
+	}
+	return canonicalizeSlackChannelAliasPath(ws.Files, path)
+}
+
+func canonicalizeSlackChannelAliasPath(files map[string]File, rawPath string) string {
+	path := normalizePath(rawPath)
+	parts := strings.Split(strings.TrimPrefix(path, "/"), "/")
+	if len(parts) < 3 || parts[0] != "slack" || parts[1] != "channels" {
+		return path
+	}
+	channelSegment := parts[2]
+	if channelSegment == "" || strings.Contains(channelSegment, "__") {
+		return path
+	}
+
+	candidates := make([]string, 0)
+	for filePath := range files {
+		fileParts := strings.Split(strings.TrimPrefix(normalizePath(filePath), "/"), "/")
+		if len(fileParts) < 3 || fileParts[0] != "slack" || fileParts[1] != "channels" {
+			continue
+		}
+		candidate := fileParts[2]
+		candidateID, _, hasAlias := strings.Cut(candidate, "__")
+		if hasAlias && candidateID == channelSegment {
+			candidates = append(candidates, candidate)
+		}
+	}
+	if len(candidates) == 0 {
+		return path
+	}
+	sort.Strings(candidates)
+	parts[2] = candidates[0]
+	return normalizePath("/" + strings.Join(parts, "/"))
 }
 
 func (s *Store) loadFromDisk() error {
@@ -4803,7 +4859,11 @@ func coalesceObjectKey(req WebhookEnvelopeRequest) string {
 	if objectID != "" {
 		return req.WorkspaceID + "|" + req.Provider + "|object:" + objectID
 	}
-	path := normalizePath(strings.TrimSpace(toString(req.Payload["path"])))
+	rawPath := strings.TrimSpace(toString(req.Payload["path"]))
+	path, ok := canonicalProviderEnvelopePath(req.Provider, rawPath)
+	if !ok {
+		return ""
+	}
 	if path != "/" {
 		return req.WorkspaceID + "|" + req.Provider + "|path:" + path
 	}
