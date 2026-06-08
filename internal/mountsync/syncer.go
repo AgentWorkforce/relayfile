@@ -989,6 +989,7 @@ type mountState struct {
 	BootstrapFilesSynced     int    `json:"bootstrapFilesSynced,omitempty"`
 	BootstrapFilesTotal      int    `json:"bootstrapFilesTotal,omitempty"`
 	BootstrapStartedAt       string `json:"bootstrapStartedAt,omitempty"`
+	SyncMode                 string `json:"syncMode,omitempty"`
 	GithubWorkingTreeHeadSHA string `json:"githubWorkingTreeHeadSha,omitempty"`
 	// IncrementalReadNotReadySince records first-seen timestamps for
 	// incremental create/update events whose remote content was not readable
@@ -4950,13 +4951,29 @@ func (s *Syncer) loadState() error {
 		state.Files = map[string]trackedFile{}
 	}
 	s.state = state
+	if s.state.BootstrapComplete && s.state.SyncMode == "write-only" && !s.writeOnly {
+		s.logf("syncMode transition write-only->mirror detected; resetting BootstrapComplete to force a full bootstrap pull (backfills records missed while write-only)")
+		s.state.BootstrapComplete = false
+		s.state.BootstrapCursor = ""
+		s.state.BootstrapStartedAt = ""
+		s.state.BootstrapFilesSynced = 0
+		s.state.BootstrapFilesTotal = 0
+	}
 	if s.githubWorkingTree != nil && strings.TrimSpace(s.state.GithubWorkingTreeHeadSHA) != "" {
 		s.githubWorkingTree.HeadSHA = strings.TrimSpace(s.state.GithubWorkingTreeHeadSHA)
 	}
 	return nil
 }
 
+func (s *Syncer) currentSyncMode() string {
+	if s.writeOnly {
+		return "write-only"
+	}
+	return "mirror"
+}
+
 func (s *Syncer) saveState() error {
+	s.state.SyncMode = s.currentSyncMode()
 	data, err := json.Marshal(s.state)
 	if err != nil {
 		return err
