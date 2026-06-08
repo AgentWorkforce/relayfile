@@ -161,6 +161,21 @@ func (e *HTTPError) Error() string {
 	return fmt.Sprintf("http %d: %s", e.StatusCode, e.Message)
 }
 
+type IncrementalReadNotReadyError struct {
+	Path       string
+	StatusCode int
+	Code       string
+	Message    string
+}
+
+func (e *IncrementalReadNotReadyError) Error() string {
+	message := strings.TrimSpace(e.Message)
+	if message == "" {
+		message = "not readable yet"
+	}
+	return fmt.Sprintf("changed event for %s is not readable yet: %s", normalizeRemotePath(e.Path), message)
+}
+
 type TreeEntry struct {
 	Path        string `json:"path"`
 	Type        string `json:"type"`
@@ -2561,6 +2576,10 @@ func (s *Syncer) pullRemote(ctx context.Context, conflicted map[string]struct{})
 		if strings.TrimSpace(nextCursor) != "" && nextCursor != s.state.EventsCursor {
 			s.state.EventsCursor = nextCursor
 		}
+		var notReadyErr *IncrementalReadNotReadyError
+		if errors.As(err, &notReadyErr) {
+			return err
+		}
 		var httpErr *HTTPError
 		if !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusNotFound {
 			return err
@@ -4153,11 +4172,13 @@ func (s *Syncer) applyIncrementalChanges(
 		if err != nil {
 			var httpErr *HTTPError
 			if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusNotFound {
-				if err := s.applyRemoteDelete(remotePath, conflicted); err != nil {
-					return err
+				s.logf("changed event for %s is not readable yet; preserving events cursor for retry", remotePath)
+				return &IncrementalReadNotReadyError{
+					Path:       remotePath,
+					StatusCode: httpErr.StatusCode,
+					Code:       httpErr.Code,
+					Message:    httpErr.Message,
 				}
-				s.markIncrementalCheckpoint(pageStartCursor, pageCursor, "changed", remotePath)
-				continue
 			}
 			if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusForbidden {
 				s.logf("skipping denied file: %s", remotePath)
