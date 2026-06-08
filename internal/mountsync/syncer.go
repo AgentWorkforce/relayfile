@@ -952,6 +952,7 @@ type Syncer struct {
 	forceFullReconcile   bool
 	incrementalCycles    int
 	oversizedLogged      map[string]struct{}
+	quarantinedPaths     map[string]struct{}
 	lazyRepos            bool
 	lowMemory            bool
 	writeOnly            bool
@@ -1024,6 +1025,23 @@ type telemetryCounters struct {
 	// and a directory); the daemon quarantines the path so a single collision
 	// can't wedge the whole mount. See isRemotePathCollision.
 	PathCollisionQuarantined uint64 `json:"pathCollisionQuarantined,omitempty"`
+}
+
+// quarantineRemotePath records a remote path that can't be materialized
+// locally because of a file/directory name collision. It counts every
+// occurrence (consistent with the other defensive counters), but logs each
+// distinct path only once per process so a persistently-colliding path does not
+// spam the log on every sync cycle. Mirrors the oversizedLogged dedup pattern.
+func (s *Syncer) quarantineRemotePath(remotePath, detail string, cause error) {
+	s.state.Counters.PathCollisionQuarantined++
+	if s.quarantinedPaths == nil {
+		s.quarantinedPaths = map[string]struct{}{}
+	}
+	if _, seen := s.quarantinedPaths[remotePath]; seen {
+		return
+	}
+	s.quarantinedPaths[remotePath] = struct{}{}
+	s.logf("quarantining remote path %s: %s (%v); skipping so the sync cycle can complete — fix is adapter-side (a name emitted as both a file and a directory)", remotePath, detail, cause)
 }
 
 // isRemotePathCollision reports whether err is a POSIX path-shape collision:
@@ -1386,6 +1404,7 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 		readNotReadyTTL:      readNotReadyTTL,
 		forceFullReconcile:   forceFullReconcile,
 		oversizedLogged:      map[string]struct{}{},
+		quarantinedPaths:     map[string]struct{}{},
 		lazyRepos:            lazyRepos,
 		lowMemory:            lowMemory,
 		layoutRegistrar:      opts.ProviderLayoutRegistrar,
@@ -4514,8 +4533,7 @@ func (s *Syncer) applyRemoteFile(remotePath string, file RemoteFile, conflicted 
 	// pass through to disk unchanged.
 	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
 		if isRemotePathCollision(err) {
-			s.state.Counters.PathCollisionQuarantined++
-			s.logf("quarantining remote path %s: cannot create parent directory (%v); skipping so the sync cycle can complete — fix is adapter-side (a name emitted as both a file and a directory)", remotePath, err)
+			s.quarantineRemotePath(remotePath, "cannot create parent directory", err)
 			return nil
 		}
 		return err
@@ -4531,8 +4549,7 @@ func (s *Syncer) applyRemoteFile(remotePath string, file RemoteFile, conflicted 
 	if shouldWrite {
 		if err := writeFileAtomic(localPath, remoteBytes, 0o644); err != nil {
 			if isRemotePathCollision(err) {
-				s.state.Counters.PathCollisionQuarantined++
-				s.logf("quarantining remote path %s: cannot write file (%v); skipping so the sync cycle can complete", remotePath, err)
+				s.quarantineRemotePath(remotePath, "cannot write file (target is a directory)", err)
 				return nil
 			}
 			return err

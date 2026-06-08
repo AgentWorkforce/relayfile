@@ -4111,6 +4111,26 @@ func TestApplyRemoteFile_QuarantinesPathCollision(t *testing.T) {
 	} else if !info.IsDir() {
 		t.Fatalf("expected replies path to remain a directory")
 	}
+
+	// Re-applying the SAME colliding path counts each occurrence (cumulative,
+	// like the other guard counters) but is logged only once — so a persistent
+	// collision doesn't spam the log every cycle.
+	countBefore := syncer.state.Counters.PathCollisionQuarantined
+	distinctBefore := len(syncer.quarantinedPaths)
+	if err := syncer.applyRemoteFile(child, RemoteFile{
+		Path:        child,
+		Revision:    "rev_child_again",
+		ContentType: "application/json",
+		Content:     "{\"emoji\":\"tada\"}\n",
+	}, nil); err != nil {
+		t.Fatalf("re-applying the colliding child should still quarantine, got error: %v", err)
+	}
+	if got := syncer.state.Counters.PathCollisionQuarantined; got != countBefore+1 {
+		t.Fatalf("counter should increment per occurrence: got %d, want %d", got, countBefore+1)
+	}
+	if got := len(syncer.quarantinedPaths); got != distinctBefore {
+		t.Fatalf("distinct quarantined paths should not grow on a repeat: got %d, want %d", got, distinctBefore)
+	}
 }
 
 func TestApplyRemoteFile_NestedIndexAndLayout(t *testing.T) {
