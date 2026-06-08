@@ -103,18 +103,6 @@
             "reasoning": "Current checkout canonicalizes Slack provider-relative paths in normalizeEnvelope, but ingestWebhook re-normalizes payload.path without provider and rejects /channels/... as invalid_input before queueing."
           },
           "significance": "high"
-        },
-        {
-          "ts": 1780918977695,
-          "type": "decision",
-          "content": "Left PR #260 code unchanged after targeted review: Left PR #260 code unchanged after targeted review",
-          "raw": {
-            "question": "Left PR #260 code unchanged after targeted review",
-            "chosen": "Left PR #260 code unchanged after targeted review",
-            "alternatives": [],
-            "reasoning": "Current checkout already addresses marker lifecycle paths in the diff; no bot review reported actionable code issues; targeted and full Go tests passed."
-          },
-          "significance": "high"
         }
       ]
     }
