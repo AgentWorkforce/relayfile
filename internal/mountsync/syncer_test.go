@@ -4091,6 +4091,26 @@ func TestApplyRemoteFile_QuarantinesPathCollision(t *testing.T) {
 	if _, ok := syncer.state.Files[child]; ok {
 		t.Fatalf("quarantined child must not be recorded as a tracked file")
 	}
+
+	// The inverse collision is also non-fatal: a remote file targets a local
+	// path that already exists as a directory.
+	dirRemotePath := "/slack/channels/C1/threads/T1/replies"
+	if err := syncer.applyRemoteFile(dirRemotePath, RemoteFile{
+		Path:        dirRemotePath,
+		Revision:    "rev_dir_collision",
+		ContentType: "application/json",
+		Content:     "{\"kind\":\"file\"}\n",
+	}, nil); err != nil {
+		t.Fatalf("applyRemoteFile(directory target) should quarantine the collision, got error: %v", err)
+	}
+	if got := syncer.state.Counters.PathCollisionQuarantined; got < 2 {
+		t.Fatalf("expected both path collisions to be counted, got %d", got)
+	}
+	if info, err := os.Stat(filepath.Join(localDir, "slack", "channels", "C1", "threads", "T1", "replies")); err != nil {
+		t.Fatalf("stat replies directory failed: %v", err)
+	} else if !info.IsDir() {
+		t.Fatalf("expected replies path to remain a directory")
+	}
 }
 
 func TestApplyRemoteFile_NestedIndexAndLayout(t *testing.T) {

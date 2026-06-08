@@ -1028,7 +1028,7 @@ type telemetryCounters struct {
 
 // isRemotePathCollision reports whether err is a POSIX path-shape collision:
 // an ancestor path component is a regular file (ENOTDIR), or the target name is
-// already a directory / already exists with the wrong type (EISDIR/EEXIST).
+// already a directory / already exists with the wrong type (EISDIR/os.ErrExist).
 // This happens when an adapter emits the same name as both a file and a
 // directory — e.g. the Slack adapter writing a thread reply leaf
 // `replies/<ts>.json` while also nesting that reply's children under a
@@ -1039,7 +1039,7 @@ type telemetryCounters struct {
 func isRemotePathCollision(err error) bool {
 	return errors.Is(err, syscall.ENOTDIR) ||
 		errors.Is(err, syscall.EISDIR) ||
-		errors.Is(err, syscall.EEXIST)
+		errors.Is(err, os.ErrExist)
 }
 
 type trackedFile struct {
@@ -5954,7 +5954,7 @@ func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
 	// otherwise be the mechanism by which the mount root was clobbered
 	// by an 11MB file. If the target exists and is a directory, refuse.
 	if info, err := os.Lstat(path); err == nil && info.IsDir() {
-		return fmt.Errorf("refusing to replace directory %s with a file", path)
+		return fmt.Errorf("refusing to replace directory %s with a file: %w", path, os.ErrExist)
 	}
 	if err := os.Rename(tmpName, path); err != nil {
 		return err
