@@ -59,6 +59,7 @@ export interface FileSemantics {
 export interface ContentIdentity {
   kind: string;
   key: string;
+  ttlSeconds?: number;
 }
 
 export interface FileReadResponse {
@@ -310,6 +311,8 @@ export interface SubscribeOptions {
   coalesce?: "none" | "fire-once";
   coalesceMs?: number;
   pathScope?: string[];
+  from?: "now" | "legacy";
+  cursor?: string;
   aclToken?: string;
   drainMs?: number;
 }
@@ -326,6 +329,8 @@ export type ReplayOptions =
 export type ChangeStreamConnectionOptions = ReplayOptions & {
   workspaceId: string;
   aclToken?: string;
+  from?: "now" | "legacy";
+  cursor?: string;
 };
 
 export interface ChangeStreamConnection extends Subscription {
@@ -817,8 +822,30 @@ export interface AckWritebackInput {
   itemId: string;
   success: boolean;
   error?: string;
+  /**
+   * Provider-assigned id of the created/updated object (e.g. the Slack
+   * message ts). When present on a successful ack, the service reconciles
+   * the agent-authored draft file per the draftFile() rename contract
+   * (issue #242): the draft is renamed to the canonical id, or removed when
+   * the canonical record already materialized. The mutation is
+   * classification-exempt — it can never enqueue a new writeback.
+   */
+  externalId?: string;
+  /**
+   * Optional canonical projection path for the draft rename. Must stay under
+   * the same provider root as the draft; otherwise the service falls back to
+   * the externalId-derived name next to the draft.
+   */
+  canonicalPath?: string;
   correlationId?: string;
   signal?: AbortSignal;
+}
+
+/** Disposition of the agent-authored draft file after a successful ack. */
+export interface AckWritebackDraftDisposition {
+  action: "renamed" | "removed" | "none";
+  from?: string;
+  to?: string;
 }
 
 export interface AckWritebackResponse {
@@ -826,4 +853,25 @@ export interface AckWritebackResponse {
   id: string;
   correlationId?: string;
   success: boolean;
+  /** Present only when the ack was successful and carried an externalId. */
+  draft?: AckWritebackDraftDisposition;
+}
+
+export interface SweepWritebackDraftsInput {
+  workspaceId: string;
+  /** Restrict the sweep to a subtree. */
+  pathPrefix?: string;
+  /** Basename globs for hand-named drafts, e.g. "wb-*.json". */
+  patterns?: string[];
+  /** Execute removals; when false the sweep is a dry run. */
+  apply?: boolean;
+  correlationId?: string;
+  signal?: AbortSignal;
+}
+
+export interface SweepWritebackDraftsResponse {
+  dryRun: boolean;
+  scanned: number;
+  removed: Array<{ path: string; reason: "space-uuid-draft" | "pattern" }>;
+  skipped: Array<{ path: string; reason: "pending-writeback" | "provider-linked" }>;
 }

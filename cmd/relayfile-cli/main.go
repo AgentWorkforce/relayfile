@@ -44,10 +44,12 @@ const (
 	websocketReconcileEvery = 10
 	defaultMountMode        = "poll"
 	defaultMountInterval    = 30 * time.Second
+	minMountPollInterval    = 5 * time.Second
 	defaultMountTimeout     = 15 * time.Second
 )
 
 var defaultJoinScopes = []string{"fs:read", "fs:write"}
+var defaultInspectScopes = []string{"relayfile:fs:read:*"}
 
 type credentials struct {
 	Server    string `json:"server"`
@@ -70,16 +72,17 @@ type workspaceCatalog struct {
 }
 
 type workspaceRecord struct {
-	Name        string   `json:"name"`
-	ID          string   `json:"id,omitempty"`
-	CreatedAt   string   `json:"createdAt"`
-	LastUsedAt  string   `json:"lastUsedAt,omitempty"`
-	LocalDir    string   `json:"localDir,omitempty"`
-	Server      string   `json:"server,omitempty"`
-	CloudAPIURL string   `json:"cloudApiUrl,omitempty"`
-	AgentName   string   `json:"agentName,omitempty"`
-	Scopes      []string `json:"scopes,omitempty"`
-	Timezone    string   `json:"timezone,omitempty"`
+	Name             string   `json:"name"`
+	ID               string   `json:"id,omitempty"`
+	RelayWorkspaceID string   `json:"relayWorkspaceId,omitempty"`
+	CreatedAt        string   `json:"createdAt"`
+	LastUsedAt       string   `json:"lastUsedAt,omitempty"`
+	LocalDir         string   `json:"localDir,omitempty"`
+	Server           string   `json:"server,omitempty"`
+	CloudAPIURL      string   `json:"cloudApiUrl,omitempty"`
+	AgentName        string   `json:"agentName,omitempty"`
+	Scopes           []string `json:"scopes,omitempty"`
+	Timezone         string   `json:"timezone,omitempty"`
 }
 
 type apiClient struct {
@@ -578,6 +581,8 @@ func printWorkspaceUsage(w io.Writer, subcommand string) {
 	switch subcommand {
 	case "create":
 		fmt.Fprintln(w, "Usage: relayfile workspace create NAME")
+	case "join":
+		fmt.Fprintln(w, "Usage: relayfile workspace join WORKSPACE_ID [--name NAME] [--write]")
 	case "use":
 		fmt.Fprintln(w, "Usage: relayfile workspace use NAME")
 	case "list":
@@ -589,6 +594,7 @@ func printWorkspaceUsage(w io.Writer, subcommand string) {
 	default:
 		fmt.Fprintln(w, `Usage:
   relayfile workspace create NAME
+  relayfile workspace join WORKSPACE_ID [--name NAME] [--write]
   relayfile workspace use NAME
   relayfile workspace list [--names-only]
   relayfile workspace current [--verbose]
@@ -645,11 +651,14 @@ func printWritebackUsage(w io.Writer, subcommand string) {
 		fmt.Fprintln(w, "Usage: relayfile writeback status [WORKSPACE] [--json]")
 	case "retry":
 		fmt.Fprintln(w, "Usage: relayfile writeback retry --opId OP [WORKSPACE]")
+	case "sweep-drafts":
+		fmt.Fprintln(w, writebackSweepUsage)
 	default:
 		fmt.Fprintln(w, `Usage:
   relayfile writeback list --state pending|dead [--workspace WS] [--json]
   relayfile writeback status [WORKSPACE] [--json]
-  relayfile writeback retry --opId OP [WORKSPACE]`)
+  relayfile writeback retry --opId OP [WORKSPACE]
+  relayfile writeback sweep-drafts [WORKSPACE] [--path-prefix PREFIX] [--pattern GLOB ...] [--apply] [--json]`)
 	}
 }
 
@@ -671,6 +680,7 @@ Usage:
   relayfile setup [--provider PROVIDER] [--backend BACKEND] [--workspace NAME] [--local-dir DIR]
   relayfile login [--no-open] [--api-key] [--server URL] [--token TOKEN]
   relayfile workspace create NAME
+  relayfile workspace join WORKSPACE_ID [--name NAME] [--write]
   relayfile workspace use NAME
   relayfile workspace list [--names-only]
   relayfile workspace current [--verbose]
@@ -705,7 +715,7 @@ Usage:
 Subcommands:
   setup       Sign in, connect an integration, and mount the workspace
   login       Sign in via the Relayfile Cloud browser flow (or --api-key for self-hosted)
-  workspace   Create, select, list, show current, or delete locally tracked workspaces
+  workspace   Create, join, select, list, show current, or delete locally tracked workspaces
   integration Connect, discover, list, disconnect, or adopt workspace integrations
   ops         List or replay dead-lettered writeback ops
   writeback   Inspect or retry local writeback failures
@@ -836,7 +846,8 @@ func runSetup(args []string, stdin io.Reader, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if err := persistJoinedWorkspace(record, joined, tokenSet.APIURL, absLocalDir); err != nil {
+	record, err = persistJoinedWorkspace(record, joined, tokenSet.APIURL, absLocalDir, true)
+	if err != nil {
 		return err
 	}
 
@@ -1424,14 +1435,21 @@ func ensureWorkspaceForSetup(cloud cloudCredentials, name, localDir string) (wor
 	return record, true, nil
 }
 
-func persistJoinedWorkspace(record workspaceRecord, joined cloudWorkspaceJoinResponse, cloudAPIURL, localDir string) error {
+func persistJoinedWorkspace(record workspaceRecord, joined cloudWorkspaceJoinResponse, cloudAPIURL, localDir string, setDefault bool) (workspaceRecord, error) {
 	serverURL := strings.TrimRight(strings.TrimSpace(joined.RelayfileURL), "/")
 	if err := saveCredentials(credentials{
 		Server:    serverURL,
 		Token:     strings.TrimSpace(joined.Token),
 		UpdatedAt: time.Now().UTC().Format(time.RFC3339),
 	}); err != nil {
-		return err
+		return workspaceRecord{}, err
+	}
+	if joinedWorkspaceID := strings.TrimSpace(joined.WorkspaceID); joinedWorkspaceID != "" {
+		if strings.TrimSpace(record.ID) == "" {
+			record.ID = joinedWorkspaceID
+		} else {
+			record.RelayWorkspaceID = joinedWorkspaceID
+		}
 	}
 	record.Server = serverURL
 	record.LocalDir = localDir
@@ -1443,11 +1461,28 @@ func persistJoinedWorkspace(record workspaceRecord, joined cloudWorkspaceJoinRes
 	if len(record.Scopes) == 0 {
 		record.Scopes = append([]string(nil), defaultJoinScopes...)
 	}
-	if _, err := upsertWorkspaceDetails(record); err != nil {
-		return err
+	persisted, err := upsertWorkspaceDetails(record)
+	if err != nil {
+		return workspaceRecord{}, err
 	}
-	_, err := setDefaultWorkspace(record.Name)
-	return err
+	if !setDefault {
+		return persisted, nil
+	}
+	persisted, err = setDefaultWorkspace(persisted.Name)
+	if err != nil {
+		return workspaceRecord{}, err
+	}
+	return persisted, nil
+}
+
+func relayWorkspaceIDForRecord(record workspaceRecord, joined cloudWorkspaceJoinResponse) string {
+	if relayID := strings.TrimSpace(joined.WorkspaceID); relayID != "" {
+		return relayID
+	}
+	if relayID := strings.TrimSpace(record.RelayWorkspaceID); relayID != "" {
+		return relayID
+	}
+	return strings.TrimSpace(record.ID)
 }
 
 func joinWorkspaceViaCloud(cloud cloudCredentials, workspaceID, agentName string, scopes []string) (cloudWorkspaceJoinResponse, error) {
@@ -1844,7 +1879,8 @@ func runLogin(args []string, stdin io.Reader, stdout io.Writer) error {
 		if rerr == nil {
 			joined, jerr := joinWorkspaceViaCloud(creds, record.ID, record.AgentName, record.Scopes)
 			if jerr == nil {
-				if perr := persistJoinedWorkspace(record, joined, creds.APIURL, record.LocalDir); perr == nil {
+				if persisted, perr := persistJoinedWorkspace(record, joined, creds.APIURL, record.LocalDir, true); perr == nil {
+					record = persisted
 					fmt.Fprintf(stdout, "Refreshed workspace token for %s (%s)\n", record.Name, record.ID)
 					return nil
 				} else if strings.TrimSpace(*workspaceFlag) != "" {
@@ -1908,11 +1944,13 @@ func loginWithAPIKey(serverValue, tokenValue string, stdout io.Writer) error {
 
 func runWorkspace(args []string, stdin io.Reader, stdout io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("workspace subcommand is required: create, use, list, current, or delete")
+		return errors.New("workspace subcommand is required: create, join, use, list, current, or delete")
 	}
 	switch args[0] {
 	case "create":
 		return runWorkspaceCreate(args[1:], stdout)
+	case "join":
+		return runWorkspaceJoin(args[1:], stdout)
 	case "use":
 		return runWorkspaceUse(args[1:], stdout)
 	case "list":
@@ -1987,12 +2025,17 @@ func runIntegrationConnect(args []string, stdin io.Reader, stdout io.Writer) err
 	if err != nil {
 		return err
 	}
-	if err := persistJoinedWorkspace(record, joined, cloudCreds.APIURL, record.LocalDir); err != nil {
+	record, err = persistJoinedWorkspace(record, joined, cloudCreds.APIURL, record.LocalDir, true)
+	if err != nil {
 		return err
 	}
 	createdConnection, err := ensureCloudIntegration(cloudCreds.APIURL, record.ID, joined.Token, provider, requestedBackend, record.LocalDir, *timeout, !*noOpen, stdout)
 	if err != nil {
 		return err
+	}
+	relayWorkspaceID := relayWorkspaceIDForRecord(record, joined)
+	if relayWorkspaceID != "" && relayWorkspaceID != record.ID {
+		fmt.Fprintf(stdout, "Workspace: %s (Relayfile runtime: %s)\n", record.ID, relayWorkspaceID)
 	}
 	// Atlassian-family providers: a single OAuth grant can cover multiple
 	// sites (cloudIds). Cloud's Jira/Confluence sync bails with a clear
@@ -2006,7 +2049,7 @@ func runIntegrationConnect(args []string, stdin io.Reader, stdout io.Writer) err
 			return err
 		}
 	}
-	return waitForInitialSync(joined.RelayfileURL, joined.Token, record.ID, provider, record.LocalDir, *timeout, stdout)
+	return waitForInitialSync(joined.RelayfileURL, joined.Token, relayWorkspaceID, provider, record.LocalDir, *timeout, stdout)
 }
 
 func isAtlassianProvider(provider string) bool {
@@ -2353,6 +2396,10 @@ func runIntegrationList(args []string, stdout io.Writer) error {
 	}
 	if *jsonOutput {
 		return writeJSON(stdout, entries)
+	}
+	relayWorkspaceID := relayWorkspaceIDForRecord(record, joined)
+	if relayWorkspaceID != "" && relayWorkspaceID != record.ID {
+		fmt.Fprintf(stdout, "Workspace: %s (Relayfile runtime: %s)\n", record.ID, relayWorkspaceID)
 	}
 	if len(entries) == 0 {
 		fmt.Fprintln(stdout, "No integrations connected")
@@ -2706,7 +2753,7 @@ func deadLetterErrorPathFor(localDir, opID string) string {
 
 func runWriteback(args []string, stdout io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("writeback subcommand is required: list, status, or retry")
+		return errors.New("writeback subcommand is required: list, status, retry, or sweep-drafts")
 	}
 	switch args[0] {
 	case "list":
@@ -2715,6 +2762,8 @@ func runWriteback(args []string, stdout io.Writer) error {
 		return runWritebackStatus(args[1:], stdout)
 	case "retry":
 		return runWritebackRetry(args[1:], stdout)
+	case "sweep-drafts":
+		return runWritebackSweepDrafts(args[1:], stdout)
 	default:
 		return fmt.Errorf("unknown writeback subcommand %q", args[0])
 	}
@@ -3530,6 +3579,72 @@ func runWorkspaceCreate(args []string, stdout io.Writer) error {
 	return nil
 }
 
+func runWorkspaceJoin(args []string, stdout io.Writer) error {
+	fs := flag.NewFlagSet("workspace join", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	cloudAPIURL := fs.String("cloud-api-url", envOrDefault("RELAYFILE_CLOUD_API_URL", defaultCloudAPIURL), "Relayfile Cloud API URL")
+	cloudToken := fs.String("cloud-token", strings.TrimSpace(os.Getenv("RELAYFILE_CLOUD_TOKEN")), "Relayfile Cloud access token; skips browser login when set")
+	name := fs.String("name", "", "local workspace name")
+	writeAccess := fs.Bool("write", false, "request read/write workspace token scopes")
+	noOpen := fs.Bool("no-open", false, "print browser URLs instead of opening them")
+	loginTimeout := fs.Duration("login-timeout", 5*time.Minute, "cloud login timeout")
+	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
+		"cloud-api-url": true,
+		"cloud-token":   true,
+		"name":          true,
+		"write":         false,
+		"no-open":       false,
+		"login-timeout": true,
+	})); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return errors.New("usage: relayfile workspace join WORKSPACE_ID [--name NAME] [--write]")
+	}
+
+	workspaceID := strings.TrimSpace(fs.Arg(0))
+	if workspaceID == "" {
+		return errors.New("workspace id is required")
+	}
+	localName := strings.TrimSpace(*name)
+	if localName == "" {
+		if record, ok := workspaceRecordByID(workspaceID); ok && strings.TrimSpace(record.Name) != "" {
+			localName = record.Name
+		} else {
+			localName = workspaceID
+		}
+	}
+	scopes := append([]string(nil), defaultInspectScopes...)
+	if *writeAccess {
+		scopes = append([]string(nil), defaultJoinScopes...)
+	}
+	record := workspaceRecord{
+		Name:      localName,
+		ID:        workspaceID,
+		CreatedAt: time.Now().UTC().Format(time.RFC3339),
+		AgentName: "relayfile-cli",
+		Scopes:    scopes,
+	}
+	cloudCreds, err := ensureCloudCredentials(strings.TrimSpace(*cloudAPIURL), strings.TrimSpace(*cloudToken), *loginTimeout, !*noOpen, stdout)
+	if err != nil {
+		return err
+	}
+	joined, err := joinWorkspaceViaCloud(cloudCreds, workspaceID, record.AgentName, record.Scopes)
+	if err != nil {
+		return err
+	}
+	record, err = persistJoinedWorkspace(record, joined, cloudCreds.APIURL, "", true)
+	if err != nil {
+		return err
+	}
+	mode := "read-only"
+	if *writeAccess {
+		mode = "read/write"
+	}
+	fmt.Fprintf(stdout, "Joined workspace %s (id: %s, %s)\n", localName, record.ID, mode)
+	return nil
+}
+
 func runWorkspaceUse(args []string, stdout io.Writer) error {
 	fs := flag.NewFlagSet("workspace use", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -3724,13 +3839,15 @@ func runMount(args []string) error {
 	remotePath := fs.String("remote-path", envOrDefault("RELAYFILE_REMOTE_PATH", "/"), "remote root path")
 	eventProvider := fs.String("provider", strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_PROVIDER")), "event provider filter")
 	stateFile := fs.String("state-file", strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_STATE_FILE")), "state file path")
+	stateDir := fs.String("state-dir", envOrDefault("RELAYFILE_MOUNT_STATE_DIR", mountsync.DefaultMountStateDir()), "directory for private mount state")
+	mountKind := fs.String("mount-kind", envOrDefault("RELAYFILE_MOUNT_KIND", mountsync.MountKindDaemon), "private state identity kind: daemon, flush, or initial-sync")
 	localDirFlag := fs.String("local-dir", "", "local mirror directory")
 	mode := fs.String("mode", envOrDefault("RELAYFILE_MOUNT_MODE", defaultMountMode), "mount mode: poll (recommended) or fuse")
 	interval := fs.Duration("interval", durationEnv("RELAYFILE_MOUNT_INTERVAL", defaultMountInterval), "sync interval")
 	intervalJitter := fs.Float64("interval-jitter", floatEnv("RELAYFILE_MOUNT_INTERVAL_JITTER", 0.2), "sync interval jitter ratio (0.0-1.0)")
 	timeout := fs.Duration("timeout", durationEnv("RELAYFILE_MOUNT_TIMEOUT", defaultMountTimeout), "per-sync timeout")
 	bootstrapTimeout := fs.Duration("bootstrap-timeout", durationEnv("RELAYFILE_BOOTSTRAP_TIMEOUT", 0), "hard cap for the one-time/full-tree bootstrap pull (0 = unbounded while making progress)")
-	cursorTimeout := fs.Duration("cursor-timeout", durationEnv("RELAYFILE_CURSOR_TIMEOUT", 20*time.Second), "independent timeout for events-cursor resolution")
+	cursorTimeout := fs.Duration("cursor-timeout", durationEnv("RELAYFILE_CURSOR_TIMEOUT", 60*time.Second), "independent timeout for events-cursor resolution")
 	fullReconcile := fs.Bool("full-reconcile", boolEnv("RELAYFILE_FORCE_FULL_RECONCILE", false), "force one full reconcile regardless of bootstrap-complete state (escape hatch)")
 	websocketEnabled := fs.Bool("websocket", boolEnv("RELAYFILE_MOUNT_WEBSOCKET", true), "enable websocket event streaming when available")
 	lowMemory := fs.Bool("low-memory", boolEnv("RELAYFILE_MOUNT_LOW_MEMORY", false), "reduce mount memory use by omitting per-file public state and deferring content reads")
@@ -3749,6 +3866,8 @@ func runMount(args []string) error {
 		"remote-path":         true,
 		"provider":            true,
 		"state-file":          true,
+		"state-dir":           true,
+		"mount-kind":          true,
 		"mode":                true,
 		"interval":            true,
 		"interval-jitter":     true,
@@ -3877,6 +3996,7 @@ func runMount(args []string) error {
 	if *interval <= 0 {
 		*interval = defaultMountInterval
 	}
+	*interval = enforcePollIntervalFloor(*interval)
 	if *timeout <= 0 {
 		*timeout = defaultMountTimeout
 	}
@@ -3950,6 +4070,9 @@ func runMount(args []string) error {
 		EventProvider:      strings.TrimSpace(*eventProvider),
 		LocalRoot:          absLocalDir,
 		StateFile:          strings.TrimSpace(*stateFile),
+		StateDir:           strings.TrimSpace(*stateDir),
+		MountKind:          strings.TrimSpace(*mountKind),
+		ValidateState:      true,
 		WebSocket:          boolPtr(*websocketEnabled),
 		LowMemory:          boolPtr(*lowMemory),
 		RootCtx:            rootCtx,
@@ -4036,8 +4159,10 @@ Common flags:
   --timeout 5m         per-sync timeout
   --bootstrap-timeout 0s
                        hard cap for initial/full-tree bootstrap (0 = progress-based)
-  --cursor-timeout 20s timeout for events-cursor resolution
+  --cursor-timeout 60s timeout for events-cursor resolution
   --full-reconcile     force one full reconcile regardless of bootstrap state
+  --state-dir DIR      private mount state directory (default $HOME/.relayfile-mount-state)
+  --state-file FILE    exact private state file override; wins over --state-dir
   --rehome             allow moving an already-registered mirror to a new LOCAL_DIR
   --no-websocket       disable websocket event streaming
   --low-memory         skip detailed per-file public state and defer content reads
@@ -4046,6 +4171,158 @@ Common flags:
 
 See 'relayfile help' for the full command list and
 docs/guides/vfs-cloud-setup.md#known-limitations for details.`)
+}
+
+type workspaceCommandClient struct {
+	workspaceID string
+	record      workspaceRecord
+	client      *apiClient
+	scopes      []string
+	directToken bool
+}
+
+func prepareWorkspaceCommandClient(workspaceValue, serverFlag, tokenFlag string, requestedScopes []string) (*workspaceCommandClient, error) {
+	creds, _ := loadCredentials()
+	tokenValue := resolveToken(tokenFlag, creds)
+	directToken := strings.TrimSpace(tokenFlag) != "" || strings.TrimSpace(os.Getenv("RELAYFILE_TOKEN")) != ""
+	workspaceID, err := resolveWorkspaceIDWithToken(workspaceValue, tokenValue)
+	if err != nil {
+		return nil, err
+	}
+	record := workspaceRecordForCommand(workspaceValue, workspaceID)
+	scopes := effectiveCommandScopes(record, requestedScopes)
+	commandClient := &workspaceCommandClient{
+		workspaceID: workspaceID,
+		record:      record,
+		scopes:      scopes,
+		directToken: directToken,
+	}
+
+	tokenWorkspaceID := workspaceIDFromToken(tokenValue)
+	shouldJoin := !directToken && (strings.TrimSpace(tokenValue) == "" || relayfileTokenNeedsRefresh(tokenValue) || (tokenWorkspaceID != "" && tokenWorkspaceID != workspaceID))
+	if shouldJoin {
+		if err := commandClient.refreshFromCloud(); err == nil {
+			return commandClient, nil
+		} else if strings.TrimSpace(tokenValue) == "" {
+			return nil, err
+		}
+	}
+
+	client, err := newAPIClient(resolveServer(serverFlag, creds), tokenValue)
+	if err != nil {
+		return nil, err
+	}
+	commandClient.client = client
+	return commandClient, nil
+}
+
+func workspaceRecordForCommand(workspaceValue, workspaceID string) workspaceRecord {
+	if record, ok := workspaceRecordByName(strings.TrimSpace(workspaceValue)); ok {
+		return normalizeWorkspaceCommandRecord(record, workspaceID)
+	}
+	if record, ok := workspaceRecordByID(workspaceID); ok {
+		return normalizeWorkspaceCommandRecord(record, workspaceID)
+	}
+	return workspaceRecord{
+		Name:      workspaceID,
+		ID:        workspaceID,
+		CreatedAt: time.Now().UTC().Format(time.RFC3339),
+		AgentName: "relayfile-cli",
+	}
+}
+
+func normalizeWorkspaceCommandRecord(record workspaceRecord, workspaceID string) workspaceRecord {
+	if strings.TrimSpace(record.ID) == "" {
+		record.ID = workspaceID
+	}
+	if strings.TrimSpace(record.Name) == "" {
+		record.Name = record.ID
+	}
+	if strings.TrimSpace(record.CreatedAt) == "" {
+		record.CreatedAt = time.Now().UTC().Format(time.RFC3339)
+	}
+	if strings.TrimSpace(record.AgentName) == "" {
+		record.AgentName = "relayfile-cli"
+	}
+	return record
+}
+
+func effectiveCommandScopes(record workspaceRecord, requestedScopes []string) []string {
+	if len(requestedScopes) > 0 {
+		return append([]string(nil), requestedScopes...)
+	}
+	if len(record.Scopes) > 0 {
+		return append([]string(nil), record.Scopes...)
+	}
+	return append([]string(nil), defaultJoinScopes...)
+}
+
+func (c *workspaceCommandClient) refreshFromCloud() error {
+	if c == nil {
+		return errors.New("workspace command client is nil")
+	}
+	cloudCreds, err := loadCloudCredentials()
+	if err != nil {
+		return err
+	}
+	cloudCreds, err = refreshCloudCredentialsIfNeeded(cloudCreds)
+	if err != nil {
+		return err
+	}
+	joined, err := joinWorkspaceViaCloud(cloudCreds, c.workspaceID, c.record.AgentName, c.scopes)
+	if err != nil {
+		return err
+	}
+	requestedWorkspaceID := c.workspaceID
+	if joinedWorkspaceID := strings.TrimSpace(joined.WorkspaceID); joinedWorkspaceID != "" {
+		c.workspaceID = joinedWorkspaceID
+	}
+	record := c.record
+	if strings.TrimSpace(record.ID) == "" {
+		record.ID = strings.TrimSpace(requestedWorkspaceID)
+	}
+	record.Scopes = append([]string(nil), c.scopes...)
+	record, err = persistJoinedWorkspace(record, joined, cloudCreds.APIURL, record.LocalDir, false)
+	if err != nil {
+		return err
+	}
+	client, err := newAPIClient(strings.TrimRight(joined.RelayfileURL, "/"), joined.Token)
+	if err != nil {
+		return err
+	}
+	c.record = record
+	c.client = client
+	return nil
+}
+
+func (c *workspaceCommandClient) getWorkspaceBytes(ctx context.Context, pathForWorkspace func(string) string) ([]byte, string, error) {
+	body, contentType, err := c.client.getBytes(ctx, pathForWorkspace(c.workspaceID))
+	if err == nil || c.directToken || !isAPIAuthError(err) {
+		return body, contentType, err
+	}
+	if refreshErr := c.refreshFromCloud(); refreshErr != nil {
+		return body, contentType, err
+	}
+	return c.client.getBytes(ctx, pathForWorkspace(c.workspaceID))
+}
+
+func (c *workspaceCommandClient) getWorkspaceJSON(ctx context.Context, pathForWorkspace func(string) string, out any) error {
+	err := c.client.getJSON(ctx, pathForWorkspace(c.workspaceID), out)
+	if err == nil || c.directToken || !isAPIAuthError(err) {
+		return err
+	}
+	if refreshErr := c.refreshFromCloud(); refreshErr != nil {
+		return err
+	}
+	return c.client.getJSON(ctx, pathForWorkspace(c.workspaceID), out)
+}
+
+func isAPIAuthError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var httpErr *apiError
+	return errors.As(err, &httpErr) && (httpErr.StatusCode == http.StatusUnauthorized || httpErr.StatusCode == http.StatusForbidden)
 }
 
 func runTree(args []string, stdout io.Writer) error {
@@ -4069,33 +4346,22 @@ func runTree(args []string, stdout io.Writer) error {
 		return errors.New("usage: relayfile tree [WORKSPACE] [PATH] [--depth N]")
 	}
 
-	creds, err := loadCredentials()
-	if err != nil {
-		return err
-	}
-	tokenValue := resolveToken(*token, creds)
-	client, err := newAPIClient(resolveServer(*server, creds), tokenValue)
-	if err != nil {
-		return err
-	}
-
 	remotePath := strings.TrimSpace(*pathFlag)
-	var workspaceID string
+	var workspaceValue string
 	switch fs.NArg() {
 	case 0:
-		workspaceID, err = resolveWorkspaceIDWithToken("", tokenValue)
 	case 1:
 		arg := strings.TrimSpace(fs.Arg(0))
 		if looksLikeRemotePathArg(arg) {
-			workspaceID, err = resolveWorkspaceIDWithToken("", tokenValue)
 			remotePath = normalizeCLIPathArg(arg)
 		} else {
-			workspaceID, err = resolveWorkspaceIDWithToken(arg, tokenValue)
+			workspaceValue = arg
 		}
 	case 2:
-		workspaceID, err = resolveWorkspaceIDWithToken(fs.Arg(0), tokenValue)
+		workspaceValue = strings.TrimSpace(fs.Arg(0))
 		remotePath = strings.TrimSpace(fs.Arg(1))
 	}
+	commandClient, err := prepareWorkspaceCommandClient(workspaceValue, *server, *token, defaultInspectScopes)
 	if err != nil {
 		return err
 	}
@@ -4109,11 +4375,13 @@ func runTree(args []string, stdout io.Writer) error {
 	query := url.Values{}
 	query.Set("path", remotePath)
 	query.Set("depth", strconv.Itoa(*depth))
-	body, _, err := client.getBytes(context.Background(), fmt.Sprintf("/v1/workspaces/%s/fs/tree?%s", url.PathEscape(workspaceID), query.Encode()))
+	body, _, err := commandClient.getWorkspaceBytes(context.Background(), func(workspaceID string) string {
+		return fmt.Sprintf("/v1/workspaces/%s/fs/tree?%s", url.PathEscape(workspaceID), query.Encode())
+	})
 	if err != nil {
 		return err
 	}
-	if _, err := upsertWorkspace(workspaceID); err != nil {
+	if _, err := upsertWorkspaceDetails(commandClient.record); err != nil {
 		return err
 	}
 	if *jsonOutput {
@@ -4226,25 +4494,15 @@ func runRead(args []string, stdout io.Writer) error {
 		return errors.New("usage: relayfile read [WORKSPACE] PATH")
 	}
 
-	creds, err := loadCredentials()
-	if err != nil {
-		return err
-	}
-	tokenValue := resolveToken(*token, creds)
-	client, err := newAPIClient(resolveServer(*server, creds), tokenValue)
-	if err != nil {
-		return err
-	}
-
-	var workspaceID string
+	var workspaceValue string
 	var remotePath string
 	if fs.NArg() == 1 {
-		workspaceID, err = resolveWorkspaceIDWithToken("", tokenValue)
 		remotePath = strings.TrimSpace(fs.Arg(0))
 	} else {
-		workspaceID, err = resolveWorkspaceIDWithToken(fs.Arg(0), tokenValue)
+		workspaceValue = strings.TrimSpace(fs.Arg(0))
 		remotePath = strings.TrimSpace(fs.Arg(1))
 	}
+	commandClient, err := prepareWorkspaceCommandClient(workspaceValue, *server, *token, defaultInspectScopes)
 	if err != nil {
 		return err
 	}
@@ -4254,11 +4512,13 @@ func runRead(args []string, stdout io.Writer) error {
 
 	query := url.Values{}
 	query.Set("path", remotePath)
-	body, _, err := client.getBytes(context.Background(), fmt.Sprintf("/v1/workspaces/%s/fs/file?%s", url.PathEscape(workspaceID), query.Encode()))
+	body, _, err := commandClient.getWorkspaceBytes(context.Background(), func(workspaceID string) string {
+		return fmt.Sprintf("/v1/workspaces/%s/fs/file?%s", url.PathEscape(workspaceID), query.Encode())
+	})
 	if err != nil {
 		return err
 	}
-	if _, err := upsertWorkspace(workspaceID); err != nil {
+	if _, err := upsertWorkspaceDetails(commandClient.record); err != nil {
 		return err
 	}
 	if *jsonOutput {
@@ -4378,29 +4638,22 @@ func runExport(args []string, stdout io.Writer) error {
 		return errors.New("usage: relayfile export [WORKSPACE] --format FORMAT [--output FILE]")
 	}
 
-	creds, err := loadCredentials()
-	if err != nil {
-		return err
-	}
-	tokenValue := resolveToken(*token, creds)
-	client, err := newAPIClient(resolveServer(*server, creds), tokenValue)
-	if err != nil {
-		return err
-	}
-
-	workspaceID, err := resolveWorkspaceIDWithToken("", tokenValue)
+	workspaceValue := ""
 	if fs.NArg() == 1 {
-		workspaceID, err = resolveWorkspaceIDWithToken(fs.Arg(0), tokenValue)
+		workspaceValue = strings.TrimSpace(fs.Arg(0))
 	}
+	commandClient, err := prepareWorkspaceCommandClient(workspaceValue, *server, *token, defaultInspectScopes)
 	if err != nil {
 		return err
 	}
-	path := fmt.Sprintf("/v1/workspaces/%s/fs/export?format=%s", url.PathEscape(workspaceID), url.QueryEscape(strings.ToLower(strings.TrimSpace(*format))))
-	body, _, err := client.getBytes(context.Background(), path)
+	exportFormat := url.QueryEscape(strings.ToLower(strings.TrimSpace(*format)))
+	body, _, err := commandClient.getWorkspaceBytes(context.Background(), func(workspaceID string) string {
+		return fmt.Sprintf("/v1/workspaces/%s/fs/export?format=%s", url.PathEscape(workspaceID), exportFormat)
+	})
 	if err != nil {
 		return err
 	}
-	if _, err := upsertWorkspace(workspaceID); err != nil {
+	if _, err := upsertWorkspaceDetails(commandClient.record); err != nil {
 		return err
 	}
 	if strings.TrimSpace(*output) == "" || strings.TrimSpace(*output) == "-" {
@@ -4430,24 +4683,18 @@ func runStatus(args []string, stdout io.Writer) error {
 		return errors.New("usage: relayfile status [WORKSPACE] [--json]")
 	}
 
-	creds, err := loadCredentials()
-	if err != nil {
-		return err
-	}
-	tokenValue := resolveToken(*token, creds)
-	client, err := newAPIClient(resolveServer(*server, creds), tokenValue)
-	if err != nil {
-		return err
-	}
-
-	workspaceID, err := resolveWorkspaceIDWithToken("", tokenValue)
+	workspaceValue := ""
 	if fs.NArg() == 1 {
-		workspaceID, err = resolveWorkspaceIDWithToken(fs.Arg(0), tokenValue)
+		workspaceValue = strings.TrimSpace(fs.Arg(0))
 	}
+	commandClient, err := prepareWorkspaceCommandClient(workspaceValue, *server, *token, defaultInspectScopes)
 	if err != nil {
 		return err
 	}
-	status, err := fetchWorkspaceSyncStatus(client, workspaceID)
+	var status syncStatusResponse
+	err = commandClient.getWorkspaceJSON(context.Background(), func(workspaceID string) string {
+		return fmt.Sprintf("/v1/workspaces/%s/sync/status", url.PathEscape(workspaceID))
+	}, &status)
 	if err != nil {
 		if isUnauthorizedAPIError(err) {
 			return ErrCloudRefreshExpired
@@ -4456,14 +4703,18 @@ func runStatus(args []string, stdout io.Writer) error {
 	}
 	var ingress *syncIngressStatusResponse
 	if statusNeedsIngressDiagnostics(status) {
-		if ingressStatus, err := fetchWorkspaceSyncIngressStatus(client, workspaceID); err == nil {
+		var ingressStatus syncIngressStatusResponse
+		if err := commandClient.getWorkspaceJSON(context.Background(), func(workspaceID string) string {
+			return fmt.Sprintf("/v1/workspaces/%s/sync/ingress", url.PathEscape(workspaceID))
+		}, &ingressStatus); err == nil {
 			ingress = &ingressStatus
 		}
 	}
-	if _, err := upsertWorkspace(workspaceID); err != nil {
+	record, err := upsertWorkspaceDetails(commandClient.record)
+	if err != nil {
 		return err
 	}
-	record, _ := workspaceRecordByID(workspaceID)
+	workspaceID := commandClient.workspaceID
 	persistedStallReason := readPersistedStallReason(record.LocalDir)
 	snapshot := buildSyncStateSnapshot(status, workspaceID, defaultMountMode, defaultMountInterval, record.LocalDir, readDaemonPID(record.LocalDir), persistedStallReason)
 	if *jsonOutput {
@@ -4795,37 +5046,26 @@ func runObserver(args []string, stdout io.Writer) error {
 		return errors.New("usage: relayfile observer [WORKSPACE] [--no-open]")
 	}
 
-	creds, err := loadCredentials()
-	if err != nil {
-		if strings.TrimSpace(*token) == "" && strings.TrimSpace(os.Getenv("RELAYFILE_TOKEN")) == "" {
-			return err
-		}
-		creds = credentials{}
-	}
-	tokenValue := resolveToken(*token, creds)
-	if strings.TrimSpace(tokenValue) == "" {
-		return errors.New("token is required; run relayfile login or pass --token")
-	}
-	serverValue := resolveServer(*server, creds)
-	workspaceID, err := resolveWorkspaceIDWithToken("", tokenValue)
+	workspaceValue := ""
 	if fs.NArg() == 1 {
-		workspaceID, err = resolveWorkspaceIDWithToken(fs.Arg(0), tokenValue)
+		workspaceValue = strings.TrimSpace(fs.Arg(0))
 	}
+	commandClient, err := prepareWorkspaceCommandClient(workspaceValue, *server, *token, defaultInspectScopes)
 	if err != nil {
 		return err
 	}
-	launchURL, err := buildObserverURL(*observerURL, serverValue, tokenValue, workspaceID)
+	launchURL, err := buildObserverURL(*observerURL, commandClient.client.baseURL, commandClient.client.token, commandClient.workspaceID)
 	if err != nil {
 		return err
 	}
-	if _, err := upsertWorkspace(workspaceID); err != nil {
+	if _, err := upsertWorkspaceDetails(commandClient.record); err != nil {
 		return err
 	}
 	if *noOpen {
 		fmt.Fprintln(stdout, launchURL)
 		return nil
 	}
-	fmt.Fprintf(stdout, "Opening observer for workspace %s\n", workspaceID)
+	fmt.Fprintf(stdout, "Opening observer for workspace %s\n", commandClient.workspaceID)
 	if err := openBrowser(launchURL); err != nil {
 		return fmt.Errorf("open observer: %w (rerun with --no-open to print the URL)", err)
 	}
@@ -5380,6 +5620,9 @@ func mergeWorkspaceRecords(current, update workspaceRecord) workspaceRecord {
 	if update.ID != "" {
 		merged.ID = update.ID
 	}
+	if update.RelayWorkspaceID != "" {
+		merged.RelayWorkspaceID = update.RelayWorkspaceID
+	}
 	if update.CreatedAt != "" {
 		merged.CreatedAt = update.CreatedAt
 	}
@@ -5428,7 +5671,7 @@ func workspaceRecordByID(id string) (workspaceRecord, bool) {
 	}
 	id = strings.TrimSpace(id)
 	for _, record := range catalog.Workspaces {
-		if record.ID == id {
+		if record.ID == id || record.RelayWorkspaceID == id {
 			return record, true
 		}
 	}
@@ -7416,13 +7659,20 @@ func clampJitterRatio(value float64) float64 {
 	return value
 }
 
+func enforcePollIntervalFloor(interval time.Duration) time.Duration {
+	if interval > 0 && interval < minMountPollInterval {
+		return minMountPollInterval
+	}
+	return interval
+}
+
 func jitteredIntervalWithSample(base time.Duration, jitterRatio, sample float64) time.Duration {
 	if base <= 0 {
 		return 0
 	}
 	jitterRatio = clampJitterRatio(jitterRatio)
 	if jitterRatio == 0 {
-		return base
+		return enforcePollIntervalFloor(base)
 	}
 	if sample < 0 {
 		sample = 0
@@ -7437,7 +7687,7 @@ func jitteredIntervalWithSample(base time.Duration, jitterRatio, sample float64)
 	if delay < time.Millisecond {
 		return time.Millisecond
 	}
-	return delay
+	return enforcePollIntervalFloor(delay)
 }
 
 var spawnBackgroundMountProcessFn = spawnBackgroundMountProcess
@@ -7488,6 +7738,7 @@ func spawnBackgroundMountProcess(originalArgs []string, localDir, pidFile, logFi
 }
 
 func runMountLoop(rootCtx context.Context, syncer *mountsync.Syncer, localDir, workspaceID, serverURL string, timeout, interval time.Duration, intervalJitter float64, websocketEnabled, once, daemonized bool, pidFile, logFile string) error {
+	interval = enforcePollIntervalFloor(interval)
 	httpClient, _ := syncerClient(syncer)
 	record, _ := workspaceRecordByID(workspaceID)
 	if record.ID == "" {
@@ -7732,6 +7983,8 @@ func runMountLoop(rootCtx context.Context, syncer *mountsync.Syncer, localDir, w
 
 	timer := time.NewTimer(jitteredIntervalWithSample(interval, intervalJitter, mathrand.Float64()))
 	defer timer.Stop()
+	wsTicker := time.NewTicker(mountsync.DefaultWebSocketMaintenanceEvery)
+	defer wsTicker.Stop()
 	cycle := 0
 	for {
 		select {
@@ -7739,9 +7992,17 @@ func runMountLoop(rootCtx context.Context, syncer *mountsync.Syncer, localDir, w
 			log.Printf("mount sync stopping: %v", rootCtx.Err())
 			writeSnapshot()
 			return nil
+		case <-wsTicker.C:
+			if websocketEnabled {
+				ctx, cancel := context.WithTimeout(rootCtx, timeout)
+				if err := syncer.MaintainWebSocket(ctx); err != nil {
+					log.Printf("websocket unavailable; using polling sync: %v", err)
+				}
+				cancel()
+			}
 		case <-timer.C:
 			cycle++
-			reconcile := !websocketEnabled || cycle%websocketReconcileEvery == 0
+			reconcile := shouldReconcileMountCycle(websocketEnabled, cycle)
 			if reconcile {
 				_ = runCycle(true)
 			}
@@ -7761,6 +8022,10 @@ func runMountLoop(rootCtx context.Context, syncer *mountsync.Syncer, localDir, w
 			timer.Reset(jitteredIntervalWithSample(interval, intervalJitter, mathrand.Float64()))
 		}
 	}
+}
+
+func shouldReconcileMountCycle(websocketEnabled bool, cycle int) bool {
+	return !websocketEnabled || cycle%websocketReconcileEvery == 0
 }
 
 func correlationID() string {

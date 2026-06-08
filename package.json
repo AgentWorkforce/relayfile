@@ -1,7 +1,8 @@
 {
   "name": "relayfile",
+  "license": "Apache-2.0",
   "private": true,
-  "version": "0.7.39",
+  "version": "0.8.17",
   "description": "relayfile — real-time filesystem for humans and agents",
   "workspaces": [
     "packages/core",
@@ -21,7 +22,9 @@
     "evals": "npm run evals:compile && node scripts/evals/run-relayfile-evals.mjs",
     "evals:list": "npm run evals:compile && node scripts/evals/run-relayfile-evals.mjs --list",
     "evals:offline": "npm run evals:compile && node scripts/evals/run-relayfile-evals.mjs --mode offline",
-    "evals:provider": "npm run evals:compile && node scripts/evals/run-relayfile-evals.mjs --provider"
+    "evals:provider": "npm run evals:compile && node scripts/evals/run-relayfile-evals.mjs --provider",
+    "test:load:tier2-scoped-writeback": "node test/load/tier2-cfdo-scoped-writeback.mjs",
+    "test:load:tier2-scoped-writeback:self-test": "node test/load/tier2-cfdo-scoped-writeback.mjs --self-test"
   },
   "devDependencies": {
     "@agent-assistant/telemetry": "^0.4.31",

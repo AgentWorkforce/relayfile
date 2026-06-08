@@ -115,6 +115,50 @@ func TestScopeMatchesPath(t *testing.T) {
 			want:     true,
 		},
 		{
+			name:     "bare read with workspace path grant allows inside subtree",
+			required: "fs:read",
+			granted: map[string]struct{}{
+				"fs:read": {},
+				"workspace:mount-sponsor:read:/slack/messages/**": {},
+			},
+			path: "/slack/messages/thread-1.json",
+			want: true,
+		},
+		{
+			name:     "bare read with workspace path grant denies outside subtree",
+			required: "fs:read",
+			granted: map[string]struct{}{
+				"fs:read": {},
+				"workspace:mount-sponsor:read:/slack/messages/**": {},
+			},
+			path: "/slack/users/user-1.json",
+			want: false,
+		},
+		{
+			name:     "bare read with workspace path grant denies empty path",
+			required: "fs:read",
+			granted: map[string]struct{}{
+				"fs:read": {},
+				"workspace:mount-sponsor:read:/slack/messages/**": {},
+			},
+			path: "",
+			want: false,
+		},
+		{
+			name:     "pure bare read remains full access",
+			required: "fs:read",
+			granted:  map[string]struct{}{"fs:read": {}},
+			path:     "/slack/users/user-1.json",
+			want:     true,
+		},
+		{
+			name:     "workspace sponsor segment is not treated as resource",
+			required: "fs:read",
+			granted:  map[string]struct{}{"workspace:pear-integrations-slack-channels-c123-messages:read:/slack/channels/c123/messages/**": {}},
+			path:     "/slack/channels/c123/messages/1710000000.json",
+			want:     true,
+		},
+		{
 			name:     "wrong plane",
 			required: "fs:read",
 			granted:  map[string]struct{}{"relaycast:fs:read:/src/*": {}},
@@ -175,6 +219,110 @@ func TestScopeMatchesPath(t *testing.T) {
 			})
 		}
 	})
+}
+
+func TestAuthorizeBearerEnforcesPathScopedMountGrants(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now().UTC()
+	privateKey := mustRSATestKey(t)
+
+	jwksServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(jwksDocument{
+			Keys: []jwkKey{mustRSATestJWK("kid-1", &privateKey.PublicKey)},
+		})
+	}))
+	defer jwksServer.Close()
+
+	verifier := newBearerVerifier(ServerConfig{
+		JWKSURL:          jwksServer.URL,
+		JWKSFetchTimeout: time.Second,
+	})
+
+	tests := []struct {
+		name       string
+		required   string
+		scopes     []string
+		path       string
+		wantStatus int
+	}{
+		{
+			name:       "bare fs read plus workspace path grant allows inside subtree",
+			required:   "fs:read",
+			scopes:     []string{"fs:read", "workspace:mount-sponsor:read:/slack/messages/**"},
+			path:       "/slack/messages/thread-1.json",
+			wantStatus: 0,
+		},
+		{
+			name:       "bare fs read plus workspace path grant denies outside subtree",
+			required:   "fs:read",
+			scopes:     []string{"fs:read", "workspace:mount-sponsor:read:/slack/messages/**"},
+			path:       "/slack/users/user-1.json",
+			wantStatus: http.StatusForbidden,
+		},
+		{
+			name:       "workspace path grant without bare read allows inside subtree",
+			required:   "fs:read",
+			scopes:     []string{"workspace:mount-sponsor:read:/slack/messages/**"},
+			path:       "/slack/messages/thread-1.json",
+			wantStatus: 0,
+		},
+		{
+			name:       "workspace path grant without bare read denies outside subtree",
+			required:   "fs:read",
+			scopes:     []string{"workspace:mount-sponsor:read:/slack/messages/**"},
+			path:       "/slack/users/user-1.json",
+			wantStatus: http.StatusForbidden,
+		},
+		{
+			name:       "pure bare fs read remains full access",
+			required:   "fs:read",
+			scopes:     []string{"fs:read"},
+			path:       "/slack/users/user-1.json",
+			wantStatus: 0,
+		},
+		{
+			name:       "bare fs write plus workspace path grant allows inside subtree",
+			required:   "fs:write",
+			scopes:     []string{"fs:write", "workspace:mount-sponsor:write:/slack/messages/**"},
+			path:       "/slack/messages/thread-1.json",
+			wantStatus: 0,
+		},
+		{
+			name:       "bare fs write plus workspace path grant denies outside subtree",
+			required:   "fs:write",
+			scopes:     []string{"fs:write", "workspace:mount-sponsor:write:/slack/messages/**"},
+			path:       "/slack/users/user-1.json",
+			wantStatus: http.StatusForbidden,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			token := mustTestRS256JWT(t, privateKey, "kid-1", map[string]any{
+				"wks":    "ws-mount",
+				"sub":    "MountSync",
+				"scopes": tt.scopes,
+				"exp":    now.Add(time.Hour).Unix(),
+				"aud":    "relayfile",
+			})
+
+			_, authErr := authorizeBearer("Bearer "+token, verifier, "ws-mount", tt.required, tt.path, now)
+			if tt.wantStatus == 0 {
+				if authErr != nil {
+					t.Fatalf("authorizeBearer returned auth error: %+v", authErr)
+				}
+				return
+			}
+			if authErr == nil {
+				t.Fatalf("expected auth error status %d, got nil", tt.wantStatus)
+			}
+			if authErr.status != tt.wantStatus {
+				t.Fatalf("expected auth status %d, got %d (%s)", tt.wantStatus, authErr.status, authErr.message)
+			}
+		})
+	}
 }
 
 func TestParseBearerRS256HappyPath(t *testing.T) {

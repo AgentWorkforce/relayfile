@@ -119,6 +119,13 @@ paths:
         The server sends JSON messages with `type`, `path`, `revision`, and
         `timestamp` fields. The client may send `{"type":"ping"}` to keep the
         connection alive; the server responds with `{"type":"pong"}`.
+
+        Updated clients should pass `from=now` for live-only subscriptions, or
+        an exclusive `cursor` event id to catch up only events after that
+        cursor. Repeated `path` query parameters restrict both catch-up and
+        live delivery to exact path/glob filters. Legacy clients that omit
+        `from`, `cursor`, and `path` keep the historical recent-event catch-up
+        behavior.
       security:
         - BearerAuth: [fs:read]
       parameters:
@@ -129,6 +136,30 @@ paths:
           description: JWT token for authentication (same as Bearer token value)
           schema:
             type: string
+        - name: from
+          in: query
+          required: false
+          description: Use `now` to skip historical catch-up and subscribe only to live events.
+          schema:
+            type: string
+            enum: [now]
+        - name: cursor
+          in: query
+          required: false
+          description: Exclusive filesystem event id cursor for bounded reconnect catch-up.
+          schema:
+            type: string
+        - name: path
+          in: query
+          required: false
+          description: Exact path or trailing-`**`/single-segment-`*` path filter. Repeat to subscribe to multiple paths.
+          schema:
+            type: array
+            items:
+              type: string
+              pattern: '^/.*'
+          style: form
+          explode: true
       responses:
         '101':
           description: WebSocket upgrade successful
@@ -1538,6 +1569,24 @@ paths:
                 error:
                   type: string
                   description: Optional error message if success is false
+                externalId:
+                  type: string
+                  description: |
+                    Provider-assigned id of the created/updated object (e.g.
+                    the Slack message ts). When present on a successful ack,
+                    the service reconciles the agent-authored draft file per
+                    the draftFile() rename contract: the draft is renamed to
+                    the canonical id, or removed when the canonical record
+                    already materialized. The mutation is classification-exempt
+                    (it can never enqueue a new writeback) and is announced to
+                    subscribers as system-origin file events.
+                canonicalPath:
+                  type: string
+                  description: |
+                    Optional canonical projection path for the draft rename.
+                    Must stay under the same provider root as the draft;
+                    otherwise the service falls back to the externalId-derived
+                    name next to the draft.
       responses:
         '200':
           description: Acknowledgment accepted
@@ -1555,6 +1604,106 @@ paths:
                     type: string
                   success:
                     type: boolean
+                  draft:
+                    type: object
+                    description: |
+                      Disposition of the agent-authored draft file. Present
+                      only when the ack was successful and carried an
+                      externalId.
+                    properties:
+                      action:
+                        type: string
+                        enum: [renamed, removed, none]
+                      from:
+                        type: string
+                      to:
+                        type: string
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /v1/workspaces/{workspaceId}/writeback/sweep-drafts:
+    post:
+      tags: [Sync]
+      operationId: sweepWritebackDrafts
+      summary: Drain accumulated writeback draft residue
+      description: |
+        One-time residue sweep (issue #242) for agent-authored writeback
+        drafts that were delivered before the rename-at-ack contract existed
+        and therefore accumulate forever at canonical provider roots.
+
+        Matching is strictly name-shape based: the built-in draftFile()
+        space-uuid form (`<resource> <uuid>.json`) always applies; hand-named
+        drafts (e.g. `wb-*.json`) are only matched by explicitly supplied
+        basename globs. Files linked to a provider object and drafts with a
+        pending or running writeback are never touched.
+
+        Dry run unless `apply` is true. Removals are classification-exempt:
+        they can never enqueue new writebacks (no provider delete fanout) and
+        are announced to subscribers as system-origin file.deleted events.
+      security:
+        - BearerAuth: [sync:trigger]
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                pathPrefix:
+                  type: string
+                  description: Restrict the sweep to a subtree
+                patterns:
+                  type: array
+                  items:
+                    type: string
+                  description: Basename globs for hand-named drafts, e.g. wb-*.json
+                apply:
+                  type: boolean
+                  default: false
+                  description: Execute removals; when false the sweep is a dry run
+      responses:
+        '200':
+          description: Sweep result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  dryRun:
+                    type: boolean
+                  scanned:
+                    type: integer
+                  removed:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        path:
+                          type: string
+                        reason:
+                          type: string
+                          enum: [space-uuid-draft, pattern]
+                  skipped:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        path:
+                          type: string
+                        reason:
+                          type: string
+                          enum: [pending-writeback, provider-linked]
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
@@ -2311,6 +2460,8 @@ components:
         providerResult:
           type: object
           additionalProperties: true
+        contentIdentity:
+          $ref: '#/components/schemas/ContentIdentity'
         correlationId:
           type: string
         createdAt:
@@ -2698,6 +2849,8 @@ components:
         correlationId:
           type: string
           description: Correlation ID for tracing
+        contentIdentity:
+          $ref: '#/components/schemas/ContentIdentity'
 
     WritebackItem:
       type: object
@@ -2803,6 +2956,26 @@ components:
         encoding:
           type: string
           description: Content encoding, e.g. "base64" for binary data
+        contentIdentity:
+          $ref: '#/components/schemas/ContentIdentity'
+
+    ContentIdentity:
+      type: object
+      additionalProperties: false
+      required: [kind, key]
+      properties:
+        kind:
+          type: string
+          minLength: 1
+          description: Dedupe namespace for this write identity
+        key:
+          type: string
+          minLength: 1
+          description: Caller-provided idempotency key within the namespace
+        ttlSeconds:
+          type: integer
+          minimum: 0
+          description: Optional lifetime for the dedupe identity in seconds
 
     BulkWriteError:
       type: object

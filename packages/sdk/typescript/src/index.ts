@@ -50,10 +50,12 @@ export {
   type MountLauncherEvent,
   type MountLauncherInstance,
   type MountLauncherStart,
+  type MountLocalLayout,
   type MountMode,
   type MountSessionRequest,
   type MountSessionResponse,
   type MountSessionResult,
+  type MountSyncMode,
   type MountedWorkspaceHandle,
   type MountedWorkspaceStatus,
   type MountWorkspaceInput,
@@ -73,6 +75,7 @@ export {
   type RelayFileSyncPong,
   type RelayFileSyncReconnectOptions,
   type RelayFileSyncSocket,
+  type RelayFileSyncStart,
   type RelayFileSyncState,
   type RelayFileSyncTokenProvider
 } from "./sync.js";
@@ -108,6 +111,7 @@ export type {
 export type {
   AckResponse,
   AckWritebackInput,
+  AckWritebackDraftDisposition,
   AckWritebackResponse,
   AdminIngressAlert,
   AdminIngressAlertProfile,
@@ -196,6 +200,8 @@ export type {
   SyncProviderStatusState,
   SyncRefreshRequest,
   SyncStatusResponse,
+  SweepWritebackDraftsInput,
+  SweepWritebackDraftsResponse,
   TreeEntry,
   TreeResponse,
   WritebackActionType,
@@ -215,3 +221,11 @@ export type { WriteEvent, WriteEventActor, WriteEventOperation, WriteEventSource
 export { WritebackConsumer } from "./writeback-consumer.js";
 export type { WritebackHandler, WritebackConsumerOptions } from "./writeback-consumer.js";
 export * from "./integration-adapter.js";
+
+// Agent workspace provisioning helpers (`seedWorkspace`, `seedAclRules`,
+// `ensureRelayfileMount`, …) live in CLI-only modules that statically pull in
+// `node:child_process`, `node:fs`, and `node:path`. They are intentionally
+// excluded from the default entry so browser/edge consumers stay node-free.
+// Import them from the explicit subpaths instead:
+//   `@relayfile/sdk/workspace-seeder`
+//   `@relayfile/sdk/workspace-mount`

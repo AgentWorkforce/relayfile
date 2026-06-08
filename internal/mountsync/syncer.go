@@ -1,7 +1,10 @@
 package mountsync
 
 import (
+	"archive/tar"
+	"bufio"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
@@ -27,6 +30,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/agentworkforce/relayfile/internal/digest"
+	"github.com/agentworkforce/relayfile/internal/relayfile"
 	"github.com/fsnotify/fsnotify"
 	"nhooyr.io/websocket"
 	"nhooyr.io/websocket/wsjson"
@@ -60,6 +64,11 @@ func (e *SchemaValidationError) Is(target error) bool {
 
 const defaultBulkFlushThreshold = 256
 
+const (
+	mountWritebackCreateDraftContentIdentityKind       = "mount-writeback-create-draft"
+	mountWritebackCreateDraftContentIdentityTTLSeconds = 2592000
+)
+
 // defaultFullPullEvery is the default cadence for the "trust but verify"
 // periodic full tree pull that runs from the incremental path. At 30s sync
 // intervals, 20 cycles is roughly every 10 minutes. This is the safety net
@@ -75,11 +84,28 @@ const defaultFullPullEvery = 20
 // defaultBootstrapIdleTimeout. The cursor resolution gets its own short
 // independent deadline so it can never hang an otherwise healthy cycle.
 const (
-	defaultBootstrapTimeout          = 0 * time.Second
-	defaultBootstrapIdleTimeout      = 90 * time.Second
-	defaultCursorTimeout             = 20 * time.Second
+	defaultBootstrapTimeout     = 0 * time.Second
+	defaultBootstrapIdleTimeout = 90 * time.Second
+	defaultCursorTimeout        = 60 * time.Second
+	// defaultExportTimeout bounds the single atomic full-tree export so a slow
+	// or 429-contended export yields to the resumable pullRemoteFullTree BEFORE
+	// the no-progress bootstrap watchdog (defaultBootstrapIdleTimeout) cancels
+	// the whole bootstrap. ExportFiles reports NO incremental progress until
+	// its whole body returns, so without this bound a doomed export can burn
+	// the entire watchdog window and be cancelled with zero files applied —
+	// and, having no resume cursor, restart from scratch every cycle (the
+	// #1499/#1516 non-convergence loop). Must stay strictly under
+	// defaultBootstrapIdleTimeout.
+	defaultExportTimeout             = 45 * time.Second
+	defaultCursorResolutionAttempts  = 3
+	defaultCursorRetryBaseDelay      = 250 * time.Millisecond
 	defaultBootstrapReadWorkers      = 16
 	defaultIncrementalEventPageLimit = 50
+	defaultRetryAfterMaxDelay        = 60 * time.Second
+	defaultWebSocketReconnectBase    = 1 * time.Second
+	defaultWebSocketReconnectMax     = 60 * time.Second
+	defaultWebSocketReconnectJitter  = 200 * time.Millisecond
+	DefaultWebSocketMaintenanceEvery = 1 * time.Second
 )
 
 // resolveDurationEnv returns the option value if non-zero, else parses the
@@ -140,6 +166,8 @@ type TreeEntry struct {
 	Type        string `json:"type"`
 	Revision    string `json:"revision"`
 	ContentHash string `json:"contentHash,omitempty"`
+	Size        int64  `json:"size,omitempty"`
+	Encoding    string `json:"encoding,omitempty"`
 }
 
 type TreeResponse struct {
@@ -197,19 +225,45 @@ type exportSnapshotClient interface {
 	ExportFiles(ctx context.Context, workspaceID, path string) ([]RemoteFile, error)
 }
 
+type githubWorkingTreeTarClient interface {
+	ExportGithubWorkingTreeTar(ctx context.Context, workspaceID string, seed GithubWorkingTreeSeedRequest) (GithubWorkingTreeTar, error)
+}
+
+type GithubWorkingTreeSeedRequest struct {
+	Owner      string
+	Repo       string
+	PathPrefix string
+	HeadSHA    string
+	Gzip       bool
+}
+
+type GithubWorkingTreeTar struct {
+	Body        io.ReadCloser
+	ContentType string
+}
+
 type LazyMaterializeClient interface {
 	LazyMaterialize(ctx context.Context, workspaceID, owner, repo string) error
 }
 
 type HTTPClient struct {
-	baseURL    string
-	token      string
-	tokenMu    sync.RWMutex
-	httpClient *http.Client
-	maxRetries int
-	baseDelay  time.Duration
-	maxDelay   time.Duration
+	baseURL          string
+	token            string
+	tokenMu          sync.RWMutex
+	tokenRefreshMu   sync.RWMutex
+	tokenRefreshFunc AuthTokenRefreshFunc
+	httpClient       *http.Client
+	maxRetries       int
+	baseDelay        time.Duration
+	maxDelay         time.Duration
+	httpStatusLogMu  sync.RWMutex
+	httpStatusLogger Logger
 }
+
+// AuthTokenRefreshFunc returns a replacement bearer token after the current
+// token has been rejected by the server. changed must be true only when the
+// replacement token should be installed and the failed request retried.
+type AuthTokenRefreshFunc func(currentToken string) (newToken string, changed bool, err error)
 
 // NewSyncTransport builds the *http.Transport used by every mount-daemon
 // HTTP client. It deliberately sets GRANULAR timeouts that bound the parts
@@ -281,8 +335,48 @@ func NewHTTPClient(baseURL, token string, httpClient *http.Client) *HTTPClient {
 		httpClient: httpClient,
 		maxRetries: 3,
 		baseDelay:  100 * time.Millisecond,
-		maxDelay:   2 * time.Second,
+		maxDelay:   defaultRetryAfterMaxDelay,
 	}
+}
+
+func (c *HTTPClient) SetHTTPStatusLogger(logger Logger) {
+	c.httpStatusLogMu.Lock()
+	defer c.httpStatusLogMu.Unlock()
+	c.httpStatusLogger = logger
+}
+
+func (c *HTTPClient) SetTokenRefreshFunc(refresh AuthTokenRefreshFunc) {
+	c.tokenRefreshMu.Lock()
+	defer c.tokenRefreshMu.Unlock()
+	c.tokenRefreshFunc = refresh
+}
+
+func (c *HTTPClient) logHTTPStatus(method, requestPath string, statusCode int, retryAfter string, attempt int) {
+	c.httpStatusLogMu.RLock()
+	logger := c.httpStatusLogger
+	c.httpStatusLogMu.RUnlock()
+	if logger == nil {
+		return
+	}
+	retryAfter = strings.TrimSpace(retryAfter)
+	if retryAfter == "" {
+		logger.Printf(
+			"relayfile http %d method=%s path=%s attempt=%d",
+			statusCode,
+			method,
+			requestPath,
+			attempt+1,
+		)
+		return
+	}
+	logger.Printf(
+		"relayfile http %d method=%s path=%s retry-after=%q attempt=%d",
+		statusCode,
+		method,
+		requestPath,
+		retryAfter,
+		attempt+1,
+	)
 }
 
 func (c *HTTPClient) ListTree(ctx context.Context, workspaceID, path string, depth int, cursor string) (TreeResponse, error) {
@@ -422,6 +516,74 @@ func (c *HTTPClient) ExportFiles(ctx context.Context, workspaceID, path string) 
 	return files, nil
 }
 
+func (c *HTTPClient) ExportGithubWorkingTreeTar(ctx context.Context, workspaceID string, seed GithubWorkingTreeSeedRequest) (GithubWorkingTreeTar, error) {
+	q := url.Values{}
+	q.Set("format", "tar")
+	q.Set("decode", "github-working-tree")
+	q.Set("pathPrefix", normalizeRemotePath(seed.PathPrefix))
+	q.Set("headSha", strings.TrimSpace(seed.HeadSHA))
+	if !seed.Gzip {
+		q.Set("gzip", "0")
+	}
+	requestPath := fmt.Sprintf("/v1/workspaces/%s/fs/export?%s", url.PathEscape(workspaceID), q.Encode())
+
+	authRefreshTried := false
+	for attempt := 0; ; attempt++ {
+		requestToken := c.Token()
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+requestPath, nil)
+		if err != nil {
+			return GithubWorkingTreeTar{}, err
+		}
+		req.Header.Set("Authorization", "Bearer "+requestToken)
+		req.Header.Set("X-Correlation-Id", correlationID())
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			if attempt < c.maxRetries {
+				if waitErr := waitWithContext(ctx, c.retryDelay(attempt+1, "")); waitErr != nil {
+					return GithubWorkingTreeTar{}, waitErr
+				}
+				continue
+			}
+			return GithubWorkingTreeTar{}, err
+		}
+		if resp.StatusCode >= 200 && resp.StatusCode <= 299 {
+			c.logHTTPStatus(http.MethodGet, requestPath, resp.StatusCode, resp.Header.Get("Retry-After"), attempt)
+			return GithubWorkingTreeTar{
+				Body:        resp.Body,
+				ContentType: resp.Header.Get("Content-Type"),
+			}, nil
+		}
+		payloadBytes, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		_ = resp.Body.Close()
+		if readErr != nil {
+			return GithubWorkingTreeTar{}, readErr
+		}
+		c.logHTTPStatus(http.MethodGet, requestPath, resp.StatusCode, resp.Header.Get("Retry-After"), attempt)
+		if resp.StatusCode == http.StatusUnauthorized && !authRefreshTried {
+			authRefreshTried = true
+			if c.refreshTokenAfterUnauthorized(requestToken) {
+				continue
+			}
+		}
+		if (resp.StatusCode == http.StatusTooManyRequests || (resp.StatusCode >= 500 && resp.StatusCode <= 599)) && attempt < c.maxRetries {
+			if waitErr := waitWithContext(ctx, c.retryDelay(attempt+1, resp.Header.Get("Retry-After"))); waitErr != nil {
+				return GithubWorkingTreeTar{}, waitErr
+			}
+			continue
+		}
+		var errPayload struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		}
+		_ = json.Unmarshal(payloadBytes, &errPayload)
+		return GithubWorkingTreeTar{}, &HTTPError{
+			StatusCode: resp.StatusCode,
+			Code:       errPayload.Code,
+			Message:    errPayload.Message,
+		}
+	}
+}
+
 func (c *HTTPClient) LazyMaterialize(ctx context.Context, workspaceID, owner, repo string) error {
 	return c.doJSON(
 		ctx,
@@ -453,16 +615,18 @@ func (c *HTTPClient) doJSON(
 			return err
 		}
 	}
+	authRefreshTried := false
 	for attempt := 0; ; attempt++ {
 		var bodyReader io.Reader
 		if bodyBytes != nil {
 			bodyReader = bytes.NewReader(bodyBytes)
 		}
+		requestToken := c.Token()
 		req, err := http.NewRequestWithContext(ctx, method, c.baseURL+requestPath, bodyReader)
 		if err != nil {
 			return err
 		}
-		req.Header.Set("Authorization", "Bearer "+c.Token())
+		req.Header.Set("Authorization", "Bearer "+requestToken)
 		req.Header.Set("X-Correlation-Id", correlationID())
 		if body != nil {
 			req.Header.Set("Content-Type", "application/json")
@@ -488,12 +652,20 @@ func (c *HTTPClient) doJSON(
 		if readErr != nil {
 			return readErr
 		}
+		c.logHTTPStatus(method, requestPath, resp.StatusCode, resp.Header.Get("Retry-After"), attempt)
 
 		if resp.StatusCode >= 200 && resp.StatusCode <= 299 {
 			if out == nil || len(payloadBytes) == 0 {
 				return nil
 			}
 			return json.Unmarshal(payloadBytes, out)
+		}
+
+		if resp.StatusCode == http.StatusUnauthorized && !authRefreshTried {
+			authRefreshTried = true
+			if c.refreshTokenAfterUnauthorized(requestToken) {
+				continue
+			}
 		}
 
 		if (resp.StatusCode == http.StatusTooManyRequests || (resp.StatusCode >= 500 && resp.StatusCode <= 599)) && attempt < c.maxRetries {
@@ -531,17 +703,45 @@ func (c *HTTPClient) SetToken(token string) {
 	c.tokenMu.Unlock()
 }
 
+func (c *HTTPClient) refreshTokenAfterUnauthorized(attemptedToken string) bool {
+	attemptedToken = strings.TrimSpace(attemptedToken)
+	current := c.Token()
+	if attemptedToken != "" && current != attemptedToken {
+		return true
+	}
+	c.tokenRefreshMu.RLock()
+	refresh := c.tokenRefreshFunc
+	c.tokenRefreshMu.RUnlock()
+	if refresh == nil {
+		return false
+	}
+	next, changed, err := refresh(current)
+	if err != nil || !changed {
+		return false
+	}
+	next = strings.TrimSpace(next)
+	if next == "" || next == current {
+		return false
+	}
+	c.SetToken(next)
+	return true
+}
+
 type SyncerOptions struct {
 	WorkspaceID   string
 	RemoteRoot    string
 	LocalRoot     string
 	StateFile     string
+	StateDir      string
+	MountKind     string
+	ValidateState bool
 	EventProvider string
 	Scopes        []string
 	WebSocket     *bool
 	RootCtx       context.Context
 	Logger        Logger
 	Mode          string
+	SyncMode      string
 	Interval      time.Duration
 	// FullPullEvery controls how often the incremental pull path forces a
 	// full tree pull as a "trust but verify" safety net against cloud-side
@@ -557,10 +757,20 @@ type SyncerOptions struct {
 	// sentinel (<=0): the bootstrap runs to completion as long as it keeps
 	// applying files within the idle window.
 	BootstrapTimeout time.Duration
-	// CursorTimeout bounds resolveLatestEventCursor with its OWN short
-	// deadline derived from RootCtx. 0 falls back to env
-	// RELAYFILE_CURSOR_TIMEOUT, default 20s.
+	// CursorTimeout bounds each resolveLatestEventCursor attempt with its OWN
+	// deadline derived from RootCtx. Timeout-class failures are retried with
+	// backoff before the caller decides whether a full pull is safe.
+	//
+	// 0 falls back to env RELAYFILE_CURSOR_TIMEOUT, default 60s.
 	CursorTimeout time.Duration
+	// ExportTimeout bounds each atomic full-tree export (ExportFiles) with its
+	// OWN deadline derived from the bootstrap ctx, kept strictly under
+	// bootstrapIdleTimeout. When the export does not finish in time the syncer
+	// falls through to the resumable, per-page pullRemoteFullTree instead of
+	// retrying a doomed one-shot export. 0 falls back to env
+	// RELAYFILE_EXPORT_TIMEOUT, default 45s; values >= bootstrapIdleTimeout are
+	// clamped below it so the fall-through always fires before the watchdog.
+	ExportTimeout time.Duration
 	// ForceFullReconcile, when non-nil and true, forces one full reconcile
 	// regardless of BootstrapComplete (escape hatch / clobber-remnant
 	// recovery). nil falls back to env RELAYFILE_FORCE_FULL_RECONCILE.
@@ -630,6 +840,15 @@ type noopLogger struct{}
 
 func (noopLogger) Printf(string, ...any) {}
 
+func normalizeSyncMode(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "write-only":
+		return "write-only"
+	default:
+		return "mirror"
+	}
+}
+
 func logMemoryStats(ctx context.Context, interval time.Duration, logger Logger) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -695,11 +914,16 @@ type Syncer struct {
 	rootCtx              context.Context
 	wsConn               *websocket.Conn
 	wsCancel             context.CancelFunc
+	wsNextAttempt        time.Time
+	wsReconnectFailures  int
+	wsConnecting         bool
+	wsGeneration         int64
 	bulkFlushThreshold   int
 	mode                 string
 	interval             time.Duration
 	fullPullEvery        int
 	cursorTimeout        time.Duration
+	exportTimeout        time.Duration
 	bootstrapTimeout     time.Duration
 	bootstrapIdleTimeout time.Duration
 	forceFullReconcile   bool
@@ -707,7 +931,9 @@ type Syncer struct {
 	oversizedLogged      map[string]struct{}
 	lazyRepos            bool
 	lowMemory            bool
+	writeOnly            bool
 	layoutRegistrar      ProviderLayoutRegistrar
+	githubWorkingTree    *githubWorkingTreeMount
 	closeScheduler       *CloseScheduler
 	rollingCoalescer     *RollingDigestCoalescer
 	circuit              *CloudErrorCircuit
@@ -736,11 +962,12 @@ type mountState struct {
 	// are additive/omitempty: legacy state files load with zero values
 	// (BootstrapComplete=false), which self-heals by forcing a full
 	// reconcile on the next cycle.
-	BootstrapComplete    bool   `json:"bootstrapComplete,omitempty"`
-	BootstrapCursor      string `json:"bootstrapCursor,omitempty"`
-	BootstrapFilesSynced int    `json:"bootstrapFilesSynced,omitempty"`
-	BootstrapFilesTotal  int    `json:"bootstrapFilesTotal,omitempty"`
-	BootstrapStartedAt   string `json:"bootstrapStartedAt,omitempty"`
+	BootstrapComplete        bool   `json:"bootstrapComplete,omitempty"`
+	BootstrapCursor          string `json:"bootstrapCursor,omitempty"`
+	BootstrapFilesSynced     int    `json:"bootstrapFilesSynced,omitempty"`
+	BootstrapFilesTotal      int    `json:"bootstrapFilesTotal,omitempty"`
+	BootstrapStartedAt       string `json:"bootstrapStartedAt,omitempty"`
+	GithubWorkingTreeHeadSHA string `json:"githubWorkingTreeHeadSha,omitempty"`
 }
 
 type incrementalCheckpoint struct {
@@ -784,6 +1011,14 @@ type trackedFile struct {
 	ReadOnly    bool   `json:"readonly,omitempty"`
 }
 
+type githubWorkingTreeMount struct {
+	Owner        string
+	Repo         string
+	RepoRoot     string
+	ContentsRoot string
+	HeadSHA      string
+}
+
 type localSnapshot struct {
 	RawContent    []byte
 	WireContent   string
@@ -821,6 +1056,7 @@ type publicState struct {
 	RemoteRoot                string                     `json:"remoteRoot"`
 	LocalRoot                 string                     `json:"localRoot"`
 	Mode                      string                     `json:"mode"`
+	SyncMode                  string                     `json:"syncMode,omitempty"`
 	IntervalMs                int64                      `json:"intervalMs"`
 	LastReconcileAt           string                     `json:"lastReconcileAt,omitempty"`
 	LastSuccessfulReconcileAt string                     `json:"lastSuccessfulReconcileAt,omitempty"`
@@ -899,10 +1135,23 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 	if eventProvider == "" {
 		eventProvider = inferProviderFromRoot(remoteRoot)
 	}
-	stateFile := strings.TrimSpace(opts.StateFile)
-	if stateFile == "" {
-		stateFile = filepath.Join(localRoot, ".relayfile-mount-state.json")
+	stateFileOpt := opts.StateFile
+	if strings.TrimSpace(stateFileOpt) == "" && strings.TrimSpace(opts.StateDir) == "" && !opts.ValidateState {
+		stateFileOpt = filepath.Join(localRoot, LegacyMountStateFileName)
 	}
+	statePath, err := ResolveMountStatePath(MountStatePathOptions{
+		WorkspaceID:     workspace,
+		RemoteRoot:      remoteRoot,
+		LocalRoot:       localRoot,
+		StateFile:       stateFileOpt,
+		StateDir:        opts.StateDir,
+		MountKind:       opts.MountKind,
+		ValidateOutside: opts.ValidateState,
+	})
+	if err != nil {
+		return nil, err
+	}
+	stateFile := statePath.StateFile
 	publicStatePath := filepath.Join(localRoot, ".relay", "state.json")
 	conflictsDir := filepath.Join(localRoot, ".relay", "conflicts")
 	resolvedConflictsDir := filepath.Join(conflictsDir, "resolved")
@@ -927,6 +1176,15 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 	}
 	if err := os.MkdirAll(deadLetterDir, 0o755); err != nil {
 		return nil, err
+	}
+	if opts.ValidateState && !statePath.Override {
+		if moved, err := QuarantineLegacyMountState(localRoot, statePath.StateDir); err != nil {
+			if opts.Logger != nil {
+				opts.Logger.Printf("warning: failed to quarantine legacy private mount state: %v", err)
+			}
+		} else if len(moved) > 0 && opts.Logger != nil {
+			opts.Logger.Printf("quarantined %d legacy private mount state file(s) outside mounted tree", len(moved))
+		}
 	}
 	websocketEnabled := true
 	if opts.WebSocket != nil {
@@ -957,6 +1215,31 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 	bootstrapIdleTimeout := resolveDurationEnv(0, "RELAYFILE_BOOTSTRAP_IDLE_TIMEOUT", defaultBootstrapIdleTimeout, opts.Logger)
 	if bootstrapIdleTimeout <= 0 {
 		bootstrapIdleTimeout = defaultBootstrapIdleTimeout
+	}
+	exportTimeout := resolveDurationEnv(opts.ExportTimeout, "RELAYFILE_EXPORT_TIMEOUT", defaultExportTimeout, opts.Logger)
+	if exportTimeout <= 0 {
+		exportTimeout = defaultExportTimeout
+	}
+	// The export's own deadline MUST elapse before the bootstrap context can
+	// be canceled so a slow export yields to the resumable tree pull while the
+	// bootstrap ctx is still alive. Clamp to a fraction of the active bootstrap
+	// window so misconfiguration can't let the export outlive either the
+	// no-progress watchdog or a hard bootstrap cap (a positive
+	// RELAYFILE_BOOTSTRAP_TIMEOUT would otherwise cancel the parent ctx before
+	// the export sub-deadline, defeating the same-cycle tree fall-through and
+	// re-creating the #1499/#1516 stall loop).
+	maxExportTimeout := bootstrapIdleTimeout * 3 / 4
+	if bootstrapTimeout > 0 {
+		hardCapMax := bootstrapTimeout * 3 / 4
+		if maxExportTimeout <= 0 || hardCapMax < maxExportTimeout {
+			maxExportTimeout = hardCapMax
+		}
+	}
+	if maxExportTimeout > 0 && exportTimeout > maxExportTimeout {
+		if opts.Logger != nil {
+			opts.Logger.Printf("clamping exportTimeout from %s to %s (must stay strictly under the active bootstrap window — no-progress watchdog %s, hard cap %s — so the export yields to the resumable tree pull before the bootstrap ctx is canceled)", exportTimeout, maxExportTimeout, bootstrapIdleTimeout, bootstrapTimeout)
+		}
+		exportTimeout = maxExportTimeout
 	}
 	forceFullReconcile := false
 	if opts.ForceFullReconcile != nil {
@@ -1017,6 +1300,7 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 			Now:      opts.DigestNow,
 		}
 	}
+	githubWorkingTree := detectGithubWorkingTreeMount(remoteRoot)
 	return &Syncer{
 		client:               client,
 		workspace:            workspace,
@@ -1036,9 +1320,11 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 		denialLogPath:        filepath.Join(localRoot, ".relay", "permissions-denied.log"),
 		bulkFlushThreshold:   bulkFlushThreshold,
 		mode:                 strings.TrimSpace(opts.Mode),
+		writeOnly:            normalizeSyncMode(opts.SyncMode) == "write-only",
 		interval:             opts.Interval,
 		fullPullEvery:        fullPullEvery,
 		cursorTimeout:        cursorTimeout,
+		exportTimeout:        exportTimeout,
 		bootstrapTimeout:     bootstrapTimeout,
 		bootstrapIdleTimeout: bootstrapIdleTimeout,
 		forceFullReconcile:   forceFullReconcile,
@@ -1046,6 +1332,7 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 		lazyRepos:            lazyRepos,
 		lowMemory:            lowMemory,
 		layoutRegistrar:      opts.ProviderLayoutRegistrar,
+		githubWorkingTree:    githubWorkingTree,
 		closeScheduler:       closeScheduler,
 		rollingCoalescer:     rollingCoalescer,
 		circuit:              NewCloudErrorCircuit(),
@@ -1128,7 +1415,7 @@ func (s *Syncer) HandleLocalChange(ctx context.Context, relativePath string, op 
 		return err
 	}
 
-	remotePath := normalizeRemotePath(filepath.Join(s.remoteRoot, filepath.FromSlash(relativePath)))
+	remotePath := s.localRelativeToRemotePath(relativePath)
 	if remotePath == "/" || !isUnderRemoteRoot(s.remoteRoot, remotePath) {
 		return nil
 	}
@@ -1296,7 +1583,7 @@ func (s *Syncer) flushPendingBulkWrites(ctx context.Context, pending []pendingBu
 		s.logf("writeback flush refused: cloud-error circuit breaker is open; %d file(s) remain pending", len(pending))
 		return nil
 	}
-	for _, chunk := range chunkPendingBulkWrites(pending, maxWritebackBatchBytes()) {
+	for _, chunk := range chunkPendingBulkWrites(s.workspace, pending, maxWritebackBatchBytes()) {
 		if err := s.flushPendingBulkWriteChunk(ctx, chunk, conflicted); err != nil {
 			return err
 		}
@@ -1305,16 +1592,7 @@ func (s *Syncer) flushPendingBulkWrites(ctx context.Context, pending []pendingBu
 }
 
 func (s *Syncer) flushPendingBulkWriteChunk(ctx context.Context, pending []pendingBulkWrite, conflicted map[string]struct{}) error {
-	files := make([]BulkWriteFile, 0, len(pending))
-	for _, pendingWrite := range pending {
-		files = append(files, BulkWriteFile{
-			Path:        pendingWrite.remotePath,
-			ContentType: pendingWrite.snapshot.ContentType,
-			Content:     pendingWrite.snapshot.WireContent,
-			Encoding:    pendingWrite.snapshot.Encoding,
-		})
-	}
-
+	files := bulkWriteFilesForPending(s.workspace, pending)
 	response, err := s.client.WriteFilesBulk(ctx, s.workspace, files)
 	if err != nil {
 		s.recordCloudFailure(err)
@@ -1356,20 +1634,36 @@ func (s *Syncer) flushPendingBulkWriteChunk(ctx context.Context, pending []pendi
 	return firstErr
 }
 
-func bulkWriteFilesForPending(pending []pendingBulkWrite) []BulkWriteFile {
+func bulkWriteFilesForPending(workspaceID string, pending []pendingBulkWrite) []BulkWriteFile {
 	files := make([]BulkWriteFile, 0, len(pending))
 	for _, pendingWrite := range pending {
 		files = append(files, BulkWriteFile{
-			Path:        pendingWrite.remotePath,
-			ContentType: pendingWrite.snapshot.ContentType,
-			Content:     pendingWrite.snapshot.WireContent,
-			Encoding:    pendingWrite.snapshot.Encoding,
+			Path:            pendingWrite.remotePath,
+			ContentType:     pendingWrite.snapshot.ContentType,
+			Content:         pendingWrite.snapshot.WireContent,
+			Encoding:        pendingWrite.snapshot.Encoding,
+			ContentIdentity: mountWritebackCreateDraftContentIdentity(workspaceID, pendingWrite.remotePath, pendingWrite.snapshot.Hash),
 		})
 	}
 	return files
 }
 
-func chunkPendingBulkWrites(pending []pendingBulkWrite, maxBytes int64) [][]pendingBulkWrite {
+func mountWritebackCreateDraftContentIdentity(workspaceID, normalizedRemotePath, contentHash string) *ContentIdentity {
+	if !relayfile.IsDraftFilePath(normalizedRemotePath) {
+		return nil
+	}
+	return newMountWritebackCreateDraftContentIdentity(workspaceID, normalizedRemotePath, contentHash)
+}
+
+func newMountWritebackCreateDraftContentIdentity(workspaceID, normalizedRemotePath, contentHash string) *ContentIdentity {
+	return &ContentIdentity{
+		Kind:       mountWritebackCreateDraftContentIdentityKind,
+		Key:        fmt.Sprintf("%s:%s:%s", workspaceID, normalizedRemotePath, contentHash),
+		TTLSeconds: mountWritebackCreateDraftContentIdentityTTLSeconds,
+	}
+}
+
+func chunkPendingBulkWrites(workspaceID string, pending []pendingBulkWrite, maxBytes int64) [][]pendingBulkWrite {
 	if len(pending) == 0 {
 		return nil
 	}
@@ -1380,7 +1674,7 @@ func chunkPendingBulkWrites(pending []pendingBulkWrite, maxBytes int64) [][]pend
 	current := make([]pendingBulkWrite, 0, len(pending))
 	for _, item := range pending {
 		candidate := append(append([]pendingBulkWrite(nil), current...), item)
-		if len(current) > 0 && bulkWriteRequestSize(bulkWriteFilesForPending(candidate)) > maxBytes {
+		if len(current) > 0 && bulkWriteRequestSize(bulkWriteFilesForPending(workspaceID, candidate)) > maxBytes {
 			chunks = append(chunks, append([]pendingBulkWrite(nil), current...))
 			current = current[:0]
 		}
@@ -1763,13 +2057,10 @@ func (s *Syncer) sync(ctx context.Context, forcePoll bool) error {
 		return err
 	}
 
-	// Check if websocket connection is needed while holding the lock,
-	// then release before connecting to avoid deadlock with readWebSocketLoop.
-	needsWS := s.websocket && s.wsConn == nil
 	s.mu.Unlock()
 
-	if needsWS {
-		if err := s.connectWebSocket(ctx); err != nil {
+	if !s.writeOnly {
+		if err := s.MaintainWebSocket(ctx); err != nil {
 			s.logf("websocket unavailable; using polling sync: %v", err)
 		}
 	}
@@ -1791,7 +2082,11 @@ func (s *Syncer) sync(ctx context.Context, forcePoll bool) error {
 
 	conflicted := map[string]struct{}{}
 	didPoll := false
-	if !s.state.BootstrapComplete || s.forceFullReconcile {
+	if s.writeOnly {
+		if !s.state.BootstrapComplete {
+			s.markBootstrapComplete()
+		}
+	} else if !s.state.BootstrapComplete || s.forceFullReconcile {
 		if err := s.pullRemote(ctx, conflicted); err != nil {
 			s.markSyncError(err)
 			_ = s.saveState()
@@ -1809,7 +2104,7 @@ func (s *Syncer) sync(ctx context.Context, forcePoll bool) error {
 	}
 
 	shouldPoll := !didPoll && (forcePoll || !s.bootstrapped || s.wsConn == nil)
-	if shouldPoll {
+	if shouldPoll && !s.writeOnly {
 		if err := s.pullRemote(ctx, conflicted); err != nil {
 			s.markSyncError(err)
 			_ = s.saveState()
@@ -1854,35 +2149,53 @@ func (s *Syncer) runRollingDigestJobsLocked(ctx context.Context) error {
 
 func (s *Syncer) connectWebSocket(ctx context.Context) error {
 	s.mu.Lock()
-	if !s.websocket || s.wsConn != nil {
+	if !s.websocketConnectDueLocked(time.Now()) {
 		s.mu.Unlock()
 		return nil
 	}
+	s.wsConnecting = true
+	generation := s.wsGeneration
 	s.mu.Unlock()
 
 	httpClient, ok := s.client.(*HTTPClient)
 	if !ok {
+		s.finishWebSocketConnectFailure(generation, 0)
 		return nil
 	}
 
 	wsURL, err := httpClient.websocketURL(s.workspace)
 	if err != nil {
+		s.finishWebSocketConnectFailure(generation, 0)
 		return err
 	}
-	conn, _, err := websocket.Dial(ctx, wsURL, &websocket.DialOptions{
+	conn, response, err := websocket.Dial(ctx, wsURL, &websocket.DialOptions{
 		HTTPHeader: http.Header{
 			"Authorization": []string{"Bearer " + httpClient.Token()},
 		},
 	})
 	if err != nil {
-		return err
+		retryAfter := retryAfterFromResponse(response)
+		s.finishWebSocketConnectFailure(generation, retryAfter)
+		return webSocketDialError{err: err, retryAfter: retryAfter}
 	}
 
 	readCtx, cancel := context.WithCancel(s.rootCtx)
 
 	s.mu.Lock()
+	if s.wsGeneration != generation || s.wsConn != nil {
+		if s.wsGeneration == generation {
+			s.wsConnecting = false
+		}
+		s.mu.Unlock()
+		cancel()
+		_ = conn.Close(websocket.StatusNormalClosure, "")
+		return nil
+	}
+	s.wsConnecting = false
 	s.wsConn = conn
 	s.wsCancel = cancel
+	s.wsNextAttempt = time.Time{}
+	s.wsReconnectFailures = 0
 	s.mu.Unlock()
 
 	go s.readWebSocketLoop(readCtx, conn)
@@ -1994,6 +2307,7 @@ func (s *Syncer) handleWebSocketDisconnect(conn *websocket.Conn) {
 		s.wsCancel = nil
 	}
 	s.wsConn = nil
+	s.scheduleWebSocketReconnectLocked(0)
 }
 
 func (s *Syncer) ResetWebSocket() {
@@ -2002,6 +2316,10 @@ func (s *Syncer) ResetWebSocket() {
 	cancel := s.wsCancel
 	s.wsConn = nil
 	s.wsCancel = nil
+	s.wsNextAttempt = time.Time{}
+	s.wsReconnectFailures = 0
+	s.wsConnecting = false
+	s.wsGeneration++
 	s.mu.Unlock()
 	if cancel != nil {
 		cancel()
@@ -2009,6 +2327,77 @@ func (s *Syncer) ResetWebSocket() {
 	if conn != nil {
 		_ = conn.Close(websocket.StatusNormalClosure, "")
 	}
+}
+
+func (s *Syncer) MaintainWebSocket(ctx context.Context) error {
+	s.mu.Lock()
+	needsWS := s.websocketConnectDueLocked(time.Now())
+	s.mu.Unlock()
+	if !needsWS {
+		return nil
+	}
+	if err := s.connectWebSocket(ctx); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Syncer) websocketConnectDueLocked(now time.Time) bool {
+	if !s.websocket || s.wsConn != nil || s.wsConnecting {
+		return false
+	}
+	return s.wsNextAttempt.IsZero() || !now.Before(s.wsNextAttempt)
+}
+
+func (s *Syncer) scheduleWebSocketReconnectLocked(retryAfter time.Duration) {
+	if s.wsConn != nil {
+		return
+	}
+	s.wsReconnectFailures++
+	delay := retryAfter
+	if delay <= 0 {
+		delay = websocketReconnectDelay(s.wsReconnectFailures)
+	}
+	if delay > defaultWebSocketReconnectMax {
+		delay = defaultWebSocketReconnectMax
+	}
+	s.wsNextAttempt = time.Now().Add(delay)
+}
+
+func (s *Syncer) finishWebSocketConnectFailure(
+	generation int64,
+	retryAfter time.Duration,
+) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.wsGeneration != generation {
+		return
+	}
+	s.wsConnecting = false
+	s.scheduleWebSocketReconnectLocked(retryAfter)
+}
+
+func websocketReconnectDelay(failures int) time.Duration {
+	if failures <= 0 {
+		failures = 1
+	}
+	delay := defaultWebSocketReconnectBase
+	for i := 1; i < failures; i++ {
+		delay *= 2
+		if delay >= defaultWebSocketReconnectMax {
+			delay = defaultWebSocketReconnectMax
+			break
+		}
+	}
+	jitter := time.Duration(time.Now().UnixNano()%int64(defaultWebSocketReconnectJitter*2)) - defaultWebSocketReconnectJitter
+	delay += jitter
+	if delay < defaultWebSocketReconnectBase {
+		return defaultWebSocketReconnectBase
+	}
+	if delay > defaultWebSocketReconnectMax {
+		return defaultWebSocketReconnectMax
+	}
+	return delay
 }
 
 func (s *Syncer) HTTPClient() (*HTTPClient, bool) {
@@ -2244,6 +2633,15 @@ func (s *Syncer) pullRemote(ctx context.Context, conflicted map[string]struct{})
 		if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusNotFound {
 			// No events feed on this backend — fall through to the
 			// full-pull bootstrap path. (Pre-fix behaviour.)
+		} else if isCursorResolutionRetryable(err) {
+			// A completed prior bootstrap with tracked files is reusable
+			// state. Under load, falling through from a transient cursor
+			// timeout to a full export recreates the production stall loop:
+			// full export exceeds the bootstrap watchdog, the cursor stays
+			// empty, and the next reuse repeats the same expensive path.
+			// Surface the cycle failure instead; the daemon will retry the
+			// cheap cursor path next reconcile without destroying progress.
+			return err
 		} else {
 			s.logf("restart fast-path: cursor resolution failed (%v); falling through to full pull", err)
 		}
@@ -2264,6 +2662,9 @@ func (s *Syncer) pullRemote(ctx context.Context, conflicted map[string]struct{})
 	if s.wsConn != nil {
 		return nil
 	}
+	if strings.TrimSpace(s.state.EventsCursor) != "" {
+		return nil
+	}
 	cursor, err := s.resolveLatestEventCursor(bctx)
 	if err != nil {
 		var httpErr *HTTPError
@@ -2277,6 +2678,12 @@ func (s *Syncer) pullRemote(ctx context.Context, conflicted map[string]struct{})
 }
 
 func (s *Syncer) pullRemoteFull(ctx context.Context, conflicted map[string]struct{}, prog bootstrapProgress) error {
+	if client, ok := s.client.(githubWorkingTreeTarClient); ok {
+		used, err := s.pullRemoteFullGithubTarSeed(ctx, client, conflicted, prog)
+		if used {
+			return err
+		}
+	}
 	if client, ok := s.client.(exportSnapshotClient); ok {
 		used, err := s.pullRemoteFullExport(ctx, client, conflicted, prog)
 		if used {
@@ -2286,10 +2693,130 @@ func (s *Syncer) pullRemoteFull(ctx context.Context, conflicted map[string]struc
 	return s.pullRemoteFullTree(ctx, conflicted, prog)
 }
 
-func (s *Syncer) pullRemoteFullExport(ctx context.Context, client exportSnapshotClient, conflicted map[string]struct{}, prog bootstrapProgress) (bool, error) {
-	files, err := client.ExportFiles(ctx, s.workspace, s.remoteRoot)
+type githubCloneManifest struct {
+	HeadSHA       string
+	DefaultBranch string
+	EventsCursor  string
+	EventID       string
+	Path          string
+}
+
+func (s *Syncer) pullRemoteFullGithubTarSeed(ctx context.Context, client githubWorkingTreeTarClient, conflicted map[string]struct{}, prog bootstrapProgress) (bool, error) {
+	if s.githubWorkingTree == nil || s.lazyRepos {
+		return false, nil
+	}
+	manifest, err := s.readGithubCloneManifest(ctx)
 	if err != nil {
 		if exportSnapshotUnsupported(err) {
+			return false, nil
+		}
+		s.logf("github tar seed unavailable: read clone manifest failed: %v", err)
+		return false, nil
+	}
+	headSHA := strings.TrimSpace(manifest.HeadSHA)
+	if headSHA == "" {
+		return false, nil
+	}
+	s.githubWorkingTree.HeadSHA = headSHA
+	s.state.GithubWorkingTreeHeadSHA = headSHA
+
+	cursor := strings.TrimSpace(manifest.EventsCursor)
+	if cursor == "" {
+		cursor = strings.TrimSpace(manifest.EventID)
+	}
+	if cursor == "" {
+		cursor, err = s.resolveGithubCloneManifestCursor(ctx, manifest)
+		if err != nil {
+			s.logf("github tar seed unavailable: resolve clone manifest cursor failed: %v", err)
+			return false, nil
+		}
+	}
+	if cursor == "" {
+		s.logf("github tar seed unavailable: clone manifest has no event cursor")
+		return false, nil
+	}
+
+	tree, maxObservedRevision, err := s.githubWorkingTreeSnapshot(ctx, prog)
+	if err != nil {
+		s.logf("github tar seed unavailable: tree verification snapshot failed: %v", err)
+		return false, nil
+	}
+	if len(tree) == 0 {
+		return false, nil
+	}
+
+	tarBody, err := client.ExportGithubWorkingTreeTar(ctx, s.workspace, GithubWorkingTreeSeedRequest{
+		Owner:      s.githubWorkingTree.Owner,
+		Repo:       s.githubWorkingTree.Repo,
+		PathPrefix: s.githubWorkingTree.ContentsRoot,
+		HeadSHA:    headSHA,
+		Gzip:       false,
+	})
+	if err != nil {
+		if exportSnapshotUnsupported(err) {
+			return false, nil
+		}
+		s.recordCloudFailure(err)
+		return true, err
+	}
+	defer tarBody.Body.Close()
+	s.recordCloudSuccess()
+
+	remotePaths, err := s.applyGithubWorkingTreeTarSeed(tarBody, tree, conflicted, prog)
+	if err != nil {
+		return true, err
+	}
+	if len(remotePaths) != len(tree) {
+		return true, fmt.Errorf("github tar seed verification failed: tar contained %d verified files, tree expected %d", len(remotePaths), len(tree))
+	}
+	if s.snapshotDeleteUnsafe(len(remotePaths)) {
+		s.logf("skipping snapshot delete pass (github tar seed): fresh remote tree has %d files but %d are tracked locally (suspected partial/empty cloud listing); preserving local state", len(remotePaths), len(s.state.Files))
+		s.markBootstrapComplete()
+		s.state.EventsCursor = cursor
+		return true, nil
+	}
+	if err := s.applyRemoteSnapshotDeletesRev(remotePaths, conflicted, maxObservedRevision); err != nil {
+		return true, err
+	}
+	s.markBootstrapComplete()
+	s.state.EventsCursor = cursor
+	s.state.IncrementalCheckpoint = nil
+	s.state.IncrementalBacklogDraining = false
+	s.logf("github tar seed complete for %s/%s at %s: %d files, events cursor %q", s.githubWorkingTree.Owner, s.githubWorkingTree.Repo, headSHA, len(remotePaths), cursor)
+	return true, nil
+}
+
+func (s *Syncer) pullRemoteFullExport(ctx context.Context, client exportSnapshotClient, conflicted map[string]struct{}, prog bootstrapProgress) (bool, error) {
+	// Bound the atomic export with its OWN deadline, strictly under the
+	// no-progress bootstrap watchdog. ExportFiles is a single HTTP call that
+	// reports NO incremental progress until the whole body returns, so on a
+	// large/slow/429-throttled workspace it can consume the entire watchdog
+	// window and be cancelled with zero files applied — and, being a one-shot
+	// mirror with no resume cursor, every retry restarts from scratch and is
+	// cancelled again (the #1499/#1516 "non-empty without completed bootstrap
+	// -> forcing full reconcile" loop). The sub-deadline makes a doomed export
+	// fail EARLY, while the parent bootstrap ctx is still alive, so we can fall
+	// through to the resumable, per-page pullRemoteFullTree.
+	exportCtx := ctx
+	if s.exportTimeout > 0 {
+		var cancel context.CancelFunc
+		exportCtx, cancel = context.WithTimeout(ctx, s.exportTimeout)
+		defer cancel()
+	}
+	files, err := client.ExportFiles(exportCtx, s.workspace, s.remoteRoot)
+	if err != nil {
+		if exportSnapshotUnsupported(err) {
+			return false, nil
+		}
+		// The export's own sub-deadline elapsed (or it was otherwise
+		// cancelled) while the PARENT bootstrap ctx is still alive: the atomic
+		// export is too slow/contended for this workspace. Yield to the
+		// resumable tree pull rather than retrying a doomed full export. If the
+		// parent ctx itself is done (the outer watchdog fired), propagate — the
+		// next cycle's shorter export sub-deadline fires before the watchdog
+		// and converges via the tree path.
+		if ctx.Err() == nil && exportCtx.Err() != nil {
+			s.logf("export snapshot did not complete within %s; falling back to resumable tree pull", s.exportTimeout)
 			return false, nil
 		}
 		s.recordCloudFailure(err)
@@ -2332,11 +2859,18 @@ func (s *Syncer) pullRemoteFullExport(ctx context.Context, client exportSnapshot
 	// healthy cycle will reconcile correctly. Mirrors the safeguard in
 	// pullRemoteFullTree.
 	if s.snapshotDeleteUnsafe(len(remotePaths)) {
-		s.logf("skipping snapshot delete pass (export): fresh remote export has %d files but %d are tracked locally (suspected partial/empty cloud export); preserving local state", len(remotePaths), len(s.state.Files))
-		// Export is atomic — a full snapshot was applied even if the
-		// delete pass is deferred for safety. Bootstrap is complete.
-		s.markBootstrapComplete()
-		return true, nil
+		// A 0/drastically-shrunk export for a workspace we KNOW has tracked
+		// files is NOT an authoritative mirror (the production empty-200
+		// export, #1499/#1516). Do NOT markBootstrapComplete here: that would
+		// lock in the stale/empty snapshot and let the restart fast-path skip
+		// recovery forever. Fall through to pullRemoteFullTree, whose paginated
+		// ListTree re-reads the real content via a DIFFERENT cloud code path
+		// and only marks bootstrap complete on a full traversal. If the tree
+		// listing is ALSO empty, its own circuit breaker preserves local state
+		// without marking complete, so the next cycle retries instead of
+		// converging on an empty mirror.
+		s.logf("export returned %d files but %d are tracked locally (suspected partial/empty cloud export); falling back to tree pull for an authoritative listing", len(remotePaths), len(s.state.Files))
+		return false, nil
 	}
 
 	if err := s.applyRemoteSnapshotDeletesRev(remotePaths, conflicted, maxObservedRevision); err != nil {
@@ -2346,6 +2880,249 @@ func (s *Syncer) pullRemoteFullExport(ctx context.Context, client exportSnapshot
 	// one-shot mirror with no resume cursor.
 	s.markBootstrapComplete()
 	return true, nil
+}
+
+func (s *Syncer) readGithubCloneManifest(ctx context.Context) (githubCloneManifest, error) {
+	if s.githubWorkingTree == nil {
+		return githubCloneManifest{}, fmt.Errorf("not a github working-tree mount")
+	}
+	paths := []string{s.githubWorkingTree.cloneSentinelPath(), s.githubWorkingTree.legacyMetaPath()}
+	var lastErr error
+	for _, manifestPath := range paths {
+		file, err := s.client.ReadFile(ctx, s.workspace, manifestPath)
+		if err != nil {
+			var httpErr *HTTPError
+			if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusNotFound {
+				lastErr = err
+				continue
+			}
+			return githubCloneManifest{}, err
+		}
+		payload, err := decodeRemoteFileContent(file)
+		if err != nil {
+			return githubCloneManifest{}, err
+		}
+		manifest, ok := parseGithubCloneManifest(payload)
+		if !ok {
+			lastErr = fmt.Errorf("clone manifest %s missing headSha", manifestPath)
+			continue
+		}
+		manifest.Path = manifestPath
+		return manifest, nil
+	}
+	if lastErr != nil {
+		return githubCloneManifest{}, lastErr
+	}
+	return githubCloneManifest{}, &HTTPError{StatusCode: http.StatusNotFound, Code: "not_found", Message: "github clone manifest not found"}
+}
+
+func parseGithubCloneManifest(payload []byte) (githubCloneManifest, bool) {
+	var raw map[string]any
+	if err := json.Unmarshal(payload, &raw); err != nil {
+		return githubCloneManifest{}, false
+	}
+	read := func(keys ...string) string {
+		for _, key := range keys {
+			if value, ok := raw[key].(string); ok && strings.TrimSpace(value) != "" {
+				return strings.TrimSpace(value)
+			}
+		}
+		return ""
+	}
+	manifest := githubCloneManifest{
+		HeadSHA:       read("headSha", "headSHA", "head_sha"),
+		DefaultBranch: read("defaultBranch", "default_branch"),
+		EventsCursor:  read("eventsCursor", "events_cursor", "eventCursor", "event_cursor", "fsEventsCursor", "fs_events_cursor", "cursor"),
+		EventID:       read("eventId", "eventID", "event_id"),
+	}
+	return manifest, manifest.HeadSHA != ""
+}
+
+func (s *Syncer) resolveGithubCloneManifestCursor(ctx context.Context, manifest githubCloneManifest) (string, error) {
+	manifestPath := normalizeRemotePath(manifest.Path)
+	if manifestPath == "/" {
+		return "", nil
+	}
+	cursor := ""
+	latest := ""
+	for {
+		feed, err := s.client.ListEvents(ctx, s.workspace, s.eventProvider, cursor, 200)
+		if err != nil {
+			return "", err
+		}
+		for _, event := range feed.Events {
+			if normalizeRemotePath(event.Path) == manifestPath && strings.TrimSpace(event.EventID) != "" {
+				latest = strings.TrimSpace(event.EventID)
+			}
+		}
+		if feed.NextCursor == nil || strings.TrimSpace(*feed.NextCursor) == "" {
+			break
+		}
+		cursor = strings.TrimSpace(*feed.NextCursor)
+	}
+	return latest, nil
+}
+
+type githubTreeFile struct {
+	RemotePath  string
+	Revision    string
+	ContentHash string
+	Encoding    string
+}
+
+func (s *Syncer) githubWorkingTreeSnapshot(ctx context.Context, prog bootstrapProgress) (map[string]githubTreeFile, string, error) {
+	files := map[string]githubTreeFile{}
+	cursor := ""
+	maxObservedRevision := ""
+	for {
+		page, err := s.client.ListTree(ctx, s.workspace, s.githubWorkingTree.ContentsRoot, 200, cursor)
+		if err != nil {
+			return nil, "", err
+		}
+		s.recordCloudSuccess()
+		prog.touch()
+		for _, entry := range page.Entries {
+			if entry.Type != "file" {
+				continue
+			}
+			if revisionAdvances(maxObservedRevision, entry.Revision) {
+				maxObservedRevision = entry.Revision
+			}
+			if headSHA := strings.TrimSpace(s.githubWorkingTree.HeadSHA); headSHA != "" && !strings.HasSuffix(normalizeRemotePath(entry.Path), "@"+headSHA+".json") {
+				continue
+			}
+			rel, ok := s.githubWorkingTree.remotePathToWorkingTreeRel(entry.Path)
+			if !ok {
+				continue
+			}
+			contentHash := strings.TrimSpace(entry.ContentHash)
+			if contentHash == "" {
+				return nil, "", fmt.Errorf("tree entry %s missing contentHash", entry.Path)
+			}
+			files[rel] = githubTreeFile{
+				RemotePath:  normalizeRemotePath(entry.Path),
+				Revision:    entry.Revision,
+				ContentHash: contentHash,
+				Encoding:    normalizeEncoding(entry.Encoding),
+			}
+		}
+		if page.NextCursor == nil || strings.TrimSpace(*page.NextCursor) == "" {
+			break
+		}
+		cursor = strings.TrimSpace(*page.NextCursor)
+	}
+	return files, maxObservedRevision, nil
+}
+
+func (s *Syncer) applyGithubWorkingTreeTarSeed(tarBody GithubWorkingTreeTar, tree map[string]githubTreeFile, conflicted map[string]struct{}, prog bootstrapProgress) (map[string]struct{}, error) {
+	reader := io.Reader(tarBody.Body)
+	buffered := bufio.NewReader(reader)
+	if strings.Contains(strings.ToLower(tarBody.ContentType), "gzip") {
+		gz, err := gzip.NewReader(buffered)
+		if err != nil {
+			return nil, err
+		}
+		defer gz.Close()
+		reader = gz
+	} else {
+		reader = buffered
+	}
+	tr := tar.NewReader(reader)
+	remotePaths := map[string]struct{}{}
+	seen := map[string]struct{}{}
+	for {
+		header, err := tr.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		if header == nil || header.FileInfo().IsDir() {
+			continue
+		}
+		if header.Typeflag != tar.TypeReg && header.Typeflag != tar.TypeRegA {
+			continue
+		}
+		rel := filepath.ToSlash(filepath.Clean(strings.TrimSpace(header.Name)))
+		rel = strings.TrimPrefix(rel, "/")
+		if rel == "" || rel == "." || strings.HasPrefix(rel, "../") || strings.Contains(rel, "/../") {
+			return nil, fmt.Errorf("github tar seed contains unsafe path %q", header.Name)
+		}
+		if _, ok := seen[rel]; ok {
+			return nil, fmt.Errorf("github tar seed contains duplicate file %s", rel)
+		}
+		seen[rel] = struct{}{}
+		meta, ok := tree[rel]
+		if !ok {
+			return nil, fmt.Errorf("github tar seed contains unexpected file %s", rel)
+		}
+		if conflicted != nil {
+			if _, skip := conflicted[meta.RemotePath]; skip {
+				remotePaths[meta.RemotePath] = struct{}{}
+				continue
+			}
+		}
+		data, err := io.ReadAll(tr)
+		if err != nil {
+			return nil, err
+		}
+		hash := hashBytes(data)
+		if hash != meta.ContentHash {
+			return nil, fmt.Errorf("github tar seed contentHash mismatch for %s: tar=%s tree=%s", rel, hash, meta.ContentHash)
+		}
+		localPath, err := safeLocalPath(s.localRoot, rel)
+		if err != nil {
+			return nil, err
+		}
+		if err := s.assertNotMountRoot(localPath); err != nil {
+			return nil, err
+		}
+		tracked := s.state.Files[meta.RemotePath]
+		canWrite := s.canWritePath(meta.RemotePath)
+		if tracked.Dirty {
+			if err := s.applyLocalPermissions(localPath, canWrite); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return nil, err
+			}
+			tracked.ReadOnly = !canWrite
+			s.state.Files[meta.RemotePath] = tracked
+			remotePaths[meta.RemotePath] = struct{}{}
+			continue
+		}
+		if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+			return nil, err
+		}
+		shouldWrite := true
+		if current, err := os.ReadFile(localPath); err == nil && hashBytes(current) == hash {
+			shouldWrite = false
+		}
+		if shouldWrite {
+			if err := writeFileAtomic(localPath, data, 0o644); err != nil {
+				return nil, err
+			}
+		}
+		if err := s.applyLocalPermissions(localPath, canWrite); err != nil {
+			return nil, err
+		}
+		contentType := detectContentType(localPath)
+		s.state.Files[meta.RemotePath] = trackedFile{
+			Revision:    meta.Revision,
+			ContentType: contentType,
+			Encoding:    meta.Encoding,
+			Hash:        hash,
+			Dirty:       false,
+			Denied:      false,
+			ReadOnly:    !canWrite,
+		}
+		remotePaths[meta.RemotePath] = struct{}{}
+		prog.touch()
+	}
+	for rel, meta := range tree {
+		if _, ok := remotePaths[meta.RemotePath]; !ok {
+			return nil, fmt.Errorf("github tar seed missing tree file %s", rel)
+		}
+	}
+	return remotePaths, nil
 }
 
 func exportSnapshotUnsupported(err error) bool {
@@ -2365,6 +3142,17 @@ func exportSnapshotUnsupported(err error) bool {
 	// through to pullRemoteFullTree rather than retrying an export that can
 	// never fit.
 	if httpErr.StatusCode == http.StatusRequestEntityTooLarge {
+		return true
+	}
+	// HTTP 429 workspace_busy: the WorkspaceDO is persistently busy and doJSON
+	// has already exhausted its Retry-After backoff. Retrying the same atomic
+	// export keeps contending for the one overloaded invocation; fall through
+	// to pullRemoteFullTree, whose paginated ListTree + per-file reads are
+	// individually bounded, individually retried, and resume from the persisted
+	// cursor instead of restarting the whole export. Other 429 classes (for
+	// example global rate limits or queue pressure) are not export-specific and
+	// should remain visible to the caller after retries are exhausted.
+	if httpErr.StatusCode == http.StatusTooManyRequests && strings.EqualFold(httpErr.Code, "workspace_busy") {
 		return true
 	}
 	return httpErr.StatusCode == http.StatusBadRequest && strings.EqualFold(httpErr.Code, "bad_request")
@@ -2412,13 +3200,21 @@ func isUnderLazyGithubRepoSubtree(remoteRoot, remotePath string) bool {
 	if !isUnderRemoteRoot(remoteRoot, remotePath) {
 		return false
 	}
-	rel := strings.TrimPrefix(remotePath, remoteRoot)
-	rel = strings.TrimPrefix(rel, "/")
-	if rel == "" {
+	absolute := strings.TrimPrefix(remotePath, "/")
+	return isLazyGithubRepoSubtreePath(absolute)
+}
+
+func isLazyGithubRepoSubtreePath(path string) bool {
+	if path == "" {
 		return false
 	}
-	segments := strings.Split(rel, "/")
-	return len(segments) >= 5 && segments[0] == "github" && segments[1] == "repos"
+	segments := strings.Split(path, "/")
+	for i := 0; i+1 < len(segments); i++ {
+		if segments[i] == "github" && segments[i+1] == "repos" {
+			return len(segments[i:]) >= 5
+		}
+	}
+	return false
 }
 
 func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]struct{}, prog bootstrapProgress) error {
@@ -2593,7 +3389,7 @@ func (s *Syncer) trySkipBootstrapRead(remotePath string, entry TreeEntry) (bool,
 			return false, nil
 		}
 	}
-	localPath, err := remoteToLocalPath(s.localRoot, s.remoteRoot, remotePath)
+	localPath, err := s.remoteToLocalPath(remotePath)
 	if err != nil {
 		return false, nil
 	}
@@ -3405,7 +4201,7 @@ func (s *Syncer) trySkipIncrementalRead(remotePath string, event FilesystemEvent
 	if ok && (tracked.Dirty || tracked.Denied) {
 		return false, nil
 	}
-	localPath, err := remoteToLocalPath(s.localRoot, s.remoteRoot, remotePath)
+	localPath, err := s.remoteToLocalPath(remotePath)
 	if err != nil {
 		return false, nil
 	}
@@ -3453,12 +4249,42 @@ func (s *Syncer) markIncrementalCheckpoint(pageStartCursor, pageCursor, phase, r
 }
 
 func (s *Syncer) resolveLatestEventCursor(ctx context.Context) (string, error) {
-	// Derive an OWN short deadline from rootCtx so a slow/hanging events
-	// feed can never wedge an otherwise healthy cycle (and is independent
-	// of whatever inbound per-cycle/bootstrap ctx the caller passed). The
-	// signature/return contract is unchanged; the inbound ctx is honored
-	// only for cancellation via rootCtx propagation.
-	cctx, cancel := context.WithTimeout(s.rootCtx, s.cursorTimeout)
+	var lastErr error
+	attempts := defaultCursorResolutionAttempts
+	if attempts < 1 {
+		attempts = 1
+	}
+	for attempt := 0; attempt < attempts; attempt++ {
+		cursor, err := s.resolveLatestEventCursorOnce(ctx, s.cursorTimeout)
+		if err == nil {
+			return cursor, nil
+		}
+		lastErr = err
+		if !isCursorResolutionRetryable(err) || attempt == attempts-1 {
+			return "", err
+		}
+		delay := cursorResolutionRetryDelay(s.cursorTimeout, attempt)
+		s.logf("cursor resolution attempt %d/%d failed (%v); retrying in %s", attempt+1, attempts, err, delay)
+		if waitErr := waitWithContext(s.rootCtx, delay); waitErr != nil {
+			return "", waitErr
+		}
+	}
+	if lastErr != nil {
+		return "", lastErr
+	}
+	return "", nil
+}
+
+func (s *Syncer) resolveLatestEventCursorOnce(ctx context.Context, timeout time.Duration) (string, error) {
+	// Derive an OWN deadline from rootCtx so a slow/hanging events feed can
+	// never wedge an otherwise healthy cycle (and is independent of whatever
+	// inbound per-cycle/bootstrap ctx the caller passed). The signature/return
+	// contract is unchanged; the inbound ctx is observed only for cancellation
+	// before starting an attempt.
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	cctx, cancel := context.WithTimeout(s.rootCtx, timeout)
 	defer cancel()
 
 	// Preferred path (post cloud#927): /fs/events?direction=desc&limit=1
@@ -3497,6 +4323,38 @@ func (s *Syncer) resolveLatestEventCursor(ctx context.Context) (string, error) {
 	return latest, nil
 }
 
+func isCursorResolutionRetryable(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
+}
+
+func cursorResolutionRetryDelay(timeout time.Duration, attempt int) time.Duration {
+	if attempt < 0 {
+		attempt = 0
+	}
+	delay := defaultCursorRetryBaseDelay
+	for i := 0; i < attempt; i++ {
+		delay *= 2
+	}
+	maxDelay := 2 * time.Second
+	if timeout > 0 && timeout/10 < maxDelay {
+		maxDelay = timeout / 10
+	}
+	if maxDelay < time.Millisecond {
+		maxDelay = time.Millisecond
+	}
+	if delay > maxDelay {
+		return maxDelay
+	}
+	return delay
+}
+
 func (s *Syncer) applyRemoteFile(remotePath string, file RemoteFile, conflicted map[string]struct{}) error {
 	if conflicted != nil {
 		if _, skip := conflicted[remotePath]; skip {
@@ -3512,7 +4370,7 @@ func (s *Syncer) applyRemoteFile(remotePath string, file RemoteFile, conflicted 
 	tracked.ReadOnly = !canWrite
 	tracked.Denied = false
 	if tracked.Dirty {
-		localPath, err := remoteToLocalPath(s.localRoot, s.remoteRoot, remotePath)
+		localPath, err := s.remoteToLocalPath(remotePath)
 		if err != nil {
 			return nil
 		}
@@ -3526,7 +4384,7 @@ func (s *Syncer) applyRemoteFile(remotePath string, file RemoteFile, conflicted 
 		s.state.Files[remotePath] = tracked
 		return nil
 	}
-	localPath, err := remoteToLocalPath(s.localRoot, s.remoteRoot, remotePath)
+	localPath, err := s.remoteToLocalPath(remotePath)
 	if err != nil {
 		return nil
 	}
@@ -3597,12 +4455,12 @@ func (s *Syncer) canWritePath(filePath string) bool {
 }
 
 func scopeGrantsWrite(scope, filePath string) bool {
-	scope = strings.ToLower(strings.TrimSpace(scope))
+	scope = strings.TrimSpace(scope)
 	if scope == "" {
 		return false
 	}
 	// Short-form scope without plane prefix.
-	if scope == "fs:write" || scope == "fs:manage" {
+	if strings.EqualFold(scope, "fs:write") || strings.EqualFold(scope, "fs:manage") {
 		return true
 	}
 
@@ -3611,9 +4469,9 @@ func scopeGrantsWrite(scope, filePath string) bool {
 		return false
 	}
 
-	plane := segments[0]
-	res := segments[1]
-	act := segments[2]
+	plane := strings.ToLower(strings.TrimSpace(segments[0]))
+	res := strings.ToLower(strings.TrimSpace(segments[1]))
+	act := strings.ToLower(strings.TrimSpace(segments[2]))
 
 	// Plane must be "relayfile" or wildcard.
 	if plane != "relayfile" && plane != "*" {
@@ -3672,7 +4530,7 @@ func (s *Syncer) applyRemoteDelete(remotePath string, conflicted map[string]stru
 	if tracked.WriteDenied {
 		return nil
 	}
-	localPath, err := remoteToLocalPath(s.localRoot, s.remoteRoot, remotePath)
+	localPath, err := s.remoteToLocalPath(remotePath)
 	if err != nil {
 		delete(s.state.Files, remotePath)
 		return nil
@@ -3708,7 +4566,7 @@ func (s *Syncer) pushLocal(ctx context.Context) (map[string]struct{}, error) {
 	for _, remotePath := range localRemotePaths {
 		snapshot := localFiles[remotePath]
 		tracked, exists := s.state.Files[remotePath]
-		localPath, err := remoteToLocalPath(s.localRoot, s.remoteRoot, remotePath)
+		localPath, err := s.remoteToLocalPath(remotePath)
 		if err != nil {
 			return nil, err
 		}
@@ -3855,7 +4713,7 @@ func (s *Syncer) markReadDenied(remotePath string) error {
 	tracked.ReadOnly = false
 	s.state.Files[remotePath] = tracked
 
-	localPath, err := remoteToLocalPath(s.localRoot, s.remoteRoot, remotePath)
+	localPath, err := s.remoteToLocalPath(remotePath)
 	if err != nil {
 		return nil
 	}
@@ -3883,6 +4741,7 @@ func (s *Syncer) applyWriteDenied(ctx context.Context, remotePath, localPath str
 
 func (s *Syncer) scanLocalFiles() (map[string]localSnapshot, error) {
 	results := map[string]localSnapshot{}
+	githubPathIndex := s.githubWorkingTreePathIndex()
 	statePathAbs, err := filepath.Abs(s.stateFile)
 	if err != nil {
 		return nil, err
@@ -3920,7 +4779,7 @@ func (s *Syncer) scanLocalFiles() (map[string]localSnapshot, error) {
 		// enqueued for writeback (it both stresses the cloud and was part
 		// of the clobber pathology). Surface it and skip.
 		if max := maxWritebackBytes(); max > 0 && info.Size() > max {
-			remotePath, err := localToRemotePath(s.localRoot, s.remoteRoot, path)
+			remotePath, err := s.localPathToRemotePath(path, githubPathIndex)
 			if err != nil {
 				return nil
 			}
@@ -3941,7 +4800,7 @@ func (s *Syncer) scanLocalFiles() (map[string]localSnapshot, error) {
 			s.state.Counters.SkippedOversizeWriteback++
 			return nil
 		}
-		remotePath, err := localToRemotePath(s.localRoot, s.remoteRoot, path)
+		remotePath, err := s.localPathToRemotePath(path, githubPathIndex)
 		if err != nil {
 			return nil
 		}
@@ -3996,6 +4855,9 @@ func (s *Syncer) loadState() error {
 		state.Files = map[string]trackedFile{}
 	}
 	s.state = state
+	if s.githubWorkingTree != nil && strings.TrimSpace(s.state.GithubWorkingTreeHeadSHA) != "" {
+		s.githubWorkingTree.HeadSHA = strings.TrimSpace(s.state.GithubWorkingTreeHeadSHA)
+	}
 	return nil
 }
 
@@ -4140,11 +5002,16 @@ func (s *Syncer) savePublicState() error {
 	if mode == "" {
 		mode = "poll"
 	}
+	syncMode := "mirror"
+	if s.writeOnly {
+		syncMode = "write-only"
+	}
 	public := publicState{
 		WorkspaceID:               s.workspace,
 		RemoteRoot:                s.remoteRoot,
 		LocalRoot:                 s.localRoot,
 		Mode:                      mode,
+		SyncMode:                  syncMode,
 		IntervalMs:                s.interval.Milliseconds(),
 		LastReconcileAt:           s.state.LastReconcileAt,
 		LastSuccessfulReconcileAt: s.state.LastSuccessfulReconcileAt,
@@ -4543,6 +5410,198 @@ func remoteToLocalPath(localRoot, remoteRoot, remotePath string) (string, error)
 	return joined, nil
 }
 
+func (s *Syncer) remoteToLocalPath(remotePath string) (string, error) {
+	if s.githubWorkingTree != nil {
+		if rel, ok := s.githubWorkingTree.remotePathToWorkingTreeRel(remotePath); ok {
+			return safeLocalPath(s.localRoot, rel)
+		}
+	}
+	return remoteToLocalPath(s.localRoot, s.remoteRoot, remotePath)
+}
+
+func (s *Syncer) localPathToRemotePath(localPath string, githubPathIndex map[string]string) (string, error) {
+	if s.githubWorkingTree != nil {
+		rel, err := RelativeRemotePathFromLocal(s.localRoot, localPath)
+		if err != nil {
+			return "", err
+		}
+		if remotePath := s.githubRemotePathForWorkingTreeRel(rel.Slash(), githubPathIndex); remotePath != "" {
+			return remotePath, nil
+		}
+		return s.githubWorkingTree.workingTreeRelToRemotePath(rel.Slash()), nil
+	}
+	return localToRemotePath(s.localRoot, s.remoteRoot, localPath)
+}
+
+func (s *Syncer) localRelativeToRemotePath(relativePath string) string {
+	relativePath = filepath.ToSlash(strings.TrimSpace(relativePath))
+	if s.githubWorkingTree != nil {
+		if remotePath := s.githubRemotePathForWorkingTreeRel(relativePath, nil); remotePath != "" {
+			return remotePath
+		}
+		return s.githubWorkingTree.workingTreeRelToRemotePath(relativePath)
+	}
+	return normalizeRemotePath(filepath.Join(s.remoteRoot, filepath.FromSlash(relativePath)))
+}
+
+func (s *Syncer) githubRemotePathForWorkingTreeRel(rel string, githubPathIndex map[string]string) string {
+	if s.githubWorkingTree == nil || len(s.state.Files) == 0 {
+		return ""
+	}
+	rel = filepath.ToSlash(filepath.Clean(filepath.ToSlash(strings.TrimSpace(rel))))
+	rel = strings.TrimPrefix(rel, "/")
+	if githubPathIndex != nil {
+		return githubPathIndex[rel]
+	}
+	return s.githubWorkingTreePathIndex()[rel]
+}
+
+func (s *Syncer) githubWorkingTreePathIndex() map[string]string {
+	if s.githubWorkingTree == nil || len(s.state.Files) == 0 {
+		return nil
+	}
+	index := map[string]string{}
+	revisions := map[string]string{}
+	paths := make([]string, 0, len(s.state.Files))
+	for remotePath := range s.state.Files {
+		paths = append(paths, remotePath)
+	}
+	sort.Strings(paths)
+	for _, remotePath := range paths {
+		rel, ok := s.githubWorkingTree.remotePathToWorkingTreeRel(remotePath)
+		if !ok {
+			continue
+		}
+		current := index[rel]
+		revision := s.state.Files[remotePath].Revision
+		if current == "" || s.githubWorkingTreePathCandidatePreferred(remotePath, revision, current, revisions[rel]) {
+			index[rel] = remotePath
+			revisions[rel] = revision
+		}
+	}
+	return index
+}
+
+func (s *Syncer) githubWorkingTreePathCandidatePreferred(candidatePath, candidateRevision, currentPath, currentRevision string) bool {
+	candidateMatchesHead := s.githubWorkingTreeRemotePathMatchesHead(candidatePath)
+	currentMatchesHead := s.githubWorkingTreeRemotePathMatchesHead(currentPath)
+	if candidateMatchesHead != currentMatchesHead {
+		return candidateMatchesHead
+	}
+	return revisionAdvances(currentRevision, candidateRevision)
+}
+
+func (s *Syncer) githubWorkingTreeRemotePathMatchesHead(remotePath string) bool {
+	if s.githubWorkingTree == nil {
+		return false
+	}
+	headSHA := strings.TrimSpace(s.githubWorkingTree.HeadSHA)
+	if headSHA == "" {
+		return false
+	}
+	return strings.HasSuffix(normalizeRemotePath(remotePath), "@"+headSHA+".json")
+}
+
+func safeLocalPath(localRoot, rel string) (string, error) {
+	localRoot = filepath.Clean(localRoot)
+	rel = filepath.ToSlash(strings.TrimSpace(rel))
+	if rel == "" || rel == "." || strings.HasPrefix(rel, "/") {
+		return "", fmt.Errorf("invalid working tree path %q", rel)
+	}
+	cleanRel := filepath.ToSlash(filepath.Clean(rel))
+	if cleanRel == "." || cleanRel == ".." || strings.HasPrefix(cleanRel, "../") || strings.Contains(cleanRel, "/../") {
+		return "", fmt.Errorf("path %s escapes local root", rel)
+	}
+	joined := filepath.Join(localRoot, filepath.FromSlash(cleanRel))
+	cleanJoined := filepath.Clean(joined)
+	if cleanJoined == localRoot {
+		return "", fmt.Errorf("path %s resolves onto the mount root %s", rel, localRoot)
+	}
+	if !strings.HasPrefix(cleanJoined, localRoot+string(filepath.Separator)) {
+		return "", fmt.Errorf("resolved path %s escapes local root %s", joined, localRoot)
+	}
+	return cleanJoined, nil
+}
+
+func detectGithubWorkingTreeMount(remoteRoot string) *githubWorkingTreeMount {
+	remoteRoot = normalizeRemotePath(remoteRoot)
+	segments := strings.Split(strings.Trim(remoteRoot, "/"), "/")
+	if len(segments) != 5 || segments[0] != "github" || segments[1] != "repos" || segments[4] != "contents" {
+		return nil
+	}
+	owner, err := url.PathUnescape(segments[2])
+	if err != nil || strings.TrimSpace(owner) == "" {
+		return nil
+	}
+	repo, err := url.PathUnescape(segments[3])
+	if err != nil || strings.TrimSpace(repo) == "" {
+		return nil
+	}
+	repoRoot := normalizeRemotePath(strings.Join(segments[:4], "/"))
+	return &githubWorkingTreeMount{
+		Owner:        owner,
+		Repo:         repo,
+		RepoRoot:     repoRoot,
+		ContentsRoot: remoteRoot,
+	}
+}
+
+func (g *githubWorkingTreeMount) cloneSentinelPath() string {
+	return normalizeRemotePath(g.RepoRoot + "/.relayfile/clone.json")
+}
+
+func (g *githubWorkingTreeMount) legacyMetaPath() string {
+	return normalizeRemotePath(g.RepoRoot + "/meta.json")
+}
+
+func (g *githubWorkingTreeMount) remotePathToWorkingTreeRel(remotePath string) (string, bool) {
+	remotePath = normalizeRemotePath(remotePath)
+	if !isUnderRemoteRoot(g.ContentsRoot, remotePath) {
+		return "", false
+	}
+	rel := strings.TrimPrefix(remotePath, g.ContentsRoot)
+	rel = strings.TrimPrefix(rel, "/")
+	rel = strings.TrimSpace(rel)
+	if rel == "" {
+		return "", false
+	}
+	suffix := "@" + strings.TrimSpace(g.HeadSHA) + ".json"
+	if strings.TrimSpace(g.HeadSHA) != "" && strings.HasSuffix(rel, suffix) {
+		rel = strings.TrimSuffix(rel, suffix)
+	} else if idx := strings.LastIndex(rel, "@"); idx >= 0 && strings.HasSuffix(rel, ".json") {
+		rel = rel[:idx]
+	} else {
+		return "", false
+	}
+	parts := strings.Split(rel, "/")
+	for i, part := range parts {
+		decoded, err := url.PathUnescape(part)
+		if err != nil {
+			return "", false
+		}
+		parts[i] = decoded
+	}
+	return filepath.ToSlash(filepath.Clean(strings.Join(parts, "/"))), true
+}
+
+func (g *githubWorkingTreeMount) workingTreeRelToRemotePath(rel string) string {
+	rel = filepath.ToSlash(strings.TrimSpace(filepath.Clean(filepath.ToSlash(rel))))
+	rel = strings.TrimPrefix(rel, "/")
+	if rel == "" || rel == "." {
+		return g.ContentsRoot
+	}
+	parts := strings.Split(rel, "/")
+	for i, part := range parts {
+		parts[i] = url.PathEscape(part)
+	}
+	suffix := ""
+	if strings.TrimSpace(g.HeadSHA) != "" {
+		suffix = "@" + strings.TrimSpace(g.HeadSHA) + ".json"
+	}
+	parts[len(parts)-1] += suffix
+	return normalizeRemotePath(g.ContentsRoot + "/" + strings.Join(parts, "/"))
+}
+
 func localToRemotePath(localRoot, remoteRoot, localPath string) (string, error) {
 	// Boundary gate: route through the typed RelativeRemotePath constructor
 	// so the round-trip-onto-root collision (a child whose name equals the
@@ -4637,10 +5696,33 @@ func (c *HTTPClient) websocketURL(workspaceID string) (string, error) {
 	return base.String(), nil
 }
 
+type webSocketDialError struct {
+	err        error
+	retryAfter time.Duration
+}
+
+func (e webSocketDialError) Error() string {
+	if e.err == nil {
+		return "websocket dial failed"
+	}
+	return e.err.Error()
+}
+
+func (e webSocketDialError) Unwrap() error {
+	return e.err
+}
+
+func retryAfterFromResponse(response *http.Response) time.Duration {
+	if response == nil {
+		return 0
+	}
+	return parseRetryAfter(response.Header.Get("Retry-After"))
+}
+
 func (c *HTTPClient) retryDelay(attempt int, retryAfterHeader string) time.Duration {
 	maxDelay := c.maxDelay
 	if maxDelay <= 0 {
-		maxDelay = 2 * time.Second
+		maxDelay = defaultRetryAfterMaxDelay
 	}
 	if retryAfter := parseRetryAfter(retryAfterHeader); retryAfter > 0 {
 		if retryAfter > maxDelay {

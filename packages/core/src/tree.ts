@@ -13,6 +13,7 @@ import type { StorageAdapter, PaginationOptions } from "./storage.js";
 import {
   filePermissionAllows,
   resolveFilePermissions,
+  type PermissionEvaluationOptions,
   type TokenClaims,
 } from "./acl.js";
 
@@ -43,6 +44,7 @@ export function listTree(
   storage: StorageAdapter,
   options: ListTreeOptions,
   claims: TokenClaims | null,
+  aclOptions: PermissionEvaluationOptions = {},
 ): TreeResult {
   const base = normalizePath(options.path ?? "/");
   const maxDepth = options.depth && options.depth > 0 ? options.depth : 1;
@@ -59,6 +61,11 @@ export function listTree(
         resolveFilePermissions(storage, filePath, true),
         workspaceId,
         claims,
+        {
+          ...aclOptions,
+          action: aclOptions.action ?? "read",
+          requestedPath: filePath,
+        },
       )
     ) {
       continue;

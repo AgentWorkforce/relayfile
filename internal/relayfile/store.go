@@ -171,11 +171,29 @@ type WriteRequest struct {
 	CorrelationID string
 }
 
+type ContentIdentity struct {
+	Kind       string `json:"kind"`
+	Key        string `json:"key"`
+	TTLSeconds int    `json:"ttlSeconds,omitempty"`
+}
+
+func cloneContentIdentity(identity *ContentIdentity) *ContentIdentity {
+	if identity == nil {
+		return nil
+	}
+	return &ContentIdentity{
+		Kind:       identity.Kind,
+		Key:        identity.Key,
+		TTLSeconds: identity.TTLSeconds,
+	}
+}
+
 type BulkWriteFile struct {
-	Path        string `json:"path"`
-	ContentType string `json:"contentType"`
-	Content     string `json:"content"`
-	Encoding    string `json:"encoding"`
+	Path            string           `json:"path"`
+	ContentType     string           `json:"contentType"`
+	Content         string           `json:"content"`
+	Encoding        string           `json:"encoding"`
+	ContentIdentity *ContentIdentity `json:"contentIdentity,omitempty"`
 }
 
 type BulkWriteError struct {
@@ -208,20 +226,21 @@ type WriteResult struct {
 }
 
 type OperationStatus struct {
-	OpID           string         `json:"opId"`
-	Path           string         `json:"path,omitempty"`
-	Revision       string         `json:"revision,omitempty"`
-	Action         string         `json:"action,omitempty"`
-	Provider       string         `json:"provider,omitempty"`
-	Status         string         `json:"status"`
-	AttemptCount   int            `json:"attemptCount"`
-	NextAttemptAt  *string        `json:"nextAttemptAt,omitempty"`
-	LastError      *string        `json:"lastError,omitempty"`
-	ProviderResult map[string]any `json:"providerResult,omitempty"`
-	CorrelationID  string         `json:"correlationId,omitempty"`
-	CreatedAt      string         `json:"createdAt,omitempty"`
-	UpdatedAt      string         `json:"updatedAt,omitempty"`
-	CompletedAt    *string        `json:"completedAt,omitempty"`
+	OpID            string           `json:"opId"`
+	Path            string           `json:"path,omitempty"`
+	Revision        string           `json:"revision,omitempty"`
+	Action          string           `json:"action,omitempty"`
+	Provider        string           `json:"provider,omitempty"`
+	Status          string           `json:"status"`
+	AttemptCount    int              `json:"attemptCount"`
+	NextAttemptAt   *string          `json:"nextAttemptAt,omitempty"`
+	LastError       *string          `json:"lastError,omitempty"`
+	ProviderResult  map[string]any   `json:"providerResult,omitempty"`
+	ContentIdentity *ContentIdentity `json:"contentIdentity,omitempty"`
+	CorrelationID   string           `json:"correlationId,omitempty"`
+	CreatedAt       string           `json:"createdAt,omitempty"`
+	UpdatedAt       string           `json:"updatedAt,omitempty"`
+	CompletedAt     *string          `json:"completedAt,omitempty"`
 }
 
 type OperationFeed struct {
@@ -358,6 +377,21 @@ type StoreOptions struct {
 	WritebackWorkers       int
 	ProviderMaxConcurrency int
 	Adapters               []ProviderAdapter
+	// DeleteStormThreshold enables the delete-storm breaker (#249) when > 0:
+	// a workspace admitting more than this many file_delete mutations within
+	// DeleteStormWindow gets further deletes refused, and a boot-time scan
+	// quarantines rehydrated pending delete bursts instead of re-arming them.
+	DeleteStormThreshold int
+	// DeleteStormWindow is the sliding window for DeleteStormThreshold
+	// (default 1m when the breaker is enabled).
+	DeleteStormWindow time.Duration
+	// StaleRunningOpThreshold enables the boot staleness gate (#249,
+	// op_20440 class) when > 0: an op found "running" at boot whose
+	// UpdatedAt is older than this is quarantined instead of re-armed —
+	// verb-agnostic, since a stuck-running upsert is an armed duplicate
+	// just like a stuck delete. Fresh running ops keep at-least-once
+	// crash semantics.
+	StaleRunningOpThreshold time.Duration
 }
 
 type ProviderWriteFunc func(workspaceID, path, revision string) error
@@ -377,6 +411,7 @@ type WritebackAction struct {
 	Type             WritebackActionType `json:"type"`
 	ContentType      string              `json:"contentType,omitempty"`
 	Content          string              `json:"content,omitempty"`
+	ContentIdentity  *ContentIdentity    `json:"contentIdentity,omitempty"`
 	Provider         string              `json:"provider,omitempty"`
 	ProviderObjectID string              `json:"providerObjectId,omitempty"`
 	CorrelationID    string              `json:"correlationId,omitempty"`
@@ -476,6 +511,10 @@ type Store struct {
 	providerSemaphores      map[string]chan struct{}
 	subscribers             map[string]map[uint64]chan<- Event
 	subscriberCounter       uint64
+	deleteStormThreshold    int
+	deleteStormWindow       time.Duration
+	deleteStormAdmissions   map[string][]time.Time
+	staleRunningOpThreshold time.Duration
 	closed                  chan struct{}
 	queueCtx                context.Context
 	queueCancel             context.CancelFunc
@@ -493,11 +532,12 @@ type workspaceState struct {
 }
 
 type WritebackQueueItem struct {
-	WorkspaceID   string `json:"workspaceId"`
-	OpID          string `json:"opId"`
-	Path          string `json:"path"`
-	Revision      string `json:"revision"`
-	CorrelationID string `json:"correlationId"`
+	WorkspaceID     string           `json:"workspaceId"`
+	OpID            string           `json:"opId"`
+	Path            string           `json:"path"`
+	Revision        string           `json:"revision"`
+	ContentIdentity *ContentIdentity `json:"contentIdentity,omitempty"`
+	CorrelationID   string           `json:"correlationId"`
 }
 
 type writebackTask = WritebackQueueItem
@@ -878,12 +918,20 @@ func NewStoreWithOptions(opts StoreOptions) *Store {
 		providerMaxConcurrency:  providerMaxConcurrency,
 		providerSemaphores:      map[string]chan struct{}{},
 		subscribers:             map[string]map[uint64]chan<- Event{},
+		deleteStormThreshold:    opts.DeleteStormThreshold,
+		deleteStormWindow:       opts.DeleteStormWindow,
+		deleteStormAdmissions:   map[string][]time.Time{},
+		staleRunningOpThreshold: opts.StaleRunningOpThreshold,
 		closed:                  make(chan struct{}),
 		queueCtx:                queueCtx,
 		queueCancel:             queueCancel,
 	}
 	s.seedQueuedIndexesFromQueues()
 	_ = s.loadFromDisk()
+	// #249: quarantine rehydrated delete storms BEFORE the boot re-enqueue
+	// scan below — a deploy is a restart, and the scan would otherwise hand
+	// a pending file_delete burst to the new executor.
+	s.quarantineBootDeleteStorms()
 	s.rebuildForkIndexesLocked()
 	s.rebuildCoalesceIndexLocked()
 	s.scheduleForkExpiryTimers()
@@ -940,11 +988,12 @@ func NewStoreWithOptions(opts StoreOptions) *Store {
 					continue
 				}
 				task := writebackTask{
-					WorkspaceID:   workspaceID,
-					OpID:          opID,
-					Path:          op.Path,
-					Revision:      op.Revision,
-					CorrelationID: op.CorrelationID,
+					WorkspaceID:     workspaceID,
+					OpID:            opID,
+					Path:            op.Path,
+					Revision:        op.Revision,
+					ContentIdentity: cloneContentIdentity(op.ContentIdentity),
+					CorrelationID:   op.CorrelationID,
 				}
 				delay := time.Duration(0)
 				if op.NextAttemptAt != nil {
@@ -1416,7 +1465,7 @@ func (s *Store) BulkWrite(workspaceID string, files []BulkWriteFile) (int, []Bul
 		if existed {
 			eventType = "file.updated"
 		}
-		result, task := s.recordWriteLocked(ws, path, revision, eventType, file.Provider, "")
+		result, task := s.recordWriteWithContentIdentityLocked(ws, path, revision, eventType, file.Provider, "", input.ContentIdentity)
 		_ = result
 		results = append(results, BulkWriteResult{
 			Path:        path,
@@ -1480,6 +1529,13 @@ func (s *Store) DeleteFile(req DeleteRequest) (WriteResult, error) {
 			CurrentRevision:       existing.Revision,
 			CurrentContentPreview: truncatePreview(existing.Content),
 		}
+	}
+	// #249: the delete-storm breaker refuses the fs mutation itself — the
+	// 2026-06-06 incident destroyed records even though every provider call
+	// failed, so guarding only the writeback would guard the wrong harm.
+	if err := s.admitDeleteLocked(req.WorkspaceID, time.Now().UTC()); err != nil {
+		s.mu.Unlock()
+		return WriteResult{}, err
 	}
 	delete(ws.Files, path)
 
@@ -2041,6 +2097,51 @@ func (s *Store) GetRecentEvents(workspaceID string, limit int) ([]Event, error) 
 		start = 0
 	}
 	return append([]Event(nil), ws.Events[start:]...), nil
+}
+
+func (s *Store) GetEventsAfterCursor(workspaceID, cursor string, limit int) ([]Event, error) {
+	if workspaceID == "" || strings.TrimSpace(cursor) == "" {
+		return []Event{}, ErrInvalidInput
+	}
+	if limit <= 0 {
+		return []Event{}, nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	ws, ok := s.workspaces[workspaceID]
+	if !ok || len(ws.Events) == 0 {
+		return []Event{}, nil
+	}
+	cursorOrdinal, ok := parseEventIDOrdinal(cursor)
+	if !ok {
+		return []Event{}, nil
+	}
+	index := sort.Search(len(ws.Events), func(i int) bool {
+		ordinal, ok := parseEventIDOrdinal(ws.Events[i].EventID)
+		return ok && ordinal >= cursorOrdinal
+	})
+	if index >= len(ws.Events) || ws.Events[index].EventID != cursor {
+		return []Event{}, nil
+	}
+	start := index + 1
+	if start >= len(ws.Events) {
+		return []Event{}, nil
+	}
+	end := start + limit
+	if end > len(ws.Events) {
+		end = len(ws.Events)
+	}
+	return append([]Event(nil), ws.Events[start:end]...), nil
+}
+
+func parseEventIDOrdinal(eventID string) (uint64, bool) {
+	value := strings.TrimPrefix(strings.TrimSpace(eventID), "evt_")
+	if value == "" || value == eventID {
+		return 0, false
+	}
+	ordinal, err := strconv.ParseUint(value, 10, 64)
+	return ordinal, err == nil
 }
 
 func (s *Store) Subscribe(workspaceID string, ch chan<- Event) func() {
@@ -2991,19 +3092,28 @@ func (s *Store) GetPendingWritebacks(workspaceID string) []map[string]any {
 		if op.Status != "pending" && op.Status != "running" {
 			continue
 		}
-		result = append(result, map[string]any{
+		itemOut := map[string]any{
 			"id":            item.OpID,
 			"workspaceId":   item.WorkspaceID,
 			"path":          item.Path,
 			"revision":      item.Revision,
 			"correlationId": item.CorrelationID,
-		})
+		}
+		if item.ContentIdentity != nil {
+			itemOut["contentIdentity"] = item.ContentIdentity
+		} else if op.ContentIdentity != nil {
+			itemOut["contentIdentity"] = op.ContentIdentity
+		}
+		result = append(result, itemOut)
 	}
 	return result
 }
 
-// AcknowledgeWriteback acknowledges a writeback item as processed
-func (s *Store) AcknowledgeWriteback(workspaceID, itemID string, success bool, errMsg, correlationID string) (map[string]any, error) {
+// AcknowledgeWriteback acknowledges a writeback item as processed. On a
+// successful ack carrying an ExternalID it also reconciles the agent-authored
+// draft file per the draftFile() rename contract (issue #242); that mutation
+// is classification-exempt and can never enqueue a new writeback.
+func (s *Store) AcknowledgeWriteback(workspaceID, itemID string, ack WritebackAck, correlationID string) (map[string]any, error) {
 	if workspaceID == "" || itemID == "" {
 		return nil, ErrInvalidInput
 	}
@@ -3024,13 +3134,20 @@ func (s *Store) AcknowledgeWriteback(workspaceID, itemID string, success bool, e
 
 	// Update operation status based on acknowledgment
 	nowTS := nowRFC3339NanoUTC()
-	if success {
+	if ack.Success {
 		op.Status = "succeeded"
 		op.LastError = nil
 		op.CompletedAt = &nowTS
+		if externalID := strings.TrimSpace(ack.ExternalID); externalID != "" {
+			if op.ProviderResult == nil {
+				op.ProviderResult = map[string]any{}
+			}
+			op.ProviderResult["externalId"] = externalID
+		}
 	} else {
 		op.Status = "dead_lettered"
-		if errMsg != "" {
+		if ack.Error != "" {
+			errMsg := ack.Error
 			op.LastError = &errMsg
 		}
 		op.CompletedAt = &nowTS
@@ -3039,14 +3156,27 @@ func (s *Store) AcknowledgeWriteback(workspaceID, itemID string, success bool, e
 	op.UpdatedAt = nowTS
 
 	ws.Ops[itemID] = op
-	_ = s.saveLocked()
 
-	return map[string]any{
+	response := map[string]any{
 		"status":        "acknowledged",
 		"id":            itemID,
 		"correlationId": correlationID,
-		"success":       success,
-	}, nil
+		"success":       ack.Success,
+	}
+	if ack.Success && strings.TrimSpace(ack.ExternalID) != "" {
+		disposition := s.reconcileAckedDraftLocked(workspaceID, ws, op, ack, correlationID)
+		draft := map[string]any{"action": disposition.Action}
+		if disposition.From != "" {
+			draft["from"] = disposition.From
+		}
+		if disposition.To != "" {
+			draft["to"] = disposition.To
+		}
+		response["draft"] = draft
+	}
+	_ = s.saveLocked()
+
+	return response, nil
 }
 
 func (s *Store) TriggerSyncRefresh(workspaceID, provider, reason, correlationID string) (QueuedResponse, error) {
@@ -3318,22 +3448,27 @@ func nowRFC3339NanoUTC() string {
 }
 
 func (s *Store) recordWriteLocked(ws *workspaceState, path, revision, eventType, provider, correlationID string) (WriteResult, writebackTask) {
+	return s.recordWriteWithContentIdentityLocked(ws, path, revision, eventType, provider, correlationID, nil)
+}
+
+func (s *Store) recordWriteWithContentIdentityLocked(ws *workspaceState, path, revision, eventType, provider, correlationID string, contentIdentity *ContentIdentity) (WriteResult, writebackTask) {
 	if provider == "" {
 	}
 	workspaceID := s.workspaceIDForStateLocked(ws)
 	opID := s.nextOperationIDLocked()
 	nowTS := nowRFC3339NanoUTC()
 	op := OperationStatus{
-		OpID:          opID,
-		Path:          path,
-		Revision:      revision,
-		Action:        string(writebackActionFromEventType(eventType)),
-		Provider:      provider,
-		Status:        "pending",
-		AttemptCount:  0,
-		CorrelationID: correlationID,
-		CreatedAt:     nowTS,
-		UpdatedAt:     nowTS,
+		OpID:            opID,
+		Path:            path,
+		Revision:        revision,
+		Action:          string(writebackActionFromEventType(eventType)),
+		Provider:        provider,
+		Status:          "pending",
+		AttemptCount:    0,
+		ContentIdentity: cloneContentIdentity(contentIdentity),
+		CorrelationID:   correlationID,
+		CreatedAt:       nowTS,
+		UpdatedAt:       nowTS,
 	}
 	ws.Ops[opID] = op
 
@@ -3358,7 +3493,7 @@ func (s *Store) recordWriteLocked(ws *workspaceState, path, revision, eventType,
 	result.Writeback.Provider = provider
 	result.Writeback.State = "pending"
 
-	task := writebackTask{WorkspaceID: workspaceID, OpID: opID, Path: path, Revision: revision, CorrelationID: correlationID}
+	task := writebackTask{WorkspaceID: workspaceID, OpID: opID, Path: path, Revision: revision, ContentIdentity: cloneContentIdentity(contentIdentity), CorrelationID: correlationID}
 	return result, task
 }
 
@@ -3705,10 +3840,14 @@ func (s *Store) processWriteback(task writebackTask) {
 		task.Revision = op.Revision
 	}
 	writeAction := WritebackAction{
-		WorkspaceID:   task.WorkspaceID,
-		Path:          task.Path,
-		Revision:      task.Revision,
-		CorrelationID: task.CorrelationID,
+		WorkspaceID:     task.WorkspaceID,
+		Path:            task.Path,
+		Revision:        task.Revision,
+		ContentIdentity: cloneContentIdentity(task.ContentIdentity),
+		CorrelationID:   task.CorrelationID,
+	}
+	if writeAction.ContentIdentity == nil {
+		writeAction.ContentIdentity = cloneContentIdentity(op.ContentIdentity)
 	}
 	if op.Provider != "" {
 		writeAction.Provider = op.Provider

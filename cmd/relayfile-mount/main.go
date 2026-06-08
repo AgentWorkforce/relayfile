@@ -25,7 +25,12 @@ import (
 const (
 	mountModePoll           = "poll"
 	mountModeFuse           = "fuse"
+	localLayoutExact        = "exact"
+	localLayoutScoped       = "scoped"
+	syncModeMirror          = "mirror"
+	syncModeWriteOnly       = "write-only"
 	websocketReconcileEvery = 10
+	minMountPollInterval    = 5 * time.Second
 )
 
 var errFuseModeUnavailable = errors.New("fuse mode is not available in this build")
@@ -33,12 +38,17 @@ var errFuseModeUnavailable = errors.New("fuse mode is not available in this buil
 type mountConfig struct {
 	baseURL          string
 	token            string
+	credsFile        string
 	workspaceID      string
 	remotePath       string
 	remotePaths      []string
 	eventProvider    string
 	localDir         string
+	localLayout      string
 	stateFile        string
+	stateDir         string
+	mountKind        string
+	syncMode         string
 	interval         time.Duration
 	intervalJitter   float64
 	timeout          time.Duration
@@ -50,6 +60,7 @@ type mountConfig struct {
 	lowMemory        bool
 	pprofAddr        string
 	memlogInterval   time.Duration
+	logHTTPStatus    bool
 	scopes           []string
 	once             bool
 	mode             string
@@ -65,31 +76,46 @@ var defaultFuseRunner fuseRunner = func(context.Context, mountConfig) error {
 func main() {
 	baseURL := flag.String("base-url", envOrDefault("RELAYFILE_BASE_URL", "http://127.0.0.1:8080"), "relayfile base URL")
 	token := flag.String("token", strings.TrimSpace(os.Getenv("RELAYFILE_TOKEN")), "bearer token")
+	credsFile := flag.String("creds-file", strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_CREDS_FILE")), "JSON credentials file containing a relayfile bearer token; takes precedence over --token")
 	workspaceID := flag.String("workspace", strings.TrimSpace(os.Getenv("RELAYFILE_WORKSPACE")), "workspace ID")
 	var remotePaths repeatedStringFlag
 	flag.Var(&remotePaths, "remote-path", "remote root path (may be repeated)")
 	pathsFile := flag.String("paths-file", strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_PATHS_FILE")), "file containing remote root paths, as JSON array or newline-separated list")
 	eventProvider := flag.String("provider", strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_PROVIDER")), "event provider filter")
 	localDir := flag.String("local-dir", strings.TrimSpace(os.Getenv("RELAYFILE_LOCAL_DIR")), "local mirror directory")
+	localLayout := flag.String("local-layout", envOrDefault("RELAYFILE_MOUNT_LOCAL_LAYOUT", localLayoutExact), "local directory layout: exact (local-dir is mirror root) or scoped (remote path is appended under local-dir)")
 	stateFile := flag.String("state-file", strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_STATE_FILE")), "state file path")
+	stateDir := flag.String("state-dir", envOrDefault("RELAYFILE_MOUNT_STATE_DIR", mountsync.DefaultMountStateDir()), "directory for private mount state")
+	mountKind := flag.String("mount-kind", envOrDefault("RELAYFILE_MOUNT_KIND", mountsync.MountKindDaemon), "private state identity kind: daemon, flush, or initial-sync")
+	syncModeFlag := flag.String("sync-mode", envOrDefault("RELAYFILE_MOUNT_SYNC_MODE", syncModeMirror), "sync behavior: mirror (pull and push) or write-only (push local changes without mirroring provider history)")
 	interval := flag.Duration("interval", durationEnv("RELAYFILE_MOUNT_INTERVAL", 30*time.Second), "sync interval")
 	intervalJitter := flag.Float64("interval-jitter", floatEnv("RELAYFILE_MOUNT_INTERVAL_JITTER", 0.2), "sync interval jitter ratio (0.0-1.0)")
 	timeout := flag.Duration("timeout", durationEnv("RELAYFILE_MOUNT_TIMEOUT", 15*time.Second), "per-sync timeout")
 	bootstrapTimeout := flag.Duration("bootstrap-timeout", durationEnv("RELAYFILE_BOOTSTRAP_TIMEOUT", 0), "hard cap for the one-time/full-tree bootstrap pull (0 = unbounded while making progress)")
-	cursorTimeout := flag.Duration("cursor-timeout", durationEnv("RELAYFILE_CURSOR_TIMEOUT", 20*time.Second), "independent timeout for events-cursor resolution")
+	cursorTimeout := flag.Duration("cursor-timeout", durationEnv("RELAYFILE_CURSOR_TIMEOUT", 60*time.Second), "independent timeout for events-cursor resolution")
 	fullReconcile := flag.Bool("full-reconcile", boolEnv("RELAYFILE_FORCE_FULL_RECONCILE", false), "force one full reconcile regardless of bootstrap-complete state (escape hatch)")
 	websocketEnabled := flag.Bool("websocket", boolEnv("RELAYFILE_MOUNT_WEBSOCKET", true), "enable websocket event streaming when available")
 	lazyRepos := flag.Bool("lazy-repos", lazyReposEnv(), "lazily materialize GitHub repo subtrees on first access")
 	lowMemory := flag.Bool("low-memory", boolEnv("RELAYFILE_MOUNT_LOW_MEMORY", false), "reduce mount memory use by omitting per-file public state and deferring content reads")
 	pprofAddr := flag.String("pprof-addr", strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_PPROF_ADDR")), "optional pprof listen address, e.g. 127.0.0.1:6060")
 	memlogInterval := flag.Duration("memlog-interval", durationEnv("RELAYFILE_MOUNT_MEMLOG_INTERVAL", 0), "optional interval for logging runtime memory stats")
+	logHTTPStatus := flag.Bool("log-http-status", boolEnv("RELAYFILE_MOUNT_LOG_HTTP_STATUS", false), "log Relayfile HTTP response statuses for mount observability")
 	mode := flag.String("mode", envOrDefault("RELAYFILE_MOUNT_MODE", mountModePoll), "mount mode: poll (synced mirror, recommended) or fuse")
 	fuse := flag.Bool("fuse", boolEnv("RELAYFILE_MOUNT_FUSE", false), "shortcut for --mode=fuse")
 	once := flag.Bool("once", false, "run one sync cycle and exit")
 	flag.Parse()
 
-	if strings.TrimSpace(*token) == "" {
-		log.Fatalf("token is required (--token or RELAYFILE_TOKEN)")
+	resolvedToken := strings.TrimSpace(*token)
+	resolvedCredsFile := strings.TrimSpace(*credsFile)
+	if resolvedCredsFile != "" {
+		credsToken, err := readMountCredsToken(resolvedCredsFile)
+		if err != nil {
+			log.Fatalf("read creds-file: %v", err)
+		}
+		resolvedToken = credsToken
+	}
+	if resolvedToken == "" {
+		log.Fatalf("token is required (--token, RELAYFILE_TOKEN, or --creds-file)")
 	}
 	if strings.TrimSpace(*workspaceID) == "" {
 		log.Fatalf("workspace is required (--workspace or RELAYFILE_WORKSPACE)")
@@ -100,6 +126,7 @@ func main() {
 	if *interval <= 0 {
 		*interval = 30 * time.Second
 	}
+	*interval = enforcePollIntervalFloor(*interval)
 	if *timeout <= 0 {
 		*timeout = 15 * time.Second
 	}
@@ -113,19 +140,32 @@ func main() {
 	if err != nil {
 		log.Fatalf("invalid mount mode: %v", err)
 	}
+	resolvedLocalLayout, err := resolveLocalLayout(*localLayout)
+	if err != nil {
+		log.Fatalf("invalid local layout: %v", err)
+	}
+	resolvedSyncMode, err := resolveSyncMode(*syncModeFlag)
+	if err != nil {
+		log.Fatalf("invalid sync mode: %v", err)
+	}
 
 	rootCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	cfg := mountConfig{
 		baseURL:          *baseURL,
-		token:            strings.TrimSpace(*token),
+		token:            resolvedToken,
+		credsFile:        resolvedCredsFile,
 		workspaceID:      strings.TrimSpace(*workspaceID),
 		remotePath:       firstRemotePath(allRemotePaths, envOrDefault("RELAYFILE_REMOTE_PATH", "/")),
 		remotePaths:      normalizeRemotePaths(allRemotePaths, envOrDefault("RELAYFILE_REMOTE_PATH", "/")),
 		eventProvider:    strings.TrimSpace(*eventProvider),
 		localDir:         *localDir,
+		localLayout:      resolvedLocalLayout,
 		stateFile:        *stateFile,
+		stateDir:         *stateDir,
+		mountKind:        *mountKind,
+		syncMode:         resolvedSyncMode,
 		interval:         *interval,
 		intervalJitter:   *intervalJitter,
 		timeout:          *timeout,
@@ -137,7 +177,8 @@ func main() {
 		lowMemory:        *lowMemory,
 		pprofAddr:        strings.TrimSpace(*pprofAddr),
 		memlogInterval:   *memlogInterval,
-		scopes:           parseTokenScopes(strings.TrimSpace(*token)),
+		logHTTPStatus:    *logHTTPStatus,
+		scopes:           parseTokenScopes(resolvedToken),
 		once:             *once,
 		mode:             resolvedMode,
 	}
@@ -166,6 +207,32 @@ func resolveMountMode(mode string, fuse bool) (string, error) {
 	}
 }
 
+func resolveLocalLayout(layout string) (string, error) {
+	normalized := strings.ToLower(strings.TrimSpace(layout))
+	if normalized == "" {
+		return localLayoutExact, nil
+	}
+	switch normalized {
+	case localLayoutExact, localLayoutScoped:
+		return normalized, nil
+	default:
+		return "", fmt.Errorf("%q (supported: %s, %s)", layout, localLayoutExact, localLayoutScoped)
+	}
+}
+
+func resolveSyncMode(mode string) (string, error) {
+	normalized := strings.ToLower(strings.TrimSpace(mode))
+	if normalized == "" {
+		return syncModeMirror, nil
+	}
+	switch normalized {
+	case syncModeMirror, syncModeWriteOnly:
+		return normalized, nil
+	default:
+		return "", fmt.Errorf("%q (supported: %s, %s)", mode, syncModeMirror, syncModeWriteOnly)
+	}
+}
+
 func executeMount(rootCtx context.Context, cfg mountConfig, runPoll pollRunner, runFuse fuseRunner) error {
 	switch cfg.mode {
 	case mountModePoll:
@@ -178,14 +245,23 @@ func executeMount(rootCtx context.Context, cfg mountConfig, runPoll pollRunner, 
 }
 
 func runPollingMount(rootCtx context.Context, cfg mountConfig) error {
+	return runPollingMountWithRunner(rootCtx, cfg, runSinglePollingMount)
+}
+
+func runPollingMountWithRunner(rootCtx context.Context, cfg mountConfig, run pollRunner) error {
 	remotePaths := cfg.remotePaths
 	if len(remotePaths) == 0 {
 		remotePaths = []string{cfg.remotePath}
 	}
-	if len(remotePaths) > 1 || (len(remotePaths) == 1 && normalizeMountRemotePath(remotePaths[0]) != "/") {
-		return runScopedPollingMounts(rootCtx, cfg, remotePaths)
+	if cfg.localLayout == localLayoutScoped {
+		return runScopedPollingMountsWithRunner(rootCtx, cfg, remotePaths, run)
 	}
-	return runSinglePollingMount(rootCtx, cfg)
+	if len(remotePaths) > 1 {
+		return fmt.Errorf("multiple --remote-path values require --local-layout=%s", localLayoutScoped)
+	}
+	cfg.remotePath = normalizeMountRemotePath(remotePaths[0])
+	cfg.remotePaths = nil
+	return run(rootCtx, cfg)
 }
 
 func runScopedPollingMounts(rootCtx context.Context, cfg mountConfig, remotePaths []string) error {
@@ -203,6 +279,9 @@ func runScopedPollingMountsWithRunner(
 	}
 	scopedMounts := make([]scopedMount, 0, len(remotePaths))
 	seen := map[string]struct{}{}
+	if len(remotePaths) > 1 && strings.TrimSpace(cfg.stateFile) != "" {
+		return fmt.Errorf("--state-file cannot be shared across multiple scoped mounts; use --state-dir instead")
+	}
 	for _, remotePath := range remotePaths {
 		remotePath := normalizeMountRemotePath(remotePath)
 		if _, ok := seen[remotePath]; ok {
@@ -213,7 +292,7 @@ func runScopedPollingMountsWithRunner(
 		scoped.remotePath = remotePath
 		scoped.remotePaths = nil
 		scoped.localDir = scopedLocalDir(cfg.localDir, remotePath)
-		scoped.stateFile = scopedStateFile(cfg.stateFile, remotePath)
+		scoped.stateFile = cfg.stateFile
 		if err := os.MkdirAll(scoped.localDir, 0o755); err != nil {
 			return fmt.Errorf("create scoped local dir for %s: %w", remotePath, err)
 		}
@@ -286,12 +365,19 @@ func runSinglePollingMount(rootCtx context.Context, cfg mountConfig) error {
 	// per-cycle / bootstrap / cursor contexts; NewSyncHTTPClient wires a
 	// transport that bounds connect/handshake/time-to-first-byte only.
 	client := mountsync.NewHTTPClient(cfg.baseURL, cfg.token, mountsync.NewSyncHTTPClient())
+	installCredsFileRefresh(client, cfg)
+	if cfg.logHTTPStatus {
+		client.SetHTTPStatusLogger(log.Default())
+	}
 	syncer, err := mountsync.NewSyncer(client, mountsync.SyncerOptions{
 		WorkspaceID:        cfg.workspaceID,
 		RemoteRoot:         cfg.remotePath,
 		EventProvider:      cfg.eventProvider,
 		LocalRoot:          cfg.localDir,
 		StateFile:          cfg.stateFile,
+		StateDir:           cfg.stateDir,
+		MountKind:          cfg.mountKind,
+		ValidateState:      true,
 		Scopes:             cfg.scopes,
 		WebSocket:          boolPtr(cfg.websocketEnabled),
 		RootCtx:            rootCtx,
@@ -303,6 +389,7 @@ func runSinglePollingMount(rootCtx context.Context, cfg mountConfig) error {
 		BootstrapTimeout:   cfg.bootstrapTimeout,
 		CursorTimeout:      cfg.cursorTimeout,
 		ForceFullReconcile: boolPtr(cfg.forceFullRecon),
+		SyncMode:           cfg.syncMode,
 	})
 	if err != nil {
 		return fmt.Errorf("initialize mount syncer: %w", err)
@@ -310,6 +397,7 @@ func runSinglePollingMount(rootCtx context.Context, cfg mountConfig) error {
 	if _, err := mountsync.StartDiagnostics(rootCtx, cfg.pprofAddr, cfg.memlogInterval, log.Default()); err != nil {
 		return fmt.Errorf("start diagnostics: %w", err)
 	}
+	log.Printf("%s", mountStartupLogLine(cfg))
 	log.Printf("Mirror started at %s. Sync interval %s +/- %.0f%%. Public state: %s", cfg.localDir, cfg.interval.Round(time.Second), cfg.intervalJitter*100, filepath.Join(cfg.localDir, ".relay", "state.json"))
 
 	run := func(reconcile bool) {
@@ -357,21 +445,71 @@ func runSinglePollingMount(rootCtx context.Context, cfg mountConfig) error {
 	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
 	timer := time.NewTimer(jitteredIntervalWithSample(cfg.interval, cfg.intervalJitter, rng.Float64()))
 	defer timer.Stop()
+	wsTicker := time.NewTicker(mountsync.DefaultWebSocketMaintenanceEvery)
+	defer wsTicker.Stop()
 	cycle := 0
 	for {
 		select {
 		case <-rootCtx.Done():
 			log.Printf("mount sync stopping: %v", rootCtx.Err())
 			return nil
+		case <-wsTicker.C:
+			if mountWebSocketEnabled(cfg) {
+				ctx, cancel := context.WithTimeout(rootCtx, cfg.timeout)
+				if err := syncer.MaintainWebSocket(ctx); err != nil {
+					log.Printf("websocket unavailable; using polling sync: %v", err)
+				}
+				cancel()
+			}
 		case <-timer.C:
 			cycle++
-			reconcile := !cfg.websocketEnabled || cycle%websocketReconcileEvery == 0
+			reconcile := shouldReconcileMountCycle(mountWebSocketEnabled(cfg), cycle)
 			if reconcile {
 				run(true)
 			}
 			timer.Reset(jitteredIntervalWithSample(cfg.interval, cfg.intervalJitter, rng.Float64()))
 		}
 	}
+}
+
+type mountCredsFile struct {
+	Token string `json:"token"`
+}
+
+func readMountCredsToken(path string) (string, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return "", errors.New("path is required")
+	}
+	payload, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	var creds mountCredsFile
+	if err := json.Unmarshal(payload, &creds); err != nil {
+		return "", err
+	}
+	token := strings.TrimSpace(creds.Token)
+	if token == "" {
+		return "", errors.New("missing token")
+	}
+	return token, nil
+}
+
+func installCredsFileRefresh(client *mountsync.HTTPClient, cfg mountConfig) {
+	credsFile := strings.TrimSpace(cfg.credsFile)
+	if client == nil || credsFile == "" {
+		return
+	}
+	client.SetTokenRefreshFunc(func(currentToken string) (string, bool, error) {
+		token, err := readMountCredsToken(credsFile)
+		if err != nil {
+			log.Printf("relayfile creds-file refresh failed: %v", err)
+			return "", false, err
+		}
+		changed := token != strings.TrimSpace(currentToken)
+		return token, changed, nil
+	})
 }
 
 type repeatedStringFlag []string
@@ -445,21 +583,24 @@ func scopedLocalDir(localRoot, remotePath string) string {
 	return filepath.Join(localRoot, filepath.FromSlash(strings.TrimPrefix(remotePath, "/")))
 }
 
-func scopedStateFile(stateFile, remotePath string) string {
-	if strings.TrimSpace(stateFile) == "" {
-		return ""
+func mountStartupLogLine(cfg mountConfig) string {
+	layout := cfg.localLayout
+	if layout == "" {
+		layout = localLayoutExact
 	}
-	remotePath = normalizeMountRemotePath(remotePath)
-	if remotePath == "/" {
-		return stateFile
+	syncMode := cfg.syncMode
+	if syncMode == "" {
+		syncMode = syncModeMirror
 	}
-	ext := filepath.Ext(stateFile)
-	base := strings.TrimSuffix(stateFile, ext)
-	suffix := strings.NewReplacer("/", "-", "\\", "-", ":", "-").Replace(strings.Trim(remotePath, "/"))
-	if suffix == "" {
-		suffix = "root"
-	}
-	return base + "-" + suffix + ext
+	return fmt.Sprintf(
+		"mount layout=%s remote=%s local=%s sync=%s mode=%s state=%s",
+		layout,
+		normalizeMountRemotePath(cfg.remotePath),
+		cfg.localDir,
+		syncMode,
+		cfg.mode,
+		filepath.Join(cfg.localDir, ".relay", "state.json"),
+	)
 }
 
 // readBootstrapProgress reads the in-progress bootstrap block from the
@@ -624,6 +765,14 @@ func normalizeTokenScopes(raw any) []string {
 	return values
 }
 
+func shouldReconcileMountCycle(websocketEnabled bool, cycle int) bool {
+	return !websocketEnabled || cycle%websocketReconcileEvery == 0
+}
+
+func mountWebSocketEnabled(cfg mountConfig) bool {
+	return cfg.websocketEnabled && cfg.syncMode != syncModeWriteOnly
+}
+
 func clampJitterRatio(value float64) float64 {
 	if value < 0 {
 		return 0
@@ -634,13 +783,20 @@ func clampJitterRatio(value float64) float64 {
 	return value
 }
 
+func enforcePollIntervalFloor(interval time.Duration) time.Duration {
+	if interval > 0 && interval < minMountPollInterval {
+		return minMountPollInterval
+	}
+	return interval
+}
+
 func jitteredIntervalWithSample(base time.Duration, jitterRatio, sample float64) time.Duration {
 	if base <= 0 {
 		return 0
 	}
 	jitterRatio = clampJitterRatio(jitterRatio)
 	if jitterRatio == 0 {
-		return base
+		return enforcePollIntervalFloor(base)
 	}
 	if sample < 0 {
 		sample = 0
@@ -655,5 +811,5 @@ func jitteredIntervalWithSample(base time.Duration, jitterRatio, sample float64)
 	if delay < time.Millisecond {
 		return time.Millisecond
 	}
-	return delay
+	return enforcePollIntervalFloor(delay)
 }

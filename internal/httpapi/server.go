@@ -218,6 +218,16 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case len(parts) == 6 && parts[3] == "writeback" && parts[5] == "ack" && r.Method == http.MethodPost:
 		requiredScope = "sync:trigger"
 		route = "writeback_ack"
+	case len(parts) == 5 && parts[3] == "writeback" && parts[4] == "sweep-drafts" && r.Method == http.MethodPost:
+		// sync:trigger (not fs:write) is deliberate: the sweep is a
+		// writeback-lifecycle operation in the same family as
+		// /writeback/{id}/ack above, and the tokens operationally available
+		// to run it (mount / writeback-consumer tokens) carry sync:trigger.
+		// The destructive surface is compensated in the store: dry-run by
+		// default, strict draft name-shape matching, and provider-linked +
+		// pending-writeback guards.
+		requiredScope = "sync:trigger"
+		route = "writeback_sweep_drafts"
 	default:
 		writeError(w, http.StatusNotFound, "not_found", "route not found", getCorrelationID(r))
 		return
@@ -231,8 +241,14 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	scopePath := ""
 	if requiredScope == "fs:read" || requiredScope == "fs:write" {
 		switch route {
+		case "tree":
+			scopePath = normalizeRoutePath(r.URL.Query().Get("path"))
 		case "read_file", "write_file", "delete_file":
 			scopePath = strings.TrimSpace(r.URL.Query().Get("path"))
+		case "export", "query_files":
+			scopePath = normalizeRoutePath(r.URL.Query().Get("path"))
+		case "events":
+			scopePath = "/"
 		}
 	}
 	claims, authErr := authorizeBearer(r.Header.Get("Authorization"), s.bearerVerifier, workspaceID, requiredScope, scopePath, time.Now().UTC())
@@ -318,6 +334,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleWritebackPending(w, r, workspaceID, correlationID)
 	case "writeback_ack":
 		s.handleWritebackAck(w, r, workspaceID, parts[4], correlationID)
+	case "writeback_sweep_drafts":
+		s.handleWritebackSweepDrafts(w, r, workspaceID, correlationID)
 	default:
 		writeError(w, http.StatusNotFound, "not_found", "route not found", correlationID)
 	}
@@ -1811,6 +1829,12 @@ func (s *Server) handleDeleteFile(w http.ResponseWriter, r *http.Request, worksp
 			writeError(w, http.StatusNotFound, "not_found", err.Error(), correlationID)
 		case relayfile.ErrMissingPrecondition:
 			writeError(w, http.StatusPreconditionFailed, "precondition_failed", err.Error(), correlationID)
+		case relayfile.ErrDeleteStormRejected:
+			// #249: deliberate breaker trip, not a server fault — 429 tells
+			// well-behaved clients to back off and makes storms visible in
+			// access logs as a distinct class.
+			w.Header().Set("Retry-After", "60")
+			writeError(w, http.StatusTooManyRequests, "delete_storm_rejected", err.Error(), correlationID)
 		default:
 			writeError(w, http.StatusInternalServerError, "internal_error", err.Error(), correlationID)
 		}
@@ -2195,17 +2219,27 @@ func (s *Server) handleWritebackAck(w http.ResponseWriter, r *http.Request, work
 		return
 	}
 
-	success := false
-	if ok, ok2 := payload["success"].(bool); ok2 {
-		success = ok
+	ack := relayfile.WritebackAck{}
+	success, ok := payload["success"].(bool)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "bad_request", "success must be a boolean", correlationID)
+		return
 	}
-
-	errMsg := ""
+	ack.Success = success
 	if e, ok := payload["error"].(string); ok {
-		errMsg = e
+		ack.Error = e
+	}
+	// Issue #242: a successful ack may carry the provider-assigned id (and
+	// optionally the canonical projection path) so the service can reconcile
+	// the agent-authored draft file per the draftFile() rename contract.
+	if externalID, ok := payload["externalId"].(string); ok {
+		ack.ExternalID = externalID
+	}
+	if canonicalPath, ok := payload["canonicalPath"].(string); ok {
+		ack.CanonicalPath = canonicalPath
 	}
 
-	resp, err := s.store.AcknowledgeWriteback(workspaceID, itemID, success, errMsg, correlationID)
+	resp, err := s.store.AcknowledgeWriteback(workspaceID, itemID, ack, correlationID)
 	if err != nil {
 		if err == relayfile.ErrNotFound {
 			writeError(w, http.StatusNotFound, "not_found", err.Error(), correlationID)
@@ -2216,6 +2250,41 @@ func (s *Server) handleWritebackAck(w http.ResponseWriter, r *http.Request, work
 	}
 
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// handleWritebackSweepDrafts handles POST /v1/workspaces/{workspaceId}/writeback/sweep-drafts
+// One-time residue drain for accumulated writeback drafts (issue #242). Dry
+// run unless the body sets "apply": true. The sweep is classification-exempt:
+// it can never enqueue new writebacks.
+func (s *Server) handleWritebackSweepDrafts(w http.ResponseWriter, r *http.Request, workspaceID, correlationID string) {
+	var payload struct {
+		PathPrefix string   `json:"pathPrefix"`
+		Patterns   []string `json:"patterns"`
+		Apply      bool     `json:"apply"`
+	}
+	if !s.decodeJSONBody(w, r, correlationID, &payload) {
+		return
+	}
+
+	result, err := s.store.SweepWritebackDrafts(workspaceID, relayfile.SweepDraftsRequest{
+		PathPrefix:    payload.PathPrefix,
+		Patterns:      payload.Patterns,
+		Apply:         payload.Apply,
+		CorrelationID: correlationID,
+	})
+	if err != nil {
+		switch {
+		case errors.Is(err, relayfile.ErrInvalidInput):
+			writeError(w, http.StatusBadRequest, "bad_request", err.Error(), correlationID)
+		case errors.Is(err, relayfile.ErrNotFound):
+			writeError(w, http.StatusNotFound, "not_found", err.Error(), correlationID)
+		default:
+			writeError(w, http.StatusInternalServerError, "internal_error", err.Error(), correlationID)
+		}
+		return
+	}
+
+	writeJSON(w, http.StatusOK, result)
 }
 
 func getCorrelationID(r *http.Request) string {

@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 export interface ContentIdentity {
   kind: string;
   key: string;
+  ttlSeconds?: number;
 }
 
 export interface DedupEntry {

@@ -89,6 +89,8 @@ export interface WorkspaceMountEnvOptions {
 export type WorkspaceMountEnv = Record<string, string>
 
 export type MountMode = "poll" | "fuse"
+export type MountLocalLayout = "exact" | "scoped"
+export type MountSyncMode = "mirror" | "write-only"
 
 export interface MountSessionRequest {
   localDir: string
@@ -123,6 +125,8 @@ export interface MountSessionResult {
   remotePath: string
   localDir: string
   mode: MountMode
+  localLayout: MountLocalLayout
+  syncMode: MountSyncMode
   scopes: string[]
   tokenIssuedAt: string | null
   expiresAt: string | null
@@ -149,6 +153,8 @@ export interface ReadMountedWorkspaceStatusInput {
   workspaceId: string
   remotePath: string
   mode: MountMode
+  localLayout?: MountLocalLayout
+  syncMode?: MountSyncMode
   relayfileBaseUrl: string
   relayfileToken: string
   expiresAt: string | null
@@ -201,6 +207,8 @@ export interface MountWorkspaceInput {
   localDir: string
   remotePath?: string
   mode?: MountMode
+  localLayout?: MountLocalLayout
+  syncMode?: MountSyncMode
   background?: boolean
   agentName?: string
   scopes?: string[]

@@ -20,10 +20,12 @@ import {
   RelayfileSetupError
 } from "./setup-errors.js"
 import type {
+  MountLocalLayout,
   MountLauncher,
   MountLauncherInstance,
   MountLauncherStart,
   MountMode,
+  MountSyncMode,
   MountedWorkspaceStatus,
   ReadMountedWorkspaceStatusInput
 } from "./setup-types.js"
@@ -71,7 +73,9 @@ export function createDefaultMountLauncher(
 export async function readMountedWorkspaceStatus(
   input: ReadMountedWorkspaceStatusInput
 ): Promise<MountedWorkspaceStatus> {
-  const state = await readMountStateFile(input.localDir)
+  const state = await readMountStateFile(
+    resolveMountLocalDir(input.localDir, input.remotePath, input.localLayout)
+  )
   if (state && !isMountStateStale(state)) {
     return {
       ready: isMountStateReady(state),
@@ -102,7 +106,12 @@ async function startRelayfileMount(
   options: DefaultMountLauncherOptions
 ): Promise<MountLauncherInstance> {
   const localDir = path.resolve(input.env.RELAYFILE_LOCAL_DIR ?? process.cwd())
-  const relayDir = path.join(localDir, ".relay")
+  const mountLocalDir = resolveMountLocalDir(
+    localDir,
+    input.env.RELAYFILE_REMOTE_PATH,
+    input.env.RELAYFILE_MOUNT_LOCAL_LAYOUT
+  )
+  const relayDir = path.join(mountLocalDir, ".relay")
   const logPath = path.join(relayDir, "mount.log")
   const pidPath = path.join(relayDir, "mount.pid")
   await mkdir(relayDir, { recursive: true })
@@ -111,7 +120,7 @@ async function startRelayfileMount(
   const command = await resolveRelayfileMountCommand()
   const args = input.background === false ? ["--once"] : []
   const child = (options.spawnImpl ?? spawn)(command, args, {
-    cwd: input.cwd ?? localDir,
+    cwd: input.cwd ?? mountLocalDir,
     env: {
       ...process.env,
       ...input.env
@@ -133,7 +142,7 @@ async function startRelayfileMount(
     pidPath,
     outputBuffer,
     input,
-    localDir,
+    localDir: mountLocalDir,
     now: options.now ?? Date.now,
     readyPollIntervalMs:
       options.readyPollIntervalMs ?? DEFAULT_READY_POLL_INTERVAL_MS
@@ -190,6 +199,8 @@ class RelayfileMountProcessInstance implements MountLauncherInstance {
       workspaceId: this.input.env.RELAYFILE_WORKSPACE ?? "",
       remotePath: this.input.env.RELAYFILE_REMOTE_PATH ?? "/",
       mode: normalizeMountMode(this.input.env.RELAYFILE_MOUNT_MODE) ?? "poll",
+      localLayout: normalizeMountLocalLayout(this.input.env.RELAYFILE_MOUNT_LOCAL_LAYOUT),
+      syncMode: normalizeMountSyncMode(this.input.env.RELAYFILE_MOUNT_SYNC_MODE),
       relayfileBaseUrl: this.input.env.RELAYFILE_BASE_URL ?? "",
       relayfileToken: this.input.env.RELAYFILE_TOKEN ?? "",
       expiresAt: null,
@@ -358,6 +369,42 @@ function isMountStateStale(state: MountStateFile): boolean {
 
 function normalizeMountMode(mode?: string): MountMode | undefined {
   return mode === "fuse" ? "fuse" : mode === "poll" ? "poll" : undefined
+}
+
+function normalizeMountLocalLayout(layout?: string): MountLocalLayout {
+  return layout === "scoped" ? "scoped" : "exact"
+}
+
+function normalizeMountSyncMode(mode?: string): MountSyncMode {
+  return mode === "write-only" ? "write-only" : "mirror"
+}
+
+function resolveMountLocalDir(
+  localDir: string,
+  remotePath?: string,
+  localLayout?: string
+): string {
+  const root = path.resolve(localDir)
+  if (normalizeMountLocalLayout(localLayout) !== "scoped") {
+    return root
+  }
+  const normalizedRemote = normalizeRemotePath(remotePath)
+  if (normalizedRemote === "/") {
+    return root
+  }
+  return path.join(root, ...normalizedRemote.split("/").filter(Boolean))
+}
+
+function normalizeRemotePath(remotePath?: string): string {
+  const trimmed = typeof remotePath === "string" ? remotePath.trim() : ""
+  if (!trimmed || trimmed === "/") {
+    return "/"
+  }
+  const slashNormalized = trimmed.replace(/\\/g, "/")
+  const normalized = path.posix.normalize(
+    slashNormalized.startsWith("/") ? slashNormalized : `/${slashNormalized}`
+  )
+  return normalized === "/" ? "/" : normalized.replace(/\/+$/, "")
 }
 
 function normalizeIsoString(value: unknown): string | undefined {

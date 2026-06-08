@@ -36,10 +36,12 @@ import {
   type JoinWorkspaceOptions,
   type MountLauncher,
   type MountLauncherInstance,
+  type MountLocalLayout,
   type MountMode,
   type MountSessionRequest,
   type MountSessionResponse,
   type MountSessionResult,
+  type MountSyncMode,
   type MountedWorkspaceHandle,
   type MountedWorkspaceStatus,
   type MountWorkspaceInput,
@@ -68,6 +70,8 @@ const DEFAULT_WAIT_INTERVAL_MS = 2_000
 const DEFAULT_WAIT_TIMEOUT_MS = 300_000
 const DEFAULT_MOUNT_READY_TIMEOUT_MS = 60_000
 const DEFAULT_MOUNT_AGENT_NAME = "relayfile-mount"
+const DEFAULT_MOUNT_LOCAL_LAYOUT: MountLocalLayout = "exact"
+const DEFAULT_MOUNT_SYNC_MODE: MountSyncMode = "mirror"
 const TOKEN_REFRESH_AGE_MS = 55 * 60 * 1000
 
 const nodeOnlyMountLauncher: MountLauncher = {
@@ -137,6 +141,8 @@ interface NormalizedMountWorkspaceInput {
   localDir: string
   remotePath: string
   mode: MountMode
+  localLayout: MountLocalLayout
+  syncMode: MountSyncMode
   background: boolean
   agentName?: string
   scopes?: string[]
@@ -341,6 +347,8 @@ export class RelayfileSetup {
       localDir: normalized.localDir,
       remotePath: normalized.remotePath,
       mode: normalized.mode,
+      localLayout: normalized.localLayout,
+      syncMode: normalized.syncMode,
       background: normalized.background,
       agentName: normalized.agentName,
       scopes: normalized.scopes,
@@ -488,7 +496,7 @@ export class RelayfileSetup {
     })
 
     try {
-      return validateMountSessionResponse(
+      const session = validateMountSessionResponse(
         await workspace.requestJson({
           operation: "mountWorkspace",
           method: "POST",
@@ -498,6 +506,11 @@ export class RelayfileSetup {
         }),
         input.localDir
       )
+      return {
+        ...session,
+        localLayout: input.localLayout,
+        syncMode: input.syncMode
+      }
     } catch (error) {
       throw mapMountSessionError(error, request)
     }
@@ -1128,6 +1141,8 @@ class MountedWorkspaceHandleImpl implements MountedWorkspaceHandle {
       workspaceId: this.workspaceId,
       remotePath: this.remotePath,
       mode: this.mode,
+      localLayout: this.mountSession.localLayout,
+      syncMode: this.mountSession.syncMode,
       relayfileBaseUrl: this.mountSession.relayfileBaseUrl,
       relayfileToken: this.mountSession.relayfileToken,
       expiresAt: this.expiresAt,
@@ -1275,6 +1290,8 @@ function validateMountSessionResponse(
     remotePath: requireStringField(payload, "remotePath"),
     localDir,
     mode: requireMountModeField(payload, "mode"),
+    localLayout: DEFAULT_MOUNT_LOCAL_LAYOUT,
+    syncMode: DEFAULT_MOUNT_SYNC_MODE,
     scopes: requireStringArrayField(payload, "scopes"),
     tokenIssuedAt: readNullableStringField(payload, "tokenIssuedAt"),
     expiresAt: readNullableStringField(payload, "expiresAt"),
@@ -1387,6 +1404,8 @@ function normalizeMountWorkspaceInput(
     localDir: resolveLocalDir(localDir),
     remotePath: normalizeMountRemotePath(input.remotePath),
     mode: normalizeMountModeInput(input.mode),
+    localLayout: normalizeMountLocalLayoutInput(input.localLayout),
+    syncMode: normalizeMountSyncModeInput(input.syncMode),
     background: input.background !== false,
     agentName: normalizeNonEmptyString(input.agentName),
     scopes:
@@ -1419,6 +1438,26 @@ function normalizeMountModeInput(mode?: string): MountMode {
   const normalized = normalizeNonEmptyString(mode) ?? "poll"
   if (normalized !== "poll" && normalized !== "fuse") {
     throw new InvalidMountModeError(normalized)
+  }
+  return normalized
+}
+
+function normalizeMountLocalLayoutInput(layout?: string): MountLocalLayout {
+  const normalized = normalizeNonEmptyString(layout) ?? DEFAULT_MOUNT_LOCAL_LAYOUT
+  if (normalized !== "exact" && normalized !== "scoped") {
+    throw new MountSessionInputError(
+      `Invalid localLayout "${normalized}" for mount session.`
+    )
+  }
+  return normalized
+}
+
+function normalizeMountSyncModeInput(mode?: string): MountSyncMode {
+  const normalized = normalizeNonEmptyString(mode) ?? DEFAULT_MOUNT_SYNC_MODE
+  if (normalized !== "mirror" && normalized !== "write-only") {
+    throw new MountSessionInputError(
+      `Invalid syncMode "${normalized}" for mount session.`
+    )
   }
   return normalized
 }
@@ -1545,6 +1584,8 @@ function buildMountedWorkspaceEnv(
     RELAYFILE_REMOTE_PATH: mountSession.remotePath,
     RELAYFILE_LOCAL_DIR: mountSession.localDir,
     RELAYFILE_MOUNT_MODE: mountSession.mode,
+    RELAYFILE_MOUNT_LOCAL_LAYOUT: mountSession.localLayout,
+    RELAYFILE_MOUNT_SYNC_MODE: mountSession.syncMode,
     RELAYCAST_API_KEY: mountSession.relaycastApiKey,
     RELAY_API_KEY: mountSession.relaycastApiKey,
     RELAYCAST_BASE_URL: relaycastBaseUrl,

@@ -82,13 +82,13 @@ async function waitForWebSocket(): Promise<ProactiveMockWebSocket> {
 
 async function waitForExpectation(check: () => void): Promise<void> {
   let lastError: unknown;
-  for (let attempt = 0; attempt < 20; attempt += 1) {
+  for (let attempt = 0; attempt < 500; attempt += 1) {
     try {
       check();
       return;
     } catch (error) {
       lastError = error;
-      await new Promise((resolve) => setTimeout(resolve, 0));
+      await new Promise((resolve) => setTimeout(resolve, 10));
     }
   }
   throw lastError;
@@ -259,8 +259,11 @@ describe("RelayFileClient — existing methods", () => {
         { coalesce: "none" },
       );
 
-      const socket = await waitForWebSocket();
-      expect(ProactiveMockWebSocket.instances).toHaveLength(1);
+      await waitForExpectation(() => {
+        const lastSocket = ProactiveMockWebSocket.instances[ProactiveMockWebSocket.instances.length - 1];
+        expect(lastSocket?.url).toBe("wss://relay.test/v1/workspaces/ws_acme/fs/ws?token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ3b3Jrc3BhY2VfaWQiOiJ3c19hY21lIiwiYWdlbnRfbmFtZSI6InN1cHBvcnQtYWdlbnQiLCJhdWQiOlsicmVsYXlmaWxlIl19.sig&from=now&path=%2Flinear%2F**&path=%2Flinear%2Fissues%2F**");
+      });
+      const socket = ProactiveMockWebSocket.instances[ProactiveMockWebSocket.instances.length - 1]!;
       socket.emit("open", {});
       socket.emit("message", {
         data: JSON.stringify({
@@ -1173,10 +1176,18 @@ describe("RelayFileClient — existing methods", () => {
         path: "/github/push/abc123.json",
         baseRevision: "rev_3",
         content: "{}",
-        contentIdentity: { kind: "github.push", key: "abc123" },
+        contentIdentity: {
+          kind: "github.push",
+          key: "abc123",
+          ttlSeconds: 2592000,
+        },
       });
       const body = JSON.parse((f.mock.calls[0]![1] as RequestInit).body as string);
-      expect(body.contentIdentity).toEqual({ kind: "github.push", key: "abc123" });
+      expect(body.contentIdentity).toEqual({
+        kind: "github.push",
+        key: "abc123",
+        ttlSeconds: 2592000,
+      });
     });
 
     it("omits contentIdentity from the body when not provided", async () => {
@@ -1267,7 +1278,15 @@ describe("RelayFileClient — existing methods", () => {
       const res: BulkWriteResponse = await client.bulkWrite({
         workspaceId: "ws_acme",
         files: [
-          { path: "/a.md", content: "a" },
+          {
+            path: "/a.md",
+            content: "a",
+            contentIdentity: {
+              kind: "mount-writeback-create-draft",
+              key: "ws_acme:/a.md:hash",
+              ttlSeconds: 2592000,
+            },
+          },
           { path: "/b.md", content: "b", encoding: "utf-8" },
         ],
       });
@@ -1289,7 +1308,15 @@ describe("RelayFileClient — existing methods", () => {
       expect(init.method).toBe("POST");
       expect(JSON.parse(init.body as string)).toEqual({
         files: [
-          { path: "/a.md", content: "a" },
+          {
+            path: "/a.md",
+            content: "a",
+            contentIdentity: {
+              kind: "mount-writeback-create-draft",
+              key: "ws_acme:/a.md:hash",
+              ttlSeconds: 2592000,
+            },
+          },
           { path: "/b.md", content: "b", encoding: "utf-8" },
         ],
       });
@@ -1385,7 +1412,20 @@ describe("RelayFileClient — existing methods", () => {
       client.connectWebSocket("ws_acme", { token: "ws_token" });
 
       expect(MockWebSocket.instances).toHaveLength(1);
-      expect(MockWebSocket.instances[0]!.url).toBe("wss://relay.test/v1/workspaces/ws_acme/fs/ws?token=ws_token");
+      expect(MockWebSocket.instances[0]!.url).toBe("wss://relay.test/v1/workspaces/ws_acme/fs/ws?token=ws_token&from=now");
+    });
+
+    it("forwards cursor and path filters to the WebSocket endpoint", () => {
+      const client = makeClient(mockFetch({ path: "/", entries: [], nextCursor: null }));
+
+      client.connectWebSocket("ws_acme", {
+        token: "ws_token",
+        cursor: "evt_42",
+        paths: ["/slack/channels/C1/**", "/github/repos/acme/api/pulls/*"]
+      });
+
+      expect(MockWebSocket.instances).toHaveLength(1);
+      expect(MockWebSocket.instances[0]!.url).toBe("wss://relay.test/v1/workspaces/ws_acme/fs/ws?token=ws_token&cursor=evt_42&path=%2Fslack%2Fchannels%2FC1%2F**&path=%2Fgithub%2Frepos%2Facme%2Fapi%2Fpulls%2F*");
     });
 
     it("emits parsed filesystem events to the event handler", () => {

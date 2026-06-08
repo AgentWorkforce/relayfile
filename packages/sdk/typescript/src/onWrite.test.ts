@@ -119,7 +119,7 @@ describe("onWrite", () => {
       );
 
       expect(sockets).toHaveLength(1);
-      expect(sockets[0]!.url).toBe("wss://api.relayfile.dev/v1/workspaces/ws_acme/fs/ws?token=tok_test");
+      expect(sockets[0]!.url).toBe("wss://api.relayfile.dev/v1/workspaces/ws_acme/fs/ws?token=tok_test&from=now");
 
       sockets[0]!.emit("open", {});
       emitFilesystemEvent(sockets[0]!, "/notion/pages/calls/call-1/transcript");

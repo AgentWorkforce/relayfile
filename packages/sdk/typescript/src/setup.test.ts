@@ -1203,6 +1203,8 @@ describe("RelayfileSetup", () => {
         RELAYFILE_REMOTE_PATH: "/notion",
         RELAYFILE_LOCAL_DIR: localDir,
         RELAYFILE_MOUNT_MODE: "poll",
+        RELAYFILE_MOUNT_LOCAL_LAYOUT: "exact",
+        RELAYFILE_MOUNT_SYNC_MODE: "mirror",
         RELAYCAST_API_KEY: "rc_mount",
         RELAY_API_KEY: "rc_mount",
         RELAYCAST_BASE_URL: "https://relaycast.mount.test",
@@ -1234,11 +1236,58 @@ describe("RelayfileSetup", () => {
         RELAYFILE_WORKSPACE: "ws_123",
         RELAYFILE_REMOTE_PATH: "/notion",
         RELAYFILE_LOCAL_DIR: localDir,
-        RELAYFILE_MOUNT_MODE: "poll"
+        RELAYFILE_MOUNT_MODE: "poll",
+        RELAYFILE_MOUNT_LOCAL_LAYOUT: "exact",
+        RELAYFILE_MOUNT_SYNC_MODE: "mirror"
       })
 
       await handle.stop()
       expect(instance.stop).toHaveBeenCalledTimes(1)
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true })
+    }
+  })
+
+  it("passes explicit local layout and sync mode only to the local mount launcher", async () => {
+    const tempRoot = await mkdtemp(
+      path.join(os.tmpdir(), "relayfile-sdk-mount-workspace-contract-")
+    )
+    const localDir = path.join(tempRoot, "mirror")
+    const fetchMock = queueFetch(
+      makeJoinResponse("rf_jwt_joined"),
+      makeMountSessionResponse({
+        remotePath: "/slack/channels/C123/messages"
+      })
+    )
+    const { launcher, readyControl } = createLauncherStub()
+
+    try {
+      const setup = new RelayfileSetup()
+      const workspace = await setup.joinWorkspace("ws_123")
+      readyControl.resolve()
+      await setup.mountWorkspace({
+        workspace,
+        localDir,
+        remotePath: "/slack/channels/C123/messages",
+        mode: "poll",
+        localLayout: "scoped",
+        syncMode: "write-only",
+        launcher
+      })
+
+      const launcherStart = (launcher.start as ReturnType<typeof vi.fn>).mock.calls[0][0]
+      expect(launcherStart.env).toMatchObject({
+        RELAYFILE_REMOTE_PATH: "/slack/channels/C123/messages",
+        RELAYFILE_LOCAL_DIR: localDir,
+        RELAYFILE_MOUNT_LOCAL_LAYOUT: "scoped",
+        RELAYFILE_MOUNT_SYNC_MODE: "write-only"
+      })
+      expect(readRequestBody(fetchMock, 1)).toEqual({
+        localDir,
+        remotePath: "/slack/channels/C123/messages",
+        mode: "poll",
+        agentName: "relayfile-mount"
+      })
     } finally {
       await rm(tempRoot, { recursive: true, force: true })
     }

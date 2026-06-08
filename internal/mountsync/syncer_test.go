@@ -1,6 +1,7 @@
 package mountsync
 
 import (
+	"archive/tar"
 	"bytes"
 	"context"
 	"crypto"
@@ -48,6 +49,115 @@ func markLocalDirtyForTest(t *testing.T, syncer *Syncer, remotePath, localPath s
 	tracked.Dirty = true
 	tracked.DeletePending = false
 	syncer.state.Files[normalizeRemotePath(remotePath)] = tracked
+}
+
+func TestHTTPClientRetryDelayHonorsRetryAfter(t *testing.T) {
+	client := NewHTTPClient("https://example.test", "token", nil)
+	if got := client.retryDelay(1, "30"); got != 30*time.Second {
+		t.Fatalf("expected Retry-After 30s, got %s", got)
+	}
+	if got := client.retryDelay(1, "999"); got != defaultRetryAfterMaxDelay {
+		t.Fatalf("expected Retry-After cap %s, got %s", defaultRetryAfterMaxDelay, got)
+	}
+}
+
+func TestWebSocketReconnectDelayBounds(t *testing.T) {
+	if got := websocketReconnectDelay(1); got < defaultWebSocketReconnectBase || got > defaultWebSocketReconnectBase+defaultWebSocketReconnectJitter {
+		t.Fatalf("first reconnect delay out of bounds: %s", got)
+	}
+	if got := websocketReconnectDelay(20); got < defaultWebSocketReconnectMax-defaultWebSocketReconnectJitter || got > defaultWebSocketReconnectMax {
+		t.Fatalf("capped reconnect delay out of bounds: %s", got)
+	}
+}
+
+func TestWebSocketConnectDueRespectsScheduledBackoff(t *testing.T) {
+	syncer := &Syncer{websocket: true}
+	now := time.Now()
+	if !syncer.websocketConnectDueLocked(now) {
+		t.Fatal("expected websocket connect to be due before a backoff is scheduled")
+	}
+	syncer.wsNextAttempt = now.Add(time.Minute)
+	if syncer.websocketConnectDueLocked(now) {
+		t.Fatal("expected websocket connect to wait for scheduled backoff")
+	}
+	syncer.wsNextAttempt = time.Time{}
+	syncer.wsConnecting = true
+	if syncer.websocketConnectDueLocked(now) {
+		t.Fatal("expected websocket connect to wait while another dial is in progress")
+	}
+}
+
+func TestMaintainWebSocketHonorsRetryAfter(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "17")
+		http.Error(w, "busy", http.StatusTooManyRequests)
+	}))
+	defer server.Close()
+
+	client := NewHTTPClient(server.URL, "token", server.Client())
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_retry_after",
+		RemoteRoot:  "/",
+		LocalRoot:   t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer failed: %v", err)
+	}
+
+	before := time.Now()
+	if err := syncer.MaintainWebSocket(context.Background()); err == nil {
+		t.Fatal("expected websocket dial to fail")
+	}
+
+	syncer.mu.Lock()
+	nextAttempt := syncer.wsNextAttempt
+	connecting := syncer.wsConnecting
+	syncer.mu.Unlock()
+
+	if connecting {
+		t.Fatal("expected websocket connecting flag to be cleared after failed dial")
+	}
+	if nextAttempt.Before(before.Add(16*time.Second)) || nextAttempt.After(before.Add(18*time.Second)) {
+		t.Fatalf("expected Retry-After based reconnect around 17s, got %s from now", time.Until(nextAttempt))
+	}
+}
+
+func TestWebSocketConnectFailureDoesNotClearNewGeneration(t *testing.T) {
+	syncer := &Syncer{
+		websocket:    true,
+		wsConnecting: true,
+		wsGeneration: 2,
+	}
+
+	syncer.finishWebSocketConnectFailure(1, 17*time.Second)
+
+	syncer.mu.Lock()
+	defer syncer.mu.Unlock()
+	if !syncer.wsConnecting {
+		t.Fatal("stale dial failure cleared the current generation's connecting flag")
+	}
+	if !syncer.wsNextAttempt.IsZero() {
+		t.Fatalf("stale dial failure scheduled backoff for current generation: %s", syncer.wsNextAttempt)
+	}
+}
+
+func TestResetWebSocketInvalidatesInFlightDialGeneration(t *testing.T) {
+	syncer := &Syncer{
+		websocket:    true,
+		wsConnecting: true,
+	}
+
+	syncer.ResetWebSocket()
+	syncer.finishWebSocketConnectFailure(0, 17*time.Second)
+
+	syncer.mu.Lock()
+	defer syncer.mu.Unlock()
+	if syncer.wsGeneration != 1 {
+		t.Fatalf("expected reset to advance websocket generation, got %d", syncer.wsGeneration)
+	}
+	if !syncer.wsNextAttempt.IsZero() {
+		t.Fatalf("stale dial scheduled backoff after reset: %s", syncer.wsNextAttempt)
+	}
 }
 
 type fakeProviderLayoutRegistrar struct {
@@ -112,6 +222,69 @@ func TestSyncOncePullsRemoteAndPushesLocalEdits(t *testing.T) {
 	}
 	if remote.Revision == "rev_1" {
 		t.Fatalf("expected remote revision to advance")
+	}
+}
+
+func TestSyncOnceWriteOnlySkipsRemotePullButPushesLocalFiles(t *testing.T) {
+	client := &fakeClient{
+		files: map[string]RemoteFile{
+			"/slack/channels/C123/messages/history.json": {
+				Path:        "/slack/channels/C123/messages/history.json",
+				Revision:    "rev_1",
+				ContentType: "application/json",
+				Content:     `{"text":"history"}`,
+			},
+		},
+		revisionCounter: 1,
+	}
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_write_only",
+		RemoteRoot:  "/slack/channels/C123/messages",
+		LocalRoot:   localDir,
+		SyncMode:    "write-only",
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+
+	localDraft := filepath.Join(localDir, "wb-pear-ack.json")
+	if err := os.WriteFile(localDraft, []byte(`{"text":"ack"}`), 0o644); err != nil {
+		t.Fatalf("write local draft failed: %v", err)
+	}
+
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("write-only sync failed: %v", err)
+	}
+
+	if client.listTreeCalls != 0 || client.listEventsCalls != 0 || client.readFileCalls != 0 {
+		t.Fatalf("write-only sync should not pull remote records; tree=%d events=%d read=%d", client.listTreeCalls, client.listEventsCalls, client.readFileCalls)
+	}
+	if got := len(client.bulkWriteBatches); got != 1 {
+		t.Fatalf("expected one bulk write batch, got %d", got)
+	}
+	if got, want := client.bulkWriteBatches[0][0].Path, "/slack/channels/C123/messages/wb-pear-ack.json"; got != want {
+		t.Fatalf("expected canonical write path %q, got %q", want, got)
+	}
+	if _, err := os.Stat(filepath.Join(localDir, ".relay", "dead-letter")); err != nil {
+		t.Fatalf("expected write-only mount to keep dead-letter feedback dir: %v", err)
+	}
+	var public struct {
+		Mode     string `json:"mode"`
+		SyncMode string `json:"syncMode"`
+	}
+	data, err := os.ReadFile(filepath.Join(localDir, ".relay", "state.json"))
+	if err != nil {
+		t.Fatalf("read public state: %v", err)
+	}
+	if err := json.Unmarshal(data, &public); err != nil {
+		t.Fatalf("decode public state: %v", err)
+	}
+	if public.Mode != "poll" || public.SyncMode != "write-only" {
+		t.Fatalf("expected public state mode poll/write-only, got %+v", public)
+	}
+	if _, err := os.Stat(filepath.Join(localDir, "history.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("write-only sync mirrored provider history, stat err=%v", err)
 	}
 }
 
@@ -402,6 +575,18 @@ func TestIsUnderLazyGithubRepoSubtree(t *testing.T) {
 			want:       false,
 		},
 		{
+			name:       "slack integration",
+			remoteRoot: "/",
+			remotePath: "/slack/channels/C123/messages/1711111000_000100.json",
+			want:       false,
+		},
+		{
+			name:       "memory integration",
+			remoteRoot: "/",
+			remotePath: "/memory/workspace/daily-ship.md",
+			want:       false,
+		},
+		{
 			name:       "root github dir",
 			remoteRoot: "/",
 			remotePath: "/github",
@@ -412,6 +597,30 @@ func TestIsUnderLazyGithubRepoSubtree(t *testing.T) {
 			remoteRoot: "/relay",
 			remotePath: "/relay/github/repos/octocat/hello-world/issues/issue-1.json",
 			want:       true,
+		},
+		{
+			name:       "scoped org remote root repo subtree file",
+			remoteRoot: "/github/repos/AgentWorkforce",
+			remotePath: "/github/repos/AgentWorkforce/cloud/pulls/123.json",
+			want:       true,
+		},
+		{
+			name:       "scoped org and repo remote root repo subtree file",
+			remoteRoot: "/github/repos/AgentWorkforce/cloud/pulls",
+			remotePath: "/github/repos/AgentWorkforce/cloud/pulls/123.json",
+			want:       true,
+		},
+		{
+			name:       "scoped org remote root repo root",
+			remoteRoot: "/github/repos/AgentWorkforce",
+			remotePath: "/github/repos/AgentWorkforce/cloud",
+			want:       false,
+		},
+		{
+			name:       "outside scoped org remote root",
+			remoteRoot: "/github/repos/AgentWorkforce",
+			remotePath: "/github/repos/OtherOrg/cloud/pulls/123.json",
+			want:       false,
 		},
 	}
 
@@ -712,6 +921,7 @@ func TestExportSnapshotOverloadedClassification(t *testing.T) {
 		&HTTPError{StatusCode: 503, Message: "Worker overloaded"},
 		errors.New("http 500 internal_error: Durable Object is overloaded. Requests queued for too long."),
 		&HTTPError{StatusCode: 413, Code: "payload_too_large", Message: "workspace export body is 3524788058 bytes, which exceeds the export body limit of 134217728; use paginated tree/read APIs instead"},
+		&HTTPError{StatusCode: 429, Code: "workspace_busy", Message: "workspace durable object is busy; retry after the advertised delay"},
 	}
 	for _, err := range unsupported {
 		if !exportSnapshotUnsupported(err) {
@@ -722,6 +932,8 @@ func TestExportSnapshotOverloadedClassification(t *testing.T) {
 	supported := []error{
 		&HTTPError{StatusCode: 500, Code: "internal_error", Message: "boom"},
 		&HTTPError{StatusCode: 502, Message: "bad gateway"},
+		&HTTPError{StatusCode: 429, Code: "rate_limited", Message: "rate limit exceeded"},
+		&HTTPError{StatusCode: 429, Code: "queue_full", Message: "cloud write queue is full"},
 		errors.New("http2: server sent GOAWAY and closed the connection"),
 	}
 	for _, err := range supported {
@@ -774,6 +986,245 @@ func TestReconcileFallsBackToTreeWhenExportPayloadTooLarge(t *testing.T) {
 		t.Fatalf("expected tree fallback to read one file, got %d calls", client.readFileCalls)
 	}
 	assertLocalFileContent(t, filepath.Join(localDir, "Docs", "A.md"), "# A")
+}
+
+// TestReconcileFallsBackToTreeWhenExportExceedsSubDeadline is the core #1499/
+// #1516 convergence regression: a slow atomic export that would otherwise run
+// until the no-progress bootstrap watchdog cancels it (with zero files applied
+// and no resume cursor -> permanent "non-empty without completed bootstrap"
+// loop) must instead hit its OWN short sub-deadline while the bootstrap ctx is
+// still alive, and fall through to the resumable, per-page pullRemoteFullTree.
+func TestReconcileFallsBackToTreeWhenExportExceedsSubDeadline(t *testing.T) {
+	base := &fakeClient{
+		files: map[string]RemoteFile{
+			"/notion/Docs/A.md": {
+				Path:        "/notion/Docs/A.md",
+				Revision:    "rev_1",
+				ContentType: "text/markdown",
+				Content:     "# A",
+			},
+		},
+	}
+	client := &fakeExportClient{fakeClient: base, exportBlockUntilCancel: true}
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID:   "ws_slow_export",
+		RemoteRoot:    "/notion",
+		LocalRoot:     localDir,
+		ExportTimeout: 50 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+
+	if err := syncer.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile should fall back to tree after export sub-deadline: %v", err)
+	}
+
+	if client.exportCalls != 1 {
+		t.Fatalf("expected one export snapshot attempt, got %d", client.exportCalls)
+	}
+	if base.listTreeCalls != 1 {
+		t.Fatalf("expected slow export to fall back to list tree once, got %d calls", base.listTreeCalls)
+	}
+	if client.readFileCalls != 1 {
+		t.Fatalf("expected tree fallback to read one file, got %d calls", client.readFileCalls)
+	}
+	assertLocalFileContent(t, filepath.Join(localDir, "Docs", "A.md"), "# A")
+	if !syncer.state.BootstrapComplete {
+		t.Fatalf("tree fallback should complete the bootstrap; loop would otherwise persist")
+	}
+}
+
+// TestReconcileFallsBackToTreeWhenExportExceedsHardBootstrapCap covers the
+// companion clamp: when a positive RELAYFILE_BOOTSTRAP_TIMEOUT (hard cap) is
+// shorter than the configured export sub-deadline, exportTimeout is clamped
+// below the hard cap so the export still yields to the resumable tree pull
+// while the parent bootstrap ctx is alive (rather than the hard cap cancelling
+// the parent first and propagating instead of falling through).
+func TestReconcileFallsBackToTreeWhenExportExceedsHardBootstrapCap(t *testing.T) {
+	base := &fakeClient{
+		files: map[string]RemoteFile{
+			"/notion/Docs/A.md": {
+				Path:        "/notion/Docs/A.md",
+				Revision:    "rev_1",
+				ContentType: "text/markdown",
+				Content:     "# A",
+			},
+		},
+	}
+	client := &fakeExportClient{fakeClient: base, exportBlockUntilCancel: true}
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID:      "ws_slow_export_hard_cap",
+		RemoteRoot:       "/notion",
+		LocalRoot:        localDir,
+		BootstrapTimeout: 200 * time.Millisecond,
+		ExportTimeout:    time.Second,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+
+	if err := syncer.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile should fall back to tree before hard bootstrap cap: %v", err)
+	}
+	if client.exportCalls != 1 {
+		t.Fatalf("expected one export snapshot attempt, got %d", client.exportCalls)
+	}
+	if base.listTreeCalls != 1 {
+		t.Fatalf("expected hard-cap-clamped export to fall back to list tree once, got %d calls", base.listTreeCalls)
+	}
+	assertLocalFileContent(t, filepath.Join(localDir, "Docs", "A.md"), "# A")
+	if !syncer.state.BootstrapComplete {
+		t.Fatalf("tree fallback should complete the bootstrap before the hard cap")
+	}
+}
+
+// TestReconcileFallsBackToTreeWhenExportWorkspaceBusy covers the HTTP 429
+// workspace_busy signal (ProbeV085's prod evidence): after doJSON exhausts its
+// Retry-After backoff, the busy DO surfaces a 429 that must fall through to the
+// per-file-bounded tree path instead of retrying the contended atomic export.
+func TestReconcileFallsBackToTreeWhenExportWorkspaceBusy(t *testing.T) {
+	base := &fakeClient{
+		files: map[string]RemoteFile{
+			"/notion/Docs/A.md": {
+				Path:        "/notion/Docs/A.md",
+				Revision:    "rev_1",
+				ContentType: "text/markdown",
+				Content:     "# A",
+			},
+		},
+	}
+	client := &fakeExportClient{
+		fakeClient: base,
+		exportErr: &HTTPError{
+			StatusCode: 429,
+			Code:       "workspace_busy",
+			Message:    "workspace durable object is busy; retry after the advertised delay",
+		},
+	}
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_busy_export",
+		RemoteRoot:  "/notion",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+
+	if err := syncer.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile should fall back to tree after 429 workspace_busy: %v", err)
+	}
+	if client.exportCalls != 1 {
+		t.Fatalf("expected one export snapshot attempt, got %d", client.exportCalls)
+	}
+	if base.listTreeCalls != 1 {
+		t.Fatalf("expected 429 workspace_busy to fall back to list tree once, got %d calls", base.listTreeCalls)
+	}
+	assertLocalFileContent(t, filepath.Join(localDir, "Docs", "A.md"), "# A")
+}
+
+// TestExportEmptyButPopulatedTreeRecoversViaTreePull covers the empty-200
+// export (ProbeV085's "fresh remote export has 0 files but N tracked locally"):
+// a successful-but-empty export for a workspace we KNOW has tracked files must
+// NOT markBootstrapComplete (locking in the stale/empty mirror); it falls
+// through to the tree pull, which re-reads the real content via a different
+// cloud code path and recovers.
+func TestExportEmptyButPopulatedTreeRecoversViaTreePull(t *testing.T) {
+	disableWS := false
+	base := &fakeClient{
+		files: map[string]RemoteFile{
+			"/notion/Docs/A.md": {
+				Path:        "/notion/Docs/A.md",
+				Revision:    "rev_1",
+				ContentType: "text/markdown",
+				Content:     "# A",
+			},
+		},
+	}
+	client := &fakeExportClient{fakeClient: base, exportReturnsEmpty: true}
+	localDir := t.TempDir()
+	stateFile := filepath.Join(localDir, ".relayfile-mount-state.json")
+	if err := writeMountState(stateFile, mountState{
+		Files: map[string]trackedFile{
+			"/notion/Docs/A.md": {Revision: "rev_1", ContentType: "text/markdown", Hash: hashString("# A")},
+		},
+	}); err != nil {
+		t.Fatalf("seed state: %v", err)
+	}
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_empty200_export",
+		RemoteRoot:  "/notion",
+		LocalRoot:   localDir,
+		StateFile:   stateFile,
+		WebSocket:   &disableWS,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+
+	if err := syncer.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile should recover via tree pull after empty-200 export: %v", err)
+	}
+	if client.exportCalls != 1 {
+		t.Fatalf("expected one export snapshot attempt, got %d", client.exportCalls)
+	}
+	if base.listTreeCalls != 1 {
+		t.Fatalf("expected empty-200 export to fall back to list tree once, got %d calls", base.listTreeCalls)
+	}
+	assertLocalFileContent(t, filepath.Join(localDir, "Docs", "A.md"), "# A")
+	if !syncer.state.BootstrapComplete {
+		t.Fatalf("tree recovery should complete bootstrap; empty export must not have short-circuited it")
+	}
+}
+
+// TestFailedExportDoesNotAdvanceCursorOrCompleteBootstrap pins the pivotal
+// cursor-safety property: a propagated export failure (a transient 5xx that is
+// retried as an export, not a fall-through) must not advance EventsCursor nor
+// mark the bootstrap complete, so the next cycle re-attempts cleanly instead of
+// short-circuiting past unsynced content.
+func TestFailedExportDoesNotAdvanceCursorOrCompleteBootstrap(t *testing.T) {
+	base := &fakeClient{
+		files: map[string]RemoteFile{
+			"/notion/Docs/A.md": {
+				Path:        "/notion/Docs/A.md",
+				Revision:    "rev_1",
+				ContentType: "text/markdown",
+				Content:     "# A",
+			},
+		},
+	}
+	client := &fakeExportClient{
+		fakeClient: base,
+		exportErr:  &HTTPError{StatusCode: 502, Message: "bad gateway"},
+	}
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_failed_export",
+		RemoteRoot:  "/notion",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+
+	if err := syncer.Reconcile(context.Background()); err == nil {
+		t.Fatalf("expected a propagated 502 export error, got nil")
+	}
+	if client.exportCalls != 1 {
+		t.Fatalf("expected one export snapshot attempt, got %d", client.exportCalls)
+	}
+	if base.listTreeCalls != 0 {
+		t.Fatalf("transient 5xx should retry export, not fall to tree; got %d list tree calls", base.listTreeCalls)
+	}
+	if strings.TrimSpace(syncer.state.EventsCursor) != "" {
+		t.Fatalf("failed export must not advance the events cursor, got %q", syncer.state.EventsCursor)
+	}
+	if syncer.state.BootstrapComplete {
+		t.Fatalf("failed export must not mark bootstrap complete")
+	}
 }
 
 // TestResolveLatestEventCursorPrefersLatestEventID guards against regressing
@@ -930,6 +1381,187 @@ func TestPullRemoteFullTreeSkipsReadFileWhenLocalHashMatchesContentHash(t *testi
 		t.Fatalf("unexpected tracked state after skip: %+v", tracked)
 	}
 	assertLocalFileContent(t, localPath, content)
+}
+
+func TestPullRemoteFullGithubWorkingTreeTarSeedsAndStoresCursor(t *testing.T) {
+	localDir := t.TempDir()
+	contentsRoot := "/github/repos/AgentWorkforce/cloud/contents"
+	headSHA := "head123"
+	readme := []byte("# Cloud\n")
+	app := []byte("export const ok = true;\n")
+	readmeRemote := contentsRoot + "/README.md@" + headSHA + ".json"
+	appRemote := contentsRoot + "/src/app.ts@" + headSHA + ".json"
+	sentinelPath := "/github/repos/AgentWorkforce/cloud/.relayfile/clone.json"
+	client := &fakeExportClient{
+		fakeClient: &fakeClient{
+			files: map[string]RemoteFile{
+				sentinelPath: {
+					Path:        sentinelPath,
+					Revision:    "rev_1",
+					ContentType: "application/json",
+					Content:     `{"headSha":"` + headSHA + `","defaultBranch":"main"}`,
+				},
+				readmeRemote: {
+					Path:        readmeRemote,
+					Revision:    "rev_2",
+					ContentType: "application/json",
+					Content:     string(readme),
+					ContentHash: hashBytes(readme),
+				},
+				appRemote: {
+					Path:        appRemote,
+					Revision:    "rev_3",
+					ContentType: "application/json",
+					Content:     string(app),
+					ContentHash: hashBytes(app),
+				},
+			},
+			events: []FilesystemEvent{
+				{EventID: "evt_1", Type: "file.created", Path: readmeRemote, Revision: "rev_2", ContentHash: hashBytes(readme)},
+				{EventID: "evt_2", Type: "file.updated", Path: sentinelPath, Revision: "rev_1"},
+			},
+		},
+		tarFiles: map[string][]byte{
+			"README.md":  readme,
+			"src/app.ts": app,
+		},
+	}
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID:   "ws_tar_seed",
+		RemoteRoot:    contentsRoot,
+		LocalRoot:     localDir,
+		StateFile:     filepath.Join(localDir, ".relayfile-mount-state.json"),
+		WebSocket:     boolPtr(false),
+		FullPullEvery: -1,
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer failed: %v", err)
+	}
+	if err := syncer.Reconcile(context.Background()); err != nil {
+		t.Fatalf("Reconcile failed: %v", err)
+	}
+	if client.tarCalls != 1 {
+		t.Fatalf("expected github tar export to be used once, got %d", client.tarCalls)
+	}
+	gotReadme, err := os.ReadFile(filepath.Join(localDir, "README.md"))
+	if err != nil {
+		t.Fatalf("read seeded README: %v", err)
+	}
+	if !bytes.Equal(gotReadme, readme) {
+		t.Fatalf("unexpected README content: %q", string(gotReadme))
+	}
+	if _, err := os.Stat(filepath.Join(localDir, "README.md@"+headSHA+".json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected decoded working-tree path without relayfile suffix, stat err=%v", err)
+	}
+	if syncer.state.EventsCursor != "evt_2" {
+		t.Fatalf("expected events cursor at clone sentinel evt_2, got %q", syncer.state.EventsCursor)
+	}
+	if syncer.state.GithubWorkingTreeHeadSHA != headSHA {
+		t.Fatalf("expected head sha persisted, got %q", syncer.state.GithubWorkingTreeHeadSHA)
+	}
+	if tracked := syncer.state.Files[readmeRemote]; tracked.Hash != hashBytes(readme) || tracked.Revision != "rev_2" {
+		t.Fatalf("unexpected tracked README state: %+v", tracked)
+	}
+	if got := syncer.localRelativeToRemotePath("src/app.ts"); got != appRemote {
+		t.Fatalf("local write path should map back to content object with head sha: got %q want %q", got, appRemote)
+	}
+}
+
+func TestParseGithubCloneManifestAcceptsSnakeCaseCursor(t *testing.T) {
+	manifest, ok := parseGithubCloneManifest([]byte(`{
+		"head_sha": "head123",
+		"default_branch": "main",
+		"events_cursor": "evt_cursor",
+		"event_id": "evt_id"
+	}`))
+	if !ok {
+		t.Fatalf("expected snake_case clone manifest to parse")
+	}
+	if manifest.HeadSHA != "head123" {
+		t.Fatalf("unexpected head sha %q", manifest.HeadSHA)
+	}
+	if manifest.EventsCursor != "evt_cursor" {
+		t.Fatalf("unexpected events cursor %q", manifest.EventsCursor)
+	}
+	if manifest.EventID != "evt_id" {
+		t.Fatalf("unexpected event id %q", manifest.EventID)
+	}
+}
+
+func TestGithubWorkingTreeLocalMappingPrefersCurrentHeadSHA(t *testing.T) {
+	localDir := t.TempDir()
+	contentsRoot := "/github/repos/AgentWorkforce/cloud/contents"
+	oldRemote := contentsRoot + "/src/app.ts@oldsha.json"
+	newRemote := contentsRoot + "/src/app.ts@newsha.json"
+	syncer, err := NewSyncer(&fakeClient{}, SyncerOptions{
+		WorkspaceID:   "ws_head_change",
+		RemoteRoot:    contentsRoot,
+		LocalRoot:     localDir,
+		StateFile:     filepath.Join(localDir, ".relayfile-mount-state.json"),
+		WebSocket:     boolPtr(false),
+		FullPullEvery: -1,
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer failed: %v", err)
+	}
+	syncer.githubWorkingTree.HeadSHA = "newsha"
+	syncer.state.Files = map[string]trackedFile{
+		oldRemote: {Revision: "rev_999", Hash: "old"},
+		newRemote: {Revision: "rev_010", Hash: "new"},
+	}
+
+	if got := syncer.localRelativeToRemotePath("src/app.ts"); got != newRemote {
+		t.Fatalf("local write path should prefer current head object: got %q want %q", got, newRemote)
+	}
+}
+
+func TestGithubWorkingTreeTarSeedRejectsDuplicateEntries(t *testing.T) {
+	localDir := t.TempDir()
+	contentsRoot := "/github/repos/AgentWorkforce/cloud/contents"
+	headSHA := "head123"
+	readme := []byte("# Cloud\n")
+	readmeRemote := contentsRoot + "/README.md@" + headSHA + ".json"
+	syncer, err := NewSyncer(&fakeClient{}, SyncerOptions{
+		WorkspaceID:   "ws_dup_tar",
+		RemoteRoot:    contentsRoot,
+		LocalRoot:     localDir,
+		StateFile:     filepath.Join(localDir, ".relayfile-mount-state.json"),
+		WebSocket:     boolPtr(false),
+		FullPullEvery: -1,
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer failed: %v", err)
+	}
+	syncer.githubWorkingTree.HeadSHA = headSHA
+	syncer.state.Files = map[string]trackedFile{}
+
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	for i := 0; i < 2; i++ {
+		if err := tw.WriteHeader(&tar.Header{Name: "README.md", Mode: 0o644, Size: int64(len(readme))}); err != nil {
+			t.Fatalf("write tar header: %v", err)
+		}
+		if _, err := tw.Write(readme); err != nil {
+			t.Fatalf("write tar body: %v", err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatalf("close tar: %v", err)
+	}
+
+	_, err = syncer.applyGithubWorkingTreeTarSeed(GithubWorkingTreeTar{
+		Body:        io.NopCloser(bytes.NewReader(buf.Bytes())),
+		ContentType: "application/x-tar",
+	}, map[string]githubTreeFile{
+		"README.md": {
+			RemotePath:  readmeRemote,
+			Revision:    "rev_1",
+			ContentHash: hashBytes(readme),
+		},
+	}, nil, bootstrapProgress{})
+	if err == nil || !strings.Contains(err.Error(), "duplicate file README.md") {
+		t.Fatalf("expected duplicate tar entry error, got %v", err)
+	}
 }
 
 func TestReconcileBootstrapSkipsMatchingKeptMirrorBeforePushLocal(t *testing.T) {
@@ -1177,6 +1809,183 @@ func TestBulkWrite_SingleCallForNFiles(t *testing.T) {
 	sort.Strings(gotPaths)
 	if strings.Join(gotPaths, ",") != strings.Join(expectedPaths, ",") {
 		t.Fatalf("expected bulk paths %v, got %v", expectedPaths, gotPaths)
+	}
+}
+
+func TestBulkWrite_ContentIdentityGoldenVector(t *testing.T) {
+	const (
+		workspaceID = "ws_test"
+		remotePath  = "/slack/channels/C123/messages/messages 5ab77d67.json"
+		content     = "{\"channel\":\"C123\",\"text\":\"hello writeback idempotency\"}\n"
+		contentHash = "751f9591557700f69b5ceefcdec7ead8563a10f0a712c501a5028699be021511"
+		key         = "ws_test:/slack/channels/C123/messages/messages 5ab77d67.json:751f9591557700f69b5ceefcdec7ead8563a10f0a712c501a5028699be021511"
+	)
+
+	snapshot := newLocalSnapshot(remotePath, []byte(content))
+	if snapshot.Hash != contentHash {
+		t.Fatalf("golden vector hash = %q, want %q", snapshot.Hash, contentHash)
+	}
+	identity := newMountWritebackCreateDraftContentIdentity(workspaceID, remotePath, snapshot.Hash)
+	if identity.Kind != mountWritebackCreateDraftContentIdentityKind {
+		t.Fatalf("content identity kind = %q, want %q", identity.Kind, mountWritebackCreateDraftContentIdentityKind)
+	}
+	if identity.Key != key {
+		t.Fatalf("content identity key = %q, want %q", identity.Key, key)
+	}
+	if identity.TTLSeconds != mountWritebackCreateDraftContentIdentityTTLSeconds {
+		t.Fatalf("content identity ttl = %d, want %d", identity.TTLSeconds, mountWritebackCreateDraftContentIdentityTTLSeconds)
+	}
+	if identity.TTLSeconds != 2592000 {
+		t.Fatalf("golden vector ttl = %d, want 2592000", identity.TTLSeconds)
+	}
+	if strings.TrimSpace(identity.Key) != identity.Key {
+		t.Fatalf("golden vector key should be trim-stable: %q", identity.Key)
+	}
+	if !strings.Contains(identity.Key, "messages 5ab77d67.json") {
+		t.Fatalf("golden vector key should preserve the internal path space: %q", identity.Key)
+	}
+}
+
+func TestBulkWrite_ContentIdentityStabilityAndIsolation(t *testing.T) {
+	const (
+		workspaceID = "ws_test"
+		remotePath  = "/slack/channels/C123/messages/messages 5ab77d67-1111-4111-8111-123456789abc.json"
+	)
+
+	snapshot := newLocalSnapshot(remotePath, []byte("{\"text\":\"same\"}\n"))
+	files := bulkWriteFilesForPending(workspaceID, []pendingBulkWrite{{
+		remotePath: remotePath,
+		snapshot:   snapshot,
+	}})
+	reupload := bulkWriteFilesForPending(workspaceID, []pendingBulkWrite{{
+		remotePath: remotePath,
+		snapshot:   snapshot,
+	}})
+	if files[0].ContentIdentity == nil || reupload[0].ContentIdentity == nil {
+		t.Fatal("expected content identity on both bulk files")
+	}
+	if files[0].ContentIdentity.Key != reupload[0].ContentIdentity.Key {
+		t.Fatalf("same draft re-upload key changed: %q vs %q", files[0].ContentIdentity.Key, reupload[0].ContentIdentity.Key)
+	}
+
+	edited := bulkWriteFilesForPending(workspaceID, []pendingBulkWrite{{
+		remotePath: remotePath,
+		snapshot:   newLocalSnapshot(remotePath, []byte("{\"text\":\"edited\"}\n")),
+	}})
+	if edited[0].ContentIdentity.Key == files[0].ContentIdentity.Key {
+		t.Fatalf("edited draft content should change key %q", edited[0].ContentIdentity.Key)
+	}
+
+	otherPath := bulkWriteFilesForPending(workspaceID, []pendingBulkWrite{{
+		remotePath: "/slack/channels/C123/messages/messages 6ab77d67-2222-4222-8222-123456789abc.json",
+		snapshot:   snapshot,
+	}})
+	if otherPath[0].ContentIdentity.Key == files[0].ContentIdentity.Key {
+		t.Fatalf("different draft path should change key %q", otherPath[0].ContentIdentity.Key)
+	}
+
+	otherWorkspace := bulkWriteFilesForPending("ws_other", []pendingBulkWrite{{
+		remotePath: remotePath,
+		snapshot:   snapshot,
+	}})
+	if otherWorkspace[0].ContentIdentity.Key == files[0].ContentIdentity.Key {
+		t.Fatalf("different workspace should change key %q", otherWorkspace[0].ContentIdentity.Key)
+	}
+}
+
+func TestBulkWrite_ContentIdentityOnlyForCreateDraftPaths(t *testing.T) {
+	const workspaceID = "ws_test"
+	snapshot := newLocalSnapshot("/notion/pages/pages 5ab77d67-1111-4111-8111-123456789abc.json", []byte("{}\n"))
+
+	draft := bulkWriteFilesForPending(workspaceID, []pendingBulkWrite{{
+		remotePath: "/notion/pages/pages 5ab77d67-1111-4111-8111-123456789abc.json",
+		snapshot:   snapshot,
+	}})
+	if draft[0].ContentIdentity == nil {
+		t.Fatal("expected content identity for space-uuid create draft path")
+	}
+
+	stable := bulkWriteFilesForPending(workspaceID, []pendingBulkWrite{{
+		remotePath: "/notion/pages/page-1.md",
+		snapshot:   snapshot,
+	}})
+	if stable[0].ContentIdentity != nil {
+		t.Fatalf("stable non-draft path should not carry content identity: %+v", stable[0].ContentIdentity)
+	}
+
+	nonUUID := bulkWriteFilesForPending(workspaceID, []pendingBulkWrite{{
+		remotePath: "/slack/channels/C123/messages/messages not-a-uuid.json",
+		snapshot:   snapshot,
+	}})
+	if nonUUID[0].ContentIdentity != nil {
+		t.Fatalf("non-uuid draft-like path should not carry content identity: %+v", nonUUID[0].ContentIdentity)
+	}
+}
+
+func TestBulkWrite_ContentIdentityOmittedForStablePathRevert(t *testing.T) {
+	const (
+		workspaceID = "ws_test"
+		remotePath  = "/notion/pages/page-1.md"
+	)
+
+	for _, content := range []string{"# C\n", "# D\n", "# C\n"} {
+		files := bulkWriteFilesForPending(workspaceID, []pendingBulkWrite{{
+			remotePath: remotePath,
+			snapshot:   newLocalSnapshot(remotePath, []byte(content)),
+		}})
+		if files[0].ContentIdentity != nil {
+			t.Fatalf("stable path content %q should not carry content identity: %+v", content, files[0].ContentIdentity)
+		}
+	}
+}
+
+func TestBulkWrite_FlushSendsContentIdentity(t *testing.T) {
+	const (
+		workspaceID = "ws_test"
+		content     = "{\"channel\":\"C123\",\"text\":\"hello writeback idempotency\"}\n"
+		draftID     = "5ab77d67-1111-4111-8111-123456789abc"
+		key         = "ws_test:/slack/channels/C123/messages/messages 5ab77d67-1111-4111-8111-123456789abc.json:751f9591557700f69b5ceefcdec7ead8563a10f0a712c501a5028699be021511"
+	)
+
+	client := &fakeClient{files: map[string]RemoteFile{}}
+	localDir := t.TempDir()
+	messageDir := filepath.Join(localDir, "slack", "channels", "C123", "messages")
+	if err := os.MkdirAll(messageDir, 0o755); err != nil {
+		t.Fatalf("mkdir message dir failed: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(messageDir, "messages "+draftID+".json"), []byte(content), 0o644); err != nil {
+		t.Fatalf("write draft failed: %v", err)
+	}
+
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: workspaceID,
+		RemoteRoot:  "/",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("sync once failed: %v", err)
+	}
+	if got := len(client.bulkWriteBatches); got != 1 {
+		t.Fatalf("expected one bulk write batch, got %d", got)
+	}
+	if got := len(client.bulkWriteBatches[0]); got != 1 {
+		t.Fatalf("expected one bulk write file, got %d", got)
+	}
+	identity := client.bulkWriteBatches[0][0].ContentIdentity
+	if identity == nil {
+		t.Fatal("expected flushed bulk file to carry content identity")
+	}
+	if identity.Kind != mountWritebackCreateDraftContentIdentityKind {
+		t.Fatalf("flushed identity kind = %q, want %q", identity.Kind, mountWritebackCreateDraftContentIdentityKind)
+	}
+	if identity.Key != key {
+		t.Fatalf("flushed identity key = %q, want %q", identity.Key, key)
+	}
+	if identity.TTLSeconds != 2592000 {
+		t.Fatalf("flushed identity ttl = %d, want 2592000", identity.TTLSeconds)
 	}
 }
 
@@ -2665,6 +3474,21 @@ func TestCanWritePathWithRelayauthScopes(t *testing.T) {
 	}
 }
 
+func TestScopeGrantsWritePreservesPathCase(t *testing.T) {
+	if !scopeGrantsWrite("relayfile:fs:write:/README.md/*", "/README.md") {
+		t.Fatalf("write scope over /README.md must grant /README.md (case preserved)")
+	}
+	if !scopeGrantsWrite("relayfile:fs:write:/packages/web/lib/MyComponent/*", "/packages/web/lib/MyComponent/index.ts") {
+		t.Fatalf("write scope over /packages/web/lib/MyComponent must grant files under it")
+	}
+	if !scopeGrantsWrite("RELAYFILE:FS:WRITE:/Foo/*", "/Foo/bar.ts") {
+		t.Fatalf("plane/resource/action must stay case-insensitive")
+	}
+	if scopeGrantsWrite("relayfile:fs:write:/Foo/*", "/foo/bar.ts") {
+		t.Fatalf("case-mismatched path must NOT be granted (paths are case-sensitive)")
+	}
+}
+
 func TestCanReadPathWithPerFileScopes(t *testing.T) {
 	scopes := map[string]struct{}{
 		"relayfile:fs:read:/src/app.ts": {},
@@ -3986,6 +4810,7 @@ type fakeClient struct {
 	listEventsCalls            int
 	latestEventIDCalls         int
 	latestEventIDErr           error
+	latestEventIDHook          func(call int) (string, error)
 	latestEventIDUnsupported   bool
 	readFileCalls              int
 	readFileCallsByPath        map[string]int
@@ -4022,16 +4847,33 @@ type deleteCall struct {
 type fakeExportClient struct {
 	*fakeClient
 	exportCalls   int
+	tarCalls      int
+	tarFiles      map[string][]byte
+	tarErr        error
 	readFileCalls int
 	exportErr     error
+	// exportBlockUntilCancel makes ExportFiles block until its ctx is
+	// cancelled, simulating a slow atomic export that exceeds the export
+	// sub-deadline (or the bootstrap watchdog).
+	exportBlockUntilCancel bool
+	// exportReturnsEmpty makes ExportFiles return a successful but empty
+	// slice regardless of the populated tree, simulating the production
+	// empty-200 export for a workspace that DOES have records.
+	exportReturnsEmpty bool
 }
 
 func (c *fakeExportClient) ExportFiles(ctx context.Context, workspaceID, path string) ([]RemoteFile, error) {
-	_ = ctx
 	_ = workspaceID
 	c.exportCalls++
+	if c.exportBlockUntilCancel {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
 	if c.exportErr != nil {
 		return nil, c.exportErr
+	}
+	if c.exportReturnsEmpty {
+		return []RemoteFile{}, nil
 	}
 	base := normalizeRemotePath(path)
 	files := make([]RemoteFile, 0, len(c.files))
@@ -4048,6 +4890,39 @@ func (c *fakeExportClient) ExportFiles(ctx context.Context, workspaceID, path st
 func (c *fakeExportClient) ReadFile(ctx context.Context, workspaceID, path string) (RemoteFile, error) {
 	c.readFileCalls++
 	return c.fakeClient.ReadFile(ctx, workspaceID, path)
+}
+
+func (c *fakeExportClient) ExportGithubWorkingTreeTar(ctx context.Context, workspaceID string, seed GithubWorkingTreeSeedRequest) (GithubWorkingTreeTar, error) {
+	_ = ctx
+	_ = workspaceID
+	_ = seed
+	c.tarCalls++
+	if c.tarErr != nil {
+		return GithubWorkingTreeTar{}, c.tarErr
+	}
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	names := make([]string, 0, len(c.tarFiles))
+	for name := range c.tarFiles {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		data := c.tarFiles[name]
+		if err := tw.WriteHeader(&tar.Header{Name: name, Mode: 0o644, Size: int64(len(data))}); err != nil {
+			return GithubWorkingTreeTar{}, err
+		}
+		if _, err := tw.Write(data); err != nil {
+			return GithubWorkingTreeTar{}, err
+		}
+	}
+	if err := tw.Close(); err != nil {
+		return GithubWorkingTreeTar{}, err
+	}
+	return GithubWorkingTreeTar{
+		Body:        io.NopCloser(bytes.NewReader(buf.Bytes())),
+		ContentType: "application/x-tar",
+	}, nil
 }
 
 func (c *fakeClient) ListTree(ctx context.Context, workspaceID, path string, depth int, cursor string) (TreeResponse, error) {
@@ -4084,6 +4959,9 @@ func (c *fakeClient) LatestEventID(ctx context.Context, workspaceID, provider st
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.latestEventIDCalls++
+	if c.latestEventIDHook != nil {
+		return c.latestEventIDHook(c.latestEventIDCalls)
+	}
 	if c.latestEventIDUnsupported {
 		return "", &HTTPError{StatusCode: http.StatusBadRequest, Code: "bad_request", Message: "direction=desc unsupported"}
 	}
@@ -5865,6 +6743,221 @@ func TestPullRestartFastPathSkipsFullPull(t *testing.T) {
 	if client.listTreeCalls != 0 || client.readFileCalls != 0 {
 		t.Fatalf("expected quiet post-restart cycle to remain a pure no-op; tree=%d read=%d",
 			client.listTreeCalls, client.readFileCalls)
+	}
+}
+
+func TestPullReusedMountWithPersistedCursorUsesIncrementalOnly(t *testing.T) {
+	client := &fakeClient{
+		files: map[string]RemoteFile{
+			"/notion/Docs/A.md": {
+				Path:        "/notion/Docs/A.md",
+				Revision:    "rev_2",
+				ContentType: "text/markdown",
+				Content:     "# A v2",
+			},
+		},
+		events: []FilesystemEvent{
+			{
+				EventID:  "evt_1",
+				Type:     "file.created",
+				Path:     "/notion/Docs/A.md",
+				Revision: "rev_1",
+			},
+			{
+				EventID:  "evt_2",
+				Type:     "file.updated",
+				Path:     "/notion/Docs/A.md",
+				Revision: "rev_2",
+			},
+		},
+		revisionCounter: 2,
+		eventCounter:    2,
+	}
+	localDir := t.TempDir()
+	localPath := filepath.Join(localDir, "Docs", "A.md")
+	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+		t.Fatalf("mkdir local: %v", err)
+	}
+	if err := os.WriteFile(localPath, []byte("# A v1"), 0o644); err != nil {
+		t.Fatalf("seed local: %v", err)
+	}
+	if err := writeMountState(filepath.Join(localDir, ".relayfile-mount-state.json"), mountState{
+		Files: map[string]trackedFile{
+			"/notion/Docs/A.md": {
+				Revision:    "rev_1",
+				ContentType: "text/markdown",
+				Hash:        hashBytes([]byte("# A v1")),
+			},
+		},
+		EventsCursor:      "evt_1",
+		BootstrapComplete: true,
+	}); err != nil {
+		t.Fatalf("write seed state: %v", err)
+	}
+
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_reuse_cursor",
+		RemoteRoot:  "/notion",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+
+	if err := syncer.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reused cursor reconcile: %v", err)
+	}
+
+	if client.listTreeCalls != 0 {
+		t.Fatalf("expected persisted cursor reuse to skip full tree pull; got %d ListTree call(s)", client.listTreeCalls)
+	}
+	if client.latestEventIDCalls != 0 {
+		t.Fatalf("expected persisted cursor reuse not to resolve latest cursor; got %d call(s)", client.latestEventIDCalls)
+	}
+	assertLocalFileContent(t, localPath, "# A v2")
+	if got := strings.TrimSpace(syncer.state.EventsCursor); got != "evt_2" {
+		t.Fatalf("expected cursor to advance to evt_2, got %q", got)
+	}
+}
+
+func TestPullRestartFastPathRetriesCursorDeadlineBeforeFullPull(t *testing.T) {
+	client := &fakeClient{
+		files: map[string]RemoteFile{
+			"/notion/Docs/A.md": {
+				Path:        "/notion/Docs/A.md",
+				Revision:    "rev_1",
+				ContentType: "text/markdown",
+				Content:     "# A",
+			},
+		},
+		events: []FilesystemEvent{
+			{
+				EventID:  "evt_seed",
+				Type:     "file.created",
+				Path:     "/notion/Docs/A.md",
+				Revision: "rev_1",
+			},
+		},
+		revisionCounter: 1,
+		eventCounter:    1,
+	}
+	client.latestEventIDHook = func(call int) (string, error) {
+		if call == 1 {
+			return "", context.DeadlineExceeded
+		}
+		return "evt_seed", nil
+	}
+	localDir := t.TempDir()
+	localPath := filepath.Join(localDir, "Docs", "A.md")
+	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+		t.Fatalf("mkdir local: %v", err)
+	}
+	if err := os.WriteFile(localPath, []byte("# A"), 0o644); err != nil {
+		t.Fatalf("seed local: %v", err)
+	}
+	if err := writeMountState(filepath.Join(localDir, ".relayfile-mount-state.json"), mountState{
+		Files: map[string]trackedFile{
+			"/notion/Docs/A.md": {
+				Revision:    "rev_1",
+				ContentType: "text/markdown",
+				Hash:        hashBytes([]byte("# A")),
+			},
+		},
+		BootstrapComplete: true,
+	}); err != nil {
+		t.Fatalf("write seed state: %v", err)
+	}
+
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID:   "ws_restart_cursor_retry",
+		RemoteRoot:    "/notion",
+		LocalRoot:     localDir,
+		CursorTimeout: 10 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+
+	if err := syncer.Reconcile(context.Background()); err != nil {
+		t.Fatalf("restart reconcile should retry cursor resolution: %v", err)
+	}
+
+	if client.latestEventIDCalls != 2 {
+		t.Fatalf("expected cursor resolution to retry once, got %d call(s)", client.latestEventIDCalls)
+	}
+	if client.listTreeCalls != 0 || client.readFileCalls != 0 {
+		t.Fatalf("expected retrying fast-path to avoid full pull; tree=%d read=%d", client.listTreeCalls, client.readFileCalls)
+	}
+	if got := strings.TrimSpace(syncer.state.EventsCursor); got != "evt_seed" {
+		t.Fatalf("expected retry to seed evt_seed, got %q", got)
+	}
+}
+
+func TestPullRestartFastPathTimeoutDoesNotFallBackToFullPull(t *testing.T) {
+	client := &fakeClient{
+		files: map[string]RemoteFile{
+			"/notion/Docs/A.md": {
+				Path:        "/notion/Docs/A.md",
+				Revision:    "rev_1",
+				ContentType: "text/markdown",
+				Content:     "# A",
+			},
+		},
+		events: []FilesystemEvent{
+			{
+				EventID:  "evt_seed",
+				Type:     "file.created",
+				Path:     "/notion/Docs/A.md",
+				Revision: "rev_1",
+			},
+		},
+		latestEventIDErr: context.DeadlineExceeded,
+		revisionCounter:  1,
+		eventCounter:     1,
+	}
+	localDir := t.TempDir()
+	localPath := filepath.Join(localDir, "Docs", "A.md")
+	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+		t.Fatalf("mkdir local: %v", err)
+	}
+	if err := os.WriteFile(localPath, []byte("# A"), 0o644); err != nil {
+		t.Fatalf("seed local: %v", err)
+	}
+	if err := writeMountState(filepath.Join(localDir, ".relayfile-mount-state.json"), mountState{
+		Files: map[string]trackedFile{
+			"/notion/Docs/A.md": {
+				Revision:    "rev_1",
+				ContentType: "text/markdown",
+				Hash:        hashBytes([]byte("# A")),
+			},
+		},
+		BootstrapComplete: true,
+	}); err != nil {
+		t.Fatalf("write seed state: %v", err)
+	}
+
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID:   "ws_restart_cursor_timeout",
+		RemoteRoot:    "/notion",
+		LocalRoot:     localDir,
+		CursorTimeout: 10 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+
+	if err := syncer.Reconcile(context.Background()); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected deadline after cursor retries, got %v", err)
+	}
+
+	if client.latestEventIDCalls != defaultCursorResolutionAttempts {
+		t.Fatalf("expected %d cursor attempts, got %d", defaultCursorResolutionAttempts, client.latestEventIDCalls)
+	}
+	if client.listTreeCalls != 0 || client.readFileCalls != 0 {
+		t.Fatalf("expected cursor timeout to avoid full pull fallback; tree=%d read=%d", client.listTreeCalls, client.readFileCalls)
+	}
+	if got := strings.TrimSpace(syncer.state.EventsCursor); got != "" {
+		t.Fatalf("expected cursor to remain empty after failed resolution, got %q", got)
 	}
 }
 
