@@ -96,16 +96,17 @@ const (
 	// and, having no resume cursor, restart from scratch every cycle (the
 	// #1499/#1516 non-convergence loop). Must stay strictly under
 	// defaultBootstrapIdleTimeout.
-	defaultExportTimeout             = 45 * time.Second
-	defaultCursorResolutionAttempts  = 3
-	defaultCursorRetryBaseDelay      = 250 * time.Millisecond
-	defaultBootstrapReadWorkers      = 16
-	defaultIncrementalEventPageLimit = 50
-	defaultRetryAfterMaxDelay        = 60 * time.Second
-	defaultWebSocketReconnectBase    = 1 * time.Second
-	defaultWebSocketReconnectMax     = 60 * time.Second
-	defaultWebSocketReconnectJitter  = 200 * time.Millisecond
-	DefaultWebSocketMaintenanceEvery = 1 * time.Second
+	defaultExportTimeout              = 45 * time.Second
+	defaultIncrementalReadNotReadyTTL = 5 * time.Minute
+	defaultCursorResolutionAttempts   = 3
+	defaultCursorRetryBaseDelay       = 250 * time.Millisecond
+	defaultBootstrapReadWorkers       = 16
+	defaultIncrementalEventPageLimit  = 50
+	defaultRetryAfterMaxDelay         = 60 * time.Second
+	defaultWebSocketReconnectBase     = 1 * time.Second
+	defaultWebSocketReconnectMax      = 60 * time.Second
+	defaultWebSocketReconnectJitter   = 200 * time.Millisecond
+	DefaultWebSocketMaintenanceEvery  = 1 * time.Second
 )
 
 // resolveDurationEnv returns the option value if non-zero, else parses the
@@ -786,6 +787,11 @@ type SyncerOptions struct {
 	// RELAYFILE_EXPORT_TIMEOUT, default 45s; values >= bootstrapIdleTimeout are
 	// clamped below it so the fall-through always fires before the watchdog.
 	ExportTimeout time.Duration
+	// IncrementalReadNotReadyTTL bounds how long an incremental create/update
+	// event may keep returning ReadFile 404 before the syncer treats it as a
+	// delete and advances past the event. 0 falls back to env
+	// RELAYFILE_INCREMENTAL_READ_NOT_READY_TTL, default 5m.
+	IncrementalReadNotReadyTTL time.Duration
 	// ForceFullReconcile, when non-nil and true, forces one full reconcile
 	// regardless of BootstrapComplete (escape hatch / clobber-remnant
 	// recovery). nil falls back to env RELAYFILE_FORCE_FULL_RECONCILE.
@@ -941,6 +947,7 @@ type Syncer struct {
 	exportTimeout        time.Duration
 	bootstrapTimeout     time.Duration
 	bootstrapIdleTimeout time.Duration
+	readNotReadyTTL      time.Duration
 	forceFullReconcile   bool
 	incrementalCycles    int
 	oversizedLogged      map[string]struct{}
@@ -983,6 +990,12 @@ type mountState struct {
 	BootstrapFilesTotal      int    `json:"bootstrapFilesTotal,omitempty"`
 	BootstrapStartedAt       string `json:"bootstrapStartedAt,omitempty"`
 	GithubWorkingTreeHeadSHA string `json:"githubWorkingTreeHeadSha,omitempty"`
+	// IncrementalReadNotReadySince records first-seen timestamps for
+	// incremental create/update events whose remote content was not readable
+	// yet. The daemon retries these without advancing EventsCursor until the
+	// TTL expires, then treats a still-unreadable path as deleted so
+	// create-then-delete events cannot wedge the mount forever.
+	IncrementalReadNotReadySince map[string]string `json:"incrementalReadNotReadySince,omitempty"`
 }
 
 type incrementalCheckpoint struct {
@@ -1256,6 +1269,10 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 		}
 		exportTimeout = maxExportTimeout
 	}
+	readNotReadyTTL := resolveDurationEnv(opts.IncrementalReadNotReadyTTL, "RELAYFILE_INCREMENTAL_READ_NOT_READY_TTL", defaultIncrementalReadNotReadyTTL, opts.Logger)
+	if readNotReadyTTL <= 0 {
+		readNotReadyTTL = defaultIncrementalReadNotReadyTTL
+	}
 	forceFullReconcile := false
 	if opts.ForceFullReconcile != nil {
 		forceFullReconcile = *opts.ForceFullReconcile
@@ -1342,6 +1359,7 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 		exportTimeout:        exportTimeout,
 		bootstrapTimeout:     bootstrapTimeout,
 		bootstrapIdleTimeout: bootstrapIdleTimeout,
+		readNotReadyTTL:      readNotReadyTTL,
 		forceFullReconcile:   forceFullReconcile,
 		oversizedLogged:      map[string]struct{}{},
 		lazyRepos:            lazyRepos,
@@ -4165,6 +4183,7 @@ func (s *Syncer) applyIncrementalChanges(
 			return err
 		}
 		if skipped {
+			s.clearIncrementalReadNotReady(remotePath)
 			s.markIncrementalCheckpoint(pageStartCursor, pageCursor, "changed", remotePath)
 			continue
 		}
@@ -4172,6 +4191,15 @@ func (s *Syncer) applyIncrementalChanges(
 		if err != nil {
 			var httpErr *HTTPError
 			if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusNotFound {
+				if s.incrementalReadNotReadyExpired(remotePath, time.Now().UTC()) {
+					s.logf("changed event for %s remained unreadable for at least %s; treating as deleted and advancing events cursor", remotePath, s.readNotReadyTTL)
+					s.clearIncrementalReadNotReady(remotePath)
+					if err := s.applyRemoteDelete(remotePath, conflicted); err != nil {
+						return err
+					}
+					s.markIncrementalCheckpoint(pageStartCursor, pageCursor, "changed", remotePath)
+					continue
+				}
 				s.logf("changed event for %s is not readable yet; preserving events cursor for retry", remotePath)
 				return &IncrementalReadNotReadyError{
 					Path:       remotePath,
@@ -4185,6 +4213,7 @@ func (s *Syncer) applyIncrementalChanges(
 				if markErr := s.markReadDenied(remotePath); markErr != nil {
 					return markErr
 				}
+				s.clearIncrementalReadNotReady(remotePath)
 				s.markIncrementalCheckpoint(pageStartCursor, pageCursor, "changed", remotePath)
 				continue
 			}
@@ -4193,6 +4222,7 @@ func (s *Syncer) applyIncrementalChanges(
 		if err := s.applyRemoteFile(remotePath, file, conflicted); err != nil {
 			return err
 		}
+		s.clearIncrementalReadNotReady(remotePath)
 		s.markIncrementalCheckpoint(pageStartCursor, pageCursor, "changed", remotePath)
 	}
 
@@ -4208,6 +4238,7 @@ func (s *Syncer) applyIncrementalChanges(
 		if err := s.applyRemoteDelete(remotePath, conflicted); err != nil {
 			return err
 		}
+		s.clearIncrementalReadNotReady(remotePath)
 		s.markIncrementalCheckpoint(pageStartCursor, pageCursor, "deleted", remotePath)
 	}
 	return nil
@@ -4266,6 +4297,34 @@ func (s *Syncer) markIncrementalCheckpoint(pageStartCursor, pageCursor, phase, r
 		PageCursor: strings.TrimSpace(pageCursor),
 		Phase:      strings.TrimSpace(phase),
 		Path:       normalizeRemotePath(remotePath),
+	}
+}
+
+func (s *Syncer) incrementalReadNotReadyExpired(remotePath string, now time.Time) bool {
+	remotePath = normalizeRemotePath(remotePath)
+	if s.state.IncrementalReadNotReadySince == nil {
+		s.state.IncrementalReadNotReadySince = map[string]string{}
+	}
+	raw := strings.TrimSpace(s.state.IncrementalReadNotReadySince[remotePath])
+	if raw == "" {
+		s.state.IncrementalReadNotReadySince[remotePath] = now.Format(time.RFC3339Nano)
+		return false
+	}
+	firstSeen, err := time.Parse(time.RFC3339Nano, raw)
+	if err != nil {
+		s.state.IncrementalReadNotReadySince[remotePath] = now.Format(time.RFC3339Nano)
+		return false
+	}
+	return !now.Before(firstSeen.Add(s.readNotReadyTTL))
+}
+
+func (s *Syncer) clearIncrementalReadNotReady(remotePath string) {
+	if s.state.IncrementalReadNotReadySince == nil {
+		return
+	}
+	delete(s.state.IncrementalReadNotReadySince, normalizeRemotePath(remotePath))
+	if len(s.state.IncrementalReadNotReadySince) == 0 {
+		s.state.IncrementalReadNotReadySince = nil
 	}
 }
 

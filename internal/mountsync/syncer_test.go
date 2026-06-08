@@ -6477,6 +6477,9 @@ func TestPullRemoteIncrementalChangedPath404RetriesWithoutAdvancingCursor(t *tes
 	if _, ok := syncer.state.Files["/notion/Docs/002.md"]; !ok {
 		t.Fatalf("expected 404 changed path to remain tracked for retry")
 	}
+	if _, ok := syncer.state.IncrementalReadNotReadySince["/notion/Docs/002.md"]; !ok {
+		t.Fatalf("expected read-not-ready timestamp to be recorded for retry")
+	}
 	if checkpoint := syncer.state.IncrementalCheckpoint; checkpoint == nil ||
 		checkpoint.Phase != "changed" ||
 		checkpoint.Path != "/notion/Docs/001.md" {
@@ -6492,6 +6495,9 @@ func TestPullRemoteIncrementalChangedPath404RetriesWithoutAdvancingCursor(t *tes
 	}
 	if persisted.EventsCursor != "evt_000" {
 		t.Fatalf("persisted EventsCursor = %q, want unchanged evt_000", persisted.EventsCursor)
+	}
+	if _, ok := persisted.IncrementalReadNotReadySince["/notion/Docs/002.md"]; !ok {
+		t.Fatalf("expected persisted read-not-ready timestamp for retry")
 	}
 	if checkpoint := persisted.IncrementalCheckpoint; checkpoint == nil ||
 		checkpoint.Phase != "changed" ||
@@ -6529,6 +6535,9 @@ func TestPullRemoteIncrementalChangedPath404RetriesWithoutAdvancingCursor(t *tes
 	}
 	if checkpoint := resumedSyncer.state.IncrementalCheckpoint; checkpoint != nil {
 		t.Fatalf("expected checkpoint to clear after completed page, got %#v", checkpoint)
+	}
+	if resumedSyncer.state.IncrementalReadNotReadySince != nil {
+		t.Fatalf("expected read-not-ready state to clear after materialization, got %#v", resumedSyncer.state.IncrementalReadNotReadySince)
 	}
 	assertLocalFileContent(t, missingPath, "# 002")
 	assertLocalFileContent(t, filepath.Join(localDir, "Docs", "003.md"), "# 003")
@@ -6602,6 +6611,144 @@ func TestPullRemoteIncrementalCreatedThreadReply404RetriesWithoutAdvancingCursor
 		t.Fatalf("EventsCursor = %q, want evt_168287", got)
 	}
 	assertLocalFileContent(t, localReplyPath, `{"text":"materialized reply"}`)
+}
+
+func TestPullRemoteIncrementalReadNotReadyBeforeTTLStillRetriesAndMaterializes(t *testing.T) {
+	const remotePath = "/notion/Docs/slow.md"
+	ttl := time.Hour
+	client := &fakeClient{
+		files: map[string]RemoteFile{},
+		events: []FilesystemEvent{
+			{EventID: "evt_001", Type: "file.created", Path: remotePath, Revision: "rev_001"},
+		},
+		revisionCounter: 1,
+		eventCounter:    1,
+	}
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID:                "ws_not_ready_before_ttl",
+		RemoteRoot:                 "/notion",
+		LocalRoot:                  localDir,
+		FullPullEvery:              -1,
+		WebSocket:                  boolPtr(false),
+		CursorTimeout:              time.Second,
+		BootstrapTimeout:           time.Second,
+		IncrementalReadNotReadyTTL: ttl,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+	syncer.loaded = true
+	syncer.state = mountState{
+		Files:             map[string]trackedFile{},
+		EventsCursor:      "evt_000",
+		BootstrapComplete: true,
+		IncrementalReadNotReadySince: map[string]string{
+			remotePath: time.Now().UTC().Add(-ttl + time.Minute).Format(time.RFC3339Nano),
+		},
+	}
+
+	err = syncer.Reconcile(context.Background())
+	var notReadyErr *IncrementalReadNotReadyError
+	if !errors.As(err, &notReadyErr) || notReadyErr.Path != remotePath {
+		t.Fatalf("expected under-TTL 404 to remain retryable, got %v", err)
+	}
+	if got := syncer.state.EventsCursor; got != "evt_000" {
+		t.Fatalf("EventsCursor = %q, want unchanged evt_000", got)
+	}
+	if _, err := os.Stat(filepath.Join(localDir, "Docs", "slow.md")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("under-TTL unreadable file should remain absent locally; stat err=%v", err)
+	}
+
+	client.files[remotePath] = RemoteFile{
+		Path:        remotePath,
+		Revision:    "rev_001",
+		ContentType: "text/markdown",
+		Content:     "# slow",
+	}
+	resumedSyncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID:                "ws_not_ready_before_ttl",
+		RemoteRoot:                 "/notion",
+		LocalRoot:                  localDir,
+		FullPullEvery:              -1,
+		WebSocket:                  boolPtr(false),
+		CursorTimeout:              time.Second,
+		BootstrapTimeout:           time.Second,
+		IncrementalReadNotReadyTTL: ttl,
+	})
+	if err != nil {
+		t.Fatalf("new resumed syncer failed: %v", err)
+	}
+	if err := resumedSyncer.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile after under-TTL file appeared failed: %v", err)
+	}
+	if got := resumedSyncer.state.EventsCursor; got != "evt_001" {
+		t.Fatalf("EventsCursor = %q, want evt_001", got)
+	}
+	if resumedSyncer.state.IncrementalReadNotReadySince != nil {
+		t.Fatalf("expected read-not-ready state to clear after materialization, got %#v", resumedSyncer.state.IncrementalReadNotReadySince)
+	}
+	assertLocalFileContent(t, filepath.Join(localDir, "Docs", "slow.md"), "# slow")
+}
+
+func TestPullRemoteIncrementalPersistentReadNotReadyAfterTTLAdvancesAsDelete(t *testing.T) {
+	const remotePath = "/notion/Docs/gone.md"
+	ttl := time.Minute
+	client := &fakeClient{
+		files: map[string]RemoteFile{},
+		events: []FilesystemEvent{
+			{EventID: "evt_001", Type: "file.created", Path: remotePath, Revision: "rev_001"},
+			{EventID: "evt_002", Type: "file.created", Path: "/notion/Docs/after.md", Revision: "rev_002"},
+		},
+		revisionCounter: 2,
+		eventCounter:    2,
+	}
+	client.files["/notion/Docs/after.md"] = RemoteFile{
+		Path:        "/notion/Docs/after.md",
+		Revision:    "rev_002",
+		ContentType: "text/markdown",
+		Content:     "# after",
+	}
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID:                "ws_not_ready_after_ttl",
+		RemoteRoot:                 "/notion",
+		LocalRoot:                  localDir,
+		FullPullEvery:              -1,
+		WebSocket:                  boolPtr(false),
+		CursorTimeout:              time.Second,
+		BootstrapTimeout:           time.Second,
+		IncrementalReadNotReadyTTL: ttl,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+	syncer.loaded = true
+	syncer.state = mountState{
+		Files:             map[string]trackedFile{},
+		EventsCursor:      "evt_000",
+		BootstrapComplete: true,
+		IncrementalReadNotReadySince: map[string]string{
+			remotePath: time.Now().UTC().Add(-ttl - time.Second).Format(time.RFC3339Nano),
+		},
+	}
+
+	if err := syncer.Reconcile(context.Background()); err != nil {
+		t.Fatalf("expired read-not-ready should advance as delete, got %v", err)
+	}
+	if got := syncer.state.EventsCursor; got != "evt_002" {
+		t.Fatalf("EventsCursor = %q, want evt_002", got)
+	}
+	if syncer.state.IncrementalReadNotReadySince != nil {
+		t.Fatalf("expected expired read-not-ready state to clear, got %#v", syncer.state.IncrementalReadNotReadySince)
+	}
+	if _, ok := syncer.state.Files[remotePath]; ok {
+		t.Fatalf("expired persistent 404 should not remain tracked")
+	}
+	if _, err := os.Stat(filepath.Join(localDir, "Docs", "gone.md")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expired persistent 404 should not materialize locally; stat err=%v", err)
+	}
+	assertLocalFileContent(t, filepath.Join(localDir, "Docs", "after.md"), "# after")
 }
 
 func TestPullRemoteIncrementalDeleteEventStillDeletes(t *testing.T) {
