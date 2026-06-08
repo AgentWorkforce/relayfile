@@ -6411,13 +6411,13 @@ func TestPullRemoteIncrementalResumesWithinAppliedPage(t *testing.T) {
 	}
 }
 
-func TestPullRemoteIncrementalCheckpointPreservesChangedPath404Delete(t *testing.T) {
+func TestPullRemoteIncrementalChangedPath404RetriesWithoutAdvancingCursor(t *testing.T) {
 	files := map[string]RemoteFile{
-		"/notion/Docs/002.md": {
-			Path:        "/notion/Docs/002.md",
-			Revision:    "rev_002",
+		"/notion/Docs/001.md": {
+			Path:        "/notion/Docs/001.md",
+			Revision:    "rev_001",
 			ContentType: "text/markdown",
-			Content:     "# 002",
+			Content:     "# 001",
 		},
 		"/notion/Docs/003.md": {
 			Path:        "/notion/Docs/003.md",
@@ -6433,10 +6433,185 @@ func TestPullRemoteIncrementalCheckpointPreservesChangedPath404Delete(t *testing
 			{EventID: "evt_002", Type: "file.updated", Path: "/notion/Docs/002.md", Revision: "rev_002"},
 			{EventID: "evt_003", Type: "file.updated", Path: "/notion/Docs/003.md", Revision: "rev_003"},
 		},
-		revisionCounter:  3,
-		eventCounter:     3,
-		readFileErrAfter: 2,
-		readFileErr:      context.DeadlineExceeded,
+		revisionCounter: 3,
+		eventCounter:    3,
+	}
+	localDir := t.TempDir()
+	missingPath := filepath.Join(localDir, "Docs", "002.md")
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID:      "ws_changed_404_retry",
+		RemoteRoot:       "/notion",
+		LocalRoot:        localDir,
+		FullPullEvery:    -1,
+		WebSocket:        boolPtr(false),
+		CursorTimeout:    time.Second,
+		BootstrapTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+	syncer.loaded = true
+	syncer.state = mountState{
+		Files: map[string]trackedFile{
+			"/notion/Docs/002.md": {
+				Revision:    "rev_old",
+				ContentType: "text/markdown",
+				Hash:        hashBytes([]byte("# stale")),
+			},
+		},
+		EventsCursor:      "evt_000",
+		BootstrapComplete: true,
+	}
+
+	err = syncer.Reconcile(context.Background())
+	var notReadyErr *IncrementalReadNotReadyError
+	if !errors.As(err, &notReadyErr) || notReadyErr.Path != "/notion/Docs/002.md" {
+		t.Fatalf("expected changed-path 404 to fail the cycle for retry, got %v (listEvents=%d readFile=%d readsByPath=%v)", err, client.listEventsCalls, client.readFileCalls, client.readFileCallsByPath)
+	}
+	if got := syncer.state.EventsCursor; got != "evt_000" {
+		t.Fatalf("EventsCursor = %q, want unchanged evt_000", got)
+	}
+	if _, err := os.Stat(missingPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected unreadable changed path to remain absent locally; stat err=%v", err)
+	}
+	if _, ok := syncer.state.Files["/notion/Docs/002.md"]; !ok {
+		t.Fatalf("expected 404 changed path to remain tracked for retry")
+	}
+	if checkpoint := syncer.state.IncrementalCheckpoint; checkpoint == nil ||
+		checkpoint.Phase != "changed" ||
+		checkpoint.Path != "/notion/Docs/001.md" {
+		t.Fatalf("unexpected checkpoint before unreadable changed path: %#v", checkpoint)
+	}
+	stateBytes, err := os.ReadFile(filepath.Join(localDir, ".relayfile-mount-state.json"))
+	if err != nil {
+		t.Fatalf("read persisted retry checkpoint: %v", err)
+	}
+	var persisted mountState
+	if err := json.Unmarshal(stateBytes, &persisted); err != nil {
+		t.Fatalf("unmarshal persisted retry checkpoint: %v", err)
+	}
+	if persisted.EventsCursor != "evt_000" {
+		t.Fatalf("persisted EventsCursor = %q, want unchanged evt_000", persisted.EventsCursor)
+	}
+	if checkpoint := persisted.IncrementalCheckpoint; checkpoint == nil ||
+		checkpoint.Phase != "changed" ||
+		checkpoint.Path != "/notion/Docs/001.md" {
+		t.Fatalf("unexpected persisted retry checkpoint: %#v", checkpoint)
+	}
+
+	beforeFirstReads := client.readFileCallsByPath["/notion/Docs/001.md"]
+	client.files["/notion/Docs/002.md"] = RemoteFile{
+		Path:        "/notion/Docs/002.md",
+		Revision:    "rev_002",
+		ContentType: "text/markdown",
+		Content:     "# 002",
+	}
+	resumedSyncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID:      "ws_changed_404_retry",
+		RemoteRoot:       "/notion",
+		LocalRoot:        localDir,
+		FullPullEvery:    -1,
+		WebSocket:        boolPtr(false),
+		CursorTimeout:    time.Second,
+		BootstrapTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatalf("new resumed syncer failed: %v", err)
+	}
+	if err := resumedSyncer.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile after changed path became readable failed: %v", err)
+	}
+	if got := client.readFileCallsByPath["/notion/Docs/001.md"]; got != beforeFirstReads {
+		t.Fatalf("expected checkpointed path to be skipped on resume; read calls went %d -> %d", beforeFirstReads, got)
+	}
+	if got := resumedSyncer.state.EventsCursor; got != "evt_003" {
+		t.Fatalf("EventsCursor = %q, want completed page cursor evt_003", got)
+	}
+	if checkpoint := resumedSyncer.state.IncrementalCheckpoint; checkpoint != nil {
+		t.Fatalf("expected checkpoint to clear after completed page, got %#v", checkpoint)
+	}
+	assertLocalFileContent(t, missingPath, "# 002")
+	assertLocalFileContent(t, filepath.Join(localDir, "Docs", "003.md"), "# 003")
+}
+
+func TestPullRemoteIncrementalCreatedThreadReply404RetriesWithoutAdvancingCursor(t *testing.T) {
+	const replyPath = "/slack/channels/C123ABC__proj-cloud/threads/1780871788_370329/replies/1780914176_827829.json"
+	client := &fakeClient{
+		files: map[string]RemoteFile{},
+		events: []FilesystemEvent{
+			{EventID: "evt_168287", Type: "file.created", Path: replyPath, Revision: "rev_reply"},
+		},
+		revisionCounter: 1,
+		eventCounter:    1,
+	}
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID:      "ws_thread_reply_404_retry",
+		RemoteRoot:       "/slack/channels/C123ABC__proj-cloud/threads",
+		LocalRoot:        localDir,
+		FullPullEvery:    -1,
+		WebSocket:        boolPtr(false),
+		CursorTimeout:    time.Second,
+		BootstrapTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+	syncer.loaded = true
+	syncer.state = mountState{
+		Files:             map[string]trackedFile{},
+		EventsCursor:      "evt_168286",
+		BootstrapComplete: true,
+	}
+
+	err = syncer.Reconcile(context.Background())
+	var notReadyErr *IncrementalReadNotReadyError
+	if !errors.As(err, &notReadyErr) || notReadyErr.Path != replyPath {
+		t.Fatalf("expected created thread reply 404 to fail the cycle for retry, got %v (listEvents=%d readFile=%d readsByPath=%v)", err, client.listEventsCalls, client.readFileCalls, client.readFileCallsByPath)
+	}
+	if got := syncer.state.EventsCursor; got != "evt_168286" {
+		t.Fatalf("EventsCursor = %q, want unchanged evt_168286", got)
+	}
+	localReplyPath := filepath.Join(localDir, "1780871788_370329", "replies", "1780914176_827829.json")
+	if _, err := os.Stat(localReplyPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected unreadable thread reply to remain absent locally; stat err=%v", err)
+	}
+
+	client.files[replyPath] = RemoteFile{
+		Path:        replyPath,
+		Revision:    "rev_reply",
+		ContentType: "application/json",
+		Content:     `{"text":"materialized reply"}`,
+	}
+	resumedSyncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID:      "ws_thread_reply_404_retry",
+		RemoteRoot:       "/slack/channels/C123ABC__proj-cloud/threads",
+		LocalRoot:        localDir,
+		FullPullEvery:    -1,
+		WebSocket:        boolPtr(false),
+		CursorTimeout:    time.Second,
+		BootstrapTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatalf("new resumed syncer failed: %v", err)
+	}
+	if err := resumedSyncer.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile after thread reply became readable failed: %v", err)
+	}
+	if got := resumedSyncer.state.EventsCursor; got != "evt_168287" {
+		t.Fatalf("EventsCursor = %q, want evt_168287", got)
+	}
+	assertLocalFileContent(t, localReplyPath, `{"text":"materialized reply"}`)
+}
+
+func TestPullRemoteIncrementalDeleteEventStillDeletes(t *testing.T) {
+	client := &fakeClient{
+		files: map[string]RemoteFile{},
+		events: []FilesystemEvent{
+			{EventID: "evt_001", Type: "file.deleted", Path: "/notion/Docs/001.md", Revision: "rev_001"},
+		},
+		revisionCounter: 1,
+		eventCounter:    1,
 	}
 	localDir := t.TempDir()
 	localPath := filepath.Join(localDir, "Docs", "001.md")
@@ -6447,7 +6622,7 @@ func TestPullRemoteIncrementalCheckpointPreservesChangedPath404Delete(t *testing
 		t.Fatalf("write stale local file: %v", err)
 	}
 	syncer, err := NewSyncer(client, SyncerOptions{
-		WorkspaceID:      "ws_page_404_resume",
+		WorkspaceID:      "ws_deleted_event",
 		RemoteRoot:       "/notion",
 		LocalRoot:        localDir,
 		FullPullEvery:    -1,
@@ -6462,7 +6637,7 @@ func TestPullRemoteIncrementalCheckpointPreservesChangedPath404Delete(t *testing
 	syncer.state = mountState{
 		Files: map[string]trackedFile{
 			"/notion/Docs/001.md": {
-				Revision:    "rev_old",
+				Revision:    "rev_001",
 				ContentType: "text/markdown",
 				Hash:        hashBytes([]byte("# stale")),
 			},
@@ -6471,60 +6646,17 @@ func TestPullRemoteIncrementalCheckpointPreservesChangedPath404Delete(t *testing
 		BootstrapComplete: true,
 	}
 
-	err = syncer.Reconcile(context.Background())
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("expected read-file deadline after checkpointed 404 delete, got %v", err)
+	if err := syncer.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile delete event: %v", err)
 	}
 	if _, err := os.Stat(localPath); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("expected 404 changed path to delete stale local file before timeout; stat err=%v", err)
+		t.Fatalf("expected delete event to remove local file; stat err=%v", err)
 	}
 	if _, ok := syncer.state.Files["/notion/Docs/001.md"]; ok {
-		t.Fatalf("expected 404 changed path to be removed from tracked state")
+		t.Fatalf("expected delete event to remove tracked state")
 	}
-	if checkpoint := syncer.state.IncrementalCheckpoint; checkpoint == nil ||
-		checkpoint.Phase != "changed" ||
-		checkpoint.Path != "/notion/Docs/002.md" {
-		t.Fatalf("unexpected checkpoint after partial changed page with 404: %#v", checkpoint)
-	}
-	stateBytes, err := os.ReadFile(filepath.Join(localDir, ".relayfile-mount-state.json"))
-	if err != nil {
-		t.Fatalf("read persisted 404 checkpoint: %v", err)
-	}
-	var persisted mountState
-	if err := json.Unmarshal(stateBytes, &persisted); err != nil {
-		t.Fatalf("unmarshal persisted 404 checkpoint: %v", err)
-	}
-	if checkpoint := persisted.IncrementalCheckpoint; checkpoint == nil ||
-		checkpoint.Phase != "changed" ||
-		checkpoint.Path != "/notion/Docs/002.md" {
-		t.Fatalf("unexpected persisted 404 checkpoint: %#v", checkpoint)
-	}
-
-	before404Reads := client.readFileCallsByPath["/notion/Docs/001.md"]
-	client.readFileErr = nil
-	resumedSyncer, err := NewSyncer(client, SyncerOptions{
-		WorkspaceID:      "ws_page_404_resume",
-		RemoteRoot:       "/notion",
-		LocalRoot:        localDir,
-		FullPullEvery:    -1,
-		WebSocket:        boolPtr(false),
-		CursorTimeout:    time.Second,
-		BootstrapTimeout: time.Second,
-	})
-	if err != nil {
-		t.Fatalf("new resumed syncer failed: %v", err)
-	}
-	if err := resumedSyncer.Reconcile(context.Background()); err != nil {
-		t.Fatalf("reconcile after checkpointed 404 delete failed: %v", err)
-	}
-	if got := client.readFileCallsByPath["/notion/Docs/001.md"]; got != before404Reads {
-		t.Fatalf("expected deleted 404 path to be checkpointed and skipped on resume; read calls went %d -> %d", before404Reads, got)
-	}
-	if got := resumedSyncer.state.EventsCursor; got != "evt_003" {
-		t.Fatalf("EventsCursor = %q, want completed page cursor evt_003", got)
-	}
-	if checkpoint := resumedSyncer.state.IncrementalCheckpoint; checkpoint != nil {
-		t.Fatalf("expected checkpoint to clear after completed page, got %#v", checkpoint)
+	if got := syncer.state.EventsCursor; got != "evt_001" {
+		t.Fatalf("EventsCursor = %q, want evt_001", got)
 	}
 }
 
