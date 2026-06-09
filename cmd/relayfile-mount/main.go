@@ -63,6 +63,7 @@ type mountConfig struct {
 	logHTTPStatus    bool
 	scopes           []string
 	once             bool
+	flushOutboxOnce  bool
 	mode             string
 }
 
@@ -103,6 +104,7 @@ func main() {
 	mode := flag.String("mode", envOrDefault("RELAYFILE_MOUNT_MODE", mountModePoll), "mount mode: poll (synced mirror, recommended) or fuse")
 	fuse := flag.Bool("fuse", boolEnv("RELAYFILE_MOUNT_FUSE", false), "shortcut for --mode=fuse")
 	once := flag.Bool("once", false, "run one sync cycle and exit")
+	flushOutboxOnce := flag.Bool("flush-outbox-once", false, "flush durable writeback outbox once and exit without reconciling the local mirror")
 	flag.Parse()
 
 	resolvedToken := strings.TrimSpace(*token)
@@ -180,6 +182,7 @@ func main() {
 		logHTTPStatus:    *logHTTPStatus,
 		scopes:           parseTokenScopes(resolvedToken),
 		once:             *once,
+		flushOutboxOnce:  *flushOutboxOnce,
 		mode:             resolvedMode,
 	}
 
@@ -396,6 +399,15 @@ func runSinglePollingMount(rootCtx context.Context, cfg mountConfig) error {
 	}
 	if _, err := mountsync.StartDiagnostics(rootCtx, cfg.pprofAddr, cfg.memlogInterval, log.Default()); err != nil {
 		return fmt.Errorf("start diagnostics: %w", err)
+	}
+	if cfg.flushOutboxOnce {
+		ctx, cancel := context.WithTimeout(rootCtx, cfg.timeout)
+		defer cancel()
+		if err := syncer.FlushOutboxOnce(ctx); err != nil {
+			return fmt.Errorf("flush outbox once: %w", err)
+		}
+		log.Printf("outbox flush completed")
+		return nil
 	}
 	log.Printf("%s", mountStartupLogLine(cfg))
 	log.Printf("Mirror started at %s. Sync interval %s +/- %.0f%%. Public state: %s", cfg.localDir, cfg.interval.Round(time.Second), cfg.intervalJitter*100, filepath.Join(cfg.localDir, ".relay", "state.json"))

@@ -2203,6 +2203,122 @@ func TestOutboxRetryCapSurfacesNeedsAttention(t *testing.T) {
 	}
 }
 
+func TestFlushOutboxOnceFlushesPendingWithoutMirrorScan(t *testing.T) {
+	localDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(localDir, "command.json"), []byte(`{"text":"hello"}`), 0o644); err != nil {
+		t.Fatalf("seed local command failed: %v", err)
+	}
+	firstClient := &fakeClient{
+		files: map[string]RemoteFile{},
+		bulkWriteResponseFunc: func(ctx context.Context, workspaceID string, files []BulkWriteFile) (BulkWriteResponse, error) {
+			_ = ctx
+			_ = workspaceID
+			_ = files
+			return BulkWriteResponse{}, context.Canceled
+		},
+	}
+	first, err := NewSyncer(firstClient, SyncerOptions{
+		WorkspaceID: "ws_flush_outbox_once",
+		RemoteRoot:  "/slack/channels/C123/messages",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer first: %v", err)
+	}
+	if err := first.SyncOnce(context.Background()); err == nil {
+		t.Fatal("expected first upload to fail")
+	}
+	record := readPendingOutboxRecordsForTest(t, localDir)[0]
+	if strings.TrimSpace(record.NextAttemptAt) == "" {
+		t.Fatalf("expected retry backoff to be set on pending record: %+v", record)
+	}
+	if err := os.WriteFile(filepath.Join(localDir, "untracked-local.txt"), []byte("do not scan me"), 0o644); err != nil {
+		t.Fatalf("seed untracked file failed: %v", err)
+	}
+
+	baseClient := &fakeClient{files: map[string]RemoteFile{}}
+	secondClient := &fakeExportClient{fakeClient: baseClient}
+	second, err := NewSyncer(secondClient, SyncerOptions{
+		WorkspaceID: "ws_flush_outbox_once",
+		RemoteRoot:  "/slack/channels/C123/messages",
+		LocalRoot:   localDir,
+		Interval:    30 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer second: %v", err)
+	}
+	if err := second.FlushOutboxOnce(context.Background()); err != nil {
+		t.Fatalf("FlushOutboxOnce failed: %v", err)
+	}
+	if baseClient.bulkWriteCalls != 1 {
+		t.Fatalf("expected one outbox bulk upload, got %d", baseClient.bulkWriteCalls)
+	}
+	if secondClient.exportCalls != 0 || baseClient.listTreeCalls != 0 || baseClient.listEventsCalls != 0 {
+		t.Fatalf("FlushOutboxOnce reconciled remote tree: export=%d listTree=%d listEvents=%d", secondClient.exportCalls, baseClient.listTreeCalls, baseClient.listEventsCalls)
+	}
+	if pending := readPendingOutboxRecordsForTest(t, localDir); len(pending) != 0 {
+		t.Fatalf("expected pending outbox empty after flush, got %+v", pending)
+	}
+	state := readPublicState(t, localDir)
+	if state.Status != "ready" || state.States.HasPendingWriteback || state.PendingWriteback != 0 || state.Outbox.Pending != 0 || state.Outbox.NeedsAttention != 0 {
+		t.Fatalf("expected drained public state without scanning untracked local file, got %+v", state)
+	}
+	if !state.LowMemory || state.Files != nil {
+		t.Fatalf("expected flush public state to be written without per-file mirror scan, got lowMemory=%v files=%d", state.LowMemory, len(state.Files))
+	}
+}
+
+func TestFlushOutboxOnceReturnsErrorAndPreservesPendingState(t *testing.T) {
+	localDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(localDir, "command.json"), []byte(`{"text":"hello"}`), 0o644); err != nil {
+		t.Fatalf("seed local command failed: %v", err)
+	}
+	client := &fakeClient{
+		files: map[string]RemoteFile{},
+		bulkWriteResponseFunc: func(ctx context.Context, workspaceID string, files []BulkWriteFile) (BulkWriteResponse, error) {
+			_ = ctx
+			_ = workspaceID
+			_ = files
+			return BulkWriteResponse{}, context.Canceled
+		},
+	}
+	first, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_flush_outbox_once_failure",
+		RemoteRoot:  "/slack/channels/C123/messages",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer first: %v", err)
+	}
+	if err := first.SyncOnce(context.Background()); err == nil {
+		t.Fatal("expected first upload to fail")
+	}
+	attemptsAfterSetup := client.bulkWriteCalls
+
+	second, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_flush_outbox_once_failure",
+		RemoteRoot:  "/slack/channels/C123/messages",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer second: %v", err)
+	}
+	if err := second.FlushOutboxOnce(context.Background()); err == nil {
+		t.Fatal("expected FlushOutboxOnce to fail when upload fails")
+	}
+	if client.bulkWriteCalls != attemptsAfterSetup+1 {
+		t.Fatalf("expected exactly one forced flush attempt, got %d -> %d", attemptsAfterSetup, client.bulkWriteCalls)
+	}
+	pending := readPendingOutboxRecordsForTest(t, localDir)
+	if len(pending) != 1 {
+		t.Fatalf("expected pending outbox preserved after failed flush, got %+v", pending)
+	}
+	state := readPublicState(t, localDir)
+	if state.Status != "writeback-pending" || !state.States.HasPendingWriteback || state.Outbox.Pending != 1 {
+		t.Fatalf("expected failed flush public state to surface pending outbox, got %+v", state)
+	}
+}
+
 func TestBulkWrite_MixedCreateAndUpdateBatch(t *testing.T) {
 	client := &fakeClient{
 		files: map[string]RemoteFile{

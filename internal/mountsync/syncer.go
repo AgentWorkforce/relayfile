@@ -1462,6 +1462,38 @@ func (s *Syncer) Reconcile(ctx context.Context) error {
 	return s.sync(ctx, true)
 }
 
+// FlushOutboxOnce uploads only persisted durable outbox records and exits
+// without reconciling the local mirror. It is intentionally O(outbox): no
+// local tree scan, pushLocal, pullRemote, websocket, or digest work.
+func (s *Syncer) FlushOutboxOnce(ctx context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if err := s.loadState(); err != nil {
+		return err
+	}
+	if err := s.flushOutboxRecords(ctx, nil, true); err != nil {
+		s.markSyncError(err)
+		_ = s.saveStateWithoutLocalScan()
+		return err
+	}
+	outbox := s.summarizeOutbox()
+	if outbox.NeedsAttention > 0 {
+		err := fmt.Errorf("outbox needs attention: %d command(s)", outbox.NeedsAttention)
+		s.markSyncError(err)
+		_ = s.saveStateWithoutLocalScan()
+		return err
+	}
+	if outbox.Pending > 0 {
+		err := fmt.Errorf("outbox pending remains: %d command(s)", outbox.Pending)
+		s.markSyncError(err)
+		_ = s.saveStateWithoutLocalScan()
+		return err
+	}
+	s.markSyncSuccess()
+	return s.saveStateWithoutLocalScan()
+}
+
 // HandleLocalChange routes a local filesystem event to the appropriate
 // writeback action.
 //
@@ -1683,6 +1715,10 @@ func (s *Syncer) flushPendingBulkWrites(ctx context.Context, pending []pendingBu
 }
 
 func (s *Syncer) flushDueOutboxRecords(ctx context.Context, conflicted map[string]struct{}) error {
+	return s.flushOutboxRecords(ctx, conflicted, false)
+}
+
+func (s *Syncer) flushOutboxRecords(ctx context.Context, conflicted map[string]struct{}, forceDue bool) error {
 	if s.circuit != nil && s.circuit.IsOpen() {
 		return nil
 	}
@@ -1698,6 +1734,10 @@ func (s *Syncer) flushDueOutboxRecords(ctx context.Context, conflicted map[strin
 			if err := s.saveOutboxRecord(record); err != nil {
 				return err
 			}
+		}
+		if forceDue && !record.NeedsAttention && record.AttemptCount < s.maxOutboxAttemptsValue() {
+			due = append(due, record)
+			continue
 		}
 		if s.outboxDue(record, now) {
 			due = append(due, record)
@@ -5167,6 +5207,25 @@ func (s *Syncer) saveState() error {
 		return err
 	}
 	return s.savePublicState()
+}
+
+func (s *Syncer) saveStateWithoutLocalScan() error {
+	s.state.SyncMode = s.currentSyncMode()
+	data, err := json.Marshal(s.state)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(s.stateFile), 0o755); err != nil {
+		return err
+	}
+	if err := writeFileAtomic(s.stateFile, data, 0o644); err != nil {
+		return err
+	}
+	wasLowMemory := s.lowMemory
+	s.lowMemory = true
+	err = s.savePublicState()
+	s.lowMemory = wasLowMemory
+	return err
 }
 
 func (s *Syncer) savePublicState() error {
