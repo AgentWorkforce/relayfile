@@ -18,6 +18,8 @@ const (
 	defaultOutboxMaxAttempts = 5
 	outboxBackoffBase        = 500 * time.Millisecond
 	outboxBackoffMax         = 30 * time.Second
+
+	outboxCapabilitiesSchemaVersion = 2
 )
 
 type outboxStatus string
@@ -58,9 +60,17 @@ type outboxSummary struct {
 	Acked          int `json:"acked"`
 }
 
+type outboxCapabilities struct {
+	SchemaVersion    int  `json:"schemaVersion"`
+	DispatchReceipts bool `json:"dispatchReceipts"`
+}
+
 func (s *Syncer) outboxPendingDir() string { return filepath.Join(s.outboxDir, "pending") }
 func (s *Syncer) outboxAckedDir() string   { return filepath.Join(s.outboxDir, "acked") }
 func (s *Syncer) outboxFailedDir() string  { return filepath.Join(s.outboxDir, "failed") }
+func (s *Syncer) outboxCapabilitiesPath() string {
+	return filepath.Join(s.outboxDir, "capabilities.json")
+}
 
 func (s *Syncer) ensureOutboxDirs() error {
 	for _, dir := range []string{s.outboxDir, s.outboxPendingDir(), s.outboxAckedDir(), s.outboxFailedDir()} {
@@ -68,7 +78,30 @@ func (s *Syncer) ensureOutboxDirs() error {
 			return err
 		}
 	}
+	if err := s.ensureOutboxCapabilities(); err != nil {
+		return err
+	}
 	return nil
+}
+
+func (s *Syncer) ensureOutboxCapabilities() error {
+	capabilities := outboxCapabilities{
+		SchemaVersion:    outboxCapabilitiesSchemaVersion,
+		DispatchReceipts: true,
+	}
+	data, err := json.Marshal(capabilities)
+	if err != nil {
+		return err
+	}
+	path := s.outboxCapabilitiesPath()
+	existing, err := os.ReadFile(path)
+	if err == nil && string(existing) == string(data) {
+		return nil
+	}
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return writeFileAtomic(path, data, 0o644)
 }
 
 func (s *Syncer) pendingOutboxPath(commandID string) string {

@@ -2425,6 +2425,34 @@ func TestFlushOutboxOnceFlushesPendingWithoutMirrorScan(t *testing.T) {
 	}
 }
 
+func TestFlushOutboxOnceWritesReceiptCapabilityMarkerWithEmptyOutbox(t *testing.T) {
+	localDir := t.TempDir()
+	client := &fakeClient{files: map[string]RemoteFile{}}
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_flush_outbox_capabilities",
+		RemoteRoot:  "/slack/channels/C123/messages",
+		LocalRoot:   localDir,
+		Interval:    30 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer: %v", err)
+	}
+	if err := syncer.FlushOutboxOnce(context.Background()); err != nil {
+		t.Fatalf("FlushOutboxOnce with empty outbox failed: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(localDir, ".relay", "outbox", "capabilities.json"))
+	if err != nil {
+		t.Fatalf("expected outbox capabilities marker: %v", err)
+	}
+	var capabilities outboxCapabilities
+	if err := json.Unmarshal(data, &capabilities); err != nil {
+		t.Fatalf("decode outbox capabilities marker: %v", err)
+	}
+	if capabilities.SchemaVersion != outboxCapabilitiesSchemaVersion || !capabilities.DispatchReceipts {
+		t.Fatalf("unexpected capabilities marker: %+v", capabilities)
+	}
+}
+
 func TestFlushOutboxOnceReturnsErrorAndPreservesPendingState(t *testing.T) {
 	localDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(localDir, "command.json"), []byte(`{"text":"hello"}`), 0o644); err != nil {
