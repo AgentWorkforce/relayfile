@@ -7025,6 +7025,88 @@ func TestMarkBootstrapCompleteClearsReadNotReadyMarkers(t *testing.T) {
 	}
 }
 
+func TestLoadStateResetsBootstrapCompleteOnlyOnWriteOnlyToMirrorSyncMode(t *testing.T) {
+	tests := []struct {
+		name                  string
+		syncMode              string
+		writeOnly             bool
+		wantBootstrapComplete bool
+		wantCleared           bool
+	}{
+		{
+			name:                  "write-only to mirror resets bootstrap",
+			syncMode:              "write-only",
+			writeOnly:             false,
+			wantBootstrapComplete: false,
+			wantCleared:           true,
+		},
+		{
+			name:                  "mirror to mirror keeps bootstrap",
+			syncMode:              "mirror",
+			writeOnly:             false,
+			wantBootstrapComplete: true,
+		},
+		{
+			name:                  "legacy unknown to mirror keeps bootstrap",
+			syncMode:              "",
+			writeOnly:             false,
+			wantBootstrapComplete: true,
+		},
+		{
+			name:                  "write-only stays write-only keeps bootstrap",
+			syncMode:              "write-only",
+			writeOnly:             true,
+			wantBootstrapComplete: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			stateFile := filepath.Join(t.TempDir(), ".relayfile-mount-state.json")
+			if err := writeMountState(stateFile, mountState{
+				Files: map[string]trackedFile{
+					"/notion/Docs/a.md": {
+						Revision:    "rev_1",
+						ContentType: "text/markdown",
+						Hash:        hashString("# A"),
+					},
+				},
+				BootstrapComplete:    true,
+				BootstrapCursor:      "cursor_1",
+				BootstrapStartedAt:   time.Now().UTC().Format(time.RFC3339Nano),
+				BootstrapFilesSynced: 3,
+				BootstrapFilesTotal:  9,
+				SyncMode:             tc.syncMode,
+			}); err != nil {
+				t.Fatalf("seed state: %v", err)
+			}
+
+			syncer := &Syncer{stateFile: stateFile, writeOnly: tc.writeOnly}
+			if err := syncer.loadState(); err != nil {
+				t.Fatalf("load state: %v", err)
+			}
+
+			if got := syncer.state.BootstrapComplete; got != tc.wantBootstrapComplete {
+				t.Fatalf("BootstrapComplete = %v, want %v", got, tc.wantBootstrapComplete)
+			}
+			if tc.wantCleared {
+				if syncer.state.BootstrapCursor != "" {
+					t.Fatalf("BootstrapCursor = %q, want empty", syncer.state.BootstrapCursor)
+				}
+				if syncer.state.BootstrapStartedAt != "" {
+					t.Fatalf("BootstrapStartedAt = %q, want empty", syncer.state.BootstrapStartedAt)
+				}
+				if syncer.state.BootstrapFilesSynced != 0 {
+					t.Fatalf("BootstrapFilesSynced = %d, want 0", syncer.state.BootstrapFilesSynced)
+				}
+				if syncer.state.BootstrapFilesTotal != 0 {
+					t.Fatalf("BootstrapFilesTotal = %d, want 0", syncer.state.BootstrapFilesTotal)
+				}
+			}
+		})
+	}
+}
+
 func TestPullRemoteIncrementalDeleteEventStillDeletes(t *testing.T) {
 	client := &fakeClient{
 		files: map[string]RemoteFile{},
