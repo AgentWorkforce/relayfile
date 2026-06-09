@@ -53,6 +53,13 @@ bin/
 /relayfile-mount
 /relayfile-server
 
+# Mount platform packages: keep the skeleton (package.json/README/bin/.gitkeep)
+# tracked, but never commit the prebuilt binary copied in at release time.
+# (The blanket `bin/` rule above would otherwise ignore these dirs entirely.)
+!packages/mount-*/bin/
+!packages/mount-*/bin/.gitkeep
+packages/mount-*/bin/relayfile-mount
+
 # Agent tool configs
 .factory/
 .gemini/

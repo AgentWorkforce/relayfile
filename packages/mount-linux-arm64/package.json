@@ -1,0 +1,23 @@
+{
+  "name": "@relayfile/mount-linux-arm64",
+  "version": "0.8.19",
+  "description": "relayfile-mount binary for linux arm64. Installed automatically as an optional dependency of @relayfile/sdk.",
+  "files": [
+    "bin"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AgentWorkforce/relayfile.git",
+    "directory": "packages/mount-linux-arm64"
+  },
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "arm64"
+  ]
+}
