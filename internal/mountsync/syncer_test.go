@@ -2157,6 +2157,163 @@ func TestOutboxRetryAfterServerCommitUsesSameCommandIDAndDedupes(t *testing.T) {
 	}
 }
 
+func TestOutboxAcksOnlyAfterWritebackOperationSucceeded(t *testing.T) {
+	localDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(localDir, "command.json"), []byte(`{"text":"hello"}`), 0o644); err != nil {
+		t.Fatalf("seed local command failed: %v", err)
+	}
+	client := &fakeClient{
+		files:      map[string]RemoteFile{},
+		operations: map[string]OperationStatus{},
+	}
+	client.bulkWriteResponseFunc = func(ctx context.Context, workspaceID string, files []BulkWriteFile) (BulkWriteResponse, error) {
+		_ = ctx
+		_ = workspaceID
+		if len(files) != 1 {
+			t.Fatalf("expected one outbox file, got %+v", files)
+		}
+		path := normalizeRemotePath(files[0].Path)
+		client.revisionCounter++
+		revision := fmt.Sprintf("rev_%d", client.revisionCounter)
+		client.files[path] = RemoteFile{Path: path, Revision: revision, ContentType: files[0].ContentType, Content: files[0].Content}
+		opID := "op_dispatch_receipt_1"
+		client.operations[opID] = OperationStatus{
+			OpID:     opID,
+			Path:     path,
+			Revision: revision,
+			Provider: "slack",
+			Status:   "running",
+		}
+		return BulkWriteResponse{
+			Written: 1,
+			Results: []BulkWriteResult{{
+				Path:        path,
+				Revision:    revision,
+				ContentType: files[0].ContentType,
+				OpID:        opID,
+				Writeback:   &relayfile.BulkWriteWritebackResult{Provider: "slack", State: "pending"},
+			}},
+			CorrelationID: "corr_receipt_pending",
+		}, nil
+	}
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_outbox_dispatch_receipt",
+		RemoteRoot:  "/slack/channels/C123/messages",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer: %v", err)
+	}
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("sync with running op should keep pending without failing: %v", err)
+	}
+	pending := readPendingOutboxRecordsForTest(t, localDir)
+	if len(pending) != 1 || pending[0].OpID != "op_dispatch_receipt_1" || pending[0].DispatchStatus != "running" {
+		t.Fatalf("expected pending outbox with running op id, got %+v", pending)
+	}
+	if acked := readOutboxRecordsInDirForTest(t, filepath.Join(localDir, ".relay", "outbox", "acked")); len(acked) != 0 {
+		t.Fatalf("expected no acked record before op succeeded, got %+v", acked)
+	}
+
+	client.operations["op_dispatch_receipt_1"] = OperationStatus{
+		OpID:     "op_dispatch_receipt_1",
+		Path:     "/slack/channels/C123/messages/command.json",
+		Revision: pending[0].Revision,
+		Provider: "slack",
+		Status:   "succeeded",
+	}
+	forcePendingOutboxDueForTest(t, localDir)
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("sync after op success failed: %v", err)
+	}
+	if client.bulkWriteCalls != 1 {
+		t.Fatalf("expected success polling to avoid re-upload, got %d bulk calls", client.bulkWriteCalls)
+	}
+	if pending := readPendingOutboxRecordsForTest(t, localDir); len(pending) != 0 {
+		t.Fatalf("expected pending empty after op success, got %+v", pending)
+	}
+	acked := readOutboxRecordsInDirForTest(t, filepath.Join(localDir, ".relay", "outbox", "acked"))
+	if len(acked) != 1 || acked[0].OpID != "op_dispatch_receipt_1" || acked[0].DispatchStatus != "succeeded" {
+		t.Fatalf("expected acked succeeded receipt, got %+v", acked)
+	}
+}
+
+func TestOutboxLostBulkResponseRetryRecoversOpIDWithoutDuplicateDispatch(t *testing.T) {
+	localDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(localDir, "command.json"), []byte(`{"text":"hello"}`), 0o644); err != nil {
+		t.Fatalf("seed local command failed: %v", err)
+	}
+	client := &fakeClient{
+		files:                          map[string]RemoteFile{},
+		operations:                     map[string]OperationStatus{},
+		bulkWriteResponseFuncOwnsWrite: true,
+	}
+	var seenIdentity string
+	var providerDispatches int
+	client.bulkWriteResponseFunc = func(ctx context.Context, workspaceID string, files []BulkWriteFile) (BulkWriteResponse, error) {
+		_ = ctx
+		_ = workspaceID
+		if len(files) != 1 || files[0].ContentIdentity == nil {
+			t.Fatalf("expected one content-identified write, got %+v", files)
+		}
+		path := normalizeRemotePath(files[0].Path)
+		opID := "op_lost_response_1"
+		if seenIdentity == "" {
+			seenIdentity = files[0].ContentIdentity.Key
+			client.revisionCounter++
+			revision := fmt.Sprintf("rev_%d", client.revisionCounter)
+			client.files[path] = RemoteFile{Path: path, Revision: revision, ContentType: files[0].ContentType, Content: files[0].Content}
+			client.operations[opID] = OperationStatus{OpID: opID, Path: path, Revision: revision, Provider: "slack", Status: "succeeded"}
+			providerDispatches++
+			return BulkWriteResponse{}, context.Canceled
+		}
+		if files[0].ContentIdentity.Key != seenIdentity {
+			t.Fatalf("retry minted new content identity: got %s want %s", files[0].ContentIdentity.Key, seenIdentity)
+		}
+		remote := client.files[path]
+		return BulkWriteResponse{
+			Written: 0,
+			Results: []BulkWriteResult{{
+				Path:            remote.Path,
+				Revision:        remote.Revision,
+				ContentType:     remote.ContentType,
+				OpID:            opID,
+				ContentIdentity: files[0].ContentIdentity,
+				Writeback:       &relayfile.BulkWriteWritebackResult{Provider: "slack", State: "succeeded"},
+			}},
+			CorrelationID: "corr_lost_response_recovered",
+		}, nil
+	}
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_outbox_lost_response_receipt",
+		RemoteRoot:  "/slack/channels/C123/messages",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer: %v", err)
+	}
+	if err := syncer.SyncOnce(context.Background()); err == nil {
+		t.Fatal("expected first lost response to fail")
+	}
+	forcePendingOutboxDueForTest(t, localDir)
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("retry after lost response failed: %v", err)
+	}
+	if client.bulkWriteCalls != 2 {
+		t.Fatalf("expected exactly two upload attempts, got %d", client.bulkWriteCalls)
+	}
+	if providerDispatches != 1 {
+		t.Fatalf("expected one provider dispatch after deduped retry, got %d", providerDispatches)
+	}
+	if pending := readPendingOutboxRecordsForTest(t, localDir); len(pending) != 0 {
+		t.Fatalf("expected pending outbox empty after recovered receipt, got %+v", pending)
+	}
+	acked := readOutboxRecordsInDirForTest(t, filepath.Join(localDir, ".relay", "outbox", "acked"))
+	if len(acked) != 1 || acked[0].OpID != "op_lost_response_1" || acked[0].DispatchStatus != "succeeded" {
+		t.Fatalf("expected acked receipt for recovered op, got %+v", acked)
+	}
+}
+
 func TestOutboxRetryCapSurfacesNeedsAttention(t *testing.T) {
 	localDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(localDir, "command.json"), []byte(`{"text":"hello"}`), 0o644); err != nil {
@@ -5249,6 +5406,8 @@ type fakeClient struct {
 	lastBulkWriteResponse          BulkWriteResponse
 	bulkWriteResponseFunc          func(ctx context.Context, workspaceID string, files []BulkWriteFile) (BulkWriteResponse, error)
 	bulkWriteResponseFuncOwnsWrite bool
+	operations                     map[string]OperationStatus
+	getOperationCalls              int
 	deleteCalls                    []deleteCall
 	eventsUnsupported              bool
 	listEventsErrAfter             int
@@ -5591,6 +5750,19 @@ func (c *fakeClient) WriteFilesBulk(ctx context.Context, workspaceID string, fil
 	}
 	c.lastBulkWriteResponse = response
 	return response, nil
+}
+
+func (c *fakeClient) GetOperation(ctx context.Context, workspaceID, opID string) (OperationStatus, error) {
+	_ = ctx
+	_ = workspaceID
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.getOperationCalls++
+	op, ok := c.operations[opID]
+	if !ok {
+		return OperationStatus{}, &HTTPError{StatusCode: 404, Code: "not_found", Message: "not found"}
+	}
+	return op, nil
 }
 
 func (c *fakeClient) DeleteFile(ctx context.Context, workspaceID, path, baseRevision string) error {

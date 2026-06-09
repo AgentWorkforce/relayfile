@@ -203,9 +203,17 @@ type BulkWriteError struct {
 }
 
 type BulkWriteResult struct {
-	Path        string `json:"path"`
-	Revision    string `json:"revision"`
-	ContentType string `json:"contentType,omitempty"`
+	Path            string                    `json:"path"`
+	Revision        string                    `json:"revision"`
+	ContentType     string                    `json:"contentType,omitempty"`
+	OpID            string                    `json:"opId,omitempty"`
+	ContentIdentity *ContentIdentity          `json:"contentIdentity,omitempty"`
+	Writeback       *BulkWriteWritebackResult `json:"writeback,omitempty"`
+}
+
+type BulkWriteWritebackResult struct {
+	Provider string `json:"provider,omitempty"`
+	State    string `json:"state,omitempty"`
 }
 
 type DeleteRequest struct {
@@ -1445,6 +1453,10 @@ func (s *Store) BulkWrite(workspaceID string, files []BulkWriteFile) (int, []Bul
 		if contentType == "" {
 			contentType = "text/markdown"
 		}
+		if existingOp, ok := findOperationByContentIdentityLocked(ws, input.ContentIdentity, now); ok {
+			results = append(results, bulkWriteResultFromOperationLocked(ws, existingOp, path, contentType))
+			continue
+		}
 		_, existed := ws.Files[path]
 		revision := s.nextRevisionLocked()
 		file := ws.Files[path]
@@ -1466,11 +1478,16 @@ func (s *Store) BulkWrite(workspaceID string, files []BulkWriteFile) (int, []Bul
 			eventType = "file.updated"
 		}
 		result, task := s.recordWriteWithContentIdentityLocked(ws, path, revision, eventType, file.Provider, "", input.ContentIdentity)
-		_ = result
 		results = append(results, BulkWriteResult{
-			Path:        path,
-			Revision:    revision,
-			ContentType: contentType,
+			Path:            path,
+			Revision:        revision,
+			ContentType:     contentType,
+			OpID:            result.OpID,
+			ContentIdentity: cloneContentIdentity(input.ContentIdentity),
+			Writeback: &BulkWriteWritebackResult{
+				Provider: result.Writeback.Provider,
+				State:    result.Writeback.State,
+			},
 		})
 		tasks = append(tasks, queuedTask{task: task})
 		written++
@@ -1483,6 +1500,72 @@ func (s *Store) BulkWrite(workspaceID string, files []BulkWriteFile) (int, []Bul
 		s.enqueueWriteback(queued.task)
 	}
 	return written, results, errorsOut
+}
+
+func findOperationByContentIdentityLocked(ws *workspaceState, identity *ContentIdentity, now time.Time) (OperationStatus, bool) {
+	if ws == nil || identity == nil {
+		return OperationStatus{}, false
+	}
+	kind := strings.TrimSpace(identity.Kind)
+	key := strings.TrimSpace(identity.Key)
+	if kind == "" || key == "" {
+		return OperationStatus{}, false
+	}
+	var matched OperationStatus
+	found := false
+	for _, op := range ws.Ops {
+		if op.ContentIdentity == nil || strings.TrimSpace(op.ContentIdentity.Kind) != kind || strings.TrimSpace(op.ContentIdentity.Key) != key {
+			continue
+		}
+		if contentIdentityExpired(op.ContentIdentity, op.CreatedAt, now) {
+			continue
+		}
+		if !found || op.CreatedAt < matched.CreatedAt || (op.CreatedAt == matched.CreatedAt && op.OpID < matched.OpID) {
+			matched = op
+			found = true
+		}
+	}
+	return matched, found
+}
+
+func contentIdentityExpired(identity *ContentIdentity, createdAt string, now time.Time) bool {
+	if identity == nil || identity.TTLSeconds <= 0 {
+		return false
+	}
+	created, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(createdAt))
+	if err != nil {
+		return false
+	}
+	return !now.Before(created.Add(time.Duration(identity.TTLSeconds) * time.Second))
+}
+
+func bulkWriteResultFromOperationLocked(ws *workspaceState, op OperationStatus, fallbackPath, fallbackContentType string) BulkWriteResult {
+	path := normalizePath(op.Path)
+	if path == "/" || path == "" {
+		path = normalizePath(fallbackPath)
+	}
+	revision := strings.TrimSpace(op.Revision)
+	contentType := strings.TrimSpace(fallbackContentType)
+	if file, ok := ws.Files[path]; ok {
+		if revision == "" {
+			revision = file.Revision
+		}
+		if strings.TrimSpace(file.ContentType) != "" {
+			contentType = file.ContentType
+		}
+	}
+	result := BulkWriteResult{
+		Path:            path,
+		Revision:        revision,
+		ContentType:     contentType,
+		OpID:            op.OpID,
+		ContentIdentity: cloneContentIdentity(op.ContentIdentity),
+		Writeback: &BulkWriteWritebackResult{
+			Provider: op.Provider,
+			State:    op.Status,
+		},
+	}
+	return result
 }
 
 func (s *Store) ExportWorkspace(workspaceID string) ([]File, error) {

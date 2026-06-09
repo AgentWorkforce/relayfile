@@ -143,11 +143,28 @@ class BulkWriteError:
 
 
 @dataclass
+class BulkWriteWritebackResult:
+    provider: str | None = None
+    state: str | None = None
+
+
+@dataclass
+class BulkWriteResult:
+    path: str
+    revision: str
+    content_type: str | None = None
+    op_id: str | None = None
+    content_identity: ContentIdentity | None = None
+    writeback: BulkWriteWritebackResult | None = None
+
+
+@dataclass
 class BulkWriteResponse:
     written: int
     error_count: int
     errors: list[BulkWriteError]
     correlation_id: str
+    results: list[BulkWriteResult] | None = None
 
 
 @dataclass

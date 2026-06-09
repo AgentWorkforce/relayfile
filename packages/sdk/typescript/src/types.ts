@@ -106,6 +106,17 @@ export interface BulkWriteResponse {
     code: string;
     message: string;
   }>;
+  results?: Array<{
+    path: string;
+    revision: string;
+    contentType?: string;
+    opId?: string;
+    contentIdentity?: ContentIdentity;
+    writeback?: {
+      provider?: string;
+      state?: string;
+    };
+  }>;
   correlationId: string;
 }
 

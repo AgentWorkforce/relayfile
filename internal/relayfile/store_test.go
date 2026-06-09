@@ -4447,6 +4447,58 @@ func TestBulkWriteContentIdentityReachesProviderWriteAction(t *testing.T) {
 	}
 }
 
+func TestBulkWriteContentIdentityRetryReturnsExistingOperationWithoutDuplicateDispatch(t *testing.T) {
+	queue := &countingWritebackQueue{inner: NewInMemoryWritebackQueue(10)}
+	store := NewStoreWithOptions(StoreOptions{
+		DisableWorkers: true,
+		WritebackQueue: queue,
+	})
+	t.Cleanup(store.Close)
+
+	identity := &ContentIdentity{
+		Kind:       "mount-command",
+		Key:        "mountcmd_retry_same_identity",
+		TTLSeconds: 604800,
+	}
+	file := BulkWriteFile{
+		Path:            "/slack/channels/C123/messages/draft@1.json",
+		ContentType:     "application/json",
+		Content:         `{"text":"hello"}`,
+		ContentIdentity: identity,
+	}
+	written, firstResults, errs := store.BulkWrite("ws_bulk_identity_dedupe", []BulkWriteFile{file})
+	if len(errs) != 0 {
+		t.Fatalf("first bulk write returned errors: %+v", errs)
+	}
+	if written != 1 || len(firstResults) != 1 || firstResults[0].OpID == "" {
+		t.Fatalf("expected first write with op id, written=%d results=%+v", written, firstResults)
+	}
+	firstOpID := firstResults[0].OpID
+
+	written, retryResults, errs := store.BulkWrite("ws_bulk_identity_dedupe", []BulkWriteFile{file})
+	if len(errs) != 0 {
+		t.Fatalf("retry bulk write returned errors: %+v", errs)
+	}
+	if written != 0 {
+		t.Fatalf("expected deduped retry to avoid a second write, got written=%d", written)
+	}
+	if len(retryResults) != 1 || retryResults[0].OpID != firstOpID {
+		t.Fatalf("expected retry to return existing op %s, got %+v", firstOpID, retryResults)
+	}
+	if retryResults[0].ContentIdentity == nil || *retryResults[0].ContentIdentity != *identity {
+		t.Fatalf("expected retry result identity %+v, got %+v", identity, retryResults[0].ContentIdentity)
+	}
+	if retryResults[0].Writeback == nil || retryResults[0].Writeback.State != "pending" {
+		t.Fatalf("expected retry result writeback pending, got %+v", retryResults[0].Writeback)
+	}
+	if depth := queue.Depth(); depth != 1 {
+		t.Fatalf("expected one provider dispatch queued after deduped retry, got depth=%d", depth)
+	}
+	if atomic.LoadInt32(&queue.tryCalls) != 1 {
+		t.Fatalf("expected exactly one queue attempt, got %d", atomic.LoadInt32(&queue.tryCalls))
+	}
+}
+
 func TestProviderWriteActionReceivesFileDeletePayload(t *testing.T) {
 	actions := make(chan WritebackAction, 10)
 	store := NewStoreWithOptions(StoreOptions{
