@@ -1944,7 +1944,6 @@ func TestBulkWrite_FlushSendsContentIdentity(t *testing.T) {
 		workspaceID = "ws_test"
 		content     = "{\"channel\":\"C123\",\"text\":\"hello writeback idempotency\"}\n"
 		draftID     = "5ab77d67-1111-4111-8111-123456789abc"
-		key         = "ws_test:/slack/channels/C123/messages/messages 5ab77d67-1111-4111-8111-123456789abc.json:751f9591557700f69b5ceefcdec7ead8563a10f0a712c501a5028699be021511"
 	)
 
 	client := &fakeClient{files: map[string]RemoteFile{}}
@@ -1978,14 +1977,229 @@ func TestBulkWrite_FlushSendsContentIdentity(t *testing.T) {
 	if identity == nil {
 		t.Fatal("expected flushed bulk file to carry content identity")
 	}
-	if identity.Kind != mountWritebackCreateDraftContentIdentityKind {
-		t.Fatalf("flushed identity kind = %q, want %q", identity.Kind, mountWritebackCreateDraftContentIdentityKind)
+	acked := readOutboxRecordsInDirForTest(t, filepath.Join(localDir, ".relay", "outbox", "acked"))
+	if len(acked) != 1 {
+		t.Fatalf("expected one acked outbox record, got %+v", acked)
 	}
-	if identity.Key != key {
-		t.Fatalf("flushed identity key = %q, want %q", identity.Key, key)
+	if identity.Kind != "mount-command" {
+		t.Fatalf("flushed identity kind = %q, want mount-command", identity.Kind)
 	}
-	if identity.TTLSeconds != 2592000 {
-		t.Fatalf("flushed identity ttl = %d, want 2592000", identity.TTLSeconds)
+	if identity.Key != acked[0].CommandID {
+		t.Fatalf("flushed identity key = %q, want persisted command id %q", identity.Key, acked[0].CommandID)
+	}
+	if identity.TTLSeconds != 7*24*60*60 {
+		t.Fatalf("flushed identity ttl = %d, want 604800", identity.TTLSeconds)
+	}
+}
+
+func TestOutboxPersistsBeforeBulkWriteFailure(t *testing.T) {
+	localDir := t.TempDir()
+	client := &fakeClient{
+		files: map[string]RemoteFile{},
+		bulkWriteResponseFunc: func(ctx context.Context, workspaceID string, files []BulkWriteFile) (BulkWriteResponse, error) {
+			_ = ctx
+			_ = workspaceID
+			_ = files
+			records := readPendingOutboxRecordsForTest(t, localDir)
+			if len(records) != 1 {
+				t.Fatalf("expected outbox record persisted before upload, got %d", len(records))
+			}
+			if records[0].CommandID == "" || records[0].CorrelationID != records[0].CommandID {
+				t.Fatalf("expected stable command/correlation id before upload, got %+v", records[0])
+			}
+			return BulkWriteResponse{}, context.Canceled
+		},
+	}
+	if err := os.WriteFile(filepath.Join(localDir, "command.json"), []byte(`{"text":"hello"}`), 0o644); err != nil {
+		t.Fatalf("seed local command failed: %v", err)
+	}
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_outbox_persist_first",
+		RemoteRoot:  "/slack/channels/C123/messages",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer: %v", err)
+	}
+
+	if err := syncer.SyncOnce(context.Background()); err == nil {
+		t.Fatal("expected canceled upload to fail")
+	}
+	records := readPendingOutboxRecordsForTest(t, localDir)
+	if len(records) != 1 || records[0].AttemptCount != 1 {
+		t.Fatalf("expected one attempted pending outbox record, got %+v", records)
+	}
+}
+
+func TestOutboxRestartReloadsPendingAndFlushesWithPersistedCommandID(t *testing.T) {
+	localDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(localDir, "command.json"), []byte(`{"text":"hello"}`), 0o644); err != nil {
+		t.Fatalf("seed local command failed: %v", err)
+	}
+	firstClient := &fakeClient{
+		files: map[string]RemoteFile{},
+		bulkWriteResponseFunc: func(ctx context.Context, workspaceID string, files []BulkWriteFile) (BulkWriteResponse, error) {
+			_ = ctx
+			_ = workspaceID
+			_ = files
+			return BulkWriteResponse{}, context.Canceled
+		},
+	}
+	first, err := NewSyncer(firstClient, SyncerOptions{
+		WorkspaceID: "ws_outbox_restart",
+		RemoteRoot:  "/slack/channels/C123/messages",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer first: %v", err)
+	}
+	if err := first.SyncOnce(context.Background()); err == nil {
+		t.Fatal("expected first upload to fail")
+	}
+	record := forcePendingOutboxDueForTest(t, localDir)
+	commandID := record.CommandID
+
+	secondClient := &fakeClient{files: map[string]RemoteFile{}}
+	second, err := NewSyncer(secondClient, SyncerOptions{
+		WorkspaceID: "ws_outbox_restart",
+		RemoteRoot:  "/slack/channels/C123/messages",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer second: %v", err)
+	}
+	if err := second.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("restart flush failed: %v", err)
+	}
+	if secondClient.bulkWriteCalls != 1 {
+		t.Fatalf("expected restart to flush pending outbox once, got %d", secondClient.bulkWriteCalls)
+	}
+	gotIdentity := secondClient.bulkWriteBatches[0][0].ContentIdentity
+	if gotIdentity == nil || gotIdentity.Key != commandID || gotIdentity.Kind != "mount-command" {
+		t.Fatalf("expected persisted command id in retry contentIdentity, got %+v (want %s)", gotIdentity, commandID)
+	}
+	if pending := readPendingOutboxRecordsForTest(t, localDir); len(pending) != 0 {
+		t.Fatalf("expected pending outbox empty after ack, got %+v", pending)
+	}
+	acked := readOutboxRecordsInDirForTest(t, filepath.Join(localDir, ".relay", "outbox", "acked"))
+	if len(acked) != 1 || acked[0].CommandID != commandID {
+		t.Fatalf("expected acked outbox record for %s, got %+v", commandID, acked)
+	}
+}
+
+func TestOutboxRetryAfterServerCommitUsesSameCommandIDAndDedupes(t *testing.T) {
+	localDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(localDir, "command.json"), []byte(`{"text":"hello"}`), 0o644); err != nil {
+		t.Fatalf("seed local command failed: %v", err)
+	}
+	var seenIdentity string
+	var committedEvents int
+	client := &fakeClient{
+		files:                          map[string]RemoteFile{},
+		bulkWriteResponseFuncOwnsWrite: true,
+	}
+	client.bulkWriteResponseFunc = func(ctx context.Context, workspaceID string, files []BulkWriteFile) (BulkWriteResponse, error) {
+		_ = ctx
+		_ = workspaceID
+		if len(files) != 1 || files[0].ContentIdentity == nil {
+			t.Fatalf("expected one content-identified write, got %+v", files)
+		}
+		path := normalizeRemotePath(files[0].Path)
+		if seenIdentity == "" {
+			seenIdentity = files[0].ContentIdentity.Key
+			client.revisionCounter++
+			revision := fmt.Sprintf("rev_%d", client.revisionCounter)
+			client.files[path] = RemoteFile{
+				Path:        path,
+				Revision:    revision,
+				ContentType: files[0].ContentType,
+				Content:     files[0].Content,
+			}
+			client.appendEvent("file.created", path, revision)
+			committedEvents++
+			return BulkWriteResponse{}, context.Canceled
+		}
+		if files[0].ContentIdentity.Key != seenIdentity {
+			t.Fatalf("retry minted a new command id: got %s want %s", files[0].ContentIdentity.Key, seenIdentity)
+		}
+		remote := client.files[path]
+		return BulkWriteResponse{
+			Written:       0,
+			ErrorCount:    0,
+			Errors:        []BulkWriteError{},
+			Results:       []BulkWriteResult{{Path: remote.Path, Revision: remote.Revision, ContentType: remote.ContentType}},
+			CorrelationID: "corr_deduped",
+		}, nil
+	}
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_outbox_commit_lost_response",
+		RemoteRoot:  "/slack/channels/C123/messages",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer: %v", err)
+	}
+	if err := syncer.SyncOnce(context.Background()); err == nil {
+		t.Fatal("expected first lost response to fail")
+	}
+	forcePendingOutboxDueForTest(t, localDir)
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("retry after lost response failed: %v", err)
+	}
+	if client.bulkWriteCalls != 2 {
+		t.Fatalf("expected exactly two upload attempts, got %d", client.bulkWriteCalls)
+	}
+	if committedEvents != 1 || len(client.events) != 1 {
+		t.Fatalf("expected one provider-facing mutation after deduped retry, committed=%d events=%d", committedEvents, len(client.events))
+	}
+	if pending := readPendingOutboxRecordsForTest(t, localDir); len(pending) != 0 {
+		t.Fatalf("expected outbox acked after deduped retry, got %+v", pending)
+	}
+}
+
+func TestOutboxRetryCapSurfacesNeedsAttention(t *testing.T) {
+	localDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(localDir, "command.json"), []byte(`{"text":"hello"}`), 0o644); err != nil {
+		t.Fatalf("seed local command failed: %v", err)
+	}
+	client := &fakeClient{
+		files: map[string]RemoteFile{},
+		bulkWriteResponseFunc: func(ctx context.Context, workspaceID string, files []BulkWriteFile) (BulkWriteResponse, error) {
+			_ = ctx
+			_ = workspaceID
+			_ = files
+			return BulkWriteResponse{}, context.Canceled
+		},
+	}
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_outbox_retry_cap",
+		RemoteRoot:  "/slack/channels/C123/messages",
+		LocalRoot:   localDir,
+		Mode:        "poll",
+		Interval:    30 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer: %v", err)
+	}
+	syncer.maxOutboxAttempts = 2
+	if err := syncer.SyncOnce(context.Background()); err == nil {
+		t.Fatal("expected first upload to fail")
+	}
+	forcePendingOutboxDueForTest(t, localDir)
+	if err := syncer.SyncOnce(context.Background()); err == nil {
+		t.Fatal("expected second upload to fail")
+	}
+	state := readPublicState(t, localDir)
+	if state.Status != "writeback-needs-attention" || !state.States.OutboxNeedsAttention || state.Outbox.NeedsAttention != 1 {
+		t.Fatalf("expected needs-attention public state, got %+v", state)
+	}
+	calls := client.bulkWriteCalls
+	forcePendingOutboxDueForTest(t, localDir)
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("needs-attention steady-state sync should not retry: %v", err)
+	}
+	if client.bulkWriteCalls != calls {
+		t.Fatalf("expected retry cap to stop further uploads, got %d -> %d", calls, client.bulkWriteCalls)
 	}
 }
 
@@ -4900,33 +5114,34 @@ func TestAtomicTempPatternHidesTempForDotPrefixedTarget(t *testing.T) {
 }
 
 type fakeClient struct {
-	mu                         sync.Mutex
-	files                      map[string]RemoteFile
-	events                     []FilesystemEvent
-	revisionCounter            int
-	eventCounter               int
-	listTreeCalls              int
-	listEventsCalls            int
-	latestEventIDCalls         int
-	latestEventIDErr           error
-	latestEventIDHook          func(call int) (string, error)
-	latestEventIDUnsupported   bool
-	readFileCalls              int
-	readFileCallsByPath        map[string]int
-	writeFileCalls             int
-	bulkWriteCalls             int
-	bulkWriteBatches           [][]BulkWriteFile
-	lastBulkWriteResponse      BulkWriteResponse
-	bulkWriteResponseFunc      func(ctx context.Context, workspaceID string, files []BulkWriteFile) (BulkWriteResponse, error)
-	deleteCalls                []deleteCall
-	eventsUnsupported          bool
-	listEventsErrAfter         int
-	listEventsErr              error
-	listEventsHook             func(call int, cursor string, limit int)
-	listEventsNextCursorByCall map[int]string
-	eventCursorAliases         map[string]string
-	readFileErrAfter           int
-	readFileErr                error
+	mu                             sync.Mutex
+	files                          map[string]RemoteFile
+	events                         []FilesystemEvent
+	revisionCounter                int
+	eventCounter                   int
+	listTreeCalls                  int
+	listEventsCalls                int
+	latestEventIDCalls             int
+	latestEventIDErr               error
+	latestEventIDHook              func(call int) (string, error)
+	latestEventIDUnsupported       bool
+	readFileCalls                  int
+	readFileCallsByPath            map[string]int
+	writeFileCalls                 int
+	bulkWriteCalls                 int
+	bulkWriteBatches               [][]BulkWriteFile
+	lastBulkWriteResponse          BulkWriteResponse
+	bulkWriteResponseFunc          func(ctx context.Context, workspaceID string, files []BulkWriteFile) (BulkWriteResponse, error)
+	bulkWriteResponseFuncOwnsWrite bool
+	deleteCalls                    []deleteCall
+	eventsUnsupported              bool
+	listEventsErrAfter             int
+	listEventsErr                  error
+	listEventsHook                 func(call int, cursor string, limit int)
+	listEventsNextCursorByCall     map[int]string
+	eventCursorAliases             map[string]string
+	readFileErrAfter               int
+	readFileErr                    error
 }
 
 // requestedReadCalls returns the cumulative number of ReadFile calls made
@@ -5204,6 +5419,10 @@ func (c *fakeClient) WriteFilesBulk(ctx context.Context, workspaceID string, fil
 		response, err = c.bulkWriteResponseFunc(ctx, workspaceID, batch)
 		if err != nil {
 			return BulkWriteResponse{}, err
+		}
+		if c.bulkWriteResponseFuncOwnsWrite {
+			c.lastBulkWriteResponse = response
+			return response, nil
 		}
 	}
 
@@ -5655,6 +5874,58 @@ func readPublicState(t *testing.T, localDir string) publicState {
 		t.Fatalf("unmarshal public state failed: %v", err)
 	}
 	return state
+}
+
+func readPendingOutboxRecordsForTest(t *testing.T, localDir string) []outboxRecord {
+	t.Helper()
+	return readOutboxRecordsInDirForTest(t, filepath.Join(localDir, ".relay", "outbox", "pending"))
+}
+
+func readOutboxRecordsInDirForTest(t *testing.T, dir string) []outboxRecord {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		t.Fatalf("read outbox dir %s failed: %v", dir, err)
+	}
+	records := make([]outboxRecord, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(dir, entry.Name()))
+		if err != nil {
+			t.Fatalf("read outbox record failed: %v", err)
+		}
+		var record outboxRecord
+		if err := json.Unmarshal(data, &record); err != nil {
+			t.Fatalf("unmarshal outbox record failed: %v", err)
+		}
+		records = append(records, record)
+	}
+	sort.Slice(records, func(i, j int) bool { return records[i].CommandID < records[j].CommandID })
+	return records
+}
+
+func forcePendingOutboxDueForTest(t *testing.T, localDir string) outboxRecord {
+	t.Helper()
+	records := readPendingOutboxRecordsForTest(t, localDir)
+	if len(records) != 1 {
+		t.Fatalf("expected one pending outbox record, got %+v", records)
+	}
+	record := records[0]
+	record.NextAttemptAt = time.Now().Add(-time.Second).UTC().Format(time.RFC3339Nano)
+	record.NeedsAttention = false
+	data, err := json.Marshal(record)
+	if err != nil {
+		t.Fatalf("marshal outbox record failed: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(localDir, ".relay", "outbox", "pending", record.CommandID+".json"), data, 0o644); err != nil {
+		t.Fatalf("write outbox record failed: %v", err)
+	}
+	return record
 }
 
 func assertLocalFileBytes(t *testing.T, path string, want []byte) {
