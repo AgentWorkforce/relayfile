@@ -1,0 +1,23 @@
+{
+  "name": "@relayfile/mount-darwin-x64",
+  "version": "0.8.19",
+  "description": "relayfile-mount binary for darwin x64. Installed automatically as an optional dependency of @relayfile/sdk.",
+  "files": [
+    "bin"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AgentWorkforce/relayfile.git",
+    "directory": "packages/mount-darwin-x64"
+  },
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "x64"
+  ]
+}

@@ -26,6 +26,10 @@
       "types": "./dist/mount-harness.d.ts",
       "default": "./dist/mount-harness.js"
     },
+    "./mount-path": {
+      "types": "./dist/mount-path.d.ts",
+      "default": "./dist/mount-path.js"
+    },
     "./workspace-seeder": {
       "types": "./dist/workspace-seeder.d.ts",
       "default": "./dist/workspace-seeder.js"
@@ -58,6 +62,12 @@
     "@relayfile/core": "0.8.19",
     "ignore": "^7.0.5",
     "tar": "^7.5.10"
+  },
+  "optionalDependencies": {
+    "@relayfile/mount-darwin-arm64": "0.8.19",
+    "@relayfile/mount-darwin-x64": "0.8.19",
+    "@relayfile/mount-linux-arm64": "0.8.19",
+    "@relayfile/mount-linux-x64": "0.8.19"
   },
   "peerDependencies": {},
   "devDependencies": {

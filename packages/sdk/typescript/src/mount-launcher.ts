@@ -1,7 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process"
-import { constants as fsConstants, createWriteStream } from "node:fs"
+import { createWriteStream } from "node:fs"
 import {
-  access,
   mkdir,
   readFile,
   rename,
@@ -11,8 +10,8 @@ import {
 } from "node:fs/promises"
 import path from "node:path"
 import process from "node:process"
-import { fileURLToPath } from "node:url"
 import { RelayFileClient } from "./client.js"
+import { getRelayfileMountBinaryPath } from "./mount-path.js"
 import {
   CloudAbortError,
   MountModeUnavailableError,
@@ -425,47 +424,11 @@ function normalizeNonEmptyString(value: unknown): string | undefined {
 }
 
 async function resolveRelayfileMountCommand(): Promise<string> {
-  const executableFromPath = await findExecutableInPath("relayfile-mount")
-  if (executableFromPath) {
-    return executableFromPath
-  }
-
-  const candidates = [
-    process.env.RELAYFILE_MOUNT_BIN,
-    fileURLToPath(new URL("../../../../bin/relayfile-mount", import.meta.url))
-  ]
-
-  for (const candidate of candidates) {
-    if (!candidate) {
-      continue
-    }
-    if (await isExecutable(candidate)) {
-      return candidate
-    }
-  }
-
-  return "relayfile-mount"
-}
-
-async function findExecutableInPath(command: string): Promise<string | null> {
-  const pathValue = process.env.PATH ?? ""
-  const pathEntries = pathValue.split(path.delimiter).filter(Boolean)
-  for (const entry of pathEntries) {
-    const candidate = path.join(entry, command)
-    if (await isExecutable(candidate)) {
-      return candidate
-    }
-  }
-  return null
-}
-
-async function isExecutable(candidate: string): Promise<boolean> {
-  try {
-    await access(candidate, fsConstants.X_OK)
-    return true
-  } catch {
-    return false
-  }
+  // Delegates to the shared resolver, which checks the RELAYFILE_MOUNT_BIN
+  // override, local source-checkout builds, the platform-specific optional-dep
+  // package (@relayfile/mount-<platform>-<arch>), then PATH. Falls back to the
+  // bare command name so spawn surfaces a clear ENOENT if nothing is found.
+  return getRelayfileMountBinaryPath() ?? "relayfile-mount"
 }
 
 async function rotateMountLogIfNeeded(logPath: string): Promise<void> {
