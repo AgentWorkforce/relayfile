@@ -325,6 +325,7 @@ type syncStateGuards struct {
 	TombstonesPending        uint64              `json:"tombstonesPending,omitempty"`
 	TombstonesConfirmed      uint64              `json:"tombstonesConfirmed,omitempty"`
 	TombstonesAgedOut        uint64              `json:"tombstonesAgedOut,omitempty"`
+	PathCollisionQuarantined uint64              `json:"pathCollisionQuarantined,omitempty"`
 	LastAppliedRevision      string              `json:"lastAppliedRevision,omitempty"`
 	Circuit                  *syncStateGuardCirc `json:"circuit,omitempty"`
 }
@@ -6056,6 +6057,7 @@ func readGuardCounters(localDir string) *syncStateGuards {
 			TombstonesPending        uint64 `json:"tombstonesPending"`
 			TombstonesConfirmed      uint64 `json:"tombstonesConfirmed"`
 			TombstonesAgedOut        uint64 `json:"tombstonesAgedOut"`
+			PathCollisionQuarantined uint64 `json:"pathCollisionQuarantined"`
 		} `json:"counters"`
 		LastAppliedRevision string `json:"lastAppliedRevision"`
 		Circuit             *struct {
@@ -6081,6 +6083,7 @@ func readGuardCounters(localDir string) *syncStateGuards {
 		view.Counters.TombstonesPending == 0 &&
 		view.Counters.TombstonesConfirmed == 0 &&
 		view.Counters.TombstonesAgedOut == 0 &&
+		view.Counters.PathCollisionQuarantined == 0 &&
 		view.LastAppliedRevision == "" &&
 		view.Circuit == nil
 	if zero {
@@ -6094,6 +6097,7 @@ func readGuardCounters(localDir string) *syncStateGuards {
 		TombstonesPending:        view.Counters.TombstonesPending,
 		TombstonesConfirmed:      view.Counters.TombstonesConfirmed,
 		TombstonesAgedOut:        view.Counters.TombstonesAgedOut,
+		PathCollisionQuarantined: view.Counters.PathCollisionQuarantined,
 		LastAppliedRevision:      view.LastAppliedRevision,
 	}
 	if view.Circuit != nil {
