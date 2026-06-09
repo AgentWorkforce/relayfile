@@ -925,6 +925,7 @@ type Syncer struct {
 	conflictsDir         string
 	resolvedConflictsDir string
 	deadLetterDir        string
+	outboxDir            string
 	eventProvider        string
 	scopes               []string
 	logger               Logger
@@ -961,6 +962,7 @@ type Syncer struct {
 	closeScheduler       *CloseScheduler
 	rollingCoalescer     *RollingDigestCoalescer
 	circuit              *CloudErrorCircuit
+	maxOutboxAttempts    int
 	mu                   sync.Mutex
 }
 
@@ -1149,6 +1151,9 @@ type publicState struct {
 	Counters telemetryCounters `json:"counters,omitempty"`
 	// Circuit summarises the cloud-error breaker state.
 	Circuit *CircuitState `json:"circuit,omitempty"`
+	// Outbox summarizes durable upload commands that are waiting for a
+	// server ACK, have exhausted retry budget, or have completed.
+	Outbox outboxSummary `json:"outbox,omitempty"`
 	// LastAppliedRevision is the highest cloud revision the daemon has
 	// reconciled. Useful for operator status display.
 	LastAppliedRevision string `json:"lastAppliedRevision,omitempty"`
@@ -1167,11 +1172,12 @@ type bootstrapStatus struct {
 }
 
 type publicStateFlags struct {
-	Stale               bool `json:"stale"`
-	Offline             bool `json:"offline"`
-	Syncing             bool `json:"syncing,omitempty"`
-	HasConflicts        bool `json:"hasConflicts"`
-	HasPendingWriteback bool `json:"hasPendingWriteback"`
+	Stale                bool `json:"stale"`
+	Offline              bool `json:"offline"`
+	Syncing              bool `json:"syncing,omitempty"`
+	HasConflicts         bool `json:"hasConflicts"`
+	HasPendingWriteback  bool `json:"hasPendingWriteback"`
+	OutboxNeedsAttention bool `json:"outboxNeedsAttention,omitempty"`
 }
 
 type publicFileState struct {
@@ -1227,6 +1233,7 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 	conflictsDir := filepath.Join(localRoot, ".relay", "conflicts")
 	resolvedConflictsDir := filepath.Join(conflictsDir, "resolved")
 	deadLetterDir := filepath.Join(localRoot, ".relay", "dead-letter")
+	outboxDir := filepath.Join(localRoot, ".relay", "outbox")
 	scopes := normalizeScopes(opts.Scopes)
 	if len(scopes) == 0 {
 		if httpClient, ok := client.(*HTTPClient); ok {
@@ -1255,6 +1262,11 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 			}
 		} else if len(moved) > 0 && opts.Logger != nil {
 			opts.Logger.Printf("quarantined %d legacy private mount state file(s) outside mounted tree", len(moved))
+		}
+	}
+	for _, dir := range []string{outboxDir, filepath.Join(outboxDir, "pending"), filepath.Join(outboxDir, "acked"), filepath.Join(outboxDir, "failed")} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return nil, err
 		}
 	}
 	websocketEnabled := true
@@ -1387,6 +1399,7 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 		conflictsDir:         conflictsDir,
 		resolvedConflictsDir: resolvedConflictsDir,
 		deadLetterDir:        deadLetterDir,
+		outboxDir:            outboxDir,
 		eventProvider:        eventProvider,
 		scopes:               scopes,
 		websocket:            websocketEnabled,
@@ -1413,6 +1426,7 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 		closeScheduler:       closeScheduler,
 		rollingCoalescer:     rollingCoalescer,
 		circuit:              NewCloudErrorCircuit(),
+		maxOutboxAttempts:    defaultOutboxMaxAttempts,
 		state: mountState{
 			Files: map[string]trackedFile{},
 		},
@@ -1660,19 +1674,56 @@ func (s *Syncer) flushPendingBulkWrites(ctx context.Context, pending []pendingBu
 		s.logf("writeback flush refused: cloud-error circuit breaker is open; %d file(s) remain pending", len(pending))
 		return nil
 	}
-	for _, chunk := range chunkPendingBulkWrites(s.workspace, pending, maxWritebackBatchBytes()) {
-		if err := s.flushPendingBulkWriteChunk(ctx, chunk, conflicted); err != nil {
+	for _, pendingWrite := range pending {
+		if _, err := s.ensureOutboxRecord(pendingWrite); err != nil {
+			return err
+		}
+	}
+	return s.flushDueOutboxRecords(ctx, conflicted)
+}
+
+func (s *Syncer) flushDueOutboxRecords(ctx context.Context, conflicted map[string]struct{}) error {
+	if s.circuit != nil && s.circuit.IsOpen() {
+		return nil
+	}
+	records, err := s.listPendingOutboxRecords()
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	due := make([]outboxRecord, 0, len(records))
+	for _, record := range records {
+		if record.AttemptCount >= s.maxOutboxAttemptsValue() && !record.NeedsAttention {
+			record.NeedsAttention = true
+			if err := s.saveOutboxRecord(record); err != nil {
+				return err
+			}
+		}
+		if s.outboxDue(record, now) {
+			due = append(due, record)
+		}
+	}
+	if len(due) == 0 {
+		return nil
+	}
+	for _, chunk := range chunkOutboxRecords(due, maxWritebackBatchBytes()) {
+		if err := s.flushOutboxRecordChunk(ctx, chunk, conflicted); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (s *Syncer) flushPendingBulkWriteChunk(ctx context.Context, pending []pendingBulkWrite, conflicted map[string]struct{}) error {
-	files := bulkWriteFilesForPending(s.workspace, pending)
+func (s *Syncer) flushOutboxRecordChunk(ctx context.Context, records []outboxRecord, conflicted map[string]struct{}) error {
+	files := outboxRecordsAsBulkFiles(records)
 	response, err := s.client.WriteFilesBulk(ctx, s.workspace, files)
 	if err != nil {
 		s.recordCloudFailure(err)
+		for _, record := range records {
+			if incErr := s.incrementOutboxAttempt(record, err); incErr != nil {
+				return incErr
+			}
+		}
 		return err
 	}
 	s.recordCloudSuccess()
@@ -1684,8 +1735,16 @@ func (s *Syncer) flushPendingBulkWriteChunk(ctx context.Context, pending []pendi
 	resultsByPath := response.resultsByPath()
 
 	var firstErr error
-	for _, pendingWrite := range pending {
-		if writeErr, ok := errorsByPath[pendingWrite.remotePath]; ok {
+	for _, record := range records {
+		tracked, exists := s.state.Files[record.RemotePath]
+		pendingWrite, pendingErr := outboxRecordAsPending(record, s.localRoot, s.remoteRoot, tracked, exists)
+		if pendingErr != nil {
+			if firstErr == nil {
+				firstErr = pendingErr
+			}
+			continue
+		}
+		if writeErr, ok := errorsByPath[record.RemotePath]; ok {
 			err := s.handleWriteError(
 				ctx,
 				pendingWrite.remotePath,
@@ -1699,16 +1758,83 @@ func (s *Syncer) flushPendingBulkWriteChunk(ctx context.Context, pending []pendi
 			if err != nil && firstErr == nil {
 				firstErr = err
 			}
+			if err == nil {
+				if failErr := s.failOutboxRecord(record, writeErr.Message); failErr != nil && firstErr == nil {
+					firstErr = failErr
+				}
+			} else if incErr := s.incrementOutboxAttempt(record, err); incErr != nil && firstErr == nil {
+				firstErr = incErr
+			}
 			continue
 		}
 		if result, ok := resultsByPath[pendingWrite.remotePath]; ok && strings.TrimSpace(result.ContentType) != "" {
 			pendingWrite.snapshot.ContentType = result.ContentType
 		}
-		if err := s.reconcileBulkWrite(ctx, pendingWrite, resultsByPath[pendingWrite.remotePath].Revision); err != nil && firstErr == nil {
+		result := resultsByPath[pendingWrite.remotePath]
+		if err := s.reconcileBulkWrite(ctx, pendingWrite, result.Revision); err != nil {
+			// The cloud accepted the batch, but old prod may omit per-file
+			// results and leave us doing a follow-up ReadFile for revision
+			// discovery. Keep the outbox record pending so restart/reconnect
+			// can retry with the same contentIdentity instead of silently
+			// losing the command.
+			if incErr := s.incrementOutboxAttempt(record, err); incErr != nil && firstErr == nil {
+				firstErr = incErr
+			}
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		revision := result.Revision
+		if strings.TrimSpace(revision) == "" {
+			revision = s.state.Files[pendingWrite.remotePath].Revision
+		}
+		if err := s.ackOutboxRecord(record, revision, response.CorrelationID); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
 	return firstErr
+}
+
+func chunkOutboxRecords(records []outboxRecord, maxBytes int64) [][]outboxRecord {
+	if len(records) == 0 {
+		return nil
+	}
+	if maxBytes <= 0 {
+		return [][]outboxRecord{records}
+	}
+	chunks := make([][]outboxRecord, 0, 1)
+	current := make([]outboxRecord, 0, len(records))
+	for _, record := range records {
+		candidate := append(append([]outboxRecord(nil), current...), record)
+		if len(current) > 0 && bulkWriteRequestSize(outboxRecordsAsBulkFiles(candidate)) > maxBytes {
+			chunks = append(chunks, append([]outboxRecord(nil), current...))
+			current = current[:0]
+		}
+		current = append(current, record)
+	}
+	if len(current) > 0 {
+		chunks = append(chunks, current)
+	}
+	return chunks
+}
+
+func outboxRecordsAsBulkFiles(records []outboxRecord) []BulkWriteFile {
+	files := make([]BulkWriteFile, 0, len(records))
+	for _, record := range records {
+		files = append(files, BulkWriteFile{
+			Path:        record.RemotePath,
+			ContentType: record.ContentType,
+			Content:     record.Content,
+			Encoding:    record.Encoding,
+			ContentIdentity: &ContentIdentity{
+				Kind:       "mount-command",
+				Key:        record.CommandID,
+				TTLSeconds: 7 * 24 * 60 * 60,
+			},
+		})
+	}
+	return files
 }
 
 func bulkWriteFilesForPending(workspaceID string, pending []pendingBulkWrite) []BulkWriteFile {
@@ -2158,6 +2284,11 @@ func (s *Syncer) sync(ctx context.Context, forcePoll bool) error {
 	}
 
 	conflicted := map[string]struct{}{}
+	if err := s.flushDueOutboxRecords(ctx, conflicted); err != nil {
+		s.markSyncError(err)
+		_ = s.saveState()
+		return err
+	}
 	didPoll := false
 	if s.writeOnly {
 		if !s.state.BootstrapComplete {
@@ -5127,6 +5258,13 @@ func (s *Syncer) savePublicState() error {
 		HasConflicts:        pendingConflicts > 0,
 		HasPendingWriteback: pendingWriteback > 0,
 	}
+	outbox := s.summarizeOutbox()
+	if outbox.Pending > 0 {
+		states.HasPendingWriteback = true
+	}
+	if outbox.NeedsAttention > 0 {
+		states.OutboxNeedsAttention = true
+	}
 	staleAfter := ""
 	if lastOK, err := parseStateTime(s.state.LastSuccessfulReconcileAt); err == nil && !lastOK.IsZero() && s.interval > 0 {
 		staleAfter = lastOK.Add(2 * s.interval).UTC().Format(time.RFC3339Nano)
@@ -5136,6 +5274,8 @@ func (s *Syncer) savePublicState() error {
 	switch {
 	case states.Offline:
 		status = "offline"
+	case states.OutboxNeedsAttention:
+		status = "writeback-needs-attention"
 	case states.HasConflicts:
 		status = "conflict"
 	case states.HasPendingWriteback:
@@ -5190,6 +5330,7 @@ func (s *Syncer) savePublicState() error {
 		Files:                     files,
 		LowMemory:                 s.lowMemory,
 		Counters:                  s.state.Counters,
+		Outbox:                    outbox,
 		LastAppliedRevision:       s.state.LastAppliedRevision,
 		Bootstrap:                 bootstrap,
 	}
