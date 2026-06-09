@@ -179,6 +179,10 @@ func (c *bootstrapClient) WriteFilesBulk(ctx context.Context, workspaceID string
 	return BulkWriteResponse{}, nil
 }
 
+func (c *bootstrapClient) GetOperation(ctx context.Context, workspaceID, opID string) (OperationStatus, error) {
+	return OperationStatus{}, &HTTPError{StatusCode: 404, Code: "not_found", Message: "not found"}
+}
+
 func (c *bootstrapClient) DeleteFile(ctx context.Context, workspaceID, path, baseRevision string) error {
 	return nil
 }

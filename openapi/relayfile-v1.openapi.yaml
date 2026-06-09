@@ -2989,6 +2989,35 @@ components:
         message:
           type: string
 
+    BulkWriteWritebackResult:
+      type: object
+      additionalProperties: false
+      properties:
+        provider:
+          type: string
+        state:
+          type: string
+          description: Current writeback operation state for this bulk-written file.
+
+    BulkWriteResult:
+      type: object
+      additionalProperties: false
+      required: [path, revision]
+      properties:
+        path:
+          type: string
+        revision:
+          type: string
+        contentType:
+          type: string
+        opId:
+          type: string
+          description: Writeback operation id created or recovered for this file.
+        contentIdentity:
+          $ref: '#/components/schemas/ContentIdentity'
+        writeback:
+          $ref: '#/components/schemas/BulkWriteWritebackResult'
+
     BulkWriteResponse:
       type: object
       additionalProperties: false
@@ -3004,6 +3033,10 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/BulkWriteError'
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/BulkWriteResult'
         correlationId:
           type: string
 

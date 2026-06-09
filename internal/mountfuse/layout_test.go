@@ -47,6 +47,10 @@ func (c *layoutRemoteClient) WriteFilesBulk(_ context.Context, _ string, _ []mou
 	return mountsync.BulkWriteResponse{}, nil
 }
 
+func (c *layoutRemoteClient) GetOperation(_ context.Context, _, _ string) (mountsync.OperationStatus, error) {
+	return mountsync.OperationStatus{}, &mountsync.HTTPError{StatusCode: 404, Code: "not_found", Message: "not found"}
+}
+
 func (c *layoutRemoteClient) DeleteFile(_ context.Context, _, _, _ string) error {
 	return nil
 }

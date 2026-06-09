@@ -235,6 +235,7 @@ type RemoteClient interface {
 	ReadFile(ctx context.Context, workspaceID, path string) (RemoteFile, error)
 	WriteFile(ctx context.Context, workspaceID, path, baseRevision, contentType, content string) (WriteResult, error)
 	WriteFilesBulk(ctx context.Context, workspaceID string, files []BulkWriteFile) (BulkWriteResponse, error)
+	GetOperation(ctx context.Context, workspaceID, opID string) (OperationStatus, error)
 	DeleteFile(ctx context.Context, workspaceID, path, baseRevision string) error
 }
 
@@ -489,6 +490,12 @@ func (c *HTTPClient) WriteFilesBulk(ctx context.Context, workspaceID string, fil
 	}
 	var out BulkWriteResponse
 	err := c.doJSON(ctx, http.MethodPost, fmt.Sprintf("/v1/workspaces/%s/fs/bulk", url.PathEscape(workspaceID)), nil, body, &out)
+	return out, err
+}
+
+func (c *HTTPClient) GetOperation(ctx context.Context, workspaceID, opID string) (OperationStatus, error) {
+	var out OperationStatus
+	err := c.doJSON(ctx, http.MethodGet, fmt.Sprintf("/v1/workspaces/%s/ops/%s", url.PathEscape(workspaceID), url.PathEscape(opID)), nil, nil, &out)
 	return out, err
 }
 
@@ -1755,11 +1762,26 @@ func (s *Syncer) flushOutboxRecords(ctx context.Context, conflicted map[string]s
 }
 
 func (s *Syncer) flushOutboxRecordChunk(ctx context.Context, records []outboxRecord, conflicted map[string]struct{}) error {
-	files := outboxRecordsAsBulkFiles(records)
+	var firstErr error
+	uploadRecords := make([]outboxRecord, 0, len(records))
+	for _, record := range records {
+		if strings.TrimSpace(record.OpID) != "" {
+			if err := s.settleOutboxRecord(ctx, record); err != nil && firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		uploadRecords = append(uploadRecords, record)
+	}
+	if len(uploadRecords) == 0 {
+		return firstErr
+	}
+
+	files := outboxRecordsAsBulkFiles(uploadRecords)
 	response, err := s.client.WriteFilesBulk(ctx, s.workspace, files)
 	if err != nil {
 		s.recordCloudFailure(err)
-		for _, record := range records {
+		for _, record := range uploadRecords {
 			if incErr := s.incrementOutboxAttempt(record, err); incErr != nil {
 				return incErr
 			}
@@ -1774,8 +1796,7 @@ func (s *Syncer) flushOutboxRecordChunk(ctx context.Context, records []outboxRec
 	}
 	resultsByPath := response.resultsByPath()
 
-	var firstErr error
-	for _, record := range records {
+	for _, record := range uploadRecords {
 		tracked, exists := s.state.Files[record.RemotePath]
 		pendingWrite, pendingErr := outboxRecordAsPending(record, s.localRoot, s.remoteRoot, tracked, exists)
 		if pendingErr != nil {
@@ -1829,11 +1850,80 @@ func (s *Syncer) flushOutboxRecordChunk(ctx context.Context, records []outboxRec
 		if strings.TrimSpace(revision) == "" {
 			revision = s.state.Files[pendingWrite.remotePath].Revision
 		}
-		if err := s.ackOutboxRecord(record, revision, response.CorrelationID); err != nil && firstErr == nil {
+		record.Revision = revision
+		if strings.TrimSpace(response.CorrelationID) != "" {
+			record.CorrelationID = strings.TrimSpace(response.CorrelationID)
+		}
+		record.OpID = strings.TrimSpace(result.OpID)
+		if result.Writeback != nil {
+			record.DispatchStatus = strings.TrimSpace(result.Writeback.State)
+		}
+		if record.OpID == "" {
+			// Legacy servers only prove upload acceptance. Keep compatibility
+			// with v0.8.20-era clouds; v0.8.21+ receipts use opId below.
+			if err := s.ackOutboxRecord(record, revision, response.CorrelationID); err != nil && firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		if err := s.saveOutboxRecord(record); err != nil && firstErr == nil {
+			firstErr = err
+			continue
+		}
+		if err := s.settleOutboxRecord(ctx, record); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
 	return firstErr
+}
+
+func (s *Syncer) settleOutboxRecord(ctx context.Context, record outboxRecord) error {
+	op, err := s.client.GetOperation(ctx, s.workspace, record.OpID)
+	if err != nil {
+		var httpErr *HTTPError
+		if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusNotFound {
+			record.NeedsAttention = true
+			record.LastError = fmt.Sprintf("writeback op %s not found", record.OpID)
+			record.NextAttemptAt = ""
+			record.DispatchStatus = "not_found"
+			return s.saveOutboxRecord(record)
+		}
+		s.recordCloudFailure(err)
+		return s.incrementOutboxAttempt(record, err)
+	}
+	s.recordCloudSuccess()
+
+	status := strings.TrimSpace(op.Status)
+	if status == "" {
+		status = "pending"
+	}
+	record.DispatchStatus = status
+	if strings.TrimSpace(op.OpID) != "" {
+		record.OpID = strings.TrimSpace(op.OpID)
+	}
+	switch status {
+	case "succeeded":
+		revision := strings.TrimSpace(record.Revision)
+		if revision == "" {
+			revision = strings.TrimSpace(op.Revision)
+		}
+		return s.ackOutboxRecord(record, revision, record.CorrelationID)
+	case "failed", "dead_lettered", "canceled":
+		record.NeedsAttention = true
+		record.NextAttemptAt = ""
+		if op.LastError != nil && strings.TrimSpace(*op.LastError) != "" {
+			record.LastError = strings.TrimSpace(*op.LastError)
+		} else {
+			record.LastError = fmt.Sprintf("writeback op %s status %s", record.OpID, status)
+		}
+		return s.saveOutboxRecord(record)
+	case "pending", "running", "queued":
+		record.LastError = ""
+		return s.saveOutboxRecord(record)
+	default:
+		record.LastError = fmt.Sprintf("writeback op %s status %s", record.OpID, status)
+		return s.saveOutboxRecord(record)
+	}
 }
 
 func chunkOutboxRecords(records []outboxRecord, maxBytes int64) [][]outboxRecord {

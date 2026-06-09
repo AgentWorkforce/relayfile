@@ -44,6 +44,8 @@ type outboxRecord struct {
 	AttemptCount   int          `json:"attemptCount"`
 	LastError      string       `json:"lastError,omitempty"`
 	NeedsAttention bool         `json:"needsAttention,omitempty"`
+	OpID           string       `json:"opId,omitempty"`
+	DispatchStatus string       `json:"dispatchStatus,omitempty"`
 	AckedAt        string       `json:"ackedAt,omitempty"`
 	Revision       string       `json:"revision,omitempty"`
 	CorrelationID  string       `json:"correlationId,omitempty"`
@@ -111,6 +113,8 @@ func (s *Syncer) readOutboxRecord(path string) (outboxRecord, error) {
 	record.ContentType = strings.TrimSpace(record.ContentType)
 	record.Encoding = normalizeEncoding(record.Encoding)
 	record.Hash = strings.TrimSpace(record.Hash)
+	record.OpID = strings.TrimSpace(record.OpID)
+	record.DispatchStatus = strings.TrimSpace(record.DispatchStatus)
 	record.CorrelationID = strings.TrimSpace(record.CorrelationID)
 	if record.CorrelationID == "" {
 		record.CorrelationID = record.CommandID
@@ -274,6 +278,7 @@ func (s *Syncer) ackOutboxRecord(record outboxRecord, revision, correlationID st
 	}
 	record.Status = outboxStatusAcked
 	record.AckedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	record.DispatchStatus = "succeeded"
 	record.Revision = strings.TrimSpace(revision)
 	if strings.TrimSpace(correlationID) != "" {
 		record.CorrelationID = strings.TrimSpace(correlationID)

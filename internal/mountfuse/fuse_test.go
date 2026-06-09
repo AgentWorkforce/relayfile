@@ -78,6 +78,10 @@ func (f *fakeRemoteClient) WriteFilesBulk(_ context.Context, _ string, _ []mount
 	return mountsync.BulkWriteResponse{}, nil
 }
 
+func (f *fakeRemoteClient) GetOperation(_ context.Context, _, _ string) (mountsync.OperationStatus, error) {
+	return mountsync.OperationStatus{}, &mountsync.HTTPError{StatusCode: 404, Code: "not_found", Message: "not found"}
+}
+
 func (f *fakeRemoteClient) DeleteFile(_ context.Context, _, path, baseRevision string) error {
 	if f.deleteErr != nil {
 		return f.deleteErr

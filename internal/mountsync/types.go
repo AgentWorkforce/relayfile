@@ -15,6 +15,8 @@ type BulkWriteError = relayfile.BulkWriteError
 
 type BulkWriteResult = relayfile.BulkWriteResult
 
+type OperationStatus = relayfile.OperationStatus
+
 type BulkWriteResponse struct {
 	Written       int               `json:"written"`
 	ErrorCount    int               `json:"errorCount"`
