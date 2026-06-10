@@ -115,6 +115,18 @@
             "reasoning": "Current checkout already addresses marker lifecycle paths in the diff; no bot review reported actionable code issues; targeted and full Go tests passed."
           },
           "significance": "high"
+        },
+        {
+          "ts": 1781109990146,
+          "type": "decision",
+          "content": "Fixed GitHub tarball marker ACL bypass: Fixed GitHub tarball marker ACL bypass",
+          "raw": {
+            "question": "Fixed GitHub tarball marker ACL bypass",
+            "chosen": "Fixed GitHub tarball marker ACL bypass",
+            "alternatives": [],
+            "reasoning": "The import path checked extracted content permissions but wrote the clone marker directly via store.BulkWrite, allowing unauthorized marker writes under protected repo paths."
+          },
+          "significance": "high"
         }
       ]
     }

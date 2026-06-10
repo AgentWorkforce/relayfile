@@ -567,14 +567,11 @@ func (s *Server) importGithubTarballEntries(workspaceID, owner, repo, headSha, r
 	sizeByPath := make(map[string]int64, len(extraction.entries))
 	for _, entry := range extraction.entries {
 		workspacePath := githubTarballWorkspacePath(owner, repo, entry.repoPath)
-		_, readErr := s.readFile(workspaceID, "", workspacePath)
-		includeTarget := readErr == nil
-		permissions := s.resolveFilePermissions(workspaceID, "", workspacePath, includeTarget)
-		if !filePermissionAllows(permissions, workspaceID, &claims) {
+		if writeErr := s.githubTarballWritePermissionError(workspaceID, workspacePath, claims); writeErr != nil {
 			summary.Errors = append(summary.Errors, relayfile.BulkWriteError{
 				Path:    workspacePath,
-				Code:    "forbidden",
-				Message: "file access denied by permission policy",
+				Code:    writeErr.Code,
+				Message: writeErr.Message,
 			})
 			continue
 		}
@@ -597,8 +594,43 @@ func (s *Server) importGithubTarballEntries(workspaceID, owner, repo, headSha, r
 		}
 	}
 
+	markerPath := githubTarballCloneMarkerPath(owner, repo)
+	if writeErr := s.githubTarballWritePermissionError(workspaceID, markerPath, claims); writeErr != nil {
+		summary.Errors = append(summary.Errors, relayfile.BulkWriteError{
+			Path:    markerPath,
+			Code:    writeErr.Code,
+			Message: writeErr.Message,
+		})
+		return summary
+	}
 	s.writeGithubTarballCloneMarker(workspaceID, owner, repo, headSha, ref, jobID)
 	return summary
+}
+
+func (s *Server) githubTarballWritePermissionError(workspaceID, workspacePath string, claims tokenClaims) *relayfile.BulkWriteError {
+	_, readErr := s.readFile(workspaceID, "", workspacePath)
+	var permissions []string
+	if readErr == nil {
+		permissions = s.resolveFilePermissions(workspaceID, "", workspacePath, true)
+	} else if readErr == relayfile.ErrNotFound || readErr == relayfile.ErrForkExpired {
+		permissions = s.resolveFilePermissions(workspaceID, "", workspacePath, false)
+	} else {
+		return &relayfile.BulkWriteError{
+			Code:    "internal_error",
+			Message: "failed to check file permissions",
+		}
+	}
+	if !filePermissionAllows(permissions, workspaceID, &claims) {
+		return &relayfile.BulkWriteError{
+			Code:    "forbidden",
+			Message: "file access denied by permission policy",
+		}
+	}
+	return nil
+}
+
+func githubTarballCloneMarkerPath(owner, repo string) string {
+	return normalizeRoutePath("/github/repos/" + owner + "/" + repo + "/.relayfile/clone.json")
 }
 
 // writeGithubTarballCloneMarker records the imported head SHA as workspace
@@ -621,7 +653,7 @@ func (s *Server) writeGithubTarballCloneMarker(workspaceID, owner, repo, headSha
 	if err != nil {
 		return
 	}
-	markerPath := normalizeRoutePath("/github/repos/" + owner + "/" + repo + "/.relayfile/clone.json")
+	markerPath := githubTarballCloneMarkerPath(owner, repo)
 	s.store.BulkWrite(workspaceID, []relayfile.BulkWriteFile{{
 		Path:        markerPath,
 		ContentType: "application/json",

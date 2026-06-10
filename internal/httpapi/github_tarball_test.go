@@ -239,6 +239,88 @@ func TestGithubTarballImportValidation(t *testing.T) {
 	}
 }
 
+func TestGithubTarballImportEnforcesAclForContentAndMarker(t *testing.T) {
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
+	t.Cleanup(store.Close)
+	server := NewServer(store)
+	ownerToken := mustTestJWT(t, "dev-secret", "ws_tarball_acl", "Owner", []string{"fs:read", "fs:write", "finance"}, time.Now().Add(time.Hour))
+	limitedToken := mustTestJWT(t, "dev-secret", "ws_tarball_acl", "Limited", []string{"fs:read", "fs:write"}, time.Now().Add(time.Hour))
+
+	aclWrite := doRequest(t, server, request{
+		method: http.MethodPut,
+		path:   "/v1/workspaces/ws_tarball_acl/fs/file?path=/github/repos/octo/demo/.relayfile.acl",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + ownerToken,
+			"X-Correlation-Id": "corr_tarball_acl_seed",
+			"If-Match":         "0",
+		},
+		body: map[string]any{
+			"contentType": "text/plain",
+			"content":     "acl marker",
+			"semantics": map[string]any{
+				"permissions": []string{"scope:finance"},
+			},
+		},
+	})
+	if aclWrite.Code != http.StatusAccepted {
+		t.Fatalf("expected acl marker write 202, got %d (%s)", aclWrite.Code, aclWrite.Body.String())
+	}
+
+	archive := buildTestGithubTarball(t, []tarballTestEntry{
+		{path: "octo-demo-abc123/README.md", content: []byte("# Demo\n")},
+	})
+	resp := doRawRequest(t, server, rawRequest{
+		method: http.MethodPost,
+		path:   "/v1/workspaces/ws_tarball_acl/fs/import/github-tarball?owner=octo&repo=demo&headSha=abc123&jobId=job-acl",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + limitedToken,
+			"Content-Type":     "application/gzip",
+			"X-Correlation-Id": "corr_tarball_acl_import",
+		},
+		body: archive,
+	})
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200 with per-file ACL errors, got %d (%s)", resp.Code, resp.Body.String())
+	}
+	var payload githubTarImportResponse
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode import response: %v", err)
+	}
+	if payload.Imported != 0 {
+		t.Fatalf("expected imported=0, got %d (%+v)", payload.Imported, payload)
+	}
+	if payload.ErrorCount != 2 || len(payload.Errors) != 2 {
+		t.Fatalf("expected content and marker ACL errors, got %+v", payload.Errors)
+	}
+	errorPaths := map[string]string{}
+	for _, item := range payload.Errors {
+		errorPaths[item.Path] = item.Code
+	}
+	if errorPaths["/github/repos/octo/demo/contents/README.md"] != "forbidden" {
+		t.Fatalf("expected content forbidden error, got %+v", payload.Errors)
+	}
+	if errorPaths["/github/repos/octo/demo/.relayfile/clone.json"] != "forbidden" {
+		t.Fatalf("expected marker forbidden error, got %+v", payload.Errors)
+	}
+
+	for _, path := range []string{
+		"/github/repos/octo/demo/contents/README.md",
+		"/github/repos/octo/demo/.relayfile/clone.json",
+	} {
+		readResp := doRequest(t, server, request{
+			method: http.MethodGet,
+			path:   "/v1/workspaces/ws_tarball_acl/fs/file?path=" + path,
+			headers: map[string]string{
+				"Authorization":    "Bearer " + ownerToken,
+				"X-Correlation-Id": "corr_tarball_acl_read",
+			},
+		})
+		if readResp.Code != http.StatusNotFound {
+			t.Fatalf("expected %s to remain unwritten, got %d (%s)", path, readResp.Code, readResp.Body.String())
+		}
+	}
+}
+
 func TestGithubTarballImportEmitsFileEvents(t *testing.T) {
 	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
 	t.Cleanup(store.Close)
