@@ -211,6 +211,13 @@
       "startedAt": "2026-06-06T00:15:50.055Z",
       "completedAt": "2026-06-10T17:13:15.410Z",
       "path": "/home/daytona/workspace/.trajectories/completed/2026-06/traj_y5jru5dh9ku6/trajectory.json"
+    },
+    "traj_z4a0ms62uw5i": {
+      "title": "Review and fix PR #268",
+      "status": "completed",
+      "startedAt": "2026-06-10T16:59:35.202Z",
+      "completedAt": "2026-06-10T16:59:41.571Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-06/traj_z4a0ms62uw5i.json"
     }
   }
 }

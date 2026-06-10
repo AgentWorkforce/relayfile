@@ -1,0 +1,277 @@
+{
+  "id": "compact_4xcit89cvl4p",
+  "version": 1,
+  "type": "compacted",
+  "compactedAt": "2026-05-21T12:09:23.141Z",
+  "sourceTrajectories": [
+    "traj_hiunpmpawtii",
+    "traj_yvmjor8zvv46",
+    "traj_i5fmjdy93pxq",
+    "traj_41ndq1lozeiz",
+    "traj_xgu0z4gei59c",
+    "traj_51qjidecqn5i",
+    "traj_nxbsptr6c5q0",
+    "traj_qrt7hh3ht8nk"
+  ],
+  "dateRange": {
+    "start": "2026-05-14T09:38:05.074Z",
+    "end": "2026-05-21T12:08:51.996Z"
+  },
+  "summary": {
+    "totalDecisions": 12,
+    "totalEvents": 47,
+    "uniqueAgents": [
+      "default",
+      "orchestrator",
+      "lead-claude",
+      "impl-codex",
+      "reviewer-claude",
+      "validator-claude",
+      "reviewer-codex",
+      "validator-codex",
+      "master-lead"
+    ]
+  },
+  "decisionGroups": [
+    {
+      "category": "api",
+      "decisions": [
+        {
+          "question": "Address issue 183 with server-side contentHash, client skip-on-hash, and bounded parallel bootstrap reads",
+          "chosen": "Address issue 183 with server-side contentHash, client skip-on-hash, and bounded parallel bootstrap reads",
+          "reasoning": "The current checkout already uses in-process HTTP/2-capable Go clients and has export support, so the remaining hot path is sequential per-entry ReadFile during tree fallback and the lack of local hash reuse when state is wiped.",
+          "fromTrajectory": "traj_hiunpmpawtii"
+        },
+        {
+          "question": "Address issue 183 with server-side contentHash, client skip-on-hash, and bounded parallel bootstrap reads",
+          "chosen": "Address issue 183 with server-side contentHash, client skip-on-hash, and bounded parallel bootstrap reads",
+          "reasoning": "The current checkout already uses in-process HTTP/2-capable Go clients and has export support, so the remaining hot path is sequential per-entry ReadFile during tree fallback and the lack of local hash reuse when state is wiped.",
+          "fromTrajectory": "traj_yvmjor8zvv46"
+        },
+        {
+          "question": "Found http.Client.Timeout as 6th defect via live testing; removed whole-request cap in favor of granular transport + context cancellation",
+          "chosen": "Found http.Client.Timeout as 6th defect via live testing; removed whole-request cap in favor of granular transport + context cancellation",
+          "reasoning": "context decoupling alone was insufficient; net/http enforces Client.Timeout over body read independent of ctx",
+          "fromTrajectory": "traj_xgu0z4gei59c"
+        },
+        {
+          "question": "Review found Notion writeback discovery/layout mismatch",
+          "chosen": "Review found Notion writeback discovery/layout mismatch",
+          "reasoning": "Notion layout advertises pages/comments/databases writeback resources, but generated discovery/resources only cover database page create; verify script iterates discovery-data endpoints and does not assert layout writeback resources have sibling schemas.",
+          "fromTrajectory": "traj_51qjidecqn5i"
+        }
+      ]
+    },
+    {
+      "category": "tooling",
+      "decisions": [
+        {
+          "question": "Build issue #182 on top of issue #180 lifecycle branch",
+          "chosen": "Build issue #182 on top of issue #180 lifecycle branch",
+          "reasoning": "The current workspace is already on codex/issue-180-mount-daemon-lifecycle, and #182 is explicitly triggered by the double-daemon state race fixed there; stacking preserves that dependency while leaving unrelated backup files untouched.",
+          "fromTrajectory": "traj_yvmjor8zvv46"
+        },
+        {
+          "question": "Require explicit local mutation state for writeback retries",
+          "chosen": "Require explicit local mutation state for writeback retries",
+          "reasoning": "Issue #182 shows hash drift alone can be caused by remote hydration or corrupted state; writes should be retried from Dirty state set by watcher/local-create paths, and deletes from a separate deletePending flag set by local delete handling.",
+          "fromTrajectory": "traj_yvmjor8zvv46"
+        }
+      ]
+    },
+    {
+      "category": "security",
+      "decisions": [
+        {
+          "question": "Harden process scan feedback cases",
+          "chosen": "Harden process scan feedback cases",
+          "reasoning": "PR feedback showed legacy bare pid files needed live process corroboration, relayfile start is a mount alias, and local-dir matching needed path-token boundaries instead of substring matching.",
+          "fromTrajectory": "traj_yvmjor8zvv46"
+        },
+        {
+          "question": "Retry cloud refresh with freshly reloaded disk credentials after refresh-token auth rejection",
+          "chosen": "Retry cloud refresh with freshly reloaded disk credentials after refresh-token auth rejection",
+          "reasoning": "Concurrent CLI processes can rotate cloud-credentials.json between the daemon's load and refresh POST; a one-shot reload absorbs that race before entering degraded re-login state.",
+          "fromTrajectory": "traj_41ndq1lozeiz"
+        }
+      ]
+    },
+    {
+      "category": "other",
+      "decisions": [
+        {
+          "question": "Use process-scan fallback for mount daemon lifecycle",
+          "chosen": "Use process-scan fallback for mount daemon lifecycle",
+          "reasoning": "Issue 180 reports stale pid files and reparented child binaries; scanning live relayfile mount commands lets stop/status/start handle orphan daemons even when .relay/mount.pid is wrong.",
+          "fromTrajectory": "traj_i5fmjdy93pxq"
+        },
+        {
+          "question": "Used fetch and non-destructive pull checks because relayfile and cloud have local/conflicted work",
+          "chosen": "Used fetch and non-destructive pull checks because relayfile and cloud have local/conflicted work",
+          "reasoning": "relayfile has unresolved merge conflicts and cloud has dirty files that Git reported would be overwritten; preserving user/agent work is higher priority while still refreshing remote refs",
+          "fromTrajectory": "traj_51qjidecqn5i"
+        }
+      ]
+    },
+    {
+      "category": "testing",
+      "decisions": [
+        {
+          "question": "Close PR39 gaps in isolated worktrees",
+          "chosen": "Close PR39 gaps in isolated worktrees",
+          "reasoning": "Latest origin/main showed skills PR39 files missing from skills, Python SDK and mounted skill text still referenced the retired provider .layout.md path, cloud lacked hosted-sync by-edited regression coverage, and relayfile-adapters documented the digest/layout contract without pinning the activity-summary by-edited fallback.",
+          "fromTrajectory": "traj_51qjidecqn5i"
+        }
+      ]
+    },
+    {
+      "category": "database",
+      "decisions": [
+        {
+          "question": "Explain lagging providers with zero measured lag in relayfile status",
+          "chosen": "Explain lagging providers with zero measured lag in relayfile status",
+          "reasoning": "The server can report status=lagging with lagSeconds=0 when a provider has no cursor or watermark; querying ingress lets the CLI show whether events are pending, accepted, or absent.",
+          "fromTrajectory": "traj_qrt7hh3ht8nk"
+        }
+      ]
+    }
+  ],
+  "keyLearnings": [],
+  "keyFindings": [
+    "\"lead-plan\" completed → - File ends with `RICKY_CHILD_LEAD_PLAN_READY`.",
+    "\"implement-slice\" completed → >7u•Booting MCP server: codex_apps(0s • esc to interrupt)›Summarize recent commitsgpt-5.5 high · Context 100% left · ~/P",
+    "\"review-claude\" completed → ## Fresh-Eyes Review Summary — `update-last-week`\n\n**Verdict:** `BLOCKED`\n\nWrote `.workflow-artifacts/generated/workspac",
+    "\"fix-loop\" completed → No commits, pushes, PR opens, source edits, or destructive git operations were performed.",
+    "\"final-review-claude\" completed → ## Summary\n\nRe-reviewed the fixed child state of slice `update-last-week` from scratch, independently re-running every v",
+    "\"final-fix-claude\" completed → RICKY_CHILD_CLAUDE_FINAL_FIX_READY",
+    "\"review-codex\" completed → RICKY_CHILD_CODEX_REVIEW_READY",
+    "\"lead-plan\" completed → File ends with `RICKY_MASTER_LEAD_PLAN_READY` as required. No source files were edited."
+  ],
+  "filesAffected": [
+    "package.json",
+    "packages/cli/CHANGELOG.md",
+    "packages/cli/package.json",
+    "packages/core/CHANGELOG.md",
+    "packages/core/package.json",
+    "packages/file-observer/CHANGELOG.md",
+    "packages/file-observer/package.json",
+    "packages/local-mount/CHANGELOG.md",
+    "packages/local-mount/package.json",
+    "packages/sdk/typescript/CHANGELOG.md",
+    "packages/sdk/typescript/package.json",
+    "cmd/relayfile-cli/main.go",
+    "cmd/relayfile-cli/main_test.go"
+  ],
+  "commits": [
+    "c25fd5a",
+    "f52e238",
+    "dd37469"
+  ],
+  "narrative": "This work session cluster spans a week of relayfile runtime hardening and workspace-primitive contract closure. The most impactful chain was issues #180→#182→#183: issue #180 hardened the mount daemon lifecycle with process-scan fallback discovery for orphan daemons (stale pid files, reparented child binaries); issue #182 stacked on top to add writeback guards requiring explicit Dirty/deletePending local mutation state before retrying writes (preventing hash-drift from remote hydration from triggering false writebacks); issue #183 then optimized bootstrap performance by adding decoded-byte contentHash to tree/events endpoints, skipping ReadFile calls when local bytes match, and fetching remaining files through a bounded concurrent worker pool. A separate fix addressed cloud refresh-token rotation races with a one-shot disk-credential reload/retry before entering degraded re-login state. In parallel, a large multi-agent workflow (ricky-workspace-primitive-skills-pr-39) drove contract closure across four repos (relayfile, cloud, relayfile-adapters, skills). Key canonical decisions were locked: `<provider>/LAYOUT.md` over `.layout.md`, existing YAML frontmatter (`date`, `generated_at`, `covers`) over the skill's blockquote header, sibling `.schema.json` as the writeback discovery surface, and `writeback retry` as the supported replay path. The workflow patched missing skill manifest files, fixed Python SDK and mounted skill text still referencing the retired `.layout.md` path, added hosted by-edited regression coverage in cloud, and updated adapter fallback contract docs. A Codex validator agent independently discovered that `http.Client.Timeout` enforces a whole-request cap over body reads independent of context cancellation, leading to its removal in favor of granular transport timeouts. Two diagnostic sessions investigated confusing `status=lagging` with `lagSeconds=0` for providers lacking cursor/watermark progress. The root cause was absent ingress state rather than timed backlog. A PR (#153) added CLI diagnostics querying sync ingress to render the actual reason.",
+  "decisions": [
+    {
+      "question": "How should writeback retries be gated to prevent false writebacks from hash drift?",
+      "chosen": "Require explicit Dirty state (set by watcher/local-create) for write retries and a separate deletePending flag for delete retries",
+      "reasoning": "Issue #182 showed hash drift can be caused by remote hydration or corrupted state, not just local mutations. Using hash difference alone as a retry signal is unsafe.",
+      "impact": "internal/mountsync/syncer.go now gates writeback paths on explicit local mutation flags, preventing remote-only changes from being echoed back as writes"
+    },
+    {
+      "question": "How to handle stale pid files and orphan mount daemons?",
+      "chosen": "Process-scan fallback: scan live relayfile mount commands to discover orphan daemons even when .relay/mount.pid is wrong",
+      "reasoning": "Issue #180 reports stale pid files and reparented child binaries; pid file alone is unreliable for lifecycle management",
+      "impact": "Stop/status/start commands now work correctly even with corrupted pid state; PR feedback further required live process corroboration for legacy bare pid files and path-token boundary matching"
+    },
+    {
+      "question": "How to optimize bootstrap performance for large workspaces?",
+      "chosen": "Server-side contentHash on tree/events, client skip-on-hash, and bounded parallel bootstrap reads",
+      "reasoning": "The hot path was sequential per-entry ReadFile during tree fallback plus no local hash reuse when state is wiped; HTTP/2 clients and export support already existed",
+      "impact": "Bootstrap skips files whose local bytes already match the tree hash; remaining files are fetched through a bounded concurrent worker pool instead of sequentially"
+    },
+    {
+      "question": "How to handle concurrent CLI processes rotating cloud refresh tokens?",
+      "chosen": "One-shot reload of disk credentials and retry after refresh-token auth rejection, before entering degraded re-login state",
+      "reasoning": "Concurrent CLI processes can rotate cloud-credentials.json between the daemon's load and refresh POST",
+      "impact": "internal/relayfile/store.go absorbs the rotation race without forcing user re-authentication"
+    },
+    {
+      "question": "What is the canonical provider layout path?",
+      "chosen": "`<provider>/LAYOUT.md` — update skill contracts to match runtime, do not migrate runtime to `.layout.md`",
+      "reasoning": "Cloud and adapters already emit `LAYOUT.md`; migrating runtime would be higher churn than updating the skill spec",
+      "impact": "Python SDK and mounted skill text referencing `.layout.md` were patched across repos"
+    },
+    {
+      "question": "Should http.Client.Timeout be used for large-workspace mount convergence?",
+      "chosen": "Remove whole-request http.Client.Timeout in favor of granular transport timeouts plus context cancellation",
+      "reasoning": "net/http enforces Client.Timeout over body read independent of ctx; context decoupling alone was insufficient for long-running bootstrap streams",
+      "impact": "Large workspace bootstrap no longer times out mid-stream during slow body reads"
+    },
+    {
+      "question": "What writeback states should be exposed to agents?",
+      "chosen": "Expose only `pending` and `dead` via `writeback list`; remove `succeeded`/`failed` from the contract",
+      "reasoning": "Current local list only returns per-op rows for `dead`; other states error because only aggregate counters are tracked. Long-form history belongs in metrics/logs.",
+      "impact": "Simplifies agent-facing writeback monitoring contract and aligns CLI with actual backend capabilities"
+    }
+  ],
+  "conventions": [
+    {
+      "pattern": "Stack dependent issue branches: #182 built on #180's `codex/issue-180-mount-daemon-lifecycle` branch",
+      "rationale": "Issues triggered by the same root cause (double-daemon state race) share implementation context; stacking preserves dependency while keeping unrelated backup files untouched",
+      "scope": "Branch management for causally related issues"
+    },
+    {
+      "pattern": "Run `scripts/check-contract-surface.sh` after any handler or OpenAPI changes",
+      "rationale": "Ensures `openapi/relayfile-v1.openapi.yaml` stays in sync with `internal/httpapi/server.go`",
+      "scope": "All relayfile HTTP API changes"
+    },
+    {
+      "pattern": "Use repo-specific worktrees for cross-repo contract changes; land adapters first, then cloud, then relayfile",
+      "rationale": "Each repo has its own tests, release cadence, and local dirty state; dependency order prevents consuming contracts before they exist",
+      "scope": "Multi-repo workspace-primitive skill gap work"
+    },
+    {
+      "pattern": "Digest file updates must emit normal file events but `/digests/*` writes must not trigger digest regeneration",
+      "rationale": "Mounted workspaces need to receive changed digest files, but recursion would cause infinite regeneration loops",
+      "scope": "Any code path that writes to /digests/"
+    },
+    {
+      "pattern": "Preserve terminal provider state (closed, merged, archived) as data, not file deletes",
+      "rationale": "Upstream object not being deleted means the record should remain readable; agents need historical state",
+      "scope": "All ingest/sync/provider mutation paths"
+    }
+  ],
+  "lessons": [
+    {
+      "lesson": "Hash drift alone is not a reliable signal for local mutation — remote hydration and corrupted state can cause identical symptoms",
+      "context": "Issue #182 writeback guard: the syncer was retrying writes based solely on hash mismatch, which could be triggered by remote-side changes",
+      "recommendation": "Always gate writeback retries on explicit local mutation state (Dirty flag from watcher, deletePending from local delete handler) rather than inferring mutation from content differences"
+    },
+    {
+      "lesson": "net/http Client.Timeout enforces a hard deadline over the entire request including body read, independent of context cancellation",
+      "context": "Codex validator agent discovered this as a 6th defect during live testing of large-workspace mount convergence; bootstrap streams were being killed mid-read",
+      "recommendation": "For streaming or long-running HTTP body reads, use granular transport-level timeouts (TLSHandshakeTimeout, ResponseHeaderTimeout) plus per-operation context deadlines instead of Client.Timeout"
+    },
+    {
+      "lesson": "Provider status=lagging with lagSeconds=0 means absent cursor/watermark, not zero backlog",
+      "context": "Diagnostic investigation found 6 providers reported as lagging with no measured lag, no errors, no dead letters — only Linear had ingress/cursor progress",
+      "recommendation": "When displaying ambiguous server state, query underlying signals (ingress events, cursor presence) and render the actual reason rather than passing through the bare status code"
+    },
+    {
+      "lesson": "Multi-agent review workflows surface real defects but produce high coordination overhead",
+      "context": "The ricky-child-update-last-week-workflow took 71 hours wall-clock with 7 agents cycling through plan→implement→review→fix→re-review→codex-review→codex-fix; the initial review verdict was BLOCKED",
+      "recommendation": "For bounded implementation slices, a single review+fix pass is usually sufficient; reserve multi-pass review cycles for security-critical or cross-repo contract changes"
+    },
+    {
+      "lesson": "Fetching remote refs non-destructively is safer than pulling when repos have local conflicts or dirty files",
+      "context": "relayfile had unresolved merge conflicts and cloud had dirty files that git pull would overwrite; the workflow used fetch + inspection instead",
+      "recommendation": "When coordinating across repos with potentially dirty state, use `git fetch` and inspect `origin/main` rather than pulling, to preserve in-progress agent or user work"
+    }
+  ],
+  "openQuestions": [
+    "Issues #180/#182/#183 have uncommitted working-tree changes (syncer.go, store.go, syncer_test.go, etc.) on codex/issue-182-writeback-guard — these need to be committed and PR'd or the work will be lost",
+    "The 500-event digest cap in cloud has not been resolved — needs either removal, pagination/chunking, or explicit machine-readable warning semantics",
+    "by-edited/<date>/ fallback indexes are still unimplemented across all three repos despite being required by the activity-summary skill contract",
+    "Workspace timezone support for digest window boundaries remains UTC-only; no wall-clock scheduler exists for daily/weekly closing windows",
+    "The websocket.go change in the working tree (contentHash forwarding for issue #183) needs review to ensure it doesn't break existing event consumers",
+    "Notion writeback discovery/layout mismatch found during PR39 review — layout advertises pages/comments/databases writeback but discovery only covers database page create"
+  ]
+}

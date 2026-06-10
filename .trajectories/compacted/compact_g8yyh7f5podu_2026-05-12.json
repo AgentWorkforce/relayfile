@@ -1,0 +1,171 @@
+{
+  "id": "compact_g8yyh7f5podu",
+  "version": 1,
+  "type": "compacted",
+  "compactedAt": "2026-05-12T10:49:13.539Z",
+  "sourceTrajectories": [
+    "traj_gi3ccn6ywqrn",
+    "traj_tdywz0ni0z1a",
+    "traj_brjdrgcnnwhs",
+    "traj_h99ldnvo1d26",
+    "traj_4vdcwo2iy630"
+  ],
+  "dateRange": {
+    "start": "2026-05-09T18:25:18.473Z",
+    "end": "2026-05-12T10:49:06.413Z"
+  },
+  "summary": {
+    "totalDecisions": 4,
+    "totalEvents": 7,
+    "uniqueAgents": [
+      "default"
+    ]
+  },
+  "decisionGroups": [
+    {
+      "category": "other",
+      "decisions": [
+        {
+          "question": "Use existing PR worktree",
+          "chosen": "Use existing PR worktree",
+          "reasoning": "The PR branch agent-relay/integration-accessible-resources is already checked out cleanly under /private/tmp/relayfile-accessible-resources, keeping the main dirty checkout untouched.",
+          "fromTrajectory": "traj_gi3ccn6ywqrn"
+        },
+        {
+          "question": "Use COPYFILE_FICLONE only for initial mount copies",
+          "chosen": "Use COPYFILE_FICLONE only for initial mount copies",
+          "reasoning": "Issue 132 targets createMount's project-to-mount mirror; sync-back and autosync behavior should remain unchanged unless separately scoped.",
+          "fromTrajectory": "traj_tdywz0ni0z1a"
+        }
+      ]
+    },
+    {
+      "category": "security",
+      "decisions": [
+        {
+          "question": "Track whether OAuth connect was newly created",
+          "chosen": "Track whether OAuth connect was newly created",
+          "reasoning": "The Atlassian picker should run after a fresh Jira/Confluence OAuth flow, but should not run for already-connected providers because it can replace existing metadata.",
+          "fromTrajectory": "traj_gi3ccn6ywqrn"
+        }
+      ]
+    },
+    {
+      "category": "api",
+      "decisions": [
+        {
+          "question": "When no --token is provided, runLogin will trigger ensureCloudCredentials (browser flow) instead of prompting for API key",
+          "chosen": "When no --token is provided, runLogin will trigger ensureCloudCredentials (browser flow) instead of prompting for API key",
+          "reasoning": "Matches what 'relayfile setup' already does. Old API-key prompt path stays available behind --api-key flag for self-hosted users who don't have cloud.",
+          "fromTrajectory": "traj_4vdcwo2iy630"
+        }
+      ]
+    }
+  ],
+  "keyLearnings": [],
+  "keyFindings": [],
+  "filesAffected": [
+    "packages/sdk/typescript/src/client.test.ts",
+    "packages/sdk/typescript/vitest.config.ts"
+  ],
+  "commits": [
+    "084c96a"
+  ],
+  "narrative": "Five sessions advanced the relayfile CLI/SDK surface and local-mount runtime. The largest (PR 142 follow-up) tightened integration UX: the Atlassian site picker now only runs after a fresh Jira/Confluence OAuth connect (not for pre-existing connections), `set-metadata` rejects nested keys client-side, Go CLI tests fail on unexpected routes, and both the Python and TypeScript SDKs strictly validate metadata responses with new async/normalization negative tests. Work was done in an isolated worktree at `/private/tmp/relayfile-accessible-resources` to keep the dirty main checkout untouched, and validated with `go test ./cmd/relayfile-cli`, `pytest packages/sdk/python/tests/test_client.py`, `npm test --workspace=packages/sdk/typescript -- setup.test.ts`, `npm run build --workspace=packages/core`, and `npm run typecheck --workspace=packages/sdk/typescript`. A second fix targeted issue #132: `createMount`'s initial project→mount mirror now passes Node's non-forcing `COPYFILE_FICLONE` flag so APFS reflinks are used when available, with a mocked copy-mode regression test added and the same-filesystem fallback documented. Sync-back and autosync paths were intentionally left untouched. Full suite runs were blocked by local FSEvents failures and a pre-existing abort-timing race, so only focused tests + build were green. Three smaller CLI sessions added: a live initial-integrations E2E eval spec (setup/discovery/Linear/Slack/Notion/GitHub + health evidence); `relayfile workspace current` plus an active `* ` marker in `workspace list` (with `--names-only` escape hatch) reusing `resolveWorkspaceRecord` precedence (env > token > default); and a `relayfile login` default that falls back to the cloud browser flow via `ensureCloudCredentials` when no `--token` is provided, preserving the legacy API-key prompt behind `--api-key` and mirroring `setup`'s `--cloud-api-url/--cloud-token/--no-open/--login-timeout` flags.",
+  "decisions": [
+    {
+      "question": "Where to run the Atlassian site picker during integration connect",
+      "chosen": "Only after a fresh Jira/Confluence OAuth connect, not for already-connected providers",
+      "reasoning": "Running the picker on an existing connection can overwrite/replace previously stored site metadata, regressing user state.",
+      "impact": "`setup` and `integration connect` flows in PR 142 now branch on a newly-created flag before invoking the picker; protects pre-existing OAuth metadata."
+    },
+    {
+      "question": "Which worktree to use when addressing PR 142 feedback",
+      "chosen": "Existing PR worktree at /private/tmp/relayfile-accessible-resources on agent-relay/integration-accessible-resources",
+      "reasoning": "Branch was already cleanly checked out there; main had a dirty working tree that shouldn't be disturbed.",
+      "impact": "Avoided stashing/conflict noise; commit 084c96a landed cleanly."
+    },
+    {
+      "question": "Copy flag for createMount initial mirror (issue #132)",
+      "chosen": "Node's non-forcing COPYFILE_FICLONE only on the initial project→mount copy",
+      "reasoning": "Issue #132 was scoped to the initial mirror; sync-back and autosync are separate code paths and shouldn't change behavior without their own scoping.",
+      "impact": "APFS reflinks used when on the same filesystem, falling back to normal copy otherwise; sync-back/autosync untouched."
+    },
+    {
+      "question": "Behavior of `relayfile login` with no --token",
+      "chosen": "Trigger ensureCloudCredentials browser flow by default; keep API-key prompt behind --api-key",
+      "reasoning": "Aligns `login` with `setup`'s existing UX; self-hosted users without cloud still have an escape hatch.",
+      "impact": "Adds --cloud-api-url/--cloud-token/--no-open/--login-timeout flags to login; 3 new unit tests cover the fallback."
+    }
+  ],
+  "conventions": [
+    {
+      "pattern": "Validate integration/metadata responses strictly in every SDK (Go test rejects unexpected routes; Python and TypeScript SDKs validate metadata response shape and add negative async/normalization tests)",
+      "rationale": "Catches drift between server and SDKs early and prevents silent acceptance of malformed payloads.",
+      "scope": "packages/sdk/python, packages/sdk/typescript, cmd/relayfile-cli"
+    },
+    {
+      "pattern": "Reject nested keys in set-metadata client-side before issuing the request",
+      "rationale": "Surfaces invalid input locally with a clear error rather than relying on server-side rejection.",
+      "scope": "CLI + SDK set-metadata paths"
+    },
+    {
+      "pattern": "Gate destructive/overwriting onboarding steps (e.g., Atlassian site picker) on a 'newly created' signal from the connect call",
+      "rationale": "Prevents idempotent re-runs from clobbering user-configured metadata.",
+      "scope": "setup and integration connect flows"
+    },
+    {
+      "pattern": "Reuse resolveWorkspaceRecord precedence (env > token > default) for any new workspace-context CLI command",
+      "rationale": "Keeps a single source of truth for which workspace is 'current' across subcommands.",
+      "scope": "relayfile workspace subcommands"
+    },
+    {
+      "pattern": "Provide --names-only (or similar machine-readable) escape hatch whenever decorating list output with human markers like '* '",
+      "rationale": "Avoids breaking scripts that parse list output when UX markers are added.",
+      "scope": "relayfile CLI list-style commands"
+    },
+    {
+      "pattern": "Mirror `setup`'s cloud flags (--cloud-api-url/--cloud-token/--no-open/--login-timeout) on any CLI command that can drive the browser OAuth flow",
+      "rationale": "Consistent flag surface across entry points reduces user surprise.",
+      "scope": "relayfile login/setup and future browser-flow commands"
+    },
+    {
+      "pattern": "For local-mount copy semantics, use Node's non-forcing COPYFILE_FICLONE rather than forcing reflink",
+      "rationale": "Falls back cleanly on non-APFS / cross-filesystem targets without erroring.",
+      "scope": "packages/local-mount createMount"
+    },
+    {
+      "pattern": "Do PR-feedback work in a dedicated worktree when main has unrelated dirty state",
+      "rationale": "Keeps in-progress work isolated and avoids accidental staging.",
+      "scope": "Any PR-revision session"
+    }
+  ],
+  "lessons": [
+    {
+      "lesson": "Full test suite is currently blocked by local FSEvents failures and a pre-existing abort-timing race",
+      "context": "Issue #132 session could only validate focused tests + build, not the entire suite.",
+      "recommendation": "File/track the FSEvents and abort-timing race as separate issues so future agents know they're known-bad and can run targeted suites without alarm."
+    },
+    {
+      "lesson": "OAuth onboarding steps must distinguish 'newly created' from 'reused' connections",
+      "context": "PR 142 reviewers flagged that the Atlassian picker was running unconditionally and could clobber existing site metadata.",
+      "recommendation": "When adding any post-connect onboarding step, plumb a created/reused boolean back from the connect call and branch on it."
+    },
+    {
+      "lesson": "TypeScript SDK negative tests required building @relayfile/core types first",
+      "context": "Typecheck passed only after `npm run build --workspace=packages/core`.",
+      "recommendation": "Document the core-build prerequisite (or wire it into the SDK's typecheck script) so contributors don't hit confusing type errors."
+    },
+    {
+      "lesson": "Aligning `login` with `setup` removed a real UX cliff",
+      "context": "Previously `login` with no token prompted for an API key while `setup` did a browser flow, surprising cloud users.",
+      "recommendation": "When two CLI commands cover overlapping onboarding, audit them together and keep the default path identical; preserve legacy behavior behind an explicit flag."
+    }
+  ],
+  "openQuestions": [
+    "Should sync-back and autosync paths also adopt COPYFILE_FICLONE, or is the initial-mirror-only scope intentional long-term?",
+    "Are the FSEvents test failures and abort-timing race tracked in issues, and what's the plan to unblock full-suite runs?",
+    "Does `packages/sdk/typescript` need a script-level dependency on `packages/core`'s build so typecheck works without a manual prebuild?",
+    "Should the Atlassian 'newly created' signal be generalized into a shared post-connect hook contract for other OAuth providers (Slack, Notion, GitHub) that may later need similar gating?"
+  ]
+}
