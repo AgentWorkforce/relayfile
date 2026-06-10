@@ -547,6 +547,155 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /v1/workspaces/{workspaceId}/fs/import/github-tarball:
+    post:
+      tags: [Filesystem]
+      operationId: importGithubTarball
+      summary: Import a GitHub source tarball into the workspace
+      description: |
+        Extracts a gzipped GitHub source tarball (the request body) into the
+        workspace under `/github/repos/{owner}/{repo}/contents/`. The leading
+        archive directory is stripped, dependency/build artifacts are skipped
+        with reason `ignored`, and files over the per-file size cap are skipped
+        with reason `too-large`. Every imported file emits a normal filesystem
+        event so digest regeneration observes the import.
+      security:
+        - BearerAuth: [fs:write]
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/CorrelationId'
+        - name: owner
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: repo
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: headSha
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: jobId
+          in: query
+          required: false
+          description: |
+            Optional job identifier. When supplied, the completed import is
+            also recorded as a pollable job for the jobs endpoint.
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/gzip:
+            schema:
+              type: string
+              format: binary
+      responses:
+        '200':
+          description: Tarball import result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GithubTarballImportResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /v1/workspaces/{workspaceId}/fs/import/github-tarball/fetch:
+    post:
+      tags: [Filesystem]
+      operationId: startGithubTarballFetchImport
+      summary: Start a server-side GitHub tarball fetch and import job
+      description: |
+        Starts an asynchronous job that downloads the tarball from
+        `tarballUrl` (authenticated with the `X-GitHub-Token` header when
+        provided) and imports it into the workspace. Returns the job snapshot
+        immediately; poll the jobs endpoint for completion. If an active job
+        already exists for the same owner/repo/headSha, that job is returned
+        instead of starting a duplicate.
+      security:
+        - BearerAuth: [fs:write]
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/CorrelationId'
+        - name: X-GitHub-Token
+          in: header
+          required: false
+          description: GitHub token used to authorize the tarball download.
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GithubTarballFetchImportRequest'
+      responses:
+        '202':
+          description: Fetch import job accepted (new or already active)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GithubTarballImportJob'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /v1/workspaces/{workspaceId}/fs/import/github-tarball/jobs/{jobId}:
+    get:
+      tags: [Filesystem]
+      operationId: getGithubTarballImportJob
+      summary: Poll a GitHub tarball fetch import job
+      security:
+        - BearerAuth: [fs:read]
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/CorrelationId'
+        - name: jobId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Current job snapshot
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GithubTarballImportJob'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
   /v1/workspaces/{workspaceId}/forks:
     post:
       tags: [Forks]
@@ -3039,6 +3188,113 @@ components:
             $ref: '#/components/schemas/BulkWriteResult'
         correlationId:
           type: string
+
+    GithubTarballImportSkip:
+      type: object
+      additionalProperties: false
+      required: [path, reason]
+      properties:
+        path:
+          type: string
+          description: Repo-relative path of the skipped tarball entry
+        reason:
+          type: string
+          enum: [ignored, too-large]
+
+    GithubTarballImportResponse:
+      type: object
+      additionalProperties: false
+      required: [imported, errorCount, errors, skipped, bytesWritten, correlationId]
+      properties:
+        imported:
+          type: integer
+          minimum: 0
+        errorCount:
+          type: integer
+          minimum: 0
+        errors:
+          type: array
+          items:
+            $ref: '#/components/schemas/BulkWriteError'
+        skipped:
+          type: array
+          items:
+            $ref: '#/components/schemas/GithubTarballImportSkip'
+        bytesWritten:
+          type: integer
+          minimum: 0
+        correlationId:
+          type: string
+
+    GithubTarballFetchImportRequest:
+      type: object
+      additionalProperties: false
+      required: [owner, repo, headSha, tarballUrl]
+      properties:
+        owner:
+          type: string
+        repo:
+          type: string
+        ref:
+          type: string
+        headSha:
+          type: string
+        jobId:
+          type: string
+          description: Optional client-supplied job identifier; generated when omitted.
+        tarballUrl:
+          type: string
+          format: uri
+          description: Absolute http(s) URL of the GitHub source tarball.
+
+    GithubTarballImportJob:
+      type: object
+      additionalProperties: false
+      required: [jobId, workspaceId, owner, repo, headSha, status, imported, errorCount, errors, skipped, bytesWritten, createdAt, updatedAt]
+      properties:
+        jobId:
+          type: string
+        workspaceId:
+          type: string
+        owner:
+          type: string
+        repo:
+          type: string
+        ref:
+          type: string
+        headSha:
+          type: string
+        status:
+          type: string
+          enum: [queued, fetching, importing, completed, failed]
+        imported:
+          type: integer
+          minimum: 0
+        errorCount:
+          type: integer
+          minimum: 0
+        errors:
+          type: array
+          items:
+            $ref: '#/components/schemas/BulkWriteError'
+        skipped:
+          type: array
+          items:
+            $ref: '#/components/schemas/GithubTarballImportSkip'
+        bytesWritten:
+          type: integer
+          minimum: 0
+        lastError:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+        completedAt:
+          type: string
+          format: date-time
 
     ForkHandle:
       type: object
