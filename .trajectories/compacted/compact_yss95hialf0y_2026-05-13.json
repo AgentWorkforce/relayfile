@@ -1,0 +1,253 @@
+{
+  "id": "compact_yss95hialf0y",
+  "version": 1,
+  "type": "compacted",
+  "compactedAt": "2026-05-13T10:35:14.017Z",
+  "sourceTrajectories": [
+    "traj_8hqeave54ra6",
+    "traj_7bs92hiaabsc",
+    "traj_a7ezdb4zv3nd",
+    "traj_yhafsbwhoufi",
+    "traj_gi3ccn6ywqrn",
+    "traj_tdywz0ni0z1a",
+    "traj_brjdrgcnnwhs",
+    "traj_h99ldnvo1d26",
+    "traj_4vdcwo2iy630"
+  ],
+  "dateRange": {
+    "start": "2026-05-09T18:25:18.473Z",
+    "end": "2026-05-13T10:35:10.028Z"
+  },
+  "summary": {
+    "totalDecisions": 10,
+    "totalEvents": 16,
+    "uniqueAgents": [
+      "default"
+    ]
+  },
+  "decisionGroups": [
+    {
+      "category": "other",
+      "decisions": [
+        {
+          "question": "Use an isolated worktree for PR 144",
+          "chosen": "Use an isolated worktree for PR 144",
+          "reasoning": "The original checkout has unrelated local edits; a separate worktree lets me resolve PR conflicts without disturbing them.",
+          "fromTrajectory": "traj_8hqeave54ra6"
+        },
+        {
+          "question": "Created isolated worktree for PR 143 conflict resolution",
+          "chosen": "Created isolated worktree for PR 143 conflict resolution",
+          "reasoning": "The active checkout is the PR branch and behind origin; a separate worktree avoids disturbing the user's current working tree while allowing a clean merge of origin/main.",
+          "fromTrajectory": "traj_a7ezdb4zv3nd"
+        },
+        {
+          "question": "Use existing PR worktree",
+          "chosen": "Use existing PR worktree",
+          "reasoning": "The PR branch agent-relay/integration-accessible-resources is already checked out cleanly under /private/tmp/relayfile-accessible-resources, keeping the main dirty checkout untouched.",
+          "fromTrajectory": "traj_gi3ccn6ywqrn"
+        },
+        {
+          "question": "Use COPYFILE_FICLONE only for initial mount copies",
+          "chosen": "Use COPYFILE_FICLONE only for initial mount copies",
+          "reasoning": "Issue 132 targets createMount's project-to-mount mirror; sync-back and autosync behavior should remain unchanged unless separately scoped.",
+          "fromTrajectory": "traj_tdywz0ni0z1a"
+        }
+      ]
+    },
+    {
+      "category": "testing",
+      "decisions": [
+        {
+          "question": "Verified conflict resolution with focused tests",
+          "chosen": "Verified conflict resolution with focused tests",
+          "reasoning": "go test ./internal/mountsync covers the mount sync behavior; npm test -- src/client.test.ts verifies the SDK digest path raised by review remains covered after taking main.",
+          "fromTrajectory": "traj_8hqeave54ra6"
+        },
+        {
+          "question": "Normalize all trajectory index paths and move refreshed cache records to the newest slot",
+          "chosen": "Normalize all trajectory index paths and move refreshed cache records to the newest slot",
+          "reasoning": "PR review identified machine-specific trajectory paths and a cache pruning invariant: entries must remain ordered by storedAt so front-pruning cannot leave expired records behind.",
+          "fromTrajectory": "traj_a7ezdb4zv3nd"
+        }
+      ]
+    },
+    {
+      "category": "api",
+      "decisions": [
+        {
+          "question": "Preserve proactive request context through cached change records",
+          "chosen": "Preserve proactive request context through cached change records",
+          "reasoning": "Additional review comments showed scoped aclToken/workspace data could be lost after stream setup, so cached records now carry the workspace/token context used by materialization, replay, and expand('full').",
+          "fromTrajectory": "traj_7bs92hiaabsc"
+        },
+        {
+          "question": "When no --token is provided, runLogin will trigger ensureCloudCredentials (browser flow) instead of prompting for API key",
+          "chosen": "When no --token is provided, runLogin will trigger ensureCloudCredentials (browser flow) instead of prompting for API key",
+          "reasoning": "Matches what 'relayfile setup' already does. Old API-key prompt path stays available behind --api-key flag for self-hosted users who don't have cloud.",
+          "fromTrajectory": "traj_4vdcwo2iy630"
+        }
+      ]
+    },
+    {
+      "category": "tooling",
+      "decisions": [
+        {
+          "question": "Resolve proactive SDK conflicts with main",
+          "chosen": "Resolve proactive SDK conflicts with main",
+          "reasoning": "PR 143 already landed the proactive SDK surface on main with a stronger digest fallback; keeping main avoids reintroducing the older PR copy while PR 144 remains focused on mount sync fixes.",
+          "fromTrajectory": "traj_8hqeave54ra6"
+        }
+      ]
+    },
+    {
+      "category": "security",
+      "decisions": [
+        {
+          "question": "Track whether OAuth connect was newly created",
+          "chosen": "Track whether OAuth connect was newly created",
+          "reasoning": "The Atlassian picker should run after a fresh Jira/Confluence OAuth flow, but should not run for already-connected providers because it can replace existing metadata.",
+          "fromTrajectory": "traj_gi3ccn6ywqrn"
+        }
+      ]
+    }
+  ],
+  "keyLearnings": [],
+  "keyFindings": [],
+  "filesAffected": [
+    "packages/sdk/typescript/src/client.test.ts",
+    "packages/sdk/typescript/vitest.config.ts"
+  ],
+  "commits": [
+    "084c96a"
+  ],
+  "narrative": "This batch of trajectories covers PR fixes and CLI ergonomics work on the relayfile codebase across 2026-05-09 to 2026-05-13. The dominant pattern: addressing CodeRabbit-style review feedback on three open PRs (142 Atlassian accessible-resources, 143 proactive runtime SDK, 144 mount sync) by working in isolated git worktrees under /private/tmp to avoid disturbing the user's dirty main checkout. PR 143 received two review passes - the first fixed trajectory index path normalization and change-log cache refresh ordering (entries must remain sorted by storedAt so front-pruning can't leave expired records behind), the second secured the SHA fallback to avoid content leaks and preserved scoped aclToken/workspace context through cached change records used by materialization, replay, and expand('full'). PR 144 was rebased on main, collapsing duplicate proactive SDK changes already landed via PR 143. PR 142 work added Atlassian site-picker behavior gated on newly-created OAuth connects (not pre-existing ones), local validation rejecting nested metadata keys, strict response validation in Python/TS SDKs, and a Go CLI test that fails on unexpected routes. Separately, issue 132 was fixed by switching createMount initial copies to Node's non-forcing COPYFILE_FICLONE flag (scoped narrowly - sync-back and autosync left unchanged). CLI ergonomics: `relayfile workspace current` subcommand plus `*` active marker in `workspace list` (with `--names-only` escape hatch reusing resolveWorkspaceRecord precedence env > token > default), and `relayfile login` now defaults to the cloud browser flow via ensureCloudCredentials when no `--token` is supplied, with the legacy API-key path preserved behind `--api-key`. A gap was noted: the setting-up-relayfile SKILL.md does not yet document Atlassian accessible-resource site selection, Jira/Confluence cloudId/baseUrl metadata, or `relayfile integration set-metadata` - it should be updated before PR 142 functionality becomes the expected operator flow.",
+  "decisions": [
+    {
+      "question": "Where to resolve PR conflicts when the active checkout is dirty",
+      "chosen": "Create isolated git worktrees under /private/tmp/relayfile-* for each PR",
+      "reasoning": "User's main checkout has unrelated local edits; separate worktrees allow clean merges of origin/main without disturbing in-progress work",
+      "impact": "Became the standard pattern across PR 142, 143, and 144 conflict resolution"
+    },
+    {
+      "question": "How to handle proactive SDK conflicts between PR 144 and main",
+      "chosen": "Keep main's implementation (from PR 143) and drop PR 144's older copy",
+      "reasoning": "PR 143 already landed the proactive SDK surface on main with a stronger digest fallback; PR 144's remaining scope is mount sync behavior",
+      "impact": "PR 144 diff narrowed to mount sync plus a changelog entry; pushed merge commit ad5a27c"
+    },
+    {
+      "question": "How to preserve auth context through cached proactive change records",
+      "chosen": "Carry workspace/token context on cached records, used by materialization, replay, and expand('full')",
+      "reasoning": "Review showed scoped aclToken/workspace data could be lost after stream setup",
+      "impact": "Pushed 34d2a02; subscribe setup failures now reject rather than disappearing behind a null handle"
+    },
+    {
+      "question": "How to enforce change-log cache ordering after refresh",
+      "chosen": "Move refreshed records to the newest slot so storedAt order is preserved",
+      "reasoning": "Front-pruning relies on the invariant that entries are ordered by storedAt; out-of-order refreshes could leave expired records",
+      "impact": "Added cache-ordering regression test; pushed 2cef166"
+    },
+    {
+      "question": "When to trigger the Atlassian site picker during setup/connect",
+      "chosen": "Only after a freshly-created OAuth connect, not for already-connected providers",
+      "reasoning": "Running the picker on existing connections risks replacing established metadata",
+      "impact": "Tracked newly-created connect state through CLI flow; PR 142 committed at 084c96a"
+    },
+    {
+      "question": "Scope of COPYFILE_FICLONE for issue 132",
+      "chosen": "Apply only to createMount initial project-to-mount copies",
+      "reasoning": "Issue targets the initial mirror; sync-back and autosync behavior should remain unchanged unless separately scoped",
+      "impact": "Narrow blast radius; mocked copy-mode regression test added"
+    },
+    {
+      "question": "Default behavior of `relayfile login` with no --token",
+      "chosen": "Fall back to ensureCloudCredentials browser flow; preserve API-key prompt behind --api-key",
+      "reasoning": "Matches `relayfile setup` behavior; self-hosted users without cloud still have a path",
+      "impact": "Adds --cloud-api-url/--cloud-token/--no-open/--login-timeout flags mirroring setup; 3 unit tests"
+    }
+  ],
+  "conventions": [
+    {
+      "pattern": "Use isolated git worktrees under /private/tmp/relayfile-<slug> for PR conflict resolution",
+      "rationale": "User's primary checkout frequently has unrelated dirty state; worktrees isolate merges",
+      "scope": "PR maintenance workflow across this repo"
+    },
+    {
+      "pattern": "Normalize trajectory index paths (no machine-specific absolute paths) before commit",
+      "rationale": "PR 143 review surfaced machine-specific paths leaking into .trajectories/index.json",
+      "scope": "trail/.trajectories tooling outputs"
+    },
+    {
+      "pattern": "Cache entries must remain ordered by storedAt; refreshed records move to the newest slot",
+      "rationale": "Front-pruning relies on the ordering invariant; violating it can leave expired records",
+      "scope": "proactive runtime change-log cache"
+    },
+    {
+      "pattern": "Preserve scoped aclToken/workspace context on cached records used by replay/materialization/expand",
+      "rationale": "Stream setup can drop request-scoped auth context otherwise",
+      "scope": "proactive runtime SDK"
+    },
+    {
+      "pattern": "Strict response validation in SDKs (Python, TypeScript) and Go CLI tests that fail on unexpected routes",
+      "rationale": "Prevents silent acceptance of malformed responses or unintended API surface drift",
+      "scope": "packages/sdk/python, packages/sdk/typescript, cmd/relayfile-cli"
+    },
+    {
+      "pattern": "Reject nested keys in `integration set-metadata` locally before round-tripping to the server",
+      "rationale": "Early local validation gives clearer errors and avoids server-side surprises",
+      "scope": "relayfile CLI integration commands"
+    },
+    {
+      "pattern": "Validation matrix: go test ./<pkg>, python -m pytest <test>, npm test --workspace=<ws> -- <file>, npm run typecheck --workspace=<ws>, npm run build --workspace=packages/core",
+      "rationale": "Establishes the focused test commands used to validate cross-language PRs",
+      "scope": "PR validation"
+    },
+    {
+      "pattern": "Gate post-OAuth follow-up actions on newly-created connect state",
+      "rationale": "Avoid mutating metadata on pre-existing connections during routine setup runs",
+      "scope": "setup and `integration connect` flows"
+    },
+    {
+      "pattern": "Reuse resolveWorkspaceRecord precedence (env > token > default) when adding workspace-context CLI subcommands",
+      "rationale": "Keeps active-workspace resolution consistent across `workspace current`, `workspace list`, etc.",
+      "scope": "relayfile workspace CLI"
+    }
+  ],
+  "lessons": [
+    {
+      "lesson": "SHA fallbacks must not leak content when the primary digest path fails",
+      "context": "PR 143 second review pass flagged the secure SHA fallback issue",
+      "recommendation": "When implementing fallback hashing paths, audit for content disclosure on every branch, not just the happy path"
+    },
+    {
+      "lesson": "Stream-setup failures should reject rather than return a null handle",
+      "context": "Proactive runtime subscribe path previously hid setup errors behind a null handle",
+      "recommendation": "Surface setup failures via rejection/throw; null-handle returns make errors invisible to callers"
+    },
+    {
+      "lesson": "Local test suites can be limited by environmental flakiness (FSEvents) and pre-existing abort-timing races",
+      "context": "Issue 132 full suite run was limited; focused tests + build were used as the validation signal",
+      "recommendation": "When the full suite is unreliable locally, narrow to focused tests covering the change and document the limitation in the retrospective"
+    },
+    {
+      "lesson": "Skills/docs lag behind feature PRs and must be updated before the feature becomes the expected operator flow",
+      "context": "setting-up-relayfile SKILL.md does not document PR 142's Atlassian accessible-resource selection or `integration set-metadata`",
+      "recommendation": "Add a checklist item to PR review: if the change alters operator flow, update the corresponding skill in ../skills/skills/<name>/SKILL.md"
+    },
+    {
+      "lesson": "Trajectory index paths can leak machine-specific absolute paths",
+      "context": "PR 143 review caught this in .trajectories/index.json",
+      "recommendation": "Normalize paths to repo-relative form in trail tooling before writing index.json"
+    },
+    {
+      "lesson": "COPYFILE_FICLONE should be non-forcing for portability",
+      "context": "Issue 132 fix used Node's non-forcing flag so behavior degrades gracefully off same-filesystem reflink",
+      "recommendation": "Document same-filesystem reflink fallback behavior in code comments for future reviewers"
+    }
+  ],
+  "openQuestions": [
+    "Should setting-up-relayfile SKILL.md be updated now to cover Atlassian accessible-resource site selection, Jira/Confluence cloudId/baseUrl metadata, and `relayfile integration set-metadata` before PR 142 becomes the canonical operator flow?",
+    "Pre-existing abort-timing race surfaced during issue 132 validation - is there a tracking issue, and should it block future mountsync work?",
+    "Local FSEvents failures limit full-suite runs - is there a CI-only path or a documented dev-environment workaround?"
+  ]
+}

@@ -6,8 +6,10 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
+	"testing/fstest"
 )
 
 const issueMetaPath = "/github/repos/octocat/hello-world/issues/10/meta.json"
@@ -177,6 +179,58 @@ func TestValidateContentMissingOptionalArraysStillFails(t *testing.T) {
 	}))
 	if err == nil || !strings.Contains(err.Error(), "labels") {
 		t.Fatalf("expected missing labels validation error, got %v", err)
+	}
+}
+
+func TestBrokenSchemaDoesNotBlockUnrelatedPathValidation(t *testing.T) {
+	fsys := fstest.MapFS{
+		"broken/broken.schema.json": &fstest.MapFile{
+			// Invalid JSON: parsing fails at compile time.
+			Data: []byte(`{"$schema": "https://json-schema.org/draft/2020-12/schema",`),
+		},
+		"good/good.schema.json": &fstest.MapFile{
+			Data: []byte(`{
+				"$schema": "https://json-schema.org/draft/2020-12/schema",
+				"type": "object",
+				"required": ["name"],
+				"properties": {"name": {"type": "string"}},
+				"additionalProperties": false
+			}`),
+		},
+	}
+	v := &validator{
+		registrations: []registration{
+			{
+				pattern: regexp.MustCompile(`^/broken/item\.json$`),
+				file:    "broken/broken.schema.json",
+			},
+			{
+				pattern: regexp.MustCompile(`^/good/item\.json$`),
+				file:    "good/good.schema.json",
+			},
+		},
+		fsys: fsys,
+	}
+
+	// The unrelated path must validate normally despite the broken schema.
+	if err := v.ValidateContent("/good/item.json", []byte(`{"name":"ok"}`)); err != nil {
+		t.Fatalf("expected unrelated path to validate despite broken schema, got %v", err)
+	}
+	err := v.ValidateContent("/good/item.json", []byte(`{"name":42}`))
+	if err == nil || !strings.Contains(err.Error(), "/name") {
+		t.Fatalf("expected schema violation on unrelated path, got %v", err)
+	}
+
+	// The broken schema's own path stays fail-closed with the compile error.
+	err = v.ValidateContent("/broken/item.json", []byte(`{"anything":true}`))
+	if err == nil {
+		t.Fatal("expected broken schema path to fail closed, got nil")
+	}
+	if errors.Is(err, ErrUnknownPath) {
+		t.Fatalf("expected compile error, not ErrUnknownPath: %v", err)
+	}
+	if !strings.Contains(err.Error(), "broken/broken.schema.json") {
+		t.Fatalf("expected error to reference broken schema file, got %v", err)
 	}
 }
 

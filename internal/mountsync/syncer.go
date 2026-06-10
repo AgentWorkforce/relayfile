@@ -2033,9 +2033,6 @@ func bulkWriteRequestSize(files []BulkWriteFile) int64 {
 func (s *Syncer) reconcileBulkWrite(ctx context.Context, pendingWrite pendingBulkWrite, revision string) error {
 	tracked := pendingWrite.tracked
 	contentType := strings.TrimSpace(pendingWrite.snapshot.ContentType)
-	if contentType == "" {
-		contentType = pendingWrite.snapshot.ContentType
-	}
 	revision = strings.TrimSpace(revision)
 	if revision == "" {
 		remoteFile, err := s.client.ReadFile(ctx, s.workspace, pendingWrite.remotePath)
