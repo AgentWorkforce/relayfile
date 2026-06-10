@@ -29,15 +29,21 @@ type ServerConfig struct {
 	RateLimitMax       int
 	RateLimitWindow    time.Duration
 	MaxBodyBytes       int64
+	// MaxGithubTarballBytes bounds the compressed size accepted by the
+	// GitHub tarball import endpoints. Defaults to 1 GiB.
+	MaxGithubTarballBytes int64
 }
 
 type Server struct {
-	store              *relayfile.Store
-	cfg                ServerConfig
-	bearerVerifier     *bearerVerifier
-	rateLimiter        *rateLimiter
-	internalReplayMu   sync.Mutex
-	internalReplaySeen map[string]time.Time
+	store               *relayfile.Store
+	cfg                 ServerConfig
+	bearerVerifier      *bearerVerifier
+	rateLimiter         *rateLimiter
+	internalReplayMu    sync.Mutex
+	internalReplaySeen  map[string]time.Time
+	githubTarJobsMu     sync.Mutex
+	githubTarJobs       map[string]*githubTarImportJob
+	githubTarballClient *http.Client
 }
 
 type rateLimiter struct {
@@ -97,6 +103,7 @@ func NewServerWithConfig(store *relayfile.Store, cfg ServerConfig) (*Server, err
 		bearerVerifier:     newBearerVerifier(cfg),
 		rateLimiter:        limiter,
 		internalReplaySeen: map[string]time.Time{},
+		githubTarJobs:      map[string]*githubTarImportJob{},
 	}, nil
 }
 
@@ -161,6 +168,15 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case len(parts) == 5 && parts[3] == "fs" && parts[4] == "bulk" && r.Method == http.MethodPost:
 		requiredScope = "fs:write"
 		route = "bulk_write"
+	case len(parts) == 6 && parts[3] == "fs" && parts[4] == "import" && parts[5] == "github-tarball" && r.Method == http.MethodPost:
+		requiredScope = "fs:write"
+		route = "github_tarball_import"
+	case len(parts) == 7 && parts[3] == "fs" && parts[4] == "import" && parts[5] == "github-tarball" && parts[6] == "fetch" && r.Method == http.MethodPost:
+		requiredScope = "fs:write"
+		route = "github_tarball_fetch"
+	case len(parts) == 8 && parts[3] == "fs" && parts[4] == "import" && parts[5] == "github-tarball" && parts[6] == "jobs" && r.Method == http.MethodGet:
+		requiredScope = "fs:read"
+		route = "github_tarball_job"
 	case len(parts) == 5 && parts[3] == "fs" && parts[4] == "export" && r.Method == http.MethodGet:
 		requiredScope = "fs:read"
 		route = "export"
@@ -298,6 +314,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleBulkWrite(w, r, workspaceID, correlationID, claims)
 	case "export":
 		s.handleExport(w, r, workspaceID, correlationID, claims)
+	case "github_tarball_import":
+		s.handleGithubTarballImport(w, r, workspaceID, correlationID, claims)
+	case "github_tarball_fetch":
+		s.handleGithubTarballFetch(w, r, workspaceID, correlationID, claims)
+	case "github_tarball_job":
+		s.handleGithubTarballJob(w, r, workspaceID, parts[7], correlationID)
 	case "read_file":
 		s.handleReadFile(w, r, workspaceID, correlationID, claims)
 	case "write_file":
