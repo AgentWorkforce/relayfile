@@ -608,6 +608,12 @@ func (s *Server) importGithubTarballEntries(workspaceID, owner, repo, headSha, r
 }
 
 func (s *Server) githubTarballWritePermissionError(workspaceID, workspacePath string, claims tokenClaims) *relayfile.BulkWriteError {
+	if !scopeMatchesPath(claims.Scopes, "fs:write", workspacePath) {
+		return &relayfile.BulkWriteError{
+			Code:    "forbidden",
+			Message: "file access denied by path scope",
+		}
+	}
 	_, readErr := s.readFile(workspaceID, "", workspacePath)
 	var permissions []string
 	if readErr == nil {
