@@ -95,8 +95,13 @@ func (s *Syncer) ensureOutboxCapabilities() error {
 	}
 	path := s.outboxCapabilitiesPath()
 	existing, err := os.ReadFile(path)
-	if err == nil && string(existing) == string(data) {
-		return nil
+	if err == nil {
+		// Compare decoded values rather than raw bytes so a field reorder or
+		// whitespace difference does not cause a spurious rewrite.
+		var current outboxCapabilities
+		if json.Unmarshal(existing, &current) == nil && current == capabilities {
+			return nil
+		}
 	}
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err

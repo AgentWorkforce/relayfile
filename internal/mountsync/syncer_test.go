@@ -2238,6 +2238,120 @@ func TestOutboxAcksOnlyAfterWritebackOperationSucceeded(t *testing.T) {
 	}
 }
 
+func TestOutboxRestartDuringInFlightOperationResumesPolling(t *testing.T) {
+	localDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(localDir, "command.json"), []byte(`{"text":"hello"}`), 0o644); err != nil {
+		t.Fatalf("seed local command failed: %v", err)
+	}
+	const opID = "op_restart_in_flight_1"
+	firstClient := &fakeClient{
+		files:      map[string]RemoteFile{},
+		operations: map[string]OperationStatus{},
+	}
+	firstClient.bulkWriteResponseFunc = func(ctx context.Context, workspaceID string, files []BulkWriteFile) (BulkWriteResponse, error) {
+		_ = ctx
+		_ = workspaceID
+		if len(files) != 1 {
+			t.Fatalf("expected one outbox file, got %+v", files)
+		}
+		path := normalizeRemotePath(files[0].Path)
+		firstClient.revisionCounter++
+		revision := fmt.Sprintf("rev_%d", firstClient.revisionCounter)
+		firstClient.files[path] = RemoteFile{Path: path, Revision: revision, ContentType: files[0].ContentType, Content: files[0].Content}
+		firstClient.operations[opID] = OperationStatus{
+			OpID:     opID,
+			Path:     path,
+			Revision: revision,
+			Provider: "slack",
+			Status:   "running",
+		}
+		return BulkWriteResponse{
+			Written: 1,
+			Results: []BulkWriteResult{{
+				Path:        path,
+				Revision:    revision,
+				ContentType: files[0].ContentType,
+				OpID:        opID,
+				Writeback:   &relayfile.BulkWriteWritebackResult{Provider: "slack", State: "pending"},
+			}},
+			CorrelationID: "corr_restart_in_flight",
+		}, nil
+	}
+	first, err := NewSyncer(firstClient, SyncerOptions{
+		WorkspaceID: "ws_outbox_restart_in_flight",
+		RemoteRoot:  "/slack/channels/C123/messages",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer first: %v", err)
+	}
+	// Command accepted by the cloud, writeback op still in flight: the record
+	// stays pending with the op id persisted, and the syncer "dies" here.
+	if err := first.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("first sync with in-flight op failed: %v", err)
+	}
+	pending := readPendingOutboxRecordsForTest(t, localDir)
+	if len(pending) != 1 || pending[0].OpID != opID || pending[0].DispatchStatus != "running" {
+		t.Fatalf("expected one pending record carrying in-flight op id, got %+v", pending)
+	}
+	commandID := pending[0].CommandID
+	remotePath := pending[0].RemotePath
+
+	// Restart with a fresh syncer and client; meanwhile the op has succeeded
+	// server-side.
+	secondClient := &fakeClient{
+		files: map[string]RemoteFile{
+			remotePath: firstClient.files[remotePath],
+		},
+		operations: map[string]OperationStatus{
+			opID: {
+				OpID:     opID,
+				Path:     remotePath,
+				Revision: pending[0].Revision,
+				Provider: "slack",
+				Status:   "succeeded",
+			},
+		},
+	}
+	second, err := NewSyncer(secondClient, SyncerOptions{
+		WorkspaceID: "ws_outbox_restart_in_flight",
+		RemoteRoot:  "/slack/channels/C123/messages",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer second: %v", err)
+	}
+	forcePendingOutboxDueForTest(t, localDir)
+	if err := second.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("restart sync failed: %v", err)
+	}
+	if secondClient.bulkWriteCalls != 0 {
+		t.Fatalf("expected restart to resume polling without re-uploading, got %d bulk calls", secondClient.bulkWriteCalls)
+	}
+	if secondClient.getOperationCalls == 0 {
+		t.Fatal("expected restart to poll the in-flight operation")
+	}
+	if remaining := readPendingOutboxRecordsForTest(t, localDir); len(remaining) != 0 {
+		t.Fatalf("expected pending outbox empty after op success, got %+v", remaining)
+	}
+	acked := readOutboxRecordsInDirForTest(t, filepath.Join(localDir, ".relay", "outbox", "acked"))
+	if len(acked) != 1 || acked[0].CommandID != commandID || acked[0].OpID != opID || acked[0].DispatchStatus != "succeeded" {
+		t.Fatalf("expected exactly one acked record for %s, got %+v", commandID, acked)
+	}
+
+	// A further cycle must not re-dispatch or ack a second time.
+	if err := second.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("steady-state sync after ack failed: %v", err)
+	}
+	if secondClient.bulkWriteCalls != 0 {
+		t.Fatalf("expected no upload after ack, got %d bulk calls", secondClient.bulkWriteCalls)
+	}
+	acked = readOutboxRecordsInDirForTest(t, filepath.Join(localDir, ".relay", "outbox", "acked"))
+	if len(acked) != 1 || acked[0].CommandID != commandID {
+		t.Fatalf("expected outbox entry acked exactly once, got %+v", acked)
+	}
+}
+
 func TestOutboxLostBulkResponseRetryRecoversOpIDWithoutDuplicateDispatch(t *testing.T) {
 	localDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(localDir, "command.json"), []byte(`{"text":"hello"}`), 0o644); err != nil {
@@ -2440,7 +2554,8 @@ func TestFlushOutboxOnceWritesReceiptCapabilityMarkerWithEmptyOutbox(t *testing.
 	if err := syncer.FlushOutboxOnce(context.Background()); err != nil {
 		t.Fatalf("FlushOutboxOnce with empty outbox failed: %v", err)
 	}
-	data, err := os.ReadFile(filepath.Join(localDir, ".relay", "outbox", "capabilities.json"))
+	capabilitiesPath := filepath.Join(localDir, ".relay", "outbox", "capabilities.json")
+	data, err := os.ReadFile(capabilitiesPath)
 	if err != nil {
 		t.Fatalf("expected outbox capabilities marker: %v", err)
 	}
@@ -2450,6 +2565,47 @@ func TestFlushOutboxOnceWritesReceiptCapabilityMarkerWithEmptyOutbox(t *testing.
 	}
 	if capabilities.SchemaVersion != outboxCapabilitiesSchemaVersion || !capabilities.DispatchReceipts {
 		t.Fatalf("unexpected capabilities marker: %+v", capabilities)
+	}
+
+	// A second flush must not rewrite an up-to-date marker.
+	firstStat, err := os.Stat(capabilitiesPath)
+	if err != nil {
+		t.Fatalf("stat capabilities marker: %v", err)
+	}
+	time.Sleep(20 * time.Millisecond)
+	if err := syncer.FlushOutboxOnce(context.Background()); err != nil {
+		t.Fatalf("second FlushOutboxOnce failed: %v", err)
+	}
+	secondStat, err := os.Stat(capabilitiesPath)
+	if err != nil {
+		t.Fatalf("stat capabilities marker after second flush: %v", err)
+	}
+	if !secondStat.ModTime().Equal(firstStat.ModTime()) {
+		t.Fatalf("expected capabilities marker not rewritten, mtime %v -> %v", firstStat.ModTime(), secondStat.ModTime())
+	}
+	secondData, err := os.ReadFile(capabilitiesPath)
+	if err != nil {
+		t.Fatalf("read capabilities marker after second flush: %v", err)
+	}
+	if !bytes.Equal(secondData, data) {
+		t.Fatalf("expected capabilities marker content unchanged, got %s", secondData)
+	}
+
+	// A semantically-equal marker with reordered fields and different
+	// whitespace must also be left untouched.
+	reordered := []byte(fmt.Sprintf("{\n  \"dispatchReceipts\": true,\n  \"schemaVersion\": %d\n}\n", outboxCapabilitiesSchemaVersion))
+	if err := os.WriteFile(capabilitiesPath, reordered, 0o644); err != nil {
+		t.Fatalf("rewrite capabilities marker: %v", err)
+	}
+	if err := syncer.FlushOutboxOnce(context.Background()); err != nil {
+		t.Fatalf("third FlushOutboxOnce failed: %v", err)
+	}
+	got, err := os.ReadFile(capabilitiesPath)
+	if err != nil {
+		t.Fatalf("read capabilities marker after third flush: %v", err)
+	}
+	if !bytes.Equal(got, reordered) {
+		t.Fatalf("expected semantically-equal capabilities marker to be preserved, got %s", got)
 	}
 }
 
@@ -3672,6 +3828,53 @@ func TestBulkWrite_ReconcileUsesResponseRevision(t *testing.T) {
 	}
 	if got == "rev_1" {
 		t.Fatalf("expected tracked revision to advance beyond pre-write revision")
+	}
+}
+
+func TestReconcileBulkWriteWhitespaceContentTypeFallsBackToRemote(t *testing.T) {
+	client := &fakeClient{
+		files: map[string]RemoteFile{
+			"/notion/Docs/A.md": {
+				Path:        "/notion/Docs/A.md",
+				Revision:    "rev_2",
+				ContentType: "text/markdown",
+				Content:     "# A",
+			},
+		},
+	}
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_mount_bulk_whitespace_content_type",
+		RemoteRoot:  "/notion",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+	if err := syncer.loadState(); err != nil {
+		t.Fatalf("load state failed: %v", err)
+	}
+
+	pendingWrite := pendingBulkWrite{
+		remotePath: "/notion/Docs/A.md",
+		localPath:  filepath.Join(localDir, "Docs", "A.md"),
+		snapshot: localSnapshot{
+			ContentType: " \t ",
+			Hash:        "hash_a",
+		},
+	}
+	// An empty revision forces the remote ReadFile fallback. The
+	// all-whitespace snapshot content type must fall through to the remote
+	// file's content type instead of being kept as whitespace.
+	if err := syncer.reconcileBulkWrite(context.Background(), pendingWrite, ""); err != nil {
+		t.Fatalf("reconcileBulkWrite failed: %v", err)
+	}
+	tracked := syncer.state.Files["/notion/Docs/A.md"]
+	if tracked.ContentType != "text/markdown" {
+		t.Fatalf("expected remote content type fallback, got %q", tracked.ContentType)
+	}
+	if tracked.Revision != "rev_2" {
+		t.Fatalf("expected remote revision, got %q", tracked.Revision)
 	}
 }
 
