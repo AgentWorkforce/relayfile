@@ -832,6 +832,11 @@ type SyncerOptions struct {
 	DigestProviders         []string
 	DigestTimezone          string
 	DigestNow               func() time.Time
+	// Now overrides the wall clock used by the outbox writeback path
+	// (first-seen stamping, retry-backoff scheduling, due-ness, ack time).
+	// Defaults to time.Now when nil. Tests inject a controllable clock to make
+	// retry-backoff and dead-letter timing deterministic without real sleeps.
+	Now func() time.Time
 }
 
 type Logger interface {
@@ -985,7 +990,18 @@ type Syncer struct {
 	rollingCoalescer     *RollingDigestCoalescer
 	circuit              *CloudErrorCircuit
 	maxOutboxAttempts    int
+	nowFn                func() time.Time
 	mu                   sync.Mutex
+}
+
+// now returns the current time using the injected clock when set (tests),
+// otherwise the wall clock. Used by the outbox writeback path so retry-backoff
+// and dead-letter timing are deterministic under test without real sleeps.
+func (s *Syncer) now() time.Time {
+	if s.nowFn != nil {
+		return s.nowFn()
+	}
+	return time.Now()
 }
 
 type mountState struct {
@@ -1454,6 +1470,7 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 		rollingCoalescer:     rollingCoalescer,
 		circuit:              NewCloudErrorCircuit(),
 		maxOutboxAttempts:    defaultOutboxMaxAttempts,
+		nowFn:                opts.Now,
 		state: mountState{
 			Files: map[string]trackedFile{},
 		},
@@ -1753,7 +1770,7 @@ func (s *Syncer) flushOutboxRecords(ctx context.Context, conflicted map[string]s
 	if err != nil {
 		return err
 	}
-	now := time.Now().UTC()
+	now := s.now().UTC()
 	due := make([]outboxRecord, 0, len(records))
 	for _, record := range records {
 		if record.AttemptCount >= s.maxOutboxAttemptsValue() && !record.NeedsAttention {
