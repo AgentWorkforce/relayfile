@@ -2623,6 +2623,68 @@ func TestFlushOutboxOnceFlushesPendingWithoutMirrorScan(t *testing.T) {
 	}
 }
 
+func TestFlushOutboxOnceRespectsCallerCancellation(t *testing.T) {
+	localDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(localDir, "command.json"), []byte(`{"text":"hello"}`), 0o644); err != nil {
+		t.Fatalf("seed local command failed: %v", err)
+	}
+	firstClient := &fakeClient{
+		files: map[string]RemoteFile{},
+		bulkWriteResponseFunc: func(ctx context.Context, workspaceID string, files []BulkWriteFile) (BulkWriteResponse, error) {
+			_ = ctx
+			_ = workspaceID
+			_ = files
+			return BulkWriteResponse{}, context.Canceled
+		},
+	}
+	first, err := NewSyncer(firstClient, SyncerOptions{
+		WorkspaceID: "ws_flush_outbox_once_cancel",
+		RemoteRoot:  "/slack/channels/C123/messages",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer first: %v", err)
+	}
+	if err := first.SyncOnce(context.Background()); err == nil {
+		t.Fatal("expected first upload to fail")
+	}
+
+	var sawCanceled bool
+	secondClient := &fakeClient{
+		files: map[string]RemoteFile{},
+		bulkWriteResponseFunc: func(ctx context.Context, workspaceID string, files []BulkWriteFile) (BulkWriteResponse, error) {
+			_ = workspaceID
+			_ = files
+			if errors.Is(ctx.Err(), context.Canceled) {
+				sawCanceled = true
+			}
+			return BulkWriteResponse{}, ctx.Err()
+		},
+	}
+	second, err := NewSyncer(secondClient, SyncerOptions{
+		WorkspaceID:        "ws_flush_outbox_once_cancel",
+		RemoteRoot:         "/slack/channels/C123/messages",
+		LocalRoot:          localDir,
+		RootCtx:            context.Background(),
+		OutboxFlushTimeout: 30 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer second: %v", err)
+	}
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if err := second.FlushOutboxOnce(canceledCtx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected FlushOutboxOnce to return caller cancellation, got %v", err)
+	}
+	if !sawCanceled {
+		t.Fatal("expected upload ctx to observe caller cancellation")
+	}
+	if secondClient.bulkWriteCalls != 1 {
+		t.Fatalf("expected one forced flush attempt, got %d", secondClient.bulkWriteCalls)
+	}
+}
+
 func TestFlushOutboxOnceWritesReceiptCapabilityMarkerWithEmptyOutbox(t *testing.T) {
 	localDir := t.TempDir()
 	client := &fakeClient{files: map[string]RemoteFile{}}

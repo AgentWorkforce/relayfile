@@ -1773,10 +1773,11 @@ func (s *Syncer) flushOutboxRecords(ctx context.Context, conflicted map[string]s
 	if len(due) == 0 {
 		return nil
 	}
-	// The actual cloud upload runs under its OWN rootCtx-derived deadline, not
-	// the inbound per-cycle ctx, so a 15s mirror budget cannot cancel a
-	// writeback mid-flight and leave it retrying for minutes (see outboxContext).
-	flushCtx, cancel := s.outboxContext(ctx)
+	// The actual cloud upload runs under its OWN rootCtx-derived deadline for
+	// normal sync cycles, so a 15s mirror budget cannot cancel a writeback
+	// mid-flight and leave it retrying for minutes. Forced one-shot flushes
+	// still honor the caller's ctx because that ctx is the command budget.
+	flushCtx, cancel := s.outboxContext(ctx, forceDue)
 	defer cancel()
 	for _, chunk := range chunkOutboxRecords(due, maxWritebackBatchBytes()) {
 		if err := s.flushOutboxRecordChunk(flushCtx, chunk, conflicted); err != nil {
@@ -2843,27 +2844,41 @@ func (s *Syncer) bootstrapContext(parent context.Context) (context.Context, cont
 	return ctx, wrapped, prog
 }
 
-// outboxContext returns a deadline for a durable writeback/outbox flush. Like
-// bootstrapContext, it is derived from s.rootCtx (NOT the inbound per-cycle
-// ctx) so the tiny per-cycle RELAYFILE_MOUNT_TIMEOUT that bounds a mirror cycle
-// cannot starve an outbound write — a small Slack/Notion writeback must not
-// share, and lose, the same 15s budget as a full-tree pull on a large
-// workspace. rootCtx cancellation (process shutdown) still propagates.
+// outboxContext returns a deadline for a durable writeback/outbox flush. Normal
+// sync-cycle flushes derive from s.rootCtx (NOT the inbound per-cycle ctx) so
+// the tiny per-cycle RELAYFILE_MOUNT_TIMEOUT that bounds a mirror cycle cannot
+// starve an outbound write. One-shot forced flushes also observe the caller's
+// ctx because that ctx represents the explicit command budget. rootCtx
+// cancellation (process shutdown) always propagates.
 //
 // Callers MUST defer the returned CancelFunc.
-func (s *Syncer) outboxContext(parent context.Context) (context.Context, context.CancelFunc) {
+func (s *Syncer) outboxContext(parent context.Context, respectParentCancel bool) (context.Context, context.CancelFunc) {
 	root := s.rootCtx
 	if root == nil {
 		// Defensive: NewSyncer always sets rootCtx, but never derive from a nil
-		// parent — fall back to the inbound ctx so behaviour degrades to the
-		// pre-fix per-cycle deadline rather than panicking.
-		root = parent
+		// parent.
+		if parent != nil {
+			root = parent
+		} else {
+			root = context.Background()
+		}
 	}
 	timeout := s.outboxFlushTimeout
 	if timeout <= 0 {
 		timeout = defaultOutboxFlushTimeout
 	}
-	return context.WithTimeout(root, timeout)
+	ctx, cancel := context.WithTimeout(root, timeout)
+	if !respectParentCancel || parent == nil {
+		return ctx, cancel
+	}
+	stopParentCancel := context.AfterFunc(parent, cancel)
+	if parent.Err() != nil {
+		cancel()
+	}
+	return ctx, func() {
+		stopParentCancel()
+		cancel()
+	}
 }
 
 func (s *Syncer) pullRemote(ctx context.Context, conflicted map[string]struct{}) error {
