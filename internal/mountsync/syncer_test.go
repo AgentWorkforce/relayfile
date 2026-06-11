@@ -2031,6 +2031,90 @@ func TestOutboxPersistsBeforeBulkWriteFailure(t *testing.T) {
 	}
 }
 
+// TestOutboxFlushUsesIndependentDeadlineNotPerCycleCtx proves the fix for the
+// churn-digest "context deadline exceeded" / minutes-late-reply failure: the
+// durable writeback upload must run under its OWN rootCtx-derived deadline
+// (outboxContext), so a tiny per-cycle RELAYFILE_MOUNT_TIMEOUT — or even an
+// already-expired inbound ctx — cannot starve or cancel it. Without the fix the
+// inbound (expired) ctx flows straight into WriteFilesBulk and the flush fails.
+func TestOutboxFlushUsesIndependentDeadlineNotPerCycleCtx(t *testing.T) {
+	localDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(localDir, "command.json"), []byte(`{"text":"hello"}`), 0o644); err != nil {
+		t.Fatalf("seed local command failed: %v", err)
+	}
+
+	// First pass: persist a pending outbox record via a canceled upload.
+	firstClient := &fakeClient{
+		files: map[string]RemoteFile{},
+		bulkWriteResponseFunc: func(ctx context.Context, _ string, _ []BulkWriteFile) (BulkWriteResponse, error) {
+			_ = ctx
+			return BulkWriteResponse{}, context.Canceled
+		},
+	}
+	first, err := NewSyncer(firstClient, SyncerOptions{
+		WorkspaceID: "ws_outbox_deadline",
+		RemoteRoot:  "/slack/channels/C123/messages",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer first: %v", err)
+	}
+	if err := first.SyncOnce(context.Background()); err == nil {
+		t.Fatal("expected first upload to fail")
+	}
+	forcePendingOutboxDueForTest(t, localDir)
+
+	// Second pass: hand the flush an ALREADY-EXPIRED per-cycle ctx. The upload
+	// must still run, under the rootCtx-derived outbox deadline (30s here).
+	var sawRemaining time.Duration
+	secondClient := &fakeClient{
+		files: map[string]RemoteFile{},
+		bulkWriteResponseFunc: func(ctx context.Context, _ string, _ []BulkWriteFile) (BulkWriteResponse, error) {
+			if dl, ok := ctx.Deadline(); !ok {
+				t.Error("expected outbox upload ctx to carry a deadline")
+			} else {
+				sawRemaining = time.Until(dl)
+			}
+			// A per-cycle-sized expiry must not cancel the upload mid-flight.
+			time.Sleep(40 * time.Millisecond)
+			if ctx.Err() != nil {
+				t.Errorf("outbox upload ctx cancelled mid-flight: %v", ctx.Err())
+			}
+			return BulkWriteResponse{}, nil
+		},
+	}
+	second, err := NewSyncer(secondClient, SyncerOptions{
+		WorkspaceID:        "ws_outbox_deadline",
+		RemoteRoot:         "/slack/channels/C123/messages",
+		LocalRoot:          localDir,
+		RootCtx:            context.Background(),
+		OutboxFlushTimeout: 30 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer second: %v", err)
+	}
+
+	tinyCtx, cancel := context.WithTimeout(context.Background(), 15*time.Millisecond)
+	defer cancel()
+	time.Sleep(20 * time.Millisecond) // the inbound per-cycle ctx is now expired
+	if tinyCtx.Err() == nil {
+		t.Fatal("precondition: expected inbound per-cycle ctx to be already expired")
+	}
+
+	if err := second.flushDueOutboxRecords(tinyCtx, nil); err != nil {
+		t.Fatalf("outbox flush should survive an expired per-cycle ctx, got: %v", err)
+	}
+	if secondClient.bulkWriteCalls != 1 {
+		t.Fatalf("expected exactly one upload, got %d", secondClient.bulkWriteCalls)
+	}
+	if sawRemaining < 5*time.Second {
+		t.Fatalf("expected upload to run under the ~30s outbox deadline, saw %s remaining (looks like the expired per-cycle ctx leaked through)", sawRemaining)
+	}
+	if pending := readPendingOutboxRecordsForTest(t, localDir); len(pending) != 0 {
+		t.Fatalf("expected pending outbox empty after ack, got %+v", pending)
+	}
+}
+
 func TestOutboxRestartReloadsPendingAndFlushesWithPersistedCommandID(t *testing.T) {
 	localDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(localDir, "command.json"), []byte(`{"text":"hello"}`), 0o644); err != nil {
