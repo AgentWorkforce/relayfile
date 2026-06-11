@@ -226,7 +226,7 @@ func (s *Syncer) ensureOutboxRecord(pending pendingBulkWrite) (outboxRecord, err
 			return outboxRecord{}, err
 		}
 	}
-	now := time.Now().UTC().Format(time.RFC3339Nano)
+	now := s.now().UTC().Format(time.RFC3339Nano)
 	record := outboxRecord{
 		CommandID:     newOutboxCommandID(s.workspace, pending.remotePath, pending.snapshot.Hash, now),
 		WorkspaceID:   s.workspace,
@@ -259,7 +259,7 @@ func newOutboxCommandID(workspaceID, remotePath, hash, firstSeenAt string) strin
 
 func (s *Syncer) incrementOutboxAttempt(record outboxRecord, err error) error {
 	record.AttemptCount++
-	now := time.Now().UTC()
+	now := s.now().UTC()
 	record.LastAttemptAt = now.Format(time.RFC3339Nano)
 	record.LastError = sanitizeOutboxError(err)
 	if record.AttemptCount >= s.maxOutboxAttemptsValue() {
@@ -315,7 +315,7 @@ func (s *Syncer) ackOutboxRecord(record outboxRecord, revision, correlationID st
 		return err
 	}
 	record.Status = outboxStatusAcked
-	record.AckedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	record.AckedAt = s.now().UTC().Format(time.RFC3339Nano)
 	record.DispatchStatus = "succeeded"
 	record.Revision = strings.TrimSpace(revision)
 	if strings.TrimSpace(correlationID) != "" {
