@@ -97,7 +97,16 @@ const (
 	// and, having no resume cursor, restart from scratch every cycle (the
 	// #1499/#1516 non-convergence loop). Must stay strictly under
 	// defaultBootstrapIdleTimeout.
-	defaultExportTimeout              = 45 * time.Second
+	defaultExportTimeout = 45 * time.Second
+	// defaultOutboxFlushTimeout bounds a durable writeback/outbox flush with
+	// its OWN deadline derived from rootCtx (see outboxContext), independent of
+	// the tiny per-cycle RELAYFILE_MOUNT_TIMEOUT. A small outbound write (e.g. a
+	// Slack reply draft) must not share — and be starved by — the same 15s
+	// budget as a full-tree mirror pull on a large workspace; when it does, the
+	// write sits in the outbox retrying across cycles for minutes (the
+	// churn-digest "context deadline exceeded" / late-reply failure mode). This
+	// mirrors bootstrapContext's "derive from rootCtx, not the per-cycle ctx".
+	defaultOutboxFlushTimeout         = 60 * time.Second
 	defaultIncrementalReadNotReadyTTL = 5 * time.Minute
 	defaultCursorResolutionAttempts   = 3
 	defaultCursorRetryBaseDelay       = 250 * time.Millisecond
@@ -795,6 +804,11 @@ type SyncerOptions struct {
 	// RELAYFILE_EXPORT_TIMEOUT, default 45s; values >= bootstrapIdleTimeout are
 	// clamped below it so the fall-through always fires before the watchdog.
 	ExportTimeout time.Duration
+	// OutboxFlushTimeout bounds a durable writeback/outbox flush with its OWN
+	// deadline derived from RootCtx (see outboxContext), so the tiny per-cycle
+	// RELAYFILE_MOUNT_TIMEOUT that bounds a mirror cycle cannot starve an
+	// outbound write. 0 falls back to env RELAYFILE_OUTBOX_TIMEOUT, default 60s.
+	OutboxFlushTimeout time.Duration
 	// IncrementalReadNotReadyTTL bounds how long an incremental create/update
 	// event may keep returning ReadFile 404 before the syncer treats it as a
 	// delete and advances past the event. 0 falls back to env
@@ -954,6 +968,7 @@ type Syncer struct {
 	fullPullEvery        int
 	cursorTimeout        time.Duration
 	exportTimeout        time.Duration
+	outboxFlushTimeout   time.Duration
 	bootstrapTimeout     time.Duration
 	bootstrapIdleTimeout time.Duration
 	readNotReadyTTL      time.Duration
@@ -1310,6 +1325,10 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 	if exportTimeout <= 0 {
 		exportTimeout = defaultExportTimeout
 	}
+	outboxFlushTimeout := resolveDurationEnv(opts.OutboxFlushTimeout, "RELAYFILE_OUTBOX_TIMEOUT", defaultOutboxFlushTimeout, opts.Logger)
+	if outboxFlushTimeout <= 0 {
+		outboxFlushTimeout = defaultOutboxFlushTimeout
+	}
 	// The export's own deadline MUST elapse before the bootstrap context can
 	// be canceled so a slow export yields to the resumable tree pull while the
 	// bootstrap ctx is still alive. Clamp to a fraction of the active bootstrap
@@ -1420,6 +1439,7 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 		fullPullEvery:        fullPullEvery,
 		cursorTimeout:        cursorTimeout,
 		exportTimeout:        exportTimeout,
+		outboxFlushTimeout:   outboxFlushTimeout,
 		bootstrapTimeout:     bootstrapTimeout,
 		bootstrapIdleTimeout: bootstrapIdleTimeout,
 		readNotReadyTTL:      readNotReadyTTL,
@@ -1753,8 +1773,13 @@ func (s *Syncer) flushOutboxRecords(ctx context.Context, conflicted map[string]s
 	if len(due) == 0 {
 		return nil
 	}
+	// The actual cloud upload runs under its OWN rootCtx-derived deadline, not
+	// the inbound per-cycle ctx, so a 15s mirror budget cannot cancel a
+	// writeback mid-flight and leave it retrying for minutes (see outboxContext).
+	flushCtx, cancel := s.outboxContext(ctx)
+	defer cancel()
 	for _, chunk := range chunkOutboxRecords(due, maxWritebackBatchBytes()) {
-		if err := s.flushOutboxRecordChunk(ctx, chunk, conflicted); err != nil {
+		if err := s.flushOutboxRecordChunk(flushCtx, chunk, conflicted); err != nil {
 			return err
 		}
 	}
@@ -2816,6 +2841,29 @@ func (s *Syncer) bootstrapContext(parent context.Context) (context.Context, cont
 		cancel()
 	}
 	return ctx, wrapped, prog
+}
+
+// outboxContext returns a deadline for a durable writeback/outbox flush. Like
+// bootstrapContext, it is derived from s.rootCtx (NOT the inbound per-cycle
+// ctx) so the tiny per-cycle RELAYFILE_MOUNT_TIMEOUT that bounds a mirror cycle
+// cannot starve an outbound write — a small Slack/Notion writeback must not
+// share, and lose, the same 15s budget as a full-tree pull on a large
+// workspace. rootCtx cancellation (process shutdown) still propagates.
+//
+// Callers MUST defer the returned CancelFunc.
+func (s *Syncer) outboxContext(parent context.Context) (context.Context, context.CancelFunc) {
+	root := s.rootCtx
+	if root == nil {
+		// Defensive: NewSyncer always sets rootCtx, but never derive from a nil
+		// parent — fall back to the inbound ctx so behaviour degrades to the
+		// pre-fix per-cycle deadline rather than panicking.
+		root = parent
+	}
+	timeout := s.outboxFlushTimeout
+	if timeout <= 0 {
+		timeout = defaultOutboxFlushTimeout
+	}
+	return context.WithTimeout(root, timeout)
 }
 
 func (s *Syncer) pullRemote(ctx context.Context, conflicted map[string]struct{}) error {
