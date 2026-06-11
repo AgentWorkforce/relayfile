@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "lastUpdated": "2026-06-10T18:09:30.327Z",
+  "lastUpdated": "2026-06-11T21:41:12.722Z",
   "trajectories": {
     "traj_7x9nltybo08h": {
       "title": "Update PR 65 usage instructions",
@@ -86,12 +86,264 @@
       "completedAt": "2026-04-30T20:31:59.361Z",
       "path": "/home/daytona/workspace/.trajectories/completed/2026-04/traj_wez7rl7pkfpn.json"
     },
+    "traj_0esz6uvcr3ei": {
+      "title": "ricky-child-update-mountfuse-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:31:16.115Z",
+      "completedAt": "2026-05-13T19:31:17.359Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_0esz6uvcr3ei.json"
+    },
+    "traj_0famt5h29r8x": {
+      "title": "ricky-child-update-core-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:55.602Z",
+      "completedAt": "2026-05-13T19:30:56.592Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_0famt5h29r8x.json"
+    },
+    "traj_0jcuk1fr1l5k": {
+      "title": "ricky-child-update-python-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:47.001Z",
+      "completedAt": "2026-05-13T19:30:47.897Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_0jcuk1fr1l5k.json"
+    },
+    "traj_0kcetdre9796": {
+      "title": "ricky-child-update-mountsync-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:28.932Z",
+      "completedAt": "2026-05-13T19:30:29.527Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_0kcetdre9796.json"
+    },
+    "traj_0l3bw0e0u4tb": {
+      "title": "ricky-child-update-3-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:39.681Z",
+      "completedAt": "2026-05-13T19:30:40.389Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_0l3bw0e0u4tb.json"
+    },
+    "traj_0lo788ci7czj": {
+      "title": "ricky-child-update-core-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:29.876Z",
+      "completedAt": "2026-05-13T19:30:30.475Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_0lo788ci7czj.json"
+    },
+    "traj_14ud5e41onet": {
+      "title": "ricky-child-update-mountfuse-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:20.519Z",
+      "completedAt": "2026-05-13T19:30:21.099Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_14ud5e41onet.json"
+    },
+    "traj_1eubck0522gt": {
+      "title": "ricky-child-update-yesterday-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:31:20.483Z",
+      "completedAt": "2026-05-13T19:31:22.155Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_1eubck0522gt.json"
+    },
+    "traj_1its4z7ii18s": {
+      "title": "ricky-child-update-mountfuse-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:53.652Z",
+      "completedAt": "2026-05-13T19:30:54.701Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_1its4z7ii18s.json"
+    },
+    "traj_1un53bxnruju": {
+      "title": "ricky-child-update-mountfuse-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:26.386Z",
+      "completedAt": "2026-05-13T19:30:26.966Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_1un53bxnruju.json"
+    },
+    "traj_24od6aovrgc9": {
+      "title": "ricky-child-update-yesterday-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:58.187Z",
+      "completedAt": "2026-05-13T19:30:59.220Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_24od6aovrgc9.json"
+    },
+    "traj_254his9mun45": {
+      "title": "ricky-child-update-adapter-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:37.779Z",
+      "completedAt": "2026-05-13T19:30:38.606Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_254his9mun45.json"
+    },
+    "traj_25jecew583sm": {
+      "title": "ricky-child-update-core-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:39.204Z",
+      "completedAt": "2026-05-13T19:30:39.989Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_25jecew583sm.json"
+    },
+    "traj_2cmp5xtwtcy2": {
+      "title": "ricky-child-update-adapter-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:33.796Z",
+      "completedAt": "2026-05-13T19:30:34.371Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_2cmp5xtwtcy2.json"
+    },
+    "traj_2q0c3stbw2j9": {
+      "title": "ricky-child-update-adapter-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:55.228Z",
+      "completedAt": "2026-05-13T19:30:56.226Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_2q0c3stbw2j9.json"
+    },
+    "traj_2s4l3rene3yd": {
+      "title": "ricky-child-update-typescript-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:31:06.875Z",
+      "completedAt": "2026-05-13T19:31:07.922Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_2s4l3rene3yd.json"
+    },
+    "traj_2y042ea34a7n": {
+      "title": "ricky-child-update-adapter-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:31:16.382Z",
+      "completedAt": "2026-05-13T19:31:17.546Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_2y042ea34a7n.json"
+    },
+    "traj_36aa9hy9atc2": {
+      "title": "ricky-child-update-adapter-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:31:00.470Z",
+      "completedAt": "2026-05-13T19:31:01.329Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_36aa9hy9atc2.json"
+    },
+    "traj_3cdvujx1pl8c": {
+      "title": "ricky-child-update-python-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:31:00.224Z",
+      "completedAt": "2026-05-13T19:31:01.121Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_3cdvujx1pl8c.json"
+    },
+    "traj_3x4jcfdqh58q": {
+      "title": "ricky-child-update-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:47.483Z",
+      "completedAt": "2026-05-13T19:30:48.350Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_3x4jcfdqh58q.json"
+    },
+    "traj_3zrv7xb59wf7": {
+      "title": "ricky-child-update-3-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:59.766Z",
+      "completedAt": "2026-05-13T19:31:00.727Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_3zrv7xb59wf7.json"
+    },
+    "traj_42si4cza2zf2": {
+      "title": "ricky-child-update-mountsync-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:23.397Z",
+      "completedAt": "2026-05-13T19:30:23.951Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_42si4cza2zf2.json"
+    },
+    "traj_43x12dqk28xd": {
+      "title": "ricky-child-update-4-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:31:19.327Z",
+      "completedAt": "2026-05-13T19:31:20.493Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_43x12dqk28xd.json"
+    },
+    "traj_4gy1x1y28w12": {
+      "title": "ricky-child-update-yesterday-2-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-15T18:49:28.304Z",
+      "completedAt": "2026-05-15T18:49:29.054Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_4gy1x1y28w12.json"
+    },
+    "traj_4jkknyucvu91": {
+      "title": "ricky-child-update-core-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:34.097Z",
+      "completedAt": "2026-05-13T19:30:34.681Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_4jkknyucvu91.json"
+    },
+    "traj_54gmp21qlt5q": {
+      "title": "ricky-child-update-relayfile-cli-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:45.081Z",
+      "completedAt": "2026-05-13T19:30:45.870Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_54gmp21qlt5q.json"
+    },
+    "traj_5dbdj1a6mm3r": {
+      "title": "ricky-child-update-core-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:50.643Z",
+      "completedAt": "2026-05-13T19:30:51.683Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_5dbdj1a6mm3r.json"
+    },
+    "traj_5ifyz773r2e9": {
+      "title": "ricky-child-update-4-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:43.963Z",
+      "completedAt": "2026-05-13T19:30:44.992Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_5ifyz773r2e9.json"
+    },
+    "traj_5sgwfti6zn25": {
+      "title": "ricky-child-update-typescript-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:41.468Z",
+      "completedAt": "2026-05-13T19:30:42.845Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_5sgwfti6zn25.json"
+    },
+    "traj_5x7zwzeqzu9l": {
+      "title": "ricky-child-update-relayfile-cli-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:31.698Z",
+      "completedAt": "2026-05-13T19:30:32.318Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_5x7zwzeqzu9l.json"
+    },
+    "traj_5xauebwbc6ge": {
+      "title": "ricky-child-update-python-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:31:19.989Z",
+      "completedAt": "2026-05-13T19:31:21.243Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_5xauebwbc6ge.json"
+    },
+    "traj_5yy169z1dolh": {
+      "title": "ricky-child-update-mountfuse-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:32.399Z",
+      "completedAt": "2026-05-13T19:30:33.053Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_5yy169z1dolh.json"
+    },
+    "traj_64s0wd97re66": {
+      "title": "ricky-child-update-mountsync-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:31.146Z",
+      "completedAt": "2026-05-13T19:30:31.752Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_64s0wd97re66.json"
+    },
+    "traj_6bd2saw4yrr6": {
+      "title": "ricky-child-update-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:31:08.923Z",
+      "completedAt": "2026-05-13T19:31:10.076Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_6bd2saw4yrr6.json"
+    },
+    "traj_6evefk06b1ej": {
+      "title": "ricky-child-update-relayfile-cli-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:38.965Z",
+      "completedAt": "2026-05-13T19:30:39.830Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_6evefk06b1ej.json"
+    },
     "traj_6fjv0fnvrc5e": {
       "title": "Relayfile follow-up PRs: cloud conventions, cloud sdk/core bump, adapters release pipeline investigation",
       "status": "completed",
       "startedAt": "2026-05-09T13:35:32.701Z",
       "completedAt": "2026-05-09T13:45:18.302Z",
       "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_6fjv0fnvrc5e.json"
+    },
+    "traj_6i9xqiujem54": {
+      "title": "ricky-child-update-typescript-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:31:16.446Z",
+      "completedAt": "2026-05-13T19:31:17.550Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_6i9xqiujem54.json"
     },
     "traj_6lyjg41p6a28": {
       "title": "Address PR comments on cloud#504 Linear conventions",
@@ -100,12 +352,89 @@
       "completedAt": "2026-05-09T13:57:04.293Z",
       "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_6lyjg41p6a28.json"
     },
+    "traj_6mahcvf8qkdy": {
+      "title": "ricky-child-update-typescript-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:31:12.304Z",
+      "completedAt": "2026-05-13T19:31:13.791Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_6mahcvf8qkdy.json"
+    },
+    "traj_6qbca2oufodm": {
+      "title": "ricky-child-update-python-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:37.398Z",
+      "completedAt": "2026-05-13T19:30:38.215Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_6qbca2oufodm.json"
+    },
+    "traj_6uhw83eqobip": {
+      "title": "ricky-child-update-activity-summary-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-15T18:50:06.687Z",
+      "completedAt": "2026-05-15T18:50:07.455Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_6uhw83eqobip.json"
+    },
+    "traj_76icov6k6nbr": {
+      "title": "ricky-child-update-activity-summary-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-15T18:49:47.769Z",
+      "completedAt": "2026-05-15T18:49:48.543Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_76icov6k6nbr.json"
+    },
+    "traj_7b2jc0rsqrep": {
+      "title": "ricky-child-update-mountfuse-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:56.395Z",
+      "completedAt": "2026-05-13T19:30:57.367Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_7b2jc0rsqrep.json"
+    },
+    "traj_7f0jkowrhmx4": {
+      "title": "ricky-child-update-mountfuse-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:35.184Z",
+      "completedAt": "2026-05-13T19:30:35.827Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_7f0jkowrhmx4.json"
+    },
+    "traj_7iw6h2hm83e1": {
+      "title": "ricky-child-update-mountsync-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:50.471Z",
+      "completedAt": "2026-05-13T19:30:51.442Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_7iw6h2hm83e1.json"
+    },
+    "traj_8lb1l7bllh0f": {
+      "title": "ricky-child-update-yesterday-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:31:06.715Z",
+      "completedAt": "2026-05-13T19:31:07.789Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_8lb1l7bllh0f.json"
+    },
+    "traj_99gdw69wk8xc": {
+      "title": "ricky-child-update-2-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-15T18:49:30.330Z",
+      "completedAt": "2026-05-15T18:49:31.249Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_99gdw69wk8xc.json"
+    },
     "traj_9khc36ax639i": {
       "title": "Add relayfile eval harness",
       "status": "completed",
       "startedAt": "2026-05-08T23:08:09.607Z",
       "completedAt": "2026-05-08T23:18:24.282Z",
       "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_9khc36ax639i.json"
+    },
+    "traj_9sl7gfy2flus": {
+      "title": "ricky-child-update-mountsync-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:32.465Z",
+      "completedAt": "2026-05-13T19:30:33.112Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_9sl7gfy2flus.json"
+    },
+    "traj_9tgfvm7ip6wj": {
+      "title": "ricky-child-update-2026-05-12-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-15T18:50:20.783Z",
+      "completedAt": "2026-05-15T18:50:21.611Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_9tgfvm7ip6wj.json"
     },
     "traj_a6rfc30zag40": {
       "title": "Draft agent workspace golden path spec",
@@ -121,12 +450,362 @@
       "completedAt": "2026-05-01T23:45:39.611Z",
       "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_ailh4waboewf.json"
     },
+    "traj_b60qewona7a9": {
+      "title": "ricky-child-update-yyyy-mm-dd-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-15T18:49:32.384Z",
+      "completedAt": "2026-05-15T18:49:33.169Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_b60qewona7a9.json"
+    },
+    "traj_b61m3y4h8ire": {
+      "title": "ricky-child-update-mountfuse-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:28.763Z",
+      "completedAt": "2026-05-13T19:30:29.364Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_b61m3y4h8ire.json"
+    },
+    "traj_b87xypwec422": {
+      "title": "ricky-child-update-adapter-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:45.230Z",
+      "completedAt": "2026-05-13T19:30:46.296Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_b87xypwec422.json"
+    },
+    "traj_babpbncqkzsb": {
+      "title": "ricky-child-update-mountsync-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:22.533Z",
+      "completedAt": "2026-05-13T19:30:23.116Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_babpbncqkzsb.json"
+    },
+    "traj_bavjou956mlb": {
+      "title": "ricky-child-update-2026-05-12-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-15T18:49:40.910Z",
+      "completedAt": "2026-05-15T18:49:41.695Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_bavjou956mlb.json"
+    },
+    "traj_bfv7l46cyrqc": {
+      "title": "ricky-child-update-3-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:47.562Z",
+      "completedAt": "2026-05-13T19:30:48.418Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_bfv7l46cyrqc.json"
+    },
+    "traj_bhrzucbym6xv": {
+      "title": "ricky-child-update-activity-summary-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-15T18:50:19.225Z",
+      "completedAt": "2026-05-15T18:50:20.127Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_bhrzucbym6xv.json"
+    },
+    "traj_bi8vjc5q8r88": {
+      "title": "ricky-child-update-yesterday-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:45.765Z",
+      "completedAt": "2026-05-13T19:30:46.536Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_bi8vjc5q8r88.json"
+    },
+    "traj_bl5u7eq7k0z9": {
+      "title": "ricky-child-update-typescript-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:50.030Z",
+      "completedAt": "2026-05-13T19:30:50.735Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_bl5u7eq7k0z9.json"
+    },
+    "traj_bm0t4whb143d": {
+      "title": "ricky-child-update-2-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:37.857Z",
+      "completedAt": "2026-05-13T19:30:38.665Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_bm0t4whb143d.json"
+    },
+    "traj_bqol9c4f6oo9": {
+      "title": "ricky-child-update-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:31:02.714Z",
+      "completedAt": "2026-05-13T19:31:04.026Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_bqol9c4f6oo9.json"
+    },
+    "traj_bvzou05c1a96": {
+      "title": "ricky-child-update-3-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:42.033Z",
+      "completedAt": "2026-05-13T19:30:43.011Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_bvzou05c1a96.json"
+    },
+    "traj_bw2v6vn9v7dx": {
+      "title": "ricky-child-update-mountsync-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:57.192Z",
+      "completedAt": "2026-05-13T19:30:58.149Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_bw2v6vn9v7dx.json"
+    },
+    "traj_c1kmctqfg76x": {
+      "title": "ricky-child-update-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:31:19.876Z",
+      "completedAt": "2026-05-13T19:31:20.956Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_c1kmctqfg76x.json"
+    },
+    "traj_cnvajv6vs5ae": {
+      "title": "ricky-child-update-relayfile-cli-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:31:16.884Z",
+      "completedAt": "2026-05-13T19:31:18.048Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_cnvajv6vs5ae.json"
+    },
+    "traj_co3le0c1c7f2": {
+      "title": "ricky-child-update-mountsync-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:26.502Z",
+      "completedAt": "2026-05-13T19:30:27.065Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_co3le0c1c7f2.json"
+    },
+    "traj_cq70rdtyvgo0": {
+      "title": "ricky-child-update-core-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:31:04.060Z",
+      "completedAt": "2026-05-13T19:31:05.061Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_cq70rdtyvgo0.json"
+    },
+    "traj_ct8x0o6w4jtj": {
+      "title": "ricky-child-update-yesterday-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:52.741Z",
+      "completedAt": "2026-05-13T19:30:53.800Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_ct8x0o6w4jtj.json"
+    },
+    "traj_d16n6f01nfwb": {
+      "title": "ricky-child-update-typescript-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:37.516Z",
+      "completedAt": "2026-05-13T19:30:38.499Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_d16n6f01nfwb.json"
+    },
+    "traj_d2suuyjolwtk": {
+      "title": "ricky-child-update-4-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:31:11.032Z",
+      "completedAt": "2026-05-13T19:31:12.279Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_d2suuyjolwtk.json"
+    },
+    "traj_d3cgkxgymirn": {
+      "title": "ricky-child-update-mountfuse-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:38.714Z",
+      "completedAt": "2026-05-13T19:30:39.481Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_d3cgkxgymirn.json"
+    },
     "traj_d3drzvodqpn7": {
       "title": "Address PR 114 comments",
       "status": "completed",
       "startedAt": "2026-05-09T08:39:35.473Z",
       "completedAt": "2026-05-09T08:42:45.202Z",
       "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_d3drzvodqpn7.json"
+    },
+    "traj_d9u34wbpvg2t": {
+      "title": "ricky-child-update-4-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:59.121Z",
+      "completedAt": "2026-05-13T19:31:00.215Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_d9u34wbpvg2t.json"
+    },
+    "traj_dc2r58nusw2p": {
+      "title": "ricky-child-update-python-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:31:12.153Z",
+      "completedAt": "2026-05-13T19:31:13.858Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_dc2r58nusw2p.json"
+    },
+    "traj_dd5bfb52jnb1": {
+      "title": "ricky-child-update-2026-05-12-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-15T18:49:42.264Z",
+      "completedAt": "2026-05-15T18:49:43.006Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_dd5bfb52jnb1.json"
+    },
+    "traj_ddwe4n6wc7n7": {
+      "title": "ricky-child-update-relayfile-cli-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:27.267Z",
+      "completedAt": "2026-05-13T19:30:27.888Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_ddwe4n6wc7n7.json"
+    },
+    "traj_ddxa75gcntqt": {
+      "title": "ricky-child-update-2-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:45.577Z",
+      "completedAt": "2026-05-13T19:30:46.483Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_ddxa75gcntqt.json"
+    },
+    "traj_dhk6yz2ihrrt": {
+      "title": "ricky-child-update-adapter-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:42.462Z",
+      "completedAt": "2026-05-13T19:30:43.599Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_dhk6yz2ihrrt.json"
+    },
+    "traj_dk2bgq40gr3g": {
+      "title": "ricky-child-update-adapter-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:47.479Z",
+      "completedAt": "2026-05-13T19:30:48.361Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_dk2bgq40gr3g.json"
+    },
+    "traj_dowbl6103pst": {
+      "title": "ricky-child-update-core-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:31:10.151Z",
+      "completedAt": "2026-05-13T19:31:11.099Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_dowbl6103pst.json"
+    },
+    "traj_dowbnjskzwa7": {
+      "title": "ricky-child-update-activity-summary-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-15T18:49:44.689Z",
+      "completedAt": "2026-05-15T18:49:45.429Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_dowbnjskzwa7.json"
+    },
+    "traj_dp1c1r4zp2xd": {
+      "title": "ricky-child-update-3-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:57.029Z",
+      "completedAt": "2026-05-13T19:30:58.209Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_dp1c1r4zp2xd.json"
+    },
+    "traj_dvggtwleupxw": {
+      "title": "ricky-child-update-python-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:31.562Z",
+      "completedAt": "2026-05-13T19:30:32.161Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_dvggtwleupxw.json"
+    },
+    "traj_e4ppb5ru3qeg": {
+      "title": "ricky-child-update-3-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:52.354Z",
+      "completedAt": "2026-05-13T19:30:53.184Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_e4ppb5ru3qeg.json"
+    },
+    "traj_e90m6la5zdcr": {
+      "title": "ricky-child-update-2026-05-12-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-15T18:50:15.373Z",
+      "completedAt": "2026-05-15T18:50:16.142Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_e90m6la5zdcr.json"
+    },
+    "traj_earhd2wmgp9c": {
+      "title": "ricky-child-update-core-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:31:00.792Z",
+      "completedAt": "2026-05-13T19:31:01.762Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_earhd2wmgp9c.json"
+    },
+    "traj_eragyrgy5167": {
+      "title": "ricky-child-update-2-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:57.984Z",
+      "completedAt": "2026-05-13T19:30:59.037Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_eragyrgy5167.json"
+    },
+    "traj_f5k69i8auhuq": {
+      "title": "ricky-child-update-mountfuse-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:49.474Z",
+      "completedAt": "2026-05-13T19:30:50.394Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_f5k69i8auhuq.json"
+    },
+    "traj_f7dgxh4js24x": {
+      "title": "ricky-child-update-typescript-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:54.751Z",
+      "completedAt": "2026-05-13T19:30:55.854Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_f7dgxh4js24x.json"
+    },
+    "traj_fj2bjmol1cpu": {
+      "title": "ricky-child-update-yesterday-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:31:00.523Z",
+      "completedAt": "2026-05-13T19:31:01.484Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_fj2bjmol1cpu.json"
+    },
+    "traj_g74ag8twvdsn": {
+      "title": "ricky-child-update-core-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:58.304Z",
+      "completedAt": "2026-05-13T19:30:59.348Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_g74ag8twvdsn.json"
+    },
+    "traj_gfs7f1t0ygqu": {
+      "title": "ricky-child-update-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:49.846Z",
+      "completedAt": "2026-05-13T19:30:50.720Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_gfs7f1t0ygqu.json"
+    },
+    "traj_giigw5i3uphj": {
+      "title": "ricky-child-update-typescript-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:32.373Z",
+      "completedAt": "2026-05-13T19:30:32.993Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_giigw5i3uphj.json"
+    },
+    "traj_gjqphzqfy93z": {
+      "title": "ricky-child-update-core-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:26.647Z",
+      "completedAt": "2026-05-13T19:30:27.208Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_gjqphzqfy93z.json"
+    },
+    "traj_gxgm0gbdvxu9": {
+      "title": "ricky-child-update-2026-05-12-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-15T18:50:17.592Z",
+      "completedAt": "2026-05-15T18:50:18.345Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_gxgm0gbdvxu9.json"
+    },
+    "traj_gy16akk5a47e": {
+      "title": "ricky-child-update-activity-summary-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-15T18:49:42.011Z",
+      "completedAt": "2026-05-15T18:49:42.809Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_gy16akk5a47e.json"
+    },
+    "traj_h6evipwe1x0v": {
+      "title": "ricky-child-update-relayfile-cli-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:35.535Z",
+      "completedAt": "2026-05-13T19:30:36.117Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_h6evipwe1x0v.json"
+    },
+    "traj_h6kblma6i019": {
+      "title": "ricky-child-update-3-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:31:20.368Z",
+      "completedAt": "2026-05-13T19:31:21.578Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_h6kblma6i019.json"
+    },
+    "traj_ha4e80uawc30": {
+      "title": "ricky-child-update-mountfuse-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:31:08.413Z",
+      "completedAt": "2026-05-13T19:31:09.599Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_ha4e80uawc30.json"
+    },
+    "traj_hlgfydy1egnf": {
+      "title": "ricky-child-update-activity-summary-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-15T18:50:01.669Z",
+      "completedAt": "2026-05-15T18:50:02.402Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_hlgfydy1egnf.json"
+    },
+    "traj_hvkg89y1sml5": {
+      "title": "ricky-child-update-mountsync-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:31:09.689Z",
+      "completedAt": "2026-05-13T19:31:10.847Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_hvkg89y1sml5.json"
     },
     "traj_hyqnsfininh5": {
       "title": "Write agent workspace implementation workflow",
@@ -135,12 +814,299 @@
       "completedAt": "2026-05-01T15:27:12.578Z",
       "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_hyqnsfininh5.json"
     },
+    "traj_i0i769iqny6q": {
+      "title": "ricky-child-update-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:35.612Z",
+      "completedAt": "2026-05-13T19:30:36.198Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_i0i769iqny6q.json"
+    },
+    "traj_i54f366yg59x": {
+      "title": "ricky-child-update-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:31:16.427Z",
+      "completedAt": "2026-05-13T19:31:17.552Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_i54f366yg59x.json"
+    },
+    "traj_i6vzztmyh9dp": {
+      "title": "ricky-child-update-3-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:31:12.268Z",
+      "completedAt": "2026-05-13T19:31:13.901Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_i6vzztmyh9dp.json"
+    },
+    "traj_i8p5rrz7k09z": {
+      "title": "ricky-child-update-mountsync-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:54.817Z",
+      "completedAt": "2026-05-13T19:30:55.861Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_i8p5rrz7k09z.json"
+    },
+    "traj_ic8upa5xav0s": {
+      "title": "ricky-child-update-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:34.596Z",
+      "completedAt": "2026-05-13T19:30:35.265Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_ic8upa5xav0s.json"
+    },
+    "traj_ifsz20k50040": {
+      "title": "ricky-child-update-python-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:49.384Z",
+      "completedAt": "2026-05-13T19:30:50.268Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_ifsz20k50040.json"
+    },
+    "traj_im9qazwtwnz9": {
+      "title": "ricky-child-update-4-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:31:04.894Z",
+      "completedAt": "2026-05-13T19:31:06.385Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_im9qazwtwnz9.json"
+    },
+    "traj_iubxb2dcurx9": {
+      "title": "ricky-child-update-relayfile-cli-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:49.657Z",
+      "completedAt": "2026-05-13T19:30:50.660Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_iubxb2dcurx9.json"
+    },
+    "traj_j0npmdn1k8p9": {
+      "title": "ricky-child-update-adapter-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:31:20.110Z",
+      "completedAt": "2026-05-13T19:31:21.428Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_j0npmdn1k8p9.json"
+    },
+    "traj_j1loiwf8t0w5": {
+      "title": "ricky-child-update-typescript-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:44.685Z",
+      "completedAt": "2026-05-13T19:30:45.791Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_j1loiwf8t0w5.json"
+    },
+    "traj_j5w351n7jvxg": {
+      "title": "ricky-child-update-core-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:45.434Z",
+      "completedAt": "2026-05-13T19:30:46.408Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_j5w351n7jvxg.json"
+    },
+    "traj_jb3n7bav1oxp": {
+      "title": "ricky-child-update-python-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:31:16.348Z",
+      "completedAt": "2026-05-13T19:31:17.478Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_jb3n7bav1oxp.json"
+    },
+    "traj_jbqe1tow37ik": {
+      "title": "ricky-child-update-yesterday-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:31:13.000Z",
+      "completedAt": "2026-05-13T19:31:14.654Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_jbqe1tow37ik.json"
+    },
+    "traj_jjm0ufaylppj": {
+      "title": "ricky-child-update-adapter-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:31:06.751Z",
+      "completedAt": "2026-05-13T19:31:07.721Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_jjm0ufaylppj.json"
+    },
+    "traj_jwdyjlduuy94": {
+      "title": "ricky-child-update-activity-summary-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-15T18:49:40.115Z",
+      "completedAt": "2026-05-15T18:49:41.374Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_jwdyjlduuy94.json"
+    },
+    "traj_jwz2kllqfgrb": {
+      "title": "ricky-child-update-adapter-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:32.891Z",
+      "completedAt": "2026-05-13T19:30:33.470Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_jwz2kllqfgrb.json"
+    },
+    "traj_k3uzquxlgy3c": {
+      "title": "ricky-child-update-2026-05-12-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-15T18:49:43.594Z",
+      "completedAt": "2026-05-15T18:49:44.413Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_k3uzquxlgy3c.json"
+    },
+    "traj_kev3ttz1my8d": {
+      "title": "ricky-child-update-2-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:31:04.483Z",
+      "completedAt": "2026-05-13T19:31:05.951Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_kev3ttz1my8d.json"
+    },
+    "traj_kg5bw3ujz16g": {
+      "title": "ricky-child-update-core-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:31:17.125Z",
+      "completedAt": "2026-05-13T19:31:18.308Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_kg5bw3ujz16g.json"
+    },
+    "traj_kki6qzqhbdn7": {
+      "title": "ricky-child-update-yesterday-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:47.672Z",
+      "completedAt": "2026-05-13T19:30:48.614Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_kki6qzqhbdn7.json"
+    },
+    "traj_kqsc3kmyaxtc": {
+      "title": "ricky-child-update-4-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:31:01.566Z",
+      "completedAt": "2026-05-13T19:31:02.677Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_kqsc3kmyaxtc.json"
+    },
+    "traj_kz02mze1s0nz": {
+      "title": "ricky-child-update-mountsync-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:35.269Z",
+      "completedAt": "2026-05-13T19:30:35.893Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_kz02mze1s0nz.json"
+    },
+    "traj_lblwspvonibn": {
+      "title": "ricky-child-update-typescript-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:31:00.302Z",
+      "completedAt": "2026-05-13T19:31:01.136Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_lblwspvonibn.json"
+    },
+    "traj_lt7eesoloo2h": {
+      "title": "ricky-child-update-4-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:46.373Z",
+      "completedAt": "2026-05-13T19:30:47.274Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_lt7eesoloo2h.json"
+    },
+    "traj_m7io60miedox": {
+      "title": "ricky-child-update-mountfuse-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:31:02.064Z",
+      "completedAt": "2026-05-13T19:31:03.354Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_m7io60miedox.json"
+    },
+    "traj_m9bz94wbli3f": {
+      "title": "ricky-child-update-mountfuse-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:21.391Z",
+      "completedAt": "2026-05-13T19:30:21.943Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_m9bz94wbli3f.json"
+    },
+    "traj_me9ab3l4u3wx": {
+      "title": "ricky-child-update-4-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:56.651Z",
+      "completedAt": "2026-05-13T19:30:57.604Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_me9ab3l4u3wx.json"
+    },
+    "traj_mmy69jpoxda5": {
+      "title": "ricky-child-update-relayfile-cli-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:56.589Z",
+      "completedAt": "2026-05-13T19:30:57.654Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_mmy69jpoxda5.json"
+    },
+    "traj_n49uzj6un4dy": {
+      "title": "ricky-child-update-mountfuse-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:44.513Z",
+      "completedAt": "2026-05-13T19:30:45.582Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_n49uzj6un4dy.json"
+    },
+    "traj_n4xfjzlz23b8": {
+      "title": "ricky-child-update-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:39.159Z",
+      "completedAt": "2026-05-13T19:30:39.848Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_n4xfjzlz23b8.json"
+    },
+    "traj_nfiplvdljfzh": {
+      "title": "ricky-child-update-mountsync-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:52.517Z",
+      "completedAt": "2026-05-13T19:30:53.404Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_nfiplvdljfzh.json"
+    },
+    "traj_nng0zy7fvrhr": {
+      "title": "ricky-child-update-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:57.104Z",
+      "completedAt": "2026-05-13T19:30:58.095Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_nng0zy7fvrhr.json"
+    },
     "traj_nxbsptr6c5q0": {
       "title": "Investigate local lag and open status diagnostics PR",
       "status": "completed",
       "startedAt": "2026-05-14T09:46:57.122Z",
       "completedAt": "2026-05-14T09:50:46.065Z",
       "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_nxbsptr6c5q0.json"
+    },
+    "traj_o3gqarctmnra": {
+      "title": "ricky-child-update-4-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:51.336Z",
+      "completedAt": "2026-05-13T19:30:52.307Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_o3gqarctmnra.json"
+    },
+    "traj_o77ocwnqvlkt": {
+      "title": "ricky-child-update-typescript-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:30.097Z",
+      "completedAt": "2026-05-13T19:30:30.660Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_o77ocwnqvlkt.json"
+    },
+    "traj_os5bphw8z5m3": {
+      "title": "ricky-child-update-adapter-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:31:12.432Z",
+      "completedAt": "2026-05-13T19:31:13.906Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_os5bphw8z5m3.json"
+    },
+    "traj_ovbwr98ffujz": {
+      "title": "ricky-child-update-python-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:41.555Z",
+      "completedAt": "2026-05-13T19:30:42.872Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_ovbwr98ffujz.json"
+    },
+    "traj_p8yiyocktj73": {
+      "title": "ricky-child-update-mountsync-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:31:16.977Z",
+      "completedAt": "2026-05-13T19:31:18.353Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_p8yiyocktj73.json"
+    },
+    "traj_prv634vo6kgh": {
+      "title": "ricky-child-update-typescript-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:39.346Z",
+      "completedAt": "2026-05-13T19:30:40.101Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_prv634vo6kgh.json"
+    },
+    "traj_q3nwdie0isda": {
+      "title": "ricky-child-update-relayfile-cli-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:25.360Z",
+      "completedAt": "2026-05-13T19:30:25.919Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_q3nwdie0isda.json"
+    },
+    "traj_qqw244libore": {
+      "title": "ricky-child-update-3-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:31:06.512Z",
+      "completedAt": "2026-05-13T19:31:07.555Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_qqw244libore.json"
+    },
+    "traj_qrfqj7fsdwsq": {
+      "title": "ricky-child-update-relayfile-cli-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:51.666Z",
+      "completedAt": "2026-05-13T19:30:52.579Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_qrfqj7fsdwsq.json"
     },
     "traj_qrt7hh3ht8nk": {
       "title": "Investigate confusing relayfile lagging status",
@@ -149,12 +1115,257 @@
       "completedAt": "2026-05-14T09:42:53.566Z",
       "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_qrt7hh3ht8nk.json"
     },
+    "traj_qvdc6lznv13o": {
+      "title": "ricky-child-update-relayfile-cli-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:24.503Z",
+      "completedAt": "2026-05-13T19:30:25.078Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_qvdc6lznv13o.json"
+    },
+    "traj_r0d8lqo8191p": {
+      "title": "ricky-child-update-2026-05-12-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-15T18:49:50.679Z",
+      "completedAt": "2026-05-15T18:49:51.413Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_r0d8lqo8191p.json"
+    },
+    "traj_rcotlv3nxty1": {
+      "title": "ricky-child-update-typescript-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:31:09.486Z",
+      "completedAt": "2026-05-13T19:31:10.637Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_rcotlv3nxty1.json"
+    },
+    "traj_rh4ku1zqm8xg": {
+      "title": "ricky-child-update-2-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:31:16.862Z",
+      "completedAt": "2026-05-13T19:31:17.964Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_rh4ku1zqm8xg.json"
+    },
+    "traj_rqaqu9gul9l0": {
+      "title": "ricky-child-update-core-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:32.019Z",
+      "completedAt": "2026-05-13T19:30:32.741Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_rqaqu9gul9l0.json"
+    },
+    "traj_s0pibmix74gt": {
+      "title": "ricky-child-update-core-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:35.321Z",
+      "completedAt": "2026-05-13T19:30:35.914Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_s0pibmix74gt.json"
+    },
+    "traj_s54gmq6aoze9": {
+      "title": "ricky-child-update-relayfile-cli-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:31:09.266Z",
+      "completedAt": "2026-05-13T19:31:10.422Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_s54gmq6aoze9.json"
+    },
+    "traj_s59nn8a47eg2": {
+      "title": "ricky-child-update-python-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:31:06.549Z",
+      "completedAt": "2026-05-13T19:31:07.487Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_s59nn8a47eg2.json"
+    },
+    "traj_scm4uagwfzmf": {
+      "title": "ricky-child-update-core-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:27.611Z",
+      "completedAt": "2026-05-13T19:30:28.326Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_scm4uagwfzmf.json"
+    },
+    "traj_skgb04azoxdb": {
+      "title": "ricky-child-update-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:45.235Z",
+      "completedAt": "2026-05-13T19:30:46.307Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_skgb04azoxdb.json"
+    },
+    "traj_t3rx68m61sws": {
+      "title": "ricky-child-update-typescript-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:29.129Z",
+      "completedAt": "2026-05-13T19:30:29.698Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_t3rx68m61sws.json"
+    },
+    "traj_t9rjnmywio3a": {
+      "title": "ricky-workspace-primitives-implementation-spec-status-proposed-affects-agentworkforce--workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T20:01:24.412Z",
+      "completedAt": "2026-05-13T20:01:25.089Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_t9rjnmywio3a.json"
+    },
+    "traj_tkdtp013bix8": {
+      "title": "ricky-child-update-2026-05-12-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-15T18:50:05.517Z",
+      "completedAt": "2026-05-15T18:50:06.277Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_tkdtp013bix8.json"
+    },
+    "traj_txha4pao07y9": {
+      "title": "ricky-child-update-activity-summary-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-15T18:50:15.462Z",
+      "completedAt": "2026-05-15T18:50:16.209Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_txha4pao07y9.json"
+    },
+    "traj_u4kesn1gbeov": {
+      "title": "ricky-child-update-2026-05-12-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-15T18:49:53.418Z",
+      "completedAt": "2026-05-15T18:49:54.176Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_u4kesn1gbeov.json"
+    },
+    "traj_u505ha31np87": {
+      "title": "ricky-child-update-2-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:31:10.154Z",
+      "completedAt": "2026-05-13T19:31:11.046Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_u505ha31np87.json"
+    },
+    "traj_ugmwr7azp31a": {
+      "title": "ricky-child-update-activity-summary-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-15T18:50:17.715Z",
+      "completedAt": "2026-05-15T18:50:18.468Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_ugmwr7azp31a.json"
+    },
+    "traj_ukhjd8828v5p": {
+      "title": "ricky-child-update-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:51.664Z",
+      "completedAt": "2026-05-13T19:30:52.672Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_ukhjd8828v5p.json"
+    },
+    "traj_up9adtir5ulg": {
+      "title": "ricky-child-update-mountsync-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:39.014Z",
+      "completedAt": "2026-05-13T19:30:39.809Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_up9adtir5ulg.json"
+    },
+    "traj_v0l48chjqje6": {
+      "title": "Fix PR 149 conflicts and add eval GitHub Action",
+      "status": "abandoned",
+      "startedAt": "2026-05-14T09:58:46.716Z",
+      "completedAt": "2026-05-21T10:39:32.081Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_v0l48chjqje6.json"
+    },
     "traj_v1un6n66y38i": {
       "title": "Async createMount — issue #104",
       "status": "completed",
       "startedAt": "2026-05-08T17:27:24.218Z",
       "completedAt": "2026-05-08T17:31:22.965Z",
       "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_v1un6n66y38i.json"
+    },
+    "traj_v5946o0fppoh": {
+      "title": "ricky-child-update-activity-summary-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-15T18:49:38.146Z",
+      "completedAt": "2026-05-15T18:49:38.989Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_v5946o0fppoh.json"
+    },
+    "traj_v8a1sa7ezmo8": {
+      "title": "ricky-child-update-2026-05-12-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-15T18:49:49.196Z",
+      "completedAt": "2026-05-15T18:49:49.953Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_v8a1sa7ezmo8.json"
+    },
+    "traj_vc3djonoerqt": {
+      "title": "ricky-child-update-2-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:52.829Z",
+      "completedAt": "2026-05-13T19:30:53.825Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_vc3djonoerqt.json"
+    },
+    "traj_vgiyarompgok": {
+      "title": "ricky-child-update-2026-05-12-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-15T18:49:52.044Z",
+      "completedAt": "2026-05-15T18:49:52.783Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_vgiyarompgok.json"
+    },
+    "traj_vv3tl8ps5wzm": {
+      "title": "ricky-child-update-mountsync-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:31:03.342Z",
+      "completedAt": "2026-05-13T19:31:04.633Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_vv3tl8ps5wzm.json"
+    },
+    "traj_vxf7dqujgjux": {
+      "title": "ricky-child-update-yesterday-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:31:03.572Z",
+      "completedAt": "2026-05-13T19:31:04.798Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_vxf7dqujgjux.json"
+    },
+    "traj_vy988hb8zjjx": {
+      "title": "ricky-child-update-relayfile-cli-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:53.938Z",
+      "completedAt": "2026-05-13T19:30:54.904Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_vy988hb8zjjx.json"
+    },
+    "traj_w6zk7ohwcfzy": {
+      "title": "ricky-child-update-relayfile-cli-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:32.906Z",
+      "completedAt": "2026-05-13T19:30:33.478Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_w6zk7ohwcfzy.json"
+    },
+    "traj_widnyqespo42": {
+      "title": "ricky-child-update-core-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:33.155Z",
+      "completedAt": "2026-05-13T19:30:33.729Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_widnyqespo42.json"
+    },
+    "traj_wm5s8l6td0hl": {
+      "title": "ricky-child-update-mountfuse-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T20:04:23.313Z",
+      "completedAt": "2026-05-13T20:04:23.997Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_wm5s8l6td0hl.json"
+    },
+    "traj_wp7l0ox623an": {
+      "title": "ricky-child-update-relayfile-cli-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:29.651Z",
+      "completedAt": "2026-05-13T19:30:30.247Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_wp7l0ox623an.json"
+    },
+    "traj_wqzb1vi72ajr": {
+      "title": "ricky-child-update-python-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:54.485Z",
+      "completedAt": "2026-05-13T19:30:55.530Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_wqzb1vi72ajr.json"
+    },
+    "traj_wt79wxz09661": {
+      "title": "ricky-child-update-relayfile-cli-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:30.633Z",
+      "completedAt": "2026-05-13T19:30:31.240Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_wt79wxz09661.json"
+    },
+    "traj_xagehza69vbb": {
+      "title": "ricky-child-update-mountfuse-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:29.934Z",
+      "completedAt": "2026-05-13T19:30:30.530Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_xagehza69vbb.json"
+    },
+    "traj_xem6czppy664": {
+      "title": "ricky-child-update-mountfuse-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:51.460Z",
+      "completedAt": "2026-05-13T19:30:52.448Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_xem6czppy664.json"
     },
     "traj_xf18gkmtr3ib": {
       "title": "Address PR comments on relayfile-adapters#59",
@@ -163,12 +1374,117 @@
       "completedAt": "2026-05-09T13:54:43.281Z",
       "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_xf18gkmtr3ib.json"
     },
+    "traj_xjd4g62wnp33": {
+      "title": "ricky-child-update-adapter-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:49.857Z",
+      "completedAt": "2026-05-13T19:30:50.899Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_xjd4g62wnp33.json"
+    },
+    "traj_xqcwb4hqmqxl": {
+      "title": "ricky-child-update-mountfuse-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:31.070Z",
+      "completedAt": "2026-05-13T19:30:31.701Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_xqcwb4hqmqxl.json"
+    },
+    "traj_xw0ri2qnnegp": {
+      "title": "ricky-child-update-activity-summary-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-15T18:49:46.113Z",
+      "completedAt": "2026-05-15T18:49:46.906Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_xw0ri2qnnegp.json"
+    },
+    "traj_xzdgrk3r9h5i": {
+      "title": "ricky-child-update-activity-summary-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-15T18:49:49.479Z",
+      "completedAt": "2026-05-15T18:49:50.253Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_xzdgrk3r9h5i.json"
+    },
+    "traj_y5yug8hkkhc4": {
+      "title": "ricky-child-update-relayfile-cli-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:31:02.203Z",
+      "completedAt": "2026-05-13T19:31:03.744Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_y5yug8hkkhc4.json"
+    },
+    "traj_y958doseumxy": {
+      "title": "ricky-child-update-python-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:30.541Z",
+      "completedAt": "2026-05-13T19:30:31.128Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_y958doseumxy.json"
+    },
+    "traj_yennaktpbws5": {
+      "title": "ricky-child-update-activity-summary-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-15T18:50:20.798Z",
+      "completedAt": "2026-05-15T18:50:21.612Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_yennaktpbws5.json"
+    },
+    "traj_yglovrwup18l": {
+      "title": "ricky-child-update-2-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:55.602Z",
+      "completedAt": "2026-05-13T19:30:56.580Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_yglovrwup18l.json"
+    },
+    "traj_ymgamxr9eg1j": {
+      "title": "ricky-child-update-2-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:39.375Z",
+      "completedAt": "2026-05-13T19:30:40.130Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_ymgamxr9eg1j.json"
+    },
+    "traj_yw4krcpddro4": {
+      "title": "ricky-child-update-last-week-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-15T18:49:36.304Z",
+      "completedAt": "2026-05-15T18:49:37.060Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_yw4krcpddro4.json"
+    },
+    "traj_z1ngtjylman6": {
+      "title": "ricky-child-update-mountsync-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:30.026Z",
+      "completedAt": "2026-05-13T19:30:30.599Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_z1ngtjylman6.json"
+    },
     "traj_z2klijcrwqed": {
       "title": "Design simple agent workspace connect flow",
       "status": "completed",
       "startedAt": "2026-05-01T14:58:15.412Z",
       "completedAt": "2026-05-01T15:06:23.351Z",
       "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_z2klijcrwqed.json"
+    },
+    "traj_z2spe7men8cm": {
+      "title": "ricky-child-update-mountsync-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:45.124Z",
+      "completedAt": "2026-05-13T19:30:46.110Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_z2spe7men8cm.json"
+    },
+    "traj_zfhht8x3z1mz": {
+      "title": "ricky-child-update-2-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:50.682Z",
+      "completedAt": "2026-05-13T19:30:51.661Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_zfhht8x3z1mz.json"
+    },
+    "traj_ziamivo8b5qf": {
+      "title": "ricky-child-update-python-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:44.493Z",
+      "completedAt": "2026-05-13T19:30:45.623Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_ziamivo8b5qf.json"
+    },
+    "traj_zpdqny4se03r": {
+      "title": "ricky-child-update-3-workflow",
+      "status": "abandoned",
+      "startedAt": "2026-05-13T19:30:54.666Z",
+      "completedAt": "2026-05-13T19:30:55.593Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-05/traj_zpdqny4se03r.json"
     },
     "traj_1w9cclaztl9m": {
       "title": "Review and fix PR #256",
@@ -218,6 +1534,13 @@
       "startedAt": "2026-06-10T16:59:35.202Z",
       "completedAt": "2026-06-10T16:59:41.571Z",
       "path": "/home/daytona/workspace/.trajectories/completed/2026-06/traj_z4a0ms62uw5i.json"
+    },
+    "traj_0ql0i2otossx": {
+      "title": "Review and fix PR #271",
+      "status": "completed",
+      "startedAt": "2026-06-11T21:41:11.786Z",
+      "completedAt": "2026-06-11T21:41:12.674Z",
+      "path": "/home/daytona/workspace/.trajectories/completed/2026-06/traj_0ql0i2otossx.json"
     }
   }
 }

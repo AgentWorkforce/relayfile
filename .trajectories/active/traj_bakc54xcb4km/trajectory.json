@@ -6,8 +6,35 @@
   },
   "status": "active",
   "startedAt": "2026-06-10T18:02:24.509Z",
-  "agents": [],
-  "chapters": [],
+  "agents": [
+    {
+      "name": "default",
+      "role": "lead",
+      "joinedAt": "2026-06-11T21:30:12.861Z"
+    }
+  ],
+  "chapters": [
+    {
+      "id": "chap_ppb6417fgpje",
+      "title": "Work",
+      "agentName": "default",
+      "startedAt": "2026-06-11T21:30:12.861Z",
+      "events": [
+        {
+          "ts": 1781213412862,
+          "type": "decision",
+          "content": "Bound PR #271 review to mountsync outbox clock injection and writeback E2E tests: Bound PR #271 review to mountsync outbox clock injection and writeback E2E tests",
+          "raw": {
+            "question": "Bound PR #271 review to mountsync outbox clock injection and writeback E2E tests",
+            "chosen": "Bound PR #271 review to mountsync outbox clock injection and writeback E2E tests",
+            "alternatives": [],
+            "reasoning": "The PR diff only changes internal/mountsync/outbox.go, internal/mountsync/syncer.go, and adds internal/mountsync/writeback_e2e_test.go; review should trace callers and tests impacted by that surface."
+          },
+          "significance": "high"
+        }
+      ]
+    }
+  ],
   "commits": [],
   "filesChanged": [],
   "projectId": "/home/daytona/workspace",
