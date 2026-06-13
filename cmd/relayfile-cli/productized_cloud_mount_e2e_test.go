@@ -33,6 +33,7 @@ func TestProductizedCloudMountE2EProof(t *testing.T) {
 
 	cloud := newProductizedCloudMock(t, relay)
 	defer cloud.Close()
+	installFakeAgentRelaySession(t, cloud.URL(), cloud.initialAccessToken, "demo", cloud.workspaceID, cloud.workspaceID)
 
 	var setupOut bytes.Buffer
 	if err := run([]string{
@@ -88,13 +89,13 @@ func TestProductizedCloudMountE2EProof(t *testing.T) {
 		t.Fatalf("expected github and notion integrations, got %v", providers)
 	}
 
-	creds, err := loadCredentials()
-	if err != nil {
-		t.Fatalf("loadCredentials failed: %v", err)
-	}
 	record, err := resolveWorkspaceRecord("demo")
 	if err != nil {
 		t.Fatalf("resolveWorkspaceRecord failed: %v", err)
+	}
+	runtimeToken := cloud.LastRelayfileToken()
+	if runtimeToken == "" {
+		t.Fatalf("expected setup/connect/list to mint a relayfile runtime token")
 	}
 
 	prevLogWriter := log.Writer()
@@ -106,7 +107,7 @@ func TestProductizedCloudMountE2EProof(t *testing.T) {
 
 	disableWebSocket := false
 	syncer, err := mountsync.NewSyncer(
-		mountsync.NewHTTPClient(creds.Server, creds.Token, relay.HTTPClient()),
+		mountsync.NewHTTPClient(relay.URL(), runtimeToken, relay.HTTPClient()),
 		mountsync.SyncerOptions{
 			WorkspaceID: record.ID,
 			RemoteRoot:  "/",
@@ -139,7 +140,7 @@ func TestProductizedCloudMountE2EProof(t *testing.T) {
 			syncer,
 			localDir,
 			record.ID,
-			creds.Server,
+			relay.URL(),
 			500*time.Millisecond,
 			100*time.Millisecond,
 			0,
@@ -200,28 +201,12 @@ func TestProductizedCloudMountE2EProof(t *testing.T) {
 		t.Fatalf("expected github and notion providers in status, got %v", providers)
 	}
 
-	if err := saveCloudCredentials(cloudCredentials{
-		APIURL:                cloud.URL(),
-		AccessToken:           cloud.expiredAccessToken,
-		RefreshToken:          cloud.refreshToken,
-		AccessTokenExpiresAt:  time.Now().Add(-time.Minute).UTC().Format(time.RFC3339),
-		RefreshTokenExpiresAt: time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
-		UpdatedAt:             time.Now().UTC().Format(time.RFC3339),
-	}); err != nil {
-		t.Fatalf("saveCloudCredentials failed: %v", err)
-	}
-
-	currentToken, err := currentRelayToken()
-	if err != nil {
-		t.Fatalf("currentRelayToken failed: %v", err)
-	}
+	installFakeAgentRelaySession(t, cloud.URL(), cloud.refreshedToken, "demo", cloud.workspaceID, cloud.workspaceID)
+	currentToken := runtimeToken
+	joinCountBeforeRefresh := cloud.JoinCount()
 	relay.RejectToken(currentToken)
 	waitForCondition(t, 12*time.Second, "cloud token refresh + workspace rejoin", func() bool {
-		creds, loadErr := loadCredentials()
-		if loadErr != nil {
-			return false
-		}
-		return cloud.RefreshCount() >= 1 && cloud.JoinCount() >= 3 && creds.Token != currentToken
+		return cloud.JoinCount() > joinCountBeforeRefresh && cloud.LastRelayfileToken() != currentToken
 	})
 
 	relay.UpsertFile("/github/repos/acme/api/pulls/42/after-refresh.md", "text/markdown", "# After refresh\n")
@@ -573,11 +558,9 @@ type productizedCloudMock struct {
 	relay              *productizedRelayfileMock
 	workspaceID        string
 	initialAccessToken string
-	expiredAccessToken string
 	refreshedToken     string
-	refreshToken       string
 	joinCount          int
-	refreshCount       int
+	lastRelayfileToken string
 	providers          map[string]string
 }
 
@@ -588,9 +571,7 @@ func newProductizedCloudMock(t *testing.T, relay *productizedRelayfileMock) *pro
 		relay:              relay,
 		workspaceID:        "ws_productized",
 		initialAccessToken: "cld_setup",
-		expiredAccessToken: "cld_expired",
 		refreshedToken:     "cld_refreshed",
-		refreshToken:       "cld_refresh",
 		providers:          map[string]string{},
 	}
 	mock.server = httptest.NewServer(http.HandlerFunc(mock.serveHTTP))
@@ -611,18 +592,16 @@ func (m *productizedCloudMock) JoinCount() int {
 	return m.joinCount
 }
 
-func (m *productizedCloudMock) RefreshCount() int {
+func (m *productizedCloudMock) LastRelayfileToken() string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.refreshCount
+	return m.lastRelayfileToken
 }
 
 func (m *productizedCloudMock) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.URL.Path == "/api/v1/workspaces" && r.Method == http.MethodPost:
 		m.serveCreateWorkspace(w, r)
-	case r.URL.Path == "/api/v1/auth/token/refresh" && r.Method == http.MethodPost:
-		m.serveRefreshCloudToken(w, r)
 	case strings.HasSuffix(r.URL.Path, "/join") && r.Method == http.MethodPost:
 		m.serveJoinWorkspace(w, r)
 	case strings.HasSuffix(r.URL.Path, "/integrations/connect-session") && r.Method == http.MethodPost:
@@ -651,29 +630,6 @@ func (m *productizedCloudMock) serveCreateWorkspace(w http.ResponseWriter, r *ht
 	})
 }
 
-func (m *productizedCloudMock) serveRefreshCloudToken(w http.ResponseWriter, r *http.Request) {
-	if got := bearerToken(r); got != m.expiredAccessToken {
-		m.t.Fatalf("unexpected refresh token auth header: %q", got)
-	}
-	var body cloudTokenRefreshRequest
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		m.t.Fatalf("decode refresh request failed: %v", err)
-	}
-	if body.RefreshToken != m.refreshToken {
-		m.t.Fatalf("unexpected refresh token: %q", body.RefreshToken)
-	}
-	m.mu.Lock()
-	m.refreshCount++
-	m.mu.Unlock()
-	writeMockJSON(w, http.StatusOK, cloudCredentials{
-		APIURL:                m.URL(),
-		AccessToken:           m.refreshedToken,
-		RefreshToken:          m.refreshToken,
-		AccessTokenExpiresAt:  time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
-		RefreshTokenExpiresAt: time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339),
-	})
-}
-
 func (m *productizedCloudMock) serveJoinWorkspace(w http.ResponseWriter, r *http.Request) {
 	got := bearerToken(r)
 	if got != m.initialAccessToken && got != m.refreshedToken {
@@ -682,6 +638,7 @@ func (m *productizedCloudMock) serveJoinWorkspace(w http.ResponseWriter, r *http
 	m.mu.Lock()
 	m.joinCount++
 	token := fmt.Sprintf("rf_token_%d", m.joinCount)
+	m.lastRelayfileToken = token
 	m.mu.Unlock()
 
 	m.relay.ActivateToken(token)
@@ -769,14 +726,6 @@ func syncStateProviders(entries []syncStateProvider) []string {
 	}
 	sort.Strings(out)
 	return out
-}
-
-func currentRelayToken() (string, error) {
-	creds, err := loadCredentials()
-	if err != nil {
-		return "", err
-	}
-	return creds.Token, nil
 }
 
 func waitForCondition(t *testing.T, timeout time.Duration, description string, predicate func() bool) {

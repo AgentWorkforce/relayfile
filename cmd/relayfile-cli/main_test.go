@@ -5,6 +5,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -245,20 +247,31 @@ func TestWorkspaceRequiresSubcommandMentionsJoin(t *testing.T) {
 func TestWorkspaceUseSetsDefaultWorkspace(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)
+	logPath := filepath.Join(t.TempDir(), "agent-relay.log")
+	t.Setenv("AGENT_RELAY_LOG", logPath)
+	installFakeAgentRelay(t, `
+printf '%s\n' "$*" >> "$AGENT_RELAY_LOG"
+if [ "$*" = "workspace switch ws_cloud" ]; then
+  echo "agent-relay workspace switch ok"
+  exit 0
+fi
+echo "unexpected args: $*" >&2
+exit 2
+`)
 
 	var stdout bytes.Buffer
 	if err := run([]string{"workspace", "use", "ws_cloud"}, strings.NewReader(""), &stdout, &stdout); err != nil {
 		t.Fatalf("run workspace use failed: %v", err)
 	}
 
-	catalog, err := loadWorkspaceCatalog()
+	logBytes, err := os.ReadFile(logPath)
 	if err != nil {
-		t.Fatalf("loadWorkspaceCatalog failed: %v", err)
+		t.Fatalf("read fake agent-relay log failed: %v", err)
 	}
-	if catalog.Default != "ws_cloud" {
-		t.Fatalf("expected default workspace ws_cloud, got %q", catalog.Default)
+	if strings.TrimSpace(string(logBytes)) != "workspace switch ws_cloud" {
+		t.Fatalf("expected agent-relay workspace switch call, got %q", string(logBytes))
 	}
-	if got := stdout.String(); !strings.Contains(got, "Default workspace set to ws_cloud") {
+	if got := stdout.String(); !strings.Contains(got, "Relayfile uses the active agent-relay workspace") {
 		t.Fatalf("unexpected workspace use output: %q", got)
 	}
 }
@@ -266,13 +279,6 @@ func TestWorkspaceUseSetsDefaultWorkspace(t *testing.T) {
 func TestWorkspaceJoinMintsReadOnlyCloudToken(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)
-
-	if err := saveCloudCredentials(cloudCredentials{
-		APIURL:      "http://placeholder.test",
-		AccessToken: "cld_access",
-	}); err != nil {
-		t.Fatalf("saveCloudCredentials failed: %v", err)
-	}
 
 	var seenJoin bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -294,14 +300,7 @@ func TestWorkspaceJoinMintsReadOnlyCloudToken(t *testing.T) {
 		_, _ = w.Write([]byte(`{"workspaceId":"ws_cloud","token":"rf_read","relayfileUrl":"https://relayfile.test"}`))
 	}))
 	defer server.Close()
-	cloudCreds, err := loadCloudCredentials()
-	if err != nil {
-		t.Fatalf("loadCloudCredentials failed: %v", err)
-	}
-	cloudCreds.APIURL = server.URL
-	if err := saveCloudCredentials(cloudCreds); err != nil {
-		t.Fatalf("saveCloudCredentials(server URL) failed: %v", err)
-	}
+	installFakeAgentRelaySession(t, server.URL, "cld_access", "cloud-prod", "ws_cloud", "ws_cloud")
 
 	var stdout bytes.Buffer
 	if err := run([]string{"workspace", "join", "ws_cloud", "--name", "cloud-prod", "--cloud-api-url", server.URL}, strings.NewReader(""), &stdout, &stdout); err != nil {
@@ -310,12 +309,8 @@ func TestWorkspaceJoinMintsReadOnlyCloudToken(t *testing.T) {
 	if !seenJoin {
 		t.Fatalf("expected cloud join call")
 	}
-	creds, err := loadCredentials()
-	if err != nil {
-		t.Fatalf("loadCredentials failed: %v", err)
-	}
-	if creds.Token != "rf_read" || creds.Server != "https://relayfile.test" {
-		t.Fatalf("unexpected persisted credentials: %#v", creds)
+	if _, err := os.Stat(credentialsPath()); !os.IsNotExist(err) {
+		t.Fatalf("expected workspace join not to persist relayfile token credentials, got err=%v", err)
 	}
 	record, ok := workspaceRecordByID("ws_cloud")
 	if !ok {
@@ -333,12 +328,6 @@ func TestTreeJoinsCloudWorkspaceWithoutServerCredentials(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)
 
-	if err := saveCloudCredentials(cloudCredentials{
-		APIURL:      "http://placeholder.test",
-		AccessToken: "cld_access",
-	}); err != nil {
-		t.Fatalf("saveCloudCredentials failed: %v", err)
-	}
 	if _, err := upsertWorkspaceDetails(workspaceRecord{
 		Name:      "cloud-prod",
 		ID:        "ws_cloud",
@@ -381,14 +370,7 @@ func TestTreeJoinsCloudWorkspaceWithoutServerCredentials(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	cloudCreds, err := loadCloudCredentials()
-	if err != nil {
-		t.Fatalf("loadCloudCredentials failed: %v", err)
-	}
-	cloudCreds.APIURL = server.URL
-	if err := saveCloudCredentials(cloudCreds); err != nil {
-		t.Fatalf("saveCloudCredentials(server URL) failed: %v", err)
-	}
+	installFakeAgentRelaySession(t, server.URL, "cld_access", "cloud-prod", "ws_cloud", "rw_cloud")
 
 	var stdout bytes.Buffer
 	if err := run([]string{"tree", "ws_cloud", "/google-mail"}, strings.NewReader(""), &stdout, &stdout); err != nil {
@@ -473,14 +455,7 @@ func TestTreeRefreshesExpiredCloudWorkspaceTokenAndRetriesCanonicalWorkspace(t *
 	if err := saveCredentials(creds); err != nil {
 		t.Fatalf("saveCredentials(server URL) failed: %v", err)
 	}
-	cloudCreds, err := loadCloudCredentials()
-	if err != nil {
-		t.Fatalf("loadCloudCredentials failed: %v", err)
-	}
-	cloudCreds.APIURL = server.URL
-	if err := saveCloudCredentials(cloudCreds); err != nil {
-		t.Fatalf("saveCloudCredentials(server URL) failed: %v", err)
-	}
+	installFakeAgentRelaySession(t, server.URL, "cld_access", "cloud-prod", "ws_cloud", "rw_cloud")
 
 	var stdout bytes.Buffer
 	if err := run([]string{"tree", "cloud-prod", "/google-mail"}, strings.NewReader(""), &stdout, &stdout); err != nil {
@@ -524,12 +499,6 @@ func TestReadRefreshesCloudWorkspaceTokenAfterUnauthorized(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)
 
-	if err := saveCloudCredentials(cloudCredentials{
-		APIURL:      "http://placeholder.test",
-		AccessToken: "cld_access",
-	}); err != nil {
-		t.Fatalf("saveCloudCredentials failed: %v", err)
-	}
 	oldToken := testJWTWithWorkspaceAndAgent("ws_cloud", "old")
 	if err := saveCredentials(credentials{
 		Server: "http://placeholder.test",
@@ -602,14 +571,7 @@ func TestReadRefreshesCloudWorkspaceTokenAfterUnauthorized(t *testing.T) {
 	if err := saveCredentials(creds); err != nil {
 		t.Fatalf("saveCredentials(server URL) failed: %v", err)
 	}
-	cloudCreds, err := loadCloudCredentials()
-	if err != nil {
-		t.Fatalf("loadCloudCredentials failed: %v", err)
-	}
-	cloudCreds.APIURL = server.URL
-	if err := saveCloudCredentials(cloudCreds); err != nil {
-		t.Fatalf("saveCloudCredentials(server URL) failed: %v", err)
-	}
+	installFakeAgentRelaySession(t, server.URL, "cld_access", "cloud-prod", "ws_cloud", "rw_cloud")
 
 	var stdout bytes.Buffer
 	if err := run([]string{"read", "cloud-prod", "/google-mail/msg.json"}, strings.NewReader(""), &stdout, &stdout); err != nil {
@@ -1150,12 +1112,8 @@ func TestSetupCreatesWorkspaceConnectsIntegrationAndSkipsMount(t *testing.T) {
 		}
 	}
 
-	creds, err := loadCredentials()
-	if err != nil {
-		t.Fatalf("loadCredentials failed: %v", err)
-	}
-	if creds.Server != "https://relayfile.test" || creds.Token != "rf_join" {
-		t.Fatalf("unexpected saved credentials: %#v", creds)
+	if _, err := os.Stat(credentialsPath()); !os.IsNotExist(err) {
+		t.Fatalf("expected setup not to persist relayfile token credentials, got err=%v", err)
 	}
 	catalog, err := loadWorkspaceCatalog()
 	if err != nil {
@@ -1256,33 +1214,11 @@ func TestIntegrationConnectRefreshesCloudAccessTokenAndReusesWorkspace(t *testin
 	}); err != nil {
 		t.Fatalf("upsertWorkspaceDetails failed: %v", err)
 	}
-	if err := saveCloudCredentials(cloudCredentials{
-		APIURL:               "https://stale.example.test",
-		AccessToken:          "cld_old",
-		RefreshToken:         "refresh_123",
-		AccessTokenExpiresAt: time.Now().Add(-time.Minute).UTC().Format(time.RFC3339),
-	}); err != nil {
-		t.Fatalf("saveCloudCredentials failed: %v", err)
-	}
-
 	seen := map[string]bool{}
 	var server *httptest.Server
 	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
-		case "/api/v1/auth/token/refresh":
-			seen["refresh"] = true
-			if got := r.Header.Get("Authorization"); got != "Bearer cld_old" {
-				t.Fatalf("unexpected refresh Authorization: %q", got)
-			}
-			var body cloudTokenRefreshRequest
-			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-				t.Fatalf("decode refresh body failed: %v", err)
-			}
-			if body.RefreshToken != "refresh_123" {
-				t.Fatalf("unexpected refresh token: %q", body.RefreshToken)
-			}
-			_, _ = w.Write([]byte(`{"apiUrl":"` + server.URL + `","accessToken":"cld_new","refreshToken":"refresh_123","accessTokenExpiresAt":"2030-05-01T00:00:00Z"}`))
 		case "/api/v1/workspaces/ws_123/join":
 			seen["join"] = true
 			if got := r.Header.Get("Authorization"); got != "Bearer cld_new" {
@@ -1319,18 +1255,10 @@ func TestIntegrationConnectRefreshesCloudAccessTokenAndReusesWorkspace(t *testin
 		}
 	}))
 	defer server.Close()
-
-	creds, err := loadCloudCredentials()
-	if err != nil {
-		t.Fatalf("loadCloudCredentials failed: %v", err)
-	}
-	creds.APIURL = server.URL
-	if err := saveCloudCredentials(creds); err != nil {
-		t.Fatalf("saveCloudCredentials(update) failed: %v", err)
-	}
+	installFakeAgentRelaySession(t, server.URL, "cld_new", "demo", "ws_123", "ws_123")
 
 	var stdout bytes.Buffer
-	err = run([]string{
+	err := run([]string{
 		"integration", "connect", "notion",
 		"--workspace", "demo",
 		"--cloud-api-url", server.URL,
@@ -1341,7 +1269,7 @@ func TestIntegrationConnectRefreshesCloudAccessTokenAndReusesWorkspace(t *testin
 	if err != nil {
 		t.Fatalf("run integration connect failed: %v\noutput:\n%s", err, stdout.String())
 	}
-	for _, key := range []string{"refresh", "join", "connect", "status", "sync"} {
+	for _, key := range []string{"join", "connect", "status", "sync"} {
 		if !seen[key] {
 			t.Fatalf("expected %s request", key)
 		}
@@ -1483,7 +1411,7 @@ func TestStatusIncludesLocalMirrorAndDaemonCounts(t *testing.T) {
 	}
 }
 
-func TestStatusRendersExpiredCloudSessionAuthLine(t *testing.T) {
+func TestStatusRendersUnavailableAgentRelaySessionAuthLine(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)
 
@@ -1509,22 +1437,17 @@ func TestStatusRendersExpiredCloudSessionAuthLine(t *testing.T) {
 	if err := saveCredentials(credentials{Server: server.URL, Token: "token"}); err != nil {
 		t.Fatalf("saveCredentials failed: %v", err)
 	}
-	if err := saveCloudCredentials(cloudCredentials{
-		APIURL:                "https://cloud.relayfile.test",
-		AccessToken:           "cloud_token",
-		AccessTokenExpiresAt:  time.Now().UTC().Add(-time.Minute).Format(time.RFC3339),
-		RefreshToken:          "refresh_token",
-		RefreshTokenExpiresAt: time.Now().UTC().Add(-time.Minute).Format(time.RFC3339),
-	}); err != nil {
-		t.Fatalf("saveCloudCredentials failed: %v", err)
-	}
+	installFakeAgentRelay(t, `
+echo "session expired" >&2
+exit 1
+`)
 
 	var stdout bytes.Buffer
 	if err := run([]string{"status", "demo"}, strings.NewReader(""), &stdout, &stdout); err != nil {
 		t.Fatalf("run status failed: %v", err)
 	}
-	if got := stdout.String(); !strings.Contains(got, "auth: cloud session expired - run 'relayfile login'") {
-		t.Fatalf("expected expired auth line, got %q", got)
+	if got := stdout.String(); !strings.Contains(got, "auth: agent-relay session unavailable - run 'agent-relay login'") {
+		t.Fatalf("expected agent-relay unavailable auth line, got %q", got)
 	}
 }
 
@@ -1719,7 +1642,7 @@ func TestMountRequiresLocalDirWhenWorkspaceHasNoRecordedMirror(t *testing.T) {
 		t.Fatalf("saveCredentials failed: %v", err)
 	}
 
-	err := run([]string{"mount", "demo", "--once", "--websocket=false"}, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
+	err := run([]string{"mount", "demo", "--token", testJWTWithWorkspace("ws_demo"), "--once", "--websocket=false"}, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
 	if err == nil {
 		t.Fatalf("expected mount without LOCAL_DIR to fail when no localDir is recorded")
 	}
@@ -1768,7 +1691,7 @@ func TestMountUsesRecordedLocalDirWhenOmitted(t *testing.T) {
 		t.Fatalf("saveCredentials failed: %v", err)
 	}
 
-	if err := run([]string{"mount", "demo", "--once", "--websocket=false"}, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
+	if err := run([]string{"mount", "demo", "--server", server.URL, "--token", testJWTWithWorkspace("ws_demo"), "--once", "--websocket=false"}, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
 		t.Fatalf("run mount failed: %v", err)
 	}
 	data, err := os.ReadFile(filepath.Join(localDir, "notion", "Docs", "A.md"))
@@ -1777,6 +1700,58 @@ func TestMountUsesRecordedLocalDirWhenOmitted(t *testing.T) {
 	}
 	if string(data) != "# A" {
 		t.Fatalf("unexpected mirrored content: %q", data)
+	}
+}
+
+func TestMountWithoutTokenRejectsWorkspaceOutsideAgentRelayActive(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	localDir := t.TempDir()
+	now := time.Now().UTC().Format(time.RFC3339)
+	if err := saveWorkspaceCatalog(workspaceCatalog{
+		Default: "stale",
+		Workspaces: []workspaceRecord{
+			{
+				Name:       "active",
+				ID:         "rw_active",
+				LocalDir:   localDir,
+				CreatedAt:  now,
+				LastUsedAt: now,
+			},
+			{
+				Name:       "stale",
+				ID:         "rw_stale",
+				LocalDir:   localDir,
+				CreatedAt:  now,
+				LastUsedAt: now,
+			},
+		},
+	}); err != nil {
+		t.Fatalf("saveWorkspaceCatalog failed: %v", err)
+	}
+
+	joinCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/workspaces/rw_active/join" {
+			joinCalls++
+			_, _ = w.Write([]byte(`{"workspaceId":"rw_active","token":"` + testJWTWithWorkspace("rw_active") + `","relayfileUrl":"` + r.Host + `"}`))
+			return
+		}
+		t.Fatalf("unexpected path: %s", r.URL.Path)
+	}))
+	defer server.Close()
+	installFakeAgentRelaySession(t, server.URL, "cld_access", "active", "rw_active", "rw_active")
+
+	err := run([]string{"mount", "stale", localDir, "--once", "--websocket=false"}, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
+	if err == nil {
+		t.Fatalf("expected mount to reject stale workspace")
+	}
+	if !strings.Contains(err.Error(), "uses active agent-relay workspace active (rw_active)") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if joinCalls != 0 {
+		t.Fatalf("expected no runtime token mint for mismatched workspace, got %d calls", joinCalls)
 	}
 }
 
@@ -1819,7 +1794,7 @@ func TestMountUsesLegacyRecordedLocalDirWhenOmitted(t *testing.T) {
 		t.Fatalf("saveCredentials failed: %v", err)
 	}
 
-	if err := run([]string{"mount", "demo", "--once", "--websocket=false"}, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
+	if err := run([]string{"mount", "demo", "--server", server.URL, "--token", testJWTWithWorkspace("demo"), "--once", "--websocket=false"}, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
 		t.Fatalf("run mount failed: %v", err)
 	}
 	data, err := os.ReadFile(filepath.Join(localDir, "notion", "Docs", "Legacy.md"))
@@ -1878,7 +1853,7 @@ func TestMountRefusesExplicitLocalDirThatRehomesRecordedMirror(t *testing.T) {
 		t.Fatalf("saveCredentials failed: %v", err)
 	}
 
-	err := run([]string{"mount", "demo", otherDir, "--once", "--websocket=false"}, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
+	err := run([]string{"mount", "demo", otherDir, "--token", testJWTWithWorkspace("ws_demo"), "--once", "--websocket=false"}, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
 	if err == nil {
 		t.Fatalf("expected mount to refuse re-homing a recorded mirror")
 	}
@@ -1922,7 +1897,7 @@ func TestMountRehomeRefusesRunningRecordedDaemon(t *testing.T) {
 		t.Fatalf("saveCredentials failed: %v", err)
 	}
 
-	err := run([]string{"mount", "demo", otherDir, "--rehome", "--once", "--websocket=false"}, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
+	err := run([]string{"mount", "demo", otherDir, "--token", testJWTWithWorkspace("ws_demo"), "--rehome", "--once", "--websocket=false"}, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
 	if err == nil {
 		t.Fatalf("expected rehome to refuse while old mirror has a running daemon")
 	}
@@ -1970,7 +1945,7 @@ func TestMountRehomeRefusesUnverifiedRecordedDaemon(t *testing.T) {
 		t.Fatalf("saveCredentials failed: %v", err)
 	}
 
-	err := run([]string{"mount", "demo", otherDir, "--rehome", "--once", "--websocket=false"}, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
+	err := run([]string{"mount", "demo", otherDir, "--token", testJWTWithWorkspace("ws_demo"), "--rehome", "--once", "--websocket=false"}, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
 	if err == nil {
 		t.Fatalf("expected rehome to refuse unverified mount state")
 	}
@@ -2026,7 +2001,7 @@ func TestMountRehomeAllowsExplicitMoveAndPersistsLocalDir(t *testing.T) {
 		t.Fatalf("saveCredentials failed: %v", err)
 	}
 
-	if err := run([]string{"mount", "demo", otherDir, "--rehome", "--once", "--websocket=false"}, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
+	if err := run([]string{"mount", "demo", otherDir, "--server", server.URL, "--token", testJWTWithWorkspace("ws_demo"), "--rehome", "--once", "--websocket=false"}, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
 		t.Fatalf("run mount --rehome failed: %v", err)
 	}
 	data, err := os.ReadFile(filepath.Join(otherDir, "notion", "Docs", "Rehomed.md"))
@@ -2083,12 +2058,6 @@ func TestMountOnceRejoinsWorkspaceTokenAfterUnauthorized(t *testing.T) {
 	localDir := t.TempDir()
 	oldToken := testJWTWithWorkspaceAndAgent("ws_refresh", "old")
 	newToken := testJWTWithWorkspaceAndAgent("ws_refresh", "new")
-	if err := saveCloudCredentials(cloudCredentials{
-		APIURL:      defaultCloudAPIURL,
-		AccessToken: "cld_access",
-	}); err != nil {
-		t.Fatalf("saveCloudCredentials failed: %v", err)
-	}
 	if _, err := upsertWorkspaceDetails(workspaceRecord{
 		Name:       "demo",
 		ID:         "ws_refresh",
@@ -2143,15 +2112,7 @@ func TestMountOnceRejoinsWorkspaceTokenAfterUnauthorized(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-
-	cloudCreds, err := loadCloudCredentials()
-	if err != nil {
-		t.Fatalf("loadCloudCredentials failed: %v", err)
-	}
-	cloudCreds.APIURL = server.URL
-	if err := saveCloudCredentials(cloudCreds); err != nil {
-		t.Fatalf("saveCloudCredentials(update) failed: %v", err)
-	}
+	installFakeAgentRelaySession(t, server.URL, "cld_access", "demo", "ws_refresh", "ws_refresh")
 
 	if err := run([]string{
 		"mount", "ws_refresh", localDir,
@@ -2165,12 +2126,8 @@ func TestMountOnceRejoinsWorkspaceTokenAfterUnauthorized(t *testing.T) {
 	if joinCalls != 1 || exportCalls != 2 {
 		t.Fatalf("expected 1 join and 2 export calls, got join=%d events=%d export=%d", joinCalls, eventCalls, exportCalls)
 	}
-	creds, err := loadCredentials()
-	if err != nil {
-		t.Fatalf("loadCredentials failed: %v", err)
-	}
-	if creds.Token != newToken {
-		t.Fatalf("expected refreshed token to be persisted, got %q", creds.Token)
+	if _, err := os.Stat(credentialsPath()); !os.IsNotExist(err) {
+		t.Fatalf("expected refreshed relayfile token not to be persisted, got err=%v", err)
 	}
 }
 
@@ -2182,6 +2139,55 @@ func clearRelayfileEnv(t *testing.T) {
 	t.Setenv("RELAYFILE_WORKSPACE", "")
 	t.Setenv("RELAYFILE_CLOUD_API_URL", "")
 	t.Setenv("RELAYFILE_CLOUD_TOKEN", "")
+	t.Setenv("AGENT_RELAY_BIN", "")
+}
+
+func installFakeAgentRelay(t *testing.T, scriptBody string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "agent-relay")
+	script := `#!/bin/sh
+set -eu
+if [ "$*" = "--version" ]; then
+  echo "8.7.0"
+  exit 0
+fi
+if [ "$*" = "cloud session --help" ]; then
+  echo "Usage: agent-relay cloud session [options]"
+  echo "  --json"
+  exit 0
+fi
+if [ "$*" = "workspace active --help" ]; then
+  echo "Usage: agent-relay workspace active [options]"
+  echo "  --json"
+  exit 0
+fi
+if [ "$*" = "workspace switch --help" ]; then
+  echo "Usage: agent-relay workspace switch [options] <name>"
+  exit 0
+fi
+` + scriptBody + "\n"
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake agent-relay failed: %v", err)
+	}
+	t.Setenv("AGENT_RELAY_BIN", path)
+	return path
+}
+
+func installFakeAgentRelaySession(t *testing.T, apiURL, accessToken, name, cloudWorkspaceID, relayfileWorkspaceID string) {
+	t.Helper()
+	body := fmt.Sprintf(`
+if [ "$*" = "cloud session --json" ]; then
+  echo '{"apiUrl":%q,"accessToken":%q}'
+  exit 0
+fi
+if [ "$*" = "workspace active --json" ]; then
+  echo '{"name":%q,"cloudWorkspaceId":%q,"relayfileWorkspaceId":%q}'
+  exit 0
+fi
+echo "unexpected args: $*" >&2
+exit 2
+`, apiURL, accessToken, name, cloudWorkspaceID, relayfileWorkspaceID)
+	installFakeAgentRelay(t, body)
 }
 
 func testJWTWithWorkspace(workspaceID string) string {
@@ -2192,126 +2198,6 @@ func testJWTWithWorkspaceAndAgent(workspaceID, agentName string) string {
 	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none","typ":"JWT"}`))
 	payload := base64.RawURLEncoding.EncodeToString([]byte(`{"workspace_id":"` + workspaceID + `","agent_name":"` + agentName + `","aud":"relayfile"}`))
 	return header + "." + payload + ".sig"
-}
-
-func TestRefreshCloudCredentialsReturnsSentinelOnInvalidGrant(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	clearRelayfileEnv(t)
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/v1/auth/token/refresh" {
-			t.Fatalf("unexpected path: %s", r.URL.Path)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusForbidden)
-		_, _ = w.Write([]byte(`{"code":"invalid_grant","message":"refresh token expired"}`))
-	}))
-	defer server.Close()
-
-	_, err := refreshCloudCredentials(cloudCredentials{
-		APIURL:       server.URL,
-		AccessToken:  "cld_old",
-		RefreshToken: "rt_expired",
-	})
-	if !errors.Is(err, ErrCloudRefreshExpired) {
-		t.Fatalf("expected ErrCloudRefreshExpired, got: %v", err)
-	}
-}
-
-func TestRefreshCloudCredentialsRetriesWithReloadedDiskTokenOnAuthRejection(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	clearRelayfileEnv(t)
-
-	var refreshTokens []string
-	var server *httptest.Server
-	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/v1/auth/token/refresh" {
-			t.Fatalf("unexpected path: %s", r.URL.Path)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		var body cloudTokenRefreshRequest
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			t.Fatalf("decode refresh body failed: %v", err)
-		}
-		refreshTokens = append(refreshTokens, body.RefreshToken)
-		switch body.RefreshToken {
-		case "rt_stale":
-			w.WriteHeader(http.StatusForbidden)
-			_, _ = w.Write([]byte(`{"code":"invalid_grant","message":"Invalid or expired refresh token"}`))
-		case "rt_disk":
-			_, _ = w.Write([]byte(`{"apiUrl":"` + server.URL + `","accessToken":"cld_new","refreshToken":"rt_new","accessTokenExpiresAt":"2030-05-01T00:00:00Z","refreshTokenExpiresAt":"2030-06-01T00:00:00Z"}`))
-		default:
-			t.Fatalf("unexpected refresh token: %q", body.RefreshToken)
-		}
-	}))
-	defer server.Close()
-
-	if err := saveCloudCredentials(cloudCredentials{
-		APIURL:               server.URL,
-		AccessToken:          "cld_disk_old",
-		RefreshToken:         "rt_disk",
-		AccessTokenExpiresAt: time.Now().Add(-time.Minute).UTC().Format(time.RFC3339),
-	}); err != nil {
-		t.Fatalf("saveCloudCredentials failed: %v", err)
-	}
-
-	refreshed, err := refreshCloudCredentials(cloudCredentials{
-		APIURL:               server.URL,
-		AccessToken:          "cld_stale",
-		RefreshToken:         "rt_stale",
-		AccessTokenExpiresAt: time.Now().Add(-time.Minute).UTC().Format(time.RFC3339),
-	})
-	if err != nil {
-		t.Fatalf("refreshCloudCredentials failed: %v", err)
-	}
-	if refreshed.AccessToken != "cld_new" || refreshed.RefreshToken != "rt_new" {
-		t.Fatalf("unexpected refreshed credentials: %#v", refreshed)
-	}
-	if got := strings.Join(refreshTokens, ","); got != "rt_stale,rt_disk" {
-		t.Fatalf("unexpected refresh token attempts: %s", got)
-	}
-
-	diskCreds, err := loadCloudCredentials()
-	if err != nil {
-		t.Fatalf("loadCloudCredentials failed: %v", err)
-	}
-	if diskCreds.AccessToken != "cld_new" || diskCreds.RefreshToken != "rt_new" {
-		t.Fatalf("expected refreshed credentials on disk, got: %#v", diskCreds)
-	}
-}
-
-func TestRefreshCloudCredentialsReturnsSentinelOnUnauthorized(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	clearRelayfileEnv(t)
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusUnauthorized)
-		_, _ = w.Write([]byte(`{"code":"unauthorized","message":"unauthenticated"}`))
-	}))
-	defer server.Close()
-
-	_, err := refreshCloudCredentials(cloudCredentials{
-		APIURL:       server.URL,
-		AccessToken:  "cld_old",
-		RefreshToken: "rt_expired",
-	})
-	if !errors.Is(err, ErrCloudRefreshExpired) {
-		t.Fatalf("expected ErrCloudRefreshExpired, got: %v", err)
-	}
-}
-
-func TestRefreshCloudCredentialsReturnsSentinelWithoutRefreshToken(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	clearRelayfileEnv(t)
-
-	_, err := refreshCloudCredentials(cloudCredentials{
-		APIURL:      "https://cloud.example.test",
-		AccessToken: "cld_old",
-	})
-	if !errors.Is(err, ErrCloudRefreshExpired) {
-		t.Fatalf("expected ErrCloudRefreshExpired, got: %v", err)
-	}
 }
 
 func TestStatusSurfacesDegradedStallReason(t *testing.T) {
@@ -2334,7 +2220,7 @@ func TestStatusSurfacesDegradedStallReason(t *testing.T) {
 	persisted := syncStateFile{
 		WorkspaceID: "ws_demo",
 		Mode:        defaultMountMode,
-		StallReason: "cloud session expired — run 'relayfile login' to refresh",
+		StallReason: "cloud session expired — run 'agent-relay login' to refresh",
 	}
 	if err := writeMirrorStateFile(localDir, persisted); err != nil {
 		t.Fatalf("writeMirrorStateFile failed: %v", err)
@@ -2358,7 +2244,7 @@ func TestStatusSurfacesDegradedStallReason(t *testing.T) {
 	if !strings.Contains(got, "stall: cloud session expired") {
 		t.Fatalf("expected degraded stall reason in status output, got: %q", got)
 	}
-	if !strings.Contains(got, "relayfile login") {
+	if !strings.Contains(got, "agent-relay login") {
 		t.Fatalf("expected recovery hint in status output, got: %q", got)
 	}
 }
@@ -3139,13 +3025,7 @@ func TestOpsReplayPostsToCloudAndRemovesLocalRecord(t *testing.T) {
 	}))
 	defer server.Close()
 
-	if err := saveCloudCredentials(cloudCredentials{
-		APIURL:               server.URL,
-		AccessToken:          "cld_token",
-		AccessTokenExpiresAt: time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
-	}); err != nil {
-		t.Fatalf("saveCloudCredentials failed: %v", err)
-	}
+	installFakeAgentRelaySession(t, server.URL, "cld_token", "demo", "ws_demo", "ws_demo")
 
 	var stdout bytes.Buffer
 	if err := run([]string{
@@ -3213,311 +3093,130 @@ func TestLoginWithExplicitTokenPersistsServerCreds(t *testing.T) {
 	}
 }
 
-// TestLoginDefaultsToCloudBrowserFlow covers the new default behavior: when
-// no --token is provided, runLogin runs the cloud browser flow. We use
-// --cloud-token to skip the actual browser handshake — ensureCloudCredentials
-// short-circuits to writing cloud credentials when an explicit token is set.
-func TestLoginDefaultsToCloudBrowserFlow(t *testing.T) {
+// TestLoginDelegatesToAgentRelay covers the unified auth behavior: relayfile
+// login no longer writes its own cloud credential store; it delegates to the
+// canonical agent-relay login command.
+func TestLoginDelegatesToAgentRelay(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)
-	if err := saveCredentials(credentials{
-		Server: "https://relayfile-old.test",
-		Token:  "stale_server_token",
+	if err := saveCloudCredentials(cloudCredentials{
+		APIURL:      "https://cloud.relayfile.test",
+		AccessToken: "stale_cloud_token",
 	}); err != nil {
-		t.Fatalf("saveCredentials failed: %v", err)
+		t.Fatalf("saveCloudCredentials failed: %v", err)
 	}
+	logPath := filepath.Join(t.TempDir(), "agent-relay.log")
+	t.Setenv("AGENT_RELAY_LOG", logPath)
+	installFakeAgentRelay(t, `
+printf '%s\n' "$*" >> "$AGENT_RELAY_LOG"
+if [ "$*" = "login --no-open" ]; then
+  echo "agent-relay login ok"
+  exit 0
+fi
+echo "unexpected args: $*" >&2
+exit 2
+`)
 
 	var stdout bytes.Buffer
 	if err := run([]string{
 		"login",
-		"--cloud-api-url", "https://cloud.relayfile.test",
-		"--cloud-token", "cld_browser_token",
+		"--no-open",
 	}, strings.NewReader(""), &stdout, &stdout); err != nil {
 		t.Fatalf("run login failed: %v\noutput:\n%s", err, stdout.String())
 	}
 
 	got := stdout.String()
-	if !strings.Contains(got, "Signed in to Relayfile Cloud") {
-		t.Fatalf("expected cloud sign-in confirmation, got %q", got)
+	if !strings.Contains(got, "agent-relay login ok") {
+		t.Fatalf("expected delegated agent-relay output, got %q", got)
 	}
-	creds, err := loadCloudCredentials()
+	if !strings.Contains(got, "Relayfile now uses the active agent-relay cloud session and workspace.") {
+		t.Fatalf("expected relayfile canonical-session note, got %q", got)
+	}
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read fake agent-relay log failed: %v", err)
+	}
+	if strings.TrimSpace(string(logBytes)) != "login --no-open" {
+		t.Fatalf("expected agent-relay login --no-open, got %q", string(logBytes))
+	}
+	if _, err := os.Stat(cloudCredentialsPath()); !os.IsNotExist(err) {
+		t.Fatalf("expected stale relayfile cloud credentials removed, got err=%v", err)
+	}
+}
+
+func TestEnsureCloudCredentialsUsesAgentRelaySession(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+	if err := saveCloudCredentials(cloudCredentials{
+		APIURL:      "https://stale-cloud.test",
+		AccessToken: "stale_cloud_token",
+	}); err != nil {
+		t.Fatalf("saveCloudCredentials failed: %v", err)
+	}
+	installFakeAgentRelay(t, `
+if [ "$*" = "cloud session --json" ]; then
+  echo '{"apiUrl":"https://relay-cloud.test","accessToken":"agent_cloud_token"}'
+  exit 0
+fi
+echo "unexpected args: $*" >&2
+exit 2
+`)
+
+	creds, err := ensureCloudCredentials("", "", 0, false, io.Discard)
+	if err != nil {
+		t.Fatalf("ensureCloudCredentials failed: %v", err)
+	}
+	if creds.APIURL != "https://relay-cloud.test" {
+		t.Fatalf("expected agent-relay APIURL, got %q", creds.APIURL)
+	}
+	if creds.AccessToken != "agent_cloud_token" {
+		t.Fatalf("expected agent-relay access token, got %q", creds.AccessToken)
+	}
+	stale, err := loadCloudCredentials()
 	if err != nil {
 		t.Fatalf("loadCloudCredentials failed: %v", err)
 	}
-	if creds.AccessToken != "cld_browser_token" {
-		t.Fatalf("expected stored cloud access token, got %q", creds.AccessToken)
-	}
-	if creds.APIURL != "https://cloud.relayfile.test" {
-		t.Fatalf("expected APIURL stored, got %q", creds.APIURL)
-	}
-	if _, err := os.Stat(credentialsPath()); !os.IsNotExist(err) {
-		t.Fatalf("expected stale server credentials removed, got err=%v", err)
+	if stale.AccessToken != "stale_cloud_token" {
+		t.Fatalf("expected relayfile cloud credential file to be ignored and left untouched, got %q", stale.AccessToken)
 	}
 }
 
-// TestLoginRefreshesWorkspaceTokenForDefaultWorkspace covers the fix for
-// the bug where `relayfile login` only refreshed cloud-credentials.json
-// even when a workspace was already registered locally. After login, the
-// data-plane JWT in credentials.json should also be refreshed via the
-// cloud's workspace join endpoint.
-func TestLoginRefreshesWorkspaceTokenForDefaultWorkspace(t *testing.T) {
+func TestEnsureCloudCredentialsRejectsStaleAgentRelayBeforeSessionCommand(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)
+	marker := filepath.Join(t.TempDir(), "session-called")
+	path := filepath.Join(t.TempDir(), "agent-relay")
+	script := fmt.Sprintf(`#!/bin/sh
+set -eu
+if [ "$*" = "--version" ]; then
+  echo "8.3.7"
+  exit 0
+fi
+if [ "$*" = "cloud session --json" ]; then
+  touch %q
+  echo '{"apiUrl":"https://relay-cloud.test","accessToken":"agent_cloud_token"}'
+  exit 0
+fi
+echo "unexpected args: $*" >&2
+exit 2
+`, marker)
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake stale agent-relay failed: %v", err)
+	}
+	t.Setenv("AGENT_RELAY_BIN", path)
 
-	seen := map[string]bool{}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/api/v1/workspaces/ws_demo/join":
-			seen["join"] = true
-			if r.Method != http.MethodPost {
-				t.Fatalf("expected join POST, got %s", r.Method)
-			}
-			if got := r.Header.Get("Authorization"); got != "Bearer cld_browser_token" {
-				t.Fatalf("unexpected join Authorization: %q", got)
-			}
-			_, _ = w.Write([]byte(`{"workspaceId":"ws_demo","token":"rf_refreshed","relayfileUrl":"https://relayfile.test","wsUrl":"wss://relayfile.test/ws","relaycastApiKey":"rc_test"}`))
-		default:
-			t.Fatalf("unexpected path: %s", r.URL.Path)
-		}
-	}))
-	defer server.Close()
-
-	if _, err := upsertWorkspaceDetails(workspaceRecord{
-		Name: "demo",
-		ID:   "ws_demo",
-	}); err != nil {
-		t.Fatalf("upsertWorkspaceDetails failed: %v", err)
-	}
-	if _, err := setDefaultWorkspace("demo"); err != nil {
-		t.Fatalf("setDefaultWorkspace failed: %v", err)
-	}
-
-	var stdout bytes.Buffer
-	if err := run([]string{
-		"login",
-		"--cloud-api-url", server.URL,
-		"--cloud-token", "cld_browser_token",
-	}, strings.NewReader(""), &stdout, &stdout); err != nil {
-		t.Fatalf("run login failed: %v\noutput:\n%s", err, stdout.String())
-	}
-
-	if !seen["join"] {
-		t.Fatalf("expected /workspaces/ws_demo/join request, none seen. output:\n%s", stdout.String())
-	}
-	got := stdout.String()
-	if !strings.Contains(got, "Refreshed workspace token for demo") {
-		t.Fatalf("expected refresh confirmation, got %q", got)
-	}
-	creds, err := loadCredentials()
-	if err != nil {
-		t.Fatalf("loadCredentials failed: %v", err)
-	}
-	if creds.Token != "rf_refreshed" {
-		t.Fatalf("expected refreshed workspace token, got %q", creds.Token)
-	}
-	if creds.Server != "https://relayfile.test" {
-		t.Fatalf("expected refreshed server URL, got %q", creds.Server)
-	}
-	if strings.TrimSpace(creds.UpdatedAt) == "" {
-		t.Fatalf("expected credentials updatedAt to be set")
-	}
-	cloud, err := loadCloudCredentials()
-	if err != nil {
-		t.Fatalf("loadCloudCredentials failed: %v", err)
-	}
-	if cloud.AccessToken != "cld_browser_token" {
-		t.Fatalf("expected refreshed cloud token to remain stored, got %q", cloud.AccessToken)
-	}
-	if strings.TrimSpace(cloud.UpdatedAt) == "" {
-		t.Fatalf("expected cloud credentials updatedAt to be set")
-	}
-}
-
-// TestLoginSkipsWorkspaceRefreshWhenFlagSet covers --skip-workspace-refresh:
-// even with a workspace registered, no /join call should fire and
-// existing credentials.json must be preserved.
-func TestLoginSkipsWorkspaceRefreshWhenFlagSet(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	clearRelayfileEnv(t)
-	if err := saveCredentials(credentials{
-		Server: "https://relayfile-old.test",
-		Token:  "stale_server_token",
-	}); err != nil {
-		t.Fatalf("saveCredentials failed: %v", err)
-	}
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
-	}))
-	defer server.Close()
-
-	if _, err := upsertWorkspaceDetails(workspaceRecord{Name: "demo", ID: "ws_demo"}); err != nil {
-		t.Fatalf("upsertWorkspaceDetails failed: %v", err)
-	}
-	if _, err := setDefaultWorkspace("demo"); err != nil {
-		t.Fatalf("setDefaultWorkspace failed: %v", err)
-	}
-
-	var stdout bytes.Buffer
-	if err := run([]string{
-		"login",
-		"--cloud-api-url", server.URL,
-		"--cloud-token", "cld_browser_token",
-		"--skip-workspace-refresh",
-	}, strings.NewReader(""), &stdout, &stdout); err != nil {
-		t.Fatalf("run login failed: %v\noutput:\n%s", err, stdout.String())
-	}
-
-	creds, err := loadCredentials()
-	if err != nil {
-		t.Fatalf("loadCredentials failed: %v", err)
-	}
-	if creds.Server != "https://relayfile-old.test" {
-		t.Fatalf("expected existing server credentials preserved, got server %q", creds.Server)
-	}
-	if creds.Token != "stale_server_token" {
-		t.Fatalf("expected existing server token preserved, got %q", creds.Token)
-	}
-	if strings.Contains(stdout.String(), "Run 'relayfile setup'") {
-		t.Fatalf("expected no workspace setup hint with --skip-workspace-refresh, got %q", stdout.String())
-	}
-}
-
-// TestLoginRejectsWorkspaceWithSkipFlag asserts that passing both
-// --workspace and --skip-workspace-refresh fails fast with a clear
-// error. The two are contradictory — --skip-workspace-refresh silently
-// winning would make an explicit --workspace a no-op while the command
-// still reports success.
-func TestLoginRejectsWorkspaceWithSkipFlag(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	clearRelayfileEnv(t)
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
-	}))
-	defer server.Close()
-
-	var stdout bytes.Buffer
-	err := run([]string{
-		"login",
-		"--cloud-api-url", server.URL,
-		"--cloud-token", "cld_browser_token",
-		"--workspace", "demo",
-		"--skip-workspace-refresh",
-	}, strings.NewReader(""), &stdout, &stdout)
+	_, err := ensureCloudCredentials("", "", 0, false, io.Discard)
 	if err == nil {
-		t.Fatalf("expected error for contradictory flag combo, got nil\noutput:\n%s", stdout.String())
+		t.Fatal("expected stale agent-relay CLI to be rejected")
 	}
-	if !strings.Contains(err.Error(), "--workspace cannot be used with --skip-workspace-refresh") {
-		t.Fatalf("expected mutually-exclusive flag error, got %v", err)
-	}
-}
-
-// TestLoginExplicitWorkspaceReturnsErrorWhenPersistFails asserts that with
-// an explicit --workspace target, a failure to write the refreshed
-// workspace token to credentials.json surfaces as a non-zero exit / error
-// — symmetric with the join and resolve failure branches. Before this
-// guard, a persist failure was downgraded to a warning even under
-// --workspace, so the command reported success while leaving the on-disk
-// JWT stale.
-func TestLoginExplicitWorkspaceReturnsErrorWhenPersistFails(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	clearRelayfileEnv(t)
-
-	seen := map[string]bool{}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/api/v1/workspaces/ws_demo/join":
-			seen["join"] = true
-			_, _ = w.Write([]byte(`{"workspaceId":"ws_demo","token":"rf_refreshed","relayfileUrl":"https://relayfile.test","wsUrl":"wss://relayfile.test/ws","relaycastApiKey":"rc_test"}`))
-		default:
-			t.Fatalf("unexpected path: %s", r.URL.Path)
+	got := err.Error()
+	for _, want := range []string{"agent-relay CLI >= 8.7.0 required", "8.3.7", "npm install -g agent-relay@8.7.0", "sandbox image"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("expected error to contain %q, got %q", want, got)
 		}
-	}))
-	defer server.Close()
-
-	if _, err := upsertWorkspaceDetails(workspaceRecord{Name: "demo", ID: "ws_demo"}); err != nil {
-		t.Fatalf("upsertWorkspaceDetails failed: %v", err)
 	}
-	if _, err := setDefaultWorkspace("demo"); err != nil {
-		t.Fatalf("setDefaultWorkspace failed: %v", err)
-	}
-
-	// Force only the credentials.json rename to fail by pre-creating
-	// that exact path as a directory. writeFileAtomically still
-	// succeeds at CreateTemp/Write/Chmod/Close; only the final
-	// os.Rename(tmp, credentialsPath()) errors because the destination
-	// is a non-empty directory. cloud-credentials.json (different
-	// path) writes normally.
-	if err := os.MkdirAll(credentialsPath(), 0o755); err != nil {
-		t.Fatalf("pre-create credentials path as dir failed: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(credentialsPath(), "blocker"), []byte("x"), 0o644); err != nil {
-		t.Fatalf("write blocker file failed: %v", err)
-	}
-
-	var stdout bytes.Buffer
-	err := run([]string{
-		"login",
-		"--cloud-api-url", server.URL,
-		"--cloud-token", "cld_browser_token",
-		"--workspace", "demo",
-	}, strings.NewReader(""), &stdout, &stdout)
-	if err == nil {
-		t.Fatalf("expected error for explicit --workspace with persist failure, got nil\noutput:\n%s", stdout.String())
-	}
-	if !strings.Contains(err.Error(), "persist refreshed credentials") {
-		t.Fatalf("expected persist failure in error, got %v", err)
-	}
-	if !seen["join"] {
-		t.Fatalf("expected /workspaces/ws_demo/join to have been called before persist; seen=%v", seen)
-	}
-}
-
-// TestLoginDefaultWorkspaceWarnsWhenPersistFails confirms the unchanged
-// behavior for the implicit default-workspace path: persist failures
-// remain a warning so the cloud login itself still counts as successful.
-func TestLoginDefaultWorkspaceWarnsWhenPersistFails(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	clearRelayfileEnv(t)
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/api/v1/workspaces/ws_demo/join":
-			_, _ = w.Write([]byte(`{"workspaceId":"ws_demo","token":"rf_refreshed","relayfileUrl":"https://relayfile.test","wsUrl":"wss://relayfile.test/ws","relaycastApiKey":"rc_test"}`))
-		default:
-			t.Fatalf("unexpected path: %s", r.URL.Path)
-		}
-	}))
-	defer server.Close()
-
-	if _, err := upsertWorkspaceDetails(workspaceRecord{Name: "demo", ID: "ws_demo"}); err != nil {
-		t.Fatalf("upsertWorkspaceDetails failed: %v", err)
-	}
-	if _, err := setDefaultWorkspace("demo"); err != nil {
-		t.Fatalf("setDefaultWorkspace failed: %v", err)
-	}
-
-	if err := os.MkdirAll(credentialsPath(), 0o755); err != nil {
-		t.Fatalf("pre-create credentials path as dir failed: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(credentialsPath(), "blocker"), []byte("x"), 0o644); err != nil {
-		t.Fatalf("write blocker file failed: %v", err)
-	}
-
-	var stdout bytes.Buffer
-	if err := run([]string{
-		"login",
-		"--cloud-api-url", server.URL,
-		"--cloud-token", "cld_browser_token",
-	}, strings.NewReader(""), &stdout, &stdout); err != nil {
-		t.Fatalf("default-workspace login should not error on persist failure: %v\noutput:\n%s", err, stdout.String())
-	}
-	got := stdout.String()
-	if !strings.Contains(got, "warning: workspace token refresh succeeded but persisting it failed") {
-		t.Fatalf("expected persist-failure warning in output, got %q", got)
+	if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
+		t.Fatalf("expected cloud session command to be skipped, stat err=%v", statErr)
 	}
 }
 
@@ -3578,6 +3277,64 @@ func TestWorkspaceCurrentPrintsActiveWorkspace(t *testing.T) {
 	}
 	if got := strings.TrimSpace(stdout.String()); !strings.Contains(got, "source: default") {
 		t.Fatalf("expected verbose output to include source, got %q", got)
+	}
+}
+
+func TestWorkspaceCurrentPrefersAgentRelayActiveWorkspace(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+	if _, err := upsertWorkspace("stale-local-default"); err != nil {
+		t.Fatalf("upsertWorkspace failed: %v", err)
+	}
+	if _, err := setDefaultWorkspace("stale-local-default"); err != nil {
+		t.Fatalf("setDefaultWorkspace failed: %v", err)
+	}
+	installFakeAgentRelay(t, `
+if [ "$*" = "workspace active --json" ]; then
+  echo '{"name":"canonical","cloudWorkspaceId":"rw_cloud","relayfileWorkspaceId":"rw_relayfile","relaycastWorkspaceId":"rw_relaycast","relayauthWorkspaceId":"rw_relayauth"}'
+  exit 0
+fi
+echo "unexpected args: $*" >&2
+exit 2
+`)
+
+	var stdout bytes.Buffer
+	if err := run([]string{"workspace", "current", "--verbose"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("run workspace current failed: %v\noutput:\n%s", err, stdout.String())
+	}
+	got := strings.TrimSpace(stdout.String())
+	if !strings.HasPrefix(got, "canonical") {
+		t.Fatalf("expected canonical active workspace, got %q", got)
+	}
+	if !strings.Contains(got, "source: agent-relay") {
+		t.Fatalf("expected agent-relay source, got %q", got)
+	}
+}
+
+func TestResolveWorkspaceUsesAgentRelayRelayfileWorkspaceID(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+	if _, err := upsertWorkspace("stale-local-default"); err != nil {
+		t.Fatalf("upsertWorkspace failed: %v", err)
+	}
+	if _, err := setDefaultWorkspace("stale-local-default"); err != nil {
+		t.Fatalf("setDefaultWorkspace failed: %v", err)
+	}
+	installFakeAgentRelay(t, `
+if [ "$*" = "workspace active --json" ]; then
+  echo '{"name":"canonical","cloudWorkspaceId":"rw_cloud","relayfileWorkspaceId":"rw_relayfile"}'
+  exit 0
+fi
+echo "unexpected args: $*" >&2
+exit 2
+`)
+
+	got, err := resolveWorkspaceIDWithToken("", "")
+	if err != nil {
+		t.Fatalf("resolveWorkspaceIDWithToken failed: %v", err)
+	}
+	if got != "rw_relayfile" {
+		t.Fatalf("expected relayfile workspace id from agent-relay descriptor, got %q", got)
 	}
 }
 
@@ -3701,8 +3458,8 @@ func TestWorkspaceListNamesOnlyRestoresBareOutput(t *testing.T) {
 }
 
 // adoptTestServer wires the cloud endpoints the adopt verb exercises:
-// token refresh (so credential bootstrap succeeds), workspace join (mints
-// the relayfile JWT for the workspace), and the new POST .../adopt route.
+// workspace join (mints the relayfile JWT for the workspace), and the new
+// POST .../adopt route.
 // Each test injects its own adopt handler so it can simulate the four
 // distinct outcomes — success (fresh insert), success (replacement),
 // 409 refusal, 404 missing-connection — without rebuilding the rest of
@@ -3714,30 +3471,6 @@ func newAdoptTestServer(t *testing.T, adoptHandler func(http.ResponseWriter, *ht
 	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
-		case r.URL.Path == "/api/v1/auth/token/refresh":
-			if r.Method != http.MethodPost {
-				t.Errorf("expected refresh POST, got %s", r.Method)
-				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-				return
-			}
-			if got := r.Header.Get("Authorization"); got != "Bearer cld_old" {
-				t.Errorf("unexpected refresh Authorization: %q", got)
-				http.Error(w, "unauthorized", http.StatusUnauthorized)
-				return
-			}
-			var body cloudTokenRefreshRequest
-			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-				t.Errorf("decode refresh body failed: %v", err)
-				http.Error(w, "bad request", http.StatusBadRequest)
-				return
-			}
-			if body.RefreshToken != "refresh_123" {
-				t.Errorf("unexpected refresh token: %q", body.RefreshToken)
-				http.Error(w, "bad request", http.StatusBadRequest)
-				return
-			}
-			seen["refresh"]++
-			_, _ = w.Write([]byte(`{"apiUrl":"` + server.URL + `","accessToken":"cld_new","refreshToken":"refresh_123","accessTokenExpiresAt":"2030-05-01T00:00:00Z"}`))
 		case r.URL.Path == "/api/v1/workspaces/ws_123/join":
 			if r.Method != http.MethodPost {
 				t.Errorf("expected join POST, got %s", r.Method)
@@ -3794,27 +3527,12 @@ func setupAdoptWorkspace(t *testing.T) (workspaceRecord, string) {
 	if err != nil {
 		t.Fatalf("upsertWorkspaceDetails failed: %v", err)
 	}
-	if err := saveCloudCredentials(cloudCredentials{
-		APIURL:               "https://stale.example.test",
-		AccessToken:          "cld_old",
-		RefreshToken:         "refresh_123",
-		AccessTokenExpiresAt: time.Now().Add(-time.Minute).UTC().Format(time.RFC3339),
-	}); err != nil {
-		t.Fatalf("saveCloudCredentials failed: %v", err)
-	}
 	return record, localDir
 }
 
 func pointAdoptCloudCredentials(t *testing.T, apiURL string) {
 	t.Helper()
-	creds, err := loadCloudCredentials()
-	if err != nil {
-		t.Fatalf("loadCloudCredentials failed: %v", err)
-	}
-	creds.APIURL = apiURL
-	if err := saveCloudCredentials(creds); err != nil {
-		t.Fatalf("saveCloudCredentials(update) failed: %v", err)
-	}
+	installFakeAgentRelaySession(t, apiURL, "cld_new", "demo", "ws_123", "ws_123")
 }
 
 func TestIntegrationAdoptForwardsConnectionIdAndPersistsLocalState(t *testing.T) {
@@ -4037,9 +3755,6 @@ func newSetMetadataTestServer(t *testing.T, metadataHandler func(http.ResponseWr
 	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
-		case r.URL.Path == "/api/v1/auth/token/refresh":
-			seen["refresh"]++
-			_, _ = w.Write([]byte(`{"apiUrl":"` + server.URL + `","accessToken":"cld_new","refreshToken":"refresh_123","accessTokenExpiresAt":"2030-05-01T00:00:00Z"}`))
 		case r.URL.Path == "/api/v1/workspaces/ws_123/join":
 			seen["join"]++
 			_, _ = w.Write([]byte(`{"workspaceId":"ws_123","token":"rf_join","relayfileUrl":"` + server.URL + `"}`))
@@ -4160,9 +3875,6 @@ func newConnectJiraTestServer(t *testing.T, sites []accessibleResourceEntry, cho
 	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
-		case r.URL.Path == "/api/v1/auth/token/refresh":
-			seen["refresh"]++
-			_, _ = w.Write([]byte(`{"apiUrl":"` + server.URL + `","accessToken":"cld_new","refreshToken":"refresh_123","accessTokenExpiresAt":"2030-05-01T00:00:00Z"}`))
 		case r.URL.Path == "/api/v1/workspaces/ws_123/join":
 			seen["join"]++
 			_, _ = w.Write([]byte(`{"workspaceId":"ws_123","token":"rf_join","relayfileUrl":"` + server.URL + `"}`))
@@ -4361,8 +4073,6 @@ func TestIntegrationConnectJiraAlreadyConnectedSkipsPicker(t *testing.T) {
 	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
-		case r.URL.Path == "/api/v1/auth/token/refresh":
-			_, _ = w.Write([]byte(`{"apiUrl":"` + server.URL + `","accessToken":"cld_new","refreshToken":"refresh_123","accessTokenExpiresAt":"2030-05-01T00:00:00Z"}`))
 		case r.URL.Path == "/api/v1/workspaces/ws_123/join":
 			_, _ = w.Write([]byte(`{"workspaceId":"ws_123","token":"rf_join","relayfileUrl":"` + server.URL + `"}`))
 		case r.URL.Path == "/api/v1/workspaces/ws_123/integrations/jira/status":
@@ -4407,8 +4117,6 @@ func TestIntegrationConnectNonAtlassianSkipsPicker(t *testing.T) {
 	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
-		case r.URL.Path == "/api/v1/auth/token/refresh":
-			_, _ = w.Write([]byte(`{"apiUrl":"` + server.URL + `","accessToken":"cld_new","refreshToken":"refresh_123","accessTokenExpiresAt":"2030-05-01T00:00:00Z"}`))
 		case r.URL.Path == "/api/v1/workspaces/ws_123/join":
 			_, _ = w.Write([]byte(`{"workspaceId":"ws_123","token":"rf_join","relayfileUrl":"` + server.URL + `"}`))
 		case r.URL.Path == "/api/v1/workspaces/ws_123/integrations/connect-session":
@@ -4453,8 +4161,6 @@ func TestIntegrationConnectKeepsSelectedWorkspaceAndUsesJoinedRelayWorkspaceForS
 		w.Header().Set("Content-Type", "application/json")
 		seen[r.URL.Path]++
 		switch r.URL.Path {
-		case "/api/v1/auth/token/refresh":
-			_, _ = w.Write([]byte(`{"apiUrl":"` + server.URL + `","accessToken":"cld_new","refreshToken":"refresh_123","accessTokenExpiresAt":"2030-05-01T00:00:00Z"}`))
 		case "/api/v1/workspaces/50587328-441d-4acb-b8f3-dbe1b3c5de99/join":
 			_, _ = w.Write([]byte(`{"workspaceId":"rw_7ccfea89","token":"rf_join","relayfileUrl":"` + server.URL + `"}`))
 		case "/api/v1/workspaces/50587328-441d-4acb-b8f3-dbe1b3c5de99/integrations/connect-session":

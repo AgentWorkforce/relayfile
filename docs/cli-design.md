@@ -12,7 +12,7 @@ The `relayfile` CLI is the primary interface for humans and CI systems to intera
 ### Design principles
 
 - **Minimal flags, sensible defaults.** The happy path should require as few arguments as possible.
-- **Config file over flags over env vars.** Credentials and server URL are stored once via `relayfile login`; individual commands inherit them automatically. Environment variables (`RELAYFILE_TOKEN`, etc.) override config for CI/CD use.
+- **Canonical auth over local fallbacks.** Cloud login and active workspace selection are owned by `agent-relay login` and the `@agent-relay/cloud` session. Explicit Relayfile tokens (`--token`, `RELAYFILE_TOKEN`, or self-hosted `relayfile login --api-key`) remain available for CI and self-hosted deployments.
 - **Composable with pipes and scripts.** All commands emit structured JSON when `--json` is passed; human-readable tables otherwise.
 - **No implicit destructive actions.** Deletes require confirmation unless `--yes` is passed.
 
@@ -26,21 +26,38 @@ The `relayfile` CLI is the primary interface for humans and CI systems to intera
 |----------|--------|----------|
 | 1 | `--token` flag | One-off override |
 | 2 | `RELAYFILE_TOKEN` env var | CI/CD pipelines |
-| 3 | `~/.relayfile/credentials.json` | Interactive use after `relayfile login` |
+| 3 | `agent-relay cloud session --json` + `agent-relay workspace active --json` | Cloud-hosted interactive use |
+| 4 | `~/.relayfile/credentials.json` | Self-hosted/API-key compatibility |
 
-### Auth flow: API key (v1)
+### Auth flow: Cloud-hosted
 
 ```
-relayfile login --server https://api.relayfile.dev
+agent-relay login
+agent-relay workspace switch my-project
+relayfile mount
+```
+
+1. `agent-relay login` writes the canonical cloud session in the relay SDK store.
+2. `agent-relay workspace switch <name>` selects the active relay workspace.
+3. `relayfile` commands call `agent-relay cloud session --json` for a short-lived access token and `agent-relay workspace active --json` for the canonical `relayfileWorkspaceId`.
+4. Relayfile runtime tokens are minted with Cloud `/join` and kept in memory; they are not persisted as a second cloud session.
+
+Relayfile requires the `agent-relay` CLI binary on `PATH` to be version
+`8.7.0` or newer, because that is the first published CLI version with the
+`cloud session --json` and `workspace active --json` surfaces. Operators can
+override the binary with `AGENT_RELAY_BIN`. Sandboxes and Daytona/base images
+that run relayfile must install or update `agent-relay` before exercising the
+Cloud-hosted path.
+
+### Auth flow: API key / self-hosted
+
+```
+relayfile login --api-key --server https://api.relayfile.dev
 ```
 
 1. Prompts the user for an API key (paste from dashboard or generate via API).
 2. Validates the key by calling `GET /health` on the target server.
 3. Writes `~/.relayfile/credentials.json`.
-
-### Auth flow: OAuth via browser (future, v2)
-
-Same as `gh auth login` — opens a browser, completes device-code flow, stores refresh token. Not in scope for v1; the credential file schema reserves fields for it.
 
 ### Credential file: `~/.relayfile/credentials.json`
 
@@ -55,7 +72,7 @@ Same as `gh auth login` — opens a browser, completes device-code flow, stores 
 
 - `server` — base URL for all API calls. Default: `https://api.relayfile.dev`.
 - `token` — Bearer JWT or API key.
-- `refreshToken` / `expiresAt` — reserved for OAuth flow (v2). Null for API-key auth.
+- `refreshToken` / `expiresAt` — legacy fields. Cloud-hosted refresh is owned by `agent-relay`.
 - File permissions: `0600` (user-only read/write).
 
 ---
@@ -84,11 +101,12 @@ relayfile setup [--provider github] [--workspace my-project] [--local-dir ./rela
 
 **Behavior:**
 
-1. Start a localhost callback and open the Cloud login URL at `/api/v1/cli/login`.
-2. Store Cloud login tokens in `~/.relayfile/cloud-credentials.json`.
-3. Create and join a Cloud workspace, then store the Relayfile VFS URL/token in `~/.relayfile/credentials.json`.
-4. Request a hosted Nango connect session for the selected integration and wait until the Cloud status endpoint reports it ready.
-5. Start the existing `relayfile mount` sync loop so the user and agent see ordinary files.
+1. Ensure the user has run `agent-relay login`; `relayfile setup` reads the canonical relay session instead of starting its own login flow.
+2. Use `agent-relay cloud session --json` for the Cloud access token.
+3. Use `agent-relay workspace active --json` for the canonical workspace descriptor and `relayfileWorkspaceId`.
+4. Create/join the Cloud workspace when needed, minting Relayfile runtime credentials without persisting them as a second login.
+5. Request a hosted Nango connect session for the selected integration and wait until the Cloud status endpoint reports it ready.
+6. Start the existing `relayfile mount` sync loop so the user and agent see ordinary files.
 
 Re-running `relayfile setup` with the same workspace name reuses the locally
 tracked workspace ID, refreshes the Cloud session if needed, re-joins to mint a
@@ -102,23 +120,23 @@ This path is intentionally a wrapper over the lower-level commands and Cloud API
 
 ### `relayfile login`
 
-Authenticate and store credentials.
+Authenticate through the canonical relay session.
 
 ```
-relayfile login [--server URL]
+relayfile login [--no-open]
 ```
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--server` | `https://api.relayfile.dev` | Server base URL |
+| `--no-open` | `false` | Forwarded to `agent-relay login --no-open` |
+| `--api-key` | `false` | Preserve the self-hosted/API-key credential path |
+| `--server` | `https://api.relayfile.dev` | Server base URL for `--api-key` |
 
 **Behavior:**
 
-1. Prompt for API key (stdin, or `--token` flag for non-interactive).
-2. Call `GET <server>/health` to validate connectivity.
-3. Call a token-validated endpoint (e.g., `GET /v1/workspaces` with limit=1) to verify the token is accepted.
-4. Write `~/.relayfile/credentials.json` with `0600` permissions.
-5. Print confirmation: `Logged in to <server> as <agent-name>`.
+1. Default path delegates to `agent-relay login`.
+2. Relayfile does not write `~/.relayfile/cloud-credentials.json`.
+3. `--api-key` keeps the self-hosted compatibility path and writes `~/.relayfile/credentials.json` with `0600` permissions.
 
 **Errors:**
 - Server unreachable: `Error: cannot reach <server> — check the URL and your network.`
@@ -513,9 +531,8 @@ These flags apply to all commands:
 
 ```
 ~/.relayfile/
-  cloud-credentials.json    # Cloud login tokens (access + refresh) (0600)
-  credentials.json          # Relayfile VFS workspace token (0600)
-  workspaces.json           # workspace name → ID mapping + default + lastUsedAt
+  credentials.json          # self-hosted/API-key credentials only (0600)
+  workspaces.json           # local workspace metadata: names, ids, localDir, history
 
 <local-dir>/
   <provider>/               # one top-level dir per connected provider
@@ -540,12 +557,12 @@ The CLI resolves tokens in this order, first match wins:
 
 1. `--token` flag
 2. `RELAYFILE_TOKEN` environment variable
-3. `~/.relayfile/credentials.json` → `token` field
+3. self-hosted only: `~/.relayfile/credentials.json` → `token` field
 
 If no token is found, the CLI prints:
 
 ```
-Error: not authenticated. Run 'relayfile login' or set RELAYFILE_TOKEN.
+Error: not authenticated. Run 'agent-relay login' for Cloud or set RELAYFILE_TOKEN.
 ```
 
 ---

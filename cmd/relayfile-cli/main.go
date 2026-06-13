@@ -15,7 +15,6 @@ import (
 	"log"
 	mathrand "math/rand/v2"
 	"mime"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -40,6 +39,7 @@ const (
 	defaultServerURL        = "https://api.relayfile.dev"
 	defaultCloudAPIURL      = "https://agentrelay.com/cloud"
 	defaultObserverURL      = "https://agentrelay.com/observer/file"
+	minAgentRelayCLIVersion = "8.7.0"
 	configDirName           = ".relayfile"
 	websocketReconcileEvery = 10
 	defaultMountMode        = "poll"
@@ -58,12 +58,34 @@ type credentials struct {
 }
 
 type cloudCredentials struct {
-	APIURL                string `json:"apiUrl"`
-	AccessToken           string `json:"accessToken"`
-	RefreshToken          string `json:"refreshToken,omitempty"`
-	AccessTokenExpiresAt  string `json:"accessTokenExpiresAt,omitempty"`
-	RefreshTokenExpiresAt string `json:"refreshTokenExpiresAt,omitempty"`
-	UpdatedAt             string `json:"updatedAt,omitempty"`
+	APIURL               string `json:"apiUrl"`
+	AccessToken          string `json:"accessToken"`
+	AccessTokenExpiresAt string `json:"accessTokenExpiresAt,omitempty"`
+	UpdatedAt            string `json:"updatedAt,omitempty"`
+}
+
+type agentRelayCloudSession struct {
+	APIURL      string `json:"apiUrl"`
+	AccessToken string `json:"accessToken"`
+	Auth        struct {
+		APIURL      string `json:"apiUrl"`
+		AccessToken string `json:"accessToken"`
+	} `json:"auth"`
+}
+
+type agentRelayActiveWorkspace struct {
+	ID                       string            `json:"id"`
+	Name                     string            `json:"name"`
+	Key                      string            `json:"key"`
+	Slug                     string            `json:"slug"`
+	CloudWorkspaceID         string            `json:"cloudWorkspaceId"`
+	RelayfileWorkspaceID     string            `json:"relayfileWorkspaceId"`
+	RelaycastWorkspaceID     string            `json:"relaycastWorkspaceId"`
+	RelayauthWorkspaceID     string            `json:"relayauthWorkspaceId"`
+	OrganizationID           string            `json:"organizationId"`
+	URLs                     map[string]string `json:"urls"`
+	RelayfileURL             string            `json:"relayfileUrl"`
+	RelayfileURLAlternateKey string            `json:"relayfileURL"`
 }
 
 type workspaceCatalog struct {
@@ -247,10 +269,6 @@ type cloudIntegrationReadyResponse struct {
 	State        string `json:"state,omitempty"`
 }
 
-type cloudTokenRefreshRequest struct {
-	RefreshToken string `json:"refreshToken"`
-}
-
 type cloudIntegrationCatalogResponse struct {
 	Providers []integrationCatalogEntry `json:"providers"`
 	Version   string                    `json:"version,omitempty"`
@@ -431,24 +449,10 @@ func parseRetryAfter(value string) time.Duration {
 	return 0
 }
 
-// cloudLoginStateMismatchExitCode is the exit code mandated by productized
-// cloud-mount contract A2 when the browser callback's state parameter does
-// not match the value the CLI generated. The dedicated code lets shells and
-// CI distinguish a tampered/replayed login flow from a generic CLI error.
-const cloudLoginStateMismatchExitCode = 10
-
-// ErrCloudLoginStateMismatch is returned by runCloudLogin when the OAuth
-// callback's `state` query parameter does not match the value the CLI
-// generated. main() maps this sentinel to exit code 10 per A2.
-var ErrCloudLoginStateMismatch = errors.New("Relayfile Cloud login state mismatch")
-
 func main() {
 	log.SetFlags(0)
 	if err := run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
-		if errors.Is(err, ErrCloudLoginStateMismatch) {
-			os.Exit(cloudLoginStateMismatchExitCode)
-		}
 		os.Exit(1)
 	}
 }
@@ -715,8 +719,8 @@ Usage:
 
 Subcommands:
   setup       Sign in, connect an integration, and mount the workspace
-  login       Sign in via the Relayfile Cloud browser flow (or --api-key for self-hosted)
-  workspace   Create, join, select, list, show current, or delete locally tracked workspaces
+  login       Sign in via agent-relay login (or --api-key for self-hosted)
+  workspace   Create, join, select via agent-relay, list, show current, or delete locally tracked workspaces
   integration Connect, discover, list, disconnect, or adopt workspace integrations
   ops         List or replay dead-lettered writeback ops
   writeback   Inspect or retry local writeback failures
@@ -915,34 +919,236 @@ func ensureCloudCredentials(cloudAPIURL, explicitToken string, timeout time.Dura
 			AccessToken: explicitToken,
 			UpdatedAt:   time.Now().UTC().Format(time.RFC3339),
 		}
-		if err := saveCloudCredentials(creds); err != nil {
-			return cloudCredentials{}, err
-		}
 		return creds, nil
 	}
 
-	creds, err := loadCloudCredentials()
-	if err == nil {
-		if strings.TrimSpace(creds.APIURL) == "" {
-			creds.APIURL = cloudAPIURL
-		}
-		if strings.TrimRight(strings.TrimSpace(creds.APIURL), "/") != cloudAPIURL {
-			creds.APIURL = cloudAPIURL
-		}
-		refreshed, refreshErr := refreshCloudCredentialsIfNeeded(creds)
-		if refreshErr == nil {
-			return refreshed, nil
-		}
-	}
-
-	creds, err = runCloudLogin(cloudAPIURL, timeout, shouldOpenBrowser, stdout)
+	creds, err := cloudCredentialsFromAgentRelay()
 	if err != nil {
 		return cloudCredentials{}, err
 	}
-	if err := saveCloudCredentials(creds); err != nil {
+	return creds, nil
+}
+
+func agentRelayBinary() string {
+	if value := strings.TrimSpace(os.Getenv("AGENT_RELAY_BIN")); value != "" {
+		return value
+	}
+	return "agent-relay"
+}
+
+func ensureAgentRelayCLICompatible() error {
+	bin := agentRelayBinary()
+	versionOutput, err := exec.Command(bin, "--version").CombinedOutput()
+	if err != nil {
+		detail := strings.TrimSpace(string(versionOutput))
+		if detail == "" {
+			detail = err.Error()
+		}
+		return fmt.Errorf("agent-relay CLI >= %s required; run `npm install -g agent-relay@%s` or set AGENT_RELAY_BIN to a compatible binary (%s)", minAgentRelayCLIVersion, minAgentRelayCLIVersion, detail)
+	}
+	version := firstSemver(string(versionOutput))
+	if version == "" || compareSemver(version, minAgentRelayCLIVersion) < 0 {
+		if version == "" {
+			version = strings.TrimSpace(string(versionOutput))
+		}
+		return fmt.Errorf("agent-relay CLI >= %s required; found %q. Run `npm install -g agent-relay@%s` or update the sandbox image", minAgentRelayCLIVersion, version, minAgentRelayCLIVersion)
+	}
+	for _, args := range [][]string{
+		{"cloud", "session", "--help"},
+		{"workspace", "active", "--help"},
+		{"workspace", "switch", "--help"},
+	} {
+		output, err := exec.Command(bin, args...).CombinedOutput()
+		if err != nil {
+			detail := strings.TrimSpace(string(output))
+			if detail == "" {
+				detail = err.Error()
+			}
+			return fmt.Errorf("agent-relay CLI >= %s required with `%s`; run `npm install -g agent-relay@%s` or update the sandbox image (%s)", minAgentRelayCLIVersion, strings.Join(append([]string{"agent-relay"}, args...), " "), minAgentRelayCLIVersion, detail)
+		}
+	}
+	return nil
+}
+
+func firstSemver(value string) string {
+	fields := strings.Fields(strings.TrimSpace(value))
+	for _, field := range fields {
+		field = strings.TrimPrefix(field, "v")
+		if isSemver(field) {
+			return field
+		}
+	}
+	return ""
+}
+
+func isSemver(value string) bool {
+	parts := strings.Split(value, ".")
+	if len(parts) < 2 {
+		return false
+	}
+	for _, part := range parts {
+		if part == "" {
+			return false
+		}
+		for _, r := range part {
+			if r < '0' || r > '9' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func compareSemver(a, b string) int {
+	aParts := strings.Split(a, ".")
+	bParts := strings.Split(b, ".")
+	maxParts := len(aParts)
+	if len(bParts) > maxParts {
+		maxParts = len(bParts)
+	}
+	for i := 0; i < maxParts; i++ {
+		var aValue, bValue int
+		if i < len(aParts) {
+			aValue, _ = strconv.Atoi(aParts[i])
+		}
+		if i < len(bParts) {
+			bValue, _ = strconv.Atoi(bParts[i])
+		}
+		if aValue < bValue {
+			return -1
+		}
+		if aValue > bValue {
+			return 1
+		}
+	}
+	return 0
+}
+
+func runAgentRelayJSON(args []string, out any) error {
+	if err := ensureAgentRelayCLICompatible(); err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, agentRelayBinary(), args...)
+	output, err := cmd.CombinedOutput()
+	if ctx.Err() == context.DeadlineExceeded {
+		return fmt.Errorf("agent-relay %s timed out; run 'agent-relay login' and try again", strings.Join(args, " "))
+	}
+	if err != nil {
+		detail := strings.TrimSpace(string(output))
+		if detail == "" {
+			detail = err.Error()
+		}
+		return fmt.Errorf("agent-relay %s failed: %s", strings.Join(args, " "), detail)
+	}
+	if err := json.Unmarshal(output, out); err != nil {
+		return fmt.Errorf("parse agent-relay %s output: %w", strings.Join(args, " "), err)
+	}
+	return nil
+}
+
+func runAgentRelayLogin(stdin io.Reader, stdout io.Writer, noOpen bool) error {
+	if err := ensureAgentRelayCLICompatible(); err != nil {
+		return err
+	}
+	args := []string{"login"}
+	if noOpen {
+		args = append(args, "--no-open")
+	}
+	cmd := exec.Command(agentRelayBinary(), args...)
+	cmd.Stdin = stdin
+	cmd.Stdout = stdout
+	cmd.Stderr = stdout
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("agent-relay login failed: %w", err)
+	}
+	return nil
+}
+
+func cloudCredentialsFromAgentRelay() (cloudCredentials, error) {
+	var session agentRelayCloudSession
+	if err := runAgentRelayJSON([]string{"cloud", "session", "--json"}, &session); err != nil {
 		return cloudCredentials{}, err
 	}
-	return creds, nil
+	apiURL := strings.TrimRight(strings.TrimSpace(session.APIURL), "/")
+	accessToken := strings.TrimSpace(session.AccessToken)
+	if apiURL == "" {
+		apiURL = strings.TrimRight(strings.TrimSpace(session.Auth.APIURL), "/")
+	}
+	if accessToken == "" {
+		accessToken = strings.TrimSpace(session.Auth.AccessToken)
+	}
+	if apiURL == "" {
+		apiURL = defaultCloudAPIURL
+	}
+	if accessToken == "" {
+		return cloudCredentials{}, errors.New("agent-relay cloud session --json did not include an accessToken")
+	}
+	return cloudCredentials{
+		APIURL:      apiURL,
+		AccessToken: accessToken,
+		UpdatedAt:   time.Now().UTC().Format(time.RFC3339),
+	}, nil
+}
+
+func activeWorkspaceFromAgentRelay() (agentRelayActiveWorkspace, error) {
+	var workspace agentRelayActiveWorkspace
+	if err := runAgentRelayJSON([]string{"workspace", "active", "--json"}, &workspace); err != nil {
+		return agentRelayActiveWorkspace{}, err
+	}
+	if strings.TrimSpace(workspace.RelayfileWorkspaceID) == "" {
+		return agentRelayActiveWorkspace{}, errors.New("agent-relay workspace active --json did not include relayfileWorkspaceId")
+	}
+	if strings.TrimSpace(workspace.CloudWorkspaceID) == "" {
+		workspace.CloudWorkspaceID = workspace.ID
+	}
+	if strings.TrimSpace(workspace.Name) == "" {
+		workspace.Name = firstNonEmpty(workspace.Slug, workspace.RelayfileWorkspaceID, workspace.CloudWorkspaceID, workspace.ID)
+	}
+	return workspace, nil
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
+}
+
+func agentRelayWorkspaceMatches(value string, workspace agentRelayActiveWorkspace) bool {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return true
+	}
+	for _, candidate := range []string{
+		workspace.ID,
+		workspace.Name,
+		workspace.Key,
+		workspace.Slug,
+		workspace.CloudWorkspaceID,
+		workspace.RelayfileWorkspaceID,
+		workspace.RelaycastWorkspaceID,
+		workspace.RelayauthWorkspaceID,
+	} {
+		if value == strings.TrimSpace(candidate) {
+			return true
+		}
+	}
+	if id, ok := catalogWorkspaceID(value); ok {
+		for _, candidate := range []string{
+			workspace.ID,
+			workspace.CloudWorkspaceID,
+			workspace.RelayfileWorkspaceID,
+		} {
+			if strings.TrimSpace(id) == strings.TrimSpace(candidate) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func loadCloudCredentials() (cloudCredentials, error) {
@@ -950,7 +1156,7 @@ func loadCloudCredentials() (cloudCredentials, error) {
 	payload, err := os.ReadFile(cloudCredentialsPath())
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return creds, fmt.Errorf("cloud credentials not found at %s; run relayfile setup or relayfile login", cloudCredentialsPath())
+			return creds, fmt.Errorf("legacy cloud credentials not found at %s; run agent-relay login", cloudCredentialsPath())
 		}
 		return creds, err
 	}
@@ -963,110 +1169,11 @@ func loadCloudCredentials() (cloudCredentials, error) {
 	return creds, nil
 }
 
-func refreshCloudCredentialsIfNeeded(creds cloudCredentials) (cloudCredentials, error) {
-	if !cloudAccessTokenExpiredSoon(creds) {
-		if strings.TrimSpace(creds.APIURL) == "" {
-			creds.APIURL = defaultCloudAPIURL
-		}
-		return creds, nil
-	}
-	return refreshCloudCredentials(creds)
-}
-
-func cloudAccessTokenExpiredSoon(creds cloudCredentials) bool {
-	if strings.TrimSpace(creds.AccessToken) == "" {
-		return true
-	}
-	expiry, ok := parseRFC3339(strings.TrimSpace(creds.AccessTokenExpiresAt))
-	if !ok {
-		return false
-	}
-	return !time.Now().UTC().Before(expiry.Add(-60 * time.Second))
-}
-
 // ErrCloudRefreshExpired indicates the cloud refresh token cannot mint new
 // access tokens. The mount loop uses this to enter the read-only degraded
 // state described in the productized cloud-mount contract acceptance test
 // A9 ("Cloud refresh token expired").
-var ErrCloudRefreshExpired = errors.New("cloud session expired. Run 'relayfile login' to sign in again.")
-
-func refreshCloudCredentials(creds cloudCredentials) (cloudCredentials, error) {
-	if strings.TrimSpace(creds.RefreshToken) == "" {
-		return creds, ErrCloudRefreshExpired
-	}
-	refreshed, err := refreshCloudCredentialsOnce(creds)
-	if err == nil {
-		return refreshed, nil
-	}
-	if !isCloudRefreshAuthRejection(err) {
-		return creds, fmt.Errorf("refresh cloud session: %w", err)
-	}
-
-	diskCreds, diskErr := loadCloudCredentials()
-	if diskErr == nil {
-		if strings.TrimSpace(diskCreds.APIURL) == "" {
-			diskCreds.APIURL = creds.APIURL
-		}
-		diskChanged := !sameCloudRefreshMaterial(creds, diskCreds)
-		if diskChanged && !cloudAccessTokenExpiredSoon(diskCreds) {
-			return diskCreds, nil
-		}
-		if diskChanged {
-			refreshed, retryErr := refreshCloudCredentialsOnce(diskCreds)
-			if retryErr == nil {
-				return refreshed, nil
-			}
-			if !isCloudRefreshAuthRejection(retryErr) {
-				return diskCreds, fmt.Errorf("refresh cloud session: %w", retryErr)
-			}
-		}
-	}
-	return creds, ErrCloudRefreshExpired
-}
-
-func refreshCloudCredentialsOnce(creds cloudCredentials) (cloudCredentials, error) {
-	client, err := newAPIClient(creds.APIURL, creds.AccessToken)
-	if err != nil {
-		return creds, err
-	}
-	var refreshed cloudCredentials
-	err = client.postJSON(context.Background(), "/api/v1/auth/token/refresh", cloudTokenRefreshRequest{
-		RefreshToken: creds.RefreshToken,
-	}, &refreshed)
-	if err != nil {
-		return creds, err
-	}
-	if strings.TrimSpace(refreshed.APIURL) == "" {
-		refreshed.APIURL = creds.APIURL
-	}
-	if strings.TrimSpace(refreshed.RefreshToken) == "" {
-		refreshed.RefreshToken = creds.RefreshToken
-	}
-	if strings.TrimSpace(refreshed.RefreshTokenExpiresAt) == "" {
-		refreshed.RefreshTokenExpiresAt = creds.RefreshTokenExpiresAt
-	}
-	refreshed.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-	if err := saveCloudCredentials(refreshed); err != nil {
-		return creds, err
-	}
-	return refreshed, nil
-}
-
-func isCloudRefreshAuthRejection(err error) bool {
-	var httpErr *apiError
-	if !errors.As(err, &httpErr) {
-		return false
-	}
-	return httpErr.StatusCode == http.StatusUnauthorized || httpErr.StatusCode == http.StatusForbidden
-}
-
-func sameCloudRefreshMaterial(a, b cloudCredentials) bool {
-	return strings.TrimSpace(a.APIURL) == strings.TrimSpace(b.APIURL) &&
-		strings.TrimSpace(a.AccessToken) == strings.TrimSpace(b.AccessToken) &&
-		strings.TrimSpace(a.AccessTokenExpiresAt) == strings.TrimSpace(b.AccessTokenExpiresAt) &&
-		strings.TrimSpace(a.RefreshToken) == strings.TrimSpace(b.RefreshToken) &&
-		strings.TrimSpace(a.RefreshTokenExpiresAt) == strings.TrimSpace(b.RefreshTokenExpiresAt)
-}
+var ErrCloudRefreshExpired = errors.New("cloud session expired. Run 'agent-relay login' to sign in again.")
 
 func providerPromptText(entries []integrationCatalogEntry) string {
 	ids := make([]string, 0, len(entries)+1)
@@ -1438,13 +1545,6 @@ func ensureWorkspaceForSetup(cloud cloudCredentials, name, localDir string) (wor
 
 func persistJoinedWorkspace(record workspaceRecord, joined cloudWorkspaceJoinResponse, cloudAPIURL, localDir string, setDefault bool) (workspaceRecord, error) {
 	serverURL := strings.TrimRight(strings.TrimSpace(joined.RelayfileURL), "/")
-	if err := saveCredentials(credentials{
-		Server:    serverURL,
-		Token:     strings.TrimSpace(joined.Token),
-		UpdatedAt: time.Now().UTC().Format(time.RFC3339),
-	}); err != nil {
-		return workspaceRecord{}, err
-	}
 	if joinedWorkspaceID := strings.TrimSpace(joined.WorkspaceID); joinedWorkspaceID != "" {
 		if strings.TrimSpace(record.ID) == "" {
 			record.ID = joinedWorkspaceID
@@ -1463,13 +1563,6 @@ func persistJoinedWorkspace(record workspaceRecord, joined cloudWorkspaceJoinRes
 		record.Scopes = append([]string(nil), defaultJoinScopes...)
 	}
 	persisted, err := upsertWorkspaceDetails(record)
-	if err != nil {
-		return workspaceRecord{}, err
-	}
-	if !setDefault {
-		return persisted, nil
-	}
-	persisted, err = setDefaultWorkspace(persisted.Name)
 	if err != nil {
 		return workspaceRecord{}, err
 	}
@@ -1514,84 +1607,6 @@ func joinWorkspaceViaCloud(cloud cloudCredentials, workspaceID, agentName string
 		return cloudWorkspaceJoinResponse{}, errors.New("cloud join response missing relayfileUrl")
 	}
 	return joined, nil
-}
-
-func runCloudLogin(cloudAPIURL string, timeout time.Duration, shouldOpenBrowser bool, stdout io.Writer) (cloudCredentials, error) {
-	if timeout <= 0 {
-		timeout = 5 * time.Minute
-	}
-	state, err := randomURLSafe(24)
-	if err != nil {
-		return cloudCredentials{}, err
-	}
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return cloudCredentials{}, err
-	}
-	defer listener.Close()
-
-	tokenCh := make(chan cloudCredentials, 1)
-	errCh := make(chan error, 1)
-	server := &http.Server{}
-	server.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/callback" {
-			http.NotFound(w, r)
-			return
-		}
-		if got := r.URL.Query().Get("state"); got != state {
-			http.Error(w, "Relayfile Cloud login state mismatch", http.StatusBadRequest)
-			errCh <- ErrCloudLoginStateMismatch
-			return
-		}
-		if loginError := strings.TrimSpace(r.URL.Query().Get("error")); loginError != "" {
-			http.Error(w, "Relayfile Cloud login failed", http.StatusBadRequest)
-			errCh <- fmt.Errorf("Relayfile Cloud login failed: %s", loginError)
-			return
-		}
-		tokens, err := readCloudCredentialsFromQuery(r.URL.Query(), cloudAPIURL)
-		if err != nil {
-			http.Error(w, "Relayfile Cloud login callback was missing token fields", http.StatusBadRequest)
-			errCh <- err
-			return
-		}
-		fmt.Fprintln(w, "Relayfile Cloud login complete. You can close this tab.")
-		tokenCh <- tokens
-	})
-
-	go func() {
-		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			errCh <- err
-		}
-	}()
-	defer server.Close()
-
-	redirectURI := "http://" + listener.Addr().String() + "/callback"
-	loginURL, err := buildCloudURL(cloudAPIURL, "api/v1/cli/login")
-	if err != nil {
-		return cloudCredentials{}, err
-	}
-	query := loginURL.Query()
-	query.Set("redirect_uri", redirectURI)
-	query.Set("state", state)
-	loginURL.RawQuery = query.Encode()
-
-	fmt.Fprintf(stdout, "Sign in to Relayfile Cloud: %s\n", loginURL.String())
-	if shouldOpenBrowser {
-		if err := openBrowser(loginURL.String()); err != nil {
-			return cloudCredentials{}, fmt.Errorf("open cloud login: %w", err)
-		}
-	}
-
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
-	select {
-	case tokens := <-tokenCh:
-		return tokens, nil
-	case err := <-errCh:
-		return cloudCredentials{}, err
-	case <-timer.C:
-		return cloudCredentials{}, fmt.Errorf("Relayfile Cloud login timed out after %s", timeout)
-	}
 }
 
 func ensureCloudIntegration(cloudAPIURL, workspaceID, workspaceToken, provider, requestedBackend, localDir string, timeout time.Duration, shouldOpenBrowser bool, stdout io.Writer) (bool, error) {
@@ -1864,47 +1879,17 @@ func runLogin(args []string, stdin io.Reader, stdout io.Writer) error {
 		return loginWithAPIKey(strings.TrimSpace(*server), prompted, stdout)
 	}
 
-	// Default: cloud browser flow.
-	cloudAPI := strings.TrimRight(strings.TrimSpace(*cloudAPIURL), "/")
-	if cloudAPI == "" {
-		cloudAPI = defaultCloudAPIURL
+	if (strings.TrimSpace(*cloudAPIURL) != "" && strings.TrimRight(strings.TrimSpace(*cloudAPIURL), "/") != defaultCloudAPIURL) ||
+		strings.TrimSpace(*cloudToken) != "" || *loginTimeout != 5*time.Minute || *skipWorkspace || strings.TrimSpace(*workspaceFlag) != "" {
+		fmt.Fprintln(stdout, "warning: relayfile login delegates to agent-relay login; relayfile cloud/workspace refresh flags are deprecated and ignored")
 	}
-	creds, err := ensureCloudCredentials(cloudAPI, strings.TrimSpace(*cloudToken), *loginTimeout, !*noOpen, stdout)
-	if err != nil {
+	if err := runAgentRelayLogin(stdin, stdout, *noOpen); err != nil {
 		return err
 	}
-	fmt.Fprintf(stdout, "Signed in to Relayfile Cloud at %s\n", creds.APIURL)
-
-	if !*skipWorkspace {
-		record, rerr := resolveWorkspaceRecord(strings.TrimSpace(*workspaceFlag))
-		if rerr == nil {
-			joined, jerr := joinWorkspaceViaCloud(creds, record.ID, record.AgentName, record.Scopes)
-			if jerr == nil {
-				if persisted, perr := persistJoinedWorkspace(record, joined, creds.APIURL, record.LocalDir, true); perr == nil {
-					record = persisted
-					fmt.Fprintf(stdout, "Refreshed workspace token for %s (%s)\n", record.Name, record.ID)
-					return nil
-				} else if strings.TrimSpace(*workspaceFlag) != "" {
-					return fmt.Errorf("refresh workspace token: persist refreshed credentials: %w", perr)
-				} else {
-					fmt.Fprintf(stdout, "warning: workspace token refresh succeeded but persisting it failed: %v\n", perr)
-				}
-			} else if strings.TrimSpace(*workspaceFlag) != "" {
-				return fmt.Errorf("refresh workspace token: %w", jerr)
-			} else {
-				fmt.Fprintf(stdout, "warning: could not refresh workspace token for %s: %v\n", record.Name, jerr)
-			}
-		} else if strings.TrimSpace(*workspaceFlag) != "" {
-			return rerr
-		}
+	if err := removeCredentialFile(cloudCredentialsPath()); err != nil {
+		fmt.Fprintf(stdout, "warning: could not clear stale relayfile cloud credentials: %v\n", err)
 	}
-
-	if !*skipWorkspace {
-		if err := removeCredentialFile(credentialsPath()); err != nil {
-			fmt.Fprintf(stdout, "warning: could not clear stale server credentials: %v\n", err)
-		}
-		fmt.Fprintln(stdout, "Run 'relayfile setup' to create or join a workspace, or 'relayfile mount WORKSPACE' if you already have one.")
-	}
+	fmt.Fprintln(stdout, "Relayfile now uses the active agent-relay cloud session and workspace.")
 	return nil
 }
 
@@ -3142,7 +3127,7 @@ func retryDeadLetterWriteback(workspaceID string, record workspaceRecord, dl dea
 	}
 	tokenValue := resolveToken("", creds)
 	if tokenValue == "" {
-		return errors.New("token is required; run relayfile login or set RELAYFILE_TOKEN")
+		return errors.New("token is required; set RELAYFILE_TOKEN or pass explicit relayfile credentials")
 	}
 	server := strings.TrimSpace(record.Server)
 	if server == "" {
@@ -3656,15 +3641,13 @@ func runWorkspaceUse(args []string, stdout io.Writer) error {
 		return errors.New("usage: relayfile workspace use NAME")
 	}
 
-	record, err := setDefaultWorkspace(fs.Arg(0))
-	if err != nil {
-		return err
+	cmd := exec.Command(agentRelayBinary(), "workspace", "switch", fs.Arg(0))
+	cmd.Stdout = stdout
+	cmd.Stderr = stdout
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("agent-relay workspace switch failed: %w", err)
 	}
-	workspaceID := record.ID
-	if workspaceID == "" {
-		workspaceID = record.Name
-	}
-	fmt.Fprintf(stdout, "Default workspace set to %s (id: %s)\n", record.Name, workspaceID)
+	fmt.Fprintln(stdout, "Relayfile uses the active agent-relay workspace.")
 	return nil
 }
 
@@ -3746,6 +3729,9 @@ func activeWorkspaceName(token string) (string, string) {
 		}
 		return tokenWS, "token"
 	}
+	if workspace, err := activeWorkspaceFromAgentRelay(); err == nil {
+		return workspace.Name, "agent-relay"
+	}
 	catalog, err := loadWorkspaceCatalog()
 	if err != nil {
 		return "", ""
@@ -3772,7 +3758,7 @@ func runWorkspaceCurrent(args []string, stdout io.Writer) error {
 	tokenValue := resolveToken(*token, creds)
 	name, source := activeWorkspaceName(tokenValue)
 	if name == "" {
-		return errors.New("no active workspace; pass WORKSPACE, set RELAYFILE_WORKSPACE, or run 'relayfile workspace use NAME'")
+		return errors.New("no active workspace; pass WORKSPACE, set RELAYFILE_WORKSPACE, or run 'agent-relay workspace switch NAME'")
 	}
 	if !*verbose {
 		fmt.Fprintln(stdout, name)
@@ -3834,9 +3820,8 @@ func runMount(args []string) error {
 	fs := flag.NewFlagSet("mount", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 
-	creds, _ := loadCredentials()
-	server := fs.String("server", resolveServer("", creds), "relayfile server URL")
-	token := fs.String("token", resolveToken("", creds), "bearer token")
+	server := fs.String("server", resolveServer("", credentials{}), "relayfile server URL")
+	token := fs.String("token", strings.TrimSpace(os.Getenv("RELAYFILE_TOKEN")), "bearer token")
 	remotePath := fs.String("remote-path", envOrDefault("RELAYFILE_REMOTE_PATH", "/"), "remote root path")
 	eventProvider := fs.String("provider", strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_PROVIDER")), "event provider filter")
 	stateFile := fs.String("state-file", strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_STATE_FILE")), "state file path")
@@ -3907,24 +3892,75 @@ func runMount(args []string) error {
 	localDir := ""
 	localDirExplicit := false
 	tokenValue := strings.TrimSpace(*token)
+	canonicalWorkspaceID := ""
+	requestedWorkspace := ""
+	activeWorkspace := agentRelayActiveWorkspace{}
+	usesAgentRelayWorkspace := false
+	if fs.NArg() > 0 {
+		requestedWorkspace = strings.TrimSpace(fs.Arg(0))
+	}
 	if tokenValue == "" {
-		return errors.New("token is required; run relayfile login or pass --token")
+		cloudCreds, cerr := ensureCloudCredentials("", "", 0, false, io.Discard)
+		if cerr != nil {
+			return fmt.Errorf("resolve agent-relay cloud session: %w", cerr)
+		}
+		resolvedActiveWorkspace, werr := activeWorkspaceFromAgentRelay()
+		if werr != nil {
+			return fmt.Errorf("resolve active agent-relay workspace: %w", werr)
+		}
+		activeWorkspace = resolvedActiveWorkspace
+		usesAgentRelayWorkspace = true
+		if requestedWorkspace != "" && !agentRelayWorkspaceMatches(requestedWorkspace, activeWorkspace) {
+			return fmt.Errorf(
+				"relayfile mount without --token uses active agent-relay workspace %s (%s); pass --token for explicit workspace %q or run 'agent-relay workspace switch %s'",
+				defaultIfBlank(activeWorkspace.Name, activeWorkspace.RelayfileWorkspaceID),
+				activeWorkspace.RelayfileWorkspaceID,
+				requestedWorkspace,
+				requestedWorkspace,
+			)
+		}
+		cloudWorkspaceID := firstNonEmpty(activeWorkspace.CloudWorkspaceID, activeWorkspace.ID, activeWorkspace.Key, activeWorkspace.RelayfileWorkspaceID)
+		if cloudWorkspaceID == "" {
+			return errors.New("agent-relay workspace active --json did not include cloudWorkspaceId")
+		}
+		joined, jerr := joinWorkspaceViaCloud(cloudCreds, cloudWorkspaceID, "relayfile-cli", defaultJoinScopes)
+		if jerr != nil {
+			return fmt.Errorf("mint relayfile runtime credentials: %w", jerr)
+		}
+		tokenValue = joined.Token
+		*server = strings.TrimRight(joined.RelayfileURL, "/")
+		canonicalWorkspaceID = strings.TrimSpace(activeWorkspace.RelayfileWorkspaceID)
+		if canonicalWorkspaceID == "" {
+			canonicalWorkspaceID = strings.TrimSpace(joined.WorkspaceID)
+		}
 	}
 	var err error
 	switch fs.NArg() {
 	case 0:
-		workspaceID, err = resolveWorkspaceIDWithToken("", tokenValue)
+		if canonicalWorkspaceID != "" {
+			workspaceID = canonicalWorkspaceID
+		} else {
+			workspaceID, err = resolveWorkspaceIDWithToken("", tokenValue)
+		}
 		localDir = strings.TrimSpace(*localDirFlag)
 		localDirExplicit = localDir != ""
 	case 1:
-		workspaceID, err = resolveWorkspaceIDWithToken(fs.Arg(0), tokenValue)
+		if canonicalWorkspaceID != "" {
+			workspaceID = canonicalWorkspaceID
+		} else {
+			workspaceID, err = resolveWorkspaceIDWithToken(fs.Arg(0), tokenValue)
+		}
 		localDir = strings.TrimSpace(*localDirFlag)
 		localDirExplicit = localDir != ""
 	case 2:
 		if strings.TrimSpace(*localDirFlag) != "" {
 			return errors.New("local directory specified twice")
 		}
-		workspaceID, err = resolveWorkspaceIDWithToken(fs.Arg(0), tokenValue)
+		if canonicalWorkspaceID != "" {
+			workspaceID = canonicalWorkspaceID
+		} else {
+			workspaceID, err = resolveWorkspaceIDWithToken(fs.Arg(0), tokenValue)
+		}
 		localDir = fs.Arg(1)
 		localDirExplicit = true
 	}
@@ -3936,6 +3972,11 @@ func runMount(args []string) error {
 		recordedLocalDir = strings.TrimSpace(record.LocalDir)
 	} else if record, ok := workspaceRecordByName(workspaceID); ok && strings.TrimSpace(record.ID) == "" {
 		recordedLocalDir = strings.TrimSpace(record.LocalDir)
+	}
+	if recordedLocalDir == "" && usesAgentRelayWorkspace && requestedWorkspace != "" && agentRelayWorkspaceMatches(requestedWorkspace, activeWorkspace) {
+		if record, ok := workspaceRecordByName(requestedWorkspace); ok {
+			recordedLocalDir = strings.TrimSpace(record.LocalDir)
+		}
 	}
 	if localDir == "" {
 		localDir = recordedLocalDir
@@ -4262,11 +4303,7 @@ func (c *workspaceCommandClient) refreshFromCloud() error {
 	if c == nil {
 		return errors.New("workspace command client is nil")
 	}
-	cloudCreds, err := loadCloudCredentials()
-	if err != nil {
-		return err
-	}
-	cloudCreds, err = refreshCloudCredentialsIfNeeded(cloudCreds)
+	cloudCreds, err := ensureCloudCredentials("", "", 0, false, io.Discard)
 	if err != nil {
 		return err
 	}
@@ -4831,29 +4868,10 @@ func latestCredentialModTime(paths ...string) (time.Time, bool) {
 }
 
 func cloudCredentialAuthLine(now time.Time) string {
-	if _, err := os.Stat(cloudCredentialsPath()); errors.Is(err, os.ErrNotExist) {
-		return "auth: server credentials only"
+	if _, err := cloudCredentialsFromAgentRelay(); err != nil {
+		return "auth: agent-relay session unavailable - run 'agent-relay login'"
 	}
-	creds, err := loadCloudCredentials()
-	if err != nil {
-		return "auth: cloud credentials unreadable - run 'relayfile login'"
-	}
-	if strings.TrimSpace(creds.AccessToken) == "" {
-		return "auth: cloud access token missing - run 'relayfile login'"
-	}
-	if expiry, ok := parseRFC3339(creds.RefreshTokenExpiresAt); ok && !now.Before(expiry) {
-		return "auth: cloud session expired - run 'relayfile login'"
-	}
-	if expiry, ok := parseRFC3339(creds.AccessTokenExpiresAt); ok {
-		remaining := expiry.Sub(now)
-		if remaining <= 0 {
-			return "auth: access token expired - run 'relayfile login'"
-		}
-		if remaining <= 15*time.Minute {
-			return fmt.Sprintf("auth: access token expires in %s", formatAuthDuration(remaining))
-		}
-	}
-	return "auth: ok"
+	return "auth: agent-relay session ok"
 }
 
 func formatAuthDuration(d time.Duration) string {
@@ -5112,7 +5130,7 @@ func newAPIClient(server, token string) (*apiClient, error) {
 		server = defaultServerURL
 	}
 	if token == "" {
-		return nil, errors.New("token is required; run relayfile login or pass --token")
+		return nil, errors.New("token is required; set RELAYFILE_TOKEN or pass --token")
 	}
 	return &apiClient{
 		baseURL:    strings.TrimRight(server, "/"),
@@ -5368,7 +5386,7 @@ func loadCredentials() (credentials, error) {
 	payload, err := os.ReadFile(credentialsPath())
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return creds, fmt.Errorf("credentials not found at %s; run relayfile login", credentialsPath())
+			return creds, fmt.Errorf("credentials not found at %s; run relayfile login --api-key for self-hosted credentials or pass --token", credentialsPath())
 		}
 		return creds, err
 	}
@@ -5723,6 +5741,10 @@ func resolveWorkspaceIDWithToken(value, token string) (string, error) {
 		return workspaceID, nil
 	}
 
+	if workspace, err := activeWorkspaceFromAgentRelay(); err == nil {
+		return strings.TrimSpace(workspace.RelayfileWorkspaceID), nil
+	}
+
 	catalog, err := loadWorkspaceCatalog()
 	if err != nil {
 		return "", err
@@ -5734,7 +5756,7 @@ func resolveWorkspaceIDWithToken(value, token string) (string, error) {
 		}
 		return defaultName, nil
 	}
-	return "", errors.New("workspace is required; pass WORKSPACE, set RELAYFILE_WORKSPACE, or run relayfile workspace use NAME")
+	return "", errors.New("workspace is required; pass WORKSPACE, set RELAYFILE_WORKSPACE, or run 'agent-relay workspace switch NAME'")
 }
 
 func catalogWorkspaceID(name string) (string, bool) {
@@ -5816,33 +5838,6 @@ func workspaceIDFromToken(token string) string {
 		}
 	}
 	return ""
-}
-
-func readCloudCredentialsFromQuery(values url.Values, fallbackAPIURL string) (cloudCredentials, error) {
-	accessToken := strings.TrimSpace(values.Get("access_token"))
-	refreshToken := strings.TrimSpace(values.Get("refresh_token"))
-	accessTokenExpiresAt := strings.TrimSpace(values.Get("access_token_expires_at"))
-	if accessToken == "" {
-		return cloudCredentials{}, errors.New("cloud login callback missing access_token")
-	}
-	if refreshToken == "" {
-		return cloudCredentials{}, errors.New("cloud login callback missing refresh_token")
-	}
-	if accessTokenExpiresAt == "" {
-		return cloudCredentials{}, errors.New("cloud login callback missing access_token_expires_at")
-	}
-	apiURL := strings.TrimRight(strings.TrimSpace(values.Get("api_url")), "/")
-	if apiURL == "" {
-		apiURL = strings.TrimRight(strings.TrimSpace(fallbackAPIURL), "/")
-	}
-	return cloudCredentials{
-		APIURL:                apiURL,
-		AccessToken:           accessToken,
-		RefreshToken:          refreshToken,
-		AccessTokenExpiresAt:  accessTokenExpiresAt,
-		RefreshTokenExpiresAt: strings.TrimSpace(values.Get("refresh_token_expires_at")),
-		UpdatedAt:             time.Now().UTC().Format(time.RFC3339),
-	}, nil
 }
 
 func fetchWorkspaceSyncStatus(client *apiClient, workspaceID string) (syncStatusResponse, error) {
@@ -7756,7 +7751,7 @@ func runMountLoop(rootCtx context.Context, syncer *mountsync.Syncer, localDir, w
 	degraded := false
 	var lastDegradedNotice time.Time
 	const degradedRecoveryInterval = time.Minute
-	const degradedStallReason = "cloud session expired — run 'relayfile login' to refresh"
+	const degradedStallReason = "cloud session expired — run 'agent-relay login' to refresh"
 
 	enterDegraded := func() {
 		if !degraded {
@@ -7792,18 +7787,12 @@ func runMountLoop(rootCtx context.Context, syncer *mountsync.Syncer, localDir, w
 		if !force && !relayfileTokenNeedsRefresh(httpClient.Token()) {
 			return nil
 		}
-		cloudCreds, err := loadCloudCredentials()
+		cloudCreds, err := ensureCloudCredentials("", "", 0, false, io.Discard)
 		if err != nil {
-			return nil
-		}
-		cloudCreds, err = refreshCloudCredentialsIfNeeded(cloudCreds)
-		if err != nil {
-			// Surface the typed error so the loop can enter degraded
-			// state per A9. Other refresh errors stay non-fatal.
 			if errors.Is(err, ErrCloudRefreshExpired) {
 				return err
 			}
-			log.Printf("cloud session refresh failed: %v", err)
+			log.Printf("agent-relay cloud session refresh failed: %v", err)
 			return nil
 		}
 		joined, err := joinWorkspaceViaCloud(cloudCreds, workspaceID, record.AgentName, record.Scopes)
@@ -7812,13 +7801,6 @@ func runMountLoop(rootCtx context.Context, syncer *mountsync.Syncer, localDir, w
 		}
 		httpClient.SetToken(joined.Token)
 		syncer.ResetWebSocket()
-		if err := saveCredentials(credentials{
-			Server:    strings.TrimRight(joined.RelayfileURL, "/"),
-			Token:     joined.Token,
-			UpdatedAt: time.Now().UTC().Format(time.RFC3339),
-		}); err != nil {
-			return err
-		}
 		record.Server = strings.TrimRight(joined.RelayfileURL, "/")
 		record.CloudAPIURL = cloudCreds.APIURL
 		if _, err := upsertWorkspaceDetails(record); err != nil {
