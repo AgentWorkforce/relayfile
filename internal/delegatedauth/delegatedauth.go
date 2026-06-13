@@ -236,7 +236,7 @@ func Renew(ctx context.Context, client *http.Client, bundle Bundle, timeout time
 	resp, err := client.Do(req)
 	if err != nil {
 		if errors.Is(reqCtx.Err(), context.DeadlineExceeded) {
-			return bundle, false, fmt.Errorf("%w: refresh timed out", ErrRefreshRejected)
+			return bundle, false, errors.New("delegated relayfile credential refresh timed out")
 		}
 		return bundle, false, err
 	}
@@ -283,7 +283,10 @@ func refreshHTTPError(status int, payload []byte) error {
 	case "delegation_expired", "workspace_token_revoked":
 		return fmt.Errorf("%w: %s", ErrRefreshRejected, parsed.Code)
 	default:
-		return fmt.Errorf("%w: relayauth refresh failed with status %d (%s)", ErrRefreshRejected, status, detail)
+		if status == http.StatusUnauthorized || status == http.StatusForbidden {
+			return fmt.Errorf("%w: relayauth refresh failed with status %d (%s)", ErrRefreshRejected, status, detail)
+		}
+		return fmt.Errorf("relayauth refresh failed with status %d (%s)", status, detail)
 	}
 }
 

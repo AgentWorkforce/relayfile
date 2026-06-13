@@ -3,6 +3,7 @@ package delegatedauth
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -121,5 +122,65 @@ func TestRenewFileRejectedRefreshDoesNotOverwriteCredentials(t *testing.T) {
 	}
 	if string(after) != string(before) {
 		t.Fatalf("credentials changed after rejected refresh\nbefore:\n%s\nafter:\n%s", before, after)
+	}
+}
+
+func TestRenewFileTransientRefreshFailureIsNotRejected(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"code":"temporary","message":"try again"}`))
+	}))
+	defer server.Close()
+
+	path := filepath.Join(t.TempDir(), "delegated.json")
+	if err := SaveAtomic(path, Bundle{
+		RelayfileURL:          "https://relayfile.test",
+		RelayfileWorkspaceID:  "rw_test",
+		AccessToken:           "access_old",
+		RefreshToken:          "refresh_old",
+		AccessTokenExpiresAt:  time.Now().Add(-time.Minute).UTC().Format(time.RFC3339),
+		RefreshTokenExpiresAt: time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
+		RelayauthURL:          server.URL,
+	}); err != nil {
+		t.Fatalf("SaveAtomic failed: %v", err)
+	}
+
+	_, changed, err := RenewFile(context.Background(), server.Client(), path, time.Second)
+	if err == nil {
+		t.Fatal("expected transient refresh error")
+	}
+	if errors.Is(err, ErrRefreshRejected) {
+		t.Fatalf("transient refresh failure must not be classified as rejected: %v", err)
+	}
+	if changed {
+		t.Fatal("expected changed=false after transient refresh failure")
+	}
+}
+
+func TestRenewTimeoutIsNotRejected(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(50 * time.Millisecond)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer server.Close()
+
+	_, changed, err := Renew(context.Background(), server.Client(), Bundle{
+		RelayfileURL:          "https://relayfile.test",
+		RelayfileWorkspaceID:  "rw_test",
+		AccessToken:           "access_old",
+		RefreshToken:          "refresh_old",
+		AccessTokenExpiresAt:  time.Now().Add(-time.Minute).UTC().Format(time.RFC3339),
+		RefreshTokenExpiresAt: time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
+		RelayauthURL:          server.URL,
+	}, time.Millisecond)
+	if err == nil {
+		t.Fatal("expected refresh timeout")
+	}
+	if errors.Is(err, ErrRefreshRejected) {
+		t.Fatalf("refresh timeout must not be classified as rejected: %v", err)
+	}
+	if changed {
+		t.Fatal("expected changed=false after refresh timeout")
 	}
 }

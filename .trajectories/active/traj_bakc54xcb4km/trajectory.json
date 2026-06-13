@@ -6,8 +6,35 @@
   },
   "status": "active",
   "startedAt": "2026-06-10T18:02:24.509Z",
-  "agents": [],
-  "chapters": [],
+  "agents": [
+    {
+      "name": "default",
+      "role": "lead",
+      "joinedAt": "2026-06-13T20:33:22.778Z"
+    }
+  ],
+  "chapters": [
+    {
+      "id": "chap_mygjl2j7xk1n",
+      "title": "Work",
+      "agentName": "default",
+      "startedAt": "2026-06-13T20:33:22.778Z",
+      "events": [
+        {
+          "ts": 1781382802778,
+          "type": "decision",
+          "content": "Fix delegated refresh error classification: Fix delegated refresh error classification",
+          "raw": {
+            "question": "Fix delegated refresh error classification",
+            "chosen": "Fix delegated refresh error classification",
+            "alternatives": [],
+            "reasoning": "Current PR maps every non-2xx refresh response and timeout to credential-expired/revoked; only explicit auth rejection should enter the expired delegated-credentials path."
+          },
+          "significance": "high"
+        }
+      ]
+    }
+  ],
   "commits": [],
   "filesChanged": [],
   "projectId": "/home/daytona/workspace",
