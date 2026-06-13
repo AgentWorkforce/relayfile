@@ -3220,6 +3220,76 @@ exit 2
 	}
 }
 
+func TestEnsureCloudCredentialsAcceptsPrereleaseAgentRelayVersion(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+	path := filepath.Join(t.TempDir(), "agent-relay")
+	script := `#!/bin/sh
+set -eu
+if [ "$*" = "--version" ]; then
+  echo "agent-relay v8.7.1-beta.1+build.5"
+  exit 0
+fi
+if [ "$*" = "cloud session --help" ]; then
+  exit 0
+fi
+if [ "$*" = "workspace active --help" ]; then
+  exit 0
+fi
+if [ "$*" = "workspace switch --help" ]; then
+  exit 0
+fi
+if [ "$*" = "cloud session --json" ]; then
+  echo '{"apiUrl":"https://relay-cloud.test","accessToken":"agent_cloud_token"}'
+  exit 0
+fi
+echo "unexpected args: $*" >&2
+exit 2
+`
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake prerelease agent-relay failed: %v", err)
+	}
+	t.Setenv("AGENT_RELAY_BIN", path)
+
+	creds, err := ensureCloudCredentials("", "", 0, false, io.Discard)
+	if err != nil {
+		t.Fatalf("ensureCloudCredentials failed: %v", err)
+	}
+	if creds.AccessToken != "agent_cloud_token" {
+		t.Fatalf("expected agent-relay access token, got %q", creds.AccessToken)
+	}
+}
+
+func TestEnsureCloudCredentialsTimesOutHangingAgentRelayPreflight(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+	path := filepath.Join(t.TempDir(), "agent-relay")
+	script := `#!/bin/sh
+set -eu
+if [ "$*" = "--version" ]; then
+  exec sleep 30
+fi
+echo "unexpected args: $*" >&2
+exit 2
+`
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake hanging agent-relay failed: %v", err)
+	}
+	t.Setenv("AGENT_RELAY_BIN", path)
+
+	start := time.Now()
+	_, err := ensureCloudCredentials("", "", 0, false, io.Discard)
+	if err == nil {
+		t.Fatal("expected hanging agent-relay preflight to fail")
+	}
+	if elapsed := time.Since(start); elapsed > 10*time.Second {
+		t.Fatalf("expected preflight timeout before 10s, elapsed %s", elapsed)
+	}
+	if got := err.Error(); !strings.Contains(got, "timed out after 5s") {
+		t.Fatalf("expected timeout detail, got %q", got)
+	}
+}
+
 // TestLoginAPIKeyFlagPromptsForToken covers the opt-in legacy interactive
 // flow: --api-key forces runLogin to prompt for an API key on stdin instead
 // of running the cloud browser flow.

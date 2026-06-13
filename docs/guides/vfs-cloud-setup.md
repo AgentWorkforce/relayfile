@@ -20,7 +20,7 @@ relayfile
 
 This runs the full setup wizard:
 
-1. Opens a browser to sign in to Relayfile Cloud.
+1. Uses your active `agent-relay login` session for Relayfile Cloud.
 2. Prompts for a workspace name (default: `relayfile-<timestamp>`).
 3. Prompts for an integration provider (GitHub, Notion, Linear, Slack, or none).
 4. Prompts for a local directory (default: `./relayfile-mount`).
@@ -44,7 +44,7 @@ relayfile setup \
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--cloud-token` | `$RELAYFILE_CLOUD_TOKEN` | Skip browser login |
+| `--cloud-token` | `$RELAYFILE_CLOUD_TOKEN` | Use an explicit Cloud token instead of the active agent-relay session |
 | `--provider` | prompted | `github`, `notion`, `linear`, `slack`, or `none` |
 | `--workspace` | prompted | Workspace display name |
 | `--local-dir` | `./relayfile-mount` | Local mirror directory |
@@ -52,20 +52,19 @@ relayfile setup \
 | `--skip-mount` | false | Finish setup without starting the sync loop |
 | `--once` | false | Run one sync cycle then exit (CI/probe use) |
 | `--cloud-api-url` | `https://agentrelay.com/cloud` | Cloud control-plane URL |
-| `--login-timeout` | `5m` | OAuth callback wait |
+| `--login-timeout` | `5m` | Deprecated; agent-relay owns login timeouts |
 | `--connect-timeout` | `5m` | Integration readiness wait |
 
 ### Re-running setup (idempotent)
 
-You can safely re-run `relayfile setup` with the same `--workspace` name. It reuses the existing workspace ID, refreshes the access token, and skips the integration connect step if the provider is already connected.
+You can safely re-run `relayfile setup` with the same `--workspace` name. It reuses the existing workspace ID, mints a fresh Relayfile runtime token from the active agent-relay session, and skips the integration connect step if the provider is already connected.
 
 ### Exit codes
 
 | Code | Meaning |
 |-----:|---------|
 | 0 | Setup complete |
-| 10 | Cloud login failed (state mismatch, OAuth error) |
-| 11 | Cloud login timed out |
+| 1 | Generic failure, including missing or expired agent-relay session |
 | 20 | Workspace create/join failed |
 | 30 | Integration connect failed |
 | 31 | Integration not ready before deadline |
@@ -317,7 +316,7 @@ error: cloud session expired. Run 'agent-relay login' to sign in again.
 
 Run `agent-relay login`. The running mount continues serving local reads from disk until the process is restarted.
 
-If the refresh token itself expires (default 7 days), the mount enters degraded mode: local reads work, local writes are refused and logged to `.relay/permissions-denied.log` with reason `cloud_session_expired`. Fix:
+If the agent-relay session cannot mint new Cloud credentials and the current Relayfile runtime token has expired, the mount enters degraded mode: local reads work, local writes are refused and logged to `.relay/permissions-denied.log` with reason `cloud_session_expired`. Fix:
 
 ```bash
 agent-relay login

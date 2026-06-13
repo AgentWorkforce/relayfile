@@ -45,14 +45,14 @@ below are normative for `setup`; defaults are listed in parentheses.
 | Flag                | Default                                | Purpose                                                           |
 |---------------------|----------------------------------------|-------------------------------------------------------------------|
 | `--cloud-api-url`   | `https://agentrelay.com/cloud`         | Cloud control plane URL                                           |
-| `--cloud-token`     | `$RELAYFILE_CLOUD_TOKEN`               | Skip browser login when set (CI/headless)                         |
+| `--cloud-token`     | `$RELAYFILE_CLOUD_TOKEN`               | Use explicit Cloud token instead of agent-relay session lookup     |
 | `--workspace`       | prompted, default `relayfile-<ts>`     | Workspace display name                                            |
 | `--provider`        | prompted, default `github`             | Integration provider; `none` skips                                 |
 | `--local-dir`       | prompted, default `./relayfile-mount`  | Mirror directory                                                   |
 | `--no-open`         | `false`                                | Print URLs instead of opening a browser                           |
 | `--skip-mount`      | `false`                                | Finish setup without starting the mount loop                       |
 | `--once`            | `false`                                | Run a single sync cycle and exit (CI/probe)                       |
-| `--login-timeout`   | `5m`                                   | OAuth callback timeout                                             |
+| `--login-timeout`   | `5m`                                   | Deprecated; agent-relay owns login timeouts                        |
 | `--connect-timeout` | `5m`                                   | Integration readiness timeout                                      |
 
 ### 1.2 Required ordered steps
@@ -109,9 +109,7 @@ a non-zero code from this table:
 | Code | Meaning                                              |
 |-----:|------------------------------------------------------|
 | 0    | Setup complete (mount running or skipped)            |
-| 1    | Generic failure                                       |
-| 10   | Cloud login failed (state mismatch / oauth error)     |
-| 11   | Cloud login timed out                                 |
+| 1    | Generic failure, including missing or expired agent-relay session |
 | 20   | Workspace create/join failed                          |
 | 30   | Integration connect failed                            |
 | 31   | Integration not ready before deadline                 |
@@ -439,7 +437,8 @@ it automatically when the token age exceeds 55 minutes.
 
 ### 5.4 What the user can lose
 
-If the refresh token also expires (default 7 days), the mount **MUST**:
+If the agent-relay session cannot mint new Cloud credentials and the current
+Relayfile runtime token has expired, the mount **MUST**:
 
 - Continue serving local reads from disk (already-synced state).
 - Refuse local writes for affected paths and place them in
@@ -744,8 +743,7 @@ against realistic mocks of Cloud, Nango, and Relayfile services.
 ### 10.1 Mock services
 
 - **Mock Cloud** — `httptest` server in Go (CLI tests) and a
-  `node:http` server in TS (SDK tests) implementing `/api/v1/cli/login`,
-  `/api/v1/auth/token/refresh`, `/api/v1/workspaces`,
+  `node:http` server in TS (SDK tests) implementing `/api/v1/workspaces`,
   `/api/v1/workspaces/{id}/join`,
   `/api/v1/workspaces/{id}/integrations/connect-session`,
   `/api/v1/workspaces/{id}/integrations/{provider}/status`,
@@ -767,14 +765,14 @@ lives in.
 | # | Scenario                                                                | File                                              |
 |---|--------------------------------------------------------------------------|---------------------------------------------------|
 | A1 | `relayfile setup` happy path with `--cloud-token` (no browser): creates workspace, connects github, waits for sync ready, mount runs one cycle, exits 0 with `--once`. | `cmd/relayfile/setup_e2e_test.go`                |
-| A2 | `relayfile setup` with browser flow, state mismatch returns exit 10.    | `cmd/relayfile/setup_e2e_test.go`                |
+| A2 | Missing, stale, or incompatible `agent-relay` CLI fails fast with actionable install/update guidance before Cloud session commands run. | `cmd/relayfile/setup_e2e_test.go`                |
 | A3 | `relayfile setup` re-run with same `--workspace` reuses local id, refreshes token, skips connect when integration status is already ready. | `cmd/relayfile/setup_e2e_test.go`                |
 | A4 | `relayfile integration connect notion` after setup: workspace gains `/notion` subtree without restarting mount. | `cmd/relayfile/integration_e2e_test.go`          |
 | A5 | Mirror conflict: local edit + remote edit with new revision yields `.relay/conflicts/<path>.<rev>.local` and a refreshed local file. | `internal/mountsync/syncer_conflict_test.go`     |
 | A6 | Schema validation failure on writeback: file lands in `.relay/conflicts/<path>.invalid.<ts>`, original restored, exit code 0 in CLI status. | `internal/mountsync/syncer_writeback_test.go`    |
 | A7 | Dead-letter surfacing: a 422 from Cloud during writeback creates `.relay/dead-letter/<opId>.json`; `relayfile ops replay` clears it on success. | `cmd/relayfile/ops_e2e_test.go`                  |
 | A8 | Token refresh: VFS token expires mid-mount; mount calls `/join` with the cloud access token, replaces credentials, continues without dropping websocket. | `internal/mountsync/syncer_refresh_test.go`      |
-| A9 | Cloud refresh token expired: mount enters read-only degraded state, prints recovery instruction once per minute, no exit. | `internal/mountsync/syncer_refresh_test.go`      |
+| A9 | Agent-relay session unavailable after the current VFS token expires: mount enters read-only degraded state, prints recovery instruction once per minute, no exit. | `internal/mountsync/syncer_refresh_test.go`      |
 | A10 | Initial sync gate: Cloud reports `cataloging`; CLI waits, polls `/sync`, exits 0 once `ready`. With a forced timeout it exits 0 with the resume hint. | `cmd/relayfile/setup_e2e_test.go`                |
 | A11 | Webhook unhealthy: Cloud returns `webhookHealthy=false, lagSeconds=80`; `relayfile status` includes the warning row. | `cmd/relayfile/status_e2e_test.go`               |
 | A12 | Catalog refresh: a new provider appears in the mocked `/integrations/catalog`; CLI accepts it within 1 h or after a 409 forces revalidation. | `cmd/relayfile/catalog_test.go`                  |

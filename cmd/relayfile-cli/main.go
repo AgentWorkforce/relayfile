@@ -36,16 +36,17 @@ import (
 )
 
 const (
-	defaultServerURL        = "https://api.relayfile.dev"
-	defaultCloudAPIURL      = "https://agentrelay.com/cloud"
-	defaultObserverURL      = "https://agentrelay.com/observer/file"
-	minAgentRelayCLIVersion = "8.7.0"
-	configDirName           = ".relayfile"
-	websocketReconcileEvery = 10
-	defaultMountMode        = "poll"
-	defaultMountInterval    = 30 * time.Second
-	minMountPollInterval    = 5 * time.Second
-	defaultMountTimeout     = 15 * time.Second
+	defaultServerURL           = "https://api.relayfile.dev"
+	defaultCloudAPIURL         = "https://agentrelay.com/cloud"
+	defaultObserverURL         = "https://agentrelay.com/observer/file"
+	minAgentRelayCLIVersion    = "8.7.0"
+	agentRelayPreflightTimeout = 5 * time.Second
+	configDirName              = ".relayfile"
+	websocketReconcileEvery    = 10
+	defaultMountMode           = "poll"
+	defaultMountInterval       = 30 * time.Second
+	minMountPollInterval       = 5 * time.Second
+	defaultMountTimeout        = 15 * time.Second
 )
 
 var defaultJoinScopes = []string{"fs:read", "fs:write"}
@@ -751,7 +752,7 @@ func runSetup(args []string, stdin io.Reader, stdout io.Writer) error {
 	fs := flag.NewFlagSet("setup", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	cloudAPIURL := fs.String("cloud-api-url", envOrDefault("RELAYFILE_CLOUD_API_URL", defaultCloudAPIURL), "Relayfile Cloud API URL")
-	cloudToken := fs.String("cloud-token", strings.TrimSpace(os.Getenv("RELAYFILE_CLOUD_TOKEN")), "Relayfile Cloud access token; skips browser login when set")
+	cloudToken := fs.String("cloud-token", strings.TrimSpace(os.Getenv("RELAYFILE_CLOUD_TOKEN")), "Relayfile Cloud access token; skips agent-relay session lookup when set")
 	workspaceName := fs.String("workspace", "", "workspace name to create")
 	provider := fs.String("provider", "", "integration provider to connect; use none to skip")
 	backend := fs.String("backend", "", "integration backend to request (nango or composio)")
@@ -759,7 +760,7 @@ func runSetup(args []string, stdin io.Reader, stdout io.Writer) error {
 	noOpen := fs.Bool("no-open", false, "print browser URLs instead of opening them")
 	skipMount := fs.Bool("skip-mount", false, "finish after setup without starting the mount process")
 	once := fs.Bool("once", false, "run one mount sync cycle and exit")
-	loginTimeout := fs.Duration("login-timeout", 5*time.Minute, "cloud login timeout")
+	loginTimeout := fs.Duration("login-timeout", 5*time.Minute, "deprecated cloud login timeout")
 	connectTimeout := fs.Duration("connect-timeout", 5*time.Minute, "integration connection timeout")
 	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
 		"cloud-api-url":   true,
@@ -938,7 +939,7 @@ func agentRelayBinary() string {
 
 func ensureAgentRelayCLICompatible() error {
 	bin := agentRelayBinary()
-	versionOutput, err := exec.Command(bin, "--version").CombinedOutput()
+	versionOutput, err := runAgentRelayPreflightCommand(bin, "--version")
 	if err != nil {
 		detail := strings.TrimSpace(string(versionOutput))
 		if detail == "" {
@@ -958,7 +959,7 @@ func ensureAgentRelayCLICompatible() error {
 		{"workspace", "active", "--help"},
 		{"workspace", "switch", "--help"},
 	} {
-		output, err := exec.Command(bin, args...).CombinedOutput()
+		output, err := runAgentRelayPreflightCommand(bin, args...)
 		if err != nil {
 			detail := strings.TrimSpace(string(output))
 			if detail == "" {
@@ -970,10 +971,23 @@ func ensureAgentRelayCLICompatible() error {
 	return nil
 }
 
+func runAgentRelayPreflightCommand(bin string, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), agentRelayPreflightTimeout)
+	defer cancel()
+	output, err := exec.CommandContext(ctx, bin, args...).CombinedOutput()
+	if ctx.Err() == context.DeadlineExceeded {
+		return output, fmt.Errorf("timed out after %s", agentRelayPreflightTimeout)
+	}
+	return output, err
+}
+
 func firstSemver(value string) string {
 	fields := strings.Fields(strings.TrimSpace(value))
 	for _, field := range fields {
 		field = strings.TrimPrefix(field, "v")
+		if idx := strings.IndexAny(field, "-+"); idx != -1 {
+			field = field[:idx]
+		}
 		if isSemver(field) {
 			return field
 		}
@@ -1835,10 +1849,10 @@ func runLogin(args []string, stdin io.Reader, stdout io.Writer) error {
 	server := fs.String("server", envOrDefault("RELAYFILE_SERVER", envOrDefault("RELAYFILE_BASE_URL", defaultServerURL)), "relayfile server URL (only used with --api-key)")
 	token := fs.String("token", strings.TrimSpace(os.Getenv("RELAYFILE_TOKEN")), "relayfile API token")
 	cloudAPIURL := fs.String("cloud-api-url", envOrDefault("RELAYFILE_CLOUD_API_URL", defaultCloudAPIURL), "Relayfile Cloud API URL")
-	cloudToken := fs.String("cloud-token", strings.TrimSpace(os.Getenv("RELAYFILE_CLOUD_TOKEN")), "Relayfile Cloud access token; skips browser login when set")
-	apiKey := fs.Bool("api-key", false, "use the legacy API-key flow against --server instead of the cloud browser login")
+	cloudToken := fs.String("cloud-token", strings.TrimSpace(os.Getenv("RELAYFILE_CLOUD_TOKEN")), "Relayfile Cloud access token; deprecated for login")
+	apiKey := fs.Bool("api-key", false, "use the legacy API-key flow against --server instead of agent-relay login")
 	noOpen := fs.Bool("no-open", false, "print the cloud sign-in URL instead of opening it")
-	loginTimeout := fs.Duration("login-timeout", 5*time.Minute, "cloud login timeout")
+	loginTimeout := fs.Duration("login-timeout", 5*time.Minute, "deprecated cloud login timeout")
 	workspaceFlag := fs.String("workspace", "", "workspace name or id to refresh; defaults to the active workspace")
 	skipWorkspace := fs.Bool("skip-workspace-refresh", false, "sign into the cloud only; do not refresh the workspace token")
 	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
@@ -3569,11 +3583,11 @@ func runWorkspaceJoin(args []string, stdout io.Writer) error {
 	fs := flag.NewFlagSet("workspace join", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	cloudAPIURL := fs.String("cloud-api-url", envOrDefault("RELAYFILE_CLOUD_API_URL", defaultCloudAPIURL), "Relayfile Cloud API URL")
-	cloudToken := fs.String("cloud-token", strings.TrimSpace(os.Getenv("RELAYFILE_CLOUD_TOKEN")), "Relayfile Cloud access token; skips browser login when set")
+	cloudToken := fs.String("cloud-token", strings.TrimSpace(os.Getenv("RELAYFILE_CLOUD_TOKEN")), "Relayfile Cloud access token; skips agent-relay session lookup when set")
 	name := fs.String("name", "", "local workspace name")
 	writeAccess := fs.Bool("write", false, "request read/write workspace token scopes")
 	noOpen := fs.Bool("no-open", false, "print browser URLs instead of opening them")
-	loginTimeout := fs.Duration("login-timeout", 5*time.Minute, "cloud login timeout")
+	loginTimeout := fs.Duration("login-timeout", 5*time.Minute, "deprecated cloud login timeout")
 	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
 		"cloud-api-url": true,
 		"cloud-token":   true,
@@ -3641,6 +3655,9 @@ func runWorkspaceUse(args []string, stdout io.Writer) error {
 		return errors.New("usage: relayfile workspace use NAME")
 	}
 
+	if err := ensureAgentRelayCLICompatible(); err != nil {
+		return err
+	}
 	cmd := exec.Command(agentRelayBinary(), "workspace", "switch", fs.Arg(0))
 	cmd.Stdout = stdout
 	cmd.Stderr = stdout

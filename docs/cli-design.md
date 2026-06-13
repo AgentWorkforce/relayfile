@@ -91,7 +91,7 @@ relayfile setup [--provider github] [--workspace my-project] [--local-dir ./rela
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--cloud-api-url` | `https://agentrelay.com/cloud` | Relayfile Cloud API URL |
-| `--cloud-token` | `RELAYFILE_CLOUD_TOKEN` | Cloud access token for headless setup; skips browser login |
+| `--cloud-token` | `RELAYFILE_CLOUD_TOKEN` | Cloud access token for headless setup; skips agent-relay session lookup |
 | `--provider` | prompted, default `github` | Integration to connect; use `none` to skip |
 | `--workspace` | prompted | Workspace name to create |
 | `--local-dir` | prompted, default `./relayfile-mount` | Local VFS mount directory |
@@ -584,8 +584,6 @@ Error: not authenticated. Run 'agent-relay login' for Cloud or set RELAYFILE_TOK
 | 1 | General error (network, server error, invalid input) |
 | 2 | Authentication failure (no token, token rejected) |
 | 3 | Resource not found (workspace doesn't exist) |
-| 10 | Cloud login failed (OAuth state mismatch or error) |
-| 11 | Cloud login timed out |
 | 20 | Workspace create/join failed |
 | 30 | Integration connect failed |
 | 31 | Integration not ready before deadline |
@@ -657,12 +655,12 @@ The CLI imports `internal/mountsync` directly for the `mount` subcommand rather 
 ```bash
 # First-time setup
 relayfile
-# Opens Relayfile Cloud login
+# Uses the active agent-relay login session
 # Opens the selected integration connect flow
 # Starts syncing files into ./relayfile-mount
 
 # Token-first self-hosted setup
-relayfile login --server https://api.relayfile.dev
+relayfile login --api-key --server https://api.relayfile.dev
 # API key: ********
 # Stored credentials for https://api.relayfile.dev
 
