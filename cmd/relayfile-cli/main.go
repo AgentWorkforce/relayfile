@@ -30,6 +30,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/agentworkforce/relayfile/internal/delegatedauth"
 	"github.com/agentworkforce/relayfile/internal/mountsync"
 	"github.com/agentworkforce/relayfile/internal/writeback"
 	"github.com/fsnotify/fsnotify"
@@ -235,18 +236,9 @@ type cloudWorkspaceCreateResponse struct {
 	Name         string `json:"name,omitempty"`
 }
 
-type cloudWorkspaceJoinRequest struct {
+type cloudRelayfileDelegatedTokenRequest struct {
 	AgentName string   `json:"agentName,omitempty"`
 	Scopes    []string `json:"scopes,omitempty"`
-}
-
-type cloudWorkspaceJoinResponse struct {
-	WorkspaceID      string `json:"workspaceId"`
-	Token            string `json:"token"`
-	RelayfileURL     string `json:"relayfileUrl"`
-	WSURL            string `json:"wsUrl,omitempty"`
-	RelaycastAPIKey  string `json:"relaycastApiKey,omitempty"`
-	RelaycastBaseURL string `json:"relaycastBaseUrl,omitempty"`
 }
 
 type cloudConnectSessionRequest struct {
@@ -847,11 +839,16 @@ func runSetup(args []string, stdin io.Reader, stdout io.Writer) error {
 		return err
 	}
 
-	joined, err := joinWorkspaceViaCloud(tokenSet, record.ID, record.AgentName, record.Scopes)
+	controlToken := tokenSet.AccessToken
+	delegated, err := delegatedRelayfileTokenViaCloud(tokenSet, record.ID, record.AgentName, record.Scopes)
 	if err != nil {
 		return err
 	}
-	record, err = persistJoinedWorkspace(record, joined, tokenSet.APIURL, absLocalDir, true)
+	delegatedCredsFile := delegatedCredentialsPath()
+	if err := delegatedauth.SaveAtomic(delegatedCredsFile, delegated); err != nil {
+		return fmt.Errorf("persist delegated relayfile credentials: %w", err)
+	}
+	record, err = persistDelegatedWorkspace(record, delegated, absLocalDir, true)
 	if err != nil {
 		return err
 	}
@@ -865,19 +862,19 @@ func runSetup(args []string, stdin io.Reader, stdout io.Writer) error {
 	if selectedProvider != "" && selectedProvider != "none" && selectedProvider != "skip" {
 		createdConnection := false
 		if createdWorkspace {
-			if err := connectCloudIntegration(tokenSet.APIURL, record.ID, joined.Token, selectedProvider, requestedBackend, absLocalDir, *connectTimeout, !*noOpen, stdout); err != nil {
+			if err := connectCloudIntegration(tokenSet.APIURL, record.ID, controlToken, selectedProvider, requestedBackend, absLocalDir, *connectTimeout, !*noOpen, stdout); err != nil {
 				return err
 			}
 			createdConnection = true
 		} else {
 			var err error
-			createdConnection, err = ensureCloudIntegration(tokenSet.APIURL, record.ID, joined.Token, selectedProvider, requestedBackend, absLocalDir, *connectTimeout, !*noOpen, stdout)
+			createdConnection, err = ensureCloudIntegration(tokenSet.APIURL, record.ID, controlToken, selectedProvider, requestedBackend, absLocalDir, *connectTimeout, !*noOpen, stdout)
 			if err != nil {
 				return err
 			}
 		}
 		if createdConnection && isAtlassianProvider(selectedProvider) {
-			if err := runAtlassianSitePicker(tokenSet.APIURL, record.ID, joined.Token, selectedProvider, stdin, stdout); err != nil {
+			if err := runAtlassianSitePicker(tokenSet.APIURL, record.ID, controlToken, selectedProvider, stdin, stdout); err != nil {
 				return err
 			}
 		}
@@ -890,8 +887,8 @@ func runSetup(args []string, stdin io.Reader, stdout io.Writer) error {
 	}
 
 	mountArgs := []string{
-		"--server", strings.TrimRight(joined.RelayfileURL, "/"),
-		"--token", joined.Token,
+		"--server", strings.TrimRight(delegated.ServerURL(), "/"),
+		"--creds-file", delegatedCredsFile,
 		record.ID,
 		localDir,
 	}
@@ -1151,6 +1148,35 @@ func agentRelayWorkspaceMatches(value string, workspace agentRelayActiveWorkspac
 	return false
 }
 
+func workspaceRequestMatchesDelegatedCredentials(value, relayfileWorkspaceID string) bool {
+	value = strings.TrimSpace(value)
+	relayfileWorkspaceID = strings.TrimSpace(relayfileWorkspaceID)
+	if value == "" {
+		return true
+	}
+	if relayfileWorkspaceID == "" {
+		return false
+	}
+	if value == relayfileWorkspaceID {
+		return true
+	}
+	if id, ok := catalogWorkspaceID(value); ok && strings.TrimSpace(id) == relayfileWorkspaceID {
+		return true
+	}
+	for _, lookup := range []func(string) (workspaceRecord, bool){workspaceRecordByName, workspaceRecordByID} {
+		record, ok := lookup(value)
+		if !ok {
+			continue
+		}
+		for _, candidate := range []string{record.ID, record.RelayWorkspaceID, record.Name} {
+			if strings.TrimSpace(candidate) == relayfileWorkspaceID {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func loadCloudCredentials() (cloudCredentials, error) {
 	var creds cloudCredentials
 	payload, err := os.ReadFile(cloudCredentialsPath())
@@ -1174,6 +1200,12 @@ func loadCloudCredentials() (cloudCredentials, error) {
 // state described in the productized cloud-mount contract acceptance test
 // A9 ("Cloud refresh token expired").
 var ErrCloudRefreshExpired = errors.New("cloud session expired. Run 'agent-relay login' to sign in again.")
+
+var ErrDelegatedRelayfileCredentialsExpired = errors.New("delegated relayfile credentials expired or revoked. Re-bootstrap relayfile credentials with agent-relay login.")
+
+func isMountCredentialExpired(err error) bool {
+	return errors.Is(err, ErrCloudRefreshExpired) || errors.Is(err, ErrDelegatedRelayfileCredentialsExpired)
+}
 
 func providerPromptText(entries []integrationCatalogEntry) string {
 	ids := make([]string, 0, len(entries)+1)
@@ -1543,43 +1575,7 @@ func ensureWorkspaceForSetup(cloud cloudCredentials, name, localDir string) (wor
 	return record, true, nil
 }
 
-func persistJoinedWorkspace(record workspaceRecord, joined cloudWorkspaceJoinResponse, cloudAPIURL, localDir string, setDefault bool) (workspaceRecord, error) {
-	serverURL := strings.TrimRight(strings.TrimSpace(joined.RelayfileURL), "/")
-	if joinedWorkspaceID := strings.TrimSpace(joined.WorkspaceID); joinedWorkspaceID != "" {
-		if strings.TrimSpace(record.ID) == "" {
-			record.ID = joinedWorkspaceID
-		} else {
-			record.RelayWorkspaceID = joinedWorkspaceID
-		}
-	}
-	record.Server = serverURL
-	record.LocalDir = localDir
-	record.CloudAPIURL = cloudAPIURL
-	record.LastUsedAt = time.Now().UTC().Format(time.RFC3339)
-	if record.AgentName == "" {
-		record.AgentName = "relayfile-cli"
-	}
-	if len(record.Scopes) == 0 {
-		record.Scopes = append([]string(nil), defaultJoinScopes...)
-	}
-	persisted, err := upsertWorkspaceDetails(record)
-	if err != nil {
-		return workspaceRecord{}, err
-	}
-	return persisted, nil
-}
-
-func relayWorkspaceIDForRecord(record workspaceRecord, joined cloudWorkspaceJoinResponse) string {
-	if relayID := strings.TrimSpace(joined.WorkspaceID); relayID != "" {
-		return relayID
-	}
-	if relayID := strings.TrimSpace(record.RelayWorkspaceID); relayID != "" {
-		return relayID
-	}
-	return strings.TrimSpace(record.ID)
-}
-
-func joinWorkspaceViaCloud(cloud cloudCredentials, workspaceID, agentName string, scopes []string) (cloudWorkspaceJoinResponse, error) {
+func delegatedRelayfileTokenViaCloud(cloud cloudCredentials, workspaceID, agentName string, scopes []string) (delegatedauth.Bundle, error) {
 	if agentName == "" {
 		agentName = "relayfile-cli"
 	}
@@ -1588,25 +1584,49 @@ func joinWorkspaceViaCloud(cloud cloudCredentials, workspaceID, agentName string
 	}
 	client, err := newAPIClient(cloud.APIURL, cloud.AccessToken)
 	if err != nil {
-		return cloudWorkspaceJoinResponse{}, err
+		return delegatedauth.Bundle{}, err
 	}
-	var joined cloudWorkspaceJoinResponse
-	if err := client.postJSON(context.Background(), fmt.Sprintf("/api/v1/workspaces/%s/join", url.PathEscape(workspaceID)), cloudWorkspaceJoinRequest{
-		AgentName: agentName,
-		Scopes:    scopes,
-	}, &joined); err != nil {
-		return cloudWorkspaceJoinResponse{}, fmt.Errorf("join cloud workspace: %w", err)
+	var bundle delegatedauth.Bundle
+	if err := client.postJSON(
+		context.Background(),
+		fmt.Sprintf("/api/v1/workspaces/%s/relayfile/delegated-token", url.PathEscape(workspaceID)),
+		cloudRelayfileDelegatedTokenRequest{
+			AgentName: agentName,
+			Scopes:    scopes,
+		},
+		&bundle,
+	); err != nil {
+		return delegatedauth.Bundle{}, fmt.Errorf("mint delegated relayfile credentials: %w", err)
 	}
-	if strings.TrimSpace(joined.WorkspaceID) == "" {
-		joined.WorkspaceID = workspaceID
+	if bundle.Workspace() == "" {
+		bundle.RelayfileWorkspaceID = workspaceID
 	}
-	if strings.TrimSpace(joined.Token) == "" {
-		return cloudWorkspaceJoinResponse{}, errors.New("cloud join response missing token")
+	if err := bundle.ValidateForUse(); err != nil {
+		return delegatedauth.Bundle{}, fmt.Errorf("delegated relayfile credential bundle invalid: %w", err)
 	}
-	if strings.TrimSpace(joined.RelayfileURL) == "" {
-		return cloudWorkspaceJoinResponse{}, errors.New("cloud join response missing relayfileUrl")
+	return bundle, nil
+}
+
+func persistDelegatedWorkspace(record workspaceRecord, bundle delegatedauth.Bundle, localDir string, setDefault bool) (workspaceRecord, error) {
+	relayWorkspaceID := bundle.Workspace()
+	if relayWorkspaceID != "" {
+		if strings.TrimSpace(record.ID) == "" {
+			record.ID = relayWorkspaceID
+		} else if strings.TrimSpace(record.ID) != relayWorkspaceID {
+			record.RelayWorkspaceID = relayWorkspaceID
+		}
 	}
-	return joined, nil
+	record.Server = strings.TrimRight(bundle.ServerURL(), "/")
+	record.LocalDir = localDir
+	record.CloudAPIURL = ""
+	record.LastUsedAt = time.Now().UTC().Format(time.RFC3339)
+	if record.AgentName == "" {
+		record.AgentName = "relayfile-cli"
+	}
+	if len(record.Scopes) == 0 {
+		record.Scopes = append([]string(nil), defaultJoinScopes...)
+	}
+	return upsertWorkspaceDetails(record)
 }
 
 func ensureCloudIntegration(cloudAPIURL, workspaceID, workspaceToken, provider, requestedBackend, localDir string, timeout time.Duration, shouldOpenBrowser bool, stdout io.Writer) (bool, error) {
@@ -2007,19 +2027,22 @@ func runIntegrationConnect(args []string, stdin io.Reader, stdout io.Writer) err
 	if err != nil {
 		return err
 	}
-	joined, err := joinWorkspaceViaCloud(cloudCreds, record.ID, record.AgentName, record.Scopes)
+	delegated, err := delegatedRelayfileTokenViaCloud(cloudCreds, record.ID, record.AgentName, record.Scopes)
 	if err != nil {
 		return err
 	}
-	record, err = persistJoinedWorkspace(record, joined, cloudCreds.APIURL, record.LocalDir, true)
+	if err := delegatedauth.SaveAtomic(delegatedCredentialsPath(), delegated); err != nil {
+		return fmt.Errorf("persist delegated relayfile credentials: %w", err)
+	}
+	record, err = persistDelegatedWorkspace(record, delegated, record.LocalDir, true)
 	if err != nil {
 		return err
 	}
-	createdConnection, err := ensureCloudIntegration(cloudCreds.APIURL, record.ID, joined.Token, provider, requestedBackend, record.LocalDir, *timeout, !*noOpen, stdout)
+	createdConnection, err := ensureCloudIntegration(cloudCreds.APIURL, record.ID, cloudCreds.AccessToken, provider, requestedBackend, record.LocalDir, *timeout, !*noOpen, stdout)
 	if err != nil {
 		return err
 	}
-	relayWorkspaceID := relayWorkspaceIDForRecord(record, joined)
+	relayWorkspaceID := delegated.Workspace()
 	if relayWorkspaceID != "" && relayWorkspaceID != record.ID {
 		fmt.Fprintf(stdout, "Workspace: %s (Relayfile runtime: %s)\n", record.ID, relayWorkspaceID)
 	}
@@ -2031,11 +2054,11 @@ func runIntegrationConnect(args []string, stdin io.Reader, stdout io.Writer) err
 	// to dive into the Nango dashboard. For other providers this is a
 	// no-op so we preserve the existing flow.
 	if createdConnection && isAtlassianProvider(provider) {
-		if err := runAtlassianSitePicker(cloudCreds.APIURL, record.ID, joined.Token, provider, stdin, stdout); err != nil {
+		if err := runAtlassianSitePicker(cloudCreds.APIURL, record.ID, cloudCreds.AccessToken, provider, stdin, stdout); err != nil {
 			return err
 		}
 	}
-	return waitForInitialSync(joined.RelayfileURL, joined.Token, relayWorkspaceID, provider, record.LocalDir, *timeout, stdout)
+	return waitForInitialSync(delegated.ServerURL(), delegated.BearerToken(), relayWorkspaceID, provider, record.LocalDir, *timeout, stdout)
 }
 
 func isAtlassianProvider(provider string) bool {
@@ -2368,11 +2391,7 @@ func runIntegrationList(args []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	joined, err := joinWorkspaceViaCloud(cloudCreds, record.ID, record.AgentName, record.Scopes)
-	if err != nil {
-		return err
-	}
-	client, err := newAPIClient(cloudCreds.APIURL, joined.Token)
+	client, err := newAPIClient(cloudCreds.APIURL, cloudCreds.AccessToken)
 	if err != nil {
 		return err
 	}
@@ -2383,8 +2402,7 @@ func runIntegrationList(args []string, stdout io.Writer) error {
 	if *jsonOutput {
 		return writeJSON(stdout, entries)
 	}
-	relayWorkspaceID := relayWorkspaceIDForRecord(record, joined)
-	if relayWorkspaceID != "" && relayWorkspaceID != record.ID {
+	if relayWorkspaceID := strings.TrimSpace(record.RelayWorkspaceID); relayWorkspaceID != "" && relayWorkspaceID != record.ID {
 		fmt.Fprintf(stdout, "Workspace: %s (Relayfile runtime: %s)\n", record.ID, relayWorkspaceID)
 	}
 	if len(entries) == 0 {
@@ -2434,11 +2452,7 @@ func runIntegrationDisconnect(args []string, stdin io.Reader, stdout io.Writer) 
 	if err != nil {
 		return err
 	}
-	joined, err := joinWorkspaceViaCloud(cloudCreds, record.ID, record.AgentName, record.Scopes)
-	if err != nil {
-		return err
-	}
-	client, err := newAPIClient(cloudCreds.APIURL, joined.Token)
+	client, err := newAPIClient(cloudCreds.APIURL, cloudCreds.AccessToken)
 	if err != nil {
 		return err
 	}
@@ -2511,11 +2525,7 @@ func runIntegrationAdopt(args []string, stdin io.Reader, stdout io.Writer) error
 	if err != nil {
 		return err
 	}
-	joined, err := joinWorkspaceViaCloud(cloudCreds, record.ID, record.AgentName, record.Scopes)
-	if err != nil {
-		return err
-	}
-	client, err := newAPIClient(cloudCreds.APIURL, joined.Token)
+	client, err := newAPIClient(cloudCreds.APIURL, cloudCreds.AccessToken)
 	if err != nil {
 		return err
 	}
@@ -2660,11 +2670,7 @@ func runIntegrationSetMetadata(args []string, stdin io.Reader, stdout io.Writer)
 	if err != nil {
 		return err
 	}
-	joined, err := joinWorkspaceViaCloud(cloudCreds, record.ID, record.AgentName, record.Scopes)
-	if err != nil {
-		return err
-	}
-	client, err := newAPIClient(cloudCreds.APIURL, joined.Token)
+	client, err := newAPIClient(cloudCreds.APIURL, cloudCreds.AccessToken)
 	if err != nil {
 		return err
 	}
@@ -3419,11 +3425,7 @@ func runOpsReplay(args []string, stdin io.Reader, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	joined, err := joinWorkspaceViaCloud(cloudCreds, record.ID, record.AgentName, record.Scopes)
-	if err != nil {
-		return err
-	}
-	client, err := newAPIClient(cloudCreds.APIURL, joined.Token)
+	client, err := newAPIClient(cloudCreds.APIURL, cloudCreds.AccessToken)
 	if err != nil {
 		return err
 	}
@@ -3615,11 +3617,14 @@ func runWorkspaceJoin(args []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	joined, err := joinWorkspaceViaCloud(cloudCreds, workspaceID, record.AgentName, record.Scopes)
+	delegated, err := delegatedRelayfileTokenViaCloud(cloudCreds, workspaceID, record.AgentName, record.Scopes)
 	if err != nil {
 		return err
 	}
-	record, err = persistJoinedWorkspace(record, joined, cloudCreds.APIURL, "", true)
+	if err := delegatedauth.SaveAtomic(delegatedCredentialsPath(), delegated); err != nil {
+		return fmt.Errorf("persist delegated relayfile credentials: %w", err)
+	}
+	record, err = persistDelegatedWorkspace(record, delegated, "", true)
 	if err != nil {
 		return err
 	}
@@ -3825,6 +3830,7 @@ func runMount(args []string) error {
 
 	server := fs.String("server", resolveServer("", credentials{}), "relayfile server URL")
 	token := fs.String("token", strings.TrimSpace(os.Getenv("RELAYFILE_TOKEN")), "bearer token")
+	credsFile := fs.String("creds-file", strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_CREDS_FILE")), "delegated relayfile credentials file")
 	remotePath := fs.String("remote-path", envOrDefault("RELAYFILE_REMOTE_PATH", "/"), "remote root path")
 	eventProvider := fs.String("provider", strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_PROVIDER")), "event provider filter")
 	stateFile := fs.String("state-file", strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_STATE_FILE")), "state file path")
@@ -3852,6 +3858,7 @@ func runMount(args []string) error {
 	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
 		"server":              true,
 		"token":               true,
+		"creds-file":          true,
 		"remote-path":         true,
 		"provider":            true,
 		"state-file":          true,
@@ -3897,45 +3904,32 @@ func runMount(args []string) error {
 	tokenValue := strings.TrimSpace(*token)
 	canonicalWorkspaceID := ""
 	requestedWorkspace := ""
-	activeWorkspace := agentRelayActiveWorkspace{}
-	usesAgentRelayWorkspace := false
+	delegatedCredsPath := resolveDelegatedCredentialsPath(*credsFile)
+	usesDelegatedWorkspace := false
 	if fs.NArg() > 0 {
 		requestedWorkspace = strings.TrimSpace(fs.Arg(0))
 	}
 	if tokenValue == "" {
-		cloudCreds, cerr := ensureCloudCredentials("", "", 0, false, io.Discard)
-		if cerr != nil {
-			return fmt.Errorf("resolve agent-relay cloud session: %w", cerr)
+		bundle, path, berr := loadDelegatedCredentials(*credsFile)
+		if berr != nil {
+			return fmt.Errorf("resolve delegated relayfile credentials: %w", berr)
 		}
-		resolvedActiveWorkspace, werr := activeWorkspaceFromAgentRelay()
-		if werr != nil {
-			return fmt.Errorf("resolve active agent-relay workspace: %w", werr)
+		delegatedCredsPath = path
+		bundle, berr = refreshDelegatedCredentials(path, bundle, false)
+		if berr != nil {
+			return fmt.Errorf("refresh delegated relayfile credentials: %w", berr)
 		}
-		activeWorkspace = resolvedActiveWorkspace
-		usesAgentRelayWorkspace = true
-		if requestedWorkspace != "" && !agentRelayWorkspaceMatches(requestedWorkspace, activeWorkspace) {
+		canonicalWorkspaceID = bundle.Workspace()
+		if requestedWorkspace != "" && !workspaceRequestMatchesDelegatedCredentials(requestedWorkspace, canonicalWorkspaceID) {
 			return fmt.Errorf(
-				"relayfile mount without --token uses active agent-relay workspace %s (%s); pass --token for explicit workspace %q or run 'agent-relay workspace switch %s'",
-				defaultIfBlank(activeWorkspace.Name, activeWorkspace.RelayfileWorkspaceID),
-				activeWorkspace.RelayfileWorkspaceID,
-				requestedWorkspace,
+				"relayfile mount without --token uses delegated relayfile workspace %s; pass --token for explicit workspace %q or re-bootstrap delegated credentials for that workspace",
+				canonicalWorkspaceID,
 				requestedWorkspace,
 			)
 		}
-		cloudWorkspaceID := firstNonEmpty(activeWorkspace.CloudWorkspaceID, activeWorkspace.ID, activeWorkspace.Key, activeWorkspace.RelayfileWorkspaceID)
-		if cloudWorkspaceID == "" {
-			return errors.New("agent-relay workspace active --json did not include cloudWorkspaceId")
-		}
-		joined, jerr := joinWorkspaceViaCloud(cloudCreds, cloudWorkspaceID, "relayfile-cli", defaultJoinScopes)
-		if jerr != nil {
-			return fmt.Errorf("mint relayfile runtime credentials: %w", jerr)
-		}
-		tokenValue = joined.Token
-		*server = strings.TrimRight(joined.RelayfileURL, "/")
-		canonicalWorkspaceID = strings.TrimSpace(activeWorkspace.RelayfileWorkspaceID)
-		if canonicalWorkspaceID == "" {
-			canonicalWorkspaceID = strings.TrimSpace(joined.WorkspaceID)
-		}
+		tokenValue = bundle.BearerToken()
+		*server = strings.TrimRight(bundle.ServerURL(), "/")
+		usesDelegatedWorkspace = true
 	}
 	var err error
 	switch fs.NArg() {
@@ -3976,7 +3970,7 @@ func runMount(args []string) error {
 	} else if record, ok := workspaceRecordByName(workspaceID); ok && strings.TrimSpace(record.ID) == "" {
 		recordedLocalDir = strings.TrimSpace(record.LocalDir)
 	}
-	if recordedLocalDir == "" && usesAgentRelayWorkspace && requestedWorkspace != "" && agentRelayWorkspaceMatches(requestedWorkspace, activeWorkspace) {
+	if recordedLocalDir == "" && usesDelegatedWorkspace && requestedWorkspace != "" && workspaceRequestMatchesDelegatedCredentials(requestedWorkspace, canonicalWorkspaceID) {
 		if record, ok := workspaceRecordByName(requestedWorkspace); ok {
 			recordedLocalDir = strings.TrimSpace(record.LocalDir)
 		}
@@ -4152,7 +4146,11 @@ func runMount(args []string) error {
 	}
 	_, _ = upsertWorkspaceDetails(record)
 
-	return runMountLoop(rootCtx, syncer, absLocalDir, workspaceID, strings.TrimRight(strings.TrimSpace(*server), "/"), *timeout, *interval, *intervalJitter, *websocketEnabled, *once, *daemonized, pidFile, logFile)
+	loopDelegatedCredsPath := ""
+	if usesDelegatedWorkspace {
+		loopDelegatedCredsPath = delegatedCredsPath
+	}
+	return runMountLoop(rootCtx, syncer, absLocalDir, workspaceID, strings.TrimRight(strings.TrimSpace(*server), "/"), loopDelegatedCredsPath, *timeout, *interval, *intervalJitter, *websocketEnabled, *once, *daemonized, pidFile, logFile)
 }
 
 func shouldRegisterMountPID(daemonized, once bool) bool {
@@ -4224,29 +4222,76 @@ type workspaceCommandClient struct {
 	client      *apiClient
 	scopes      []string
 	directToken bool
+	credsFile   string
 }
 
 func prepareWorkspaceCommandClient(workspaceValue, serverFlag, tokenFlag string, requestedScopes []string) (*workspaceCommandClient, error) {
 	creds, _ := loadCredentials()
 	tokenValue := resolveToken(tokenFlag, creds)
-	directToken := strings.TrimSpace(tokenFlag) != "" || strings.TrimSpace(os.Getenv("RELAYFILE_TOKEN")) != ""
-	workspaceID, err := resolveWorkspaceIDWithToken(workspaceValue, tokenValue)
-	if err != nil {
-		return nil, err
+	directToken := strings.TrimSpace(tokenFlag) != "" || strings.TrimSpace(os.Getenv("RELAYFILE_TOKEN")) != "" || strings.TrimSpace(creds.Token) != ""
+	credsFile := ""
+	var bundle delegatedauth.Bundle
+	var err error
+	if !directToken && strings.TrimSpace(tokenValue) == "" {
+		bundle, credsFile, err = loadDelegatedCredentials("")
+		if err != nil {
+			return nil, fmt.Errorf("resolve delegated relayfile credentials: %w", err)
+		}
+		bundle, err = refreshDelegatedCredentials(credsFile, bundle, false)
+		if err != nil {
+			return nil, fmt.Errorf("refresh delegated relayfile credentials: %w", err)
+		}
+		tokenValue = bundle.BearerToken()
+		if strings.TrimSpace(serverFlag) == "" {
+			serverFlag = bundle.ServerURL()
+		}
+	}
+	workspaceID := ""
+	if credsFile != "" {
+		workspaceID = bundle.Workspace()
+		if !workspaceRequestMatchesDelegatedCredentials(workspaceValue, workspaceID) {
+			return nil, fmt.Errorf(
+				"delegated relayfile credentials are for workspace %s; pass --token for explicit workspace %q or re-bootstrap delegated credentials for that workspace",
+				workspaceID,
+				workspaceValue,
+			)
+		}
+	} else {
+		workspaceID, err = resolveWorkspaceIDWithToken(workspaceValue, tokenValue)
+		if err != nil {
+			return nil, err
+		}
 	}
 	record := workspaceRecordForCommand(workspaceValue, workspaceID)
+	if credsFile != "" {
+		if strings.TrimSpace(record.ID) == "" {
+			record.ID = workspaceID
+		} else if strings.TrimSpace(record.ID) != workspaceID {
+			record.RelayWorkspaceID = workspaceID
+		}
+		record.Server = strings.TrimRight(bundle.ServerURL(), "/")
+		record.CloudAPIURL = ""
+		record.LastUsedAt = time.Now().UTC().Format(time.RFC3339)
+	}
 	scopes := effectiveCommandScopes(record, requestedScopes)
 	commandClient := &workspaceCommandClient{
 		workspaceID: workspaceID,
 		record:      record,
 		scopes:      scopes,
 		directToken: directToken,
+		credsFile:   credsFile,
+	}
+	if credsFile != "" {
+		persisted, err := upsertWorkspaceDetails(record)
+		if err != nil {
+			return nil, err
+		}
+		commandClient.record = persisted
 	}
 
-	tokenWorkspaceID := workspaceIDFromToken(tokenValue)
-	shouldJoin := !directToken && (strings.TrimSpace(tokenValue) == "" || relayfileTokenNeedsRefresh(tokenValue) || (tokenWorkspaceID != "" && tokenWorkspaceID != workspaceID))
-	if shouldJoin {
-		if err := commandClient.refreshFromCloud(); err == nil {
+	shouldRefreshDelegated := !directToken && credsFile != "" && (strings.TrimSpace(tokenValue) == "" || relayfileTokenNeedsRefresh(tokenValue))
+	if shouldRefreshDelegated {
+		if err := commandClient.refreshFromDelegated(); err == nil {
 			return commandClient, nil
 		} else if strings.TrimSpace(tokenValue) == "" {
 			return nil, err
@@ -4302,32 +4347,40 @@ func effectiveCommandScopes(record workspaceRecord, requestedScopes []string) []
 	return append([]string(nil), defaultJoinScopes...)
 }
 
-func (c *workspaceCommandClient) refreshFromCloud() error {
+func (c *workspaceCommandClient) refreshFromDelegated() error {
 	if c == nil {
 		return errors.New("workspace command client is nil")
 	}
-	cloudCreds, err := ensureCloudCredentials("", "", 0, false, io.Discard)
+	if strings.TrimSpace(c.credsFile) == "" {
+		return delegatedauth.ErrMissingCredentials
+	}
+	bundle, _, err := loadDelegatedCredentials(c.credsFile)
 	if err != nil {
 		return err
 	}
-	joined, err := joinWorkspaceViaCloud(cloudCreds, c.workspaceID, c.record.AgentName, c.scopes)
+	if bundle.Workspace() != "" && bundle.Workspace() != c.workspaceID {
+		return fmt.Errorf("delegated relayfile credentials are for workspace %s, expected %s", bundle.Workspace(), c.workspaceID)
+	}
+	renewed, err := refreshDelegatedCredentials(c.credsFile, bundle, true)
 	if err != nil {
 		return err
 	}
-	requestedWorkspaceID := c.workspaceID
-	if joinedWorkspaceID := strings.TrimSpace(joined.WorkspaceID); joinedWorkspaceID != "" {
-		c.workspaceID = joinedWorkspaceID
-	}
+	c.workspaceID = renewed.Workspace()
 	record := c.record
 	if strings.TrimSpace(record.ID) == "" {
-		record.ID = strings.TrimSpace(requestedWorkspaceID)
+		record.ID = c.workspaceID
+	} else if strings.TrimSpace(record.ID) != c.workspaceID {
+		record.RelayWorkspaceID = c.workspaceID
 	}
 	record.Scopes = append([]string(nil), c.scopes...)
-	record, err = persistJoinedWorkspace(record, joined, cloudCreds.APIURL, record.LocalDir, false)
+	record.Server = strings.TrimRight(renewed.ServerURL(), "/")
+	record.CloudAPIURL = ""
+	record.LastUsedAt = time.Now().UTC().Format(time.RFC3339)
+	record, err = upsertWorkspaceDetails(record)
 	if err != nil {
 		return err
 	}
-	client, err := newAPIClient(strings.TrimRight(joined.RelayfileURL, "/"), joined.Token)
+	client, err := newAPIClient(strings.TrimRight(renewed.ServerURL(), "/"), renewed.BearerToken())
 	if err != nil {
 		return err
 	}
@@ -4341,7 +4394,7 @@ func (c *workspaceCommandClient) getWorkspaceBytes(ctx context.Context, pathForW
 	if err == nil || c.directToken || !isAPIAuthError(err) {
 		return body, contentType, err
 	}
-	if refreshErr := c.refreshFromCloud(); refreshErr != nil {
+	if refreshErr := c.refreshFromDelegated(); refreshErr != nil {
 		return body, contentType, err
 	}
 	return c.client.getBytes(ctx, pathForWorkspace(c.workspaceID))
@@ -4352,7 +4405,7 @@ func (c *workspaceCommandClient) getWorkspaceJSON(ctx context.Context, pathForWo
 	if err == nil || c.directToken || !isAPIAuthError(err) {
 		return err
 	}
-	if refreshErr := c.refreshFromCloud(); refreshErr != nil {
+	if refreshErr := c.refreshFromDelegated(); refreshErr != nil {
 		return err
 	}
 	return c.client.getJSON(ctx, pathForWorkspace(c.workspaceID), out)
@@ -5337,6 +5390,59 @@ func credentialsPath() string {
 
 func cloudCredentialsPath() string {
 	return filepath.Join(configDir(), "cloud-credentials.json")
+}
+
+func delegatedCredentialsPath() string {
+	return filepath.Join(configDir(), "delegated-credentials.json")
+}
+
+func resolveDelegatedCredentialsPath(flagValue string) string {
+	if value := strings.TrimSpace(flagValue); value != "" {
+		return value
+	}
+	if value := strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_CREDS_FILE")); value != "" {
+		return value
+	}
+	if value := strings.TrimSpace(os.Getenv("RELAYFILE_DELEGATED_CREDENTIALS_FILE")); value != "" {
+		return value
+	}
+	return delegatedCredentialsPath()
+}
+
+func loadDelegatedCredentials(path string) (delegatedauth.Bundle, string, error) {
+	resolvedPath := resolveDelegatedCredentialsPath(path)
+	bundle, err := delegatedauth.Load(resolvedPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return delegatedauth.Bundle{}, resolvedPath, fmt.Errorf("%w: %s not found", delegatedauth.ErrMissingCredentials, resolvedPath)
+		}
+		return delegatedauth.Bundle{}, resolvedPath, err
+	}
+	if err := bundle.ValidateForUse(); err != nil {
+		return delegatedauth.Bundle{}, resolvedPath, err
+	}
+	return bundle, resolvedPath, nil
+}
+
+func refreshDelegatedCredentials(path string, bundle delegatedauth.Bundle, force bool) (delegatedauth.Bundle, error) {
+	resolvedPath := resolveDelegatedCredentialsPath(path)
+	if !force && !relayfileTokenNeedsRefresh(bundle.BearerToken()) {
+		return bundle, nil
+	}
+	renewed, changed, err := delegatedauth.RenewFile(context.Background(), nil, resolvedPath, delegatedauth.DefaultRefreshTimeout)
+	if err != nil {
+		if errors.Is(err, delegatedauth.ErrRefreshRejected) {
+			return bundle, ErrDelegatedRelayfileCredentialsExpired
+		}
+		return bundle, err
+	}
+	if !changed {
+		return bundle, nil
+	}
+	if err := renewed.ValidateForUse(); err != nil {
+		return bundle, err
+	}
+	return renewed, nil
 }
 
 func agentRelayCloudAuthPath() string {
@@ -7747,7 +7853,7 @@ func spawnBackgroundMountProcess(originalArgs []string, localDir, pidFile, logFi
 	return nil
 }
 
-func runMountLoop(rootCtx context.Context, syncer *mountsync.Syncer, localDir, workspaceID, serverURL string, timeout, interval time.Duration, intervalJitter float64, websocketEnabled, once, daemonized bool, pidFile, logFile string) error {
+func runMountLoop(rootCtx context.Context, syncer *mountsync.Syncer, localDir, workspaceID, serverURL, delegatedCredsFile string, timeout, interval time.Duration, intervalJitter float64, websocketEnabled, once, daemonized bool, pidFile, logFile string) error {
 	interval = enforcePollIntervalFloor(interval)
 	httpClient, _ := syncerClient(syncer)
 	record, _ := workspaceRecordByID(workspaceID)
@@ -7762,7 +7868,7 @@ func runMountLoop(rootCtx context.Context, syncer *mountsync.Syncer, localDir, w
 	degraded := false
 	var lastDegradedNotice time.Time
 	const degradedRecoveryInterval = time.Minute
-	const degradedStallReason = "cloud session expired — run 'agent-relay login' to refresh"
+	const degradedStallReason = "delegated relayfile credentials expired or revoked — re-bootstrap relayfile credentials with agent-relay login"
 
 	enterDegraded := func() {
 		if !degraded {
@@ -7777,7 +7883,7 @@ func runMountLoop(rootCtx context.Context, syncer *mountsync.Syncer, localDir, w
 			degraded = false
 			stallReason = ""
 			lastDegradedNotice = time.Time{}
-			log.Printf("mount exiting degraded state; cloud session restored")
+			log.Printf("mount exiting degraded state; delegated relayfile credentials restored")
 		}
 	}
 	maybePrintRecovery := func() {
@@ -7798,22 +7904,24 @@ func runMountLoop(rootCtx context.Context, syncer *mountsync.Syncer, localDir, w
 		if !force && !relayfileTokenNeedsRefresh(httpClient.Token()) {
 			return nil
 		}
-		cloudCreds, err := ensureCloudCredentials("", "", 0, false, io.Discard)
-		if err != nil {
-			if errors.Is(err, ErrCloudRefreshExpired) {
-				return err
-			}
-			log.Printf("agent-relay cloud session refresh failed: %v", err)
+		if strings.TrimSpace(delegatedCredsFile) == "" {
 			return nil
 		}
-		joined, err := joinWorkspaceViaCloud(cloudCreds, workspaceID, record.AgentName, record.Scopes)
+		bundle, _, err := loadDelegatedCredentials(delegatedCredsFile)
 		if err != nil {
 			return err
 		}
-		httpClient.SetToken(joined.Token)
+		if bundle.Workspace() != "" && bundle.Workspace() != workspaceID {
+			return fmt.Errorf("delegated relayfile credentials are for workspace %s, expected %s", bundle.Workspace(), workspaceID)
+		}
+		renewed, err := refreshDelegatedCredentials(delegatedCredsFile, bundle, force)
+		if err != nil {
+			return err
+		}
+		httpClient.SetToken(renewed.BearerToken())
 		syncer.ResetWebSocket()
-		record.Server = strings.TrimRight(joined.RelayfileURL, "/")
-		record.CloudAPIURL = cloudCreds.APIURL
+		record.Server = strings.TrimRight(renewed.ServerURL(), "/")
+		record.CloudAPIURL = ""
 		if _, err := upsertWorkspaceDetails(record); err != nil {
 			return err
 		}
@@ -7893,7 +8001,7 @@ func runMountLoop(rootCtx context.Context, syncer *mountsync.Syncer, localDir, w
 			// still missing/expired, stay degraded and emit the
 			// recovery notice on the configured cadence.
 			if err := refreshMountAuth(true); err != nil {
-				if errors.Is(err, ErrCloudRefreshExpired) {
+				if isMountCredentialExpired(err) {
 					maybePrintRecovery()
 					writeSnapshot()
 					return err
@@ -7911,7 +8019,7 @@ func runMountLoop(rootCtx context.Context, syncer *mountsync.Syncer, localDir, w
 			return syncer.SyncOnce(ctx)
 		})
 		if err != nil {
-			if errors.Is(err, ErrCloudRefreshExpired) {
+			if isMountCredentialExpired(err) {
 				enterDegraded()
 				maybePrintRecovery()
 				writeSnapshot()
@@ -7950,7 +8058,7 @@ func runMountLoop(rootCtx context.Context, syncer *mountsync.Syncer, localDir, w
 
 	watcher, err := mountsync.NewFileWatcher(localDir, func(relativePath string, op fsnotify.Op) {
 		if degraded {
-			// Local edit observed while we have no usable cloud session.
+			// Local edit observed while delegated credentials are unusable.
 			// Leave the dirty state in place so the next successful cycle
 			// after re-login picks it up; do not attempt to push now.
 			maybePrintRecovery()
@@ -7959,7 +8067,7 @@ func runMountLoop(rootCtx context.Context, syncer *mountsync.Syncer, localDir, w
 		if err := withAuthRefresh(func(ctx context.Context) error {
 			return syncer.HandleLocalChange(ctx, relativePath, op)
 		}); err != nil {
-			if errors.Is(err, ErrCloudRefreshExpired) {
+			if isMountCredentialExpired(err) {
 				enterDegraded()
 				maybePrintRecovery()
 				writeSnapshot()

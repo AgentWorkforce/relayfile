@@ -32,9 +32,9 @@ func signedExpJWT(t *testing.T, expIn time.Duration) string {
 }
 
 // TestA8RelayfileTokenNeedsRefreshDetectsNearExpiry covers the predicate
-// the mount loop uses (in withAuthRefresh) to decide when to call
-// joinWorkspaceViaCloud — the trigger half of contract acceptance test
-// A8 ("Token refresh: VFS token expires mid-mount").
+// the mount loop uses to decide when to rotate delegated relayfile credentials
+// — the trigger half of contract acceptance test A8 ("Token refresh: VFS token
+// expires mid-mount").
 func TestA8RelayfileTokenNeedsRefreshDetectsNearExpiry(t *testing.T) {
 	cases := []struct {
 		name string
@@ -64,30 +64,30 @@ func TestA8RelayfileTokenNeedsRefreshDetectsNearExpiry(t *testing.T) {
 	}
 }
 
-// TestA8JoinWorkspaceMintsFreshRelayfileToken covers the action half of A8:
-// when the cloud access token is valid and we call joinWorkspaceViaCloud,
-// the cloud responds with a brand-new relayfile token + URL without the
-// CLI dropping the websocket. We verify the call shape (token bearer, body)
-// and that the returned credentials are well-formed.
-func TestA8JoinWorkspaceMintsFreshRelayfileToken(t *testing.T) {
+// TestA8DelegatedTokenBootstrapMintsRelayfileTokenPair covers the action half
+// of A8: when the cloud access token is valid, relayfile requests a delegated
+// relayfile TokenPair bundle rather than the legacy access-only /join response.
+// We verify the call shape (cloud bearer, body) and that the returned
+// credentials are well-formed for direct relayauth rotation.
+func TestA8DelegatedTokenBootstrapMintsRelayfileTokenPair(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)
 
-	var joinCalls int32
-	var seenBody cloudWorkspaceJoinRequest
+	var mintCalls int32
+	var seenBody cloudRelayfileDelegatedTokenRequest
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		if r.URL.Path != "/api/v1/workspaces/ws_demo/join" {
+		if r.URL.Path != "/api/v1/workspaces/ws_demo/relayfile/delegated-token" {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
 		if got := r.Header.Get("Authorization"); got != "Bearer cld_access" {
-			t.Fatalf("unexpected join Authorization: %q", got)
+			t.Fatalf("unexpected delegated-token Authorization: %q", got)
 		}
-		atomic.AddInt32(&joinCalls, 1)
+		atomic.AddInt32(&mintCalls, 1)
 		if err := json.NewDecoder(r.Body).Decode(&seenBody); err != nil {
-			t.Fatalf("decode join body failed: %v", err)
+			t.Fatalf("decode delegated-token body failed: %v", err)
 		}
-		_, _ = w.Write([]byte(`{"workspaceId":"ws_demo","token":"rf_new_token","relayfileUrl":"https://relayfile.test","wsUrl":"wss://relayfile.test/ws"}`))
+		writeDelegatedBundleResponse(t, w, "https://relayfile.test", "ws_demo", "rf_new_token", "refresh_new_token")
 	}))
 	defer server.Close()
 
@@ -96,21 +96,25 @@ func TestA8JoinWorkspaceMintsFreshRelayfileToken(t *testing.T) {
 		AccessToken:          "cld_access",
 		AccessTokenExpiresAt: time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
 	}
-	joined, err := joinWorkspaceViaCloud(creds, "ws_demo", "relayfile-cli", append([]string(nil), defaultJoinScopes...))
+	bundle, err := delegatedRelayfileTokenViaCloud(creds, "ws_demo", "relayfile-cli", append([]string(nil), defaultJoinScopes...))
 	if err != nil {
-		t.Fatalf("joinWorkspaceViaCloud failed: %v", err)
+		t.Fatalf("delegatedRelayfileTokenViaCloud failed: %v", err)
 	}
-	if atomic.LoadInt32(&joinCalls) != 1 {
-		t.Fatalf("expected exactly 1 /join call, got %d", joinCalls)
+	if atomic.LoadInt32(&mintCalls) != 1 {
+		t.Fatalf("expected exactly 1 delegated-token call, got %d", mintCalls)
 	}
-	if joined.Token != "rf_new_token" {
-		t.Fatalf("expected fresh relayfile token, got %q", joined.Token)
+	if bundle.BearerToken() != "rf_new_token" || bundle.RotationToken() != "refresh_new_token" {
+		t.Fatalf("expected delegated relayfile token pair, got %+v", bundle)
 	}
-	if joined.RelayfileURL == "" || joined.WSURL == "" {
-		t.Fatalf("expected join response to include relayfileUrl and wsUrl, got %+v", joined)
+	refreshEndpoint, err := bundle.RefreshEndpoint()
+	if err != nil {
+		t.Fatalf("RefreshEndpoint failed: %v", err)
+	}
+	if bundle.ServerURL() != "https://relayfile.test" || refreshEndpoint != "https://relayfile.test/v1/tokens/refresh" {
+		t.Fatalf("expected relayfile and relayauth endpoints, got %+v", bundle)
 	}
 	if seenBody.AgentName != "relayfile-cli" {
-		t.Fatalf("expected agent name in join body, got %+v", seenBody)
+		t.Fatalf("expected agent name in delegated-token body, got %+v", seenBody)
 	}
 }
 
