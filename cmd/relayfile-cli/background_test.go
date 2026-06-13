@@ -582,7 +582,7 @@ func TestRestartClearsStaleDaemonPID(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected restart to reach mount and fail without credentials")
 	}
-	if !strings.Contains(err.Error(), "agent-relay cloud session") {
+	if !strings.Contains(err.Error(), "delegated relayfile credentials") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if strings.Contains(stdout.String(), "Stopped background mount") {
