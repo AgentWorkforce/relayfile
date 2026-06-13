@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/agentworkforce/relayfile/internal/delegatedauth"
 	"github.com/agentworkforce/relayfile/internal/mountsync"
 	"github.com/fsnotify/fsnotify"
 )
@@ -485,7 +486,15 @@ func runSinglePollingMount(rootCtx context.Context, cfg mountConfig) error {
 }
 
 type mountCredsFile struct {
-	Token string `json:"token"`
+	Token                   string `json:"token"`
+	AccessToken             string `json:"accessToken,omitempty"`
+	RelayfileToken          string `json:"relayfileToken,omitempty"`
+	RefreshToken            string `json:"refreshToken,omitempty"`
+	RelayfileRefreshToken   string `json:"relayfileRefreshToken,omitempty"`
+	RelayauthURL            string `json:"relayauthUrl,omitempty"`
+	RefreshURL              string `json:"refreshUrl,omitempty"`
+	AccessTokenExpiresAt    string `json:"accessTokenExpiresAt,omitempty"`
+	RelayfileTokenExpiresAt string `json:"relayfileTokenExpiresAt,omitempty"`
 }
 
 func readMountCredsToken(path string) (string, error) {
@@ -501,11 +510,20 @@ func readMountCredsToken(path string) (string, error) {
 	if err := json.Unmarshal(payload, &creds); err != nil {
 		return "", err
 	}
-	token := strings.TrimSpace(creds.Token)
+	token := firstNonEmpty(creds.Token, creds.AccessToken, creds.RelayfileToken)
 	if token == "" {
 		return "", errors.New("missing token")
 	}
 	return token, nil
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
 }
 
 func installCredsFileRefresh(client *mountsync.HTTPClient, cfg mountConfig) {
@@ -514,6 +532,15 @@ func installCredsFileRefresh(client *mountsync.HTTPClient, cfg mountConfig) {
 		return
 	}
 	client.SetTokenRefreshFunc(func(currentToken string) (string, bool, error) {
+		bundle, loadErr := delegatedauth.Load(credsFile)
+		if loadErr == nil && bundle.RotationToken() != "" {
+			renewed, changed, err := delegatedauth.RenewFile(context.Background(), nil, credsFile, delegatedauth.DefaultRefreshTimeout)
+			if err != nil {
+				log.Printf("relayfile delegated credential refresh failed: %v", err)
+				return "", false, err
+			}
+			return renewed.BearerToken(), changed || renewed.BearerToken() != strings.TrimSpace(currentToken), nil
+		}
 		token, err := readMountCredsToken(credsFile)
 		if err != nil {
 			log.Printf("relayfile creds-file refresh failed: %v", err)

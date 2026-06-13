@@ -87,6 +87,7 @@ func TestWritebackDaemonDeadLettersHTTP400(t *testing.T) {
 			localDir,
 			workspaceID,
 			server.URL,
+			"",
 			100*time.Millisecond,
 			time.Hour,
 			0,
