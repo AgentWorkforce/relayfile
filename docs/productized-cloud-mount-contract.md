@@ -63,14 +63,13 @@ step **MUST** be idempotent on re-run:
 1. **Print intent.** A single line stating: "Relayfile setup. This signs
    you in, connects an integration, and prepares a local VFS mount."
 2. **Cloud login.**
-   - If `--cloud-token`/`$RELAYFILE_CLOUD_TOKEN` is set, skip the browser
-     and persist the supplied token.
-   - Otherwise: bind a localhost callback (`http://127.0.0.1:<port>/callback`),
-     open `${cloud-api-url}/api/v1/cli/login?redirect_uri=…&state=…`,
-     verify state, and capture `access_token`, `refresh_token`,
-     `access_token_expires_at`, `refresh_token_expires_at`, `api_url`.
-   - Persist to `~/.relayfile/cloud-credentials.json` with `0600` perms
-     and the `cloudCredentials` schema in §5.1.
+   - Cloud authentication is owned by `agent-relay login` and the
+     `@agent-relay/cloud` session store.
+   - Relayfile obtains Cloud auth by invoking
+     `agent-relay cloud session --json`, which returns only `apiUrl`,
+     `accessToken`, and `accessTokenExpiresAt`.
+   - Relayfile does not persist `~/.relayfile/cloud-credentials.json` as a
+     Cloud session source of truth.
 3. **Workspace name.** Use `--workspace`, else prompt. Default suggestion:
    `relayfile-<UTC YYYYMMDD-HHMMSS>`.
 4. **Provider choice.** Use `--provider`, else prompt with the catalog
@@ -78,12 +77,13 @@ step **MUST** be idempotent on re-run:
 5. **Local dir.** Use `--local-dir`, else prompt; default
    `./relayfile-mount`. The directory **MUST** be created with `0o755`
    and a `.relay/` subdir with `0o755`.
-6. **Workspace create + join.** `POST /api/v1/workspaces`, then
-   `POST /api/v1/workspaces/{id}/join` with
-   `{agentName: "relayfile-cli", scopes: ["fs:read", "fs:write"]}`.
-   Persist Relayfile VFS credentials to `~/.relayfile/credentials.json`
-   (§5.1) and add the workspace to `~/.relayfile/workspaces.json`,
-   marking it default.
+6. **Workspace create + join.** Resolve the canonical active workspace via
+   `agent-relay workspace active --json`, then `POST
+   /api/v1/workspaces/{cloudWorkspaceId}/join` with `{agentName:
+   "relayfile-cli", scopes: ["fs:read", "fs:write"]}`. Use the returned
+   Relayfile VFS token in memory and add/update local workspace metadata in
+   `~/.relayfile/workspaces.json` without marking a separate Relayfile
+   workspace default.
 7. **Integration connect.** If a provider was chosen and not `none`:
    `POST /api/v1/workspaces/{id}/integrations/connect-session` with
    `{allowedIntegrations: [provider]}`. Print the `connectLink`, open it
@@ -369,18 +369,27 @@ two layers: Cloud login tokens (user identity) and Relayfile VFS tokens
 
 ### 5.1 Credential files
 
-- `~/.relayfile/cloud-credentials.json` (`0600`):
+- `agent-relay cloud session --json`:
   ```json
   {
     "apiUrl": "https://agentrelay.com/cloud",
     "accessToken": "...",
-    "refreshToken": "...",
-    "accessTokenExpiresAt":  "2026-05-03T18:00:00Z",
-    "refreshTokenExpiresAt": "2026-05-09T18:00:00Z",
-    "updatedAt":             "2026-05-02T18:00:00Z"
+    "accessTokenExpiresAt": "2026-05-03T18:00:00Z"
   }
   ```
-- `~/.relayfile/credentials.json` (`0600`):
+- `agent-relay workspace active --json` includes the canonical
+  `relayfileWorkspaceId` used by Relayfile data-plane calls.
+- Relayfile shells out to the external `agent-relay` binary on `PATH`, or to
+  `AGENT_RELAY_BIN` when set. The runtime environment, including sandbox and
+  Daytona/base images, must provide `agent-relay` CLI `8.7.0` or newer before
+  using the Cloud-hosted path. Relayfile must fail fast with an actionable
+  upgrade message when the binary is missing, stale, or lacks the required
+  `cloud session`, `workspace active`, or `workspace switch` commands.
+  The cloud/workforce sandbox image owner must ship that binary update before
+  enabling the unified Relayfile path in production; Relayfile validates the
+  binary but does not mutate the runtime image.
+- `~/.relayfile/credentials.json` (`0600`, self-hosted/API-key
+  compatibility only):
   ```json
   {
     "server": "https://api.relayfile.dev",
@@ -388,22 +397,18 @@ two layers: Cloud login tokens (user identity) and Relayfile VFS tokens
     "updatedAt": "2026-05-02T18:00:00Z"
   }
   ```
-- `~/.relayfile/workspaces.json`: catalog with `default` and per-name
-  `id`, `createdAt`, `lastUsedAt`.
+- `~/.relayfile/workspaces.json`: local metadata catalog with per-name
+  `id`, `localDir`, `createdAt`, and `lastUsedAt`. It is not a separate
+  active workspace pin.
 
 ### 5.2 Cloud token refresh
 
-The CLI **MUST** treat a Cloud access token as expired when
-`now ≥ accessTokenExpiresAt - 60s`. Refresh **MUST** call
-`POST ${apiUrl}/api/v1/auth/token/refresh` with the refresh token and
-**MUST**:
-
-- Persist the new token set atomically (write temp file, rename).
-- Coalesce concurrent refresh attempts inside a single CLI process.
-- Surface a `403 invalid_grant` as `error: cloud session expired. Run
-  'relayfile login' to sign in again.` and exit 10. The mount process
-  **MUST** keep running on the existing VFS token until that token also
-  expires.
+Relayfile **MUST NOT** refresh Cloud tokens itself. When it needs Cloud
+credentials it invokes `agent-relay cloud session --json`; the relay SDK owns
+refresh, timeout, and typed failure behavior. If that command fails because the
+canonical session is expired, Relayfile surfaces an actionable `agent-relay
+login` recovery hint. The mount process **MUST** keep running on the existing
+VFS token until that token also expires.
 
 ### 5.3 Relayfile VFS token rejoin
 
@@ -425,8 +430,9 @@ Triggers:
 
 The rejoin **MUST**:
 
-- Use the Cloud access token (refreshing it first if needed per §5.2).
-- Replace the on-disk `credentials.json` atomically.
+- Use the Cloud access token returned by `agent-relay cloud session --json`.
+- Keep the minted Relayfile runtime token in memory; do not write it to
+  `~/.relayfile/credentials.json`.
 - Update the in-memory token of the running syncer/HTTP client without
   killing the process or losing the websocket.
 
@@ -442,7 +448,7 @@ If the refresh token also expires (default 7 days), the mount **MUST**:
 - Refuse local writes for affected paths and place them in
   `.relay/permissions-denied.log` with reason `cloud_session_expired`.
 - Print one stderr line per minute (capped) directing the user to run
-  `relayfile login`. This is the only condition under which v1 mounts
+  `agent-relay login`. This is the only condition under which v1 mounts
   enter a degraded read-only state.
 
 ---

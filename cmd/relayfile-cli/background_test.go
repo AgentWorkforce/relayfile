@@ -5,13 +5,9 @@ package main
 import (
 	"bytes"
 	"errors"
-	"io"
-	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
@@ -418,7 +414,7 @@ func TestMountBackgroundRefusesExistingDaemonFromProcessScan(t *testing.T) {
 	t.Cleanup(func() { listProcessCommands = oldList })
 
 	var stdout bytes.Buffer
-	err := run([]string{"mount", "demo", "--background"}, strings.NewReader(""), &stdout, &stdout)
+	err := run([]string{"mount", "demo", "--token", testJWTWithWorkspace("ws_demo"), "--background"}, strings.NewReader(""), &stdout, &stdout)
 	if err == nil {
 		t.Fatalf("expected mount --background to refuse an existing daemon")
 	}
@@ -480,7 +476,7 @@ func TestMountBackgroundClearsDeadStructuredPIDBeforeStart(t *testing.T) {
 	t.Cleanup(func() { spawnBackgroundMountProcessFn = oldSpawn })
 
 	var stdout bytes.Buffer
-	if err := run([]string{"mount", "demo", "--background"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+	if err := run([]string{"mount", "demo", "--token", testJWTWithWorkspace("ws_demo"), "--background"}, strings.NewReader(""), &stdout, &stdout); err != nil {
 		t.Fatalf("run mount failed: %v\noutput:\n%s", err, stdout.String())
 	}
 	if !spawned {
@@ -586,7 +582,7 @@ func TestRestartClearsStaleDaemonPID(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected restart to reach mount and fail without credentials")
 	}
-	if !strings.Contains(err.Error(), "token is required") {
+	if !strings.Contains(err.Error(), "agent-relay cloud session") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if strings.Contains(stdout.String(), "Stopped background mount") {
@@ -597,88 +593,6 @@ func TestRestartClearsStaleDaemonPID(t *testing.T) {
 	}
 	if _, err := os.Stat(mountPIDFile(localDir)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("expected stale pid file to be removed, got err=%v", err)
-	}
-}
-
-// TestA2RunCloudLoginReturnsStateMismatchSentinel exercises productized
-// cloud-mount contract A2: when the OAuth callback's `state` parameter does
-// not match the value the CLI generated, runCloudLogin must return the
-// ErrCloudLoginStateMismatch sentinel so main() can exit 10.
-func TestA2RunCloudLoginReturnsStateMismatchSentinel(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	clearRelayfileEnv(t)
-
-	// Read stdout via a pipe so the test can wait for the listener URL line
-	// before forging the callback request.
-	pipeR, pipeW := io.Pipe()
-	scannerOut := make(chan string, 1)
-	go func() {
-		// Pull at most a few KB until we see the login URL the function
-		// prints, then forward the rest into a discard sink.
-		buf := make([]byte, 0, 4096)
-		tmp := make([]byte, 256)
-		re := regexp.MustCompile(`Sign in to Relayfile Cloud:\s+(\S+)`)
-		for {
-			n, err := pipeR.Read(tmp)
-			if n > 0 {
-				buf = append(buf, tmp[:n]...)
-				if matches := re.FindSubmatch(buf); matches != nil {
-					scannerOut <- string(matches[1])
-					_, _ = io.Copy(io.Discard, pipeR)
-					return
-				}
-			}
-			if err != nil {
-				close(scannerOut)
-				return
-			}
-		}
-	}()
-
-	loginErr := make(chan error, 1)
-	go func() {
-		_, err := runCloudLogin("https://cloud.example.test", 10*time.Second, false, pipeW)
-		_ = pipeW.Close()
-		loginErr <- err
-	}()
-
-	var loginURL string
-	select {
-	case loginURL = <-scannerOut:
-	case <-time.After(2 * time.Second):
-		t.Fatalf("runCloudLogin did not print login URL in time")
-	}
-
-	parsed, err := url.Parse(loginURL)
-	if err != nil {
-		t.Fatalf("parse login URL failed: %v", err)
-	}
-	redirectURI := parsed.Query().Get("redirect_uri")
-	if redirectURI == "" {
-		t.Fatalf("login URL missing redirect_uri: %s", loginURL)
-	}
-	callback, err := url.Parse(redirectURI)
-	if err != nil {
-		t.Fatalf("parse redirect_uri failed: %v", err)
-	}
-	q := callback.Query()
-	q.Set("state", "tampered-or-replayed")
-	q.Set("access_token", "bogus")
-	callback.RawQuery = q.Encode()
-
-	resp, err := http.Get(callback.String())
-	if err != nil {
-		t.Fatalf("forge callback request failed: %v", err)
-	}
-	_ = resp.Body.Close()
-
-	select {
-	case err := <-loginErr:
-		if !errors.Is(err, ErrCloudLoginStateMismatch) {
-			t.Fatalf("expected ErrCloudLoginStateMismatch, got: %v", err)
-		}
-	case <-time.After(3 * time.Second):
-		t.Fatalf("runCloudLogin did not return after state mismatch")
 	}
 }
 
