@@ -1435,7 +1435,7 @@ exit 1
 	if err := run([]string{"status", "demo"}, strings.NewReader(""), &stdout, &stdout); err != nil {
 		t.Fatalf("run status failed: %v", err)
 	}
-	if got := stdout.String(); !strings.Contains(got, "auth: agent-relay session unavailable - run 'agent-relay login'") {
+	if got := stdout.String(); !strings.Contains(got, "auth: agent-relay session unavailable - run 'agent-relay cloud login'") {
 		t.Fatalf("expected agent-relay unavailable auth line, got %q", got)
 	}
 }
@@ -3254,7 +3254,7 @@ func TestLoginDelegatesToAgentRelay(t *testing.T) {
 	t.Setenv("AGENT_RELAY_LOG", logPath)
 	installFakeAgentRelay(t, `
 printf '%s\n' "$*" >> "$AGENT_RELAY_LOG"
-if [ "$*" = "login --no-open" ]; then
+if [ "$*" = "cloud login --no-open" ]; then
   echo "agent-relay login ok"
   exit 0
 fi
@@ -3281,8 +3281,8 @@ exit 2
 	if err != nil {
 		t.Fatalf("read fake agent-relay log failed: %v", err)
 	}
-	if strings.TrimSpace(string(logBytes)) != "login --no-open" {
-		t.Fatalf("expected agent-relay login --no-open, got %q", string(logBytes))
+	if strings.TrimSpace(string(logBytes)) != "cloud login --no-open" {
+		t.Fatalf("expected agent-relay cloud login --no-open, got %q", string(logBytes))
 	}
 	if _, err := os.Stat(cloudCredentialsPath()); !os.IsNotExist(err) {
 		t.Fatalf("expected stale relayfile cloud credentials removed, got err=%v", err)
