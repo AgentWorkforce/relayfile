@@ -711,7 +711,7 @@ Usage:
 
 Subcommands:
   setup       Sign in, connect an integration, and mount the workspace
-  login       Sign in via agent-relay login (or --api-key for self-hosted)
+  login       Sign in via agent-relay cloud login (or --api-key for self-hosted)
   workspace   Create, join, select via agent-relay, list, show current, or delete locally tracked workspaces
   integration Connect, discover, list, disconnect, or adopt workspace integrations
   ops         List or replay dead-lettered writeback ops
@@ -1030,7 +1030,7 @@ func runAgentRelayJSON(args []string, out any) error {
 	cmd := exec.CommandContext(ctx, agentRelayBinary(), args...)
 	output, err := cmd.CombinedOutput()
 	if ctx.Err() == context.DeadlineExceeded {
-		return fmt.Errorf("agent-relay %s timed out; run 'agent-relay login' and try again", strings.Join(args, " "))
+		return fmt.Errorf("agent-relay %s timed out; run 'agent-relay cloud login' and try again", strings.Join(args, " "))
 	}
 	if err != nil {
 		detail := strings.TrimSpace(string(output))
@@ -1049,7 +1049,7 @@ func runAgentRelayLogin(stdin io.Reader, stdout io.Writer, noOpen bool) error {
 	if err := ensureAgentRelayCLICompatible(); err != nil {
 		return err
 	}
-	args := []string{"login"}
+	args := []string{"cloud", "login"}
 	if noOpen {
 		args = append(args, "--no-open")
 	}
@@ -1058,7 +1058,7 @@ func runAgentRelayLogin(stdin io.Reader, stdout io.Writer, noOpen bool) error {
 	cmd.Stdout = stdout
 	cmd.Stderr = stdout
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("agent-relay login failed: %w", err)
+		return fmt.Errorf("agent-relay cloud login failed: %w", err)
 	}
 	return nil
 }
@@ -1182,7 +1182,7 @@ func loadCloudCredentials() (cloudCredentials, error) {
 	payload, err := os.ReadFile(cloudCredentialsPath())
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return creds, fmt.Errorf("legacy cloud credentials not found at %s; run agent-relay login", cloudCredentialsPath())
+			return creds, fmt.Errorf("legacy cloud credentials not found at %s; run agent-relay cloud login", cloudCredentialsPath())
 		}
 		return creds, err
 	}
@@ -1199,9 +1199,9 @@ func loadCloudCredentials() (cloudCredentials, error) {
 // access tokens. The mount loop uses this to enter the read-only degraded
 // state described in the productized cloud-mount contract acceptance test
 // A9 ("Cloud refresh token expired").
-var ErrCloudRefreshExpired = errors.New("cloud session expired. Run 'agent-relay login' to sign in again.")
+var ErrCloudRefreshExpired = errors.New("cloud session expired. Run 'agent-relay cloud login' to sign in again.")
 
-var ErrDelegatedRelayfileCredentialsExpired = errors.New("delegated relayfile credentials expired or revoked. Re-bootstrap relayfile credentials with agent-relay login.")
+var ErrDelegatedRelayfileCredentialsExpired = errors.New("delegated relayfile credentials expired or revoked. Re-bootstrap relayfile credentials with agent-relay cloud login.")
 
 func isMountCredentialExpired(err error) bool {
 	return errors.Is(err, ErrCloudRefreshExpired) || errors.Is(err, ErrDelegatedRelayfileCredentialsExpired)
@@ -1901,7 +1901,7 @@ func runLogin(args []string, stdin io.Reader, stdout io.Writer) error {
 
 	if (strings.TrimSpace(*cloudAPIURL) != "" && strings.TrimRight(strings.TrimSpace(*cloudAPIURL), "/") != defaultCloudAPIURL) ||
 		strings.TrimSpace(*cloudToken) != "" || *loginTimeout != 5*time.Minute || *skipWorkspace || strings.TrimSpace(*workspaceFlag) != "" {
-		fmt.Fprintln(stdout, "warning: relayfile login delegates to agent-relay login; relayfile cloud/workspace refresh flags are deprecated and ignored")
+		fmt.Fprintln(stdout, "warning: relayfile login delegates to agent-relay cloud login; relayfile cloud/workspace refresh flags are deprecated and ignored")
 	}
 	if err := runAgentRelayLogin(stdin, stdout, *noOpen); err != nil {
 		return err
@@ -4925,7 +4925,7 @@ func latestCredentialModTime(paths ...string) (time.Time, bool) {
 
 func cloudCredentialAuthLine(now time.Time) string {
 	if _, err := cloudCredentialsFromAgentRelay(); err != nil {
-		return "auth: agent-relay session unavailable - run 'agent-relay login'"
+		return "auth: agent-relay session unavailable - run 'agent-relay cloud login'"
 	}
 	return "auth: agent-relay session ok"
 }
@@ -7868,7 +7868,7 @@ func runMountLoop(rootCtx context.Context, syncer *mountsync.Syncer, localDir, w
 	degraded := false
 	var lastDegradedNotice time.Time
 	const degradedRecoveryInterval = time.Minute
-	const degradedStallReason = "delegated relayfile credentials expired or revoked — re-bootstrap relayfile credentials with agent-relay login"
+	const degradedStallReason = "delegated relayfile credentials expired or revoked — re-bootstrap relayfile credentials with agent-relay cloud login"
 
 	enterDegraded := func() {
 		if !degraded {
