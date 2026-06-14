@@ -727,12 +727,11 @@ func TestTreeUsesEnvWorkspaceWhenWorkspaceArgOmitted(t *testing.T) {
 	}))
 	defer server.Close()
 
-	if err := saveCredentials(credentials{
-		Server: server.URL,
-		Token:  "token",
-	}); err != nil {
-		t.Fatalf("saveCredentials failed: %v", err)
-	}
+	writeDelegatedCredentialsForTest(t, delegatedauth.Bundle{
+		RelayfileURL:         server.URL,
+		RelayfileWorkspaceID: "ws_env",
+		AccessToken:          "token",
+	})
 
 	var stdout bytes.Buffer
 	if err := run([]string{"tree", "/github"}, strings.NewReader(""), &stdout, &stdout); err != nil {
@@ -761,12 +760,11 @@ func TestTreeTreatsPathLikeSingleArgAsRemotePath(t *testing.T) {
 	}))
 	defer server.Close()
 
-	if err := saveCredentials(credentials{
-		Server: server.URL,
-		Token:  "token",
-	}); err != nil {
-		t.Fatalf("saveCredentials failed: %v", err)
-	}
+	writeDelegatedCredentialsForTest(t, delegatedauth.Bundle{
+		RelayfileURL:         server.URL,
+		RelayfileWorkspaceID: "ws_env",
+		AccessToken:          "token",
+	})
 
 	var stdout bytes.Buffer
 	if err := run([]string{"tree", "linear/projects"}, strings.NewReader(""), &stdout, &stdout); err != nil {
@@ -793,12 +791,11 @@ func TestTreePreservesUncatalogedSlashWorkspaceWhenRootIsUnknown(t *testing.T) {
 	}))
 	defer server.Close()
 
-	if err := saveCredentials(credentials{
-		Server: server.URL,
-		Token:  "token",
-	}); err != nil {
-		t.Fatalf("saveCredentials failed: %v", err)
-	}
+	writeDelegatedCredentialsForTest(t, delegatedauth.Bundle{
+		RelayfileURL:         server.URL,
+		RelayfileWorkspaceID: "team/project",
+		AccessToken:          "token",
+	})
 
 	var stdout bytes.Buffer
 	if err := run([]string{"tree", "team/project"}, strings.NewReader(""), &stdout, &stdout); err != nil {
@@ -831,12 +828,11 @@ func TestTreeReadsRemoteWorkspacePath(t *testing.T) {
 	}))
 	defer server.Close()
 
-	if err := saveCredentials(credentials{
-		Server: server.URL,
-		Token:  "token",
-	}); err != nil {
-		t.Fatalf("saveCredentials failed: %v", err)
-	}
+	writeDelegatedCredentialsForTest(t, delegatedauth.Bundle{
+		RelayfileURL:         server.URL,
+		RelayfileWorkspaceID: "ws_cloud",
+		AccessToken:          "token",
+	})
 
 	var stdout bytes.Buffer
 	if err := run([]string{"tree", "ws_cloud", "/github", "--depth", "5"}, strings.NewReader(""), &stdout, &stdout); err != nil {
@@ -865,12 +861,11 @@ func TestTreeCanPrintPrettyJSON(t *testing.T) {
 	}))
 	defer server.Close()
 
-	if err := saveCredentials(credentials{
-		Server: server.URL,
-		Token:  "token",
-	}); err != nil {
-		t.Fatalf("saveCredentials failed: %v", err)
-	}
+	writeDelegatedCredentialsForTest(t, delegatedauth.Bundle{
+		RelayfileURL:         server.URL,
+		RelayfileWorkspaceID: "ws_cloud",
+		AccessToken:          "token",
+	})
 
 	var stdout bytes.Buffer
 	if err := run([]string{"tree", "ws_cloud", "--json"}, strings.NewReader(""), &stdout, &stdout); err != nil {
@@ -898,12 +893,11 @@ func TestReadPrintsRemoteFileContent(t *testing.T) {
 	}))
 	defer server.Close()
 
-	if err := saveCredentials(credentials{
-		Server: server.URL,
-		Token:  "token",
-	}); err != nil {
-		t.Fatalf("saveCredentials failed: %v", err)
-	}
+	writeDelegatedCredentialsForTest(t, delegatedauth.Bundle{
+		RelayfileURL:         server.URL,
+		RelayfileWorkspaceID: "ws_cloud",
+		AccessToken:          "token",
+	})
 
 	var stdout bytes.Buffer
 	if err := run([]string{"read", "ws_cloud", "/github/README.md"}, strings.NewReader(""), &stdout, &stdout); err != nil {
@@ -932,12 +926,11 @@ func TestReadUsesTokenWorkspaceWhenWorkspaceArgOmitted(t *testing.T) {
 	}))
 	defer server.Close()
 
-	if err := saveCredentials(credentials{
-		Server: server.URL,
-		Token:  token,
-	}); err != nil {
-		t.Fatalf("saveCredentials failed: %v", err)
-	}
+	writeDelegatedCredentialsForTest(t, delegatedauth.Bundle{
+		RelayfileURL:         server.URL,
+		RelayfileWorkspaceID: "ws_token",
+		AccessToken:          token,
+	})
 
 	var stdout bytes.Buffer
 	if err := run([]string{"read", "/docs/readme.md"}, strings.NewReader(""), &stdout, &stdout); err != nil {
@@ -960,12 +953,11 @@ func TestReadDecodesBase64Content(t *testing.T) {
 	}))
 	defer server.Close()
 
-	if err := saveCredentials(credentials{
-		Server: server.URL,
-		Token:  "token",
-	}); err != nil {
-		t.Fatalf("saveCredentials failed: %v", err)
-	}
+	writeDelegatedCredentialsForTest(t, delegatedauth.Bundle{
+		RelayfileURL:         server.URL,
+		RelayfileWorkspaceID: "ws_cloud",
+		AccessToken:          "token",
+	})
 
 	var stdout bytes.Buffer
 	if err := run([]string{"cat", "ws_cloud", "/external/blob.bin"}, strings.NewReader(""), &stdout, &stdout); err != nil {
@@ -1371,20 +1363,25 @@ func TestStatusIncludesLocalMirrorAndDaemonCounts(t *testing.T) {
 		if r.URL.Path != "/v1/workspaces/ws_demo/sync/status" {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
+		if got := r.Header.Get("Authorization"); got != "Bearer delegated_token" {
+			t.Fatalf("expected delegated Authorization, got %q", got)
+		}
 		_, _ = w.Write([]byte(`{"workspaceId":"ws_demo","providers":[{"provider":"notion","status":"ready","lagSeconds":4,"watermarkTs":"2026-05-02T18:00:00Z"}]}`))
 	}))
 	defer server.Close()
 
-	if err := saveCredentials(credentials{
-		Server: server.URL,
-		Token:  "token",
-	}); err != nil {
-		t.Fatalf("saveCredentials(update) failed: %v", err)
-	}
+	writeDelegatedCredentialsForTest(t, delegatedauth.Bundle{
+		RelayfileURL:         server.URL,
+		RelayfileWorkspaceID: "ws_demo",
+		AccessToken:          "delegated_token",
+	})
 
 	var stdout bytes.Buffer
 	if err := run([]string{"status", "demo"}, strings.NewReader(""), &stdout, &stdout); err != nil {
 		t.Fatalf("run status failed: %v", err)
+	}
+	if _, err := os.Stat(credentialsPath()); !os.IsNotExist(err) {
+		t.Fatalf("expected stale relayfile credentials removed, got err=%v", err)
 	}
 	got := stdout.String()
 	for _, fragment := range []string{
@@ -1423,9 +1420,11 @@ func TestStatusRendersUnavailableAgentRelaySessionAuthLine(t *testing.T) {
 		_, _ = w.Write([]byte(`{"workspaceId":"ws_demo","providers":[]}`))
 	}))
 	defer server.Close()
-	if err := saveCredentials(credentials{Server: server.URL, Token: "token"}); err != nil {
-		t.Fatalf("saveCredentials failed: %v", err)
-	}
+	writeDelegatedCredentialsForTest(t, delegatedauth.Bundle{
+		RelayfileURL:         server.URL,
+		RelayfileWorkspaceID: "ws_demo",
+		AccessToken:          "token",
+	})
 	installFakeAgentRelay(t, `
 echo "session expired" >&2
 exit 1
@@ -1472,13 +1471,18 @@ func TestStatusWarnsWhenDaemonPredatesLastLogin(t *testing.T) {
 		_, _ = w.Write([]byte(`{"workspaceId":"ws_demo","providers":[]}`))
 	}))
 	defer server.Close()
-	if err := saveCredentials(credentials{Server: server.URL, Token: "token"}); err != nil {
+	if err := saveCredentials(credentials{Server: "https://legacy.relayfile.invalid", Token: "legacy_token"}); err != nil {
 		t.Fatalf("saveCredentials failed: %v", err)
 	}
 	oldLoginTime := startedAt.Add(-30 * time.Minute)
 	if err := os.Chtimes(credentialsPath(), oldLoginTime, oldLoginTime); err != nil {
 		t.Fatalf("chtimes credentials failed: %v", err)
 	}
+	writeDelegatedCredentialsForTest(t, delegatedauth.Bundle{
+		RelayfileURL:         server.URL,
+		RelayfileWorkspaceID: "ws_demo",
+		AccessToken:          "delegated_token",
+	})
 	agentRelayAuthPath := agentRelayCloudAuthPath()
 	if err := os.MkdirAll(filepath.Dir(agentRelayAuthPath), 0o700); err != nil {
 		t.Fatalf("mkdir agent-relay auth dir failed: %v", err)
@@ -1517,9 +1521,11 @@ func TestStatusUnauthorizedReturnsLoginHint(t *testing.T) {
 		_, _ = w.Write([]byte(`{"message":"Token has expired"}`))
 	}))
 	defer server.Close()
-	if err := saveCredentials(credentials{Server: server.URL, Token: "expired"}); err != nil {
-		t.Fatalf("saveCredentials failed: %v", err)
-	}
+	writeDelegatedCredentialsForTest(t, delegatedauth.Bundle{
+		RelayfileURL:         server.URL,
+		RelayfileWorkspaceID: "ws_demo",
+		AccessToken:          "expired",
+	})
 
 	var stdout bytes.Buffer
 	err := run([]string{"status", "demo"}, strings.NewReader(""), &stdout, &stdout)
@@ -1554,12 +1560,11 @@ func TestStatusSurfacesOrphanDaemonFromProcessScan(t *testing.T) {
 		_, _ = w.Write([]byte(`{"workspaceId":"ws_demo","providers":[]}`))
 	}))
 	defer server.Close()
-	if err := saveCredentials(credentials{
-		Server: server.URL,
-		Token:  "token",
-	}); err != nil {
-		t.Fatalf("saveCredentials failed: %v", err)
-	}
+	writeDelegatedCredentialsForTest(t, delegatedauth.Bundle{
+		RelayfileURL:         server.URL,
+		RelayfileWorkspaceID: "ws_demo",
+		AccessToken:          "delegated_token",
+	})
 
 	oldList := listProcessCommands
 	listProcessCommands = func() ([]processCommandSnapshot, error) {
@@ -2380,9 +2385,11 @@ func TestStatusSurfacesDegradedStallReason(t *testing.T) {
 	}))
 	defer server.Close()
 
-	if err := saveCredentials(credentials{Server: server.URL, Token: "token"}); err != nil {
-		t.Fatalf("saveCredentials failed: %v", err)
-	}
+	writeDelegatedCredentialsForTest(t, delegatedauth.Bundle{
+		RelayfileURL:         server.URL,
+		RelayfileWorkspaceID: "ws_demo",
+		AccessToken:          "delegated_token",
+	})
 
 	var stdout bytes.Buffer
 	if err := run([]string{"status", "demo"}, strings.NewReader(""), &stdout, &stdout); err != nil {
@@ -2513,9 +2520,11 @@ func TestStatusRendersWebhookUnhealthyWarning(t *testing.T) {
 	}))
 	defer server.Close()
 
-	if err := saveCredentials(credentials{Server: server.URL, Token: "token"}); err != nil {
-		t.Fatalf("saveCredentials failed: %v", err)
-	}
+	writeDelegatedCredentialsForTest(t, delegatedauth.Bundle{
+		RelayfileURL:         server.URL,
+		RelayfileWorkspaceID: "ws_demo",
+		AccessToken:          "delegated_token",
+	})
 
 	var stdout bytes.Buffer
 	if err := run([]string{"status", "demo"}, strings.NewReader(""), &stdout, &stdout); err != nil {
@@ -2563,9 +2572,11 @@ func TestStatusExplainsLaggingProviderWithoutWatermark(t *testing.T) {
 	}))
 	defer server.Close()
 
-	if err := saveCredentials(credentials{Server: server.URL, Token: "token"}); err != nil {
-		t.Fatalf("saveCredentials failed: %v", err)
-	}
+	writeDelegatedCredentialsForTest(t, delegatedauth.Bundle{
+		RelayfileURL:         server.URL,
+		RelayfileWorkspaceID: "ws_demo",
+		AccessToken:          "delegated_token",
+	})
 
 	var stdout bytes.Buffer
 	if err := run([]string{"status", "demo"}, strings.NewReader(""), &stdout, &stdout); err != nil {
@@ -2627,9 +2638,11 @@ func TestStatusOmitsWebhookWarningWhenHealthy(t *testing.T) {
 	}))
 	defer server.Close()
 
-	if err := saveCredentials(credentials{Server: server.URL, Token: "token"}); err != nil {
-		t.Fatalf("saveCredentials failed: %v", err)
-	}
+	writeDelegatedCredentialsForTest(t, delegatedauth.Bundle{
+		RelayfileURL:         server.URL,
+		RelayfileWorkspaceID: "ws_demo",
+		AccessToken:          "delegated_token",
+	})
 
 	var stdout bytes.Buffer
 	if err := run([]string{"status", "demo"}, strings.NewReader(""), &stdout, &stdout); err != nil {
@@ -2740,7 +2753,10 @@ func TestOpsListRefreshesMirrorFromServer(t *testing.T) {
 	}))
 	defer server.Close()
 
-	if err := saveCredentials(credentials{Server: server.URL, Token: "token"}); err != nil {
+	if err := saveCredentials(credentials{
+		Server: server.URL,
+		Token:  "token",
+	}); err != nil {
 		t.Fatalf("saveCredentials failed: %v", err)
 	}
 
@@ -2818,7 +2834,10 @@ func TestOpsListRefreshRejectsUnsafeOpIDAndKeepsSidecar(t *testing.T) {
 	}))
 	defer server.Close()
 
-	if err := saveCredentials(credentials{Server: server.URL, Token: "token"}); err != nil {
+	if err := saveCredentials(credentials{
+		Server: server.URL,
+		Token:  "token",
+	}); err != nil {
 		t.Fatalf("saveCredentials failed: %v", err)
 	}
 
@@ -2890,9 +2909,11 @@ func TestPullTriggersSyncRefreshForConnectedProviders(t *testing.T) {
 	}))
 	defer server.Close()
 
-	if err := saveCredentials(credentials{Server: server.URL, Token: "token"}); err != nil {
-		t.Fatalf("saveCredentials failed: %v", err)
-	}
+	writeDelegatedCredentialsForTest(t, delegatedauth.Bundle{
+		RelayfileURL:         server.URL,
+		RelayfileWorkspaceID: "ws_demo",
+		AccessToken:          "delegated_token",
+	})
 
 	var stdout bytes.Buffer
 	if err := run([]string{"pull", "--workspace", "demo"}, strings.NewReader(""), &stdout, &stdout); err != nil {
@@ -2930,9 +2951,11 @@ func TestPullScopedToSingleProviderSkipsStatusCall(t *testing.T) {
 	}))
 	defer server.Close()
 
-	if err := saveCredentials(credentials{Server: server.URL, Token: "token"}); err != nil {
-		t.Fatalf("saveCredentials failed: %v", err)
-	}
+	writeDelegatedCredentialsForTest(t, delegatedauth.Bundle{
+		RelayfileURL:         server.URL,
+		RelayfileWorkspaceID: "ws_demo",
+		AccessToken:          "delegated_token",
+	})
 
 	var stdout bytes.Buffer
 	if err := run([]string{"pull", "--workspace", "demo", "--provider", "notion", "--reason", "investigation"}, strings.NewReader(""), &stdout, &stdout); err != nil {
@@ -3252,10 +3275,41 @@ func TestLoginDelegatesToAgentRelay(t *testing.T) {
 	}
 	logPath := filepath.Join(t.TempDir(), "agent-relay.log")
 	t.Setenv("AGENT_RELAY_LOG", logPath)
+	var seenDelegated bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/workspaces/ws_123/relayfile/delegated-token" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		seenDelegated = true
+		if got := r.Header.Get("Authorization"); got != "Bearer cld_new" {
+			t.Fatalf("unexpected delegated-token Authorization: %q", got)
+		}
+		var body cloudRelayfileDelegatedTokenRequest
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode delegated-token body: %v", err)
+		}
+		if body.AgentName != "relayfile-cli" {
+			t.Fatalf("unexpected agentName: %q", body.AgentName)
+		}
+		if got, want := strings.Join(body.Scopes, ","), "fs:read,fs:write"; got != want {
+			t.Fatalf("delegated-token scopes = %q, want %q", got, want)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		writeDelegatedBundleResponse(t, w, "https://relayfile.test", "ws_123", "rf_login", "refresh_login")
+	}))
+	defer server.Close()
 	installFakeAgentRelay(t, `
 printf '%s\n' "$*" >> "$AGENT_RELAY_LOG"
 if [ "$*" = "cloud login --no-open" ]; then
   echo "agent-relay login ok"
+  exit 0
+fi
+if [ "$*" = "cloud session --json" ]; then
+  echo '{"apiUrl":"`+server.URL+`","accessToken":"cld_new"}'
+  exit 0
+fi
+if [ "$*" = "workspace active --json" ]; then
+  echo '{"name":"demo","cloudWorkspaceId":"ws_123","relayfileWorkspaceId":"ws_123"}'
   exit 0
 fi
 echo "unexpected args: $*" >&2
@@ -3274,18 +3328,212 @@ exit 2
 	if !strings.Contains(got, "agent-relay login ok") {
 		t.Fatalf("expected delegated agent-relay output, got %q", got)
 	}
-	if !strings.Contains(got, "Relayfile now uses the active agent-relay cloud session and workspace.") {
+	if !strings.Contains(got, "Relayfile now uses the active agent-relay cloud session and workspace demo.") {
 		t.Fatalf("expected relayfile canonical-session note, got %q", got)
+	}
+	if !seenDelegated {
+		t.Fatalf("expected delegated-token bootstrap call")
 	}
 	logBytes, err := os.ReadFile(logPath)
 	if err != nil {
 		t.Fatalf("read fake agent-relay log failed: %v", err)
 	}
-	if strings.TrimSpace(string(logBytes)) != "cloud login --no-open" {
-		t.Fatalf("expected agent-relay cloud login --no-open, got %q", string(logBytes))
+	gotLog := strings.TrimSpace(string(logBytes))
+	for _, want := range []string{"cloud login --no-open", "cloud session --json", "workspace active --json"} {
+		if !strings.Contains(gotLog, want) {
+			t.Fatalf("expected agent-relay %s call, got %q", want, string(logBytes))
+		}
 	}
 	if _, err := os.Stat(cloudCredentialsPath()); !os.IsNotExist(err) {
 		t.Fatalf("expected stale relayfile cloud credentials removed, got err=%v", err)
+	}
+	if _, err := os.Stat(credentialsPath()); !os.IsNotExist(err) {
+		t.Fatalf("expected stale relayfile credentials removed, got err=%v", err)
+	}
+	delegated, err := delegatedauth.Load(delegatedCredentialsPath())
+	if err != nil {
+		t.Fatalf("expected delegated credentials to be stored: %v", err)
+	}
+	if delegated.BearerToken() != "rf_login" || delegated.RotationToken() != "refresh_login" {
+		t.Fatalf("unexpected delegated credentials: %#v", delegated)
+	}
+}
+
+func TestPrepareWorkspaceCommandClientBootstrapsDelegatedCredentialsDespiteStaleLegacyToken(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+	if err := saveCredentials(credentials{
+		Server:    "https://stale-relayfile.test",
+		Token:     "stale_legacy_token",
+		UpdatedAt: time.Now().Add(-24 * time.Hour).UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("saveCredentials failed: %v", err)
+	}
+
+	var seenDelegated bool
+	var seenTree bool
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/workspaces/ws_cloud/relayfile/delegated-token":
+			seenDelegated = true
+			if got := r.Header.Get("Authorization"); got != "Bearer cld_access" {
+				t.Fatalf("unexpected delegated-token Authorization: %q", got)
+			}
+			var body cloudRelayfileDelegatedTokenRequest
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("decode delegated-token body: %v", err)
+			}
+			if got, want := strings.Join(body.Scopes, ","), "relayfile:fs:read:*"; got != want {
+				t.Fatalf("delegated-token scopes = %q, want %q", got, want)
+			}
+			writeDelegatedBundleResponse(t, w, server.URL, "ws_cloud", "rf_read", "refresh_read")
+		case "/v1/workspaces/ws_cloud/fs/tree":
+			seenTree = true
+			if got := r.Header.Get("Authorization"); got != "Bearer rf_read" {
+				t.Fatalf("unexpected data-plane Authorization: %q", got)
+			}
+			_, _ = w.Write([]byte(`{"path":"/github","entries":[],"nextCursor":null}`))
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	installFakeAgentRelaySession(t, server.URL, "cld_access", "cloud-prod", "ws_cloud", "ws_cloud")
+
+	var stdout bytes.Buffer
+	if err := run([]string{"tree", "cloud-prod", "/github"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("run tree failed: %v\noutput:\n%s", err, stdout.String())
+	}
+	if !seenDelegated {
+		t.Fatalf("expected delegated-token bootstrap call")
+	}
+	if !seenTree {
+		t.Fatalf("expected tree data-plane call")
+	}
+	if _, err := os.Stat(credentialsPath()); !os.IsNotExist(err) {
+		t.Fatalf("expected legacy relayfile credentials removed, got err=%v", err)
+	}
+	delegated, err := delegatedauth.Load(delegatedCredentialsPath())
+	if err != nil {
+		t.Fatalf("expected delegated credentials to be stored: %v", err)
+	}
+	if delegated.BearerToken() != "rf_read" || delegated.RotationToken() != "refresh_read" {
+		t.Fatalf("unexpected delegated credentials: %#v", delegated)
+	}
+}
+
+func TestWorkspaceCommandClientRefreshesExpiredDelegatedAccessToken(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	var sawRefresh bool
+	var sawStatus bool
+	expired := testJWTWithWorkspaceAgentAndExpiry("ws_refresh", "relayfile-cli", time.Now().Add(-time.Minute))
+	renewedAccessToken := testJWTWithWorkspaceAgentAndExpiry("ws_refresh", "relayfile-cli", time.Now().Add(time.Hour))
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/tokens/refresh":
+			sawRefresh = true
+			var body struct {
+				RefreshToken string `json:"refreshToken"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("decode refresh body: %v", err)
+			}
+			if body.RefreshToken != "refresh_old" {
+				t.Fatalf("refresh token = %q, want refresh_old", body.RefreshToken)
+			}
+			_ = json.NewEncoder(w).Encode(delegatedauth.TokenPair{
+				AccessToken:           renewedAccessToken,
+				RefreshToken:          "refresh_new",
+				AccessTokenExpiresAt:  time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
+				RefreshTokenExpiresAt: time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339),
+				DelegationNotAfter:    time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339),
+			})
+		case "/v1/workspaces/ws_refresh/sync/status":
+			sawStatus = true
+			if got, want := r.Header.Get("Authorization"), "Bearer "+renewedAccessToken; got != want {
+				t.Fatalf("unexpected status Authorization: %q", got)
+			}
+			_, _ = w.Write([]byte(`{"workspaceId":"ws_refresh","providers":[]}`))
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	if err := delegatedauth.SaveAtomic(delegatedCredentialsPath(), delegatedauth.Bundle{
+		RelayfileURL:          server.URL,
+		RelayauthURL:          server.URL,
+		RelayfileWorkspaceID:  "ws_refresh",
+		AccessToken:           expired,
+		RefreshToken:          "refresh_old",
+		AccessTokenExpiresAt:  time.Now().Add(-time.Minute).UTC().Format(time.RFC3339),
+		RefreshTokenExpiresAt: time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("save delegated credentials failed: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := run([]string{"status", "ws_refresh"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("run status failed: %v\noutput:\n%s", err, stdout.String())
+	}
+	if !sawRefresh {
+		t.Fatalf("expected delegated refresh call")
+	}
+	if !sawStatus {
+		t.Fatalf("expected status data-plane call")
+	}
+	renewed, err := delegatedauth.Load(delegatedCredentialsPath())
+	if err != nil {
+		t.Fatalf("load renewed delegated credentials failed: %v", err)
+	}
+	if renewed.RotationToken() != "refresh_new" {
+		t.Fatalf("expected rotated refresh token, got %#v", renewed)
+	}
+}
+
+func TestDelegatedRelayfileTokenViaCloudDefaultsToCoarseScopes(t *testing.T) {
+	var sawRequest bool
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/workspaces/ws_contract/relayfile/delegated-token" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		sawRequest = true
+		if got := r.Header.Get("Authorization"); got != "Bearer cld_contract" {
+			t.Fatalf("unexpected Authorization: %q", got)
+		}
+		var body cloudRelayfileDelegatedTokenRequest
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode delegated-token body: %v", err)
+		}
+		if body.AgentName != "relayfile-cli" {
+			t.Fatalf("agentName = %q, want relayfile-cli", body.AgentName)
+		}
+		if got, want := strings.Join(body.Scopes, ","), "fs:read,fs:write"; got != want {
+			t.Fatalf("scopes = %q, want %q", got, want)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		writeDelegatedBundleResponse(t, w, server.URL, "ws_contract", "rf_contract", "refresh_contract")
+	}))
+	defer server.Close()
+
+	bundle, err := delegatedRelayfileTokenViaCloud(cloudCredentials{
+		APIURL:      server.URL,
+		AccessToken: "cld_contract",
+	}, "ws_contract", "", nil)
+	if err != nil {
+		t.Fatalf("delegatedRelayfileTokenViaCloud failed: %v", err)
+	}
+	if !sawRequest {
+		t.Fatalf("expected delegated-token request")
+	}
+	if bundle.BearerToken() != "rf_contract" {
+		t.Fatalf("unexpected bundle: %#v", bundle)
 	}
 }
 
