@@ -7524,6 +7524,135 @@ func TestPullRemoteIncrementalChangedPath404RetriesWithoutAdvancingCursor(t *tes
 	assertLocalFileContent(t, filepath.Join(localDir, "Docs", "003.md"), "# 003")
 }
 
+// TestPullRemoteIncrementalDrainsStaleAliasEventsInOneCycle verifies the
+// stuck-event drain (AR-272 Part 2a): a read 404 on a provider-layout-alias
+// path (by-state index) is treated as a stale event and skipped immediately,
+// so a single cycle chews through several consecutive stuck events instead of
+// exiting after the first one. Real (non-alias) records on either side of the
+// stuck run are still applied.
+func TestPullRemoteIncrementalDrainsStaleAliasEventsInOneCycle(t *testing.T) {
+	files := map[string]RemoteFile{
+		"/linear/issues/AR-1.json": {
+			Path:        "/linear/issues/AR-1.json",
+			Revision:    "rev_001",
+			ContentType: "application/json",
+			Content:     `{"id":"AR-1"}`,
+		},
+		"/linear/issues/AR-4.json": {
+			Path:        "/linear/issues/AR-4.json",
+			Revision:    "rev_004",
+			ContentType: "application/json",
+			Content:     `{"id":"AR-4"}`,
+		},
+	}
+	client := &fakeClient{
+		files: files,
+		events: []FilesystemEvent{
+			{EventID: "evt_001", Type: "file.updated", Path: "/linear/issues/AR-1.json", Revision: "rev_001"},
+			// Two by-state alias paths the emitter dropped when the issues
+			// left ready-for-agent — the events feed still carries them, and
+			// reads 404. These are the stuck-event class.
+			{EventID: "evt_002", Type: "file.updated", Path: "/linear/issues/by-state/ready-for-agent/AR-2.json", Revision: "rev_002"},
+			{EventID: "evt_003", Type: "file.updated", Path: "/linear/issues/by-state/ready-for-agent/AR-3.json", Revision: "rev_003"},
+			{EventID: "evt_004", Type: "file.updated", Path: "/linear/issues/AR-4.json", Revision: "rev_004"},
+		},
+		revisionCounter: 4,
+		eventCounter:    4,
+	}
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID:      "ws_alias_drain",
+		RemoteRoot:       "/linear",
+		LocalRoot:        localDir,
+		FullPullEvery:    -1,
+		WebSocket:        boolPtr(false),
+		CursorTimeout:    time.Second,
+		BootstrapTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+	syncer.loaded = true
+	syncer.state = mountState{
+		Files:             map[string]trackedFile{},
+		EventsCursor:      "evt_000",
+		BootstrapComplete: true,
+	}
+
+	if err := syncer.Reconcile(context.Background()); err != nil {
+		t.Fatalf("expected stale alias events to drain in one cycle, got %v", err)
+	}
+	if got := syncer.state.EventsCursor; got != "evt_004" {
+		t.Fatalf("EventsCursor = %q, want fully-drained evt_004", got)
+	}
+	if got := syncer.StaleAliasSkips(); got != 2 {
+		t.Fatalf("StaleAliasSkips = %d, want 2", got)
+	}
+	if syncer.state.IncrementalReadNotReadySince != nil {
+		t.Fatalf("expected no read-not-ready timestamps for stale alias paths, got %#v", syncer.state.IncrementalReadNotReadySince)
+	}
+	assertLocalFileContent(t, filepath.Join(localDir, "issues", "AR-1.json"), `{"id":"AR-1"}`)
+	assertLocalFileContent(t, filepath.Join(localDir, "issues", "AR-4.json"), `{"id":"AR-4"}`)
+}
+
+// TestSkipStuckDropsConsecutiveUnreadableEvents verifies the operator escape
+// hatch (AR-272 Part 2b): SkipStuck advances the events cursor past every
+// read-404 event — including non-alias canonical paths — without waiting the
+// read-not-ready TTL, and reports the number skipped.
+func TestSkipStuckDropsConsecutiveUnreadableEvents(t *testing.T) {
+	client := &fakeClient{
+		files: map[string]RemoteFile{
+			"/notion/Docs/004.md": {
+				Path:        "/notion/Docs/004.md",
+				Revision:    "rev_004",
+				ContentType: "text/markdown",
+				Content:     "# 004",
+			},
+		},
+		events: []FilesystemEvent{
+			// Non-alias canonical paths that 404 — normally these retry for
+			// the full TTL; skip-stuck drops them immediately.
+			{EventID: "evt_001", Type: "file.updated", Path: "/notion/Docs/001.md", Revision: "rev_001"},
+			{EventID: "evt_002", Type: "file.updated", Path: "/notion/Docs/002.md", Revision: "rev_002"},
+			{EventID: "evt_003", Type: "file.updated", Path: "/notion/Docs/003.md", Revision: "rev_003"},
+			{EventID: "evt_004", Type: "file.updated", Path: "/notion/Docs/004.md", Revision: "rev_004"},
+		},
+		revisionCounter: 4,
+		eventCounter:    4,
+	}
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID:      "ws_skip_stuck",
+		RemoteRoot:       "/notion",
+		LocalRoot:        localDir,
+		FullPullEvery:    -1,
+		WebSocket:        boolPtr(false),
+		CursorTimeout:    time.Second,
+		BootstrapTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+	syncer.loaded = true
+	syncer.state = mountState{
+		Files:             map[string]trackedFile{},
+		EventsCursor:      "evt_000",
+		BootstrapComplete: true,
+	}
+
+	skipped, err := syncer.SkipStuck(context.Background(), 0)
+	if err != nil {
+		t.Fatalf("SkipStuck failed: %v", err)
+	}
+	if skipped != 3 {
+		t.Fatalf("skipped = %d, want 3 unreadable events dropped", skipped)
+	}
+	if got := syncer.state.EventsCursor; got != "evt_004" {
+		t.Fatalf("EventsCursor = %q, want evt_004 (caught up to head)", got)
+	}
+	assertLocalFileContent(t, filepath.Join(localDir, "Docs", "004.md"), "# 004")
+}
+
 func TestPullRemoteIncrementalCreatedThreadReply404RetriesWithoutAdvancingCursor(t *testing.T) {
 	const replyPath = "/slack/channels/C123ABC__proj-cloud/threads/1780871788_370329/replies/1780914176_827829.json"
 	client := &fakeClient{

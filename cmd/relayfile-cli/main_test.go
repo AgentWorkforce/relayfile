@@ -2506,6 +2506,43 @@ func TestWritebackPushPostsBulkAndWritesAckedReceipt(t *testing.T) {
 	}
 }
 
+func TestWritebackPushRejectsPathWithoutContentIdentity(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	const workspaceID = "ws_demo"
+	localDir := t.TempDir()
+	if err := ensureMirrorLayout(localDir); err != nil {
+		t.Fatalf("ensureMirrorLayout failed: %v", err)
+	}
+	if err := writeMirrorStateFile(localDir, syncStateFile{
+		WorkspaceID: workspaceID,
+		RemoteRoot:  "/linear/issues",
+		Mode:        defaultMountMode,
+	}); err != nil {
+		t.Fatalf("writeMirrorStateFile failed: %v", err)
+	}
+
+	localPath := filepath.Join(localDir, "comment-ar-272-test.json")
+	if err := os.WriteFile(localPath, []byte(`{"body":"synthetic comment"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write local payload failed: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	err := run([]string{"writeback", "push", localPath}, strings.NewReader(""), &stdout, &stdout)
+	if err == nil {
+		t.Fatal("expected unsupported path error")
+	}
+	if got := err.Error(); !strings.Contains(got, "supports only draft writeback paths and factory-create-*.json") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, state := range []string{"pending", "acked", "failed"} {
+		if got := countJSONFiles(filepath.Join(localDir, ".relay", "outbox", state)); got != 0 {
+			t.Fatalf("%s receipt count = %d, want 0", state, got)
+		}
+	}
+}
+
 func TestWorkspaceStatusReportsLocalMountHealth(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)
@@ -4846,5 +4883,24 @@ func TestIntegrationConnectKeepsSelectedWorkspaceAndUsesJoinedRelayWorkspaceForS
 	}
 	if !strings.Contains(stdout.String(), "Relayfile runtime: rw_7ccfea89") {
 		t.Fatalf("expected explicit runtime workspace output, got %q", stdout.String())
+	}
+}
+
+func TestIsWritebackDraftPathSlashSeparated(t *testing.T) {
+	cases := []struct {
+		path string
+		want bool
+	}{
+		{"/linear/issues/factory-create-abc.json", true},
+		{"linear/issues/factory-create-abc.json", true},
+		{"/linear/issues/by-state/ready-for-agent/factory-create-9f.json", true},
+		{"/linear/issues/AR-1.json", false},
+		{"/linear/issues/factory-create-abc.txt", false},
+		{"/notion/Docs/notes.md", false},
+	}
+	for _, tc := range cases {
+		if got := isWritebackDraftPath(tc.path); got != tc.want {
+			t.Errorf("isWritebackDraftPath(%q) = %v, want %v", tc.path, got, tc.want)
+		}
 	}
 }

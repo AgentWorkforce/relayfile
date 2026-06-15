@@ -21,6 +21,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -687,6 +688,8 @@ func printWritebackUsage(w io.Writer, subcommand string) {
 		fmt.Fprintln(w, "Usage: relayfile writeback push LOCAL_PATH [--workspace WS] [--json] [--timeout 90s]")
 	case "retry":
 		fmt.Fprintln(w, "Usage: relayfile writeback retry --opId OP [WORKSPACE]")
+	case "skip-stuck":
+		fmt.Fprintln(w, "Usage: relayfile writeback skip-stuck [WORKSPACE] [--workspace WS] [--max N] [--json]")
 	case "sweep-drafts":
 		fmt.Fprintln(w, writebackSweepUsage)
 	default:
@@ -695,6 +698,7 @@ func printWritebackUsage(w io.Writer, subcommand string) {
   relayfile writeback status [WORKSPACE] [--json]
   relayfile writeback retry --opId OP [WORKSPACE]
   relayfile writeback push LOCAL_PATH [--workspace WS] [--json] [--timeout 90s]
+  relayfile writeback skip-stuck [WORKSPACE] [--workspace WS] [--max N] [--json]
   relayfile writeback sweep-drafts [WORKSPACE] [--path-prefix PREFIX] [--pattern GLOB ...] [--apply] [--json]`)
 	}
 }
@@ -737,6 +741,7 @@ Usage:
   relayfile writeback status [WORKSPACE] [--json]
   relayfile writeback retry --opId OP [WORKSPACE]
   relayfile writeback push LOCAL_PATH [--workspace WS] [--json] [--timeout 90s]
+  relayfile writeback skip-stuck [WORKSPACE] [--workspace WS] [--max N] [--json]
   relayfile digest rebuild --window today|yesterday|YYYY-MM-DD|this-week|last-week [--workspace NAME] [--json]
   relayfile pull [--workspace NAME] [--provider PROVIDER] [--reason TEXT]
   relayfile mount [WORKSPACE] [LOCAL_DIR]
@@ -764,6 +769,8 @@ Subcommands:
               Show local pending, failed, and dead-lettered writebacks
   writeback retry
               Re-enqueue a local dead-lettered writeback op
+  writeback skip-stuck
+              Walk the events cursor past stuck (404) events without waiting the treat-as-deleted timer
   digest      Regenerate workspace digests
   digest rebuild
               Regenerate daily, weekly, or date-stamped digest artifacts
@@ -2932,6 +2939,9 @@ func runWritebackPush(args []string, stdout io.Writer) error {
 	contentType := detectContentType(resolved.LocalPath, raw)
 	contentHash := hashBytes(raw)
 	identity := writebackPushContentIdentity(resolved.WorkspaceID, resolved.RemotePath, contentHash)
+	if identity == nil {
+		return fmt.Errorf("writeback push currently supports only draft writeback paths and factory-create-*.json files; %s has no content identity for double-dispatch dedupe", resolved.RemotePath)
+	}
 	joinScopes := writebackPushJoinScopes(resolved.RemotePath)
 	requiredRelayfileScopes := writebackPushRequiredRelayfileScopes(resolved.RemotePath)
 	if strings.TrimSpace(*tokenOverride) == "" {
@@ -3013,7 +3023,13 @@ func runWritebackPush(args []string, stdout io.Writer) error {
 		dispatchStatus = strings.TrimSpace(result.Writeback.State)
 	}
 	if opID != "" {
-		op, err := waitForWritebackOperation(commandClient, opID, *timeout)
+		waitTimeout := *timeout
+		if waitTimeout <= 0 {
+			waitTimeout = 90 * time.Second
+		}
+		waitCtx, cancel := context.WithTimeout(context.Background(), waitTimeout)
+		op, err := waitForWritebackOperation(waitCtx, commandClient, opID)
+		cancel()
 		if err != nil {
 			failed := pendingReceipt
 			failed.OpID = opID
@@ -3061,33 +3077,35 @@ type writebackOperationStatus struct {
 	Revision string `json:"revision,omitempty"`
 }
 
-func waitForWritebackOperation(commandClient *workspaceCommandClient, opID string, timeout time.Duration) (writebackOperationStatus, error) {
+func waitForWritebackOperation(ctx context.Context, commandClient *workspaceCommandClient, opID string) (writebackOperationStatus, error) {
 	if strings.TrimSpace(opID) == "" {
 		return writebackOperationStatus{Status: "succeeded"}, nil
 	}
-	if timeout <= 0 {
-		timeout = 90 * time.Second
-	}
-	deadline := time.Now().Add(timeout)
 	for {
 		var op writebackOperationStatus
-		err := commandClient.getWorkspaceJSON(context.Background(), func(workspaceID string) string {
+		err := commandClient.getWorkspaceJSON(ctx, func(workspaceID string) string {
 			return fmt.Sprintf("/v1/workspaces/%s/ops/%s", url.PathEscape(workspaceID), url.PathEscape(opID))
 		}, &op)
-		if err != nil {
-			return op, err
+		if err == nil {
+			switch strings.TrimSpace(op.Status) {
+			case "succeeded":
+				return op, nil
+			case "failed", "dead_lettered", "canceled":
+				return op, fmt.Errorf("writeback operation %s %s", opID, strings.TrimSpace(op.Status))
+			}
 		}
-		status := strings.TrimSpace(op.Status)
-		switch status {
-		case "succeeded":
-			return op, nil
-		case "failed", "dead_lettered", "canceled":
-			return op, fmt.Errorf("writeback operation %s %s", opID, status)
+		// A transient poll error (network glitch, 5xx) should not abort the
+		// whole push — keep retrying until the context deadline fires. The
+		// select also makes the poll cancellable (e.g. Ctrl+C) instead of
+		// sleeping blindly.
+		select {
+		case <-ctx.Done():
+			if err != nil {
+				return op, fmt.Errorf("timed out waiting for writeback operation %s: %w", opID, err)
+			}
+			return op, fmt.Errorf("timed out waiting for writeback operation %s: %w", opID, ctx.Err())
+		case <-time.After(500 * time.Millisecond):
 		}
-		if time.Now().After(deadline) {
-			return op, fmt.Errorf("timed out waiting for writeback operation %s", opID)
-		}
-		time.Sleep(500 * time.Millisecond)
 	}
 }
 
@@ -3242,7 +3260,9 @@ func writebackPushContentIdentity(workspaceID, remotePath, contentHash string) *
 }
 
 func isWritebackDraftPath(remotePath string) bool {
-	base := filepath.Base(normalizeWritebackFailurePath(remotePath))
+	// Remote paths are slash-separated regardless of host OS, so use
+	// path.Base (not filepath.Base, which splits on "\\" on Windows).
+	base := path.Base(normalizeWritebackFailurePath(remotePath))
 	return strings.HasPrefix(base, "factory-create-") && strings.HasSuffix(base, ".json") ||
 		relayfile.IsDraftFilePath(remotePath)
 }
@@ -3344,11 +3364,109 @@ func runWriteback(args []string, stdout io.Writer) error {
 		return runWritebackStatus(args[1:], stdout)
 	case "retry":
 		return runWritebackRetry(args[1:], stdout)
+	case "skip-stuck":
+		return runWritebackSkipStuck(args[1:], stdout)
 	case "sweep-drafts":
 		return runWritebackSweepDrafts(args[1:], stdout)
 	default:
 		return fmt.Errorf("unknown writeback subcommand %q", args[0])
 	}
+}
+
+// runWritebackSkipStuck is the operator escape hatch for a wedged events
+// cursor. It walks the events cursor forward, dropping consecutive read-404
+// ("not readable yet") events immediately without waiting the 5-minute
+// treat-as-deleted timer, and reports how many stuck events it skipped.
+func runWritebackSkipStuck(args []string, stdout io.Writer) error {
+	fs := flag.NewFlagSet("writeback skip-stuck", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	workspaceName := fs.String("workspace", "", "workspace name or id")
+	maxSkips := fs.Int("max", 0, "maximum number of stuck events to skip (0 = unbounded)")
+	jsonOutput := fs.Bool("json", false, "emit JSON")
+	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
+		"workspace": true,
+		"max":       true,
+		"json":      false,
+	})); err != nil {
+		return err
+	}
+	if fs.NArg() > 1 {
+		return errors.New("usage: relayfile writeback skip-stuck [WORKSPACE] [--workspace WS] [--max N] [--json]")
+	}
+	if *maxSkips < 0 {
+		return errors.New("--max must be >= 0")
+	}
+
+	workspaceValue := firstNonBlank(strings.TrimSpace(*workspaceName), firstArg(fs))
+	workspaceID, record, err := resolveWorkspaceLikeStatus(workspaceValue)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(record.LocalDir) == "" {
+		return errors.New("workspace has no local mirror")
+	}
+
+	creds, err := loadCredentials()
+	if err != nil {
+		return err
+	}
+	tokenValue := resolveToken("", creds)
+	if tokenValue == "" {
+		return errors.New("token is required; set RELAYFILE_TOKEN or pass explicit relayfile credentials")
+	}
+	server := strings.TrimSpace(record.Server)
+	if server == "" {
+		server = resolveServer("", creds)
+	}
+	timeout := durationEnv("RELAYFILE_MOUNT_TIMEOUT", defaultMountTimeout)
+	if timeout <= 0 {
+		timeout = defaultMountTimeout
+	}
+	client := mountsync.NewHTTPClient(server, tokenValue, &http.Client{
+		Transport: newWritebackFailureTransport(record.LocalDir, log.Default(), mountsync.NewSyncTransport()),
+	})
+	remoteRoot := readMountRemoteRoot(record.LocalDir)
+	websocketDisabled := true
+	syncer, err := mountsync.NewSyncer(client, mountsync.SyncerOptions{
+		WorkspaceID: workspaceID,
+		RemoteRoot:  remoteRoot,
+		LocalRoot:   record.LocalDir,
+		WebSocket:   &websocketDisabled,
+		RootCtx:     context.Background(),
+		Logger:      log.Default(),
+	})
+	if err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	skipped, syncErr := syncer.SkipStuck(ctx, *maxSkips)
+	backlog := syncer.BacklogDraining()
+
+	if *jsonOutput {
+		result := struct {
+			Workspace string `json:"workspace"`
+			Skipped   int    `json:"skipped"`
+			Backlog   bool   `json:"backlogRemaining"`
+			Error     string `json:"error,omitempty"`
+		}{Workspace: workspaceID, Skipped: skipped, Backlog: backlog}
+		if syncErr != nil {
+			result.Error = syncErr.Error()
+		}
+		if err := writeJSON(stdout, result); err != nil {
+			return err
+		}
+		return syncErr
+	}
+
+	fmt.Fprintf(stdout, "Skipped %d stuck event(s)\n", skipped)
+	if backlog {
+		fmt.Fprintln(stdout, "Backlog remains — re-run 'relayfile writeback skip-stuck' to continue clearing")
+	} else {
+		fmt.Fprintln(stdout, "Events cursor caught up to live head")
+	}
+	return syncErr
 }
 
 func runWritebackStatus(args []string, stdout io.Writer) error {
@@ -8581,6 +8699,24 @@ func spawnBackgroundMountProcess(originalArgs []string, localDir, pidFile, logFi
 	return nil
 }
 
+// logStuckEventSummary surfaces the stuck-event drain outcome of a reconcile
+// cycle. In the request-driven, one-shot pull model a cycle can be canceled
+// mid-drain; without this the CLI exits silently and the operator cannot tell
+// whether the cursor caught up. When events were skipped or a backlog remains,
+// it points the operator at `relayfile writeback skip-stuck`.
+func logStuckEventSummary(syncer *mountsync.Syncer, cycleErr error) {
+	skipped := syncer.StaleAliasSkips()
+	backlog := syncer.BacklogDraining()
+	if skipped == 0 && !backlog {
+		return
+	}
+	if backlog || errors.Is(cycleErr, context.Canceled) || errors.Is(cycleErr, context.DeadlineExceeded) {
+		log.Printf("stuck-event drain: %d stale index event(s) skipped this cycle; backlog remains — re-run or use 'relayfile writeback skip-stuck' to clear", skipped)
+		return
+	}
+	log.Printf("stuck-event drain: %d stale index event(s) skipped this cycle; events cursor caught up to live head", skipped)
+}
+
 func runMountLoop(rootCtx context.Context, syncer *mountsync.Syncer, localDir, workspaceID, serverURL, delegatedCredsFile string, timeout, interval time.Duration, intervalJitter float64, websocketEnabled, once, daemonized bool, pidFile, logFile string) error {
 	interval = enforcePollIntervalFloor(interval)
 	httpClient, _ := syncerClient(syncer)
@@ -8780,6 +8916,7 @@ func runMountLoop(rootCtx context.Context, syncer *mountsync.Syncer, localDir, w
 
 	log.Print(mountStartBanner(localDir, interval, intervalJitter))
 	initialErr := runCycle(true)
+	logStuckEventSummary(syncer, initialErr)
 	if once {
 		return initialErr
 	}

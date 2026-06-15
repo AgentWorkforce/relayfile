@@ -986,19 +986,32 @@ type Syncer struct {
 	readNotReadyTTL      time.Duration
 	forceFullReconcile   bool
 	incrementalCycles    int
-	oversizedLogged      map[string]struct{}
-	quarantinedPaths     map[string]struct{}
-	lazyRepos            bool
-	lowMemory            bool
-	writeOnly            bool
-	layoutRegistrar      ProviderLayoutRegistrar
-	githubWorkingTree    *githubWorkingTreeMount
-	closeScheduler       *CloseScheduler
-	rollingCoalescer     *RollingDigestCoalescer
-	circuit              *CloudErrorCircuit
-	maxOutboxAttempts    int
-	nowFn                func() time.Time
-	mu                   sync.Mutex
+	// staleAliasSkips counts stale provider-layout-alias events drained in the
+	// current reconcile cycle. Reset at the start of each cycle and surfaced to
+	// the CLI (e.g. `relayfile pull` summary, `workspace status`) so operators
+	// can see the stuck-event drain making progress.
+	staleAliasSkips int
+	// skip-stuck escape hatch (`relayfile writeback skip-stuck`). When
+	// skipStuckMode is set, the incremental drain drops every read-404 event
+	// immediately — not just provider-layout-alias paths — without waiting the
+	// read-not-ready TTL. skipStuckMax bounds the number of events dropped
+	// (0 = unbounded); skipStuckCount tracks how many were dropped.
+	skipStuckMode     bool
+	skipStuckMax      int
+	skipStuckCount    int
+	oversizedLogged   map[string]struct{}
+	quarantinedPaths  map[string]struct{}
+	lazyRepos         bool
+	lowMemory         bool
+	writeOnly         bool
+	layoutRegistrar   ProviderLayoutRegistrar
+	githubWorkingTree *githubWorkingTreeMount
+	closeScheduler    *CloseScheduler
+	rollingCoalescer  *RollingDigestCoalescer
+	circuit           *CloudErrorCircuit
+	maxOutboxAttempts int
+	nowFn             func() time.Time
+	mu                sync.Mutex
 }
 
 // now returns the current time using the injected clock when set (tests),
@@ -1511,6 +1524,50 @@ func (s *Syncer) SyncOnce(ctx context.Context) error {
 
 func (s *Syncer) Reconcile(ctx context.Context) error {
 	return s.sync(ctx, true)
+}
+
+// StaleAliasSkips returns the number of stale provider-layout-alias events the
+// most recent reconcile cycle drained without waiting the read-not-ready TTL.
+// Operators use this (via `relayfile pull` / `workspace status`) to confirm the
+// stuck-event drain is making progress.
+func (s *Syncer) StaleAliasSkips() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.staleAliasSkips
+}
+
+// BacklogDraining reports whether the events feed still has unprocessed pages
+// after the most recent cycle (e.g. the cycle was canceled mid-drain). The CLI
+// uses this to tell the operator to re-run or run `writeback skip-stuck`.
+func (s *Syncer) BacklogDraining() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.state.IncrementalBacklogDraining
+}
+
+// SkipStuck is the operator escape hatch for a wedged events cursor. It runs a
+// reconcile cycle that drops every read-404 ("not readable yet") event
+// immediately — without waiting the read-not-ready TTL — so the cursor walks
+// forward past consecutive stuck events in one invocation. max bounds the
+// number of events dropped (0 = unbounded). It returns the number of stuck
+// events skipped along with any reconcile error.
+func (s *Syncer) SkipStuck(ctx context.Context, max int) (int, error) {
+	s.mu.Lock()
+	s.skipStuckMode = true
+	s.skipStuckMax = max
+	s.skipStuckCount = 0
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		s.skipStuckMode = false
+		s.skipStuckMax = 0
+		s.mu.Unlock()
+	}()
+	err := s.sync(ctx, true)
+	s.mu.Lock()
+	count := s.skipStuckCount
+	s.mu.Unlock()
+	return count, err
 }
 
 // FlushOutboxOnce uploads only persisted durable outbox records and exits
@@ -2456,6 +2513,7 @@ func (s *Syncer) sync(ctx context.Context, forcePoll bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.markReconcileStarted()
+	s.staleAliasSkips = 0
 	if err := s.runClosingDigestJobsLocked(ctx); err != nil {
 		s.markSyncError(err)
 		_ = s.saveState()
@@ -4408,6 +4466,23 @@ func isProviderLayoutAliasSegment(segment string) bool {
 	return false
 }
 
+// isProviderLayoutAliasRemotePath reports whether remotePath lives under a
+// provider layout alias index (by-state, by-id, by-title, ...). Those paths are
+// derived index views: the emitter removes the alias entry when the underlying
+// record changes state, but the events feed may still carry the now-dangling
+// path. A read 404 on such a path means the event is stale, not slow — the
+// alias mirror is reconstructable from the canonical record and the periodic
+// full pull — so the cycle can skip it immediately instead of holding the
+// events cursor for the full read-not-ready TTL.
+func isProviderLayoutAliasRemotePath(remotePath string) bool {
+	for _, segment := range strings.Split(strings.Trim(normalizeRemotePath(remotePath), "/"), "/") {
+		if isProviderLayoutAliasSegment(segment) {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Syncer) pullRemoteIncremental(ctx context.Context, conflicted map[string]struct{}, cursor string) (string, error) {
 	currentCursor := strings.TrimSpace(cursor)
 	safeCursor := currentCursor
@@ -4577,6 +4652,48 @@ func (s *Syncer) applyIncrementalChanges(
 		if err != nil {
 			var httpErr *HTTPError
 			if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusNotFound {
+				// Operator escape hatch (`relayfile writeback skip-stuck`): drop
+				// every unreadable event immediately, regardless of path shape
+				// or TTL, until the optional max budget is exhausted. Once the
+				// budget is hit, preserve the cursor so a follow-up run resumes
+				// from here.
+				if s.skipStuckMode {
+					if s.skipStuckMax > 0 && s.skipStuckCount >= s.skipStuckMax {
+						s.logf("skip-stuck: reached max=%d skipped events; preserving events cursor for next run", s.skipStuckMax)
+						return &IncrementalReadNotReadyError{
+							Path:       remotePath,
+							StatusCode: httpErr.StatusCode,
+							Code:       httpErr.Code,
+							Message:    httpErr.Message,
+						}
+					}
+					s.skipStuckCount++
+					s.logf("skip-stuck: dropping unreadable event for %s (404); advancing events cursor", remotePath)
+					if err := s.applyRemoteDelete(remotePath, conflicted); err != nil {
+						return err
+					}
+					s.markIncrementalCheckpoint(pageStartCursor, pageCursor, "changed", remotePath)
+					continue
+				}
+				// In-cycle drain of the stuck-event class. A read 404 on a
+				// provider-layout-alias path (by-state, by-id, ...) is a stale
+				// index event: the emitter dropped the alias entry when the
+				// record changed state, but the events feed still carries the
+				// dangling path. Skip it immediately and keep draining the rest
+				// of the page in this same cycle rather than holding the cursor
+				// for the full read-not-ready TTL and exiting after one event.
+				// Canonical records are reconstructable independently, so this
+				// cannot lose committed data; the periodic full pull self-heals
+				// any alias mirror that should still exist.
+				if isProviderLayoutAliasRemotePath(remotePath) {
+					s.staleAliasSkips++
+					s.logf("changed event for %s is a stale index-alias path (read 404); skipping immediately and continuing drain", remotePath)
+					if err := s.applyRemoteDelete(remotePath, conflicted); err != nil {
+						return err
+					}
+					s.markIncrementalCheckpoint(pageStartCursor, pageCursor, "changed", remotePath)
+					continue
+				}
 				if s.incrementalReadNotReadyExpired(remotePath, time.Now().UTC()) {
 					s.logf("changed event for %s remained unreadable for at least %s; treating as deleted and advancing events cursor", remotePath, s.readNotReadyTTL)
 					if err := s.applyRemoteDelete(remotePath, conflicted); err != nil {
