@@ -1905,6 +1905,14 @@ func TestBulkWrite_ContentIdentityOnlyForCreateDraftPaths(t *testing.T) {
 		t.Fatal("expected content identity for space-uuid create draft path")
 	}
 
+	factoryCreate := bulkWriteFilesForPending(workspaceID, []pendingBulkWrite{{
+		remotePath: "/linear/issues/factory-create-ar-272-test.json",
+		snapshot:   snapshot,
+	}})
+	if factoryCreate[0].ContentIdentity == nil {
+		t.Fatal("expected content identity for factory-create writeback path")
+	}
+
 	stable := bulkWriteFilesForPending(workspaceID, []pendingBulkWrite{{
 		remotePath: "/notion/pages/page-1.md",
 		snapshot:   snapshot,

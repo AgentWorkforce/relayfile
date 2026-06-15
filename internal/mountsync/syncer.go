@@ -19,6 +19,7 @@ import (
 	"net/http/pprof"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -227,7 +228,13 @@ type RemoteFile struct {
 }
 
 type WriteResult struct {
+	OpID           string `json:"opId,omitempty"`
+	Status         string `json:"status,omitempty"`
 	TargetRevision string `json:"targetRevision"`
+	Writeback      struct {
+		Provider string `json:"provider,omitempty"`
+		State    string `json:"state,omitempty"`
+	} `json:"writeback,omitempty"`
 }
 
 type RemoteClient interface {
@@ -2024,10 +2031,18 @@ func bulkWriteFilesForPending(workspaceID string, pending []pendingBulkWrite) []
 }
 
 func mountWritebackCreateDraftContentIdentity(workspaceID, normalizedRemotePath, contentHash string) *ContentIdentity {
-	if !relayfile.IsDraftFilePath(normalizedRemotePath) {
+	if !isMountWritebackCreateDraftPath(normalizedRemotePath) {
 		return nil
 	}
 	return newMountWritebackCreateDraftContentIdentity(workspaceID, normalizedRemotePath, contentHash)
+}
+
+func isMountWritebackCreateDraftPath(remotePath string) bool {
+	if relayfile.IsDraftFilePath(remotePath) {
+		return true
+	}
+	base := path.Base(normalizeRemotePath(remotePath))
+	return strings.HasPrefix(base, "factory-create-") && strings.HasSuffix(base, ".json")
 }
 
 func newMountWritebackCreateDraftContentIdentity(workspaceID, normalizedRemotePath, contentHash string) *ContentIdentity {

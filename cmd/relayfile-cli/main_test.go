@@ -241,7 +241,7 @@ func TestWorkspaceRequiresSubcommandMentionsJoin(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected workspace without subcommand to fail")
 	}
-	if got := err.Error(); !strings.Contains(got, "create, join, use, list, current, or delete") {
+	if got := err.Error(); !strings.Contains(got, "create, join, use, list, current, status, or delete") {
 		t.Fatalf("workspace subcommand error = %q", got)
 	}
 }
@@ -2351,6 +2351,234 @@ func writeDelegatedCredentialsForTest(t *testing.T, bundle delegatedauth.Bundle)
 		t.Fatalf("save delegated credentials failed: %v", err)
 	}
 	return path
+}
+
+func TestWritebackPushPostsBulkAndWritesAckedReceipt(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	const workspaceID = "ws_demo"
+	const remotePath = "/linear/issues/factory-create-ar-272-test.json"
+	const opID = "op_ar_272"
+	localDir := t.TempDir()
+	if err := ensureMirrorLayout(localDir); err != nil {
+		t.Fatalf("ensureMirrorLayout failed: %v", err)
+	}
+	if err := writeMirrorStateFile(localDir, syncStateFile{
+		WorkspaceID: workspaceID,
+		RemoteRoot:  "/linear/issues",
+		Mode:        defaultMountMode,
+	}); err != nil {
+		t.Fatalf("writeMirrorStateFile failed: %v", err)
+	}
+	if _, err := upsertWorkspaceDetails(workspaceRecord{
+		Name:       "demo",
+		ID:         workspaceID,
+		LocalDir:   localDir,
+		CreatedAt:  time.Now().UTC().Format(time.RFC3339),
+		LastUsedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("upsertWorkspaceDetails failed: %v", err)
+	}
+
+	localPath := filepath.Join(localDir, "factory-create-ar-272-test.json")
+	content := []byte(`{"title":"AR-272 synthetic test"}` + "\n")
+	if err := os.WriteFile(localPath, content, 0o644); err != nil {
+		t.Fatalf("write local payload failed: %v", err)
+	}
+
+	if err := saveCloudCredentials(cloudCredentials{
+		APIURL:      "https://legacy-cloud-credentials.invalid",
+		AccessToken: "legacy_token_must_not_be_used",
+	}); err != nil {
+		t.Fatalf("save legacy cloud credentials failed: %v", err)
+	}
+
+	var sawDelegated atomic.Bool
+	var sawBulk atomic.Bool
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/workspaces/"+workspaceID+"/relayfile/delegated-token":
+			sawDelegated.Store(true)
+			if got := r.Header.Get("Authorization"); got != "Bearer cld_access" {
+				t.Fatalf("unexpected delegated-token Authorization: %q", got)
+			}
+			var body cloudRelayfileDelegatedTokenRequest
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("decode delegated-token body failed: %v", err)
+			}
+			if body.AgentName != "relayfile-cli" {
+				t.Fatalf("agentName = %q, want relayfile-cli", body.AgentName)
+			}
+			if got, want := strings.Join(body.Scopes, ","), "fs:write:/linear/**"; got != want {
+				t.Fatalf("delegated-token scopes = %q, want %q", got, want)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"relayfileUrl":                   server.URL,
+				"relayauthUrl":                   server.URL,
+				"relayfileWorkspaceId":           workspaceID,
+				"relayfileToken":                 "rf_write",
+				"relayfileTokenExpiresAt":        time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
+				"relayfileRefreshToken":          "refresh_write",
+				"relayfileRefreshTokenExpiresAt": time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339),
+				"relayfileScopes":                []string{"relayfile:fs:write:/linear/**"},
+				"delegationNotAfter":             time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339),
+				"relayfileMountPaths":            []string{"/linear/**"},
+			})
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/workspaces/"+workspaceID+"/fs/bulk":
+			sawBulk.Store(true)
+			if got := r.Header.Get("Authorization"); got != "Bearer rf_write" {
+				t.Fatalf("unexpected bulk Authorization: %q", got)
+			}
+			var req bulkWriteRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatalf("decode bulk request failed: %v", err)
+			}
+			if len(req.Files) != 1 {
+				t.Fatalf("bulk files = %d, want 1", len(req.Files))
+			}
+			file := req.Files[0]
+			if file.Path != remotePath {
+				t.Fatalf("bulk path = %q, want %q", file.Path, remotePath)
+			}
+			if file.Content != string(content) {
+				t.Fatalf("bulk content = %q, want %q", file.Content, string(content))
+			}
+			if file.ContentIdentity == nil {
+				t.Fatal("expected content identity for factory-create writeback")
+			}
+			if file.ContentIdentity.Kind != "mount-writeback-create-draft" {
+				t.Fatalf("content identity kind = %q", file.ContentIdentity.Kind)
+			}
+			if !strings.HasPrefix(file.ContentIdentity.Key, workspaceID+":"+remotePath+":") {
+				t.Fatalf("content identity key = %q", file.ContentIdentity.Key)
+			}
+			_, _ = io.WriteString(w, `{"written":1,"errorCount":0,"correlationId":"corr_ar_272","results":[{"path":"`+remotePath+`","revision":"rev_1","opId":"`+opID+`","writeback":{"provider":"linear","state":"succeeded"}}]}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/workspaces/"+workspaceID+"/ops/"+opID:
+			if got := r.Header.Get("Authorization"); got != "Bearer rf_write" {
+				t.Fatalf("unexpected op Authorization: %q", got)
+			}
+			_, _ = io.WriteString(w, `{"opId":"`+opID+`","path":"`+remotePath+`","status":"succeeded","revision":"rev_1"}`)
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	installFakeAgentRelaySession(t, server.URL, "cld_access", "demo", workspaceID, workspaceID)
+
+	var stdout bytes.Buffer
+	if err := run([]string{"writeback", "push", localPath, "--workspace", "demo", "--timeout", "1s"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("writeback push failed: %v\n%s", err, stdout.String())
+	}
+	if !sawDelegated.Load() {
+		t.Fatal("expected delegated-token request via agent-relay cloud session")
+	}
+	if !sawBulk.Load() {
+		t.Fatal("expected bulk write request")
+	}
+	if got := stdout.String(); !strings.Contains(got, "Pushed ") || !strings.Contains(got, opID) {
+		t.Fatalf("unexpected stdout: %s", got)
+	}
+	if got := countJSONFiles(filepath.Join(localDir, ".relay", "outbox", "pending")); got != 0 {
+		t.Fatalf("pending receipt count = %d, want 0", got)
+	}
+	ackedDir := filepath.Join(localDir, ".relay", "outbox", "acked")
+	entries, err := os.ReadDir(ackedDir)
+	if err != nil {
+		t.Fatalf("read acked dir failed: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("acked receipt count = %d, want 1", len(entries))
+	}
+	payload, err := os.ReadFile(filepath.Join(ackedDir, entries[0].Name()))
+	if err != nil {
+		t.Fatalf("read acked receipt failed: %v", err)
+	}
+	var receipt writebackPushReceipt
+	if err := json.Unmarshal(payload, &receipt); err != nil {
+		t.Fatalf("decode acked receipt failed: %v", err)
+	}
+	if receipt.Status != "acked" || receipt.OpID != opID || receipt.RemotePath != remotePath || receipt.Revision != "rev_1" {
+		t.Fatalf("unexpected receipt: %+v", receipt)
+	}
+}
+
+func TestWorkspaceStatusReportsLocalMountHealth(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	localDir := t.TempDir()
+	if err := ensureMirrorLayout(localDir); err != nil {
+		t.Fatalf("ensureMirrorLayout failed: %v", err)
+	}
+	if err := writeMirrorStateFile(localDir, syncStateFile{
+		WorkspaceID:               "ws_demo",
+		RemoteRoot:                "/linear/issues",
+		Mode:                      defaultMountMode,
+		Status:                    "syncing",
+		LastSuccessfulReconcileAt: "2026-06-11T15:14:48Z",
+		LastReconcileAt:           "2026-06-15T10:00:00Z",
+		LastError:                 &statusError{Message: "changed event not readable yet"},
+	}); err != nil {
+		t.Fatalf("writeMirrorStateFile failed: %v", err)
+	}
+	mountState := map[string]any{
+		"incrementalReadNotReadySince": map[string]string{
+			"/linear/issues/by-state/ready-for-agent/AR-1.json": "2026-06-15T09:00:00Z",
+			"/linear/issues/by-state/ready-for-agent/AR-2.json": "2026-06-15T09:01:00Z",
+		},
+		"incrementalBacklogDraining": true,
+	}
+	mountStatePayload, err := json.Marshal(mountState)
+	if err != nil {
+		t.Fatalf("marshal mount state failed: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(localDir, ".relayfile-mount-state.json"), mountStatePayload, 0o644); err != nil {
+		t.Fatalf("write mount state failed: %v", err)
+	}
+	for _, path := range []string{
+		filepath.Join(localDir, ".relay", "outbox", "pending", "mountcmd_pending.json"),
+		filepath.Join(localDir, ".relay", "outbox", "failed", "mountcmd_failed.json"),
+		filepath.Join(localDir, ".relay", "outbox", "acked", "mountcmd_acked.json"),
+	} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("mkdir %s failed: %v", filepath.Dir(path), err)
+		}
+		if err := os.WriteFile(path, []byte("{}\n"), 0o644); err != nil {
+			t.Fatalf("write %s failed: %v", path, err)
+		}
+	}
+	if _, err := upsertWorkspaceDetails(workspaceRecord{
+		Name:       "demo",
+		ID:         "ws_demo",
+		LocalDir:   localDir,
+		CreatedAt:  time.Now().UTC().Format(time.RFC3339),
+		LastUsedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("upsertWorkspaceDetails failed: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := run([]string{"workspace", "status", "--workspace", "demo"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("workspace status failed: %v\n%s", err, stdout.String())
+	}
+	output := stdout.String()
+	for _, want := range []string{
+		"workspace: ws_demo (demo)",
+		"status: syncing",
+		"last successful reconcile: 2026-06-11T15:14:48Z",
+		"stuck events: 2",
+		"outbox: pending=1 failed=1 acked=1",
+		"last error: changed event not readable yet",
+		"incremental backlog: draining",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("workspace status output missing %q:\n%s", want, output)
+		}
+	}
 }
 
 func TestStatusSurfacesDegradedStallReason(t *testing.T) {
