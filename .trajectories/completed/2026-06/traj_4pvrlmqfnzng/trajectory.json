@@ -37,7 +37,7 @@
         {
           "ts": 1781521862043,
           "type": "decision",
-          "content": "Leave outbound webhook SDK/server contract mismatch as review finding: Leave outbound webhook SDK/server contract mismatch as review finding",
+          "content": "Leave outbound webhook SDK/server contract mismatch as review finding",
           "raw": {
             "question": "Leave outbound webhook SDK/server contract mismatch as review finding",
             "chosen": "Leave outbound webhook SDK/server contract mismatch as review finding",
