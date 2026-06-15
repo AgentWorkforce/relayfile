@@ -23,10 +23,11 @@ import { createLocalRs256Auth, type LocalRs256Auth } from './test-utils/rsa-sign
 // ---------------------------------------------------------------------------
 // Config
 // ---------------------------------------------------------------------------
-const flags = new Set(process.argv.slice(2).filter((a) => a.startsWith('--')));
+const argv = process.argv.slice(2);
+const flags = new Set(argv.filter((a) => a.startsWith('--')));
 const CI = flags.has('--ci') || !!process.env.CI;
 const REMOTE = flags.has('--remote');
-const HELP = flags.has('--help') || flags.has('-h');
+const HELP = flags.has('--help') || argv.includes('-h');
 
 const PORT = Number(process.env.RELAYFILE_PORT || 19090);
 const BASE_URL = process.env.RELAYFILE_BASE_URL || `http://127.0.0.1:${PORT}`;
