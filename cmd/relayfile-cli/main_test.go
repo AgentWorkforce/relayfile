@@ -2412,7 +2412,7 @@ func TestWritebackPushPostsBulkAndWritesAckedReceipt(t *testing.T) {
 			if body.AgentName != "relayfile-cli" {
 				t.Fatalf("agentName = %q, want relayfile-cli", body.AgentName)
 			}
-			if got, want := strings.Join(body.Scopes, ","), "fs:write:/linear/**"; got != want {
+			if got, want := strings.Join(body.Scopes, ","), "fs:write:/linear/**,ops:read"; got != want {
 				t.Fatalf("delegated-token scopes = %q, want %q", got, want)
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{
@@ -2503,6 +2503,14 @@ func TestWritebackPushPostsBulkAndWritesAckedReceipt(t *testing.T) {
 	}
 	if receipt.Status != "acked" || receipt.OpID != opID || receipt.RemotePath != remotePath || receipt.Revision != "rev_1" {
 		t.Fatalf("unexpected receipt: %+v", receipt)
+	}
+	// Terminal receipts must not retain the user's file body on disk.
+	if receipt.Content != "" || receipt.Encoding != "" {
+		t.Fatalf("acked receipt must redact content/encoding, got content=%q encoding=%q", receipt.Content, receipt.Encoding)
+	}
+	// The acked JSON printed to stdout must likewise omit the body.
+	if strings.Contains(stdout.String(), "AR-272 synthetic test") {
+		t.Fatalf("stdout leaked file content: %s", stdout.String())
 	}
 }
 
@@ -4902,5 +4910,84 @@ func TestIsWritebackDraftPathSlashSeparated(t *testing.T) {
 		if got := isWritebackDraftPath(tc.path); got != tc.want {
 			t.Errorf("isWritebackDraftPath(%q) = %v, want %v", tc.path, got, tc.want)
 		}
+	}
+}
+
+func TestWriteWritebackPushReceiptRedactsTerminalReceipts(t *testing.T) {
+	mountRoot := t.TempDir()
+	base := writebackPushReceipt{
+		CommandID:   "mountcmd_test",
+		WorkspaceID: "ws_demo",
+		RemotePath:  "/linear/issues/factory-create-x.json",
+		ContentType: "application/json",
+		Content:     "secret-body",
+		Encoding:    "",
+		Hash:        "deadbeef",
+	}
+
+	// Pending receipt: retains the body (for retry) and is written 0600.
+	pending := base
+	pending.Status = "pending"
+	if err := writeWritebackPushReceipt(mountRoot, pending); err != nil {
+		t.Fatalf("write pending receipt: %v", err)
+	}
+	pendingPath := filepath.Join(mountRoot, ".relay", "outbox", "pending", "mountcmd_test.json")
+	info, err := os.Stat(pendingPath)
+	if err != nil {
+		t.Fatalf("stat pending receipt: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Fatalf("pending receipt mode = %o, want 600", perm)
+	}
+	var pendingReceipt writebackPushReceipt
+	readReceiptJSON(t, pendingPath, &pendingReceipt)
+	if pendingReceipt.Content != "secret-body" {
+		t.Fatalf("pending receipt must retain content, got %q", pendingReceipt.Content)
+	}
+
+	// Terminal receipts (acked/failed): body stripped, pending copy removed.
+	for _, status := range []string{"acked", "failed"} {
+		r := base
+		r.Status = status
+		if err := writeWritebackPushReceipt(mountRoot, r); err != nil {
+			t.Fatalf("write %s receipt: %v", status, err)
+		}
+		p := filepath.Join(mountRoot, ".relay", "outbox", status, "mountcmd_test.json")
+		var got writebackPushReceipt
+		readReceiptJSON(t, p, &got)
+		if got.Content != "" || got.Encoding != "" {
+			t.Fatalf("%s receipt must redact content/encoding, got content=%q", status, got.Content)
+		}
+		if _, err := os.Stat(pendingPath); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("writing %s receipt should remove the pending copy; stat err=%v", status, err)
+		}
+		// Re-create the pending copy for the next iteration's removal check.
+		if err := writeWritebackPushReceipt(mountRoot, pending); err != nil {
+			t.Fatalf("recreate pending receipt: %v", err)
+		}
+	}
+}
+
+func TestIsTerminalWritebackOpStatus(t *testing.T) {
+	for _, s := range []string{"failed", "dead_lettered", "canceled", " failed "} {
+		if !isTerminalWritebackOpStatus(s) {
+			t.Errorf("isTerminalWritebackOpStatus(%q) = false, want true", s)
+		}
+	}
+	for _, s := range []string{"", "succeeded", "running", "pending", "dispatched"} {
+		if isTerminalWritebackOpStatus(s) {
+			t.Errorf("isTerminalWritebackOpStatus(%q) = true, want false", s)
+		}
+	}
+}
+
+func readReceiptJSON(t *testing.T, path string, out *writebackPushReceipt) {
+	t.Helper()
+	payload, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read receipt %s: %v", path, err)
+	}
+	if err := json.Unmarshal(payload, out); err != nil {
+		t.Fatalf("decode receipt %s: %v", path, err)
 	}
 }

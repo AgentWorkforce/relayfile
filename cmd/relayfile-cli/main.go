@@ -2881,6 +2881,16 @@ type writebackPushReceipt struct {
 	ContentIdentity *contentIdentity `json:"contentIdentity,omitempty"`
 }
 
+// withoutBody returns a copy with the file content stripped. Persisted
+// terminal receipts (acked/failed) and any printed receipt must not retain or
+// log arbitrary user file contents beyond the in-flight writeback; only the
+// transient pending receipt keeps the body so a retry can resend it.
+func (r writebackPushReceipt) withoutBody() writebackPushReceipt {
+	r.Content = ""
+	r.Encoding = ""
+	return r
+}
+
 type workspaceHealthReport struct {
 	WorkspaceID                string `json:"workspaceId"`
 	Name                       string `json:"name,omitempty"`
@@ -3031,16 +3041,28 @@ func runWritebackPush(args []string, stdout io.Writer) error {
 		op, err := waitForWritebackOperation(waitCtx, commandClient, opID)
 		cancel()
 		if err != nil {
-			failed := pendingReceipt
-			failed.OpID = opID
-			failed.Status = "failed"
-			failed.LastAttemptAt = time.Now().UTC().Format(time.RFC3339Nano)
-			failed.AttemptCount = 1
-			failed.LastError = sanitizeCLIReceiptError(err)
-			failed.DispatchStatus = "failed"
-			failed.CorrelationID = firstNonBlank(response.CorrelationID, failed.CorrelationID)
-			if receiptErr := writeWritebackPushReceipt(resolved.MountRoot, failed); receiptErr != nil {
-				return fmt.Errorf("%w; additionally failed to write failure receipt: %v", err, receiptErr)
+			// The write already landed on the cloud (we have an opID). A
+			// terminal op status (failed/dead_lettered/canceled) is a real
+			// failure; a poll timeout or transient GET error is "unknown" —
+			// the op may still succeed cloud-side, so keep the receipt pending
+			// (flagged needsAttention) instead of diverging local state with a
+			// premature failed receipt.
+			receipt := pendingReceipt
+			receipt.OpID = opID
+			receipt.LastAttemptAt = time.Now().UTC().Format(time.RFC3339Nano)
+			receipt.AttemptCount = 1
+			receipt.LastError = sanitizeCLIReceiptError(err)
+			receipt.CorrelationID = firstNonBlank(response.CorrelationID, receipt.CorrelationID)
+			if isTerminalWritebackOpStatus(op.Status) {
+				receipt.Status = "failed"
+				receipt.DispatchStatus = firstNonBlank(strings.TrimSpace(op.Status), "failed")
+			} else {
+				receipt.Status = "pending"
+				receipt.DispatchStatus = firstNonBlank(strings.TrimSpace(op.Status), "dispatched")
+				receipt.NeedsAttention = true
+			}
+			if receiptErr := writeWritebackPushReceipt(resolved.MountRoot, receipt); receiptErr != nil {
+				return fmt.Errorf("%w; additionally failed to write receipt: %v", err, receiptErr)
 			}
 			return err
 		}
@@ -3060,7 +3082,7 @@ func runWritebackPush(args []string, stdout io.Writer) error {
 		return err
 	}
 	if *jsonOutput {
-		return writeJSON(stdout, acked)
+		return writeJSON(stdout, acked.withoutBody())
 	}
 	fmt.Fprintf(stdout, "Pushed %s -> %s", resolved.LocalPath, resolved.RemotePath)
 	if opID != "" {
@@ -3075,6 +3097,18 @@ type writebackOperationStatus struct {
 	Path     string `json:"path,omitempty"`
 	Status   string `json:"status,omitempty"`
 	Revision string `json:"revision,omitempty"`
+}
+
+// isTerminalWritebackOpStatus reports whether a cloud op status is a confirmed
+// terminal failure. Anything else (empty, in-flight, or unknown) is treated as
+// not-yet-final so the push keeps the receipt pending rather than failing it.
+func isTerminalWritebackOpStatus(status string) bool {
+	switch strings.TrimSpace(status) {
+	case "failed", "dead_lettered", "canceled":
+		return true
+	default:
+		return false
+	}
 }
 
 func waitForWritebackOperation(ctx context.Context, commandClient *workspaceCommandClient, opID string) (writebackOperationStatus, error) {
@@ -3115,8 +3149,22 @@ func ensureWritebackDelegatedCredentials(workspaceID string, joinScopes, require
 		delegatedBundleHasScopes(bundle, requiredRelayfileScopes) {
 		return nil
 	}
-	_, err := bootstrapDelegatedCredentialsFromAgentRelay(workspaceID, joinScopes)
-	return err
+	if _, err := bootstrapDelegatedCredentialsFromAgentRelay(workspaceID, joinScopes); err != nil {
+		return err
+	}
+	// Re-validate after bootstrap: if Cloud returns a delegated bundle that
+	// omits the compiled relayfile:fs:write:/<provider>/** scope, fail loudly
+	// here rather than proceeding to write receipts and call /fs/bulk with an
+	// under-scoped token.
+	bundle, _, err := loadDelegatedCredentials("")
+	if err != nil {
+		return err
+	}
+	if !workspaceRequestMatchesDelegatedCredentials(workspaceID, bundle.Workspace()) ||
+		!delegatedBundleHasScopes(bundle, requiredRelayfileScopes) {
+		return fmt.Errorf("delegated relayfile credentials for workspace %s do not include required scope(s): %s", workspaceID, strings.Join(requiredRelayfileScopes, ", "))
+	}
+	return nil
 }
 
 func delegatedBundleHasScopes(bundle delegatedauth.Bundle, required []string) bool {
@@ -3154,6 +3202,12 @@ func resolveWritebackPushPath(localPath, workspaceValue string) (writebackPushRe
 	}
 	if info.IsDir() {
 		return writebackPushResolvedPath{}, fmt.Errorf("%s is a directory", abs)
+	}
+	// Reject FIFOs, device nodes, sockets, etc. os.ReadFile on a special file
+	// can hang or read an unintended stream; direct push only accepts regular
+	// files.
+	if !info.Mode().IsRegular() {
+		return writebackPushResolvedPath{}, fmt.Errorf("%s is not a regular file", abs)
 	}
 	mountRoot, err := findRelayMountRoot(filepath.Dir(abs))
 	if err != nil {
@@ -3204,7 +3258,10 @@ func findRelayMountRoot(start string) (string, error) {
 }
 
 func joinRemotePath(root, rel string) string {
-	root = normalizeWritebackFailurePath(root)
+	// Trim a trailing slash from the mount's remoteRoot (e.g. "/linear/") so
+	// the join does not produce "/linear//file.json"; the server may treat the
+	// double-slash path literally and break path matching/dedupe.
+	root = strings.TrimRight(normalizeWritebackFailurePath(root), "/")
 	if root == "" {
 		root = "/"
 	}
@@ -3231,12 +3288,17 @@ func hashBytes(raw []byte) string {
 }
 
 func writebackPushJoinScopes(remotePath string) []string {
+	// ops:read is requested alongside fs:write because a successful /fs/bulk
+	// returns an opID that this command then polls at
+	// GET /v1/workspaces/{id}/ops/{opId} (server.go requires ops:read). Without
+	// it the write succeeds but the status poll is unauthorized; the push then
+	// leaves the op pending+needsAttention rather than failing it.
 	parts := strings.Split(strings.Trim(normalizeWritebackFailurePath(remotePath), "/"), "/")
 	if len(parts) == 0 || strings.TrimSpace(parts[0]) == "" {
-		return []string{"fs:write:/**"}
+		return []string{"fs:write:/**", "ops:read"}
 	}
 	provider := strings.TrimSpace(parts[0])
-	return []string{fmt.Sprintf("fs:write:/%s/**", provider)}
+	return []string{fmt.Sprintf("fs:write:/%s/**", provider), "ops:read"}
 }
 
 func writebackPushRequiredRelayfileScopes(remotePath string) []string {
@@ -3292,18 +3354,26 @@ func writeWritebackPushReceipt(mountRoot string, receipt writebackPushReceipt) e
 			return err
 		}
 	}
+	targetDir := "pending"
+	// Only the transient pending receipt retains the file body (so a retry can
+	// resend it), and it is written 0600 to limit exposure. Terminal receipts
+	// drop the body entirely.
+	perm := os.FileMode(0o600)
+	switch status {
+	case "acked":
+		targetDir = "acked"
+		receipt = receipt.withoutBody()
+		perm = 0o644
+	case "failed":
+		targetDir = "failed"
+		receipt = receipt.withoutBody()
+		perm = 0o644
+	}
 	data, err := json.Marshal(receipt)
 	if err != nil {
 		return err
 	}
-	targetDir := "pending"
-	switch status {
-	case "acked":
-		targetDir = "acked"
-	case "failed":
-		targetDir = "failed"
-	}
-	if err := writeFileAtomically(filepath.Join(outboxRoot, targetDir, receipt.CommandID+".json"), data, 0o644); err != nil {
+	if err := writeFileAtomically(filepath.Join(outboxRoot, targetDir, receipt.CommandID+".json"), data, perm); err != nil {
 		return err
 	}
 	if status != "pending" {
@@ -3689,16 +3759,29 @@ func resolveWorkspaceLikeStatus(value string) (string, workspaceRecord, error) {
 	// supplies a name/id; only fall back to the credentials path when
 	// nothing local matches (or when no value was given and we need
 	// the JWT's `wks` claim to identify the default).
+	//
+	// When no value is given, resolve the modern selection chain (env
+	// RELAYFILE_WORKSPACE, active Agent Relay workspace, catalog default)
+	// against the local registry before the credentials path: in the
+	// delegated Agent Relay flow credentials.json is removed, so falling
+	// straight through to loadCredentials would fail even when a default
+	// local mirror exists.
 	trimmed := strings.TrimSpace(value)
-	if trimmed != "" {
-		if local, ok := workspaceRecordByName(trimmed); ok {
+	candidate := trimmed
+	if candidate == "" {
+		if name, _ := activeWorkspaceName(""); strings.TrimSpace(name) != "" {
+			candidate = strings.TrimSpace(name)
+		}
+	}
+	if candidate != "" {
+		if local, ok := workspaceRecordByName(candidate); ok {
 			workspaceID := strings.TrimSpace(local.ID)
 			if workspaceID == "" {
 				workspaceID = local.Name
 			}
 			return workspaceID, local, nil
 		}
-		if local, ok := workspaceRecordByID(trimmed); ok {
+		if local, ok := workspaceRecordByID(candidate); ok {
 			return strings.TrimSpace(local.ID), local, nil
 		}
 	}
@@ -4533,7 +4616,16 @@ func buildWorkspaceHealthReport(workspaceID string, record workspaceRecord) work
 	if state.LastError != nil {
 		report.LastError = strings.TrimSpace(firstNonBlank(state.LastError.Message, state.LastError.Code))
 	}
-	report.StuckEventCount, report.IncrementalBacklogDraining = readLocalMountCursorHealth(report.LocalDir)
+	// Use the public sync state's not-ready set as the stuck-event baseline so
+	// the count is non-zero even when the private cursor files are absent or
+	// the first readable one lacks the field; then take the max with the
+	// private cursor health (which also carries the backlog-draining flag).
+	report.StuckEventCount = len(state.IncrementalReadNotReadySince)
+	cursorStuckCount, backlogDraining := readLocalMountCursorHealth(report.LocalDir)
+	if cursorStuckCount > report.StuckEventCount {
+		report.StuckEventCount = cursorStuckCount
+	}
+	report.IncrementalBacklogDraining = backlogDraining
 	report.OutboxPending = countJSONFiles(filepath.Join(report.LocalDir, ".relay", "outbox", "pending"))
 	report.OutboxFailed = countJSONFiles(filepath.Join(report.LocalDir, ".relay", "outbox", "failed"))
 	report.OutboxAcked = countJSONFiles(filepath.Join(report.LocalDir, ".relay", "outbox", "acked"))
