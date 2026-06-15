@@ -129,6 +129,14 @@ async function api(method: string, path: string, body?: unknown, headers?: Recor
   return { status: resp.status, data };
 }
 
+function apiFileContent(data: { content?: string; encoding?: string }): string {
+  const content = data.content ?? '';
+  if (data.encoding === 'base64') {
+    return Buffer.from(content, 'base64').toString('utf8');
+  }
+  return content;
+}
+
 // ---------------------------------------------------------------------------
 // Wait helpers
 // ---------------------------------------------------------------------------
@@ -360,7 +368,8 @@ ${B}${CYAN}╔══════════════════════
       // Verify via API
       const resp = await api('GET', `/v1/workspaces/${WORKSPACE}/fs/file?path=${encodeURIComponent('/src/new-feature.ts')}`);
       assert(resp.status === 200, `API read new-feature.ts failed: ${resp.status} ${JSON.stringify(resp.data)}`);
-      assert(resp.data.content.includes('feature = true'), `API content mismatch: ${resp.data.content}`);
+      const apiContent = apiFileContent(resp.data);
+      assert(apiContent.includes('feature = true'), `API content mismatch: ${resp.data.content}`);
 
       // Wait for Agent B daemon to pull
       log('⏳', 'Waiting for Agent B to pull...');
