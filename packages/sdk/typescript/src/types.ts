@@ -172,6 +172,7 @@ export interface FilesystemEvent {
   type: FilesystemEventType;
   path: string;
   revision: string;
+  contentHash?: string;
   origin?: EventOrigin;
   provider?: string;
   correlationId?: string;
@@ -719,6 +720,75 @@ export interface DeadLetterItem {
 
 export interface DeadLetterFeedResponse {
   items: DeadLetterItem[];
+  nextCursor: string | null;
+}
+
+export interface WebhookSubscriptionHealth {
+  lastDeliveryAt: string | null;
+  lastSuccessAt: string | null;
+  lastError: string | null;
+  consecutiveFailures: number;
+}
+
+export interface WebhookSubscription {
+  id: string;
+  url: string;
+  pathGlobs: string[];
+  createdAt: string;
+  updatedAt: string;
+  health: WebhookSubscriptionHealth;
+}
+
+export interface RegisterWebhookInput {
+  workspaceId: string;
+  url: string;
+  pathGlobs: string[];
+  /**
+   * Optional HMAC secret. If omitted, relayfile generates a secret and returns
+   * it once from the registration response.
+   */
+  secret?: string;
+  correlationId?: string;
+  signal?: AbortSignal;
+}
+
+export interface RegisterWebhookResponse {
+  subscriptionId: string;
+  secret?: string;
+}
+
+export interface ListWebhooksOptions {
+  correlationId?: string;
+  signal?: AbortSignal;
+}
+
+export interface DeleteWebhookOptions {
+  correlationId?: string;
+  signal?: AbortSignal;
+}
+
+export interface GetWebhookDeadLettersOptions {
+  cursor?: string;
+  limit?: number;
+  correlationId?: string;
+  signal?: AbortSignal;
+}
+
+export interface WebhookDeliveryDeadLetterItem {
+  deliveryId: string;
+  workspaceId: string;
+  subscriptionId: string;
+  eventId: string;
+  url: string;
+  failedAt: string;
+  attemptCount: number;
+  lastError: string;
+  replayCount: number;
+  status: "dead_lettered" | "queued" | "delivered";
+}
+
+export interface WebhookDeliveryDeadLetterFeedResponse {
+  items: WebhookDeliveryDeadLetterItem[];
   nextCursor: string | null;
 }
 

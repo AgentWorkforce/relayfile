@@ -103,6 +103,43 @@ describe("RelayFileSync", () => {
     await sync.stop();
   });
 
+  it("preserves contentHash from WebSocket event payloads", async () => {
+    const sockets: MockWebSocket[] = [];
+    const sync = new RelayFileSync({
+      client: makeClient(),
+      workspaceId: "ws_acme",
+      baseUrl: "https://relay.test",
+      token: "ws_token",
+      webSocketFactory: (url) => {
+        const socket = new MockWebSocket(url);
+        sockets.push(socket);
+        return socket;
+      }
+    });
+
+    const events: FilesystemEvent[] = [];
+    sync.on("event", (event) => events.push(event));
+
+    sync.start();
+    sockets[0]!.emit("open", {});
+    sockets[0]!.emit("message", {
+      data: JSON.stringify({
+        type: "file.updated",
+        path: "/docs/readme.md",
+        revision: "rev_2",
+        contentHash: "sha256:abc123",
+        timestamp: "2026-03-26T00:00:00Z"
+      })
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(events).toHaveLength(1);
+    expect(events[0]!.contentHash).toBe("sha256:abc123");
+
+    await sync.stop();
+  });
+
   it("sends exclusive cursor and path filters on WebSocket connect and reconnect", async () => {
     vi.useFakeTimers();
     const sockets: MockWebSocket[] = [];
