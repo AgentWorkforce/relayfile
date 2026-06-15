@@ -399,6 +399,7 @@ func TestParseBearerStripsRelayauthTokenPrefixes(t *testing.T) {
 		"relay_pa_",
 		"relay_ws_",
 		"relay_id_",
+		"relay_ag_",
 	}
 	for _, prefix := range prefixes {
 		prefix := prefix // capture

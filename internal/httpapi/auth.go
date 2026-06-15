@@ -132,11 +132,14 @@ func authorizeBearer(authHeader string, verifier *bearerVerifier, workspaceID, r
 //
 // Keep this in sync with the prefixes minted by relayauth's
 // `packages/server/src/routes/tokens.ts` (`relay_pa_*` for path-access,
-// `relay_ws_*` for workspace, `relay_id_*` for identity).
+// `relay_ws_*` for workspace, `relay_id_*` for identity, `relay_ag_*` for
+// agent — the delegated-token / `relayfile workspace join` chain issues
+// `relay_ag_` access tokens via `/v1/tokens/agent`).
 var relayauthTokenPrefixes = []string{
 	"relay_pa_",
 	"relay_ws_",
 	"relay_id_",
+	"relay_ag_",
 }
 
 // stripRelayauthTokenPrefix removes the leading `relay_<class>_` prefix
