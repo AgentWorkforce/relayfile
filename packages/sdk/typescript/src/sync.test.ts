@@ -649,6 +649,63 @@ describe("RelayFileSync", () => {
     await sync.stop();
   });
 
+  it("re-probes the WebSocket and recovers after an involuntary polling fallback", async () => {
+    // Regression (relayfile-ws-self-heal-latch): a single pre-open WS failure
+    // used to latch the SDK into polling for the life of the process —
+    // pollLoop() ran `while(!stopped)` forever, so the reconnect path in its
+    // .finally() was unreachable. A long-running consumer (the factory daemon)
+    // stayed on 5s polling until restart. The poll loop now yields after a
+    // backoff window so the WS is re-probed; once the transient clears the
+    // socket re-opens and push delivery resumes — with no restart.
+    vi.useFakeTimers();
+    try {
+      const sockets: MockWebSocket[] = [];
+      const fallback = vi.fn();
+      const sync = new RelayFileSync({
+        client: makeClient(),
+        workspaceId: "ws_acme",
+        baseUrl: "https://relay.test",
+        token: "ws_token",
+        pollIntervalMs: 1000,
+        reconnect: { minDelayMs: 5, maxDelayMs: 5 },
+        onPollingFallback: fallback,
+        webSocketFactory: (url) => {
+          const socket = new MockWebSocket(url);
+          sockets.push(socket);
+          return socket;
+        }
+      });
+
+      sync.start();
+      expect(sockets).toHaveLength(1);
+
+      // Pre-open failure → after the grace window, drop to polling. No eager
+      // WS retry (retrying the same failing handshake in a loop is pointless).
+      sockets[0]!.emit("error", { type: "error" });
+      await vi.advanceTimersByTimeAsync(300);
+      expect(fallback).toHaveBeenCalledWith(
+        expect.objectContaining({ reason: "forced-polling-pre-open" })
+      );
+      expect(sync.getState()).toBe("polling");
+      expect(sockets).toHaveLength(1);
+
+      // Advance past the 5s re-probe window: the poll loop yields and the
+      // reconnect path opens a fresh socket. THIS is what the old code could
+      // never do — it stayed in pollLoop forever.
+      await vi.advanceTimersByTimeAsync(5000 + 50);
+      expect(sockets.length).toBeGreaterThanOrEqual(2);
+
+      // The endpoint has recovered — the re-probed socket opens and push
+      // delivery resumes.
+      sockets[sockets.length - 1]!.emit("open", {});
+      expect(sync.getState()).toBe("open");
+
+      await sync.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("does NOT double-recover when a normal close follows the ws error", async () => {
     // Companion to the above: when the error IS followed by a close (the
     // well-behaved path), the close handler must clear the grace timer so
