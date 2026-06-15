@@ -26,6 +26,7 @@ import { createLocalRs256Auth, type LocalRs256Auth } from './test-utils/rsa-sign
 const flags = new Set(process.argv.slice(2).filter((a) => a.startsWith('--')));
 const CI = flags.has('--ci') || !!process.env.CI;
 const REMOTE = flags.has('--remote');
+const HELP = flags.has('--help') || flags.has('-h');
 
 const PORT = Number(process.env.RELAYFILE_PORT || 19090);
 const BASE_URL = process.env.RELAYFILE_BASE_URL || `http://127.0.0.1:${PORT}`;
@@ -61,7 +62,19 @@ function generateToken(
   return rs256Auth.generateToken(workspaceId, agentName, scopes, 3600);
 }
 
-const ALL_SCOPES = ['fs:read', 'fs:write', 'sync:read', 'sync:trigger', 'ops:read', 'ops:replay', 'admin:read', 'admin:replay'];
+const ALL_SCOPES = [
+  'fs:read',
+  'fs:write',
+  'sync:read',
+  'sync:trigger',
+  'ops:read',
+  'ops:replay',
+  'admin:read',
+  'admin:replay',
+  'webhooks:read',
+  'webhooks:write',
+  'webhooks:replay',
+];
 let TOKEN_ALPHA = '';
 let TOKEN_BETA = '';
 let TOKEN_LIMITED = '';
@@ -139,6 +152,24 @@ function ws(workspaceId: string = WORKSPACE): string {
 
 function assert(condition: boolean, msg: string): void {
   if (!condition) throw new Error(`Assertion failed: ${msg}`);
+}
+
+function subscriptionId(data: any): string | undefined {
+  const raw = data?.subscriptionId ?? data?.id;
+  return typeof raw === 'string' && raw.length > 0 ? raw : undefined;
+}
+
+function subscriptionItems(data: any): any[] {
+  if (Array.isArray(data)) return data;
+  if (Array.isArray(data?.items)) return data.items;
+  if (Array.isArray(data?.subscriptions)) return data.subscriptions;
+  if (Array.isArray(data?.webhooks)) return data.webhooks;
+  return [];
+}
+
+function errorCode(data: any): string | undefined {
+  const raw = data?.code ?? data?.error;
+  return typeof raw === 'string' ? raw : undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -410,7 +441,11 @@ async function runSuite() {
     assert(types.has('file.created'), 'Missing file.created events');
   });
 
-  // ── 8. Export ───────────────────────────────────────────────────────
+  // ── 8. Outbound webhooks ───────────────────────────────────────────
+
+  await webhooksSection();
+
+  // ── 9. Export ───────────────────────────────────────────────────────
 
   step('Export');
 
@@ -424,7 +459,7 @@ async function runSuite() {
     assert(readme.semantics?.properties?.author === 'agent-alpha', 'Export missing semantics');
   });
 
-  // ── 9. Writeback lifecycle ─────────────────────────────────────────
+  // ── 10. Writeback lifecycle ────────────────────────────────────────
 
   step('Writeback Lifecycle');
 
@@ -460,7 +495,7 @@ async function runSuite() {
     ok('  Acked item correctly filtered from pending');
   });
 
-  // ── 10. ACL / Permission enforcement ───────────────────────────────
+  // ── 11. ACL / Permission enforcement ───────────────────────────────
 
   step('ACL Permission Enforcement');
 
@@ -506,7 +541,7 @@ async function runSuite() {
     }
   });
 
-  // ── 11. WebSocket catch-up ─────────────────────────────────────────
+  // ── 12. WebSocket catch-up ─────────────────────────────────────────
 
   step('WebSocket');
 
@@ -554,7 +589,7 @@ async function runSuite() {
     log('🔌', `WebSocket delivered ${events.length} catch-up events`);
   });
 
-  // ── 12. Concurrent writes from multiple agents ─────────────────────
+  // ── 13. Concurrent writes from multiple agents ─────────────────────
 
   step('Concurrent Multi-Agent Writes');
 
@@ -611,10 +646,101 @@ async function runSuite() {
   });
 }
 
+async function webhooksSection() {
+  step('Outbound Webhooks');
+
+  await test('register + list + delete subscription lifecycle', async () => {
+    const create = await api('POST', `${ws()}/webhooks`, TOKEN_ALPHA, {
+      url: `https://example.com/relayfile/conformance/${Date.now()}`,
+      pathGlobs: ['/webhooks/lifecycle/**'],
+      secret: 'conformance-webhook-secret',
+    });
+    assert(create.status === 201, `Expected 201, got ${create.status}: ${JSON.stringify(create.data)}`);
+    const id = subscriptionId(create.data);
+    assert(id !== undefined, `Missing subscriptionId in response: ${JSON.stringify(create.data)}`);
+
+    const listed = await api('GET', `${ws()}/webhooks`, TOKEN_ALPHA);
+    assert(listed.status === 200, `Expected 200, got ${listed.status}: ${JSON.stringify(listed.data)}`);
+    const items = subscriptionItems(listed.data);
+    assert(items.some((item) => subscriptionId(item) === id), `Created subscription ${id} missing from list`);
+
+    const deleted = await api('DELETE', `${ws()}/webhooks/${encodeURIComponent(id)}`, TOKEN_ALPHA);
+    assert(deleted.status === 204, `Expected 204, got ${deleted.status}: ${JSON.stringify(deleted.data)}`);
+
+    const listedAfter = await api('GET', `${ws()}/webhooks`, TOKEN_ALPHA);
+    assert(listedAfter.status === 200, `Expected 200 after delete, got ${listedAfter.status}`);
+    const afterItems = subscriptionItems(listedAfter.data);
+    assert(!afterItems.some((item) => subscriptionId(item) === id), `Deleted subscription ${id} still listed`);
+  });
+
+  await test('SSRF rejection', async () => {
+    const loopback = await api('POST', `${ws()}/webhooks`, TOKEN_ALPHA, {
+      url: 'https://127.0.0.1/hook',
+      pathGlobs: ['/webhooks/ssrf/**'],
+      secret: 'conformance-webhook-secret',
+    });
+    assert(loopback.status === 400, `Expected 400 for loopback URL, got ${loopback.status}: ${JSON.stringify(loopback.data)}`);
+    assert(errorCode(loopback.data) === 'invalid_webhook_url',
+      `Expected invalid_webhook_url for loopback URL, got ${JSON.stringify(loopback.data)}`);
+
+    const plaintext = await api('POST', `${ws()}/webhooks`, TOKEN_ALPHA, {
+      url: 'http://example.com/hook',
+      pathGlobs: ['/webhooks/ssrf/**'],
+      secret: 'conformance-webhook-secret',
+    });
+    assert(plaintext.status === 400, `Expected 400 for non-https URL, got ${plaintext.status}: ${JSON.stringify(plaintext.data)}`);
+    assert(errorCode(plaintext.data) === 'invalid_webhook_url',
+      `Expected invalid_webhook_url for non-https URL, got ${JSON.stringify(plaintext.data)}`);
+  });
+
+  await test('Scope enforcement', async () => {
+    const tokenPathScoped = generateToken('agent-webhook-path-scoped', [
+      'relayfile:fs:write:/webhooks/scoped/**',
+      'relayfile:webhooks:write:/webhooks/scoped/**',
+    ]);
+    const create = await api('POST', `${ws()}/webhooks`, tokenPathScoped, {
+      url: `https://example.com/relayfile/scoped/${Date.now()}`,
+      pathGlobs: ['/webhooks/scoped/**'],
+      secret: 'conformance-webhook-secret',
+    });
+    assert(create.status === 201, `Expected 201 for matching path-scoped token, got ${create.status}: ${JSON.stringify(create.data)}`);
+    const id = subscriptionId(create.data);
+    assert(id !== undefined, `Missing subscriptionId in scoped create response: ${JSON.stringify(create.data)}`);
+
+    const listed = await api('GET', `${ws()}/webhooks`, tokenPathScoped);
+    assert(listed.status === 403, `Expected 403 for path-scoped list, got ${listed.status}: ${JSON.stringify(listed.data)}`);
+
+    const deleted = await api('DELETE', `${ws()}/webhooks/${encodeURIComponent(id)}`, tokenPathScoped);
+    assert(deleted.status === 403, `Expected 403 for path-scoped delete, got ${deleted.status}: ${JSON.stringify(deleted.data)}`);
+
+    const cleanup = await api('DELETE', `${ws()}/webhooks/${encodeURIComponent(id)}`, TOKEN_ALPHA);
+    assert(cleanup.status === 204, `Expected 204 for cleanup delete, got ${cleanup.status}: ${JSON.stringify(cleanup.data)}`);
+  });
+
+  await test('DLQ endpoint', async () => {
+    const r = await api('GET', `${ws()}/webhooks/dlq`, TOKEN_ALPHA);
+    assert(r.status === 200, `Expected 200, got ${r.status}: ${JSON.stringify(r.data)}`);
+    assert(Array.isArray(r.data?.items), `Expected items array, got ${JSON.stringify(r.data)}`);
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 async function main() {
+  if (HELP) {
+    console.log(`Relayfile API Conformance Suite
+
+Usage:
+  npx tsx scripts/conformance.ts [--ci] [--remote] [--help]
+
+Environment:
+  RELAYFILE_BASE_URL  Base URL when using --remote
+  RELAYFILE_PORT      Local server port when not using --remote
+`);
+    return;
+  }
+
   rs256Auth = await createLocalRs256Auth();
   TOKEN_ALPHA = generateToken('agent-alpha', ALL_SCOPES);
   TOKEN_BETA = generateToken('agent-beta', ALL_SCOPES);
