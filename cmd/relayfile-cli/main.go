@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -20,6 +21,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -32,6 +34,7 @@ import (
 
 	"github.com/agentworkforce/relayfile/internal/delegatedauth"
 	"github.com/agentworkforce/relayfile/internal/mountsync"
+	"github.com/agentworkforce/relayfile/internal/relayfile"
 	"github.com/agentworkforce/relayfile/internal/writeback"
 	"github.com/fsnotify/fsnotify"
 )
@@ -119,23 +122,43 @@ type bulkWriteRequest struct {
 }
 
 type bulkWriteFile struct {
-	Path        string `json:"path"`
-	ContentType string `json:"contentType"`
-	Content     string `json:"content"`
-	Encoding    string `json:"encoding,omitempty"`
+	Path            string           `json:"path"`
+	ContentType     string           `json:"contentType"`
+	Content         string           `json:"content"`
+	Encoding        string           `json:"encoding,omitempty"`
+	ContentIdentity *contentIdentity `json:"contentIdentity,omitempty"`
 }
 
 type bulkWriteResponse struct {
-	Written       int              `json:"written"`
-	ErrorCount    int              `json:"errorCount"`
-	Errors        []bulkWriteError `json:"errors"`
-	CorrelationID string           `json:"correlationId"`
+	Written       int               `json:"written"`
+	ErrorCount    int               `json:"errorCount"`
+	Errors        []bulkWriteError  `json:"errors"`
+	Results       []bulkWriteResult `json:"results,omitempty"`
+	CorrelationID string            `json:"correlationId"`
+}
+
+type bulkWriteResult struct {
+	Path            string           `json:"path"`
+	Revision        string           `json:"revision"`
+	ContentType     string           `json:"contentType,omitempty"`
+	OpID            string           `json:"opId,omitempty"`
+	ContentIdentity *contentIdentity `json:"contentIdentity,omitempty"`
+	Writeback       *struct {
+		Provider string `json:"provider,omitempty"`
+		State    string `json:"state,omitempty"`
+	} `json:"writeback,omitempty"`
 }
 
 type bulkWriteError struct {
 	Path    string `json:"path"`
 	Code    string `json:"code"`
 	Message string `json:"message"`
+}
+
+type contentIdentity struct {
+	Kind       string `json:"kind"`
+	Key        string `json:"key"`
+	TTLSeconds int    `json:"ttlSeconds,omitempty"`
 }
 
 type syncStatusResponse struct {
@@ -291,19 +314,23 @@ type cloudIntegrationListEntry struct {
 }
 
 type syncStateFile struct {
-	WorkspaceID      string              `json:"workspaceId"`
-	RemoteRoot       string              `json:"remoteRoot,omitempty"`
-	Mode             string              `json:"mode"`
-	LastReconcileAt  string              `json:"lastReconcileAt,omitempty"`
-	LastEventAt      string              `json:"lastEventAt,omitempty"`
-	IntervalMs       int64               `json:"intervalMs"`
-	Providers        []syncStateProvider `json:"providers,omitempty"`
-	PendingWriteback int                 `json:"pendingWriteback"`
-	PendingConflicts int                 `json:"pendingConflicts"`
-	DeniedPaths      int                 `json:"deniedPaths"`
-	FailedWritebacks uint64              `json:"failedWritebacks"`
-	StallReason      string              `json:"stallReason,omitempty"`
-	Daemon           *syncStateDaemon    `json:"daemon,omitempty"`
+	WorkspaceID                  string              `json:"workspaceId"`
+	RemoteRoot                   string              `json:"remoteRoot,omitempty"`
+	Mode                         string              `json:"mode"`
+	Status                       string              `json:"status,omitempty"`
+	LastReconcileAt              string              `json:"lastReconcileAt,omitempty"`
+	LastSuccessfulReconcileAt    string              `json:"lastSuccessfulReconcileAt,omitempty"`
+	LastEventAt                  string              `json:"lastEventAt,omitempty"`
+	IntervalMs                   int64               `json:"intervalMs"`
+	Providers                    []syncStateProvider `json:"providers,omitempty"`
+	PendingWriteback             int                 `json:"pendingWriteback"`
+	PendingConflicts             int                 `json:"pendingConflicts"`
+	DeniedPaths                  int                 `json:"deniedPaths"`
+	FailedWritebacks             uint64              `json:"failedWritebacks"`
+	StallReason                  string              `json:"stallReason,omitempty"`
+	LastError                    *statusError        `json:"lastError,omitempty"`
+	IncrementalReadNotReadySince map[string]string   `json:"incrementalReadNotReadySince,omitempty"`
+	Daemon                       *syncStateDaemon    `json:"daemon,omitempty"`
 	// Guards surfaces defensive-guard telemetry from the in-process
 	// mountsync state. Existing consumers can ignore the field; it is
 	// additive and uses omitempty. Counters come from .relay/state.json.
@@ -338,6 +365,14 @@ type syncStateGuards struct {
 	PathCollisionQuarantined uint64              `json:"pathCollisionQuarantined,omitempty"`
 	LastAppliedRevision      string              `json:"lastAppliedRevision,omitempty"`
 	Circuit                  *syncStateGuardCirc `json:"circuit,omitempty"`
+}
+
+type statusError struct {
+	Kind       string `json:"kind"`
+	StatusCode int    `json:"statusCode,omitempty"`
+	Code       string `json:"code,omitempty"`
+	Message    string `json:"message"`
+	At         string `json:"at"`
 }
 
 // syncStateGuardCirc is the JSON shape of the cloud-error circuit breaker
@@ -586,6 +621,8 @@ func printWorkspaceUsage(w io.Writer, subcommand string) {
 		fmt.Fprintln(w, "Usage: relayfile workspace list [--names-only]")
 	case "current":
 		fmt.Fprintln(w, "Usage: relayfile workspace current [--verbose]")
+	case "status":
+		fmt.Fprintln(w, "Usage: relayfile workspace status [--workspace NAME] [--json]")
 	case "delete":
 		fmt.Fprintln(w, "Usage: relayfile workspace delete NAME [--yes]")
 	default:
@@ -595,6 +632,7 @@ func printWorkspaceUsage(w io.Writer, subcommand string) {
   relayfile workspace use NAME
   relayfile workspace list [--names-only]
   relayfile workspace current [--verbose]
+  relayfile workspace status [--workspace NAME] [--json]
   relayfile workspace delete NAME [--yes]`)
 	}
 }
@@ -646,8 +684,12 @@ func printWritebackUsage(w io.Writer, subcommand string) {
 		fmt.Fprintln(w, writebackListUsage)
 	case "status":
 		fmt.Fprintln(w, "Usage: relayfile writeback status [WORKSPACE] [--json]")
+	case "push":
+		fmt.Fprintln(w, "Usage: relayfile writeback push LOCAL_PATH [--workspace WS] [--json] [--timeout 90s]")
 	case "retry":
 		fmt.Fprintln(w, "Usage: relayfile writeback retry --opId OP [WORKSPACE]")
+	case "skip-stuck":
+		fmt.Fprintln(w, "Usage: relayfile writeback skip-stuck [WORKSPACE] [--workspace WS] [--max N] [--json]")
 	case "sweep-drafts":
 		fmt.Fprintln(w, writebackSweepUsage)
 	default:
@@ -655,6 +697,8 @@ func printWritebackUsage(w io.Writer, subcommand string) {
   relayfile writeback list --state pending|dead [--workspace WS] [--json]
   relayfile writeback status [WORKSPACE] [--json]
   relayfile writeback retry --opId OP [WORKSPACE]
+  relayfile writeback push LOCAL_PATH [--workspace WS] [--json] [--timeout 90s]
+  relayfile writeback skip-stuck [WORKSPACE] [--workspace WS] [--max N] [--json]
   relayfile writeback sweep-drafts [WORKSPACE] [--path-prefix PREFIX] [--pattern GLOB ...] [--apply] [--json]`)
 	}
 }
@@ -681,6 +725,7 @@ Usage:
   relayfile workspace use NAME
   relayfile workspace list [--names-only]
   relayfile workspace current [--verbose]
+  relayfile workspace status [--workspace NAME] [--json]
   relayfile workspace delete NAME [--yes]
   relayfile integration connect PROVIDER [--backend BACKEND] [--workspace NAME]
     (for jira/confluence: prompts for the Atlassian site to bind after OAuth completes)
@@ -695,6 +740,8 @@ Usage:
   relayfile writeback list --state pending|dead [--workspace WS] [--json]
   relayfile writeback status [WORKSPACE] [--json]
   relayfile writeback retry --opId OP [WORKSPACE]
+  relayfile writeback push LOCAL_PATH [--workspace WS] [--json] [--timeout 90s]
+  relayfile writeback skip-stuck [WORKSPACE] [--workspace WS] [--max N] [--json]
   relayfile digest rebuild --window today|yesterday|YYYY-MM-DD|this-week|last-week [--workspace NAME] [--json]
   relayfile pull [--workspace NAME] [--provider PROVIDER] [--reason TEXT]
   relayfile mount [WORKSPACE] [LOCAL_DIR]
@@ -722,6 +769,8 @@ Subcommands:
               Show local pending, failed, and dead-lettered writebacks
   writeback retry
               Re-enqueue a local dead-lettered writeback op
+  writeback skip-stuck
+              Walk the events cursor past stuck (404) events without waiting the treat-as-deleted timer
   digest      Regenerate workspace digests
   digest rebuild
               Regenerate daily, weekly, or date-stamped digest artifacts
@@ -2015,7 +2064,7 @@ func loginWithAPIKey(serverValue, tokenValue string, stdout io.Writer) error {
 
 func runWorkspace(args []string, stdin io.Reader, stdout io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("workspace subcommand is required: create, join, use, list, current, or delete")
+		return errors.New("workspace subcommand is required: create, join, use, list, current, status, or delete")
 	}
 	switch args[0] {
 	case "create":
@@ -2028,6 +2077,8 @@ func runWorkspace(args []string, stdin io.Reader, stdout io.Writer) error {
 		return runWorkspaceList(args[1:], stdout)
 	case "current":
 		return runWorkspaceCurrent(args[1:], stdout)
+	case "status":
+		return runWorkspaceStatus(args[1:], stdout)
 	case "delete":
 		return runWorkspaceDelete(args[1:], stdin, stdout)
 	default:
@@ -2798,6 +2849,63 @@ type writebackStatusReport struct {
 	LastErrorByProvider map[string]string           `json:"lastErrorByProvider"`
 }
 
+type writebackPushResolvedPath struct {
+	LocalPath   string
+	MountRoot   string
+	WorkspaceID string
+	RemoteRoot  string
+	RemotePath  string
+}
+
+type writebackPushReceipt struct {
+	CommandID       string           `json:"commandId"`
+	WorkspaceID     string           `json:"workspaceId"`
+	RemotePath      string           `json:"remotePath"`
+	ContentType     string           `json:"contentType"`
+	Content         string           `json:"content"`
+	Encoding        string           `json:"encoding,omitempty"`
+	Hash            string           `json:"hash"`
+	Exists          bool             `json:"exists"`
+	Status          string           `json:"status"`
+	FirstSeenAt     string           `json:"firstSeenAt"`
+	LastAttemptAt   string           `json:"lastAttemptAt,omitempty"`
+	NextAttemptAt   string           `json:"nextAttemptAt,omitempty"`
+	AttemptCount    int              `json:"attemptCount"`
+	LastError       string           `json:"lastError,omitempty"`
+	NeedsAttention  bool             `json:"needsAttention,omitempty"`
+	OpID            string           `json:"opId,omitempty"`
+	DispatchStatus  string           `json:"dispatchStatus,omitempty"`
+	AckedAt         string           `json:"ackedAt,omitempty"`
+	Revision        string           `json:"revision,omitempty"`
+	CorrelationID   string           `json:"correlationId,omitempty"`
+	ContentIdentity *contentIdentity `json:"contentIdentity,omitempty"`
+}
+
+// withoutBody returns a copy with the file content stripped. Persisted
+// terminal receipts (acked/failed) and any printed receipt must not retain or
+// log arbitrary user file contents beyond the in-flight writeback; only the
+// transient pending receipt keeps the body so a retry can resend it.
+func (r writebackPushReceipt) withoutBody() writebackPushReceipt {
+	r.Content = ""
+	r.Encoding = ""
+	return r
+}
+
+type workspaceHealthReport struct {
+	WorkspaceID                string `json:"workspaceId"`
+	Name                       string `json:"name,omitempty"`
+	LocalDir                   string `json:"localDir,omitempty"`
+	Status                     string `json:"status,omitempty"`
+	LastSuccessfulReconcileAt  string `json:"lastSuccessfulReconcileAt,omitempty"`
+	LastReconcileAt            string `json:"lastReconcileAt,omitempty"`
+	LastError                  string `json:"lastError,omitempty"`
+	StuckEventCount            int    `json:"stuckEventCount"`
+	OutboxPending              int    `json:"outboxPending"`
+	OutboxFailed               int    `json:"outboxFailed"`
+	OutboxAcked                int    `json:"outboxAcked"`
+	IncrementalBacklogDraining bool   `json:"incrementalBacklogDraining,omitempty"`
+}
+
 var errWritebackFailuresPresent = errors.New("writeback failures present")
 
 func deadLetterDirFor(localDir string) string {
@@ -2808,22 +2916,627 @@ func deadLetterErrorPathFor(localDir, opID string) string {
 	return filepath.Join(deadLetterDirFor(localDir), opID+".error.json")
 }
 
+func runWritebackPush(args []string, stdout io.Writer) error {
+	fs := flag.NewFlagSet("writeback push", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	workspaceName := fs.String("workspace", "", "workspace name or id")
+	server := fs.String("server", "", "relayfile server URL override")
+	tokenOverride := fs.String("token", "", "relayfile token override")
+	jsonOutput := fs.Bool("json", false, "emit JSON")
+	timeout := fs.Duration("timeout", 90*time.Second, "operation receipt wait timeout")
+	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
+		"workspace": true,
+		"server":    true,
+		"token":     true,
+		"json":      false,
+		"timeout":   true,
+	})); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return errors.New("usage: relayfile writeback push LOCAL_PATH [--workspace WS] [--json] [--timeout 90s]")
+	}
+
+	resolved, err := resolveWritebackPushPath(fs.Arg(0), strings.TrimSpace(*workspaceName))
+	if err != nil {
+		return err
+	}
+	raw, err := os.ReadFile(resolved.LocalPath)
+	if err != nil {
+		return err
+	}
+	content, encoding := encodeLocalWritebackContent(raw)
+	contentType := detectContentType(resolved.LocalPath, raw)
+	contentHash := hashBytes(raw)
+	identity := writebackPushContentIdentity(resolved.WorkspaceID, resolved.RemotePath, contentHash)
+	if identity == nil {
+		return fmt.Errorf("writeback push currently supports only draft writeback paths and factory-create-*.json files; %s has no content identity for double-dispatch dedupe", resolved.RemotePath)
+	}
+	joinScopes := writebackPushJoinScopes(resolved.RemotePath)
+	requiredRelayfileScopes := writebackPushRequiredRelayfileScopes(resolved.RemotePath)
+	if strings.TrimSpace(*tokenOverride) == "" {
+		if err := ensureWritebackDelegatedCredentials(resolved.WorkspaceID, joinScopes, requiredRelayfileScopes); err != nil {
+			return err
+		}
+	}
+	commandClient, err := prepareWorkspaceCommandClient(resolved.WorkspaceID, *server, *tokenOverride, joinScopes)
+	if err != nil {
+		return err
+	}
+
+	now := time.Now().UTC()
+	firstSeenAt := now.Format(time.RFC3339Nano)
+	commandID := newWritebackPushCommandID(resolved.WorkspaceID, resolved.RemotePath, contentHash, firstSeenAt)
+	pendingReceipt := writebackPushReceipt{
+		CommandID:       commandID,
+		WorkspaceID:     resolved.WorkspaceID,
+		RemotePath:      resolved.RemotePath,
+		ContentType:     contentType,
+		Content:         content,
+		Encoding:        encoding,
+		Hash:            contentHash,
+		Exists:          true,
+		Status:          "pending",
+		FirstSeenAt:     firstSeenAt,
+		CorrelationID:   commandID,
+		ContentIdentity: identity,
+	}
+	if err := writeWritebackPushReceipt(resolved.MountRoot, pendingReceipt); err != nil {
+		return err
+	}
+
+	file := bulkWriteFile{
+		Path:            resolved.RemotePath,
+		ContentType:     contentType,
+		Content:         content,
+		Encoding:        encoding,
+		ContentIdentity: identity,
+	}
+	var response bulkWriteResponse
+	err = commandClient.postWorkspaceJSON(context.Background(), func(workspaceID string) string {
+		return fmt.Sprintf("/v1/workspaces/%s/fs/bulk", url.PathEscape(workspaceID))
+	}, bulkWriteRequest{Files: []bulkWriteFile{file}}, &response)
+	if err != nil {
+		failed := pendingReceipt
+		failed.Status = "failed"
+		failed.LastAttemptAt = time.Now().UTC().Format(time.RFC3339Nano)
+		failed.AttemptCount = 1
+		failed.LastError = sanitizeCLIReceiptError(err)
+		failed.DispatchStatus = "failed"
+		if receiptErr := writeWritebackPushReceipt(resolved.MountRoot, failed); receiptErr != nil {
+			return fmt.Errorf("push failed: %w; additionally failed to write failure receipt: %v", err, receiptErr)
+		}
+		return err
+	}
+	result := firstBulkWriteResultForPath(response.Results, resolved.RemotePath)
+	if response.ErrorCount > 0 {
+		reason := firstBulkWriteErrorForPath(response.Errors, resolved.RemotePath)
+		if reason == "" {
+			reason = fmt.Sprintf("bulk write returned %d error(s)", response.ErrorCount)
+		}
+		failed := pendingReceipt
+		failed.Status = "failed"
+		failed.LastAttemptAt = time.Now().UTC().Format(time.RFC3339Nano)
+		failed.AttemptCount = 1
+		failed.LastError = sanitizeCLIReceiptError(errors.New(reason))
+		failed.DispatchStatus = "failed"
+		failed.CorrelationID = firstNonBlank(response.CorrelationID, failed.CorrelationID)
+		if receiptErr := writeWritebackPushReceipt(resolved.MountRoot, failed); receiptErr != nil {
+			return fmt.Errorf("%s; additionally failed to write failure receipt: %v", reason, receiptErr)
+		}
+		return errors.New(reason)
+	}
+	revision := firstNonBlank(result.Revision, "")
+	opID := strings.TrimSpace(result.OpID)
+	dispatchStatus := "succeeded"
+	if result.Writeback != nil && strings.TrimSpace(result.Writeback.State) != "" {
+		dispatchStatus = strings.TrimSpace(result.Writeback.State)
+	}
+	if opID != "" {
+		waitTimeout := *timeout
+		if waitTimeout <= 0 {
+			waitTimeout = 90 * time.Second
+		}
+		waitCtx, cancel := context.WithTimeout(context.Background(), waitTimeout)
+		op, err := waitForWritebackOperation(waitCtx, commandClient, opID)
+		cancel()
+		if err != nil {
+			// The write already landed on the cloud (we have an opID). A
+			// terminal op status (failed/dead_lettered/canceled) is a real
+			// failure; a poll timeout or transient GET error is "unknown" —
+			// the op may still succeed cloud-side, so keep the receipt pending
+			// (flagged needsAttention) instead of diverging local state with a
+			// premature failed receipt.
+			receipt := pendingReceipt
+			receipt.OpID = opID
+			receipt.LastAttemptAt = time.Now().UTC().Format(time.RFC3339Nano)
+			receipt.AttemptCount = 1
+			receipt.LastError = sanitizeCLIReceiptError(err)
+			receipt.CorrelationID = firstNonBlank(response.CorrelationID, receipt.CorrelationID)
+			if isTerminalWritebackOpStatus(op.Status) {
+				receipt.Status = "failed"
+				receipt.DispatchStatus = firstNonBlank(strings.TrimSpace(op.Status), "failed")
+			} else {
+				receipt.Status = "pending"
+				receipt.DispatchStatus = firstNonBlank(strings.TrimSpace(op.Status), "dispatched")
+				receipt.NeedsAttention = true
+			}
+			if receiptErr := writeWritebackPushReceipt(resolved.MountRoot, receipt); receiptErr != nil {
+				return fmt.Errorf("%w; additionally failed to write receipt: %v", err, receiptErr)
+			}
+			return err
+		}
+		revision = firstNonBlank(revision, op.Revision)
+		dispatchStatus = firstNonBlank(op.Status, dispatchStatus)
+	}
+	acked := pendingReceipt
+	acked.Status = "acked"
+	acked.LastAttemptAt = time.Now().UTC().Format(time.RFC3339Nano)
+	acked.AttemptCount = 1
+	acked.OpID = opID
+	acked.DispatchStatus = dispatchStatus
+	acked.AckedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	acked.Revision = revision
+	acked.CorrelationID = firstNonBlank(response.CorrelationID, acked.CorrelationID)
+	if err := writeWritebackPushReceipt(resolved.MountRoot, acked); err != nil {
+		return err
+	}
+	if *jsonOutput {
+		return writeJSON(stdout, acked.withoutBody())
+	}
+	fmt.Fprintf(stdout, "Pushed %s -> %s", resolved.LocalPath, resolved.RemotePath)
+	if opID != "" {
+		fmt.Fprintf(stdout, " (%s)", opID)
+	}
+	fmt.Fprintln(stdout)
+	return nil
+}
+
+type writebackOperationStatus struct {
+	OpID     string `json:"opId,omitempty"`
+	Path     string `json:"path,omitempty"`
+	Status   string `json:"status,omitempty"`
+	Revision string `json:"revision,omitempty"`
+}
+
+// isTerminalWritebackOpStatus reports whether a cloud op status is a confirmed
+// terminal failure. Anything else (empty, in-flight, or unknown) is treated as
+// not-yet-final so the push keeps the receipt pending rather than failing it.
+func isTerminalWritebackOpStatus(status string) bool {
+	switch strings.TrimSpace(status) {
+	case "failed", "dead_lettered", "canceled":
+		return true
+	default:
+		return false
+	}
+}
+
+func waitForWritebackOperation(ctx context.Context, commandClient *workspaceCommandClient, opID string) (writebackOperationStatus, error) {
+	if strings.TrimSpace(opID) == "" {
+		return writebackOperationStatus{Status: "succeeded"}, nil
+	}
+	for {
+		var op writebackOperationStatus
+		err := commandClient.getWorkspaceJSON(ctx, func(workspaceID string) string {
+			return fmt.Sprintf("/v1/workspaces/%s/ops/%s", url.PathEscape(workspaceID), url.PathEscape(opID))
+		}, &op)
+		if err == nil {
+			switch strings.TrimSpace(op.Status) {
+			case "succeeded":
+				return op, nil
+			case "failed", "dead_lettered", "canceled":
+				return op, fmt.Errorf("writeback operation %s %s", opID, strings.TrimSpace(op.Status))
+			}
+		}
+		// A transient poll error (network glitch, 5xx) should not abort the
+		// whole push — keep retrying until the context deadline fires. The
+		// select also makes the poll cancellable (e.g. Ctrl+C) instead of
+		// sleeping blindly.
+		select {
+		case <-ctx.Done():
+			if err != nil {
+				return op, fmt.Errorf("timed out waiting for writeback operation %s: %w", opID, err)
+			}
+			return op, fmt.Errorf("timed out waiting for writeback operation %s: %w", opID, ctx.Err())
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+}
+
+func ensureWritebackDelegatedCredentials(workspaceID string, joinScopes, requiredRelayfileScopes []string) error {
+	if bundle, _, err := loadDelegatedCredentials(""); err == nil &&
+		workspaceRequestMatchesDelegatedCredentials(workspaceID, bundle.Workspace()) &&
+		delegatedBundleHasScopes(bundle, requiredRelayfileScopes) {
+		return nil
+	}
+	if _, err := bootstrapDelegatedCredentialsFromAgentRelay(workspaceID, joinScopes); err != nil {
+		return err
+	}
+	// Re-validate after bootstrap: if Cloud returns a delegated bundle that
+	// omits the compiled relayfile:fs:write:/<provider>/** scope, fail loudly
+	// here rather than proceeding to write receipts and call /fs/bulk with an
+	// under-scoped token.
+	bundle, _, err := loadDelegatedCredentials("")
+	if err != nil {
+		return err
+	}
+	if !workspaceRequestMatchesDelegatedCredentials(workspaceID, bundle.Workspace()) ||
+		!delegatedBundleHasScopes(bundle, requiredRelayfileScopes) {
+		return fmt.Errorf("delegated relayfile credentials for workspace %s do not include required scope(s): %s", workspaceID, strings.Join(requiredRelayfileScopes, ", "))
+	}
+	return nil
+}
+
+func delegatedBundleHasScopes(bundle delegatedauth.Bundle, required []string) bool {
+	available := append(append([]string(nil), bundle.Scopes...), bundle.RelayfileScopes...)
+	for _, want := range required {
+		want = strings.TrimSpace(want)
+		if want == "" {
+			continue
+		}
+		found := false
+		for _, got := range available {
+			if strings.TrimSpace(got) == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
+}
+
+func resolveWritebackPushPath(localPath, workspaceValue string) (writebackPushResolvedPath, error) {
+	abs, err := filepath.Abs(localPath)
+	if err != nil {
+		return writebackPushResolvedPath{}, err
+	}
+	if evaluated, err := filepath.EvalSymlinks(abs); err == nil {
+		abs = evaluated
+	}
+	info, err := os.Stat(abs)
+	if err != nil {
+		return writebackPushResolvedPath{}, err
+	}
+	if info.IsDir() {
+		return writebackPushResolvedPath{}, fmt.Errorf("%s is a directory", abs)
+	}
+	// Reject FIFOs, device nodes, sockets, etc. os.ReadFile on a special file
+	// can hang or read an unintended stream; direct push only accepts regular
+	// files.
+	if !info.Mode().IsRegular() {
+		return writebackPushResolvedPath{}, fmt.Errorf("%s is not a regular file", abs)
+	}
+	mountRoot, err := findRelayMountRoot(filepath.Dir(abs))
+	if err != nil {
+		return writebackPushResolvedPath{}, err
+	}
+	state, err := readWritebackState(mountRoot)
+	if err != nil {
+		return writebackPushResolvedPath{}, err
+	}
+	workspaceID := strings.TrimSpace(state.WorkspaceID)
+	if workspaceID == "" {
+		return writebackPushResolvedPath{}, fmt.Errorf("%s missing workspaceId", filepath.Join(mountRoot, ".relay", "state.json"))
+	}
+	if strings.TrimSpace(workspaceValue) != "" && !workspaceRequestMatchesDelegatedCredentials(workspaceValue, workspaceID) {
+		return writebackPushResolvedPath{}, fmt.Errorf("local path belongs to workspace %s, not %s", workspaceID, workspaceValue)
+	}
+	root := mountRoot
+	rel, err := filepath.Rel(root, abs)
+	if err != nil {
+		return writebackPushResolvedPath{}, err
+	}
+	if rel == "." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || rel == ".." {
+		return writebackPushResolvedPath{}, fmt.Errorf("%s is outside mount root %s", abs, root)
+	}
+	remotePath := joinRemotePath(readMountRemoteRoot(mountRoot), filepath.ToSlash(rel))
+	return writebackPushResolvedPath{
+		LocalPath:   abs,
+		MountRoot:   mountRoot,
+		WorkspaceID: workspaceID,
+		RemoteRoot:  readMountRemoteRoot(mountRoot),
+		RemotePath:  remotePath,
+	}, nil
+}
+
+func findRelayMountRoot(start string) (string, error) {
+	dir := filepath.Clean(start)
+	for {
+		if _, err := os.Stat(filepath.Join(dir, ".relay", "state.json")); err == nil {
+			return dir, nil
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	return "", fmt.Errorf("could not find .relay/state.json above %s", start)
+}
+
+func joinRemotePath(root, rel string) string {
+	// Trim a trailing slash from the mount's remoteRoot (e.g. "/linear/") so
+	// the join does not produce "/linear//file.json"; the server may treat the
+	// double-slash path literally and break path matching/dedupe.
+	root = strings.TrimRight(normalizeWritebackFailurePath(root), "/")
+	if root == "" {
+		root = "/"
+	}
+	rel = strings.TrimPrefix(filepath.ToSlash(filepath.Clean(rel)), "/")
+	if rel == "." || rel == "" {
+		return root
+	}
+	if root == "/" {
+		return "/" + rel
+	}
+	return root + "/" + rel
+}
+
+func encodeLocalWritebackContent(raw []byte) (string, string) {
+	if utf8.Valid(raw) {
+		return string(raw), ""
+	}
+	return base64.StdEncoding.EncodeToString(raw), "base64"
+}
+
+func hashBytes(raw []byte) string {
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:])
+}
+
+func writebackPushJoinScopes(remotePath string) []string {
+	// ops:read is requested alongside fs:write because a successful /fs/bulk
+	// returns an opID that this command then polls at
+	// GET /v1/workspaces/{id}/ops/{opId} (server.go requires ops:read). Without
+	// it the write succeeds but the status poll is unauthorized; the push then
+	// leaves the op pending+needsAttention rather than failing it.
+	parts := strings.Split(strings.Trim(normalizeWritebackFailurePath(remotePath), "/"), "/")
+	if len(parts) == 0 || strings.TrimSpace(parts[0]) == "" {
+		return []string{"fs:write:/**", "ops:read"}
+	}
+	provider := strings.TrimSpace(parts[0])
+	return []string{fmt.Sprintf("fs:write:/%s/**", provider), "ops:read"}
+}
+
+func writebackPushRequiredRelayfileScopes(remotePath string) []string {
+	parts := strings.Split(strings.Trim(normalizeWritebackFailurePath(remotePath), "/"), "/")
+	if len(parts) == 0 || strings.TrimSpace(parts[0]) == "" {
+		return []string{"relayfile:fs:write:/**"}
+	}
+	provider := strings.TrimSpace(parts[0])
+	return []string{fmt.Sprintf("relayfile:fs:write:/%s/**", provider)}
+}
+
+func writebackPushContentIdentity(workspaceID, remotePath, contentHash string) *contentIdentity {
+	if !isWritebackDraftPath(remotePath) {
+		return nil
+	}
+	return &contentIdentity{
+		Kind:       "mount-writeback-create-draft",
+		Key:        fmt.Sprintf("%s:%s:%s", strings.TrimSpace(workspaceID), normalizeWritebackFailurePath(remotePath), strings.TrimSpace(contentHash)),
+		TTLSeconds: 2592000,
+	}
+}
+
+func isWritebackDraftPath(remotePath string) bool {
+	// Remote paths are slash-separated regardless of host OS, so use
+	// path.Base (not filepath.Base, which splits on "\\" on Windows).
+	base := path.Base(normalizeWritebackFailurePath(remotePath))
+	return strings.HasPrefix(base, "factory-create-") && strings.HasSuffix(base, ".json") ||
+		relayfile.IsDraftFilePath(remotePath)
+}
+
+func newWritebackPushCommandID(workspaceID, remotePath, hash, firstSeenAt string) string {
+	sum := sha256.Sum256([]byte(strings.Join([]string{
+		strings.TrimSpace(workspaceID),
+		normalizeWritebackFailurePath(remotePath),
+		strings.TrimSpace(hash),
+		strings.TrimSpace(firstSeenAt),
+	}, "\x00")))
+	return "mountcmd_" + hex.EncodeToString(sum[:])[:32]
+}
+
+func writeWritebackPushReceipt(mountRoot string, receipt writebackPushReceipt) error {
+	status := strings.TrimSpace(receipt.Status)
+	if status == "" {
+		status = "pending"
+	}
+	receipt.Status = status
+	if receipt.CorrelationID == "" {
+		receipt.CorrelationID = receipt.CommandID
+	}
+	outboxRoot := filepath.Join(mountRoot, ".relay", "outbox")
+	for _, dir := range []string{"pending", "acked", "failed"} {
+		if err := os.MkdirAll(filepath.Join(outboxRoot, dir), 0o755); err != nil {
+			return err
+		}
+	}
+	targetDir := "pending"
+	// Only the transient pending receipt retains the file body (so a retry can
+	// resend it), and it is written 0600 to limit exposure. Terminal receipts
+	// drop the body entirely.
+	perm := os.FileMode(0o600)
+	switch status {
+	case "acked":
+		targetDir = "acked"
+		receipt = receipt.withoutBody()
+		perm = 0o644
+	case "failed":
+		targetDir = "failed"
+		receipt = receipt.withoutBody()
+		perm = 0o644
+	}
+	data, err := json.Marshal(receipt)
+	if err != nil {
+		return err
+	}
+	if err := writeFileAtomically(filepath.Join(outboxRoot, targetDir, receipt.CommandID+".json"), data, perm); err != nil {
+		return err
+	}
+	if status != "pending" {
+		if err := os.Remove(filepath.Join(outboxRoot, "pending", receipt.CommandID+".json")); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	return nil
+}
+
+func firstBulkWriteResultForPath(results []bulkWriteResult, remotePath string) bulkWriteResult {
+	remotePath = normalizeWritebackFailurePath(remotePath)
+	for _, result := range results {
+		if normalizeWritebackFailurePath(result.Path) == remotePath {
+			return result
+		}
+	}
+	if len(results) > 0 {
+		return results[0]
+	}
+	return bulkWriteResult{}
+}
+
+func firstBulkWriteErrorForPath(errors []bulkWriteError, remotePath string) string {
+	remotePath = normalizeWritebackFailurePath(remotePath)
+	for _, item := range errors {
+		if normalizeWritebackFailurePath(item.Path) == remotePath {
+			return firstNonBlank(item.Message, item.Code)
+		}
+	}
+	if len(errors) > 0 {
+		return firstNonBlank(errors[0].Message, errors[0].Code)
+	}
+	return ""
+}
+
+func sanitizeCLIReceiptError(err error) string {
+	if err == nil {
+		return ""
+	}
+	message := strings.TrimSpace(err.Error())
+	if len(message) > 2000 {
+		return message[:2000]
+	}
+	return message
+}
+
 func runWriteback(args []string, stdout io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("writeback subcommand is required: list, status, retry, or sweep-drafts")
+		return errors.New("writeback subcommand is required: list, push, status, retry, or sweep-drafts")
 	}
 	switch args[0] {
 	case "list":
 		return runWritebackList(args[1:], stdout)
+	case "push":
+		return runWritebackPush(args[1:], stdout)
 	case "status":
 		return runWritebackStatus(args[1:], stdout)
 	case "retry":
 		return runWritebackRetry(args[1:], stdout)
+	case "skip-stuck":
+		return runWritebackSkipStuck(args[1:], stdout)
 	case "sweep-drafts":
 		return runWritebackSweepDrafts(args[1:], stdout)
 	default:
 		return fmt.Errorf("unknown writeback subcommand %q", args[0])
 	}
+}
+
+// runWritebackSkipStuck is the operator escape hatch for a wedged events
+// cursor. It walks the events cursor forward, dropping consecutive read-404
+// ("not readable yet") events immediately without waiting the 5-minute
+// treat-as-deleted timer, and reports how many stuck events it skipped.
+func runWritebackSkipStuck(args []string, stdout io.Writer) error {
+	fs := flag.NewFlagSet("writeback skip-stuck", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	workspaceName := fs.String("workspace", "", "workspace name or id")
+	maxSkips := fs.Int("max", 0, "maximum number of stuck events to skip (0 = unbounded)")
+	jsonOutput := fs.Bool("json", false, "emit JSON")
+	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
+		"workspace": true,
+		"max":       true,
+		"json":      false,
+	})); err != nil {
+		return err
+	}
+	if fs.NArg() > 1 {
+		return errors.New("usage: relayfile writeback skip-stuck [WORKSPACE] [--workspace WS] [--max N] [--json]")
+	}
+	if *maxSkips < 0 {
+		return errors.New("--max must be >= 0")
+	}
+
+	workspaceValue := firstNonBlank(strings.TrimSpace(*workspaceName), firstArg(fs))
+	workspaceID, record, err := resolveWorkspaceLikeStatus(workspaceValue)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(record.LocalDir) == "" {
+		return errors.New("workspace has no local mirror")
+	}
+
+	creds, err := loadCredentials()
+	if err != nil {
+		return err
+	}
+	tokenValue := resolveToken("", creds)
+	if tokenValue == "" {
+		return errors.New("token is required; set RELAYFILE_TOKEN or pass explicit relayfile credentials")
+	}
+	server := strings.TrimSpace(record.Server)
+	if server == "" {
+		server = resolveServer("", creds)
+	}
+	timeout := durationEnv("RELAYFILE_MOUNT_TIMEOUT", defaultMountTimeout)
+	if timeout <= 0 {
+		timeout = defaultMountTimeout
+	}
+	client := mountsync.NewHTTPClient(server, tokenValue, &http.Client{
+		Transport: newWritebackFailureTransport(record.LocalDir, log.Default(), mountsync.NewSyncTransport()),
+	})
+	remoteRoot := readMountRemoteRoot(record.LocalDir)
+	websocketDisabled := true
+	syncer, err := mountsync.NewSyncer(client, mountsync.SyncerOptions{
+		WorkspaceID: workspaceID,
+		RemoteRoot:  remoteRoot,
+		LocalRoot:   record.LocalDir,
+		WebSocket:   &websocketDisabled,
+		RootCtx:     context.Background(),
+		Logger:      log.Default(),
+	})
+	if err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	skipped, syncErr := syncer.SkipStuck(ctx, *maxSkips)
+	backlog := syncer.BacklogDraining()
+
+	if *jsonOutput {
+		result := struct {
+			Workspace string `json:"workspace"`
+			Skipped   int    `json:"skipped"`
+			Backlog   bool   `json:"backlogRemaining"`
+			Error     string `json:"error,omitempty"`
+		}{Workspace: workspaceID, Skipped: skipped, Backlog: backlog}
+		if syncErr != nil {
+			result.Error = syncErr.Error()
+		}
+		if err := writeJSON(stdout, result); err != nil {
+			return err
+		}
+		return syncErr
+	}
+
+	fmt.Fprintf(stdout, "Skipped %d stuck event(s)\n", skipped)
+	if backlog {
+		fmt.Fprintln(stdout, "Backlog remains — re-run 'relayfile writeback skip-stuck' to continue clearing")
+	} else {
+		fmt.Fprintln(stdout, "Events cursor caught up to live head")
+	}
+	return syncErr
 }
 
 func runWritebackStatus(args []string, stdout io.Writer) error {
@@ -3046,16 +3759,29 @@ func resolveWorkspaceLikeStatus(value string) (string, workspaceRecord, error) {
 	// supplies a name/id; only fall back to the credentials path when
 	// nothing local matches (or when no value was given and we need
 	// the JWT's `wks` claim to identify the default).
+	//
+	// When no value is given, resolve the modern selection chain (env
+	// RELAYFILE_WORKSPACE, active Agent Relay workspace, catalog default)
+	// against the local registry before the credentials path: in the
+	// delegated Agent Relay flow credentials.json is removed, so falling
+	// straight through to loadCredentials would fail even when a default
+	// local mirror exists.
 	trimmed := strings.TrimSpace(value)
-	if trimmed != "" {
-		if local, ok := workspaceRecordByName(trimmed); ok {
+	candidate := trimmed
+	if candidate == "" {
+		if name, _ := activeWorkspaceName(""); strings.TrimSpace(name) != "" {
+			candidate = strings.TrimSpace(name)
+		}
+	}
+	if candidate != "" {
+		if local, ok := workspaceRecordByName(candidate); ok {
 			workspaceID := strings.TrimSpace(local.ID)
 			if workspaceID == "" {
 				workspaceID = local.Name
 			}
 			return workspaceID, local, nil
 		}
-		if local, ok := workspaceRecordByID(trimmed); ok {
+		if local, ok := workspaceRecordByID(candidate); ok {
 			return strings.TrimSpace(local.ID), local, nil
 		}
 	}
@@ -3842,6 +4568,135 @@ func runWorkspaceCurrent(args []string, stdout io.Writer) error {
 		fmt.Fprintf(stdout, "%s (source: %s)\n", name, source)
 	}
 	return nil
+}
+
+func runWorkspaceStatus(args []string, stdout io.Writer) error {
+	fs := flag.NewFlagSet("workspace status", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	workspaceName := fs.String("workspace", "", "workspace name or id")
+	jsonOutput := fs.Bool("json", false, "emit JSON")
+	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
+		"workspace": true,
+		"json":      false,
+	})); err != nil {
+		return err
+	}
+	if fs.NArg() > 1 {
+		return errors.New("usage: relayfile workspace status [--workspace NAME] [--json]")
+	}
+	value := strings.TrimSpace(*workspaceName)
+	if value == "" && fs.NArg() == 1 {
+		value = strings.TrimSpace(fs.Arg(0))
+	}
+	workspaceID, record, err := resolveWorkspaceLikeStatus(value)
+	if err != nil {
+		return err
+	}
+	report := buildWorkspaceHealthReport(workspaceID, record)
+	if *jsonOutput {
+		return writeJSON(stdout, report)
+	}
+	printWorkspaceHealthReport(stdout, report)
+	return nil
+}
+
+func buildWorkspaceHealthReport(workspaceID string, record workspaceRecord) workspaceHealthReport {
+	report := workspaceHealthReport{
+		WorkspaceID: strings.TrimSpace(workspaceID),
+		Name:        strings.TrimSpace(record.Name),
+		LocalDir:    strings.TrimSpace(record.LocalDir),
+	}
+	if report.LocalDir == "" {
+		return report
+	}
+	state := readWritebackStateBestEffort(report.LocalDir)
+	report.Status = strings.TrimSpace(state.Status)
+	report.LastSuccessfulReconcileAt = strings.TrimSpace(state.LastSuccessfulReconcileAt)
+	report.LastReconcileAt = strings.TrimSpace(state.LastReconcileAt)
+	if state.LastError != nil {
+		report.LastError = strings.TrimSpace(firstNonBlank(state.LastError.Message, state.LastError.Code))
+	}
+	// Use the public sync state's not-ready set as the stuck-event baseline so
+	// the count is non-zero even when the private cursor files are absent or
+	// the first readable one lacks the field; then take the max with the
+	// private cursor health (which also carries the backlog-draining flag).
+	report.StuckEventCount = len(state.IncrementalReadNotReadySince)
+	cursorStuckCount, backlogDraining := readLocalMountCursorHealth(report.LocalDir)
+	if cursorStuckCount > report.StuckEventCount {
+		report.StuckEventCount = cursorStuckCount
+	}
+	report.IncrementalBacklogDraining = backlogDraining
+	report.OutboxPending = countJSONFiles(filepath.Join(report.LocalDir, ".relay", "outbox", "pending"))
+	report.OutboxFailed = countJSONFiles(filepath.Join(report.LocalDir, ".relay", "outbox", "failed"))
+	report.OutboxAcked = countJSONFiles(filepath.Join(report.LocalDir, ".relay", "outbox", "acked"))
+	return report
+}
+
+func readWritebackStateBestEffort(localDir string) syncStateFile {
+	state, err := readWritebackState(localDir)
+	if err == nil {
+		return state
+	}
+	return syncStateFile{}
+}
+
+func readLocalMountCursorHealth(localDir string) (stuckCount int, backlogDraining bool) {
+	for _, path := range []string{
+		filepath.Join(localDir, ".relayfile-mount-state.json"),
+		filepath.Join(localDir, mountsync.DefaultMountStateDirName, "state.json"),
+	} {
+		payload, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		var state struct {
+			IncrementalReadNotReadySince map[string]string `json:"incrementalReadNotReadySince"`
+			IncrementalBacklogDraining   bool              `json:"incrementalBacklogDraining"`
+		}
+		if json.Unmarshal(payload, &state) != nil {
+			continue
+		}
+		return len(state.IncrementalReadNotReadySince), state.IncrementalBacklogDraining
+	}
+	return 0, false
+}
+
+func countJSONFiles(dir string) int {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0
+	}
+	count := 0
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".json") {
+			count++
+		}
+	}
+	return count
+}
+
+func printWorkspaceHealthReport(stdout io.Writer, report workspaceHealthReport) {
+	label := report.WorkspaceID
+	if report.Name != "" && report.Name != report.WorkspaceID {
+		label = fmt.Sprintf("%s (%s)", report.WorkspaceID, report.Name)
+	}
+	fmt.Fprintf(stdout, "workspace: %s\n", label)
+	if report.LocalDir == "" {
+		fmt.Fprintln(stdout, "local mirror: not configured")
+		return
+	}
+	fmt.Fprintf(stdout, "local mirror: %s\n", report.LocalDir)
+	fmt.Fprintf(stdout, "status: %s\n", defaultIfBlank(report.Status, "-"))
+	fmt.Fprintf(stdout, "last successful reconcile: %s\n", defaultIfBlank(report.LastSuccessfulReconcileAt, "-"))
+	fmt.Fprintf(stdout, "last reconcile: %s\n", defaultIfBlank(report.LastReconcileAt, "-"))
+	fmt.Fprintf(stdout, "stuck events: %d\n", report.StuckEventCount)
+	fmt.Fprintf(stdout, "outbox: pending=%d failed=%d acked=%d\n", report.OutboxPending, report.OutboxFailed, report.OutboxAcked)
+	if report.LastError != "" {
+		fmt.Fprintf(stdout, "last error: %s\n", report.LastError)
+	}
+	if report.IncrementalBacklogDraining {
+		fmt.Fprintln(stdout, "incremental backlog: draining")
+	}
 }
 
 func runWorkspaceDelete(args []string, stdin io.Reader, stdout io.Writer) error {
@@ -7936,6 +8791,24 @@ func spawnBackgroundMountProcess(originalArgs []string, localDir, pidFile, logFi
 	return nil
 }
 
+// logStuckEventSummary surfaces the stuck-event drain outcome of a reconcile
+// cycle. In the request-driven, one-shot pull model a cycle can be canceled
+// mid-drain; without this the CLI exits silently and the operator cannot tell
+// whether the cursor caught up. When events were skipped or a backlog remains,
+// it points the operator at `relayfile writeback skip-stuck`.
+func logStuckEventSummary(syncer *mountsync.Syncer, cycleErr error) {
+	skipped := syncer.StaleAliasSkips()
+	backlog := syncer.BacklogDraining()
+	if skipped == 0 && !backlog {
+		return
+	}
+	if backlog || errors.Is(cycleErr, context.Canceled) || errors.Is(cycleErr, context.DeadlineExceeded) {
+		log.Printf("stuck-event drain: %d stale index event(s) skipped this cycle; backlog remains — re-run or use 'relayfile writeback skip-stuck' to clear", skipped)
+		return
+	}
+	log.Printf("stuck-event drain: %d stale index event(s) skipped this cycle; events cursor caught up to live head", skipped)
+}
+
 func runMountLoop(rootCtx context.Context, syncer *mountsync.Syncer, localDir, workspaceID, serverURL, delegatedCredsFile string, timeout, interval time.Duration, intervalJitter float64, websocketEnabled, once, daemonized bool, pidFile, logFile string) error {
 	interval = enforcePollIntervalFloor(interval)
 	httpClient, _ := syncerClient(syncer)
@@ -8135,6 +9008,7 @@ func runMountLoop(rootCtx context.Context, syncer *mountsync.Syncer, localDir, w
 
 	log.Print(mountStartBanner(localDir, interval, intervalJitter))
 	initialErr := runCycle(true)
+	logStuckEventSummary(syncer, initialErr)
 	if once {
 		return initialErr
 	}
