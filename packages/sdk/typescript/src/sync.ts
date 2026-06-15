@@ -150,6 +150,16 @@ const DEFAULT_POLL_INTERVAL_MS = 5000;
 const DEFAULT_PING_INTERVAL_MS = 30000;
 const DEFAULT_RECONNECT_MIN_DELAY_MS = 250;
 const DEFAULT_RECONNECT_MAX_DELAY_MS = 5000;
+// When involuntary polling is active but the WebSocket transport is still
+// viable (baseUrl present, reconnect enabled, not caller-forced), the poll
+// loop yields after a backoff window so the SDK can re-probe the WS and climb
+// back to push delivery. Backoff grows on repeated pre-open failures so we
+// never tight-loop a handshake that keeps rejecting, yet always recover once
+// the transient (cold DO, proxy blip, brief auth gap) clears. Without this a
+// single pre-open failure latches the process into polling forever — fatal
+// for long-running consumers like the factory daemon.
+const DEFAULT_WS_REPROBE_MIN_DELAY_MS = 5000;
+const DEFAULT_WS_REPROBE_MAX_DELAY_MS = 300000;
 // Cap on the dedupe cache used in polling mode. Sized large enough that no
 // realistic workspace burst can churn through it within one poll interval
 // (the events API is itself capped at ~1000 per page), small enough to keep
@@ -327,6 +337,14 @@ export class RelayFileSync {
   // (no broadcasts and no pings yet) would falsely trip the watchdog.
   private lastPingSentAt = 0;
   private reconnectAttempts = 0;
+  // Tracks how many times involuntary polling has yielded to re-probe the
+  // WebSocket without a successful open in between. Drives re-probe backoff;
+  // reset to 0 once a socket actually reaches OPEN.
+  private pollingReprobeAttempts = 0;
+  // Whether the *current* polling session should periodically yield to
+  // re-probe the WS. False for explicit/caller-forced polling (preferPolling
+  // or no baseUrl) — that polling is intentional and stays put.
+  private pollingReprobeEnabled = false;
   private readonly abortHandler?: () => void;
 
   constructor(options: RelayFileSyncOptions) {
@@ -544,6 +562,9 @@ export class RelayFileSync {
       }
       this.currentSocketHasOpened = true;
       this.reconnectAttempts = 0;
+      // A real OPEN means the transport is healthy again — start the next
+      // potential degradation from a fresh (short) re-probe backoff.
+      this.pollingReprobeAttempts = 0;
       // Reset frame/ping bookkeeping for the freshly opened socket so the
       // watchdog has a clean baseline. lastPingSentAt=0 disables the pong
       // timeout until we actually send our first ping.
@@ -663,6 +684,15 @@ export class RelayFileSync {
       }
     }
     this.setState("polling");
+    // Involuntary polling (anything but "explicit") should not be a one-way
+    // door: if the WS transport is viable, the poll loop will yield after a
+    // backoff window so the .finally() below can re-open the socket. Explicit
+    // polling (preferPolling / no baseUrl) is intentional and stays put.
+    this.pollingReprobeEnabled =
+      reason !== "explicit" &&
+      !!this.baseUrl &&
+      this.reconnect.enabled &&
+      !this.preferPolling;
     this.pollingPromise = this.pollLoop().finally(() => {
       this.pollingPromise = undefined;
       if (!this.stopped && !this.shouldUsePolling()) {
@@ -673,9 +703,30 @@ export class RelayFileSync {
 
   private async pollLoop(): Promise<void> {
     let retryAttempt = 0;
+    // When re-probing is enabled, fix a deadline at which this poll session
+    // yields back to the WebSocket. Computed once per session from the running
+    // attempt count so repeated failures back off (5s, 10s, 20s … capped 5m).
+    // `undefined` => never yield (explicit polling, or WS not viable).
+    const reprobeDeadlineAt = this.pollingReprobeEnabled
+      ? Date.now() + this.computeReprobeDelayMs(this.pollingReprobeAttempts)
+      : undefined;
     while (!this.stopped) {
       if (this.signal?.aborted) {
         throw createAbortError();
+      }
+      // Backoff window elapsed: exit the loop so startPolling()'s .finally
+      // runs scheduleReconnect() → openWebSocket(). The cursor advanced by
+      // this session carries into the WS URL, so the re-opened socket resumes
+      // exactly where polling left off (no gap, no replay). If the re-open
+      // fails pre-open again, forceReconnect → startPolling restarts this loop
+      // with an incremented attempt and a longer window.
+      if (reprobeDeadlineAt !== undefined && Date.now() >= reprobeDeadlineAt) {
+        this.pollingReprobeAttempts += 1;
+        debugLog("polling yielding to WS re-probe", {
+          workspaceId: this.workspaceId,
+          attempt: this.pollingReprobeAttempts,
+        });
+        return;
       }
       try {
         // The current server implementation paginates events from oldest to
@@ -936,6 +987,15 @@ export class RelayFileSync {
   private computeReconnectDelayMs(attempt: number): number {
     const uncapped = this.reconnect.minDelayMs * Math.pow(2, Math.max(0, attempt - 1));
     return Math.min(this.reconnect.maxDelayMs, uncapped);
+  }
+
+  // How long involuntary polling runs before yielding to re-probe the WS.
+  // attempt 0 → 5s, 1 → 10s, 2 → 20s … capped at 5m. The first re-probe after
+  // a fresh degradation is fast (transients usually clear within seconds); a
+  // persistently rejecting handshake backs off so we never hammer it.
+  private computeReprobeDelayMs(attempt: number): number {
+    const uncapped = DEFAULT_WS_REPROBE_MIN_DELAY_MS * Math.pow(2, Math.max(0, attempt));
+    return Math.min(DEFAULT_WS_REPROBE_MAX_DELAY_MS, uncapped);
   }
 
   private async sleep(delayMs: number): Promise<void> {
