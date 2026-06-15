@@ -2032,6 +2032,105 @@ describe("RelayFileClient — new webhook/writeback methods", () => {
     expect(body.headers["X-GitHub-Event"]).toBe("issues");
   });
 
+  it("registerWebhook sends outbound subscription details", async () => {
+    const f = mockFetch({ subscriptionId: "whsub_1" });
+    const client = makeClient(f);
+
+    const res = await client.registerWebhook({
+      workspaceId: "ws_acme",
+      url: "https://factory.example.com/relayfile",
+      pathGlobs: ["/github/repos/acme/api/issues/by-id/**"],
+      secret: "whsec_test",
+    });
+
+    expect(res.subscriptionId).toBe("whsub_1");
+    const url = f.mock.calls[0]![0] as string;
+    expect(url).toContain("/v1/workspaces/ws_acme/webhooks");
+    const init = f.mock.calls[0]![1] as RequestInit;
+    expect(init.method).toBe("POST");
+    const body = JSON.parse(init.body as string);
+    expect(body.url).toBe("https://factory.example.com/relayfile");
+    expect(body.pathGlobs).toEqual(["/github/repos/acme/api/issues/by-id/**"]);
+    expect(body.secret).toBe("whsec_test");
+  });
+
+  it("listWebhooks and deleteWebhook target outbound subscription routes", async () => {
+    const f = mockFetch([
+      {
+        id: "whsub_1",
+        url: "https://factory.example.com/relayfile",
+        pathGlobs: ["/linear/issues/**"],
+        createdAt: "2026-06-15T00:00:00.000Z",
+        updatedAt: "2026-06-15T00:00:00.000Z",
+        health: {
+          lastDeliveryAt: null,
+          lastSuccessAt: null,
+          lastError: null,
+          consecutiveFailures: 0,
+        },
+      },
+    ]);
+    const client = makeClient(f);
+
+    const hooks = await client.listWebhooks("ws_acme");
+    expect(hooks[0]?.id).toBe("whsub_1");
+    expect(f.mock.calls[0]![0] as string).toContain("/v1/workspaces/ws_acme/webhooks");
+
+    f.mockResolvedValueOnce({
+      ok: true,
+      status: 204,
+      headers: new Headers(),
+      json: () => Promise.resolve(null),
+      text: () => Promise.resolve(""),
+    } as unknown as Response);
+    await client.deleteWebhook("ws_acme", "whsub_1");
+    expect(f.mock.calls[1]![0] as string).toContain("/v1/workspaces/ws_acme/webhooks/whsub_1");
+    expect((f.mock.calls[1]![1] as RequestInit).method).toBe("DELETE");
+  });
+
+  it("lists and replays outbound webhook delivery dead letters", async () => {
+    const f = mockFetch({
+      items: [
+        {
+          deliveryId: "whdel_1",
+          workspaceId: "ws_acme",
+          subscriptionId: "whsub_1",
+          eventId: "evt_10",
+          url: "https://factory.example.com/relayfile",
+          failedAt: "2026-06-15T00:00:00.000Z",
+          attemptCount: 3,
+          lastError: "webhook endpoint returned 500",
+          replayCount: 0,
+          status: "dead_lettered",
+        },
+      ],
+      nextCursor: null,
+    });
+    const client = makeClient(f);
+
+    const dlq = await client.getWebhookDeadLetters("ws_acme", {
+      cursor: "2026-06-14T00:00:00.000Z",
+      limit: 10,
+    });
+    expect(dlq.items[0]?.eventId).toBe("evt_10");
+    expect(f.mock.calls[0]![0] as string).toContain(
+      "/v1/workspaces/ws_acme/webhooks/dlq?cursor=2026-06-14T00%3A00%3A00.000Z&limit=10",
+    );
+
+    f.mockResolvedValueOnce({
+      ok: true,
+      status: 202,
+      headers: new Headers({ "content-type": "application/json" }),
+      json: () => Promise.resolve({ status: "queued", id: "whdel_1" }),
+      text: () => Promise.resolve(JSON.stringify({ status: "queued", id: "whdel_1" })),
+    } as unknown as Response);
+    const replay = await client.replayWebhookDeadLetter("ws_acme", "whdel_1");
+    expect(replay.status).toBe("queued");
+    expect(f.mock.calls[1]![0] as string).toContain(
+      "/v1/workspaces/ws_acme/webhooks/dlq/whdel_1/replay",
+    );
+  });
+
   it("listPendingWritebacks GETs writeback/pending", async () => {
     const payload: WritebackItem[] = [
       {

@@ -11,6 +11,7 @@ import {
   type DeleteFileInput,
   type DeadLetterItem,
   type DeadLetterFeedResponse,
+  type DeleteWebhookOptions,
   type DiscardForkInput,
   type ErrorResponse,
   type EventFeedResponse,
@@ -26,6 +27,8 @@ import {
   type GetSyncDeadLettersOptions,
   type GetSyncIngressStatusOptions,
   type GetSyncStatusOptions,
+  type GetWebhookDeadLettersOptions,
+  type ListWebhooksOptions,
   type ListTreeOptions,
   type OperationFeedResponse,
   type OperationStatusResponse,
@@ -33,6 +36,8 @@ import {
   type ResourceAtEventResult,
   type ReadFileInput,
   type QueryFilesOptions,
+  type RegisterWebhookInput,
+  type RegisterWebhookResponse,
   type Subscription,
   type SyncIngressStatusResponse,
   type SyncStatusResponse,
@@ -41,6 +46,8 @@ import {
   type WriteQueuedResponse,
   type IngestWebhookInput,
   type WritebackItem,
+  type WebhookDeliveryDeadLetterFeedResponse,
+  type WebhookSubscription,
   type AckWritebackInput,
   type AckWritebackResponse,
   type SweepWritebackDraftsInput,
@@ -1858,6 +1865,75 @@ export class RelayFileClient {
         headers: input.headers
       },
       signal: input.signal
+    });
+  }
+
+  async registerWebhook(input: RegisterWebhookInput): Promise<RegisterWebhookResponse> {
+    return this.request<RegisterWebhookResponse>({
+      method: "POST",
+      path: `/v1/workspaces/${encodeURIComponent(input.workspaceId)}/webhooks`,
+      correlationId: input.correlationId,
+      body: {
+        url: input.url,
+        pathGlobs: input.pathGlobs,
+        secret: input.secret
+      },
+      signal: input.signal
+    });
+  }
+
+  async listWebhooks(
+    workspaceId: string,
+    options: ListWebhooksOptions = {}
+  ): Promise<WebhookSubscription[]> {
+    return this.request<WebhookSubscription[]>({
+      method: "GET",
+      path: `/v1/workspaces/${encodeURIComponent(workspaceId)}/webhooks`,
+      correlationId: options.correlationId,
+      signal: options.signal
+    });
+  }
+
+  async deleteWebhook(
+    workspaceId: string,
+    subscriptionId: string,
+    options: DeleteWebhookOptions = {}
+  ): Promise<void> {
+    await this.performRequest({
+      method: "DELETE",
+      path: `/v1/workspaces/${encodeURIComponent(workspaceId)}/webhooks/${encodeURIComponent(subscriptionId)}`,
+      correlationId: options.correlationId,
+      signal: options.signal
+    });
+  }
+
+  async getWebhookDeadLetters(
+    workspaceId: string,
+    options: GetWebhookDeadLettersOptions = {}
+  ): Promise<WebhookDeliveryDeadLetterFeedResponse> {
+    const query = buildQuery({
+      cursor: options.cursor,
+      limit: options.limit
+    });
+    return this.request<WebhookDeliveryDeadLetterFeedResponse>({
+      method: "GET",
+      path: `/v1/workspaces/${encodeURIComponent(workspaceId)}/webhooks/dlq${query}`,
+      correlationId: options.correlationId,
+      signal: options.signal
+    });
+  }
+
+  async replayWebhookDeadLetter(
+    workspaceId: string,
+    deliveryId: string,
+    correlationId?: string,
+    signal?: AbortSignal
+  ): Promise<QueuedResponse> {
+    return this.request<QueuedResponse>({
+      method: "POST",
+      path: `/v1/workspaces/${encodeURIComponent(workspaceId)}/webhooks/dlq/${encodeURIComponent(deliveryId)}/replay`,
+      correlationId,
+      signal
     });
   }
 
