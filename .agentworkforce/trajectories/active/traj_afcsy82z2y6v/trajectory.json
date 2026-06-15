@@ -400,6 +400,18 @@
             "reasoning": "Phase 1 must improve delivery against current prod cloud, so mount persists command IDs under .relay/outbox, retries with contentIdentity, treats successful bulk responses as upload ACK when revisions are available, and surfaces capped retries as needs-attention without requiring TS receipt fields first."
           },
           "significance": "high"
+        },
+        {
+          "ts": 1781508511616,
+          "type": "decision",
+          "content": "Reviewing PR #278 from required workforce diff and metadata: Reviewing PR #278 from required workforce diff and metadata",
+          "raw": {
+            "question": "Reviewing PR #278 from required workforce diff and metadata",
+            "chosen": "Reviewing PR #278 from required workforce diff and metadata",
+            "alternatives": [],
+            "reasoning": "Current workspace has an unrelated active trajectory; recording the PR review work without further altering historical trajectory state"
+          },
+          "significance": "high"
         }
       ]
     }

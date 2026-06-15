@@ -4,8 +4,9 @@
   "task": {
     "title": "Review and fix PR #269"
   },
-  "status": "active",
+  "status": "abandoned",
   "startedAt": "2026-06-10T18:02:24.509Z",
+  "completedAt": "2026-06-15T07:28:06.970Z",
   "agents": [],
   "chapters": [],
   "commits": [],
