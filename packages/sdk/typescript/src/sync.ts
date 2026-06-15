@@ -139,6 +139,7 @@ interface RelayFileSyncWireEvent {
   eventId?: string;
   path?: string;
   revision?: string;
+  contentHash?: string;
   origin?: EventOrigin;
   provider?: string;
   correlationId?: string;
@@ -254,6 +255,7 @@ function normalizeFilesystemEvent(message: RelayFileSyncWireEvent): FilesystemEv
     type: message.type as FilesystemEvent["type"],
     path: message.path ?? "",
     revision: message.revision ?? "",
+    contentHash: message.contentHash,
     origin: message.origin,
     provider: message.provider,
     correlationId: message.correlationId,

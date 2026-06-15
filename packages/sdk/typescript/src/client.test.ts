@@ -2131,6 +2131,30 @@ describe("RelayFileClient — new webhook/writeback methods", () => {
     );
   });
 
+  it("webhook methods reject missing required identifiers before issuing a request", async () => {
+    const f = mockFetch({});
+    const client = makeClient(f);
+
+    await expect(
+      client.registerWebhook({ workspaceId: "", url: "https://x", pathGlobs: ["/a"] }),
+    ).rejects.toThrow("workspaceId is required");
+    await expect(
+      client.registerWebhook({ workspaceId: "ws_acme", url: "", pathGlobs: ["/a"] }),
+    ).rejects.toThrow("url is required");
+    await expect(client.listWebhooks("")).rejects.toThrow("workspaceId is required");
+    await expect(client.deleteWebhook("ws_acme", "")).rejects.toThrow(
+      "subscriptionId is required",
+    );
+    await expect(client.getWebhookDeadLetters("")).rejects.toThrow(
+      "workspaceId is required",
+    );
+    await expect(client.replayWebhookDeadLetter("ws_acme", "")).rejects.toThrow(
+      "deliveryId is required",
+    );
+
+    expect(f).not.toHaveBeenCalled();
+  });
+
   it("listPendingWritebacks GETs writeback/pending", async () => {
     const payload: WritebackItem[] = [
       {

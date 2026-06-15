@@ -1869,6 +1869,12 @@ export class RelayFileClient {
   }
 
   async registerWebhook(input: RegisterWebhookInput): Promise<RegisterWebhookResponse> {
+    if (!input.workspaceId) {
+      throw new Error("workspaceId is required");
+    }
+    if (!input.url) {
+      throw new Error("url is required");
+    }
     return this.request<RegisterWebhookResponse>({
       method: "POST",
       path: `/v1/workspaces/${encodeURIComponent(input.workspaceId)}/webhooks`,
@@ -1886,6 +1892,9 @@ export class RelayFileClient {
     workspaceId: string,
     options: ListWebhooksOptions = {}
   ): Promise<WebhookSubscription[]> {
+    if (!workspaceId) {
+      throw new Error("workspaceId is required");
+    }
     return this.request<WebhookSubscription[]>({
       method: "GET",
       path: `/v1/workspaces/${encodeURIComponent(workspaceId)}/webhooks`,
@@ -1899,6 +1908,12 @@ export class RelayFileClient {
     subscriptionId: string,
     options: DeleteWebhookOptions = {}
   ): Promise<void> {
+    if (!workspaceId) {
+      throw new Error("workspaceId is required");
+    }
+    if (!subscriptionId) {
+      throw new Error("subscriptionId is required");
+    }
     await this.performRequest({
       method: "DELETE",
       path: `/v1/workspaces/${encodeURIComponent(workspaceId)}/webhooks/${encodeURIComponent(subscriptionId)}`,
@@ -1911,6 +1926,9 @@ export class RelayFileClient {
     workspaceId: string,
     options: GetWebhookDeadLettersOptions = {}
   ): Promise<WebhookDeliveryDeadLetterFeedResponse> {
+    if (!workspaceId) {
+      throw new Error("workspaceId is required");
+    }
     const query = buildQuery({
       cursor: options.cursor,
       limit: options.limit
@@ -1929,6 +1947,12 @@ export class RelayFileClient {
     correlationId?: string,
     signal?: AbortSignal
   ): Promise<QueuedResponse> {
+    if (!workspaceId) {
+      throw new Error("workspaceId is required");
+    }
+    if (!deliveryId) {
+      throw new Error("deliveryId is required");
+    }
     return this.request<QueuedResponse>({
       method: "POST",
       path: `/v1/workspaces/${encodeURIComponent(workspaceId)}/webhooks/dlq/${encodeURIComponent(deliveryId)}/replay`,
