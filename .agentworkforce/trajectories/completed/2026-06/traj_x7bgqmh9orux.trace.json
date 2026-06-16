@@ -1,0 +1,293 @@
+{
+  "version": "1.0.0",
+  "id": "da3b5aea-81d2-4f85-b77d-4c00bf604ba1",
+  "timestamp": "2026-06-16T19:57:09.915Z",
+  "trajectory": "traj_x7bgqmh9orux",
+  "files": [
+    {
+      "path": "package.json",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 2,
+              "end_line": 8,
+              "revision": "03ef54f52b7853949b4780e882f5c54b57b31217"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "packages/cli/CHANGELOG.md",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 8,
+              "end_line": 17,
+              "revision": "03ef54f52b7853949b4780e882f5c54b57b31217"
+            },
+            {
+              "start_line": 416,
+              "end_line": 423,
+              "revision": "03ef54f52b7853949b4780e882f5c54b57b31217"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "packages/cli/package.json",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 1,
+              "end_line": 6,
+              "revision": "03ef54f52b7853949b4780e882f5c54b57b31217"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "packages/core/CHANGELOG.md",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 8,
+              "end_line": 17,
+              "revision": "03ef54f52b7853949b4780e882f5c54b57b31217"
+            },
+            {
+              "start_line": 392,
+              "end_line": 399,
+              "revision": "03ef54f52b7853949b4780e882f5c54b57b31217"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "packages/core/package.json",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 1,
+              "end_line": 6,
+              "revision": "03ef54f52b7853949b4780e882f5c54b57b31217"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "packages/file-observer/CHANGELOG.md",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 8,
+              "end_line": 17,
+              "revision": "03ef54f52b7853949b4780e882f5c54b57b31217"
+            },
+            {
+              "start_line": 391,
+              "end_line": 398,
+              "revision": "03ef54f52b7853949b4780e882f5c54b57b31217"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "packages/file-observer/package.json",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 1,
+              "end_line": 6,
+              "revision": "03ef54f52b7853949b4780e882f5c54b57b31217"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "packages/local-mount/CHANGELOG.md",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 8,
+              "end_line": 17,
+              "revision": "03ef54f52b7853949b4780e882f5c54b57b31217"
+            },
+            {
+              "start_line": 415,
+              "end_line": 422,
+              "revision": "03ef54f52b7853949b4780e882f5c54b57b31217"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "packages/local-mount/package.json",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 1,
+              "end_line": 6,
+              "revision": "03ef54f52b7853949b4780e882f5c54b57b31217"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "packages/mount-darwin-arm64/package.json",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 1,
+              "end_line": 6,
+              "revision": "03ef54f52b7853949b4780e882f5c54b57b31217"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "packages/mount-darwin-x64/package.json",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 1,
+              "end_line": 6,
+              "revision": "03ef54f52b7853949b4780e882f5c54b57b31217"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "packages/mount-linux-arm64/package.json",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 1,
+              "end_line": 6,
+              "revision": "03ef54f52b7853949b4780e882f5c54b57b31217"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "packages/mount-linux-x64/package.json",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 1,
+              "end_line": 6,
+              "revision": "03ef54f52b7853949b4780e882f5c54b57b31217"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "packages/sdk/typescript/CHANGELOG.md",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 8,
+              "end_line": 17,
+              "revision": "03ef54f52b7853949b4780e882f5c54b57b31217"
+            },
+            {
+              "start_line": 413,
+              "end_line": 420,
+              "revision": "03ef54f52b7853949b4780e882f5c54b57b31217"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "packages/sdk/typescript/package.json",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 1,
+              "end_line": 6,
+              "revision": "03ef54f52b7853949b4780e882f5c54b57b31217"
+            },
+            {
+              "start_line": 59,
+              "end_line": 73,
+              "revision": "03ef54f52b7853949b4780e882f5c54b57b31217"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

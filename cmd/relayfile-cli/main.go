@@ -155,6 +155,16 @@ type bulkWriteError struct {
 	Message string `json:"message"`
 }
 
+type writeQueuedResponse struct {
+	OpID           string `json:"opId"`
+	Status         string `json:"status"`
+	TargetRevision string `json:"targetRevision"`
+	Writeback      struct {
+		Provider string `json:"provider"`
+		State    string `json:"state"`
+	} `json:"writeback"`
+}
+
 type contentIdentity struct {
 	Kind       string `json:"kind"`
 	Key        string `json:"key"`
@@ -686,6 +696,10 @@ func printWritebackUsage(w io.Writer, subcommand string) {
 		fmt.Fprintln(w, "Usage: relayfile writeback status [WORKSPACE] [--json]")
 	case "push":
 		fmt.Fprintln(w, "Usage: relayfile writeback push LOCAL_PATH [--workspace WS] [--json] [--timeout 90s]")
+	case "update":
+		fmt.Fprintln(w, "Usage: relayfile writeback update LOCAL_PATH [--workspace WS] [--json] [--timeout 90s]")
+	case "delete":
+		fmt.Fprintln(w, "Usage: relayfile writeback delete LOCAL_PATH [--workspace WS] [--json] [--timeout 90s]")
 	case "retry":
 		fmt.Fprintln(w, "Usage: relayfile writeback retry --opId OP [WORKSPACE]")
 	case "skip-stuck":
@@ -698,6 +712,8 @@ func printWritebackUsage(w io.Writer, subcommand string) {
   relayfile writeback status [WORKSPACE] [--json]
   relayfile writeback retry --opId OP [WORKSPACE]
   relayfile writeback push LOCAL_PATH [--workspace WS] [--json] [--timeout 90s]
+  relayfile writeback update LOCAL_PATH [--workspace WS] [--json] [--timeout 90s]
+  relayfile writeback delete LOCAL_PATH [--workspace WS] [--json] [--timeout 90s]
   relayfile writeback skip-stuck [WORKSPACE] [--workspace WS] [--max N] [--json]
   relayfile writeback sweep-drafts [WORKSPACE] [--path-prefix PREFIX] [--pattern GLOB ...] [--apply] [--json]`)
 	}
@@ -741,6 +757,8 @@ Usage:
   relayfile writeback status [WORKSPACE] [--json]
   relayfile writeback retry --opId OP [WORKSPACE]
   relayfile writeback push LOCAL_PATH [--workspace WS] [--json] [--timeout 90s]
+  relayfile writeback update LOCAL_PATH [--workspace WS] [--json] [--timeout 90s]
+  relayfile writeback delete LOCAL_PATH [--workspace WS] [--json] [--timeout 90s]
   relayfile writeback skip-stuck [WORKSPACE] [--workspace WS] [--max N] [--json]
   relayfile digest rebuild --window today|yesterday|YYYY-MM-DD|this-week|last-week [--workspace NAME] [--json]
   relayfile pull [--workspace NAME] [--provider PROVIDER] [--reason TEXT]
@@ -2861,6 +2879,7 @@ type writebackPushReceipt struct {
 	CommandID       string           `json:"commandId"`
 	WorkspaceID     string           `json:"workspaceId"`
 	RemotePath      string           `json:"remotePath"`
+	Action          string           `json:"action,omitempty"`
 	ContentType     string           `json:"contentType"`
 	Content         string           `json:"content"`
 	Encoding        string           `json:"encoding,omitempty"`
@@ -2908,6 +2927,14 @@ type workspaceHealthReport struct {
 
 var errWritebackFailuresPresent = errors.New("writeback failures present")
 
+type writebackCommandMode string
+
+const (
+	writebackCommandPush   writebackCommandMode = "push"
+	writebackCommandUpdate writebackCommandMode = "update"
+	writebackCommandDelete writebackCommandMode = "delete"
+)
+
 func deadLetterDirFor(localDir string) string {
 	return filepath.Join(localDir, ".relay", "dead-letter")
 }
@@ -2917,7 +2944,22 @@ func deadLetterErrorPathFor(localDir, opID string) string {
 }
 
 func runWritebackPush(args []string, stdout io.Writer) error {
+	return runWritebackFileMutation(writebackCommandPush, args, stdout)
+}
+
+func runWritebackUpdate(args []string, stdout io.Writer) error {
+	return runWritebackFileMutation(writebackCommandUpdate, args, stdout)
+}
+
+func runWritebackDelete(args []string, stdout io.Writer) error {
+	return runWritebackFileMutation(writebackCommandDelete, args, stdout)
+}
+
+func runWritebackFileMutation(mode writebackCommandMode, args []string, stdout io.Writer) error {
 	fs := flag.NewFlagSet("writeback push", flag.ContinueOnError)
+	if mode != writebackCommandPush {
+		fs = flag.NewFlagSet("writeback "+string(mode), flag.ContinueOnError)
+	}
 	fs.SetOutput(io.Discard)
 	workspaceName := fs.String("workspace", "", "workspace name or id")
 	server := fs.String("server", "", "relayfile server URL override")
@@ -2934,23 +2976,15 @@ func runWritebackPush(args []string, stdout io.Writer) error {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return errors.New("usage: relayfile writeback push LOCAL_PATH [--workspace WS] [--json] [--timeout 90s]")
+		return fmt.Errorf("usage: relayfile writeback %s LOCAL_PATH [--workspace WS] [--json] [--timeout 90s]", mode)
 	}
 
 	resolved, err := resolveWritebackPushPath(fs.Arg(0), strings.TrimSpace(*workspaceName))
 	if err != nil {
 		return err
 	}
-	raw, err := os.ReadFile(resolved.LocalPath)
-	if err != nil {
-		return err
-	}
-	content, encoding := encodeLocalWritebackContent(raw)
-	contentType := detectContentType(resolved.LocalPath, raw)
-	contentHash := hashBytes(raw)
-	identity := writebackPushContentIdentity(resolved.WorkspaceID, resolved.RemotePath, contentHash)
-	if identity == nil {
-		return fmt.Errorf("writeback push currently supports only draft writeback paths and factory-create-*.json files; %s has no content identity for double-dispatch dedupe", resolved.RemotePath)
+	if mode != writebackCommandPush && !isCanonicalWritebackTargetPath(resolved.RemotePath) {
+		return fmt.Errorf("writeback %s requires a canonical provider record path, got %s", mode, resolved.RemotePath)
 	}
 	joinScopes := writebackPushJoinScopes(resolved.RemotePath)
 	requiredRelayfileScopes := writebackPushRequiredRelayfileScopes(resolved.RemotePath)
@@ -2966,16 +3000,34 @@ func runWritebackPush(args []string, stdout io.Writer) error {
 
 	now := time.Now().UTC()
 	firstSeenAt := now.Format(time.RFC3339Nano)
-	commandID := newWritebackPushCommandID(resolved.WorkspaceID, resolved.RemotePath, contentHash, firstSeenAt)
+	raw := []byte(nil)
+	content := ""
+	encoding := ""
+	contentType := ""
+	contentHash := ""
+	var identity *contentIdentity
+	exists := mode != writebackCommandDelete
+	if exists {
+		raw, err = os.ReadFile(resolved.LocalPath)
+		if err != nil {
+			return err
+		}
+		content, encoding = encodeLocalWritebackContent(raw)
+		contentType = detectContentType(resolved.LocalPath, raw)
+		contentHash = hashBytes(raw)
+		identity = writebackPushContentIdentity(resolved.WorkspaceID, resolved.RemotePath, contentHash)
+	}
+	commandID := newWritebackPushCommandID(resolved.WorkspaceID, resolved.RemotePath, string(mode)+":"+contentHash, firstSeenAt)
 	pendingReceipt := writebackPushReceipt{
 		CommandID:       commandID,
 		WorkspaceID:     resolved.WorkspaceID,
 		RemotePath:      resolved.RemotePath,
+		Action:          string(mode),
 		ContentType:     contentType,
 		Content:         content,
 		Encoding:        encoding,
 		Hash:            contentHash,
-		Exists:          true,
+		Exists:          exists,
 		Status:          "pending",
 		FirstSeenAt:     firstSeenAt,
 		CorrelationID:   commandID,
@@ -2985,17 +3037,19 @@ func runWritebackPush(args []string, stdout io.Writer) error {
 		return err
 	}
 
-	file := bulkWriteFile{
-		Path:            resolved.RemotePath,
-		ContentType:     contentType,
-		Content:         content,
-		Encoding:        encoding,
-		ContentIdentity: identity,
+	dispatch := writebackDispatchResult{}
+	if mode == writebackCommandDelete {
+		dispatch, err = dispatchWritebackDelete(commandClient, resolved.RemotePath)
+	} else {
+		file := bulkWriteFile{
+			Path:            resolved.RemotePath,
+			ContentType:     contentType,
+			Content:         content,
+			Encoding:        encoding,
+			ContentIdentity: identity,
+		}
+		dispatch, err = dispatchWritebackUpsert(commandClient, file)
 	}
-	var response bulkWriteResponse
-	err = commandClient.postWorkspaceJSON(context.Background(), func(workspaceID string) string {
-		return fmt.Sprintf("/v1/workspaces/%s/fs/bulk", url.PathEscape(workspaceID))
-	}, bulkWriteRequest{Files: []bulkWriteFile{file}}, &response)
 	if err != nil {
 		failed := pendingReceipt
 		failed.Status = "failed"
@@ -3008,29 +3062,22 @@ func runWritebackPush(args []string, stdout io.Writer) error {
 		}
 		return err
 	}
-	result := firstBulkWriteResultForPath(response.Results, resolved.RemotePath)
-	if response.ErrorCount > 0 {
-		reason := firstBulkWriteErrorForPath(response.Errors, resolved.RemotePath)
-		if reason == "" {
-			reason = fmt.Sprintf("bulk write returned %d error(s)", response.ErrorCount)
-		}
+	revision := firstNonBlank(dispatch.Revision, "")
+	opID := strings.TrimSpace(dispatch.OpID)
+	dispatchStatus := firstNonBlank(dispatch.State, "succeeded")
+	if opID == "" && isTerminalWritebackOpStatus(dispatchStatus) {
+		err := fmt.Errorf("writeback operation %s", dispatchStatus)
 		failed := pendingReceipt
 		failed.Status = "failed"
 		failed.LastAttemptAt = time.Now().UTC().Format(time.RFC3339Nano)
 		failed.AttemptCount = 1
-		failed.LastError = sanitizeCLIReceiptError(errors.New(reason))
-		failed.DispatchStatus = "failed"
-		failed.CorrelationID = firstNonBlank(response.CorrelationID, failed.CorrelationID)
+		failed.LastError = sanitizeCLIReceiptError(err)
+		failed.DispatchStatus = dispatchStatus
+		failed.CorrelationID = firstNonBlank(dispatch.CorrelationID, failed.CorrelationID)
 		if receiptErr := writeWritebackPushReceipt(resolved.MountRoot, failed); receiptErr != nil {
-			return fmt.Errorf("%s; additionally failed to write failure receipt: %v", reason, receiptErr)
+			return fmt.Errorf("%w; additionally failed to write failure receipt: %v", err, receiptErr)
 		}
-		return errors.New(reason)
-	}
-	revision := firstNonBlank(result.Revision, "")
-	opID := strings.TrimSpace(result.OpID)
-	dispatchStatus := "succeeded"
-	if result.Writeback != nil && strings.TrimSpace(result.Writeback.State) != "" {
-		dispatchStatus = strings.TrimSpace(result.Writeback.State)
+		return err
 	}
 	if opID != "" {
 		waitTimeout := *timeout
@@ -3052,7 +3099,7 @@ func runWritebackPush(args []string, stdout io.Writer) error {
 			receipt.LastAttemptAt = time.Now().UTC().Format(time.RFC3339Nano)
 			receipt.AttemptCount = 1
 			receipt.LastError = sanitizeCLIReceiptError(err)
-			receipt.CorrelationID = firstNonBlank(response.CorrelationID, receipt.CorrelationID)
+			receipt.CorrelationID = firstNonBlank(dispatch.CorrelationID, receipt.CorrelationID)
 			if isTerminalWritebackOpStatus(op.Status) {
 				receipt.Status = "failed"
 				receipt.DispatchStatus = firstNonBlank(strings.TrimSpace(op.Status), "failed")
@@ -3077,19 +3124,82 @@ func runWritebackPush(args []string, stdout io.Writer) error {
 	acked.DispatchStatus = dispatchStatus
 	acked.AckedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	acked.Revision = revision
-	acked.CorrelationID = firstNonBlank(response.CorrelationID, acked.CorrelationID)
+	acked.CorrelationID = firstNonBlank(dispatch.CorrelationID, acked.CorrelationID)
 	if err := writeWritebackPushReceipt(resolved.MountRoot, acked); err != nil {
 		return err
 	}
 	if *jsonOutput {
 		return writeJSON(stdout, acked.withoutBody())
 	}
-	fmt.Fprintf(stdout, "Pushed %s -> %s", resolved.LocalPath, resolved.RemotePath)
+	switch mode {
+	case writebackCommandUpdate:
+		fmt.Fprintf(stdout, "Updated %s -> %s", resolved.LocalPath, resolved.RemotePath)
+	case writebackCommandDelete:
+		fmt.Fprintf(stdout, "Deleted %s", resolved.RemotePath)
+	default:
+		fmt.Fprintf(stdout, "Pushed %s -> %s", resolved.LocalPath, resolved.RemotePath)
+	}
 	if opID != "" {
 		fmt.Fprintf(stdout, " (%s)", opID)
 	}
 	fmt.Fprintln(stdout)
 	return nil
+}
+
+type writebackDispatchResult struct {
+	OpID          string
+	Revision      string
+	State         string
+	CorrelationID string
+}
+
+func dispatchWritebackUpsert(commandClient *workspaceCommandClient, file bulkWriteFile) (writebackDispatchResult, error) {
+	var response bulkWriteResponse
+	err := commandClient.postWorkspaceJSON(context.Background(), func(workspaceID string) string {
+		return fmt.Sprintf("/v1/workspaces/%s/fs/bulk", url.PathEscape(workspaceID))
+	}, bulkWriteRequest{Files: []bulkWriteFile{file}}, &response)
+	if err != nil {
+		return writebackDispatchResult{}, err
+	}
+	if response.ErrorCount > 0 {
+		reason := firstBulkWriteErrorForPath(response.Errors, file.Path)
+		if reason == "" {
+			reason = fmt.Sprintf("bulk write returned %d error(s)", response.ErrorCount)
+		}
+		return writebackDispatchResult{CorrelationID: response.CorrelationID}, errors.New(reason)
+	}
+	result := firstBulkWriteResultForPath(response.Results, file.Path)
+	state := "succeeded"
+	if result.Writeback != nil && strings.TrimSpace(result.Writeback.State) != "" {
+		state = strings.TrimSpace(result.Writeback.State)
+	}
+	return writebackDispatchResult{
+		OpID:          strings.TrimSpace(result.OpID),
+		Revision:      result.Revision,
+		State:         state,
+		CorrelationID: response.CorrelationID,
+	}, nil
+}
+
+func dispatchWritebackDelete(commandClient *workspaceCommandClient, remotePath string) (writebackDispatchResult, error) {
+	var result writeQueuedResponse
+	err := commandClient.deleteWorkspaceJSON(context.Background(), func(workspaceID string) string {
+		query := url.Values{}
+		query.Set("path", remotePath)
+		return fmt.Sprintf("/v1/workspaces/%s/fs?%s", url.PathEscape(workspaceID), query.Encode())
+	}, "*", &result)
+	if err != nil {
+		return writebackDispatchResult{}, err
+	}
+	state := result.Writeback.State
+	if strings.TrimSpace(state) == "" {
+		state = result.Status
+	}
+	return writebackDispatchResult{
+		OpID:     strings.TrimSpace(result.OpID),
+		Revision: result.TargetRevision,
+		State:    state,
+	}, nil
 }
 
 type writebackOperationStatus struct {
@@ -3329,6 +3439,15 @@ func isWritebackDraftPath(remotePath string) bool {
 		relayfile.IsDraftFilePath(remotePath)
 }
 
+func isCanonicalWritebackTargetPath(remotePath string) bool {
+	remotePath = normalizeWritebackFailurePath(remotePath)
+	if remotePath == "" || remotePath == "/" || isWritebackDraftPath(remotePath) {
+		return false
+	}
+	base := path.Base(remotePath)
+	return strings.HasSuffix(base, ".json")
+}
+
 func newWritebackPushCommandID(workspaceID, remotePath, hash, firstSeenAt string) string {
 	sum := sha256.Sum256([]byte(strings.Join([]string{
 		strings.TrimSpace(workspaceID),
@@ -3423,13 +3542,17 @@ func sanitizeCLIReceiptError(err error) string {
 
 func runWriteback(args []string, stdout io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("writeback subcommand is required: list, push, status, retry, or sweep-drafts")
+		return errors.New("writeback subcommand is required: list, push, update, delete, status, retry, or sweep-drafts")
 	}
 	switch args[0] {
 	case "list":
 		return runWritebackList(args[1:], stdout)
 	case "push":
 		return runWritebackPush(args[1:], stdout)
+	case "update":
+		return runWritebackUpdate(args[1:], stdout)
+	case "delete":
+		return runWritebackDelete(args[1:], stdout)
 	case "status":
 		return runWritebackStatus(args[1:], stdout)
 	case "retry":
@@ -5342,6 +5465,17 @@ func (c *workspaceCommandClient) postWorkspaceJSON(ctx context.Context, pathForW
 	return c.client.postJSON(ctx, pathForWorkspace(c.workspaceID), body, out)
 }
 
+func (c *workspaceCommandClient) deleteWorkspaceJSON(ctx context.Context, pathForWorkspace func(string) string, ifMatch string, out any) error {
+	err := c.client.deleteJSON(ctx, pathForWorkspace(c.workspaceID), ifMatch, out)
+	if err == nil || c.directToken || !isAPIAuthError(err) {
+		return err
+	}
+	if refreshErr := c.refreshFromDelegated(); refreshErr != nil {
+		return err
+	}
+	return c.client.deleteJSON(ctx, pathForWorkspace(c.workspaceID), ifMatch, out)
+}
+
 func isAPIAuthError(err error) bool {
 	if err == nil {
 		return false
@@ -6152,11 +6286,28 @@ func (c *apiClient) postJSON(ctx context.Context, path string, input, out any) e
 	return json.Unmarshal(body, out)
 }
 
+func (c *apiClient) deleteJSON(ctx context.Context, path string, ifMatch string, out any) error {
+	body, _, err := c.doWithHeaders(ctx, http.MethodDelete, path, nil, map[string]string{
+		"If-Match": ifMatch,
+	})
+	if err != nil {
+		return err
+	}
+	if out == nil || len(body) == 0 {
+		return nil
+	}
+	return json.Unmarshal(body, out)
+}
+
 func (c *apiClient) getBytes(ctx context.Context, path string) ([]byte, string, error) {
 	return c.do(ctx, http.MethodGet, path, nil)
 }
 
 func (c *apiClient) do(ctx context.Context, method, path string, body []byte) ([]byte, string, error) {
+	return c.doWithHeaders(ctx, method, path, body, nil)
+}
+
+func (c *apiClient) doWithHeaders(ctx context.Context, method, path string, body []byte, headers map[string]string) ([]byte, string, error) {
 	var reader io.Reader
 	if len(body) > 0 {
 		reader = bytes.NewReader(body)
@@ -6169,6 +6320,11 @@ func (c *apiClient) do(ctx context.Context, method, path string, body []byte) ([
 	req.Header.Set("X-Correlation-Id", correlationID())
 	if len(body) > 0 {
 		req.Header.Set("Content-Type", "application/json")
+	}
+	for key, value := range headers {
+		if strings.TrimSpace(value) != "" {
+			req.Header.Set(key, value)
+		}
 	}
 
 	resp, err := c.httpClient.Do(req)
