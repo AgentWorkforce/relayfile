@@ -32,6 +32,11 @@ type WritebackAck struct {
 	// must stay under the same provider root as the draft; otherwise the
 	// service falls back to the ExternalID-derived name.
 	CanonicalPath string
+	// ProviderResult carries additional fields the provider echoed back about
+	// the written record (e.g. a Slack message ts/channel). They are surfaced
+	// verbatim on the operation's providerResult. The reserved server-owned
+	// key providerRevision cannot be overridden via this map.
+	ProviderResult map[string]any
 }
 
 // DraftDisposition reports what the service did to the draft file at ack time.

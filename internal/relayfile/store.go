@@ -402,8 +402,14 @@ type StoreOptions struct {
 	StaleRunningOpThreshold time.Duration
 }
 
-type ProviderWriteFunc func(workspaceID, path, revision string) error
-type ProviderWriteActionFunc func(action WritebackAction) error
+// ProviderWriteFunc and ProviderWriteActionFunc execute a writeback against
+// the external provider. They return an optional providerResult map — the
+// fields the provider echoed back about the written record (e.g. a Slack
+// message `ts`, the created issue id) — which is surfaced verbatim on the
+// operation's ProviderResult so agents can recover server-assigned ids
+// without a second round-trip. A nil map means "nothing to surface".
+type ProviderWriteFunc func(workspaceID, path, revision string) (map[string]any, error)
+type ProviderWriteActionFunc func(action WritebackAction) (map[string]any, error)
 
 type WritebackActionType string
 
@@ -866,8 +872,8 @@ func NewStoreWithOptions(opts StoreOptions) *Store {
 	writer := opts.ProviderWrite
 	legacyWriterConfigured := writer != nil
 	if writer == nil {
-		writer = func(workspaceID, path, revision string) error {
-			return nil
+		writer = func(workspaceID, path, revision string) (map[string]any, error) {
+			return nil, nil
 		}
 	}
 	actionWriter := opts.ProviderWriteAction
@@ -3195,7 +3201,10 @@ func (s *Store) GetPendingWritebacks(workspaceID string) []map[string]any {
 // AcknowledgeWriteback acknowledges a writeback item as processed. On a
 // successful ack carrying an ExternalID it also reconciles the agent-authored
 // draft file per the draftFile() rename contract (issue #242); that mutation
-// is classification-exempt and can never enqueue a new writeback.
+// is classification-exempt and can never enqueue a new writeback. Any
+// provider-echoed fields the consumer reports (ack.ExternalID and
+// ack.ProviderResult, e.g. a Slack message ts/channel) are surfaced on the
+// operation's providerResult.
 func (s *Store) AcknowledgeWriteback(workspaceID, itemID string, ack WritebackAck, correlationID string) (map[string]any, error) {
 	if workspaceID == "" || itemID == "" {
 		return nil, ErrInvalidInput
@@ -3221,12 +3230,19 @@ func (s *Store) AcknowledgeWriteback(workspaceID, itemID string, ack WritebackAc
 		op.Status = "succeeded"
 		op.LastError = nil
 		op.CompletedAt = &nowTS
+		// Fold the consumer-reported externalId into the provider-echoed fields
+		// so it lands on providerResult alongside any ts/channel the consumer
+		// sent. mergeProviderResult keeps providerRevision server-owned.
+		echoed := ack.ProviderResult
 		if externalID := strings.TrimSpace(ack.ExternalID); externalID != "" {
-			if op.ProviderResult == nil {
-				op.ProviderResult = map[string]any{}
+			merged := make(map[string]any, len(echoed)+1)
+			for k, v := range echoed {
+				merged[k] = v
 			}
-			op.ProviderResult["externalId"] = externalID
+			merged["externalId"] = externalID
+			echoed = merged
 		}
+		op.ProviderResult = mergeProviderResult(op.Revision, echoed)
 	} else {
 		op.Status = "dead_lettered"
 		if ack.Error != "" {
@@ -3608,6 +3624,21 @@ func (s *Store) enqueueWriteback(task writebackTask) {
 	}()
 }
 
+// mergeProviderResult builds the ProviderResult map stored on a succeeded
+// operation. It overlays any fields the provider echoed back (e.g. a Slack
+// message `ts`), letting agents recover server-assigned ids from
+// GET /ops/{opId} without a second request, then stamps the server-owned
+// providerRevision last so a provider- or caller-supplied value can never
+// overwrite it (keeping providerRevision a stable, server-authoritative field).
+func mergeProviderResult(revision string, providerResult map[string]any) map[string]any {
+	result := make(map[string]any, len(providerResult)+1)
+	for k, v := range providerResult {
+		result[k] = v
+	}
+	result["providerRevision"] = revision
+	return result
+}
+
 func (s *Store) writebackWorker() {
 	for {
 		task, ok := s.writebackQueue.Dequeue(s.queueCtx)
@@ -3960,18 +3991,19 @@ func (s *Store) processWriteback(task writebackTask) {
 
 	// Step 2: execute provider write outside the lock.
 	var err error
+	var providerResult map[string]any
 	if s.providerWriteAction != nil {
-		err = s.providerWriteAction(writeAction)
+		providerResult, err = s.providerWriteAction(writeAction)
 	} else if s.providerWriteConfigured {
-		err = s.providerWrite(task.WorkspaceID, task.Path, task.Revision)
+		providerResult, err = s.providerWrite(task.WorkspaceID, task.Path, task.Revision)
 	} else if adapter, ok := s.adapters[writeAction.Provider]; ok {
 		if outbound, ok := adapter.(ProviderWritebackAdapter); ok {
-			err = outbound.ApplyWriteback(writeAction)
+			providerResult, err = outbound.ApplyWriteback(writeAction)
 		} else {
-			err = s.providerWrite(task.WorkspaceID, task.Path, task.Revision)
+			providerResult, err = s.providerWrite(task.WorkspaceID, task.Path, task.Revision)
 		}
 	} else {
-		err = s.providerWrite(task.WorkspaceID, task.Path, task.Revision)
+		providerResult, err = s.providerWrite(task.WorkspaceID, task.Path, task.Revision)
 	}
 
 	// Step 3: persist state update and emit event.
@@ -3999,7 +4031,7 @@ func (s *Store) processWriteback(task writebackTask) {
 		op.Status = "succeeded"
 		op.LastError = nil
 		op.NextAttemptAt = nil
-		op.ProviderResult = map[string]any{"providerRevision": task.Revision}
+		op.ProviderResult = mergeProviderResult(task.Revision, providerResult)
 		op.UpdatedAt = nowTS
 		op.CompletedAt = &nowTS
 		ws.Ops[task.OpID] = op

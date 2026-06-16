@@ -918,6 +918,14 @@ export interface AckWritebackInput {
    * the externalId-derived name next to the draft.
    */
   canonicalPath?: string;
+  /**
+   * Optional fields the provider echoed back about the written record (e.g. a
+   * Slack message `ts` and `channel`). They are surfaced verbatim on the
+   * operation's providerResult (recoverable via getOp), letting an agent reply
+   * in a Slack thread using the returned ts as thread_ts. The reserved key
+   * `providerRevision` is server-owned and cannot be overridden via this map.
+   */
+  providerResult?: Record<string, unknown>;
   correlationId?: string;
   signal?: AbortSignal;
 }

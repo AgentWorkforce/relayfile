@@ -1983,7 +1983,8 @@ export class RelayFileClient {
         success: input.success,
         error: input.error,
         externalId: input.externalId,
-        canonicalPath: input.canonicalPath
+        canonicalPath: input.canonicalPath,
+        providerResult: input.providerResult
       },
       signal: input.signal
     });

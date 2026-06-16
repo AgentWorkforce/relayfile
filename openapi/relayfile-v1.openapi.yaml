@@ -1736,6 +1736,17 @@ paths:
                     Must stay under the same provider root as the draft;
                     otherwise the service falls back to the externalId-derived
                     name next to the draft.
+                providerResult:
+                  type: object
+                  additionalProperties: true
+                  description: |
+                    Optional fields the provider echoed back about the written
+                    record (e.g. a Slack message `ts` and `channel`). They are
+                    surfaced verbatim on the operation's providerResult, so an
+                    agent can recover them from GET /ops/{opId} — for example to
+                    reply in a Slack thread using the returned ts as thread_ts.
+                    The reserved key `providerRevision` is server-owned and
+                    cannot be overridden via this map.
       responses:
         '200':
           description: Acknowledgment accepted

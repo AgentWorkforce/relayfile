@@ -434,8 +434,8 @@ func TestFileEventsWebSocketEnforcesPathScopedMountGrant(t *testing.T) {
 
 func TestFileEventsWebSocketWritebackMaterializationCarriesAgentWriteOrigin(t *testing.T) {
 	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{
-		ProviderWriteAction: func(action relayfile.WritebackAction) error {
-			return nil
+		ProviderWriteAction: func(action relayfile.WritebackAction) (map[string]any, error) {
+			return nil, nil
 		},
 	})
 	t.Cleanup(store.Close)
@@ -2883,11 +2883,11 @@ func TestSyncStatusEndpointIncludesProviderFromOperations(t *testing.T) {
 	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{
 		MaxWritebackAttempts: 1,
 		WritebackDelay:       5 * time.Millisecond,
-		ProviderWriteAction: func(action relayfile.WritebackAction) error {
+		ProviderWriteAction: func(action relayfile.WritebackAction) (map[string]any, error) {
 			if action.Type == relayfile.WritebackActionFileDelete {
-				return fmt.Errorf("delete failure for provider discovery")
+				return nil, fmt.Errorf("delete failure for provider discovery")
 			}
-			return nil
+			return nil, nil
 		},
 	})
 	t.Cleanup(store.Close)
@@ -3934,8 +3934,8 @@ func TestWorkspaceOperationReplayEndpoint(t *testing.T) {
 	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{
 		MaxWritebackAttempts: 1,
 		WritebackDelay:       5 * time.Millisecond,
-		ProviderWrite: func(workspaceID, path, revision string) error {
-			return fmt.Errorf("forced writeback failure")
+		ProviderWrite: func(workspaceID, path, revision string) (map[string]any, error) {
+			return nil, fmt.Errorf("forced writeback failure")
 		},
 	})
 	t.Cleanup(store.Close)
@@ -4098,8 +4098,8 @@ func TestAdminReplayAndSyncRefresh(t *testing.T) {
 	server := NewServer(relayfile.NewStoreWithOptions(relayfile.StoreOptions{
 		MaxWritebackAttempts: 1,
 		WritebackDelay:       5 * time.Millisecond,
-		ProviderWrite: func(workspaceID, path, revision string) error {
-			return fmt.Errorf("forced dead-letter for replay")
+		ProviderWrite: func(workspaceID, path, revision string) (map[string]any, error) {
+			return nil, fmt.Errorf("forced dead-letter for replay")
 		},
 	}))
 
