@@ -2261,6 +2261,24 @@ func (s *Server) handleWritebackAck(w http.ResponseWriter, r *http.Request, work
 		ack.CanonicalPath = canonicalPath
 	}
 
+	// Optional: an external writeback consumer may report fields the provider
+	// echoed back about the written record (e.g. a Slack message `ts`/`channel`).
+	// These are surfaced on the operation's providerResult. Strip the reserved,
+	// server-owned providerRevision at this trust boundary so an untrusted
+	// consumer cannot attempt to overwrite it. (mergeProviderResult also
+	// re-stamps the authoritative value as a backstop; this makes the intent
+	// explicit and keeps the persisted map clean.)
+	if pr, ok := payload["providerResult"].(map[string]any); ok {
+		filtered := make(map[string]any, len(pr))
+		for k, v := range pr {
+			if k == "providerRevision" {
+				continue
+			}
+			filtered[k] = v
+		}
+		ack.ProviderResult = filtered
+	}
+
 	resp, err := s.store.AcknowledgeWriteback(workspaceID, itemID, ack, correlationID)
 	if err != nil {
 		if err == relayfile.ErrNotFound {

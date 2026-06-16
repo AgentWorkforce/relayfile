@@ -707,9 +707,9 @@ func TestProcessWritebackSkipsNonPendingOperation(t *testing.T) {
 	var writeCalls int32
 	store := NewStoreWithOptions(StoreOptions{
 		DisableWorkers: true,
-		ProviderWriteAction: func(action WritebackAction) error {
+		ProviderWriteAction: func(action WritebackAction) (map[string]any, error) {
 			atomic.AddInt32(&writeCalls, 1)
-			return nil
+			return nil, nil
 		},
 	})
 	t.Cleanup(store.Close)
@@ -1577,9 +1577,9 @@ func TestPendingWritebacksRecoveredOnRestart(t *testing.T) {
 	var writeCalls int32
 	recovered := NewStoreWithOptions(StoreOptions{
 		StateFile: stateFile,
-		ProviderWriteAction: func(action WritebackAction) error {
+		ProviderWriteAction: func(action WritebackAction) (map[string]any, error) {
 			atomic.AddInt32(&writeCalls, 1)
-			return nil
+			return nil, nil
 		},
 		WritebackDelay: 5 * time.Millisecond,
 	})
@@ -1598,8 +1598,8 @@ func TestRecoveredWritebackRespectsPersistedNextAttemptAt(t *testing.T) {
 		StateFile:            stateFile,
 		MaxWritebackAttempts: 3,
 		WritebackDelay:       400 * time.Millisecond,
-		ProviderWriteAction: func(action WritebackAction) error {
-			return fmt.Errorf("transient writeback failure")
+		ProviderWriteAction: func(action WritebackAction) (map[string]any, error) {
+			return nil, fmt.Errorf("transient writeback failure")
 		},
 	})
 	write, err := store.WriteFile(WriteRequest{
@@ -1629,9 +1629,9 @@ func TestRecoveredWritebackRespectsPersistedNextAttemptAt(t *testing.T) {
 		StateFile:            stateFile,
 		MaxWritebackAttempts: 3,
 		WritebackDelay:       400 * time.Millisecond,
-		ProviderWriteAction: func(action WritebackAction) error {
+		ProviderWriteAction: func(action WritebackAction) (map[string]any, error) {
 			atomic.AddInt32(&recoveredCalls, 1)
-			return nil
+			return nil, nil
 		},
 	})
 	t.Cleanup(recovered.Close)
@@ -2093,8 +2093,8 @@ func TestGetSyncStatusMarksProviderErrorFromWritebackDeadLetter(t *testing.T) {
 	store := NewStoreWithOptions(StoreOptions{
 		MaxWritebackAttempts: 1,
 		WritebackDelay:       5 * time.Millisecond,
-		ProviderWrite: func(workspaceID, path, revision string) error {
-			return fmt.Errorf("writeback provider failure")
+		ProviderWrite: func(workspaceID, path, revision string) (map[string]any, error) {
+			return nil, fmt.Errorf("writeback provider failure")
 		},
 	})
 	t.Cleanup(store.Close)
@@ -2138,11 +2138,11 @@ func TestGetSyncStatusIncludesProviderPresentOnlyInOperations(t *testing.T) {
 	store := NewStoreWithOptions(StoreOptions{
 		MaxWritebackAttempts: 1,
 		WritebackDelay:       5 * time.Millisecond,
-		ProviderWriteAction: func(action WritebackAction) error {
+		ProviderWriteAction: func(action WritebackAction) (map[string]any, error) {
 			if action.Type == WritebackActionFileDelete {
-				return fmt.Errorf("delete failure for provider discovery")
+				return nil, fmt.Errorf("delete failure for provider discovery")
 			}
-			return nil
+			return nil, nil
 		},
 	})
 	t.Cleanup(store.Close)
@@ -2284,11 +2284,11 @@ func TestListSyncStatusesIncludesFailureCodesFromDeadLettersAndOps(t *testing.T)
 				},
 			},
 		},
-		ProviderWrite: func(workspaceID, path, revision string) error {
+		ProviderWrite: func(workspaceID, path, revision string) (map[string]any, error) {
 			if workspaceID == "ws_sync_list_error_op" {
-				return fmt.Errorf("writeback provider failure")
+				return nil, fmt.Errorf("writeback provider failure")
 			}
-			return nil
+			return nil, nil
 		},
 	})
 	t.Cleanup(store.Close)
@@ -2403,8 +2403,8 @@ func TestListOperationsFiltersByStatus(t *testing.T) {
 	store := NewStoreWithOptions(StoreOptions{
 		MaxWritebackAttempts: 1,
 		WritebackDelay:       5 * time.Millisecond,
-		ProviderWrite: func(workspaceID, path, revision string) error {
-			return fmt.Errorf("forced failure")
+		ProviderWrite: func(workspaceID, path, revision string) (map[string]any, error) {
+			return nil, fmt.Errorf("forced failure")
 		},
 	})
 	t.Cleanup(store.Close)
@@ -2698,8 +2698,8 @@ func TestStoreIngestEnvelopeAndReplayOp(t *testing.T) {
 	store := NewStoreWithOptions(StoreOptions{
 		MaxWritebackAttempts: 1,
 		WritebackDelay:       5 * time.Millisecond,
-		ProviderWrite: func(workspaceID, path, revision string) error {
-			return fmt.Errorf("forced replay precondition failure")
+		ProviderWrite: func(workspaceID, path, revision string) (map[string]any, error) {
+			return nil, fmt.Errorf("forced replay precondition failure")
 		},
 	})
 	t.Cleanup(store.Close)
@@ -2788,11 +2788,11 @@ func TestReplayOperationResetsAttemptCount(t *testing.T) {
 	store := NewStoreWithOptions(StoreOptions{
 		MaxWritebackAttempts: 1,
 		WritebackDelay:       5 * time.Millisecond,
-		ProviderWrite: func(workspaceID, path, revision string) error {
+		ProviderWrite: func(workspaceID, path, revision string) (map[string]any, error) {
 			if shouldFail.Load() {
-				return fmt.Errorf("forced failure")
+				return nil, fmt.Errorf("forced failure")
 			}
-			return nil
+			return nil, nil
 		},
 	})
 	t.Cleanup(store.Close)
@@ -4368,9 +4368,9 @@ func TestIngressStatusReportsOldestPendingAge(t *testing.T) {
 func TestProviderWriteActionReceivesFileUpsertPayload(t *testing.T) {
 	actions := make(chan WritebackAction, 2)
 	store := NewStoreWithOptions(StoreOptions{
-		ProviderWriteAction: func(action WritebackAction) error {
+		ProviderWriteAction: func(action WritebackAction) (map[string]any, error) {
 			actions <- action
-			return nil
+			return nil, nil
 		},
 	})
 	t.Cleanup(store.Close)
@@ -4409,9 +4409,9 @@ func TestProviderWriteActionReceivesFileUpsertPayload(t *testing.T) {
 func TestBulkWriteContentIdentityReachesProviderWriteAction(t *testing.T) {
 	actions := make(chan WritebackAction, 1)
 	store := NewStoreWithOptions(StoreOptions{
-		ProviderWriteAction: func(action WritebackAction) error {
+		ProviderWriteAction: func(action WritebackAction) (map[string]any, error) {
 			actions <- action
-			return nil
+			return nil, nil
 		},
 	})
 	t.Cleanup(store.Close)
@@ -4502,9 +4502,9 @@ func TestBulkWriteContentIdentityRetryReturnsExistingOperationWithoutDuplicateDi
 func TestProviderWriteActionReceivesFileDeletePayload(t *testing.T) {
 	actions := make(chan WritebackAction, 10)
 	store := NewStoreWithOptions(StoreOptions{
-		ProviderWriteAction: func(action WritebackAction) error {
+		ProviderWriteAction: func(action WritebackAction) (map[string]any, error) {
 			actions <- action
-			return nil
+			return nil, nil
 		},
 	})
 	t.Cleanup(store.Close)
@@ -4559,12 +4559,12 @@ func TestWritebackRetriesThenSucceeds(t *testing.T) {
 	store := NewStoreWithOptions(StoreOptions{
 		MaxWritebackAttempts: 5,
 		WritebackDelay:       5 * time.Millisecond,
-		ProviderWrite: func(workspaceID, path, revision string) error {
+		ProviderWrite: func(workspaceID, path, revision string) (map[string]any, error) {
 			n := attempts.Add(1)
 			if n < 3 {
-				return fmt.Errorf("transient provider error")
+				return nil, fmt.Errorf("transient provider error")
 			}
-			return nil
+			return nil, nil
 		},
 	})
 	t.Cleanup(store.Close)
@@ -4596,9 +4596,9 @@ func TestWritebackDeadLetterAfterMaxAttempts(t *testing.T) {
 	store := NewStoreWithOptions(StoreOptions{
 		MaxWritebackAttempts: 2,
 		WritebackDelay:       5 * time.Millisecond,
-		ProviderWrite: func(workspaceID, path, revision string) error {
+		ProviderWrite: func(workspaceID, path, revision string) (map[string]any, error) {
 			attempts.Add(1)
-			return fmt.Errorf("permanent failure")
+			return nil, fmt.Errorf("permanent failure")
 		},
 	})
 	t.Cleanup(store.Close)
@@ -4705,9 +4705,9 @@ func TestAdapterWritebackHandlerIsUsedWhenLegacyProviderWriteNotConfigured(t *te
 			testAdapter{
 				provider: "external",
 				actions:  []ApplyAction{{Type: ActionIgnored}},
-				writeback: func(action WritebackAction) error {
+				writeback: func(action WritebackAction) (map[string]any, error) {
 					actions <- action
-					return nil
+					return nil, nil
 				},
 			},
 		},
@@ -4932,7 +4932,7 @@ type testAdapter struct {
 	provider      string
 	actions       []ApplyAction
 	parseEnvelope func(req WebhookEnvelopeRequest) ([]ApplyAction, error)
-	writeback     func(action WritebackAction) error
+	writeback     func(action WritebackAction) (map[string]any, error)
 }
 
 func (a testAdapter) Provider() string {
@@ -4946,9 +4946,9 @@ func (a testAdapter) ParseEnvelope(req WebhookEnvelopeRequest) ([]ApplyAction, e
 	return append([]ApplyAction(nil), a.actions...), nil
 }
 
-func (a testAdapter) ApplyWriteback(action WritebackAction) error {
+func (a testAdapter) ApplyWriteback(action WritebackAction) (map[string]any, error) {
 	if a.writeback == nil {
-		return nil
+		return nil, nil
 	}
 	return a.writeback(action)
 }
@@ -5026,5 +5026,98 @@ func TestBulkWriteContentIdentityAppearsInPendingWritebacks(t *testing.T) {
 	}
 	if *rawIdentity != *identity {
 		t.Fatalf("pending content identity = %+v, want %+v", rawIdentity, identity)
+	}
+}
+
+// TestProviderWriteActionSurfacesProviderResult verifies that fields returned
+// by the provider write action (e.g. a Slack message `ts`) are surfaced on the
+// operation's ProviderResult alongside the local providerRevision.
+func TestProviderWriteActionSurfacesProviderResult(t *testing.T) {
+	store := NewStoreWithOptions(StoreOptions{
+		ProviderWriteAction: func(action WritebackAction) (map[string]any, error) {
+			return map[string]any{"ts": "123.45", "channel": "C0001"}, nil
+		},
+	})
+	t.Cleanup(store.Close)
+
+	write, err := store.WriteFile(WriteRequest{
+		WorkspaceID:   "ws_provider_result",
+		Path:          "/external/ProviderResult.md",
+		IfMatch:       "0",
+		ContentType:   "text/markdown",
+		Content:       "# provider result",
+		CorrelationID: "corr_provider_result_1",
+	})
+	if err != nil {
+		t.Fatalf("write failed: %v", err)
+	}
+
+	waitForOpStatus(t, store, "ws_provider_result", write.OpID, "succeeded")
+
+	op, err := store.GetOperation("ws_provider_result", write.OpID)
+	if err != nil {
+		t.Fatalf("get operation failed: %v", err)
+	}
+	if op.ProviderResult["ts"] != "123.45" {
+		t.Fatalf("expected providerResult.ts to be surfaced, got %v", op.ProviderResult["ts"])
+	}
+	if op.ProviderResult["channel"] != "C0001" {
+		t.Fatalf("expected providerResult.channel to be surfaced, got %v", op.ProviderResult["channel"])
+	}
+	if _, ok := op.ProviderResult["providerRevision"]; !ok {
+		t.Fatalf("expected providerRevision to remain present, got %v", op.ProviderResult)
+	}
+}
+
+// TestExternalWritebackAckSurfacesProviderResult verifies that an external
+// writeback consumer can report provider-echoed fields (e.g. a Slack message
+// `ts`) via the ack, that they land on the operation's ProviderResult, and that
+// a caller-supplied providerRevision cannot overwrite the server-owned value.
+func TestExternalWritebackAckSurfacesProviderResult(t *testing.T) {
+	store := NewStoreWithOptions(StoreOptions{
+		ExternalWritebackMode: true,
+	})
+	t.Cleanup(store.Close)
+
+	write, err := store.WriteFile(WriteRequest{
+		WorkspaceID:   "ws_ext_result",
+		Path:          "/external/ExtResult.md",
+		IfMatch:       "0",
+		ContentType:   "text/markdown",
+		Content:       "# external result",
+		CorrelationID: "corr_ext_result_1",
+	})
+	if err != nil {
+		t.Fatalf("write failed: %v", err)
+	}
+
+	if _, err := store.AcknowledgeWriteback(
+		"ws_ext_result",
+		write.OpID,
+		WritebackAck{
+			Success: true,
+			// A malicious/buggy consumer cannot clobber the server-owned
+			// providerRevision via the echoed fields.
+			ProviderResult: map[string]any{"ts": "678.90", "channel": "C0002", "providerRevision": "spoofed"},
+		},
+		"corr_ext_result_1",
+	); err != nil {
+		t.Fatalf("acknowledge writeback failed: %v", err)
+	}
+
+	op, err := store.GetOperation("ws_ext_result", write.OpID)
+	if err != nil {
+		t.Fatalf("get operation failed: %v", err)
+	}
+	if op.Status != "succeeded" {
+		t.Fatalf("expected op to be succeeded, got %s", op.Status)
+	}
+	if op.ProviderResult["ts"] != "678.90" {
+		t.Fatalf("expected providerResult.ts from ack, got %v", op.ProviderResult["ts"])
+	}
+	if pr, ok := op.ProviderResult["providerRevision"]; !ok {
+		t.Fatalf("expected providerRevision to remain present, got %v", op.ProviderResult)
+	} else if pr == "spoofed" {
+		t.Fatalf("expected server-owned providerRevision to win, but caller value was kept: %v", pr)
 	}
 }

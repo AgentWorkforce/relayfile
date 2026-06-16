@@ -30,7 +30,11 @@ type ProviderAdapter interface {
 }
 
 type ProviderWritebackAdapter interface {
-	ApplyWriteback(action WritebackAction) error
+	// ApplyWriteback executes the writeback against the provider. The returned
+	// map, when non-nil, carries provider-echoed fields about the written
+	// record (e.g. a Slack message `ts`) that are surfaced on the operation's
+	// ProviderResult.
+	ApplyWriteback(action WritebackAction) (map[string]any, error)
 }
 
 // ParseGenericEnvelope processes a generic webhook envelope for any provider.

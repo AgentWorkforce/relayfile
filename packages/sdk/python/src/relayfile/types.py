@@ -680,6 +680,18 @@ class AckWritebackInput:
     item_id: str
     success: bool
     error: str | None = None
+    # Provider-assigned id of the created/updated object (e.g. the Slack
+    # message ts). When present on a successful ack, the service reconciles the
+    # agent-authored draft file per the draftFile() rename contract.
+    external_id: str | None = None
+    # Optional canonical projection path for the draft rename. Must stay under
+    # the same provider root as the draft.
+    canonical_path: str | None = None
+    # Optional fields the provider echoed back about the written record (e.g. a
+    # Slack message ts/channel). Surfaced verbatim on the operation's
+    # providerResult (recoverable via get_operation). The reserved key
+    # providerRevision is server-owned and cannot be overridden via this map.
+    provider_result: dict[str, Any] | None = None
     correlation_id: str | None = None
 
 
