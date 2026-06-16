@@ -193,6 +193,8 @@ func TestHelpFlagPrintsUsageForCommandsAndSubcommands(t *testing.T) {
 		{name: "writeback group", args: []string{"writeback", "-h"}, want: "relayfile writeback retry --opId OP"},
 		{name: "writeback list", args: []string{"writeback", "list", "-h"}, want: writebackListUsage},
 		{name: "writeback status", args: []string{"writeback", "status", "-h"}, want: "Usage: relayfile writeback status"},
+		{name: "writeback update", args: []string{"writeback", "update", "-h"}, want: "Usage: relayfile writeback update"},
+		{name: "writeback delete", args: []string{"writeback", "delete", "-h"}, want: "Usage: relayfile writeback delete"},
 		{name: "writeback retry", args: []string{"writeback", "retry", "-h"}, want: "Usage: relayfile writeback retry --opId OP"},
 		{name: "digest group", args: []string{"digest", "-h"}, want: "today|yesterday|YYYY-MM-DD|this-week|last-week"},
 		{name: "digest rebuild", args: []string{"digest", "rebuild", "-h"}, want: digestRebuildUsage},
@@ -2514,7 +2516,80 @@ func TestWritebackPushPostsBulkAndWritesAckedReceipt(t *testing.T) {
 	}
 }
 
-func TestWritebackPushRejectsPathWithoutContentIdentity(t *testing.T) {
+func TestWritebackPushCanonicalPathPostsBulkWithoutContentIdentity(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	const workspaceID = "ws_demo"
+	const remotePath = "/linear/issues/AR-272__00000000-0000-0000-0000-000000000272.json"
+	const opID = "op_update_272"
+	localDir := t.TempDir()
+	if err := ensureMirrorLayout(localDir); err != nil {
+		t.Fatalf("ensureMirrorLayout failed: %v", err)
+	}
+	if err := writeMirrorStateFile(localDir, syncStateFile{
+		WorkspaceID: workspaceID,
+		RemoteRoot:  "/linear/issues",
+		Mode:        defaultMountMode,
+	}); err != nil {
+		t.Fatalf("writeMirrorStateFile failed: %v", err)
+	}
+
+	localPath := filepath.Join(localDir, "AR-272__00000000-0000-0000-0000-000000000272.json")
+	content := []byte(`{"title":"updated title","stateId":"state_1"}` + "\n")
+	if err := os.WriteFile(localPath, content, 0o644); err != nil {
+		t.Fatalf("write local payload failed: %v", err)
+	}
+
+	var sawBulk atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/workspaces/"+workspaceID+"/fs/bulk":
+			sawBulk.Store(true)
+			if got := r.Header.Get("Authorization"); got != "Bearer rf_write" {
+				t.Fatalf("unexpected bulk Authorization: %q", got)
+			}
+			var req bulkWriteRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatalf("decode bulk request failed: %v", err)
+			}
+			if len(req.Files) != 1 {
+				t.Fatalf("bulk files = %d, want 1", len(req.Files))
+			}
+			file := req.Files[0]
+			if file.Path != remotePath {
+				t.Fatalf("bulk path = %q, want %q", file.Path, remotePath)
+			}
+			if file.Content != string(content) {
+				t.Fatalf("bulk content = %q, want %q", file.Content, string(content))
+			}
+			if file.ContentIdentity != nil {
+				t.Fatalf("canonical update must not carry draft content identity: %+v", file.ContentIdentity)
+			}
+			_, _ = io.WriteString(w, `{"written":1,"errorCount":0,"correlationId":"corr_update_272","results":[{"path":"`+remotePath+`","revision":"rev_2","opId":"`+opID+`","writeback":{"provider":"linear","state":"pending"}}]}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/workspaces/"+workspaceID+"/ops/"+opID:
+			_, _ = io.WriteString(w, `{"opId":"`+opID+`","path":"`+remotePath+`","status":"succeeded","revision":"rev_2"}`)
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	err := run([]string{"writeback", "push", localPath, "--server", server.URL, "--token", "rf_write", "--timeout", "1s"}, strings.NewReader(""), &stdout, &stdout)
+	if err != nil {
+		t.Fatalf("writeback push canonical failed: %v\n%s", err, stdout.String())
+	}
+	if !sawBulk.Load() {
+		t.Fatal("expected bulk write request")
+	}
+	if got := stdout.String(); !strings.Contains(got, "Pushed ") || !strings.Contains(got, opID) {
+		t.Fatalf("unexpected stdout: %s", got)
+	}
+}
+
+func TestWritebackUpdateRejectsDraftPath(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)
 
@@ -2530,24 +2605,131 @@ func TestWritebackPushRejectsPathWithoutContentIdentity(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("writeMirrorStateFile failed: %v", err)
 	}
-
-	localPath := filepath.Join(localDir, "comment-ar-272-test.json")
-	if err := os.WriteFile(localPath, []byte(`{"body":"synthetic comment"}`+"\n"), 0o644); err != nil {
+	localPath := filepath.Join(localDir, "factory-create-ar-272-test.json")
+	if err := os.WriteFile(localPath, []byte(`{"title":"draft"}`+"\n"), 0o644); err != nil {
 		t.Fatalf("write local payload failed: %v", err)
 	}
 
 	var stdout bytes.Buffer
-	err := run([]string{"writeback", "push", localPath}, strings.NewReader(""), &stdout, &stdout)
+	err := run([]string{"writeback", "update", localPath, "--token", "rf_write"}, strings.NewReader(""), &stdout, &stdout)
 	if err == nil {
-		t.Fatal("expected unsupported path error")
+		t.Fatal("expected draft path rejection")
 	}
-	if got := err.Error(); !strings.Contains(got, "supports only draft writeback paths and factory-create-*.json") {
+	if got := err.Error(); !strings.Contains(got, "requires a canonical provider record path") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	for _, state := range []string{"pending", "acked", "failed"} {
 		if got := countJSONFiles(filepath.Join(localDir, ".relay", "outbox", state)); got != 0 {
 			t.Fatalf("%s receipt count = %d, want 0", state, got)
 		}
+	}
+}
+
+func TestWritebackDeleteCallsFilesystemDeleteAndPollsOperation(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	const workspaceID = "ws_demo"
+	const remotePath = "/linear/issues/AR-272__00000000-0000-0000-0000-000000000272.json"
+	const opID = "op_delete_272"
+	localDir := t.TempDir()
+	if err := ensureMirrorLayout(localDir); err != nil {
+		t.Fatalf("ensureMirrorLayout failed: %v", err)
+	}
+	if err := writeMirrorStateFile(localDir, syncStateFile{
+		WorkspaceID: workspaceID,
+		RemoteRoot:  "/linear/issues",
+		Mode:        defaultMountMode,
+	}); err != nil {
+		t.Fatalf("writeMirrorStateFile failed: %v", err)
+	}
+	localPath := filepath.Join(localDir, "AR-272__00000000-0000-0000-0000-000000000272.json")
+	if err := os.WriteFile(localPath, []byte(`{"title":"delete me"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write local payload failed: %v", err)
+	}
+
+	var sawDelete atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodDelete && r.URL.Path == "/v1/workspaces/"+workspaceID+"/fs":
+			sawDelete.Store(true)
+			if got := r.Header.Get("If-Match"); got != "*" {
+				t.Fatalf("If-Match = %q, want *", got)
+			}
+			if got := r.URL.Query().Get("path"); got != remotePath {
+				t.Fatalf("delete path = %q, want %q", got, remotePath)
+			}
+			_, _ = io.WriteString(w, `{"opId":"`+opID+`","status":"queued","targetRevision":"rev_3","writeback":{"provider":"linear","state":"pending"}}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/workspaces/"+workspaceID+"/ops/"+opID:
+			_, _ = io.WriteString(w, `{"opId":"`+opID+`","path":"`+remotePath+`","status":"succeeded","revision":"rev_3"}`)
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	if err := run([]string{"writeback", "delete", localPath, "--server", server.URL, "--token", "rf_write", "--timeout", "1s"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("writeback delete failed: %v\n%s", err, stdout.String())
+	}
+	if !sawDelete.Load() {
+		t.Fatal("expected delete request")
+	}
+	if got := stdout.String(); !strings.Contains(got, "Deleted "+remotePath) || !strings.Contains(got, opID) {
+		t.Fatalf("unexpected stdout: %s", got)
+	}
+}
+
+func TestWritebackUpdateFailsWhenOperationFails(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	const workspaceID = "ws_demo"
+	const remotePath = "/linear/issues/AR-272__00000000-0000-0000-0000-000000000272.json"
+	const opID = "op_failed_272"
+	localDir := t.TempDir()
+	if err := ensureMirrorLayout(localDir); err != nil {
+		t.Fatalf("ensureMirrorLayout failed: %v", err)
+	}
+	if err := writeMirrorStateFile(localDir, syncStateFile{
+		WorkspaceID: workspaceID,
+		RemoteRoot:  "/linear/issues",
+		Mode:        defaultMountMode,
+	}); err != nil {
+		t.Fatalf("writeMirrorStateFile failed: %v", err)
+	}
+	localPath := filepath.Join(localDir, "AR-272__00000000-0000-0000-0000-000000000272.json")
+	if err := os.WriteFile(localPath, []byte(`{"stateId":"missing"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write local payload failed: %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/workspaces/"+workspaceID+"/fs/bulk":
+			_, _ = io.WriteString(w, `{"written":1,"errorCount":0,"correlationId":"corr_failed_272","results":[{"path":"`+remotePath+`","revision":"rev_4","opId":"`+opID+`","writeback":{"provider":"linear","state":"pending"}}]}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/workspaces/"+workspaceID+"/ops/"+opID:
+			_, _ = io.WriteString(w, `{"opId":"`+opID+`","path":"`+remotePath+`","status":"failed","revision":"rev_4","lastError":"ADAPTER_ERROR: not found"}`)
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	err := run([]string{"writeback", "update", localPath, "--server", server.URL, "--token", "rf_write", "--timeout", "1s"}, strings.NewReader(""), &stdout, &stdout)
+	if err == nil {
+		t.Fatal("expected failed operation error")
+	}
+	if got := err.Error(); !strings.Contains(got, "writeback operation "+opID+" failed") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := countJSONFiles(filepath.Join(localDir, ".relay", "outbox", "failed")); got != 1 {
+		t.Fatalf("failed receipt count = %d, want 1", got)
+	}
+	if got := countJSONFiles(filepath.Join(localDir, ".relay", "outbox", "acked")); got != 0 {
+		t.Fatalf("acked receipt count = %d, want 0", got)
 	}
 }
 
