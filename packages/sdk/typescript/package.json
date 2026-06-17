@@ -69,7 +69,6 @@
     "@relayfile/mount-linux-arm64": "0.9.5",
     "@relayfile/mount-linux-x64": "0.9.5"
   },
-  "peerDependencies": {},
   "devDependencies": {
     "typescript": "^5.7.3",
     "vitest": "^3.0.0"

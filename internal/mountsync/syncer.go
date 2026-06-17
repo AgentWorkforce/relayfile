@@ -1012,7 +1012,11 @@ type Syncer struct {
 	circuit           *CloudErrorCircuit
 	maxOutboxAttempts int
 	nowFn             func() time.Time
-	mu                sync.Mutex
+	// credExpiresAt is the RFC3339 expiry of the delegated access token,
+	// set by the CLI layer via SetCredentialExpiry and included in the
+	// public state as credExpiresInSecs so operators get advance warning.
+	credExpiresAt string
+	mu            sync.Mutex
 }
 
 // now returns the current time using the injected clock when set (tests),
@@ -1220,6 +1224,12 @@ type publicState struct {
 	// "bootstrapping N/M files" instead of a misleading stall. The resume
 	// cursor is intentionally NOT exposed (internal-only).
 	Bootstrap *bootstrapStatus `json:"bootstrap,omitempty"`
+	// ReconcileAgeSecs is seconds elapsed since the last successful reconcile.
+	// 0 when no successful reconcile has been recorded yet.
+	ReconcileAgeSecs int64 `json:"reconcileAgeSecs,omitempty"`
+	// CredExpiresInSecs is seconds until the delegated access token expires.
+	// Negative means already expired. Omitted (0) when unknown.
+	CredExpiresInSecs int64 `json:"credExpiresInSecs,omitempty"`
 }
 
 // bootstrapStatus is the public, cursor-free view of bootstrap progress.
@@ -1500,6 +1510,15 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 
 // Circuit returns the cloud-error breaker for tests and status reporters.
 func (s *Syncer) Circuit() *CloudErrorCircuit { return s.circuit }
+
+// SetCredentialExpiry records the RFC3339 expiry of the delegated access token
+// so it can be surfaced in the public state as credExpiresInSecs. Call this
+// from the CLI layer whenever credentials are loaded or refreshed.
+func (s *Syncer) SetCredentialExpiry(expiresAt string) {
+	s.mu.Lock()
+	s.credExpiresAt = strings.TrimSpace(expiresAt)
+	s.mu.Unlock()
+}
 
 func parseScopesFromJWT(token string) []string {
 	parts := strings.Split(strings.TrimSpace(token), ".")
@@ -5726,6 +5745,16 @@ func (s *Syncer) savePublicState() error {
 			public.Counters.CircuitOpenEvents = snap.OpenEvents
 		}
 		public.Circuit = &snap
+	}
+	// ReconcileAgeSecs: seconds since last successful reconcile.
+	if lastOK, err := parseStateTime(s.state.LastSuccessfulReconcileAt); err == nil && !lastOK.IsZero() {
+		public.ReconcileAgeSecs = int64(time.Since(lastOK).Seconds())
+	}
+	// CredExpiresInSecs: seconds until access token expires (negative = expired).
+	if s.credExpiresAt != "" {
+		if exp, err := time.Parse(time.RFC3339, s.credExpiresAt); err == nil {
+			public.CredExpiresInSecs = int64(time.Until(exp).Seconds())
+		}
 	}
 	if err := os.MkdirAll(filepath.Dir(s.publicStatePath), 0o755); err != nil {
 		return err
