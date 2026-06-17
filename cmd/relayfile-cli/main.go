@@ -3099,7 +3099,7 @@ func runWritebackFileMutation(mode writebackCommandMode, args []string, stdout i
 	revision := firstNonBlank(dispatch.Revision, "")
 	opID := strings.TrimSpace(dispatch.OpID)
 	dispatchStatus := firstNonBlank(dispatch.State, "succeeded")
-	if (mode == writebackCommandUpdate || mode == writebackCommandDelete) && opID == "" {
+	if mode == writebackCommandDelete && opID == "" {
 		err := fmt.Errorf("writeback %s did not return an operation id; provider writeback was not dispatched", mode)
 		failed := pendingReceipt
 		failed.Status = "failed"
@@ -3110,6 +3110,21 @@ func runWritebackFileMutation(mode writebackCommandMode, args []string, stdout i
 		failed.CorrelationID = firstNonBlank(dispatch.CorrelationID, failed.CorrelationID)
 		if receiptErr := writeWritebackPushReceipt(resolved.MountRoot, failed); receiptErr != nil {
 			return fmt.Errorf("%w; additionally failed to write failure receipt: %v", err, receiptErr)
+		}
+		return err
+	}
+	if mode == writebackCommandUpdate && opID == "" && !isSuccessfulWritebackDispatchStatus(dispatchStatus) {
+		err := fmt.Errorf("writeback update did not return an operation id; provider writeback status %q cannot be tracked", dispatchStatus)
+		receipt := pendingReceipt
+		receipt.Status = "pending"
+		receipt.LastAttemptAt = time.Now().UTC().Format(time.RFC3339Nano)
+		receipt.AttemptCount = 1
+		receipt.LastError = sanitizeCLIReceiptError(err)
+		receipt.DispatchStatus = dispatchStatus
+		receipt.NeedsAttention = true
+		receipt.CorrelationID = firstNonBlank(dispatch.CorrelationID, receipt.CorrelationID)
+		if receiptErr := writeWritebackPushReceipt(resolved.MountRoot, receipt); receiptErr != nil {
+			return fmt.Errorf("%w; additionally failed to write pending receipt: %v", err, receiptErr)
 		}
 		return err
 	}
@@ -3263,6 +3278,15 @@ type writebackOperationStatus struct {
 func isTerminalWritebackOpStatus(status string) bool {
 	switch strings.TrimSpace(status) {
 	case "failed", "dead_lettered", "canceled":
+		return true
+	default:
+		return false
+	}
+}
+
+func isSuccessfulWritebackDispatchStatus(status string) bool {
+	switch strings.TrimSpace(status) {
+	case "succeeded", "completed":
 		return true
 	default:
 		return false
