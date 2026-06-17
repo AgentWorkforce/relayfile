@@ -2757,6 +2757,60 @@ func TestWritebackDeleteCallsFilesystemDeleteAndPollsOperation(t *testing.T) {
 	}
 }
 
+func TestWritebackDeleteRequiresOperationID(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	const workspaceID = "ws_demo"
+	const remotePath = "/linear/issues/AR-292__00000000-0000-0000-0000-000000000292.json"
+	localDir := t.TempDir()
+	if err := ensureMirrorLayout(localDir); err != nil {
+		t.Fatalf("ensureMirrorLayout failed: %v", err)
+	}
+	if err := writeMirrorStateFile(localDir, syncStateFile{
+		WorkspaceID: workspaceID,
+		RemoteRoot:  "/linear/issues",
+		Mode:        defaultMountMode,
+	}); err != nil {
+		t.Fatalf("writeMirrorStateFile failed: %v", err)
+	}
+	localPath := filepath.Join(localDir, "AR-292__00000000-0000-0000-0000-000000000292.json")
+	if err := os.WriteFile(localPath, []byte(`{"title":"delete me"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write local payload failed: %v", err)
+	}
+
+	var sawDelete atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodDelete && r.URL.Path == "/v1/workspaces/"+workspaceID+"/fs/file":
+			sawDelete.Store(true)
+			_, _ = io.WriteString(w, `{"status":"queued","targetRevision":"rev_delete_missing_op","writeback":{"provider":"linear","state":"pending"}}`)
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	err := run([]string{"writeback", "delete", localPath, "--server", server.URL, "--token", "rf_write", "--timeout", "1s"}, strings.NewReader(""), &stdout, &stdout)
+	if err == nil {
+		t.Fatal("expected missing operation id error")
+	}
+	if got := err.Error(); !strings.Contains(got, "writeback delete did not return an operation id") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !sawDelete.Load() {
+		t.Fatal("expected delete request")
+	}
+	if got := countJSONFiles(filepath.Join(localDir, ".relay", "outbox", "failed")); got != 1 {
+		t.Fatalf("failed receipt count = %d, want 1", got)
+	}
+	if got := countJSONFiles(filepath.Join(localDir, ".relay", "outbox", "acked")); got != 0 {
+		t.Fatalf("acked receipt count = %d, want 0", got)
+	}
+}
+
 func TestWritebackUpdateFailsWhenOperationFails(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)

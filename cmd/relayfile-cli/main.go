@@ -2957,10 +2957,7 @@ func runWritebackDelete(args []string, stdout io.Writer) error {
 }
 
 func runWritebackFileMutation(mode writebackCommandMode, args []string, stdout io.Writer) error {
-	fs := flag.NewFlagSet("writeback push", flag.ContinueOnError)
-	if mode != writebackCommandPush {
-		fs = flag.NewFlagSet("writeback "+string(mode), flag.ContinueOnError)
-	}
+	fs := flag.NewFlagSet("writeback "+string(mode), flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	workspaceName := fs.String("workspace", "", "workspace name or id")
 	server := fs.String("server", "", "relayfile server URL override")
@@ -3069,8 +3066,8 @@ func runWritebackFileMutation(mode writebackCommandMode, args []string, stdout i
 	revision := firstNonBlank(dispatch.Revision, "")
 	opID := strings.TrimSpace(dispatch.OpID)
 	dispatchStatus := firstNonBlank(dispatch.State, "succeeded")
-	if mode == writebackCommandUpdate && opID == "" {
-		err := errors.New("writeback update did not return an operation id; provider writeback was not dispatched")
+	if (mode == writebackCommandUpdate || mode == writebackCommandDelete) && opID == "" {
+		err := fmt.Errorf("writeback %s did not return an operation id; provider writeback was not dispatched", mode)
 		failed := pendingReceipt
 		failed.Status = "failed"
 		failed.LastAttemptAt = time.Now().UTC().Format(time.RFC3339Nano)
