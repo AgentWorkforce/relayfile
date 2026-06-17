@@ -3186,7 +3186,7 @@ func dispatchWritebackDelete(commandClient *workspaceCommandClient, remotePath s
 	err := commandClient.deleteWorkspaceJSON(context.Background(), func(workspaceID string) string {
 		query := url.Values{}
 		query.Set("path", remotePath)
-		return fmt.Sprintf("/v1/workspaces/%s/fs?%s", url.PathEscape(workspaceID), query.Encode())
+		return fmt.Sprintf("/v1/workspaces/%s/fs/file?%s", url.PathEscape(workspaceID), query.Encode())
 	}, "*", &result)
 	if err != nil {
 		return writebackDispatchResult{}, err
