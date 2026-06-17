@@ -9812,7 +9812,13 @@ func runMountLoop(rootCtx context.Context, syncer *mountsync.Syncer, localDir, w
 			// Try to recover by re-running auth refresh.
 			if err := refreshMountAuth(true); err != nil {
 				// Compute backoff for next attempt: base * 2^attempts, capped.
-				backoff := degradedBackoffBase << uint(degradedAttempts)
+				// Cap the exponent at 14 to prevent int64 overflow on 30s<<uint(n)
+				// after ~28 consecutive failures (would shift to negative).
+				exp := degradedAttempts
+				if exp > 14 {
+					exp = 14
+				}
+				backoff := degradedBackoffBase << uint(exp)
 				if backoff > degradedBackoffMax {
 					backoff = degradedBackoffMax
 				}
