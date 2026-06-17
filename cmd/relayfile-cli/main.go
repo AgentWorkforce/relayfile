@@ -912,7 +912,7 @@ func runSetup(args []string, stdin io.Reader, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	delegatedCredsFile := delegatedCredentialsPath()
+	delegatedCredsFile := delegatedCredentialsPathForRequest(record.ID, record.Scopes)
 	if err := delegatedauth.SaveAtomic(delegatedCredsFile, delegated); err != nil {
 		return fmt.Errorf("persist delegated relayfile credentials: %w", err)
 	}
@@ -1245,7 +1245,9 @@ func workspaceRequestMatchesDelegatedCredentials(value, relayfileWorkspaceID str
 	return false
 }
 
-func loadCloudCredentials() (cloudCredentials, error) {
+// loadLegacyCloudCredentials reads the pre-Agent Relay cloud credential store.
+// New cloud auth flows must use cloudCredentialsFromAgentRelay instead.
+func loadLegacyCloudCredentials() (cloudCredentials, error) {
 	var creds cloudCredentials
 	payload, err := os.ReadFile(cloudCredentialsPath())
 	if err != nil {
@@ -1669,27 +1671,30 @@ func delegatedRelayfileTokenViaCloud(cloud cloudCredentials, workspaceID, agentN
 	if bundle.Workspace() == "" {
 		bundle.RelayfileWorkspaceID = workspaceID
 	}
+	if len(bundle.Scopes) == 0 {
+		bundle.Scopes = append([]string(nil), scopes...)
+	}
 	if err := bundle.ValidateForUse(); err != nil {
 		return delegatedauth.Bundle{}, fmt.Errorf("delegated relayfile credential bundle invalid: %w", err)
 	}
 	return bundle, nil
 }
 
-func bootstrapDelegatedCredentialsFromAgentRelay(workspaceValue string, scopes []string) (workspaceRecord, error) {
+func bootstrapDelegatedCredentialsFromAgentRelay(workspaceValue string, scopes []string) (workspaceRecord, string, error) {
 	cloudCreds, err := cloudCredentialsFromAgentRelay()
 	if err != nil {
-		return workspaceRecord{}, err
+		return workspaceRecord{}, "", err
 	}
 	workspace, err := activeWorkspaceFromAgentRelay()
 	if err != nil {
-		return workspaceRecord{}, err
+		return workspaceRecord{}, "", err
 	}
 	if !agentRelayWorkspaceMatches(workspaceValue, workspace) {
-		return workspaceRecord{}, fmt.Errorf("active agent-relay workspace %s does not match requested workspace %q", workspace.Name, workspaceValue)
+		return workspaceRecord{}, "", fmt.Errorf("active agent-relay workspace %s does not match requested workspace %q", workspace.Name, workspaceValue)
 	}
 	cloudWorkspaceID := firstNonEmpty(workspace.CloudWorkspaceID, workspace.ID, workspace.RelayfileWorkspaceID)
 	if cloudWorkspaceID == "" {
-		return workspaceRecord{}, errors.New("agent-relay workspace active --json did not include a cloud workspace id")
+		return workspaceRecord{}, "", errors.New("agent-relay workspace active --json did not include a cloud workspace id")
 	}
 	recordScopes := append([]string(nil), scopes...)
 	if len(recordScopes) == 0 {
@@ -1707,24 +1712,31 @@ func bootstrapDelegatedCredentialsFromAgentRelay(workspaceValue string, scopes [
 	}
 	delegated, err := delegatedRelayfileTokenViaCloud(cloudCreds, cloudWorkspaceID, record.AgentName, record.Scopes)
 	if err != nil {
-		return workspaceRecord{}, err
+		return workspaceRecord{}, "", err
 	}
-	if err := delegatedauth.SaveAtomic(delegatedCredentialsPath(), delegated); err != nil {
-		return workspaceRecord{}, fmt.Errorf("persist delegated relayfile credentials: %w", err)
+	credsPath := delegatedCredentialsPathForRequest(record.ID, record.Scopes)
+	if err := delegatedauth.SaveAtomic(credsPath, delegated); err != nil {
+		return workspaceRecord{}, "", fmt.Errorf("persist delegated relayfile credentials: %w", err)
 	}
-	return persistDelegatedWorkspace(record, delegated, "", true)
+	persisted, err := persistDelegatedWorkspace(record, delegated, "", true)
+	if err != nil {
+		return workspaceRecord{}, "", err
+	}
+	return persisted, credsPath, nil
 }
 
 func loadOrBootstrapDelegatedCredentials(workspaceValue string, scopes []string) (delegatedauth.Bundle, string, error) {
-	bundle, path, err := loadDelegatedCredentials("")
+	bundle, path, err := loadDelegatedCredentialsForRequest("", workspaceValue, scopes)
 	if err == nil {
 		return bundle, path, nil
 	}
 	if !errors.Is(err, delegatedauth.ErrMissingCredentials) {
 		return delegatedauth.Bundle{}, path, err
 	}
-	if _, bootstrapErr := bootstrapDelegatedCredentialsFromAgentRelay(workspaceValue, scopes); bootstrapErr != nil {
+	if _, bootstrappedPath, bootstrapErr := bootstrapDelegatedCredentialsFromAgentRelay(workspaceValue, scopes); bootstrapErr != nil {
 		return delegatedauth.Bundle{}, path, bootstrapErr
+	} else if strings.TrimSpace(bootstrappedPath) != "" {
+		path = bootstrappedPath
 	}
 	return loadDelegatedCredentials(path)
 }
@@ -2035,7 +2047,7 @@ func runLogin(args []string, stdin io.Reader, stdout io.Writer) error {
 		fmt.Fprintln(stdout, "Relayfile now uses the active agent-relay cloud session.")
 		return nil
 	}
-	record, err := bootstrapDelegatedCredentialsFromAgentRelay(strings.TrimSpace(*workspaceFlag), defaultJoinScopes)
+	record, _, err := bootstrapDelegatedCredentialsFromAgentRelay(strings.TrimSpace(*workspaceFlag), defaultJoinScopes)
 	if err != nil {
 		return fmt.Errorf("bootstrap delegated relayfile credentials: %w", err)
 	}
@@ -2166,7 +2178,7 @@ func runIntegrationConnect(args []string, stdin io.Reader, stdout io.Writer) err
 	if err != nil {
 		return err
 	}
-	if err := delegatedauth.SaveAtomic(delegatedCredentialsPath(), delegated); err != nil {
+	if err := delegatedauth.SaveAtomic(delegatedCredentialsPathForRequest(record.ID, record.Scopes), delegated); err != nil {
 		return fmt.Errorf("persist delegated relayfile credentials: %w", err)
 	}
 	record, err = persistDelegatedWorkspace(record, delegated, record.LocalDir, true)
@@ -3269,19 +3281,19 @@ func waitForWritebackOperation(ctx context.Context, commandClient *workspaceComm
 }
 
 func ensureWritebackDelegatedCredentials(workspaceID string, joinScopes, requiredRelayfileScopes []string) error {
-	if bundle, _, err := loadDelegatedCredentials(""); err == nil &&
+	if bundle, _, err := loadDelegatedCredentialsForRequest("", workspaceID, joinScopes); err == nil &&
 		workspaceRequestMatchesDelegatedCredentials(workspaceID, bundle.Workspace()) &&
 		delegatedBundleHasScopes(bundle, requiredRelayfileScopes) {
 		return nil
 	}
-	if _, err := bootstrapDelegatedCredentialsFromAgentRelay(workspaceID, joinScopes); err != nil {
+	if _, _, err := bootstrapDelegatedCredentialsFromAgentRelay(workspaceID, joinScopes); err != nil {
 		return err
 	}
 	// Re-validate after bootstrap: if Cloud returns a delegated bundle that
 	// omits the compiled relayfile:fs:write:/<provider>/** scope, fail loudly
 	// here rather than proceeding to write receipts and call /fs/bulk with an
 	// under-scoped token.
-	bundle, _, err := loadDelegatedCredentials("")
+	bundle, _, err := loadDelegatedCredentialsForRequest("", workspaceID, joinScopes)
 	if err != nil {
 		return err
 	}
@@ -4545,7 +4557,7 @@ func runWorkspaceJoin(args []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if err := delegatedauth.SaveAtomic(delegatedCredentialsPath(), delegated); err != nil {
+	if err := delegatedauth.SaveAtomic(delegatedCredentialsPathForRequest(record.ID, record.Scopes), delegated); err != nil {
 		return fmt.Errorf("persist delegated relayfile credentials: %w", err)
 	}
 	record, err = persistDelegatedWorkspace(record, delegated, "", true)
@@ -4963,7 +4975,7 @@ func runMount(args []string) error {
 		requestedWorkspace = strings.TrimSpace(fs.Arg(0))
 	}
 	if tokenValue == "" {
-		bundle, path, berr := loadDelegatedCredentials(*credsFile)
+		bundle, path, berr := loadDelegatedCredentialsForRequest(*credsFile, requestedWorkspace, defaultJoinScopes)
 		if berr != nil {
 			return fmt.Errorf("resolve delegated relayfile credentials: %w", berr)
 		}
@@ -5430,7 +5442,6 @@ func (c *workspaceCommandClient) refreshFromDelegated() error {
 	} else if strings.TrimSpace(record.ID) != c.workspaceID {
 		record.RelayWorkspaceID = c.workspaceID
 	}
-	record.Scopes = append([]string(nil), c.scopes...)
 	record.Server = strings.TrimRight(renewed.ServerURL(), "/")
 	record.CloudAPIURL = ""
 	record.LastUsedAt = time.Now().UTC().Format(time.RFC3339)
@@ -6498,17 +6509,81 @@ func delegatedCredentialsPath() string {
 	return filepath.Join(configDir(), "delegated-credentials.json")
 }
 
-func resolveDelegatedCredentialsPath(flagValue string) string {
+func delegatedCredentialsPathForRequest(workspaceValue string, scopes []string) string {
+	workspaceKey := delegatedCredentialsWorkspaceKey(workspaceValue)
+	scopeKey := delegatedCredentialsScopeKey(scopes)
+	return filepath.Join(configDir(), "delegated", workspaceKey, scopeKey+".json")
+}
+
+func delegatedCredentialsWorkspaceKey(workspaceValue string) string {
+	workspaceValue = strings.TrimSpace(workspaceValue)
+	if workspaceValue == "" {
+		workspaceValue = "active"
+	}
+	if record, ok := workspaceRecordByName(workspaceValue); ok && strings.TrimSpace(record.ID) != "" {
+		workspaceValue = record.ID
+	} else if record, ok := workspaceRecordByID(workspaceValue); ok && strings.TrimSpace(record.ID) != "" {
+		workspaceValue = record.ID
+	}
+	sum := sha256.Sum256([]byte(workspaceValue))
+	return hex.EncodeToString(sum[:])[:24]
+}
+
+func delegatedCredentialsScopeKey(scopes []string) string {
+	normalized := normalizedScopeSet(scopes)
+	if len(normalized) == 0 {
+		normalized = normalizedScopeSet(defaultJoinScopes)
+	}
+	sum := sha256.Sum256([]byte(strings.Join(normalized, "\n")))
+	return hex.EncodeToString(sum[:])[:24]
+}
+
+func normalizedScopeSet(scopes []string) []string {
+	seen := map[string]struct{}{}
+	normalized := make([]string, 0, len(scopes))
+	for _, scope := range scopes {
+		scope = strings.TrimSpace(scope)
+		if scope == "" {
+			continue
+		}
+		if _, ok := seen[scope]; ok {
+			continue
+		}
+		seen[scope] = struct{}{}
+		normalized = append(normalized, scope)
+	}
+	sort.Strings(normalized)
+	return normalized
+}
+
+func explicitDelegatedCredentialsPath(flagValue string) (string, bool) {
 	if value := strings.TrimSpace(flagValue); value != "" {
-		return value
+		return value, true
 	}
 	if value := strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_CREDS_FILE")); value != "" {
-		return value
+		return value, true
 	}
 	if value := strings.TrimSpace(os.Getenv("RELAYFILE_DELEGATED_CREDENTIALS_FILE")); value != "" {
+		return value, true
+	}
+	return "", false
+}
+
+func resolveDelegatedCredentialsPath(flagValue string) string {
+	if value, ok := explicitDelegatedCredentialsPath(flagValue); ok {
 		return value
 	}
 	return delegatedCredentialsPath()
+}
+
+func resolveDelegatedCredentialsPathForRequest(flagValue, workspaceValue string, scopes []string) (string, bool) {
+	if value, ok := explicitDelegatedCredentialsPath(flagValue); ok {
+		return value, true
+	}
+	if strings.TrimSpace(workspaceValue) != "" || len(scopes) > 0 {
+		return delegatedCredentialsPathForRequest(workspaceValue, scopes), false
+	}
+	return delegatedCredentialsPath(), false
 }
 
 func loadDelegatedCredentials(path string) (delegatedauth.Bundle, string, error) {
@@ -6526,25 +6601,242 @@ func loadDelegatedCredentials(path string) (delegatedauth.Bundle, string, error)
 	return bundle, resolvedPath, nil
 }
 
+func loadDelegatedCredentialsForRequest(path, workspaceValue string, scopes []string) (delegatedauth.Bundle, string, error) {
+	resolvedPath, explicit := resolveDelegatedCredentialsPathForRequest(path, workspaceValue, scopes)
+	bundle, loadedPath, err := loadDelegatedCredentials(resolvedPath)
+	if err == nil || explicit || resolvedPath == delegatedCredentialsPath() || !errors.Is(err, delegatedauth.ErrMissingCredentials) {
+		return bundle, loadedPath, err
+	}
+	legacyBundle, legacyPath, legacyErr := loadDelegatedCredentials(delegatedCredentialsPath())
+	if legacyErr == nil && delegatedBundleSatisfiesRequestedScopes(legacyBundle, scopes) {
+		return legacyBundle, legacyPath, nil
+	}
+	return bundle, loadedPath, err
+}
+
+func delegatedBundleSatisfiesRequestedScopes(bundle delegatedauth.Bundle, requested []string) bool {
+	requested = normalizedScopeSet(requested)
+	if len(requested) == 0 {
+		return true
+	}
+	available := delegatedBundleAvailableScopes(bundle)
+	if len(available) == 0 {
+		return false
+	}
+	for _, want := range requested {
+		if !scopeSetAllows(available, want) {
+			return false
+		}
+	}
+	return true
+}
+
+func delegatedBundleAvailableScopes(bundle delegatedauth.Bundle) []string {
+	available := append(append([]string(nil), bundle.Scopes...), bundle.RelayfileScopes...)
+	if claims, ok := parseJWTClaims(bundle.BearerToken()); ok {
+		if raw, ok := claims["scopes"]; ok {
+			available = append(available, normalizeScopeClaim(raw)...)
+		} else if raw, ok := claims["scope"]; ok {
+			available = append(available, normalizeScopeClaim(raw)...)
+		}
+	}
+	return normalizedScopeSet(available)
+}
+
+func normalizeScopeClaim(raw any) []string {
+	var scopes []string
+	add := func(scope string) {
+		scope = strings.TrimSpace(scope)
+		if scope != "" {
+			scopes = append(scopes, scope)
+		}
+	}
+	switch value := raw.(type) {
+	case []any:
+		for _, item := range value {
+			if scope, ok := item.(string); ok {
+				add(scope)
+			}
+		}
+	case []string:
+		for _, scope := range value {
+			add(scope)
+		}
+	case string:
+		for _, scope := range strings.FieldsFunc(value, func(r rune) bool {
+			return r == ' ' || r == ',' || r == '\t' || r == '\n' || r == '\r'
+		}) {
+			add(scope)
+		}
+	}
+	return scopes
+}
+
+func scopeSetAllows(available []string, requested string) bool {
+	for _, grant := range available {
+		if scopeAllows(grant, requested) {
+			return true
+		}
+	}
+	return false
+}
+
+func scopeAllows(grant, requested string) bool {
+	grant = strings.TrimSpace(grant)
+	requested = strings.TrimSpace(requested)
+	if grant == "" || requested == "" {
+		return false
+	}
+	if grant == requested {
+		return true
+	}
+	grant = strings.TrimPrefix(grant, "relayfile:")
+	requested = strings.TrimPrefix(requested, "relayfile:")
+	if grant == requested {
+		return true
+	}
+	grantParts := strings.Split(grant, ":")
+	requestParts := strings.Split(requested, ":")
+	if len(grantParts) < 2 || len(requestParts) < 2 {
+		return false
+	}
+	if grantParts[0] != requestParts[0] || grantParts[1] != requestParts[1] {
+		return false
+	}
+	grantPath := ""
+	if len(grantParts) > 2 {
+		grantPath = strings.Join(grantParts[2:], ":")
+	}
+	requestPath := ""
+	if len(requestParts) > 2 {
+		requestPath = strings.Join(requestParts[2:], ":")
+	}
+	if grantPath == "" || grantPath == "*" || grantPath == "/*" || grantPath == "/**" {
+		return true
+	}
+	return grantPath == requestPath
+}
+
 func refreshDelegatedCredentials(path string, bundle delegatedauth.Bundle, force bool) (delegatedauth.Bundle, error) {
 	resolvedPath := resolveDelegatedCredentialsPath(path)
 	if !force && !relayfileTokenNeedsRefresh(bundle.BearerToken()) {
 		return bundle, nil
 	}
-	renewed, changed, err := delegatedauth.RenewFile(context.Background(), nil, resolvedPath, delegatedauth.DefaultRefreshTimeout)
-	if err != nil {
-		if errors.Is(err, delegatedauth.ErrRefreshRejected) {
-			return bundle, ErrDelegatedRelayfileCredentialsExpired
+	var renewed delegatedauth.Bundle
+	attemptedToken := strings.TrimSpace(bundle.BearerToken())
+	if err := withDelegatedCredentialsLock(resolvedPath, func() error {
+		latest, loadErr := delegatedauth.Load(resolvedPath)
+		if loadErr == nil {
+			bundle = latest
+		} else if !errors.Is(loadErr, os.ErrNotExist) {
+			return loadErr
 		}
+		latestToken := strings.TrimSpace(bundle.BearerToken())
+		if latestToken != "" && latestToken != attemptedToken && !relayfileTokenNeedsRefresh(latestToken) {
+			renewed = bundle
+			return nil
+		}
+		if !force && !relayfileTokenNeedsRefresh(bundle.BearerToken()) {
+			renewed = bundle
+			return nil
+		}
+		refreshed, changed, err := delegatedauth.RenewFile(context.Background(), nil, resolvedPath, delegatedauth.DefaultRefreshTimeout)
+		if err != nil {
+			reminted, remintErr := remintDelegatedCredentialsFromCloud(resolvedPath, bundle)
+			if remintErr == nil {
+				renewed = reminted
+				return nil
+			}
+			if errors.Is(err, delegatedauth.ErrRefreshRejected) {
+				return fmt.Errorf("%w; cloud re-mint fallback failed: %v", ErrDelegatedRelayfileCredentialsExpired, remintErr)
+			}
+			return fmt.Errorf("%w; cloud re-mint fallback failed: %v", err, remintErr)
+		}
+		if !changed {
+			renewed = bundle
+			return nil
+		}
+		renewed = refreshed
+		return nil
+	}); err != nil {
 		return bundle, err
-	}
-	if !changed {
-		return bundle, nil
 	}
 	if err := renewed.ValidateForUse(); err != nil {
 		return bundle, err
 	}
 	return renewed, nil
+}
+
+func withDelegatedCredentialsLock(path string, fn func() error) error {
+	lockPath := path + ".lock"
+	if err := os.MkdirAll(filepath.Dir(lockPath), 0o700); err != nil {
+		return err
+	}
+	file, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX); err != nil {
+		return err
+	}
+	defer syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
+	return fn()
+}
+
+func remintDelegatedCredentialsFromCloud(path string, bundle delegatedauth.Bundle) (delegatedauth.Bundle, error) {
+	workspaceID := cloudWorkspaceIDForDelegatedBundle(bundle)
+	if workspaceID == "" {
+		return delegatedauth.Bundle{}, errors.New("delegated relayfile credentials missing workspace id")
+	}
+	scopes := delegatedBundleMintScopes(bundle)
+	cloudCreds, err := cloudCredentialsFromAgentRelay()
+	if err != nil {
+		return delegatedauth.Bundle{}, err
+	}
+	renewed, err := delegatedRelayfileTokenViaCloud(cloudCreds, workspaceID, bundle.AgentName, scopes)
+	if err != nil {
+		return delegatedauth.Bundle{}, err
+	}
+	if err := delegatedauth.SaveAtomic(path, renewed); err != nil {
+		return delegatedauth.Bundle{}, fmt.Errorf("persist re-minted delegated relayfile credentials: %w", err)
+	}
+	return renewed, nil
+}
+
+func cloudWorkspaceIDForDelegatedBundle(bundle delegatedauth.Bundle) string {
+	if workspaceID := strings.TrimSpace(bundle.WorkspaceID); workspaceID != "" {
+		return workspaceID
+	}
+	relayWorkspaceID := strings.TrimSpace(bundle.Workspace())
+	if relayWorkspaceID == "" {
+		return ""
+	}
+	if record, ok := workspaceRecordByID(relayWorkspaceID); ok && strings.TrimSpace(record.ID) != "" {
+		return record.ID
+	}
+	if record, ok := workspaceRecordByName(relayWorkspaceID); ok && strings.TrimSpace(record.ID) != "" {
+		return record.ID
+	}
+	catalog, err := loadWorkspaceCatalog()
+	if err == nil {
+		for _, record := range catalog.Workspaces {
+			if strings.TrimSpace(record.RelayWorkspaceID) == relayWorkspaceID && strings.TrimSpace(record.ID) != "" {
+				return strings.TrimSpace(record.ID)
+			}
+		}
+	}
+	return relayWorkspaceID
+}
+
+func delegatedBundleMintScopes(bundle delegatedauth.Bundle) []string {
+	if len(bundle.Scopes) > 0 {
+		return append([]string(nil), bundle.Scopes...)
+	}
+	if len(bundle.RelayfileScopes) > 0 {
+		return append([]string(nil), bundle.RelayfileScopes...)
+	}
+	return append([]string(nil), defaultJoinScopes...)
 }
 
 func agentRelayCloudAuthPath() string {
@@ -6582,7 +6874,9 @@ func removeCredentialFile(path string) error {
 	return nil
 }
 
-func saveCloudCredentials(creds cloudCredentials) error {
+// saveLegacyCloudCredentials is retained for stale-store cleanup tests only.
+// Relayfile no longer owns the canonical cloud session.
+func saveLegacyCloudCredentials(creds cloudCredentials) error {
 	if err := ensureConfigDir(); err != nil {
 		return err
 	}
