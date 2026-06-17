@@ -2728,7 +2728,7 @@ func TestWritebackDeleteCallsFilesystemDeleteAndPollsOperation(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
-		case r.Method == http.MethodDelete && r.URL.Path == "/v1/workspaces/"+workspaceID+"/fs":
+		case r.Method == http.MethodDelete && r.URL.Path == "/v1/workspaces/"+workspaceID+"/fs/file":
 			sawDelete.Store(true)
 			if got := r.Header.Get("If-Match"); got != "*" {
 				t.Fatalf("If-Match = %q, want *", got)
