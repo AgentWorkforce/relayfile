@@ -2589,6 +2589,82 @@ func TestWritebackPushCanonicalPathPostsBulkWithoutContentIdentity(t *testing.T)
 	}
 }
 
+func TestWritebackUpdateCanonicalPathRequiresOperationAndSendsIntent(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	const workspaceID = "ws_demo"
+	const remotePath = "/linear/issues/AR-292__00000000-0000-0000-0000-000000000292.json"
+	localDir := t.TempDir()
+	if err := ensureMirrorLayout(localDir); err != nil {
+		t.Fatalf("ensureMirrorLayout failed: %v", err)
+	}
+	if err := writeMirrorStateFile(localDir, syncStateFile{
+		WorkspaceID: workspaceID,
+		RemoteRoot:  "/linear/issues",
+		Mode:        defaultMountMode,
+	}); err != nil {
+		t.Fatalf("writeMirrorStateFile failed: %v", err)
+	}
+
+	localPath := filepath.Join(localDir, "AR-292__00000000-0000-0000-0000-000000000292.json")
+	content := []byte(`{"labels":[{"name":"harness"}]}` + "\n")
+	if err := os.WriteFile(localPath, content, 0o644); err != nil {
+		t.Fatalf("write local payload failed: %v", err)
+	}
+
+	var sawBulk atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/workspaces/"+workspaceID+"/fs/bulk":
+			sawBulk.Store(true)
+			var req bulkWriteRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatalf("decode bulk request failed: %v", err)
+			}
+			if len(req.Files) != 1 {
+				t.Fatalf("bulk files = %d, want 1", len(req.Files))
+			}
+			file := req.Files[0]
+			if file.Path != remotePath {
+				t.Fatalf("bulk path = %q, want %q", file.Path, remotePath)
+			}
+			if file.Content != string(content) {
+				t.Fatalf("bulk content = %q, want %q", file.Content, string(content))
+			}
+			if file.ContentIdentity != nil {
+				t.Fatalf("canonical update must not carry draft content identity: %+v", file.ContentIdentity)
+			}
+			if file.WritebackIntent != "update" {
+				t.Fatalf("writebackIntent = %q, want update", file.WritebackIntent)
+			}
+			_, _ = io.WriteString(w, `{"written":1,"errorCount":0,"correlationId":"corr_update_292","results":[{"path":"`+remotePath+`","revision":"rev_292","writeback":{"provider":"linear","state":"succeeded"}}]}`)
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	err := run([]string{"writeback", "update", localPath, "--server", server.URL, "--token", "rf_write", "--timeout", "1s"}, strings.NewReader(""), &stdout, &stdout)
+	if err == nil {
+		t.Fatal("expected missing operation id error")
+	}
+	if got := err.Error(); !strings.Contains(got, "provider writeback was not dispatched") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !sawBulk.Load() {
+		t.Fatal("expected bulk write request")
+	}
+	if got := countJSONFiles(filepath.Join(localDir, ".relay", "outbox", "failed")); got != 1 {
+		t.Fatalf("failed receipt count = %d, want 1", got)
+	}
+	if got := countJSONFiles(filepath.Join(localDir, ".relay", "outbox", "acked")); got != 0 {
+		t.Fatalf("acked receipt count = %d, want 0", got)
+	}
+}
+
 func TestWritebackUpdateRejectsDraftPath(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)
