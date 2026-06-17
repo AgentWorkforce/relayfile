@@ -136,15 +136,22 @@ interface RelayFileSyncReconnectConfig {
 
 interface RelayFileSyncWireEvent {
   type: string;
+  id?: string;
   eventId?: string;
   path?: string;
   revision?: string;
+  digest?: string;
   contentHash?: string;
   origin?: EventOrigin;
   provider?: string;
   correlationId?: string;
   timestamp?: string;
   ts?: string;
+  occurredAt?: string;
+  resource?: {
+    path?: unknown;
+    provider?: unknown;
+  };
 }
 
 const DEFAULT_POLL_INTERVAL_MS = 5000;
@@ -240,26 +247,57 @@ function createAbortError(): Error {
 }
 
 function buildEventId(message: RelayFileSyncWireEvent): string {
+  const path = readWirePath(message);
+  const timestamp = readWireTimestamp(message);
+  const type = readWireString(message.type) ?? "file.updated";
   return [
     "ws",
-    message.type,
-    message.path ?? "",
-    message.revision ?? "",
-    message.timestamp ?? message.ts ?? ""
+    normalizeFilesystemEventType(type),
+    path,
+    readWireString(message.revision) ?? "",
+    timestamp
   ].join(":");
 }
 
-function normalizeFilesystemEvent(message: RelayFileSyncWireEvent): FilesystemEvent {
+function readWireString(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
+}
+
+function readWirePath(message: RelayFileSyncWireEvent): string {
+  return readWireString(message.path) ?? readWireString(message.resource?.path) ?? "";
+}
+
+function readWireProvider(message: RelayFileSyncWireEvent): string | undefined {
+  return readWireString(message.provider) ?? readWireString(message.resource?.provider);
+}
+
+function readWireTimestamp(message: RelayFileSyncWireEvent): string {
+  return readWireString(message.timestamp)
+    ?? readWireString(message.ts)
+    ?? readWireString(message.occurredAt)
+    ?? new Date().toISOString();
+}
+
+function normalizeFilesystemEventType(type: string): FilesystemEvent["type"] {
+  return type === "relayfile.changed" || type === "relayfile.changed.summary"
+    ? "file.updated"
+    : type as FilesystemEvent["type"];
+}
+
+export function normalizeFilesystemEvent(message: RelayFileSyncWireEvent): FilesystemEvent {
+  const path = readWirePath(message);
+  const type = readWireString(message.type) ?? "file.updated";
+  const digest = readWireString(message.digest);
   return {
-    eventId: message.eventId ?? buildEventId(message),
-    type: message.type as FilesystemEvent["type"],
-    path: message.path ?? "",
-    revision: message.revision ?? "",
-    contentHash: message.contentHash,
+    eventId: readWireString(message.eventId) ?? readWireString(message.id) ?? buildEventId(message),
+    type: normalizeFilesystemEventType(type),
+    path,
+    revision: readWireString(message.revision) ?? digest ?? "",
+    contentHash: readWireString(message.contentHash) ?? digest,
     origin: message.origin,
-    provider: message.provider,
-    correlationId: message.correlationId,
-    timestamp: message.timestamp ?? message.ts ?? new Date().toISOString()
+    provider: readWireProvider(message),
+    correlationId: readWireString(message.correlationId),
+    timestamp: readWireTimestamp(message)
   };
 }
 

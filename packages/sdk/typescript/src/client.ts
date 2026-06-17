@@ -61,7 +61,7 @@ import {
   type SubscribeOptions
 } from "./types.js";
 import type { ForkHandle } from "@relayfile/core";
-import { RelayFileSync } from "./sync.js";
+import { RelayFileSync, normalizeFilesystemEvent } from "./sync.js";
 import {
   InvalidStateError,
   PayloadTooLargeError,
@@ -372,7 +372,7 @@ class RelayFileWebSocketConnection implements WebSocketConnection {
         if (raw.path !== undefined && typeof raw.path !== "string") {
           throw new Error("Invalid WebSocket event: 'path' must be a string.");
         }
-        parsed = raw as FilesystemEvent;
+        parsed = normalizeFilesystemEvent(raw as Parameters<typeof normalizeFilesystemEvent>[0]);
       } catch (error) {
         const parseError = error instanceof Error ? error : new Error("Failed to parse WebSocket event payload.");
         for (const handler of this.handlers.error) {
@@ -1151,23 +1151,66 @@ function toChangeEvent(
   };
 }
 
-function normalizeWireChangeEvent(payload: unknown): ChangeEventWireShape {
+function normalizeWireChangeEvent(payload: unknown, workspaceId?: string): ChangeEventWireShape {
   const data = (payload ?? {}) as Record<string, unknown>;
   const resource = (data.resource ?? {}) as Record<string, unknown>;
   const summary = (data.summary ?? {}) as Record<string, unknown>;
+  const path = typeof resource.path === "string"
+    ? resource.path
+    : typeof data.path === "string"
+      ? data.path
+      : "";
+  const inferredResource = inferResourceMetadata(path, resource);
+  const occurredAt = typeof data.occurredAt === "string"
+    ? data.occurredAt
+    : typeof data.timestamp === "string"
+      ? data.timestamp
+      : typeof data.ts === "string"
+        ? data.ts
+        : new Date().toISOString();
+  const eventId = typeof data.id === "string"
+    ? data.id
+    : typeof data.eventId === "string"
+      ? data.eventId
+      : [
+          "relayfile",
+          workspaceId ?? "",
+          typeof data.type === "string" ? data.type : "relayfile.changed",
+          path,
+          typeof data.revision === "string" ? data.revision : "",
+          occurredAt
+        ].join(":");
+  const provider = typeof resource.provider === "string"
+    ? resource.provider
+    : typeof data.provider === "string"
+      ? data.provider
+      : inferredResource.provider;
   return {
-    id: typeof data.id === "string" ? data.id : "",
-    workspace: typeof data.workspace === "string" ? data.workspace : "",
+    id: eventId,
+    workspace: typeof data.workspace === "string" ? data.workspace : workspaceId ?? "",
     agentId: typeof data.agentId === "string" ? data.agentId : undefined,
     type: "relayfile.changed",
-    occurredAt: typeof data.occurredAt === "string" ? data.occurredAt : new Date().toISOString(),
+    occurredAt,
     resource: {
-      path: typeof resource.path === "string" ? resource.path : "",
-      kind: typeof resource.kind === "string" ? resource.kind : "relayfile.resource",
-      id: typeof resource.id === "string" ? resource.id : "",
-      provider: typeof resource.provider === "string" ? resource.provider : "relayfile"
+      path,
+      kind: typeof resource.kind === "string"
+        ? resource.kind
+        : typeof data.kind === "string"
+          ? data.kind
+          : typeof data.resourceType === "string"
+            ? data.resourceType
+            : inferredResource.kind,
+      id: typeof resource.id === "string"
+        ? resource.id
+        : typeof data.resourceId === "string"
+          ? data.resourceId
+          : typeof data.providerObjectId === "string"
+            ? data.providerObjectId
+            : inferredResource.id,
+      provider
     },
     summary: {
+      ...buildChangeSummary(path, data),
       ...(typeof summary.title === "string" ? { title: summary.title } : {}),
       ...(typeof summary.status === "string" ? { status: summary.status } : {}),
       ...(typeof summary.priority === "string" ? { priority: summary.priority } : {}),
@@ -1457,12 +1500,16 @@ export class RelayFileClient {
       cursor: options.cursor,
       limit: options.limit
     });
-    return this.request<EventFeedResponse>({
+    const response = await this.request<EventFeedResponse>({
       method: "GET",
       path: `/v1/workspaces/${encodeURIComponent(workspaceId)}/fs/events${query}`,
       correlationId: options.correlationId,
       signal: options.signal
     });
+    return {
+      events: (response.events ?? []).map((event) => normalizeFilesystemEvent(event as Parameters<typeof normalizeFilesystemEvent>[0])),
+      nextCursor: response.nextCursor ?? null
+    };
   }
 
   subscribe(
@@ -1538,7 +1585,7 @@ export class RelayFileClient {
       });
       records = mergeChangeRecords([
         ...cached,
-        ...(payload.events ?? []).map((event) => this.cacheWireChangeEvent(workspaceId, normalizeWireChangeEvent(event), effectiveContext))
+        ...(payload.events ?? []).map((event) => this.cacheWireChangeEvent(workspaceId, normalizeWireChangeEvent(event, workspaceId), effectiveContext))
       ]);
     } catch (error) {
       if (cached.length === 0) {
@@ -1568,7 +1615,7 @@ export class RelayFileClient {
       });
       records = mergeChangeRecords([
         ...cached,
-        ...(payload.events ?? []).map((event) => this.cacheWireChangeEvent(workspaceId, normalizeWireChangeEvent(event), effectiveContext))
+        ...(payload.events ?? []).map((event) => this.cacheWireChangeEvent(workspaceId, normalizeWireChangeEvent(event, workspaceId), effectiveContext))
       ]).slice(-safeLimit);
     } catch (error) {
       if (cached.length === 0) {
