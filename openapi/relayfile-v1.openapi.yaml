@@ -3118,6 +3118,10 @@ components:
           description: Content encoding, e.g. "base64" for binary data
         contentIdentity:
           $ref: '#/components/schemas/ContentIdentity'
+        writebackIntent:
+          type: string
+          enum: [update]
+          description: Explicit agent-authored writeback intent for canonical provider record updates.
 
     ContentIdentity:
       type: object

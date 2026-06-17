@@ -127,6 +127,7 @@ type bulkWriteFile struct {
 	Content         string           `json:"content"`
 	Encoding        string           `json:"encoding,omitempty"`
 	ContentIdentity *contentIdentity `json:"contentIdentity,omitempty"`
+	WritebackIntent string           `json:"writebackIntent,omitempty"`
 }
 
 type bulkWriteResponse struct {
@@ -2956,10 +2957,7 @@ func runWritebackDelete(args []string, stdout io.Writer) error {
 }
 
 func runWritebackFileMutation(mode writebackCommandMode, args []string, stdout io.Writer) error {
-	fs := flag.NewFlagSet("writeback push", flag.ContinueOnError)
-	if mode != writebackCommandPush {
-		fs = flag.NewFlagSet("writeback "+string(mode), flag.ContinueOnError)
-	}
+	fs := flag.NewFlagSet("writeback "+string(mode), flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	workspaceName := fs.String("workspace", "", "workspace name or id")
 	server := fs.String("server", "", "relayfile server URL override")
@@ -3048,6 +3046,9 @@ func runWritebackFileMutation(mode writebackCommandMode, args []string, stdout i
 			Encoding:        encoding,
 			ContentIdentity: identity,
 		}
+		if mode == writebackCommandUpdate {
+			file.WritebackIntent = "update"
+		}
 		dispatch, err = dispatchWritebackUpsert(commandClient, file)
 	}
 	if err != nil {
@@ -3065,6 +3066,20 @@ func runWritebackFileMutation(mode writebackCommandMode, args []string, stdout i
 	revision := firstNonBlank(dispatch.Revision, "")
 	opID := strings.TrimSpace(dispatch.OpID)
 	dispatchStatus := firstNonBlank(dispatch.State, "succeeded")
+	if (mode == writebackCommandUpdate || mode == writebackCommandDelete) && opID == "" {
+		err := fmt.Errorf("writeback %s did not return an operation id; provider writeback was not dispatched", mode)
+		failed := pendingReceipt
+		failed.Status = "failed"
+		failed.LastAttemptAt = time.Now().UTC().Format(time.RFC3339Nano)
+		failed.AttemptCount = 1
+		failed.LastError = sanitizeCLIReceiptError(err)
+		failed.DispatchStatus = dispatchStatus
+		failed.CorrelationID = firstNonBlank(dispatch.CorrelationID, failed.CorrelationID)
+		if receiptErr := writeWritebackPushReceipt(resolved.MountRoot, failed); receiptErr != nil {
+			return fmt.Errorf("%w; additionally failed to write failure receipt: %v", err, receiptErr)
+		}
+		return err
+	}
 	if opID == "" && isTerminalWritebackOpStatus(dispatchStatus) {
 		err := fmt.Errorf("writeback operation %s", dispatchStatus)
 		failed := pendingReceipt

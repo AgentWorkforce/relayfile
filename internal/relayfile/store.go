@@ -194,6 +194,7 @@ type BulkWriteFile struct {
 	Content         string           `json:"content"`
 	Encoding        string           `json:"encoding"`
 	ContentIdentity *ContentIdentity `json:"contentIdentity,omitempty"`
+	WritebackIntent string           `json:"writebackIntent,omitempty"`
 }
 
 type BulkWriteError struct {
