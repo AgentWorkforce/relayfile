@@ -1989,14 +1989,21 @@ func TestBulkWrite_FlushSendsContentIdentity(t *testing.T) {
 	if len(acked) != 1 {
 		t.Fatalf("expected one acked outbox record, got %+v", acked)
 	}
-	if identity.Kind != "mount-command" {
-		t.Fatalf("flushed identity kind = %q, want mount-command", identity.Kind)
+	// A draft-create flush must dedupe on the create-draft identity
+	// (workspace:path:hash) — the same key the in-flight pending path and the
+	// CLI's direct `writeback push` use — so a daemon flush of a pending push
+	// receipt collides with the direct push instead of minting a second
+	// idempotency key (which would create duplicate provider drafts).
+	remotePath := acked[0].RemotePath
+	want := newMountWritebackCreateDraftContentIdentity(workspaceID, remotePath, acked[0].Hash)
+	if identity.Kind != mountWritebackCreateDraftContentIdentityKind {
+		t.Fatalf("flushed identity kind = %q, want %q", identity.Kind, mountWritebackCreateDraftContentIdentityKind)
 	}
-	if identity.Key != acked[0].CommandID {
-		t.Fatalf("flushed identity key = %q, want persisted command id %q", identity.Key, acked[0].CommandID)
+	if identity.Key != want.Key {
+		t.Fatalf("flushed identity key = %q, want create-draft key %q", identity.Key, want.Key)
 	}
-	if identity.TTLSeconds != 7*24*60*60 {
-		t.Fatalf("flushed identity ttl = %d, want 604800", identity.TTLSeconds)
+	if identity.TTLSeconds != mountWritebackCreateDraftContentIdentityTTLSeconds {
+		t.Fatalf("flushed identity ttl = %d, want %d", identity.TTLSeconds, mountWritebackCreateDraftContentIdentityTTLSeconds)
 	}
 }
 
@@ -2120,6 +2127,46 @@ func TestOutboxFlushUsesIndependentDeadlineNotPerCycleCtx(t *testing.T) {
 	}
 	if pending := readPendingOutboxRecordsForTest(t, localDir); len(pending) != 0 {
 		t.Fatalf("expected pending outbox empty after ack, got %+v", pending)
+	}
+}
+
+func TestOutboxRecordContentIdentityDraftMatchesDirectPush(t *testing.T) {
+	const (
+		workspaceID = "ws_test"
+		contentHash = "751f9591557700f69b5ceefcdec7ead8563a10f0a712c501a5028699be021511"
+		draftPath   = "/slack/channels/C123/messages/messages 5ab77d67-1111-2222-3333-444455556666.json"
+	)
+
+	// A draft "create" outbox record must dedupe on the create-draft identity
+	// (workspace:path:hash) so a mount-daemon flush of the CLI's pending receipt
+	// collides with the CLI's direct `writeback push`, not on the per-record
+	// commandId. Otherwise the server sees two idempotency keys for identical
+	// content and can mint duplicate provider drafts.
+	if !isMountWritebackCreateDraftPath(draftPath) {
+		t.Fatalf("expected %q to be recognized as a create-draft path", draftPath)
+	}
+	draftRecord := outboxRecord{
+		CommandID:   "mountcmd_should_not_be_used",
+		WorkspaceID: workspaceID,
+		RemotePath:  draftPath,
+		Hash:        contentHash,
+	}
+	got := outboxRecordContentIdentity(draftRecord)
+	want := newMountWritebackCreateDraftContentIdentity(workspaceID, draftPath, contentHash)
+	if got == nil || got.Kind != want.Kind || got.Key != want.Key || got.TTLSeconds != want.TTLSeconds {
+		t.Fatalf("draft record identity = %+v, want %+v", got, want)
+	}
+
+	// Non-draft mount commands keep the stable commandId identity.
+	plainRecord := outboxRecord{
+		CommandID:   "mountcmd_abc123",
+		WorkspaceID: workspaceID,
+		RemotePath:  "/slack/channels/C123/messages/command.json",
+		Hash:        contentHash,
+	}
+	plain := outboxRecordContentIdentity(plainRecord)
+	if plain == nil || plain.Kind != "mount-command" || plain.Key != plainRecord.CommandID {
+		t.Fatalf("plain record identity = %+v, want mount-command keyed by commandId", plain)
 	}
 }
 

@@ -2066,18 +2066,34 @@ func outboxRecordsAsBulkFiles(records []outboxRecord) []BulkWriteFile {
 	files := make([]BulkWriteFile, 0, len(records))
 	for _, record := range records {
 		files = append(files, BulkWriteFile{
-			Path:        record.RemotePath,
-			ContentType: record.ContentType,
-			Content:     record.Content,
-			Encoding:    record.Encoding,
-			ContentIdentity: &ContentIdentity{
-				Kind:       "mount-command",
-				Key:        record.CommandID,
-				TTLSeconds: 7 * 24 * 60 * 60,
-			},
+			Path:            record.RemotePath,
+			ContentType:     record.ContentType,
+			Content:         record.Content,
+			Encoding:        record.Encoding,
+			ContentIdentity: outboxRecordContentIdentity(record),
 		})
 	}
 	return files
+}
+
+// outboxRecordContentIdentity derives the server-side dedupe key for a durable
+// outbox record. Writeback "create draft" paths must dedupe on
+// (workspace, path, content hash) — the same identity used by the in-flight
+// `bulkWriteFilesForPending` path and by the CLI's direct `relayfile writeback
+// push`. Keying those on the per-record commandId instead would mint a second
+// idempotency key for identical content, so a direct push racing a mount-daemon
+// flush of the same pending receipt could create duplicate provider
+// drafts/tickets. Non-draft mount commands keep the commandId identity, which is
+// stable across reconnect/restart.
+func outboxRecordContentIdentity(record outboxRecord) *ContentIdentity {
+	if identity := mountWritebackCreateDraftContentIdentity(record.WorkspaceID, record.RemotePath, record.Hash); identity != nil {
+		return identity
+	}
+	return &ContentIdentity{
+		Kind:       "mount-command",
+		Key:        record.CommandID,
+		TTLSeconds: 7 * 24 * 60 * 60,
+	}
 }
 
 func bulkWriteFilesForPending(workspaceID string, pending []pendingBulkWrite) []BulkWriteFile {
