@@ -2837,6 +2837,83 @@ func TestWritebackUpdateCanonicalPathAllowsMissingOperationAndSendsIntent(t *tes
 	}
 }
 
+func TestWritebackUpdateMissingOperationIDPendingStateNeedsAttention(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	const workspaceID = "ws_demo"
+	const remotePath = "/linear/issues/AR-295__00000000-0000-0000-0000-000000000295.json"
+	localDir := t.TempDir()
+	if err := ensureMirrorLayout(localDir); err != nil {
+		t.Fatalf("ensureMirrorLayout failed: %v", err)
+	}
+	if err := writeMirrorStateFile(localDir, syncStateFile{
+		WorkspaceID: workspaceID,
+		RemoteRoot:  "/linear/issues",
+		Mode:        defaultMountMode,
+	}); err != nil {
+		t.Fatalf("writeMirrorStateFile failed: %v", err)
+	}
+
+	localPath := filepath.Join(localDir, "AR-295__00000000-0000-0000-0000-000000000295.json")
+	content := []byte(`{"priority":2}` + "\n")
+	if err := os.WriteFile(localPath, content, 0o644); err != nil {
+		t.Fatalf("write local payload failed: %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/workspaces/"+workspaceID+"/fs/bulk":
+			var req bulkWriteRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatalf("decode bulk request failed: %v", err)
+			}
+			if len(req.Files) != 1 || req.Files[0].WritebackIntent != "update" {
+				t.Fatalf("unexpected bulk request: %+v", req.Files)
+			}
+			_, _ = io.WriteString(w, `{"written":1,"errorCount":0,"correlationId":"corr_update_295","results":[{"path":"`+remotePath+`","revision":"rev_295","writeback":{"provider":"linear","state":"pending"}}]}`)
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	err := run([]string{"writeback", "update", localPath, "--server", server.URL, "--token", "rf_write", "--timeout", "1s"}, strings.NewReader(""), &stdout, &stdout)
+	if err == nil {
+		t.Fatal("expected missing operation id tracking error")
+	}
+	if got := err.Error(); !strings.Contains(got, "cannot be tracked") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := countJSONFiles(filepath.Join(localDir, ".relay", "outbox", "failed")); got != 0 {
+		t.Fatalf("failed receipt count = %d, want 0", got)
+	}
+	if got := countJSONFiles(filepath.Join(localDir, ".relay", "outbox", "acked")); got != 0 {
+		t.Fatalf("acked receipt count = %d, want 0", got)
+	}
+	pendingDir := filepath.Join(localDir, ".relay", "outbox", "pending")
+	entries, err := os.ReadDir(pendingDir)
+	if err != nil {
+		t.Fatalf("read pending dir failed: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("pending receipt count = %d, want 1", len(entries))
+	}
+	payload, err := os.ReadFile(filepath.Join(pendingDir, entries[0].Name()))
+	if err != nil {
+		t.Fatalf("read pending receipt failed: %v", err)
+	}
+	var receipt writebackPushReceipt
+	if err := json.Unmarshal(payload, &receipt); err != nil {
+		t.Fatalf("decode pending receipt failed: %v", err)
+	}
+	if receipt.Status != "pending" || receipt.OpID != "" || receipt.DispatchStatus != "pending" || !receipt.NeedsAttention {
+		t.Fatalf("unexpected receipt: %+v", receipt)
+	}
+}
+
 func TestWritebackUpdateRejectsDraftPath(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)

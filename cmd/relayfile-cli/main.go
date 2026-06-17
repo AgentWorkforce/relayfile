@@ -3113,6 +3113,21 @@ func runWritebackFileMutation(mode writebackCommandMode, args []string, stdout i
 		}
 		return err
 	}
+	if mode == writebackCommandUpdate && opID == "" && !isSuccessfulWritebackDispatchStatus(dispatchStatus) {
+		err := fmt.Errorf("writeback update did not return an operation id; provider writeback status %q cannot be tracked", dispatchStatus)
+		receipt := pendingReceipt
+		receipt.Status = "pending"
+		receipt.LastAttemptAt = time.Now().UTC().Format(time.RFC3339Nano)
+		receipt.AttemptCount = 1
+		receipt.LastError = sanitizeCLIReceiptError(err)
+		receipt.DispatchStatus = dispatchStatus
+		receipt.NeedsAttention = true
+		receipt.CorrelationID = firstNonBlank(dispatch.CorrelationID, receipt.CorrelationID)
+		if receiptErr := writeWritebackPushReceipt(resolved.MountRoot, receipt); receiptErr != nil {
+			return fmt.Errorf("%w; additionally failed to write pending receipt: %v", err, receiptErr)
+		}
+		return err
+	}
 	if opID == "" && isTerminalWritebackOpStatus(dispatchStatus) {
 		err := fmt.Errorf("writeback operation %s", dispatchStatus)
 		failed := pendingReceipt
@@ -3263,6 +3278,15 @@ type writebackOperationStatus struct {
 func isTerminalWritebackOpStatus(status string) bool {
 	switch strings.TrimSpace(status) {
 	case "failed", "dead_lettered", "canceled":
+		return true
+	default:
+		return false
+	}
+}
+
+func isSuccessfulWritebackDispatchStatus(status string) bool {
+	switch strings.TrimSpace(status) {
+	case "succeeded", "completed":
 		return true
 	default:
 		return false
