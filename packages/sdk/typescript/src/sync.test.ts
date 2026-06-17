@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { RelayFileClient } from "./client.js";
-import { RelayFileSync, normalizeError } from "./sync.js";
+import { RelayFileSync, normalizeError, normalizeFilesystemEvent } from "./sync.js";
 import type { FilesystemEvent } from "./types.js";
 
 class MockWebSocket {
@@ -103,6 +103,22 @@ describe("RelayFileSync", () => {
     await sync.stop();
   });
 
+  it("normalizes malformed filesystem events with stable fallbacks", () => {
+    const first = normalizeFilesystemEvent(null);
+    const second = normalizeFilesystemEvent({ type: "relayfile.changed", resource: { path: "/linear/issues/ENG-1.json" } });
+    const third = normalizeFilesystemEvent({ type: "relayfile.changed", resource: { path: "/linear/issues/ENG-1.json" } });
+
+    expect(first).toMatchObject({
+      eventId: "ws:file.updated:::1970-01-01T00:00:00.000Z",
+      type: "file.updated",
+      path: "",
+      revision: "",
+      timestamp: "1970-01-01T00:00:00.000Z"
+    });
+    expect(second.eventId).toBe(third.eventId);
+    expect(second.timestamp).toBe("1970-01-01T00:00:00.000Z");
+  });
+
   it("preserves contentHash from WebSocket event payloads", async () => {
     const sockets: MockWebSocket[] = [];
     const sync = new RelayFileSync({
@@ -176,6 +192,46 @@ describe("RelayFileSync", () => {
 
     expect(sockets).toHaveLength(2);
     expect(sockets[1]!.url).toBe("wss://relay.test/v1/workspaces/ws_acme/fs/ws?token=ws_token&cursor=evt_11&path=%2Fslack%2Fchannels%2FC1%2F**");
+
+    await sync.stop();
+    vi.useRealTimers();
+  });
+
+  it("advances reconnect cursor from normalized envelope ids", async () => {
+    vi.useFakeTimers();
+    const sockets: MockWebSocket[] = [];
+    const sync = new RelayFileSync({
+      client: makeClient(),
+      workspaceId: "ws_acme",
+      baseUrl: "https://relay.test",
+      token: "ws_token",
+      reconnect: { minDelayMs: 1, maxDelayMs: 1 },
+      webSocketFactory: (url) => {
+        const socket = new MockWebSocket(url);
+        sockets.push(socket);
+        return socket;
+      }
+    });
+
+    sync.start();
+    expect(sockets[0]!.url).toBe("wss://relay.test/v1/workspaces/ws_acme/fs/ws?token=ws_token&from=now");
+    sockets[0]!.emit("open", {});
+    sockets[0]!.emit("message", {
+      data: JSON.stringify({
+        id: "evt_envelope_12",
+        type: "relayfile.changed",
+        resource: {
+          path: "/slack/channels/C1/messages/2.json"
+        },
+        occurredAt: "2026-03-26T00:00:00Z"
+      })
+    });
+    sockets[0]!.emit("close", { code: 1006, reason: "lost" });
+
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(sockets).toHaveLength(2);
+    expect(sockets[1]!.url).toBe("wss://relay.test/v1/workspaces/ws_acme/fs/ws?token=ws_token&cursor=evt_envelope_12");
 
     await sync.stop();
     vi.useRealTimers();

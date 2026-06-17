@@ -165,6 +165,7 @@ const DEFAULT_CHANGE_COALESCE_MS = 200;
 const DEFAULT_CHANGE_LOG_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 const DEFAULT_CHANGE_LOG_MAX_ENTRIES = 10_000;
 const CLIENT_TOKEN_STREAM_KEY = "__client__";
+const STABLE_FALLBACK_CHANGE_TIMESTAMP = "1970-01-01T00:00:00.000Z";
 
 type JsonObject = Record<string, unknown>;
 
@@ -1167,7 +1168,7 @@ function normalizeWireChangeEvent(payload: unknown, workspaceId?: string): Chang
       ? data.timestamp
       : typeof data.ts === "string"
         ? data.ts
-        : new Date().toISOString();
+        : STABLE_FALLBACK_CHANGE_TIMESTAMP;
   const eventId = typeof data.id === "string"
     ? data.id
     : typeof data.eventId === "string"
