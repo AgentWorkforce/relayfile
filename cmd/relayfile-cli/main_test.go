@@ -2745,7 +2745,7 @@ func TestWritebackPushCanonicalPathPostsBulkWithoutContentIdentity(t *testing.T)
 	}
 }
 
-func TestWritebackUpdateCanonicalPathRequiresOperationAndSendsIntent(t *testing.T) {
+func TestWritebackUpdateCanonicalPathAllowsMissingOperationAndSendsIntent(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)
 
@@ -2804,20 +2804,36 @@ func TestWritebackUpdateCanonicalPathRequiresOperationAndSendsIntent(t *testing.
 
 	var stdout bytes.Buffer
 	err := run([]string{"writeback", "update", localPath, "--server", server.URL, "--token", "rf_write", "--timeout", "1s"}, strings.NewReader(""), &stdout, &stdout)
-	if err == nil {
-		t.Fatal("expected missing operation id error")
-	}
-	if got := err.Error(); !strings.Contains(got, "provider writeback was not dispatched") {
-		t.Fatalf("unexpected error: %v", err)
+	if err != nil {
+		t.Fatalf("writeback update failed: %v\n%s", err, stdout.String())
 	}
 	if !sawBulk.Load() {
 		t.Fatal("expected bulk write request")
 	}
-	if got := countJSONFiles(filepath.Join(localDir, ".relay", "outbox", "failed")); got != 1 {
-		t.Fatalf("failed receipt count = %d, want 1", got)
+	if got := stdout.String(); !strings.Contains(got, "Updated ") || !strings.Contains(got, " -> "+remotePath) {
+		t.Fatalf("unexpected stdout: %s", got)
 	}
-	if got := countJSONFiles(filepath.Join(localDir, ".relay", "outbox", "acked")); got != 0 {
-		t.Fatalf("acked receipt count = %d, want 0", got)
+	if got := countJSONFiles(filepath.Join(localDir, ".relay", "outbox", "failed")); got != 0 {
+		t.Fatalf("failed receipt count = %d, want 0", got)
+	}
+	if got := countJSONFiles(filepath.Join(localDir, ".relay", "outbox", "acked")); got != 1 {
+		t.Fatalf("acked receipt count = %d, want 1", got)
+	}
+	ackedDir := filepath.Join(localDir, ".relay", "outbox", "acked")
+	entries, err := os.ReadDir(ackedDir)
+	if err != nil {
+		t.Fatalf("read acked dir failed: %v", err)
+	}
+	payload, err := os.ReadFile(filepath.Join(ackedDir, entries[0].Name()))
+	if err != nil {
+		t.Fatalf("read acked receipt failed: %v", err)
+	}
+	var receipt writebackPushReceipt
+	if err := json.Unmarshal(payload, &receipt); err != nil {
+		t.Fatalf("decode acked receipt failed: %v", err)
+	}
+	if receipt.Status != "acked" || receipt.OpID != "" || receipt.DispatchStatus != "succeeded" || receipt.Revision != "rev_292" {
+		t.Fatalf("unexpected receipt: %+v", receipt)
 	}
 }
 

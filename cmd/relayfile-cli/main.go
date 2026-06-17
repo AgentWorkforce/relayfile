@@ -3099,7 +3099,7 @@ func runWritebackFileMutation(mode writebackCommandMode, args []string, stdout i
 	revision := firstNonBlank(dispatch.Revision, "")
 	opID := strings.TrimSpace(dispatch.OpID)
 	dispatchStatus := firstNonBlank(dispatch.State, "succeeded")
-	if (mode == writebackCommandUpdate || mode == writebackCommandDelete) && opID == "" {
+	if mode == writebackCommandDelete && opID == "" {
 		err := fmt.Errorf("writeback %s did not return an operation id; provider writeback was not dispatched", mode)
 		failed := pendingReceipt
 		failed.Status = "failed"
