@@ -773,6 +773,55 @@ describe("RelayFileClient — existing methods", () => {
       });
     });
 
+    it("listChangesSince normalizes retained flat filesystem events into ChangeEvents", async () => {
+      const fetchImpl = vi.fn(async (url: string) => {
+        if (url.includes("/fs/changes?since=")) {
+          return {
+            ok: true,
+            status: 200,
+            headers: new Headers({ "content-type": "application/json" }),
+            json: async () => ({
+              events: [
+                {
+                  eventId: "evt_slack_reply_1",
+                  type: "file.updated",
+                  path: "/slack/channels/C1/messages/m1.json",
+                  revision: "rev_1",
+                  provider: "slack",
+                  timestamp: "2026-05-11T00:00:00.000Z",
+                },
+              ],
+            }),
+            text: async () => "",
+          } as unknown as Response;
+        }
+        throw new Error(`Unexpected fetch URL: ${url}`);
+      });
+      const client = makeClient(fetchImpl as unknown as typeof fetch, {
+        token: makeWorkspaceToken("ws_acme", "support-agent"),
+      });
+
+      const result = await client.listChangesSince("2026-05-11T00:00:00.000Z");
+
+      expect(result.events[0]).toMatchObject({
+        id: "evt_slack_reply_1",
+        workspace: "ws_acme",
+        type: "relayfile.changed",
+        occurredAt: "2026-05-11T00:00:00.000Z",
+        resource: {
+          path: "/slack/channels/C1/messages/m1.json",
+          provider: "slack",
+        },
+        summary: {
+          title: "m1",
+        },
+      });
+      await expect(result.events[0]!.expand("summary")).resolves.toMatchObject({
+        level: "summary",
+        path: "/slack/channels/C1/messages/m1.json",
+      });
+    });
+
     it("getResourceAtEvent falls back to the retained change-log endpoint when the cache is cold", async () => {
       const fetchImpl = vi.fn(async (url: string) => {
         if (url.includes("/fs/changes/resource?eventId=evt_rest_1")) {
@@ -1255,6 +1304,44 @@ describe("RelayFileClient — existing methods", () => {
       const url = f.mock.calls[0]![0] as string;
       expect(url).toContain("provider=github");
       expect(url).toContain("limit=10");
+    });
+
+    it("normalizes envelope-style events into filesystem events", async () => {
+      const f = mockFetch({
+        events: [
+          {
+            id: "evt_envelope_1",
+            type: "relayfile.changed",
+            occurredAt: "2026-05-11T00:00:00.000Z",
+            digest: "sha256:envelope",
+            resource: {
+              path: "/slack/channels/C1/messages/m1.json",
+              provider: "slack",
+            },
+          },
+        ],
+        nextCursor: "evt_envelope_1",
+      });
+      const client = makeClient(f);
+
+      const result = await client.getEvents("ws_acme");
+
+      expect(result).toEqual({
+        events: [
+          {
+            eventId: "evt_envelope_1",
+            type: "file.updated",
+            path: "/slack/channels/C1/messages/m1.json",
+            revision: "sha256:envelope",
+            contentHash: "sha256:envelope",
+            origin: undefined,
+            provider: "slack",
+            correlationId: undefined,
+            timestamp: "2026-05-11T00:00:00.000Z",
+          },
+        ],
+        nextCursor: "evt_envelope_1",
+      });
     });
   });
 

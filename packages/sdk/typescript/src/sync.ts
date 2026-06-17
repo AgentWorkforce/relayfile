@@ -136,15 +136,22 @@ interface RelayFileSyncReconnectConfig {
 
 interface RelayFileSyncWireEvent {
   type: string;
+  id?: string;
   eventId?: string;
   path?: string;
   revision?: string;
+  digest?: string;
   contentHash?: string;
   origin?: EventOrigin;
   provider?: string;
   correlationId?: string;
   timestamp?: string;
   ts?: string;
+  occurredAt?: string;
+  resource?: {
+    path?: unknown;
+    provider?: unknown;
+  };
 }
 
 const DEFAULT_POLL_INTERVAL_MS = 5000;
@@ -161,6 +168,7 @@ const DEFAULT_RECONNECT_MAX_DELAY_MS = 5000;
 // for long-running consumers like the factory daemon.
 const DEFAULT_WS_REPROBE_MIN_DELAY_MS = 5000;
 const DEFAULT_WS_REPROBE_MAX_DELAY_MS = 300000;
+const STABLE_FALLBACK_TIMESTAMP = "1970-01-01T00:00:00.000Z";
 // Cap on the dedupe cache used in polling mode. Sized large enough that no
 // realistic workspace burst can churn through it within one poll interval
 // (the events API is itself capped at ~1000 per page), small enough to keep
@@ -239,27 +247,58 @@ function createAbortError(): Error {
   return err;
 }
 
-function buildEventId(message: RelayFileSyncWireEvent): string {
+function buildEventId(message?: RelayFileSyncWireEvent | null): string {
+  const path = readWirePath(message);
+  const timestamp = readWireTimestamp(message);
+  const type = readWireString(message?.type) ?? "file.updated";
   return [
     "ws",
-    message.type,
-    message.path ?? "",
-    message.revision ?? "",
-    message.timestamp ?? message.ts ?? ""
+    normalizeFilesystemEventType(type),
+    path,
+    readWireString(message?.revision) ?? "",
+    timestamp
   ].join(":");
 }
 
-function normalizeFilesystemEvent(message: RelayFileSyncWireEvent): FilesystemEvent {
+function readWireString(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
+}
+
+function readWirePath(message?: RelayFileSyncWireEvent | null): string {
+  return readWireString(message?.path) ?? readWireString(message?.resource?.path) ?? "";
+}
+
+function readWireProvider(message?: RelayFileSyncWireEvent | null): string | undefined {
+  return readWireString(message?.provider) ?? readWireString(message?.resource?.provider);
+}
+
+function readWireTimestamp(message?: RelayFileSyncWireEvent | null): string {
+  return readWireString(message?.timestamp)
+    ?? readWireString(message?.ts)
+    ?? readWireString(message?.occurredAt)
+    ?? STABLE_FALLBACK_TIMESTAMP;
+}
+
+function normalizeFilesystemEventType(type: string): FilesystemEvent["type"] {
+  return type === "relayfile.changed" || type === "relayfile.changed.summary"
+    ? "file.updated"
+    : type as FilesystemEvent["type"];
+}
+
+export function normalizeFilesystemEvent(message?: RelayFileSyncWireEvent | null): FilesystemEvent {
+  const path = readWirePath(message);
+  const type = readWireString(message?.type) ?? "file.updated";
+  const digest = readWireString(message?.digest);
   return {
-    eventId: message.eventId ?? buildEventId(message),
-    type: message.type as FilesystemEvent["type"],
-    path: message.path ?? "",
-    revision: message.revision ?? "",
-    contentHash: message.contentHash,
-    origin: message.origin,
-    provider: message.provider,
-    correlationId: message.correlationId,
-    timestamp: message.timestamp ?? message.ts ?? new Date().toISOString()
+    eventId: readWireString(message?.eventId) ?? readWireString(message?.id) ?? buildEventId(message),
+    type: normalizeFilesystemEventType(type),
+    path,
+    revision: readWireString(message?.revision) ?? digest ?? "",
+    contentHash: readWireString(message?.contentHash) ?? digest,
+    origin: message?.origin,
+    provider: readWireProvider(message),
+    correlationId: readWireString(message?.correlationId),
+    timestamp: readWireTimestamp(message)
   };
 }
 
@@ -834,6 +873,14 @@ export class RelayFileSync {
       this.emit("error", new Error("Invalid WebSocket payload: 'revision' must be a string."));
       return;
     }
+    if (parsed.resource !== undefined && (typeof parsed.resource !== "object" || parsed.resource === null)) {
+      this.emit("error", new Error("Invalid WebSocket payload: 'resource' must be an object."));
+      return;
+    }
+    if (parsed.resource?.path !== undefined && typeof parsed.resource.path !== "string") {
+      this.emit("error", new Error("Invalid WebSocket payload: 'resource.path' must be a string."));
+      return;
+    }
     if (parsed.timestamp !== undefined && typeof parsed.timestamp !== "string") {
       this.emit("error", new Error("Invalid WebSocket payload: 'timestamp' must be a string."));
       return;
@@ -853,8 +900,8 @@ export class RelayFileSync {
     }
 
     const normalized = normalizeFilesystemEvent(parsed);
-    if (parsed.eventId) {
-      this.cursor = parsed.eventId;
+    if (normalized.eventId) {
+      this.cursor = normalized.eventId;
     }
     debugLog("event", { type: normalized.type, path: normalized.path, revision: normalized.revision });
     this.emitFilesystemEvent(normalized);
