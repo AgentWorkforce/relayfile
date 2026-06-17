@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/agentworkforce/relayfile/internal/delegatedauth"
+	"github.com/agentworkforce/relayfile/internal/mountsync"
 )
 
 func TestWorkspaceCreateStoresCatalogEntry(t *testing.T) {
@@ -2370,6 +2371,144 @@ func writeDelegatedCredentialsForTest(t *testing.T, bundle delegatedauth.Bundle)
 		t.Fatalf("save delegated credentials failed: %v", err)
 	}
 	return path
+}
+
+func TestDelegatedBundleHasScopesAllowsBroadWildcardGrant(t *testing.T) {
+	bundle := delegatedauth.Bundle{
+		RelayfileScopes: []string{"relayfile:fs:write:/**"},
+	}
+	if !delegatedBundleHasScopes(bundle, []string{"relayfile:fs:write:/github/**"}) {
+		t.Fatal("expected broad write scope to satisfy provider write scope")
+	}
+	if delegatedBundleHasScopes(bundle, []string{"relayfile:fs:read:/github/**"}) {
+		t.Fatal("did not expect write scope to satisfy read scope")
+	}
+}
+
+func TestReadLocalMountCursorHealthAggregatesStateFiles(t *testing.T) {
+	localDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(localDir, ".relayfile-mount-state.json"), []byte(`{"incrementalReadNotReadySince":{"a":"now"},"incrementalBacklogDraining":false}`), 0o644); err != nil {
+		t.Fatalf("write public state failed: %v", err)
+	}
+	privateDir := filepath.Join(localDir, mountsync.DefaultMountStateDirName)
+	if err := os.MkdirAll(privateDir, 0o755); err != nil {
+		t.Fatalf("mkdir private state failed: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(privateDir, "state.json"), []byte(`{"incrementalReadNotReadySince":{"a":"now","b":"now"},"incrementalBacklogDraining":true}`), 0o644); err != nil {
+		t.Fatalf("write private state failed: %v", err)
+	}
+
+	stuck, backlog := readLocalMountCursorHealth(localDir)
+	if stuck != 2 || !backlog {
+		t.Fatalf("cursor health = %d/%v, want 2/true", stuck, backlog)
+	}
+}
+
+func TestResolveWorkspaceLikeStatusPrefersRelayWorkspaceID(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+	if _, err := upsertWorkspaceDetails(workspaceRecord{
+		Name:             "demo",
+		ID:               "ws_cloud",
+		RelayWorkspaceID: "rw_cloud",
+		LocalDir:         t.TempDir(),
+		CreatedAt:        time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("upsertWorkspaceDetails failed: %v", err)
+	}
+
+	workspaceID, _, err := resolveWorkspaceLikeStatus("demo")
+	if err != nil {
+		t.Fatalf("resolveWorkspaceLikeStatus failed: %v", err)
+	}
+	if workspaceID != "rw_cloud" {
+		t.Fatalf("workspaceID = %q, want rw_cloud", workspaceID)
+	}
+}
+
+func TestLoadDelegatedCredentialsForActiveWorkspaceUsesCatalogDefault(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+	if _, err := upsertWorkspaceDetails(workspaceRecord{
+		Name:      "cloud-prod",
+		ID:        "ws_cloud",
+		CreatedAt: time.Now().UTC().Format(time.RFC3339),
+		Scopes:    append([]string(nil), defaultInspectScopes...),
+	}); err != nil {
+		t.Fatalf("upsertWorkspaceDetails failed: %v", err)
+	}
+	if _, err := setDefaultWorkspace("cloud-prod"); err != nil {
+		t.Fatalf("setDefaultWorkspace failed: %v", err)
+	}
+	path := delegatedCredentialsPathForRequest("cloud-prod", defaultInspectScopes)
+	if err := delegatedauth.SaveAtomic(path, delegatedauth.Bundle{
+		RelayfileURL:         "https://relayfile.test",
+		RelayfileWorkspaceID: "ws_cloud",
+		AccessToken:          testJWTWithWorkspaceAndScopes("ws_cloud", "relayfile-cli", defaultInspectScopes),
+		RefreshToken:         "refresh_read",
+		Scopes:               append([]string(nil), defaultInspectScopes...),
+	}); err != nil {
+		t.Fatalf("save delegated credentials failed: %v", err)
+	}
+
+	_, loadedPath, err := loadDelegatedCredentialsForRequest("", "active", defaultInspectScopes)
+	if err != nil {
+		t.Fatalf("loadDelegatedCredentialsForRequest failed: %v", err)
+	}
+	if loadedPath != path {
+		t.Fatalf("loadedPath = %q, want %q", loadedPath, path)
+	}
+}
+
+func TestWritebackSkipStuckUsesDelegatedCredentialsWithoutLegacyCredentials(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	localDir := t.TempDir()
+	if err := ensureMirrorLayout(localDir); err != nil {
+		t.Fatalf("ensureMirrorLayout failed: %v", err)
+	}
+	if _, err := upsertWorkspaceDetails(workspaceRecord{
+		Name:       "demo",
+		ID:         "ws_demo",
+		LocalDir:   localDir,
+		CreatedAt:  time.Now().UTC().Format(time.RFC3339),
+		LastUsedAt: time.Now().UTC().Format(time.RFC3339),
+		Scopes:     append([]string(nil), defaultJoinScopes...),
+	}); err != nil {
+		t.Fatalf("upsertWorkspaceDetails failed: %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/workspaces/ws_demo/fs/export":
+			_, _ = w.Write([]byte(`[]`))
+		case "/v1/workspaces/ws_demo/fs/events":
+			_, _ = w.Write([]byte(`{"events":[]}`))
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	if err := delegatedauth.SaveAtomic(delegatedCredentialsPathForRequest("ws_demo", defaultJoinScopes), delegatedauth.Bundle{
+		RelayfileURL:         server.URL,
+		RelayfileWorkspaceID: "ws_demo",
+		AccessToken:          testJWTWithWorkspaceAndScopes("ws_demo", "relayfile-cli", defaultJoinScopes),
+		RefreshToken:         "refresh_join",
+		RelayauthURL:         server.URL,
+		Scopes:               append([]string(nil), defaultJoinScopes...),
+	}); err != nil {
+		t.Fatalf("save delegated credentials failed: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := run([]string{"writeback", "skip-stuck", "demo", "--json"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("writeback skip-stuck failed without legacy credentials: %v\n%s", err, stdout.String())
+	}
+	if !strings.Contains(stdout.String(), `"workspace": "ws_demo"`) {
+		t.Fatalf("unexpected skip-stuck output: %s", stdout.String())
+	}
 }
 
 func TestWritebackPushPostsBulkAndWritesAckedReceipt(t *testing.T) {

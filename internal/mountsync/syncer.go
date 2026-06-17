@@ -999,6 +999,7 @@ type Syncer struct {
 	skipStuckMode     bool
 	skipStuckMax      int
 	skipStuckCount    int
+	syncActive        bool
 	oversizedLogged   map[string]struct{}
 	quarantinedPaths  map[string]struct{}
 	lazyRepos         bool
@@ -1553,6 +1554,11 @@ func (s *Syncer) BacklogDraining() bool {
 // events skipped along with any reconcile error.
 func (s *Syncer) SkipStuck(ctx context.Context, max int) (int, error) {
 	s.mu.Lock()
+	if s.syncActive {
+		s.mu.Unlock()
+		return 0, errors.New("sync already in progress")
+	}
+	s.syncActive = true
 	s.skipStuckMode = true
 	s.skipStuckMax = max
 	s.skipStuckCount = 0
@@ -1561,9 +1567,10 @@ func (s *Syncer) SkipStuck(ctx context.Context, max int) (int, error) {
 		s.mu.Lock()
 		s.skipStuckMode = false
 		s.skipStuckMax = 0
+		s.syncActive = false
 		s.mu.Unlock()
 	}()
-	err := s.sync(ctx, true)
+	err := s.syncReserved(ctx, true)
 	s.mu.Lock()
 	count := s.skipStuckCount
 	s.mu.Unlock()
@@ -2487,6 +2494,22 @@ func (s *Syncer) pushSingleDelete(ctx context.Context, remotePath, localPath str
 }
 
 func (s *Syncer) sync(ctx context.Context, forcePoll bool) error {
+	s.mu.Lock()
+	if s.syncActive {
+		s.mu.Unlock()
+		return errors.New("sync already in progress")
+	}
+	s.syncActive = true
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		s.syncActive = false
+		s.mu.Unlock()
+	}()
+	return s.syncReserved(ctx, forcePoll)
+}
+
+func (s *Syncer) syncReserved(ctx context.Context, forcePoll bool) error {
 	// Top-of-cycle invariant: the mount root must exist and be a
 	// directory. If a previous cycle, an external process, or a cloud
 	// clobber wiped it out, refuse to continue rather than recreating

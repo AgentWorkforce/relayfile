@@ -7653,6 +7653,31 @@ func TestSkipStuckDropsConsecutiveUnreadableEvents(t *testing.T) {
 	assertLocalFileContent(t, filepath.Join(localDir, "Docs", "004.md"), "# 004")
 }
 
+func TestSkipStuckRefusesConcurrentSync(t *testing.T) {
+	syncer, err := NewSyncer(&fakeClient{files: map[string]RemoteFile{}}, SyncerOptions{
+		WorkspaceID: "ws_skip_stuck_busy",
+		RemoteRoot:  "/",
+		LocalRoot:   t.TempDir(),
+		WebSocket:   boolPtr(false),
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+	syncer.mu.Lock()
+	syncer.syncActive = true
+	syncer.mu.Unlock()
+
+	skipped, err := syncer.SkipStuck(context.Background(), 0)
+	if err == nil || !strings.Contains(err.Error(), "sync already in progress") {
+		t.Fatalf("expected concurrent sync error, skipped=%d err=%v", skipped, err)
+	}
+	syncer.mu.Lock()
+	defer syncer.mu.Unlock()
+	if syncer.skipStuckMode || syncer.skipStuckMax != 0 {
+		t.Fatalf("skip-stuck state leaked after refusal: mode=%v max=%d", syncer.skipStuckMode, syncer.skipStuckMax)
+	}
+}
+
 func TestPullRemoteIncrementalCreatedThreadReply404RetriesWithoutAdvancingCursor(t *testing.T) {
 	const replyPath = "/slack/channels/C123ABC__proj-cloud/threads/1780871788_370329/replies/1780914176_827829.json"
 	client := &fakeClient{

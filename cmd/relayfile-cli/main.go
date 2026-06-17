@@ -1696,10 +1696,11 @@ func bootstrapDelegatedCredentialsFromAgentRelay(workspaceValue string, scopes [
 	if cloudWorkspaceID == "" {
 		return workspaceRecord{}, "", errors.New("agent-relay workspace active --json did not include a cloud workspace id")
 	}
-	recordScopes := append([]string(nil), scopes...)
-	if len(recordScopes) == 0 {
-		recordScopes = append([]string(nil), defaultJoinScopes...)
+	mintScopes := append([]string(nil), scopes...)
+	if len(mintScopes) == 0 {
+		mintScopes = append([]string(nil), defaultJoinScopes...)
 	}
+	recordScopes := delegatedWorkspaceCatalogScopes(cloudWorkspaceID, workspace, mintScopes)
 	now := time.Now().UTC().Format(time.RFC3339)
 	record := workspaceRecord{
 		Name:             firstNonEmpty(workspace.Name, workspace.Slug, workspace.Key, cloudWorkspaceID, workspace.RelayfileWorkspaceID),
@@ -1710,11 +1711,11 @@ func bootstrapDelegatedCredentialsFromAgentRelay(workspaceValue string, scopes [
 		AgentName:        "relayfile-cli",
 		Scopes:           recordScopes,
 	}
-	delegated, err := delegatedRelayfileTokenViaCloud(cloudCreds, cloudWorkspaceID, record.AgentName, record.Scopes)
+	delegated, err := delegatedRelayfileTokenViaCloud(cloudCreds, cloudWorkspaceID, record.AgentName, mintScopes)
 	if err != nil {
 		return workspaceRecord{}, "", err
 	}
-	credsPath := delegatedCredentialsPathForRequest(record.ID, record.Scopes)
+	credsPath := delegatedCredentialsPathForRequest(record.ID, mintScopes)
 	if err := delegatedauth.SaveAtomic(credsPath, delegated); err != nil {
 		return workspaceRecord{}, "", fmt.Errorf("persist delegated relayfile credentials: %w", err)
 	}
@@ -1723,6 +1724,26 @@ func bootstrapDelegatedCredentialsFromAgentRelay(workspaceValue string, scopes [
 		return workspaceRecord{}, "", err
 	}
 	return persisted, credsPath, nil
+}
+
+func delegatedWorkspaceCatalogScopes(cloudWorkspaceID string, workspace agentRelayActiveWorkspace, fallback []string) []string {
+	candidates := []string{
+		cloudWorkspaceID,
+		workspace.RelayfileWorkspaceID,
+		workspace.Name,
+		workspace.Slug,
+		workspace.Key,
+		workspace.ID,
+	}
+	for _, candidate := range candidates {
+		if record, ok := workspaceRecordByID(candidate); ok && len(record.Scopes) > 0 {
+			return append([]string(nil), record.Scopes...)
+		}
+		if record, ok := workspaceRecordByName(candidate); ok && len(record.Scopes) > 0 {
+			return append([]string(nil), record.Scopes...)
+		}
+	}
+	return append([]string(nil), fallback...)
 }
 
 func loadOrBootstrapDelegatedCredentials(workspaceValue string, scopes []string) (delegatedauth.Bundle, string, error) {
@@ -3311,14 +3332,7 @@ func delegatedBundleHasScopes(bundle delegatedauth.Bundle, required []string) bo
 		if want == "" {
 			continue
 		}
-		found := false
-		for _, got := range available {
-			if strings.TrimSpace(got) == want {
-				found = true
-				break
-			}
-		}
-		if !found {
+		if !scopeSetAllows(available, want) {
 			return false
 		}
 	}
@@ -3626,18 +3640,12 @@ func runWritebackSkipStuck(args []string, stdout io.Writer) error {
 		return errors.New("workspace has no local mirror")
 	}
 
-	creds, err := loadCredentials()
+	commandClient, err := prepareWorkspaceCommandClient(workspaceID, "", "", defaultJoinScopes)
 	if err != nil {
 		return err
 	}
-	tokenValue := resolveToken("", creds)
-	if tokenValue == "" {
-		return errors.New("token is required; set RELAYFILE_TOKEN or pass explicit relayfile credentials")
-	}
-	server := strings.TrimSpace(record.Server)
-	if server == "" {
-		server = resolveServer("", creds)
-	}
+	tokenValue := commandClient.client.token
+	server := strings.TrimSpace(commandClient.client.baseURL)
 	timeout := durationEnv("RELAYFILE_MOUNT_TIMEOUT", defaultMountTimeout)
 	if timeout <= 0 {
 		timeout = defaultMountTimeout
@@ -3646,7 +3654,7 @@ func runWritebackSkipStuck(args []string, stdout io.Writer) error {
 		Transport: newWritebackFailureTransport(record.LocalDir, log.Default(), mountsync.NewSyncTransport()),
 	})
 	remoteRoot := readMountRemoteRoot(record.LocalDir)
-	websocketDisabled := true
+	websocketDisabled := false
 	syncer, err := mountsync.NewSyncer(client, mountsync.SyncerOptions{
 		WorkspaceID: workspaceID,
 		RemoteRoot:  remoteRoot,
@@ -3925,14 +3933,14 @@ func resolveWorkspaceLikeStatus(value string) (string, workspaceRecord, error) {
 	}
 	if candidate != "" {
 		if local, ok := workspaceRecordByName(candidate); ok {
-			workspaceID := strings.TrimSpace(local.ID)
+			workspaceID := firstNonBlank(strings.TrimSpace(local.RelayWorkspaceID), strings.TrimSpace(local.ID))
 			if workspaceID == "" {
 				workspaceID = local.Name
 			}
 			return workspaceID, local, nil
 		}
 		if local, ok := workspaceRecordByID(candidate); ok {
-			return strings.TrimSpace(local.ID), local, nil
+			return firstNonBlank(strings.TrimSpace(local.RelayWorkspaceID), strings.TrimSpace(local.ID)), local, nil
 		}
 	}
 
@@ -4806,9 +4814,12 @@ func readLocalMountCursorHealth(localDir string) (stuckCount int, backlogDrainin
 		if json.Unmarshal(payload, &state) != nil {
 			continue
 		}
-		return len(state.IncrementalReadNotReadySince), state.IncrementalBacklogDraining
+		if count := len(state.IncrementalReadNotReadySince); count > stuckCount {
+			stuckCount = count
+		}
+		backlogDraining = backlogDraining || state.IncrementalBacklogDraining
 	}
-	return 0, false
+	return stuckCount, backlogDraining
 }
 
 func countJSONFiles(dir string) int {
@@ -6580,10 +6591,22 @@ func resolveDelegatedCredentialsPathForRequest(flagValue, workspaceValue string,
 	if value, ok := explicitDelegatedCredentialsPath(flagValue); ok {
 		return value, true
 	}
+	workspaceValue = resolveDelegatedCredentialsWorkspaceValue(workspaceValue)
 	if strings.TrimSpace(workspaceValue) != "" || len(scopes) > 0 {
 		return delegatedCredentialsPathForRequest(workspaceValue, scopes), false
 	}
 	return delegatedCredentialsPath(), false
+}
+
+func resolveDelegatedCredentialsWorkspaceValue(workspaceValue string) string {
+	workspaceValue = strings.TrimSpace(workspaceValue)
+	if workspaceValue != "" && !strings.EqualFold(workspaceValue, "active") {
+		return workspaceValue
+	}
+	if name, _ := activeWorkspaceName(""); strings.TrimSpace(name) != "" {
+		return strings.TrimSpace(name)
+	}
+	return workspaceValue
 }
 
 func loadDelegatedCredentials(path string) (delegatedauth.Bundle, string, error) {
@@ -6777,10 +6800,11 @@ func withDelegatedCredentialsLock(path string, fn func() error) error {
 		return err
 	}
 	defer file.Close()
-	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX); err != nil {
+	unlock, err := lockFileExclusive(file)
+	if err != nil {
 		return err
 	}
-	defer syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
+	defer unlock()
 	return fn()
 }
 
