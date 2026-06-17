@@ -999,6 +999,7 @@ type Syncer struct {
 	skipStuckMode     bool
 	skipStuckMax      int
 	skipStuckCount    int
+	syncActive        bool
 	oversizedLogged   map[string]struct{}
 	quarantinedPaths  map[string]struct{}
 	lazyRepos         bool
@@ -1553,6 +1554,11 @@ func (s *Syncer) BacklogDraining() bool {
 // events skipped along with any reconcile error.
 func (s *Syncer) SkipStuck(ctx context.Context, max int) (int, error) {
 	s.mu.Lock()
+	if s.syncActive {
+		s.mu.Unlock()
+		return 0, errors.New("sync already in progress")
+	}
+	s.syncActive = true
 	s.skipStuckMode = true
 	s.skipStuckMax = max
 	s.skipStuckCount = 0
@@ -1561,9 +1567,10 @@ func (s *Syncer) SkipStuck(ctx context.Context, max int) (int, error) {
 		s.mu.Lock()
 		s.skipStuckMode = false
 		s.skipStuckMax = 0
+		s.syncActive = false
 		s.mu.Unlock()
 	}()
-	err := s.sync(ctx, true)
+	err := s.syncReserved(ctx, true)
 	s.mu.Lock()
 	count := s.skipStuckCount
 	s.mu.Unlock()
@@ -2059,18 +2066,34 @@ func outboxRecordsAsBulkFiles(records []outboxRecord) []BulkWriteFile {
 	files := make([]BulkWriteFile, 0, len(records))
 	for _, record := range records {
 		files = append(files, BulkWriteFile{
-			Path:        record.RemotePath,
-			ContentType: record.ContentType,
-			Content:     record.Content,
-			Encoding:    record.Encoding,
-			ContentIdentity: &ContentIdentity{
-				Kind:       "mount-command",
-				Key:        record.CommandID,
-				TTLSeconds: 7 * 24 * 60 * 60,
-			},
+			Path:            record.RemotePath,
+			ContentType:     record.ContentType,
+			Content:         record.Content,
+			Encoding:        record.Encoding,
+			ContentIdentity: outboxRecordContentIdentity(record),
 		})
 	}
 	return files
+}
+
+// outboxRecordContentIdentity derives the server-side dedupe key for a durable
+// outbox record. Writeback "create draft" paths must dedupe on
+// (workspace, path, content hash) — the same identity used by the in-flight
+// `bulkWriteFilesForPending` path and by the CLI's direct `relayfile writeback
+// push`. Keying those on the per-record commandId instead would mint a second
+// idempotency key for identical content, so a direct push racing a mount-daemon
+// flush of the same pending receipt could create duplicate provider
+// drafts/tickets. Non-draft mount commands keep the commandId identity, which is
+// stable across reconnect/restart.
+func outboxRecordContentIdentity(record outboxRecord) *ContentIdentity {
+	if identity := mountWritebackCreateDraftContentIdentity(record.WorkspaceID, record.RemotePath, record.Hash); identity != nil {
+		return identity
+	}
+	return &ContentIdentity{
+		Kind:       "mount-command",
+		Key:        record.CommandID,
+		TTLSeconds: 7 * 24 * 60 * 60,
+	}
 }
 
 func bulkWriteFilesForPending(workspaceID string, pending []pendingBulkWrite) []BulkWriteFile {
@@ -2487,6 +2510,22 @@ func (s *Syncer) pushSingleDelete(ctx context.Context, remotePath, localPath str
 }
 
 func (s *Syncer) sync(ctx context.Context, forcePoll bool) error {
+	s.mu.Lock()
+	if s.syncActive {
+		s.mu.Unlock()
+		return errors.New("sync already in progress")
+	}
+	s.syncActive = true
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		s.syncActive = false
+		s.mu.Unlock()
+	}()
+	return s.syncReserved(ctx, forcePoll)
+}
+
+func (s *Syncer) syncReserved(ctx context.Context, forcePoll bool) error {
 	// Top-of-cycle invariant: the mount root must exist and be a
 	// directory. If a previous cycle, an external process, or a cloud
 	// clobber wiped it out, refuse to continue rather than recreating
