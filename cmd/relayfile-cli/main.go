@@ -52,7 +52,12 @@ const (
 	defaultMountTimeout     = 15 * time.Second
 )
 
-var defaultJoinScopes = []string{"fs:read", "fs:write"}
+// defaultJoinScopes are the scopes minted for every delegated-credential
+// workspace join. ops:read is required for writeback op-status polling
+// (/v1/workspaces/{id}/ops/{opId}); sync:trigger is required for
+// server-side reconcile kicks. Both must be present on every credential
+// so narrow prior credentials cannot silently break a subset of providers.
+var defaultJoinScopes = []string{"fs:read", "fs:write", "ops:read", "sync:trigger"}
 var defaultInspectScopes = []string{"relayfile:fs:read:*"}
 
 type credentials struct {
@@ -527,6 +532,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		return runMount(args[1:])
 	case "restart":
 		return runRestart(args[1:], stdout)
+	case "supervisor":
+		return runSupervisor(args[1:], stdout)
 	case "tree", "ls":
 		return runTree(args[1:], stdout)
 	case "read", "cat":
@@ -609,6 +616,8 @@ func printHelpForArgs(args []string, stdout io.Writer) {
 		fmt.Fprintln(stdout, "Usage: relayfile status [WORKSPACE] [--json]")
 	case "stop":
 		fmt.Fprintln(stdout, "Usage: relayfile stop [WORKSPACE]")
+	case "supervisor":
+		fmt.Fprintln(stdout, "Usage: relayfile supervisor <install|uninstall|status> [WORKSPACE] [--interval 30s]")
 	case "logs":
 		fmt.Fprintln(stdout, "Usage: relayfile logs [WORKSPACE] [--lines N]")
 	case "observer":
@@ -767,6 +776,9 @@ Usage:
   relayfile start [WORKSPACE] [LOCAL_DIR]            (alias for mount; pass --background to detach)
   relayfile stop [WORKSPACE]
   relayfile restart [WORKSPACE] [--foreground]
+  relayfile supervisor install [WORKSPACE] [--interval 30s]
+  relayfile supervisor uninstall [WORKSPACE]
+  relayfile supervisor status [WORKSPACE]
   relayfile tree [WORKSPACE] [PATH] [--depth N]
   relayfile read [WORKSPACE] PATH
   relayfile seed [WORKSPACE] [DIR]
@@ -798,6 +810,7 @@ Subcommands:
   start       Alias for mount; pass --background to detach
   stop        Stop a background mount
   restart     Stop and start a workspace's mount in one step (--foreground to attach)
+  supervisor  Install/uninstall/status launchd (macOS) or systemd (Linux) service for auto-restart
   tree        List a remote workspace path
   read        Print a remote file's content
   seed        Upload a directory tree with bulk writes
@@ -1273,8 +1286,39 @@ var ErrCloudRefreshExpired = errors.New("cloud session expired. Run 'agent-relay
 
 var ErrDelegatedRelayfileCredentialsExpired = errors.New("delegated relayfile credentials expired or revoked. Re-bootstrap relayfile credentials with agent-relay cloud login.")
 
+// ErrDelegatedScopeInsufficient is returned when the cloud delegated-token
+// mint rejects the requested scopes. This requires human/admin intervention
+// (re-mint with corrected scopes) and cannot be recovered automatically.
+var ErrDelegatedScopeInsufficient = errors.New("delegated relayfile credentials have insufficient scope — re-mint with broader scopes")
+
 func isMountCredentialExpired(err error) bool {
-	return errors.Is(err, ErrCloudRefreshExpired) || errors.Is(err, ErrDelegatedRelayfileCredentialsExpired)
+	return errors.Is(err, ErrCloudRefreshExpired) ||
+		errors.Is(err, ErrDelegatedRelayfileCredentialsExpired) ||
+		errors.Is(err, ErrDelegatedScopeInsufficient)
+}
+
+// mapDelegatedTokenCloudError translates structured cloud error codes returned
+// by the delegated-token route into typed sentinel errors so the mount loop
+// can distinguish needs_reauth (pause-for-human) from transient failures
+// (back off and retry).
+func mapDelegatedTokenCloudError(err error) error {
+	if err == nil {
+		return nil
+	}
+	var ae *apiError
+	if !errors.As(err, &ae) {
+		return fmt.Errorf("mint delegated relayfile credentials: %w", err)
+	}
+	switch ae.Code {
+	case "needs_reauth":
+		return fmt.Errorf("%w: %s", ErrDelegatedRelayfileCredentialsExpired, ae.Message)
+	case "scope_insufficient":
+		return fmt.Errorf("%w: %s", ErrDelegatedScopeInsufficient, ae.Message)
+	default:
+		// relayauth_unavailable and other codes are transient — wrap plainly
+		// so the caller can back off and retry.
+		return fmt.Errorf("mint delegated relayfile credentials: %w", err)
+	}
 }
 
 func providerPromptText(entries []integrationCatalogEntry) string {
@@ -1666,7 +1710,7 @@ func delegatedRelayfileTokenViaCloud(cloud cloudCredentials, workspaceID, agentN
 		},
 		&bundle,
 	); err != nil {
-		return delegatedauth.Bundle{}, fmt.Errorf("mint delegated relayfile credentials: %w", err)
+		return delegatedauth.Bundle{}, mapDelegatedTokenCloudError(err)
 	}
 	if bundle.Workspace() == "" {
 		bundle.RelayfileWorkspaceID = workspaceID
@@ -5006,6 +5050,7 @@ func runMount(args []string) error {
 	requestedWorkspace := ""
 	delegatedCredsPath := resolveDelegatedCredentialsPath(*credsFile)
 	usesDelegatedWorkspace := false
+	initialCredExpiresAt := ""
 	if fs.NArg() > 0 {
 		requestedWorkspace = strings.TrimSpace(fs.Arg(0))
 	}
@@ -5028,6 +5073,7 @@ func runMount(args []string) error {
 			)
 		}
 		tokenValue = bundle.BearerToken()
+		initialCredExpiresAt = bundle.BearerExpiresAt()
 		*server = strings.TrimRight(bundle.ServerURL(), "/")
 		usesDelegatedWorkspace = true
 	}
@@ -5222,6 +5268,9 @@ func runMount(args []string) error {
 	})
 	if err != nil {
 		return fmt.Errorf("failed to initialize mount syncer: %w", err)
+	}
+	if initialCredExpiresAt != "" {
+		syncer.SetCredentialExpiry(initialCredExpiresAt)
 	}
 	if _, err := mountsync.StartDiagnostics(rootCtx, strings.TrimSpace(*pprofAddr), *memlogInterval, log.Default()); err != nil {
 		return fmt.Errorf("start diagnostics: %w", err)
@@ -6144,6 +6193,283 @@ func runRestart(args []string, stdout io.Writer) error {
 		mountArgs = append(mountArgs, "--background")
 	}
 	return runMount(mountArgs)
+}
+
+// runSupervisor generates and installs/uninstalls platform-specific process
+// supervisor service files (launchd on macOS, systemd on Linux) so that
+// `relayfile start --background` is replaced by a supervised, auto-restarting
+// service. A supervised mount survives kills, reboots, and—combined with the
+// degraded-mode credential refresh loop—stale delegated credentials.
+//
+// Usage:
+//
+//	relayfile supervisor install [WORKSPACE] [--interval 30s]
+//	relayfile supervisor uninstall [WORKSPACE]
+//	relayfile supervisor status [WORKSPACE]
+func runSupervisor(args []string, stdout io.Writer) error {
+	if len(args) == 0 {
+		fmt.Fprintln(stdout, "Usage: relayfile supervisor <install|uninstall|status> [WORKSPACE]")
+		return nil
+	}
+	subcommand := args[0]
+	switch subcommand {
+	case "install":
+		return runSupervisorInstall(args[1:], stdout)
+	case "uninstall":
+		return runSupervisorUninstall(args[1:], stdout)
+	case "status":
+		return runSupervisorStatus(args[1:], stdout)
+	default:
+		return fmt.Errorf("unknown supervisor subcommand %q; use install, uninstall, or status", subcommand)
+	}
+}
+
+func runSupervisorInstall(args []string, stdout io.Writer) error {
+	fs := flag.NewFlagSet("supervisor install", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	intervalFlag := fs.Duration("interval", defaultMountInterval, "sync interval")
+	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
+		"interval": true,
+	})); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			fmt.Fprintln(stdout, "Usage: relayfile supervisor install [WORKSPACE] [--interval 30s]")
+			return nil
+		}
+		return err
+	}
+	record, err := resolveWorkspaceRecord(firstArg(fs))
+	if err != nil {
+		return err
+	}
+	localDir := strings.TrimSpace(record.LocalDir)
+	if localDir == "" {
+		return fmt.Errorf("workspace %s has no recorded local mirror directory; run relayfile start %s <LOCAL_DIR> first", record.Name, record.Name)
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("resolve relayfile executable path: %w", err)
+	}
+	exe, err = filepath.EvalSymlinks(exe)
+	if err != nil {
+		return fmt.Errorf("resolve relayfile executable symlinks: %w", err)
+	}
+	switch runtime.GOOS {
+	case "darwin":
+		return supervisorInstallLaunchd(record, localDir, exe, *intervalFlag, stdout)
+	case "linux":
+		return supervisorInstallSystemd(record, localDir, exe, *intervalFlag, stdout)
+	default:
+		return fmt.Errorf("supervisor install is not supported on %s; start the mount with --background and manage it with your OS process manager", runtime.GOOS)
+	}
+}
+
+func runSupervisorUninstall(args []string, stdout io.Writer) error {
+	fs := flag.NewFlagSet("supervisor uninstall", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{})); err != nil {
+		return err
+	}
+	record, err := resolveWorkspaceRecord(firstArg(fs))
+	if err != nil {
+		return err
+	}
+	switch runtime.GOOS {
+	case "darwin":
+		return supervisorUninstallLaunchd(record, stdout)
+	case "linux":
+		return supervisorUninstallSystemd(record, stdout)
+	default:
+		return fmt.Errorf("supervisor uninstall is not supported on %s", runtime.GOOS)
+	}
+}
+
+func runSupervisorStatus(args []string, stdout io.Writer) error {
+	fs := flag.NewFlagSet("supervisor status", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{})); err != nil {
+		return err
+	}
+	record, err := resolveWorkspaceRecord(firstArg(fs))
+	if err != nil {
+		return err
+	}
+	switch runtime.GOOS {
+	case "darwin":
+		return supervisorStatusLaunchd(record, stdout)
+	case "linux":
+		return supervisorStatusSystemd(record, stdout)
+	default:
+		return fmt.Errorf("supervisor status is not supported on %s", runtime.GOOS)
+	}
+}
+
+func supervisorLabelForWorkspace(workspaceID string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(workspaceID)))
+	return "com.relayfile.mount." + hex.EncodeToString(sum[:])[:12]
+}
+
+func supervisorPlistPath(workspaceID string) string {
+	label := supervisorLabelForWorkspace(workspaceID)
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, "Library", "LaunchAgents", label+".plist")
+}
+
+func supervisorInstallLaunchd(record workspaceRecord, localDir, exe string, interval time.Duration, stdout io.Writer) error {
+	label := supervisorLabelForWorkspace(record.ID)
+	plistPath := supervisorPlistPath(record.ID)
+	intervalSecs := int(interval.Seconds())
+	if intervalSecs < 5 {
+		intervalSecs = 5
+	}
+	logDir := filepath.Join(configDir(), "logs")
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		return fmt.Errorf("create log dir: %w", err)
+	}
+	stdoutLog := filepath.Join(logDir, "mount-"+record.ID+".log")
+	stderrLog := filepath.Join(logDir, "mount-"+record.ID+"-err.log")
+	plist := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>%s</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>%s</string>
+		<string>mount</string>
+		<string>%s</string>
+		<string>%s</string>
+		<string>--interval</string>
+		<string>%ds</string>
+	</array>
+	<key>WorkingDirectory</key>
+	<string>%s</string>
+	<key>KeepAlive</key>
+	<true/>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StandardOutPath</key>
+	<string>%s</string>
+	<key>StandardErrorPath</key>
+	<string>%s</string>
+	<key>ThrottleInterval</key>
+	<integer>10</integer>
+</dict>
+</plist>
+`, label, exe, record.ID, localDir, intervalSecs, localDir, stdoutLog, stderrLog)
+
+	if err := os.MkdirAll(filepath.Dir(plistPath), 0o755); err != nil {
+		return fmt.Errorf("create LaunchAgents directory: %w", err)
+	}
+	if err := os.WriteFile(plistPath, []byte(plist), 0o644); err != nil {
+		return fmt.Errorf("write launchd plist: %w", err)
+	}
+	// Load the service (launchctl load -w <plist>).
+	if err := supervisorRunLaunchctl("load", "-w", plistPath); err != nil {
+		fmt.Fprintf(stdout, "Warning: launchctl load failed (%v); plist written to %s — run 'launchctl load -w %s' manually\n", err, plistPath, plistPath)
+		return nil
+	}
+	fmt.Fprintf(stdout, "Supervisor installed: %s\nMount will start automatically and restart on exit.\nLogs: %s\nTo uninstall: relayfile supervisor uninstall %s\n", label, stdoutLog, record.Name)
+	return nil
+}
+
+func supervisorUninstallLaunchd(record workspaceRecord, stdout io.Writer) error {
+	label := supervisorLabelForWorkspace(record.ID)
+	plistPath := supervisorPlistPath(record.ID)
+	// Attempt unload first (stop + disable).
+	_ = supervisorRunLaunchctl("unload", "-w", plistPath)
+	if err := os.Remove(plistPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove launchd plist %s: %w", plistPath, err)
+	}
+	fmt.Fprintf(stdout, "Supervisor removed: %s\n", label)
+	return nil
+}
+
+func supervisorStatusLaunchd(record workspaceRecord, stdout io.Writer) error {
+	label := supervisorLabelForWorkspace(record.ID)
+	plistPath := supervisorPlistPath(record.ID)
+	if _, err := os.Stat(plistPath); errors.Is(err, os.ErrNotExist) {
+		fmt.Fprintf(stdout, "Supervisor not installed for workspace %s (plist not found at %s)\n", record.Name, plistPath)
+		return nil
+	}
+	fmt.Fprintf(stdout, "Supervisor installed: %s\nPlist: %s\nRun 'launchctl list %s' for live status.\n", label, plistPath, label)
+	return nil
+}
+
+func supervisorRunLaunchctl(args ...string) error {
+	cmd := exec.Command("launchctl", args...)
+	cmd.Stdout = io.Discard
+	cmd.Stderr = io.Discard
+	return cmd.Run()
+}
+
+func supervisorSystemdUnitName(workspaceID string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(workspaceID)))
+	return "relayfile-mount-" + hex.EncodeToString(sum[:])[:12] + ".service"
+}
+
+func supervisorSystemdUnitPath(workspaceID string) string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".config", "systemd", "user", supervisorSystemdUnitName(workspaceID))
+}
+
+func supervisorInstallSystemd(record workspaceRecord, localDir, exe string, interval time.Duration, stdout io.Writer) error {
+	unitName := supervisorSystemdUnitName(record.ID)
+	unitPath := supervisorSystemdUnitPath(record.ID)
+	intervalSecs := int(interval.Seconds())
+	if intervalSecs < 5 {
+		intervalSecs = 5
+	}
+	unit := fmt.Sprintf(`[Unit]
+Description=Relayfile mount for workspace %s
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%s mount %s %s --interval %ds
+WorkingDirectory=%s
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target
+`, record.Name, exe, record.ID, localDir, intervalSecs, localDir)
+
+	if err := os.MkdirAll(filepath.Dir(unitPath), 0o755); err != nil {
+		return fmt.Errorf("create systemd user unit directory: %w", err)
+	}
+	if err := os.WriteFile(unitPath, []byte(unit), 0o644); err != nil {
+		return fmt.Errorf("write systemd unit file: %w", err)
+	}
+	// Reload the daemon and enable+start the unit.
+	_ = exec.Command("systemctl", "--user", "daemon-reload").Run()
+	_ = exec.Command("systemctl", "--user", "enable", "--now", unitName).Run()
+	fmt.Fprintf(stdout, "Supervisor installed: %s\nUnit: %s\nTo check status: systemctl --user status %s\nTo uninstall: relayfile supervisor uninstall %s\n", unitName, unitPath, unitName, record.Name)
+	return nil
+}
+
+func supervisorUninstallSystemd(record workspaceRecord, stdout io.Writer) error {
+	unitName := supervisorSystemdUnitName(record.ID)
+	unitPath := supervisorSystemdUnitPath(record.ID)
+	_ = exec.Command("systemctl", "--user", "disable", "--now", unitName).Run()
+	if err := os.Remove(unitPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove systemd unit file %s: %w", unitPath, err)
+	}
+	_ = exec.Command("systemctl", "--user", "daemon-reload").Run()
+	fmt.Fprintf(stdout, "Supervisor removed: %s\n", unitName)
+	return nil
+}
+
+func supervisorStatusSystemd(record workspaceRecord, stdout io.Writer) error {
+	unitName := supervisorSystemdUnitName(record.ID)
+	unitPath := supervisorSystemdUnitPath(record.ID)
+	if _, err := os.Stat(unitPath); errors.Is(err, os.ErrNotExist) {
+		fmt.Fprintf(stdout, "Supervisor not installed for workspace %s (unit not found at %s)\n", record.Name, unitPath)
+		return nil
+	}
+	fmt.Fprintf(stdout, "Supervisor installed: %s\nUnit: %s\nRun 'systemctl --user status %s' for live status.\n", unitName, unitPath, unitName)
+	return nil
 }
 
 // isProcessAlreadyGone reports whether a signal-delivery failure means the
@@ -9336,7 +9662,13 @@ func runMountLoop(rootCtx context.Context, syncer *mountsync.Syncer, localDir, w
 	stallReason := ""
 	degraded := false
 	var lastDegradedNotice time.Time
-	const degradedRecoveryInterval = time.Minute
+	// Exponential backoff for degraded credential recovery: base 30s, cap 10m.
+	// Avoids hammering the auth endpoint if the operator session is truly gone.
+	const degradedBackoffBase = 30 * time.Second
+	const degradedBackoffMax = 10 * time.Minute
+	const degradedNoticeInterval = time.Minute
+	degradedAttempts := 0
+	var nextDegradedAttempt time.Time
 	const degradedStallReason = "delegated relayfile credentials expired or revoked — re-bootstrap relayfile credentials with agent-relay cloud login"
 
 	enterDegraded := func() {
@@ -9344,6 +9676,7 @@ func runMountLoop(rootCtx context.Context, syncer *mountsync.Syncer, localDir, w
 			degraded = true
 			stallReason = degradedStallReason
 			lastDegradedNotice = time.Time{}
+			nextDegradedAttempt = time.Time{}
 			log.Printf("mount entering read-only degraded state: %s", degradedStallReason)
 		}
 	}
@@ -9352,6 +9685,8 @@ func runMountLoop(rootCtx context.Context, syncer *mountsync.Syncer, localDir, w
 			degraded = false
 			stallReason = ""
 			lastDegradedNotice = time.Time{}
+			degradedAttempts = 0
+			nextDegradedAttempt = time.Time{}
 			log.Printf("mount exiting degraded state; delegated relayfile credentials restored")
 		}
 	}
@@ -9359,7 +9694,7 @@ func runMountLoop(rootCtx context.Context, syncer *mountsync.Syncer, localDir, w
 		if !degraded {
 			return
 		}
-		if time.Since(lastDegradedNotice) < degradedRecoveryInterval {
+		if time.Since(lastDegradedNotice) < degradedNoticeInterval {
 			return
 		}
 		log.Printf("mount degraded: %s", degradedStallReason)
@@ -9388,6 +9723,7 @@ func runMountLoop(rootCtx context.Context, syncer *mountsync.Syncer, localDir, w
 			return err
 		}
 		httpClient.SetToken(renewed.BearerToken())
+		syncer.SetCredentialExpiry(renewed.BearerExpiresAt())
 		syncer.ResetWebSocket()
 		record.Server = strings.TrimRight(renewed.ServerURL(), "/")
 		record.CloudAPIURL = ""
@@ -9466,16 +9802,28 @@ func runMountLoop(rootCtx context.Context, syncer *mountsync.Syncer, localDir, w
 
 	runCycle := func(reconcile bool) error {
 		if degraded {
-			// Try to recover by re-running auth refresh. If creds are
-			// still missing/expired, stay degraded and emit the
-			// recovery notice on the configured cadence.
+			// Exponential backoff: skip recovery attempts until nextDegradedAttempt.
+			// This prevents hammering the auth endpoint on consecutive cycles.
+			if !nextDegradedAttempt.IsZero() && time.Now().Before(nextDegradedAttempt) {
+				maybePrintRecovery()
+				writeSnapshot()
+				return errors.New(degradedStallReason)
+			}
+			// Try to recover by re-running auth refresh.
 			if err := refreshMountAuth(true); err != nil {
+				// Compute backoff for next attempt: base * 2^attempts, capped.
+				backoff := degradedBackoffBase << uint(degradedAttempts)
+				if backoff > degradedBackoffMax {
+					backoff = degradedBackoffMax
+				}
+				degradedAttempts++
+				nextDegradedAttempt = time.Now().Add(backoff)
 				if isMountCredentialExpired(err) {
 					maybePrintRecovery()
 					writeSnapshot()
 					return err
 				}
-				log.Printf("mount degraded: refresh attempt failed: %v", err)
+				log.Printf("mount degraded: refresh attempt failed (next retry in %s): %v", backoff, err)
 				writeSnapshot()
 				return err
 			}

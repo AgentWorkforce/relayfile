@@ -4125,7 +4125,7 @@ func TestLoginDelegatesToAgentRelay(t *testing.T) {
 		if body.AgentName != "relayfile-cli" {
 			t.Fatalf("unexpected agentName: %q", body.AgentName)
 		}
-		if got, want := strings.Join(body.Scopes, ","), "fs:read,fs:write"; got != want {
+		if got, want := strings.Join(body.Scopes, ","), strings.Join(defaultJoinScopes, ","); got != want {
 			t.Fatalf("delegated-token scopes = %q, want %q", got, want)
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -4585,7 +4585,7 @@ func TestDelegatedRelayfileTokenViaCloudDefaultsToCoarseScopes(t *testing.T) {
 		if body.AgentName != "relayfile-cli" {
 			t.Fatalf("agentName = %q, want relayfile-cli", body.AgentName)
 		}
-		if got, want := strings.Join(body.Scopes, ","), "fs:read,fs:write"; got != want {
+		if got, want := strings.Join(body.Scopes, ","), "fs:read,fs:write,ops:read,sync:trigger"; got != want {
 			t.Fatalf("scopes = %q, want %q", got, want)
 		}
 		w.Header().Set("Content-Type", "application/json")
