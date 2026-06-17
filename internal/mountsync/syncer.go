@@ -1628,6 +1628,58 @@ func (s *Syncer) FlushOutboxOnce(ctx context.Context) error {
 	return s.saveStateWithoutLocalScan()
 }
 
+// PushLocalAndFlushOnce ingests pending local writeback drafts with a single
+// pushLocal pass, then flushes the durable outbox, and exits — without
+// pullRemote, digest, websocket, or a full reconcile cycle.
+//
+// It is the teardown drain. Local writeback drafts are normally ingested into
+// the outbox by the running daemon's sync cycle (watcher + pushLocal). A draft
+// written after that daemon's last cycle and just before shutdown — e.g. a
+// final fire-and-forget reply right before a one-shot sandbox is torn down — is
+// still on disk but not yet in the outbox, so FlushOutboxOnce (outbox-only, no
+// local scan) silently drops it. Running pushLocal here, in the fresh cleanup
+// process that scans the on-disk mirror, ingests those drafts before flushing.
+//
+// The local scan is the cost (the same O(tree) work FlushOutboxOnce exists to
+// avoid), so callers should invoke this only when pending local writes are
+// detected and keep FlushOutboxOnce for the no-pending-writes fast path. Unlike
+// a full reconcile it still skips pullRemote/digest/websocket, so it cannot
+// reintroduce the pull-side flush-124 stalls.
+func (s *Syncer) PushLocalAndFlushOnce(ctx context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if err := s.loadState(); err != nil {
+		return err
+	}
+	conflicted, err := s.pushLocal(ctx)
+	if err != nil {
+		s.markSyncError(err)
+		_ = s.saveStateWithoutLocalScan()
+		return err
+	}
+	if err := s.flushOutboxRecords(ctx, conflicted, true); err != nil {
+		s.markSyncError(err)
+		_ = s.saveStateWithoutLocalScan()
+		return err
+	}
+	outbox := s.summarizeOutbox()
+	if outbox.NeedsAttention > 0 {
+		err := fmt.Errorf("outbox needs attention: %d command(s)", outbox.NeedsAttention)
+		s.markSyncError(err)
+		_ = s.saveStateWithoutLocalScan()
+		return err
+	}
+	if outbox.Pending > 0 {
+		err := fmt.Errorf("outbox pending remains: %d command(s)", outbox.Pending)
+		s.markSyncError(err)
+		_ = s.saveStateWithoutLocalScan()
+		return err
+	}
+	s.markSyncSuccess()
+	return s.saveState()
+}
+
 // HandleLocalChange routes a local filesystem event to the appropriate
 // writeback action.
 //
