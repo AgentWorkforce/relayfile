@@ -1056,6 +1056,12 @@ type mountState struct {
 	BootstrapFilesSynced     int    `json:"bootstrapFilesSynced,omitempty"`
 	BootstrapFilesTotal      int    `json:"bootstrapFilesTotal,omitempty"`
 	BootstrapStartedAt       string `json:"bootstrapStartedAt,omitempty"`
+	// QuarantinedPaths holds remote paths that cannot be materialized locally
+	// due to file/directory name collisions. Persisted across cycle restarts
+	// so the daemon does not re-fetch these paths from the cloud until the
+	// adapter emitting the collision is fixed. Cleared on bootstrap completion
+	// so a fixed adapter gets a clean slate on the next full cycle.
+	QuarantinedPaths         map[string]string `json:"quarantinedPaths,omitempty"`
 	SyncMode                 string `json:"syncMode,omitempty"`
 	GithubWorkingTreeHeadSHA string `json:"githubWorkingTreeHeadSha,omitempty"`
 	// IncrementalReadNotReadySince records first-seen timestamps for
@@ -1107,6 +1113,10 @@ func (s *Syncer) quarantineRemotePath(remotePath, detail string, cause error) {
 		return
 	}
 	s.quarantinedPaths[remotePath] = struct{}{}
+	if s.state.QuarantinedPaths == nil {
+		s.state.QuarantinedPaths = map[string]string{}
+	}
+	s.state.QuarantinedPaths[remotePath] = detail
 	s.logf("quarantining remote path %s: %s (%v); skipping so the sync cycle can complete — fix is adapter-side (a name emitted as both a file and a directory)", remotePath, detail, cause)
 }
 
@@ -3201,7 +3211,11 @@ func (s *Syncer) pullRemote(ctx context.Context, conflicted map[string]struct{})
 	// for free: a non-empty Files map with BootstrapComplete=false (or an
 	// explicit --full-reconcile) forces the full pull below.
 	if len(s.state.Files) > 0 && !s.state.BootstrapComplete {
-		s.logf("detected non-empty state without completed bootstrap; forcing full reconcile (%d tracked files)", len(s.state.Files))
+		if strings.TrimSpace(s.state.BootstrapCursor) != "" {
+			s.logf("detected non-empty state without completed bootstrap; will resume from persisted cursor (%d files already synced)", s.state.BootstrapFilesSynced)
+		} else {
+			s.logf("detected non-empty state without completed bootstrap; forcing full reconcile (%d tracked files)", len(s.state.Files))
+		}
 	}
 	if s.state.BootstrapComplete && !s.forceFullReconcile && len(s.state.Files) > 0 {
 		cursor, err := s.resolveLatestEventCursor(ctx)
@@ -3835,6 +3849,7 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 		s.state.BootstrapStartedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	}
 	maxObservedRevision := ""
+	var transientBootstrapAbort bool
 	for {
 		page, err := s.client.ListTree(ctx, s.workspace, s.remoteRoot, 200, cursor)
 		if err != nil {
@@ -3888,6 +3903,16 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 				filesThisPage++
 				continue
 			}
+			// Skip paths quarantined in a prior cycle due to a file/directory
+			// name collision. Treat as present so the snapshot delete pass does
+			// not remove any locally-mirrored copy. The quarantine is cleared by
+			// markBootstrapComplete so a fixed adapter gets a clean slate.
+			if detail, quarantined := s.state.QuarantinedPaths[remotePath]; quarantined {
+				s.logf("skipping quarantined path %s (%s); fix is adapter-side", remotePath, detail)
+				remotePaths[remotePath] = struct{}{}
+				filesThisPage++
+				continue
+			}
 			readJobs = append(readJobs, bootstrapReadJob{
 				Index:      len(readJobs),
 				RemotePath: remotePath,
@@ -3895,13 +3920,36 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 		}
 		for _, result := range s.readBootstrapFiles(ctx, readJobs, prog) {
 			if result.Err != nil {
+				// Context canceled/deadline exceeded — propagate; the cycle is
+				// being torn down and the next one will resume from the cursor.
+				if ctx.Err() != nil {
+					return result.Err
+				}
 				var httpErr *HTTPError
-				if errors.As(result.Err, &httpErr) && httpErr.StatusCode == http.StatusForbidden {
-					s.logf("skipping denied file: %s", result.RemotePath)
-					if markErr := s.markReadDenied(result.RemotePath); markErr != nil {
-						return markErr
+				if errors.As(result.Err, &httpErr) {
+					if httpErr.StatusCode == http.StatusForbidden {
+						s.logf("skipping denied file: %s", result.RemotePath)
+						if markErr := s.markReadDenied(result.RemotePath); markErr != nil {
+							return markErr
+						}
+						continue
 					}
-					continue
+					// Transient HTTP error (503, 429, etc.): stop the current
+					// page immediately without advancing the cursor. On a full
+					// bootstrap (startedFromEmpty) this guarantees the failing
+					// path is retried next cycle rather than permanently skipped.
+					// On a resumed traversal (startedFromEmpty=false) the cursor
+					// already points past this page, so stopping here is still
+					// safe — the delete pass is skipped on resumed cycles anyway.
+					s.logf("transient error reading %s (status %d); aborting page without advancing cursor so it is retried next cycle: %v", result.RemotePath, httpErr.StatusCode, result.Err)
+					transientBootstrapAbort = true
+					// Preserve any previously-synced files processed on this page
+					// before the abort so the delete pass (if it runs) does not
+					// remove local copies that are still on the server.
+					if _, prevSynced := s.state.Files[result.RemotePath]; prevSynced {
+						remotePaths[result.RemotePath] = struct{}{}
+					}
+					break
 				}
 				return result.Err
 			}
@@ -3911,6 +3959,18 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 			prog.touch()
 			remotePaths[result.RemotePath] = struct{}{}
 			filesThisPage++
+		}
+		// A transient read error stopped the page early. Do not advance the
+		// cursor so the same page (including the failing path) is retried next
+		// cycle. Save state up to the last successfully-committed cursor.
+		if transientBootstrapAbort {
+			if !s.state.BootstrapComplete {
+				s.state.BootstrapFilesSynced += filesThisPage
+				if err := s.saveState(); err != nil {
+					return err
+				}
+			}
+			break
 		}
 		if page.NextCursor == nil || *page.NextCursor == "" {
 			break
@@ -3928,6 +3988,14 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 			}
 			prog.touch()
 		}
+	}
+
+	// A transient read error stopped the page scan early. Bootstrap is not
+	// complete; the cursor is left at the page boundary so the next cycle
+	// retries the failing paths. Skip the delete pass entirely.
+	if transientBootstrapAbort {
+		s.logf("bootstrap paused due to transient read error(s); will resume from last cursor next cycle")
+		return nil
 	}
 
 	// Resumed/partial traversal safety: only run the authoritative
@@ -4094,6 +4162,8 @@ func (s *Syncer) markBootstrapComplete() {
 	s.state.BootstrapStartedAt = ""
 	s.state.BootstrapFilesSynced = 0
 	s.state.BootstrapFilesTotal = 0
+	// Clear persisted quarantine so a fixed adapter gets a clean slate.
+	s.state.QuarantinedPaths = nil
 	s.clearAllIncrementalReadNotReady()
 	// One-shot escape hatch / clobber-remnant recovery: after a single
 	// successful full reconcile, clear the in-memory force flag so
