@@ -1,14 +1,12 @@
-// Shared Relayfile bootstrap template. Byte-identical across all examples
-// under examples/integrations/ — copy this file directly if you're using one
-// of these as a starting point for your own project.
-
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
 import { RelayfileSetup, type RelayFileClient } from "@relayfile/sdk";
 
-// Only file we read — written by `agent-relay cloud login`.
+import { createWriteback, type WritebackApi } from "./writeback.js";
+
+// Single canonical credential file — written by `agent-relay cloud login`.
 const CLOUD_AUTH_FILE = join(homedir(), ".agentworkforce", "relay", "cloud-auth.json");
 
 const FAR_FUTURE_ISO = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString();
@@ -21,11 +19,26 @@ interface CloudCreds {
   source: string;
 }
 
-export interface RelayfileWorkspace {
-  workspaceId: string;
-  cloudWorkspaceId: string;
+export interface ConnectOptions {
+  /** Cloud app-UUID. Falls back to `CLOUD_WORKSPACE_ID` env var. */
+  workspaceId?: string;
+  /** Path-scoped scopes, e.g. `["relayfile:fs:read:/notion/**"]`. Defaults to read+write on everything. */
+  scopes?: string[];
+  /** Agent name advertised to the workspace. Defaults to `relayfile-agents`. */
+  agentName?: string;
+}
+
+export interface RelayfileAgents {
+  /** Raw SDK client — escape hatch for anything the high-level API doesn't cover. */
   client: RelayFileClient;
+  /** The `rw_` shard id returned by `/join`; use for any raw SDK calls. */
+  workspaceId: string;
+  /** The cloud app-UUID you passed in. */
+  cloudWorkspaceId: string;
+  /** Where credentials were resolved from (env, cloud-auth.json, ...). */
   credSource: string;
+  /** Provider-agnostic writeback lifecycle (create/update/delete with op-poll). */
+  writeback: WritebackApi;
 }
 
 function readCloudCreds(): CloudCreds {
@@ -33,11 +46,11 @@ function readCloudCreds(): CloudCreds {
   const envAccess = process.env.CLOUD_API_ACCESS_TOKEN;
   if (envAccess) {
     const refreshToken = process.env.CLOUD_API_REFRESH_TOKEN ?? "";
-    // Without a refresh token the SDK cannot roll the access token. Pin expiry
-    // far-future so it never attempts a refresh with an empty credential.
     return {
       accessToken: envAccess,
       refreshToken,
+      // Without a refresh token, pin expiry far-future so the SDK never
+      // attempts to roll the access token with an empty refresh credential.
       accessTokenExpiresAt:
         process.env.CLOUD_API_ACCESS_TOKEN_EXPIRES_AT ??
         (refreshToken ? new Date(Date.now() + 60_000).toISOString() : FAR_FUTURE_ISO),
@@ -65,7 +78,7 @@ function readCloudCreds(): CloudCreds {
       };
     }
   } catch {
-    // fall through to error below
+    // fall through
   }
 
   throw new Error(
@@ -74,17 +87,14 @@ function readCloudCreds(): CloudCreds {
   );
 }
 
-export async function connectWorkspace(opts: {
-  cloudWorkspaceId?: string;
-  scopes?: string[];
-} = {}): Promise<RelayfileWorkspace> {
+export async function connect(opts: ConnectOptions = {}): Promise<RelayfileAgents> {
   const creds = readCloudCreds();
-  const cloudWorkspaceId = opts.cloudWorkspaceId ?? process.env.CLOUD_WORKSPACE_ID;
+  const cloudWorkspaceId = opts.workspaceId ?? process.env.CLOUD_WORKSPACE_ID;
 
   if (!cloudWorkspaceId) {
     throw new Error(
-      "CLOUD_WORKSPACE_ID env var (your app-UUID) is required. Find it on " +
-        "https://agentrelay.com/cloud.",
+      "workspaceId required: pass it to connect() or set CLOUD_WORKSPACE_ID. " +
+        "Find your app-UUID at https://agentrelay.com/cloud.",
     );
   }
 
@@ -97,18 +107,22 @@ export async function connectWorkspace(opts: {
     { cloudApiUrl: creds.apiUrl },
   );
 
-  // Iron rule: send your app-UUID to /join, but every downstream data-plane
-  // call uses workspace.workspaceId (the `rw_` shard id /join returns). That
-  // ID split was the root of relayfile#306.
+  // The app-UUID may go into /join, but every downstream data-plane call uses
+  // workspace.workspaceId (the rw_ shard id /join returns). That ID split was
+  // the root of relayfile#306.
   const handle = await setup.joinWorkspace(cloudWorkspaceId, {
-    agentName: "integration-verifier-example",
+    agentName: opts.agentName ?? "relayfile-agents",
     scopes: opts.scopes,
   });
 
+  const client = handle.client();
+  const workspaceId = handle.workspaceId;
+
   return {
-    workspaceId: handle.workspaceId,
+    client,
+    workspaceId,
     cloudWorkspaceId,
-    client: handle.client(),
     credSource: creds.source,
+    writeback: createWriteback(client, workspaceId),
   };
 }

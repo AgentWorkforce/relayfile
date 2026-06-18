@@ -11,7 +11,7 @@
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^1.0.5",
-    "@relayfile/sdk": "^0.10.1",
+    "@relayfile/agents": "file:../../../packages/agents",
     "ai": "^4.0.20",
     "zod": "^3.23.8"
   },

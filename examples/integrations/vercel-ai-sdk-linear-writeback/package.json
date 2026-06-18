@@ -2,7 +2,7 @@
   "name": "@relayfile-example/vercel-ai-sdk-linear-writeback",
   "private": true,
   "version": "0.0.1",
-  "description": "Vercel AI SDK agent that creates/updates/deletes Linear labels via Relayfile (schema-validated).",
+  "description": "Vercel AI SDK agent that creates/updates/deletes Linear labels via Relayfile.",
   "type": "module",
   "scripts": {
     "smoke": "tsx src/smoke.ts",
@@ -11,10 +11,9 @@
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^1.0.5",
+    "@relayfile/agents": "file:../../../packages/agents",
     "@relayfile/sdk": "^0.10.1",
     "ai": "^4.0.20",
-    "ajv": "^8.17.1",
-    "ajv-formats": "^3.0.1",
     "zod": "^3.23.8"
   },
   "devDependencies": {

@@ -9,7 +9,8 @@
     "packages/sdk/typescript",
     "packages/cli",
     "packages/local-mount",
-    "packages/file-observer"
+    "packages/file-observer",
+    "packages/agents"
   ],
   "scripts": {
     "workflow": "agent-relay run",
