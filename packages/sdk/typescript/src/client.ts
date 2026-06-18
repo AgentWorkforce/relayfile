@@ -38,6 +38,7 @@ import {
   type QueryFilesOptions,
   type RegisterWebhookInput,
   type RegisterWebhookResponse,
+  type RelayFileReadCacheOptions,
   type Subscription,
   type SyncIngressStatusResponse,
   type SyncStatusResponse,
@@ -115,6 +116,12 @@ export interface RelayFileClientOptions {
   userAgent?: string;
   retry?: RelayFileRetryOptions;
   changeLog?: RelayFileChangeLogOptions;
+  /**
+   * Client-side file read cache with in-flight deduplication.
+   * Enabled by default. Set to `false` to disable.
+   * Active change streams automatically evict paths on remote mutations.
+   */
+  readCache?: false | RelayFileReadCacheOptions;
 }
 
 interface NormalizedRetryOptions {
@@ -206,6 +213,87 @@ const changeStreamManagers = new WeakMap<RelayFileClient, Map<string, RelayFileC
 const changeLogCaches = new WeakMap<RelayFileClient, Map<string, WorkspaceChangeLogCache>>();
 const changeLogSettings = new WeakMap<RelayFileClient, NormalizedChangeLogOptions>();
 const pendingChangeHydrations = new WeakMap<RelayFileClient, Map<string, Map<string, Promise<CachedChangeRecord | null>>>>();
+const fileReadCaches = new WeakMap<RelayFileClient, FileReadCache | false>();
+
+const DEFAULT_READ_CACHE_TTL_MS = 5_000;
+const DEFAULT_READ_CACHE_MAX_ENTRIES = 500;
+
+interface ReadCacheEntry {
+  value: FileReadResponse;
+  expiresAt: number;
+}
+
+class FileReadCache {
+  private readonly ttlMs: number;
+  private readonly maxEntries: number;
+  private readonly entries = new Map<string, ReadCacheEntry>();
+  private readonly inFlight = new Map<string, Promise<FileReadResponse>>();
+
+  constructor(options?: RelayFileReadCacheOptions) {
+    this.ttlMs = options?.ttlMs ?? DEFAULT_READ_CACHE_TTL_MS;
+    this.maxEntries = options?.maxEntries ?? DEFAULT_READ_CACHE_MAX_ENTRIES;
+  }
+
+  get(key: string): FileReadResponse | undefined {
+    const entry = this.entries.get(key);
+    if (!entry) return undefined;
+    if (Date.now() > entry.expiresAt) {
+      this.entries.delete(key);
+      return undefined;
+    }
+    return entry.value;
+  }
+
+  set(key: string, value: FileReadResponse): void {
+    if (this.entries.size >= this.maxEntries && !this.entries.has(key)) {
+      const oldest = this.entries.keys().next().value;
+      if (oldest !== undefined) {
+        this.entries.delete(oldest);
+      }
+    }
+    this.entries.set(key, { value, expiresAt: Date.now() + this.ttlMs });
+  }
+
+  evict(workspaceId: string, path: string): void {
+    this.entries.delete(`${workspaceId}:${path}`);
+    this.inFlight.delete(`${workspaceId}:${path}`);
+  }
+
+  getInFlight(key: string): Promise<FileReadResponse> | undefined {
+    return this.inFlight.get(key);
+  }
+
+  setInFlight(key: string, promise: Promise<FileReadResponse>): void {
+    this.inFlight.set(key, promise);
+    promise.then(
+      (result) => {
+        if (this.inFlight.get(key) === promise) {
+          this.inFlight.delete(key);
+          this.set(key, result);
+        }
+      },
+      () => {
+        if (this.inFlight.get(key) === promise) {
+          this.inFlight.delete(key);
+        }
+      }
+    );
+  }
+}
+
+function getFileReadCache(client: RelayFileClient): FileReadCache | false {
+  const cached = fileReadCaches.get(client);
+  if (cached !== undefined) return cached;
+  return false;
+}
+
+function initFileReadCache(client: RelayFileClient, options: RelayFileClientOptions): void {
+  if (options.readCache === false) {
+    fileReadCaches.set(client, false);
+  } else {
+    fileReadCaches.set(client, new FileReadCache(options.readCache));
+  }
+}
 
 function createM2NotImplementedError(feature: string): Error & { code: "M2_NOT_IMPLEMENTED" } {
   const error = new Error(`M2_NOT_IMPLEMENTED: ${feature} is reserved for proactive runtime M2.`) as Error & {
@@ -702,6 +790,14 @@ class RelayFileChangeStreamManager {
       }
     });
     sync.on("event", (event) => {
+      // Evict the cached read when the server signals a mutation so stale
+      // content is never returned after a change event arrives.
+      if (event.type === "file.updated" || event.type === "file.created" || event.type === "file.deleted") {
+        const cacheOrFalse = getFileReadCache(this.client);
+        if (cacheOrFalse !== false) {
+          cacheOrFalse.evict(this.workspaceId, event.path);
+        }
+      }
       for (const subscription of this.subscriptions) {
         subscription.push(event);
       }
@@ -1316,6 +1412,7 @@ export class RelayFileClient {
     this.userAgent = options.userAgent;
     this.retryOptions = normalizeRetryOptions(options.retry);
     changeLogSettings.set(this, normalizeChangeLogOptions(options.changeLog));
+    initFileReadCache(this, options);
   }
 
   /**
@@ -1375,14 +1472,32 @@ export class RelayFileClient {
           signal
         }
       : workspaceOrInput;
+
+    const cacheRaw = getFileReadCache(this);
+    // Skip cache for fork-scoped reads (isolated state) and when cache is disabled.
+    const cache: FileReadCache | undefined = cacheRaw !== false ? cacheRaw : undefined;
+    const cacheKey = (cache && !input.forkId) ? `${input.workspaceId}:${input.path}` : undefined;
+
+    if (cache && cacheKey) {
+      const hit = cache.get(cacheKey);
+      if (hit) return hit;
+      const pending = cache.getInFlight(cacheKey);
+      if (pending) return pending;
+    }
+
     const query = buildQuery({ path: input.path, forkId: input.forkId });
-    return this.request<FileReadResponse>({
+    const fetch = this.request<FileReadResponse>({
       method: "GET",
       path: `/v1/workspaces/${encodeURIComponent(input.workspaceId)}/fs/file${query}`,
       correlationId: input.correlationId,
       signal: input.signal,
       tokenOverride: (input as ReadFileInput & { token?: string }).token
     });
+
+    if (cache && cacheKey) {
+      cache.setInFlight(cacheKey, fetch);
+    }
+    return fetch;
   }
 
   async queryFiles(workspaceId: string, options: QueryFilesOptions = {}): Promise<FileQueryResponse> {
@@ -1415,7 +1530,7 @@ export class RelayFileClient {
   async writeFile(input: WriteFileInput): Promise<WriteQueuedResponse> {
     const { workspaceId, path, correlationId, baseRevision, content, contentType, encoding, contentIdentity, signal } = input;
     const query = buildQuery({ path, forkId: input.forkId });
-    return this.request<WriteQueuedResponse>({
+    const result = await this.request<WriteQueuedResponse>({
       method: "PUT",
       path: `/v1/workspaces/${encodeURIComponent(workspaceId)}/fs/file${query}`,
       correlationId,
@@ -1432,6 +1547,9 @@ export class RelayFileClient {
       },
       signal
     });
+    const cache = getFileReadCache(this);
+    if (cache !== false) cache.evict(workspaceId, path);
+    return result;
   }
 
   async bulkWrite(input: BulkWriteInput): Promise<BulkWriteResponse> {
@@ -1445,12 +1563,19 @@ export class RelayFileClient {
       },
       signal: input.signal
     });
-    return this.readPayload(response) as Promise<BulkWriteResponse>;
+    const result = await (this.readPayload(response) as Promise<BulkWriteResponse>);
+    const cache = getFileReadCache(this);
+    if (cache !== false) {
+      for (const file of input.files) {
+        cache.evict(input.workspaceId, file.path);
+      }
+    }
+    return result;
   }
 
   async deleteFile(input: DeleteFileInput): Promise<WriteQueuedResponse> {
     const query = buildQuery({ path: input.path, forkId: input.forkId });
-    return this.request<WriteQueuedResponse>({
+    const result = await this.request<WriteQueuedResponse>({
       method: "DELETE",
       path: `/v1/workspaces/${encodeURIComponent(input.workspaceId)}/fs/file${query}`,
       correlationId: input.correlationId,
@@ -1459,6 +1584,9 @@ export class RelayFileClient {
       },
       signal: input.signal
     });
+    const cache = getFileReadCache(this);
+    if (cache !== false) cache.evict(input.workspaceId, input.path);
+    return result;
   }
 
   async createFork(input: CreateForkInput): Promise<ForkHandle> {

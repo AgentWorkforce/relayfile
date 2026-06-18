@@ -8,6 +8,7 @@ export {
   type RelayFileRetryOptions,
   type WebSocketConnection
 } from "./client.js";
+export type { RelayFileReadCacheOptions } from "./types.js";
 export {
   RelayfileSetup,
   RELAYFILE_SDK_VERSION,

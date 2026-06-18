@@ -29,6 +29,7 @@ func runFuseMount(ctx context.Context, cfg mountConfig) error {
 		RemoteRoot:  cfg.remotePath,
 		LazyRepos:   cfg.lazyRepos,
 		Logger:      log.Default(),
+		ContentTTL:  cfg.fuseContentTTL,
 	}
 
 	mounted, err := mountfuse.Mount(cfg.localDir, fuseCfg)

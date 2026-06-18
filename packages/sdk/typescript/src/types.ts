@@ -62,6 +62,13 @@ export interface ContentIdentity {
   ttlSeconds?: number;
 }
 
+export interface RelayFileReadCacheOptions {
+  /** Cache TTL in ms. Default: 5000. */
+  ttlMs?: number;
+  /** Max cached entries before LRU eviction. Default: 500. */
+  maxEntries?: number;
+}
+
 export interface FileReadResponse {
   path: string;
   revision: string;

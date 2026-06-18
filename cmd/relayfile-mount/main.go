@@ -67,6 +67,7 @@ type mountConfig struct {
 	flushOutboxOnce  bool
 	pushLocalOnce    bool
 	mode             string
+	fuseContentTTL   time.Duration
 }
 
 type pollRunner func(context.Context, mountConfig) error
@@ -105,6 +106,7 @@ func main() {
 	logHTTPStatus := flag.Bool("log-http-status", boolEnv("RELAYFILE_MOUNT_LOG_HTTP_STATUS", false), "log Relayfile HTTP response statuses for mount observability")
 	mode := flag.String("mode", envOrDefault("RELAYFILE_MOUNT_MODE", mountModePoll), "mount mode: poll (synced mirror, recommended) or fuse")
 	fuse := flag.Bool("fuse", boolEnv("RELAYFILE_MOUNT_FUSE", false), "shortcut for --mode=fuse")
+	fuseContentTTL := flag.Duration("fuse-content-ttl", durationEnv("RELAYFILE_MOUNT_FUSE_CONTENT_TTL", 0), "FUSE in-memory file content cache TTL (default 30s; 0 = use default)")
 	once := flag.Bool("once", false, "run one sync cycle and exit")
 	flushOutboxOnce := flag.Bool("flush-outbox-once", false, "flush durable writeback outbox once and exit without reconciling the local mirror")
 	pushLocalOnce := flag.Bool("push-local-once", false, "ingest pending local writeback drafts (one pushLocal pass) then flush the outbox once and exit; no pullRemote/digest/reconcile — the teardown drain for last-moment drafts")
@@ -188,6 +190,7 @@ func main() {
 		flushOutboxOnce:  *flushOutboxOnce,
 		pushLocalOnce:    *pushLocalOnce,
 		mode:             resolvedMode,
+		fuseContentTTL:   *fuseContentTTL,
 	}
 
 	if err := executeMount(rootCtx, cfg, runPollingMount, defaultFuseRunner); err != nil {
