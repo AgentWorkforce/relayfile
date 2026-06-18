@@ -1,6 +1,6 @@
 {
   "name": "@relayfile/agents",
-  "version": "0.1.0",
+  "version": "0.10.1",
   "description": "Thin agent-framework adapters for Relayfile. One connect() call, ready tools, proven writeback lifecycle.",
   "type": "module",
   "main": "dist/index.js",
