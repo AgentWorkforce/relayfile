@@ -801,3 +801,31 @@ func TestWatcherDoesNotSkipNestedReservedNameDirectories(t *testing.T) {
 		t.Fatalf("no watcher event for nested reserved-name directory path")
 	}
 }
+
+func TestWatcherSkipsNestedMountRuntimeDirectories(t *testing.T) {
+	localDir := t.TempDir()
+	events, _, _ := startFileWatcher(t, localDir)
+
+	nestedDir := filepath.Join(localDir, "slack", "channels", "C123", "messages", ".relay")
+	if err := os.MkdirAll(nestedDir, 0o755); err != nil {
+		t.Fatalf("create nested .relay directory: %v", err)
+	}
+	target := filepath.Join(nestedDir, "state.json")
+	if err := os.WriteFile(target, []byte(`{"pendingWriteback":200}`), 0o644); err != nil {
+		t.Fatalf("write nested .relay state: %v", err)
+	}
+
+	notExpected := filepath.ToSlash("slack/channels/C123/messages/.relay/state.json")
+	if _, ok := waitForWatcherEventPath(t, events, notExpected, 300*time.Millisecond); ok {
+		t.Fatalf("watcher emitted nested mount runtime state path %q", notExpected)
+	}
+
+	realPath := filepath.Join(localDir, "slack", "channels", "C123", "messages", "1780145510_376649.json")
+	if err := os.WriteFile(realPath, []byte(`{"text":"hello"}`), 0o644); err != nil {
+		t.Fatalf("write real provider file: %v", err)
+	}
+	expected := filepath.ToSlash("slack/channels/C123/messages/1780145510_376649.json")
+	if _, ok := waitForWatcherEventPath(t, events, expected, 2*time.Second); !ok {
+		t.Fatalf("no watcher event for real provider file")
+	}
+}

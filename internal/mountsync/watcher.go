@@ -97,6 +97,9 @@ func (fw *FileWatcher) Start(ctx context.Context) error {
 }
 
 func (fw *FileWatcher) shouldSkip(rel string) bool {
+	if isMountRuntimeRelativePath(rel) {
+		return true
+	}
 	parts := strings.SplitN(rel, string(os.PathSeparator), 2)
 	first := parts[0]
 	// Match the state file itself and only its writeFileAtomic temp
@@ -187,6 +190,11 @@ func (fw *FileWatcher) addDirRecursive(base string) error {
 		}
 		if !info.IsDir() {
 			return nil
+		}
+		if rel, relErr := filepath.Rel(fw.localDir, path); relErr == nil &&
+			rel != "." &&
+			isMountRuntimeRelativePath(rel) {
+			return filepath.SkipDir
 		}
 		name := info.Name()
 		if fw.isTopLevelReservedDir(path, name) {
