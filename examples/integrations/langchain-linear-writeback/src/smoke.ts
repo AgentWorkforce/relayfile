@@ -72,35 +72,19 @@ await step("create label → op succeeded → real Linear UUID", async () => {
 });
 
 if (canonicalPath) {
-  await step(
-    "read canonical → Linear fields present (eventually-consistent — best-effort 30s)",
-    async () => {
-      const deadline = Date.now() + 30_000;
-      while (Date.now() < deadline) {
-        try {
-          const file = await rf.client.readFile(rf.workspaceId, canonicalPath!);
-          const record = JSON.parse(file.content);
-          lastRevision = file.revision;
-          canonicalMaterialised = true;
-          return {
-            path: canonicalPath,
-            revision: file.revision,
-            name: record.name,
-            color: record.color,
-            creatorId: record.creatorId ?? "(missing)",
-            createdAt: record.createdAt ?? "(missing)",
-          };
-        } catch {
-          await new Promise((r) => setTimeout(r, 2000));
-        }
-      }
-      return {
-        informational: true,
-        materialised: false,
-        note: "Canonical not yet mirrored in 30s — Linear-side write is proven by the op-status step above.",
-      };
-    },
-  );
+  await step("readCanonical → Linear fields present", async () => {
+    const { revision, record } = await rf.writeback.readCanonical(canonicalPath!);
+    lastRevision = revision;
+    canonicalMaterialised = true;
+    return {
+      path: canonicalPath,
+      revision,
+      name: record.name,
+      color: record.color,
+      creatorId: record.creatorId ?? "(missing)",
+      createdAt: record.createdAt ?? "(missing)",
+    };
+  });
 
   if (canonicalMaterialised && lastRevision) {
     staleRevision = lastRevision;

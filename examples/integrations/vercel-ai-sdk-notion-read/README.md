@@ -11,7 +11,7 @@ Relayfile tools; Relayfile resolves Notion content from the synced workspace.
 | Bootstrap | Cloud token → `RelayfileSetup.fromCloudTokens` → `joinWorkspace` → `client()` |
 | ID handling | App-UUID in, `rw_` ID out — example uses `workspace.workspaceId` for every downstream call (the relayfile#306 plumbing) |
 | Least-privilege | Requests `relayfile:fs:read:/notion/**` only — verified preserved in surface map (no scope upgrade) |
-| Tool surface | `listTree` / `readFile` / `queryFiles` against `/notion` via the Vercel AI SDK `tool()` wrapper |
+| Tool surface | `listTree` + `readFile` against `/notion` via `tools.vercel(rf, { readPaths: ["/notion"] })`. `queryFiles` is intentionally omitted — Notion sync doesn't yet emit semantic metadata (cloud#2275), so a `queryFiles({provider:"notion"})` tool would always return 0 and burn the agent's tool budget. |
 
 ## Run
 

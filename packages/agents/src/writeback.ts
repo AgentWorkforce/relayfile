@@ -71,6 +71,17 @@ export interface WritebackApi {
     payload: T,
     opts?: { intervalMs?: number; timeoutMs?: number },
   ): Promise<CreateResult>;
+  /**
+   * Read a canonical record, polling until it materialises in the Relayfile
+   * mirror tree. After `create()` succeeds against the provider, the canonical
+   * file at `/{provider}/{resource}/<externalId>.json` arrives asynchronously
+   * via inbound webhook sync — usually fast but variable. This wraps that
+   * polling so `update`/`delete` paths don't need to babysit it.
+   */
+  readCanonical(
+    canonicalPath: string,
+    opts?: { intervalMs?: number; timeoutMs?: number },
+  ): Promise<{ revision: string; record: Record<string, unknown> }>;
   /** PATCH an existing canonical record. Polls the resulting op. */
   update<T extends Record<string, unknown>>(
     canonicalPath: string,
@@ -145,6 +156,24 @@ export function createWriteback(client: RelayFileClient, workspaceId: string): W
           ? (receipt.providerResult.url as string)
           : undefined;
       return { draftPath, receipt, externalId, canonicalPath, url };
+    },
+
+    async readCanonical(canonicalPath, opts) {
+      const deadline = Date.now() + (opts?.timeoutMs ?? 60_000);
+      const interval = opts?.intervalMs ?? 1_500;
+      let lastErr: unknown;
+      while (Date.now() < deadline) {
+        try {
+          const file = await client.readFile(workspaceId, canonicalPath);
+          return { revision: file.revision, record: JSON.parse(file.content) };
+        } catch (err) {
+          lastErr = err;
+          await new Promise((r) => setTimeout(r, interval));
+        }
+      }
+      throw lastErr instanceof Error
+        ? lastErr
+        : new Error(`canonical ${canonicalPath} did not materialise within ${opts?.timeoutMs ?? 60_000}ms`);
     },
 
     async update(canonicalPath, baseRevision, patch, opts) {
