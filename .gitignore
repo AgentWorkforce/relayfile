@@ -72,3 +72,4 @@ site/dist/
 .next/
 packages/file-observer/out/
 packages/agents/dist
+.scratch/
