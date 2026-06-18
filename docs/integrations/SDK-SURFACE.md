@@ -87,7 +87,7 @@ const tree = await client.listTree(workspace.workspaceId, { path: "/notion", dep
 
 **Token mint endpoint (use this for examples)**
 ```
-POST {CLOUD_API_URL}/api/v1/workspaces/{workspaceId}/relayfile/mount-session
+POST {CLOUD_API_URL}/api/v1/workspaces/{rwWorkspaceId}/relayfile/mount-session
 Authorization: Bearer <cloud api access token>
 Content-Type: application/json
 
@@ -95,6 +95,8 @@ Content-Type: application/json
   "agentName": "integration-verifier",
   "scopes": ["relayfile:fs:read:/notion/**", "relayfile:fs:write:/linear/**"] }
 ```
+> ⚠️ **The mount-session path param requires the `rw_…` workspace ID, NOT the Cloud app UUID.** Cloud-source-confirmed: the route validates with `isValidWorkspaceId` (`@cloud/core/workspace/id`), which only accepts `rw_[a-z0-9]{8}`, then looks it up in the relay workspace registry. Passing an app UUID returns `404 workspace_not_found`. **Resolve first** (`GET /api/v1/workspaces/{appUUID}/resolve` → `relayfileWorkspaceId`), then call mount-session with that `rw_` id. (The SDK does this for you: `joinWorkspace(id)` → `handle.workspaceId` from the join response → mount-session uses that. Raw-HTTP callers must resolve manually.)
+
 Response includes: `workspaceId` (the `rw_…` shard id — use this downstream), `relayfileBaseUrl`, `relayfileToken`, `wsUrl`, `scopes`, expiry fields.
 A `delegated-token` route also exists (`POST .../relayfile/delegated-token`) for per-agent scoping; prefer `mount-session` for examples.
 
@@ -109,9 +111,9 @@ Returns `accessToken`, a new `refreshToken`, expiry fields, `apiUrl`, `tokenType
 ```
 GET  {CLOUD_API_URL}/api/v1/workspaces                       # list app workspace ids
 GET  {CLOUD_API_URL}/api/v1/workspaces/{appWorkspaceId}/resolve
-       → { cloudWorkspaceId: <app UUID>, relayfileWorkspaceId: "rw_..." }
+       → { cloudWorkspaceId: <app UUID>, relayfileWorkspaceId: "rw_...", provisioned: false }
 ```
-Pick the descriptor whose `relayfileWorkspaceId` equals the `rw_` you want. **Iron rule:** the request-side `CLOUD_WORKSPACE_ID` may be an app UUID, but every Relayfile **data-plane** call must use the `workspaceId` returned by `mount-session` / `joinWorkspace` / `resolve` — never the request id. This is the exact app-UUID↔`rw_` split that caused issue #306; the example bootstrap helper bakes this in as a comment so it isn't accidentally reintroduced.
+Pick the descriptor whose `relayfileWorkspaceId` equals the `rw_` you want. Note: **`provisioned` means "did this `/resolve` call provision a *new* relay workspace right now?"** — for an already-existing, functional workspace it is `false`. It is NOT a data-plane health flag; `false` is normal and expected. **Iron rule:** the request-side `CLOUD_WORKSPACE_ID` may be an app UUID, but every Relayfile **data-plane** call must use the `workspaceId` returned by `mount-session` / `joinWorkspace` / `resolve` — never the request id. This is the exact app-UUID↔`rw_` split that caused issue #306; the example bootstrap helper bakes this in as a comment so it isn't accidentally reintroduced.
 
 **Data-plane auth/header shape**
 - Routes: `{RELAYFILE_BASE_URL}/v1/workspaces/{relayfileWorkspaceId}/...`
@@ -119,7 +121,8 @@ Pick the descriptor whose `relayfileWorkspaceId` equals the `rw_` you want. **Ir
 - `X-Correlation-Id: <stable smoke id>` — **required** on fs routes.
 - `Content-Type: application/json` for JSON writes.
 - **Do NOT send `X-Workspace-Id`** — Cloud's Relayfile Worker sets it internally when forwarding to the DO; sending it can mis-route.
-- Scopes: reads `fs:read` or `relayfile:fs:read:/provider/**`; writes/bulk `fs:write` or `relayfile:fs:write:/provider/**`. Request the narrowest scope each example needs.
+- Scopes: **always request the `relayfile:fs:<read|write>:/provider/**` form** for least-privilege. ⚠️ Cloud-source-confirmed: `compileJoinAccess` filters requested scopes to `relayfile:fs:*` and **falls back to full default read+write if every requested scope is filtered out** — so requesting bare `fs:read` / `fs:write` silently yields a *broad* token, not a narrow one. Bare `fs:*` works for data-plane *checks* but is the wrong thing to *request* at mint time.
+  - Known Cloud bug (file with repro if reproduced): path scopes like `relayfile:fs:read:/notion/**` expanding to `relayfile:fs:read:*` is **not** expected — `normalizeRequestedScope` should preserve the path. If mint returns wildcard for a path-scoped request, that breaks least-privilege and is a real bug, not a doc issue.
 
 **Bulk-write 202=sync contract (after cloud#2274 deploys)**
 ```
