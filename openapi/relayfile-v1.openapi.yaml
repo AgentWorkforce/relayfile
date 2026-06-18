@@ -174,9 +174,14 @@ paths:
       operationId: bulkWriteFiles
       summary: Write multiple files in a single request
       description: |
-        Writes multiple files atomically within a workspace. Each file is
-        individually permission-checked; files that fail permission checks are
-        reported in the `errors` array while permitted files are written.
+        Writes multiple files within a workspace. Each file is individually
+        permission-checked; files that fail permission checks are reported in
+        the `errors` array while permitted files are written.
+
+        The response is synchronous: a `202` means all files listed in
+        `results` are immediately readable via `GET /fs/file`. The `202`
+        status code is kept for historical reasons and does not imply an
+        asynchronous or queued write.
       security:
         - BearerAuth: [fs:write]
       parameters:
@@ -191,7 +196,9 @@ paths:
               $ref: '#/components/schemas/BulkWriteRequest'
       responses:
         '202':
-          description: Bulk write accepted
+          description: >
+            Bulk write complete. All files in `results` are immediately
+            readable. Files that could not be written appear in `errors`.
           content:
             application/json:
               schema:

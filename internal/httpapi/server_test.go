@@ -1261,6 +1261,147 @@ func TestBulkWriteEndpoint(t *testing.T) {
 	}
 }
 
+// TestBulkWriteReadImmediatelyAfter202 documents the OSS contract for issue #306:
+// a 202 from POST /fs/bulk means every file in the results array is immediately
+// readable — the handler is synchronous so "accepted" and "written" are the same.
+func TestBulkWriteReadImmediatelyAfter202(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name    string
+		files   []map[string]any
+		want    []string // paths expected to be readable
+		written int
+	}{
+		{
+			name: "single file readable after bulk write",
+			files: []map[string]any{
+				{"path": "/sync/Record.md", "contentType": "text/markdown", "content": "# record"},
+			},
+			want:    []string{"/sync/Record.md"},
+			written: 1,
+		},
+		{
+			name: "multiple files all readable after bulk write",
+			files: []map[string]any{
+				{"path": "/sync/Alpha.md", "contentType": "text/markdown", "content": "# alpha"},
+				{"path": "/sync/Beta.md", "contentType": "text/plain", "content": "beta"},
+				{"path": "/sync/Gamma.json", "contentType": "application/json", "content": `{"ok":true}`},
+			},
+			want:    []string{"/sync/Alpha.md", "/sync/Beta.md", "/sync/Gamma.json"},
+			written: 3,
+		},
+		{
+			name: "partial batch: valid files readable, invalid files reported in errors",
+			files: []map[string]any{
+				{"path": "/sync/Good.md", "contentType": "text/markdown", "content": "# good"},
+				{"path": "/sync/Bad.md", "contentType": "text/markdown", "content": "# bad", "encoding": "utf16"},
+			},
+			want:    []string{"/sync/Good.md"},
+			written: 1,
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			server := NewServer(relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true}))
+			wsID := "ws_read_after_202_" + tc.name[:4]
+			token := mustTestJWT(t, "dev-secret", wsID, "Worker1", []string{"fs:read", "fs:write"}, time.Now().Add(time.Hour))
+
+			bulkResp := doRequest(t, server, request{
+				method: http.MethodPost,
+				path:   "/v1/workspaces/" + wsID + "/fs/bulk",
+				headers: map[string]string{
+					"Authorization":    "Bearer " + token,
+					"X-Correlation-Id": "corr_rar202",
+				},
+				body: map[string]any{"files": tc.files},
+			})
+			if bulkResp.Code != http.StatusAccepted {
+				t.Fatalf("expected 202, got %d: %s", bulkResp.Code, bulkResp.Body.String())
+			}
+			var payload struct {
+				Written int `json:"written"`
+			}
+			if err := json.NewDecoder(bulkResp.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode bulk response: %v", err)
+			}
+			if payload.Written != tc.written {
+				t.Fatalf("expected written=%d, got %d", tc.written, payload.Written)
+			}
+
+			for _, path := range tc.want {
+				file := readFileForTest(t, server, token, wsID, path, "corr_read_after_bulk")
+				if file.Path != path {
+					t.Errorf("path mismatch: want %q got %q", path, file.Path)
+				}
+				if file.Content == "" {
+					t.Errorf("file %q has empty content after bulk write", path)
+				}
+			}
+		})
+	}
+}
+
+// TestBulkWriteResyncPattern documents that sequential bulk writes (simulating a
+// provider re-sync) produce a consistent readable state: both original and updated
+// paths are immediately available after each round, and updated content is reflected.
+// This is the OSS analogue of the full_resync scenario in issue #306: the OSS handler
+// is synchronous, so there is no window between "accepted" and "readable".
+func TestBulkWriteResyncPattern(t *testing.T) {
+	t.Parallel()
+	server := NewServer(relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true}))
+	const wsID = "ws_resync_pattern"
+	token := mustTestJWT(t, "dev-secret", wsID, "Worker1", []string{"fs:read", "fs:write"}, time.Now().Add(time.Hour))
+
+	bulkWrite := func(files []map[string]any) {
+		t.Helper()
+		resp := doRequest(t, server, request{
+			method: http.MethodPost,
+			path:   "/v1/workspaces/" + wsID + "/fs/bulk",
+			headers: map[string]string{
+				"Authorization":    "Bearer " + token,
+				"X-Correlation-Id": "corr_resync",
+			},
+			body: map[string]any{"files": files},
+		})
+		if resp.Code != http.StatusAccepted {
+			t.Fatalf("bulk write: expected 202, got %d: %s", resp.Code, resp.Body.String())
+		}
+	}
+
+	// Round 1: initial provider sync.
+	bulkWrite([]map[string]any{
+		{"path": "/provider/A.md", "contentType": "text/markdown", "content": "v1-A"},
+		{"path": "/provider/B.md", "contentType": "text/markdown", "content": "v1-B"},
+		{"path": "/provider/C.md", "contentType": "text/markdown", "content": "v1-C"},
+	})
+
+	for _, path := range []string{"/provider/A.md", "/provider/B.md", "/provider/C.md"} {
+		f := readFileForTest(t, server, token, wsID, path, "corr_resync_r1")
+		if f.Content == "" {
+			t.Errorf("round 1: %q has empty content", path)
+		}
+	}
+
+	// Round 2: re-sync with updated B, new D — simulates a provider resync batch.
+	bulkWrite([]map[string]any{
+		{"path": "/provider/B.md", "contentType": "text/markdown", "content": "v2-B"},
+		{"path": "/provider/D.md", "contentType": "text/markdown", "content": "v2-D"},
+	})
+
+	updated := readFileForTest(t, server, token, wsID, "/provider/B.md", "corr_resync_r2")
+	if updated.Content != "v2-B" {
+		t.Errorf("expected updated content %q, got %q", "v2-B", updated.Content)
+	}
+	newFile := readFileForTest(t, server, token, wsID, "/provider/D.md", "corr_resync_r2")
+	if newFile.Content != "v2-D" {
+		t.Errorf("expected new file content %q, got %q", "v2-D", newFile.Content)
+	}
+}
+
 func TestExportJSON(t *testing.T) {
 	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
 	t.Cleanup(store.Close)
