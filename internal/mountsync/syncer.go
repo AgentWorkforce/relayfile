@@ -3936,7 +3936,13 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 					// Transient HTTP error (503, 429, etc.): skip this path for
 					// the current cycle. The cursor-based resume on the next
 					// cycle will retry it without restarting from scratch.
+					// If the file was previously synced, preserve it in remotePaths
+					// so the snapshot delete pass does not remove the local copy.
 					s.logf("transient error reading %s (status %d); skipping for this cycle: %v", result.RemotePath, httpErr.StatusCode, result.Err)
+					if _, prevSynced := s.state.Files[result.RemotePath]; prevSynced {
+						remotePaths[result.RemotePath] = struct{}{}
+						filesThisPage++
+					}
 					continue
 				}
 				return result.Err
