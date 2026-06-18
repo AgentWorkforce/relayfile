@@ -1,6 +1,6 @@
 {
   "name": "@relayfile/agents",
-  "version": "0.10.1",
+  "version": "0.10.5",
   "description": "Thin agent-framework adapters for Relayfile. One connect() call, ready tools, proven writeback lifecycle.",
   "license": "Apache-2.0",
   "type": "module",
@@ -48,22 +48,34 @@
     "@langchain/core": ">=0.3",
     "@langchain/langgraph": ">=0.2",
     "@openai/agents": ">=0",
-    "@relayfile/sdk": "^0.10.1",
+    "@relayfile/sdk": "^0.10.5",
     "ai": ">=4"
   },
   "peerDependenciesMeta": {
-    "@ai-sdk/anthropic": { "optional": true },
-    "@langchain/anthropic": { "optional": true },
-    "@langchain/core": { "optional": true },
-    "@langchain/langgraph": { "optional": true },
-    "@openai/agents": { "optional": true },
-    "ai": { "optional": true }
+    "@ai-sdk/anthropic": {
+      "optional": true
+    },
+    "@langchain/anthropic": {
+      "optional": true
+    },
+    "@langchain/core": {
+      "optional": true
+    },
+    "@langchain/langgraph": {
+      "optional": true
+    },
+    "@openai/agents": {
+      "optional": true
+    },
+    "ai": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@langchain/core": "^0.3.25",
     "@langchain/langgraph": "^0.2.31",
     "@openai/agents": "^0.0.13",
-    "@relayfile/sdk": "^0.10.1",
+    "@relayfile/sdk": "0.10.5",
     "@types/node": "^20.19.43",
     "ai": "^4.0.20",
     "typescript": "^5.5.4"
