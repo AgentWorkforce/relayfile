@@ -124,3 +124,7 @@ future examples once labels are proven.
 Every SDK call here is pinned against `docs/integrations/SDK-SURFACE.md`.
 Linear write-field contracts are in `/discovery/linear/.adapter.md` on the
 data plane.
+
+## Why this vs. a provider MCP?
+
+Honest answer in [packages/agents/README.md](../../../packages/agents/README.md#when-to-use-this-vs-a-provider-mcp): the MCP wins for one-shot single-provider work; `@relayfile/agents` is structurally better as integrations and agents compound.

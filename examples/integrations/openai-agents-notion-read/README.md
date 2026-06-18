@@ -27,3 +27,7 @@ For CI / non-interactive: set `CLOUD_API_ACCESS_TOKEN`
 Identical to the Vercel AI SDK sibling: workspace bootstrap → path-scoped
 least-privilege read → `listTree` + `readFile` against `/notion` wired into
 the framework's tool layer.
+
+## Why this vs. a provider MCP?
+
+Honest answer in [packages/agents/README.md](../../../packages/agents/README.md#when-to-use-this-vs-a-provider-mcp): the MCP wins for one-shot single-provider work; `@relayfile/agents` is structurally better as integrations and agents compound.

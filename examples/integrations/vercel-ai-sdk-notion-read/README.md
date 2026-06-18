@@ -82,3 +82,7 @@ The agent will explore `/notion`, build a summary, and print tool-call traces.
 
 Every SDK call in this example is verified against `docs/integrations/SDK-SURFACE.md`.
 If you edit and a call breaks, check the divergence table at Section 0 of that doc first.
+
+## Why this vs. a provider MCP?
+
+Honest answer in [packages/agents/README.md](../../../packages/agents/README.md#when-to-use-this-vs-a-provider-mcp): the MCP wins for one-shot single-provider work; `@relayfile/agents` is structurally better as integrations and agents compound.

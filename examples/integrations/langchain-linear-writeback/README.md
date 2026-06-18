@@ -28,3 +28,7 @@ For CI: set `CLOUD_API_ACCESS_TOKEN` (and optionally `CLOUD_API_REFRESH_TOKEN`,
 Every smoke run creates ONE real Linear label and deletes it before exit.
 Test labels are prefixed `relayfile-writeback-test`. See
 `vercel-ai-sdk-linear-writeback/README.md` for the full contract details.
+
+## Why this vs. a provider MCP?
+
+Honest answer in [packages/agents/README.md](../../../packages/agents/README.md#when-to-use-this-vs-a-provider-mcp): the MCP wins for one-shot single-provider work; `@relayfile/agents` is structurally better as integrations and agents compound.

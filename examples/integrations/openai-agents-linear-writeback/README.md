@@ -30,3 +30,7 @@ are prefixed `relayfile-writeback-test` so you can identify orphans if a run
 is interrupted. See `vercel-ai-sdk-linear-writeback/README.md` for the
 contract details (draft semantics, externalId path discipline, the
 adapter-doc drift filed as relayfile-adapters#213).
+
+## Why this vs. a provider MCP?
+
+Honest answer in [packages/agents/README.md](../../../packages/agents/README.md#when-to-use-this-vs-a-provider-mcp): the MCP wins for one-shot single-provider work; `@relayfile/agents` is structurally better as integrations and agents compound.
