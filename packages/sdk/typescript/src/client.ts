@@ -1530,7 +1530,7 @@ export class RelayFileClient {
   async writeFile(input: WriteFileInput): Promise<WriteQueuedResponse> {
     const { workspaceId, path, correlationId, baseRevision, content, contentType, encoding, contentIdentity, signal } = input;
     const query = buildQuery({ path, forkId: input.forkId });
-    return this.request<WriteQueuedResponse>({
+    const result = await this.request<WriteQueuedResponse>({
       method: "PUT",
       path: `/v1/workspaces/${encodeURIComponent(workspaceId)}/fs/file${query}`,
       correlationId,
@@ -1547,6 +1547,9 @@ export class RelayFileClient {
       },
       signal
     });
+    const cache = getFileReadCache(this);
+    if (cache !== false) cache.evict(workspaceId, path);
+    return result;
   }
 
   async bulkWrite(input: BulkWriteInput): Promise<BulkWriteResponse> {
@@ -1560,12 +1563,19 @@ export class RelayFileClient {
       },
       signal: input.signal
     });
-    return this.readPayload(response) as Promise<BulkWriteResponse>;
+    const result = await (this.readPayload(response) as Promise<BulkWriteResponse>);
+    const cache = getFileReadCache(this);
+    if (cache !== false) {
+      for (const file of input.files) {
+        cache.evict(input.workspaceId, file.path);
+      }
+    }
+    return result;
   }
 
   async deleteFile(input: DeleteFileInput): Promise<WriteQueuedResponse> {
     const query = buildQuery({ path: input.path, forkId: input.forkId });
-    return this.request<WriteQueuedResponse>({
+    const result = await this.request<WriteQueuedResponse>({
       method: "DELETE",
       path: `/v1/workspaces/${encodeURIComponent(input.workspaceId)}/fs/file${query}`,
       correlationId: input.correlationId,
@@ -1574,6 +1584,9 @@ export class RelayFileClient {
       },
       signal: input.signal
     });
+    const cache = getFileReadCache(this);
+    if (cache !== false) cache.evict(input.workspaceId, input.path);
+    return result;
   }
 
   async createFork(input: CreateForkInput): Promise<ForkHandle> {
