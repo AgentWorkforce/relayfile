@@ -231,8 +231,9 @@ for self-host Connect; Cloud convergence remains separate from this surface.
 (`oauth_connected` or provider `ready: true`). Data-plane readiness is a
 separate, shipped helper — `RelayFileClient.waitForData(workspaceId, provider)`
 over `/v1/workspaces/{id}/sync/status` (resolves when the provider reports
-`ready`). See `docs/integrations/SELF-HOST.md` for the full connect → data-ready
-flow and the provider sync-coverage matrix.
+`ready`, or when an OSS `healthy` row includes processed-ingest progress via
+`cursor`/`watermarkTs`). See `docs/integrations/SELF-HOST.md` for the full
+connect → data-ready flow and the provider sync-coverage matrix.
 
 ---
 

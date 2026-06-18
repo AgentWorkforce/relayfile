@@ -56,12 +56,12 @@ Auth-ready is not data-ready. After connect, a provider sync still has to backfi
 // Push normalized provider events into the VFS with a workspace token (no internal HMAC).
 await client.ingestWebhook(/* workspaceId, normalized event */);
 
-// Wait until first sync has actually materialized data for a provider (data-ready).
+// Wait until provider data is safe to read.
 await client.waitForData(workspaceId, "github");
 ```
 
 - **`ingestWebhook`** posts to the token-authed `POST /v1/workspaces/{workspaceId}/webhooks/ingest`. The receiver can be `@relayfile/webhook-server`, a Nango sync-webhook handler, a Composio trigger handler, or your own service.
-- **`waitForData`** polls `/v1/workspaces/{workspaceId}/sync/status` until the provider reports `ready`. This is the **data-ready signal**, distinct from Connect's auth-ready — call it before an agent reads `/<provider>/**` so it never reads an empty tree.
+- **`waitForData`** polls `/v1/workspaces/{workspaceId}/sync/status`. Cloud-managed syncs report first-sync completion with `ready`; OSS self-host reports provider health as `healthy`, so the SDK only treats `healthy` as data-ready after the status row carries processed-ingest progress (`cursor` or `watermarkTs`). If your OSS deployment ingests through custom webhooks or sync workers, gate on your own ingest completion when you need stronger proof than observed provider progress.
 
 The end-to-end self-host shape: `connect → backfill + live webhooks → waitForData → agent reads the VFS`. Full reference tracked in [#311](https://github.com/AgentWorkforce/relayfile/issues/311).
 

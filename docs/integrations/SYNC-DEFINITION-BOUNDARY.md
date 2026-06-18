@@ -8,8 +8,9 @@ definitions are a scoped services engagement.
 - Workspace-token ingest: `RelayFileClient.ingestWebhook(...)` sends normalized
   provider events to `POST /v1/workspaces/{workspaceId}/webhooks/ingest`.
 - Data readiness: `RelayFileClient.waitForData(workspaceId, provider)` polls
-  `/v1/workspaces/{workspaceId}/sync/status` until that provider reports
-  `ready`.
+  `/v1/workspaces/{workspaceId}/sync/status` until cloud reports first-sync
+  `ready`, or until OSS reports `healthy` with processed-ingest progress
+  (`cursor`/`watermarkTs`).
 - Adapter contract: `@relayfile/adapter-*` packages define path mapping,
   webhook normalization, writeback payloads, and digest handling.
 - Self-host wiring: the developer runs Relayfile, their provider backend

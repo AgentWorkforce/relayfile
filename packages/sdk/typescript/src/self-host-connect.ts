@@ -188,7 +188,7 @@ function normalizeNonNegativeInteger(value: number | undefined, fallback: number
 
 function throwIfAborted(signal?: AbortSignal): void {
   if (signal?.aborted) {
-    throw new Error("Aborted while waiting for self-host connection.");
+    throw createAbortError();
   }
 }
 
@@ -196,15 +196,25 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   if (ms <= 0) {
     return Promise.resolve();
   }
+  if (signal?.aborted) {
+    return Promise.reject(createAbortError());
+  }
   return new Promise((resolve, reject) => {
-    const timeout = setTimeout(resolve, ms);
-    signal?.addEventListener(
-      "abort",
-      () => {
-        clearTimeout(timeout);
-        reject(new Error("Aborted while waiting for self-host connection."));
-      },
-      { once: true }
-    );
+    const onAbort = () => {
+      clearTimeout(timeout);
+      signal?.removeEventListener("abort", onAbort);
+      reject(createAbortError());
+    };
+    const timeout = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
   });
+}
+
+function createAbortError(): Error {
+  const error = new Error("Aborted while waiting for self-host connection.");
+  error.name = "AbortError";
+  return error;
 }

@@ -1635,6 +1635,59 @@ describe("RelayFileClient — existing methods", () => {
       expect(status.ready).toBe(true);
     });
 
+    it("waitForData treats OSS healthy with provider progress as data-ready", async () => {
+      const payload: SyncStatusResponse = {
+        workspaceId: "ws_acme",
+        providers: [{ provider: "linear", status: "healthy", cursor: "env_1" }],
+      };
+      const client = makeClient(mockFetch(payload));
+
+      const status = await client.waitForData("ws_acme", "linear");
+
+      expect(status.status).toBe("healthy");
+      expect(status.cursor).toBe("env_1");
+    });
+
+    it("waitForData does not treat bare OSS healthy as data-ready", async () => {
+      vi.useFakeTimers();
+      const payload: SyncStatusResponse = {
+        workspaceId: "ws_acme",
+        providers: [{ provider: "linear", status: "healthy" }],
+      };
+      const client = makeClient(mockFetch(payload));
+
+      try {
+        const promise = client.waitForData("ws_acme", "linear", {
+          pollIntervalMs: 500,
+          timeoutMs: 1_000,
+        });
+        const rejection = expect(promise).rejects.toThrow(
+          "Timed out waiting for linear data"
+        );
+
+        await vi.advanceTimersByTimeAsync(1_000);
+
+        await rejection;
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("waitForData ignores invalid returned provider ids while matching the requested provider", async () => {
+      const payload: SyncStatusResponse = {
+        workspaceId: "ws_acme",
+        providers: [
+          { provider: " ", status: "ready" },
+          { provider: "github", status: "ready" },
+        ],
+      };
+      const client = makeClient(mockFetch(payload));
+
+      const status = await client.waitForData("ws_acme", "github");
+
+      expect(status.provider).toBe("github");
+    });
+
     it("triggerSyncRefresh sends provider and reason", async () => {
       const payload: QueuedResponse = { status: "queued", id: "ref_1" };
       const f = mockFetch(payload);

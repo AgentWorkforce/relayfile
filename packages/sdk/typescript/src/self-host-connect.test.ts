@@ -103,6 +103,57 @@ describe("SelfHostConnect", () => {
       connectionId: "conn_123"
     });
   });
+
+  it("rejects immediately with AbortError when waitForConnection starts aborted", async () => {
+    const provider = connectProvider();
+    const connect = new SelfHostConnect({
+      provider,
+      providerConfigKeys: {
+        github: "github-prod"
+      }
+    });
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(
+      connect.waitForConnection("github", {
+        connectionId: "conn_123",
+        signal: controller.signal
+      })
+    ).rejects.toMatchObject({ name: "AbortError" });
+    expect(provider.getConnectionStatus).not.toHaveBeenCalled();
+  });
+
+  it("removes the abort listener when waitForConnection sleep is aborted", async () => {
+    const provider = connectProvider({
+      getConnectionStatus: vi.fn(async () => ({
+        connectionId: "conn_123",
+        state: "pending"
+      }))
+    });
+    const connect = new SelfHostConnect({
+      provider,
+      providerConfigKeys: {
+        github: "github-prod"
+      }
+    });
+    const controller = new AbortController();
+    const removeListener = vi.spyOn(controller.signal, "removeEventListener");
+
+    const promise = connect.waitForConnection("github", {
+      connectionId: "conn_123",
+      pollIntervalMs: 10_000,
+      timeoutMs: 60_000,
+      signal: controller.signal
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    controller.abort();
+
+    await expect(promise).rejects.toMatchObject({ name: "AbortError" });
+    expect(removeListener).toHaveBeenCalledWith("abort", expect.any(Function));
+  });
 });
 
 function baseProvider(): ConnectionProvider {

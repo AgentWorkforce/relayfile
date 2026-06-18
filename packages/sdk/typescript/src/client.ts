@@ -422,6 +422,11 @@ function normalizeProviderId(value: string): string {
   return normalized;
 }
 
+function normalizeProviderIdOrNull(value: string): string | null {
+  const normalized = value.trim().toLowerCase();
+  return normalized || null;
+}
+
 function normalizePositiveInteger(value: number, field: string): number {
   const normalized = Math.floor(value);
   if (!Number.isFinite(normalized) || normalized <= 0) {
@@ -431,7 +436,15 @@ function normalizePositiveInteger(value: number, field: string): number {
 }
 
 function providerDataReady(status: SyncProviderStatus): boolean {
-  return status.ready === true || status.status === "ready";
+  return (
+    status.ready === true ||
+    status.status === "ready" ||
+    (status.status === "healthy" && providerHasProgress(status))
+  );
+}
+
+function providerHasProgress(status: SyncProviderStatus): boolean {
+  return Boolean(status.cursor || status.watermarkTs);
 }
 
 class RelayFileWebSocketConnection implements WebSocketConnection {
@@ -1955,6 +1968,17 @@ export class RelayFileClient {
     });
   }
 
+  /**
+   * Wait until a provider is safe to read from the data plane.
+   *
+   * Cloud-managed syncs report first-sync completion through `ready: true` or
+   * `status: "ready"`. OSS self-host `/sync/status` uses `healthy` for provider
+   * health, including empty freshly filtered provider rows, so this method only
+   * treats OSS `healthy` as data-ready after processed-ingest progress appears
+   * on the status row (`cursor` or `watermarkTs`). For custom OSS ingest flows,
+   * gate on your own ingest completion when you need stronger domain-specific
+   * proof than provider progress.
+   */
   async waitForData(
     workspaceId: string,
     provider: string,
@@ -1981,7 +2005,7 @@ export class RelayFileClient {
         signal: options.signal
       });
       const providerStatus = status.providers.find(
-        (entry) => normalizeProviderId(entry.provider) === providerKey
+        (entry) => normalizeProviderIdOrNull(entry.provider) === providerKey
       );
       options.onPoll?.(elapsedMs, providerStatus);
 
