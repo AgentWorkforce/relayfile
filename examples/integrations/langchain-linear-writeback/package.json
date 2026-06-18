@@ -13,9 +13,8 @@
     "@langchain/anthropic": "^0.3.11",
     "@langchain/core": "^0.3.25",
     "@langchain/langgraph": "^0.2.31",
+    "@relayfile/agents": "file:../../../packages/agents",
     "@relayfile/sdk": "^0.10.1",
-    "ajv": "^8.17.1",
-    "ajv-formats": "^3.0.1",
     "zod": "^3.23.8"
   },
   "devDependencies": {

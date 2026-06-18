@@ -16,9 +16,13 @@ export {
 } from "@relayfile/sdk";
 
 import { vercelTools, type VercelToolsOptions } from "./tools/vercel.js";
+import { openaiTools, type OpenAIToolsOptions } from "./tools/openai.js";
+import { langchainTools, type LangChainToolsOptions } from "./tools/langchain.js";
 
 export const tools = {
   vercel: vercelTools,
+  openai: openaiTools,
+  langchain: langchainTools,
 };
 
-export type { VercelToolsOptions };
+export type { VercelToolsOptions, OpenAIToolsOptions, LangChainToolsOptions };
