@@ -1589,6 +1589,52 @@ describe("RelayFileClient — existing methods", () => {
       expect(res.providers).toHaveLength(1);
     });
 
+    it("waitForData polls sync status until the provider is ready", async () => {
+      vi.useFakeTimers();
+      const responses: SyncStatusResponse[] = [
+        { workspaceId: "ws_acme", providers: [{ provider: "github", status: "syncing" }] },
+        { workspaceId: "ws_acme", providers: [{ provider: "github", status: "ready" }] },
+      ];
+      const f = vi.fn(async () => {
+        const body = responses.shift() ?? responses[responses.length - 1];
+        return {
+          ok: true,
+          status: 200,
+          headers: new Headers({ "content-type": "application/json" }),
+          json: () => Promise.resolve(body),
+          text: () => Promise.resolve(JSON.stringify(body)),
+        } as unknown as Response;
+      });
+      const client = makeClient(f);
+      const onPoll = vi.fn();
+
+      const promise = client.waitForData("ws_acme", "github", {
+        pollIntervalMs: 1000,
+        onPoll,
+      });
+
+      await vi.advanceTimersByTimeAsync(1000);
+      const status = await promise;
+      vi.useRealTimers();
+
+      expect(status.status).toBe("ready");
+      expect(f).toHaveBeenCalledTimes(2);
+      expect(String(f.mock.calls[0]![0])).toContain("/v1/workspaces/ws_acme/sync/status?provider=github");
+      expect(onPoll).toHaveBeenCalledTimes(2);
+    });
+
+    it("waitForData treats ready=true as data-ready", async () => {
+      const payload: SyncStatusResponse = {
+        workspaceId: "ws_acme",
+        providers: [{ provider: "linear", status: "syncing", ready: true }],
+      };
+      const client = makeClient(mockFetch(payload));
+
+      const status = await client.waitForData("ws_acme", "linear");
+
+      expect(status.ready).toBe(true);
+    });
+
     it("triggerSyncRefresh sends provider and reason", async () => {
       const payload: QueuedResponse = { status: "queued", id: "ref_1" };
       const f = mockFetch(payload);

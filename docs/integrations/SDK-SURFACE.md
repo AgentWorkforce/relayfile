@@ -214,6 +214,28 @@ Properties: `info: WorkspaceInfo`, `workspaceId: string`.
 
 ---
 
+## Self-Host Connect
+
+`ConnectCapableProvider` (`src/connection.ts`) extends `ConnectionProvider` with
+`createConnectSession(input)` and `getConnectionStatus(input)`. Use
+`supportsConnect(provider)` before treating a provider as connect-capable.
+
+`SelfHostConnect` (`src/self-host-connect.ts`) is provider-backed and requires
+an explicit `providerConfigKeys` map (typed `ProviderConfigKeyMap`, a
+`Record<relayfileSlug, providerConfigKey>`), for example
+`{ github: "github-prod" }`. `startConnect("github", { endUserId })` resolves
+that map and calls the provider directly. The OSS server has no bind/adopt route
+for self-host Connect; Cloud convergence remains separate from this surface.
+
+`waitForConnection(provider, { connectionId })` waits for auth readiness
+(`oauth_connected` or provider `ready: true`). Data-plane readiness is a
+separate, shipped helper — `RelayFileClient.waitForData(workspaceId, provider)`
+over `/v1/workspaces/{id}/sync/status` (resolves when the provider reports
+`ready`). See `docs/integrations/SELF-HOST.md` for the full connect → data-ready
+flow and the provider sync-coverage matrix.
+
+---
+
 ## 6. MountedWorkspaceHandle (`src/setup.ts:1081`)
 
 `{ workspaceId, localDir, remotePath, mode: "poll"|"fuse", ready: boolean, expiresAt, suggestedRefreshAt }`
@@ -231,9 +253,43 @@ github · slack-sage · slack-my-senior-dev · slack-nightcto · notion · linea
 
 `WORKSPACE_INTEGRATION_PROVIDERS` is the exact allowed set for `connectIntegration(provider)` and `EnsureMountedWorkspaceInput.provider`.
 
+## 8. `@relayfile/agents` shipped surface
+
+PR 309 adds the thin package that the framework examples use:
+
+```ts
+import { connect, tools } from "@relayfile/agents";
+
+const rf = await connect({ scopes: ["relayfile:fs:read:/notion/**"] });
+tools.vercel(rf, { readPaths: ["/notion"] });
+tools.openai(rf, { readPaths: ["/notion"] });
+tools.langchain(rf, { readPaths: ["/notion"] });
+```
+
+The package wraps the canonical Cloud bootstrap from §1, exposes `rf.client` as the raw SDK escape hatch, and adds `writeback.*`, `read`, and `onEvent` helpers. See `packages/agents/README.md` for the package API and `examples/integrations/` for runnable smoke-tested projects.
+
+## 9. Self-host boundary
+
+`WorkspaceHandle.connectIntegration()` / `connectNotion()` are Cloud-backed today: they call Agent Relay Cloud `integrations/connect-session` and `status` routes. They are correct for hosted examples, but they are not a white-label self-host connect orchestrator.
+
+Current self-hostable pieces in this repo:
+
+| Need | Current surface |
+|---|---|
+| Run the VFS API | relayfile server |
+| Issue scoped workspace tokens | relayauth-compatible issuer |
+| Read/write/list files | `RelayFileClient` |
+| Push normalized provider events | `RelayFileClient.ingestWebhook(...)` -> `POST /v1/workspaces/{id}/webhooks/ingest` |
+| Orchestrate self-host connect | `SelfHostConnect` (`@relayfile/sdk`) + a `ConnectCapableProvider` |
+| Wait for first-sync data | `RelayFileClient.waitForData(id, provider)` -> `/v1/workspaces/{id}/sync/status` |
+| Consume writeback work | writeback queue / consumer APIs |
+| Framework tools | `@relayfile/agents` |
+
+Self-host provider OAuth session minting and `connectionId` binding remain provider-stack work; first-sync backfill and the actual sync definitions are the [paid boundary](./SYNC-DEFINITION-BOUNDARY.md). The connect orchestrator (`SelfHostConnect`) and the data-ready signal (`waitForData`) now ship in `@relayfile/sdk`. Issues [#310](https://github.com/AgentWorkforce/relayfile/issues/310) and [#311](https://github.com/AgentWorkforce/relayfile/issues/311) track turning more of that into explicit SDK/OSS surface. The short guide is `docs/integrations/SELF-HOST.md`.
+
 ---
 
-## 8. Existing examples to lift patterns from (`examples/`)
+## 10. Existing examples to lift patterns from (`examples/`)
 
 | Dir | Demonstrates | Real SDK calls |
 |---|---|---|
@@ -245,6 +301,8 @@ github · slack-sage · slack-my-senior-dev · slack-nightcto · notion · linea
 | `06-writeback-consumer` | writeback handler | — |
 
 Env vars these examples read: `RELAYFILE_TOKEN`, `WORKSPACE_ID` (and scoped variants in 05). The SDK does **not** auto-read `process.env` — the caller passes token + workspaceId explicitly.
+
+Framework examples live under `examples/integrations/` and use `@relayfile/agents`: Vercel AI SDK, OpenAI Agents SDK, and LangChain Notion read / Linear writeback projects, plus the Vercel Linear events example.
 
 ---
 

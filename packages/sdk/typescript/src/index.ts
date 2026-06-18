@@ -100,14 +100,28 @@ export { IntegrationProvider, computeCanonicalPath } from "./provider.js";
 export type { WebhookInput, ListProviderFilesOptions, WatchProviderEventsOptions } from "./provider.js";
 // Connection provider contract
 export type {
+  ConnectCapableProvider,
+  ConnectConnectionStatus,
+  ConnectSession,
   ConnectionProvider,
+  CreateConnectSessionInput,
+  GetConnectConnectionStatusInput,
   NormalizedWebhook,
+  ProviderConfigKeyMap,
   ProxyHeaders,
   ProxyMethod,
   ProxyQuery,
   ProxyRequest,
   ProxyResponse,
 } from "./connection.js";
+export { supportsConnect } from "./connection.js";
+export { SelfHostConnect } from "./self-host-connect.js";
+export type {
+  SelfHostConnectOptions,
+  SelfHostConnectResult,
+  StartSelfHostConnectOptions,
+  WaitForSelfHostConnectionOptions
+} from "./self-host-connect.js";
 
 export type {
   AckResponse,
@@ -177,6 +191,7 @@ export type {
   GetSyncDeadLettersOptions,
   GetSyncIngressStatusOptions,
   GetSyncStatusOptions,
+  WaitForDataOptions,
   GetWebhookDeadLettersOptions,
   IngestWebhookInput,
   LayoutManifest,

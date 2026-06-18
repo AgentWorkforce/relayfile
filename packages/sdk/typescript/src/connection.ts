@@ -46,3 +46,52 @@ export interface ConnectionProvider {
   getConnection?(connectionId: string): Promise<Record<string, unknown>>;
   listConnections?(): Promise<Array<Record<string, unknown>>>;
 }
+
+/**
+ * Maps a relayfile provider slug (e.g. "github", "linear") to the provider
+ * config key it is registered under in your credential backend (e.g. the Nango
+ * `providerConfigKey`). The relayfile slug is NOT guaranteed to equal the
+ * upstream config key, so self-host callers supply this mapping explicitly.
+ */
+export type ProviderConfigKeyMap = Record<string, string>;
+
+export interface CreateConnectSessionInput {
+  relayfileProvider: string;
+  providerConfigKey: string;
+  endUserId: string;
+  connectionId?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface ConnectSession {
+  connectLink: string | null;
+  sessionToken: string | null;
+  expiresAt: string | null;
+  connectionId: string;
+}
+
+export interface GetConnectConnectionStatusInput {
+  relayfileProvider: string;
+  providerConfigKey: string;
+  connectionId: string;
+}
+
+export interface ConnectConnectionStatus {
+  connectionId: string;
+  state: string;
+  ready?: boolean;
+  raw?: unknown;
+}
+
+export interface ConnectCapableProvider extends ConnectionProvider {
+  createConnectSession(input: CreateConnectSessionInput): Promise<ConnectSession>;
+  getConnectionStatus(input: GetConnectConnectionStatusInput): Promise<ConnectConnectionStatus>;
+}
+
+export function supportsConnect(provider: ConnectionProvider): provider is ConnectCapableProvider {
+  const candidate = provider as Partial<ConnectCapableProvider>;
+  return (
+    typeof candidate.createConnectSession === "function" &&
+    typeof candidate.getConnectionStatus === "function"
+  );
+}

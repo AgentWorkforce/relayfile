@@ -69,9 +69,9 @@ a user prompt but reacting to provider state changes (a new Linear issue, a Noti
 a GitHub PR opened). MCPs have no concept of this: they're pull-only.
 
 The SDK exposes `connectWebSocket({ onEvent })` and a glob-based `subscribe()` API for
-filtering. See `examples/04-realtime-events/` for the raw-SDK pattern. A framework-wrapped
-"agent reacts to webhook" example is on the Phase-2 roadmap — the wiring is identical to the
-read/write examples in this PR plus a long-lived event loop.
+filtering. See `examples/04-realtime-events/` for the raw-SDK pattern and
+[`examples/integrations/vercel-ai-sdk-linear-events`](../../examples/integrations/vercel-ai-sdk-linear-events/)
+for the framework-wrapped "agent reacts to webhook" example.
 
 ### Operational deploy story
 
@@ -114,7 +114,7 @@ That's it. No legacy probing.
 
 ## See also
 
-Six runnable example projects in [`examples/integrations/`](../../examples/integrations/) —
-Vercel AI SDK / OpenAI Agents / LangChain × Notion read + Linear writeback. Each is
-self-contained (`npm install && npm run smoke`) and proves the full lifecycle against
-production Relayfile.
+Seven runnable example projects in [`examples/integrations/`](../../examples/integrations/) —
+Vercel AI SDK / OpenAI Agents / LangChain × Notion read + Linear writeback, plus Vercel
+AI SDK Linear events. Each is self-contained (`npm install && npm run smoke`) and proves
+the relevant lifecycle against production Relayfile.
