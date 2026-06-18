@@ -128,6 +128,16 @@ func TestWriteOnlyMountDisablesWebSocketCadence(t *testing.T) {
 	}
 }
 
+func TestWatcherUnavailableDisablesWebSocketReconcileCadence(t *testing.T) {
+	cfg := mountConfig{websocketEnabled: true, syncMode: syncModeMirror}
+	if !mountReconcileUsesWebSocketCadence(cfg, true) {
+		t.Fatal("active watcher should allow websocket reconcile cadence")
+	}
+	if mountReconcileUsesWebSocketCadence(cfg, false) {
+		t.Fatal("missing watcher must keep regular reconcile cadence for local scans")
+	}
+}
+
 func TestResolveMountMode(t *testing.T) {
 	tests := []struct {
 		name    string

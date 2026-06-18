@@ -2,6 +2,7 @@ package mountsync
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -99,6 +100,36 @@ func TestWatcherCloseCancelsPendingDebounce(t *testing.T) {
 		t.Fatalf("close watcher: %v", err)
 	}
 	assertNoWatcherEvents(t, events, 150*time.Millisecond)
+}
+
+func TestWatcherStartReturnsLimitExceededWhenDirectoryBudgetExceeded(t *testing.T) {
+	t.Setenv("RELAYFILE_MOUNT_MAX_WATCH_DIRS", "1")
+	localDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(localDir, "github", "repos", "owner", "repo"), 0o755); err != nil {
+		t.Fatalf("seed nested tree: %v", err)
+	}
+	watcher, err := NewFileWatcher(localDir, func(string, fsnotify.Op) {})
+	if err != nil {
+		t.Fatalf("create watcher: %v", err)
+	}
+	defer watcher.Close()
+
+	err = watcher.Start(context.Background())
+	if !errors.Is(err, ErrWatcherLimitExceeded) {
+		t.Fatalf("expected watcher limit error, got %v", err)
+	}
+}
+
+func TestWatcherAddErrorClassificationDoesNotHideMissingPaths(t *testing.T) {
+	if !isBenignWatcherAddError(errors.New("file already exists")) {
+		t.Fatal("expected duplicate watcher add errors to be benign")
+	}
+	if isBenignWatcherAddError(errors.New("no such file or directory")) {
+		t.Fatal("missing paths must not be treated as benign watcher add errors")
+	}
+	if isBenignWatcherAddError(errors.New("does not exist")) {
+		t.Fatal("does-not-exist errors must not be treated as benign watcher add errors")
+	}
 }
 
 func TestWatcherDetectsFileWrite(t *testing.T) {
