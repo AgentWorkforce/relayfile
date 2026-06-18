@@ -1,0 +1,23 @@
+{
+  "name": "@relayfile-example/vercel-ai-sdk-notion-read",
+  "private": true,
+  "version": "0.0.1",
+  "description": "Vercel AI SDK agent that reads workspace Notion content via Relayfile.",
+  "type": "module",
+  "scripts": {
+    "smoke": "tsx src/smoke.ts",
+    "dev": "tsx src/index.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@ai-sdk/anthropic": "^1.0.5",
+    "@relayfile/sdk": "^0.10.1",
+    "ai": "^4.0.20",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.43",
+    "tsx": "^4.19.2",
+    "typescript": "^5.5.4"
+  }
+}
