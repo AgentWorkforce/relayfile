@@ -41,8 +41,8 @@ async function pollOp(
   opId: string,
   opts: { intervalMs?: number; timeoutMs?: number } = {},
 ): Promise<OpReceipt> {
-  const deadline = Date.now() + (opts.timeoutMs ?? 30_000);
-  const interval = opts.intervalMs ?? 1_000;
+  const deadline = Date.now() + (opts.timeoutMs ?? 60_000);
+  const interval = opts.intervalMs ?? 1_500;
   let lastStatus = "(no op observed yet)";
   let lastProviderResult: Record<string, unknown> | undefined;
   let lastError: string | null | undefined;

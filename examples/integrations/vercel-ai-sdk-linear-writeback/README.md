@@ -56,31 +56,20 @@ to clear accumulated drafts in bulk.
 
 Same credential resolution as the Notion read example — three options:
 
-### Option A — pre-minted relayfile token (most CI-clean, no cloud hop)
+One-time setup:
 
 ```bash
-export RELAYFILE_BASE_URL="https://api.relayfile.dev"
-export RELAYFILE_WORKSPACE_ID="rw_…"
-export RELAYFILE_TOKEN="ey…"   # JWT with read+write scopes for /linear and /discovery/linear
+agent-relay cloud login            # writes ~/.agentworkforce/relay/cloud-auth.json
+export CLOUD_WORKSPACE_ID=<your-app-uuid>
+npm install
 ```
 
-### Option B — cloud control plane (env)
-
-```bash
-export CLOUD_API_URL="https://agentrelay.com/cloud"
-export CLOUD_API_ACCESS_TOKEN="cld_at_…"
-export CLOUD_API_REFRESH_TOKEN="cld_rt_…"
-export CLOUD_WORKSPACE_ID="<your-app-uuid>"
-```
-
-### Option C — local cred file (operator convenience)
-
-Run `agent-relay cloud login` once. Set just `CLOUD_WORKSPACE_ID`.
+For CI: set `CLOUD_API_ACCESS_TOKEN` (and optionally `CLOUD_API_REFRESH_TOKEN`,
+`CLOUD_API_URL`) instead of running login.
 
 ### Smoke (no LLM)
 
 ```bash
-npm install
 npm run smoke
 ```
 

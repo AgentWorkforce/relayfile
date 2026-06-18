@@ -15,41 +15,24 @@ Relayfile tools; Relayfile resolves Notion content from the synced workspace.
 
 ## Run
 
-You need:
-
-- **A Relayfile workspace with Notion connected.** This workspace's app-UUID goes in `CLOUD_WORKSPACE_ID`.
-- **Cloud credentials**, either as env vars (CI-safe) or from a local file written by `agent-relay cloud login`.
-
-### Option A — pre-minted relayfile token (most CI-clean, no cloud hop)
+One-time setup:
 
 ```bash
-export RELAYFILE_BASE_URL="https://api.relayfile.dev"
-export RELAYFILE_WORKSPACE_ID="rw_…"
-export RELAYFILE_TOKEN="ey…"      # JWT with relayfile:fs:read:/notion/** scope
+agent-relay cloud login            # writes ~/.agentworkforce/relay/cloud-auth.json
+export CLOUD_WORKSPACE_ID=<your-app-uuid>   # from https://agentrelay.com/cloud
+npm install
 ```
 
-Skips the cloud control plane entirely. Useful when a token has already been
-minted by some other process (e.g. CI).
-
-### Option B — cloud control plane (env)
+Then either:
 
 ```bash
-export CLOUD_API_URL="https://agentrelay.com/cloud"
-export CLOUD_API_ACCESS_TOKEN="cld_at_…"
-export CLOUD_API_REFRESH_TOKEN="cld_rt_…"   # optional but recommended
-export CLOUD_WORKSPACE_ID="<your-app-uuid>"
+npm run smoke           # deterministic, no LLM key needed
+ANTHROPIC_API_KEY=sk-ant-… npm run dev   # full agent with Vercel AI SDK
 ```
 
-If you omit `CLOUD_API_REFRESH_TOKEN`, the bootstrap pins the access token
-as far-future so the SDK uses it as-is without trying to roll it.
-
-### Option C — local cred file (operator convenience)
-
-Run `agent-relay cloud login` once. The example will discover credentials at
-`~/.agentworkforce/relay/cloud-auth.json` (or `~/.cloud/credentials.json` /
-`~/.relayfile/cloud-credentials.json` as fallbacks). Set just
-`CLOUD_WORKSPACE_ID`. If the cred file is stale the bootstrap warns and the
-SDK refreshes automatically via the stored refresh token.
+For CI / non-interactive runs, swap `agent-relay cloud login` for the env
+overrides: `CLOUD_API_URL`, `CLOUD_API_ACCESS_TOKEN`, `CLOUD_API_REFRESH_TOKEN`
+(optional), `CLOUD_WORKSPACE_ID`.
 
 ### Smoke (no LLM, deterministic)
 
