@@ -2678,6 +2678,55 @@ func TestFlushOutboxOnceFlushesPendingWithoutMirrorScan(t *testing.T) {
 	}
 }
 
+// A draft written but never ingested by a sync cycle (the teardown race: a
+// final fire-and-forget reply right before shutdown) is on disk but not in the
+// outbox. FlushOutboxOnce drops it (outbox-only, no local scan);
+// PushLocalAndFlushOnce ingests it by scanning the on-disk mirror, then flushes.
+func TestPushLocalAndFlushOnceIngestsUnsyncedLocalDraft(t *testing.T) {
+	localDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(localDir, "command.json"), []byte(`{"text":"hello"}`), 0o644); err != nil {
+		t.Fatalf("seed local command failed: %v", err)
+	}
+
+	// Baseline: FlushOutboxOnce must NOT ingest the unsynced draft (the bug).
+	flushClient := &fakeClient{files: map[string]RemoteFile{}}
+	flushOnly, err := NewSyncer(flushClient, SyncerOptions{
+		WorkspaceID: "ws_push_local_once",
+		RemoteRoot:  "/slack/channels/C123/messages",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer flushOnly: %v", err)
+	}
+	if err := flushOnly.FlushOutboxOnce(context.Background()); err != nil {
+		t.Fatalf("FlushOutboxOnce failed: %v", err)
+	}
+	if flushClient.bulkWriteCalls != 0 {
+		t.Fatalf("FlushOutboxOnce must not ingest an unsynced local draft, got %d uploads", flushClient.bulkWriteCalls)
+	}
+
+	// Fix: PushLocalAndFlushOnce scans the on-disk mirror, ingests the draft,
+	// uploads it, and drains the outbox.
+	pushClient := &fakeClient{files: map[string]RemoteFile{}}
+	drain, err := NewSyncer(pushClient, SyncerOptions{
+		WorkspaceID: "ws_push_local_once",
+		RemoteRoot:  "/slack/channels/C123/messages",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer drain: %v", err)
+	}
+	if err := drain.PushLocalAndFlushOnce(context.Background()); err != nil {
+		t.Fatalf("PushLocalAndFlushOnce failed: %v", err)
+	}
+	if pushClient.bulkWriteCalls != 1 {
+		t.Fatalf("expected the unsynced draft to be ingested + uploaded once, got %d", pushClient.bulkWriteCalls)
+	}
+	if pending := readPendingOutboxRecordsForTest(t, localDir); len(pending) != 0 {
+		t.Fatalf("expected outbox drained after push+flush, got %+v", pending)
+	}
+}
+
 func TestFlushOutboxOnceWritesReceiptCapabilityMarkerWithEmptyOutbox(t *testing.T) {
 	localDir := t.TempDir()
 	client := &fakeClient{files: map[string]RemoteFile{}}

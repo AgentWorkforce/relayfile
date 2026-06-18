@@ -65,6 +65,7 @@ type mountConfig struct {
 	scopes           []string
 	once             bool
 	flushOutboxOnce  bool
+	pushLocalOnce    bool
 	mode             string
 }
 
@@ -106,6 +107,7 @@ func main() {
 	fuse := flag.Bool("fuse", boolEnv("RELAYFILE_MOUNT_FUSE", false), "shortcut for --mode=fuse")
 	once := flag.Bool("once", false, "run one sync cycle and exit")
 	flushOutboxOnce := flag.Bool("flush-outbox-once", false, "flush durable writeback outbox once and exit without reconciling the local mirror")
+	pushLocalOnce := flag.Bool("push-local-once", false, "ingest pending local writeback drafts (one pushLocal pass) then flush the outbox once and exit; no pullRemote/digest/reconcile — the teardown drain for last-moment drafts")
 	flag.Parse()
 
 	resolvedToken := strings.TrimSpace(*token)
@@ -184,6 +186,7 @@ func main() {
 		scopes:           parseTokenScopes(resolvedToken),
 		once:             *once,
 		flushOutboxOnce:  *flushOutboxOnce,
+		pushLocalOnce:    *pushLocalOnce,
 		mode:             resolvedMode,
 	}
 
@@ -400,6 +403,15 @@ func runSinglePollingMount(rootCtx context.Context, cfg mountConfig) error {
 	}
 	if _, err := mountsync.StartDiagnostics(rootCtx, cfg.pprofAddr, cfg.memlogInterval, log.Default()); err != nil {
 		return fmt.Errorf("start diagnostics: %w", err)
+	}
+	if cfg.pushLocalOnce {
+		ctx, cancel := context.WithTimeout(rootCtx, cfg.timeout)
+		defer cancel()
+		if err := syncer.PushLocalAndFlushOnce(ctx); err != nil {
+			return fmt.Errorf("push local and flush once: %w", err)
+		}
+		log.Printf("local push + outbox flush completed")
+		return nil
 	}
 	if cfg.flushOutboxOnce {
 		ctx, cancel := context.WithTimeout(rootCtx, cfg.timeout)
