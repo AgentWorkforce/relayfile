@@ -2,8 +2,10 @@ package mountsync
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -11,16 +13,22 @@ import (
 	"github.com/fsnotify/fsnotify"
 )
 
+const defaultMaxWatchedDirs = 8192
+
+var ErrWatcherLimitExceeded = errors.New("mount file watcher directory limit exceeded")
+
 // FileWatcher watches a local directory for changes using OS-level
 // notifications (inotify on Linux, FSEvents on macOS).
 type FileWatcher struct {
-	watcher  *fsnotify.Watcher
-	localDir string
-	onChange func(relativePath string, op fsnotify.Op)
-	mu       sync.Mutex
-	debounce map[string]*time.Timer // debounce rapid events per file
-	closed   bool
-	wg       sync.WaitGroup
+	watcher     *fsnotify.Watcher
+	localDir    string
+	onChange    func(relativePath string, op fsnotify.Op)
+	maxDirs     int
+	watchedDirs int
+	mu          sync.Mutex
+	debounce    map[string]*time.Timer // debounce rapid events per file
+	closed      bool
+	wg          sync.WaitGroup
 }
 
 func NewFileWatcher(localDir string, onChange func(string, fsnotify.Op)) (*FileWatcher, error) {
@@ -32,6 +40,7 @@ func NewFileWatcher(localDir string, onChange func(string, fsnotify.Op)) (*FileW
 		watcher:  w,
 		localDir: localDir,
 		onChange: onChange,
+		maxDirs:  watcherMaxDirsFromEnv(),
 		debounce: make(map[string]*time.Timer),
 	}, nil
 }
@@ -200,12 +209,44 @@ func (fw *FileWatcher) addDirRecursive(base string) error {
 		if fw.isTopLevelReservedDir(path, name) {
 			return filepath.SkipDir
 		}
-		// Best-effort add. fsnotify returns an error for already-watched dirs
-		// on macOS/FSEvents in some cases; we ignore it because re-adding is
-		// a no-op semantically.
-		_ = fw.watcher.Add(path)
+		if fw.maxDirs > 0 && fw.watchedDirs >= fw.maxDirs {
+			return fmtWatcherLimitExceeded(fw.maxDirs)
+		}
+		if err := fw.watcher.Add(path); err != nil {
+			if isBenignWatcherAddError(err) {
+				return nil
+			}
+			return err
+		}
+		fw.watchedDirs++
 		return nil
 	})
+}
+
+func watcherMaxDirsFromEnv() int {
+	raw := strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_MAX_WATCH_DIRS"))
+	if raw == "" {
+		return defaultMaxWatchedDirs
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil {
+		return defaultMaxWatchedDirs
+	}
+	if value < 0 {
+		return 0
+	}
+	return value
+}
+
+func fmtWatcherLimitExceeded(limit int) error {
+	return errors.Join(ErrWatcherLimitExceeded, errors.New("watched directory limit reached: "+strconv.Itoa(limit)))
+}
+
+func isBenignWatcherAddError(err error) bool {
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "already watched") ||
+		strings.Contains(message, "already exists") ||
+		strings.Contains(message, "file exists")
 }
 
 func (fw *FileWatcher) isTopLevelReservedDir(path, name string) bool {

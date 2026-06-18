@@ -463,12 +463,15 @@ func runSinglePollingMount(rootCtx context.Context, cfg mountConfig) error {
 		}
 	})
 	if err != nil {
-		return fmt.Errorf("create file watcher: %w", err)
+		log.Printf("file watcher unavailable; continuing with polling sync: %v", err)
+	} else if err := watcher.Start(rootCtx); err != nil {
+		_ = watcher.Close()
+		log.Printf("file watcher disabled; continuing with polling sync: %v", err)
+		watcher = nil
 	}
-	if err := watcher.Start(rootCtx); err != nil {
-		return fmt.Errorf("start file watcher: %w", err)
+	if watcher != nil {
+		defer watcher.Close()
 	}
-	defer watcher.Close()
 
 	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
 	timer := time.NewTimer(jitteredIntervalWithSample(cfg.interval, cfg.intervalJitter, rng.Float64()))
@@ -491,7 +494,10 @@ func runSinglePollingMount(rootCtx context.Context, cfg mountConfig) error {
 			}
 		case <-timer.C:
 			cycle++
-			reconcile := shouldReconcileMountCycle(mountWebSocketEnabled(cfg), cycle)
+			reconcile := shouldReconcileMountCycle(
+				mountReconcileUsesWebSocketCadence(cfg, watcher != nil),
+				cycle,
+			)
 			if reconcile {
 				run(true)
 			}
@@ -825,6 +831,10 @@ func shouldReconcileMountCycle(websocketEnabled bool, cycle int) bool {
 
 func mountWebSocketEnabled(cfg mountConfig) bool {
 	return cfg.websocketEnabled && cfg.syncMode != syncModeWriteOnly
+}
+
+func mountReconcileUsesWebSocketCadence(cfg mountConfig, watcherActive bool) bool {
+	return watcherActive && mountWebSocketEnabled(cfg)
 }
 
 func clampJitterRatio(value float64) float64 {
