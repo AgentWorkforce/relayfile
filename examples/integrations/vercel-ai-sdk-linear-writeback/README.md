@@ -26,6 +26,32 @@ deletes it before exit. All artifacts are clearly marked
 any orphan if the smoke is interrupted mid-flight. Look under
 `/linear/labels/relayfile-writeback-test-*` if you need to clean up.
 
+### What each delete actually does
+
+The smoke performs two delete calls; their provider-side semantics differ:
+
+| Delete target | Path shape | Linear-side effect |
+|---|---|---|
+| **Canonical** | `/linear/labels/<uuid>.json` (UUID-matching) | **Propagates** — real Linear label is deleted via GraphQL. |
+| **Draft receipt** | `/linear/labels/relayfile-writeback-test--*.json` (non-UUID) | **Local-only** — Relayfile-side cleanup, does NOT enqueue a Linear writeback. Per cloud `path-eligibility.ts`, the Linear delete writeback only fires for paths matching `/linear/(issues\|labels\|projects)/<uuid>.json`. |
+
+That means deleting the draft receipt is a free no-op writeback-wise; no
+risk of accidentally double-firing a Linear delete.
+
+### Why drafts exist at all
+
+The Linear adapter writes a **receipt** to the draft path with
+`{ created, path, externalId }` after the canonical is materialized in
+parallel at `/linear/labels/<externalId>.json`. The discovery doc at
+`/discovery/linear/.adapter.md` claims drafts are *renamed* to the canonical
+path, but the runtime currently writes the receipt in place instead — tracked
+as [`AgentWorkforce/relayfile-adapters#213`](https://github.com/AgentWorkforce/relayfile-adapters/issues/213).
+The example follows the *real* contract: read `externalId` from
+`providerResult`, operate on `/linear/labels/<externalId>.json`, then clean
+up the draft receipt explicitly. You can also use
+`client.sweepWritebackDrafts({ workspaceId, pathPrefix: "/linear/labels/", apply: true })`
+to clear accumulated drafts in bulk.
+
 ## Run
 
 Same credential resolution as the Notion read example — three options:
