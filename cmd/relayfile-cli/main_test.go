@@ -1284,10 +1284,7 @@ func TestIntegrationConnectRefreshesCloudAccessTokenAndReusesWorkspace(t *testin
 			_, _ = w.Write([]byte(`{"ready":true}`))
 		case "/v1/workspaces/ws_123/sync/status":
 			seen["sync"] = true
-			if got := r.Header.Get("Authorization"); got != "Bearer rf_join" {
-				t.Fatalf("unexpected sync Authorization: %q", got)
-			}
-			_, _ = w.Write([]byte(`{"workspaceId":"ws_123","providers":[{"provider":"notion","status":"ready","lagSeconds":4,"watermarkTs":"2026-05-02T18:00:00Z"}]}`))
+			t.Fatalf("integration connect should not poll sync status unless --wait-sync is set")
 		default:
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
@@ -1307,24 +1304,96 @@ func TestIntegrationConnectRefreshesCloudAccessTokenAndReusesWorkspace(t *testin
 	if err != nil {
 		t.Fatalf("run integration connect failed: %v\noutput:\n%s", err, stdout.String())
 	}
-	for _, key := range []string{"delegated", "connect", "status", "sync"} {
+	for _, key := range []string{"delegated", "connect", "status"} {
 		if !seen[key] {
 			t.Fatalf("expected %s request", key)
 		}
+	}
+	if seen["sync"] {
+		t.Fatalf("did not expect sync status request without --wait-sync")
 	}
 	got := stdout.String()
 	if !strings.Contains(got, "notion connected") {
 		t.Fatalf("unexpected integration connect output: %q", got)
 	}
-	if !strings.Contains(got, "keep this command running while the mount is active") {
-		t.Fatalf("expected connected-but-still-working guidance, got %q", got)
+	if strings.Contains(got, "keep this command running while the mount is active") {
+		t.Fatalf("did not expect keep-running guidance by default, got %q", got)
 	}
-	if !strings.Contains(got, "Waiting for notion initial sync. Leave this command running") {
-		t.Fatalf("expected initial sync wait guidance, got %q", got)
+	if strings.Contains(got, "Waiting for notion initial sync") {
+		t.Fatalf("did not expect initial sync wait by default, got %q", got)
+	}
+	if !strings.Contains(got, "relayfile mount") {
+		t.Fatalf("expected mount guidance, got %q", got)
 	}
 	state := loadSavedConnection(localDir, "notion")
 	if state.ConnectionID != "conn_789" || state.Backend != "composio" {
 		t.Fatalf("unexpected saved integration connection: %#v", state)
+	}
+}
+
+func TestIntegrationConnectWaitSyncPreservesInitialSyncGate(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	localDir := t.TempDir()
+	if _, err := upsertWorkspaceDetails(workspaceRecord{
+		Name:       "demo",
+		ID:         "ws_123",
+		LocalDir:   localDir,
+		AgentName:  "relayfile-cli",
+		Scopes:     append([]string(nil), defaultJoinScopes...),
+		CreatedAt:  time.Now().UTC().Format(time.RFC3339),
+		LastUsedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("upsertWorkspaceDetails failed: %v", err)
+	}
+	seen := map[string]bool{}
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/workspaces/ws_123/relayfile/delegated-token":
+			seen["delegated"] = true
+			writeDelegatedBundleResponse(t, w, server.URL, "ws_123", "rf_join", "refresh_join")
+		case "/api/v1/workspaces/ws_123/integrations/connect-session":
+			seen["connect"] = true
+			_, _ = w.Write([]byte(`{"connectLink":"https://connect.test/notion","connectionId":"conn_789","backend":"composio"}`))
+		case "/api/v1/workspaces/ws_123/integrations/notion/status":
+			seen["status"] = true
+			_, _ = w.Write([]byte(`{"ready":true}`))
+		case "/v1/workspaces/ws_123/sync/status":
+			seen["sync"] = true
+			if got := r.Header.Get("Authorization"); got != "Bearer rf_join" {
+				t.Fatalf("unexpected sync Authorization: %q", got)
+			}
+			_, _ = w.Write([]byte(`{"workspaceId":"ws_123","providers":[{"provider":"notion","status":"ready","lagSeconds":4,"watermarkTs":"2026-05-02T18:00:00Z"}]}`))
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	installFakeAgentRelaySession(t, server.URL, "cld_new", "demo", "ws_123", "ws_123")
+
+	var stdout bytes.Buffer
+	err := run([]string{
+		"integration", "connect", "notion",
+		"--workspace", "demo",
+		"--cloud-api-url", server.URL,
+		"--backend", "composio",
+		"--no-open",
+		"--timeout", "1s",
+		"--wait-sync",
+	}, strings.NewReader(""), &stdout, &stdout)
+	if err != nil {
+		t.Fatalf("run integration connect --wait-sync failed: %v\noutput:\n%s", err, stdout.String())
+	}
+	for _, key := range []string{"delegated", "connect", "status", "sync"} {
+		if !seen[key] {
+			t.Fatalf("expected %s request", key)
+		}
+	}
+	if got := stdout.String(); !strings.Contains(got, "Waiting for notion initial sync. Leave this command running") {
+		t.Fatalf("expected initial sync wait guidance, got %q", got)
 	}
 }
 
@@ -1376,6 +1445,229 @@ func TestConnectCloudIntegrationAcceptsWorkspaceScopedGitHubStatus(t *testing.T)
 	state := loadSavedConnection(localDir, "github")
 	if state.ConnectionID != "conn_actual" || state.Backend != "nango" {
 		t.Fatalf("expected resolved github connection to be saved, got %#v", state)
+	}
+}
+
+func TestIntegrationListOverlaysRuntimeReadyStatus(t *testing.T) {
+	_, _ = setupAdoptWorkspace(t)
+	var seenCloudIntegrations bool
+	var seenRuntimeStatus bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/workspaces/ws_123/integrations":
+			seenCloudIntegrations = true
+			_, _ = w.Write([]byte(`[{"provider":"slack","status":"syncing","lagSeconds":0}]`))
+		case "/v1/workspaces/ws_123/sync/status":
+			seenRuntimeStatus = true
+			if got := r.Header.Get("Authorization"); got != "Bearer rf_join" {
+				t.Fatalf("unexpected runtime Authorization: %q", got)
+			}
+			_, _ = w.Write([]byte(`{"workspaceId":"ws_123","providers":[{"provider":"slack","status":"ready","lagSeconds":0,"watermarkTs":"2026-05-28T22:30:46Z"}]}`))
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	pointAdoptCloudCredentials(t, server.URL)
+	writeDelegatedCredentialsForTest(t, delegatedauth.Bundle{
+		RelayfileURL:         server.URL,
+		RelayfileWorkspaceID: "ws_123",
+		AccessToken:          "rf_join",
+	})
+
+	var stdout bytes.Buffer
+	if err := run([]string{"integration", "list", "--workspace", "demo", "--cloud-api-url", server.URL}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("integration list failed: %v\noutput:\n%s", err, stdout.String())
+	}
+	if !seenCloudIntegrations || !seenRuntimeStatus {
+		t.Fatalf("expected cloud integrations and runtime sync status requests, got cloud=%v runtime=%v", seenCloudIntegrations, seenRuntimeStatus)
+	}
+	got := stdout.String()
+	if !strings.Contains(got, "slack\tready\t0s\t2026-05-28T22:30:46Z") {
+		t.Fatalf("expected runtime-ready slack row, got %q", got)
+	}
+}
+
+func TestIntegrationListUsesSavedWorkspaceScopesForRuntimeStatus(t *testing.T) {
+	record, _ := setupAdoptWorkspace(t)
+	var seenRuntimeStatus bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/workspaces/ws_123/integrations":
+			_, _ = w.Write([]byte(`[{"provider":"slack","status":"syncing","lagSeconds":0}]`))
+		case "/v1/workspaces/ws_123/sync/status":
+			seenRuntimeStatus = true
+			if got := r.Header.Get("Authorization"); got != "Bearer rf_join" {
+				t.Fatalf("unexpected runtime Authorization: %q", got)
+			}
+			_, _ = w.Write([]byte(`{"workspaceId":"ws_123","providers":[{"provider":"slack","status":"ready","lagSeconds":0,"watermarkTs":"2026-05-28T22:30:46Z"}]}`))
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	pointAdoptCloudCredentials(t, server.URL)
+	if err := delegatedauth.SaveAtomic(delegatedCredentialsPathForRequest(record.ID, record.Scopes), delegatedauth.Bundle{
+		RelayfileURL:         server.URL,
+		RelayfileWorkspaceID: "ws_123",
+		AccessToken:          "rf_join",
+		RefreshToken:         "refresh_join",
+		Scopes:               append([]string(nil), record.Scopes...),
+	}); err != nil {
+		t.Fatalf("save join-scoped delegated credentials failed: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := run([]string{"integration", "list", "--workspace", "demo", "--cloud-api-url", server.URL}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("integration list failed: %v\noutput:\n%s", err, stdout.String())
+	}
+	if !seenRuntimeStatus {
+		t.Fatal("expected runtime sync status request using saved workspace scopes")
+	}
+	if got := stdout.String(); !strings.Contains(got, "slack\tready\t0s\t2026-05-28T22:30:46Z") {
+		t.Fatalf("expected join-scoped runtime-ready overlay, got %q", got)
+	}
+}
+
+func TestIntegrationListDoesNotMaskCloudActionRequiredStatus(t *testing.T) {
+	_, _ = setupAdoptWorkspace(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/workspaces/ws_123/integrations":
+			_, _ = w.Write([]byte(`[{"provider":"slack","status":"error","lagSeconds":0}]`))
+		case "/v1/workspaces/ws_123/sync/status":
+			_, _ = w.Write([]byte(`{"workspaceId":"ws_123","providers":[{"provider":"slack","status":"ready","lagSeconds":0,"watermarkTs":"2026-05-28T22:30:46Z"}]}`))
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	pointAdoptCloudCredentials(t, server.URL)
+	writeDelegatedCredentialsForTest(t, delegatedauth.Bundle{
+		RelayfileURL:         server.URL,
+		RelayfileWorkspaceID: "ws_123",
+		AccessToken:          "rf_join",
+	})
+
+	var stdout bytes.Buffer
+	if err := run([]string{"integration", "list", "--workspace", "demo", "--cloud-api-url", server.URL}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("integration list failed: %v\noutput:\n%s", err, stdout.String())
+	}
+	if got := stdout.String(); !strings.Contains(got, "slack\terror\t0s\t-") {
+		t.Fatalf("expected cloud error status to remain visible, got %q", got)
+	}
+}
+
+func TestIntegrationListDoesNotUpgradeBareHealthyRuntimeStatus(t *testing.T) {
+	_, _ = setupAdoptWorkspace(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/workspaces/ws_123/integrations":
+			_, _ = w.Write([]byte(`[{"provider":"slack","status":"syncing","lagSeconds":0}]`))
+		case "/v1/workspaces/ws_123/sync/status":
+			_, _ = w.Write([]byte(`{"workspaceId":"ws_123","providers":[{"provider":"slack","status":"healthy","lagSeconds":0}]}`))
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	pointAdoptCloudCredentials(t, server.URL)
+	writeDelegatedCredentialsForTest(t, delegatedauth.Bundle{
+		RelayfileURL:         server.URL,
+		RelayfileWorkspaceID: "ws_123",
+		AccessToken:          "rf_join",
+	})
+
+	var stdout bytes.Buffer
+	if err := run([]string{"integration", "list", "--workspace", "demo", "--cloud-api-url", server.URL}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("integration list failed: %v\noutput:\n%s", err, stdout.String())
+	}
+	if got := stdout.String(); !strings.Contains(got, "slack\tsyncing\t0s\t-") {
+		t.Fatalf("expected bare healthy runtime status not to upgrade cloud syncing, got %q", got)
+	}
+}
+
+func TestIntegrationListDoesNotUpgradeUnknownCloudStatus(t *testing.T) {
+	_, _ = setupAdoptWorkspace(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/workspaces/ws_123/integrations":
+			_, _ = w.Write([]byte(`[{"provider":"slack","status":"needs_operator","lagSeconds":0}]`))
+		case "/v1/workspaces/ws_123/sync/status":
+			_, _ = w.Write([]byte(`{"workspaceId":"ws_123","providers":[{"provider":"slack","status":"ready","lagSeconds":0,"watermarkTs":"2026-05-28T22:30:46Z"}]}`))
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	pointAdoptCloudCredentials(t, server.URL)
+	writeDelegatedCredentialsForTest(t, delegatedauth.Bundle{
+		RelayfileURL:         server.URL,
+		RelayfileWorkspaceID: "ws_123",
+		AccessToken:          "rf_join",
+	})
+
+	var stdout bytes.Buffer
+	if err := run([]string{"integration", "list", "--workspace", "demo", "--cloud-api-url", server.URL}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("integration list failed: %v\noutput:\n%s", err, stdout.String())
+	}
+	if got := stdout.String(); !strings.Contains(got, "slack\tneeds_operator\t0s\t-") {
+		t.Fatalf("expected unknown cloud status not to be upgraded, got %q", got)
+	}
+}
+
+func TestIntegrationListDoesNotUpgradeBlankOrUnknownCloudStatus(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		cloudJSON  string
+		wantStatus string
+	}{
+		{
+			name:       "blank",
+			cloudJSON:  `[{"provider":"slack","lagSeconds":0}]`,
+			wantStatus: "unknown",
+		},
+		{
+			name:       "unknown",
+			cloudJSON:  `[{"provider":"slack","status":"unknown","lagSeconds":0}]`,
+			wantStatus: "unknown",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _ = setupAdoptWorkspace(t)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				switch r.URL.Path {
+				case "/api/v1/workspaces/ws_123/integrations":
+					_, _ = w.Write([]byte(tc.cloudJSON))
+				case "/v1/workspaces/ws_123/sync/status":
+					_, _ = w.Write([]byte(`{"workspaceId":"ws_123","providers":[{"provider":"slack","status":"ready","lagSeconds":0,"watermarkTs":"2026-05-28T22:30:46Z"}]}`))
+				default:
+					t.Fatalf("unexpected path: %s", r.URL.Path)
+				}
+			}))
+			defer server.Close()
+			pointAdoptCloudCredentials(t, server.URL)
+			writeDelegatedCredentialsForTest(t, delegatedauth.Bundle{
+				RelayfileURL:         server.URL,
+				RelayfileWorkspaceID: "ws_123",
+				AccessToken:          "rf_join",
+			})
+
+			var stdout bytes.Buffer
+			if err := run([]string{"integration", "list", "--workspace", "demo", "--cloud-api-url", server.URL}, strings.NewReader(""), &stdout, &stdout); err != nil {
+				t.Fatalf("integration list failed: %v\noutput:\n%s", err, stdout.String())
+			}
+			want := "slack\t" + tc.wantStatus + "\t0s\t-"
+			if got := stdout.String(); !strings.Contains(got, want) {
+				t.Fatalf("expected %q, got %q", want, got)
+			}
+		})
 	}
 }
 
@@ -5839,6 +6131,7 @@ func TestIntegrationConnectKeepsSelectedWorkspaceAndUsesJoinedRelayWorkspaceForS
 		"--cloud-api-url", server.URL,
 		"--no-open",
 		"--timeout", "5s",
+		"--wait-sync",
 	}, strings.NewReader(""), &stdout, &stdout); err != nil {
 		t.Fatalf("integration connect slack failed: %v\noutput:\n%s", err, stdout.String())
 	}
