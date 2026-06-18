@@ -198,10 +198,15 @@ export async function connect(opts: ConnectOptions = {}): Promise<RelayfileAgent
       const scheduleReconnect = () => {
         if (unsubscribed) return;
         // If we held a stable connection long enough, reset the backoff so the
-        // next reconnect-after-flap is fast. Sustained flap keeps doubling.
+        // next reconnect-after-flap is fast. Consume the timestamp here so
+        // only a *fresh* stable connection re-arms the reset — otherwise
+        // sustained connect-failures after one prior stable window would keep
+        // seeing the old `connectedAt` and reset backoff to base every time,
+        // defeating the backoff exactly when it matters.
         if (connectedAt && Date.now() - connectedAt >= stableThreshold) {
           nextDelay = baseDelay;
         }
+        connectedAt = 0;
         const delay = Math.min(nextDelay, maxDelay);
         nextDelay = Math.min(nextDelay * 2, maxDelay);
         reconnectTimer = setTimeout(() => {
