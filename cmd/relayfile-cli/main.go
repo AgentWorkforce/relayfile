@@ -6442,9 +6442,14 @@ WantedBy=default.target
 	if err := os.WriteFile(unitPath, []byte(unit), 0o644); err != nil {
 		return fmt.Errorf("write systemd unit file: %w", err)
 	}
-	// Reload the daemon and enable+start the unit.
-	_ = exec.Command("systemctl", "--user", "daemon-reload").Run()
-	_ = exec.Command("systemctl", "--user", "enable", "--now", unitName).Run()
+	// Reload the daemon and enable+start the unit. Surface activation
+	// failures so callers know supervision is not actually running.
+	if out, err := exec.Command("systemctl", "--user", "daemon-reload").CombinedOutput(); err != nil {
+		return fmt.Errorf("systemctl daemon-reload failed: %w\n%s", err, out)
+	}
+	if out, err := exec.Command("systemctl", "--user", "enable", "--now", unitName).CombinedOutput(); err != nil {
+		return fmt.Errorf("systemctl enable --now %s failed: %w\n%s", unitName, err, out)
+	}
 	fmt.Fprintf(stdout, "Supervisor installed: %s\nUnit: %s\nTo check status: systemctl --user status %s\nTo uninstall: relayfile supervisor uninstall %s\n", unitName, unitPath, unitName, record.Name)
 	return nil
 }

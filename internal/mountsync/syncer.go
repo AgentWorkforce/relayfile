@@ -3849,6 +3849,7 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 		s.state.BootstrapStartedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	}
 	maxObservedRevision := ""
+	var transientBootstrapAbort bool
 	for {
 		page, err := s.client.ListTree(ctx, s.workspace, s.remoteRoot, 200, cursor)
 		if err != nil {
@@ -3933,17 +3934,22 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 						}
 						continue
 					}
-					// Transient HTTP error (503, 429, etc.): skip this path for
-					// the current cycle. The cursor-based resume on the next
-					// cycle will retry it without restarting from scratch.
-					// If the file was previously synced, preserve it in remotePaths
-					// so the snapshot delete pass does not remove the local copy.
-					s.logf("transient error reading %s (status %d); skipping for this cycle: %v", result.RemotePath, httpErr.StatusCode, result.Err)
+					// Transient HTTP error (503, 429, etc.): stop the current
+					// page immediately without advancing the cursor. On a full
+					// bootstrap (startedFromEmpty) this guarantees the failing
+					// path is retried next cycle rather than permanently skipped.
+					// On a resumed traversal (startedFromEmpty=false) the cursor
+					// already points past this page, so stopping here is still
+					// safe — the delete pass is skipped on resumed cycles anyway.
+					s.logf("transient error reading %s (status %d); aborting page without advancing cursor so it is retried next cycle: %v", result.RemotePath, httpErr.StatusCode, result.Err)
+					transientBootstrapAbort = true
+					// Preserve any previously-synced files processed on this page
+					// before the abort so the delete pass (if it runs) does not
+					// remove local copies that are still on the server.
 					if _, prevSynced := s.state.Files[result.RemotePath]; prevSynced {
 						remotePaths[result.RemotePath] = struct{}{}
-						filesThisPage++
 					}
-					continue
+					break
 				}
 				return result.Err
 			}
@@ -3953,6 +3959,18 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 			prog.touch()
 			remotePaths[result.RemotePath] = struct{}{}
 			filesThisPage++
+		}
+		// A transient read error stopped the page early. Do not advance the
+		// cursor so the same page (including the failing path) is retried next
+		// cycle. Save state up to the last successfully-committed cursor.
+		if transientBootstrapAbort {
+			if !s.state.BootstrapComplete {
+				s.state.BootstrapFilesSynced += filesThisPage
+				if err := s.saveState(); err != nil {
+					return err
+				}
+			}
+			break
 		}
 		if page.NextCursor == nil || *page.NextCursor == "" {
 			break
@@ -3970,6 +3988,14 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 			}
 			prog.touch()
 		}
+	}
+
+	// A transient read error stopped the page scan early. Bootstrap is not
+	// complete; the cursor is left at the page boundary so the next cycle
+	// retries the failing paths. Skip the delete pass entirely.
+	if transientBootstrapAbort {
+		s.logf("bootstrap paused due to transient read error(s); will resume from last cursor next cycle")
+		return nil
 	}
 
 	// Resumed/partial traversal safety: only run the authoritative
