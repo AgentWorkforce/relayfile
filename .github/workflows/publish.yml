@@ -154,10 +154,15 @@ jobs:
                 const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
                 pkg.version = version;
                 console.log(pkg.name + ' -> v' + version);
-                for (const depType of ['dependencies', 'devDependencies', 'optionalDependencies']) {
+                for (const depType of ['dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies']) {
                   for (const dep of Object.keys(pkg[depType] || {})) {
                     if (dep.startsWith('@relayfile/')) {
-                      pkg[depType][dep] = version;
+                      // Internal deps pin to exact version (existing convention);
+                      // peerDependencies use caret so consumers retain flexibility
+                      // (e.g. a future 0.11.x agents must still admit any 0.11.x sdk,
+                      // not break under 0.x semver as it would with the previous
+                      // peer string left untouched).
+                      pkg[depType][dep] = depType === 'peerDependencies' ? '^' + version : version;
                     }
                   }
                 }
