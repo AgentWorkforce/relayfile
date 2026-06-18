@@ -31,7 +31,7 @@
     "url": "https://github.com/AgentWorkforce/relayfile",
     "directory": "packages/local-mount"
   },
-  "license": "MIT",
+  "license": "Apache-2.0",
   "keywords": [
     "relayfile",
     "mount",

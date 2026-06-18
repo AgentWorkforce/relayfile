@@ -2,6 +2,7 @@
   "name": "@relayfile/agents",
   "version": "0.10.1",
   "description": "Thin agent-framework adapters for Relayfile. One connect() call, ready tools, proven writeback lifecycle.",
+  "license": "Apache-2.0",
   "type": "module",
   "main": "dist/index.js",
   "exports": {
@@ -30,6 +31,11 @@
     "build": "tsc",
     "typecheck": "tsc --noEmit",
     "prepublishOnly": "npm run build"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AgentWorkforce/relayfile.git",
+    "directory": "packages/agents"
   },
   "dependencies": {
     "ajv": "^8.17.1",

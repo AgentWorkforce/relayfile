@@ -22,7 +22,7 @@
     "url": "git+https://github.com/AgentWorkforce/relayfile.git",
     "directory": "packages/cli"
   },
-  "license": "MIT",
+  "license": "Apache-2.0",
   "keywords": [
     "relayfile",
     "filesystem",

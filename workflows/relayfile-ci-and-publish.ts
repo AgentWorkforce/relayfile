@@ -274,7 +274,7 @@ Update ${RELAYFILE}/packages/sdk/typescript/package.json:
     "url": "https://github.com/AgentWorkforce/relayfile",
     "directory": "packages/sdk/typescript"
   },
-  "license": "MIT",
+  "license": "Apache-2.0",
   "keywords": ["relayfile", "filesystem", "sync", "agent", "collaboration"],
   "engines": { "node": ">=18" }
 }

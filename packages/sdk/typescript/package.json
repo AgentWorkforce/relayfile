@@ -82,7 +82,7 @@
     "url": "https://github.com/AgentWorkforce/relayfile",
     "directory": "packages/sdk/typescript"
   },
-  "license": "MIT",
+  "license": "Apache-2.0",
   "keywords": [
     "relayfile",
     "filesystem",
