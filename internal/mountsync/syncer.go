@@ -1646,6 +1646,14 @@ func (s *Syncer) FlushOutboxOnce(ctx context.Context) error {
 // a full reconcile it still skips pullRemote/digest/websocket, so it cannot
 // reintroduce the pull-side flush-124 stalls.
 func (s *Syncer) PushLocalAndFlushOnce(ctx context.Context) error {
+	// Same top-of-cycle invariant as syncReserved: pushLocal scans and mutates
+	// the local mirror, so refuse to run if the mount root was wiped/clobbered
+	// (recovery is gated behind --reset-after-clobber). FlushOutboxOnce skips
+	// this because it is outbox-only and never touches the mirror.
+	if err := s.assertMountRootInvariant(); err != nil {
+		return err
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
