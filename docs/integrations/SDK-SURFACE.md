@@ -40,10 +40,14 @@ Two-hop: Cloud control plane mints a short-lived Relayfile data-plane token, the
 └──────────────────────────────────┘      └─────────────────────────────────┘
 ```
 
-**Resolution order each example uses (CI-safe first):**
+**Resolution order each example uses (CI-safe first) — authoritative, confirmed from Cloud source `packages/cli/src/cli/constants.ts` + `credentials.ts`:**
 
 1. **Env overrides (primary):** `CLOUD_API_URL`, `CLOUD_API_ACCESS_TOKEN`, `CLOUD_WORKSPACE_ID`, and/or a pre-minted `RELAYFILE_BASE_URL` + `RELAYFILE_TOKEN` + `RELAYFILE_WORKSPACE_ID`.
-2. **Credential-file fallback:** probe `~/.cloud/credentials.json` (canonical) then the legacy `~/.relayfile/cloud-credentials.json`. **Log which file was chosen** so the operator isn't surprised when a stale file wins.
+2. **`~/.agentworkforce/relay/cloud-auth.json`** — written by `agent-relay cloud login`. **Canonical/current**; this is what a fresh login refreshes. Shape: `{ accessToken, refreshToken, accessTokenExpiresAt, apiUrl }` = `RelayfileCloudTokenSet`, feed straight into `fromCloudTokens`.
+3. **`~/.cloud/credentials.json`** — older Cloud CLI path (`packages/cli/src/credentials.ts`). May be stale.
+4. **`~/.relayfile/cloud-credentials.json`** — relayfile CLI legacy path (`cmd/relayfile-cli/main.go:6870`). Last resort.
+
+**Log which file was chosen** so the operator isn't surprised when a stale file wins — three CLIs (agent-relay, Cloud, relayfile) each write a different location, and `agent-relay cloud login` does **not** refresh the other two.
 
 > ⚠️ **Use the workspace ID that `mount-session` RETURNS** for all `/v1/workspaces/{id}/...`
 > calls — never the request-side app-UUID. The app-UUID ↔ `rw_…` shard split was the
@@ -75,9 +79,11 @@ const tree = await client.listTree(workspace.workspaceId, { path: "/notion", dep
 - Cloud control plane: `https://agentrelay.com/cloud` (prod). Override: `CLOUD_API_URL`. Local CLI default: `http://localhost:3000/cloud`.
 - Relayfile data plane: `https://api.relayfile.dev` (prod). Override: `RELAYFILE_BASE_URL` / `RELAYFILE_URL`. Staging: `https://staging-api.relayfile.dev`.
 
-**Credentials (canonical)**
-- Cloud control-plane creds: **`~/.cloud/credentials.json`** — source of truth `packages/cli/src/credentials.ts` (Cloud repo). Contains `accessToken`, `refreshToken`, `apiUrl`.
-- The relayfile CLI's `~/.relayfile/cloud-credentials.json` (`cmd/relayfile-cli/main.go:6870`) is **legacy/stale for Cloud control-plane auth** — probe only as a last resort.
+**Credentials (canonical) — three CLIs, three files, see §1 for the full precedence**
+- **`~/.agentworkforce/relay/cloud-auth.json`** — written by `agent-relay cloud login` (`packages/cli/src/cli/constants.ts`). **The current/canonical path** a fresh login refreshes. `{ accessToken, refreshToken, accessTokenExpiresAt, apiUrl }`.
+- `~/.cloud/credentials.json` — older Cloud CLI path (`packages/cli/src/credentials.ts`).
+- `~/.relayfile/cloud-credentials.json` — relayfile CLI legacy path (`cmd/relayfile-cli/main.go:6870`).
+- ⚠️ `agent-relay cloud login` refreshes **only** the first; the other two can be arbitrarily stale. Always check `accessTokenExpiresAt` before use.
 
 **Token mint endpoint (use this for examples)**
 ```
@@ -97,7 +103,7 @@ A `delegated-token` route also exists (`POST .../relayfile/delegated-token`) for
 POST {CLOUD_API_URL}/api/v1/auth/token/refresh
 { "refreshToken": "cld_rt_..." }
 ```
-Returns `accessToken`, a new `refreshToken`, expiry fields, `apiUrl`, `tokenType`. Write the new values back to `~/.cloud/credentials.json`. `RelayfileSetup.fromCloudTokens(...)` performs this roundtrip automatically when the access token is within its refresh window — examples using it do **not** implement refresh by hand.
+Returns `accessToken`, a new `refreshToken`, expiry fields, `apiUrl`, `tokenType`. Write the new values back to whichever cred file you read (canonical: `~/.agentworkforce/relay/cloud-auth.json`). `RelayfileSetup.fromCloudTokens(...)` performs this roundtrip automatically when the access token is within its refresh window — examples using it do **not** implement refresh by hand.
 
 **App-UUID ↔ `rw_` resolution (never guess the mapping)**
 ```
