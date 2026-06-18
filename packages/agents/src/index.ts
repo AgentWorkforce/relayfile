@@ -13,6 +13,10 @@ export {
   type WriteQueuedResponse,
   type WriteFileInput,
   type DeleteFileInput,
+  type ChangeEvent,
+  type FilesystemEvent,
+  type Subscription,
+  type WebSocketConnection,
 } from "@relayfile/sdk";
 
 import { vercelTools, type VercelToolsOptions } from "./tools/vercel.js";

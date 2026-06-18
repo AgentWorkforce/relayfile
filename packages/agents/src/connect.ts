@@ -2,7 +2,14 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-import { RelayfileSetup, type RelayFileClient } from "@relayfile/sdk";
+import {
+  RelayfileSetup,
+  type FileReadResponse,
+  type FilesystemEvent,
+  type RelayFileClient,
+  type Subscription,
+  type WebSocketConnection,
+} from "@relayfile/sdk";
 
 import { createWriteback, type WritebackApi } from "./writeback.js";
 
@@ -39,6 +46,30 @@ export interface RelayfileAgents {
   credSource: string;
   /** Provider-agnostic writeback lifecycle (create/update/delete with op-poll). */
   writeback: WritebackApi;
+  /** Convenience: read a single file by path. */
+  read(path: string): Promise<FileReadResponse>;
+  /**
+   * React to provider webhooks in real time. The agent registers a handler
+   * on one or more workspace path globs (`**` supported as a trailing
+   * segment per the SDK convention). When a Relayfile file event matches —
+   * a webhook ingested by Cloud, a writeback by another agent, anything
+   * that mutates the path — the handler fires.
+   *
+   * This is the structural difference vs. per-provider MCPs (which are
+   * pull-only). MCPs can't push; Relayfile turns every provider event into
+   * a workspace event multiple agents can subscribe to.
+   *
+   * Auto-reconnect with token refresh: when the WebSocket drops (typically
+   * at token TTL), the subscription re-resolves a fresh token via the
+   * cloud token provider and reconnects. Long-lived reactive agents
+   * survive token expiry without silent failure.
+   *
+   * @returns `Subscription` with `unsubscribe()`.
+   */
+  onEvent(
+    globs: string[],
+    handler: (event: FilesystemEvent) => void | Promise<void>,
+  ): Subscription;
 }
 
 function readCloudCreds(): CloudCreds {
@@ -124,5 +155,72 @@ export async function connect(opts: ConnectOptions = {}): Promise<RelayfileAgent
     cloudWorkspaceId,
     credSource: creds.source,
     writeback: createWriteback(client, workspaceId),
+    read: (path: string) => client.readFile(workspaceId, path),
+    onEvent: (globs, handler) => {
+      const patterns = globs.map(normalizeGlob);
+      let conn: WebSocketConnection | null = null;
+      let unsubscribed = false;
+      let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+
+      const dispatch = (event: FilesystemEvent) => {
+        if (!patterns.some((p) => p.test(event.path))) return;
+        Promise.resolve(handler(event)).catch((err) => {
+          console.error("[relayfile/agents] onEvent handler error:", err);
+        });
+      };
+
+      const connectOnce = async () => {
+        if (unsubscribed) return;
+        try {
+          const token = await client.getToken();
+          conn = client.connectWebSocket(workspaceId, {
+            token,
+            paths: globs,
+            onEvent: dispatch,
+          });
+          // Auto-reconnect with fresh token on close — long-lived reactive
+          // agents must survive token TTL without silent death.
+          const offClose = conn.on("close", () => {
+            offClose();
+            if (unsubscribed) return;
+            reconnectTimer = setTimeout(() => {
+              reconnectTimer = null;
+              void connectOnce();
+            }, 1000);
+          });
+        } catch (err) {
+          console.error("[relayfile/agents] onEvent connect failed; retrying in 5s:", err);
+          if (!unsubscribed) reconnectTimer = setTimeout(connectOnce, 5000);
+        }
+      };
+
+      void connectOnce();
+
+      return {
+        unsubscribe: async () => {
+          unsubscribed = true;
+          if (reconnectTimer) clearTimeout(reconnectTimer);
+          conn?.close();
+        },
+      };
+    },
   };
+}
+
+/**
+ * Convert a `/foo/bar/**` glob into a RegExp. Supports `**` only as a
+ * trailing segment per the SDK's subscribe contract — anything else is
+ * literal text. The match is on full paths (anchored both ends).
+ */
+function normalizeGlob(glob: string): RegExp {
+  const trimmed = glob.replace(/\/+$/, "");
+  if (trimmed.endsWith("/**")) {
+    const prefix = trimmed.slice(0, -3);
+    return new RegExp(`^${escapeRegex(prefix)}(/|$)`);
+  }
+  return new RegExp(`^${escapeRegex(trimmed)}$`);
+}
+
+function escapeRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }

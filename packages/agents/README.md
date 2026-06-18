@@ -50,6 +50,29 @@ Honest answer up front:
 | Provider rate limits / retry / dead-letter | Every agent races the provider | Centralized in Relayfile's writeback queue + op-status |
 | Workspace state | Ephemeral per session | Durable — a new agent joining mid-flight is oriented by `_index.json` / digests |
 
+### The webhook / `onEvent` axis — where this really pays off
+
+The single biggest structural difference vs. per-provider MCPs is that Relayfile is
+**event-driven, not request/response.** Every provider webhook becomes a workspace file event
+that any number of agents can subscribe to in real time:
+
+```
+Linear webhook → Cloud sync → /linear/issues/X.json revision++ → WebSocket event
+                                                                      ↓
+                                                       agent A reacts, writes a comment
+                                                       agent B reacts, files a Slack ping
+                                                       agent C reacts, opens a PR
+```
+
+This is the substrate that makes **proactive agents** possible — agents that aren't waiting for
+a user prompt but reacting to provider state changes (a new Linear issue, a Notion page edit,
+a GitHub PR opened). MCPs have no concept of this: they're pull-only.
+
+The SDK exposes `connectWebSocket({ onEvent })` and a glob-based `subscribe()` API for
+filtering. See `examples/04-realtime-events/` for the raw-SDK pattern. A framework-wrapped
+"agent reacts to webhook" example is on the Phase-2 roadmap — the wiring is identical to the
+read/write examples in this PR plus a long-lived event loop.
+
 ### Operational deploy story
 
 In a deployed agent fleet you don't want every container running N OAuth dances per provider.
