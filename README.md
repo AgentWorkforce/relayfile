@@ -42,6 +42,16 @@ export async function readRelayfile(path: string) {
 }
 ```
 
+**Client-side read cache** (enabled by default, `v0.10.1+`): `RelayFileClient` caches `readFile` responses with a 5-second TTL and LRU eviction. Concurrent reads for the same path resolve from a single in-flight request. The cache auto-evicts when a change stream delivers a mutation event, and immediately on `writeFile`/`bulkWrite`/`deleteFile` from the same client. Tune or disable via the `readCache` option:
+
+```ts
+// custom TTL for fast-changing workspaces (default: 5000ms, 500 entries)
+const files = new RelayFileClient({ token, readCache: { ttlMs: 2000 } })
+
+// disable caching entirely
+const files = new RelayFileClient({ token, readCache: false })
+```
+
 Common workflows:
 
 - Read `/digests/yesterday.md`, then drill into `/github`, `/linear`, and `/notion` only when needed.
@@ -109,7 +119,7 @@ This is what turns multi-agent collaboration into a property of the substrate in
 
 ## What's in the box
 
-- **File-native reads.** `ls`, `cat`, `grep`, `find` — the agent's native vocabulary. No tool schemas in context.
+- **File-native reads.** `ls`, `cat`, `grep`, `find` — the agent's native vocabulary. No tool schemas in context. The TypeScript SDK includes a client-side read cache with in-flight deduplication, LRU eviction, and automatic write-through invalidation (v0.10.1+).
 - **File-native writes.** PATCH a record by writing to its canonical path. CREATE by saving a draft filename. DELETE by removing the file. Per-resource schemas are discoverable in-tree (`<resource>/.schema.json`). See [relayfile-adapters](https://github.com/AgentWorkforce/relayfile-adapters).
 - **Per-agent ACLs.** Scope each agent's read/write surface via `.relayfile.acl`. Agents see only the paths they should — readonly on the rest of the tree.
 - **Real-time multi-agent sync.** Writes from one agent are visible to others on the next read. No commit/push/pull cycle, no merge.
@@ -193,6 +203,16 @@ RELAYFILE_TOKEN="$TOKEN" go run ./cmd/relayfile-mount \
 
 For long path lists, pass `--paths-file ./paths.json`; the file may be a JSON
 array of remote roots or a newline-separated list.
+
+The FUSE layer caches file content in kernel memory independently of its attribute TTL. By default content is held for 30 seconds and attributes for 2 seconds. Tune with `--fuse-content-ttl` (or `RELAYFILE_MOUNT_FUSE_CONTENT_TTL`) if your workload needs fresher reads or can tolerate a longer cache window:
+
+```bash
+# 10-second content cache — reduces kernel re-reads for stable workspaces
+RELAYFILE_TOKEN="$TOKEN" go run ./cmd/relayfile-mount \
+  --workspace ws_demo \
+  --local-dir ./relayfile-mount \
+  --fuse-content-ttl 10s
+```
 
 Now any local tool or agent can use `./relayfile-mount` like a normal directory.
 
