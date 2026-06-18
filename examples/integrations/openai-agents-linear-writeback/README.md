@@ -1,22 +1,32 @@
 # OpenAI Agents × Linear writeback (via Relayfile)
 
-OpenAI Agents SDK equivalent of `vercel-ai-sdk-linear-writeback/`. Same Relayfile
-bootstrap, same schema discipline, same comprehensive op-status proof
+OpenAI Agents SDK creates / updates / deletes Linear labels through
+Relayfile — schema-validated, with comprehensive op-status proof
 (`writeback.provider=linear` → op `succeeded` → real Linear UUID in
-`providerResult.externalId`), same draft-receipt cleanup. Only the agent
-wrapper differs.
+`providerResult.externalId`).
 
-See `vercel-ai-sdk-linear-writeback/README.md` for the full contract details
-(draft semantics, why we use the externalId path, what the smoke proves,
-filed adapter-doc issue link).
-
-## Run
+## Quickstart
 
 ```bash
-# Smoke (no LLM key, comprehensive provider-side proof)
+agent-relay cloud login
+cd examples/integrations/openai-agents-linear-writeback
 npm install
-CLOUD_WORKSPACE_ID=<app-uuid> npm run smoke
-
-# Agent (needs OpenAI key)
-OPENAI_API_KEY=sk-… CLOUD_WORKSPACE_ID=<app-uuid> npm run dev
+CLOUD_WORKSPACE_ID=<your-app-uuid> npm run smoke
 ```
+
+Then for the interactive agent:
+
+```bash
+OPENAI_API_KEY=sk-… npm run dev
+```
+
+For CI: set `CLOUD_API_ACCESS_TOKEN` (and optionally `CLOUD_API_REFRESH_TOKEN`,
+`CLOUD_API_URL`).
+
+## Important
+
+Every smoke run creates ONE real Linear label and deletes it. All test labels
+are prefixed `relayfile-writeback-test` so you can identify orphans if a run
+is interrupted. See `vercel-ai-sdk-linear-writeback/README.md` for the
+contract details (draft semantics, externalId path discipline, the
+adapter-doc drift filed as relayfile-adapters#213).

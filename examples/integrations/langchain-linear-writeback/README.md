@@ -1,17 +1,30 @@
 # LangChain × Linear writeback (via Relayfile)
 
 LangChain (via `@langchain/langgraph` `createReactAgent`) creates / updates /
-deletes Linear labels through Relayfile. Same Relayfile bootstrap, schema
-discipline, and comprehensive op-status proof as the Vercel AI SDK and OpenAI
-Agents siblings. See `vercel-ai-sdk-linear-writeback/README.md` for the full
-contract details (draft semantics, why externalId pathing, adapter-doc issue).
+deletes Linear labels through Relayfile. Schema-validated, with comprehensive
+op-status proof (`writeback.provider=linear` → op `succeeded` → real Linear
+UUID in `providerResult.externalId`).
 
-## Run
+## Quickstart
 
 ```bash
+agent-relay cloud login
+cd examples/integrations/langchain-linear-writeback
 npm install
-# Smoke (no LLM key — comprehensive provider-side proof)
-CLOUD_WORKSPACE_ID=<app-uuid> npm run smoke
-# Agent
-ANTHROPIC_API_KEY=sk-ant-… CLOUD_WORKSPACE_ID=<app-uuid> npm run dev
+CLOUD_WORKSPACE_ID=<your-app-uuid> npm run smoke
 ```
+
+Then for the interactive agent:
+
+```bash
+ANTHROPIC_API_KEY=sk-ant-… npm run dev
+```
+
+For CI: set `CLOUD_API_ACCESS_TOKEN` (and optionally `CLOUD_API_REFRESH_TOKEN`,
+`CLOUD_API_URL`).
+
+## Important
+
+Every smoke run creates ONE real Linear label and deletes it before exit.
+Test labels are prefixed `relayfile-writeback-test`. See
+`vercel-ai-sdk-linear-writeback/README.md` for the full contract details.

@@ -1,18 +1,23 @@
 # LangChain × Notion read (via Relayfile)
 
 LangChain (via `@langchain/langgraph` `createReactAgent`) reads workspace
-Notion content via Relayfile. Same bootstrap + smoke as the Vercel AI SDK and
-OpenAI Agents siblings; only the agent wrapper differs.
+Notion content via Relayfile — `listTree` + `readFile` wired as LangChain
+tools.
 
-## Run
+## Quickstart
 
 ```bash
+agent-relay cloud login
+cd examples/integrations/langchain-notion-read
 npm install
-# Smoke (no LLM key)
-CLOUD_WORKSPACE_ID=<app-uuid> npm run smoke
-# Agent
-ANTHROPIC_API_KEY=sk-ant-… CLOUD_WORKSPACE_ID=<app-uuid> npm run dev
+CLOUD_WORKSPACE_ID=<your-app-uuid> npm run smoke
 ```
 
-See `vercel-ai-sdk-notion-read/README.md` for the full credential resolution
-options and what each smoke check proves.
+Then for the interactive agent:
+
+```bash
+ANTHROPIC_API_KEY=sk-ant-… npm run dev
+```
+
+For CI: set `CLOUD_API_ACCESS_TOKEN` (and optionally `CLOUD_API_REFRESH_TOKEN`,
+`CLOUD_API_URL`).
