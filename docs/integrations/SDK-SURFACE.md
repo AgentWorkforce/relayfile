@@ -92,6 +92,21 @@ Content-Type: application/json
 Response includes: `workspaceId` (the `rw_…` shard id — use this downstream), `relayfileBaseUrl`, `relayfileToken`, `wsUrl`, `scopes`, expiry fields.
 A `delegated-token` route also exists (`POST .../relayfile/delegated-token`) for per-agent scoping; prefer `mount-session` for examples.
 
+**Token refresh (codified in `CloudApiClient`, not reverse-engineered)**
+```
+POST {CLOUD_API_URL}/api/v1/auth/token/refresh
+{ "refreshToken": "cld_rt_..." }
+```
+Returns `accessToken`, a new `refreshToken`, expiry fields, `apiUrl`, `tokenType`. Write the new values back to `~/.cloud/credentials.json`. `RelayfileSetup.fromCloudTokens(...)` performs this roundtrip automatically when the access token is within its refresh window — examples using it do **not** implement refresh by hand.
+
+**App-UUID ↔ `rw_` resolution (never guess the mapping)**
+```
+GET  {CLOUD_API_URL}/api/v1/workspaces                       # list app workspace ids
+GET  {CLOUD_API_URL}/api/v1/workspaces/{appWorkspaceId}/resolve
+       → { cloudWorkspaceId: <app UUID>, relayfileWorkspaceId: "rw_..." }
+```
+Pick the descriptor whose `relayfileWorkspaceId` equals the `rw_` you want. **Iron rule:** the request-side `CLOUD_WORKSPACE_ID` may be an app UUID, but every Relayfile **data-plane** call must use the `workspaceId` returned by `mount-session` / `joinWorkspace` / `resolve` — never the request id. This is the exact app-UUID↔`rw_` split that caused issue #306; the example bootstrap helper bakes this in as a comment so it isn't accidentally reintroduced.
+
 **Data-plane auth/header shape**
 - Routes: `{RELAYFILE_BASE_URL}/v1/workspaces/{relayfileWorkspaceId}/...`
 - `Authorization: Bearer <relayfileToken>`
@@ -142,7 +157,7 @@ interface RelayFileClientOptions {
 
 `WriteFileInput`: `{ workspaceId, path, baseRevision, content, contentType?, encoding?: "utf-8"|"base64", semantics?, forkId?, contentIdentity?, correlationId?, signal? }` (`src/types.ts:802`). `baseRevision: "*"` = create-or-overwrite.
 
-`BulkWriteFile`: `{ path, contentType?, content, encoding?: "utf-8"|"base64", contentIdentity? }` (`src/types.ts:100`).
+`BulkWriteFile`: `{ path, contentType?, content, encoding?: "utf-8"|"base64", contentIdentity? }` (`src/types.ts:100`). **Note:** `bulkWrite` files do **not** carry a per-file `baseRevision` (unlike `writeFile`) — bulk writes are unconditional create-or-overwrite. `BulkWriteResponse` returns `{ written, errorCount, errors, results }`. Use `writeFile` with an explicit `baseRevision` when you need optimistic-concurrency / conflict detection (`RevisionConflictError`).
 
 ---
 
