@@ -59,17 +59,35 @@ export interface RelayfileAgents {
    * pull-only). MCPs can't push; Relayfile turns every provider event into
    * a workspace event multiple agents can subscribe to.
    *
-   * Auto-reconnect with token refresh: when the WebSocket drops (typically
-   * at token TTL), the subscription re-resolves a fresh token via the
-   * cloud token provider and reconnects. Long-lived reactive agents
-   * survive token expiry without silent failure.
+   * Auto-reconnect with token refresh and exponential backoff: when the
+   * WebSocket drops (token TTL, gateway flap, sustained outage), the
+   * subscription re-resolves a fresh token via the cloud token provider
+   * and reconnects, with backoff `baseDelayMs → maxDelayMs` (doubling on
+   * each failure, reset to base after ~10s of stable connection). Long-
+   * lived reactive agents survive token expiry without silent failure
+   * and without hammering the gateway on sustained outage.
    *
    * @returns `Subscription` with `unsubscribe()`.
    */
   onEvent(
     globs: string[],
     handler: (event: FilesystemEvent) => void | Promise<void>,
+    opts?: OnEventOptions,
   ): Subscription;
+}
+
+export interface OnEventOptions {
+  /** Called when a handler invocation rejects. Defaults to `console.error`. */
+  onError?: (err: unknown, event: FilesystemEvent) => void;
+  /** Base backoff in ms (doubles each failure). Default 1000. */
+  baseDelayMs?: number;
+  /** Cap backoff at this many ms. Default 30000. */
+  maxDelayMs?: number;
+  /**
+   * If a connection stays open this long, reset the backoff to the base
+   * (treat the connection as healthy). Default 10000.
+   */
+  stableThresholdMs?: number;
 }
 
 function readCloudCreds(): CloudCreds {
@@ -156,17 +174,40 @@ export async function connect(opts: ConnectOptions = {}): Promise<RelayfileAgent
     credSource: creds.source,
     writeback: createWriteback(client, workspaceId),
     read: (path: string) => client.readFile(workspaceId, path),
-    onEvent: (globs, handler) => {
+    onEvent: (globs, handler, opts = {}) => {
       const patterns = globs.map(normalizeGlob);
+      const baseDelay = opts.baseDelayMs ?? 1000;
+      const maxDelay = opts.maxDelayMs ?? 30_000;
+      const stableThreshold = opts.stableThresholdMs ?? 10_000;
+      const reportError =
+        opts.onError ??
+        ((err: unknown, event: FilesystemEvent) =>
+          console.error("[relayfile/agents] onEvent handler error:", err, "@", event.path));
+
       let conn: WebSocketConnection | null = null;
       let unsubscribed = false;
       let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+      let nextDelay = baseDelay;
+      let connectedAt = 0;
 
       const dispatch = (event: FilesystemEvent) => {
         if (!patterns.some((p) => p.test(event.path))) return;
-        Promise.resolve(handler(event)).catch((err) => {
-          console.error("[relayfile/agents] onEvent handler error:", err);
-        });
+        Promise.resolve(handler(event)).catch((err) => reportError(err, event));
+      };
+
+      const scheduleReconnect = () => {
+        if (unsubscribed) return;
+        // If we held a stable connection long enough, reset the backoff so the
+        // next reconnect-after-flap is fast. Sustained flap keeps doubling.
+        if (connectedAt && Date.now() - connectedAt >= stableThreshold) {
+          nextDelay = baseDelay;
+        }
+        const delay = Math.min(nextDelay, maxDelay);
+        nextDelay = Math.min(nextDelay * 2, maxDelay);
+        reconnectTimer = setTimeout(() => {
+          reconnectTimer = null;
+          void connectOnce();
+        }, delay);
       };
 
       const connectOnce = async () => {
@@ -178,19 +219,17 @@ export async function connect(opts: ConnectOptions = {}): Promise<RelayfileAgent
             paths: globs,
             onEvent: dispatch,
           });
-          // Auto-reconnect with fresh token on close — long-lived reactive
-          // agents must survive token TTL without silent death.
+          connectedAt = Date.now();
           const offClose = conn.on("close", () => {
             offClose();
-            if (unsubscribed) return;
-            reconnectTimer = setTimeout(() => {
-              reconnectTimer = null;
-              void connectOnce();
-            }, 1000);
+            scheduleReconnect();
           });
         } catch (err) {
-          console.error("[relayfile/agents] onEvent connect failed; retrying in 5s:", err);
-          if (!unsubscribed) reconnectTimer = setTimeout(connectOnce, 5000);
+          console.error(
+            `[relayfile/agents] onEvent connect failed; retrying in ${nextDelay}ms:`,
+            err,
+          );
+          scheduleReconnect();
         }
       };
 

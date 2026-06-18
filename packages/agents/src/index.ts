@@ -1,5 +1,5 @@
 export { connect } from "./connect.js";
-export type { ConnectOptions, RelayfileAgents } from "./connect.js";
+export type { ConnectOptions, OnEventOptions, RelayfileAgents } from "./connect.js";
 export type { CreateResult, OpReceipt, WritebackApi } from "./writeback.js";
 
 // Re-export SDK types + error classes so consumers have one import surface

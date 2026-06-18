@@ -67,6 +67,17 @@ yourself. This example uses the SDK's push channel (`subscribe` → WebSocket)
 through the `@relayfile/agents` thin `onEvent` wrapper, so the agent code is
 just three lines and there's no polling loop in the example at all.
 
+## Test coverage honesty
+
+The smoke proves event **delivery** end-to-end — a writeback create fires a
+real `file.created` event delivered over the WebSocket within seconds. The
+**reconnect-on-close + token-refresh + exponential-backoff** path is
+correct-by-inspection but isn't deterministically exercisable in a smoke
+(the WS token TTL is ~24h, far longer than a smoke run). The exponential
+backoff (`baseDelayMs: 1000` → `maxDelayMs: 30000`, reset to base after
+~10s of stable connection) is the safety belt for that untested path:
+sustained gateway flap won't hammer the connection.
+
 ## See also
 
 - [`packages/agents/README.md`](../../../packages/agents/README.md) — package overview, including "When to use vs. a provider MCP" and the event-driven structural advantage.
