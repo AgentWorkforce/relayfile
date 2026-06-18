@@ -225,6 +225,69 @@ func TestSyncOncePullsRemoteAndPushesLocalEdits(t *testing.T) {
 	}
 }
 
+func TestSyncOnceWriteOnlySkipsRemotePullButPushesLocalFiles(t *testing.T) {
+	client := &fakeClient{
+		files: map[string]RemoteFile{
+			"/slack/channels/C123/messages/history.json": {
+				Path:        "/slack/channels/C123/messages/history.json",
+				Revision:    "rev_1",
+				ContentType: "application/json",
+				Content:     `{"text":"history"}`,
+			},
+		},
+		revisionCounter: 1,
+	}
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_write_only",
+		RemoteRoot:  "/slack/channels/C123/messages",
+		LocalRoot:   localDir,
+		SyncMode:    "write-only",
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+
+	localDraft := filepath.Join(localDir, "wb-pear-ack.json")
+	if err := os.WriteFile(localDraft, []byte(`{"text":"ack"}`), 0o644); err != nil {
+		t.Fatalf("write local draft failed: %v", err)
+	}
+
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("write-only sync failed: %v", err)
+	}
+
+	if client.listTreeCalls != 0 || client.listEventsCalls != 0 || client.readFileCalls != 0 {
+		t.Fatalf("write-only sync should not pull remote records; tree=%d events=%d read=%d", client.listTreeCalls, client.listEventsCalls, client.readFileCalls)
+	}
+	if got := len(client.bulkWriteBatches); got != 1 {
+		t.Fatalf("expected one bulk write batch, got %d", got)
+	}
+	if got, want := client.bulkWriteBatches[0][0].Path, "/slack/channels/C123/messages/wb-pear-ack.json"; got != want {
+		t.Fatalf("expected canonical write path %q, got %q", want, got)
+	}
+	if _, err := os.Stat(filepath.Join(localDir, ".relay", "dead-letter")); err != nil {
+		t.Fatalf("expected write-only mount to keep dead-letter feedback dir: %v", err)
+	}
+	var public struct {
+		Mode     string `json:"mode"`
+		SyncMode string `json:"syncMode"`
+	}
+	data, err := os.ReadFile(filepath.Join(localDir, ".relay", "state.json"))
+	if err != nil {
+		t.Fatalf("read public state: %v", err)
+	}
+	if err := json.Unmarshal(data, &public); err != nil {
+		t.Fatalf("decode public state: %v", err)
+	}
+	if public.Mode != "poll" || public.SyncMode != "write-only" {
+		t.Fatalf("expected public state mode poll/write-only, got %+v", public)
+	}
+	if _, err := os.Stat(filepath.Join(localDir, "history.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("write-only sync mirrored provider history, stat err=%v", err)
+	}
+}
+
 func TestHandleLocalChangeIgnoresAlreadyTrackedContent(t *testing.T) {
 	client := &fakeClient{
 		files: map[string]RemoteFile{
@@ -512,6 +575,18 @@ func TestIsUnderLazyGithubRepoSubtree(t *testing.T) {
 			want:       false,
 		},
 		{
+			name:       "slack integration",
+			remoteRoot: "/",
+			remotePath: "/slack/channels/C123/messages/1711111000_000100.json",
+			want:       false,
+		},
+		{
+			name:       "memory integration",
+			remoteRoot: "/",
+			remotePath: "/memory/workspace/daily-ship.md",
+			want:       false,
+		},
+		{
 			name:       "root github dir",
 			remoteRoot: "/",
 			remotePath: "/github",
@@ -522,6 +597,30 @@ func TestIsUnderLazyGithubRepoSubtree(t *testing.T) {
 			remoteRoot: "/relay",
 			remotePath: "/relay/github/repos/octocat/hello-world/issues/issue-1.json",
 			want:       true,
+		},
+		{
+			name:       "scoped org remote root repo subtree file",
+			remoteRoot: "/github/repos/AgentWorkforce",
+			remotePath: "/github/repos/AgentWorkforce/cloud/pulls/123.json",
+			want:       true,
+		},
+		{
+			name:       "scoped org and repo remote root repo subtree file",
+			remoteRoot: "/github/repos/AgentWorkforce/cloud/pulls",
+			remotePath: "/github/repos/AgentWorkforce/cloud/pulls/123.json",
+			want:       true,
+		},
+		{
+			name:       "scoped org remote root repo root",
+			remoteRoot: "/github/repos/AgentWorkforce",
+			remotePath: "/github/repos/AgentWorkforce/cloud",
+			want:       false,
+		},
+		{
+			name:       "outside scoped org remote root",
+			remoteRoot: "/github/repos/AgentWorkforce",
+			remotePath: "/github/repos/OtherOrg/cloud/pulls/123.json",
+			want:       false,
 		},
 	}
 
@@ -1713,6 +1812,1042 @@ func TestBulkWrite_SingleCallForNFiles(t *testing.T) {
 	}
 }
 
+func TestBulkWrite_ContentIdentityGoldenVector(t *testing.T) {
+	const (
+		workspaceID = "ws_test"
+		remotePath  = "/slack/channels/C123/messages/messages 5ab77d67.json"
+		content     = "{\"channel\":\"C123\",\"text\":\"hello writeback idempotency\"}\n"
+		contentHash = "751f9591557700f69b5ceefcdec7ead8563a10f0a712c501a5028699be021511"
+		key         = "ws_test:/slack/channels/C123/messages/messages 5ab77d67.json:751f9591557700f69b5ceefcdec7ead8563a10f0a712c501a5028699be021511"
+	)
+
+	snapshot := newLocalSnapshot(remotePath, []byte(content))
+	if snapshot.Hash != contentHash {
+		t.Fatalf("golden vector hash = %q, want %q", snapshot.Hash, contentHash)
+	}
+	identity := newMountWritebackCreateDraftContentIdentity(workspaceID, remotePath, snapshot.Hash)
+	if identity.Kind != mountWritebackCreateDraftContentIdentityKind {
+		t.Fatalf("content identity kind = %q, want %q", identity.Kind, mountWritebackCreateDraftContentIdentityKind)
+	}
+	if identity.Key != key {
+		t.Fatalf("content identity key = %q, want %q", identity.Key, key)
+	}
+	if identity.TTLSeconds != mountWritebackCreateDraftContentIdentityTTLSeconds {
+		t.Fatalf("content identity ttl = %d, want %d", identity.TTLSeconds, mountWritebackCreateDraftContentIdentityTTLSeconds)
+	}
+	if identity.TTLSeconds != 2592000 {
+		t.Fatalf("golden vector ttl = %d, want 2592000", identity.TTLSeconds)
+	}
+	if strings.TrimSpace(identity.Key) != identity.Key {
+		t.Fatalf("golden vector key should be trim-stable: %q", identity.Key)
+	}
+	if !strings.Contains(identity.Key, "messages 5ab77d67.json") {
+		t.Fatalf("golden vector key should preserve the internal path space: %q", identity.Key)
+	}
+}
+
+func TestBulkWrite_ContentIdentityStabilityAndIsolation(t *testing.T) {
+	const (
+		workspaceID = "ws_test"
+		remotePath  = "/slack/channels/C123/messages/messages 5ab77d67-1111-4111-8111-123456789abc.json"
+	)
+
+	snapshot := newLocalSnapshot(remotePath, []byte("{\"text\":\"same\"}\n"))
+	files := bulkWriteFilesForPending(workspaceID, []pendingBulkWrite{{
+		remotePath: remotePath,
+		snapshot:   snapshot,
+	}})
+	reupload := bulkWriteFilesForPending(workspaceID, []pendingBulkWrite{{
+		remotePath: remotePath,
+		snapshot:   snapshot,
+	}})
+	if files[0].ContentIdentity == nil || reupload[0].ContentIdentity == nil {
+		t.Fatal("expected content identity on both bulk files")
+	}
+	if files[0].ContentIdentity.Key != reupload[0].ContentIdentity.Key {
+		t.Fatalf("same draft re-upload key changed: %q vs %q", files[0].ContentIdentity.Key, reupload[0].ContentIdentity.Key)
+	}
+
+	edited := bulkWriteFilesForPending(workspaceID, []pendingBulkWrite{{
+		remotePath: remotePath,
+		snapshot:   newLocalSnapshot(remotePath, []byte("{\"text\":\"edited\"}\n")),
+	}})
+	if edited[0].ContentIdentity.Key == files[0].ContentIdentity.Key {
+		t.Fatalf("edited draft content should change key %q", edited[0].ContentIdentity.Key)
+	}
+
+	otherPath := bulkWriteFilesForPending(workspaceID, []pendingBulkWrite{{
+		remotePath: "/slack/channels/C123/messages/messages 6ab77d67-2222-4222-8222-123456789abc.json",
+		snapshot:   snapshot,
+	}})
+	if otherPath[0].ContentIdentity.Key == files[0].ContentIdentity.Key {
+		t.Fatalf("different draft path should change key %q", otherPath[0].ContentIdentity.Key)
+	}
+
+	otherWorkspace := bulkWriteFilesForPending("ws_other", []pendingBulkWrite{{
+		remotePath: remotePath,
+		snapshot:   snapshot,
+	}})
+	if otherWorkspace[0].ContentIdentity.Key == files[0].ContentIdentity.Key {
+		t.Fatalf("different workspace should change key %q", otherWorkspace[0].ContentIdentity.Key)
+	}
+}
+
+func TestBulkWrite_ContentIdentityOnlyForCreateDraftPaths(t *testing.T) {
+	const workspaceID = "ws_test"
+	snapshot := newLocalSnapshot("/notion/pages/pages 5ab77d67-1111-4111-8111-123456789abc.json", []byte("{}\n"))
+
+	draft := bulkWriteFilesForPending(workspaceID, []pendingBulkWrite{{
+		remotePath: "/notion/pages/pages 5ab77d67-1111-4111-8111-123456789abc.json",
+		snapshot:   snapshot,
+	}})
+	if draft[0].ContentIdentity == nil {
+		t.Fatal("expected content identity for space-uuid create draft path")
+	}
+
+	factoryCreate := bulkWriteFilesForPending(workspaceID, []pendingBulkWrite{{
+		remotePath: "/linear/issues/factory-create-ar-272-test.json",
+		snapshot:   snapshot,
+	}})
+	if factoryCreate[0].ContentIdentity == nil {
+		t.Fatal("expected content identity for factory-create writeback path")
+	}
+
+	stable := bulkWriteFilesForPending(workspaceID, []pendingBulkWrite{{
+		remotePath: "/notion/pages/page-1.md",
+		snapshot:   snapshot,
+	}})
+	if stable[0].ContentIdentity != nil {
+		t.Fatalf("stable non-draft path should not carry content identity: %+v", stable[0].ContentIdentity)
+	}
+
+	nonUUID := bulkWriteFilesForPending(workspaceID, []pendingBulkWrite{{
+		remotePath: "/slack/channels/C123/messages/messages not-a-uuid.json",
+		snapshot:   snapshot,
+	}})
+	if nonUUID[0].ContentIdentity != nil {
+		t.Fatalf("non-uuid draft-like path should not carry content identity: %+v", nonUUID[0].ContentIdentity)
+	}
+}
+
+func TestBulkWrite_ContentIdentityOmittedForStablePathRevert(t *testing.T) {
+	const (
+		workspaceID = "ws_test"
+		remotePath  = "/notion/pages/page-1.md"
+	)
+
+	for _, content := range []string{"# C\n", "# D\n", "# C\n"} {
+		files := bulkWriteFilesForPending(workspaceID, []pendingBulkWrite{{
+			remotePath: remotePath,
+			snapshot:   newLocalSnapshot(remotePath, []byte(content)),
+		}})
+		if files[0].ContentIdentity != nil {
+			t.Fatalf("stable path content %q should not carry content identity: %+v", content, files[0].ContentIdentity)
+		}
+	}
+}
+
+func TestBulkWrite_FlushSendsContentIdentity(t *testing.T) {
+	const (
+		workspaceID = "ws_test"
+		content     = "{\"channel\":\"C123\",\"text\":\"hello writeback idempotency\"}\n"
+		draftID     = "5ab77d67-1111-4111-8111-123456789abc"
+	)
+
+	client := &fakeClient{files: map[string]RemoteFile{}}
+	localDir := t.TempDir()
+	messageDir := filepath.Join(localDir, "slack", "channels", "C123", "messages")
+	if err := os.MkdirAll(messageDir, 0o755); err != nil {
+		t.Fatalf("mkdir message dir failed: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(messageDir, "messages "+draftID+".json"), []byte(content), 0o644); err != nil {
+		t.Fatalf("write draft failed: %v", err)
+	}
+
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: workspaceID,
+		RemoteRoot:  "/",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("sync once failed: %v", err)
+	}
+	if got := len(client.bulkWriteBatches); got != 1 {
+		t.Fatalf("expected one bulk write batch, got %d", got)
+	}
+	if got := len(client.bulkWriteBatches[0]); got != 1 {
+		t.Fatalf("expected one bulk write file, got %d", got)
+	}
+	identity := client.bulkWriteBatches[0][0].ContentIdentity
+	if identity == nil {
+		t.Fatal("expected flushed bulk file to carry content identity")
+	}
+	acked := readOutboxRecordsInDirForTest(t, filepath.Join(localDir, ".relay", "outbox", "acked"))
+	if len(acked) != 1 {
+		t.Fatalf("expected one acked outbox record, got %+v", acked)
+	}
+	// A draft-create flush must dedupe on the create-draft identity
+	// (workspace:path:hash) — the same key the in-flight pending path and the
+	// CLI's direct `writeback push` use — so a daemon flush of a pending push
+	// receipt collides with the direct push instead of minting a second
+	// idempotency key (which would create duplicate provider drafts).
+	remotePath := acked[0].RemotePath
+	want := newMountWritebackCreateDraftContentIdentity(workspaceID, remotePath, acked[0].Hash)
+	if identity.Kind != mountWritebackCreateDraftContentIdentityKind {
+		t.Fatalf("flushed identity kind = %q, want %q", identity.Kind, mountWritebackCreateDraftContentIdentityKind)
+	}
+	if identity.Key != want.Key {
+		t.Fatalf("flushed identity key = %q, want create-draft key %q", identity.Key, want.Key)
+	}
+	if identity.TTLSeconds != mountWritebackCreateDraftContentIdentityTTLSeconds {
+		t.Fatalf("flushed identity ttl = %d, want %d", identity.TTLSeconds, mountWritebackCreateDraftContentIdentityTTLSeconds)
+	}
+}
+
+func TestOutboxPersistsBeforeBulkWriteFailure(t *testing.T) {
+	localDir := t.TempDir()
+	client := &fakeClient{
+		files: map[string]RemoteFile{},
+		bulkWriteResponseFunc: func(ctx context.Context, workspaceID string, files []BulkWriteFile) (BulkWriteResponse, error) {
+			_ = ctx
+			_ = workspaceID
+			_ = files
+			records := readPendingOutboxRecordsForTest(t, localDir)
+			if len(records) != 1 {
+				t.Fatalf("expected outbox record persisted before upload, got %d", len(records))
+			}
+			if records[0].CommandID == "" || records[0].CorrelationID != records[0].CommandID {
+				t.Fatalf("expected stable command/correlation id before upload, got %+v", records[0])
+			}
+			return BulkWriteResponse{}, context.Canceled
+		},
+	}
+	if err := os.WriteFile(filepath.Join(localDir, "command.json"), []byte(`{"text":"hello"}`), 0o644); err != nil {
+		t.Fatalf("seed local command failed: %v", err)
+	}
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_outbox_persist_first",
+		RemoteRoot:  "/slack/channels/C123/messages",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer: %v", err)
+	}
+
+	if err := syncer.SyncOnce(context.Background()); err == nil {
+		t.Fatal("expected canceled upload to fail")
+	}
+	records := readPendingOutboxRecordsForTest(t, localDir)
+	if len(records) != 1 || records[0].AttemptCount != 1 {
+		t.Fatalf("expected one attempted pending outbox record, got %+v", records)
+	}
+}
+
+// TestOutboxFlushUsesIndependentDeadlineNotPerCycleCtx proves the fix for the
+// churn-digest "context deadline exceeded" / minutes-late-reply failure: the
+// durable writeback upload must run under its OWN rootCtx-derived deadline
+// (outboxContext), so a tiny per-cycle RELAYFILE_MOUNT_TIMEOUT — or even an
+// already-expired inbound ctx — cannot starve or cancel it. Without the fix the
+// inbound (expired) ctx flows straight into WriteFilesBulk and the flush fails.
+func TestOutboxFlushUsesIndependentDeadlineNotPerCycleCtx(t *testing.T) {
+	localDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(localDir, "command.json"), []byte(`{"text":"hello"}`), 0o644); err != nil {
+		t.Fatalf("seed local command failed: %v", err)
+	}
+
+	// First pass: persist a pending outbox record via a canceled upload.
+	firstClient := &fakeClient{
+		files: map[string]RemoteFile{},
+		bulkWriteResponseFunc: func(ctx context.Context, _ string, _ []BulkWriteFile) (BulkWriteResponse, error) {
+			_ = ctx
+			return BulkWriteResponse{}, context.Canceled
+		},
+	}
+	first, err := NewSyncer(firstClient, SyncerOptions{
+		WorkspaceID: "ws_outbox_deadline",
+		RemoteRoot:  "/slack/channels/C123/messages",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer first: %v", err)
+	}
+	if err := first.SyncOnce(context.Background()); err == nil {
+		t.Fatal("expected first upload to fail")
+	}
+	forcePendingOutboxDueForTest(t, localDir)
+
+	// Second pass: hand the flush an ALREADY-EXPIRED per-cycle ctx. The upload
+	// must still run, under the rootCtx-derived outbox deadline (30s here).
+	var sawRemaining time.Duration
+	secondClient := &fakeClient{
+		files: map[string]RemoteFile{},
+		bulkWriteResponseFunc: func(ctx context.Context, _ string, _ []BulkWriteFile) (BulkWriteResponse, error) {
+			if dl, ok := ctx.Deadline(); !ok {
+				t.Error("expected outbox upload ctx to carry a deadline")
+			} else {
+				sawRemaining = time.Until(dl)
+			}
+			// A per-cycle-sized expiry must not cancel the upload mid-flight.
+			time.Sleep(40 * time.Millisecond)
+			if ctx.Err() != nil {
+				t.Errorf("outbox upload ctx cancelled mid-flight: %v", ctx.Err())
+			}
+			return BulkWriteResponse{}, nil
+		},
+	}
+	second, err := NewSyncer(secondClient, SyncerOptions{
+		WorkspaceID:        "ws_outbox_deadline",
+		RemoteRoot:         "/slack/channels/C123/messages",
+		LocalRoot:          localDir,
+		RootCtx:            context.Background(),
+		OutboxFlushTimeout: 30 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer second: %v", err)
+	}
+
+	tinyCtx, cancel := context.WithTimeout(context.Background(), 15*time.Millisecond)
+	defer cancel()
+	time.Sleep(20 * time.Millisecond) // the inbound per-cycle ctx is now expired
+	if tinyCtx.Err() == nil {
+		t.Fatal("precondition: expected inbound per-cycle ctx to be already expired")
+	}
+
+	if err := second.flushDueOutboxRecords(tinyCtx, nil); err != nil {
+		t.Fatalf("outbox flush should survive an expired per-cycle ctx, got: %v", err)
+	}
+	if secondClient.bulkWriteCalls != 1 {
+		t.Fatalf("expected exactly one upload, got %d", secondClient.bulkWriteCalls)
+	}
+	if sawRemaining < 5*time.Second {
+		t.Fatalf("expected upload to run under the ~30s outbox deadline, saw %s remaining (looks like the expired per-cycle ctx leaked through)", sawRemaining)
+	}
+	if pending := readPendingOutboxRecordsForTest(t, localDir); len(pending) != 0 {
+		t.Fatalf("expected pending outbox empty after ack, got %+v", pending)
+	}
+}
+
+func TestOutboxRecordContentIdentityDraftMatchesDirectPush(t *testing.T) {
+	const (
+		workspaceID = "ws_test"
+		contentHash = "751f9591557700f69b5ceefcdec7ead8563a10f0a712c501a5028699be021511"
+		draftPath   = "/slack/channels/C123/messages/messages 5ab77d67-1111-2222-3333-444455556666.json"
+	)
+
+	// A draft "create" outbox record must dedupe on the create-draft identity
+	// (workspace:path:hash) so a mount-daemon flush of the CLI's pending receipt
+	// collides with the CLI's direct `writeback push`, not on the per-record
+	// commandId. Otherwise the server sees two idempotency keys for identical
+	// content and can mint duplicate provider drafts.
+	if !isMountWritebackCreateDraftPath(draftPath) {
+		t.Fatalf("expected %q to be recognized as a create-draft path", draftPath)
+	}
+	draftRecord := outboxRecord{
+		CommandID:   "mountcmd_should_not_be_used",
+		WorkspaceID: workspaceID,
+		RemotePath:  draftPath,
+		Hash:        contentHash,
+	}
+	got := outboxRecordContentIdentity(draftRecord)
+	want := newMountWritebackCreateDraftContentIdentity(workspaceID, draftPath, contentHash)
+	if got == nil || got.Kind != want.Kind || got.Key != want.Key || got.TTLSeconds != want.TTLSeconds {
+		t.Fatalf("draft record identity = %+v, want %+v", got, want)
+	}
+
+	// Non-draft mount commands keep the stable commandId identity.
+	plainRecord := outboxRecord{
+		CommandID:   "mountcmd_abc123",
+		WorkspaceID: workspaceID,
+		RemotePath:  "/slack/channels/C123/messages/command.json",
+		Hash:        contentHash,
+	}
+	plain := outboxRecordContentIdentity(plainRecord)
+	if plain == nil || plain.Kind != "mount-command" || plain.Key != plainRecord.CommandID {
+		t.Fatalf("plain record identity = %+v, want mount-command keyed by commandId", plain)
+	}
+}
+
+func TestOutboxRestartReloadsPendingAndFlushesWithPersistedCommandID(t *testing.T) {
+	localDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(localDir, "command.json"), []byte(`{"text":"hello"}`), 0o644); err != nil {
+		t.Fatalf("seed local command failed: %v", err)
+	}
+	firstClient := &fakeClient{
+		files: map[string]RemoteFile{},
+		bulkWriteResponseFunc: func(ctx context.Context, workspaceID string, files []BulkWriteFile) (BulkWriteResponse, error) {
+			_ = ctx
+			_ = workspaceID
+			_ = files
+			return BulkWriteResponse{}, context.Canceled
+		},
+	}
+	first, err := NewSyncer(firstClient, SyncerOptions{
+		WorkspaceID: "ws_outbox_restart",
+		RemoteRoot:  "/slack/channels/C123/messages",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer first: %v", err)
+	}
+	if err := first.SyncOnce(context.Background()); err == nil {
+		t.Fatal("expected first upload to fail")
+	}
+	record := forcePendingOutboxDueForTest(t, localDir)
+	commandID := record.CommandID
+
+	secondClient := &fakeClient{files: map[string]RemoteFile{}}
+	second, err := NewSyncer(secondClient, SyncerOptions{
+		WorkspaceID: "ws_outbox_restart",
+		RemoteRoot:  "/slack/channels/C123/messages",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer second: %v", err)
+	}
+	if err := second.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("restart flush failed: %v", err)
+	}
+	if secondClient.bulkWriteCalls != 1 {
+		t.Fatalf("expected restart to flush pending outbox once, got %d", secondClient.bulkWriteCalls)
+	}
+	gotIdentity := secondClient.bulkWriteBatches[0][0].ContentIdentity
+	if gotIdentity == nil || gotIdentity.Key != commandID || gotIdentity.Kind != "mount-command" {
+		t.Fatalf("expected persisted command id in retry contentIdentity, got %+v (want %s)", gotIdentity, commandID)
+	}
+	if pending := readPendingOutboxRecordsForTest(t, localDir); len(pending) != 0 {
+		t.Fatalf("expected pending outbox empty after ack, got %+v", pending)
+	}
+	acked := readOutboxRecordsInDirForTest(t, filepath.Join(localDir, ".relay", "outbox", "acked"))
+	if len(acked) != 1 || acked[0].CommandID != commandID {
+		t.Fatalf("expected acked outbox record for %s, got %+v", commandID, acked)
+	}
+}
+
+func TestOutboxRetryAfterServerCommitUsesSameCommandIDAndDedupes(t *testing.T) {
+	localDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(localDir, "command.json"), []byte(`{"text":"hello"}`), 0o644); err != nil {
+		t.Fatalf("seed local command failed: %v", err)
+	}
+	var seenIdentity string
+	var committedEvents int
+	client := &fakeClient{
+		files:                          map[string]RemoteFile{},
+		bulkWriteResponseFuncOwnsWrite: true,
+	}
+	client.bulkWriteResponseFunc = func(ctx context.Context, workspaceID string, files []BulkWriteFile) (BulkWriteResponse, error) {
+		_ = ctx
+		_ = workspaceID
+		if len(files) != 1 || files[0].ContentIdentity == nil {
+			t.Fatalf("expected one content-identified write, got %+v", files)
+		}
+		path := normalizeRemotePath(files[0].Path)
+		if seenIdentity == "" {
+			seenIdentity = files[0].ContentIdentity.Key
+			client.revisionCounter++
+			revision := fmt.Sprintf("rev_%d", client.revisionCounter)
+			client.files[path] = RemoteFile{
+				Path:        path,
+				Revision:    revision,
+				ContentType: files[0].ContentType,
+				Content:     files[0].Content,
+			}
+			client.appendEvent("file.created", path, revision)
+			committedEvents++
+			return BulkWriteResponse{}, context.Canceled
+		}
+		if files[0].ContentIdentity.Key != seenIdentity {
+			t.Fatalf("retry minted a new command id: got %s want %s", files[0].ContentIdentity.Key, seenIdentity)
+		}
+		remote := client.files[path]
+		return BulkWriteResponse{
+			Written:       0,
+			ErrorCount:    0,
+			Errors:        []BulkWriteError{},
+			Results:       []BulkWriteResult{{Path: remote.Path, Revision: remote.Revision, ContentType: remote.ContentType}},
+			CorrelationID: "corr_deduped",
+		}, nil
+	}
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_outbox_commit_lost_response",
+		RemoteRoot:  "/slack/channels/C123/messages",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer: %v", err)
+	}
+	if err := syncer.SyncOnce(context.Background()); err == nil {
+		t.Fatal("expected first lost response to fail")
+	}
+	forcePendingOutboxDueForTest(t, localDir)
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("retry after lost response failed: %v", err)
+	}
+	if client.bulkWriteCalls != 2 {
+		t.Fatalf("expected exactly two upload attempts, got %d", client.bulkWriteCalls)
+	}
+	if committedEvents != 1 || len(client.events) != 1 {
+		t.Fatalf("expected one provider-facing mutation after deduped retry, committed=%d events=%d", committedEvents, len(client.events))
+	}
+	if pending := readPendingOutboxRecordsForTest(t, localDir); len(pending) != 0 {
+		t.Fatalf("expected outbox acked after deduped retry, got %+v", pending)
+	}
+}
+
+func TestOutboxAcksOnlyAfterWritebackOperationSucceeded(t *testing.T) {
+	localDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(localDir, "command.json"), []byte(`{"text":"hello"}`), 0o644); err != nil {
+		t.Fatalf("seed local command failed: %v", err)
+	}
+	client := &fakeClient{
+		files:      map[string]RemoteFile{},
+		operations: map[string]OperationStatus{},
+	}
+	client.bulkWriteResponseFunc = func(ctx context.Context, workspaceID string, files []BulkWriteFile) (BulkWriteResponse, error) {
+		_ = ctx
+		_ = workspaceID
+		if len(files) != 1 {
+			t.Fatalf("expected one outbox file, got %+v", files)
+		}
+		path := normalizeRemotePath(files[0].Path)
+		client.revisionCounter++
+		revision := fmt.Sprintf("rev_%d", client.revisionCounter)
+		client.files[path] = RemoteFile{Path: path, Revision: revision, ContentType: files[0].ContentType, Content: files[0].Content}
+		opID := "op_dispatch_receipt_1"
+		client.operations[opID] = OperationStatus{
+			OpID:     opID,
+			Path:     path,
+			Revision: revision,
+			Provider: "slack",
+			Status:   "running",
+		}
+		return BulkWriteResponse{
+			Written: 1,
+			Results: []BulkWriteResult{{
+				Path:        path,
+				Revision:    revision,
+				ContentType: files[0].ContentType,
+				OpID:        opID,
+				Writeback:   &relayfile.BulkWriteWritebackResult{Provider: "slack", State: "pending"},
+			}},
+			CorrelationID: "corr_receipt_pending",
+		}, nil
+	}
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_outbox_dispatch_receipt",
+		RemoteRoot:  "/slack/channels/C123/messages",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer: %v", err)
+	}
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("sync with running op should keep pending without failing: %v", err)
+	}
+	pending := readPendingOutboxRecordsForTest(t, localDir)
+	if len(pending) != 1 || pending[0].OpID != "op_dispatch_receipt_1" || pending[0].DispatchStatus != "running" {
+		t.Fatalf("expected pending outbox with running op id, got %+v", pending)
+	}
+	if acked := readOutboxRecordsInDirForTest(t, filepath.Join(localDir, ".relay", "outbox", "acked")); len(acked) != 0 {
+		t.Fatalf("expected no acked record before op succeeded, got %+v", acked)
+	}
+
+	client.operations["op_dispatch_receipt_1"] = OperationStatus{
+		OpID:     "op_dispatch_receipt_1",
+		Path:     "/slack/channels/C123/messages/command.json",
+		Revision: pending[0].Revision,
+		Provider: "slack",
+		Status:   "succeeded",
+	}
+	forcePendingOutboxDueForTest(t, localDir)
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("sync after op success failed: %v", err)
+	}
+	if client.bulkWriteCalls != 1 {
+		t.Fatalf("expected success polling to avoid re-upload, got %d bulk calls", client.bulkWriteCalls)
+	}
+	if pending := readPendingOutboxRecordsForTest(t, localDir); len(pending) != 0 {
+		t.Fatalf("expected pending empty after op success, got %+v", pending)
+	}
+	acked := readOutboxRecordsInDirForTest(t, filepath.Join(localDir, ".relay", "outbox", "acked"))
+	if len(acked) != 1 || acked[0].OpID != "op_dispatch_receipt_1" || acked[0].DispatchStatus != "succeeded" {
+		t.Fatalf("expected acked succeeded receipt, got %+v", acked)
+	}
+}
+
+func TestOutboxRestartDuringInFlightOperationResumesPolling(t *testing.T) {
+	localDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(localDir, "command.json"), []byte(`{"text":"hello"}`), 0o644); err != nil {
+		t.Fatalf("seed local command failed: %v", err)
+	}
+	const opID = "op_restart_in_flight_1"
+	firstClient := &fakeClient{
+		files:      map[string]RemoteFile{},
+		operations: map[string]OperationStatus{},
+	}
+	firstClient.bulkWriteResponseFunc = func(ctx context.Context, workspaceID string, files []BulkWriteFile) (BulkWriteResponse, error) {
+		_ = ctx
+		_ = workspaceID
+		if len(files) != 1 {
+			t.Fatalf("expected one outbox file, got %+v", files)
+		}
+		path := normalizeRemotePath(files[0].Path)
+		firstClient.revisionCounter++
+		revision := fmt.Sprintf("rev_%d", firstClient.revisionCounter)
+		firstClient.files[path] = RemoteFile{Path: path, Revision: revision, ContentType: files[0].ContentType, Content: files[0].Content}
+		firstClient.operations[opID] = OperationStatus{
+			OpID:     opID,
+			Path:     path,
+			Revision: revision,
+			Provider: "slack",
+			Status:   "running",
+		}
+		return BulkWriteResponse{
+			Written: 1,
+			Results: []BulkWriteResult{{
+				Path:        path,
+				Revision:    revision,
+				ContentType: files[0].ContentType,
+				OpID:        opID,
+				Writeback:   &relayfile.BulkWriteWritebackResult{Provider: "slack", State: "pending"},
+			}},
+			CorrelationID: "corr_restart_in_flight",
+		}, nil
+	}
+	first, err := NewSyncer(firstClient, SyncerOptions{
+		WorkspaceID: "ws_outbox_restart_in_flight",
+		RemoteRoot:  "/slack/channels/C123/messages",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer first: %v", err)
+	}
+	// Command accepted by the cloud, writeback op still in flight: the record
+	// stays pending with the op id persisted, and the syncer "dies" here.
+	if err := first.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("first sync with in-flight op failed: %v", err)
+	}
+	pending := readPendingOutboxRecordsForTest(t, localDir)
+	if len(pending) != 1 || pending[0].OpID != opID || pending[0].DispatchStatus != "running" {
+		t.Fatalf("expected one pending record carrying in-flight op id, got %+v", pending)
+	}
+	commandID := pending[0].CommandID
+	remotePath := pending[0].RemotePath
+
+	// Restart with a fresh syncer and client; meanwhile the op has succeeded
+	// server-side.
+	secondClient := &fakeClient{
+		files: map[string]RemoteFile{
+			remotePath: firstClient.files[remotePath],
+		},
+		operations: map[string]OperationStatus{
+			opID: {
+				OpID:     opID,
+				Path:     remotePath,
+				Revision: pending[0].Revision,
+				Provider: "slack",
+				Status:   "succeeded",
+			},
+		},
+	}
+	second, err := NewSyncer(secondClient, SyncerOptions{
+		WorkspaceID: "ws_outbox_restart_in_flight",
+		RemoteRoot:  "/slack/channels/C123/messages",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer second: %v", err)
+	}
+	forcePendingOutboxDueForTest(t, localDir)
+	if err := second.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("restart sync failed: %v", err)
+	}
+	if secondClient.bulkWriteCalls != 0 {
+		t.Fatalf("expected restart to resume polling without re-uploading, got %d bulk calls", secondClient.bulkWriteCalls)
+	}
+	if secondClient.getOperationCalls == 0 {
+		t.Fatal("expected restart to poll the in-flight operation")
+	}
+	if remaining := readPendingOutboxRecordsForTest(t, localDir); len(remaining) != 0 {
+		t.Fatalf("expected pending outbox empty after op success, got %+v", remaining)
+	}
+	acked := readOutboxRecordsInDirForTest(t, filepath.Join(localDir, ".relay", "outbox", "acked"))
+	if len(acked) != 1 || acked[0].CommandID != commandID || acked[0].OpID != opID || acked[0].DispatchStatus != "succeeded" {
+		t.Fatalf("expected exactly one acked record for %s, got %+v", commandID, acked)
+	}
+
+	// A further cycle must not re-dispatch or ack a second time.
+	if err := second.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("steady-state sync after ack failed: %v", err)
+	}
+	if secondClient.bulkWriteCalls != 0 {
+		t.Fatalf("expected no upload after ack, got %d bulk calls", secondClient.bulkWriteCalls)
+	}
+	acked = readOutboxRecordsInDirForTest(t, filepath.Join(localDir, ".relay", "outbox", "acked"))
+	if len(acked) != 1 || acked[0].CommandID != commandID {
+		t.Fatalf("expected outbox entry acked exactly once, got %+v", acked)
+	}
+}
+
+func TestOutboxLostBulkResponseRetryRecoversOpIDWithoutDuplicateDispatch(t *testing.T) {
+	localDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(localDir, "command.json"), []byte(`{"text":"hello"}`), 0o644); err != nil {
+		t.Fatalf("seed local command failed: %v", err)
+	}
+	client := &fakeClient{
+		files:                          map[string]RemoteFile{},
+		operations:                     map[string]OperationStatus{},
+		bulkWriteResponseFuncOwnsWrite: true,
+	}
+	var seenIdentity string
+	var providerDispatches int
+	client.bulkWriteResponseFunc = func(ctx context.Context, workspaceID string, files []BulkWriteFile) (BulkWriteResponse, error) {
+		_ = ctx
+		_ = workspaceID
+		if len(files) != 1 || files[0].ContentIdentity == nil {
+			t.Fatalf("expected one content-identified write, got %+v", files)
+		}
+		path := normalizeRemotePath(files[0].Path)
+		opID := "op_lost_response_1"
+		if seenIdentity == "" {
+			seenIdentity = files[0].ContentIdentity.Key
+			client.revisionCounter++
+			revision := fmt.Sprintf("rev_%d", client.revisionCounter)
+			client.files[path] = RemoteFile{Path: path, Revision: revision, ContentType: files[0].ContentType, Content: files[0].Content}
+			client.operations[opID] = OperationStatus{OpID: opID, Path: path, Revision: revision, Provider: "slack", Status: "succeeded"}
+			providerDispatches++
+			return BulkWriteResponse{}, context.Canceled
+		}
+		if files[0].ContentIdentity.Key != seenIdentity {
+			t.Fatalf("retry minted new content identity: got %s want %s", files[0].ContentIdentity.Key, seenIdentity)
+		}
+		remote := client.files[path]
+		return BulkWriteResponse{
+			Written: 0,
+			Results: []BulkWriteResult{{
+				Path:            remote.Path,
+				Revision:        remote.Revision,
+				ContentType:     remote.ContentType,
+				OpID:            opID,
+				ContentIdentity: files[0].ContentIdentity,
+				Writeback:       &relayfile.BulkWriteWritebackResult{Provider: "slack", State: "succeeded"},
+			}},
+			CorrelationID: "corr_lost_response_recovered",
+		}, nil
+	}
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_outbox_lost_response_receipt",
+		RemoteRoot:  "/slack/channels/C123/messages",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer: %v", err)
+	}
+	if err := syncer.SyncOnce(context.Background()); err == nil {
+		t.Fatal("expected first lost response to fail")
+	}
+	forcePendingOutboxDueForTest(t, localDir)
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("retry after lost response failed: %v", err)
+	}
+	if client.bulkWriteCalls != 2 {
+		t.Fatalf("expected exactly two upload attempts, got %d", client.bulkWriteCalls)
+	}
+	if providerDispatches != 1 {
+		t.Fatalf("expected one provider dispatch after deduped retry, got %d", providerDispatches)
+	}
+	if pending := readPendingOutboxRecordsForTest(t, localDir); len(pending) != 0 {
+		t.Fatalf("expected pending outbox empty after recovered receipt, got %+v", pending)
+	}
+	acked := readOutboxRecordsInDirForTest(t, filepath.Join(localDir, ".relay", "outbox", "acked"))
+	if len(acked) != 1 || acked[0].OpID != "op_lost_response_1" || acked[0].DispatchStatus != "succeeded" {
+		t.Fatalf("expected acked receipt for recovered op, got %+v", acked)
+	}
+}
+
+func TestOutboxRetryCapSurfacesNeedsAttention(t *testing.T) {
+	localDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(localDir, "command.json"), []byte(`{"text":"hello"}`), 0o644); err != nil {
+		t.Fatalf("seed local command failed: %v", err)
+	}
+	client := &fakeClient{
+		files: map[string]RemoteFile{},
+		bulkWriteResponseFunc: func(ctx context.Context, workspaceID string, files []BulkWriteFile) (BulkWriteResponse, error) {
+			_ = ctx
+			_ = workspaceID
+			_ = files
+			return BulkWriteResponse{}, context.Canceled
+		},
+	}
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_outbox_retry_cap",
+		RemoteRoot:  "/slack/channels/C123/messages",
+		LocalRoot:   localDir,
+		Mode:        "poll",
+		Interval:    30 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer: %v", err)
+	}
+	syncer.maxOutboxAttempts = 2
+	if err := syncer.SyncOnce(context.Background()); err == nil {
+		t.Fatal("expected first upload to fail")
+	}
+	forcePendingOutboxDueForTest(t, localDir)
+	if err := syncer.SyncOnce(context.Background()); err == nil {
+		t.Fatal("expected second upload to fail")
+	}
+	state := readPublicState(t, localDir)
+	if state.Status != "writeback-needs-attention" || !state.States.OutboxNeedsAttention || state.Outbox.NeedsAttention != 1 {
+		t.Fatalf("expected needs-attention public state, got %+v", state)
+	}
+	calls := client.bulkWriteCalls
+	forcePendingOutboxDueForTest(t, localDir)
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("needs-attention steady-state sync should not retry: %v", err)
+	}
+	if client.bulkWriteCalls != calls {
+		t.Fatalf("expected retry cap to stop further uploads, got %d -> %d", calls, client.bulkWriteCalls)
+	}
+}
+
+func TestFlushOutboxOnceFlushesPendingWithoutMirrorScan(t *testing.T) {
+	localDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(localDir, "command.json"), []byte(`{"text":"hello"}`), 0o644); err != nil {
+		t.Fatalf("seed local command failed: %v", err)
+	}
+	firstClient := &fakeClient{
+		files: map[string]RemoteFile{},
+		bulkWriteResponseFunc: func(ctx context.Context, workspaceID string, files []BulkWriteFile) (BulkWriteResponse, error) {
+			_ = ctx
+			_ = workspaceID
+			_ = files
+			return BulkWriteResponse{}, context.Canceled
+		},
+	}
+	first, err := NewSyncer(firstClient, SyncerOptions{
+		WorkspaceID: "ws_flush_outbox_once",
+		RemoteRoot:  "/slack/channels/C123/messages",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer first: %v", err)
+	}
+	if err := first.SyncOnce(context.Background()); err == nil {
+		t.Fatal("expected first upload to fail")
+	}
+	record := readPendingOutboxRecordsForTest(t, localDir)[0]
+	if strings.TrimSpace(record.NextAttemptAt) == "" {
+		t.Fatalf("expected retry backoff to be set on pending record: %+v", record)
+	}
+	if err := os.WriteFile(filepath.Join(localDir, "untracked-local.txt"), []byte("do not scan me"), 0o644); err != nil {
+		t.Fatalf("seed untracked file failed: %v", err)
+	}
+
+	baseClient := &fakeClient{files: map[string]RemoteFile{}}
+	secondClient := &fakeExportClient{fakeClient: baseClient}
+	second, err := NewSyncer(secondClient, SyncerOptions{
+		WorkspaceID: "ws_flush_outbox_once",
+		RemoteRoot:  "/slack/channels/C123/messages",
+		LocalRoot:   localDir,
+		Interval:    30 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer second: %v", err)
+	}
+	if err := second.FlushOutboxOnce(context.Background()); err != nil {
+		t.Fatalf("FlushOutboxOnce failed: %v", err)
+	}
+	if baseClient.bulkWriteCalls != 1 {
+		t.Fatalf("expected one outbox bulk upload, got %d", baseClient.bulkWriteCalls)
+	}
+	if secondClient.exportCalls != 0 || baseClient.listTreeCalls != 0 || baseClient.listEventsCalls != 0 {
+		t.Fatalf("FlushOutboxOnce reconciled remote tree: export=%d listTree=%d listEvents=%d", secondClient.exportCalls, baseClient.listTreeCalls, baseClient.listEventsCalls)
+	}
+	if pending := readPendingOutboxRecordsForTest(t, localDir); len(pending) != 0 {
+		t.Fatalf("expected pending outbox empty after flush, got %+v", pending)
+	}
+	state := readPublicState(t, localDir)
+	if state.Status != "ready" || state.States.HasPendingWriteback || state.PendingWriteback != 0 || state.Outbox.Pending != 0 || state.Outbox.NeedsAttention != 0 {
+		t.Fatalf("expected drained public state without scanning untracked local file, got %+v", state)
+	}
+	if !state.LowMemory || state.Files != nil {
+		t.Fatalf("expected flush public state to be written without per-file mirror scan, got lowMemory=%v files=%d", state.LowMemory, len(state.Files))
+	}
+}
+
+// A draft written but never ingested by a sync cycle (the teardown race: a
+// final fire-and-forget reply right before shutdown) is on disk but not in the
+// outbox. FlushOutboxOnce drops it (outbox-only, no local scan);
+// PushLocalAndFlushOnce ingests it by scanning the on-disk mirror, then flushes.
+func TestPushLocalAndFlushOnceIngestsUnsyncedLocalDraft(t *testing.T) {
+	localDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(localDir, "command.json"), []byte(`{"text":"hello"}`), 0o644); err != nil {
+		t.Fatalf("seed local command failed: %v", err)
+	}
+
+	// Baseline: FlushOutboxOnce must NOT ingest the unsynced draft (the bug).
+	flushClient := &fakeClient{files: map[string]RemoteFile{}}
+	flushOnly, err := NewSyncer(flushClient, SyncerOptions{
+		WorkspaceID: "ws_push_local_once",
+		RemoteRoot:  "/slack/channels/C123/messages",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer flushOnly: %v", err)
+	}
+	if err := flushOnly.FlushOutboxOnce(context.Background()); err != nil {
+		t.Fatalf("FlushOutboxOnce failed: %v", err)
+	}
+	if flushClient.bulkWriteCalls != 0 {
+		t.Fatalf("FlushOutboxOnce must not ingest an unsynced local draft, got %d uploads", flushClient.bulkWriteCalls)
+	}
+
+	// Fix: PushLocalAndFlushOnce scans the on-disk mirror, ingests the draft,
+	// uploads it, and drains the outbox.
+	pushClient := &fakeClient{files: map[string]RemoteFile{}}
+	drain, err := NewSyncer(pushClient, SyncerOptions{
+		WorkspaceID: "ws_push_local_once",
+		RemoteRoot:  "/slack/channels/C123/messages",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer drain: %v", err)
+	}
+	if err := drain.PushLocalAndFlushOnce(context.Background()); err != nil {
+		t.Fatalf("PushLocalAndFlushOnce failed: %v", err)
+	}
+	if pushClient.bulkWriteCalls != 1 {
+		t.Fatalf("expected the unsynced draft to be ingested + uploaded once, got %d", pushClient.bulkWriteCalls)
+	}
+	if pending := readPendingOutboxRecordsForTest(t, localDir); len(pending) != 0 {
+		t.Fatalf("expected outbox drained after push+flush, got %+v", pending)
+	}
+}
+
+func TestFlushOutboxOnceWritesReceiptCapabilityMarkerWithEmptyOutbox(t *testing.T) {
+	localDir := t.TempDir()
+	client := &fakeClient{files: map[string]RemoteFile{}}
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_flush_outbox_capabilities",
+		RemoteRoot:  "/slack/channels/C123/messages",
+		LocalRoot:   localDir,
+		Interval:    30 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer: %v", err)
+	}
+	if err := syncer.FlushOutboxOnce(context.Background()); err != nil {
+		t.Fatalf("FlushOutboxOnce with empty outbox failed: %v", err)
+	}
+	capabilitiesPath := filepath.Join(localDir, ".relay", "outbox", "capabilities.json")
+	data, err := os.ReadFile(capabilitiesPath)
+	if err != nil {
+		t.Fatalf("expected outbox capabilities marker: %v", err)
+	}
+	var capabilities outboxCapabilities
+	if err := json.Unmarshal(data, &capabilities); err != nil {
+		t.Fatalf("decode outbox capabilities marker: %v", err)
+	}
+	if capabilities.SchemaVersion != outboxCapabilitiesSchemaVersion || !capabilities.DispatchReceipts {
+		t.Fatalf("unexpected capabilities marker: %+v", capabilities)
+	}
+
+	// A second flush must not rewrite an up-to-date marker.
+	firstStat, err := os.Stat(capabilitiesPath)
+	if err != nil {
+		t.Fatalf("stat capabilities marker: %v", err)
+	}
+	time.Sleep(20 * time.Millisecond)
+	if err := syncer.FlushOutboxOnce(context.Background()); err != nil {
+		t.Fatalf("second FlushOutboxOnce failed: %v", err)
+	}
+	secondStat, err := os.Stat(capabilitiesPath)
+	if err != nil {
+		t.Fatalf("stat capabilities marker after second flush: %v", err)
+	}
+	if !secondStat.ModTime().Equal(firstStat.ModTime()) {
+		t.Fatalf("expected capabilities marker not rewritten, mtime %v -> %v", firstStat.ModTime(), secondStat.ModTime())
+	}
+	secondData, err := os.ReadFile(capabilitiesPath)
+	if err != nil {
+		t.Fatalf("read capabilities marker after second flush: %v", err)
+	}
+	if !bytes.Equal(secondData, data) {
+		t.Fatalf("expected capabilities marker content unchanged, got %s", secondData)
+	}
+
+	// A semantically-equal marker with reordered fields and different
+	// whitespace must also be left untouched.
+	reordered := []byte(fmt.Sprintf("{\n  \"dispatchReceipts\": true,\n  \"schemaVersion\": %d\n}\n", outboxCapabilitiesSchemaVersion))
+	if err := os.WriteFile(capabilitiesPath, reordered, 0o644); err != nil {
+		t.Fatalf("rewrite capabilities marker: %v", err)
+	}
+	if err := syncer.FlushOutboxOnce(context.Background()); err != nil {
+		t.Fatalf("third FlushOutboxOnce failed: %v", err)
+	}
+	got, err := os.ReadFile(capabilitiesPath)
+	if err != nil {
+		t.Fatalf("read capabilities marker after third flush: %v", err)
+	}
+	if !bytes.Equal(got, reordered) {
+		t.Fatalf("expected semantically-equal capabilities marker to be preserved, got %s", got)
+	}
+}
+
+func TestFlushOutboxOnceReturnsErrorAndPreservesPendingState(t *testing.T) {
+	localDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(localDir, "command.json"), []byte(`{"text":"hello"}`), 0o644); err != nil {
+		t.Fatalf("seed local command failed: %v", err)
+	}
+	client := &fakeClient{
+		files: map[string]RemoteFile{},
+		bulkWriteResponseFunc: func(ctx context.Context, workspaceID string, files []BulkWriteFile) (BulkWriteResponse, error) {
+			_ = ctx
+			_ = workspaceID
+			_ = files
+			return BulkWriteResponse{}, context.Canceled
+		},
+	}
+	first, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_flush_outbox_once_failure",
+		RemoteRoot:  "/slack/channels/C123/messages",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer first: %v", err)
+	}
+	if err := first.SyncOnce(context.Background()); err == nil {
+		t.Fatal("expected first upload to fail")
+	}
+	attemptsAfterSetup := client.bulkWriteCalls
+
+	second, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_flush_outbox_once_failure",
+		RemoteRoot:  "/slack/channels/C123/messages",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer second: %v", err)
+	}
+	if err := second.FlushOutboxOnce(context.Background()); err == nil {
+		t.Fatal("expected FlushOutboxOnce to fail when upload fails")
+	}
+	if client.bulkWriteCalls != attemptsAfterSetup+1 {
+		t.Fatalf("expected exactly one forced flush attempt, got %d -> %d", attemptsAfterSetup, client.bulkWriteCalls)
+	}
+	pending := readPendingOutboxRecordsForTest(t, localDir)
+	if len(pending) != 1 {
+		t.Fatalf("expected pending outbox preserved after failed flush, got %+v", pending)
+	}
+	state := readPublicState(t, localDir)
+	if state.Status != "writeback-pending" || !state.States.HasPendingWriteback || state.Outbox.Pending != 1 {
+		t.Fatalf("expected failed flush public state to surface pending outbox, got %+v", state)
+	}
+}
+
 func TestBulkWrite_MixedCreateAndUpdateBatch(t *testing.T) {
 	client := &fakeClient{
 		files: map[string]RemoteFile{
@@ -2884,6 +4019,53 @@ func TestBulkWrite_ReconcileUsesResponseRevision(t *testing.T) {
 	}
 }
 
+func TestReconcileBulkWriteWhitespaceContentTypeFallsBackToRemote(t *testing.T) {
+	client := &fakeClient{
+		files: map[string]RemoteFile{
+			"/notion/Docs/A.md": {
+				Path:        "/notion/Docs/A.md",
+				Revision:    "rev_2",
+				ContentType: "text/markdown",
+				Content:     "# A",
+			},
+		},
+	}
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_mount_bulk_whitespace_content_type",
+		RemoteRoot:  "/notion",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+	if err := syncer.loadState(); err != nil {
+		t.Fatalf("load state failed: %v", err)
+	}
+
+	pendingWrite := pendingBulkWrite{
+		remotePath: "/notion/Docs/A.md",
+		localPath:  filepath.Join(localDir, "Docs", "A.md"),
+		snapshot: localSnapshot{
+			ContentType: " \t ",
+			Hash:        "hash_a",
+		},
+	}
+	// An empty revision forces the remote ReadFile fallback. The
+	// all-whitespace snapshot content type must fall through to the remote
+	// file's content type instead of being kept as whitespace.
+	if err := syncer.reconcileBulkWrite(context.Background(), pendingWrite, ""); err != nil {
+		t.Fatalf("reconcileBulkWrite failed: %v", err)
+	}
+	tracked := syncer.state.Files["/notion/Docs/A.md"]
+	if tracked.ContentType != "text/markdown" {
+		t.Fatalf("expected remote content type fallback, got %q", tracked.ContentType)
+	}
+	if tracked.Revision != "rev_2" {
+		t.Fatalf("expected remote revision, got %q", tracked.Revision)
+	}
+}
+
 func TestSyncOnceUsesWebSocketForRealtimeUpdatesAndSkipsPollingWhileConnected(t *testing.T) {
 	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
 	t.Cleanup(store.Close)
@@ -3195,6 +4377,21 @@ func TestCanWritePathWithRelayauthScopes(t *testing.T) {
 	}
 	if canWritePath(scopes, "/docs/readme.md") {
 		t.Fatalf("expected scoped write token to deny path outside /src")
+	}
+}
+
+func TestScopeGrantsWritePreservesPathCase(t *testing.T) {
+	if !scopeGrantsWrite("relayfile:fs:write:/README.md/*", "/README.md") {
+		t.Fatalf("write scope over /README.md must grant /README.md (case preserved)")
+	}
+	if !scopeGrantsWrite("relayfile:fs:write:/packages/web/lib/MyComponent/*", "/packages/web/lib/MyComponent/index.ts") {
+		t.Fatalf("write scope over /packages/web/lib/MyComponent must grant files under it")
+	}
+	if !scopeGrantsWrite("RELAYFILE:FS:WRITE:/Foo/*", "/Foo/bar.ts") {
+		t.Fatalf("plane/resource/action must stay case-insensitive")
+	}
+	if scopeGrantsWrite("relayfile:fs:write:/Foo/*", "/foo/bar.ts") {
+		t.Fatalf("case-mismatched path must NOT be granted (paths are case-sensitive)")
 	}
 }
 
@@ -3740,6 +4937,105 @@ func TestApplyRemoteFile_IndexAndLayoutFiles(t *testing.T) {
 		t.Fatalf("stat notion/pages failed: %v", err)
 	} else if !info.IsDir() {
 		t.Fatalf("expected notion/pages to be a directory")
+	}
+}
+
+// TestApplyRemoteFile_QuarantinesPathCollision pins the resilience fix for the
+// Slack-adapter file/dir collision: a thread reply emitted as a leaf file
+// `replies/<ts>.json` whose children are also nested under a directory at the
+// same stem. The child cannot be materialized (its parent is a regular file →
+// ENOTDIR), but that single path must NOT fail the apply — it is quarantined so
+// the sync cycle completes and bootstrap can finish. Before the fix this
+// returned ENOTDIR, which aborted every cycle and wedged the mount forever.
+func TestApplyRemoteFile_QuarantinesPathCollision(t *testing.T) {
+	t.Parallel()
+
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(&fakeClient{}, SyncerOptions{
+		WorkspaceID: "ws_path_collision",
+		RemoteRoot:  "/",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+
+	// The reply leaf applies fine as a regular file.
+	leaf := "/slack/channels/C1/threads/T1/replies/1780911014_625209.json"
+	if err := syncer.applyRemoteFile(leaf, RemoteFile{
+		Path:        leaf,
+		Revision:    "rev_leaf",
+		ContentType: "application/json",
+		Content:     "{\"text\":\"reply\"}\n",
+	}, nil); err != nil {
+		t.Fatalf("applyRemoteFile(leaf) failed: %v", err)
+	}
+
+	// A child UNDER the leaf forces mkdir of a path whose parent is a regular
+	// file. With the fix this is quarantined (nil error), not propagated.
+	child := leaf + "/reactions/tada--U1.json"
+	if err := syncer.applyRemoteFile(child, RemoteFile{
+		Path:        child,
+		Revision:    "rev_child",
+		ContentType: "application/json",
+		Content:     "{\"emoji\":\"tada\"}\n",
+	}, nil); err != nil {
+		t.Fatalf("applyRemoteFile(child) should quarantine the collision, got error: %v", err)
+	}
+
+	// The collision counter advanced, the leaf is intact, and the colliding
+	// child was not (and cannot be) materialized.
+	if got := syncer.state.Counters.PathCollisionQuarantined; got == 0 {
+		t.Fatalf("expected PathCollisionQuarantined > 0, got %d", got)
+	}
+	leafLocal := filepath.Join(localDir, "slack", "channels", "C1", "threads", "T1", "replies", "1780911014_625209.json")
+	if info, err := os.Stat(leafLocal); err != nil {
+		t.Fatalf("stat leaf failed: %v", err)
+	} else if info.IsDir() {
+		t.Fatalf("expected reply leaf to be a regular file, got directory")
+	}
+	if _, ok := syncer.state.Files[child]; ok {
+		t.Fatalf("quarantined child must not be recorded as a tracked file")
+	}
+
+	// The inverse collision is also non-fatal: a remote file targets a local
+	// path that already exists as a directory.
+	dirRemotePath := "/slack/channels/C1/threads/T1/replies"
+	if err := syncer.applyRemoteFile(dirRemotePath, RemoteFile{
+		Path:        dirRemotePath,
+		Revision:    "rev_dir_collision",
+		ContentType: "application/json",
+		Content:     "{\"kind\":\"file\"}\n",
+	}, nil); err != nil {
+		t.Fatalf("applyRemoteFile(directory target) should quarantine the collision, got error: %v", err)
+	}
+	if got := syncer.state.Counters.PathCollisionQuarantined; got < 2 {
+		t.Fatalf("expected both path collisions to be counted, got %d", got)
+	}
+	if info, err := os.Stat(filepath.Join(localDir, "slack", "channels", "C1", "threads", "T1", "replies")); err != nil {
+		t.Fatalf("stat replies directory failed: %v", err)
+	} else if !info.IsDir() {
+		t.Fatalf("expected replies path to remain a directory")
+	}
+
+	// Re-applying the SAME colliding path counts each occurrence (cumulative,
+	// like the other guard counters) but is logged only once — so a persistent
+	// collision doesn't spam the log every cycle.
+	countBefore := syncer.state.Counters.PathCollisionQuarantined
+	distinctBefore := len(syncer.quarantinedPaths)
+	if err := syncer.applyRemoteFile(child, RemoteFile{
+		Path:        child,
+		Revision:    "rev_child_again",
+		ContentType: "application/json",
+		Content:     "{\"emoji\":\"tada\"}\n",
+	}, nil); err != nil {
+		t.Fatalf("re-applying the colliding child should still quarantine, got error: %v", err)
+	}
+	if got := syncer.state.Counters.PathCollisionQuarantined; got != countBefore+1 {
+		t.Fatalf("counter should increment per occurrence: got %d, want %d", got, countBefore+1)
+	}
+	if got := len(syncer.quarantinedPaths); got != distinctBefore {
+		t.Fatalf("distinct quarantined paths should not grow on a repeat: got %d, want %d", got, distinctBefore)
 	}
 }
 
@@ -4510,33 +5806,36 @@ func TestAtomicTempPatternHidesTempForDotPrefixedTarget(t *testing.T) {
 }
 
 type fakeClient struct {
-	mu                         sync.Mutex
-	files                      map[string]RemoteFile
-	events                     []FilesystemEvent
-	revisionCounter            int
-	eventCounter               int
-	listTreeCalls              int
-	listEventsCalls            int
-	latestEventIDCalls         int
-	latestEventIDErr           error
-	latestEventIDHook          func(call int) (string, error)
-	latestEventIDUnsupported   bool
-	readFileCalls              int
-	readFileCallsByPath        map[string]int
-	writeFileCalls             int
-	bulkWriteCalls             int
-	bulkWriteBatches           [][]BulkWriteFile
-	lastBulkWriteResponse      BulkWriteResponse
-	bulkWriteResponseFunc      func(ctx context.Context, workspaceID string, files []BulkWriteFile) (BulkWriteResponse, error)
-	deleteCalls                []deleteCall
-	eventsUnsupported          bool
-	listEventsErrAfter         int
-	listEventsErr              error
-	listEventsHook             func(call int, cursor string, limit int)
-	listEventsNextCursorByCall map[int]string
-	eventCursorAliases         map[string]string
-	readFileErrAfter           int
-	readFileErr                error
+	mu                             sync.Mutex
+	files                          map[string]RemoteFile
+	events                         []FilesystemEvent
+	revisionCounter                int
+	eventCounter                   int
+	listTreeCalls                  int
+	listEventsCalls                int
+	latestEventIDCalls             int
+	latestEventIDErr               error
+	latestEventIDHook              func(call int) (string, error)
+	latestEventIDUnsupported       bool
+	readFileCalls                  int
+	readFileCallsByPath            map[string]int
+	writeFileCalls                 int
+	bulkWriteCalls                 int
+	bulkWriteBatches               [][]BulkWriteFile
+	lastBulkWriteResponse          BulkWriteResponse
+	bulkWriteResponseFunc          func(ctx context.Context, workspaceID string, files []BulkWriteFile) (BulkWriteResponse, error)
+	bulkWriteResponseFuncOwnsWrite bool
+	operations                     map[string]OperationStatus
+	getOperationCalls              int
+	deleteCalls                    []deleteCall
+	eventsUnsupported              bool
+	listEventsErrAfter             int
+	listEventsErr                  error
+	listEventsHook                 func(call int, cursor string, limit int)
+	listEventsNextCursorByCall     map[int]string
+	eventCursorAliases             map[string]string
+	readFileErrAfter               int
+	readFileErr                    error
 }
 
 // requestedReadCalls returns the cumulative number of ReadFile calls made
@@ -4815,6 +6114,10 @@ func (c *fakeClient) WriteFilesBulk(ctx context.Context, workspaceID string, fil
 		if err != nil {
 			return BulkWriteResponse{}, err
 		}
+		if c.bulkWriteResponseFuncOwnsWrite {
+			c.lastBulkWriteResponse = response
+			return response, nil
+		}
 	}
 
 	errorPaths := make(map[string]BulkWriteError, len(response.Errors))
@@ -4866,6 +6169,19 @@ func (c *fakeClient) WriteFilesBulk(ctx context.Context, workspaceID string, fil
 	}
 	c.lastBulkWriteResponse = response
 	return response, nil
+}
+
+func (c *fakeClient) GetOperation(ctx context.Context, workspaceID, opID string) (OperationStatus, error) {
+	_ = ctx
+	_ = workspaceID
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.getOperationCalls++
+	op, ok := c.operations[opID]
+	if !ok {
+		return OperationStatus{}, &HTTPError{StatusCode: 404, Code: "not_found", Message: "not found"}
+	}
+	return op, nil
 }
 
 func (c *fakeClient) DeleteFile(ctx context.Context, workspaceID, path, baseRevision string) error {
@@ -5265,6 +6581,58 @@ func readPublicState(t *testing.T, localDir string) publicState {
 		t.Fatalf("unmarshal public state failed: %v", err)
 	}
 	return state
+}
+
+func readPendingOutboxRecordsForTest(t *testing.T, localDir string) []outboxRecord {
+	t.Helper()
+	return readOutboxRecordsInDirForTest(t, filepath.Join(localDir, ".relay", "outbox", "pending"))
+}
+
+func readOutboxRecordsInDirForTest(t *testing.T, dir string) []outboxRecord {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		t.Fatalf("read outbox dir %s failed: %v", dir, err)
+	}
+	records := make([]outboxRecord, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(dir, entry.Name()))
+		if err != nil {
+			t.Fatalf("read outbox record failed: %v", err)
+		}
+		var record outboxRecord
+		if err := json.Unmarshal(data, &record); err != nil {
+			t.Fatalf("unmarshal outbox record failed: %v", err)
+		}
+		records = append(records, record)
+	}
+	sort.Slice(records, func(i, j int) bool { return records[i].CommandID < records[j].CommandID })
+	return records
+}
+
+func forcePendingOutboxDueForTest(t *testing.T, localDir string) outboxRecord {
+	t.Helper()
+	records := readPendingOutboxRecordsForTest(t, localDir)
+	if len(records) != 1 {
+		t.Fatalf("expected one pending outbox record, got %+v", records)
+	}
+	record := records[0]
+	record.NextAttemptAt = time.Now().Add(-time.Second).UTC().Format(time.RFC3339Nano)
+	record.NeedsAttention = false
+	data, err := json.Marshal(record)
+	if err != nil {
+		t.Fatalf("marshal outbox record failed: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(localDir, ".relay", "outbox", "pending", record.CommandID+".json"), data, 0o644); err != nil {
+		t.Fatalf("write outbox record failed: %v", err)
+	}
+	return record
 }
 
 func assertLocalFileBytes(t *testing.T, path string, want []byte) {
@@ -6120,13 +7488,13 @@ func TestPullRemoteIncrementalResumesWithinAppliedPage(t *testing.T) {
 	}
 }
 
-func TestPullRemoteIncrementalCheckpointPreservesChangedPath404Delete(t *testing.T) {
+func TestPullRemoteIncrementalChangedPath404RetriesWithoutAdvancingCursor(t *testing.T) {
 	files := map[string]RemoteFile{
-		"/notion/Docs/002.md": {
-			Path:        "/notion/Docs/002.md",
-			Revision:    "rev_002",
+		"/notion/Docs/001.md": {
+			Path:        "/notion/Docs/001.md",
+			Revision:    "rev_001",
 			ContentType: "text/markdown",
-			Content:     "# 002",
+			Content:     "# 001",
 		},
 		"/notion/Docs/003.md": {
 			Path:        "/notion/Docs/003.md",
@@ -6142,10 +7510,743 @@ func TestPullRemoteIncrementalCheckpointPreservesChangedPath404Delete(t *testing
 			{EventID: "evt_002", Type: "file.updated", Path: "/notion/Docs/002.md", Revision: "rev_002"},
 			{EventID: "evt_003", Type: "file.updated", Path: "/notion/Docs/003.md", Revision: "rev_003"},
 		},
-		revisionCounter:  3,
-		eventCounter:     3,
-		readFileErrAfter: 2,
-		readFileErr:      context.DeadlineExceeded,
+		revisionCounter: 3,
+		eventCounter:    3,
+	}
+	localDir := t.TempDir()
+	missingPath := filepath.Join(localDir, "Docs", "002.md")
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID:      "ws_changed_404_retry",
+		RemoteRoot:       "/notion",
+		LocalRoot:        localDir,
+		FullPullEvery:    -1,
+		WebSocket:        boolPtr(false),
+		CursorTimeout:    time.Second,
+		BootstrapTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+	syncer.loaded = true
+	syncer.state = mountState{
+		Files: map[string]trackedFile{
+			"/notion/Docs/002.md": {
+				Revision:    "rev_old",
+				ContentType: "text/markdown",
+				Hash:        hashBytes([]byte("# stale")),
+			},
+		},
+		EventsCursor:      "evt_000",
+		BootstrapComplete: true,
+	}
+
+	err = syncer.Reconcile(context.Background())
+	var notReadyErr *IncrementalReadNotReadyError
+	if !errors.As(err, &notReadyErr) || notReadyErr.Path != "/notion/Docs/002.md" {
+		t.Fatalf("expected changed-path 404 to fail the cycle for retry, got %v (listEvents=%d readFile=%d readsByPath=%v)", err, client.listEventsCalls, client.readFileCalls, client.readFileCallsByPath)
+	}
+	if got := syncer.state.EventsCursor; got != "evt_000" {
+		t.Fatalf("EventsCursor = %q, want unchanged evt_000", got)
+	}
+	if _, err := os.Stat(missingPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected unreadable changed path to remain absent locally; stat err=%v", err)
+	}
+	if _, ok := syncer.state.Files["/notion/Docs/002.md"]; !ok {
+		t.Fatalf("expected 404 changed path to remain tracked for retry")
+	}
+	if _, ok := syncer.state.IncrementalReadNotReadySince["/notion/Docs/002.md"]; !ok {
+		t.Fatalf("expected read-not-ready timestamp to be recorded for retry")
+	}
+	if checkpoint := syncer.state.IncrementalCheckpoint; checkpoint == nil ||
+		checkpoint.Phase != "changed" ||
+		checkpoint.Path != "/notion/Docs/001.md" {
+		t.Fatalf("unexpected checkpoint before unreadable changed path: %#v", checkpoint)
+	}
+	stateBytes, err := os.ReadFile(filepath.Join(localDir, ".relayfile-mount-state.json"))
+	if err != nil {
+		t.Fatalf("read persisted retry checkpoint: %v", err)
+	}
+	var persisted mountState
+	if err := json.Unmarshal(stateBytes, &persisted); err != nil {
+		t.Fatalf("unmarshal persisted retry checkpoint: %v", err)
+	}
+	if persisted.EventsCursor != "evt_000" {
+		t.Fatalf("persisted EventsCursor = %q, want unchanged evt_000", persisted.EventsCursor)
+	}
+	if _, ok := persisted.IncrementalReadNotReadySince["/notion/Docs/002.md"]; !ok {
+		t.Fatalf("expected persisted read-not-ready timestamp for retry")
+	}
+	if checkpoint := persisted.IncrementalCheckpoint; checkpoint == nil ||
+		checkpoint.Phase != "changed" ||
+		checkpoint.Path != "/notion/Docs/001.md" {
+		t.Fatalf("unexpected persisted retry checkpoint: %#v", checkpoint)
+	}
+
+	beforeFirstReads := client.readFileCallsByPath["/notion/Docs/001.md"]
+	client.files["/notion/Docs/002.md"] = RemoteFile{
+		Path:        "/notion/Docs/002.md",
+		Revision:    "rev_002",
+		ContentType: "text/markdown",
+		Content:     "# 002",
+	}
+	resumedSyncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID:      "ws_changed_404_retry",
+		RemoteRoot:       "/notion",
+		LocalRoot:        localDir,
+		FullPullEvery:    -1,
+		WebSocket:        boolPtr(false),
+		CursorTimeout:    time.Second,
+		BootstrapTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatalf("new resumed syncer failed: %v", err)
+	}
+	if err := resumedSyncer.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile after changed path became readable failed: %v", err)
+	}
+	if got := client.readFileCallsByPath["/notion/Docs/001.md"]; got != beforeFirstReads {
+		t.Fatalf("expected checkpointed path to be skipped on resume; read calls went %d -> %d", beforeFirstReads, got)
+	}
+	if got := resumedSyncer.state.EventsCursor; got != "evt_003" {
+		t.Fatalf("EventsCursor = %q, want completed page cursor evt_003", got)
+	}
+	if checkpoint := resumedSyncer.state.IncrementalCheckpoint; checkpoint != nil {
+		t.Fatalf("expected checkpoint to clear after completed page, got %#v", checkpoint)
+	}
+	if resumedSyncer.state.IncrementalReadNotReadySince != nil {
+		t.Fatalf("expected read-not-ready state to clear after materialization, got %#v", resumedSyncer.state.IncrementalReadNotReadySince)
+	}
+	assertLocalFileContent(t, missingPath, "# 002")
+	assertLocalFileContent(t, filepath.Join(localDir, "Docs", "003.md"), "# 003")
+}
+
+// TestPullRemoteIncrementalDrainsStaleAliasEventsInOneCycle verifies the
+// stuck-event drain (AR-272 Part 2a): a read 404 on a provider-layout-alias
+// path (by-state index) is treated as a stale event and skipped immediately,
+// so a single cycle chews through several consecutive stuck events instead of
+// exiting after the first one. Real (non-alias) records on either side of the
+// stuck run are still applied.
+func TestPullRemoteIncrementalDrainsStaleAliasEventsInOneCycle(t *testing.T) {
+	files := map[string]RemoteFile{
+		"/linear/issues/AR-1.json": {
+			Path:        "/linear/issues/AR-1.json",
+			Revision:    "rev_001",
+			ContentType: "application/json",
+			Content:     `{"id":"AR-1"}`,
+		},
+		"/linear/issues/AR-4.json": {
+			Path:        "/linear/issues/AR-4.json",
+			Revision:    "rev_004",
+			ContentType: "application/json",
+			Content:     `{"id":"AR-4"}`,
+		},
+	}
+	client := &fakeClient{
+		files: files,
+		events: []FilesystemEvent{
+			{EventID: "evt_001", Type: "file.updated", Path: "/linear/issues/AR-1.json", Revision: "rev_001"},
+			// Two by-state alias paths the emitter dropped when the issues
+			// left ready-for-agent — the events feed still carries them, and
+			// reads 404. These are the stuck-event class.
+			{EventID: "evt_002", Type: "file.updated", Path: "/linear/issues/by-state/ready-for-agent/AR-2.json", Revision: "rev_002"},
+			{EventID: "evt_003", Type: "file.updated", Path: "/linear/issues/by-state/ready-for-agent/AR-3.json", Revision: "rev_003"},
+			{EventID: "evt_004", Type: "file.updated", Path: "/linear/issues/AR-4.json", Revision: "rev_004"},
+		},
+		revisionCounter: 4,
+		eventCounter:    4,
+	}
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID:      "ws_alias_drain",
+		RemoteRoot:       "/linear",
+		LocalRoot:        localDir,
+		FullPullEvery:    -1,
+		WebSocket:        boolPtr(false),
+		CursorTimeout:    time.Second,
+		BootstrapTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+	syncer.loaded = true
+	syncer.state = mountState{
+		Files:             map[string]trackedFile{},
+		EventsCursor:      "evt_000",
+		BootstrapComplete: true,
+	}
+
+	if err := syncer.Reconcile(context.Background()); err != nil {
+		t.Fatalf("expected stale alias events to drain in one cycle, got %v", err)
+	}
+	if got := syncer.state.EventsCursor; got != "evt_004" {
+		t.Fatalf("EventsCursor = %q, want fully-drained evt_004", got)
+	}
+	if got := syncer.StaleAliasSkips(); got != 2 {
+		t.Fatalf("StaleAliasSkips = %d, want 2", got)
+	}
+	if syncer.state.IncrementalReadNotReadySince != nil {
+		t.Fatalf("expected no read-not-ready timestamps for stale alias paths, got %#v", syncer.state.IncrementalReadNotReadySince)
+	}
+	assertLocalFileContent(t, filepath.Join(localDir, "issues", "AR-1.json"), `{"id":"AR-1"}`)
+	assertLocalFileContent(t, filepath.Join(localDir, "issues", "AR-4.json"), `{"id":"AR-4"}`)
+}
+
+// TestSkipStuckDropsConsecutiveUnreadableEvents verifies the operator escape
+// hatch (AR-272 Part 2b): SkipStuck advances the events cursor past every
+// read-404 event — including non-alias canonical paths — without waiting the
+// read-not-ready TTL, and reports the number skipped.
+func TestSkipStuckDropsConsecutiveUnreadableEvents(t *testing.T) {
+	client := &fakeClient{
+		files: map[string]RemoteFile{
+			"/notion/Docs/004.md": {
+				Path:        "/notion/Docs/004.md",
+				Revision:    "rev_004",
+				ContentType: "text/markdown",
+				Content:     "# 004",
+			},
+		},
+		events: []FilesystemEvent{
+			// Non-alias canonical paths that 404 — normally these retry for
+			// the full TTL; skip-stuck drops them immediately.
+			{EventID: "evt_001", Type: "file.updated", Path: "/notion/Docs/001.md", Revision: "rev_001"},
+			{EventID: "evt_002", Type: "file.updated", Path: "/notion/Docs/002.md", Revision: "rev_002"},
+			{EventID: "evt_003", Type: "file.updated", Path: "/notion/Docs/003.md", Revision: "rev_003"},
+			{EventID: "evt_004", Type: "file.updated", Path: "/notion/Docs/004.md", Revision: "rev_004"},
+		},
+		revisionCounter: 4,
+		eventCounter:    4,
+	}
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID:      "ws_skip_stuck",
+		RemoteRoot:       "/notion",
+		LocalRoot:        localDir,
+		FullPullEvery:    -1,
+		WebSocket:        boolPtr(false),
+		CursorTimeout:    time.Second,
+		BootstrapTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+	syncer.loaded = true
+	syncer.state = mountState{
+		Files:             map[string]trackedFile{},
+		EventsCursor:      "evt_000",
+		BootstrapComplete: true,
+	}
+
+	skipped, err := syncer.SkipStuck(context.Background(), 0)
+	if err != nil {
+		t.Fatalf("SkipStuck failed: %v", err)
+	}
+	if skipped != 3 {
+		t.Fatalf("skipped = %d, want 3 unreadable events dropped", skipped)
+	}
+	if got := syncer.state.EventsCursor; got != "evt_004" {
+		t.Fatalf("EventsCursor = %q, want evt_004 (caught up to head)", got)
+	}
+	assertLocalFileContent(t, filepath.Join(localDir, "Docs", "004.md"), "# 004")
+}
+
+func TestSkipStuckRefusesConcurrentSync(t *testing.T) {
+	syncer, err := NewSyncer(&fakeClient{files: map[string]RemoteFile{}}, SyncerOptions{
+		WorkspaceID: "ws_skip_stuck_busy",
+		RemoteRoot:  "/",
+		LocalRoot:   t.TempDir(),
+		WebSocket:   boolPtr(false),
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+	syncer.mu.Lock()
+	syncer.syncActive = true
+	syncer.mu.Unlock()
+
+	skipped, err := syncer.SkipStuck(context.Background(), 0)
+	if err == nil || !strings.Contains(err.Error(), "sync already in progress") {
+		t.Fatalf("expected concurrent sync error, skipped=%d err=%v", skipped, err)
+	}
+	syncer.mu.Lock()
+	defer syncer.mu.Unlock()
+	if syncer.skipStuckMode || syncer.skipStuckMax != 0 {
+		t.Fatalf("skip-stuck state leaked after refusal: mode=%v max=%d", syncer.skipStuckMode, syncer.skipStuckMax)
+	}
+}
+
+func TestPullRemoteIncrementalCreatedThreadReply404RetriesWithoutAdvancingCursor(t *testing.T) {
+	const replyPath = "/slack/channels/C123ABC__proj-cloud/threads/1780871788_370329/replies/1780914176_827829.json"
+	client := &fakeClient{
+		files: map[string]RemoteFile{},
+		events: []FilesystemEvent{
+			{EventID: "evt_168287", Type: "file.created", Path: replyPath, Revision: "rev_reply"},
+		},
+		revisionCounter: 1,
+		eventCounter:    1,
+	}
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID:      "ws_thread_reply_404_retry",
+		RemoteRoot:       "/slack/channels/C123ABC__proj-cloud/threads",
+		LocalRoot:        localDir,
+		FullPullEvery:    -1,
+		WebSocket:        boolPtr(false),
+		CursorTimeout:    time.Second,
+		BootstrapTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+	syncer.loaded = true
+	syncer.state = mountState{
+		Files:             map[string]trackedFile{},
+		EventsCursor:      "evt_168286",
+		BootstrapComplete: true,
+	}
+
+	err = syncer.Reconcile(context.Background())
+	var notReadyErr *IncrementalReadNotReadyError
+	if !errors.As(err, &notReadyErr) || notReadyErr.Path != replyPath {
+		t.Fatalf("expected created thread reply 404 to fail the cycle for retry, got %v (listEvents=%d readFile=%d readsByPath=%v)", err, client.listEventsCalls, client.readFileCalls, client.readFileCallsByPath)
+	}
+	if got := syncer.state.EventsCursor; got != "evt_168286" {
+		t.Fatalf("EventsCursor = %q, want unchanged evt_168286", got)
+	}
+	localReplyPath := filepath.Join(localDir, "1780871788_370329", "replies", "1780914176_827829.json")
+	if _, err := os.Stat(localReplyPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected unreadable thread reply to remain absent locally; stat err=%v", err)
+	}
+
+	client.files[replyPath] = RemoteFile{
+		Path:        replyPath,
+		Revision:    "rev_reply",
+		ContentType: "application/json",
+		Content:     `{"text":"materialized reply"}`,
+	}
+	resumedSyncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID:      "ws_thread_reply_404_retry",
+		RemoteRoot:       "/slack/channels/C123ABC__proj-cloud/threads",
+		LocalRoot:        localDir,
+		FullPullEvery:    -1,
+		WebSocket:        boolPtr(false),
+		CursorTimeout:    time.Second,
+		BootstrapTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatalf("new resumed syncer failed: %v", err)
+	}
+	if err := resumedSyncer.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile after thread reply became readable failed: %v", err)
+	}
+	if got := resumedSyncer.state.EventsCursor; got != "evt_168287" {
+		t.Fatalf("EventsCursor = %q, want evt_168287", got)
+	}
+	assertLocalFileContent(t, localReplyPath, `{"text":"materialized reply"}`)
+}
+
+func TestPullRemoteIncrementalReadNotReadyBeforeTTLStillRetriesAndMaterializes(t *testing.T) {
+	const remotePath = "/notion/Docs/slow.md"
+	ttl := time.Hour
+	client := &fakeClient{
+		files: map[string]RemoteFile{},
+		events: []FilesystemEvent{
+			{EventID: "evt_001", Type: "file.created", Path: remotePath, Revision: "rev_001"},
+		},
+		revisionCounter: 1,
+		eventCounter:    1,
+	}
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID:                "ws_not_ready_before_ttl",
+		RemoteRoot:                 "/notion",
+		LocalRoot:                  localDir,
+		FullPullEvery:              -1,
+		WebSocket:                  boolPtr(false),
+		CursorTimeout:              time.Second,
+		BootstrapTimeout:           time.Second,
+		IncrementalReadNotReadyTTL: ttl,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+	syncer.loaded = true
+	syncer.state = mountState{
+		Files:             map[string]trackedFile{},
+		EventsCursor:      "evt_000",
+		BootstrapComplete: true,
+		IncrementalReadNotReadySince: map[string]string{
+			remotePath: time.Now().UTC().Add(-ttl + time.Minute).Format(time.RFC3339Nano),
+		},
+	}
+
+	err = syncer.Reconcile(context.Background())
+	var notReadyErr *IncrementalReadNotReadyError
+	if !errors.As(err, &notReadyErr) || notReadyErr.Path != remotePath {
+		t.Fatalf("expected under-TTL 404 to remain retryable, got %v", err)
+	}
+	if got := syncer.state.EventsCursor; got != "evt_000" {
+		t.Fatalf("EventsCursor = %q, want unchanged evt_000", got)
+	}
+	if _, err := os.Stat(filepath.Join(localDir, "Docs", "slow.md")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("under-TTL unreadable file should remain absent locally; stat err=%v", err)
+	}
+
+	client.files[remotePath] = RemoteFile{
+		Path:        remotePath,
+		Revision:    "rev_001",
+		ContentType: "text/markdown",
+		Content:     "# slow",
+	}
+	resumedSyncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID:                "ws_not_ready_before_ttl",
+		RemoteRoot:                 "/notion",
+		LocalRoot:                  localDir,
+		FullPullEvery:              -1,
+		WebSocket:                  boolPtr(false),
+		CursorTimeout:              time.Second,
+		BootstrapTimeout:           time.Second,
+		IncrementalReadNotReadyTTL: ttl,
+	})
+	if err != nil {
+		t.Fatalf("new resumed syncer failed: %v", err)
+	}
+	if err := resumedSyncer.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile after under-TTL file appeared failed: %v", err)
+	}
+	if got := resumedSyncer.state.EventsCursor; got != "evt_001" {
+		t.Fatalf("EventsCursor = %q, want evt_001", got)
+	}
+	if resumedSyncer.state.IncrementalReadNotReadySince != nil {
+		t.Fatalf("expected read-not-ready state to clear after materialization, got %#v", resumedSyncer.state.IncrementalReadNotReadySince)
+	}
+	assertLocalFileContent(t, filepath.Join(localDir, "Docs", "slow.md"), "# slow")
+}
+
+func TestPullRemoteIncrementalPersistentReadNotReadyAfterTTLAdvancesAsDelete(t *testing.T) {
+	const remotePath = "/notion/Docs/gone.md"
+	ttl := time.Minute
+	client := &fakeClient{
+		files: map[string]RemoteFile{},
+		events: []FilesystemEvent{
+			{EventID: "evt_001", Type: "file.created", Path: remotePath, Revision: "rev_001"},
+			{EventID: "evt_002", Type: "file.created", Path: "/notion/Docs/after.md", Revision: "rev_002"},
+		},
+		revisionCounter: 2,
+		eventCounter:    2,
+	}
+	client.files["/notion/Docs/after.md"] = RemoteFile{
+		Path:        "/notion/Docs/after.md",
+		Revision:    "rev_002",
+		ContentType: "text/markdown",
+		Content:     "# after",
+	}
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID:                "ws_not_ready_after_ttl",
+		RemoteRoot:                 "/notion",
+		LocalRoot:                  localDir,
+		FullPullEvery:              -1,
+		WebSocket:                  boolPtr(false),
+		CursorTimeout:              time.Second,
+		BootstrapTimeout:           time.Second,
+		IncrementalReadNotReadyTTL: ttl,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+	syncer.loaded = true
+	syncer.state = mountState{
+		Files:             map[string]trackedFile{},
+		EventsCursor:      "evt_000",
+		BootstrapComplete: true,
+		IncrementalReadNotReadySince: map[string]string{
+			remotePath: time.Now().UTC().Add(-ttl - time.Second).Format(time.RFC3339Nano),
+		},
+	}
+
+	if err := syncer.Reconcile(context.Background()); err != nil {
+		t.Fatalf("expired read-not-ready should advance as delete, got %v", err)
+	}
+	if got := syncer.state.EventsCursor; got != "evt_002" {
+		t.Fatalf("EventsCursor = %q, want evt_002", got)
+	}
+	if syncer.state.IncrementalReadNotReadySince != nil {
+		t.Fatalf("expected expired read-not-ready state to clear, got %#v", syncer.state.IncrementalReadNotReadySince)
+	}
+	if _, ok := syncer.state.Files[remotePath]; ok {
+		t.Fatalf("expired persistent 404 should not remain tracked")
+	}
+	if _, err := os.Stat(filepath.Join(localDir, "Docs", "gone.md")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expired persistent 404 should not materialize locally; stat err=%v", err)
+	}
+	assertLocalFileContent(t, filepath.Join(localDir, "Docs", "after.md"), "# after")
+}
+
+func TestPullRemoteIncrementalRecreatedPathAfterMarkerClearGetsFreshTTL(t *testing.T) {
+	const remotePath = "/notion/Docs/recreated.md"
+	ttl := time.Minute
+	oldMarker := time.Now().UTC().Add(-ttl - time.Minute).Format(time.RFC3339Nano)
+	client := &fakeClient{
+		files: map[string]RemoteFile{},
+		events: []FilesystemEvent{
+			{EventID: "evt_001", Type: "file.created", Path: remotePath, Revision: "rev_recreated"},
+		},
+		revisionCounter: 1,
+		eventCounter:    1,
+	}
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID:                "ws_not_ready_recreated_fresh_ttl",
+		RemoteRoot:                 "/notion",
+		LocalRoot:                  localDir,
+		FullPullEvery:              -1,
+		WebSocket:                  boolPtr(false),
+		CursorTimeout:              time.Second,
+		BootstrapTimeout:           time.Second,
+		IncrementalReadNotReadyTTL: ttl,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+	syncer.loaded = true
+	syncer.state = mountState{
+		Files:             map[string]trackedFile{},
+		EventsCursor:      "evt_000",
+		BootstrapComplete: true,
+		IncrementalReadNotReadySince: map[string]string{
+			remotePath: oldMarker,
+		},
+	}
+
+	if err := syncer.applyRemoteFile(remotePath, RemoteFile{
+		Path:        remotePath,
+		Revision:    "rev_old_incarnation",
+		ContentType: "text/markdown",
+		Content:     "# old incarnation",
+	}, nil); err != nil {
+		t.Fatalf("apply old incarnation: %v", err)
+	}
+	if syncer.state.IncrementalReadNotReadySince != nil {
+		t.Fatalf("expected successful materialization to clear stale marker, got %#v", syncer.state.IncrementalReadNotReadySince)
+	}
+
+	err = syncer.Reconcile(context.Background())
+	var notReadyErr *IncrementalReadNotReadyError
+	if !errors.As(err, &notReadyErr) || notReadyErr.Path != remotePath {
+		t.Fatalf("expected recreated path 404 to get fresh retry window, got %v", err)
+	}
+	if got := syncer.state.EventsCursor; got != "evt_000" {
+		t.Fatalf("EventsCursor = %q, want unchanged evt_000", got)
+	}
+	gotMarker := syncer.state.IncrementalReadNotReadySince[remotePath]
+	if gotMarker == "" {
+		t.Fatalf("expected recreated path to record a fresh read-not-ready marker")
+	}
+	if gotMarker == oldMarker {
+		t.Fatalf("expected recreated path marker to be refreshed, still %q", gotMarker)
+	}
+	if _, ok := syncer.state.Files[remotePath]; !ok {
+		t.Fatalf("fresh retry should not delete recreated path state")
+	}
+	assertLocalFileContent(t, filepath.Join(localDir, "Docs", "recreated.md"), "# old incarnation")
+}
+
+func TestApplyWebSocketEventClearsReadNotReadyMarker(t *testing.T) {
+	const remotePath = "/notion/Docs/ws.md"
+	client := &fakeClient{
+		files: map[string]RemoteFile{
+			remotePath: {
+				Path:        remotePath,
+				Revision:    "rev_ws",
+				ContentType: "text/markdown",
+				Content:     "# websocket",
+			},
+		},
+	}
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_event_clears_not_ready",
+		RemoteRoot:  "/notion",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+	syncer.state.IncrementalReadNotReadySince = map[string]string{
+		remotePath: time.Now().UTC().Add(-time.Hour).Format(time.RFC3339Nano),
+	}
+
+	if err := syncer.applyWebSocketEvent(context.Background(), websocketEvent{
+		Type:      "file.updated",
+		Path:      remotePath,
+		Timestamp: "2026-06-08T12:00:00Z",
+	}); err != nil {
+		t.Fatalf("apply websocket event: %v", err)
+	}
+	if syncer.state.IncrementalReadNotReadySince != nil {
+		t.Fatalf("expected websocket materialization to clear marker, got %#v", syncer.state.IncrementalReadNotReadySince)
+	}
+	assertLocalFileContent(t, filepath.Join(localDir, "Docs", "ws.md"), "# websocket")
+}
+
+func TestApplyRemoteSnapshotDeletesRevClearsReadNotReadyMarkerAfterConfirmedDelete(t *testing.T) {
+	const remotePath = "/notion/Docs/deleted.md"
+	localDir := t.TempDir()
+	localPath := filepath.Join(localDir, "Docs", "deleted.md")
+	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+		t.Fatalf("mkdir local doc dir: %v", err)
+	}
+	if err := os.WriteFile(localPath, []byte("# deleted"), 0o644); err != nil {
+		t.Fatalf("write local doc: %v", err)
+	}
+	syncer, err := NewSyncer(&fakeClient{}, SyncerOptions{
+		WorkspaceID: "ws_snapshot_delete_clears_not_ready",
+		RemoteRoot:  "/notion",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+	syncer.state.Files[remotePath] = trackedFile{
+		Revision:    "rev_old",
+		ContentType: "text/markdown",
+		Hash:        hashBytes([]byte("# deleted")),
+	}
+	syncer.state.LastAppliedRevision = "rev_001"
+	syncer.state.IncrementalReadNotReadySince = map[string]string{
+		remotePath: time.Now().UTC().Add(-time.Hour).Format(time.RFC3339Nano),
+	}
+
+	if err := syncer.applyRemoteSnapshotDeletesRev(map[string]struct{}{}, nil, "rev_002"); err != nil {
+		t.Fatalf("first snapshot delete observation: %v", err)
+	}
+	if syncer.state.IncrementalReadNotReadySince == nil {
+		t.Fatalf("first tombstone observation should not clear marker before delete succeeds")
+	}
+	if err := syncer.applyRemoteSnapshotDeletesRev(map[string]struct{}{}, nil, "rev_003"); err != nil {
+		t.Fatalf("confirmed snapshot delete: %v", err)
+	}
+	if syncer.state.IncrementalReadNotReadySince != nil {
+		t.Fatalf("expected confirmed snapshot delete to clear marker, got %#v", syncer.state.IncrementalReadNotReadySince)
+	}
+	if _, ok := syncer.state.Files[remotePath]; ok {
+		t.Fatalf("expected confirmed snapshot delete to remove tracked state")
+	}
+	if _, err := os.Stat(localPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected confirmed snapshot delete to remove local file; stat err=%v", err)
+	}
+}
+
+func TestMarkBootstrapCompleteClearsReadNotReadyMarkers(t *testing.T) {
+	syncer, err := NewSyncer(&fakeClient{}, SyncerOptions{
+		WorkspaceID: "ws_bootstrap_clears_not_ready",
+		RemoteRoot:  "/notion",
+		LocalRoot:   t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+	syncer.state.IncrementalReadNotReadySince = map[string]string{
+		"/notion/Docs/a.md": time.Now().UTC().Add(-time.Hour).Format(time.RFC3339Nano),
+	}
+
+	syncer.markBootstrapComplete()
+
+	if syncer.state.IncrementalReadNotReadySince != nil {
+		t.Fatalf("expected bootstrap completion to clear markers, got %#v", syncer.state.IncrementalReadNotReadySince)
+	}
+}
+
+func TestLoadStateResetsBootstrapCompleteOnlyOnWriteOnlyToMirrorSyncMode(t *testing.T) {
+	tests := []struct {
+		name                  string
+		syncMode              string
+		writeOnly             bool
+		wantBootstrapComplete bool
+		wantCleared           bool
+	}{
+		{
+			name:                  "write-only to mirror resets bootstrap",
+			syncMode:              "write-only",
+			writeOnly:             false,
+			wantBootstrapComplete: false,
+			wantCleared:           true,
+		},
+		{
+			name:                  "mirror to mirror keeps bootstrap",
+			syncMode:              "mirror",
+			writeOnly:             false,
+			wantBootstrapComplete: true,
+		},
+		{
+			name:                  "legacy unknown to mirror keeps bootstrap",
+			syncMode:              "",
+			writeOnly:             false,
+			wantBootstrapComplete: true,
+		},
+		{
+			name:                  "write-only stays write-only keeps bootstrap",
+			syncMode:              "write-only",
+			writeOnly:             true,
+			wantBootstrapComplete: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			stateFile := filepath.Join(t.TempDir(), ".relayfile-mount-state.json")
+			if err := writeMountState(stateFile, mountState{
+				Files: map[string]trackedFile{
+					"/notion/Docs/a.md": {
+						Revision:    "rev_1",
+						ContentType: "text/markdown",
+						Hash:        hashString("# A"),
+					},
+				},
+				BootstrapComplete:    true,
+				BootstrapCursor:      "cursor_1",
+				BootstrapStartedAt:   time.Now().UTC().Format(time.RFC3339Nano),
+				BootstrapFilesSynced: 3,
+				BootstrapFilesTotal:  9,
+				SyncMode:             tc.syncMode,
+			}); err != nil {
+				t.Fatalf("seed state: %v", err)
+			}
+
+			syncer := &Syncer{stateFile: stateFile, writeOnly: tc.writeOnly}
+			if err := syncer.loadState(); err != nil {
+				t.Fatalf("load state: %v", err)
+			}
+
+			if got := syncer.state.BootstrapComplete; got != tc.wantBootstrapComplete {
+				t.Fatalf("BootstrapComplete = %v, want %v", got, tc.wantBootstrapComplete)
+			}
+			if tc.wantCleared {
+				if syncer.state.BootstrapCursor != "" {
+					t.Fatalf("BootstrapCursor = %q, want empty", syncer.state.BootstrapCursor)
+				}
+				if syncer.state.BootstrapStartedAt != "" {
+					t.Fatalf("BootstrapStartedAt = %q, want empty", syncer.state.BootstrapStartedAt)
+				}
+				if syncer.state.BootstrapFilesSynced != 0 {
+					t.Fatalf("BootstrapFilesSynced = %d, want 0", syncer.state.BootstrapFilesSynced)
+				}
+				if syncer.state.BootstrapFilesTotal != 0 {
+					t.Fatalf("BootstrapFilesTotal = %d, want 0", syncer.state.BootstrapFilesTotal)
+				}
+			}
+		})
+	}
+}
+
+func TestPullRemoteIncrementalDeleteEventStillDeletes(t *testing.T) {
+	client := &fakeClient{
+		files: map[string]RemoteFile{},
+		events: []FilesystemEvent{
+			{EventID: "evt_001", Type: "file.deleted", Path: "/notion/Docs/001.md", Revision: "rev_001"},
+		},
+		revisionCounter: 1,
+		eventCounter:    1,
 	}
 	localDir := t.TempDir()
 	localPath := filepath.Join(localDir, "Docs", "001.md")
@@ -6156,7 +8257,7 @@ func TestPullRemoteIncrementalCheckpointPreservesChangedPath404Delete(t *testing
 		t.Fatalf("write stale local file: %v", err)
 	}
 	syncer, err := NewSyncer(client, SyncerOptions{
-		WorkspaceID:      "ws_page_404_resume",
+		WorkspaceID:      "ws_deleted_event",
 		RemoteRoot:       "/notion",
 		LocalRoot:        localDir,
 		FullPullEvery:    -1,
@@ -6171,7 +8272,7 @@ func TestPullRemoteIncrementalCheckpointPreservesChangedPath404Delete(t *testing
 	syncer.state = mountState{
 		Files: map[string]trackedFile{
 			"/notion/Docs/001.md": {
-				Revision:    "rev_old",
+				Revision:    "rev_001",
 				ContentType: "text/markdown",
 				Hash:        hashBytes([]byte("# stale")),
 			},
@@ -6180,60 +8281,17 @@ func TestPullRemoteIncrementalCheckpointPreservesChangedPath404Delete(t *testing
 		BootstrapComplete: true,
 	}
 
-	err = syncer.Reconcile(context.Background())
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("expected read-file deadline after checkpointed 404 delete, got %v", err)
+	if err := syncer.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile delete event: %v", err)
 	}
 	if _, err := os.Stat(localPath); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("expected 404 changed path to delete stale local file before timeout; stat err=%v", err)
+		t.Fatalf("expected delete event to remove local file; stat err=%v", err)
 	}
 	if _, ok := syncer.state.Files["/notion/Docs/001.md"]; ok {
-		t.Fatalf("expected 404 changed path to be removed from tracked state")
+		t.Fatalf("expected delete event to remove tracked state")
 	}
-	if checkpoint := syncer.state.IncrementalCheckpoint; checkpoint == nil ||
-		checkpoint.Phase != "changed" ||
-		checkpoint.Path != "/notion/Docs/002.md" {
-		t.Fatalf("unexpected checkpoint after partial changed page with 404: %#v", checkpoint)
-	}
-	stateBytes, err := os.ReadFile(filepath.Join(localDir, ".relayfile-mount-state.json"))
-	if err != nil {
-		t.Fatalf("read persisted 404 checkpoint: %v", err)
-	}
-	var persisted mountState
-	if err := json.Unmarshal(stateBytes, &persisted); err != nil {
-		t.Fatalf("unmarshal persisted 404 checkpoint: %v", err)
-	}
-	if checkpoint := persisted.IncrementalCheckpoint; checkpoint == nil ||
-		checkpoint.Phase != "changed" ||
-		checkpoint.Path != "/notion/Docs/002.md" {
-		t.Fatalf("unexpected persisted 404 checkpoint: %#v", checkpoint)
-	}
-
-	before404Reads := client.readFileCallsByPath["/notion/Docs/001.md"]
-	client.readFileErr = nil
-	resumedSyncer, err := NewSyncer(client, SyncerOptions{
-		WorkspaceID:      "ws_page_404_resume",
-		RemoteRoot:       "/notion",
-		LocalRoot:        localDir,
-		FullPullEvery:    -1,
-		WebSocket:        boolPtr(false),
-		CursorTimeout:    time.Second,
-		BootstrapTimeout: time.Second,
-	})
-	if err != nil {
-		t.Fatalf("new resumed syncer failed: %v", err)
-	}
-	if err := resumedSyncer.Reconcile(context.Background()); err != nil {
-		t.Fatalf("reconcile after checkpointed 404 delete failed: %v", err)
-	}
-	if got := client.readFileCallsByPath["/notion/Docs/001.md"]; got != before404Reads {
-		t.Fatalf("expected deleted 404 path to be checkpointed and skipped on resume; read calls went %d -> %d", before404Reads, got)
-	}
-	if got := resumedSyncer.state.EventsCursor; got != "evt_003" {
-		t.Fatalf("EventsCursor = %q, want completed page cursor evt_003", got)
-	}
-	if checkpoint := resumedSyncer.state.IncrementalCheckpoint; checkpoint != nil {
-		t.Fatalf("expected checkpoint to clear after completed page, got %#v", checkpoint)
+	if got := syncer.state.EventsCursor; got != "evt_001" {
+		t.Fatalf("EventsCursor = %q, want evt_001", got)
 	}
 }
 

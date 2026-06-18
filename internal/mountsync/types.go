@@ -9,9 +9,13 @@ import (
 
 type BulkWriteFile = relayfile.BulkWriteFile
 
+type ContentIdentity = relayfile.ContentIdentity
+
 type BulkWriteError = relayfile.BulkWriteError
 
 type BulkWriteResult = relayfile.BulkWriteResult
+
+type OperationStatus = relayfile.OperationStatus
 
 type BulkWriteResponse struct {
 	Written       int               `json:"written"`

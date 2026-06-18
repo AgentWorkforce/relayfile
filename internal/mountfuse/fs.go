@@ -22,8 +22,13 @@ const (
 	defaultAttrTTL     = 2 * time.Second
 	defaultEntryTTL    = 5 * time.Second
 	defaultNegativeTTL = 1 * time.Second
-	defaultDirMode     = 0o755
-	defaultFileMode    = 0o644
+	// defaultContentTTL is the TTL for cached file content, independent of the
+	// kernel attribute TTL. Longer than attrTTL because the WS invalidator
+	// evicts content immediately on remote change, so stale content cannot
+	// persist beyond a change event regardless of this value.
+	defaultContentTTL = 30 * time.Second
+	defaultDirMode    = 0o755
+	defaultFileMode   = 0o644
 
 	// maxInodeCacheSize limits the inode mapping cache to prevent unbounded
 	// memory growth. When exceeded, the oldest half of entries are evicted.
@@ -38,10 +43,15 @@ type Config struct {
 	AttrTTL         time.Duration
 	EntryTTL        time.Duration
 	NegativeTimeout time.Duration
-	UID             uint32
-	GID             uint32
-	LazyRepos       bool
-	Logger          *log.Logger
+	// ContentTTL controls how long fetched file content is cached in memory.
+	// Defaults to 30s. Independent of AttrTTL (kernel attribute cache).
+	// The WS invalidator evicts entries immediately on remote change, so a
+	// longer value does not increase the risk of serving stale content.
+	ContentTTL time.Duration
+	UID        uint32
+	GID        uint32
+	LazyRepos  bool
+	Logger     *log.Logger
 }
 
 type MountedFS struct {
@@ -104,6 +114,7 @@ type fsState struct {
 	attrTTL     time.Duration
 	entryTTL    time.Duration
 	negativeTTL time.Duration
+	contentTTL  time.Duration
 	uid         uint32
 	gid         uint32
 	logger      *log.Logger
@@ -150,6 +161,10 @@ func newFSState(cfg Config) *fsState {
 	if negativeTTL <= 0 {
 		negativeTTL = defaultNegativeTTL
 	}
+	contentTTL := cfg.ContentTTL
+	if contentTTL <= 0 {
+		contentTTL = defaultContentTTL
+	}
 	state := &fsState{
 		client:      cfg.Client,
 		workspaceID: strings.TrimSpace(cfg.WorkspaceID),
@@ -157,6 +172,7 @@ func newFSState(cfg Config) *fsState {
 		attrTTL:     attrTTL,
 		entryTTL:    entryTTL,
 		negativeTTL: negativeTTL,
+		contentTTL:  contentTTL,
 		uid:         cfg.UID,
 		gid:         cfg.GID,
 		logger:      cfg.Logger,
@@ -289,7 +305,7 @@ func (s *fsState) putFile(file mountsync.RemoteFile) {
 	s.cacheMu.Lock()
 	s.fileCache[file.Path] = cachedFile{
 		file:      file,
-		expiresAt: time.Now().Add(s.attrTTL),
+		expiresAt: time.Now().Add(s.contentTTL),
 	}
 	s.cacheMu.Unlock()
 }

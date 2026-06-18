@@ -14,10 +14,12 @@ import {
 } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import https from 'node:https';
+import { createRequire } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
 
-const RELAYFILE_VERSION = '0.1.6';
+const require = createRequire(import.meta.url);
+const RELAYFILE_VERSION = String(require('../package.json').version);
 const RELEASE_BASE_URL = 'https://github.com/AgentWorkforce/relayfile/releases/download';
 const CHECKSUMS_FILE = 'checksums.txt';
 const CACHE_DIR = path.join(os.homedir(), '.agent-relay', 'bin');

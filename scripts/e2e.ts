@@ -9,6 +9,7 @@
  *   npx tsx scripts/e2e.ts                          # default (interactive)
  *   npx tsx scripts/e2e.ts --ci                      # CI mode (shorter pauses)
  *   npx tsx scripts/e2e.ts --continue-on-failure     # keep running after failures
+ *   npx tsx scripts/e2e.ts --webhook-receiver-url https://public-tunnel.example/hook
  */
 
 import { execSync, spawn, ChildProcess } from 'node:child_process';
@@ -20,14 +21,25 @@ import { createLocalRs256Auth, type LocalRs256Auth } from './test-utils/rsa-sign
 // ---------------------------------------------------------------------------
 // Config
 // ---------------------------------------------------------------------------
-const flags = new Set(process.argv.slice(2).filter((a) => a.startsWith('--')));
+const argv = process.argv.slice(2);
+const flags = new Set(argv.filter((a) => a.startsWith('--')).map((a) => a.split('=', 1)[0]));
 const CI = flags.has('--ci') || !!process.env.CI;
 const CONTINUE_ON_FAILURE = flags.has('--continue-on-failure');
+const WEBHOOK_RECEIVER_URL = readArg('--webhook-receiver-url') || process.env.RELAYFILE_WEBHOOK_RECEIVER_URL || '';
 
 const PORT = 9090;
 const BASE_URL = `http://127.0.0.1:${PORT}`;
 const WORKSPACE = 'e2e-test';
 const DISABLE_SHARED_SECRET_JWT_ENV = `RELAYFILE_VERIFIER_ACCEPT_HS${256}`;
+
+function readArg(name: string): string | undefined {
+  const prefix = `${name}=`;
+  const inline = argv.find((arg) => arg.startsWith(prefix));
+  if (inline) return inline.slice(prefix.length);
+  const index = argv.indexOf(name);
+  if (index >= 0 && index + 1 < argv.length) return argv[index + 1];
+  return undefined;
+}
 
 // ---------------------------------------------------------------------------
 // Terminal colors
@@ -127,6 +139,39 @@ async function api(method: string, path: string, body?: unknown, headers?: Recor
     data = text;
   }
   return { status: resp.status, data };
+}
+
+async function waitForEventId(
+  filePath: string,
+  revision: string | undefined,
+  timeoutMs: number,
+  excludedEventIds: string[] = [],
+): Promise<string> {
+  const excluded = new Set(excludedEventIds);
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const resp = await api('GET', `/v1/workspaces/${WORKSPACE}/fs/events?limit=100`);
+    assert(resp.status === 200, `Events feed failed: ${resp.status}: ${JSON.stringify(resp.data)}`);
+    const events = Array.isArray(resp.data.events) ? resp.data.events : [];
+    const match = events.find((event: any) =>
+      event?.path === filePath &&
+      (!revision || event?.revision === revision) &&
+      typeof event?.eventId === 'string' &&
+      event.eventId.length > 0 &&
+      !excluded.has(event.eventId)
+    );
+    if (match) return match.eventId;
+    await sleep(250);
+  }
+  throw new Error(`Timed out waiting for event id for ${filePath}${revision ? ` at ${revision}` : ''}`);
+}
+
+function apiFileContent(data: { content?: string; encoding?: string }): string {
+  const content = data.content ?? '';
+  if (data.encoding === 'base64') {
+    return Buffer.from(content, 'base64').toString('utf8');
+  }
+  return content;
 }
 
 // ---------------------------------------------------------------------------
@@ -360,7 +405,8 @@ ${B}${CYAN}╔══════════════════════
       // Verify via API
       const resp = await api('GET', `/v1/workspaces/${WORKSPACE}/fs/file?path=${encodeURIComponent('/src/new-feature.ts')}`);
       assert(resp.status === 200, `API read new-feature.ts failed: ${resp.status} ${JSON.stringify(resp.data)}`);
-      assert(resp.data.content.includes('feature = true'), `API content mismatch: ${resp.data.content}`);
+      const apiContent = apiFileContent(resp.data);
+      assert(apiContent.includes('feature = true'), `API content mismatch: ${resp.data.content}`);
 
       // Wait for Agent B daemon to pull
       log('⏳', 'Waiting for Agent B to pull...');
@@ -556,6 +602,81 @@ ${B}${CYAN}╔══════════════════════
       });
 
       log('🔌', `WebSocket received ${events.length} event(s)`);
+    });
+
+    // ------------------------------------------------------------------
+    // Webhook delivery smoke
+    // ------------------------------------------------------------------
+    await run('Webhook delivery smoke', async () => {
+      step('Testing outbound webhook delivery');
+
+      // Deployed CF workers cannot reach localhost. CI/CD should pass
+      // --webhook-receiver-url with a public receiver/tunnel URL. The receiver
+      // process owns delivery capture and HMAC verification for that URL.
+      if (!WEBHOOK_RECEIVER_URL) {
+        log('⏭️ ', 'webhook delivery smoke skipped: no public receiver URL');
+        return;
+      }
+
+      let subscriptionId = '';
+      try {
+        const secret = `e2e-webhook-secret-${Date.now()}`;
+        const pathGlob = `/webhooks/smoke-${Date.now()}-*`;
+        const hookUrl = WEBHOOK_RECEIVER_URL;
+        log('🪝', `Registering external webhook receiver ${hookUrl}`);
+        log('🔐', `Webhook receiver must verify deliveries with secret ${secret}`);
+
+        const created = await api('POST', `/v1/workspaces/${WORKSPACE}/webhooks`, {
+          url: hookUrl,
+          pathGlobs: [pathGlob],
+          secret,
+        });
+        assert(created.status === 201, `Register webhook failed: ${created.status}: ${JSON.stringify(created.data)}`);
+        subscriptionId = created.data?.subscriptionId || created.data?.id || '';
+        assert(subscriptionId.length > 0, `Missing subscriptionId: ${JSON.stringify(created.data)}`);
+
+        const filePath = `/webhooks/smoke-${Date.now()}-delivery.txt`;
+        const firstWrite = await api('PUT', `/v1/workspaces/${WORKSPACE}/fs/file?path=${encodeURIComponent(filePath)}`, {
+          contentType: 'text/plain',
+          content: 'webhook smoke',
+        }, { 'If-Match': '0' });
+        assert(firstWrite.status === 200 || firstWrite.status === 201 || firstWrite.status === 202,
+          `First webhook write failed: ${firstWrite.status}: ${JSON.stringify(firstWrite.data)}`);
+        const firstEventId = firstWrite.data?.eventId ||
+          await waitForEventId(filePath, firstWrite.data?.targetRevision, 10_000);
+        log('📨', `Expect external receiver delivery for ${firstEventId}`);
+
+        const secondWrite = await api('PUT', `/v1/workspaces/${WORKSPACE}/fs/file?path=${encodeURIComponent(filePath)}`, {
+          contentType: 'text/plain',
+          content: 'webhook smoke',
+        }, { 'If-Match': '*' });
+        assert(secondWrite.status === 200 || secondWrite.status === 201 || secondWrite.status === 202,
+          `Second webhook write failed: ${secondWrite.status}: ${JSON.stringify(secondWrite.data)}`);
+        const secondEventId = secondWrite.data?.eventId ||
+          await waitForEventId(filePath, secondWrite.data?.targetRevision, 10_000, [firstEventId]);
+        assert(secondEventId !== firstEventId, `Expected distinct event IDs, both writes used ${firstEventId}`);
+        log('📨', `Expect external receiver delivery for ${secondEventId} after ${firstEventId}`);
+
+        const deleted = await api('DELETE', `/v1/workspaces/${WORKSPACE}/webhooks/${encodeURIComponent(subscriptionId)}`);
+        assert(deleted.status === 204, `Delete webhook failed: ${deleted.status}: ${JSON.stringify(deleted.data)}`);
+        subscriptionId = '';
+
+        const thirdWrite = await api('PUT', `/v1/workspaces/${WORKSPACE}/fs/file?path=${encodeURIComponent(filePath)}`, {
+          contentType: 'text/plain',
+          content: 'webhook smoke after delete',
+        }, { 'If-Match': '*' });
+        assert(thirdWrite.status === 200 || thirdWrite.status === 201 || thirdWrite.status === 202,
+          `Third webhook write failed: ${thirdWrite.status}: ${JSON.stringify(thirdWrite.data)}`);
+        const thirdEventId = thirdWrite.data?.eventId ||
+          await waitForEventId(filePath, thirdWrite.data?.targetRevision, 10_000, [firstEventId, secondEventId]);
+
+        await sleep(2_000);
+        log('🚫', `External receiver should not receive delivery for ${thirdEventId} after subscription deletion`);
+      } finally {
+        if (subscriptionId) {
+          await api('DELETE', `/v1/workspaces/${WORKSPACE}/webhooks/${encodeURIComponent(subscriptionId)}`).catch(() => {});
+        }
+      }
     });
 
   } finally {

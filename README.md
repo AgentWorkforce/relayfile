@@ -28,7 +28,7 @@ That's the entire interface. No new SDK to learn, no MCP schemas eating your con
 - **Hosted integrations:** `npx relayfile setup --provider notion --workspace research-room --local-dir ./relayfile-mount`
 - **Local OSS:** run the Docker stack below, then mount `ws_demo` as a normal directory.
 - **Sandbox SDK:** use `RelayfileSetup.ensureMountedWorkspace()` when your runtime already has a cloud access token.
-- **Programmatic agents:** wrap `RelayFileClient.readFile()` / `writeFile()` as one tool inside Vercel AI SDK, Claude Agent SDK, OpenAI Agents SDK, or any custom harness.
+- **Programmatic agents:** use [`@relayfile/agents`](packages/agents/README.md) for Vercel AI SDK, OpenAI Agents SDK, and LangChain, or wrap `RelayFileClient.readFile()` / `writeFile()` directly in any custom harness.
 
 ```ts
 import { RelayFileClient } from "@relayfile/sdk"
@@ -40,6 +40,16 @@ const files = new RelayFileClient({ token: process.env.RELAYFILE_TOKEN! })
 export async function readRelayfile(path: string) {
   return files.readFile("rw_123", path)
 }
+```
+
+**Client-side read cache** (enabled by default, `v0.10.1+`): `RelayFileClient` caches `readFile` responses with a 5-second TTL and LRU eviction. Concurrent reads for the same path resolve from a single in-flight request. The cache auto-evicts when a change stream delivers a mutation event, and immediately on `writeFile`/`bulkWrite`/`deleteFile` from the same client. Tune or disable via the `readCache` option:
+
+```ts
+// custom TTL for fast-changing workspaces (default: 5000ms, 500 entries)
+const files = new RelayFileClient({ token, readCache: { ttlMs: 2000 } })
+
+// disable caching entirely
+const files = new RelayFileClient({ token, readCache: false })
 ```
 
 Common workflows:
@@ -109,12 +119,13 @@ This is what turns multi-agent collaboration into a property of the substrate in
 
 ## What's in the box
 
-- **File-native reads.** `ls`, `cat`, `grep`, `find` — the agent's native vocabulary. No tool schemas in context.
+- **File-native reads.** `ls`, `cat`, `grep`, `find` — the agent's native vocabulary. No tool schemas in context. The TypeScript SDK includes a client-side read cache with in-flight deduplication, LRU eviction, and automatic write-through invalidation (v0.10.1+).
 - **File-native writes.** PATCH a record by writing to its canonical path. CREATE by saving a draft filename. DELETE by removing the file. Per-resource schemas are discoverable in-tree (`<resource>/.schema.json`). See [relayfile-adapters](https://github.com/AgentWorkforce/relayfile-adapters).
 - **Per-agent ACLs.** Scope each agent's read/write surface via `.relayfile.acl`. Agents see only the paths they should — readonly on the rest of the tree.
 - **Real-time multi-agent sync.** Writes from one agent are visible to others on the next read. No commit/push/pull cycle, no merge.
 - **Real OS mount.** Native bash, native `find`/`grep`/`jq`/`rg`, no emulation gaps. Any process — agents, scripts, IDEs — can read or write the mount.
 - **Pluggable architecture.** A core file server plus [adapters](https://github.com/AgentWorkforce/relayfile-adapters) (per-integration logic) and [providers](https://github.com/AgentWorkforce/relayfile-providers) (auth/proxy via Nango, Composio, Pipedream). One provider integration unlocks tens of apps.
+- **Framework adapter.** [`@relayfile/agents`](packages/agents/) is a thin adapter — one `connect()` call yields path-scoped read tools, a proven writeback lifecycle, and `onEvent` reactive webhooks, working identically across the Vercel AI SDK, OpenAI Agents SDK, and LangChain.
 
 ## Works with
 
@@ -123,9 +134,12 @@ Anything that can read and write files works with relayfile out of the box — t
 | Framework | Recipe |
 |---|---|
 | Claude Code | [setting-up-relayfile skill](https://github.com/AgentWorkforce/skills/blob/main/skills/setting-up-relayfile/SKILL.md) |
+| Vercel AI SDK | [`@relayfile/agents`](packages/agents/README.md) · [Notion read](examples/integrations/vercel-ai-sdk-notion-read/) · [Linear writeback](examples/integrations/vercel-ai-sdk-linear-writeback/) · [reactive `onEvent`](examples/integrations/vercel-ai-sdk-linear-events/) |
+| OpenAI Agents SDK | [`@relayfile/agents`](packages/agents/README.md) · [Notion read](examples/integrations/openai-agents-notion-read/) · [Linear writeback](examples/integrations/openai-agents-linear-writeback/) |
+| LangChain | [`@relayfile/agents`](packages/agents/README.md) · [Notion read](examples/integrations/langchain-notion-read/) · [Linear writeback](examples/integrations/langchain-linear-writeback/) |
 | Anything that runs `bash` | works out of the box (it's a real OS mount) |
 
-More framework recipes (Vercel AI SDK, OpenAI Agents SDK, LangGraph, Pydantic AI) are landing as part of [#106](https://github.com/AgentWorkforce/relayfile/issues/106).
+For the exact SDK/cloud contract that the examples pin against, see [`docs/integrations/SDK-SURFACE.md`](docs/integrations/SDK-SURFACE.md). For self-host connect and ingestion boundaries, see [`docs/integrations/SELF-HOST.md`](docs/integrations/SELF-HOST.md).
 
 ## How relayfile compares
 
@@ -193,6 +207,16 @@ RELAYFILE_TOKEN="$TOKEN" go run ./cmd/relayfile-mount \
 
 For long path lists, pass `--paths-file ./paths.json`; the file may be a JSON
 array of remote roots or a newline-separated list.
+
+The FUSE layer caches file content in kernel memory independently of its attribute TTL. By default content is held for 30 seconds and attributes for 2 seconds. Tune with `--fuse-content-ttl` (or `RELAYFILE_MOUNT_FUSE_CONTENT_TTL`) if your workload needs fresher reads or can tolerate a longer cache window:
+
+```bash
+# 10-second content cache — reduces kernel re-reads for stable workspaces
+RELAYFILE_TOKEN="$TOKEN" go run ./cmd/relayfile-mount \
+  --workspace ws_demo \
+  --local-dir ./relayfile-mount \
+  --fuse-content-ttl 10s
+```
 
 Now any local tool or agent can use `./relayfile-mount` like a normal directory.
 
@@ -287,6 +311,8 @@ Use the OSS repo when you want to run the file server yourself. Use hosted Agent
 
 For end-to-end self-hosting of provider-backed files, run relayfile, relayauth, the relevant [adapters](https://github.com/AgentWorkforce/relayfile-adapters), [providers](https://github.com/AgentWorkforce/relayfile-providers), and Nango. Relayfile itself does not store third-party OAuth credentials.
 
+The current split is deliberate: Relayfile's OSS surface handles the VFS, scoped tokens, generic ingest, writeback queue, and mount. The polished OAuth connect flow and provider sync definitions are either hosted by Agent Relay Cloud or implemented in your self-host provider stack. See the [self-host integration guide](docs/integrations/SELF-HOST.md) for the connect path, ingestion path, and paid sync-definition boundary.
+
 ### Mount a workspace from a sandbox (TypeScript SDK)
 
 Once a user has signed in and connected their providers in Agent Relay Cloud, a sandbox (Daytona, E2B, an ephemeral container, your own runtime) can attach the workspace as local files in a single SDK call:
@@ -346,7 +372,10 @@ Pipedream:
 
 - [Getting started](docs/guides/getting-started.md)
 - [Cloud integration](docs/guides/cloud-integration.md)
+- [SDK surface](docs/integrations/SDK-SURFACE.md) — authoritative SDK + cloud contract surface
+- [Self-host connect and ingestion boundaries](docs/integrations/SELF-HOST.md)
 - [Post-auth mount session (SDK)](docs/guides/post-auth-mount-session.md)
+- [`@relayfile/agents`](packages/agents/README.md)
 - [Adapters](https://github.com/AgentWorkforce/relayfile-adapters)
 - [Providers](https://github.com/AgentWorkforce/relayfile-providers)
 - [API reference](docs/api-reference.md)

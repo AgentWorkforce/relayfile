@@ -1,0 +1,310 @@
+# Relayfile SDK Surface & Cloud Contract (Authoritative)
+
+**Status:** Authoritative reference for the agents-integration example projects.
+**SDK version pinned:** `@relayfile/sdk@0.10.1`
+**Audience:** Anyone scaffolding a framework example (Vercel AI SDK, OpenAI Agents, Eve, Flue, LangChain).
+
+> **Why this doc exists.** `docs/relayfile-agents-integration-spec.md` is an
+> implementation-free proposal and several of its code snippets use APIs that do
+> **not** match the shipped SDK. Pin example projects against *this* document, not
+> the spec's pseudo-code. Every signature below is verified against SDK source with
+> `file:line` citations.
+
+---
+
+## 0. Spec → Reality divergences (read first)
+
+These are the spots where the spec's snippets will silently break if copied verbatim.
+
+| Spec snippet | Reality | Action |
+|---|---|---|
+| `import { ensureMountedWorkspace } from "@relayfile/sdk"` (top-level fn) | **No such top-level export.** `ensureMountedWorkspace` is a **method on `RelayfileSetup`** (`src/setup.ts:325`). | Use `new RelayfileSetup(...)` → `setup.ensureMountedWorkspace(input)`. |
+| `client.readFile(workspaceId, path)` | Correct — positional overload exists (`src/client.ts:1459`), **and** an options-object overload `readFile(input: ReadFileInput)`. | Either form is fine. |
+| `client.writeFile({ workspaceId, path, content, contentType })` | Needs **`baseRevision`** (`If-Match` semantics). Use `baseRevision: "*"` for create-or-overwrite. | Always pass `baseRevision`. |
+| `workspace.mountEnv()` / `workspace.agentInvite()` | Correct, both exist (`src/setup.ts:898`, `:924`). `agentInvite` is **sync** and does **not** downscope; use `agentInviteScoped()` (async, `:963`) for narrower scopes. | Use scoped variant for least-privilege examples. |
+| `client.listTree(workspaceId, { path })` | Correct (`src/client.ts:1444`). | — |
+| read cache opt-in | Read cache is **on by default** (TTL 5s, max 500 entries), auto-evicts on remote mutations and on local writes. Pass `readCache: false` to disable. | Examples don't need to enable it; mention it's automatic. |
+
+---
+
+## 1. Bootstrap pattern for examples (canonical)
+
+Two-hop: Cloud control plane mints a short-lived Relayfile data-plane token, then the SDK talks to the data plane.
+
+```
+┌─ Cloud control plane ────────────┐      ┌─ Relayfile data plane ──────────┐
+│ https://agentrelay.com/cloud     │      │ https://api.relayfile.dev       │
+│ POST /api/v1/workspaces/{ws}/    │ ───► │ GET  /v1/workspaces/{rw}/fs/file │
+│   relayfile/mount-session        │      │ POST /v1/workspaces/{rw}/fs/bulk │
+│ Auth: Bearer <cloud accessToken> │      │ Auth: Bearer <relayfileToken>   │
+└──────────────────────────────────┘      └─────────────────────────────────┘
+```
+
+**Resolution order each example uses (CI-safe first) — authoritative, confirmed from Cloud source `packages/cli/src/cli/constants.ts` + `credentials.ts`:**
+
+1. **Env overrides (primary):** `CLOUD_API_URL`, `CLOUD_API_ACCESS_TOKEN`, `CLOUD_WORKSPACE_ID`, and/or a pre-minted `RELAYFILE_BASE_URL` + `RELAYFILE_TOKEN` + `RELAYFILE_WORKSPACE_ID`.
+2. **`~/.agentworkforce/relay/cloud-auth.json`** — written by `agent-relay cloud login`. **Canonical/current**; this is what a fresh login refreshes. Shape: `{ accessToken, refreshToken, accessTokenExpiresAt, apiUrl }` = `RelayfileCloudTokenSet`, feed straight into `fromCloudTokens`.
+3. **`~/.cloud/credentials.json`** — older Cloud CLI path (`packages/cli/src/credentials.ts`). May be stale.
+4. **`~/.relayfile/cloud-credentials.json`** — relayfile CLI legacy path (`cmd/relayfile-cli/main.go:6870`). Last resort.
+
+**Log which file was chosen** so the operator isn't surprised when a stale file wins — three CLIs (agent-relay, Cloud, relayfile) each write a different location, and `agent-relay cloud login` does **not** refresh the other two.
+
+> ⚠️ **Use the workspace ID that `mount-session` RETURNS** for all `/v1/workspaces/{id}/...`
+> calls — never the request-side app-UUID. The app-UUID ↔ `rw_…` shard split was the
+> root cause of issue #306. Examples must demonstrate the correct plumbing.
+
+### SDK path (preferred over raw fetch)
+
+```ts
+import { RelayfileSetup } from "@relayfile/sdk";
+
+// fromCloudTokens: hand it the Cloud accessToken/refreshToken; it auto-refreshes.
+const setup = RelayfileSetup.fromCloudTokens(
+  { accessToken, refreshToken, accessTokenExpiresAt },
+  { cloudApiUrl: process.env.CLOUD_API_URL ?? "https://agentrelay.com/cloud" },
+);
+
+const workspace = await setup.joinWorkspace(process.env.CLOUD_WORKSPACE_ID!);
+const client = workspace.client(); // RelayFileClient bound to this workspace, auto-refreshing token
+
+// downstream calls use workspace.workspaceId (the rw_ shard id the cloud handed back)
+const tree = await client.listTree(workspace.workspaceId, { path: "/notion", depth: 2 });
+```
+
+---
+
+## 2. Cloud contract (from cloud-expert, authoritative)
+
+**Base URLs**
+- Cloud control plane: `https://agentrelay.com/cloud` (prod). Override: `CLOUD_API_URL`. Local CLI default: `http://localhost:3000/cloud`.
+- Relayfile data plane: `https://api.relayfile.dev` (prod). Override: `RELAYFILE_BASE_URL` / `RELAYFILE_URL`. Staging: `https://staging-api.relayfile.dev`.
+
+**Credentials (canonical) — three CLIs, three files, see §1 for the full precedence**
+- **`~/.agentworkforce/relay/cloud-auth.json`** — written by `agent-relay cloud login` (`packages/cli/src/cli/constants.ts`). **The current/canonical path** a fresh login refreshes. `{ accessToken, refreshToken, accessTokenExpiresAt, apiUrl }`.
+- `~/.cloud/credentials.json` — older Cloud CLI path (`packages/cli/src/credentials.ts`).
+- `~/.relayfile/cloud-credentials.json` — relayfile CLI legacy path (`cmd/relayfile-cli/main.go:6870`).
+- ⚠️ `agent-relay cloud login` refreshes **only** the first; the other two can be arbitrarily stale. Always check `accessTokenExpiresAt` before use.
+
+**Token mint endpoint (use this for examples)**
+```
+POST {CLOUD_API_URL}/api/v1/workspaces/{rwWorkspaceId}/relayfile/mount-session
+Authorization: Bearer <cloud api access token>
+Content-Type: application/json
+
+{ "localDir": "/tmp/relayfile-demo", "remotePath": "/", "mode": "poll",
+  "agentName": "integration-verifier",
+  "scopes": ["relayfile:fs:read:/notion/**", "relayfile:fs:write:/linear/**"] }
+```
+> ⚠️ **The mount-session path param requires the `rw_…` workspace ID, NOT the Cloud app UUID.** Cloud-source-confirmed: the route validates with `isValidWorkspaceId` (`@cloud/core/workspace/id`), which only accepts `rw_[a-z0-9]{8}`, then looks it up in the relay workspace registry. Passing an app UUID returns `404 workspace_not_found`. **Resolve first** (`GET /api/v1/workspaces/{appUUID}/resolve` → `relayfileWorkspaceId`), then call mount-session with that `rw_` id. (The SDK does this for you: `joinWorkspace(id)` → `handle.workspaceId` from the join response → mount-session uses that. Raw-HTTP callers must resolve manually.)
+
+Response includes: `workspaceId` (the `rw_…` shard id — use this downstream), `relayfileBaseUrl`, `relayfileToken`, `wsUrl`, `scopes`, expiry fields.
+A `delegated-token` route also exists (`POST .../relayfile/delegated-token`) for per-agent scoping; prefer `mount-session` for examples.
+
+**Token refresh (codified in `CloudApiClient`, not reverse-engineered)**
+```
+POST {CLOUD_API_URL}/api/v1/auth/token/refresh
+{ "refreshToken": "cld_rt_..." }
+```
+Returns `accessToken`, a new `refreshToken`, expiry fields, `apiUrl`, `tokenType`. Write the new values back to whichever cred file you read (canonical: `~/.agentworkforce/relay/cloud-auth.json`). `RelayfileSetup.fromCloudTokens(...)` performs this roundtrip automatically when the access token is within its refresh window — examples using it do **not** implement refresh by hand.
+
+**App-UUID ↔ `rw_` resolution (never guess the mapping)**
+```
+GET  {CLOUD_API_URL}/api/v1/workspaces                       # list app workspace ids
+GET  {CLOUD_API_URL}/api/v1/workspaces/{appWorkspaceId}/resolve
+       → { cloudWorkspaceId: <app UUID>, relayfileWorkspaceId: "rw_...", provisioned: false }
+```
+Pick the descriptor whose `relayfileWorkspaceId` equals the `rw_` you want. Note: **`provisioned` means "did this `/resolve` call provision a *new* relay workspace right now?"** — for an already-existing, functional workspace it is `false`. It is NOT a data-plane health flag; `false` is normal and expected. **Iron rule:** the request-side `CLOUD_WORKSPACE_ID` may be an app UUID, but every Relayfile **data-plane** call must use the `workspaceId` returned by `mount-session` / `joinWorkspace` / `resolve` — never the request id. This is the exact app-UUID↔`rw_` split that caused issue #306; the example bootstrap helper bakes this in as a comment so it isn't accidentally reintroduced.
+
+**Data-plane auth/header shape**
+- Routes: `{RELAYFILE_BASE_URL}/v1/workspaces/{relayfileWorkspaceId}/...`
+- `Authorization: Bearer <relayfileToken>`
+- `X-Correlation-Id: <stable smoke id>` — **required** on fs routes.
+- `Content-Type: application/json` for JSON writes.
+- **Do NOT send `X-Workspace-Id`** — Cloud's Relayfile Worker sets it internally when forwarding to the DO; sending it can mis-route.
+- Scopes: **always request the `relayfile:fs:<read|write>:/provider/**` form** for least-privilege. ⚠️ Cloud-source-confirmed: `compileJoinAccess` filters requested scopes to `relayfile:fs:*` and **falls back to full default read+write if every requested scope is filtered out** — so requesting bare `fs:read` / `fs:write` silently yields a *broad* token, not a narrow one. Bare `fs:*` works for data-plane *checks* but is the wrong thing to *request* at mint time.
+  - Known Cloud bug (file with repro if reproduced): path scopes like `relayfile:fs:read:/notion/**` expanding to `relayfile:fs:read:*` is **not** expected — `normalizeRequestedScope` should preserve the path. If mint returns wildcard for a path-scoped request, that breaks least-privilege and is a real bug, not a doc issue.
+
+**Bulk-write 202=sync contract (after cloud#2274 deploys)**
+```
+POST {RELAYFILE_BASE_URL}/v1/workspaces/{rw}/fs/bulk
+{ "files": [{ "path": "/linear/labels/<id>.json", "content": "...",
+              "contentType": "application/json", "encoding": "utf-8" }] }
+```
+`202` ⇒ files in `results` are immediately readable via `GET /fs/file?path=...`.
+cloud#2274 routes `/fs/bulk` through the same provider shard resolver as reads (concurrent per-file shard lookup + aggregated mixed-provider fanout). **Not deployed yet as of this writing** — the live 202=sync smoke against prod waits for cloud-expert's deploy confirmation.
+
+---
+
+## 3. RelayFileClient (`src/client.ts`)
+
+Constructor `(options: RelayFileClientOptions)` — `:1408`.
+
+```ts
+interface RelayFileClientOptions {
+  baseUrl?: string;                          // default https://api.relayfile.dev
+  token: string | (() => string | Promise<string>);
+  fetchImpl?: typeof fetch;
+  userAgent?: string;
+  retry?: { maxRetries?; baseDelayMs?; maxDelayMs?; jitterRatio? };
+  changeLog?: { retentionMs?; maxEntries? };
+  readCache?: false | { ttlMs?; maxEntries? }; // on by default
+}
+```
+
+| Method | Signature | Returns | Line |
+|---|---|---|---|
+| `listTree` | `(workspaceId, options?: { path?; depth?; cursor?; forkId?; correlationId?; signal? })` | `TreeResponse` | 1444 |
+| `readFile` | `(workspaceId, path, correlationId?, signal?)` **or** `(input: ReadFileInput)` | `FileReadResponse` | 1459 |
+| `queryFiles` | `(workspaceId, options?: { path?; provider?; relation?; permission?; comment?; properties?; cursor?; limit?; ... })` | `FileQueryResponse` | 1503 |
+| `writeFile` | `(input: WriteFileInput)` — requires `baseRevision` | `WriteQueuedResponse` | 1530 |
+| `bulkWrite` | `(input: { workspaceId; files: BulkWriteFile[]; forkId?; correlationId?; signal? })` | `BulkWriteResponse` | 1555 |
+| `deleteFile` | `(input: { workspaceId; path; baseRevision; ... })` | `WriteQueuedResponse` | 1576 |
+| `subscribe` | `(globs, onChange, options?)` | `Subscription` | 1644 |
+| `connectWebSocket` | `(workspaceId, options?)` | `WebSocketConnection` | 1778 |
+| `getToken` | `()` | `Promise<string>` | 1429 |
+| `getBaseUrl` | `()` | `string` | 1440 |
+
+`WriteFileInput`: `{ workspaceId, path, baseRevision, content, contentType?, encoding?: "utf-8"|"base64", semantics?, forkId?, contentIdentity?, correlationId?, signal? }` (`src/types.ts:802`). `baseRevision: "*"` = create-or-overwrite.
+
+`BulkWriteFile`: `{ path, contentType?, content, encoding?: "utf-8"|"base64", contentIdentity? }` (`src/types.ts:100`). **Note:** `bulkWrite` files do **not** carry a per-file `baseRevision` (unlike `writeFile`) — bulk writes are unconditional create-or-overwrite. `BulkWriteResponse` returns `{ written, errorCount, errors, results }`. Use `writeFile` with an explicit `baseRevision` when you need optimistic-concurrency / conflict detection (`RevisionConflictError`).
+
+> ⚠️ **`queryFiles` caveat — filters on synced *metadata*, not path.** `queryFiles({provider, properties, relation, ...})` matches against each file's `provider`/`semantics` fields (OSS reference: `internal/relayfile/store.go:1286`), **not** the path prefix. A provider's content is only queryable if its cloud sync populates that metadata. As of 2026-06: Linear/Jira/Confluence writers tag semantics; **Notion sync does NOT** (writes `/notion/...` paths without `semantics`), so `queryFiles({provider:"notion"})` returns `0` while `listTree`/`readFile` on `/notion` are fully functional. For read examples over un-tagged providers, use `listTree`+`readFile`; reserve `queryFiles` for agent-written semantic files or providers with tagging. (Cloud follow-up tracked separately.)
+
+---
+
+## 4. RelayfileSetup (`src/setup.ts`)
+
+Constructor `(options?: { cloudApiUrl?; accessToken?; requestTimeoutMs?; retry? })` — `:220`. Default cloud API `https://agentrelay.com/cloud` (`:61`).
+
+| Method | Signature | Returns | Line |
+|---|---|---|---|
+| `login` (static) | `(options?)` — **`@relayfile/sdk/cli` only**, node-only | `Promise<RelayfileSetup>` | 189 |
+| `fromCloudTokens` (static) | `(tokens: RelayfileCloudTokenSet, options?)` | `RelayfileSetup` | 199 |
+| `createWorkspace` | `(options?: { name?; permissions?; agentName?; scopes? })` | `Promise<WorkspaceHandle>` | 230 |
+| `joinWorkspace` | `(workspaceId, options?: { agentName?; scopes?; permissions? })` | `Promise<WorkspaceHandle>` | 270 |
+| `mountWorkspace` | `(input: MountWorkspaceInput)` | `Promise<MountedWorkspaceHandle>` | 291 |
+| `ensureMountedWorkspace` | `(input: EnsureMountedWorkspaceInput)` — **method, not top-level export** | `Promise<MountedWorkspaceHandle>` | 325 |
+| `getCloudApiUrl` | `()` | `string` | 451 |
+
+`RelayfileCloudTokenSet`: `{ apiUrl?, accessToken, refreshToken, accessTokenExpiresAt, refreshTokenExpiresAt? }`. Auto-refreshes within `refreshWindowMs` (default 60s).
+
+---
+
+## 5. WorkspaceHandle (`src/setup.ts`)
+
+Properties: `info: WorkspaceInfo`, `workspaceId: string`.
+
+| Method | Signature | Returns | Line |
+|---|---|---|---|
+| `client` | `()` — cached, auto-refreshing token | `RelayFileClient` | 549 |
+| `connectIntegration` | `(provider, options?: { connectionId?; allowedIntegrations? })` | `Promise<ConnectIntegrationResult>` | 559 |
+| `connectNotion` | `(options?)` | `Promise<ConnectIntegrationResult>` | 607 |
+| `waitForConnection` | `(provider, options?: { connectionId?; pollIntervalMs?; timeoutMs?; signal?; onPoll? })` | `Promise<void>` | 616 |
+| `isConnected` | `(provider, connectionId)` | `Promise<boolean>` | 682 |
+| `listAccessibleResources` | `(provider)` | `Promise<Array<{ id; url; name?; scopes?; avatarUrl? }>>` | 795 |
+| `mountEnv` | `(options?: { localDir?; remotePath?; mode?; relaycastBaseUrl? })` | `WorkspaceMountEnv` (Record) | 898 |
+| `agentInvite` | `(options?)` — sync, **no** downscope | `AgentWorkspaceInvite` | 924 |
+| `agentInviteScoped` | `(options?: { scopes?; agentName?; permissions?; ... })` — mints downscoped JWT | `Promise<AgentWorkspaceInvite>` | 963 |
+| `getToken` | `()` | `string` | 885 |
+| `refreshToken` | `()` | `Promise<void>` | 1015 |
+
+`ConnectIntegrationResult`: `{ connectLink: string|null, sessionToken: string|null, expiresAt: string|null, alreadyConnected: boolean, connectionId: string }`.
+
+`mountEnv()` returns: `RELAYFILE_BASE_URL`, `RELAYFILE_TOKEN`, `RELAYFILE_WORKSPACE`, `RELAYFILE_REMOTE_PATH`, `RELAYFILE_LOCAL_DIR`, `RELAYFILE_MOUNT_MODE`, `RELAYCAST_API_KEY`, `RELAY_API_KEY`, `RELAYCAST_BASE_URL`, `RELAY_BASE_URL`.
+
+---
+
+## Self-Host Connect
+
+`ConnectCapableProvider` (`src/connection.ts`) extends `ConnectionProvider` with
+`createConnectSession(input)` and `getConnectionStatus(input)`. Use
+`supportsConnect(provider)` before treating a provider as connect-capable.
+
+`SelfHostConnect` (`src/self-host-connect.ts`) is provider-backed and requires
+an explicit `providerConfigKeys` map (typed `ProviderConfigKeyMap`, a
+`Record<relayfileSlug, providerConfigKey>`), for example
+`{ github: "github-prod" }`. `startConnect("github", { endUserId })` resolves
+that map and calls the provider directly. The OSS server has no bind/adopt route
+for self-host Connect; Cloud convergence remains separate from this surface.
+
+`waitForConnection(provider, { connectionId })` waits for auth readiness
+(`oauth_connected` or provider `ready: true`). Data-plane readiness is a
+separate, shipped helper — `RelayFileClient.waitForData(workspaceId, provider)`
+over `/v1/workspaces/{id}/sync/status` (resolves when the provider reports
+`ready`, or when an OSS `healthy` row includes processed-ingest progress via
+`cursor`/`watermarkTs`). See `docs/integrations/SELF-HOST.md` for the full
+connect → data-ready flow and the provider sync-coverage matrix.
+
+---
+
+## 6. MountedWorkspaceHandle (`src/setup.ts:1081`)
+
+`{ workspaceId, localDir, remotePath, mode: "poll"|"fuse", ready: boolean, expiresAt, suggestedRefreshAt }`
+Methods: `env(): Record<string,string>`, `status(): Promise<MountedWorkspaceStatus>`, `stop(): Promise<void>`.
+
+`EnsureMountedWorkspaceInput extends MountWorkspaceInput` with `{ provider?, verifyProvider?, providerReadyTimeoutMs? }`. `MountWorkspaceInput`: `{ workspace? | workspaceId, localDir, remotePath?, mode?: "poll"|"fuse", localLayout?: "exact"|"scoped", syncMode?: "mirror"|"write-only", background?, agentName?, scopes?, signal?, launcher?, readyTimeoutMs? }`.
+
+---
+
+## 7. Supported integration providers (`src/setup-types.ts:4`)
+
+```
+github · slack-sage · slack-my-senior-dev · slack-nightcto · notion · linear
+```
+
+`WORKSPACE_INTEGRATION_PROVIDERS` is the exact allowed set for `connectIntegration(provider)` and `EnsureMountedWorkspaceInput.provider`.
+
+## 8. `@relayfile/agents` shipped surface
+
+PR 309 adds the thin package that the framework examples use:
+
+```ts
+import { connect, tools } from "@relayfile/agents";
+
+const rf = await connect({ scopes: ["relayfile:fs:read:/notion/**"] });
+tools.vercel(rf, { readPaths: ["/notion"] });
+tools.openai(rf, { readPaths: ["/notion"] });
+tools.langchain(rf, { readPaths: ["/notion"] });
+```
+
+The package wraps the canonical Cloud bootstrap from §1, exposes `rf.client` as the raw SDK escape hatch, and adds `writeback.*`, `read`, and `onEvent` helpers. See `packages/agents/README.md` for the package API and `examples/integrations/` for runnable smoke-tested projects.
+
+## 9. Self-host boundary
+
+`WorkspaceHandle.connectIntegration()` / `connectNotion()` are Cloud-backed today: they call Agent Relay Cloud `integrations/connect-session` and `status` routes. They are correct for hosted examples, but they are not a white-label self-host connect orchestrator.
+
+Current self-hostable pieces in this repo:
+
+| Need | Current surface |
+|---|---|
+| Run the VFS API | relayfile server |
+| Issue scoped workspace tokens | relayauth-compatible issuer |
+| Read/write/list files | `RelayFileClient` |
+| Push normalized provider events | `RelayFileClient.ingestWebhook(...)` -> `POST /v1/workspaces/{id}/webhooks/ingest` |
+| Orchestrate self-host connect | `SelfHostConnect` (`@relayfile/sdk`) + a `ConnectCapableProvider` |
+| Wait for first-sync data | `RelayFileClient.waitForData(id, provider)` -> `/v1/workspaces/{id}/sync/status` |
+| Consume writeback work | writeback queue / consumer APIs |
+| Framework tools | `@relayfile/agents` |
+
+Self-host provider OAuth session minting and `connectionId` binding remain provider-stack work; first-sync backfill and the actual sync definitions are the [paid boundary](./SYNC-DEFINITION-BOUNDARY.md). The connect orchestrator (`SelfHostConnect`) and the data-ready signal (`waitForData`) now ship in `@relayfile/sdk`. Issues [#310](https://github.com/AgentWorkforce/relayfile/issues/310) and [#311](https://github.com/AgentWorkforce/relayfile/issues/311) track turning more of that into explicit SDK/OSS surface. The short guide is `docs/integrations/SELF-HOST.md`.
+
+---
+
+## 10. Existing examples to lift patterns from (`examples/`)
+
+| Dir | Demonstrates | Real SDK calls |
+|---|---|---|
+| `01-agent-reads-files` | read-only | `listTree(ws, { depth: 2 })`, `readFile(ws, path)`, `queryFiles(ws, { provider })` |
+| `02-agent-writes-files` | write + conflict | `writeFile({ ws, path, baseRevision: "*", content, contentType })`, `bulkWrite({ ws, files })`, catches `RevisionConflictError` |
+| `03-webhook-to-vfs` | webhook ingest | — |
+| `04-realtime-events` | change stream | `subscribe` / `connectWebSocket` |
+| `05-relayauth-scoped-agent` | scoped tokens | two clients, different scopes; 403 on out-of-scope read/write |
+| `06-writeback-consumer` | writeback handler | — |
+
+Env vars these examples read: `RELAYFILE_TOKEN`, `WORKSPACE_ID` (and scoped variants in 05). The SDK does **not** auto-read `process.env` — the caller passes token + workspaceId explicitly.
+
+Framework examples live under `examples/integrations/` and use `@relayfile/agents`: Vercel AI SDK, OpenAI Agents SDK, and LangChain Notion read / Linear writeback projects, plus the Vercel Linear events example.
+
+---
+
+_Verified against `@relayfile/sdk@0.10.1` source + cloud contract from cloud-expert. Update this doc in the same change if any of these signatures move._

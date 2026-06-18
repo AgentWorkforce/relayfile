@@ -323,15 +323,15 @@ If the mount has not reconciled for ≥10 minutes it logs `mount stalled: <reaso
 ### Token expired
 
 ```
-error: cloud session expired. Run 'relayfile login' to sign in again.
+error: cloud session expired. Run 'agent-relay login' to sign in again.
 ```
 
-Run `relayfile login`. The running mount continues serving local reads from disk until the process is restarted.
+Run `agent-relay login`. The running mount continues serving local reads from disk until the process is restarted.
 
 If the refresh token itself expires (default 7 days), the mount enters degraded mode: local reads work, local writes are refused and logged to `.relay/permissions-denied.log` with reason `cloud_session_expired`. Fix:
 
 ```bash
-relayfile login
+agent-relay login
 relayfile stop my-project
 relayfile mount --background my-project ./relayfile-mount
 ```
@@ -379,9 +379,8 @@ relayfile mount --mode=poll my-project ./relayfile-mount
 
 ```
 ~/.relayfile/
-  cloud-credentials.json    # Cloud login tokens (0600)
-  credentials.json          # Relayfile VFS workspace token (0600)
-  workspaces.json           # workspace name → ID mapping
+  credentials.json          # self-hosted/API-key credentials only (0600)
+  workspaces.json           # local workspace metadata
 
 <local-dir>/
   github/                   # GitHub files

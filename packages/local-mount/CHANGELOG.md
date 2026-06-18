@@ -8,6 +8,130 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _No unreleased changes._
 
+## [0.10.1] - 2026-06-18
+
+_No user-visible changes in this release._
+
+## [0.10.0] - 2026-06-18
+
+_No user-visible changes in this release._
+
+## [0.9.6] - 2026-06-17
+
+_No user-visible changes in this release._
+
+## [0.9.5] - 2026-06-17
+
+_No user-visible changes in this release._
+
+## [0.9.4] - 2026-06-17
+
+_No user-visible changes in this release._
+
+## [0.9.3] - 2026-06-17
+
+_No user-visible changes in this release._
+
+## [0.9.2] - 2026-06-17
+
+_No user-visible changes in this release._
+
+## [0.9.1] - 2026-06-17
+
+_No user-visible changes in this release._
+
+## [0.9.0] - 2026-06-16
+
+_No user-visible changes in this release._
+
+## [0.8.30] - 2026-06-15
+
+_No user-visible changes in this release._
+
+## [0.8.29] - 2026-06-15
+
+_No user-visible changes in this release._
+
+## [0.8.28] - 2026-06-15
+
+_No user-visible changes in this release._
+
+## [0.8.27] - 2026-06-15
+
+_No user-visible changes in this release._
+
+## [0.8.26] - 2026-06-14
+
+_No user-visible changes in this release._
+
+## [0.8.25] - 2026-06-14
+
+_No user-visible changes in this release._
+
+## [0.8.24] - 2026-06-14
+
+_No user-visible changes in this release._
+
+## [0.8.23] - 2026-06-11
+
+_No user-visible changes in this release._
+
+## [0.8.22] - 2026-06-10
+
+_No user-visible changes in this release._
+
+## [0.8.21] - 2026-06-09
+
+_No user-visible changes in this release._
+
+## [0.8.19] - 2026-06-08
+
+_No user-visible changes in this release._
+
+## [0.8.18] - 2026-06-08
+
+_No user-visible changes in this release._
+
+## [0.8.17] - 2026-06-07
+
+_No user-visible changes in this release._
+
+## [0.8.16] - 2026-06-07
+
+_No user-visible changes in this release._
+
+## [0.8.15] - 2026-06-06
+
+_No user-visible changes in this release._
+
+## [0.8.14] - 2026-06-06
+
+_No user-visible changes in this release._
+
+## [0.8.13] - 2026-06-06
+
+_No user-visible changes in this release._
+
+## [0.8.12] - 2026-06-06
+
+_No user-visible changes in this release._
+
+## [0.8.11] - 2026-06-06
+
+_No user-visible changes in this release._
+
+## [0.8.10] - 2026-06-05
+
+_No user-visible changes in this release._
+
+## [0.8.9] - 2026-06-02
+
+_No user-visible changes in this release._
+
+## [0.8.8] - 2026-06-01
+
+_No user-visible changes in this release._
+
 ## [0.8.7] - 2026-05-31
 
 _No user-visible changes in this release._
@@ -323,7 +447,38 @@ Initial release.
 - Directory-only ignore patterns (e.g. `cache/`) match directories without swallowing like-named files.
 - README documenting the mount lifecycle, dotfile semantics, and auto-sync behavior. ([#48])
 
-[Unreleased]: https://github.com/AgentWorkforce/relayfile/compare/v0.8.7...HEAD
+[Unreleased]: https://github.com/AgentWorkforce/relayfile/compare/v0.10.1...HEAD
+[0.10.1]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.10.1
+[0.10.0]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.10.0
+[0.9.6]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.9.6
+[0.9.5]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.9.5
+[0.9.4]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.9.4
+[0.9.3]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.9.3
+[0.9.2]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.9.2
+[0.9.1]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.9.1
+[0.9.0]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.9.0
+[0.8.30]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.8.30
+[0.8.29]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.8.29
+[0.8.28]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.8.28
+[0.8.27]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.8.27
+[0.8.26]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.8.26
+[0.8.25]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.8.25
+[0.8.24]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.8.24
+[0.8.23]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.8.23
+[0.8.22]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.8.22
+[0.8.21]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.8.21
+[0.8.19]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.8.19
+[0.8.18]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.8.18
+[0.8.17]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.8.17
+[0.8.16]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.8.16
+[0.8.15]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.8.15
+[0.8.14]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.8.14
+[0.8.13]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.8.13
+[0.8.12]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.8.12
+[0.8.11]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.8.11
+[0.8.10]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.8.10
+[0.8.9]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.8.9
+[0.8.8]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.8.8
 [0.8.7]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.8.7
 [0.8.6]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.8.6
 [0.8.5]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.8.5

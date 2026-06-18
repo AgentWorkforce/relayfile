@@ -13,22 +13,45 @@ import (
 )
 
 type fileEventMessage struct {
-	Type        string `json:"type"`
-	Path        string `json:"path,omitempty"`
-	Revision    string `json:"revision,omitempty"`
-	ContentHash string `json:"contentHash,omitempty"`
-	Timestamp   string `json:"timestamp,omitempty"`
+	EventID       string `json:"eventId,omitempty"`
+	Type          string `json:"type"`
+	Path          string `json:"path,omitempty"`
+	Revision      string `json:"revision,omitempty"`
+	ContentHash   string `json:"contentHash,omitempty"`
+	Origin        string `json:"origin,omitempty"`
+	Provider      string `json:"provider,omitempty"`
+	CorrelationID string `json:"correlationId,omitempty"`
+	Timestamp     string `json:"timestamp,omitempty"`
 }
 
 type websocketClientMessage struct {
 	Type string `json:"type"`
 }
 
+type websocketSubscriptionOptions struct {
+	From   string
+	Cursor string
+	Paths  []string
+}
+
 func (s *Server) handleFileEventsWebSocket(w http.ResponseWriter, r *http.Request, workspaceID string) {
-	claims, authErr := authorizeBearer("Bearer "+strings.TrimSpace(r.URL.Query().Get("token")), s.bearerVerifier, workspaceID, "fs:read", "", time.Now().UTC())
+	options := parseWebSocketSubscriptionOptions(r)
+	scopePath := "/"
+	if len(options.Paths) > 0 {
+		scopePath = options.Paths[0]
+	}
+	claims, authErr := authorizeBearer("Bearer "+strings.TrimSpace(r.URL.Query().Get("token")), s.bearerVerifier, workspaceID, "fs:read", scopePath, time.Now().UTC())
 	if authErr != nil {
 		writeError(w, authErr.status, authErr.code, authErr.message, "")
 		return
+	}
+	if len(options.Paths) > 1 {
+		for _, path := range options.Paths[1:] {
+			if !scopeMatchesPath(claims.Scopes, "fs:read", path) {
+				writeError(w, http.StatusForbidden, "forbidden", "missing required scope: fs:read", "")
+				return
+			}
+		}
 	}
 	if s.rateLimiter != nil {
 		key := workspaceID + "|" + claims.AgentName
@@ -53,7 +76,7 @@ func (s *Server) handleFileEventsWebSocket(w http.ResponseWriter, r *http.Reques
 	unsubscribe := s.store.Subscribe(workspaceID, subscriptionCh)
 	defer unsubscribe()
 
-	catchUp, err := s.store.GetRecentEvents(workspaceID, 100)
+	catchUp, err := s.webSocketCatchUpEvents(workspaceID, options)
 	if err != nil {
 		_ = conn.Close(websocket.StatusInternalError, "failed to load catch-up events")
 		return
@@ -63,6 +86,9 @@ func (s *Server) handleFileEventsWebSocket(w http.ResponseWriter, r *http.Reques
 	for _, event := range catchUp {
 		if event.EventID != "" {
 			catchUpIDs[event.EventID] = struct{}{}
+		}
+		if !webSocketEventMatchesPaths(event, options.Paths) {
+			continue
 		}
 		if err := s.writeWebSocketEvent(ctx, conn, event); err != nil {
 			return
@@ -88,6 +114,9 @@ func (s *Server) handleFileEventsWebSocket(w http.ResponseWriter, r *http.Reques
 				return
 			}
 		case event := <-subscriptionCh:
+			if !webSocketEventMatchesPaths(event, options.Paths) {
+				continue
+			}
 			// Skip events already sent during catch-up to avoid duplicates
 			if event.EventID != "" {
 				if _, dup := catchUpIDs[event.EventID]; dup {
@@ -100,6 +129,85 @@ func (s *Server) handleFileEventsWebSocket(w http.ResponseWriter, r *http.Reques
 			}
 		}
 	}
+}
+
+func parseWebSocketSubscriptionOptions(r *http.Request) websocketSubscriptionOptions {
+	query := r.URL.Query()
+	return websocketSubscriptionOptions{
+		From:   strings.ToLower(strings.TrimSpace(query.Get("from"))),
+		Cursor: strings.TrimSpace(query.Get("cursor")),
+		Paths:  normalizeWebSocketPathFilters(query["path"]),
+	}
+}
+
+func (s *Server) webSocketCatchUpEvents(workspaceID string, options websocketSubscriptionOptions) ([]relayfile.Event, error) {
+	if options.Cursor != "" {
+		return s.store.GetEventsAfterCursor(workspaceID, options.Cursor, 100)
+	}
+	if options.From == "now" {
+		return []relayfile.Event{}, nil
+	}
+	return s.store.GetRecentEvents(workspaceID, 100)
+}
+
+func normalizeWebSocketPathFilters(values []string) []string {
+	seen := map[string]struct{}{}
+	paths := make([]string, 0, len(values))
+	for _, value := range values {
+		path := strings.TrimSpace(value)
+		if path == "" {
+			continue
+		}
+		if !strings.HasPrefix(path, "/") {
+			path = "/" + path
+		}
+		if _, ok := seen[path]; ok {
+			continue
+		}
+		seen[path] = struct{}{}
+		paths = append(paths, path)
+	}
+	return paths
+}
+
+func webSocketEventMatchesPaths(event relayfile.Event, filters []string) bool {
+	if len(filters) == 0 {
+		return true
+	}
+	for _, filter := range filters {
+		if webSocketPathMatches(filter, event.Path) {
+			return true
+		}
+	}
+	return false
+}
+
+func webSocketPathMatches(pattern, eventPath string) bool {
+	pattern = strings.TrimSpace(pattern)
+	eventPath = strings.TrimSpace(eventPath)
+	if pattern == "" || eventPath == "" {
+		return false
+	}
+	if pattern == eventPath {
+		return true
+	}
+	patternSegments := strings.Split(strings.Trim(pattern, "/"), "/")
+	pathSegments := strings.Split(strings.Trim(eventPath, "/"), "/")
+	for index, segment := range patternSegments {
+		if segment == "**" && index == len(patternSegments)-1 {
+			return true
+		}
+		if index >= len(pathSegments) {
+			return false
+		}
+		if segment == "*" {
+			continue
+		}
+		if segment != pathSegments[index] {
+			return false
+		}
+	}
+	return len(patternSegments) == len(pathSegments)
 }
 
 func (s *Server) readWebSocketMessages(ctx context.Context, conn *websocket.Conn, controlCh chan<- fileEventMessage, readErrCh chan<- error) {
@@ -133,10 +241,14 @@ func (s *Server) readWebSocketMessages(ctx context.Context, conn *websocket.Conn
 
 func (s *Server) writeWebSocketEvent(ctx context.Context, conn *websocket.Conn, event relayfile.Event) error {
 	return wsjson.Write(ctx, conn, fileEventMessage{
-		Type:        event.Type,
-		Path:        event.Path,
-		Revision:    event.Revision,
-		ContentHash: event.ContentHash,
-		Timestamp:   event.Timestamp,
+		EventID:       event.EventID,
+		Type:          event.Type,
+		Path:          event.Path,
+		Revision:      event.Revision,
+		ContentHash:   event.ContentHash,
+		Origin:        event.Origin,
+		Provider:      event.Provider,
+		CorrelationID: event.CorrelationID,
+		Timestamp:     event.Timestamp,
 	})
 }

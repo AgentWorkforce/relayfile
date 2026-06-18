@@ -132,11 +132,14 @@ func authorizeBearer(authHeader string, verifier *bearerVerifier, workspaceID, r
 //
 // Keep this in sync with the prefixes minted by relayauth's
 // `packages/server/src/routes/tokens.ts` (`relay_pa_*` for path-access,
-// `relay_ws_*` for workspace, `relay_id_*` for identity).
+// `relay_ws_*` for workspace, `relay_id_*` for identity, `relay_ag_*` for
+// agent — the delegated-token / `relayfile workspace join` chain issues
+// `relay_ag_` access tokens via `/v1/tokens/agent`).
 var relayauthTokenPrefixes = []string{
 	"relay_pa_",
 	"relay_ws_",
 	"relay_id_",
+	"relay_ag_",
 }
 
 // stripRelayauthTokenPrefix removes the leading `relay_<class>_` prefix
@@ -437,10 +440,6 @@ func scopeMatches(granted map[string]struct{}, required string) bool {
 }
 
 func scopeMatchesPath(granted map[string]struct{}, required string, filePath string) bool {
-	if _, ok := granted[required]; ok {
-		return true
-	}
-
 	filePath = strings.TrimSpace(filePath)
 	parts := strings.SplitN(required, ":", 2)
 	if len(parts) != 2 {
@@ -448,47 +447,84 @@ func scopeMatchesPath(granted map[string]struct{}, required string, filePath str
 	}
 	resource, action := parts[0], parts[1]
 
+	hasNarrowPathGrant := false
 	for scope := range granted {
-		segments := strings.SplitN(scope, ":", 4)
-		if len(segments) < 3 {
+		scopePath, ok := pathScopeForRequired(scope, resource, action)
+		if !ok {
 			continue
 		}
-
-		plane, res, act := segments[0], segments[1], segments[2]
-		scopePath := "*"
-		if len(segments) == 4 {
-			scopePath = segments[3]
-		}
-
-		if plane != "relayfile" && plane != "*" {
-			continue
-		}
-		if res != resource && res != "*" {
-			continue
-		}
-		if act != action && act != "*" {
-			if act != "manage" || (action != "read" && action != "write") {
-				continue
-			}
-		}
-
 		if scopePath == "*" {
 			return true
 		}
+		hasNarrowPathGrant = true
 		if filePath == "" {
+			continue
+		}
+		if scopePathMatches(scopePath, filePath) {
 			return true
 		}
+	}
+
+	if _, ok := granted[required]; ok {
+		return !hasNarrowPathGrant
+	}
+	return false
+}
+
+func pathScopeForRequired(scope, resource, action string) (string, bool) {
+	segments := strings.SplitN(scope, ":", 4)
+	if len(segments) < 3 {
+		return "", false
+	}
+
+	switch segments[0] {
+	case "relayfile", "*":
+		res, act := segments[1], segments[2]
+		if res != resource && res != "*" {
+			return "", false
+		}
+		if !scopeActionMatches(act, action) {
+			return "", false
+		}
+		if len(segments) == 4 {
+			return strings.TrimSpace(segments[3]), true
+		}
+		return "*", true
+	case "workspace":
+		act := segments[2]
+		if resource != "fs" || !scopeActionMatches(act, action) {
+			return "", false
+		}
+		if len(segments) == 4 {
+			return strings.TrimSpace(segments[3]), true
+		}
+		return "*", true
+	default:
+		return "", false
+	}
+}
+
+func scopeActionMatches(granted, required string) bool {
+	if granted == required || granted == "*" {
+		return true
+	}
+	return granted == "manage" && (required == "read" || required == "write")
+}
+
+func scopePathMatches(scopePath, filePath string) bool {
+	if scopePath == filePath {
+		return true
+	}
+	if strings.HasSuffix(scopePath, "/**") {
+		scopeDir := strings.TrimSuffix(scopePath, "/**")
+		return filePath == scopeDir || strings.HasPrefix(filePath, scopeDir+"/")
+	}
+	if strings.HasSuffix(scopePath, "/*") {
 		scopeDir := strings.TrimSuffix(scopePath, "/*")
-		scopeDir = strings.TrimSuffix(scopeDir, "*")
-		if scopePath == filePath {
-			return true
-		}
-		if strings.HasSuffix(scopePath, "/*") && strings.HasPrefix(filePath, scopeDir+"/") {
-			return true
-		}
-		if strings.HasSuffix(scopePath, "*") && strings.HasPrefix(filePath, scopeDir) {
-			return true
-		}
+		return strings.HasPrefix(filePath, scopeDir+"/")
+	}
+	if strings.HasSuffix(scopePath, "*") {
+		return strings.HasPrefix(filePath, strings.TrimSuffix(scopePath, "*"))
 	}
 	return false
 }

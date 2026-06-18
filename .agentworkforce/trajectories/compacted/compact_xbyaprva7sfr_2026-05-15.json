@@ -1,0 +1,332 @@
+{
+  "id": "compact_xbyaprva7sfr",
+  "version": 1,
+  "type": "compacted",
+  "compactedAt": "2026-05-15T21:20:25.769Z",
+  "sourceTrajectories": [
+    "traj_3balr2rcreru",
+    "traj_001ra2ed5hjl",
+    "traj_ojfhzfa6dbta",
+    "traj_0koqnjd95bxg",
+    "traj_eu8sdreuqrqg",
+    "traj_wrr6ahp3kndu",
+    "traj_uj5fwdz1jd8e",
+    "traj_wele88oxvqjw",
+    "traj_f2htpp6d9p37",
+    "traj_rgfgabud8nmf",
+    "traj_dm0j845h8pcp",
+    "traj_2orm7podcpre",
+    "traj_ad3m9duae5nu",
+    "traj_nxbsptr6c5q0",
+    "traj_qrt7hh3ht8nk",
+    "traj_bsmv08n1uauq",
+    "traj_q1eiuylnhzn0",
+    "traj_hpjceq921iab",
+    "traj_fpnhphcrcvvu",
+    "traj_8ngwmrksyii2",
+    "traj_zr7q5eibyqjh",
+    "traj_e0xa66nminiy",
+    "traj_zibsxb7oo1qe",
+    "traj_r1d4fcc2h154",
+    "traj_hpmkewuiu5my",
+    "traj_n057rpgdu441",
+    "traj_j6xc2wddqma6",
+    "traj_0djoh9gaqmsm",
+    "traj_p4xp6vo1pql1",
+    "traj_t2zdnawkq4ly",
+    "traj_kgvdyhoply5g",
+    "traj_63vqorujnhf5",
+    "traj_1oag50pgmiyx",
+    "traj_oh53afdbvzuu",
+    "traj_lli9m5ba3f3s",
+    "traj_0s04fu6a2v9q",
+    "traj_z39d1xei8o95",
+    "traj_3p0ykvwckumb",
+    "traj_oy75t2m71aep",
+    "traj_ji5hytmayikt",
+    "traj_92nwrqg8be6w",
+    "traj_vnuk2hipisp1",
+    "traj_gyibmn0d298f",
+    "traj_o5v8o8pq6sym",
+    "traj_5hyssslb7r39",
+    "traj_ahvcwelw14lj",
+    "traj_t25802ahuav4",
+    "traj_s9ea82l12pqd",
+    "traj_4aeewngh7eub",
+    "traj_nd8zrsufjwt5"
+  ],
+  "dateRange": {
+    "start": "2026-05-13T18:53:59.695Z",
+    "end": "2026-05-15T21:20:22.178Z"
+  },
+  "summary": {
+    "totalDecisions": 8,
+    "totalEvents": 820,
+    "uniqueAgents": [
+      "orchestrator",
+      "lead-claude",
+      "impl-codex",
+      "reviewer-claude",
+      "validator-claude",
+      "reviewer-codex",
+      "validator-codex",
+      "default",
+      "master-lead",
+      "master-reviewer"
+    ]
+  },
+  "decisionGroups": [
+    {
+      "category": "testing",
+      "decisions": [
+        {
+          "question": "Prepared cross-repo Ricky worktree bundle",
+          "chosen": "Prepared cross-repo Ricky worktree bundle",
+          "reasoning": "The custom digest spec routes implementation through relayfile and cloud, with adapter dependency context, so the kickoff workspace includes clean worktrees for relayfile, cloud, and relayfile-adapters on matching branches.",
+          "fromTrajectory": "traj_8ngwmrksyii2"
+        },
+        {
+          "question": "Implemented relayfile writeback list from local mirror state",
+          "chosen": "Implemented relayfile writeback list from local mirror state",
+          "reasoning": "The CLI slice is independent and can satisfy the spec by reading dirty mount-state entries for pending rows and local dead-letter records for dead/failed rows without requiring server credentials.",
+          "fromTrajectory": "traj_3p0ykvwckumb"
+        },
+        {
+          "question": "Added explicit repo routing to both specs",
+          "chosen": "Added explicit repo routing to both specs",
+          "reasoning": "PR 147 spans relayfile, relayfile-adapters, cloud, skills, and relay; implementers need primary/supporting repo ownership and PR split before handoff.",
+          "fromTrajectory": "traj_nd8zrsufjwt5"
+        }
+      ]
+    },
+    {
+      "category": "other",
+      "decisions": [
+        {
+          "question": "Did not clear update-last-week changed-files gate in shared dirty worktree",
+          "chosen": "Did not clear update-last-week changed-files gate in shared dirty worktree",
+          "reasoning": "final-review-codex finding is packaging/ownership only; cleaning it would require destructive or ownership-sensitive operations across sibling-slice files without an agreed isolated base",
+          "fromTrajectory": "traj_3balr2rcreru"
+        },
+        {
+          "question": "Master review verdict is pass with scope caveat",
+          "chosen": "Master review verdict is pass with scope caveat",
+          "reasoning": "All signoff markers, typecheck, dry-runs, and contract surface check pass; aggregate dirty tree includes paths outside child changed_files scopes.",
+          "fromTrajectory": "traj_lli9m5ba3f3s"
+        }
+      ]
+    },
+    {
+      "category": "database",
+      "decisions": [
+        {
+          "question": "Explain lagging providers with zero measured lag in relayfile status",
+          "chosen": "Explain lagging providers with zero measured lag in relayfile status",
+          "reasoning": "The server can report status=lagging with lagSeconds=0 when a provider has no cursor or watermark; querying ingress lets the CLI show whether events are pending, accepted, or absent.",
+          "fromTrajectory": "traj_qrt7hh3ht8nk"
+        }
+      ]
+    },
+    {
+      "category": "architecture",
+      "decisions": [
+        {
+          "question": "Structured docs like reference projects: quickstart first, then examples, then architecture",
+          "chosen": "Structured docs like reference projects: quickstart first, then examples, then architecture",
+          "reasoning": "AgentFS and Mirage both make the concrete usage path visible before deeper positioning; relayfile needed copy-pastable mount/API/framework examples earlier in the README and /file docs.",
+          "fromTrajectory": "traj_fpnhphcrcvvu"
+        }
+      ]
+    },
+    {
+      "category": "tooling",
+      "decisions": [
+        {
+          "question": "Required per-repo worktrees and PRs",
+          "chosen": "Required per-repo worktrees and PRs",
+          "reasoning": "Ricky's agents need an explicit rule that every touched repo gets its own worktree, branch, and PR with cross-linked dependencies.",
+          "fromTrajectory": "traj_4aeewngh7eub"
+        }
+      ]
+    }
+  ],
+  "keyLearnings": [
+    "\"fix-loop\" (2 attempts) succeeded after retries — consider adding clearer output instructions to reduce retries.",
+    "\"implement-slice\" (2 attempts) succeeded after retries — consider adding clearer output instructions to reduce retries."
+  ],
+  "keyFindings": [
+    "\"lead-plan\" completed → RICKY_CHILD_LEAD_PLAN_READY",
+    "\"implement-slice\" completed → >7u\r\n╭──────────────────────────────────────────────────╮\r\n│ >_ OpenAI Codex (v0.130.0)                       │\r\n│      ",
+    "\"review-claude\" completed → The review file ends with `RICKY_CHILD_CLAUDE_REVIEW_READY` as required.",
+    "\"fix-loop\" completed → RICKY_CHILD_FIX_LOOP_READY",
+    "\"final-review-claude\" completed → Fresh independent re-review of the `update-last-week` fixed child state complete. Deliverable written to `.workflow-arti",
+    "\"final-fix-claude\" completed → RICKY_CHILD_CLAUDE_FINAL_FIX_READY",
+    "\"review-codex\" completed → RICKY_CHILD_CODEX_REVIEW_READY",
+    "\"fix-loop-codex\" completed → RICKY_CHILD_CODEX_FIX_LOOP_READY",
+    "\"final-review-codex\" completed → RICKY_CHILD_CODEX_FINAL_REVIEW_READY",
+    "\"lead-plan\" completed → File ends with `RICKY_CHILD_LEAD_PLAN_READY`.",
+    "\"review-claude\" completed → Fresh-eyes review of the `update-yyyy-mm-dd` child slice complete.\n\n**Verdict: NO_ISSUES_FOUND**\n\nSummary of findings:\n-",
+    "\"fix-loop\" completed → ## Summary\n\nThe fresh-eyes review (`review-claude.md`, 21:40) returned **NO_ISSUES_FOUND** with explicit `## Findings → ",
+    "\"final-review-claude\" completed → No `fix_required`, no `test_required`.",
+    "\"final-fix-codex\" completed → RICKY_CHILD_CODEX_FINAL_FIX_READY",
+    "\"lead-plan\" completed → File ends with `RICKY_CHILD_LEAD_PLAN_READY` as required.",
+    "\"review-claude\" completed → ## Review Summary\n\n**Verdict: NO_ISSUES_FOUND**\n\nReviewed `mount-verify/.skills/activity-summary.md` against the `update",
+    "\"final-review-claude\" completed → - `test_required`: n/a",
+    "\"final-fix-claude\" completed → The `update-activity-summary` slice is ready to close at the lead's discretion.",
+    "\"implement-slice\" completed → /exit0 q",
+    "\"review-claude\" completed → Each finding includes `fix_required` and `test_required`.",
+    "\"fix-loop\" completed → All five review findings addressed within slice scope:\n\n- **Finding 1 (signoff)** — `signoff.md` written with both marke",
+    "\"final-review-claude\" completed → **Verdict: NO_ISSUES_FOUND**\n\nIndependently verified the fixed child state for `update-2026-05-12`:\n\n- `digests/2026-05-",
+    "\"lead-plan\" completed → Wrote `update-this-week/lead-plan.md` covering goal, non-goals, ownership, validation, source changes, code changes, tes",
+    "\"review-claude\" completed → ## Review Complete\n\n**Verdict: FINDINGS** (8 blocking, 1 non-blocking)\n\nWrote review to `.workflow-artifacts/generated/w",
+    "\"final-review-claude\" completed → Final review written.\n\n**Verdict: NO_ISSUES_FOUND**\n\nThe fix-loop pass resolved every blocking finding (F1–F8) and the p",
+    "\"final-fix-claude\" completed → Slice `update-this-week` is ready-for-review as-is.",
+    "\"lead-plan\" completed → File ends with the required sentinel `RICKY_CHILD_LEAD_PLAN_READY`.",
+    "\"review-claude\" completed → Review complete. Single-pass non-interactive review.\n\n**Verdict: FINDINGS**\n\nArtifact written to:\n`.workflow-artifacts/g",
+    "\"fix-loop\" completed → ## Summary\n\nAddressed all three valid findings from `review-claude.md`:\n\n- **F1 (Python SDK contract regression):** Reve",
+    "\"final-review-claude\" completed → ## Final Review Complete\n\n**Verdict: NO_ISSUES_FOUND**\n\nAll three findings from the original review are resolved in the ",
+    "\"final-fix-claude\" completed → No code or test edits in this pass. No `BLOCKED_NO_COMMIT.md` written (not blocked).",
+    "\"lead-plan\" completed → Document ends with the required `RICKY_CHILD_LEAD_PLAN_READY` sentinel.",
+    "\"review-claude\" completed → ## Review summary\n\nWrote `.workflow-artifacts/generated/workspace-primitive-skills-pr-39-gap-spec-status-draft-created-2",
+    "\"fix-loop\" completed → Fix-loop complete. Summary:\n\n## What was done\n\nThe reviewed deliverable was `update-2/lead-plan.md` in `PLAN_ONLY` statu",
+    "\"final-review-claude\" completed → ## Summary\n\nRe-reviewed the fixed child state of slice `update-2` (`/digests/*`) from scratch. Read the original review ",
+    "\"final-fix-claude\" completed → ## Summary\n\n**Action:** No fix required.\n\nThe final review (`update-2/final-review-claude.md`) explicitly declares `NO_I",
+    "\"review-claude\" completed → Review complete. Verdict: **FINDINGS** — 9 findings written to `update-yesterday-2/review-claude.md`.\n\nSummary of what I",
+    "\"fix-loop\" completed → Fix loop complete. Summary of what was done:\n\n## Fix-loop deliverables\n\n**Code changes:**\n- `internal/digest/yesterday.g",
+    "\"final-review-claude\" completed → File ends with `RICKY_CHILD_CLAUDE_FINAL_REVIEW_READY` as required.",
+    "\"final-fix-claude\" completed → ## Summary\n\nReviewed `update-yesterday-2/final-review-claude.md`. The fresh-eyes second-pass review verdict was **NO_ISS",
+    "\"lead-plan\" completed → ## Deliverable — Child Slice Lead Plan: `update-today`\n\n**Artifact written:** `.workflow-artifacts/generated/workspace-p",
+    "\"review-claude\" completed → # Review Summary — `update-today` slice\n\n**Verdict: BLOCKED.** Wrote review to `.workflow-artifacts/generated/workspace-",
+    "\"fix-loop\" completed → No git commits made; no changes to OpenAPI, `AGENTS.md`, or `CLAUDE.md`.",
+    "\"final-review-claude\" completed → Ends with `RICKY_CHILD_CLAUDE_FINAL_REVIEW_READY`.",
+    "\"final-review-claude\" completed → The slice is ready for master-lead dispatch.",
+    "\"final-fix-claude\" completed → ## Summary\n\nRead `update/final-review-claude.md`. Verdict was **NO_ISSUES_FOUND** with `fix_required: none` and `test_re",
+    "\"review-codex\" completed → ```",
+    "\"review-claude\" completed → ## Review summary\n\n**Verdict: FINDINGS** — wrote review to `.workflow-artifacts/generated/workspace-primitive-skills-pr-",
+    "\"fix-loop\" completed → All 9 review-named tests pass.\n\n## Summary\n\nAddressed all 9 findings from `review-claude.md` in scope for the `update-ye",
+    "\"final-review-claude\" completed → Final re-review complete.\n\n**Verdict: FINDINGS (non-blocking)**\n\nThe functional contract is met. All review gates A–F fr",
+    "\"final-fix-claude\" completed → All three findings from `final-review-claude.md` resolved:\n\n- **F-RR-1**: rewrote `fix-loop-report.md` §F3 to describe t",
+    "\"lead-plan\" completed → File ends with the required `RICKY_CHILD_LEAD_PLAN_READY` sentinel.",
+    "\"review-claude\" completed → Each finding includes a `fix_required` and `test_required` line in the artifact.",
+    "\"fix-loop\" completed → `fix-loop-report.md` terminates with `RICKY_CHILD_FIX_LOOP_READY`.",
+    "\"final-review-claude\" completed → ## Summary\n\nRe-reviewed `update-layout-2` from scratch against live working-tree state.\n\n**Verdict: FINDINGS** (two mino",
+    "\"lead-plan\" completed → Plan ends with the `RICKY_CHILD_LEAD_PLAN_READY` sentinel.",
+    "\"implement-slice\" completed → >7u•Starting MCP servers (0/2): codex_apps, relaycast(0s • esc to interrupt)›Find and fix a bug in @filenamegpt-5.5 high",
+    "\"review-claude\" completed → ## Review Summary\n\n**Verdict: NO_ISSUES_FOUND**\n\nThe `update-layout` child slice implements the lead plan's requirements",
+    "\"fix-loop\" completed → ## Summary\n\n**Slice:** `update-layout` — provider `.layout.md` renderer conformance (Work Items A and E).\n\n**Review verd",
+    "\"final-review-claude\" completed → ## Final Review Complete\n\n**Verdict: NO_ISSUES_FOUND**\n\nRe-reviewed the fixed `update-layout` child state from scratch. ",
+    "\"review-codex\" completed → RICKY_CHILD_REVIEW_READY",
+    "\"implement-slice\" completed → <system-reminder>\r\nRelaycast MCP tools are available for replies.\r\nYou are pre-registered by the broker under your assig",
+    "\"fix-loop\" completed → # Fix Loop Complete — `update-4` (Dead-letter `.error.json` sidecars)\n\n## Summary\n\nRejected the prior iteration's \"artif",
+    "\"fix-loop\" completed → No source files were edited, reverted, or created outside the `update-3` artifact directory.",
+    "\"lead-plan\" completed → File ends with the required `RICKY_CHILD_LEAD_PLAN_READY` marker.",
+    "\"fix-loop\" completed → ## Fix-loop summary\n\nBoth prior-review findings resolved within lead plan §5 `fileScope`:\n\n**Finding 1 — `changed_files`",
+    "\"lead-plan\" completed → The file ends with `RICKY_CHILD_LEAD_PLAN_READY` as required.",
+    "\"fix-loop\" completed → Report ends with `RICKY_CHILD_FIX_LOOP_READY` as required.",
+    "\"lead-plan\" completed → **File terminator:** `RICKY_CHILD_LEAD_PLAN_READY` ✓",
+    "\"fix-loop\" completed (after 2 attempts) → Fix-loop round 2 complete for `update-python`.\n\n**Summary of work:**\n\nVerified the current Python SDK state against `rev",
+    "\"lead-plan\" completed → Lead plan written to `.workflow-artifacts/generated/workspace-primitives-implementation-spec-status-proposed-affects-age",
+    "\"fix-loop\" completed → ## Summary\n\nRan the 80-to-100 fix loop for the `update-core` child slice (bounded to `packages/core/**`).\n\n**Review verd",
+    "\"lead-plan\" completed → The file ends with the required marker `RICKY_CHILD_LEAD_PLAN_READY`.",
+    "\"fix-loop\" completed → This is a single-step no-op fix loop (review is PASS), so TodoWrite is not needed.\n\n## Summary\n\n**Fix-loop pass: no-op**",
+    "\"lead-plan\" completed → - **File ends with:** `RICKY_CHILD_LEAD_PLAN_READY`.",
+    "\"fix-loop\" completed → # Fix-Loop Summary — `update-mountsync`\n\n## Result\n**No within-scope source changes applied.** All within-scope validati",
+    "\"lead-plan\" completed → Lead plan refreshed at `.workflow-artifacts/generated/workspace-primitives-implementation-spec-status-proposed-affects-a",
+    "\"lead-plan\" completed → The lead-plan.md already exists at the requested path with comprehensive coverage of all required sections, and it termi",
+    "\"implement-slice\" completed (after 2 attempts) → Agent Relay collects anonymous usage data to improve the product.Run `agent-relay telemetry disable` to opt out.>7u\r\n╭──",
+    "\"fix-loop\" completed → No source files outside the slice's `allowedDirtyScope` were touched.",
+    "\"fix-loop\" completed → ## Summary\n\nFix loop completed for child slice `update-yesterday` as a **no-op**.\n\n**Inputs reviewed:**\n- `review-codex.",
+    "\"implement-slice\" completed → >7u•Starting MCP servers (0/2): codex_apps, relaycast(0s • esc to interrupt)›Improve documentation in @filenamegpt-5.5 h",
+    "\"fix-loop\" completed → # Fix-loop summary — `update-4`\n\n**Scope contract:** `target-files.txt` declares `.relay/dead-letter/` only — a runtime ",
+    "\"lead-plan\" completed → Wrote `update-core/lead-plan.md` (≈260 lines). Summary of the plan:\n\n**Scope** — `packages/core` only. Contributes to WI",
+    "\"implement-slice\" completed → Agent Relay collects anonymous usage data to improve the product.Run `agent-relay telemetry disable` to opt out.>7u•Star",
+    "\"fix-loop\" completed → Ends with required marker: `RICKY_CHILD_FIX_LOOP_READY`.",
+    "\"lead-plan\" completed → The lead-plan file ends with `RICKY_CHILD_LEAD_PLAN_READY` as required.",
+    "\"fix-loop\" completed → Report ends with `RICKY_CHILD_FIX_LOOP_READY`.",
+    "\"fix-loop\" completed → Fix loop complete. Summary:\n\n**In-scope fixes applied (`cmd/relayfile-cli/` only):**\n- **F3 (JSON contract):** Rewrote `",
+    "\"implement-slice\" completed → >7u›Run /review on my current changesgpt-5.5 high · Context 100% left · ~/Projects/AgentWorkforce/relayfile · gpt-…0 q\r\n",
+    "\"fix-loop\" completed → - `signoff.md` rewritten to reflect the post-fix state; retains both required markers.",
+    "\"lead-plan\" completed → Wrote the child lead plan to `.workflow-artifacts/generated/workspace-primitives-implementation-spec-status-proposed-aff",
+    "\"fix-loop\" completed → # Fix-loop complete — `update` (target: `internal/`)\n\n**Verdict: PASS**\n\n## What the prior review failed on, and how the",
+    "\"fix-loop\" completed → Fix-loop complete for child slice `update-adapter`.\n\n## Summary\n\nTriaged the FAIL review against the slice's declared **",
+    "\"lead-plan\" completed → - Ends with `RICKY_CHILD_LEAD_PLAN_READY` as required.",
+    "\"fix-loop\" completed → ## Fix Loop Complete — `update-python`\n\nAll seven FAIL findings from `review-codex.md` are resolved within scope (`packa",
+    "\"lead-plan\" completed → Lead plan written for the `update-mountfuse` child slice.\n\n**Summary**\n\n- **Artifact:** `.workflow-artifacts/generated/w",
+    "\"lead-plan\" completed → Plan file ends with `RICKY_CHILD_LEAD_PLAN_READY` as required.",
+    "\"fix-loop\" completed → Terminates with `RICKY_CHILD_FIX_LOOP_READY`."
+  ],
+  "filesAffected": [
+    "cmd/relayfile-cli/main.go",
+    "cmd/relayfile-cli/main_test.go",
+    "package.json",
+    "packages/cli/CHANGELOG.md",
+    "packages/cli/package.json",
+    "packages/core/CHANGELOG.md",
+    "packages/core/package.json",
+    "packages/file-observer/CHANGELOG.md",
+    "packages/file-observer/package.json",
+    "packages/local-mount/CHANGELOG.md",
+    "packages/local-mount/package.json",
+    "packages/sdk/typescript/CHANGELOG.md",
+    "packages/sdk/typescript/package.json"
+  ],
+  "commits": [
+    "dd37469",
+    "2381eff",
+    "546b2ce"
+  ],
+  "narrative": "Six sibling \"ricky-child\" workflows ran on 2026-05-15 as bounded slices of the parent `workspace-primitives-pr-39-gap-spec` effort, implementing the digest-tightening feature set on the `digest-tightening` branch. Each slice owned one digest artifact or code path: `/digests/YYYY-MM-DD.md` and the concrete `/digests/2026-05-12.md` fixture proof, `/digests/this-week.md`, `/digests/last-week.md`, the `/.skills/activity-summary.md` skill doc, and a catch-all `/digests/*` slice. The implementation landed Go renderers/writers under `internal/digest/` (`date_stamped.go`, `this_week.go`, `last_week.go`, `today.go`, `yesterday.go`, `timezone.go`), an immutable create-only date-stamped writer, `internal/mountsync/scheduler.go` plus digest_writer/digest_filter event wiring, `internal/mountfuse/layout.go` changes, and a touched Python SDK contract.",
+  "decisions": [
+    {
+      "question": "Clear the update-last-week changed-files gate in a shared dirty worktree?",
+      "chosen": "Did not clear it; left BLOCKED_NO_COMMIT.md and refreshed codex-final-fix.md",
+      "reasoning": "The only remaining finding was packaging/ownership, not a code defect; clearing it would require destructive or ownership-sensitive operations across sibling-slice files with no agreed isolated base",
+      "impact": "update-last-week ended ready-on-content but blocked on commit; surfaces the shared-worktree contamination problem for the parent to resolve"
+    },
+    {
+      "question": "How to structure each child slice end-to-end?",
+      "chosen": "17-step DAG: lead-plan → implement-slice → Claude review→fix-loop→final-review→final-fix → Codex review→fix-loop→final-review→final-fix",
+      "reasoning": "Dual independent fresh-eyes reviewers (Claude then Codex) catch defects a single reviewer misses; verification/marker-based completion gates each step",
+      "impact": "All 6 slices completed in 22–48 min; real regressions caught (Python SDK contract revert, undefined `providerLayoutDefaultAliasSegments`) before any merge"
+    }
+  ],
+  "conventions": [
+    {
+      "pattern": "Sentinel-terminated step artifacts: lead-plan.md ends with RICKY_CHILD_LEAD_PLAN_READY; fix-loop/final-fix/review files end with RICKY_CHILD_*_READY; BLOCKED_NO_COMMIT.md written when a slice cannot commit",
+      "rationale": "Gives the orchestrator a deterministic, greppable completion/blocked signal independent of prose verdicts",
+      "scope": "All ricky-child workflow steps under .workflow-artifacts/generated/.../source-children/<slice>/"
+    },
+    {
+      "pattern": "Fresh-eyes reviewers re-review from scratch and emit explicit verdict tokens (NO_ISSUES_FOUND / FINDINGS) with per-finding `fix_required` and `test_required` fields",
+      "rationale": "Forces independent verification rather than rubber-stamping the prior pass; machine-checkable verdicts drive the fix-loop",
+      "scope": "review-claude, final-review-claude, review-codex, final-review-codex steps"
+    },
+    {
+      "pattern": "Digest-runtime changes preserve terminal provider state as data (not deletes) and must emit file events that trigger digest regen without recursing on /digests/* writes",
+      "rationale": "Codified in .claude/rules/relayfile-integration-digests.md (modified by multiple codex fix loops); keeps mounted workspaces' digest files current",
+      "scope": "Any ingest/sync/bulk-write/provider mutation path in internal/digest, internal/mountsync, internal/mountfuse"
+    }
+  ],
+  "lessons": [
+    {
+      "lesson": "Sibling slices executed against a shared, dirty worktree, so each session's file-change list bleeds other slices' artifacts and code edits",
+      "context": "update-last-week could not clear its changed-files gate because the worktree contained unrelated sibling-slice modifications; final-fix-codex declined to clean it",
+      "recommendation": "Run parallel child slices in isolated git worktrees (or a serialized commit lane) so each slice's changed-files gate is meaningful and committable"
+    },
+    {
+      "lesson": "implement-slice (Codex) completion was detected via legacy STEP_COMPLETE markers with garbled TUI output (e.g. `>7u`, `0 q0 q...`), unlike Claude steps which used clean verification evidence",
+      "context": "Multiple sessions show noisy/`exit=null` Codex implement-slice findings; completion still inferred from the COMPLETE marker and file changes",
+      "recommendation": "Prefer structured verification-based completion over scraping interactive Codex TUI output; capture a clean machine-readable result file from implement-slice"
+    },
+    {
+      "lesson": "Dual-reviewer loop catches real defects the implementation missed",
+      "context": "Claude/Codex reviews flagged a Python SDK DIGEST_PATH contract regression (reverted in fix-loop), an undefined `providerLayoutDefaultAliasSegments` compile error, and missing signoff markers",
+      "recommendation": "Keep the two-reviewer (cross-model) gate for contract-sensitive surfaces like the Python SDK and digest path taxonomy"
+    }
+  ],
+  "openQuestions": [
+    "How will the uncommitted digest-tightening work (sessions report zero commits / zero files changed) actually be staged and merged for PR #39?",
+    "Is the update-last-week BLOCKED_NO_COMMIT changed-files/packaging gate resolved, and who owns reconciling the shared dirty worktree across all six slices?",
+    "Should generated /digests/*.md fixtures (today.md, yesterday.md, this-week.md, last-week.md, 2026-05-12.md) be committed artifacts or regenerated, given they appear as untracked files?"
+  ]
+}

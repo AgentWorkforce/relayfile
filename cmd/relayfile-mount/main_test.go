@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,6 +12,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/agentworkforce/relayfile/internal/mountsync"
 )
 
 func TestFloatEnvParsesValue(t *testing.T) {
@@ -114,6 +118,16 @@ func TestWebSocketMaintenanceDoesNotLowerReconcileCadence(t *testing.T) {
 	}
 }
 
+func TestWriteOnlyMountDisablesWebSocketCadence(t *testing.T) {
+	cfg := mountConfig{websocketEnabled: true, syncMode: syncModeWriteOnly}
+	if mountWebSocketEnabled(cfg) {
+		t.Fatal("write-only mount should not maintain websocket connections")
+	}
+	if !shouldReconcileMountCycle(mountWebSocketEnabled(cfg), 1) {
+		t.Fatal("write-only mount should keep regular reconcile cadence")
+	}
+}
+
 func TestResolveMountMode(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -144,6 +158,72 @@ func TestResolveMountMode(t *testing.T) {
 			}
 			if got != tc.want {
 				t.Fatalf("expected mode %q, got %q", tc.want, got)
+			}
+		})
+	}
+}
+
+func TestResolveLocalLayout(t *testing.T) {
+	tests := []struct {
+		name    string
+		layout  string
+		want    string
+		wantErr bool
+	}{
+		{name: "default empty layout uses exact", want: localLayoutExact},
+		{name: "explicit exact", layout: "exact", want: localLayoutExact},
+		{name: "explicit scoped", layout: "scoped", want: localLayoutScoped},
+		{name: "case and whitespace normalized", layout: " SCOPED ", want: localLayoutScoped},
+		{name: "invalid layout errors", layout: "auto", wantErr: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := resolveLocalLayout(tc.layout)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got layout %q", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("resolveLocalLayout returned error: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("expected layout %q, got %q", tc.want, got)
+			}
+		})
+	}
+}
+
+func TestResolveSyncMode(t *testing.T) {
+	tests := []struct {
+		name    string
+		mode    string
+		want    string
+		wantErr bool
+	}{
+		{name: "default empty sync mode uses mirror", want: syncModeMirror},
+		{name: "explicit mirror", mode: "mirror", want: syncModeMirror},
+		{name: "explicit write-only", mode: "write-only", want: syncModeWriteOnly},
+		{name: "case and whitespace normalized", mode: " WRITE-ONLY ", want: syncModeWriteOnly},
+		{name: "invalid sync mode errors", mode: "push", wantErr: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := resolveSyncMode(tc.mode)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got sync mode %q", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("resolveSyncMode returned error: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("expected sync mode %q, got %q", tc.want, got)
 			}
 		})
 	}
@@ -224,6 +304,107 @@ func TestExecuteMountRejectsUnsupportedMode(t *testing.T) {
 	}
 }
 
+func TestReadMountCredsTokenSupportsAdvisoryFields(t *testing.T) {
+	credsFile := filepath.Join(t.TempDir(), "creds.json")
+	if err := os.WriteFile(credsFile, []byte(`{
+		"token": " relay_pa_new ",
+		"mintedAt": "2026-06-06T14:00:00Z",
+		"expiresAt": null
+	}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	token, err := readMountCredsToken(credsFile)
+	if err != nil {
+		t.Fatalf("read creds token: %v", err)
+	}
+	if token != "relay_pa_new" {
+		t.Fatalf("expected trimmed token, got %q", token)
+	}
+}
+
+func TestReadMountCredsTokenRejectsMissingToken(t *testing.T) {
+	credsFile := filepath.Join(t.TempDir(), "creds.json")
+	if err := os.WriteFile(credsFile, []byte(`{"mintedAt":"2026-06-06T14:00:00Z"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := readMountCredsToken(credsFile); err == nil || !strings.Contains(err.Error(), "missing token") {
+		t.Fatalf("expected missing-token error, got %v", err)
+	}
+}
+
+func TestInstallCredsFileRefreshReloadsChangedToken(t *testing.T) {
+	credsFile := filepath.Join(t.TempDir(), "creds.json")
+	if err := os.WriteFile(credsFile, []byte(`{"token":"new-token"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var calls int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		call := atomic.AddInt32(&calls, 1)
+		switch call {
+		case 1:
+			if got := r.Header.Get("Authorization"); got != "Bearer old-token" {
+				t.Fatalf("expected first request to use old token, got %q", got)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"code":"unauthorized","message":"Token has expired"}`))
+		case 2:
+			if got := r.Header.Get("Authorization"); got != "Bearer new-token" {
+				t.Fatalf("expected retry to use creds-file token, got %q", got)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"path":"/slack","entries":[],"nextCursor":null}`))
+		default:
+			t.Fatalf("unexpected call %d", call)
+		}
+	}))
+	defer server.Close()
+
+	client := mountsync.NewHTTPClient(server.URL, "old-token", server.Client())
+	installCredsFileRefresh(client, mountConfig{credsFile: credsFile})
+
+	if _, err := client.ListTree(context.Background(), "ws_auth", "/slack", 1, ""); err != nil {
+		t.Fatalf("expected creds-file refresh to recover request: %v", err)
+	}
+	if got := client.Token(); got != "new-token" {
+		t.Fatalf("expected client token to update, got %q", got)
+	}
+}
+
+func TestInstallCredsFileRefreshToleratesParseFailureWithoutRetry(t *testing.T) {
+	credsFile := filepath.Join(t.TempDir(), "creds.json")
+	if err := os.WriteFile(credsFile, []byte(`{"token":`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var calls int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"code":"unauthorized","message":"Token has expired"}`))
+	}))
+	defer server.Close()
+
+	client := mountsync.NewHTTPClient(server.URL, "old-token", server.Client())
+	installCredsFileRefresh(client, mountConfig{credsFile: credsFile})
+
+	_, err := client.ListTree(context.Background(), "ws_auth", "/slack", 1, "")
+	var httpErr *mountsync.HTTPError
+	if !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected original unauthorized error, got %v", err)
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("expected no retry after parse failure, got %d calls", got)
+	}
+	if got := client.Token(); got != "old-token" {
+		t.Fatalf("expected old token to stay installed, got %q", got)
+	}
+}
+
 func TestNormalizeRemotePathsDedupesRepeatedFlagValues(t *testing.T) {
 	got := normalizeRemotePaths(
 		[]string{"/github/repos/acme/cloud", "github/repos/acme/cloud/", "/slack/channels/proj-cloud"},
@@ -276,6 +457,109 @@ func TestRunScopedPollingMountsKeepsSharedStateDirForHashResolver(t *testing.T) 
 		}
 		if cfg.stateFile != "" {
 			t.Fatalf("expected state-file to stay empty so mountsync derives hashed path, got %q", cfg.stateFile)
+		}
+	}
+}
+
+func TestRunPollingMountSingleNonRootDefaultsToExactLocalDir(t *testing.T) {
+	localDir := t.TempDir()
+	var got []mountConfig
+
+	err := runPollingMountWithRunner(
+		context.Background(),
+		mountConfig{
+			localDir:    localDir,
+			stateDir:    t.TempDir(),
+			remotePath:  "/slack/channels/C123",
+			remotePaths: []string{"/slack/channels/C123"},
+		},
+		func(_ context.Context, cfg mountConfig) error {
+			got = append(got, cfg)
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("runPollingMountWithRunner returned error: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected one mount, got %d", len(got))
+	}
+	if got[0].localDir != localDir {
+		t.Fatalf("expected exact local dir %q, got %q", localDir, got[0].localDir)
+	}
+}
+
+func TestRunPollingMountScopedLayoutAppendsRemotePath(t *testing.T) {
+	localRoot := t.TempDir()
+	var got []mountConfig
+
+	err := runPollingMountWithRunner(
+		context.Background(),
+		mountConfig{
+			localDir:    localRoot,
+			localLayout: localLayoutScoped,
+			stateDir:    t.TempDir(),
+			remotePath:  "/slack/channels/C123",
+			remotePaths: []string{"/slack/channels/C123"},
+		},
+		func(_ context.Context, cfg mountConfig) error {
+			got = append(got, cfg)
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("runPollingMountWithRunner returned error: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected one mount, got %d", len(got))
+	}
+	want := filepath.Join(localRoot, "slack", "channels", "C123")
+	if got[0].localDir != want {
+		t.Fatalf("expected scoped local dir %q, got %q", want, got[0].localDir)
+	}
+}
+
+func TestRunPollingMountMultiPathRequiresExplicitScopedLayout(t *testing.T) {
+	err := runPollingMountWithRunner(
+		context.Background(),
+		mountConfig{
+			localDir:    t.TempDir(),
+			stateDir:    t.TempDir(),
+			remotePaths: []string{"/github", "/slack"},
+		},
+		func(_ context.Context, cfg mountConfig) error {
+			t.Fatalf("runner should not start with implicit multi-path layout: %+v", cfg)
+			return nil
+		},
+	)
+	if err == nil {
+		t.Fatal("expected multi-path exact layout to fail")
+	}
+	if !strings.Contains(err.Error(), "--local-layout=scoped") {
+		t.Fatalf("expected scoped-layout guidance, got %v", err)
+	}
+}
+
+func TestMountStartupLogLineIncludesResolvedLayoutAndSyncContract(t *testing.T) {
+	localDir := t.TempDir()
+	got := mountStartupLogLine(mountConfig{
+		localDir:    localDir,
+		localLayout: localLayoutExact,
+		remotePath:  "/slack/channels/C123",
+		syncMode:    syncModeWriteOnly,
+		mode:        mountModePoll,
+	})
+
+	for _, want := range []string{
+		"layout=exact",
+		"remote=/slack/channels/C123",
+		"local=" + localDir,
+		"sync=write-only",
+		"mode=poll",
+		"state=" + filepath.Join(localDir, ".relay", "state.json"),
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("startup log %q missing %q", got, want)
 		}
 	}
 }

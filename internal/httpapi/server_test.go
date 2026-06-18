@@ -147,6 +147,368 @@ func TestFileEventsWebSocketCatchUpAndPingPong(t *testing.T) {
 	if live["path"] != "/notion/Docs/Two.md" {
 		t.Fatalf("unexpected live event path: %v", live["path"])
 	}
+	if live["origin"] != "agent_write" {
+		t.Fatalf("expected live write event origin=agent_write, got %v", live["origin"])
+	}
+}
+
+func TestFileEventsWebSocketFromNowSkipsBackfillOnSubscribeAndReconnect(t *testing.T) {
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
+	t.Cleanup(store.Close)
+
+	if _, err := store.WriteFile(relayfile.WriteRequest{
+		WorkspaceID: "ws_socket_now",
+		Path:        "/slack/channels/C1/messages/old.json",
+		IfMatch:     "0",
+		ContentType: "application/json",
+		Content:     "{}",
+	}); err != nil {
+		t.Fatalf("seed write failed: %v", err)
+	}
+
+	server := httptest.NewServer(NewServer(store))
+	defer server.Close()
+
+	token := mustTestJWT(t, "dev-secret", "ws_socket_now", "Worker1", []string{"fs:read"}, time.Now().Add(time.Hour))
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/workspaces/ws_socket_now/fs/ws?token=" + token + "&from=now"
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	conn, _, err := websocket.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatalf("websocket dial failed: %v", err)
+	}
+	if err := wsjson.Write(ctx, conn, map[string]any{"type": "ping"}); err != nil {
+		t.Fatalf("write ping failed: %v", err)
+	}
+	var pong map[string]any
+	if err := wsjson.Read(ctx, conn, &pong); err != nil {
+		t.Fatalf("read pong failed: %v", err)
+	}
+	if pong["type"] != "pong" {
+		t.Fatalf("from=now must not backfill seeded event before pong, got %+v", pong)
+	}
+	_ = conn.Close(websocket.StatusNormalClosure, "")
+
+	if _, err := store.WriteFile(relayfile.WriteRequest{
+		WorkspaceID: "ws_socket_now",
+		Path:        "/slack/channels/C1/messages/disconnected.json",
+		IfMatch:     "0",
+		ContentType: "application/json",
+		Content:     "{}",
+	}); err != nil {
+		t.Fatalf("disconnected write failed: %v", err)
+	}
+
+	conn, _, err = websocket.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatalf("reconnect websocket dial failed: %v", err)
+	}
+	defer conn.Close(websocket.StatusNormalClosure, "")
+	if err := wsjson.Write(ctx, conn, map[string]any{"type": "ping"}); err != nil {
+		t.Fatalf("write reconnect ping failed: %v", err)
+	}
+	pong = map[string]any{}
+	if err := wsjson.Read(ctx, conn, &pong); err != nil {
+		t.Fatalf("read reconnect pong failed: %v", err)
+	}
+	if pong["type"] != "pong" {
+		t.Fatalf("from=now reconnect must not backfill disconnected event before pong, got %+v", pong)
+	}
+
+	if _, err := store.WriteFile(relayfile.WriteRequest{
+		WorkspaceID: "ws_socket_now",
+		Path:        "/slack/channels/C1/messages/live.json",
+		IfMatch:     "0",
+		ContentType: "application/json",
+		Content:     "{}",
+	}); err != nil {
+		t.Fatalf("live write failed: %v", err)
+	}
+	var live map[string]any
+	if err := wsjson.Read(ctx, conn, &live); err != nil {
+		t.Fatalf("read live event failed: %v", err)
+	}
+	if live["path"] != "/slack/channels/C1/messages/live.json" {
+		t.Fatalf("unexpected live path after from=now reconnect: %+v", live)
+	}
+}
+
+func TestFileEventsWebSocketCursorCatchUpIsExclusive(t *testing.T) {
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
+	t.Cleanup(store.Close)
+
+	for _, path := range []string{"/docs/one.md", "/docs/two.md", "/docs/three.md"} {
+		if _, err := store.WriteFile(relayfile.WriteRequest{
+			WorkspaceID: "ws_socket_cursor",
+			Path:        path,
+			IfMatch:     "0",
+			ContentType: "text/markdown",
+			Content:     "# doc",
+		}); err != nil {
+			t.Fatalf("seed write %s failed: %v", path, err)
+		}
+	}
+	feed, err := store.GetEvents("ws_socket_cursor", "", "", 100)
+	if err != nil {
+		t.Fatalf("get events failed: %v", err)
+	}
+	if len(feed.Events) != 3 {
+		t.Fatalf("expected 3 seeded events, got %d", len(feed.Events))
+	}
+
+	server := httptest.NewServer(NewServer(store))
+	defer server.Close()
+
+	token := mustTestJWT(t, "dev-secret", "ws_socket_cursor", "Worker1", []string{"fs:read"}, time.Now().Add(time.Hour))
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/workspaces/ws_socket_cursor/fs/ws?token=" + token + "&cursor=" + url.QueryEscape(feed.Events[0].EventID)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	conn, _, err := websocket.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatalf("websocket dial failed: %v", err)
+	}
+	defer conn.Close(websocket.StatusNormalClosure, "")
+
+	var event map[string]any
+	if err := wsjson.Read(ctx, conn, &event); err != nil {
+		t.Fatalf("read first cursor catch-up event failed: %v", err)
+	}
+	if event["eventId"] != feed.Events[1].EventID || event["path"] != "/docs/two.md" {
+		t.Fatalf("expected exclusive cursor catch-up to start at second event, got %+v", event)
+	}
+	if err := wsjson.Read(ctx, conn, &event); err != nil {
+		t.Fatalf("read second cursor catch-up event failed: %v", err)
+	}
+	if event["eventId"] != feed.Events[2].EventID || event["path"] != "/docs/three.md" {
+		t.Fatalf("expected second catch-up event after cursor, got %+v", event)
+	}
+	if err := wsjson.Write(ctx, conn, map[string]any{"type": "ping"}); err != nil {
+		t.Fatalf("write ping failed: %v", err)
+	}
+	var pong map[string]any
+	if err := wsjson.Read(ctx, conn, &pong); err != nil {
+		t.Fatalf("read pong failed: %v", err)
+	}
+	if pong["type"] != "pong" {
+		t.Fatalf("expected no additional catch-up events before pong, got %+v", pong)
+	}
+}
+
+func TestFileEventsWebSocketPathFilterConstrainsServerFanout(t *testing.T) {
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
+	t.Cleanup(store.Close)
+
+	server := httptest.NewServer(NewServer(store))
+	defer server.Close()
+
+	token := mustTestJWT(t, "dev-secret", "ws_socket_path", "Worker1", []string{"fs:read"}, time.Now().Add(time.Hour))
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/workspaces/ws_socket_path/fs/ws?token=" + token + "&from=now&path=" + url.QueryEscape("/slack/channels/C1/**")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	conn, _, err := websocket.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatalf("websocket dial failed: %v", err)
+	}
+	defer conn.Close(websocket.StatusNormalClosure, "")
+
+	if _, err := store.WriteFile(relayfile.WriteRequest{
+		WorkspaceID: "ws_socket_path",
+		Path:        "/slack/channels/C2/messages/ignored.json",
+		IfMatch:     "0",
+		ContentType: "application/json",
+		Content:     "{}",
+	}); err != nil {
+		t.Fatalf("non-matching write failed: %v", err)
+	}
+	type readResult struct {
+		event map[string]any
+		err   error
+	}
+	readCh := make(chan readResult, 1)
+	go func() {
+		var event map[string]any
+		err := wsjson.Read(ctx, conn, &event)
+		readCh <- readResult{event: event, err: err}
+	}()
+	select {
+	case result := <-readCh:
+		if result.err != nil {
+			t.Fatalf("read after non-matching write failed: %v", result.err)
+		}
+		t.Fatalf("path filter must suppress non-matching event, got %+v", result.event)
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	if _, err := store.WriteFile(relayfile.WriteRequest{
+		WorkspaceID: "ws_socket_path",
+		Path:        "/slack/channels/C1/messages/live.json",
+		IfMatch:     "0",
+		ContentType: "application/json",
+		Content:     "{}",
+	}); err != nil {
+		t.Fatalf("matching write failed: %v", err)
+	}
+	var event map[string]any
+	select {
+	case result := <-readCh:
+		if result.err != nil {
+			t.Fatalf("read matching event failed: %v", result.err)
+		}
+		event = result.event
+	case <-ctx.Done():
+		t.Fatalf("timed out waiting for matching event: %v", ctx.Err())
+	}
+	if event["path"] != "/slack/channels/C1/messages/live.json" {
+		t.Fatalf("expected matching path event, got %+v", event)
+	}
+}
+
+func TestFileEventsWebSocketEnforcesPathScopedMountGrant(t *testing.T) {
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
+	t.Cleanup(store.Close)
+
+	server := httptest.NewServer(NewServer(store))
+	defer server.Close()
+
+	token := mustTestJWT(t, "dev-secret", "ws_socket_scope", "MountSync", []string{
+		"fs:read",
+		"workspace:mount-sponsor:read:/allowed/**",
+	}, time.Now().Add(time.Hour))
+
+	tests := []struct {
+		name     string
+		query    string
+		wantCode int
+	}{
+		{
+			name:     "allows subscribed path inside grant",
+			query:    "&from=now&path=" + url.QueryEscape("/allowed/**"),
+			wantCode: http.StatusSwitchingProtocols,
+		},
+		{
+			name:     "denies subscribed path outside grant",
+			query:    "&from=now&path=" + url.QueryEscape("/secret/**"),
+			wantCode: http.StatusForbidden,
+		},
+		{
+			name:     "denies whole workspace subscription",
+			query:    "&from=now",
+			wantCode: http.StatusForbidden,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/workspaces/ws_socket_scope/fs/ws?token=" + token + tt.query
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+
+			conn, resp, err := websocket.Dial(ctx, wsURL, nil)
+			if tt.wantCode == http.StatusSwitchingProtocols {
+				if err != nil {
+					t.Fatalf("websocket dial failed: %v", err)
+				}
+				defer conn.Close(websocket.StatusNormalClosure, "")
+				return
+			}
+			if err == nil {
+				defer conn.Close(websocket.StatusNormalClosure, "")
+				t.Fatalf("expected websocket dial to fail with %d", tt.wantCode)
+			}
+			if resp == nil {
+				t.Fatalf("expected websocket dial response with status %d, got nil response: %v", tt.wantCode, err)
+			}
+			if resp.StatusCode != tt.wantCode {
+				t.Fatalf("expected websocket status %d, got %d", tt.wantCode, resp.StatusCode)
+			}
+		})
+	}
+}
+
+func TestFileEventsWebSocketWritebackMaterializationCarriesAgentWriteOrigin(t *testing.T) {
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{
+		ProviderWriteAction: func(action relayfile.WritebackAction) (map[string]any, error) {
+			return nil, nil
+		},
+	})
+	t.Cleanup(store.Close)
+
+	server := httptest.NewServer(NewServer(store))
+	defer server.Close()
+
+	token := mustTestJWT(t, "dev-secret", "ws_socket_writeback_origin", "Worker1", []string{"fs:read", "fs:write"}, time.Now().Add(time.Hour))
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/workspaces/ws_socket_writeback_origin/fs/ws?token=" + token + "&from=now&path=" + url.QueryEscape("/external/**")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	conn, _, err := websocket.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatalf("websocket dial failed: %v", err)
+	}
+	defer conn.Close(websocket.StatusNormalClosure, "")
+
+	// Flake fix (#245): websocket.Dial returns once the HTTP upgrade
+	// completes, but the server registers its store subscription slightly
+	// later — a write landing in that window is lost for a from=now
+	// subscriber (no catch-up), which made this test time out on loaded CI
+	// runners. The ping→pong round-trip is a deterministic barrier: the pong
+	// is only written by the handler's main loop, which starts after the
+	// subscription is live (the sibling from=now tests use the same
+	// pattern).
+	if err := wsjson.Write(ctx, conn, map[string]any{"type": "ping"}); err != nil {
+		t.Fatalf("write ping failed: %v", err)
+	}
+	var pong map[string]any
+	if err := wsjson.Read(ctx, conn, &pong); err != nil {
+		t.Fatalf("read pong failed: %v", err)
+	}
+	if pong["type"] != "pong" {
+		t.Fatalf("from=now must not backfill before pong, got %+v", pong)
+	}
+
+	writeResp := doRequest(t, NewServer(store), request{
+		method: http.MethodPut,
+		path:   "/v1/workspaces/ws_socket_writeback_origin/fs/file?path=/external/Writeback.md",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_ws_writeback_origin",
+			"If-Match":         "0",
+		},
+		body: map[string]any{
+			"contentType": "text/markdown",
+			"content":     "# writeback",
+		},
+	})
+	if writeResp.Code != http.StatusAccepted {
+		t.Fatalf("expected 202 write, got %d (%s)", writeResp.Code, writeResp.Body.String())
+	}
+
+	// Order-tolerant scan (#245): await the materialization event rather
+	// than asserting the first frame. The origin assertion below stays
+	// strict — the tolerance is about WHICH frame carries the event, never
+	// about what origin it carries.
+	var event map[string]any
+	for {
+		var frame map[string]any
+		if err := wsjson.Read(ctx, conn, &frame); err != nil {
+			t.Fatalf("read writeback materialization event failed: %v", err)
+		}
+		if frame["type"] == "file.created" && frame["path"] == "/external/Writeback.md" {
+			event = frame
+			break
+		}
+	}
+	if event["origin"] != "agent_write" {
+		t.Fatalf("expected writeback materialization origin=agent_write, got %+v", event)
+	}
 }
 
 func TestLifecycleAndConflicts(t *testing.T) {
@@ -899,6 +1261,155 @@ func TestBulkWriteEndpoint(t *testing.T) {
 	}
 }
 
+// TestBulkWriteReadImmediatelyAfter202 documents the OSS contract for issue #306:
+// a 202 from POST /fs/bulk means every file in the results array is immediately
+// readable — the handler is synchronous so "accepted" and "written" are the same.
+func TestBulkWriteReadImmediatelyAfter202(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name    string
+		ws      string // stable, unique workspace suffix per case
+		files   []map[string]any
+		want    []string // paths expected to be readable
+		written int
+	}{
+		{
+			name: "single file readable after bulk write",
+			ws:   "single",
+			files: []map[string]any{
+				{"path": "/sync/Record.md", "contentType": "text/markdown", "content": "# record"},
+			},
+			want:    []string{"/sync/Record.md"},
+			written: 1,
+		},
+		{
+			name: "multiple files all readable after bulk write",
+			ws:   "multi",
+			files: []map[string]any{
+				{"path": "/sync/Alpha.md", "contentType": "text/markdown", "content": "# alpha"},
+				{"path": "/sync/Beta.md", "contentType": "text/plain", "content": "beta"},
+				{"path": "/sync/Gamma.json", "contentType": "application/json", "content": `{"ok":true}`},
+			},
+			want:    []string{"/sync/Alpha.md", "/sync/Beta.md", "/sync/Gamma.json"},
+			written: 3,
+		},
+		{
+			name: "partial batch: valid files readable, invalid files reported in errors",
+			ws:   "partial",
+			files: []map[string]any{
+				{"path": "/sync/Good.md", "contentType": "text/markdown", "content": "# good"},
+				{"path": "/sync/Bad.md", "contentType": "text/markdown", "content": "# bad", "encoding": "utf16"},
+			},
+			want:    []string{"/sync/Good.md"},
+			written: 1,
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
+			t.Cleanup(store.Close)
+			server := NewServer(store)
+			wsID := "ws_read_after_202_" + tc.ws
+			token := mustTestJWT(t, "dev-secret", wsID, "Worker1", []string{"fs:read", "fs:write"}, time.Now().Add(time.Hour))
+
+			bulkResp := doRequest(t, server, request{
+				method: http.MethodPost,
+				path:   "/v1/workspaces/" + wsID + "/fs/bulk",
+				headers: map[string]string{
+					"Authorization":    "Bearer " + token,
+					"X-Correlation-Id": "corr_rar202",
+				},
+				body: map[string]any{"files": tc.files},
+			})
+			if bulkResp.Code != http.StatusAccepted {
+				t.Fatalf("expected 202, got %d: %s", bulkResp.Code, bulkResp.Body.String())
+			}
+			var payload struct {
+				Written int `json:"written"`
+			}
+			if err := json.NewDecoder(bulkResp.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode bulk response: %v", err)
+			}
+			if payload.Written != tc.written {
+				t.Fatalf("expected written=%d, got %d", tc.written, payload.Written)
+			}
+
+			for _, path := range tc.want {
+				file := readFileForTest(t, server, token, wsID, path, "corr_read_after_bulk")
+				if file.Path != path {
+					t.Errorf("path mismatch: want %q got %q", path, file.Path)
+				}
+				if file.Content == "" {
+					t.Errorf("file %q has empty content after bulk write", path)
+				}
+			}
+		})
+	}
+}
+
+// TestBulkWriteResyncPattern documents that sequential bulk writes (simulating a
+// provider re-sync) produce a consistent readable state: both original and updated
+// paths are immediately available after each round, and updated content is reflected.
+// This is the OSS analogue of the full_resync scenario in issue #306: the OSS handler
+// is synchronous, so there is no window between "accepted" and "readable".
+func TestBulkWriteResyncPattern(t *testing.T) {
+	t.Parallel()
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
+	t.Cleanup(store.Close)
+	server := NewServer(store)
+	const wsID = "ws_resync_pattern"
+	token := mustTestJWT(t, "dev-secret", wsID, "Worker1", []string{"fs:read", "fs:write"}, time.Now().Add(time.Hour))
+
+	bulkWrite := func(files []map[string]any) {
+		t.Helper()
+		resp := doRequest(t, server, request{
+			method: http.MethodPost,
+			path:   "/v1/workspaces/" + wsID + "/fs/bulk",
+			headers: map[string]string{
+				"Authorization":    "Bearer " + token,
+				"X-Correlation-Id": "corr_resync",
+			},
+			body: map[string]any{"files": files},
+		})
+		if resp.Code != http.StatusAccepted {
+			t.Fatalf("bulk write: expected 202, got %d: %s", resp.Code, resp.Body.String())
+		}
+	}
+
+	// Round 1: initial provider sync.
+	bulkWrite([]map[string]any{
+		{"path": "/provider/A.md", "contentType": "text/markdown", "content": "v1-A"},
+		{"path": "/provider/B.md", "contentType": "text/markdown", "content": "v1-B"},
+		{"path": "/provider/C.md", "contentType": "text/markdown", "content": "v1-C"},
+	})
+
+	for _, path := range []string{"/provider/A.md", "/provider/B.md", "/provider/C.md"} {
+		f := readFileForTest(t, server, token, wsID, path, "corr_resync_r1")
+		if f.Content == "" {
+			t.Errorf("round 1: %q has empty content", path)
+		}
+	}
+
+	// Round 2: re-sync with updated B, new D — simulates a provider resync batch.
+	bulkWrite([]map[string]any{
+		{"path": "/provider/B.md", "contentType": "text/markdown", "content": "v2-B"},
+		{"path": "/provider/D.md", "contentType": "text/markdown", "content": "v2-D"},
+	})
+
+	updated := readFileForTest(t, server, token, wsID, "/provider/B.md", "corr_resync_r2")
+	if updated.Content != "v2-B" {
+		t.Errorf("expected updated content %q, got %q", "v2-B", updated.Content)
+	}
+	newFile := readFileForTest(t, server, token, wsID, "/provider/D.md", "corr_resync_r2")
+	if newFile.Content != "v2-D" {
+		t.Errorf("expected new file content %q, got %q", "v2-D", newFile.Content)
+	}
+}
+
 func TestExportJSON(t *testing.T) {
 	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
 	t.Cleanup(store.Close)
@@ -975,6 +1486,94 @@ func TestExportJSONPathFilter(t *testing.T) {
 	}
 	if files[0].Path != "/github/repos/demo/README.md" || files[0].Content != "# Demo" {
 		t.Fatalf("unexpected exported file: %+v", files[0])
+	}
+}
+
+func TestExportEnforcesPathScopedMountGrant(t *testing.T) {
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
+	t.Cleanup(store.Close)
+
+	workspaceID := "ws_export_scope"
+	if written, _, errs := store.BulkWrite(workspaceID, []relayfile.BulkWriteFile{
+		{Path: "/allowed/A.md", ContentType: "text/markdown", Content: "# A"},
+		{Path: "/secret/B.md", ContentType: "text/markdown", Content: "# B"},
+	}); written != 2 || len(errs) != 0 {
+		t.Fatalf("seed bulk write failed: written=%d errs=%+v", written, errs)
+	}
+
+	server := NewServer(store)
+	scopedToken := mustTestJWT(t, "dev-secret", workspaceID, "MountSync", []string{
+		"fs:read",
+		"workspace:mount-sponsor:read:/allowed/**",
+	}, time.Now().Add(time.Hour))
+	fullToken := mustTestJWT(t, "dev-secret", workspaceID, "Worker1", []string{"fs:read"}, time.Now().Add(time.Hour))
+
+	tests := []struct {
+		name      string
+		token     string
+		path      string
+		wantCode  int
+		wantFiles []string
+	}{
+		{
+			name:      "path-scoped mount token exports inside subtree",
+			token:     scopedToken,
+			path:      "/v1/workspaces/" + workspaceID + "/fs/export?format=json&path=/allowed",
+			wantCode:  http.StatusOK,
+			wantFiles: []string{"/allowed/A.md"},
+		},
+		{
+			name:     "path-scoped mount token cannot export outside subtree",
+			token:    scopedToken,
+			path:     "/v1/workspaces/" + workspaceID + "/fs/export?format=json&path=/secret",
+			wantCode: http.StatusForbidden,
+		},
+		{
+			name:     "path-scoped mount token cannot export whole workspace by omitting path",
+			token:    scopedToken,
+			path:     "/v1/workspaces/" + workspaceID + "/fs/export?format=json",
+			wantCode: http.StatusForbidden,
+		},
+		{
+			name:      "pure bare fs read token can still export whole workspace",
+			token:     fullToken,
+			path:      "/v1/workspaces/" + workspaceID + "/fs/export?format=json",
+			wantCode:  http.StatusOK,
+			wantFiles: []string{"/allowed/A.md", "/secret/B.md"},
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			resp := doRequest(t, server, request{
+				method: http.MethodGet,
+				path:   tt.path,
+				headers: map[string]string{
+					"Authorization":    "Bearer " + tt.token,
+					"X-Correlation-Id": "corr_export_scope",
+				},
+			})
+			if resp.Code != tt.wantCode {
+				t.Fatalf("expected %d, got %d (%s)", tt.wantCode, resp.Code, resp.Body.String())
+			}
+			if tt.wantCode != http.StatusOK {
+				return
+			}
+
+			var files []relayfile.File
+			if err := json.NewDecoder(resp.Body).Decode(&files); err != nil {
+				t.Fatalf("decode export response: %v", err)
+			}
+			if len(files) != len(tt.wantFiles) {
+				t.Fatalf("expected %d exported files, got %d: %+v", len(tt.wantFiles), len(files), files)
+			}
+			for i, wantPath := range tt.wantFiles {
+				if files[i].Path != wantPath {
+					t.Fatalf("expected exported file %d path %q, got %q", i, wantPath, files[i].Path)
+				}
+			}
+		})
 	}
 }
 
@@ -1416,6 +2015,169 @@ func TestQueryFilesEndpoint(t *testing.T) {
 	}
 	if queryPayload.Items[0].Properties["stage"] != "seed" {
 		t.Fatalf("expected stage semantic, got %q", queryPayload.Items[0].Properties["stage"])
+	}
+}
+
+func TestQueryFilesEnforcesPathScopedMountGrant(t *testing.T) {
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
+	t.Cleanup(store.Close)
+
+	workspaceID := "ws_query_scope"
+	if written, _, errs := store.BulkWrite(workspaceID, []relayfile.BulkWriteFile{
+		{Path: "/allowed/A.md", ContentType: "text/markdown", Content: "# A"},
+		{Path: "/secret/B.md", ContentType: "text/markdown", Content: "# B"},
+	}); written != 2 || len(errs) != 0 {
+		t.Fatalf("seed bulk write failed: written=%d errs=%+v", written, errs)
+	}
+
+	server := NewServer(store)
+	scopedToken := mustTestJWT(t, "dev-secret", workspaceID, "MountSync", []string{
+		"fs:read",
+		"workspace:mount-sponsor:read:/allowed/**",
+	}, time.Now().Add(time.Hour))
+	fullToken := mustTestJWT(t, "dev-secret", workspaceID, "Worker1", []string{"fs:read"}, time.Now().Add(time.Hour))
+
+	tests := []struct {
+		name      string
+		token     string
+		path      string
+		wantCode  int
+		wantItems []string
+	}{
+		{
+			name:      "path-scoped mount token queries inside subtree",
+			token:     scopedToken,
+			path:      "/v1/workspaces/" + workspaceID + "/fs/query?path=/allowed",
+			wantCode:  http.StatusOK,
+			wantItems: []string{"/allowed/A.md"},
+		},
+		{
+			name:     "path-scoped mount token cannot query outside subtree",
+			token:    scopedToken,
+			path:     "/v1/workspaces/" + workspaceID + "/fs/query?path=/secret",
+			wantCode: http.StatusForbidden,
+		},
+		{
+			name:     "path-scoped mount token cannot query whole workspace by omitting path",
+			token:    scopedToken,
+			path:     "/v1/workspaces/" + workspaceID + "/fs/query",
+			wantCode: http.StatusForbidden,
+		},
+		{
+			name:      "pure bare fs read token can still query whole workspace",
+			token:     fullToken,
+			path:      "/v1/workspaces/" + workspaceID + "/fs/query",
+			wantCode:  http.StatusOK,
+			wantItems: []string{"/allowed/A.md", "/secret/B.md"},
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			resp := doRequest(t, server, request{
+				method: http.MethodGet,
+				path:   tt.path,
+				headers: map[string]string{
+					"Authorization":    "Bearer " + tt.token,
+					"X-Correlation-Id": "corr_query_scope",
+				},
+			})
+			if resp.Code != tt.wantCode {
+				t.Fatalf("expected %d, got %d (%s)", tt.wantCode, resp.Code, resp.Body.String())
+			}
+			if tt.wantCode != http.StatusOK {
+				return
+			}
+
+			var payload relayfile.FileQueryResponse
+			if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode query response: %v", err)
+			}
+			if len(payload.Items) != len(tt.wantItems) {
+				t.Fatalf("expected %d query items, got %d: %+v", len(tt.wantItems), len(payload.Items), payload.Items)
+			}
+			for i, wantPath := range tt.wantItems {
+				if payload.Items[i].Path != wantPath {
+					t.Fatalf("expected query item %d path %q, got %q", i, wantPath, payload.Items[i].Path)
+				}
+			}
+		})
+	}
+}
+
+func TestTreeAndEventsEnforcePathScopedMountGrant(t *testing.T) {
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
+	t.Cleanup(store.Close)
+
+	workspaceID := "ws_tree_events_scope"
+	if written, _, errs := store.BulkWrite(workspaceID, []relayfile.BulkWriteFile{
+		{Path: "/allowed/A.md", ContentType: "text/markdown", Content: "# A"},
+		{Path: "/secret/B.md", ContentType: "text/markdown", Content: "# B"},
+	}); written != 2 || len(errs) != 0 {
+		t.Fatalf("seed bulk write failed: written=%d errs=%+v", written, errs)
+	}
+
+	server := NewServer(store)
+	scopedToken := mustTestJWT(t, "dev-secret", workspaceID, "MountSync", []string{
+		"fs:read",
+		"workspace:mount-sponsor:read:/allowed/**",
+	}, time.Now().Add(time.Hour))
+	fullToken := mustTestJWT(t, "dev-secret", workspaceID, "Worker1", []string{"fs:read"}, time.Now().Add(time.Hour))
+
+	tests := []struct {
+		name     string
+		token    string
+		path     string
+		wantCode int
+	}{
+		{
+			name:     "path-scoped mount token can read tree inside subtree",
+			token:    scopedToken,
+			path:     "/v1/workspaces/" + workspaceID + "/fs/tree?path=/allowed",
+			wantCode: http.StatusOK,
+		},
+		{
+			name:     "path-scoped mount token cannot read tree outside subtree",
+			token:    scopedToken,
+			path:     "/v1/workspaces/" + workspaceID + "/fs/tree?path=/secret",
+			wantCode: http.StatusForbidden,
+		},
+		{
+			name:     "path-scoped mount token cannot read whole tree by omitting path",
+			token:    scopedToken,
+			path:     "/v1/workspaces/" + workspaceID + "/fs/tree",
+			wantCode: http.StatusForbidden,
+		},
+		{
+			name:     "path-scoped mount token cannot read whole event stream",
+			token:    scopedToken,
+			path:     "/v1/workspaces/" + workspaceID + "/fs/events?limit=10",
+			wantCode: http.StatusForbidden,
+		},
+		{
+			name:     "pure bare fs read token can still read whole event stream",
+			token:    fullToken,
+			path:     "/v1/workspaces/" + workspaceID + "/fs/events?limit=10",
+			wantCode: http.StatusOK,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			resp := doRequest(t, server, request{
+				method: http.MethodGet,
+				path:   tt.path,
+				headers: map[string]string{
+					"Authorization":    "Bearer " + tt.token,
+					"X-Correlation-Id": "corr_tree_events_scope",
+				},
+			})
+			if resp.Code != tt.wantCode {
+				t.Fatalf("expected %d, got %d (%s)", tt.wantCode, resp.Code, resp.Body.String())
+			}
+		})
 	}
 }
 
@@ -2270,11 +3032,11 @@ func TestSyncStatusEndpointIncludesProviderFromOperations(t *testing.T) {
 	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{
 		MaxWritebackAttempts: 1,
 		WritebackDelay:       5 * time.Millisecond,
-		ProviderWriteAction: func(action relayfile.WritebackAction) error {
+		ProviderWriteAction: func(action relayfile.WritebackAction) (map[string]any, error) {
 			if action.Type == relayfile.WritebackActionFileDelete {
-				return fmt.Errorf("delete failure for provider discovery")
+				return nil, fmt.Errorf("delete failure for provider discovery")
 			}
-			return nil
+			return nil, nil
 		},
 	})
 	t.Cleanup(store.Close)
@@ -3321,8 +4083,8 @@ func TestWorkspaceOperationReplayEndpoint(t *testing.T) {
 	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{
 		MaxWritebackAttempts: 1,
 		WritebackDelay:       5 * time.Millisecond,
-		ProviderWrite: func(workspaceID, path, revision string) error {
-			return fmt.Errorf("forced writeback failure")
+		ProviderWrite: func(workspaceID, path, revision string) (map[string]any, error) {
+			return nil, fmt.Errorf("forced writeback failure")
 		},
 	})
 	t.Cleanup(store.Close)
@@ -3485,8 +4247,8 @@ func TestAdminReplayAndSyncRefresh(t *testing.T) {
 	server := NewServer(relayfile.NewStoreWithOptions(relayfile.StoreOptions{
 		MaxWritebackAttempts: 1,
 		WritebackDelay:       5 * time.Millisecond,
-		ProviderWrite: func(workspaceID, path, revision string) error {
-			return fmt.Errorf("forced dead-letter for replay")
+		ProviderWrite: func(workspaceID, path, revision string) (map[string]any, error) {
+			return nil, fmt.Errorf("forced dead-letter for replay")
 		},
 	}))
 
@@ -5466,6 +6228,230 @@ func TestWritebackQueueACK(t *testing.T) {
 		if pendingID, _ := pending["id"].(string); pendingID == itemID {
 			t.Fatalf("expected acked item %q to be filtered from pending writebacks, got %+v", itemID, itemsAfter)
 		}
+	}
+}
+
+// Issue #242: an ack carrying externalId reconciles the agent-authored draft
+// (draftFile() rename contract) and reports the disposition.
+func TestWritebackAckWithExternalIDReconcilesDraft(t *testing.T) {
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{ExternalWritebackMode: true})
+	defer store.Close()
+	server := NewServer(store)
+	token := mustTestJWT(t, "dev-secret", "ws_1", "Worker1", []string{"fs:read", "fs:write", "sync:read", "sync:trigger"}, time.Now().Add(time.Hour))
+
+	draftPath := "/slack/channels/C0ALQ06AAUT/messages/messages 0e89a031-65f0-480e-a823-ab1d94b324ea.json"
+	writeResp := doRequest(t, server, request{
+		method: http.MethodPut,
+		path:   "/v1/workspaces/ws_1/fs/file?path=" + url.QueryEscape(draftPath),
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_write_1",
+			"If-Match":         "0",
+		},
+		body: map[string]any{
+			"contentType": "application/json",
+			"content":     `{"text":"hi"}`,
+		},
+	})
+	if writeResp.Code != http.StatusAccepted {
+		t.Fatalf("expected 202 on draft write, got %d (%s)", writeResp.Code, writeResp.Body.String())
+	}
+	var writeResult relayfile.WriteResult
+	if err := json.NewDecoder(writeResp.Body).Decode(&writeResult); err != nil {
+		t.Fatalf("failed to decode write response: %v", err)
+	}
+
+	ackResp := doRequest(t, server, request{
+		method: http.MethodPost,
+		path:   "/v1/workspaces/ws_1/writeback/" + writeResult.OpID + "/ack",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_ack_1",
+		},
+		body: map[string]any{
+			"success":    true,
+			"externalId": "1780018871.351819",
+		},
+	})
+	if ackResp.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK on ack, got %d (%s)", ackResp.Code, ackResp.Body.String())
+	}
+	var ackBody map[string]any
+	if err := json.NewDecoder(ackResp.Body).Decode(&ackBody); err != nil {
+		t.Fatalf("failed to decode ack response: %v", err)
+	}
+	draft, _ := ackBody["draft"].(map[string]any)
+	if draft == nil || draft["action"] != "renamed" {
+		t.Fatalf("expected renamed draft disposition, got %v", ackBody)
+	}
+
+	readDraft := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/workspaces/ws_1/fs/file?path=" + url.QueryEscape(draftPath),
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_read_1",
+		},
+	})
+	if readDraft.Code != http.StatusNotFound {
+		t.Fatalf("expected draft gone after ack, got %d", readDraft.Code)
+	}
+	canonicalPath := "/slack/channels/C0ALQ06AAUT/messages/1780018871.351819.json"
+	readCanonical := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/workspaces/ws_1/fs/file?path=" + url.QueryEscape(canonicalPath),
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_read_2",
+		},
+	})
+	if readCanonical.Code != http.StatusOK {
+		t.Fatalf("expected canonical-id file after ack, got %d (%s)", readCanonical.Code, readCanonical.Body.String())
+	}
+}
+
+func TestWritebackAckRejectsMissingSuccess(t *testing.T) {
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{ExternalWritebackMode: true})
+	defer store.Close()
+	server := NewServer(store)
+	token := mustTestJWT(t, "dev-secret", "ws_1", "Worker1", []string{"fs:write", "sync:read", "sync:trigger"}, time.Now().Add(time.Hour))
+
+	writeResp := doRequest(t, server, request{
+		method: http.MethodPut,
+		path:   "/v1/workspaces/ws_1/fs/file?path=" + url.QueryEscape("/slack/channels/C0ALQ06AAUT/messages/messages 0e89a031-65f0-480e-a823-ab1d94b324ea.json"),
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_write_1",
+			"If-Match":         "0",
+		},
+		body: map[string]any{
+			"contentType": "application/json",
+			"content":     `{"text":"hi"}`,
+		},
+	})
+	if writeResp.Code != http.StatusAccepted {
+		t.Fatalf("expected 202 on draft write, got %d (%s)", writeResp.Code, writeResp.Body.String())
+	}
+	var writeResult relayfile.WriteResult
+	if err := json.NewDecoder(writeResp.Body).Decode(&writeResult); err != nil {
+		t.Fatalf("failed to decode write response: %v", err)
+	}
+
+	ackResp := doRequest(t, server, request{
+		method: http.MethodPost,
+		path:   "/v1/workspaces/ws_1/writeback/" + writeResult.OpID + "/ack",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_ack_1",
+		},
+		body: map[string]any{"error": "missing success"},
+	})
+	if ackResp.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 on malformed ack, got %d (%s)", ackResp.Code, ackResp.Body.String())
+	}
+	ops, err := store.ListOperations("ws_1", "", "", "", "", 10)
+	if err != nil {
+		t.Fatalf("list operations failed: %v", err)
+	}
+	if len(ops.Items) != 1 || ops.Items[0].Status != "pending" {
+		t.Fatalf("malformed ack must leave operation pending, got %+v", ops.Items)
+	}
+}
+
+// Issue #242: POST /writeback/sweep-drafts drains accumulated draft residue.
+func TestWritebackSweepDraftsEndpoint(t *testing.T) {
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{ExternalWritebackMode: true})
+	defer store.Close()
+	server := NewServer(store)
+	token := mustTestJWT(t, "dev-secret", "ws_1", "Worker1", []string{"fs:read", "fs:write", "sync:read", "sync:trigger"}, time.Now().Add(time.Hour))
+
+	draftPath := "/slack/channels/C0ALQ06AAUT/messages/messages 0e89a031-65f0-480e-a823-ab1d94b324ea.json"
+	writeResp := doRequest(t, server, request{
+		method: http.MethodPut,
+		path:   "/v1/workspaces/ws_1/fs/file?path=" + url.QueryEscape(draftPath),
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_write_1",
+			"If-Match":         "0",
+		},
+		body: map[string]any{
+			"contentType": "application/json",
+			"content":     `{"text":"old"}`,
+		},
+	})
+	if writeResp.Code != http.StatusAccepted {
+		t.Fatalf("expected 202 on draft write, got %d (%s)", writeResp.Code, writeResp.Body.String())
+	}
+	var writeResult relayfile.WriteResult
+	if err := json.NewDecoder(writeResp.Body).Decode(&writeResult); err != nil {
+		t.Fatalf("failed to decode write response: %v", err)
+	}
+	// Mark the writeback delivered (legacy path, no externalId) so the file
+	// becomes residue rather than an in-flight draft.
+	ackResp := doRequest(t, server, request{
+		method: http.MethodPost,
+		path:   "/v1/workspaces/ws_1/writeback/" + writeResult.OpID + "/ack",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_ack_1",
+		},
+		body: map[string]any{"success": true},
+	})
+	if ackResp.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK on ack, got %d (%s)", ackResp.Code, ackResp.Body.String())
+	}
+
+	// Default is a dry run: candidates reported, nothing removed.
+	dryResp := doRequest(t, server, request{
+		method: http.MethodPost,
+		path:   "/v1/workspaces/ws_1/writeback/sweep-drafts",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_sweep_1",
+		},
+		body: map[string]any{},
+	})
+	if dryResp.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK on dry-run sweep, got %d (%s)", dryResp.Code, dryResp.Body.String())
+	}
+	var dryResult relayfile.SweepDraftsResult
+	if err := json.NewDecoder(dryResp.Body).Decode(&dryResult); err != nil {
+		t.Fatalf("failed to decode sweep response: %v", err)
+	}
+	if !dryResult.DryRun || len(dryResult.Removed) != 1 || dryResult.Removed[0].Path != draftPath {
+		t.Fatalf("unexpected dry-run result: %+v", dryResult)
+	}
+
+	applyResp := doRequest(t, server, request{
+		method: http.MethodPost,
+		path:   "/v1/workspaces/ws_1/writeback/sweep-drafts",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_sweep_2",
+		},
+		body: map[string]any{"apply": true},
+	})
+	if applyResp.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK on apply sweep, got %d (%s)", applyResp.Code, applyResp.Body.String())
+	}
+	var applyResult relayfile.SweepDraftsResult
+	if err := json.NewDecoder(applyResp.Body).Decode(&applyResult); err != nil {
+		t.Fatalf("failed to decode sweep response: %v", err)
+	}
+	if applyResult.DryRun || len(applyResult.Removed) != 1 {
+		t.Fatalf("unexpected apply result: %+v", applyResult)
+	}
+
+	readDraft := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/workspaces/ws_1/fs/file?path=" + url.QueryEscape(draftPath),
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_read_1",
+		},
+	})
+	if readDraft.Code != http.StatusNotFound {
+		t.Fatalf("expected residue gone after apply sweep, got %d", readDraft.Code)
 	}
 }
 

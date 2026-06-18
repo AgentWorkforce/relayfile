@@ -19,6 +19,7 @@ import (
 	"net/http/pprof"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -26,10 +27,12 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 	"unicode/utf8"
 
 	"github.com/agentworkforce/relayfile/internal/digest"
+	"github.com/agentworkforce/relayfile/internal/relayfile"
 	"github.com/fsnotify/fsnotify"
 	"nhooyr.io/websocket"
 	"nhooyr.io/websocket/wsjson"
@@ -63,6 +66,11 @@ func (e *SchemaValidationError) Is(target error) bool {
 
 const defaultBulkFlushThreshold = 256
 
+const (
+	mountWritebackCreateDraftContentIdentityKind       = "mount-writeback-create-draft"
+	mountWritebackCreateDraftContentIdentityTTLSeconds = 2592000
+)
+
 // defaultFullPullEvery is the default cadence for the "trust but verify"
 // periodic full tree pull that runs from the incremental path. At 30s sync
 // intervals, 20 cycles is roughly every 10 minutes. This is the safety net
@@ -90,16 +98,26 @@ const (
 	// and, having no resume cursor, restart from scratch every cycle (the
 	// #1499/#1516 non-convergence loop). Must stay strictly under
 	// defaultBootstrapIdleTimeout.
-	defaultExportTimeout             = 45 * time.Second
-	defaultCursorResolutionAttempts  = 3
-	defaultCursorRetryBaseDelay      = 250 * time.Millisecond
-	defaultBootstrapReadWorkers      = 16
-	defaultIncrementalEventPageLimit = 50
-	defaultRetryAfterMaxDelay        = 60 * time.Second
-	defaultWebSocketReconnectBase    = 1 * time.Second
-	defaultWebSocketReconnectMax     = 60 * time.Second
-	defaultWebSocketReconnectJitter  = 200 * time.Millisecond
-	DefaultWebSocketMaintenanceEvery = 1 * time.Second
+	defaultExportTimeout = 45 * time.Second
+	// defaultOutboxFlushTimeout bounds a durable writeback/outbox flush with
+	// its OWN deadline derived from rootCtx (see outboxContext), independent of
+	// the tiny per-cycle RELAYFILE_MOUNT_TIMEOUT. A small outbound write (e.g. a
+	// Slack reply draft) must not share — and be starved by — the same 15s
+	// budget as a full-tree mirror pull on a large workspace; when it does, the
+	// write sits in the outbox retrying across cycles for minutes (the
+	// churn-digest "context deadline exceeded" / late-reply failure mode). This
+	// mirrors bootstrapContext's "derive from rootCtx, not the per-cycle ctx".
+	defaultOutboxFlushTimeout         = 60 * time.Second
+	defaultIncrementalReadNotReadyTTL = 5 * time.Minute
+	defaultCursorResolutionAttempts   = 3
+	defaultCursorRetryBaseDelay       = 250 * time.Millisecond
+	defaultBootstrapReadWorkers       = 16
+	defaultIncrementalEventPageLimit  = 50
+	defaultRetryAfterMaxDelay         = 60 * time.Second
+	defaultWebSocketReconnectBase     = 1 * time.Second
+	defaultWebSocketReconnectMax      = 60 * time.Second
+	defaultWebSocketReconnectJitter   = 200 * time.Millisecond
+	DefaultWebSocketMaintenanceEvery  = 1 * time.Second
 )
 
 // resolveDurationEnv returns the option value if non-zero, else parses the
@@ -155,6 +173,21 @@ func (e *HTTPError) Error() string {
 	return fmt.Sprintf("http %d: %s", e.StatusCode, e.Message)
 }
 
+type IncrementalReadNotReadyError struct {
+	Path       string
+	StatusCode int
+	Code       string
+	Message    string
+}
+
+func (e *IncrementalReadNotReadyError) Error() string {
+	message := strings.TrimSpace(e.Message)
+	if message == "" {
+		message = "not readable yet"
+	}
+	return fmt.Sprintf("changed event for %s is not readable yet: %s", normalizeRemotePath(e.Path), message)
+}
+
 type TreeEntry struct {
 	Path        string `json:"path"`
 	Type        string `json:"type"`
@@ -195,7 +228,13 @@ type RemoteFile struct {
 }
 
 type WriteResult struct {
+	OpID           string `json:"opId,omitempty"`
+	Status         string `json:"status,omitempty"`
 	TargetRevision string `json:"targetRevision"`
+	Writeback      struct {
+		Provider string `json:"provider,omitempty"`
+		State    string `json:"state,omitempty"`
+	} `json:"writeback,omitempty"`
 }
 
 type RemoteClient interface {
@@ -212,6 +251,7 @@ type RemoteClient interface {
 	ReadFile(ctx context.Context, workspaceID, path string) (RemoteFile, error)
 	WriteFile(ctx context.Context, workspaceID, path, baseRevision, contentType, content string) (WriteResult, error)
 	WriteFilesBulk(ctx context.Context, workspaceID string, files []BulkWriteFile) (BulkWriteResponse, error)
+	GetOperation(ctx context.Context, workspaceID, opID string) (OperationStatus, error)
 	DeleteFile(ctx context.Context, workspaceID, path, baseRevision string) error
 }
 
@@ -241,14 +281,23 @@ type LazyMaterializeClient interface {
 }
 
 type HTTPClient struct {
-	baseURL    string
-	token      string
-	tokenMu    sync.RWMutex
-	httpClient *http.Client
-	maxRetries int
-	baseDelay  time.Duration
-	maxDelay   time.Duration
+	baseURL          string
+	token            string
+	tokenMu          sync.RWMutex
+	tokenRefreshMu   sync.RWMutex
+	tokenRefreshFunc AuthTokenRefreshFunc
+	httpClient       *http.Client
+	maxRetries       int
+	baseDelay        time.Duration
+	maxDelay         time.Duration
+	httpStatusLogMu  sync.RWMutex
+	httpStatusLogger Logger
 }
+
+// AuthTokenRefreshFunc returns a replacement bearer token after the current
+// token has been rejected by the server. changed must be true only when the
+// replacement token should be installed and the failed request retried.
+type AuthTokenRefreshFunc func(currentToken string) (newToken string, changed bool, err error)
 
 // NewSyncTransport builds the *http.Transport used by every mount-daemon
 // HTTP client. It deliberately sets GRANULAR timeouts that bound the parts
@@ -322,6 +371,46 @@ func NewHTTPClient(baseURL, token string, httpClient *http.Client) *HTTPClient {
 		baseDelay:  100 * time.Millisecond,
 		maxDelay:   defaultRetryAfterMaxDelay,
 	}
+}
+
+func (c *HTTPClient) SetHTTPStatusLogger(logger Logger) {
+	c.httpStatusLogMu.Lock()
+	defer c.httpStatusLogMu.Unlock()
+	c.httpStatusLogger = logger
+}
+
+func (c *HTTPClient) SetTokenRefreshFunc(refresh AuthTokenRefreshFunc) {
+	c.tokenRefreshMu.Lock()
+	defer c.tokenRefreshMu.Unlock()
+	c.tokenRefreshFunc = refresh
+}
+
+func (c *HTTPClient) logHTTPStatus(method, requestPath string, statusCode int, retryAfter string, attempt int) {
+	c.httpStatusLogMu.RLock()
+	logger := c.httpStatusLogger
+	c.httpStatusLogMu.RUnlock()
+	if logger == nil {
+		return
+	}
+	retryAfter = strings.TrimSpace(retryAfter)
+	if retryAfter == "" {
+		logger.Printf(
+			"relayfile http %d method=%s path=%s attempt=%d",
+			statusCode,
+			method,
+			requestPath,
+			attempt+1,
+		)
+		return
+	}
+	logger.Printf(
+		"relayfile http %d method=%s path=%s retry-after=%q attempt=%d",
+		statusCode,
+		method,
+		requestPath,
+		retryAfter,
+		attempt+1,
+	)
 }
 
 func (c *HTTPClient) ListTree(ctx context.Context, workspaceID, path string, depth int, cursor string) (TreeResponse, error) {
@@ -420,6 +509,12 @@ func (c *HTTPClient) WriteFilesBulk(ctx context.Context, workspaceID string, fil
 	return out, err
 }
 
+func (c *HTTPClient) GetOperation(ctx context.Context, workspaceID, opID string) (OperationStatus, error) {
+	var out OperationStatus
+	err := c.doJSON(ctx, http.MethodGet, fmt.Sprintf("/v1/workspaces/%s/ops/%s", url.PathEscape(workspaceID), url.PathEscape(opID)), nil, nil, &out)
+	return out, err
+}
+
 func (c *HTTPClient) DeleteFile(ctx context.Context, workspaceID, path, baseRevision string) error {
 	q := url.Values{}
 	q.Set("path", normalizeRemotePath(path))
@@ -472,12 +567,14 @@ func (c *HTTPClient) ExportGithubWorkingTreeTar(ctx context.Context, workspaceID
 	}
 	requestPath := fmt.Sprintf("/v1/workspaces/%s/fs/export?%s", url.PathEscape(workspaceID), q.Encode())
 
+	authRefreshTried := false
 	for attempt := 0; ; attempt++ {
+		requestToken := c.Token()
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+requestPath, nil)
 		if err != nil {
 			return GithubWorkingTreeTar{}, err
 		}
-		req.Header.Set("Authorization", "Bearer "+c.Token())
+		req.Header.Set("Authorization", "Bearer "+requestToken)
 		req.Header.Set("X-Correlation-Id", correlationID())
 		resp, err := c.httpClient.Do(req)
 		if err != nil {
@@ -490,6 +587,7 @@ func (c *HTTPClient) ExportGithubWorkingTreeTar(ctx context.Context, workspaceID
 			return GithubWorkingTreeTar{}, err
 		}
 		if resp.StatusCode >= 200 && resp.StatusCode <= 299 {
+			c.logHTTPStatus(http.MethodGet, requestPath, resp.StatusCode, resp.Header.Get("Retry-After"), attempt)
 			return GithubWorkingTreeTar{
 				Body:        resp.Body,
 				ContentType: resp.Header.Get("Content-Type"),
@@ -499,6 +597,13 @@ func (c *HTTPClient) ExportGithubWorkingTreeTar(ctx context.Context, workspaceID
 		_ = resp.Body.Close()
 		if readErr != nil {
 			return GithubWorkingTreeTar{}, readErr
+		}
+		c.logHTTPStatus(http.MethodGet, requestPath, resp.StatusCode, resp.Header.Get("Retry-After"), attempt)
+		if resp.StatusCode == http.StatusUnauthorized && !authRefreshTried {
+			authRefreshTried = true
+			if c.refreshTokenAfterUnauthorized(requestToken) {
+				continue
+			}
 		}
 		if (resp.StatusCode == http.StatusTooManyRequests || (resp.StatusCode >= 500 && resp.StatusCode <= 599)) && attempt < c.maxRetries {
 			if waitErr := waitWithContext(ctx, c.retryDelay(attempt+1, resp.Header.Get("Retry-After"))); waitErr != nil {
@@ -550,16 +655,18 @@ func (c *HTTPClient) doJSON(
 			return err
 		}
 	}
+	authRefreshTried := false
 	for attempt := 0; ; attempt++ {
 		var bodyReader io.Reader
 		if bodyBytes != nil {
 			bodyReader = bytes.NewReader(bodyBytes)
 		}
+		requestToken := c.Token()
 		req, err := http.NewRequestWithContext(ctx, method, c.baseURL+requestPath, bodyReader)
 		if err != nil {
 			return err
 		}
-		req.Header.Set("Authorization", "Bearer "+c.Token())
+		req.Header.Set("Authorization", "Bearer "+requestToken)
 		req.Header.Set("X-Correlation-Id", correlationID())
 		if body != nil {
 			req.Header.Set("Content-Type", "application/json")
@@ -585,12 +692,20 @@ func (c *HTTPClient) doJSON(
 		if readErr != nil {
 			return readErr
 		}
+		c.logHTTPStatus(method, requestPath, resp.StatusCode, resp.Header.Get("Retry-After"), attempt)
 
 		if resp.StatusCode >= 200 && resp.StatusCode <= 299 {
 			if out == nil || len(payloadBytes) == 0 {
 				return nil
 			}
 			return json.Unmarshal(payloadBytes, out)
+		}
+
+		if resp.StatusCode == http.StatusUnauthorized && !authRefreshTried {
+			authRefreshTried = true
+			if c.refreshTokenAfterUnauthorized(requestToken) {
+				continue
+			}
 		}
 
 		if (resp.StatusCode == http.StatusTooManyRequests || (resp.StatusCode >= 500 && resp.StatusCode <= 599)) && attempt < c.maxRetries {
@@ -628,6 +743,30 @@ func (c *HTTPClient) SetToken(token string) {
 	c.tokenMu.Unlock()
 }
 
+func (c *HTTPClient) refreshTokenAfterUnauthorized(attemptedToken string) bool {
+	attemptedToken = strings.TrimSpace(attemptedToken)
+	current := c.Token()
+	if attemptedToken != "" && current != attemptedToken {
+		return true
+	}
+	c.tokenRefreshMu.RLock()
+	refresh := c.tokenRefreshFunc
+	c.tokenRefreshMu.RUnlock()
+	if refresh == nil {
+		return false
+	}
+	next, changed, err := refresh(current)
+	if err != nil || !changed {
+		return false
+	}
+	next = strings.TrimSpace(next)
+	if next == "" || next == current {
+		return false
+	}
+	c.SetToken(next)
+	return true
+}
+
 type SyncerOptions struct {
 	WorkspaceID   string
 	RemoteRoot    string
@@ -642,6 +781,7 @@ type SyncerOptions struct {
 	RootCtx       context.Context
 	Logger        Logger
 	Mode          string
+	SyncMode      string
 	Interval      time.Duration
 	// FullPullEvery controls how often the incremental pull path forces a
 	// full tree pull as a "trust but verify" safety net against cloud-side
@@ -671,6 +811,16 @@ type SyncerOptions struct {
 	// RELAYFILE_EXPORT_TIMEOUT, default 45s; values >= bootstrapIdleTimeout are
 	// clamped below it so the fall-through always fires before the watchdog.
 	ExportTimeout time.Duration
+	// OutboxFlushTimeout bounds a durable writeback/outbox flush with its OWN
+	// deadline derived from RootCtx (see outboxContext), so the tiny per-cycle
+	// RELAYFILE_MOUNT_TIMEOUT that bounds a mirror cycle cannot starve an
+	// outbound write. 0 falls back to env RELAYFILE_OUTBOX_TIMEOUT, default 60s.
+	OutboxFlushTimeout time.Duration
+	// IncrementalReadNotReadyTTL bounds how long an incremental create/update
+	// event may keep returning ReadFile 404 before the syncer treats it as a
+	// delete and advances past the event. 0 falls back to env
+	// RELAYFILE_INCREMENTAL_READ_NOT_READY_TTL, default 5m.
+	IncrementalReadNotReadyTTL time.Duration
 	// ForceFullReconcile, when non-nil and true, forces one full reconcile
 	// regardless of BootstrapComplete (escape hatch / clobber-remnant
 	// recovery). nil falls back to env RELAYFILE_FORCE_FULL_RECONCILE.
@@ -689,6 +839,11 @@ type SyncerOptions struct {
 	DigestProviders         []string
 	DigestTimezone          string
 	DigestNow               func() time.Time
+	// Now overrides the wall clock used by the outbox writeback path
+	// (first-seen stamping, retry-backoff scheduling, due-ness, ack time).
+	// Defaults to time.Now when nil. Tests inject a controllable clock to make
+	// retry-backoff and dead-letter timing deterministic without real sleeps.
+	Now func() time.Time
 }
 
 type Logger interface {
@@ -739,6 +894,15 @@ func StartDiagnostics(ctx context.Context, addr string, memlogInterval time.Dura
 type noopLogger struct{}
 
 func (noopLogger) Printf(string, ...any) {}
+
+func normalizeSyncMode(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "write-only":
+		return "write-only"
+	default:
+		return "mirror"
+	}
+}
 
 func logMemoryStats(ctx context.Context, interval time.Duration, logger Logger) {
 	ticker := time.NewTicker(interval)
@@ -794,6 +958,7 @@ type Syncer struct {
 	conflictsDir         string
 	resolvedConflictsDir string
 	deadLetterDir        string
+	outboxDir            string
 	eventProvider        string
 	scopes               []string
 	logger               Logger
@@ -815,19 +980,53 @@ type Syncer struct {
 	fullPullEvery        int
 	cursorTimeout        time.Duration
 	exportTimeout        time.Duration
+	outboxFlushTimeout   time.Duration
 	bootstrapTimeout     time.Duration
 	bootstrapIdleTimeout time.Duration
+	readNotReadyTTL      time.Duration
 	forceFullReconcile   bool
 	incrementalCycles    int
-	oversizedLogged      map[string]struct{}
-	lazyRepos            bool
-	lowMemory            bool
-	layoutRegistrar      ProviderLayoutRegistrar
-	githubWorkingTree    *githubWorkingTreeMount
-	closeScheduler       *CloseScheduler
-	rollingCoalescer     *RollingDigestCoalescer
-	circuit              *CloudErrorCircuit
-	mu                   sync.Mutex
+	// staleAliasSkips counts stale provider-layout-alias events drained in the
+	// current reconcile cycle. Reset at the start of each cycle and surfaced to
+	// the CLI (e.g. `relayfile pull` summary, `workspace status`) so operators
+	// can see the stuck-event drain making progress.
+	staleAliasSkips int
+	// skip-stuck escape hatch (`relayfile writeback skip-stuck`). When
+	// skipStuckMode is set, the incremental drain drops every read-404 event
+	// immediately — not just provider-layout-alias paths — without waiting the
+	// read-not-ready TTL. skipStuckMax bounds the number of events dropped
+	// (0 = unbounded); skipStuckCount tracks how many were dropped.
+	skipStuckMode     bool
+	skipStuckMax      int
+	skipStuckCount    int
+	syncActive        bool
+	oversizedLogged   map[string]struct{}
+	quarantinedPaths  map[string]struct{}
+	lazyRepos         bool
+	lowMemory         bool
+	writeOnly         bool
+	layoutRegistrar   ProviderLayoutRegistrar
+	githubWorkingTree *githubWorkingTreeMount
+	closeScheduler    *CloseScheduler
+	rollingCoalescer  *RollingDigestCoalescer
+	circuit           *CloudErrorCircuit
+	maxOutboxAttempts int
+	nowFn             func() time.Time
+	// credExpiresAt is the RFC3339 expiry of the delegated access token,
+	// set by the CLI layer via SetCredentialExpiry and included in the
+	// public state as credExpiresInSecs so operators get advance warning.
+	credExpiresAt string
+	mu            sync.Mutex
+}
+
+// now returns the current time using the injected clock when set (tests),
+// otherwise the wall clock. Used by the outbox writeback path so retry-backoff
+// and dead-letter timing are deterministic under test without real sleeps.
+func (s *Syncer) now() time.Time {
+	if s.nowFn != nil {
+		return s.nowFn()
+	}
+	return time.Now()
 }
 
 type mountState struct {
@@ -857,7 +1056,20 @@ type mountState struct {
 	BootstrapFilesSynced     int    `json:"bootstrapFilesSynced,omitempty"`
 	BootstrapFilesTotal      int    `json:"bootstrapFilesTotal,omitempty"`
 	BootstrapStartedAt       string `json:"bootstrapStartedAt,omitempty"`
+	// QuarantinedPaths holds remote paths that cannot be materialized locally
+	// due to file/directory name collisions. Persisted across cycle restarts
+	// so the daemon does not re-fetch these paths from the cloud until the
+	// adapter emitting the collision is fixed. Cleared on bootstrap completion
+	// so a fixed adapter gets a clean slate on the next full cycle.
+	QuarantinedPaths         map[string]string `json:"quarantinedPaths,omitempty"`
+	SyncMode                 string `json:"syncMode,omitempty"`
 	GithubWorkingTreeHeadSHA string `json:"githubWorkingTreeHeadSha,omitempty"`
+	// IncrementalReadNotReadySince records first-seen timestamps for
+	// incremental create/update events whose remote content was not readable
+	// yet. The daemon retries these without advancing EventsCursor until the
+	// TTL expires, then treats a still-unreadable path as deleted so
+	// create-then-delete events cannot wedge the mount forever.
+	IncrementalReadNotReadySince map[string]string `json:"incrementalReadNotReadySince,omitempty"`
 }
 
 type incrementalCheckpoint struct {
@@ -878,6 +1090,50 @@ type telemetryCounters struct {
 	TombstonesPending        uint64 `json:"tombstonesPending,omitempty"`
 	TombstonesConfirmed      uint64 `json:"tombstonesConfirmed,omitempty"`
 	TombstonesAgedOut        uint64 `json:"tombstonesAgedOut,omitempty"`
+	// PathCollisionQuarantined counts apply attempts skipped because a remote
+	// path could not be represented on the local filesystem — an ancestor
+	// component exists as a regular file (or the target is a directory). The
+	// fix belongs in the emitting adapter (do not emit one name as both a file
+	// and a directory); the daemon quarantines the path so a single collision
+	// can't wedge the whole mount. See isRemotePathCollision.
+	PathCollisionQuarantined uint64 `json:"pathCollisionQuarantined,omitempty"`
+}
+
+// quarantineRemotePath records a remote path that can't be materialized
+// locally because of a file/directory name collision. It counts every
+// occurrence (consistent with the other defensive counters), but logs each
+// distinct path only once per process so a persistently-colliding path does not
+// spam the log on every sync cycle. Mirrors the oversizedLogged dedup pattern.
+func (s *Syncer) quarantineRemotePath(remotePath, detail string, cause error) {
+	s.state.Counters.PathCollisionQuarantined++
+	if s.quarantinedPaths == nil {
+		s.quarantinedPaths = map[string]struct{}{}
+	}
+	if _, seen := s.quarantinedPaths[remotePath]; seen {
+		return
+	}
+	s.quarantinedPaths[remotePath] = struct{}{}
+	if s.state.QuarantinedPaths == nil {
+		s.state.QuarantinedPaths = map[string]string{}
+	}
+	s.state.QuarantinedPaths[remotePath] = detail
+	s.logf("quarantining remote path %s: %s (%v); skipping so the sync cycle can complete — fix is adapter-side (a name emitted as both a file and a directory)", remotePath, detail, cause)
+}
+
+// isRemotePathCollision reports whether err is a POSIX path-shape collision:
+// an ancestor path component is a regular file (ENOTDIR), or the target name is
+// already a directory / already exists with the wrong type (EISDIR/os.ErrExist).
+// This happens when an adapter emits the same name as both a file and a
+// directory — e.g. the Slack adapter writing a thread reply leaf
+// `replies/<ts>.json` while also nesting that reply's children under a
+// directory at the same stem. Such a path can never be materialized here, so
+// failing the sync cycle on it would wedge the mount forever (bootstrap never
+// completes, the teardown writeback flush hangs and is killed at its timeout,
+// and the run is marked FAILED). The daemon logs + counts it and moves on.
+func isRemotePathCollision(err error) bool {
+	return errors.Is(err, syscall.ENOTDIR) ||
+		errors.Is(err, syscall.EISDIR) ||
+		errors.Is(err, os.ErrExist)
 }
 
 type trackedFile struct {
@@ -946,6 +1202,7 @@ type publicState struct {
 	RemoteRoot                string                     `json:"remoteRoot"`
 	LocalRoot                 string                     `json:"localRoot"`
 	Mode                      string                     `json:"mode"`
+	SyncMode                  string                     `json:"syncMode,omitempty"`
 	IntervalMs                int64                      `json:"intervalMs"`
 	LastReconcileAt           string                     `json:"lastReconcileAt,omitempty"`
 	LastSuccessfulReconcileAt string                     `json:"lastSuccessfulReconcileAt,omitempty"`
@@ -967,6 +1224,9 @@ type publicState struct {
 	Counters telemetryCounters `json:"counters,omitempty"`
 	// Circuit summarises the cloud-error breaker state.
 	Circuit *CircuitState `json:"circuit,omitempty"`
+	// Outbox summarizes durable upload commands that are waiting for a
+	// server ACK, have exhausted retry budget, or have completed.
+	Outbox outboxSummary `json:"outbox,omitempty"`
 	// LastAppliedRevision is the highest cloud revision the daemon has
 	// reconciled. Useful for operator status display.
 	LastAppliedRevision string `json:"lastAppliedRevision,omitempty"`
@@ -974,6 +1234,12 @@ type publicState struct {
 	// "bootstrapping N/M files" instead of a misleading stall. The resume
 	// cursor is intentionally NOT exposed (internal-only).
 	Bootstrap *bootstrapStatus `json:"bootstrap,omitempty"`
+	// ReconcileAgeSecs is seconds elapsed since the last successful reconcile.
+	// 0 when no successful reconcile has been recorded yet.
+	ReconcileAgeSecs int64 `json:"reconcileAgeSecs,omitempty"`
+	// CredExpiresInSecs is seconds until the delegated access token expires.
+	// Negative means already expired. Omitted (0) when unknown.
+	CredExpiresInSecs int64 `json:"credExpiresInSecs,omitempty"`
 }
 
 // bootstrapStatus is the public, cursor-free view of bootstrap progress.
@@ -985,11 +1251,12 @@ type bootstrapStatus struct {
 }
 
 type publicStateFlags struct {
-	Stale               bool `json:"stale"`
-	Offline             bool `json:"offline"`
-	Syncing             bool `json:"syncing,omitempty"`
-	HasConflicts        bool `json:"hasConflicts"`
-	HasPendingWriteback bool `json:"hasPendingWriteback"`
+	Stale                bool `json:"stale"`
+	Offline              bool `json:"offline"`
+	Syncing              bool `json:"syncing,omitempty"`
+	HasConflicts         bool `json:"hasConflicts"`
+	HasPendingWriteback  bool `json:"hasPendingWriteback"`
+	OutboxNeedsAttention bool `json:"outboxNeedsAttention,omitempty"`
 }
 
 type publicFileState struct {
@@ -1045,6 +1312,7 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 	conflictsDir := filepath.Join(localRoot, ".relay", "conflicts")
 	resolvedConflictsDir := filepath.Join(conflictsDir, "resolved")
 	deadLetterDir := filepath.Join(localRoot, ".relay", "dead-letter")
+	outboxDir := filepath.Join(localRoot, ".relay", "outbox")
 	scopes := normalizeScopes(opts.Scopes)
 	if len(scopes) == 0 {
 		if httpClient, ok := client.(*HTTPClient); ok {
@@ -1073,6 +1341,11 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 			}
 		} else if len(moved) > 0 && opts.Logger != nil {
 			opts.Logger.Printf("quarantined %d legacy private mount state file(s) outside mounted tree", len(moved))
+		}
+	}
+	for _, dir := range []string{outboxDir, filepath.Join(outboxDir, "pending"), filepath.Join(outboxDir, "acked"), filepath.Join(outboxDir, "failed")} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return nil, err
 		}
 	}
 	websocketEnabled := true
@@ -1109,6 +1382,10 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 	if exportTimeout <= 0 {
 		exportTimeout = defaultExportTimeout
 	}
+	outboxFlushTimeout := resolveDurationEnv(opts.OutboxFlushTimeout, "RELAYFILE_OUTBOX_TIMEOUT", defaultOutboxFlushTimeout, opts.Logger)
+	if outboxFlushTimeout <= 0 {
+		outboxFlushTimeout = defaultOutboxFlushTimeout
+	}
 	// The export's own deadline MUST elapse before the bootstrap context can
 	// be canceled so a slow export yields to the resumable tree pull while the
 	// bootstrap ctx is still alive. Clamp to a fraction of the active bootstrap
@@ -1129,6 +1406,10 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 			opts.Logger.Printf("clamping exportTimeout from %s to %s (must stay strictly under the active bootstrap window — no-progress watchdog %s, hard cap %s — so the export yields to the resumable tree pull before the bootstrap ctx is canceled)", exportTimeout, maxExportTimeout, bootstrapIdleTimeout, bootstrapTimeout)
 		}
 		exportTimeout = maxExportTimeout
+	}
+	readNotReadyTTL := resolveDurationEnv(opts.IncrementalReadNotReadyTTL, "RELAYFILE_INCREMENTAL_READ_NOT_READY_TTL", defaultIncrementalReadNotReadyTTL, opts.Logger)
+	if readNotReadyTTL <= 0 {
+		readNotReadyTTL = defaultIncrementalReadNotReadyTTL
 	}
 	forceFullReconcile := false
 	if opts.ForceFullReconcile != nil {
@@ -1201,6 +1482,7 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 		conflictsDir:         conflictsDir,
 		resolvedConflictsDir: resolvedConflictsDir,
 		deadLetterDir:        deadLetterDir,
+		outboxDir:            outboxDir,
 		eventProvider:        eventProvider,
 		scopes:               scopes,
 		websocket:            websocketEnabled,
@@ -1209,14 +1491,18 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 		denialLogPath:        filepath.Join(localRoot, ".relay", "permissions-denied.log"),
 		bulkFlushThreshold:   bulkFlushThreshold,
 		mode:                 strings.TrimSpace(opts.Mode),
+		writeOnly:            normalizeSyncMode(opts.SyncMode) == "write-only",
 		interval:             opts.Interval,
 		fullPullEvery:        fullPullEvery,
 		cursorTimeout:        cursorTimeout,
 		exportTimeout:        exportTimeout,
+		outboxFlushTimeout:   outboxFlushTimeout,
 		bootstrapTimeout:     bootstrapTimeout,
 		bootstrapIdleTimeout: bootstrapIdleTimeout,
+		readNotReadyTTL:      readNotReadyTTL,
 		forceFullReconcile:   forceFullReconcile,
 		oversizedLogged:      map[string]struct{}{},
+		quarantinedPaths:     map[string]struct{}{},
 		lazyRepos:            lazyRepos,
 		lowMemory:            lowMemory,
 		layoutRegistrar:      opts.ProviderLayoutRegistrar,
@@ -1224,6 +1510,8 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 		closeScheduler:       closeScheduler,
 		rollingCoalescer:     rollingCoalescer,
 		circuit:              NewCloudErrorCircuit(),
+		maxOutboxAttempts:    defaultOutboxMaxAttempts,
+		nowFn:                opts.Now,
 		state: mountState{
 			Files: map[string]trackedFile{},
 		},
@@ -1232,6 +1520,15 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 
 // Circuit returns the cloud-error breaker for tests and status reporters.
 func (s *Syncer) Circuit() *CloudErrorCircuit { return s.circuit }
+
+// SetCredentialExpiry records the RFC3339 expiry of the delegated access token
+// so it can be surfaced in the public state as credExpiresInSecs. Call this
+// from the CLI layer whenever credentials are loaded or refreshed.
+func (s *Syncer) SetCredentialExpiry(expiresAt string) {
+	s.mu.Lock()
+	s.credExpiresAt = strings.TrimSpace(expiresAt)
+	s.mu.Unlock()
+}
 
 func parseScopesFromJWT(token string) []string {
 	parts := strings.Split(strings.TrimSpace(token), ".")
@@ -1257,6 +1554,148 @@ func (s *Syncer) SyncOnce(ctx context.Context) error {
 
 func (s *Syncer) Reconcile(ctx context.Context) error {
 	return s.sync(ctx, true)
+}
+
+// StaleAliasSkips returns the number of stale provider-layout-alias events the
+// most recent reconcile cycle drained without waiting the read-not-ready TTL.
+// Operators use this (via `relayfile pull` / `workspace status`) to confirm the
+// stuck-event drain is making progress.
+func (s *Syncer) StaleAliasSkips() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.staleAliasSkips
+}
+
+// BacklogDraining reports whether the events feed still has unprocessed pages
+// after the most recent cycle (e.g. the cycle was canceled mid-drain). The CLI
+// uses this to tell the operator to re-run or run `writeback skip-stuck`.
+func (s *Syncer) BacklogDraining() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.state.IncrementalBacklogDraining
+}
+
+// SkipStuck is the operator escape hatch for a wedged events cursor. It runs a
+// reconcile cycle that drops every read-404 ("not readable yet") event
+// immediately — without waiting the read-not-ready TTL — so the cursor walks
+// forward past consecutive stuck events in one invocation. max bounds the
+// number of events dropped (0 = unbounded). It returns the number of stuck
+// events skipped along with any reconcile error.
+func (s *Syncer) SkipStuck(ctx context.Context, max int) (int, error) {
+	s.mu.Lock()
+	if s.syncActive {
+		s.mu.Unlock()
+		return 0, errors.New("sync already in progress")
+	}
+	s.syncActive = true
+	s.skipStuckMode = true
+	s.skipStuckMax = max
+	s.skipStuckCount = 0
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		s.skipStuckMode = false
+		s.skipStuckMax = 0
+		s.syncActive = false
+		s.mu.Unlock()
+	}()
+	err := s.syncReserved(ctx, true)
+	s.mu.Lock()
+	count := s.skipStuckCount
+	s.mu.Unlock()
+	return count, err
+}
+
+// FlushOutboxOnce uploads only persisted durable outbox records and exits
+// without reconciling the local mirror. It is intentionally O(outbox): no
+// local tree scan, pushLocal, pullRemote, websocket, or digest work.
+func (s *Syncer) FlushOutboxOnce(ctx context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if err := s.loadState(); err != nil {
+		return err
+	}
+	if err := s.flushOutboxRecords(ctx, nil, true); err != nil {
+		s.markSyncError(err)
+		_ = s.saveStateWithoutLocalScan()
+		return err
+	}
+	outbox := s.summarizeOutbox()
+	if outbox.NeedsAttention > 0 {
+		err := fmt.Errorf("outbox needs attention: %d command(s)", outbox.NeedsAttention)
+		s.markSyncError(err)
+		_ = s.saveStateWithoutLocalScan()
+		return err
+	}
+	if outbox.Pending > 0 {
+		err := fmt.Errorf("outbox pending remains: %d command(s)", outbox.Pending)
+		s.markSyncError(err)
+		_ = s.saveStateWithoutLocalScan()
+		return err
+	}
+	s.markSyncSuccess()
+	return s.saveStateWithoutLocalScan()
+}
+
+// PushLocalAndFlushOnce ingests pending local writeback drafts with a single
+// pushLocal pass, then flushes the durable outbox, and exits — without
+// pullRemote, digest, websocket, or a full reconcile cycle.
+//
+// It is the teardown drain. Local writeback drafts are normally ingested into
+// the outbox by the running daemon's sync cycle (watcher + pushLocal). A draft
+// written after that daemon's last cycle and just before shutdown — e.g. a
+// final fire-and-forget reply right before a one-shot sandbox is torn down — is
+// still on disk but not yet in the outbox, so FlushOutboxOnce (outbox-only, no
+// local scan) silently drops it. Running pushLocal here, in the fresh cleanup
+// process that scans the on-disk mirror, ingests those drafts before flushing.
+//
+// The local scan is the cost (the same O(tree) work FlushOutboxOnce exists to
+// avoid), so callers should invoke this only when pending local writes are
+// detected and keep FlushOutboxOnce for the no-pending-writes fast path. Unlike
+// a full reconcile it still skips pullRemote/digest/websocket, so it cannot
+// reintroduce the pull-side flush-124 stalls.
+func (s *Syncer) PushLocalAndFlushOnce(ctx context.Context) error {
+	// Same top-of-cycle invariant as syncReserved: pushLocal scans and mutates
+	// the local mirror, so refuse to run if the mount root was wiped/clobbered
+	// (recovery is gated behind --reset-after-clobber). FlushOutboxOnce skips
+	// this because it is outbox-only and never touches the mirror.
+	if err := s.assertMountRootInvariant(); err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if err := s.loadState(); err != nil {
+		return err
+	}
+	conflicted, err := s.pushLocal(ctx)
+	if err != nil {
+		s.markSyncError(err)
+		_ = s.saveStateWithoutLocalScan()
+		return err
+	}
+	if err := s.flushOutboxRecords(ctx, conflicted, true); err != nil {
+		s.markSyncError(err)
+		_ = s.saveStateWithoutLocalScan()
+		return err
+	}
+	outbox := s.summarizeOutbox()
+	if outbox.NeedsAttention > 0 {
+		err := fmt.Errorf("outbox needs attention: %d command(s)", outbox.NeedsAttention)
+		s.markSyncError(err)
+		_ = s.saveStateWithoutLocalScan()
+		return err
+	}
+	if outbox.Pending > 0 {
+		err := fmt.Errorf("outbox pending remains: %d command(s)", outbox.Pending)
+		s.markSyncError(err)
+		_ = s.saveStateWithoutLocalScan()
+		return err
+	}
+	s.markSyncSuccess()
+	return s.saveState()
 }
 
 // HandleLocalChange routes a local filesystem event to the appropriate
@@ -1471,28 +1910,84 @@ func (s *Syncer) flushPendingBulkWrites(ctx context.Context, pending []pendingBu
 		s.logf("writeback flush refused: cloud-error circuit breaker is open; %d file(s) remain pending", len(pending))
 		return nil
 	}
-	for _, chunk := range chunkPendingBulkWrites(pending, maxWritebackBatchBytes()) {
-		if err := s.flushPendingBulkWriteChunk(ctx, chunk, conflicted); err != nil {
+	for _, pendingWrite := range pending {
+		if _, err := s.ensureOutboxRecord(pendingWrite); err != nil {
+			return err
+		}
+	}
+	return s.flushDueOutboxRecords(ctx, conflicted)
+}
+
+func (s *Syncer) flushDueOutboxRecords(ctx context.Context, conflicted map[string]struct{}) error {
+	return s.flushOutboxRecords(ctx, conflicted, false)
+}
+
+func (s *Syncer) flushOutboxRecords(ctx context.Context, conflicted map[string]struct{}, forceDue bool) error {
+	if s.circuit != nil && s.circuit.IsOpen() {
+		return nil
+	}
+	records, err := s.listPendingOutboxRecords()
+	if err != nil {
+		return err
+	}
+	now := s.now().UTC()
+	due := make([]outboxRecord, 0, len(records))
+	for _, record := range records {
+		if record.AttemptCount >= s.maxOutboxAttemptsValue() && !record.NeedsAttention {
+			record.NeedsAttention = true
+			if err := s.saveOutboxRecord(record); err != nil {
+				return err
+			}
+		}
+		if forceDue && !record.NeedsAttention && record.AttemptCount < s.maxOutboxAttemptsValue() {
+			due = append(due, record)
+			continue
+		}
+		if s.outboxDue(record, now) {
+			due = append(due, record)
+		}
+	}
+	if len(due) == 0 {
+		return nil
+	}
+	// The actual cloud upload runs under its OWN rootCtx-derived deadline, not
+	// the inbound per-cycle ctx, so a 15s mirror budget cannot cancel a
+	// writeback mid-flight and leave it retrying for minutes (see outboxContext).
+	flushCtx, cancel := s.outboxContext(ctx)
+	defer cancel()
+	for _, chunk := range chunkOutboxRecords(due, maxWritebackBatchBytes()) {
+		if err := s.flushOutboxRecordChunk(flushCtx, chunk, conflicted); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (s *Syncer) flushPendingBulkWriteChunk(ctx context.Context, pending []pendingBulkWrite, conflicted map[string]struct{}) error {
-	files := make([]BulkWriteFile, 0, len(pending))
-	for _, pendingWrite := range pending {
-		files = append(files, BulkWriteFile{
-			Path:        pendingWrite.remotePath,
-			ContentType: pendingWrite.snapshot.ContentType,
-			Content:     pendingWrite.snapshot.WireContent,
-			Encoding:    pendingWrite.snapshot.Encoding,
-		})
+func (s *Syncer) flushOutboxRecordChunk(ctx context.Context, records []outboxRecord, conflicted map[string]struct{}) error {
+	var firstErr error
+	uploadRecords := make([]outboxRecord, 0, len(records))
+	for _, record := range records {
+		if strings.TrimSpace(record.OpID) != "" {
+			if err := s.settleOutboxRecord(ctx, record); err != nil && firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		uploadRecords = append(uploadRecords, record)
+	}
+	if len(uploadRecords) == 0 {
+		return firstErr
 	}
 
+	files := outboxRecordsAsBulkFiles(uploadRecords)
 	response, err := s.client.WriteFilesBulk(ctx, s.workspace, files)
 	if err != nil {
 		s.recordCloudFailure(err)
+		for _, record := range uploadRecords {
+			if incErr := s.incrementOutboxAttempt(record, err); incErr != nil {
+				return incErr
+			}
+		}
 		return err
 	}
 	s.recordCloudSuccess()
@@ -1503,9 +1998,16 @@ func (s *Syncer) flushPendingBulkWriteChunk(ctx context.Context, pending []pendi
 	}
 	resultsByPath := response.resultsByPath()
 
-	var firstErr error
-	for _, pendingWrite := range pending {
-		if writeErr, ok := errorsByPath[pendingWrite.remotePath]; ok {
+	for _, record := range uploadRecords {
+		tracked, exists := s.state.Files[record.RemotePath]
+		pendingWrite, pendingErr := outboxRecordAsPending(record, s.localRoot, s.remoteRoot, tracked, exists)
+		if pendingErr != nil {
+			if firstErr == nil {
+				firstErr = pendingErr
+			}
+			continue
+		}
+		if writeErr, ok := errorsByPath[record.RemotePath]; ok {
 			err := s.handleWriteError(
 				ctx,
 				pendingWrite.remotePath,
@@ -1519,32 +2021,208 @@ func (s *Syncer) flushPendingBulkWriteChunk(ctx context.Context, pending []pendi
 			if err != nil && firstErr == nil {
 				firstErr = err
 			}
+			if err == nil {
+				if failErr := s.failOutboxRecord(record, writeErr.Message); failErr != nil && firstErr == nil {
+					firstErr = failErr
+				}
+			} else if incErr := s.incrementOutboxAttempt(record, err); incErr != nil && firstErr == nil {
+				firstErr = incErr
+			}
 			continue
 		}
 		if result, ok := resultsByPath[pendingWrite.remotePath]; ok && strings.TrimSpace(result.ContentType) != "" {
 			pendingWrite.snapshot.ContentType = result.ContentType
 		}
-		if err := s.reconcileBulkWrite(ctx, pendingWrite, resultsByPath[pendingWrite.remotePath].Revision); err != nil && firstErr == nil {
+		result := resultsByPath[pendingWrite.remotePath]
+		if err := s.reconcileBulkWrite(ctx, pendingWrite, result.Revision); err != nil {
+			// The cloud accepted the batch, but old prod may omit per-file
+			// results and leave us doing a follow-up ReadFile for revision
+			// discovery. Keep the outbox record pending so restart/reconnect
+			// can retry with the same contentIdentity instead of silently
+			// losing the command.
+			if incErr := s.incrementOutboxAttempt(record, err); incErr != nil && firstErr == nil {
+				firstErr = incErr
+			}
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		revision := result.Revision
+		if strings.TrimSpace(revision) == "" {
+			revision = s.state.Files[pendingWrite.remotePath].Revision
+		}
+		record.Revision = revision
+		if strings.TrimSpace(response.CorrelationID) != "" {
+			record.CorrelationID = strings.TrimSpace(response.CorrelationID)
+		}
+		record.OpID = strings.TrimSpace(result.OpID)
+		if result.Writeback != nil {
+			record.DispatchStatus = strings.TrimSpace(result.Writeback.State)
+		}
+		if record.OpID == "" {
+			// Legacy servers only prove upload acceptance. Keep compatibility
+			// with v0.8.20-era clouds; v0.8.21+ receipts use opId below.
+			if err := s.ackOutboxRecord(record, revision, response.CorrelationID); err != nil && firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		if err := s.saveOutboxRecord(record); err != nil && firstErr == nil {
+			firstErr = err
+			continue
+		}
+		if err := s.settleOutboxRecord(ctx, record); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
 	return firstErr
 }
 
-func bulkWriteFilesForPending(pending []pendingBulkWrite) []BulkWriteFile {
-	files := make([]BulkWriteFile, 0, len(pending))
-	for _, pendingWrite := range pending {
+func (s *Syncer) settleOutboxRecord(ctx context.Context, record outboxRecord) error {
+	op, err := s.client.GetOperation(ctx, s.workspace, record.OpID)
+	if err != nil {
+		var httpErr *HTTPError
+		if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusNotFound {
+			record.NeedsAttention = true
+			record.LastError = fmt.Sprintf("writeback op %s not found", record.OpID)
+			record.NextAttemptAt = ""
+			record.DispatchStatus = "not_found"
+			return s.saveOutboxRecord(record)
+		}
+		s.recordCloudFailure(err)
+		return s.incrementOutboxAttempt(record, err)
+	}
+	s.recordCloudSuccess()
+
+	status := strings.TrimSpace(op.Status)
+	if status == "" {
+		status = "pending"
+	}
+	record.DispatchStatus = status
+	if strings.TrimSpace(op.OpID) != "" {
+		record.OpID = strings.TrimSpace(op.OpID)
+	}
+	switch status {
+	case "succeeded":
+		revision := strings.TrimSpace(record.Revision)
+		if revision == "" {
+			revision = strings.TrimSpace(op.Revision)
+		}
+		return s.ackOutboxRecord(record, revision, record.CorrelationID)
+	case "failed", "dead_lettered", "canceled":
+		record.NeedsAttention = true
+		record.NextAttemptAt = ""
+		if op.LastError != nil && strings.TrimSpace(*op.LastError) != "" {
+			record.LastError = strings.TrimSpace(*op.LastError)
+		} else {
+			record.LastError = fmt.Sprintf("writeback op %s status %s", record.OpID, status)
+		}
+		return s.saveOutboxRecord(record)
+	case "pending", "running", "queued":
+		record.LastError = ""
+		return s.saveOutboxRecord(record)
+	default:
+		record.LastError = fmt.Sprintf("writeback op %s status %s", record.OpID, status)
+		return s.saveOutboxRecord(record)
+	}
+}
+
+func chunkOutboxRecords(records []outboxRecord, maxBytes int64) [][]outboxRecord {
+	if len(records) == 0 {
+		return nil
+	}
+	if maxBytes <= 0 {
+		return [][]outboxRecord{records}
+	}
+	chunks := make([][]outboxRecord, 0, 1)
+	current := make([]outboxRecord, 0, len(records))
+	for _, record := range records {
+		candidate := append(append([]outboxRecord(nil), current...), record)
+		if len(current) > 0 && bulkWriteRequestSize(outboxRecordsAsBulkFiles(candidate)) > maxBytes {
+			chunks = append(chunks, append([]outboxRecord(nil), current...))
+			current = current[:0]
+		}
+		current = append(current, record)
+	}
+	if len(current) > 0 {
+		chunks = append(chunks, current)
+	}
+	return chunks
+}
+
+func outboxRecordsAsBulkFiles(records []outboxRecord) []BulkWriteFile {
+	files := make([]BulkWriteFile, 0, len(records))
+	for _, record := range records {
 		files = append(files, BulkWriteFile{
-			Path:        pendingWrite.remotePath,
-			ContentType: pendingWrite.snapshot.ContentType,
-			Content:     pendingWrite.snapshot.WireContent,
-			Encoding:    pendingWrite.snapshot.Encoding,
+			Path:            record.RemotePath,
+			ContentType:     record.ContentType,
+			Content:         record.Content,
+			Encoding:        record.Encoding,
+			ContentIdentity: outboxRecordContentIdentity(record),
 		})
 	}
 	return files
 }
 
-func chunkPendingBulkWrites(pending []pendingBulkWrite, maxBytes int64) [][]pendingBulkWrite {
+// outboxRecordContentIdentity derives the server-side dedupe key for a durable
+// outbox record. Writeback "create draft" paths must dedupe on
+// (workspace, path, content hash) — the same identity used by the in-flight
+// `bulkWriteFilesForPending` path and by the CLI's direct `relayfile writeback
+// push`. Keying those on the per-record commandId instead would mint a second
+// idempotency key for identical content, so a direct push racing a mount-daemon
+// flush of the same pending receipt could create duplicate provider
+// drafts/tickets. Non-draft mount commands keep the commandId identity, which is
+// stable across reconnect/restart.
+func outboxRecordContentIdentity(record outboxRecord) *ContentIdentity {
+	if identity := mountWritebackCreateDraftContentIdentity(record.WorkspaceID, record.RemotePath, record.Hash); identity != nil {
+		return identity
+	}
+	return &ContentIdentity{
+		Kind:       "mount-command",
+		Key:        record.CommandID,
+		TTLSeconds: 7 * 24 * 60 * 60,
+	}
+}
+
+func bulkWriteFilesForPending(workspaceID string, pending []pendingBulkWrite) []BulkWriteFile {
+	files := make([]BulkWriteFile, 0, len(pending))
+	for _, pendingWrite := range pending {
+		files = append(files, BulkWriteFile{
+			Path:            pendingWrite.remotePath,
+			ContentType:     pendingWrite.snapshot.ContentType,
+			Content:         pendingWrite.snapshot.WireContent,
+			Encoding:        pendingWrite.snapshot.Encoding,
+			ContentIdentity: mountWritebackCreateDraftContentIdentity(workspaceID, pendingWrite.remotePath, pendingWrite.snapshot.Hash),
+		})
+	}
+	return files
+}
+
+func mountWritebackCreateDraftContentIdentity(workspaceID, normalizedRemotePath, contentHash string) *ContentIdentity {
+	if !isMountWritebackCreateDraftPath(normalizedRemotePath) {
+		return nil
+	}
+	return newMountWritebackCreateDraftContentIdentity(workspaceID, normalizedRemotePath, contentHash)
+}
+
+func isMountWritebackCreateDraftPath(remotePath string) bool {
+	if relayfile.IsDraftFilePath(remotePath) {
+		return true
+	}
+	base := path.Base(normalizeRemotePath(remotePath))
+	return strings.HasPrefix(base, "factory-create-") && strings.HasSuffix(base, ".json")
+}
+
+func newMountWritebackCreateDraftContentIdentity(workspaceID, normalizedRemotePath, contentHash string) *ContentIdentity {
+	return &ContentIdentity{
+		Kind:       mountWritebackCreateDraftContentIdentityKind,
+		Key:        fmt.Sprintf("%s:%s:%s", workspaceID, normalizedRemotePath, contentHash),
+		TTLSeconds: mountWritebackCreateDraftContentIdentityTTLSeconds,
+	}
+}
+
+func chunkPendingBulkWrites(workspaceID string, pending []pendingBulkWrite, maxBytes int64) [][]pendingBulkWrite {
 	if len(pending) == 0 {
 		return nil
 	}
@@ -1555,7 +2233,7 @@ func chunkPendingBulkWrites(pending []pendingBulkWrite, maxBytes int64) [][]pend
 	current := make([]pendingBulkWrite, 0, len(pending))
 	for _, item := range pending {
 		candidate := append(append([]pendingBulkWrite(nil), current...), item)
-		if len(current) > 0 && bulkWriteRequestSize(bulkWriteFilesForPending(candidate)) > maxBytes {
+		if len(current) > 0 && bulkWriteRequestSize(bulkWriteFilesForPending(workspaceID, candidate)) > maxBytes {
 			chunks = append(chunks, append([]pendingBulkWrite(nil), current...))
 			current = current[:0]
 		}
@@ -1581,9 +2259,6 @@ func bulkWriteRequestSize(files []BulkWriteFile) int64 {
 func (s *Syncer) reconcileBulkWrite(ctx context.Context, pendingWrite pendingBulkWrite, revision string) error {
 	tracked := pendingWrite.tracked
 	contentType := strings.TrimSpace(pendingWrite.snapshot.ContentType)
-	if contentType == "" {
-		contentType = pendingWrite.snapshot.ContentType
-	}
 	revision = strings.TrimSpace(revision)
 	if revision == "" {
 		remoteFile, err := s.client.ReadFile(ctx, s.workspace, pendingWrite.remotePath)
@@ -1924,6 +2599,22 @@ func (s *Syncer) pushSingleDelete(ctx context.Context, remotePath, localPath str
 }
 
 func (s *Syncer) sync(ctx context.Context, forcePoll bool) error {
+	s.mu.Lock()
+	if s.syncActive {
+		s.mu.Unlock()
+		return errors.New("sync already in progress")
+	}
+	s.syncActive = true
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		s.syncActive = false
+		s.mu.Unlock()
+	}()
+	return s.syncReserved(ctx, forcePoll)
+}
+
+func (s *Syncer) syncReserved(ctx context.Context, forcePoll bool) error {
 	// Top-of-cycle invariant: the mount root must exist and be a
 	// directory. If a previous cycle, an external process, or a cloud
 	// clobber wiped it out, refuse to continue rather than recreating
@@ -1940,14 +2631,17 @@ func (s *Syncer) sync(ctx context.Context, forcePoll bool) error {
 
 	s.mu.Unlock()
 
-	if err := s.MaintainWebSocket(ctx); err != nil {
-		s.logf("websocket unavailable; using polling sync: %v", err)
+	if !s.writeOnly {
+		if err := s.MaintainWebSocket(ctx); err != nil {
+			s.logf("websocket unavailable; using polling sync: %v", err)
+		}
 	}
 
 	// Re-acquire lock for the remainder of the sync operation.
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.markReconcileStarted()
+	s.staleAliasSkips = 0
 	if err := s.runClosingDigestJobsLocked(ctx); err != nil {
 		s.markSyncError(err)
 		_ = s.saveState()
@@ -1960,8 +2654,17 @@ func (s *Syncer) sync(ctx context.Context, forcePoll bool) error {
 	}
 
 	conflicted := map[string]struct{}{}
+	if err := s.flushDueOutboxRecords(ctx, conflicted); err != nil {
+		s.markSyncError(err)
+		_ = s.saveState()
+		return err
+	}
 	didPoll := false
-	if !s.state.BootstrapComplete || s.forceFullReconcile {
+	if s.writeOnly {
+		if !s.state.BootstrapComplete {
+			s.markBootstrapComplete()
+		}
+	} else if !s.state.BootstrapComplete || s.forceFullReconcile {
 		if err := s.pullRemote(ctx, conflicted); err != nil {
 			s.markSyncError(err)
 			_ = s.saveState()
@@ -1979,7 +2682,7 @@ func (s *Syncer) sync(ctx context.Context, forcePoll bool) error {
 	}
 
 	shouldPoll := !didPoll && (forcePoll || !s.bootstrapped || s.wsConn == nil)
-	if shouldPoll {
+	if shouldPoll && !s.writeOnly {
 		if err := s.pullRemote(ctx, conflicted); err != nil {
 			s.markSyncError(err)
 			_ = s.saveState()
@@ -2358,6 +3061,29 @@ func (s *Syncer) bootstrapContext(parent context.Context) (context.Context, cont
 	return ctx, wrapped, prog
 }
 
+// outboxContext returns a deadline for a durable writeback/outbox flush. Like
+// bootstrapContext, it is derived from s.rootCtx (NOT the inbound per-cycle
+// ctx) so the tiny per-cycle RELAYFILE_MOUNT_TIMEOUT that bounds a mirror cycle
+// cannot starve an outbound write — a small Slack/Notion writeback must not
+// share, and lose, the same 15s budget as a full-tree pull on a large
+// workspace. rootCtx cancellation (process shutdown) still propagates.
+//
+// Callers MUST defer the returned CancelFunc.
+func (s *Syncer) outboxContext(parent context.Context) (context.Context, context.CancelFunc) {
+	root := s.rootCtx
+	if root == nil {
+		// Defensive: NewSyncer always sets rootCtx, but never derive from a nil
+		// parent — fall back to the inbound ctx so behaviour degrades to the
+		// pre-fix per-cycle deadline rather than panicking.
+		root = parent
+	}
+	timeout := s.outboxFlushTimeout
+	if timeout <= 0 {
+		timeout = defaultOutboxFlushTimeout
+	}
+	return context.WithTimeout(root, timeout)
+}
+
 func (s *Syncer) pullRemote(ctx context.Context, conflicted map[string]struct{}) error {
 	if s.state.EventsCursor != "" && !s.forceFullReconcile {
 		// Skip-if-no-events short-circuit. Most reconcile cycles on a
@@ -2410,6 +3136,7 @@ func (s *Syncer) pullRemote(ctx context.Context, conflicted map[string]struct{})
 			// content already matches.
 			s.state.IncrementalCheckpoint = nil
 			s.state.IncrementalBacklogDraining = false
+			s.clearAllIncrementalReadNotReady()
 			return nil
 		}
 		feed, err := s.client.ListEvents(ctx, s.workspace, s.eventProvider, s.state.EventsCursor, 1)
@@ -2436,6 +3163,10 @@ func (s *Syncer) pullRemote(ctx context.Context, conflicted map[string]struct{})
 		if strings.TrimSpace(nextCursor) != "" && nextCursor != s.state.EventsCursor {
 			s.state.EventsCursor = nextCursor
 		}
+		var notReadyErr *IncrementalReadNotReadyError
+		if errors.As(err, &notReadyErr) {
+			return err
+		}
 		var httpErr *HTTPError
 		if !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusNotFound {
 			return err
@@ -2444,6 +3175,7 @@ func (s *Syncer) pullRemote(ctx context.Context, conflicted map[string]struct{})
 		s.state.EventsCursor = ""
 		s.state.IncrementalCheckpoint = nil
 		s.state.IncrementalBacklogDraining = false
+		s.clearAllIncrementalReadNotReady()
 	}
 
 	// Restart fast-path. When EventsCursor is empty but the state file
@@ -2479,7 +3211,11 @@ func (s *Syncer) pullRemote(ctx context.Context, conflicted map[string]struct{})
 	// for free: a non-empty Files map with BootstrapComplete=false (or an
 	// explicit --full-reconcile) forces the full pull below.
 	if len(s.state.Files) > 0 && !s.state.BootstrapComplete {
-		s.logf("detected non-empty state without completed bootstrap; forcing full reconcile (%d tracked files)", len(s.state.Files))
+		if strings.TrimSpace(s.state.BootstrapCursor) != "" {
+			s.logf("detected non-empty state without completed bootstrap; will resume from persisted cursor (%d files already synced)", s.state.BootstrapFilesSynced)
+		} else {
+			s.logf("detected non-empty state without completed bootstrap; forcing full reconcile (%d tracked files)", len(s.state.Files))
+		}
 	}
 	if s.state.BootstrapComplete && !s.forceFullReconcile && len(s.state.Files) > 0 {
 		cursor, err := s.resolveLatestEventCursor(ctx)
@@ -2534,6 +3270,7 @@ func (s *Syncer) pullRemote(ctx context.Context, conflicted map[string]struct{})
 	}
 	s.state.IncrementalCheckpoint = nil
 	s.state.IncrementalBacklogDraining = false
+	s.clearAllIncrementalReadNotReady()
 	if s.wsConn != nil {
 		return nil
 	}
@@ -3075,13 +3812,21 @@ func isUnderLazyGithubRepoSubtree(remoteRoot, remotePath string) bool {
 	if !isUnderRemoteRoot(remoteRoot, remotePath) {
 		return false
 	}
-	rel := strings.TrimPrefix(remotePath, remoteRoot)
-	rel = strings.TrimPrefix(rel, "/")
-	if rel == "" {
+	absolute := strings.TrimPrefix(remotePath, "/")
+	return isLazyGithubRepoSubtreePath(absolute)
+}
+
+func isLazyGithubRepoSubtreePath(path string) bool {
+	if path == "" {
 		return false
 	}
-	segments := strings.Split(rel, "/")
-	return len(segments) >= 5 && segments[0] == "github" && segments[1] == "repos"
+	segments := strings.Split(path, "/")
+	for i := 0; i+1 < len(segments); i++ {
+		if segments[i] == "github" && segments[i+1] == "repos" {
+			return len(segments[i:]) >= 5
+		}
+	}
+	return false
 }
 
 func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]struct{}, prog bootstrapProgress) error {
@@ -3104,6 +3849,7 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 		s.state.BootstrapStartedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	}
 	maxObservedRevision := ""
+	var transientBootstrapAbort bool
 	for {
 		page, err := s.client.ListTree(ctx, s.workspace, s.remoteRoot, 200, cursor)
 		if err != nil {
@@ -3157,6 +3903,16 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 				filesThisPage++
 				continue
 			}
+			// Skip paths quarantined in a prior cycle due to a file/directory
+			// name collision. Treat as present so the snapshot delete pass does
+			// not remove any locally-mirrored copy. The quarantine is cleared by
+			// markBootstrapComplete so a fixed adapter gets a clean slate.
+			if detail, quarantined := s.state.QuarantinedPaths[remotePath]; quarantined {
+				s.logf("skipping quarantined path %s (%s); fix is adapter-side", remotePath, detail)
+				remotePaths[remotePath] = struct{}{}
+				filesThisPage++
+				continue
+			}
 			readJobs = append(readJobs, bootstrapReadJob{
 				Index:      len(readJobs),
 				RemotePath: remotePath,
@@ -3164,13 +3920,36 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 		}
 		for _, result := range s.readBootstrapFiles(ctx, readJobs, prog) {
 			if result.Err != nil {
+				// Context canceled/deadline exceeded — propagate; the cycle is
+				// being torn down and the next one will resume from the cursor.
+				if ctx.Err() != nil {
+					return result.Err
+				}
 				var httpErr *HTTPError
-				if errors.As(result.Err, &httpErr) && httpErr.StatusCode == http.StatusForbidden {
-					s.logf("skipping denied file: %s", result.RemotePath)
-					if markErr := s.markReadDenied(result.RemotePath); markErr != nil {
-						return markErr
+				if errors.As(result.Err, &httpErr) {
+					if httpErr.StatusCode == http.StatusForbidden {
+						s.logf("skipping denied file: %s", result.RemotePath)
+						if markErr := s.markReadDenied(result.RemotePath); markErr != nil {
+							return markErr
+						}
+						continue
 					}
-					continue
+					// Transient HTTP error (503, 429, etc.): stop the current
+					// page immediately without advancing the cursor. On a full
+					// bootstrap (startedFromEmpty) this guarantees the failing
+					// path is retried next cycle rather than permanently skipped.
+					// On a resumed traversal (startedFromEmpty=false) the cursor
+					// already points past this page, so stopping here is still
+					// safe — the delete pass is skipped on resumed cycles anyway.
+					s.logf("transient error reading %s (status %d); aborting page without advancing cursor so it is retried next cycle: %v", result.RemotePath, httpErr.StatusCode, result.Err)
+					transientBootstrapAbort = true
+					// Preserve any previously-synced files processed on this page
+					// before the abort so the delete pass (if it runs) does not
+					// remove local copies that are still on the server.
+					if _, prevSynced := s.state.Files[result.RemotePath]; prevSynced {
+						remotePaths[result.RemotePath] = struct{}{}
+					}
+					break
 				}
 				return result.Err
 			}
@@ -3180,6 +3959,18 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 			prog.touch()
 			remotePaths[result.RemotePath] = struct{}{}
 			filesThisPage++
+		}
+		// A transient read error stopped the page early. Do not advance the
+		// cursor so the same page (including the failing path) is retried next
+		// cycle. Save state up to the last successfully-committed cursor.
+		if transientBootstrapAbort {
+			if !s.state.BootstrapComplete {
+				s.state.BootstrapFilesSynced += filesThisPage
+				if err := s.saveState(); err != nil {
+					return err
+				}
+			}
+			break
 		}
 		if page.NextCursor == nil || *page.NextCursor == "" {
 			break
@@ -3197,6 +3988,14 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 			}
 			prog.touch()
 		}
+	}
+
+	// A transient read error stopped the page scan early. Bootstrap is not
+	// complete; the cursor is left at the page boundary so the next cycle
+	// retries the failing paths. Skip the delete pass entirely.
+	if transientBootstrapAbort {
+		s.logf("bootstrap paused due to transient read error(s); will resume from last cursor next cycle")
+		return nil
 	}
 
 	// Resumed/partial traversal safety: only run the authoritative
@@ -3363,6 +4162,9 @@ func (s *Syncer) markBootstrapComplete() {
 	s.state.BootstrapStartedAt = ""
 	s.state.BootstrapFilesSynced = 0
 	s.state.BootstrapFilesTotal = 0
+	// Clear persisted quarantine so a fixed adapter gets a clean slate.
+	s.state.QuarantinedPaths = nil
+	s.clearAllIncrementalReadNotReady()
 	// One-shot escape hatch / clobber-remnant recovery: after a single
 	// successful full reconcile, clear the in-memory force flag so
 	// subsequent cycles can use the fast-path again.
@@ -3852,6 +4654,23 @@ func isProviderLayoutAliasSegment(segment string) bool {
 	return false
 }
 
+// isProviderLayoutAliasRemotePath reports whether remotePath lives under a
+// provider layout alias index (by-state, by-id, by-title, ...). Those paths are
+// derived index views: the emitter removes the alias entry when the underlying
+// record changes state, but the events feed may still carry the now-dangling
+// path. A read 404 on such a path means the event is stale, not slow — the
+// alias mirror is reconstructable from the canonical record and the periodic
+// full pull — so the cycle can skip it immediately instead of holding the
+// events cursor for the full read-not-ready TTL.
+func isProviderLayoutAliasRemotePath(remotePath string) bool {
+	for _, segment := range strings.Split(strings.Trim(normalizeRemotePath(remotePath), "/"), "/") {
+		if isProviderLayoutAliasSegment(segment) {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Syncer) pullRemoteIncremental(ctx context.Context, conflicted map[string]struct{}, cursor string) (string, error) {
 	currentCursor := strings.TrimSpace(cursor)
 	safeCursor := currentCursor
@@ -4013,6 +4832,7 @@ func (s *Syncer) applyIncrementalChanges(
 			return err
 		}
 		if skipped {
+			s.clearIncrementalReadNotReady(remotePath)
 			s.markIncrementalCheckpoint(pageStartCursor, pageCursor, "changed", remotePath)
 			continue
 		}
@@ -4020,17 +4840,70 @@ func (s *Syncer) applyIncrementalChanges(
 		if err != nil {
 			var httpErr *HTTPError
 			if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusNotFound {
-				if err := s.applyRemoteDelete(remotePath, conflicted); err != nil {
-					return err
+				// Operator escape hatch (`relayfile writeback skip-stuck`): drop
+				// every unreadable event immediately, regardless of path shape
+				// or TTL, until the optional max budget is exhausted. Once the
+				// budget is hit, preserve the cursor so a follow-up run resumes
+				// from here.
+				if s.skipStuckMode {
+					if s.skipStuckMax > 0 && s.skipStuckCount >= s.skipStuckMax {
+						s.logf("skip-stuck: reached max=%d skipped events; preserving events cursor for next run", s.skipStuckMax)
+						return &IncrementalReadNotReadyError{
+							Path:       remotePath,
+							StatusCode: httpErr.StatusCode,
+							Code:       httpErr.Code,
+							Message:    httpErr.Message,
+						}
+					}
+					s.skipStuckCount++
+					s.logf("skip-stuck: dropping unreadable event for %s (404); advancing events cursor", remotePath)
+					if err := s.applyRemoteDelete(remotePath, conflicted); err != nil {
+						return err
+					}
+					s.markIncrementalCheckpoint(pageStartCursor, pageCursor, "changed", remotePath)
+					continue
 				}
-				s.markIncrementalCheckpoint(pageStartCursor, pageCursor, "changed", remotePath)
-				continue
+				// In-cycle drain of the stuck-event class. A read 404 on a
+				// provider-layout-alias path (by-state, by-id, ...) is a stale
+				// index event: the emitter dropped the alias entry when the
+				// record changed state, but the events feed still carries the
+				// dangling path. Skip it immediately and keep draining the rest
+				// of the page in this same cycle rather than holding the cursor
+				// for the full read-not-ready TTL and exiting after one event.
+				// Canonical records are reconstructable independently, so this
+				// cannot lose committed data; the periodic full pull self-heals
+				// any alias mirror that should still exist.
+				if isProviderLayoutAliasRemotePath(remotePath) {
+					s.staleAliasSkips++
+					s.logf("changed event for %s is a stale index-alias path (read 404); skipping immediately and continuing drain", remotePath)
+					if err := s.applyRemoteDelete(remotePath, conflicted); err != nil {
+						return err
+					}
+					s.markIncrementalCheckpoint(pageStartCursor, pageCursor, "changed", remotePath)
+					continue
+				}
+				if s.incrementalReadNotReadyExpired(remotePath, time.Now().UTC()) {
+					s.logf("changed event for %s remained unreadable for at least %s; treating as deleted and advancing events cursor", remotePath, s.readNotReadyTTL)
+					if err := s.applyRemoteDelete(remotePath, conflicted); err != nil {
+						return err
+					}
+					s.markIncrementalCheckpoint(pageStartCursor, pageCursor, "changed", remotePath)
+					continue
+				}
+				s.logf("changed event for %s is not readable yet; preserving events cursor for retry", remotePath)
+				return &IncrementalReadNotReadyError{
+					Path:       remotePath,
+					StatusCode: httpErr.StatusCode,
+					Code:       httpErr.Code,
+					Message:    httpErr.Message,
+				}
 			}
 			if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusForbidden {
 				s.logf("skipping denied file: %s", remotePath)
 				if markErr := s.markReadDenied(remotePath); markErr != nil {
 					return markErr
 				}
+				s.clearIncrementalReadNotReady(remotePath)
 				s.markIncrementalCheckpoint(pageStartCursor, pageCursor, "changed", remotePath)
 				continue
 			}
@@ -4113,6 +4986,38 @@ func (s *Syncer) markIncrementalCheckpoint(pageStartCursor, pageCursor, phase, r
 		Phase:      strings.TrimSpace(phase),
 		Path:       normalizeRemotePath(remotePath),
 	}
+}
+
+func (s *Syncer) incrementalReadNotReadyExpired(remotePath string, now time.Time) bool {
+	remotePath = normalizeRemotePath(remotePath)
+	if s.state.IncrementalReadNotReadySince == nil {
+		s.state.IncrementalReadNotReadySince = map[string]string{}
+	}
+	raw := strings.TrimSpace(s.state.IncrementalReadNotReadySince[remotePath])
+	if raw == "" {
+		s.state.IncrementalReadNotReadySince[remotePath] = now.Format(time.RFC3339Nano)
+		return false
+	}
+	firstSeen, err := time.Parse(time.RFC3339Nano, raw)
+	if err != nil {
+		s.state.IncrementalReadNotReadySince[remotePath] = now.Format(time.RFC3339Nano)
+		return false
+	}
+	return !now.Before(firstSeen.Add(s.readNotReadyTTL))
+}
+
+func (s *Syncer) clearIncrementalReadNotReady(remotePath string) {
+	if s.state.IncrementalReadNotReadySince == nil {
+		return
+	}
+	delete(s.state.IncrementalReadNotReadySince, normalizeRemotePath(remotePath))
+	if len(s.state.IncrementalReadNotReadySince) == 0 {
+		s.state.IncrementalReadNotReadySince = nil
+	}
+}
+
+func (s *Syncer) clearAllIncrementalReadNotReady() {
+	s.state.IncrementalReadNotReadySince = nil
 }
 
 func (s *Syncer) resolveLatestEventCursor(ctx context.Context) (string, error) {
@@ -4222,7 +5127,12 @@ func cursorResolutionRetryDelay(timeout time.Duration, attempt int) time.Duratio
 	return delay
 }
 
-func (s *Syncer) applyRemoteFile(remotePath string, file RemoteFile, conflicted map[string]struct{}) error {
+func (s *Syncer) applyRemoteFile(remotePath string, file RemoteFile, conflicted map[string]struct{}) (err error) {
+	defer func() {
+		if err == nil {
+			s.clearIncrementalReadNotReady(remotePath)
+		}
+	}()
 	if conflicted != nil {
 		if _, skip := conflicted[remotePath]; skip {
 			return nil
@@ -4266,6 +5176,10 @@ func (s *Syncer) applyRemoteFile(remotePath string, file RemoteFile, conflicted 
 	// materializeProviderLayouts; remote-supplied .layout.md payloads still
 	// pass through to disk unchanged.
 	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+		if isRemotePathCollision(err) {
+			s.quarantineRemotePath(remotePath, "cannot create parent directory", err)
+			return nil
+		}
 		return err
 	}
 	remoteHash := hashBytes(remoteBytes)
@@ -4278,6 +5192,10 @@ func (s *Syncer) applyRemoteFile(remotePath string, file RemoteFile, conflicted 
 	}
 	if shouldWrite {
 		if err := writeFileAtomic(localPath, remoteBytes, 0o644); err != nil {
+			if isRemotePathCollision(err) {
+				s.quarantineRemotePath(remotePath, "cannot write file (target is a directory)", err)
+				return nil
+			}
 			return err
 		}
 	}
@@ -4322,12 +5240,12 @@ func (s *Syncer) canWritePath(filePath string) bool {
 }
 
 func scopeGrantsWrite(scope, filePath string) bool {
-	scope = strings.ToLower(strings.TrimSpace(scope))
+	scope = strings.TrimSpace(scope)
 	if scope == "" {
 		return false
 	}
 	// Short-form scope without plane prefix.
-	if scope == "fs:write" || scope == "fs:manage" {
+	if strings.EqualFold(scope, "fs:write") || strings.EqualFold(scope, "fs:manage") {
 		return true
 	}
 
@@ -4336,9 +5254,9 @@ func scopeGrantsWrite(scope, filePath string) bool {
 		return false
 	}
 
-	plane := segments[0]
-	res := segments[1]
-	act := segments[2]
+	plane := strings.ToLower(strings.TrimSpace(segments[0]))
+	res := strings.ToLower(strings.TrimSpace(segments[1]))
+	act := strings.ToLower(strings.TrimSpace(segments[2]))
 
 	// Plane must be "relayfile" or wildcard.
 	if plane != "relayfile" && plane != "*" {
@@ -4379,7 +5297,12 @@ func scopeGrantsWrite(scope, filePath string) bool {
 	return true
 }
 
-func (s *Syncer) applyRemoteDelete(remotePath string, conflicted map[string]struct{}) error {
+func (s *Syncer) applyRemoteDelete(remotePath string, conflicted map[string]struct{}) (err error) {
+	defer func() {
+		if err == nil {
+			s.clearIncrementalReadNotReady(remotePath)
+		}
+	}()
 	if conflicted != nil {
 		if _, skip := conflicted[remotePath]; skip {
 			return nil
@@ -4722,13 +5645,29 @@ func (s *Syncer) loadState() error {
 		state.Files = map[string]trackedFile{}
 	}
 	s.state = state
+	if s.state.BootstrapComplete && s.state.SyncMode == "write-only" && !s.writeOnly {
+		s.logf("syncMode transition write-only->mirror detected; resetting BootstrapComplete to force a full bootstrap pull (backfills records missed while write-only)")
+		s.state.BootstrapComplete = false
+		s.state.BootstrapCursor = ""
+		s.state.BootstrapStartedAt = ""
+		s.state.BootstrapFilesSynced = 0
+		s.state.BootstrapFilesTotal = 0
+	}
 	if s.githubWorkingTree != nil && strings.TrimSpace(s.state.GithubWorkingTreeHeadSHA) != "" {
 		s.githubWorkingTree.HeadSHA = strings.TrimSpace(s.state.GithubWorkingTreeHeadSHA)
 	}
 	return nil
 }
 
+func (s *Syncer) currentSyncMode() string {
+	if s.writeOnly {
+		return "write-only"
+	}
+	return "mirror"
+}
+
 func (s *Syncer) saveState() error {
+	s.state.SyncMode = s.currentSyncMode()
 	data, err := json.Marshal(s.state)
 	if err != nil {
 		return err
@@ -4740,6 +5679,25 @@ func (s *Syncer) saveState() error {
 		return err
 	}
 	return s.savePublicState()
+}
+
+func (s *Syncer) saveStateWithoutLocalScan() error {
+	s.state.SyncMode = s.currentSyncMode()
+	data, err := json.Marshal(s.state)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(s.stateFile), 0o755); err != nil {
+		return err
+	}
+	if err := writeFileAtomic(s.stateFile, data, 0o644); err != nil {
+		return err
+	}
+	wasLowMemory := s.lowMemory
+	s.lowMemory = true
+	err = s.savePublicState()
+	s.lowMemory = wasLowMemory
+	return err
 }
 
 func (s *Syncer) savePublicState() error {
@@ -4831,6 +5789,13 @@ func (s *Syncer) savePublicState() error {
 		HasConflicts:        pendingConflicts > 0,
 		HasPendingWriteback: pendingWriteback > 0,
 	}
+	outbox := s.summarizeOutbox()
+	if outbox.Pending > 0 {
+		states.HasPendingWriteback = true
+	}
+	if outbox.NeedsAttention > 0 {
+		states.OutboxNeedsAttention = true
+	}
 	staleAfter := ""
 	if lastOK, err := parseStateTime(s.state.LastSuccessfulReconcileAt); err == nil && !lastOK.IsZero() && s.interval > 0 {
 		staleAfter = lastOK.Add(2 * s.interval).UTC().Format(time.RFC3339Nano)
@@ -4840,6 +5805,8 @@ func (s *Syncer) savePublicState() error {
 	switch {
 	case states.Offline:
 		status = "offline"
+	case states.OutboxNeedsAttention:
+		status = "writeback-needs-attention"
 	case states.HasConflicts:
 		status = "conflict"
 	case states.HasPendingWriteback:
@@ -4869,11 +5836,16 @@ func (s *Syncer) savePublicState() error {
 	if mode == "" {
 		mode = "poll"
 	}
+	syncMode := "mirror"
+	if s.writeOnly {
+		syncMode = "write-only"
+	}
 	public := publicState{
 		WorkspaceID:               s.workspace,
 		RemoteRoot:                s.remoteRoot,
 		LocalRoot:                 s.localRoot,
 		Mode:                      mode,
+		SyncMode:                  syncMode,
 		IntervalMs:                s.interval.Milliseconds(),
 		LastReconcileAt:           s.state.LastReconcileAt,
 		LastSuccessfulReconcileAt: s.state.LastSuccessfulReconcileAt,
@@ -4889,6 +5861,7 @@ func (s *Syncer) savePublicState() error {
 		Files:                     files,
 		LowMemory:                 s.lowMemory,
 		Counters:                  s.state.Counters,
+		Outbox:                    outbox,
 		LastAppliedRevision:       s.state.LastAppliedRevision,
 		Bootstrap:                 bootstrap,
 	}
@@ -4902,6 +5875,16 @@ func (s *Syncer) savePublicState() error {
 			public.Counters.CircuitOpenEvents = snap.OpenEvents
 		}
 		public.Circuit = &snap
+	}
+	// ReconcileAgeSecs: seconds since last successful reconcile.
+	if lastOK, err := parseStateTime(s.state.LastSuccessfulReconcileAt); err == nil && !lastOK.IsZero() {
+		public.ReconcileAgeSecs = int64(time.Since(lastOK).Seconds())
+	}
+	// CredExpiresInSecs: seconds until access token expires (negative = expired).
+	if s.credExpiresAt != "" {
+		if exp, err := time.Parse(time.RFC3339, s.credExpiresAt); err == nil {
+			public.CredExpiresInSecs = int64(time.Until(exp).Seconds())
+		}
 	}
 	if err := os.MkdirAll(filepath.Dir(s.publicStatePath), 0o755); err != nil {
 		return err
@@ -5687,7 +6670,7 @@ func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
 	// otherwise be the mechanism by which the mount root was clobbered
 	// by an 11MB file. If the target exists and is a directory, refuse.
 	if info, err := os.Lstat(path); err == nil && info.IsDir() {
-		return fmt.Errorf("refusing to replace directory %s with a file", path)
+		return fmt.Errorf("refusing to replace directory %s with a file: %w", path, os.ErrExist)
 	}
 	if err := os.Rename(tmpName, path); err != nil {
 		return err

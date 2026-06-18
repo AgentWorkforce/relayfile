@@ -82,13 +82,13 @@ async function waitForWebSocket(): Promise<ProactiveMockWebSocket> {
 
 async function waitForExpectation(check: () => void): Promise<void> {
   let lastError: unknown;
-  for (let attempt = 0; attempt < 20; attempt += 1) {
+  for (let attempt = 0; attempt < 500; attempt += 1) {
     try {
       check();
       return;
     } catch (error) {
       lastError = error;
-      await new Promise((resolve) => setTimeout(resolve, 0));
+      await new Promise((resolve) => setTimeout(resolve, 10));
     }
   }
   throw lastError;
@@ -259,8 +259,11 @@ describe("RelayFileClient — existing methods", () => {
         { coalesce: "none" },
       );
 
-      const socket = await waitForWebSocket();
-      expect(ProactiveMockWebSocket.instances).toHaveLength(1);
+      await waitForExpectation(() => {
+        const lastSocket = ProactiveMockWebSocket.instances[ProactiveMockWebSocket.instances.length - 1];
+        expect(lastSocket?.url).toBe("wss://relay.test/v1/workspaces/ws_acme/fs/ws?token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ3b3Jrc3BhY2VfaWQiOiJ3c19hY21lIiwiYWdlbnRfbmFtZSI6InN1cHBvcnQtYWdlbnQiLCJhdWQiOlsicmVsYXlmaWxlIl19.sig&from=now&path=%2Flinear%2F**&path=%2Flinear%2Fissues%2F**");
+      });
+      const socket = ProactiveMockWebSocket.instances[ProactiveMockWebSocket.instances.length - 1]!;
       socket.emit("open", {});
       socket.emit("message", {
         data: JSON.stringify({
@@ -770,6 +773,55 @@ describe("RelayFileClient — existing methods", () => {
       });
     });
 
+    it("listChangesSince normalizes retained flat filesystem events into ChangeEvents", async () => {
+      const fetchImpl = vi.fn(async (url: string) => {
+        if (url.includes("/fs/changes?since=")) {
+          return {
+            ok: true,
+            status: 200,
+            headers: new Headers({ "content-type": "application/json" }),
+            json: async () => ({
+              events: [
+                {
+                  eventId: "evt_slack_reply_1",
+                  type: "file.updated",
+                  path: "/slack/channels/C1/messages/m1.json",
+                  revision: "rev_1",
+                  provider: "slack",
+                  timestamp: "2026-05-11T00:00:00.000Z",
+                },
+              ],
+            }),
+            text: async () => "",
+          } as unknown as Response;
+        }
+        throw new Error(`Unexpected fetch URL: ${url}`);
+      });
+      const client = makeClient(fetchImpl as unknown as typeof fetch, {
+        token: makeWorkspaceToken("ws_acme", "support-agent"),
+      });
+
+      const result = await client.listChangesSince("2026-05-11T00:00:00.000Z");
+
+      expect(result.events[0]).toMatchObject({
+        id: "evt_slack_reply_1",
+        workspace: "ws_acme",
+        type: "relayfile.changed",
+        occurredAt: "2026-05-11T00:00:00.000Z",
+        resource: {
+          path: "/slack/channels/C1/messages/m1.json",
+          provider: "slack",
+        },
+        summary: {
+          title: "m1",
+        },
+      });
+      await expect(result.events[0]!.expand("summary")).resolves.toMatchObject({
+        level: "summary",
+        path: "/slack/channels/C1/messages/m1.json",
+      });
+    });
+
     it("getResourceAtEvent falls back to the retained change-log endpoint when the cache is cold", async () => {
       const fetchImpl = vi.fn(async (url: string) => {
         if (url.includes("/fs/changes/resource?eventId=evt_rest_1")) {
@@ -1173,10 +1225,18 @@ describe("RelayFileClient — existing methods", () => {
         path: "/github/push/abc123.json",
         baseRevision: "rev_3",
         content: "{}",
-        contentIdentity: { kind: "github.push", key: "abc123" },
+        contentIdentity: {
+          kind: "github.push",
+          key: "abc123",
+          ttlSeconds: 2592000,
+        },
       });
       const body = JSON.parse((f.mock.calls[0]![1] as RequestInit).body as string);
-      expect(body.contentIdentity).toEqual({ kind: "github.push", key: "abc123" });
+      expect(body.contentIdentity).toEqual({
+        kind: "github.push",
+        key: "abc123",
+        ttlSeconds: 2592000,
+      });
     });
 
     it("omits contentIdentity from the body when not provided", async () => {
@@ -1245,6 +1305,44 @@ describe("RelayFileClient — existing methods", () => {
       expect(url).toContain("provider=github");
       expect(url).toContain("limit=10");
     });
+
+    it("normalizes envelope-style events into filesystem events", async () => {
+      const f = mockFetch({
+        events: [
+          {
+            id: "evt_envelope_1",
+            type: "relayfile.changed",
+            occurredAt: "2026-05-11T00:00:00.000Z",
+            digest: "sha256:envelope",
+            resource: {
+              path: "/slack/channels/C1/messages/m1.json",
+              provider: "slack",
+            },
+          },
+        ],
+        nextCursor: "evt_envelope_1",
+      });
+      const client = makeClient(f);
+
+      const result = await client.getEvents("ws_acme");
+
+      expect(result).toEqual({
+        events: [
+          {
+            eventId: "evt_envelope_1",
+            type: "file.updated",
+            path: "/slack/channels/C1/messages/m1.json",
+            revision: "sha256:envelope",
+            contentHash: "sha256:envelope",
+            origin: undefined,
+            provider: "slack",
+            correlationId: undefined,
+            timestamp: "2026-05-11T00:00:00.000Z",
+          },
+        ],
+        nextCursor: "evt_envelope_1",
+      });
+    });
   });
 
   // ---- bulkWrite ----
@@ -1267,7 +1365,15 @@ describe("RelayFileClient — existing methods", () => {
       const res: BulkWriteResponse = await client.bulkWrite({
         workspaceId: "ws_acme",
         files: [
-          { path: "/a.md", content: "a" },
+          {
+            path: "/a.md",
+            content: "a",
+            contentIdentity: {
+              kind: "mount-writeback-create-draft",
+              key: "ws_acme:/a.md:hash",
+              ttlSeconds: 2592000,
+            },
+          },
           { path: "/b.md", content: "b", encoding: "utf-8" },
         ],
       });
@@ -1289,7 +1395,15 @@ describe("RelayFileClient — existing methods", () => {
       expect(init.method).toBe("POST");
       expect(JSON.parse(init.body as string)).toEqual({
         files: [
-          { path: "/a.md", content: "a" },
+          {
+            path: "/a.md",
+            content: "a",
+            contentIdentity: {
+              kind: "mount-writeback-create-draft",
+              key: "ws_acme:/a.md:hash",
+              ttlSeconds: 2592000,
+            },
+          },
           { path: "/b.md", content: "b", encoding: "utf-8" },
         ],
       });
@@ -1385,7 +1499,20 @@ describe("RelayFileClient — existing methods", () => {
       client.connectWebSocket("ws_acme", { token: "ws_token" });
 
       expect(MockWebSocket.instances).toHaveLength(1);
-      expect(MockWebSocket.instances[0]!.url).toBe("wss://relay.test/v1/workspaces/ws_acme/fs/ws?token=ws_token");
+      expect(MockWebSocket.instances[0]!.url).toBe("wss://relay.test/v1/workspaces/ws_acme/fs/ws?token=ws_token&from=now");
+    });
+
+    it("forwards cursor and path filters to the WebSocket endpoint", () => {
+      const client = makeClient(mockFetch({ path: "/", entries: [], nextCursor: null }));
+
+      client.connectWebSocket("ws_acme", {
+        token: "ws_token",
+        cursor: "evt_42",
+        paths: ["/slack/channels/C1/**", "/github/repos/acme/api/pulls/*"]
+      });
+
+      expect(MockWebSocket.instances).toHaveLength(1);
+      expect(MockWebSocket.instances[0]!.url).toBe("wss://relay.test/v1/workspaces/ws_acme/fs/ws?token=ws_token&cursor=evt_42&path=%2Fslack%2Fchannels%2FC1%2F**&path=%2Fgithub%2Frepos%2Facme%2Fapi%2Fpulls%2F*");
     });
 
     it("emits parsed filesystem events to the event handler", () => {
@@ -1460,6 +1587,105 @@ describe("RelayFileClient — existing methods", () => {
       const client = makeClient(f);
       const res = await client.getSyncStatus("ws_acme");
       expect(res.providers).toHaveLength(1);
+    });
+
+    it("waitForData polls sync status until the provider is ready", async () => {
+      vi.useFakeTimers();
+      const responses: SyncStatusResponse[] = [
+        { workspaceId: "ws_acme", providers: [{ provider: "github", status: "syncing" }] },
+        { workspaceId: "ws_acme", providers: [{ provider: "github", status: "ready" }] },
+      ];
+      const f = vi.fn(async () => {
+        const body = responses.shift() ?? responses[responses.length - 1];
+        return {
+          ok: true,
+          status: 200,
+          headers: new Headers({ "content-type": "application/json" }),
+          json: () => Promise.resolve(body),
+          text: () => Promise.resolve(JSON.stringify(body)),
+        } as unknown as Response;
+      });
+      const client = makeClient(f);
+      const onPoll = vi.fn();
+
+      const promise = client.waitForData("ws_acme", "github", {
+        pollIntervalMs: 1000,
+        onPoll,
+      });
+
+      await vi.advanceTimersByTimeAsync(1000);
+      const status = await promise;
+      vi.useRealTimers();
+
+      expect(status.status).toBe("ready");
+      expect(f).toHaveBeenCalledTimes(2);
+      expect(String(f.mock.calls[0]![0])).toContain("/v1/workspaces/ws_acme/sync/status?provider=github");
+      expect(onPoll).toHaveBeenCalledTimes(2);
+    });
+
+    it("waitForData treats ready=true as data-ready", async () => {
+      const payload: SyncStatusResponse = {
+        workspaceId: "ws_acme",
+        providers: [{ provider: "linear", status: "syncing", ready: true }],
+      };
+      const client = makeClient(mockFetch(payload));
+
+      const status = await client.waitForData("ws_acme", "linear");
+
+      expect(status.ready).toBe(true);
+    });
+
+    it("waitForData treats OSS healthy with provider progress as data-ready", async () => {
+      const payload: SyncStatusResponse = {
+        workspaceId: "ws_acme",
+        providers: [{ provider: "linear", status: "healthy", cursor: "env_1" }],
+      };
+      const client = makeClient(mockFetch(payload));
+
+      const status = await client.waitForData("ws_acme", "linear");
+
+      expect(status.status).toBe("healthy");
+      expect(status.cursor).toBe("env_1");
+    });
+
+    it("waitForData does not treat bare OSS healthy as data-ready", async () => {
+      vi.useFakeTimers();
+      const payload: SyncStatusResponse = {
+        workspaceId: "ws_acme",
+        providers: [{ provider: "linear", status: "healthy" }],
+      };
+      const client = makeClient(mockFetch(payload));
+
+      try {
+        const promise = client.waitForData("ws_acme", "linear", {
+          pollIntervalMs: 500,
+          timeoutMs: 1_000,
+        });
+        const rejection = expect(promise).rejects.toThrow(
+          "Timed out waiting for linear data"
+        );
+
+        await vi.advanceTimersByTimeAsync(1_000);
+
+        await rejection;
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("waitForData ignores invalid returned provider ids while matching the requested provider", async () => {
+      const payload: SyncStatusResponse = {
+        workspaceId: "ws_acme",
+        providers: [
+          { provider: " ", status: "ready" },
+          { provider: "github", status: "ready" },
+        ],
+      };
+      const client = makeClient(mockFetch(payload));
+
+      const status = await client.waitForData("ws_acme", "github");
+
+      expect(status.provider).toBe("github");
     });
 
     it("triggerSyncRefresh sends provider and reason", async () => {
@@ -1990,6 +2216,129 @@ describe("RelayFileClient — new webhook/writeback methods", () => {
     );
     expect(body.timestamp).toBe("2026-03-14T12:00:00Z");
     expect(body.headers["X-GitHub-Event"]).toBe("issues");
+  });
+
+  it("registerWebhook sends outbound subscription details", async () => {
+    const f = mockFetch({ subscriptionId: "whsub_1" });
+    const client = makeClient(f);
+
+    const res = await client.registerWebhook({
+      workspaceId: "ws_acme",
+      url: "https://factory.example.com/relayfile",
+      pathGlobs: ["/github/repos/acme/api/issues/by-id/**"],
+      secret: "whsec_test",
+    });
+
+    expect(res.subscriptionId).toBe("whsub_1");
+    const url = f.mock.calls[0]![0] as string;
+    expect(url).toContain("/v1/workspaces/ws_acme/webhooks");
+    const init = f.mock.calls[0]![1] as RequestInit;
+    expect(init.method).toBe("POST");
+    const body = JSON.parse(init.body as string);
+    expect(body.url).toBe("https://factory.example.com/relayfile");
+    expect(body.pathGlobs).toEqual(["/github/repos/acme/api/issues/by-id/**"]);
+    expect(body.secret).toBe("whsec_test");
+  });
+
+  it("listWebhooks and deleteWebhook target outbound subscription routes", async () => {
+    const f = mockFetch([
+      {
+        id: "whsub_1",
+        url: "https://factory.example.com/relayfile",
+        pathGlobs: ["/linear/issues/**"],
+        createdAt: "2026-06-15T00:00:00.000Z",
+        updatedAt: "2026-06-15T00:00:00.000Z",
+        health: {
+          lastDeliveryAt: null,
+          lastSuccessAt: null,
+          lastError: null,
+          consecutiveFailures: 0,
+        },
+      },
+    ]);
+    const client = makeClient(f);
+
+    const hooks = await client.listWebhooks("ws_acme");
+    expect(hooks[0]?.id).toBe("whsub_1");
+    expect(f.mock.calls[0]![0] as string).toContain("/v1/workspaces/ws_acme/webhooks");
+
+    f.mockResolvedValueOnce({
+      ok: true,
+      status: 204,
+      headers: new Headers(),
+      json: () => Promise.resolve(null),
+      text: () => Promise.resolve(""),
+    } as unknown as Response);
+    await client.deleteWebhook("ws_acme", "whsub_1");
+    expect(f.mock.calls[1]![0] as string).toContain("/v1/workspaces/ws_acme/webhooks/whsub_1");
+    expect((f.mock.calls[1]![1] as RequestInit).method).toBe("DELETE");
+  });
+
+  it("lists and replays outbound webhook delivery dead letters", async () => {
+    const f = mockFetch({
+      items: [
+        {
+          deliveryId: "whdel_1",
+          workspaceId: "ws_acme",
+          subscriptionId: "whsub_1",
+          eventId: "evt_10",
+          url: "https://factory.example.com/relayfile",
+          failedAt: "2026-06-15T00:00:00.000Z",
+          attemptCount: 3,
+          lastError: "webhook endpoint returned 500",
+          replayCount: 0,
+          status: "dead_lettered",
+        },
+      ],
+      nextCursor: null,
+    });
+    const client = makeClient(f);
+
+    const dlq = await client.getWebhookDeadLetters("ws_acme", {
+      cursor: "2026-06-14T00:00:00.000Z",
+      limit: 10,
+    });
+    expect(dlq.items[0]?.eventId).toBe("evt_10");
+    expect(f.mock.calls[0]![0] as string).toContain(
+      "/v1/workspaces/ws_acme/webhooks/dlq?cursor=2026-06-14T00%3A00%3A00.000Z&limit=10",
+    );
+
+    f.mockResolvedValueOnce({
+      ok: true,
+      status: 202,
+      headers: new Headers({ "content-type": "application/json" }),
+      json: () => Promise.resolve({ status: "queued", id: "whdel_1" }),
+      text: () => Promise.resolve(JSON.stringify({ status: "queued", id: "whdel_1" })),
+    } as unknown as Response);
+    const replay = await client.replayWebhookDeadLetter("ws_acme", "whdel_1");
+    expect(replay.status).toBe("queued");
+    expect(f.mock.calls[1]![0] as string).toContain(
+      "/v1/workspaces/ws_acme/webhooks/dlq/whdel_1/replay",
+    );
+  });
+
+  it("webhook methods reject missing required identifiers before issuing a request", async () => {
+    const f = mockFetch({});
+    const client = makeClient(f);
+
+    await expect(
+      client.registerWebhook({ workspaceId: "", url: "https://x", pathGlobs: ["/a"] }),
+    ).rejects.toThrow("workspaceId is required");
+    await expect(
+      client.registerWebhook({ workspaceId: "ws_acme", url: "", pathGlobs: ["/a"] }),
+    ).rejects.toThrow("url is required");
+    await expect(client.listWebhooks("")).rejects.toThrow("workspaceId is required");
+    await expect(client.deleteWebhook("ws_acme", "")).rejects.toThrow(
+      "subscriptionId is required",
+    );
+    await expect(client.getWebhookDeadLetters("")).rejects.toThrow(
+      "workspaceId is required",
+    );
+    await expect(client.replayWebhookDeadLetter("ws_acme", "")).rejects.toThrow(
+      "deliveryId is required",
+    );
+
+    expect(f).not.toHaveBeenCalled();
   });
 
   it("listPendingWritebacks GETs writeback/pending", async () => {

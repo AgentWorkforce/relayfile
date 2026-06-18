@@ -11,6 +11,7 @@ import {
   type DeleteFileInput,
   type DeadLetterItem,
   type DeadLetterFeedResponse,
+  type DeleteWebhookOptions,
   type DiscardForkInput,
   type ErrorResponse,
   type EventFeedResponse,
@@ -26,6 +27,8 @@ import {
   type GetSyncDeadLettersOptions,
   type GetSyncIngressStatusOptions,
   type GetSyncStatusOptions,
+  type GetWebhookDeadLettersOptions,
+  type ListWebhooksOptions,
   type ListTreeOptions,
   type OperationFeedResponse,
   type OperationStatusResponse,
@@ -33,26 +36,35 @@ import {
   type ResourceAtEventResult,
   type ReadFileInput,
   type QueryFilesOptions,
+  type RegisterWebhookInput,
+  type RegisterWebhookResponse,
+  type RelayFileReadCacheOptions,
   type Subscription,
   type SyncIngressStatusResponse,
+  type SyncProviderStatus,
   type SyncStatusResponse,
   type TreeResponse,
   type WriteFileInput,
   type WriteQueuedResponse,
   type IngestWebhookInput,
   type WritebackItem,
+  type WebhookDeliveryDeadLetterFeedResponse,
+  type WebhookSubscription,
   type AckWritebackInput,
   type AckWritebackResponse,
+  type SweepWritebackDraftsInput,
+  type SweepWritebackDraftsResponse,
   type ChangeEvent,
   type ChangeLogQueryResult,
   type ChangeStreamConnection,
   type ChangeStreamConnectionOptions,
   type Expansion,
   type ExpansionLevel,
-  type SubscribeOptions
+  type SubscribeOptions,
+  type WaitForDataOptions
 } from "./types.js";
 import type { ForkHandle } from "@relayfile/core";
-import { RelayFileSync } from "./sync.js";
+import { RelayFileSync, normalizeFilesystemEvent } from "./sync.js";
 import {
   InvalidStateError,
   PayloadTooLargeError,
@@ -106,6 +118,12 @@ export interface RelayFileClientOptions {
   userAgent?: string;
   retry?: RelayFileRetryOptions;
   changeLog?: RelayFileChangeLogOptions;
+  /**
+   * Client-side file read cache with in-flight deduplication.
+   * Enabled by default. Set to `false` to disable.
+   * Active change streams automatically evict paths on remote mutations.
+   */
+  readCache?: false | RelayFileReadCacheOptions;
 }
 
 interface NormalizedRetryOptions {
@@ -139,6 +157,9 @@ export interface WebSocketConnection {
 
 export interface ConnectWebSocketOptions {
   token?: string;
+  from?: "now" | "legacy";
+  cursor?: string;
+  paths?: string[];
   onEvent?: (event: FilesystemEvent) => void;
 }
 
@@ -153,8 +174,14 @@ const DEFAULT_CHANGE_COALESCE_MS = 200;
 const DEFAULT_CHANGE_LOG_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 const DEFAULT_CHANGE_LOG_MAX_ENTRIES = 10_000;
 const CLIENT_TOKEN_STREAM_KEY = "__client__";
+const STABLE_FALLBACK_CHANGE_TIMESTAMP = "1970-01-01T00:00:00.000Z";
 
 type JsonObject = Record<string, unknown>;
+
+interface StreamStartOptions {
+  from?: "now" | "legacy";
+  cursor?: string;
+}
 
 interface JwtClaimsShape {
   workspace_id?: unknown;
@@ -188,6 +215,87 @@ const changeStreamManagers = new WeakMap<RelayFileClient, Map<string, RelayFileC
 const changeLogCaches = new WeakMap<RelayFileClient, Map<string, WorkspaceChangeLogCache>>();
 const changeLogSettings = new WeakMap<RelayFileClient, NormalizedChangeLogOptions>();
 const pendingChangeHydrations = new WeakMap<RelayFileClient, Map<string, Map<string, Promise<CachedChangeRecord | null>>>>();
+const fileReadCaches = new WeakMap<RelayFileClient, FileReadCache | false>();
+
+const DEFAULT_READ_CACHE_TTL_MS = 5_000;
+const DEFAULT_READ_CACHE_MAX_ENTRIES = 500;
+
+interface ReadCacheEntry {
+  value: FileReadResponse;
+  expiresAt: number;
+}
+
+class FileReadCache {
+  private readonly ttlMs: number;
+  private readonly maxEntries: number;
+  private readonly entries = new Map<string, ReadCacheEntry>();
+  private readonly inFlight = new Map<string, Promise<FileReadResponse>>();
+
+  constructor(options?: RelayFileReadCacheOptions) {
+    this.ttlMs = options?.ttlMs ?? DEFAULT_READ_CACHE_TTL_MS;
+    this.maxEntries = options?.maxEntries ?? DEFAULT_READ_CACHE_MAX_ENTRIES;
+  }
+
+  get(key: string): FileReadResponse | undefined {
+    const entry = this.entries.get(key);
+    if (!entry) return undefined;
+    if (Date.now() > entry.expiresAt) {
+      this.entries.delete(key);
+      return undefined;
+    }
+    return entry.value;
+  }
+
+  set(key: string, value: FileReadResponse): void {
+    if (this.entries.size >= this.maxEntries && !this.entries.has(key)) {
+      const oldest = this.entries.keys().next().value;
+      if (oldest !== undefined) {
+        this.entries.delete(oldest);
+      }
+    }
+    this.entries.set(key, { value, expiresAt: Date.now() + this.ttlMs });
+  }
+
+  evict(workspaceId: string, path: string): void {
+    this.entries.delete(`${workspaceId}:${path}`);
+    this.inFlight.delete(`${workspaceId}:${path}`);
+  }
+
+  getInFlight(key: string): Promise<FileReadResponse> | undefined {
+    return this.inFlight.get(key);
+  }
+
+  setInFlight(key: string, promise: Promise<FileReadResponse>): void {
+    this.inFlight.set(key, promise);
+    promise.then(
+      (result) => {
+        if (this.inFlight.get(key) === promise) {
+          this.inFlight.delete(key);
+          this.set(key, result);
+        }
+      },
+      () => {
+        if (this.inFlight.get(key) === promise) {
+          this.inFlight.delete(key);
+        }
+      }
+    );
+  }
+}
+
+function getFileReadCache(client: RelayFileClient): FileReadCache | false {
+  const cached = fileReadCaches.get(client);
+  if (cached !== undefined) return cached;
+  return false;
+}
+
+function initFileReadCache(client: RelayFileClient, options: RelayFileClientOptions): void {
+  if (options.readCache === false) {
+    fileReadCaches.set(client, false);
+  } else {
+    fileReadCaches.set(client, new FileReadCache(options.readCache));
+  }
+}
 
 function createM2NotImplementedError(feature: string): Error & { code: "M2_NOT_IMPLEMENTED" } {
   const error = new Error(`M2_NOT_IMPLEMENTED: ${feature} is reserved for proactive runtime M2.`) as Error & {
@@ -306,6 +414,39 @@ function normalizeErrorDetails(data: Record<string, unknown>, explicitDetails: u
   return Object.keys(details).length > 0 ? details : undefined;
 }
 
+function normalizeProviderId(value: string): string {
+  const normalized = value.trim().toLowerCase();
+  if (!normalized) {
+    throw new Error("provider is required.");
+  }
+  return normalized;
+}
+
+function normalizeProviderIdOrNull(value: string): string | null {
+  const normalized = value.trim().toLowerCase();
+  return normalized || null;
+}
+
+function normalizePositiveInteger(value: number, field: string): number {
+  const normalized = Math.floor(value);
+  if (!Number.isFinite(normalized) || normalized <= 0) {
+    throw new Error(`${field} must be a positive integer.`);
+  }
+  return normalized;
+}
+
+function providerDataReady(status: SyncProviderStatus): boolean {
+  return (
+    status.ready === true ||
+    status.status === "ready" ||
+    (status.status === "healthy" && providerHasProgress(status))
+  );
+}
+
+function providerHasProgress(status: SyncProviderStatus): boolean {
+  return Boolean(status.cursor || status.watermarkTs);
+}
+
 class RelayFileWebSocketConnection implements WebSocketConnection {
   private readonly socket: WebSocket;
   private readonly handlers: {
@@ -355,7 +496,7 @@ class RelayFileWebSocketConnection implements WebSocketConnection {
         if (raw.path !== undefined && typeof raw.path !== "string") {
           throw new Error("Invalid WebSocket event: 'path' must be a string.");
         }
-        parsed = raw as FilesystemEvent;
+        parsed = normalizeFilesystemEvent(raw as Parameters<typeof normalizeFilesystemEvent>[0]);
       } catch (error) {
         const parseError = error instanceof Error ? error : new Error("Failed to parse WebSocket event payload.");
         for (const handler of this.handlers.error) {
@@ -526,6 +667,15 @@ class RelayFileChangeSubscription {
     await drain;
   }
 
+  serverPathFilters(): string[] {
+    const filters = new Set<string>();
+    const patterns = this.pathScopes ?? this.globPatterns;
+    for (const pattern of patterns) {
+      filters.add(`/${pattern.join("/")}`);
+    }
+    return Array.from(filters);
+  }
+
   private matches(path: string): boolean {
     const pathSegments = normalizeChangePath(path);
     const matchesGlob = this.globPatterns.some((pattern) => matchChangeSegments(pattern, pathSegments));
@@ -562,6 +712,7 @@ class RelayFileChangeStreamManager {
   private readonly subscriptions = new Set<RelayFileChangeSubscription>();
   private openHandleCount = 0;
   private sync?: RelayFileSync;
+  private activePathFilterKey?: string;
   private readyResolved = false;
   private readonly readyInternal: Promise<void>;
   private resolveReady!: () => void;
@@ -571,7 +722,8 @@ class RelayFileChangeStreamManager {
     private readonly client: RelayFileClient,
     private readonly workspaceId: string,
     private readonly token: string | undefined,
-    private readonly baseUrl: string
+    private readonly baseUrl: string,
+    private readonly startOptions: StreamStartOptions
   ) {
     this.readyInternal = new Promise<void>((resolve, reject) => {
       this.resolveReady = resolve;
@@ -586,11 +738,13 @@ class RelayFileChangeStreamManager {
   addSubscription(globs: string[], onChange: (event: ChangeEvent) => void, options?: SubscribeOptions): Subscription {
     const subscription = new RelayFileChangeSubscription(this, globs, onChange, options);
     this.subscriptions.add(subscription);
+    this.restartIfPathScopeChanged();
     this.ensureStarted();
     return {
       unsubscribe: async () => {
         this.subscriptions.delete(subscription);
         await subscription.close();
+        this.restartIfPathScopeChanged();
         await this.maybeStop();
       }
     };
@@ -598,11 +752,13 @@ class RelayFileChangeStreamManager {
 
   open(): ChangeStreamConnection {
     this.openHandleCount += 1;
+    this.restartIfPathScopeChanged();
     this.ensureStarted();
     return {
       ready: this.ready,
       unsubscribe: async () => {
         this.openHandleCount = Math.max(0, this.openHandleCount - 1);
+        this.restartIfPathScopeChanged();
         await this.maybeStop();
       }
     };
@@ -641,11 +797,16 @@ class RelayFileChangeStreamManager {
     if (this.sync) {
       return;
     }
+    const paths = this.serverPathFilters();
+    this.activePathFilterKey = paths.join("\n");
     const sync = new RelayFileSync({
       client: this.client,
       workspaceId: this.workspaceId,
       baseUrl: this.baseUrl,
       token: this.token,
+      from: this.startOptions.from,
+      cursor: this.startOptions.cursor,
+      paths,
       onPollingFallback: () => {
         this.resolveReadyOnce();
       }
@@ -664,6 +825,14 @@ class RelayFileChangeStreamManager {
       }
     });
     sync.on("event", (event) => {
+      // Evict the cached read when the server signals a mutation so stale
+      // content is never returned after a change event arrives.
+      if (event.type === "file.updated" || event.type === "file.created" || event.type === "file.deleted") {
+        const cacheOrFalse = getFileReadCache(this.client);
+        if (cacheOrFalse !== false) {
+          cacheOrFalse.evict(this.workspaceId, event.path);
+        }
+      }
       for (const subscription of this.subscriptions) {
         subscription.push(event);
       }
@@ -673,6 +842,36 @@ class RelayFileChangeStreamManager {
     if (sync.getState() === "polling") {
       this.resolveReadyOnce();
     }
+  }
+
+  private restartIfPathScopeChanged(): void {
+    if (!this.sync) {
+      return;
+    }
+    const nextKey = this.serverPathFilters().join("\n");
+    const currentKey = this.activePathFilterKey;
+    if (nextKey === currentKey) {
+      return;
+    }
+    const sync = this.sync;
+    this.sync = undefined;
+    void sync.stop();
+    if (this.openHandleCount > 0 || this.subscriptions.size > 0) {
+      this.ensureStarted();
+    }
+  }
+
+  private serverPathFilters(): string[] {
+    if (this.openHandleCount > 0) {
+      return [];
+    }
+    const filters = new Set<string>();
+    for (const subscription of this.subscriptions) {
+      for (const path of subscription.serverPathFilters()) {
+        filters.add(path);
+      }
+    }
+    return Array.from(filters).sort();
   }
 
   private resolveReadyOnce(): void {
@@ -690,6 +889,7 @@ class RelayFileChangeStreamManager {
     if (this.sync) {
       const sync = this.sync;
       this.sync = undefined;
+      this.activePathFilterKey = undefined;
       await sync.stop();
     }
     const managers = changeStreamManagers.get(this.client);
@@ -708,19 +908,23 @@ function getStreamManager(
   client: RelayFileClient,
   workspaceId: string,
   token: string | undefined,
-  baseUrl: string
+  baseUrl: string,
+  startOptions: StreamStartOptions = {}
 ): RelayFileChangeStreamManager {
   let managers = changeStreamManagers.get(client);
   if (!managers) {
     managers = new Map();
     changeStreamManagers.set(client, managers);
   }
-  const key = `${workspaceId}:${token ?? CLIENT_TOKEN_STREAM_KEY}`;
+  const key = `${workspaceId}:${token ?? CLIENT_TOKEN_STREAM_KEY}:${startOptions.from ?? "now"}:${startOptions.cursor ?? ""}`;
   const existing = managers.get(key);
   if (existing) {
     return existing;
   }
-  const manager = new RelayFileChangeStreamManager(client, workspaceId, token, baseUrl);
+  const manager = new RelayFileChangeStreamManager(client, workspaceId, token, baseUrl, {
+    from: startOptions.from,
+    cursor: startOptions.cursor
+  });
   managers.set(key, manager);
   return manager;
 }
@@ -1079,23 +1283,66 @@ function toChangeEvent(
   };
 }
 
-function normalizeWireChangeEvent(payload: unknown): ChangeEventWireShape {
+function normalizeWireChangeEvent(payload: unknown, workspaceId?: string): ChangeEventWireShape {
   const data = (payload ?? {}) as Record<string, unknown>;
   const resource = (data.resource ?? {}) as Record<string, unknown>;
   const summary = (data.summary ?? {}) as Record<string, unknown>;
+  const path = typeof resource.path === "string"
+    ? resource.path
+    : typeof data.path === "string"
+      ? data.path
+      : "";
+  const inferredResource = inferResourceMetadata(path, resource);
+  const occurredAt = typeof data.occurredAt === "string"
+    ? data.occurredAt
+    : typeof data.timestamp === "string"
+      ? data.timestamp
+      : typeof data.ts === "string"
+        ? data.ts
+        : STABLE_FALLBACK_CHANGE_TIMESTAMP;
+  const eventId = typeof data.id === "string"
+    ? data.id
+    : typeof data.eventId === "string"
+      ? data.eventId
+      : [
+          "relayfile",
+          workspaceId ?? "",
+          typeof data.type === "string" ? data.type : "relayfile.changed",
+          path,
+          typeof data.revision === "string" ? data.revision : "",
+          occurredAt
+        ].join(":");
+  const provider = typeof resource.provider === "string"
+    ? resource.provider
+    : typeof data.provider === "string"
+      ? data.provider
+      : inferredResource.provider;
   return {
-    id: typeof data.id === "string" ? data.id : "",
-    workspace: typeof data.workspace === "string" ? data.workspace : "",
+    id: eventId,
+    workspace: typeof data.workspace === "string" ? data.workspace : workspaceId ?? "",
     agentId: typeof data.agentId === "string" ? data.agentId : undefined,
     type: "relayfile.changed",
-    occurredAt: typeof data.occurredAt === "string" ? data.occurredAt : new Date().toISOString(),
+    occurredAt,
     resource: {
-      path: typeof resource.path === "string" ? resource.path : "",
-      kind: typeof resource.kind === "string" ? resource.kind : "relayfile.resource",
-      id: typeof resource.id === "string" ? resource.id : "",
-      provider: typeof resource.provider === "string" ? resource.provider : "relayfile"
+      path,
+      kind: typeof resource.kind === "string"
+        ? resource.kind
+        : typeof data.kind === "string"
+          ? data.kind
+          : typeof data.resourceType === "string"
+            ? data.resourceType
+            : inferredResource.kind,
+      id: typeof resource.id === "string"
+        ? resource.id
+        : typeof data.resourceId === "string"
+          ? data.resourceId
+          : typeof data.providerObjectId === "string"
+            ? data.providerObjectId
+            : inferredResource.id,
+      provider
     },
     summary: {
+      ...buildChangeSummary(path, data),
       ...(typeof summary.title === "string" ? { title: summary.title } : {}),
       ...(typeof summary.status === "string" ? { status: summary.status } : {}),
       ...(typeof summary.priority === "string" ? { priority: summary.priority } : {}),
@@ -1200,6 +1447,7 @@ export class RelayFileClient {
     this.userAgent = options.userAgent;
     this.retryOptions = normalizeRetryOptions(options.retry);
     changeLogSettings.set(this, normalizeChangeLogOptions(options.changeLog));
+    initFileReadCache(this, options);
   }
 
   /**
@@ -1259,14 +1507,32 @@ export class RelayFileClient {
           signal
         }
       : workspaceOrInput;
+
+    const cacheRaw = getFileReadCache(this);
+    // Skip cache for fork-scoped reads (isolated state) and when cache is disabled.
+    const cache: FileReadCache | undefined = cacheRaw !== false ? cacheRaw : undefined;
+    const cacheKey = (cache && !input.forkId) ? `${input.workspaceId}:${input.path}` : undefined;
+
+    if (cache && cacheKey) {
+      const hit = cache.get(cacheKey);
+      if (hit) return hit;
+      const pending = cache.getInFlight(cacheKey);
+      if (pending) return pending;
+    }
+
     const query = buildQuery({ path: input.path, forkId: input.forkId });
-    return this.request<FileReadResponse>({
+    const fetch = this.request<FileReadResponse>({
       method: "GET",
       path: `/v1/workspaces/${encodeURIComponent(input.workspaceId)}/fs/file${query}`,
       correlationId: input.correlationId,
       signal: input.signal,
       tokenOverride: (input as ReadFileInput & { token?: string }).token
     });
+
+    if (cache && cacheKey) {
+      cache.setInFlight(cacheKey, fetch);
+    }
+    return fetch;
   }
 
   async queryFiles(workspaceId: string, options: QueryFilesOptions = {}): Promise<FileQueryResponse> {
@@ -1299,7 +1565,7 @@ export class RelayFileClient {
   async writeFile(input: WriteFileInput): Promise<WriteQueuedResponse> {
     const { workspaceId, path, correlationId, baseRevision, content, contentType, encoding, contentIdentity, signal } = input;
     const query = buildQuery({ path, forkId: input.forkId });
-    return this.request<WriteQueuedResponse>({
+    const result = await this.request<WriteQueuedResponse>({
       method: "PUT",
       path: `/v1/workspaces/${encodeURIComponent(workspaceId)}/fs/file${query}`,
       correlationId,
@@ -1316,6 +1582,9 @@ export class RelayFileClient {
       },
       signal
     });
+    const cache = getFileReadCache(this);
+    if (cache !== false) cache.evict(workspaceId, path);
+    return result;
   }
 
   async bulkWrite(input: BulkWriteInput): Promise<BulkWriteResponse> {
@@ -1329,12 +1598,19 @@ export class RelayFileClient {
       },
       signal: input.signal
     });
-    return this.readPayload(response) as Promise<BulkWriteResponse>;
+    const result = await (this.readPayload(response) as Promise<BulkWriteResponse>);
+    const cache = getFileReadCache(this);
+    if (cache !== false) {
+      for (const file of input.files) {
+        cache.evict(input.workspaceId, file.path);
+      }
+    }
+    return result;
   }
 
   async deleteFile(input: DeleteFileInput): Promise<WriteQueuedResponse> {
     const query = buildQuery({ path: input.path, forkId: input.forkId });
-    return this.request<WriteQueuedResponse>({
+    const result = await this.request<WriteQueuedResponse>({
       method: "DELETE",
       path: `/v1/workspaces/${encodeURIComponent(input.workspaceId)}/fs/file${query}`,
       correlationId: input.correlationId,
@@ -1343,6 +1619,9 @@ export class RelayFileClient {
       },
       signal: input.signal
     });
+    const cache = getFileReadCache(this);
+    if (cache !== false) cache.evict(input.workspaceId, input.path);
+    return result;
   }
 
   async createFork(input: CreateForkInput): Promise<ForkHandle> {
@@ -1385,12 +1664,16 @@ export class RelayFileClient {
       cursor: options.cursor,
       limit: options.limit
     });
-    return this.request<EventFeedResponse>({
+    const response = await this.request<EventFeedResponse>({
       method: "GET",
       path: `/v1/workspaces/${encodeURIComponent(workspaceId)}/fs/events${query}`,
       correlationId: options.correlationId,
       signal: options.signal
     });
+    return {
+      events: (response.events ?? []).map((event) => normalizeFilesystemEvent(event as Parameters<typeof normalizeFilesystemEvent>[0])),
+      nextCursor: response.nextCursor ?? null
+    };
   }
 
   subscribe(
@@ -1400,7 +1683,7 @@ export class RelayFileClient {
   ): Subscription {
     const setup = this.resolveWorkspaceId(options?.aclToken)
       .then((workspaceId) => {
-        const manager = getStreamManager(this, workspaceId, options?.aclToken, this.baseUrl);
+        const manager = getStreamManager(this, workspaceId, options?.aclToken, this.baseUrl, options);
         return manager.addSubscription(globs, onChange, options);
       });
     return {
@@ -1412,7 +1695,7 @@ export class RelayFileClient {
   }
 
   open(options: ChangeStreamConnectionOptions): ChangeStreamConnection {
-    const manager = getStreamManager(this, options.workspaceId, options.aclToken, this.baseUrl);
+    const manager = getStreamManager(this, options.workspaceId, options.aclToken, this.baseUrl, options);
     const connection = manager.open();
     const replay = this.primeReplayCache(options).catch((error) => {
       if (typeof console !== "undefined" && typeof console.error === "function") {
@@ -1466,7 +1749,7 @@ export class RelayFileClient {
       });
       records = mergeChangeRecords([
         ...cached,
-        ...(payload.events ?? []).map((event) => this.cacheWireChangeEvent(workspaceId, normalizeWireChangeEvent(event), effectiveContext))
+        ...(payload.events ?? []).map((event) => this.cacheWireChangeEvent(workspaceId, normalizeWireChangeEvent(event, workspaceId), effectiveContext))
       ]);
     } catch (error) {
       if (cached.length === 0) {
@@ -1496,7 +1779,7 @@ export class RelayFileClient {
       });
       records = mergeChangeRecords([
         ...cached,
-        ...(payload.events ?? []).map((event) => this.cacheWireChangeEvent(workspaceId, normalizeWireChangeEvent(event), effectiveContext))
+        ...(payload.events ?? []).map((event) => this.cacheWireChangeEvent(workspaceId, normalizeWireChangeEvent(event, workspaceId), effectiveContext))
       ]).slice(-safeLimit);
     } catch (error) {
       if (cached.length === 0) {
@@ -1535,6 +1818,14 @@ export class RelayFileClient {
     const url = new URL(`${this.baseUrl}/v1/workspaces/${encodeURIComponent(workspaceId)}/fs/ws`);
     url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
     url.searchParams.set("token", token);
+    if (options.cursor) {
+      url.searchParams.set("cursor", options.cursor);
+    } else if ((options.from ?? "now") === "now") {
+      url.searchParams.set("from", "now");
+    }
+    for (const path of options.paths ?? []) {
+      url.searchParams.append("path", path);
+    }
 
     const socket = new WebSocket(url.toString());
     return new RelayFileWebSocketConnection(socket, options.onEvent);
@@ -1677,6 +1968,56 @@ export class RelayFileClient {
     });
   }
 
+  /**
+   * Wait until a provider is safe to read from the data plane.
+   *
+   * Cloud-managed syncs report first-sync completion through `ready: true` or
+   * `status: "ready"`. OSS self-host `/sync/status` uses `healthy` for provider
+   * health, including empty freshly filtered provider rows, so this method only
+   * treats OSS `healthy` as data-ready after processed-ingest progress appears
+   * on the status row (`cursor` or `watermarkTs`). For custom OSS ingest flows,
+   * gate on your own ingest completion when you need stronger domain-specific
+   * proof than provider progress.
+   */
+  async waitForData(
+    workspaceId: string,
+    provider: string,
+    options: WaitForDataOptions = {}
+  ): Promise<SyncProviderStatus> {
+    const providerKey = normalizeProviderId(provider);
+    const pollIntervalMs = normalizePositiveInteger(options.pollIntervalMs ?? 1_000, "pollIntervalMs");
+    const timeoutMs = normalizePositiveInteger(options.timeoutMs ?? 5 * 60_000, "timeoutMs");
+    const startedAt = Date.now();
+
+    for (;;) {
+      if (options.signal?.aborted) {
+        throw createAbortError();
+      }
+
+      const elapsedMs = Date.now() - startedAt;
+      if (elapsedMs >= timeoutMs) {
+        throw new Error(`Timed out waiting for ${providerKey} data after ${elapsedMs}ms.`);
+      }
+
+      const status = await this.getSyncStatus(workspaceId, {
+        provider: providerKey,
+        correlationId: options.correlationId,
+        signal: options.signal
+      });
+      const providerStatus = status.providers.find(
+        (entry) => normalizeProviderIdOrNull(entry.provider) === providerKey
+      );
+      options.onPoll?.(elapsedMs, providerStatus);
+
+      if (providerStatus && providerDataReady(providerStatus)) {
+        return providerStatus;
+      }
+
+      const remainingMs = Math.max(0, timeoutMs - (Date.now() - startedAt));
+      await this.sleep(Math.min(pollIntervalMs, remainingMs), options.signal);
+    }
+  }
+
   async getSyncIngressStatus(
     workspaceId: string,
     options: GetSyncIngressStatusOptions = {}
@@ -1788,6 +2129,99 @@ export class RelayFileClient {
     });
   }
 
+  async registerWebhook(input: RegisterWebhookInput): Promise<RegisterWebhookResponse> {
+    if (!input.workspaceId) {
+      throw new Error("workspaceId is required");
+    }
+    if (!input.url) {
+      throw new Error("url is required");
+    }
+    return this.request<RegisterWebhookResponse>({
+      method: "POST",
+      path: `/v1/workspaces/${encodeURIComponent(input.workspaceId)}/webhooks`,
+      correlationId: input.correlationId,
+      body: {
+        url: input.url,
+        pathGlobs: input.pathGlobs,
+        secret: input.secret
+      },
+      signal: input.signal
+    });
+  }
+
+  async listWebhooks(
+    workspaceId: string,
+    options: ListWebhooksOptions = {}
+  ): Promise<WebhookSubscription[]> {
+    if (!workspaceId) {
+      throw new Error("workspaceId is required");
+    }
+    return this.request<WebhookSubscription[]>({
+      method: "GET",
+      path: `/v1/workspaces/${encodeURIComponent(workspaceId)}/webhooks`,
+      correlationId: options.correlationId,
+      signal: options.signal
+    });
+  }
+
+  async deleteWebhook(
+    workspaceId: string,
+    subscriptionId: string,
+    options: DeleteWebhookOptions = {}
+  ): Promise<void> {
+    if (!workspaceId) {
+      throw new Error("workspaceId is required");
+    }
+    if (!subscriptionId) {
+      throw new Error("subscriptionId is required");
+    }
+    await this.performRequest({
+      method: "DELETE",
+      path: `/v1/workspaces/${encodeURIComponent(workspaceId)}/webhooks/${encodeURIComponent(subscriptionId)}`,
+      correlationId: options.correlationId,
+      signal: options.signal
+    });
+  }
+
+  async getWebhookDeadLetters(
+    workspaceId: string,
+    options: GetWebhookDeadLettersOptions = {}
+  ): Promise<WebhookDeliveryDeadLetterFeedResponse> {
+    if (!workspaceId) {
+      throw new Error("workspaceId is required");
+    }
+    const query = buildQuery({
+      cursor: options.cursor,
+      limit: options.limit
+    });
+    return this.request<WebhookDeliveryDeadLetterFeedResponse>({
+      method: "GET",
+      path: `/v1/workspaces/${encodeURIComponent(workspaceId)}/webhooks/dlq${query}`,
+      correlationId: options.correlationId,
+      signal: options.signal
+    });
+  }
+
+  async replayWebhookDeadLetter(
+    workspaceId: string,
+    deliveryId: string,
+    correlationId?: string,
+    signal?: AbortSignal
+  ): Promise<QueuedResponse> {
+    if (!workspaceId) {
+      throw new Error("workspaceId is required");
+    }
+    if (!deliveryId) {
+      throw new Error("deliveryId is required");
+    }
+    return this.request<QueuedResponse>({
+      method: "POST",
+      path: `/v1/workspaces/${encodeURIComponent(workspaceId)}/webhooks/dlq/${encodeURIComponent(deliveryId)}/replay`,
+      correlationId,
+      signal
+    });
+  }
+
   async listPendingWritebacks(
     workspaceId: string,
     correlationId?: string,
@@ -1808,7 +2242,28 @@ export class RelayFileClient {
       correlationId: input.correlationId,
       body: {
         success: input.success,
-        error: input.error
+        error: input.error,
+        externalId: input.externalId,
+        canonicalPath: input.canonicalPath,
+        providerResult: input.providerResult
+      },
+      signal: input.signal
+    });
+  }
+
+  /**
+   * One-time residue sweep for accumulated writeback drafts (issue #242).
+   * Dry run unless `apply` is true; classification-exempt service-side.
+   */
+  async sweepWritebackDrafts(input: SweepWritebackDraftsInput): Promise<SweepWritebackDraftsResponse> {
+    return this.request<SweepWritebackDraftsResponse>({
+      method: "POST",
+      path: `/v1/workspaces/${encodeURIComponent(input.workspaceId)}/writeback/sweep-drafts`,
+      correlationId: input.correlationId,
+      body: {
+        pathPrefix: input.pathPrefix,
+        patterns: input.patterns,
+        apply: input.apply === true
       },
       signal: input.signal
     });

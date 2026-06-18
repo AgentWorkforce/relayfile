@@ -1,7 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process"
-import { constants as fsConstants, createWriteStream } from "node:fs"
+import { createWriteStream } from "node:fs"
 import {
-  access,
   mkdir,
   readFile,
   rename,
@@ -11,8 +10,8 @@ import {
 } from "node:fs/promises"
 import path from "node:path"
 import process from "node:process"
-import { fileURLToPath } from "node:url"
 import { RelayFileClient } from "./client.js"
+import { getRelayfileMountBinaryPath } from "./mount-path.js"
 import {
   CloudAbortError,
   MountModeUnavailableError,
@@ -20,10 +19,12 @@ import {
   RelayfileSetupError
 } from "./setup-errors.js"
 import type {
+  MountLocalLayout,
   MountLauncher,
   MountLauncherInstance,
   MountLauncherStart,
   MountMode,
+  MountSyncMode,
   MountedWorkspaceStatus,
   ReadMountedWorkspaceStatusInput
 } from "./setup-types.js"
@@ -71,7 +72,9 @@ export function createDefaultMountLauncher(
 export async function readMountedWorkspaceStatus(
   input: ReadMountedWorkspaceStatusInput
 ): Promise<MountedWorkspaceStatus> {
-  const state = await readMountStateFile(input.localDir)
+  const state = await readMountStateFile(
+    resolveMountLocalDir(input.localDir, input.remotePath, input.localLayout)
+  )
   if (state && !isMountStateStale(state)) {
     return {
       ready: isMountStateReady(state),
@@ -102,7 +105,12 @@ async function startRelayfileMount(
   options: DefaultMountLauncherOptions
 ): Promise<MountLauncherInstance> {
   const localDir = path.resolve(input.env.RELAYFILE_LOCAL_DIR ?? process.cwd())
-  const relayDir = path.join(localDir, ".relay")
+  const mountLocalDir = resolveMountLocalDir(
+    localDir,
+    input.env.RELAYFILE_REMOTE_PATH,
+    input.env.RELAYFILE_MOUNT_LOCAL_LAYOUT
+  )
+  const relayDir = path.join(mountLocalDir, ".relay")
   const logPath = path.join(relayDir, "mount.log")
   const pidPath = path.join(relayDir, "mount.pid")
   await mkdir(relayDir, { recursive: true })
@@ -111,7 +119,7 @@ async function startRelayfileMount(
   const command = await resolveRelayfileMountCommand()
   const args = input.background === false ? ["--once"] : []
   const child = (options.spawnImpl ?? spawn)(command, args, {
-    cwd: input.cwd ?? localDir,
+    cwd: input.cwd ?? mountLocalDir,
     env: {
       ...process.env,
       ...input.env
@@ -133,7 +141,7 @@ async function startRelayfileMount(
     pidPath,
     outputBuffer,
     input,
-    localDir,
+    localDir: mountLocalDir,
     now: options.now ?? Date.now,
     readyPollIntervalMs:
       options.readyPollIntervalMs ?? DEFAULT_READY_POLL_INTERVAL_MS
@@ -190,6 +198,8 @@ class RelayfileMountProcessInstance implements MountLauncherInstance {
       workspaceId: this.input.env.RELAYFILE_WORKSPACE ?? "",
       remotePath: this.input.env.RELAYFILE_REMOTE_PATH ?? "/",
       mode: normalizeMountMode(this.input.env.RELAYFILE_MOUNT_MODE) ?? "poll",
+      localLayout: normalizeMountLocalLayout(this.input.env.RELAYFILE_MOUNT_LOCAL_LAYOUT),
+      syncMode: normalizeMountSyncMode(this.input.env.RELAYFILE_MOUNT_SYNC_MODE),
       relayfileBaseUrl: this.input.env.RELAYFILE_BASE_URL ?? "",
       relayfileToken: this.input.env.RELAYFILE_TOKEN ?? "",
       expiresAt: null,
@@ -360,6 +370,42 @@ function normalizeMountMode(mode?: string): MountMode | undefined {
   return mode === "fuse" ? "fuse" : mode === "poll" ? "poll" : undefined
 }
 
+function normalizeMountLocalLayout(layout?: string): MountLocalLayout {
+  return layout === "scoped" ? "scoped" : "exact"
+}
+
+function normalizeMountSyncMode(mode?: string): MountSyncMode {
+  return mode === "write-only" ? "write-only" : "mirror"
+}
+
+function resolveMountLocalDir(
+  localDir: string,
+  remotePath?: string,
+  localLayout?: string
+): string {
+  const root = path.resolve(localDir)
+  if (normalizeMountLocalLayout(localLayout) !== "scoped") {
+    return root
+  }
+  const normalizedRemote = normalizeRemotePath(remotePath)
+  if (normalizedRemote === "/") {
+    return root
+  }
+  return path.join(root, ...normalizedRemote.split("/").filter(Boolean))
+}
+
+function normalizeRemotePath(remotePath?: string): string {
+  const trimmed = typeof remotePath === "string" ? remotePath.trim() : ""
+  if (!trimmed || trimmed === "/") {
+    return "/"
+  }
+  const slashNormalized = trimmed.replace(/\\/g, "/")
+  const normalized = path.posix.normalize(
+    slashNormalized.startsWith("/") ? slashNormalized : `/${slashNormalized}`
+  )
+  return normalized === "/" ? "/" : normalized.replace(/\/+$/, "")
+}
+
 function normalizeIsoString(value: unknown): string | undefined {
   if (typeof value !== "string" || value.trim() === "") {
     return undefined
@@ -378,47 +424,11 @@ function normalizeNonEmptyString(value: unknown): string | undefined {
 }
 
 async function resolveRelayfileMountCommand(): Promise<string> {
-  const executableFromPath = await findExecutableInPath("relayfile-mount")
-  if (executableFromPath) {
-    return executableFromPath
-  }
-
-  const candidates = [
-    process.env.RELAYFILE_MOUNT_BIN,
-    fileURLToPath(new URL("../../../../bin/relayfile-mount", import.meta.url))
-  ]
-
-  for (const candidate of candidates) {
-    if (!candidate) {
-      continue
-    }
-    if (await isExecutable(candidate)) {
-      return candidate
-    }
-  }
-
-  return "relayfile-mount"
-}
-
-async function findExecutableInPath(command: string): Promise<string | null> {
-  const pathValue = process.env.PATH ?? ""
-  const pathEntries = pathValue.split(path.delimiter).filter(Boolean)
-  for (const entry of pathEntries) {
-    const candidate = path.join(entry, command)
-    if (await isExecutable(candidate)) {
-      return candidate
-    }
-  }
-  return null
-}
-
-async function isExecutable(candidate: string): Promise<boolean> {
-  try {
-    await access(candidate, fsConstants.X_OK)
-    return true
-  } catch {
-    return false
-  }
+  // Delegates to the shared resolver, which checks the RELAYFILE_MOUNT_BIN
+  // override, local source-checkout builds, the platform-specific optional-dep
+  // package (@relayfile/mount-<platform>-<arch>), then PATH. Falls back to the
+  // bare command name so spawn surfaces a clear ENOENT if nothing is found.
+  return getRelayfileMountBinaryPath() ?? "relayfile-mount"
 }
 
 async function rotateMountLogIfNeeded(logPath: string): Promise<void> {

@@ -783,7 +783,13 @@ class RelayFileClient:
         return self._request(
             "POST",
             f"/v1/workspaces/{_enc(input.workspace_id)}/writeback/{_enc(input.item_id)}/ack",
-            json_body={"success": input.success, "error": input.error},
+            json_body={
+                "success": input.success,
+                "error": input.error,
+                "externalId": input.external_id,
+                "canonicalPath": input.canonical_path,
+                "providerResult": input.provider_result,
+            },
             correlation_id=input.correlation_id,
         )
 
@@ -1474,7 +1480,13 @@ class AsyncRelayFileClient:
         return await self._request(
             "POST",
             f"/v1/workspaces/{_enc(input.workspace_id)}/writeback/{_enc(input.item_id)}/ack",
-            json_body={"success": input.success, "error": input.error},
+            json_body={
+                "success": input.success,
+                "error": input.error,
+                "externalId": input.external_id,
+                "canonicalPath": input.canonical_path,
+                "providerResult": input.provider_result,
+            },
             correlation_id=input.correlation_id,
         )
 

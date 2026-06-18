@@ -59,6 +59,14 @@ export interface FileSemantics {
 export interface ContentIdentity {
   kind: string;
   key: string;
+  ttlSeconds?: number;
+}
+
+export interface RelayFileReadCacheOptions {
+  /** Cache TTL in ms. Default: 5000. */
+  ttlMs?: number;
+  /** Max cached entries before LRU eviction. Default: 500. */
+  maxEntries?: number;
 }
 
 export interface FileReadResponse {
@@ -104,6 +112,17 @@ export interface BulkWriteResponse {
     path: string;
     code: string;
     message: string;
+  }>;
+  results?: Array<{
+    path: string;
+    revision: string;
+    contentType?: string;
+    opId?: string;
+    contentIdentity?: ContentIdentity;
+    writeback?: {
+      provider?: string;
+      state?: string;
+    };
   }>;
   correlationId: string;
 }
@@ -160,6 +179,7 @@ export interface FilesystemEvent {
   type: FilesystemEventType;
   path: string;
   revision: string;
+  contentHash?: string;
   origin?: EventOrigin;
   provider?: string;
   correlationId?: string;
@@ -310,6 +330,8 @@ export interface SubscribeOptions {
   coalesce?: "none" | "fire-once";
   coalesceMs?: number;
   pathScope?: string[];
+  from?: "now" | "legacy";
+  cursor?: string;
   aclToken?: string;
   drainMs?: number;
 }
@@ -326,6 +348,8 @@ export type ReplayOptions =
 export type ChangeStreamConnectionOptions = ReplayOptions & {
   workspaceId: string;
   aclToken?: string;
+  from?: "now" | "legacy";
+  cursor?: string;
 };
 
 export interface ChangeStreamConnection extends Subscription {
@@ -407,11 +431,21 @@ export interface SyncRefreshRequest {
   reason?: string;
 }
 
-export type SyncProviderStatusState = "healthy" | "lagging" | "error" | "paused";
+export type SyncProviderStatusState =
+  | "connected"
+  | "oauth_connected"
+  | "sync_queued"
+  | "syncing"
+  | "ready"
+  | "healthy"
+  | "lagging"
+  | "error"
+  | "paused";
 
 export interface SyncProviderStatus {
   provider: string;
   status: SyncProviderStatusState;
+  ready?: boolean;
   cursor?: string | null;
   watermarkTs?: string | null;
   lagSeconds?: number;
@@ -610,6 +644,12 @@ export interface GetSyncStatusOptions {
   signal?: AbortSignal;
 }
 
+export interface WaitForDataOptions extends GetSyncStatusOptions {
+  pollIntervalMs?: number;
+  timeoutMs?: number;
+  onPoll?: (elapsedMs: number, status?: SyncProviderStatus) => void;
+}
+
 export interface GetSyncIngressStatusOptions {
   provider?: string;
   correlationId?: string;
@@ -703,6 +743,75 @@ export interface DeadLetterItem {
 
 export interface DeadLetterFeedResponse {
   items: DeadLetterItem[];
+  nextCursor: string | null;
+}
+
+export interface WebhookSubscriptionHealth {
+  lastDeliveryAt: string | null;
+  lastSuccessAt: string | null;
+  lastError: string | null;
+  consecutiveFailures: number;
+}
+
+export interface WebhookSubscription {
+  id: string;
+  url: string;
+  pathGlobs: string[];
+  createdAt: string;
+  updatedAt: string;
+  health: WebhookSubscriptionHealth;
+}
+
+export interface RegisterWebhookInput {
+  workspaceId: string;
+  url: string;
+  pathGlobs: string[];
+  /**
+   * Optional HMAC secret. If omitted, relayfile generates a secret and returns
+   * it once from the registration response.
+   */
+  secret?: string;
+  correlationId?: string;
+  signal?: AbortSignal;
+}
+
+export interface RegisterWebhookResponse {
+  subscriptionId: string;
+  secret?: string;
+}
+
+export interface ListWebhooksOptions {
+  correlationId?: string;
+  signal?: AbortSignal;
+}
+
+export interface DeleteWebhookOptions {
+  correlationId?: string;
+  signal?: AbortSignal;
+}
+
+export interface GetWebhookDeadLettersOptions {
+  cursor?: string;
+  limit?: number;
+  correlationId?: string;
+  signal?: AbortSignal;
+}
+
+export interface WebhookDeliveryDeadLetterItem {
+  deliveryId: string;
+  workspaceId: string;
+  subscriptionId: string;
+  eventId: string;
+  url: string;
+  failedAt: string;
+  attemptCount: number;
+  lastError: string;
+  replayCount: number;
+  status: "dead_lettered" | "queued" | "delivered";
+}
+
+export interface WebhookDeliveryDeadLetterFeedResponse {
+  items: WebhookDeliveryDeadLetterItem[];
   nextCursor: string | null;
 }
 
@@ -817,8 +926,38 @@ export interface AckWritebackInput {
   itemId: string;
   success: boolean;
   error?: string;
+  /**
+   * Provider-assigned id of the created/updated object (e.g. the Slack
+   * message ts). When present on a successful ack, the service reconciles
+   * the agent-authored draft file per the draftFile() rename contract
+   * (issue #242): the draft is renamed to the canonical id, or removed when
+   * the canonical record already materialized. The mutation is
+   * classification-exempt — it can never enqueue a new writeback.
+   */
+  externalId?: string;
+  /**
+   * Optional canonical projection path for the draft rename. Must stay under
+   * the same provider root as the draft; otherwise the service falls back to
+   * the externalId-derived name next to the draft.
+   */
+  canonicalPath?: string;
+  /**
+   * Optional fields the provider echoed back about the written record (e.g. a
+   * Slack message `ts` and `channel`). They are surfaced verbatim on the
+   * operation's providerResult (recoverable via getOp), letting an agent reply
+   * in a Slack thread using the returned ts as thread_ts. The reserved key
+   * `providerRevision` is server-owned and cannot be overridden via this map.
+   */
+  providerResult?: Record<string, unknown>;
   correlationId?: string;
   signal?: AbortSignal;
+}
+
+/** Disposition of the agent-authored draft file after a successful ack. */
+export interface AckWritebackDraftDisposition {
+  action: "renamed" | "removed" | "none";
+  from?: string;
+  to?: string;
 }
 
 export interface AckWritebackResponse {
@@ -826,4 +965,25 @@ export interface AckWritebackResponse {
   id: string;
   correlationId?: string;
   success: boolean;
+  /** Present only when the ack was successful and carried an externalId. */
+  draft?: AckWritebackDraftDisposition;
+}
+
+export interface SweepWritebackDraftsInput {
+  workspaceId: string;
+  /** Restrict the sweep to a subtree. */
+  pathPrefix?: string;
+  /** Basename globs for hand-named drafts, e.g. "wb-*.json". */
+  patterns?: string[];
+  /** Execute removals; when false the sweep is a dry run. */
+  apply?: boolean;
+  correlationId?: string;
+  signal?: AbortSignal;
+}
+
+export interface SweepWritebackDraftsResponse {
+  dryRun: boolean;
+  scanned: number;
+  removed: Array<{ path: string; reason: "space-uuid-draft" | "pattern" }>;
+  skipped: Array<{ path: string; reason: "pending-writeback" | "provider-linked" }>;
 }

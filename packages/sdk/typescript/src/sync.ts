@@ -11,6 +11,7 @@ import type { EventOrigin, FilesystemEvent } from "./types.js";
 export type RelayFileSyncTokenProvider = string | (() => string | undefined | Promise<string | undefined>);
 
 export type RelayFileSyncState = "idle" | "connecting" | "open" | "polling" | "reconnecting" | "closed";
+export type RelayFileSyncStart = "now" | "legacy";
 
 export interface RelayFileSyncPong {
   type: "pong";
@@ -37,7 +38,9 @@ export interface RelayFileSyncOptions {
    * normally NOT pass this and let it inherit from the client.
    */
   token?: RelayFileSyncTokenProvider;
+  from?: RelayFileSyncStart;
   cursor?: string;
+  paths?: string[];
   preferPolling?: boolean;
   pollIntervalMs?: number;
   pingIntervalMs?: number;
@@ -58,6 +61,52 @@ export interface RelayFileSyncOptions {
    * `error` event regardless of whether this is wired.
    */
   onPollingFallback?: (info: { reason: string; cause?: unknown }) => void;
+}
+
+function normalizeWebSocketPathFilters(paths: string[] | undefined): string[] {
+  const seen = new Set<string>();
+  const normalized: string[] = [];
+  for (const value of paths ?? []) {
+    const path = typeof value === "string" ? value.trim() : "";
+    if (!path) {
+      continue;
+    }
+    const absolute = path.startsWith("/") ? path : `/${path}`;
+    if (seen.has(absolute)) {
+      continue;
+    }
+    seen.add(absolute);
+    normalized.push(absolute);
+  }
+  return normalized;
+}
+
+function pathMatchesAnyFilter(filters: string[], path: string): boolean {
+  if (filters.length === 0) {
+    return true;
+  }
+  const pathSegments = normalizePathSegments(path);
+  return filters.some((filter) => matchPathSegments(normalizePathSegments(filter), pathSegments));
+}
+
+function normalizePathSegments(path: string): string[] {
+  const absolute = path.startsWith("/") ? path : `/${path}`;
+  const trimmed = absolute.replace(/\/+$/, "");
+  if (!trimmed) {
+    return [];
+  }
+  return trimmed.split("/").filter(Boolean);
+}
+
+function matchPathSegments(pattern: string[], path: string[]): boolean {
+  if (pattern.length > 0 && pattern[pattern.length - 1] === "**") {
+    const prefix = pattern.slice(0, -1);
+    return path.length >= prefix.length && prefix.every((segment, index) => segment === "*" || segment === path[index]);
+  }
+  if (pattern.length !== path.length) {
+    return false;
+  }
+  return pattern.every((segment, index) => segment === "*" || segment === path[index]);
 }
 
 export interface RelayFileSyncSocket {
@@ -87,20 +136,39 @@ interface RelayFileSyncReconnectConfig {
 
 interface RelayFileSyncWireEvent {
   type: string;
+  id?: string;
   eventId?: string;
   path?: string;
   revision?: string;
+  digest?: string;
+  contentHash?: string;
   origin?: EventOrigin;
   provider?: string;
   correlationId?: string;
   timestamp?: string;
   ts?: string;
+  occurredAt?: string;
+  resource?: {
+    path?: unknown;
+    provider?: unknown;
+  };
 }
 
 const DEFAULT_POLL_INTERVAL_MS = 5000;
 const DEFAULT_PING_INTERVAL_MS = 30000;
 const DEFAULT_RECONNECT_MIN_DELAY_MS = 250;
 const DEFAULT_RECONNECT_MAX_DELAY_MS = 5000;
+// When involuntary polling is active but the WebSocket transport is still
+// viable (baseUrl present, reconnect enabled, not caller-forced), the poll
+// loop yields after a backoff window so the SDK can re-probe the WS and climb
+// back to push delivery. Backoff grows on repeated pre-open failures so we
+// never tight-loop a handshake that keeps rejecting, yet always recover once
+// the transient (cold DO, proxy blip, brief auth gap) clears. Without this a
+// single pre-open failure latches the process into polling forever — fatal
+// for long-running consumers like the factory daemon.
+const DEFAULT_WS_REPROBE_MIN_DELAY_MS = 5000;
+const DEFAULT_WS_REPROBE_MAX_DELAY_MS = 300000;
+const STABLE_FALLBACK_TIMESTAMP = "1970-01-01T00:00:00.000Z";
 // Cap on the dedupe cache used in polling mode. Sized large enough that no
 // realistic workspace burst can churn through it within one poll interval
 // (the events API is itself capped at ~1000 per page), small enough to keep
@@ -179,26 +247,58 @@ function createAbortError(): Error {
   return err;
 }
 
-function buildEventId(message: RelayFileSyncWireEvent): string {
+function buildEventId(message?: RelayFileSyncWireEvent | null): string {
+  const path = readWirePath(message);
+  const timestamp = readWireTimestamp(message);
+  const type = readWireString(message?.type) ?? "file.updated";
   return [
     "ws",
-    message.type,
-    message.path ?? "",
-    message.revision ?? "",
-    message.timestamp ?? message.ts ?? ""
+    normalizeFilesystemEventType(type),
+    path,
+    readWireString(message?.revision) ?? "",
+    timestamp
   ].join(":");
 }
 
-function normalizeFilesystemEvent(message: RelayFileSyncWireEvent): FilesystemEvent {
+function readWireString(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
+}
+
+function readWirePath(message?: RelayFileSyncWireEvent | null): string {
+  return readWireString(message?.path) ?? readWireString(message?.resource?.path) ?? "";
+}
+
+function readWireProvider(message?: RelayFileSyncWireEvent | null): string | undefined {
+  return readWireString(message?.provider) ?? readWireString(message?.resource?.provider);
+}
+
+function readWireTimestamp(message?: RelayFileSyncWireEvent | null): string {
+  return readWireString(message?.timestamp)
+    ?? readWireString(message?.ts)
+    ?? readWireString(message?.occurredAt)
+    ?? STABLE_FALLBACK_TIMESTAMP;
+}
+
+function normalizeFilesystemEventType(type: string): FilesystemEvent["type"] {
+  return type === "relayfile.changed" || type === "relayfile.changed.summary"
+    ? "file.updated"
+    : type as FilesystemEvent["type"];
+}
+
+export function normalizeFilesystemEvent(message?: RelayFileSyncWireEvent | null): FilesystemEvent {
+  const path = readWirePath(message);
+  const type = readWireString(message?.type) ?? "file.updated";
+  const digest = readWireString(message?.digest);
   return {
-    eventId: message.eventId ?? buildEventId(message),
-    type: message.type as FilesystemEvent["type"],
-    path: message.path ?? "",
-    revision: message.revision ?? "",
-    origin: message.origin,
-    provider: message.provider,
-    correlationId: message.correlationId,
-    timestamp: message.timestamp ?? message.ts ?? new Date().toISOString()
+    eventId: readWireString(message?.eventId) ?? readWireString(message?.id) ?? buildEventId(message),
+    type: normalizeFilesystemEventType(type),
+    path,
+    revision: readWireString(message?.revision) ?? digest ?? "",
+    contentHash: readWireString(message?.contentHash) ?? digest,
+    origin: message?.origin,
+    provider: readWireProvider(message),
+    correlationId: readWireString(message?.correlationId),
+    timestamp: readWireTimestamp(message)
   };
 }
 
@@ -249,6 +349,8 @@ export class RelayFileSync {
 
   private state: RelayFileSyncState = "idle";
   private cursor?: string;
+  private readonly from: RelayFileSyncStart;
+  private readonly paths: string[];
   private readonly polledEventIds: Set<string> = new Set();
   private readonly polledEventOrder: string[] = [];
   private firstPollComplete = false;
@@ -276,6 +378,14 @@ export class RelayFileSync {
   // (no broadcasts and no pings yet) would falsely trip the watchdog.
   private lastPingSentAt = 0;
   private reconnectAttempts = 0;
+  // Tracks how many times involuntary polling has yielded to re-probe the
+  // WebSocket without a successful open in between. Drives re-probe backoff;
+  // reset to 0 once a socket actually reaches OPEN.
+  private pollingReprobeAttempts = 0;
+  // Whether the *current* polling session should periodically yield to
+  // re-probe the WS. False for explicit/caller-forced polling (preferPolling
+  // or no baseUrl) — that polling is intentional and stays put.
+  private pollingReprobeEnabled = false;
   private readonly abortHandler?: () => void;
 
   constructor(options: RelayFileSyncOptions) {
@@ -293,7 +403,9 @@ export class RelayFileSync {
       const literal = options.token;
       this.tokenProvider = () => literal;
     }
+    this.from = options.from ?? "now";
     this.cursor = options.cursor;
+    this.paths = normalizeWebSocketPathFilters(options.paths);
     this.onPollingFallback = options.onPollingFallback;
     this.pollIntervalMs = Math.max(1, Math.floor(options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS));
     this.pingIntervalMs = Math.max(1, Math.floor(options.pingIntervalMs ?? DEFAULT_PING_INTERVAL_MS));
@@ -464,6 +576,14 @@ export class RelayFileSync {
     if (token) {
       url.searchParams.set("token", token);
     }
+    if (this.cursor) {
+      url.searchParams.set("cursor", this.cursor);
+    } else if (this.from === "now") {
+      url.searchParams.set("from", "now");
+    }
+    for (const path of this.paths) {
+      url.searchParams.append("path", path);
+    }
 
     let socket: RelayFileSyncSocket;
     try {
@@ -483,6 +603,9 @@ export class RelayFileSync {
       }
       this.currentSocketHasOpened = true;
       this.reconnectAttempts = 0;
+      // A real OPEN means the transport is healthy again — start the next
+      // potential degradation from a fresh (short) re-probe backoff.
+      this.pollingReprobeAttempts = 0;
       // Reset frame/ping bookkeeping for the freshly opened socket so the
       // watchdog has a clean baseline. lastPingSentAt=0 disables the pong
       // timeout until we actually send our first ping.
@@ -602,6 +725,15 @@ export class RelayFileSync {
       }
     }
     this.setState("polling");
+    // Involuntary polling (anything but "explicit") should not be a one-way
+    // door: if the WS transport is viable, the poll loop will yield after a
+    // backoff window so the .finally() below can re-open the socket. Explicit
+    // polling (preferPolling / no baseUrl) is intentional and stays put.
+    this.pollingReprobeEnabled =
+      reason !== "explicit" &&
+      !!this.baseUrl &&
+      this.reconnect.enabled &&
+      !this.preferPolling;
     this.pollingPromise = this.pollLoop().finally(() => {
       this.pollingPromise = undefined;
       if (!this.stopped && !this.shouldUsePolling()) {
@@ -612,9 +744,30 @@ export class RelayFileSync {
 
   private async pollLoop(): Promise<void> {
     let retryAttempt = 0;
+    // When re-probing is enabled, fix a deadline at which this poll session
+    // yields back to the WebSocket. Computed once per session from the running
+    // attempt count so repeated failures back off (5s, 10s, 20s … capped 5m).
+    // `undefined` => never yield (explicit polling, or WS not viable).
+    const reprobeDeadlineAt = this.pollingReprobeEnabled
+      ? Date.now() + this.computeReprobeDelayMs(this.pollingReprobeAttempts)
+      : undefined;
     while (!this.stopped) {
       if (this.signal?.aborted) {
         throw createAbortError();
+      }
+      // Backoff window elapsed: exit the loop so startPolling()'s .finally
+      // runs scheduleReconnect() → openWebSocket(). The cursor advanced by
+      // this session carries into the WS URL, so the re-opened socket resumes
+      // exactly where polling left off (no gap, no replay). If the re-open
+      // fails pre-open again, forceReconnect → startPolling restarts this loop
+      // with an incremented attempt and a longer window.
+      if (reprobeDeadlineAt !== undefined && Date.now() >= reprobeDeadlineAt) {
+        this.pollingReprobeAttempts += 1;
+        debugLog("polling yielding to WS re-probe", {
+          workspaceId: this.workspaceId,
+          attempt: this.pollingReprobeAttempts,
+        });
+        return;
       }
       try {
         // The current server implementation paginates events from oldest to
@@ -665,7 +818,7 @@ export class RelayFileSync {
           this.firstPollComplete = true;
         } else {
           for (const event of pending) {
-            this.emit("event", event);
+            this.emitFilesystemEvent(event);
           }
         }
         await this.sleep(this.pollIntervalMs);
@@ -720,6 +873,14 @@ export class RelayFileSync {
       this.emit("error", new Error("Invalid WebSocket payload: 'revision' must be a string."));
       return;
     }
+    if (parsed.resource !== undefined && (typeof parsed.resource !== "object" || parsed.resource === null)) {
+      this.emit("error", new Error("Invalid WebSocket payload: 'resource' must be an object."));
+      return;
+    }
+    if (parsed.resource?.path !== undefined && typeof parsed.resource.path !== "string") {
+      this.emit("error", new Error("Invalid WebSocket payload: 'resource.path' must be a string."));
+      return;
+    }
     if (parsed.timestamp !== undefined && typeof parsed.timestamp !== "string") {
       this.emit("error", new Error("Invalid WebSocket payload: 'timestamp' must be a string."));
       return;
@@ -739,8 +900,18 @@ export class RelayFileSync {
     }
 
     const normalized = normalizeFilesystemEvent(parsed);
+    if (normalized.eventId) {
+      this.cursor = normalized.eventId;
+    }
     debugLog("event", { type: normalized.type, path: normalized.path, revision: normalized.revision });
-    this.emit("event", normalized);
+    this.emitFilesystemEvent(normalized);
+  }
+
+  private emitFilesystemEvent(event: FilesystemEvent): void {
+    if (!pathMatchesAnyFilter(this.paths, event.path)) {
+      return;
+    }
+    this.emit("event", event);
   }
 
   private startPingLoop(socket: RelayFileSyncSocket): void {
@@ -865,6 +1036,15 @@ export class RelayFileSync {
   private computeReconnectDelayMs(attempt: number): number {
     const uncapped = this.reconnect.minDelayMs * Math.pow(2, Math.max(0, attempt - 1));
     return Math.min(this.reconnect.maxDelayMs, uncapped);
+  }
+
+  // How long involuntary polling runs before yielding to re-probe the WS.
+  // attempt 0 → 5s, 1 → 10s, 2 → 20s … capped at 5m. The first re-probe after
+  // a fresh degradation is fast (transients usually clear within seconds); a
+  // persistently rejecting handshake backs off so we never hammer it.
+  private computeReprobeDelayMs(attempt: number): number {
+    const uncapped = DEFAULT_WS_REPROBE_MIN_DELAY_MS * Math.pow(2, Math.max(0, attempt));
+    return Math.min(DEFAULT_WS_REPROBE_MAX_DELAY_MS, uncapped);
   }
 
   private async sleep(delayMs: number): Promise<void> {

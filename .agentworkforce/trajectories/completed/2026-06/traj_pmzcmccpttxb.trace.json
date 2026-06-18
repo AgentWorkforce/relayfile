@@ -1,0 +1,81 @@
+{
+  "version": "1.0.0",
+  "id": "e0d9dc38-17eb-4800-b660-a3437ea9b378",
+  "timestamp": "2026-06-15T11:21:06.653Z",
+  "trajectory": "traj_pmzcmccpttxb",
+  "files": [
+    {
+      "path": ".agentworkforce/trajectories/active/traj_pmzcmccpttxb/trajectory.json",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 1,
+              "end_line": 19,
+              "revision": "2432065c6190d1c6a66e57712150d9a3106d2812"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": ".trajectories/active/traj_4pvrlmqfnzng/trajectory.json",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": []
+        }
+      ]
+    },
+    {
+      "path": ".trajectories/completed/2026-06/traj_4pvrlmqfnzng/summary.md",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 1,
+              "end_line": 33,
+              "revision": "2432065c6190d1c6a66e57712150d9a3106d2812"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": ".trajectories/completed/2026-06/traj_4pvrlmqfnzng/trajectory.json",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 1,
+              "end_line": 87,
+              "revision": "2432065c6190d1c6a66e57712150d9a3106d2812"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": ".trajectories/index.json",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": []
+        }
+      ]
+    }
+  ]
+}

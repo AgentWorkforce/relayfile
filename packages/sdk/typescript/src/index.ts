@@ -8,6 +8,7 @@ export {
   type RelayFileRetryOptions,
   type WebSocketConnection
 } from "./client.js";
+export type { RelayFileReadCacheOptions } from "./types.js";
 export {
   RelayfileSetup,
   RELAYFILE_SDK_VERSION,
@@ -50,10 +51,12 @@ export {
   type MountLauncherEvent,
   type MountLauncherInstance,
   type MountLauncherStart,
+  type MountLocalLayout,
   type MountMode,
   type MountSessionRequest,
   type MountSessionResponse,
   type MountSessionResult,
+  type MountSyncMode,
   type MountedWorkspaceHandle,
   type MountedWorkspaceStatus,
   type MountWorkspaceInput,
@@ -73,6 +76,7 @@ export {
   type RelayFileSyncPong,
   type RelayFileSyncReconnectOptions,
   type RelayFileSyncSocket,
+  type RelayFileSyncStart,
   type RelayFileSyncState,
   type RelayFileSyncTokenProvider
 } from "./sync.js";
@@ -96,18 +100,33 @@ export { IntegrationProvider, computeCanonicalPath } from "./provider.js";
 export type { WebhookInput, ListProviderFilesOptions, WatchProviderEventsOptions } from "./provider.js";
 // Connection provider contract
 export type {
+  ConnectCapableProvider,
+  ConnectConnectionStatus,
+  ConnectSession,
   ConnectionProvider,
+  CreateConnectSessionInput,
+  GetConnectConnectionStatusInput,
   NormalizedWebhook,
+  ProviderConfigKeyMap,
   ProxyHeaders,
   ProxyMethod,
   ProxyQuery,
   ProxyRequest,
   ProxyResponse,
 } from "./connection.js";
+export { supportsConnect } from "./connection.js";
+export { SelfHostConnect } from "./self-host-connect.js";
+export type {
+  SelfHostConnectOptions,
+  SelfHostConnectResult,
+  StartSelfHostConnectOptions,
+  WaitForSelfHostConnectionOptions
+} from "./self-host-connect.js";
 
 export type {
   AckResponse,
   AckWritebackInput,
+  AckWritebackDraftDisposition,
   AckWritebackResponse,
   AdminIngressAlert,
   AdminIngressAlertProfile,
@@ -140,6 +159,7 @@ export type {
   CreateForkInput,
   ContentIdentity,
   DeleteFileInput,
+  DeleteWebhookOptions,
   DeadLetterFeedResponse,
   DeadLetterItem,
   DigestBullet,
@@ -171,10 +191,13 @@ export type {
   GetSyncDeadLettersOptions,
   GetSyncIngressStatusOptions,
   GetSyncStatusOptions,
+  WaitForDataOptions,
+  GetWebhookDeadLettersOptions,
   IngestWebhookInput,
   LayoutManifest,
   LayoutManifestAlias,
   LayoutManifestResource,
+  ListWebhooksOptions,
   ListTreeOptions,
   OperationFeedResponse,
   OperationStatus,
@@ -182,6 +205,8 @@ export type {
   QueuedResponse,
   QueryFilesOptions,
   ReadFileInput,
+  RegisterWebhookInput,
+  RegisterWebhookResponse,
   ReplayOptions,
   ResourceAtEventResult,
   SummaryExpansion,
@@ -196,8 +221,14 @@ export type {
   SyncProviderStatusState,
   SyncRefreshRequest,
   SyncStatusResponse,
+  SweepWritebackDraftsInput,
+  SweepWritebackDraftsResponse,
   TreeEntry,
   TreeResponse,
+  WebhookDeliveryDeadLetterFeedResponse,
+  WebhookDeliveryDeadLetterItem,
+  WebhookSubscription,
+  WebhookSubscriptionHealth,
   WritebackActionType,
   WritebackDeadLetterError,
   WritebackDeadLetterErrorCode,

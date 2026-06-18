@@ -11,9 +11,14 @@ on:
           - all
           - core
           - sdk
+          - agents
           - cli
           - file-observer
           - local-mount
+          - mount-darwin-arm64
+          - mount-darwin-x64
+          - mount-linux-arm64
+          - mount-linux-x64
         default: "all"
       version:
         description: "Version bump type"
@@ -134,9 +139,14 @@ jobs:
             const packagePaths = [
               'packages/core/package.json',
               'packages/sdk/typescript/package.json',
+              'packages/agents/package.json',
               'packages/cli/package.json',
               'packages/file-observer/package.json',
               'packages/local-mount/package.json',
+              'packages/mount-darwin-arm64/package.json',
+              'packages/mount-darwin-x64/package.json',
+              'packages/mount-linux-arm64/package.json',
+              'packages/mount-linux-x64/package.json',
             ];
 
             for (const pkgPath of packagePaths) {
@@ -144,10 +154,15 @@ jobs:
                 const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
                 pkg.version = version;
                 console.log(pkg.name + ' -> v' + version);
-                for (const depType of ['dependencies', 'devDependencies']) {
+                for (const depType of ['dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies']) {
                   for (const dep of Object.keys(pkg[depType] || {})) {
                     if (dep.startsWith('@relayfile/')) {
-                      pkg[depType][dep] = version;
+                      // Internal deps pin to exact version (existing convention);
+                      // peerDependencies use caret so consumers retain flexibility
+                      // (e.g. a future 0.11.x agents must still admit any 0.11.x sdk,
+                      // not break under 0.x semver as it would with the previous
+                      // peer string left untouched).
+                      pkg[depType][dep] = depType === 'peerDependencies' ? '^' + version : version;
                     }
                   }
                 }
@@ -172,6 +187,7 @@ jobs:
         run: |
           npm run build --workspace=packages/core
           npm run build --workspace=packages/sdk/typescript
+          npm run build --workspace=packages/agents
           npm run build --workspace=packages/cli
           npm run build --workspace=packages/local-mount
           npm ci --prefix packages/file-observer
@@ -189,6 +205,9 @@ jobs:
             packages/sdk/typescript/package.json
             packages/sdk/typescript/dist/
             packages/sdk/typescript/CHANGELOG.md
+            packages/agents/package.json
+            packages/agents/dist/
+            packages/agents/CHANGELOG.md
             packages/cli/package.json
             packages/cli/bin/
             packages/cli/CHANGELOG.md
@@ -197,6 +216,18 @@ jobs:
             packages/local-mount/package.json
             packages/local-mount/dist/
             packages/local-mount/CHANGELOG.md
+            packages/mount-darwin-arm64/package.json
+            packages/mount-darwin-arm64/README.md
+            packages/mount-darwin-arm64/bin/.gitkeep
+            packages/mount-darwin-x64/package.json
+            packages/mount-darwin-x64/README.md
+            packages/mount-darwin-x64/bin/.gitkeep
+            packages/mount-linux-arm64/package.json
+            packages/mount-linux-arm64/README.md
+            packages/mount-linux-arm64/bin/.gitkeep
+            packages/mount-linux-x64/package.json
+            packages/mount-linux-x64/README.md
+            packages/mount-linux-x64/bin/.gitkeep
           retention-days: 1
 
   # Cross-compile relayfile-mount for every consumer-supported platform.
@@ -275,9 +306,13 @@ jobs:
   # Publish all packages in parallel
   publish-packages:
     name: Publish ${{ matrix.package }}
-    needs: build
+    needs: [build, build-mount-binaries]
     runs-on: ubuntu-latest
-    if: github.event.inputs.package == 'all'
+    if: |
+      always() &&
+      github.event.inputs.package == 'all' &&
+      needs.build.result == 'success' &&
+      (github.event.inputs.dry_run == 'true' || needs.build-mount-binaries.result == 'success')
     strategy:
       fail-fast: false
       max-parallel: 10
@@ -285,14 +320,34 @@ jobs:
         include:
           - package: core
             path: packages/core
+            mount_binary: ""
           - package: sdk
             path: packages/sdk/typescript
+            mount_binary: ""
+          - package: agents
+            path: packages/agents
+            mount_binary: ""
           - package: cli
             path: packages/cli
+            mount_binary: ""
           - package: file-observer
             path: packages/file-observer
+            mount_binary: ""
           - package: local-mount
             path: packages/local-mount
+            mount_binary: ""
+          - package: mount-darwin-arm64
+            path: packages/mount-darwin-arm64
+            mount_binary: relayfile-mount-darwin-arm64
+          - package: mount-darwin-x64
+            path: packages/mount-darwin-x64
+            mount_binary: relayfile-mount-darwin-amd64
+          - package: mount-linux-arm64
+            path: packages/mount-linux-arm64
+            mount_binary: relayfile-mount-linux-arm64
+          - package: mount-linux-x64
+            path: packages/mount-linux-x64
+            mount_binary: relayfile-mount-linux-amd64
 
     steps:
       - name: Checkout code
@@ -314,6 +369,21 @@ jobs:
         if: matrix.package == 'cli'
         run: chmod 755 packages/cli/bin/relayfile-cli-*
 
+      - name: Download relayfile-mount binary
+        if: matrix.mount_binary != '' && github.event.inputs.dry_run != 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.mount_binary }}
+          path: /tmp/relayfile-mount-binary
+
+      - name: Prepare mount platform package
+        if: matrix.mount_binary != '' && github.event.inputs.dry_run != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p "${{ matrix.path }}/bin"
+          cp "/tmp/relayfile-mount-binary/${{ matrix.mount_binary }}" "${{ matrix.path }}/bin/relayfile-mount"
+          chmod 755 "${{ matrix.path }}/bin/relayfile-mount"
+
       - name: Update npm for OIDC support
         run: npm install -g npm@latest
 
@@ -333,9 +403,13 @@ jobs:
   # Publish single package (when not 'all')
   publish-single:
     name: Publish single package
-    needs: build
+    needs: [build, build-mount-binaries]
     runs-on: ubuntu-latest
-    if: github.event.inputs.package != 'all'
+    if: |
+      always() &&
+      github.event.inputs.package != 'all' &&
+      needs.build.result == 'success' &&
+      (github.event.inputs.dry_run == 'true' || needs.build-mount-binaries.result == 'success')
 
     steps:
       - name: Checkout code
@@ -357,23 +431,43 @@ jobs:
         if: github.event.inputs.package == 'cli'
         run: chmod 755 packages/cli/bin/relayfile-cli-*
 
-      - name: Update npm for OIDC support
-        run: npm install -g npm@latest
-
       - name: Resolve package path
         id: resolve-package
         run: |
           case "${{ github.event.inputs.package }}" in
-            core) echo "path=packages/core" >> "$GITHUB_OUTPUT" ;;
-            sdk) echo "path=packages/sdk/typescript" >> "$GITHUB_OUTPUT" ;;
-            cli) echo "path=packages/cli" >> "$GITHUB_OUTPUT" ;;
-            file-observer) echo "path=packages/file-observer" >> "$GITHUB_OUTPUT" ;;
-            local-mount) echo "path=packages/local-mount" >> "$GITHUB_OUTPUT" ;;
+            core) echo "path=packages/core" >> "$GITHUB_OUTPUT"; echo "mount_binary=" >> "$GITHUB_OUTPUT" ;;
+            sdk) echo "path=packages/sdk/typescript" >> "$GITHUB_OUTPUT"; echo "mount_binary=" >> "$GITHUB_OUTPUT" ;;
+            agents) echo "path=packages/agents" >> "$GITHUB_OUTPUT"; echo "mount_binary=" >> "$GITHUB_OUTPUT" ;;
+            cli) echo "path=packages/cli" >> "$GITHUB_OUTPUT"; echo "mount_binary=" >> "$GITHUB_OUTPUT" ;;
+            file-observer) echo "path=packages/file-observer" >> "$GITHUB_OUTPUT"; echo "mount_binary=" >> "$GITHUB_OUTPUT" ;;
+            local-mount) echo "path=packages/local-mount" >> "$GITHUB_OUTPUT"; echo "mount_binary=" >> "$GITHUB_OUTPUT" ;;
+            mount-darwin-arm64) echo "path=packages/mount-darwin-arm64" >> "$GITHUB_OUTPUT"; echo "mount_binary=relayfile-mount-darwin-arm64" >> "$GITHUB_OUTPUT" ;;
+            mount-darwin-x64) echo "path=packages/mount-darwin-x64" >> "$GITHUB_OUTPUT"; echo "mount_binary=relayfile-mount-darwin-amd64" >> "$GITHUB_OUTPUT" ;;
+            mount-linux-arm64) echo "path=packages/mount-linux-arm64" >> "$GITHUB_OUTPUT"; echo "mount_binary=relayfile-mount-linux-arm64" >> "$GITHUB_OUTPUT" ;;
+            mount-linux-x64) echo "path=packages/mount-linux-x64" >> "$GITHUB_OUTPUT"; echo "mount_binary=relayfile-mount-linux-amd64" >> "$GITHUB_OUTPUT" ;;
             *)
               echo "Unsupported package: ${{ github.event.inputs.package }}" >&2
               exit 1
               ;;
           esac
+
+      - name: Download relayfile-mount binary
+        if: steps.resolve-package.outputs.mount_binary != '' && github.event.inputs.dry_run != 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ steps.resolve-package.outputs.mount_binary }}
+          path: /tmp/relayfile-mount-binary
+
+      - name: Prepare mount platform package
+        if: steps.resolve-package.outputs.mount_binary != '' && github.event.inputs.dry_run != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p "${{ steps.resolve-package.outputs.path }}/bin"
+          cp "/tmp/relayfile-mount-binary/${{ steps.resolve-package.outputs.mount_binary }}" "${{ steps.resolve-package.outputs.path }}/bin/relayfile-mount"
+          chmod 755 "${{ steps.resolve-package.outputs.path }}/bin/relayfile-mount"
+
+      - name: Update npm for OIDC support
+        run: npm install -g npm@latest
 
       - name: Dry run check
         if: github.event.inputs.dry_run == 'true'
@@ -453,9 +547,12 @@ jobs:
             package.json \
             packages/core/package.json packages/core/CHANGELOG.md \
             packages/sdk/typescript/package.json packages/sdk/typescript/CHANGELOG.md \
+            packages/agents/package.json packages/agents/CHANGELOG.md \
             packages/cli/package.json packages/cli/CHANGELOG.md \
             packages/file-observer/package.json packages/file-observer/CHANGELOG.md \
-            packages/local-mount/package.json packages/local-mount/CHANGELOG.md
+            packages/local-mount/package.json packages/local-mount/CHANGELOG.md \
+            packages/mount-darwin-arm64/package.json packages/mount-darwin-x64/package.json \
+            packages/mount-linux-arm64/package.json packages/mount-linux-x64/package.json
           if ! git diff --staged --quiet; then
             git commit -m "chore(release): v${NEW_VERSION}"
             git push
@@ -475,16 +572,23 @@ jobs:
             ### Packages
             - `@relayfile/core@${{ needs.build.outputs.new_version }}`
             - `@relayfile/sdk@${{ needs.build.outputs.new_version }}`
+            - `@relayfile/agents@${{ needs.build.outputs.new_version }}`
             - `relayfile@${{ needs.build.outputs.new_version }}`
             - `@relayfile/file-observer@${{ needs.build.outputs.new_version }}`
             - `@relayfile/local-mount@${{ needs.build.outputs.new_version }}`
+            - `@relayfile/mount-darwin-arm64@${{ needs.build.outputs.new_version }}`
+            - `@relayfile/mount-darwin-x64@${{ needs.build.outputs.new_version }}`
+            - `@relayfile/mount-linux-arm64@${{ needs.build.outputs.new_version }}`
+            - `@relayfile/mount-linux-x64@${{ needs.build.outputs.new_version }}`
 
             ### Install
             ```bash
             npm install @relayfile/sdk@${{ needs.build.outputs.new_version }}
+            npm install @relayfile/agents@${{ needs.build.outputs.new_version }}
             npm install relayfile@${{ needs.build.outputs.new_version }}
             npm install @relayfile/file-observer@${{ needs.build.outputs.new_version }}
             npm install @relayfile/local-mount@${{ needs.build.outputs.new_version }}
+            npm install @relayfile/sdk@${{ needs.build.outputs.new_version }} --include=optional
             ```
 
             ### Binaries

@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/agentworkforce/relayfile/internal/delegatedauth"
 	"github.com/agentworkforce/relayfile/internal/mountsync"
 	"github.com/fsnotify/fsnotify"
 )
@@ -33,6 +34,7 @@ func TestProductizedCloudMountE2EProof(t *testing.T) {
 
 	cloud := newProductizedCloudMock(t, relay)
 	defer cloud.Close()
+	installFakeAgentRelaySession(t, cloud.URL(), cloud.initialAccessToken, "demo", cloud.workspaceID, cloud.workspaceID)
 
 	var setupOut bytes.Buffer
 	if err := run([]string{
@@ -49,8 +51,8 @@ func TestProductizedCloudMountE2EProof(t *testing.T) {
 		t.Fatalf("setup failed: %v\noutput:\n%s", err, setupOut.String())
 	}
 	assertFileContentEventually(t, filepath.Join(localDir, "github", "repos", "acme", "api", "pulls", "42", "metadata.json"), `{"title":"Initial PR"}`)
-	if cloud.JoinCount() != 1 {
-		t.Fatalf("expected one workspace join after setup, got %d", cloud.JoinCount())
+	if cloud.TokenMintCount() != 1 {
+		t.Fatalf("expected one delegated token mint after setup, got %d", cloud.TokenMintCount())
 	}
 
 	relay.SetProviderStatus("notion", "syncing", 4)
@@ -88,14 +90,23 @@ func TestProductizedCloudMountE2EProof(t *testing.T) {
 		t.Fatalf("expected github and notion integrations, got %v", providers)
 	}
 
-	creds, err := loadCredentials()
-	if err != nil {
-		t.Fatalf("loadCredentials failed: %v", err)
-	}
 	record, err := resolveWorkspaceRecord("demo")
 	if err != nil {
 		t.Fatalf("resolveWorkspaceRecord failed: %v", err)
 	}
+	runtimeToken := cloud.LastRelayfileToken()
+	if runtimeToken == "" {
+		t.Fatalf("expected setup/connect/list to mint a relayfile runtime token")
+	}
+	delegatedCredsFile := writeDelegatedCredentialsForTest(t, delegatedauth.Bundle{
+		RelayfileURL:          relay.URL(),
+		RelayfileWorkspaceID:  cloud.workspaceID,
+		AccessToken:           runtimeToken,
+		RefreshToken:          "refresh_productized_1",
+		AccessTokenExpiresAt:  time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
+		RefreshTokenExpiresAt: time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339),
+		RelayauthURL:          cloud.URL(),
+	})
 
 	prevLogWriter := log.Writer()
 	log.SetOutput(io.Discard)
@@ -106,7 +117,7 @@ func TestProductizedCloudMountE2EProof(t *testing.T) {
 
 	disableWebSocket := false
 	syncer, err := mountsync.NewSyncer(
-		mountsync.NewHTTPClient(creds.Server, creds.Token, relay.HTTPClient()),
+		mountsync.NewHTTPClient(relay.URL(), runtimeToken, relay.HTTPClient()),
 		mountsync.SyncerOptions{
 			WorkspaceID: record.ID,
 			RemoteRoot:  "/",
@@ -139,7 +150,8 @@ func TestProductizedCloudMountE2EProof(t *testing.T) {
 			syncer,
 			localDir,
 			record.ID,
-			creds.Server,
+			relay.URL(),
+			delegatedCredsFile,
 			500*time.Millisecond,
 			100*time.Millisecond,
 			0,
@@ -200,28 +212,10 @@ func TestProductizedCloudMountE2EProof(t *testing.T) {
 		t.Fatalf("expected github and notion providers in status, got %v", providers)
 	}
 
-	if err := saveCloudCredentials(cloudCredentials{
-		APIURL:                cloud.URL(),
-		AccessToken:           cloud.expiredAccessToken,
-		RefreshToken:          cloud.refreshToken,
-		AccessTokenExpiresAt:  time.Now().Add(-time.Minute).UTC().Format(time.RFC3339),
-		RefreshTokenExpiresAt: time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
-		UpdatedAt:             time.Now().UTC().Format(time.RFC3339),
-	}); err != nil {
-		t.Fatalf("saveCloudCredentials failed: %v", err)
-	}
-
-	currentToken, err := currentRelayToken()
-	if err != nil {
-		t.Fatalf("currentRelayToken failed: %v", err)
-	}
+	currentToken := runtimeToken
 	relay.RejectToken(currentToken)
-	waitForCondition(t, 12*time.Second, "cloud token refresh + workspace rejoin", func() bool {
-		creds, loadErr := loadCredentials()
-		if loadErr != nil {
-			return false
-		}
-		return cloud.RefreshCount() >= 1 && cloud.JoinCount() >= 3 && creds.Token != currentToken
+	waitForCondition(t, 12*time.Second, "delegated relayfile token refresh", func() bool {
+		return cloud.RefreshCount() > 0 && cloud.LastRelayfileToken() != currentToken
 	})
 
 	relay.UpsertFile("/github/repos/acme/api/pulls/42/after-refresh.md", "text/markdown", "# After refresh\n")
@@ -573,11 +567,10 @@ type productizedCloudMock struct {
 	relay              *productizedRelayfileMock
 	workspaceID        string
 	initialAccessToken string
-	expiredAccessToken string
 	refreshedToken     string
-	refreshToken       string
-	joinCount          int
+	tokenMintCount     int
 	refreshCount       int
+	lastRelayfileToken string
 	providers          map[string]string
 }
 
@@ -588,9 +581,7 @@ func newProductizedCloudMock(t *testing.T, relay *productizedRelayfileMock) *pro
 		relay:              relay,
 		workspaceID:        "ws_productized",
 		initialAccessToken: "cld_setup",
-		expiredAccessToken: "cld_expired",
 		refreshedToken:     "cld_refreshed",
-		refreshToken:       "cld_refresh",
 		providers:          map[string]string{},
 	}
 	mock.server = httptest.NewServer(http.HandlerFunc(mock.serveHTTP))
@@ -605,10 +596,16 @@ func (m *productizedCloudMock) URL() string {
 	return m.server.URL
 }
 
-func (m *productizedCloudMock) JoinCount() int {
+func (m *productizedCloudMock) TokenMintCount() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.joinCount
+	return m.tokenMintCount
+}
+
+func (m *productizedCloudMock) LastRelayfileToken() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.lastRelayfileToken
 }
 
 func (m *productizedCloudMock) RefreshCount() int {
@@ -621,10 +618,10 @@ func (m *productizedCloudMock) serveHTTP(w http.ResponseWriter, r *http.Request)
 	switch {
 	case r.URL.Path == "/api/v1/workspaces" && r.Method == http.MethodPost:
 		m.serveCreateWorkspace(w, r)
-	case r.URL.Path == "/api/v1/auth/token/refresh" && r.Method == http.MethodPost:
-		m.serveRefreshCloudToken(w, r)
-	case strings.HasSuffix(r.URL.Path, "/join") && r.Method == http.MethodPost:
-		m.serveJoinWorkspace(w, r)
+	case r.URL.Path == "/v1/tokens/refresh" && r.Method == http.MethodPost:
+		m.serveRefreshToken(w, r)
+	case strings.HasSuffix(r.URL.Path, "/relayfile/delegated-token") && r.Method == http.MethodPost:
+		m.serveDelegatedRelayfileToken(w, r)
 	case strings.HasSuffix(r.URL.Path, "/integrations/connect-session") && r.Method == http.MethodPost:
 		m.serveConnectSession(w, r)
 	case strings.Contains(r.URL.Path, "/integrations/") && strings.HasSuffix(r.URL.Path, "/status") && r.Method == http.MethodGet:
@@ -639,6 +636,31 @@ func (m *productizedCloudMock) serveHTTP(w http.ResponseWriter, r *http.Request)
 	}
 }
 
+func (m *productizedCloudMock) serveRefreshToken(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		RefreshToken string `json:"refreshToken"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		m.t.Fatalf("decode relayauth refresh body failed: %v", err)
+	}
+	if strings.TrimSpace(body.RefreshToken) == "" {
+		m.t.Fatalf("refresh token missing")
+	}
+	m.mu.Lock()
+	m.refreshCount++
+	token := fmt.Sprintf("rf_token_refresh_%d", m.refreshCount)
+	m.lastRelayfileToken = token
+	m.mu.Unlock()
+
+	m.relay.ActivateToken(token)
+	writeMockJSON(w, http.StatusOK, map[string]string{
+		"accessToken":           token,
+		"refreshToken":          fmt.Sprintf("refresh_productized_%d", m.refreshCount+1),
+		"accessTokenExpiresAt":  time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
+		"refreshTokenExpiresAt": time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339),
+	})
+}
+
 func (m *productizedCloudMock) serveCreateWorkspace(w http.ResponseWriter, r *http.Request) {
 	if got := bearerToken(r); got != m.initialAccessToken {
 		m.t.Fatalf("unexpected create workspace token: %q", got)
@@ -651,49 +673,45 @@ func (m *productizedCloudMock) serveCreateWorkspace(w http.ResponseWriter, r *ht
 	})
 }
 
-func (m *productizedCloudMock) serveRefreshCloudToken(w http.ResponseWriter, r *http.Request) {
-	if got := bearerToken(r); got != m.expiredAccessToken {
-		m.t.Fatalf("unexpected refresh token auth header: %q", got)
-	}
-	var body cloudTokenRefreshRequest
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		m.t.Fatalf("decode refresh request failed: %v", err)
-	}
-	if body.RefreshToken != m.refreshToken {
-		m.t.Fatalf("unexpected refresh token: %q", body.RefreshToken)
-	}
-	m.mu.Lock()
-	m.refreshCount++
-	m.mu.Unlock()
-	writeMockJSON(w, http.StatusOK, cloudCredentials{
-		APIURL:                m.URL(),
-		AccessToken:           m.refreshedToken,
-		RefreshToken:          m.refreshToken,
-		AccessTokenExpiresAt:  time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
-		RefreshTokenExpiresAt: time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339),
-	})
-}
-
-func (m *productizedCloudMock) serveJoinWorkspace(w http.ResponseWriter, r *http.Request) {
+func (m *productizedCloudMock) serveDelegatedRelayfileToken(w http.ResponseWriter, r *http.Request) {
 	got := bearerToken(r)
 	if got != m.initialAccessToken && got != m.refreshedToken {
-		m.t.Fatalf("unexpected join token: %q", got)
+		m.t.Fatalf("unexpected delegated-token auth token: %q", got)
+	}
+	var body cloudRelayfileDelegatedTokenRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		m.t.Fatalf("decode delegated-token body failed: %v", err)
+	}
+	if strings.TrimSpace(body.AgentName) == "" {
+		m.t.Fatalf("delegated-token agentName missing")
+	}
+	if len(body.Scopes) == 0 {
+		m.t.Fatalf("delegated-token scopes missing")
 	}
 	m.mu.Lock()
-	m.joinCount++
-	token := fmt.Sprintf("rf_token_%d", m.joinCount)
+	m.tokenMintCount++
+	token := fmt.Sprintf("rf_token_%d", m.tokenMintCount)
+	refreshToken := fmt.Sprintf("refresh_productized_%d", m.tokenMintCount)
+	m.lastRelayfileToken = token
 	m.mu.Unlock()
 
 	m.relay.ActivateToken(token)
-	writeMockJSON(w, http.StatusOK, cloudWorkspaceJoinResponse{
-		WorkspaceID:  m.workspaceID,
-		Token:        token,
-		RelayfileURL: m.relay.URL(),
+	writeMockJSON(w, http.StatusOK, map[string]any{
+		"relayfileUrl":                   m.relay.URL(),
+		"relayauthUrl":                   m.URL(),
+		"relayfileWorkspaceId":           m.workspaceID,
+		"relayfileToken":                 token,
+		"relayfileTokenExpiresAt":        time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
+		"relayfileRefreshToken":          refreshToken,
+		"relayfileRefreshTokenExpiresAt": time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339),
+		"relayfileScopes":                body.Scopes,
+		"delegationNotAfter":             time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339),
+		"relayfileMountPaths":            []string{"/"},
 	})
 }
 
 func (m *productizedCloudMock) serveConnectSession(w http.ResponseWriter, r *http.Request) {
-	if got := bearerToken(r); !strings.HasPrefix(got, "rf_token_") {
+	if got := bearerToken(r); got != m.initialAccessToken && got != m.refreshedToken {
 		m.t.Fatalf("unexpected connect-session auth token: %q", got)
 	}
 	var body cloudConnectSessionRequest
@@ -715,14 +733,14 @@ func (m *productizedCloudMock) serveConnectSession(w http.ResponseWriter, r *htt
 }
 
 func (m *productizedCloudMock) serveIntegrationStatus(w http.ResponseWriter, r *http.Request) {
-	if got := bearerToken(r); !strings.HasPrefix(got, "rf_token_") {
+	if got := bearerToken(r); got != m.initialAccessToken && got != m.refreshedToken {
 		m.t.Fatalf("unexpected integration status auth token: %q", got)
 	}
 	writeMockJSON(w, http.StatusOK, cloudIntegrationReadyResponse{Ready: true})
 }
 
 func (m *productizedCloudMock) serveIntegrationList(w http.ResponseWriter, r *http.Request) {
-	if got := bearerToken(r); !strings.HasPrefix(got, "rf_token_") {
+	if got := bearerToken(r); got != m.initialAccessToken && got != m.refreshedToken {
 		m.t.Fatalf("unexpected integration list auth token: %q", got)
 	}
 	m.mu.Lock()
@@ -769,14 +787,6 @@ func syncStateProviders(entries []syncStateProvider) []string {
 	}
 	sort.Strings(out)
 	return out
-}
-
-func currentRelayToken() (string, error) {
-	creds, err := loadCredentials()
-	if err != nil {
-		return "", err
-	}
-	return creds.Token, nil
 }
 
 func waitForCondition(t *testing.T, timeout time.Duration, description string, predicate func() bool) {

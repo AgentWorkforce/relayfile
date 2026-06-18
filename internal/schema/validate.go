@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
+	"log"
 	"regexp"
 	"sync"
 
@@ -28,26 +30,42 @@ var registrations = []registration{
 	},
 }
 
-var (
-	compilerOnce sync.Once
-	// TODO: compilerErr is a global kill switch — if any single schema fails to
-	// compile during init, all validation is blocked. Refactor to per-schema error
-	// tracking when the second schema is added.
-	compilerErr error
+// validator compiles and caches the canonical schemas for a registration set.
+// Compile failures are tracked per schema file, so one broken schema only
+// blocks validation for its own paths; unrelated paths validate normally.
+type validator struct {
+	registrations []registration
+	fsys          fs.FS
+
+	once sync.Once
+	// compileErrs maps schema file path -> compile/load error from init.
+	compileErrs map[string]error
 	compiled    sync.Map
-)
+}
+
+var defaultValidator = &validator{
+	registrations: registrations,
+	fsys:          schemaassets.FS,
+}
 
 // ValidateContent checks whether content conforms to the canonical schema for a
 // registered VFS path. Returns ErrUnknownPath (checkable via errors.Is) when no
 // schema is registered for the path pattern, nil when validation passes, or a
 // descriptive error for invalid JSON or schema violations.
+//
+// If the schema registered for the path failed to compile, the compile error is
+// returned (fail-closed for that path); schemas for other paths are unaffected.
 func ValidateContent(path string, content []byte) error {
-	schemaPath := registeredSchema(path)
+	return defaultValidator.ValidateContent(path, content)
+}
+
+func (v *validator) ValidateContent(path string, content []byte) error {
+	schemaPath := v.registeredSchema(path)
 	if schemaPath == "" {
 		return fmt.Errorf("%w: %s", ErrUnknownPath, path)
 	}
 
-	sch, err := loadSchema(schemaPath)
+	sch, err := v.loadSchema(schemaPath)
 	if err != nil {
 		return err
 	}
@@ -63,8 +81,8 @@ func ValidateContent(path string, content []byte) error {
 	return nil
 }
 
-func registeredSchema(path string) string {
-	for _, item := range registrations {
+func (v *validator) registeredSchema(path string) string {
+	for _, item := range v.registrations {
 		if item.pattern.MatchString(path) {
 			return item.file
 		}
@@ -72,20 +90,47 @@ func registeredSchema(path string) string {
 	return ""
 }
 
-func loadSchema(path string) (*jsonschema.Schema, error) {
-	initCompiler()
-	if compilerErr != nil {
-		return nil, compilerErr
+func (v *validator) loadSchema(path string) (*jsonschema.Schema, error) {
+	v.init()
+	if err, ok := v.compileErrs[path]; ok {
+		return nil, err
 	}
-	if cached, ok := compiled.Load(path); ok {
+	if cached, ok := v.compiled.Load(path); ok {
 		return cached.(*jsonschema.Schema), nil
 	}
 
 	// NOTE: This fallback path creates a fresh compiler that does not share
-	// state with initCompiler(). If schemas ever use $ref to reference each
-	// other, this will fail to resolve cross-schema references. Refactor to a
+	// state with init(). If schemas ever use $ref to reference each other,
+	// this will fail to resolve cross-schema references. Refactor to a
 	// single shared compiler instance when the schema set grows.
-	data, err := schemaassets.FS.ReadFile(path)
+	sch, err := compileSchemaFile(v.fsys, path)
+	if err != nil {
+		return nil, err
+	}
+
+	actual, _ := v.compiled.LoadOrStore(path, sch)
+	return actual.(*jsonschema.Schema), nil
+}
+
+func (v *validator) init() {
+	v.once.Do(func() {
+		v.compileErrs = make(map[string]error)
+		for _, item := range v.registrations {
+			sch, err := compileSchemaFile(v.fsys, item.file)
+			if err != nil {
+				// Track the failure per schema so only paths registered to
+				// this schema are blocked; other schemas validate normally.
+				v.compileErrs[item.file] = err
+				log.Printf("schema: %v; validation for paths registered to %s will fail until fixed", err, item.file)
+				continue
+			}
+			v.compiled.Store(item.file, sch)
+		}
+	})
+}
+
+func compileSchemaFile(fsys fs.FS, path string) (*jsonschema.Schema, error) {
+	data, err := fs.ReadFile(fsys, path)
 	if err != nil {
 		return nil, fmt.Errorf("read schema %s: %w", path, err)
 	}
@@ -104,37 +149,7 @@ func loadSchema(path string) (*jsonschema.Schema, error) {
 	if err != nil {
 		return nil, fmt.Errorf("compile schema %s: %w", path, err)
 	}
-
-	actual, _ := compiled.LoadOrStore(path, sch)
-	return actual.(*jsonschema.Schema), nil
-}
-
-func initCompiler() {
-	compilerOnce.Do(func() {
-		for _, item := range registrations {
-			data, err := schemaassets.FS.ReadFile(item.file)
-			if err != nil {
-				compilerErr = fmt.Errorf("read schema %s: %w", item.file, err)
-				return
-			}
-			var doc any
-			if err := json.Unmarshal(data, &doc); err != nil {
-				compilerErr = fmt.Errorf("parse schema %s: %w", item.file, err)
-				return
-			}
-			compiler := newCompiler()
-			if err := compiler.AddResource(item.file, doc); err != nil {
-				compilerErr = fmt.Errorf("register schema %s: %w", item.file, err)
-				return
-			}
-			sch, err := compiler.Compile(item.file)
-			if err != nil {
-				compilerErr = fmt.Errorf("compile schema %s: %w", item.file, err)
-				return
-			}
-			compiled.Store(item.file, sch)
-		}
-	})
+	return sch, nil
 }
 
 func newCompiler() *jsonschema.Compiler {

@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { RelayFileClient } from "./client.js";
-import { RelayFileSync, normalizeError } from "./sync.js";
+import { RelayFileSync, normalizeError, normalizeFilesystemEvent } from "./sync.js";
 import type { FilesystemEvent } from "./types.js";
 
 class MockWebSocket {
@@ -68,7 +68,7 @@ describe("RelayFileSync", () => {
 
     sync.start();
     expect(sockets).toHaveLength(1);
-    expect(sockets[0]!.url).toBe("wss://relay.test/v1/workspaces/ws_acme/fs/ws?token=ws_token");
+    expect(sockets[0]!.url).toBe("wss://relay.test/v1/workspaces/ws_acme/fs/ws?token=ws_token&from=now");
 
     sockets[0]!.emit("open", {});
     sockets[0]!.emit("message", {
@@ -101,6 +101,140 @@ describe("RelayFileSync", () => {
     expect(sockets[0]!.sent).toContain(JSON.stringify({ type: "ping" }));
 
     await sync.stop();
+  });
+
+  it("normalizes malformed filesystem events with stable fallbacks", () => {
+    const first = normalizeFilesystemEvent(null);
+    const second = normalizeFilesystemEvent({ type: "relayfile.changed", resource: { path: "/linear/issues/ENG-1.json" } });
+    const third = normalizeFilesystemEvent({ type: "relayfile.changed", resource: { path: "/linear/issues/ENG-1.json" } });
+
+    expect(first).toMatchObject({
+      eventId: "ws:file.updated:::1970-01-01T00:00:00.000Z",
+      type: "file.updated",
+      path: "",
+      revision: "",
+      timestamp: "1970-01-01T00:00:00.000Z"
+    });
+    expect(second.eventId).toBe(third.eventId);
+    expect(second.timestamp).toBe("1970-01-01T00:00:00.000Z");
+  });
+
+  it("preserves contentHash from WebSocket event payloads", async () => {
+    const sockets: MockWebSocket[] = [];
+    const sync = new RelayFileSync({
+      client: makeClient(),
+      workspaceId: "ws_acme",
+      baseUrl: "https://relay.test",
+      token: "ws_token",
+      webSocketFactory: (url) => {
+        const socket = new MockWebSocket(url);
+        sockets.push(socket);
+        return socket;
+      }
+    });
+
+    const events: FilesystemEvent[] = [];
+    sync.on("event", (event) => events.push(event));
+
+    sync.start();
+    sockets[0]!.emit("open", {});
+    sockets[0]!.emit("message", {
+      data: JSON.stringify({
+        type: "file.updated",
+        path: "/docs/readme.md",
+        revision: "rev_2",
+        contentHash: "sha256:abc123",
+        timestamp: "2026-03-26T00:00:00Z"
+      })
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(events).toHaveLength(1);
+    expect(events[0]!.contentHash).toBe("sha256:abc123");
+
+    await sync.stop();
+  });
+
+  it("sends exclusive cursor and path filters on WebSocket connect and reconnect", async () => {
+    vi.useFakeTimers();
+    const sockets: MockWebSocket[] = [];
+    const sync = new RelayFileSync({
+      client: makeClient(),
+      workspaceId: "ws_acme",
+      baseUrl: "https://relay.test",
+      token: "ws_token",
+      cursor: "evt_10",
+      paths: ["/slack/channels/C1/**"],
+      reconnect: { minDelayMs: 1, maxDelayMs: 1 },
+      webSocketFactory: (url) => {
+        const socket = new MockWebSocket(url);
+        sockets.push(socket);
+        return socket;
+      }
+    });
+
+    sync.start();
+    expect(sockets[0]!.url).toBe("wss://relay.test/v1/workspaces/ws_acme/fs/ws?token=ws_token&cursor=evt_10&path=%2Fslack%2Fchannels%2FC1%2F**");
+    sockets[0]!.emit("open", {});
+    sockets[0]!.emit("message", {
+      data: JSON.stringify({
+        eventId: "evt_11",
+        type: "file.updated",
+        path: "/slack/channels/C1/messages/1.json",
+        revision: "rev_11",
+        timestamp: "2026-03-26T00:00:00Z"
+      })
+    });
+    sockets[0]!.emit("close", { code: 1006, reason: "lost" });
+
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(sockets).toHaveLength(2);
+    expect(sockets[1]!.url).toBe("wss://relay.test/v1/workspaces/ws_acme/fs/ws?token=ws_token&cursor=evt_11&path=%2Fslack%2Fchannels%2FC1%2F**");
+
+    await sync.stop();
+    vi.useRealTimers();
+  });
+
+  it("advances reconnect cursor from normalized envelope ids", async () => {
+    vi.useFakeTimers();
+    const sockets: MockWebSocket[] = [];
+    const sync = new RelayFileSync({
+      client: makeClient(),
+      workspaceId: "ws_acme",
+      baseUrl: "https://relay.test",
+      token: "ws_token",
+      reconnect: { minDelayMs: 1, maxDelayMs: 1 },
+      webSocketFactory: (url) => {
+        const socket = new MockWebSocket(url);
+        sockets.push(socket);
+        return socket;
+      }
+    });
+
+    sync.start();
+    expect(sockets[0]!.url).toBe("wss://relay.test/v1/workspaces/ws_acme/fs/ws?token=ws_token&from=now");
+    sockets[0]!.emit("open", {});
+    sockets[0]!.emit("message", {
+      data: JSON.stringify({
+        id: "evt_envelope_12",
+        type: "relayfile.changed",
+        resource: {
+          path: "/slack/channels/C1/messages/2.json"
+        },
+        occurredAt: "2026-03-26T00:00:00Z"
+      })
+    });
+    sockets[0]!.emit("close", { code: 1006, reason: "lost" });
+
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(sockets).toHaveLength(2);
+    expect(sockets[1]!.url).toBe("wss://relay.test/v1/workspaces/ws_acme/fs/ws?token=ws_token&cursor=evt_envelope_12");
+
+    await sync.stop();
+    vi.useRealTimers();
   });
 
   it("falls back to polling when preferred, seeds to the live cursor, then emits only new events", async () => {
@@ -606,6 +740,63 @@ describe("RelayFileSync", () => {
     expect(sockets).toHaveLength(1);
 
     await sync.stop();
+  });
+
+  it("re-probes the WebSocket and recovers after an involuntary polling fallback", async () => {
+    // Regression (relayfile-ws-self-heal-latch): a single pre-open WS failure
+    // used to latch the SDK into polling for the life of the process —
+    // pollLoop() ran `while(!stopped)` forever, so the reconnect path in its
+    // .finally() was unreachable. A long-running consumer (the factory daemon)
+    // stayed on 5s polling until restart. The poll loop now yields after a
+    // backoff window so the WS is re-probed; once the transient clears the
+    // socket re-opens and push delivery resumes — with no restart.
+    vi.useFakeTimers();
+    try {
+      const sockets: MockWebSocket[] = [];
+      const fallback = vi.fn();
+      const sync = new RelayFileSync({
+        client: makeClient(),
+        workspaceId: "ws_acme",
+        baseUrl: "https://relay.test",
+        token: "ws_token",
+        pollIntervalMs: 1000,
+        reconnect: { minDelayMs: 5, maxDelayMs: 5 },
+        onPollingFallback: fallback,
+        webSocketFactory: (url) => {
+          const socket = new MockWebSocket(url);
+          sockets.push(socket);
+          return socket;
+        }
+      });
+
+      sync.start();
+      expect(sockets).toHaveLength(1);
+
+      // Pre-open failure → after the grace window, drop to polling. No eager
+      // WS retry (retrying the same failing handshake in a loop is pointless).
+      sockets[0]!.emit("error", { type: "error" });
+      await vi.advanceTimersByTimeAsync(300);
+      expect(fallback).toHaveBeenCalledWith(
+        expect.objectContaining({ reason: "forced-polling-pre-open" })
+      );
+      expect(sync.getState()).toBe("polling");
+      expect(sockets).toHaveLength(1);
+
+      // Advance past the 5s re-probe window: the poll loop yields and the
+      // reconnect path opens a fresh socket. THIS is what the old code could
+      // never do — it stayed in pollLoop forever.
+      await vi.advanceTimersByTimeAsync(5000 + 50);
+      expect(sockets.length).toBeGreaterThanOrEqual(2);
+
+      // The endpoint has recovered — the re-probed socket opens and push
+      // delivery resumes.
+      sockets[sockets.length - 1]!.emit("open", {});
+      expect(sync.getState()).toBe("open");
+
+      await sync.stop();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("does NOT double-recover when a normal close follows the ws error", async () => {

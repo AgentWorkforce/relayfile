@@ -179,6 +179,10 @@ func (c *bootstrapClient) WriteFilesBulk(ctx context.Context, workspaceID string
 	return BulkWriteResponse{}, nil
 }
 
+func (c *bootstrapClient) GetOperation(ctx context.Context, workspaceID, opID string) (OperationStatus, error) {
+	return OperationStatus{}, &HTTPError{StatusCode: 404, Code: "not_found", Message: "not found"}
+}
+
 func (c *bootstrapClient) DeleteFile(ctx context.Context, workspaceID, path, baseRevision string) error {
 	return nil
 }
@@ -632,4 +636,93 @@ func TestBootstrapWatchdogNoGoroutineLeak(t *testing.T) {
 			t.Fatalf("reconcile: %v", err)
 		}
 	})
+}
+
+// TestQuarantinedPathsPersistedAcrossRestarts verifies that a path quarantined
+// due to a file/directory name collision is persisted in state.json and skipped
+// (no ReadFile call) on the next cycle, preventing repeated proxy calls.
+//
+// The test uses an INTERRUPTED cycle (page failure after the collision page) so
+// that QuarantinedPaths is written to state.json before BootstrapComplete is
+// set. markBootstrapComplete clears the quarantine on a complete run — the
+// quarantine is only meant to survive interrupted restarts, not live forever.
+func TestQuarantinedPathsPersistedAcrossRestarts(t *testing.T) {
+	// 20 files across pages of 5. Plant the collision on page 1, then fail
+	// on page 3 so the cursor + QuarantinedPaths are persisted before the
+	// bootstrap completes.
+	client := newBootstrapClient(20, 5)
+	// Add a colliding path on the FIRST page: "/f/00000.txt/sub.txt" requires
+	// "/f/00000.txt" to be a directory, but we pre-create it as a file (ENOTDIR).
+	collisionPath := "/f/00000.txt/sub.txt"
+	client.mu.Lock()
+	client.files[collisionPath] = RemoteFile{
+		Path:        collisionPath,
+		Revision:    "rev_col",
+		ContentType: "text/plain",
+		Content:     "collision content",
+	}
+	client.mu.Unlock()
+	// Fail on page 3 so the page 1 cursor (which saved QuarantinedPaths) is
+	// persisted but the bootstrap is not complete.
+	client.listTreeFailAt = 3
+	client.listTreeFailErr = &HTTPError{StatusCode: 502, Code: "bad_gateway", Message: "interrupted"}
+	client.listTreeFailOnce = true
+
+	localDir := t.TempDir()
+
+	// Pre-create "/f/00000.txt" as a regular file to force the ENOTDIR collision.
+	parentDir := filepath.Join(localDir, "f")
+	if err := os.MkdirAll(parentDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(parentDir, "00000.txt"), []byte("existing"), 0o644); err != nil {
+		t.Fatalf("seed collision file: %v", err)
+	}
+
+	// Cycle 1: encounters collision on page 1, saves cursor + QuarantinedPaths,
+	// then fails on page 3. BootstrapComplete=false.
+	s := newBootstrapSyncer(t, client, localDir, SyncerOptions{RootCtx: context.Background()})
+	if err := s.Reconcile(context.Background()); err == nil {
+		t.Fatalf("expected cycle 1 to fail at page 3")
+	}
+
+	// Verify the quarantine was persisted to state.json (saved at page 1 boundary).
+	st := loadPersistedState(t, localDir)
+	if st.BootstrapComplete {
+		t.Fatalf("expected BootstrapComplete=false after interrupted cycle")
+	}
+	if st.QuarantinedPaths == nil {
+		t.Fatalf("expected QuarantinedPaths in persisted state after interrupted cycle with collision")
+	}
+	if _, ok := st.QuarantinedPaths[collisionPath]; !ok {
+		t.Fatalf("expected %s to be in QuarantinedPaths, got %v", collisionPath, st.QuarantinedPaths)
+	}
+
+	// Simulate a restart: fresh syncer loads the saved state.
+	readsAfterCycle1 := client.readFileCalls.Load()
+	s2 := newBootstrapSyncer(t, client, localDir, SyncerOptions{RootCtx: context.Background()})
+	if err := s2.Reconcile(context.Background()); err != nil {
+		t.Fatalf("cycle 2 (resume) reconcile: %v", err)
+	}
+
+	// The colliding path must NOT have triggered a new ReadFile call in cycle 2.
+	readsAfterCycle2 := client.readFileCalls.Load()
+	// Cycle 2 resumes from page 2 cursor: it should read remaining pages but
+	// NOT re-read the collision path from page 1.
+	// We check by counting whether ReadFile was called for the collision path.
+	// A proxy-safe way: total reads in cycle 2 should be ≤ remaining files
+	// (i.e. no extra call for the collision path).
+	remainingAfterResume := int64(20) - readsAfterCycle1 // non-collision files on pages 3+
+	if actual := readsAfterCycle2 - readsAfterCycle1; actual > remainingAfterResume+int64(client.pageSize) {
+		t.Fatalf("cycle 2 read too many files (%d > %d): collision path was likely re-fetched", actual, remainingAfterResume+int64(client.pageSize))
+	}
+
+	// After completion, BootstrapComplete=true and quarantine cleared.
+	st2 := loadPersistedState(t, localDir)
+	if !st2.BootstrapComplete {
+		t.Fatalf("expected BootstrapComplete=true after resumed cycle")
+	}
+	if len(st2.QuarantinedPaths) != 0 {
+		t.Fatalf("expected QuarantinedPaths cleared on bootstrap completion, got %v", st2.QuarantinedPaths)
+	}
 }
