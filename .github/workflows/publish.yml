@@ -82,6 +82,21 @@ jobs:
       is_prerelease: ${{ steps.bump.outputs.is_prerelease }}
 
     steps:
+      - name: Validate release mode
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event.inputs.package }}" != "all" ] && [ "${{ github.event.inputs.dry_run }}" != "true" ]; then
+            cat >&2 <<'EOF'
+          ERROR: the publish workflow version-bumps every @relayfile package, and
+          release lockfile regeneration needs every @relayfile/mount-* package at
+          the new version to have been published so npm can resolve tarball
+          integrity metadata. Run the release with package=all, or split
+          single-package releases into a workflow that does not rewrite all
+          package manifests and lockfiles.
+          EOF
+            exit 1
+          fi
+
       - name: Checkout code
         uses: actions/checkout@v4
         with:
@@ -499,6 +514,12 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.14.0"
+          registry-url: "https://registry.npmjs.org"
+
       - name: Download build artifacts
         uses: actions/download-artifact@v4
         with:
@@ -536,6 +557,14 @@ jobs:
           ( cd packages/cli/bin && sha256sum relayfile-cli-* ) >> checksums.txt
           cat checksums.txt
 
+      - name: Regenerate release lockfiles
+        run: |
+          set -euo pipefail
+          npm install --package-lock-only --ignore-scripts
+          npm install --prefix packages/sdk/typescript --package-lock-only --ignore-scripts
+          npm ci --dry-run
+          npm ci --prefix packages/sdk/typescript --dry-run
+
       - name: Commit version bump and create tag
         env:
           NEW_VERSION: ${{ needs.build.outputs.new_version }}
@@ -544,9 +573,9 @@ jobs:
           git config user.email "actions@github.com"
 
           git add \
-            package.json \
+            package.json package-lock.json \
             packages/core/package.json packages/core/CHANGELOG.md \
-            packages/sdk/typescript/package.json packages/sdk/typescript/CHANGELOG.md \
+            packages/sdk/typescript/package.json packages/sdk/typescript/package-lock.json packages/sdk/typescript/CHANGELOG.md \
             packages/agents/package.json packages/agents/CHANGELOG.md \
             packages/cli/package.json packages/cli/CHANGELOG.md \
             packages/file-observer/package.json packages/file-observer/CHANGELOG.md \
@@ -625,20 +654,22 @@ jobs:
     steps:
       - name: Summary
         run: |
-          echo "## Publish Summary" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "**Package**: \`${{ github.event.inputs.package }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "**Version**: \`${{ needs.build.outputs.new_version }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "**NPM Tag**: \`${{ github.event.inputs.tag }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "**Prerelease**: \`${{ needs.build.outputs.is_prerelease }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "**Dry Run**: \`${{ github.event.inputs.dry_run }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "**Provenance**: \`enabled\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "### Results" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Stage | Status |" >> "$GITHUB_STEP_SUMMARY"
-          echo "|-------|--------|" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Build & Version | ${{ needs.build.result == 'success' && 'SUCCESS' || 'FAILURE' }} |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Publish All | ${{ needs.publish-packages.result == 'success' && 'SUCCESS' || (needs.publish-packages.result == 'skipped' && 'SKIPPED' || 'FAILURE') }} |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Publish Single | ${{ needs.publish-single.result == 'success' && 'SUCCESS' || (needs.publish-single.result == 'skipped' && 'SKIPPED' || 'FAILURE') }} |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Build Mount Binaries | ${{ needs.build-mount-binaries.result == 'success' && 'SUCCESS' || (needs.build-mount-binaries.result == 'skipped' && 'SKIPPED' || 'FAILURE') }} |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Create Release | ${{ needs.create-release.result == 'success' && 'SUCCESS' || (needs.create-release.result == 'skipped' && 'SKIPPED' || 'FAILURE') }} |" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "## Publish Summary"
+            echo ""
+            echo "**Package**: \`${{ github.event.inputs.package }}\`"
+            echo "**Version**: \`${{ needs.build.outputs.new_version }}\`"
+            echo "**NPM Tag**: \`${{ github.event.inputs.tag }}\`"
+            echo "**Prerelease**: \`${{ needs.build.outputs.is_prerelease }}\`"
+            echo "**Dry Run**: \`${{ github.event.inputs.dry_run }}\`"
+            echo "**Provenance**: \`enabled\`"
+            echo ""
+            echo "### Results"
+            echo "| Stage | Status |"
+            echo "|-------|--------|"
+            echo "| Build & Version | ${{ needs.build.result == 'success' && 'SUCCESS' || 'FAILURE' }} |"
+            echo "| Publish All | ${{ needs.publish-packages.result == 'success' && 'SUCCESS' || (needs.publish-packages.result == 'skipped' && 'SKIPPED' || 'FAILURE') }} |"
+            echo "| Publish Single | ${{ needs.publish-single.result == 'success' && 'SUCCESS' || (needs.publish-single.result == 'skipped' && 'SKIPPED' || 'FAILURE') }} |"
+            echo "| Build Mount Binaries | ${{ needs.build-mount-binaries.result == 'success' && 'SUCCESS' || (needs.build-mount-binaries.result == 'skipped' && 'SKIPPED' || 'FAILURE') }} |"
+            echo "| Create Release | ${{ needs.create-release.result == 'success' && 'SUCCESS' || (needs.create-release.result == 'skipped' && 'SKIPPED' || 'FAILURE') }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
