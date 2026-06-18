@@ -514,6 +514,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		return runSetup(args[1:], stdin, stdout)
 	case "login":
 		return runLogin(args[1:], stdin, stdout)
+	case "logout":
+		return runLogout(args[1:], stdout)
 	case "workspace":
 		return runWorkspace(args[1:], stdin, stdout)
 	case "integration":
@@ -588,6 +590,8 @@ func printHelpForArgs(args []string, stdout io.Writer) {
 		fmt.Fprintln(stdout, "Usage: relayfile setup [--provider PROVIDER] [--backend BACKEND] [--workspace NAME] [--local-dir DIR]")
 	case "login":
 		fmt.Fprintln(stdout, "Usage: relayfile login [--no-open] [--api-key] [--server URL] [--token TOKEN]")
+	case "logout":
+		fmt.Fprintln(stdout, "Usage: relayfile logout")
 	case "workspace":
 		printWorkspaceUsage(stdout, subcommand)
 	case "integration":
@@ -746,6 +750,7 @@ Usage:
   relayfile
   relayfile setup [--provider PROVIDER] [--backend BACKEND] [--workspace NAME] [--local-dir DIR]
   relayfile login [--no-open] [--api-key] [--server URL] [--token TOKEN]
+  relayfile logout
   relayfile workspace create NAME
   relayfile workspace join WORKSPACE_ID [--name NAME] [--write]
   relayfile workspace use NAME
@@ -790,6 +795,7 @@ Usage:
 Subcommands:
   setup       Sign in, connect an integration, and mount the workspace
   login       Sign in via agent-relay cloud login (or --api-key for self-hosted)
+  logout      Clear Relayfile credentials from this machine
   workspace   Create, join, select via agent-relay, list, show current, or delete locally tracked workspaces
   integration Connect, discover, list, disconnect, or adopt workspace integrations
   ops         List or replay dead-lettered writeback ops
@@ -2120,6 +2126,24 @@ func runLogin(args []string, stdin io.Reader, stdout io.Writer) error {
 		fmt.Fprintf(stdout, "warning: could not clear stale relayfile credentials: %v\n", err)
 	}
 	fmt.Fprintf(stdout, "Relayfile now uses the active agent-relay cloud session and workspace %s.\n", record.Name)
+	return nil
+}
+
+func runLogout(args []string, stdout io.Writer) error {
+	if len(args) > 0 {
+		return errors.New("usage: relayfile logout")
+	}
+	removed, err := clearAuthCredentials()
+	if err != nil {
+		return err
+	}
+	if removed == 0 {
+		fmt.Fprintln(stdout, "Relayfile is already logged out.")
+		fmt.Fprintln(stdout, "Agent Relay cloud session left intact; run `agent-relay cloud logout` to fully sign out.")
+		return nil
+	}
+	fmt.Fprintln(stdout, "Logged out of Relayfile on this machine.")
+	fmt.Fprintln(stdout, "Agent Relay cloud session left intact; run `agent-relay cloud logout` to fully sign out.")
 	return nil
 }
 
@@ -7251,6 +7275,54 @@ func removeCredentialFile(path string) error {
 		return err
 	}
 	return nil
+}
+
+func removeCredentialFileIfExists(path string) (bool, error) {
+	if err := os.Remove(path); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
+func removeCredentialDirIfExists(path string) (bool, error) {
+	if _, err := os.Stat(path); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
+	}
+	if err := os.RemoveAll(path); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func clearAuthCredentials() (int, error) {
+	removed := 0
+	for _, path := range []string{
+		credentialsPath(),
+		cloudCredentialsPath(),
+		delegatedCredentialsPath(),
+	} {
+		ok, err := removeCredentialFileIfExists(path)
+		if err != nil {
+			return removed, fmt.Errorf("remove %s: %w", path, err)
+		}
+		if ok {
+			removed++
+		}
+	}
+	ok, err := removeCredentialDirIfExists(filepath.Join(configDir(), "delegated"))
+	if err != nil {
+		return removed, fmt.Errorf("remove delegated credential cache: %w", err)
+	}
+	if ok {
+		removed++
+	}
+	return removed, nil
 }
 
 // saveLegacyCloudCredentials is retained for stale-store cleanup tests only.

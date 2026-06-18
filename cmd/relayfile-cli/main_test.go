@@ -170,6 +170,7 @@ func TestHelpFlagPrintsUsageForCommandsAndSubcommands(t *testing.T) {
 		{name: "root long", args: []string{"--help"}, want: "relayfile is the RelayFile CLI."},
 		{name: "setup", args: []string{"setup", "-h"}, want: "Usage: relayfile setup"},
 		{name: "login", args: []string{"login", "-h"}, want: "Usage: relayfile login"},
+		{name: "logout", args: []string{"logout", "-h"}, want: "Usage: relayfile logout"},
 		{name: "workspace group", args: []string{"workspace", "-h"}, want: "relayfile workspace create NAME"},
 		{name: "workspace create", args: []string{"workspace", "create", "-h"}, want: "Usage: relayfile workspace create NAME"},
 		{name: "workspace join", args: []string{"workspace", "join", "-h"}, want: "Usage: relayfile workspace join WORKSPACE_ID"},
@@ -4190,6 +4191,120 @@ exit 2
 	}
 	if delegated.BearerToken() != "rf_login" || delegated.RotationToken() != "refresh_login" {
 		t.Fatalf("unexpected delegated credentials: %#v", delegated)
+	}
+}
+
+func TestLogoutClearsAuthCredentialsOnly(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	if err := saveCredentials(credentials{Server: "https://relayfile.test", Token: "rf_legacy"}); err != nil {
+		t.Fatalf("saveCredentials failed: %v", err)
+	}
+	if err := saveLegacyCloudCredentials(cloudCredentials{
+		APIURL:      "https://cloud.relayfile.test",
+		AccessToken: "cld_legacy",
+	}); err != nil {
+		t.Fatalf("saveLegacyCloudCredentials failed: %v", err)
+	}
+	defaultDelegated := delegatedCredentialsPath()
+	if err := delegatedauth.SaveAtomic(defaultDelegated, delegatedauth.Bundle{
+		Token:                "rf_delegated",
+		RefreshToken:         "refresh_delegated",
+		RelayfileWorkspaceID: "ws_demo",
+		RelayfileURL:         "https://relayfile.test",
+		RelayauthURL:         "https://relayauth.test",
+	}); err != nil {
+		t.Fatalf("save default delegated credentials failed: %v", err)
+	}
+	cachedDelegated := delegatedCredentialsPathForRequest("ws_demo", defaultJoinScopes)
+	if err := delegatedauth.SaveAtomic(cachedDelegated, delegatedauth.Bundle{
+		Token:                "rf_cached",
+		RefreshToken:         "refresh_cached",
+		RelayfileWorkspaceID: "ws_demo",
+		RelayfileURL:         "https://relayfile.test",
+		RelayauthURL:         "https://relayauth.test",
+	}); err != nil {
+		t.Fatalf("save cached delegated credentials failed: %v", err)
+	}
+	agentRelayAuth := agentRelayCloudAuthPath()
+	if err := os.MkdirAll(filepath.Dir(agentRelayAuth), 0o700); err != nil {
+		t.Fatalf("mkdir agent-relay auth dir failed: %v", err)
+	}
+	if err := os.WriteFile(agentRelayAuth, []byte(`{"accessToken":"cld_agent"}`), 0o600); err != nil {
+		t.Fatalf("write agent-relay cloud auth failed: %v", err)
+	}
+	catalog := workspaceCatalog{
+		Default: "demo",
+		Workspaces: []workspaceRecord{{
+			Name:      "demo",
+			ID:        "ws_demo",
+			CreatedAt: time.Now().UTC().Format(time.RFC3339),
+		}},
+	}
+	if err := saveWorkspaceCatalog(catalog); err != nil {
+		t.Fatalf("saveWorkspaceCatalog failed: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := run([]string{"logout"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("run logout failed: %v\noutput:\n%s", err, stdout.String())
+	}
+	if got := stdout.String(); !strings.Contains(got, "Logged out of Relayfile on this machine.") {
+		t.Fatalf("expected logout success message, got %q", got)
+	}
+	if got := stdout.String(); !strings.Contains(got, "Agent Relay cloud session left intact") {
+		t.Fatalf("expected shared-session note, got %q", got)
+	}
+	for _, path := range []string{
+		credentialsPath(),
+		cloudCredentialsPath(),
+		defaultDelegated,
+		filepath.Join(configDir(), "delegated"),
+	} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("expected %s removed, got err=%v", path, err)
+		}
+	}
+	if _, err := os.Stat(agentRelayAuth); err != nil {
+		t.Fatalf("expected shared agent-relay cloud auth preserved, got err=%v", err)
+	}
+	loadedCatalog, err := loadWorkspaceCatalog()
+	if err != nil {
+		t.Fatalf("loadWorkspaceCatalog failed: %v", err)
+	}
+	if loadedCatalog.Default != "demo" || len(loadedCatalog.Workspaces) != 1 {
+		t.Fatalf("expected workspace catalog preserved, got %+v", loadedCatalog)
+	}
+}
+
+func TestLogoutIsIdempotentWhenNoCredentialsExist(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	var stdout bytes.Buffer
+	if err := run([]string{"logout"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("run logout failed: %v\noutput:\n%s", err, stdout.String())
+	}
+	if got := stdout.String(); !strings.Contains(got, "Relayfile is already logged out.") {
+		t.Fatalf("expected already-logged-out message, got %q", got)
+	}
+	if got := stdout.String(); !strings.Contains(got, "Agent Relay cloud session left intact") {
+		t.Fatalf("expected shared-session note, got %q", got)
+	}
+}
+
+func TestLogoutRejectsExtraArguments(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	var stdout bytes.Buffer
+	err := run([]string{"logout", "demo"}, strings.NewReader(""), &stdout, &stdout)
+	if err == nil {
+		t.Fatal("expected logout with extra arg to fail")
+	}
+	if got := err.Error(); !strings.Contains(got, "usage: relayfile logout") {
+		t.Fatalf("expected logout usage error, got %q", got)
 	}
 }
 
