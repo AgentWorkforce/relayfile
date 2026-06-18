@@ -168,6 +168,8 @@ interface RelayFileClientOptions {
 
 `BulkWriteFile`: `{ path, contentType?, content, encoding?: "utf-8"|"base64", contentIdentity? }` (`src/types.ts:100`). **Note:** `bulkWrite` files do **not** carry a per-file `baseRevision` (unlike `writeFile`) — bulk writes are unconditional create-or-overwrite. `BulkWriteResponse` returns `{ written, errorCount, errors, results }`. Use `writeFile` with an explicit `baseRevision` when you need optimistic-concurrency / conflict detection (`RevisionConflictError`).
 
+> ⚠️ **`queryFiles` caveat — filters on synced *metadata*, not path.** `queryFiles({provider, properties, relation, ...})` matches against each file's `provider`/`semantics` fields (OSS reference: `internal/relayfile/store.go:1286`), **not** the path prefix. A provider's content is only queryable if its cloud sync populates that metadata. As of 2026-06: Linear/Jira/Confluence writers tag semantics; **Notion sync does NOT** (writes `/notion/...` paths without `semantics`), so `queryFiles({provider:"notion"})` returns `0` while `listTree`/`readFile` on `/notion` are fully functional. For read examples over un-tagged providers, use `listTree`+`readFile`; reserve `queryFiles` for agent-written semantic files or providers with tagging. (Cloud follow-up tracked separately.)
+
 ---
 
 ## 4. RelayfileSetup (`src/setup.ts`)
