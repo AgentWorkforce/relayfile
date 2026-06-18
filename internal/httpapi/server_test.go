@@ -1269,12 +1269,14 @@ func TestBulkWriteReadImmediatelyAfter202(t *testing.T) {
 
 	cases := []struct {
 		name    string
+		ws      string // stable, unique workspace suffix per case
 		files   []map[string]any
 		want    []string // paths expected to be readable
 		written int
 	}{
 		{
 			name: "single file readable after bulk write",
+			ws:   "single",
 			files: []map[string]any{
 				{"path": "/sync/Record.md", "contentType": "text/markdown", "content": "# record"},
 			},
@@ -1283,6 +1285,7 @@ func TestBulkWriteReadImmediatelyAfter202(t *testing.T) {
 		},
 		{
 			name: "multiple files all readable after bulk write",
+			ws:   "multi",
 			files: []map[string]any{
 				{"path": "/sync/Alpha.md", "contentType": "text/markdown", "content": "# alpha"},
 				{"path": "/sync/Beta.md", "contentType": "text/plain", "content": "beta"},
@@ -1293,6 +1296,7 @@ func TestBulkWriteReadImmediatelyAfter202(t *testing.T) {
 		},
 		{
 			name: "partial batch: valid files readable, invalid files reported in errors",
+			ws:   "partial",
 			files: []map[string]any{
 				{"path": "/sync/Good.md", "contentType": "text/markdown", "content": "# good"},
 				{"path": "/sync/Bad.md", "contentType": "text/markdown", "content": "# bad", "encoding": "utf16"},
@@ -1306,8 +1310,10 @@ func TestBulkWriteReadImmediatelyAfter202(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			server := NewServer(relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true}))
-			wsID := "ws_read_after_202_" + tc.name[:4]
+			store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
+			t.Cleanup(store.Close)
+			server := NewServer(store)
+			wsID := "ws_read_after_202_" + tc.ws
 			token := mustTestJWT(t, "dev-secret", wsID, "Worker1", []string{"fs:read", "fs:write"}, time.Now().Add(time.Hour))
 
 			bulkResp := doRequest(t, server, request{
@@ -1352,7 +1358,9 @@ func TestBulkWriteReadImmediatelyAfter202(t *testing.T) {
 // is synchronous, so there is no window between "accepted" and "readable".
 func TestBulkWriteResyncPattern(t *testing.T) {
 	t.Parallel()
-	server := NewServer(relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true}))
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
+	t.Cleanup(store.Close)
+	server := NewServer(store)
 	const wsID = "ws_resync_pattern"
 	token := mustTestJWT(t, "dev-secret", wsID, "Worker1", []string{"fs:read", "fs:write"}, time.Now().Add(time.Hour))
 
