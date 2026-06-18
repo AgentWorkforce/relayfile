@@ -1,0 +1,24 @@
+{
+  "name": "@relayfile-example/vercel-ai-sdk-linear-events",
+  "private": true,
+  "version": "0.0.1",
+  "description": "Vercel AI SDK agent reacts to live Linear file events via Relayfile onEvent.",
+  "type": "module",
+  "scripts": {
+    "smoke": "tsx src/smoke.ts",
+    "dev": "tsx src/index.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@ai-sdk/anthropic": "^1.0.5",
+    "@relayfile/agents": "file:../../../packages/agents",
+    "@relayfile/sdk": "^0.10.1",
+    "ai": "^4.0.20",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.43",
+    "tsx": "^4.19.2",
+    "typescript": "^5.5.4"
+  }
+}

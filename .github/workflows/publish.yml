@@ -11,6 +11,7 @@ on:
           - all
           - core
           - sdk
+          - agents
           - cli
           - file-observer
           - local-mount
@@ -138,6 +139,7 @@ jobs:
             const packagePaths = [
               'packages/core/package.json',
               'packages/sdk/typescript/package.json',
+              'packages/agents/package.json',
               'packages/cli/package.json',
               'packages/file-observer/package.json',
               'packages/local-mount/package.json',
@@ -152,10 +154,15 @@ jobs:
                 const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
                 pkg.version = version;
                 console.log(pkg.name + ' -> v' + version);
-                for (const depType of ['dependencies', 'devDependencies', 'optionalDependencies']) {
+                for (const depType of ['dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies']) {
                   for (const dep of Object.keys(pkg[depType] || {})) {
                     if (dep.startsWith('@relayfile/')) {
-                      pkg[depType][dep] = version;
+                      // Internal deps pin to exact version (existing convention);
+                      // peerDependencies use caret so consumers retain flexibility
+                      // (e.g. a future 0.11.x agents must still admit any 0.11.x sdk,
+                      // not break under 0.x semver as it would with the previous
+                      // peer string left untouched).
+                      pkg[depType][dep] = depType === 'peerDependencies' ? '^' + version : version;
                     }
                   }
                 }
@@ -180,6 +187,7 @@ jobs:
         run: |
           npm run build --workspace=packages/core
           npm run build --workspace=packages/sdk/typescript
+          npm run build --workspace=packages/agents
           npm run build --workspace=packages/cli
           npm run build --workspace=packages/local-mount
           npm ci --prefix packages/file-observer
@@ -197,6 +205,9 @@ jobs:
             packages/sdk/typescript/package.json
             packages/sdk/typescript/dist/
             packages/sdk/typescript/CHANGELOG.md
+            packages/agents/package.json
+            packages/agents/dist/
+            packages/agents/CHANGELOG.md
             packages/cli/package.json
             packages/cli/bin/
             packages/cli/CHANGELOG.md
@@ -313,6 +324,9 @@ jobs:
           - package: sdk
             path: packages/sdk/typescript
             mount_binary: ""
+          - package: agents
+            path: packages/agents
+            mount_binary: ""
           - package: cli
             path: packages/cli
             mount_binary: ""
@@ -423,6 +437,7 @@ jobs:
           case "${{ github.event.inputs.package }}" in
             core) echo "path=packages/core" >> "$GITHUB_OUTPUT"; echo "mount_binary=" >> "$GITHUB_OUTPUT" ;;
             sdk) echo "path=packages/sdk/typescript" >> "$GITHUB_OUTPUT"; echo "mount_binary=" >> "$GITHUB_OUTPUT" ;;
+            agents) echo "path=packages/agents" >> "$GITHUB_OUTPUT"; echo "mount_binary=" >> "$GITHUB_OUTPUT" ;;
             cli) echo "path=packages/cli" >> "$GITHUB_OUTPUT"; echo "mount_binary=" >> "$GITHUB_OUTPUT" ;;
             file-observer) echo "path=packages/file-observer" >> "$GITHUB_OUTPUT"; echo "mount_binary=" >> "$GITHUB_OUTPUT" ;;
             local-mount) echo "path=packages/local-mount" >> "$GITHUB_OUTPUT"; echo "mount_binary=" >> "$GITHUB_OUTPUT" ;;
@@ -532,6 +547,7 @@ jobs:
             package.json \
             packages/core/package.json packages/core/CHANGELOG.md \
             packages/sdk/typescript/package.json packages/sdk/typescript/CHANGELOG.md \
+            packages/agents/package.json packages/agents/CHANGELOG.md \
             packages/cli/package.json packages/cli/CHANGELOG.md \
             packages/file-observer/package.json packages/file-observer/CHANGELOG.md \
             packages/local-mount/package.json packages/local-mount/CHANGELOG.md \
@@ -556,6 +572,7 @@ jobs:
             ### Packages
             - `@relayfile/core@${{ needs.build.outputs.new_version }}`
             - `@relayfile/sdk@${{ needs.build.outputs.new_version }}`
+            - `@relayfile/agents@${{ needs.build.outputs.new_version }}`
             - `relayfile@${{ needs.build.outputs.new_version }}`
             - `@relayfile/file-observer@${{ needs.build.outputs.new_version }}`
             - `@relayfile/local-mount@${{ needs.build.outputs.new_version }}`
@@ -567,6 +584,7 @@ jobs:
             ### Install
             ```bash
             npm install @relayfile/sdk@${{ needs.build.outputs.new_version }}
+            npm install @relayfile/agents@${{ needs.build.outputs.new_version }}
             npm install relayfile@${{ needs.build.outputs.new_version }}
             npm install @relayfile/file-observer@${{ needs.build.outputs.new_version }}
             npm install @relayfile/local-mount@${{ needs.build.outputs.new_version }}
