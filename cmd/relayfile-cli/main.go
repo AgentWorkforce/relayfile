@@ -201,6 +201,7 @@ type treeEntry struct {
 type syncProviderStatus struct {
 	Provider              string         `json:"provider"`
 	Status                string         `json:"status"`
+	Ready                 bool           `json:"ready,omitempty"`
 	Cursor                *string        `json:"cursor"`
 	WatermarkTs           *string        `json:"watermarkTs"`
 	LagSeconds            int            `json:"lagSeconds"`
@@ -667,7 +668,7 @@ func printWorkspaceUsage(w io.Writer, subcommand string) {
 func printIntegrationUsage(w io.Writer, subcommand string) {
 	switch subcommand {
 	case "connect":
-		fmt.Fprintln(w, "Usage: relayfile integration connect PROVIDER [--backend BACKEND] [--workspace NAME] [--no-open] [--timeout 5m]")
+		fmt.Fprintln(w, "Usage: relayfile integration connect PROVIDER [--backend BACKEND] [--workspace NAME] [--no-open] [--timeout 5m] [--wait-sync]")
 	case "available", "catalog", "providers":
 		fmt.Fprintln(w, "Usage: relayfile integration available [--search QUERY] [--backend BACKEND] [--json] [--refresh]")
 	case "search":
@@ -682,7 +683,7 @@ func printIntegrationUsage(w io.Writer, subcommand string) {
 		fmt.Fprintln(w, "Usage: relayfile integration set-metadata PROVIDER KEY=VALUE [KEY=VALUE...] [--workspace NAME] [--yes]")
 	default:
 		fmt.Fprintln(w, `Usage:
-  relayfile integration connect PROVIDER [--backend BACKEND] [--workspace NAME]
+  relayfile integration connect PROVIDER [--backend BACKEND] [--workspace NAME] [--wait-sync]
   relayfile integration available [--search QUERY] [--backend BACKEND] [--json] [--refresh]
   relayfile integration search QUERY [--backend BACKEND] [--json] [--refresh]
   relayfile integration list [--workspace NAME] [--json]
@@ -1934,7 +1935,7 @@ func connectCloudIntegration(cloudAPIURL, workspaceID, workspaceToken, provider,
 					UpdatedAt:    time.Now().UTC().Format(time.RFC3339),
 				})
 			}
-			fmt.Fprintf(stdout, "%s connected. Files will appear under %s/%s as Relayfile syncs in the background; keep this command running while the mount is active.\n", provider, localDir, providerRootDir(provider))
+			fmt.Fprintf(stdout, "%s connected. Files will appear under %s/%s as Relayfile syncs in the background.\n", provider, localDir, providerRootDir(provider))
 			pollErr = nil
 			return pollResult{done: true}
 		}
@@ -2245,17 +2246,19 @@ func runIntegrationConnect(args []string, stdin io.Reader, stdout io.Writer) err
 	backend := fs.String("backend", "", "integration backend to request (nango or composio)")
 	noOpen := fs.Bool("no-open", false, "print the hosted URL instead of opening it")
 	timeout := fs.Duration("timeout", 5*time.Minute, "integration readiness timeout")
+	waitSync := fs.Bool("wait-sync", false, "wait for initial sync before returning")
 	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
 		"workspace":     true,
 		"cloud-api-url": true,
 		"backend":       true,
 		"no-open":       false,
 		"timeout":       true,
+		"wait-sync":     false,
 	})); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return errors.New("usage: relayfile integration connect PROVIDER [--backend BACKEND] [--workspace NAME] [--no-open] [--timeout 5m]")
+		return errors.New("usage: relayfile integration connect PROVIDER [--backend BACKEND] [--workspace NAME] [--no-open] [--timeout 5m] [--wait-sync]")
 	}
 	provider := normalizeProviderID(fs.Arg(0))
 	requestedBackend, err := normalizeIntegrationBackend(*backend)
@@ -2301,7 +2304,15 @@ func runIntegrationConnect(args []string, stdin io.Reader, stdout io.Writer) err
 			return err
 		}
 	}
-	return waitForInitialSync(delegated.ServerURL(), delegated.BearerToken(), relayWorkspaceID, provider, record.LocalDir, *timeout, stdout)
+	if *waitSync {
+		return waitForInitialSync(delegated.ServerURL(), delegated.BearerToken(), relayWorkspaceID, provider, record.LocalDir, *timeout, stdout)
+	}
+	if record.LocalDir != "" {
+		fmt.Fprintf(stdout, "Run `relayfile mount %s %s` to mirror files locally, or rerun with --wait-sync to block until initial data is ready.\n", record.ID, record.LocalDir)
+	} else {
+		fmt.Fprintln(stdout, "Run `relayfile mount` to mirror files locally, or rerun with --wait-sync to block until initial data is ready.")
+	}
+	return nil
 }
 
 func isAtlassianProvider(provider string) bool {
@@ -2642,6 +2653,7 @@ func runIntegrationList(args []string, stdout io.Writer) error {
 	if err := client.getJSON(context.Background(), fmt.Sprintf("/api/v1/workspaces/%s/integrations", url.PathEscape(record.ID)), &entries); err != nil {
 		return err
 	}
+	entries = overlayIntegrationListRuntimeStatus(entries, record)
 	if *jsonOutput {
 		return writeJSON(stdout, entries)
 	}
@@ -2657,6 +2669,79 @@ func runIntegrationList(args []string, stdout io.Writer) error {
 		fmt.Fprintf(stdout, "%s\t%s\t%s\t%s\n", entry.Provider, defaultIfBlank(entry.Status, "unknown"), formatLag(entry.LagSeconds), defaultIfBlank(entry.LastEventAt, "-"))
 	}
 	return nil
+}
+
+func overlayIntegrationListRuntimeStatus(entries []cloudIntegrationListEntry, record workspaceRecord) []cloudIntegrationListEntry {
+	if len(entries) == 0 {
+		return entries
+	}
+	runtimeStatus, ok := runtimeSyncStatusForIntegrationList(record)
+	if !ok {
+		return entries
+	}
+	overlaid := append([]cloudIntegrationListEntry(nil), entries...)
+	for i := range overlaid {
+		runtimeProvider, found := syncProviderByName(runtimeStatus, overlaid[i].Provider)
+		if !found || !syncProviderHasDataReadyEvidence(runtimeProvider) || !cloudIntegrationListStatusUpgradeable(overlaid[i].Status) {
+			continue
+		}
+		overlaid[i].Status = "ready"
+		if strings.TrimSpace(overlaid[i].LastEventAt) == "" && hasNonEmptyString(runtimeProvider.WatermarkTs) {
+			overlaid[i].LastEventAt = strings.TrimSpace(*runtimeProvider.WatermarkTs)
+		}
+	}
+	return overlaid
+}
+
+func runtimeSyncStatusForIntegrationList(record workspaceRecord) (syncStatusResponse, bool) {
+	workspaceID := strings.TrimSpace(record.ID)
+	if workspaceID == "" {
+		workspaceID = strings.TrimSpace(record.RelayWorkspaceID)
+	}
+	scopes := normalizedScopeSet(record.Scopes)
+	if len(scopes) == 0 {
+		scopes = append([]string(nil), defaultJoinScopes...)
+	}
+	bundle, _, err := loadDelegatedCredentialsForRequest("", workspaceID, scopes)
+	if err != nil {
+		return syncStatusResponse{}, false
+	}
+	client, err := newAPIClient(bundle.ServerURL(), bundle.BearerToken())
+	if err != nil {
+		return syncStatusResponse{}, false
+	}
+	runtimeWorkspaceID := strings.TrimSpace(bundle.Workspace())
+	if runtimeWorkspaceID == "" {
+		runtimeWorkspaceID = workspaceID
+	}
+	status, err := fetchWorkspaceSyncStatus(client, runtimeWorkspaceID)
+	if err != nil {
+		return syncStatusResponse{}, false
+	}
+	return status, true
+}
+
+func syncProviderHasDataReadyEvidence(status syncProviderStatus) bool {
+	if status.Ready {
+		return true
+	}
+	switch strings.TrimSpace(strings.ToLower(status.Status)) {
+	case "ready":
+		return true
+	case "healthy":
+		return hasNonEmptyString(status.Cursor) || hasNonEmptyString(status.WatermarkTs)
+	default:
+		return false
+	}
+}
+
+func cloudIntegrationListStatusUpgradeable(status string) bool {
+	switch strings.TrimSpace(strings.ToLower(status)) {
+	case "connected", "oauth_connected", "sync_queued", "syncing":
+		return true
+	default:
+		return false
+	}
 }
 
 func runIntegrationDisconnect(args []string, stdin io.Reader, stdout io.Writer) error {
