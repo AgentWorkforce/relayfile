@@ -431,11 +431,21 @@ export interface SyncRefreshRequest {
   reason?: string;
 }
 
-export type SyncProviderStatusState = "healthy" | "lagging" | "error" | "paused";
+export type SyncProviderStatusState =
+  | "connected"
+  | "oauth_connected"
+  | "sync_queued"
+  | "syncing"
+  | "ready"
+  | "healthy"
+  | "lagging"
+  | "error"
+  | "paused";
 
 export interface SyncProviderStatus {
   provider: string;
   status: SyncProviderStatusState;
+  ready?: boolean;
   cursor?: string | null;
   watermarkTs?: string | null;
   lagSeconds?: number;
@@ -632,6 +642,12 @@ export interface GetSyncStatusOptions {
   provider?: string;
   correlationId?: string;
   signal?: AbortSignal;
+}
+
+export interface WaitForDataOptions extends GetSyncStatusOptions {
+  pollIntervalMs?: number;
+  timeoutMs?: number;
+  onPoll?: (elapsedMs: number, status?: SyncProviderStatus) => void;
 }
 
 export interface GetSyncIngressStatusOptions {

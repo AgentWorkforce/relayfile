@@ -2687,7 +2687,18 @@ components:
                 type: string
               status:
                 type: string
-                enum: [healthy, lagging, error, paused]
+                enum:
+                  - connected
+                  - oauth_connected
+                  - sync_queued
+                  - syncing
+                  - ready
+                  - healthy
+                  - lagging
+                  - error
+                  - paused
+              ready:
+                type: boolean
               cursor:
                 type: string
                 nullable: true

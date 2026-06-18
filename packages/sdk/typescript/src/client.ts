@@ -41,6 +41,7 @@ import {
   type RelayFileReadCacheOptions,
   type Subscription,
   type SyncIngressStatusResponse,
+  type SyncProviderStatus,
   type SyncStatusResponse,
   type TreeResponse,
   type WriteFileInput,
@@ -59,7 +60,8 @@ import {
   type ChangeStreamConnectionOptions,
   type Expansion,
   type ExpansionLevel,
-  type SubscribeOptions
+  type SubscribeOptions,
+  type WaitForDataOptions
 } from "./types.js";
 import type { ForkHandle } from "@relayfile/core";
 import { RelayFileSync, normalizeFilesystemEvent } from "./sync.js";
@@ -410,6 +412,39 @@ function normalizeErrorDetails(data: Record<string, unknown>, explicitDetails: u
     }
   }
   return Object.keys(details).length > 0 ? details : undefined;
+}
+
+function normalizeProviderId(value: string): string {
+  const normalized = value.trim().toLowerCase();
+  if (!normalized) {
+    throw new Error("provider is required.");
+  }
+  return normalized;
+}
+
+function normalizeProviderIdOrNull(value: string): string | null {
+  const normalized = value.trim().toLowerCase();
+  return normalized || null;
+}
+
+function normalizePositiveInteger(value: number, field: string): number {
+  const normalized = Math.floor(value);
+  if (!Number.isFinite(normalized) || normalized <= 0) {
+    throw new Error(`${field} must be a positive integer.`);
+  }
+  return normalized;
+}
+
+function providerDataReady(status: SyncProviderStatus): boolean {
+  return (
+    status.ready === true ||
+    status.status === "ready" ||
+    (status.status === "healthy" && providerHasProgress(status))
+  );
+}
+
+function providerHasProgress(status: SyncProviderStatus): boolean {
+  return Boolean(status.cursor || status.watermarkTs);
 }
 
 class RelayFileWebSocketConnection implements WebSocketConnection {
@@ -1931,6 +1966,56 @@ export class RelayFileClient {
       correlationId: options.correlationId,
       signal: options.signal
     });
+  }
+
+  /**
+   * Wait until a provider is safe to read from the data plane.
+   *
+   * Cloud-managed syncs report first-sync completion through `ready: true` or
+   * `status: "ready"`. OSS self-host `/sync/status` uses `healthy` for provider
+   * health, including empty freshly filtered provider rows, so this method only
+   * treats OSS `healthy` as data-ready after processed-ingest progress appears
+   * on the status row (`cursor` or `watermarkTs`). For custom OSS ingest flows,
+   * gate on your own ingest completion when you need stronger domain-specific
+   * proof than provider progress.
+   */
+  async waitForData(
+    workspaceId: string,
+    provider: string,
+    options: WaitForDataOptions = {}
+  ): Promise<SyncProviderStatus> {
+    const providerKey = normalizeProviderId(provider);
+    const pollIntervalMs = normalizePositiveInteger(options.pollIntervalMs ?? 1_000, "pollIntervalMs");
+    const timeoutMs = normalizePositiveInteger(options.timeoutMs ?? 5 * 60_000, "timeoutMs");
+    const startedAt = Date.now();
+
+    for (;;) {
+      if (options.signal?.aborted) {
+        throw createAbortError();
+      }
+
+      const elapsedMs = Date.now() - startedAt;
+      if (elapsedMs >= timeoutMs) {
+        throw new Error(`Timed out waiting for ${providerKey} data after ${elapsedMs}ms.`);
+      }
+
+      const status = await this.getSyncStatus(workspaceId, {
+        provider: providerKey,
+        correlationId: options.correlationId,
+        signal: options.signal
+      });
+      const providerStatus = status.providers.find(
+        (entry) => normalizeProviderIdOrNull(entry.provider) === providerKey
+      );
+      options.onPoll?.(elapsedMs, providerStatus);
+
+      if (providerStatus && providerDataReady(providerStatus)) {
+        return providerStatus;
+      }
+
+      const remainingMs = Math.max(0, timeoutMs - (Date.now() - startedAt));
+      await this.sleep(Math.min(pollIntervalMs, remainingMs), options.signal);
+    }
   }
 
   async getSyncIngressStatus(

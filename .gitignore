@@ -73,3 +73,5 @@ site/dist/
 packages/file-observer/out/
 packages/agents/dist
 .scratch/
+.agentworkforce/
+packages/**/.claude/

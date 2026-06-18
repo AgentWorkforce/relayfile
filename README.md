@@ -28,7 +28,7 @@ That's the entire interface. No new SDK to learn, no MCP schemas eating your con
 - **Hosted integrations:** `npx relayfile setup --provider notion --workspace research-room --local-dir ./relayfile-mount`
 - **Local OSS:** run the Docker stack below, then mount `ws_demo` as a normal directory.
 - **Sandbox SDK:** use `RelayfileSetup.ensureMountedWorkspace()` when your runtime already has a cloud access token.
-- **Programmatic agents:** wrap `RelayFileClient.readFile()` / `writeFile()` as one tool inside Vercel AI SDK, Claude Agent SDK, OpenAI Agents SDK, or any custom harness.
+- **Programmatic agents:** use [`@relayfile/agents`](packages/agents/README.md) for Vercel AI SDK, OpenAI Agents SDK, and LangChain, or wrap `RelayFileClient.readFile()` / `writeFile()` directly in any custom harness.
 
 ```ts
 import { RelayFileClient } from "@relayfile/sdk"
@@ -125,6 +125,7 @@ This is what turns multi-agent collaboration into a property of the substrate in
 - **Real-time multi-agent sync.** Writes from one agent are visible to others on the next read. No commit/push/pull cycle, no merge.
 - **Real OS mount.** Native bash, native `find`/`grep`/`jq`/`rg`, no emulation gaps. Any process — agents, scripts, IDEs — can read or write the mount.
 - **Pluggable architecture.** A core file server plus [adapters](https://github.com/AgentWorkforce/relayfile-adapters) (per-integration logic) and [providers](https://github.com/AgentWorkforce/relayfile-providers) (auth/proxy via Nango, Composio, Pipedream). One provider integration unlocks tens of apps.
+- **Framework adapter.** [`@relayfile/agents`](packages/agents/) is a thin adapter — one `connect()` call yields path-scoped read tools, a proven writeback lifecycle, and `onEvent` reactive webhooks, working identically across the Vercel AI SDK, OpenAI Agents SDK, and LangChain.
 
 ## Works with
 
@@ -133,9 +134,12 @@ Anything that can read and write files works with relayfile out of the box — t
 | Framework | Recipe |
 |---|---|
 | Claude Code | [setting-up-relayfile skill](https://github.com/AgentWorkforce/skills/blob/main/skills/setting-up-relayfile/SKILL.md) |
+| Vercel AI SDK | [`@relayfile/agents`](packages/agents/README.md) · [Notion read](examples/integrations/vercel-ai-sdk-notion-read/) · [Linear writeback](examples/integrations/vercel-ai-sdk-linear-writeback/) · [reactive `onEvent`](examples/integrations/vercel-ai-sdk-linear-events/) |
+| OpenAI Agents SDK | [`@relayfile/agents`](packages/agents/README.md) · [Notion read](examples/integrations/openai-agents-notion-read/) · [Linear writeback](examples/integrations/openai-agents-linear-writeback/) |
+| LangChain | [`@relayfile/agents`](packages/agents/README.md) · [Notion read](examples/integrations/langchain-notion-read/) · [Linear writeback](examples/integrations/langchain-linear-writeback/) |
 | Anything that runs `bash` | works out of the box (it's a real OS mount) |
 
-More framework recipes (Vercel AI SDK, OpenAI Agents SDK, LangGraph, Pydantic AI) are landing as part of [#106](https://github.com/AgentWorkforce/relayfile/issues/106).
+For the exact SDK/cloud contract that the examples pin against, see [`docs/integrations/SDK-SURFACE.md`](docs/integrations/SDK-SURFACE.md). For self-host connect and ingestion boundaries, see [`docs/integrations/SELF-HOST.md`](docs/integrations/SELF-HOST.md).
 
 ## How relayfile compares
 
@@ -307,6 +311,8 @@ Use the OSS repo when you want to run the file server yourself. Use hosted Agent
 
 For end-to-end self-hosting of provider-backed files, run relayfile, relayauth, the relevant [adapters](https://github.com/AgentWorkforce/relayfile-adapters), [providers](https://github.com/AgentWorkforce/relayfile-providers), and Nango. Relayfile itself does not store third-party OAuth credentials.
 
+The current split is deliberate: Relayfile's OSS surface handles the VFS, scoped tokens, generic ingest, writeback queue, and mount. The polished OAuth connect flow and provider sync definitions are either hosted by Agent Relay Cloud or implemented in your self-host provider stack. See the [self-host integration guide](docs/integrations/SELF-HOST.md) for the connect path, ingestion path, and paid sync-definition boundary.
+
 ### Mount a workspace from a sandbox (TypeScript SDK)
 
 Once a user has signed in and connected their providers in Agent Relay Cloud, a sandbox (Daytona, E2B, an ephemeral container, your own runtime) can attach the workspace as local files in a single SDK call:
@@ -366,7 +372,10 @@ Pipedream:
 
 - [Getting started](docs/guides/getting-started.md)
 - [Cloud integration](docs/guides/cloud-integration.md)
+- [SDK surface](docs/integrations/SDK-SURFACE.md) — authoritative SDK + cloud contract surface
+- [Self-host connect and ingestion boundaries](docs/integrations/SELF-HOST.md)
 - [Post-auth mount session (SDK)](docs/guides/post-auth-mount-session.md)
+- [`@relayfile/agents`](packages/agents/README.md)
 - [Adapters](https://github.com/AgentWorkforce/relayfile-adapters)
 - [Providers](https://github.com/AgentWorkforce/relayfile-providers)
 - [API reference](docs/api-reference.md)

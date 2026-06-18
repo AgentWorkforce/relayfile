@@ -1589,6 +1589,105 @@ describe("RelayFileClient — existing methods", () => {
       expect(res.providers).toHaveLength(1);
     });
 
+    it("waitForData polls sync status until the provider is ready", async () => {
+      vi.useFakeTimers();
+      const responses: SyncStatusResponse[] = [
+        { workspaceId: "ws_acme", providers: [{ provider: "github", status: "syncing" }] },
+        { workspaceId: "ws_acme", providers: [{ provider: "github", status: "ready" }] },
+      ];
+      const f = vi.fn(async () => {
+        const body = responses.shift() ?? responses[responses.length - 1];
+        return {
+          ok: true,
+          status: 200,
+          headers: new Headers({ "content-type": "application/json" }),
+          json: () => Promise.resolve(body),
+          text: () => Promise.resolve(JSON.stringify(body)),
+        } as unknown as Response;
+      });
+      const client = makeClient(f);
+      const onPoll = vi.fn();
+
+      const promise = client.waitForData("ws_acme", "github", {
+        pollIntervalMs: 1000,
+        onPoll,
+      });
+
+      await vi.advanceTimersByTimeAsync(1000);
+      const status = await promise;
+      vi.useRealTimers();
+
+      expect(status.status).toBe("ready");
+      expect(f).toHaveBeenCalledTimes(2);
+      expect(String(f.mock.calls[0]![0])).toContain("/v1/workspaces/ws_acme/sync/status?provider=github");
+      expect(onPoll).toHaveBeenCalledTimes(2);
+    });
+
+    it("waitForData treats ready=true as data-ready", async () => {
+      const payload: SyncStatusResponse = {
+        workspaceId: "ws_acme",
+        providers: [{ provider: "linear", status: "syncing", ready: true }],
+      };
+      const client = makeClient(mockFetch(payload));
+
+      const status = await client.waitForData("ws_acme", "linear");
+
+      expect(status.ready).toBe(true);
+    });
+
+    it("waitForData treats OSS healthy with provider progress as data-ready", async () => {
+      const payload: SyncStatusResponse = {
+        workspaceId: "ws_acme",
+        providers: [{ provider: "linear", status: "healthy", cursor: "env_1" }],
+      };
+      const client = makeClient(mockFetch(payload));
+
+      const status = await client.waitForData("ws_acme", "linear");
+
+      expect(status.status).toBe("healthy");
+      expect(status.cursor).toBe("env_1");
+    });
+
+    it("waitForData does not treat bare OSS healthy as data-ready", async () => {
+      vi.useFakeTimers();
+      const payload: SyncStatusResponse = {
+        workspaceId: "ws_acme",
+        providers: [{ provider: "linear", status: "healthy" }],
+      };
+      const client = makeClient(mockFetch(payload));
+
+      try {
+        const promise = client.waitForData("ws_acme", "linear", {
+          pollIntervalMs: 500,
+          timeoutMs: 1_000,
+        });
+        const rejection = expect(promise).rejects.toThrow(
+          "Timed out waiting for linear data"
+        );
+
+        await vi.advanceTimersByTimeAsync(1_000);
+
+        await rejection;
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("waitForData ignores invalid returned provider ids while matching the requested provider", async () => {
+      const payload: SyncStatusResponse = {
+        workspaceId: "ws_acme",
+        providers: [
+          { provider: " ", status: "ready" },
+          { provider: "github", status: "ready" },
+        ],
+      };
+      const client = makeClient(mockFetch(payload));
+
+      const status = await client.waitForData("ws_acme", "github");
+
+      expect(status.provider).toBe("github");
+    });
+
     it("triggerSyncRefresh sends provider and reason", async () => {
       const payload: QueuedResponse = { status: "queued", id: "ref_1" };
       const f = mockFetch(payload);
