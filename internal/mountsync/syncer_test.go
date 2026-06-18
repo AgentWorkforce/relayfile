@@ -782,6 +782,42 @@ func TestHandleLocalChangeDeletesWhenFileGone(t *testing.T) {
 	}
 }
 
+func TestHandleLocalChangeSkipsNestedMountRuntimeState(t *testing.T) {
+	client := &fakeClient{
+		files:           map[string]RemoteFile{},
+		revisionCounter: 1,
+	}
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID:   "ws_nested_relay_change",
+		RemoteRoot:    "/slack",
+		LocalRoot:     localDir,
+		FullPullEvery: -1,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+	runtimeRel := filepath.ToSlash(filepath.Join("channels", "C123", "messages", ".relay", "state.json"))
+	runtimeLocal := filepath.Join(localDir, filepath.FromSlash(runtimeRel))
+	if err := os.MkdirAll(filepath.Dir(runtimeLocal), 0o755); err != nil {
+		t.Fatalf("mkdir nested .relay: %v", err)
+	}
+	if err := os.WriteFile(runtimeLocal, []byte(`{"status":"writeback-pending"}`), 0o644); err != nil {
+		t.Fatalf("write nested .relay state: %v", err)
+	}
+
+	if err := syncer.HandleLocalChange(context.Background(), runtimeRel, fsnotify.Write); err != nil {
+		t.Fatalf("handle nested runtime change failed: %v", err)
+	}
+
+	if client.bulkWriteCalls != 0 || client.writeFileCalls != 0 {
+		t.Fatalf("nested mount runtime file must not be uploaded, bulk=%d write=%d", client.bulkWriteCalls, client.writeFileCalls)
+	}
+	if len(syncer.state.Files) != 0 {
+		t.Fatalf("nested mount runtime file must not be tracked, got %#v", syncer.state.Files)
+	}
+}
+
 func TestReconcileUsesExportSnapshotForInitialPull(t *testing.T) {
 	base := &fakeClient{
 		files: map[string]RemoteFile{
@@ -5663,6 +5699,46 @@ func TestScanLocalFilesSkipsSymlinkedDirectories(t *testing.T) {
 	}
 }
 
+func TestScanLocalFilesSkipsNestedMountRuntimeState(t *testing.T) {
+	t.Parallel()
+
+	localDir := t.TempDir()
+	realPath := filepath.Join(localDir, "slack", "channels", "C123", "messages", "1780145510_376649.json")
+	if err := os.MkdirAll(filepath.Dir(realPath), 0o755); err != nil {
+		t.Fatalf("mkdir real message dir: %v", err)
+	}
+	if err := os.WriteFile(realPath, []byte(`{"text":"hello"}`), 0o644); err != nil {
+		t.Fatalf("write real message: %v", err)
+	}
+	runtimePath := filepath.Join(localDir, "slack", "channels", "C123", "messages", ".relay", "state.json")
+	if err := os.MkdirAll(filepath.Dir(runtimePath), 0o755); err != nil {
+		t.Fatalf("mkdir nested .relay: %v", err)
+	}
+	if err := os.WriteFile(runtimePath, []byte(`{"pendingWriteback":200}`), 0o644); err != nil {
+		t.Fatalf("write nested .relay state: %v", err)
+	}
+
+	syncer, err := NewSyncer(&fakeClient{}, SyncerOptions{
+		WorkspaceID: "ws_scan_nested_relay",
+		RemoteRoot:  "/",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+	files, err := syncer.scanLocalFiles()
+	if err != nil {
+		t.Fatalf("scanLocalFiles failed: %v", err)
+	}
+
+	if _, ok := files["/slack/channels/C123/messages/1780145510_376649.json"]; !ok {
+		t.Fatalf("expected real provider file to be scanned, got keys %#v", files)
+	}
+	if _, ok := files["/slack/channels/C123/messages/.relay/state.json"]; ok {
+		t.Fatalf("nested .relay/state.json must not be scanned as provider content")
+	}
+}
+
 func TestLowMemoryPublicStateOmitsPerFileDetails(t *testing.T) {
 	t.Parallel()
 
@@ -8332,6 +8408,131 @@ func TestScanLocalFilesLogsOversizedFileOncePerSize(t *testing.T) {
 	}
 	if oversizedLogs != 1 {
 		t.Fatalf("expected one oversized-file log across repeated scans, got %d lines: %#v", oversizedLogs, logger.lines)
+	}
+}
+
+func TestPullRemoteFullTreeSkipsNestedMountRuntimeState(t *testing.T) {
+	client := &fakeClient{
+		files: map[string]RemoteFile{
+			"/slack/channels/C123/messages/1780145510_376649.json": {
+				Path:        "/slack/channels/C123/messages/1780145510_376649.json",
+				Revision:    "rev_msg",
+				ContentType: "application/json",
+				Content:     `{"text":"hello"}`,
+			},
+			"/slack/channels/C123/messages/.relay/state.json": {
+				Path:        "/slack/channels/C123/messages/.relay/state.json",
+				Revision:    "rev_runtime",
+				ContentType: "application/json",
+				Content:     `{"pendingWriteback":200}`,
+			},
+		},
+	}
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_pull_nested_relay",
+		RemoteRoot:  "/slack",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+	runtimeLocal := filepath.Join(localDir, "channels", "C123", "messages", ".relay", "state.json")
+	if err := os.MkdirAll(filepath.Dir(runtimeLocal), 0o755); err != nil {
+		t.Fatalf("mkdir stale nested .relay: %v", err)
+	}
+	if err := os.WriteFile(runtimeLocal, []byte(`{"stale":true}`), 0o644); err != nil {
+		t.Fatalf("write stale nested .relay: %v", err)
+	}
+	syncer.state.Files["/slack/channels/C123/messages/.relay/state.json"] = trackedFile{
+		Revision: "rev_old",
+		Hash:     hashString(`{"stale":true}`),
+	}
+
+	if err := syncer.pullRemoteFullTree(context.Background(), nil, bootstrapProgress{}); err != nil {
+		t.Fatalf("pullRemoteFullTree failed: %v", err)
+	}
+
+	realLocal := filepath.Join(localDir, "channels", "C123", "messages", "1780145510_376649.json")
+	if _, err := os.Stat(realLocal); err != nil {
+		t.Fatalf("expected real message mirrored locally: %v", err)
+	}
+	if _, err := os.Stat(runtimeLocal); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("nested mount runtime file should be absent after full pull, stat err=%v", err)
+	}
+	if _, ok := syncer.state.Files["/slack/channels/C123/messages/.relay/state.json"]; ok {
+		t.Fatalf("nested mount runtime path should not remain tracked")
+	}
+	if got := client.readFileCallsByPath["/slack/channels/C123/messages/.relay/state.json"]; got != 0 {
+		t.Fatalf("nested mount runtime path should not be read from remote, got %d reads", got)
+	}
+}
+
+func TestPullRemoteIncrementalSkipsNestedMountRuntimeState(t *testing.T) {
+	client := &fakeClient{
+		files: map[string]RemoteFile{
+			"/slack/channels/C123/messages/1780145510_376649.json": {
+				Path:        "/slack/channels/C123/messages/1780145510_376649.json",
+				Revision:    "rev_msg",
+				ContentType: "application/json",
+				Content:     `{"text":"hello"}`,
+			},
+			"/slack/channels/C123/messages/.relay/state.json": {
+				Path:        "/slack/channels/C123/messages/.relay/state.json",
+				Revision:    "rev_runtime",
+				ContentType: "application/json",
+				Content:     `{"pendingWriteback":200}`,
+			},
+		},
+		events: []FilesystemEvent{
+			{
+				EventID:  "evt_runtime",
+				Type:     "file.created",
+				Path:     "/slack/channels/C123/messages/.relay/state.json",
+				Revision: "rev_runtime",
+			},
+			{
+				EventID:  "evt_msg",
+				Type:     "file.created",
+				Path:     "/slack/channels/C123/messages/1780145510_376649.json",
+				Revision: "rev_msg",
+			},
+		},
+	}
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_incremental_nested_relay",
+		RemoteRoot:  "/slack",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+	runtimeLocal := filepath.Join(localDir, "channels", "C123", "messages", ".relay", "state.json")
+	if err := os.MkdirAll(filepath.Dir(runtimeLocal), 0o755); err != nil {
+		t.Fatalf("mkdir stale nested .relay: %v", err)
+	}
+	if err := os.WriteFile(runtimeLocal, []byte(`{"stale":true}`), 0o644); err != nil {
+		t.Fatalf("write stale nested .relay: %v", err)
+	}
+	syncer.state.Files["/slack/channels/C123/messages/.relay/state.json"] = trackedFile{Revision: "rev_old"}
+
+	cursor, err := syncer.pullRemoteIncremental(context.Background(), nil, "")
+	if err != nil {
+		t.Fatalf("pullRemoteIncremental failed: %v", err)
+	}
+	if cursor != "evt_msg" {
+		t.Fatalf("cursor = %q, want evt_msg", cursor)
+	}
+	if got := client.readFileCallsByPath["/slack/channels/C123/messages/.relay/state.json"]; got != 0 {
+		t.Fatalf("nested mount runtime path should not be read from remote, got %d reads", got)
+	}
+	if _, err := os.Stat(runtimeLocal); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("nested mount runtime file should be absent after incremental pull, stat err=%v", err)
+	}
+	realLocal := filepath.Join(localDir, "channels", "C123", "messages", "1780145510_376649.json")
+	if _, err := os.Stat(realLocal); err != nil {
+		t.Fatalf("expected real message mirrored locally: %v", err)
 	}
 }
 

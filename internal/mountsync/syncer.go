@@ -1051,19 +1051,19 @@ type mountState struct {
 	// are additive/omitempty: legacy state files load with zero values
 	// (BootstrapComplete=false), which self-heals by forcing a full
 	// reconcile on the next cycle.
-	BootstrapComplete        bool   `json:"bootstrapComplete,omitempty"`
-	BootstrapCursor          string `json:"bootstrapCursor,omitempty"`
-	BootstrapFilesSynced     int    `json:"bootstrapFilesSynced,omitempty"`
-	BootstrapFilesTotal      int    `json:"bootstrapFilesTotal,omitempty"`
-	BootstrapStartedAt       string `json:"bootstrapStartedAt,omitempty"`
+	BootstrapComplete    bool   `json:"bootstrapComplete,omitempty"`
+	BootstrapCursor      string `json:"bootstrapCursor,omitempty"`
+	BootstrapFilesSynced int    `json:"bootstrapFilesSynced,omitempty"`
+	BootstrapFilesTotal  int    `json:"bootstrapFilesTotal,omitempty"`
+	BootstrapStartedAt   string `json:"bootstrapStartedAt,omitempty"`
 	// QuarantinedPaths holds remote paths that cannot be materialized locally
 	// due to file/directory name collisions. Persisted across cycle restarts
 	// so the daemon does not re-fetch these paths from the cloud until the
 	// adapter emitting the collision is fixed. Cleared on bootstrap completion
 	// so a fixed adapter gets a clean slate on the next full cycle.
 	QuarantinedPaths         map[string]string `json:"quarantinedPaths,omitempty"`
-	SyncMode                 string `json:"syncMode,omitempty"`
-	GithubWorkingTreeHeadSHA string `json:"githubWorkingTreeHeadSha,omitempty"`
+	SyncMode                 string            `json:"syncMode,omitempty"`
+	GithubWorkingTreeHeadSHA string            `json:"githubWorkingTreeHeadSha,omitempty"`
 	// IncrementalReadNotReadySince records first-seen timestamps for
 	// incremental create/update events whose remote content was not readable
 	// yet. The daemon retries these without advancing EventsCursor until the
@@ -1724,6 +1724,9 @@ func (s *Syncer) PushLocalAndFlushOnce(ctx context.Context) error {
 func (s *Syncer) HandleLocalChange(ctx context.Context, relativePath string, op fsnotify.Op) error {
 	relativePath = filepath.ToSlash(strings.TrimSpace(filepath.Clean(relativePath)))
 	if relativePath == "" || relativePath == "." {
+		return nil
+	}
+	if isMountRuntimeRelativePath(relativePath) {
 		return nil
 	}
 	if first := strings.SplitN(relativePath, "/", 2)[0]; reservedTopLevel(first) {
@@ -3871,6 +3874,9 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 			if !isUnderRemoteRoot(s.remoteRoot, remotePath) {
 				continue
 			}
+			if s.skipMountRuntimeRemotePath(remotePath, conflicted) {
+				continue
+			}
 			// Contract: lazy GitHub repos do not eagerly hydrate per-repo content at startup.
 			if s.lazyRepos && isUnderLazyGithubRepoSubtree(s.remoteRoot, remotePath) {
 				continue
@@ -4702,6 +4708,9 @@ func (s *Syncer) pullRemoteIncremental(ctx context.Context, conflicted map[strin
 			if remotePath == "/" || !isUnderRemoteRoot(s.remoteRoot, remotePath) {
 				continue
 			}
+			if s.skipMountRuntimeRemotePath(remotePath, conflicted) {
+				continue
+			}
 			if tracked, ok := s.state.Files[remotePath]; ok && tracked.Denied {
 				continue
 			}
@@ -5133,6 +5142,9 @@ func (s *Syncer) applyRemoteFile(remotePath string, file RemoteFile, conflicted 
 			s.clearIncrementalReadNotReady(remotePath)
 		}
 	}()
+	if s.skipMountRuntimeRemotePath(remotePath, conflicted) {
+		return nil
+	}
 	if conflicted != nil {
 		if _, skip := conflicted[remotePath]; skip {
 			return nil
@@ -5217,6 +5229,25 @@ func (s *Syncer) applyRemoteFile(remotePath string, file RemoteFile, conflicted 
 		ReadOnly:    !canWrite,
 	}
 	return nil
+}
+
+func (s *Syncer) skipMountRuntimeRemotePath(remotePath string, conflicted map[string]struct{}) bool {
+	remotePath = normalizeRemotePath(remotePath)
+	if !isMountRuntimeRemotePath(remotePath) {
+		return false
+	}
+	s.logf("skipping mount runtime path surfaced as workspace content: %s", remotePath)
+	if err := s.applyRemoteDelete(remotePath, conflicted); err != nil {
+		s.logf("failed to clean local mount runtime path %s: %v", remotePath, err)
+	}
+	if localPath, err := s.remoteToLocalPath(remotePath); err == nil {
+		if removeErr := os.Remove(localPath); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+			s.logf("failed to remove local mount runtime file %s (%s): %v", remotePath, localPath, removeErr)
+		}
+	}
+	delete(s.state.Files, remotePath)
+	s.clearIncrementalReadNotReady(remotePath)
+	return true
 }
 
 func (s *Syncer) applyLocalPermissions(localPath string, canWrite bool) error {
@@ -5544,11 +5575,19 @@ func (s *Syncer) scanLocalFiles() (map[string]localSnapshot, error) {
 			if d.Name() == ".relay" {
 				return filepath.SkipDir
 			}
+			if rel, relErr := filepath.Rel(s.localRoot, path); relErr == nil &&
+				rel != "." &&
+				isMountRuntimeRelativePath(rel) {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		// Data-loss guard: skip any top-level entry whose name collides
 		// with the mount directory's own basename (round-trip-onto-root).
 		if rel, relErr := filepath.Rel(s.localRoot, path); relErr == nil {
+			if isMountRuntimeRelativePath(rel) {
+				return nil
+			}
 			first := strings.SplitN(rel, string(os.PathSeparator), 2)[0]
 			if reservedTopLevel(first) || first == filepath.Base(s.localRoot) {
 				return nil
@@ -5622,6 +5661,28 @@ func normalizeScopes(scopes []string) []string {
 		normalized = append(normalized, scope)
 	}
 	return normalized
+}
+
+func isMountRuntimeRemotePath(path string) bool {
+	return isMountRuntimeRelativePath(strings.TrimPrefix(normalizeRemotePath(path), "/"))
+}
+
+func isMountRuntimeRelativePath(path string) bool {
+	normalized := filepath.ToSlash(strings.TrimSpace(path))
+	if normalized == "" || normalized == "." {
+		return false
+	}
+	for _, segment := range strings.Split(normalized, "/") {
+		if segment == "" || segment == "." {
+			continue
+		}
+		if segment == ".relay" ||
+			segment == ".relayfile-mount-state.json" ||
+			strings.HasPrefix(segment, ".relayfile-mount-state.json.tmp-") {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Syncer) loadState() error {
