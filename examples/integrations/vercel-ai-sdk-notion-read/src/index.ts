@@ -1,10 +1,13 @@
 /**
  * Vercel AI SDK agent that reads workspace Notion content via Relayfile.
  *
- * The agent has three Notion-read tools wired to the Relayfile SDK:
+ * The agent has two Notion-read tools wired to the Relayfile SDK:
  *   - notion_list_tree   (browse /notion)
  *   - notion_read_file   (fetch a single file's content + metadata)
- *   - notion_query       (filter files by semantic property)
+ *
+ * `queryFiles` is intentionally not exposed: it filters by per-file `provider`
+ * metadata which the current cloud sync does not yet populate for synced
+ * records, so it would return 0 items and burn the agent's tool budget.
  *
  * Run:
  *   ANTHROPIC_API_KEY=... CLOUD_WORKSPACE_ID=<app-uuid> npm run dev
@@ -57,19 +60,6 @@ async function main() {
           contentType: file.contentType,
           content: file.content,
         };
-      },
-    }),
-    notion_query: tool({
-      description: "Query Notion files by semantic property.",
-      parameters: z.object({
-        properties: z.record(z.string()).describe("Property filter, e.g. { status: 'open' }"),
-      }),
-      async execute({ properties }) {
-        const result = await ws.client.queryFiles(ws.workspaceId, {
-          provider: "notion",
-          properties,
-        });
-        return result.items.map((i) => ({ path: i.path, properties: i.properties }));
       },
     }),
   };
