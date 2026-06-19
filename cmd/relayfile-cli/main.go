@@ -1305,10 +1305,19 @@ var ErrDelegatedRelayfileCredentialsExpired = errors.New("delegated relayfile cr
 // (re-mint with corrected scopes) and cannot be recovered automatically.
 var ErrDelegatedScopeInsufficient = errors.New("delegated relayfile credentials have insufficient scope — re-mint with broader scopes")
 
+// ErrDelegatedScopeInvalid is returned when the cloud delegated-token mint
+// rejects the request because the requested scopes are malformed — e.g. not
+// valid relayfile path scopes. Unlike a transient backend failure, retrying
+// re-sends the identical bad scopes and can never succeed, so this is a
+// permanent client error that must surface to a human (correct the scope shape)
+// rather than drive an endless retry loop.
+var ErrDelegatedScopeInvalid = errors.New("delegated relayfile credentials requested invalid scopes — scopes must be valid relayfile path scopes; retrying will not succeed, re-mint with corrected scopes")
+
 func isMountCredentialExpired(err error) bool {
 	return errors.Is(err, ErrCloudRefreshExpired) ||
 		errors.Is(err, ErrDelegatedRelayfileCredentialsExpired) ||
-		errors.Is(err, ErrDelegatedScopeInsufficient)
+		errors.Is(err, ErrDelegatedScopeInsufficient) ||
+		errors.Is(err, ErrDelegatedScopeInvalid)
 }
 
 // mapDelegatedTokenCloudError translates structured cloud error codes returned
@@ -1328,6 +1337,12 @@ func mapDelegatedTokenCloudError(err error) error {
 		return fmt.Errorf("%w: %s", ErrDelegatedRelayfileCredentialsExpired, ae.Message)
 	case "scope_insufficient":
 		return fmt.Errorf("%w: %s", ErrDelegatedScopeInsufficient, ae.Message)
+	case "invalid_scope":
+		// The requested scopes are malformed (e.g. not relayfile path scopes).
+		// This is a permanent client error: retrying re-sends the same bad
+		// scopes and cannot succeed, so surface it as needs-human rather than
+		// letting the mount loop back off and retry forever.
+		return fmt.Errorf("%w: %s", ErrDelegatedScopeInvalid, ae.Message)
 	default:
 		// relayauth_unavailable and other codes are transient — wrap plainly
 		// so the caller can back off and retry.
