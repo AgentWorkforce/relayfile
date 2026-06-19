@@ -13,6 +13,68 @@ import (
 	"time"
 )
 
+func TestSaveAtomicIfMissingCreatesCredentialFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "creds", "delegated.json")
+	created, err := SaveAtomicIfMissing(path, Bundle{
+		RelayfileURL:         "https://relayfile.test",
+		RelayfileWorkspaceID: "rw_test",
+		AccessToken:          "access_new",
+		RefreshToken:         "refresh_new",
+	})
+	if err != nil {
+		t.Fatalf("SaveAtomicIfMissing failed: %v", err)
+	}
+	if !created {
+		t.Fatal("created = false, want true")
+	}
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if loaded.BearerToken() != "access_new" || loaded.RotationToken() != "refresh_new" {
+		t.Fatalf("unexpected saved bundle: %#v", loaded)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat saved file failed: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("credential mode = %o, want 0600", got)
+	}
+}
+
+func TestSaveAtomicIfMissingDoesNotOverwriteExistingCredentialFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "delegated.json")
+	if err := SaveAtomic(path, Bundle{
+		RelayfileURL:         "https://relayfile.test",
+		RelayfileWorkspaceID: "rw_test",
+		AccessToken:          "access_existing",
+		RefreshToken:         "refresh_existing",
+	}); err != nil {
+		t.Fatalf("SaveAtomic failed: %v", err)
+	}
+
+	created, err := SaveAtomicIfMissing(path, Bundle{
+		RelayfileURL:         "https://relayfile.test",
+		RelayfileWorkspaceID: "rw_test",
+		AccessToken:          "access_late",
+		RefreshToken:         "refresh_late",
+	})
+	if err != nil {
+		t.Fatalf("SaveAtomicIfMissing failed: %v", err)
+	}
+	if created {
+		t.Fatal("created = true, want false")
+	}
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if loaded.BearerToken() != "access_existing" || loaded.RotationToken() != "refresh_existing" {
+		t.Fatalf("existing bundle was overwritten: %#v", loaded)
+	}
+}
+
 func TestRenewFileRotatesAndPersistsDelegatedTokenPair(t *testing.T) {
 	var sawRefresh string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

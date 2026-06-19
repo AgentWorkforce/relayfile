@@ -2809,6 +2809,131 @@ func TestLoadDelegatedCredentialsForActiveWorkspaceUsesCatalogDefault(t *testing
 	}
 }
 
+func TestDelegatedCredentialsPathCanonicalizesWorkspaceAliases(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+	now := time.Now().UTC().Format(time.RFC3339)
+	if err := saveWorkspaceCatalog(workspaceCatalog{
+		Default: "default",
+		Workspaces: []workspaceRecord{
+			{Name: "50587328-441d-4acb-b8f3-dbe1b3c5de99", ID: "50587328-441d-4acb-b8f3-dbe1b3c5de99", RelayWorkspaceID: "rw_7ccfea89", CreatedAt: now, Scopes: append([]string(nil), defaultJoinScopes...)},
+			{Name: "default", ID: "50587328-441d-4acb-b8f3-dbe1b3c5de99", RelayWorkspaceID: "rw_7ccfea89", CreatedAt: now, Scopes: append([]string(nil), defaultJoinScopes...)},
+			{Name: "default", ID: "50587328-441d-4acb-b8f3-dbe1b3c5de99", RelayWorkspaceID: "rw_7ccfea89", CreatedAt: now, Scopes: append([]string(nil), defaultJoinScopes...)},
+			{Name: "other", ID: "60698439-552e-4bdc-c9f4-ecf2c4d6efa0", RelayWorkspaceID: "rw_other", CreatedAt: now, Scopes: append([]string(nil), defaultJoinScopes...)},
+		},
+	}); err != nil {
+		t.Fatalf("saveWorkspaceCatalog failed: %v", err)
+	}
+
+	want := delegatedCredentialsPathForRequest("50587328-441d-4acb-b8f3-dbe1b3c5de99", defaultJoinScopes)
+	for _, input := range []string{"rw_7ccfea89", "default", "active", ""} {
+		if got := delegatedCredentialsPathForRequest(input, defaultJoinScopes); got != want {
+			t.Fatalf("path for %q = %q, want %q", input, got, want)
+		}
+	}
+	other := delegatedCredentialsPathForRequest("rw_other", defaultJoinScopes)
+	if other == want {
+		t.Fatalf("rw_ aliases were not one-to-one: other path %q matched default path", other)
+	}
+	if got := delegatedCredentialsPathForRequest("other", defaultJoinScopes); got != other {
+		t.Fatalf("path for other name = %q, want %q", got, other)
+	}
+}
+
+func TestDelegatedCredentialsPathLeavesAmbiguousRelayWorkspaceAliasRaw(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+	now := time.Now().UTC().Format(time.RFC3339)
+	if err := saveWorkspaceCatalog(workspaceCatalog{
+		Workspaces: []workspaceRecord{
+			{Name: "one", ID: "11111111-1111-1111-1111-111111111111", RelayWorkspaceID: "rw_shared", CreatedAt: now},
+			{Name: "two", ID: "22222222-2222-2222-2222-222222222222", RelayWorkspaceID: "rw_shared", CreatedAt: now},
+		},
+	}); err != nil {
+		t.Fatalf("saveWorkspaceCatalog failed: %v", err)
+	}
+
+	if value, ok := canonicalWorkspaceShardValueStatus("rw_shared"); ok || value != "rw_shared" {
+		t.Fatalf("ambiguous relay alias canonicalized to value=%q ok=%v, want raw rw_shared false", value, ok)
+	}
+	if got, want := workspaceShardKey("rw_shared"), rawWorkspaceShardKey("rw_shared"); got != want {
+		t.Fatalf("ambiguous relay alias shard key = %q, want raw %q", got, want)
+	}
+}
+
+func TestLoadDelegatedCredentialsMigratesLegacyRelayWorkspaceShard(t *testing.T) {
+	now := time.Now().UTC().Format(time.RFC3339)
+	records := []workspaceRecord{
+		{Name: "default", ID: "50587328-441d-4acb-b8f3-dbe1b3c5de99", RelayWorkspaceID: "rw_7ccfea89", CreatedAt: now, Scopes: append([]string(nil), defaultJoinScopes...)},
+		{Name: "default", ID: "50587328-441d-4acb-b8f3-dbe1b3c5de99", RelayWorkspaceID: "rw_7ccfea89", CreatedAt: now, Scopes: append([]string(nil), defaultJoinScopes...)},
+		{Name: "rw_7ccfea89", ID: "rw_7ccfea89", RelayWorkspaceID: "50587328-441d-4acb-b8f3-dbe1b3c5de99", CreatedAt: now, Scopes: append([]string(nil), defaultJoinScopes...)},
+		{Name: "rw_7ccfea89", ID: "rw_7ccfea89", CreatedAt: now, Scopes: append([]string(nil), defaultJoinScopes...)},
+	}
+	run := func(t *testing.T, records []workspaceRecord) {
+		t.Helper()
+		t.Setenv("HOME", t.TempDir())
+		clearRelayfileEnv(t)
+		if err := saveWorkspaceCatalog(workspaceCatalog{
+			Default:    "default",
+			Workspaces: records,
+		}); err != nil {
+			t.Fatalf("saveWorkspaceCatalog failed: %v", err)
+		}
+		mintedPath := delegatedCredentialsPathForRequest("50587328-441d-4acb-b8f3-dbe1b3c5de99", defaultJoinScopes)
+		resolvedPath := delegatedCredentialsPathForRequest("rw_7ccfea89", defaultJoinScopes)
+		if mintedPath == resolvedPath {
+			t.Fatalf("test setup expected polluted catalog to produce distinct mint/resolve paths, got %q", mintedPath)
+		}
+		if err := delegatedauth.SaveAtomic(mintedPath, delegatedauth.Bundle{
+			RelayfileURL:         "https://relayfile.test",
+			RelayfileWorkspaceID: "rw_7ccfea89",
+			AccessToken:          testJWTWithWorkspaceAndScopes("rw_7ccfea89", "relayfile-cli", defaultJoinScopes),
+			RefreshToken:         "refresh_join",
+			Scopes:               append([]string(nil), defaultJoinScopes...),
+		}); err != nil {
+			t.Fatalf("save minted delegated credentials failed: %v", err)
+		}
+		if _, err := os.Stat(resolvedPath); !os.IsNotExist(err) {
+			t.Fatalf("resolved path unexpectedly exists before heal: %v", err)
+		}
+
+		bundle, loadedPath, err := loadDelegatedCredentialsForRequest("", "rw_7ccfea89", defaultJoinScopes)
+		if err != nil {
+			t.Fatalf("loadDelegatedCredentialsForRequest failed: %v", err)
+		}
+		if loadedPath != resolvedPath {
+			t.Fatalf("loadedPath = %q, want healed resolve path %q", loadedPath, resolvedPath)
+		}
+		if bundle.BearerToken() == "" {
+			t.Fatal("expected delegated bundle from minted shard")
+		}
+		if _, err := delegatedauth.Load(resolvedPath); err != nil {
+			t.Fatalf("expected healed delegated credentials at resolved path: %v", err)
+		}
+
+		if err := os.Remove(mintedPath); err != nil {
+			t.Fatalf("remove minted path failed: %v", err)
+		}
+		_, loadedPath, err = loadDelegatedCredentialsForRequest("", "rw_7ccfea89", defaultJoinScopes)
+		if err != nil {
+			t.Fatalf("second loadDelegatedCredentialsForRequest failed: %v", err)
+		}
+		if loadedPath != resolvedPath {
+			t.Fatalf("second loadedPath = %q, want healed resolve path %q", loadedPath, resolvedPath)
+		}
+	}
+	t.Run("polluted catalog order", func(t *testing.T) {
+		run(t, records)
+	})
+	t.Run("reversed polluted catalog order", func(t *testing.T) {
+		reversed := append([]workspaceRecord(nil), records...)
+		for i, j := 0, len(reversed)-1; i < j; i, j = i+1, j-1 {
+			reversed[i], reversed[j] = reversed[j], reversed[i]
+		}
+		run(t, reversed)
+	})
+}
+
 func TestWritebackSkipStuckUsesDelegatedCredentialsWithoutLegacyCredentials(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)
