@@ -2734,6 +2734,33 @@ func TestDelegatedBundleHasScopesAllowsBroadWildcardGrant(t *testing.T) {
 	}
 }
 
+func TestWritebackPushCredentialScopesAreProviderScoped(t *testing.T) {
+	joinScopes, relayfileScopes, err := writebackPushCredentialScopes("/linear/issues/123.json")
+	if err != nil {
+		t.Fatalf("writebackPushCredentialScopes failed: %v", err)
+	}
+	if got, want := strings.Join(joinScopes, ","), "fs:write:/linear/**,ops:read"; got != want {
+		t.Fatalf("join scopes = %q, want %q", got, want)
+	}
+	if got, want := strings.Join(relayfileScopes, ","), "relayfile:fs:write:/linear/**"; got != want {
+		t.Fatalf("relayfile scopes = %q, want %q", got, want)
+	}
+}
+
+func TestWritebackPushCredentialScopesRejectGlobalFallbacks(t *testing.T) {
+	for _, remotePath := range []string{"", "/", "//", "////", "/./", "/**", "/*"} {
+		t.Run(remotePath, func(t *testing.T) {
+			joinScopes, relayfileScopes, err := writebackPushCredentialScopes(remotePath)
+			if err == nil {
+				t.Fatalf("expected provider-scoped path error, got join=%v relayfile=%v", joinScopes, relayfileScopes)
+			}
+			if strings.Join(joinScopes, ",") == "fs:write:/**,ops:read" || strings.Join(relayfileScopes, ",") == "relayfile:fs:write:/**" {
+				t.Fatalf("providerless path produced global writeback scopes: join=%v relayfile=%v", joinScopes, relayfileScopes)
+			}
+		})
+	}
+}
+
 func TestReadLocalMountCursorHealthAggregatesStateFiles(t *testing.T) {
 	localDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(localDir, ".relayfile-mount-state.json"), []byte(`{"incrementalReadNotReadySince":{"a":"now"},"incrementalBacklogDraining":false}`), 0o644); err != nil {
