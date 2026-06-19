@@ -2734,6 +2734,51 @@ func TestDelegatedBundleHasScopesAllowsBroadWildcardGrant(t *testing.T) {
 	}
 }
 
+func TestWritebackPushScopesRequireProviderSubtree(t *testing.T) {
+	for _, tc := range []struct {
+		remotePath          string
+		wantJoinScopes      string
+		wantRelayfileScopes string
+	}{
+		{
+			remotePath:          "/linear/issues/issue-55.json",
+			wantJoinScopes:      "fs:write:/linear/**,ops:read",
+			wantRelayfileScopes: "relayfile:fs:write:/linear/**",
+		},
+		{
+			remotePath:          "/GitHub/issues/issue-55.json",
+			wantJoinScopes:      "fs:write:/github/**,ops:read",
+			wantRelayfileScopes: "relayfile:fs:write:/github/**",
+		},
+	} {
+		t.Run(tc.remotePath, func(t *testing.T) {
+			joinScopes, requiredRelayfileScopes, err := writebackPushScopes(tc.remotePath)
+			if err != nil {
+				t.Fatalf("writebackPushScopes returned error: %v", err)
+			}
+			if got := strings.Join(joinScopes, ","); got != tc.wantJoinScopes {
+				t.Fatalf("join scopes = %q, want %q", got, tc.wantJoinScopes)
+			}
+			if got := strings.Join(requiredRelayfileScopes, ","); got != tc.wantRelayfileScopes {
+				t.Fatalf("required relayfile scopes = %q, want %q", got, tc.wantRelayfileScopes)
+			}
+		})
+	}
+
+	for _, remotePath := range []string{"", "/", "///", "/foo.json", "/linear", "/**", "/*", "/./record.json", "/../record.json", "/bad provider/record.json"} {
+		joinScopes, requiredRelayfileScopes, err := writebackPushScopes(remotePath)
+		if err == nil {
+			t.Fatalf("writebackPushScopes(%q) succeeded with join=%v relayfile=%v", remotePath, joinScopes, requiredRelayfileScopes)
+		}
+		if strings.Contains(strings.Join(joinScopes, ","), "/**") || strings.Contains(strings.Join(requiredRelayfileScopes, ","), "/**") {
+			t.Fatalf("writebackPushScopes(%q) returned whole-tree scopes join=%v relayfile=%v", remotePath, joinScopes, requiredRelayfileScopes)
+		}
+		if got := err.Error(); !strings.Contains(got, "provider-scoped remote path") {
+			t.Fatalf("writebackPushScopes(%q) error = %q, want provider-scoped remote path", remotePath, got)
+		}
+	}
+}
+
 func TestReadLocalMountCursorHealthAggregatesStateFiles(t *testing.T) {
 	localDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(localDir, ".relayfile-mount-state.json"), []byte(`{"incrementalReadNotReadySince":{"a":"now"},"incrementalBacklogDraining":false}`), 0o644); err != nil {

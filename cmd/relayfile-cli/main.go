@@ -3192,8 +3192,10 @@ func runWritebackFileMutation(mode writebackCommandMode, args []string, stdout i
 	if mode != writebackCommandPush && !isCanonicalWritebackTargetPath(resolved.RemotePath) {
 		return fmt.Errorf("writeback %s requires a canonical provider record path, got %s", mode, resolved.RemotePath)
 	}
-	joinScopes := writebackPushJoinScopes(resolved.RemotePath)
-	requiredRelayfileScopes := writebackPushRequiredRelayfileScopes(resolved.RemotePath)
+	joinScopes, requiredRelayfileScopes, err := writebackPushScopes(resolved.RemotePath)
+	if err != nil {
+		return err
+	}
 	if strings.TrimSpace(*tokenOverride) == "" {
 		if err := ensureWritebackDelegatedCredentials(resolved.WorkspaceID, joinScopes, requiredRelayfileScopes); err != nil {
 			return err
@@ -3637,27 +3639,26 @@ func hashBytes(raw []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func writebackPushJoinScopes(remotePath string) []string {
-	// ops:read is requested alongside fs:write because a successful /fs/bulk
-	// returns an opID that this command then polls at
-	// GET /v1/workspaces/{id}/ops/{opId} (server.go requires ops:read). Without
-	// it the write succeeds but the status poll is unauthorized; the push then
-	// leaves the op pending+needsAttention rather than failing it.
-	parts := strings.Split(strings.Trim(normalizeWritebackFailurePath(remotePath), "/"), "/")
-	if len(parts) == 0 || strings.TrimSpace(parts[0]) == "" {
-		return []string{"fs:write:/**", "ops:read"}
+func writebackPushScopes(remotePath string) ([]string, []string, error) {
+	provider, ok := writebackPushProvider(remotePath)
+	if !ok {
+		return nil, nil, fmt.Errorf("writeback requires a provider-scoped remote path, got %s", normalizeWritebackFailurePath(remotePath))
 	}
-	provider := strings.TrimSpace(parts[0])
-	return []string{fmt.Sprintf("fs:write:/%s/**", provider), "ops:read"}
+	return []string{fmt.Sprintf("fs:write:/%s/**", provider), "ops:read"},
+		[]string{fmt.Sprintf("relayfile:fs:write:/%s/**", provider)},
+		nil
 }
 
-func writebackPushRequiredRelayfileScopes(remotePath string) []string {
+func writebackPushProvider(remotePath string) (string, bool) {
 	parts := strings.Split(strings.Trim(normalizeWritebackFailurePath(remotePath), "/"), "/")
-	if len(parts) == 0 || strings.TrimSpace(parts[0]) == "" {
-		return []string{"relayfile:fs:write:/**"}
+	if len(parts) < 2 {
+		return "", false
 	}
-	provider := strings.TrimSpace(parts[0])
-	return []string{fmt.Sprintf("relayfile:fs:write:/%s/**", provider)}
+	provider := strings.ToLower(strings.TrimSpace(parts[0]))
+	if err := validateLocalProviderID(provider); err != nil {
+		return "", false
+	}
+	return provider, true
 }
 
 func writebackPushContentIdentity(workspaceID, remotePath, contentHash string) *contentIdentity {

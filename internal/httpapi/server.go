@@ -1601,6 +1601,14 @@ func (s *Server) handleBulkWrite(w http.ResponseWriter, r *http.Request, workspa
 	errorsOut := make([]relayfile.BulkWriteError, 0)
 	for _, file := range body.Files {
 		path := normalizeRoutePath(file.Path)
+		if !scopeMatchesPath(claims.Scopes, "fs:write", path) {
+			errorsOut = append(errorsOut, relayfile.BulkWriteError{
+				Path:    path,
+				Code:    "forbidden",
+				Message: "file access denied by path scope",
+			})
+			continue
+		}
 		_, readErr := s.readFile(workspaceID, forkID, path)
 		if readErr == nil {
 			existingPermissions := s.resolveFilePermissions(workspaceID, forkID, path, true)

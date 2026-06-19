@@ -1261,6 +1261,63 @@ func TestBulkWriteEndpoint(t *testing.T) {
 	}
 }
 
+func TestBulkWriteEndpointEnforcesPathScopedTokenPerFile(t *testing.T) {
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
+	t.Cleanup(store.Close)
+	server := NewServer(store)
+	token := mustTestJWT(t, "dev-secret", "ws_bulk_scope", "Worker1", []string{"relayfile:fs:write:/linear/**"}, time.Now().Add(time.Hour))
+
+	resp := doRequest(t, server, request{
+		method: http.MethodPost,
+		path:   "/v1/workspaces/ws_bulk_scope/fs/bulk",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_bulk_scope",
+		},
+		body: map[string]any{
+			"files": []map[string]any{
+				{
+					"path":        "/linear/issues/ISS-1.json",
+					"contentType": "application/json",
+					"content":     `{"id":"ISS-1"}`,
+				},
+				{
+					"path":        "/github/issues/1.json",
+					"contentType": "application/json",
+					"content":     `{"id":1}`,
+				},
+			},
+		},
+	})
+	if resp.Code != http.StatusAccepted {
+		t.Fatalf("expected 202 on partially scoped bulk write, got %d (%s)", resp.Code, resp.Body.String())
+	}
+
+	var payload struct {
+		Written    int                        `json:"written"`
+		ErrorCount int                        `json:"errorCount"`
+		Errors     []relayfile.BulkWriteError `json:"errors"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode bulk response: %v", err)
+	}
+	if payload.Written != 1 {
+		t.Fatalf("written = %d, want 1", payload.Written)
+	}
+	if payload.ErrorCount != 1 || len(payload.Errors) != 1 {
+		t.Fatalf("expected one path-scope error, got errorCount=%d errors=%+v", payload.ErrorCount, payload.Errors)
+	}
+	if got := payload.Errors[0]; got.Path != "/github/issues/1.json" || got.Code != "forbidden" || got.Message != "file access denied by path scope" {
+		t.Fatalf("unexpected path-scope error: %+v", got)
+	}
+	if _, err := store.ReadFile("ws_bulk_scope", "/linear/issues/ISS-1.json"); err != nil {
+		t.Fatalf("in-scope file was not written: %v", err)
+	}
+	if _, err := store.ReadFile("ws_bulk_scope", "/github/issues/1.json"); err == nil {
+		t.Fatal("out-of-scope file was written")
+	}
+}
+
 // TestBulkWriteReadImmediatelyAfter202 documents the OSS contract for issue #306:
 // a 202 from POST /fs/bulk means every file in the results array is immediately
 // readable — the handler is synchronous so "accepted" and "written" are the same.
