@@ -2734,6 +2734,32 @@ func TestDelegatedBundleHasScopesAllowsBroadWildcardGrant(t *testing.T) {
 	}
 }
 
+func TestWritebackPushScopesRequireProviderSubtree(t *testing.T) {
+	joinScopes, requiredRelayfileScopes, err := writebackPushScopes("/linear/issues/issue-55.json")
+	if err != nil {
+		t.Fatalf("writebackPushScopes returned error: %v", err)
+	}
+	if got, want := strings.Join(joinScopes, ","), "fs:write:/linear/**,ops:read"; got != want {
+		t.Fatalf("join scopes = %q, want %q", got, want)
+	}
+	if got, want := strings.Join(requiredRelayfileScopes, ","), "relayfile:fs:write:/linear/**"; got != want {
+		t.Fatalf("required relayfile scopes = %q, want %q", got, want)
+	}
+
+	for _, remotePath := range []string{"", "/", "///"} {
+		joinScopes, requiredRelayfileScopes, err := writebackPushScopes(remotePath)
+		if err == nil {
+			t.Fatalf("writebackPushScopes(%q) succeeded with join=%v relayfile=%v", remotePath, joinScopes, requiredRelayfileScopes)
+		}
+		if strings.Contains(strings.Join(joinScopes, ","), "/**") || strings.Contains(strings.Join(requiredRelayfileScopes, ","), "/**") {
+			t.Fatalf("writebackPushScopes(%q) returned whole-tree scopes join=%v relayfile=%v", remotePath, joinScopes, requiredRelayfileScopes)
+		}
+		if got := err.Error(); !strings.Contains(got, "provider-scoped remote path") {
+			t.Fatalf("writebackPushScopes(%q) error = %q, want provider-scoped remote path", remotePath, got)
+		}
+	}
+}
+
 func TestReadLocalMountCursorHealthAggregatesStateFiles(t *testing.T) {
 	localDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(localDir, ".relayfile-mount-state.json"), []byte(`{"incrementalReadNotReadySince":{"a":"now"},"incrementalBacklogDraining":false}`), 0o644); err != nil {
