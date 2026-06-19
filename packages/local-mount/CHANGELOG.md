@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _No unreleased changes._
 
+## [0.10.6] - 2026-06-19
+
+_No user-visible changes in this release._
+
 ## [0.10.5] - 2026-06-18
 
 _No user-visible changes in this release._
@@ -451,7 +455,8 @@ Initial release.
 - Directory-only ignore patterns (e.g. `cache/`) match directories without swallowing like-named files.
 - README documenting the mount lifecycle, dotfile semantics, and auto-sync behavior. ([#48])
 
-[Unreleased]: https://github.com/AgentWorkforce/relayfile/compare/v0.10.5...HEAD
+[Unreleased]: https://github.com/AgentWorkforce/relayfile/compare/v0.10.6...HEAD
+[0.10.6]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.10.6
 [0.10.5]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.10.5
 [0.10.1]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.10.1
 [0.10.0]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.10.0
