@@ -2735,18 +2735,37 @@ func TestDelegatedBundleHasScopesAllowsBroadWildcardGrant(t *testing.T) {
 }
 
 func TestWritebackPushScopesRequireProviderSubtree(t *testing.T) {
-	joinScopes, requiredRelayfileScopes, err := writebackPushScopes("/linear/issues/issue-55.json")
-	if err != nil {
-		t.Fatalf("writebackPushScopes returned error: %v", err)
-	}
-	if got, want := strings.Join(joinScopes, ","), "fs:write:/linear/**,ops:read"; got != want {
-		t.Fatalf("join scopes = %q, want %q", got, want)
-	}
-	if got, want := strings.Join(requiredRelayfileScopes, ","), "relayfile:fs:write:/linear/**"; got != want {
-		t.Fatalf("required relayfile scopes = %q, want %q", got, want)
+	for _, tc := range []struct {
+		remotePath          string
+		wantJoinScopes      string
+		wantRelayfileScopes string
+	}{
+		{
+			remotePath:          "/linear/issues/issue-55.json",
+			wantJoinScopes:      "fs:write:/linear/**,ops:read",
+			wantRelayfileScopes: "relayfile:fs:write:/linear/**",
+		},
+		{
+			remotePath:          "/GitHub/issues/issue-55.json",
+			wantJoinScopes:      "fs:write:/github/**,ops:read",
+			wantRelayfileScopes: "relayfile:fs:write:/github/**",
+		},
+	} {
+		t.Run(tc.remotePath, func(t *testing.T) {
+			joinScopes, requiredRelayfileScopes, err := writebackPushScopes(tc.remotePath)
+			if err != nil {
+				t.Fatalf("writebackPushScopes returned error: %v", err)
+			}
+			if got := strings.Join(joinScopes, ","); got != tc.wantJoinScopes {
+				t.Fatalf("join scopes = %q, want %q", got, tc.wantJoinScopes)
+			}
+			if got := strings.Join(requiredRelayfileScopes, ","); got != tc.wantRelayfileScopes {
+				t.Fatalf("required relayfile scopes = %q, want %q", got, tc.wantRelayfileScopes)
+			}
+		})
 	}
 
-	for _, remotePath := range []string{"", "/", "///"} {
+	for _, remotePath := range []string{"", "/", "///", "/foo.json", "/linear", "/**", "/*", "/./record.json", "/../record.json", "/bad provider/record.json"} {
 		joinScopes, requiredRelayfileScopes, err := writebackPushScopes(remotePath)
 		if err == nil {
 			t.Fatalf("writebackPushScopes(%q) succeeded with join=%v relayfile=%v", remotePath, joinScopes, requiredRelayfileScopes)

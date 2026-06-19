@@ -3649,34 +3649,13 @@ func writebackPushScopes(remotePath string) ([]string, []string, error) {
 		nil
 }
 
-func writebackPushJoinScopes(remotePath string) []string {
-	// ops:read is requested alongside fs:write because a successful /fs/bulk
-	// returns an opID that this command then polls at
-	// GET /v1/workspaces/{id}/ops/{opId} (server.go requires ops:read). Without
-	// it the write succeeds but the status poll is unauthorized; the push then
-	// leaves the op pending+needsAttention rather than failing it.
-	provider, ok := writebackPushProvider(remotePath)
-	if !ok {
-		return nil
-	}
-	return []string{fmt.Sprintf("fs:write:/%s/**", provider), "ops:read"}
-}
-
-func writebackPushRequiredRelayfileScopes(remotePath string) []string {
-	provider, ok := writebackPushProvider(remotePath)
-	if !ok {
-		return nil
-	}
-	return []string{fmt.Sprintf("relayfile:fs:write:/%s/**", provider)}
-}
-
 func writebackPushProvider(remotePath string) (string, bool) {
 	parts := strings.Split(strings.Trim(normalizeWritebackFailurePath(remotePath), "/"), "/")
-	if len(parts) == 0 {
+	if len(parts) < 2 {
 		return "", false
 	}
-	provider := strings.TrimSpace(parts[0])
-	if provider == "" {
+	provider := strings.ToLower(strings.TrimSpace(parts[0]))
+	if err := validateLocalProviderID(provider); err != nil {
 		return "", false
 	}
 	return provider, true
