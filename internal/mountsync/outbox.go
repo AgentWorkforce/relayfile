@@ -336,6 +336,31 @@ func (s *Syncer) ackOutboxRecord(record outboxRecord, revision, correlationID st
 	return nil
 }
 
+func (s *Syncer) skipOutboxRecord(record outboxRecord, reason string) error {
+	if err := s.ensureOutboxDirs(); err != nil {
+		return err
+	}
+	record.Status = outboxStatusAcked
+	record.AckedAt = s.now().UTC().Format(time.RFC3339Nano)
+	record.DispatchStatus = strings.TrimSpace(reason)
+	record.Revision = ""
+	record.CorrelationID = ""
+	record.NeedsAttention = false
+	record.LastError = ""
+	record.NextAttemptAt = ""
+	data, err := json.Marshal(record)
+	if err != nil {
+		return err
+	}
+	if err := writeFileAtomic(s.ackedOutboxPath(record.CommandID), data, 0o644); err != nil {
+		return err
+	}
+	if err := os.Remove(s.pendingOutboxPath(record.CommandID)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
 func (s *Syncer) failOutboxRecord(record outboxRecord, reason string) error {
 	if err := s.ensureOutboxDirs(); err != nil {
 		return err

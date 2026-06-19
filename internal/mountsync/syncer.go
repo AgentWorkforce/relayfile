@@ -1001,6 +1001,7 @@ type Syncer struct {
 	skipStuckCount    int
 	syncActive        bool
 	oversizedLogged   map[string]struct{}
+	controlSkipLogged map[string]struct{}
 	quarantinedPaths  map[string]struct{}
 	lazyRepos         bool
 	lowMemory         bool
@@ -1727,6 +1728,7 @@ func (s *Syncer) HandleLocalChange(ctx context.Context, relativePath string, op 
 		return nil
 	}
 	if isMountRuntimeRelativePath(relativePath) {
+		s.logMountControlPathSkipped(relativePath)
 		return nil
 	}
 	if first := strings.SplitN(relativePath, "/", 2)[0]; reservedTopLevel(first) {
@@ -1970,6 +1972,13 @@ func (s *Syncer) flushOutboxRecordChunk(ctx context.Context, records []outboxRec
 	var firstErr error
 	uploadRecords := make([]outboxRecord, 0, len(records))
 	for _, record := range records {
+		if isMountRuntimeRemotePath(record.RemotePath) {
+			s.logMountControlPathSkipped(strings.TrimPrefix(normalizeRemotePath(record.RemotePath), "/"))
+			if err := s.skipOutboxRecord(record, "skipped_control_path"); err != nil && firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
 		if strings.TrimSpace(record.OpID) != "" {
 			if err := s.settleOutboxRecord(ctx, record); err != nil && firstErr == nil {
 				firstErr = err
@@ -5578,6 +5587,7 @@ func (s *Syncer) scanLocalFiles() (map[string]localSnapshot, error) {
 			if rel, relErr := filepath.Rel(s.localRoot, path); relErr == nil &&
 				rel != "." &&
 				isMountRuntimeRelativePath(rel) {
+				s.logMountControlPathSkipped(rel)
 				return filepath.SkipDir
 			}
 			return nil
@@ -5586,6 +5596,7 @@ func (s *Syncer) scanLocalFiles() (map[string]localSnapshot, error) {
 		// with the mount directory's own basename (round-trip-onto-root).
 		if rel, relErr := filepath.Rel(s.localRoot, path); relErr == nil {
 			if isMountRuntimeRelativePath(rel) {
+				s.logMountControlPathSkipped(rel)
 				return nil
 			}
 			first := strings.SplitN(rel, string(os.PathSeparator), 2)[0]
@@ -5683,6 +5694,21 @@ func isMountRuntimeRelativePath(path string) bool {
 		}
 	}
 	return false
+}
+
+func (s *Syncer) logMountControlPathSkipped(relativePath string) {
+	normalized := filepath.ToSlash(strings.TrimSpace(relativePath))
+	if normalized == "" || normalized == "." {
+		return
+	}
+	if s.controlSkipLogged == nil {
+		s.controlSkipLogged = map[string]struct{}{}
+	}
+	if _, seen := s.controlSkipLogged[normalized]; seen {
+		return
+	}
+	s.controlSkipLogged[normalized] = struct{}{}
+	s.logf("skipping mount control path before upload: %s", normalized)
 }
 
 func (s *Syncer) loadState() error {
