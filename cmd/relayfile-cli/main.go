@@ -6992,23 +6992,88 @@ func delegatedCredentialsPath() string {
 }
 
 func delegatedCredentialsPathForRequest(workspaceValue string, scopes []string) string {
-	workspaceKey := delegatedCredentialsWorkspaceKey(workspaceValue)
+	workspaceKey := workspaceShardKey(workspaceValue)
 	scopeKey := delegatedCredentialsScopeKey(scopes)
 	return filepath.Join(configDir(), "delegated", workspaceKey, scopeKey+".json")
 }
 
-func delegatedCredentialsWorkspaceKey(workspaceValue string) string {
+func delegatedCredentialsRawPathForRequest(workspaceValue string, scopes []string) string {
+	workspaceKey := rawWorkspaceShardKey(workspaceValue)
+	scopeKey := delegatedCredentialsScopeKey(scopes)
+	return filepath.Join(configDir(), "delegated", workspaceKey, scopeKey+".json")
+}
+
+func workspaceShardKey(workspaceValue string) string {
+	workspaceValue = canonicalWorkspaceShardValue(workspaceValue)
+	sum := sha256.Sum256([]byte(workspaceValue))
+	return hex.EncodeToString(sum[:])[:24]
+}
+
+func rawWorkspaceShardKey(workspaceValue string) string {
 	workspaceValue = strings.TrimSpace(workspaceValue)
 	if workspaceValue == "" {
 		workspaceValue = "active"
 	}
-	if record, ok := workspaceRecordByName(workspaceValue); ok && strings.TrimSpace(record.ID) != "" {
-		workspaceValue = record.ID
-	} else if record, ok := workspaceRecordByID(workspaceValue); ok && strings.TrimSpace(record.ID) != "" {
-		workspaceValue = record.ID
-	}
 	sum := sha256.Sum256([]byte(workspaceValue))
 	return hex.EncodeToString(sum[:])[:24]
+}
+
+func canonicalWorkspaceShardValue(workspaceValue string) string {
+	value, _ := canonicalWorkspaceShardValueStatus(workspaceValue)
+	return value
+}
+
+func canonicalWorkspaceShardValueStatus(workspaceValue string) (string, bool) {
+	workspaceValue = strings.TrimSpace(workspaceValue)
+	if workspaceValue == "" || strings.EqualFold(workspaceValue, "active") {
+		if name, _ := activeWorkspaceName(""); strings.TrimSpace(name) != "" {
+			workspaceValue = strings.TrimSpace(name)
+		} else if workspaceValue == "" {
+			workspaceValue = "active"
+		}
+	}
+	if record, ok := workspaceRecordForShardValue(workspaceValue); ok {
+		return strings.TrimSpace(record.ID), true
+	}
+	return workspaceValue, false
+}
+
+func workspaceRecordForShardValue(workspaceValue string) (workspaceRecord, bool) {
+	catalog, err := loadWorkspaceCatalog()
+	if err != nil {
+		return workspaceRecord{}, false
+	}
+	workspaceValue = strings.TrimSpace(workspaceValue)
+	var match workspaceRecord
+	canonicalID := ""
+	for _, record := range catalog.Workspaces {
+		if record.Name != workspaceValue && record.ID != workspaceValue && record.RelayWorkspaceID != workspaceValue {
+			continue
+		}
+		recordID := strings.TrimSpace(record.ID)
+		if recordID == "" {
+			return workspaceRecord{}, false
+		}
+		if canonicalID == "" {
+			canonicalID = recordID
+			match = record
+			continue
+		}
+		if canonicalID != recordID {
+			return workspaceRecord{}, false
+		}
+		if strings.TrimSpace(match.Name) == "" {
+			match.Name = strings.TrimSpace(record.Name)
+		}
+		if strings.TrimSpace(match.RelayWorkspaceID) == "" {
+			match.RelayWorkspaceID = strings.TrimSpace(record.RelayWorkspaceID)
+		}
+	}
+	if canonicalID == "" {
+		return workspaceRecord{}, false
+	}
+	match.ID = canonicalID
+	return match, true
 }
 
 func delegatedCredentialsScopeKey(scopes []string) string {
@@ -7062,22 +7127,10 @@ func resolveDelegatedCredentialsPathForRequest(flagValue, workspaceValue string,
 	if value, ok := explicitDelegatedCredentialsPath(flagValue); ok {
 		return value, true
 	}
-	workspaceValue = resolveDelegatedCredentialsWorkspaceValue(workspaceValue)
 	if strings.TrimSpace(workspaceValue) != "" || len(scopes) > 0 {
 		return delegatedCredentialsPathForRequest(workspaceValue, scopes), false
 	}
 	return delegatedCredentialsPath(), false
-}
-
-func resolveDelegatedCredentialsWorkspaceValue(workspaceValue string) string {
-	workspaceValue = strings.TrimSpace(workspaceValue)
-	if workspaceValue != "" && !strings.EqualFold(workspaceValue, "active") {
-		return workspaceValue
-	}
-	if name, _ := activeWorkspaceName(""); strings.TrimSpace(name) != "" {
-		return strings.TrimSpace(name)
-	}
-	return workspaceValue
 }
 
 func loadDelegatedCredentials(path string) (delegatedauth.Bundle, string, error) {
@@ -7096,16 +7149,87 @@ func loadDelegatedCredentials(path string) (delegatedauth.Bundle, string, error)
 }
 
 func loadDelegatedCredentialsForRequest(path, workspaceValue string, scopes []string) (delegatedauth.Bundle, string, error) {
+	canonicalWorkspaceValue, canonicalWorkspaceOK := canonicalWorkspaceShardValueStatus(workspaceValue)
+	if !canonicalWorkspaceOK && strings.TrimSpace(workspaceValue) != "" {
+		fmt.Fprintf(os.Stderr, "warning: delegated credential workspace %q was not uniquely resolved in %s; using raw workspace shard and probing alias shards\n", canonicalWorkspaceValue, workspacesPath())
+	}
 	resolvedPath, explicit := resolveDelegatedCredentialsPathForRequest(path, workspaceValue, scopes)
 	bundle, loadedPath, err := loadDelegatedCredentials(resolvedPath)
 	if err == nil || explicit || resolvedPath == delegatedCredentialsPath() || !errors.Is(err, delegatedauth.ErrMissingCredentials) {
 		return bundle, loadedPath, err
+	}
+	for _, legacyPath := range legacyDelegatedCredentialsPathsForRequest(workspaceValue, scopes) {
+		legacyBundle, loadedLegacyPath, legacyErr := loadDelegatedCredentials(legacyPath)
+		if legacyErr == nil && delegatedBundleSatisfiesRequestedScopes(legacyBundle, scopes) {
+			if created, migrateErr := delegatedauth.SaveAtomicIfMissing(resolvedPath, legacyBundle); migrateErr == nil && created {
+				return legacyBundle, resolvedPath, nil
+			} else if migrateErr == nil && !created {
+				canonicalBundle, canonicalLoadedPath, canonicalErr := loadDelegatedCredentials(resolvedPath)
+				if canonicalErr == nil && delegatedBundleSatisfiesRequestedScopes(canonicalBundle, scopes) {
+					return canonicalBundle, canonicalLoadedPath, nil
+				}
+			}
+			return legacyBundle, loadedLegacyPath, nil
+		}
 	}
 	legacyBundle, legacyPath, legacyErr := loadDelegatedCredentials(delegatedCredentialsPath())
 	if legacyErr == nil && delegatedBundleSatisfiesRequestedScopes(legacyBundle, scopes) {
 		return legacyBundle, legacyPath, nil
 	}
 	return bundle, loadedPath, err
+}
+
+func legacyDelegatedCredentialsPathsForRequest(workspaceValue string, scopes []string) []string {
+	aliases := legacyDelegatedCredentialsWorkspaceAliases(workspaceValue)
+	paths := make([]string, 0, len(aliases))
+	seen := map[string]struct{}{delegatedCredentialsPathForRequest(workspaceValue, scopes): {}}
+	for _, alias := range aliases {
+		path := delegatedCredentialsRawPathForRequest(alias, scopes)
+		if _, ok := seen[path]; ok {
+			continue
+		}
+		seen[path] = struct{}{}
+		paths = append(paths, path)
+	}
+	return paths
+}
+
+func legacyDelegatedCredentialsWorkspaceAliases(workspaceValue string) []string {
+	value := strings.TrimSpace(workspaceValue)
+	if value == "" || strings.EqualFold(value, "active") {
+		if name, _ := activeWorkspaceName(""); strings.TrimSpace(name) != "" {
+			value = strings.TrimSpace(name)
+		}
+	}
+	aliases := make([]string, 0, 3)
+	addAlias := func(alias string) {
+		alias = strings.TrimSpace(alias)
+		if alias == "" {
+			return
+		}
+		for _, existing := range aliases {
+			if existing == alias {
+				return
+			}
+		}
+		aliases = append(aliases, alias)
+	}
+	addAlias(value)
+	catalog, err := loadWorkspaceCatalog()
+	if err != nil {
+		return aliases
+	}
+	for _, record := range catalog.Workspaces {
+		if strings.TrimSpace(record.Name) != value &&
+			strings.TrimSpace(record.ID) != value &&
+			strings.TrimSpace(record.RelayWorkspaceID) != value {
+			continue
+		}
+		addAlias(record.ID)
+		addAlias(record.RelayWorkspaceID)
+		addAlias(record.Name)
+	}
+	return aliases
 }
 
 func delegatedBundleSatisfiesRequestedScopes(bundle delegatedauth.Bundle, requested []string) bool {

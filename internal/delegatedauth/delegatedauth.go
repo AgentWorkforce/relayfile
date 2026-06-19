@@ -145,23 +145,37 @@ func Load(path string) (Bundle, error) {
 }
 
 func SaveAtomic(path string, bundle Bundle) error {
+	_, err := saveAtomic(path, bundle, false)
+	return err
+}
+
+func SaveAtomicIfMissing(path string, bundle Bundle) (bool, error) {
+	if _, err := os.Stat(strings.TrimSpace(path)); err == nil {
+		return false, nil
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return false, err
+	}
+	return saveAtomic(path, bundle, true)
+}
+
+func saveAtomic(path string, bundle Bundle, createOnly bool) (bool, error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
-		return errors.New("credential path is required")
+		return false, errors.New("credential path is required")
 	}
 	bundle.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 	payload, err := json.MarshalIndent(bundle, "", "  ")
 	if err != nil {
-		return err
+		return false, err
 	}
 	payload = append(payload, '\n')
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
+		return false, err
 	}
 	tmp, err := os.CreateTemp(dir, ".relayfile-credentials-*.tmp")
 	if err != nil {
-		return err
+		return false, err
 	}
 	tmpName := tmp.Name()
 	cleanup := true
@@ -172,24 +186,36 @@ func SaveAtomic(path string, bundle Bundle) error {
 	}()
 	if err := tmp.Chmod(0o600); err != nil {
 		_ = tmp.Close()
-		return err
+		return false, err
 	}
 	if _, err := tmp.Write(payload); err != nil {
 		_ = tmp.Close()
-		return err
+		return false, err
 	}
 	if err := tmp.Sync(); err != nil {
 		_ = tmp.Close()
-		return err
+		return false, err
 	}
 	if err := tmp.Close(); err != nil {
-		return err
+		return false, err
 	}
-	if err := os.Rename(tmpName, path); err != nil {
-		return err
+	if createOnly {
+		if err := os.Link(tmpName, path); err != nil {
+			if errors.Is(err, os.ErrExist) {
+				return false, nil
+			}
+			return false, err
+		}
+	} else if err := os.Rename(tmpName, path); err != nil {
+		return false, err
 	}
-	cleanup = false
-	return os.Chmod(path, 0o600)
+	if !createOnly {
+		cleanup = false
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func RenewFile(ctx context.Context, client *http.Client, path string, timeout time.Duration) (Bundle, bool, error) {
