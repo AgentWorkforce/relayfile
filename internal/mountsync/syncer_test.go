@@ -2763,6 +2763,60 @@ func TestPushLocalAndFlushOnceIngestsUnsyncedLocalDraft(t *testing.T) {
 	}
 }
 
+func TestPushLocalAndFlushOnceSkipsSelfReferentialOutboxControlFiles(t *testing.T) {
+	localDir := t.TempDir()
+	client := &fakeClient{files: map[string]RemoteFile{}}
+	logger := &captureLogger{}
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_skip_outbox_control",
+		RemoteRoot:  "/slack/channels/C123/messages",
+		LocalRoot:   localDir,
+		Logger:      logger,
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer: %v", err)
+	}
+
+	remotePath := "/slack/channels/C123/messages/1781905242_715929/.relay/outbox/pending/mountcmd_self.json"
+	if err := syncer.saveOutboxRecord(outboxRecord{
+		CommandID:   "mountcmd_self",
+		WorkspaceID: "ws_skip_outbox_control",
+		RemotePath:  remotePath,
+		ContentType: "application/json",
+		Content:     `{"path":"/slack/channels/C123/messages/1781905242_715929/plan-ack.json"}`,
+		Hash:        "sha256:control",
+		Exists:      true,
+		FirstSeenAt: time.Now().UTC().Format(time.RFC3339Nano),
+	}); err != nil {
+		t.Fatalf("seed self-referential outbox record: %v", err)
+	}
+
+	if err := syncer.PushLocalAndFlushOnce(context.Background()); err != nil {
+		t.Fatalf("PushLocalAndFlushOnce failed: %v", err)
+	}
+
+	if client.bulkWriteCalls != 0 || client.writeFileCalls != 0 {
+		t.Fatalf("control outbox file must not be uploaded, bulk=%d write=%d", client.bulkWriteCalls, client.writeFileCalls)
+	}
+	if pending := readPendingOutboxRecordsForTest(t, localDir); len(pending) != 0 {
+		t.Fatalf("expected self-referential control record removed from pending outbox, got %+v", pending)
+	}
+	acked := readOutboxRecordsInDirForTest(t, filepath.Join(localDir, ".relay", "outbox", "acked"))
+	if len(acked) != 1 || acked[0].CommandID != "mountcmd_self" || acked[0].DispatchStatus != "skipped_control_path" {
+		t.Fatalf("expected skipped control record in acked diagnostics, got %+v", acked)
+	}
+	skipLogs := 0
+	for _, line := range logger.lines {
+		if strings.Contains(line, "skipping mount control path before upload") &&
+			strings.Contains(line, "1781905242_715929/.relay/outbox/pending/mountcmd_self.json") {
+			skipLogs++
+		}
+	}
+	if skipLogs != 1 {
+		t.Fatalf("expected one control skip log, got %d lines: %#v", skipLogs, logger.lines)
+	}
+}
+
 func TestFlushOutboxOnceWritesReceiptCapabilityMarkerWithEmptyOutbox(t *testing.T) {
 	localDir := t.TempDir()
 	client := &fakeClient{files: map[string]RemoteFile{}}
