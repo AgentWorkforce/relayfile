@@ -1,8 +1,24 @@
 # Getting Started
 
-Relayfile gives agents a file tree instead of an API surface. Start locally, seed files, mount them, and let the agent use normal filesystem tools.
+Relayfile normalizes SaaS webhooks — from Linear, Notion, GitHub, Slack, and others — into a consistent file tree, then delivers them to your agents. Agents react to events using `cat`, `grep`, and file-write operations rather than provider-specific SDKs or webhook parsers.
+
+Relayfile runs as a background daemon (the integration runtime). The daemon is where OAuth stays warm, rate limits are absorbed, and webhook deliveries are deduplicated before your agents ever see them. You can run it locally or let [Agent Relay Cloud](#hosted-provider-files) run it for you.
 
 This repo is the file server and mount layer. For the rest of the ecosystem, see [relayfile-adapters](https://github.com/AgentWorkforce/relayfile-adapters) (`../relayfile-adapters` locally) for path mapping, webhook normalization, and writeback behavior, and [relayfile-providers](https://github.com/AgentWorkforce/relayfile-providers) (`../relayfile-providers` locally) for provider auth, API proxying, subscriptions, and connection health.
+
+## Hosted Provider Files (Least Friction)
+
+If you want Notion, Slack, Linear, GitHub, or other provider-backed files without running any infrastructure, start here. Agent Relay Cloud runs the daemon, OAuth, sync workers, and writeback workers for you.
+
+```bash
+relayfile setup \
+  --provider notion \
+  --workspace my-agent \
+  --local-dir ./relayfile-mount \
+  --no-open
+```
+
+That command connects to `agentrelay.com`, completes provider auth, waits for sync, and mounts provider files locally. Your agent reads and reacts to the mounted files; the integration stack is hosted.
 
 ## Local OSS Quickstart
 
@@ -78,22 +94,6 @@ go run ./cmd/relayfile-cli mount ws_demo ./relayfile-mount --once
 # Export a workspace
 go run ./cmd/relayfile-cli export ws_demo --format tar --output ws_demo.tar
 ```
-
-## Hosted Provider Files
-
-If the user wants Notion, Slack, Linear, GitHub, or other provider-backed files without running infrastructure, use hosted Agent Relay. Agent Relay Cloud runs the workspace, relayfile API, scoped auth, Nango OAuth, sync workers, and writeback workers.
-
-Use the hosted setup skill from [AgentWorkforce/skills#28](https://github.com/AgentWorkforce/skills/pull/28):
-
-```bash
-relayfile setup \
-  --provider notion \
-  --workspace my-agent \
-  --local-dir ./relayfile-mount \
-  --no-open
-```
-
-That path connects to `agentrelay.com`, completes provider auth, waits for sync, and mounts provider files locally for the agent. The local directory is only the agent's file interface; the integration stack is hosted.
 
 ## Fully Self-Hosted Provider Files
 

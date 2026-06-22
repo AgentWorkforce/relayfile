@@ -2,9 +2,11 @@
   <img src="assets/banner.png" alt="Relayfile — the integration filesystem for agents" width="900">
 </p>
 
-**The integration filesystem for agents.**
+**The event layer for AI agents.**
 
-Mount Linear, Notion, GitHub, Slack, HubSpot, Salesforce, and the rest of your SaaS stack as a virtual filesystem. Every agent in your system reads them with `cat`, writes them by saving files, and coordinates through a real, ACL'd, real-time-synced filesystem. The mount can live anywhere — the SDK, CLI, and FUSE layer all let you choose where to expose it.
+Your SaaS tools are always firing events. When a Linear issue is created, a Notion page edited, or a GitHub PR opened — something should react. But every provider fires webhooks differently: different payload shapes, different auth schemes, different retry semantics. Building that normalization for each provider is the plumbing nobody wants to write.
+
+Relayfile normalizes webhooks from Linear, Notion, GitHub, Slack, HubSpot, Salesforce, and the rest of your SaaS stack into a consistent, ACL'd file tree, then delivers them to your agents. Agents wake up to a ready filesystem, read what changed, and write back — using `cat`, `grep`, and file-write operations they already know. One integration point. Zero webhook parsing.
 
 LLMs are far better at reading files than calling typed tools — the file system is the most-trained-on API in existence. Relayfile leans on that instead of fighting it.
 
@@ -89,9 +91,9 @@ Four alias views ship out of the box: `by-title/` (slug lookups), `by-id/` (iden
 
 Three reasons:
 
-1. **Context efficiency.** A typical MCP setup loads 100+ tool schemas into every agent session before any work happens. Files load nothing — context cost is what the agent actually opens.
-2. **Completeness.** APIs return what their search ranks. `ls` returns what's there. For "what changed yesterday across these three integrations" type questions, exhaustive enumeration beats query-by-query retrieval.
-3. **Coordination.** Multiple agents working through the same filesystem can see each other's writes immediately, scoped by ACL. Multi-agent collaboration becomes a property of the substrate, not something each app re-implements.
+1. **Reactive invocation.** Provider webhooks normalize into file events. When a Linear issue is created or a Notion page edited, your agent wakes up to the changed file — no webhook parsing, no provider-specific payload handling, no bespoke adapter per integration. The event is already in a shape the agent can read.
+2. **Coordination.** Multiple agents working through the same filesystem can see each other's writes immediately, scoped by ACL. Multi-agent collaboration becomes a property of the substrate, not something each app re-implements.
+3. **Context efficiency.** A typical MCP setup loads 100+ tool schemas into every agent session before any work happens. Files load nothing — context cost is what the agent actually opens. `ls` returns what's there; exhaustive enumeration beats query-by-query API retrieval.
 
 ## Real-time multi-agent sync
 
@@ -147,13 +149,17 @@ The "give agents a filesystem" idea is a healthy direction — relayfile isn't t
 
 **vs. MCP servers (Linear, Notion, Slack, GitHub, …).** MCP gives the agent a typed tool surface per integration. Strong for single, well-defined writes (`linear.create_issue(title, priority, …)` enforces the shape at call time). The cost is that each connected server loads tool schemas into the context window, and an LLM is more reliable reading a directory than juggling N typed APIs. Relayfile exposes the same integrations as paths you can `Read` / `Bash` / `Glob` — no schema overhead — with exhaustive enumeration where MCP returns API search results. The two compose well: relayfile for reads and synthesis, MCP for typed writes that need server-side validation.
 
-**vs. [Mirage](https://github.com/strukto-ai/mirage) and other virtual-filesystem-for-agents projects.** Mirage is doing thoughtful work in this space and it's worth a look. Their focus is **infrastructure and storage primitives** — S3, Postgres, Redis, GDrive, GCS, Mongo, SSH — mounted side-by-side as one tree. Relayfile's focus is **integrations** — the SaaS APIs where day-to-day agent work lives — with file-native writeback (PATCH / CREATE / DELETE through file ops), per-agent ACLs, real-time multi-agent sync, and a real OS mount you can put wherever fits your stack. Different scopes, both useful; pick the one your work lives in (or run both).
+**vs. [Mirage](https://github.com/strukto-ai/mirage) and other virtual-filesystem-for-agents projects.** Mirage is doing thoughtful work in this space and it's worth a look. The clearest distinction: Mirage is a **pull layer** — agents query data from S3, GDrive, Postgres, Redis, and other infrastructure backends on demand. Relayfile is an **event layer** — provider webhooks normalize into file events that wake agents, which then read, react, and write back. The two are complementary: use Mirage when your agents need to query infrastructure data, use Relayfile when your agents need to react to SaaS events. Relayfile also adds file-native writeback (PATCH / CREATE / DELETE through file ops), per-agent ACLs, real-time multi-agent sync, and centralized OAuth / retry / rate-limit handling across providers.
 
 **vs. rolling your own.** A single agent against a single backend can do fine with FUSE, Mountpoint, or direct SDK calls. Relayfile becomes worth it when you need multi-agent coordination, scoped capabilities, and a consistent read/write contract across many SaaS surfaces.
 
 ## Run Locally
 
-Fastest path:
+Relayfile runs as a lightweight background daemon. That's where OAuth tokens stay warm, provider rate limits are absorbed, webhook deliveries are deduplicated, and events fan out to all subscribed agents. It's an integration runtime — the same reason you run a database process rather than re-implementing storage per request.
+
+**Don't want to run it?** [Hosted Agent Relay](#hosted-agent-relay) runs the daemon for you. Your agents connect with a single token; no infrastructure to manage.
+
+Fastest local path:
 
 ```bash
 cd docker
