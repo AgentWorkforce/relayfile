@@ -2,7 +2,7 @@
 
 Relayfile normalizes SaaS webhooks — from Linear, Notion, GitHub, Slack, and others — into a consistent file tree, then delivers them to your agents. Agents react to events using `cat`, `grep`, and file-write operations rather than provider-specific SDKs or webhook parsers.
 
-Relayfile runs as a background daemon (the integration runtime). The daemon is where OAuth stays warm, rate limits are absorbed, and webhook deliveries are deduplicated before your agents ever see them. You can run it locally or let [Agent Relay Cloud](#hosted-provider-files) run it for you.
+Relayfile runs as a background daemon (the integration runtime). The daemon is where OAuth stays warm, rate limits are absorbed, and webhook deliveries are deduplicated before your agents ever see them. You can run it locally or let [Agent Relay Cloud](#hosted-provider-files-least-friction) run it for you.
 
 This repo is the file server and mount layer. For the rest of the ecosystem, see [relayfile-adapters](https://github.com/AgentWorkforce/relayfile-adapters) (`../relayfile-adapters` locally) for path mapping, webhook normalization, and writeback behavior, and [relayfile-providers](https://github.com/AgentWorkforce/relayfile-providers) (`../relayfile-providers` locally) for provider auth, API proxying, subscriptions, and connection health.
 
