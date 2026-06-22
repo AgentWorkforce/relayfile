@@ -37,6 +37,8 @@ import (
 	"github.com/agentworkforce/relayfile/internal/relayfile"
 	"github.com/agentworkforce/relayfile/internal/writeback"
 	"github.com/fsnotify/fsnotify"
+	"nhooyr.io/websocket"
+	"nhooyr.io/websocket/wsjson"
 )
 
 const (
@@ -543,6 +545,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		return runLogs(args[1:], stdout)
 	case "observer":
 		return runObserver(args[1:], stdout)
+	case "listen", "watch":
+		return runListen(args[1:], stdout)
 	case "help", "-h", "--help":
 		printUsage(stdout)
 		return nil
@@ -613,6 +617,8 @@ func printHelpForArgs(args []string, stdout io.Writer) {
 		fmt.Fprintln(stdout, "Usage: relayfile logs [WORKSPACE] [--lines N]")
 	case "observer":
 		fmt.Fprintln(stdout, "Usage: relayfile observer [WORKSPACE] [--no-open]")
+	case "listen", "watch":
+		printListenUsage(stdout)
 	case "help":
 		printUsage(stdout)
 	default:
@@ -774,6 +780,7 @@ Usage:
   relayfile status [WORKSPACE]
   relayfile logs [WORKSPACE]
   relayfile observer [WORKSPACE] [--no-open]
+  relayfile listen [WORKSPACE] [--provider PROVIDER] [--path GLOB] [--event TYPE] [--run CMD]
 
 Subcommands:
   setup       Sign in, connect an integration, and mount the workspace
@@ -804,7 +811,8 @@ Subcommands:
   export      Export a workspace as json, tar, or patch
   status      Show sync status and local mirror state for a workspace
   logs        Print the background mount log
-  observer    Open the hosted file observer for a workspace`)
+  observer    Open the hosted file observer for a workspace
+  listen      Stream live file events from a workspace; run a command per event with --run`)
 }
 
 func runSetup(args []string, stdin io.Reader, stdout io.Writer) error {
@@ -5543,6 +5551,235 @@ func isAPIAuthError(err error) bool {
 	}
 	var httpErr *apiError
 	return errors.As(err, &httpErr) && (httpErr.StatusCode == http.StatusUnauthorized || httpErr.StatusCode == http.StatusForbidden)
+}
+
+// listenEvent is the wire format for events delivered over /fs/ws.
+type listenEvent struct {
+	EventID       string `json:"eventId"`
+	Type          string `json:"type"`
+	Path          string `json:"path"`
+	Revision      string `json:"revision"`
+	ContentHash   string `json:"contentHash,omitempty"`
+	Origin        string `json:"origin,omitempty"`
+	Provider      string `json:"provider,omitempty"`
+	CorrelationID string `json:"correlationId,omitempty"`
+	Timestamp     string `json:"timestamp,omitempty"`
+}
+
+func printListenUsage(w io.Writer) {
+	fmt.Fprintln(w, `relayfile listen streams live file events from a workspace and optionally
+runs a command for each matching event.
+
+Usage:
+  relayfile listen [WORKSPACE] [--provider PROVIDER] [--path GLOB] [--event TYPE] [--run CMD] [--format text|json]
+
+Flags:
+  --provider PROVIDER  filter to a specific integration (linear, notion, hubspot, …)
+                       shorthand for --path /PROVIDER/**
+  --path GLOB          glob path filter, e.g. /linear/issues/** or /notion/pages/*
+  --event TYPE         filter by event type: file.created, file.updated, file.deleted
+                       (default: all types)
+  --run CMD            shell command to execute per matching event.
+                       Use {{path}}, {{type}}, {{provider}}, {{revision}}, and
+                       {{event}} (full JSON) as placeholders.
+  --format text|json   output format when --run is not set (default: text)
+
+Examples:
+
+  # Stream all events from the default workspace
+  relayfile listen
+
+  # Watch Linear for new issues and let Claude triage them
+  relayfile listen --provider linear --event file.created \
+    --run "claude --print 'A new Linear issue was filed. Read {{path}} and suggest a priority and owner.'"
+
+  # Watch Notion for any page edits
+  relayfile listen --provider notion --event file.updated \
+    --run "claude --print 'A Notion page changed at {{path}}. Summarise what likely changed.'"
+
+  # Watch HubSpot for new contacts and draft outreach
+  relayfile listen --provider hubspot --event file.created \
+    --run "claude --print 'New HubSpot contact at {{path}}. Draft a personalised first-touch email.'"
+
+  # Watch Asana for new tasks
+  relayfile listen --provider asana --event file.created \
+    --run "claude --print 'New Asana task at {{path}}. Break it into subtasks and estimate effort.'"
+
+  # Watch Shortcut for new stories
+  relayfile listen --provider shortcut --event file.created \
+    --run "claude --print 'New Shortcut story at {{path}}. Suggest an implementation approach.'"
+
+  # Watch Granola for new meeting notes and extract action items
+  relayfile listen --provider granola --event file.created \
+    --run "claude --print 'New meeting notes at {{path}}. Extract action items and owners.'"
+
+  # Watch Fathom for new call recordings and send a follow-up summary
+  relayfile listen --provider fathom --event file.created \
+    --run "claude --print 'New Fathom call at {{path}}. Write a follow-up email with key decisions.'"
+
+  # Print raw JSON for scripting
+  relayfile listen --provider linear --format json | jq '.path'
+
+  # Explicit path glob instead of --provider
+  relayfile listen --path "/linear/issues/**" --event file.created \
+    --run "claude --print 'New issue at {{path}}.'"
+
+Want this running headlessly for your whole team — turning issues into reviewed PRs automatically?
+See https://github.com/AgentWorkforce/factory`)
+}
+
+func runListen(args []string, stdout io.Writer) error {
+	fs := flag.NewFlagSet("listen", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	server := fs.String("server", "", "relayfile server URL override")
+	token := fs.String("token", "", "relayfile token override")
+	providerFlag := fs.String("provider", "", "filter to a specific provider (e.g. linear, notion)")
+	pathFlag := fs.String("path", "", "glob path filter (e.g. /linear/issues/**)")
+	eventFlag := fs.String("event", "", "event type filter: file.created, file.updated, file.deleted")
+	runFlag := fs.String("run", "", "shell command per event; supports {{path}}, {{type}}, {{provider}}, {{revision}}, {{event}}")
+	formatFlag := fs.String("format", "text", "output format when --run is not set: text or json")
+	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
+		"server":   true,
+		"token":    true,
+		"provider": true,
+		"path":     true,
+		"event":    true,
+		"run":      true,
+		"format":   true,
+	})); err != nil {
+		return err
+	}
+	var workspaceValue string
+	if fs.NArg() > 0 {
+		workspaceValue = strings.TrimSpace(fs.Arg(0))
+	}
+
+	commandClient, err := prepareWorkspaceCommandClient(workspaceValue, *server, *token, defaultInspectScopes)
+	if err != nil {
+		return err
+	}
+
+	// Build WebSocket URL from the HTTP base URL.
+	base, err := url.Parse(strings.TrimRight(commandClient.client.baseURL, "/"))
+	if err != nil {
+		return fmt.Errorf("invalid server URL: %w", err)
+	}
+	switch base.Scheme {
+	case "http":
+		base.Scheme = "ws"
+	case "https":
+		base.Scheme = "wss"
+	}
+	base.Path = fmt.Sprintf("/v1/workspaces/%s/fs/ws", url.PathEscape(commandClient.workspaceID))
+
+	pathFilter := strings.TrimSpace(*pathFlag)
+	if pathFilter == "" && strings.TrimSpace(*providerFlag) != "" {
+		pathFilter = fmt.Sprintf("/%s/**", strings.TrimSpace(*providerFlag))
+	}
+	q := url.Values{}
+	q.Set("from", "now")
+	if pathFilter != "" {
+		q.Set("path", pathFilter)
+	}
+	// Token in query param for WS upgrade (server does not yet support Authorization on upgrade).
+	q.Set("token", commandClient.client.token)
+	base.RawQuery = q.Encode()
+
+	rootCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	conn, _, err := websocket.Dial(rootCtx, base.String(), &websocket.DialOptions{
+		HTTPHeader: http.Header{
+			"Authorization": []string{"Bearer " + commandClient.client.token},
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("connect to event stream: %w", err)
+	}
+	defer conn.Close(websocket.StatusNormalClosure, "")
+
+	typeFilter := strings.TrimSpace(*eventFlag)
+	runCmd := strings.TrimSpace(*runFlag)
+	format := strings.TrimSpace(*formatFlag)
+
+	label := "all events"
+	if pathFilter != "" {
+		label = pathFilter
+	}
+	if typeFilter != "" {
+		label += " (" + typeFilter + ")"
+	}
+	fmt.Fprintf(stdout, "Listening on %s — Ctrl+C to stop\n", label)
+	if runCmd == "" && format == "text" {
+		fmt.Fprintln(stdout, "Tip: pass --run to execute a command per event.")
+		fmt.Fprintln(stdout, "     See 'relayfile help listen' for examples with Linear, Notion, HubSpot, and more.")
+	}
+	fmt.Fprintln(stdout)
+
+	for {
+		var raw json.RawMessage
+		if err := wsjson.Read(rootCtx, conn, &raw); err != nil {
+			if websocket.CloseStatus(err) == websocket.StatusNormalClosure ||
+				websocket.CloseStatus(err) == websocket.StatusGoingAway ||
+				errors.Is(err, context.Canceled) {
+				return nil
+			}
+			return fmt.Errorf("event stream error: %w", err)
+		}
+
+		var evt listenEvent
+		if err := json.Unmarshal(raw, &evt); err != nil || evt.Type == "" || evt.Type == "pong" {
+			continue
+		}
+		if typeFilter != "" && evt.Type != typeFilter {
+			continue
+		}
+
+		if runCmd != "" {
+			expanded := listenExpandTemplate(runCmd, evt, raw)
+			cmd := exec.CommandContext(rootCtx, "sh", "-c", expanded)
+			cmd.Stdout = stdout
+			cmd.Stderr = os.Stderr
+			if err := cmd.Run(); err != nil && !errors.Is(err, context.Canceled) {
+				fmt.Fprintf(os.Stderr, "run error for %s: %v\n", evt.Path, err)
+			}
+			continue
+		}
+
+		if format == "json" {
+			fmt.Fprintf(stdout, "%s\n", string(raw))
+			continue
+		}
+
+		// Default text output.
+		ts := strings.TrimSpace(evt.Timestamp)
+		if ts == "" {
+			ts = time.Now().UTC().Format(time.RFC3339)
+		}
+		provider := strings.TrimSpace(evt.Provider)
+		if provider == "" {
+			// Infer provider from the leading path segment.
+			seg := strings.TrimPrefix(evt.Path, "/")
+			if i := strings.IndexByte(seg, '/'); i > 0 {
+				provider = seg[:i]
+			}
+		}
+		if provider != "" {
+			fmt.Fprintf(stdout, "%-20s  %-30s  %s  [%s]\n", evt.Type, evt.Path, ts, provider)
+		} else {
+			fmt.Fprintf(stdout, "%-20s  %-30s  %s\n", evt.Type, evt.Path, ts)
+		}
+	}
+}
+
+func listenExpandTemplate(tmpl string, evt listenEvent, raw json.RawMessage) string {
+	return strings.NewReplacer(
+		"{{path}}", evt.Path,
+		"{{type}}", evt.Type,
+		"{{provider}}", evt.Provider,
+		"{{revision}}", evt.Revision,
+		"{{event}}", string(raw),
+	).Replace(tmpl)
 }
 
 func runTree(args []string, stdout io.Writer) error {

@@ -107,6 +107,33 @@ Without write-through invalidation, this falls apart. Two agents on the same dat
 
 This is what turns multi-agent collaboration into a property of the substrate instead of something every app has to reinvent. Reviewer agents watch implementer agents in real time. A persona-orchestrator agent watches workers' progress through their writes. None of that requires a coordination protocol on top of relayfile — **the filesystem is the protocol.**
 
+## React to events locally
+
+`relayfile listen` streams live file events from your workspace and runs a command for each one. Provider webhooks arrive normalized — you write the reaction, not the plumbing.
+
+```bash
+# Wake Claude when a new Linear issue is filed
+relayfile listen --provider linear --event file.created \
+  --run "claude --print 'New issue at {{path}}. Read it and suggest a priority and owner.'"
+
+# Extract action items when Granola adds new meeting notes
+relayfile listen --provider granola --event file.created \
+  --run "claude --print 'New meeting notes at {{path}}. Extract action items and owners.'"
+
+# Draft follow-up emails from Fathom call recordings
+relayfile listen --provider fathom --event file.created \
+  --run "claude --print 'New call at {{path}}. Write a follow-up with key decisions.'"
+
+# New HubSpot contact → personalised first-touch email
+relayfile listen --provider hubspot --event file.created \
+  --run "claude --print 'New contact at {{path}}. Draft a personalised intro email.'"
+```
+
+`--run` supports `{{path}}`, `{{type}}`, `{{provider}}`, `{{revision}}`, and `{{event}}` (full JSON). Works with Notion, Asana, Shortcut, HubSpot, Granola, Fathom, and every other connected provider. Run `relayfile help listen` for the full example set.
+
+> **Want this running headlessly for your whole team** — turning issues into reviewed PRs automatically?
+> See [AgentWorkforce/factory](https://github.com/AgentWorkforce/factory).
+
 ## What's in the box
 
 - **File-native reads.** `ls`, `cat`, `grep`, `find` — the agent's native vocabulary. No tool schemas in context.
@@ -115,6 +142,7 @@ This is what turns multi-agent collaboration into a property of the substrate in
 - **Real-time multi-agent sync.** Writes from one agent are visible to others on the next read. No commit/push/pull cycle, no merge.
 - **Real OS mount.** Native bash, native `find`/`grep`/`jq`/`rg`, no emulation gaps. Any process — agents, scripts, IDEs — can read or write the mount.
 - **Pluggable architecture.** A core file server plus [adapters](https://github.com/AgentWorkforce/relayfile-adapters) (per-integration logic) and [providers](https://github.com/AgentWorkforce/relayfile-providers) (auth/proxy via Nango, Composio, Pipedream). One provider integration unlocks tens of apps.
+- **`relayfile listen`.** Stream live events and run a command per match. The local on-ramp to reactive agents.
 
 ## Works with
 
