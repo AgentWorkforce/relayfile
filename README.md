@@ -125,5 +125,6 @@ Hosted Agent Relay runs all of this for you. For end-to-end self-hosting, run re
 
 - [Getting started](docs/guides/getting-started.md)
 - [Cloud integration](docs/guides/cloud-integration.md)
+- [Pricing](docs/guides/pricing.md)
 - [API reference](docs/api-reference.md)
 - [OpenAPI spec](openapi/relayfile-v1.openapi.yaml)
