@@ -549,6 +549,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		return runListen(args[1:], stdout)
 	case "dev":
 		return runDev(args[1:], nil, stdout)
+	case "supervisor":
+		return runSupervisor(args[1:], stdout)
 	case "help", "-h", "--help":
 		printUsage(stdout)
 		return nil
@@ -623,6 +625,8 @@ func printHelpForArgs(args []string, stdout io.Writer) {
 		printListenUsage(stdout)
 	case "dev":
 		printListenUsage(stdout)
+	case "supervisor":
+		printSupervisorUsage(stdout)
 	case "help":
 		printUsage(stdout)
 	default:
@@ -786,6 +790,9 @@ Usage:
   relayfile observer [WORKSPACE] [--no-open]
   relayfile listen [WORKSPACE] [--provider PROVIDER] [--path GLOB] [--event TYPE] [--run CMD] [--background]
   relayfile dev [WORKSPACE] [--provider PROVIDER] [--path GLOB] [--event TYPE] [--run CMD]
+  relayfile supervisor install [LISTEN_FLAGS...]
+  relayfile supervisor uninstall
+  relayfile supervisor status
 
 Subcommands:
   setup       Sign in, connect an integration, and mount the workspace
@@ -818,7 +825,8 @@ Subcommands:
   logs        Print the background mount log
   observer    Open the hosted file observer for a workspace
   listen      Stream live file events from a workspace; run a command per event with --run
-  dev         Zero-friction entry point: checks auth and status, then streams events (alias for listen with friendly onboarding)`)
+  dev         Zero-friction entry point: checks auth and status, then streams events (alias for listen with friendly onboarding)
+  supervisor  Install, uninstall, or check status of the listen daemon as a system service (systemd on Linux, launchd on macOS)`)
 }
 
 func runSetup(args []string, stdin io.Reader, stdout io.Writer) error {
@@ -5938,6 +5946,292 @@ func listenExpandTemplate(tmpl string, evt listenEvent, raw json.RawMessage) str
 		"{{revision}}", evt.Revision,
 		"{{event}}", string(raw),
 	).Replace(tmpl)
+}
+
+func printSupervisorUsage(w io.Writer) {
+	fmt.Fprintln(w, `relayfile supervisor manages the listen daemon as a system service.
+
+On Linux  it writes a systemd user unit (~/.config/systemd/user/relayfile-listen.service).
+On macOS  it writes a launchd agent  (~/Library/LaunchAgents/com.relayfile.listen.plist).
+
+Usage:
+  relayfile supervisor install [LISTEN_FLAGS...]   install and start the service
+  relayfile supervisor uninstall                   stop, disable, and remove the service
+  relayfile supervisor status                      show service status
+
+Examples:
+
+  # Install: react to every new Linear triage issue
+  relayfile supervisor install \
+    --path "/linear/issues/by-state/triage/**" --event file.created \
+    --run "claude --print 'New triage issue at {{path}}. Assign it.'"
+
+  # Install: all Linear events, background agent
+  relayfile supervisor install --provider linear --run "my-agent --event '{{event}}'"
+
+  relayfile supervisor status
+  relayfile supervisor uninstall
+
+All flags accepted by 'relayfile listen' are accepted here and are embedded
+verbatim into the unit file. The service restarts automatically on failure.`)
+}
+
+const (
+	supervisorServiceName  = "relayfile-listen"
+	supervisorLaunchdLabel = "com.relayfile.listen"
+)
+
+func supervisorSystemdUnitPath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".config", "systemd", "user", supervisorServiceName+".service"), nil
+}
+
+func supervisorLaunchdPlistPath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, "Library", "LaunchAgents", supervisorLaunchdLabel+".plist"), nil
+}
+
+func runSupervisor(args []string, stdout io.Writer) error {
+	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" {
+		printSupervisorUsage(stdout)
+		return nil
+	}
+	sub := args[0]
+	rest := args[1:]
+	switch sub {
+	case "install":
+		return supervisorInstall(rest, stdout)
+	case "uninstall", "remove":
+		return supervisorUninstall(stdout)
+	case "status":
+		return supervisorStatus(stdout)
+	default:
+		printSupervisorUsage(stdout)
+		return fmt.Errorf("unknown supervisor subcommand %q", sub)
+	}
+}
+
+func supervisorInstall(listenArgs []string, stdout io.Writer) error {
+	executable, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("locate relayfile binary: %w", err)
+	}
+	logFile := listenLogFile()
+
+	switch runtime.GOOS {
+	case "linux":
+		return supervisorInstallSystemd(executable, listenArgs, logFile, stdout)
+	case "darwin":
+		return supervisorInstallLaunchd(executable, listenArgs, logFile, stdout)
+	default:
+		return fmt.Errorf("supervisor install is not supported on %s; run 'relayfile listen --background' instead", runtime.GOOS)
+	}
+}
+
+func supervisorInstallSystemd(executable string, listenArgs []string, logFile string, stdout io.Writer) error {
+	unitPath, err := supervisorSystemdUnitPath()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(unitPath), 0o755); err != nil {
+		return fmt.Errorf("create systemd user unit dir: %w", err)
+	}
+
+	// Build ExecStart line: quote args that contain spaces or special chars.
+	execArgs := []string{executable, "listen"}
+	execArgs = append(execArgs, listenArgs...)
+	execStart := shelljoin(execArgs)
+
+	unit := fmt.Sprintf(`[Unit]
+Description=Relayfile listen — reactive agent event stream
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%s
+Restart=on-failure
+RestartSec=5s
+StandardOutput=append:%s
+StandardError=append:%s
+
+[Install]
+WantedBy=default.target
+`, execStart, logFile, logFile)
+
+	if err := os.WriteFile(unitPath, []byte(unit), 0o644); err != nil {
+		return fmt.Errorf("write unit file: %w", err)
+	}
+	fmt.Fprintf(stdout, "Wrote %s\n", unitPath)
+
+	for _, args := range [][]string{
+		{"--user", "daemon-reload"},
+		{"--user", "enable", "--now", supervisorServiceName},
+	} {
+		cmd := exec.Command("systemctl", args...)
+		cmd.Stdout = stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("systemctl %s: %w", strings.Join(args, " "), err)
+		}
+	}
+	fmt.Fprintf(stdout, "\nService started. Logs: %s\n", logFile)
+	fmt.Fprintf(stdout, "Status: systemctl --user status %s\n", supervisorServiceName)
+	return nil
+}
+
+func supervisorInstallLaunchd(executable string, listenArgs []string, logFile string, stdout io.Writer) error {
+	plistPath, err := supervisorLaunchdPlistPath()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(plistPath), 0o755); err != nil {
+		return fmt.Errorf("create LaunchAgents dir: %w", err)
+	}
+
+	// Build <array> of <string> elements for ProgramArguments.
+	programArgs := append([]string{executable, "listen"}, listenArgs...)
+	var argElems strings.Builder
+	for _, a := range programArgs {
+		argElems.WriteString("\t\t<string>")
+		argElems.WriteString(plistEscapeXML(a))
+		argElems.WriteString("</string>\n")
+	}
+
+	plist := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>%s</string>
+	<key>ProgramArguments</key>
+	<array>
+%s	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>StandardOutPath</key>
+	<string>%s</string>
+	<key>StandardErrorPath</key>
+	<string>%s</string>
+</dict>
+</plist>
+`, supervisorLaunchdLabel, argElems.String(), plistEscapeXML(logFile), plistEscapeXML(logFile))
+
+	if err := os.WriteFile(plistPath, []byte(plist), 0o644); err != nil {
+		return fmt.Errorf("write plist: %w", err)
+	}
+	fmt.Fprintf(stdout, "Wrote %s\n", plistPath)
+
+	// Unload first in case an old version is loaded.
+	unload := exec.Command("launchctl", "unload", "-w", plistPath)
+	_ = unload.Run()
+
+	load := exec.Command("launchctl", "load", "-w", plistPath)
+	load.Stdout = stdout
+	load.Stderr = os.Stderr
+	if err := load.Run(); err != nil {
+		return fmt.Errorf("launchctl load: %w", err)
+	}
+	fmt.Fprintf(stdout, "\nService started. Logs: %s\n", logFile)
+	fmt.Fprintf(stdout, "Status: launchctl list %s\n", supervisorLaunchdLabel)
+	return nil
+}
+
+func supervisorUninstall(stdout io.Writer) error {
+	switch runtime.GOOS {
+	case "linux":
+		return supervisorUninstallSystemd(stdout)
+	case "darwin":
+		return supervisorUninstallLaunchd(stdout)
+	default:
+		return fmt.Errorf("supervisor uninstall is not supported on %s", runtime.GOOS)
+	}
+}
+
+func supervisorUninstallSystemd(stdout io.Writer) error {
+	for _, args := range [][]string{
+		{"--user", "disable", "--now", supervisorServiceName},
+	} {
+		cmd := exec.Command("systemctl", args...)
+		cmd.Stdout = stdout
+		cmd.Stderr = os.Stderr
+		_ = cmd.Run() // best-effort; unit may not be loaded
+	}
+	unitPath, err := supervisorSystemdUnitPath()
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(unitPath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove unit file: %w", err)
+	}
+	exec.Command("systemctl", "--user", "daemon-reload").Run() //nolint
+	fmt.Fprintln(stdout, "Service stopped and removed.")
+	return nil
+}
+
+func supervisorUninstallLaunchd(stdout io.Writer) error {
+	plistPath, err := supervisorLaunchdPlistPath()
+	if err != nil {
+		return err
+	}
+	unload := exec.Command("launchctl", "unload", "-w", plistPath)
+	unload.Stdout = stdout
+	unload.Stderr = os.Stderr
+	_ = unload.Run() // best-effort
+	if err := os.Remove(plistPath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove plist: %w", err)
+	}
+	fmt.Fprintln(stdout, "Service stopped and removed.")
+	return nil
+}
+
+func supervisorStatus(stdout io.Writer) error {
+	switch runtime.GOOS {
+	case "linux":
+		cmd := exec.Command("systemctl", "--user", "status", supervisorServiceName)
+		cmd.Stdout = stdout
+		cmd.Stderr = os.Stderr
+		_ = cmd.Run()
+	case "darwin":
+		cmd := exec.Command("launchctl", "list", supervisorLaunchdLabel)
+		cmd.Stdout = stdout
+		cmd.Stderr = os.Stderr
+		_ = cmd.Run()
+	default:
+		fmt.Fprintf(stdout, "supervisor status is not supported on %s\n", runtime.GOOS)
+	}
+	return nil
+}
+
+// shelljoin builds a shell-safe ExecStart string by quoting arguments that
+// contain spaces or shell metacharacters.
+func shelljoin(args []string) string {
+	quoted := make([]string, len(args))
+	for i, a := range args {
+		if strings.ContainsAny(a, " \t\"'\\$`{}[]|&;<>()#~!") {
+			a = "\"" + strings.ReplaceAll(a, "\"", "\\\"") + "\""
+		}
+		quoted[i] = a
+	}
+	return strings.Join(quoted, " ")
+}
+
+// plistEscapeXML escapes the five XML entities that can appear in plist string values.
+func plistEscapeXML(s string) string {
+	s = strings.ReplaceAll(s, "&", "&amp;")
+	s = strings.ReplaceAll(s, "<", "&lt;")
+	s = strings.ReplaceAll(s, ">", "&gt;")
+	s = strings.ReplaceAll(s, "\"", "&quot;")
+	s = strings.ReplaceAll(s, "'", "&apos;")
+	return s
 }
 
 func runTree(args []string, stdout io.Writer) error {
