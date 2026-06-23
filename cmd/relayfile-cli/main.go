@@ -5728,6 +5728,24 @@ func runDev(args []string, stdin io.Reader, stdout io.Writer) error {
 	return runListen(args, stdout)
 }
 
+// matchListenPath reports whether eventPath matches the glob filter used by
+// relayfile listen. It handles the double-star (**) recursive wildcard that
+// path.Match does not support: "/**" suffix matches any path rooted at the
+// prefix, and "**" alone matches everything.
+func matchListenPath(glob, eventPath string) bool {
+	if glob == "" || glob == "**" || glob == "/**" {
+		return true
+	}
+	// "/foo/**" matches "/foo" and anything under it.
+	if strings.HasSuffix(glob, "/**") {
+		prefix := strings.TrimSuffix(glob, "/**")
+		return eventPath == prefix || strings.HasPrefix(eventPath, prefix+"/")
+	}
+	// Fall back to path.Match for single-star globs.
+	matched, err := path.Match(glob, eventPath)
+	return err == nil && matched
+}
+
 // wsEncodeGlob encodes a path glob for a WebSocket URL query parameter,
 // preserving /, *, and ? as literal characters so server-side glob matching works.
 func wsEncodeGlob(s string) string {
@@ -5878,6 +5896,9 @@ func runListen(args []string, stdout io.Writer) error {
 			continue
 		}
 		if typeFilter != "" && evt.Type != typeFilter {
+			continue
+		}
+		if pathFilter != "" && !matchListenPath(pathFilter, evt.Path) {
 			continue
 		}
 
