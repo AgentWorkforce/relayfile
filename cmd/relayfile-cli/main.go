@@ -5825,7 +5825,11 @@ func wsEncodeGlob(s string) string {
 		case (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9'):
 			b.WriteRune(r)
 		default:
-			b.WriteString(url.QueryEscape(string(r)))
+			// QueryEscape encodes spaces as "+"; rewrite to "%20" so the
+			// encoded value is unambiguous in both query and path contexts.
+			// Both decode to a space server-side via url.Query(), so this is
+			// purely a more robust encoding, not a behavior change.
+			b.WriteString(strings.ReplaceAll(url.QueryEscape(string(r)), "+", "%20"))
 		}
 	}
 	return b.String()
