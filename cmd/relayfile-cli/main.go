@@ -547,6 +547,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		return runObserver(args[1:], stdout)
 	case "listen", "watch":
 		return runListen(args[1:], stdout)
+	case "dev":
+		return runDev(args[1:], nil, stdout)
 	case "help", "-h", "--help":
 		printUsage(stdout)
 		return nil
@@ -618,6 +620,8 @@ func printHelpForArgs(args []string, stdout io.Writer) {
 	case "observer":
 		fmt.Fprintln(stdout, "Usage: relayfile observer [WORKSPACE] [--no-open]")
 	case "listen", "watch":
+		printListenUsage(stdout)
+	case "dev":
 		printListenUsage(stdout)
 	case "help":
 		printUsage(stdout)
@@ -780,7 +784,8 @@ Usage:
   relayfile status [WORKSPACE]
   relayfile logs [WORKSPACE]
   relayfile observer [WORKSPACE] [--no-open]
-  relayfile listen [WORKSPACE] [--provider PROVIDER] [--path GLOB] [--event TYPE] [--run CMD]
+  relayfile listen [WORKSPACE] [--provider PROVIDER] [--path GLOB] [--event TYPE] [--run CMD] [--background]
+  relayfile dev [WORKSPACE] [--provider PROVIDER] [--path GLOB] [--event TYPE] [--run CMD]
 
 Subcommands:
   setup       Sign in, connect an integration, and mount the workspace
@@ -812,7 +817,8 @@ Subcommands:
   status      Show sync status and local mirror state for a workspace
   logs        Print the background mount log
   observer    Open the hosted file observer for a workspace
-  listen      Stream live file events from a workspace; run a command per event with --run`)
+  listen      Stream live file events from a workspace; run a command per event with --run
+  dev         Zero-friction entry point: checks auth and status, then streams events (alias for listen with friendly onboarding)`)
 }
 
 func runSetup(args []string, stdin io.Reader, stdout io.Writer) error {
@@ -5675,6 +5681,44 @@ Want this running headlessly for your whole team — turning issues into reviewe
 See https://github.com/AgentWorkforce/factory`)
 }
 
+// runDev is the zero-friction entry point for reactive local agents.
+// It checks credentials and integration status, prints a status header,
+// then hands off to the listen loop.
+func runDev(args []string, stdin io.Reader, stdout io.Writer) error {
+	// Peek at flags without consuming them — runListen re-parses the same slice.
+	peek := flag.NewFlagSet("dev-peek", flag.ContinueOnError)
+	peek.SetOutput(io.Discard)
+	serverPeek := peek.String("server", "", "")
+	tokenPeek := peek.String("token", "", "")
+	providerPeek := peek.String("provider", "", "")
+	_ = peek.Parse(normalizeFlagArgs(args, map[string]bool{
+		"server": true, "token": true, "provider": true,
+		"path": true, "event": true, "run": true, "format": true,
+		"background": false, "daemonized": false,
+	}))
+
+	commandClient, err := prepareWorkspaceCommandClient("", *serverPeek, *tokenPeek, defaultInspectScopes)
+	if err != nil {
+		provider := strings.TrimSpace(*providerPeek)
+		if provider == "" {
+			provider = "linear"
+		}
+		fmt.Fprintln(stdout, "Not connected to Agent Relay. Get started with:")
+		fmt.Fprintf(stdout, "\n  relayfile setup --provider %s\n\n", provider)
+		fmt.Fprintln(stdout, "Then re-run: relayfile dev "+strings.Join(args, " "))
+		return err
+	}
+
+	fmt.Fprintf(stdout, "Workspace: %s\n", commandClient.workspaceID)
+	if p := strings.TrimSpace(*providerPeek); p != "" {
+		fmt.Fprintf(stdout, "Provider filter: %s\n", p)
+		fmt.Fprintf(stdout, "Tip: run 'relayfile integration list' to see connected providers.\n")
+	}
+	fmt.Fprintln(stdout)
+
+	return runListen(args, stdout)
+}
+
 func runListen(args []string, stdout io.Writer) error {
 	fs := flag.NewFlagSet("listen", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -5685,14 +5729,18 @@ func runListen(args []string, stdout io.Writer) error {
 	eventFlag := fs.String("event", "", "event type filter: file.created, file.updated, file.deleted")
 	runFlag := fs.String("run", "", "shell command per event; supports {{path}}, {{type}}, {{provider}}, {{revision}}, {{event}}")
 	formatFlag := fs.String("format", "text", "output format when --run is not set: text or json")
+	background := fs.Bool("background", false, "run in background; logs to ~/.relayfile/listen.log")
+	daemonized := fs.Bool("daemonized", false, "internal flag used by relayfile listen --background")
 	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
-		"server":   true,
-		"token":    true,
-		"provider": true,
-		"path":     true,
-		"event":    true,
-		"run":      true,
-		"format":   true,
+		"server":     true,
+		"token":      true,
+		"provider":   true,
+		"path":       true,
+		"event":      true,
+		"run":        true,
+		"format":     true,
+		"background": false,
+		"daemonized": false,
 	})); err != nil {
 		return err
 	}
@@ -5701,12 +5749,25 @@ func runListen(args []string, stdout io.Writer) error {
 		workspaceValue = strings.TrimSpace(fs.Arg(0))
 	}
 
+	if *background && !*daemonized {
+		logFile := listenLogFile()
+		pidFile := listenPIDFile()
+		return spawnBackgroundListenProcess(args, pidFile, logFile)
+	}
+	if *daemonized {
+		if err := rotateLogFile(listenLogFile()); err != nil {
+			return err
+		}
+	}
+
 	commandClient, err := prepareWorkspaceCommandClient(workspaceValue, *server, *token, defaultInspectScopes)
 	if err != nil {
 		return err
 	}
 
 	// Build WebSocket URL from the HTTP base URL.
+	// relayfile listen connects directly to Agent Relay Cloud — no local
+	// daemon or FUSE mount is required.
 	base, err := url.Parse(strings.TrimRight(commandClient.client.baseURL, "/"))
 	if err != nil {
 		return fmt.Errorf("invalid server URL: %w", err)
@@ -5756,12 +5817,15 @@ func runListen(args []string, stdout io.Writer) error {
 	if typeFilter != "" {
 		label += " (" + typeFilter + ")"
 	}
-	fmt.Fprintf(stdout, "Listening on %s — Ctrl+C to stop\n", label)
-	if runCmd == "" && format == "text" {
-		fmt.Fprintln(stdout, "Tip: pass --run to execute a command per event.")
-		fmt.Fprintln(stdout, "     See 'relayfile help listen' for examples with Linear, Notion, HubSpot, and more.")
+	if !*daemonized {
+		fmt.Fprintf(stdout, "Listening on %s — Ctrl+C to stop\n", label)
+		if runCmd == "" && format == "text" {
+			fmt.Fprintln(stdout, "Tip: pass --run to execute a command per event.")
+			fmt.Fprintln(stdout, "     See 'relayfile help listen' for examples with Linear, Notion, HubSpot, and more.")
+			fmt.Fprintln(stdout, "     Add --background to detach; 'relayfile supervisor install --listen' to survive reboots.")
+		}
+		fmt.Fprintln(stdout)
 	}
-	fmt.Fprintln(stdout)
 
 	for {
 		var raw json.RawMessage
@@ -5817,6 +5881,53 @@ func runListen(args []string, stdout io.Writer) error {
 			fmt.Fprintf(stdout, "%-20s  %-30s  %s\n", evt.Type, evt.Path, ts)
 		}
 	}
+}
+
+func listenPIDFile() string {
+	return filepath.Join(configDir(), "listen.pid")
+}
+
+func listenLogFile() string {
+	return filepath.Join(configDir(), "listen.log")
+}
+
+func spawnBackgroundListenProcess(originalArgs []string, pidFile, logFile string) error {
+	if err := rotateLogFile(logFile); err != nil {
+		return err
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	filtered := make([]string, 0, len(originalArgs))
+	for _, arg := range originalArgs {
+		if arg == "--background" || arg == "-background" ||
+			strings.HasPrefix(arg, "--background=") || strings.HasPrefix(arg, "-background=") {
+			continue
+		}
+		filtered = append(filtered, arg)
+	}
+	childArgs := append([]string{"listen"}, filtered...)
+	childArgs = append(childArgs, "--daemonized", "--pid-file", pidFile)
+	logHandle, err := os.OpenFile(logFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	defer logHandle.Close()
+	cmd := exec.Command(executable, childArgs...)
+	cmd.Stdout = logHandle
+	cmd.Stderr = logHandle
+	if err := configureDetachedProcess(cmd); err != nil {
+		return err
+	}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	if err := cmd.Process.Release(); err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stdout, "Listen started in background. Logs: %s\n", logFile)
+	return nil
 }
 
 func listenExpandTemplate(tmpl string, evt listenEvent, raw json.RawMessage) string {

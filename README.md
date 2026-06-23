@@ -141,6 +141,23 @@ relayfile listen --provider fathom --event file.created \
 
 `--run` supports `{{path}}`, `{{type}}`, `{{provider}}`, `{{revision}}`, and `{{event}}` (full JSON). The alias views available in each provider tree (`by-state/`, `by-label/`, `by-epic/`, `by-name/`, …) are discoverable with `relayfile tree / --depth 3`. Run `relayfile help listen` for the full example set across all providers.
 
+No local daemon or FUSE mount is required — `relayfile listen` connects directly to Agent Relay Cloud via WebSocket.
+
+Run in the foreground, or detach:
+
+```bash
+# Foreground (Ctrl+C to stop)
+relayfile listen --provider linear --event file.created --run "..."
+
+# Background — logs to ~/.relayfile/listen.log
+relayfile listen --provider linear --event file.created --run "..." --background
+
+# Zero-friction entry point: checks auth, prints status, then listens
+relayfile dev --provider linear --event file.created --run "..."
+```
+
+> **Cloud outbound delivery (coming soon):** push normalized events to any HTTPS endpoint with no local process required. Track [AgentWorkforce/relayfile-providers#cloud-webhooks](https://github.com/AgentWorkforce/relayfile-providers).
+
 > **Want this running headlessly for your whole team** — turning issues into reviewed PRs automatically?
 > See [AgentWorkforce/factory](https://github.com/AgentWorkforce/factory).
 
@@ -152,7 +169,7 @@ relayfile listen --provider fathom --event file.created \
 - **Real-time multi-agent sync.** Writes from one agent are visible to others on the next read. No commit/push/pull cycle, no merge.
 - **Real OS mount.** Native bash, native `find`/`grep`/`jq`/`rg`, no emulation gaps. Any process — agents, scripts, IDEs — can read or write the mount.
 - **Pluggable architecture.** A core file server plus [adapters](https://github.com/AgentWorkforce/relayfile-adapters) (per-integration logic) and [providers](https://github.com/AgentWorkforce/relayfile-providers) (auth/proxy via Nango, Composio, Pipedream). One provider integration unlocks tens of apps.
-- **`relayfile listen`.** Stream live events and run a command per match. The local on-ramp to reactive agents.
+- **`relayfile listen` / `relayfile dev`.** Stream live events and run a command per match. Foreground or `--background`. The local on-ramp to reactive agents.
 
 ## Works with
 
