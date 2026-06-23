@@ -37,6 +37,8 @@ import (
 	"github.com/agentworkforce/relayfile/internal/relayfile"
 	"github.com/agentworkforce/relayfile/internal/writeback"
 	"github.com/fsnotify/fsnotify"
+	"nhooyr.io/websocket"
+	"nhooyr.io/websocket/wsjson"
 )
 
 const (
@@ -52,12 +54,7 @@ const (
 	defaultMountTimeout     = 15 * time.Second
 )
 
-// defaultJoinScopes are the scopes minted for every delegated-credential
-// workspace join. ops:read is required for writeback op-status polling
-// (/v1/workspaces/{id}/ops/{opId}); sync:trigger is required for
-// server-side reconcile kicks. Both must be present on every credential
-// so narrow prior credentials cannot silently break a subset of providers.
-var defaultJoinScopes = []string{"fs:read", "fs:write", "ops:read", "sync:trigger"}
+var defaultJoinScopes = []string{"fs:read", "fs:write"}
 var defaultInspectScopes = []string{"relayfile:fs:read:*"}
 
 type credentials struct {
@@ -201,7 +198,6 @@ type treeEntry struct {
 type syncProviderStatus struct {
 	Provider              string         `json:"provider"`
 	Status                string         `json:"status"`
-	Ready                 bool           `json:"ready,omitempty"`
 	Cursor                *string        `json:"cursor"`
 	WatermarkTs           *string        `json:"watermarkTs"`
 	LagSeconds            int            `json:"lagSeconds"`
@@ -515,8 +511,6 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		return runSetup(args[1:], stdin, stdout)
 	case "login":
 		return runLogin(args[1:], stdin, stdout)
-	case "logout":
-		return runLogout(args[1:], stdout)
 	case "workspace":
 		return runWorkspace(args[1:], stdin, stdout)
 	case "integration":
@@ -529,15 +523,12 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		return runDigest(args[1:], stdout)
 	case "pull":
 		return runPull(args[1:], stdout)
-	case "mount", "start", "on":
-		// `start` and `on` are friendlier aliases for `mount`. Same flags,
-		// same foreground/background behavior; pass --background to detach.
-		// `on` migrates the agent-relay `relay on` mount UX into relayfile.
+	case "mount", "start":
+		// `start` is the friendlier alias for `mount`. Same flags, same
+		// foreground/background behavior; pass --background to detach.
 		return runMount(args[1:])
 	case "restart":
 		return runRestart(args[1:], stdout)
-	case "supervisor":
-		return runSupervisor(args[1:], stdout)
 	case "tree", "ls":
 		return runTree(args[1:], stdout)
 	case "read", "cat":
@@ -548,14 +539,18 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		return runExport(args[1:], stdout)
 	case "status":
 		return runStatus(args[1:], stdout)
-	case "stop", "off":
-		// `off` is the friendlier alias for `stop`, migrating the
-		// agent-relay `relay off` unmount UX into relayfile.
+	case "stop":
 		return runStop(args[1:], stdout)
 	case "logs":
 		return runLogs(args[1:], stdout)
 	case "observer":
 		return runObserver(args[1:], stdout)
+	case "listen", "watch":
+		return runListen(args[1:], stdout)
+	case "dev":
+		return runDev(args[1:], nil, stdout)
+	case "supervisor":
+		return runSupervisor(args[1:], stdout)
 	case "help", "-h", "--help":
 		printUsage(stdout)
 		return nil
@@ -594,8 +589,6 @@ func printHelpForArgs(args []string, stdout io.Writer) {
 		fmt.Fprintln(stdout, "Usage: relayfile setup [--provider PROVIDER] [--backend BACKEND] [--workspace NAME] [--local-dir DIR]")
 	case "login":
 		fmt.Fprintln(stdout, "Usage: relayfile login [--no-open] [--api-key] [--server URL] [--token TOKEN]")
-	case "logout":
-		fmt.Fprintln(stdout, "Usage: relayfile logout")
 	case "workspace":
 		printWorkspaceUsage(stdout, subcommand)
 	case "integration":
@@ -608,7 +601,7 @@ func printHelpForArgs(args []string, stdout io.Writer) {
 		printDigestUsage(stdout, subcommand)
 	case "pull":
 		fmt.Fprintln(stdout, "Usage: relayfile pull [--workspace NAME] [--provider PROVIDER] [--reason TEXT]")
-	case "mount", "start", "on":
+	case "mount", "start":
 		printMountHelp(stdout)
 	case "restart":
 		fmt.Fprintln(stdout, "Usage: relayfile restart [WORKSPACE] [--foreground]")
@@ -622,14 +615,18 @@ func printHelpForArgs(args []string, stdout io.Writer) {
 		fmt.Fprintln(stdout, "Usage: relayfile export [WORKSPACE] --format FORMAT [--output FILE]")
 	case "status":
 		fmt.Fprintln(stdout, "Usage: relayfile status [WORKSPACE] [--json]")
-	case "stop", "off":
+	case "stop":
 		fmt.Fprintln(stdout, "Usage: relayfile stop [WORKSPACE]")
-	case "supervisor":
-		fmt.Fprintln(stdout, "Usage: relayfile supervisor <install|uninstall|status> [WORKSPACE] [--interval 30s]")
 	case "logs":
 		fmt.Fprintln(stdout, "Usage: relayfile logs [WORKSPACE] [--lines N]")
 	case "observer":
 		fmt.Fprintln(stdout, "Usage: relayfile observer [WORKSPACE] [--no-open]")
+	case "listen", "watch":
+		printListenUsage(stdout)
+	case "dev":
+		printListenUsage(stdout)
+	case "supervisor":
+		printSupervisorUsage(stdout)
 	case "help":
 		printUsage(stdout)
 	default:
@@ -668,7 +665,7 @@ func printWorkspaceUsage(w io.Writer, subcommand string) {
 func printIntegrationUsage(w io.Writer, subcommand string) {
 	switch subcommand {
 	case "connect":
-		fmt.Fprintln(w, "Usage: relayfile integration connect PROVIDER [--backend BACKEND] [--workspace NAME] [--no-open] [--timeout 5m] [--wait-sync]")
+		fmt.Fprintln(w, "Usage: relayfile integration connect PROVIDER [--backend BACKEND] [--workspace NAME] [--no-open] [--timeout 5m]")
 	case "available", "catalog", "providers":
 		fmt.Fprintln(w, "Usage: relayfile integration available [--search QUERY] [--backend BACKEND] [--json] [--refresh]")
 	case "search":
@@ -683,7 +680,7 @@ func printIntegrationUsage(w io.Writer, subcommand string) {
 		fmt.Fprintln(w, "Usage: relayfile integration set-metadata PROVIDER KEY=VALUE [KEY=VALUE...] [--workspace NAME] [--yes]")
 	default:
 		fmt.Fprintln(w, `Usage:
-  relayfile integration connect PROVIDER [--backend BACKEND] [--workspace NAME] [--wait-sync]
+  relayfile integration connect PROVIDER [--backend BACKEND] [--workspace NAME]
   relayfile integration available [--search QUERY] [--backend BACKEND] [--json] [--refresh]
   relayfile integration search QUERY [--backend BACKEND] [--json] [--refresh]
   relayfile integration list [--workspace NAME] [--json]
@@ -754,7 +751,6 @@ Usage:
   relayfile
   relayfile setup [--provider PROVIDER] [--backend BACKEND] [--workspace NAME] [--local-dir DIR]
   relayfile login [--no-open] [--api-key] [--server URL] [--token TOKEN]
-  relayfile logout
   relayfile workspace create NAME
   relayfile workspace join WORKSPACE_ID [--name NAME] [--write]
   relayfile workspace use NAME
@@ -783,13 +779,8 @@ Usage:
   relayfile pull [--workspace NAME] [--provider PROVIDER] [--reason TEXT]
   relayfile mount [WORKSPACE] [LOCAL_DIR]
   relayfile start [WORKSPACE] [LOCAL_DIR]            (alias for mount; pass --background to detach)
-  relayfile on [WORKSPACE] [LOCAL_DIR]              (alias for mount; pass --background to detach)
   relayfile stop [WORKSPACE]
-  relayfile off [WORKSPACE]                         (alias for stop)
   relayfile restart [WORKSPACE] [--foreground]
-  relayfile supervisor install [WORKSPACE] [--interval 30s]
-  relayfile supervisor uninstall [WORKSPACE]
-  relayfile supervisor status [WORKSPACE]
   relayfile tree [WORKSPACE] [PATH] [--depth N]
   relayfile read [WORKSPACE] PATH
   relayfile seed [WORKSPACE] [DIR]
@@ -797,11 +788,15 @@ Usage:
   relayfile status [WORKSPACE]
   relayfile logs [WORKSPACE]
   relayfile observer [WORKSPACE] [--no-open]
+  relayfile listen [WORKSPACE] [--provider PROVIDER] [--path GLOB] [--event TYPE] [--run CMD] [--background]
+  relayfile dev [WORKSPACE] [--provider PROVIDER] [--path GLOB] [--event TYPE] [--run CMD]
+  relayfile supervisor install [LISTEN_FLAGS...]
+  relayfile supervisor uninstall
+  relayfile supervisor status
 
 Subcommands:
   setup       Sign in, connect an integration, and mount the workspace
   login       Sign in via agent-relay cloud login (or --api-key for self-hosted)
-  logout      Clear Relayfile credentials from this machine
   workspace   Create, join, select via agent-relay, list, show current, or delete locally tracked workspaces
   integration Connect, discover, list, disconnect, or adopt workspace integrations
   ops         List or replay dead-lettered writeback ops
@@ -820,18 +815,18 @@ Subcommands:
   pull        Trigger an immediate sync refresh for one or all providers
   mount       Mirror a remote workspace to a local directory; add --background to detach
   start       Alias for mount; pass --background to detach
-  on          Alias for mount; pass --background to detach
   stop        Stop a background mount
-  off         Alias for stop
   restart     Stop and start a workspace's mount in one step (--foreground to attach)
-  supervisor  Install/uninstall/status launchd (macOS) or systemd (Linux) service for auto-restart
   tree        List a remote workspace path
   read        Print a remote file's content
   seed        Upload a directory tree with bulk writes
   export      Export a workspace as json, tar, or patch
   status      Show sync status and local mirror state for a workspace
   logs        Print the background mount log
-  observer    Open the hosted file observer for a workspace`)
+  observer    Open the hosted file observer for a workspace
+  listen      Stream live file events from a workspace; run a command per event with --run
+  dev         Zero-friction entry point: checks auth and status, then streams events (alias for listen with friendly onboarding)
+  supervisor  Install, uninstall, or check status of the listen daemon as a system service (systemd on Linux, launchd on macOS)`)
 }
 
 func runSetup(args []string, stdin io.Reader, stdout io.Writer) error {
@@ -1300,54 +1295,8 @@ var ErrCloudRefreshExpired = errors.New("cloud session expired. Run 'agent-relay
 
 var ErrDelegatedRelayfileCredentialsExpired = errors.New("delegated relayfile credentials expired or revoked. Re-bootstrap relayfile credentials with agent-relay cloud login.")
 
-// ErrDelegatedScopeInsufficient is returned when the cloud delegated-token
-// mint rejects the requested scopes. This requires human/admin intervention
-// (re-mint with corrected scopes) and cannot be recovered automatically.
-var ErrDelegatedScopeInsufficient = errors.New("delegated relayfile credentials have insufficient scope — re-mint with broader scopes")
-
-// ErrDelegatedScopeInvalid is returned when the cloud delegated-token mint
-// rejects the request because the requested scopes are malformed — e.g. not
-// valid relayfile path scopes. Unlike a transient backend failure, retrying
-// re-sends the identical bad scopes and can never succeed, so this is a
-// permanent client error that must surface to a human (correct the scope shape)
-// rather than drive an endless retry loop.
-var ErrDelegatedScopeInvalid = errors.New("delegated relayfile credentials requested invalid scopes — scopes must be valid relayfile path scopes; retrying will not succeed, re-mint with corrected scopes")
-
 func isMountCredentialExpired(err error) bool {
-	return errors.Is(err, ErrCloudRefreshExpired) ||
-		errors.Is(err, ErrDelegatedRelayfileCredentialsExpired) ||
-		errors.Is(err, ErrDelegatedScopeInsufficient) ||
-		errors.Is(err, ErrDelegatedScopeInvalid)
-}
-
-// mapDelegatedTokenCloudError translates structured cloud error codes returned
-// by the delegated-token route into typed sentinel errors so the mount loop
-// can distinguish needs_reauth (pause-for-human) from transient failures
-// (back off and retry).
-func mapDelegatedTokenCloudError(err error) error {
-	if err == nil {
-		return nil
-	}
-	var ae *apiError
-	if !errors.As(err, &ae) {
-		return fmt.Errorf("mint delegated relayfile credentials: %w", err)
-	}
-	switch ae.Code {
-	case "needs_reauth":
-		return fmt.Errorf("%w: %s", ErrDelegatedRelayfileCredentialsExpired, ae.Message)
-	case "scope_insufficient":
-		return fmt.Errorf("%w: %s", ErrDelegatedScopeInsufficient, ae.Message)
-	case "invalid_scope":
-		// The requested scopes are malformed (e.g. not relayfile path scopes).
-		// This is a permanent client error: retrying re-sends the same bad
-		// scopes and cannot succeed, so surface it as needs-human rather than
-		// letting the mount loop back off and retry forever.
-		return fmt.Errorf("%w: %s", ErrDelegatedScopeInvalid, ae.Message)
-	default:
-		// relayauth_unavailable and other codes are transient — wrap plainly
-		// so the caller can back off and retry.
-		return fmt.Errorf("mint delegated relayfile credentials: %w", err)
-	}
+	return errors.Is(err, ErrCloudRefreshExpired) || errors.Is(err, ErrDelegatedRelayfileCredentialsExpired)
 }
 
 func providerPromptText(entries []integrationCatalogEntry) string {
@@ -1739,7 +1688,7 @@ func delegatedRelayfileTokenViaCloud(cloud cloudCredentials, workspaceID, agentN
 		},
 		&bundle,
 	); err != nil {
-		return delegatedauth.Bundle{}, mapDelegatedTokenCloudError(err)
+		return delegatedauth.Bundle{}, fmt.Errorf("mint delegated relayfile credentials: %w", err)
 	}
 	if bundle.Workspace() == "" {
 		bundle.RelayfileWorkspaceID = workspaceID
@@ -1950,7 +1899,7 @@ func connectCloudIntegration(cloudAPIURL, workspaceID, workspaceToken, provider,
 					UpdatedAt:    time.Now().UTC().Format(time.RFC3339),
 				})
 			}
-			fmt.Fprintf(stdout, "%s connected. Files will appear under %s/%s as Relayfile syncs in the background.\n", provider, localDir, providerRootDir(provider))
+			fmt.Fprintf(stdout, "%s connected. Files will appear under %s/%s as Relayfile syncs in the background; keep this command running while the mount is active.\n", provider, localDir, providerRootDir(provider))
 			pollErr = nil
 			return pollResult{done: true}
 		}
@@ -2152,24 +2101,6 @@ func runLogin(args []string, stdin io.Reader, stdout io.Writer) error {
 	return nil
 }
 
-func runLogout(args []string, stdout io.Writer) error {
-	if len(args) > 0 {
-		return errors.New("usage: relayfile logout")
-	}
-	removed, err := clearAuthCredentials()
-	if err != nil {
-		return err
-	}
-	if removed == 0 {
-		fmt.Fprintln(stdout, "Relayfile is already logged out.")
-		fmt.Fprintln(stdout, "Agent Relay cloud session left intact; run `agent-relay cloud logout` to fully sign out.")
-		return nil
-	}
-	fmt.Fprintln(stdout, "Logged out of Relayfile on this machine.")
-	fmt.Fprintln(stdout, "Agent Relay cloud session left intact; run `agent-relay cloud logout` to fully sign out.")
-	return nil
-}
-
 func loginWithAPIKey(serverValue, tokenValue string, stdout io.Writer) error {
 	serverValue = strings.TrimSpace(serverValue)
 	if serverValue == "" {
@@ -2261,19 +2192,17 @@ func runIntegrationConnect(args []string, stdin io.Reader, stdout io.Writer) err
 	backend := fs.String("backend", "", "integration backend to request (nango or composio)")
 	noOpen := fs.Bool("no-open", false, "print the hosted URL instead of opening it")
 	timeout := fs.Duration("timeout", 5*time.Minute, "integration readiness timeout")
-	waitSync := fs.Bool("wait-sync", false, "wait for initial sync before returning")
 	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
 		"workspace":     true,
 		"cloud-api-url": true,
 		"backend":       true,
 		"no-open":       false,
 		"timeout":       true,
-		"wait-sync":     false,
 	})); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return errors.New("usage: relayfile integration connect PROVIDER [--backend BACKEND] [--workspace NAME] [--no-open] [--timeout 5m] [--wait-sync]")
+		return errors.New("usage: relayfile integration connect PROVIDER [--backend BACKEND] [--workspace NAME] [--no-open] [--timeout 5m]")
 	}
 	provider := normalizeProviderID(fs.Arg(0))
 	requestedBackend, err := normalizeIntegrationBackend(*backend)
@@ -2319,15 +2248,7 @@ func runIntegrationConnect(args []string, stdin io.Reader, stdout io.Writer) err
 			return err
 		}
 	}
-	if *waitSync {
-		return waitForInitialSync(delegated.ServerURL(), delegated.BearerToken(), relayWorkspaceID, provider, record.LocalDir, *timeout, stdout)
-	}
-	if record.LocalDir != "" {
-		fmt.Fprintf(stdout, "Run `relayfile mount %s %s` to mirror files locally, or rerun with --wait-sync to block until initial data is ready.\n", record.ID, record.LocalDir)
-	} else {
-		fmt.Fprintln(stdout, "Run `relayfile mount` to mirror files locally, or rerun with --wait-sync to block until initial data is ready.")
-	}
-	return nil
+	return waitForInitialSync(delegated.ServerURL(), delegated.BearerToken(), relayWorkspaceID, provider, record.LocalDir, *timeout, stdout)
 }
 
 func isAtlassianProvider(provider string) bool {
@@ -2668,7 +2589,6 @@ func runIntegrationList(args []string, stdout io.Writer) error {
 	if err := client.getJSON(context.Background(), fmt.Sprintf("/api/v1/workspaces/%s/integrations", url.PathEscape(record.ID)), &entries); err != nil {
 		return err
 	}
-	entries = overlayIntegrationListRuntimeStatus(entries, record)
 	if *jsonOutput {
 		return writeJSON(stdout, entries)
 	}
@@ -2684,79 +2604,6 @@ func runIntegrationList(args []string, stdout io.Writer) error {
 		fmt.Fprintf(stdout, "%s\t%s\t%s\t%s\n", entry.Provider, defaultIfBlank(entry.Status, "unknown"), formatLag(entry.LagSeconds), defaultIfBlank(entry.LastEventAt, "-"))
 	}
 	return nil
-}
-
-func overlayIntegrationListRuntimeStatus(entries []cloudIntegrationListEntry, record workspaceRecord) []cloudIntegrationListEntry {
-	if len(entries) == 0 {
-		return entries
-	}
-	runtimeStatus, ok := runtimeSyncStatusForIntegrationList(record)
-	if !ok {
-		return entries
-	}
-	overlaid := append([]cloudIntegrationListEntry(nil), entries...)
-	for i := range overlaid {
-		runtimeProvider, found := syncProviderByName(runtimeStatus, overlaid[i].Provider)
-		if !found || !syncProviderHasDataReadyEvidence(runtimeProvider) || !cloudIntegrationListStatusUpgradeable(overlaid[i].Status) {
-			continue
-		}
-		overlaid[i].Status = "ready"
-		if strings.TrimSpace(overlaid[i].LastEventAt) == "" && hasNonEmptyString(runtimeProvider.WatermarkTs) {
-			overlaid[i].LastEventAt = strings.TrimSpace(*runtimeProvider.WatermarkTs)
-		}
-	}
-	return overlaid
-}
-
-func runtimeSyncStatusForIntegrationList(record workspaceRecord) (syncStatusResponse, bool) {
-	workspaceID := strings.TrimSpace(record.ID)
-	if workspaceID == "" {
-		workspaceID = strings.TrimSpace(record.RelayWorkspaceID)
-	}
-	scopes := normalizedScopeSet(record.Scopes)
-	if len(scopes) == 0 {
-		scopes = append([]string(nil), defaultJoinScopes...)
-	}
-	bundle, _, err := loadDelegatedCredentialsForRequest("", workspaceID, scopes)
-	if err != nil {
-		return syncStatusResponse{}, false
-	}
-	client, err := newAPIClient(bundle.ServerURL(), bundle.BearerToken())
-	if err != nil {
-		return syncStatusResponse{}, false
-	}
-	runtimeWorkspaceID := strings.TrimSpace(bundle.Workspace())
-	if runtimeWorkspaceID == "" {
-		runtimeWorkspaceID = workspaceID
-	}
-	status, err := fetchWorkspaceSyncStatus(client, runtimeWorkspaceID)
-	if err != nil {
-		return syncStatusResponse{}, false
-	}
-	return status, true
-}
-
-func syncProviderHasDataReadyEvidence(status syncProviderStatus) bool {
-	if status.Ready {
-		return true
-	}
-	switch strings.TrimSpace(strings.ToLower(status.Status)) {
-	case "ready":
-		return true
-	case "healthy":
-		return hasNonEmptyString(status.Cursor) || hasNonEmptyString(status.WatermarkTs)
-	default:
-		return false
-	}
-}
-
-func cloudIntegrationListStatusUpgradeable(status string) bool {
-	switch strings.TrimSpace(strings.ToLower(status)) {
-	case "connected", "oauth_connected", "sync_queued", "syncing":
-		return true
-	default:
-		return false
-	}
 }
 
 func runIntegrationDisconnect(args []string, stdin io.Reader, stdout io.Writer) error {
@@ -3192,10 +3039,8 @@ func runWritebackFileMutation(mode writebackCommandMode, args []string, stdout i
 	if mode != writebackCommandPush && !isCanonicalWritebackTargetPath(resolved.RemotePath) {
 		return fmt.Errorf("writeback %s requires a canonical provider record path, got %s", mode, resolved.RemotePath)
 	}
-	joinScopes, requiredRelayfileScopes, err := writebackPushScopes(resolved.RemotePath)
-	if err != nil {
-		return err
-	}
+	joinScopes := writebackPushJoinScopes(resolved.RemotePath)
+	requiredRelayfileScopes := writebackPushRequiredRelayfileScopes(resolved.RemotePath)
 	if strings.TrimSpace(*tokenOverride) == "" {
 		if err := ensureWritebackDelegatedCredentials(resolved.WorkspaceID, joinScopes, requiredRelayfileScopes); err != nil {
 			return err
@@ -3639,26 +3484,27 @@ func hashBytes(raw []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func writebackPushScopes(remotePath string) ([]string, []string, error) {
-	provider, ok := writebackPushProvider(remotePath)
-	if !ok {
-		return nil, nil, fmt.Errorf("writeback requires a provider-scoped remote path, got %s", normalizeWritebackFailurePath(remotePath))
+func writebackPushJoinScopes(remotePath string) []string {
+	// ops:read is requested alongside fs:write because a successful /fs/bulk
+	// returns an opID that this command then polls at
+	// GET /v1/workspaces/{id}/ops/{opId} (server.go requires ops:read). Without
+	// it the write succeeds but the status poll is unauthorized; the push then
+	// leaves the op pending+needsAttention rather than failing it.
+	parts := strings.Split(strings.Trim(normalizeWritebackFailurePath(remotePath), "/"), "/")
+	if len(parts) == 0 || strings.TrimSpace(parts[0]) == "" {
+		return []string{"fs:write:/**", "ops:read"}
 	}
-	return []string{fmt.Sprintf("fs:write:/%s/**", provider), "ops:read"},
-		[]string{fmt.Sprintf("relayfile:fs:write:/%s/**", provider)},
-		nil
+	provider := strings.TrimSpace(parts[0])
+	return []string{fmt.Sprintf("fs:write:/%s/**", provider), "ops:read"}
 }
 
-func writebackPushProvider(remotePath string) (string, bool) {
+func writebackPushRequiredRelayfileScopes(remotePath string) []string {
 	parts := strings.Split(strings.Trim(normalizeWritebackFailurePath(remotePath), "/"), "/")
-	if len(parts) < 2 {
-		return "", false
+	if len(parts) == 0 || strings.TrimSpace(parts[0]) == "" {
+		return []string{"relayfile:fs:write:/**"}
 	}
-	provider := strings.ToLower(strings.TrimSpace(parts[0]))
-	if err := validateLocalProviderID(provider); err != nil {
-		return "", false
-	}
-	return provider, true
+	provider := strings.TrimSpace(parts[0])
+	return []string{fmt.Sprintf("relayfile:fs:write:/%s/**", provider)}
 }
 
 func writebackPushContentIdentity(workspaceID, remotePath, contentHash string) *contentIdentity {
@@ -5182,7 +5028,6 @@ func runMount(args []string) error {
 	requestedWorkspace := ""
 	delegatedCredsPath := resolveDelegatedCredentialsPath(*credsFile)
 	usesDelegatedWorkspace := false
-	initialCredExpiresAt := ""
 	if fs.NArg() > 0 {
 		requestedWorkspace = strings.TrimSpace(fs.Arg(0))
 	}
@@ -5205,7 +5050,6 @@ func runMount(args []string) error {
 			)
 		}
 		tokenValue = bundle.BearerToken()
-		initialCredExpiresAt = bundle.BearerExpiresAt()
 		*server = strings.TrimRight(bundle.ServerURL(), "/")
 		usesDelegatedWorkspace = true
 	}
@@ -5400,9 +5244,6 @@ func runMount(args []string) error {
 	})
 	if err != nil {
 		return fmt.Errorf("failed to initialize mount syncer: %w", err)
-	}
-	if initialCredExpiresAt != "" {
-		syncer.SetCredentialExpiry(initialCredExpiresAt)
 	}
 	if _, err := mountsync.StartDiagnostics(rootCtx, strings.TrimSpace(*pprofAddr), *memlogInterval, log.Default()); err != nil {
 		return fmt.Errorf("start diagnostics: %w", err)
@@ -5724,6 +5565,673 @@ func isAPIAuthError(err error) bool {
 	}
 	var httpErr *apiError
 	return errors.As(err, &httpErr) && (httpErr.StatusCode == http.StatusUnauthorized || httpErr.StatusCode == http.StatusForbidden)
+}
+
+// listenEvent is the wire format for events delivered over /fs/ws.
+type listenEvent struct {
+	EventID       string `json:"eventId"`
+	Type          string `json:"type"`
+	Path          string `json:"path"`
+	Revision      string `json:"revision"`
+	ContentHash   string `json:"contentHash,omitempty"`
+	Origin        string `json:"origin,omitempty"`
+	Provider      string `json:"provider,omitempty"`
+	CorrelationID string `json:"correlationId,omitempty"`
+	Timestamp     string `json:"timestamp,omitempty"`
+}
+
+func printListenUsage(w io.Writer) {
+	fmt.Fprintln(w, `relayfile listen streams live file events from a workspace and optionally
+runs a command for each matching event.
+
+Usage:
+  relayfile listen [WORKSPACE] [--provider PROVIDER] [--path GLOB] [--event TYPE] [--run CMD] [--format text|json]
+
+Flags:
+  --provider PROVIDER  filter to a specific integration (linear, notion, hubspot, …)
+                       shorthand for --path /PROVIDER/**
+  --path GLOB          glob path filter. The workspace tree has alias views that let
+                       you filter far below the provider level — by status, label,
+                       project, channel, and more. See examples below.
+  --event TYPE         filter by event type: file.created, file.updated, file.deleted
+                       (default: all types)
+  --run CMD            shell command to execute per matching event.
+                       Use {{path}}, {{type}}, {{provider}}, {{revision}}, and
+                       {{event}} (full JSON) as placeholders.
+  --format text|json   output format when --run is not set (default: text)
+
+Examples:
+
+  # Stream all events from the default workspace
+  relayfile listen
+
+  # --- Linear ---
+
+  # New issue filed anywhere in Linear
+  relayfile listen --provider linear --event file.created \
+    --run "claude --print 'New Linear issue at {{path}}. Suggest a priority and owner.'"
+
+  # New issue filed, but only when it lands in the Triage state
+  relayfile listen --path "/linear/issues/by-state/triage/**" --event file.created \
+    --run "claude --print 'Untriaged issue at {{path}}. Assign priority, owner, and cycle.'"
+
+  # Any In Progress issue updated (catch status changes, description edits, etc.)
+  relayfile listen --path "/linear/issues/by-state/in-progress/**" --event file.updated \
+    --run "claude --print 'In-progress issue changed at {{path}}. Check for blockers.'"
+
+  # --- GitHub ---
+
+  # New PR opened on any repo in the org
+  relayfile listen --path "/github/repos/**/pulls/**" --event file.created \
+    --run "claude --print 'New PR at {{path}}. Write a one-paragraph review summary.'"
+
+  # New PR labeled needs-review on a specific repo
+  relayfile listen --path "/github/repos/acme/api/pulls/by-label/needs-review/**" --event file.created \
+    --run "claude --print 'PR needs review at {{path}}. Summarise the diff and flag risks.'"
+
+  # --- Notion ---
+
+  # Any page edited across the whole workspace
+  relayfile listen --provider notion --event file.updated \
+    --run "claude --print 'Notion page changed at {{path}}. Summarise the update.'"
+
+  # Edits only inside a specific Notion database
+  relayfile listen --path "/notion/databases/roadmap/**" --event file.updated \
+    --run "claude --print 'Roadmap item changed at {{path}}. Send a Slack digest.'"
+
+  # --- Slack ---
+
+  # New message in a specific channel
+  relayfile listen --path "/slack/channels/incidents/**" --event file.created \
+    --run "claude --print 'New incident message at {{path}}. Draft a status-page update.'"
+
+  # --- HubSpot ---
+
+  # New contact created
+  relayfile listen --path "/hubspot/contacts/**" --event file.created \
+    --run "claude --print 'New HubSpot contact at {{path}}. Draft a personalised intro email.'"
+
+  # Deal moved to a new stage
+  relayfile listen --path "/hubspot/deals/**" --event file.updated \
+    --run "claude --print 'Deal updated at {{path}}. Draft a follow-up for the new stage.'"
+
+  # --- Asana ---
+
+  # New task in a specific project
+  relayfile listen --path "/asana/projects/q3-launch/**" --event file.created \
+    --run "claude --print 'New task in Q3 launch at {{path}}. Break it into subtasks.'"
+
+  # --- Shortcut ---
+
+  # New story under a specific epic
+  relayfile listen --path "/shortcut/stories/by-epic/payments/**" --event file.created \
+    --run "claude --print 'New payments story at {{path}}. Suggest an implementation approach.'"
+
+  # --- Granola / Fathom ---
+
+  # New meeting notes → extract action items
+  relayfile listen --provider granola --event file.created \
+    --run "claude --print 'New meeting notes at {{path}}. Extract action items and owners.'"
+
+  # New Fathom call recording → follow-up email
+  relayfile listen --provider fathom --event file.created \
+    --run "claude --print 'New call at {{path}}. Write a follow-up email with key decisions.'"
+
+  # --- Scripting ---
+
+  # Print raw JSON events for piping
+  relayfile listen --provider linear --format json | jq '.path'
+
+The workspace tree has alias views (by-state/, by-label/, by-epic/, by-name/, by-id/, …)
+for every provider. Run 'relayfile tree / --depth 3' to explore what's available.
+
+Want this running headlessly for your whole team — turning issues into reviewed PRs automatically?
+See https://github.com/AgentWorkforce/factory`)
+}
+
+// runDev is the zero-friction entry point for reactive local agents.
+// It checks credentials and integration status, prints a status header,
+// then hands off to the listen loop.
+func runDev(args []string, stdin io.Reader, stdout io.Writer) error {
+	// Peek at flags without consuming them — runListen re-parses the same slice.
+	peek := flag.NewFlagSet("dev-peek", flag.ContinueOnError)
+	peek.SetOutput(io.Discard)
+	serverPeek := peek.String("server", "", "")
+	tokenPeek := peek.String("token", "", "")
+	providerPeek := peek.String("provider", "", "")
+	_ = peek.Parse(normalizeFlagArgs(args, map[string]bool{
+		"server": true, "token": true, "provider": true,
+		"path": true, "event": true, "run": true, "format": true,
+		"background": false, "daemonized": false,
+	}))
+
+	commandClient, err := prepareWorkspaceCommandClient("", *serverPeek, *tokenPeek, defaultInspectScopes)
+	if err != nil {
+		provider := strings.TrimSpace(*providerPeek)
+		if provider == "" {
+			provider = "linear"
+		}
+		fmt.Fprintln(stdout, "Not connected to Agent Relay. Get started with:")
+		fmt.Fprintf(stdout, "\n  relayfile setup --provider %s\n\n", provider)
+		fmt.Fprintln(stdout, "Then re-run: relayfile dev "+strings.Join(args, " "))
+		return err
+	}
+
+	fmt.Fprintf(stdout, "Workspace: %s\n", commandClient.workspaceID)
+	if p := strings.TrimSpace(*providerPeek); p != "" {
+		fmt.Fprintf(stdout, "Provider filter: %s\n", p)
+		fmt.Fprintf(stdout, "Tip: run 'relayfile integration list' to see connected providers.\n")
+	}
+	fmt.Fprintln(stdout)
+
+	return runListen(args, stdout)
+}
+
+func runListen(args []string, stdout io.Writer) error {
+	fs := flag.NewFlagSet("listen", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	server := fs.String("server", "", "relayfile server URL override")
+	token := fs.String("token", "", "relayfile token override")
+	providerFlag := fs.String("provider", "", "filter to a specific provider (e.g. linear, notion)")
+	pathFlag := fs.String("path", "", "glob path filter (e.g. /linear/issues/**)")
+	eventFlag := fs.String("event", "", "event type filter: file.created, file.updated, file.deleted")
+	runFlag := fs.String("run", "", "shell command per event; supports {{path}}, {{type}}, {{provider}}, {{revision}}, {{event}}")
+	formatFlag := fs.String("format", "text", "output format when --run is not set: text or json")
+	background := fs.Bool("background", false, "run in background; logs to ~/.relayfile/listen.log")
+	daemonized := fs.Bool("daemonized", false, "internal flag used by relayfile listen --background")
+	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
+		"server":     true,
+		"token":      true,
+		"provider":   true,
+		"path":       true,
+		"event":      true,
+		"run":        true,
+		"format":     true,
+		"background": false,
+		"daemonized": false,
+	})); err != nil {
+		return err
+	}
+	var workspaceValue string
+	if fs.NArg() > 0 {
+		workspaceValue = strings.TrimSpace(fs.Arg(0))
+	}
+
+	if *background && !*daemonized {
+		logFile := listenLogFile()
+		pidFile := listenPIDFile()
+		return spawnBackgroundListenProcess(args, pidFile, logFile)
+	}
+	if *daemonized {
+		if err := rotateLogFile(listenLogFile()); err != nil {
+			return err
+		}
+	}
+
+	commandClient, err := prepareWorkspaceCommandClient(workspaceValue, *server, *token, defaultInspectScopes)
+	if err != nil {
+		return err
+	}
+
+	// Build WebSocket URL from the HTTP base URL.
+	// relayfile listen connects directly to Agent Relay Cloud — no local
+	// daemon or FUSE mount is required.
+	base, err := url.Parse(strings.TrimRight(commandClient.client.baseURL, "/"))
+	if err != nil {
+		return fmt.Errorf("invalid server URL: %w", err)
+	}
+	switch base.Scheme {
+	case "http":
+		base.Scheme = "ws"
+	case "https":
+		base.Scheme = "wss"
+	}
+	base.Path = fmt.Sprintf("/v1/workspaces/%s/fs/ws", url.PathEscape(commandClient.workspaceID))
+
+	pathFilter := strings.TrimSpace(*pathFlag)
+	if pathFilter == "" && strings.TrimSpace(*providerFlag) != "" {
+		pathFilter = fmt.Sprintf("/%s/**", strings.TrimSpace(*providerFlag))
+	}
+	q := url.Values{}
+	q.Set("from", "now")
+	if pathFilter != "" {
+		q.Set("path", pathFilter)
+	}
+	// Token in query param for WS upgrade (server does not yet support Authorization on upgrade).
+	q.Set("token", commandClient.client.token)
+	base.RawQuery = q.Encode()
+
+	rootCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	conn, _, err := websocket.Dial(rootCtx, base.String(), &websocket.DialOptions{
+		HTTPHeader: http.Header{
+			"Authorization": []string{"Bearer " + commandClient.client.token},
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("connect to event stream: %w", err)
+	}
+	defer conn.Close(websocket.StatusNormalClosure, "")
+
+	typeFilter := strings.TrimSpace(*eventFlag)
+	runCmd := strings.TrimSpace(*runFlag)
+	format := strings.TrimSpace(*formatFlag)
+
+	label := "all events"
+	if pathFilter != "" {
+		label = pathFilter
+	}
+	if typeFilter != "" {
+		label += " (" + typeFilter + ")"
+	}
+	if !*daemonized {
+		fmt.Fprintf(stdout, "Listening on %s — Ctrl+C to stop\n", label)
+		if runCmd == "" && format == "text" {
+			fmt.Fprintln(stdout, "Tip: pass --run to execute a command per event.")
+			fmt.Fprintln(stdout, "     See 'relayfile help listen' for examples with Linear, Notion, HubSpot, and more.")
+			fmt.Fprintln(stdout, "     Add --background to detach; 'relayfile supervisor install --listen' to survive reboots.")
+		}
+		fmt.Fprintln(stdout)
+	}
+
+	for {
+		var raw json.RawMessage
+		if err := wsjson.Read(rootCtx, conn, &raw); err != nil {
+			if websocket.CloseStatus(err) == websocket.StatusNormalClosure ||
+				websocket.CloseStatus(err) == websocket.StatusGoingAway ||
+				errors.Is(err, context.Canceled) {
+				return nil
+			}
+			return fmt.Errorf("event stream error: %w", err)
+		}
+
+		var evt listenEvent
+		if err := json.Unmarshal(raw, &evt); err != nil || evt.Type == "" || evt.Type == "pong" {
+			continue
+		}
+		if typeFilter != "" && evt.Type != typeFilter {
+			continue
+		}
+
+		if runCmd != "" {
+			expanded := listenExpandTemplate(runCmd, evt, raw)
+			cmd := exec.CommandContext(rootCtx, "sh", "-c", expanded)
+			cmd.Stdout = stdout
+			cmd.Stderr = os.Stderr
+			if err := cmd.Run(); err != nil && !errors.Is(err, context.Canceled) {
+				fmt.Fprintf(os.Stderr, "run error for %s: %v\n", evt.Path, err)
+			}
+			continue
+		}
+
+		if format == "json" {
+			fmt.Fprintf(stdout, "%s\n", string(raw))
+			continue
+		}
+
+		// Default text output.
+		ts := strings.TrimSpace(evt.Timestamp)
+		if ts == "" {
+			ts = time.Now().UTC().Format(time.RFC3339)
+		}
+		provider := strings.TrimSpace(evt.Provider)
+		if provider == "" {
+			// Infer provider from the leading path segment.
+			seg := strings.TrimPrefix(evt.Path, "/")
+			if i := strings.IndexByte(seg, '/'); i > 0 {
+				provider = seg[:i]
+			}
+		}
+		if provider != "" {
+			fmt.Fprintf(stdout, "%-20s  %-30s  %s  [%s]\n", evt.Type, evt.Path, ts, provider)
+		} else {
+			fmt.Fprintf(stdout, "%-20s  %-30s  %s\n", evt.Type, evt.Path, ts)
+		}
+	}
+}
+
+func listenPIDFile() string {
+	return filepath.Join(configDir(), "listen.pid")
+}
+
+func listenLogFile() string {
+	return filepath.Join(configDir(), "listen.log")
+}
+
+func spawnBackgroundListenProcess(originalArgs []string, pidFile, logFile string) error {
+	if err := rotateLogFile(logFile); err != nil {
+		return err
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	filtered := make([]string, 0, len(originalArgs))
+	for _, arg := range originalArgs {
+		if arg == "--background" || arg == "-background" ||
+			strings.HasPrefix(arg, "--background=") || strings.HasPrefix(arg, "-background=") {
+			continue
+		}
+		filtered = append(filtered, arg)
+	}
+	childArgs := append([]string{"listen"}, filtered...)
+	childArgs = append(childArgs, "--daemonized", "--pid-file", pidFile)
+	logHandle, err := os.OpenFile(logFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	defer logHandle.Close()
+	cmd := exec.Command(executable, childArgs...)
+	cmd.Stdout = logHandle
+	cmd.Stderr = logHandle
+	if err := configureDetachedProcess(cmd); err != nil {
+		return err
+	}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	if err := cmd.Process.Release(); err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stdout, "Listen started in background. Logs: %s\n", logFile)
+	return nil
+}
+
+func listenExpandTemplate(tmpl string, evt listenEvent, raw json.RawMessage) string {
+	return strings.NewReplacer(
+		"{{path}}", evt.Path,
+		"{{type}}", evt.Type,
+		"{{provider}}", evt.Provider,
+		"{{revision}}", evt.Revision,
+		"{{event}}", string(raw),
+	).Replace(tmpl)
+}
+
+func printSupervisorUsage(w io.Writer) {
+	fmt.Fprintln(w, `relayfile supervisor manages the listen daemon as a system service.
+
+On Linux  it writes a systemd user unit (~/.config/systemd/user/relayfile-listen.service).
+On macOS  it writes a launchd agent  (~/Library/LaunchAgents/com.relayfile.listen.plist).
+
+Usage:
+  relayfile supervisor install [LISTEN_FLAGS...]   install and start the service
+  relayfile supervisor uninstall                   stop, disable, and remove the service
+  relayfile supervisor status                      show service status
+
+Examples:
+
+  # Install: react to every new Linear triage issue
+  relayfile supervisor install \
+    --path "/linear/issues/by-state/triage/**" --event file.created \
+    --run "claude --print 'New triage issue at {{path}}. Assign it.'"
+
+  # Install: all Linear events, background agent
+  relayfile supervisor install --provider linear --run "my-agent --event '{{event}}'"
+
+  relayfile supervisor status
+  relayfile supervisor uninstall
+
+All flags accepted by 'relayfile listen' are accepted here and are embedded
+verbatim into the unit file. The service restarts automatically on failure.`)
+}
+
+const (
+	supervisorServiceName  = "relayfile-listen"
+	supervisorLaunchdLabel = "com.relayfile.listen"
+)
+
+func supervisorSystemdUnitPath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".config", "systemd", "user", supervisorServiceName+".service"), nil
+}
+
+func supervisorLaunchdPlistPath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, "Library", "LaunchAgents", supervisorLaunchdLabel+".plist"), nil
+}
+
+func runSupervisor(args []string, stdout io.Writer) error {
+	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" {
+		printSupervisorUsage(stdout)
+		return nil
+	}
+	sub := args[0]
+	rest := args[1:]
+	switch sub {
+	case "install":
+		return supervisorInstall(rest, stdout)
+	case "uninstall", "remove":
+		return supervisorUninstall(stdout)
+	case "status":
+		return supervisorStatus(stdout)
+	default:
+		printSupervisorUsage(stdout)
+		return fmt.Errorf("unknown supervisor subcommand %q", sub)
+	}
+}
+
+func supervisorInstall(listenArgs []string, stdout io.Writer) error {
+	executable, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("locate relayfile binary: %w", err)
+	}
+	logFile := listenLogFile()
+
+	switch runtime.GOOS {
+	case "linux":
+		return supervisorInstallSystemd(executable, listenArgs, logFile, stdout)
+	case "darwin":
+		return supervisorInstallLaunchd(executable, listenArgs, logFile, stdout)
+	default:
+		return fmt.Errorf("supervisor install is not supported on %s; run 'relayfile listen --background' instead", runtime.GOOS)
+	}
+}
+
+func supervisorInstallSystemd(executable string, listenArgs []string, logFile string, stdout io.Writer) error {
+	unitPath, err := supervisorSystemdUnitPath()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(unitPath), 0o755); err != nil {
+		return fmt.Errorf("create systemd user unit dir: %w", err)
+	}
+
+	// Build ExecStart line: quote args that contain spaces or special chars.
+	execArgs := []string{executable, "listen"}
+	execArgs = append(execArgs, listenArgs...)
+	execStart := shelljoin(execArgs)
+
+	unit := fmt.Sprintf(`[Unit]
+Description=Relayfile listen — reactive agent event stream
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%s
+Restart=on-failure
+RestartSec=5s
+StandardOutput=append:%s
+StandardError=append:%s
+
+[Install]
+WantedBy=default.target
+`, execStart, logFile, logFile)
+
+	if err := os.WriteFile(unitPath, []byte(unit), 0o644); err != nil {
+		return fmt.Errorf("write unit file: %w", err)
+	}
+	fmt.Fprintf(stdout, "Wrote %s\n", unitPath)
+
+	for _, args := range [][]string{
+		{"--user", "daemon-reload"},
+		{"--user", "enable", "--now", supervisorServiceName},
+	} {
+		cmd := exec.Command("systemctl", args...)
+		cmd.Stdout = stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("systemctl %s: %w", strings.Join(args, " "), err)
+		}
+	}
+	fmt.Fprintf(stdout, "\nService started. Logs: %s\n", logFile)
+	fmt.Fprintf(stdout, "Status: systemctl --user status %s\n", supervisorServiceName)
+	return nil
+}
+
+func supervisorInstallLaunchd(executable string, listenArgs []string, logFile string, stdout io.Writer) error {
+	plistPath, err := supervisorLaunchdPlistPath()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(plistPath), 0o755); err != nil {
+		return fmt.Errorf("create LaunchAgents dir: %w", err)
+	}
+
+	// Build <array> of <string> elements for ProgramArguments.
+	programArgs := append([]string{executable, "listen"}, listenArgs...)
+	var argElems strings.Builder
+	for _, a := range programArgs {
+		argElems.WriteString("\t\t<string>")
+		argElems.WriteString(plistEscapeXML(a))
+		argElems.WriteString("</string>\n")
+	}
+
+	plist := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>%s</string>
+	<key>ProgramArguments</key>
+	<array>
+%s	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>StandardOutPath</key>
+	<string>%s</string>
+	<key>StandardErrorPath</key>
+	<string>%s</string>
+</dict>
+</plist>
+`, supervisorLaunchdLabel, argElems.String(), plistEscapeXML(logFile), plistEscapeXML(logFile))
+
+	if err := os.WriteFile(plistPath, []byte(plist), 0o644); err != nil {
+		return fmt.Errorf("write plist: %w", err)
+	}
+	fmt.Fprintf(stdout, "Wrote %s\n", plistPath)
+
+	// Unload first in case an old version is loaded.
+	unload := exec.Command("launchctl", "unload", "-w", plistPath)
+	_ = unload.Run()
+
+	load := exec.Command("launchctl", "load", "-w", plistPath)
+	load.Stdout = stdout
+	load.Stderr = os.Stderr
+	if err := load.Run(); err != nil {
+		return fmt.Errorf("launchctl load: %w", err)
+	}
+	fmt.Fprintf(stdout, "\nService started. Logs: %s\n", logFile)
+	fmt.Fprintf(stdout, "Status: launchctl list %s\n", supervisorLaunchdLabel)
+	return nil
+}
+
+func supervisorUninstall(stdout io.Writer) error {
+	switch runtime.GOOS {
+	case "linux":
+		return supervisorUninstallSystemd(stdout)
+	case "darwin":
+		return supervisorUninstallLaunchd(stdout)
+	default:
+		return fmt.Errorf("supervisor uninstall is not supported on %s", runtime.GOOS)
+	}
+}
+
+func supervisorUninstallSystemd(stdout io.Writer) error {
+	for _, args := range [][]string{
+		{"--user", "disable", "--now", supervisorServiceName},
+	} {
+		cmd := exec.Command("systemctl", args...)
+		cmd.Stdout = stdout
+		cmd.Stderr = os.Stderr
+		_ = cmd.Run() // best-effort; unit may not be loaded
+	}
+	unitPath, err := supervisorSystemdUnitPath()
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(unitPath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove unit file: %w", err)
+	}
+	exec.Command("systemctl", "--user", "daemon-reload").Run() //nolint
+	fmt.Fprintln(stdout, "Service stopped and removed.")
+	return nil
+}
+
+func supervisorUninstallLaunchd(stdout io.Writer) error {
+	plistPath, err := supervisorLaunchdPlistPath()
+	if err != nil {
+		return err
+	}
+	unload := exec.Command("launchctl", "unload", "-w", plistPath)
+	unload.Stdout = stdout
+	unload.Stderr = os.Stderr
+	_ = unload.Run() // best-effort
+	if err := os.Remove(plistPath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove plist: %w", err)
+	}
+	fmt.Fprintln(stdout, "Service stopped and removed.")
+	return nil
+}
+
+func supervisorStatus(stdout io.Writer) error {
+	switch runtime.GOOS {
+	case "linux":
+		cmd := exec.Command("systemctl", "--user", "status", supervisorServiceName)
+		cmd.Stdout = stdout
+		cmd.Stderr = os.Stderr
+		_ = cmd.Run()
+	case "darwin":
+		cmd := exec.Command("launchctl", "list", supervisorLaunchdLabel)
+		cmd.Stdout = stdout
+		cmd.Stderr = os.Stderr
+		_ = cmd.Run()
+	default:
+		fmt.Fprintf(stdout, "supervisor status is not supported on %s\n", runtime.GOOS)
+	}
+	return nil
+}
+
+// shelljoin builds a shell-safe ExecStart string by quoting arguments that
+// contain spaces or shell metacharacters.
+func shelljoin(args []string) string {
+	quoted := make([]string, len(args))
+	for i, a := range args {
+		if strings.ContainsAny(a, " \t\"'\\$`{}[]|&;<>()#~!") {
+			a = "\"" + strings.ReplaceAll(a, "\"", "\\\"") + "\""
+		}
+		quoted[i] = a
+	}
+	return strings.Join(quoted, " ")
+}
+
+// plistEscapeXML escapes the five XML entities that can appear in plist string values.
+func plistEscapeXML(s string) string {
+	s = strings.ReplaceAll(s, "&", "&amp;")
+	s = strings.ReplaceAll(s, "<", "&lt;")
+	s = strings.ReplaceAll(s, ">", "&gt;")
+	s = strings.ReplaceAll(s, "\"", "&quot;")
+	s = strings.ReplaceAll(s, "'", "&apos;")
+	return s
 }
 
 func runTree(args []string, stdout io.Writer) error {
@@ -6327,288 +6835,6 @@ func runRestart(args []string, stdout io.Writer) error {
 	return runMount(mountArgs)
 }
 
-// runSupervisor generates and installs/uninstalls platform-specific process
-// supervisor service files (launchd on macOS, systemd on Linux) so that
-// `relayfile start --background` is replaced by a supervised, auto-restarting
-// service. A supervised mount survives kills, reboots, and—combined with the
-// degraded-mode credential refresh loop—stale delegated credentials.
-//
-// Usage:
-//
-//	relayfile supervisor install [WORKSPACE] [--interval 30s]
-//	relayfile supervisor uninstall [WORKSPACE]
-//	relayfile supervisor status [WORKSPACE]
-func runSupervisor(args []string, stdout io.Writer) error {
-	if len(args) == 0 {
-		fmt.Fprintln(stdout, "Usage: relayfile supervisor <install|uninstall|status> [WORKSPACE]")
-		return nil
-	}
-	subcommand := args[0]
-	switch subcommand {
-	case "install":
-		return runSupervisorInstall(args[1:], stdout)
-	case "uninstall":
-		return runSupervisorUninstall(args[1:], stdout)
-	case "status":
-		return runSupervisorStatus(args[1:], stdout)
-	default:
-		return fmt.Errorf("unknown supervisor subcommand %q; use install, uninstall, or status", subcommand)
-	}
-}
-
-func runSupervisorInstall(args []string, stdout io.Writer) error {
-	fs := flag.NewFlagSet("supervisor install", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	intervalFlag := fs.Duration("interval", defaultMountInterval, "sync interval")
-	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
-		"interval": true,
-	})); err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			fmt.Fprintln(stdout, "Usage: relayfile supervisor install [WORKSPACE] [--interval 30s]")
-			return nil
-		}
-		return err
-	}
-	record, err := resolveWorkspaceRecord(firstArg(fs))
-	if err != nil {
-		return err
-	}
-	localDir := strings.TrimSpace(record.LocalDir)
-	if localDir == "" {
-		return fmt.Errorf("workspace %s has no recorded local mirror directory; run relayfile start %s <LOCAL_DIR> first", record.Name, record.Name)
-	}
-	exe, err := os.Executable()
-	if err != nil {
-		return fmt.Errorf("resolve relayfile executable path: %w", err)
-	}
-	exe, err = filepath.EvalSymlinks(exe)
-	if err != nil {
-		return fmt.Errorf("resolve relayfile executable symlinks: %w", err)
-	}
-	switch runtime.GOOS {
-	case "darwin":
-		return supervisorInstallLaunchd(record, localDir, exe, *intervalFlag, stdout)
-	case "linux":
-		return supervisorInstallSystemd(record, localDir, exe, *intervalFlag, stdout)
-	default:
-		return fmt.Errorf("supervisor install is not supported on %s; start the mount with --background and manage it with your OS process manager", runtime.GOOS)
-	}
-}
-
-func runSupervisorUninstall(args []string, stdout io.Writer) error {
-	fs := flag.NewFlagSet("supervisor uninstall", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{})); err != nil {
-		return err
-	}
-	record, err := resolveWorkspaceRecord(firstArg(fs))
-	if err != nil {
-		return err
-	}
-	switch runtime.GOOS {
-	case "darwin":
-		return supervisorUninstallLaunchd(record, stdout)
-	case "linux":
-		return supervisorUninstallSystemd(record, stdout)
-	default:
-		return fmt.Errorf("supervisor uninstall is not supported on %s", runtime.GOOS)
-	}
-}
-
-func runSupervisorStatus(args []string, stdout io.Writer) error {
-	fs := flag.NewFlagSet("supervisor status", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{})); err != nil {
-		return err
-	}
-	record, err := resolveWorkspaceRecord(firstArg(fs))
-	if err != nil {
-		return err
-	}
-	switch runtime.GOOS {
-	case "darwin":
-		return supervisorStatusLaunchd(record, stdout)
-	case "linux":
-		return supervisorStatusSystemd(record, stdout)
-	default:
-		return fmt.Errorf("supervisor status is not supported on %s", runtime.GOOS)
-	}
-}
-
-func supervisorLabelForWorkspace(workspaceID string) string {
-	sum := sha256.Sum256([]byte(strings.TrimSpace(workspaceID)))
-	return "com.relayfile.mount." + hex.EncodeToString(sum[:])[:12]
-}
-
-func supervisorPlistPath(workspaceID string) string {
-	label := supervisorLabelForWorkspace(workspaceID)
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, "Library", "LaunchAgents", label+".plist")
-}
-
-func supervisorInstallLaunchd(record workspaceRecord, localDir, exe string, interval time.Duration, stdout io.Writer) error {
-	label := supervisorLabelForWorkspace(record.ID)
-	plistPath := supervisorPlistPath(record.ID)
-	intervalSecs := int(interval.Seconds())
-	if intervalSecs < 5 {
-		intervalSecs = 5
-	}
-	logDir := filepath.Join(configDir(), "logs")
-	if err := os.MkdirAll(logDir, 0o755); err != nil {
-		return fmt.Errorf("create log dir: %w", err)
-	}
-	stdoutLog := filepath.Join(logDir, "mount-"+record.ID+".log")
-	stderrLog := filepath.Join(logDir, "mount-"+record.ID+"-err.log")
-	plist := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-	<key>Label</key>
-	<string>%s</string>
-	<key>ProgramArguments</key>
-	<array>
-		<string>%s</string>
-		<string>mount</string>
-		<string>%s</string>
-		<string>%s</string>
-		<string>--interval</string>
-		<string>%ds</string>
-	</array>
-	<key>WorkingDirectory</key>
-	<string>%s</string>
-	<key>KeepAlive</key>
-	<true/>
-	<key>RunAtLoad</key>
-	<true/>
-	<key>StandardOutPath</key>
-	<string>%s</string>
-	<key>StandardErrorPath</key>
-	<string>%s</string>
-	<key>ThrottleInterval</key>
-	<integer>10</integer>
-</dict>
-</plist>
-`, label, exe, record.ID, localDir, intervalSecs, localDir, stdoutLog, stderrLog)
-
-	if err := os.MkdirAll(filepath.Dir(plistPath), 0o755); err != nil {
-		return fmt.Errorf("create LaunchAgents directory: %w", err)
-	}
-	if err := os.WriteFile(plistPath, []byte(plist), 0o644); err != nil {
-		return fmt.Errorf("write launchd plist: %w", err)
-	}
-	// Load the service (launchctl load -w <plist>).
-	if err := supervisorRunLaunchctl("load", "-w", plistPath); err != nil {
-		fmt.Fprintf(stdout, "Warning: launchctl load failed (%v); plist written to %s — run 'launchctl load -w %s' manually\n", err, plistPath, plistPath)
-		return nil
-	}
-	fmt.Fprintf(stdout, "Supervisor installed: %s\nMount will start automatically and restart on exit.\nLogs: %s\nTo uninstall: relayfile supervisor uninstall %s\n", label, stdoutLog, record.Name)
-	return nil
-}
-
-func supervisorUninstallLaunchd(record workspaceRecord, stdout io.Writer) error {
-	label := supervisorLabelForWorkspace(record.ID)
-	plistPath := supervisorPlistPath(record.ID)
-	// Attempt unload first (stop + disable).
-	_ = supervisorRunLaunchctl("unload", "-w", plistPath)
-	if err := os.Remove(plistPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("remove launchd plist %s: %w", plistPath, err)
-	}
-	fmt.Fprintf(stdout, "Supervisor removed: %s\n", label)
-	return nil
-}
-
-func supervisorStatusLaunchd(record workspaceRecord, stdout io.Writer) error {
-	label := supervisorLabelForWorkspace(record.ID)
-	plistPath := supervisorPlistPath(record.ID)
-	if _, err := os.Stat(plistPath); errors.Is(err, os.ErrNotExist) {
-		fmt.Fprintf(stdout, "Supervisor not installed for workspace %s (plist not found at %s)\n", record.Name, plistPath)
-		return nil
-	}
-	fmt.Fprintf(stdout, "Supervisor installed: %s\nPlist: %s\nRun 'launchctl list %s' for live status.\n", label, plistPath, label)
-	return nil
-}
-
-func supervisorRunLaunchctl(args ...string) error {
-	cmd := exec.Command("launchctl", args...)
-	cmd.Stdout = io.Discard
-	cmd.Stderr = io.Discard
-	return cmd.Run()
-}
-
-func supervisorSystemdUnitName(workspaceID string) string {
-	sum := sha256.Sum256([]byte(strings.TrimSpace(workspaceID)))
-	return "relayfile-mount-" + hex.EncodeToString(sum[:])[:12] + ".service"
-}
-
-func supervisorSystemdUnitPath(workspaceID string) string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".config", "systemd", "user", supervisorSystemdUnitName(workspaceID))
-}
-
-func supervisorInstallSystemd(record workspaceRecord, localDir, exe string, interval time.Duration, stdout io.Writer) error {
-	unitName := supervisorSystemdUnitName(record.ID)
-	unitPath := supervisorSystemdUnitPath(record.ID)
-	intervalSecs := int(interval.Seconds())
-	if intervalSecs < 5 {
-		intervalSecs = 5
-	}
-	unit := fmt.Sprintf(`[Unit]
-Description=Relayfile mount for workspace %s
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-ExecStart=%s mount %s %s --interval %ds
-WorkingDirectory=%s
-Restart=always
-RestartSec=10
-
-[Install]
-WantedBy=default.target
-`, record.Name, exe, record.ID, localDir, intervalSecs, localDir)
-
-	if err := os.MkdirAll(filepath.Dir(unitPath), 0o755); err != nil {
-		return fmt.Errorf("create systemd user unit directory: %w", err)
-	}
-	if err := os.WriteFile(unitPath, []byte(unit), 0o644); err != nil {
-		return fmt.Errorf("write systemd unit file: %w", err)
-	}
-	// Reload the daemon and enable+start the unit. Surface activation
-	// failures so callers know supervision is not actually running.
-	if out, err := exec.Command("systemctl", "--user", "daemon-reload").CombinedOutput(); err != nil {
-		return fmt.Errorf("systemctl daemon-reload failed: %w\n%s", err, out)
-	}
-	if out, err := exec.Command("systemctl", "--user", "enable", "--now", unitName).CombinedOutput(); err != nil {
-		return fmt.Errorf("systemctl enable --now %s failed: %w\n%s", unitName, err, out)
-	}
-	fmt.Fprintf(stdout, "Supervisor installed: %s\nUnit: %s\nTo check status: systemctl --user status %s\nTo uninstall: relayfile supervisor uninstall %s\n", unitName, unitPath, unitName, record.Name)
-	return nil
-}
-
-func supervisorUninstallSystemd(record workspaceRecord, stdout io.Writer) error {
-	unitName := supervisorSystemdUnitName(record.ID)
-	unitPath := supervisorSystemdUnitPath(record.ID)
-	_ = exec.Command("systemctl", "--user", "disable", "--now", unitName).Run()
-	if err := os.Remove(unitPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("remove systemd unit file %s: %w", unitPath, err)
-	}
-	_ = exec.Command("systemctl", "--user", "daemon-reload").Run()
-	fmt.Fprintf(stdout, "Supervisor removed: %s\n", unitName)
-	return nil
-}
-
-func supervisorStatusSystemd(record workspaceRecord, stdout io.Writer) error {
-	unitName := supervisorSystemdUnitName(record.ID)
-	unitPath := supervisorSystemdUnitPath(record.ID)
-	if _, err := os.Stat(unitPath); errors.Is(err, os.ErrNotExist) {
-		fmt.Fprintf(stdout, "Supervisor not installed for workspace %s (unit not found at %s)\n", record.Name, unitPath)
-		return nil
-	}
-	fmt.Fprintf(stdout, "Supervisor installed: %s\nUnit: %s\nRun 'systemctl --user status %s' for live status.\n", unitName, unitPath, unitName)
-	return nil
-}
-
 // isProcessAlreadyGone reports whether a signal-delivery failure means the
 // target process has already exited. Treats both `os.ErrProcessDone` (the
 // modern Go check) and `syscall.ESRCH` (raw signal failure) as "gone".
@@ -7008,88 +7234,23 @@ func delegatedCredentialsPath() string {
 }
 
 func delegatedCredentialsPathForRequest(workspaceValue string, scopes []string) string {
-	workspaceKey := workspaceShardKey(workspaceValue)
+	workspaceKey := delegatedCredentialsWorkspaceKey(workspaceValue)
 	scopeKey := delegatedCredentialsScopeKey(scopes)
 	return filepath.Join(configDir(), "delegated", workspaceKey, scopeKey+".json")
 }
 
-func delegatedCredentialsRawPathForRequest(workspaceValue string, scopes []string) string {
-	workspaceKey := rawWorkspaceShardKey(workspaceValue)
-	scopeKey := delegatedCredentialsScopeKey(scopes)
-	return filepath.Join(configDir(), "delegated", workspaceKey, scopeKey+".json")
-}
-
-func workspaceShardKey(workspaceValue string) string {
-	workspaceValue = canonicalWorkspaceShardValue(workspaceValue)
-	sum := sha256.Sum256([]byte(workspaceValue))
-	return hex.EncodeToString(sum[:])[:24]
-}
-
-func rawWorkspaceShardKey(workspaceValue string) string {
+func delegatedCredentialsWorkspaceKey(workspaceValue string) string {
 	workspaceValue = strings.TrimSpace(workspaceValue)
 	if workspaceValue == "" {
 		workspaceValue = "active"
 	}
+	if record, ok := workspaceRecordByName(workspaceValue); ok && strings.TrimSpace(record.ID) != "" {
+		workspaceValue = record.ID
+	} else if record, ok := workspaceRecordByID(workspaceValue); ok && strings.TrimSpace(record.ID) != "" {
+		workspaceValue = record.ID
+	}
 	sum := sha256.Sum256([]byte(workspaceValue))
 	return hex.EncodeToString(sum[:])[:24]
-}
-
-func canonicalWorkspaceShardValue(workspaceValue string) string {
-	value, _ := canonicalWorkspaceShardValueStatus(workspaceValue)
-	return value
-}
-
-func canonicalWorkspaceShardValueStatus(workspaceValue string) (string, bool) {
-	workspaceValue = strings.TrimSpace(workspaceValue)
-	if workspaceValue == "" || strings.EqualFold(workspaceValue, "active") {
-		if name, _ := activeWorkspaceName(""); strings.TrimSpace(name) != "" {
-			workspaceValue = strings.TrimSpace(name)
-		} else if workspaceValue == "" {
-			workspaceValue = "active"
-		}
-	}
-	if record, ok := workspaceRecordForShardValue(workspaceValue); ok {
-		return strings.TrimSpace(record.ID), true
-	}
-	return workspaceValue, false
-}
-
-func workspaceRecordForShardValue(workspaceValue string) (workspaceRecord, bool) {
-	catalog, err := loadWorkspaceCatalog()
-	if err != nil {
-		return workspaceRecord{}, false
-	}
-	workspaceValue = strings.TrimSpace(workspaceValue)
-	var match workspaceRecord
-	canonicalID := ""
-	for _, record := range catalog.Workspaces {
-		if record.Name != workspaceValue && record.ID != workspaceValue && record.RelayWorkspaceID != workspaceValue {
-			continue
-		}
-		recordID := strings.TrimSpace(record.ID)
-		if recordID == "" {
-			return workspaceRecord{}, false
-		}
-		if canonicalID == "" {
-			canonicalID = recordID
-			match = record
-			continue
-		}
-		if canonicalID != recordID {
-			return workspaceRecord{}, false
-		}
-		if strings.TrimSpace(match.Name) == "" {
-			match.Name = strings.TrimSpace(record.Name)
-		}
-		if strings.TrimSpace(match.RelayWorkspaceID) == "" {
-			match.RelayWorkspaceID = strings.TrimSpace(record.RelayWorkspaceID)
-		}
-	}
-	if canonicalID == "" {
-		return workspaceRecord{}, false
-	}
-	match.ID = canonicalID
-	return match, true
 }
 
 func delegatedCredentialsScopeKey(scopes []string) string {
@@ -7143,10 +7304,22 @@ func resolveDelegatedCredentialsPathForRequest(flagValue, workspaceValue string,
 	if value, ok := explicitDelegatedCredentialsPath(flagValue); ok {
 		return value, true
 	}
+	workspaceValue = resolveDelegatedCredentialsWorkspaceValue(workspaceValue)
 	if strings.TrimSpace(workspaceValue) != "" || len(scopes) > 0 {
 		return delegatedCredentialsPathForRequest(workspaceValue, scopes), false
 	}
 	return delegatedCredentialsPath(), false
+}
+
+func resolveDelegatedCredentialsWorkspaceValue(workspaceValue string) string {
+	workspaceValue = strings.TrimSpace(workspaceValue)
+	if workspaceValue != "" && !strings.EqualFold(workspaceValue, "active") {
+		return workspaceValue
+	}
+	if name, _ := activeWorkspaceName(""); strings.TrimSpace(name) != "" {
+		return strings.TrimSpace(name)
+	}
+	return workspaceValue
 }
 
 func loadDelegatedCredentials(path string) (delegatedauth.Bundle, string, error) {
@@ -7165,87 +7338,16 @@ func loadDelegatedCredentials(path string) (delegatedauth.Bundle, string, error)
 }
 
 func loadDelegatedCredentialsForRequest(path, workspaceValue string, scopes []string) (delegatedauth.Bundle, string, error) {
-	canonicalWorkspaceValue, canonicalWorkspaceOK := canonicalWorkspaceShardValueStatus(workspaceValue)
-	if !canonicalWorkspaceOK && strings.TrimSpace(workspaceValue) != "" {
-		fmt.Fprintf(os.Stderr, "warning: delegated credential workspace %q was not uniquely resolved in %s; using raw workspace shard and probing alias shards\n", canonicalWorkspaceValue, workspacesPath())
-	}
 	resolvedPath, explicit := resolveDelegatedCredentialsPathForRequest(path, workspaceValue, scopes)
 	bundle, loadedPath, err := loadDelegatedCredentials(resolvedPath)
 	if err == nil || explicit || resolvedPath == delegatedCredentialsPath() || !errors.Is(err, delegatedauth.ErrMissingCredentials) {
 		return bundle, loadedPath, err
-	}
-	for _, legacyPath := range legacyDelegatedCredentialsPathsForRequest(workspaceValue, scopes) {
-		legacyBundle, loadedLegacyPath, legacyErr := loadDelegatedCredentials(legacyPath)
-		if legacyErr == nil && delegatedBundleSatisfiesRequestedScopes(legacyBundle, scopes) {
-			if created, migrateErr := delegatedauth.SaveAtomicIfMissing(resolvedPath, legacyBundle); migrateErr == nil && created {
-				return legacyBundle, resolvedPath, nil
-			} else if migrateErr == nil && !created {
-				canonicalBundle, canonicalLoadedPath, canonicalErr := loadDelegatedCredentials(resolvedPath)
-				if canonicalErr == nil && delegatedBundleSatisfiesRequestedScopes(canonicalBundle, scopes) {
-					return canonicalBundle, canonicalLoadedPath, nil
-				}
-			}
-			return legacyBundle, loadedLegacyPath, nil
-		}
 	}
 	legacyBundle, legacyPath, legacyErr := loadDelegatedCredentials(delegatedCredentialsPath())
 	if legacyErr == nil && delegatedBundleSatisfiesRequestedScopes(legacyBundle, scopes) {
 		return legacyBundle, legacyPath, nil
 	}
 	return bundle, loadedPath, err
-}
-
-func legacyDelegatedCredentialsPathsForRequest(workspaceValue string, scopes []string) []string {
-	aliases := legacyDelegatedCredentialsWorkspaceAliases(workspaceValue)
-	paths := make([]string, 0, len(aliases))
-	seen := map[string]struct{}{delegatedCredentialsPathForRequest(workspaceValue, scopes): {}}
-	for _, alias := range aliases {
-		path := delegatedCredentialsRawPathForRequest(alias, scopes)
-		if _, ok := seen[path]; ok {
-			continue
-		}
-		seen[path] = struct{}{}
-		paths = append(paths, path)
-	}
-	return paths
-}
-
-func legacyDelegatedCredentialsWorkspaceAliases(workspaceValue string) []string {
-	value := strings.TrimSpace(workspaceValue)
-	if value == "" || strings.EqualFold(value, "active") {
-		if name, _ := activeWorkspaceName(""); strings.TrimSpace(name) != "" {
-			value = strings.TrimSpace(name)
-		}
-	}
-	aliases := make([]string, 0, 3)
-	addAlias := func(alias string) {
-		alias = strings.TrimSpace(alias)
-		if alias == "" {
-			return
-		}
-		for _, existing := range aliases {
-			if existing == alias {
-				return
-			}
-		}
-		aliases = append(aliases, alias)
-	}
-	addAlias(value)
-	catalog, err := loadWorkspaceCatalog()
-	if err != nil {
-		return aliases
-	}
-	for _, record := range catalog.Workspaces {
-		if strings.TrimSpace(record.Name) != value &&
-			strings.TrimSpace(record.ID) != value &&
-			strings.TrimSpace(record.RelayWorkspaceID) != value {
-			continue
-		}
-		addAlias(record.ID)
-		addAlias(record.RelayWorkspaceID)
-		addAlias(record.Name)
-	}
-	return aliases
 }
 
 func delegatedBundleSatisfiesRequestedScopes(bundle delegatedauth.Bundle, requested []string) bool {
@@ -7507,54 +7609,6 @@ func removeCredentialFile(path string) error {
 		return err
 	}
 	return nil
-}
-
-func removeCredentialFileIfExists(path string) (bool, error) {
-	if err := os.Remove(path); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return false, nil
-		}
-		return false, err
-	}
-	return true, nil
-}
-
-func removeCredentialDirIfExists(path string) (bool, error) {
-	if _, err := os.Stat(path); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return false, nil
-		}
-		return false, err
-	}
-	if err := os.RemoveAll(path); err != nil {
-		return false, err
-	}
-	return true, nil
-}
-
-func clearAuthCredentials() (int, error) {
-	removed := 0
-	for _, path := range []string{
-		credentialsPath(),
-		cloudCredentialsPath(),
-		delegatedCredentialsPath(),
-	} {
-		ok, err := removeCredentialFileIfExists(path)
-		if err != nil {
-			return removed, fmt.Errorf("remove %s: %w", path, err)
-		}
-		if ok {
-			removed++
-		}
-	}
-	ok, err := removeCredentialDirIfExists(filepath.Join(configDir(), "delegated"))
-	if err != nil {
-		return removed, fmt.Errorf("remove delegated credential cache: %w", err)
-	}
-	if ok {
-		removed++
-	}
-	return removed, nil
 }
 
 // saveLegacyCloudCredentials is retained for stale-store cleanup tests only.
@@ -8677,7 +8731,7 @@ func isRelayfileExecutable(arg0 string) bool {
 
 func commandHasMountSubcommand(fields []string) bool {
 	for _, field := range fields {
-		if field == "mount" || field == "start" || field == "on" {
+		if field == "mount" || field == "start" {
 			return true
 		}
 	}
@@ -9971,13 +10025,7 @@ func runMountLoop(rootCtx context.Context, syncer *mountsync.Syncer, localDir, w
 	stallReason := ""
 	degraded := false
 	var lastDegradedNotice time.Time
-	// Exponential backoff for degraded credential recovery: base 30s, cap 10m.
-	// Avoids hammering the auth endpoint if the operator session is truly gone.
-	const degradedBackoffBase = 30 * time.Second
-	const degradedBackoffMax = 10 * time.Minute
-	const degradedNoticeInterval = time.Minute
-	degradedAttempts := 0
-	var nextDegradedAttempt time.Time
+	const degradedRecoveryInterval = time.Minute
 	const degradedStallReason = "delegated relayfile credentials expired or revoked — re-bootstrap relayfile credentials with agent-relay cloud login"
 
 	enterDegraded := func() {
@@ -9985,7 +10033,6 @@ func runMountLoop(rootCtx context.Context, syncer *mountsync.Syncer, localDir, w
 			degraded = true
 			stallReason = degradedStallReason
 			lastDegradedNotice = time.Time{}
-			nextDegradedAttempt = time.Time{}
 			log.Printf("mount entering read-only degraded state: %s", degradedStallReason)
 		}
 	}
@@ -9994,8 +10041,6 @@ func runMountLoop(rootCtx context.Context, syncer *mountsync.Syncer, localDir, w
 			degraded = false
 			stallReason = ""
 			lastDegradedNotice = time.Time{}
-			degradedAttempts = 0
-			nextDegradedAttempt = time.Time{}
 			log.Printf("mount exiting degraded state; delegated relayfile credentials restored")
 		}
 	}
@@ -10003,7 +10048,7 @@ func runMountLoop(rootCtx context.Context, syncer *mountsync.Syncer, localDir, w
 		if !degraded {
 			return
 		}
-		if time.Since(lastDegradedNotice) < degradedNoticeInterval {
+		if time.Since(lastDegradedNotice) < degradedRecoveryInterval {
 			return
 		}
 		log.Printf("mount degraded: %s", degradedStallReason)
@@ -10032,7 +10077,6 @@ func runMountLoop(rootCtx context.Context, syncer *mountsync.Syncer, localDir, w
 			return err
 		}
 		httpClient.SetToken(renewed.BearerToken())
-		syncer.SetCredentialExpiry(renewed.BearerExpiresAt())
 		syncer.ResetWebSocket()
 		record.Server = strings.TrimRight(renewed.ServerURL(), "/")
 		record.CloudAPIURL = ""
@@ -10111,34 +10155,16 @@ func runMountLoop(rootCtx context.Context, syncer *mountsync.Syncer, localDir, w
 
 	runCycle := func(reconcile bool) error {
 		if degraded {
-			// Exponential backoff: skip recovery attempts until nextDegradedAttempt.
-			// This prevents hammering the auth endpoint on consecutive cycles.
-			if !nextDegradedAttempt.IsZero() && time.Now().Before(nextDegradedAttempt) {
-				maybePrintRecovery()
-				writeSnapshot()
-				return errors.New(degradedStallReason)
-			}
-			// Try to recover by re-running auth refresh.
+			// Try to recover by re-running auth refresh. If creds are
+			// still missing/expired, stay degraded and emit the
+			// recovery notice on the configured cadence.
 			if err := refreshMountAuth(true); err != nil {
-				// Compute backoff for next attempt: base * 2^attempts, capped.
-				// Cap the exponent at 14 to prevent int64 overflow on 30s<<uint(n)
-				// after ~28 consecutive failures (would shift to negative).
-				exp := degradedAttempts
-				if exp > 14 {
-					exp = 14
-				}
-				backoff := degradedBackoffBase << uint(exp)
-				if backoff > degradedBackoffMax {
-					backoff = degradedBackoffMax
-				}
-				degradedAttempts++
-				nextDegradedAttempt = time.Now().Add(backoff)
 				if isMountCredentialExpired(err) {
 					maybePrintRecovery()
 					writeSnapshot()
 					return err
 				}
-				log.Printf("mount degraded: refresh attempt failed (next retry in %s): %v", backoff, err)
+				log.Printf("mount degraded: refresh attempt failed: %v", err)
 				writeSnapshot()
 				return err
 			}
