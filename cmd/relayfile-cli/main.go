@@ -1296,8 +1296,54 @@ var ErrCloudRefreshExpired = errors.New("cloud session expired. Run 'agent-relay
 
 var ErrDelegatedRelayfileCredentialsExpired = errors.New("delegated relayfile credentials expired or revoked. Re-bootstrap relayfile credentials with agent-relay cloud login.")
 
+// ErrDelegatedScopeInsufficient is returned when the cloud delegated-token
+// mint rejects the requested scopes. This requires human/admin intervention
+// (re-mint with corrected scopes) and cannot be recovered automatically.
+var ErrDelegatedScopeInsufficient = errors.New("delegated relayfile credentials have insufficient scope — re-mint with broader scopes")
+
+// ErrDelegatedScopeInvalid is returned when the cloud delegated-token mint
+// rejects the request because the requested scopes are malformed — e.g. not
+// valid relayfile path scopes. Unlike a transient backend failure, retrying
+// re-sends the identical bad scopes and can never succeed, so this is a
+// permanent client error that must surface to a human (correct the scope shape)
+// rather than drive an endless retry loop.
+var ErrDelegatedScopeInvalid = errors.New("delegated relayfile credentials requested invalid scopes — scopes must be valid relayfile path scopes; retrying will not succeed, re-mint with corrected scopes")
+
 func isMountCredentialExpired(err error) bool {
-	return errors.Is(err, ErrCloudRefreshExpired) || errors.Is(err, ErrDelegatedRelayfileCredentialsExpired)
+	return errors.Is(err, ErrCloudRefreshExpired) ||
+		errors.Is(err, ErrDelegatedRelayfileCredentialsExpired) ||
+		errors.Is(err, ErrDelegatedScopeInsufficient) ||
+		errors.Is(err, ErrDelegatedScopeInvalid)
+}
+
+// mapDelegatedTokenCloudError translates structured cloud error codes returned
+// by the delegated-token route into typed sentinel errors so the mount loop
+// can distinguish needs_reauth (pause-for-human) from transient failures
+// (back off and retry).
+func mapDelegatedTokenCloudError(err error) error {
+	if err == nil {
+		return nil
+	}
+	var ae *apiError
+	if !errors.As(err, &ae) {
+		return fmt.Errorf("mint delegated relayfile credentials: %w", err)
+	}
+	switch ae.Code {
+	case "needs_reauth":
+		return fmt.Errorf("%w: %s", ErrDelegatedRelayfileCredentialsExpired, ae.Message)
+	case "scope_insufficient":
+		return fmt.Errorf("%w: %s", ErrDelegatedScopeInsufficient, ae.Message)
+	case "invalid_scope":
+		// The requested scopes are malformed (e.g. not relayfile path scopes).
+		// This is a permanent client error: retrying re-sends the same bad
+		// scopes and cannot succeed, so surface it as needs-human rather than
+		// letting the mount loop back off and retry forever.
+		return fmt.Errorf("%w: %s", ErrDelegatedScopeInvalid, ae.Message)
+	default:
+		// relayauth_unavailable and other codes are transient — wrap plainly
+		// so the caller can back off and retry.
+		return fmt.Errorf("mint delegated relayfile credentials: %w", err)
+	}
 }
 
 func providerPromptText(entries []integrationCatalogEntry) string {
@@ -3506,6 +3552,28 @@ func writebackPushRequiredRelayfileScopes(remotePath string) []string {
 	}
 	provider := strings.TrimSpace(parts[0])
 	return []string{fmt.Sprintf("relayfile:fs:write:/%s/**", provider)}
+}
+
+func writebackPushProvider(remotePath string) (string, bool) {
+	parts := strings.Split(strings.Trim(normalizeWritebackFailurePath(remotePath), "/"), "/")
+	if len(parts) < 2 {
+		return "", false
+	}
+	provider := strings.ToLower(strings.TrimSpace(parts[0]))
+	if err := validateLocalProviderID(provider); err != nil {
+		return "", false
+	}
+	return provider, true
+}
+
+func writebackPushScopes(remotePath string) ([]string, []string, error) {
+	provider, ok := writebackPushProvider(remotePath)
+	if !ok {
+		return nil, nil, fmt.Errorf("writeback requires a provider-scoped remote path, got %s", normalizeWritebackFailurePath(remotePath))
+	}
+	return []string{fmt.Sprintf("fs:write:/%s/**", provider), "ops:read"},
+		[]string{fmt.Sprintf("relayfile:fs:write:/%s/**", provider)},
+		nil
 }
 
 func writebackPushContentIdentity(workspaceID, remotePath, contentHash string) *contentIdentity {
@@ -7299,6 +7367,74 @@ func delegatedCredentialsWorkspaceKey(workspaceValue string) string {
 	}
 	sum := sha256.Sum256([]byte(workspaceValue))
 	return hex.EncodeToString(sum[:])[:24]
+}
+
+func workspaceShardKey(workspaceValue string) string {
+	canonical, _ := canonicalWorkspaceShardValueStatus(workspaceValue)
+	sum := sha256.Sum256([]byte(canonical))
+	return hex.EncodeToString(sum[:])[:24]
+}
+
+func rawWorkspaceShardKey(workspaceValue string) string {
+	workspaceValue = strings.TrimSpace(workspaceValue)
+	if workspaceValue == "" {
+		workspaceValue = "active"
+	}
+	sum := sha256.Sum256([]byte(workspaceValue))
+	return hex.EncodeToString(sum[:])[:24]
+}
+
+func canonicalWorkspaceShardValueStatus(workspaceValue string) (string, bool) {
+	workspaceValue = strings.TrimSpace(workspaceValue)
+	if workspaceValue == "" || strings.EqualFold(workspaceValue, "active") {
+		if name, _ := activeWorkspaceName(""); strings.TrimSpace(name) != "" {
+			workspaceValue = strings.TrimSpace(name)
+		} else if workspaceValue == "" {
+			workspaceValue = "active"
+		}
+	}
+	if record, ok := workspaceRecordForShardValue(workspaceValue); ok {
+		return strings.TrimSpace(record.ID), true
+	}
+	return workspaceValue, false
+}
+
+func workspaceRecordForShardValue(workspaceValue string) (workspaceRecord, bool) {
+	catalog, err := loadWorkspaceCatalog()
+	if err != nil {
+		return workspaceRecord{}, false
+	}
+	workspaceValue = strings.TrimSpace(workspaceValue)
+	var match workspaceRecord
+	canonicalID := ""
+	for _, record := range catalog.Workspaces {
+		if record.Name != workspaceValue && record.ID != workspaceValue && record.RelayWorkspaceID != workspaceValue {
+			continue
+		}
+		recordID := strings.TrimSpace(record.ID)
+		if recordID == "" {
+			return workspaceRecord{}, false
+		}
+		if canonicalID == "" {
+			canonicalID = recordID
+			match = record
+			continue
+		}
+		if canonicalID != recordID {
+			return workspaceRecord{}, false
+		}
+		if strings.TrimSpace(match.Name) == "" {
+			match.Name = strings.TrimSpace(record.Name)
+		}
+		if strings.TrimSpace(match.RelayWorkspaceID) == "" {
+			match.RelayWorkspaceID = strings.TrimSpace(record.RelayWorkspaceID)
+		}
+	}
+	if canonicalID == "" {
+		return workspaceRecord{}, false
+	}
+	match.ID = canonicalID
+	return match, true
 }
 
 func delegatedCredentialsScopeKey(scopes []string) string {
