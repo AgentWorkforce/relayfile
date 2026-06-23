@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -37,6 +38,8 @@ import (
 	"github.com/agentworkforce/relayfile/internal/relayfile"
 	"github.com/agentworkforce/relayfile/internal/writeback"
 	"github.com/fsnotify/fsnotify"
+	"nhooyr.io/websocket"
+	"nhooyr.io/websocket/wsjson"
 )
 
 const (
@@ -556,6 +559,10 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		return runLogs(args[1:], stdout)
 	case "observer":
 		return runObserver(args[1:], stdout)
+	case "listen", "watch":
+		return runListen(args[1:], stdout)
+	case "dev":
+		return runDev(args[1:], nil, stdout)
 	case "help", "-h", "--help":
 		printUsage(stdout)
 		return nil
@@ -630,6 +637,10 @@ func printHelpForArgs(args []string, stdout io.Writer) {
 		fmt.Fprintln(stdout, "Usage: relayfile logs [WORKSPACE] [--lines N]")
 	case "observer":
 		fmt.Fprintln(stdout, "Usage: relayfile observer [WORKSPACE] [--no-open]")
+	case "listen", "watch":
+		fmt.Fprintln(stdout, "Usage: relayfile listen [WORKSPACE] [--provider PROVIDER] [--path GLOB] [--event TYPE] [--run CMD] [--format text|json] [--background]")
+	case "dev":
+		fmt.Fprintln(stdout, "Usage: relayfile dev [WORKSPACE] [--provider PROVIDER] [--path GLOB] [--event TYPE] [--run CMD]")
 	case "help":
 		printUsage(stdout)
 	default:
@@ -5726,6 +5737,724 @@ func isAPIAuthError(err error) bool {
 	return errors.As(err, &httpErr) && (httpErr.StatusCode == http.StatusUnauthorized || httpErr.StatusCode == http.StatusForbidden)
 }
 
+// listenEvent is the wire format for events delivered over /fs/ws.
+type listenEvent struct {
+	EventID       string `json:"eventId"`
+	Type          string `json:"type"`
+	Path          string `json:"path"`
+	Revision      string `json:"revision"`
+	ContentHash   string `json:"contentHash,omitempty"`
+	Origin        string `json:"origin,omitempty"`
+	Provider      string `json:"provider,omitempty"`
+	CorrelationID string `json:"correlationId,omitempty"`
+	Timestamp     string `json:"timestamp,omitempty"`
+}
+
+func printListenUsage(w io.Writer) {
+	fmt.Fprintln(w, `relayfile listen streams live file events from a workspace and optionally
+runs a command for each matching event.
+
+Usage:
+  relayfile listen [WORKSPACE] [--provider PROVIDER] [--path GLOB] [--event TYPE] [--run CMD] [--format text|json]
+
+Flags:
+  --provider PROVIDER  filter to a specific integration (linear, notion, hubspot, …)
+                       shorthand for --path /PROVIDER/**
+  --path GLOB          glob path filter. The workspace tree has alias views that let
+                       you filter far below the provider level — by status, label,
+                       project, channel, and more. See examples below.
+  --event TYPE         filter by event type: file.created, file.updated, file.deleted
+                       (default: all types)
+  --run CMD            shell command to execute per matching event.
+                       Use {{path}}, {{type}}, {{provider}}, {{revision}}, and
+                       {{event}} (full JSON) as placeholders.
+  --format text|json   output format when --run is not set (default: text)
+
+Examples:
+
+  # Stream all events from the default workspace
+  relayfile listen
+
+  # --- Linear ---
+
+  # New issue filed anywhere in Linear
+  relayfile listen --provider linear --event file.created \
+    --run "claude --print 'New Linear issue at {{path}}. Suggest a priority and owner.'"
+
+  # New issue filed, but only when it lands in the Triage state
+  relayfile listen --path "/linear/issues/by-state/triage/**" --event file.created \
+    --run "claude --print 'Untriaged issue at {{path}}. Assign priority, owner, and cycle.'"
+
+  # Any In Progress issue updated (catch status changes, description edits, etc.)
+  relayfile listen --path "/linear/issues/by-state/in-progress/**" --event file.updated \
+    --run "claude --print 'In-progress issue changed at {{path}}. Check for blockers.'"
+
+  # --- GitHub ---
+
+  # New PR opened on any repo in the org
+  relayfile listen --path "/github/repos/**/pulls/**" --event file.created \
+    --run "claude --print 'New PR at {{path}}. Write a one-paragraph review summary.'"
+
+  # New PR labeled needs-review on a specific repo
+  relayfile listen --path "/github/repos/acme/api/pulls/by-label/needs-review/**" --event file.created \
+    --run "claude --print 'PR needs review at {{path}}. Summarise the diff and flag risks.'"
+
+  # --- Notion ---
+
+  # Any page edited across the whole workspace
+  relayfile listen --provider notion --event file.updated \
+    --run "claude --print 'Notion page changed at {{path}}. Summarise the update.'"
+
+  # Edits only inside a specific Notion database
+  relayfile listen --path "/notion/databases/roadmap/**" --event file.updated \
+    --run "claude --print 'Roadmap item changed at {{path}}. Send a Slack digest.'"
+
+  # --- Slack ---
+
+  # New message in a specific channel
+  relayfile listen --path "/slack/channels/incidents/**" --event file.created \
+    --run "claude --print 'New incident message at {{path}}. Draft a status-page update.'"
+
+  # --- HubSpot ---
+
+  # New contact created
+  relayfile listen --path "/hubspot/contacts/**" --event file.created \
+    --run "claude --print 'New HubSpot contact at {{path}}. Draft a personalised intro email.'"
+
+  # Deal moved to a new stage
+  relayfile listen --path "/hubspot/deals/**" --event file.updated \
+    --run "claude --print 'Deal updated at {{path}}. Draft a follow-up for the new stage.'"
+
+  # --- Asana ---
+
+  # New task in a specific project
+  relayfile listen --path "/asana/projects/q3-launch/**" --event file.created \
+    --run "claude --print 'New task in Q3 launch at {{path}}. Break it into subtasks.'"
+
+  # --- Shortcut ---
+
+  # New story under a specific epic
+  relayfile listen --path "/shortcut/stories/by-epic/payments/**" --event file.created \
+    --run "claude --print 'New payments story at {{path}}. Suggest an implementation approach.'"
+
+  # --- Granola / Fathom ---
+
+  # New meeting notes → extract action items
+  relayfile listen --provider granola --event file.created \
+    --run "claude --print 'New meeting notes at {{path}}. Extract action items and owners.'"
+
+  # New Fathom call recording → follow-up email
+  relayfile listen --provider fathom --event file.created \
+    --run "claude --print 'New call at {{path}}. Write a follow-up email with key decisions.'"
+
+  # --- Scripting ---
+
+  # Print raw JSON events for piping
+  relayfile listen --provider linear --format json | jq '.path'
+
+The workspace tree has alias views (by-state/, by-label/, by-epic/, by-name/, by-id/, …)
+for every provider. Run 'relayfile tree / --depth 3' to explore what's available.
+
+Want this running headlessly for your whole team — turning issues into reviewed PRs automatically?
+See https://github.com/AgentWorkforce/factory`)
+}
+
+// runDev is the zero-friction entry point for reactive local agents.
+// It checks credentials and integration status, prints a status header,
+// then hands off to the listen loop.
+func runDev(args []string, stdin io.Reader, stdout io.Writer) error {
+	// Peek at flags without consuming them — runListen re-parses the same slice.
+	peek := flag.NewFlagSet("dev-peek", flag.ContinueOnError)
+	peek.SetOutput(io.Discard)
+	serverPeek := peek.String("server", "", "")
+	tokenPeek := peek.String("token", "", "")
+	providerPeek := peek.String("provider", "", "")
+	_ = peek.Parse(normalizeFlagArgs(args, map[string]bool{
+		"server": true, "token": true, "provider": true,
+		"path": true, "event": true, "run": true, "format": true,
+		"background": false, "daemonized": false,
+	}))
+
+	commandClient, err := prepareWorkspaceCommandClient("", *serverPeek, *tokenPeek, defaultInspectScopes)
+	if err != nil {
+		provider := strings.TrimSpace(*providerPeek)
+		if provider == "" {
+			provider = "linear"
+		}
+		fmt.Fprintln(stdout, "Not connected to Agent Relay. Get started with:")
+		fmt.Fprintf(stdout, "\n  relayfile setup --provider %s\n\n", provider)
+		fmt.Fprintln(stdout, "Then re-run: relayfile dev "+strings.Join(args, " "))
+		return err
+	}
+
+	fmt.Fprintf(stdout, "Workspace: %s\n", commandClient.workspaceID)
+	if p := strings.TrimSpace(*providerPeek); p != "" {
+		fmt.Fprintf(stdout, "Provider filter: %s\n", p)
+		fmt.Fprintf(stdout, "Tip: run 'relayfile integration list' to see connected providers.\n")
+	}
+	fmt.Fprintln(stdout)
+
+	return runListen(args, stdout)
+}
+
+// matchListenPath reports whether eventPath matches the glob filter used by
+// relayfile listen. It handles the double-star (**) recursive wildcard that
+// path.Match does not support: "/**" suffix matches any path rooted at the
+// prefix, and "**" alone matches everything.
+func matchListenPath(glob, eventPath string) bool {
+	if glob == "" || glob == "**" || glob == "/**" {
+		return true
+	}
+	// "/foo/**" matches "/foo" and anything under it.
+	if strings.HasSuffix(glob, "/**") {
+		prefix := strings.TrimSuffix(glob, "/**")
+		return eventPath == prefix || strings.HasPrefix(eventPath, prefix+"/")
+	}
+	// Fall back to path.Match for single-star globs.
+	matched, err := path.Match(glob, eventPath)
+	return err == nil && matched
+}
+
+// wsEncodeGlob encodes a path glob for a WebSocket URL query parameter,
+// preserving /, *, and ? as literal characters so server-side glob matching works.
+func wsEncodeGlob(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r == '/' || r == '*' || r == '?' || r == '-' || r == '_' || r == '.' || r == '~':
+			b.WriteRune(r)
+		case (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9'):
+			b.WriteRune(r)
+		default:
+			// QueryEscape encodes spaces as "+"; rewrite to "%20" so the
+			// encoded value is unambiguous in both query and path contexts.
+			// Both decode to a space server-side via url.Query(), so this is
+			// purely a more robust encoding, not a behavior change.
+			b.WriteString(strings.ReplaceAll(url.QueryEscape(string(r)), "+", "%20"))
+		}
+	}
+	return b.String()
+}
+
+func runListen(args []string, stdout io.Writer) error {
+	fs := flag.NewFlagSet("listen", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	server := fs.String("server", "", "relayfile server URL override")
+	token := fs.String("token", "", "relayfile token override")
+	providerFlag := fs.String("provider", "", "filter to a specific provider (e.g. linear, notion)")
+	pathFlag := fs.String("path", "", "glob path filter (e.g. /linear/issues/**)")
+	eventFlag := fs.String("event", "", "event type filter: file.created, file.updated, file.deleted")
+	runFlag := fs.String("run", "", "shell command per event; supports {{path}}, {{type}}, {{provider}}, {{revision}}, {{event}}")
+	formatFlag := fs.String("format", "text", "output format when --run is not set: text or json")
+	background := fs.Bool("background", false, "run in background; logs to ~/.relayfile/listen.log")
+	daemonized := fs.Bool("daemonized", false, "internal flag used by relayfile listen --background")
+	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
+		"server":     true,
+		"token":      true,
+		"provider":   true,
+		"path":       true,
+		"event":      true,
+		"run":        true,
+		"format":     true,
+		"background": false,
+		"daemonized": false,
+	})); err != nil {
+		return err
+	}
+	var workspaceValue string
+	if fs.NArg() > 0 {
+		workspaceValue = strings.TrimSpace(fs.Arg(0))
+	}
+
+	if *background && !*daemonized {
+		logFile := listenLogFile()
+		pidFile := listenPIDFile()
+		return spawnBackgroundListenProcess(args, pidFile, logFile)
+	}
+	if *daemonized {
+		if err := rotateLogFile(listenLogFile()); err != nil {
+			return err
+		}
+	}
+
+	commandClient, err := prepareWorkspaceCommandClient(workspaceValue, *server, *token, defaultInspectScopes)
+	if err != nil {
+		return err
+	}
+
+	// Build WebSocket URL from the HTTP base URL.
+	// relayfile listen connects directly to Agent Relay Cloud — no local
+	// daemon or FUSE mount is required.
+	base, err := url.Parse(strings.TrimRight(commandClient.client.baseURL, "/"))
+	if err != nil {
+		return fmt.Errorf("invalid server URL: %w", err)
+	}
+	switch base.Scheme {
+	case "http":
+		base.Scheme = "ws"
+	case "https":
+		base.Scheme = "wss"
+	}
+	base.Path = fmt.Sprintf("/v1/workspaces/%s/fs/ws", url.PathEscape(commandClient.workspaceID))
+
+	pathFilter := strings.TrimSpace(*pathFlag)
+	if pathFilter == "" && strings.TrimSpace(*providerFlag) != "" {
+		pathFilter = fmt.Sprintf("/%s/**", strings.TrimSpace(*providerFlag))
+	}
+	// Build the raw query manually so that path glob characters (/ * ?) are NOT
+	// percent-encoded. url.Values.Encode() encodes them, which causes the server
+	// glob matcher to receive a literal "%2Flinear%2F%2A%2A" and match nothing.
+	rawParts := []string{"from=now"}
+	if pathFilter != "" {
+		rawParts = append(rawParts, "path="+wsEncodeGlob(pathFilter))
+	}
+	// Token in query param for WS upgrade (server does not yet support Authorization on upgrade).
+	rawParts = append(rawParts, "token="+url.QueryEscape(commandClient.client.token))
+	base.RawQuery = strings.Join(rawParts, "&")
+
+	rootCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	// WebSocket upgrade requires HTTP/1.1; disable h2 so TLS ALPN negotiation
+	// doesn't select HTTP/2 (which rejects the Upgrade header).
+	wsTransport := http.DefaultTransport.(*http.Transport).Clone()
+	wsTransport.TLSNextProto = make(map[string]func(string, *tls.Conn) http.RoundTripper)
+	wsHTTPClient := &http.Client{Transport: wsTransport}
+
+	conn, _, err := websocket.Dial(rootCtx, base.String(), &websocket.DialOptions{
+		HTTPClient: wsHTTPClient,
+		HTTPHeader: http.Header{
+			"Authorization": []string{"Bearer " + commandClient.client.token},
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("connect to event stream: %w", err)
+	}
+	defer conn.Close(websocket.StatusNormalClosure, "")
+
+	typeFilter := strings.TrimSpace(*eventFlag)
+	runCmd := strings.TrimSpace(*runFlag)
+	format := strings.TrimSpace(*formatFlag)
+
+	label := "all events"
+	if pathFilter != "" {
+		label = pathFilter
+	}
+	if typeFilter != "" {
+		label += " (" + typeFilter + ")"
+	}
+	if !*daemonized {
+		fmt.Fprintf(stdout, "Listening on %s — Ctrl+C to stop\n", label)
+		if runCmd == "" && format == "text" {
+			fmt.Fprintln(stdout, "Tip: pass --run to execute a command per event.")
+			fmt.Fprintln(stdout, "     See 'relayfile help listen' for examples with Linear, Notion, HubSpot, and more.")
+			fmt.Fprintln(stdout, "     Add --background to detach; 'relayfile supervisor install --listen' to survive reboots.")
+		}
+		fmt.Fprintln(stdout)
+	}
+
+	for {
+		var raw json.RawMessage
+		if err := wsjson.Read(rootCtx, conn, &raw); err != nil {
+			if websocket.CloseStatus(err) == websocket.StatusNormalClosure ||
+				websocket.CloseStatus(err) == websocket.StatusGoingAway ||
+				errors.Is(err, context.Canceled) {
+				return nil
+			}
+			return fmt.Errorf("event stream error: %w", err)
+		}
+
+		var evt listenEvent
+		if err := json.Unmarshal(raw, &evt); err != nil || evt.Type == "" || evt.Type == "pong" {
+			continue
+		}
+		if typeFilter != "" && evt.Type != typeFilter {
+			continue
+		}
+		if pathFilter != "" && !matchListenPath(pathFilter, evt.Path) {
+			continue
+		}
+
+		if runCmd != "" {
+			expanded := listenExpandTemplate(runCmd, evt, raw)
+			cmd := exec.CommandContext(rootCtx, "sh", "-c", expanded)
+			cmd.Stdout = stdout
+			cmd.Stderr = os.Stderr
+			if err := cmd.Run(); err != nil && !errors.Is(err, context.Canceled) {
+				fmt.Fprintf(os.Stderr, "run error for %s: %v\n", evt.Path, err)
+			}
+			continue
+		}
+
+		if format == "json" {
+			fmt.Fprintf(stdout, "%s\n", string(raw))
+			continue
+		}
+
+		// Default text output.
+		ts := strings.TrimSpace(evt.Timestamp)
+		if ts == "" {
+			ts = time.Now().UTC().Format(time.RFC3339)
+		}
+		provider := strings.TrimSpace(evt.Provider)
+		if provider == "" {
+			// Infer provider from the leading path segment.
+			seg := strings.TrimPrefix(evt.Path, "/")
+			if i := strings.IndexByte(seg, '/'); i > 0 {
+				provider = seg[:i]
+			}
+		}
+		if provider != "" {
+			fmt.Fprintf(stdout, "%-20s  %-30s  %s  [%s]\n", evt.Type, evt.Path, ts, provider)
+		} else {
+			fmt.Fprintf(stdout, "%-20s  %-30s  %s\n", evt.Type, evt.Path, ts)
+		}
+	}
+}
+
+func listenPIDFile() string {
+	return filepath.Join(configDir(), "listen.pid")
+}
+
+func listenLogFile() string {
+	return filepath.Join(configDir(), "listen.log")
+}
+
+func spawnBackgroundListenProcess(originalArgs []string, pidFile, logFile string) error {
+	if err := rotateLogFile(logFile); err != nil {
+		return err
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	filtered := make([]string, 0, len(originalArgs))
+	for _, arg := range originalArgs {
+		if arg == "--background" || arg == "-background" ||
+			strings.HasPrefix(arg, "--background=") || strings.HasPrefix(arg, "-background=") {
+			continue
+		}
+		filtered = append(filtered, arg)
+	}
+	childArgs := append([]string{"listen"}, filtered...)
+	childArgs = append(childArgs, "--daemonized", "--pid-file", pidFile)
+	logHandle, err := os.OpenFile(logFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	defer logHandle.Close()
+	cmd := exec.Command(executable, childArgs...)
+	cmd.Stdout = logHandle
+	cmd.Stderr = logHandle
+	if err := configureDetachedProcess(cmd); err != nil {
+		return err
+	}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	if err := cmd.Process.Release(); err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stdout, "Listen started in background. Logs: %s\n", logFile)
+	return nil
+}
+
+func listenExpandTemplate(tmpl string, evt listenEvent, raw json.RawMessage) string {
+	return strings.NewReplacer(
+		"{{path}}", evt.Path,
+		"{{type}}", evt.Type,
+		"{{provider}}", evt.Provider,
+		"{{revision}}", evt.Revision,
+		"{{event}}", string(raw),
+	).Replace(tmpl)
+}
+
+func printSupervisorUsage(w io.Writer) {
+	fmt.Fprintln(w, `relayfile supervisor manages the listen daemon as a system service.
+
+On Linux  it writes a systemd user unit (~/.config/systemd/user/relayfile-listen.service).
+On macOS  it writes a launchd agent  (~/Library/LaunchAgents/com.relayfile.listen.plist).
+
+Usage:
+  relayfile supervisor install [LISTEN_FLAGS...]   install and start the service
+  relayfile supervisor uninstall                   stop, disable, and remove the service
+  relayfile supervisor status                      show service status
+
+Examples:
+
+  # Install: react to every new Linear triage issue
+  relayfile supervisor install \
+    --path "/linear/issues/by-state/triage/**" --event file.created \
+    --run "claude --print 'New triage issue at {{path}}. Assign it.'"
+
+  # Install: all Linear events, background agent
+  relayfile supervisor install --provider linear --run "my-agent --event '{{event}}'"
+
+  relayfile supervisor status
+  relayfile supervisor uninstall
+
+All flags accepted by 'relayfile listen' are accepted here and are embedded
+verbatim into the unit file. The service restarts automatically on failure.`)
+}
+
+const (
+	supervisorServiceName  = "relayfile-listen"
+	supervisorLaunchdLabel = "com.relayfile.listen"
+)
+
+func supervisorSystemdUnitPath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".config", "systemd", "user", supervisorServiceName+".service"), nil
+}
+
+func supervisorLaunchdPlistPath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, "Library", "LaunchAgents", supervisorLaunchdLabel+".plist"), nil
+}
+
+func runSupervisor(args []string, stdout io.Writer) error {
+	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" {
+		printSupervisorUsage(stdout)
+		return nil
+	}
+	sub := args[0]
+	rest := args[1:]
+	switch sub {
+	case "install":
+		return supervisorInstall(rest, stdout)
+	case "uninstall", "remove":
+		return supervisorUninstall(stdout)
+	case "status":
+		return supervisorStatus(stdout)
+	default:
+		printSupervisorUsage(stdout)
+		return fmt.Errorf("unknown supervisor subcommand %q", sub)
+	}
+}
+
+func supervisorInstall(listenArgs []string, stdout io.Writer) error {
+	executable, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("locate relayfile binary: %w", err)
+	}
+	logFile := listenLogFile()
+
+	switch runtime.GOOS {
+	case "linux":
+		return supervisorInstallSystemd(executable, listenArgs, logFile, stdout)
+	case "darwin":
+		return supervisorInstallLaunchd(executable, listenArgs, logFile, stdout)
+	default:
+		return fmt.Errorf("supervisor install is not supported on %s; run 'relayfile listen --background' instead", runtime.GOOS)
+	}
+}
+
+func supervisorInstallSystemd(executable string, listenArgs []string, logFile string, stdout io.Writer) error {
+	unitPath, err := supervisorSystemdUnitPath()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(unitPath), 0o755); err != nil {
+		return fmt.Errorf("create systemd user unit dir: %w", err)
+	}
+
+	// Build ExecStart line: quote args that contain spaces or special chars.
+	execArgs := []string{executable, "listen"}
+	execArgs = append(execArgs, listenArgs...)
+	execStart := shelljoin(execArgs)
+
+	unit := fmt.Sprintf(`[Unit]
+Description=Relayfile listen — reactive agent event stream
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%s
+Restart=on-failure
+RestartSec=5s
+StandardOutput=append:%s
+StandardError=append:%s
+
+[Install]
+WantedBy=default.target
+`, execStart, logFile, logFile)
+
+	if err := os.WriteFile(unitPath, []byte(unit), 0o644); err != nil {
+		return fmt.Errorf("write unit file: %w", err)
+	}
+	fmt.Fprintf(stdout, "Wrote %s\n", unitPath)
+
+	for _, args := range [][]string{
+		{"--user", "daemon-reload"},
+		{"--user", "enable", "--now", supervisorServiceName},
+	} {
+		cmd := exec.Command("systemctl", args...)
+		cmd.Stdout = stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("systemctl %s: %w", strings.Join(args, " "), err)
+		}
+	}
+	fmt.Fprintf(stdout, "\nService started. Logs: %s\n", logFile)
+	fmt.Fprintf(stdout, "Status: systemctl --user status %s\n", supervisorServiceName)
+	return nil
+}
+
+func supervisorInstallLaunchd(executable string, listenArgs []string, logFile string, stdout io.Writer) error {
+	plistPath, err := supervisorLaunchdPlistPath()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(plistPath), 0o755); err != nil {
+		return fmt.Errorf("create LaunchAgents dir: %w", err)
+	}
+
+	// Build <array> of <string> elements for ProgramArguments.
+	programArgs := append([]string{executable, "listen"}, listenArgs...)
+	var argElems strings.Builder
+	for _, a := range programArgs {
+		argElems.WriteString("\t\t<string>")
+		argElems.WriteString(plistEscapeXML(a))
+		argElems.WriteString("</string>\n")
+	}
+
+	plist := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>%s</string>
+	<key>ProgramArguments</key>
+	<array>
+%s	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>StandardOutPath</key>
+	<string>%s</string>
+	<key>StandardErrorPath</key>
+	<string>%s</string>
+</dict>
+</plist>
+`, supervisorLaunchdLabel, argElems.String(), plistEscapeXML(logFile), plistEscapeXML(logFile))
+
+	if err := os.WriteFile(plistPath, []byte(plist), 0o644); err != nil {
+		return fmt.Errorf("write plist: %w", err)
+	}
+	fmt.Fprintf(stdout, "Wrote %s\n", plistPath)
+
+	// Unload first in case an old version is loaded.
+	unload := exec.Command("launchctl", "unload", "-w", plistPath)
+	_ = unload.Run()
+
+	load := exec.Command("launchctl", "load", "-w", plistPath)
+	load.Stdout = stdout
+	load.Stderr = os.Stderr
+	if err := load.Run(); err != nil {
+		return fmt.Errorf("launchctl load: %w", err)
+	}
+	fmt.Fprintf(stdout, "\nService started. Logs: %s\n", logFile)
+	fmt.Fprintf(stdout, "Status: launchctl list %s\n", supervisorLaunchdLabel)
+	return nil
+}
+
+func supervisorUninstall(stdout io.Writer) error {
+	switch runtime.GOOS {
+	case "linux":
+		return supervisorUninstallSystemd(stdout)
+	case "darwin":
+		return supervisorUninstallLaunchd(stdout)
+	default:
+		return fmt.Errorf("supervisor uninstall is not supported on %s", runtime.GOOS)
+	}
+}
+
+func supervisorUninstallSystemd(stdout io.Writer) error {
+	for _, args := range [][]string{
+		{"--user", "disable", "--now", supervisorServiceName},
+	} {
+		cmd := exec.Command("systemctl", args...)
+		cmd.Stdout = stdout
+		cmd.Stderr = os.Stderr
+		_ = cmd.Run() // best-effort; unit may not be loaded
+	}
+	unitPath, err := supervisorSystemdUnitPath()
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(unitPath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove unit file: %w", err)
+	}
+	exec.Command("systemctl", "--user", "daemon-reload").Run() //nolint
+	fmt.Fprintln(stdout, "Service stopped and removed.")
+	return nil
+}
+
+func supervisorUninstallLaunchd(stdout io.Writer) error {
+	plistPath, err := supervisorLaunchdPlistPath()
+	if err != nil {
+		return err
+	}
+	unload := exec.Command("launchctl", "unload", "-w", plistPath)
+	unload.Stdout = stdout
+	unload.Stderr = os.Stderr
+	_ = unload.Run() // best-effort
+	if err := os.Remove(plistPath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove plist: %w", err)
+	}
+	fmt.Fprintln(stdout, "Service stopped and removed.")
+	return nil
+}
+
+func supervisorStatus(stdout io.Writer) error {
+	switch runtime.GOOS {
+	case "linux":
+		cmd := exec.Command("systemctl", "--user", "status", supervisorServiceName)
+		cmd.Stdout = stdout
+		cmd.Stderr = os.Stderr
+		_ = cmd.Run()
+	case "darwin":
+		cmd := exec.Command("launchctl", "list", supervisorLaunchdLabel)
+		cmd.Stdout = stdout
+		cmd.Stderr = os.Stderr
+		_ = cmd.Run()
+	default:
+		fmt.Fprintf(stdout, "supervisor status is not supported on %s\n", runtime.GOOS)
+	}
+	return nil
+}
+
+// shelljoin builds a shell-safe ExecStart string by quoting arguments that
+// contain spaces or shell metacharacters.
+func shelljoin(args []string) string {
+	quoted := make([]string, len(args))
+	for i, a := range args {
+		if strings.ContainsAny(a, " \t\"'\\$`{}[]|&;<>()#~!") {
+			a = "\"" + strings.ReplaceAll(a, "\"", "\\\"") + "\""
+		}
+		quoted[i] = a
+	}
+	return strings.Join(quoted, " ")
+}
+
+// plistEscapeXML escapes the five XML entities that can appear in plist string values.
+func plistEscapeXML(s string) string {
+	s = strings.ReplaceAll(s, "&", "&amp;")
+	s = strings.ReplaceAll(s, "<", "&lt;")
+	s = strings.ReplaceAll(s, ">", "&gt;")
+	s = strings.ReplaceAll(s, "\"", "&quot;")
+	s = strings.ReplaceAll(s, "'", "&apos;")
+	return s
+}
+
 func runTree(args []string, stdout io.Writer) error {
 	fs := flag.NewFlagSet("tree", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -6325,288 +7054,6 @@ func runRestart(args []string, stdout io.Writer) error {
 		mountArgs = append(mountArgs, "--background")
 	}
 	return runMount(mountArgs)
-}
-
-// runSupervisor generates and installs/uninstalls platform-specific process
-// supervisor service files (launchd on macOS, systemd on Linux) so that
-// `relayfile start --background` is replaced by a supervised, auto-restarting
-// service. A supervised mount survives kills, reboots, and—combined with the
-// degraded-mode credential refresh loop—stale delegated credentials.
-//
-// Usage:
-//
-//	relayfile supervisor install [WORKSPACE] [--interval 30s]
-//	relayfile supervisor uninstall [WORKSPACE]
-//	relayfile supervisor status [WORKSPACE]
-func runSupervisor(args []string, stdout io.Writer) error {
-	if len(args) == 0 {
-		fmt.Fprintln(stdout, "Usage: relayfile supervisor <install|uninstall|status> [WORKSPACE]")
-		return nil
-	}
-	subcommand := args[0]
-	switch subcommand {
-	case "install":
-		return runSupervisorInstall(args[1:], stdout)
-	case "uninstall":
-		return runSupervisorUninstall(args[1:], stdout)
-	case "status":
-		return runSupervisorStatus(args[1:], stdout)
-	default:
-		return fmt.Errorf("unknown supervisor subcommand %q; use install, uninstall, or status", subcommand)
-	}
-}
-
-func runSupervisorInstall(args []string, stdout io.Writer) error {
-	fs := flag.NewFlagSet("supervisor install", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	intervalFlag := fs.Duration("interval", defaultMountInterval, "sync interval")
-	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
-		"interval": true,
-	})); err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			fmt.Fprintln(stdout, "Usage: relayfile supervisor install [WORKSPACE] [--interval 30s]")
-			return nil
-		}
-		return err
-	}
-	record, err := resolveWorkspaceRecord(firstArg(fs))
-	if err != nil {
-		return err
-	}
-	localDir := strings.TrimSpace(record.LocalDir)
-	if localDir == "" {
-		return fmt.Errorf("workspace %s has no recorded local mirror directory; run relayfile start %s <LOCAL_DIR> first", record.Name, record.Name)
-	}
-	exe, err := os.Executable()
-	if err != nil {
-		return fmt.Errorf("resolve relayfile executable path: %w", err)
-	}
-	exe, err = filepath.EvalSymlinks(exe)
-	if err != nil {
-		return fmt.Errorf("resolve relayfile executable symlinks: %w", err)
-	}
-	switch runtime.GOOS {
-	case "darwin":
-		return supervisorInstallLaunchd(record, localDir, exe, *intervalFlag, stdout)
-	case "linux":
-		return supervisorInstallSystemd(record, localDir, exe, *intervalFlag, stdout)
-	default:
-		return fmt.Errorf("supervisor install is not supported on %s; start the mount with --background and manage it with your OS process manager", runtime.GOOS)
-	}
-}
-
-func runSupervisorUninstall(args []string, stdout io.Writer) error {
-	fs := flag.NewFlagSet("supervisor uninstall", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{})); err != nil {
-		return err
-	}
-	record, err := resolveWorkspaceRecord(firstArg(fs))
-	if err != nil {
-		return err
-	}
-	switch runtime.GOOS {
-	case "darwin":
-		return supervisorUninstallLaunchd(record, stdout)
-	case "linux":
-		return supervisorUninstallSystemd(record, stdout)
-	default:
-		return fmt.Errorf("supervisor uninstall is not supported on %s", runtime.GOOS)
-	}
-}
-
-func runSupervisorStatus(args []string, stdout io.Writer) error {
-	fs := flag.NewFlagSet("supervisor status", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{})); err != nil {
-		return err
-	}
-	record, err := resolveWorkspaceRecord(firstArg(fs))
-	if err != nil {
-		return err
-	}
-	switch runtime.GOOS {
-	case "darwin":
-		return supervisorStatusLaunchd(record, stdout)
-	case "linux":
-		return supervisorStatusSystemd(record, stdout)
-	default:
-		return fmt.Errorf("supervisor status is not supported on %s", runtime.GOOS)
-	}
-}
-
-func supervisorLabelForWorkspace(workspaceID string) string {
-	sum := sha256.Sum256([]byte(strings.TrimSpace(workspaceID)))
-	return "com.relayfile.mount." + hex.EncodeToString(sum[:])[:12]
-}
-
-func supervisorPlistPath(workspaceID string) string {
-	label := supervisorLabelForWorkspace(workspaceID)
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, "Library", "LaunchAgents", label+".plist")
-}
-
-func supervisorInstallLaunchd(record workspaceRecord, localDir, exe string, interval time.Duration, stdout io.Writer) error {
-	label := supervisorLabelForWorkspace(record.ID)
-	plistPath := supervisorPlistPath(record.ID)
-	intervalSecs := int(interval.Seconds())
-	if intervalSecs < 5 {
-		intervalSecs = 5
-	}
-	logDir := filepath.Join(configDir(), "logs")
-	if err := os.MkdirAll(logDir, 0o755); err != nil {
-		return fmt.Errorf("create log dir: %w", err)
-	}
-	stdoutLog := filepath.Join(logDir, "mount-"+record.ID+".log")
-	stderrLog := filepath.Join(logDir, "mount-"+record.ID+"-err.log")
-	plist := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-	<key>Label</key>
-	<string>%s</string>
-	<key>ProgramArguments</key>
-	<array>
-		<string>%s</string>
-		<string>mount</string>
-		<string>%s</string>
-		<string>%s</string>
-		<string>--interval</string>
-		<string>%ds</string>
-	</array>
-	<key>WorkingDirectory</key>
-	<string>%s</string>
-	<key>KeepAlive</key>
-	<true/>
-	<key>RunAtLoad</key>
-	<true/>
-	<key>StandardOutPath</key>
-	<string>%s</string>
-	<key>StandardErrorPath</key>
-	<string>%s</string>
-	<key>ThrottleInterval</key>
-	<integer>10</integer>
-</dict>
-</plist>
-`, label, exe, record.ID, localDir, intervalSecs, localDir, stdoutLog, stderrLog)
-
-	if err := os.MkdirAll(filepath.Dir(plistPath), 0o755); err != nil {
-		return fmt.Errorf("create LaunchAgents directory: %w", err)
-	}
-	if err := os.WriteFile(plistPath, []byte(plist), 0o644); err != nil {
-		return fmt.Errorf("write launchd plist: %w", err)
-	}
-	// Load the service (launchctl load -w <plist>).
-	if err := supervisorRunLaunchctl("load", "-w", plistPath); err != nil {
-		fmt.Fprintf(stdout, "Warning: launchctl load failed (%v); plist written to %s — run 'launchctl load -w %s' manually\n", err, plistPath, plistPath)
-		return nil
-	}
-	fmt.Fprintf(stdout, "Supervisor installed: %s\nMount will start automatically and restart on exit.\nLogs: %s\nTo uninstall: relayfile supervisor uninstall %s\n", label, stdoutLog, record.Name)
-	return nil
-}
-
-func supervisorUninstallLaunchd(record workspaceRecord, stdout io.Writer) error {
-	label := supervisorLabelForWorkspace(record.ID)
-	plistPath := supervisorPlistPath(record.ID)
-	// Attempt unload first (stop + disable).
-	_ = supervisorRunLaunchctl("unload", "-w", plistPath)
-	if err := os.Remove(plistPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("remove launchd plist %s: %w", plistPath, err)
-	}
-	fmt.Fprintf(stdout, "Supervisor removed: %s\n", label)
-	return nil
-}
-
-func supervisorStatusLaunchd(record workspaceRecord, stdout io.Writer) error {
-	label := supervisorLabelForWorkspace(record.ID)
-	plistPath := supervisorPlistPath(record.ID)
-	if _, err := os.Stat(plistPath); errors.Is(err, os.ErrNotExist) {
-		fmt.Fprintf(stdout, "Supervisor not installed for workspace %s (plist not found at %s)\n", record.Name, plistPath)
-		return nil
-	}
-	fmt.Fprintf(stdout, "Supervisor installed: %s\nPlist: %s\nRun 'launchctl list %s' for live status.\n", label, plistPath, label)
-	return nil
-}
-
-func supervisorRunLaunchctl(args ...string) error {
-	cmd := exec.Command("launchctl", args...)
-	cmd.Stdout = io.Discard
-	cmd.Stderr = io.Discard
-	return cmd.Run()
-}
-
-func supervisorSystemdUnitName(workspaceID string) string {
-	sum := sha256.Sum256([]byte(strings.TrimSpace(workspaceID)))
-	return "relayfile-mount-" + hex.EncodeToString(sum[:])[:12] + ".service"
-}
-
-func supervisorSystemdUnitPath(workspaceID string) string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".config", "systemd", "user", supervisorSystemdUnitName(workspaceID))
-}
-
-func supervisorInstallSystemd(record workspaceRecord, localDir, exe string, interval time.Duration, stdout io.Writer) error {
-	unitName := supervisorSystemdUnitName(record.ID)
-	unitPath := supervisorSystemdUnitPath(record.ID)
-	intervalSecs := int(interval.Seconds())
-	if intervalSecs < 5 {
-		intervalSecs = 5
-	}
-	unit := fmt.Sprintf(`[Unit]
-Description=Relayfile mount for workspace %s
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-ExecStart=%s mount %s %s --interval %ds
-WorkingDirectory=%s
-Restart=always
-RestartSec=10
-
-[Install]
-WantedBy=default.target
-`, record.Name, exe, record.ID, localDir, intervalSecs, localDir)
-
-	if err := os.MkdirAll(filepath.Dir(unitPath), 0o755); err != nil {
-		return fmt.Errorf("create systemd user unit directory: %w", err)
-	}
-	if err := os.WriteFile(unitPath, []byte(unit), 0o644); err != nil {
-		return fmt.Errorf("write systemd unit file: %w", err)
-	}
-	// Reload the daemon and enable+start the unit. Surface activation
-	// failures so callers know supervision is not actually running.
-	if out, err := exec.Command("systemctl", "--user", "daemon-reload").CombinedOutput(); err != nil {
-		return fmt.Errorf("systemctl daemon-reload failed: %w\n%s", err, out)
-	}
-	if out, err := exec.Command("systemctl", "--user", "enable", "--now", unitName).CombinedOutput(); err != nil {
-		return fmt.Errorf("systemctl enable --now %s failed: %w\n%s", unitName, err, out)
-	}
-	fmt.Fprintf(stdout, "Supervisor installed: %s\nUnit: %s\nTo check status: systemctl --user status %s\nTo uninstall: relayfile supervisor uninstall %s\n", unitName, unitPath, unitName, record.Name)
-	return nil
-}
-
-func supervisorUninstallSystemd(record workspaceRecord, stdout io.Writer) error {
-	unitName := supervisorSystemdUnitName(record.ID)
-	unitPath := supervisorSystemdUnitPath(record.ID)
-	_ = exec.Command("systemctl", "--user", "disable", "--now", unitName).Run()
-	if err := os.Remove(unitPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("remove systemd unit file %s: %w", unitPath, err)
-	}
-	_ = exec.Command("systemctl", "--user", "daemon-reload").Run()
-	fmt.Fprintf(stdout, "Supervisor removed: %s\n", unitName)
-	return nil
-}
-
-func supervisorStatusSystemd(record workspaceRecord, stdout io.Writer) error {
-	unitName := supervisorSystemdUnitName(record.ID)
-	unitPath := supervisorSystemdUnitPath(record.ID)
-	if _, err := os.Stat(unitPath); errors.Is(err, os.ErrNotExist) {
-		fmt.Fprintf(stdout, "Supervisor not installed for workspace %s (unit not found at %s)\n", record.Name, unitPath)
-		return nil
-	}
-	fmt.Fprintf(stdout, "Supervisor installed: %s\nUnit: %s\nRun 'systemctl --user status %s' for live status.\n", unitName, unitPath, unitName)
-	return nil
 }
 
 // isProcessAlreadyGone reports whether a signal-delivery failure means the
