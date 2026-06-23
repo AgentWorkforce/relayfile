@@ -67,6 +67,29 @@ Every provider tree has alias views for granular reads: `by-state/`, `by-label/`
 
 **vs. webhook forwarders** (Hookdeck, Svix). A forwarder delivers the event. It doesn't deliver the context. The agent still has to make API calls to understand what to do. Relayfile delivers both: the event fires, and the files were already there before it arrived.
 
+## Cloud agents (SDK)
+
+For agents running in a sandbox — E2B, Daytona, an ephemeral container, your own runtime — the TypeScript SDK mounts the workspace as local files in one call. The agent gets `ls`, `cat`, `grep` against live provider data; no manual setup, no separate auth flow.
+
+```ts
+import { RelayfileSetup } from "@relayfile/sdk"
+
+const setup = new RelayfileSetup({ accessToken })
+
+// Mount and wait for the provider to be ready before the agent starts.
+const handle = await setup.ensureMountedWorkspace({
+  workspaceId: "rw_…",
+  provider: "notion",
+  localDir: "/workspace",
+})
+
+// /workspace is now a live, writable mount of the workspace.
+// The agent reads with cat/ls/grep and writes back by saving files.
+await handle.stop()
+```
+
+`ensureMountedWorkspace` throws `ProviderNotConnectedError` if the provider isn't connected and `ProviderNotReadyError` if the initial sync hasn't finished. Pass `verifyProvider: false` to skip the probe. Full details in [docs/guides/post-auth-mount-session.md](docs/guides/post-auth-mount-session.md).
+
 ## Quick start
 
 Fastest path — hosted, zero infrastructure:
