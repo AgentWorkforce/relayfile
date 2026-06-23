@@ -65,7 +65,7 @@ Every provider tree has alias views for granular reads: `by-state/`, `by-label/`
 
 **vs. MCP.** MCP gives the agent a typed tool surface: `linear.search_issues(query)` returns what the API ranks, and each connected server loads schemas into the context window. Relayfile gives `ls /linear/issues/by-state/triage/` — exhaustive enumeration, zero schema overhead. The two compose: relayfile for reads and ambient context, MCP for typed writes that need server-side validation.
 
-**vs. webhook forwarders** (Hookdeck, Svix). A forwarder delivers the event. It doesn't deliver the context. The agent still has to make API calls to understand what to do. Relayfile delivers both: the event fires, and the files were already there before it arrived.
+**vs. webhook forwarders** (Hookdeck, Svix). A raw webhook is a diff without context — it tells you something changed, not what the full state is. A forwarder delivers the notification; your agent still has to make API calls to understand what to do. Relayfile materializes the event: the webhook arrives, the file updates, and by the time your `--run` command fires the full record is already on disk. So are the sprint, the assignees, and every related record — materialized by previous webhooks. The agent wakes up into a complete world, not a notification.
 
 ## Cloud agents (SDK)
 
