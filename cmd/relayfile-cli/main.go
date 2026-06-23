@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -5727,6 +5728,23 @@ func runDev(args []string, stdin io.Reader, stdout io.Writer) error {
 	return runListen(args, stdout)
 }
 
+// wsEncodeGlob encodes a path glob for a WebSocket URL query parameter,
+// preserving /, *, and ? as literal characters so server-side glob matching works.
+func wsEncodeGlob(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r == '/' || r == '*' || r == '?' || r == '-' || r == '_' || r == '.' || r == '~':
+			b.WriteRune(r)
+		case (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9'):
+			b.WriteRune(r)
+		default:
+			b.WriteString(url.QueryEscape(string(r)))
+		}
+	}
+	return b.String()
+}
+
 func runListen(args []string, stdout io.Writer) error {
 	fs := flag.NewFlagSet("listen", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -5792,19 +5810,28 @@ func runListen(args []string, stdout io.Writer) error {
 	if pathFilter == "" && strings.TrimSpace(*providerFlag) != "" {
 		pathFilter = fmt.Sprintf("/%s/**", strings.TrimSpace(*providerFlag))
 	}
-	q := url.Values{}
-	q.Set("from", "now")
+	// Build the raw query manually so that path glob characters (/ * ?) are NOT
+	// percent-encoded. url.Values.Encode() encodes them, which causes the server
+	// glob matcher to receive a literal "%2Flinear%2F%2A%2A" and match nothing.
+	rawParts := []string{"from=now"}
 	if pathFilter != "" {
-		q.Set("path", pathFilter)
+		rawParts = append(rawParts, "path="+wsEncodeGlob(pathFilter))
 	}
 	// Token in query param for WS upgrade (server does not yet support Authorization on upgrade).
-	q.Set("token", commandClient.client.token)
-	base.RawQuery = q.Encode()
+	rawParts = append(rawParts, "token="+url.QueryEscape(commandClient.client.token))
+	base.RawQuery = strings.Join(rawParts, "&")
 
 	rootCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// WebSocket upgrade requires HTTP/1.1; disable h2 so TLS ALPN negotiation
+	// doesn't select HTTP/2 (which rejects the Upgrade header).
+	wsTransport := http.DefaultTransport.(*http.Transport).Clone()
+	wsTransport.TLSNextProto = make(map[string]func(string, *tls.Conn) http.RoundTripper)
+	wsHTTPClient := &http.Client{Transport: wsTransport}
+
 	conn, _, err := websocket.Dial(rootCtx, base.String(), &websocket.DialOptions{
+		HTTPClient: wsHTTPClient,
 		HTTPHeader: http.Header{
 			"Authorization": []string{"Bearer " + commandClient.client.token},
 		},
