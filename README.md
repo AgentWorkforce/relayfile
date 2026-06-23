@@ -1,12 +1,46 @@
 <p align="center">
-  <img src="assets/banner.png" alt="Relayfile — the integration filesystem for agents" width="900">
+  <img src="assets/banner.png" alt="Relayfile — reactive agents without the plumbing" width="900">
 </p>
 
-**The integration filesystem for agents.**
+**Reactive agents without the plumbing.**
 
-Mount Linear, Notion, GitHub, Slack, HubSpot, Salesforce, and the rest of your SaaS stack as a virtual filesystem. Every agent in your system reads them with `cat`, writes them by saving files, and coordinates through a real, ACL'd, real-time-synced filesystem. The mount can live anywhere — the SDK, CLI, and FUSE layer all let you choose where to expose it.
+A Linear issue lands in Triage. `relayfile listen` fires. Your agent reads `/linear/issues/ENG-123.md` — already synced, no API call — scans open triage items, finds an available assignee, and patches the issue by writing the file back. Event arrives, context is there, agent acts.
 
-LLMs are far better at reading files than calling typed tools — the file system is the most-trained-on API in existence. Relayfile leans on that instead of fighting it.
+That's the loop relayfile closes. Provider webhooks are normalized and delivered as file events. Your SaaS stack is a live filesystem the agent reads with `cat` and writes with file saves. No ingestion code. No per-provider API clients in the agent. No context window full of tool schemas.
+
+## The reactive loop
+
+```bash
+# Issue lands in Triage → agent reads context, assigns it, patches back
+relayfile listen --path "/linear/issues/by-state/triage/**" --event file.created \
+  --run "claude --print 'New issue at {{path}}. Read the file, check open triage items and available assignees, assign it.'"
+```
+
+When the event fires, `/linear/issues/ENG-123.md` is already there. So is `/linear/issues/by-state/triage/` (all open triage items), `/linear/users/` (who's available), `/linear/cycles/` (current sprint). The agent reads what it needs with `cat` and writes the result back — a file save, not an API call.
+
+Filter as deeply as the provider tree allows:
+
+```bash
+# PRs labeled needs-review on a specific repo
+relayfile listen --path "/github/repos/acme/api/pulls/by-label/needs-review/**" --event file.created \
+  --run "claude --print 'New PR at {{path}}. Read the diff context and write a review summary.'"
+
+# Deal moved to a new HubSpot stage
+relayfile listen --path "/hubspot/deals/**" --event file.updated \
+  --run "claude --print 'Deal updated at {{path}}. Draft a follow-up for the new stage.'"
+
+# New Shortcut story under a specific epic
+relayfile listen --path "/shortcut/stories/by-epic/payments/**" --event file.created \
+  --run "claude --print 'New payments story at {{path}}. Suggest an implementation plan.'"
+
+# Meeting notes → extract action items
+relayfile listen --provider granola --event file.created \
+  --run "claude --print 'New notes at {{path}}. Extract action items and owners.'"
+```
+
+Run in the foreground, detach with `--background`, or use `relayfile dev` for a zero-friction entry point that checks your auth and integration status first.
+
+## Read, write, coordinate
 
 ```bash
 $ ls mount/
@@ -15,395 +49,58 @@ github  linear  notion  slack
 $ cat mount/linear/issues/AGE-12.json
 { "identifier": "AGE-12", "title": "Fix login bug", "state": "Todo", ... }
 
-$ echo '{"description":"Updated by reviewer agent"}' \
-    > mount/linear/issues/AGE-12.json   # PATCH back to Linear
+$ echo '{"state":"In Review","description":"PR #42"}' > mount/linear/issues/AGE-12.json
+# ↑ PATCHes back to Linear
 
 $ grep -l '"state":"Todo"' mount/linear/issues/*.json
 ```
 
-That's the entire interface. No new SDK to learn, no MCP schemas eating your context window — just the bash and file-IO an agent already knows.
+Write-back is a file save on the same path the agent read from. No separate write API, no schema to learn.
 
-## Quick paths
+Multiple agents share the same mount. When agent A writes, agent B sees it within a second — no push, no merge. Reviewer agents watch implementer agents in real time. **The filesystem is the coordination protocol.**
 
-- **Hosted integrations:** `npx relayfile setup --provider notion --workspace research-room --local-dir ./relayfile-mount`
-- **Local OSS:** run the Docker stack below, then mount `ws_demo` as a normal directory.
-- **Sandbox SDK:** use `RelayfileSetup.ensureMountedWorkspace()` when your runtime already has a cloud access token.
-- **Programmatic agents:** wrap `RelayFileClient.readFile()` / `writeFile()` as one tool inside Vercel AI SDK, Claude Agent SDK, OpenAI Agents SDK, or any custom harness.
+Every provider tree has alias views for granular reads: `by-state/`, `by-label/`, `by-epic/`, `by-name/`, `by-id/`. Run `relayfile tree / --depth 3` to explore what's available for your connected providers.
 
-```ts
-import { RelayFileClient } from "@relayfile/sdk"
+## vs. MCP and webhook forwarders
 
-const files = new RelayFileClient({ token: process.env.RELAYFILE_TOKEN! })
+**vs. MCP.** MCP gives the agent a typed tool surface: `linear.search_issues(query)` returns what the API ranks, and each connected server loads schemas into the context window. Relayfile gives `ls /linear/issues/by-state/triage/` — exhaustive enumeration, zero schema overhead. The two compose: relayfile for reads and ambient context, MCP for typed writes that need server-side validation.
 
-// Use this as the body of a Vercel AI SDK tool, Claude SDK MCP tool,
-// OpenAI Agents SDK tool, or your own agent runtime callback.
-export async function readRelayfile(path: string) {
-  return files.readFile("rw_123", path)
-}
-```
+**vs. webhook forwarders** (Hookdeck, Svix). A forwarder delivers the event. It doesn't deliver the context. The agent still has to make API calls to understand what to do. Relayfile delivers both: the event fires, and the files were already there before it arrived.
 
-Common workflows:
+## Quick start
 
-- Read `/digests/yesterday.md`, then drill into `/github`, `/linear`, and `/notion` only when needed.
-- Create or patch provider records by writing JSON to canonical paths such as `/linear/issues/...`.
-- Give each worker only the paths it needs, e.g. read Notion and write Linear follow-ups.
-
-## Mount layout
-
-Every mount is self-describing. The agent never needs to learn paths from documentation — `cat mount/LAYOUT.md` lists everything, and per-integration `<integration>/.layout.md` files document tree shapes. Each directory holds an `_index.json` with the rows it contains, and entity files follow a `<sanitized-name>__<id>` naming convention so identifiers are recoverable from any filename.
-
-```
-mount/
-├── LAYOUT.md                              # virtual, read-only — top-level guide
-├── _index.json                            # root listing
-├── linear/
-│   ├── .layout.md                         # linear-specific tree shape
-│   ├── issues/
-│   │   ├── _index.json
-│   │   ├── AGE-12__fix-login-bug.json     # canonical: <slug>__<id>
-│   │   ├── by-title/AGE-12-fix-login-bug.json
-│   │   ├── by-id/AGE-12.json
-│   │   └── by-state/in-progress/AGE-12__fix-login-bug.json
-│   └── users/by-name/dana.json
-└── github/
-    └── repos/
-        ├── _index.json
-        ├── acme/api/
-        │   └── pulls/42__bump-deps/meta.json
-        └── by-name/acme__api.json
-```
-
-Four alias views ship out of the box: `by-title/` (slug lookups), `by-id/` (identifier lookups), `by-name/` (human-readable name lookups), and `by-state/` (grouped by issue/PR state). GitHub repo subtrees can be materialized lazily (opt-in via `--lazy-repos`) for huge-org workspaces.
-
-## Why files
-
-Three reasons:
-
-1. **Context efficiency.** A typical MCP setup loads 100+ tool schemas into every agent session before any work happens. Files load nothing — context cost is what the agent actually opens.
-2. **Completeness.** APIs return what their search ranks. `ls` returns what's there. For "what changed yesterday across these three integrations" type questions, exhaustive enumeration beats query-by-query retrieval.
-3. **Coordination.** Multiple agents working through the same filesystem can see each other's writes immediately, scoped by ACL. Multi-agent collaboration becomes a property of the substrate, not something each app re-implements.
-
-## Real-time multi-agent sync
-
-Most "filesystem for agents" projects assume one agent at a time. Relayfile assumes many.
-
-When agent A writes a file, agent B sees the new contents on the next read — within a second, no commit, no push, no merge. That's not polish; it's the difference between agents that *use* a filesystem and agents that *coordinate through* one.
-
-```
-# terminal 1: reviewer agent watching the ticket
-$ tail -F mount/linear/issues/AGE-12.json
-{ "title": "Fix login bug", "state": "Todo", ... }
-
-# terminal 2: implementer agent (writes after pushing the fix)
-$ echo '{"state":"In Review","description":"PR #42"}' \
-    > mount/linear/issues/AGE-12.json
-
-# terminal 1, ~half a second later — same file, new contents
-$ tail -F mount/linear/issues/AGE-12.json
-{ "title": "Fix login bug", "state": "In Review", ..., "description": "PR #42" }
-```
-
-Without write-through invalidation, this falls apart. Two agents on the same data either hit stale-read bugs (B reads a cached version after A wrote) or step on each other (last-write-wins, no notification). Some virtual-filesystem-for-agents projects have this as an open issue today; relayfile shipped it.
-
-This is what turns multi-agent collaboration into a property of the substrate instead of something every app has to reinvent. Reviewer agents watch implementer agents in real time. A persona-orchestrator agent watches workers' progress through their writes. None of that requires a coordination protocol on top of relayfile — **the filesystem is the protocol.**
-
-## React to events locally
-
-`relayfile listen` streams live file events from your workspace and runs a command for each one. Provider webhooks arrive normalized — you write the reaction, not the plumbing.
-
-Because every provider is a filesystem, `--path` can filter far below the provider level — by Linear status, GitHub label, Notion database, Slack channel, Asana project, and more:
+Fastest path — hosted, zero infrastructure:
 
 ```bash
-# New Linear issue → triage it
-relayfile listen --provider linear --event file.created \
-  --run "claude --print 'New issue at {{path}}. Suggest priority and owner.'"
-
-# Only issues that land in Triage state specifically
-relayfile listen --path "/linear/issues/by-state/triage/**" --event file.created \
-  --run "claude --print 'Untriaged issue at {{path}}. Assign priority, owner, and cycle.'"
-
-# New PR labeled needs-review on a specific repo
-relayfile listen --path "/github/repos/acme/api/pulls/by-label/needs-review/**" --event file.created \
-  --run "claude --print 'PR needs review at {{path}}. Summarise the diff and flag risks.'"
-
-# New message in a specific Slack incident channel
-relayfile listen --path "/slack/channels/incidents/**" --event file.created \
-  --run "claude --print 'New incident message at {{path}}. Draft a status-page update.'"
-
-# New Shortcut story under a specific epic
-relayfile listen --path "/shortcut/stories/by-epic/payments/**" --event file.created \
-  --run "claude --print 'New payments story at {{path}}. Suggest an implementation approach.'"
-
-# Fathom call recording → follow-up email
-relayfile listen --provider fathom --event file.created \
-  --run "claude --print 'New call at {{path}}. Write a follow-up with key decisions.'"
+npx relayfile setup --provider linear --workspace my-agent --local-dir ./mount
 ```
 
-`--run` supports `{{path}}`, `{{type}}`, `{{provider}}`, `{{revision}}`, and `{{event}}` (full JSON). The alias views available in each provider tree (`by-state/`, `by-label/`, `by-epic/`, `by-name/`, …) are discoverable with `relayfile tree / --depth 3`. Run `relayfile help listen` for the full example set across all providers.
-
-No local daemon or FUSE mount is required — `relayfile listen` connects directly to Agent Relay Cloud via WebSocket.
-
-Run in the foreground, or detach:
+Local OSS:
 
 ```bash
-# Foreground (Ctrl+C to stop)
-relayfile listen --provider linear --event file.created --run "..."
-
-# Background — logs to ~/.relayfile/listen.log
-relayfile listen --provider linear --event file.created --run "..." --background
-
-# Zero-friction entry point: checks auth, prints status, then listens
-relayfile dev --provider linear --event file.created --run "..."
-```
-
-> **Cloud outbound delivery (coming soon):** push normalized events to any HTTPS endpoint with no local process required. Track [AgentWorkforce/relayfile-providers#cloud-webhooks](https://github.com/AgentWorkforce/relayfile-providers).
-
-> **Want this running headlessly for your whole team** — turning issues into reviewed PRs automatically?
-> See [AgentWorkforce/factory](https://github.com/AgentWorkforce/factory).
-
-## What's in the box
-
-- **File-native reads.** `ls`, `cat`, `grep`, `find` — the agent's native vocabulary. No tool schemas in context.
-- **File-native writes.** PATCH a record by writing to its canonical path. CREATE by saving a draft filename. DELETE by removing the file. Per-resource schemas are discoverable in-tree (`<resource>/.schema.json`). See [relayfile-adapters](https://github.com/AgentWorkforce/relayfile-adapters).
-- **Per-agent ACLs.** Scope each agent's read/write surface via `.relayfile.acl`. Agents see only the paths they should — readonly on the rest of the tree.
-- **Real-time multi-agent sync.** Writes from one agent are visible to others on the next read. No commit/push/pull cycle, no merge.
-- **Real OS mount.** Native bash, native `find`/`grep`/`jq`/`rg`, no emulation gaps. Any process — agents, scripts, IDEs — can read or write the mount.
-- **Pluggable architecture.** A core file server plus [adapters](https://github.com/AgentWorkforce/relayfile-adapters) (per-integration logic) and [providers](https://github.com/AgentWorkforce/relayfile-providers) (auth/proxy via Nango, Composio, Pipedream). One provider integration unlocks tens of apps.
-- **`relayfile listen` / `relayfile dev`.** Stream live events and run a command per match. Foreground or `--background`. The local on-ramp to reactive agents.
-
-## Works with
-
-Anything that can read and write files works with relayfile out of the box — that's the point. Confirmed integration recipes ship for:
-
-| Framework | Recipe |
-|---|---|
-| Claude Code | [setting-up-relayfile skill](https://github.com/AgentWorkforce/skills/blob/main/skills/setting-up-relayfile/SKILL.md) |
-| Anything that runs `bash` | works out of the box (it's a real OS mount) |
-
-More framework recipes (Vercel AI SDK, OpenAI Agents SDK, LangGraph, Pydantic AI) are landing as part of [#106](https://github.com/AgentWorkforce/relayfile/issues/106).
-
-## How relayfile compares
-
-The "give agents a filesystem" idea is a healthy direction — relayfile isn't the only project pointing at it.
-
-**vs. MCP servers (Linear, Notion, Slack, GitHub, …).** MCP gives the agent a typed tool surface per integration. Strong for single, well-defined writes (`linear.create_issue(title, priority, …)` enforces the shape at call time). The cost is that each connected server loads tool schemas into the context window, and an LLM is more reliable reading a directory than juggling N typed APIs. Relayfile exposes the same integrations as paths you can `Read` / `Bash` / `Glob` — no schema overhead — with exhaustive enumeration where MCP returns API search results. The two compose well: relayfile for reads and synthesis, MCP for typed writes that need server-side validation.
-
-**vs. [Mirage](https://github.com/strukto-ai/mirage) and other virtual-filesystem-for-agents projects.** Mirage is doing thoughtful work in this space and it's worth a look. Their focus is **infrastructure and storage primitives** — S3, Postgres, Redis, GDrive, GCS, Mongo, SSH — mounted side-by-side as one tree. Relayfile's focus is **integrations** — the SaaS APIs where day-to-day agent work lives — with file-native writeback (PATCH / CREATE / DELETE through file ops), per-agent ACLs, real-time multi-agent sync, and a real OS mount you can put wherever fits your stack. Different scopes, both useful; pick the one your work lives in (or run both).
-
-**vs. rolling your own.** A single agent against a single backend can do fine with FUSE, Mountpoint, or direct SDK calls. Relayfile becomes worth it when you need multi-agent coordination, scoped capabilities, and a consistent read/write contract across many SaaS surfaces.
-
-## Run Locally
-
-Fastest path:
-
-```bash
-cd docker
-docker compose up --build
-```
-
-This starts:
-
-| Service | URL | Purpose |
-|---|---|---|
-| relayfile | `http://localhost:9090` | VFS API |
-| relayauth | `http://localhost:9091` | local dev token issuer |
-| seed | exits after setup | creates `ws_demo` sample files |
-
-Try the local API:
-
-```bash
+cd docker && docker compose up --build
 TOKEN="$(docker compose logs seed | awk '/token/ {print $NF}' | tail -1)"
-
-curl -H "Authorization: Bearer $TOKEN" \
-  -H "X-Correlation-Id: quickstart-tree" \
-  "http://localhost:9090/v1/workspaces/ws_demo/fs/tree?path=/"
-
-curl -H "Authorization: Bearer $TOKEN" \
-  -H "X-Correlation-Id: quickstart-read" \
-  "http://localhost:9090/v1/workspaces/ws_demo/fs/file?path=/docs/welcome.md"
-```
-
-Mount the workspace as ordinary local files:
-
-```bash
-cd ..
 RELAYFILE_TOKEN="$TOKEN" go run ./cmd/relayfile-mount \
-  --base-url http://localhost:9090 \
-  --workspace ws_demo \
-  --local-dir ./relayfile-mount
+  --base-url http://localhost:9090 --workspace ws_demo --local-dir ./mount
 ```
 
-Limit the daemon to one or more remote subtrees by repeating
-`--remote-path`. Each subtree is mirrored under the matching path inside
-`--local-dir`, which avoids full-workspace export pulls on large workspaces:
-
-```bash
-RELAYFILE_TOKEN="$TOKEN" go run ./cmd/relayfile-mount \
-  --base-url http://localhost:9090 \
-  --workspace ws_demo \
-  --local-dir ./relayfile-mount \
-  --remote-path /github \
-  --remote-path /slack/channels/proj-cloud
-```
-
-For long path lists, pass `--paths-file ./paths.json`; the file may be a JSON
-array of remote roots or a newline-separated list.
-
-Now any local tool or agent can use `./relayfile-mount` like a normal directory.
-
-## Running Evals
-
-Relayfile evals live under `evals/suites/*/cases.md` and compile to gitignored
-`cases.jsonl` files using the shared Agent Assistant human-eval harness.
-
-```bash
-npm run evals:list
-npm run evals -- --suite vfs-contracts
-npm run evals -- --suite provider-readiness
-npm run evals:offline
-```
-
-The default executor uses an isolated fixture-backed mount, so deterministic
-VFS, ACL, concurrency, and writeback cases run offline. Provider-backed or
-real-mount cases can opt into a configured mount with `RELAYFILE_MOUNT`,
-`RELAYFILE_WORKSPACE`, and `RELAYFILE_TOKEN`.
-
-To add a case, create a `## suite.case-id` block in a suite `cases.md` with
-`Message`, optional JSON `Mock`, JSON `Operations`, deterministic checks, and
-`Must` / `Must Not` reviewer notes. Run `npm run evals:compile` before running
-the suite.
-
-## Local Development Without Docker
-
-Start the local token issuer:
-
-```bash
-node docker/relayauth/server.js
-```
-
-In another terminal, start relayfile:
-
-```bash
-RELAYFILE_BACKEND_PROFILE=durable-local \
-RELAYFILE_DATA_DIR=.data \
-RELAYAUTH_JWKS_URL=http://127.0.0.1:9091/.well-known/jwks.json \
-go run ./cmd/relayfile
-```
-
-In a third terminal:
-
-```bash
-export RELAYFILE_WORKSPACE=ws_demo
-export RELAYFILE_TOKEN="$(./scripts/generate-dev-token.sh "$RELAYFILE_WORKSPACE")"
-
-go run ./cmd/relayfile-cli login \
-  --server http://127.0.0.1:8080 \
-  --token "$RELAYFILE_TOKEN"
-
-go run ./cmd/relayfile-cli seed "$RELAYFILE_WORKSPACE" ./examples
-go run ./cmd/relayfile-cli tree "$RELAYFILE_WORKSPACE" /
-go run ./cmd/relayfile-cli mount "$RELAYFILE_WORKSPACE" ./relayfile-mount --once
-```
+See [getting-started.md](docs/guides/getting-started.md) for the full local dev path and CLI reference.
 
 ## Ecosystem
 
-This repo is the file server and local mount layer. The wider Agent Relay file ecosystem also includes:
+This repo is the file server and mount layer.
 
-- [relayfile-adapters](https://github.com/AgentWorkforce/relayfile-adapters): maps provider webhooks and objects into relayfile paths, normalizes events, and defines writeback behavior.
-- [relayfile-providers](https://github.com/AgentWorkforce/relayfile-providers): handles provider auth, token lookup, API proxying, webhook subscriptions, and connection health.
+- [relayfile-adapters](https://github.com/AgentWorkforce/relayfile-adapters): webhook normalization, path mapping, writeback behavior per provider
+- [relayfile-providers](https://github.com/AgentWorkforce/relayfile-providers): provider auth, API proxy, webhook subscriptions, connection health
 
-Hosted Agent Relay runs these pieces for you. Fully self-hosted provider-backed files need relayfile plus the adapter and provider repos for the systems you expose.
+Hosted Agent Relay runs all of this for you. For end-to-end self-hosting, run relayfile plus the adapter and provider repos for the integrations you need.
 
-## Hosted Agent Relay
-
-If you want Notion, Slack, Linear, GitHub, or other provider-backed files without running any infrastructure, use hosted Agent Relay. Agent Relay Cloud runs the workspace, relayfile API, scoped auth, Nango OAuth, provider sync workers, and writeback workers for you.
-
-Use the [`setting-up-relayfile` skill](https://github.com/AgentWorkforce/skills/blob/main/skills/setting-up-relayfile/SKILL.md) when an agent should set up hosted files:
-
-```bash
-relayfile setup \
-  --provider notion \
-  --workspace my-agent \
-  --local-dir ./relayfile-mount \
-  --no-open
-```
-
-That command connects to `agentrelay.com`, creates or joins a cloud workspace, completes provider auth, waits for sync, and mounts the resulting files for the agent. The local directory is just the agent's file interface; the integration stack is hosted.
-
-Use the OSS repo when you want to run the file server yourself. Use hosted Agent Relay when you want the whole integration path managed:
-
-| Need | Local OSS | Hosted Agent Relay |
-|---|---:|---:|
-| Run relayfile locally | yes | no |
-| Mount files for an agent | yes | yes |
-| Provider OAuth | self-host provider auth | managed |
-| Provider sync/writeback | self-host workers | managed |
-| Nango | self-host for end-to-end OAuth | managed |
-
-For end-to-end self-hosting of provider-backed files, run relayfile, relayauth, the relevant [adapters](https://github.com/AgentWorkforce/relayfile-adapters), [providers](https://github.com/AgentWorkforce/relayfile-providers), and Nango. Relayfile itself does not store third-party OAuth credentials.
-
-### Mount a workspace from a sandbox (TypeScript SDK)
-
-Once a user has signed in and connected their providers in Agent Relay Cloud, a sandbox (Daytona, E2B, an ephemeral container, your own runtime) can attach the workspace as local files in a single SDK call:
-
-```ts
-import { RelayfileSetup } from "@relayfile/sdk"
-
-const setup = new RelayfileSetup({ accessToken })
-
-const handle = await setup.mountWorkspace({
-  workspaceId: "rw_…",
-  localDir: "/workspace",
-})
-
-// /workspace is now a live mount of the workspace
-console.log(handle.expiresAt)
-await handle.stop()
-```
-
-Use `ensureMountedWorkspace` when you also want provider-readiness gating in the same call:
-
-```ts
-const handle = await setup.ensureMountedWorkspace({
-  workspaceId: "rw_…",
-  provider: "notion",
-  verifyProvider: true,
-  localDir: "/workspace",
-})
-```
-
-`ensureMountedWorkspace` throws `ProviderNotConnectedError` when the provider isn't connected, and `ProviderNotReadyError({ provider, state, initialSyncState })` when the connection exists but isn't ready by `providerReadyTimeoutMs`. Pass `verifyProvider: false` to skip the probe.
-
-The handle exposes `ready`, `expiresAt`, `suggestedRefreshAt`, `env()`, `status()`, and `stop()`. The SDK supervises the local `relayfile-mount` process for you and only resolves once the mount is reachable.
-
-This is the programmatic sibling of the `relayfile setup` CLI above — same outcome (a workspace mounted at a local directory), different entry point. Use the CLI for human-driven setup; use the SDK from inside an already-authorized sandbox or agent runtime. Full details in [docs/guides/post-auth-mount-session.md](docs/guides/post-auth-mount-session.md).
-
-## Bring Existing Connections
-
-Relayfile tracks provider identity as `connectionId` metadata. The core OSS server can ingest events and queue writebacks with a `connectionId`, but the OAuth provider must be able to use that ID.
-
-Nango:
-
-- In your own self-hosted stack, point the Nango provider at your Nango host/secret and link the workspace to the existing `connectionId` and `providerConfigKey` before triggering sync.
-- Hosted `agentrelay.com` currently exposes the connect-session flow through the CLI, not a public import command for arbitrary existing Nango connections. If the connection is not in Agent Relay's Nango project, re-connect through the hosted flow or run your own Nango-backed stack.
-
-Composio:
-
-- Use your Composio API key and the existing connected account ID as the Relayfile `connectionId`.
-- The Composio provider can list/get connected accounts and proxy/write through that account.
-
-Pipedream:
-
-- Use your Pipedream Connect project credentials and the existing account ID as the Relayfile `connectionId`.
-- For proxy calls, also provide the external user ID through headers, query, or a resolver callback.
+> **Want this running headlessly for your whole team** — turning issues into reviewed PRs automatically?
+> See [AgentWorkforce/factory](https://github.com/AgentWorkforce/factory).
 
 ## Docs
 
 - [Getting started](docs/guides/getting-started.md)
 - [Cloud integration](docs/guides/cloud-integration.md)
-- [Post-auth mount session (SDK)](docs/guides/post-auth-mount-session.md)
-- [Adapters](https://github.com/AgentWorkforce/relayfile-adapters)
-- [Providers](https://github.com/AgentWorkforce/relayfile-providers)
 - [API reference](docs/api-reference.md)
-- [Docker quickstart](docker/README.md)
 - [OpenAPI spec](openapi/relayfile-v1.openapi.yaml)
