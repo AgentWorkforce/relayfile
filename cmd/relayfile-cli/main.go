@@ -5576,7 +5576,9 @@ Usage:
 Flags:
   --provider PROVIDER  filter to a specific integration (linear, notion, hubspot, …)
                        shorthand for --path /PROVIDER/**
-  --path GLOB          glob path filter, e.g. /linear/issues/** or /notion/pages/*
+  --path GLOB          glob path filter. The workspace tree has alias views that let
+                       you filter far below the provider level — by status, label,
+                       project, channel, and more. See examples below.
   --event TYPE         filter by event type: file.created, file.updated, file.deleted
                        (default: all types)
   --run CMD            shell command to execute per matching event.
@@ -5589,40 +5591,85 @@ Examples:
   # Stream all events from the default workspace
   relayfile listen
 
-  # Watch Linear for new issues and let Claude triage them
+  # --- Linear ---
+
+  # New issue filed anywhere in Linear
   relayfile listen --provider linear --event file.created \
-    --run "claude --print 'A new Linear issue was filed. Read {{path}} and suggest a priority and owner.'"
+    --run "claude --print 'New Linear issue at {{path}}. Suggest a priority and owner.'"
 
-  # Watch Notion for any page edits
+  # New issue filed, but only when it lands in the Triage state
+  relayfile listen --path "/linear/issues/by-state/triage/**" --event file.created \
+    --run "claude --print 'Untriaged issue at {{path}}. Assign priority, owner, and cycle.'"
+
+  # Any In Progress issue updated (catch status changes, description edits, etc.)
+  relayfile listen --path "/linear/issues/by-state/in-progress/**" --event file.updated \
+    --run "claude --print 'In-progress issue changed at {{path}}. Check for blockers.'"
+
+  # --- GitHub ---
+
+  # New PR opened on any repo in the org
+  relayfile listen --path "/github/repos/**/pulls/**" --event file.created \
+    --run "claude --print 'New PR at {{path}}. Write a one-paragraph review summary.'"
+
+  # New PR labeled needs-review on a specific repo
+  relayfile listen --path "/github/repos/acme/api/pulls/by-label/needs-review/**" --event file.created \
+    --run "claude --print 'PR needs review at {{path}}. Summarise the diff and flag risks.'"
+
+  # --- Notion ---
+
+  # Any page edited across the whole workspace
   relayfile listen --provider notion --event file.updated \
-    --run "claude --print 'A Notion page changed at {{path}}. Summarise what likely changed.'"
+    --run "claude --print 'Notion page changed at {{path}}. Summarise the update.'"
 
-  # Watch HubSpot for new contacts and draft outreach
-  relayfile listen --provider hubspot --event file.created \
-    --run "claude --print 'New HubSpot contact at {{path}}. Draft a personalised first-touch email.'"
+  # Edits only inside a specific Notion database
+  relayfile listen --path "/notion/databases/roadmap/**" --event file.updated \
+    --run "claude --print 'Roadmap item changed at {{path}}. Send a Slack digest.'"
 
-  # Watch Asana for new tasks
-  relayfile listen --provider asana --event file.created \
-    --run "claude --print 'New Asana task at {{path}}. Break it into subtasks and estimate effort.'"
+  # --- Slack ---
 
-  # Watch Shortcut for new stories
-  relayfile listen --provider shortcut --event file.created \
-    --run "claude --print 'New Shortcut story at {{path}}. Suggest an implementation approach.'"
+  # New message in a specific channel
+  relayfile listen --path "/slack/channels/incidents/**" --event file.created \
+    --run "claude --print 'New incident message at {{path}}. Draft a status-page update.'"
 
-  # Watch Granola for new meeting notes and extract action items
+  # --- HubSpot ---
+
+  # New contact created
+  relayfile listen --path "/hubspot/contacts/**" --event file.created \
+    --run "claude --print 'New HubSpot contact at {{path}}. Draft a personalised intro email.'"
+
+  # Deal moved to a new stage
+  relayfile listen --path "/hubspot/deals/**" --event file.updated \
+    --run "claude --print 'Deal updated at {{path}}. Draft a follow-up for the new stage.'"
+
+  # --- Asana ---
+
+  # New task in a specific project
+  relayfile listen --path "/asana/projects/q3-launch/**" --event file.created \
+    --run "claude --print 'New task in Q3 launch at {{path}}. Break it into subtasks.'"
+
+  # --- Shortcut ---
+
+  # New story under a specific epic
+  relayfile listen --path "/shortcut/stories/by-epic/payments/**" --event file.created \
+    --run "claude --print 'New payments story at {{path}}. Suggest an implementation approach.'"
+
+  # --- Granola / Fathom ---
+
+  # New meeting notes → extract action items
   relayfile listen --provider granola --event file.created \
     --run "claude --print 'New meeting notes at {{path}}. Extract action items and owners.'"
 
-  # Watch Fathom for new call recordings and send a follow-up summary
+  # New Fathom call recording → follow-up email
   relayfile listen --provider fathom --event file.created \
-    --run "claude --print 'New Fathom call at {{path}}. Write a follow-up email with key decisions.'"
+    --run "claude --print 'New call at {{path}}. Write a follow-up email with key decisions.'"
 
-  # Print raw JSON for scripting
+  # --- Scripting ---
+
+  # Print raw JSON events for piping
   relayfile listen --provider linear --format json | jq '.path'
 
-  # Explicit path glob instead of --provider
-  relayfile listen --path "/linear/issues/**" --event file.created \
-    --run "claude --print 'New issue at {{path}}.'"
+The workspace tree has alias views (by-state/, by-label/, by-epic/, by-name/, by-id/, …)
+for every provider. Run 'relayfile tree / --depth 3' to explore what's available.
 
 Want this running headlessly for your whole team — turning issues into reviewed PRs automatically?
 See https://github.com/AgentWorkforce/factory`)

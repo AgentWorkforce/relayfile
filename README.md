@@ -111,25 +111,35 @@ This is what turns multi-agent collaboration into a property of the substrate in
 
 `relayfile listen` streams live file events from your workspace and runs a command for each one. Provider webhooks arrive normalized — you write the reaction, not the plumbing.
 
+Because every provider is a filesystem, `--path` can filter far below the provider level — by Linear status, GitHub label, Notion database, Slack channel, Asana project, and more:
+
 ```bash
-# Wake Claude when a new Linear issue is filed
+# New Linear issue → triage it
 relayfile listen --provider linear --event file.created \
-  --run "claude --print 'New issue at {{path}}. Read it and suggest a priority and owner.'"
+  --run "claude --print 'New issue at {{path}}. Suggest priority and owner.'"
 
-# Extract action items when Granola adds new meeting notes
-relayfile listen --provider granola --event file.created \
-  --run "claude --print 'New meeting notes at {{path}}. Extract action items and owners.'"
+# Only issues that land in Triage state specifically
+relayfile listen --path "/linear/issues/by-state/triage/**" --event file.created \
+  --run "claude --print 'Untriaged issue at {{path}}. Assign priority, owner, and cycle.'"
 
-# Draft follow-up emails from Fathom call recordings
+# New PR labeled needs-review on a specific repo
+relayfile listen --path "/github/repos/acme/api/pulls/by-label/needs-review/**" --event file.created \
+  --run "claude --print 'PR needs review at {{path}}. Summarise the diff and flag risks.'"
+
+# New message in a specific Slack incident channel
+relayfile listen --path "/slack/channels/incidents/**" --event file.created \
+  --run "claude --print 'New incident message at {{path}}. Draft a status-page update.'"
+
+# New Shortcut story under a specific epic
+relayfile listen --path "/shortcut/stories/by-epic/payments/**" --event file.created \
+  --run "claude --print 'New payments story at {{path}}. Suggest an implementation approach.'"
+
+# Fathom call recording → follow-up email
 relayfile listen --provider fathom --event file.created \
   --run "claude --print 'New call at {{path}}. Write a follow-up with key decisions.'"
-
-# New HubSpot contact → personalised first-touch email
-relayfile listen --provider hubspot --event file.created \
-  --run "claude --print 'New contact at {{path}}. Draft a personalised intro email.'"
 ```
 
-`--run` supports `{{path}}`, `{{type}}`, `{{provider}}`, `{{revision}}`, and `{{event}}` (full JSON). Works with Notion, Asana, Shortcut, HubSpot, Granola, Fathom, and every other connected provider. Run `relayfile help listen` for the full example set.
+`--run` supports `{{path}}`, `{{type}}`, `{{provider}}`, `{{revision}}`, and `{{event}}` (full JSON). The alias views available in each provider tree (`by-state/`, `by-label/`, `by-epic/`, `by-name/`, …) are discoverable with `relayfile tree / --depth 3`. Run `relayfile help listen` for the full example set across all providers.
 
 > **Want this running headlessly for your whole team** — turning issues into reviewed PRs automatically?
 > See [AgentWorkforce/factory](https://github.com/AgentWorkforce/factory).
