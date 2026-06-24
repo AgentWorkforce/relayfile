@@ -20,6 +20,11 @@ The existing contract check (`scripts/check-contract-surface.sh`) also runs
 this guard. Release workflows for the TypeScript and Python SDKs run the same
 check before publishing.
 
+The guard is bidirectional for the TypeScript default entrypoint: it validates
+that every symbol exported from `packages/sdk/typescript/src/index.ts`,
+including local `export *` re-exports, appears in `parity.json`. A PR that adds
+a new default-entrypoint export must classify it in the parity contract.
+
 ## Current Contract
 
 | Capability | Status | Notes |
