@@ -55,7 +55,7 @@ func TestWorkspaceCreateStoresCatalogEntry(t *testing.T) {
 func TestResolveServerDefaultsToHostedRelayfile(t *testing.T) {
 	clearRelayfileEnv(t)
 
-	if got := resolveServer("", credentials{}); got != "https://api.relayfile.dev" {
+	if got := resolveServer("", credentials{}); got != "https://file.agentrelay.com" {
 		t.Fatalf("expected hosted Relayfile default server, got %q", got)
 	}
 }

@@ -43,7 +43,7 @@ import (
 )
 
 const (
-	defaultServerURL        = "https://api.relayfile.dev"
+	defaultServerURL        = "https://file.agentrelay.com"
 	defaultCloudAPIURL      = "https://agentrelay.com/cloud"
 	defaultObserverURL      = "https://agentrelay.com/observer/file"
 	minAgentRelayCLIVersion = "8.7.0"
