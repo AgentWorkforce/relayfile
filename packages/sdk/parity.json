@@ -1,0 +1,185 @@
+{
+  "schemaVersion": 1,
+  "statuses": ["both", "ts-only", "py-only", "planned"],
+  "capabilities": [
+    {
+      "id": "data-plane-client",
+      "status": "both",
+      "summary": "Filesystem, bulk write, query, events, sync/writeback operation, webhook ingest, and admin HTTP client.",
+      "tsExports": ["RelayFileClient", "DEFAULT_RELAYFILE_BASE_URL"],
+      "pyExports": ["RelayFileClient", "AsyncRelayFileClient"]
+    },
+    {
+      "id": "on-write-subscriptions",
+      "status": "both",
+      "summary": "Subscribe to write events by path pattern.",
+      "tsExports": ["onWrite", "pathMatches"],
+      "pyExports": ["on_write", "path_matches"]
+    },
+    {
+      "id": "provider-helpers",
+      "status": "both",
+      "summary": "Provider path helpers, digest paths, webhook input, and provider base class.",
+      "tsExports": ["IntegrationProvider", "computeCanonicalPath"],
+      "pyExports": [
+        "IntegrationProvider",
+        "compute_canonical_path",
+        "provider_layout_path",
+        "resource_schema_path",
+        "DIGEST_PATHS",
+        "is_digest_path"
+      ]
+    },
+    {
+      "id": "setup-control-plane",
+      "status": "both",
+      "summary": "Create/join workspaces, connect/adopt integrations, wait for readiness, metadata/resource helpers, and peer-agent invites.",
+      "tsExports": [
+        "RelayfileSetup",
+        "WorkspaceHandle",
+        "WORKSPACE_INTEGRATION_PROVIDERS",
+        "ConnectIntegrationResult",
+        "AgentWorkspaceInvite",
+        "WorkspaceInfo",
+        "WorkspacePermissions"
+      ],
+      "pyExports": [
+        "RelayfileSetup",
+        "WorkspaceHandle",
+        "WORKSPACE_INTEGRATION_PROVIDERS",
+        "ConnectIntegrationResult",
+        "AgentWorkspaceInvite",
+        "WorkspaceInfo",
+        "WorkspacePermissions"
+      ]
+    },
+    {
+      "id": "setup-errors",
+      "status": "both",
+      "summary": "Typed setup/control-plane error classes.",
+      "tsExports": [
+        "RelayfileSetupError",
+        "CloudApiError",
+        "MalformedCloudResponseError",
+        "IntegrationConnectionTimeoutError",
+        "UnknownProviderError",
+        "MissingConnectionIdError",
+        "ProviderNotConnectedError",
+        "ProviderNotReadyError"
+      ],
+      "pyExports": [
+        "RelayfileSetupError",
+        "CloudApiError",
+        "MalformedCloudResponseError",
+        "IntegrationConnectionTimeoutError",
+        "UnknownProviderError",
+        "MissingConnectionIdError",
+        "ProviderNotConnectedError",
+        "ProviderNotReadyError"
+      ]
+    },
+    {
+      "id": "connection-provider-contract",
+      "status": "both",
+      "summary": "Connection provider proxy/webhook/connect contracts.",
+      "tsExports": [
+        "ConnectionProvider",
+        "ConnectCapableProvider",
+        "ConnectConnectionStatus",
+        "ConnectSession",
+        "CreateConnectSessionInput",
+        "GetConnectConnectionStatusInput",
+        "NormalizedWebhook",
+        "ProviderConfigKeyMap",
+        "ProxyRequest",
+        "ProxyResponse",
+        "supportsConnect"
+      ],
+      "pyExports": [
+        "ConnectionProvider",
+        "ConnectCapableProvider",
+        "ConnectConnectionStatus",
+        "ConnectSession",
+        "CreateConnectSessionInput",
+        "GetConnectConnectionStatusInput",
+        "NormalizedWebhook",
+        "ProviderConfigKeyMap",
+        "ProxyRequest",
+        "ProxyResponse",
+        "supports_connect"
+      ]
+    },
+    {
+      "id": "self-host-connect",
+      "status": "both",
+      "summary": "Self-hosted OAuth/connect session helper.",
+      "tsExports": ["SelfHostConnect", "SelfHostConnectResult"],
+      "pyExports": ["SelfHostConnect", "SelfHostConnectResult"]
+    },
+    {
+      "id": "writeback-consumer",
+      "status": "both",
+      "summary": "Poll pending writebacks, dispatch handlers, and ack success/failure.",
+      "tsExports": ["WritebackConsumer", "WritebackHandler"],
+      "pyExports": ["WritebackConsumer", "WritebackHandler"]
+    },
+    {
+      "id": "integration-adapter",
+      "status": "both",
+      "summary": "Base adapter and typed sync/ingest result contracts for provider packages.",
+      "tsExports": [
+        "IntegrationAdapter",
+        "AdapterWebhook",
+        "IngestResult",
+        "SyncOptions",
+        "SyncResult"
+      ],
+      "pyExports": [
+        "IntegrationAdapter",
+        "AdapterWebhook",
+        "IngestResult",
+        "SyncOptions",
+        "SyncResult"
+      ]
+    },
+    {
+      "id": "client-read-cache",
+      "status": "planned",
+      "summary": "Client-side read cache with write-through invalidation.",
+      "tsExports": ["RelayFileReadCacheOptions"],
+      "pyExports": []
+    },
+    {
+      "id": "sync-socket-manager",
+      "status": "ts-only",
+      "summary": "Dedicated TypeScript RelayFileSync socket manager; Python uses on_write for subscription flows today.",
+      "tsExports": ["RelayFileSync"],
+      "pyExports": []
+    },
+    {
+      "id": "interactive-cloud-login",
+      "status": "ts-only",
+      "summary": "Local callback-server login flow exposed by the TypeScript CLI entrypoint.",
+      "tsExports": ["RelayfileCloudLoginOptions", "RelayfileCloudTokenSet"],
+      "pyExports": []
+    },
+    {
+      "id": "workspace-seeder",
+      "status": "ts-only",
+      "summary": "Node filesystem and tar-based workspace seeding helpers.",
+      "tsExports": ["seedWorkspace", "seedWorkspaceTar", "seedAclRules"],
+      "pyExports": []
+    },
+    {
+      "id": "mount-launcher",
+      "status": "ts-only",
+      "summary": "Node process launcher and optional native relayfile-mount binary resolution.",
+      "tsExports": [
+        "ensureRelayfileMount",
+        "getRelayfileMountBinaryPath",
+        "defaultMountLauncher"
+      ],
+      "pyExports": ["mount_workspace", "ensure_mounted_workspace"]
+    }
+  ]
+}

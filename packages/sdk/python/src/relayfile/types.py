@@ -98,6 +98,13 @@ class FileSemantics:
 
 
 @dataclass
+class ContentIdentity:
+    kind: str
+    key: str
+    ttl_seconds: int | None = None
+
+
+@dataclass
 class FileReadResponse:
     path: str
     revision: str
