@@ -5750,6 +5750,66 @@ type listenEvent struct {
 	Timestamp     string `json:"timestamp,omitempty"`
 }
 
+const listenRunDuplicateWindow = 2 * time.Second
+const listenRunDuplicateSweepInterval = 100
+
+type listenRunDuplicateSuppressor struct {
+	window time.Duration
+	seen   map[string]time.Time
+	calls  int
+}
+
+func newListenRunDuplicateSuppressor(window time.Duration) *listenRunDuplicateSuppressor {
+	if window <= 0 {
+		window = listenRunDuplicateWindow
+	}
+	return &listenRunDuplicateSuppressor{
+		window: window,
+		seen:   map[string]time.Time{},
+	}
+}
+
+func (s *listenRunDuplicateSuppressor) shouldSuppress(evt listenEvent, now time.Time) bool {
+	if s == nil {
+		return false
+	}
+	key := listenRunDuplicateKey(evt)
+	if key == "" {
+		return false
+	}
+	s.calls++
+	if s.calls%listenRunDuplicateSweepInterval == 0 {
+		for existingKey, seenAt := range s.seen {
+			if now.Sub(seenAt) > s.window {
+				delete(s.seen, existingKey)
+			}
+		}
+	}
+	if seenAt, ok := s.seen[key]; ok {
+		if now.Sub(seenAt) <= s.window {
+			return true
+		}
+		delete(s.seen, key)
+	}
+	s.seen[key] = now
+	return false
+}
+
+func listenRunDuplicateKey(evt listenEvent) string {
+	eventType := strings.TrimSpace(evt.Type)
+	eventPath := strings.TrimSpace(evt.Path)
+	if eventType == "" || eventPath == "" {
+		return ""
+	}
+	if contentHash := strings.TrimSpace(evt.ContentHash); contentHash != "" {
+		return eventType + "\x00" + eventPath + "\x00hash:" + contentHash
+	}
+	if correlationID := strings.TrimSpace(evt.CorrelationID); correlationID != "" {
+		return eventType + "\x00" + eventPath + "\x00corr:" + correlationID
+	}
+	return ""
+}
+
 func printListenUsage(w io.Writer) {
 	fmt.Fprintln(w, `relayfile listen streams live file events from a workspace and optionally
 runs a command for each matching event.
@@ -6035,6 +6095,10 @@ func runListen(args []string, stdout io.Writer) error {
 	typeFilter := strings.TrimSpace(*eventFlag)
 	runCmd := strings.TrimSpace(*runFlag)
 	format := strings.TrimSpace(*formatFlag)
+	var runDuplicateSuppressor *listenRunDuplicateSuppressor
+	if runCmd != "" {
+		runDuplicateSuppressor = newListenRunDuplicateSuppressor(listenRunDuplicateWindow)
+	}
 
 	label := "all events"
 	if pathFilter != "" {
@@ -6076,6 +6140,9 @@ func runListen(args []string, stdout io.Writer) error {
 		}
 
 		if runCmd != "" {
+			if runDuplicateSuppressor.shouldSuppress(evt, time.Now()) {
+				continue
+			}
 			expanded := listenExpandTemplate(runCmd, evt, raw)
 			cmd := exec.CommandContext(rootCtx, "sh", "-c", expanded)
 			cmd.Stdout = stdout
