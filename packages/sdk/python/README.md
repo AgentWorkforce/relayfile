@@ -2,6 +2,14 @@
 
 Python SDK for the RelayFile virtual filesystem API.
 
+## Install
+
+```bash
+pip install relayfile-sdk
+```
+
+The import namespace remains `relayfile`.
+
 ## Workspace Primitives (M1)
 
 The SDK exposes the workspace primitive paths and data shapes used by digest,
