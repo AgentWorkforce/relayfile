@@ -37,9 +37,9 @@ class Handler:
             raise RuntimeError("provider rejected write")
 
 
-def item(path: str = "/github/issues/1.json") -> WritebackItem:
+def item(path: str = "/github/issues/1.json", *, item_id: str = "wb_1") -> WritebackItem:
     return WritebackItem(
-        id="wb_1",
+        id=item_id,
         workspace_id="ws_123",
         path=path,
         revision="rev_1",
@@ -122,3 +122,43 @@ def test_writeback_consumer_retries_transient_ack_failures() -> None:
 
     assert client.ack_attempts == 2
     assert client.acks[0].success is True
+
+
+def test_writeback_consumer_records_exhausted_ack_and_continues() -> None:
+    client = FlakyAckClient([item(item_id="wb_1"), item(item_id="wb_2")], fail_times=2)
+    handler = Handler()
+    consumer = WritebackConsumer(
+        client=client,  # type: ignore[arg-type]
+        workspace_id="ws_123",
+        handlers=[handler],
+        provider=FakeProvider(),  # type: ignore[arg-type]
+        ack_max_attempts=2,
+    )
+
+    consumer.poll_once()
+
+    assert handler.executed == ["wb_1", "wb_2"]
+    assert client.ack_attempts == 3
+    assert [ack.item_id for ack in client.acks] == ["wb_2"]
+    assert consumer.ack_errors[0][0] == "wb_1"
+    assert "ack_writeback failed after 2 attempts" in str(consumer.ack_errors[0][1])
+
+
+def test_writeback_consumer_does_not_reexecute_completed_redelivery() -> None:
+    client = FlakyAckClient([item()], fail_times=2)
+    handler = Handler()
+    consumer = WritebackConsumer(
+        client=client,  # type: ignore[arg-type]
+        workspace_id="ws_123",
+        handlers=[handler],
+        provider=FakeProvider(),  # type: ignore[arg-type]
+        ack_max_attempts=2,
+    )
+
+    consumer.poll_once()
+    consumer.poll_once()
+
+    assert handler.executed == ["wb_1"]
+    assert client.ack_attempts == 3
+    assert client.acks[0].success is True
+    assert client.acks[0].item_id == "wb_1"
