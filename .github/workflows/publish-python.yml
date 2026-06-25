@@ -54,6 +54,10 @@ jobs:
           enable-cache: true
           python-version: "3.12"
 
+      - name: Check SDK parity
+        working-directory: ${{ github.workspace }}
+        run: node scripts/check-sdk-parity.mjs
+
       - name: Determine and set version
         id: bump
         shell: bash

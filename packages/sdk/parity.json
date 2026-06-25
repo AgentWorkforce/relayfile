@@ -1,0 +1,430 @@
+{
+  "schemaVersion": 1,
+  "statuses": [
+    "both",
+    "ts-only",
+    "py-only",
+    "planned"
+  ],
+  "capabilities": [
+    {
+      "id": "data-plane-client",
+      "status": "both",
+      "summary": "Filesystem, bulk write, query, events, sync/writeback operation, webhook ingest, and admin HTTP client.",
+      "tsExports": [
+        "AccessTokenProvider",
+        "AckResponse",
+        "AckWritebackDraftDisposition",
+        "AckWritebackInput",
+        "AckWritebackResponse",
+        "AdminIngressAlert",
+        "AdminIngressAlertProfile",
+        "AdminIngressAlertSeverity",
+        "AdminIngressAlertThresholds",
+        "AdminIngressAlertTotals",
+        "AdminIngressAlertType",
+        "AdminIngressEffectiveAlertProfile",
+        "AdminIngressStatusResponse",
+        "AdminSyncAlert",
+        "AdminSyncAlertSeverity",
+        "AdminSyncAlertThresholds",
+        "AdminSyncAlertTotals",
+        "AdminSyncAlertType",
+        "AdminSyncStatusResponse",
+        "BackendStatusResponse",
+        "BulkWriteFile",
+        "BulkWriteInput",
+        "BulkWriteResponse",
+        "ChangeEvent",
+        "ChangeEventActor",
+        "ChangeEventResource",
+        "ChangeEventSummary",
+        "ChangeLogQueryResult",
+        "ChangeStreamConnection",
+        "ChangeStreamConnectionOptions",
+        "CommitForkInput",
+        "CommitForkResponse",
+        "ConflictErrorResponse",
+        "ConnectWebSocketOptions",
+        "ContentIdentity",
+        "CreateForkInput",
+        "DEFAULT_RELAYFILE_BASE_URL",
+        "DeadLetterFeedResponse",
+        "DeadLetterItem",
+        "DeleteFileInput",
+        "DeleteWebhookOptions",
+        "DiffExpansion",
+        "DigestBullet",
+        "DigestContext",
+        "DigestHandler",
+        "DigestSection",
+        "DigestWindow",
+        "DiscardForkInput",
+        "ErrorResponse",
+        "EventFeedResponse",
+        "EventOrigin",
+        "EventSummary",
+        "Expansion",
+        "ExpansionLevel",
+        "ExportFormat",
+        "ExportJsonResponse",
+        "ExportOptions",
+        "FileQueryItem",
+        "FileQueryResponse",
+        "FileReadResponse",
+        "FileSemantics",
+        "FileWriteRequest",
+        "FilesystemEvent",
+        "FilesystemEventType",
+        "FullExpansion",
+        "GetAdminIngressStatusOptions",
+        "GetAdminSyncStatusOptions",
+        "GetEventsOptions",
+        "GetOperationsOptions",
+        "GetSyncDeadLettersOptions",
+        "GetSyncIngressStatusOptions",
+        "GetSyncStatusOptions",
+        "GetWebhookDeadLettersOptions",
+        "IngestWebhookInput",
+        "InvalidStateError",
+        "LayoutManifest",
+        "LayoutManifestAlias",
+        "LayoutManifestResource",
+        "ListTreeOptions",
+        "ListWebhooksOptions",
+        "OperationFeedResponse",
+        "OperationStatus",
+        "OperationStatusResponse",
+        "PayloadTooLargeError",
+        "QueryFilesOptions",
+        "QueueFullError",
+        "QueuedResponse",
+        "ReadFileInput",
+        "RegisterWebhookInput",
+        "RegisterWebhookResponse",
+        "RelayFileApiError",
+        "RelayFileChangeLogOptions",
+        "RelayFileClient",
+        "RelayFileClientOptions",
+        "RelayFileJwtClaims",
+        "RelayFileRetryOptions",
+        "ReplayOptions",
+        "ResourceAtEventResult",
+        "RevisionConflictError",
+        "SubscribeOptions",
+        "Subscription",
+        "SummaryExpansion",
+        "SweepWritebackDraftsInput",
+        "SweepWritebackDraftsResponse",
+        "SyncIngressStatusResponse",
+        "SyncProviderStatus",
+        "SyncProviderStatusState",
+        "SyncRefreshRequest",
+        "SyncStatusResponse",
+        "ThreadExpansion",
+        "TreeEntry",
+        "TreeResponse",
+        "WaitForDataOptions",
+        "WebSocketConnection",
+        "WebhookDeliveryDeadLetterFeedResponse",
+        "WebhookDeliveryDeadLetterItem",
+        "WebhookSubscription",
+        "WebhookSubscriptionHealth",
+        "WriteFileInput",
+        "WriteQueuedResponse",
+        "WritebackActionType",
+        "WritebackDeadLetterError",
+        "WritebackDeadLetterErrorCode",
+        "WritebackItem",
+        "WritebackItemDetail",
+        "WritebackListState",
+        "WritebackSchemaRef",
+        "WritebackState"
+      ],
+      "pyExports": [
+        "AsyncRelayFileClient",
+        "RelayFileClient"
+      ]
+    },
+    {
+      "id": "on-write-subscriptions",
+      "status": "both",
+      "summary": "Subscribe to write events by path pattern.",
+      "tsExports": [
+        "OnWriteClient",
+        "OnWriteHandler",
+        "OnWriteHandlerError",
+        "OnWriteOptions",
+        "onWrite",
+        "pathMatches"
+      ],
+      "pyExports": [
+        "on_write",
+        "path_matches"
+      ]
+    },
+    {
+      "id": "provider-helpers",
+      "status": "both",
+      "summary": "Provider path helpers, digest paths, webhook input, and provider base class.",
+      "tsExports": [
+        "IntegrationProvider",
+        "ListProviderFilesOptions",
+        "WatchProviderEventsOptions",
+        "WebhookInput",
+        "computeCanonicalPath"
+      ],
+      "pyExports": [
+        "DIGEST_PATHS",
+        "IntegrationProvider",
+        "compute_canonical_path",
+        "is_digest_path",
+        "provider_layout_path",
+        "resource_schema_path"
+      ]
+    },
+    {
+      "id": "setup-control-plane",
+      "status": "both",
+      "summary": "Create/join workspaces, connect/adopt integrations, wait for readiness, metadata/resource helpers, and peer-agent invites.",
+      "tsExports": [
+        "AgentWorkspaceInvite",
+        "AgentWorkspaceInviteOptions",
+        "AgentWorkspaceScopedInviteOptions",
+        "ConnectIntegrationOptions",
+        "ConnectIntegrationResult",
+        "CreateWorkspaceOptions",
+        "EnsureMountedWorkspaceInput",
+        "JoinWorkspaceOptions",
+        "MountLauncher",
+        "MountLauncherEvent",
+        "MountLauncherInstance",
+        "MountLauncherStart",
+        "MountLocalLayout",
+        "MountMode",
+        "MountSyncMode",
+        "MountWorkspaceInput",
+        "MountedWorkspaceHandle",
+        "MountedWorkspaceStatus",
+        "RELAYFILE_SDK_VERSION",
+        "ReadMountedWorkspaceStatusInput",
+        "RelayfileSetup",
+        "RelayfileSetupOptions",
+        "RelayfileSetupRetryOptions",
+        "WORKSPACE_INTEGRATION_PROVIDERS",
+        "WaitForConnectionOptions",
+        "WorkspaceHandle",
+        "WorkspaceInfo",
+        "WorkspaceIntegrationProvider",
+        "WorkspaceMountEnv",
+        "WorkspaceMountEnvOptions",
+        "WorkspacePermissions"
+      ],
+      "pyExports": [
+        "AgentWorkspaceInvite",
+        "ConnectIntegrationResult",
+        "RelayfileSetup",
+        "WORKSPACE_INTEGRATION_PROVIDERS",
+        "WorkspaceHandle",
+        "WorkspaceInfo",
+        "WorkspacePermissions"
+      ]
+    },
+    {
+      "id": "setup-errors",
+      "status": "both",
+      "summary": "Typed setup/control-plane error classes.",
+      "tsExports": [
+        "CloudAbortError",
+        "CloudApiError",
+        "CloudTimeoutError",
+        "IntegrationConnectionTimeoutError",
+        "InvalidLocalDirError",
+        "InvalidMountModeError",
+        "InvalidRemotePathError",
+        "MalformedCloudResponseError",
+        "MissingConnectionIdError",
+        "MountModeUnavailableError",
+        "MountReadyTimeoutError",
+        "MountSessionInputError",
+        "MountSessionRequest",
+        "MountSessionResponse",
+        "MountSessionResult",
+        "ProviderNotConnectedError",
+        "ProviderNotReadyError",
+        "RelayfileSetupError",
+        "UnknownProviderError"
+      ],
+      "pyExports": [
+        "CloudApiError",
+        "IntegrationConnectionTimeoutError",
+        "MalformedCloudResponseError",
+        "MissingConnectionIdError",
+        "ProviderNotConnectedError",
+        "ProviderNotReadyError",
+        "RelayfileSetupError",
+        "UnknownProviderError"
+      ]
+    },
+    {
+      "id": "connection-provider-contract",
+      "status": "both",
+      "summary": "Connection provider proxy/webhook/connect contracts.",
+      "tsExports": [
+        "ConnectCapableProvider",
+        "ConnectConnectionStatus",
+        "ConnectSession",
+        "ConnectionProvider",
+        "CreateConnectSessionInput",
+        "GetConnectConnectionStatusInput",
+        "NormalizedWebhook",
+        "ProviderConfigKeyMap",
+        "ProxyHeaders",
+        "ProxyMethod",
+        "ProxyQuery",
+        "ProxyRequest",
+        "ProxyResponse",
+        "supportsConnect"
+      ],
+      "pyExports": [
+        "ConnectCapableProvider",
+        "ConnectConnectionStatus",
+        "ConnectSession",
+        "ConnectionProvider",
+        "CreateConnectSessionInput",
+        "GetConnectConnectionStatusInput",
+        "NormalizedWebhook",
+        "ProviderConfigKeyMap",
+        "ProxyRequest",
+        "ProxyResponse",
+        "supports_connect"
+      ]
+    },
+    {
+      "id": "self-host-connect",
+      "status": "both",
+      "summary": "Self-hosted OAuth/connect session helper.",
+      "tsExports": [
+        "SelfHostConnect",
+        "SelfHostConnectOptions",
+        "SelfHostConnectResult",
+        "StartSelfHostConnectOptions",
+        "WaitForSelfHostConnectionOptions"
+      ],
+      "pyExports": [
+        "SelfHostConnect",
+        "SelfHostConnectResult"
+      ]
+    },
+    {
+      "id": "writeback-consumer",
+      "status": "both",
+      "summary": "Poll pending writebacks, dispatch handlers, and ack success/failure.",
+      "tsExports": [
+        "WritebackConsumer",
+        "WritebackConsumerOptions",
+        "WritebackHandler"
+      ],
+      "pyExports": [
+        "WritebackConsumer",
+        "WritebackHandler"
+      ]
+    },
+    {
+      "id": "integration-adapter",
+      "status": "both",
+      "summary": "Base adapter and typed sync/ingest result contracts for provider packages.",
+      "tsExports": [
+        "AdapterWebhook",
+        "AdapterWebhookMetadata",
+        "IngestError",
+        "IngestResult",
+        "IntegrationAdapter",
+        "SyncOptions",
+        "SyncResult"
+      ],
+      "pyExports": [
+        "AdapterWebhook",
+        "IngestResult",
+        "IntegrationAdapter",
+        "SyncOptions",
+        "SyncResult"
+      ]
+    },
+    {
+      "id": "client-read-cache",
+      "status": "planned",
+      "summary": "Client-side read cache with write-through invalidation.",
+      "tsExports": [
+        "RelayFileReadCacheOptions"
+      ],
+      "pyExports": []
+    },
+    {
+      "id": "sync-socket-manager",
+      "status": "ts-only",
+      "summary": "Dedicated TypeScript RelayFileSync socket manager; Python uses on_write for subscription flows today.",
+      "tsExports": [
+        "RelayFileSync",
+        "RelayFileSyncOptions",
+        "RelayFileSyncPong",
+        "RelayFileSyncReconnectOptions",
+        "RelayFileSyncSocket",
+        "RelayFileSyncStart",
+        "RelayFileSyncState",
+        "RelayFileSyncTokenProvider"
+      ],
+      "pyExports": []
+    },
+    {
+      "id": "interactive-cloud-login",
+      "status": "ts-only",
+      "summary": "Local callback-server login flow exposed by the TypeScript CLI entrypoint.",
+      "tsExports": [
+        "RelayfileCloudLoginOptions",
+        "RelayfileCloudTokenSet",
+        "RelayfileCloudTokenSetupOptions"
+      ],
+      "pyExports": []
+    },
+    {
+      "id": "workspace-seeder",
+      "status": "ts-only",
+      "summary": "Node filesystem and tar-based workspace seeding helpers.",
+      "tsExports": [
+        "seedAclRules",
+        "seedWorkspace",
+        "seedWorkspaceTar"
+      ],
+      "pyExports": []
+    },
+    {
+      "id": "mount-launcher",
+      "status": "ts-only",
+      "summary": "Node process launcher and optional native relayfile-mount binary resolution.",
+      "tsExports": [
+        "defaultMountLauncher",
+        "ensureRelayfileMount",
+        "getRelayfileMountBinaryPath"
+      ],
+      "pyExports": [
+        "ensure_mounted_workspace",
+        "mount_workspace"
+      ]
+    },
+    {
+      "id": "core-fork-and-write-events",
+      "status": "ts-only",
+      "summary": "Core package fork handles and low-level write event types re-exported by the TypeScript SDK default entrypoint.",
+      "tsExports": [
+        "ForkHandle",
+        "ForkOptions",
+        "WriteEvent",
+        "WriteEventActor",
+        "WriteEventOperation",
+        "WriteEventSource"
+      ],
+      "pyExports": []
+    }
+  ]
+}

@@ -10,6 +10,31 @@ pip install relayfile-sdk
 
 The import namespace remains `relayfile`.
 
+## Cloud Setup
+
+The Python SDK exposes the portable Relayfile Cloud setup flow from the
+TypeScript SDK. Interactive browser login and native mount launching remain
+TypeScript/Node-only, but Python can create or join workspaces, connect or
+adopt integrations, set provider metadata, and build peer-agent invites.
+
+```python
+from relayfile import RelayfileSetup
+
+setup = RelayfileSetup(access_token="cld_access_token")
+workspace = setup.create_workspace(name="docs-agent")
+
+connect = workspace.connect_integration("github")
+print(connect.connect_link)
+
+workspace.wait_for_connection(
+    "github",
+    connection_id=connect.connection_id,
+)
+
+client = workspace.client()
+tree = client.list_tree(workspace.workspace_id)
+```
+
 ## Workspace Primitives (M1)
 
 The SDK exposes the workspace primitive paths and data shapes used by digest,

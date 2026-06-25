@@ -69,4 +69,6 @@ require_pattern "$PY_TYPES_FILE" "created_at:" "python operation created_at"
 require_pattern "$PY_TYPES_FILE" "updated_at:" "python operation updated_at"
 require_pattern "$PY_TYPES_FILE" "completed_at:" "python operation completed_at"
 
+node scripts/check-sdk-parity.mjs
+
 echo "contract check passed"

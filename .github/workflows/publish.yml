@@ -118,6 +118,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Check SDK parity
+        run: node scripts/check-sdk-parity.mjs
+
       - name: Version all packages
         id: bump
         run: |
