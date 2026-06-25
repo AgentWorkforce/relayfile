@@ -25,6 +25,17 @@ that every symbol exported from `packages/sdk/typescript/src/index.ts`,
 including local `export *` re-exports, appears in `parity.json`. A PR that adds
 a new default-entrypoint export must classify it in the parity contract.
 
+Additional integrity checks:
+
+- An empty/truncated `parity.json` (no `capabilities`) fails fast instead of
+  passing a no-op gate.
+- Every `both` capability's `tsExports` must be reachable from the default
+  entrypoint, so removing a shared symbol from `index.ts` while leaving its
+  source declaration intact is reported before publishing. (`ts-only` CLI
+  surface such as the mount launcher and workspace seeder lives on CLI-only
+  subpaths and is validated against the source tree rather than the default
+  entrypoint.)
+
 ## Current Contract
 
 | Capability | Status | Notes |

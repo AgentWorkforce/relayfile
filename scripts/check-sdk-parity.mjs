@@ -10,6 +10,11 @@ const tsIndexPath = path.join(tsSrcDir, "index.ts");
 const pyInitPath = path.join(root, "packages/sdk/python/src/relayfile/__init__.py");
 
 const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+if (!Array.isArray(manifest.capabilities) || manifest.capabilities.length === 0) {
+  console.error("SDK parity check failed:");
+  console.error("- parity manifest has no capabilities; refusing to pass an empty gate");
+  process.exit(1);
+}
 const allowedStatuses = new Set(manifest.statuses ?? []);
 const tsExports = collectTypeScriptExports(tsSrcDir);
 const tsEntrypointExports = collectTypeScriptModuleExports(tsIndexPath, tsSrcDir);
@@ -38,6 +43,13 @@ for (const capability of manifest.capabilities ?? []) {
     for (const symbol of capability.pyExports ?? []) {
       if (!pyExports.has(symbol)) {
         errors.push(`${capability.id}: missing Python export ${symbol}`);
+      }
+    }
+    for (const symbol of capability.tsExports ?? []) {
+      if (!tsEntrypointExports.has(symbol)) {
+        errors.push(
+          `${capability.id}: both capability TypeScript export ${symbol} is not exported from the package entrypoint (src/index.ts)`
+        );
       }
     }
     if ((capability.tsExports ?? []).length === 0) {

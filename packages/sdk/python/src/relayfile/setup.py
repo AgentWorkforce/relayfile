@@ -42,6 +42,7 @@ DEFAULT_SCOPES = ("fs:read", "fs:write")
 DEFAULT_WAIT_INTERVAL_MS = 2_000
 DEFAULT_WAIT_TIMEOUT_MS = 300_000
 TOKEN_REFRESH_AGE_SECONDS = 55 * 60
+_RETRYABLE_STATUS = frozenset({408, 425, 429, 500, 502, 503, 504})
 
 
 def _sdk_version() -> str:
@@ -92,7 +93,7 @@ def _read_json(response: httpx.Response) -> Any:
     if "application/json" in content_type:
         try:
             return response.json()
-        except Exception:
+        except ValueError:
             return {}
     return {"message": response.text}
 
@@ -261,23 +262,37 @@ class RelayfileSetup:
         token_provider: AccessTokenProvider | None = None,
     ) -> Any:
         token_source = token_provider if token_provider is not None else self._access_token
-        token = _resolve_token(token_source) if token_source else None
-        headers = {"X-Relayfile-SDK-Version": _sdk_version()}
-        if token:
-            headers["Authorization"] = f"Bearer {token}"
-        if body is not None:
-            headers["Content-Type"] = "application/json"
+        url = f"{self._cloud_api_url}/{path.lstrip('/')}"
+        attempts = max(1, self._retry.max_retries)
+        transport_error: httpx.TransportError | None = None
+        for attempt in range(attempts):
+            token = _resolve_token(token_source) if token_source else None
+            headers = {"X-Relayfile-SDK-Version": _sdk_version()}
+            if token:
+                headers["Authorization"] = f"Bearer {token}"
+            if body is not None:
+                headers["Content-Type"] = "application/json"
 
-        response = self._client.request(
-            method,
-            f"{self._cloud_api_url}/{path.lstrip('/')}",
-            headers=headers,
-            json=body,
-        )
-        payload = _read_json(response)
-        if response.is_success:
-            return payload
-        raise CloudApiError(response.status_code, payload)
+            try:
+                response = self._client.request(method, url, headers=headers, json=body)
+            except httpx.TransportError as exc:
+                transport_error = exc
+                if attempt < attempts - 1:
+                    self._sleep_backoff(attempt)
+                    continue
+                raise
+            payload = _read_json(response)
+            if response.is_success:
+                return payload
+            if response.status_code in _RETRYABLE_STATUS and attempt < attempts - 1:
+                self._sleep_backoff(attempt)
+                continue
+            raise CloudApiError(response.status_code, payload)
+        # Only reachable if every attempt raised a transport error.
+        raise transport_error  # pragma: no cover
+
+    def _sleep_backoff(self, attempt: int) -> None:
+        time.sleep(self._retry.base_delay_ms * (2**attempt) / 1000)
 
     def create_workspace(
         self,
@@ -431,9 +446,14 @@ class WorkspaceHandle:
                 },
             )
         )
-        resolved_connection_id = (
-            _normalize_connection_id(response.get("connectionId")) or self.workspace_id
-        )
+        resolved_connection_id = _normalize_connection_id(response.get("connectionId"))
+        if resolved_connection_id is None:
+            resolved_connection_id = requested_connection_id
+        if resolved_connection_id is None:
+            raise MalformedCloudResponseError(
+                "Cloud connect-session response did not include connectionId.",
+                "malformed_cloud_response",
+            )
         self._pending_connections[normalized] = resolved_connection_id
         return ConnectIntegrationResult(
             connect_link=response.get("connectLink"),
@@ -508,9 +528,10 @@ class WorkspaceHandle:
         connection_id: str | None = None,
     ) -> None:
         normalized = _normalize_provider(provider, require_known=True)
+        query = _build_query({"connectionId": _normalize_connection_id(connection_id)})
         self.request_json(
             "DELETE",
-            f"api/v1/workspaces/{_enc(self.workspace_id)}/integrations/{_enc(normalized)}/status",
+            f"api/v1/workspaces/{_enc(self.workspace_id)}/integrations/{_enc(normalized)}/status{query}",
         )
         self._pending_connections.pop(normalized, None)
 
@@ -585,7 +606,7 @@ class WorkspaceHandle:
             key: value
             for key, value in {
                 "RELAYFILE_BASE_URL": self.info.relayfile_url,
-                "RELAYFILE_TOKEN": self.get_token(),
+                "RELAYFILE_TOKEN": self.get_or_refresh_token(),
                 "RELAYFILE_WORKSPACE": self.workspace_id,
                 "RELAYFILE_REMOTE_PATH": remote_path,
                 "RELAYFILE_LOCAL_DIR": local_dir,
@@ -615,7 +636,7 @@ class WorkspaceHandle:
             or DEFAULT_RELAYCAST_BASE_URL,
             agent_name=agent_name or self._join_options.agent_name,
             scopes=list(self._join_options.scopes),
-            relayfile_token=self.get_token() if include_relayfile_token else None,
+            relayfile_token=self.get_or_refresh_token() if include_relayfile_token else None,
             created_at=self.info.created_at,
             name=self.info.name,
         )

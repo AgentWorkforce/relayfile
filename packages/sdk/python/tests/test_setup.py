@@ -10,7 +10,9 @@ import respx
 from relayfile import (
     CloudApiError,
     IntegrationConnectionTimeoutError,
+    MalformedCloudResponseError,
     RelayfileSetup,
+    RelayfileSetupRetryOptions,
     SelfHostConnect,
     WorkspacePermissions,
 )
@@ -182,17 +184,17 @@ class ConnectProvider:
     def health_check(self, connection_id: str) -> bool:
         return True
 
-    def create_connect_session(self, input: dict[str, Any]) -> dict[str, Any]:
+    def create_connect_session(self, payload: dict[str, Any]) -> dict[str, Any]:
         return {
             "connectLink": "https://connect.test",
             "sessionToken": "session_token",
             "expiresAt": None,
-            "connectionId": input["connectionId"],
+            "connectionId": payload["connectionId"],
         }
 
-    def get_connection_status(self, input: dict[str, Any]) -> dict[str, Any]:
+    def get_connection_status(self, payload: dict[str, Any]) -> dict[str, Any]:
         self.status_calls += 1
-        return {"connectionId": input["connectionId"], "state": "oauth_connected"}
+        return {"connectionId": payload["connectionId"], "state": "oauth_connected"}
 
 
 def test_self_host_connect_uses_provider_mapping() -> None:
@@ -213,3 +215,65 @@ def test_self_host_connect_uses_provider_mapping() -> None:
     assert result.provider_config_key == "github-prod"
     assert result.connection_id == "conn_123"
     assert status["state"] == "oauth_connected"
+
+
+@respx.mock
+def test_request_json_retries_transient_errors() -> None:
+    route = respx.post(f"{CLOUD}/api/v1/workspaces/ws_123/join").mock(
+        side_effect=[
+            httpx.Response(503, json={"error": "try later"}),
+            httpx.Response(200, json=join_payload()),
+        ]
+    )
+
+    handle = RelayfileSetup(
+        cloud_api_url=CLOUD,
+        retry=RelayfileSetupRetryOptions(max_retries=3, base_delay_ms=0),
+    ).join_workspace("ws_123")
+
+    assert handle.workspace_id == "ws_123"
+    assert route.call_count == 2
+
+
+@respx.mock
+def test_request_json_does_not_retry_client_errors() -> None:
+    route = respx.post(f"{CLOUD}/api/v1/workspaces/ws_123/join").mock(
+        return_value=httpx.Response(409, json={"code": "conflict"})
+    )
+
+    with pytest.raises(CloudApiError):
+        RelayfileSetup(
+            cloud_api_url=CLOUD,
+            retry=RelayfileSetupRetryOptions(max_retries=3, base_delay_ms=0),
+        ).join_workspace("ws_123")
+    assert route.call_count == 1
+
+
+@respx.mock
+def test_connect_session_without_connection_id_raises() -> None:
+    respx.post(f"{CLOUD}/api/v1/workspaces/ws_123/join").mock(
+        return_value=httpx.Response(200, json=join_payload())
+    )
+    respx.post(f"{CLOUD}/api/v1/workspaces/ws_123/integrations/connect-session").mock(
+        return_value=httpx.Response(200, json={"token": "session_token"})
+    )
+
+    handle = RelayfileSetup(cloud_api_url=CLOUD).join_workspace("ws_123")
+    with pytest.raises(MalformedCloudResponseError):
+        handle.connect_integration("github")
+
+
+@respx.mock
+def test_disconnect_integration_sends_connection_id() -> None:
+    respx.post(f"{CLOUD}/api/v1/workspaces/ws_123/join").mock(
+        return_value=httpx.Response(200, json=join_payload())
+    )
+    route = respx.delete(
+        f"{CLOUD}/api/v1/workspaces/ws_123/integrations/github/status",
+        params={"connectionId": "conn_123"},
+    ).mock(return_value=httpx.Response(200, json={"ok": True}))
+
+    handle = RelayfileSetup(cloud_api_url=CLOUD).join_workspace("ws_123")
+    handle.disconnect_integration("github", "conn_123")
+
+    assert route.called

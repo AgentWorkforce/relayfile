@@ -14,9 +14,9 @@ class FakeClient:
         assert workspace_id == "ws_123"
         return self.items
 
-    def ack_writeback(self, input: Any) -> dict[str, Any]:
-        self.acks.append(input)
-        return {"status": "acknowledged", "id": input.item_id}
+    def ack_writeback(self, ack_input: Any) -> dict[str, Any]:
+        self.acks.append(ack_input)
+        return {"status": "acknowledged", "id": ack_input.item_id}
 
 
 class FakeProvider:
@@ -93,3 +93,32 @@ def test_writeback_consumer_dead_letters_unhandled_paths() -> None:
 
     assert client.acks[0].success is False
     assert "No writeback handler found" in client.acks[0].error
+
+
+class FlakyAckClient(FakeClient):
+    def __init__(self, items: list[WritebackItem], *, fail_times: int) -> None:
+        super().__init__(items)
+        self.fail_times = fail_times
+        self.ack_attempts = 0
+
+    def ack_writeback(self, ack_input: Any) -> dict[str, Any]:
+        self.ack_attempts += 1
+        if self.ack_attempts <= self.fail_times:
+            raise RuntimeError("transient ack failure")
+        return super().ack_writeback(ack_input)
+
+
+def test_writeback_consumer_retries_transient_ack_failures() -> None:
+    client = FlakyAckClient([item()], fail_times=1)
+    consumer = WritebackConsumer(
+        client=client,  # type: ignore[arg-type]
+        workspace_id="ws_123",
+        handlers=[Handler()],
+        provider=FakeProvider(),  # type: ignore[arg-type]
+        ack_max_attempts=3,
+    )
+
+    consumer.poll_once()
+
+    assert client.ack_attempts == 2
+    assert client.acks[0].success is True

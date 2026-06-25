@@ -59,17 +59,17 @@ class SelfHostConnect:
         if not trimmed_end_user_id:
             raise ValueError("end_user_id is required to start a self-host connect session")
 
-        input: CreateConnectSessionInput = {
+        session_input: CreateConnectSessionInput = {
             "relayfileProvider": normalized,
             "providerConfigKey": provider_config_key,
             "endUserId": trimmed_end_user_id,
         }
         if connection_id and connection_id.strip():
-            input["connectionId"] = connection_id.strip()
+            session_input["connectionId"] = connection_id.strip()
         if metadata:
-            input["metadata"] = dict(metadata)
+            session_input["metadata"] = dict(metadata)
 
-        session = connect_provider.create_connect_session(input)  # type: ignore[attr-defined]
+        session = connect_provider.create_connect_session(session_input)  # type: ignore[attr-defined]
         return SelfHostConnectResult(
             relayfile_provider=normalized,
             provider_config_key=provider_config_key,
@@ -138,7 +138,7 @@ def _is_auth_ready(status: ConnectConnectionStatus) -> bool:
 
 
 def _normalize_relayfile_provider(provider: str) -> str:
-    normalized = provider.strip()
+    normalized = provider.strip().lower()
     if not normalized:
         raise ValueError("relayfile_provider is required")
     return normalized
