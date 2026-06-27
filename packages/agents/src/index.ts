@@ -1,6 +1,21 @@
 export { connect } from "./connect.js";
 export type { ConnectOptions, OnEventOptions, RelayfileAgents } from "./connect.js";
 export type { CreateResult, OpReceipt, WritebackApi } from "./writeback.js";
+export {
+  createInboundForwardHandler,
+  defaultBindingsPath,
+  handleWritebackDelivery,
+  loadRelayBindings,
+  matchBinding,
+  startForwarder,
+} from "./forward.js";
+export type {
+  ForwarderHandle,
+  ForwarderOptions,
+  RelayBindingRecord,
+  RelayCastLike,
+  RelaycastDelivery,
+} from "./forward.js";
 
 // Re-export SDK types + error classes so consumers have one import surface
 // AND reinforce single-instance @relayfile/sdk resolution. Examples should

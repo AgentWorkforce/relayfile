@@ -340,15 +340,23 @@
         "IngestError",
         "IngestResult",
         "IntegrationAdapter",
+        "RelayBinding",
+        "RelayBindingView",
         "SyncOptions",
-        "SyncResult"
+        "SyncResult",
+        "genericPresent",
+        "genericReplyPathFor"
       ],
       "pyExports": [
         "AdapterWebhook",
         "IngestResult",
         "IntegrationAdapter",
+        "RelayBinding",
+        "RelayBindingView",
         "SyncOptions",
-        "SyncResult"
+        "SyncResult",
+        "generic_present",
+        "generic_reply_path_for"
       ]
     },
     {

@@ -189,6 +189,8 @@ func TestHelpFlagPrintsUsageForCommandsAndSubcommands(t *testing.T) {
 		{name: "integration disconnect", args: []string{"integration", "disconnect", "-h"}, want: "Usage: relayfile integration disconnect PROVIDER"},
 		{name: "integration adopt", args: []string{"integration", "adopt", "-h"}, want: "Usage: relayfile integration adopt PROVIDER"},
 		{name: "integration set metadata", args: []string{"integration", "set-metadata", "-h"}, want: "Usage: relayfile integration set-metadata PROVIDER"},
+		{name: "integration bind", args: []string{"integration", "bind", "-h"}, want: "Usage: relayfile integration bind PROVIDER"},
+		{name: "integration unbind", args: []string{"integration", "unbind", "-h"}, want: "Usage: relayfile integration unbind PROVIDER"},
 		{name: "ops group", args: []string{"ops", "-h"}, want: "relayfile ops replay OPID"},
 		{name: "ops list", args: []string{"ops", "list", "-h"}, want: "Usage: relayfile ops list"},
 		{name: "ops replay", args: []string{"ops", "replay", "-h"}, want: "Usage: relayfile ops replay OPID"},
@@ -235,6 +237,58 @@ func TestHelpFlagPrintsUsageForCommandsAndSubcommands(t *testing.T) {
 				t.Fatalf("expected no stderr for help, got %q", got)
 			}
 		})
+	}
+}
+
+func TestIntegrationBindListAndUnbind(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	var stdout bytes.Buffer
+	if err := run([]string{
+		"integration", "bind", "linear", "/linear/issues/**",
+		"--channel", "#issues",
+		"--webhook", "wh_1",
+		"--webhook-token", "tok_1",
+	}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("bind failed: %v\n%s", err, stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "linear binding created") {
+		t.Fatalf("expected bind confirmation, got %q", stdout.String())
+	}
+
+	stdout.Reset()
+	if err := run([]string{"integration", "bind", "--list"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("bind --list failed: %v", err)
+	}
+	var bindings []relayIntegrationBinding
+	if err := json.Unmarshal(stdout.Bytes(), &bindings); err != nil {
+		t.Fatalf("parse bindings list failed: %v\n%s", err, stdout.String())
+	}
+	if len(bindings) != 1 {
+		t.Fatalf("expected 1 binding, got %d", len(bindings))
+	}
+	if bindings[0].Provider != "linear" || bindings[0].PathGlob != "/linear/issues/**" || bindings[0].Channel != "#issues" {
+		t.Fatalf("unexpected binding: %#v", bindings[0])
+	}
+
+	stdout.Reset()
+	if err := run([]string{"integration", "unbind", "linear", "--resource", "/linear/issues/**"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("unbind failed: %v\n%s", err, stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "linear binding removed") {
+		t.Fatalf("expected unbind confirmation, got %q", stdout.String())
+	}
+
+	stdout.Reset()
+	if err := run([]string{"integration", "bind", "--list"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("bind --list after unbind failed: %v", err)
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &bindings); err != nil {
+		t.Fatalf("parse empty bindings list failed: %v\n%s", err, stdout.String())
+	}
+	if len(bindings) != 0 {
+		t.Fatalf("expected bindings to be empty, got %#v", bindings)
 	}
 }
 
