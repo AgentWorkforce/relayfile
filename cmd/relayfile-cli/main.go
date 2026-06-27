@@ -721,7 +721,8 @@ func printIntegrationUsage(w io.Writer, subcommand string) {
   relayfile integration adopt PROVIDER --connection-id ID [--workspace NAME] [--provider-config-key KEY] [--yes]
   relayfile integration set-metadata PROVIDER KEY=VALUE [KEY=VALUE...] [--workspace NAME] [--yes]
   relayfile integration bind PROVIDER PATH_GLOB --channel CHANNEL --webhook ID --webhook-token TOKEN
-  relayfile integration unbind PROVIDER [PATH_GLOB|--resource PATH_GLOB]`)
+  relayfile integration unbind PROVIDER [PATH_GLOB|--resource PATH_GLOB]
+  relayfile integration writeback-secret --channel CHANNEL [--workspace WS] [--json]`)
 	}
 }
 
@@ -2286,6 +2287,8 @@ func runIntegration(args []string, stdin io.Reader, stdout io.Writer) error {
 		return runIntegrationBind(args[1:], stdout)
 	case "unbind":
 		return runIntegrationUnbind(args[1:], stdout)
+	case "writeback-secret":
+		return runIntegrationWritebackSecret(args[1:], stdout)
 	default:
 		return fmt.Errorf("unknown integration subcommand %q", args[0])
 	}
@@ -2433,6 +2436,71 @@ func runIntegrationUnbind(args []string, stdout io.Writer) error {
 	} else {
 		fmt.Fprintf(stdout, "%s binding removed: %s\n", provider, pathGlob)
 	}
+	return nil
+}
+
+// writebackSecretResponse is the relayfile-cloud GET writeback-secret payload.
+type writebackSecretResponse struct {
+	OK   bool `json:"ok"`
+	Data struct {
+		URL    string `json:"url"`
+		Secret string `json:"secret"`
+	} `json:"data"`
+}
+
+// runIntegrationWritebackSecret fetches the per-channel writeback signing secret
+// (and ingress URL) for a relay channel from relayfile-cloud, over the
+// authenticated relayfile session. The relay CLI calls this at `subscribe` time
+// and signs the relay subscription with the returned secret, so there is no
+// static shared secret to provision. The secret is derived server-side from the
+// internal master key, so this endpoint just returns it to the workspace owner.
+func runIntegrationWritebackSecret(args []string, stdout io.Writer) error {
+	fs := flag.NewFlagSet("integration writeback-secret", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	workspaceName := fs.String("workspace", "", "workspace name or id")
+	channel := fs.String("channel", "", "relay channel the binding delivers to")
+	jsonOutput := fs.Bool("json", false, "emit JSON")
+	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
+		"workspace": true,
+		"channel":   true,
+		"json":      false,
+	})); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return errors.New("usage: relayfile integration writeback-secret --channel CHANNEL [--workspace WS] [--json]")
+	}
+	channelValue := strings.TrimSpace(*channel)
+	if channelValue == "" {
+		return errors.New("--channel is required")
+	}
+
+	commandClient, err := prepareWorkspaceCommandClient(strings.TrimSpace(*workspaceName), "", "", defaultJoinScopes)
+	if err != nil {
+		return err
+	}
+	workspaceID := strings.TrimSpace(commandClient.workspaceID)
+	if workspaceID == "" {
+		return errors.New("could not resolve relayfile workspace id")
+	}
+
+	path := fmt.Sprintf(
+		"/v1/workspaces/%s/integrations/relay/writeback-secret?channel=%s",
+		url.PathEscape(workspaceID),
+		url.QueryEscape(channelValue),
+	)
+	var resp writebackSecretResponse
+	if err := commandClient.client.getJSON(context.Background(), path, &resp); err != nil {
+		return fmt.Errorf("fetch writeback secret: %w", err)
+	}
+	if strings.TrimSpace(resp.Data.Secret) == "" {
+		return errors.New("relayfile-cloud returned an empty writeback secret")
+	}
+
+	if *jsonOutput {
+		return writeJSON(stdout, resp.Data)
+	}
+	fmt.Fprintf(stdout, "url: %s\nsecret: %s\n", resp.Data.URL, resp.Data.Secret)
 	return nil
 }
 
