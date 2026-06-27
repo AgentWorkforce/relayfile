@@ -2493,6 +2493,9 @@ func runIntegrationWritebackSecret(args []string, stdout io.Writer) error {
 	if err := commandClient.client.getJSON(context.Background(), path, &resp); err != nil {
 		return fmt.Errorf("fetch writeback secret: %w", err)
 	}
+	if !resp.OK {
+		return errors.New("relayfile-cloud returned an unsuccessful writeback-secret response")
+	}
 	if strings.TrimSpace(resp.Data.Secret) == "" {
 		return errors.New("relayfile-cloud returned an empty writeback secret")
 	}
