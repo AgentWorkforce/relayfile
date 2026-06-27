@@ -429,13 +429,14 @@ type integrationConnectionState struct {
 }
 
 type relayIntegrationBinding struct {
-	Provider     string `json:"provider"`
-	PathGlob     string `json:"pathGlob"`
-	Channel      string `json:"channel"`
-	WebhookID    string `json:"webhookId"`
-	WebhookToken string `json:"webhookToken"`
-	CreatedAt    string `json:"createdAt,omitempty"`
-	UpdatedAt    string `json:"updatedAt,omitempty"`
+	Provider       string `json:"provider"`
+	PathGlob       string `json:"pathGlob"`
+	Channel        string `json:"channel"`
+	WebhookID      string `json:"webhookId"`
+	WebhookToken   string `json:"webhookToken"`
+	SubscriptionID string `json:"subscriptionId,omitempty"`
+	CreatedAt      string `json:"createdAt,omitempty"`
+	UpdatedAt      string `json:"updatedAt,omitempty"`
 }
 
 type relayIntegrationBindingStore struct {
@@ -2297,11 +2298,13 @@ func runIntegrationBind(args []string, stdout io.Writer) error {
 	channel := fs.String("channel", "", "relay channel to receive provider records")
 	webhookID := fs.String("webhook", "", "RelayCast inbound webhook id")
 	webhookToken := fs.String("webhook-token", "", "RelayCast inbound webhook token")
+	subscriptionID := fs.String("subscription", "", "relay integration subscription id")
 	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
 		"list":          false,
 		"channel":       true,
 		"webhook":       true,
 		"webhook-token": true,
+		"subscription":  true,
 	})); err != nil {
 		return err
 	}
@@ -2327,11 +2330,12 @@ func runIntegrationBind(args []string, stdout io.Writer) error {
 		return errors.New("PATH_GLOB must start with /")
 	}
 	binding := relayIntegrationBinding{
-		Provider:     provider,
-		PathGlob:     pathGlob,
-		Channel:      strings.TrimSpace(*channel),
-		WebhookID:    strings.TrimSpace(*webhookID),
-		WebhookToken: strings.TrimSpace(*webhookToken),
+		Provider:       provider,
+		PathGlob:       pathGlob,
+		Channel:        strings.TrimSpace(*channel),
+		WebhookID:      strings.TrimSpace(*webhookID),
+		WebhookToken:   strings.TrimSpace(*webhookToken),
+		SubscriptionID: strings.TrimSpace(*subscriptionID),
 	}
 	if binding.Channel == "" {
 		return errors.New("--channel is required")
