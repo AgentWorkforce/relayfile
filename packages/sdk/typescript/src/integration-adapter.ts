@@ -100,7 +100,7 @@ export function genericPresent(event: WriteEvent, adapter: IntegrationAdapter): 
   const payload = isRecord(event.value) ? event.value : {};
   let semantics: FileSemantics = {};
   try {
-    semantics = adapter.computeSemantics(objectType, objectId, payload);
+    semantics = adapter.computeSemantics(objectType, objectId, payload) ?? {};
   } catch {
     semantics = {};
   }

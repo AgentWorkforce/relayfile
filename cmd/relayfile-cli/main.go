@@ -2413,6 +2413,9 @@ func runIntegrationUnbind(args []string, stdout io.Writer) error {
 		kept = append(kept, binding)
 	}
 	if removed == 0 {
+		if pathGlob != "" {
+			return fmt.Errorf("no binding found for provider %q with path glob %q", provider, pathGlob)
+		}
 		return fmt.Errorf("no binding found for provider %q", provider)
 	}
 	if err := writeRelayIntegrationBindings(kept); err != nil {
@@ -7692,7 +7695,10 @@ func readRelayIntegrationBindings() ([]relayIntegrationBinding, error) {
 		return nil, err
 	}
 	var store relayIntegrationBindingStore
-	if err := json.Unmarshal(payload, &store); err == nil && store.Bindings != nil {
+	if err := json.Unmarshal(payload, &store); err == nil && len(payload) > 0 && payload[0] == '{' {
+		if store.Bindings == nil {
+			return []relayIntegrationBinding{}, nil
+		}
 		return store.Bindings, nil
 	}
 	var bindings []relayIntegrationBinding

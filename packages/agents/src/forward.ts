@@ -74,7 +74,8 @@ export async function loadRelayBindings(bindingsPath = defaultBindingsPath()): P
 }
 
 export async function startForwarder(opts: ForwarderOptions): Promise<ForwarderHandle> {
-  const bindings = opts.bindings ?? await loadRelayBindings(opts.bindingsPath);
+  const allBindings = opts.bindings ?? await loadRelayBindings(opts.bindingsPath);
+  const bindings = allBindings.filter(b => b.provider === opts.adapter.name);
   const handler = createInboundForwardHandler({
     adapter: opts.adapter,
     bindings,
@@ -95,7 +96,7 @@ export function createInboundForwardHandler(input: {
   relayCastSdk: RelayCastLike;
 }): (event: WriteEvent) => Promise<void> {
   return async (event) => {
-    if (event.operation === "delete" || isRelayfileWritebackActor(event)) {
+    if (event.operation === "delete" || isRelayfileWritebackActor(event) || isWritebackReplyPath(event.path)) {
       return;
     }
 
@@ -136,6 +137,9 @@ export async function handleWritebackDelivery(
   workspaceId: string,
   bindings: RelayBindingRecord[],
 ): Promise<void> {
+  if (!isRecord(body)) {
+    return;
+  }
   const message = isRecord(body.message) ? body.message : undefined;
   const metadata = isRecord(message?.metadata) ? message.metadata : undefined;
   if (metadata?.__relaycast_origin === "inbound_webhook") {
@@ -196,6 +200,11 @@ function normalizePath(value: string): string {
 
 function isRelayfileWritebackActor(event: WriteEvent): boolean {
   return event.actor?.id === "__relayfile_writeback__" || event.actor?.id === "relayfile-writeback";
+}
+
+function isWritebackReplyPath(path: string): boolean {
+  const normalized = path.replace(/\/+$/, "");
+  return normalized.endsWith("/replies/draft.json") || normalized.includes("/replies/");
 }
 
 function messageText(message: Record<string, unknown> | undefined): string {
