@@ -2359,6 +2359,9 @@ func runIntegrationBind(args []string, stdout io.Writer) error {
 			if binding.CreatedAt == "" {
 				binding.CreatedAt = now
 			}
+			if binding.SubscriptionID == "" {
+				binding.SubscriptionID = bindings[i].SubscriptionID
+			}
 			bindings[i] = binding
 			replaced = true
 			break
