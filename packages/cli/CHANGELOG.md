@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - `relayfile integration bind` now accepts provider-native resources for Slack channels, GitHub repositories, Linear teams, and Telegram chats, resolving them to matching VFS path globs while preserving explicit `/`-prefixed globs.
+- Hardened the local control-plane daemon with serialized binding updates, socket permission guarding, explicit HTTP timeouts, and an OpenAPI-documented API-version header on `/v1/hello`.
 
 ## [0.10.15] - 2026-06-28
 

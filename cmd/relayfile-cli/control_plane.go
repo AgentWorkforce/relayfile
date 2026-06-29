@@ -8,7 +8,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -153,7 +152,7 @@ func serveControlPlaneSocket(sock string, stdout io.Writer) error {
 		return err
 	}
 	_ = os.Remove(sock)
-	listener, err := net.Listen("unix", sock)
+	listener, err := listenControlPlaneSocket(sock)
 	if err != nil {
 		return err
 	}
@@ -163,7 +162,13 @@ func serveControlPlaneSocket(sock string, stdout io.Writer) error {
 		return err
 	}
 
-	server := &http.Server{Handler: newControlPlaneHandler()}
+	server := &http.Server{
+		Handler:           newControlPlaneHandler(),
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
 	errCh := make(chan error, 1)
 	go func() {
 		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -391,7 +396,7 @@ func handleControlPlaneListBindings(w http.ResponseWriter, r *http.Request) {
 		writeControlPlaneError(w, http.StatusMethodNotAllowed, controlPlaneErrInvalidArgument, "method not allowed")
 		return
 	}
-	bindings, err := readRelayIntegrationBindings()
+	bindings, err := listRelayIntegrationBindings()
 	if err != nil {
 		writeControlPlaneMappedError(w, err)
 		return
@@ -544,14 +549,14 @@ func writeControlPlaneError(w http.ResponseWriter, status int, code controlPlane
 }
 
 func writeControlPlaneJSON(w http.ResponseWriter, status int, value any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
 	payload, err := json.MarshalIndent(value, "", "  ")
 	if err != nil {
-		_, _ = w.Write([]byte(`{"error":{"code":"DAEMON_UNAVAILABLE","message":"failed to encode response"}}` + "\n"))
-		return
+		status = http.StatusInternalServerError
+		payload = []byte(`{"error":{"code":"DAEMON_UNAVAILABLE","message":"failed to encode response"}}`)
 	}
 	payload = append(payload, '\n')
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
 	_, _ = w.Write(payload)
 }
 

@@ -16,6 +16,7 @@ paths:
       operationId: hello
       summary: Negotiate control-plane API compatibility
       parameters:
+        - $ref: "#/components/parameters/ApiVersionHeader"
         - $ref: "#/components/parameters/ApiVersionQuery"
       responses:
         "200":
@@ -29,6 +30,8 @@ paths:
     post:
       operationId: helloPost
       summary: Negotiate control-plane API compatibility
+      parameters:
+        - $ref: "#/components/parameters/ApiVersionHeader"
       requestBody:
         required: false
         content:

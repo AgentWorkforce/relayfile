@@ -58,6 +58,8 @@ const (
 
 var relayfileVersion = relayfileDefaultVersion
 
+var relayIntegrationBindingsMu sync.Mutex
+
 // defaultJoinScopes are the scopes minted for every delegated-credential
 // workspace join. ops:read is required for writeback op-status polling
 // (/v1/workspaces/{id}/ops/{opId}); sync:trigger is required for
@@ -2351,6 +2353,8 @@ func bindRelayIntegration(input relayIntegrationBindInput) (relayIntegrationBind
 	if binding.WebhookToken == "" {
 		return relayIntegrationBinding{}, false, "", errors.New("--webhook-token is required")
 	}
+	relayIntegrationBindingsMu.Lock()
+	defer relayIntegrationBindingsMu.Unlock()
 	now := time.Now().UTC().Format(time.RFC3339)
 	bindings, err := readRelayIntegrationBindings()
 	if err != nil {
@@ -2406,7 +2410,7 @@ func runIntegrationBind(args []string, stdout io.Writer) error {
 		if fs.NArg() != 0 {
 			return errors.New("usage: relayfile integration bind --list")
 		}
-		bindings, err := readRelayIntegrationBindings()
+		bindings, err := listRelayIntegrationBindings()
 		if err != nil {
 			return err
 		}
@@ -2505,6 +2509,8 @@ func unbindRelayIntegration(providerValue, resourceValue string) (relayIntegrati
 		matchGlobs = append([]string{pathGlob}, fallbackUnbindPathGlobsForNativeResource(provider)...)
 		warning = resolved.Warning
 	}
+	relayIntegrationBindingsMu.Lock()
+	defer relayIntegrationBindingsMu.Unlock()
 	bindings, err := readRelayIntegrationBindings()
 	if err != nil {
 		return relayIntegrationUnbindResult{}, err
@@ -7892,6 +7898,12 @@ func cloudCredentialsPath() string {
 
 func relayIntegrationBindingsPath() string {
 	return filepath.Join(configDir(), "bindings.json")
+}
+
+func listRelayIntegrationBindings() ([]relayIntegrationBinding, error) {
+	relayIntegrationBindingsMu.Lock()
+	defer relayIntegrationBindingsMu.Unlock()
+	return readRelayIntegrationBindings()
 }
 
 func readRelayIntegrationBindings() ([]relayIntegrationBinding, error) {
