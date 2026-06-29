@@ -292,6 +292,126 @@ func TestIntegrationBindListAndUnbind(t *testing.T) {
 	}
 }
 
+func TestIntegrationBindResolvesNativeResources(t *testing.T) {
+	tests := []struct {
+		name      string
+		provider  string
+		resource  string
+		files     map[string]string
+		wantGlob  string
+		wantWarn  bool
+		wantError string
+	}{
+		{
+			name:     "explicit glob passes through",
+			provider: "slack",
+			resource: "/slack/channels/C123__watchdog-test/**",
+			wantGlob: "/slack/channels/C123__watchdog-test/**",
+		},
+		{
+			name:     "slack channel name resolves through by-name alias",
+			provider: "slack",
+			resource: "#watchdog-test",
+			files: map[string]string{
+				"slack/channels/by-name/watchdog-test.json": `{"id":"C123","canonicalPath":"/slack/channels/C123__watchdog-test/meta.json"}`,
+			},
+			wantGlob: "/slack/channels/C123__watchdog-test/**",
+		},
+		{
+			name:     "github owner repo maps to repo subtree",
+			provider: "github",
+			resource: "AgentWorkforce/relayfile",
+			wantGlob: "/github/repos/AgentWorkforce/relayfile/**",
+		},
+		{
+			name:     "linear team key resolves by mounted team payload",
+			provider: "linear",
+			resource: "AR",
+			files: map[string]string{
+				"linear/teams/team-ar.json": `{"provider":"linear","payload":{"id":"team-ar","key":"AR","name":"Agent Relay"}}`,
+			},
+			wantGlob: "/linear/teams/team-ar.json",
+		},
+		{
+			name:     "telegram chat title resolves through id-suffixed alias",
+			provider: "telegram",
+			resource: "@release-room",
+			files: map[string]string{
+				"telegram/chats/by-username/release-room__-100123.json": `{"id":"-100123","canonicalPath":"/telegram/chats/-100123__release-room/meta.json"}`,
+			},
+			wantGlob: "/telegram/chats/-100123__release-room/**",
+		},
+		{
+			name:     "unresolved slack name warns and binds matcher-safe fallback",
+			provider: "slack",
+			resource: "#missing-channel",
+			wantGlob: "/slack/channels/*/**",
+			wantWarn: true,
+		},
+		{
+			name:      "unknown native provider still requires explicit VFS glob",
+			provider:  "notion",
+			resource:  "Engineering",
+			wantError: `provider "notion" has no native resource resolver`,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			clearRelayfileEnv(t)
+			localDir := t.TempDir()
+			if _, err := upsertWorkspaceDetails(workspaceRecord{Name: "demo", ID: "ws_demo", LocalDir: localDir}); err != nil {
+				t.Fatalf("upsert workspace failed: %v", err)
+			}
+			for rel, content := range tc.files {
+				writeTestMountFile(t, localDir, rel, content)
+			}
+
+			var stdout bytes.Buffer
+			err := run([]string{
+				"integration", "bind", tc.provider, tc.resource,
+				"--channel", "#events",
+				"--webhook", "wh_1",
+				"--webhook-token", "tok_1",
+			}, strings.NewReader(""), &stdout, &stdout)
+			if tc.wantError != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantError) {
+					t.Fatalf("expected error containing %q, got err=%v output=%q", tc.wantError, err, stdout.String())
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("bind failed: %v\n%s", err, stdout.String())
+			}
+			if tc.wantWarn && !strings.Contains(stdout.String(), "Warning:") {
+				t.Fatalf("expected warning, got %q", stdout.String())
+			}
+			bindings, err := readRelayIntegrationBindings()
+			if err != nil {
+				t.Fatalf("read bindings failed: %v", err)
+			}
+			if len(bindings) != 1 {
+				t.Fatalf("expected one binding, got %#v", bindings)
+			}
+			if bindings[0].PathGlob != tc.wantGlob {
+				t.Fatalf("expected glob %q, got %#v", tc.wantGlob, bindings[0])
+			}
+		})
+	}
+}
+
+func writeTestMountFile(t *testing.T, root, rel, content string) {
+	t.Helper()
+	path := filepath.Join(root, filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir mount fixture failed: %v", err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write mount fixture failed: %v", err)
+	}
+}
+
 // TestOnOffAliasesDispatchLikeMountAndStop verifies that the `on` and `off`
 // verbs migrated from the agent-relay CLI route to the same handlers as
 // `mount` and `stop`. We assert on the handler-specific error surfaced for an

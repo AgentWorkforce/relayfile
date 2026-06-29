@@ -709,6 +709,8 @@ func printIntegrationUsage(w io.Writer, subcommand string) {
 		fmt.Fprintln(w, "Usage: relayfile integration set-metadata PROVIDER KEY=VALUE [KEY=VALUE...] [--workspace NAME] [--yes]")
 	case "bind":
 		fmt.Fprintln(w, "Usage: relayfile integration bind PROVIDER PATH_GLOB --channel CHANNEL --webhook ID --webhook-token TOKEN")
+	case "resolve-path":
+		fmt.Fprintln(w, "Usage: relayfile integration resolve-path PROVIDER RESOURCE [--json]")
 	case "unbind":
 		fmt.Fprintln(w, "Usage: relayfile integration unbind PROVIDER [PATH_GLOB|--resource PATH_GLOB]")
 	default:
@@ -721,6 +723,7 @@ func printIntegrationUsage(w io.Writer, subcommand string) {
   relayfile integration adopt PROVIDER --connection-id ID [--workspace NAME] [--provider-config-key KEY] [--yes]
   relayfile integration set-metadata PROVIDER KEY=VALUE [KEY=VALUE...] [--workspace NAME] [--yes]
   relayfile integration bind PROVIDER PATH_GLOB --channel CHANNEL --webhook ID --webhook-token TOKEN
+  relayfile integration resolve-path PROVIDER RESOURCE [--json]
   relayfile integration unbind PROVIDER [PATH_GLOB|--resource PATH_GLOB]
   relayfile integration writeback-secret --channel CHANNEL [--workspace WS] [--json]`)
 	}
@@ -804,6 +807,7 @@ Usage:
   relayfile integration adopt PROVIDER --connection-id ID [--workspace NAME] [--provider-config-key KEY] [--yes]
   relayfile integration set-metadata PROVIDER KEY=VALUE [KEY=VALUE...] [--workspace NAME] [--yes]
   relayfile integration bind PROVIDER PATH_GLOB --channel CHANNEL --webhook ID --webhook-token TOKEN
+  relayfile integration resolve-path PROVIDER RESOURCE [--json]
   relayfile integration unbind PROVIDER [PATH_GLOB|--resource PATH_GLOB]
   relayfile ops list [--workspace NAME] [--json]
   relayfile ops replay OPID [--workspace NAME]
@@ -2285,6 +2289,8 @@ func runIntegration(args []string, stdin io.Reader, stdout io.Writer) error {
 		return runIntegrationSetMetadata(args[1:], stdin, stdout)
 	case "bind":
 		return runIntegrationBind(args[1:], stdout)
+	case "resolve-path":
+		return runIntegrationResolvePath(args[1:], stdout)
 	case "unbind":
 		return runIntegrationUnbind(args[1:], stdout)
 	case "writeback-secret":
@@ -2328,13 +2334,13 @@ func runIntegrationBind(args []string, stdout io.Writer) error {
 	if err := validateLocalProviderID(provider); err != nil {
 		return err
 	}
-	pathGlob := strings.TrimSpace(fs.Arg(1))
-	if !strings.HasPrefix(pathGlob, "/") {
-		return errors.New("PATH_GLOB must start with /")
+	resolved, err := resolveIntegrationBindPathGlob(provider, fs.Arg(1))
+	if err != nil {
+		return err
 	}
 	binding := relayIntegrationBinding{
 		Provider:       provider,
-		PathGlob:       pathGlob,
+		PathGlob:       resolved.PathGlob,
 		Channel:        strings.TrimSpace(*channel),
 		WebhookID:      strings.TrimSpace(*webhookID),
 		WebhookToken:   strings.TrimSpace(*webhookToken),
@@ -2378,11 +2384,54 @@ func runIntegrationBind(args []string, stdout io.Writer) error {
 	if err := writeRelayIntegrationBindings(bindings); err != nil {
 		return err
 	}
+	if resolved.Warning != "" {
+		fmt.Fprintf(stdout, "Warning: %s\n", resolved.Warning)
+	}
 	if replaced {
 		fmt.Fprintf(stdout, "%s binding updated: %s -> %s\n", binding.Provider, binding.PathGlob, binding.Channel)
 	} else {
 		fmt.Fprintf(stdout, "%s binding created: %s -> %s\n", binding.Provider, binding.PathGlob, binding.Channel)
 	}
+	return nil
+}
+
+func runIntegrationResolvePath(args []string, stdout io.Writer) error {
+	fs := flag.NewFlagSet("integration resolve-path", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	jsonOutput := fs.Bool("json", false, "emit JSON")
+	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
+		"json": false,
+	})); err != nil {
+		return err
+	}
+	if fs.NArg() != 2 {
+		return errors.New("usage: relayfile integration resolve-path PROVIDER RESOURCE [--json]")
+	}
+	provider := normalizeProviderID(fs.Arg(0))
+	if err := validateLocalProviderID(provider); err != nil {
+		return err
+	}
+	resolved, err := resolveIntegrationBindPathGlob(provider, fs.Arg(1))
+	if err != nil {
+		return err
+	}
+	if *jsonOutput {
+		return writeJSON(stdout, struct {
+			Provider string `json:"provider"`
+			Resource string `json:"resource"`
+			PathGlob string `json:"pathGlob"`
+			Warning  string `json:"warning,omitempty"`
+		}{
+			Provider: provider,
+			Resource: strings.TrimSpace(fs.Arg(1)),
+			PathGlob: resolved.PathGlob,
+			Warning:  resolved.Warning,
+		})
+	}
+	if resolved.Warning != "" {
+		fmt.Fprintf(stdout, "Warning: %s\n", resolved.Warning)
+	}
+	fmt.Fprintln(stdout, resolved.PathGlob)
 	return nil
 }
 
@@ -2408,6 +2457,16 @@ func runIntegrationUnbind(args []string, stdout io.Writer) error {
 			return errors.New("pass PATH_GLOB either positionally or with --resource, not both")
 		}
 		pathGlob = strings.TrimSpace(fs.Arg(1))
+	}
+	if pathGlob != "" && !strings.HasPrefix(pathGlob, "/") {
+		resolved, err := resolveIntegrationBindPathGlob(provider, pathGlob)
+		if err != nil {
+			return err
+		}
+		pathGlob = resolved.PathGlob
+		if resolved.Warning != "" {
+			fmt.Fprintf(stdout, "Warning: %s\n", resolved.Warning)
+		}
 	}
 	bindings, err := readRelayIntegrationBindings()
 	if err != nil {
@@ -7803,6 +7862,470 @@ func writeRelayIntegrationBindings(bindings []relayIntegrationBinding) error {
 
 func delegatedCredentialsPath() string {
 	return filepath.Join(configDir(), "delegated-credentials.json")
+}
+
+type integrationBindPathResolution struct {
+	PathGlob string
+	Warning  string
+}
+
+type integrationContainerResolver struct {
+	Provider       string
+	Root           string
+	Container      string
+	Aliases        []string
+	StripSigils    string
+	DirectoryGlob  bool
+	DirectID       func(string) bool
+	AdditionalKeys func(map[string]any) []string
+}
+
+func resolveIntegrationBindPathGlob(provider, resource string) (integrationBindPathResolution, error) {
+	resource = strings.TrimSpace(resource)
+	if resource == "" {
+		return integrationBindPathResolution{}, errors.New("PATH_GLOB/resource is required")
+	}
+	if strings.HasPrefix(resource, "/") {
+		return integrationBindPathResolution{PathGlob: resource}, nil
+	}
+
+	switch provider {
+	case "github":
+		return resolveGitHubBindPathGlob(resource)
+	case "slack":
+		return resolveContainerBindPathGlob(resource, integrationContainerResolver{
+			Provider:      "slack",
+			Root:          "/slack",
+			Container:     "channels",
+			Aliases:       []string{"by-name"},
+			StripSigils:   "#",
+			DirectoryGlob: true,
+			DirectID: func(value string) bool {
+				return len(value) >= 6 && strings.IndexFunc(value, func(r rune) bool {
+					return !(r >= 'A' && r <= 'Z' || r >= '0' && r <= '9')
+				}) < 0
+			},
+		})
+	case "telegram":
+		return resolveContainerBindPathGlob(resource, integrationContainerResolver{
+			Provider:      "telegram",
+			Root:          "/telegram",
+			Container:     "chats",
+			Aliases:       []string{"by-title", "by-username"},
+			StripSigils:   "@",
+			DirectoryGlob: true,
+			DirectID: func(value string) bool {
+				trimmed := strings.TrimPrefix(value, "-")
+				return trimmed != "" && strings.IndexFunc(trimmed, func(r rune) bool {
+					return r < '0' || r > '9'
+				}) < 0
+			},
+		})
+	case "linear":
+		return resolveContainerBindPathGlob(resource, integrationContainerResolver{
+			Provider:      "linear",
+			Root:          "/linear",
+			Container:     "teams",
+			Aliases:       []string{"by-name"},
+			StripSigils:   "",
+			DirectoryGlob: false,
+			DirectID: func(value string) bool {
+				return isUUIDLike(value) || strings.HasPrefix(strings.ToLower(value), "team")
+			},
+			AdditionalKeys: func(row map[string]any) []string {
+				return []string{stringField(row, "key"), stringField(row, "team_key")}
+			},
+		})
+	default:
+		return integrationBindPathResolution{}, fmt.Errorf("PATH_GLOB must start with /; provider %q has no native resource resolver", provider)
+	}
+}
+
+func resolveGitHubBindPathGlob(resource string) (integrationBindPathResolution, error) {
+	parts := strings.Split(strings.Trim(resource, "/"), "/")
+	if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" {
+		return integrationBindPathResolution{}, errors.New("github resource must be owner/repo or an explicit /-prefixed path glob")
+	}
+	return integrationBindPathResolution{
+		PathGlob: path.Join("/github/repos", url.PathEscape(parts[0]), url.PathEscape(parts[1]), "**"),
+	}, nil
+}
+
+func resolveContainerBindPathGlob(resource string, cfg integrationContainerResolver) (integrationBindPathResolution, error) {
+	native := strings.TrimSpace(resource)
+	lookup := strings.Trim(native, " \t\r\n")
+	if cfg.StripSigils != "" {
+		lookup = strings.TrimLeft(lookup, cfg.StripSigils)
+	}
+	if lookup == "" {
+		return integrationBindPathResolution{}, fmt.Errorf("%s resource is empty after trimming sigils", cfg.Provider)
+	}
+
+	if cfg.DirectID != nil && cfg.DirectID(lookup) {
+		if canonical, ok := resolveContainerResourceByID(cfg, lookup); ok {
+			return integrationBindPathResolution{PathGlob: canonicalPathToBindGlob(canonical, cfg)}, nil
+		}
+		if cfg.DirectoryGlob {
+			return integrationBindPathResolution{
+				PathGlob: path.Join(cfg.Root, cfg.Container, encodeVFSPathSegment(lookup), "**"),
+				Warning: fmt.Sprintf("could not find %s resource %q in the active mount; bound %s and it may miss id-slug paths until the mount index is available",
+					cfg.Provider, native, path.Join(cfg.Root, cfg.Container, encodeVFSPathSegment(lookup), "**")),
+			}, nil
+		}
+		return integrationBindPathResolution{PathGlob: path.Join(cfg.Root, cfg.Container, encodeVFSPathSegment(lookup)+".json")}, nil
+	}
+
+	if canonical, ok := resolveContainerResourceByAliasOrIndex(cfg, lookup); ok {
+		return integrationBindPathResolution{PathGlob: canonicalPathToBindGlob(canonical, cfg)}, nil
+	}
+
+	fallback := unresolvedContainerFallbackGlob(cfg)
+	return integrationBindPathResolution{
+		PathGlob: fallback,
+		Warning: fmt.Sprintf("could not resolve %s resource %q from the active mount; bound fallback glob %s, which may match more than the requested resource",
+			cfg.Provider, native, fallback),
+	}, nil
+}
+
+func resolveContainerResourceByID(cfg integrationContainerResolver, id string) (string, bool) {
+	if canonical, ok := findContainerIndexCanonical(cfg, func(row map[string]any) bool {
+		return stringEqualFold(stringField(row, "id"), id) || stringEqualFold(stringField(row, "objectId"), id)
+	}); ok {
+		return canonical, true
+	}
+	return findMountedContainerEntry(cfg, id)
+}
+
+func resolveContainerResourceByAliasOrIndex(cfg integrationContainerResolver, name string) (string, bool) {
+	slug := slugifyNativeResource(name)
+	for _, alias := range cfg.Aliases {
+		aliasDir := path.Join(cfg.Root, cfg.Container, alias)
+		if canonical, ok := readAliasCanonicalPath(path.Join(aliasDir, slug+".json")); ok {
+			return canonical, true
+		}
+		if canonical, ok := scanAliasCanonicalPath(aliasDir, slug); ok {
+			return canonical, true
+		}
+		if alias == "by-username" {
+			if canonical, ok := readAliasCanonicalPath(path.Join(aliasDir, strings.TrimPrefix(slug, "@")+".json")); ok {
+				return canonical, true
+			}
+		}
+	}
+	if canonical, ok := findContainerIndexCanonical(cfg, func(row map[string]any) bool {
+		keys := []string{
+			stringField(row, "title"),
+			stringField(row, "name"),
+			stringField(row, "username"),
+			stringField(row, "id"),
+		}
+		if cfg.AdditionalKeys != nil {
+			keys = append(keys, cfg.AdditionalKeys(row)...)
+		}
+		for _, key := range keys {
+			if key == "" {
+				continue
+			}
+			if stringEqualFold(key, name) || slugifyNativeResource(key) == slug {
+				return true
+			}
+		}
+		return false
+	}); ok {
+		return canonical, true
+	}
+	if cfg.Provider == "linear" {
+		return scanLinearTeamFiles(name)
+	}
+	return "", false
+}
+
+func scanAliasCanonicalPath(aliasDirRemotePath, slug string) (string, bool) {
+	record, ok := activeWorkspaceRecordForMountResolution()
+	if !ok || strings.TrimSpace(record.LocalDir) == "" {
+		return "", false
+	}
+	aliasDir := filepath.Join(record.LocalDir, filepath.FromSlash(strings.TrimPrefix(aliasDirRemotePath, "/")))
+	entries, err := os.ReadDir(aliasDir)
+	if err != nil {
+		return "", false
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if name == slug+".json" || strings.HasPrefix(name, slug+"__") || strings.HasPrefix(name, slug+"-") {
+			if canonical, ok := readAliasCanonicalPath(path.Join(aliasDirRemotePath, name)); ok {
+				return canonical, true
+			}
+		}
+	}
+	return "", false
+}
+
+func findContainerIndexCanonical(cfg integrationContainerResolver, match func(map[string]any) bool) (string, bool) {
+	rows, ok := readIndexRows(path.Join(cfg.Root, cfg.Container, "_index.json"))
+	if !ok {
+		return "", false
+	}
+	for _, row := range rows {
+		if !match(row) {
+			continue
+		}
+		if canonical := stringField(row, "canonicalPath"); canonical != "" {
+			return canonical, true
+		}
+		if p := stringField(row, "path"); p != "" {
+			return p, true
+		}
+		if id := stringField(row, "id"); id != "" {
+			return findMountedContainerEntry(cfg, id)
+		}
+	}
+	return "", false
+}
+
+func readAliasCanonicalPath(remotePath string) (string, bool) {
+	var payload map[string]any
+	if !readMountedJSON(remotePath, &payload) {
+		return "", false
+	}
+	for _, key := range []string{"canonicalPath", "path", "targetPath"} {
+		if value := stringField(payload, key); value != "" {
+			return value, true
+		}
+	}
+	if id := stringField(payload, "id"); id != "" {
+		if strings.Contains(remotePath, "/slack/channels/") {
+			return findMountedContainerEntry(integrationContainerResolver{Root: "/slack", Container: "channels", DirectoryGlob: true}, id)
+		}
+		if strings.Contains(remotePath, "/telegram/chats/") {
+			return findMountedContainerEntry(integrationContainerResolver{Root: "/telegram", Container: "chats", DirectoryGlob: true}, id)
+		}
+		if strings.Contains(remotePath, "/linear/teams/") {
+			return path.Join("/linear/teams", encodeVFSPathSegment(id)+".json"), true
+		}
+	}
+	return "", false
+}
+
+func readIndexRows(remotePath string) ([]map[string]any, bool) {
+	var raw any
+	if !readMountedJSON(remotePath, &raw) {
+		return nil, false
+	}
+	switch value := raw.(type) {
+	case []any:
+		return mapsFromArray(value), true
+	case map[string]any:
+		if rows, ok := value["rows"].([]any); ok {
+			return mapsFromArray(rows), true
+		}
+	}
+	return nil, false
+}
+
+func mapsFromArray(values []any) []map[string]any {
+	rows := make([]map[string]any, 0, len(values))
+	for _, value := range values {
+		if row, ok := value.(map[string]any); ok {
+			rows = append(rows, row)
+		}
+	}
+	return rows
+}
+
+func findMountedContainerEntry(cfg integrationContainerResolver, id string) (string, bool) {
+	record, ok := activeWorkspaceRecordForMountResolution()
+	if !ok || strings.TrimSpace(record.LocalDir) == "" {
+		return "", false
+	}
+	dir := filepath.Join(record.LocalDir, filepath.FromSlash(strings.TrimPrefix(path.Join(cfg.Root, cfg.Container), "/")))
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return "", false
+	}
+	encodedID := encodeVFSPathSegment(id)
+	for _, entry := range entries {
+		name := entry.Name()
+		if strings.HasPrefix(name, "by-") || name == "_index.json" {
+			continue
+		}
+		if cfg.DirectoryGlob {
+			if entry.IsDir() && (name == encodedID || strings.HasPrefix(name, encodedID+"__")) {
+				return path.Join(cfg.Root, cfg.Container, name), true
+			}
+			continue
+		}
+		if !entry.IsDir() && name == encodedID+".json" {
+			return path.Join(cfg.Root, cfg.Container, name), true
+		}
+	}
+	return "", false
+}
+
+func scanLinearTeamFiles(resource string) (string, bool) {
+	record, ok := activeWorkspaceRecordForMountResolution()
+	if !ok || strings.TrimSpace(record.LocalDir) == "" {
+		return "", false
+	}
+	dir := filepath.Join(record.LocalDir, "linear", "teams")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return "", false
+	}
+	slug := slugifyNativeResource(resource)
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || strings.HasPrefix(name, "by-") || !strings.HasSuffix(name, ".json") || name == "_index.json" {
+			continue
+		}
+		var payload map[string]any
+		if !readMountedJSON(path.Join("/linear/teams", name), &payload) {
+			continue
+		}
+		recordPayload, _ := payload["payload"].(map[string]any)
+		keys := []string{
+			stringField(payload, "id"),
+			stringField(payload, "key"),
+			stringField(payload, "name"),
+			stringField(recordPayload, "id"),
+			stringField(recordPayload, "key"),
+			stringField(recordPayload, "name"),
+		}
+		for _, key := range keys {
+			if key != "" && (stringEqualFold(key, resource) || slugifyNativeResource(key) == slug) {
+				return path.Join("/linear/teams", name), true
+			}
+		}
+	}
+	return "", false
+}
+
+func canonicalPathToBindGlob(canonical string, cfg integrationContainerResolver) string {
+	clean := "/" + strings.TrimLeft(strings.TrimSpace(canonical), "/")
+	clean = path.Clean(clean)
+	if cfg.DirectoryGlob {
+		parts := strings.Split(strings.Trim(clean, "/"), "/")
+		if len(parts) >= 3 && "/"+parts[0] == cfg.Root && parts[1] == cfg.Container {
+			return path.Join(cfg.Root, cfg.Container, parts[2], "**")
+		}
+		if strings.HasSuffix(clean, "/meta.json") {
+			return path.Join(path.Dir(clean), "**")
+		}
+		return path.Join(clean, "**")
+	}
+	return clean
+}
+
+func unresolvedContainerFallbackGlob(cfg integrationContainerResolver) string {
+	if cfg.DirectoryGlob {
+		return path.Join(cfg.Root, cfg.Container, "*", "**")
+	}
+	return path.Join(cfg.Root, cfg.Container, "*")
+}
+
+func readMountedJSON(remotePath string, out any) bool {
+	record, ok := activeWorkspaceRecordForMountResolution()
+	if !ok || strings.TrimSpace(record.LocalDir) == "" {
+		return false
+	}
+	localPath := filepath.Join(record.LocalDir, filepath.FromSlash(strings.TrimPrefix(remotePath, "/")))
+	payload, err := os.ReadFile(localPath)
+	if err != nil {
+		return false
+	}
+	return json.Unmarshal(payload, out) == nil
+}
+
+func activeWorkspaceRecordForMountResolution() (workspaceRecord, bool) {
+	creds, _ := loadCredentials()
+	name, _ := activeWorkspaceName(resolveToken("", creds))
+	if strings.TrimSpace(name) == "" {
+		return workspaceRecord{}, false
+	}
+	if record, ok := workspaceRecordByName(name); ok {
+		return record, true
+	}
+	if record, ok := workspaceRecordByID(name); ok {
+		return record, true
+	}
+	return workspaceRecord{}, false
+}
+
+func stringField(record map[string]any, key string) string {
+	if record == nil {
+		return ""
+	}
+	value, ok := record[key]
+	if !ok || value == nil {
+		return ""
+	}
+	switch typed := value.(type) {
+	case string:
+		return strings.TrimSpace(typed)
+	case json.Number:
+		return strings.TrimSpace(typed.String())
+	default:
+		return strings.TrimSpace(fmt.Sprint(typed))
+	}
+}
+
+func stringEqualFold(a, b string) bool {
+	return strings.EqualFold(strings.TrimSpace(a), strings.TrimSpace(b))
+}
+
+func slugifyNativeResource(value string) string {
+	var b strings.Builder
+	lastDash := false
+	for _, r := range strings.ToLower(strings.TrimSpace(value)) {
+		if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' {
+			b.WriteRune(r)
+			lastDash = false
+			continue
+		}
+		if !lastDash && b.Len() > 0 {
+			b.WriteByte('-')
+			lastDash = true
+		}
+	}
+	return strings.Trim(b.String(), "-")
+}
+
+func encodeVFSPathSegment(value string) string {
+	return url.PathEscape(strings.TrimSpace(value))
+}
+
+func isUUIDLike(value string) bool {
+	trimmed := strings.TrimSpace(value)
+	if len(trimmed) == 36 {
+		for i, r := range trimmed {
+			if i == 8 || i == 13 || i == 18 || i == 23 {
+				if r != '-' {
+					return false
+				}
+				continue
+			}
+			if !isHexRune(r) {
+				return false
+			}
+		}
+		return true
+	}
+	if len(trimmed) == 32 {
+		for _, r := range trimmed {
+			if !isHexRune(r) {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+func isHexRune(r rune) bool {
+	return r >= '0' && r <= '9' || r >= 'a' && r <= 'f' || r >= 'A' && r <= 'F'
 }
 
 func delegatedCredentialsPathForRequest(workspaceValue string, scopes []string) string {
