@@ -6,6 +6,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+_No unreleased changes._
+
+## [0.10.19] - 2026-06-29
+
 ### Fixed
 
 - Hardened the local control-plane daemon with serialized binding updates, socket permission guarding, explicit HTTP timeouts, and an OpenAPI-documented API-version header on `/v1/hello`.
@@ -496,7 +500,8 @@ _No user-visible changes in this release._
 ### Fixed
 - Upload raw binaries to GitHub releases. ([#34])
 
-[Unreleased]: https://github.com/AgentWorkforce/relayfile/compare/v0.10.16...HEAD
+[Unreleased]: https://github.com/AgentWorkforce/relayfile/compare/v0.10.19...HEAD
+[0.10.19]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.10.19
 [0.10.16]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.10.16
 [0.10.15]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.10.15
 [0.10.13]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.10.13
