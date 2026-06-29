@@ -292,6 +292,51 @@ func TestIntegrationBindListAndUnbind(t *testing.T) {
 	}
 }
 
+func TestIntegrationUnbindNativeResourceRemovesStoredFallbackGlob(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+	localDir := t.TempDir()
+	if _, err := upsertWorkspaceDetails(workspaceRecord{Name: "demo", ID: "ws_demo", LocalDir: localDir}); err != nil {
+		t.Fatalf("upsert workspace failed: %v", err)
+	}
+	writeTestMountFile(t, localDir, "slack/channels/by-name/watchdog-test.json", `{"id":"C123","canonicalPath":"/slack/channels/C123__watchdog-test/meta.json"}`)
+
+	if err := writeRelayIntegrationBindings([]relayIntegrationBinding{
+		{
+			Provider:     "slack",
+			PathGlob:     "/slack/channels/*/**",
+			Channel:      "#events",
+			WebhookID:    "wh_1",
+			WebhookToken: "tok_1",
+		},
+		{
+			Provider:     "github",
+			PathGlob:     "/github/repos/AgentWorkforce/relayfile/**",
+			Channel:      "#events",
+			WebhookID:    "wh_2",
+			WebhookToken: "tok_2",
+		},
+	}); err != nil {
+		t.Fatalf("seed bindings failed: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := run([]string{"integration", "unbind", "slack", "--resource", "#watchdog-test"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("unbind failed: %v\n%s", err, stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "slack binding removed") {
+		t.Fatalf("expected unbind confirmation, got %q", stdout.String())
+	}
+
+	bindings, err := readRelayIntegrationBindings()
+	if err != nil {
+		t.Fatalf("read bindings failed: %v", err)
+	}
+	if len(bindings) != 1 || bindings[0].Provider != "github" {
+		t.Fatalf("expected only github binding to remain, got %#v", bindings)
+	}
+}
+
 func TestIntegrationBindResolvesNativeResources(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -345,7 +390,7 @@ func TestIntegrationBindResolvesNativeResources(t *testing.T) {
 			name:     "unresolved slack name warns and binds matcher-safe fallback",
 			provider: "slack",
 			resource: "#missing-channel",
-			wantGlob: "/slack/channels/*/**",
+			wantGlob: "/slack/channels/**",
 			wantWarn: true,
 		},
 		{
@@ -2755,6 +2800,7 @@ func TestMountSkipsDataPlaneWhenDelegatedRefreshRejected(t *testing.T) {
 
 func clearRelayfileEnv(t *testing.T) {
 	t.Helper()
+	resetActiveWorkspaceRecordForMountResolutionCache()
 	t.Setenv("RELAYFILE_SERVER", "")
 	t.Setenv("RELAYFILE_BASE_URL", "")
 	t.Setenv("RELAYFILE_TOKEN", "")

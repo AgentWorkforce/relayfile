@@ -708,11 +708,11 @@ func printIntegrationUsage(w io.Writer, subcommand string) {
 	case "set-metadata":
 		fmt.Fprintln(w, "Usage: relayfile integration set-metadata PROVIDER KEY=VALUE [KEY=VALUE...] [--workspace NAME] [--yes]")
 	case "bind":
-		fmt.Fprintln(w, "Usage: relayfile integration bind PROVIDER PATH_GLOB --channel CHANNEL --webhook ID --webhook-token TOKEN")
+		fmt.Fprintln(w, "Usage: relayfile integration bind PROVIDER RESOURCE_OR_PATH_GLOB --channel CHANNEL --webhook ID --webhook-token TOKEN")
 	case "resolve-path":
 		fmt.Fprintln(w, "Usage: relayfile integration resolve-path PROVIDER RESOURCE [--json]")
 	case "unbind":
-		fmt.Fprintln(w, "Usage: relayfile integration unbind PROVIDER [PATH_GLOB|--resource PATH_GLOB]")
+		fmt.Fprintln(w, "Usage: relayfile integration unbind PROVIDER [RESOURCE_OR_PATH_GLOB|--resource RESOURCE_OR_PATH_GLOB]")
 	default:
 		fmt.Fprintln(w, `Usage:
   relayfile integration connect PROVIDER [--backend BACKEND] [--workspace NAME] [--wait-sync]
@@ -722,9 +722,9 @@ func printIntegrationUsage(w io.Writer, subcommand string) {
   relayfile integration disconnect PROVIDER [--workspace NAME] [--yes]
   relayfile integration adopt PROVIDER --connection-id ID [--workspace NAME] [--provider-config-key KEY] [--yes]
   relayfile integration set-metadata PROVIDER KEY=VALUE [KEY=VALUE...] [--workspace NAME] [--yes]
-  relayfile integration bind PROVIDER PATH_GLOB --channel CHANNEL --webhook ID --webhook-token TOKEN
+  relayfile integration bind PROVIDER RESOURCE_OR_PATH_GLOB --channel CHANNEL --webhook ID --webhook-token TOKEN
   relayfile integration resolve-path PROVIDER RESOURCE [--json]
-  relayfile integration unbind PROVIDER [PATH_GLOB|--resource PATH_GLOB]
+  relayfile integration unbind PROVIDER [RESOURCE_OR_PATH_GLOB|--resource RESOURCE_OR_PATH_GLOB]
   relayfile integration writeback-secret --channel CHANNEL [--workspace WS] [--json]`)
 	}
 }
@@ -806,9 +806,9 @@ Usage:
   relayfile integration disconnect PROVIDER [--workspace NAME] [--yes]
   relayfile integration adopt PROVIDER --connection-id ID [--workspace NAME] [--provider-config-key KEY] [--yes]
   relayfile integration set-metadata PROVIDER KEY=VALUE [KEY=VALUE...] [--workspace NAME] [--yes]
-  relayfile integration bind PROVIDER PATH_GLOB --channel CHANNEL --webhook ID --webhook-token TOKEN
+  relayfile integration bind PROVIDER RESOURCE_OR_PATH_GLOB --channel CHANNEL --webhook ID --webhook-token TOKEN
   relayfile integration resolve-path PROVIDER RESOURCE [--json]
-  relayfile integration unbind PROVIDER [PATH_GLOB|--resource PATH_GLOB]
+  relayfile integration unbind PROVIDER [RESOURCE_OR_PATH_GLOB|--resource RESOURCE_OR_PATH_GLOB]
   relayfile ops list [--workspace NAME] [--json]
   relayfile ops replay OPID [--workspace NAME]
   relayfile writeback list --state pending|dead [--workspace WS] [--json]
@@ -2328,7 +2328,7 @@ func runIntegrationBind(args []string, stdout io.Writer) error {
 		return writeJSON(stdout, bindings)
 	}
 	if fs.NArg() != 2 {
-		return errors.New("usage: relayfile integration bind PROVIDER PATH_GLOB --channel CHANNEL --webhook ID --webhook-token TOKEN")
+		return errors.New("usage: relayfile integration bind PROVIDER RESOURCE_OR_PATH_GLOB --channel CHANNEL --webhook ID --webhook-token TOKEN")
 	}
 	provider := normalizeProviderID(fs.Arg(0))
 	if err := validateLocalProviderID(provider); err != nil {
@@ -2445,7 +2445,7 @@ func runIntegrationUnbind(args []string, stdout io.Writer) error {
 		return err
 	}
 	if fs.NArg() < 1 || fs.NArg() > 2 {
-		return errors.New("usage: relayfile integration unbind PROVIDER [PATH_GLOB|--resource PATH_GLOB]")
+		return errors.New("usage: relayfile integration unbind PROVIDER [RESOURCE_OR_PATH_GLOB|--resource RESOURCE_OR_PATH_GLOB]")
 	}
 	provider := normalizeProviderID(fs.Arg(0))
 	if err := validateLocalProviderID(provider); err != nil {
@@ -2454,16 +2454,22 @@ func runIntegrationUnbind(args []string, stdout io.Writer) error {
 	pathGlob := strings.TrimSpace(*resource)
 	if fs.NArg() == 2 {
 		if pathGlob != "" {
-			return errors.New("pass PATH_GLOB either positionally or with --resource, not both")
+			return errors.New("pass RESOURCE_OR_PATH_GLOB either positionally or with --resource, not both")
 		}
 		pathGlob = strings.TrimSpace(fs.Arg(1))
 	}
-	if pathGlob != "" && !strings.HasPrefix(pathGlob, "/") {
+	matchGlobs := []string{}
+	if pathGlob != "" {
+		matchGlobs = append(matchGlobs, pathGlob)
+	}
+	nativeResource := pathGlob != "" && !strings.HasPrefix(pathGlob, "/")
+	if nativeResource {
 		resolved, err := resolveIntegrationBindPathGlob(provider, pathGlob)
 		if err != nil {
 			return err
 		}
 		pathGlob = resolved.PathGlob
+		matchGlobs = append([]string{pathGlob}, fallbackUnbindPathGlobsForNativeResource(provider)...)
 		if resolved.Warning != "" {
 			fmt.Fprintf(stdout, "Warning: %s\n", resolved.Warning)
 		}
@@ -2475,7 +2481,7 @@ func runIntegrationUnbind(args []string, stdout io.Writer) error {
 	kept := bindings[:0]
 	removed := 0
 	for _, binding := range bindings {
-		if binding.Provider == provider && (pathGlob == "" || binding.PathGlob == pathGlob) {
+		if binding.Provider == provider && (pathGlob == "" || pathGlobMatchesAny(binding.PathGlob, matchGlobs)) {
 			removed++
 			continue
 		}
@@ -7860,6 +7866,28 @@ func writeRelayIntegrationBindings(bindings []relayIntegrationBinding) error {
 	return writeFileAtomically(relayIntegrationBindingsPath(), payload, 0o600)
 }
 
+func pathGlobMatchesAny(pathGlob string, candidates []string) bool {
+	for _, candidate := range candidates {
+		if pathGlob == candidate {
+			return true
+		}
+	}
+	return false
+}
+
+func fallbackUnbindPathGlobsForNativeResource(provider string) []string {
+	switch provider {
+	case "slack":
+		return []string{"/slack/channels/**", "/slack/channels/*/**"}
+	case "telegram":
+		return []string{"/telegram/chats/**", "/telegram/chats/*/**"}
+	case "linear":
+		return []string{"/linear/teams/*"}
+	default:
+		return nil
+	}
+}
+
 func delegatedCredentialsPath() string {
 	return filepath.Join(configDir(), "delegated-credentials.json")
 }
@@ -8055,7 +8083,7 @@ func scanAliasCanonicalPath(aliasDirRemotePath, slug string) (string, bool) {
 			continue
 		}
 		name := entry.Name()
-		if name == slug+".json" || strings.HasPrefix(name, slug+"__") || strings.HasPrefix(name, slug+"-") {
+		if strings.HasSuffix(name, ".json") && (name == slug+".json" || strings.HasPrefix(name, slug+"__")) {
 			if canonical, ok := readAliasCanonicalPath(path.Join(aliasDirRemotePath, name)); ok {
 				return canonical, true
 			}
@@ -8221,7 +8249,7 @@ func canonicalPathToBindGlob(canonical string, cfg integrationContainerResolver)
 
 func unresolvedContainerFallbackGlob(cfg integrationContainerResolver) string {
 	if cfg.DirectoryGlob {
-		return path.Join(cfg.Root, cfg.Container, "*", "**")
+		return path.Join(cfg.Root, cfg.Container, "**")
 	}
 	return path.Join(cfg.Root, cfg.Container, "*")
 }
@@ -8239,19 +8267,37 @@ func readMountedJSON(remotePath string, out any) bool {
 	return json.Unmarshal(payload, out) == nil
 }
 
+var (
+	activeWorkspaceRecordCache     workspaceRecord
+	activeWorkspaceRecordCacheOK   bool
+	activeWorkspaceRecordCacheOnce sync.Once
+)
+
 func activeWorkspaceRecordForMountResolution() (workspaceRecord, bool) {
-	creds, _ := loadCredentials()
-	name, _ := activeWorkspaceName(resolveToken("", creds))
-	if strings.TrimSpace(name) == "" {
-		return workspaceRecord{}, false
-	}
-	if record, ok := workspaceRecordByName(name); ok {
-		return record, true
-	}
-	if record, ok := workspaceRecordByID(name); ok {
-		return record, true
-	}
-	return workspaceRecord{}, false
+	activeWorkspaceRecordCacheOnce.Do(func() {
+		creds, _ := loadCredentials()
+		name, _ := activeWorkspaceName(resolveToken("", creds))
+		if strings.TrimSpace(name) == "" {
+			return
+		}
+		if record, ok := workspaceRecordByName(name); ok {
+			activeWorkspaceRecordCache = record
+			activeWorkspaceRecordCacheOK = true
+			return
+		}
+		if record, ok := workspaceRecordByID(name); ok {
+			activeWorkspaceRecordCache = record
+			activeWorkspaceRecordCacheOK = true
+			return
+		}
+	})
+	return activeWorkspaceRecordCache, activeWorkspaceRecordCacheOK
+}
+
+func resetActiveWorkspaceRecordForMountResolutionCache() {
+	activeWorkspaceRecordCache = workspaceRecord{}
+	activeWorkspaceRecordCacheOK = false
+	activeWorkspaceRecordCacheOnce = sync.Once{}
 }
 
 func stringField(record map[string]any, key string) string {
@@ -8300,7 +8346,8 @@ func encodeVFSPathSegment(value string) string {
 func isUUIDLike(value string) bool {
 	trimmed := strings.TrimSpace(value)
 	if len(trimmed) == 36 {
-		for i, r := range trimmed {
+		for i := 0; i < len(trimmed); i++ {
+			r := rune(trimmed[i])
 			if i == 8 || i == 13 || i == 18 || i == 23 {
 				if r != '-' {
 					return false
@@ -8314,7 +8361,8 @@ func isUUIDLike(value string) bool {
 		return true
 	}
 	if len(trimmed) == 32 {
-		for _, r := range trimmed {
+		for i := 0; i < len(trimmed); i++ {
+			r := rune(trimmed[i])
 			if !isHexRune(r) {
 				return false
 			}
