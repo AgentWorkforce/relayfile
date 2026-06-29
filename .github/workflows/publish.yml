@@ -11,6 +11,7 @@ on:
           - all
           - core
           - sdk
+          - client
           - agents
           - cli
           - file-observer
@@ -157,6 +158,7 @@ jobs:
             const packagePaths = [
               'packages/core/package.json',
               'packages/sdk/typescript/package.json',
+              'packages/client/package.json',
               'packages/agents/package.json',
               'packages/cli/package.json',
               'packages/file-observer/package.json',
@@ -205,6 +207,7 @@ jobs:
         run: |
           npm run build --workspace=packages/core
           npm run build --workspace=packages/sdk/typescript
+          npm run build --workspace=@relayfile/client
           npm run build --workspace=packages/agents
           npm run build --workspace=packages/cli
           npm run build --workspace=packages/local-mount
@@ -223,6 +226,9 @@ jobs:
             packages/sdk/typescript/package.json
             packages/sdk/typescript/dist/
             packages/sdk/typescript/CHANGELOG.md
+            packages/client/package.json
+            packages/client/dist/
+            packages/client/CHANGELOG.md
             packages/agents/package.json
             packages/agents/dist/
             packages/agents/CHANGELOG.md
@@ -342,6 +348,9 @@ jobs:
           - package: sdk
             path: packages/sdk/typescript
             mount_binary: ""
+          - package: client
+            path: packages/client
+            mount_binary: ""
           - package: agents
             path: packages/agents
             mount_binary: ""
@@ -455,6 +464,7 @@ jobs:
           case "${{ github.event.inputs.package }}" in
             core) echo "path=packages/core" >> "$GITHUB_OUTPUT"; echo "mount_binary=" >> "$GITHUB_OUTPUT" ;;
             sdk) echo "path=packages/sdk/typescript" >> "$GITHUB_OUTPUT"; echo "mount_binary=" >> "$GITHUB_OUTPUT" ;;
+            client) echo "path=packages/client" >> "$GITHUB_OUTPUT"; echo "mount_binary=" >> "$GITHUB_OUTPUT" ;;
             agents) echo "path=packages/agents" >> "$GITHUB_OUTPUT"; echo "mount_binary=" >> "$GITHUB_OUTPUT" ;;
             cli) echo "path=packages/cli" >> "$GITHUB_OUTPUT"; echo "mount_binary=" >> "$GITHUB_OUTPUT" ;;
             file-observer) echo "path=packages/file-observer" >> "$GITHUB_OUTPUT"; echo "mount_binary=" >> "$GITHUB_OUTPUT" ;;
@@ -579,6 +589,7 @@ jobs:
             package.json package-lock.json \
             packages/core/package.json packages/core/CHANGELOG.md \
             packages/sdk/typescript/package.json packages/sdk/typescript/package-lock.json packages/sdk/typescript/CHANGELOG.md \
+            packages/client/package.json packages/client/CHANGELOG.md \
             packages/agents/package.json packages/agents/CHANGELOG.md \
             packages/cli/package.json packages/cli/CHANGELOG.md \
             packages/file-observer/package.json packages/file-observer/CHANGELOG.md \
@@ -604,6 +615,7 @@ jobs:
             ### Packages
             - `@relayfile/core@${{ needs.build.outputs.new_version }}`
             - `@relayfile/sdk@${{ needs.build.outputs.new_version }}`
+            - `@relayfile/client@${{ needs.build.outputs.new_version }}`
             - `@relayfile/agents@${{ needs.build.outputs.new_version }}`
             - `relayfile@${{ needs.build.outputs.new_version }}`
             - `@relayfile/file-observer@${{ needs.build.outputs.new_version }}`
@@ -616,6 +628,7 @@ jobs:
             ### Install
             ```bash
             npm install @relayfile/sdk@${{ needs.build.outputs.new_version }}
+            npm install @relayfile/client@${{ needs.build.outputs.new_version }}
             npm install @relayfile/agents@${{ needs.build.outputs.new_version }}
             npm install relayfile@${{ needs.build.outputs.new_version }}
             npm install @relayfile/file-observer@${{ needs.build.outputs.new_version }}

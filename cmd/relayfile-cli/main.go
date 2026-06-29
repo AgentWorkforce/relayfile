@@ -43,6 +43,7 @@ import (
 )
 
 const (
+	relayfileDefaultVersion = "0.10.17"
 	defaultServerURL        = "https://file.agentrelay.com"
 	defaultCloudAPIURL      = "https://agentrelay.com/cloud"
 	defaultObserverURL      = "https://agentrelay.com/observer/file"
@@ -54,6 +55,10 @@ const (
 	minMountPollInterval    = 5 * time.Second
 	defaultMountTimeout     = 15 * time.Second
 )
+
+var relayfileVersion = relayfileDefaultVersion
+
+var relayIntegrationBindingsMu sync.Mutex
 
 // defaultJoinScopes are the scopes minted for every delegated-credential
 // workspace join. ops:read is required for writeback op-status polling
@@ -520,6 +525,10 @@ func main() {
 }
 
 func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
+	if wantsVersion(args) {
+		fmt.Fprintln(stdout, relayfileVersion)
+		return nil
+	}
 	if wantsHelp(args) {
 		printHelpForArgs(args, stdout)
 		return nil
@@ -576,6 +585,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		return runObserver(args[1:], stdout)
 	case "listen", "watch":
 		return runListen(args[1:], stdout)
+	case "control-plane":
+		return runControlPlane(args[1:], stdout)
 	case "dev":
 		return runDev(args[1:], nil, stdout)
 	case "help", "-h", "--help":
@@ -585,6 +596,10 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		printUsage(stderr)
 		return fmt.Errorf("unknown subcommand %q", args[0])
 	}
+}
+
+func wantsVersion(args []string) bool {
+	return len(args) == 1 && (args[0] == "--version" || args[0] == "version")
 }
 
 func wantsHelp(args []string) bool {
@@ -654,6 +669,8 @@ func printHelpForArgs(args []string, stdout io.Writer) {
 		fmt.Fprintln(stdout, "Usage: relayfile observer [WORKSPACE] [--no-open]")
 	case "listen", "watch":
 		fmt.Fprintln(stdout, "Usage: relayfile listen [WORKSPACE] [--provider PROVIDER] [--path GLOB] [--event TYPE] [--run CMD] [--format text|json] [--background]")
+	case "control-plane":
+		fmt.Fprintln(stdout, "Usage: relayfile control-plane serve [--sock PATH]")
 	case "dev":
 		fmt.Fprintln(stdout, "Usage: relayfile dev [WORKSPACE] [--provider PROVIDER] [--path GLOB] [--event TYPE] [--run CMD]")
 	case "help":
@@ -836,6 +853,7 @@ Usage:
   relayfile status [WORKSPACE]
   relayfile logs [WORKSPACE]
   relayfile observer [WORKSPACE] [--no-open]
+  relayfile control-plane serve [--sock PATH]
 
 Subcommands:
   setup       Sign in, connect an integration, and mount the workspace
@@ -2300,65 +2318,47 @@ func runIntegration(args []string, stdin io.Reader, stdout io.Writer) error {
 	}
 }
 
-func runIntegrationBind(args []string, stdout io.Writer) error {
-	fs := flag.NewFlagSet("integration bind", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	list := fs.Bool("list", false, "list active relay bindings as JSON")
-	channel := fs.String("channel", "", "relay channel to receive provider records")
-	webhookID := fs.String("webhook", "", "RelayCast inbound webhook id")
-	webhookToken := fs.String("webhook-token", "", "RelayCast inbound webhook token")
-	subscriptionID := fs.String("subscription", "", "relay integration subscription id")
-	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
-		"list":          false,
-		"channel":       true,
-		"webhook":       true,
-		"webhook-token": true,
-		"subscription":  true,
-	})); err != nil {
-		return err
-	}
-	if *list {
-		if fs.NArg() != 0 {
-			return errors.New("usage: relayfile integration bind --list")
-		}
-		bindings, err := readRelayIntegrationBindings()
-		if err != nil {
-			return err
-		}
-		return writeJSON(stdout, bindings)
-	}
-	if fs.NArg() != 2 {
-		return errors.New("usage: relayfile integration bind PROVIDER RESOURCE_OR_PATH_GLOB --channel CHANNEL --webhook ID --webhook-token TOKEN")
-	}
-	provider := normalizeProviderID(fs.Arg(0))
+type relayIntegrationBindInput struct {
+	Provider       string
+	Resource       string
+	Channel        string
+	WebhookID      string
+	WebhookToken   string
+	SubscriptionID string
+}
+
+func bindRelayIntegration(input relayIntegrationBindInput) (relayIntegrationBinding, bool, string, error) {
+	provider := normalizeProviderID(input.Provider)
 	if err := validateLocalProviderID(provider); err != nil {
-		return err
+		return relayIntegrationBinding{}, false, "", err
 	}
-	resolved, err := resolveIntegrationBindPathGlob(provider, fs.Arg(1))
+	resolved, err := resolveIntegrationBindPathGlob(provider, input.Resource)
 	if err != nil {
-		return err
+		return relayIntegrationBinding{}, false, "", err
 	}
 	binding := relayIntegrationBinding{
 		Provider:       provider,
 		PathGlob:       resolved.PathGlob,
-		Channel:        strings.TrimSpace(*channel),
-		WebhookID:      strings.TrimSpace(*webhookID),
-		WebhookToken:   strings.TrimSpace(*webhookToken),
-		SubscriptionID: strings.TrimSpace(*subscriptionID),
+		Channel:        strings.TrimSpace(input.Channel),
+		WebhookID:      strings.TrimSpace(input.WebhookID),
+		WebhookToken:   strings.TrimSpace(input.WebhookToken),
+		SubscriptionID: strings.TrimSpace(input.SubscriptionID),
 	}
 	if binding.Channel == "" {
-		return errors.New("--channel is required")
+		return relayIntegrationBinding{}, false, "", errors.New("--channel is required")
 	}
 	if binding.WebhookID == "" {
-		return errors.New("--webhook is required")
+		return relayIntegrationBinding{}, false, "", errors.New("--webhook is required")
 	}
 	if binding.WebhookToken == "" {
-		return errors.New("--webhook-token is required")
+		return relayIntegrationBinding{}, false, "", errors.New("--webhook-token is required")
 	}
+	relayIntegrationBindingsMu.Lock()
+	defer relayIntegrationBindingsMu.Unlock()
 	now := time.Now().UTC().Format(time.RFC3339)
 	bindings, err := readRelayIntegrationBindings()
 	if err != nil {
-		return err
+		return relayIntegrationBinding{}, false, "", err
 	}
 	replaced := false
 	for i := range bindings {
@@ -2382,10 +2382,56 @@ func runIntegrationBind(args []string, stdout io.Writer) error {
 		bindings = append(bindings, binding)
 	}
 	if err := writeRelayIntegrationBindings(bindings); err != nil {
+		return relayIntegrationBinding{}, false, "", err
+	}
+	return binding, replaced, resolved.Warning, nil
+}
+
+func runIntegrationBind(args []string, stdout io.Writer) error {
+	fs := flag.NewFlagSet("integration bind", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	list := fs.Bool("list", false, "list active relay bindings as JSON")
+	_ = fs.Bool("json", false, "accepted for consistency with other JSON-emitting integration commands")
+	channel := fs.String("channel", "", "relay channel to receive provider records")
+	webhookID := fs.String("webhook", "", "RelayCast inbound webhook id")
+	webhookToken := fs.String("webhook-token", "", "RelayCast inbound webhook token")
+	subscriptionID := fs.String("subscription", "", "relay integration subscription id")
+	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
+		"list":          false,
+		"channel":       true,
+		"webhook":       true,
+		"webhook-token": true,
+		"subscription":  true,
+		"json":          false,
+	})); err != nil {
 		return err
 	}
-	if resolved.Warning != "" {
-		fmt.Fprintf(stdout, "Warning: %s\n", resolved.Warning)
+	if *list {
+		if fs.NArg() != 0 {
+			return errors.New("usage: relayfile integration bind --list")
+		}
+		bindings, err := listRelayIntegrationBindings()
+		if err != nil {
+			return err
+		}
+		return writeJSON(stdout, bindings)
+	}
+	if fs.NArg() != 2 {
+		return errors.New("usage: relayfile integration bind PROVIDER RESOURCE_OR_PATH_GLOB --channel CHANNEL --webhook ID --webhook-token TOKEN")
+	}
+	binding, replaced, warning, err := bindRelayIntegration(relayIntegrationBindInput{
+		Provider:       fs.Arg(0),
+		Resource:       fs.Arg(1),
+		Channel:        *channel,
+		WebhookID:      *webhookID,
+		WebhookToken:   *webhookToken,
+		SubscriptionID: *subscriptionID,
+	})
+	if err != nil {
+		return err
+	}
+	if warning != "" {
+		fmt.Fprintf(stdout, "Warning: %s\n", warning)
 	}
 	if replaced {
 		fmt.Fprintf(stdout, "%s binding updated: %s -> %s\n", binding.Provider, binding.PathGlob, binding.Channel)
@@ -2435,48 +2481,39 @@ func runIntegrationResolvePath(args []string, stdout io.Writer) error {
 	return nil
 }
 
-func runIntegrationUnbind(args []string, stdout io.Writer) error {
-	fs := flag.NewFlagSet("integration unbind", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	resource := fs.String("resource", "", "path glob/resource to unbind")
-	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
-		"resource": true,
-	})); err != nil {
-		return err
-	}
-	if fs.NArg() < 1 || fs.NArg() > 2 {
-		return errors.New("usage: relayfile integration unbind PROVIDER [RESOURCE_OR_PATH_GLOB|--resource RESOURCE_OR_PATH_GLOB]")
-	}
-	provider := normalizeProviderID(fs.Arg(0))
+type relayIntegrationUnbindResult struct {
+	Provider string
+	PathGlob string
+	Removed  int
+	Warning  string
+}
+
+func unbindRelayIntegration(providerValue, resourceValue string) (relayIntegrationUnbindResult, error) {
+	provider := normalizeProviderID(providerValue)
 	if err := validateLocalProviderID(provider); err != nil {
-		return err
+		return relayIntegrationUnbindResult{}, err
 	}
-	pathGlob := strings.TrimSpace(*resource)
-	if fs.NArg() == 2 {
-		if pathGlob != "" {
-			return errors.New("pass RESOURCE_OR_PATH_GLOB either positionally or with --resource, not both")
-		}
-		pathGlob = strings.TrimSpace(fs.Arg(1))
-	}
+	pathGlob := strings.TrimSpace(resourceValue)
 	matchGlobs := []string{}
 	if pathGlob != "" {
 		matchGlobs = append(matchGlobs, pathGlob)
 	}
+	warning := ""
 	nativeResource := pathGlob != "" && !strings.HasPrefix(pathGlob, "/")
 	if nativeResource {
 		resolved, err := resolveIntegrationBindPathGlob(provider, pathGlob)
 		if err != nil {
-			return err
+			return relayIntegrationUnbindResult{}, err
 		}
 		pathGlob = resolved.PathGlob
 		matchGlobs = append([]string{pathGlob}, fallbackUnbindPathGlobsForNativeResource(provider)...)
-		if resolved.Warning != "" {
-			fmt.Fprintf(stdout, "Warning: %s\n", resolved.Warning)
-		}
+		warning = resolved.Warning
 	}
+	relayIntegrationBindingsMu.Lock()
+	defer relayIntegrationBindingsMu.Unlock()
 	bindings, err := readRelayIntegrationBindings()
 	if err != nil {
-		return err
+		return relayIntegrationUnbindResult{}, err
 	}
 	kept := bindings[:0]
 	removed := 0
@@ -2489,17 +2526,51 @@ func runIntegrationUnbind(args []string, stdout io.Writer) error {
 	}
 	if removed == 0 {
 		if pathGlob != "" {
-			return fmt.Errorf("no binding found for provider %q with path glob %q", provider, pathGlob)
+			return relayIntegrationUnbindResult{}, fmt.Errorf("no binding found for provider %q with path glob %q", provider, pathGlob)
 		}
-		return fmt.Errorf("no binding found for provider %q", provider)
+		return relayIntegrationUnbindResult{}, fmt.Errorf("no binding found for provider %q", provider)
 	}
 	if err := writeRelayIntegrationBindings(kept); err != nil {
+		return relayIntegrationUnbindResult{}, err
+	}
+	return relayIntegrationUnbindResult{
+		Provider: provider,
+		PathGlob: pathGlob,
+		Removed:  removed,
+		Warning:  warning,
+	}, nil
+}
+
+func runIntegrationUnbind(args []string, stdout io.Writer) error {
+	fs := flag.NewFlagSet("integration unbind", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	resource := fs.String("resource", "", "path glob/resource to unbind")
+	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
+		"resource": true,
+	})); err != nil {
 		return err
 	}
-	if pathGlob == "" {
-		fmt.Fprintf(stdout, "%s bindings removed: %d\n", provider, removed)
+	if fs.NArg() < 1 || fs.NArg() > 2 {
+		return errors.New("usage: relayfile integration unbind PROVIDER [RESOURCE_OR_PATH_GLOB|--resource RESOURCE_OR_PATH_GLOB]")
+	}
+	pathGlob := strings.TrimSpace(*resource)
+	if fs.NArg() == 2 {
+		if pathGlob != "" {
+			return errors.New("pass RESOURCE_OR_PATH_GLOB either positionally or with --resource, not both")
+		}
+		pathGlob = strings.TrimSpace(fs.Arg(1))
+	}
+	result, err := unbindRelayIntegration(fs.Arg(0), pathGlob)
+	if err != nil {
+		return err
+	}
+	if result.Warning != "" {
+		fmt.Fprintf(stdout, "Warning: %s\n", result.Warning)
+	}
+	if result.PathGlob == "" {
+		fmt.Fprintf(stdout, "%s bindings removed: %d\n", result.Provider, result.Removed)
 	} else {
-		fmt.Fprintf(stdout, "%s binding removed: %s\n", provider, pathGlob)
+		fmt.Fprintf(stdout, "%s binding removed: %s\n", result.Provider, result.PathGlob)
 	}
 	return nil
 }
@@ -7827,6 +7898,12 @@ func cloudCredentialsPath() string {
 
 func relayIntegrationBindingsPath() string {
 	return filepath.Join(configDir(), "bindings.json")
+}
+
+func listRelayIntegrationBindings() ([]relayIntegrationBinding, error) {
+	relayIntegrationBindingsMu.Lock()
+	defer relayIntegrationBindingsMu.Unlock()
+	return readRelayIntegrationBindings()
 }
 
 func readRelayIntegrationBindings() ([]relayIntegrationBinding, error) {

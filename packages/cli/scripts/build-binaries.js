@@ -7,6 +7,7 @@ const path = require("path");
 const repoRoot = path.resolve(__dirname, "..", "..", "..");
 const packageRoot = path.resolve(__dirname, "..");
 const binDir = path.join(packageRoot, "bin");
+const version = require(path.join(packageRoot, "package.json")).version;
 
 const targets = [
   { goos: "darwin", goarch: "amd64" },
@@ -29,7 +30,7 @@ for (const target of targets) {
     [
       "build",
       "-trimpath",
-      "-ldflags=-s -w",
+      `-ldflags=-s -w -X main.relayfileVersion=${version}`,
       "-o",
       output,
       "./cmd/relayfile-cli",

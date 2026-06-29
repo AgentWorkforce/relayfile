@@ -6,7 +6,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_No unreleased changes._
+### Fixed
+
+- Hardened the local control-plane daemon with serialized binding updates, socket permission guarding, explicit HTTP timeouts, and an OpenAPI-documented API-version header on `/v1/hello`.
 
 ## [0.10.16] - 2026-06-29
 
