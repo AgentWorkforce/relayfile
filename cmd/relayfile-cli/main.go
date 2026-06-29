@@ -43,7 +43,7 @@ import (
 )
 
 const (
-	relayfileDefaultVersion = "0.10.16"
+	relayfileDefaultVersion = "0.10.17"
 	defaultServerURL        = "https://file.agentrelay.com"
 	defaultCloudAPIURL      = "https://agentrelay.com/cloud"
 	defaultObserverURL      = "https://agentrelay.com/observer/file"

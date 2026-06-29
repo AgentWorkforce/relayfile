@@ -6,4 +6,4 @@ All notable changes to this package will be documented in this file.
 
 - Added the initial typed relayfile control-plane client.
 
-[Unreleased]: https://github.com/AgentWorkforce/relayfile/compare/v0.10.15...HEAD
+[Unreleased]: https://github.com/AgentWorkforce/relayfile/compare/v0.10.16...HEAD

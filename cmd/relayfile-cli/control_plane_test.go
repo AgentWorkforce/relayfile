@@ -23,8 +23,8 @@ func TestControlPlaneHelloVersionAndCLIVersion(t *testing.T) {
 	if err := run([]string{"--version"}, strings.NewReader(""), &stdout, &stdout); err != nil {
 		t.Fatalf("relayfile --version failed: %v", err)
 	}
-	if got := strings.TrimSpace(stdout.String()); got != "0.10.16" {
-		t.Fatalf("relayfile --version = %q, want 0.10.16", got)
+	if got := strings.TrimSpace(stdout.String()); got != "0.10.17" {
+		t.Fatalf("relayfile --version = %q, want 0.10.17", got)
 	}
 
 	client, baseURL, cleanup := startControlPlaneTestServer(t)
@@ -35,7 +35,7 @@ func TestControlPlaneHelloVersionAndCLIVersion(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("hello status = %d", status)
 	}
-	if hello.DaemonVersion != "0.10.16" || hello.APIVersion != 1 {
+	if hello.DaemonVersion != "0.10.17" || hello.APIVersion != 1 {
 		t.Fatalf("unexpected hello response: %#v", hello)
 	}
 
