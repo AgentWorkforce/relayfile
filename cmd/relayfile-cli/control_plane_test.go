@@ -187,6 +187,30 @@ func TestControlPlaneCloudIntegrationConformance(t *testing.T) {
 				t.Fatalf("unexpected writeback-secret channel: %q", r.URL.Query().Get("channel"))
 			}
 			_, _ = w.Write([]byte(`{"ok":true,"data":{"url":"https://relay.test/writeback","secret":"sec_123"}}`))
+		case "/v1/workspaces/ws_123/webhooks":
+			if r.Method != http.MethodPost {
+				t.Fatalf("expected webhooks POST, got %s", r.Method)
+			}
+			var body struct {
+				URL       string   `json:"url"`
+				PathGlobs []string `json:"pathGlobs"`
+				Secret    string   `json:"secret"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("decode webhook subscription body failed: %v", err)
+			}
+			if body.URL != "https://cast.test/v1/integrations/relayfile/inbound/ws/ch" ||
+				len(body.PathGlobs) != 1 ||
+				body.PathGlobs[0] != "/github/repos/acme/widgets/issues/**" ||
+				body.Secret != "inbound-secret" {
+				t.Fatalf("unexpected webhook subscription body: %#v", body)
+			}
+			_, _ = w.Write([]byte(`{"subscriptionId":"whsub_123"}`))
+		case "/v1/workspaces/ws_123/webhooks/whsub_123":
+			if r.Method != http.MethodDelete {
+				t.Fatalf("expected webhooks DELETE, got %s", r.Method)
+			}
+			w.WriteHeader(http.StatusNoContent)
 		default:
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
@@ -239,6 +263,32 @@ func TestControlPlaneCloudIntegrationConformance(t *testing.T) {
 	}
 	if secret.URL != "https://relay.test/writeback" || secret.Secret != "sec_123" {
 		t.Fatalf("unexpected writeback secret: %#v", secret)
+	}
+
+	var subscription webhookSubscriptionResponse
+	status = controlPlaneJSON(t, client, http.MethodPost, baseURL+"/v1/integrations/webhook-subscriptions", webhookSubscriptionRequest{
+		Workspace: "demo",
+		URL:       "https://cast.test/v1/integrations/relayfile/inbound/ws/ch",
+		PathGlobs: []string{"/github/repos/acme/widgets/issues/**"},
+		Secret:    "inbound-secret",
+	}, &subscription)
+	if status != http.StatusOK {
+		t.Fatalf("webhook subscription status = %d", status)
+	}
+	if subscription.SubscriptionID != "whsub_123" {
+		t.Fatalf("unexpected webhook subscription: %#v", subscription)
+	}
+
+	var deleted map[string]bool
+	status = controlPlaneJSON(t, client, http.MethodDelete, baseURL+"/v1/integrations/webhook-subscriptions", deleteWebhookSubscriptionRequest{
+		Workspace:      "demo",
+		SubscriptionID: "whsub_123",
+	}, &deleted)
+	if status != http.StatusOK {
+		t.Fatalf("delete webhook subscription status = %d", status)
+	}
+	if !deleted["ok"] {
+		t.Fatalf("unexpected delete response: %#v", deleted)
 	}
 }
 
