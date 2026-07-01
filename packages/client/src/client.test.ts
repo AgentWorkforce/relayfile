@@ -106,6 +106,42 @@ describe('RelayfileControlPlaneClient lifecycle', () => {
   });
 });
 
+describe('RelayfileControlPlaneClient integration webhook subscriptions', () => {
+  it('posts and deletes webhook subscriptions through the control-plane socket', async () => {
+    const client = new RelayfileControlPlaneClient({ socketPath: '/nope.sock', autoStart: false });
+    vi.spyOn(client, 'ensureReady').mockResolvedValue(undefined);
+    const rawRequest = vi.spyOn(client as unknown as { rawRequest: (opts: unknown) => Promise<unknown> }, 'rawRequest');
+    rawRequest.mockResolvedValueOnce({ subscriptionId: 'whsub_123' }).mockResolvedValueOnce(undefined);
+
+    await expect(
+      client.createWebhookSubscription({
+        workspace: 'demo',
+        url: 'https://cast.test/v1/integrations/relayfile/inbound/ws/ch',
+        pathGlobs: ['/github/repos/acme/widgets/issues/**'],
+        secret: 'inbound-secret',
+      })
+    ).resolves.toEqual({ subscriptionId: 'whsub_123' });
+
+    await expect(client.deleteWebhookSubscription('whsub_123', 'demo')).resolves.toBeUndefined();
+
+    expect(rawRequest).toHaveBeenNthCalledWith(1, {
+      method: 'POST',
+      path: '/v1/integrations/webhook-subscriptions',
+      body: {
+        workspace: 'demo',
+        url: 'https://cast.test/v1/integrations/relayfile/inbound/ws/ch',
+        pathGlobs: ['/github/repos/acme/widgets/issues/**'],
+        secret: 'inbound-secret',
+      },
+    });
+    expect(rawRequest).toHaveBeenNthCalledWith(2, {
+      method: 'DELETE',
+      path: '/v1/integrations/webhook-subscriptions',
+      body: { subscriptionId: 'whsub_123', workspace: 'demo' },
+    });
+  });
+});
+
 // Real-daemon contract tests — opt-in via RELAYFILE_BIN (CI builds the binary:
 // `go build -o relayfile ./cmd/relayfile-cli`). Boots the daemon and drives the
 // client over the socket.

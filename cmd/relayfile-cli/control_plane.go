@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -119,6 +120,23 @@ type writebackSecretData struct {
 	Secret string `json:"secret"`
 }
 
+type webhookSubscriptionRequest struct {
+	Workspace string   `json:"workspace,omitempty"`
+	URL       string   `json:"url"`
+	PathGlobs []string `json:"pathGlobs"`
+	Secret    string   `json:"secret"`
+}
+
+type webhookSubscriptionResponse struct {
+	SubscriptionID string `json:"subscriptionId"`
+	Secret         string `json:"secret,omitempty"`
+}
+
+type deleteWebhookSubscriptionRequest struct {
+	Workspace      string `json:"workspace,omitempty"`
+	SubscriptionID string `json:"subscriptionId"`
+}
+
 func runControlPlane(args []string, stdout io.Writer) error {
 	if len(args) == 0 {
 		return errors.New("control-plane subcommand is required: serve")
@@ -210,6 +228,7 @@ func newControlPlaneHandler() http.Handler {
 	mux.HandleFunc("/v1/integrations/bindings", withControlPlaneVersion(handleControlPlaneListBindings))
 	mux.HandleFunc("/v1/integrations/unbind", withControlPlaneVersion(handleControlPlaneUnbind))
 	mux.HandleFunc("/v1/integrations/writeback-secret", withControlPlaneVersion(handleControlPlaneWritebackSecret))
+	mux.HandleFunc("/v1/integrations/webhook-subscriptions", withControlPlaneVersion(handleControlPlaneWebhookSubscription))
 	return mux
 }
 
@@ -447,6 +466,79 @@ func handleControlPlaneWritebackSecret(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeControlPlaneJSON(w, http.StatusOK, data)
+}
+
+func handleControlPlaneWebhookSubscription(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodPost:
+		var req webhookSubscriptionRequest
+		if err := decodeControlPlaneJSON(r, &req); err != nil {
+			writeControlPlaneError(w, http.StatusBadRequest, controlPlaneErrInvalidArgument, err.Error())
+			return
+		}
+		if strings.TrimSpace(req.URL) == "" || len(req.PathGlobs) == 0 || strings.TrimSpace(req.Secret) == "" {
+			writeControlPlaneError(w, http.StatusBadRequest, controlPlaneErrInvalidArgument, "url, pathGlobs, and secret are required")
+			return
+		}
+		commandClient, err := prepareWorkspaceCommandClient(strings.TrimSpace(req.Workspace), "", "", defaultJoinScopes)
+		if err != nil {
+			writeControlPlaneMappedError(w, err)
+			return
+		}
+		workspaceID := strings.TrimSpace(commandClient.workspaceID)
+		if workspaceID == "" {
+			writeControlPlaneMappedError(w, errors.New("could not resolve relayfile workspace id"))
+			return
+		}
+		var response webhookSubscriptionResponse
+		if err := commandClient.client.postJSON(
+			context.Background(),
+			fmt.Sprintf("/v1/workspaces/%s/webhooks", url.PathEscape(workspaceID)),
+			map[string]any{
+				"url":       strings.TrimSpace(req.URL),
+				"pathGlobs": req.PathGlobs,
+				"secret":    strings.TrimSpace(req.Secret),
+			},
+			&response,
+		); err != nil {
+			writeControlPlaneMappedError(w, err)
+			return
+		}
+		writeControlPlaneJSON(w, http.StatusOK, response)
+	case http.MethodDelete:
+		var req deleteWebhookSubscriptionRequest
+		if err := decodeControlPlaneJSON(r, &req); err != nil {
+			writeControlPlaneError(w, http.StatusBadRequest, controlPlaneErrInvalidArgument, err.Error())
+			return
+		}
+		subscriptionID := strings.TrimSpace(req.SubscriptionID)
+		if subscriptionID == "" {
+			writeControlPlaneError(w, http.StatusBadRequest, controlPlaneErrInvalidArgument, "subscriptionId is required")
+			return
+		}
+		commandClient, err := prepareWorkspaceCommandClient(strings.TrimSpace(req.Workspace), "", "", defaultJoinScopes)
+		if err != nil {
+			writeControlPlaneMappedError(w, err)
+			return
+		}
+		workspaceID := strings.TrimSpace(commandClient.workspaceID)
+		if workspaceID == "" {
+			writeControlPlaneMappedError(w, errors.New("could not resolve relayfile workspace id"))
+			return
+		}
+		if err := commandClient.client.deleteJSON(
+			context.Background(),
+			fmt.Sprintf("/v1/workspaces/%s/webhooks/%s", url.PathEscape(workspaceID), url.PathEscape(subscriptionID)),
+			"",
+			nil,
+		); err != nil {
+			writeControlPlaneMappedError(w, err)
+			return
+		}
+		writeControlPlaneJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	default:
+		writeControlPlaneError(w, http.StatusMethodNotAllowed, controlPlaneErrInvalidArgument, "method not allowed")
+	}
 }
 
 func controlPlaneHello() helloResponse {

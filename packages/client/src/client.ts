@@ -106,6 +106,8 @@ export type ConnectRequestBody = Schemas['ConnectProviderRequest'];
 export type ConnectResult = Schemas['ConnectProviderResponse'];
 export type ProviderStatusResult = Schemas['ProviderStatus'];
 export type WritebackSecretResult = Schemas['WritebackSecret'];
+export type WebhookSubscriptionRequestBody = Schemas['WebhookSubscriptionRequest'];
+export type WebhookSubscriptionResult = Schemas['WebhookSubscriptionResponse'];
 
 export interface RelayfileClientOptions {
   /** Socket to connect to. Defaults to defaultRelayfileSocketPath(). */
@@ -124,7 +126,7 @@ export interface RelayfileClientOptions {
 }
 
 interface RequestOptions {
-  method: 'GET' | 'POST';
+  method: 'DELETE' | 'GET' | 'POST';
   path: string;
   query?: Record<string, string | undefined>;
   body?: unknown;
@@ -390,6 +392,22 @@ export class RelayfileControlPlaneClient {
       method: 'POST',
       path: '/v1/integrations/writeback-secret',
       body: { channel, ...(workspace ? { workspace } : {}) },
+    });
+  }
+
+  createWebhookSubscription(input: WebhookSubscriptionRequestBody): Promise<WebhookSubscriptionResult> {
+    return this.request<WebhookSubscriptionResult>({
+      method: 'POST',
+      path: '/v1/integrations/webhook-subscriptions',
+      body: input,
+    });
+  }
+
+  deleteWebhookSubscription(subscriptionId: string, workspace?: string): Promise<void> {
+    return this.request<void>({
+      method: 'DELETE',
+      path: '/v1/integrations/webhook-subscriptions',
+      body: { subscriptionId, ...(workspace ? { workspace } : {}) },
     });
   }
 
