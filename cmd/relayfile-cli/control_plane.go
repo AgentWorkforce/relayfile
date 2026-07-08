@@ -19,9 +19,9 @@ import (
 	"time"
 )
 
-const relayfileControlPlaneAPIVersion uint32 = 1
+const relayfileControlPlaneAPIVersion uint32 = 2
 
-var relayfileControlPlaneSupportedVersions = []uint32{relayfileControlPlaneAPIVersion}
+var relayfileControlPlaneSupportedVersions = []uint32{1, relayfileControlPlaneAPIVersion}
 
 type controlPlaneErrorCode string
 
@@ -492,7 +492,7 @@ func handleControlPlaneWebhookSubscription(w http.ResponseWriter, r *http.Reques
 		}
 		var response webhookSubscriptionResponse
 		if err := commandClient.client.postJSON(
-			context.Background(),
+			r.Context(),
 			fmt.Sprintf("/v1/workspaces/%s/webhooks", url.PathEscape(workspaceID)),
 			map[string]any{
 				"url":       strings.TrimSpace(req.URL),
@@ -527,7 +527,7 @@ func handleControlPlaneWebhookSubscription(w http.ResponseWriter, r *http.Reques
 			return
 		}
 		if err := commandClient.client.deleteJSON(
-			context.Background(),
+			r.Context(),
 			fmt.Sprintf("/v1/workspaces/%s/webhooks/%s", url.PathEscape(workspaceID), url.PathEscape(subscriptionID)),
 			"",
 			nil,

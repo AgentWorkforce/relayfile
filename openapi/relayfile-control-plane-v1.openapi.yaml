@@ -6,7 +6,7 @@ info:
     Versioned local control-plane contract for the relayfile daemon/CLI.
     The service listens on a user-owned Unix domain socket
     (`RELAYFILE_SOCK`, or `$XDG_RUNTIME_DIR/relayfile.sock`) and uses
-    `X-Relayfile-API-Version: 1` for client compatibility checks.
+    `X-Relayfile-API-Version: 2` for client compatibility checks.
 servers:
   - url: http://relayfile.local
     description: Logical HTTP origin over the relayfile Unix domain socket.
@@ -264,11 +264,7 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                required: [ok]
-                properties:
-                  ok:
-                    type: boolean
+                $ref: "#/components/schemas/DeleteWebhookSubscriptionResponse"
 components:
   parameters:
     ApiVersionHeader:
@@ -278,7 +274,7 @@ components:
       schema:
         type: integer
         format: uint32
-        const: 1
+        const: 2
     ApiVersionQuery:
       name: apiVersion
       in: query
@@ -558,6 +554,12 @@ components:
           type: string
         subscriptionId:
           type: string
+    DeleteWebhookSubscriptionResponse:
+      type: object
+      required: [ok]
+      properties:
+        ok:
+          type: boolean
     ErrorEnvelope:
       type: object
       required: [error]

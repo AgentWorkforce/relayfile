@@ -301,6 +301,9 @@ export interface components {
             workspace?: string;
             subscriptionId: string;
         };
+        DeleteWebhookSubscriptionResponse: {
+            ok: boolean;
+        };
         ErrorEnvelope: {
             error: {
                 /** @enum {string} */
@@ -339,7 +342,7 @@ export interface components {
         };
     };
     parameters: {
-        ApiVersionHeader: 1;
+        ApiVersionHeader: 2;
         ApiVersionQuery: number;
     };
     requestBodies: never;
@@ -679,9 +682,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        ok: boolean;
-                    };
+                    "application/json": components["schemas"]["DeleteWebhookSubscriptionResponse"];
                 };
             };
         };

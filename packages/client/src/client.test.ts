@@ -64,8 +64,8 @@ describe('RelayfileControlPlaneClient lifecycle', () => {
     const client = new RelayfileControlPlaneClient({ socketPath: '/nope.sock', autoStart: false });
     vi.spyOn(client, 'hello').mockResolvedValue({
       daemonVersion: '0.10.17',
-      apiVersion: 2,
-      supportedApiVersions: [2],
+      apiVersion: 1,
+      supportedApiVersions: [1],
     });
     await expect(client.ensureReady()).rejects.toMatchObject({ code: 'VERSION_INCOMPATIBLE' });
   });
@@ -111,7 +111,7 @@ describe('RelayfileControlPlaneClient integration webhook subscriptions', () => 
     const client = new RelayfileControlPlaneClient({ socketPath: '/nope.sock', autoStart: false });
     vi.spyOn(client, 'ensureReady').mockResolvedValue(undefined);
     const rawRequest = vi.spyOn(client as unknown as { rawRequest: (opts: unknown) => Promise<unknown> }, 'rawRequest');
-    rawRequest.mockResolvedValueOnce({ subscriptionId: 'whsub_123' }).mockResolvedValueOnce(undefined);
+    rawRequest.mockResolvedValueOnce({ subscriptionId: 'whsub_123' }).mockResolvedValueOnce({ ok: true });
 
     await expect(
       client.createWebhookSubscription({
@@ -122,7 +122,7 @@ describe('RelayfileControlPlaneClient integration webhook subscriptions', () => 
       })
     ).resolves.toEqual({ subscriptionId: 'whsub_123' });
 
-    await expect(client.deleteWebhookSubscription('whsub_123', 'demo')).resolves.toBeUndefined();
+    await expect(client.deleteWebhookSubscription('whsub_123', 'demo')).resolves.toEqual({ ok: true });
 
     expect(rawRequest).toHaveBeenNthCalledWith(1, {
       method: 'POST',

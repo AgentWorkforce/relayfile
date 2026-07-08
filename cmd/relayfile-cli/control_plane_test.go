@@ -35,12 +35,15 @@ func TestControlPlaneHelloVersionAndCLIVersion(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("hello status = %d", status)
 	}
-	if hello.DaemonVersion != "0.10.17" || hello.APIVersion != 1 {
+	if hello.DaemonVersion != "0.10.17" || hello.APIVersion != 2 {
 		t.Fatalf("unexpected hello response: %#v", hello)
+	}
+	if len(hello.SupportedAPIVersions) != 2 || hello.SupportedAPIVersions[0] != 1 || hello.SupportedAPIVersions[1] != 2 {
+		t.Fatalf("unexpected supported API versions: %#v", hello.SupportedAPIVersions)
 	}
 
 	var errResp map[string]controlPlaneError
-	status = controlPlaneJSONWithoutVersion(t, client, http.MethodGet, baseURL+"/v1/hello?apiVersion=2", nil, &errResp)
+	status = controlPlaneJSONWithoutVersion(t, client, http.MethodGet, baseURL+"/v1/hello?apiVersion=3", nil, &errResp)
 	if status != http.StatusUpgradeRequired {
 		t.Fatalf("incompatible hello status = %d, want %d", status, http.StatusUpgradeRequired)
 	}
