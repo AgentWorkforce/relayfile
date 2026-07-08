@@ -6,7 +6,7 @@ info:
     Versioned local control-plane contract for the relayfile daemon/CLI.
     The service listens on a user-owned Unix domain socket
     (`RELAYFILE_SOCK`, or `$XDG_RUNTIME_DIR/relayfile.sock`) and uses
-    `X-Relayfile-API-Version: 1` for client compatibility checks.
+    `X-Relayfile-API-Version: 2` for client compatibility checks.
 servers:
   - url: http://relayfile.local
     description: Logical HTTP origin over the relayfile Unix domain socket.
@@ -228,6 +228,43 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/WritebackSecret"
+  /v1/integrations/webhook-subscriptions:
+    post:
+      operationId: createWebhookSubscription
+      summary: Create a server-side relayfile webhook subscription
+      parameters:
+        - $ref: "#/components/parameters/ApiVersionHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WebhookSubscriptionRequest"
+      responses:
+        "200":
+          description: Created webhook subscription
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WebhookSubscriptionResponse"
+    delete:
+      operationId: deleteWebhookSubscription
+      summary: Delete a server-side relayfile webhook subscription
+      parameters:
+        - $ref: "#/components/parameters/ApiVersionHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeleteWebhookSubscriptionRequest"
+      responses:
+        "200":
+          description: Subscription deleted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeleteWebhookSubscriptionResponse"
 components:
   parameters:
     ApiVersionHeader:
@@ -237,7 +274,7 @@ components:
       schema:
         type: integer
         format: uint32
-        const: 1
+        const: 2
     ApiVersionQuery:
       name: apiVersion
       in: query
@@ -485,6 +522,44 @@ components:
           type: string
         secret:
           type: string
+    WebhookSubscriptionRequest:
+      type: object
+      required: [url, pathGlobs, secret]
+      properties:
+        workspace:
+          type: string
+        url:
+          type: string
+          format: uri
+        pathGlobs:
+          type: array
+          minItems: 1
+          items:
+            type: string
+        secret:
+          type: string
+    WebhookSubscriptionResponse:
+      type: object
+      required: [subscriptionId]
+      properties:
+        subscriptionId:
+          type: string
+        secret:
+          type: string
+    DeleteWebhookSubscriptionRequest:
+      type: object
+      required: [subscriptionId]
+      properties:
+        workspace:
+          type: string
+        subscriptionId:
+          type: string
+    DeleteWebhookSubscriptionResponse:
+      type: object
+      required: [ok]
+      properties:
+        ok:
+          type: boolean
     ErrorEnvelope:
       type: object
       required: [error]

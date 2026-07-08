@@ -159,6 +159,24 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/integrations/webhook-subscriptions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Create a server-side relayfile webhook subscription */
+        post: operations["createWebhookSubscription"];
+        /** Delete a server-side relayfile webhook subscription */
+        delete: operations["deleteWebhookSubscription"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -268,6 +286,24 @@ export interface components {
             url: string;
             secret: string;
         };
+        WebhookSubscriptionRequest: {
+            workspace?: string;
+            /** Format: uri */
+            url: string;
+            pathGlobs: string[];
+            secret: string;
+        };
+        WebhookSubscriptionResponse: {
+            subscriptionId: string;
+            secret?: string;
+        };
+        DeleteWebhookSubscriptionRequest: {
+            workspace?: string;
+            subscriptionId: string;
+        };
+        DeleteWebhookSubscriptionResponse: {
+            ok: boolean;
+        };
         ErrorEnvelope: {
             error: {
                 /** @enum {string} */
@@ -306,7 +342,7 @@ export interface components {
         };
     };
     parameters: {
-        ApiVersionHeader: 1;
+        ApiVersionHeader: 2;
         ApiVersionQuery: number;
     };
     requestBodies: never;
@@ -595,6 +631,58 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["WritebackSecret"];
+                };
+            };
+        };
+    };
+    createWebhookSubscription: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Relayfile-API-Version"?: components["parameters"]["ApiVersionHeader"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebhookSubscriptionRequest"];
+            };
+        };
+        responses: {
+            /** @description Created webhook subscription */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebhookSubscriptionResponse"];
+                };
+            };
+        };
+    };
+    deleteWebhookSubscription: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Relayfile-API-Version"?: components["parameters"]["ApiVersionHeader"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DeleteWebhookSubscriptionRequest"];
+            };
+        };
+        responses: {
+            /** @description Subscription deleted */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DeleteWebhookSubscriptionResponse"];
                 };
             };
         };

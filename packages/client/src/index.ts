@@ -20,6 +20,10 @@ export type {
   ConnectResult,
   ProviderStatusResult,
   WritebackSecretResult,
+  WebhookSubscriptionRequestBody,
+  WebhookSubscriptionResult,
+  DeleteWebhookSubscriptionRequestBody,
+  DeleteWebhookSubscriptionResult,
 } from './client.js';
 
 export type { components, paths, operations } from './generated/control-plane.js';

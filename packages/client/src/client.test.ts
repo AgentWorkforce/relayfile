@@ -64,8 +64,8 @@ describe('RelayfileControlPlaneClient lifecycle', () => {
     const client = new RelayfileControlPlaneClient({ socketPath: '/nope.sock', autoStart: false });
     vi.spyOn(client, 'hello').mockResolvedValue({
       daemonVersion: '0.10.17',
-      apiVersion: 2,
-      supportedApiVersions: [2],
+      apiVersion: 1,
+      supportedApiVersions: [1],
     });
     await expect(client.ensureReady()).rejects.toMatchObject({ code: 'VERSION_INCOMPATIBLE' });
   });
@@ -103,6 +103,42 @@ describe('RelayfileControlPlaneClient lifecycle', () => {
     await expect(client.ensureReady()).rejects.toMatchObject({ code: 'DAEMON_UNAVAILABLE' });
     await expect(client.ensureReady()).resolves.toBeUndefined();
     expect(hello).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('RelayfileControlPlaneClient integration webhook subscriptions', () => {
+  it('posts and deletes webhook subscriptions through the control-plane socket', async () => {
+    const client = new RelayfileControlPlaneClient({ socketPath: '/nope.sock', autoStart: false });
+    vi.spyOn(client, 'ensureReady').mockResolvedValue(undefined);
+    const rawRequest = vi.spyOn(client as unknown as { rawRequest: (opts: unknown) => Promise<unknown> }, 'rawRequest');
+    rawRequest.mockResolvedValueOnce({ subscriptionId: 'whsub_123' }).mockResolvedValueOnce({ ok: true });
+
+    await expect(
+      client.createWebhookSubscription({
+        workspace: 'demo',
+        url: 'https://cast.test/v1/integrations/relayfile/inbound/ws/ch',
+        pathGlobs: ['/github/repos/acme/widgets/issues/**'],
+        secret: 'inbound-secret',
+      })
+    ).resolves.toEqual({ subscriptionId: 'whsub_123' });
+
+    await expect(client.deleteWebhookSubscription('whsub_123', 'demo')).resolves.toEqual({ ok: true });
+
+    expect(rawRequest).toHaveBeenNthCalledWith(1, {
+      method: 'POST',
+      path: '/v1/integrations/webhook-subscriptions',
+      body: {
+        workspace: 'demo',
+        url: 'https://cast.test/v1/integrations/relayfile/inbound/ws/ch',
+        pathGlobs: ['/github/repos/acme/widgets/issues/**'],
+        secret: 'inbound-secret',
+      },
+    });
+    expect(rawRequest).toHaveBeenNthCalledWith(2, {
+      method: 'DELETE',
+      path: '/v1/integrations/webhook-subscriptions',
+      body: { subscriptionId: 'whsub_123', workspace: 'demo' },
+    });
   });
 });
 

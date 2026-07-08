@@ -17,14 +17,13 @@ import type { components } from './generated/control-plane.js';
  * rename in the contract is a compile error here.
  */
 
-/** Control-plane API version this client speaks. Bump on a breaking wire change. */
-export const RELAYFILE_API_VERSION = 1;
+/** Control-plane API version this client speaks. Bump when adding required endpoint support. */
+export const RELAYFILE_API_VERSION = 2;
 
 /**
  * Minimum `relayfile` daemon version this client requires. The control-plane
  * first shipped in 0.10.17, so anything that answers `/v1/hello` is already >=
- * this — the check is belt-and-suspenders and the bump point for future
- * contract changes.
+ * this — API compatibility is enforced by RELAYFILE_API_VERSION.
  */
 export const MIN_RELAYFILE_VERSION = '0.10.17';
 
@@ -106,6 +105,10 @@ export type ConnectRequestBody = Schemas['ConnectProviderRequest'];
 export type ConnectResult = Schemas['ConnectProviderResponse'];
 export type ProviderStatusResult = Schemas['ProviderStatus'];
 export type WritebackSecretResult = Schemas['WritebackSecret'];
+export type WebhookSubscriptionRequestBody = Schemas['WebhookSubscriptionRequest'];
+export type WebhookSubscriptionResult = Schemas['WebhookSubscriptionResponse'];
+export type DeleteWebhookSubscriptionRequestBody = Schemas['DeleteWebhookSubscriptionRequest'];
+export type DeleteWebhookSubscriptionResult = Schemas['DeleteWebhookSubscriptionResponse'];
 
 export interface RelayfileClientOptions {
   /** Socket to connect to. Defaults to defaultRelayfileSocketPath(). */
@@ -124,7 +127,7 @@ export interface RelayfileClientOptions {
 }
 
 interface RequestOptions {
-  method: 'GET' | 'POST';
+  method: 'DELETE' | 'GET' | 'POST';
   path: string;
   query?: Record<string, string | undefined>;
   body?: unknown;
@@ -390,6 +393,25 @@ export class RelayfileControlPlaneClient {
       method: 'POST',
       path: '/v1/integrations/writeback-secret',
       body: { channel, ...(workspace ? { workspace } : {}) },
+    });
+  }
+
+  createWebhookSubscription(input: WebhookSubscriptionRequestBody): Promise<WebhookSubscriptionResult> {
+    return this.request<WebhookSubscriptionResult>({
+      method: 'POST',
+      path: '/v1/integrations/webhook-subscriptions',
+      body: input,
+    });
+  }
+
+  deleteWebhookSubscription(
+    subscriptionId: DeleteWebhookSubscriptionRequestBody['subscriptionId'],
+    workspace?: DeleteWebhookSubscriptionRequestBody['workspace']
+  ): Promise<DeleteWebhookSubscriptionResult> {
+    return this.request<DeleteWebhookSubscriptionResult>({
+      method: 'DELETE',
+      path: '/v1/integrations/webhook-subscriptions',
+      body: { subscriptionId, ...(workspace ? { workspace } : {}) } satisfies DeleteWebhookSubscriptionRequestBody,
     });
   }
 
