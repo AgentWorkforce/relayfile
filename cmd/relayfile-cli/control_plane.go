@@ -87,13 +87,14 @@ type resolveResourcePathResponse struct {
 }
 
 type bindRequest struct {
-	Provider              string `json:"provider"`
-	Resource              string `json:"resource"`
-	Channel               string `json:"channel"`
-	WebhookID             string `json:"webhookId"`
-	WebhookToken          string `json:"webhookToken"`
-	SubscriptionID        string `json:"subscriptionId,omitempty"`
-	WebhookSubscriptionID string `json:"webhookSubscriptionId,omitempty"`
+	Provider                      string    `json:"provider"`
+	Resource                      string    `json:"resource"`
+	Channel                       string    `json:"channel"`
+	WebhookID                     string    `json:"webhookId"`
+	WebhookToken                  string    `json:"webhookToken"`
+	SubscriptionID                string    `json:"subscriptionId,omitempty"`
+	WebhookSubscriptionID         string    `json:"webhookSubscriptionId,omitempty"`
+	PendingWebhookSubscriptionIDs *[]string `json:"pendingWebhookSubscriptionIds,omitempty"`
 }
 
 type bindResponse struct {
@@ -397,13 +398,14 @@ func handleControlPlaneBind(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	binding, replaced, warning, err := bindRelayIntegration(relayIntegrationBindInput{
-		Provider:              req.Provider,
-		Resource:              req.Resource,
-		Channel:               req.Channel,
-		WebhookID:             req.WebhookID,
-		WebhookToken:          req.WebhookToken,
-		SubscriptionID:        req.SubscriptionID,
-		WebhookSubscriptionID: req.WebhookSubscriptionID,
+		Provider:                      req.Provider,
+		Resource:                      req.Resource,
+		Channel:                       req.Channel,
+		WebhookID:                     req.WebhookID,
+		WebhookToken:                  req.WebhookToken,
+		SubscriptionID:                req.SubscriptionID,
+		WebhookSubscriptionID:         req.WebhookSubscriptionID,
+		PendingWebhookSubscriptionIDs: req.PendingWebhookSubscriptionIDs,
 	})
 	if err != nil {
 		writeControlPlaneMappedError(w, err)

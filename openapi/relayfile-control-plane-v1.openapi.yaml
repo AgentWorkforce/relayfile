@@ -449,6 +449,10 @@ components:
           type: string
         webhookSubscriptionId:
           type: string
+        pendingWebhookSubscriptionIds:
+          type: array
+          items:
+            type: string
     BindResponse:
       type: object
       required: [binding, replaced]
@@ -478,6 +482,10 @@ components:
           type: string
         webhookSubscriptionId:
           type: string
+        pendingWebhookSubscriptionIds:
+          type: array
+          items:
+            type: string
         createdAt:
           type: string
         updatedAt:

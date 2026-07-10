@@ -61,6 +61,7 @@ func TestControlPlaneBindingConformance(t *testing.T) {
 		t.Fatalf("upsert workspace failed: %v", err)
 	}
 	writeTestMountFile(t, localDir, "slack/channels/by-name/watchdog-test.json", `{"id":"C123","canonicalPath":"/slack/channels/C123__watchdog-test/meta.json"}`)
+	pending := []string{"relayfile_whsub_old", " relayfile_whsub_old ", ""}
 
 	client, baseURL, cleanup := startControlPlaneTestServer(t)
 	defer cleanup()
@@ -79,18 +80,19 @@ func TestControlPlaneBindingConformance(t *testing.T) {
 
 	var bound bindResponse
 	status = controlPlaneJSON(t, client, http.MethodPost, baseURL+"/v1/integrations/bind", bindRequest{
-		Provider:              "slack",
-		Resource:              "#watchdog-test",
-		Channel:               "#events",
-		WebhookID:             "wh_1",
-		WebhookToken:          "tok_1",
-		SubscriptionID:        "relay_sub_1",
-		WebhookSubscriptionID: "relayfile_whsub_1",
+		Provider:                      "slack",
+		Resource:                      "#watchdog-test",
+		Channel:                       "#events",
+		WebhookID:                     "wh_1",
+		WebhookToken:                  "tok_1",
+		SubscriptionID:                "relay_sub_1",
+		WebhookSubscriptionID:         "relayfile_whsub_1",
+		PendingWebhookSubscriptionIDs: &pending,
 	}, &bound)
 	if status != http.StatusOK {
 		t.Fatalf("bind status = %d", status)
 	}
-	if bound.Binding.PathGlob != resolved.PathGlob || bound.Binding.WebhookToken != "tok_1" || bound.Binding.WebhookSubscriptionID != "relayfile_whsub_1" {
+	if bound.Binding.PathGlob != resolved.PathGlob || bound.Binding.WebhookToken != "tok_1" || bound.Binding.WebhookSubscriptionID != "relayfile_whsub_1" || len(bound.Binding.PendingWebhookSubscriptionIDs) != 1 || bound.Binding.PendingWebhookSubscriptionIDs[0] != "relayfile_whsub_old" {
 		t.Fatalf("unexpected bind response: %#v", bound)
 	}
 
@@ -99,7 +101,7 @@ func TestControlPlaneBindingConformance(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("bindings status = %d", status)
 	}
-	if len(listed.Bindings) != 1 || listed.Bindings[0].PathGlob != resolved.PathGlob || listed.Bindings[0].WebhookSubscriptionID != "relayfile_whsub_1" {
+	if len(listed.Bindings) != 1 || listed.Bindings[0].PathGlob != resolved.PathGlob || listed.Bindings[0].WebhookSubscriptionID != "relayfile_whsub_1" || len(listed.Bindings[0].PendingWebhookSubscriptionIDs) != 1 || listed.Bindings[0].PendingWebhookSubscriptionIDs[0] != "relayfile_whsub_old" {
 		t.Fatalf("unexpected bindings response: %#v", listed)
 	}
 
@@ -111,8 +113,38 @@ func TestControlPlaneBindingConformance(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &cliBindings); err != nil {
 		t.Fatalf("parse bind --list --json output failed: %v\n%s", err, stdout.String())
 	}
-	if len(cliBindings) != 1 || cliBindings[0].PathGlob != resolved.PathGlob || cliBindings[0].WebhookSubscriptionID != "relayfile_whsub_1" {
+	if len(cliBindings) != 1 || cliBindings[0].PathGlob != resolved.PathGlob || cliBindings[0].WebhookSubscriptionID != "relayfile_whsub_1" || len(cliBindings[0].PendingWebhookSubscriptionIDs) != 1 || cliBindings[0].PendingWebhookSubscriptionIDs[0] != "relayfile_whsub_old" {
 		t.Fatalf("unexpected CLI bindings: %#v", cliBindings)
+	}
+
+	// Omitted fields preserve pending cleanup work for older callers, while an
+	// explicit empty list clears it after the caller has confirmed retirement.
+	var updated bindResponse
+	status = controlPlaneJSON(t, client, http.MethodPost, baseURL+"/v1/integrations/bind", bindRequest{
+		Provider:              "slack",
+		Resource:              "#watchdog-test",
+		Channel:               "#events",
+		WebhookID:             "wh_2",
+		WebhookToken:          "tok_2",
+		SubscriptionID:        "relay_sub_2",
+		WebhookSubscriptionID: "relayfile_whsub_2",
+	}, &updated)
+	if status != http.StatusOK || len(updated.Binding.PendingWebhookSubscriptionIDs) != 1 || updated.Binding.PendingWebhookSubscriptionIDs[0] != "relayfile_whsub_old" {
+		t.Fatalf("omitted pending cleanup IDs were not preserved: status=%d binding=%#v", status, updated.Binding)
+	}
+	emptyPending := []string{}
+	status = controlPlaneJSON(t, client, http.MethodPost, baseURL+"/v1/integrations/bind", bindRequest{
+		Provider:                      "slack",
+		Resource:                      "#watchdog-test",
+		Channel:                       "#events",
+		WebhookID:                     "wh_2",
+		WebhookToken:                  "tok_2",
+		SubscriptionID:                "relay_sub_2",
+		WebhookSubscriptionID:         "relayfile_whsub_2",
+		PendingWebhookSubscriptionIDs: &emptyPending,
+	}, &updated)
+	if status != http.StatusOK || len(updated.Binding.PendingWebhookSubscriptionIDs) != 0 {
+		t.Fatalf("explicit empty pending cleanup IDs did not clear: status=%d binding=%#v", status, updated.Binding)
 	}
 
 	var unbound relayIntegrationUnbindResult

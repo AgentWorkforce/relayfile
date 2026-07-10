@@ -250,6 +250,7 @@ export interface components {
             webhookToken: string;
             subscriptionId?: string;
             webhookSubscriptionId?: string;
+            pendingWebhookSubscriptionIds?: string[];
         };
         BindResponse: {
             binding: components["schemas"]["Binding"];
@@ -264,6 +265,7 @@ export interface components {
             webhookToken: string;
             subscriptionId?: string;
             webhookSubscriptionId?: string;
+            pendingWebhookSubscriptionIds?: string[];
             createdAt?: string;
             updatedAt?: string;
         };

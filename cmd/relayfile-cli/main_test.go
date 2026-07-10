@@ -315,6 +315,20 @@ func TestIntegrationBindListAndUnbind(t *testing.T) {
 	}
 }
 
+func TestIntegrationBindUsageListsOptionalSubscriptionFlags(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	var stdout bytes.Buffer
+	err := run([]string{"integration", "bind", "slack"}, strings.NewReader(""), &stdout, &stdout)
+	if err == nil {
+		t.Fatal("integration bind with missing resource unexpectedly succeeded")
+	}
+	if got, want := err.Error(), "[--subscription ID] [--webhook-subscription ID]"; !strings.Contains(got, want) {
+		t.Fatalf("usage = %q, want to contain %q", got, want)
+	}
+}
+
 func TestIntegrationUnbindNativeResourceRemovesStoredFallbackGlob(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)
