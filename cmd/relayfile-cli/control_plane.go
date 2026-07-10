@@ -19,9 +19,9 @@ import (
 	"time"
 )
 
-const relayfileControlPlaneAPIVersion uint32 = 2
+const relayfileControlPlaneAPIVersion uint32 = 3
 
-var relayfileControlPlaneSupportedVersions = []uint32{1, relayfileControlPlaneAPIVersion}
+var relayfileControlPlaneSupportedVersions = []uint32{1, 2, relayfileControlPlaneAPIVersion}
 
 type controlPlaneErrorCode string
 
@@ -87,12 +87,17 @@ type resolveResourcePathResponse struct {
 }
 
 type bindRequest struct {
-	Provider       string `json:"provider"`
-	Resource       string `json:"resource"`
-	Channel        string `json:"channel"`
-	WebhookID      string `json:"webhookId"`
-	WebhookToken   string `json:"webhookToken"`
-	SubscriptionID string `json:"subscriptionId,omitempty"`
+	Provider              string `json:"provider"`
+	Resource              string `json:"resource"`
+	Channel               string `json:"channel"`
+	WebhookID             string `json:"webhookId"`
+	WebhookToken          string `json:"webhookToken"`
+	SubscriptionID        string `json:"subscriptionId,omitempty"`
+	WebhookSubscriptionID string `json:"webhookSubscriptionId,omitempty"`
+	// Workspace the webhook subscription was created in, persisted with the
+	// binding so later cleanup deletes are pinned to the right workspace even
+	// after the daemon's active workspace changes.
+	WebhookSubscriptionWorkspaceID string `json:"webhookSubscriptionWorkspaceId,omitempty"`
 }
 
 type bindResponse struct {
@@ -118,6 +123,9 @@ type writebackSecretRequest struct {
 type writebackSecretData struct {
 	URL    string `json:"url"`
 	Secret string `json:"secret"`
+	// WorkspaceID pins which workspace resolved this channel's writeback
+	// binding, so callers can journal it before creating cloud resources.
+	WorkspaceID string `json:"workspaceId,omitempty"`
 }
 
 type webhookSubscriptionRequest struct {
@@ -130,11 +138,26 @@ type webhookSubscriptionRequest struct {
 type webhookSubscriptionResponse struct {
 	SubscriptionID string `json:"subscriptionId"`
 	Secret         string `json:"secret,omitempty"`
+	// WorkspaceID pins which workspace the subscription was created in, so
+	// callers can journal it and later delete/list through the SAME workspace
+	// even if the daemon's active workspace changes.
+	WorkspaceID string `json:"workspaceId,omitempty"`
 }
 
 type deleteWebhookSubscriptionRequest struct {
 	Workspace      string `json:"workspace,omitempty"`
 	SubscriptionID string `json:"subscriptionId"`
+}
+
+type listWebhookSubscriptionsResponse struct {
+	Subscriptions []webhookSubscriptionSummary `json:"subscriptions"`
+	WorkspaceID   string                       `json:"workspaceId,omitempty"`
+}
+
+type webhookSubscriptionSummary struct {
+	SubscriptionID string   `json:"subscriptionId"`
+	URL            string   `json:"url"`
+	PathGlobs      []string `json:"pathGlobs"`
 }
 
 func runControlPlane(args []string, stdout io.Writer) error {
@@ -396,12 +419,14 @@ func handleControlPlaneBind(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	binding, replaced, warning, err := bindRelayIntegration(relayIntegrationBindInput{
-		Provider:       req.Provider,
-		Resource:       req.Resource,
-		Channel:        req.Channel,
-		WebhookID:      req.WebhookID,
-		WebhookToken:   req.WebhookToken,
-		SubscriptionID: req.SubscriptionID,
+		Provider:                       req.Provider,
+		Resource:                       req.Resource,
+		Channel:                        req.Channel,
+		WebhookID:                      req.WebhookID,
+		WebhookToken:                   req.WebhookToken,
+		SubscriptionID:                 req.SubscriptionID,
+		WebhookSubscriptionID:          req.WebhookSubscriptionID,
+		WebhookSubscriptionWorkspaceID: req.WebhookSubscriptionWorkspaceID,
 	})
 	if err != nil {
 		writeControlPlaneMappedError(w, err)
@@ -470,6 +495,42 @@ func handleControlPlaneWritebackSecret(w http.ResponseWriter, r *http.Request) {
 
 func handleControlPlaneWebhookSubscription(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
+	case http.MethodGet:
+		commandClient, err := prepareWorkspaceCommandClient(strings.TrimSpace(r.URL.Query().Get("workspace")), "", "", defaultJoinScopes)
+		if err != nil {
+			writeControlPlaneMappedError(w, err)
+			return
+		}
+		workspaceID := strings.TrimSpace(commandClient.workspaceID)
+		if workspaceID == "" {
+			writeControlPlaneMappedError(w, errors.New("could not resolve relayfile workspace id"))
+			return
+		}
+		var upstream []struct {
+			ID        string   `json:"id"`
+			URL       string   `json:"url"`
+			PathGlobs []string `json:"pathGlobs"`
+		}
+		if err := commandClient.client.getJSON(
+			r.Context(),
+			fmt.Sprintf("/v1/workspaces/%s/webhooks", url.PathEscape(workspaceID)),
+			&upstream,
+		); err != nil {
+			writeControlPlaneMappedError(w, err)
+			return
+		}
+		subscriptions := make([]webhookSubscriptionSummary, 0, len(upstream))
+		for _, item := range upstream {
+			subscriptions = append(subscriptions, webhookSubscriptionSummary{
+				SubscriptionID: item.ID,
+				URL:            item.URL,
+				PathGlobs:      item.PathGlobs,
+			})
+		}
+		writeControlPlaneJSON(w, http.StatusOK, listWebhookSubscriptionsResponse{
+			Subscriptions: subscriptions,
+			WorkspaceID:   workspaceID,
+		})
 	case http.MethodPost:
 		var req webhookSubscriptionRequest
 		if err := decodeControlPlaneJSON(r, &req); err != nil {
@@ -491,6 +552,7 @@ func handleControlPlaneWebhookSubscription(w http.ResponseWriter, r *http.Reques
 			return
 		}
 		var response webhookSubscriptionResponse
+		response.WorkspaceID = workspaceID
 		if err := commandClient.client.postJSON(
 			r.Context(),
 			fmt.Sprintf("/v1/workspaces/%s/webhooks", url.PathEscape(workspaceID)),
@@ -532,6 +594,26 @@ func handleControlPlaneWebhookSubscription(w http.ResponseWriter, r *http.Reques
 			"",
 			nil,
 		); err != nil {
+			// Idempotent delete, but ONLY for a workspace-pinned request: a
+			// pinned 404 proves the subscription is gone at its recorded
+			// workspace, so retried cleanups must observe success. An
+			// UNPINNED 404 may just mean the daemon's active workspace
+			// changed — surface it so callers retain their record instead of
+			// discarding an id that still exists elsewhere.
+			var upstreamErr *apiError
+			if errors.As(err, &upstreamErr) && upstreamErr.StatusCode == http.StatusNotFound {
+				if strings.TrimSpace(req.Workspace) != "" {
+					writeControlPlaneJSON(w, http.StatusOK, map[string]bool{"ok": true})
+					return
+				}
+				writeControlPlaneError(
+					w,
+					http.StatusNotFound,
+					controlPlaneErrBindingNotFound,
+					"webhook subscription not found in the active workspace; retry with its workspace pin",
+				)
+				return
+			}
 			writeControlPlaneMappedError(w, err)
 			return
 		}

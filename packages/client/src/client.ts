@@ -18,7 +18,7 @@ import type { components } from './generated/control-plane.js';
  */
 
 /** Control-plane API version this client speaks. Bump when adding required endpoint support. */
-export const RELAYFILE_API_VERSION = 2;
+export const RELAYFILE_API_VERSION = 3;
 
 /**
  * Minimum `relayfile` daemon version this client requires. The control-plane
@@ -109,6 +109,8 @@ export type WebhookSubscriptionRequestBody = Schemas['WebhookSubscriptionRequest
 export type WebhookSubscriptionResult = Schemas['WebhookSubscriptionResponse'];
 export type DeleteWebhookSubscriptionRequestBody = Schemas['DeleteWebhookSubscriptionRequest'];
 export type DeleteWebhookSubscriptionResult = Schemas['DeleteWebhookSubscriptionResponse'];
+export type ListWebhookSubscriptionsResult = Schemas['ListWebhookSubscriptionsResponse'];
+export type WebhookSubscriptionSummary = Schemas['WebhookSubscriptionSummary'];
 
 export interface RelayfileClientOptions {
   /** Socket to connect to. Defaults to defaultRelayfileSocketPath(). */
@@ -393,6 +395,19 @@ export class RelayfileControlPlaneClient {
       method: 'POST',
       path: '/v1/integrations/writeback-secret',
       body: { channel, ...(workspace ? { workspace } : {}) },
+    });
+  }
+
+  /**
+   * Lists the workspace's inbound webhook subscriptions so callers can
+   * reconcile subscriptions created by runs that crashed before persisting
+   * the server-assigned id.
+   */
+  listWebhookSubscriptions(workspace?: string): Promise<ListWebhookSubscriptionsResult> {
+    return this.request<ListWebhookSubscriptionsResult>({
+      method: 'GET',
+      path: '/v1/integrations/webhook-subscriptions',
+      ...(workspace ? { query: { workspace } } : {}),
     });
   }
 

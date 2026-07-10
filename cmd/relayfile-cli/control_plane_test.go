@@ -35,15 +35,15 @@ func TestControlPlaneHelloVersionAndCLIVersion(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("hello status = %d", status)
 	}
-	if hello.DaemonVersion != "0.10.17" || hello.APIVersion != 2 {
+	if hello.DaemonVersion != "0.10.17" || hello.APIVersion != 3 {
 		t.Fatalf("unexpected hello response: %#v", hello)
 	}
-	if len(hello.SupportedAPIVersions) != 2 || hello.SupportedAPIVersions[0] != 1 || hello.SupportedAPIVersions[1] != 2 {
+	if len(hello.SupportedAPIVersions) != 3 || hello.SupportedAPIVersions[0] != 1 || hello.SupportedAPIVersions[1] != 2 || hello.SupportedAPIVersions[2] != 3 {
 		t.Fatalf("unexpected supported API versions: %#v", hello.SupportedAPIVersions)
 	}
 
 	var errResp map[string]controlPlaneError
-	status = controlPlaneJSONWithoutVersion(t, client, http.MethodGet, baseURL+"/v1/hello?apiVersion=3", nil, &errResp)
+	status = controlPlaneJSONWithoutVersion(t, client, http.MethodGet, baseURL+"/v1/hello?apiVersion=4", nil, &errResp)
 	if status != http.StatusUpgradeRequired {
 		t.Fatalf("incompatible hello status = %d, want %d", status, http.StatusUpgradeRequired)
 	}
@@ -79,16 +79,19 @@ func TestControlPlaneBindingConformance(t *testing.T) {
 
 	var bound bindResponse
 	status = controlPlaneJSON(t, client, http.MethodPost, baseURL+"/v1/integrations/bind", bindRequest{
-		Provider:     "slack",
-		Resource:     "#watchdog-test",
-		Channel:      "#events",
-		WebhookID:    "wh_1",
-		WebhookToken: "tok_1",
+		Provider:                       "slack",
+		Resource:                       "#watchdog-test",
+		Channel:                        "#events",
+		WebhookID:                      "wh_1",
+		WebhookToken:                   "tok_1",
+		SubscriptionID:                 "relay_sub_1",
+		WebhookSubscriptionID:          "relayfile_whsub_1",
+		WebhookSubscriptionWorkspaceID: "rw_pin_1",
 	}, &bound)
 	if status != http.StatusOK {
 		t.Fatalf("bind status = %d", status)
 	}
-	if bound.Binding.PathGlob != resolved.PathGlob || bound.Binding.WebhookToken != "tok_1" {
+	if bound.Binding.PathGlob != resolved.PathGlob || bound.Binding.WebhookToken != "tok_1" || bound.Binding.WebhookSubscriptionID != "relayfile_whsub_1" || bound.Binding.WebhookSubscriptionWorkspaceID != "rw_pin_1" {
 		t.Fatalf("unexpected bind response: %#v", bound)
 	}
 
@@ -97,7 +100,7 @@ func TestControlPlaneBindingConformance(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("bindings status = %d", status)
 	}
-	if len(listed.Bindings) != 1 || listed.Bindings[0].PathGlob != resolved.PathGlob {
+	if len(listed.Bindings) != 1 || listed.Bindings[0].PathGlob != resolved.PathGlob || listed.Bindings[0].WebhookSubscriptionID != "relayfile_whsub_1" || listed.Bindings[0].WebhookSubscriptionWorkspaceID != "rw_pin_1" {
 		t.Fatalf("unexpected bindings response: %#v", listed)
 	}
 
@@ -109,8 +112,70 @@ func TestControlPlaneBindingConformance(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &cliBindings); err != nil {
 		t.Fatalf("parse bind --list --json output failed: %v\n%s", err, stdout.String())
 	}
-	if len(cliBindings) != 1 || cliBindings[0].PathGlob != resolved.PathGlob {
+	if len(cliBindings) != 1 || cliBindings[0].PathGlob != resolved.PathGlob || cliBindings[0].WebhookSubscriptionID != "relayfile_whsub_1" {
 		t.Fatalf("unexpected CLI bindings: %#v", cliBindings)
+	}
+
+	// A replacement that omits the workspace pin (legacy/partial caller) must
+	// not strip it from the persisted binding.
+	var repinned bindResponse
+	status = controlPlaneJSON(t, client, http.MethodPost, baseURL+"/v1/integrations/bind", bindRequest{
+		Provider:     "slack",
+		Resource:     "#watchdog-test",
+		Channel:      "#events",
+		WebhookID:    "wh_2",
+		WebhookToken: "tok_2",
+	}, &repinned)
+	if status != http.StatusOK {
+		t.Fatalf("replacement bind status = %d", status)
+	}
+	if repinned.Binding.WebhookSubscriptionID != "relayfile_whsub_1" || repinned.Binding.WebhookSubscriptionWorkspaceID != "rw_pin_1" {
+		t.Fatalf("omitted ids/pin were not preserved on replacement: %#v", repinned.Binding)
+	}
+
+	// Mismatched-pair permutation 1: a NEW id without its workspace is
+	// rejected — persisting it unpinned (or worse, inheriting the old pin)
+	// would leave the new cloud resource unretryable across a workspace
+	// switch.
+	var newIDNoWsErr map[string]controlPlaneError
+	status = controlPlaneJSON(t, client, http.MethodPost, baseURL+"/v1/integrations/bind", bindRequest{
+		Provider:              "slack",
+		Resource:              "#watchdog-test",
+		Channel:               "#events",
+		WebhookID:             "wh_3",
+		WebhookToken:          "tok_3",
+		WebhookSubscriptionID: "relayfile_whsub_2",
+	}, &newIDNoWsErr)
+	if status != http.StatusBadRequest {
+		t.Fatalf("new-id-without-workspace bind status = %d, want 400", status)
+	}
+
+	// Mismatched-pair permutation 2: a workspace without its id is rejected.
+	var pairErr map[string]controlPlaneError
+	status = controlPlaneJSON(t, client, http.MethodPost, baseURL+"/v1/integrations/bind", bindRequest{
+		Provider:                       "slack",
+		Resource:                       "#watchdog-test",
+		Channel:                        "#events",
+		WebhookID:                      "wh_4",
+		WebhookToken:                   "tok_4",
+		WebhookSubscriptionWorkspaceID: "rw_orphan_ws",
+	}, &pairErr)
+	if status != http.StatusBadRequest {
+		t.Fatalf("workspace-without-id bind status = %d, want 400", status)
+	}
+
+	// Restore the pinned pair for the remaining assertions.
+	status = controlPlaneJSON(t, client, http.MethodPost, baseURL+"/v1/integrations/bind", bindRequest{
+		Provider:                       "slack",
+		Resource:                       "#watchdog-test",
+		Channel:                        "#events",
+		WebhookID:                      "wh_2",
+		WebhookToken:                   "tok_2",
+		WebhookSubscriptionID:          "relayfile_whsub_1",
+		WebhookSubscriptionWorkspaceID: "rw_pin_1",
+	}, &repinned)
+	if status != http.StatusOK {
+		t.Fatalf("restore bind status = %d", status)
 	}
 
 	var unbound relayIntegrationUnbindResult
@@ -191,6 +256,10 @@ func TestControlPlaneCloudIntegrationConformance(t *testing.T) {
 			}
 			_, _ = w.Write([]byte(`{"ok":true,"data":{"url":"https://relay.test/writeback","secret":"sec_123"}}`))
 		case "/v1/workspaces/ws_123/webhooks":
+			if r.Method == http.MethodGet {
+				_, _ = w.Write([]byte(`[{"id":"whsub_123","url":"https://cast.test/v1/integrations/relayfile/inbound/ws/ch","pathGlobs":["/github/repos/acme/widgets/issues/**"],"createdAt":"2026-07-10T00:00:00Z","updatedAt":"2026-07-10T00:00:00Z","health":{"lastDeliveryAt":null,"lastSuccessAt":null,"lastError":null,"consecutiveFailures":0}}]`))
+				return
+			}
 			if r.Method != http.MethodPost {
 				t.Fatalf("expected webhooks POST, got %s", r.Method)
 			}
@@ -214,6 +283,12 @@ func TestControlPlaneCloudIntegrationConformance(t *testing.T) {
 				t.Fatalf("expected webhooks DELETE, got %s", r.Method)
 			}
 			w.WriteHeader(http.StatusNoContent)
+		case "/v1/workspaces/ws_123/webhooks/whsub_gone":
+			if r.Method != http.MethodDelete {
+				t.Fatalf("expected webhooks DELETE, got %s", r.Method)
+			}
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":"webhook subscription not found","code":"not_found"}`))
 		default:
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
@@ -264,7 +339,7 @@ func TestControlPlaneCloudIntegrationConformance(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("writeback-secret status = %d", status)
 	}
-	if secret.URL != "https://relay.test/writeback" || secret.Secret != "sec_123" {
+	if secret.URL != "https://relay.test/writeback" || secret.Secret != "sec_123" || secret.WorkspaceID != "ws_123" {
 		t.Fatalf("unexpected writeback secret: %#v", secret)
 	}
 
@@ -278,8 +353,24 @@ func TestControlPlaneCloudIntegrationConformance(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("webhook subscription status = %d", status)
 	}
-	if subscription.SubscriptionID != "whsub_123" {
+	if subscription.SubscriptionID != "whsub_123" || subscription.WorkspaceID != "ws_123" {
 		t.Fatalf("unexpected webhook subscription: %#v", subscription)
+	}
+
+	var listedSubscriptions listWebhookSubscriptionsResponse
+	status = controlPlaneJSON(t, client, http.MethodGet, baseURL+"/v1/integrations/webhook-subscriptions?workspace=demo", nil, &listedSubscriptions)
+	if status != http.StatusOK {
+		t.Fatalf("list webhook subscriptions status = %d", status)
+	}
+	if listedSubscriptions.WorkspaceID != "ws_123" {
+		t.Fatalf("unexpected webhook subscription list workspace: %#v", listedSubscriptions)
+	}
+	if len(listedSubscriptions.Subscriptions) != 1 ||
+		listedSubscriptions.Subscriptions[0].SubscriptionID != "whsub_123" ||
+		listedSubscriptions.Subscriptions[0].URL != "https://cast.test/v1/integrations/relayfile/inbound/ws/ch" ||
+		len(listedSubscriptions.Subscriptions[0].PathGlobs) != 1 ||
+		listedSubscriptions.Subscriptions[0].PathGlobs[0] != "/github/repos/acme/widgets/issues/**" {
+		t.Fatalf("unexpected webhook subscription list: %#v", listedSubscriptions)
 	}
 
 	var deleted map[string]bool
@@ -292,6 +383,32 @@ func TestControlPlaneCloudIntegrationConformance(t *testing.T) {
 	}
 	if !deleted["ok"] {
 		t.Fatalf("unexpected delete response: %#v", deleted)
+	}
+
+	// Idempotent delete: the upstream 404 for an already-deleted subscription
+	// must surface as success so retried cleanups of a recorded id progress
+	// instead of retaining it forever.
+	var deletedGone map[string]bool
+	status = controlPlaneJSON(t, client, http.MethodDelete, baseURL+"/v1/integrations/webhook-subscriptions", deleteWebhookSubscriptionRequest{
+		Workspace:      "demo",
+		SubscriptionID: "whsub_gone",
+	}, &deletedGone)
+	if status != http.StatusOK {
+		t.Fatalf("delete of already-deleted webhook subscription status = %d", status)
+	}
+	if !deletedGone["ok"] {
+		t.Fatalf("unexpected idempotent delete response: %#v", deletedGone)
+	}
+
+	// An UNPINNED delete of a missing subscription must NOT read as success:
+	// without the workspace pin, "not found" may just be the wrong active
+	// workspace, and a 200 would let callers discard a live resource's record.
+	var unpinnedGone map[string]controlPlaneError
+	status = controlPlaneJSON(t, client, http.MethodDelete, baseURL+"/v1/integrations/webhook-subscriptions", deleteWebhookSubscriptionRequest{
+		SubscriptionID: "whsub_gone",
+	}, &unpinnedGone)
+	if status != http.StatusNotFound {
+		t.Fatalf("unpinned delete of missing subscription status = %d, want 404", status)
 	}
 }
 

@@ -4,7 +4,7 @@ All notable changes to this package will be documented in this file.
 
 ## [Unreleased]
 
-_No unreleased changes._
+- Control-plane API v3 persists the relayfile-cloud inbound webhook subscription ID on relay bindings so clients can remove it during replacement and unsubscribe.
 
 ## [0.10.20] - 2026-07-08
 

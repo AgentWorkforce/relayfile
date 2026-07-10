@@ -250,6 +250,7 @@ func TestIntegrationBindListAndUnbind(t *testing.T) {
 		"--channel", "#issues",
 		"--webhook", "wh_1",
 		"--webhook-token", "tok_1",
+		"--webhook-subscription", "relayfile_whsub_1", "--webhook-subscription-workspace", "rw_test_pin",
 	}, strings.NewReader(""), &stdout, &stdout); err != nil {
 		t.Fatalf("bind failed: %v\n%s", err, stdout.String())
 	}
@@ -268,8 +269,30 @@ func TestIntegrationBindListAndUnbind(t *testing.T) {
 	if len(bindings) != 1 {
 		t.Fatalf("expected 1 binding, got %d", len(bindings))
 	}
-	if bindings[0].Provider != "linear" || bindings[0].PathGlob != "/linear/issues/**" || bindings[0].Channel != "#issues" {
+	if bindings[0].Provider != "linear" || bindings[0].PathGlob != "/linear/issues/**" || bindings[0].Channel != "#issues" || bindings[0].WebhookSubscriptionID != "relayfile_whsub_1" {
 		t.Fatalf("unexpected binding: %#v", bindings[0])
+	}
+
+	// A legacy caller that does not know the webhook-subscription flag must not
+	// erase the ID needed by a later agent-relay unsubscribe cleanup.
+	stdout.Reset()
+	if err := run([]string{
+		"integration", "bind", "linear", "/linear/issues/**",
+		"--channel", "#issues",
+		"--webhook", "wh_2",
+		"--webhook-token", "tok_2",
+	}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("replacement bind failed: %v\n%s", err, stdout.String())
+	}
+	stdout.Reset()
+	if err := run([]string{"integration", "bind", "--list"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("bind --list after replacement failed: %v", err)
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &bindings); err != nil {
+		t.Fatalf("parse replacement bindings failed: %v\n%s", err, stdout.String())
+	}
+	if len(bindings) != 1 || bindings[0].WebhookID != "wh_2" || bindings[0].WebhookSubscriptionID != "relayfile_whsub_1" {
+		t.Fatalf("replacement lost webhook subscription id: %#v", bindings)
 	}
 
 	stdout.Reset()
@@ -289,6 +312,20 @@ func TestIntegrationBindListAndUnbind(t *testing.T) {
 	}
 	if len(bindings) != 0 {
 		t.Fatalf("expected bindings to be empty, got %#v", bindings)
+	}
+}
+
+func TestIntegrationBindUsageListsOptionalSubscriptionFlags(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	var stdout bytes.Buffer
+	err := run([]string{"integration", "bind", "slack"}, strings.NewReader(""), &stdout, &stdout)
+	if err == nil {
+		t.Fatal("integration bind with missing resource unexpectedly succeeded")
+	}
+	if got, want := err.Error(), "[--subscription ID] [--webhook-subscription ID --webhook-subscription-workspace WS]"; !strings.Contains(got, want) {
+		t.Fatalf("usage = %q, want to contain %q", got, want)
 	}
 }
 

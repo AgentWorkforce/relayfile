@@ -434,14 +434,16 @@ type integrationConnectionState struct {
 }
 
 type relayIntegrationBinding struct {
-	Provider       string `json:"provider"`
-	PathGlob       string `json:"pathGlob"`
-	Channel        string `json:"channel"`
-	WebhookID      string `json:"webhookId"`
-	WebhookToken   string `json:"webhookToken"`
-	SubscriptionID string `json:"subscriptionId,omitempty"`
-	CreatedAt      string `json:"createdAt,omitempty"`
-	UpdatedAt      string `json:"updatedAt,omitempty"`
+	Provider                       string `json:"provider"`
+	PathGlob                       string `json:"pathGlob"`
+	Channel                        string `json:"channel"`
+	WebhookID                      string `json:"webhookId"`
+	WebhookToken                   string `json:"webhookToken"`
+	SubscriptionID                 string `json:"subscriptionId,omitempty"`
+	WebhookSubscriptionID          string `json:"webhookSubscriptionId,omitempty"`
+	WebhookSubscriptionWorkspaceID string `json:"webhookSubscriptionWorkspaceId,omitempty"`
+	CreatedAt                      string `json:"createdAt,omitempty"`
+	UpdatedAt                      string `json:"updatedAt,omitempty"`
 }
 
 type relayIntegrationBindingStore struct {
@@ -2319,12 +2321,14 @@ func runIntegration(args []string, stdin io.Reader, stdout io.Writer) error {
 }
 
 type relayIntegrationBindInput struct {
-	Provider       string
-	Resource       string
-	Channel        string
-	WebhookID      string
-	WebhookToken   string
-	SubscriptionID string
+	Provider                       string
+	Resource                       string
+	Channel                        string
+	WebhookID                      string
+	WebhookToken                   string
+	SubscriptionID                 string
+	WebhookSubscriptionID          string
+	WebhookSubscriptionWorkspaceID string
 }
 
 func bindRelayIntegration(input relayIntegrationBindInput) (relayIntegrationBinding, bool, string, error) {
@@ -2337,12 +2341,14 @@ func bindRelayIntegration(input relayIntegrationBindInput) (relayIntegrationBind
 		return relayIntegrationBinding{}, false, "", err
 	}
 	binding := relayIntegrationBinding{
-		Provider:       provider,
-		PathGlob:       resolved.PathGlob,
-		Channel:        strings.TrimSpace(input.Channel),
-		WebhookID:      strings.TrimSpace(input.WebhookID),
-		WebhookToken:   strings.TrimSpace(input.WebhookToken),
-		SubscriptionID: strings.TrimSpace(input.SubscriptionID),
+		Provider:                       provider,
+		PathGlob:                       resolved.PathGlob,
+		Channel:                        strings.TrimSpace(input.Channel),
+		WebhookID:                      strings.TrimSpace(input.WebhookID),
+		WebhookToken:                   strings.TrimSpace(input.WebhookToken),
+		SubscriptionID:                 strings.TrimSpace(input.SubscriptionID),
+		WebhookSubscriptionID:          strings.TrimSpace(input.WebhookSubscriptionID),
+		WebhookSubscriptionWorkspaceID: strings.TrimSpace(input.WebhookSubscriptionWorkspaceID),
 	}
 	if binding.Channel == "" {
 		return relayIntegrationBinding{}, false, "", errors.New("--channel is required")
@@ -2352,6 +2358,17 @@ func bindRelayIntegration(input relayIntegrationBindInput) (relayIntegrationBind
 	}
 	if binding.WebhookToken == "" {
 		return relayIntegrationBinding{}, false, "", errors.New("--webhook-token is required")
+	}
+	// The subscription id and its workspace pin are an atomic pair in BOTH
+	// directions: a workspace without its id could only produce a mismatched
+	// (oldSub, newWs) record, and a NEW id without its workspace would be
+	// unpinned — unretryable across an active-workspace switch. A legacy
+	// unpinned pair survives only when a replacement omits both fields.
+	if binding.WebhookSubscriptionWorkspaceID != "" && binding.WebhookSubscriptionID == "" {
+		return relayIntegrationBinding{}, false, "", errors.New("--webhook-subscription-workspace requires --webhook-subscription")
+	}
+	if binding.WebhookSubscriptionID != "" && binding.WebhookSubscriptionWorkspaceID == "" {
+		return relayIntegrationBinding{}, false, "", errors.New("--webhook-subscription requires --webhook-subscription-workspace")
 	}
 	relayIntegrationBindingsMu.Lock()
 	defer relayIntegrationBindingsMu.Unlock()
@@ -2370,6 +2387,15 @@ func bindRelayIntegration(input relayIntegrationBindInput) (relayIntegrationBind
 			}
 			if binding.SubscriptionID == "" {
 				binding.SubscriptionID = bindings[i].SubscriptionID
+			}
+			// The (id, workspace) pin is preserved as an ATOMIC PAIR, and only
+			// when the replacement omits the id entirely (legacy/partial
+			// caller). A replacement that PROVIDES a new id takes its own
+			// workspace exactly as given — inheriting the old workspace would
+			// pin the new subscription to the wrong place.
+			if binding.WebhookSubscriptionID == "" {
+				binding.WebhookSubscriptionID = bindings[i].WebhookSubscriptionID
+				binding.WebhookSubscriptionWorkspaceID = bindings[i].WebhookSubscriptionWorkspaceID
 			}
 			bindings[i] = binding
 			replaced = true
@@ -2396,13 +2422,17 @@ func runIntegrationBind(args []string, stdout io.Writer) error {
 	webhookID := fs.String("webhook", "", "RelayCast inbound webhook id")
 	webhookToken := fs.String("webhook-token", "", "RelayCast inbound webhook token")
 	subscriptionID := fs.String("subscription", "", "relay integration subscription id")
+	webhookSubscriptionID := fs.String("webhook-subscription", "", "relayfile-cloud inbound webhook subscription id")
+	webhookSubscriptionWorkspaceID := fs.String("webhook-subscription-workspace", "", "workspace the webhook subscription was created in (pairs with --webhook-subscription)")
 	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
-		"list":          false,
-		"channel":       true,
-		"webhook":       true,
-		"webhook-token": true,
-		"subscription":  true,
-		"json":          false,
+		"list":                           false,
+		"channel":                        true,
+		"webhook":                        true,
+		"webhook-token":                  true,
+		"subscription":                   true,
+		"webhook-subscription":           true,
+		"webhook-subscription-workspace": true,
+		"json":                           false,
 	})); err != nil {
 		return err
 	}
@@ -2417,15 +2447,17 @@ func runIntegrationBind(args []string, stdout io.Writer) error {
 		return writeJSON(stdout, bindings)
 	}
 	if fs.NArg() != 2 {
-		return errors.New("usage: relayfile integration bind PROVIDER RESOURCE_OR_PATH_GLOB --channel CHANNEL --webhook ID --webhook-token TOKEN")
+		return errors.New("usage: relayfile integration bind PROVIDER RESOURCE_OR_PATH_GLOB --channel CHANNEL --webhook ID --webhook-token TOKEN [--subscription ID] [--webhook-subscription ID --webhook-subscription-workspace WS]")
 	}
 	binding, replaced, warning, err := bindRelayIntegration(relayIntegrationBindInput{
-		Provider:       fs.Arg(0),
-		Resource:       fs.Arg(1),
-		Channel:        *channel,
-		WebhookID:      *webhookID,
-		WebhookToken:   *webhookToken,
-		SubscriptionID: *subscriptionID,
+		Provider:                       fs.Arg(0),
+		Resource:                       fs.Arg(1),
+		Channel:                        *channel,
+		WebhookID:                      *webhookID,
+		WebhookToken:                   *webhookToken,
+		SubscriptionID:                 *subscriptionID,
+		WebhookSubscriptionID:          *webhookSubscriptionID,
+		WebhookSubscriptionWorkspaceID: *webhookSubscriptionWorkspaceID,
 	})
 	if err != nil {
 		return err
@@ -2637,7 +2669,14 @@ func runIntegrationWritebackSecret(args []string, stdout io.Writer) error {
 	}
 
 	if *jsonOutput {
-		return writeJSON(stdout, resp.Data)
+		// Include the resolved workspace id so callers can pin later
+		// webhook-subscription operations to the same workspace even if the
+		// daemon's active workspace changes between runs.
+		return writeJSON(stdout, struct {
+			URL         string `json:"url"`
+			Secret      string `json:"secret"`
+			WorkspaceID string `json:"workspaceId"`
+		}{URL: resp.Data.URL, Secret: resp.Data.Secret, WorkspaceID: workspaceID})
 	}
 	fmt.Fprintf(stdout, "url: %s\nsecret: %s\n", resp.Data.URL, resp.Data.Secret)
 	return nil

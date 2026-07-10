@@ -229,6 +229,27 @@ paths:
               schema:
                 $ref: "#/components/schemas/WritebackSecret"
   /v1/integrations/webhook-subscriptions:
+    get:
+      operationId: listWebhookSubscriptions
+      summary: List server-side relayfile webhook subscriptions
+      description: >-
+        Lists the workspace's inbound webhook subscriptions so callers can
+        reconcile subscriptions created by runs that crashed before persisting
+        the server-assigned id.
+      parameters:
+        - $ref: "#/components/parameters/ApiVersionHeader"
+        - name: workspace
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Webhook subscriptions for the workspace
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListWebhookSubscriptionsResponse"
     post:
       operationId: createWebhookSubscription
       summary: Create a server-side relayfile webhook subscription
@@ -250,6 +271,10 @@ paths:
     delete:
       operationId: deleteWebhookSubscription
       summary: Delete a server-side relayfile webhook subscription
+      description: >-
+        Idempotent: deleting a subscription that no longer exists succeeds, so
+        retried cleanups of a known-deleted id observe progress instead of an
+        error.
       parameters:
         - $ref: "#/components/parameters/ApiVersionHeader"
       requestBody:
@@ -260,7 +285,7 @@ paths:
               $ref: "#/components/schemas/DeleteWebhookSubscriptionRequest"
       responses:
         "200":
-          description: Subscription deleted
+          description: Subscription deleted (or already absent)
           content:
             application/json:
               schema:
@@ -274,7 +299,7 @@ components:
       schema:
         type: integer
         format: uint32
-        const: 2
+        const: 3
     ApiVersionQuery:
       name: apiVersion
       in: query
@@ -447,6 +472,10 @@ components:
           type: string
         subscriptionId:
           type: string
+        webhookSubscriptionId:
+          type: string
+        webhookSubscriptionWorkspaceId:
+          type: string
     BindResponse:
       type: object
       required: [binding, replaced]
@@ -473,6 +502,10 @@ components:
         webhookToken:
           type: string
         subscriptionId:
+          type: string
+        webhookSubscriptionId:
+          type: string
+        webhookSubscriptionWorkspaceId:
           type: string
         createdAt:
           type: string
@@ -518,6 +551,8 @@ components:
       type: object
       required: [url, secret]
       properties:
+        workspaceId:
+          type: string
         url:
           type: string
         secret:
@@ -542,6 +577,11 @@ components:
       type: object
       required: [subscriptionId]
       properties:
+        workspaceId:
+          type: string
+          description: >-
+            Workspace the subscription was created in, so callers can pin later
+            delete/list calls to the same workspace.
         subscriptionId:
           type: string
         secret:
@@ -560,6 +600,29 @@ components:
       properties:
         ok:
           type: boolean
+    ListWebhookSubscriptionsResponse:
+      type: object
+      required: [subscriptions]
+      properties:
+        workspaceId:
+          type: string
+        subscriptions:
+          type: array
+          items:
+            $ref: "#/components/schemas/WebhookSubscriptionSummary"
+    WebhookSubscriptionSummary:
+      type: object
+      required: [subscriptionId, url, pathGlobs]
+      properties:
+        subscriptionId:
+          type: string
+        url:
+          type: string
+          format: uri
+        pathGlobs:
+          type: array
+          items:
+            type: string
     ErrorEnvelope:
       type: object
       required: [error]

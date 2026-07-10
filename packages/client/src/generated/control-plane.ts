@@ -166,11 +166,18 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get?: never;
+        /**
+         * List server-side relayfile webhook subscriptions
+         * @description Lists the workspace's inbound webhook subscriptions so callers can reconcile subscriptions created by runs that crashed before persisting the server-assigned id.
+         */
+        get: operations["listWebhookSubscriptions"];
         put?: never;
         /** Create a server-side relayfile webhook subscription */
         post: operations["createWebhookSubscription"];
-        /** Delete a server-side relayfile webhook subscription */
+        /**
+         * Delete a server-side relayfile webhook subscription
+         * @description Idempotent: deleting a subscription that no longer exists succeeds, so retried cleanups of a known-deleted id observe progress instead of an error.
+         */
         delete: operations["deleteWebhookSubscription"];
         options?: never;
         head?: never;
@@ -249,6 +256,8 @@ export interface components {
             webhookId: string;
             webhookToken: string;
             subscriptionId?: string;
+            webhookSubscriptionId?: string;
+            webhookSubscriptionWorkspaceId?: string;
         };
         BindResponse: {
             binding: components["schemas"]["Binding"];
@@ -262,6 +271,8 @@ export interface components {
             webhookId: string;
             webhookToken: string;
             subscriptionId?: string;
+            webhookSubscriptionId?: string;
+            webhookSubscriptionWorkspaceId?: string;
             createdAt?: string;
             updatedAt?: string;
         };
@@ -283,6 +294,7 @@ export interface components {
             channel: string;
         };
         WritebackSecret: {
+            workspaceId?: string;
             url: string;
             secret: string;
         };
@@ -294,6 +306,8 @@ export interface components {
             secret: string;
         };
         WebhookSubscriptionResponse: {
+            /** @description Workspace the subscription was created in, so callers can pin later delete/list calls to the same workspace. */
+            workspaceId?: string;
             subscriptionId: string;
             secret?: string;
         };
@@ -303,6 +317,16 @@ export interface components {
         };
         DeleteWebhookSubscriptionResponse: {
             ok: boolean;
+        };
+        ListWebhookSubscriptionsResponse: {
+            workspaceId?: string;
+            subscriptions: components["schemas"]["WebhookSubscriptionSummary"][];
+        };
+        WebhookSubscriptionSummary: {
+            subscriptionId: string;
+            /** Format: uri */
+            url: string;
+            pathGlobs: string[];
         };
         ErrorEnvelope: {
             error: {
@@ -342,7 +366,7 @@ export interface components {
         };
     };
     parameters: {
-        ApiVersionHeader: 2;
+        ApiVersionHeader: 3;
         ApiVersionQuery: number;
     };
     requestBodies: never;
@@ -635,6 +659,30 @@ export interface operations {
             };
         };
     };
+    listWebhookSubscriptions: {
+        parameters: {
+            query?: {
+                workspace?: string;
+            };
+            header?: {
+                "X-Relayfile-API-Version"?: components["parameters"]["ApiVersionHeader"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Webhook subscriptions for the workspace */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ListWebhookSubscriptionsResponse"];
+                };
+            };
+        };
+    };
     createWebhookSubscription: {
         parameters: {
             query?: never;
@@ -676,7 +724,7 @@ export interface operations {
             };
         };
         responses: {
-            /** @description Subscription deleted */
+            /** @description Subscription deleted (or already absent) */
             200: {
                 headers: {
                     [name: string]: unknown;
