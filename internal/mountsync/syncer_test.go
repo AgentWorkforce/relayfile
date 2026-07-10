@@ -960,8 +960,12 @@ func TestIsGithubAdapterCreateCommandPath(t *testing.T) {
 		{"issue comments _index.json is a reserved auxiliary payload", "/github/repos/octocat/hello-world/issues/42/comments/_index.json", false},
 		{"reviews _index.json is a reserved auxiliary payload", "/github/repos/octocat/hello-world/pulls/7/reviews/_index.json", false},
 		{"replies _index.json is a reserved auxiliary payload", "/github/repos/octocat/hello-world/pulls/7/review-comments/991/replies/_index.json", false},
-		{"underscore-prefixed leaf under issues is reserved regardless of exact name", "/github/repos/octocat/hello-world/issues/_anything.json", false},
-		{"dotfile leaf under issues is reserved", "/github/repos/octocat/hello-world/issues/.layout.md", false},
+		// The reserved exclusion is EXACT-name only: the adapter create
+		// contract has no `_`/`.` prefix reservation (adapter-core
+		// file-native-router.ts:148-186,637-710), so prefix-named leaves are
+		// valid create commands and MUST classify as create.
+		{"underscore-prefixed leaf under issues is a valid create command", "/github/repos/octocat/hello-world/issues/_draft.json", true},
+		{"dotfile leaf under issues is a valid create command", "/github/repos/octocat/hello-world/issues/.draft.json", true},
 	}
 
 	for _, tt := range tests {
@@ -1015,6 +1019,8 @@ func TestShouldSkipLazyUntrackedPushGithubAdapterCreateRoots(t *testing.T) {
 		{"issue numeric leaf stays skipped", "/github/repos/octocat/hello-world/issues/42.json", true},
 		{"draft.json outside any command root stays skipped", "/github/repos/octocat/hello-world/pulls/draft.json", true},
 		{"issues _index.json stays skipped", "/github/repos/octocat/hello-world/issues/_index.json", true},
+		{"issues _draft.json is a valid create and must push", "/github/repos/octocat/hello-world/issues/_draft.json", false},
+		{"issues .draft.json is a valid create and must push", "/github/repos/octocat/hello-world/issues/.draft.json", false},
 		{"issue comments _index.json stays skipped", "/github/repos/octocat/hello-world/issues/42/comments/_index.json", true},
 		{"reviews _index.json stays skipped", "/github/repos/octocat/hello-world/pulls/7/reviews/_index.json", true},
 		{"replies _index.json stays skipped", "/github/repos/octocat/hello-world/pulls/7/review-comments/991/replies/_index.json", true},

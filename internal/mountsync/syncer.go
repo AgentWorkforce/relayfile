@@ -5797,19 +5797,17 @@ var githubMergeCommandPathPattern = regexp.MustCompile(`^github/repos/[^/]+/[^/]
 // this exclusion, `issues/_index.json` has a nonnumeric leaf (`_index`)
 // that would otherwise match the issues create-root pattern below and get
 // pushed as a bogus issue-create — reopening the exact pre-pull hazard this
-// guard exists to close. Reserved leaves are recognized two ways: the
-// existing isReservedProviderLayoutSegment literal set (reused rather than
-// duplicated), and — because the adapter could add more `_`/`.`-prefixed
-// auxiliary payloads without this list being updated in lockstep — any
-// basename that starts with `_` or `.`. The adapter's create-command
-// contract never uses `_`-prefixed or dotfile leaf names (see the roots
-// enumerated in githubAdapterCreateCommandPathPatterns), so this exclusion
-// cannot suppress a real command.
+// guard exists to close. The exclusion matches EXACT reserved names only —
+// the existing isReservedProviderLayoutSegment literal set (reused rather
+// than duplicated; covers `_index.json` and `LAYOUT.md`). It deliberately
+// does NOT ban `_`/`.` name prefixes: the adapter's create contract has no
+// prefix reservation (adapter-core file-native-router.ts:148-186,637-710
+// reserves only exact `.schema`/`.create.example`/`.adapter`/`.tmp`/
+// `.partial` stem variants), so `issues/_draft.json` or `issues/.draft.json`
+// are VALID create commands that a prefix rule would silently suppress —
+// the over-skip loss class this review rejected twice.
 func isGithubAdapterReservedAuxiliaryLeaf(basename string) bool {
-	if isReservedProviderLayoutSegment(basename) {
-		return true
-	}
-	return strings.HasPrefix(basename, "_") || strings.HasPrefix(basename, ".")
+	return isReservedProviderLayoutSegment(basename)
 }
 
 // isGithubAdapterCreateCommandPath reports whether remotePath is a
