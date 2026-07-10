@@ -131,6 +131,10 @@ type webhookSubscriptionRequest struct {
 type webhookSubscriptionResponse struct {
 	SubscriptionID string `json:"subscriptionId"`
 	Secret         string `json:"secret,omitempty"`
+	// WorkspaceID pins which workspace the subscription was created in, so
+	// callers can journal it and later delete/list through the SAME workspace
+	// even if the daemon's active workspace changes.
+	WorkspaceID string `json:"workspaceId,omitempty"`
 }
 
 type deleteWebhookSubscriptionRequest struct {
@@ -140,6 +144,7 @@ type deleteWebhookSubscriptionRequest struct {
 
 type listWebhookSubscriptionsResponse struct {
 	Subscriptions []webhookSubscriptionSummary `json:"subscriptions"`
+	WorkspaceID   string                       `json:"workspaceId,omitempty"`
 }
 
 type webhookSubscriptionSummary struct {
@@ -514,7 +519,10 @@ func handleControlPlaneWebhookSubscription(w http.ResponseWriter, r *http.Reques
 				PathGlobs:      item.PathGlobs,
 			})
 		}
-		writeControlPlaneJSON(w, http.StatusOK, listWebhookSubscriptionsResponse{Subscriptions: subscriptions})
+		writeControlPlaneJSON(w, http.StatusOK, listWebhookSubscriptionsResponse{
+			Subscriptions: subscriptions,
+			WorkspaceID:   workspaceID,
+		})
 	case http.MethodPost:
 		var req webhookSubscriptionRequest
 		if err := decodeControlPlaneJSON(r, &req); err != nil {
@@ -536,6 +544,7 @@ func handleControlPlaneWebhookSubscription(w http.ResponseWriter, r *http.Reques
 			return
 		}
 		var response webhookSubscriptionResponse
+		response.WorkspaceID = workspaceID
 		if err := commandClient.client.postJSON(
 			r.Context(),
 			fmt.Sprintf("/v1/workspaces/%s/webhooks", url.PathEscape(workspaceID)),

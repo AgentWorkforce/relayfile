@@ -571,6 +571,11 @@ components:
       type: object
       required: [subscriptionId]
       properties:
+        workspaceId:
+          type: string
+          description: >-
+            Workspace the subscription was created in, so callers can pin later
+            delete/list calls to the same workspace.
         subscriptionId:
           type: string
         secret:
@@ -593,6 +598,8 @@ components:
       type: object
       required: [subscriptions]
       properties:
+        workspaceId:
+          type: string
         subscriptions:
           type: array
           items:

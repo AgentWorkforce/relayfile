@@ -290,7 +290,7 @@ func TestControlPlaneCloudIntegrationConformance(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("webhook subscription status = %d", status)
 	}
-	if subscription.SubscriptionID != "whsub_123" {
+	if subscription.SubscriptionID != "whsub_123" || subscription.WorkspaceID != "ws_123" {
 		t.Fatalf("unexpected webhook subscription: %#v", subscription)
 	}
 
@@ -298,6 +298,9 @@ func TestControlPlaneCloudIntegrationConformance(t *testing.T) {
 	status = controlPlaneJSON(t, client, http.MethodGet, baseURL+"/v1/integrations/webhook-subscriptions?workspace=demo", nil, &listedSubscriptions)
 	if status != http.StatusOK {
 		t.Fatalf("list webhook subscriptions status = %d", status)
+	}
+	if listedSubscriptions.WorkspaceID != "ws_123" {
+		t.Fatalf("unexpected webhook subscription list workspace: %#v", listedSubscriptions)
 	}
 	if len(listedSubscriptions.Subscriptions) != 1 ||
 		listedSubscriptions.Subscriptions[0].SubscriptionID != "whsub_123" ||

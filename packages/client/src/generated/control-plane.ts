@@ -303,6 +303,8 @@ export interface components {
             secret: string;
         };
         WebhookSubscriptionResponse: {
+            /** @description Workspace the subscription was created in, so callers can pin later delete/list calls to the same workspace. */
+            workspaceId?: string;
             subscriptionId: string;
             secret?: string;
         };
@@ -314,6 +316,7 @@ export interface components {
             ok: boolean;
         };
         ListWebhookSubscriptionsResponse: {
+            workspaceId?: string;
             subscriptions: components["schemas"]["WebhookSubscriptionSummary"][];
         };
         WebhookSubscriptionSummary: {

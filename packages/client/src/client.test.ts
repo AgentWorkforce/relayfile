@@ -146,6 +146,7 @@ describe('RelayfileControlPlaneClient integration webhook subscriptions', () => 
     vi.spyOn(client, 'ensureReady').mockResolvedValue(undefined);
     const rawRequest = vi.spyOn(client as unknown as { rawRequest: (opts: unknown) => Promise<unknown> }, 'rawRequest');
     rawRequest.mockResolvedValueOnce({
+      workspaceId: 'ws_123',
       subscriptions: [
         {
           subscriptionId: 'whsub_123',
@@ -156,6 +157,7 @@ describe('RelayfileControlPlaneClient integration webhook subscriptions', () => 
     });
 
     await expect(client.listWebhookSubscriptions('demo')).resolves.toEqual({
+      workspaceId: 'ws_123',
       subscriptions: [
         {
           subscriptionId: 'whsub_123',
