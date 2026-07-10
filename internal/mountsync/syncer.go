@@ -827,6 +827,12 @@ type SyncerOptions struct {
 	ForceFullReconcile *bool
 	// LazyRepos controls lazy GitHub repo subtree hydration. nil falls back to env.
 	LazyRepos *bool
+	// LazySkipUntrackedPush controls whether pushLocal excludes local files
+	// under a lazy GitHub repo subtree that this daemon never tracked in
+	// s.state.Files (see SkippedLazyUntrackedPush). Only takes effect when
+	// LazyRepos is true. nil falls back to env RELAYFILE_LAZY_SKIP_UNTRACKED_PUSH,
+	// default true.
+	LazySkipUntrackedPush *bool
 	// LowMemory avoids expensive diagnostic/public-state scans and large
 	// in-memory snapshots. nil falls back to RELAYFILE_MOUNT_LOW_MEMORY.
 	LowMemory *bool
@@ -996,23 +1002,25 @@ type Syncer struct {
 	// immediately — not just provider-layout-alias paths — without waiting the
 	// read-not-ready TTL. skipStuckMax bounds the number of events dropped
 	// (0 = unbounded); skipStuckCount tracks how many were dropped.
-	skipStuckMode     bool
-	skipStuckMax      int
-	skipStuckCount    int
-	syncActive        bool
-	oversizedLogged   map[string]struct{}
-	controlSkipLogged map[string]struct{}
-	quarantinedPaths  map[string]struct{}
-	lazyRepos         bool
-	lowMemory         bool
-	writeOnly         bool
-	layoutRegistrar   ProviderLayoutRegistrar
-	githubWorkingTree *githubWorkingTreeMount
-	closeScheduler    *CloseScheduler
-	rollingCoalescer  *RollingDigestCoalescer
-	circuit           *CloudErrorCircuit
-	maxOutboxAttempts int
-	nowFn             func() time.Time
+	skipStuckMode         bool
+	skipStuckMax          int
+	skipStuckCount        int
+	syncActive            bool
+	oversizedLogged       map[string]struct{}
+	controlSkipLogged     map[string]struct{}
+	lazyUntrackedLogged   map[string]struct{}
+	quarantinedPaths      map[string]struct{}
+	lazyRepos             bool
+	lazySkipUntrackedPush bool
+	lowMemory             bool
+	writeOnly             bool
+	layoutRegistrar       ProviderLayoutRegistrar
+	githubWorkingTree     *githubWorkingTreeMount
+	closeScheduler        *CloseScheduler
+	rollingCoalescer      *RollingDigestCoalescer
+	circuit               *CloudErrorCircuit
+	maxOutboxAttempts     int
+	nowFn                 func() time.Time
 	// credExpiresAt is the RFC3339 expiry of the delegated access token,
 	// set by the CLI layer via SetCredentialExpiry and included in the
 	// public state as credExpiresInSecs so operators get advance warning.
@@ -1098,6 +1106,15 @@ type telemetryCounters struct {
 	// and a directory); the daemon quarantines the path so a single collision
 	// can't wedge the whole mount. See isRemotePathCollision.
 	PathCollisionQuarantined uint64 `json:"pathCollisionQuarantined,omitempty"`
+	// SkippedLazyUntrackedPush counts local files excluded from pushLocal
+	// because they sit under a lazy GitHub repo subtree
+	// (isLazyGithubRepoSubtreePath) this daemon never tracked in s.state.Files
+	// — e.g. a canonical record materialized by an isolated non-lazy pre-pull
+	// with its own state file. Without this guard scanLocalFiles's
+	// untracked-file path treats the pre-pulled record as a brand-new local
+	// write and pushes it upstream as agent_write. Writeback drafts
+	// (isMountWritebackCreateDraftPath) are exempt and still push.
+	SkippedLazyUntrackedPush uint64 `json:"skippedLazyUntrackedPush,omitempty"`
 }
 
 // quarantineRemotePath records a remote path that can't be materialized
@@ -1438,6 +1455,16 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 			opts.Logger.Printf("ignoring invalid RELAYFILE_MOUNT_LAZY_GITHUB_REPOS=%q: %v", raw, perr)
 		}
 	}
+	lazySkipUntrackedPush := true
+	if opts.LazySkipUntrackedPush != nil {
+		lazySkipUntrackedPush = *opts.LazySkipUntrackedPush
+	} else if raw := strings.TrimSpace(os.Getenv("RELAYFILE_LAZY_SKIP_UNTRACKED_PUSH")); raw != "" {
+		if parsed, perr := strconv.ParseBool(raw); perr == nil {
+			lazySkipUntrackedPush = parsed
+		} else if opts.Logger != nil {
+			opts.Logger.Printf("ignoring invalid RELAYFILE_LAZY_SKIP_UNTRACKED_PUSH=%q: %v", raw, perr)
+		}
+	}
 	lowMemory := false
 	if opts.LowMemory != nil {
 		lowMemory = *opts.LowMemory
@@ -1473,46 +1500,47 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 	}
 	githubWorkingTree := detectGithubWorkingTreeMount(remoteRoot)
 	return &Syncer{
-		client:               client,
-		workspace:            workspace,
-		remoteRoot:           remoteRoot,
-		localRoot:            localRoot,
-		localDir:             localRoot,
-		stateFile:            stateFile,
-		publicStatePath:      publicStatePath,
-		conflictsDir:         conflictsDir,
-		resolvedConflictsDir: resolvedConflictsDir,
-		deadLetterDir:        deadLetterDir,
-		outboxDir:            outboxDir,
-		eventProvider:        eventProvider,
-		scopes:               scopes,
-		websocket:            websocketEnabled,
-		rootCtx:              rootCtx,
-		logger:               opts.Logger,
-		denialLogPath:        filepath.Join(localRoot, ".relay", "permissions-denied.log"),
-		bulkFlushThreshold:   bulkFlushThreshold,
-		mode:                 strings.TrimSpace(opts.Mode),
-		writeOnly:            normalizeSyncMode(opts.SyncMode) == "write-only",
-		interval:             opts.Interval,
-		fullPullEvery:        fullPullEvery,
-		cursorTimeout:        cursorTimeout,
-		exportTimeout:        exportTimeout,
-		outboxFlushTimeout:   outboxFlushTimeout,
-		bootstrapTimeout:     bootstrapTimeout,
-		bootstrapIdleTimeout: bootstrapIdleTimeout,
-		readNotReadyTTL:      readNotReadyTTL,
-		forceFullReconcile:   forceFullReconcile,
-		oversizedLogged:      map[string]struct{}{},
-		quarantinedPaths:     map[string]struct{}{},
-		lazyRepos:            lazyRepos,
-		lowMemory:            lowMemory,
-		layoutRegistrar:      opts.ProviderLayoutRegistrar,
-		githubWorkingTree:    githubWorkingTree,
-		closeScheduler:       closeScheduler,
-		rollingCoalescer:     rollingCoalescer,
-		circuit:              NewCloudErrorCircuit(),
-		maxOutboxAttempts:    defaultOutboxMaxAttempts,
-		nowFn:                opts.Now,
+		client:                client,
+		workspace:             workspace,
+		remoteRoot:            remoteRoot,
+		localRoot:             localRoot,
+		localDir:              localRoot,
+		stateFile:             stateFile,
+		publicStatePath:       publicStatePath,
+		conflictsDir:          conflictsDir,
+		resolvedConflictsDir:  resolvedConflictsDir,
+		deadLetterDir:         deadLetterDir,
+		outboxDir:             outboxDir,
+		eventProvider:         eventProvider,
+		scopes:                scopes,
+		websocket:             websocketEnabled,
+		rootCtx:               rootCtx,
+		logger:                opts.Logger,
+		denialLogPath:         filepath.Join(localRoot, ".relay", "permissions-denied.log"),
+		bulkFlushThreshold:    bulkFlushThreshold,
+		mode:                  strings.TrimSpace(opts.Mode),
+		writeOnly:             normalizeSyncMode(opts.SyncMode) == "write-only",
+		interval:              opts.Interval,
+		fullPullEvery:         fullPullEvery,
+		cursorTimeout:         cursorTimeout,
+		exportTimeout:         exportTimeout,
+		outboxFlushTimeout:    outboxFlushTimeout,
+		bootstrapTimeout:      bootstrapTimeout,
+		bootstrapIdleTimeout:  bootstrapIdleTimeout,
+		readNotReadyTTL:       readNotReadyTTL,
+		forceFullReconcile:    forceFullReconcile,
+		oversizedLogged:       map[string]struct{}{},
+		quarantinedPaths:      map[string]struct{}{},
+		lazyRepos:             lazyRepos,
+		lazySkipUntrackedPush: lazySkipUntrackedPush,
+		lowMemory:             lowMemory,
+		layoutRegistrar:       opts.ProviderLayoutRegistrar,
+		githubWorkingTree:     githubWorkingTree,
+		closeScheduler:        closeScheduler,
+		rollingCoalescer:      rollingCoalescer,
+		circuit:               NewCloudErrorCircuit(),
+		maxOutboxAttempts:     defaultOutboxMaxAttempts,
+		nowFn:                 opts.Now,
 		state: mountState{
 			Files: map[string]trackedFile{},
 		},
@@ -5648,6 +5676,11 @@ func (s *Syncer) scanLocalFiles() (map[string]localSnapshot, error) {
 		if err != nil {
 			return err
 		}
+		if s.shouldSkipLazyUntrackedPush(remotePath) {
+			snapshot.SkipWriteback = true
+			s.logLazyUntrackedPushSkipped(remotePath)
+			s.state.Counters.SkippedLazyUntrackedPush++
+		}
 		results[remotePath] = snapshot
 		return nil
 	})
@@ -5655,6 +5688,46 @@ func (s *Syncer) scanLocalFiles() (map[string]localSnapshot, error) {
 		return nil, err
 	}
 	return results, nil
+}
+
+// shouldSkipLazyUntrackedPush reports whether a locally-scanned file must be
+// excluded from pushLocal's writeback path because it sits under a lazy
+// GitHub repo subtree (isLazyGithubRepoSubtreePath) that this daemon never
+// tracked in s.state.Files. This happens when a separate, isolated
+// non-lazy pre-pull (its own state file) has already materialized a
+// canonical record under a broad-root daemon's localDir before the lazy
+// daemon's first cycle. Without this guard, scanLocalFiles's untracked-file
+// path treats the pre-pulled record as a brand-new local write and pushLocal
+// pushes it upstream as agent_write — minting a spurious revision,
+// file.updated event, and provider writeback for content the agent never
+// touched. Writeback drafts/commands (isMountWritebackCreateDraftPath) are
+// real agent-authored writes and must still push even when untracked.
+func (s *Syncer) shouldSkipLazyUntrackedPush(remotePath string) bool {
+	if !s.lazyRepos || !s.lazySkipUntrackedPush {
+		return false
+	}
+	if !isUnderLazyGithubRepoSubtree(s.remoteRoot, remotePath) {
+		return false
+	}
+	if _, tracked := s.state.Files[normalizeRemotePath(remotePath)]; tracked {
+		return false
+	}
+	return !isMountWritebackCreateDraftPath(remotePath)
+}
+
+// logLazyUntrackedPushSkipped logs each distinct skipped path only once per
+// process, mirroring the oversizedLogged/controlSkipLogged dedup pattern so a
+// large pre-pulled subtree does not spam the log every sync cycle.
+func (s *Syncer) logLazyUntrackedPushSkipped(remotePath string) {
+	normalized := normalizeRemotePath(remotePath)
+	if s.lazyUntrackedLogged == nil {
+		s.lazyUntrackedLogged = map[string]struct{}{}
+	}
+	if _, seen := s.lazyUntrackedLogged[normalized]; seen {
+		return
+	}
+	s.lazyUntrackedLogged[normalized] = struct{}{}
+	s.logf("skipping untracked local file under lazy GitHub repo subtree: %s (not enqueued for writeback)", normalized)
 }
 
 func normalizeScopes(scopes []string) []string {

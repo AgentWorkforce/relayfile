@@ -37,37 +37,38 @@ const (
 var errFuseModeUnavailable = errors.New("fuse mode is not available in this build")
 
 type mountConfig struct {
-	baseURL          string
-	token            string
-	credsFile        string
-	workspaceID      string
-	remotePath       string
-	remotePaths      []string
-	eventProvider    string
-	localDir         string
-	localLayout      string
-	stateFile        string
-	stateDir         string
-	mountKind        string
-	syncMode         string
-	interval         time.Duration
-	intervalJitter   float64
-	timeout          time.Duration
-	bootstrapTimeout time.Duration
-	cursorTimeout    time.Duration
-	forceFullRecon   bool
-	websocketEnabled bool
-	lazyRepos        bool
-	lowMemory        bool
-	pprofAddr        string
-	memlogInterval   time.Duration
-	logHTTPStatus    bool
-	scopes           []string
-	once             bool
-	flushOutboxOnce  bool
-	pushLocalOnce    bool
-	mode             string
-	fuseContentTTL   time.Duration
+	baseURL               string
+	token                 string
+	credsFile             string
+	workspaceID           string
+	remotePath            string
+	remotePaths           []string
+	eventProvider         string
+	localDir              string
+	localLayout           string
+	stateFile             string
+	stateDir              string
+	mountKind             string
+	syncMode              string
+	interval              time.Duration
+	intervalJitter        float64
+	timeout               time.Duration
+	bootstrapTimeout      time.Duration
+	cursorTimeout         time.Duration
+	forceFullRecon        bool
+	websocketEnabled      bool
+	lazyRepos             bool
+	lazySkipUntrackedPush bool
+	lowMemory             bool
+	pprofAddr             string
+	memlogInterval        time.Duration
+	logHTTPStatus         bool
+	scopes                []string
+	once                  bool
+	flushOutboxOnce       bool
+	pushLocalOnce         bool
+	mode                  string
+	fuseContentTTL        time.Duration
 }
 
 type pollRunner func(context.Context, mountConfig) error
@@ -100,6 +101,7 @@ func main() {
 	fullReconcile := flag.Bool("full-reconcile", boolEnv("RELAYFILE_FORCE_FULL_RECONCILE", false), "force one full reconcile regardless of bootstrap-complete state (escape hatch)")
 	websocketEnabled := flag.Bool("websocket", boolEnv("RELAYFILE_MOUNT_WEBSOCKET", true), "enable websocket event streaming when available")
 	lazyRepos := flag.Bool("lazy-repos", lazyReposEnv(), "lazily materialize GitHub repo subtrees on first access")
+	lazySkipUntrackedPush := flag.Bool("lazy-skip-untracked-push", boolEnv("RELAYFILE_LAZY_SKIP_UNTRACKED_PUSH", true), "when --lazy-repos is set, skip pushLocal for local files under a lazy GitHub repo subtree that this daemon does not track in its state (e.g. pre-pulled by an isolated non-lazy mount); writeback drafts/commands are exempt and still push")
 	lowMemory := flag.Bool("low-memory", boolEnv("RELAYFILE_MOUNT_LOW_MEMORY", false), "reduce mount memory use by omitting per-file public state and deferring content reads")
 	pprofAddr := flag.String("pprof-addr", strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_PPROF_ADDR")), "optional pprof listen address, e.g. 127.0.0.1:6060")
 	memlogInterval := flag.Duration("memlog-interval", durationEnv("RELAYFILE_MOUNT_MEMLOG_INTERVAL", 0), "optional interval for logging runtime memory stats")
@@ -160,37 +162,38 @@ func main() {
 	defer stop()
 
 	cfg := mountConfig{
-		baseURL:          *baseURL,
-		token:            resolvedToken,
-		credsFile:        resolvedCredsFile,
-		workspaceID:      strings.TrimSpace(*workspaceID),
-		remotePath:       firstRemotePath(allRemotePaths, envOrDefault("RELAYFILE_REMOTE_PATH", "/")),
-		remotePaths:      normalizeRemotePaths(allRemotePaths, envOrDefault("RELAYFILE_REMOTE_PATH", "/")),
-		eventProvider:    strings.TrimSpace(*eventProvider),
-		localDir:         *localDir,
-		localLayout:      resolvedLocalLayout,
-		stateFile:        *stateFile,
-		stateDir:         *stateDir,
-		mountKind:        *mountKind,
-		syncMode:         resolvedSyncMode,
-		interval:         *interval,
-		intervalJitter:   *intervalJitter,
-		timeout:          *timeout,
-		bootstrapTimeout: *bootstrapTimeout,
-		cursorTimeout:    *cursorTimeout,
-		forceFullRecon:   *fullReconcile,
-		websocketEnabled: *websocketEnabled,
-		lazyRepos:        *lazyRepos,
-		lowMemory:        *lowMemory,
-		pprofAddr:        strings.TrimSpace(*pprofAddr),
-		memlogInterval:   *memlogInterval,
-		logHTTPStatus:    *logHTTPStatus,
-		scopes:           parseTokenScopes(resolvedToken),
-		once:             *once,
-		flushOutboxOnce:  *flushOutboxOnce,
-		pushLocalOnce:    *pushLocalOnce,
-		mode:             resolvedMode,
-		fuseContentTTL:   *fuseContentTTL,
+		baseURL:               *baseURL,
+		token:                 resolvedToken,
+		credsFile:             resolvedCredsFile,
+		workspaceID:           strings.TrimSpace(*workspaceID),
+		remotePath:            firstRemotePath(allRemotePaths, envOrDefault("RELAYFILE_REMOTE_PATH", "/")),
+		remotePaths:           normalizeRemotePaths(allRemotePaths, envOrDefault("RELAYFILE_REMOTE_PATH", "/")),
+		eventProvider:         strings.TrimSpace(*eventProvider),
+		localDir:              *localDir,
+		localLayout:           resolvedLocalLayout,
+		stateFile:             *stateFile,
+		stateDir:              *stateDir,
+		mountKind:             *mountKind,
+		syncMode:              resolvedSyncMode,
+		interval:              *interval,
+		intervalJitter:        *intervalJitter,
+		timeout:               *timeout,
+		bootstrapTimeout:      *bootstrapTimeout,
+		cursorTimeout:         *cursorTimeout,
+		forceFullRecon:        *fullReconcile,
+		websocketEnabled:      *websocketEnabled,
+		lazyRepos:             *lazyRepos,
+		lazySkipUntrackedPush: *lazySkipUntrackedPush,
+		lowMemory:             *lowMemory,
+		pprofAddr:             strings.TrimSpace(*pprofAddr),
+		memlogInterval:        *memlogInterval,
+		logHTTPStatus:         *logHTTPStatus,
+		scopes:                parseTokenScopes(resolvedToken),
+		once:                  *once,
+		flushOutboxOnce:       *flushOutboxOnce,
+		pushLocalOnce:         *pushLocalOnce,
+		mode:                  resolvedMode,
+		fuseContentTTL:        *fuseContentTTL,
 	}
 
 	if err := executeMount(rootCtx, cfg, runPollingMount, defaultFuseRunner); err != nil {
@@ -380,26 +383,27 @@ func runSinglePollingMount(rootCtx context.Context, cfg mountConfig) error {
 		client.SetHTTPStatusLogger(log.Default())
 	}
 	syncer, err := mountsync.NewSyncer(client, mountsync.SyncerOptions{
-		WorkspaceID:        cfg.workspaceID,
-		RemoteRoot:         cfg.remotePath,
-		EventProvider:      cfg.eventProvider,
-		LocalRoot:          cfg.localDir,
-		StateFile:          cfg.stateFile,
-		StateDir:           cfg.stateDir,
-		MountKind:          cfg.mountKind,
-		ValidateState:      true,
-		Scopes:             cfg.scopes,
-		WebSocket:          boolPtr(cfg.websocketEnabled),
-		RootCtx:            rootCtx,
-		Logger:             log.Default(),
-		Mode:               cfg.mode,
-		Interval:           cfg.interval,
-		LazyRepos:          boolPtr(cfg.lazyRepos),
-		LowMemory:          boolPtr(cfg.lowMemory),
-		BootstrapTimeout:   cfg.bootstrapTimeout,
-		CursorTimeout:      cfg.cursorTimeout,
-		ForceFullReconcile: boolPtr(cfg.forceFullRecon),
-		SyncMode:           cfg.syncMode,
+		WorkspaceID:           cfg.workspaceID,
+		RemoteRoot:            cfg.remotePath,
+		EventProvider:         cfg.eventProvider,
+		LocalRoot:             cfg.localDir,
+		StateFile:             cfg.stateFile,
+		StateDir:              cfg.stateDir,
+		MountKind:             cfg.mountKind,
+		ValidateState:         true,
+		Scopes:                cfg.scopes,
+		WebSocket:             boolPtr(cfg.websocketEnabled),
+		RootCtx:               rootCtx,
+		Logger:                log.Default(),
+		Mode:                  cfg.mode,
+		Interval:              cfg.interval,
+		LazyRepos:             boolPtr(cfg.lazyRepos),
+		LazySkipUntrackedPush: boolPtr(cfg.lazySkipUntrackedPush),
+		LowMemory:             boolPtr(cfg.lowMemory),
+		BootstrapTimeout:      cfg.bootstrapTimeout,
+		CursorTimeout:         cfg.cursorTimeout,
+		ForceFullReconcile:    boolPtr(cfg.forceFullRecon),
+		SyncMode:              cfg.syncMode,
 	})
 	if err != nil {
 		return fmt.Errorf("initialize mount syncer: %w", err)

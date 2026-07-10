@@ -633,6 +633,278 @@ func TestIsUnderLazyGithubRepoSubtree(t *testing.T) {
 	}
 }
 
+// TestShouldSkipLazyUntrackedPush pins the exact contract of the guard added
+// to fix the daily-ship materialization push hazard: a broad-root lazy daemon
+// must not treat a pre-pulled (untracked) canonical record under a lazy
+// GitHub repo subtree as a new local write, but must still push writeback
+// drafts/commands and must never suppress pushes when lazy mode (or the
+// guard itself) is off.
+func TestShouldSkipLazyUntrackedPush(t *testing.T) {
+	t.Parallel()
+
+	newSyncerFor := func(t *testing.T, lazyRepos, lazySkip bool, tracked map[string]struct{}) *Syncer {
+		t.Helper()
+		client := &fakeClient{files: map[string]RemoteFile{}}
+		syncer, err := NewSyncer(client, SyncerOptions{
+			WorkspaceID:           "ws_should_skip",
+			RemoteRoot:            "/",
+			LocalRoot:             t.TempDir(),
+			LazyRepos:             boolPtr(lazyRepos),
+			LazySkipUntrackedPush: boolPtr(lazySkip),
+		})
+		if err != nil {
+			t.Fatalf("NewSyncer: %v", err)
+		}
+		for remotePath := range tracked {
+			syncer.state.Files[normalizeRemotePath(remotePath)] = trackedFile{}
+		}
+		return syncer
+	}
+
+	const subtreeFile = "/github/repos/octocat/hello-world/pulls/pr-1.json"
+	const draftFile = "/github/repos/octocat/hello-world/pulls/factory-create-1.json"
+	const outsideFile = "/notion/pages/x.json"
+
+	tests := []struct {
+		name       string
+		lazyRepos  bool
+		lazySkip   bool
+		tracked    map[string]struct{}
+		remotePath string
+		want       bool
+	}{
+		{
+			name:       "untracked lazy subtree file skipped",
+			lazyRepos:  true,
+			lazySkip:   true,
+			remotePath: subtreeFile,
+			want:       true,
+		},
+		{
+			name:       "tracked lazy subtree file still pushes",
+			lazyRepos:  true,
+			lazySkip:   true,
+			tracked:    map[string]struct{}{subtreeFile: {}},
+			remotePath: subtreeFile,
+			want:       false,
+		},
+		{
+			name:       "untracked draft under lazy subtree still pushes",
+			lazyRepos:  true,
+			lazySkip:   true,
+			remotePath: draftFile,
+			want:       false,
+		},
+		{
+			name:       "untracked file outside lazy subtree still pushes",
+			lazyRepos:  true,
+			lazySkip:   true,
+			remotePath: outsideFile,
+			want:       false,
+		},
+		{
+			name:       "lazy repos off never skips",
+			lazyRepos:  false,
+			lazySkip:   true,
+			remotePath: subtreeFile,
+			want:       false,
+		},
+		{
+			name:       "guard disabled never skips",
+			lazyRepos:  true,
+			lazySkip:   false,
+			remotePath: subtreeFile,
+			want:       false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			syncer := newSyncerFor(t, tt.lazyRepos, tt.lazySkip, tt.tracked)
+			if got := syncer.shouldSkipLazyUntrackedPush(tt.remotePath); got != tt.want {
+				t.Fatalf("shouldSkipLazyUntrackedPush(%q) = %v, want %v", tt.remotePath, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestLazyDaemonReconcileSkipsPushForPrePulledUntrackedSubtree is the
+// acceptance test for the daily-ship materialization push hazard: cloud's
+// scoped non-lazy pre-pull (its own isolated state) materializes a GitHub PR
+// subtree into a broad-root daemon's localDir before the daemon's first
+// cycle. The broad daemon then runs with --lazy-repos and an fs:write
+// provider-root scope, but its OWN state is fresh/isolated and never tracked
+// those files. Before the fix, scanLocalFiles walked the whole localDir with
+// no lazy filter, so pushLocal treated the pre-pulled records as brand-new
+// local writes and pushed them upstream as agent_write — minting a spurious
+// revision, file.updated event, and provider writeback for content the agent
+// never touched. This test asserts zero BulkWrite operations for that
+// subtree after the fix.
+func TestLazyDaemonReconcileSkipsPushForPrePulledUntrackedSubtree(t *testing.T) {
+	const remoteRoot = "/github/repos/octocat/hello-world/pulls"
+	const prOne = remoteRoot + "/pr-1.json"
+	const prTwo = remoteRoot + "/pr-2.json"
+
+	client := &fakeClient{
+		files: map[string]RemoteFile{
+			prOne: {Path: prOne, Revision: "rev_pr_1", ContentType: "application/json", Content: `{"number":1}`},
+			prTwo: {Path: prTwo, Revision: "rev_pr_2", ContentType: "application/json", Content: `{"number":2}`},
+		},
+		revisionCounter: 2,
+	}
+
+	localRootBase := t.TempDir()
+	scopedLocal := filepath.Join(localRootBase, filepath.FromSlash(strings.TrimPrefix(remoteRoot, "/")))
+	if err := os.MkdirAll(scopedLocal, 0o755); err != nil {
+		t.Fatalf("mkdir scoped local dir: %v", err)
+	}
+
+	// Step 1: scoped, non-lazy pre-pull with its own state file materializes
+	// the PR subtree into the broad daemon's localDir.
+	prePull, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_daily_ship",
+		RemoteRoot:  remoteRoot,
+		LocalRoot:   scopedLocal,
+		StateFile:   filepath.Join(t.TempDir(), "prepull-state.json"),
+		LazyRepos:   boolPtr(false),
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer prePull: %v", err)
+	}
+	if err := prePull.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("prePull.SyncOnce: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(scopedLocal, "pr-1.json")); err != nil {
+		t.Fatalf("expected pre-pulled pr-1.json on disk: %v", err)
+	}
+
+	bulkWriteCallsBeforeDaemon := client.bulkWriteCalls
+
+	// Step 2: broad-root lazy daemon, isolated default state, fs:write
+	// provider-root scope, same localDir base.
+	daemon, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_daily_ship",
+		RemoteRoot:  "/",
+		LocalRoot:   localRootBase,
+		StateFile:   filepath.Join(t.TempDir(), "daemon-state.json"),
+		LazyRepos:   boolPtr(true),
+		Scopes:      []string{"relayfile:fs:write:/"},
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer daemon: %v", err)
+	}
+	if err := daemon.Reconcile(context.Background()); err != nil {
+		t.Fatalf("daemon.Reconcile: %v", err)
+	}
+
+	if got := client.bulkWriteCalls; got != bulkWriteCallsBeforeDaemon {
+		t.Fatalf("expected zero BulkWrite calls from the lazy daemon for the pre-pulled subtree, got %d new call(s); batches=%+v", got-bulkWriteCallsBeforeDaemon, client.bulkWriteBatches)
+	}
+	for remotePath := range client.files {
+		if remotePath == prOne || remotePath == prTwo {
+			if got := client.files[remotePath].Revision; got != "rev_pr_1" && got != "rev_pr_2" {
+				t.Fatalf("expected pre-pull revision to be unchanged for %s, got %s", remotePath, got)
+			}
+		}
+	}
+	if got := daemon.state.Counters.SkippedLazyUntrackedPush; got < 2 {
+		t.Fatalf("expected SkippedLazyUntrackedPush >= 2, got %d", got)
+	}
+	if _, tracked := daemon.state.Files[normalizeRemotePath(prOne)]; tracked {
+		t.Fatalf("pre-pulled subtree file must remain untracked by the lazy daemon's own state")
+	}
+}
+
+// TestLazyDaemonStillPushesUntrackedDraftUnderLazySubtree is the regression
+// test proving the exemption for real agent-authored writeback drafts: even
+// though a draft file is untracked and sits under a lazy GitHub repo
+// subtree, it is a genuine local write (isMountWritebackCreateDraftPath) and
+// must still push.
+func TestLazyDaemonStillPushesUntrackedDraftUnderLazySubtree(t *testing.T) {
+	const remoteRoot = "/github/repos/octocat/hello-world/pulls"
+	const draftRemotePath = remoteRoot + "/factory-create-comment.json"
+
+	client := &fakeClient{files: map[string]RemoteFile{}}
+	localDir := t.TempDir()
+	scopedLocal := filepath.Join(localDir, filepath.FromSlash(strings.TrimPrefix(remoteRoot, "/")))
+	if err := os.MkdirAll(scopedLocal, 0o755); err != nil {
+		t.Fatalf("mkdir scoped local dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(scopedLocal, "factory-create-comment.json"), []byte(`{"body":"hello"}`), 0o644); err != nil {
+		t.Fatalf("seed draft file: %v", err)
+	}
+
+	daemon, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_daily_ship_draft",
+		RemoteRoot:  "/",
+		LocalRoot:   localDir,
+		StateFile:   filepath.Join(t.TempDir(), "daemon-state.json"),
+		LazyRepos:   boolPtr(true),
+		Scopes:      []string{"relayfile:fs:write:/"},
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer daemon: %v", err)
+	}
+	if err := daemon.Reconcile(context.Background()); err != nil {
+		t.Fatalf("daemon.Reconcile: %v", err)
+	}
+
+	if client.bulkWriteCalls == 0 {
+		t.Fatalf("expected the untracked draft under the lazy subtree to push via BulkWrite")
+	}
+	if _, ok := client.files[normalizeRemotePath(draftRemotePath)]; !ok {
+		t.Fatalf("expected draft file %s to have been written upstream, got files=%+v", draftRemotePath, client.files)
+	}
+	if got := daemon.state.Counters.SkippedLazyUntrackedPush; got != 0 {
+		t.Fatalf("expected the draft push not to be counted as a lazy-untracked skip, got %d", got)
+	}
+}
+
+// TestNonLazyMountStillPushesUntrackedSubtreeFile is the regression test
+// proving the new guard is a no-op when --lazy-repos is off: a non-lazy
+// mount must keep pushing any untracked local file exactly as before,
+// including one that happens to sit under what would be a lazy GitHub repo
+// subtree path.
+func TestNonLazyMountStillPushesUntrackedSubtreeFile(t *testing.T) {
+	const remoteRoot = "/github/repos/octocat/hello-world/pulls"
+	const fileRemotePath = remoteRoot + "/pr-3.json"
+
+	client := &fakeClient{files: map[string]RemoteFile{}}
+	localDir := t.TempDir()
+	scopedLocal := filepath.Join(localDir, filepath.FromSlash(strings.TrimPrefix(remoteRoot, "/")))
+	if err := os.MkdirAll(scopedLocal, 0o755); err != nil {
+		t.Fatalf("mkdir scoped local dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(scopedLocal, "pr-3.json"), []byte(`{"number":3}`), 0o644); err != nil {
+		t.Fatalf("seed local file: %v", err)
+	}
+
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_non_lazy",
+		RemoteRoot:  "/",
+		LocalRoot:   localDir,
+		StateFile:   filepath.Join(t.TempDir(), "state.json"),
+		LazyRepos:   boolPtr(false),
+		Scopes:      []string{"relayfile:fs:write:/"},
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer: %v", err)
+	}
+	if err := syncer.Reconcile(context.Background()); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	if client.bulkWriteCalls == 0 {
+		t.Fatalf("expected non-lazy mount to push the untracked local file")
+	}
+	if _, ok := client.files[normalizeRemotePath(fileRemotePath)]; !ok {
+		t.Fatalf("expected %s to have been written upstream, got files=%+v", fileRemotePath, client.files)
+	}
+	if got := syncer.state.Counters.SkippedLazyUntrackedPush; got != 0 {
+		t.Fatalf("expected zero SkippedLazyUntrackedPush for a non-lazy mount, got %d", got)
+	}
+}
+
 // TestHandleLocalChangePushesOnChmodOnlyEvent pins the regression that
 // motivated the state-driven dispatch: editors (Vim, VSCode, JetBrains)
 // often end a save sequence with a Chmod event, and the per-path
