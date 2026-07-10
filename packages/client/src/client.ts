@@ -18,7 +18,7 @@ import type { components } from './generated/control-plane.js';
  */
 
 /** Control-plane API version this client speaks. Bump when adding required endpoint support. */
-export const RELAYFILE_API_VERSION = 2;
+export const RELAYFILE_API_VERSION = 3;
 
 /**
  * Minimum `relayfile` daemon version this client requires. The control-plane

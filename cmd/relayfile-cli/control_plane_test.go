@@ -35,15 +35,15 @@ func TestControlPlaneHelloVersionAndCLIVersion(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("hello status = %d", status)
 	}
-	if hello.DaemonVersion != "0.10.17" || hello.APIVersion != 2 {
+	if hello.DaemonVersion != "0.10.17" || hello.APIVersion != 3 {
 		t.Fatalf("unexpected hello response: %#v", hello)
 	}
-	if len(hello.SupportedAPIVersions) != 2 || hello.SupportedAPIVersions[0] != 1 || hello.SupportedAPIVersions[1] != 2 {
+	if len(hello.SupportedAPIVersions) != 3 || hello.SupportedAPIVersions[0] != 1 || hello.SupportedAPIVersions[1] != 2 || hello.SupportedAPIVersions[2] != 3 {
 		t.Fatalf("unexpected supported API versions: %#v", hello.SupportedAPIVersions)
 	}
 
 	var errResp map[string]controlPlaneError
-	status = controlPlaneJSONWithoutVersion(t, client, http.MethodGet, baseURL+"/v1/hello?apiVersion=3", nil, &errResp)
+	status = controlPlaneJSONWithoutVersion(t, client, http.MethodGet, baseURL+"/v1/hello?apiVersion=4", nil, &errResp)
 	if status != http.StatusUpgradeRequired {
 		t.Fatalf("incompatible hello status = %d, want %d", status, http.StatusUpgradeRequired)
 	}
@@ -79,16 +79,18 @@ func TestControlPlaneBindingConformance(t *testing.T) {
 
 	var bound bindResponse
 	status = controlPlaneJSON(t, client, http.MethodPost, baseURL+"/v1/integrations/bind", bindRequest{
-		Provider:     "slack",
-		Resource:     "#watchdog-test",
-		Channel:      "#events",
-		WebhookID:    "wh_1",
-		WebhookToken: "tok_1",
+		Provider:              "slack",
+		Resource:              "#watchdog-test",
+		Channel:               "#events",
+		WebhookID:             "wh_1",
+		WebhookToken:          "tok_1",
+		SubscriptionID:        "relay_sub_1",
+		WebhookSubscriptionID: "relayfile_whsub_1",
 	}, &bound)
 	if status != http.StatusOK {
 		t.Fatalf("bind status = %d", status)
 	}
-	if bound.Binding.PathGlob != resolved.PathGlob || bound.Binding.WebhookToken != "tok_1" {
+	if bound.Binding.PathGlob != resolved.PathGlob || bound.Binding.WebhookToken != "tok_1" || bound.Binding.WebhookSubscriptionID != "relayfile_whsub_1" {
 		t.Fatalf("unexpected bind response: %#v", bound)
 	}
 
@@ -97,7 +99,7 @@ func TestControlPlaneBindingConformance(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("bindings status = %d", status)
 	}
-	if len(listed.Bindings) != 1 || listed.Bindings[0].PathGlob != resolved.PathGlob {
+	if len(listed.Bindings) != 1 || listed.Bindings[0].PathGlob != resolved.PathGlob || listed.Bindings[0].WebhookSubscriptionID != "relayfile_whsub_1" {
 		t.Fatalf("unexpected bindings response: %#v", listed)
 	}
 
@@ -109,7 +111,7 @@ func TestControlPlaneBindingConformance(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &cliBindings); err != nil {
 		t.Fatalf("parse bind --list --json output failed: %v\n%s", err, stdout.String())
 	}
-	if len(cliBindings) != 1 || cliBindings[0].PathGlob != resolved.PathGlob {
+	if len(cliBindings) != 1 || cliBindings[0].PathGlob != resolved.PathGlob || cliBindings[0].WebhookSubscriptionID != "relayfile_whsub_1" {
 		t.Fatalf("unexpected CLI bindings: %#v", cliBindings)
 	}
 

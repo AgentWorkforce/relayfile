@@ -274,7 +274,7 @@ components:
       schema:
         type: integer
         format: uint32
-        const: 2
+        const: 3
     ApiVersionQuery:
       name: apiVersion
       in: query
@@ -447,6 +447,8 @@ components:
           type: string
         subscriptionId:
           type: string
+        webhookSubscriptionId:
+          type: string
     BindResponse:
       type: object
       required: [binding, replaced]
@@ -473,6 +475,8 @@ components:
         webhookToken:
           type: string
         subscriptionId:
+          type: string
+        webhookSubscriptionId:
           type: string
         createdAt:
           type: string

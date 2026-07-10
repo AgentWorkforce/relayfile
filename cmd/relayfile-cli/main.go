@@ -434,14 +434,15 @@ type integrationConnectionState struct {
 }
 
 type relayIntegrationBinding struct {
-	Provider       string `json:"provider"`
-	PathGlob       string `json:"pathGlob"`
-	Channel        string `json:"channel"`
-	WebhookID      string `json:"webhookId"`
-	WebhookToken   string `json:"webhookToken"`
-	SubscriptionID string `json:"subscriptionId,omitempty"`
-	CreatedAt      string `json:"createdAt,omitempty"`
-	UpdatedAt      string `json:"updatedAt,omitempty"`
+	Provider              string `json:"provider"`
+	PathGlob              string `json:"pathGlob"`
+	Channel               string `json:"channel"`
+	WebhookID             string `json:"webhookId"`
+	WebhookToken          string `json:"webhookToken"`
+	SubscriptionID        string `json:"subscriptionId,omitempty"`
+	WebhookSubscriptionID string `json:"webhookSubscriptionId,omitempty"`
+	CreatedAt             string `json:"createdAt,omitempty"`
+	UpdatedAt             string `json:"updatedAt,omitempty"`
 }
 
 type relayIntegrationBindingStore struct {
@@ -2319,12 +2320,13 @@ func runIntegration(args []string, stdin io.Reader, stdout io.Writer) error {
 }
 
 type relayIntegrationBindInput struct {
-	Provider       string
-	Resource       string
-	Channel        string
-	WebhookID      string
-	WebhookToken   string
-	SubscriptionID string
+	Provider              string
+	Resource              string
+	Channel               string
+	WebhookID             string
+	WebhookToken          string
+	SubscriptionID        string
+	WebhookSubscriptionID string
 }
 
 func bindRelayIntegration(input relayIntegrationBindInput) (relayIntegrationBinding, bool, string, error) {
@@ -2337,12 +2339,13 @@ func bindRelayIntegration(input relayIntegrationBindInput) (relayIntegrationBind
 		return relayIntegrationBinding{}, false, "", err
 	}
 	binding := relayIntegrationBinding{
-		Provider:       provider,
-		PathGlob:       resolved.PathGlob,
-		Channel:        strings.TrimSpace(input.Channel),
-		WebhookID:      strings.TrimSpace(input.WebhookID),
-		WebhookToken:   strings.TrimSpace(input.WebhookToken),
-		SubscriptionID: strings.TrimSpace(input.SubscriptionID),
+		Provider:              provider,
+		PathGlob:              resolved.PathGlob,
+		Channel:               strings.TrimSpace(input.Channel),
+		WebhookID:             strings.TrimSpace(input.WebhookID),
+		WebhookToken:          strings.TrimSpace(input.WebhookToken),
+		SubscriptionID:        strings.TrimSpace(input.SubscriptionID),
+		WebhookSubscriptionID: strings.TrimSpace(input.WebhookSubscriptionID),
 	}
 	if binding.Channel == "" {
 		return relayIntegrationBinding{}, false, "", errors.New("--channel is required")
@@ -2371,6 +2374,9 @@ func bindRelayIntegration(input relayIntegrationBindInput) (relayIntegrationBind
 			if binding.SubscriptionID == "" {
 				binding.SubscriptionID = bindings[i].SubscriptionID
 			}
+			if binding.WebhookSubscriptionID == "" {
+				binding.WebhookSubscriptionID = bindings[i].WebhookSubscriptionID
+			}
 			bindings[i] = binding
 			replaced = true
 			break
@@ -2396,13 +2402,15 @@ func runIntegrationBind(args []string, stdout io.Writer) error {
 	webhookID := fs.String("webhook", "", "RelayCast inbound webhook id")
 	webhookToken := fs.String("webhook-token", "", "RelayCast inbound webhook token")
 	subscriptionID := fs.String("subscription", "", "relay integration subscription id")
+	webhookSubscriptionID := fs.String("webhook-subscription", "", "relayfile-cloud inbound webhook subscription id")
 	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
-		"list":          false,
-		"channel":       true,
-		"webhook":       true,
-		"webhook-token": true,
-		"subscription":  true,
-		"json":          false,
+		"list":                 false,
+		"channel":              true,
+		"webhook":              true,
+		"webhook-token":        true,
+		"subscription":         true,
+		"webhook-subscription": true,
+		"json":                 false,
 	})); err != nil {
 		return err
 	}
@@ -2420,12 +2428,13 @@ func runIntegrationBind(args []string, stdout io.Writer) error {
 		return errors.New("usage: relayfile integration bind PROVIDER RESOURCE_OR_PATH_GLOB --channel CHANNEL --webhook ID --webhook-token TOKEN")
 	}
 	binding, replaced, warning, err := bindRelayIntegration(relayIntegrationBindInput{
-		Provider:       fs.Arg(0),
-		Resource:       fs.Arg(1),
-		Channel:        *channel,
-		WebhookID:      *webhookID,
-		WebhookToken:   *webhookToken,
-		SubscriptionID: *subscriptionID,
+		Provider:              fs.Arg(0),
+		Resource:              fs.Arg(1),
+		Channel:               *channel,
+		WebhookID:             *webhookID,
+		WebhookToken:          *webhookToken,
+		SubscriptionID:        *subscriptionID,
+		WebhookSubscriptionID: *webhookSubscriptionID,
 	})
 	if err != nil {
 		return err

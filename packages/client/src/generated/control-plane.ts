@@ -249,6 +249,7 @@ export interface components {
             webhookId: string;
             webhookToken: string;
             subscriptionId?: string;
+            webhookSubscriptionId?: string;
         };
         BindResponse: {
             binding: components["schemas"]["Binding"];
@@ -262,6 +263,7 @@ export interface components {
             webhookId: string;
             webhookToken: string;
             subscriptionId?: string;
+            webhookSubscriptionId?: string;
             createdAt?: string;
             updatedAt?: string;
         };
@@ -342,7 +344,7 @@ export interface components {
         };
     };
     parameters: {
-        ApiVersionHeader: 2;
+        ApiVersionHeader: 3;
         ApiVersionQuery: number;
     };
     requestBodies: never;

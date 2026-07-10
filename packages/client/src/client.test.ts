@@ -202,11 +202,13 @@ describeContract('control-plane client (real daemon)', () => {
       webhookId: 'wh',
       webhookToken: 'tok',
       subscriptionId: 'sub',
+      webhookSubscriptionId: 'whsub',
     });
     const after = await client.listBindings();
     const binding = after.find((b) => b.pathGlob === pathGlob);
     expect(binding).toBeDefined();
     expect(binding!.channel).toBe('general');
+    expect(binding!.webhookSubscriptionId).toBe('whsub');
     await client.unbind('github', pathGlob);
     expect((await client.listBindings()).find((b) => b.pathGlob === pathGlob)).toBeUndefined();
   });

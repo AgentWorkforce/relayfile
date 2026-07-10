@@ -19,9 +19,9 @@ import (
 	"time"
 )
 
-const relayfileControlPlaneAPIVersion uint32 = 2
+const relayfileControlPlaneAPIVersion uint32 = 3
 
-var relayfileControlPlaneSupportedVersions = []uint32{1, relayfileControlPlaneAPIVersion}
+var relayfileControlPlaneSupportedVersions = []uint32{1, 2, relayfileControlPlaneAPIVersion}
 
 type controlPlaneErrorCode string
 
@@ -87,12 +87,13 @@ type resolveResourcePathResponse struct {
 }
 
 type bindRequest struct {
-	Provider       string `json:"provider"`
-	Resource       string `json:"resource"`
-	Channel        string `json:"channel"`
-	WebhookID      string `json:"webhookId"`
-	WebhookToken   string `json:"webhookToken"`
-	SubscriptionID string `json:"subscriptionId,omitempty"`
+	Provider              string `json:"provider"`
+	Resource              string `json:"resource"`
+	Channel               string `json:"channel"`
+	WebhookID             string `json:"webhookId"`
+	WebhookToken          string `json:"webhookToken"`
+	SubscriptionID        string `json:"subscriptionId,omitempty"`
+	WebhookSubscriptionID string `json:"webhookSubscriptionId,omitempty"`
 }
 
 type bindResponse struct {
@@ -396,12 +397,13 @@ func handleControlPlaneBind(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	binding, replaced, warning, err := bindRelayIntegration(relayIntegrationBindInput{
-		Provider:       req.Provider,
-		Resource:       req.Resource,
-		Channel:        req.Channel,
-		WebhookID:      req.WebhookID,
-		WebhookToken:   req.WebhookToken,
-		SubscriptionID: req.SubscriptionID,
+		Provider:              req.Provider,
+		Resource:              req.Resource,
+		Channel:               req.Channel,
+		WebhookID:             req.WebhookID,
+		WebhookToken:          req.WebhookToken,
+		SubscriptionID:        req.SubscriptionID,
+		WebhookSubscriptionID: req.WebhookSubscriptionID,
 	})
 	if err != nil {
 		writeControlPlaneMappedError(w, err)
