@@ -257,6 +257,7 @@ export interface components {
             webhookToken: string;
             subscriptionId?: string;
             webhookSubscriptionId?: string;
+            webhookSubscriptionWorkspaceId?: string;
         };
         BindResponse: {
             binding: components["schemas"]["Binding"];
@@ -271,6 +272,7 @@ export interface components {
             webhookToken: string;
             subscriptionId?: string;
             webhookSubscriptionId?: string;
+            webhookSubscriptionWorkspaceId?: string;
             createdAt?: string;
             updatedAt?: string;
         };
@@ -292,6 +294,7 @@ export interface components {
             channel: string;
         };
         WritebackSecret: {
+            workspaceId?: string;
             url: string;
             secret: string;
         };

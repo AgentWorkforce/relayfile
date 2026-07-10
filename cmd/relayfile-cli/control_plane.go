@@ -94,6 +94,10 @@ type bindRequest struct {
 	WebhookToken          string `json:"webhookToken"`
 	SubscriptionID        string `json:"subscriptionId,omitempty"`
 	WebhookSubscriptionID string `json:"webhookSubscriptionId,omitempty"`
+	// Workspace the webhook subscription was created in, persisted with the
+	// binding so later cleanup deletes are pinned to the right workspace even
+	// after the daemon's active workspace changes.
+	WebhookSubscriptionWorkspaceID string `json:"webhookSubscriptionWorkspaceId,omitempty"`
 }
 
 type bindResponse struct {
@@ -119,6 +123,9 @@ type writebackSecretRequest struct {
 type writebackSecretData struct {
 	URL    string `json:"url"`
 	Secret string `json:"secret"`
+	// WorkspaceID pins which workspace resolved this channel's writeback
+	// binding, so callers can journal it before creating cloud resources.
+	WorkspaceID string `json:"workspaceId,omitempty"`
 }
 
 type webhookSubscriptionRequest struct {
@@ -412,13 +419,14 @@ func handleControlPlaneBind(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	binding, replaced, warning, err := bindRelayIntegration(relayIntegrationBindInput{
-		Provider:              req.Provider,
-		Resource:              req.Resource,
-		Channel:               req.Channel,
-		WebhookID:             req.WebhookID,
-		WebhookToken:          req.WebhookToken,
-		SubscriptionID:        req.SubscriptionID,
-		WebhookSubscriptionID: req.WebhookSubscriptionID,
+		Provider:                       req.Provider,
+		Resource:                       req.Resource,
+		Channel:                        req.Channel,
+		WebhookID:                      req.WebhookID,
+		WebhookToken:                   req.WebhookToken,
+		SubscriptionID:                 req.SubscriptionID,
+		WebhookSubscriptionID:          req.WebhookSubscriptionID,
+		WebhookSubscriptionWorkspaceID: req.WebhookSubscriptionWorkspaceID,
 	})
 	if err != nil {
 		writeControlPlaneMappedError(w, err)

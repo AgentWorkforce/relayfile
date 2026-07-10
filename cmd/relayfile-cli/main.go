@@ -434,15 +434,16 @@ type integrationConnectionState struct {
 }
 
 type relayIntegrationBinding struct {
-	Provider              string `json:"provider"`
-	PathGlob              string `json:"pathGlob"`
-	Channel               string `json:"channel"`
-	WebhookID             string `json:"webhookId"`
-	WebhookToken          string `json:"webhookToken"`
-	SubscriptionID        string `json:"subscriptionId,omitempty"`
-	WebhookSubscriptionID string `json:"webhookSubscriptionId,omitempty"`
-	CreatedAt             string `json:"createdAt,omitempty"`
-	UpdatedAt             string `json:"updatedAt,omitempty"`
+	Provider                       string `json:"provider"`
+	PathGlob                       string `json:"pathGlob"`
+	Channel                        string `json:"channel"`
+	WebhookID                      string `json:"webhookId"`
+	WebhookToken                   string `json:"webhookToken"`
+	SubscriptionID                 string `json:"subscriptionId,omitempty"`
+	WebhookSubscriptionID          string `json:"webhookSubscriptionId,omitempty"`
+	WebhookSubscriptionWorkspaceID string `json:"webhookSubscriptionWorkspaceId,omitempty"`
+	CreatedAt                      string `json:"createdAt,omitempty"`
+	UpdatedAt                      string `json:"updatedAt,omitempty"`
 }
 
 type relayIntegrationBindingStore struct {
@@ -2320,13 +2321,14 @@ func runIntegration(args []string, stdin io.Reader, stdout io.Writer) error {
 }
 
 type relayIntegrationBindInput struct {
-	Provider              string
-	Resource              string
-	Channel               string
-	WebhookID             string
-	WebhookToken          string
-	SubscriptionID        string
-	WebhookSubscriptionID string
+	Provider                       string
+	Resource                       string
+	Channel                        string
+	WebhookID                      string
+	WebhookToken                   string
+	SubscriptionID                 string
+	WebhookSubscriptionID          string
+	WebhookSubscriptionWorkspaceID string
 }
 
 func bindRelayIntegration(input relayIntegrationBindInput) (relayIntegrationBinding, bool, string, error) {
@@ -2339,13 +2341,14 @@ func bindRelayIntegration(input relayIntegrationBindInput) (relayIntegrationBind
 		return relayIntegrationBinding{}, false, "", err
 	}
 	binding := relayIntegrationBinding{
-		Provider:              provider,
-		PathGlob:              resolved.PathGlob,
-		Channel:               strings.TrimSpace(input.Channel),
-		WebhookID:             strings.TrimSpace(input.WebhookID),
-		WebhookToken:          strings.TrimSpace(input.WebhookToken),
-		SubscriptionID:        strings.TrimSpace(input.SubscriptionID),
-		WebhookSubscriptionID: strings.TrimSpace(input.WebhookSubscriptionID),
+		Provider:                       provider,
+		PathGlob:                       resolved.PathGlob,
+		Channel:                        strings.TrimSpace(input.Channel),
+		WebhookID:                      strings.TrimSpace(input.WebhookID),
+		WebhookToken:                   strings.TrimSpace(input.WebhookToken),
+		SubscriptionID:                 strings.TrimSpace(input.SubscriptionID),
+		WebhookSubscriptionID:          strings.TrimSpace(input.WebhookSubscriptionID),
+		WebhookSubscriptionWorkspaceID: strings.TrimSpace(input.WebhookSubscriptionWorkspaceID),
 	}
 	if binding.Channel == "" {
 		return relayIntegrationBinding{}, false, "", errors.New("--channel is required")
@@ -2646,7 +2649,14 @@ func runIntegrationWritebackSecret(args []string, stdout io.Writer) error {
 	}
 
 	if *jsonOutput {
-		return writeJSON(stdout, resp.Data)
+		// Include the resolved workspace id so callers can pin later
+		// webhook-subscription operations to the same workspace even if the
+		// daemon's active workspace changes between runs.
+		return writeJSON(stdout, struct {
+			URL         string `json:"url"`
+			Secret      string `json:"secret"`
+			WorkspaceID string `json:"workspaceId"`
+		}{URL: resp.Data.URL, Secret: resp.Data.Secret, WorkspaceID: workspaceID})
 	}
 	fmt.Fprintf(stdout, "url: %s\nsecret: %s\n", resp.Data.URL, resp.Data.Secret)
 	return nil

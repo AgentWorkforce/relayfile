@@ -79,18 +79,19 @@ func TestControlPlaneBindingConformance(t *testing.T) {
 
 	var bound bindResponse
 	status = controlPlaneJSON(t, client, http.MethodPost, baseURL+"/v1/integrations/bind", bindRequest{
-		Provider:              "slack",
-		Resource:              "#watchdog-test",
-		Channel:               "#events",
-		WebhookID:             "wh_1",
-		WebhookToken:          "tok_1",
-		SubscriptionID:        "relay_sub_1",
-		WebhookSubscriptionID: "relayfile_whsub_1",
+		Provider:                       "slack",
+		Resource:                       "#watchdog-test",
+		Channel:                        "#events",
+		WebhookID:                      "wh_1",
+		WebhookToken:                   "tok_1",
+		SubscriptionID:                 "relay_sub_1",
+		WebhookSubscriptionID:          "relayfile_whsub_1",
+		WebhookSubscriptionWorkspaceID: "rw_pin_1",
 	}, &bound)
 	if status != http.StatusOK {
 		t.Fatalf("bind status = %d", status)
 	}
-	if bound.Binding.PathGlob != resolved.PathGlob || bound.Binding.WebhookToken != "tok_1" || bound.Binding.WebhookSubscriptionID != "relayfile_whsub_1" {
+	if bound.Binding.PathGlob != resolved.PathGlob || bound.Binding.WebhookToken != "tok_1" || bound.Binding.WebhookSubscriptionID != "relayfile_whsub_1" || bound.Binding.WebhookSubscriptionWorkspaceID != "rw_pin_1" {
 		t.Fatalf("unexpected bind response: %#v", bound)
 	}
 
@@ -99,7 +100,7 @@ func TestControlPlaneBindingConformance(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("bindings status = %d", status)
 	}
-	if len(listed.Bindings) != 1 || listed.Bindings[0].PathGlob != resolved.PathGlob || listed.Bindings[0].WebhookSubscriptionID != "relayfile_whsub_1" {
+	if len(listed.Bindings) != 1 || listed.Bindings[0].PathGlob != resolved.PathGlob || listed.Bindings[0].WebhookSubscriptionID != "relayfile_whsub_1" || listed.Bindings[0].WebhookSubscriptionWorkspaceID != "rw_pin_1" {
 		t.Fatalf("unexpected bindings response: %#v", listed)
 	}
 
@@ -276,7 +277,7 @@ func TestControlPlaneCloudIntegrationConformance(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("writeback-secret status = %d", status)
 	}
-	if secret.URL != "https://relay.test/writeback" || secret.Secret != "sec_123" {
+	if secret.URL != "https://relay.test/writeback" || secret.Secret != "sec_123" || secret.WorkspaceID != "ws_123" {
 		t.Fatalf("unexpected writeback secret: %#v", secret)
 	}
 

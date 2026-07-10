@@ -474,6 +474,8 @@ components:
           type: string
         webhookSubscriptionId:
           type: string
+        webhookSubscriptionWorkspaceId:
+          type: string
     BindResponse:
       type: object
       required: [binding, replaced]
@@ -502,6 +504,8 @@ components:
         subscriptionId:
           type: string
         webhookSubscriptionId:
+          type: string
+        webhookSubscriptionWorkspaceId:
           type: string
         createdAt:
           type: string
@@ -547,6 +551,8 @@ components:
       type: object
       required: [url, secret]
       properties:
+        workspaceId:
+          type: string
         url:
           type: string
         secret:
