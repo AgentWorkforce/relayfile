@@ -21,6 +21,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strconv"
@@ -1106,14 +1107,19 @@ type telemetryCounters struct {
 	// and a directory); the daemon quarantines the path so a single collision
 	// can't wedge the whole mount. See isRemotePathCollision.
 	PathCollisionQuarantined uint64 `json:"pathCollisionQuarantined,omitempty"`
-	// SkippedLazyUntrackedPush counts local files excluded from pushLocal
-	// because they sit under a lazy GitHub repo subtree
-	// (isLazyGithubRepoSubtreePath) this daemon never tracked in s.state.Files
-	// — e.g. a canonical record materialized by an isolated non-lazy pre-pull
-	// with its own state file. Without this guard scanLocalFiles's
-	// untracked-file path treats the pre-pulled record as a brand-new local
-	// write and pushes it upstream as agent_write. Writeback drafts
-	// (isMountWritebackCreateDraftPath) are exempt and still push.
+	// SkippedLazyUntrackedPush counts real push-skip decisions for local
+	// files excluded because they sit under a lazy GitHub repo subtree
+	// (isLazyGithubRepoSubtreePath) this daemon never tracked in
+	// s.state.Files — e.g. a canonical record materialized by an isolated
+	// non-lazy pre-pull with its own state file. Without this guard, an
+	// untracked-file push path would treat the pre-pulled record as a
+	// brand-new local write and push it upstream as agent_write. Writeback
+	// drafts/commands (isMountWritebackCreateDraftPath,
+	// isGithubAdapterCreateCommandPath) are exempt and still push. Increments
+	// only at the two actual skip decision points — pushLocal's
+	// SkipWriteback check and preparePendingBulkWrite (the watcher-path
+	// choke point) — never from scanLocalFiles/savePublicState's
+	// status-display scans, so a state save cannot inflate this counter.
 	SkippedLazyUntrackedPush uint64 `json:"skippedLazyUntrackedPush,omitempty"`
 }
 
@@ -1868,6 +1874,21 @@ func (s *Syncer) preparePendingBulkWrite(
 	tracked trackedFile,
 	exists bool,
 ) (*pendingBulkWrite, error) {
+	// Shared choke point for both push paths: pushLocal (via scanLocalFiles)
+	// and the filesystem-watcher path (HandleLocalChange ->
+	// handleLocalWriteOrCreate -> pushSingleFile). The watcher path never
+	// calls scanLocalFiles, so it cannot rely on snapshot.SkipWriteback —
+	// without this check here, a watcher-delivered write/create event for an
+	// untracked file under a lazy GitHub repo subtree would push regardless
+	// of shouldSkipLazyUntrackedPush. pushLocal already filters these out
+	// earlier via scanLocalFiles's SkipWriteback flag (to avoid a full
+	// content re-read for large pre-pulled files), so for that path this
+	// check is a defense-in-depth no-op and never double-counts the skip.
+	if s.shouldSkipLazyUntrackedPush(remotePath) {
+		s.logLazyUntrackedPushSkipped(remotePath)
+		s.state.Counters.SkippedLazyUntrackedPush++
+		return nil, nil
+	}
 	canWrite := s.canWritePath(remotePath)
 	tracked.ReadOnly = !canWrite
 	if !canWrite {
@@ -5483,6 +5504,16 @@ func (s *Syncer) pushLocal(ctx context.Context) (map[string]struct{}, error) {
 			continue
 		}
 		if snapshot.SkipWriteback {
+			// snapshot.SkipWriteback is a general "don't push this" flag set
+			// by scanLocalFiles for two distinct reasons (oversize body,
+			// lazy-untracked). Recomputing shouldSkipLazyUntrackedPush here
+			// (cheap: no I/O, same inputs as the scan) attributes the
+			// increment to the correct counter only when this is actually
+			// the lazy-untracked reason, and only at the real pushLocal skip
+			// decision — not on every scanLocalFiles call (see scanLocalFiles).
+			if s.shouldSkipLazyUntrackedPush(remotePath) {
+				s.state.Counters.SkippedLazyUntrackedPush++
+			}
 			continue
 		}
 		if exists && !tracked.Dirty {
@@ -5677,9 +5708,16 @@ func (s *Syncer) scanLocalFiles() (map[string]localSnapshot, error) {
 			return err
 		}
 		if s.shouldSkipLazyUntrackedPush(remotePath) {
+			// Only flag the snapshot here; do NOT increment
+			// Counters.SkippedLazyUntrackedPush in this function.
+			// scanLocalFiles also runs from savePublicState (status-display
+			// only, not a push decision), so counting here would inflate the
+			// counter on every state save instead of only on real pushLocal
+			// skip decisions. The counter increments where the skip actually
+			// happens: pushLocal's SkipWriteback check, and
+			// preparePendingBulkWrite for the watcher path.
 			snapshot.SkipWriteback = true
 			s.logLazyUntrackedPushSkipped(remotePath)
-			s.state.Counters.SkippedLazyUntrackedPush++
 		}
 		results[remotePath] = snapshot
 		return nil
@@ -5688,6 +5726,85 @@ func (s *Syncer) scanLocalFiles() (map[string]localSnapshot, error) {
 		return nil, err
 	}
 	return results, nil
+}
+
+// githubAdapterCreateCommandPathPatterns enumerate the GitHub Relayfile
+// adapter's writeback command roots that accept an arbitrary (noncanonical)
+// leaf filename to create a new provider record. Each entry's pattern
+// capture group is the leaf id; a leaf that ALSO matches the adapter's
+// canonical id pattern is a materialized record (the adapter's PATCH-by-
+// editing-record surface), not a create command, and must stay classified
+// as non-create so it remains subject to shouldSkipLazyUntrackedPush.
+//
+// Semantics cited to ../relayfile-adapters:
+//   - adapter-core classifyWrite: a path matches a resource's pathPattern,
+//     the leaf id is extracted, and canonical-id-match => "patch" while
+//     non-canonical => "create" (packages/core/src/runtime/file-native-router.ts:148-186).
+//   - issues:                    packages/github/src/writeback.ts:35-36 (ISSUE_WRITEBACK_PATH)
+//     packages/github/src/resources.ts:12-18 (idPattern ^[1-9]\d*$)
+//   - issue comments:            packages/github/src/writeback.ts:41-42 (ISSUE_COMMENT_WRITEBACK_PATH)
+//     packages/github/src/resources.ts:19-26 (idPattern ^(?:meta|\d+)$ — the
+//     literal "meta" leaf, e.g. comments/42/meta.json, is canonical too)
+//   - PR reviews:                packages/github/src/writeback.ts:31-32 (REVIEW_WRITEBACK_PATH)
+//     packages/github/src/resources.ts:27-34 (idPattern ^\d+$)
+//   - PR review-comment replies: packages/github/src/writeback.ts:43-45 (PR_COMMENT_REPLY_WRITEBACK_PATH)
+//     packages/github/src/resources.ts:43-50 (idPattern ^\d+$)
+//
+// merge.json (packages/github/src/writeback.ts:33-34, resources.ts:35-42) has
+// no arbitrary-leaf variant — the leaf is always the literal "merge.json" —
+// so it is matched separately by githubMergeCommandPathPattern below rather
+// than through this table.
+var githubAdapterCreateCommandPathPatterns = []struct {
+	pattern   *regexp.Regexp
+	canonical *regexp.Regexp
+}{
+	{
+		pattern:   regexp.MustCompile(`^github/repos/[^/]+/[^/]+/issues/([^/]+?)(?:\.json)?$`),
+		canonical: regexp.MustCompile(`^[1-9]\d*$`),
+	},
+	{
+		pattern:   regexp.MustCompile(`^github/repos/[^/]+/[^/]+/issues/[1-9]\d*(?:__[^/]+)?/comments/([^/]+?)(?:\.json|/meta\.json)?$`),
+		canonical: regexp.MustCompile(`^(?:meta|\d+)$`),
+	},
+	{
+		pattern:   regexp.MustCompile(`^github/repos/[^/]+/[^/]+/pulls/[1-9]\d*(?:__[^/]+)?/reviews/([^/]+?)(?:\.json)?$`),
+		canonical: regexp.MustCompile(`^\d+$`),
+	},
+	{
+		pattern:   regexp.MustCompile(`^github/repos/[^/]+/[^/]+/pulls/[1-9]\d*(?:__[^/]+)?/review-comments/[1-9]\d*/replies/([^/]+?)(?:\.json)?$`),
+		canonical: regexp.MustCompile(`^\d+$`),
+	},
+}
+
+// githubMergeCommandPathPattern matches the exact merge.json command file
+// (packages/github/src/writeback.ts:33-34). It is always pushable as a
+// create-only command leaf: unlike the other roots it has no numeric-leaf
+// canonical variant of its own (the enclosing PR-number segment is what
+// classifyWrite treats as the id, and a PR number is always numeric —
+// merge.json itself is the fixed command name).
+var githubMergeCommandPathPattern = regexp.MustCompile(`^github/repos/[^/]+/[^/]+/pulls/[1-9]\d*(?:__[^/]+)?/merge\.json$`)
+
+// isGithubAdapterCreateCommandPath reports whether remotePath is a
+// noncanonical (arbitrary-name) leaf under one of the GitHub adapter's
+// create command roots, or the exact merge.json command. See
+// githubAdapterCreateCommandPathPatterns for the adapter contract citations.
+// Numeric/meta canonical leaves — the adapter's PATCH-by-editing-record
+// surface, e.g. pulls/7/reviews/991.json or comments/42/meta.json —
+// deliberately return false: they are materialized records, not commands.
+func isGithubAdapterCreateCommandPath(remotePath string) bool {
+	normalized := strings.TrimPrefix(normalizeRemotePath(remotePath), "/")
+	if githubMergeCommandPathPattern.MatchString(normalized) {
+		return true
+	}
+	for _, root := range githubAdapterCreateCommandPathPatterns {
+		match := root.pattern.FindStringSubmatch(normalized)
+		if match == nil {
+			continue
+		}
+		leaf := match[1]
+		return !root.canonical.MatchString(leaf)
+	}
+	return false
 }
 
 // shouldSkipLazyUntrackedPush reports whether a locally-scanned file must be
@@ -5700,8 +5817,28 @@ func (s *Syncer) scanLocalFiles() (map[string]localSnapshot, error) {
 // path treats the pre-pulled record as a brand-new local write and pushLocal
 // pushes it upstream as agent_write — minting a spurious revision,
 // file.updated event, and provider writeback for content the agent never
-// touched. Writeback drafts/commands (isMountWritebackCreateDraftPath) are
-// real agent-authored writes and must still push even when untracked.
+// touched.
+//
+// Two independent OR'd exemptions cover real agent-authored writes that must
+// still push even when untracked: (1) isMountWritebackCreateDraftPath, the
+// pre-existing Relayfile-owned `<resource> <uuid>.json` / `factory-create-*`
+// draft contract, and (2) isGithubAdapterCreateCommandPath, the GitHub
+// adapter's actual create-command surface (arbitrary-name leaves under
+// issues/comments/reviews/replies, plus merge.json) — the narrower
+// isMountWritebackCreateDraftPath check alone misses these real command
+// paths (e.g. review-comments/<id>/replies/new-reply.json), which is a
+// blocking gap the first version of this guard had.
+//
+// Accepted trade-off: a numeric/meta canonical leaf under a lazy subtree
+// (e.g. pulls/7/reviews/991.json) is the adapter's PATCH-by-editing-record
+// surface too — an agent editing a pre-pulled canonical record's local copy
+// won't have that edit pushed under a lazy mount. This does not regress
+// anything that works today: that flow is already nonfunctional under lazy
+// mounts (the record never materializes locally in the first place without
+// an external pre-pull). The skip is still logged (logLazyUntrackedPushSkipped)
+// so a future persona author debugging a silent patch gets a breadcrumb.
+// Patch-under-lazy is a follow-up (daemon consulting pre-pull state hashes),
+// not this guard.
 func (s *Syncer) shouldSkipLazyUntrackedPush(remotePath string) bool {
 	if !s.lazyRepos || !s.lazySkipUntrackedPush {
 		return false
@@ -5712,7 +5849,10 @@ func (s *Syncer) shouldSkipLazyUntrackedPush(remotePath string) bool {
 	if _, tracked := s.state.Files[normalizeRemotePath(remotePath)]; tracked {
 		return false
 	}
-	return !isMountWritebackCreateDraftPath(remotePath)
+	if isMountWritebackCreateDraftPath(remotePath) {
+		return false
+	}
+	return !isGithubAdapterCreateCommandPath(remotePath)
 }
 
 // logLazyUntrackedPushSkipped logs each distinct skipped path only once per
