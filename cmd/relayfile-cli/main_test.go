@@ -324,7 +324,7 @@ func TestIntegrationBindUsageListsOptionalSubscriptionFlags(t *testing.T) {
 	if err == nil {
 		t.Fatal("integration bind with missing resource unexpectedly succeeded")
 	}
-	if got, want := err.Error(), "[--subscription ID] [--webhook-subscription ID]"; !strings.Contains(got, want) {
+	if got, want := err.Error(), "[--subscription ID] [--webhook-subscription ID --webhook-subscription-workspace WS]"; !strings.Contains(got, want) {
 		t.Fatalf("usage = %q, want to contain %q", got, want)
 	}
 }

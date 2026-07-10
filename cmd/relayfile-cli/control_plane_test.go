@@ -116,6 +116,69 @@ func TestControlPlaneBindingConformance(t *testing.T) {
 		t.Fatalf("unexpected CLI bindings: %#v", cliBindings)
 	}
 
+	// A replacement that omits the workspace pin (legacy/partial caller) must
+	// not strip it from the persisted binding.
+	var repinned bindResponse
+	status = controlPlaneJSON(t, client, http.MethodPost, baseURL+"/v1/integrations/bind", bindRequest{
+		Provider:     "slack",
+		Resource:     "#watchdog-test",
+		Channel:      "#events",
+		WebhookID:    "wh_2",
+		WebhookToken: "tok_2",
+	}, &repinned)
+	if status != http.StatusOK {
+		t.Fatalf("replacement bind status = %d", status)
+	}
+	if repinned.Binding.WebhookSubscriptionID != "relayfile_whsub_1" || repinned.Binding.WebhookSubscriptionWorkspaceID != "rw_pin_1" {
+		t.Fatalf("omitted ids/pin were not preserved on replacement: %#v", repinned.Binding)
+	}
+
+	// Mismatched-pair permutation 1: a replacement PROVIDING a new id but no
+	// workspace must persist (newSub, "") — never (newSub, oldWs).
+	var newIDNoWs bindResponse
+	status = controlPlaneJSON(t, client, http.MethodPost, baseURL+"/v1/integrations/bind", bindRequest{
+		Provider:              "slack",
+		Resource:              "#watchdog-test",
+		Channel:               "#events",
+		WebhookID:             "wh_3",
+		WebhookToken:          "tok_3",
+		WebhookSubscriptionID: "relayfile_whsub_2",
+	}, &newIDNoWs)
+	if status != http.StatusOK {
+		t.Fatalf("new-id replacement bind status = %d", status)
+	}
+	if newIDNoWs.Binding.WebhookSubscriptionID != "relayfile_whsub_2" || newIDNoWs.Binding.WebhookSubscriptionWorkspaceID != "" {
+		t.Fatalf("new id inherited a stale workspace pin: %#v", newIDNoWs.Binding)
+	}
+
+	// Mismatched-pair permutation 2: a workspace without its id is rejected.
+	var pairErr map[string]controlPlaneError
+	status = controlPlaneJSON(t, client, http.MethodPost, baseURL+"/v1/integrations/bind", bindRequest{
+		Provider:                       "slack",
+		Resource:                       "#watchdog-test",
+		Channel:                        "#events",
+		WebhookID:                      "wh_4",
+		WebhookToken:                   "tok_4",
+		WebhookSubscriptionWorkspaceID: "rw_orphan_ws",
+	}, &pairErr)
+	if status != http.StatusBadRequest {
+		t.Fatalf("workspace-without-id bind status = %d, want 400", status)
+	}
+
+	// Restore the pinned pair for the remaining assertions.
+	status = controlPlaneJSON(t, client, http.MethodPost, baseURL+"/v1/integrations/bind", bindRequest{
+		Provider:                       "slack",
+		Resource:                       "#watchdog-test",
+		Channel:                        "#events",
+		WebhookID:                      "wh_2",
+		WebhookToken:                   "tok_2",
+		WebhookSubscriptionID:          "relayfile_whsub_1",
+		WebhookSubscriptionWorkspaceID: "rw_pin_1",
+	}, &repinned)
+	if status != http.StatusOK {
+		t.Fatalf("restore bind status = %d", status)
+	}
+
 	var unbound relayIntegrationUnbindResult
 	status = controlPlaneJSON(t, client, http.MethodPost, baseURL+"/v1/integrations/unbind", unbindRequest{
 		Provider: "slack",

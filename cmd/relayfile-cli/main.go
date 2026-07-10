@@ -2359,6 +2359,12 @@ func bindRelayIntegration(input relayIntegrationBindInput) (relayIntegrationBind
 	if binding.WebhookToken == "" {
 		return relayIntegrationBinding{}, false, "", errors.New("--webhook-token is required")
 	}
+	// The subscription id and its workspace pin are an atomic pair: a
+	// workspace without its id is unusable and could only produce a
+	// mismatched (oldSub, newWs) record.
+	if binding.WebhookSubscriptionWorkspaceID != "" && binding.WebhookSubscriptionID == "" {
+		return relayIntegrationBinding{}, false, "", errors.New("--webhook-subscription-workspace requires --webhook-subscription")
+	}
 	relayIntegrationBindingsMu.Lock()
 	defer relayIntegrationBindingsMu.Unlock()
 	now := time.Now().UTC().Format(time.RFC3339)
@@ -2377,8 +2383,14 @@ func bindRelayIntegration(input relayIntegrationBindInput) (relayIntegrationBind
 			if binding.SubscriptionID == "" {
 				binding.SubscriptionID = bindings[i].SubscriptionID
 			}
+			// The (id, workspace) pin is preserved as an ATOMIC PAIR, and only
+			// when the replacement omits the id entirely (legacy/partial
+			// caller). A replacement that PROVIDES a new id takes its own
+			// workspace exactly as given — inheriting the old workspace would
+			// pin the new subscription to the wrong place.
 			if binding.WebhookSubscriptionID == "" {
 				binding.WebhookSubscriptionID = bindings[i].WebhookSubscriptionID
+				binding.WebhookSubscriptionWorkspaceID = bindings[i].WebhookSubscriptionWorkspaceID
 			}
 			bindings[i] = binding
 			replaced = true
@@ -2406,14 +2418,16 @@ func runIntegrationBind(args []string, stdout io.Writer) error {
 	webhookToken := fs.String("webhook-token", "", "RelayCast inbound webhook token")
 	subscriptionID := fs.String("subscription", "", "relay integration subscription id")
 	webhookSubscriptionID := fs.String("webhook-subscription", "", "relayfile-cloud inbound webhook subscription id")
+	webhookSubscriptionWorkspaceID := fs.String("webhook-subscription-workspace", "", "workspace the webhook subscription was created in (pairs with --webhook-subscription)")
 	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
-		"list":                 false,
-		"channel":              true,
-		"webhook":              true,
-		"webhook-token":        true,
-		"subscription":         true,
-		"webhook-subscription": true,
-		"json":                 false,
+		"list":                           false,
+		"channel":                        true,
+		"webhook":                        true,
+		"webhook-token":                  true,
+		"subscription":                   true,
+		"webhook-subscription":           true,
+		"webhook-subscription-workspace": true,
+		"json":                           false,
 	})); err != nil {
 		return err
 	}
@@ -2428,16 +2442,17 @@ func runIntegrationBind(args []string, stdout io.Writer) error {
 		return writeJSON(stdout, bindings)
 	}
 	if fs.NArg() != 2 {
-		return errors.New("usage: relayfile integration bind PROVIDER RESOURCE_OR_PATH_GLOB --channel CHANNEL --webhook ID --webhook-token TOKEN [--subscription ID] [--webhook-subscription ID]")
+		return errors.New("usage: relayfile integration bind PROVIDER RESOURCE_OR_PATH_GLOB --channel CHANNEL --webhook ID --webhook-token TOKEN [--subscription ID] [--webhook-subscription ID --webhook-subscription-workspace WS]")
 	}
 	binding, replaced, warning, err := bindRelayIntegration(relayIntegrationBindInput{
-		Provider:              fs.Arg(0),
-		Resource:              fs.Arg(1),
-		Channel:               *channel,
-		WebhookID:             *webhookID,
-		WebhookToken:          *webhookToken,
-		SubscriptionID:        *subscriptionID,
-		WebhookSubscriptionID: *webhookSubscriptionID,
+		Provider:                       fs.Arg(0),
+		Resource:                       fs.Arg(1),
+		Channel:                        *channel,
+		WebhookID:                      *webhookID,
+		WebhookToken:                   *webhookToken,
+		SubscriptionID:                 *subscriptionID,
+		WebhookSubscriptionID:          *webhookSubscriptionID,
+		WebhookSubscriptionWorkspaceID: *webhookSubscriptionWorkspaceID,
 	})
 	if err != nil {
 		return err
