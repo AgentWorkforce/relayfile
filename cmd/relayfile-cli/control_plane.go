@@ -87,14 +87,13 @@ type resolveResourcePathResponse struct {
 }
 
 type bindRequest struct {
-	Provider                      string    `json:"provider"`
-	Resource                      string    `json:"resource"`
-	Channel                       string    `json:"channel"`
-	WebhookID                     string    `json:"webhookId"`
-	WebhookToken                  string    `json:"webhookToken"`
-	SubscriptionID                string    `json:"subscriptionId,omitempty"`
-	WebhookSubscriptionID         string    `json:"webhookSubscriptionId,omitempty"`
-	PendingWebhookSubscriptionIDs *[]string `json:"pendingWebhookSubscriptionIds,omitempty"`
+	Provider              string `json:"provider"`
+	Resource              string `json:"resource"`
+	Channel               string `json:"channel"`
+	WebhookID             string `json:"webhookId"`
+	WebhookToken          string `json:"webhookToken"`
+	SubscriptionID        string `json:"subscriptionId,omitempty"`
+	WebhookSubscriptionID string `json:"webhookSubscriptionId,omitempty"`
 }
 
 type bindResponse struct {
@@ -137,6 +136,16 @@ type webhookSubscriptionResponse struct {
 type deleteWebhookSubscriptionRequest struct {
 	Workspace      string `json:"workspace,omitempty"`
 	SubscriptionID string `json:"subscriptionId"`
+}
+
+type listWebhookSubscriptionsResponse struct {
+	Subscriptions []webhookSubscriptionSummary `json:"subscriptions"`
+}
+
+type webhookSubscriptionSummary struct {
+	SubscriptionID string   `json:"subscriptionId"`
+	URL            string   `json:"url"`
+	PathGlobs      []string `json:"pathGlobs"`
 }
 
 func runControlPlane(args []string, stdout io.Writer) error {
@@ -398,14 +407,13 @@ func handleControlPlaneBind(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	binding, replaced, warning, err := bindRelayIntegration(relayIntegrationBindInput{
-		Provider:                      req.Provider,
-		Resource:                      req.Resource,
-		Channel:                       req.Channel,
-		WebhookID:                     req.WebhookID,
-		WebhookToken:                  req.WebhookToken,
-		SubscriptionID:                req.SubscriptionID,
-		WebhookSubscriptionID:         req.WebhookSubscriptionID,
-		PendingWebhookSubscriptionIDs: req.PendingWebhookSubscriptionIDs,
+		Provider:              req.Provider,
+		Resource:              req.Resource,
+		Channel:               req.Channel,
+		WebhookID:             req.WebhookID,
+		WebhookToken:          req.WebhookToken,
+		SubscriptionID:        req.SubscriptionID,
+		WebhookSubscriptionID: req.WebhookSubscriptionID,
 	})
 	if err != nil {
 		writeControlPlaneMappedError(w, err)
@@ -474,6 +482,39 @@ func handleControlPlaneWritebackSecret(w http.ResponseWriter, r *http.Request) {
 
 func handleControlPlaneWebhookSubscription(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
+	case http.MethodGet:
+		commandClient, err := prepareWorkspaceCommandClient(strings.TrimSpace(r.URL.Query().Get("workspace")), "", "", defaultJoinScopes)
+		if err != nil {
+			writeControlPlaneMappedError(w, err)
+			return
+		}
+		workspaceID := strings.TrimSpace(commandClient.workspaceID)
+		if workspaceID == "" {
+			writeControlPlaneMappedError(w, errors.New("could not resolve relayfile workspace id"))
+			return
+		}
+		var upstream []struct {
+			ID        string   `json:"id"`
+			URL       string   `json:"url"`
+			PathGlobs []string `json:"pathGlobs"`
+		}
+		if err := commandClient.client.getJSON(
+			r.Context(),
+			fmt.Sprintf("/v1/workspaces/%s/webhooks", url.PathEscape(workspaceID)),
+			&upstream,
+		); err != nil {
+			writeControlPlaneMappedError(w, err)
+			return
+		}
+		subscriptions := make([]webhookSubscriptionSummary, 0, len(upstream))
+		for _, item := range upstream {
+			subscriptions = append(subscriptions, webhookSubscriptionSummary{
+				SubscriptionID: item.ID,
+				URL:            item.URL,
+				PathGlobs:      item.PathGlobs,
+			})
+		}
+		writeControlPlaneJSON(w, http.StatusOK, listWebhookSubscriptionsResponse{Subscriptions: subscriptions})
 	case http.MethodPost:
 		var req webhookSubscriptionRequest
 		if err := decodeControlPlaneJSON(r, &req); err != nil {
@@ -536,6 +577,15 @@ func handleControlPlaneWebhookSubscription(w http.ResponseWriter, r *http.Reques
 			"",
 			nil,
 		); err != nil {
+			// Idempotent delete: an upstream 404 means the subscription is
+			// already gone. Callers retry recorded cleanup ids, so a retried
+			// delete of a known-deleted id must observe success — surfacing an
+			// error here would make them retain the id forever.
+			var upstreamErr *apiError
+			if errors.As(err, &upstreamErr) && upstreamErr.StatusCode == http.StatusNotFound {
+				writeControlPlaneJSON(w, http.StatusOK, map[string]bool{"ok": true})
+				return
+			}
 			writeControlPlaneMappedError(w, err)
 			return
 		}

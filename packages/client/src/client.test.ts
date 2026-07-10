@@ -140,6 +140,37 @@ describe('RelayfileControlPlaneClient integration webhook subscriptions', () => 
       body: { subscriptionId: 'whsub_123', workspace: 'demo' },
     });
   });
+
+  it('lists webhook subscriptions through the control-plane socket', async () => {
+    const client = new RelayfileControlPlaneClient({ socketPath: '/nope.sock', autoStart: false });
+    vi.spyOn(client, 'ensureReady').mockResolvedValue(undefined);
+    const rawRequest = vi.spyOn(client as unknown as { rawRequest: (opts: unknown) => Promise<unknown> }, 'rawRequest');
+    rawRequest.mockResolvedValueOnce({
+      subscriptions: [
+        {
+          subscriptionId: 'whsub_123',
+          url: 'https://cast.test/v1/integrations/relayfile/inbound/ws/ch',
+          pathGlobs: ['/github/repos/acme/widgets/issues/**'],
+        },
+      ],
+    });
+
+    await expect(client.listWebhookSubscriptions('demo')).resolves.toEqual({
+      subscriptions: [
+        {
+          subscriptionId: 'whsub_123',
+          url: 'https://cast.test/v1/integrations/relayfile/inbound/ws/ch',
+          pathGlobs: ['/github/repos/acme/widgets/issues/**'],
+        },
+      ],
+    });
+
+    expect(rawRequest).toHaveBeenCalledWith({
+      method: 'GET',
+      path: '/v1/integrations/webhook-subscriptions',
+      query: { workspace: 'demo' },
+    });
+  });
 });
 
 // Real-daemon contract tests — opt-in via RELAYFILE_BIN (CI builds the binary:
@@ -203,14 +234,12 @@ describeContract('control-plane client (real daemon)', () => {
       webhookToken: 'tok',
       subscriptionId: 'sub',
       webhookSubscriptionId: 'whsub',
-      pendingWebhookSubscriptionIds: ['whsub_retired'],
     });
     const after = await client.listBindings();
     const binding = after.find((b) => b.pathGlob === pathGlob);
     expect(binding).toBeDefined();
     expect(binding!.channel).toBe('general');
     expect(binding!.webhookSubscriptionId).toBe('whsub');
-    expect(binding!.pendingWebhookSubscriptionIds).toEqual(['whsub_retired']);
     await client.unbind('github', pathGlob);
     expect((await client.listBindings()).find((b) => b.pathGlob === pathGlob)).toBeUndefined();
   });

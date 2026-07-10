@@ -166,11 +166,18 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get?: never;
+        /**
+         * List server-side relayfile webhook subscriptions
+         * @description Lists the workspace's inbound webhook subscriptions so callers can reconcile subscriptions created by runs that crashed before persisting the server-assigned id.
+         */
+        get: operations["listWebhookSubscriptions"];
         put?: never;
         /** Create a server-side relayfile webhook subscription */
         post: operations["createWebhookSubscription"];
-        /** Delete a server-side relayfile webhook subscription */
+        /**
+         * Delete a server-side relayfile webhook subscription
+         * @description Idempotent: deleting a subscription that no longer exists succeeds, so retried cleanups of a known-deleted id observe progress instead of an error.
+         */
         delete: operations["deleteWebhookSubscription"];
         options?: never;
         head?: never;
@@ -250,7 +257,6 @@ export interface components {
             webhookToken: string;
             subscriptionId?: string;
             webhookSubscriptionId?: string;
-            pendingWebhookSubscriptionIds?: string[];
         };
         BindResponse: {
             binding: components["schemas"]["Binding"];
@@ -265,7 +271,6 @@ export interface components {
             webhookToken: string;
             subscriptionId?: string;
             webhookSubscriptionId?: string;
-            pendingWebhookSubscriptionIds?: string[];
             createdAt?: string;
             updatedAt?: string;
         };
@@ -307,6 +312,15 @@ export interface components {
         };
         DeleteWebhookSubscriptionResponse: {
             ok: boolean;
+        };
+        ListWebhookSubscriptionsResponse: {
+            subscriptions: components["schemas"]["WebhookSubscriptionSummary"][];
+        };
+        WebhookSubscriptionSummary: {
+            subscriptionId: string;
+            /** Format: uri */
+            url: string;
+            pathGlobs: string[];
         };
         ErrorEnvelope: {
             error: {
@@ -639,6 +653,30 @@ export interface operations {
             };
         };
     };
+    listWebhookSubscriptions: {
+        parameters: {
+            query?: {
+                workspace?: string;
+            };
+            header?: {
+                "X-Relayfile-API-Version"?: components["parameters"]["ApiVersionHeader"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Webhook subscriptions for the workspace */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ListWebhookSubscriptionsResponse"];
+                };
+            };
+        };
+    };
     createWebhookSubscription: {
         parameters: {
             query?: never;
@@ -680,7 +718,7 @@ export interface operations {
             };
         };
         responses: {
-            /** @description Subscription deleted */
+            /** @description Subscription deleted (or already absent) */
             200: {
                 headers: {
                     [name: string]: unknown;

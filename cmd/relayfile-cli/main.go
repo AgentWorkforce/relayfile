@@ -434,16 +434,15 @@ type integrationConnectionState struct {
 }
 
 type relayIntegrationBinding struct {
-	Provider                      string   `json:"provider"`
-	PathGlob                      string   `json:"pathGlob"`
-	Channel                       string   `json:"channel"`
-	WebhookID                     string   `json:"webhookId"`
-	WebhookToken                  string   `json:"webhookToken"`
-	SubscriptionID                string   `json:"subscriptionId,omitempty"`
-	WebhookSubscriptionID         string   `json:"webhookSubscriptionId,omitempty"`
-	PendingWebhookSubscriptionIDs []string `json:"pendingWebhookSubscriptionIds,omitempty"`
-	CreatedAt                     string   `json:"createdAt,omitempty"`
-	UpdatedAt                     string   `json:"updatedAt,omitempty"`
+	Provider              string `json:"provider"`
+	PathGlob              string `json:"pathGlob"`
+	Channel               string `json:"channel"`
+	WebhookID             string `json:"webhookId"`
+	WebhookToken          string `json:"webhookToken"`
+	SubscriptionID        string `json:"subscriptionId,omitempty"`
+	WebhookSubscriptionID string `json:"webhookSubscriptionId,omitempty"`
+	CreatedAt             string `json:"createdAt,omitempty"`
+	UpdatedAt             string `json:"updatedAt,omitempty"`
 }
 
 type relayIntegrationBindingStore struct {
@@ -2321,14 +2320,13 @@ func runIntegration(args []string, stdin io.Reader, stdout io.Writer) error {
 }
 
 type relayIntegrationBindInput struct {
-	Provider                      string
-	Resource                      string
-	Channel                       string
-	WebhookID                     string
-	WebhookToken                  string
-	SubscriptionID                string
-	WebhookSubscriptionID         string
-	PendingWebhookSubscriptionIDs *[]string
+	Provider              string
+	Resource              string
+	Channel               string
+	WebhookID             string
+	WebhookToken          string
+	SubscriptionID        string
+	WebhookSubscriptionID string
 }
 
 func bindRelayIntegration(input relayIntegrationBindInput) (relayIntegrationBinding, bool, string, error) {
@@ -2348,9 +2346,6 @@ func bindRelayIntegration(input relayIntegrationBindInput) (relayIntegrationBind
 		WebhookToken:          strings.TrimSpace(input.WebhookToken),
 		SubscriptionID:        strings.TrimSpace(input.SubscriptionID),
 		WebhookSubscriptionID: strings.TrimSpace(input.WebhookSubscriptionID),
-	}
-	if input.PendingWebhookSubscriptionIDs != nil {
-		binding.PendingWebhookSubscriptionIDs = normalizeWebhookSubscriptionIDs(*input.PendingWebhookSubscriptionIDs)
 	}
 	if binding.Channel == "" {
 		return relayIntegrationBinding{}, false, "", errors.New("--channel is required")
@@ -2381,9 +2376,6 @@ func bindRelayIntegration(input relayIntegrationBindInput) (relayIntegrationBind
 			}
 			if binding.WebhookSubscriptionID == "" {
 				binding.WebhookSubscriptionID = bindings[i].WebhookSubscriptionID
-			}
-			if input.PendingWebhookSubscriptionIDs == nil {
-				binding.PendingWebhookSubscriptionIDs = append([]string(nil), bindings[i].PendingWebhookSubscriptionIDs...)
 			}
 			bindings[i] = binding
 			replaced = true
@@ -2456,23 +2448,6 @@ func runIntegrationBind(args []string, stdout io.Writer) error {
 		fmt.Fprintf(stdout, "%s binding created: %s -> %s\n", binding.Provider, binding.PathGlob, binding.Channel)
 	}
 	return nil
-}
-
-func normalizeWebhookSubscriptionIDs(ids []string) []string {
-	seen := make(map[string]struct{}, len(ids))
-	normalized := make([]string, 0, len(ids))
-	for _, id := range ids {
-		id = strings.TrimSpace(id)
-		if id == "" {
-			continue
-		}
-		if _, ok := seen[id]; ok {
-			continue
-		}
-		seen[id] = struct{}{}
-		normalized = append(normalized, id)
-	}
-	return normalized
 }
 
 func runIntegrationResolvePath(args []string, stdout io.Writer) error {

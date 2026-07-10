@@ -229,6 +229,27 @@ paths:
               schema:
                 $ref: "#/components/schemas/WritebackSecret"
   /v1/integrations/webhook-subscriptions:
+    get:
+      operationId: listWebhookSubscriptions
+      summary: List server-side relayfile webhook subscriptions
+      description: >-
+        Lists the workspace's inbound webhook subscriptions so callers can
+        reconcile subscriptions created by runs that crashed before persisting
+        the server-assigned id.
+      parameters:
+        - $ref: "#/components/parameters/ApiVersionHeader"
+        - name: workspace
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Webhook subscriptions for the workspace
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListWebhookSubscriptionsResponse"
     post:
       operationId: createWebhookSubscription
       summary: Create a server-side relayfile webhook subscription
@@ -250,6 +271,10 @@ paths:
     delete:
       operationId: deleteWebhookSubscription
       summary: Delete a server-side relayfile webhook subscription
+      description: >-
+        Idempotent: deleting a subscription that no longer exists succeeds, so
+        retried cleanups of a known-deleted id observe progress instead of an
+        error.
       parameters:
         - $ref: "#/components/parameters/ApiVersionHeader"
       requestBody:
@@ -260,7 +285,7 @@ paths:
               $ref: "#/components/schemas/DeleteWebhookSubscriptionRequest"
       responses:
         "200":
-          description: Subscription deleted
+          description: Subscription deleted (or already absent)
           content:
             application/json:
               schema:
@@ -449,10 +474,6 @@ components:
           type: string
         webhookSubscriptionId:
           type: string
-        pendingWebhookSubscriptionIds:
-          type: array
-          items:
-            type: string
     BindResponse:
       type: object
       required: [binding, replaced]
@@ -482,10 +503,6 @@ components:
           type: string
         webhookSubscriptionId:
           type: string
-        pendingWebhookSubscriptionIds:
-          type: array
-          items:
-            type: string
         createdAt:
           type: string
         updatedAt:
@@ -572,6 +589,27 @@ components:
       properties:
         ok:
           type: boolean
+    ListWebhookSubscriptionsResponse:
+      type: object
+      required: [subscriptions]
+      properties:
+        subscriptions:
+          type: array
+          items:
+            $ref: "#/components/schemas/WebhookSubscriptionSummary"
+    WebhookSubscriptionSummary:
+      type: object
+      required: [subscriptionId, url, pathGlobs]
+      properties:
+        subscriptionId:
+          type: string
+        url:
+          type: string
+          format: uri
+        pathGlobs:
+          type: array
+          items:
+            type: string
     ErrorEnvelope:
       type: object
       required: [error]
