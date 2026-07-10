@@ -5784,6 +5784,34 @@ var githubAdapterCreateCommandPathPatterns = []struct {
 // merge.json itself is the fixed command name).
 var githubMergeCommandPathPattern = regexp.MustCompile(`^github/repos/[^/]+/[^/]+/pulls/[1-9]\d*(?:__[^/]+)?/merge\.json$`)
 
+// isGithubAdapterReservedAuxiliaryLeaf reports whether basename is a
+// provider-emitted auxiliary/index payload rather than an agent-authored
+// writeback command. Cloud's pre-pull of a GitHub repo's /issues (and
+// /pulls) root always materializes a resource-level `_index.json`
+// alongside the canonical records (relayfile-adapters
+// packages/github/src/layout-prompt.ts:8-10,24 and
+// emit-auxiliary-files.ts:13-21). That index is a first-class remote
+// payload, not a command: applyRemoteFile passes `_index.json` files and
+// nested `<integration>/.layout.md` dotfiles through unchanged
+// (syncer.go:5242-5244, the comment this function centralizes on). Without
+// this exclusion, `issues/_index.json` has a nonnumeric leaf (`_index`)
+// that would otherwise match the issues create-root pattern below and get
+// pushed as a bogus issue-create — reopening the exact pre-pull hazard this
+// guard exists to close. Reserved leaves are recognized two ways: the
+// existing isReservedProviderLayoutSegment literal set (reused rather than
+// duplicated), and — because the adapter could add more `_`/`.`-prefixed
+// auxiliary payloads without this list being updated in lockstep — any
+// basename that starts with `_` or `.`. The adapter's create-command
+// contract never uses `_`-prefixed or dotfile leaf names (see the roots
+// enumerated in githubAdapterCreateCommandPathPatterns), so this exclusion
+// cannot suppress a real command.
+func isGithubAdapterReservedAuxiliaryLeaf(basename string) bool {
+	if isReservedProviderLayoutSegment(basename) {
+		return true
+	}
+	return strings.HasPrefix(basename, "_") || strings.HasPrefix(basename, ".")
+}
+
 // isGithubAdapterCreateCommandPath reports whether remotePath is a
 // noncanonical (arbitrary-name) leaf under one of the GitHub adapter's
 // create command roots, or the exact merge.json command. See
@@ -5791,8 +5819,14 @@ var githubMergeCommandPathPattern = regexp.MustCompile(`^github/repos/[^/]+/[^/]
 // Numeric/meta canonical leaves — the adapter's PATCH-by-editing-record
 // surface, e.g. pulls/7/reviews/991.json or comments/42/meta.json —
 // deliberately return false: they are materialized records, not commands.
+// Reserved/auxiliary provider payloads (isGithubAdapterReservedAuxiliaryLeaf,
+// e.g. `_index.json`) are excluded before any create-root pattern is
+// consulted, regardless of which root's directory they happen to sit under.
 func isGithubAdapterCreateCommandPath(remotePath string) bool {
 	normalized := strings.TrimPrefix(normalizeRemotePath(remotePath), "/")
+	if isGithubAdapterReservedAuxiliaryLeaf(path.Base(normalized)) {
+		return false
+	}
 	if githubMergeCommandPathPattern.MatchString(normalized) {
 		return true
 	}

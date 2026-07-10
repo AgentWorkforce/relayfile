@@ -950,6 +950,18 @@ func TestIsGithubAdapterCreateCommandPath(t *testing.T) {
 		// outside every command root
 		{"draft.json outside any command root is not a create command", "/github/repos/octocat/hello-world/pulls/draft.json", false},
 		{"path outside github entirely is not a create command", "/notion/pages/draft.json", false},
+
+		// reserved/auxiliary provider payloads (go-verify fresh-eyes finding
+		// on 8d02e074): _index.json resource indexes and dotfile manifests
+		// are first-class remote payloads (applyRemoteFile,
+		// syncer.go:5242-5244), not commands, even though their nonnumeric
+		// leaf would otherwise match a create root.
+		{"issues/_index.json is a reserved auxiliary payload, not a create command", "/github/repos/octocat/hello-world/issues/_index.json", false},
+		{"issue comments _index.json is a reserved auxiliary payload", "/github/repos/octocat/hello-world/issues/42/comments/_index.json", false},
+		{"reviews _index.json is a reserved auxiliary payload", "/github/repos/octocat/hello-world/pulls/7/reviews/_index.json", false},
+		{"replies _index.json is a reserved auxiliary payload", "/github/repos/octocat/hello-world/pulls/7/review-comments/991/replies/_index.json", false},
+		{"underscore-prefixed leaf under issues is reserved regardless of exact name", "/github/repos/octocat/hello-world/issues/_anything.json", false},
+		{"dotfile leaf under issues is reserved", "/github/repos/octocat/hello-world/issues/.layout.md", false},
 	}
 
 	for _, tt := range tests {
@@ -1002,6 +1014,10 @@ func TestShouldSkipLazyUntrackedPushGithubAdapterCreateRoots(t *testing.T) {
 		{"comment meta.json stays skipped", "/github/repos/octocat/hello-world/issues/42/comments/7/meta.json", true},
 		{"issue numeric leaf stays skipped", "/github/repos/octocat/hello-world/issues/42.json", true},
 		{"draft.json outside any command root stays skipped", "/github/repos/octocat/hello-world/pulls/draft.json", true},
+		{"issues _index.json stays skipped", "/github/repos/octocat/hello-world/issues/_index.json", true},
+		{"issue comments _index.json stays skipped", "/github/repos/octocat/hello-world/issues/42/comments/_index.json", true},
+		{"reviews _index.json stays skipped", "/github/repos/octocat/hello-world/pulls/7/reviews/_index.json", true},
+		{"replies _index.json stays skipped", "/github/repos/octocat/hello-world/pulls/7/review-comments/991/replies/_index.json", true},
 	}
 
 	for _, tt := range tests {
@@ -1113,6 +1129,62 @@ func TestLazyDaemonSkipsCanonicalGithubAdapterLeaves(t *testing.T) {
 	}
 	if got := daemon.state.Counters.SkippedLazyUntrackedPush; got != 3 {
 		t.Fatalf("expected SkippedLazyUntrackedPush == 3 (reviews/991.json, replies/55.json, draft.json), got %d", got)
+	}
+}
+
+// TestLazyDaemonSkipsPrePulledIndexJsonAcrossAdapterRoots is the regression
+// for go-verify's fresh-eyes finding on 8d02e074: Cloud's pre-pull of a
+// GitHub repo's /issues (and /pulls) root always materializes a
+// resource-level `_index.json` alongside the canonical records
+// (relayfile-adapters packages/github/src/layout-prompt.ts:8-10,24,
+// emit-auxiliary-files.ts:13-21). `_index.json`'s leaf (`_index`) is
+// nonnumeric, so without isGithubAdapterReservedAuxiliaryLeaf it would
+// match the enclosing root's create pattern and get bulk-written upstream
+// as a bogus create — reopening the pre-pull push hazard this whole guard
+// exists to close. Covers `_index.json` directly under every adapter create
+// root (issues, issue comments, reviews, replies), not just the confirmed
+// issues/_index.json case.
+func TestLazyDaemonSkipsPrePulledIndexJsonAcrossAdapterRoots(t *testing.T) {
+	const remoteRoot = "/github/repos/octocat/hello-world"
+
+	client := &fakeClient{files: map[string]RemoteFile{}}
+	localDir := t.TempDir()
+	scopedLocal := filepath.Join(localDir, filepath.FromSlash(strings.TrimPrefix(remoteRoot, "/")))
+
+	seed := func(relDirs ...string) {
+		dir := filepath.Join(append([]string{scopedLocal}, relDirs...)...)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "_index.json"), []byte(`{"items":[]}`), 0o644); err != nil {
+			t.Fatalf("seed %s/_index.json: %v", dir, err)
+		}
+	}
+	seed("issues")
+	seed("issues", "42", "comments")
+	seed("pulls", "7", "reviews")
+	seed("pulls", "7", "review-comments", "991", "replies")
+
+	daemon, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_adapter_index_json",
+		RemoteRoot:  "/",
+		LocalRoot:   localDir,
+		StateFile:   filepath.Join(t.TempDir(), "daemon-state.json"),
+		LazyRepos:   boolPtr(true),
+		Scopes:      []string{"relayfile:fs:write:/"},
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer daemon: %v", err)
+	}
+	if err := daemon.Reconcile(context.Background()); err != nil {
+		t.Fatalf("daemon.Reconcile: %v", err)
+	}
+
+	if got := client.bulkWriteCalls; got != 0 {
+		t.Fatalf("expected zero BulkWrite calls for pre-pulled _index.json payloads, got %d; batches=%+v", got, client.bulkWriteBatches)
+	}
+	if got := daemon.state.Counters.SkippedLazyUntrackedPush; got != 4 {
+		t.Fatalf("expected SkippedLazyUntrackedPush == 4 (issues/_index.json, comments/_index.json, reviews/_index.json, replies/_index.json), got %d", got)
 	}
 }
 
