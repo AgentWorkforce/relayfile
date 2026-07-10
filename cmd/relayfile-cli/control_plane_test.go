@@ -133,9 +133,11 @@ func TestControlPlaneBindingConformance(t *testing.T) {
 		t.Fatalf("omitted ids/pin were not preserved on replacement: %#v", repinned.Binding)
 	}
 
-	// Mismatched-pair permutation 1: a replacement PROVIDING a new id but no
-	// workspace must persist (newSub, "") — never (newSub, oldWs).
-	var newIDNoWs bindResponse
+	// Mismatched-pair permutation 1: a NEW id without its workspace is
+	// rejected — persisting it unpinned (or worse, inheriting the old pin)
+	// would leave the new cloud resource unretryable across a workspace
+	// switch.
+	var newIDNoWsErr map[string]controlPlaneError
 	status = controlPlaneJSON(t, client, http.MethodPost, baseURL+"/v1/integrations/bind", bindRequest{
 		Provider:              "slack",
 		Resource:              "#watchdog-test",
@@ -143,12 +145,9 @@ func TestControlPlaneBindingConformance(t *testing.T) {
 		WebhookID:             "wh_3",
 		WebhookToken:          "tok_3",
 		WebhookSubscriptionID: "relayfile_whsub_2",
-	}, &newIDNoWs)
-	if status != http.StatusOK {
-		t.Fatalf("new-id replacement bind status = %d", status)
-	}
-	if newIDNoWs.Binding.WebhookSubscriptionID != "relayfile_whsub_2" || newIDNoWs.Binding.WebhookSubscriptionWorkspaceID != "" {
-		t.Fatalf("new id inherited a stale workspace pin: %#v", newIDNoWs.Binding)
+	}, &newIDNoWsErr)
+	if status != http.StatusBadRequest {
+		t.Fatalf("new-id-without-workspace bind status = %d, want 400", status)
 	}
 
 	// Mismatched-pair permutation 2: a workspace without its id is rejected.
@@ -399,6 +398,17 @@ func TestControlPlaneCloudIntegrationConformance(t *testing.T) {
 	}
 	if !deletedGone["ok"] {
 		t.Fatalf("unexpected idempotent delete response: %#v", deletedGone)
+	}
+
+	// An UNPINNED delete of a missing subscription must NOT read as success:
+	// without the workspace pin, "not found" may just be the wrong active
+	// workspace, and a 200 would let callers discard a live resource's record.
+	var unpinnedGone map[string]controlPlaneError
+	status = controlPlaneJSON(t, client, http.MethodDelete, baseURL+"/v1/integrations/webhook-subscriptions", deleteWebhookSubscriptionRequest{
+		SubscriptionID: "whsub_gone",
+	}, &unpinnedGone)
+	if status != http.StatusNotFound {
+		t.Fatalf("unpinned delete of missing subscription status = %d, want 404", status)
 	}
 }
 

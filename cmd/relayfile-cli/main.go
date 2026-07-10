@@ -2359,11 +2359,16 @@ func bindRelayIntegration(input relayIntegrationBindInput) (relayIntegrationBind
 	if binding.WebhookToken == "" {
 		return relayIntegrationBinding{}, false, "", errors.New("--webhook-token is required")
 	}
-	// The subscription id and its workspace pin are an atomic pair: a
-	// workspace without its id is unusable and could only produce a
-	// mismatched (oldSub, newWs) record.
+	// The subscription id and its workspace pin are an atomic pair in BOTH
+	// directions: a workspace without its id could only produce a mismatched
+	// (oldSub, newWs) record, and a NEW id without its workspace would be
+	// unpinned — unretryable across an active-workspace switch. A legacy
+	// unpinned pair survives only when a replacement omits both fields.
 	if binding.WebhookSubscriptionWorkspaceID != "" && binding.WebhookSubscriptionID == "" {
 		return relayIntegrationBinding{}, false, "", errors.New("--webhook-subscription-workspace requires --webhook-subscription")
+	}
+	if binding.WebhookSubscriptionID != "" && binding.WebhookSubscriptionWorkspaceID == "" {
+		return relayIntegrationBinding{}, false, "", errors.New("--webhook-subscription requires --webhook-subscription-workspace")
 	}
 	relayIntegrationBindingsMu.Lock()
 	defer relayIntegrationBindingsMu.Unlock()

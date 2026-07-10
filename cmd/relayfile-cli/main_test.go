@@ -250,7 +250,7 @@ func TestIntegrationBindListAndUnbind(t *testing.T) {
 		"--channel", "#issues",
 		"--webhook", "wh_1",
 		"--webhook-token", "tok_1",
-		"--webhook-subscription", "relayfile_whsub_1",
+		"--webhook-subscription", "relayfile_whsub_1", "--webhook-subscription-workspace", "rw_test_pin",
 	}, strings.NewReader(""), &stdout, &stdout); err != nil {
 		t.Fatalf("bind failed: %v\n%s", err, stdout.String())
 	}

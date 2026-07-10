@@ -594,13 +594,24 @@ func handleControlPlaneWebhookSubscription(w http.ResponseWriter, r *http.Reques
 			"",
 			nil,
 		); err != nil {
-			// Idempotent delete: an upstream 404 means the subscription is
-			// already gone. Callers retry recorded cleanup ids, so a retried
-			// delete of a known-deleted id must observe success — surfacing an
-			// error here would make them retain the id forever.
+			// Idempotent delete, but ONLY for a workspace-pinned request: a
+			// pinned 404 proves the subscription is gone at its recorded
+			// workspace, so retried cleanups must observe success. An
+			// UNPINNED 404 may just mean the daemon's active workspace
+			// changed — surface it so callers retain their record instead of
+			// discarding an id that still exists elsewhere.
 			var upstreamErr *apiError
 			if errors.As(err, &upstreamErr) && upstreamErr.StatusCode == http.StatusNotFound {
-				writeControlPlaneJSON(w, http.StatusOK, map[string]bool{"ok": true})
+				if strings.TrimSpace(req.Workspace) != "" {
+					writeControlPlaneJSON(w, http.StatusOK, map[string]bool{"ok": true})
+					return
+				}
+				writeControlPlaneError(
+					w,
+					http.StatusNotFound,
+					controlPlaneErrBindingNotFound,
+					"webhook subscription not found in the active workspace; retry with its workspace pin",
+				)
 				return
 			}
 			writeControlPlaneMappedError(w, err)
