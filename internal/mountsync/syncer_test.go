@@ -966,6 +966,16 @@ func TestIsGithubAdapterCreateCommandPath(t *testing.T) {
 		// valid create commands and MUST classify as create.
 		{"underscore-prefixed leaf under issues is a valid create command", "/github/repos/octocat/hello-world/issues/_draft.json", true},
 		{"dotfile leaf under issues is a valid create command", "/github/repos/octocat/hello-world/issues/.draft.json", true},
+
+		// adapter-core's router explicitly ignores reserved writeback stems
+		// (isReservedWritebackFilename, file-native-router.ts:695-706) —
+		// pushing them would only create spurious revisions/events, so the
+		// guard keeps them skipped (cubic P1 on 20c374db).
+		{"tmp dotfile stem is reserved, not a create", "/github/repos/octocat/hello-world/issues/.tmp.json", false},
+		{"tmp-suffixed stem is reserved, not a create", "/github/repos/octocat/hello-world/issues/foo.tmp.json", false},
+		{"partial-suffixed stem is reserved, not a create", "/github/repos/octocat/hello-world/issues/bar.partial.json", false},
+		{"schema stem is reserved, not a create", "/github/repos/octocat/hello-world/issues/.schema.json", false},
+		{"bare partial stem is reserved, not a create", "/github/repos/octocat/hello-world/issues/partial.json", false},
 	}
 
 	for _, tt := range tests {

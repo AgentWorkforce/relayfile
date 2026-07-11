@@ -5807,7 +5807,28 @@ var githubMergeCommandPathPattern = regexp.MustCompile(`^github/repos/[^/]+/[^/]
 // are VALID create commands that a prefix rule would silently suppress —
 // the over-skip loss class this review rejected twice.
 func isGithubAdapterReservedAuxiliaryLeaf(basename string) bool {
-	return isReservedProviderLayoutSegment(basename)
+	if isReservedProviderLayoutSegment(basename) {
+		return true
+	}
+	return isGithubAdapterReservedWritebackStem(basename)
+}
+
+// isGithubAdapterReservedWritebackStem mirrors the adapter runtime's
+// authoritative isReservedWritebackFilename (adapter-core
+// packages/core/src/runtime/file-native-router.ts:695-706): the router
+// explicitly ignores these exact stems and .tmp/.partial suffixes instead of
+// treating them as create commands, so pushing them from a lazy mount would
+// only manufacture the spurious revision/event this guard exists to prevent
+// (cubic P1 on 20c374db). The stem is the basename minus a trailing ".json",
+// exactly like the router computes it. Everything else — including
+// `_draft.json` and `.draft.json` — remains a valid create leaf.
+func isGithubAdapterReservedWritebackStem(basename string) bool {
+	stem := strings.TrimSuffix(basename, ".json")
+	switch stem {
+	case ".schema", ".create.example", ".adapter", ".tmp", ".partial", "partial":
+		return true
+	}
+	return strings.HasSuffix(stem, ".tmp") || strings.HasSuffix(stem, ".partial")
 }
 
 // isGithubAdapterCreateCommandPath reports whether remotePath is a
