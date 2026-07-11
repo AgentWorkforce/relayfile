@@ -21,6 +21,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strconv"
@@ -827,6 +828,12 @@ type SyncerOptions struct {
 	ForceFullReconcile *bool
 	// LazyRepos controls lazy GitHub repo subtree hydration. nil falls back to env.
 	LazyRepos *bool
+	// LazySkipUntrackedPush controls whether pushLocal excludes local files
+	// under a lazy GitHub repo subtree that this daemon never tracked in
+	// s.state.Files (see SkippedLazyUntrackedPush). Only takes effect when
+	// LazyRepos is true. nil falls back to env RELAYFILE_LAZY_SKIP_UNTRACKED_PUSH,
+	// default true.
+	LazySkipUntrackedPush *bool
 	// LowMemory avoids expensive diagnostic/public-state scans and large
 	// in-memory snapshots. nil falls back to RELAYFILE_MOUNT_LOW_MEMORY.
 	LowMemory *bool
@@ -996,23 +1003,25 @@ type Syncer struct {
 	// immediately — not just provider-layout-alias paths — without waiting the
 	// read-not-ready TTL. skipStuckMax bounds the number of events dropped
 	// (0 = unbounded); skipStuckCount tracks how many were dropped.
-	skipStuckMode     bool
-	skipStuckMax      int
-	skipStuckCount    int
-	syncActive        bool
-	oversizedLogged   map[string]struct{}
-	controlSkipLogged map[string]struct{}
-	quarantinedPaths  map[string]struct{}
-	lazyRepos         bool
-	lowMemory         bool
-	writeOnly         bool
-	layoutRegistrar   ProviderLayoutRegistrar
-	githubWorkingTree *githubWorkingTreeMount
-	closeScheduler    *CloseScheduler
-	rollingCoalescer  *RollingDigestCoalescer
-	circuit           *CloudErrorCircuit
-	maxOutboxAttempts int
-	nowFn             func() time.Time
+	skipStuckMode         bool
+	skipStuckMax          int
+	skipStuckCount        int
+	syncActive            bool
+	oversizedLogged       map[string]struct{}
+	controlSkipLogged     map[string]struct{}
+	lazyUntrackedLogged   map[string]struct{}
+	quarantinedPaths      map[string]struct{}
+	lazyRepos             bool
+	lazySkipUntrackedPush bool
+	lowMemory             bool
+	writeOnly             bool
+	layoutRegistrar       ProviderLayoutRegistrar
+	githubWorkingTree     *githubWorkingTreeMount
+	closeScheduler        *CloseScheduler
+	rollingCoalescer      *RollingDigestCoalescer
+	circuit               *CloudErrorCircuit
+	maxOutboxAttempts     int
+	nowFn                 func() time.Time
 	// credExpiresAt is the RFC3339 expiry of the delegated access token,
 	// set by the CLI layer via SetCredentialExpiry and included in the
 	// public state as credExpiresInSecs so operators get advance warning.
@@ -1098,6 +1107,20 @@ type telemetryCounters struct {
 	// and a directory); the daemon quarantines the path so a single collision
 	// can't wedge the whole mount. See isRemotePathCollision.
 	PathCollisionQuarantined uint64 `json:"pathCollisionQuarantined,omitempty"`
+	// SkippedLazyUntrackedPush counts real push-skip decisions for local
+	// files excluded because they sit under a lazy GitHub repo subtree
+	// (isLazyGithubRepoSubtreePath) this daemon never tracked in
+	// s.state.Files — e.g. a canonical record materialized by an isolated
+	// non-lazy pre-pull with its own state file. Without this guard, an
+	// untracked-file push path would treat the pre-pulled record as a
+	// brand-new local write and push it upstream as agent_write. Writeback
+	// drafts/commands (isMountWritebackCreateDraftPath,
+	// isGithubAdapterCreateCommandPath) are exempt and still push. Increments
+	// only at the two actual skip decision points — pushLocal's
+	// SkipWriteback check and preparePendingBulkWrite (the watcher-path
+	// choke point) — never from scanLocalFiles/savePublicState's
+	// status-display scans, so a state save cannot inflate this counter.
+	SkippedLazyUntrackedPush uint64 `json:"skippedLazyUntrackedPush,omitempty"`
 }
 
 // quarantineRemotePath records a remote path that can't be materialized
@@ -1438,6 +1461,16 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 			opts.Logger.Printf("ignoring invalid RELAYFILE_MOUNT_LAZY_GITHUB_REPOS=%q: %v", raw, perr)
 		}
 	}
+	lazySkipUntrackedPush := true
+	if opts.LazySkipUntrackedPush != nil {
+		lazySkipUntrackedPush = *opts.LazySkipUntrackedPush
+	} else if raw := strings.TrimSpace(os.Getenv("RELAYFILE_LAZY_SKIP_UNTRACKED_PUSH")); raw != "" {
+		if parsed, perr := strconv.ParseBool(raw); perr == nil {
+			lazySkipUntrackedPush = parsed
+		} else if opts.Logger != nil {
+			opts.Logger.Printf("ignoring invalid RELAYFILE_LAZY_SKIP_UNTRACKED_PUSH=%q: %v", raw, perr)
+		}
+	}
 	lowMemory := false
 	if opts.LowMemory != nil {
 		lowMemory = *opts.LowMemory
@@ -1473,46 +1506,47 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 	}
 	githubWorkingTree := detectGithubWorkingTreeMount(remoteRoot)
 	return &Syncer{
-		client:               client,
-		workspace:            workspace,
-		remoteRoot:           remoteRoot,
-		localRoot:            localRoot,
-		localDir:             localRoot,
-		stateFile:            stateFile,
-		publicStatePath:      publicStatePath,
-		conflictsDir:         conflictsDir,
-		resolvedConflictsDir: resolvedConflictsDir,
-		deadLetterDir:        deadLetterDir,
-		outboxDir:            outboxDir,
-		eventProvider:        eventProvider,
-		scopes:               scopes,
-		websocket:            websocketEnabled,
-		rootCtx:              rootCtx,
-		logger:               opts.Logger,
-		denialLogPath:        filepath.Join(localRoot, ".relay", "permissions-denied.log"),
-		bulkFlushThreshold:   bulkFlushThreshold,
-		mode:                 strings.TrimSpace(opts.Mode),
-		writeOnly:            normalizeSyncMode(opts.SyncMode) == "write-only",
-		interval:             opts.Interval,
-		fullPullEvery:        fullPullEvery,
-		cursorTimeout:        cursorTimeout,
-		exportTimeout:        exportTimeout,
-		outboxFlushTimeout:   outboxFlushTimeout,
-		bootstrapTimeout:     bootstrapTimeout,
-		bootstrapIdleTimeout: bootstrapIdleTimeout,
-		readNotReadyTTL:      readNotReadyTTL,
-		forceFullReconcile:   forceFullReconcile,
-		oversizedLogged:      map[string]struct{}{},
-		quarantinedPaths:     map[string]struct{}{},
-		lazyRepos:            lazyRepos,
-		lowMemory:            lowMemory,
-		layoutRegistrar:      opts.ProviderLayoutRegistrar,
-		githubWorkingTree:    githubWorkingTree,
-		closeScheduler:       closeScheduler,
-		rollingCoalescer:     rollingCoalescer,
-		circuit:              NewCloudErrorCircuit(),
-		maxOutboxAttempts:    defaultOutboxMaxAttempts,
-		nowFn:                opts.Now,
+		client:                client,
+		workspace:             workspace,
+		remoteRoot:            remoteRoot,
+		localRoot:             localRoot,
+		localDir:              localRoot,
+		stateFile:             stateFile,
+		publicStatePath:       publicStatePath,
+		conflictsDir:          conflictsDir,
+		resolvedConflictsDir:  resolvedConflictsDir,
+		deadLetterDir:         deadLetterDir,
+		outboxDir:             outboxDir,
+		eventProvider:         eventProvider,
+		scopes:                scopes,
+		websocket:             websocketEnabled,
+		rootCtx:               rootCtx,
+		logger:                opts.Logger,
+		denialLogPath:         filepath.Join(localRoot, ".relay", "permissions-denied.log"),
+		bulkFlushThreshold:    bulkFlushThreshold,
+		mode:                  strings.TrimSpace(opts.Mode),
+		writeOnly:             normalizeSyncMode(opts.SyncMode) == "write-only",
+		interval:              opts.Interval,
+		fullPullEvery:         fullPullEvery,
+		cursorTimeout:         cursorTimeout,
+		exportTimeout:         exportTimeout,
+		outboxFlushTimeout:    outboxFlushTimeout,
+		bootstrapTimeout:      bootstrapTimeout,
+		bootstrapIdleTimeout:  bootstrapIdleTimeout,
+		readNotReadyTTL:       readNotReadyTTL,
+		forceFullReconcile:    forceFullReconcile,
+		oversizedLogged:       map[string]struct{}{},
+		quarantinedPaths:      map[string]struct{}{},
+		lazyRepos:             lazyRepos,
+		lazySkipUntrackedPush: lazySkipUntrackedPush,
+		lowMemory:             lowMemory,
+		layoutRegistrar:       opts.ProviderLayoutRegistrar,
+		githubWorkingTree:     githubWorkingTree,
+		closeScheduler:        closeScheduler,
+		rollingCoalescer:      rollingCoalescer,
+		circuit:               NewCloudErrorCircuit(),
+		maxOutboxAttempts:     defaultOutboxMaxAttempts,
+		nowFn:                 opts.Now,
 		state: mountState{
 			Files: map[string]trackedFile{},
 		},
@@ -1840,6 +1874,21 @@ func (s *Syncer) preparePendingBulkWrite(
 	tracked trackedFile,
 	exists bool,
 ) (*pendingBulkWrite, error) {
+	// Shared choke point for both push paths: pushLocal (via scanLocalFiles)
+	// and the filesystem-watcher path (HandleLocalChange ->
+	// handleLocalWriteOrCreate -> pushSingleFile). The watcher path never
+	// calls scanLocalFiles, so it cannot rely on snapshot.SkipWriteback —
+	// without this check here, a watcher-delivered write/create event for an
+	// untracked file under a lazy GitHub repo subtree would push regardless
+	// of shouldSkipLazyUntrackedPush. pushLocal already filters these out
+	// earlier via scanLocalFiles's SkipWriteback flag (to avoid a full
+	// content re-read for large pre-pulled files), so for that path this
+	// check is a defense-in-depth no-op and never double-counts the skip.
+	if s.shouldSkipLazyUntrackedPush(remotePath) {
+		s.logLazyUntrackedPushSkipped(remotePath)
+		s.state.Counters.SkippedLazyUntrackedPush++
+		return nil, nil
+	}
 	canWrite := s.canWritePath(remotePath)
 	tracked.ReadOnly = !canWrite
 	if !canWrite {
@@ -5455,6 +5504,16 @@ func (s *Syncer) pushLocal(ctx context.Context) (map[string]struct{}, error) {
 			continue
 		}
 		if snapshot.SkipWriteback {
+			// snapshot.SkipWriteback is a general "don't push this" flag set
+			// by scanLocalFiles for two distinct reasons (oversize body,
+			// lazy-untracked). Recomputing shouldSkipLazyUntrackedPush here
+			// (cheap: no I/O, same inputs as the scan) attributes the
+			// increment to the correct counter only when this is actually
+			// the lazy-untracked reason, and only at the real pushLocal skip
+			// decision — not on every scanLocalFiles call (see scanLocalFiles).
+			if s.shouldSkipLazyUntrackedPush(remotePath) {
+				s.state.Counters.SkippedLazyUntrackedPush++
+			}
 			continue
 		}
 		if exists && !tracked.Dirty {
@@ -5648,6 +5707,18 @@ func (s *Syncer) scanLocalFiles() (map[string]localSnapshot, error) {
 		if err != nil {
 			return err
 		}
+		if s.shouldSkipLazyUntrackedPush(remotePath) {
+			// Only flag the snapshot here; do NOT increment
+			// Counters.SkippedLazyUntrackedPush in this function.
+			// scanLocalFiles also runs from savePublicState (status-display
+			// only, not a push decision), so counting here would inflate the
+			// counter on every state save instead of only on real pushLocal
+			// skip decisions. The counter increments where the skip actually
+			// happens: pushLocal's SkipWriteback check, and
+			// preparePendingBulkWrite for the watcher path.
+			snapshot.SkipWriteback = true
+			s.logLazyUntrackedPushSkipped(remotePath)
+		}
 		results[remotePath] = snapshot
 		return nil
 	})
@@ -5655,6 +5726,201 @@ func (s *Syncer) scanLocalFiles() (map[string]localSnapshot, error) {
 		return nil, err
 	}
 	return results, nil
+}
+
+// githubAdapterCreateCommandPathPatterns enumerate the GitHub Relayfile
+// adapter's writeback command roots that accept an arbitrary (noncanonical)
+// leaf filename to create a new provider record. Each entry's pattern
+// capture group is the leaf id; a leaf that ALSO matches the adapter's
+// canonical id pattern is a materialized record (the adapter's PATCH-by-
+// editing-record surface), not a create command, and must stay classified
+// as non-create so it remains subject to shouldSkipLazyUntrackedPush.
+//
+// Semantics cited to ../relayfile-adapters:
+//   - adapter-core classifyWrite: a path matches a resource's pathPattern,
+//     the leaf id is extracted, and canonical-id-match => "patch" while
+//     non-canonical => "create" (packages/core/src/runtime/file-native-router.ts:148-186).
+//   - issues:                    packages/github/src/writeback.ts:35-36 (ISSUE_WRITEBACK_PATH)
+//     packages/github/src/resources.ts:12-18 (idPattern ^[1-9]\d*$)
+//   - issue comments:            packages/github/src/writeback.ts:41-42 (ISSUE_COMMENT_WRITEBACK_PATH)
+//     packages/github/src/resources.ts:19-26 (idPattern ^(?:meta|\d+)$ — the
+//     literal "meta" leaf, e.g. comments/42/meta.json, is canonical too)
+//   - PR reviews:                packages/github/src/writeback.ts:31-32 (REVIEW_WRITEBACK_PATH)
+//     packages/github/src/resources.ts:27-34 (idPattern ^\d+$)
+//   - PR review-comment replies: packages/github/src/writeback.ts:43-45 (PR_COMMENT_REPLY_WRITEBACK_PATH)
+//     packages/github/src/resources.ts:43-50 (idPattern ^\d+$)
+//
+// merge.json (packages/github/src/writeback.ts:33-34, resources.ts:35-42) has
+// no arbitrary-leaf variant — the leaf is always the literal "merge.json" —
+// so it is matched separately by githubMergeCommandPathPattern below rather
+// than through this table.
+var githubAdapterCreateCommandPathPatterns = []struct {
+	pattern   *regexp.Regexp
+	canonical *regexp.Regexp
+}{
+	{
+		pattern:   regexp.MustCompile(`^github/repos/[^/]+/[^/]+/issues/([^/]+?)(?:\.json)?$`),
+		canonical: regexp.MustCompile(`^[1-9]\d*$`),
+	},
+	{
+		pattern:   regexp.MustCompile(`^github/repos/[^/]+/[^/]+/issues/[1-9]\d*(?:__[^/]+)?/comments/([^/]+?)(?:\.json|/meta\.json)?$`),
+		canonical: regexp.MustCompile(`^(?:meta|\d+)$`),
+	},
+	{
+		pattern:   regexp.MustCompile(`^github/repos/[^/]+/[^/]+/pulls/[1-9]\d*(?:__[^/]+)?/reviews/([^/]+?)(?:\.json)?$`),
+		canonical: regexp.MustCompile(`^\d+$`),
+	},
+	{
+		pattern:   regexp.MustCompile(`^github/repos/[^/]+/[^/]+/pulls/[1-9]\d*(?:__[^/]+)?/review-comments/[1-9]\d*/replies/([^/]+?)(?:\.json)?$`),
+		canonical: regexp.MustCompile(`^\d+$`),
+	},
+}
+
+// githubMergeCommandPathPattern matches the exact merge.json command file
+// (packages/github/src/writeback.ts:33-34). It is always pushable as a
+// create-only command leaf: unlike the other roots it has no numeric-leaf
+// canonical variant of its own (the enclosing PR-number segment is what
+// classifyWrite treats as the id, and a PR number is always numeric —
+// merge.json itself is the fixed command name).
+var githubMergeCommandPathPattern = regexp.MustCompile(`^github/repos/[^/]+/[^/]+/pulls/[1-9]\d*(?:__[^/]+)?/merge\.json$`)
+
+// isGithubAdapterReservedAuxiliaryLeaf reports whether basename is a
+// provider-emitted auxiliary/index payload rather than an agent-authored
+// writeback command. Cloud's pre-pull of a GitHub repo's /issues (and
+// /pulls) root always materializes a resource-level `_index.json`
+// alongside the canonical records (relayfile-adapters
+// packages/github/src/layout-prompt.ts:8-10,24 and
+// emit-auxiliary-files.ts:13-21). That index is a first-class remote
+// payload, not a command: applyRemoteFile passes `_index.json` files and
+// nested `<integration>/.layout.md` dotfiles through unchanged
+// (syncer.go:5242-5244, the comment this function centralizes on). Without
+// this exclusion, `issues/_index.json` has a nonnumeric leaf (`_index`)
+// that would otherwise match the issues create-root pattern below and get
+// pushed as a bogus issue-create — reopening the exact pre-pull hazard this
+// guard exists to close. The exclusion matches EXACT reserved names only —
+// the existing isReservedProviderLayoutSegment literal set (reused rather
+// than duplicated; covers `_index.json` and `LAYOUT.md`). It deliberately
+// does NOT ban `_`/`.` name prefixes: the adapter's create contract has no
+// prefix reservation (adapter-core file-native-router.ts:148-186,637-710
+// reserves only exact `.schema`/`.create.example`/`.adapter`/`.tmp`/
+// `.partial` stem variants), so `issues/_draft.json` or `issues/.draft.json`
+// are VALID create commands that a prefix rule would silently suppress —
+// the over-skip loss class this review rejected twice.
+func isGithubAdapterReservedAuxiliaryLeaf(basename string) bool {
+	if isReservedProviderLayoutSegment(basename) {
+		return true
+	}
+	return isGithubAdapterReservedWritebackStem(basename)
+}
+
+// isGithubAdapterReservedWritebackStem mirrors the adapter runtime's
+// authoritative isReservedWritebackFilename (adapter-core
+// packages/core/src/runtime/file-native-router.ts:695-706): the router
+// explicitly ignores these exact stems and .tmp/.partial suffixes instead of
+// treating them as create commands, so pushing them from a lazy mount would
+// only manufacture the spurious revision/event this guard exists to prevent
+// (cubic P1 on 20c374db). The stem is the basename minus a trailing ".json",
+// exactly like the router computes it. Everything else — including
+// `_draft.json` and `.draft.json` — remains a valid create leaf.
+func isGithubAdapterReservedWritebackStem(basename string) bool {
+	stem := strings.TrimSuffix(basename, ".json")
+	switch stem {
+	case ".schema", ".create.example", ".adapter", ".tmp", ".partial", "partial":
+		return true
+	}
+	return strings.HasSuffix(stem, ".tmp") || strings.HasSuffix(stem, ".partial")
+}
+
+// isGithubAdapterCreateCommandPath reports whether remotePath is a
+// noncanonical (arbitrary-name) leaf under one of the GitHub adapter's
+// create command roots, or the exact merge.json command. See
+// githubAdapterCreateCommandPathPatterns for the adapter contract citations.
+// Numeric/meta canonical leaves — the adapter's PATCH-by-editing-record
+// surface, e.g. pulls/7/reviews/991.json or comments/42/meta.json —
+// deliberately return false: they are materialized records, not commands.
+// Reserved/auxiliary provider payloads (isGithubAdapterReservedAuxiliaryLeaf,
+// e.g. `_index.json`) are excluded before any create-root pattern is
+// consulted, regardless of which root's directory they happen to sit under.
+func isGithubAdapterCreateCommandPath(remotePath string) bool {
+	normalized := strings.TrimPrefix(normalizeRemotePath(remotePath), "/")
+	if isGithubAdapterReservedAuxiliaryLeaf(path.Base(normalized)) {
+		return false
+	}
+	if githubMergeCommandPathPattern.MatchString(normalized) {
+		return true
+	}
+	for _, root := range githubAdapterCreateCommandPathPatterns {
+		match := root.pattern.FindStringSubmatch(normalized)
+		if match == nil {
+			continue
+		}
+		leaf := match[1]
+		return !root.canonical.MatchString(leaf)
+	}
+	return false
+}
+
+// shouldSkipLazyUntrackedPush reports whether a locally-scanned file must be
+// excluded from pushLocal's writeback path because it sits under a lazy
+// GitHub repo subtree (isLazyGithubRepoSubtreePath) that this daemon never
+// tracked in s.state.Files. This happens when a separate, isolated
+// non-lazy pre-pull (its own state file) has already materialized a
+// canonical record under a broad-root daemon's localDir before the lazy
+// daemon's first cycle. Without this guard, scanLocalFiles's untracked-file
+// path treats the pre-pulled record as a brand-new local write and pushLocal
+// pushes it upstream as agent_write — minting a spurious revision,
+// file.updated event, and provider writeback for content the agent never
+// touched.
+//
+// Two independent OR'd exemptions cover real agent-authored writes that must
+// still push even when untracked: (1) isMountWritebackCreateDraftPath, the
+// pre-existing Relayfile-owned `<resource> <uuid>.json` / `factory-create-*`
+// draft contract, and (2) isGithubAdapterCreateCommandPath, the GitHub
+// adapter's actual create-command surface (arbitrary-name leaves under
+// issues/comments/reviews/replies, plus merge.json) — the narrower
+// isMountWritebackCreateDraftPath check alone misses these real command
+// paths (e.g. review-comments/<id>/replies/new-reply.json), which is a
+// blocking gap the first version of this guard had.
+//
+// Accepted trade-off: a numeric/meta canonical leaf under a lazy subtree
+// (e.g. pulls/7/reviews/991.json) is the adapter's PATCH-by-editing-record
+// surface too — an agent editing a pre-pulled canonical record's local copy
+// won't have that edit pushed under a lazy mount. This does not regress
+// anything that works today: that flow is already nonfunctional under lazy
+// mounts (the record never materializes locally in the first place without
+// an external pre-pull). The skip is still logged (logLazyUntrackedPushSkipped)
+// so a future persona author debugging a silent patch gets a breadcrumb.
+// Patch-under-lazy is a follow-up (daemon consulting pre-pull state hashes),
+// not this guard.
+func (s *Syncer) shouldSkipLazyUntrackedPush(remotePath string) bool {
+	if !s.lazyRepos || !s.lazySkipUntrackedPush {
+		return false
+	}
+	if !isUnderLazyGithubRepoSubtree(s.remoteRoot, remotePath) {
+		return false
+	}
+	if _, tracked := s.state.Files[normalizeRemotePath(remotePath)]; tracked {
+		return false
+	}
+	if isMountWritebackCreateDraftPath(remotePath) {
+		return false
+	}
+	return !isGithubAdapterCreateCommandPath(remotePath)
+}
+
+// logLazyUntrackedPushSkipped logs each distinct skipped path only once per
+// process, mirroring the oversizedLogged/controlSkipLogged dedup pattern so a
+// large pre-pulled subtree does not spam the log every sync cycle.
+func (s *Syncer) logLazyUntrackedPushSkipped(remotePath string) {
+	normalized := normalizeRemotePath(remotePath)
+	if s.lazyUntrackedLogged == nil {
+		s.lazyUntrackedLogged = map[string]struct{}{}
+	}
+	if _, seen := s.lazyUntrackedLogged[normalized]; seen {
+		return
+	}
+	s.lazyUntrackedLogged[normalized] = struct{}{}
+	s.logf("skipping untracked local file under lazy GitHub repo subtree: %s (not enqueued for writeback)", normalized)
 }
 
 func normalizeScopes(scopes []string) []string {
