@@ -44,18 +44,19 @@ import (
 )
 
 const (
-	relayfileDefaultVersion = "0.10.17"
-	defaultServerURL        = "https://file.agentrelay.com"
-	defaultCloudAPIURL      = "https://agentrelay.com/cloud"
-	defaultRelaycastAPIURL  = "https://gateway.relaycast.dev"
-	defaultObserverURL      = "https://agentrelay.com/observer/file"
-	minAgentRelayCLIVersion = "8.7.0"
-	configDirName           = ".relayfile"
-	websocketReconcileEvery = 10
-	defaultMountMode        = "poll"
-	defaultMountInterval    = 30 * time.Second
-	minMountPollInterval    = 5 * time.Second
-	defaultMountTimeout     = 15 * time.Second
+	relayfileDefaultVersion                   = "0.10.17"
+	defaultServerURL                          = "https://file.agentrelay.com"
+	defaultCloudAPIURL                        = "https://agentrelay.com/cloud"
+	defaultRelaycastAPIURL                    = "https://gateway.relaycast.dev"
+	defaultObserverURL                        = "https://agentrelay.com/observer/file"
+	minAgentRelayCLIVersion                   = "8.7.0"
+	messagingOnlyRelayfileWorkspaceNameSuffix = " (Relayfile)"
+	configDirName                             = ".relayfile"
+	websocketReconcileEvery                   = 10
+	defaultMountMode                          = "poll"
+	defaultMountInterval                      = 30 * time.Second
+	minMountPollInterval                      = 5 * time.Second
+	defaultMountTimeout                       = 15 * time.Second
 )
 
 var relayfileVersion = relayfileDefaultVersion
@@ -1295,9 +1296,8 @@ func classifyAgentRelayActiveWorkspaceError(err error) error {
 	}
 	detail := err.Error()
 	normalized := strings.ToLower(detail)
-	if !strings.Contains(normalized, "workspace resolve failed") ||
-		!strings.Contains(normalized, "404") ||
-		!strings.Contains(normalized, "workspace not found") {
+	if !strings.Contains(normalized, "resolve failed") ||
+		!strings.Contains(normalized, "404") {
 		return err
 	}
 	match := agentRelayWorkspaceKeyInResolverError.FindStringSubmatch(detail)
@@ -1314,7 +1314,7 @@ func classifyAgentRelayActiveWorkspaceError(err error) error {
 	name, statusCode, validationErr := validateRelaycastWorkspaceKey(ctx, workspaceKey)
 	if validationErr != nil {
 		return fmt.Errorf(
-			"the active Agent Relay workspace could not be resolved through Cloud, and Relayfile could not verify it with Relaycast: %v. Check network connectivity and try again",
+			"the active Agent Relay workspace could not be resolved through Cloud, and Relayfile could not verify it with Relaycast: %w. Check network connectivity and try again",
 			validationErr,
 		)
 	}
@@ -1339,6 +1339,7 @@ func validateRelaycastWorkspaceKey(ctx context.Context, workspaceKey string) (st
 		return "", 0, err
 	}
 	req.Header.Set("Authorization", "Bearer "+workspaceKey)
+	req.Header.Set("User-Agent", "relayfile-cli/"+relayfileVersion)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return "", 0, err
@@ -1983,7 +1984,11 @@ func provisionRelayfileWorkspaceForMessagingOnly(cloud cloudCredentials, name st
 	if name == "" {
 		return workspaceRecord{}, "", errors.New("the messaging-only workspace did not include a name; run `relayfile setup --workspace <name>` to create a separate Relayfile-backed workspace")
 	}
-	record, _, err := ensureWorkspaceForSetup(cloud, name, "")
+	// Keep the Relayfile-backed workspace visually distinct from the original
+	// Relaycast-only workspace. ensureWorkspaceForSetup deduplicates this name
+	// against the local workspace catalog before calling Cloud.
+	provisionedName := name + messagingOnlyRelayfileWorkspaceNameSuffix
+	record, _, err := ensureWorkspaceForSetup(cloud, provisionedName, "")
 	if err != nil {
 		return workspaceRecord{}, "", err
 	}
