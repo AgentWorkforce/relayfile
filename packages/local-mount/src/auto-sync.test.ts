@@ -9,8 +9,9 @@ import {
   writeFileSync,
 } from 'node:fs';
 import os from 'node:os';
+import { spawnSync } from 'node:child_process';
 import path from 'node:path';
-import { createMount } from './mount.js';
+import { attachMount, createMount } from './mount.js';
 
 function tmpDir(): string {
   return mkdtempSync(path.join(os.tmpdir(), 'local-mount-autosync-'));
@@ -425,6 +426,433 @@ describe('startAutoSync', () => {
       await new Promise((r) => setTimeout(r, 300));
       await auto.reconcile();
       expect(existsSync(path.join(projectDir, '_MOUNT_README.md'))).toBe(false);
+    } finally {
+      await auto.stop();
+      handle.cleanup();
+    }
+  });
+});
+
+describe('startAutoSync initial-state seeding', () => {
+  let projectDir: string;
+  let mountParent: string;
+  let mountDir: string;
+
+  beforeEach(() => {
+    projectDir = tmpDir();
+    mountParent = tmpDir();
+    mountDir = path.join(mountParent, 'mount');
+  });
+
+  afterEach(() => {
+    try { rmSync(projectDir, { recursive: true, force: true }); } catch { /* best effort */ }
+    try { rmSync(mountParent, { recursive: true, force: true }); } catch { /* best effort */ }
+  });
+
+  it('project edits made between createMount and startAutoSync win over the stale mount copy', async () => {
+    write(path.join(projectDir, 'file.txt'), 'original');
+
+    const handle = await createMount(projectDir, mountDir, {
+      ignoredPatterns: [],
+      readonlyPatterns: [],
+      excludeDirs: [],
+    });
+
+    // Host-side edit lands after the mount was populated but before autosync
+    // starts. The population-seeded state knows the mount copy matches
+    // "original", so reconcile must classify this as a project-side change —
+    // not fall into the no-history tiebreak that lets the stale mount copy
+    // overwrite the newer project content.
+    await new Promise((r) => setTimeout(r, 20));
+    write(path.join(projectDir, 'file.txt'), 'edited on host');
+
+    const auto = handle.startAutoSync({ debounceMs: 50, scanIntervalMs: 10_000 });
+    await auto.ready();
+    try {
+      await auto.reconcile();
+      expect(readFileSync(path.join(handle.mountDir, 'file.txt'), 'utf8')).toBe('edited on host');
+      expect(readFileSync(path.join(projectDir, 'file.txt'), 'utf8')).toBe('edited on host');
+    } finally {
+      await auto.stop();
+      handle.cleanup();
+    }
+  });
+
+  it('mount-side .git config written before startAutoSync survives reconcile (includeGit)', async () => {
+    write(path.join(projectDir, 'src/code.ts'), 'code');
+    write(path.join(projectDir, '.git/HEAD'), 'ref: refs/heads/main\n');
+    write(path.join(projectDir, '.git/info/exclude'), '# base\n');
+
+    const handle = await createMount(projectDir, mountDir, {
+      ignoredPatterns: [],
+      readonlyPatterns: [],
+      excludeDirs: [],
+      includeGit: true,
+    });
+
+    // Session setup appends to the mount's .git/info/exclude before autosync
+    // starts (e.g. hiding materialized config files from git status). With
+    // seeded state this is a mount-only change on a no-sync-back path: it
+    // must neither flow back nor be clobbered by the project's copy.
+    writeFileSync(
+      path.join(handle.mountDir, '.git/info/exclude'),
+      '# base\n# session additions\n',
+      'utf8'
+    );
+
+    const auto = handle.startAutoSync({ debounceMs: 50, scanIntervalMs: 10_000 });
+    await auto.ready();
+    try {
+      await auto.reconcile();
+      expect(readFileSync(path.join(handle.mountDir, '.git/info/exclude'), 'utf8')).toBe(
+        '# base\n# session additions\n'
+      );
+      expect(readFileSync(path.join(projectDir, '.git/info/exclude'), 'utf8')).toBe('# base\n');
+    } finally {
+      await auto.stop();
+      handle.cleanup();
+    }
+  });
+});
+
+describe('attachMount warm reuse', () => {
+  let projectDir: string;
+  let mountParent: string;
+  let mountDir: string;
+
+  beforeEach(() => {
+    projectDir = tmpDir();
+    mountParent = tmpDir();
+    mountDir = path.join(mountParent, 'mount');
+  });
+
+  afterEach(() => {
+    try { rmSync(projectDir, { recursive: true, force: true }); } catch { /* best effort */ }
+    try { rmSync(mountParent, { recursive: true, force: true }); } catch { /* best effort */ }
+  });
+
+  const mountOptions = {
+    ignoredPatterns: [],
+    readonlyPatterns: [],
+    excludeDirs: [],
+  };
+
+  it('refuses a directory without the mount marker', async () => {
+    mkdirSync(mountDir, { recursive: true });
+    await expect(attachMount(projectDir, mountDir, mountOptions)).rejects.toThrow(/marker/);
+  });
+
+  it('round-trip: exportState → attachMount propagates project-side deletes instead of resurrecting', async () => {
+    write(path.join(projectDir, 'keep.txt'), 'keep');
+    write(path.join(projectDir, 'gone.txt'), 'doomed');
+
+    // Session 1: create, capture state, keep the mount dir.
+    const first = await createMount(projectDir, mountDir, mountOptions);
+    const auto1 = first.startAutoSync({ debounceMs: 50, scanIntervalMs: 10_000 });
+    await auto1.ready();
+    await auto1.reconcile();
+    const state = auto1.exportState();
+    await auto1.stop();
+    expect(Object.keys(state)).toContain('gone.txt');
+    // Intentionally no cleanup(): the mount dir is being kept warm.
+
+    // Between sessions: the file disappears from the project.
+    rmSync(path.join(projectDir, 'gone.txt'));
+
+    // Session 2: reattach with the exported state.
+    const second = await attachMount(projectDir, mountDir, {
+      ...mountOptions,
+      initialState: state,
+    });
+    expect(second.population).toBe('reattach');
+    const auto2 = second.startAutoSync({ debounceMs: 50, scanIntervalMs: 10_000 });
+    await auto2.ready();
+    try {
+      await auto2.reconcile();
+      // With state: recognized as a project-side delete → removed from mount.
+      expect(existsSync(path.join(second.mountDir, 'gone.txt'))).toBe(false);
+      expect(existsSync(path.join(projectDir, 'gone.txt'))).toBe(false);
+      expect(readFileSync(path.join(second.mountDir, 'keep.txt'), 'utf8')).toBe('keep');
+    } finally {
+      await auto2.stop();
+      second.cleanup();
+    }
+  });
+
+  it('reattach without exported state resurrects deletes (documents why state matters)', async () => {
+    write(path.join(projectDir, 'gone.txt'), 'doomed');
+
+    const first = await createMount(projectDir, mountDir, mountOptions);
+    // No autosync, no state export — simulate a naive reuse.
+    rmSync(path.join(projectDir, 'gone.txt'));
+
+    const second = await attachMount(projectDir, mountDir, mountOptions);
+    const auto = second.startAutoSync({ debounceMs: 50, scanIntervalMs: 10_000 });
+    await auto.ready();
+    try {
+      await auto.reconcile();
+      // Mount-only file with no history → treated as created in the mount.
+      expect(existsSync(path.join(projectDir, 'gone.txt'))).toBe(true);
+    } finally {
+      await auto.stop();
+      second.cleanup();
+      void first;
+    }
+  });
+
+  it('reattach picks up project-side edits made while the mount sat idle', async () => {
+    write(path.join(projectDir, 'file.txt'), 'v1');
+
+    const first = await createMount(projectDir, mountDir, mountOptions);
+    const auto1 = first.startAutoSync({ debounceMs: 50, scanIntervalMs: 10_000 });
+    await auto1.ready();
+    await auto1.reconcile();
+    const state = auto1.exportState();
+    await auto1.stop();
+
+    await new Promise((r) => setTimeout(r, 20));
+    write(path.join(projectDir, 'file.txt'), 'v2 from host');
+    write(path.join(projectDir, 'new-file.txt'), 'brand new');
+
+    const second = await attachMount(projectDir, mountDir, {
+      ...mountOptions,
+      initialState: state,
+    });
+    const auto2 = second.startAutoSync({ debounceMs: 50, scanIntervalMs: 10_000 });
+    await auto2.ready();
+    try {
+      await auto2.reconcile();
+      expect(readFileSync(path.join(second.mountDir, 'file.txt'), 'utf8')).toBe('v2 from host');
+      expect(readFileSync(path.join(second.mountDir, 'new-file.txt'), 'utf8')).toBe('brand new');
+    } finally {
+      await auto2.stop();
+      second.cleanup();
+    }
+  });
+});
+
+describe('git population sync semantics', () => {
+  let projectDir: string;
+  let mountParent: string;
+  let mountDir: string;
+
+  beforeEach(() => {
+    projectDir = tmpDir();
+    mountParent = tmpDir();
+    mountDir = path.join(mountParent, 'mount');
+  });
+
+  afterEach(() => {
+    try { rmSync(projectDir, { recursive: true, force: true }); } catch { /* best effort */ }
+    try { rmSync(mountParent, { recursive: true, force: true }); } catch { /* best effort */ }
+  });
+
+  function git(...args: string[]): void {
+    const res = spawnSync('git', ['-C', projectDir, ...args]);
+    if (res.status !== 0) {
+      throw new Error(`git ${args.join(' ')} failed: ${res.stderr?.toString()}`);
+    }
+  }
+
+  it('reconcile does not import gitignored trees into a git-populated mount', async () => {
+    git('init', '--quiet');
+    git('config', 'user.email', 'test@example.com');
+    git('config', 'user.name', 'Test');
+    write(path.join(projectDir, 'src/code.ts'), 'code');
+    write(path.join(projectDir, '.gitignore'), 'junk/\n');
+    git('add', '-A');
+    git('commit', '--quiet', '-m', 'init');
+    // Gitignored tree that only the gitignore knows about (not a default
+    // exclude, not a caller pattern).
+    write(path.join(projectDir, 'junk/worktrees/big.txt'), 'x'.repeat(500));
+
+    const handle = await createMount(projectDir, mountDir, {
+      ignoredPatterns: [],
+      readonlyPatterns: [],
+      excludeDirs: [],
+      population: 'git',
+    });
+    expect(existsSync(path.join(handle.mountDir, 'junk'))).toBe(false);
+
+    const auto = handle.startAutoSync({ debounceMs: 50, scanIntervalMs: 10_000 });
+    await auto.ready();
+    try {
+      const changes = await auto.reconcile();
+      // The gitignored tree must not be pulled into the mount by the
+      // project-side reconcile walk.
+      expect(existsSync(path.join(handle.mountDir, 'junk'))).toBe(false);
+      expect(changes).toBe(0);
+    } finally {
+      await auto.stop();
+      handle.cleanup();
+    }
+  });
+
+  it('syncBack ignores gitignored files an agent created inside the mount', async () => {
+    git('init', '--quiet');
+    git('config', 'user.email', 'test@example.com');
+    git('config', 'user.name', 'Test');
+    write(path.join(projectDir, 'src/code.ts'), 'code');
+    write(path.join(projectDir, '.gitignore'), 'scratch/\n');
+    git('add', '-A');
+    git('commit', '--quiet', '-m', 'init');
+
+    const handle = await createMount(projectDir, mountDir, {
+      ignoredPatterns: [],
+      readonlyPatterns: [],
+      excludeDirs: [],
+      population: 'git',
+    });
+
+    write(path.join(handle.mountDir, 'scratch/tmp.txt'), 'session-local');
+    write(path.join(handle.mountDir, 'src/new.ts'), 'real work');
+    const synced = await handle.syncBack();
+
+    expect(synced).toBe(1);
+    expect(existsSync(path.join(projectDir, 'scratch'))).toBe(false);
+    expect(readFileSync(path.join(projectDir, 'src/new.ts'), 'utf8')).toBe('real work');
+
+    handle.cleanup();
+  });
+
+  it('tracked-but-gitignored files stay mounted and synced (exception to gitignore rules)', async () => {
+    git('init', '--quiet');
+    git('config', 'user.email', 'test@example.com');
+    git('config', 'user.name', 'Test');
+    write(path.join(projectDir, 'src/code.ts'), 'code');
+    write(path.join(projectDir, 'forced.log'), 'tracked despite ignore');
+    write(path.join(projectDir, '.gitignore'), '*.log\n');
+    git('add', '-A');
+    git('add', '-f', 'forced.log');
+    git('commit', '--quiet', '-m', 'init');
+    // Untracked file the same rule ignores — must stay out of the mount.
+    write(path.join(projectDir, 'scratch.log'), 'untracked junk');
+
+    const handle = await createMount(projectDir, mountDir, {
+      ignoredPatterns: [],
+      readonlyPatterns: [],
+      excludeDirs: [],
+      population: 'git',
+    });
+
+    expect(handle.population).toBe('git');
+    // Git syncs forced-added files regardless of gitignore; so do we.
+    expect(existsSync(path.join(handle.mountDir, 'forced.log'))).toBe(true);
+    expect(existsSync(path.join(handle.mountDir, 'scratch.log'))).toBe(false);
+
+    // And edits to it inside the mount flow back on syncBack.
+    writeFileSync(path.join(handle.mountDir, 'forced.log'), 'edited in mount', 'utf8');
+    const synced = await handle.syncBack();
+    expect(synced).toBe(1);
+    expect(readFileSync(path.join(projectDir, 'forced.log'), 'utf8')).toBe('edited in mount');
+
+    handle.cleanup();
+  });
+
+  it('falls back to walk when caller patterns contain negations', async () => {
+    git('init', '--quiet');
+    git('config', 'user.email', 'test@example.com');
+    git('config', 'user.name', 'Test');
+    write(path.join(projectDir, 'src/code.ts'), 'code');
+    git('add', '-A');
+    git('commit', '--quiet', '-m', 'init');
+
+    const handle = await createMount(projectDir, mountDir, {
+      ignoredPatterns: ['/*', '!src'],
+      readonlyPatterns: [],
+      excludeDirs: [],
+      population: 'auto',
+    });
+
+    expect(handle.population).toBe('walk');
+    handle.cleanup();
+  });
+});
+
+describe('external teardown safety', () => {
+  let projectDir: string;
+  let mountParent: string;
+  let mountDir: string;
+
+  beforeEach(() => {
+    projectDir = tmpDir();
+    mountParent = tmpDir();
+    mountDir = path.join(mountParent, 'mount');
+  });
+
+  afterEach(() => {
+    try { rmSync(projectDir, { recursive: true, force: true }); } catch { /* best effort */ }
+    try { rmSync(mountParent, { recursive: true, force: true }); } catch { /* best effort */ }
+  });
+
+  it('a mount torn down externally never mass-deletes the project', async () => {
+    write(path.join(projectDir, 'src/a.ts'), 'a');
+    write(path.join(projectDir, 'src/b.ts'), 'b');
+    write(path.join(projectDir, 'README.md'), 'readme');
+
+    const handle = await createMount(projectDir, mountDir, {
+      ignoredPatterns: [],
+      readonlyPatterns: [],
+      excludeDirs: [],
+    });
+    const auto = handle.startAutoSync({ debounceMs: 50, scanIntervalMs: 10_000 });
+    await auto.ready();
+    try {
+      // Simulate a crash-cleanup / manual rm of the live session's mount.
+      rmSync(handle.mountDir, { recursive: true, force: true });
+      await auto.reconcile();
+
+      // Every project file must survive: the vanished mount is a teardown,
+      // not an agent deleting each file.
+      expect(readFileSync(path.join(projectDir, 'src/a.ts'), 'utf8')).toBe('a');
+      expect(readFileSync(path.join(projectDir, 'src/b.ts'), 'utf8')).toBe('b');
+      expect(readFileSync(path.join(projectDir, 'README.md'), 'utf8')).toBe('readme');
+    } finally {
+      await auto.stop();
+      handle.cleanup();
+    }
+  });
+
+  it('a project tree that vanishes never empties the mount', async () => {
+    write(path.join(projectDir, 'src/a.ts'), 'agent work in progress');
+
+    const handle = await createMount(projectDir, mountDir, {
+      ignoredPatterns: [],
+      readonlyPatterns: [],
+      excludeDirs: [],
+    });
+    const auto = handle.startAutoSync({ debounceMs: 50, scanIntervalMs: 10_000 });
+    await auto.ready();
+    try {
+      rmSync(projectDir, { recursive: true, force: true });
+      await auto.reconcile();
+
+      expect(readFileSync(path.join(handle.mountDir, 'src/a.ts'), 'utf8')).toBe(
+        'agent work in progress'
+      );
+    } finally {
+      await auto.stop();
+      handle.cleanup();
+    }
+  });
+
+  it('single-file deletes still propagate while both roots are intact', async () => {
+    write(path.join(projectDir, 'keep.txt'), 'keep');
+    write(path.join(projectDir, 'gone.txt'), 'doomed');
+
+    const handle = await createMount(projectDir, mountDir, {
+      ignoredPatterns: [],
+      readonlyPatterns: [],
+      excludeDirs: [],
+    });
+    const auto = handle.startAutoSync({ debounceMs: 50, scanIntervalMs: 10_000 });
+    await auto.ready();
+    try {
+      // Agent deletes one file inside the live mount → propagates.
+      rmSync(path.join(handle.mountDir, 'gone.txt'));
+      await auto.reconcile();
+      expect(existsSync(path.join(projectDir, 'gone.txt'))).toBe(false);
+      expect(existsSync(path.join(projectDir, 'keep.txt'))).toBe(true);
     } finally {
       await auto.stop();
       handle.cleanup();

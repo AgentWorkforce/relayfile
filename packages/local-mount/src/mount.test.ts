@@ -6,9 +6,11 @@ import {
   readFileSync,
   rmSync,
   statSync,
+  utimesSync,
   writeFileSync,
   existsSync,
 } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
 import { createMount } from './mount.js';
@@ -443,4 +445,201 @@ describe('createMount', () => {
     expect(ticks).toBeGreaterThanOrEqual(2);
     handle.cleanup();
   }, 10_000);
+});
+
+describe('createMount population modes', () => {
+  let projectDir: string;
+  let mountDir: string;
+
+  beforeEach(() => {
+    projectDir = tmpDir();
+    mountDir = path.join(tmpDir(), 'mount');
+  });
+
+  afterEach(() => {
+    try { rmSync(projectDir, { recursive: true, force: true }); } catch { /* best effort */ }
+    try { rmSync(mountDir, { recursive: true, force: true }); } catch { /* best effort */ }
+    try { rmSync(path.dirname(mountDir), { recursive: true, force: true }); } catch { /* best effort */ }
+  });
+
+  function git(...args: string[]): void {
+    const res = spawnSync('git', ['-C', projectDir, ...args]);
+    if (res.status !== 0) {
+      throw new Error(`git ${args.join(' ')} failed: ${res.stderr?.toString()}`);
+    }
+  }
+
+  function initGitProject(): void {
+    git('init', '--quiet');
+    git('config', 'user.email', 'test@example.com');
+    git('config', 'user.name', 'Test');
+  }
+
+  it("population 'git': mounts tracked + untracked-unignored, skips gitignored at any depth", async () => {
+    initGitProject();
+    write(path.join(projectDir, 'src/code.ts'), 'code');
+    write(path.join(projectDir, '.gitignore'), 'generated/\n');
+    git('add', '-A');
+    git('commit', '--quiet', '-m', 'init');
+    // Untracked but not ignored → belongs in the mount.
+    write(path.join(projectDir, 'notes.md'), 'wip');
+    // Gitignored nested tree the default excludes don't know about.
+    write(path.join(projectDir, 'tools/generated/bundle.js'), 'x'.repeat(1000));
+
+    const handle = await createMount(projectDir, mountDir, {
+      ignoredPatterns: [],
+      readonlyPatterns: [],
+      excludeDirs: [],
+      population: 'git',
+    });
+
+    expect(handle.population).toBe('git');
+    expect(existsSync(path.join(handle.mountDir, 'src/code.ts'))).toBe(true);
+    expect(existsSync(path.join(handle.mountDir, 'notes.md'))).toBe(true);
+    expect(existsSync(path.join(handle.mountDir, '.gitignore'))).toBe(true);
+    expect(existsSync(path.join(handle.mountDir, 'tools/generated'))).toBe(false);
+    // .git not requested → absent.
+    expect(existsSync(path.join(handle.mountDir, '.git'))).toBe(false);
+
+    handle.cleanup();
+  });
+
+  it("population 'git': caller ignoredPatterns still hide files", async () => {
+    initGitProject();
+    write(path.join(projectDir, 'src/code.ts'), 'code');
+    write(path.join(projectDir, 'secrets/api-key.txt'), 'shhh');
+    git('add', '-A');
+    git('commit', '--quiet', '-m', 'init');
+
+    const handle = await createMount(projectDir, mountDir, {
+      ignoredPatterns: ['secrets/'],
+      readonlyPatterns: [],
+      excludeDirs: [],
+      population: 'git',
+    });
+
+    expect(existsSync(path.join(handle.mountDir, 'src/code.ts'))).toBe(true);
+    expect(existsSync(path.join(handle.mountDir, 'secrets'))).toBe(false);
+
+    handle.cleanup();
+  });
+
+  it("population 'git' + includeGit: clones .git with working git state, still no sync-back", async () => {
+    initGitProject();
+    write(path.join(projectDir, 'src/code.ts'), 'code');
+    git('add', '-A');
+    git('commit', '--quiet', '-m', 'init');
+
+    const handle = await createMount(projectDir, mountDir, {
+      ignoredPatterns: [],
+      readonlyPatterns: [],
+      excludeDirs: [],
+      includeGit: true,
+      population: 'git',
+    });
+
+    expect(handle.population).toBe('git');
+    expect(existsSync(path.join(handle.mountDir, '.git/HEAD'))).toBe(true);
+    // git must be functional inside the mount.
+    const status = spawnSync('git', ['-C', handle.mountDir, 'status', '--porcelain']);
+    expect(status.status).toBe(0);
+
+    // Mount-side .git mutations never reach the project.
+    writeFileSync(path.join(handle.mountDir, '.git/test-marker'), 'sandboxed', 'utf8');
+    await handle.syncBack();
+    expect(existsSync(path.join(projectDir, '.git/test-marker'))).toBe(false);
+
+    handle.cleanup();
+  });
+
+  it("population 'auto': falls back to walk for non-git projects", async () => {
+    write(path.join(projectDir, 'src/code.ts'), 'code');
+
+    const handle = await createMount(projectDir, mountDir, {
+      ignoredPatterns: [],
+      readonlyPatterns: [],
+      excludeDirs: [],
+      population: 'auto',
+    });
+
+    expect(handle.population).toBe('walk');
+    expect(existsSync(path.join(handle.mountDir, 'src/code.ts'))).toBe(true);
+
+    handle.cleanup();
+  });
+
+  it("population 'git': throws for non-git projects", async () => {
+    write(path.join(projectDir, 'src/code.ts'), 'code');
+
+    await expect(
+      createMount(projectDir, mountDir, {
+        ignoredPatterns: [],
+        readonlyPatterns: [],
+        excludeDirs: [],
+        population: 'git',
+      })
+    ).rejects.toThrow(/git checkout/);
+  });
+
+  it("population 'auto' + includeGit: ignored patterns targeting .git fall back to walk", async () => {
+    initGitProject();
+    write(path.join(projectDir, 'src/code.ts'), 'code');
+    git('add', '-A');
+    git('commit', '--quiet', '-m', 'init');
+
+    const handle = await createMount(projectDir, mountDir, {
+      ignoredPatterns: ['.git/hooks'],
+      readonlyPatterns: [],
+      excludeDirs: [],
+      includeGit: true,
+      population: 'auto',
+    });
+
+    expect(handle.population).toBe('walk');
+    handle.cleanup();
+  });
+
+  it('population preserves source mtimes onto mount copies', async () => {
+    initGitProject();
+    const src = path.join(projectDir, 'src/code.ts');
+    write(src, 'code');
+    git('add', '-A');
+    git('commit', '--quiet', '-m', 'init');
+    // Backdate so the copy visibly differs from "now".
+    const past = new Date(Date.now() - 60_000);
+    utimesSync(src, past, past);
+    const projectStat = statSync(src);
+
+    const handle = await createMount(projectDir, mountDir, {
+      ignoredPatterns: [],
+      readonlyPatterns: [],
+      excludeDirs: [],
+      population: 'git',
+    });
+
+    const mountStat = statSync(path.join(handle.mountDir, 'src/code.ts'));
+    expect(Math.abs(mountStat.mtimeMs - projectStat.mtimeMs)).toBeLessThanOrEqual(2);
+
+    handle.cleanup();
+  });
+
+  it('walk population also preserves mtimes and reports population=walk', async () => {
+    const src = path.join(projectDir, 'src/code.ts');
+    write(src, 'code');
+    const past = new Date(Date.now() - 60_000);
+    utimesSync(src, past, past);
+    const projectStat = statSync(src);
+
+    const handle = await createMount(projectDir, mountDir, {
+      ignoredPatterns: [],
+      readonlyPatterns: [],
+      excludeDirs: [],
+    });
+
+    expect(handle.population).toBe('walk');
+    const mountStat = statSync(path.join(handle.mountDir, 'src/code.ts'));
+    expect(Math.abs(mountStat.mtimeMs - projectStat.mtimeMs)).toBeLessThanOrEqual(2);
+
+    handle.cleanup();
+  });
 });

@@ -2,6 +2,7 @@ import {
   chmodSync,
   constants as fsConstants,
   copyFileSync,
+  cpSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -13,6 +14,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import type { Stats } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import ignore, { type Ignore } from 'ignore';
 import path from 'node:path';
 import {
@@ -20,7 +22,9 @@ import {
   type AutoSyncContext,
   type AutoSyncHandle,
   type AutoSyncOptions,
+  type FileState,
 } from './auto-sync.js';
+import { preserveMtime, statsImplySameContent } from './stat-compare.js';
 
 export interface MountOptions {
   ignoredPatterns: string[];
@@ -50,12 +54,38 @@ export interface MountOptions {
    * excluded unless `includeGit` is true, even when this is false.
    */
   includeDefaultExcludeDirs?: boolean;
+  /**
+   * How the initial mount population enumerates project files.
+   *
+   * - `'walk'` (default): recursive directory walk honoring the exclude and
+   *   ignore rules. Copies every non-excluded file it encounters, including
+   *   gitignored build outputs and caches the default excludes don't cover.
+   * - `'git'`: enumerate via `git ls-files --cached --others
+   *   --exclude-standard` — exactly the tracked plus untracked-unignored
+   *   set, so gitignored trees (nested caches, worktrees, build outputs at
+   *   any depth) never enter the mount. Exclude and ignore rules still apply
+   *   on top. Throws if the project is not a usable git checkout.
+   * - `'auto'`: `'git'` when the project has a `.git`, no `.gitmodules`, and
+   *   `git ls-files` succeeds; silently falls back to `'walk'` otherwise.
+   *
+   * With `includeGit: true`, git-list population copies `.git` as one
+   * timestamp-preserving bulk clone (copy-on-write where the filesystem
+   * supports it) instead of walking it file-by-file. When any ignored or
+   * readonly pattern targets `.git` itself, population falls back to
+   * `'walk'` so those patterns keep applying inside `.git`.
+   */
+  population?: 'walk' | 'git' | 'auto';
 }
 
 export interface MountHandle {
   mountDir: string;
   initialFileCount?: number;
   initialMountDurationMs?: number;
+  /**
+   * Which population strategy actually ran (after `'auto'` resolution), or
+   * `'reattach'` for handles from {@link attachMount}.
+   */
+  population: 'git' | 'walk' | 'reattach';
   syncBack(opts?: { signal?: AbortSignal; paths?: Iterable<string> }): Promise<number>;
   /**
    * Start bidirectional auto-sync: watches both the mount and project trees
@@ -85,6 +115,13 @@ const DEFAULT_ANY_DEPTH_EXCLUDES = [
   '.turbo',
   '.cache',
   '.DS_Store',
+  // Virtualenvs are never mount material and routinely nest below the root
+  // (e.g. packages/*/py/.venv). They also self-ignore via an internal
+  // `.gitignore` that root-level rules never see, so without an any-depth
+  // exclude the sync layers would happily mirror thousands of interpreter
+  // files.
+  '.venv',
+  'venv',
 ];
 
 const DEFAULT_ROOT_EXCLUDES = [
@@ -93,8 +130,6 @@ const DEFAULT_ROOT_EXCLUDES = [
   'dist',
   'build',
   'out',
-  '.venv',
-  'venv',
   'env',
   'coverage',
 ];
@@ -114,7 +149,6 @@ export async function createMount(
   const ignoredPatterns = [...options.ignoredPatterns];
   const includeGit = options.includeGit === true;
   const readonlyMatcher = createPathMatcher(readonlyPatterns);
-  const ignoredMatcher = createPathMatcher(ignoredPatterns);
   const includeDefaultExcludeDirs = options.includeDefaultExcludeDirs !== false;
   // `.git` is in the default any-depth excludes so the mount stays small and git
   // operations don't accidentally cross-mutate the host repo. When the caller
@@ -123,6 +157,25 @@ export async function createMount(
   const excludeRules = createExcludeRules(options.excludeDirs, includeGit, includeDefaultExcludeDirs);
   const noSyncBackPatterns = includeGit ? ['.git', '.git/**'] : [];
   const noSyncBackMatcher = createPathMatcher(noSyncBackPatterns);
+
+  const requestedPopulation = options.population ?? 'walk';
+  const gitPopulation =
+    requestedPopulation !== 'walk'
+      ? prepareGitPopulation(resolvedProjectDir, ignoredPatterns, readonlyPatterns, includeGit)
+      : null;
+  if (requestedPopulation === 'git' && gitPopulation === null) {
+    throw new Error(
+      `population: 'git' requires a plain git checkout at ${resolvedProjectDir} ` +
+        '(no submodules, no tracked-but-gitignored files, no pattern negations, ' +
+        "no ignored/readonly patterns targeting '.git')"
+    );
+  }
+  const population: 'git' | 'walk' = gitPopulation === null ? 'walk' : 'git';
+  // Git-list population must keep the *sync* layers in agreement with what it
+  // mounted: gitignored files never enter the mount, so reconcile/syncBack
+  // must treat them as ignored too or the first full reconcile would copy
+  // every gitignored tree into the mount after all.
+  const isIgnored = buildIgnoredPredicate(createPathMatcher(ignoredPatterns), gitPopulation);
 
   // Guard against mountDir === projectDir. We compare both the realpath'd
   // project dir and the plain resolved project dir so callers that pass the
@@ -143,15 +196,37 @@ export async function createMount(
   writeFileSync(path.join(realMountDir, MOUNT_MARKER_FILENAME), MOUNT_MARKER_CONTENT, 'utf8');
 
   const initialMountStartedAt = Date.now();
-  const initialFileCount = await walkProjectTree(
-    resolvedProjectDir,
-    resolvedProjectDir,
-    realMountDir,
-    realMountDir,
-    excludeRules,
-    readonlyMatcher,
-    ignoredMatcher
-  );
+  // Sync state seeded during population: every copy records both sides'
+  // mtimes, so autosync can skip its full-tree content-comparison priming
+  // pass — the copy loop already proved the two sides identical.
+  const initialState = new Map<string, FileState>();
+
+  let initialFileCount: number;
+  if (gitPopulation !== null) {
+    initialFileCount = await populateFromGitFileList(
+      resolvedProjectDir,
+      realMountDir,
+      gitPopulation.files,
+      excludeRules,
+      readonlyMatcher,
+      isIgnored,
+      initialState
+    );
+    if (includeGit) {
+      initialFileCount += cloneGitInto(resolvedProjectDir, realMountDir);
+    }
+  } else {
+    initialFileCount = await walkProjectTree(
+      resolvedProjectDir,
+      resolvedProjectDir,
+      realMountDir,
+      realMountDir,
+      excludeRules,
+      readonlyMatcher,
+      isIgnored,
+      initialState
+    );
+  }
   const initialMountDurationMs = Date.now() - initialMountStartedAt;
 
   const readmePath = resolveSafeCopyTarget(realMountDir, path.join(realMountDir, MOUNT_README_FILENAME));
@@ -165,30 +240,149 @@ export async function createMount(
     'utf8'
   );
 
+  return buildMountHandle({
+    resolvedProjectDir,
+    resolvedMountDir,
+    realMountDir,
+    excludeRules,
+    readonlyMatcher,
+    isIgnored,
+    noSyncBackMatcher,
+    initialState,
+    initialFileCount,
+    initialMountDurationMs,
+    population,
+  });
+}
+
+/**
+ * Reattach to a mount directory a previous `createMount` populated (and a
+ * previous session left behind) without wiping or re-copying anything.
+ *
+ * The caller owns correctness of the reuse: pass the same patterns the mount
+ * was created with, and pass `initialState` from a prior
+ * `AutoSyncHandle.exportState()` so the first reconcile can tell "unchanged
+ * since last session" from "changed on one side" — without it, files deleted
+ * from the project while the mount sat idle would be treated as new
+ * mount-side creations and resurrected. Refuses directories that don't carry
+ * the mount marker.
+ */
+export async function attachMount(
+  projectDir: string,
+  mountDir: string,
+  options: MountOptions & { initialState?: Record<string, FileState> }
+): Promise<MountHandle> {
+  const resolvedProjectDir = realpathSync(projectDir);
+  const resolvedMountDir = path.resolve(mountDir);
+  const readonlyPatterns = [...options.readonlyPatterns];
+  const ignoredPatterns = [...options.ignoredPatterns];
+  const includeGit = options.includeGit === true;
+  const readonlyMatcher = createPathMatcher(readonlyPatterns);
+  // A reattached mount must ignore exactly what its population did: when the
+  // caller requests git-mode semantics, re-derive the same gitignore-aware
+  // predicate (the guards re-run too, so a repo that has since grown
+  // submodules degrades to plain caller patterns — matching what a fresh
+  // createMount would do).
+  const gitPopulation =
+    (options.population ?? 'walk') !== 'walk'
+      ? prepareGitPopulation(resolvedProjectDir, ignoredPatterns, readonlyPatterns, includeGit)
+      : null;
+  const isIgnored = buildIgnoredPredicate(createPathMatcher(ignoredPatterns), gitPopulation);
+  const includeDefaultExcludeDirs = options.includeDefaultExcludeDirs !== false;
+  const excludeRules = createExcludeRules(options.excludeDirs, includeGit, includeDefaultExcludeDirs);
+  const noSyncBackPatterns = includeGit ? ['.git', '.git/**'] : [];
+  const noSyncBackMatcher = createPathMatcher(noSyncBackPatterns);
+
+  if (
+    resolvedMountDir === resolvedProjectDir ||
+    resolvedMountDir === path.resolve(projectDir)
+  ) {
+    throw new Error('mountDir must be different from projectDir');
+  }
+  const markerPath = path.join(resolvedMountDir, MOUNT_MARKER_FILENAME);
+  if (!existsSync(markerPath)) {
+    throw new Error(
+      `attachMount: ${resolvedMountDir} is missing the ${MOUNT_MARKER_FILENAME} marker; ` +
+        'only directories previously populated by createMount can be reattached.'
+    );
+  }
+  const realMountDir = realpathSync(resolvedMountDir);
+
+  const initialState = new Map<string, FileState>(
+    Object.entries(options.initialState ?? {})
+  );
+
+  return buildMountHandle({
+    resolvedProjectDir,
+    resolvedMountDir,
+    realMountDir,
+    excludeRules,
+    readonlyMatcher,
+    isIgnored,
+    noSyncBackMatcher,
+    initialState,
+    population: 'reattach',
+  });
+}
+
+function buildMountHandle(input: {
+  resolvedProjectDir: string;
+  resolvedMountDir: string;
+  realMountDir: string;
+  excludeRules: ExcludeRules;
+  readonlyMatcher: Ignore;
+  isIgnored: IgnoredPredicate;
+  noSyncBackMatcher: Ignore;
+  initialState: Map<string, FileState>;
+  initialFileCount?: number;
+  initialMountDurationMs?: number;
+  population: 'git' | 'walk' | 'reattach';
+}): MountHandle {
+  const {
+    resolvedProjectDir,
+    resolvedMountDir,
+    realMountDir,
+    excludeRules,
+    readonlyMatcher,
+    isIgnored,
+    noSyncBackMatcher,
+    initialState,
+  } = input;
+
   const autoSyncContext: AutoSyncContext = {
     realMountDir,
     realProjectDir: resolvedProjectDir,
     isExcluded: (relPosix) => isExcludedPath(relPosix, excludeRules),
     excludedAnyDepthNames: [...excludeRules.anyDepthNames],
     excludedRootPrefixes: [...excludeRules.rootPrefixes],
-    isIgnored: (relPosix, isDir) => isPathMatched(relPosix, ignoredMatcher, isDir),
+    isIgnored,
     isReadonly: (relPosix) => isPathMatched(relPosix, readonlyMatcher),
     isNoSyncBack: (relPosix) => isPathMatched(relPosix, noSyncBackMatcher),
     isReservedFile: (relPosix) =>
       relPosix === MOUNT_README_FILENAME || relPosix === MOUNT_MARKER_FILENAME,
+    mountRootIntact: () =>
+      existsSync(path.join(realMountDir, MOUNT_MARKER_FILENAME)),
+    projectRootIntact: () => existsSync(resolvedProjectDir),
+    initialState,
   };
 
   return {
     mountDir: resolvedMountDir,
-    initialFileCount,
-    initialMountDurationMs,
+    initialFileCount: input.initialFileCount,
+    initialMountDurationMs: input.initialMountDurationMs,
+    population: input.population,
     async syncBack(opts?: { signal?: AbortSignal; paths?: Iterable<string> }): Promise<number> {
       let synced = 0;
       const realProjectDir = realpathSync(resolvedProjectDir);
       const realMountDir = realpathSync(resolvedMountDir);
+      // No-sync-back subtrees (`.git/**` under includeGit) can never produce
+      // a sync, so don't descend into them at all — `.git` alone is often
+      // thousands of entries.
       const files = opts?.paths
         ? syncBackPathsToFiles(realMountDir, opts.paths)
-        : listFiles(realMountDir);
+        : listFiles(realMountDir, (relPosix) =>
+            isPathMatched(relPosix, noSyncBackMatcher, true)
+          );
       const signal = opts?.signal;
 
       for (const sourceFile of files) {
@@ -201,7 +395,7 @@ export async function createMount(
           realMountDir,
           realProjectDir,
           readonlyMatcher,
-          ignoredMatcher,
+          isIgnored,
           noSyncBackMatcher,
           (relPosix) => isExcludedPath(relPosix, excludeRules)
         );
@@ -284,7 +478,8 @@ async function walkProjectTree(
   currentMountDir: string,
   excludeRules: ExcludeRules,
   readonlyMatcher: Ignore,
-  ignoredMatcher: Ignore
+  isIgnored: IgnoredPredicate,
+  state: Map<string, FileState>
 ): Promise<number> {
   await yieldToEventLoop();
   const entries = readdirSync(currentDir, { withFileTypes: true });
@@ -312,7 +507,7 @@ async function walkProjectTree(
       continue;
     }
 
-    if (isPathMatched(relativePath, ignoredMatcher, entry.isDirectory())) {
+    if (isIgnored(relativePath, entry.isDirectory())) {
       continue;
     }
 
@@ -330,7 +525,8 @@ async function walkProjectTree(
         safeMountDir,
         excludeRules,
         readonlyMatcher,
-        ignoredMatcher
+        isIgnored,
+        state
       );
       continue;
     }
@@ -342,7 +538,8 @@ async function walkProjectTree(
         absolutePath,
         mountPath,
         relativePath,
-        readonlyMatcher
+        readonlyMatcher,
+        state
       )) {
         copiedFiles += 1;
       }
@@ -359,13 +556,266 @@ async function walkProjectTree(
       absolutePath,
       mountPath,
       relativePath,
-      readonlyMatcher
+      readonlyMatcher,
+      state
     )) {
       copiedFiles += 1;
     }
   }
 
   return copiedFiles;
+}
+
+/**
+ * Populate the mount from a git-provided file list instead of a full tree
+ * walk. The list is exactly `git ls-files --cached --others
+ * --exclude-standard` output, so gitignored trees never even get visited;
+ * exclude and ignore rules are still applied per path so callers' patterns
+ * behave identically to walk mode.
+ */
+async function populateFromGitFileList(
+  projectDir: string,
+  mountDir: string,
+  gitFiles: string[],
+  excludeRules: ExcludeRules,
+  readonlyMatcher: Ignore,
+  isIgnored: IgnoredPredicate,
+  state: Map<string, FileState>
+): Promise<number> {
+  // Sorted order keeps sibling files adjacent so the ensure-directory cache
+  // inside resolveSafeCopyTarget hits its realpath cache line after line.
+  const sorted = [...gitFiles].sort();
+  let processed = 0;
+  let copiedFiles = 0;
+  for (const raw of sorted) {
+    if (processed > 0 && processed % WALK_YIELD_EVERY === 0) {
+      await yieldToEventLoop();
+    }
+    processed += 1;
+
+    const relativePath = normalizeRelativePosix(raw);
+    if (!relativePath || relativePath.startsWith('..') || path.isAbsolute(raw)) {
+      continue;
+    }
+    if (isExcludedPath(relativePath, excludeRules)) {
+      continue;
+    }
+    if (isIgnored(relativePath, false)) {
+      continue;
+    }
+
+    const absolutePath = path.join(projectDir, ...relativePath.split('/'));
+    if (isPathWithinRoot(absolutePath, mountDir)) {
+      continue;
+    }
+    let entryStat: Stats;
+    try {
+      entryStat = lstatSync(absolutePath);
+    } catch {
+      // Listed but deleted from the working tree (staged deletes) — skip.
+      continue;
+    }
+    const mountPath = path.join(mountDir, ...relativePath.split('/'));
+
+    if (entryStat.isSymbolicLink()) {
+      if (copySymlinkedFile(
+        projectDir,
+        mountDir,
+        absolutePath,
+        mountPath,
+        relativePath,
+        readonlyMatcher,
+        state
+      )) {
+        copiedFiles += 1;
+      }
+      continue;
+    }
+    // Non-files (submodule gitlinks appear as directories, sockets, fifos)
+    // are never mount candidates.
+    if (!entryStat.isFile()) {
+      continue;
+    }
+    if (copyMountedFile(
+      projectDir,
+      mountDir,
+      absolutePath,
+      mountPath,
+      relativePath,
+      readonlyMatcher,
+      state
+    )) {
+      copiedFiles += 1;
+    }
+  }
+  return copiedFiles;
+}
+
+interface GitPopulation {
+  /** Tracked + untracked-unignored files, posix-relative to the project. */
+  files: string[];
+  /**
+   * Root `.gitignore` + `.git/info/exclude` rules, applied by the sync
+   * layers so they agree with the populated set. Nested `.gitignore` files
+   * are honored by the file *listing* but not by these rules; files they
+   * ignore merely lose the walk-pruning speedup.
+   */
+  gitignoreLines: string[];
+  /**
+   * Tracked files the gitignore rules match anyway (`git add -f` survivors,
+   * `ls-files -ci`). Git syncs these regardless of ignore rules, so the
+   * gitignore-derived matcher must except them — caller patterns still win.
+   */
+  trackedIgnoredFiles: string[];
+}
+
+type IgnoredPredicate = (relPosix: string, isDirectory?: boolean) => boolean;
+
+/**
+ * The "is this path hidden from the mount and its sync?" decision.
+ *
+ * Walk mode: caller patterns only (historical behavior). Git mode: caller
+ * patterns first (they always win), then the repo's gitignore rules — except
+ * for tracked-but-gitignored files (and their ancestor directories, so walk
+ * pruning can't hide them), which git itself treats as ordinary content.
+ */
+function buildIgnoredPredicate(
+  callerMatcher: Ignore,
+  gitPopulation: GitPopulation | null
+): IgnoredPredicate {
+  if (gitPopulation === null) {
+    return (relPosix, isDirectory) => isPathMatched(relPosix, callerMatcher, isDirectory);
+  }
+  const gitignoreMatcher = createPathMatcher(gitPopulation.gitignoreLines);
+  const trackedIgnored = new Set(gitPopulation.trackedIgnoredFiles);
+  const trackedIgnoredDirs = new Set<string>();
+  for (const file of gitPopulation.trackedIgnoredFiles) {
+    let dir = file;
+    while (dir.includes('/')) {
+      dir = dir.slice(0, dir.lastIndexOf('/'));
+      trackedIgnoredDirs.add(dir);
+    }
+  }
+  return (relPosix, isDirectory) => {
+    if (isPathMatched(relPosix, callerMatcher, isDirectory)) return true;
+    if (isDirectory ? trackedIgnoredDirs.has(relPosix) : trackedIgnored.has(relPosix)) {
+      return false;
+    }
+    return isPathMatched(relPosix, gitignoreMatcher, isDirectory);
+  };
+}
+
+function runGitLsFiles(projectDir: string, args: string[]): string[] | null {
+  let result;
+  try {
+    result = spawnSync('git', ['-C', projectDir, 'ls-files', '-z', ...args], {
+      maxBuffer: 1024 * 1024 * 1024,
+    });
+  } catch {
+    return null;
+  }
+  if (result.error || result.status !== 0) return null;
+  return result.stdout.toString('utf8').split('\0').filter(Boolean);
+}
+
+function readIgnoreRuleLines(filePath: string): string[] {
+  try {
+    return readFileSync(filePath, 'utf8').split('\n');
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Decide whether git-list population applies and gather its inputs.
+ * Returns null (→ walk fallback) when any precondition fails:
+ *
+ * - not a git checkout, or git itself fails;
+ * - `.gitmodules` present — submodule working trees are populated by the
+ *   walk but invisible to a plain `ls-files` call;
+ * - caller patterns contain negations (`!keep`) — those can re-include
+ *   gitignored paths, which a git-derived file list can never surface;
+ * - with `includeGit`, patterns targeting `.git` — the bulk `.git` clone
+ *   doesn't consult matchers, only the walk does.
+ */
+function prepareGitPopulation(
+  projectDir: string,
+  ignoredPatterns: readonly string[],
+  readonlyPatterns: readonly string[],
+  includeGit: boolean
+): GitPopulation | null {
+  if (!existsSync(path.join(projectDir, '.git'))) return null;
+  if (existsSync(path.join(projectDir, '.gitmodules'))) return null;
+  const allPatterns = [...ignoredPatterns, ...readonlyPatterns];
+  if (allPatterns.some((p) => p.trim().startsWith('!'))) return null;
+  if (includeGit && allPatterns.some((p) => p.includes('.git'))) return null;
+
+  const trackedIgnored = runGitLsFiles(projectDir, ['--cached', '-i', '--exclude-standard']);
+  if (trackedIgnored === null) return null;
+
+  const listed = runGitLsFiles(projectDir, ['--cached', '--others', '--exclude-standard']);
+  if (listed === null) return null;
+
+  return {
+    // Belt and braces: ls-files never emits `.git` paths, but the mount must
+    // not trust a spawned tool's output for that invariant.
+    files: listed.filter((p) => p !== '.git' && !p.startsWith('.git/')),
+    gitignoreLines: [
+      ...readIgnoreRuleLines(path.join(projectDir, '.gitignore')),
+      ...readIgnoreRuleLines(path.join(projectDir, '.git', 'info', 'exclude')),
+    ],
+    trackedIgnoredFiles: trackedIgnored.map((p) => normalizeRelativePosix(p)),
+  };
+}
+
+/**
+ * Copy the project's `.git` into the mount as a single timestamp-preserving
+ * bulk clone (copy-on-write via FICLONE where the filesystem supports it).
+ * Returns the entry count contribution for `initialFileCount` (0 or 1 — the
+ * per-file count of the walk path isn't worth a second traversal here).
+ *
+ * A worktree-style `.git` *file* (gitdir pointer) is copied as-is, matching
+ * the walk path's behavior.
+ */
+function cloneGitInto(projectDir: string, mountDir: string): number {
+  const source = path.join(projectDir, '.git');
+  let sourceStat: Stats;
+  try {
+    sourceStat = lstatSync(source);
+  } catch {
+    return 0;
+  }
+  const target = path.join(mountDir, '.git');
+  try {
+    if (sourceStat.isFile()) {
+      copyFileSync(source, target, fsConstants.COPYFILE_FICLONE);
+      preserveMtime(target, sourceStat);
+      return 1;
+    }
+    if (!sourceStat.isDirectory()) {
+      return 0;
+    }
+    cpSync(source, target, {
+      recursive: true,
+      force: true,
+      preserveTimestamps: true,
+      mode: fsConstants.COPYFILE_FICLONE,
+      // Sockets and fifos (e.g. fsmonitor--daemon.ipc) can't be copied.
+      filter: (src) => {
+        try {
+          const st = lstatSync(src);
+          return st.isDirectory() || st.isFile() || st.isSymbolicLink();
+        } catch {
+          return false;
+        }
+      },
+    });
+    return 1;
+  } catch {
+    // Best-effort: a partially cloned .git is still more useful than a
+    // failed mount. Git commands inside the mount surface any gaps.
+    return 0;
+  }
 }
 
 function yieldToEventLoop(): Promise<void> {
@@ -378,7 +828,8 @@ function copySymlinkedFile(
   sourcePath: string,
   mountPath: string,
   relativePath: string,
-  readonlyMatcher: Ignore
+  readonlyMatcher: Ignore,
+  state: Map<string, FileState>
 ): boolean {
   let realSource: string;
   let resolvedStat: Stats;
@@ -400,6 +851,7 @@ function copySymlinkedFile(
     mountPath,
     relativePath,
     readonlyMatcher,
+    state,
     resolvedStat.mode
   );
 }
@@ -411,6 +863,7 @@ function copyMountedFile(
   mountPath: string,
   relativePath: string,
   readonlyMatcher: Ignore,
+  state: Map<string, FileState>,
   sourceMode?: number
 ): boolean {
   const safeMountPath = resolveSafeCopyTarget(mountDir, mountPath);
@@ -423,16 +876,43 @@ function copyMountedFile(
     return false;
   }
 
+  const sourceStat = statSync(safeSourcePath);
   copyFileSync(safeSourcePath, safeMountPath, fsConstants.COPYFILE_FICLONE);
+  // Carry the source mtime onto the copy so both trees stat as "the same
+  // write" — reconcile and syncBack can then trust the stat quick check
+  // instead of re-reading file contents.
+  preserveMtime(safeMountPath, sourceStat);
+  recordCopiedState(state, relativePath, safeMountPath, sourceStat);
 
   if (isPathMatched(relativePath, readonlyMatcher)) {
     chmodSync(safeMountPath, 0o444);
     return true;
   }
 
-  const mode = sourceMode ?? statSync(safeSourcePath).mode;
+  const mode = sourceMode ?? sourceStat.mode;
   chmodSync(safeMountPath, mode & 0o777);
   return true;
+}
+
+/**
+ * Seed the autosync state for a file the population loop just copied. The
+ * mount side is stat'd after the mtime carry-over so the recorded value is
+ * exactly what a later stat will report.
+ */
+function recordCopiedState(
+  state: Map<string, FileState>,
+  relativePath: string,
+  mountPath: string,
+  sourceStat: Stats
+): void {
+  try {
+    state.set(normalizeRelativePosix(relativePath), {
+      mountMtimeMs: statSync(mountPath).mtimeMs,
+      projectMtimeMs: sourceStat.mtimeMs,
+    });
+  } catch {
+    /* unseeded entries just take autosync's first-sight path */
+  }
 }
 
 function ensureDirectory(pathValue: string): void {
@@ -453,7 +933,10 @@ function ensureDirectoryWithinRoot(rootPath: string, dirPath: string): string | 
   }
 }
 
-function listFiles(baseDir: string): string[] {
+function listFiles(
+  baseDir: string,
+  skipDir?: (relPosix: string) => boolean
+): string[] {
   const files: string[] = [];
   const stack = [baseDir];
   while (stack.length > 0) {
@@ -463,6 +946,10 @@ function listFiles(baseDir: string): string[] {
     for (const entry of entries) {
       const entryPath = path.join(current, entry.name);
       if (entry.isDirectory()) {
+        if (skipDir) {
+          const relPosix = normalizeRelativePosix(path.relative(baseDir, entryPath));
+          if (relPosix && skipDir(relPosix)) continue;
+        }
         stack.push(entryPath);
       } else if (entry.isFile() || entry.isSymbolicLink()) {
         files.push(entryPath);
@@ -573,10 +1060,12 @@ function hasSameContent(left: string, right: string): boolean {
     if (leftStat.size !== rightStat.size) {
       return false;
     }
-    // Same size: fall back to a full byte comparison. Buffer.equals short-
-    // circuits internally but we still read both files; for very large files
-    // callers may want a streaming approach, though in practice mounts are
-    // dominated by source code where this is cheap.
+    // Population preserves source mtimes onto copies, so equal size plus
+    // (near-)equal mtime means "same write" without re-reading either side.
+    if (statsImplySameContent(leftStat, rightStat)) {
+      return true;
+    }
+    // Same size but diverged mtimes: fall back to a full byte comparison.
     const leftContent = readFileSync(left);
     const rightContent = readFileSync(right);
     return leftContent.equals(rightContent);
@@ -590,7 +1079,7 @@ function syncMountedFileBack(
   mountDir: string,
   projectDir: string,
   readonlyMatcher: Ignore,
-  ignoredMatcher: Ignore,
+  isIgnored: IgnoredPredicate,
   noSyncBackMatcher: Ignore,
   isExcluded: (relPosix: string) => boolean
 ): number {
@@ -598,7 +1087,7 @@ function syncMountedFileBack(
     sourceFile,
     mountDir,
     readonlyMatcher,
-    ignoredMatcher,
+    isIgnored,
     noSyncBackMatcher,
     isExcluded
   );
@@ -612,6 +1101,13 @@ function syncMountedFileBack(
   }
 
   copyFileSync(sourceFile, safeTargetPath);
+  // Keep both sides stat-identical so a later pass (or a reused mount) can
+  // take the quick check instead of re-reading content.
+  try {
+    preserveMtime(safeTargetPath, statSync(sourceFile));
+  } catch {
+    /* best effort */
+  }
   return 1;
 }
 
@@ -619,7 +1115,7 @@ function resolveSyncRelativePath(
   sourceFile: string,
   mountDir: string,
   readonlyMatcher: Ignore,
-  ignoredMatcher: Ignore,
+  isIgnored: IgnoredPredicate,
   noSyncBackMatcher: Ignore,
   isExcluded: (relPosix: string) => boolean
 ): string | null {
@@ -631,7 +1127,7 @@ function resolveSyncRelativePath(
   if (
     isExcluded(relativePosix) ||
     isPathMatched(relative, readonlyMatcher) ||
-    isPathMatched(relative, ignoredMatcher) ||
+    isIgnored(relativePosix) ||
     isPathMatched(relative, noSyncBackMatcher)
   ) return null;
 
