@@ -1,6 +1,6 @@
 {
   "name": "relayfile",
-  "version": "0.10.23",
+  "version": "0.10.24",
   "description": "CLI for relayfile — real-time filesystem for humans and agents",
   "bin": {
     "relayfile": "scripts/run.js"

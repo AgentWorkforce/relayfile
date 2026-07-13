@@ -1,6 +1,6 @@
 {
   "name": "@relayfile/client",
-  "version": "0.10.23",
+  "version": "0.10.24",
   "description": "Typed client for the relayfile local control-plane (unix-socket HTTP/JSON), generated from the authoritative OpenAPI contract",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

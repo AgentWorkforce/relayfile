@@ -2,7 +2,7 @@
   "name": "relayfile",
   "license": "Apache-2.0",
   "private": true,
-  "version": "0.10.23",
+  "version": "0.10.24",
   "description": "relayfile — real-time filesystem for humans and agents",
   "workspaces": [
     "packages/core",
