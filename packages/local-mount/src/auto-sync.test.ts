@@ -859,3 +859,194 @@ describe('external teardown safety', () => {
     }
   });
 });
+
+describe('review follow-ups', () => {
+  let projectDir: string;
+  let mountParent: string;
+  let mountDir: string;
+
+  beforeEach(() => {
+    projectDir = tmpDir();
+    mountParent = tmpDir();
+    mountDir = path.join(mountParent, 'mount');
+  });
+
+  afterEach(() => {
+    try { rmSync(projectDir, { recursive: true, force: true }); } catch { /* best effort */ }
+    try { rmSync(mountParent, { recursive: true, force: true }); } catch { /* best effort */ }
+  });
+
+  function git(...args: string[]): void {
+    const res = spawnSync('git', ['-C', projectDir, ...args]);
+    if (res.status !== 0) {
+      throw new Error(`git ${args.join(' ')} failed: ${res.stderr?.toString()}`);
+    }
+  }
+
+  function initGitProject(): void {
+    git('init', '--quiet');
+    git('config', 'user.email', 'test@example.com');
+    git('config', 'user.name', 'Test');
+  }
+
+  it('symlinked project files survive the first reconcile', async () => {
+    write(path.join(projectDir, 'real.txt'), 'target content');
+    const { symlinkSync } = await import('node:fs');
+    symlinkSync(path.join(projectDir, 'real.txt'), path.join(projectDir, 'link.txt'));
+
+    const handle = await createMount(projectDir, mountDir, {
+      ignoredPatterns: [],
+      readonlyPatterns: [],
+      excludeDirs: [],
+    });
+    // The symlink was dereferenced into a regular file in the mount.
+    expect(readFileSync(path.join(handle.mountDir, 'link.txt'), 'utf8')).toBe('target content');
+
+    const auto = handle.startAutoSync({ debounceMs: 50, scanIntervalMs: 10_000 });
+    await auto.ready();
+    try {
+      await auto.reconcile();
+      // Auto-sync's symlink-rejecting stat sees no project-side file; the
+      // copy must not be treated as a propagatable delete.
+      expect(readFileSync(path.join(handle.mountDir, 'link.txt'), 'utf8')).toBe('target content');
+    } finally {
+      await auto.stop();
+      handle.cleanup();
+    }
+  });
+
+  it('nested .gitignore rules keep their trees out of git-populated sync', async () => {
+    initGitProject();
+    write(path.join(projectDir, 'pkg/src/code.ts'), 'code');
+    write(path.join(projectDir, 'pkg/.gitignore'), 'cache/\n');
+    git('add', '-A');
+    git('commit', '--quiet', '-m', 'init');
+    write(path.join(projectDir, 'pkg/cache/blob.bin'), 'x'.repeat(200));
+
+    const handle = await createMount(projectDir, mountDir, {
+      ignoredPatterns: [],
+      readonlyPatterns: [],
+      excludeDirs: [],
+      population: 'git',
+    });
+    expect(existsSync(path.join(handle.mountDir, 'pkg/cache'))).toBe(false);
+
+    const auto = handle.startAutoSync({ debounceMs: 50, scanIntervalMs: 10_000 });
+    await auto.ready();
+    try {
+      const changes = await auto.reconcile();
+      expect(existsSync(path.join(handle.mountDir, 'pkg/cache'))).toBe(false);
+      expect(changes).toBe(0);
+    } finally {
+      await auto.stop();
+      handle.cleanup();
+    }
+
+    // syncBack must agree too: agent-created files under the nested-ignored
+    // tree stay session-local.
+    const second = await createMount(projectDir, mountDir, {
+      ignoredPatterns: [],
+      readonlyPatterns: [],
+      excludeDirs: [],
+      population: 'git',
+    });
+    write(path.join(second.mountDir, 'pkg/cache/session.tmp'), 'local');
+    const synced = await second.syncBack();
+    expect(synced).toBe(0);
+    expect(existsSync(path.join(projectDir, 'pkg/cache/session.tmp'))).toBe(false);
+    second.cleanup();
+  });
+
+  it('git population + includeGit: pre-autosync mount .git edits survive, project .git deletions propagate', async () => {
+    initGitProject();
+    write(path.join(projectDir, 'src/code.ts'), 'code');
+    git('add', '-A');
+    git('commit', '--quiet', '-m', 'init');
+    // A loose file the "project" will delete between clone and reconcile,
+    // mimicking pack-refs/gc.
+    write(path.join(projectDir, '.git/loose-marker'), 'about to be packed');
+
+    const handle = await createMount(projectDir, mountDir, {
+      ignoredPatterns: [],
+      readonlyPatterns: [],
+      excludeDirs: [],
+      includeGit: true,
+      population: 'git',
+    });
+    expect(existsSync(path.join(handle.mountDir, '.git/loose-marker'))).toBe(true);
+
+    // Session setup edit before autosync starts (configureGitForMount-style).
+    const excludePath = path.join(handle.mountDir, '.git/info/exclude');
+    const baseExclude = readFileSync(excludePath, 'utf8');
+    writeFileSync(excludePath, `${baseExclude}# session additions\n`, 'utf8');
+
+    // Host-side .git deletion while the session runs.
+    rmSync(path.join(projectDir, '.git/loose-marker'));
+
+    const auto = handle.startAutoSync({ debounceMs: 50, scanIntervalMs: 10_000 });
+    await auto.ready();
+    try {
+      await auto.reconcile();
+      // Deletion propagated (state was seeded for the cloned file)…
+      expect(existsSync(path.join(handle.mountDir, '.git/loose-marker'))).toBe(false);
+      // …and the mount-side setup write survived (mount-changed + no-sync-back).
+      expect(readFileSync(excludePath, 'utf8')).toContain('# session additions');
+    } finally {
+      await auto.stop();
+      handle.cleanup();
+    }
+  });
+
+  it('exportState returns detached snapshots', async () => {
+    write(path.join(projectDir, 'file.txt'), 'content');
+    const handle = await createMount(projectDir, mountDir, {
+      ignoredPatterns: [],
+      readonlyPatterns: [],
+      excludeDirs: [],
+    });
+    const auto = handle.startAutoSync({ debounceMs: 50, scanIntervalMs: 10_000 });
+    await auto.ready();
+    try {
+      const first = auto.exportState();
+      expect(first['file.txt']).toBeDefined();
+      first['file.txt'].mountMtimeMs = -1;
+      const second = auto.exportState();
+      expect(second['file.txt'].mountMtimeMs).not.toBe(-1);
+    } finally {
+      await auto.stop();
+      handle.cleanup();
+    }
+  });
+
+  it('attachMount refuses a marked directory overlapping the project', async () => {
+    write(path.join(projectDir, 'src/code.ts'), 'code');
+    const insideProject = path.join(projectDir, 'nested-mount');
+    mkdirSync(insideProject, { recursive: true });
+    writeFileSync(
+      path.join(insideProject, '.relayfile-local-mount'),
+      'marker',
+      'utf8'
+    );
+    await expect(
+      attachMount(projectDir, insideProject, {
+        ignoredPatterns: [],
+        readonlyPatterns: [],
+        excludeDirs: [],
+      })
+    ).rejects.toThrow(/overlaps/);
+  });
+
+  it("attachMount with explicit population 'git' throws for non-git projects", async () => {
+    write(path.join(projectDir, 'src/code.ts'), 'code');
+    mkdirSync(mountDir, { recursive: true });
+    writeFileSync(path.join(mountDir, '.relayfile-local-mount'), 'marker', 'utf8');
+    await expect(
+      attachMount(projectDir, mountDir, {
+        ignoredPatterns: [],
+        readonlyPatterns: [],
+        excludeDirs: [],
+        population: 'git',
+      })
+    ).rejects.toThrow(/git checkout/);
+  });
+});

@@ -12,14 +12,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `git ls-files --cached --others --exclude-standard` instead of walking the
   tree, so gitignored trees (nested caches, stale worktrees, build outputs at
   any depth) never enter the mount; the repo's root `.gitignore` +
-  `.git/info/exclude` rules also join the mount's ignore set so reconcile and
-  syncBack agree with the populated file set. Tracked-but-gitignored files
-  (`git add -f` survivors) are excepted and sync normally. Falls back to the
-  walk for non-git projects, submodules, and pattern negations.
+  `.git/info/exclude` rules — plus the user's global excludes file and any
+  tracked nested `.gitignore` files (directory-scoped, as git applies them) —
+  also join the mount's ignore set so reconcile and syncBack agree with the
+  populated file set. Tracked-but-gitignored files (`git add -f` survivors)
+  are excepted and sync normally. Falls back to the walk for non-git
+  projects, submodules, and pattern negations. Linked-worktree projects
+  (`.git` pointer file) get no sandboxed `.git` under git population: copying
+  the pointer would let mount-side git commands mutate the host checkout's
+  worktree metadata.
 - `attachMount()`: reattach to a kept mount directory without wiping or
   re-copying, for warm session reuse. Pass `initialState` from a prior
   `exportState()` so the first reconcile distinguishes deletions from
-  creations.
+  creations. Runs the same overlap/safety validation as `createMount`
+  (with both sides realpath-resolved) and throws for explicit
+  `population: 'git'` when git preconditions fail.
 - `AutoSyncHandle.exportState()`: serializable snapshot of the per-file sync
   state for persistence alongside a kept mount.
 - `MountHandle.population` reports which strategy ran (`git`, `walk`, or
@@ -40,7 +47,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   writes always get byte-compared.
 - With `includeGit` under git population, `.git` is copied as one
   timestamp-preserving bulk clone (copy-on-write where the filesystem
-  supports it) instead of file-by-file.
+  supports it) instead of file-by-file, and the cloned files are seeded into
+  the autosync state so project-side `.git` deletions (pack-refs, gc)
+  propagate and pre-autosync mount-side `.git` setup writes survive the
+  first reconcile.
 - `syncBack` no longer descends into no-sync-back subtrees (`.git/**` under
   `includeGit`), which on large repos removed thousands of pointless stats
   per teardown.

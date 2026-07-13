@@ -157,9 +157,12 @@ export function startAutoSync(
   const debounceMs = opts.debounceMs ?? 50;
   const onError = opts.onError ?? (() => { /* ignore by default */ });
 
-  // Population-seeded state skips the priming walk entirely; each start gets
-  // its own copy so repeated start/stop cycles never share mutable state.
-  const state = new Map<string, FileState>(ctx.initialState ?? []);
+  // Population-seeded state skips the priming walk entirely. Entries are
+  // cloned, not shared: the internal map mutates on every sync, and callers
+  // hold (or persist) their snapshot under a readonly contract.
+  const state = new Map<string, FileState>(
+    Array.from(ctx.initialState ?? [], ([rel, fileState]) => [rel, { ...fileState }] as const)
+  );
 
   if (!ctx.initialState) {
     primeState(state, ctx);
@@ -444,7 +447,8 @@ export function startAutoSync(
     ready: async () => {
       await watchersReady;
     },
-    exportState: () => Object.fromEntries(state),
+    exportState: () =>
+      Object.fromEntries(Array.from(state, ([rel, fileState]) => [rel, { ...fileState }])),
   };
 }
 

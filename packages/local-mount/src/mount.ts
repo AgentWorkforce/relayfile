@@ -16,6 +16,7 @@ import {
 import type { Stats } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import ignore, { type Ignore } from 'ignore';
+import os from 'node:os';
 import path from 'node:path';
 import {
   startAutoSync,
@@ -166,8 +167,7 @@ export async function createMount(
   if (requestedPopulation === 'git' && gitPopulation === null) {
     throw new Error(
       `population: 'git' requires a plain git checkout at ${resolvedProjectDir} ` +
-        '(no submodules, no tracked-but-gitignored files, no pattern negations, ' +
-        "no ignored/readonly patterns targeting '.git')"
+        "(no submodules, no pattern negations, no ignored/readonly patterns matching '.git')"
     );
   }
   const population: 'git' | 'walk' = gitPopulation === null ? 'walk' : 'git';
@@ -214,6 +214,11 @@ export async function createMount(
     );
     if (includeGit) {
       initialFileCount += cloneGitInto(resolvedProjectDir, realMountDir);
+      // The clone bypasses the per-file copy loop, so seed its state
+      // explicitly: without entries, project-side .git deletions (pack-refs,
+      // gc) would never propagate, and pre-autosync mount-side .git setup
+      // writes would be clobbered by the first reconcile's no-history path.
+      seedClonedGitState(resolvedProjectDir, realMountDir, initialState);
     }
   } else {
     initialFileCount = await walkProjectTree(
@@ -299,6 +304,12 @@ export async function attachMount(
   ) {
     throw new Error('mountDir must be different from projectDir');
   }
+  if ((options.population ?? 'walk') === 'git' && gitPopulation === null) {
+    throw new Error(
+      `population: 'git' requires a plain git checkout at ${resolvedProjectDir} ` +
+        "(no submodules, no pattern negations, no ignored/readonly patterns matching '.git')"
+    );
+  }
   const markerPath = path.join(resolvedMountDir, MOUNT_MARKER_FILENAME);
   if (!existsSync(markerPath)) {
     throw new Error(
@@ -307,6 +318,12 @@ export async function attachMount(
     );
   }
   const realMountDir = realpathSync(resolvedMountDir);
+  // Same root/overlap validation as createMount: cleanup() recursively
+  // removes the mount dir, so a marked directory that overlaps the project
+  // must never be attachable. Unlike createMount, the mount dir exists here
+  // (marker just verified), so both sides compare as realpaths — otherwise
+  // symlinked temp roots (macOS /var → /private/var) would defeat the check.
+  assertMountDirSafeToRemove(realMountDir, resolvedProjectDir);
 
   const initialState = new Map<string, FileState>(
     Object.entries(options.initialState ?? {})
@@ -655,16 +672,24 @@ interface GitPopulation {
   /** Tracked + untracked-unignored files, posix-relative to the project. */
   files: string[];
   /**
-   * Root `.gitignore` + `.git/info/exclude` rules, applied by the sync
-   * layers so they agree with the populated set. Nested `.gitignore` files
-   * are honored by the file *listing* but not by these rules; files they
-   * ignore merely lose the walk-pruning speedup.
+   * Root-scoped ignore rules: the project `.gitignore`,
+   * `.git/info/exclude`, and the user's global excludes file
+   * (`core.excludesFile`). Applied by the sync layers so they agree with
+   * the populated set.
    */
   gitignoreLines: string[];
   /**
+   * Nested `.gitignore` rule files discovered in the tracked file list,
+   * each scoped to its directory the way git scopes them. Untracked nested
+   * `.gitignore` files (rare — usually self-ignoring cache dirs) aren't
+   * listed and so aren't represented; files they ignore merely lose the
+   * walk-pruning speedup on the project side.
+   */
+  nestedIgnores: Array<{ prefix: string; lines: string[] }>;
+  /**
    * Tracked files the gitignore rules match anyway (`git add -f` survivors,
    * `ls-files -ci`). Git syncs these regardless of ignore rules, so the
-   * gitignore-derived matcher must except them — caller patterns still win.
+   * gitignore-derived matchers must except them — caller patterns still win.
    */
   trackedIgnoredFiles: string[];
 }
@@ -687,6 +712,12 @@ function buildIgnoredPredicate(
     return (relPosix, isDirectory) => isPathMatched(relPosix, callerMatcher, isDirectory);
   }
   const gitignoreMatcher = createPathMatcher(gitPopulation.gitignoreLines);
+  // Nested .gitignore files scope to their directory: rules match paths
+  // relative to the rule file's location, exactly as git applies them.
+  const nested = gitPopulation.nestedIgnores.map(({ prefix, lines }) => ({
+    prefix: prefix === '' ? '' : `${prefix}/`,
+    matcher: createPathMatcher(lines),
+  }));
   const trackedIgnored = new Set(gitPopulation.trackedIgnoredFiles);
   const trackedIgnoredDirs = new Set<string>();
   for (const file of gitPopulation.trackedIgnoredFiles) {
@@ -701,7 +732,13 @@ function buildIgnoredPredicate(
     if (isDirectory ? trackedIgnoredDirs.has(relPosix) : trackedIgnored.has(relPosix)) {
       return false;
     }
-    return isPathMatched(relPosix, gitignoreMatcher, isDirectory);
+    if (isPathMatched(relPosix, gitignoreMatcher, isDirectory)) return true;
+    for (const { prefix, matcher } of nested) {
+      if (prefix !== '' && !relPosix.startsWith(prefix)) continue;
+      const scoped = prefix === '' ? relPosix : relPosix.slice(prefix.length);
+      if (scoped && isPathMatched(scoped, matcher, isDirectory)) return true;
+    }
+    return false;
   };
 }
 
@@ -735,8 +772,8 @@ function readIgnoreRuleLines(filePath: string): string[] {
  *   walk but invisible to a plain `ls-files` call;
  * - caller patterns contain negations (`!keep`) — those can re-include
  *   gitignored paths, which a git-derived file list can never surface;
- * - with `includeGit`, patterns targeting `.git` — the bulk `.git` clone
- *   doesn't consult matchers, only the walk does.
+ * - with `includeGit`, patterns that match the root `.git` tree — the bulk
+ *   `.git` clone doesn't consult matchers, only the walk does.
  */
 function prepareGitPopulation(
   projectDir: string,
@@ -748,7 +785,10 @@ function prepareGitPopulation(
   if (existsSync(path.join(projectDir, '.gitmodules'))) return null;
   const allPatterns = [...ignoredPatterns, ...readonlyPatterns];
   if (allPatterns.some((p) => p.trim().startsWith('!'))) return null;
-  if (includeGit && allPatterns.some((p) => p.includes('.git'))) return null;
+  // Probe the actual matchers rather than inspecting pattern strings: this
+  // catches every syntax that can reach inside `.git` (globs included)
+  // without false-positiving on `.github` / `.gitignore`-style names.
+  if (includeGit && patternsMatchGitDir(allPatterns)) return null;
 
   const trackedIgnored = runGitLsFiles(projectDir, ['--cached', '-i', '--exclude-standard']);
   if (trackedIgnored === null) return null;
@@ -756,16 +796,106 @@ function prepareGitPopulation(
   const listed = runGitLsFiles(projectDir, ['--cached', '--others', '--exclude-standard']);
   if (listed === null) return null;
 
+  // Belt and braces: ls-files never emits `.git` paths, but the mount must
+  // not trust a spawned tool's output for that invariant.
+  const files = listed.filter((p) => p !== '.git' && !p.startsWith('.git/'));
+
+  // Nested .gitignore files scope their rules to their own directory; the
+  // listing honors them already, the sync predicate needs them explicitly.
+  const nestedIgnores: Array<{ prefix: string; lines: string[] }> = [];
+  for (const file of files) {
+    if (!file.endsWith('/.gitignore')) continue;
+    const prefix = normalizeRelativePosix(file.slice(0, -'/.gitignore'.length));
+    const lines = readIgnoreRuleLines(path.join(projectDir, ...file.split('/')));
+    const hasRules = lines.some((l) => {
+      const t = l.trim();
+      return t !== '' && !t.startsWith('#');
+    });
+    if (hasRules && prefix !== '') nestedIgnores.push({ prefix, lines });
+  }
+
   return {
-    // Belt and braces: ls-files never emits `.git` paths, but the mount must
-    // not trust a spawned tool's output for that invariant.
-    files: listed.filter((p) => p !== '.git' && !p.startsWith('.git/')),
+    files,
     gitignoreLines: [
       ...readIgnoreRuleLines(path.join(projectDir, '.gitignore')),
       ...readIgnoreRuleLines(path.join(projectDir, '.git', 'info', 'exclude')),
+      // The user's global excludes also shaped the listing; without them the
+      // sync layers would re-import globally-ignored files (.DS_Store etc.).
+      ...readGlobalGitExcludeLines(projectDir),
     ],
+    nestedIgnores,
     trackedIgnoredFiles: trackedIgnored.map((p) => normalizeRelativePosix(p)),
   };
+}
+
+/**
+ * Would any caller pattern hide or freeze something under the root `.git`?
+ * Tested against representative `.git` paths through the real matcher so
+ * glob spellings are covered; `.github`-style names don't match.
+ */
+function patternsMatchGitDir(patterns: readonly string[]): boolean {
+  const matcher = createPathMatcher([...patterns]);
+  return (
+    isPathMatched('.git', matcher, true) ||
+    matcher.ignores('.git/config') ||
+    matcher.ignores('.git/hooks/pre-commit')
+  );
+}
+
+/**
+ * Record autosync state for every file the `.git` bulk clone produced. The
+ * clone preserved timestamps, so this is a stat-only sweep of both sides —
+ * no content reads. Files whose project counterpart vanished between clone
+ * and sweep are simply skipped and take the first-sight path later.
+ */
+function seedClonedGitState(
+  projectDir: string,
+  mountDir: string,
+  state: Map<string, FileState>
+): void {
+  const mountGit = path.join(mountDir, '.git');
+  if (!existsSync(mountGit)) return;
+  for (const mountAbs of listFiles(mountGit)) {
+    const rel = normalizeRelativePosix(path.relative(mountDir, mountAbs));
+    if (!rel || rel.startsWith('..')) continue;
+    try {
+      const mountStat = lstatSync(mountAbs);
+      if (!mountStat.isFile()) continue;
+      const projectStat = lstatSync(path.join(projectDir, ...rel.split('/')));
+      if (!projectStat.isFile()) continue;
+      state.set(rel, {
+        mountMtimeMs: mountStat.mtimeMs,
+        projectMtimeMs: projectStat.mtimeMs,
+      });
+    } catch {
+      /* skipped entries take autosync's first-sight path */
+    }
+  }
+}
+
+/** Lines from the user's global git excludes file (core.excludesFile or the XDG default). */
+function readGlobalGitExcludeLines(projectDir: string): string[] {
+  let configured: string | null = null;
+  try {
+    const result = spawnSync(
+      'git',
+      ['-C', projectDir, 'config', '--path', '--get', 'core.excludesfile'],
+      { maxBuffer: 1024 * 1024 }
+    );
+    if (!result.error && result.status === 0) {
+      configured = result.stdout.toString('utf8').trim() || null;
+    }
+  } catch {
+    /* fall through to the XDG default */
+  }
+  const candidate =
+    configured ??
+    path.join(
+      process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'),
+      'git',
+      'ignore'
+    );
+  return readIgnoreRuleLines(candidate);
 }
 
 /**
@@ -787,12 +917,13 @@ function cloneGitInto(projectDir: string, mountDir: string): number {
   }
   const target = path.join(mountDir, '.git');
   try {
-    if (sourceStat.isFile()) {
-      copyFileSync(source, target, fsConstants.COPYFILE_FICLONE);
-      preserveMtime(target, sourceStat);
-      return 1;
-    }
     if (!sourceStat.isDirectory()) {
+      // A worktree-style `.git` *file* is a gitdir pointer into the host
+      // checkout's private worktree metadata. Copying it verbatim would let
+      // git commands inside the mount mutate the host's index/HEAD, so
+      // linked worktrees get no sandboxed `.git` at all under git
+      // population. (The legacy walk still copies the pointer; fixing that
+      // pre-existing behavior is out of scope here.)
       return 0;
     }
     cpSync(source, target, {
@@ -851,7 +982,12 @@ function copySymlinkedFile(
     mountPath,
     relativePath,
     readonlyMatcher,
-    state,
+    // Auto-sync stats the project side with a symlink-rejecting lstat, so a
+    // seeded entry for a symlink's path would read as "project side gone,
+    // mount unchanged" on the first reconcile and delete the mount copy.
+    // Leave symlink copies unseeded — they take the historical
+    // first-sight path, whose symlink-target write guard keeps them alive.
+    null,
     resolvedStat.mode
   );
 }
@@ -863,7 +999,7 @@ function copyMountedFile(
   mountPath: string,
   relativePath: string,
   readonlyMatcher: Ignore,
-  state: Map<string, FileState>,
+  state: Map<string, FileState> | null,
   sourceMode?: number
 ): boolean {
   const safeMountPath = resolveSafeCopyTarget(mountDir, mountPath);
@@ -882,7 +1018,7 @@ function copyMountedFile(
   // write" — reconcile and syncBack can then trust the stat quick check
   // instead of re-reading file contents.
   preserveMtime(safeMountPath, sourceStat);
-  recordCopiedState(state, relativePath, safeMountPath, sourceStat);
+  if (state) recordCopiedState(state, relativePath, safeMountPath, sourceStat);
 
   if (isPathMatched(relativePath, readonlyMatcher)) {
     chmodSync(safeMountPath, 0o444);
