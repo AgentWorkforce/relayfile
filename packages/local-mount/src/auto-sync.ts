@@ -14,6 +14,7 @@ import {
 import type { Stats } from 'node:fs';
 import path from 'node:path';
 import watcher, { type AsyncSubscription } from '@parcel/watcher';
+import { preserveMtime, statsImplySameContent } from './stat-compare.js';
 
 export interface AutoSyncContext {
   realMountDir: string;
@@ -47,6 +48,25 @@ export interface AutoSyncContext {
    */
   isNoSyncBack: (relPosix: string) => boolean;
   isReservedFile: (relPosix: string) => boolean;
+  /**
+   * True while the mount root still looks like a live mount (its marker
+   * file exists). Checked before any deletion is mirrored across trees: a
+   * mount directory that was torn down externally (crash cleanup, manual
+   * rm) must read as "the mount is gone", never as "the agent deleted
+   * every file" — without this, autosync would faithfully propagate the
+   * teardown as a mass delete of the user's project.
+   */
+  mountRootIntact: () => boolean;
+  /** Same guard for the project side: its disappearance must not empty the mount. */
+  projectRootIntact: () => boolean;
+  /**
+   * Sync state seeded by the mount population loop: one entry per copied
+   * file with both sides' mtimes recorded at copy time. When present,
+   * `startAutoSync` clones it instead of running the full-tree
+   * content-comparison priming pass — the copy already proved both sides
+   * identical, so re-reading every file pair only rediscovers that.
+   */
+  initialState?: ReadonlyMap<string, FileState>;
 }
 
 export interface AutoSyncOptions {
@@ -84,9 +104,18 @@ export interface AutoSyncHandle {
   totalChanges(): number;
   /** Resolves once both watchers have completed their initial scan. */
   ready(): Promise<void>;
+  /**
+   * Snapshot of the per-file sync state (both sides' last-synced mtimes),
+   * keyed by posix-relative path. Persist it alongside a kept mount and feed
+   * it to `attachMount` so the next session's first reconcile can
+   * distinguish deletions from creations. Run a full `reconcile()` first if
+   * the snapshot must cover paths only reconciles visit (e.g. `.git/**`
+   * under `includeGit`).
+   */
+  exportState(): Record<string, FileState>;
 }
 
-interface FileState {
+export interface FileState {
   mountMtimeMs?: number;
   projectMtimeMs?: number;
 }
@@ -128,9 +157,16 @@ export function startAutoSync(
   const debounceMs = opts.debounceMs ?? 50;
   const onError = opts.onError ?? (() => { /* ignore by default */ });
 
-  const state = new Map<string, FileState>();
+  // Population-seeded state skips the priming walk entirely. Entries are
+  // cloned, not shared: the internal map mutates on every sync, and callers
+  // hold (or persist) their snapshot under a readonly contract.
+  const state = new Map<string, FileState>(
+    Array.from(ctx.initialState ?? [], ([rel, fileState]) => [rel, { ...fileState }] as const)
+  );
 
-  primeState(state, ctx);
+  if (!ctx.initialState) {
+    primeState(state, ctx);
+  }
 
   let syncing = false;
   let pending = false;
@@ -411,6 +447,8 @@ export function startAutoSync(
     ready: async () => {
       await watchersReady;
     },
+    exportState: () =>
+      Object.fromEntries(Array.from(state, ([rel, fileState]) => [rel, { ...fileState }])),
   };
 }
 
@@ -609,7 +647,10 @@ function syncOneFile(
     if (mountChanged && !noSyncBack) {
       return doMountToProject(relPosix, state, ctx, mountAbs, projectAbs);
     }
-    // Project deleted externally and mount hasn't been touched since → mirror.
+    // Project deleted externally and mount hasn't been touched since →
+    // mirror — but only while the project root itself is still there. A
+    // vanished project tree is a teardown, not a per-file delete.
+    if (!ctx.projectRootIntact()) return false;
     return doDeleteMount(relPosix, state, mountAbs);
   }
 
@@ -622,6 +663,10 @@ function syncOneFile(
       // No-sync-back deletes in mount don't propagate; recreate from project.
       return doProjectToMount(relPosix, state, ctx, projectAbs, mountAbs, readonly);
     }
+    // Guard the catastrophic case: if the mount root itself is gone (torn
+    // down externally while this autosync was still alive), every mount
+    // file reads as "deleted" — propagating that would erase the project.
+    if (!ctx.mountRootIntact()) return false;
     return doDeleteProject(relPosix, state, projectAbs);
   }
 
@@ -643,6 +688,8 @@ function doMountToProject(
     return false;
   }
   copyFileSync(mountAbs, target, fsConstants.COPYFILE_FICLONE);
+  const mountStat = safeFileStat(mountAbs);
+  if (mountStat) preserveMtime(target, mountStat);
   updateState(state, relPosix, mountAbs, target);
   return true;
 }
@@ -668,6 +715,8 @@ function doProjectToMount(
     try { chmodSync(target, 0o644); } catch { /* best effort */ }
   }
   copyFileSync(projectAbs, target, fsConstants.COPYFILE_FICLONE);
+  const sourceStat = safeFileStat(projectAbs);
+  if (sourceStat) preserveMtime(target, sourceStat);
   if (readonly) {
     try { chmodSync(target, 0o444); } catch { /* best effort */ }
   } else {
@@ -764,6 +813,20 @@ function isSymlinkTarget(target: string): boolean {
 }
 
 function sameContent(left: string, right: string): boolean {
+  try {
+    const leftStat = statSync(left);
+    const rightStat = statSync(right);
+    if (leftStat.size !== rightStat.size) return false;
+    // Copies preserve source mtimes, so equal size plus (near-)equal mtime
+    // means "same write" — skip re-reading both files.
+    if (statsImplySameContent(leftStat, rightStat)) return true;
+  } catch {
+    return false;
+  }
+  return sameContentBytes(left, right);
+}
+
+function sameContentBytes(left: string, right: string): boolean {
   try {
     const a = statSync(left);
     const b = statSync(right);

@@ -6,7 +6,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_No unreleased changes._
+### Added
+
+- `population: 'walk' | 'git' | 'auto'` mount option. Git mode enumerates via
+  `git ls-files --cached --others --exclude-standard` instead of walking the
+  tree, so gitignored trees (nested caches, stale worktrees, build outputs at
+  any depth) never enter the mount; the repo's root `.gitignore` +
+  `.git/info/exclude` rules — plus the user's global excludes file and any
+  tracked nested `.gitignore` files (directory-scoped, as git applies them) —
+  also join the mount's ignore set so reconcile and syncBack agree with the
+  populated file set. Tracked-but-gitignored files (`git add -f` survivors)
+  are excepted and sync normally. Falls back to the walk for non-git
+  projects, submodules, and pattern negations. Linked-worktree projects
+  (`.git` pointer file) get no sandboxed `.git` under git population: copying
+  the pointer would let mount-side git commands mutate the host checkout's
+  worktree metadata.
+- `attachMount()`: reattach to a kept mount directory without wiping or
+  re-copying, for warm session reuse. Pass `initialState` from a prior
+  `exportState()` so the first reconcile distinguishes deletions from
+  creations. Runs the same overlap/safety validation as `createMount`
+  (with both sides realpath-resolved) and throws for explicit
+  `population: 'git'` when git preconditions fail.
+- `AutoSyncHandle.exportState()`: serializable snapshot of the per-file sync
+  state for persistence alongside a kept mount.
+- `MountHandle.population` reports which strategy ran (`git`, `walk`, or
+  `reattach`).
+
+### Changed
+
+- Mount population records both sides' mtimes for every copied file and hands
+  that state to `startAutoSync`, which skips its full-tree content-comparison
+  priming pass — on large repos this pass alone took many seconds and re-read
+  every file pair. This also fixes a latent first-reconcile bug: project
+  edits made between `createMount` and `startAutoSync` now win over the stale
+  mount copy, and mount-side `.git` setup writes survive instead of being
+  clobbered by the project's copy.
+- Copies preserve source mtimes (population, reconcile, and syncBack), and
+  content comparison takes an rsync-style quick path: equal size plus mtimes
+  within 2ms imply equal content, guarded by a 5s recency window so fresh
+  writes always get byte-compared.
+- With `includeGit` under git population, `.git` is copied as one
+  timestamp-preserving bulk clone (copy-on-write where the filesystem
+  supports it) instead of file-by-file, and the cloned files are seeded into
+  the autosync state so project-side `.git` deletions (pack-refs, gc)
+  propagate and pre-autosync mount-side `.git` setup writes survive the
+  first reconcile.
+- `syncBack` no longer descends into no-sync-back subtrees (`.git/**` under
+  `includeGit`), which on large repos removed thousands of pointless stats
+  per teardown.
+- `.venv` / `venv` moved from root-level to any-depth default excludes:
+  virtualenvs self-ignore via an internal `.gitignore` that root-level rules
+  never see, and they routinely nest below the project root.
+
+### Fixed
+
+- Autosync no longer propagates an externally torn-down tree as a mass
+  delete: if the mount root's marker vanishes while autosync is alive, mount-
+  side "deletions" stop being mirrored to the project (and a vanished project
+  root stops being mirrored into the mount). Previously, removing a live
+  session's mount directory caused autosync to delete every mounted file
+  from the user's project.
 
 ## [0.10.22] - 2026-07-11
 

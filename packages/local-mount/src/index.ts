@@ -1,5 +1,6 @@
 export {
   createMount,
+  attachMount,
   type MountOptions,
   type MountHandle,
 } from './mount.js';
@@ -7,6 +8,7 @@ export {
 export {
   type AutoSyncOptions,
   type AutoSyncHandle,
+  type FileState,
 } from './auto-sync.js';
 
 export {
