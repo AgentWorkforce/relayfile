@@ -2846,6 +2846,8 @@ func clearRelayfileEnv(t *testing.T) {
 	t.Setenv("RELAYFILE_CLOUD_TOKEN", "")
 	t.Setenv("RELAYFILE_MOUNT_CREDS_FILE", "")
 	t.Setenv("RELAYFILE_DELEGATED_CREDENTIALS_FILE", "")
+	t.Setenv("RELAYCAST_BASE_URL", "")
+	t.Setenv("RELAY_BASE_URL", "")
 	t.Setenv("AGENT_RELAY_BIN", "")
 }
 
@@ -2895,6 +2897,290 @@ echo "unexpected args: $*" >&2
 exit 2
 `, apiURL, accessToken, name, cloudWorkspaceID, relayfileWorkspaceID)
 	installFakeAgentRelay(t, body)
+}
+
+func relayfileCLITestFixture(t *testing.T, name string) string {
+	t.Helper()
+	content, err := os.ReadFile(filepath.Join("testdata", name))
+	if err != nil {
+		t.Fatalf("read CLI test fixture %s: %v", name, err)
+	}
+	return strings.TrimSpace(string(content))
+}
+
+func agentRelayResolver404Error(workspaceKey, body string) error {
+	return errors.New("Workspace resolve failed at /api/v1/workspaces/active?key=" + workspaceKey + ": 404 " + body)
+}
+
+func TestActiveWorkspaceFromAgentRelayReportsMessagingOnlyWorkspace(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	const workspaceKey = "rk_live_messaging_only_test"
+	var validationCalls int
+	relaycast := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		validationCalls++
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/workspace" {
+			t.Fatalf("unexpected Relaycast request: %s %s", r.Method, r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer "+workspaceKey {
+			t.Fatalf("unexpected Relaycast Authorization: %q", got)
+		}
+		if got := r.Header.Get("User-Agent"); got != "relayfile-cli/"+relayfileVersion {
+			t.Fatalf("unexpected Relaycast User-Agent: %q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true,"data":{"id":"rc_123","name":"chat-only"}}`))
+	}))
+	defer relaycast.Close()
+	t.Setenv("RELAYCAST_BASE_URL", relaycast.URL)
+	resolverFailure := agentRelayResolver404Error(workspaceKey, relayfileCLITestFixture(t, "cloud-workspace-not-found.json"))
+	installFakeAgentRelay(t, fmt.Sprintf(`
+if [ "$*" = "workspace active --json" ]; then
+  printf '%%s\n' %s >&2
+  exit 1
+fi
+echo "unexpected args: $*" >&2
+exit 2
+`, strconv.Quote(resolverFailure.Error())))
+
+	_, err := activeWorkspaceFromAgentRelay()
+	if err == nil {
+		t.Fatal("expected messaging-only workspace error")
+	}
+	var messagingOnly *agentRelayMessagingOnlyWorkspaceError
+	if !errors.As(err, &messagingOnly) {
+		t.Fatalf("expected agentRelayMessagingOnlyWorkspaceError, got %T: %v", err, err)
+	}
+	if messagingOnly.Name != "chat-only" {
+		t.Fatalf("messaging-only workspace name = %q, want chat-only", messagingOnly.Name)
+	}
+	got := err.Error()
+	for _, want := range []string{
+		"messaging-only (Relaycast-only)",
+		"not Relayfile-backed",
+		`relayfile setup --workspace "chat-only"`,
+		"relayfile login --provision-messaging-only",
+		"messaging workspace and its key will remain unchanged",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("messaging-only error missing %q: %q", want, got)
+		}
+	}
+	for _, unwanted := range []string{"404", "Workspace resolve failed", workspaceKey} {
+		if strings.Contains(got, unwanted) {
+			t.Fatalf("messaging-only error leaked opaque resolver detail %q: %q", unwanted, got)
+		}
+	}
+	if validationCalls != 1 {
+		t.Fatalf("Relaycast validation calls = %d, want 1", validationCalls)
+	}
+}
+
+func TestClassifyAgentRelayActiveWorkspaceErrorReportsRelaycastNetworkError(t *testing.T) {
+	clearRelayfileEnv(t)
+
+	const workspaceKey = "rk_live_network_error_test"
+	relaycast := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	baseURL := relaycast.URL
+	relaycast.Close()
+	t.Setenv("RELAYCAST_BASE_URL", baseURL)
+
+	err := classifyAgentRelayActiveWorkspaceError(agentRelayResolver404Error(workspaceKey, "upstream response body omitted"))
+	if err == nil {
+		t.Fatal("expected Relaycast network verification error")
+	}
+	var messagingOnly *agentRelayMessagingOnlyWorkspaceError
+	var invalidKey *agentRelayInvalidWorkspaceKeyError
+	if errors.As(err, &messagingOnly) || errors.As(err, &invalidKey) {
+		t.Fatalf("network failure was misclassified: %T: %v", err, err)
+	}
+	for _, want := range []string{"could not verify it with Relaycast", "Check network connectivity and try again"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("network verification error missing %q: %q", want, err)
+		}
+	}
+}
+
+func TestClassifyAgentRelayActiveWorkspaceErrorReportsUnexpectedRelaycastStatus(t *testing.T) {
+	clearRelayfileEnv(t)
+
+	const workspaceKey = "rk_live_unexpected_status_test"
+	relaycast := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/workspace" {
+			t.Fatalf("unexpected Relaycast request: %s %s", r.Method, r.URL.Path)
+		}
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer relaycast.Close()
+	t.Setenv("RELAYCAST_BASE_URL", relaycast.URL)
+
+	err := classifyAgentRelayActiveWorkspaceError(agentRelayResolver404Error(workspaceKey, "opaque Cloud miss"))
+	if err == nil || !strings.Contains(err.Error(), "Relaycast verification returned HTTP 503") {
+		t.Fatalf("unexpected-status error = %v", err)
+	}
+	var messagingOnly *agentRelayMessagingOnlyWorkspaceError
+	var invalidKey *agentRelayInvalidWorkspaceKeyError
+	if errors.As(err, &messagingOnly) || errors.As(err, &invalidKey) {
+		t.Fatalf("unexpected status was misclassified: %T: %v", err, err)
+	}
+}
+
+func TestClassifyAgentRelayActiveWorkspaceErrorPreservesRegexMiss(t *testing.T) {
+	clearRelayfileEnv(t)
+
+	var validationCalls int
+	relaycast := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		validationCalls++
+	}))
+	defer relaycast.Close()
+	t.Setenv("RELAYCAST_BASE_URL", relaycast.URL)
+
+	original := errors.New("Workspace resolve failed without an embedded key: 404 " + relayfileCLITestFixture(t, "cloud-workspace-not-found.json"))
+	classified := classifyAgentRelayActiveWorkspaceError(original)
+	if classified != original {
+		t.Fatalf("regex-miss fallback changed the original error: got %v, want %v", classified, original)
+	}
+	if validationCalls != 0 {
+		t.Fatalf("Relaycast validation calls = %d, want 0", validationCalls)
+	}
+}
+
+func TestActiveWorkspaceFromAgentRelayDoesNotMisclassifyInvalidKey(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	const workspaceKey = "rk_live_invalid_test"
+	relaycast := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer "+workspaceKey {
+			t.Fatalf("unexpected Relaycast Authorization: %q", got)
+		}
+		http.Error(w, "invalid key", http.StatusUnauthorized)
+	}))
+	defer relaycast.Close()
+	t.Setenv("RELAYCAST_BASE_URL", relaycast.URL)
+	installFakeAgentRelay(t, `
+if [ "$*" = "workspace active --json" ]; then
+  echo 'Workspace resolve failed at /api/v1/workspaces/`+workspaceKey+`/resolve: 404 Workspace not found' >&2
+  exit 1
+fi
+echo "unexpected args: $*" >&2
+exit 2
+`)
+
+	_, err := activeWorkspaceFromAgentRelay()
+	if err == nil {
+		t.Fatal("expected invalid workspace key error")
+	}
+	var messagingOnly *agentRelayMessagingOnlyWorkspaceError
+	if errors.As(err, &messagingOnly) {
+		t.Fatalf("invalid key was misclassified as messaging-only: %v", err)
+	}
+	var invalidKey *agentRelayInvalidWorkspaceKeyError
+	if !errors.As(err, &invalidKey) {
+		t.Fatalf("expected agentRelayInvalidWorkspaceKeyError, got %T: %v", err, err)
+	}
+	got := err.Error()
+	if !strings.Contains(got, "invalid or unknown") || !strings.Contains(got, "agent-relay workspace switch <name>") {
+		t.Fatalf("invalid-key error was not actionable: %q", got)
+	}
+	if strings.Contains(got, "404") || strings.Contains(got, workspaceKey) {
+		t.Fatalf("invalid-key error leaked opaque resolver detail: %q", got)
+	}
+}
+
+func TestLoginCanProvisionSeparateWorkspaceForMessagingOnlyRelaycastWorkspace(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	const workspaceKey = "rk_live_messaging_only_provision_test"
+	relaycast := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/workspace" || r.Header.Get("Authorization") != "Bearer "+workspaceKey {
+			t.Fatalf("unexpected Relaycast validation request: %s auth=%q", r.URL.Path, r.Header.Get("Authorization"))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true,"data":{"id":"rc_messaging","name":"chat-only"}}`))
+	}))
+	defer relaycast.Close()
+	t.Setenv("RELAYCAST_BASE_URL", relaycast.URL)
+
+	var createCalls, mintCalls int
+	var cloud *httptest.Server
+	cloud = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/workspaces":
+			createCalls++
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("decode Cloud create body: %v", err)
+			}
+			if len(body) != 1 || body["name"] != "chat-only (Relayfile)" {
+				t.Fatalf("Cloud create must contain only the messaging workspace name, got %#v", body)
+			}
+			_, _ = w.Write([]byte(`{"workspaceId":"rw_relayfile","relayfileUrl":"` + cloud.URL + `","createdAt":"2026-07-13T00:00:00Z"}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/workspaces/rw_relayfile/relayfile/delegated-token":
+			mintCalls++
+			if got := r.Header.Get("Authorization"); got != "Bearer cld_access" {
+				t.Fatalf("unexpected delegated-token Authorization: %q", got)
+			}
+			writeDelegatedBundleResponse(t, w, cloud.URL, "rw_relayfile", "rf_access", "rf_refresh")
+		default:
+			t.Fatalf("unexpected Cloud request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer cloud.Close()
+
+	resolverFailure := agentRelayResolver404Error(workspaceKey, relayfileCLITestFixture(t, "cloud-workspace-not-found.json"))
+	installFakeAgentRelay(t, fmt.Sprintf(`
+if [ "$*" = "cloud login --no-open" ]; then
+  echo "agent-relay login ok"
+  exit 0
+fi
+if [ "$*" = "cloud session --json" ]; then
+  echo '{"apiUrl":"`+cloud.URL+`","accessToken":"cld_access"}'
+  exit 0
+fi
+if [ "$*" = "workspace active --json" ]; then
+  printf '%%s\n' %s >&2
+  exit 1
+fi
+echo "unexpected args: $*" >&2
+exit 2
+`, strconv.Quote(resolverFailure.Error())))
+
+	var stdout bytes.Buffer
+	if err := run([]string{"login", "--no-open", "--provision-messaging-only"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("run login with messaging-only provisioning failed: %v\noutput:\n%s", err, stdout.String())
+	}
+	if createCalls != 1 || mintCalls != 1 {
+		t.Fatalf("Cloud calls create=%d mint=%d, want 1 each", createCalls, mintCalls)
+	}
+	gotOutput := stdout.String()
+	for _, want := range []string{"separate Relayfile-backed workspace chat-only (Relayfile)", "id: rw_relayfile", "messaging-only Agent Relay workspace and its key were left unchanged"} {
+		if !strings.Contains(gotOutput, want) {
+			t.Fatalf("provisioning output missing %q: %q", want, gotOutput)
+		}
+	}
+	record, ok := workspaceRecordByName("chat-only (Relayfile)")
+	if !ok || record.ID != "rw_relayfile" {
+		t.Fatalf("separate Relayfile workspace was not persisted: ok=%v record=%+v", ok, record)
+	}
+	delegated, err := delegatedauth.Load(delegatedCredentialsPathForRequest("rw_relayfile", defaultJoinScopes))
+	if err != nil {
+		t.Fatalf("load provisioned delegated credentials: %v", err)
+	}
+	if delegated.Workspace() != "rw_relayfile" || delegated.BearerToken() != "rf_access" {
+		t.Fatalf("unexpected provisioned delegated credentials: %+v", delegated)
+	}
+
+	stdout.Reset()
+	if err := run([]string{"login", "--no-open", "--provision-messaging-only"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("repeat local provisioning failed: %v\noutput:\n%s", err, stdout.String())
+	}
+	if createCalls != 1 || mintCalls != 2 {
+		t.Fatalf("repeat local provisioning calls create=%d mint=%d, want create=1 mint=2", createCalls, mintCalls)
+	}
 }
 
 func testJWTWithWorkspace(workspaceID string) string {

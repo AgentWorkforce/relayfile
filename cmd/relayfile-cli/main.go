@@ -24,6 +24,7 @@ import (
 	"os/signal"
 	"path"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strconv"
@@ -43,22 +44,26 @@ import (
 )
 
 const (
-	relayfileDefaultVersion = "0.10.17"
-	defaultServerURL        = "https://file.agentrelay.com"
-	defaultCloudAPIURL      = "https://agentrelay.com/cloud"
-	defaultObserverURL      = "https://agentrelay.com/observer/file"
-	minAgentRelayCLIVersion = "8.7.0"
-	configDirName           = ".relayfile"
-	websocketReconcileEvery = 10
-	defaultMountMode        = "poll"
-	defaultMountInterval    = 30 * time.Second
-	minMountPollInterval    = 5 * time.Second
-	defaultMountTimeout     = 15 * time.Second
+	relayfileDefaultVersion                   = "0.10.17"
+	defaultServerURL                          = "https://file.agentrelay.com"
+	defaultCloudAPIURL                        = "https://agentrelay.com/cloud"
+	defaultRelaycastAPIURL                    = "https://gateway.relaycast.dev"
+	defaultObserverURL                        = "https://agentrelay.com/observer/file"
+	minAgentRelayCLIVersion                   = "8.7.0"
+	messagingOnlyRelayfileWorkspaceNameSuffix = " (Relayfile)"
+	configDirName                             = ".relayfile"
+	websocketReconcileEvery                   = 10
+	defaultMountMode                          = "poll"
+	defaultMountInterval                      = 30 * time.Second
+	minMountPollInterval                      = 5 * time.Second
+	defaultMountTimeout                       = 15 * time.Second
 )
 
 var relayfileVersion = relayfileDefaultVersion
 
 var relayIntegrationBindingsMu sync.Mutex
+
+var agentRelayWorkspaceKeyInResolverError = regexp.MustCompile(`(?:[?&]key=|/api/v1/workspaces/)(rk_live_[A-Za-z0-9_-]+)`)
 
 // defaultJoinScopes are the scopes minted for every delegated-credential
 // workspace join. ops:read is required for writeback op-status polling
@@ -103,6 +108,31 @@ type agentRelayActiveWorkspace struct {
 	URLs                     map[string]string `json:"urls"`
 	RelayfileURL             string            `json:"relayfileUrl"`
 	RelayfileURLAlternateKey string            `json:"relayfileURL"`
+}
+
+type agentRelayMessagingOnlyWorkspaceError struct {
+	Name string
+}
+
+func (e *agentRelayMessagingOnlyWorkspaceError) Error() string {
+	name := strings.TrimSpace(e.Name)
+	setupCommand := "relayfile setup --workspace <name>"
+	workspaceLabel := "active Agent Relay workspace"
+	if name != "" {
+		setupCommand = "relayfile setup --workspace " + strconv.Quote(name)
+		workspaceLabel = "Agent Relay workspace " + strconv.Quote(name)
+	}
+	return fmt.Sprintf(
+		"%s is messaging-only (Relaycast-only) and is not Relayfile-backed. Run `%s` to create a separate Relayfile-backed workspace, or rerun `relayfile login --provision-messaging-only` to provision one automatically. The messaging workspace and its key will remain unchanged.",
+		workspaceLabel,
+		setupCommand,
+	)
+}
+
+type agentRelayInvalidWorkspaceKeyError struct{}
+
+func (*agentRelayInvalidWorkspaceKeyError) Error() string {
+	return "the active Agent Relay workspace key is invalid or unknown: Cloud could not resolve it and Relaycast rejected it. Run `agent-relay workspace list`, switch to a valid workspace with `agent-relay workspace switch <name>`, or create a Relayfile-backed workspace with `relayfile setup --workspace <name>`."
 }
 
 type workspaceCatalog struct {
@@ -632,7 +662,7 @@ func printHelpForArgs(args []string, stdout io.Writer) {
 	case "setup":
 		fmt.Fprintln(stdout, "Usage: relayfile setup [--provider PROVIDER] [--backend BACKEND] [--workspace NAME] [--local-dir DIR]")
 	case "login":
-		fmt.Fprintln(stdout, "Usage: relayfile login [--no-open] [--api-key] [--server URL] [--token TOKEN]")
+		fmt.Fprintln(stdout, "Usage: relayfile login [--no-open] [--provision-messaging-only] [--api-key] [--server URL] [--token TOKEN]")
 	case "logout":
 		fmt.Fprintln(stdout, "Usage: relayfile logout")
 	case "workspace":
@@ -808,7 +838,7 @@ func printUsage(w io.Writer) {
 Usage:
   relayfile
   relayfile setup [--provider PROVIDER] [--backend BACKEND] [--workspace NAME] [--local-dir DIR]
-  relayfile login [--no-open] [--api-key] [--server URL] [--token TOKEN]
+  relayfile login [--no-open] [--provision-messaging-only] [--api-key] [--server URL] [--token TOKEN]
   relayfile logout
   relayfile workspace create NAME
   relayfile workspace join WORKSPACE_ID [--name NAME] [--write]
@@ -1246,7 +1276,7 @@ func cloudCredentialsFromAgentRelay() (cloudCredentials, error) {
 func activeWorkspaceFromAgentRelay() (agentRelayActiveWorkspace, error) {
 	var workspace agentRelayActiveWorkspace
 	if err := runAgentRelayJSON([]string{"workspace", "active", "--json"}, &workspace); err != nil {
-		return agentRelayActiveWorkspace{}, err
+		return agentRelayActiveWorkspace{}, classifyAgentRelayActiveWorkspaceError(err)
 	}
 	if strings.TrimSpace(workspace.RelayfileWorkspaceID) == "" {
 		return agentRelayActiveWorkspace{}, errors.New("agent-relay workspace active --json did not include relayfileWorkspaceId")
@@ -1258,6 +1288,79 @@ func activeWorkspaceFromAgentRelay() (agentRelayActiveWorkspace, error) {
 		workspace.Name = firstNonEmpty(workspace.Slug, workspace.RelayfileWorkspaceID, workspace.CloudWorkspaceID, workspace.ID)
 	}
 	return workspace, nil
+}
+
+func classifyAgentRelayActiveWorkspaceError(err error) error {
+	if err == nil {
+		return nil
+	}
+	detail := err.Error()
+	normalized := strings.ToLower(detail)
+	if !strings.Contains(normalized, "resolve failed") ||
+		!strings.Contains(normalized, "404") {
+		return err
+	}
+	match := agentRelayWorkspaceKeyInResolverError.FindStringSubmatch(detail)
+	if len(match) != 2 {
+		return err
+	}
+	workspaceKey, unescapeErr := url.QueryUnescape(match[1])
+	if unescapeErr != nil || !strings.HasPrefix(workspaceKey, "rk_live_") {
+		return err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	name, statusCode, validationErr := validateRelaycastWorkspaceKey(ctx, workspaceKey)
+	if validationErr != nil {
+		return fmt.Errorf(
+			"the active Agent Relay workspace could not be resolved through Cloud, and Relayfile could not verify it with Relaycast: %w. Check network connectivity and try again",
+			validationErr,
+		)
+	}
+	switch statusCode {
+	case http.StatusOK:
+		return &agentRelayMessagingOnlyWorkspaceError{Name: name}
+	case http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound:
+		return &agentRelayInvalidWorkspaceKeyError{}
+	default:
+		return fmt.Errorf(
+			"the active Agent Relay workspace could not be resolved through Cloud, and Relaycast verification returned HTTP %d. Try again or run `relayfile setup --workspace <name>` to create a Relayfile-backed workspace",
+			statusCode,
+		)
+	}
+}
+
+func validateRelaycastWorkspaceKey(ctx context.Context, workspaceKey string) (string, int, error) {
+	baseURL := firstNonEmpty(os.Getenv("RELAYCAST_BASE_URL"), os.Getenv("RELAY_BASE_URL"), defaultRelaycastAPIURL)
+	endpoint := strings.TrimRight(baseURL, "/") + "/v1/workspace"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return "", 0, err
+	}
+	req.Header.Set("Authorization", "Bearer "+workspaceKey)
+	req.Header.Set("User-Agent", "relayfile-cli/"+relayfileVersion)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", 0, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
+		return "", resp.StatusCode, nil
+	}
+	var payload struct {
+		Data struct {
+			Name string `json:"name"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&payload); err != nil {
+		// A successful authenticated response is sufficient to prove that the
+		// key is valid in Relaycast. The name only improves the remediation.
+		return "", resp.StatusCode, nil
+	}
+	return strings.TrimSpace(payload.Data.Name), resp.StatusCode, nil
 }
 
 func firstNonEmpty(values ...string) string {
@@ -1812,21 +1915,39 @@ func delegatedRelayfileTokenViaCloud(cloud cloudCredentials, workspaceID, agentN
 	return bundle, nil
 }
 
+type delegatedBootstrapOptions struct {
+	ProvisionMessagingOnly bool
+}
+
 func bootstrapDelegatedCredentialsFromAgentRelay(workspaceValue string, scopes []string) (workspaceRecord, string, error) {
+	record, path, _, err := bootstrapDelegatedCredentialsFromAgentRelayWithOptions(workspaceValue, scopes, delegatedBootstrapOptions{})
+	return record, path, err
+}
+
+func bootstrapDelegatedCredentialsFromAgentRelayWithOptions(workspaceValue string, scopes []string, options delegatedBootstrapOptions) (workspaceRecord, string, bool, error) {
 	cloudCreds, err := cloudCredentialsFromAgentRelay()
 	if err != nil {
-		return workspaceRecord{}, "", err
+		return workspaceRecord{}, "", false, err
 	}
 	workspace, err := activeWorkspaceFromAgentRelay()
 	if err != nil {
-		return workspaceRecord{}, "", err
+		var messagingOnly *agentRelayMessagingOnlyWorkspaceError
+		if !options.ProvisionMessagingOnly || !errors.As(err, &messagingOnly) {
+			return workspaceRecord{}, "", false, err
+		}
+		requested := strings.TrimSpace(workspaceValue)
+		if requested != "" && !strings.EqualFold(requested, "active") && requested != strings.TrimSpace(messagingOnly.Name) {
+			return workspaceRecord{}, "", false, fmt.Errorf("active messaging-only Agent Relay workspace %q does not match requested workspace %q", messagingOnly.Name, workspaceValue)
+		}
+		record, path, provisionErr := provisionRelayfileWorkspaceForMessagingOnly(cloudCreds, messagingOnly.Name, scopes)
+		return record, path, true, provisionErr
 	}
 	if !agentRelayWorkspaceMatches(workspaceValue, workspace) {
-		return workspaceRecord{}, "", fmt.Errorf("active agent-relay workspace %s does not match requested workspace %q", workspace.Name, workspaceValue)
+		return workspaceRecord{}, "", false, fmt.Errorf("active agent-relay workspace %s does not match requested workspace %q", workspace.Name, workspaceValue)
 	}
 	cloudWorkspaceID := firstNonEmpty(workspace.CloudWorkspaceID, workspace.ID, workspace.RelayfileWorkspaceID)
 	if cloudWorkspaceID == "" {
-		return workspaceRecord{}, "", errors.New("agent-relay workspace active --json did not include a cloud workspace id")
+		return workspaceRecord{}, "", false, errors.New("agent-relay workspace active --json did not include a cloud workspace id")
 	}
 	mintScopes := append([]string(nil), scopes...)
 	if len(mintScopes) == 0 {
@@ -1845,13 +1966,45 @@ func bootstrapDelegatedCredentialsFromAgentRelay(workspaceValue string, scopes [
 	}
 	delegated, err := delegatedRelayfileTokenViaCloud(cloudCreds, cloudWorkspaceID, record.AgentName, mintScopes)
 	if err != nil {
+		return workspaceRecord{}, "", false, err
+	}
+	credsPath := delegatedCredentialsPathForRequest(record.ID, mintScopes)
+	if err := delegatedauth.SaveAtomic(credsPath, delegated); err != nil {
+		return workspaceRecord{}, "", false, fmt.Errorf("persist delegated relayfile credentials: %w", err)
+	}
+	persisted, err := persistDelegatedWorkspace(record, delegated, "", true)
+	if err != nil {
+		return workspaceRecord{}, "", false, err
+	}
+	return persisted, credsPath, false, nil
+}
+
+func provisionRelayfileWorkspaceForMessagingOnly(cloud cloudCredentials, name string, scopes []string) (workspaceRecord, string, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return workspaceRecord{}, "", errors.New("the messaging-only workspace did not include a name; run `relayfile setup --workspace <name>` to create a separate Relayfile-backed workspace")
+	}
+	// Keep the Relayfile-backed workspace visually distinct from the original
+	// Relaycast-only workspace. ensureWorkspaceForSetup deduplicates this name
+	// against the local workspace catalog before calling Cloud.
+	provisionedName := name + messagingOnlyRelayfileWorkspaceNameSuffix
+	record, _, err := ensureWorkspaceForSetup(cloud, provisionedName, "")
+	if err != nil {
+		return workspaceRecord{}, "", err
+	}
+	mintScopes := append([]string(nil), scopes...)
+	if len(mintScopes) == 0 {
+		mintScopes = append([]string(nil), defaultJoinScopes...)
+	}
+	delegated, err := delegatedRelayfileTokenViaCloud(cloud, record.ID, record.AgentName, mintScopes)
+	if err != nil {
 		return workspaceRecord{}, "", err
 	}
 	credsPath := delegatedCredentialsPathForRequest(record.ID, mintScopes)
 	if err := delegatedauth.SaveAtomic(credsPath, delegated); err != nil {
 		return workspaceRecord{}, "", fmt.Errorf("persist delegated relayfile credentials: %w", err)
 	}
-	persisted, err := persistDelegatedWorkspace(record, delegated, "", true)
+	persisted, err := persistDelegatedWorkspace(record, delegated, record.LocalDir, true)
 	if err != nil {
 		return workspaceRecord{}, "", err
 	}
@@ -2148,16 +2301,18 @@ func runLogin(args []string, stdin io.Reader, stdout io.Writer) error {
 	loginTimeout := fs.Duration("login-timeout", 5*time.Minute, "cloud login timeout")
 	workspaceFlag := fs.String("workspace", "", "workspace name or id to refresh; defaults to the active workspace")
 	skipWorkspace := fs.Bool("skip-workspace-refresh", false, "sign into the cloud only; do not refresh the workspace token")
+	provisionMessagingOnly := fs.Bool("provision-messaging-only", false, "create a separate Relayfile-backed workspace when the active Agent Relay workspace is messaging-only")
 	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
-		"server":                 true,
-		"token":                  true,
-		"cloud-api-url":          true,
-		"cloud-token":            true,
-		"api-key":                false,
-		"no-open":                false,
-		"login-timeout":          true,
-		"workspace":              true,
-		"skip-workspace-refresh": false,
+		"server":                   true,
+		"token":                    true,
+		"cloud-api-url":            true,
+		"cloud-token":              true,
+		"api-key":                  false,
+		"no-open":                  false,
+		"login-timeout":            true,
+		"workspace":                true,
+		"skip-workspace-refresh":   false,
+		"provision-messaging-only": false,
 	})); err != nil {
 		return err
 	}
@@ -2165,8 +2320,14 @@ func runLogin(args []string, stdin io.Reader, stdout io.Writer) error {
 	if *skipWorkspace && strings.TrimSpace(*workspaceFlag) != "" {
 		return errors.New("--workspace cannot be used with --skip-workspace-refresh: pick one")
 	}
+	if *skipWorkspace && *provisionMessagingOnly {
+		return errors.New("--provision-messaging-only cannot be used with --skip-workspace-refresh")
+	}
 
 	tokenValue := strings.TrimSpace(*token)
+	if *provisionMessagingOnly && (tokenValue != "" || *apiKey) {
+		return errors.New("--provision-messaging-only is only available with the Agent Relay cloud login flow")
+	}
 
 	// Token explicitly provided → legacy server-credential flow.
 	if tokenValue != "" {
@@ -2200,14 +2361,22 @@ func runLogin(args []string, stdin io.Reader, stdout io.Writer) error {
 		fmt.Fprintln(stdout, "Relayfile now uses the active agent-relay cloud session.")
 		return nil
 	}
-	record, _, err := bootstrapDelegatedCredentialsFromAgentRelay(strings.TrimSpace(*workspaceFlag), defaultJoinScopes)
+	record, _, usedSeparateWorkspace, err := bootstrapDelegatedCredentialsFromAgentRelayWithOptions(
+		strings.TrimSpace(*workspaceFlag),
+		defaultJoinScopes,
+		delegatedBootstrapOptions{ProvisionMessagingOnly: *provisionMessagingOnly},
+	)
 	if err != nil {
 		return fmt.Errorf("bootstrap delegated relayfile credentials: %w", err)
 	}
 	if err := removeCredentialFile(credentialsPath()); err != nil {
 		fmt.Fprintf(stdout, "warning: could not clear stale relayfile credentials: %v\n", err)
 	}
-	fmt.Fprintf(stdout, "Relayfile now uses the active agent-relay cloud session and workspace %s.\n", record.Name)
+	if usedSeparateWorkspace {
+		fmt.Fprintf(stdout, "Relayfile now uses separate Relayfile-backed workspace %s (id: %s). The active messaging-only Agent Relay workspace and its key were left unchanged.\n", record.Name, record.ID)
+	} else {
+		fmt.Fprintf(stdout, "Relayfile now uses the active agent-relay cloud session and workspace %s.\n", record.Name)
+	}
 	return nil
 }
 

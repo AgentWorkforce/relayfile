@@ -125,7 +125,7 @@ This path is intentionally a wrapper over the lower-level commands and Cloud API
 Authenticate through the canonical relay session.
 
 ```
-relayfile login [--no-open]
+relayfile login [--no-open] [--provision-messaging-only]
 ```
 
 | Flag | Default | Description |
@@ -133,12 +133,18 @@ relayfile login [--no-open]
 | `--no-open` | `false` | Forwarded to `agent-relay login --no-open` |
 | `--api-key` | `false` | Preserve the self-hosted/API-key credential path |
 | `--server` | `https://api.relayfile.dev` | Server base URL for `--api-key` |
+| `--provision-messaging-only` | `false` | When the active Agent Relay workspace exists only in Relaycast, create a separate Relayfile-backed workspace with a ` (Relayfile)` display-name suffix. |
 
 **Behavior:**
 
 1. Default path delegates to `agent-relay login`.
 2. Relayfile does not write `~/.relayfile/cloud-credentials.json`.
 3. `--api-key` keeps the self-hosted compatibility path and writes `~/.relayfile/credentials.json` with `0600` permissions.
+
+Messaging-only provisioning deduplicates against
+`~/.relayfile/workspaces.json`, so the guarantee is local to the current
+machine. Running the flag from a second machine without that catalog entry can
+create another Relayfile-backed workspace with the same display name.
 
 **Errors:**
 - Server unreachable: `Error: cannot reach <server> — check the URL and your network.`
