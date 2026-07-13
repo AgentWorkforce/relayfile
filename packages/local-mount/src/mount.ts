@@ -889,12 +889,16 @@ function readGlobalGitExcludeLines(projectDir: string): string[] {
     /* fall through to the XDG default */
   }
   const candidate =
-    configured ??
-    path.join(
-      process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'),
-      'git',
-      'ignore'
-    );
+    configured !== null
+      ? // `--path` expands `~`; a bare relative value (a misconfiguration git
+        // itself resolves against its process cwd) resolves against the
+        // project dir here, matching the `git -C projectDir` listing calls.
+        path.resolve(projectDir, configured)
+      : path.join(
+          process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'),
+          'git',
+          'ignore'
+        );
   return readIgnoreRuleLines(candidate);
 }
 
