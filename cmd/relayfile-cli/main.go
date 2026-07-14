@@ -11632,39 +11632,85 @@ func runMountLoop(rootCtx context.Context, syncer *mountsync.Syncer, localDir, w
 	const degradedNoticeInterval = time.Minute
 	degradedAttempts := 0
 	var nextDegradedAttempt time.Time
+	var statusMu sync.Mutex
 	const degradedStallReason = "delegated relayfile credentials expired or revoked — re-bootstrap relayfile credentials with agent-relay cloud login"
 
 	enterDegraded := func() {
+		statusMu.Lock()
+		changed := false
 		if !degraded {
 			degraded = true
 			stallReason = degradedStallReason
 			lastDegradedNotice = time.Time{}
 			nextDegradedAttempt = time.Time{}
+			changed = true
+		}
+		statusMu.Unlock()
+		if changed {
 			log.Printf("mount entering read-only degraded state: %s", degradedStallReason)
 		}
 	}
 	exitDegraded := func() {
+		statusMu.Lock()
+		changed := false
 		if degraded {
 			degraded = false
 			stallReason = ""
 			lastDegradedNotice = time.Time{}
 			degradedAttempts = 0
 			nextDegradedAttempt = time.Time{}
+			changed = true
+		}
+		statusMu.Unlock()
+		if changed {
 			log.Printf("mount exiting degraded state; delegated relayfile credentials restored")
 		}
 	}
 	maybePrintRecovery := func() {
+		statusMu.Lock()
 		if !degraded {
+			statusMu.Unlock()
 			return
 		}
 		if time.Since(lastDegradedNotice) < degradedNoticeInterval {
+			statusMu.Unlock()
 			return
 		}
-		log.Printf("mount degraded: %s", degradedStallReason)
 		lastDegradedNotice = time.Now()
+		statusMu.Unlock()
+		log.Printf("mount degraded: %s", degradedStallReason)
+	}
+	isDegraded := func() bool {
+		statusMu.Lock()
+		defer statusMu.Unlock()
+		return degraded
+	}
+	setStallReason := func(reason string) {
+		statusMu.Lock()
+		stallReason = reason
+		statusMu.Unlock()
+	}
+	markCycleSuccess := func() {
+		statusMu.Lock()
+		stallReason = ""
+		lastSuccess = time.Now()
+		statusMu.Unlock()
+	}
+	lastSuccessAt := func() time.Time {
+		statusMu.Lock()
+		defer statusMu.Unlock()
+		return lastSuccess
+	}
+	currentStallReason := func() string {
+		statusMu.Lock()
+		defer statusMu.Unlock()
+		return stallReason
 	}
 
+	var authMu sync.Mutex
 	refreshMountAuth := func(force bool) error {
+		authMu.Lock()
+		defer authMu.Unlock()
 		if httpClient == nil {
 			return nil
 		}
@@ -11735,6 +11781,7 @@ func runMountLoop(rootCtx context.Context, syncer *mountsync.Syncer, localDir, w
 		snapshotMu.Lock()
 		needFetch := !hasCachedStatus || time.Since(lastSnapshotFetchAt) >= syncStatusMinPollInterval
 		cached := lastSnapshotStatus
+		hadCachedStatus := hasCachedStatus
 		snapshotMu.Unlock()
 
 		status := cached
@@ -11748,7 +11795,7 @@ func runMountLoop(rootCtx context.Context, syncer *mountsync.Syncer, localDir, w
 				// Fetch failed; fall back to cached snapshot if we have one,
 				// otherwise skip this write — we'd rather have a stale
 				// snapshot than spin retrying on every file event.
-				if !hasCachedStatus {
+				if !hadCachedStatus {
 					return
 				}
 			} else {
@@ -11760,14 +11807,18 @@ func runMountLoop(rootCtx context.Context, syncer *mountsync.Syncer, localDir, w
 				status = fetched
 			}
 		}
-		_ = writeMirrorStateFile(localDir, buildSyncStateSnapshot(status, workspaceID, defaultMountMode, interval, localDir, readDaemonPID(localDir), stallReason))
+		_ = writeMirrorStateFile(localDir, buildSyncStateSnapshot(status, workspaceID, defaultMountMode, interval, localDir, readDaemonPID(localDir), currentStallReason()))
 	}
 
 	runCycle := func(reconcile bool) error {
-		if degraded {
+		statusMu.Lock()
+		currentlyDegraded := degraded
+		degradedRetryAt := nextDegradedAttempt
+		statusMu.Unlock()
+		if currentlyDegraded {
 			// Exponential backoff: skip recovery attempts until nextDegradedAttempt.
 			// This prevents hammering the auth endpoint on consecutive cycles.
-			if !nextDegradedAttempt.IsZero() && time.Now().Before(nextDegradedAttempt) {
+			if !degradedRetryAt.IsZero() && time.Now().Before(degradedRetryAt) {
 				maybePrintRecovery()
 				writeSnapshot()
 				return errors.New(degradedStallReason)
@@ -11777,6 +11828,7 @@ func runMountLoop(rootCtx context.Context, syncer *mountsync.Syncer, localDir, w
 				// Compute backoff for next attempt: base * 2^attempts, capped.
 				// Cap the exponent at 14 to prevent int64 overflow on 30s<<uint(n)
 				// after ~28 consecutive failures (would shift to negative).
+				statusMu.Lock()
 				exp := degradedAttempts
 				if exp > 14 {
 					exp = 14
@@ -11787,6 +11839,7 @@ func runMountLoop(rootCtx context.Context, syncer *mountsync.Syncer, localDir, w
 				}
 				degradedAttempts++
 				nextDegradedAttempt = time.Now().Add(backoff)
+				statusMu.Unlock()
 				if isMountCredentialExpired(err) {
 					maybePrintRecovery()
 					writeSnapshot()
@@ -11818,19 +11871,18 @@ func runMountLoop(rootCtx context.Context, syncer *mountsync.Syncer, localDir, w
 			// only for that expected timeout case.
 			if errors.Is(err, context.DeadlineExceeded) {
 				if bs := readBootstrapStatus(localDir); bs != nil {
-					stallReason = ""
+					setStallReason("")
 					log.Printf("mount bootstrapping: %d/%d files (in progress)", bs.FilesSynced, bs.FilesTotal)
 					writeSnapshot()
 					return err
 				}
 			}
-			stallReason = err.Error()
+			setStallReason(err.Error())
 			log.Printf("mount sync cycle failed: %v", err)
 			writeSnapshot()
 			return err
 		}
-		stallReason = ""
-		lastSuccess = time.Now()
+		markCycleSuccess()
 		log.Printf("mount sync cycle completed")
 		writeSnapshot()
 		return nil
@@ -11844,7 +11896,7 @@ func runMountLoop(rootCtx context.Context, syncer *mountsync.Syncer, localDir, w
 	// filtered by HandleLocalChange's tracked hash check.
 	if !once {
 		watcher, err := mountsync.NewFileWatcher(localDir, func(relativePath string, op fsnotify.Op) {
-			if degraded {
+			if isDegraded() {
 				// Local edit observed while delegated credentials are unusable.
 				// Leave the dirty state in place so the next successful cycle
 				// after re-login picks it up; do not attempt to push now.
@@ -11906,16 +11958,16 @@ func runMountLoop(rootCtx context.Context, syncer *mountsync.Syncer, localDir, w
 			if reconcile {
 				_ = runCycle(true)
 			}
-			if !degraded && time.Since(lastSuccess) >= 10*time.Minute {
+			if !isDegraded() && time.Since(lastSuccessAt()) >= 10*time.Minute {
 				if bs := readBootstrapStatus(localDir); bs != nil {
 					// Long-running initial mirror is making progress
 					// across cycles — not a stall.
-					stallReason = ""
+					setStallReason("")
 					log.Printf("mount bootstrapping: %d/%d files (in progress)", bs.FilesSynced, bs.FilesTotal)
 					writeSnapshot()
 				} else {
-					stallReason = "no successful reconcile for 10m"
-					log.Printf("mount stalled: %s", stallReason)
+					setStallReason("no successful reconcile for 10m")
+					log.Printf("mount stalled: %s", currentStallReason())
 					writeSnapshot()
 				}
 			}

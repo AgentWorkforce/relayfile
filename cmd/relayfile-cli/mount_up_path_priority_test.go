@@ -29,6 +29,36 @@ type blockingBootstrapClient struct {
 	opOnce        sync.Once
 }
 
+type concurrentCredentialFailureClient struct {
+	mountsync.RemoteClient
+
+	exportStarted chan struct{}
+	bulkStarted   chan struct{}
+	release       <-chan struct{}
+	exportOnce    sync.Once
+	bulkOnce      sync.Once
+}
+
+func (c *concurrentCredentialFailureClient) ExportFiles(ctx context.Context, _, _ string) ([]mountsync.RemoteFile, error) {
+	c.exportOnce.Do(func() { close(c.exportStarted) })
+	select {
+	case <-c.release:
+		return nil, ErrDelegatedRelayfileCredentialsExpired
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func (c *concurrentCredentialFailureClient) WriteFilesBulk(ctx context.Context, _ string, _ []mountsync.BulkWriteFile) (mountsync.BulkWriteResponse, error) {
+	c.bulkOnce.Do(func() { close(c.bulkStarted) })
+	select {
+	case <-c.release:
+		return mountsync.BulkWriteResponse{}, ErrDelegatedRelayfileCredentialsExpired
+	case <-ctx.Done():
+		return mountsync.BulkWriteResponse{}, ctx.Err()
+	}
+}
+
 func (c *blockingBootstrapClient) ExportFiles(ctx context.Context, _, _ string) ([]mountsync.RemoteFile, error) {
 	c.exportOnce.Do(func() { close(c.exportStarted) })
 	<-ctx.Done()
@@ -156,6 +186,95 @@ func TestMountLoopStartsWatcherBeforeBlockedInitialBootstrap(t *testing.T) {
 		t.Fatalf("acked receipts = %v (glob err=%v), want exactly one", acked, globErr)
 	}
 
+	cancel()
+	select {
+	case err := <-loopDone:
+		if err != nil {
+			t.Fatalf("mount loop shutdown: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("mount loop did not stop after cancel")
+	}
+}
+
+func TestMountLoopSerializesStatusWhenWatcherAndInitialBootstrapFailTogether(t *testing.T) {
+	localDir := t.TempDir()
+	draftRel := filepath.FromSlash("slack/channels/C123/messages/messages 6ab77d67-1111-4111-8111-123456789abc.json")
+	draftPath := filepath.Join(localDir, draftRel)
+	if err := os.MkdirAll(filepath.Dir(draftPath), 0o755); err != nil {
+		t.Fatalf("mkdir draft parent: %v", err)
+	}
+
+	release := make(chan struct{})
+	client := &concurrentCredentialFailureClient{
+		exportStarted: make(chan struct{}),
+		bulkStarted:   make(chan struct{}),
+		release:       release,
+	}
+	rootCtx, cancel := context.WithCancel(context.Background())
+	syncer, err := mountsync.NewSyncer(client, mountsync.SyncerOptions{
+		WorkspaceID: "ws_mount_loop_status_race",
+		RemoteRoot:  "/",
+		LocalRoot:   localDir,
+		RootCtx:     rootCtx,
+		WebSocket:   boolPtr(false),
+		Logger:      log.New(io.Discard, "", 0),
+	})
+	if err != nil {
+		cancel()
+		t.Fatalf("NewSyncer: %v", err)
+	}
+
+	previousLogWriter := log.Writer()
+	log.SetOutput(io.Discard)
+	defer log.SetOutput(previousLogWriter)
+
+	loopDone := make(chan error, 1)
+	go func() {
+		loopDone <- runMountLoop(
+			rootCtx,
+			syncer,
+			localDir,
+			"ws_mount_loop_status_race",
+			"http://unused.test",
+			"",
+			time.Second,
+			time.Hour,
+			0,
+			false,
+			false,
+			false,
+			mountPIDFile(localDir),
+			mountLogFile(localDir),
+		)
+	}()
+
+	select {
+	case <-client.exportStarted:
+	case <-time.After(time.Second):
+		cancel()
+		<-loopDone
+		t.Fatal("initial export did not start")
+	}
+	if err := os.WriteFile(draftPath, []byte(`{"channel":"C123","text":"race status"}`), 0o644); err != nil {
+		cancel()
+		<-loopDone
+		t.Fatalf("write draft: %v", err)
+	}
+	select {
+	case <-client.bulkStarted:
+	case <-time.After(2 * time.Second):
+		cancel()
+		<-loopDone
+		t.Fatal("watcher did not reach concurrent credential failure")
+	}
+
+	// Both the blocked initial runCycle and the watcher callback now return
+	// the same terminal credential error. They independently transition the
+	// mount-loop status to degraded; -race must prove those transitions and
+	// snapshot reads are serialized.
+	close(release)
+	time.Sleep(100 * time.Millisecond)
 	cancel()
 	select {
 	case err := <-loopDone:

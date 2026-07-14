@@ -3249,6 +3249,497 @@ func TestFullPullDoesNotStarveLocalDraftAdmissionOrReceiptSettlement(t *testing.
 	}
 }
 
+func TestGithubTarFullPullDoesNotStarveOrClobberConcurrentWriteback(t *testing.T) {
+	const (
+		workspaceID  = "ws_github_tar_up_path_priority"
+		contentsRoot = "/github/repos/acme/widgets/contents"
+		headSHA      = "head123"
+		localRel     = "README.md"
+		remotePath   = contentsRoot + "/README.md@" + headSHA + ".json"
+		sentinelPath = "/github/repos/acme/widgets/.relayfile/clone.json"
+		opID         = "op_github_tar_up_path_priority"
+	)
+	oldBody := []byte("# stale remote snapshot\n")
+	newBody := []byte("# local writeback wins\n")
+	tarStarted := make(chan struct{})
+	tarRelease := make(chan struct{})
+	base := &fakeExportClient{
+		fakeClient: &fakeClient{
+			files: map[string]RemoteFile{
+				sentinelPath: {
+					Path:        sentinelPath,
+					Revision:    "rev_1",
+					ContentType: "application/json",
+					Content:     `{"headSha":"` + headSHA + `","eventsCursor":"evt_seed"}`,
+				},
+				remotePath: {
+					Path:        remotePath,
+					Revision:    "rev_2",
+					ContentType: "text/markdown",
+					Content:     string(oldBody),
+					ContentHash: hashBytes(oldBody),
+				},
+			},
+			operations: map[string]OperationStatus{
+				opID: {
+					OpID:     opID,
+					Path:     remotePath,
+					Revision: "rev_3",
+					Provider: "github",
+					Status:   "succeeded",
+				},
+			},
+		},
+		tarFiles: map[string][]byte{localRel: oldBody},
+	}
+	base.bulkWriteResponseFunc = successfulReceiptBulkResponse(remotePath, opID, "rev_3")
+	client := &blockingGithubTarClient{
+		fakeExportClient: base,
+		tarStarted:       tarStarted,
+		tarRelease:       tarRelease,
+	}
+
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID:   workspaceID,
+		RemoteRoot:    contentsRoot,
+		LocalRoot:     localDir,
+		WebSocket:     boolPtr(false),
+		FullPullEvery: -1,
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer: %v", err)
+	}
+
+	pullDone := make(chan error, 1)
+	go func() { pullDone <- syncer.SyncOnce(context.Background()) }()
+	select {
+	case <-tarStarted:
+	case <-time.After(time.Second):
+		t.Fatal("github tar snapshot did not block")
+	}
+
+	localPath := filepath.Join(localDir, localRel)
+	if err := os.WriteFile(localPath, newBody, 0o644); err != nil {
+		close(tarRelease)
+		<-pullDone
+		t.Fatalf("write local github file: %v", err)
+	}
+	writeDone := make(chan error, 1)
+	go func() { writeDone <- syncer.HandleLocalChange(context.Background(), localRel, fsnotify.Create) }()
+	assertWritebackSettlesWhilePullBlocked(t, localDir, base.fakeClient, remotePath, opID, writeDone, tarRelease, pullDone)
+
+	close(tarRelease)
+	if err := <-pullDone; err != nil {
+		t.Fatalf("github tar full pull after release: %v", err)
+	}
+	if base.tarCalls != 1 || base.exportCalls != 0 {
+		t.Fatalf("full-pull dispatch tar=%d export=%d, want tar=1 export=0", base.tarCalls, base.exportCalls)
+	}
+	assertLocalFileContent(t, localPath, string(newBody))
+}
+
+func TestTreeFullPullDoesNotStarveOrClobberConcurrentWriteback(t *testing.T) {
+	const (
+		workspaceID = "ws_tree_up_path_priority"
+		localRel    = "Docs/A.md"
+		remotePath  = "/notion/Docs/A.md"
+		opID        = "op_tree_up_path_priority"
+	)
+	oldBody := "# stale tree snapshot\n"
+	newBody := "# local writeback wins\n"
+	readStarted := make(chan struct{})
+	readRelease := make(chan struct{})
+	base := &fakeExportClient{
+		fakeClient: &fakeClient{
+			files: map[string]RemoteFile{
+				remotePath: {
+					Path:        remotePath,
+					Revision:    "rev_1",
+					ContentType: "text/markdown",
+					Content:     oldBody,
+					ContentHash: hashString(oldBody),
+				},
+			},
+			operations: map[string]OperationStatus{
+				opID: {
+					OpID:     opID,
+					Path:     remotePath,
+					Revision: "rev_2",
+					Provider: "notion",
+					Status:   "succeeded",
+				},
+			},
+		},
+		exportErr: &HTTPError{StatusCode: http.StatusNotFound, Code: "not_found", Message: "export unsupported"},
+	}
+	base.bulkWriteResponseFunc = successfulReceiptBulkResponse(remotePath, opID, "rev_2")
+	client := &blockingTreeReadClient{
+		fakeExportClient: base,
+		blockedPath:      remotePath,
+		readStarted:      readStarted,
+		readRelease:      readRelease,
+	}
+
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID:   workspaceID,
+		RemoteRoot:    "/notion",
+		LocalRoot:     localDir,
+		WebSocket:     boolPtr(false),
+		FullPullEvery: -1,
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer: %v", err)
+	}
+
+	pullDone := make(chan error, 1)
+	go func() { pullDone <- syncer.SyncOnce(context.Background()) }()
+	select {
+	case <-readStarted:
+	case <-time.After(time.Second):
+		t.Fatal("tree bootstrap ReadFile did not block")
+	}
+
+	localPath := filepath.Join(localDir, filepath.FromSlash(localRel))
+	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+		close(readRelease)
+		<-pullDone
+		t.Fatalf("mkdir local tree file parent: %v", err)
+	}
+	if err := os.WriteFile(localPath, []byte(newBody), 0o644); err != nil {
+		close(readRelease)
+		<-pullDone
+		t.Fatalf("write local tree file: %v", err)
+	}
+	writeDone := make(chan error, 1)
+	go func() { writeDone <- syncer.HandleLocalChange(context.Background(), localRel, fsnotify.Create) }()
+	assertWritebackSettlesWhilePullBlocked(t, localDir, base.fakeClient, remotePath, opID, writeDone, readRelease, pullDone)
+
+	close(readRelease)
+	if err := <-pullDone; err != nil {
+		t.Fatalf("tree full pull after release: %v", err)
+	}
+	if base.exportCalls != 1 || base.listTreeCalls == 0 || base.tarCalls != 0 {
+		t.Fatalf("full-pull dispatch export=%d tree=%d tar=%d, want unsupported export then tree", base.exportCalls, base.listTreeCalls, base.tarCalls)
+	}
+	assertLocalFileContent(t, localPath, newBody)
+}
+
+func TestNoopWatcherEventDuringFullPullDoesNotSuppressRemoteUpdate(t *testing.T) {
+	const (
+		workspaceID = "ws_full_pull_noop_event"
+		localRel    = "Docs/A.md"
+		remotePath  = "/notion/Docs/A.md"
+	)
+	oldBody := "# tracked local bytes\n"
+	newBody := "# authoritative remote update\n"
+	base := &fakeExportClient{
+		fakeClient: &fakeClient{
+			files: map[string]RemoteFile{
+				remotePath: {
+					Path:        remotePath,
+					Revision:    "rev_1",
+					ContentType: "text/markdown",
+					Content:     oldBody,
+					ContentHash: hashString(oldBody),
+				},
+			},
+			eventsUnsupported: true,
+		},
+	}
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(base, SyncerOptions{
+		WorkspaceID:   workspaceID,
+		RemoteRoot:    "/notion",
+		LocalRoot:     localDir,
+		WebSocket:     boolPtr(false),
+		FullPullEvery: -1,
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer: %v", err)
+	}
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("initial full pull: %v", err)
+	}
+	localPath := filepath.Join(localDir, filepath.FromSlash(localRel))
+	assertLocalFileContent(t, localPath, oldBody)
+
+	base.files[remotePath] = RemoteFile{
+		Path:        remotePath,
+		Revision:    "rev_2",
+		ContentType: "text/markdown",
+		Content:     newBody,
+		ContentHash: hashString(newBody),
+	}
+	exportStarted := make(chan struct{})
+	exportRelease := make(chan struct{})
+	base.exportStarted = exportStarted
+	base.exportRelease = exportRelease
+	syncer.forceFullReconcile = true
+	pullDone := make(chan error, 1)
+	go func() { pullDone <- syncer.SyncOnce(context.Background()) }()
+	select {
+	case <-exportStarted:
+	case <-time.After(time.Second):
+		t.Fatal("authoritative export did not block")
+	}
+
+	if err := syncer.HandleLocalChange(context.Background(), localRel, fsnotify.Chmod); err != nil {
+		close(exportRelease)
+		<-pullDone
+		t.Fatalf("no-op Chmod event: %v", err)
+	}
+	if got := base.bulkWriteCalls; got != 0 {
+		close(exportRelease)
+		<-pullDone
+		t.Fatalf("no-op event admitted %d writes, want 0", got)
+	}
+	close(exportRelease)
+	if err := <-pullDone; err != nil {
+		t.Fatalf("authoritative export after release: %v", err)
+	}
+	assertLocalFileContent(t, localPath, newBody)
+}
+
+func TestNoopWatcherEventDuringFullPullDoesNotSuppressRemoteDelete(t *testing.T) {
+	const (
+		workspaceID = "ws_full_pull_noop_remote_delete"
+		localRel    = "Docs/A.md"
+		remotePath  = "/notion/Docs/A.md"
+		keepPath    = "/notion/Docs/B.md"
+	)
+	body := "# tracked local bytes\n"
+	keepBody := "# remains remote\n"
+	base := &fakeExportClient{
+		fakeClient: &fakeClient{
+			files: map[string]RemoteFile{
+				remotePath: {
+					Path:        remotePath,
+					Revision:    "rev_1",
+					ContentType: "text/markdown",
+					Content:     body,
+					ContentHash: hashString(body),
+				},
+				keepPath: {
+					Path:        keepPath,
+					Revision:    "rev_2",
+					ContentType: "text/markdown",
+					Content:     keepBody,
+					ContentHash: hashString(keepBody),
+				},
+			},
+			eventsUnsupported: true,
+		},
+	}
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(base, SyncerOptions{
+		WorkspaceID:   workspaceID,
+		RemoteRoot:    "/notion",
+		LocalRoot:     localDir,
+		WebSocket:     boolPtr(false),
+		FullPullEvery: -1,
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer: %v", err)
+	}
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("initial full pull: %v", err)
+	}
+	localPath := filepath.Join(localDir, filepath.FromSlash(localRel))
+	assertLocalFileContent(t, localPath, body)
+
+	delete(base.files, remotePath)
+	keep := base.files[keepPath]
+	keep.Revision = "rev_3"
+	base.files[keepPath] = keep
+	syncer.forceFullReconcile = true
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("first remote-delete observation: %v", err)
+	}
+	if _, err := os.Stat(localPath); err != nil {
+		t.Fatalf("first delete observation should retain local file: %v", err)
+	}
+
+	exportStarted := make(chan struct{})
+	exportRelease := make(chan struct{})
+	keep = base.files[keepPath]
+	keep.Revision = "rev_4"
+	base.files[keepPath] = keep
+	base.exportStarted = exportStarted
+	base.exportRelease = exportRelease
+	syncer.forceFullReconcile = true
+	pullDone := make(chan error, 1)
+	go func() { pullDone <- syncer.SyncOnce(context.Background()) }()
+	select {
+	case <-exportStarted:
+	case <-time.After(time.Second):
+		t.Fatal("authoritative empty export did not block")
+	}
+
+	if err := syncer.HandleLocalChange(context.Background(), localRel, fsnotify.Chmod); err != nil {
+		close(exportRelease)
+		<-pullDone
+		t.Fatalf("no-op Chmod event: %v", err)
+	}
+	if got := base.bulkWriteCalls; got != 0 {
+		close(exportRelease)
+		<-pullDone
+		t.Fatalf("no-op event admitted %d writes, want 0", got)
+	}
+	close(exportRelease)
+	if err := <-pullDone; err != nil {
+		t.Fatalf("confirmed remote-delete pull after release: %v", err)
+	}
+	if _, err := os.Stat(localPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("no-op event suppressed authoritative remote delete: %v", err)
+	}
+}
+
+func TestSuccessfulLocalDeleteDuringFullPullOwnsPathAgainstStaleSnapshot(t *testing.T) {
+	const (
+		workspaceID = "ws_full_pull_local_delete"
+		localRel    = "Docs/A.md"
+		remotePath  = "/notion/Docs/A.md"
+	)
+	body := "# stale snapshot must not restore this\n"
+	base := &fakeExportClient{
+		fakeClient: &fakeClient{
+			files: map[string]RemoteFile{
+				remotePath: {
+					Path:        remotePath,
+					Revision:    "rev_1",
+					ContentType: "text/markdown",
+					Content:     body,
+					ContentHash: hashString(body),
+				},
+			},
+			eventsUnsupported: true,
+		},
+	}
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(base, SyncerOptions{
+		WorkspaceID:   workspaceID,
+		RemoteRoot:    "/notion",
+		LocalRoot:     localDir,
+		WebSocket:     boolPtr(false),
+		FullPullEvery: -1,
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer: %v", err)
+	}
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("initial full pull: %v", err)
+	}
+	localPath := filepath.Join(localDir, filepath.FromSlash(localRel))
+
+	exportStarted := make(chan struct{})
+	exportRelease := make(chan struct{})
+	base.exportStarted = exportStarted
+	base.exportRelease = exportRelease
+	syncer.forceFullReconcile = true
+	pullDone := make(chan error, 1)
+	go func() { pullDone <- syncer.SyncOnce(context.Background()) }()
+	select {
+	case <-exportStarted:
+	case <-time.After(time.Second):
+		t.Fatal("stale export did not block")
+	}
+	if err := os.Remove(localPath); err != nil {
+		close(exportRelease)
+		<-pullDone
+		t.Fatalf("remove local file: %v", err)
+	}
+	if err := syncer.HandleLocalChange(context.Background(), localRel, fsnotify.Remove); err != nil {
+		close(exportRelease)
+		<-pullDone
+		t.Fatalf("local delete writeback: %v", err)
+	}
+	if len(base.deleteCalls) != 1 || base.deleteCalls[0].Path != remotePath {
+		close(exportRelease)
+		<-pullDone
+		t.Fatalf("delete calls = %+v, want one %s", base.deleteCalls, remotePath)
+	}
+	close(exportRelease)
+	if err := <-pullDone; err != nil {
+		t.Fatalf("stale full pull after local delete: %v", err)
+	}
+	if _, err := os.Stat(localPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stale snapshot restored successfully-deleted local file: %v", err)
+	}
+}
+
+func successfulReceiptBulkResponse(remotePath, opID, revision string) func(context.Context, string, []BulkWriteFile) (BulkWriteResponse, error) {
+	return func(_ context.Context, _ string, files []BulkWriteFile) (BulkWriteResponse, error) {
+		if len(files) != 1 || normalizeRemotePath(files[0].Path) != normalizeRemotePath(remotePath) {
+			return BulkWriteResponse{}, fmt.Errorf("bulk admission paths = %+v, want %s", files, remotePath)
+		}
+		return BulkWriteResponse{
+			Written: 1,
+			Results: []BulkWriteResult{{
+				Path:        remotePath,
+				Revision:    revision,
+				ContentType: files[0].ContentType,
+				OpID:        opID,
+				Writeback:   &relayfile.BulkWriteWritebackResult{State: "running"},
+			}},
+			CorrelationID: "corr_" + opID,
+		}, nil
+	}
+}
+
+func assertWritebackSettlesWhilePullBlocked(
+	t *testing.T,
+	localDir string,
+	client *fakeClient,
+	remotePath, opID string,
+	writeDone <-chan error,
+	pullRelease chan struct{},
+	pullDone <-chan error,
+) {
+	t.Helper()
+	select {
+	case err := <-writeDone:
+		if err != nil {
+			close(pullRelease)
+			<-pullDone
+			t.Fatalf("local writeback while full pull blocked: %v", err)
+		}
+	case <-time.After(750 * time.Millisecond):
+		close(pullRelease)
+		pullErr := <-pullDone
+		writeErr := <-writeDone
+		t.Fatalf("local admission/receipt settlement starved while full pull blocked (pull=%v write=%v)", pullErr, writeErr)
+	}
+	select {
+	case err := <-pullDone:
+		close(pullRelease)
+		t.Fatalf("full pull completed before release (err=%v)", err)
+	default:
+	}
+	if got := client.bulkWriteCalls; got != 1 {
+		close(pullRelease)
+		<-pullDone
+		t.Fatalf("bulk admissions = %d, want 1 for %s", got, remotePath)
+	}
+	if got := client.getOperationCalls; got != 1 {
+		close(pullRelease)
+		<-pullDone
+		t.Fatalf("operation settlement polls = %d, want 1", got)
+	}
+	if pending := readPendingOutboxRecordsForTest(t, localDir); len(pending) != 0 {
+		close(pullRelease)
+		<-pullDone
+		t.Fatalf("receipt remained pending: %+v", pending)
+	}
+	acked := readOutboxRecordsInDirForTest(t, filepath.Join(localDir, ".relay", "outbox", "acked"))
+	if len(acked) != 1 || acked[0].OpID != opID || acked[0].DispatchStatus != "succeeded" {
+		close(pullRelease)
+		<-pullDone
+		t.Fatalf("settled receipt = %+v, want one succeeded %s", acked, opID)
+	}
+}
+
 func TestOutboxRestartDuringInFlightOperationResumesPolling(t *testing.T) {
 	localDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(localDir, "command.json"), []byte(`{"text":"hello"}`), 0o644); err != nil {
@@ -6840,6 +7331,56 @@ type fakeExportClient struct {
 	// arrives.
 	exportStarted chan struct{}
 	exportRelease <-chan struct{}
+}
+
+type blockingGithubTarClient struct {
+	*fakeExportClient
+	tarStarted chan struct{}
+	tarRelease <-chan struct{}
+}
+
+func (c *blockingGithubTarClient) ExportGithubWorkingTreeTar(ctx context.Context, workspaceID string, seed GithubWorkingTreeSeedRequest) (GithubWorkingTreeTar, error) {
+	tarBody, err := c.fakeExportClient.ExportGithubWorkingTreeTar(ctx, workspaceID, seed)
+	if err != nil {
+		return GithubWorkingTreeTar{}, err
+	}
+	close(c.tarStarted)
+	select {
+	case <-c.tarRelease:
+		return tarBody, nil
+	case <-ctx.Done():
+		_ = tarBody.Body.Close()
+		return GithubWorkingTreeTar{}, ctx.Err()
+	}
+}
+
+type blockingTreeReadClient struct {
+	*fakeExportClient
+	blockedPath string
+	readStarted chan struct{}
+	readRelease <-chan struct{}
+	once        sync.Once
+}
+
+func (c *blockingTreeReadClient) ReadFile(ctx context.Context, workspaceID, path string) (RemoteFile, error) {
+	file, err := c.fakeExportClient.ReadFile(ctx, workspaceID, path)
+	if normalizeRemotePath(path) != normalizeRemotePath(c.blockedPath) {
+		return file, err
+	}
+	shouldBlock := false
+	c.once.Do(func() {
+		shouldBlock = true
+		close(c.readStarted)
+	})
+	if !shouldBlock {
+		return file, err
+	}
+	select {
+	case <-c.readRelease:
+		return file, err
+	case <-ctx.Done():
+		return RemoteFile{}, ctx.Err()
+	}
 }
 
 func (c *fakeExportClient) ExportFiles(ctx context.Context, workspaceID, path string) ([]RemoteFile, error) {

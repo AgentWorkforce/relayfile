@@ -1088,6 +1088,13 @@ func (s *Syncer) fullPullPathTouchedByUpPath(remotePath string) bool {
 	return ok
 }
 
+func (s *Syncer) markFullPullUpPath(remotePath string) {
+	if !s.fullPullActive {
+		return
+	}
+	s.fullPullUpPaths[normalizeRemotePath(remotePath)] = struct{}{}
+}
+
 // now returns the current time using the injected clock when set (tests),
 // otherwise the wall clock. Used by the outbox writeback path so retry-backoff
 // and dead-letter timing are deterministic under test without real sleeps.
@@ -1844,13 +1851,6 @@ func (s *Syncer) HandleLocalChange(ctx context.Context, relativePath string, op 
 	if remotePath == "/" || !isUnderRemoteRoot(s.remoteRoot, remotePath) {
 		return nil
 	}
-	if s.fullPullActive {
-		// The point-in-time snapshot may have been captured before this local
-		// change. Preserve up-path ownership even after /fs/bulk succeeds and
-		// clears Dirty: the resumed snapshot must not replay its older bytes or
-		// infer a delete for a newly-created draft absent from that listing.
-		s.fullPullUpPaths[remotePath] = struct{}{}
-	}
 	localPath := filepath.Join(s.localDir, filepath.FromSlash(relativePath))
 
 	saveWithStatus := func(run func() error) error {
@@ -2157,6 +2157,11 @@ func (s *Syncer) flushOutboxRecordChunk(ctx context.Context, records []outboxRec
 			}
 			continue
 		}
+		// The cloud accepted this record. Only now claim up-path ownership:
+		// watcher noise and per-path bulk errors must leave the point-in-time
+		// snapshot authoritative, while an admitted write must not be replayed
+		// with older bytes (or inferred absent) when the full pull resumes.
+		s.markFullPullUpPath(record.RemotePath)
 		if result, ok := resultsByPath[pendingWrite.remotePath]; ok && strings.TrimSpace(result.ContentType) != "" {
 			pendingWrite.snapshot.ContentType = result.ContentType
 		}
@@ -2703,6 +2708,9 @@ func (s *Syncer) pushSingleDelete(ctx context.Context, remotePath, localPath str
 	if err != nil {
 		var httpErr *HTTPError
 		if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusNotFound {
+			// Idempotent delete success: the remote is already absent, so a
+			// snapshot captured before this observation must not restore it.
+			s.markFullPullUpPath(remotePath)
 			delete(s.state.Files, remotePath)
 			return nil
 		}
@@ -2721,6 +2729,7 @@ func (s *Syncer) pushSingleDelete(ctx context.Context, remotePath, localPath str
 		}
 		return err
 	}
+	s.markFullPullUpPath(remotePath)
 	delete(s.state.Files, remotePath)
 	return nil
 }
