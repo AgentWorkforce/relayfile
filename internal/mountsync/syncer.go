@@ -1003,10 +1003,18 @@ type Syncer struct {
 	// immediately — not just provider-layout-alias paths — without waiting the
 	// read-not-ready TTL. skipStuckMax bounds the number of events dropped
 	// (0 = unbounded); skipStuckCount tracks how many were dropped.
-	skipStuckMode         bool
-	skipStuckMax          int
-	skipStuckCount        int
-	syncActive            bool
+	skipStuckMode  bool
+	skipStuckMax   int
+	skipStuckCount int
+	syncActive     bool
+	// fullPullActive is true only while a normal SyncOnce/Reconcile cycle is
+	// applying a point-in-time full snapshot. The cycle still owns mu for all
+	// state mutation, but releases it around remote/downstream I/O so watcher
+	// writeback and durable receipt settlement can take priority. Paths touched
+	// by that up-path are remembered for the lifetime of the snapshot so stale
+	// export/tree data cannot overwrite or tombstone a concurrent local write.
+	fullPullActive        bool
+	fullPullUpPaths       map[string]struct{}
 	oversizedLogged       map[string]struct{}
 	controlSkipLogged     map[string]struct{}
 	lazyUntrackedLogged   map[string]struct{}
@@ -1027,6 +1035,64 @@ type Syncer struct {
 	// public state as credExpiresInSecs so operators get advance warning.
 	credExpiresAt string
 	mu            sync.Mutex
+}
+
+// runFullPullIO temporarily releases the Syncer's state mutex around a remote
+// read that belongs to a full snapshot. Callers enter with mu held and must not
+// access mutable Syncer state from fn. Direct low-level tests that invoke full
+// pull helpers without a reserved sync cycle leave fullPullActive false, so
+// they retain their historical lock-free calling convention.
+func (s *Syncer) runFullPullIO(fn func()) {
+	if !s.fullPullActive {
+		fn()
+		return
+	}
+	s.mu.Unlock()
+	defer s.mu.Lock()
+	fn()
+}
+
+// runReservedSyncIO is the same lock split for bounded down-path I/O that
+// brackets a full pull (for example, resolving the event cursor immediately
+// before/after bootstrap). These calls are not inside pullRemoteFull itself,
+// but leaving the mutex held for their independent 60s deadline would recreate
+// the same up-path starvation at the edge of the heavy mirror operation.
+func (s *Syncer) runReservedSyncIO(fn func()) {
+	if !s.syncActive {
+		fn()
+		return
+	}
+	s.mu.Unlock()
+	defer s.mu.Lock()
+	fn()
+}
+
+// yieldFullPullStateLock gives an already-waiting watcher/outbox operation a
+// scheduling point between local snapshot applications. Remote export can
+// return thousands of files at once, so releasing only around the HTTP body
+// would still let the subsequent disk apply monopolize mu for a long time.
+func (s *Syncer) yieldFullPullStateLock() {
+	if !s.fullPullActive {
+		return
+	}
+	s.mu.Unlock()
+	runtime.Gosched()
+	s.mu.Lock()
+}
+
+func (s *Syncer) fullPullPathTouchedByUpPath(remotePath string) bool {
+	if !s.fullPullActive {
+		return false
+	}
+	_, ok := s.fullPullUpPaths[normalizeRemotePath(remotePath)]
+	return ok
+}
+
+func (s *Syncer) markFullPullUpPath(remotePath string) {
+	if !s.fullPullActive {
+		return
+	}
+	s.fullPullUpPaths[normalizeRemotePath(remotePath)] = struct{}{}
 }
 
 // now returns the current time using the injected clock when set (tests),
@@ -2091,6 +2157,11 @@ func (s *Syncer) flushOutboxRecordChunk(ctx context.Context, records []outboxRec
 			}
 			continue
 		}
+		// The cloud accepted this record. Only now claim up-path ownership:
+		// watcher noise and per-path bulk errors must leave the point-in-time
+		// snapshot authoritative, while an admitted write must not be replayed
+		// with older bytes (or inferred absent) when the full pull resumes.
+		s.markFullPullUpPath(record.RemotePath)
 		if result, ok := resultsByPath[pendingWrite.remotePath]; ok && strings.TrimSpace(result.ContentType) != "" {
 			pendingWrite.snapshot.ContentType = result.ContentType
 		}
@@ -2637,6 +2708,9 @@ func (s *Syncer) pushSingleDelete(ctx context.Context, remotePath, localPath str
 	if err != nil {
 		var httpErr *HTTPError
 		if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusNotFound {
+			// Idempotent delete success: the remote is already absent, so a
+			// snapshot captured before this observation must not restore it.
+			s.markFullPullUpPath(remotePath)
 			delete(s.state.Files, remotePath)
 			return nil
 		}
@@ -2655,6 +2729,7 @@ func (s *Syncer) pushSingleDelete(ctx context.Context, remotePath, localPath str
 		}
 		return err
 	}
+	s.markFullPullUpPath(remotePath)
 	delete(s.state.Files, remotePath)
 	return nil
 }
@@ -3279,7 +3354,11 @@ func (s *Syncer) pullRemote(ctx context.Context, conflicted map[string]struct{})
 		}
 	}
 	if s.state.BootstrapComplete && !s.forceFullReconcile && len(s.state.Files) > 0 {
-		cursor, err := s.resolveLatestEventCursor(ctx)
+		var cursor string
+		var err error
+		s.runReservedSyncIO(func() {
+			cursor, err = s.resolveLatestEventCursor(ctx)
+		})
 		if err == nil && strings.TrimSpace(cursor) != "" {
 			// Only short-circuit when the events feed yielded a real
 			// tip. An empty cursor means the feed has no usable
@@ -3338,7 +3417,11 @@ func (s *Syncer) pullRemote(ctx context.Context, conflicted map[string]struct{})
 	if strings.TrimSpace(s.state.EventsCursor) != "" {
 		return nil
 	}
-	cursor, err := s.resolveLatestEventCursor(bctx)
+	var cursor string
+	var err error
+	s.runReservedSyncIO(func() {
+		cursor, err = s.resolveLatestEventCursor(bctx)
+	})
 	if err != nil {
 		var httpErr *HTTPError
 		if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusNotFound {
@@ -3351,6 +3434,19 @@ func (s *Syncer) pullRemote(ctx context.Context, conflicted map[string]struct{})
 }
 
 func (s *Syncer) pullRemoteFull(ctx context.Context, conflicted map[string]struct{}, prog bootstrapProgress) error {
+	// syncActive means this full pull was entered through SyncOnce/Reconcile,
+	// where the caller holds mu. Low-level tests also call pullRemoteFull
+	// directly without that reservation; keep those calls on the historical
+	// non-yielding path so we never unlock a mutex they do not own.
+	prioritizeUpPath := s.syncActive
+	if prioritizeUpPath {
+		s.fullPullActive = true
+		s.fullPullUpPaths = make(map[string]struct{})
+		defer func() {
+			s.fullPullActive = false
+			s.fullPullUpPaths = nil
+		}()
+	}
 	if client, ok := s.client.(githubWorkingTreeTarClient); ok {
 		used, err := s.pullRemoteFullGithubTarSeed(ctx, client, conflicted, prog)
 		if used {
@@ -3378,7 +3474,11 @@ func (s *Syncer) pullRemoteFullGithubTarSeed(ctx context.Context, client githubW
 	if s.githubWorkingTree == nil || s.lazyRepos {
 		return false, nil
 	}
-	manifest, err := s.readGithubCloneManifest(ctx)
+	var manifest githubCloneManifest
+	var err error
+	s.runFullPullIO(func() {
+		manifest, err = s.readGithubCloneManifest(ctx)
+	})
 	if err != nil {
 		if exportSnapshotUnsupported(err) {
 			return false, nil
@@ -3398,7 +3498,9 @@ func (s *Syncer) pullRemoteFullGithubTarSeed(ctx context.Context, client githubW
 		cursor = strings.TrimSpace(manifest.EventID)
 	}
 	if cursor == "" {
-		cursor, err = s.resolveGithubCloneManifestCursor(ctx, manifest)
+		s.runFullPullIO(func() {
+			cursor, err = s.resolveGithubCloneManifestCursor(ctx, manifest)
+		})
 		if err != nil {
 			s.logf("github tar seed unavailable: resolve clone manifest cursor failed: %v", err)
 			return false, nil
@@ -3409,7 +3511,11 @@ func (s *Syncer) pullRemoteFullGithubTarSeed(ctx context.Context, client githubW
 		return false, nil
 	}
 
-	tree, maxObservedRevision, err := s.githubWorkingTreeSnapshot(ctx, prog)
+	var tree map[string]githubTreeFile
+	var maxObservedRevision string
+	s.runFullPullIO(func() {
+		tree, maxObservedRevision, err = s.githubWorkingTreeSnapshot(ctx, prog)
+	})
 	if err != nil {
 		s.logf("github tar seed unavailable: tree verification snapshot failed: %v", err)
 		return false, nil
@@ -3418,12 +3524,15 @@ func (s *Syncer) pullRemoteFullGithubTarSeed(ctx context.Context, client githubW
 		return false, nil
 	}
 
-	tarBody, err := client.ExportGithubWorkingTreeTar(ctx, s.workspace, GithubWorkingTreeSeedRequest{
-		Owner:      s.githubWorkingTree.Owner,
-		Repo:       s.githubWorkingTree.Repo,
-		PathPrefix: s.githubWorkingTree.ContentsRoot,
-		HeadSHA:    headSHA,
-		Gzip:       false,
+	var tarBody GithubWorkingTreeTar
+	s.runFullPullIO(func() {
+		tarBody, err = client.ExportGithubWorkingTreeTar(ctx, s.workspace, GithubWorkingTreeSeedRequest{
+			Owner:      s.githubWorkingTree.Owner,
+			Repo:       s.githubWorkingTree.Repo,
+			PathPrefix: s.githubWorkingTree.ContentsRoot,
+			HeadSHA:    headSHA,
+			Gzip:       false,
+		})
 	})
 	if err != nil {
 		if exportSnapshotUnsupported(err) {
@@ -3432,7 +3541,9 @@ func (s *Syncer) pullRemoteFullGithubTarSeed(ctx context.Context, client githubW
 		s.recordCloudFailure(err)
 		return true, err
 	}
-	defer tarBody.Body.Close()
+	defer func() {
+		s.runFullPullIO(func() { _ = tarBody.Body.Close() })
+	}()
 	s.recordCloudSuccess()
 
 	remotePaths, err := s.applyGithubWorkingTreeTarSeed(tarBody, tree, conflicted, prog)
@@ -3476,7 +3587,11 @@ func (s *Syncer) pullRemoteFullExport(ctx context.Context, client exportSnapshot
 		exportCtx, cancel = context.WithTimeout(ctx, s.exportTimeout)
 		defer cancel()
 	}
-	files, err := client.ExportFiles(exportCtx, s.workspace, s.remoteRoot)
+	var files []RemoteFile
+	var err error
+	s.runFullPullIO(func() {
+		files, err = client.ExportFiles(exportCtx, s.workspace, s.remoteRoot)
+	})
 	if err != nil {
 		if exportSnapshotUnsupported(err) {
 			return false, nil
@@ -3520,6 +3635,7 @@ func (s *Syncer) pullRemoteFullExport(ctx context.Context, client exportSnapshot
 		if err := s.applyRemoteFile(remotePath, files[i], conflicted); err != nil {
 			return true, err
 		}
+		s.yieldFullPullStateLock()
 		prog.touch()
 		remotePaths[remotePath] = struct{}{}
 		files[i].Content = ""
@@ -3691,7 +3807,11 @@ func (s *Syncer) applyGithubWorkingTreeTarSeed(tarBody GithubWorkingTreeTar, tre
 	reader := io.Reader(tarBody.Body)
 	buffered := bufio.NewReader(reader)
 	if strings.Contains(strings.ToLower(tarBody.ContentType), "gzip") {
-		gz, err := gzip.NewReader(buffered)
+		var gz *gzip.Reader
+		var err error
+		s.runFullPullIO(func() {
+			gz, err = gzip.NewReader(buffered)
+		})
 		if err != nil {
 			return nil, err
 		}
@@ -3704,7 +3824,11 @@ func (s *Syncer) applyGithubWorkingTreeTarSeed(tarBody GithubWorkingTreeTar, tre
 	remotePaths := map[string]struct{}{}
 	seen := map[string]struct{}{}
 	for {
-		header, err := tr.Next()
+		var header *tar.Header
+		var err error
+		s.runFullPullIO(func() {
+			header, err = tr.Next()
+		})
 		if errors.Is(err, io.EOF) {
 			break
 		}
@@ -3736,13 +3860,25 @@ func (s *Syncer) applyGithubWorkingTreeTarSeed(tarBody GithubWorkingTreeTar, tre
 				continue
 			}
 		}
-		data, err := io.ReadAll(tr)
+		var data []byte
+		s.runFullPullIO(func() {
+			data, err = io.ReadAll(tr)
+		})
 		if err != nil {
 			return nil, err
 		}
 		hash := hashBytes(data)
 		if hash != meta.ContentHash {
 			return nil, fmt.Errorf("github tar seed contentHash mismatch for %s: tar=%s tree=%s", rel, hash, meta.ContentHash)
+		}
+		if s.fullPullPathTouchedByUpPath(meta.RemotePath) {
+			// The tar/tree pair is a point-in-time snapshot too. A watcher
+			// writeback that completed while this body streamed owns the newer
+			// bytes; count the remote path as present but never replay the stale
+			// archive entry over it.
+			remotePaths[meta.RemotePath] = struct{}{}
+			s.yieldFullPullStateLock()
+			continue
 		}
 		localPath, err := safeLocalPath(s.localRoot, rel)
 		if err != nil {
@@ -3788,6 +3924,7 @@ func (s *Syncer) applyGithubWorkingTreeTarSeed(tarBody GithubWorkingTreeTar, tre
 			ReadOnly:    !canWrite,
 		}
 		remotePaths[meta.RemotePath] = struct{}{}
+		s.yieldFullPullStateLock()
 		prog.touch()
 	}
 	for rel, meta := range tree {
@@ -3912,7 +4049,11 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 	maxObservedRevision := ""
 	var transientBootstrapAbort bool
 	for {
-		page, err := s.client.ListTree(ctx, s.workspace, s.remoteRoot, 200, cursor)
+		var page TreeResponse
+		var err error
+		s.runFullPullIO(func() {
+			page, err = s.client.ListTree(ctx, s.workspace, s.remoteRoot, 200, cursor)
+		})
 		if err != nil {
 			s.recordCloudFailure(err)
 			return err
@@ -3982,7 +4123,11 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 				RemotePath: remotePath,
 			})
 		}
-		for _, result := range s.readBootstrapFiles(ctx, readJobs, prog) {
+		var readResults []bootstrapReadResult
+		s.runFullPullIO(func() {
+			readResults = s.readBootstrapFiles(ctx, readJobs, prog)
+		})
+		for _, result := range readResults {
 			if result.Err != nil {
 				// Context canceled/deadline exceeded — propagate; the cycle is
 				// being torn down and the next one will resume from the cursor.
@@ -4020,6 +4165,7 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 			if err := s.applyRemoteFile(result.RemotePath, result.File, conflicted); err != nil {
 				return err
 			}
+			s.yieldFullPullStateLock()
 			prog.touch()
 			remotePaths[result.RemotePath] = struct{}{}
 			filesThisPage++
@@ -4453,16 +4599,26 @@ func (s *Syncer) applyRemoteSnapshotDeletesRev(remotePaths map[string]struct{}, 
 	stillMissing := map[string]struct{}{}
 	for _, remotePath := range statePaths {
 		if _, ok := remotePaths[remotePath]; ok {
+			s.yieldFullPullStateLock()
+			continue
+		}
+		if s.fullPullPathTouchedByUpPath(remotePath) {
+			// The snapshot predates this local write. Treat the up-path as the
+			// authoritative observation for this cycle and do not even create a
+			// first-pass tombstone from the stale absence.
+			s.yieldFullPullStateLock()
 			continue
 		}
 		stillMissing[remotePath] = struct{}{}
 		allow, tErr := s.observePendingDelete(remotePath, observedRevision)
 		if tErr != nil {
 			s.logf("tombstone update failed for %s: %v", remotePath, tErr)
+			s.yieldFullPullStateLock()
 			continue
 		}
 		if !allow {
 			// First observation (or aged-out reset) — record and skip.
+			s.yieldFullPullStateLock()
 			continue
 		}
 		if err := s.applyRemoteDelete(remotePath, conflicted); err != nil {
@@ -4471,6 +4627,7 @@ func (s *Syncer) applyRemoteSnapshotDeletesRev(remotePaths map[string]struct{}, 
 		// Confirmed delete fired; clear the marker.
 		s.removeTombstone(remotePath)
 		delete(stillMissing, remotePath)
+		s.yieldFullPullStateLock()
 	}
 
 	// Drop markers whose paths have reappeared.
@@ -5207,6 +5364,9 @@ func (s *Syncer) applyRemoteFile(remotePath string, file RemoteFile, conflicted 
 		if _, skip := conflicted[remotePath]; skip {
 			return nil
 		}
+	}
+	if s.fullPullPathTouchedByUpPath(remotePath) {
+		return nil
 	}
 	remoteBytes, err := decodeRemoteFileContent(file)
 	if err != nil {
