@@ -411,8 +411,10 @@ jobs:
           cp "/tmp/relayfile-mount-binary/${{ matrix.mount_binary }}" "${{ matrix.path }}/bin/relayfile-mount"
           chmod 755 "${{ matrix.path }}/bin/relayfile-mount"
 
+      # Pinned to the npm 11 line (OIDC needs >= 11.5.1): @latest broke
+      # 2026-07-13 when npm 12 dropped support for the runner's node 22.14.
       - name: Update npm for OIDC support
-        run: npm install -g npm@latest
+        run: npm install -g npm@11
 
       - name: Dry run check
         if: github.event.inputs.dry_run == 'true'
@@ -494,8 +496,10 @@ jobs:
           cp "/tmp/relayfile-mount-binary/${{ steps.resolve-package.outputs.mount_binary }}" "${{ steps.resolve-package.outputs.path }}/bin/relayfile-mount"
           chmod 755 "${{ steps.resolve-package.outputs.path }}/bin/relayfile-mount"
 
+      # Pinned to the npm 11 line (OIDC needs >= 11.5.1): @latest broke
+      # 2026-07-13 when npm 12 dropped support for the runner's node 22.14.
       - name: Update npm for OIDC support
-        run: npm install -g npm@latest
+        run: npm install -g npm@11
 
       - name: Dry run check
         if: github.event.inputs.dry_run == 'true'
