@@ -3104,6 +3104,151 @@ func TestOutboxAcksOnlyAfterWritebackOperationSucceeded(t *testing.T) {
 	}
 }
 
+// A full down-mirror is allowed to take minutes on a large workspace, but it
+// must not own the state lock for that entire wall-clock interval. Local
+// writeback is the latency-sensitive path: the watcher must still be able to
+// admit a newly-created draft to /fs/bulk and settle its operation receipt
+// while the point-in-time export remains blocked. The stale export must also
+// leave that concurrent draft alone when it eventually applies.
+func TestFullPullDoesNotStarveLocalDraftAdmissionOrReceiptSettlement(t *testing.T) {
+	const (
+		workspaceID = "ws_full_pull_up_path_priority"
+		draftRel    = "slack/channels/C123/messages/messages 5ab77d67-1111-4111-8111-123456789abc.json"
+		draftRemote = "/" + draftRel
+		opID        = "op_full_pull_up_path_priority"
+	)
+
+	localDir := t.TempDir()
+	exportStarted := make(chan struct{})
+	exportRelease := make(chan struct{})
+	client := &fakeExportClient{
+		fakeClient: &fakeClient{
+			files: map[string]RemoteFile{
+				"/notion/reference.md": {
+					Path:        "/notion/reference.md",
+					Revision:    "rev_1",
+					ContentType: "text/markdown",
+					Content:     "# Reference\n",
+				},
+			},
+			revisionCounter: 1,
+			operations: map[string]OperationStatus{
+				opID: {
+					OpID:     opID,
+					Path:     draftRemote,
+					Revision: "rev_2",
+					Provider: "slack",
+					Status:   "succeeded",
+				},
+			},
+		},
+		exportStarted: exportStarted,
+		exportRelease: exportRelease,
+	}
+	client.bulkWriteResponseFunc = func(_ context.Context, _ string, files []BulkWriteFile) (BulkWriteResponse, error) {
+		if len(files) != 1 {
+			return BulkWriteResponse{}, fmt.Errorf("bulk admission got %d files, want 1", len(files))
+		}
+		return BulkWriteResponse{
+			Written: 1,
+			Results: []BulkWriteResult{{
+				Path:        draftRemote,
+				Revision:    "rev_2",
+				ContentType: files[0].ContentType,
+				OpID:        opID,
+				Writeback:   &relayfile.BulkWriteWritebackResult{Provider: "slack", State: "running"},
+			}},
+			CorrelationID: "corr_full_pull_up_path_priority",
+		}, nil
+	}
+
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: workspaceID,
+		RemoteRoot:  "/",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer: %v", err)
+	}
+
+	pullDone := make(chan error, 1)
+	go func() { pullDone <- syncer.SyncOnce(context.Background()) }()
+	select {
+	case <-exportStarted:
+	case <-time.After(time.Second):
+		t.Fatal("full export did not start")
+	}
+
+	draftPath := filepath.Join(localDir, filepath.FromSlash(draftRel))
+	if err := os.MkdirAll(filepath.Dir(draftPath), 0o755); err != nil {
+		close(exportRelease)
+		<-pullDone
+		t.Fatalf("mkdir draft parent: %v", err)
+	}
+	const draftBody = `{"channel":"C123","text":"ship it"}`
+	if err := os.WriteFile(draftPath, []byte(draftBody), 0o644); err != nil {
+		close(exportRelease)
+		<-pullDone
+		t.Fatalf("write local draft: %v", err)
+	}
+
+	writeDone := make(chan error, 1)
+	go func() {
+		writeDone <- syncer.HandleLocalChange(context.Background(), draftRel, fsnotify.Create)
+	}()
+
+	select {
+	case err := <-writeDone:
+		if err != nil {
+			close(exportRelease)
+			<-pullDone
+			t.Fatalf("local writeback while export blocked: %v", err)
+		}
+	case <-time.After(750 * time.Millisecond):
+		close(exportRelease)
+		pullErr := <-pullDone
+		writeErr := <-writeDone
+		t.Fatalf("local /fs/bulk admission and receipt settlement were starved by the blocked full pull (pull=%v write=%v)", pullErr, writeErr)
+	}
+
+	select {
+	case err := <-pullDone:
+		close(exportRelease)
+		t.Fatalf("full pull completed before release (err=%v); test did not hold down-mirror I/O", err)
+	default:
+	}
+	if got := client.bulkWriteCalls; got != 1 {
+		close(exportRelease)
+		<-pullDone
+		t.Fatalf("bulk admissions = %d, want 1", got)
+	}
+	if got := client.getOperationCalls; got != 1 {
+		close(exportRelease)
+		<-pullDone
+		t.Fatalf("operation settlement polls = %d, want 1", got)
+	}
+	if pending := readPendingOutboxRecordsForTest(t, localDir); len(pending) != 0 {
+		close(exportRelease)
+		<-pullDone
+		t.Fatalf("receipt remained pending while full pull blocked: %+v", pending)
+	}
+	acked := readOutboxRecordsInDirForTest(t, filepath.Join(localDir, ".relay", "outbox", "acked"))
+	if len(acked) != 1 || acked[0].OpID != opID || acked[0].DispatchStatus != "succeeded" {
+		close(exportRelease)
+		<-pullDone
+		t.Fatalf("settled receipt = %+v, want one succeeded %s", acked, opID)
+	}
+
+	close(exportRelease)
+	if err := <-pullDone; err != nil {
+		t.Fatalf("full pull after release: %v", err)
+	}
+	assertLocalFileContent(t, draftPath, draftBody)
+	if _, err := os.Stat(syncer.tombstoneFile(draftRemote)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stale full snapshot tombstoned concurrent local write: %v", err)
+	}
+}
+
 func TestOutboxRestartDuringInFlightOperationResumesPolling(t *testing.T) {
 	localDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(localDir, "command.json"), []byte(`{"text":"hello"}`), 0o644); err != nil {
@@ -6689,6 +6834,12 @@ type fakeExportClient struct {
 	// slice regardless of the populated tree, simulating the production
 	// empty-200 export for a workspace that DOES have records.
 	exportReturnsEmpty bool
+	// exportStarted/exportRelease let concurrency tests hold a full export
+	// after its point-in-time snapshot has been captured. This reproduces a
+	// large down-mirror body that is still in flight while a local writeback
+	// arrives.
+	exportStarted chan struct{}
+	exportRelease <-chan struct{}
 }
 
 func (c *fakeExportClient) ExportFiles(ctx context.Context, workspaceID, path string) ([]RemoteFile, error) {
@@ -6713,6 +6864,20 @@ func (c *fakeExportClient) ExportFiles(ctx context.Context, workspaceID, path st
 		files = append(files, file)
 	}
 	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
+	if c.exportStarted != nil {
+		select {
+		case <-c.exportStarted:
+		default:
+			close(c.exportStarted)
+		}
+	}
+	if c.exportRelease != nil {
+		select {
+		case <-c.exportRelease:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
 	return files, nil
 }
 

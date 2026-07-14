@@ -11836,42 +11836,50 @@ func runMountLoop(rootCtx context.Context, syncer *mountsync.Syncer, localDir, w
 		return nil
 	}
 
+	// The watcher must be accepting local edits before the initial bootstrap
+	// starts. A large full-tree export can run for minutes; starting the
+	// watcher afterward creates a blind window where a writeback draft is on
+	// disk but never reaches /fs/bulk until teardown. Full-pull I/O yields the
+	// Syncer's state lock to this callback, and unchanged down-mirror echoes are
+	// filtered by HandleLocalChange's tracked hash check.
+	if !once {
+		watcher, err := mountsync.NewFileWatcher(localDir, func(relativePath string, op fsnotify.Op) {
+			if degraded {
+				// Local edit observed while delegated credentials are unusable.
+				// Leave the dirty state in place so the next successful cycle
+				// after re-login picks it up; do not attempt to push now.
+				maybePrintRecovery()
+				return
+			}
+			if err := withAuthRefresh(func(ctx context.Context) error {
+				return syncer.HandleLocalChange(ctx, relativePath, op)
+			}); err != nil {
+				if isMountCredentialExpired(err) {
+					enterDegraded()
+					maybePrintRecovery()
+					writeSnapshot()
+					return
+				}
+				log.Printf("mount local change failed: %v", err)
+			}
+			writeSnapshot()
+		})
+		if err != nil {
+			return fmt.Errorf("create file watcher: %w", err)
+		}
+		if err := watcher.Start(rootCtx); err != nil {
+			_ = watcher.Close()
+			return fmt.Errorf("start file watcher: %w", err)
+		}
+		defer watcher.Close()
+	}
+
 	log.Print(mountStartBanner(localDir, interval, intervalJitter))
 	initialErr := runCycle(true)
 	logStuckEventSummary(syncer, initialErr)
 	if once {
 		return initialErr
 	}
-
-	watcher, err := mountsync.NewFileWatcher(localDir, func(relativePath string, op fsnotify.Op) {
-		if degraded {
-			// Local edit observed while delegated credentials are unusable.
-			// Leave the dirty state in place so the next successful cycle
-			// after re-login picks it up; do not attempt to push now.
-			maybePrintRecovery()
-			return
-		}
-		if err := withAuthRefresh(func(ctx context.Context) error {
-			return syncer.HandleLocalChange(ctx, relativePath, op)
-		}); err != nil {
-			if isMountCredentialExpired(err) {
-				enterDegraded()
-				maybePrintRecovery()
-				writeSnapshot()
-				return
-			}
-			log.Printf("mount local change failed: %v", err)
-		}
-		writeSnapshot()
-	})
-	if err != nil {
-		return fmt.Errorf("create file watcher: %w", err)
-	}
-	if err := watcher.Start(rootCtx); err != nil {
-		_ = watcher.Close()
-		return fmt.Errorf("start file watcher: %w", err)
-	}
-	defer watcher.Close()
 
 	timer := time.NewTimer(jitteredIntervalWithSample(interval, intervalJitter, mathrand.Float64()))
 	defer timer.Stop()
