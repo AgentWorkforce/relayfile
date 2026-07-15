@@ -208,6 +208,33 @@ describe("webhook Slack path canonicalization", () => {
       "/slack/channels/C123/messages/1711111111_000100/meta.json",
     );
   });
+
+  it("rejects an envelope write whose path has an oversized segment instead of writing it", () => {
+    const storage = new MemoryStorage();
+    const oversizedSlug = "a".repeat(250);
+
+    const queued = ingestWebhook(storage, {
+      provider: "reddit",
+      eventType: "file.created",
+      path: `/reddit/subreddits/localllama/posts/${oversizedSlug}__1uvwn9q.json`,
+      deliveryId: "delivery_1",
+      timestamp: "2026-07-15T09:45:00.000Z",
+      correlationId: "corr_1",
+    }, {
+      generateEnvelopeId: () => "env_1",
+      coalesceWindowMs: 10_000,
+    });
+    expect(queued.status).toBe("queued");
+
+    const envelope = storage.envelopes.get("env_1");
+    if (!envelope) throw new Error("envelope not queued");
+
+    const result = applyWebhookEnvelope(storage, envelope);
+
+    expect(result.status).toBe("rejected");
+    expect(result.reason).toBe("path_too_long");
+    expect(storage.files.size).toBe(0);
+  });
 });
 
 function fileRow(path: string, overrides: Partial<FileRow> = {}): FileRow {

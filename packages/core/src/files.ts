@@ -94,6 +94,9 @@ export function writeFile(storage: StorageAdapter, req: WriteFileRequest): Write
   }
 
   const path = normalizePath(req.path);
+  if (hasOversizedPathSegment(path)) {
+    return { ok: false, error: "invalid_input" };
+  }
   const ifMatch = normalizeIfMatch(req.ifMatch);
   if (!ifMatch) {
     return { ok: false, error: "missing_precondition" };
@@ -273,6 +276,27 @@ export function deleteFile(storage: StorageAdapter, req: DeleteFileRequest): Del
 
 export const DEFAULT_CONTENT_TYPE = "text/markdown";
 export const MAX_FILE_BYTES = 10 * 1024 * 1024;
+
+// Local mounts materialize each path segment as a real filesystem entry, and
+// most filesystems (ext4, APFS, ...) reject names over 255 bytes with
+// ENAMETOOLONG -- worse once a mount's own atomic-write suffix (e.g.
+// `.tmp-<random>`) is appended to the leaf segment. A provider adapter that
+// builds a path segment from unbounded user content (a long title, etc.) can
+// produce a canonical path no mount can ever materialize, which then fails
+// forever on every sync cycle since nothing else revisits an already-written
+// path. Reject that at write time instead of a bounded content-derived slug
+// having to be probabilistically clean everywhere it's used.
+export const MAX_PATH_SEGMENT_BYTES = 200;
+
+function encodedByteLength(value: string): number {
+  return new TextEncoder().encode(value).length;
+}
+
+export function hasOversizedPathSegment(path: string): boolean {
+  return path
+    .split("/")
+    .some((segment) => segment.length > 0 && encodedByteLength(segment) > MAX_PATH_SEGMENT_BYTES);
+}
 
 function normalizeEncoding(value?: string): "utf-8" | "base64" | null {
   const encoding = value?.trim().toLowerCase() ?? "";
