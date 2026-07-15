@@ -21,7 +21,7 @@ import type {
   Paginated,
   FileSemantics,
 } from "./storage.js";
-import { normalizePath, DEFAULT_CONTENT_TYPE, MAX_FILE_BYTES, encodedSize } from "./files.js";
+import { normalizePath, DEFAULT_CONTENT_TYPE, MAX_FILE_BYTES, encodedSize, hasOversizedPathSegment } from "./files.js";
 
 export interface IngestWebhookInput {
   provider: string;
@@ -394,6 +394,16 @@ export function applyWebhookEnvelope(
         eventType: event.type,
         path: event.path,
         revision: null,
+      };
+    }
+
+    if (hasOversizedPathSegment(event.path)) {
+      return {
+        status: "rejected",
+        eventType: event.type,
+        path: event.path,
+        revision: null,
+        reason: "path_too_long",
       };
     }
 
