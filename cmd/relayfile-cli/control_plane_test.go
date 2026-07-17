@@ -42,13 +42,22 @@ func TestControlPlaneHelloVersionAndCLIVersion(t *testing.T) {
 		t.Fatalf("unexpected supported API versions: %#v", hello.SupportedAPIVersions)
 	}
 
+	var discovery helloResponse
+	status = controlPlaneJSONWithRequestedVersion(t, client, http.MethodGet, baseURL+"/v1/hello?apiVersion=4", nil, &discovery, "4")
+	if status != http.StatusOK {
+		t.Fatalf("discovery hello status = %d, want %d", status, http.StatusOK)
+	}
+	if discovery.DaemonVersion != hello.DaemonVersion || discovery.APIVersion != hello.APIVersion {
+		t.Fatalf("unexpected discovery hello response: %#v", discovery)
+	}
+
 	var errResp map[string]controlPlaneError
-	status = controlPlaneJSONWithoutVersion(t, client, http.MethodGet, baseURL+"/v1/hello?apiVersion=4", nil, &errResp)
+	status = controlPlaneJSONWithoutVersion(t, client, http.MethodGet, baseURL+"/v1/integrations/providers?apiVersion=4", nil, &errResp)
 	if status != http.StatusUpgradeRequired {
-		t.Fatalf("incompatible hello status = %d, want %d", status, http.StatusUpgradeRequired)
+		t.Fatalf("incompatible non-hello status = %d, want %d", status, http.StatusUpgradeRequired)
 	}
 	if errResp["error"].Code != controlPlaneErrVersionIncompatible {
-		t.Fatalf("unexpected incompatible error: %#v", errResp)
+		t.Fatalf("unexpected non-hello incompatible error: %#v", errResp)
 	}
 }
 
@@ -456,15 +465,15 @@ func startControlPlaneTestServer(t *testing.T) (*http.Client, string, func()) {
 
 func controlPlaneJSON(t *testing.T, client *http.Client, method, url string, body any, out any) int {
 	t.Helper()
-	return controlPlaneJSONWithVersionHeader(t, client, method, url, body, out, true)
+	return controlPlaneJSONWithRequestedVersion(t, client, method, url, body, out, "1")
 }
 
 func controlPlaneJSONWithoutVersion(t *testing.T, client *http.Client, method, url string, body any, out any) int {
 	t.Helper()
-	return controlPlaneJSONWithVersionHeader(t, client, method, url, body, out, false)
+	return controlPlaneJSONWithRequestedVersion(t, client, method, url, body, out, "")
 }
 
-func controlPlaneJSONWithVersionHeader(t *testing.T, client *http.Client, method, url string, body any, out any, sendVersion bool) int {
+func controlPlaneJSONWithRequestedVersion(t *testing.T, client *http.Client, method, url string, body any, out any, version string) int {
 	t.Helper()
 	var reader *bytes.Reader
 	if body == nil {
@@ -480,8 +489,8 @@ func controlPlaneJSONWithVersionHeader(t *testing.T, client *http.Client, method
 	if err != nil {
 		t.Fatalf("new request failed: %v", err)
 	}
-	if sendVersion {
-		req.Header.Set("X-Relayfile-API-Version", "1")
+	if version != "" {
+		req.Header.Set("X-Relayfile-API-Version", version)
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")

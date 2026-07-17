@@ -270,8 +270,15 @@ func handleControlPlaneHello(w http.ResponseWriter, r *http.Request) {
 		writeControlPlaneError(w, http.StatusMethodNotAllowed, controlPlaneErrInvalidArgument, "method not allowed")
 		return
 	}
+	// GET /v1/hello is the discovery endpoint. It must answer regardless of the
+	// caller's requested API version so newer clients can inspect an older
+	// daemon's supportedApiVersions and report (or repair) incompatibility.
+	if r.Method == http.MethodGet {
+		writeControlPlaneJSON(w, http.StatusOK, controlPlaneHello())
+		return
+	}
 	var requested uint32
-	if r.Method == http.MethodPost && r.Body != nil {
+	if r.Body != nil {
 		var req helloRequest
 		if err := decodeControlPlaneJSON(r, &req); err != nil {
 			writeControlPlaneError(w, http.StatusBadRequest, controlPlaneErrInvalidArgument, err.Error())

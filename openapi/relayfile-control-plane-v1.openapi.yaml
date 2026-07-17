@@ -6,7 +6,7 @@ info:
     Versioned local control-plane contract for the relayfile daemon/CLI.
     The service listens on a user-owned Unix domain socket
     (`RELAYFILE_SOCK`, or `$XDG_RUNTIME_DIR/relayfile.sock`) and uses
-    `X-Relayfile-API-Version: 2` for client compatibility checks.
+    `X-Relayfile-API-Version: 3` for compatibility checks after discovery.
 servers:
   - url: http://relayfile.local
     description: Logical HTTP origin over the relayfile Unix domain socket.
@@ -15,9 +15,12 @@ paths:
     get:
       operationId: hello
       summary: Negotiate control-plane API compatibility
-      parameters:
-        - $ref: "#/components/parameters/ApiVersionHeader"
-        - $ref: "#/components/parameters/ApiVersionQuery"
+      description: |
+        Unversioned discovery endpoint. The daemon always returns its current
+        and supported API versions; any version header or query is ignored.
+        No version parameters are declared here on purpose: discovery must stay
+        callable by clients of any API version, including versions this contract
+        does not know about.
       responses:
         "200":
           description: Daemon version and supported API versions
@@ -25,8 +28,6 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HelloResponse"
-        "426":
-          $ref: "#/components/responses/VersionIncompatible"
     post:
       operationId: helloPost
       summary: Negotiate control-plane API compatibility
@@ -300,13 +301,6 @@ components:
         type: integer
         format: uint32
         const: 3
-    ApiVersionQuery:
-      name: apiVersion
-      in: query
-      required: false
-      schema:
-        type: integer
-        format: uint32
   responses:
     VersionIncompatible:
       description: Client and daemon API versions are incompatible

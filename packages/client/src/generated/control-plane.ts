@@ -11,7 +11,14 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Negotiate control-plane API compatibility */
+        /**
+         * Negotiate control-plane API compatibility
+         * @description Unversioned discovery endpoint. The daemon always returns its current
+         *     and supported API versions; any version header or query is ignored.
+         *     No version parameters are declared here on purpose: discovery must stay
+         *     callable by clients of any API version, including versions this contract
+         *     does not know about.
+         */
         get: operations["hello"];
         put?: never;
         /** Negotiate control-plane API compatibility */
@@ -367,7 +374,6 @@ export interface components {
     };
     parameters: {
         ApiVersionHeader: 3;
-        ApiVersionQuery: number;
     };
     requestBodies: never;
     headers: never;
@@ -377,12 +383,8 @@ export type $defs = Record<string, never>;
 export interface operations {
     hello: {
         parameters: {
-            query?: {
-                apiVersion?: components["parameters"]["ApiVersionQuery"];
-            };
-            header?: {
-                "X-Relayfile-API-Version"?: components["parameters"]["ApiVersionHeader"];
-            };
+            query?: never;
+            header?: never;
             path?: never;
             cookie?: never;
         };
@@ -397,7 +399,6 @@ export interface operations {
                     "application/json": components["schemas"]["HelloResponse"];
                 };
             };
-            426: components["responses"]["VersionIncompatible"];
         };
     };
     helloPost: {

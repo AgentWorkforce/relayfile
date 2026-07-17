@@ -4,7 +4,7 @@ All notable changes to this package will be documented in this file.
 
 ## [Unreleased]
 
-_No unreleased changes._
+- Fixed control-plane negotiation to discover older daemons without version-gating hello, fail fast on incompatible APIs, and replace stale managed daemons after binary upgrades.
 
 ## [0.10.26] - 2026-07-15
 
