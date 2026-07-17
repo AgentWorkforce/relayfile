@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { request } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -21,11 +22,13 @@ import type { components } from './generated/control-plane.js';
 export const RELAYFILE_API_VERSION = 3;
 
 /**
- * Minimum `relayfile` daemon version this client requires. The control-plane
- * first shipped in 0.10.17, so anything that answers `/v1/hello` is already >=
- * this — API compatibility is enforced by RELAYFILE_API_VERSION.
+ * Minimum `relayfile` daemon version this client requires. API compatibility is
+ * enforced independently through supportedApiVersions.
  */
 export const MIN_RELAYFILE_VERSION = '0.10.17';
+
+/** First published relayfile binary that can replace a stale daemon for API v3. */
+const MIN_RELAYFILE_VERSION_FOR_CURRENT_API = '0.10.21';
 
 const SEMVER_RE = /^\d+\.\d+\.\d+(?:[-+].*)?$/;
 
@@ -83,7 +86,9 @@ export class RelayfileControlPlaneError extends Error {
   constructor(
     public readonly code: string,
     message: string,
-    public readonly status?: number
+    public readonly status?: number,
+    /** True only for connection failures that may clear while a daemon starts. */
+    public readonly transient = false
   ) {
     super(message);
     this.name = 'RelayfileControlPlaneError';
@@ -133,9 +138,39 @@ interface RequestOptions {
   path: string;
   query?: Record<string, string | undefined>;
   body?: unknown;
+  /** Discovery hello intentionally omits the API header until negotiation completes. */
+  includeVersionHeader?: boolean;
+  /** Do not reuse a socket that may still point at an unlinked stale daemon. */
+  freshConnection?: boolean;
 }
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const TRANSIENT_CONNECTION_CODES = new Set(['ENOENT', 'ECONNREFUSED', 'ETIMEDOUT']);
+
+function isTransientConnectionCode(code: string | undefined): boolean {
+  return code != null && TRANSIENT_CONNECTION_CODES.has(code);
+}
+
+function isTransientControlPlaneError(err: unknown): err is RelayfileControlPlaneError {
+  return (
+    err instanceof RelayfileControlPlaneError && err.code === 'DAEMON_UNAVAILABLE' && err.transient
+  );
+}
+
+function shellQuote(value: string): string {
+  return /^[A-Za-z0-9_./:@%+=,-]+$/.test(value) ? value : `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+interface SpawnedDaemon {
+  getError(): Error | undefined;
+}
+
+interface CommandResult {
+  stdout: string;
+  stderr: string;
+  code: number | null;
+}
 
 export class RelayfileControlPlaneClient {
   private readonly socketPath: string;
@@ -183,8 +218,13 @@ export class RelayfileControlPlaneClient {
           method: opts.method,
           path,
           timeout: this.requestTimeoutMs,
+          // Discovery must open a fresh socket. A pooled keep-alive connection
+          // would keep reaching the unlinked stale daemon after replacement.
+          agent: opts.freshConnection ? false : undefined,
           headers: {
-            'X-Relayfile-API-Version': String(RELAYFILE_API_VERSION),
+            ...(opts.includeVersionHeader === false
+              ? {}
+              : { 'X-Relayfile-API-Version': String(RELAYFILE_API_VERSION) }),
             Accept: 'application/json',
             ...(payload
               ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) }
@@ -194,8 +234,15 @@ export class RelayfileControlPlaneClient {
         (res) => {
           // The response stream can emit 'error' (e.g. socket reset mid-body);
           // without a listener that's an unhandled error -> crash.
-          res.on('error', (err) =>
-            fail(new RelayfileControlPlaneError('DAEMON_UNAVAILABLE', err.message))
+          res.on('error', (err: NodeJS.ErrnoException) =>
+            fail(
+              new RelayfileControlPlaneError(
+                'DAEMON_UNAVAILABLE',
+                err.message,
+                undefined,
+                isTransientConnectionCode(err.code)
+              )
+            )
           );
           const chunks: Buffer[] = [];
           res.on('data', (c) => chunks.push(c as Buffer));
@@ -234,7 +281,9 @@ export class RelayfileControlPlaneClient {
         req.destroy(
           new RelayfileControlPlaneError(
             'DAEMON_UNAVAILABLE',
-            `relayfile control-plane request timed out after ${this.requestTimeoutMs}ms (${opts.method} ${opts.path})`
+            `relayfile control-plane request timed out after ${this.requestTimeoutMs}ms (${opts.method} ${opts.path})`,
+            undefined,
+            true
           )
         );
       });
@@ -250,7 +299,8 @@ export class RelayfileControlPlaneClient {
             err.code === 'ENOENT' || err.code === 'ECONNREFUSED'
               ? `relayfile control-plane is not running at ${this.socketPath} (${err.code})`
               : err.message,
-            undefined
+            undefined,
+            isTransientConnectionCode(err.code)
           )
         );
       });
@@ -276,7 +326,10 @@ export class RelayfileControlPlaneClient {
     try {
       hello = await this.hello();
     } catch (err) {
-      if (!(err instanceof RelayfileControlPlaneError) || err.code !== 'DAEMON_UNAVAILABLE') throw err;
+      if (err instanceof RelayfileControlPlaneError && err.code === 'VERSION_INCOMPATIBLE') {
+        throw await this.versionRejectionError(err);
+      }
+      if (!isTransientControlPlaneError(err)) throw err;
       if (!this.autoStart) {
         throw new RelayfileControlPlaneError(
           'DAEMON_UNAVAILABLE',
@@ -287,21 +340,43 @@ export class RelayfileControlPlaneClient {
       hello = await this.startDaemonAndConnect();
     }
     if (!hello.supportedApiVersions?.includes(RELAYFILE_API_VERSION)) {
-      throw new RelayfileControlPlaneError(
-        'VERSION_INCOMPATIBLE',
-        `relayfile daemon speaks API v${hello.apiVersion} (supports ${
-          hello.supportedApiVersions?.join(', ') || 'none'
-        }); this client needs v${RELAYFILE_API_VERSION}. Upgrade relayfile (or agent-relay).`
-      );
+      const installedVersion = await this.installedBinaryVersion();
+      const daemonVersion = firstSemver(hello.daemonVersion);
+      const canReplaceStaleDaemon =
+        this.autoStart &&
+        installedVersion != null &&
+        daemonVersion !== '' &&
+        compareSemver(installedVersion, MIN_RELAYFILE_VERSION_FOR_CURRENT_API) >= 0 &&
+        compareSemver(installedVersion, daemonVersion) > 0;
+
+      if (!canReplaceStaleDaemon) {
+        throw this.versionMismatchError(hello, installedVersion);
+      }
+
+      try {
+        await this.stopStaleDaemon();
+        hello = await this.startDaemonAndConnect(installedVersion);
+      } catch (err) {
+        if (err instanceof RelayfileControlPlaneError && err.code === 'VERSION_INCOMPATIBLE') {
+          throw err;
+        }
+        throw this.versionMismatchError(
+          hello,
+          installedVersion,
+          `Automatic stale-daemon replacement failed: ${
+            err instanceof Error ? err.message : String(err)
+          }`
+        );
+      }
     }
     assertRelayfileVersion(hello.daemonVersion);
   }
 
-  private async startDaemonAndConnect(): Promise<HelloResponse> {
-    let child;
+  private spawnDaemon(): SpawnedDaemon {
     // A missing binary / bad RELAYFILE_BIN surfaces as an async 'error' event on
     // the child (ENOENT), not a throw from spawn().
     let spawnError: Error | undefined;
+    let child;
     try {
       child = spawn(this.binary, ['control-plane', 'serve', '--sock', this.socketPath], {
         detached: true,
@@ -310,17 +385,28 @@ export class RelayfileControlPlaneClient {
       child.on('error', (err) => {
         spawnError = err;
       });
+      child.once('exit', (code, signal) => {
+        spawnError = new Error(
+          `relayfile control-plane exited before readiness (${signal ? `signal ${signal}` : `code ${code}`})`
+        );
+      });
     } catch (err) {
       throw new RelayfileControlPlaneError(
         'DAEMON_UNAVAILABLE',
         `failed to start relayfile control-plane (${err instanceof Error ? err.message : String(err)}). ` +
-          `Install relayfile or set RELAYFILE_BIN.`
+        `Install relayfile or set RELAYFILE_BIN.`
       );
     }
     child.unref?.();
+    return { getError: () => spawnError };
+  }
+
+  private async startDaemonAndConnect(installedVersion?: string): Promise<HelloResponse> {
+    const spawned = this.spawnDaemon();
     const deadline = Date.now() + this.startTimeoutMs;
     let lastErr: unknown;
     while (Date.now() < deadline) {
+      const spawnError = spawned.getError();
       if (spawnError) {
         throw new RelayfileControlPlaneError(
           'DAEMON_UNAVAILABLE',
@@ -329,11 +415,27 @@ export class RelayfileControlPlaneClient {
         );
       }
       await sleep(100);
+      let hello: HelloResponse;
       try {
-        return await this.hello();
+        hello = await this.hello();
       } catch (err) {
+        if (err instanceof RelayfileControlPlaneError && err.code === 'VERSION_INCOMPATIBLE') {
+          throw await this.versionRejectionError(err, installedVersion);
+        }
+        if (!isTransientControlPlaneError(err)) throw err;
         lastErr = err;
+        continue;
       }
+
+      if (hello.supportedApiVersions?.includes(RELAYFILE_API_VERSION)) {
+        return hello;
+      }
+
+      const mismatch = this.versionMismatchError(
+        hello,
+        installedVersion ?? (await this.installedBinaryVersion())
+      );
+      throw mismatch;
     }
     throw new RelayfileControlPlaneError(
       'DAEMON_UNAVAILABLE',
@@ -342,10 +444,144 @@ export class RelayfileControlPlaneClient {
     );
   }
 
+  private async stopStaleDaemon(): Promise<void> {
+    const result = await this.runCommand('lsof', ['-t', '--', this.socketPath], 1000);
+    const pids = [
+      ...new Set(
+        (result?.code === 0 ? result.stdout : '')
+          .split(/\s+/)
+          .map((value) => Number.parseInt(value, 10))
+          .filter((pid) => Number.isSafeInteger(pid) && pid > 1 && pid !== process.pid)
+      ),
+    ];
+    if (pids.length !== 1) {
+      throw new Error(
+        pids.length === 0
+          ? `could not identify the process serving ${this.socketPath}`
+          : `refusing to stop multiple processes serving ${this.socketPath}: ${pids.join(', ')}`
+      );
+    }
+
+    try {
+      process.kill(pids[0]!, 'SIGTERM');
+    } catch (err) {
+      throw new Error(
+        `could not stop stale relayfile control-plane pid ${pids[0]}: ${
+          err instanceof Error ? err.message : String(err)
+        }`
+      );
+    }
+
+    const deadline = Date.now() + this.startTimeoutMs;
+    while (existsSync(this.socketPath) && Date.now() < deadline) {
+      await sleep(50);
+    }
+    if (existsSync(this.socketPath)) {
+      throw new Error(
+        `stale relayfile control-plane pid ${pids[0]} did not release ${this.socketPath} within ${this.startTimeoutMs}ms`
+      );
+    }
+  }
+
+  private versionMismatchError(
+    hello: HelloResponse,
+    installedVersion: string | undefined,
+    detail?: string
+  ): RelayfileControlPlaneError {
+    const supported = hello.supportedApiVersions?.length
+      ? hello.supportedApiVersions.map((version) => `v${version}`).join(', ')
+      : 'none reported';
+    return new RelayfileControlPlaneError(
+      'VERSION_INCOMPATIBLE',
+      `relayfile daemon ${hello.daemonVersion} speaks API v${hello.apiVersion} ` +
+        `(supports ${supported}); this client requires API v${RELAYFILE_API_VERSION}. ` +
+        `Installed relayfile binary: ${installedVersion ?? 'version unknown'}. ` +
+        `${detail ? `${detail} ` : ''}` +
+        `Upgrade with \`npm install -g relayfile@latest\`, then restart the running control-plane with ` +
+        `\`${this.restartCommand()}\`.`
+    );
+  }
+
+  private async versionRejectionError(
+    err: RelayfileControlPlaneError,
+    installedVersion?: string
+  ): Promise<RelayfileControlPlaneError> {
+    installedVersion ??= await this.installedBinaryVersion();
+    const spoken = err.message.match(/speaks API v(\d+)/i)?.[1];
+    return new RelayfileControlPlaneError(
+      'VERSION_INCOMPATIBLE',
+      `relayfile daemon version unknown (discovery hello was rejected) speaks API ` +
+        `${spoken ? `v${spoken}` : 'version unknown'} (supported versions were not reported); ` +
+        `this client requires API v${RELAYFILE_API_VERSION}. Installed relayfile binary: ` +
+        `${installedVersion ?? 'version unknown'}. Upgrade with \`npm install -g relayfile@latest\`, ` +
+        `then restart the running control-plane with \`${this.restartCommand()}\`. ` +
+        `Daemon response: ${err.message}`,
+      err.status
+    );
+  }
+
+  private restartCommand(): string {
+    const socket = shellQuote(this.socketPath);
+    return (
+      `kill $(lsof -t -- ${socket}) && ` +
+      `${shellQuote(this.binary)} control-plane serve --sock ${socket}`
+    );
+  }
+
+  private async installedBinaryVersion(): Promise<string | undefined> {
+    const result = await this.runCommand(
+      this.binary,
+      ['--version'],
+      Math.min(this.requestTimeoutMs, 2000)
+    );
+    return firstSemver(`${result?.stdout ?? ''} ${result?.stderr ?? ''}`) || undefined;
+  }
+
+  private runCommand(command: string, args: string[], timeoutMs: number): Promise<CommandResult | undefined> {
+    return new Promise((resolve) => {
+      let child;
+      try {
+        child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+      } catch {
+        resolve(undefined);
+        return;
+      }
+
+      let stdout = '';
+      let stderr = '';
+      let settled = false;
+      let timeout: NodeJS.Timeout | undefined;
+      const finish = (result?: CommandResult) => {
+        if (settled) return;
+        settled = true;
+        if (timeout) clearTimeout(timeout);
+        resolve(result);
+      };
+      child.stdout?.on('data', (chunk) => {
+        stdout += String(chunk);
+      });
+      child.stderr?.on('data', (chunk) => {
+        stderr += String(chunk);
+      });
+      child.once('error', () => finish());
+      child.once('close', (code) => finish({ stdout, stderr, code }));
+      timeout = setTimeout(() => {
+        child.kill();
+        finish();
+      }, timeoutMs);
+      timeout.unref?.();
+    });
+  }
+
   // ── endpoints ──────────────────────────────────────────────────────────────
 
   hello(): Promise<HelloResponse> {
-    return this.rawRequest<HelloResponse>({ method: 'GET', path: '/v1/hello' });
+    return this.rawRequest<HelloResponse>({
+      method: 'GET',
+      path: '/v1/hello',
+      includeVersionHeader: false,
+      freshConnection: true,
+    });
   }
 
   resolvePath(provider: string, resource: string): Promise<ResolvePathResult> {

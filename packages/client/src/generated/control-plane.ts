@@ -11,7 +11,11 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Negotiate control-plane API compatibility */
+        /**
+         * Negotiate control-plane API compatibility
+         * @description Unversioned discovery endpoint. The daemon always returns its current
+         *     and supported API versions; any version header or query is ignored.
+         */
         get: operations["hello"];
         put?: never;
         /** Negotiate control-plane API compatibility */
@@ -397,7 +401,6 @@ export interface operations {
                     "application/json": components["schemas"]["HelloResponse"];
                 };
             };
-            426: components["responses"]["VersionIncompatible"];
         };
     };
     helloPost: {
