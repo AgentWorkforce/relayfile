@@ -1127,11 +1127,12 @@ type mountState struct {
 	// are additive/omitempty: legacy state files load with zero values
 	// (BootstrapComplete=false), which self-heals by forcing a full
 	// reconcile on the next cycle.
-	BootstrapComplete    bool   `json:"bootstrapComplete,omitempty"`
-	BootstrapCursor      string `json:"bootstrapCursor,omitempty"`
-	BootstrapFilesSynced int    `json:"bootstrapFilesSynced,omitempty"`
-	BootstrapFilesTotal  int    `json:"bootstrapFilesTotal,omitempty"`
-	BootstrapStartedAt   string `json:"bootstrapStartedAt,omitempty"`
+	BootstrapComplete    bool     `json:"bootstrapComplete,omitempty"`
+	BootstrapDirectories []string `json:"bootstrapDirectories,omitempty"`
+	BootstrapCursor      string   `json:"bootstrapCursor,omitempty"`
+	BootstrapFilesSynced int      `json:"bootstrapFilesSynced,omitempty"`
+	BootstrapFilesTotal  int      `json:"bootstrapFilesTotal,omitempty"`
+	BootstrapStartedAt   string   `json:"bootstrapStartedAt,omitempty"`
 	// QuarantinedPaths holds remote paths that cannot be materialized locally
 	// due to file/directory name collisions. Persisted across cycle restarts
 	// so the daemon does not re-fetch these paths from the cloud until the
@@ -4031,7 +4032,7 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 	metrics := fullTreeTraversalMetrics{startedAt: time.Now()}
 	defer func() {
 		s.logf(
-			"mount full-tree traversal summary remote_root=%q list_calls=%d entries_seen=%d files_seen=%d directories_seen=%d bytes_seen=%d runtime_entries_seen=%d traversal_complete=%t duration_ms=%d",
+			"mount full-tree traversal summary remote_root=%q list_calls=%d entries_seen=%d files_seen=%d directories_seen=%d bytes_seen=%d runtime_entries_seen=%d runtime_subtrees_pruned=%d traversal_complete=%t traversal_failed=%t duration_ms=%d",
 			s.remoteRoot,
 			metrics.listCalls,
 			metrics.entriesSeen,
@@ -4039,35 +4040,71 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 			metrics.directoriesSeen,
 			metrics.bytesSeen,
 			metrics.runtimeEntriesSeen,
+			metrics.runtimeSubtreesPruned,
 			metrics.traversalComplete,
+			returnErr != nil,
 			time.Since(metrics.startedAt).Milliseconds(),
 		)
 	}()
 	remotePaths := map[string]struct{}{}
-	// Resumable bootstrap: if a prior bootstrap was interrupted mid-tree,
-	// pick traversal back up from the persisted cursor rather than
-	// re-reading everything. startedFromEmpty tracks whether this process
-	// traversed the WHOLE tree (empty start -> NextCursor==nil): only then
-	// is the snapshot delete pass authoritative. Resuming from a persisted
-	// cursor means we did not observe the full remote set this cycle, so
-	// the delete pass is skipped (next full cycle does the authoritative
-	// delete) — preserving the #164/#165 mount-root-clobber invariants.
+	// Traverse one directory level at a time. A deep ListTree request makes the
+	// server enumerate every descendant before the client can reject reserved
+	// runtime paths. The shallow queue sees a nested .relay directory first and
+	// can prune it without ever requesting its state/outbox descendants.
+	directories := []string{s.remoteRoot}
 	cursor := ""
-	if !s.state.BootstrapComplete && strings.TrimSpace(s.state.BootstrapCursor) != "" {
-		cursor = s.state.BootstrapCursor
-		s.logf("resuming bootstrap full-tree pull from persisted cursor (%d files already synced)", s.state.BootstrapFilesSynced)
+	startedFromEmpty := true
+	if !s.state.BootstrapComplete && len(s.state.BootstrapDirectories) > 0 {
+		resumedDirectories := make([]string, 0, len(s.state.BootstrapDirectories))
+		for _, directory := range s.state.BootstrapDirectories {
+			directory = normalizeRemotePath(directory)
+			if !isUnderRemoteRoot(s.remoteRoot, directory) || isMountRuntimeRemotePath(directory) {
+				continue
+			}
+			resumedDirectories = append(resumedDirectories, directory)
+		}
+		if len(resumedDirectories) > 0 {
+			directories = resumedDirectories
+			cursor = strings.TrimSpace(s.state.BootstrapCursor)
+			startedFromEmpty = false
+			s.logf("resuming bootstrap shallow-tree pull at %s from persisted cursor (%d directories pending, %d files already synced)", directories[0], len(directories), s.state.BootstrapFilesSynced)
+		}
+	} else if !s.state.BootstrapComplete && strings.TrimSpace(s.state.BootstrapCursor) != "" {
+		// v0.10.28 and older persisted a cursor into one depth=200 listing.
+		// That cursor is invalid for a depth=1 directory page, so restart from
+		// the root. The local-hash fast path avoids re-reading unchanged files.
+		s.logf("discarding legacy deep-tree bootstrap cursor and restarting shallow traversal from %s", s.remoteRoot)
+		s.state.BootstrapCursor = ""
 	}
-	startedFromEmpty := cursor == ""
+	queuedDirectories := make(map[string]struct{}, len(directories))
+	for _, directory := range directories {
+		queuedDirectories[directory] = struct{}{}
+	}
 	if s.state.BootstrapStartedAt == "" {
 		s.state.BootstrapStartedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	}
+	persistTraversal := func(filesThisPage int) error {
+		if s.state.BootstrapComplete {
+			return nil
+		}
+		s.state.BootstrapDirectories = append([]string(nil), directories...)
+		s.state.BootstrapCursor = cursor
+		s.state.BootstrapFilesSynced += filesThisPage
+		prog.touch()
+		if err := s.saveState(); err != nil {
+			return err
+		}
+		prog.touch()
+		return nil
+	}
 	maxObservedRevision := ""
 	var transientBootstrapAbort bool
-	for {
+	for len(directories) > 0 {
+		currentDirectory := directories[0]
 		var page TreeResponse
 		var err error
 		s.runFullPullIO(func() {
-			page, err = s.client.ListTree(ctx, s.workspace, s.remoteRoot, 200, cursor)
+			page, err = s.client.ListTree(ctx, s.workspace, currentDirectory, 1, cursor)
 		})
 		metrics.listCalls++
 		if err != nil {
@@ -4079,6 +4116,7 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 		filesThisPage := 0
 		readJobs := make([]bootstrapReadJob, 0, len(page.Entries))
 		for _, entry := range page.Entries {
+			remotePath := normalizeRemotePath(entry.Path)
 			metrics.entriesSeen++
 			switch entry.Type {
 			case "file":
@@ -4089,25 +4127,34 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 			case "dir":
 				metrics.directoriesSeen++
 			}
-			if isMountRuntimeRemotePath(entry.Path) {
+			if isMountRuntimeRemotePath(remotePath) {
 				metrics.runtimeEntriesSeen++
+			}
+			if !isUnderRemoteRoot(s.remoteRoot, remotePath) {
+				continue
+			}
+			if s.skipMountRuntimeRemotePath(remotePath, conflicted) {
+				if entry.Type == "dir" {
+					metrics.runtimeSubtreesPruned++
+				}
+				continue
+			}
+			// Contract: lazy GitHub repos do not eagerly hydrate per-repo content at startup.
+			if s.lazyRepos && isUnderLazyGithubRepoSubtree(s.remoteRoot, remotePath) {
+				continue
+			}
+			if entry.Type == "dir" {
+				if _, exists := queuedDirectories[remotePath]; !exists {
+					queuedDirectories[remotePath] = struct{}{}
+					directories = append(directories, remotePath)
+				}
+				continue
 			}
 			if entry.Type != "file" {
 				continue
 			}
 			if revisionAdvances(maxObservedRevision, entry.Revision) {
 				maxObservedRevision = entry.Revision
-			}
-			remotePath := normalizeRemotePath(entry.Path)
-			if !isUnderRemoteRoot(s.remoteRoot, remotePath) {
-				continue
-			}
-			if s.skipMountRuntimeRemotePath(remotePath, conflicted) {
-				continue
-			}
-			// Contract: lazy GitHub repos do not eagerly hydrate per-repo content at startup.
-			if s.lazyRepos && isUnderLazyGithubRepoSubtree(s.remoteRoot, remotePath) {
-				continue
 			}
 			if tracked, ok := s.state.Files[remotePath]; ok && tracked.Denied {
 				continue
@@ -4203,31 +4250,30 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 		// cursor so the same page (including the failing path) is retried next
 		// cycle. Save state up to the last successfully-committed cursor.
 		if transientBootstrapAbort {
-			if !s.state.BootstrapComplete {
-				s.state.BootstrapFilesSynced += filesThisPage
-				if err := s.saveState(); err != nil {
-					return err
-				}
-			}
-			break
-		}
-		if page.NextCursor == nil || *page.NextCursor == "" {
-			metrics.traversalComplete = true
-			break
-		}
-		cursor = *page.NextCursor
-		// Persist the resume point + progress so an interrupted bootstrap
-		// (timeout, crash, watchdog cancel) picks up here next cycle
-		// instead of restarting the whole tree.
-		if !s.state.BootstrapComplete {
-			s.state.BootstrapCursor = cursor
-			s.state.BootstrapFilesSynced += filesThisPage
-			prog.touch()
-			if err := s.saveState(); err != nil {
+			if err := persistTraversal(filesThisPage); err != nil {
 				return err
 			}
-			prog.touch()
+			break
 		}
+		if page.NextCursor != nil && *page.NextCursor != "" {
+			cursor = *page.NextCursor
+			if err := persistTraversal(filesThisPage); err != nil {
+				return err
+			}
+			continue
+		}
+		// This directory is exhausted. Persist the remaining queue before
+		// requesting its next member so cancellation resumes at a directory
+		// boundary instead of restarting the root.
+		directories = directories[1:]
+		cursor = ""
+		if len(directories) > 0 {
+			if err := persistTraversal(filesThisPage); err != nil {
+				return err
+			}
+			continue
+		}
+		metrics.traversalComplete = true
 	}
 
 	// A transient read error stopped the page scan early. Bootstrap is not
@@ -4240,8 +4286,8 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 
 	// Resumed/partial traversal safety: only run the authoritative
 	// snapshot delete pass when this process traversed the ENTIRE tree
-	// (started from an empty cursor and reached NextCursor==nil). If the
-	// traversal began from a persisted resume cursor, remotePaths only
+	// (started from the root with an empty directory queue). If the
+	// traversal began from a persisted directory/cursor boundary, remotePaths only
 	// covers the tail of the tree, so deleting "everything not in
 	// remotePaths" would wipe the already-mirrored prefix — exactly the
 	// #164/#165 clobber failure mode. Skip the delete pass this cycle;
@@ -4275,14 +4321,15 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 }
 
 type fullTreeTraversalMetrics struct {
-	startedAt          time.Time
-	listCalls          int
-	entriesSeen        int
-	filesSeen          int
-	directoriesSeen    int
-	bytesSeen          int64
-	runtimeEntriesSeen int
-	traversalComplete  bool
+	startedAt             time.Time
+	listCalls             int
+	entriesSeen           int
+	filesSeen             int
+	directoriesSeen       int
+	bytesSeen             int64
+	runtimeEntriesSeen    int
+	runtimeSubtreesPruned int
+	traversalComplete     bool
 }
 
 type bootstrapReadJob struct {
@@ -4409,6 +4456,7 @@ func bootstrapReadWorkers() int {
 // gate (Step 5) cannot be satisfied by a partial pull.
 func (s *Syncer) markBootstrapComplete() {
 	s.state.BootstrapComplete = true
+	s.state.BootstrapDirectories = nil
 	s.state.BootstrapCursor = ""
 	s.state.BootstrapStartedAt = ""
 	s.state.BootstrapFilesSynced = 0
@@ -5496,17 +5544,50 @@ func (s *Syncer) skipMountRuntimeRemotePath(remotePath string, conflicted map[st
 		return false
 	}
 	s.logf("skipping mount runtime path surfaced as workspace content: %s", remotePath)
-	if err := s.applyRemoteDelete(remotePath, conflicted); err != nil {
-		s.logf("failed to clean local mount runtime path %s: %v", remotePath, err)
-	}
-	if localPath, err := s.remoteToLocalPath(remotePath); err == nil {
-		if removeErr := os.Remove(localPath); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
-			s.logf("failed to remove local mount runtime file %s (%s): %v", remotePath, localPath, removeErr)
+	prefix := strings.TrimSuffix(remotePath, "/") + "/"
+	for trackedPath := range s.state.Files {
+		if trackedPath != remotePath && !strings.HasPrefix(trackedPath, prefix) {
+			continue
+		}
+		delete(s.state.Files, trackedPath)
+		s.clearIncrementalReadNotReady(trackedPath)
+		if conflicted != nil {
+			delete(conflicted, trackedPath)
 		}
 	}
-	delete(s.state.Files, remotePath)
+	for notReadyPath := range s.state.IncrementalReadNotReadySince {
+		if notReadyPath == remotePath || strings.HasPrefix(notReadyPath, prefix) {
+			s.clearIncrementalReadNotReady(notReadyPath)
+		}
+	}
+	if localPath, err := s.remoteToLocalPath(remotePath); err == nil {
+		if s.isActiveMountRuntimeLocalPath(localPath) {
+			// A leaked remote /.relay entry maps onto this daemon's own public
+			// runtime directory. Reject the remote entry, but never delete the
+			// live local state/outbox while doing so.
+		} else if err := s.assertNotMountRoot(localPath); err != nil {
+			s.logf("failed to clean local mount runtime path %s: %v", remotePath, err)
+		} else if removeErr := os.RemoveAll(localPath); removeErr != nil {
+			s.logf("failed to remove local mount runtime subtree %s (%s): %v", remotePath, localPath, removeErr)
+		}
+	}
 	s.clearIncrementalReadNotReady(remotePath)
 	return true
+}
+
+func (s *Syncer) isActiveMountRuntimeLocalPath(localPath string) bool {
+	localPath = filepath.Clean(localPath)
+	publicRuntimeRoot := filepath.Join(filepath.Clean(s.localRoot), ".relay")
+	if relative, err := filepath.Rel(publicRuntimeRoot, localPath); err == nil &&
+		(relative == "." || (relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)))) {
+		return true
+	}
+	stateFile := filepath.Clean(s.stateFile)
+	if localPath == stateFile {
+		return true
+	}
+	return filepath.Dir(localPath) == filepath.Dir(stateFile) &&
+		strings.HasPrefix(filepath.Base(localPath), "."+filepath.Base(stateFile)+".tmp-")
 }
 
 func (s *Syncer) applyLocalPermissions(localPath string, canWrite bool) error {
@@ -6202,6 +6283,7 @@ func (s *Syncer) loadState() error {
 	if s.state.BootstrapComplete && s.state.SyncMode == "write-only" && !s.writeOnly {
 		s.logf("syncMode transition write-only->mirror detected; resetting BootstrapComplete to force a full bootstrap pull (backfills records missed while write-only)")
 		s.state.BootstrapComplete = false
+		s.state.BootstrapDirectories = nil
 		s.state.BootstrapCursor = ""
 		s.state.BootstrapStartedAt = ""
 		s.state.BootstrapFilesSynced = 0

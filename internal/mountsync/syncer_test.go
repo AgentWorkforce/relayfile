@@ -7502,12 +7502,23 @@ type hierarchicalTreeClient struct {
 	*fakeClient
 	calls           []hierarchicalTreeCall
 	entriesReturned int
+	failAtCall      int
+	failErr         error
 }
 
 func (c *hierarchicalTreeClient) ListTree(_ context.Context, _ string, path string, depth int, cursor string) (TreeResponse, error) {
 	base := normalizeRemotePath(path)
 	if depth <= 0 {
 		depth = 1
+	}
+	callNumber := len(c.calls) + 1
+	if c.failAtCall == callNumber {
+		c.calls = append(c.calls, hierarchicalTreeCall{path: base, depth: depth})
+		c.failAtCall = 0
+		if c.failErr != nil {
+			return TreeResponse{}, c.failErr
+		}
+		return TreeResponse{}, errors.New("synthetic ListTree failure")
 	}
 	entriesByPath := map[string]TreeEntry{}
 	for remotePath, file := range c.files {
@@ -9820,6 +9831,9 @@ func TestLoadStateResetsBootstrapCompleteOnlyOnWriteOnlyToMirrorSyncMode(t *test
 				t.Fatalf("BootstrapComplete = %v, want %v", got, tc.wantBootstrapComplete)
 			}
 			if tc.wantCleared {
+				if len(syncer.state.BootstrapDirectories) != 0 {
+					t.Fatalf("BootstrapDirectories = %#v, want empty", syncer.state.BootstrapDirectories)
+				}
 				if syncer.state.BootstrapCursor != "" {
 					t.Fatalf("BootstrapCursor = %q, want empty", syncer.state.BootstrapCursor)
 				}
@@ -10037,6 +10051,37 @@ func TestIsMountRuntimeRelativePathExcludesOnlyReservedRuntimeArtifacts(t *testi
 	}
 }
 
+func TestSkipMountRuntimeRemotePathPreservesActiveRootRuntime(t *testing.T) {
+	localDir := t.TempDir()
+	activeState := filepath.Join(localDir, ".relay", "state.json")
+	activeOutbox := filepath.Join(localDir, ".relay", "outbox", "pending", "mountcmd_live.json")
+	if err := os.MkdirAll(filepath.Dir(activeOutbox), 0o755); err != nil {
+		t.Fatalf("mkdir active runtime tree: %v", err)
+	}
+	if err := os.WriteFile(activeState, []byte(`{"ready":true}`), 0o644); err != nil {
+		t.Fatalf("write active state: %v", err)
+	}
+	if err := os.WriteFile(activeOutbox, []byte(`{"pending":true}`), 0o644); err != nil {
+		t.Fatalf("write active outbox: %v", err)
+	}
+	syncer, err := NewSyncer(&fakeClient{files: map[string]RemoteFile{}}, SyncerOptions{
+		WorkspaceID: "ws_active_runtime",
+		RemoteRoot:  "/",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+	if !syncer.skipMountRuntimeRemotePath("/.relay", nil) {
+		t.Fatalf("expected remote /.relay to be classified as runtime")
+	}
+	for _, activePath := range []string{activeState, activeOutbox} {
+		if _, err := os.Stat(activePath); err != nil {
+			t.Fatalf("active mount runtime %s was removed: %v", activePath, err)
+		}
+	}
+}
+
 func TestPullRemoteFullTreePrunesNestedMountRuntimeBeforeDescendantEnumeration(t *testing.T) {
 	files := map[string]RemoteFile{
 		"/slack/channels/C123/messages/1780145510_376649.json": {
@@ -10123,6 +10168,55 @@ func TestPullRemoteFullTreePrunesNestedMountRuntimeBeforeDescendantEnumeration(t
 	}
 	if !strings.Contains(summary, "runtime_subtrees_pruned=1") {
 		t.Fatalf("expected traversal summary to report one pruned runtime subtree, got %q", summary)
+	}
+}
+
+func TestPullRemoteFullTreeResumesPersistedShallowDirectoryQueue(t *testing.T) {
+	files := map[string]RemoteFile{
+		"/a/one.md":        {Path: "/a/one.md", Revision: "rev_a", Content: "one"},
+		"/b/two.md":        {Path: "/b/two.md", Revision: "rev_b", Content: "two"},
+		"/c/deep/three.md": {Path: "/c/deep/three.md", Revision: "rev_c", Content: "three"},
+	}
+	client := &hierarchicalTreeClient{
+		fakeClient: &fakeClient{files: files},
+		failAtCall: 3,
+		failErr:    &HTTPError{StatusCode: http.StatusBadGateway, Code: "bad_gateway", Message: "synthetic interruption"},
+	}
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_shallow_resume",
+		RemoteRoot:  "/",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+	if err := syncer.pullRemoteFullTree(context.Background(), nil, bootstrapProgress{}); err == nil {
+		t.Fatalf("expected first traversal to fail")
+	}
+	if got := syncer.state.BootstrapDirectories; len(got) == 0 || got[0] != "/b" {
+		t.Fatalf("persisted directory queue = %#v, want /b at the resume boundary", got)
+	}
+	if err := syncer.pullRemoteFullTree(context.Background(), nil, bootstrapProgress{}); err != nil {
+		t.Fatalf("resumed traversal failed: %v", err)
+	}
+	if len(client.calls) < 4 || client.calls[3].path != "/b" {
+		t.Fatalf("resumed traversal did not restart at /b: %#v", client.calls)
+	}
+	if !syncer.state.BootstrapComplete {
+		t.Fatalf("resumed traversal did not mark bootstrap complete")
+	}
+	if len(syncer.state.BootstrapDirectories) != 0 {
+		t.Fatalf("completed traversal retained directory queue: %#v", syncer.state.BootstrapDirectories)
+	}
+	for _, localPath := range []string{
+		filepath.Join(localDir, "a", "one.md"),
+		filepath.Join(localDir, "b", "two.md"),
+		filepath.Join(localDir, "c", "deep", "three.md"),
+	} {
+		if _, err := os.Stat(localPath); err != nil {
+			t.Fatalf("expected resumed traversal to mirror %s: %v", localPath, err)
+		}
 	}
 }
 
