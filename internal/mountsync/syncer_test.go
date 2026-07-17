@@ -7488,6 +7488,76 @@ func (c *fakeClient) ListTree(ctx context.Context, workspaceID, path string, dep
 	}, nil
 }
 
+type hierarchicalTreeCall struct {
+	path    string
+	depth   int
+	entries int
+}
+
+// hierarchicalTreeClient mirrors the production tree contract: a request
+// returns files and synthesized directories only through the requested depth.
+// It lets traversal tests distinguish pruning before descent from filtering a
+// flat depth=200 response after the server has already enumerated every leaf.
+type hierarchicalTreeClient struct {
+	*fakeClient
+	calls           []hierarchicalTreeCall
+	entriesReturned int
+}
+
+func (c *hierarchicalTreeClient) ListTree(_ context.Context, _ string, path string, depth int, cursor string) (TreeResponse, error) {
+	base := normalizeRemotePath(path)
+	if depth <= 0 {
+		depth = 1
+	}
+	entriesByPath := map[string]TreeEntry{}
+	for remotePath, file := range c.files {
+		remotePath = normalizeRemotePath(remotePath)
+		if !isUnderRemoteRoot(base, remotePath) || remotePath == base {
+			continue
+		}
+		relative := strings.TrimPrefix(strings.TrimPrefix(remotePath, base), "/")
+		parts := strings.Split(relative, "/")
+		levels := depth
+		if len(parts) < levels {
+			levels = len(parts)
+		}
+		for level := 1; level <= levels; level++ {
+			entryPath := normalizeRemotePath(strings.TrimSuffix(base, "/") + "/" + strings.Join(parts[:level], "/"))
+			if level == len(parts) {
+				entriesByPath[entryPath] = TreeEntry{
+					Path:        entryPath,
+					Type:        "file",
+					Revision:    file.Revision,
+					ContentHash: file.ContentHash,
+					Size:        int64(len(file.Content)),
+				}
+				continue
+			}
+			if _, exists := entriesByPath[entryPath]; !exists {
+				entriesByPath[entryPath] = TreeEntry{Path: entryPath, Type: "dir", Revision: "dir"}
+			}
+		}
+	}
+	entries := make([]TreeEntry, 0, len(entriesByPath))
+	for _, entry := range entriesByPath {
+		entries = append(entries, entry)
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Path < entries[j].Path })
+	if cursor != "" {
+		start := len(entries)
+		for index, entry := range entries {
+			if entry.Path == cursor {
+				start = index + 1
+				break
+			}
+		}
+		entries = entries[start:]
+	}
+	c.calls = append(c.calls, hierarchicalTreeCall{path: base, depth: depth, entries: len(entries)})
+	c.entriesReturned += len(entries)
+	return TreeResponse{Path: base, Entries: entries}, nil
+}
+
 func (c *fakeClient) LatestEventID(ctx context.Context, workspaceID, provider string) (string, error) {
 	_ = ctx
 	_ = workspaceID
@@ -9940,6 +10010,119 @@ func TestPullRemoteFullTreeSkipsNestedMountRuntimeState(t *testing.T) {
 		if !strings.Contains(summary, field) {
 			t.Fatalf("traversal summary %q missing %q", summary, field)
 		}
+	}
+}
+
+func TestIsMountRuntimeRelativePathExcludesOnlyReservedRuntimeArtifacts(t *testing.T) {
+	tests := []struct {
+		path string
+		want bool
+	}{
+		{path: ".relay", want: true},
+		{path: "slack/channels/C123/messages/1/.relay/state.json", want: true},
+		{path: "slack/channels/C123/messages/1/.relay/outbox/acked/mountcmd_1.json", want: true},
+		{path: "slack/channels/C123/messages/1/.relayfile-mount-state.json", want: true},
+		{path: "slack/channels/C123/messages/1/relay/state.json", want: false},
+		{path: "slack/channels/C123/messages/1/.relay-notes/state.json", want: false},
+		{path: "slack/channels/C123/messages/1/outbox/acked/mountcmd_1.json", want: false},
+		{path: "slack/channels/C123/messages/1/notes/mountcmd_1.json", want: false},
+		{path: "slack/channels/C123/messages/1/.relayfile-mount-state.json.backup", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			if got := isMountRuntimeRelativePath(tt.path); got != tt.want {
+				t.Fatalf("isMountRuntimeRelativePath(%q) = %t, want %t", tt.path, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestPullRemoteFullTreePrunesNestedMountRuntimeBeforeDescendantEnumeration(t *testing.T) {
+	files := map[string]RemoteFile{
+		"/slack/channels/C123/messages/1780145510_376649.json": {
+			Path: "/slack/channels/C123/messages/1780145510_376649.json", Revision: "rev_msg", Content: `{"text":"hello"}`,
+		},
+		"/slack/channels/C123/messages/1780145510_376649/.relay-notes/keep.md": {
+			Path: "/slack/channels/C123/messages/1780145510_376649/.relay-notes/keep.md", Revision: "rev_notes", Content: "real notes",
+		},
+		"/slack/channels/C123/messages/1780145510_376649/outbox/acked/mountcmd_real.json": {
+			Path: "/slack/channels/C123/messages/1780145510_376649/outbox/acked/mountcmd_real.json", Revision: "rev_real_cmd", Content: `{"real":true}`,
+		},
+		"/slack/channels/C123/messages/1780145510_376649/.relay/state.json": {
+			Path: "/slack/channels/C123/messages/1780145510_376649/.relay/state.json", Revision: "rev_runtime_state", Content: `{"pendingWriteback":400}`,
+		},
+	}
+	for index := 0; index < 400; index++ {
+		path := fmt.Sprintf("/slack/channels/C123/messages/1780145510_376649/.relay/outbox/acked/mountcmd_%03d.json", index)
+		files[path] = RemoteFile{Path: path, Revision: fmt.Sprintf("rev_runtime_%03d", index), Content: `{"runtime":true}`}
+	}
+	baseClient := &fakeClient{files: files}
+	client := &hierarchicalTreeClient{fakeClient: baseClient}
+	logger := &captureLogger{}
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_prune_nested_relay",
+		RemoteRoot:  "/slack",
+		LocalRoot:   localDir,
+		Logger:      logger,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+	runtimeDir := filepath.Join(localDir, "channels", "C123", "messages", "1780145510_376649", ".relay")
+	staleRuntimePath := filepath.Join(runtimeDir, "outbox", "acked", "mountcmd_stale.json")
+	if err := os.MkdirAll(filepath.Dir(staleRuntimePath), 0o755); err != nil {
+		t.Fatalf("mkdir stale runtime tree: %v", err)
+	}
+	if err := os.WriteFile(staleRuntimePath, []byte(`{"stale":true}`), 0o644); err != nil {
+		t.Fatalf("write stale runtime artifact: %v", err)
+	}
+	staleRemotePath := "/slack/channels/C123/messages/1780145510_376649/.relay/outbox/acked/mountcmd_stale.json"
+	syncer.state.Files[staleRemotePath] = trackedFile{Revision: "rev_stale", Hash: hashString(`{"stale":true}`)}
+
+	if err := syncer.pullRemoteFullTree(context.Background(), nil, bootstrapProgress{}); err != nil {
+		t.Fatalf("pullRemoteFullTree failed: %v", err)
+	}
+
+	if client.entriesReturned >= 40 {
+		t.Fatalf("runtime subtree was enumerated before filtering: returned %d entries across calls %#v", client.entriesReturned, client.calls)
+	}
+	for _, call := range client.calls {
+		if isMountRuntimeRemotePath(call.path) {
+			t.Fatalf("ListTree descended into reserved runtime subtree: %#v", call)
+		}
+		if call.depth != 1 {
+			t.Fatalf("ListTree depth = %d for %s, want 1 so runtime directories can be pruned before descent", call.depth, call.path)
+		}
+	}
+	for _, realPath := range []string{
+		filepath.Join(localDir, "channels", "C123", "messages", "1780145510_376649.json"),
+		filepath.Join(localDir, "channels", "C123", "messages", "1780145510_376649", ".relay-notes", "keep.md"),
+		filepath.Join(localDir, "channels", "C123", "messages", "1780145510_376649", "outbox", "acked", "mountcmd_real.json"),
+	} {
+		if _, err := os.Stat(realPath); err != nil {
+			t.Fatalf("expected real workspace content %s to remain mirrored: %v", realPath, err)
+		}
+	}
+	if _, err := os.Stat(runtimeDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("nested runtime subtree should be absent after pruning, stat err=%v", err)
+	}
+	if _, exists := syncer.state.Files[staleRemotePath]; exists {
+		t.Fatalf("stale nested runtime artifact remained tracked")
+	}
+	for path, calls := range baseClient.readFileCallsByPath {
+		if isMountRuntimeRemotePath(path) && calls > 0 {
+			t.Fatalf("runtime artifact %s was read %d time(s)", path, calls)
+		}
+	}
+	var summary string
+	for _, line := range logger.lines {
+		if strings.Contains(line, "mount full-tree traversal summary") {
+			summary = line
+		}
+	}
+	if !strings.Contains(summary, "runtime_subtrees_pruned=1") {
+		t.Fatalf("expected traversal summary to report one pruned runtime subtree, got %q", summary)
 	}
 }
 
