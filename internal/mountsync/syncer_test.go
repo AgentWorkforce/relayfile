@@ -7477,6 +7477,7 @@ func (c *fakeClient) ListTree(ctx context.Context, workspaceID, path string, dep
 			Type:        "file",
 			Revision:    file.Revision,
 			ContentHash: file.ContentHash,
+			Size:        int64(len(file.Content)),
 		})
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Path < entries[j].Path })
@@ -9880,10 +9881,12 @@ func TestPullRemoteFullTreeSkipsNestedMountRuntimeState(t *testing.T) {
 		},
 	}
 	localDir := t.TempDir()
+	logger := &captureLogger{}
 	syncer, err := NewSyncer(client, SyncerOptions{
 		WorkspaceID: "ws_pull_nested_relay",
 		RemoteRoot:  "/slack",
 		LocalRoot:   localDir,
+		Logger:      logger,
 	})
 	if err != nil {
 		t.Fatalf("new syncer failed: %v", err)
@@ -9916,6 +9919,27 @@ func TestPullRemoteFullTreeSkipsNestedMountRuntimeState(t *testing.T) {
 	}
 	if got := client.readFileCallsByPath["/slack/channels/C123/messages/.relay/state.json"]; got != 0 {
 		t.Fatalf("nested mount runtime path should not be read from remote, got %d reads", got)
+	}
+	var summary string
+	for _, line := range logger.lines {
+		if strings.Contains(line, "mount full-tree traversal summary") {
+			summary = line
+		}
+	}
+	if summary == "" {
+		t.Fatalf("expected a full-tree traversal summary, logs: %#v", logger.lines)
+	}
+	for _, field := range []string{
+		"list_calls=1",
+		"entries_seen=2",
+		"files_seen=2",
+		"directories_seen=0",
+		"runtime_entries_seen=1",
+		"traversal_complete=true",
+	} {
+		if !strings.Contains(summary, field) {
+			t.Fatalf("traversal summary %q missing %q", summary, field)
+		}
 	}
 }
 

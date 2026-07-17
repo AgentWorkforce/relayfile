@@ -4027,7 +4027,22 @@ func isLazyGithubRepoSubtreePath(path string) bool {
 	return false
 }
 
-func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]struct{}, prog bootstrapProgress) error {
+func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]struct{}, prog bootstrapProgress) (returnErr error) {
+	metrics := fullTreeTraversalMetrics{startedAt: time.Now()}
+	defer func() {
+		s.logf(
+			"mount full-tree traversal summary remote_root=%q list_calls=%d entries_seen=%d files_seen=%d directories_seen=%d bytes_seen=%d runtime_entries_seen=%d traversal_complete=%t duration_ms=%d",
+			s.remoteRoot,
+			metrics.listCalls,
+			metrics.entriesSeen,
+			metrics.filesSeen,
+			metrics.directoriesSeen,
+			metrics.bytesSeen,
+			metrics.runtimeEntriesSeen,
+			metrics.traversalComplete,
+			time.Since(metrics.startedAt).Milliseconds(),
+		)
+	}()
 	remotePaths := map[string]struct{}{}
 	// Resumable bootstrap: if a prior bootstrap was interrupted mid-tree,
 	// pick traversal back up from the persisted cursor rather than
@@ -4054,6 +4069,7 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 		s.runFullPullIO(func() {
 			page, err = s.client.ListTree(ctx, s.workspace, s.remoteRoot, 200, cursor)
 		})
+		metrics.listCalls++
 		if err != nil {
 			s.recordCloudFailure(err)
 			return err
@@ -4063,6 +4079,19 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 		filesThisPage := 0
 		readJobs := make([]bootstrapReadJob, 0, len(page.Entries))
 		for _, entry := range page.Entries {
+			metrics.entriesSeen++
+			switch entry.Type {
+			case "file":
+				metrics.filesSeen++
+				if entry.Size > 0 {
+					metrics.bytesSeen += entry.Size
+				}
+			case "dir":
+				metrics.directoriesSeen++
+			}
+			if isMountRuntimeRemotePath(entry.Path) {
+				metrics.runtimeEntriesSeen++
+			}
 			if entry.Type != "file" {
 				continue
 			}
@@ -4183,6 +4212,7 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 			break
 		}
 		if page.NextCursor == nil || *page.NextCursor == "" {
+			metrics.traversalComplete = true
 			break
 		}
 		cursor = *page.NextCursor
@@ -4242,6 +4272,17 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 	}
 	s.markBootstrapComplete()
 	return nil
+}
+
+type fullTreeTraversalMetrics struct {
+	startedAt          time.Time
+	listCalls          int
+	entriesSeen        int
+	filesSeen          int
+	directoriesSeen    int
+	bytesSeen          int64
+	runtimeEntriesSeen int
+	traversalComplete  bool
 }
 
 type bootstrapReadJob struct {
