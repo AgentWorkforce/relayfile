@@ -113,12 +113,18 @@ const (
 	defaultCursorResolutionAttempts   = 3
 	defaultCursorRetryBaseDelay       = 250 * time.Millisecond
 	defaultBootstrapReadWorkers       = 16
-	defaultIncrementalEventPageLimit  = 50
-	defaultRetryAfterMaxDelay         = 60 * time.Second
-	defaultWebSocketReconnectBase     = 1 * time.Second
-	defaultWebSocketReconnectMax      = 60 * time.Second
-	defaultWebSocketReconnectJitter   = 200 * time.Millisecond
-	DefaultWebSocketMaintenanceEvery  = 1 * time.Second
+	// fullTreeTraversalDepth bounds each tree request so the client can see and
+	// prune a reserved .relay directory before the server reaches deep
+	// outbox/acked/mountcmd_* leaves. Depth 3 also covers the common Slack
+	// channels/<id>/messages frontier in one request, avoiding one network
+	// round trip per message directory.
+	fullTreeTraversalDepth           = 3
+	defaultIncrementalEventPageLimit = 50
+	defaultRetryAfterMaxDelay        = 60 * time.Second
+	defaultWebSocketReconnectBase    = 1 * time.Second
+	defaultWebSocketReconnectMax     = 60 * time.Second
+	defaultWebSocketReconnectJitter  = 200 * time.Millisecond
+	DefaultWebSocketMaintenanceEvery = 1 * time.Second
 )
 
 // resolveDurationEnv returns the option value if non-zero, else parses the
@@ -4047,10 +4053,11 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 		)
 	}()
 	remotePaths := map[string]struct{}{}
-	// Traverse one directory level at a time. A deep ListTree request makes the
+	// Traverse in bounded-depth chunks. A depth=200 ListTree request makes the
 	// server enumerate every descendant before the client can reject reserved
-	// runtime paths. The shallow queue sees a nested .relay directory first and
-	// can prune it without ever requesting its state/outbox descendants.
+	// runtime paths. A small fixed depth sees a nested .relay directory before
+	// it reaches deep outbox/acked/mountcmd_* leaves, while advancing through a
+	// representative Slack tree in a few requests rather than one per directory.
 	directories := []string{s.remoteRoot}
 	cursor := ""
 	startedFromEmpty := true
@@ -4067,13 +4074,13 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 			directories = resumedDirectories
 			cursor = strings.TrimSpace(s.state.BootstrapCursor)
 			startedFromEmpty = false
-			s.logf("resuming bootstrap shallow-tree pull at %s from persisted cursor (%d directories pending, %d files already synced)", directories[0], len(directories), s.state.BootstrapFilesSynced)
+			s.logf("resuming bootstrap bounded-tree pull at %s from persisted cursor (%d directories pending, %d files already synced)", directories[0], len(directories), s.state.BootstrapFilesSynced)
 		}
 	} else if !s.state.BootstrapComplete && strings.TrimSpace(s.state.BootstrapCursor) != "" {
 		// v0.10.28 and older persisted a cursor into one depth=200 listing.
-		// That cursor is invalid for a depth=1 directory page, so restart from
+		// That cursor is invalid for a bounded-depth directory page, so restart from
 		// the root. The local-hash fast path avoids re-reading unchanged files.
-		s.logf("discarding legacy deep-tree bootstrap cursor and restarting shallow traversal from %s", s.remoteRoot)
+		s.logf("discarding legacy deep-tree bootstrap cursor and restarting bounded traversal from %s", s.remoteRoot)
 		s.state.BootstrapCursor = ""
 	}
 	queuedDirectories := make(map[string]struct{}, len(directories))
@@ -4099,12 +4106,13 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 	}
 	maxObservedRevision := ""
 	var transientBootstrapAbort bool
+	prunedRuntimeRoots := map[string]struct{}{}
 	for len(directories) > 0 {
 		currentDirectory := directories[0]
 		var page TreeResponse
 		var err error
 		s.runFullPullIO(func() {
-			page, err = s.client.ListTree(ctx, s.workspace, currentDirectory, 1, cursor)
+			page, err = s.client.ListTree(ctx, s.workspace, currentDirectory, fullTreeTraversalDepth, cursor)
 		})
 		metrics.listCalls++
 		if err != nil {
@@ -4127,15 +4135,18 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 			case "dir":
 				metrics.directoriesSeen++
 			}
-			if isMountRuntimeRemotePath(remotePath) {
+			runtimeRoot := mountRuntimeRemoteRoot(remotePath)
+			if runtimeRoot != "" {
 				metrics.runtimeEntriesSeen++
 			}
 			if !isUnderRemoteRoot(s.remoteRoot, remotePath) {
 				continue
 			}
-			if s.skipMountRuntimeRemotePath(remotePath, conflicted) {
-				if entry.Type == "dir" {
+			if runtimeRoot != "" {
+				if _, pruned := prunedRuntimeRoots[runtimeRoot]; !pruned {
+					prunedRuntimeRoots[runtimeRoot] = struct{}{}
 					metrics.runtimeSubtreesPruned++
+					s.skipMountRuntimeRemotePath(runtimeRoot, conflicted)
 				}
 				continue
 			}
@@ -4144,7 +4155,10 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 				continue
 			}
 			if entry.Type == "dir" {
-				if _, exists := queuedDirectories[remotePath]; !exists {
+				if remoteDescendantDepth(currentDirectory, remotePath) >= fullTreeTraversalDepth {
+					if _, exists := queuedDirectories[remotePath]; exists {
+						continue
+					}
 					queuedDirectories[remotePath] = struct{}{}
 					directories = append(directories, remotePath)
 				}
@@ -5539,8 +5553,8 @@ func (s *Syncer) applyRemoteFile(remotePath string, file RemoteFile, conflicted 
 }
 
 func (s *Syncer) skipMountRuntimeRemotePath(remotePath string, conflicted map[string]struct{}) bool {
-	remotePath = normalizeRemotePath(remotePath)
-	if !isMountRuntimeRemotePath(remotePath) {
+	remotePath = mountRuntimeRemoteRoot(remotePath)
+	if remotePath == "" {
 		return false
 	}
 	s.logf("skipping mount runtime path surfaced as workspace content: %s", remotePath)
@@ -5586,8 +5600,9 @@ func (s *Syncer) isActiveMountRuntimeLocalPath(localPath string) bool {
 	if localPath == stateFile {
 		return true
 	}
+	stateTempPrefix := strings.TrimSuffix(atomicTempPattern(stateFile), "*")
 	return filepath.Dir(localPath) == filepath.Dir(stateFile) &&
-		strings.HasPrefix(filepath.Base(localPath), "."+filepath.Base(stateFile)+".tmp-")
+		strings.HasPrefix(filepath.Base(localPath), stateTempPrefix)
 }
 
 func (s *Syncer) applyLocalPermissions(localPath string, canWrite bool) error {
@@ -6223,25 +6238,34 @@ func normalizeScopes(scopes []string) []string {
 }
 
 func isMountRuntimeRemotePath(path string) bool {
-	return isMountRuntimeRelativePath(strings.TrimPrefix(normalizeRemotePath(path), "/"))
+	return mountRuntimeRemoteRoot(path) != ""
 }
 
 func isMountRuntimeRelativePath(path string) bool {
-	normalized := filepath.ToSlash(strings.TrimSpace(path))
+	return mountRuntimeRemoteRoot("/"+strings.TrimPrefix(filepath.ToSlash(strings.TrimSpace(path)), "/")) != ""
+}
+
+// mountRuntimeRemoteRoot returns the reserved runtime subtree containing path.
+// Canonicalizing descendants to their first reserved segment lets a bounded
+// tree page clean/log one .relay root without treating its state/outbox
+// children as separate subtrees.
+func mountRuntimeRemoteRoot(path string) string {
+	normalized := strings.TrimPrefix(filepath.ToSlash(normalizeRemotePath(path)), "/")
 	if normalized == "" || normalized == "." {
-		return false
+		return ""
 	}
-	for _, segment := range strings.Split(normalized, "/") {
+	segments := strings.Split(normalized, "/")
+	for index, segment := range segments {
 		if segment == "" || segment == "." {
 			continue
 		}
 		if segment == ".relay" ||
 			segment == ".relayfile-mount-state.json" ||
 			strings.HasPrefix(segment, ".relayfile-mount-state.json.tmp-") {
-			return true
+			return normalizeRemotePath("/" + strings.Join(segments[:index+1], "/"))
 		}
 	}
-	return false
+	return ""
 }
 
 func (s *Syncer) logMountControlPathSkipped(relativePath string) {
@@ -6849,6 +6873,20 @@ func isUnderRemoteRoot(remoteRoot, remotePath string) bool {
 		return true
 	}
 	return remotePath == remoteRoot || strings.HasPrefix(remotePath, remoteRoot+"/")
+}
+
+func remoteDescendantDepth(remoteRoot, remotePath string) int {
+	remoteRoot = normalizeRemotePath(remoteRoot)
+	remotePath = normalizeRemotePath(remotePath)
+	if remotePath == remoteRoot || !isUnderRemoteRoot(remoteRoot, remotePath) {
+		return 0
+	}
+	relative := strings.TrimPrefix(remotePath, remoteRoot)
+	relative = strings.TrimPrefix(relative, "/")
+	if relative == "" {
+		return 0
+	}
+	return len(strings.Split(relative, "/"))
 }
 
 func remoteToLocalPath(localRoot, remoteRoot, remotePath string) (string, error) {
