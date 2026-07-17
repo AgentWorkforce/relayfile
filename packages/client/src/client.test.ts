@@ -1,5 +1,7 @@
 import { type ChildProcess, spawn } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { EventEmitter } from 'node:events';
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import type { ClientRequest, IncomingMessage, RequestOptions as NodeRequestOptions } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -55,10 +57,36 @@ describe('RelayfileControlPlaneClient lifecycle', () => {
     spawnDaemon(): { getError(): Error | undefined };
     installedBinaryVersion(): Promise<string | undefined>;
     stopStaleDaemon(): Promise<void>;
+    socketOwnerPids(): Promise<number[]>;
+    linuxSocketOwnerPids(procRoot?: string): number[];
+    runCommand(
+      command: string,
+      args: string[],
+      timeoutMs: number
+    ): Promise<{ stdout: string; stderr: string; code: number | null } | undefined>;
+    createHTTPRequest(
+      options: NodeRequestOptions,
+      onResponse: (response: IncomingMessage) => void
+    ): ClientRequest;
   };
 
   const lifecycleInternals = (client: RelayfileControlPlaneClient) =>
     client as unknown as LifecycleInternals;
+
+  const fakeRequest = (onEnd: () => void): ClientRequest => {
+    const request = Object.assign(new EventEmitter(), {
+      write: () => true,
+      end: () => {
+        queueMicrotask(onEnd);
+        return request;
+      },
+      destroy: (error?: Error) => {
+        if (error) queueMicrotask(() => request.emit('error', error));
+        return request;
+      },
+    });
+    return request as unknown as ClientRequest;
+  };
 
   it('require-daemon mode (autoStart:false) fails fast with an actionable error', async () => {
     const client = new RelayfileControlPlaneClient({
@@ -131,6 +159,42 @@ describe('RelayfileControlPlaneClient lifecycle', () => {
       freshConnection: true,
     });
   });
+
+  it.each(['ECONNRESET', 'EPIPE'])('marks request %s errors as startup-transient', async (code) => {
+    const client = new RelayfileControlPlaneClient({ socketPath: '/nope.sock', autoStart: false });
+    let request!: ClientRequest;
+    request = fakeRequest(() => {
+      request.emit('error', Object.assign(new Error(`${code} request`), { code }));
+    });
+    vi.spyOn(lifecycleInternals(client), 'createHTTPRequest').mockReturnValue(request);
+
+    await expect(client.hello()).rejects.toMatchObject({
+      code: 'DAEMON_UNAVAILABLE',
+      transient: true,
+    });
+  });
+
+  it.each(['ECONNRESET', 'EPIPE'])(
+    'marks response-stream %s errors as startup-transient',
+    async (code) => {
+      const client = new RelayfileControlPlaneClient({ socketPath: '/nope.sock', autoStart: false });
+      vi.spyOn(lifecycleInternals(client), 'createHTTPRequest').mockImplementation(
+        (_options, onResponse) =>
+          fakeRequest(() => {
+            const response = Object.assign(new EventEmitter(), { statusCode: 200 });
+            onResponse(response as unknown as IncomingMessage);
+            queueMicrotask(() =>
+              response.emit('error', Object.assign(new Error(`${code} response`), { code }))
+            );
+          })
+      );
+
+      await expect(client.hello()).rejects.toMatchObject({
+        code: 'DAEMON_UNAVAILABLE',
+        transient: true,
+      });
+    }
+  );
 
   it('does not retry a version rejection returned while an auto-started daemon connects', async () => {
     const client = new RelayfileControlPlaneClient({
@@ -234,6 +298,55 @@ describe('RelayfileControlPlaneClient lifecycle', () => {
     expect(stopStaleDaemon).toHaveBeenCalledTimes(1);
     expect(spawnDaemon).toHaveBeenCalledTimes(1);
     expect(hello).toHaveBeenCalledTimes(2);
+  });
+
+  it('finds an exact Linux socket owner through procfs without lsof', () => {
+    const procRoot = mkdtempSync(join(tmpdir(), 'relayfile-proc-'));
+    const socketPath = join(procRoot, 'control-plane.sock');
+    const ownerPid = 424242;
+    try {
+      mkdirSync(join(procRoot, 'net'), { recursive: true });
+      mkdirSync(join(procRoot, String(ownerPid), 'fd'), { recursive: true });
+      writeFileSync(
+        join(procRoot, 'net', 'unix'),
+        `Num RefCount Protocol Flags Type St Inode Path\n` +
+          `0000000000000000: 00000002 00000000 00010000 0001 01 998877 ${socketPath}\n`
+      );
+      symlinkSync('socket:[998877]', join(procRoot, String(ownerPid), 'fd', '7'));
+
+      const client = new RelayfileControlPlaneClient({ socketPath, autoStart: true });
+
+      expect(lifecycleInternals(client).linuxSocketOwnerPids(procRoot)).toEqual([ownerPid]);
+    } finally {
+      rmSync(procRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('blames an unavailable lsof when the fallback cannot identify the stale daemon', async () => {
+    const client = new RelayfileControlPlaneClient({
+      socketPath: '/nope.sock',
+      autoStart: true,
+      startTimeoutMs: 1000,
+    });
+    vi.spyOn(lifecycleInternals(client), 'installedBinaryVersion').mockResolvedValue('0.10.26');
+    vi.spyOn(
+      client as unknown as { runCommand: () => Promise<undefined> },
+      'runCommand'
+    ).mockResolvedValue(undefined);
+    vi.spyOn(client, 'hello').mockResolvedValue({
+      daemonVersion: '0.10.19',
+      apiVersion: 1,
+      supportedApiVersions: [1],
+    });
+
+    const error = await client.ensureReady().catch((err: unknown) => err);
+
+    expect(error).toMatchObject({ code: 'VERSION_INCOMPATIBLE' });
+    expect(error).toHaveProperty('message', expect.stringContaining('could not run `lsof`'));
+    expect(error).toHaveProperty(
+      'message',
+      expect.stringContaining('Automatic stale-daemon replacement failed')
+    );
   });
 
   it('auto-start with a missing binary fails fast with DAEMON_UNAVAILABLE (no crash)', async () => {

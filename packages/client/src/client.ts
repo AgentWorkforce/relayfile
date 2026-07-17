@@ -1,6 +1,11 @@
 import { spawn } from 'node:child_process';
-import { existsSync } from 'node:fs';
-import { request } from 'node:http';
+import { existsSync, readFileSync, readdirSync, readlinkSync } from 'node:fs';
+import {
+  request,
+  type ClientRequest,
+  type IncomingMessage,
+  type RequestOptions as NodeRequestOptions,
+} from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -146,7 +151,15 @@ interface RequestOptions {
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-const TRANSIENT_CONNECTION_CODES = new Set(['ENOENT', 'ECONNREFUSED', 'ETIMEDOUT']);
+const TRANSIENT_CONNECTION_CODES = new Set([
+  'ENOENT',
+  'ECONNREFUSED',
+  'ETIMEDOUT',
+  // A daemon that binds the socket before it is ready to serve can accept and
+  // then drop the connection mid-request; both surface during startup polling.
+  'ECONNRESET',
+  'EPIPE',
+]);
 
 function isTransientConnectionCode(code: string | undefined): boolean {
   return code != null && TRANSIENT_CONNECTION_CODES.has(code);
@@ -188,6 +201,13 @@ export class RelayfileControlPlaneClient {
     this.requestTimeoutMs = options.requestTimeoutMs ?? 10000;
   }
 
+  private createHTTPRequest(
+    options: NodeRequestOptions,
+    onResponse: (response: IncomingMessage) => void
+  ): ClientRequest {
+    return request(options, onResponse);
+  }
+
   /** Low-level request over the unix socket. Throws RelayfileControlPlaneError. */
   private rawRequest<T>(opts: RequestOptions): Promise<T> {
     const query = opts.query
@@ -212,7 +232,7 @@ export class RelayfileControlPlaneClient {
         resolve(value);
       };
 
-      const req = request(
+      const req = this.createHTTPRequest(
         {
           socketPath: this.socketPath,
           method: opts.method,
@@ -445,15 +465,7 @@ export class RelayfileControlPlaneClient {
   }
 
   private async stopStaleDaemon(): Promise<void> {
-    const result = await this.runCommand('lsof', ['-t', '--', this.socketPath], 1000);
-    const pids = [
-      ...new Set(
-        (result?.code === 0 ? result.stdout : '')
-          .split(/\s+/)
-          .map((value) => Number.parseInt(value, 10))
-          .filter((pid) => Number.isSafeInteger(pid) && pid > 1 && pid !== process.pid)
-      ),
-    ];
+    const pids = await this.socketOwnerPids();
     if (pids.length !== 1) {
       throw new Error(
         pids.length === 0
@@ -481,6 +493,92 @@ export class RelayfileControlPlaneClient {
         `stale relayfile control-plane pid ${pids[0]} did not release ${this.socketPath} within ${this.startTimeoutMs}ms`
       );
     }
+  }
+
+  private async socketOwnerPids(): Promise<number[]> {
+    if (process.platform === 'linux') {
+      const procPids = this.linuxSocketOwnerPids();
+      if (procPids.length > 0) return procPids;
+    }
+    if (process.platform === 'win32') {
+      throw new Error(
+        'automatic stale-daemon replacement is not supported on Windows; stop the running relayfile control-plane manually'
+      );
+    }
+
+    const result = await this.runCommand('lsof', ['-t', '--', this.socketPath], 1000);
+    if (!result) {
+      throw new Error(
+        `could not run \`lsof\` to identify the process serving ${this.socketPath} ` +
+          `(it is not installed, not on PATH, or did not exit within 1000ms); ` +
+          `install lsof or stop the stale relayfile control-plane manually`
+      );
+    }
+    if (result.code !== 0) {
+      throw new Error(
+        `lsof could not identify the process serving ${this.socketPath} (exit ${result.code}${
+          result.stderr.trim() ? `: ${result.stderr.trim()}` : ''
+        })`
+      );
+    }
+    return [
+      ...new Set(
+        result.stdout
+          .split(/\s+/)
+          .map((value) => Number.parseInt(value, 10))
+          .filter((pid) => Number.isSafeInteger(pid) && pid > 1 && pid !== process.pid)
+      ),
+    ];
+  }
+
+  /** Resolve a Unix-socket owner without external tools on standard Linux hosts. */
+  private linuxSocketOwnerPids(procRoot = '/proc'): number[] {
+    let socketInodes: Set<string>;
+    try {
+      socketInodes = new Set(
+        readFileSync(join(procRoot, 'net', 'unix'), 'utf8')
+          .split('\n')
+          .slice(1)
+          .map((line) => line.trim().split(/\s+/))
+          .filter((fields) => fields.length >= 8 && fields.slice(7).join(' ') === this.socketPath)
+          .map((fields) => fields[6]!)
+      );
+    } catch {
+      return [];
+    }
+    if (socketInodes.size === 0) return [];
+
+    const pids = new Set<number>();
+    let processes: string[];
+    try {
+      processes = readdirSync(procRoot).filter((name) => /^\d+$/.test(name));
+    } catch {
+      return [];
+    }
+    for (const processName of processes) {
+      const pid = Number.parseInt(processName, 10);
+      if (pid <= 1 || pid === process.pid) continue;
+      const fdDir = join(procRoot, processName, 'fd');
+      let descriptors: string[];
+      try {
+        descriptors = readdirSync(fdDir);
+      } catch {
+        continue;
+      }
+      for (const descriptor of descriptors) {
+        try {
+          const target = readlinkSync(join(fdDir, descriptor));
+          const inode = target.match(/^socket:\[(\d+)\]$/)?.[1];
+          if (inode && socketInodes.has(inode)) {
+            pids.add(pid);
+            break;
+          }
+        } catch {
+          // File descriptors may disappear while /proc is scanned.
+        }
+      }
+    }
+    return [...pids];
   }
 
   private versionMismatchError(

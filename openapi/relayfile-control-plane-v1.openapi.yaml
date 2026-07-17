@@ -18,9 +18,9 @@ paths:
       description: |
         Unversioned discovery endpoint. The daemon always returns its current
         and supported API versions; any version header or query is ignored.
-      parameters:
-        - $ref: "#/components/parameters/ApiVersionHeader"
-        - $ref: "#/components/parameters/ApiVersionQuery"
+        No version parameters are declared here on purpose: discovery must stay
+        callable by clients of any API version, including versions this contract
+        does not know about.
       responses:
         "200":
           description: Daemon version and supported API versions
@@ -301,13 +301,6 @@ components:
         type: integer
         format: uint32
         const: 3
-    ApiVersionQuery:
-      name: apiVersion
-      in: query
-      required: false
-      schema:
-        type: integer
-        format: uint32
   responses:
     VersionIncompatible:
       description: Client and daemon API versions are incompatible
