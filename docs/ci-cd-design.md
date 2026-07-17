@@ -1,5 +1,10 @@
 # RelayFile CI/CD Pipeline Design
 
+> **Design intent, not current state.** Some of this has drifted from what ships
+> — publishing lives in `publish.yml` (not `publish-npm.yml`) and authenticates
+> with OIDC trusted publishing rather than the npm token described below. For
+> the steps to actually cut a release, see [`releasing.md`](./releasing.md).
+
 ## Overview
 
 Four GitHub Actions workflows covering continuous integration, SDK publishing, binary releases, and Cloudflare Workers deployment. Designed to match the proven patterns from the relaycast project.
