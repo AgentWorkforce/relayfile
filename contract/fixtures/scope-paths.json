@@ -19,6 +19,12 @@
     { "name": "prefix-glob-valid", "scope_path": "/github/repos/acme-*", "expect": { "valid": true, "mounts_at": "/github/repos" } },
     { "name": "top-level-prefix-glob-mounts-at-root", "scope_path": "/github*", "expect": { "valid": true, "mounts_at": "/" } },
     {
+      "name": "colon-in-segment-valid",
+      "scope_path": "/a:b/**",
+      "description": "Colons are ordinary path bytes; only the first three colons of the scope string delimit segments (§4).",
+      "expect": { "valid": true, "mounts_at": "/a:b" }
+    },
+    {
       "name": "mid-path-segment-globs-invalid",
       "scope_path": "/github/repos/*/*/issues/**",
       "description": "THE production divergence (parent spec §2.1): cloud emits this scope; hosted TS matches it, OSS Go does not. Invalid under the contract — a token carrying only this scope authorizes nothing.",
