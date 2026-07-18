@@ -256,6 +256,30 @@
       "expect": { "auth_matches": true }
     },
     {
+      "name": "colon-in-scope-path-is-preserved",
+      "description": "Scope splitting is SplitN(scope, \":\", 4): the path segment keeps any further colons (§4). Pins the truncating-split divergence found in hosted TS (String.split with a limit drops the remainder).",
+      "scopes": ["relayfile:fs:read:/a:b/**"],
+      "required": "fs:read",
+      "file": "/a:b/x.json",
+      "expect": { "auth_matches": true }
+    },
+    {
+      "name": "colon-in-scope-path-does-not-truncate-to-prefix",
+      "description": "A truncating split turns /a:b/** into the exact path /a; this case fails such an implementation.",
+      "scopes": ["relayfile:fs:read:/a:b/**"],
+      "required": "fs:read",
+      "file": "/a",
+      "expect": { "auth_matches": false }
+    },
+    {
+      "name": "empty-fourth-segment-is-a-narrow-grant-matching-nothing",
+      "description": "relayfile:fs:read: (trailing colon, empty scope path) is an invalid narrow grant: it matches no file and, being narrow, still suppresses nothing-else semantics — it must NOT be read as the 3-segment full-namespace form. Pins the hosted-TS empty-path-becomes-* divergence.",
+      "scopes": ["relayfile:fs:read:"],
+      "required": "fs:read",
+      "file": "/src/app.ts",
+      "expect": { "auth_matches": false }
+    },
+    {
       "name": "two-segment-scope-is-opaque-literal-not-grant",
       "description": "Scopes with <3 segments never act as path grants; they only match as exact literals of the requirement string.",
       "scopes": ["fs:write"],
