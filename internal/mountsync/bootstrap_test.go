@@ -435,6 +435,34 @@ func TestBootstrapStallCycleGuardPersistsAndFailsHard(t *testing.T) {
 	}
 }
 
+func TestBootstrapStallCycleGuardIgnoresCanceledContext(t *testing.T) {
+	s := newBootstrapSyncer(t, newBootstrapClient(1, 1), t.TempDir(), SyncerOptions{
+		RootCtx:              context.Background(),
+		BootstrapStallCycles: 2,
+	})
+	s.state.BootstrapCursor = "resume-cursor"
+	s.state.BootstrapStallCycles = 1
+
+	wrappedCanceled := fmt.Errorf("mount shutting down: %w", context.Canceled)
+	if err := s.recordBootstrapCycle("resume-cursor", nil, wrappedCanceled); err != nil {
+		t.Fatalf("canceled context must not trip the stall guard: %v", err)
+	}
+	if got := s.state.BootstrapStallCycles; got != 1 {
+		t.Fatalf("canceled context changed stall count to %d, want 1", got)
+	}
+
+	// DeadlineExceeded is a failed retry at the same checkpoint, so it still
+	// consumes the remaining attempt and produces the typed hard stop.
+	err := s.recordBootstrapCycle("resume-cursor", nil, context.DeadlineExceeded)
+	var stalled *BootstrapStalledError
+	if !errors.As(err, &stalled) {
+		t.Fatalf("deadline exceeded must count toward the stall limit, got %v", err)
+	}
+	if stalled.Cycles != 2 || stalled.Limit != 2 {
+		t.Fatalf("BootstrapStalledError = %#v, want cycles=2 limit=2", stalled)
+	}
+}
+
 // TestBootstrapStallCycleGuardResetsOnCheckpointAdvanceAndCompletion proves
 // that the counter reflects lack of traversal progress, not merely errors.
 func TestBootstrapStallCycleGuardResetsOnCheckpointAdvanceAndCompletion(t *testing.T) {

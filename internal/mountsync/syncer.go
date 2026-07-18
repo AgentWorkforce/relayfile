@@ -4584,6 +4584,13 @@ func (s *Syncer) recordBootstrapCycle(previousCursor string, previousDirectories
 		s.state.BootstrapStallCycles = 0
 		return nil
 	}
+	// Root-context cancellation means this runner is intentionally stopping,
+	// not that the remote checkpoint has made a retryable failed attempt. Keep
+	// the persisted count intact so shutdown/restart does not consume a stall
+	// budget. A deadline remains a real failed attempt and continues below.
+	if errors.Is(cause, context.Canceled) {
+		return nil
+	}
 	s.state.BootstrapStallCycles++
 	limit := s.bootstrapStallCycles
 	if limit <= 0 {
