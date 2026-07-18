@@ -7477,6 +7477,7 @@ func (c *fakeClient) ListTree(ctx context.Context, workspaceID, path string, dep
 			Type:        "file",
 			Revision:    file.Revision,
 			ContentHash: file.ContentHash,
+			Size:        int64(len(file.Content)),
 		})
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Path < entries[j].Path })
@@ -7485,6 +7486,99 @@ func (c *fakeClient) ListTree(ctx context.Context, workspaceID, path string, dep
 		Entries:    entries,
 		NextCursor: nil,
 	}, nil
+}
+
+type hierarchicalTreeCall struct {
+	path    string
+	depth   int
+	entries int
+}
+
+// hierarchicalTreeClient mirrors the production tree contract: a request
+// returns files and synthesized directories only through the requested depth.
+// It lets traversal tests distinguish pruning before descent from filtering a
+// flat depth=200 response after the server has already enumerated every leaf.
+type hierarchicalTreeClient struct {
+	*fakeClient
+	calls           []hierarchicalTreeCall
+	entriesReturned int
+	returnedPaths   []string
+	listDelay       time.Duration
+	failAtCall      int
+	failErr         error
+}
+
+func (c *hierarchicalTreeClient) ListTree(ctx context.Context, _ string, path string, depth int, cursor string) (TreeResponse, error) {
+	base := normalizeRemotePath(path)
+	if depth <= 0 {
+		depth = 1
+	}
+	if c.listDelay > 0 {
+		select {
+		case <-time.After(c.listDelay):
+		case <-ctx.Done():
+			return TreeResponse{}, ctx.Err()
+		}
+	}
+	callNumber := len(c.calls) + 1
+	if c.failAtCall == callNumber {
+		c.calls = append(c.calls, hierarchicalTreeCall{path: base, depth: depth})
+		c.failAtCall = 0
+		if c.failErr != nil {
+			return TreeResponse{}, c.failErr
+		}
+		return TreeResponse{}, errors.New("synthetic ListTree failure")
+	}
+	entriesByPath := map[string]TreeEntry{}
+	for remotePath, file := range c.files {
+		remotePath = normalizeRemotePath(remotePath)
+		if !isUnderRemoteRoot(base, remotePath) || remotePath == base {
+			continue
+		}
+		relative := strings.TrimPrefix(strings.TrimPrefix(remotePath, base), "/")
+		parts := strings.Split(relative, "/")
+		levels := depth
+		if len(parts) < levels {
+			levels = len(parts)
+		}
+		for level := 1; level <= levels; level++ {
+			entryPath := normalizeRemotePath(strings.TrimSuffix(base, "/") + "/" + strings.Join(parts[:level], "/"))
+			if level == len(parts) {
+				entriesByPath[entryPath] = TreeEntry{
+					Path:        entryPath,
+					Type:        "file",
+					Revision:    file.Revision,
+					ContentHash: file.ContentHash,
+					Size:        int64(len(file.Content)),
+				}
+				continue
+			}
+			if _, exists := entriesByPath[entryPath]; !exists {
+				entriesByPath[entryPath] = TreeEntry{Path: entryPath, Type: "dir", Revision: "dir"}
+			}
+		}
+	}
+	entries := make([]TreeEntry, 0, len(entriesByPath))
+	for _, entry := range entriesByPath {
+		entries = append(entries, entry)
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Path < entries[j].Path })
+	if cursor != "" {
+		start := len(entries)
+		for index, entry := range entries {
+			if entry.Path == cursor {
+				start = index + 1
+				break
+			}
+		}
+		entries = entries[start:]
+	}
+	c.calls = append(c.calls, hierarchicalTreeCall{path: base, depth: depth, entries: len(entries)})
+	c.entriesReturned += len(entries)
+	for _, entry := range entries {
+		c.returnedPaths = append(c.returnedPaths, entry.Path)
+	}
+	return TreeResponse{Path: base, Entries: entries}, nil
 }
 
 func (c *fakeClient) LatestEventID(ctx context.Context, workspaceID, provider string) (string, error) {
@@ -9749,6 +9843,9 @@ func TestLoadStateResetsBootstrapCompleteOnlyOnWriteOnlyToMirrorSyncMode(t *test
 				t.Fatalf("BootstrapComplete = %v, want %v", got, tc.wantBootstrapComplete)
 			}
 			if tc.wantCleared {
+				if len(syncer.state.BootstrapDirectories) != 0 {
+					t.Fatalf("BootstrapDirectories = %#v, want empty", syncer.state.BootstrapDirectories)
+				}
 				if syncer.state.BootstrapCursor != "" {
 					t.Fatalf("BootstrapCursor = %q, want empty", syncer.state.BootstrapCursor)
 				}
@@ -9880,10 +9977,12 @@ func TestPullRemoteFullTreeSkipsNestedMountRuntimeState(t *testing.T) {
 		},
 	}
 	localDir := t.TempDir()
+	logger := &captureLogger{}
 	syncer, err := NewSyncer(client, SyncerOptions{
 		WorkspaceID: "ws_pull_nested_relay",
 		RemoteRoot:  "/slack",
 		LocalRoot:   localDir,
+		Logger:      logger,
 	})
 	if err != nil {
 		t.Fatalf("new syncer failed: %v", err)
@@ -9916,6 +10015,269 @@ func TestPullRemoteFullTreeSkipsNestedMountRuntimeState(t *testing.T) {
 	}
 	if got := client.readFileCallsByPath["/slack/channels/C123/messages/.relay/state.json"]; got != 0 {
 		t.Fatalf("nested mount runtime path should not be read from remote, got %d reads", got)
+	}
+	var summary string
+	for _, line := range logger.lines {
+		if strings.Contains(line, "mount full-tree traversal summary") {
+			summary = line
+		}
+	}
+	if summary == "" {
+		t.Fatalf("expected a full-tree traversal summary, logs: %#v", logger.lines)
+	}
+	for _, field := range []string{
+		"list_calls=1",
+		"entries_seen=2",
+		"files_seen=2",
+		"directories_seen=0",
+		"runtime_entries_seen=1",
+		"traversal_complete=true",
+	} {
+		if !strings.Contains(summary, field) {
+			t.Fatalf("traversal summary %q missing %q", summary, field)
+		}
+	}
+}
+
+func TestIsMountRuntimeRelativePathExcludesOnlyReservedRuntimeArtifacts(t *testing.T) {
+	tests := []struct {
+		path string
+		want bool
+	}{
+		{path: ".relay", want: true},
+		{path: "slack/channels/C123/messages/1/.relay/state.json", want: true},
+		{path: "slack/channels/C123/messages/1/.relay/outbox/acked/mountcmd_1.json", want: true},
+		{path: "slack/channels/C123/messages/1/.relayfile-mount-state.json", want: true},
+		{path: "slack/channels/C123/messages/1/relay/state.json", want: false},
+		{path: "slack/channels/C123/messages/1/.relay-notes/state.json", want: false},
+		{path: "slack/channels/C123/messages/1/outbox/acked/mountcmd_1.json", want: false},
+		{path: "slack/channels/C123/messages/1/notes/mountcmd_1.json", want: false},
+		{path: "slack/channels/C123/messages/1/.relayfile-mount-state.json.backup", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			if got := isMountRuntimeRelativePath(tt.path); got != tt.want {
+				t.Fatalf("isMountRuntimeRelativePath(%q) = %t, want %t", tt.path, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSkipMountRuntimeRemotePathPreservesActiveRootRuntime(t *testing.T) {
+	localDir := t.TempDir()
+	activeState := filepath.Join(localDir, ".relay", "state.json")
+	activeOutbox := filepath.Join(localDir, ".relay", "outbox", "pending", "mountcmd_live.json")
+	activeLegacyState := filepath.Join(localDir, LegacyMountStateFileName)
+	activeLegacyTemp := filepath.Join(localDir, ".relayfile-mount-state.json.tmp-live")
+	if err := os.MkdirAll(filepath.Dir(activeOutbox), 0o755); err != nil {
+		t.Fatalf("mkdir active runtime tree: %v", err)
+	}
+	if err := os.WriteFile(activeState, []byte(`{"ready":true}`), 0o644); err != nil {
+		t.Fatalf("write active state: %v", err)
+	}
+	if err := os.WriteFile(activeOutbox, []byte(`{"pending":true}`), 0o644); err != nil {
+		t.Fatalf("write active outbox: %v", err)
+	}
+	if err := os.WriteFile(activeLegacyState, []byte(`{"ready":true}`), 0o644); err != nil {
+		t.Fatalf("write active legacy state: %v", err)
+	}
+	if err := os.WriteFile(activeLegacyTemp, []byte(`{"pending":true}`), 0o644); err != nil {
+		t.Fatalf("write active legacy state temp: %v", err)
+	}
+	syncer, err := NewSyncer(&fakeClient{files: map[string]RemoteFile{}}, SyncerOptions{
+		WorkspaceID: "ws_active_runtime",
+		RemoteRoot:  "/",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+	for _, remoteRuntimePath := range []string{
+		"/.relay",
+		"/.relayfile-mount-state.json",
+		"/.relayfile-mount-state.json.tmp-live",
+	} {
+		if !syncer.skipMountRuntimeRemotePath(remoteRuntimePath, nil) {
+			t.Fatalf("expected remote %s to be classified as runtime", remoteRuntimePath)
+		}
+	}
+	for _, activePath := range []string{activeState, activeOutbox, activeLegacyState, activeLegacyTemp} {
+		if _, err := os.Stat(activePath); err != nil {
+			t.Fatalf("active mount runtime %s was removed: %v", activePath, err)
+		}
+	}
+}
+
+func TestPullRemoteFullTreePrunesNestedMountRuntimeBeforeDescendantEnumeration(t *testing.T) {
+	files := map[string]RemoteFile{
+		"/slack/channels/C123/messages/1780145510_376649.json": {
+			Path: "/slack/channels/C123/messages/1780145510_376649.json", Revision: "rev_msg", Content: `{"text":"hello"}`,
+		},
+		"/slack/channels/C123/messages/1780145510_376649/.relay-notes/keep.md": {
+			Path: "/slack/channels/C123/messages/1780145510_376649/.relay-notes/keep.md", Revision: "rev_notes", Content: "real notes",
+		},
+		"/slack/channels/C123/messages/1780145510_376649/outbox/acked/mountcmd_real.json": {
+			Path: "/slack/channels/C123/messages/1780145510_376649/outbox/acked/mountcmd_real.json", Revision: "rev_real_cmd", Content: `{"real":true}`,
+		},
+		"/slack/channels/C123/messages/1780145510_376649/.relayfile-mount-state.json.backup": {
+			Path: "/slack/channels/C123/messages/1780145510_376649/.relayfile-mount-state.json.backup", Revision: "rev_real_backup", Content: `{"backup":true}`,
+		},
+	}
+	for message := 0; message < 200; message++ {
+		messageID := fmt.Sprintf("1780145510_%06d", message)
+		statePath := fmt.Sprintf("/slack/channels/C123/messages/%s/.relay/state.json", messageID)
+		files[statePath] = RemoteFile{Path: statePath, Revision: fmt.Sprintf("rev_runtime_state_%03d", message), Content: `{"pendingWriteback":2}`}
+		for artifact := 0; artifact < 2; artifact++ {
+			path := fmt.Sprintf("/slack/channels/C123/messages/%s/.relay/outbox/acked/mountcmd_%03d.json", messageID, artifact)
+			files[path] = RemoteFile{Path: path, Revision: fmt.Sprintf("rev_runtime_%03d_%d", message, artifact), Content: `{"runtime":true}`}
+		}
+	}
+	baseClient := &fakeClient{files: files}
+	client := &hierarchicalTreeClient{fakeClient: baseClient, listDelay: 5 * time.Millisecond}
+	logger := &captureLogger{}
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_prune_nested_relay",
+		RemoteRoot:  "/slack",
+		LocalRoot:   localDir,
+		Logger:      logger,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+	runtimeDir := filepath.Join(localDir, "channels", "C123", "messages", "1780145510_000000", ".relay")
+	staleRuntimePath := filepath.Join(runtimeDir, "outbox", "acked", "mountcmd_stale.json")
+	if err := os.MkdirAll(filepath.Dir(staleRuntimePath), 0o755); err != nil {
+		t.Fatalf("mkdir stale runtime tree: %v", err)
+	}
+	if err := os.WriteFile(staleRuntimePath, []byte(`{"stale":true}`), 0o644); err != nil {
+		t.Fatalf("write stale runtime artifact: %v", err)
+	}
+	staleRemotePath := "/slack/channels/C123/messages/1780145510_000000/.relay/outbox/acked/mountcmd_stale.json"
+	syncer.state.Files[staleRemotePath] = trackedFile{Revision: "rev_stale", Hash: hashString(`{"stale":true}`)}
+
+	startedAt := time.Now()
+	if err := syncer.pullRemoteFullTree(context.Background(), nil, bootstrapProgress{}); err != nil {
+		t.Fatalf("pullRemoteFullTree failed: %v", err)
+	}
+	elapsed := time.Since(startedAt)
+
+	if len(client.calls) != 3 {
+		t.Fatalf("representative Slack traversal used %d ListTree calls, want exactly 3: %#v", len(client.calls), client.calls)
+	}
+	if elapsed >= 500*time.Millisecond {
+		t.Fatalf("representative Slack traversal exceeded bounded latency: %s across %d delayed calls", elapsed, len(client.calls))
+	}
+	if client.entriesReturned >= 1000 {
+		t.Fatalf("runtime subtree traversal was not bounded: returned %d entries across calls %#v", client.entriesReturned, client.calls)
+	}
+	for _, call := range client.calls {
+		if isMountRuntimeRemotePath(call.path) {
+			t.Fatalf("ListTree descended into reserved runtime subtree: %#v", call)
+		}
+		if call.depth != fullTreeTraversalDepth {
+			t.Fatalf("ListTree depth = %d for %s, want bounded depth %d", call.depth, call.path, fullTreeTraversalDepth)
+		}
+	}
+	for _, returnedPath := range client.returnedPaths {
+		if strings.Contains(filepath.Base(returnedPath), "mountcmd_") && isMountRuntimeRemotePath(returnedPath) {
+			t.Fatalf("deep runtime artifact was enumerated before pruning: %s", returnedPath)
+		}
+	}
+	for _, realPath := range []string{
+		filepath.Join(localDir, "channels", "C123", "messages", "1780145510_376649.json"),
+		filepath.Join(localDir, "channels", "C123", "messages", "1780145510_376649", ".relay-notes", "keep.md"),
+		filepath.Join(localDir, "channels", "C123", "messages", "1780145510_376649", "outbox", "acked", "mountcmd_real.json"),
+		filepath.Join(localDir, "channels", "C123", "messages", "1780145510_376649", ".relayfile-mount-state.json.backup"),
+	} {
+		if _, err := os.Stat(realPath); err != nil {
+			t.Fatalf("expected real workspace content %s to remain mirrored: %v", realPath, err)
+		}
+	}
+	assertLocalFileContent(t, filepath.Join(localDir, "channels", "C123", "messages", "1780145510_376649", ".relayfile-mount-state.json.backup"), `{"backup":true}`)
+	if _, err := os.Stat(runtimeDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("nested runtime subtree should be absent after pruning, stat err=%v", err)
+	}
+	if _, exists := syncer.state.Files[staleRemotePath]; exists {
+		t.Fatalf("stale nested runtime artifact remained tracked")
+	}
+	for path, calls := range baseClient.readFileCallsByPath {
+		if isMountRuntimeRemotePath(path) && calls > 0 {
+			t.Fatalf("runtime artifact %s was read %d time(s)", path, calls)
+		}
+	}
+	var summary string
+	for _, line := range logger.lines {
+		if strings.Contains(line, "mount full-tree traversal summary") {
+			summary = line
+		}
+	}
+	if !strings.Contains(summary, "runtime_subtrees_pruned=200") {
+		t.Fatalf("expected traversal summary to report 200 pruned runtime subtrees, got %q", summary)
+	}
+	if !strings.Contains(summary, "list_calls=3") {
+		t.Fatalf("expected traversal summary to report the measured three-call frontier, got %q", summary)
+	}
+}
+
+func TestPullRemoteFullTreeResumesPersistedShallowDirectoryQueue(t *testing.T) {
+	files := map[string]RemoteFile{
+		"/a/level1/level2/one.md":   {Path: "/a/level1/level2/one.md", Revision: "rev_a", Content: "one"},
+		"/b/level1/level2/two.md":   {Path: "/b/level1/level2/two.md", Revision: "rev_b", Content: "two"},
+		"/c/level1/level2/three.md": {Path: "/c/level1/level2/three.md", Revision: "rev_c", Content: "three"},
+	}
+	client := &hierarchicalTreeClient{
+		fakeClient: &fakeClient{files: files},
+		failAtCall: 3,
+		failErr:    &HTTPError{StatusCode: http.StatusBadGateway, Code: "bad_gateway", Message: "synthetic interruption"},
+	}
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_shallow_resume",
+		RemoteRoot:  "/",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+	preservedPrefixPath := filepath.Join(localDir, "preserved-prefix.md")
+	if err := os.WriteFile(preservedPrefixPath, []byte("prefix mirrored before interruption"), 0o644); err != nil {
+		t.Fatalf("seed tracked prefix: %v", err)
+	}
+	syncer.state.Files["/preserved-prefix.md"] = trackedFile{
+		Revision: "rev_prefix",
+		Hash:     hashString("prefix mirrored before interruption"),
+	}
+	if err := syncer.pullRemoteFullTree(context.Background(), nil, bootstrapProgress{}); err == nil {
+		t.Fatalf("expected first traversal to fail")
+	}
+	if got := syncer.state.BootstrapDirectories; len(got) == 0 || got[0] != "/b/level1/level2" {
+		t.Fatalf("persisted directory queue = %#v, want /b/level1/level2 at the resume boundary", got)
+	}
+	if err := syncer.pullRemoteFullTree(context.Background(), nil, bootstrapProgress{}); err != nil {
+		t.Fatalf("resumed traversal failed: %v", err)
+	}
+	if len(client.calls) < 4 || client.calls[3].path != "/b/level1/level2" {
+		t.Fatalf("resumed traversal did not restart at /b/level1/level2: %#v", client.calls)
+	}
+	if !syncer.state.BootstrapComplete {
+		t.Fatalf("resumed traversal did not mark bootstrap complete")
+	}
+	if len(syncer.state.BootstrapDirectories) != 0 {
+		t.Fatalf("completed traversal retained directory queue: %#v", syncer.state.BootstrapDirectories)
+	}
+	if _, tracked := syncer.state.Files["/preserved-prefix.md"]; !tracked {
+		t.Fatalf("resumed partial traversal applied an authoritative delete to the tracked prefix")
+	}
+	assertLocalFileContent(t, preservedPrefixPath, "prefix mirrored before interruption")
+	for _, localPath := range []string{
+		filepath.Join(localDir, "a", "level1", "level2", "one.md"),
+		filepath.Join(localDir, "b", "level1", "level2", "two.md"),
+		filepath.Join(localDir, "c", "level1", "level2", "three.md"),
+	} {
+		if _, err := os.Stat(localPath); err != nil {
+			t.Fatalf("expected resumed traversal to mirror %s: %v", localPath, err)
+		}
 	}
 }
 

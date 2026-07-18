@@ -14,6 +14,41 @@ import (
 	"testing"
 )
 
+func TestHTTPClientListTreeRequestsPrePaginationMountRuntimeExclusion(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/workspaces/ws_mount/fs/tree" {
+			t.Fatalf("unexpected path %q", r.URL.Path)
+		}
+		query := r.URL.Query()
+		if got := query.Get("path"); got != "/slack/channels" {
+			t.Fatalf("expected normalized mount path, got %q", got)
+		}
+		if got := query.Get("depth"); got != "3" {
+			t.Fatalf("expected depth 3, got %q", got)
+		}
+		if got := query.Get("cursor"); got != "/slack/channels/C123" {
+			t.Fatalf("expected cursor to be forwarded, got %q", got)
+		}
+		if got := query.Get("excludeMountRuntime"); got != "true" {
+			t.Fatalf("expected server-side mount runtime exclusion, got %q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"path":"/slack/channels","entries":[],"nextCursor":null}`))
+	}))
+	defer server.Close()
+
+	client := NewHTTPClient(server.URL, "token", server.Client())
+	if _, err := client.ListTree(
+		context.Background(),
+		"ws_mount",
+		"/slack/channels/",
+		3,
+		"/slack/channels/C123",
+	); err != nil {
+		t.Fatalf("list tree failed: %v", err)
+	}
+}
+
 func TestHTTPClientRetriesTransientFailure(t *testing.T) {
 	var calls int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
