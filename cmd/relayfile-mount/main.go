@@ -432,7 +432,7 @@ func runSinglePollingMount(rootCtx context.Context, cfg mountConfig) error {
 	log.Printf("%s", mountStartupLogLine(cfg))
 	log.Printf("Mirror started at %s. Sync interval %s +/- %.0f%%. Public state: %s", cfg.localDir, cfg.interval.Round(time.Second), cfg.intervalJitter*100, filepath.Join(cfg.localDir, ".relay", "state.json"))
 
-	run := func(reconcile bool) {
+	run := func(reconcile bool) error {
 		ctx, cancel := context.WithTimeout(rootCtx, cfg.timeout)
 		defer cancel()
 		var err error
@@ -442,19 +442,30 @@ func runSinglePollingMount(rootCtx context.Context, cfg mountConfig) error {
 			err = syncer.SyncOnce(ctx)
 		}
 		if err != nil {
+			var stalled *mountsync.BootstrapStalledError
+			if errors.As(err, &stalled) {
+				// This is an operator-actionable hard stop, not a transient
+				// cycle failure. Returning it terminates this runner (and, for
+				// scoped layouts, cancels sibling runners) instead of letting
+				// the polling ticker retry the same persisted checkpoint forever.
+				return err
+			}
 			if errors.Is(err, context.DeadlineExceeded) {
 				if synced, total, ok := readBootstrapProgress(cfg.localDir); ok {
 					log.Printf("mount bootstrapping: %d/%d files (in progress)", synced, total)
-					return
+					return nil
 				}
 			}
 			log.Printf("mount sync cycle failed: %v", err)
-			return
+			return nil
 		}
 		log.Printf("mount sync cycle completed")
+		return nil
 	}
 
-	run(true)
+	if err := run(true); err != nil {
+		return err
+	}
 	if cfg.once {
 		return nil
 	}
@@ -503,7 +514,9 @@ func runSinglePollingMount(rootCtx context.Context, cfg mountConfig) error {
 				cycle,
 			)
 			if reconcile {
-				run(true)
+				if err := run(true); err != nil {
+					return err
+				}
 			}
 			timer.Reset(jitteredIntervalWithSample(cfg.interval, cfg.intervalJitter, rng.Float64()))
 		}

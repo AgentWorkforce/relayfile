@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -412,6 +414,142 @@ func TestInstallCredsFileRefreshToleratesParseFailureWithoutRetry(t *testing.T) 
 	}
 	if got := client.Token(); got != "old-token" {
 		t.Fatalf("expected old token to stay installed, got %q", got)
+	}
+}
+
+// TestRunSinglePollingMountStopsOnBootstrapStall proves the typed hard failure
+// leaves the polling runner immediately. main turns this returned error into a
+// nonzero process exit, so the ticker cannot retry the same checkpoint.
+func TestRunSinglePollingMountStopsOnBootstrapStall(t *testing.T) {
+	t.Setenv("RELAYFILE_BOOTSTRAP_STALL_CYCLES", "1")
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		http.Error(w, "stuck", http.StatusBadGateway)
+	}))
+	defer server.Close()
+
+	err := runSinglePollingMount(context.Background(), mountConfig{
+		baseURL:          server.URL,
+		token:            "test-token",
+		workspaceID:      "ws_bootstrap_stall",
+		remotePath:       "/",
+		localDir:         t.TempDir(),
+		stateDir:         t.TempDir(),
+		mountKind:        mountsync.MountKindDaemon,
+		syncMode:         syncModeMirror,
+		interval:         time.Hour,
+		timeout:          time.Second,
+		websocketEnabled: false,
+	})
+	var stalled *mountsync.BootstrapStalledError
+	if !errors.As(err, &stalled) {
+		t.Fatalf("expected bootstrap stall to escape polling runner, got %v", err)
+	}
+	if got := calls.Load(); got == 0 {
+		t.Fatal("expected initial full-tree request before runner exited")
+	}
+}
+
+// TestRunSinglePollingMountKeepsNormalCycleFailuresNonFatal verifies that a
+// normal cloud error keeps its historical per-cycle retry behavior rather
+// than terminating the mount runner.
+func TestRunSinglePollingMountKeepsNormalCycleFailuresNonFatal(t *testing.T) {
+	t.Setenv("RELAYFILE_BOOTSTRAP_STALL_CYCLES", "2")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "transient", http.StatusBadGateway)
+	}))
+	defer server.Close()
+
+	err := runSinglePollingMount(context.Background(), mountConfig{
+		baseURL:          server.URL,
+		token:            "test-token",
+		workspaceID:      "ws_normal_retry",
+		remotePath:       "/",
+		localDir:         t.TempDir(),
+		stateDir:         t.TempDir(),
+		mountKind:        mountsync.MountKindDaemon,
+		syncMode:         syncModeMirror,
+		interval:         time.Hour,
+		timeout:          time.Second,
+		websocketEnabled: false,
+		once:             true,
+	})
+	if err != nil {
+		t.Fatalf("normal cycle failure must remain nonfatal to the runner, got %v", err)
+	}
+}
+
+// TestRunSinglePollingMountStopsOnTimerBootstrapStall exercises the polling
+// timer path, not just the initial cycle. The first page commits a partial
+// checkpoint and its next-page error remains nonfatal; the following timer
+// reconcile fails at that unchanged cursor and terminates the runner.
+func TestRunSinglePollingMountStopsOnTimerBootstrapStall(t *testing.T) {
+	t.Setenv("RELAYFILE_BOOTSTRAP_STALL_CYCLES", "1")
+	var rootTreeCalls atomic.Int32
+	var cursorTreeCalls atomic.Int32
+	var readCalls atomic.Int32
+	entries := make([]mountsync.TreeEntry, 0, 10)
+	for i := 0; i < 10; i++ {
+		entries = append(entries, mountsync.TreeEntry{Path: fmt.Sprintf("/f/%05d.txt", i), Type: "file"})
+	}
+	nextCursor := entries[len(entries)-1].Path
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.Contains(r.URL.Path, "/fs/tree"):
+			if r.URL.Query().Get("cursor") != "" {
+				cursorTreeCalls.Add(1)
+				// A 400 is intentionally not retried by HTTPClient, so exactly
+				// two calls prove the initial nonfatal cycle plus one timer cycle.
+				http.Error(w, "stuck cursor", http.StatusBadRequest)
+				return
+			}
+			rootTreeCalls.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(mountsync.TreeResponse{Entries: entries, NextCursor: &nextCursor})
+		case strings.Contains(r.URL.Path, "/fs/file"):
+			readCalls.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(mountsync.RemoteFile{
+				Path:        r.URL.Query().Get("path"),
+				ContentType: "text/plain",
+				Content:     "content",
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	started := time.Now()
+	err := runSinglePollingMount(context.Background(), mountConfig{
+		baseURL:          server.URL,
+		token:            "test-token",
+		workspaceID:      "ws_timer_bootstrap_stall",
+		remotePath:       "/",
+		localDir:         t.TempDir(),
+		stateDir:         t.TempDir(),
+		mountKind:        mountsync.MountKindDaemon,
+		syncMode:         syncModeMirror,
+		interval:         time.Millisecond, // enforced to the 5s poll floor
+		timeout:          time.Second,
+		websocketEnabled: false,
+	})
+	var stalled *mountsync.BootstrapStalledError
+	if !errors.As(err, &stalled) {
+		t.Fatalf("expected timer-path bootstrap stall to escape runner, got %v", err)
+	}
+	if got := rootTreeCalls.Load(); got != 1 {
+		t.Fatalf("root tree calls = %d, want one initial partial traversal", got)
+	}
+	if got := readCalls.Load(); got != int32(len(entries)) {
+		t.Fatalf("ReadFile calls = %d, want %d first-page files", got, len(entries))
+	}
+	if got := cursorTreeCalls.Load(); got != 2 {
+		t.Fatalf("cursor tree calls = %d, want initial nonfatal + timer hard-stop", got)
+	}
+	if elapsed := time.Since(started); elapsed < minMountPollInterval {
+		t.Fatalf("runner returned before a timer cycle (%s < %s)", elapsed, minMountPollInterval)
 	}
 }
 

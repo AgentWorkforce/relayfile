@@ -89,6 +89,11 @@ const defaultFullPullEvery = 20
 const (
 	defaultBootstrapTimeout     = 0 * time.Second
 	defaultBootstrapIdleTimeout = 90 * time.Second
+	// defaultBootstrapStallCycles is the maximum number of consecutive
+	// bootstrap cycles allowed to leave the persisted traversal checkpoint
+	// unchanged. It turns a permanently failing resume point into an explicit
+	// operator-visible failure instead of silently retrying forever.
+	defaultBootstrapStallCycles = 20
 	defaultCursorTimeout        = 60 * time.Second
 	// defaultExportTimeout bounds the single atomic full-tree export so a slow
 	// or 429-contended export yields to the resumable pullRemoteFullTree BEFORE
@@ -144,6 +149,27 @@ func resolveDurationEnv(opt time.Duration, env string, def time.Duration, logger
 	return def
 }
 
+// resolveBootstrapStallCycles returns the explicit option when set, otherwise
+// RELAYFILE_BOOTSTRAP_STALL_CYCLES, otherwise the default. A non-positive
+// value is invalid because the guard must remain a bounded hard stop.
+func resolveBootstrapStallCycles(opt int, logger Logger) int {
+	if opt > 0 {
+		return opt
+	}
+	if opt < 0 && logger != nil {
+		logger.Printf("ignoring invalid BootstrapStallCycles=%d; using env/default", opt)
+	}
+	const env = "RELAYFILE_BOOTSTRAP_STALL_CYCLES"
+	if raw := strings.TrimSpace(os.Getenv(env)); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
+			return parsed
+		} else if logger != nil {
+			logger.Printf("ignoring invalid %s=%q; expected a positive integer", env, raw)
+		}
+	}
+	return defaultBootstrapStallCycles
+}
+
 var providerLayoutAliasSegments = []string{
 	"by-title",
 	"by-id",
@@ -194,6 +220,27 @@ func (e *IncrementalReadNotReadyError) Error() string {
 	}
 	return fmt.Sprintf("changed event for %s is not readable yet: %s", normalizeRemotePath(e.Path), message)
 }
+
+// BootstrapStalledError reports that a resumable bootstrap has retried the
+// same persisted checkpoint too many times. It is deliberately a typed error
+// so callers can distinguish an operator-actionable hard stop from a normal
+// transient cloud failure.
+type BootstrapStalledError struct {
+	Cycles int
+	Limit  int
+	Cursor string
+	Cause  error
+}
+
+func (e *BootstrapStalledError) Error() string {
+	message := fmt.Sprintf("bootstrap stalled for %d consecutive checkpoint-stable cycles (limit %d, cursor %q)", e.Cycles, e.Limit, e.Cursor)
+	if e.Cause != nil {
+		return message + ": " + e.Cause.Error()
+	}
+	return message
+}
+
+func (e *BootstrapStalledError) Unwrap() error { return e.Cause }
 
 type TreeEntry struct {
 	Path        string `json:"path"`
@@ -808,6 +855,10 @@ type SyncerOptions struct {
 	// sentinel (<=0): the bootstrap runs to completion as long as it keeps
 	// applying files within the idle window.
 	BootstrapTimeout time.Duration
+	// BootstrapStallCycles is the maximum number of consecutive bootstrap
+	// cycles that may leave the persisted traversal checkpoint unchanged. 0
+	// falls back to RELAYFILE_BOOTSTRAP_STALL_CYCLES, then the default (20).
+	BootstrapStallCycles int
 	// CursorTimeout bounds each resolveLatestEventCursor attempt with its OWN
 	// deadline derived from RootCtx. Timeout-class failures are retried with
 	// backoff before the caller decides whether a full pull is safe.
@@ -1000,6 +1051,7 @@ type Syncer struct {
 	outboxFlushTimeout   time.Duration
 	bootstrapTimeout     time.Duration
 	bootstrapIdleTimeout time.Duration
+	bootstrapStallCycles int
 	readNotReadyTTL      time.Duration
 	forceFullReconcile   bool
 	incrementalCycles    int
@@ -1143,6 +1195,10 @@ type mountState struct {
 	BootstrapFilesSynced int      `json:"bootstrapFilesSynced,omitempty"`
 	BootstrapFilesTotal  int      `json:"bootstrapFilesTotal,omitempty"`
 	BootstrapStartedAt   string   `json:"bootstrapStartedAt,omitempty"`
+	// BootstrapStallCycles counts consecutive bootstrap cycles that did not
+	// advance the resumable directory/cursor checkpoint. It is persisted so a
+	// process restart cannot evade the hard-stall guard.
+	BootstrapStallCycles int `json:"bootstrapStallCycles,omitempty"`
 	// QuarantinedPaths holds remote paths that cannot be materialized locally
 	// due to file/directory name collisions. Persisted across cycle restarts
 	// so the daemon does not re-fetch these paths from the cloud until the
@@ -1479,6 +1535,7 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 	if bootstrapIdleTimeout <= 0 {
 		bootstrapIdleTimeout = defaultBootstrapIdleTimeout
 	}
+	bootstrapStallCycles := resolveBootstrapStallCycles(opts.BootstrapStallCycles, opts.Logger)
 	exportTimeout := resolveDurationEnv(opts.ExportTimeout, "RELAYFILE_EXPORT_TIMEOUT", defaultExportTimeout, opts.Logger)
 	if exportTimeout <= 0 {
 		exportTimeout = defaultExportTimeout
@@ -1610,6 +1667,7 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 		outboxFlushTimeout:    outboxFlushTimeout,
 		bootstrapTimeout:      bootstrapTimeout,
 		bootstrapIdleTimeout:  bootstrapIdleTimeout,
+		bootstrapStallCycles:  bootstrapStallCycles,
 		readNotReadyTTL:       readNotReadyTTL,
 		forceFullReconcile:    forceFullReconcile,
 		oversizedLogged:       map[string]struct{}{},
@@ -2812,10 +2870,18 @@ func (s *Syncer) syncReserved(ctx context.Context, forcePoll bool) error {
 			s.markBootstrapComplete()
 		}
 	} else if !s.state.BootstrapComplete || s.forceFullReconcile {
-		if err := s.pullRemote(ctx, conflicted); err != nil {
-			s.markSyncError(err)
+		previousBootstrapCursor := s.state.BootstrapCursor
+		previousBootstrapDirectories := append([]string(nil), s.state.BootstrapDirectories...)
+		pullErr := s.pullRemote(ctx, conflicted)
+		if stallErr := s.recordBootstrapCycle(previousBootstrapCursor, previousBootstrapDirectories, pullErr); stallErr != nil {
+			s.markSyncError(stallErr)
 			_ = s.saveState()
-			return err
+			return stallErr
+		}
+		if pullErr != nil {
+			s.markSyncError(pullErr)
+			_ = s.saveState()
+			return pullErr
 		}
 		s.bootstrapped = true
 		didPoll = true
@@ -4479,6 +4545,7 @@ func (s *Syncer) markBootstrapComplete() {
 	s.state.BootstrapStartedAt = ""
 	s.state.BootstrapFilesSynced = 0
 	s.state.BootstrapFilesTotal = 0
+	s.state.BootstrapStallCycles = 0
 	// Clear persisted quarantine so a fixed adapter gets a clean slate.
 	s.state.QuarantinedPaths = nil
 	s.clearAllIncrementalReadNotReady()
@@ -4486,6 +4553,51 @@ func (s *Syncer) markBootstrapComplete() {
 	// successful full reconcile, clear the in-memory force flag so
 	// subsequent cycles can use the fast-path again.
 	s.forceFullReconcile = false
+}
+
+// bootstrapCheckpointAdvanced reports whether this cycle moved the persisted
+// resumable traversal checkpoint. Directory queue changes matter just as much
+// as a page cursor change: bounded-depth traversals can finish a directory and
+// begin the next one with an empty page cursor.
+func (s *Syncer) bootstrapCheckpointAdvanced(previousCursor string, previousDirectories []string) bool {
+	if strings.TrimSpace(s.state.BootstrapCursor) != strings.TrimSpace(previousCursor) {
+		return true
+	}
+	if len(s.state.BootstrapDirectories) != len(previousDirectories) {
+		return true
+	}
+	for i, directory := range s.state.BootstrapDirectories {
+		if directory != previousDirectories[i] {
+			return true
+		}
+	}
+	return false
+}
+
+// recordBootstrapCycle updates the persisted bootstrap stall guard after a
+// bootstrap attempt. It resets only when the traversal checkpoint advances or
+// completes, so retries across process restarts cannot spin forever at the
+// same cursor. At the configured limit it returns a typed hard failure and
+// intentionally leaves BootstrapComplete false.
+func (s *Syncer) recordBootstrapCycle(previousCursor string, previousDirectories []string, cause error) error {
+	if s.state.BootstrapComplete || s.bootstrapCheckpointAdvanced(previousCursor, previousDirectories) {
+		s.state.BootstrapStallCycles = 0
+		return nil
+	}
+	s.state.BootstrapStallCycles++
+	limit := s.bootstrapStallCycles
+	if limit <= 0 {
+		limit = defaultBootstrapStallCycles
+	}
+	if s.state.BootstrapStallCycles < limit {
+		return nil
+	}
+	return &BootstrapStalledError{
+		Cycles: s.state.BootstrapStallCycles,
+		Limit:  limit,
+		Cursor: strings.TrimSpace(s.state.BootstrapCursor),
+		Cause:  cause,
+	}
 }
 
 // snapshotDeleteUnsafe reports whether running snapshot-driven deletes is
@@ -6316,6 +6428,7 @@ func (s *Syncer) loadState() error {
 		s.state.BootstrapStartedAt = ""
 		s.state.BootstrapFilesSynced = 0
 		s.state.BootstrapFilesTotal = 0
+		s.state.BootstrapStallCycles = 0
 	}
 	if s.githubWorkingTree != nil && strings.TrimSpace(s.state.GithubWorkingTreeHeadSHA) != "" {
 		s.githubWorkingTree.HeadSHA = strings.TrimSpace(s.state.GithubWorkingTreeHeadSHA)
@@ -6803,6 +6916,12 @@ func classifyStatusError(err error) *statusError {
 		Kind:    "error",
 		Message: err.Error(),
 		At:      time.Now().UTC().Format(time.RFC3339Nano),
+	}
+	var bootstrapStalled *BootstrapStalledError
+	if errors.As(err, &bootstrapStalled) {
+		status.Kind = "bootstrap_stalled"
+		status.Code = "bootstrap_stall_cycle_limit"
+		return status
 	}
 	var httpErr *HTTPError
 	if errors.As(err, &httpErr) {
