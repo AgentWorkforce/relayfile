@@ -1,0 +1,105 @@
+{
+  "contract": "relayfile-path-contract",
+  "version": 1,
+  "area": "scope-paths",
+  "cases": [
+    { "name": "star-is-valid", "scope_path": "*", "expect": { "valid": true, "mounts_at": "/" } },
+    {
+      "name": "root-is-valid-but-exact-only",
+      "scope_path": "/",
+      "description": "\"/\" is a valid EXACT path: it authorizes only the root node itself, nothing beneath it. Whole-namespace access is \"*\" (or \"/**\"). See auth-matching root-scope-* cases and README §5.1.",
+      "expect": { "valid": true, "mounts_at": "/" }
+    },
+    { "name": "exact-path-valid", "scope_path": "/github/repos/acme/cloud/issues/5.json", "expect": { "valid": true, "mounts_at": "/github/repos/acme/cloud/issues/5.json" } },
+    { "name": "recursive-glob-valid", "scope_path": "/github/**", "expect": { "valid": true, "mounts_at": "/github" } },
+    { "name": "root-recursive-glob-valid", "scope_path": "/**", "expect": { "valid": true, "mounts_at": "/" } },
+    { "name": "descendant-glob-valid", "scope_path": "/github/*", "expect": { "valid": true, "mounts_at": "/github" } },
+    { "name": "root-descendant-glob-valid", "scope_path": "/*", "expect": { "valid": true, "mounts_at": "/" } },
+    { "name": "deep-recursive-glob-valid", "scope_path": "/slack/channels/c123/messages/**", "expect": { "valid": true, "mounts_at": "/slack/channels/c123/messages" } },
+    { "name": "prefix-glob-valid", "scope_path": "/github/repos/acme-*", "expect": { "valid": true, "mounts_at": "/github/repos" } },
+    { "name": "top-level-prefix-glob-mounts-at-root", "scope_path": "/github*", "expect": { "valid": true, "mounts_at": "/" } },
+    {
+      "name": "mid-path-segment-globs-invalid",
+      "scope_path": "/github/repos/*/*/issues/**",
+      "description": "THE production divergence (parent spec §2.1): cloud emits this scope; hosted TS matches it, OSS Go does not. Invalid under the contract — a token carrying only this scope authorizes nothing.",
+      "probe_files": [
+        "/github/repos/acme/cloud/issues/5.json",
+        "/github/repos/acme/cloud/issues",
+        "/github/repos"
+      ],
+      "expect": { "valid": false, "mounts_at": null }
+    },
+    {
+      "name": "mid-path-single-star-invalid",
+      "scope_path": "/github/*/issues",
+      "probe_files": ["/github/acme/issues", "/github/acme/issues/5.json"],
+      "expect": { "valid": false, "mounts_at": null }
+    },
+    {
+      "name": "mid-path-double-star-invalid",
+      "scope_path": "/github/**/issues",
+      "probe_files": ["/github/acme/issues", "/github/a/b/issues"],
+      "expect": { "valid": false, "mounts_at": null }
+    },
+    {
+      "name": "star-inside-segment-invalid",
+      "scope_path": "/git*hub/repos",
+      "probe_files": ["/github/repos", "/gitXhub/repos"],
+      "expect": { "valid": false, "mounts_at": null }
+    },
+    {
+      "name": "star-mid-final-segment-invalid",
+      "scope_path": "/github/re*po",
+      "probe_files": ["/github/repo", "/github/reXpo"],
+      "expect": { "valid": false, "mounts_at": null }
+    },
+    {
+      "name": "double-star-suffix-of-name-invalid",
+      "scope_path": "/github/x**",
+      "probe_files": ["/github/x", "/github/xy", "/github/x/y"],
+      "expect": { "valid": false, "mounts_at": null }
+    },
+    {
+      "name": "missing-leading-slash-invalid",
+      "scope_path": "github/**",
+      "probe_files": ["/github/x"],
+      "expect": { "valid": false, "mounts_at": null }
+    },
+    {
+      "name": "bare-double-star-invalid",
+      "scope_path": "**",
+      "probe_files": ["/github/x"],
+      "expect": { "valid": false, "mounts_at": null }
+    },
+    {
+      "name": "empty-segment-invalid",
+      "scope_path": "/github//repos/**",
+      "probe_files": ["/github/repos/x"],
+      "expect": { "valid": false, "mounts_at": null }
+    },
+    {
+      "name": "trailing-slash-invalid",
+      "scope_path": "/github/",
+      "probe_files": ["/github/x"],
+      "expect": { "valid": false, "mounts_at": null }
+    },
+    {
+      "name": "dot-dot-segment-invalid",
+      "scope_path": "/github/../secrets/**",
+      "probe_files": ["/secrets/key.json"],
+      "expect": { "valid": false, "mounts_at": null }
+    },
+    {
+      "name": "dot-segment-invalid",
+      "scope_path": "/github/./repos/**",
+      "probe_files": ["/github/repos/x"],
+      "expect": { "valid": false, "mounts_at": null }
+    },
+    {
+      "name": "empty-scope-path-invalid",
+      "scope_path": "",
+      "probe_files": ["/github/x"],
+      "expect": { "valid": false, "mounts_at": null }
+    }
+  ]
+}

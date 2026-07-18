@@ -1,0 +1,19 @@
+{
+  "contract": "relayfile-path-contract",
+  "version": 1,
+  "area": "containment",
+  "cases": [
+    { "name": "root-contains-everything", "base": "/", "candidate": "/github/repos/acme/cloud/issues/5.json", "expect": { "contains": true } },
+    { "name": "root-contains-root", "base": "/", "candidate": "/", "expect": { "contains": true } },
+    { "name": "base-contains-itself", "base": "/github", "candidate": "/github", "expect": { "contains": true } },
+    { "name": "base-contains-deep-descendant", "base": "/github", "candidate": "/github/repos/acme/cloud", "expect": { "contains": true } },
+    { "name": "sibling-name-prefix-not-contained", "base": "/github", "candidate": "/github2", "expect": { "contains": false } },
+    { "name": "shorter-prefix-not-contained", "base": "/github", "candidate": "/gith", "expect": { "contains": false } },
+    { "name": "parent-not-contained-by-child", "base": "/a/b", "candidate": "/a", "expect": { "contains": false } },
+    { "name": "base-normalized-before-compare", "base": "github", "candidate": "/github/x", "expect": { "contains": true } },
+    { "name": "trailing-slash-base-normalized", "base": "/github/", "candidate": "/github/x", "expect": { "contains": true } },
+    { "name": "candidate-normalized-before-compare", "base": "/github", "candidate": "github/x/", "expect": { "contains": true } },
+    { "name": "case-sensitive", "base": "/github", "candidate": "/GitHub/x", "expect": { "contains": false } },
+    { "name": "unrelated-tree", "base": "/slack/messages", "candidate": "/github/repos/acme", "expect": { "contains": false } }
+  ]
+}

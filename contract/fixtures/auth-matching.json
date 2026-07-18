@@ -1,0 +1,274 @@
+{
+  "contract": "relayfile-path-contract",
+  "version": 1,
+  "area": "auth-matching",
+  "cases": [
+    {
+      "name": "exact-path-grant-matches-exact-file",
+      "scopes": ["relayfile:fs:read:/src/app.ts"],
+      "required": "fs:read",
+      "file": "/src/app.ts",
+      "expect": { "auth_matches": true }
+    },
+    {
+      "name": "root-scope-path-matches-only-root-node",
+      "description": "\"/\" is an exact path like any other: it matches the root node and nothing else. It is NOT a whole-tree grant — compare star-scope-path and /** cases.",
+      "scopes": ["relayfile:fs:read:/"],
+      "required": "fs:read",
+      "file": "/",
+      "expect": { "auth_matches": true }
+    },
+    {
+      "name": "root-scope-path-denies-everything-beneath-root",
+      "description": "Pins the / vs * asymmetry: both are valid with mounts_at \"/\", but / authorizes nothing beneath the root node. An author wanting the whole tree must write * or /**.",
+      "scopes": ["relayfile:fs:read:/"],
+      "required": "fs:read",
+      "file": "/a.json",
+      "expect": { "auth_matches": false }
+    },
+    {
+      "name": "exact-path-grant-denies-other-file",
+      "scopes": ["relayfile:fs:read:/src/app.ts"],
+      "required": "fs:read",
+      "file": "/.env",
+      "expect": { "auth_matches": false }
+    },
+    {
+      "name": "recursive-glob-matches-directory-node-itself",
+      "scopes": ["relayfile:fs:read:/github/**"],
+      "required": "fs:read",
+      "file": "/github",
+      "expect": { "auth_matches": true }
+    },
+    {
+      "name": "recursive-glob-matches-deep-descendant",
+      "scopes": ["relayfile:fs:read:/github/**"],
+      "required": "fs:read",
+      "file": "/github/repos/acme/cloud/issues/5.json",
+      "expect": { "auth_matches": true }
+    },
+    {
+      "name": "recursive-glob-denies-sibling-name-prefix",
+      "scopes": ["relayfile:fs:read:/github/**"],
+      "required": "fs:read",
+      "file": "/github2/x",
+      "expect": { "auth_matches": false }
+    },
+    {
+      "name": "descendant-glob-denies-directory-node-itself",
+      "description": "Unlike /**, /* excludes the directory node.",
+      "scopes": ["relayfile:fs:read:/github/*"],
+      "required": "fs:read",
+      "file": "/github",
+      "expect": { "auth_matches": false }
+    },
+    {
+      "name": "descendant-glob-matches-any-depth",
+      "description": "/* is an any-depth descendant match, NOT single-segment. Pins a known cross-impl disagreement candidate.",
+      "scopes": ["relayfile:fs:read:/github/*"],
+      "required": "fs:read",
+      "file": "/github/repos/acme/cloud/issues/5.json",
+      "expect": { "auth_matches": true }
+    },
+    {
+      "name": "prefix-glob-matches-raw-byte-prefix",
+      "scopes": ["relayfile:fs:read:/github/repos/acme-*"],
+      "required": "fs:read",
+      "file": "/github/repos/acme-cloud/issues/1.json",
+      "expect": { "auth_matches": true }
+    },
+    {
+      "name": "prefix-glob-denies-non-prefixed-sibling",
+      "scopes": ["relayfile:fs:read:/github/repos/acme-*"],
+      "required": "fs:read",
+      "file": "/github/repos/other/issues/1.json",
+      "expect": { "auth_matches": false }
+    },
+    {
+      "name": "prefix-glob-crosses-segment-boundary",
+      "description": "<name>* is a raw byte prefix: /github* matches /github itself and /github/x.",
+      "scopes": ["relayfile:fs:read:/github*"],
+      "required": "fs:read",
+      "file": "/github/x",
+      "expect": { "auth_matches": true }
+    },
+    {
+      "name": "mid-path-segment-globs-authorize-nothing",
+      "description": "THE production divergence (parent spec §2.1). Hosted TS currently allows this; the contract verdict is deny. An implementation returning true here fails the suite.",
+      "scopes": ["relayfile:fs:read:/github/repos/*/*/issues/**"],
+      "required": "fs:read",
+      "file": "/github/repos/acme/cloud/issues/5.json",
+      "expect": { "auth_matches": false }
+    },
+    {
+      "name": "mid-path-single-star-authorizes-nothing",
+      "scopes": ["relayfile:fs:read:/github/*/issues"],
+      "required": "fs:read",
+      "file": "/github/acme/issues",
+      "expect": { "auth_matches": false }
+    },
+    {
+      "name": "narrow-grant-suppresses-bare-literal-outside",
+      "description": "Bare fs:read + a narrow path grant = confined to the narrow grant.",
+      "scopes": ["fs:read", "relayfile:fs:read:/github/**"],
+      "required": "fs:read",
+      "file": "/slack/messages/thread-1.json",
+      "expect": { "auth_matches": false }
+    },
+    {
+      "name": "narrow-grant-with-bare-literal-allows-inside",
+      "scopes": ["fs:read", "relayfile:fs:read:/github/**"],
+      "required": "fs:read",
+      "file": "/github/repos/acme/cloud/issues/5.json",
+      "expect": { "auth_matches": true }
+    },
+    {
+      "name": "pure-bare-literal-is-full-access",
+      "scopes": ["fs:read"],
+      "required": "fs:read",
+      "file": "/anything/at/all.json",
+      "expect": { "auth_matches": true }
+    },
+    {
+      "name": "three-segment-grant-is-full-namespace",
+      "scopes": ["relayfile:fs:read"],
+      "required": "fs:read",
+      "file": "/slack/users/user-1.json",
+      "expect": { "auth_matches": true }
+    },
+    {
+      "name": "star-scope-path-allows-empty-required-path",
+      "scopes": ["relayfile:fs:read:*"],
+      "required": "fs:read",
+      "file": "",
+      "expect": { "auth_matches": true }
+    },
+    {
+      "name": "narrow-grant-denies-empty-required-path",
+      "scopes": ["relayfile:fs:read:/github/**"],
+      "required": "fs:read",
+      "file": "",
+      "expect": { "auth_matches": false }
+    },
+    {
+      "name": "wildcard-action-matches-write",
+      "scopes": ["relayfile:fs:*:/src/**"],
+      "required": "fs:write",
+      "file": "/src/app.ts",
+      "expect": { "auth_matches": true }
+    },
+    {
+      "name": "manage-implies-write",
+      "scopes": ["relayfile:fs:manage:/src/**"],
+      "required": "fs:write",
+      "file": "/src/app.ts",
+      "expect": { "auth_matches": true }
+    },
+    {
+      "name": "manage-implies-read",
+      "scopes": ["relayfile:fs:manage:/src/**"],
+      "required": "fs:read",
+      "file": "/src/app.ts",
+      "expect": { "auth_matches": true }
+    },
+    {
+      "name": "read-does-not-imply-write",
+      "scopes": ["relayfile:fs:read:/src/**"],
+      "required": "fs:write",
+      "file": "/src/app.ts",
+      "expect": { "auth_matches": false }
+    },
+    {
+      "name": "read-does-not-imply-manage",
+      "scopes": ["relayfile:fs:read:/src/**"],
+      "required": "fs:manage",
+      "file": "/src/app.ts",
+      "expect": { "auth_matches": false }
+    },
+    {
+      "name": "wildcard-resource-matches",
+      "scopes": ["relayfile:*:read:/src/**"],
+      "required": "fs:read",
+      "file": "/src/app.ts",
+      "expect": { "auth_matches": true }
+    },
+    {
+      "name": "wildcard-plane-matches",
+      "scopes": ["*:fs:read:/src/**"],
+      "required": "fs:read",
+      "file": "/src/app.ts",
+      "expect": { "auth_matches": true }
+    },
+    {
+      "name": "foreign-plane-never-matches",
+      "scopes": ["relaycast:fs:read:/src/**"],
+      "required": "fs:read",
+      "file": "/src/app.ts",
+      "expect": { "auth_matches": false }
+    },
+    {
+      "name": "workspace-plane-second-segment-is-label-not-resource",
+      "scopes": ["workspace:pear-integrations-slack-channels-c123-messages:read:/slack/channels/c123/messages/**"],
+      "required": "fs:read",
+      "file": "/slack/channels/c123/messages/1710000000.json",
+      "expect": { "auth_matches": true }
+    },
+    {
+      "name": "workspace-plane-grant-denies-outside-subtree",
+      "scopes": ["workspace:mount-sponsor:read:/slack/messages/**"],
+      "required": "fs:read",
+      "file": "/slack/users/user-1.json",
+      "expect": { "auth_matches": false }
+    },
+    {
+      "name": "workspace-plane-three-segment-is-full-namespace",
+      "scopes": ["workspace:mount-sponsor:read"],
+      "required": "fs:read",
+      "file": "/github/repos/acme/cloud/issues/5.json",
+      "expect": { "auth_matches": true }
+    },
+    {
+      "name": "workspace-plane-applies-to-fs-only",
+      "scopes": ["workspace:mount-sponsor:read:/slack/**"],
+      "required": "search:read",
+      "file": "/slack/messages/thread-1.json",
+      "expect": { "auth_matches": false }
+    },
+    {
+      "name": "matching-is-case-sensitive",
+      "scopes": ["relayfile:fs:read:/GitHub/**"],
+      "required": "fs:read",
+      "file": "/github/x",
+      "expect": { "auth_matches": false }
+    },
+    {
+      "name": "required-file-path-is-whitespace-trimmed",
+      "scopes": ["relayfile:fs:read:/github/**"],
+      "required": "fs:read",
+      "file": "  /github/x  ",
+      "expect": { "auth_matches": true }
+    },
+    {
+      "name": "scope-path-is-whitespace-trimmed",
+      "scopes": ["relayfile:fs:read: /github/** "],
+      "required": "fs:read",
+      "file": "/github/x",
+      "expect": { "auth_matches": true }
+    },
+    {
+      "name": "two-segment-scope-is-opaque-literal-not-grant",
+      "description": "Scopes with <3 segments never act as path grants; they only match as exact literals of the requirement string.",
+      "scopes": ["fs:write"],
+      "required": "fs:read",
+      "file": "/src/app.ts",
+      "expect": { "auth_matches": false }
+    },
+    {
+      "name": "empty-scope-set-denies",
+      "scopes": [],
+      "required": "fs:read",
+      "file": "/src/app.ts",
+      "expect": { "auth_matches": false }
+    }
+  ]
+}

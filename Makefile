@@ -19,7 +19,7 @@ MOUNT_BIN := relayfile-mount
 TARGETS := darwin/amd64 darwin/arm64 linux/amd64 linux/arm64
 RELEASE_BINS := $(CLI_BIN) $(SERVER_BIN) $(MOUNT_BIN)
 
-.PHONY: build build-all install test release clean
+.PHONY: build build-all install test contract-test release clean
 
 build:
 	mkdir -p $(BIN_DIR)
@@ -49,6 +49,12 @@ install: build
 
 test:
 	$(GO) test ./...
+
+# Path-contract conformance suite (contract/README.md + contract/fixtures/).
+# Also runs as part of plain `go test ./...`; this target is the named entry
+# point other repos' docs reference.
+contract-test:
+	$(GO) test ./internal/httpapi ./internal/relayfile -run 'TestContractFixtures'
 
 release: clean build-all
 	set -eu; \

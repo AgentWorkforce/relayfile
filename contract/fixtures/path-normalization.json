@@ -1,0 +1,42 @@
+{
+  "contract": "relayfile-path-contract",
+  "version": 1,
+  "area": "path-normalization",
+  "cases": [
+    { "name": "empty-becomes-root", "path": "", "expect": { "normalized": "/" } },
+    { "name": "root-unchanged", "path": "/", "expect": { "normalized": "/" } },
+    { "name": "missing-leading-slash-added", "path": "github", "expect": { "normalized": "/github" } },
+    { "name": "relative-multi-segment", "path": "a/b", "expect": { "normalized": "/a/b" } },
+    { "name": "canonical-unchanged", "path": "/github/repos/acme/cloud/issues/5.json", "expect": { "normalized": "/github/repos/acme/cloud/issues/5.json" } },
+    { "name": "single-trailing-slash-trimmed", "path": "/github/", "expect": { "normalized": "/github" } },
+    { "name": "relative-with-trailing-slash", "path": "a/b/", "expect": { "normalized": "/a/b" } },
+    {
+      "name": "double-trailing-slash-trims-one",
+      "path": "/a//",
+      "quirk": true,
+      "description": "Only one trailing slash is trimmed. Pinned current behavior; candidate for a v2 tightening.",
+      "expect": { "normalized": "/a/" }
+    },
+    {
+      "name": "dot-dot-segment-preserved",
+      "path": "/a/../b",
+      "quirk": true,
+      "description": "Dot segments are literal segment names in the virtual namespace; they are not collapsed and cannot alias another path.",
+      "expect": { "normalized": "/a/../b" }
+    },
+    {
+      "name": "dot-segment-preserved",
+      "path": "/a/./b",
+      "quirk": true,
+      "expect": { "normalized": "/a/./b" }
+    },
+    {
+      "name": "interior-double-slash-preserved",
+      "path": "/a//b",
+      "quirk": true,
+      "description": "Interior empty segments survive normalization; such paths are non-canonical distinct keys.",
+      "expect": { "normalized": "/a//b" }
+    },
+    { "name": "case-preserved", "path": "/GitHub/Repos", "expect": { "normalized": "/GitHub/Repos" } }
+  ]
+}
