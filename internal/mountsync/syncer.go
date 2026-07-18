@@ -423,6 +423,10 @@ func (c *HTTPClient) logHTTPStatus(method, requestPath string, statusCode int, r
 func (c *HTTPClient) ListTree(ctx context.Context, workspaceID, path string, depth int, cursor string) (TreeResponse, error) {
 	q := url.Values{}
 	q.Set("path", normalizeRemotePath(path))
+	// Relayfile mount owns .relay and its atomic state files as private runtime
+	// data. Ask the server to remove those rows before raw SQL pagination so a
+	// large acked outbox cannot consume every page before real content appears.
+	q.Set("excludeMountRuntime", "true")
 	if depth > 0 {
 		q.Set("depth", fmt.Sprintf("%d", depth))
 	}
