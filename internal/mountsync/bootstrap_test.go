@@ -3,6 +3,7 @@ package mountsync
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -362,6 +363,173 @@ func TestBootstrapResumesFromPersistedCursor(t *testing.T) {
 	}
 	if got := countLocalFiles(t, localDir); got != 50 {
 		t.Fatalf("expected 50 files mirrored after resume, got %d", got)
+	}
+}
+
+// TestBootstrapStallCycleGuardPersistsAndFailsHard reproduces the
+// non-converging unversioned partial-bootstrap shape: the first page is
+// persisted, then every resumed cycle fails at the same next-page cursor.
+// The empty revision is non-destructive and not the reason completion fails;
+// the unchanged checkpoint is. The guard turns the otherwise infinite
+// "non-empty state without completed bootstrap" loop into a hard failure,
+// even when every attempt is a fresh Syncer process.
+func TestBootstrapStallCycleGuardPersistsAndFailsHard(t *testing.T) {
+	client := newBootstrapClient(30, 10)
+	for path, file := range client.files {
+		file.Revision = ""
+		client.files[path] = file
+	}
+	client.listTreeFailAt = 2
+	client.listTreeFailErr = &HTTPError{StatusCode: 502, Code: "bad_gateway", Message: "stuck"}
+	localDir := t.TempDir()
+	opts := SyncerOptions{RootCtx: context.Background(), BootstrapStallCycles: 2}
+
+	s := newBootstrapSyncer(t, client, localDir, opts)
+	err := s.Reconcile(context.Background())
+	if err == nil {
+		t.Fatalf("expected partial bootstrap cycle to return its cloud error")
+	}
+	var stalled *BootstrapStalledError
+	if errors.As(err, &stalled) {
+		t.Fatalf("checkpoint-advancing cycle must stay below the hard limit: %v", err)
+	}
+	st := loadPersistedState(t, localDir)
+	if st.BootstrapStallCycles != 0 || st.BootstrapCursor == "" || st.BootstrapFilesSynced == 0 {
+		t.Fatalf("expected persisted partial checkpoint with reset stall count, state=%#v", st)
+	}
+	if got := countLocalFiles(t, localDir); got != 10 {
+		t.Fatalf("expected first page to stay materialized, got %d files", got)
+	}
+
+	// A fresh Syncer resumes at the same failing cursor. This is the first
+	// checkpoint-stable stalled cycle, so it increments but stays retryable.
+	s = newBootstrapSyncer(t, client, localDir, opts)
+	err = s.Reconcile(context.Background())
+	if err == nil || errors.As(err, &stalled) {
+		t.Fatalf("first checkpoint-stable cycle must return the cloud error, got %v", err)
+	}
+	st = loadPersistedState(t, localDir)
+	if st.BootstrapStallCycles != 1 {
+		t.Fatalf("BootstrapStallCycles after first unchanged cycle = %d, want 1", st.BootstrapStallCycles)
+	}
+
+	// The next fresh Syncer sees the same persisted partial checkpoint and
+	// reaches the configured limit, returning a typed, status-visible failure.
+	s = newBootstrapSyncer(t, client, localDir, opts)
+	err = s.Reconcile(context.Background())
+	if !errors.As(err, &stalled) {
+		t.Fatalf("expected BootstrapStalledError at the hard limit, got %v", err)
+	}
+	if stalled.Cycles != 2 || stalled.Limit != 2 {
+		t.Fatalf("BootstrapStalledError = %#v, want cycles=2 limit=2", stalled)
+	}
+	st = loadPersistedState(t, localDir)
+	if st.BootstrapComplete {
+		t.Fatalf("hard stall must not force BootstrapComplete")
+	}
+	if st.BootstrapStallCycles != 2 {
+		t.Fatalf("persisted BootstrapStallCycles = %d, want 2", st.BootstrapStallCycles)
+	}
+	if st.LastError == nil || st.LastError.Kind != "bootstrap_stalled" || st.LastError.Code != "bootstrap_stall_cycle_limit" {
+		t.Fatalf("expected structured persisted bootstrap stall error, got %#v", st.LastError)
+	}
+}
+
+func TestBootstrapStallCycleGuardIgnoresCanceledContext(t *testing.T) {
+	s := newBootstrapSyncer(t, newBootstrapClient(1, 1), t.TempDir(), SyncerOptions{
+		RootCtx:              context.Background(),
+		BootstrapStallCycles: 2,
+	})
+	s.state.BootstrapCursor = "resume-cursor"
+	s.state.BootstrapStallCycles = 1
+
+	wrappedCanceled := fmt.Errorf("mount shutting down: %w", context.Canceled)
+	if err := s.recordBootstrapCycle("resume-cursor", nil, wrappedCanceled); err != nil {
+		t.Fatalf("canceled context must not trip the stall guard: %v", err)
+	}
+	if got := s.state.BootstrapStallCycles; got != 1 {
+		t.Fatalf("canceled context changed stall count to %d, want 1", got)
+	}
+
+	// DeadlineExceeded is a failed retry at the same checkpoint, so it still
+	// consumes the remaining attempt and produces the typed hard stop.
+	err := s.recordBootstrapCycle("resume-cursor", nil, context.DeadlineExceeded)
+	var stalled *BootstrapStalledError
+	if !errors.As(err, &stalled) {
+		t.Fatalf("deadline exceeded must count toward the stall limit, got %v", err)
+	}
+	if stalled.Cycles != 2 || stalled.Limit != 2 {
+		t.Fatalf("BootstrapStalledError = %#v, want cycles=2 limit=2", stalled)
+	}
+}
+
+// TestBootstrapStallCycleGuardResetsOnCheckpointAdvanceAndCompletion proves
+// that the counter reflects lack of traversal progress, not merely errors.
+func TestBootstrapStallCycleGuardResetsOnCheckpointAdvanceAndCompletion(t *testing.T) {
+	client := newBootstrapClient(30, 10)
+	client.listTreeFailAt = 2
+	client.listTreeFailErr = &HTTPError{StatusCode: 502, Code: "bad_gateway", Message: "page failure"}
+	localDir := t.TempDir()
+	s := newBootstrapSyncer(t, client, localDir, SyncerOptions{
+		RootCtx:              context.Background(),
+		BootstrapStallCycles: 3,
+	})
+
+	// Page one advances the cursor before page two fails, so the count resets.
+	if err := s.Reconcile(context.Background()); err == nil {
+		t.Fatalf("expected first bootstrap attempt to fail on page 2")
+	}
+	if st := loadPersistedState(t, localDir); st.BootstrapStallCycles != 0 || st.BootstrapCursor == "" {
+		t.Fatalf("cursor advance must reset stall count; state=%#v", st)
+	}
+
+	// Fail at the same persisted cursor once: count increments.
+	if err := s.Reconcile(context.Background()); err == nil {
+		t.Fatalf("expected unchanged checkpoint attempt to fail")
+	}
+	if st := loadPersistedState(t, localDir); st.BootstrapStallCycles != 1 {
+		t.Fatalf("unchanged checkpoint count = %d, want 1", st.BootstrapStallCycles)
+	}
+
+	// Let page two advance, then fail on page three. The new cursor resets the
+	// persisted count despite the returned cloud error.
+	client.mu.Lock()
+	client.listTreeFailAt = 3
+	client.mu.Unlock()
+	if err := s.Reconcile(context.Background()); err == nil {
+		t.Fatalf("expected bootstrap attempt to fail on page 3")
+	}
+	if st := loadPersistedState(t, localDir); st.BootstrapStallCycles != 0 {
+		t.Fatalf("advanced checkpoint must reset stall count, got %d", st.BootstrapStallCycles)
+	}
+
+	client.mu.Lock()
+	client.listTreeFailAt = 0
+	client.mu.Unlock()
+	if err := s.Reconcile(context.Background()); err != nil {
+		t.Fatalf("completion after checkpoint advances: %v", err)
+	}
+	st := loadPersistedState(t, localDir)
+	if !st.BootstrapComplete || st.BootstrapStallCycles != 0 {
+		t.Fatalf("completion must clear checkpoint and stall count, state=%#v", st)
+	}
+}
+
+func TestBootstrapStallCycleLimitUsesOptionThenEnvThenDefault(t *testing.T) {
+	newSyncer := func(t *testing.T, opts SyncerOptions) *Syncer {
+		t.Helper()
+		return newBootstrapSyncer(t, newBootstrapClient(1, 1), t.TempDir(), opts)
+	}
+	t.Setenv("RELAYFILE_BOOTSTRAP_STALL_CYCLES", "7")
+	if got := newSyncer(t, SyncerOptions{}).bootstrapStallCycles; got != 7 {
+		t.Fatalf("env bootstrap stall limit = %d, want 7", got)
+	}
+	if got := newSyncer(t, SyncerOptions{BootstrapStallCycles: 3}).bootstrapStallCycles; got != 3 {
+		t.Fatalf("explicit bootstrap stall limit = %d, want 3", got)
+	}
+	t.Setenv("RELAYFILE_BOOTSTRAP_STALL_CYCLES", "not-a-number")
+	if got := newSyncer(t, SyncerOptions{}).bootstrapStallCycles; got != defaultBootstrapStallCycles {
+		t.Fatalf("invalid env bootstrap stall limit = %d, want default %d", got, defaultBootstrapStallCycles)
 	}
 }
 

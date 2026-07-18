@@ -134,6 +134,65 @@ func TestRevisionGateRefusesOlderListing(t *testing.T) {
 	}
 }
 
+// TestRevisionGateRefusesUnversionedListingAcrossRepeatedPulls proves that
+// an unversioned listing can never authorize destructive snapshots.
+// Two partial listings without revisions must neither create nor confirm a
+// tombstone for the absent tracked path.
+func TestRevisionGateRefusesUnversionedListingAcrossRepeatedPulls(t *testing.T) {
+	disableWS := false
+	localDir := t.TempDir()
+
+	keepPath := filepath.Join(localDir, "keep.md")
+	if err := os.WriteFile(keepPath, []byte("# keep"), 0o644); err != nil {
+		t.Fatalf("seed keep: %v", err)
+	}
+	otherPath := filepath.Join(localDir, "other.md")
+	if err := os.WriteFile(otherPath, []byte("# other"), 0o644); err != nil {
+		t.Fatalf("seed other: %v", err)
+	}
+	stateFile := filepath.Join(localDir, ".relayfile-mount-state.json")
+	if err := writeMountState(stateFile, mountState{
+		Files: map[string]trackedFile{
+			"/keep.md":  {ContentType: "text/markdown", Hash: hashString("# keep")},
+			"/other.md": {ContentType: "text/markdown", Hash: hashString("# other")},
+		},
+	}); err != nil {
+		t.Fatalf("seed state: %v", err)
+	}
+
+	// The cloud omits /keep.md and emits no revisions for /other.md. This is
+	// indistinguishable from an unversioned partial listing, never a delete
+	// authorization.
+	fc := &fakeClient{files: map[string]RemoteFile{
+		"/other.md": {Path: "/other.md", ContentType: "text/markdown", Content: "# other"},
+	}, eventsUnsupported: true}
+	syncer, err := NewSyncer(fc, SyncerOptions{
+		WorkspaceID: "ws_unversioned_gate",
+		RemoteRoot:  "/",
+		LocalRoot:   localDir,
+		WebSocket:   &disableWS,
+		StateFile:   stateFile,
+	})
+	if err != nil {
+		t.Fatalf("new syncer: %v", err)
+	}
+
+	for i := 0; i < 2; i++ {
+		if err := syncer.SyncOnce(context.Background()); err != nil {
+			t.Fatalf("sync %d: %v", i+1, err)
+		}
+	}
+	if _, err := os.Stat(keepPath); err != nil {
+		t.Fatalf("unversioned listing deleted tracked file: %v", err)
+	}
+	if syncer.state.Counters.SnapshotDeleteBlocked < 2 {
+		t.Fatalf("SnapshotDeleteBlocked = %d, want at least two blocked pulls", syncer.state.Counters.SnapshotDeleteBlocked)
+	}
+	if _, err := os.Stat(filepath.Join(localDir, ".relay", "pending-deletes")); !os.IsNotExist(err) {
+		t.Fatalf("unversioned listing must not create tombstones, stat err=%v", err)
+	}
+}
+
 // TestRevisionAdvances exercises the numeric and lexicographic paths.
 func TestRevisionAdvances(t *testing.T) {
 	if revisionAdvances("rev_5", "") {

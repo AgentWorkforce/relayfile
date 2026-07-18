@@ -9829,6 +9829,7 @@ func TestLoadStateResetsBootstrapCompleteOnlyOnWriteOnlyToMirrorSyncMode(t *test
 				BootstrapStartedAt:   time.Now().UTC().Format(time.RFC3339Nano),
 				BootstrapFilesSynced: 3,
 				BootstrapFilesTotal:  9,
+				BootstrapStallCycles: 2,
 				SyncMode:             tc.syncMode,
 			}); err != nil {
 				t.Fatalf("seed state: %v", err)
@@ -9857,6 +9858,9 @@ func TestLoadStateResetsBootstrapCompleteOnlyOnWriteOnlyToMirrorSyncMode(t *test
 				}
 				if syncer.state.BootstrapFilesTotal != 0 {
 					t.Fatalf("BootstrapFilesTotal = %d, want 0", syncer.state.BootstrapFilesTotal)
+				}
+				if syncer.state.BootstrapStallCycles != 0 {
+					t.Fatalf("BootstrapStallCycles = %d, want 0", syncer.state.BootstrapStallCycles)
 				}
 			}
 		})
