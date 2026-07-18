@@ -4,7 +4,12 @@
   "area": "scope-paths",
   "cases": [
     { "name": "star-is-valid", "scope_path": "*", "expect": { "valid": true, "mounts_at": "/" } },
-    { "name": "root-is-valid", "scope_path": "/", "expect": { "valid": true, "mounts_at": "/" } },
+    {
+      "name": "root-is-valid-but-exact-only",
+      "scope_path": "/",
+      "description": "\"/\" is a valid EXACT path: it authorizes only the root node itself, nothing beneath it. Whole-namespace access is \"*\" (or \"/**\"). See auth-matching root-scope-* cases and README §5.1.",
+      "expect": { "valid": true, "mounts_at": "/" }
+    },
     { "name": "exact-path-valid", "scope_path": "/github/repos/acme/cloud/issues/5.json", "expect": { "valid": true, "mounts_at": "/github/repos/acme/cloud/issues/5.json" } },
     { "name": "recursive-glob-valid", "scope_path": "/github/**", "expect": { "valid": true, "mounts_at": "/github" } },
     { "name": "root-recursive-glob-valid", "scope_path": "/**", "expect": { "valid": true, "mounts_at": "/" } },

@@ -11,6 +11,22 @@
       "expect": { "auth_matches": true }
     },
     {
+      "name": "root-scope-path-matches-only-root-node",
+      "description": "\"/\" is an exact path like any other: it matches the root node and nothing else. It is NOT a whole-tree grant — compare star-scope-path and /** cases.",
+      "scopes": ["relayfile:fs:read:/"],
+      "required": "fs:read",
+      "file": "/",
+      "expect": { "auth_matches": true }
+    },
+    {
+      "name": "root-scope-path-denies-everything-beneath-root",
+      "description": "Pins the / vs * asymmetry: both are valid with mounts_at \"/\", but / authorizes nothing beneath the root node. An author wanting the whole tree must write * or /**.",
+      "scopes": ["relayfile:fs:read:/"],
+      "required": "fs:read",
+      "file": "/a.json",
+      "expect": { "auth_matches": false }
+    },
+    {
       "name": "exact-path-grant-denies-other-file",
       "scopes": ["relayfile:fs:read:/src/app.ts"],
       "required": "fs:read",

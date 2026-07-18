@@ -144,6 +144,15 @@ of three glob forms:
 | `<name>*` | `/github/acme-*` | `f` starts with the raw byte prefix `/github/acme-` |
 | `*` | `*` | any `f`, including the empty required-path |
 
+**The `/` vs `*` asymmetry.** Both `/` and `*` are valid scope paths with
+`mounts_at: /`, but their authorization behavior is opposite: `*` matches
+every file path (including the empty required-path), while `/` is an exact
+path like any other — it matches **only the root node itself**, nothing
+beneath it. An author who writes `/` intending "the whole tree" gets a
+valid-looking scope that authorizes almost nothing. Whole-namespace access
+is spelled `*` (or `/**`). The fixtures pin both sides
+(`root-scope-path-*` cases in `auth-matching.json`).
+
 Points that pin known cross-implementation disagreements:
 
 - **`/*` is not single-segment.** `/github/*` matches
@@ -269,6 +278,18 @@ failure.
   and `cloud` consume these files (vendored copy or package) and report.
   Phase 2 is report-only; expected red: `relayfile-cloud` (segment-glob
   matcher is too permissive), `cloud` (emits invalid scopes).
+
+### Stricter subsets
+
+An implementation (typically a path **producer** or canonicalizer, e.g. a
+mount-path layer that accepts terminal `/**` only and not `/*` or `name*`)
+MAY accept a strict subset of this grammar — a scope path it rejects can
+never be one it wrongly honors. But a subset must be a **declared choice**:
+documented in that implementation, with a rationale, and its rejections must
+be explicit errors or reported degradations per §5.2. An undocumented subset
+is exactly the two-vocabularies drift that produced cloud#2297. Consumers
+and enforcers (anything answering `auth_matches`) get no such latitude: they
+must implement the full grammar and pass every fixture.
 
 ### Changing the contract
 
