@@ -156,6 +156,7 @@ func TestRevisionGateRefusesUnversionedListingAcrossRepeatedPulls(t *testing.T) 
 			"/keep.md":  {ContentType: "text/markdown", Hash: hashString("# keep")},
 			"/other.md": {ContentType: "text/markdown", Hash: hashString("# other")},
 		},
+		BootstrapComplete: true,
 	}); err != nil {
 		t.Fatalf("seed state: %v", err)
 	}
@@ -195,6 +196,9 @@ func TestRevisionGateRefusesUnversionedListingAcrossRepeatedPulls(t *testing.T) 
 
 // TestRevisionAdvances exercises the numeric and lexicographic paths.
 func TestRevisionAdvances(t *testing.T) {
+	if !revisionAdvances("", "") {
+		t.Fatalf("empty last + empty observed must advance for the first-ever observation")
+	}
 	if revisionAdvances("rev_5", "") {
 		t.Fatalf("empty observed must never advance")
 	}

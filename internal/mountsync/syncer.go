@@ -4806,10 +4806,17 @@ func (s *Syncer) applyRemoteSnapshotDeletesRev(remotePaths map[string]struct{}, 
 	}
 
 	// Revision gate: refuse to act on a listing that does not strictly
-	// advance the highest-applied revision. revisionAdvances treats an
-	// empty observedRevision as "unknown" — which is also refused. An
-	// empty stored LastAppliedRevision allows the first advancement.
-	if !revisionAdvances(s.state.LastAppliedRevision, observedRevision) {
+	// advance the highest-applied revision. Empty/empty is allowed only for
+	// the first completed bootstrap observation. BootstrapComplete is the
+	// persisted discriminator that prevents every later unversioned listing
+	// from masquerading as another first observation and confirming deletes.
+	revisionAdvanced := revisionAdvances(s.state.LastAppliedRevision, observedRevision)
+	if strings.TrimSpace(observedRevision) == "" &&
+		strings.TrimSpace(s.state.LastAppliedRevision) == "" &&
+		s.state.BootstrapComplete {
+		revisionAdvanced = false
+	}
+	if !revisionAdvanced {
 		s.state.Counters.SnapshotDeleteBlocked++
 		s.logf("snapshot delete pass refused: observed revision %q does not advance past last applied %q",
 			observedRevision, s.state.LastAppliedRevision)
@@ -4870,12 +4877,15 @@ func (s *Syncer) applyRemoteSnapshotDeletesRev(remotePaths map[string]struct{}, 
 // Revisions in this codebase look like "rev_<int>" (see fakeClient) but
 // real cloud revisions may be opaque; we compare numerically when both
 // match the rev_<int> shape, and lexicographically otherwise. An empty
-// observed is never an advancement.
+// observed advances only when last is also empty: the first-ever observation
+// from a backend without revision information. Callers that persist an
+// independent completion marker must use it to distinguish later empty/empty
+// observations from this initial case.
 func revisionAdvances(last, observed string) bool {
 	observed = strings.TrimSpace(observed)
 	last = strings.TrimSpace(last)
 	if observed == "" {
-		return false
+		return last == ""
 	}
 	if last == "" {
 		return true
