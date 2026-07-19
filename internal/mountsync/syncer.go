@@ -4784,15 +4784,18 @@ func (s *Syncer) applyRemoteSnapshotDeletes(remotePaths map[string]struct{}, con
 //  1. Refuse the destructive pass entirely when the cloud-error circuit
 //     is open (read-only mirror remains; the next healthy cycle catches
 //     up). Layout materialization is still safe to run.
-//  2. Refuse when the observedRevision does not strictly advance past
+//  2. Treat the first complete bootstrap observation with no revision as a
+//     non-destructive no-op. This lets the caller persist bootstrap completion
+//     without creating or confirming tombstones.
+//  3. Refuse when the observedRevision does not strictly advance past
 //     state.LastAppliedRevision — an older or equal listing must not
 //     authorize deletes.
-//  3. For every tracked path missing from the fresh listing, write or
+//  4. For every tracked path missing from the fresh listing, write or
 //     confirm a tombstone under .relay/pending-deletes. Only the second
 //     consecutive confirmation actually deletes; the first observation
 //     is recorded and skipped.
-//  4. After the pass, prune tombstones for paths that have reappeared.
-//  5. On a clean pass, advance state.LastAppliedRevision.
+//  5. After the pass, prune tombstones for paths that have reappeared.
+//  6. On a clean pass, advance state.LastAppliedRevision.
 func (s *Syncer) applyRemoteSnapshotDeletesRev(remotePaths map[string]struct{}, conflicted map[string]struct{}, observedRevision string) error {
 	if err := s.materializeProviderLayoutsFromPaths(remotePaths); err != nil {
 		return err
@@ -4805,10 +4808,21 @@ func (s *Syncer) applyRemoteSnapshotDeletesRev(remotePaths map[string]struct{}, 
 		return nil
 	}
 
+	// The first completed bootstrap traversal may legitimately have no
+	// revision. Let the caller record that completion, but do not allow this
+	// unversioned observation to enter tombstone creation or confirmation.
+	// BootstrapComplete is persisted immediately after the successful
+	// traversal, so later unversioned observations fall through to the normal
+	// revision gate and are counted as blocked.
+	if strings.TrimSpace(observedRevision) == "" &&
+		strings.TrimSpace(s.state.LastAppliedRevision) == "" &&
+		!s.state.BootstrapComplete {
+		s.logf("snapshot delete pass skipped: first bootstrap observation has no revision; destructive reconciliation deferred")
+		return nil
+	}
+
 	// Revision gate: refuse to act on a listing that does not strictly
-	// advance the highest-applied revision. revisionAdvances treats an
-	// empty observedRevision as "unknown" — which is also refused. An
-	// empty stored LastAppliedRevision allows the first advancement.
+	// advance the highest-applied revision.
 	if !revisionAdvances(s.state.LastAppliedRevision, observedRevision) {
 		s.state.Counters.SnapshotDeleteBlocked++
 		s.logf("snapshot delete pass refused: observed revision %q does not advance past last applied %q",
@@ -4870,7 +4884,10 @@ func (s *Syncer) applyRemoteSnapshotDeletesRev(remotePaths map[string]struct{}, 
 // Revisions in this codebase look like "rev_<int>" (see fakeClient) but
 // real cloud revisions may be opaque; we compare numerically when both
 // match the rev_<int> shape, and lexicographically otherwise. An empty
-// observed is never an advancement.
+// observed is never an advancement. Bootstrap callers that need to accept a
+// first unversioned observation must keep that exception local to their
+// persisted bootstrap-completion gate; this generic predicate is also used by
+// strict candidate ordering.
 func revisionAdvances(last, observed string) bool {
 	observed = strings.TrimSpace(observed)
 	last = strings.TrimSpace(last)

@@ -366,6 +366,45 @@ func TestBootstrapResumesFromPersistedCursor(t *testing.T) {
 	}
 }
 
+// TestBootstrapConvergesOnFirstUnversionedObservation reproduces #360's
+// empty-revision bootstrap shape. A complete traversal with no remote
+// revision is still a legitimate first observation: it must not be counted as
+// a revision-gate refusal, and the persisted bootstrap must converge.
+func TestBootstrapConvergesOnFirstUnversionedObservation(t *testing.T) {
+	client := newBootstrapClient(12, 12)
+	for path, file := range client.files {
+		file.Revision = ""
+		client.files[path] = file
+	}
+	localDir := t.TempDir()
+	stateFile := filepath.Join(localDir, ".relayfile-mount-state.json")
+	if err := writeMountState(stateFile, mountState{
+		Files:             map[string]trackedFile{},
+		BootstrapComplete: false,
+	}); err != nil {
+		t.Fatalf("seed state: %v", err)
+	}
+
+	s := newBootstrapSyncer(t, client, localDir, SyncerOptions{
+		RootCtx:   context.Background(),
+		StateFile: stateFile,
+	})
+	if err := s.Reconcile(context.Background()); err != nil {
+		t.Fatalf("unversioned bootstrap reconcile: %v", err)
+	}
+
+	st := loadPersistedState(t, localDir)
+	if !st.BootstrapComplete {
+		t.Fatalf("empty-revision full traversal must persist BootstrapComplete")
+	}
+	if st.Counters.SnapshotDeleteBlocked != 0 {
+		t.Fatalf("first empty-revision observation was blocked %d time(s), want 0", st.Counters.SnapshotDeleteBlocked)
+	}
+	if got := countLocalFiles(t, localDir); got != 12 {
+		t.Fatalf("mirrored files = %d, want 12", got)
+	}
+}
+
 // TestBootstrapStallCycleGuardPersistsAndFailsHard reproduces the
 // non-converging unversioned partial-bootstrap shape: the first page is
 // persisted, then every resumed cycle fails at the same next-page cursor.
