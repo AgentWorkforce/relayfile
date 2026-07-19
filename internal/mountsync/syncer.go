@@ -4813,8 +4813,8 @@ func (s *Syncer) applyRemoteSnapshotDeletesRev(remotePaths map[string]struct{}, 
 	revisionAdvanced := revisionAdvances(s.state.LastAppliedRevision, observedRevision)
 	if strings.TrimSpace(observedRevision) == "" &&
 		strings.TrimSpace(s.state.LastAppliedRevision) == "" &&
-		s.state.BootstrapComplete {
-		revisionAdvanced = false
+		!s.state.BootstrapComplete {
+		revisionAdvanced = true
 	}
 	if !revisionAdvanced {
 		s.state.Counters.SnapshotDeleteBlocked++
@@ -4877,15 +4877,15 @@ func (s *Syncer) applyRemoteSnapshotDeletesRev(remotePaths map[string]struct{}, 
 // Revisions in this codebase look like "rev_<int>" (see fakeClient) but
 // real cloud revisions may be opaque; we compare numerically when both
 // match the rev_<int> shape, and lexicographically otherwise. An empty
-// observed advances only when last is also empty: the first-ever observation
-// from a backend without revision information. Callers that persist an
-// independent completion marker must use it to distinguish later empty/empty
-// observations from this initial case.
+// observed is never an advancement. Bootstrap callers that need to accept a
+// first unversioned observation must keep that exception local to their
+// persisted bootstrap-completion gate; this generic predicate is also used by
+// strict candidate ordering.
 func revisionAdvances(last, observed string) bool {
 	observed = strings.TrimSpace(observed)
 	last = strings.TrimSpace(last)
 	if observed == "" {
-		return last == ""
+		return false
 	}
 	if last == "" {
 		return true

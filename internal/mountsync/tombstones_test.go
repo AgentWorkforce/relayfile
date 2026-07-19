@@ -196,8 +196,8 @@ func TestRevisionGateRefusesUnversionedListingAcrossRepeatedPulls(t *testing.T) 
 
 // TestRevisionAdvances exercises the numeric and lexicographic paths.
 func TestRevisionAdvances(t *testing.T) {
-	if !revisionAdvances("", "") {
-		t.Fatalf("empty last + empty observed must advance for the first-ever observation")
+	if revisionAdvances("", "") {
+		t.Fatalf("generic revision ordering must not treat empty + empty as strictly newer")
 	}
 	if revisionAdvances("rev_5", "") {
 		t.Fatalf("empty observed must never advance")
