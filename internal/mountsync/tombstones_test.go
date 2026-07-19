@@ -281,3 +281,57 @@ func TestObservePendingDeleteAgedOutReobservesCurrentPass(t *testing.T) {
 		t.Fatalf("unexpected counters after reset: %#v", s.state.Counters)
 	}
 }
+
+func TestFirstUnversionedBootstrapDoesNotConfirmLegacyTombstone(t *testing.T) {
+	const remotePath = "/gone.md"
+	const contents = "# preserve me"
+
+	localDir := t.TempDir()
+	localPath := filepath.Join(localDir, "gone.md")
+	if err := os.WriteFile(localPath, []byte(contents), 0o644); err != nil {
+		t.Fatalf("seed tracked file: %v", err)
+	}
+	s, err := NewSyncer(&fakeClient{}, SyncerOptions{
+		WorkspaceID: "ws_first_unversioned_bootstrap_tombstone",
+		RemoteRoot:  "/",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("new syncer: %v", err)
+	}
+	s.state.Files[remotePath] = trackedFile{
+		Revision:    "rev_legacy",
+		ContentType: "text/markdown",
+		Hash:        hashString(contents),
+	}
+	s.state.BootstrapComplete = false
+	s.state.LastAppliedRevision = ""
+	seeded := pendingDeleteTombstone{
+		Path:             remotePath,
+		FirstObservedAt:  time.Now().UTC(),
+		LastObservedAt:   time.Now().UTC(),
+		Attempts:         1,
+		ObservedRevision: "rev_legacy",
+	}
+	if err := s.writeTombstone(&seeded); err != nil {
+		t.Fatalf("seed legacy tombstone: %v", err)
+	}
+
+	if err := s.applyRemoteSnapshotDeletesRev(map[string]struct{}{}, nil, ""); err != nil {
+		t.Fatalf("first unversioned bootstrap delete pass: %v", err)
+	}
+
+	if got, err := os.ReadFile(localPath); err != nil || string(got) != contents {
+		t.Fatalf("first unversioned bootstrap changed tracked file: contents=%q err=%v", got, err)
+	}
+	if _, ok := s.state.Files[remotePath]; !ok {
+		t.Fatalf("first unversioned bootstrap removed tracked state")
+	}
+	got, err := s.loadTombstone(remotePath)
+	if err != nil {
+		t.Fatalf("load legacy tombstone: %v", err)
+	}
+	if got == nil || got.Attempts != seeded.Attempts || got.ObservedRevision != seeded.ObservedRevision {
+		t.Fatalf("first unversioned bootstrap mutated legacy tombstone: got=%#v want=%#v", got, seeded)
+	}
+}
