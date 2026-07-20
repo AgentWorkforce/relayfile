@@ -1223,8 +1223,12 @@ class SupervisedMountedWorkspaceHandle implements MountedWorkspaceHandle {
     this.refreshRetryMaxMs = input.refreshRetryMaxMs
     this.onEvent = input.onEvent
     this.signal = input.signal
-    this.signal?.addEventListener("abort", this.handleAbort, { once: true })
-    this.schedule()
+    if (this.signal?.aborted) {
+      this.handleAbort()
+    } else {
+      this.signal?.addEventListener("abort", this.handleAbort, { once: true })
+      this.schedule()
+    }
   }
 
   get workspaceId(): string {
@@ -1351,10 +1355,12 @@ class SupervisedMountedWorkspaceHandle implements MountedWorkspaceHandle {
 
   private async replaceMount(): Promise<void> {
     const previous = this.mounted
+    if (this.stopped) return
     await previous.stop().catch(() => {})
+    if (this.stopped) return
     const replacement = await this.launch()
     if (this.stopped) {
-      await replacement.stop()
+      await replacement.stop().catch(() => {})
       return
     }
     this.mounted = replacement

@@ -1699,6 +1699,102 @@ describe("RelayfileSetup", () => {
     }
   })
 
+  it("ensureMountedWorkspace does not start a mount for an already aborted signal", async () => {
+    const tempRoot = await mkdtemp(
+      path.join(os.tmpdir(), "relayfile-sdk-supervised-preaborted-")
+    )
+    const localDir = path.join(tempRoot, "mirror")
+    queueFetch(
+      makeJoinResponse("rf_jwt_joined"),
+      makeMountSessionResponse({ suggestedRefreshAt: "2026-05-09T11:00:00.000Z" })
+    )
+    const stop = vi.fn().mockResolvedValue(undefined)
+    const launcher: MountLauncher = {
+      start: vi.fn().mockResolvedValue({
+        pid: 4321,
+        ready: Promise.resolve(),
+        status: vi.fn().mockResolvedValue({
+          ready: true,
+          mode: "poll",
+          expiresAt: null,
+          suggestedRefreshAt: null
+        } satisfies MountedWorkspaceStatus),
+        stop
+      })
+    }
+    const controller = new AbortController()
+    controller.abort()
+
+    try {
+      const setup = new RelayfileSetup({ retry: { maxRetries: 0 } })
+      await expect(setup.ensureMountedWorkspace({
+          workspaceId: "ws_123",
+          localDir,
+          verifyProvider: false,
+          launcher,
+          signal: controller.signal
+        }))
+        .rejects.toThrow("Aborted while waiting for mountWorkspace")
+      expect(launcher.start).not.toHaveBeenCalled()
+      expect(stop).not.toHaveBeenCalled()
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true })
+    }
+  })
+
+  it("does not launch a replacement after stop begins during refresh", async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime("2026-05-09T10:00:00.000Z")
+    const tempRoot = await mkdtemp(
+      path.join(os.tmpdir(), "relayfile-sdk-supervised-stop-refresh-")
+    )
+    const localDir = path.join(tempRoot, "mirror")
+    queueFetch(
+      makeJoinResponse("rf_jwt_joined"),
+      makeMountSessionResponse({
+        suggestedRefreshAt: "2026-05-09T10:00:01.000Z"
+      })
+    )
+    let releaseStop!: () => void
+    const stopBlocked = new Promise<void>((resolve) => { releaseStop = resolve })
+    const firstStop = vi.fn().mockReturnValue(stopBlocked)
+    const launcher: MountLauncher = {
+      start: vi.fn().mockResolvedValue({
+        pid: 4321,
+        ready: Promise.resolve(),
+        status: vi.fn().mockResolvedValue({
+          ready: true,
+          mode: "poll",
+          expiresAt: null,
+          suggestedRefreshAt: null
+        } satisfies MountedWorkspaceStatus),
+        stop: firstStop
+      })
+    }
+
+    try {
+      const setup = new RelayfileSetup({ retry: { maxRetries: 0 } })
+      const handle = await setup.ensureMountedWorkspace({
+        workspaceId: "ws_123",
+        localDir,
+        verifyProvider: false,
+        launcher,
+        healthCheckIntervalMs: 30_000
+      })
+
+      await vi.advanceTimersByTimeAsync(1_000)
+      expect(firstStop).toHaveBeenCalledTimes(1)
+      const stopping = handle.stop()
+      releaseStop()
+      await stopping
+
+      expect(launcher.start).toHaveBeenCalledTimes(1)
+      expect(handle.ready).toBe(false)
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true })
+    }
+  })
+
   it("mounted handle status reads .relay/state.json and keeps expiresAt fields stable", async () => {
     const tempRoot = await mkdtemp(
       path.join(os.tmpdir(), "relayfile-sdk-status-state-file-")
