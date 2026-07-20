@@ -202,6 +202,7 @@
         "MountLauncherStart",
         "MountLocalLayout",
         "MountMode",
+        "MountSupervisorEvent",
         "MountSyncMode",
         "MountWorkspaceInput",
         "MountedWorkspaceHandle",
