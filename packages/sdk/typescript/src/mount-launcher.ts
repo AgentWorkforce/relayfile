@@ -193,7 +193,7 @@ class RelayfileMountProcessInstance implements MountLauncherInstance {
   }
 
   async status(): Promise<MountedWorkspaceStatus> {
-    return readMountedWorkspaceStatus({
+    const status = await readMountedWorkspaceStatus({
       localDir: this.localDir,
       workspaceId: this.input.env.RELAYFILE_WORKSPACE ?? "",
       remotePath: this.input.env.RELAYFILE_REMOTE_PATH ?? "/",
@@ -206,6 +206,7 @@ class RelayfileMountProcessInstance implements MountLauncherInstance {
       suggestedRefreshAt: null,
       pid: this.pid
     })
+    return this.exited ? { ...status, ready: false } : status
   }
 
   async stop(): Promise<void> {

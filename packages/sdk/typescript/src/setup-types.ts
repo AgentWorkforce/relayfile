@@ -176,6 +176,15 @@ export interface MountedWorkspaceHandle {
   stop(): Promise<void>
 }
 
+export interface MountSupervisorEvent {
+  type: "mount.refreshed" | "mount.refresh_failed"
+  workspaceId: string
+  localDir: string
+  attempt: number
+  retryInMs?: number
+  errorCode?: string
+}
+
 export interface MountLauncherEvent {
   type: string
   [key: string]: unknown
@@ -221,6 +230,15 @@ export interface EnsureMountedWorkspaceInput extends MountWorkspaceInput {
   provider?: WorkspaceIntegrationProvider
   verifyProvider?: boolean
   providerReadyTimeoutMs?: number
+  /** Keep a background mount healthy and renew its short-lived session. Defaults to true. */
+  supervise?: boolean
+  /** Health-check cadence for supervised background mounts. */
+  healthCheckIntervalMs?: number
+  /** Initial retry delay after a supervised refresh failure. */
+  refreshRetryBaseMs?: number
+  /** Maximum retry delay after repeated supervised refresh failures. */
+  refreshRetryMaxMs?: number
+  onSupervisorEvent?: (event: MountSupervisorEvent) => void | Promise<void>
 }
 
 export interface AgentWorkspaceInviteOptions {

@@ -57,6 +57,7 @@ export {
   type MountSessionResponse,
   type MountSessionResult,
   type MountSyncMode,
+  type MountSupervisorEvent,
   type MountedWorkspaceHandle,
   type MountedWorkspaceStatus,
   type MountWorkspaceInput,
