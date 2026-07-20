@@ -1560,6 +1560,145 @@ describe("RelayfileSetup", () => {
     }
   })
 
+  it("ensureMountedWorkspace renews a background mount at the suggested refresh time", async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime("2026-05-09T10:00:00.000Z")
+    const tempRoot = await mkdtemp(
+      path.join(os.tmpdir(), "relayfile-sdk-supervised-refresh-")
+    )
+    const localDir = path.join(tempRoot, "mirror")
+    const fetchMock = queueFetch(
+      makeJoinResponse("rf_jwt_joined"),
+      makeMountSessionResponse({
+        relayfileToken: "rf_mount_token_1",
+        expiresAt: "2026-05-09T10:01:05.000Z",
+        suggestedRefreshAt: "2026-05-09T10:00:01.000Z"
+      }),
+      makeMountSessionResponse({
+        relayfileToken: "rf_mount_token_2",
+        expiresAt: "2026-05-09T11:00:00.000Z",
+        suggestedRefreshAt: "2026-05-09T10:55:00.000Z"
+      })
+    )
+    const firstStop = vi.fn().mockResolvedValue(undefined)
+    const secondStop = vi.fn().mockResolvedValue(undefined)
+    const instances = [firstStop, secondStop].map((stop) => ({
+      pid: 4321,
+      ready: Promise.resolve(),
+      status: vi.fn().mockResolvedValue({
+        ready: true,
+        mode: "poll",
+        expiresAt: null,
+        suggestedRefreshAt: null
+      } satisfies MountedWorkspaceStatus),
+      stop
+    }))
+    const launcher: MountLauncher = {
+      start: vi.fn()
+        .mockResolvedValueOnce(instances[0])
+        .mockResolvedValueOnce(instances[1])
+    }
+    const events: Array<{ type: string; attempt: number }> = []
+
+    try {
+      const setup = new RelayfileSetup({ retry: { maxRetries: 0 } })
+      const handle = await setup.ensureMountedWorkspace({
+        workspaceId: "ws_123",
+        localDir,
+        verifyProvider: false,
+        launcher,
+        healthCheckIntervalMs: 30_000,
+        onSupervisorEvent: (event) => { events.push(event) }
+      })
+
+      expect(handle.env().RELAYFILE_TOKEN).toBe("rf_mount_token_1")
+      await vi.advanceTimersByTimeAsync(1_000)
+
+      expect(fetchMock).toHaveBeenCalledTimes(3)
+      expect(firstStop).toHaveBeenCalledTimes(1)
+      expect(handle.env().RELAYFILE_TOKEN).toBe("rf_mount_token_2")
+      expect(handle.expiresAt).toBe("2026-05-09T11:00:00.000Z")
+      expect(events).toEqual([expect.objectContaining({
+        type: "mount.refreshed",
+        workspaceId: "ws_123",
+        localDir,
+        attempt: 0
+      })])
+
+      await handle.stop()
+      expect(secondStop).toHaveBeenCalledTimes(1)
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true })
+    }
+  })
+
+  it("ensureMountedWorkspace restarts a background mount that becomes unhealthy", async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime("2026-05-09T10:00:00.000Z")
+    const tempRoot = await mkdtemp(
+      path.join(os.tmpdir(), "relayfile-sdk-supervised-health-")
+    )
+    const localDir = path.join(tempRoot, "mirror")
+    queueFetch(
+      makeJoinResponse("rf_jwt_joined"),
+      makeMountSessionResponse({
+        suggestedRefreshAt: "2026-05-09T11:00:00.000Z"
+      }),
+      makeMountSessionResponse({
+        relayfileToken: "rf_mount_restarted",
+        suggestedRefreshAt: "2026-05-09T11:00:00.000Z"
+      })
+    )
+    const firstStop = vi.fn().mockResolvedValue(undefined)
+    const secondStop = vi.fn().mockResolvedValue(undefined)
+    const launcher: MountLauncher = {
+      start: vi.fn()
+        .mockResolvedValueOnce({
+          pid: 4321,
+          ready: Promise.resolve(),
+          status: vi.fn().mockResolvedValue({
+            ready: false,
+            mode: "poll",
+            expiresAt: null,
+            suggestedRefreshAt: null
+          } satisfies MountedWorkspaceStatus),
+          stop: firstStop
+        })
+        .mockResolvedValueOnce({
+          pid: 4322,
+          ready: Promise.resolve(),
+          status: vi.fn().mockResolvedValue({
+            ready: true,
+            mode: "poll",
+            expiresAt: null,
+            suggestedRefreshAt: null
+          } satisfies MountedWorkspaceStatus),
+          stop: secondStop
+        })
+    }
+
+    try {
+      const setup = new RelayfileSetup({ retry: { maxRetries: 0 } })
+      const handle = await setup.ensureMountedWorkspace({
+        workspaceId: "ws_123",
+        localDir,
+        verifyProvider: false,
+        launcher,
+        healthCheckIntervalMs: 1_000
+      })
+
+      await vi.advanceTimersByTimeAsync(1_000)
+
+      expect(launcher.start).toHaveBeenCalledTimes(2)
+      expect(firstStop).toHaveBeenCalledTimes(1)
+      expect(handle.ready).toBe(true)
+      await handle.stop()
+      expect(secondStop).toHaveBeenCalledTimes(1)
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true })
+    }
+  })
+
   it("mounted handle status reads .relay/state.json and keeps expiresAt fields stable", async () => {
     const tempRoot = await mkdtemp(
       path.join(os.tmpdir(), "relayfile-sdk-status-state-file-")

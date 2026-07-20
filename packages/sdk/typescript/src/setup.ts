@@ -42,6 +42,7 @@ import {
   type MountSessionResponse,
   type MountSessionResult,
   type MountSyncMode,
+  type MountSupervisorEvent,
   type MountedWorkspaceHandle,
   type MountedWorkspaceStatus,
   type MountWorkspaceInput,
@@ -72,6 +73,9 @@ const DEFAULT_MOUNT_READY_TIMEOUT_MS = 60_000
 const DEFAULT_MOUNT_AGENT_NAME = "relayfile-mount"
 const DEFAULT_MOUNT_LOCAL_LAYOUT: MountLocalLayout = "exact"
 const DEFAULT_MOUNT_SYNC_MODE: MountSyncMode = "mirror"
+const DEFAULT_MOUNT_HEALTH_INTERVAL_MS = 30_000
+const DEFAULT_MOUNT_REFRESH_RETRY_BASE_MS = 1_000
+const DEFAULT_MOUNT_REFRESH_RETRY_MAX_MS = 60_000
 const TOKEN_REFRESH_AGE_MS = 55 * 60 * 1000
 
 const nodeOnlyMountLauncher: MountLauncher = {
@@ -155,6 +159,11 @@ interface NormalizedEnsureMountedWorkspaceInput extends NormalizedMountWorkspace
   provider?: WorkspaceIntegrationProvider
   verifyProvider: boolean
   providerReadyTimeoutMs: number
+  supervise: boolean
+  healthCheckIntervalMs: number
+  refreshRetryBaseMs: number
+  refreshRetryMaxMs: number
+  onSupervisorEvent?: (event: MountSupervisorEvent) => void | Promise<void>
 }
 
 interface ValidatedIntegrationStatusResponse {
@@ -342,7 +351,7 @@ export class RelayfileSetup {
       )
     }
 
-    return this.mountWorkspace({
+    const mountInput: MountWorkspaceInput = {
       workspace,
       localDir: normalized.localDir,
       remotePath: normalized.remotePath,
@@ -355,6 +364,20 @@ export class RelayfileSetup {
       signal: normalized.signal,
       launcher: normalized.launcher,
       readyTimeoutMs: normalized.readyTimeoutMs
+    }
+    const mounted = await this.mountWorkspace(mountInput)
+    if (!normalized.supervise || !normalized.background) {
+      return mounted
+    }
+
+    return new SupervisedMountedWorkspaceHandle({
+      mounted,
+      launch: () => this.mountWorkspace(mountInput),
+      healthCheckIntervalMs: normalized.healthCheckIntervalMs,
+      refreshRetryBaseMs: normalized.refreshRetryBaseMs,
+      refreshRetryMaxMs: normalized.refreshRetryMaxMs,
+      onEvent: normalized.onSupervisorEvent,
+      signal: normalized.signal
     })
   }
 
@@ -1161,11 +1184,189 @@ class MountedWorkspaceHandleImpl implements MountedWorkspaceHandle {
   }
 
   private async performStop(): Promise<void> {
+    this.readySnapshot = false
     if (this.probeOnly || !this.launcherInstance) {
       return
     }
     await safeStopLauncher(this.launcherInstance)
   }
+}
+
+class SupervisedMountedWorkspaceHandle implements MountedWorkspaceHandle {
+  private mounted: MountedWorkspaceHandle
+  private readonly launch: () => Promise<MountedWorkspaceHandle>
+  private readonly healthCheckIntervalMs: number
+  private readonly refreshRetryBaseMs: number
+  private readonly refreshRetryMaxMs: number
+  private readonly onEvent?: (event: MountSupervisorEvent) => void | Promise<void>
+  private readonly signal?: AbortSignal
+  private timer?: ReturnType<typeof setTimeout>
+  private refreshPromise?: Promise<void>
+  private stopPromise?: Promise<void>
+  private stopped = false
+  private supervisorReady = true
+  private refreshAttempts = 0
+
+  constructor(input: {
+    mounted: MountedWorkspaceHandle
+    launch: () => Promise<MountedWorkspaceHandle>
+    healthCheckIntervalMs: number
+    refreshRetryBaseMs: number
+    refreshRetryMaxMs: number
+    onEvent?: (event: MountSupervisorEvent) => void | Promise<void>
+    signal?: AbortSignal
+  }) {
+    this.mounted = input.mounted
+    this.launch = input.launch
+    this.healthCheckIntervalMs = input.healthCheckIntervalMs
+    this.refreshRetryBaseMs = input.refreshRetryBaseMs
+    this.refreshRetryMaxMs = input.refreshRetryMaxMs
+    this.onEvent = input.onEvent
+    this.signal = input.signal
+    this.signal?.addEventListener("abort", this.handleAbort, { once: true })
+    this.schedule()
+  }
+
+  get workspaceId(): string {
+    return this.mounted.workspaceId
+  }
+
+  get localDir(): string {
+    return this.mounted.localDir
+  }
+
+  get remotePath(): string {
+    return this.mounted.remotePath
+  }
+
+  get mode(): MountMode {
+    return this.mounted.mode
+  }
+
+  get ready(): boolean {
+    return !this.stopped && this.supervisorReady && this.mounted.ready
+  }
+
+  get expiresAt(): string | null {
+    return this.mounted.expiresAt
+  }
+
+  get suggestedRefreshAt(): string | null {
+    return this.mounted.suggestedRefreshAt
+  }
+
+  env(): Record<string, string> {
+    return this.mounted.env()
+  }
+
+  async status(): Promise<MountedWorkspaceStatus> {
+    const status = await this.mounted.status()
+    return {
+      ...status,
+      ready: !this.stopped && this.supervisorReady && status.ready,
+      expiresAt: this.expiresAt,
+      suggestedRefreshAt: this.suggestedRefreshAt
+    }
+  }
+
+  async stop(): Promise<void> {
+    if (!this.stopPromise) this.stopPromise = this.performStop()
+    await this.stopPromise
+  }
+
+  private async performStop(): Promise<void> {
+    this.stopped = true
+    this.supervisorReady = false
+    this.signal?.removeEventListener("abort", this.handleAbort)
+    if (this.timer) clearTimeout(this.timer)
+    this.timer = undefined
+    await this.refreshPromise?.catch(() => {})
+    await this.mounted.stop()
+  }
+
+  private readonly handleAbort = (): void => {
+    void this.stop()
+  }
+
+  private schedule(delayOverrideMs?: number): void {
+    if (this.stopped || this.timer) return
+    const suggestedRefreshAtMs = Date.parse(this.mounted.suggestedRefreshAt ?? "")
+    const untilRefresh = Number.isFinite(suggestedRefreshAtMs)
+      ? Math.max(0, suggestedRefreshAtMs - Date.now())
+      : this.healthCheckIntervalMs
+    const delayMs = delayOverrideMs ?? Math.min(this.healthCheckIntervalMs, untilRefresh)
+    this.timer = setTimeout(() => {
+      this.timer = undefined
+      this.refreshPromise = this.checkAndRefresh().finally(() => {
+        this.refreshPromise = undefined
+      })
+    }, Math.max(1_000, delayMs))
+    this.timer.unref?.()
+  }
+
+  private async checkAndRefresh(): Promise<void> {
+    if (this.stopped) return
+    try {
+      const suggestedRefreshAtMs = Date.parse(this.mounted.suggestedRefreshAt ?? "")
+      const refreshDue = Number.isFinite(suggestedRefreshAtMs) && Date.now() >= suggestedRefreshAtMs
+      if (!refreshDue) {
+        const status = await this.mounted.status()
+        if (status.ready) {
+          this.supervisorReady = true
+          this.refreshAttempts = 0
+          this.schedule()
+          return
+        }
+      }
+      await this.replaceMount()
+      if (this.stopped) return
+      this.supervisorReady = true
+      this.refreshAttempts = 0
+      this.emit({
+        type: "mount.refreshed",
+        workspaceId: this.workspaceId,
+        localDir: this.localDir,
+        attempt: 0
+      })
+      this.schedule()
+    } catch (error) {
+      if (this.stopped) return
+      this.supervisorReady = false
+      this.refreshAttempts += 1
+      const retryInMs = Math.min(
+        this.refreshRetryMaxMs,
+        this.refreshRetryBaseMs * 2 ** (this.refreshAttempts - 1)
+      )
+      this.emit({
+        type: "mount.refresh_failed",
+        workspaceId: this.workspaceId,
+        localDir: this.localDir,
+        attempt: this.refreshAttempts,
+        retryInMs,
+        errorCode: setupErrorCode(error)
+      })
+      this.schedule(retryInMs)
+    }
+  }
+
+  private async replaceMount(): Promise<void> {
+    const previous = this.mounted
+    await previous.stop().catch(() => {})
+    const replacement = await this.launch()
+    if (this.stopped) {
+      await replacement.stop()
+      return
+    }
+    this.mounted = replacement
+  }
+
+  private emit(event: MountSupervisorEvent): void {
+    void Promise.resolve(this.onEvent?.(event)).catch(() => {})
+  }
+}
+
+function setupErrorCode(error: unknown): string {
+  return error instanceof RelayfileSetupError ? error.code : "mount_refresh_failed"
 }
 
 // The metadata + accessible-resources verbs accept `WorkspaceIntegrationProvider | string`
@@ -1430,8 +1631,27 @@ function normalizeEnsureMountedWorkspaceInput(
     providerReadyTimeoutMs: Math.max(
       0,
       Math.floor(input.providerReadyTimeoutMs ?? 0)
-    )
+    ),
+    supervise: input.supervise !== false && normalized.background,
+    healthCheckIntervalMs: positiveInterval(
+      input.healthCheckIntervalMs,
+      DEFAULT_MOUNT_HEALTH_INTERVAL_MS
+    ),
+    refreshRetryBaseMs: positiveInterval(
+      input.refreshRetryBaseMs,
+      DEFAULT_MOUNT_REFRESH_RETRY_BASE_MS
+    ),
+    refreshRetryMaxMs: positiveInterval(
+      input.refreshRetryMaxMs,
+      DEFAULT_MOUNT_REFRESH_RETRY_MAX_MS
+    ),
+    onSupervisorEvent: input.onSupervisorEvent
   }
+}
+
+function positiveInterval(value: number | undefined, fallback: number): number {
+  if (value === undefined || !Number.isFinite(value) || value <= 0) return fallback
+  return Math.max(1_000, Math.floor(value))
 }
 
 function normalizeMountModeInput(mode?: string): MountMode {
