@@ -2,6 +2,7 @@ package mountsync
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -118,6 +119,92 @@ func TestRemoteLongBasenameHashSuffixAvoidsPrefixCollisions(t *testing.T) {
 		if got := len([]byte(filepath.Base(localPath))); got > 255 {
 			t.Fatalf("local basename %s is %d bytes, want <= NAME_MAX (255)", label, got)
 		}
+	}
+}
+
+func TestLocallyCreatedLongValidBasenameKeepsIdentityAcrossReconcile(t *testing.T) {
+	t.Parallel()
+
+	localRoot := t.TempDir()
+	longBase := strings.Repeat("local-title-", 19) + "draft.json"
+	if got := len(longBase); got <= maxLocalMirrorBasenameBytes || got > 255 {
+		t.Fatalf("test basename is %d bytes, want %d < length <= 255", got, maxLocalMirrorBasenameBytes)
+	}
+	remotePath := normalizeRemotePath("/reddit/posts/" + longBase)
+	localPath := filepath.Join(localRoot, "reddit", "posts", longBase)
+	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+		t.Fatalf("create local parent: %v", err)
+	}
+
+	client := &fakeClient{}
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_local_long_valid_name",
+		RemoteRoot:  "/",
+		LocalRoot:   localRoot,
+	})
+	if err != nil {
+		t.Fatalf("new syncer: %v", err)
+	}
+	if err := os.WriteFile(localPath, []byte(`{"version":1}`), 0o644); err != nil {
+		t.Fatalf("create long valid local file: %v", err)
+	}
+	// The scan path derives the correct remote name from the local path, but
+	// must keep reading the original local identity instead of remapping the
+	// remote path through the mirror-shortening function.
+	if _, err := syncer.pushLocal(context.Background()); err != nil {
+		t.Fatalf("initial scan writeback remapped the user-created name: %v", err)
+	}
+	if got, ok := client.files[remotePath]; !ok {
+		t.Fatalf("initial writeback did not create exact remote path %q", remotePath)
+	} else if got.Content != `{"version":1}` {
+		t.Fatalf("initial scan writeback content = %q, want version 1", got.Content)
+	}
+
+	// Subsequent remote reconciliation must update the same user-created path
+	// rather than materializing a second hash-shortened sibling.
+	remoteUpdate := RemoteFile{
+		Path:        remotePath,
+		Revision:    "rev_remote_update",
+		ContentType: "application/json",
+		Content:     `{"version":3}`,
+	}
+	if err := syncer.applyRemoteFile(remotePath, remoteUpdate, nil); err != nil {
+		t.Fatalf("apply remote update to preserved local identity: %v", err)
+	}
+	if got, err := os.ReadFile(localPath); err != nil {
+		t.Fatalf("read preserved local path: %v", err)
+	} else if string(got) != remoteUpdate.Content {
+		t.Fatalf("preserved local content = %q, want %q", got, remoteUpdate.Content)
+	}
+	shortenedPath, err := remoteToLocalPath(localRoot, "/", remotePath)
+	if err != nil {
+		t.Fatalf("compute default shortened path: %v", err)
+	}
+	if shortenedPath == localPath {
+		t.Fatalf("test did not exercise a shortened default path")
+	}
+	if _, err := os.Stat(shortenedPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("reconcile created shortened sibling %q: %v", shortenedPath, err)
+	}
+
+	if err := syncer.saveState(); err != nil {
+		t.Fatalf("persist local identity mapping: %v", err)
+	}
+	restarted, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_local_long_valid_name",
+		RemoteRoot:  "/",
+		LocalRoot:   localRoot,
+	})
+	if err != nil {
+		t.Fatalf("restart syncer: %v", err)
+	}
+	if err := restarted.loadState(); err != nil {
+		t.Fatalf("load persisted local identity mapping: %v", err)
+	}
+	if got, err := restarted.remoteToLocalPath(remotePath); err != nil {
+		t.Fatalf("map remote path after restart: %v", err)
+	} else if got != localPath {
+		t.Fatalf("remote path mapped to %q after restart, want preserved %q", got, localPath)
 	}
 }
 
