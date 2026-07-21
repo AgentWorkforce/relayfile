@@ -1,0 +1,279 @@
+package mountsync
+
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+func TestRemoteLongBasenameIsShortenedAndRoundTripsForWriteback(t *testing.T) {
+	t.Parallel()
+
+	localRoot := t.TempDir()
+	longBase := strings.Repeat("reddit-title-", 22) + "1uvwn9q.json"
+	if len(longBase) <= 255 {
+		t.Fatalf("test basename is only %d bytes; want > 255", len(longBase))
+	}
+	remotePath := "/reddit/subreddits/localllama/posts/" + longBase
+	client := &fakeClient{}
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_long_reddit_name",
+		RemoteRoot:  "/",
+		LocalRoot:   localRoot,
+	})
+	if err != nil {
+		t.Fatalf("new syncer: %v", err)
+	}
+
+	localPath, err := syncer.remoteToLocalPath(remotePath)
+	if err != nil {
+		t.Fatalf("remoteToLocalPath: %v", err)
+	}
+	if got := len([]byte(filepath.Base(localPath))); got > 255 {
+		t.Fatalf("local basename is %d bytes, want <= NAME_MAX (255): %q", got, filepath.Base(localPath))
+	}
+	localPathAgain, err := syncer.remoteToLocalPath(remotePath)
+	if err != nil {
+		t.Fatalf("second remoteToLocalPath: %v", err)
+	}
+	if localPathAgain != localPath {
+		t.Fatalf("long-name mapping is not deterministic: %q != %q", localPathAgain, localPath)
+	}
+
+	file := RemoteFile{
+		Path:        remotePath,
+		Revision:    "rev_reddit_long_name",
+		ContentType: "application/json",
+		Content:     `{"id":"1uvwn9q"}`,
+	}
+	if err := syncer.applyRemoteFile(remotePath, file, nil); err != nil {
+		t.Fatalf("applyRemoteFile(long basename): %v", err)
+	}
+	if got, err := os.ReadFile(localPath); err != nil {
+		t.Fatalf("read shortened local mirror: %v", err)
+	} else if string(got) != file.Content {
+		t.Fatalf("shortened local mirror content = %q, want %q", got, file.Content)
+	}
+
+	gotRemote, err := syncer.localPathToRemotePath(localPath, nil)
+	if err != nil {
+		t.Fatalf("localPathToRemotePath(shortened path): %v", err)
+	}
+	if gotRemote != remotePath {
+		t.Fatalf("writeback remote path = %q, want exact original %q", gotRemote, remotePath)
+	}
+	rel, err := filepath.Rel(localRoot, localPath)
+	if err != nil {
+		t.Fatalf("relative shortened path: %v", err)
+	}
+	if got := syncer.localRelativeToRemotePath(rel); got != remotePath {
+		t.Fatalf("watcher writeback remote path = %q, want exact original %q", got, remotePath)
+	}
+
+	// Exercise the real watcher/outbox writeback boundary, not only the path
+	// helpers: editing the shortened local file must update the original remote
+	// provider name and must never create a hash-shortened cloud path.
+	if err := syncer.saveState(); err != nil {
+		t.Fatalf("persist tracked long-name state: %v", err)
+	}
+	updated := `{"id":"1uvwn9q","edited":true}`
+	if err := os.WriteFile(localPath, []byte(updated), 0o644); err != nil {
+		t.Fatalf("edit shortened local mirror: %v", err)
+	}
+	if err := syncer.HandleLocalChange(context.Background(), filepath.ToSlash(rel), 0); err != nil {
+		t.Fatalf("write back shortened local mirror: %v", err)
+	}
+	if got := client.files[remotePath].Content; got != updated {
+		t.Fatalf("original remote path content = %q, want %q", got, updated)
+	}
+	shortRemote := normalizeRemotePath("/" + filepath.ToSlash(rel))
+	if shortRemote != remotePath {
+		if _, exists := client.files[shortRemote]; exists {
+			t.Fatalf("writeback created shortened remote path %q", shortRemote)
+		}
+	}
+}
+
+func TestRemoteLongBasenameHashSuffixAvoidsPrefixCollisions(t *testing.T) {
+	t.Parallel()
+
+	localRoot := t.TempDir()
+	prefix := strings.Repeat("same-reddit-title-", 18)
+	remoteA := "/reddit/posts/" + prefix + "a.json"
+	remoteB := "/reddit/posts/" + prefix + "b.json"
+	localA, err := remoteToLocalPath(localRoot, "/", remoteA)
+	if err != nil {
+		t.Fatalf("map A: %v", err)
+	}
+	localB, err := remoteToLocalPath(localRoot, "/", remoteB)
+	if err != nil {
+		t.Fatalf("map B: %v", err)
+	}
+	if filepath.Base(localA) == filepath.Base(localB) {
+		t.Fatalf("distinct long remote basenames collided at %q", filepath.Base(localA))
+	}
+	for label, localPath := range map[string]string{"A": localA, "B": localB} {
+		if got := len([]byte(filepath.Base(localPath))); got > 255 {
+			t.Fatalf("local basename %s is %d bytes, want <= NAME_MAX (255)", label, got)
+		}
+	}
+}
+
+func TestBootstrapSkipsOneUnmaterializablePathAndContinues(t *testing.T) {
+	t.Parallel()
+
+	localRoot := t.TempDir()
+	// Keep every component legal while making the total remote path just under
+	// MaxRemotePathLen. Adding the absolute temp-root prefix pushes the local
+	// mirror path over PATH_MAX on POSIX filesystems, deterministically yielding
+	// ENAMETOOLONG without relying on chmod behavior (which differs as root).
+	badPath := "/reddit"
+	for len(badPath)+len("/segment0123456789")+len("/pathological.json") < MaxRemotePathLen-8 {
+		badPath += "/segment0123456789"
+	}
+	badPath += "/pathological.json"
+	healthyPath := "/slack/channels/C1/messages/healthy.json"
+	client := &fakeClient{files: map[string]RemoteFile{
+		badPath: {
+			Path:        badPath,
+			Revision:    "rev_bad",
+			ContentType: "application/json",
+			Content:     `{"bad":true}`,
+		},
+		healthyPath: {
+			Path:        healthyPath,
+			Revision:    "rev_healthy",
+			ContentType: "application/json",
+			Content:     `{"ok":true}`,
+		},
+	}}
+	logger := &captureLogger{}
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_skip_bad_local_path",
+		RemoteRoot:  "/",
+		LocalRoot:   localRoot,
+		Logger:      logger,
+	})
+	if err != nil {
+		t.Fatalf("new syncer: %v", err)
+	}
+
+	if err := syncer.pullRemoteFullTree(context.Background(), nil, bootstrapProgress{}); err != nil {
+		t.Fatalf("bootstrap should skip one path-local failure and continue: %v", err)
+	}
+	if !syncer.state.BootstrapComplete {
+		t.Fatal("bootstrap did not complete after skipping one unmaterializable path")
+	}
+	if _, ok := syncer.state.SkippedMaterializations[badPath]; !ok {
+		t.Fatalf("skipped path %s was not durably queued for retry", badPath)
+	}
+	if err := syncer.saveStateWithoutLocalScan(); err != nil {
+		t.Fatalf("persist skipped-materialization queue: %v", err)
+	}
+	restarted, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_skip_bad_local_path",
+		RemoteRoot:  "/",
+		LocalRoot:   localRoot,
+		Logger:      logger,
+	})
+	if err != nil {
+		t.Fatalf("new restarted syncer: %v", err)
+	}
+	if err := restarted.loadState(); err != nil {
+		t.Fatalf("load persisted skipped-materialization queue: %v", err)
+	}
+	if _, ok := restarted.state.SkippedMaterializations[badPath]; !ok {
+		t.Fatalf("skipped path %s was lost across process restart", badPath)
+	}
+	healthyLocal, err := syncer.remoteToLocalPath(healthyPath)
+	if err != nil {
+		t.Fatalf("map healthy path: %v", err)
+	}
+	if got, err := os.ReadFile(healthyLocal); err != nil {
+		t.Fatalf("healthy sibling was not mirrored: %v", err)
+	} else if string(got) != `{"ok":true}` {
+		t.Fatalf("healthy sibling content = %q", got)
+	}
+	if got := strings.Join(logger.lines, "\n"); !strings.Contains(got, "warning") ||
+		!strings.Contains(got, badPath) || !strings.Contains(got, "skipping") {
+		t.Fatalf("missing skip-and-continue warning for %s; logs:\n%s", badPath, got)
+	}
+}
+
+func TestSkippedMaterializationIsPersistedRetriedAndCleared(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("permission failure is not enforceable as root")
+	}
+
+	localRoot := t.TempDir()
+	blockedDir := filepath.Join(localRoot, "reddit", "posts")
+	if err := os.MkdirAll(blockedDir, 0o755); err != nil {
+		t.Fatalf("create blocked directory: %v", err)
+	}
+	if err := os.Chmod(blockedDir, 0o555); err != nil {
+		t.Fatalf("make directory read-only: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(blockedDir, 0o755) })
+
+	badPath := "/reddit/posts/temporarily-blocked.json"
+	healthyPath := "/slack/healthy.json"
+	client := &fakeClient{files: map[string]RemoteFile{
+		badPath: {
+			Path:        badPath,
+			Revision:    "rev_bad",
+			ContentType: "application/json",
+			Content:     `{"retry":true}`,
+		},
+		healthyPath: {
+			Path:        healthyPath,
+			Revision:    "rev_healthy",
+			ContentType: "application/json",
+			Content:     `{"ok":true}`,
+		},
+	}}
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_retry_skipped_materialization",
+		RemoteRoot:  "/",
+		LocalRoot:   localRoot,
+	})
+	if err != nil {
+		t.Fatalf("new syncer: %v", err)
+	}
+
+	if err := syncer.pullRemoteFullTree(context.Background(), nil, bootstrapProgress{}); err != nil {
+		t.Fatalf("bootstrap with one blocked file: %v", err)
+	}
+	if _, ok := syncer.state.SkippedMaterializations[badPath]; !ok {
+		t.Fatalf("blocked path %s was not persisted for retry", badPath)
+	}
+	if got := client.readFileCallsByPath[badPath]; got != 1 {
+		t.Fatalf("initial read count for blocked path = %d, want 1", got)
+	}
+
+	if err := os.Chmod(blockedDir, 0o755); err != nil {
+		t.Fatalf("unblock directory: %v", err)
+	}
+	// Make the normal event path a quiet fast-path. The only reason the remote
+	// file is read again must be the durable skipped-materialization retry.
+	syncer.state.EventsCursor = "evt_tip"
+	if err := syncer.pullRemote(context.Background(), nil); err != nil {
+		t.Fatalf("retry skipped materialization on quiet cycle: %v", err)
+	}
+	if _, ok := syncer.state.SkippedMaterializations[badPath]; ok {
+		t.Fatalf("successfully materialized path %s remained queued", badPath)
+	}
+	if got := client.readFileCallsByPath[badPath]; got != 2 {
+		t.Fatalf("read count after targeted retry = %d, want 2", got)
+	}
+	localPath, err := syncer.remoteToLocalPath(badPath)
+	if err != nil {
+		t.Fatalf("map retried path: %v", err)
+	}
+	if got, err := os.ReadFile(localPath); err != nil {
+		t.Fatalf("retried file was not materialized: %v", err)
+	} else if string(got) != `{"retry":true}` {
+		t.Fatalf("retried file content = %q", got)
+	}
+}
