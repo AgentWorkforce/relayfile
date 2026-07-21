@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _No unreleased changes._
 
+## [0.10.33] - 2026-07-21
+
+_No user-visible changes in this release._
+
 ## [0.10.32] - 2026-07-20
 
 _No user-visible changes in this release._
@@ -552,7 +556,8 @@ _No user-visible changes in this release._
 ### Fixed
 - Upload raw binaries to GitHub releases. ([#34])
 
-[Unreleased]: https://github.com/AgentWorkforce/relayfile/compare/v0.10.32...HEAD
+[Unreleased]: https://github.com/AgentWorkforce/relayfile/compare/v0.10.33...HEAD
+[0.10.33]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.10.33
 [0.10.32]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.10.32
 [0.10.31]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.10.31
 [0.10.30]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.10.30

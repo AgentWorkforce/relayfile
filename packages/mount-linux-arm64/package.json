@@ -1,6 +1,6 @@
 {
   "name": "@relayfile/mount-linux-arm64",
-  "version": "0.10.32",
+  "version": "0.10.33",
   "description": "relayfile-mount binary for linux arm64. Installed automatically as an optional dependency of @relayfile/sdk.",
   "files": [
     "bin"
