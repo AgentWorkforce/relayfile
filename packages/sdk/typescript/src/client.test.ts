@@ -25,6 +25,8 @@ import type {
   SyncIngressStatusResponse,
   DeadLetterFeedResponse,
   DeadLetterItem,
+  DurableResourceSubscription,
+  DurableSubscriptionDelivery,
   AdminIngressStatusResponse,
   AdminSyncStatusResponse,
   IngestWebhookInput,
@@ -2168,6 +2170,135 @@ describe("RelayFileClient — retry", () => {
 // ---------------------------------------------------------------------------
 // New methods: ingestWebhook, listPendingWritebacks, ackWriteback
 // ---------------------------------------------------------------------------
+
+describe("RelayFileClient — durable resource subscriptions", () => {
+  const subscription: DurableResourceSubscription = {
+    id: "rsub_1",
+    ownerId: "factory-owner",
+    subscriberId: "deployment-42",
+    provider: "github",
+    resourceRef: "/github/repos/acme__api/pulls/by-id/42.json",
+    eventTypes: ["pull_request.synchronize"],
+    terminalEventTypes: ["pull_request.closed"],
+    intent: "wake-pr-babysitter",
+    status: "active",
+    createdAt: "2026-07-21T09:00:00.000Z",
+    updatedAt: "2026-07-21T09:00:00.000Z",
+    expiresAt: "2026-07-21T10:00:00.000Z",
+    retiredAt: null,
+  };
+
+  const delivery: DurableSubscriptionDelivery = {
+    id: "rsubdel_1",
+    subscriptionId: subscription.id,
+    ownerId: subscription.ownerId,
+    subscriberId: subscription.subscriberId,
+    provider: subscription.provider,
+    resourceRef: subscription.resourceRef,
+    event: {
+      id: "evt_1",
+      type: "pull_request.synchronize",
+      path: subscription.resourceRef,
+      revision: "rev_1",
+      origin: "provider_sync",
+      provider: "github",
+      correlationId: "corr_event_1",
+      timestamp: "2026-07-21T09:01:00.000Z",
+    },
+    terminal: false,
+    status: "claimed",
+    createdAt: "2026-07-21T09:01:00.000Z",
+    claimedAt: "2026-07-21T09:02:00.000Z",
+    claimLeaseExpiresAt: "2026-07-21T09:03:00.000Z",
+    claimToken: "claim-token-1",
+    acceptedAt: null,
+  };
+
+  it("creates, lists, claims, accepts, and cancels through owner-scoped routes", async () => {
+    const f = vi.fn()
+      .mockResolvedValueOnce(mockResponse(subscription, 201))
+      .mockResolvedValueOnce(mockResponse({ subscriptions: [subscription] }))
+      .mockResolvedValueOnce(mockResponse({ deliveries: [delivery] }))
+      .mockResolvedValueOnce(mockResponse({
+        delivery: { ...delivery, status: "accepted", claimToken: null, acceptedAt: "2026-07-21T09:02:30.000Z" },
+      }))
+      .mockResolvedValueOnce(mockResponse(undefined, 204));
+    const client = makeClient(f as typeof fetch);
+
+    const created = await client.createOrRenewDurableResourceSubscription({
+      workspaceId: "ws_acme",
+      provider: "github",
+      resourceRef: subscription.resourceRef,
+      eventTypes: subscription.eventTypes,
+      terminalEventTypes: subscription.terminalEventTypes,
+      subscriberId: subscription.subscriberId,
+      intent: subscription.intent ?? undefined,
+      ttlSeconds: 3_600,
+      ...({ ownerId: "forged-owner" } as object),
+    });
+    expect(created.id).toBe("rsub_1");
+    const createBody = JSON.parse((f.mock.calls[0]![1] as RequestInit).body as string);
+    expect(createBody).not.toHaveProperty("ownerId");
+    expect(f.mock.calls[0]![0]).toBe("https://relay.test/v1/workspaces/ws_acme/subscriptions");
+
+    const listed = await client.listDurableResourceSubscriptions("ws_acme");
+    expect(listed.subscriptions).toEqual([subscription]);
+
+    const claimed = await client.claimDurableSubscriptionDeliveries({ workspaceId: "ws_acme", limit: 7 });
+    expect(claimed.deliveries).toEqual([delivery]);
+    expect(JSON.parse((f.mock.calls[2]![1] as RequestInit).body as string)).toEqual({ limit: 7 });
+
+    const accepted = await client.acceptDurableSubscriptionDelivery({
+      workspaceId: "ws_acme",
+      deliveryId: delivery.id,
+      claimToken: delivery.claimToken!,
+    });
+    expect(accepted.delivery.status).toBe("accepted");
+    expect(JSON.parse((f.mock.calls[3]![1] as RequestInit).body as string)).toEqual({
+      claimToken: "claim-token-1",
+    });
+
+    await client.cancelDurableResourceSubscription("ws_acme", subscription.id);
+    expect(f.mock.calls[4]![0]).toBe(
+      "https://relay.test/v1/workspaces/ws_acme/subscriptions/rsub_1",
+    );
+    expect((f.mock.calls[4]![1] as RequestInit).method).toBe("DELETE");
+  });
+
+  it("surfaces capability 404s and validates identifiers before a request", async () => {
+    const unavailable = mockFetch({ code: "not_found", message: "route unavailable" }, 404);
+    const client = makeClient(unavailable);
+    await expect(client.listDurableResourceSubscriptions("ws_acme")).rejects.toMatchObject({
+      status: 404,
+    });
+
+    const untouched = mockFetch({});
+    const validating = makeClient(untouched);
+    await expect(validating.listDurableResourceSubscriptions("")).rejects.toThrow("workspaceId is required");
+    await expect(validating.cancelDurableResourceSubscription("ws_acme", "")).rejects.toThrow(
+      "subscriptionId is required",
+    );
+    await expect(validating.claimDurableSubscriptionDeliveries({ workspaceId: "" })).rejects.toThrow(
+      "workspaceId is required",
+    );
+    await expect(validating.acceptDurableSubscriptionDelivery({
+      workspaceId: "ws_acme",
+      deliveryId: "delivery-1",
+      claimToken: "",
+    })).rejects.toThrow("claimToken is required");
+    expect(untouched).not.toHaveBeenCalled();
+  });
+});
+
+function mockResponse(body: unknown, status = 200): Response {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    headers: new Headers(body === undefined ? {} : { "content-type": "application/json" }),
+    json: () => Promise.resolve(body),
+    text: () => Promise.resolve(body === undefined ? "" : JSON.stringify(body)),
+  } as unknown as Response;
+}
 
 describe("RelayFileClient — new webhook/writeback methods", () => {
   // These tests validate the 3 missing SDK methods once implemented.
