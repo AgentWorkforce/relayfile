@@ -5,15 +5,20 @@
 // which @relayfile/sdk resolves at runtime via require.resolve.
 //
 // Usage:
-//   make build-all            # produce dist/relayfile-mount-<os>-<arch>
+//   make build-all            # produce dist/<os>_<arch>/relayfile-mount
 //   node scripts/build-mount-npm-packages.mjs
 //
+// Packed-consumer verification may override RELAYFILE_MOUNT_DIST_DIR and
+// RELAYFILE_MOUNT_PACKAGES_DIR so release staging never mutates worktree
+// build output or checked-out package directories.
+//
 // For each target it:
-//   1. copies dist/relayfile-mount-<os>-<goarch> -> packages/mount-<os>-<arch>/bin/relayfile-mount
+//   1. copies dist/<os>_<goarch>/relayfile-mount (or the legacy flat release
+//      artifact dist/relayfile-mount-<os>-<goarch>) into the platform package
 //   2. rewrites that package's version to match @relayfile/sdk
 //
 // Note the arch naming: Go emits `amd64`, npm os/cpu uses Node's `x64`. The
-// dist files use the Go name; the package dirs use the Node name.
+// dist paths use the Go name; the package dirs use the Node name.
 import { chmod, copyFile, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { constants } from 'node:fs'
 import { access } from 'node:fs/promises'
@@ -22,8 +27,8 @@ import { fileURLToPath } from 'node:url'
 
 const scriptDir = dirname(fileURLToPath(import.meta.url))
 const repoRoot = resolve(scriptDir, '..')
-const distDir = join(repoRoot, 'dist')
-const packagesDir = join(repoRoot, 'packages')
+const distDir = resolve(process.env.RELAYFILE_MOUNT_DIST_DIR || join(repoRoot, 'dist'))
+const packagesDir = resolve(process.env.RELAYFILE_MOUNT_PACKAGES_DIR || join(repoRoot, 'packages'))
 
 // (npmArch used in package dir + os/cpu) -> (goArch used in dist file name)
 const TARGETS = [
@@ -53,7 +58,11 @@ async function main() {
   const missing = []
 
   for (const target of TARGETS) {
-    const distBinary = join(distDir, `relayfile-mount-${target.os}-${target.goArch}`)
+    // `make build-all` writes one target directory per GOOS/GOARCH. Keep the
+    // legacy flat filename as a fallback for older release artifact layouts.
+    const builtBinary = join(distDir, `${target.os}_${target.goArch}`, 'relayfile-mount')
+    const legacyBinary = join(distDir, `relayfile-mount-${target.os}-${target.goArch}`)
+    const distBinary = (await exists(builtBinary)) ? builtBinary : legacyBinary
     const pkgDir = join(packagesDir, `mount-${target.os}-${target.npmArch}`)
     const pkgJsonPath = join(pkgDir, 'package.json')
     const binTarget = join(pkgDir, 'bin', 'relayfile-mount')

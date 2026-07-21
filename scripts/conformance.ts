@@ -17,7 +17,10 @@
  *   npx tsx scripts/conformance.ts --ci
  */
 
-import { execSync, spawn, ChildProcess } from 'node:child_process';
+import { execFileSync, spawn, ChildProcess } from 'node:child_process';
+import { existsSync, mkdtempSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import { basename, dirname, join, resolve } from 'node:path';
+import { tmpdir } from 'node:os';
 import { createLocalRs256Auth, type LocalRs256Auth } from './test-utils/rsa-signer';
 
 // ---------------------------------------------------------------------------
@@ -30,7 +33,13 @@ const REMOTE = flags.has('--remote');
 const HELP = flags.has('--help') || argv.includes('-h');
 
 const PORT = Number(process.env.RELAYFILE_PORT || 19090);
+if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65_535) {
+  throw new Error(`RELAYFILE_PORT must be an integer from 1 to 65535, got ${process.env.RELAYFILE_PORT}`);
+}
 const BASE_URL = process.env.RELAYFILE_BASE_URL || `http://127.0.0.1:${PORT}`;
+const REQUESTED_LOCAL_SERVER_BINARY = process.env.RELAYFILE_CONFORMANCE_BINARY
+  ? resolve(process.env.RELAYFILE_CONFORMANCE_BINARY)
+  : undefined;
 const WORKSPACE = `conformance-${Date.now()}`;
 const DISABLE_SHARED_SECRET_JWT_ENV = `RELAYFILE_VERIFIER_ACCEPT_HS${256}`;
 
@@ -173,22 +182,77 @@ function errorCode(data: any): string | undefined {
   return typeof raw === 'string' ? raw : undefined;
 }
 
+class SkippedTest extends Error {}
+
 function skipCloudOnlyWebhookRoute(testName: string, response: { status: number }): boolean {
   if (response.status !== 404) return false;
-  log('⏭️ ', `${testName} skipped: webhook subscription routes are not implemented by this server`);
-  return true;
+  throw new SkippedTest(`${testName} skipped: webhook subscription routes are not implemented by this server`);
 }
 
 // ---------------------------------------------------------------------------
 // Process management
 // ---------------------------------------------------------------------------
 let serverProcess: ChildProcess | null = null;
+let localServerBinary: string | null = null;
+let localServerBinaryOwned = false;
+let localServerFixture: string | null = null;
+
+function prepareLocalServerBinary(): string {
+  if (REQUESTED_LOCAL_SERVER_BINARY) {
+    if (existsSync(REQUESTED_LOCAL_SERVER_BINARY)) {
+      throw new Error(`refusing to overwrite existing conformance binary: ${REQUESTED_LOCAL_SERVER_BINARY}`);
+    }
+    localServerBinaryOwned = true;
+    localServerBinary = REQUESTED_LOCAL_SERVER_BINARY;
+    return localServerBinary;
+  }
+
+  localServerFixture = mkdtempSync(join(tmpdir(), 'relayfile-conformance-'));
+  writeFileSync(join(localServerFixture, '.relayfile-conformance-fixture'), '');
+  localServerBinaryOwned = true;
+  localServerBinary = join(localServerFixture, process.platform === 'win32' ? 'relayfile.exe' : 'relayfile');
+  return localServerBinary;
+}
+
+function removeLocalServerFixture(): void {
+  if (!localServerFixture) return;
+  const marker = join(localServerFixture, '.relayfile-conformance-fixture');
+  const expectedParent = resolve(tmpdir());
+  if (
+    !existsSync(marker) ||
+    dirname(resolve(localServerFixture)) !== expectedParent ||
+    !basename(localServerFixture).startsWith('relayfile-conformance-')
+  ) {
+    throw new Error(`refusing unsafe conformance fixture cleanup: ${localServerFixture}`);
+  }
+  rmSync(localServerFixture, { recursive: true });
+  localServerFixture = null;
+}
+
+function waitForServerExit(child: ChildProcess, timeoutMs: number): Promise<boolean> {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve(true);
+  return new Promise((resolveExit) => {
+    let settled = false;
+    const finish = (exited: boolean) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      child.off('exit', onExit);
+      resolveExit(exited);
+    };
+    const onExit = () => finish(true);
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    child.once('exit', onExit);
+    if (child.exitCode !== null || child.signalCode !== null) finish(true);
+  });
+}
 
 async function startServer(): Promise<void> {
   if (REMOTE) return;
   step('Building & starting local Go server');
-  execSync('go build -o relayfile-conformance ./cmd/relayfile', { stdio: 'inherit' });
-  serverProcess = spawn('./relayfile-conformance', [], {
+  const binary = prepareLocalServerBinary();
+  execFileSync('go', ['build', '-o', binary, './cmd/relayfile'], { stdio: 'inherit' });
+  serverProcess = spawn(binary, [], {
     env: {
       ...process.env,
       RELAYFILE_ADDR: `:${PORT}`,
@@ -220,14 +284,28 @@ async function startServer(): Promise<void> {
 
 async function stopServer() {
   if (serverProcess) {
-    serverProcess.kill('SIGTERM');
+    const child = serverProcess;
     serverProcess = null;
+    if (child.exitCode === null && child.signalCode === null) {
+      const termExit = waitForServerExit(child, 5_000);
+      child.kill('SIGTERM');
+      if (!(await termExit)) {
+        const killExit = waitForServerExit(child, 2_000);
+        child.kill('SIGKILL');
+        if (!(await killExit)) throw new Error(`conformance server process ${child.pid ?? 'unknown'} did not exit`);
+      }
+    }
   }
   if (rs256Auth) {
     await rs256Auth.close();
     rs256Auth = null;
   }
-  try { execSync('rm -f relayfile-conformance', { stdio: 'ignore' }); } catch {}
+  if (localServerBinaryOwned && localServerBinary && existsSync(localServerBinary)) {
+    unlinkSync(localServerBinary);
+  }
+  localServerBinary = null;
+  localServerBinaryOwned = false;
+  removeLocalServerFixture();
 }
 
 // ---------------------------------------------------------------------------
@@ -235,6 +313,7 @@ async function stopServer() {
 // ---------------------------------------------------------------------------
 const passed: string[] = [];
 const failed: string[] = [];
+const skipped: string[] = [];
 
 async function test(name: string, fn: () => Promise<void>) {
   try {
@@ -242,6 +321,11 @@ async function test(name: string, fn: () => Promise<void>) {
     ok(name);
     passed.push(name);
   } catch (err) {
+    if (err instanceof SkippedTest) {
+      log('⏭️ ', err.message);
+      skipped.push(name);
+      return;
+    }
     const msg = err instanceof Error ? err.message : String(err);
     fail(`${name}: ${msg}`);
     failed.push(name);
@@ -747,6 +831,7 @@ Usage:
 Environment:
   RELAYFILE_BASE_URL  Base URL when using --remote
   RELAYFILE_PORT      Local server port when not using --remote
+  RELAYFILE_CONFORMANCE_BINARY  Optional non-existent local server binary path (never overwritten)
 `);
     return;
   }
@@ -784,6 +869,11 @@ ${B}${CYAN}╔══════════════════════
       console.log();
       log('❌', `${RED}${B}${failed.length} failed${R}`);
       for (const t of failed) log('  ', `${RED}• ${t}${R}`);
+    }
+    if (skipped.length > 0) {
+      console.log();
+      log('⏭️ ', `${YELLOW}${B}${skipped.length} skipped${R}`);
+      for (const t of skipped) log('  ', `${YELLOW}• ${t}${R}`);
     }
     console.log();
 

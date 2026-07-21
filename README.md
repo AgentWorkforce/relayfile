@@ -389,3 +389,4 @@ Pipedream:
 - [API reference](docs/api-reference.md)
 - [Docker quickstart](docker/README.md)
 - [OpenAPI spec](openapi/relayfile-v1.openapi.yaml)
+- [Authoritative feature catalog and verification runbook](.agentworkforce/features/README.md)

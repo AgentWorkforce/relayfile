@@ -12,9 +12,9 @@
  *   npx tsx scripts/e2e.ts --webhook-receiver-url https://public-tunnel.example/hook
  */
 
-import { execSync, spawn, ChildProcess } from 'node:child_process';
-import { existsSync, readFileSync, writeFileSync, unlinkSync, mkdirSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
+import { execFileSync, spawn, ChildProcess } from 'node:child_process';
+import { existsSync, readFileSync, writeFileSync, unlinkSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { basename, dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createLocalRs256Auth, type LocalRs256Auth } from './test-utils/rsa-signer';
 
@@ -27,7 +27,10 @@ const CI = flags.has('--ci') || !!process.env.CI;
 const CONTINUE_ON_FAILURE = flags.has('--continue-on-failure');
 const WEBHOOK_RECEIVER_URL = readArg('--webhook-receiver-url') || process.env.RELAYFILE_WEBHOOK_RECEIVER_URL || '';
 
-const PORT = 9090;
+const PORT = Number(process.env.RELAYFILE_PORT || 9090);
+if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65_535) {
+  throw new Error(`RELAYFILE_PORT must be an integer from 1 to 65535, got ${process.env.RELAYFILE_PORT}`);
+}
 const BASE_URL = `http://127.0.0.1:${PORT}`;
 const WORKSPACE = 'e2e-test';
 const DISABLE_SHARED_SECRET_JWT_ENV = `RELAYFILE_VERIFIER_ACCEPT_HS${256}`;
@@ -82,11 +85,33 @@ function sleep(ms: number) {
 const children: ChildProcess[] = [];
 let rs256Auth: LocalRs256Auth | null = null;
 
-function killAll() {
+function waitForExit(child: ChildProcess, timeoutMs: number): Promise<boolean> {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve(true);
+  return new Promise((resolveExit) => {
+    let settled = false;
+    const finish = (exited: boolean) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      child.off('exit', onExit);
+      resolveExit(exited);
+    };
+    const onExit = () => finish(true);
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    child.once('exit', onExit);
+    if (child.exitCode !== null || child.signalCode !== null) finish(true);
+  });
+}
+
+async function stopAll() {
   for (const child of children) {
-    try {
-      child.kill('SIGTERM');
-    } catch {}
+    if (child.exitCode !== null || child.signalCode !== null) continue;
+    const termExit = waitForExit(child, 5_000);
+    child.kill('SIGTERM');
+    if (await termExit) continue;
+    const killExit = waitForExit(child, 2_000);
+    child.kill('SIGKILL');
+    if (!(await killExit)) throw new Error(`child process ${child.pid ?? 'unknown'} did not exit`);
   }
 }
 
@@ -243,20 +268,29 @@ ${B}${CYAN}╔══════════════════════
 
   const passed: string[] = [];
   const failed: string[] = [];
+  const skipped: string[] = [];
 
   const SYNC_WAIT = CI ? 8_000 : 12_000;
   const MOUNT_WAIT = CI ? 10_000 : 15_000;
 
   // Temp dirs
-  const tmpBase = join(tmpdir(), `relayfile-e2e-${Date.now()}`);
+  const tmpBase = mkdtempSync(join(tmpdir(), 'relayfile-e2e-'));
+  const fixtureMarker = join(tmpBase, '.relayfile-e2e-fixture');
+  writeFileSync(fixtureMarker, '');
   const agentADir = join(tmpBase, 'agent-a');
   const agentBDir = join(tmpBase, 'agent-b');
+  const serverBinary = join(tmpBase, process.platform === 'win32' ? 'relayfile.exe' : 'relayfile');
+  const mountBinary = join(tmpBase, process.platform === 'win32' ? 'relayfile-mount.exe' : 'relayfile-mount');
   mkdirSync(agentADir, { recursive: true });
   mkdirSync(agentBDir, { recursive: true });
 
-  async function run(name: string, fn: () => Promise<void>) {
+  async function run(name: string, fn: () => Promise<void | 'SKIP'>) {
     try {
-      await fn();
+      const result = await fn();
+      if (result === 'SKIP') {
+        skipped.push(name);
+        return;
+      }
       ok(name);
       passed.push(name);
     } catch (err) {
@@ -274,17 +308,15 @@ ${B}${CYAN}╔══════════════════════
     // Build
     // ------------------------------------------------------------------
     step('Building relayfile and relayfile-mount');
-    execSync('go build -o relayfile ./cmd/relayfile && go build -o relayfile-mount ./cmd/relayfile-mount', {
-      cwd: process.cwd(),
-      stdio: 'inherit',
-    });
+    execFileSync('go', ['build', '-o', serverBinary, './cmd/relayfile'], { cwd: process.cwd(), stdio: 'inherit' });
+    execFileSync('go', ['build', '-o', mountBinary, './cmd/relayfile-mount'], { cwd: process.cwd(), stdio: 'inherit' });
     ok('Build succeeded');
 
     // ------------------------------------------------------------------
     // Start server
     // ------------------------------------------------------------------
     step('Starting relayfile server');
-    const server = spawnTracked('./relayfile', [], {
+    const server = spawnTracked(serverBinary, [], {
       RELAYFILE_ADDR: `:${PORT}`,
       RELAYFILE_BACKEND_PROFILE: 'memory',
       RELAYAUTH_JWKS_URL: rs256Auth.jwksUrl,
@@ -307,7 +339,7 @@ ${B}${CYAN}╔══════════════════════
     // Start mount daemons
     // ------------------------------------------------------------------
     step('Starting mount daemons');
-    const mountA = spawnTracked('./relayfile-mount', [
+    const mountA = spawnTracked(mountBinary, [
       '--base-url', BASE_URL,
       '--workspace', WORKSPACE,
       '--local-dir', agentADir,
@@ -319,7 +351,7 @@ ${B}${CYAN}╔══════════════════════
       if (line) log('🔄', `${DIM}[mount-a] ${line}${R}`);
     });
 
-    const mountB = spawnTracked('./relayfile-mount', [
+    const mountB = spawnTracked(mountBinary, [
       '--base-url', BASE_URL,
       '--workspace', WORKSPACE,
       '--local-dir', agentBDir,
@@ -615,7 +647,7 @@ ${B}${CYAN}╔══════════════════════
       // process owns delivery capture and HMAC verification for that URL.
       if (!WEBHOOK_RECEIVER_URL) {
         log('⏭️ ', 'webhook delivery smoke skipped: no public receiver URL');
-        return;
+        return 'SKIP';
       }
 
       let subscriptionId = '';
@@ -684,16 +716,15 @@ ${B}${CYAN}╔══════════════════════
     // Teardown
     // ------------------------------------------------------------------
     step('Teardown');
-    killAll();
+    await stopAll();
     await closeAuth();
-
-    // Wait briefly for processes to exit
-    await sleep(500);
-
-    try {
-      rmSync(tmpBase, { recursive: true, force: true });
-      log('🗑️ ', 'Cleaned up temp dirs');
-    } catch {}
+    if (
+      !existsSync(fixtureMarker) ||
+      dirname(resolve(tmpBase)) !== resolve(tmpdir()) ||
+      !basename(tmpBase).startsWith('relayfile-e2e-')
+    ) throw new Error(`refusing unsafe E2E fixture cleanup: ${tmpBase}`);
+    rmSync(tmpBase, { recursive: true });
+    log('🗑️ ', 'Cleaned up marker-checked temp dirs');
 
     // Summary
     console.log(`
@@ -714,6 +745,13 @@ ${B}${CYAN}╔══════════════════════
         log('  ', `${RED}• ${t}${R}`);
       }
     }
+    if (skipped.length > 0) {
+      console.log();
+      log('⏭️ ', `${YELLOW}${B}${skipped.length} skipped${R}`);
+      for (const t of skipped) {
+        log('  ', `${YELLOW}• ${t}${R}`);
+      }
+    }
     console.log();
 
     if (failed.length > 0) {
@@ -724,7 +762,7 @@ ${B}${CYAN}╔══════════════════════
 
 main().catch(async (err) => {
   fail(err instanceof Error ? err.message : String(err));
-  killAll();
+  await stopAll().catch((cleanupError) => fail(cleanupError instanceof Error ? cleanupError.message : String(cleanupError)));
   await closeAuth();
   process.exit(1);
 });
