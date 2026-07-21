@@ -1692,6 +1692,12 @@ export class RelayFileClient {
     if (!input.provider) throw new Error("provider is required");
     if (!input.resourceRef) throw new Error("resourceRef is required");
     if (!input.subscriberId) throw new Error("subscriberId is required");
+    if (!Array.isArray(input.eventTypes) || input.eventTypes.length === 0) {
+      throw new Error("eventTypes is required and must be a non-empty array");
+    }
+    if (!Number.isInteger(input.ttlSeconds) || input.ttlSeconds < 60 || input.ttlSeconds > 2_592_000) {
+      throw new Error("ttlSeconds must be an integer between 60 and 2592000");
+    }
     return this.request<DurableResourceSubscription>({
       method: "POST",
       path: `/v1/workspaces/${encodeURIComponent(input.workspaceId)}/subscriptions`,

@@ -2274,6 +2274,26 @@ describe("RelayFileClient — durable resource subscriptions", () => {
 
     const untouched = mockFetch({});
     const validating = makeClient(untouched);
+    const createInput = {
+      workspaceId: "ws_acme",
+      provider: "github",
+      resourceRef: subscription.resourceRef,
+      eventTypes: subscription.eventTypes,
+      subscriberId: subscription.subscriberId,
+      ttlSeconds: 3_600,
+    };
+    await expect(validating.createOrRenewDurableResourceSubscription({
+      ...createInput,
+      eventTypes: [],
+    })).rejects.toThrow("eventTypes is required and must be a non-empty array");
+    await expect(validating.createOrRenewDurableResourceSubscription({
+      ...createInput,
+      ttlSeconds: 59,
+    })).rejects.toThrow("ttlSeconds must be an integer between 60 and 2592000");
+    await expect(validating.createOrRenewDurableResourceSubscription({
+      ...createInput,
+      ttlSeconds: 2_592_001,
+    })).rejects.toThrow("ttlSeconds must be an integer between 60 and 2592000");
     await expect(validating.listDurableResourceSubscriptions("")).rejects.toThrow("workspaceId is required");
     await expect(validating.cancelDurableResourceSubscription("ws_acme", "")).rejects.toThrow(
       "subscriptionId is required",
