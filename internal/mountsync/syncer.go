@@ -7292,6 +7292,16 @@ func (s *Syncer) existingPreShorteningLocalPath(remotePath string) (string, stri
 		pathHasComponentLongerThan(remotePath, maxLocalFilesystemBasenameBytes) {
 		return "", "", false
 	}
+	// Migration is only unambiguous when the deterministic post-fix path is
+	// absent. If both names exist, keep the shortened mirror authoritative so
+	// it cannot reappear in a scan as a new literal remote path.
+	defaultPath, err := s.defaultRemoteToLocalPath(remotePath)
+	if err != nil {
+		return "", "", false
+	}
+	if _, err := os.Lstat(defaultPath); err == nil || !errors.Is(err, os.ErrNotExist) {
+		return "", "", false
+	}
 	localPath, err := remoteToLocalPathWithShortening(s.localRoot, s.remoteRoot, remotePath, false)
 	if err != nil {
 		return "", "", false

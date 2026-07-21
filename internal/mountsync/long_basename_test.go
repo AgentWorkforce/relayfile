@@ -413,6 +413,71 @@ func TestLegacyLongValidBasenameOutboxMigratesWithoutState(t *testing.T) {
 	}
 }
 
+func TestExistingExactSiblingDoesNotStealShortenedTrackedIdentity(t *testing.T) {
+	t.Parallel()
+
+	localRoot := t.TempDir()
+	longBase := strings.Repeat("remote-title-", 18) + "tracked.json"
+	if got := len(longBase); got <= maxLocalMirrorBasenameBytes || got > 255 {
+		t.Fatalf("test basename is %d bytes, want %d < length <= 255", got, maxLocalMirrorBasenameBytes)
+	}
+	remotePath := normalizeRemotePath("/reddit/posts/" + longBase)
+	shortenedPath, err := remoteToLocalPath(localRoot, "/", remotePath)
+	if err != nil {
+		t.Fatalf("map shortened mirror path: %v", err)
+	}
+	exactPath, err := remoteToLocalPathWithShortening(localRoot, "/", remotePath, false)
+	if err != nil {
+		t.Fatalf("map exact sibling path: %v", err)
+	}
+	for _, path := range []string{shortenedPath, exactPath} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("create parent for %s: %v", path, err)
+		}
+	}
+	shortenedContent := []byte(`{"source":"remote"}`)
+	if err := os.WriteFile(shortenedPath, shortenedContent, 0o644); err != nil {
+		t.Fatalf("create shortened tracked mirror: %v", err)
+	}
+	if err := os.WriteFile(exactPath, []byte(`{"source":"local-sibling"}`), 0o644); err != nil {
+		t.Fatalf("create exact sibling: %v", err)
+	}
+
+	syncer, err := NewSyncer(&fakeClient{}, SyncerOptions{
+		WorkspaceID: "ws_long_exact_sibling",
+		RemoteRoot:  "/",
+		LocalRoot:   localRoot,
+	})
+	if err != nil {
+		t.Fatalf("new syncer: %v", err)
+	}
+	if err := syncer.loadState(); err != nil {
+		t.Fatalf("load state: %v", err)
+	}
+	syncer.state.Files[remotePath] = trackedFile{
+		Revision:    "rev_shortened_mirror",
+		ContentType: "application/json",
+		Hash:        hashBytes(shortenedContent),
+	}
+	if got, err := syncer.remoteToLocalPath(remotePath); err != nil {
+		t.Fatalf("map tracked remote path: %v", err)
+	} else if got != shortenedPath {
+		t.Fatalf("exact sibling stole shortened tracked identity: mapped=%q want=%q", got, shortenedPath)
+	}
+	localFiles, err := syncer.scanLocalFiles()
+	if err != nil {
+		t.Fatalf("scan local files: %v", err)
+	}
+	shortRel, err := filepath.Rel(localRoot, shortenedPath)
+	if err != nil {
+		t.Fatalf("shortened relative path: %v", err)
+	}
+	shortenedLiteralRemote := normalizeRemotePath("/" + filepath.ToSlash(shortRel))
+	if _, exists := localFiles[shortenedLiteralRemote]; exists && shortenedLiteralRemote != remotePath {
+		t.Fatalf("shortened mirror leaked as new cloud path %q", shortenedLiteralRemote)
+	}
+}
+
 func TestBootstrapSkipsOneUnmaterializablePathAndContinues(t *testing.T) {
 	t.Parallel()
 
