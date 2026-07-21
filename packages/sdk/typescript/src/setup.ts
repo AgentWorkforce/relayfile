@@ -337,6 +337,7 @@ export class RelayfileSetup {
   ): Promise<MountedWorkspaceHandle> {
     const normalized = normalizeEnsureMountedWorkspaceInput(input)
     const workspace = await this.resolveWorkspaceForMount(normalized)
+    throwIfAborted(normalized.signal, "ensureMountedWorkspace")
 
     const mountKey = ensuredMountKey(workspace, normalized)
     const existing = this.ensuredMounts.get(mountKey)
@@ -345,10 +346,14 @@ export class RelayfileSetup {
     }
 
     let shared!: Promise<MountedWorkspaceHandle>
-    shared = this.startEnsuredMount(workspace, normalized).then(
+    // The physical mount belongs to the logical target, not the first caller.
+    // Individual abort signals only cancel that caller's wait below.
+    shared = this.startEnsuredMount(workspace, {
+      ...normalized,
+      signal: undefined
+    }).then(
       (mounted) => new SharedMountedWorkspaceHandle({
         mounted,
-        signal: normalized.signal,
         onStopped: () => {
           if (this.ensuredMounts.get(mountKey) === shared) {
             this.ensuredMounts.delete(mountKey)
@@ -1227,22 +1232,14 @@ class MountedWorkspaceHandleImpl implements MountedWorkspaceHandle {
 class SharedMountedWorkspaceHandle implements MountedWorkspaceHandle {
   private readonly mounted: MountedWorkspaceHandle
   private readonly onStopped: () => void
-  private readonly signal?: AbortSignal
   private stopPromise?: Promise<void>
 
   constructor(input: {
     mounted: MountedWorkspaceHandle
     onStopped: () => void
-    signal?: AbortSignal
   }) {
     this.mounted = input.mounted
     this.onStopped = input.onStopped
-    this.signal = input.signal
-    if (this.signal?.aborted) {
-      this.handleAbort()
-    } else {
-      this.signal?.addEventListener("abort", this.handleAbort, { once: true })
-    }
   }
 
   get workspaceId(): string {
@@ -1287,16 +1284,11 @@ class SharedMountedWorkspaceHandle implements MountedWorkspaceHandle {
   }
 
   private async performStop(): Promise<void> {
-    this.signal?.removeEventListener("abort", this.handleAbort)
     try {
       await this.mounted.stop()
     } finally {
       this.onStopped()
     }
-  }
-
-  private readonly handleAbort = (): void => {
-    void this.stop()
   }
 }
 
