@@ -40,6 +40,7 @@
     "@agentworkforce/runtime": "^4.1.34",
     "@agentworkforce/workload-router": "^0.3.0",
     "@relayfile/relay-helpers": "^0.4.9",
+    "@types/node": "^22.10.0",
     "agent-trajectories": "^0.5.8",
     "tsx": "^4.21.0",
     "typescript": "^5.7.3",

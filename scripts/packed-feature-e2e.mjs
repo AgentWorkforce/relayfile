@@ -1,10 +1,14 @@
 #!/usr/bin/env node
-import { cpSync, existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 
 const root = process.cwd();
+const cliVersion = JSON.parse(readFileSync(join(root, 'packages/cli/package.json'), 'utf8')).version;
+if (typeof cliVersion !== 'string' || !/^\d+\.\d+\.\d+$/u.test(cliVersion)) {
+  throw new Error(`invalid CLI package version: ${String(cliVersion)}`);
+}
 const fixture = mkdtempSync(join(tmpdir(), 'relayfile-packed-e2e.'));
 const packs = join(fixture, 'packs');
 const consumer = join(fixture, 'node-consumer');
@@ -81,7 +85,7 @@ try {
   if (undeclared.status === 0) throw new Error('undeclared SDK subpath unexpectedly imported');
 
   const cli = run('node', ['node_modules/relayfile/scripts/run.js', 'version'], { cwd: consumer });
-  if (!/0\.10\.33/.test(cli.stdout)) throw new Error(`packed CLI version drifted: ${cli.stdout}`);
+  if (!cli.stdout.includes(cliVersion)) throw new Error(`packed CLI version drifted: ${cli.stdout}`);
   const mountBinary = join(consumer, 'node_modules', '@relayfile', `mount-${platform}`, 'bin', 'relayfile-mount');
   if (!existsSync(mountBinary)) throw new Error(`packed mount binary is absent: ${mountBinary}`);
 
@@ -93,7 +97,7 @@ try {
   run('uv', ['pip', 'install', '--python', python, join(packs, wheel)]);
   run(python, ['-c', 'import relayfile; assert relayfile.RelayFileClient; assert len(relayfile.__all__) == len(set(relayfile.__all__))']);
 
-  console.log('PACKED_FEATURE_E2E_PASS npm_tarballs=7 python_wheel=1 declared_imports=15 cli_version=0.10.33 mount_binary=1 undeclared_negative=1');
+  console.log(`PACKED_FEATURE_E2E_PASS npm_tarballs=7 python_wheel=1 declared_imports=15 cli_version=${cliVersion} mount_binary=1 undeclared_negative=1`);
 } finally {
   if (
     !existsSync(fixtureMarker) ||

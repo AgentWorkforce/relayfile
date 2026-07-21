@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
 import { resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { parse } from 'yaml';
 
@@ -12,7 +13,7 @@ import {
 } from '../../../scripts/validate-feature-catalog.mjs';
 import guardian from './agent.ts';
 
-const root = resolve(new URL('../../../', import.meta.url).pathname);
+const root = resolve(fileURLToPath(new URL('../../../', import.meta.url)));
 const manifest = parse(readFileSync(resolve(root, '.agentworkforce/features/manifest.yaml'), 'utf8'));
 const procedures = readFileSync(resolve(root, '.agentworkforce/features/verify/procedures.md'), 'utf8');
 

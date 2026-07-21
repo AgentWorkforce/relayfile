@@ -463,12 +463,10 @@ export function createHttpProgressStore(
           headers: {
             Authorization: `Bearer ${credentials.token}`,
             'X-Correlation-Id': correlationId,
-            'Content-Type': 'application/octet-stream',
-            'X-Relayfile-Encoding': 'utf-8',
-            'X-Relayfile-Content-Type': 'application/json',
+            'Content-Type': 'application/json',
             'If-Match': expected?.revision ?? '0',
           },
-          body: content,
+          body: JSON.stringify({ contentType: 'application/json', content }),
           signal,
         });
         if (response.status === 409 || response.status === 412) throw new ProgressStateConflictError();

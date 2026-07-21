@@ -270,14 +270,24 @@ describe('HTTP exact-revision store', () => {
   it('maps 409 and 412 writes to CAS conflicts with If-Match zero on bootstrap', async () => {
     for (const status of [409, 412]) {
       let ifMatch = '';
+      let contentType = '';
+      let requestBody = '';
       const store = createHttpProgressStore(credentials, {
         fetchImpl: async (_url, init) => {
-          ifMatch = new Headers(init?.headers).get('if-match') ?? '';
+          const headers = new Headers(init?.headers);
+          ifMatch = headers.get('if-match') ?? '';
+          contentType = headers.get('content-type') ?? '';
+          requestBody = String(init?.body ?? '');
           return new Response('', { status });
         },
       });
       await assert.rejects(() => store.save(state(), null, features()), ProgressStateConflictError);
       assert.equal(ifMatch, '0');
+      assert.equal(contentType, 'application/json');
+      assert.deepEqual(JSON.parse(requestBody), {
+        contentType: 'application/json',
+        content: `${JSON.stringify(state())}\n`,
+      });
     }
   });
 
