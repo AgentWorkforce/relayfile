@@ -1,6 +1,6 @@
 {
   "name": "@relayfile/mount-darwin-arm64",
-  "version": "0.10.34",
+  "version": "0.10.35",
   "description": "relayfile-mount binary for darwin arm64. Installed automatically as an optional dependency of @relayfile/sdk.",
   "files": [
     "bin"
