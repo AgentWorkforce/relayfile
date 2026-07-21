@@ -220,6 +220,199 @@ func TestLocallyCreatedLongValidBasenameKeepsIdentityAcrossReconcile(t *testing.
 	}
 }
 
+func TestLongValidBasenameOutboxIdentitySurvivesCrashBeforeStateSave(t *testing.T) {
+	t.Parallel()
+
+	localRoot := t.TempDir()
+	longBase := strings.Repeat("local-title-", 19) + "crash.json"
+	if got := len(longBase); got <= maxLocalMirrorBasenameBytes || got > 255 {
+		t.Fatalf("test basename is %d bytes, want %d < length <= 255", got, maxLocalMirrorBasenameBytes)
+	}
+	remotePath := normalizeRemotePath("/reddit/posts/" + longBase)
+	localPath := filepath.Join(localRoot, "reddit", "posts", longBase)
+	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+		t.Fatalf("create local parent: %v", err)
+	}
+	content := []byte(`{"version":"crash"}`)
+	if err := os.WriteFile(localPath, content, 0o644); err != nil {
+		t.Fatalf("create long valid local file: %v", err)
+	}
+
+	client := &fakeClient{}
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_local_long_crash",
+		RemoteRoot:  "/",
+		LocalRoot:   localRoot,
+	})
+	if err != nil {
+		t.Fatalf("new syncer: %v", err)
+	}
+	if err := syncer.loadState(); err != nil {
+		t.Fatalf("load initial state: %v", err)
+	}
+	snapshot, err := readLocalSnapshot(localPath, true)
+	if err != nil {
+		t.Fatalf("read local snapshot: %v", err)
+	}
+	pending, err := syncer.preparePendingBulkWrite(context.Background(), remotePath, localPath, snapshot, trackedFile{}, false)
+	if err != nil || pending == nil {
+		t.Fatalf("prepare pending write: pending=%v err=%v", pending, err)
+	}
+	record, err := syncer.ensureOutboxRecord(*pending)
+	if err != nil {
+		t.Fatalf("persist durable outbox record: %v", err)
+	}
+	wantRel := filepath.ToSlash(filepath.Join("reddit", "posts", longBase))
+	if record.LocalRelativePath != wantRel {
+		t.Fatalf("durable outbox local identity = %q, want %q", record.LocalRelativePath, wantRel)
+	}
+	persisted, err := syncer.readOutboxRecord(syncer.pendingOutboxPath(record.CommandID))
+	if err != nil {
+		t.Fatalf("read durable outbox record: %v", err)
+	}
+	if persisted.LocalRelativePath != wantRel {
+		t.Fatalf("persisted outbox local identity = %q, want %q", persisted.LocalRelativePath, wantRel)
+	}
+	// Simulate a crash here: the outbox is durable, but the in-memory state
+	// containing LocalRelativePath has deliberately not been saved.
+	restarted, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_local_long_crash",
+		RemoteRoot:  "/",
+		LocalRoot:   localRoot,
+	})
+	if err != nil {
+		t.Fatalf("restart syncer: %v", err)
+	}
+	if err := restarted.FlushOutboxOnce(context.Background()); err != nil {
+		t.Fatalf("flush durable outbox after crash: %v", err)
+	}
+	if got, err := restarted.remoteToLocalPath(remotePath); err != nil {
+		t.Fatalf("map remote path after durable retry: %v", err)
+	} else if got != localPath {
+		t.Fatalf("durable outbox retry lost local identity: mapped=%q want=%q", got, localPath)
+	}
+}
+
+func TestExistingLongValidBasenameMigratesFromPrefixState(t *testing.T) {
+	t.Parallel()
+
+	localRoot := t.TempDir()
+	longBase := strings.Repeat("legacy-title-", 18) + "upgrade.json"
+	if got := len(longBase); got <= maxLocalMirrorBasenameBytes || got > 255 {
+		t.Fatalf("test basename is %d bytes, want %d < length <= 255", got, maxLocalMirrorBasenameBytes)
+	}
+	remotePath := normalizeRemotePath("/reddit/posts/" + longBase)
+	localPath := filepath.Join(localRoot, "reddit", "posts", longBase)
+	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+		t.Fatalf("create legacy local parent: %v", err)
+	}
+	content := []byte(`{"version":"legacy"}`)
+	if err := os.WriteFile(localPath, content, 0o644); err != nil {
+		t.Fatalf("create legacy long local file: %v", err)
+	}
+
+	client := &fakeClient{}
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_local_long_upgrade",
+		RemoteRoot:  "/",
+		LocalRoot:   localRoot,
+	})
+	if err != nil {
+		t.Fatalf("new syncer: %v", err)
+	}
+	if err := syncer.loadState(); err != nil {
+		t.Fatalf("load initial state: %v", err)
+	}
+	syncer.state.Files[remotePath] = trackedFile{
+		Revision:    "rev_before_long_name_fix",
+		ContentType: "application/json",
+		Hash:        hashBytes(content),
+	}
+	if err := syncer.saveState(); err != nil {
+		t.Fatalf("persist pre-fix state: %v", err)
+	}
+
+	restarted, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_local_long_upgrade",
+		RemoteRoot:  "/",
+		LocalRoot:   localRoot,
+	})
+	if err != nil {
+		t.Fatalf("restart upgraded syncer: %v", err)
+	}
+	if err := restarted.loadState(); err != nil {
+		t.Fatalf("load pre-fix state: %v", err)
+	}
+	if got, err := restarted.remoteToLocalPath(remotePath); err != nil {
+		t.Fatalf("map pre-fix tracked path: %v", err)
+	} else if got != localPath {
+		t.Fatalf("upgrade remapped existing local identity: mapped=%q want=%q", got, localPath)
+	}
+	if got := restarted.state.Files[remotePath].LocalRelativePath; got != filepath.ToSlash(filepath.Join("reddit", "posts", longBase)) {
+		t.Fatalf("migrated local identity = %q, want exact legacy relative path", got)
+	}
+}
+
+func TestLegacyLongValidBasenameOutboxMigratesWithoutState(t *testing.T) {
+	t.Parallel()
+
+	localRoot := t.TempDir()
+	longBase := strings.Repeat("legacy-outbox-", 16) + "upgrade.json"
+	if got := len(longBase); got <= maxLocalMirrorBasenameBytes || got > 255 {
+		t.Fatalf("test basename is %d bytes, want %d < length <= 255", got, maxLocalMirrorBasenameBytes)
+	}
+	remotePath := normalizeRemotePath("/reddit/posts/" + longBase)
+	localPath := filepath.Join(localRoot, "reddit", "posts", longBase)
+	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+		t.Fatalf("create legacy local parent: %v", err)
+	}
+	content := `{"version":"legacy-outbox"}`
+	if err := os.WriteFile(localPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("create legacy long local file: %v", err)
+	}
+
+	client := &fakeClient{}
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_local_long_legacy_outbox",
+		RemoteRoot:  "/",
+		LocalRoot:   localRoot,
+	})
+	if err != nil {
+		t.Fatalf("new syncer: %v", err)
+	}
+	record := outboxRecord{
+		CommandID:     "mountcmd_legacy_long_name",
+		WorkspaceID:   "ws_local_long_legacy_outbox",
+		RemotePath:    remotePath,
+		ContentType:   "application/json",
+		Content:       content,
+		Hash:          hashBytes([]byte(content)),
+		Status:        outboxStatusPending,
+		FirstSeenAt:   "2026-06-11T12:00:00Z",
+		CorrelationID: "mountcmd_legacy_long_name",
+	}
+	if err := syncer.saveOutboxRecord(record); err != nil {
+		t.Fatalf("persist legacy outbox record: %v", err)
+	}
+
+	restarted, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_local_long_legacy_outbox",
+		RemoteRoot:  "/",
+		LocalRoot:   localRoot,
+	})
+	if err != nil {
+		t.Fatalf("restart upgraded syncer: %v", err)
+	}
+	if err := restarted.FlushOutboxOnce(context.Background()); err != nil {
+		t.Fatalf("flush legacy outbox after upgrade: %v", err)
+	}
+	if got, err := restarted.remoteToLocalPath(remotePath); err != nil {
+		t.Fatalf("map legacy outbox path: %v", err)
+	} else if got != localPath {
+		t.Fatalf("legacy outbox remapped existing identity: mapped=%q want=%q", got, localPath)
+	}
+}
+
 func TestBootstrapSkipsOneUnmaterializablePathAndContinues(t *testing.T) {
 	t.Parallel()
 

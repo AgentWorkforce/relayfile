@@ -7216,6 +7216,10 @@ func remoteDescendantDepth(remoteRoot, remotePath string) int {
 }
 
 func remoteToLocalPath(localRoot, remoteRoot, remotePath string) (string, error) {
+	return remoteToLocalPathWithShortening(localRoot, remoteRoot, remotePath, true)
+}
+
+func remoteToLocalPathWithShortening(localRoot, remoteRoot, remotePath string, shorten bool) (string, error) {
 	localRoot = filepath.Clean(localRoot)
 	remoteRoot = normalizeRemotePath(remoteRoot)
 	remotePath = normalizeRemotePath(remotePath)
@@ -7242,7 +7246,9 @@ func remoteToLocalPath(localRoot, remoteRoot, remotePath string) (string, error)
 	// deterministically for the mirror. The Syncer resolves the inverse from
 	// its persisted remote-path state before writeback, preserving the exact
 	// provider name rather than sending the shortened local representation.
-	rel = shortenLocalRelativePath(rel)
+	if shorten {
+		rel = shortenLocalRelativePath(rel)
+	}
 	joined := filepath.Join(localRoot, filepath.FromSlash(rel))
 	cleanJoined := filepath.Clean(joined)
 	// Data-loss guard: a remote path whose only relative component is the
@@ -7263,14 +7269,51 @@ func remoteToLocalPath(localRoot, remoteRoot, remotePath string) (string, error)
 
 func (s *Syncer) remoteToLocalPath(remotePath string) (string, error) {
 	remotePath = normalizeRemotePath(remotePath)
-	if tracked, ok := s.state.Files[remotePath]; ok && strings.TrimSpace(tracked.LocalRelativePath) != "" {
-		localPath, err := safeLocalPath(s.localRoot, tracked.LocalRelativePath)
-		if err != nil {
-			return "", fmt.Errorf("invalid preserved local path for %s: %w", remotePath, err)
+	if tracked, ok := s.state.Files[remotePath]; ok {
+		if strings.TrimSpace(tracked.LocalRelativePath) != "" {
+			localPath, err := safeLocalPath(s.localRoot, tracked.LocalRelativePath)
+			if err != nil {
+				return "", fmt.Errorf("invalid preserved local path for %s: %w", remotePath, err)
+			}
+			return localPath, nil
 		}
-		return localPath, nil
+		if localPath, rel, found := s.existingPreShorteningLocalPath(remotePath); found {
+			tracked.LocalRelativePath = rel
+			s.state.Files[remotePath] = tracked
+			return localPath, nil
+		}
 	}
 	return s.defaultRemoteToLocalPath(remotePath)
+}
+
+func (s *Syncer) existingPreShorteningLocalPath(remotePath string) (string, string, bool) {
+	if s.githubWorkingTree != nil ||
+		!pathHasComponentLongerThan(remotePath, maxLocalMirrorBasenameBytes) ||
+		pathHasComponentLongerThan(remotePath, maxLocalFilesystemBasenameBytes) {
+		return "", "", false
+	}
+	localPath, err := remoteToLocalPathWithShortening(s.localRoot, s.remoteRoot, remotePath, false)
+	if err != nil {
+		return "", "", false
+	}
+	info, err := os.Lstat(localPath)
+	if err != nil || info.IsDir() {
+		return "", "", false
+	}
+	mappedRemote, err := localToRemotePath(s.localRoot, s.remoteRoot, localPath)
+	if err != nil || normalizeRemotePath(mappedRemote) != normalizeRemotePath(remotePath) {
+		return "", "", false
+	}
+	rel, err := filepath.Rel(s.localRoot, localPath)
+	if err != nil {
+		return "", "", false
+	}
+	rel = filepath.ToSlash(rel)
+	resolved, err := safeLocalPath(s.localRoot, rel)
+	if err != nil || filepath.Clean(resolved) != filepath.Clean(localPath) {
+		return "", "", false
+	}
+	return localPath, rel, true
 }
 
 func (s *Syncer) defaultRemoteToLocalPath(remotePath string) (string, error) {
@@ -7378,9 +7421,10 @@ const (
 	// POSIX NAME_MAX is commonly 255 bytes. Atomic mirror writes prepend a dot
 	// and append a randomized ".tmp-*" suffix, so leave ample headroom for the
 	// temporary basename as well as the final target.
-	maxLocalMirrorBasenameBytes = 220
-	localNameHashBytes          = 16
-	maxPreservedExtensionBytes  = 32
+	maxLocalMirrorBasenameBytes     = 220
+	maxLocalFilesystemBasenameBytes = 255
+	localNameHashBytes              = 16
+	maxPreservedExtensionBytes      = 32
 )
 
 func shortenLocalRelativePath(rel string) string {
