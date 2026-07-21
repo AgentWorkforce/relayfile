@@ -347,6 +347,30 @@ func TestWritebackE2E_TerminalOperationFailureFailsClosed(t *testing.T) {
 	if len(failed) != 1 || failed[0].OpID != "op_terminal_failure" || failed[0].DispatchStatus != "failed" {
 		t.Fatalf("failed terminal receipt = %+v, want one failed op receipt", failed)
 	}
+	if summary := syncer.summarizeOutbox(); summary.Failed != 1 || summary.NeedsAttention != 1 {
+		t.Fatalf("terminal failure summary = %+v, want failed=1 and needsAttention=1", summary)
+	}
+
+	// A later otherwise-clean cycle must not erase the terminal provider
+	// failure from mount health merely because the receipt left pending/.
+	err = syncer.SyncOnce(context.Background())
+	if err != nil {
+		t.Fatalf("otherwise-clean cycle after terminal failure: %v", err)
+	}
+	publicBytes, err := os.ReadFile(filepath.Join(localDir, ".relay", "state.json"))
+	if err != nil {
+		t.Fatalf("read public state after terminal failure: %v", err)
+	}
+	var public publicState
+	if err := json.Unmarshal(publicBytes, &public); err != nil {
+		t.Fatalf("decode public state after terminal failure: %v", err)
+	}
+	if public.Status != "writeback-needs-attention" || !public.States.OutboxNeedsAttention {
+		t.Fatalf("public state hid terminal provider failure: status=%q states=%+v", public.Status, public.States)
+	}
+	if public.Outbox.Failed != 1 || public.Outbox.NeedsAttention != 1 {
+		t.Fatalf("public outbox summary = %+v, want failed=1 and needsAttention=1", public.Outbox)
+	}
 }
 
 func TestWritebackE2E_RetryBackoffIsExponential(t *testing.T) {

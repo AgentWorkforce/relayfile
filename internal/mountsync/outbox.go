@@ -223,7 +223,7 @@ func (s *Syncer) ensureOutboxRecord(pending pendingBulkWrite) (outboxRecord, err
 			// the sole source of truth for commandId across reconnect/restart.
 			return record, nil
 		}
-		if err := s.failOutboxRecord(record, "superseded by newer local content"); err != nil {
+		if err := s.archiveFailedOutboxRecord(record, "superseded by newer local content", false); err != nil {
 			return outboxRecord{}, err
 		}
 	}
@@ -365,12 +365,21 @@ func (s *Syncer) skipOutboxRecord(record outboxRecord, reason string) error {
 }
 
 func (s *Syncer) failOutboxRecord(record outboxRecord, reason string) error {
+	return s.archiveFailedOutboxRecord(record, reason, false)
+}
+
+func (s *Syncer) failOutboxRecordNeedsAttention(record outboxRecord, reason string) error {
+	return s.archiveFailedOutboxRecord(record, reason, true)
+}
+
+func (s *Syncer) archiveFailedOutboxRecord(record outboxRecord, reason string, needsAttention bool) error {
 	if err := s.ensureOutboxDirs(); err != nil {
 		return err
 	}
 	record.Status = outboxStatusFailed
 	record.LastError = strings.TrimSpace(reason)
 	record.NextAttemptAt = ""
+	record.NeedsAttention = needsAttention
 	data, err := json.Marshal(record)
 	if err != nil {
 		return err
@@ -399,6 +408,10 @@ func (s *Syncer) summarizeOutbox() outboxSummary {
 		for _, entry := range entries {
 			if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".json") {
 				summary.Failed++
+				record, readErr := s.readOutboxRecord(filepath.Join(s.outboxFailedDir(), entry.Name()))
+				if readErr != nil || record.NeedsAttention || terminalOutboxDispatchStatus(record.DispatchStatus) {
+					summary.NeedsAttention++
+				}
 			}
 		}
 	}
@@ -410,6 +423,15 @@ func (s *Syncer) summarizeOutbox() outboxSummary {
 		}
 	}
 	return summary
+}
+
+func terminalOutboxDispatchStatus(status string) bool {
+	switch strings.TrimSpace(status) {
+	case "failed", "dead_lettered", "canceled":
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Syncer) maxOutboxAttemptsValue() int {

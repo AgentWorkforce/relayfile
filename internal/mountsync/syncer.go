@@ -2392,7 +2392,7 @@ func (s *Syncer) settleOutboxRecord(ctx context.Context, record outboxRecord) er
 		} else {
 			reason = fmt.Sprintf("writeback op %s status %s", record.OpID, status)
 		}
-		if err := s.failOutboxRecord(record, reason); err != nil {
+		if err := s.failOutboxRecordNeedsAttention(record, reason); err != nil {
 			return err
 		}
 		return errors.New(reason)
