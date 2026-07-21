@@ -293,7 +293,7 @@ func TestWritebackE2E_OperationNotVisibleThenSucceeded(t *testing.T) {
 	if pending[0].NeedsAttention {
 		t.Fatalf("eventually-consistent receipt 404 must remain retryable: %+v", pending[0])
 	}
-	if pending[0].AttemptCount != 1 || strings.TrimSpace(pending[0].NextAttemptAt) == "" {
+	if pending[0].AttemptCount != 0 || pending[0].ReceiptPollCount != 1 || strings.TrimSpace(pending[0].NextAttemptAt) == "" {
 		t.Fatalf("receipt 404 was not scheduled for a later poll: %+v", pending[0])
 	}
 	if len(ackedOutbox(t, localDir)) != 0 {
@@ -322,6 +322,46 @@ func TestWritebackE2E_OperationNotVisibleThenSucceeded(t *testing.T) {
 	}
 }
 
+func TestWritebackE2E_OperationNotVisiblePastDispatchRetryCapThenSucceeded(t *testing.T) {
+	cloud := newWritebackTestCloud(t)
+	clock := newFakeClock(time.Date(2026, 6, 11, 12, 0, 0, 0, time.UTC))
+	cloud.bulk = okBulkWithOpID("op_slow_receipt")
+	cloud.op = func(callNum int, opID string) (int, OperationStatus) {
+		if callNum <= 3 {
+			return http.StatusNotFound, OperationStatus{OpID: opID}
+		}
+		return http.StatusOK, OperationStatus{OpID: opID, Status: "succeeded", Revision: "rev_slow"}
+	}
+
+	syncer, localDir, _ := newWritebackSyncer(t, cloud, clock)
+	syncer.maxOutboxAttempts = 3
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("initial dispatch with missing receipt: %v", err)
+	}
+	var pollErr error
+	for i := 0; i < 3; i++ {
+		clock.advance(outboxBackoffMax)
+		pollErr = syncer.FlushOutboxOnce(context.Background())
+	}
+	if pollErr != nil {
+		t.Fatalf("final receipt poll after operation became visible: %v", pollErr)
+	}
+
+	if got := cloud.bulkCallCount(); got != 1 {
+		t.Fatalf("slow receipt caused provider write re-upload: bulk calls = %d, want 1", got)
+	}
+	if got := cloud.opCallCount(); got != 4 {
+		t.Fatalf("receipt polling stopped at dispatch retry cap: calls = %d, want 4", got)
+	}
+	if pending := readPendingOutboxRecordsForTest(t, localDir); len(pending) != 0 {
+		t.Fatalf("eventual success remained pending after receipt became visible: %+v", pending)
+	}
+	acked := ackedOutbox(t, localDir)
+	if len(acked) != 1 || acked[0].OpID != "op_slow_receipt" || acked[0].DispatchStatus != "succeeded" {
+		t.Fatalf("eventual receipt archive = %+v, want one succeeded receipt", acked)
+	}
+}
+
 func TestWritebackE2E_TerminalOperationFailureFailsClosed(t *testing.T) {
 	cloud := newWritebackTestCloud(t)
 	clock := newFakeClock(time.Date(2026, 6, 11, 12, 0, 0, 0, time.UTC))
@@ -347,9 +387,13 @@ func TestWritebackE2E_TerminalOperationFailureFailsClosed(t *testing.T) {
 	if len(failed) != 1 || failed[0].OpID != "op_terminal_failure" || failed[0].DispatchStatus != "failed" {
 		t.Fatalf("failed terminal receipt = %+v, want one failed op receipt", failed)
 	}
-	// Attention is persisted in the archive filename, so health summaries do
-	// not need to re-read and decode every failed command on every state write.
-	if err := os.WriteFile(syncer.failedAttentionOutboxPath(failed[0].CommandID), []byte("invalid archived payload"), 0o644); err != nil {
+	failedPath := syncer.failedOutboxPath(failed[0].CommandID)
+	if _, err := os.Stat(failedPath); err != nil {
+		t.Fatalf("terminal receipt did not preserve failed/<commandId>.json contract: %v", err)
+	}
+	// Attention is persisted separately from the stable failed-record path, so
+	// health summaries do not need to decode every archive on every state write.
+	if err := os.WriteFile(failedPath, []byte("invalid archived payload"), 0o644); err != nil {
 		t.Fatalf("corrupt archived payload after inspecting receipt: %v", err)
 	}
 	if summary := syncer.summarizeOutbox(); summary.Failed != 1 || summary.NeedsAttention != 1 {
@@ -375,6 +419,35 @@ func TestWritebackE2E_TerminalOperationFailureFailsClosed(t *testing.T) {
 	}
 	if public.Outbox.Failed != 1 || public.Outbox.NeedsAttention != 1 {
 		t.Fatalf("public outbox summary = %+v, want failed=1 and needsAttention=1", public.Outbox)
+	}
+}
+
+func TestWritebackE2E_OtherTerminalOperationStatusesFailClosed(t *testing.T) {
+	for _, status := range []string{"dead_lettered", "canceled"} {
+		t.Run(status, func(t *testing.T) {
+			cloud := newWritebackTestCloud(t)
+			clock := newFakeClock(time.Date(2026, 6, 11, 12, 0, 0, 0, time.UTC))
+			cloud.bulk = okBulkWithOpID("op_" + status)
+			cloud.op = func(_ int, opID string) (int, OperationStatus) {
+				return http.StatusOK, OperationStatus{OpID: opID, Status: status}
+			}
+
+			syncer, localDir, _ := newWritebackSyncer(t, cloud, clock)
+			err := syncer.SyncOnce(context.Background())
+			if err == nil || !strings.Contains(err.Error(), "status "+status) {
+				t.Fatalf("terminal %s receipt must fail closed, got %v", status, err)
+			}
+			if pending := readPendingOutboxRecordsForTest(t, localDir); len(pending) != 0 {
+				t.Fatalf("terminal %s receipt remained pending: %+v", status, pending)
+			}
+			failed := failedOutbox(t, localDir)
+			if len(failed) != 1 || failed[0].DispatchStatus != status {
+				t.Fatalf("terminal %s archive = %+v, want one failed receipt", status, failed)
+			}
+			if summary := syncer.summarizeOutbox(); summary.Failed != 1 || summary.NeedsAttention != 1 {
+				t.Fatalf("terminal %s summary = %+v, want failed=1 and needsAttention=1", status, summary)
+			}
+		})
 	}
 }
 

@@ -2363,7 +2363,7 @@ func (s *Syncer) settleOutboxRecord(ctx context.Context, record outboxRecord) er
 			// operation record may be eventually consistent. Keep the durable
 			// receipt retryable and poll it on a later cycle instead of turning
 			// the first 404 into a permanent receiptless NeedsAttention state.
-			return s.incrementOutboxAttempt(record, err)
+			return s.scheduleOutboxReceiptPoll(record, err)
 		}
 		s.recordCloudFailure(err)
 		return s.incrementOutboxAttempt(record, err)
@@ -2397,7 +2397,9 @@ func (s *Syncer) settleOutboxRecord(ctx context.Context, record outboxRecord) er
 		}
 		return errors.New(reason)
 	case "pending", "running", "queued":
+		record.ReceiptPollCount = 0
 		record.LastError = ""
+		record.NextAttemptAt = ""
 		return s.saveOutboxRecord(record)
 	default:
 		record.LastError = fmt.Sprintf("writeback op %s status %s", record.OpID, status)
