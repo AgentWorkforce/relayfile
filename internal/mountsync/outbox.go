@@ -325,6 +325,7 @@ func (s *Syncer) ackOutboxRecord(record outboxRecord, revision, correlationID st
 	}
 	record.NeedsAttention = false
 	record.LastError = ""
+	record.NextAttemptAt = ""
 	data, err := json.Marshal(record)
 	if err != nil {
 		return err

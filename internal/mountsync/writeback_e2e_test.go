@@ -268,6 +268,87 @@ func TestWritebackE2E_PollPendingThenAck(t *testing.T) {
 	}
 }
 
+func TestWritebackE2E_OperationNotVisibleThenSucceeded(t *testing.T) {
+	cloud := newWritebackTestCloud(t)
+	clock := newFakeClock(time.Date(2026, 6, 11, 12, 0, 0, 0, time.UTC))
+	cloud.bulk = okBulkWithOpID("op_eventually_visible")
+	// The operation record may lag the accepted provider dispatch. Treat the
+	// first 404 as receipt-pending, then surface the terminal receipt on the
+	// next normal poll without re-uploading the Slack write.
+	cloud.op = func(callNum int, opID string) (int, OperationStatus) {
+		if callNum == 1 {
+			return http.StatusNotFound, OperationStatus{OpID: opID}
+		}
+		return http.StatusOK, OperationStatus{OpID: opID, Status: "succeeded", Revision: "rev_1"}
+	}
+
+	syncer, localDir, _ := newWritebackSyncer(t, cloud, clock)
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("initial dispatch with not-yet-visible receipt: %v", err)
+	}
+	pending := readPendingOutboxRecordsForTest(t, localDir)
+	if len(pending) != 1 {
+		t.Fatalf("after receipt 404: pending = %d, want 1", len(pending))
+	}
+	if pending[0].NeedsAttention {
+		t.Fatalf("eventually-consistent receipt 404 must remain retryable: %+v", pending[0])
+	}
+	if pending[0].AttemptCount != 1 || strings.TrimSpace(pending[0].NextAttemptAt) == "" {
+		t.Fatalf("receipt 404 was not scheduled for a later poll: %+v", pending[0])
+	}
+	if len(ackedOutbox(t, localDir)) != 0 {
+		t.Fatal("receipt must not ack before terminal success")
+	}
+
+	clock.advance(outboxBackoff(1))
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("next poll after receipt became visible: %v", err)
+	}
+	if got := cloud.bulkCallCount(); got != 1 {
+		t.Fatalf("slow receipt caused provider write re-upload: bulk calls = %d, want 1", got)
+	}
+	if got := cloud.opCallCount(); got != 2 {
+		t.Fatalf("operation poll calls = %d, want 2", got)
+	}
+	if pending := readPendingOutboxRecordsForTest(t, localDir); len(pending) != 0 {
+		t.Fatalf("terminal receipt was not surfaced on next poll: %+v", pending)
+	}
+	acked := ackedOutbox(t, localDir)
+	if len(acked) != 1 || acked[0].OpID != "op_eventually_visible" || acked[0].DispatchStatus != "succeeded" {
+		t.Fatalf("acked receipt = %+v, want eventual succeeded receipt", acked)
+	}
+	if acked[0].NeedsAttention || acked[0].LastError != "" || acked[0].NextAttemptAt != "" {
+		t.Fatalf("terminal success retained pending retry state: %+v", acked[0])
+	}
+}
+
+func TestWritebackE2E_TerminalOperationFailureFailsClosed(t *testing.T) {
+	cloud := newWritebackTestCloud(t)
+	clock := newFakeClock(time.Date(2026, 6, 11, 12, 0, 0, 0, time.UTC))
+	cloud.bulk = okBulkWithOpID("op_terminal_failure")
+	lastError := "Slack rejected the delivered message"
+	cloud.op = func(_ int, opID string) (int, OperationStatus) {
+		return http.StatusOK, OperationStatus{
+			OpID:      opID,
+			Status:    "failed",
+			LastError: &lastError,
+		}
+	}
+
+	syncer, localDir, _ := newWritebackSyncer(t, cloud, clock)
+	err := syncer.SyncOnce(context.Background())
+	if err == nil || !strings.Contains(err.Error(), lastError) {
+		t.Fatalf("terminal provider receipt must fail closed, got %v", err)
+	}
+	if pending := readPendingOutboxRecordsForTest(t, localDir); len(pending) != 0 {
+		t.Fatalf("terminal failure remained receiptless/pending: %+v", pending)
+	}
+	failed := failedOutbox(t, localDir)
+	if len(failed) != 1 || failed[0].OpID != "op_terminal_failure" || failed[0].DispatchStatus != "failed" {
+		t.Fatalf("failed terminal receipt = %+v, want one failed op receipt", failed)
+	}
+}
+
 func TestWritebackE2E_RetryBackoffIsExponential(t *testing.T) {
 	cloud := newWritebackTestCloud(t)
 	start := time.Date(2026, 6, 11, 12, 0, 0, 0, time.UTC)

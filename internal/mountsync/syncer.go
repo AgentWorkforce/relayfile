@@ -2359,11 +2359,11 @@ func (s *Syncer) settleOutboxRecord(ctx context.Context, record outboxRecord) er
 	if err != nil {
 		var httpErr *HTTPError
 		if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusNotFound {
-			record.NeedsAttention = true
-			record.LastError = fmt.Sprintf("writeback op %s not found", record.OpID)
-			record.NextAttemptAt = ""
-			record.DispatchStatus = "not_found"
-			return s.saveOutboxRecord(record)
+			// The provider dispatch was accepted and returned an opID, but the
+			// operation record may be eventually consistent. Keep the durable
+			// receipt retryable and poll it on a later cycle instead of turning
+			// the first 404 into a permanent receiptless NeedsAttention state.
+			return s.incrementOutboxAttempt(record, err)
 		}
 		s.recordCloudFailure(err)
 		return s.incrementOutboxAttempt(record, err)
@@ -2386,14 +2386,16 @@ func (s *Syncer) settleOutboxRecord(ctx context.Context, record outboxRecord) er
 		}
 		return s.ackOutboxRecord(record, revision, record.CorrelationID)
 	case "failed", "dead_lettered", "canceled":
-		record.NeedsAttention = true
-		record.NextAttemptAt = ""
+		reason := ""
 		if op.LastError != nil && strings.TrimSpace(*op.LastError) != "" {
-			record.LastError = strings.TrimSpace(*op.LastError)
+			reason = strings.TrimSpace(*op.LastError)
 		} else {
-			record.LastError = fmt.Sprintf("writeback op %s status %s", record.OpID, status)
+			reason = fmt.Sprintf("writeback op %s status %s", record.OpID, status)
 		}
-		return s.saveOutboxRecord(record)
+		if err := s.failOutboxRecord(record, reason); err != nil {
+			return err
+		}
+		return errors.New(reason)
 	case "pending", "running", "queued":
 		record.LastError = ""
 		return s.saveOutboxRecord(record)
