@@ -31,26 +31,27 @@ const (
 )
 
 type outboxRecord struct {
-	CommandID      string       `json:"commandId"`
-	WorkspaceID    string       `json:"workspaceId"`
-	RemotePath     string       `json:"remotePath"`
-	ContentType    string       `json:"contentType"`
-	Content        string       `json:"content"`
-	Encoding       string       `json:"encoding,omitempty"`
-	Hash           string       `json:"hash"`
-	Exists         bool         `json:"exists"`
-	Status         outboxStatus `json:"status"`
-	FirstSeenAt    string       `json:"firstSeenAt"`
-	LastAttemptAt  string       `json:"lastAttemptAt,omitempty"`
-	NextAttemptAt  string       `json:"nextAttemptAt,omitempty"`
-	AttemptCount   int          `json:"attemptCount"`
-	LastError      string       `json:"lastError,omitempty"`
-	NeedsAttention bool         `json:"needsAttention,omitempty"`
-	OpID           string       `json:"opId,omitempty"`
-	DispatchStatus string       `json:"dispatchStatus,omitempty"`
-	AckedAt        string       `json:"ackedAt,omitempty"`
-	Revision       string       `json:"revision,omitempty"`
-	CorrelationID  string       `json:"correlationId,omitempty"`
+	CommandID         string       `json:"commandId"`
+	WorkspaceID       string       `json:"workspaceId"`
+	RemotePath        string       `json:"remotePath"`
+	ContentType       string       `json:"contentType"`
+	Content           string       `json:"content"`
+	Encoding          string       `json:"encoding,omitempty"`
+	Hash              string       `json:"hash"`
+	Exists            bool         `json:"exists"`
+	Status            outboxStatus `json:"status"`
+	FirstSeenAt       string       `json:"firstSeenAt"`
+	LastAttemptAt     string       `json:"lastAttemptAt,omitempty"`
+	NextAttemptAt     string       `json:"nextAttemptAt,omitempty"`
+	AttemptCount      int          `json:"attemptCount"`
+	LastError         string       `json:"lastError,omitempty"`
+	NeedsAttention    bool         `json:"needsAttention,omitempty"`
+	OpID              string       `json:"opId,omitempty"`
+	DispatchStatus    string       `json:"dispatchStatus,omitempty"`
+	AckedAt           string       `json:"ackedAt,omitempty"`
+	Revision          string       `json:"revision,omitempty"`
+	CorrelationID     string       `json:"correlationId,omitempty"`
+	LocalRelativePath string       `json:"localRelativePath,omitempty"`
 }
 
 type outboxSummary struct {
@@ -228,17 +229,18 @@ func (s *Syncer) ensureOutboxRecord(pending pendingBulkWrite) (outboxRecord, err
 	}
 	now := s.now().UTC().Format(time.RFC3339Nano)
 	record := outboxRecord{
-		CommandID:     newOutboxCommandID(s.workspace, pending.remotePath, pending.snapshot.Hash, now),
-		WorkspaceID:   s.workspace,
-		RemotePath:    pending.remotePath,
-		ContentType:   pending.snapshot.ContentType,
-		Content:       pending.snapshot.WireContent,
-		Encoding:      normalizeEncoding(pending.snapshot.Encoding),
-		Hash:          pending.snapshot.Hash,
-		Exists:        pending.exists,
-		Status:        outboxStatusPending,
-		FirstSeenAt:   now,
-		CorrelationID: "",
+		CommandID:         newOutboxCommandID(s.workspace, pending.remotePath, pending.snapshot.Hash, now),
+		WorkspaceID:       s.workspace,
+		RemotePath:        pending.remotePath,
+		ContentType:       pending.snapshot.ContentType,
+		Content:           pending.snapshot.WireContent,
+		Encoding:          normalizeEncoding(pending.snapshot.Encoding),
+		Hash:              pending.snapshot.Hash,
+		Exists:            pending.exists,
+		Status:            outboxStatusPending,
+		FirstSeenAt:       now,
+		CorrelationID:     "",
+		LocalRelativePath: pending.tracked.LocalRelativePath,
 	}
 	record.CorrelationID = record.CommandID
 	if err := s.saveOutboxRecord(record); err != nil {
@@ -416,8 +418,31 @@ func (s *Syncer) maxOutboxAttemptsValue() int {
 	return defaultOutboxMaxAttempts
 }
 
-func outboxRecordAsPending(record outboxRecord, localRoot, remoteRoot string, tracked trackedFile, exists bool) (pendingBulkWrite, error) {
-	localPath, err := remoteToLocalPath(localRoot, remoteRoot, record.RemotePath)
+func (s *Syncer) outboxRecordAsPending(record outboxRecord, tracked trackedFile, exists bool) (pendingBulkWrite, error) {
+	var localPath string
+	var err error
+	if strings.TrimSpace(record.LocalRelativePath) != "" {
+		localPath, err = safeLocalPath(s.localRoot, record.LocalRelativePath)
+		if err == nil {
+			var mappedRemote string
+			mappedRemote, err = localToRemotePath(s.localRoot, s.remoteRoot, localPath)
+			if err == nil && normalizeRemotePath(mappedRemote) != normalizeRemotePath(record.RemotePath) {
+				err = fmt.Errorf("outbox local path %s maps to %s, want %s", record.LocalRelativePath, mappedRemote, record.RemotePath)
+			}
+		}
+		if err == nil && strings.TrimSpace(tracked.LocalRelativePath) == "" {
+			tracked.LocalRelativePath = filepath.ToSlash(record.LocalRelativePath)
+		}
+	} else {
+		if migratedPath, rel, found := s.existingPreShorteningLocalPath(record.RemotePath); found {
+			localPath = migratedPath
+			if strings.TrimSpace(tracked.LocalRelativePath) == "" {
+				tracked.LocalRelativePath = rel
+			}
+		} else {
+			localPath, err = s.remoteToLocalPath(record.RemotePath)
+		}
+	}
 	if err != nil {
 		return pendingBulkWrite{}, err
 	}

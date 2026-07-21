@@ -1204,9 +1204,13 @@ type mountState struct {
 	// so the daemon does not re-fetch these paths from the cloud until the
 	// adapter emitting the collision is fixed. Cleared on bootstrap completion
 	// so a fixed adapter gets a clean slate on the next full cycle.
-	QuarantinedPaths         map[string]string `json:"quarantinedPaths,omitempty"`
-	SyncMode                 string            `json:"syncMode,omitempty"`
-	GithubWorkingTreeHeadSHA string            `json:"githubWorkingTreeHeadSha,omitempty"`
+	QuarantinedPaths map[string]string `json:"quarantinedPaths,omitempty"`
+	// SkippedMaterializations durably retains per-path local apply failures
+	// after the traversal cursor advances. Later cycles retry these paths
+	// directly, so skip-and-continue cannot turn into silent mirror data loss.
+	SkippedMaterializations  map[string]skippedMaterialization `json:"skippedMaterializations,omitempty"`
+	SyncMode                 string                            `json:"syncMode,omitempty"`
+	GithubWorkingTreeHeadSHA string                            `json:"githubWorkingTreeHeadSha,omitempty"`
 	// IncrementalReadNotReadySince records first-seen timestamps for
 	// incremental create/update events whose remote content was not readable
 	// yet. The daemon retries these without advancing EventsCursor until the
@@ -1228,11 +1232,16 @@ type incrementalCheckpoint struct {
 type telemetryCounters struct {
 	SkippedOversizeWriteback uint64 `json:"skippedOversizeWriteback,omitempty"`
 	DeniedRootTarget         uint64 `json:"deniedRootTarget,omitempty"`
-	SnapshotDeleteBlocked    uint64 `json:"snapshotDeleteBlocked,omitempty"`
-	CircuitOpenEvents        uint64 `json:"circuitOpenEvents,omitempty"`
-	TombstonesPending        uint64 `json:"tombstonesPending,omitempty"`
-	TombstonesConfirmed      uint64 `json:"tombstonesConfirmed,omitempty"`
-	TombstonesAgedOut        uint64 `json:"tombstonesAgedOut,omitempty"`
+	// PathMaterializationSkipped counts remote files that could not be
+	// represented at one local path (for example ENAMETOOLONG/ELOOP). These
+	// failures are isolated to the file so one pathological provider record
+	// cannot prevent bootstrap checkpoint progress for the rest of the mount.
+	PathMaterializationSkipped uint64 `json:"pathMaterializationSkipped,omitempty"`
+	SnapshotDeleteBlocked      uint64 `json:"snapshotDeleteBlocked,omitempty"`
+	CircuitOpenEvents          uint64 `json:"circuitOpenEvents,omitempty"`
+	TombstonesPending          uint64 `json:"tombstonesPending,omitempty"`
+	TombstonesConfirmed        uint64 `json:"tombstonesConfirmed,omitempty"`
+	TombstonesAgedOut          uint64 `json:"tombstonesAgedOut,omitempty"`
 	// PathCollisionQuarantined counts apply attempts skipped because a remote
 	// path could not be represented on the local filesystem — an ancestor
 	// component exists as a regular file (or the target is a directory). The
@@ -1293,12 +1302,75 @@ func isRemotePathCollision(err error) bool {
 		errors.Is(err, os.ErrExist)
 }
 
+// isPathLocalMaterializationError reports failures caused by one local path's
+// representation or permissions. They differ from process/system failures
+// such as EMFILE or ENOSPC: retrying the same provider path cannot make them
+// succeed, while aborting the whole page prevents unrelated files from being
+// mirrored and wedges the bootstrap checkpoint forever.
+func isPathLocalMaterializationError(err error) bool {
+	return errors.Is(err, syscall.ENAMETOOLONG) ||
+		errors.Is(err, syscall.ELOOP) ||
+		errors.Is(err, syscall.EINVAL) ||
+		errors.Is(err, syscall.EACCES) ||
+		errors.Is(err, syscall.EPERM) ||
+		errors.Is(err, syscall.EROFS)
+}
+
+func (s *Syncer) skipPathLocalMaterializationError(remotePath, operation string, err error) bool {
+	if !isPathLocalMaterializationError(err) {
+		return false
+	}
+	s.recordSkippedMaterialization(remotePath, operation, err)
+	s.state.Counters.PathMaterializationSkipped++
+	s.logf("warning: skipping remote file %s after local %s failed: %v; continuing sync cycle", normalizeRemotePath(remotePath), operation, err)
+	return true
+}
+
+func (s *Syncer) recordSkippedMaterialization(remotePath, operation string, err error) {
+	remotePath = normalizeRemotePath(remotePath)
+	now := s.now().UTC().Format(time.RFC3339Nano)
+	if s.state.SkippedMaterializations == nil {
+		s.state.SkippedMaterializations = map[string]skippedMaterialization{}
+	}
+	record := s.state.SkippedMaterializations[remotePath]
+	if record.FirstSeenAt == "" {
+		record.FirstSeenAt = now
+	}
+	record.LastAttemptAt = now
+	record.AttemptCount++
+	record.Operation = strings.TrimSpace(operation)
+	record.LastError = sanitizeOutboxError(err)
+	s.state.SkippedMaterializations[remotePath] = record
+}
+
+func (s *Syncer) clearSkippedMaterialization(remotePath string) {
+	if s.state.SkippedMaterializations == nil {
+		return
+	}
+	delete(s.state.SkippedMaterializations, normalizeRemotePath(remotePath))
+	if len(s.state.SkippedMaterializations) == 0 {
+		s.state.SkippedMaterializations = nil
+	}
+}
+
+type skippedMaterialization struct {
+	Operation     string `json:"operation,omitempty"`
+	FirstSeenAt   string `json:"firstSeenAt"`
+	LastAttemptAt string `json:"lastAttemptAt"`
+	AttemptCount  int    `json:"attemptCount"`
+	LastError     string `json:"lastError"`
+}
+
 type trackedFile struct {
 	Revision    string `json:"revision"`
 	ContentType string `json:"contentType"`
 	Encoding    string `json:"encoding,omitempty"`
 	Hash        string `json:"hash"`
 	Dirty       bool   `json:"dirty,omitempty"`
+	// LocalRelativePath preserves the identity of a valid user-created local
+	// name when the mirror's conservative atomic-write limit would otherwise
+	// shorten it. Remote-origin names still use deterministic shortening.
+	LocalRelativePath string `json:"localRelativePath,omitempty"`
 	// DeletePending is set only by an observed local delete. A missing file
 	// during a scan is not enough evidence to delete cloud state.
 	DeletePending bool `json:"deletePending,omitempty"`
@@ -1328,6 +1400,7 @@ type localSnapshot struct {
 	ContentType   string
 	Encoding      string
 	Hash          string
+	LocalPath     string
 	SkipWriteback bool
 }
 
@@ -2009,6 +2082,7 @@ func (s *Syncer) preparePendingBulkWrite(
 	tracked trackedFile,
 	exists bool,
 ) (*pendingBulkWrite, error) {
+	tracked = s.trackLocalPathIdentity(remotePath, localPath, tracked)
 	// Shared choke point for both push paths: pushLocal (via scanLocalFiles)
 	// and the filesystem-watcher path (HandleLocalChange ->
 	// handleLocalWriteOrCreate -> pushSingleFile). The watcher path never
@@ -2196,7 +2270,7 @@ func (s *Syncer) flushOutboxRecordChunk(ctx context.Context, records []outboxRec
 
 	for _, record := range uploadRecords {
 		tracked, exists := s.state.Files[record.RemotePath]
-		pendingWrite, pendingErr := outboxRecordAsPending(record, s.localRoot, s.remoteRoot, tracked, exists)
+		pendingWrite, pendingErr := s.outboxRecordAsPending(record, tracked, exists)
 		if pendingErr != nil {
 			if firstErr == nil {
 				firstErr = pendingErr
@@ -2473,12 +2547,13 @@ func (s *Syncer) reconcileBulkWrite(ctx context.Context, pendingWrite pendingBul
 	}
 	tracked.ContentType = contentType
 	s.state.Files[pendingWrite.remotePath] = trackedFile{
-		Revision:    revision,
-		ContentType: tracked.ContentType,
-		Encoding:    normalizeEncoding(pendingWrite.snapshot.Encoding),
-		Hash:        pendingWrite.snapshot.Hash,
-		Dirty:       false,
-		ReadOnly:    false,
+		Revision:          revision,
+		ContentType:       tracked.ContentType,
+		Encoding:          normalizeEncoding(pendingWrite.snapshot.Encoding),
+		Hash:              pendingWrite.snapshot.Hash,
+		Dirty:             false,
+		LocalRelativePath: tracked.LocalRelativePath,
+		ReadOnly:          false,
 	}
 	s.resolveConflictArtifacts(pendingWrite.remotePath)
 	return nil
@@ -2523,10 +2598,11 @@ func (s *Syncer) handleWriteError(
 				"agent does not have write permission; local copy preserved",
 			)
 			s.state.Files[remotePath] = trackedFile{
-				ContentType: snapshot.ContentType,
-				Hash:        snapshot.Hash,
-				WriteDenied: true,
-				DeniedHash:  snapshot.Hash,
+				ContentType:       snapshot.ContentType,
+				Hash:              snapshot.Hash,
+				LocalRelativePath: tracked.LocalRelativePath,
+				WriteDenied:       true,
+				DeniedHash:        snapshot.Hash,
 			}
 			return nil
 		}
@@ -2575,11 +2651,12 @@ func (s *Syncer) materializeConflict(ctx context.Context, remotePath, localPath 
 		contentType = snapshot.ContentType
 	}
 	s.state.Files[remotePath] = trackedFile{
-		Revision:    remoteFile.Revision,
-		ContentType: contentType,
-		Encoding:    normalizeEncoding(remoteFile.Encoding),
-		Hash:        hashBytes(remoteBytes),
-		ReadOnly:    !s.canWritePath(remotePath),
+		Revision:          remoteFile.Revision,
+		ContentType:       contentType,
+		Encoding:          normalizeEncoding(remoteFile.Encoding),
+		Hash:              hashBytes(remoteBytes),
+		LocalRelativePath: tracked.LocalRelativePath,
+		ReadOnly:          !s.canWritePath(remotePath),
 	}
 	s.logf("conflict at %s; local saved at %s", remotePath, artifactPath)
 	return nil
@@ -2643,13 +2720,13 @@ func (s *Syncer) materializeSchemaInvalid(
 		contentType = snapshot.ContentType
 	}
 	s.state.Files[remotePath] = trackedFile{
-		Revision:    remoteFile.Revision,
-		ContentType: contentType,
-		Encoding:    normalizeEncoding(remoteFile.Encoding),
-		Hash:        hashBytes(remoteBytes),
-		ReadOnly:    !s.canWritePath(remotePath),
+		Revision:          remoteFile.Revision,
+		ContentType:       contentType,
+		Encoding:          normalizeEncoding(remoteFile.Encoding),
+		Hash:              hashBytes(remoteBytes),
+		LocalRelativePath: tracked.LocalRelativePath,
+		ReadOnly:          !s.canWritePath(remotePath),
 	}
-	_ = tracked
 	s.logf("schema validation failed at %s (%s); local saved at %s, remote restored",
 		remotePath, violationDescription, artifactPath)
 	return nil
@@ -3297,7 +3374,74 @@ func (s *Syncer) outboxContext(parent context.Context) (context.Context, context
 	return context.WithTimeout(root, timeout)
 }
 
+// retrySkippedMaterializations revisits remote paths that a prior traversal
+// deliberately skipped after a path-local filesystem failure. The retry runs
+// before the normal events fast-path, so a quiet workspace still repairs the
+// mirror once the local obstruction disappears. Records survive cursor/page
+// advancement and process restart until materialization succeeds or the
+// remote file is authoritatively gone.
+func (s *Syncer) retrySkippedMaterializations(ctx context.Context, conflicted map[string]struct{}) error {
+	if len(s.state.SkippedMaterializations) == 0 {
+		return nil
+	}
+	paths := make([]string, 0, len(s.state.SkippedMaterializations))
+	for remotePath := range s.state.SkippedMaterializations {
+		remotePath = normalizeRemotePath(remotePath)
+		if remotePath == "/" || !isUnderRemoteRoot(s.remoteRoot, remotePath) {
+			s.clearSkippedMaterialization(remotePath)
+			continue
+		}
+		paths = append(paths, remotePath)
+	}
+	sort.Strings(paths)
+	for _, remotePath := range paths {
+		if conflicted != nil {
+			if _, skip := conflicted[remotePath]; skip {
+				continue
+			}
+		}
+		var file RemoteFile
+		var err error
+		s.runReservedSyncIO(func() {
+			file, err = s.client.ReadFile(ctx, s.workspace, remotePath)
+		})
+		if err != nil {
+			if ctx.Err() != nil {
+				return err
+			}
+			var httpErr *HTTPError
+			if errors.As(err, &httpErr) {
+				switch httpErr.StatusCode {
+				case http.StatusNotFound:
+					s.logf("clearing skipped local materialization for deleted remote file %s", remotePath)
+					s.clearSkippedMaterialization(remotePath)
+					continue
+				case http.StatusForbidden:
+					if markErr := s.markReadDenied(remotePath); markErr != nil {
+						return markErr
+					}
+					s.clearSkippedMaterialization(remotePath)
+					continue
+				}
+			}
+			s.recordSkippedMaterialization(remotePath, "retry read", err)
+			s.logf("warning: deferred retry read for skipped remote file %s failed: %v; keeping it queued", remotePath, err)
+			continue
+		}
+		if err := s.applyRemoteFile(remotePath, file, conflicted); err != nil {
+			return err
+		}
+		if _, pending := s.state.SkippedMaterializations[remotePath]; !pending {
+			s.logf("recovered skipped local materialization for remote file %s", remotePath)
+		}
+	}
+	return nil
+}
+
 func (s *Syncer) pullRemote(ctx context.Context, conflicted map[string]struct{}) error {
+	if err := s.retrySkippedMaterializations(ctx, conflicted); err != nil {
+		return err
+	}
 	if s.state.EventsCursor != "" && !s.forceFullReconcile {
 		// Skip-if-no-events short-circuit. Most reconcile cycles on a
 		// quiet workspace have nothing to pull; turning that into a
@@ -4432,7 +4576,8 @@ func (s *Syncer) trySkipBootstrapRead(remotePath string, entry TreeEntry) (bool,
 	if strings.TrimSpace(entry.ContentHash) == "" {
 		return false, nil
 	}
-	if tracked, ok := s.state.Files[remotePath]; ok {
+	tracked, ok := s.state.Files[remotePath]
+	if ok {
 		if tracked.Dirty || tracked.Denied {
 			return false, nil
 		}
@@ -4458,16 +4603,21 @@ func (s *Syncer) trySkipBootstrapRead(remotePath string, entry TreeEntry) (bool,
 	}
 	canWrite := s.canWritePath(remotePath)
 	if err := s.applyLocalPermissions(localPath, canWrite); err != nil {
+		if s.skipPathLocalMaterializationError(remotePath, "permission update", err) {
+			return true, nil
+		}
 		return false, err
 	}
 	s.state.Files[remotePath] = trackedFile{
-		Revision:    entry.Revision,
-		ContentType: snapshot.ContentType,
-		Hash:        snapshot.Hash,
-		Dirty:       false,
-		Denied:      false,
-		ReadOnly:    !canWrite,
+		Revision:          entry.Revision,
+		ContentType:       snapshot.ContentType,
+		Hash:              snapshot.Hash,
+		Dirty:             false,
+		LocalRelativePath: tracked.LocalRelativePath,
+		Denied:            false,
+		ReadOnly:          !canWrite,
 	}
+	s.clearSkippedMaterialization(remotePath)
 	return true, nil
 }
 
@@ -5436,13 +5586,15 @@ func (s *Syncer) trySkipIncrementalRead(remotePath string, event FilesystemEvent
 		revision = tracked.Revision
 	}
 	s.state.Files[remotePath] = trackedFile{
-		Revision:    revision,
-		ContentType: snapshot.ContentType,
-		Hash:        snapshot.Hash,
-		Dirty:       false,
-		Denied:      false,
-		ReadOnly:    !canWrite,
+		Revision:          revision,
+		ContentType:       snapshot.ContentType,
+		Hash:              snapshot.Hash,
+		Dirty:             false,
+		LocalRelativePath: tracked.LocalRelativePath,
+		Denied:            false,
+		ReadOnly:          !canWrite,
 	}
+	s.clearSkippedMaterialization(remotePath)
 	return true, nil
 }
 
@@ -5595,9 +5747,13 @@ func cursorResolutionRetryDelay(timeout time.Duration, attempt int) time.Duratio
 }
 
 func (s *Syncer) applyRemoteFile(remotePath string, file RemoteFile, conflicted map[string]struct{}) (err error) {
+	materialized := false
 	defer func() {
 		if err == nil {
 			s.clearIncrementalReadNotReady(remotePath)
+			if materialized {
+				s.clearSkippedMaterialization(remotePath)
+			}
 		}
 	}()
 	if s.skipMountRuntimeRemotePath(remotePath, conflicted) {
@@ -5624,20 +5780,26 @@ func (s *Syncer) applyRemoteFile(remotePath string, file RemoteFile, conflicted 
 		if err != nil {
 			return nil
 		}
+		tracked.LocalRelativePath = s.state.Files[remotePath].LocalRelativePath
 		if err := s.assertNotMountRoot(localPath); err != nil {
 			s.logf("skipping remote file %s: %v", remotePath, err)
 			return nil
 		}
 		if err := s.applyLocalPermissions(localPath, canWrite); err != nil {
+			if s.skipPathLocalMaterializationError(remotePath, "permission update", err) {
+				return nil
+			}
 			return err
 		}
 		s.state.Files[remotePath] = tracked
+		materialized = true
 		return nil
 	}
 	localPath, err := s.remoteToLocalPath(remotePath)
 	if err != nil {
 		return nil
 	}
+	tracked.LocalRelativePath = s.state.Files[remotePath].LocalRelativePath
 	if err := s.assertNotMountRoot(localPath); err != nil {
 		s.logf("skipping remote file %s: %v", remotePath, err)
 		return nil
@@ -5651,6 +5813,9 @@ func (s *Syncer) applyRemoteFile(remotePath string, file RemoteFile, conflicted 
 	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
 		if isRemotePathCollision(err) {
 			s.quarantineRemotePath(remotePath, "cannot create parent directory", err)
+			return nil
+		}
+		if s.skipPathLocalMaterializationError(remotePath, "parent directory creation", err) {
 			return nil
 		}
 		return err
@@ -5669,10 +5834,16 @@ func (s *Syncer) applyRemoteFile(remotePath string, file RemoteFile, conflicted 
 				s.quarantineRemotePath(remotePath, "cannot write file (target is a directory)", err)
 				return nil
 			}
+			if s.skipPathLocalMaterializationError(remotePath, "atomic write", err) {
+				return nil
+			}
 			return err
 		}
 	}
 	if err := s.applyLocalPermissions(localPath, canWrite); err != nil {
+		if s.skipPathLocalMaterializationError(remotePath, "permission update", err) {
+			return nil
+		}
 		return err
 	}
 	contentType := strings.TrimSpace(file.ContentType)
@@ -5681,14 +5852,16 @@ func (s *Syncer) applyRemoteFile(remotePath string, file RemoteFile, conflicted 
 	}
 	tracked.ReadOnly = !canWrite
 	s.state.Files[remotePath] = trackedFile{
-		Revision:    file.Revision,
-		ContentType: contentType,
-		Encoding:    normalizeEncoding(file.Encoding),
-		Hash:        remoteHash,
-		Dirty:       false,
-		Denied:      false,
-		ReadOnly:    !canWrite,
+		Revision:          file.Revision,
+		ContentType:       contentType,
+		Encoding:          normalizeEncoding(file.Encoding),
+		Hash:              remoteHash,
+		Dirty:             false,
+		LocalRelativePath: tracked.LocalRelativePath,
+		Denied:            false,
+		ReadOnly:          !canWrite,
 	}
+	materialized = true
 	return nil
 }
 
@@ -5834,6 +6007,9 @@ func (s *Syncer) applyRemoteDelete(remotePath string, conflicted map[string]stru
 			return nil
 		}
 	}
+	// An authoritative remote delete resolves any earlier local
+	// materialization failure even when the file was never tracked locally.
+	s.clearSkippedMaterialization(remotePath)
 	tracked, ok := s.state.Files[remotePath]
 	if !ok || tracked.Dirty {
 		return nil
@@ -5882,9 +6058,12 @@ func (s *Syncer) pushLocal(ctx context.Context) (map[string]struct{}, error) {
 	for _, remotePath := range localRemotePaths {
 		snapshot := localFiles[remotePath]
 		tracked, exists := s.state.Files[remotePath]
-		localPath, err := s.remoteToLocalPath(remotePath)
-		if err != nil {
-			return nil, err
+		localPath := snapshot.LocalPath
+		if strings.TrimSpace(localPath) == "" {
+			localPath, err = s.remoteToLocalPath(remotePath)
+			if err != nil {
+				return nil, err
+			}
 		}
 		canWrite := s.canWritePath(remotePath)
 		tracked.ReadOnly = !canWrite
@@ -6848,6 +7027,7 @@ func newLocalSnapshot(path string, data []byte) localSnapshot {
 		ContentType: contentType,
 		Encoding:    encoding,
 		Hash:        hashBytes(data),
+		LocalPath:   path,
 	}
 }
 
@@ -6871,6 +7051,7 @@ func readLocalSnapshot(path string, includeContent bool) (localSnapshot, error) 
 	return localSnapshot{
 		ContentType: detectContentType(path),
 		Hash:        hex.EncodeToString(h.Sum(nil)),
+		LocalPath:   path,
 	}, nil
 }
 
@@ -7037,6 +7218,10 @@ func remoteDescendantDepth(remoteRoot, remotePath string) int {
 }
 
 func remoteToLocalPath(localRoot, remoteRoot, remotePath string) (string, error) {
+	return remoteToLocalPathWithShortening(localRoot, remoteRoot, remotePath, true)
+}
+
+func remoteToLocalPathWithShortening(localRoot, remoteRoot, remotePath string, shorten bool) (string, error) {
 	localRoot = filepath.Clean(localRoot)
 	remoteRoot = normalizeRemotePath(remoteRoot)
 	remotePath = normalizeRemotePath(remotePath)
@@ -7058,6 +7243,14 @@ func remoteToLocalPath(localRoot, remoteRoot, remotePath string) (string, error)
 	if strings.HasPrefix(relSlash, "../") || relSlash == ".." || strings.Contains(relSlash, "/../") {
 		return "", fmt.Errorf("path %s escapes local root", remotePath)
 	}
+	// A provider basename can exceed the local filesystem's NAME_MAX even when
+	// the full remote path is valid. Shorten each overlong component
+	// deterministically for the mirror. The Syncer resolves the inverse from
+	// its persisted remote-path state before writeback, preserving the exact
+	// provider name rather than sending the shortened local representation.
+	if shorten {
+		rel = shortenLocalRelativePath(rel)
+	}
 	joined := filepath.Join(localRoot, filepath.FromSlash(rel))
 	cleanJoined := filepath.Clean(joined)
 	// Data-loss guard: a remote path whose only relative component is the
@@ -7077,6 +7270,65 @@ func remoteToLocalPath(localRoot, remoteRoot, remotePath string) (string, error)
 }
 
 func (s *Syncer) remoteToLocalPath(remotePath string) (string, error) {
+	remotePath = normalizeRemotePath(remotePath)
+	if tracked, ok := s.state.Files[remotePath]; ok {
+		if strings.TrimSpace(tracked.LocalRelativePath) != "" {
+			localPath, err := safeLocalPath(s.localRoot, tracked.LocalRelativePath)
+			if err != nil {
+				return "", fmt.Errorf("invalid preserved local path for %s: %w", remotePath, err)
+			}
+			return localPath, nil
+		}
+		if localPath, rel, found := s.existingPreShorteningLocalPath(remotePath); found {
+			tracked.LocalRelativePath = rel
+			s.state.Files[remotePath] = tracked
+			return localPath, nil
+		}
+	}
+	return s.defaultRemoteToLocalPath(remotePath)
+}
+
+func (s *Syncer) existingPreShorteningLocalPath(remotePath string) (string, string, bool) {
+	if s.githubWorkingTree != nil ||
+		!pathHasComponentLongerThan(remotePath, maxLocalMirrorBasenameBytes) ||
+		pathHasComponentLongerThan(remotePath, maxLocalFilesystemBasenameBytes) {
+		return "", "", false
+	}
+	// Migration is only unambiguous when the deterministic post-fix path is
+	// absent. If both names exist, keep the shortened mirror authoritative so
+	// it cannot reappear in a scan as a new literal remote path.
+	defaultPath, err := s.defaultRemoteToLocalPath(remotePath)
+	if err != nil {
+		return "", "", false
+	}
+	if _, err := os.Lstat(defaultPath); err == nil || !errors.Is(err, os.ErrNotExist) {
+		return "", "", false
+	}
+	localPath, err := remoteToLocalPathWithShortening(s.localRoot, s.remoteRoot, remotePath, false)
+	if err != nil {
+		return "", "", false
+	}
+	info, err := os.Lstat(localPath)
+	if err != nil || info.IsDir() {
+		return "", "", false
+	}
+	mappedRemote, err := localToRemotePath(s.localRoot, s.remoteRoot, localPath)
+	if err != nil || normalizeRemotePath(mappedRemote) != normalizeRemotePath(remotePath) {
+		return "", "", false
+	}
+	rel, err := filepath.Rel(s.localRoot, localPath)
+	if err != nil {
+		return "", "", false
+	}
+	rel = filepath.ToSlash(rel)
+	resolved, err := safeLocalPath(s.localRoot, rel)
+	if err != nil || filepath.Clean(resolved) != filepath.Clean(localPath) {
+		return "", "", false
+	}
+	return localPath, rel, true
+}
+
+func (s *Syncer) defaultRemoteToLocalPath(remotePath string) (string, error) {
 	if s.githubWorkingTree != nil {
 		if rel, ok := s.githubWorkingTree.remotePathToWorkingTreeRel(remotePath); ok {
 			return safeLocalPath(s.localRoot, rel)
@@ -7085,7 +7337,35 @@ func (s *Syncer) remoteToLocalPath(remotePath string) (string, error) {
 	return remoteToLocalPath(s.localRoot, s.remoteRoot, remotePath)
 }
 
+func (s *Syncer) trackLocalPathIdentity(remotePath, localPath string, tracked trackedFile) trackedFile {
+	if strings.TrimSpace(tracked.LocalRelativePath) != "" || s.githubWorkingTree != nil {
+		return tracked
+	}
+	defaultPath, err := s.defaultRemoteToLocalPath(remotePath)
+	if err != nil || filepath.Clean(defaultPath) == filepath.Clean(localPath) {
+		return tracked
+	}
+	mappedRemote, err := localToRemotePath(s.localRoot, s.remoteRoot, localPath)
+	if err != nil || normalizeRemotePath(mappedRemote) != normalizeRemotePath(remotePath) {
+		return tracked
+	}
+	rel, err := filepath.Rel(s.localRoot, localPath)
+	if err != nil {
+		return tracked
+	}
+	rel = filepath.ToSlash(rel)
+	resolved, err := safeLocalPath(s.localRoot, rel)
+	if err != nil || filepath.Clean(resolved) != filepath.Clean(localPath) {
+		return tracked
+	}
+	tracked.LocalRelativePath = rel
+	return tracked
+}
+
 func (s *Syncer) localPathToRemotePath(localPath string, githubPathIndex map[string]string) (string, error) {
+	if remotePath, ok := s.trackedRemotePathForLocalPath(localPath); ok {
+		return remotePath, nil
+	}
 	if s.githubWorkingTree != nil {
 		rel, err := RelativeRemotePathFromLocal(s.localRoot, localPath)
 		if err != nil {
@@ -7101,6 +7381,11 @@ func (s *Syncer) localPathToRemotePath(localPath string, githubPathIndex map[str
 
 func (s *Syncer) localRelativeToRemotePath(relativePath string) string {
 	relativePath = filepath.ToSlash(strings.TrimSpace(relativePath))
+	if localPath, err := safeLocalPath(s.localRoot, relativePath); err == nil {
+		if remotePath, ok := s.trackedRemotePathForLocalPath(localPath); ok {
+			return remotePath
+		}
+	}
 	if s.githubWorkingTree != nil {
 		if remotePath := s.githubRemotePathForWorkingTreeRel(relativePath, nil); remotePath != "" {
 			return remotePath
@@ -7108,6 +7393,111 @@ func (s *Syncer) localRelativeToRemotePath(relativePath string) string {
 		return s.githubWorkingTree.workingTreeRelToRemotePath(relativePath)
 	}
 	return normalizeRemotePath(filepath.Join(s.remoteRoot, filepath.FromSlash(relativePath)))
+}
+
+// trackedRemotePathForLocalPath reverses deterministic local-name shortening
+// through the persisted remote-path keys in mount state. There is no lossless
+// stateless encoding from an arbitrary >NAME_MAX basename into <=NAME_MAX
+// bytes; state is therefore the Path Contract's authoritative inverse. Sorting
+// keeps the result deterministic even in the astronomically unlikely event of
+// a truncated SHA-256 collision.
+func (s *Syncer) trackedRemotePathForLocalPath(localPath string) (string, bool) {
+	want := filepath.Clean(localPath)
+	if !localPathMayContainShortenedName(want) {
+		return "", false
+	}
+	var remotePaths []string
+	for remotePath := range s.state.Files {
+		// Only a remote path with an overlong component can map to a local
+		// path containing the shortening marker. Avoid hashing every ordinary
+		// tracked file when one shortened path is written back.
+		if pathHasComponentLongerThan(remotePath, maxLocalMirrorBasenameBytes) {
+			remotePaths = append(remotePaths, remotePath)
+		}
+	}
+	sort.Strings(remotePaths)
+	for _, remotePath := range remotePaths {
+		mapped, err := s.remoteToLocalPath(remotePath)
+		if err == nil && filepath.Clean(mapped) == want {
+			return remotePath, true
+		}
+	}
+	return "", false
+}
+
+func localPathMayContainShortenedName(localPath string) bool {
+	return strings.Contains(localPath, "~rf-")
+}
+
+const (
+	// POSIX NAME_MAX is commonly 255 bytes. Atomic mirror writes prepend a dot
+	// and append a randomized ".tmp-*" suffix, so leave ample headroom for the
+	// temporary basename as well as the final target.
+	maxLocalMirrorBasenameBytes     = 220
+	maxLocalFilesystemBasenameBytes = 255
+	localNameHashBytes              = 16
+	maxPreservedExtensionBytes      = 32
+)
+
+func shortenLocalRelativePath(rel string) string {
+	rel = filepath.ToSlash(rel)
+	if !pathHasComponentLongerThan(rel, maxLocalMirrorBasenameBytes) {
+		return rel
+	}
+	parts := strings.Split(rel, "/")
+	for i, part := range parts {
+		parts[i] = shortenLocalBasename(part)
+	}
+	return strings.Join(parts, "/")
+}
+
+func pathHasComponentLongerThan(path string, maxBytes int) bool {
+	componentBytes := 0
+	for i := 0; i < len(path); i++ {
+		if path[i] == '/' {
+			if componentBytes > maxBytes {
+				return true
+			}
+			componentBytes = 0
+			continue
+		}
+		componentBytes++
+	}
+	return componentBytes > maxBytes
+}
+
+func shortenLocalBasename(base string) string {
+	if len(base) <= maxLocalMirrorBasenameBytes {
+		return base
+	}
+	sum := sha256.Sum256([]byte(base))
+	hashSuffix := "~rf-" + hex.EncodeToString(sum[:localNameHashBytes])
+	ext := filepath.Ext(base)
+	stem := strings.TrimSuffix(base, ext)
+	if stem == "" || len(ext) > maxPreservedExtensionBytes {
+		ext = ""
+		stem = base
+	}
+	prefixBytes := maxLocalMirrorBasenameBytes - len(hashSuffix) - len(ext)
+	if prefixBytes < 0 {
+		prefixBytes = 0
+	}
+	prefix := truncateValidUTF8(stem, prefixBytes)
+	return prefix + hashSuffix + ext
+}
+
+func truncateValidUTF8(value string, maxBytes int) string {
+	if maxBytes <= 0 {
+		return ""
+	}
+	if len(value) <= maxBytes {
+		return value
+	}
+	value = value[:maxBytes]
+	for value != "" && !utf8.ValidString(value) {
+		value = value[:len(value)-1]
+	}
+	return value
 }
 
 func (s *Syncer) githubRemotePathForWorkingTreeRel(rel string, githubPathIndex map[string]string) string {
@@ -7455,7 +7845,11 @@ func waitWithContext(ctx context.Context, delay time.Duration) error {
 // "..relayfile-mount-state.json.tmp-*", which the file watcher's
 // shouldSkip didn't recognize as internal.
 func atomicTempPattern(path string) string {
-	base := filepath.Base(path)
+	// A user-created basename may be valid at 221-255 bytes even though
+	// prefixing it and appending the randomized temp suffix would exceed the
+	// filesystem's NAME_MAX. The temp name does not participate in the Path
+	// Contract, so shorten only the disposable temp basename.
+	base := shortenLocalBasename(filepath.Base(path))
 	if !strings.HasPrefix(base, ".") {
 		base = "." + base
 	}
