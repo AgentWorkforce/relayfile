@@ -343,13 +343,28 @@ func TestExistingLongValidBasenameMigratesFromPrefixState(t *testing.T) {
 	if err := restarted.loadState(); err != nil {
 		t.Fatalf("load pre-fix state: %v", err)
 	}
+	remoteUpdate := RemoteFile{
+		Path:        remotePath,
+		Revision:    "rev_after_long_name_fix",
+		ContentType: "application/json",
+		Content:     `{"version":"upgraded"}`,
+	}
+	if err := restarted.applyRemoteFile(remotePath, remoteUpdate, nil); err != nil {
+		t.Fatalf("apply remote update while migrating pre-fix state: %v", err)
+	}
+	wantRel := filepath.ToSlash(filepath.Join("reddit", "posts", longBase))
+	if got := restarted.state.Files[remotePath].LocalRelativePath; got != wantRel {
+		t.Fatalf("remote apply overwrote migrated local identity = %q, want %q", got, wantRel)
+	}
 	if got, err := restarted.remoteToLocalPath(remotePath); err != nil {
 		t.Fatalf("map pre-fix tracked path: %v", err)
 	} else if got != localPath {
 		t.Fatalf("upgrade remapped existing local identity: mapped=%q want=%q", got, localPath)
 	}
-	if got := restarted.state.Files[remotePath].LocalRelativePath; got != filepath.ToSlash(filepath.Join("reddit", "posts", longBase)) {
-		t.Fatalf("migrated local identity = %q, want exact legacy relative path", got)
+	if got, err := os.ReadFile(localPath); err != nil {
+		t.Fatalf("read migrated local path after remote apply: %v", err)
+	} else if string(got) != remoteUpdate.Content {
+		t.Fatalf("migrated local content = %q, want %q", got, remoteUpdate.Content)
 	}
 }
 

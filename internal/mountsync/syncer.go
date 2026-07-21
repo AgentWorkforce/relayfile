@@ -5780,6 +5780,7 @@ func (s *Syncer) applyRemoteFile(remotePath string, file RemoteFile, conflicted 
 		if err != nil {
 			return nil
 		}
+		tracked.LocalRelativePath = s.state.Files[remotePath].LocalRelativePath
 		if err := s.assertNotMountRoot(localPath); err != nil {
 			s.logf("skipping remote file %s: %v", remotePath, err)
 			return nil
@@ -5798,6 +5799,7 @@ func (s *Syncer) applyRemoteFile(remotePath string, file RemoteFile, conflicted 
 	if err != nil {
 		return nil
 	}
+	tracked.LocalRelativePath = s.state.Files[remotePath].LocalRelativePath
 	if err := s.assertNotMountRoot(localPath); err != nil {
 		s.logf("skipping remote file %s: %v", remotePath, err)
 		return nil
