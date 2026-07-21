@@ -175,6 +175,8 @@ Exactly one of `workspace` / `workspaceId` must be provided. Passing both or nei
 
 Use when the workspace has an integration provider that must be connected before mounting. This is the standard entry point for sandbox integrators.
 
+Within one `RelayfileSetup` instance, the method keeps a single-flight registry keyed by the logical mount target. Concurrent and repeated calls return the same supervised handle, so only one physical mount owns a local directory. `stop()` is shared and idempotent; after it completes, the next ensure creates a new mount.
+
 ```ts
 import { ProviderNotConnectedError, ProviderNotReadyError } from "@relayfile/sdk";
 import { RelayfileSetup } from "@relayfile/sdk/cli";

@@ -194,6 +194,7 @@ export class RelayfileSetup {
   private readonly accessToken?: AccessTokenProvider
   private readonly requestTimeoutMs: number
   private readonly retryOptions: NormalizedRetryOptions
+  private readonly ensuredMounts = new Map<string, Promise<MountedWorkspaceHandle>>()
 
   static async login(
     options: RelayfileCloudLoginOptions = {}
@@ -337,6 +338,37 @@ export class RelayfileSetup {
     const normalized = normalizeEnsureMountedWorkspaceInput(input)
     const workspace = await this.resolveWorkspaceForMount(normalized)
 
+    const mountKey = ensuredMountKey(workspace, normalized)
+    const existing = this.ensuredMounts.get(mountKey)
+    if (existing) {
+      return waitForEnsuredMount(existing, normalized.signal)
+    }
+
+    let shared!: Promise<MountedWorkspaceHandle>
+    shared = this.startEnsuredMount(workspace, normalized).then(
+      (mounted) => new SharedMountedWorkspaceHandle({
+        mounted,
+        signal: normalized.signal,
+        onStopped: () => {
+          if (this.ensuredMounts.get(mountKey) === shared) {
+            this.ensuredMounts.delete(mountKey)
+          }
+        }
+      })
+    )
+    this.ensuredMounts.set(mountKey, shared)
+    void shared.catch(() => {
+      if (this.ensuredMounts.get(mountKey) === shared) {
+        this.ensuredMounts.delete(mountKey)
+      }
+    })
+    return waitForEnsuredMount(shared, normalized.signal)
+  }
+
+  private async startEnsuredMount(
+    workspace: WorkspaceHandle,
+    normalized: NormalizedEnsureMountedWorkspaceInput
+  ): Promise<MountedWorkspaceHandle> {
     if (normalized.verifyProvider) {
       if (!normalized.provider) {
         throw new MountSessionInputError(
@@ -1192,6 +1224,82 @@ class MountedWorkspaceHandleImpl implements MountedWorkspaceHandle {
   }
 }
 
+class SharedMountedWorkspaceHandle implements MountedWorkspaceHandle {
+  private readonly mounted: MountedWorkspaceHandle
+  private readonly onStopped: () => void
+  private readonly signal?: AbortSignal
+  private stopPromise?: Promise<void>
+
+  constructor(input: {
+    mounted: MountedWorkspaceHandle
+    onStopped: () => void
+    signal?: AbortSignal
+  }) {
+    this.mounted = input.mounted
+    this.onStopped = input.onStopped
+    this.signal = input.signal
+    if (this.signal?.aborted) {
+      this.handleAbort()
+    } else {
+      this.signal?.addEventListener("abort", this.handleAbort, { once: true })
+    }
+  }
+
+  get workspaceId(): string {
+    return this.mounted.workspaceId
+  }
+
+  get localDir(): string {
+    return this.mounted.localDir
+  }
+
+  get remotePath(): string {
+    return this.mounted.remotePath
+  }
+
+  get mode(): MountMode {
+    return this.mounted.mode
+  }
+
+  get ready(): boolean {
+    return this.mounted.ready
+  }
+
+  get expiresAt(): string | null {
+    return this.mounted.expiresAt
+  }
+
+  get suggestedRefreshAt(): string | null {
+    return this.mounted.suggestedRefreshAt
+  }
+
+  env(): Record<string, string> {
+    return this.mounted.env()
+  }
+
+  status(): Promise<MountedWorkspaceStatus> {
+    return this.mounted.status()
+  }
+
+  async stop(): Promise<void> {
+    if (!this.stopPromise) this.stopPromise = this.performStop()
+    await this.stopPromise
+  }
+
+  private async performStop(): Promise<void> {
+    this.signal?.removeEventListener("abort", this.handleAbort)
+    try {
+      await this.mounted.stop()
+    } finally {
+      this.onStopped()
+    }
+  }
+
+  private readonly handleAbort = (): void => {
+    void this.stop()
+  }
+}
+
 class SupervisedMountedWorkspaceHandle implements MountedWorkspaceHandle {
   private mounted: MountedWorkspaceHandle
   private readonly launch: () => Promise<MountedWorkspaceHandle>
@@ -1368,6 +1476,42 @@ class SupervisedMountedWorkspaceHandle implements MountedWorkspaceHandle {
 
   private emit(event: MountSupervisorEvent): void {
     void Promise.resolve(this.onEvent?.(event)).catch(() => {})
+  }
+}
+
+function ensuredMountKey(
+  workspace: WorkspaceHandle,
+  input: NormalizedEnsureMountedWorkspaceInput
+): string {
+  return JSON.stringify([
+    workspace.workspaceId,
+    input.localDir,
+    input.remotePath,
+    input.mode,
+    input.localLayout,
+    input.syncMode,
+    input.background
+  ])
+}
+
+async function waitForEnsuredMount(
+  mounted: Promise<MountedWorkspaceHandle>,
+  signal?: AbortSignal
+): Promise<MountedWorkspaceHandle> {
+  if (!signal) return mounted
+  if (signal.aborted) throw new CloudAbortError("ensureMountedWorkspace")
+
+  let onAbort: (() => void) | undefined
+  try {
+    return await Promise.race([
+      mounted,
+      new Promise<never>((_, reject) => {
+        onAbort = () => reject(new CloudAbortError("ensureMountedWorkspace"))
+        signal.addEventListener("abort", onAbort, { once: true })
+      })
+    ])
+  } finally {
+    if (onAbort) signal.removeEventListener("abort", onAbort)
   }
 }
 

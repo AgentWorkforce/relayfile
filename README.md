@@ -351,6 +351,8 @@ const handle = await setup.ensureMountedWorkspace({
 
 `ensureMountedWorkspace` throws `ProviderNotConnectedError` when the provider isn't connected, and `ProviderNotReadyError({ provider, state, initialSyncState })` when the connection exists but isn't ready by `providerReadyTimeoutMs`. Pass `verifyProvider: false` to skip the probe.
 
+Calls on the same `RelayfileSetup` instance are idempotent for one logical mount target. Concurrent or repeated ensures share one physical mount and one supervised handle until `stop()` completes; a later ensure then starts a fresh mount. This prevents parallel agent lifecycle handlers from launching competing mount processes for the same local directory.
+
 The handle exposes `ready`, `expiresAt`, `suggestedRefreshAt`, `env()`, `status()`, and `stop()`. The SDK supervises the local `relayfile-mount` process for you and only resolves once the mount is reachable.
 
 This is the programmatic sibling of the `relayfile setup` CLI above — same outcome (a workspace mounted at a local directory), different entry point. Use the CLI for human-driven setup; use the SDK from inside an already-authorized sandbox or agent runtime. Full details in [docs/guides/post-auth-mount-session.md](docs/guides/post-auth-mount-session.md).
