@@ -1560,6 +1560,163 @@ describe("RelayfileSetup", () => {
     }
   })
 
+  it("ensureMountedWorkspace shares one physical mount and evicts it only after stop", async () => {
+    const tempRoot = await mkdtemp(
+      path.join(os.tmpdir(), "relayfile-sdk-ensure-singleflight-")
+    )
+    const localDir = path.join(tempRoot, "mirror")
+    const fetchMock = queueFetch(
+      makeJoinResponse("rf_jwt_joined"),
+      makeMountSessionResponse(),
+      makeMountSessionResponse({ relayfileToken: "rf_mount_after_stop" })
+    )
+    const instances = [4321, 4322].map((pid) => ({
+      pid,
+      ready: Promise.resolve(),
+      status: vi.fn().mockResolvedValue({
+        ready: true,
+        mode: "poll",
+        expiresAt: null,
+        suggestedRefreshAt: null
+      } satisfies MountedWorkspaceStatus),
+      stop: vi.fn().mockResolvedValue(undefined)
+    }))
+    const launcher: MountLauncher = {
+      start: vi.fn()
+        .mockResolvedValueOnce(instances[0])
+        .mockResolvedValueOnce(instances[1])
+    }
+
+    try {
+      const setup = new RelayfileSetup()
+      const workspace = await setup.joinWorkspace("ws_123")
+      const [first, alias] = await Promise.all([
+        setup.ensureMountedWorkspace({
+          workspace,
+          localDir,
+          verifyProvider: false,
+          launcher
+        }),
+        setup.ensureMountedWorkspace({
+          workspace,
+          localDir,
+          verifyProvider: false,
+          launcher
+        })
+      ])
+
+      expect(alias).toBe(first)
+      expect(launcher.start).toHaveBeenCalledTimes(1)
+      expect(fetchMock).toHaveBeenCalledTimes(2)
+
+      await alias.stop()
+      expect(instances[0]!.stop).toHaveBeenCalledTimes(1)
+
+      const restarted = await setup.ensureMountedWorkspace({
+        workspace,
+        localDir,
+        verifyProvider: false,
+        launcher
+      })
+      expect(restarted).not.toBe(first)
+      expect(launcher.start).toHaveBeenCalledTimes(2)
+      expect(fetchMock).toHaveBeenCalledTimes(3)
+      await restarted.stop()
+      expect(instances[1]!.stop).toHaveBeenCalledTimes(1)
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true })
+    }
+  })
+
+  it("lets the creating waiter abort without cancelling shared physical startup", async () => {
+    const tempRoot = await mkdtemp(
+      path.join(os.tmpdir(), "relayfile-sdk-ensure-waiter-abort-")
+    )
+    const localDir = path.join(tempRoot, "mirror")
+    queueFetch(
+      makeJoinResponse("rf_jwt_joined"),
+      makeMountSessionResponse()
+    )
+    const { launcher, instance, readyControl } = createLauncherStub()
+    const controller = new AbortController()
+
+    try {
+      const setup = new RelayfileSetup()
+      const workspace = await setup.joinWorkspace("ws_123")
+      const first = setup.ensureMountedWorkspace({
+        workspace,
+        localDir,
+        verifyProvider: false,
+        launcher,
+        signal: controller.signal
+      })
+      const alias = setup.ensureMountedWorkspace({
+        workspace,
+        localDir,
+        verifyProvider: false,
+        launcher
+      })
+
+      await flushPromises()
+      controller.abort()
+      await expect(first).rejects.toBeInstanceOf(CloudAbortError)
+      expect(instance.stop).not.toHaveBeenCalled()
+
+      readyControl.resolve()
+      const mounted = await alias
+      expect(launcher.start).toHaveBeenCalledTimes(1)
+      await mounted.stop()
+      expect(instance.stop).toHaveBeenCalledTimes(1)
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true })
+    }
+  })
+
+  it("does not stop an established shared mount when its creating waiter later aborts", async () => {
+    const tempRoot = await mkdtemp(
+      path.join(os.tmpdir(), "relayfile-sdk-ensure-creator-late-abort-")
+    )
+    const localDir = path.join(tempRoot, "mirror")
+    queueFetch(
+      makeJoinResponse("rf_jwt_joined"),
+      makeMountSessionResponse()
+    )
+    const { launcher, instance, readyControl } = createLauncherStub()
+    const controller = new AbortController()
+
+    try {
+      const setup = new RelayfileSetup()
+      const workspace = await setup.joinWorkspace("ws_123")
+      const creating = setup.ensureMountedWorkspace({
+        workspace,
+        localDir,
+        verifyProvider: false,
+        launcher,
+        signal: controller.signal
+      })
+      const alias = setup.ensureMountedWorkspace({
+        workspace,
+        localDir,
+        verifyProvider: false,
+        launcher
+      })
+
+      readyControl.resolve()
+      const [mounted, shared] = await Promise.all([creating, alias])
+      expect(shared).toBe(mounted)
+
+      controller.abort()
+      await flushPromises()
+      expect(instance.stop).not.toHaveBeenCalled()
+      expect(mounted.ready).toBe(true)
+
+      await shared.stop()
+      expect(instance.stop).toHaveBeenCalledTimes(1)
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true })
+    }
+  })
+
   it("ensureMountedWorkspace renews a background mount at the suggested refresh time", async () => {
     vi.useFakeTimers()
     vi.setSystemTime("2026-05-09T10:00:00.000Z")
@@ -1734,7 +1891,7 @@ describe("RelayfileSetup", () => {
           launcher,
           signal: controller.signal
         }))
-        .rejects.toThrow("Aborted while waiting for mountWorkspace")
+        .rejects.toThrow("Aborted while waiting for ensureMountedWorkspace")
       expect(launcher.start).not.toHaveBeenCalled()
       expect(stop).not.toHaveBeenCalled()
     } finally {
