@@ -159,6 +159,18 @@ func TestLocallyCreatedLongValidBasenameKeepsIdentityAcrossReconcile(t *testing.
 	} else if got.Content != `{"version":1}` {
 		t.Fatalf("initial scan writeback content = %q, want version 1", got.Content)
 	}
+	pendingRetry, err := syncer.outboxRecordAsPending(outboxRecord{
+		RemotePath:  remotePath,
+		ContentType: "application/json",
+		Content:     `{"version":1}`,
+		Hash:        hashBytes([]byte(`{"version":1}`)),
+	}, syncer.state.Files[remotePath], true)
+	if err != nil {
+		t.Fatalf("rebuild pending retry: %v", err)
+	}
+	if pendingRetry.localPath != localPath {
+		t.Fatalf("pending retry mapped to %q, want preserved %q", pendingRetry.localPath, localPath)
+	}
 
 	// Subsequent remote reconciliation must update the same user-created path
 	// rather than materializing a second hash-shortened sibling.

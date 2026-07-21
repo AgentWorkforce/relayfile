@@ -2270,7 +2270,7 @@ func (s *Syncer) flushOutboxRecordChunk(ctx context.Context, records []outboxRec
 
 	for _, record := range uploadRecords {
 		tracked, exists := s.state.Files[record.RemotePath]
-		pendingWrite, pendingErr := outboxRecordAsPending(record, s.localRoot, s.remoteRoot, tracked, exists)
+		pendingWrite, pendingErr := s.outboxRecordAsPending(record, tracked, exists)
 		if pendingErr != nil {
 			if firstErr == nil {
 				firstErr = pendingErr

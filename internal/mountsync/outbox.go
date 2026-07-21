@@ -416,8 +416,8 @@ func (s *Syncer) maxOutboxAttemptsValue() int {
 	return defaultOutboxMaxAttempts
 }
 
-func outboxRecordAsPending(record outboxRecord, localRoot, remoteRoot string, tracked trackedFile, exists bool) (pendingBulkWrite, error) {
-	localPath, err := remoteToLocalPath(localRoot, remoteRoot, record.RemotePath)
+func (s *Syncer) outboxRecordAsPending(record outboxRecord, tracked trackedFile, exists bool) (pendingBulkWrite, error) {
+	localPath, err := s.remoteToLocalPath(record.RemotePath)
 	if err != nil {
 		return pendingBulkWrite{}, err
 	}
