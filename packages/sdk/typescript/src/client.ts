@@ -7,12 +7,20 @@ import {
   type AckResponse,
   type CommitForkInput,
   type CommitForkResponse,
+  type AcceptDurableSubscriptionDeliveryInput,
+  type CancelDurableResourceSubscriptionOptions,
+  type ClaimDurableSubscriptionDeliveriesInput,
+  type CreateOrRenewDurableResourceSubscriptionInput,
   type CreateForkInput,
   type DeleteFileInput,
   type DeadLetterItem,
   type DeadLetterFeedResponse,
   type DeleteWebhookOptions,
   type DiscardForkInput,
+  type DurableResourceSubscription,
+  type DurableResourceSubscriptionListResponse,
+  type DurableSubscriptionDeliveryListResponse,
+  type DurableSubscriptionDeliveryResponse,
   type ErrorResponse,
   type EventFeedResponse,
   type ExportJsonResponse,
@@ -29,6 +37,7 @@ import {
   type GetSyncStatusOptions,
   type GetWebhookDeadLettersOptions,
   type ListWebhooksOptions,
+  type ListDurableResourceSubscriptionsOptions,
   type ListTreeOptions,
   type OperationFeedResponse,
   type OperationStatusResponse,
@@ -1674,6 +1683,92 @@ export class RelayFileClient {
       events: (response.events ?? []).map((event) => normalizeFilesystemEvent(event as Parameters<typeof normalizeFilesystemEvent>[0])),
       nextCursor: response.nextCursor ?? null
     };
+  }
+
+  async createOrRenewDurableResourceSubscription(
+    input: CreateOrRenewDurableResourceSubscriptionInput
+  ): Promise<DurableResourceSubscription> {
+    if (!input.workspaceId) throw new Error("workspaceId is required");
+    if (!input.provider) throw new Error("provider is required");
+    if (!input.resourceRef) throw new Error("resourceRef is required");
+    if (!input.subscriberId) throw new Error("subscriberId is required");
+    if (!Array.isArray(input.eventTypes) || input.eventTypes.length === 0) {
+      throw new Error("eventTypes is required and must be a non-empty array");
+    }
+    if (!Number.isInteger(input.ttlSeconds) || input.ttlSeconds < 60 || input.ttlSeconds > 2_592_000) {
+      throw new Error("ttlSeconds must be an integer between 60 and 2592000");
+    }
+    return this.request<DurableResourceSubscription>({
+      method: "POST",
+      path: `/v1/workspaces/${encodeURIComponent(input.workspaceId)}/subscriptions`,
+      correlationId: input.correlationId,
+      body: {
+        provider: input.provider,
+        resourceRef: input.resourceRef,
+        eventTypes: input.eventTypes,
+        terminalEventTypes: input.terminalEventTypes,
+        subscriberId: input.subscriberId,
+        intent: input.intent,
+        ttlSeconds: input.ttlSeconds
+      },
+      signal: input.signal
+    });
+  }
+
+  async listDurableResourceSubscriptions(
+    workspaceId: string,
+    options: ListDurableResourceSubscriptionsOptions = {}
+  ): Promise<DurableResourceSubscriptionListResponse> {
+    if (!workspaceId) throw new Error("workspaceId is required");
+    return this.request<DurableResourceSubscriptionListResponse>({
+      method: "GET",
+      path: `/v1/workspaces/${encodeURIComponent(workspaceId)}/subscriptions`,
+      correlationId: options.correlationId,
+      signal: options.signal
+    });
+  }
+
+  async cancelDurableResourceSubscription(
+    workspaceId: string,
+    subscriptionId: string,
+    options: CancelDurableResourceSubscriptionOptions = {}
+  ): Promise<void> {
+    if (!workspaceId) throw new Error("workspaceId is required");
+    if (!subscriptionId) throw new Error("subscriptionId is required");
+    await this.performRequest({
+      method: "DELETE",
+      path: `/v1/workspaces/${encodeURIComponent(workspaceId)}/subscriptions/${encodeURIComponent(subscriptionId)}`,
+      correlationId: options.correlationId,
+      signal: options.signal
+    });
+  }
+
+  async claimDurableSubscriptionDeliveries(
+    input: ClaimDurableSubscriptionDeliveriesInput
+  ): Promise<DurableSubscriptionDeliveryListResponse> {
+    if (!input.workspaceId) throw new Error("workspaceId is required");
+    return this.request<DurableSubscriptionDeliveryListResponse>({
+      method: "POST",
+      path: `/v1/workspaces/${encodeURIComponent(input.workspaceId)}/subscriptions/deliveries/claim`,
+      correlationId: input.correlationId,
+      body: input.limit === undefined ? {} : { limit: input.limit },
+      signal: input.signal
+    });
+  }
+
+  async acceptDurableSubscriptionDelivery(
+    input: AcceptDurableSubscriptionDeliveryInput
+  ): Promise<DurableSubscriptionDeliveryResponse> {
+    if (!input.workspaceId) throw new Error("workspaceId is required");
+    if (!input.deliveryId) throw new Error("deliveryId is required");
+    if (!input.claimToken) throw new Error("claimToken is required");
+    return this.request<DurableSubscriptionDeliveryResponse>({
+      method: "POST",
+      path: `/v1/workspaces/${encodeURIComponent(input.workspaceId)}/subscriptions/deliveries/${encodeURIComponent(input.deliveryId)}/accept`,
+      correlationId: input.correlationId,
+      body: { claimToken: input.claimToken },
+      signal: input.signal
+    });
   }
 
   subscribe(

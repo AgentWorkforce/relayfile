@@ -20,6 +20,7 @@ tags:
   - name: Filesystem
   - name: Forks
   - name: Events
+  - name: Subscriptions
   - name: Operations
   - name: Sync
   - name: Internal
@@ -464,6 +465,191 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /v1/workspaces/{workspaceId}/subscriptions:
+    post:
+      tags: [Subscriptions]
+      operationId: createOrRenewDurableResourceSubscription
+      summary: Create or renew an owner-scoped durable resource subscription
+      description: |
+        Creates or idempotently renews a subscription to exact provider event
+        types for one stable by-id resource. The service derives ownerId from
+        the verified bearer token; clients cannot select an owner namespace.
+      security:
+        - BearerAuth: [fs:read]
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateOrRenewDurableResourceSubscriptionRequest'
+      responses:
+        '200':
+          description: Existing subscription renewed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DurableResourceSubscription'
+        '201':
+          description: Subscription created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DurableResourceSubscription'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    get:
+      tags: [Subscriptions]
+      operationId: listDurableResourceSubscriptions
+      summary: List active durable subscriptions owned by the caller
+      security:
+        - BearerAuth: [fs:read]
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Active subscriptions for the authenticated owner
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DurableResourceSubscriptionListResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /v1/workspaces/{workspaceId}/subscriptions/deliveries/claim:
+    post:
+      tags: [Subscriptions]
+      operationId: claimDurableSubscriptionDeliveries
+      summary: Atomically claim pending deliveries for the authenticated owner
+      security:
+        - BearerAuth: [fs:read]
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ClaimDurableSubscriptionDeliveriesRequest'
+      responses:
+        '200':
+          description: Leased delivery claims
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DurableSubscriptionDeliveryListResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /v1/workspaces/{workspaceId}/subscriptions/deliveries/{deliveryId}/accept:
+    post:
+      tags: [Subscriptions]
+      operationId: acceptDurableSubscriptionDelivery
+      summary: Accept a live durable delivery claim
+      description: |
+        Accepts a delivery only when claimToken matches its live lease. Repeated
+        acceptance of an already accepted delivery is idempotently readable.
+      security:
+        - BearerAuth: [fs:read]
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/CorrelationId'
+        - name: deliveryId
+          in: path
+          required: true
+          schema:
+            type: string
+            minLength: 1
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AcceptDurableSubscriptionDeliveryRequest'
+      responses:
+        '200':
+          description: Accepted delivery
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DurableSubscriptionDeliveryResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Delivery is not actively claimed or the claim token is invalid
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /v1/workspaces/{workspaceId}/subscriptions/{subscriptionId}:
+    delete:
+      tags: [Subscriptions]
+      operationId: cancelDurableResourceSubscription
+      summary: Cancel a durable subscription owned by the caller
+      security:
+        - BearerAuth: [fs:read]
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/CorrelationId'
+        - name: subscriptionId
+          in: path
+          required: true
+          schema:
+            type: string
+            minLength: 1
+      responses:
+        '204':
+          description: Subscription cancelled
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
         '429':
           $ref: '#/components/responses/RateLimited'
         '500':
@@ -2272,6 +2458,239 @@ components:
         nextCursor:
           type: string
           nullable: true
+
+    CreateOrRenewDurableResourceSubscriptionRequest:
+      type: object
+      additionalProperties: false
+      required: [provider, resourceRef, eventTypes, subscriberId, ttlSeconds]
+      properties:
+        provider:
+          type: string
+          minLength: 1
+          maxLength: 128
+          pattern: '^[a-z0-9][a-z0-9_-]*$'
+        resourceRef:
+          type: string
+          minLength: 1
+          description: Absolute canonical Relayfile by-id resource leaf.
+          pattern: '^/.+/by-id/[^/]+$'
+        eventTypes:
+          type: array
+          minItems: 1
+          maxItems: 32
+          uniqueItems: true
+          items:
+            type: string
+            minLength: 1
+            maxLength: 128
+            pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]*$'
+        terminalEventTypes:
+          type: array
+          minItems: 1
+          maxItems: 32
+          uniqueItems: true
+          items:
+            type: string
+            minLength: 1
+            maxLength: 128
+            pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]*$'
+        subscriberId:
+          type: string
+          minLength: 1
+          maxLength: 512
+        intent:
+          type: string
+          minLength: 1
+          maxLength: 4096
+        ttlSeconds:
+          type: integer
+          minimum: 60
+          maximum: 2592000
+
+    DurableResourceSubscription:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - ownerId
+        - subscriberId
+        - provider
+        - resourceRef
+        - eventTypes
+        - terminalEventTypes
+        - intent
+        - status
+        - createdAt
+        - updatedAt
+        - expiresAt
+        - retiredAt
+      properties:
+        id:
+          type: string
+        ownerId:
+          type: string
+          description: Stable owner derived from the authenticated bearer token.
+        subscriberId:
+          type: string
+        provider:
+          type: string
+        resourceRef:
+          type: string
+        eventTypes:
+          type: array
+          items:
+            type: string
+        terminalEventTypes:
+          type: array
+          items:
+            type: string
+        intent:
+          type: string
+          nullable: true
+        status:
+          type: string
+          enum: [active, cancelled, expired, retired]
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+        expiresAt:
+          type: string
+          format: date-time
+        retiredAt:
+          type: string
+          format: date-time
+          nullable: true
+
+    DurableResourceSubscriptionListResponse:
+      type: object
+      additionalProperties: false
+      required: [subscriptions]
+      properties:
+        subscriptions:
+          type: array
+          items:
+            $ref: '#/components/schemas/DurableResourceSubscription'
+
+    DurableSubscriptionEvent:
+      type: object
+      additionalProperties: false
+      required: [id, type, path, revision, origin, provider, correlationId, timestamp]
+      properties:
+        id:
+          type: string
+        type:
+          type: string
+        path:
+          type: string
+        revision:
+          type: string
+        origin:
+          type: string
+        provider:
+          type: string
+        correlationId:
+          type: string
+        timestamp:
+          type: string
+          format: date-time
+
+    DurableSubscriptionDelivery:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - subscriptionId
+        - ownerId
+        - subscriberId
+        - provider
+        - resourceRef
+        - event
+        - terminal
+        - status
+        - createdAt
+        - claimedAt
+        - claimLeaseExpiresAt
+        - claimToken
+        - acceptedAt
+      properties:
+        id:
+          type: string
+        subscriptionId:
+          type: string
+        ownerId:
+          type: string
+        subscriberId:
+          type: string
+        provider:
+          type: string
+        resourceRef:
+          type: string
+        event:
+          $ref: '#/components/schemas/DurableSubscriptionEvent'
+        terminal:
+          type: boolean
+        status:
+          type: string
+          enum: [pending, claimed, accepted, cancelled]
+        createdAt:
+          type: string
+          format: date-time
+        claimedAt:
+          type: string
+          format: date-time
+          nullable: true
+        claimLeaseExpiresAt:
+          type: string
+          format: date-time
+          nullable: true
+        claimToken:
+          type: string
+          nullable: true
+          description: Opaque lease credential, non-empty only while status is claimed.
+        acceptedAt:
+          type: string
+          format: date-time
+          nullable: true
+
+    ClaimDurableSubscriptionDeliveriesRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 250
+          default: 100
+
+    DurableSubscriptionDeliveryListResponse:
+      type: object
+      additionalProperties: false
+      required: [deliveries]
+      properties:
+        deliveries:
+          type: array
+          items:
+            $ref: '#/components/schemas/DurableSubscriptionDelivery'
+
+    AcceptDurableSubscriptionDeliveryRequest:
+      type: object
+      additionalProperties: false
+      required: [claimToken]
+      properties:
+        claimToken:
+          type: string
+          minLength: 1
+
+    DurableSubscriptionDeliveryResponse:
+      type: object
+      additionalProperties: false
+      required: [delivery]
+      properties:
+        delivery:
+          $ref: '#/components/schemas/DurableSubscriptionDelivery'
 
     BackendStatusResponse:
       type: object

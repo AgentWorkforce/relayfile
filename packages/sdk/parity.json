@@ -164,6 +164,27 @@
       ]
     },
     {
+      "id": "durable-resource-subscriptions",
+      "status": "ts-only",
+      "summary": "Owner-scoped durable resource subscription lifecycle and delivery claims.",
+      "tsExports": [
+        "AcceptDurableSubscriptionDeliveryInput",
+        "CancelDurableResourceSubscriptionOptions",
+        "ClaimDurableSubscriptionDeliveriesInput",
+        "CreateOrRenewDurableResourceSubscriptionInput",
+        "DurableResourceSubscription",
+        "DurableResourceSubscriptionListResponse",
+        "DurableResourceSubscriptionStatus",
+        "DurableSubscriptionDelivery",
+        "DurableSubscriptionDeliveryListResponse",
+        "DurableSubscriptionDeliveryResponse",
+        "DurableSubscriptionDeliveryStatus",
+        "DurableSubscriptionEvent",
+        "ListDurableResourceSubscriptionsOptions"
+      ],
+      "pyExports": []
+    },
+    {
       "id": "provider-helpers",
       "status": "both",
       "summary": "Provider path helpers, digest paths, webhook input, and provider base class.",

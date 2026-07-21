@@ -371,6 +371,117 @@ export interface EventFeedResponse {
   nextCursor: string | null;
 }
 
+export type DurableResourceSubscriptionStatus =
+  | "active"
+  | "cancelled"
+  | "expired"
+  | "retired";
+
+export type DurableSubscriptionDeliveryStatus =
+  | "pending"
+  | "claimed"
+  | "accepted"
+  | "cancelled";
+
+/**
+ * Create-or-renew request for an owner-scoped durable resource subscription.
+ * The server derives ownerId from the bearer token; callers cannot supply it.
+ */
+export interface CreateOrRenewDurableResourceSubscriptionInput {
+  workspaceId: string;
+  provider: string;
+  resourceRef: string;
+  eventTypes: string[];
+  terminalEventTypes?: string[];
+  subscriberId: string;
+  intent?: string;
+  ttlSeconds: number;
+  correlationId?: string;
+  signal?: AbortSignal;
+}
+
+export interface DurableResourceSubscription {
+  id: string;
+  ownerId: string;
+  subscriberId: string;
+  provider: string;
+  resourceRef: string;
+  eventTypes: string[];
+  terminalEventTypes: string[];
+  intent: string | null;
+  status: DurableResourceSubscriptionStatus;
+  createdAt: string;
+  updatedAt: string;
+  expiresAt: string;
+  retiredAt: string | null;
+}
+
+export interface ListDurableResourceSubscriptionsOptions {
+  correlationId?: string;
+  signal?: AbortSignal;
+}
+
+export interface DurableResourceSubscriptionListResponse {
+  subscriptions: DurableResourceSubscription[];
+}
+
+export interface DurableSubscriptionEvent {
+  id: string;
+  type: string;
+  path: string;
+  revision: string;
+  origin: string;
+  provider: string;
+  correlationId: string;
+  timestamp: string;
+}
+
+export interface DurableSubscriptionDelivery {
+  id: string;
+  subscriptionId: string;
+  ownerId: string;
+  subscriberId: string;
+  provider: string;
+  resourceRef: string;
+  event: DurableSubscriptionEvent;
+  terminal: boolean;
+  status: DurableSubscriptionDeliveryStatus;
+  createdAt: string;
+  claimedAt: string | null;
+  claimLeaseExpiresAt: string | null;
+  /** Present only while the delivery has a live claim. */
+  claimToken: string | null;
+  acceptedAt: string | null;
+}
+
+export interface ClaimDurableSubscriptionDeliveriesInput {
+  workspaceId: string;
+  limit?: number;
+  correlationId?: string;
+  signal?: AbortSignal;
+}
+
+export interface DurableSubscriptionDeliveryListResponse {
+  deliveries: DurableSubscriptionDelivery[];
+}
+
+export interface AcceptDurableSubscriptionDeliveryInput {
+  workspaceId: string;
+  deliveryId: string;
+  claimToken: string;
+  correlationId?: string;
+  signal?: AbortSignal;
+}
+
+export interface DurableSubscriptionDeliveryResponse {
+  delivery: DurableSubscriptionDelivery;
+}
+
+export interface CancelDurableResourceSubscriptionOptions {
+  correlationId?: string;
+  signal?: AbortSignal;
+}
+
 export type ExportFormat = "tar" | "json" | "patch";
 
 export interface ExportOptions {
