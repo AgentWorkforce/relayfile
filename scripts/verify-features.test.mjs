@@ -34,3 +34,20 @@ test('tier 5 live opt-in stays MANUAL instead of passing the mocked SDK E2E', ()
   assert.equal(required.result.status, 1);
   assert.deepEqual(required.report.totals, { PASS: 0, FAIL: 0, SKIP: 0, MANUAL: 1 });
 });
+
+test('runbook results remain valid one-line JSON for arbitrary details', () => {
+  const detail = 'windows\\path\n"quoted"\tcontrol';
+  const result = spawnSync('bash', [
+    '-c',
+    'source scripts/feature-runbook-lib.sh; vf_result PASS sample-procedure "$1"',
+    'vf-result-test',
+    detail,
+  ], { cwd: process.cwd(), encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout.trim().split('\n').length, 1);
+  assert.deepEqual(JSON.parse(result.stdout), {
+    status: 'PASS',
+    procedure: 'sample-procedure',
+    detail,
+  });
+});

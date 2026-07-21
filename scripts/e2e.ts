@@ -104,6 +104,7 @@ function waitForExit(child: ChildProcess, timeoutMs: number): Promise<boolean> {
 }
 
 async function stopAll() {
+  const failures: string[] = [];
   for (const child of children) {
     if (child.exitCode !== null || child.signalCode !== null) continue;
     const termExit = waitForExit(child, 5_000);
@@ -111,8 +112,9 @@ async function stopAll() {
     if (await termExit) continue;
     const killExit = waitForExit(child, 2_000);
     child.kill('SIGKILL');
-    if (!(await killExit)) throw new Error(`child process ${child.pid ?? 'unknown'} did not exit`);
+    if (!(await killExit)) failures.push(`child process ${child.pid ?? 'unknown'} did not exit`);
   }
+  if (failures.length > 0) throw new Error(failures.join('; '));
 }
 
 async function closeAuth() {

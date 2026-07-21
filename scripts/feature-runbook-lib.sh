@@ -30,8 +30,10 @@ vf_result() {
   local procedure="${2:?procedure required}"
   local detail="${3:-}"
   case "$status" in PASS|FAIL|SKIP|MANUAL) ;; *) return 2 ;; esac
-  printf '{"status":"%s","procedure":"%s","detail":"%s"}\n' \
-    "$status" "$procedure" "${detail//\"/\\\"}"
+  node -e '
+    const [status, procedure, detail] = process.argv.slice(1);
+    process.stdout.write(`${JSON.stringify({ status, procedure, detail })}\n`);
+  ' "$status" "$procedure" "$detail"
 }
 
 vf_wait_http() {

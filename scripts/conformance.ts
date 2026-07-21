@@ -283,6 +283,7 @@ async function startServer(): Promise<void> {
 }
 
 async function stopServer() {
+  const failures: string[] = [];
   if (serverProcess) {
     const child = serverProcess;
     serverProcess = null;
@@ -292,20 +293,33 @@ async function stopServer() {
       if (!(await termExit)) {
         const killExit = waitForServerExit(child, 2_000);
         child.kill('SIGKILL');
-        if (!(await killExit)) throw new Error(`conformance server process ${child.pid ?? 'unknown'} did not exit`);
+        if (!(await killExit)) failures.push(`conformance server process ${child.pid ?? 'unknown'} did not exit`);
       }
     }
   }
   if (rs256Auth) {
-    await rs256Auth.close();
+    try {
+      await rs256Auth.close();
+    } catch (error) {
+      failures.push(`RS256 fixture close failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
     rs256Auth = null;
   }
   if (localServerBinaryOwned && localServerBinary && existsSync(localServerBinary)) {
-    unlinkSync(localServerBinary);
+    try {
+      unlinkSync(localServerBinary);
+    } catch (error) {
+      failures.push(`local server binary cleanup failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
   localServerBinary = null;
   localServerBinaryOwned = false;
-  removeLocalServerFixture();
+  try {
+    removeLocalServerFixture();
+  } catch (error) {
+    failures.push(`local server fixture cleanup failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (failures.length > 0) throw new Error(failures.join('; '));
 }
 
 // ---------------------------------------------------------------------------
