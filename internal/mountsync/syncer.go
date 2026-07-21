@@ -7296,9 +7296,14 @@ func (s *Syncer) trackedRemotePathForLocalPath(localPath string) (string, bool) 
 	if !localPathMayContainShortenedName(want) {
 		return "", false
 	}
-	remotePaths := make([]string, 0, len(s.state.Files))
+	var remotePaths []string
 	for remotePath := range s.state.Files {
-		remotePaths = append(remotePaths, remotePath)
+		// Only a remote path with an overlong component can map to a local
+		// path containing the shortening marker. Avoid hashing every ordinary
+		// tracked file when one shortened path is written back.
+		if pathHasComponentLongerThan(remotePath, maxLocalMirrorBasenameBytes) {
+			remotePaths = append(remotePaths, remotePath)
+		}
 	}
 	sort.Strings(remotePaths)
 	for _, remotePath := range remotePaths {
@@ -7311,12 +7316,7 @@ func (s *Syncer) trackedRemotePathForLocalPath(localPath string) (string, bool) 
 }
 
 func localPathMayContainShortenedName(localPath string) bool {
-	for _, component := range strings.Split(filepath.ToSlash(localPath), "/") {
-		if strings.Contains(component, "~rf-") {
-			return true
-		}
-	}
-	return false
+	return strings.Contains(localPath, "~rf-")
 }
 
 const (
@@ -7329,26 +7329,45 @@ const (
 )
 
 func shortenLocalRelativePath(rel string) string {
-	parts := strings.Split(filepath.ToSlash(rel), "/")
+	rel = filepath.ToSlash(rel)
+	if !pathHasComponentLongerThan(rel, maxLocalMirrorBasenameBytes) {
+		return rel
+	}
+	parts := strings.Split(rel, "/")
 	for i, part := range parts {
 		parts[i] = shortenLocalBasename(part)
 	}
 	return strings.Join(parts, "/")
 }
 
+func pathHasComponentLongerThan(path string, maxBytes int) bool {
+	componentBytes := 0
+	for i := 0; i < len(path); i++ {
+		if path[i] == '/' {
+			if componentBytes > maxBytes {
+				return true
+			}
+			componentBytes = 0
+			continue
+		}
+		componentBytes++
+	}
+	return componentBytes > maxBytes
+}
+
 func shortenLocalBasename(base string) string {
-	if len([]byte(base)) <= maxLocalMirrorBasenameBytes {
+	if len(base) <= maxLocalMirrorBasenameBytes {
 		return base
 	}
 	sum := sha256.Sum256([]byte(base))
 	hashSuffix := "~rf-" + hex.EncodeToString(sum[:localNameHashBytes])
 	ext := filepath.Ext(base)
 	stem := strings.TrimSuffix(base, ext)
-	if stem == "" || len([]byte(ext)) > maxPreservedExtensionBytes {
+	if stem == "" || len(ext) > maxPreservedExtensionBytes {
 		ext = ""
 		stem = base
 	}
-	prefixBytes := maxLocalMirrorBasenameBytes - len(hashSuffix) - len([]byte(ext))
+	prefixBytes := maxLocalMirrorBasenameBytes - len(hashSuffix) - len(ext)
 	if prefixBytes < 0 {
 		prefixBytes = 0
 	}
@@ -7360,7 +7379,7 @@ func truncateValidUTF8(value string, maxBytes int) string {
 	if maxBytes <= 0 {
 		return ""
 	}
-	if len([]byte(value)) <= maxBytes {
+	if len(value) <= maxBytes {
 		return value
 	}
 	value = value[:maxBytes]
