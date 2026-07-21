@@ -100,7 +100,8 @@ Each pending record stores:
 - local file mtime/size used only to detect user edits and supersede the entry.
 
 If the local command file changes before ACK, supersede the old entry with a new
-command id and leave the old entry observable as `failed/superseded`.
+command id and leave the old entry observable under `acked/` with dispatch
+status `superseded_by_newer_local_content`.
 
 ## Wire Protocol
 

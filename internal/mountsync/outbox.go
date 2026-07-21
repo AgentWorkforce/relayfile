@@ -290,6 +290,20 @@ func (s *Syncer) scheduleOutboxReceiptPoll(record outboxRecord, err error) error
 	return s.saveOutboxRecord(record)
 }
 
+func migrateLegacyMissingReceipt(record *outboxRecord) bool {
+	if record == nil || record.Status != outboxStatusPending ||
+		!record.NeedsAttention || strings.TrimSpace(record.OpID) == "" ||
+		strings.TrimSpace(record.DispatchStatus) != "not_found" {
+		return false
+	}
+	record.AttemptCount = 0
+	record.ReceiptPollCount = 0
+	record.NeedsAttention = false
+	record.LastError = ""
+	record.NextAttemptAt = ""
+	return true
+}
+
 func outboxBackoff(attempt int) time.Duration {
 	if attempt <= 0 {
 		return outboxBackoffBase

@@ -362,6 +362,46 @@ func TestWritebackE2E_OperationNotVisiblePastDispatchRetryCapThenSucceeded(t *te
 	}
 }
 
+func TestWritebackE2E_LegacyMissingReceiptResumesPolling(t *testing.T) {
+	cloud := newWritebackTestCloud(t)
+	clock := newFakeClock(time.Date(2026, 6, 11, 12, 0, 0, 0, time.UTC))
+	cloud.op = func(_ int, opID string) (int, OperationStatus) {
+		return http.StatusOK, OperationStatus{OpID: opID, Status: "succeeded", Revision: "rev_legacy_receipt"}
+	}
+
+	syncer, localDir, remotePath := newWritebackSyncer(t, cloud, clock)
+	legacy := outboxRecord{
+		CommandID:      "mountcmd_legacy_missing_receipt",
+		WorkspaceID:    "ws_writeback_e2e",
+		RemotePath:     remotePath,
+		ContentType:    "application/json",
+		Content:        `{"channel":"C123","text":"legacy accepted write"}`,
+		Hash:           hashBytes([]byte(`{"channel":"C123","text":"legacy accepted write"}`)),
+		Status:         outboxStatusPending,
+		FirstSeenAt:    "2026-06-11T11:59:00Z",
+		NeedsAttention: true,
+		OpID:           "op_legacy_missing_receipt",
+		DispatchStatus: "not_found",
+		CorrelationID:  "mountcmd_legacy_missing_receipt",
+	}
+	if err := syncer.saveOutboxRecord(legacy); err != nil {
+		t.Fatalf("persist legacy receiptless record: %v", err)
+	}
+	if err := syncer.FlushOutboxOnce(context.Background()); err != nil {
+		t.Fatalf("legacy missing receipt should resume polling: %v", err)
+	}
+	if got := cloud.opCallCount(); got != 1 {
+		t.Fatalf("legacy receipt polls = %d, want 1", got)
+	}
+	if pending := readPendingOutboxRecordsForTest(t, localDir); len(pending) != 0 {
+		t.Fatalf("legacy receipt remained pending after success: %+v", pending)
+	}
+	acked := ackedOutbox(t, localDir)
+	if len(acked) != 1 || acked[0].OpID != legacy.OpID || acked[0].DispatchStatus != "succeeded" {
+		t.Fatalf("legacy receipt archive = %+v, want one succeeded receipt", acked)
+	}
+}
+
 func TestWritebackE2E_TerminalOperationFailureFailsClosed(t *testing.T) {
 	cloud := newWritebackTestCloud(t)
 	clock := newFakeClock(time.Date(2026, 6, 11, 12, 0, 0, 0, time.UTC))

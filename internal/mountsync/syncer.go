@@ -2196,6 +2196,11 @@ func (s *Syncer) flushOutboxRecords(ctx context.Context, conflicted map[string]s
 	now := s.now().UTC()
 	due := make([]outboxRecord, 0, len(records))
 	for _, record := range records {
+		if migrateLegacyMissingReceipt(&record) {
+			if err := s.saveOutboxRecord(record); err != nil {
+				return err
+			}
+		}
 		if record.AttemptCount >= s.maxOutboxAttemptsValue() && !record.NeedsAttention {
 			record.NeedsAttention = true
 			if err := s.saveOutboxRecord(record); err != nil {
