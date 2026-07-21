@@ -347,6 +347,11 @@ func TestWritebackE2E_TerminalOperationFailureFailsClosed(t *testing.T) {
 	if len(failed) != 1 || failed[0].OpID != "op_terminal_failure" || failed[0].DispatchStatus != "failed" {
 		t.Fatalf("failed terminal receipt = %+v, want one failed op receipt", failed)
 	}
+	// Attention is persisted in the archive filename, so health summaries do
+	// not need to re-read and decode every failed command on every state write.
+	if err := os.WriteFile(syncer.failedAttentionOutboxPath(failed[0].CommandID), []byte("invalid archived payload"), 0o644); err != nil {
+		t.Fatalf("corrupt archived payload after inspecting receipt: %v", err)
+	}
 	if summary := syncer.summarizeOutbox(); summary.Failed != 1 || summary.NeedsAttention != 1 {
 		t.Fatalf("terminal failure summary = %+v, want failed=1 and needsAttention=1", summary)
 	}
@@ -370,6 +375,45 @@ func TestWritebackE2E_TerminalOperationFailureFailsClosed(t *testing.T) {
 	}
 	if public.Outbox.Failed != 1 || public.Outbox.NeedsAttention != 1 {
 		t.Fatalf("public outbox summary = %+v, want failed=1 and needsAttention=1", public.Outbox)
+	}
+}
+
+func TestWritebackE2E_SupersededPendingIsArchivedWithoutAttention(t *testing.T) {
+	cloud := newWritebackTestCloud(t)
+	clock := newFakeClock(time.Date(2026, 6, 11, 12, 0, 0, 0, time.UTC))
+	syncer, localDir, remotePath := newWritebackSyncer(t, cloud, clock)
+
+	makePending := func(content string) pendingBulkWrite {
+		return pendingBulkWrite{
+			remotePath: remotePath,
+			snapshot: localSnapshot{
+				RawContent:  []byte(content),
+				WireContent: content,
+				ContentType: "application/json",
+				Hash:        hashBytes([]byte(content)),
+			},
+		}
+	}
+	first, err := syncer.ensureOutboxRecord(makePending(`{"version":1}`))
+	if err != nil {
+		t.Fatalf("create first pending command: %v", err)
+	}
+	second, err := syncer.ensureOutboxRecord(makePending(`{"version":2}`))
+	if err != nil {
+		t.Fatalf("supersede pending command: %v", err)
+	}
+	if first.CommandID == second.CommandID {
+		t.Fatalf("superseded command reused command id %q", first.CommandID)
+	}
+	if failed := failedOutbox(t, localDir); len(failed) != 0 {
+		t.Fatalf("superseded command was archived as failed: %+v", failed)
+	}
+	acked := ackedOutbox(t, localDir)
+	if len(acked) != 1 || acked[0].CommandID != first.CommandID || acked[0].DispatchStatus != "superseded_by_newer_local_content" {
+		t.Fatalf("superseded command archive = %+v, want one acknowledged superseded command", acked)
+	}
+	if summary := syncer.summarizeOutbox(); summary.Failed != 0 || summary.NeedsAttention != 0 {
+		t.Fatalf("superseded command polluted failure health: %+v", summary)
 	}
 }
 

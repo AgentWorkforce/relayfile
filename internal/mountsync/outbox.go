@@ -122,6 +122,10 @@ func (s *Syncer) failedOutboxPath(commandID string) string {
 	return filepath.Join(s.outboxFailedDir(), commandID+".json")
 }
 
+func (s *Syncer) failedAttentionOutboxPath(commandID string) string {
+	return filepath.Join(s.outboxFailedDir(), commandID+".needs-attention.json")
+}
+
 func (s *Syncer) saveOutboxRecord(record outboxRecord) error {
 	if err := s.ensureOutboxDirs(); err != nil {
 		return err
@@ -223,7 +227,7 @@ func (s *Syncer) ensureOutboxRecord(pending pendingBulkWrite) (outboxRecord, err
 			// the sole source of truth for commandId across reconnect/restart.
 			return record, nil
 		}
-		if err := s.archiveFailedOutboxRecord(record, "superseded by newer local content", false); err != nil {
+		if err := s.skipOutboxRecord(record, "superseded_by_newer_local_content"); err != nil {
 			return outboxRecord{}, err
 		}
 	}
@@ -365,26 +369,31 @@ func (s *Syncer) skipOutboxRecord(record outboxRecord, reason string) error {
 }
 
 func (s *Syncer) failOutboxRecord(record outboxRecord, reason string) error {
-	return s.archiveFailedOutboxRecord(record, reason, false)
+	record.NeedsAttention = false
+	return s.saveFailedOutboxRecord(record, reason)
 }
 
 func (s *Syncer) failOutboxRecordNeedsAttention(record outboxRecord, reason string) error {
-	return s.archiveFailedOutboxRecord(record, reason, true)
+	record.NeedsAttention = true
+	return s.saveFailedOutboxRecord(record, reason)
 }
 
-func (s *Syncer) archiveFailedOutboxRecord(record outboxRecord, reason string, needsAttention bool) error {
+func (s *Syncer) saveFailedOutboxRecord(record outboxRecord, reason string) error {
 	if err := s.ensureOutboxDirs(); err != nil {
 		return err
 	}
 	record.Status = outboxStatusFailed
 	record.LastError = strings.TrimSpace(reason)
 	record.NextAttemptAt = ""
-	record.NeedsAttention = needsAttention
 	data, err := json.Marshal(record)
 	if err != nil {
 		return err
 	}
-	if err := writeFileAtomic(s.failedOutboxPath(record.CommandID), data, 0o644); err != nil {
+	failedPath := s.failedOutboxPath(record.CommandID)
+	if record.NeedsAttention {
+		failedPath = s.failedAttentionOutboxPath(record.CommandID)
+	}
+	if err := writeFileAtomic(failedPath, data, 0o644); err != nil {
 		return err
 	}
 	if err := os.Remove(s.pendingOutboxPath(record.CommandID)); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -408,8 +417,7 @@ func (s *Syncer) summarizeOutbox() outboxSummary {
 		for _, entry := range entries {
 			if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".json") {
 				summary.Failed++
-				record, readErr := s.readOutboxRecord(filepath.Join(s.outboxFailedDir(), entry.Name()))
-				if readErr != nil || record.NeedsAttention || terminalOutboxDispatchStatus(record.DispatchStatus) {
+				if strings.HasSuffix(entry.Name(), ".needs-attention.json") {
 					summary.NeedsAttention++
 				}
 			}
@@ -423,15 +431,6 @@ func (s *Syncer) summarizeOutbox() outboxSummary {
 		}
 	}
 	return summary
-}
-
-func terminalOutboxDispatchStatus(status string) bool {
-	switch strings.TrimSpace(status) {
-	case "failed", "dead_lettered", "canceled":
-		return true
-	default:
-		return false
-	}
 }
 
 func (s *Syncer) maxOutboxAttemptsValue() int {
