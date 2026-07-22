@@ -44,6 +44,7 @@ type outboxRecord struct {
 	LastAttemptAt     string       `json:"lastAttemptAt,omitempty"`
 	NextAttemptAt     string       `json:"nextAttemptAt,omitempty"`
 	AttemptCount      int          `json:"attemptCount"`
+	ReceiptPollCount  int          `json:"receiptPollCount,omitempty"`
 	LastError         string       `json:"lastError,omitempty"`
 	NeedsAttention    bool         `json:"needsAttention,omitempty"`
 	OpID              string       `json:"opId,omitempty"`
@@ -69,12 +70,15 @@ type outboxCapabilities struct {
 func (s *Syncer) outboxPendingDir() string { return filepath.Join(s.outboxDir, "pending") }
 func (s *Syncer) outboxAckedDir() string   { return filepath.Join(s.outboxDir, "acked") }
 func (s *Syncer) outboxFailedDir() string  { return filepath.Join(s.outboxDir, "failed") }
+func (s *Syncer) outboxAttentionDir() string {
+	return filepath.Join(s.outboxDir, "attention")
+}
 func (s *Syncer) outboxCapabilitiesPath() string {
 	return filepath.Join(s.outboxDir, "capabilities.json")
 }
 
 func (s *Syncer) ensureOutboxDirs() error {
-	for _, dir := range []string{s.outboxDir, s.outboxPendingDir(), s.outboxAckedDir(), s.outboxFailedDir()} {
+	for _, dir := range []string{s.outboxDir, s.outboxPendingDir(), s.outboxAckedDir(), s.outboxFailedDir(), s.outboxAttentionDir()} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return err
 		}
@@ -120,6 +124,10 @@ func (s *Syncer) ackedOutboxPath(commandID string) string {
 
 func (s *Syncer) failedOutboxPath(commandID string) string {
 	return filepath.Join(s.outboxFailedDir(), commandID+".json")
+}
+
+func (s *Syncer) outboxAttentionPath(commandID string) string {
+	return filepath.Join(s.outboxAttentionDir(), commandID+".marker")
 }
 
 func (s *Syncer) saveOutboxRecord(record outboxRecord) error {
@@ -223,7 +231,7 @@ func (s *Syncer) ensureOutboxRecord(pending pendingBulkWrite) (outboxRecord, err
 			// the sole source of truth for commandId across reconnect/restart.
 			return record, nil
 		}
-		if err := s.failOutboxRecord(record, "superseded by newer local content"); err != nil {
+		if err := s.skipOutboxRecord(record, "superseded_by_newer_local_content"); err != nil {
 			return outboxRecord{}, err
 		}
 	}
@@ -271,6 +279,29 @@ func (s *Syncer) incrementOutboxAttempt(record outboxRecord, err error) error {
 		record.NextAttemptAt = now.Add(outboxBackoff(record.AttemptCount)).Format(time.RFC3339Nano)
 	}
 	return s.saveOutboxRecord(record)
+}
+
+func (s *Syncer) scheduleOutboxReceiptPoll(record outboxRecord, err error) error {
+	record.ReceiptPollCount++
+	now := s.now().UTC()
+	record.LastAttemptAt = now.Format(time.RFC3339Nano)
+	record.LastError = sanitizeOutboxError(err)
+	record.NextAttemptAt = now.Add(outboxBackoff(record.ReceiptPollCount)).Format(time.RFC3339Nano)
+	return s.saveOutboxRecord(record)
+}
+
+func migrateLegacyMissingReceipt(record *outboxRecord) bool {
+	if record == nil || record.Status != outboxStatusPending ||
+		!record.NeedsAttention || strings.TrimSpace(record.OpID) == "" ||
+		strings.TrimSpace(record.DispatchStatus) != "not_found" {
+		return false
+	}
+	record.AttemptCount = 0
+	record.ReceiptPollCount = 0
+	record.NeedsAttention = false
+	record.LastError = ""
+	record.NextAttemptAt = ""
+	return true
 }
 
 func outboxBackoff(attempt int) time.Duration {
@@ -324,7 +355,9 @@ func (s *Syncer) ackOutboxRecord(record outboxRecord, revision, correlationID st
 		record.CorrelationID = strings.TrimSpace(correlationID)
 	}
 	record.NeedsAttention = false
+	record.ReceiptPollCount = 0
 	record.LastError = ""
+	record.NextAttemptAt = ""
 	data, err := json.Marshal(record)
 	if err != nil {
 		return err
@@ -333,6 +366,9 @@ func (s *Syncer) ackOutboxRecord(record outboxRecord, revision, correlationID st
 		return err
 	}
 	if err := os.Remove(s.pendingOutboxPath(record.CommandID)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if err := os.Remove(s.outboxAttentionPath(record.CommandID)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 	return nil
@@ -348,6 +384,7 @@ func (s *Syncer) skipOutboxRecord(record outboxRecord, reason string) error {
 	record.Revision = ""
 	record.CorrelationID = ""
 	record.NeedsAttention = false
+	record.ReceiptPollCount = 0
 	record.LastError = ""
 	record.NextAttemptAt = ""
 	data, err := json.Marshal(record)
@@ -360,10 +397,23 @@ func (s *Syncer) skipOutboxRecord(record outboxRecord, reason string) error {
 	if err := os.Remove(s.pendingOutboxPath(record.CommandID)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
+	if err := os.Remove(s.outboxAttentionPath(record.CommandID)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
 	return nil
 }
 
 func (s *Syncer) failOutboxRecord(record outboxRecord, reason string) error {
+	record.NeedsAttention = false
+	return s.saveFailedOutboxRecord(record, reason)
+}
+
+func (s *Syncer) failOutboxRecordNeedsAttention(record outboxRecord, reason string) error {
+	record.NeedsAttention = true
+	return s.saveFailedOutboxRecord(record, reason)
+}
+
+func (s *Syncer) saveFailedOutboxRecord(record outboxRecord, reason string) error {
 	if err := s.ensureOutboxDirs(); err != nil {
 		return err
 	}
@@ -374,8 +424,18 @@ func (s *Syncer) failOutboxRecord(record outboxRecord, reason string) error {
 	if err != nil {
 		return err
 	}
+	if record.NeedsAttention {
+		if err := writeFileAtomic(s.outboxAttentionPath(record.CommandID), []byte("attention\n"), 0o644); err != nil {
+			return err
+		}
+	}
 	if err := writeFileAtomic(s.failedOutboxPath(record.CommandID), data, 0o644); err != nil {
 		return err
+	}
+	if !record.NeedsAttention {
+		if err := os.Remove(s.outboxAttentionPath(record.CommandID)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
 	}
 	if err := os.Remove(s.pendingOutboxPath(record.CommandID)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
@@ -398,6 +458,13 @@ func (s *Syncer) summarizeOutbox() outboxSummary {
 		for _, entry := range entries {
 			if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".json") {
 				summary.Failed++
+			}
+		}
+	}
+	if entries, err := os.ReadDir(s.outboxAttentionDir()); err == nil {
+		for _, entry := range entries {
+			if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".marker") {
+				summary.NeedsAttention++
 			}
 		}
 	}

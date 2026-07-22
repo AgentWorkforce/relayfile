@@ -268,6 +268,268 @@ func TestWritebackE2E_PollPendingThenAck(t *testing.T) {
 	}
 }
 
+func TestWritebackE2E_OperationNotVisibleThenSucceeded(t *testing.T) {
+	cloud := newWritebackTestCloud(t)
+	clock := newFakeClock(time.Date(2026, 6, 11, 12, 0, 0, 0, time.UTC))
+	cloud.bulk = okBulkWithOpID("op_eventually_visible")
+	// The operation record may lag the accepted provider dispatch. Treat the
+	// first 404 as receipt-pending, then surface the terminal receipt on the
+	// next normal poll without re-uploading the Slack write.
+	cloud.op = func(callNum int, opID string) (int, OperationStatus) {
+		if callNum == 1 {
+			return http.StatusNotFound, OperationStatus{OpID: opID}
+		}
+		return http.StatusOK, OperationStatus{OpID: opID, Status: "succeeded", Revision: "rev_1"}
+	}
+
+	syncer, localDir, _ := newWritebackSyncer(t, cloud, clock)
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("initial dispatch with not-yet-visible receipt: %v", err)
+	}
+	pending := readPendingOutboxRecordsForTest(t, localDir)
+	if len(pending) != 1 {
+		t.Fatalf("after receipt 404: pending = %d, want 1", len(pending))
+	}
+	if pending[0].NeedsAttention {
+		t.Fatalf("eventually-consistent receipt 404 must remain retryable: %+v", pending[0])
+	}
+	if pending[0].AttemptCount != 0 || pending[0].ReceiptPollCount != 1 || strings.TrimSpace(pending[0].NextAttemptAt) == "" {
+		t.Fatalf("receipt 404 was not scheduled for a later poll: %+v", pending[0])
+	}
+	if len(ackedOutbox(t, localDir)) != 0 {
+		t.Fatal("receipt must not ack before terminal success")
+	}
+
+	clock.advance(outboxBackoff(1))
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("next poll after receipt became visible: %v", err)
+	}
+	if got := cloud.bulkCallCount(); got != 1 {
+		t.Fatalf("slow receipt caused provider write re-upload: bulk calls = %d, want 1", got)
+	}
+	if got := cloud.opCallCount(); got != 2 {
+		t.Fatalf("operation poll calls = %d, want 2", got)
+	}
+	if pending := readPendingOutboxRecordsForTest(t, localDir); len(pending) != 0 {
+		t.Fatalf("terminal receipt was not surfaced on next poll: %+v", pending)
+	}
+	acked := ackedOutbox(t, localDir)
+	if len(acked) != 1 || acked[0].OpID != "op_eventually_visible" || acked[0].DispatchStatus != "succeeded" {
+		t.Fatalf("acked receipt = %+v, want eventual succeeded receipt", acked)
+	}
+	if acked[0].NeedsAttention || acked[0].LastError != "" || acked[0].NextAttemptAt != "" {
+		t.Fatalf("terminal success retained pending retry state: %+v", acked[0])
+	}
+}
+
+func TestWritebackE2E_OperationNotVisiblePastDispatchRetryCapThenSucceeded(t *testing.T) {
+	cloud := newWritebackTestCloud(t)
+	clock := newFakeClock(time.Date(2026, 6, 11, 12, 0, 0, 0, time.UTC))
+	cloud.bulk = okBulkWithOpID("op_slow_receipt")
+	cloud.op = func(callNum int, opID string) (int, OperationStatus) {
+		if callNum <= 3 {
+			return http.StatusNotFound, OperationStatus{OpID: opID}
+		}
+		return http.StatusOK, OperationStatus{OpID: opID, Status: "succeeded", Revision: "rev_slow"}
+	}
+
+	syncer, localDir, _ := newWritebackSyncer(t, cloud, clock)
+	syncer.maxOutboxAttempts = 3
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("initial dispatch with missing receipt: %v", err)
+	}
+	var pollErr error
+	for i := 0; i < 3; i++ {
+		clock.advance(outboxBackoffMax)
+		pollErr = syncer.FlushOutboxOnce(context.Background())
+	}
+	if pollErr != nil {
+		t.Fatalf("final receipt poll after operation became visible: %v", pollErr)
+	}
+
+	if got := cloud.bulkCallCount(); got != 1 {
+		t.Fatalf("slow receipt caused provider write re-upload: bulk calls = %d, want 1", got)
+	}
+	if got := cloud.opCallCount(); got != 4 {
+		t.Fatalf("receipt polling stopped at dispatch retry cap: calls = %d, want 4", got)
+	}
+	if pending := readPendingOutboxRecordsForTest(t, localDir); len(pending) != 0 {
+		t.Fatalf("eventual success remained pending after receipt became visible: %+v", pending)
+	}
+	acked := ackedOutbox(t, localDir)
+	if len(acked) != 1 || acked[0].OpID != "op_slow_receipt" || acked[0].DispatchStatus != "succeeded" {
+		t.Fatalf("eventual receipt archive = %+v, want one succeeded receipt", acked)
+	}
+}
+
+func TestWritebackE2E_LegacyMissingReceiptResumesPolling(t *testing.T) {
+	cloud := newWritebackTestCloud(t)
+	clock := newFakeClock(time.Date(2026, 6, 11, 12, 0, 0, 0, time.UTC))
+	cloud.op = func(_ int, opID string) (int, OperationStatus) {
+		return http.StatusOK, OperationStatus{OpID: opID, Status: "succeeded", Revision: "rev_legacy_receipt"}
+	}
+
+	syncer, localDir, remotePath := newWritebackSyncer(t, cloud, clock)
+	legacy := outboxRecord{
+		CommandID:      "mountcmd_legacy_missing_receipt",
+		WorkspaceID:    "ws_writeback_e2e",
+		RemotePath:     remotePath,
+		ContentType:    "application/json",
+		Content:        `{"channel":"C123","text":"legacy accepted write"}`,
+		Hash:           hashBytes([]byte(`{"channel":"C123","text":"legacy accepted write"}`)),
+		Status:         outboxStatusPending,
+		FirstSeenAt:    "2026-06-11T11:59:00Z",
+		NeedsAttention: true,
+		OpID:           "op_legacy_missing_receipt",
+		DispatchStatus: "not_found",
+		CorrelationID:  "mountcmd_legacy_missing_receipt",
+	}
+	if err := syncer.saveOutboxRecord(legacy); err != nil {
+		t.Fatalf("persist legacy receiptless record: %v", err)
+	}
+	if err := syncer.FlushOutboxOnce(context.Background()); err != nil {
+		t.Fatalf("legacy missing receipt should resume polling: %v", err)
+	}
+	if got := cloud.opCallCount(); got != 1 {
+		t.Fatalf("legacy receipt polls = %d, want 1", got)
+	}
+	if pending := readPendingOutboxRecordsForTest(t, localDir); len(pending) != 0 {
+		t.Fatalf("legacy receipt remained pending after success: %+v", pending)
+	}
+	acked := ackedOutbox(t, localDir)
+	if len(acked) != 1 || acked[0].OpID != legacy.OpID || acked[0].DispatchStatus != "succeeded" {
+		t.Fatalf("legacy receipt archive = %+v, want one succeeded receipt", acked)
+	}
+}
+
+func TestWritebackE2E_TerminalOperationFailureFailsClosed(t *testing.T) {
+	cloud := newWritebackTestCloud(t)
+	clock := newFakeClock(time.Date(2026, 6, 11, 12, 0, 0, 0, time.UTC))
+	cloud.bulk = okBulkWithOpID("op_terminal_failure")
+	lastError := "Slack rejected the delivered message"
+	cloud.op = func(_ int, opID string) (int, OperationStatus) {
+		return http.StatusOK, OperationStatus{
+			OpID:      opID,
+			Status:    "failed",
+			LastError: &lastError,
+		}
+	}
+
+	syncer, localDir, _ := newWritebackSyncer(t, cloud, clock)
+	err := syncer.SyncOnce(context.Background())
+	if err == nil || !strings.Contains(err.Error(), lastError) {
+		t.Fatalf("terminal provider receipt must fail closed, got %v", err)
+	}
+	if pending := readPendingOutboxRecordsForTest(t, localDir); len(pending) != 0 {
+		t.Fatalf("terminal failure remained receiptless/pending: %+v", pending)
+	}
+	failed := failedOutbox(t, localDir)
+	if len(failed) != 1 || failed[0].OpID != "op_terminal_failure" || failed[0].DispatchStatus != "failed" {
+		t.Fatalf("failed terminal receipt = %+v, want one failed op receipt", failed)
+	}
+	failedPath := syncer.failedOutboxPath(failed[0].CommandID)
+	if _, err := os.Stat(failedPath); err != nil {
+		t.Fatalf("terminal receipt did not preserve failed/<commandId>.json contract: %v", err)
+	}
+	// Attention is persisted separately from the stable failed-record path, so
+	// health summaries do not need to decode every archive on every state write.
+	if err := os.WriteFile(failedPath, []byte("invalid archived payload"), 0o644); err != nil {
+		t.Fatalf("corrupt archived payload after inspecting receipt: %v", err)
+	}
+	if summary := syncer.summarizeOutbox(); summary.Failed != 1 || summary.NeedsAttention != 1 {
+		t.Fatalf("terminal failure summary = %+v, want failed=1 and needsAttention=1", summary)
+	}
+
+	// A later otherwise-clean cycle must not erase the terminal provider
+	// failure from mount health merely because the receipt left pending/.
+	err = syncer.SyncOnce(context.Background())
+	if err != nil {
+		t.Fatalf("otherwise-clean cycle after terminal failure: %v", err)
+	}
+	publicBytes, err := os.ReadFile(filepath.Join(localDir, ".relay", "state.json"))
+	if err != nil {
+		t.Fatalf("read public state after terminal failure: %v", err)
+	}
+	var public publicState
+	if err := json.Unmarshal(publicBytes, &public); err != nil {
+		t.Fatalf("decode public state after terminal failure: %v", err)
+	}
+	if public.Status != "writeback-needs-attention" || !public.States.OutboxNeedsAttention {
+		t.Fatalf("public state hid terminal provider failure: status=%q states=%+v", public.Status, public.States)
+	}
+	if public.Outbox.Failed != 1 || public.Outbox.NeedsAttention != 1 {
+		t.Fatalf("public outbox summary = %+v, want failed=1 and needsAttention=1", public.Outbox)
+	}
+}
+
+func TestWritebackE2E_OtherTerminalOperationStatusesFailClosed(t *testing.T) {
+	for _, status := range []string{"dead_lettered", "canceled"} {
+		t.Run(status, func(t *testing.T) {
+			cloud := newWritebackTestCloud(t)
+			clock := newFakeClock(time.Date(2026, 6, 11, 12, 0, 0, 0, time.UTC))
+			cloud.bulk = okBulkWithOpID("op_" + status)
+			cloud.op = func(_ int, opID string) (int, OperationStatus) {
+				return http.StatusOK, OperationStatus{OpID: opID, Status: status}
+			}
+
+			syncer, localDir, _ := newWritebackSyncer(t, cloud, clock)
+			err := syncer.SyncOnce(context.Background())
+			if err == nil || !strings.Contains(err.Error(), "status "+status) {
+				t.Fatalf("terminal %s receipt must fail closed, got %v", status, err)
+			}
+			if pending := readPendingOutboxRecordsForTest(t, localDir); len(pending) != 0 {
+				t.Fatalf("terminal %s receipt remained pending: %+v", status, pending)
+			}
+			failed := failedOutbox(t, localDir)
+			if len(failed) != 1 || failed[0].DispatchStatus != status {
+				t.Fatalf("terminal %s archive = %+v, want one failed receipt", status, failed)
+			}
+			if summary := syncer.summarizeOutbox(); summary.Failed != 1 || summary.NeedsAttention != 1 {
+				t.Fatalf("terminal %s summary = %+v, want failed=1 and needsAttention=1", status, summary)
+			}
+		})
+	}
+}
+
+func TestWritebackE2E_SupersededPendingIsArchivedWithoutAttention(t *testing.T) {
+	cloud := newWritebackTestCloud(t)
+	clock := newFakeClock(time.Date(2026, 6, 11, 12, 0, 0, 0, time.UTC))
+	syncer, localDir, remotePath := newWritebackSyncer(t, cloud, clock)
+
+	makePending := func(content string) pendingBulkWrite {
+		return pendingBulkWrite{
+			remotePath: remotePath,
+			snapshot: localSnapshot{
+				RawContent:  []byte(content),
+				WireContent: content,
+				ContentType: "application/json",
+				Hash:        hashBytes([]byte(content)),
+			},
+		}
+	}
+	first, err := syncer.ensureOutboxRecord(makePending(`{"version":1}`))
+	if err != nil {
+		t.Fatalf("create first pending command: %v", err)
+	}
+	second, err := syncer.ensureOutboxRecord(makePending(`{"version":2}`))
+	if err != nil {
+		t.Fatalf("supersede pending command: %v", err)
+	}
+	if first.CommandID == second.CommandID {
+		t.Fatalf("superseded command reused command id %q", first.CommandID)
+	}
+	if failed := failedOutbox(t, localDir); len(failed) != 0 {
+		t.Fatalf("superseded command was archived as failed: %+v", failed)
+	}
+	acked := ackedOutbox(t, localDir)
+	if len(acked) != 1 || acked[0].CommandID != first.CommandID || acked[0].DispatchStatus != "superseded_by_newer_local_content" {
+		t.Fatalf("superseded command archive = %+v, want one acknowledged superseded command", acked)
+	}
+	if summary := syncer.summarizeOutbox(); summary.Failed != 0 || summary.NeedsAttention != 0 {
+		t.Fatalf("superseded command polluted failure health: %+v", summary)
+	}
+}
+
 func TestWritebackE2E_RetryBackoffIsExponential(t *testing.T) {
 	cloud := newWritebackTestCloud(t)
 	start := time.Date(2026, 6, 11, 12, 0, 0, 0, time.UTC)
