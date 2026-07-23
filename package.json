@@ -25,14 +25,25 @@
     "evals:list": "npm run evals:compile && node scripts/evals/run-relayfile-evals.mjs --list",
     "evals:offline": "npm run evals:compile && node scripts/evals/run-relayfile-evals.mjs --mode offline",
     "evals:provider": "npm run evals:compile && node scripts/evals/run-relayfile-evals.mjs --provider",
+    "features:validate": "node scripts/validate-feature-catalog.mjs",
+    "features:typecheck": "tsc --noEmit --target ES2022 --module NodeNext --moduleResolution NodeNext --types node --skipLibCheck .agentworkforce/agents/relayfile-feature-guardian/agent.ts workflows/verify-features.ts",
+    "features:test": "npm run features:typecheck && node --test scripts/verify-features.test.mjs && tsx --test .agentworkforce/agents/relayfile-feature-guardian/manifest-contract.test.ts .agentworkforce/agents/relayfile-feature-guardian/agent.test.ts && vitest run packages/agents/src/forward.test.ts packages/agents/src/tools/read-roots.test.ts",
+    "features:pack-e2e": "node scripts/packed-feature-e2e.mjs",
+    "features:verify": "node scripts/verify-features.mjs",
     "test:load:tier2-scoped-writeback": "node test/load/tier2-cfdo-scoped-writeback.mjs",
     "test:load:tier2-scoped-writeback:self-test": "node test/load/tier2-cfdo-scoped-writeback.mjs --self-test"
   },
   "devDependencies": {
     "@agent-assistant/telemetry": "^0.4.31",
     "@agent-relay/sdk": "^4.0.28",
+    "@agentworkforce/delivery": "^4.1.34",
+    "@agentworkforce/runtime": "^4.1.34",
     "@agentworkforce/workload-router": "^0.3.0",
+    "@relayfile/relay-helpers": "^0.4.9",
+    "@types/node": "^22.10.0",
     "agent-trajectories": "^0.5.8",
-    "tsx": "^4.21.0"
+    "tsx": "^4.21.0",
+    "typescript": "^5.7.3",
+    "yaml": "^2.8.3"
   }
 }
