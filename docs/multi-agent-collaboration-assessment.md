@@ -13,15 +13,16 @@ and `internal/httpapi/assessment_fork_contention_test.go`.
 
 ## Verdict
 
-**Status update:** the two gaps below (silent-overwrite on the shared-mount
-write path, and false fork contention) that originally motivated the
-"partial" verdict have both been fixed and measured — see
-`goal-b/phase-0-bulkwrite-revision-check` (PR #370) and
-`goal-b/phase-1-per-path-fork-revision`. The verdict paragraph and gap list
-below are left in their original form, with inline corrections, so the
-document remains an accurate record of what was actually found and in what
-order it was fixed — gap #1 and gap #2 are now marked fixed in place rather
-than rewritten away.
+**Status update:** all four gaps below that originally motivated the
+"partial" verdict have now been fixed and measured — silent-overwrite on the
+shared-mount write path (PR #370), false fork contention (PR #371), no
+recovery primitive for a genuine same-path fork conflict (PR #372), and no
+merge path for two agents concurrently editing the same file (PR #373, added
+as a fourth phase beyond the original gap list, at symbol/function
+granularity for Go). The verdict paragraph and gap list below are left in
+their original form, with inline corrections, so the document remains an
+accurate record of what was actually found and in what order it was fixed —
+each fixed gap is marked fixed in place rather than rewritten away.
 
 **Originally partial, and the biggest reason was not what the original
 hypothesis guessed.** The tension the brief worried about — shared mount
@@ -46,9 +47,11 @@ the correctness problem but were effectively unusable at any real
 concurrency: two agents touching completely disjoint directories failed
 ~39% of fork commits, and the failure had no recovery primitive short of
 discard-and-redo. **The false-contention half of this is fixed in gap #2
-below** (0.0% measured for disjoint paths after the fix); the missing
-recovery primitive for genuine same-path conflicts (gap #3, rebase) remains
-open.
+below** (0.0% measured for disjoint paths after the fix); **the recovery
+primitive for genuine same-path conflicts is fixed in gap #3 below** (a
+rebase endpoint replacing discard-and-redo); **and same-file concurrent
+editing at function granularity, not just whole-file, is fixed in gap #4
+below** (a symbol-level merge endpoint, Go-only for now).
 
 ## The two modes, corrected
 
@@ -378,30 +381,59 @@ prior — so this is a two-machine, not three-machine, confirmation).
    weaken authorization, and no correctness elsewhere turned out to depend
    on `ws.Revision` being a single serialized counter.
 
-3. **No rebase primitive.** Evidence: full API-surface audit above.
-   Compounds gap #2 — even after narrowing the check, a fork that
-   genuinely does collide on a path it touched still has no recovery
-   better than discard-and-redo. **Fix (design, not sized for
-   implementation):** a `RebaseFork` endpoint that re-pins `ParentRevision`
-   to current, diffs each overlay entry's `BaseRevision` against the live
-   file, and returns clean-vs-conflicting paths as structured data instead
-   of throwing — reusing `CommitForkWithValidator`'s atomic-apply loop
-   (`store.go:1769-1818`) for the actual land. Hard cases needing an
-   explicit policy: path deleted upstream (write-after-delete vs
-   delete-delete), ACL/schema changed on a path the overlay didn't touch,
-   tombstone-vs-upstream-write ordering. **Size:** weeks — this is new
-   surface across store, HTTP, and both SDKs, not a local fix. **Do this
-   only after #2**, since narrowing the check first shrinks how often
-   rebase is even needed.
+3. **FIXED (`goal-b/phase-2-rebase-fork`, PR #372).** **No rebase
+   primitive.** Evidence: full API-surface audit above. Compounded gap #2 —
+   even after narrowing the check, a fork that genuinely collided on a path
+   it touched had no recovery better than discard-and-redo. **Fix
+   (implemented):** `Store.RebaseFork` re-pins `ParentRevision` to current,
+   diffs each overlay entry's `BaseRevision` against live file state, and
+   returns clean-vs-conflicting paths as structured data instead of
+   throwing; a clean rebase re-applies via `CommitForkWithValidator`'s
+   existing atomic-apply loop. Exposed over HTTP
+   (`POST /v1/workspaces/{id}/forks/{forkId}/rebase`) and the TypeScript SDK,
+   with `parent_moved` given its own error branch in `throwForError`. Policy
+   for the hard cases (path deleted upstream, ACL/schema changed on an
+   untouched path) was resolved and covered by tests rather than left open.
+   **Size (actual):** matched the days-to-weeks estimate — split cleanly
+   along the store/HTTP+SDK boundary and cross-reviewed. **Risk (actual):**
+   low — reused the already-hardened per-path CAS from gap #2 rather than
+   introducing new conflict-detection logic.
 
-4. **Docs oversell current behavior.** `docs/guides/collaboration.md:54-76`
+4. **FIXED (`goal-b/phase-3-symbol-merge`, PR #373).** **No path back from
+   a genuine same-path collision short of picking a winner and discarding
+   the loser's work.** Gap #3's rebase primitive gives an agent a clean
+   *retry* when nothing really collided, but two agents both editing the
+   same Go file — even different functions in it — still forced a
+   whole-file conflict under gap #3 alone. **Fix (implemented):**
+   `Store.MergeFile` — a symbol-level three-way merge for `.go` files
+   (`internal/relayfile/merge_go.go`, `merge.go`), scoped deliberately
+   narrow: AST-based extraction of top-level function declarations via
+   `go/parser` (not line-based diffing, not a cross-language heuristic),
+   auto-merging when only one side changed a given function, conflicting
+   (fail-closed, writes nothing) when both sides changed the same function
+   or the merge base can't be cryptographically verified against a bounded
+   in-memory provenance ledger. Exposed over HTTP
+   (`POST /v1/workspaces/{id}/fs/merge`) and the TypeScript SDK. **Explicitly
+   out of scope for this phase** (by user decision, not oversight):
+   automatic mountsync routing to the merge endpoint ("mount rollout" — an
+   agent must currently call `mergeFile` directly rather than have a
+   same-path write silently attempt a merge), and non-Go languages. **Size
+   (actual):** in-line with the "weeks" estimate implied by gap #3's note
+   that this class of work is new cross-layer surface. **Risk (actual):**
+   low in production impact (fails closed on any parse ambiguity, `.go`-only
+   surface), though the implementation needed one external-review round
+   (CodeRabbit on PR #373) to catch a reintroduced instance of gap #2's
+   exact class of bug — workspace-wide CAS instead of per-file CAS — plus a
+   comment-preservation correctness bug, both fixed before merge.
+
+5. **Docs oversell current behavior.** `docs/guides/collaboration.md:54-76`
    claims conflict-safety the code doesn't have (see gap #1);
    `cmd/relayfile-cli/`'s mount help text undersells actual propagation
    speed (says "polls... every 30s", actual steady-state is sub-200ms via
    websocket). Cheap to fix, should happen alongside #1 so the doc becomes
    true rather than requiring a retraction later.
 
-5. **No same-file simultaneous co-editing (CRDT/OT).** **Correction to an
+6. **No same-file simultaneous co-editing (CRDT/OT).** **Correction to an
    earlier framing of this finding:** this *was* scoped and explicitly
    rejected, not merely unaddressed. `docs/relayfile-v1-spec.md:30-35`
    ("Non-Goals (v1)", doc dated 2026-02-17, status "Draft for
@@ -414,31 +446,37 @@ prior — so this is a two-machine, not three-machine, confirmation).
    itself — `git show f1ed3e4:.trajectories/active/traj_dnzgabyc2ijd.json`
    — indeed never re-litigates CRDT/OT, consistent with the decision having
    already been made two months earlier rather than being reconsidered at
-   fork-design time.) Given gap #1 exists, adding CRDT/OT before fixing
-   basic last-write-safety would be solving a problem one layer past the
-   one that's actually broken. **Recommendation: not in scope until #1 and
-   #2 are fixed** — isolation (forks, once contention is fixed) is almost
-   certainly the better answer for agent-to-agent collaboration than
-   merge-based co-editing, and this now has an explicit prior decision
-   behind it, not just this assessment's opinion; true simultaneous
-   same-line editing is a human-collaboration problem (Google-Docs-style)
-   that doesn't obviously apply to agents, who don't need sub-second
-   keystroke-level merge, they need "did my change survive."
+   fork-design time.) **Still holds after Phase 3:** gap #4's symbol-level
+   `MergeFile` is deliberately *not* CRDT/OT — it's an explicit, agent-called
+   endpoint operating on a bounded, verifiable unit (a parsed Go function),
+   not a background live-merge of keystrokes. It's evidence the "isolation
+   plus an explicit narrow merge primitive" direction implied by the original
+   CRDT rejection was the right one, not a reversal of it.
+   **Recommendation: still not in scope for a general CRDT/OT engine** —
+   isolation (forks) plus scoped, verifiable merge (gap #4, currently
+   Go-only) is the answer for agent-to-agent collaboration, not
+   background-live merge-based co-editing; true simultaneous same-line
+   editing is a human-collaboration problem (Google-Docs-style) that doesn't
+   obviously apply to agents, who don't need sub-second keystroke-level
+   merge, they need "did my change survive."
 
 ## Recommendation
 
-Gaps #1 and #2 are both fixed (see the gap list above) — the shared-mount
-mode is now honest about what it guarantees, and forks no longer
-false-contend on disjoint paths. A rebase primitive (gap #3) is the
-remaining multi-week investment for genuine same-path conflict recovery,
-and is worth less now than it would have been before Phase 1, since the
-correctly-narrowed check already eliminated most of what rebase would have
-needed to solve for disjoint-path work.
+Gaps #1-#4 are all fixed (see the gap list above): the shared-mount mode is
+now honest about what it guarantees, forks no longer false-contend on
+disjoint paths, a genuine same-path fork collision has a rebase path instead
+of forced discard-and-redo, and two agents concurrently editing different
+functions in the same Go file now merge automatically instead of forcing a
+whole-file conflict. What remains deliberately out of scope, by explicit user
+decision rather than oversight: automatic mountsync routing to the merge
+endpoint ("mount rollout" — gap #4 today requires an agent to call
+`mergeFile` directly), and merge support for languages other than Go.
 
-Don't invest in CRDT/OT — it was explicitly scoped out of v1
-(`docs/relayfile-v1-spec.md:30-35`, see gap #5), and the two gaps above are
-more fundamental anyway: an agent that can't trust its write survived
-doesn't need finer-grained merge, it needs the write to survive.
+Don't invest in a general CRDT/OT engine — it was explicitly scoped out of
+v1 (`docs/relayfile-v1-spec.md:30-35`, see gap #6), and gap #4's scoped,
+AST-verified merge is a better fit for how agents actually need this
+(a discrete "did my change survive, and if not, why" answer) than
+background live-merge would be.
 
 ## What was NOT verified (would change the verdict if wrong)
 
