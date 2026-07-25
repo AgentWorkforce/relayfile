@@ -6278,7 +6278,20 @@ func (s *Syncer) pushLocal(ctx context.Context) (map[string]struct{}, error) {
 			// populate via the filesystem-watcher path (HandleLocalChange),
 			// never via periodic polling — silently inert in the default,
 			// recommended mount mode.
-			s.recordShadowContent(remotePath, tracked.Revision, snapshot.RawContent)
+			//
+			// snapshot here came from scanLocalFiles's cheap hash-only read
+			// (readLocalSnapshot(path, false)) — snapshot.RawContent is
+			// always empty at this call site, unlike every other caller of
+			// recordShadowContent. Caching that empty slice would produce a
+			// cache "hit" with the WRONG content (empty), which the
+			// server's provenance hash check would then reject on every
+			// merge attempt — mount rollout would silently never succeed,
+			// worse than never attempting it. s.refreshShadowContentFromDisk
+			// does the one real extra read this requires (bounded to .go
+			// paths, and skipped entirely once this exact revision is
+			// already cached, so steady-state clean files cost nothing
+			// beyond the stat this branch already implies).
+			s.refreshShadowContentFromDisk(remotePath, tracked.Revision, localPath)
 			continue
 		}
 		// Skip re-pushing a previously write-denied file whose content hasn't
@@ -7156,6 +7169,30 @@ func (s *Syncer) readShadowContent(remotePath, revision string) ([]byte, bool) {
 		return nil, false
 	}
 	return content, true
+}
+
+// refreshShadowContentFromDisk populates the shadow cache for a confirmed-
+// clean path when the caller only has a content-less snapshot in hand
+// (scanLocalFiles's cheap readLocalSnapshot(path, false) hash-only read,
+// used by pushLocal's own confirmed-clean short-circuit). No-op for
+// ineligible paths. Skips the extra read entirely when this exact revision
+// is already cached — steady-state clean files pay nothing beyond the stat
+// pushLocal's own hash check already required. If the read fails (file
+// removed between the hash check and here, permissions, etc.) it is treated
+// the same as any other shadow-cache miss: silently skipped, never an error
+// — a missed caching opportunity, not a correctness problem.
+func (s *Syncer) refreshShadowContentFromDisk(remotePath, revision, localPath string) {
+	if !mountRolloutMergeEligible(remotePath) {
+		return
+	}
+	if _, ok := s.readShadowContent(remotePath, revision); ok {
+		return
+	}
+	content, err := os.ReadFile(localPath)
+	if err != nil {
+		return
+	}
+	s.recordShadowContent(remotePath, revision, content)
 }
 
 func shadowArtifactPath(baseDir, remotePath, revision string) string {

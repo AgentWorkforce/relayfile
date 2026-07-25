@@ -112,6 +112,51 @@ func TestMountRolloutShadowCache(t *testing.T) {
 	})
 }
 
+// TestMountRolloutShadowCachePopulatesFromPollModeAlone is a regression test
+// for a real bug found driving relayfile-mount as an actual continuous
+// daemon (not through unit-test helpers): pushLocal's own confirmed-clean
+// short-circuit works from scanLocalFiles's cheap, hash-only snapshot
+// (readLocalSnapshot(path, false)), whose RawContent is always empty —
+// unlike every other snapshot in this codebase. A naive cache write there
+// would cache an empty byte slice as the "shadow" for a real file, which
+// would then fail the server's provenance hash check on every real merge
+// attempt: mount rollout would silently never succeed under the default
+// poll mode, worse than not attempting it. Every existing test up to this
+// one masked the bug because they all eventually call HandleLocalChange
+// (which always reads full content), overwriting whatever pushLocal had
+// written first. This test drives ONLY SyncOnce — no HandleLocalChange —
+// to isolate the pure poll-mode path and assert the cached content is the
+// real file bytes, not empty.
+func TestMountRolloutShadowCachePopulatesFromPollModeAlone(t *testing.T) {
+	const (
+		remotePath = "/notion/pkg/service.go"
+		content    = "package pkg\n\nfunc Service() string { return \"base\" }\n"
+	)
+	client := &fakeClient{files: map[string]RemoteFile{
+		remotePath: {Path: remotePath, Revision: "rev_base", ContentType: "text/x-go", Content: content},
+	}}
+	syncer := newMountRolloutTestSyncer(t, client)
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("bootstrap sync: %v", err)
+	}
+	// A second cycle with no local changes is pushLocal's own
+	// confirmed-clean path in isolation (the first cycle's pushLocal runs
+	// immediately after the bootstrap pull within the same SyncOnce call,
+	// which is enough to populate it too — this second call just makes the
+	// scenario explicit and unambiguous).
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("confirmed-clean sync: %v", err)
+	}
+
+	got, ok := syncer.readShadowContent(remotePath, "rev_base")
+	if !ok {
+		t.Fatal("expected pure poll-mode cycles to populate the shadow cache")
+	}
+	if string(got) != content {
+		t.Fatalf("shadow content = %q, want %q (a bug here means every real merge attempt fails provenance verification and mount rollout silently never succeeds)", got, content)
+	}
+}
+
 func TestAttemptMountRolloutMergeSkipsNetworkWithoutShadow(t *testing.T) {
 	const (
 		remotePath = "/notion/pkg/service.go"
