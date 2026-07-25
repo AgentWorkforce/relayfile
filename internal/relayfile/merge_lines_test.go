@@ -217,6 +217,38 @@ func TestLinesMergeDifferentInsertionsAtSamePositionConflict(t *testing.T) {
 	}
 }
 
+// TestLinesMergeAmbiguousDuplicateInsertionsConflict is a regression test
+// for a real P1 finding (external review on PR #375): a repeated line near
+// an independent insertion on each side makes the LCS alignment ambiguous.
+// base has one "a"; mine independently inserts a second "a" after it;
+// theirs independently inserts "b" before the "a" AND a second "a" after
+// it. A single greedy-leftmost alignment can align mine's inserted "a" and
+// theirs' inserted "a" to the SAME logical gap purely because they're
+// textually identical, silently collapsing what are actually two
+// independent insertions into one and losing content — `git merge-file`
+// resolves this correctly (by choosing a different, non-colliding
+// alignment) to "x\nb\na\na\na\ny\n" (three a's: theirs' insertion, the
+// original, and mine's insertion). This strategy doesn't try to replicate
+// that exact resolution; it only has to never silently guess wrong, so the
+// bar here is "conflict" not "the git answer" — see linesThreeWayMerge's
+// doc comment for why cross-checking two alignments is how that's caught.
+func TestLinesMergeAmbiguousDuplicateInsertionsConflict(t *testing.T) {
+	base := "x\na\ny\n"
+	mine := "x\na\na\ny\n"
+	theirs := "x\nb\na\na\ny\n"
+
+	result, conflicts, err := linesThreeWayMerge(base, mine, theirs)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Content != "" {
+		t.Fatalf("expected no content on ambiguous alignment, got %q — this would be silent data loss if it doesn't contain all of: theirs' \"b\", the original \"a\", mine's inserted \"a\", and theirs' inserted \"a\"", result.Content)
+	}
+	if len(conflicts) == 0 {
+		t.Fatal("expected at least one conflict for an ambiguous alignment, got none — this means one side's independent insertion was silently dropped")
+	}
+}
+
 func TestLinesMergeNoTrailingNewlinePreservedExactly(t *testing.T) {
 	base := "alpha\nbeta\ngamma" // no trailing newline
 	mine := "alpha CHANGED\nbeta\ngamma"

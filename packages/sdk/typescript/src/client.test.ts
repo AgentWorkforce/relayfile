@@ -1883,6 +1883,34 @@ describe("RelayFileClient — existing methods", () => {
       });
     });
 
+    it("mergeFile defaults contentType per strategy when omitted", async () => {
+      const f = mockFetch({
+        targetRevision: "rev_2",
+        strategy: "go-top-level-functions-v1",
+        baseRevision: "rev_1",
+        mergedAgainstRevision: "rev_1",
+      });
+      const client = makeClient(f);
+
+      await client.mergeFile({
+        workspaceId: "ws_acme",
+        path: "/src/a.go",
+        strategy: "go-top-level-functions-v1",
+        content: "package sample\n\nfunc Alpha() int { return 2 }\n",
+        baseRevision: "rev_1",
+        baseContent: "package sample\n\nfunc Alpha() int { return 1 }\n",
+      });
+
+      // go-top-level-functions-v1 is Go-only: an omitted contentType must
+      // keep defaulting to "text/x-go", not the neutral "text/plain" the
+      // language-agnostic three-way-lines-v1 strategy uses — regression
+      // coverage for a real bug where a blanket neutral default would have
+      // silently rewritten every existing Go merge caller's stored content
+      // type and provider-writeback metadata.
+      const init = f.mock.calls[0]![1] as RequestInit;
+      expect(JSON.parse(init.body as string).contentType).toBe("text/x-go");
+    });
+
     it("writeFile with forkId appends forkId and leaves body unchanged", async () => {
       const f = mockFetch({ opId: "op_1", status: "queued", targetRevision: "fork:fork_123:1" });
       const client = makeClient(f);

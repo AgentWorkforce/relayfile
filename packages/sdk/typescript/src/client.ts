@@ -1614,9 +1614,13 @@ export class RelayFileClient {
         content: input.content,
         baseRevision: input.baseRevision,
         baseContent: input.baseContent,
-        // A neutral default matches the server and works for either merge
-        // strategy when the caller did not provide a more specific type.
-        contentType: input.contentType ?? "text/plain",
+        // Default per-strategy: go-top-level-functions-v1 is Go-only, so
+        // existing callers that omit contentType must keep getting
+        // "text/x-go" (changing this would silently rewrite their file's
+        // stored content type and provider-writeback metadata on every
+        // merge). three-way-lines-v1 has no language restriction, so
+        // "text/plain" is the right neutral default there.
+        contentType: input.contentType ?? (input.strategy === "go-top-level-functions-v1" ? "text/x-go" : "text/plain"),
         contentIdentity: input.contentIdentity
       },
       signal: input.signal

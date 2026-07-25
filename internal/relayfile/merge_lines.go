@@ -22,12 +22,13 @@ import (
 const MergeStrategyThreeWayLines = "three-way-lines-v1"
 
 // maxMergeDiffLines bounds the per-side line count the line-based merge
-// will diff. lcsMatch is a full O(n*m) DP table sized int32 — at this
-// bound that's roughly maxMergeDiffLines^2*4 bytes (~36MB) per call, twice
-// per merge attempt (base-vs-mine, base-vs-theirs). A single real source
-// file this long is already unusual; like every other bound in this file,
-// exceeding it fails closed (ineligible), never degrades to a slower or
-// more memory-hungry path.
+// will diff. Each LCS alignment is a full O(n*m) DP table sized int32 — at
+// this bound that's roughly maxMergeDiffLines^2*4 bytes (~36MB) per table,
+// and linesThreeWayMerge computes four of them (forward+backward alignment,
+// each for base-vs-mine and base-vs-theirs) per merge attempt. A single
+// real source file this long is already unusual; like every other bound in
+// this file, exceeding it fails closed (ineligible), never degrades to a
+// slower or more memory-hungry path.
 const maxMergeDiffLines = 3000
 
 // lineMergeConflict reports one contiguous base line range that both sides
@@ -67,13 +68,21 @@ func splitLinesKeepEnds(s string) []string {
 	return lines
 }
 
-// lcsMatch returns, for each index i in base, the index in other that
-// base[i] is matched to as part of a longest common subsequence of lines,
-// or -1 if base[i] has no match (i.e. it was changed/deleted relative to
-// other). Lines are compared by exact string equality, including their
-// trailing newline. This is a textbook full DP LCS, bounded to
-// maxMergeDiffLines by the caller so the O(n*m) table stays memory-safe.
-func lcsMatch(base, other []string) []int {
+// lcsMatchPreferFirst returns, for each index i in base, the index in other
+// that base[i] is matched to as part of a longest common subsequence of
+// lines, or -1 if base[i] has no match (i.e. it was changed/deleted
+// relative to other). Lines are compared by exact string equality,
+// including their trailing newline. This is a textbook full DP LCS,
+// bounded to maxMergeDiffLines by the caller so the O(n*m) table stays
+// memory-safe.
+//
+// When the LCS is ambiguous — repeated/duplicated lines admit more than one
+// optimal alignment — this backtrack greedily matches the EARLIEST valid
+// occurrence. lcsMatchPreferLast computes the same LCS but greedily matches
+// the LATEST valid occurrence instead. The two are combined in
+// linesThreeWayMerge specifically to catch cases a single alignment choice
+// would get silently wrong (see its doc comment).
+func lcsMatchPreferFirst(base, other []string) []int {
 	n, m := len(base), len(other)
 	match := make([]int, n)
 	for i := range match {
@@ -82,6 +91,7 @@ func lcsMatch(base, other []string) []int {
 	if n == 0 || m == 0 {
 		return match
 	}
+	// dp[i][j] = LCS length of base[i:], other[j:].
 	dp := make([][]int32, n+1)
 	for i := range dp {
 		dp[i] = make([]int32, m+1)
@@ -113,29 +123,58 @@ func lcsMatch(base, other []string) []int {
 	return match
 }
 
-// linesThreeWayMerge implements the three-way-lines-v1 strategy: a
-// diff3-style merge over base/mine/theirs, resolved at "sync points" —
-// base lines that are unchanged (present verbatim) in both mine and
-// theirs. Between consecutive sync points, whichever side actually
-// changed something relative to base wins; if both changed it identically,
-// that's not a conflict either; only a genuine divergence — both sides
-// changed the same span to different content — is reported as a conflict.
-//
-// Safety invariant, matching goThreeWayMerge: on ANY conflict, no content
-// is returned at all — the caller must treat this as an all-or-nothing
-// merge, never a partial one.
-func linesThreeWayMerge(base, mine, theirs string) (lineMergeResult, []lineMergeConflict, error) {
-	baseLines := splitLinesKeepEnds(base)
-	mineLines := splitLinesKeepEnds(mine)
-	theirsLines := splitLinesKeepEnds(theirs)
-
-	if len(baseLines) > maxMergeDiffLines || len(mineLines) > maxMergeDiffLines || len(theirsLines) > maxMergeDiffLines {
-		return lineMergeResult{}, nil, fmt.Errorf("content exceeds %d lines, too large for %s", maxMergeDiffLines, MergeStrategyThreeWayLines)
+// lcsMatchPreferLast is lcsMatchPreferFirst's mirror image: it computes a
+// PREFIX LCS table (dp[i][j] = LCS length of base[:i], other[:j]) and
+// backtracks from the end of both sequences toward the start, greedily
+// matching the LATEST valid occurrence of a repeated line instead of the
+// earliest. See lcsMatchPreferFirst's doc comment for why both exist.
+func lcsMatchPreferLast(base, other []string) []int {
+	n, m := len(base), len(other)
+	match := make([]int, n)
+	for i := range match {
+		match[i] = -1
 	}
+	if n == 0 || m == 0 {
+		return match
+	}
+	dp := make([][]int32, n+1)
+	for i := range dp {
+		dp[i] = make([]int32, m+1)
+	}
+	for i := 1; i <= n; i++ {
+		row, prevRow := dp[i], dp[i-1]
+		for j := 1; j <= m; j++ {
+			if base[i-1] == other[j-1] {
+				row[j] = prevRow[j-1] + 1
+			} else if prevRow[j] >= row[j-1] {
+				row[j] = prevRow[j]
+			} else {
+				row[j] = row[j-1]
+			}
+		}
+	}
+	i, j := n, m
+	for i > 0 && j > 0 {
+		if base[i-1] == other[j-1] {
+			match[i-1] = j - 1
+			i--
+			j--
+		} else if dp[i-1][j] >= dp[i][j-1] {
+			i--
+		} else {
+			j--
+		}
+	}
+	return match
+}
 
-	matchMine := lcsMatch(baseLines, mineLines)
-	matchTheirs := lcsMatch(baseLines, theirsLines)
-
+// mergeWithAlignment implements the core diff3-style resolution given a
+// pair of already-computed base-vs-mine / base-vs-theirs alignments: walk
+// "sync points" (base lines matched in both alignments) and between them
+// take whichever side actually changed something relative to base, or —
+// if both changed it identically — either; only a genuine divergence
+// (both sides changed the same span to different content) is a conflict.
+func mergeWithAlignment(baseLines, mineLines, theirsLines []string, matchMine, matchTheirs []int) (lineMergeResult, []lineMergeConflict) {
 	type syncPoint struct {
 		base, mine, theirs int
 	}
@@ -199,7 +238,65 @@ func linesThreeWayMerge(base, mine, theirs string) (lineMergeResult, []lineMerge
 	}
 
 	if len(conflicts) > 0 {
-		return lineMergeResult{}, conflicts, nil
+		return lineMergeResult{}, conflicts
 	}
-	return lineMergeResult{Content: strings.Join(output, "")}, nil, nil
+	return lineMergeResult{Content: strings.Join(output, "")}, nil
+}
+
+// linesThreeWayMerge implements the three-way-lines-v1 strategy.
+//
+// Safety invariant, matching goThreeWayMerge: on ANY conflict, no content
+// is returned at all — the caller must treat this as an all-or-nothing
+// merge, never a partial one.
+//
+// Repeated/duplicated lines near an edit make the LCS alignment between
+// base and a changed side genuinely ambiguous — more than one alignment
+// achieves the same optimal length, and different choices can attribute an
+// insertion to a different position. Trusting a single (e.g. greedy-
+// leftmost) alignment can silently DROP one side's independent insertion
+// when both sides happen to insert lines that are textually identical to
+// something nearby (see TestLinesMergeAmbiguousDuplicateInsertionsConflict
+// for a concrete example matching what `git merge-file` resolves
+// correctly by choosing a different, non-colliding alignment). Rather than
+// try to replicate git's exact resolution heuristic, this computes the
+// merge TWICE — once preferring the earliest occurrence when a repeated
+// line admits a choice, once preferring the latest — and only trusts the
+// result when both agree. Disagreement (different content, or one finds a
+// conflict the other doesn't) means the alignment was ambiguous, and the
+// safe response is a conflict, never a guess.
+func linesThreeWayMerge(base, mine, theirs string) (lineMergeResult, []lineMergeConflict, error) {
+	baseLines := splitLinesKeepEnds(base)
+	mineLines := splitLinesKeepEnds(mine)
+	theirsLines := splitLinesKeepEnds(theirs)
+
+	if len(baseLines) > maxMergeDiffLines || len(mineLines) > maxMergeDiffLines || len(theirsLines) > maxMergeDiffLines {
+		return lineMergeResult{}, nil, fmt.Errorf("content exceeds %d lines, too large for %s", maxMergeDiffLines, MergeStrategyThreeWayLines)
+	}
+
+	firstResult, firstConflicts := mergeWithAlignment(baseLines, mineLines, theirsLines,
+		lcsMatchPreferFirst(baseLines, mineLines), lcsMatchPreferFirst(baseLines, theirsLines))
+	lastResult, lastConflicts := mergeWithAlignment(baseLines, mineLines, theirsLines,
+		lcsMatchPreferLast(baseLines, mineLines), lcsMatchPreferLast(baseLines, theirsLines))
+
+	if len(firstConflicts) == 0 && len(lastConflicts) == 0 && firstResult.Content == lastResult.Content {
+		return firstResult, nil, nil
+	}
+
+	// Disagreement between the two alignments, or a conflict found by
+	// either one: fail closed. Report whichever conflict list is
+	// non-empty; if both claim success but produced DIFFERENT content,
+	// there's no more specific unit to point at than the whole file.
+	if len(firstConflicts) > 0 {
+		return lineMergeResult{}, firstConflicts, nil
+	}
+	if len(lastConflicts) > 0 {
+		return lineMergeResult{}, lastConflicts, nil
+	}
+	return lineMergeResult{}, []lineMergeConflict{{
+		Unit:   "whole file",
+		Reason: "ambiguous merge alignment: repeated or duplicated lines admit more than one valid resolution",
+		Base:   base,
+		Mine:   mine,
+		Theirs: theirs,
+	}}, nil
 }
