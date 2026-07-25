@@ -600,11 +600,12 @@ func (c *HTTPClient) MergeFile(ctx context.Context, workspaceID, path, strategy,
 		contentType = "text/x-go"
 	}
 	body := map[string]any{
-		"strategy":     strategy,
-		"content":      content,
-		"baseRevision": baseRevision,
-		"baseContent":  baseContent,
-		"contentType":  contentType,
+		"strategy":        strategy,
+		"content":         content,
+		"baseRevision":    baseRevision,
+		"baseContent":     baseContent,
+		"contentType":     contentType,
+		"contentIdentity": mountRolloutMergeContentIdentity(workspaceID, path, strategy, baseRevision, hashString(content)),
 	}
 	q := url.Values{}
 	q.Set("path", normalizeRemotePath(path))
@@ -2566,6 +2567,24 @@ func newMountWritebackCreateDraftContentIdentity(workspaceID, normalizedRemotePa
 	}
 }
 
+const mountRolloutMergeContentIdentityKind = "mount-rollout-merge"
+const mountRolloutMergeContentIdentityTTLSeconds = 7 * 24 * 60 * 60
+
+// mountRolloutMergeContentIdentity derives a stable dedupe key for a mount
+// rollout merge request from its logical inputs (not a timestamp), so that
+// doJSON's automatic retry on a 5xx/429/lost-response resends the identical
+// key and the server's operation dedup (findExistingMergeOpLocked) returns
+// the original result instead of committing the same merge twice — each
+// double-commit would otherwise mint an extra revision, filesystem event,
+// and provider writeback for content that already landed.
+func mountRolloutMergeContentIdentity(workspaceID, remotePath, strategy, baseRevision, contentHash string) *ContentIdentity {
+	return &ContentIdentity{
+		Kind:       mountRolloutMergeContentIdentityKind,
+		Key:        fmt.Sprintf("%s:%s:%s:%s:%s", workspaceID, normalizeRemotePath(remotePath), strategy, baseRevision, contentHash),
+		TTLSeconds: mountRolloutMergeContentIdentityTTLSeconds,
+	}
+}
+
 func chunkPendingBulkWrites(workspaceID string, pending []pendingBulkWrite, maxBytes int64) [][]pendingBulkWrite {
 	if len(pending) == 0 {
 		return nil
@@ -2809,14 +2828,19 @@ func (s *Syncer) attemptMountRolloutMerge(ctx context.Context, remotePath, local
 	if contentTypeOut == "" {
 		contentTypeOut = snapshot.ContentType
 	}
-	s.state.Files[remotePath] = trackedFile{
-		Revision:          remoteFile.Revision,
-		ContentType:       contentTypeOut,
-		Encoding:          normalizeEncoding(remoteFile.Encoding),
-		Hash:              hashBytes(remoteBytes),
-		LocalRelativePath: tracked.LocalRelativePath,
-		ReadOnly:          !s.canWritePath(remotePath),
-	}
+	// Mutate the existing tracked entry rather than rebuilding it: only the
+	// fields the merge actually determined (revision/content type/encoding/
+	// hash/read-only) should change. DeletePending/Denied/WriteDenied/
+	// DeniedHash are unrelated to a same-path write conflict and must not
+	// silently reset just because this particular write happened to go
+	// through the merge path instead of an ordinary push.
+	tracked.Revision = remoteFile.Revision
+	tracked.ContentType = contentTypeOut
+	tracked.Encoding = normalizeEncoding(remoteFile.Encoding)
+	tracked.Hash = hashBytes(remoteBytes)
+	tracked.Dirty = false
+	tracked.ReadOnly = !s.canWritePath(remotePath)
+	s.state.Files[remotePath] = tracked
 	s.recordShadowContent(remotePath, remoteFile.Revision, remoteBytes)
 	s.logf("mount rollout: auto-merged %s (base %s -> %s)", remotePath, tracked.Revision, remoteFile.Revision)
 	return true
@@ -7135,6 +7159,15 @@ func (s *Syncer) recordShadowContent(remotePath, revision string, content []byte
 		return
 	}
 	artifactPath := shadowArtifactPath(s.mountShadowDir, remotePath, revision)
+	// Steady-state fast path: this is called on every clean-file observation
+	// (every scan/push cycle, for every tracked .go file), but the cached
+	// base for a given revision is immutable once written — a size match is
+	// enough to skip the atomic write + glob + prune below, which would
+	// otherwise be real per-cycle disk I/O across a large Go tree for
+	// content that's already cached almost every time.
+	if info, statErr := os.Stat(artifactPath); statErr == nil && info.Size() == int64(len(content)) {
+		return
+	}
 	if err := os.MkdirAll(filepath.Dir(artifactPath), 0o755); err != nil {
 		return
 	}
