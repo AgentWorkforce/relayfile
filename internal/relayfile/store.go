@@ -1768,15 +1768,28 @@ func (s *Store) CommitForkWithValidator(workspaceID, forkID, correlationID strin
 	sort.Strings(paths)
 	for _, path := range paths {
 		entry := fork.Overlay[path]
-		baseRevision := entry.BaseRevision
-		if baseRevision == "" {
-			baseRevision = "0"
+		if entry.BaseRevision == "" {
+			// Overlay entry persisted by a pre-Phase-1 binary, before
+			// BaseRevision existed — Go's JSON unmarshal leaves it as the
+			// zero value "". New code always sets an explicit "0" for a
+			// path that didn't exist at first-touch (writeForkOverlayLocked,
+			// DeleteForkFile), so an empty string unambiguously means
+			// "we don't know this path's real base revision." Treating that
+			// as "0" would wrongly assume the path never existed, which can
+			// spuriously conflict (or worse, wrongly NOT conflict) — fall
+			// back to the old whole-workspace check for this fork instead,
+			// which is what a pre-Phase-1 binary would have done.
+			if currentRevision != fork.ParentRevision {
+				s.mu.Unlock()
+				return ForkCommitResponse{}, &ParentMovedError{CurrentRevision: currentRevision}
+			}
+			continue
 		}
 		currentPathRevision := "0"
 		if current, exists := ws.Files[path]; exists {
 			currentPathRevision = current.Revision
 		}
-		if currentPathRevision != baseRevision {
+		if currentPathRevision != entry.BaseRevision {
 			s.mu.Unlock()
 			return ForkCommitResponse{}, &ParentMovedError{CurrentRevision: currentRevision}
 		}

@@ -5,6 +5,87 @@ import (
 	"testing"
 )
 
+// TestCommitForkLegacyOverlayEntryFallsBackToWorkspaceCheck covers a fork
+// overlay entry persisted by a pre-Phase-1 binary, before ForkOverlayEntry
+// had a BaseRevision field. Go's JSON unmarshal leaves BaseRevision as the
+// zero value "" for such an entry (new code always sets an explicit "0" for
+// a path that didn't exist at first-touch, so "" is unambiguous). Commit
+// must fall back to the old whole-workspace ParentRevision check for that
+// fork rather than treating "" as "0" (which would wrongly assume the path
+// never existed).
+func TestCommitForkLegacyOverlayEntryFallsBackToWorkspaceCheck(t *testing.T) {
+	const (
+		workspaceID = "ws_fork_legacy_overlay"
+		path        = "/agent-a/legacy.md"
+	)
+
+	t.Run("succeeds when workspace unchanged since fork open", func(t *testing.T) {
+		store := NewStoreWithOptions(StoreOptions{DisableWorkers: true})
+		t.Cleanup(store.Close)
+		seed, err := store.WriteFile(WriteRequest{WorkspaceID: workspaceID, Path: path, IfMatch: "0", Content: "# base"})
+		if err != nil {
+			t.Fatalf("seed file: %v", err)
+		}
+		fork, err := store.CreateFork(workspaceID, "proposal-legacy-ok", 0)
+		if err != nil {
+			t.Fatalf("CreateFork: %v", err)
+		}
+		if _, err := store.WriteForkFile(WriteRequest{
+			WorkspaceID: workspaceID, Path: path, IfMatch: seed.TargetRevision, Content: "# fork edit",
+		}, fork.ForkID); err != nil {
+			t.Fatalf("fork write: %v", err)
+		}
+
+		store.mu.Lock()
+		entry := store.forks[fork.ForkID].Overlay[path]
+		entry.BaseRevision = "" // simulate pre-Phase-1 persisted state
+		store.forks[fork.ForkID].Overlay[path] = entry
+		store.mu.Unlock()
+
+		if _, err := store.CommitFork(workspaceID, fork.ForkID, "corr-legacy-ok"); err != nil {
+			t.Fatalf("expected commit to succeed with unchanged workspace, got %v", err)
+		}
+	})
+
+	t.Run("conflicts on unrelated write, preserving old conservative behavior", func(t *testing.T) {
+		store := NewStoreWithOptions(StoreOptions{DisableWorkers: true})
+		t.Cleanup(store.Close)
+		seed, err := store.WriteFile(WriteRequest{WorkspaceID: workspaceID, Path: path, IfMatch: "0", Content: "# base"})
+		if err != nil {
+			t.Fatalf("seed file: %v", err)
+		}
+		fork, err := store.CreateFork(workspaceID, "proposal-legacy-conflict", 0)
+		if err != nil {
+			t.Fatalf("CreateFork: %v", err)
+		}
+		if _, err := store.WriteForkFile(WriteRequest{
+			WorkspaceID: workspaceID, Path: path, IfMatch: seed.TargetRevision, Content: "# fork edit",
+		}, fork.ForkID); err != nil {
+			t.Fatalf("fork write: %v", err)
+		}
+
+		store.mu.Lock()
+		entry := store.forks[fork.ForkID].Overlay[path]
+		entry.BaseRevision = "" // simulate pre-Phase-1 persisted state
+		store.forks[fork.ForkID].Overlay[path] = entry
+		store.mu.Unlock()
+
+		// Unrelated write elsewhere in the workspace — a per-path-aware
+		// check would ignore this, but a legacy entry has no reliable
+		// per-path base to compare, so it must still conservatively
+		// conflict, matching what a pre-Phase-1 binary would have done.
+		if _, err := store.WriteFile(WriteRequest{
+			WorkspaceID: workspaceID, Path: "/agent-b/unrelated.md", IfMatch: "0", Content: "# unrelated",
+		}); err != nil {
+			t.Fatalf("unrelated write: %v", err)
+		}
+
+		if _, err := store.CommitFork(workspaceID, fork.ForkID, "corr-legacy-conflict"); !errors.Is(err, ErrParentMoved) {
+			t.Fatalf("expected parent_moved for legacy overlay entry after unrelated workspace write, got %v", err)
+		}
+	})
+}
+
 func TestForkOverlayBaseRevisionPinnedAtFirstTouch(t *testing.T) {
 	store := NewStoreWithOptions(StoreOptions{DisableWorkers: true})
 	t.Cleanup(store.Close)

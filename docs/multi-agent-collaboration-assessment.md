@@ -54,9 +54,13 @@ open.
 
 ### Shared mount
 
-**Guarantee it actually provides:** fast, roughly-realtime propagation of
-independent writes, with **no isolation and no reliable conflict detection**
-on the path real agents use.
+**Guarantee it now provides (as of gap #1 / PR #370):** fast, roughly-realtime
+propagation of independent writes, **with** conflict detection on the path
+real agents use — a concurrent write to a path that moved since the writer
+last saw it is rejected and materialized as a `.relay/conflicts/` artifact
+instead of silently lost. **Before PR #370** (the state this section
+originally documented, kept below for the record) there was no isolation and
+no reliable conflict detection at all on that path.
 
 - Propagation is push-based, not the documented 30s poll floor. Websocket
   streaming is on by default (`websocketEnabled := true`,
@@ -71,34 +75,32 @@ on the path real agents use.
   flag default in `cmd/relayfile-mount/main.go`) is the **fallback poll
   cadence when the websocket is down**, not the steady-state number — the
   CLI help text itself undersells this ("polls the cloud for every 30s")
-  and should be corrected.
-- The write path a real agent uses — edit a file under the local mirror —
-  goes through `pushLocal` → `POST /v1/workspaces/{id}/fs/bulk`
+  and should be corrected. (Unaffected by gap #1; still true.)
+- **Originally**, the write path a real agent uses — edit a file under the
+  local mirror — went through `pushLocal` → `POST /v1/workspaces/{id}/fs/bulk`
   (`internal/httpapi/server.go:1581`, `handleBulkWrite`) →
-  `Store.BulkWrite` (`internal/relayfile/store.go:1409-1510`).
-  **`BulkWriteFile` (`store.go:191-198`) has no revision/If-Match field at
-  all**, and `BulkWrite`'s per-file logic (`store.go:1467-1481`)
-  unconditionally does `revision := s.nextRevisionLocked(); ...;
-  ws.Files[path] = file` — there is no read-compare-write, no
-  `ConflictError`, nothing. This is a structurally different code path from
-  the single-file `PUT /fs/file` handler (`server.go:1716`,
-  `handleWriteFile`), which does require `If-Match`
-  (`server.go:1722-1727`) and does route through `Store.WriteFile`
-  (`store.go:1328`), which checks it and can return a conflict.
-  `pushLocal` never uses the checked path.
-- Consequence: `internal/mountsync/syncer.go`'s conflict-artifact machinery
-  (`materializeConflict`, `syncer.go:2624`; triggered only by
-  `errors.Is(err, ErrConflict)` at `syncer.go:2580`, which is only reachable
-  from an HTTP 409 the bulk path can never produce, `syncer.go:781-782`) is
-  **effectively dead code for the ordinary shared-mount edit workflow**. It
-  would fire for other error shapes (permission denial at `syncer.go:2596-2618`
-  is exercised and correct — see `WRITE_DENIED` handling), just not for the
-  concurrent-same-path-write case the docs describe.
+  `Store.BulkWrite` (`internal/relayfile/store.go:1409-1510`), and
+  `BulkWriteFile` (`store.go:191-198`) had no revision/If-Match field at all
+  — `BulkWrite`'s per-file logic unconditionally overwrote, no
+  read-compare-write, no `ConflictError`. **Fixed in gap #1:**
+  `BulkWriteFile` now carries an optional `ifMatch`, `BulkWrite` checks it
+  the same way `Store.WriteFile` (`store.go:1328`) always did for the
+  single-file path, and `mountsync`'s outbox now populates it from the
+  locally-tracked base revision.
+- **Originally**, `internal/mountsync/syncer.go`'s conflict-artifact
+  machinery (`materializeConflict`, `syncer.go:2624`; triggered only by
+  `errors.Is(err, ErrConflict)` at `syncer.go:2580`, reachable only from an
+  HTTP 409 the bulk path could never produce) was effectively dead code for
+  the ordinary shared-mount edit workflow. **Fixed in gap #1:** `BulkWrite`
+  now returns a `"conflict"`-coded error the outbox path already knew how to
+  turn into a materialized artifact — that machinery needed zero changes,
+  it just never received a conflict to react to before.
 - `docs/guides/collaboration.md:54-76` documents the "Machine A and Machine
   B both edit `src/main.go`" scenario and asserts: "concurrent changes are
   detected instead of silently overwritten" (line 61) and "RelayFile should
   surface a conflict as a failed or stale write, not as silent data loss"
-  (line 75). **This is not what the code does.** Verified live (below).
+  (line 75). **This was not what the code did; it is now** (verified live,
+  including post-fix, in Measurements below).
 
 ### Forks
 
