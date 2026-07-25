@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -131,6 +132,15 @@ func runForkContentionTrial(t *testing.T, agents int, budget, thinkTime time.Dur
 func TestAssessForkContention(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping contention measurement in -short mode")
+	}
+	// This repo's CI runs plain `go test ./...` (no -short), so the
+	// testing.Short() check above never fires there. This measurement's 8
+	// subtests take 3s each (24s+ total) and are a diagnostic/regression
+	// signal, not a per-commit correctness check — gate the full sweep
+	// behind explicit opt-in so it doesn't tax every CI run by default.
+	// Run with: RELAYFILE_RUN_CONTENTION_BENCH=1 go test ./internal/httpapi/ -run TestAssessForkContention -v
+	if os.Getenv("RELAYFILE_RUN_CONTENTION_BENCH") == "" {
+		t.Skip("skipping fork contention measurement sweep; set RELAYFILE_RUN_CONTENTION_BENCH=1 to run it")
 	}
 	t.Run("tight-loop", func(t *testing.T) {
 		for _, agents := range []int{1, 2, 4, 8} {

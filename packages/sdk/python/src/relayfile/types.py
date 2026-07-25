@@ -133,6 +133,11 @@ class BulkWriteFile:
     content: str
     content_type: str | None = None
     encoding: ContentEncoding | None = None
+    # Optional per-file optimistic-concurrency precondition ("ifMatch" on the
+    # wire), same semantics as the single-file write's If-Match header: "0"
+    # or "*" to create only if absent, an exact revision to require an
+    # unchanged base, "*" to force. None/omitted means no check.
+    if_match: str | None = None
 
 
 @dataclass
@@ -147,6 +152,10 @@ class BulkWriteError:
     path: str
     code: str
     message: str
+    # Present when code is "conflict".
+    expected_revision: str | None = None
+    # Present when code is "conflict" and the path exists.
+    current_revision: str | None = None
 
 
 @dataclass

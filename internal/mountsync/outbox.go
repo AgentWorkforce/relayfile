@@ -243,18 +243,18 @@ func (s *Syncer) ensureOutboxRecord(pending pendingBulkWrite) (outboxRecord, err
 		}
 	}
 	now := s.now().UTC().Format(time.RFC3339Nano)
+	// Default to create-only ("0"): the local side has no confirmed remote
+	// revision for this path, so the fail-safe precondition is "only succeed
+	// if the path is still absent" — never force. This also covers
+	// pending.exists=true with an empty tracked.Revision (e.g. a tracked
+	// entry left over from a create whose write was ACL-denied before ever
+	// syncing a revision): using "*" there would let this local write
+	// silently overwrite a genuinely different file another writer created
+	// at the same path in the meantime, exactly the race this check exists
+	// to catch.
 	expectedRevision := "0"
-	if pending.exists {
+	if pending.exists && pending.tracked.Revision != "" {
 		expectedRevision = pending.tracked.Revision
-		if expectedRevision == "" {
-			// Defensive fallback: exists=true should always carry a tracked
-			// revision from the last pull/reconcile. If it somehow doesn't,
-			// force the write rather than silently sending an empty
-			// IfMatch, which the server treats as "skip the check entirely"
-			// (see Store.BulkWrite) — "*" preserves today's unconditional
-			// behavior for this one file instead of accidentally widening it.
-			expectedRevision = "*"
-		}
 	}
 	record := outboxRecord{
 		CommandID:         newOutboxCommandID(s.workspace, pending.remotePath, pending.snapshot.Hash, now),

@@ -3567,7 +3567,10 @@ components:
             to create only if the path is absent, an exact revision to
             require an unchanged base, "*" to force. Omitted or empty means
             no check (unconditional overwrite), preserving prior behavior
-            for callers that don't track revisions.
+            for callers that don't track revisions. Honored on both the
+            workspace bulk-write path and the fork bulk-write path (when
+            forkId is set) — for a fork write, the compared revision is the
+            path's current revision within the fork's merged view.
 
     ContentIdentity:
       type: object

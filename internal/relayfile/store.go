@@ -1981,6 +1981,29 @@ func (s *Store) BulkWriteFork(workspaceID, forkID string, files []BulkWriteFile)
 			continue
 		}
 		existing, exists := s.readForkFileLocked(fork, path)
+		ifMatch := strings.TrimSpace(input.IfMatch)
+		if ifMatch != "" {
+			if !exists {
+				if ifMatch != "0" && ifMatch != "*" {
+					errorsOut = append(errorsOut, BulkWriteError{
+						Path:             path,
+						Code:             "conflict",
+						Message:          fmt.Sprintf("expected revision %q but %s does not exist", ifMatch, path),
+						ExpectedRevision: ifMatch,
+					})
+					continue
+				}
+			} else if ifMatch != "*" && ifMatch != existing.Revision {
+				errorsOut = append(errorsOut, BulkWriteError{
+					Path:             path,
+					Code:             "conflict",
+					Message:          fmt.Sprintf("expected revision %q but current revision is %q", ifMatch, existing.Revision),
+					ExpectedRevision: ifMatch,
+					CurrentRevision:  existing.Revision,
+				})
+				continue
+			}
+		}
 		result := s.writeForkOverlayLocked(fork, WriteRequest{
 			WorkspaceID: workspaceID,
 			Path:        path,
