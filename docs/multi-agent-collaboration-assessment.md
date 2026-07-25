@@ -13,31 +13,42 @@ and `internal/httpapi/assessment_fork_contention_test.go`.
 
 ## Verdict
 
-**Partial, and the biggest reason is not what the original hypothesis
-guessed.** The tension the brief worried about — shared mount gives
-visibility, forks withhold it — is real, but it is not the primary blocker.
-The primary blocker is that the shared-mount path, the one goal B actually
-depends on for "agents see each other's writes," has **no working conflict
-detection on its main write path**. Two sandboxes editing the same file
-converge in ~120ms with no explicit refresh (this part works, and works
-well) *when there is no collision*. **Correction to an earlier framing of
-this finding:** it is not a narrow race window. `Store.BulkWrite`
-(`store.go:1409-1510`) never compares against the existing file's revision
+**Status update:** the two gaps below (silent-overwrite on the shared-mount
+write path, and false fork contention) that originally motivated the
+"partial" verdict have both been fixed and measured — see
+`goal-b/phase-0-bulkwrite-revision-check` (PR #370) and
+`goal-b/phase-1-per-path-fork-revision`. The verdict paragraph and gap list
+below are left in their original form, with inline corrections, so the
+document remains an accurate record of what was actually found and in what
+order it was fixed — gap #1 and gap #2 are now marked fixed in place rather
+than rewritten away.
+
+**Originally partial, and the biggest reason was not what the original
+hypothesis guessed.** The tension the brief worried about — shared mount
+gives visibility, forks withhold it — is real, but it was not the primary
+blocker. The primary blocker was that the shared-mount path, the one goal B
+actually depends on for "agents see each other's writes," had **no working
+conflict detection on its main write path**. Two sandboxes editing the same
+file converge in ~120ms with no explicit refresh (this part always worked,
+and works well) *when there is no collision*. **Correction to an earlier
+framing of this finding:** it was not a narrow race window. `Store.BulkWrite`
+(`store.go:1409-1510`) never compared against the existing file's revision
 at all — see the "Independent confirmation" measurement below, which
 reproduces the silent overwrite deterministically on every run, not as a
-timing-sensitive race. Any push that hasn't first pulled the other side's
-write silently overwrites it, whether the two writes are 10ms or 10 minutes
-apart (e.g. a sandbox that was offline, or just hasn't hit its next
-reconcile). So the loser's write is silently discarded — no error, no
-`.relay/conflicts/` artifact, no signal anywhere. This directly contradicts
+timing-sensitive race. Any push that hadn't first pulled the other side's
+write silently overwrote it, whether the two writes were 10ms or 10 minutes
+apart (e.g. a sandbox that was offline, or just hadn't hit its next
+reconcile). So the loser's write was silently discarded — no error, no
+`.relay/conflicts/` artifact, no signal anywhere. This directly contradicted
 `docs/guides/collaboration.md`, which documents exactly this scenario and
-claims the opposite outcome. Forks solve
-the correctness problem but are effectively unusable at any real concurrency
-today: two agents touching completely disjoint directories already fail
-~39% of fork commits, and the failure has no recovery primitive short of
-discard-and-redo. So: real-time visibility works, correctness under
-concurrency does not, and the tool meant to buy correctness (forks) doesn't
-scale past trivial concurrency.
+claimed the opposite outcome. **Fixed in gap #1 below.** Forks solved
+the correctness problem but were effectively unusable at any real
+concurrency: two agents touching completely disjoint directories failed
+~39% of fork commits, and the failure had no recovery primitive short of
+discard-and-redo. **The false-contention half of this is fixed in gap #2
+below** (0.0% measured for disjoint paths after the fix); the missing
+recovery primitive for genuine same-path conflicts (gap #3, rebase) remains
+open.
 
 ## The two modes, corrected
 
@@ -95,10 +106,12 @@ on the path real agents use.
 snapshot — overlay misses fall through to the *live* parent,
 `readForkFileLocked`, `store.go:4510`) and atomic, all-or-nothing landing.
 No other agent sees anything until commit (confirmed, no events fire
-pre-commit). The cost: a single global optimistic-concurrency gate that
-serializes **all** forks in a workspace against each other, regardless of
-which paths they touch, with no way to recover from a conflict except
-discard and start over.
+pre-commit). **Originally**, the cost was a single global
+optimistic-concurrency gate that serialized **all** forks in a workspace
+against each other, regardless of which paths they touch — **fixed in Phase
+1 (gap #2 below)**, which narrowed this to per-path. What remains: a
+genuine same-path conflict still has no recovery except discard and start
+over (gap #3, rebase primitive, still open).
 
 - `Store` has one `revCounter` (`store.go:494`) generating a single
   monotonic `ws.Revision` (`nextRevisionLocked`, `store.go:3531-3534`).
@@ -106,12 +119,17 @@ discard and start over.
   `BulkWrite` (`store.go:1467-1481`), rename/move
   (`store.go:1468-1481`/`4121-4122`), and a fork's own atomic apply
   (`CommitForkWithValidator`, `store.go:1769-1818`).
-  `CreateFork` snapshots `ParentRevision: s.currentWorkspaceRevisionLocked(...)`
-  at open time (`store.go:1675`). `CommitForkWithValidator` compares
-  `currentRevision != fork.ParentRevision` (`store.go:1730-1734`) — a
-  **workspace-wide** compare-and-set, not per-path. A fork touching
-  `/agent-a/*` dies if anything, anywhere in the workspace, wrote in the
-  meantime.
+  `CreateFork` still snapshots `ParentRevision:
+  s.currentWorkspaceRevisionLocked(...)` at open time (`store.go:1675`) —
+  kept for a future rebase primitive, but as of Phase 1 it is no longer what
+  gates commit. `ForkOverlayEntry` now records a first-touch `BaseRevision`
+  per overlaid path, and `CommitForkWithValidator` compares each path's
+  `BaseRevision` against the live `ws.Files[path].Revision` instead of the
+  single workspace counter. A fork touching `/agent-a/*` now proceeds when
+  `/agent-b/*` changes elsewhere; it still correctly fails if `/agent-a/*`
+  itself changed live in the meantime (verified: genuine same-path conflicts
+  between two forks still return `parent_moved`, and a live parent
+  delete/rename of a path a fork touched is still detected).
 - There is **no rebase/refresh primitive anywhere in the stack** — store,
   HTTP, TypeScript SDK, CLI, or `packages/core`. Full fork API surface:
   `CreateFork:1641`, `DiscardFork:1693`, `CommitFork:1712`/
@@ -184,9 +202,9 @@ consequence of `BulkWrite` having no revision check (previous section) —
 repeatable every time two bulk pushes to the same path race, regardless of
 how close together they land, not just "within one sync cycle."
 
-**Fork contention (Q3), N agents each looping create-fork → write 3 files
-under their own disjoint `/agent-N/` directory → commit, retrying (discard +
-recreate) on `parent_moved` up to 20 times:**
+**Fork contention baseline (Q3, before Phase 1), N agents each looping
+create-fork → write 3 files under their own disjoint `/agent-N/` directory →
+commit, retrying (discard + recreate) on `parent_moved` up to 20 times:**
 
 | agents | commit attempts | parent_moved | rate | wasted wall-time |
 |---|---|---|---|---|
@@ -201,6 +219,12 @@ activity, not with actual overlap. The last row is the more damning number
 for goal B: it doesn't take multiple fork-using agents to break this — a
 single ordinary shared-mount writer (the *other* collaboration mode) is
 enough to make forks nearly unusable in the same workspace.
+
+**Phase 1 confirmation:** the updated in-process `TestAssessForkContention`
+harness now asserts a disjoint-path `parent_moved` rate below 5% instead of
+only logging it. Measured **0.0%** for 2, 4, and 8 agents in both the
+tight-loop and 20ms-think-time variants (all attempts succeeded; no other
+errors) — the false-contention baseline above is gone.
 
 **Independent confirmation (in-repo, durably reproducible):** the measurements
 above were produced with standalone daemon processes and shell scripts under a
@@ -232,20 +256,28 @@ tests committed to this repo — the same root causes reproduce:
   last. This is not timing-sensitive — it reproduces on every run, because
   `BulkWrite` never compares against the existing revision at all (see gap
   #1 below).
-- `go test ./internal/httpapi/ -run TestAssessForkContention -v`
-  (`internal/httpapi/assessment_fork_contention_test.go`): fork commit
-  contention among agents on fully disjoint paths, tight commit loop over
-  3s bursts: agents=1 → 0% `parent_moved`; agents=2 → 38.2%; agents=4 →
-  51.1%; agents=8 → 59.4%. A second variant adds a 20ms "think time" between
-  fork-open and commit to approximate a real agent doing a few writes before
-  committing (rather than committing in the same tick it opened the fork):
-  agents=2 → 50.0%; agents=4 → 75.0%; agents=8 → 87.5% — and, notably, the
-  raw count of *successful* commits stays flat (~139-140) regardless of
-  agent count, while attempts and waste scale with N. In other words: adding
-  more concurrent forking agents does not increase throughput, it only
-  increases the fraction of wasted work, because the whole-workspace
-  compare-and-set caps how many commits per second the workspace can
-  possibly absorb, independent of how many agents are trying.
+- `RELAYFILE_RUN_CONTENTION_BENCH=1 go test ./internal/httpapi/ -run TestAssessForkContention -v`
+  (`internal/httpapi/assessment_fork_contention_test.go`; gated behind this
+  env var so it doesn't tax every default `go test ./...` CI run — see gap
+  #4's CI-hygiene note): fork commit contention among agents on fully
+  disjoint paths.
+  **Before Phase 1**, tight commit loop over 3s bursts: agents=1 → 0%
+  `parent_moved`; agents=2 → 38.2%; agents=4 → 51.1%; agents=8 → 59.4%. A
+  second variant adds a 20ms "think time" between fork-open and commit to
+  approximate a real agent doing a few writes before committing (rather
+  than committing in the same tick it opened the fork): agents=2 → 50.0%;
+  agents=4 → 75.0%; agents=8 → 87.5% — and, notably, the raw count of
+  *successful* commits stayed flat (~139-140) regardless of agent count,
+  while attempts and waste scaled with N. In other words: adding more
+  concurrent forking agents did not increase throughput, it only increased
+  the fraction of wasted work, because the whole-workspace compare-and-set
+  capped how many commits per second the workspace could possibly absorb,
+  independent of how many agents were trying.
+  **After Phase 1**, the same test (now asserting `parent_moved < 5%` for
+  the disjoint-path case rather than only logging it) measures **0.0%** for
+  agents=2/4/8 in both the tight-loop and 20ms-think-time variants — the
+  false-contention effect described above is gone; the workspace-wide cap
+  no longer applies to disjoint work.
 
 Same qualitative shape as the daemon-process measurements above (monotonic
 degradation with agent count, worse with longer fork lifetimes), via a
@@ -290,7 +322,8 @@ prior — so this is a two-machine, not three-machine, confirmation).
 
 ## Gap list (ordered by impact on goal B)
 
-1. **Shared-mount concurrent writes to the same path silently overwrite,
+1. **FIXED (`goal-b/phase-0-bulkwrite-revision-check`, PR #370).**
+   **Shared-mount concurrent writes to the same path silently overwrite,
    contradicting the documented behavior.** Evidence: `store.go:191-198`
    (`BulkWriteFile` has no revision field), `store.go:1409-1510`
    (`BulkWrite`, no compare-and-set), live race test above, doc
@@ -310,31 +343,38 @@ prior — so this is a two-machine, not three-machine, confirmation).
    pattern is proven. **This is the highest-impact, lowest-risk fix on the
    list and should happen before anything else.**
 
-2. **Fork commit contention makes forks impractical above trivial
-   concurrency, and gets worse with any unrelated workspace activity.**
+2. **FIXED (`goal-b/phase-1-per-path-fork-revision`).** **Fork commit
+   contention makes forks impractical above trivial concurrency, and gets
+   worse with any unrelated workspace activity.**
    Evidence: measurements above; root cause `store.go:1730-1734` comparing
    a single `ws.Revision` (`store.go:494`) instead of per-path state. A
    per-path base revision is already computed on every fork write
    (`WriteForkFile`'s `If-Match` check against the merged view,
    `store.go:1879-1885`) — it's checked but not *recorded* on the overlay
    entry (`ForkOverlayEntry`, `store.go:114-119` stores the revision the
-   write *produced*, not the one it was *based on*). **Fix:** add a
-   `BaseRevision` field to `ForkOverlayEntry`, populate it at first-touch in
-   `writeForkOverlayLocked`, and change the commit check
-   (`store.go:1730-1734`) to iterate `fork.Overlay` and compare each
-   `BaseRevision` against the live `ws.Files[path].Revision` instead of the
-   single workspace counter. **Size:** days, not weeks, for the core
-   change; needs explicit tests for directory delete/rename (each child's
-   own revision bumps individually per the flat `ws.Files` layout, so this
-   should degrade gracefully, but the directory-delete code path itself
-   was not directly traced in this pass — see "not verified" below) and a
-   decided policy for delete-vs-write ambiguity. **Risk:** moderate —
-   ACL/permission resolution at commit time already reads live state fresh
-   (`store.go:1754`) so narrowing doesn't weaken authorization, and nothing
-   found ties correctness to `ws.Revision` being a single serialized
-   counter outside this one check — but this needs the same live-contention
-   re-test after the change to confirm the fix actually moves the numbers
-   above, not just a code read.
+   write *produced*, not the one it was *based on*). **Fix (implemented):**
+   `ForkOverlayEntry` gained a `BaseRevision` field, populated at
+   first-touch in `writeForkOverlayLocked` and `DeleteForkFile` (pinned —
+   later writes/deletes to the same path within the same fork do not update
+   it), and the commit check now iterates `fork.Overlay` comparing each
+   path's `BaseRevision` against the live `ws.Files[path].Revision` (a
+   missing live path compares as revision `0`) instead of the single
+   workspace counter. `fork.ParentRevision` is kept on the fork, unused for
+   gating, reserved for gap #3's future rebase primitive. **Measured
+   result:** the updated `TestAssessForkContention` harness (now asserting,
+   not just logging) measured **0.0% `parent_moved`** for 2, 4, and 8 agents
+   on disjoint paths, in both the tight-loop and 20ms-think-time variants —
+   down from the 38.2-87.5% baseline above. Genuine same-path conflicts
+   between two forks, and a live parent delete/rename of a path a fork
+   touched, are both still correctly detected (new tests:
+   `TestForkCommitReturnsParentMovedConflict`,
+   `TestCommitForkDetectsLiveDirectoryChildRemoval`). **Size (actual):** a
+   contained days-scale change, as predicted — one new struct field, pinned
+   at first-touch in two call sites (write, delete), plus the commit-check
+   loop. **Risk (actual):** low — ACL/permission resolution at commit time
+   already read live state fresh (`store.go:1754`), so narrowing did not
+   weaken authorization, and no correctness elsewhere turned out to depend
+   on `ws.Revision` being a single serialized counter.
 
 3. **No rebase primitive.** Evidence: full API-surface audit above.
    Compounds gap #2 — even after narrowing the check, a fork that
@@ -385,16 +425,13 @@ prior — so this is a two-machine, not three-machine, confirmation).
 
 ## Recommendation
 
-Fix gap #1 first — it's the one actively lying to users today, it's cheap
-(the conflict-artifact machinery already exists and is tested, it just
-never receives an error to react to), and it makes the shared-mount mode
-honest about what it guarantees. Then invest in narrowing the fork commit
-check to per-path (gap #2) using the `BaseRevision` field described above,
-and re-run this same live-contention experiment after that change lands —
-the 2/4/8-agent numbers in this report are the baseline to beat. Only after
-both land does a rebase primitive (gap #3) become worth the multi-week
-investment, since a correctly-narrowed check will make most of what rebase
-would need to solve for disjoint-path work simply not happen anymore.
+Gaps #1 and #2 are both fixed (see the gap list above) — the shared-mount
+mode is now honest about what it guarantees, and forks no longer
+false-contend on disjoint paths. A rebase primitive (gap #3) is the
+remaining multi-week investment for genuine same-path conflict recovery,
+and is worth less now than it would have been before Phase 1, since the
+correctly-narrowed check already eliminated most of what rebase would have
+needed to solve for disjoint-path work.
 
 Don't invest in CRDT/OT — it was explicitly scoped out of v1
 (`docs/relayfile-v1-spec.md:30-35`, see gap #5), and the two gaps above are

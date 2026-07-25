@@ -760,16 +760,35 @@ func TestForkCommitPromotesOverlayToParent(t *testing.T) {
 	}
 }
 
-func TestForkCommitReturnsParentMovedConflict(t *testing.T) {
+func TestForkCommitAllowsDisjointParentWrite(t *testing.T) {
 	server := newForkTestServer(t)
 	token := forkTestToken(t, "ws_fork_conflict")
 	fork := createForkForTest(t, server, token, "ws_fork_conflict", "proposal-conflict", nil)
 	writeForkFileForTest(t, server, token, "ws_fork_conflict", fork.ForkID, "/notion/Fork.md", "0", "# fork", "corr_fork_conflict_overlay")
 	writeFileForTest(t, server, token, "ws_fork_conflict", "/notion/ParentMove.md", "0", "# parent move", "corr_fork_conflict_parent")
+	commit := commitForkForTest(t, server, token, "ws_fork_conflict", fork.ForkID, "corr_fork_conflict_commit")
+	if commit.WrittenCount != 1 {
+		t.Fatalf("expected disjoint fork commit to write one file, got %+v", commit)
+	}
+	parent := readFileForTest(t, server, token, "ws_fork_conflict", "/notion/Fork.md", "corr_fork_conflict_read")
+	if parent.Content != "# fork" {
+		t.Fatalf("expected fork content to commit after disjoint parent write, got %q", parent.Content)
+	}
+}
+
+func TestForkCommitReturnsParentMovedConflict(t *testing.T) {
+	server := newForkTestServer(t)
+	token := forkTestToken(t, "ws_fork_conflict")
+	seed := writeFileForTest(t, server, token, "ws_fork_conflict", "/notion/Fork.md", "0", "# base", "corr_fork_conflict_seed")
+	first := createForkForTest(t, server, token, "ws_fork_conflict", "proposal-conflict-first", nil)
+	second := createForkForTest(t, server, token, "ws_fork_conflict", "proposal-conflict-second", nil)
+	writeForkFileForTest(t, server, token, "ws_fork_conflict", first.ForkID, "/notion/Fork.md", seed.TargetRevision, "# first", "corr_fork_conflict_first")
+	writeForkFileForTest(t, server, token, "ws_fork_conflict", second.ForkID, "/notion/Fork.md", seed.TargetRevision, "# second", "corr_fork_conflict_second")
+	commitForkForTest(t, server, token, "ws_fork_conflict", first.ForkID, "corr_fork_conflict_first_commit")
 
 	resp := doRequest(t, server, request{
 		method: http.MethodPost,
-		path:   "/v1/workspaces/ws_fork_conflict/forks/" + fork.ForkID + "/commit",
+		path:   "/v1/workspaces/ws_fork_conflict/forks/" + second.ForkID + "/commit",
 		headers: map[string]string{
 			"Authorization":    "Bearer " + token,
 			"X-Correlation-Id": "corr_fork_conflict_commit",

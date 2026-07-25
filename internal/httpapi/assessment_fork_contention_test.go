@@ -2,17 +2,18 @@ package httpapi
 
 // Measurement harness for docs/multi-agent-collaboration-assessment.md (Q3).
 //
-// Question: how badly does fork contention degrade as concurrent agent count
-// grows, when agents write to DISJOINT paths (the best case for forks)?
+// Question: does per-path fork revision tracking (Phase 1) eliminate false
+// parent_moved conflicts when concurrent agents write to DISJOINT paths?
+// Before Phase 1, this degraded badly with agent count (measured 38-88%
+// parent_moved on fully disjoint paths); after, it asserts near-zero.
 //
 // Method: N goroutines each simulate one agent working a private path
 // (/agent-<i>/work.md). Each round: CreateFork -> WriteForkFile (If-Match "0"
 // on first write, previous revision after) -> CommitFork. On parent_moved,
-// the fork is discarded (per store.go, ParentRevision is never mutated, so a
-// stuck fork can never succeed) and the round is retried with a fresh fork.
-// Every agent runs for a fixed wall-clock budget so all N goroutines are
-// racing to commit against the SAME workspace-wide revision counter
-// concurrently. Run with: go test ./internal/httpapi/ -run TestAssessForkContention -v
+// the fork is discarded and the round is retried with a fresh fork. Every
+// agent runs for a fixed wall-clock budget so all N goroutines commit
+// concurrently while only their own path changes.
+// Run with: RELAYFILE_RUN_CONTENTION_BENCH=1 go test ./internal/httpapi/ -run TestAssessForkContention -v
 //
 // Deliberately not table-driven / t.Parallel() per .claude/rules/go-httpapi-tests.md:
 // this is a wall-clock contention measurement, not a request/response contract
@@ -22,6 +23,7 @@ package httpapi
 
 import (
 	"bytes"
+	"crypto/rsa"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -45,6 +47,13 @@ func runForkContentionTrial(t *testing.T, agents int, budget, thinkTime time.Dur
 	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
 	t.Cleanup(store.Close)
 	server := NewServer(store)
+	// Pre-populate the JWKS cache directly with the shared test key instead
+	// of relying on a live fetch — avoids a network round-trip per trial and
+	// keeps this test robust in restricted-network sandboxes.
+	server.bearerVerifier.jwksCache.store(server.bearerVerifier.jwksURL, cachedJWKS{
+		keys:      map[string]*rsa.PublicKey{testBearerJWTKID: &testBearerPrivateKey.PublicKey},
+		fetchedAt: time.Now(),
+	})
 	const wsID = "ws_contention_trial"
 
 	var (
@@ -127,6 +136,16 @@ func runForkContentionTrial(t *testing.T, agents int, budget, thinkTime time.Dur
 	}
 	t.Logf("agents=%d think_time=%s budget=%s attempts=%d success=%d parent_moved=%d (%.1f%%) other_errors=%d avg_wasted_fork_lifetime_ms=%.2f",
 		agents, thinkTime, budget, total, ok, moved, movedPct, errs, avgWastedMs)
+
+	if total == 0 {
+		t.Fatal("expected at least one fork commit attempt")
+	}
+	if movedPct >= 5 {
+		t.Fatalf("expected disjoint-path parent_moved rate below 5%% after per-path revision tracking (Phase 1), got %.1f%% (%d/%d)", movedPct, moved, total)
+	}
+	if errs != 0 {
+		t.Fatalf("expected no non-conflict errors during contention trial, got %d", errs)
+	}
 }
 
 func TestAssessForkContention(t *testing.T) {
@@ -138,7 +157,6 @@ func TestAssessForkContention(t *testing.T) {
 	// subtests take 3s each (24s+ total) and are a diagnostic/regression
 	// signal, not a per-commit correctness check — gate the full sweep
 	// behind explicit opt-in so it doesn't tax every CI run by default.
-	// Run with: RELAYFILE_RUN_CONTENTION_BENCH=1 go test ./internal/httpapi/ -run TestAssessForkContention -v
 	if os.Getenv("RELAYFILE_RUN_CONTENTION_BENCH") == "" {
 		t.Skip("skipping fork contention measurement sweep; set RELAYFILE_RUN_CONTENTION_BENCH=1 to run it")
 	}

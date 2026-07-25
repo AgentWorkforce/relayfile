@@ -112,10 +112,11 @@ type ForkHandle struct {
 }
 
 type ForkOverlayEntry struct {
-	Type      string `json:"type"`
-	File      *File  `json:"file,omitempty"`
-	Revision  string `json:"revision,omitempty"`
-	DeletedAt string `json:"deletedAt,omitempty"`
+	Type         string `json:"type"`
+	File         *File  `json:"file,omitempty"`
+	Revision     string `json:"revision,omitempty"`
+	BaseRevision string `json:"baseRevision,omitempty"`
+	DeletedAt    string `json:"deletedAt,omitempty"`
 }
 
 type ForkCommitResponse struct {
@@ -1759,17 +1760,27 @@ func (s *Store) CommitForkWithValidator(workspaceID, forkID, correlationID strin
 	}
 
 	currentRevision := s.currentWorkspaceRevisionLocked(workspaceID)
-	if currentRevision != fork.ParentRevision {
-		s.mu.Unlock()
-		return ForkCommitResponse{}, &ParentMovedError{CurrentRevision: currentRevision}
-	}
-
 	ws := s.ensureWorkspaceLocked(workspaceID)
 	paths := make([]string, 0, len(fork.Overlay))
 	for path := range fork.Overlay {
 		paths = append(paths, path)
 	}
 	sort.Strings(paths)
+	for _, path := range paths {
+		entry := fork.Overlay[path]
+		baseRevision := entry.BaseRevision
+		if baseRevision == "" {
+			baseRevision = "0"
+		}
+		currentPathRevision := "0"
+		if current, exists := ws.Files[path]; exists {
+			currentPathRevision = current.Revision
+		}
+		if currentPathRevision != baseRevision {
+			s.mu.Unlock()
+			return ForkCommitResponse{}, &ParentMovedError{CurrentRevision: currentRevision}
+		}
+	}
 
 	if validate != nil {
 		entries := make([]ForkCommitEntry, 0, len(paths))
@@ -2054,11 +2065,18 @@ func (s *Store) DeleteForkFile(req DeleteRequest, forkID string) (WriteResult, e
 		}
 	}
 
+	baseRevision := "0"
+	if entry, touched := fork.Overlay[path]; touched {
+		baseRevision = entry.BaseRevision
+	} else if exists {
+		baseRevision = existing.Revision
+	}
 	revision := s.nextForkOverlayRevisionLocked(fork)
 	fork.Overlay[path] = ForkOverlayEntry{
-		Type:      "delete",
-		Revision:  revision,
-		DeletedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		Type:         "delete",
+		Revision:     revision,
+		BaseRevision: baseRevision,
+		DeletedAt:    time.Now().UTC().Format(time.RFC3339Nano),
 	}
 	_ = s.saveLocked()
 	result := WriteResult{OpID: "fork:" + fork.ForkID + ":op:" + strconv.FormatUint(fork.OverlayRevisionCounter, 10), Status: "queued", TargetRevision: revision}
@@ -4598,6 +4616,12 @@ func (s *Store) writeForkOverlayLocked(fork *forkState, req WriteRequest, existi
 	if provider == "" {
 		provider = inferProviderFromPath(path)
 	}
+	baseRevision := "0"
+	if entry, touched := fork.Overlay[path]; touched {
+		baseRevision = entry.BaseRevision
+	} else if exists {
+		baseRevision = existing.Revision
+	}
 	revision := s.nextForkOverlayRevisionLocked(fork)
 	file := File{
 		Path:         path,
@@ -4611,9 +4635,10 @@ func (s *Store) writeForkOverlayLocked(fork *forkState, req WriteRequest, existi
 		Semantics:    semantics,
 	}
 	fork.Overlay[path] = ForkOverlayEntry{
-		Type:     "write",
-		File:     &file,
-		Revision: revision,
+		Type:         "write",
+		File:         &file,
+		Revision:     revision,
+		BaseRevision: baseRevision,
 	}
 	result := WriteResult{
 		OpID:           "fork:" + fork.ForkID + ":op:" + strconv.FormatUint(fork.OverlayRevisionCounter, 10),
