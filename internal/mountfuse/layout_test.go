@@ -55,6 +55,10 @@ func (c *layoutRemoteClient) DeleteFile(_ context.Context, _, _, _ string) error
 	return nil
 }
 
+func (c *layoutRemoteClient) MergeFile(_ context.Context, _, _, _, _, _, _, _ string) (mountsync.MergeResult, error) {
+	return mountsync.MergeResult{}, &mountsync.HTTPError{StatusCode: 422, Code: "merge_ineligible", Message: "not supported by layoutRemoteClient"}
+}
+
 func TestLayoutMarkdownContainsRequiredAnchors(t *testing.T) {
 	t.Parallel()
 

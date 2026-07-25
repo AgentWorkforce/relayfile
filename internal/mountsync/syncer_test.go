@@ -7293,6 +7293,8 @@ type fakeClient struct {
 	eventCursorAliases             map[string]string
 	readFileErrAfter               int
 	readFileErr                    error
+	mergeFileCalls                 int
+	mergeFileFunc                  func(ctx context.Context, workspaceID, path, strategy, baseRevision, baseContent, content, contentType string) (MergeResult, error)
 }
 
 // requestedReadCalls returns the cumulative number of ReadFile calls made
@@ -7823,6 +7825,21 @@ func (c *fakeClient) DeleteFile(ctx context.Context, workspaceID, path, baseRevi
 	delete(c.files, path)
 	c.appendEvent("file.deleted", path, current.Revision)
 	return nil
+}
+
+// MergeFile defaults to merge_ineligible (never silently participates in
+// mount rollout) unless a test opts in via mergeFileFunc — matching
+// bootstrapClient's conservative default and keeping every test that
+// predates mount rollout unaffected.
+func (c *fakeClient) MergeFile(ctx context.Context, workspaceID, path, strategy, baseRevision, baseContent, content, contentType string) (MergeResult, error) {
+	c.mu.Lock()
+	c.mergeFileCalls++
+	hook := c.mergeFileFunc
+	c.mu.Unlock()
+	if hook != nil {
+		return hook(ctx, workspaceID, path, strategy, baseRevision, baseContent, content, contentType)
+	}
+	return MergeResult{}, &HTTPError{StatusCode: 422, Code: "merge_ineligible", Message: "not supported by fakeClient"}
 }
 
 func assertLocalFileContent(t *testing.T, path, want string) {
