@@ -125,6 +125,30 @@ type ForkCommitResponse struct {
 	DeletedCount int    `json:"deletedCount"`
 }
 
+// RebaseResponse is the result of re-pinning a fork against the live parent.
+// Paths whose BaseRevision already matched live state are silently updated
+// (a no-op in practice) and counted in CleanCount. Paths that diverged are
+// NOT auto-mutated — they're reported in Conflicts as data so the caller can
+// decide how to resolve each one (re-write/delete citing the reported
+// LiveRevision to explicitly resolve, per WriteForkFile/DeleteForkFile's
+// rebase-resolution handling; or leave it, in which case commit will still
+// correctly fail for that path).
+type RebaseResponse struct {
+	ParentRevision string           `json:"parentRevision"`
+	CleanCount     int              `json:"cleanCount"`
+	Conflicts      []RebaseConflict `json:"conflicts"`
+}
+
+type RebaseConflict struct {
+	Path         string `json:"path"`
+	ForkType     string `json:"forkType"`
+	LiveExists   bool   `json:"liveExists"`
+	LiveRevision string `json:"liveRevision"`
+	// LiveContentPreview is empty for a path the fork deleted or wrote that
+	// no longer exists live.
+	LiveContentPreview string `json:"liveContentPreview,omitempty"`
+}
+
 type ForkCommitEntry struct {
 	Path        string
 	Type        string
@@ -1887,6 +1911,75 @@ func (s *Store) CommitForkWithValidator(workspaceID, forkID, correlationID strin
 	}, nil
 }
 
+// RebaseFork re-pins a fork against the current live parent state instead
+// of forcing a hard discard-and-redo on parent_moved. Paths whose
+// BaseRevision already matches live are silently re-pinned (a no-op).
+// Paths that diverged are reported as RebaseConflict entries and left
+// untouched in the overlay — the caller resolves each one explicitly via
+// WriteForkFile/DeleteForkFile citing the reported LiveRevision as IfMatch
+// (see writeForkOverlayLocked's resolvedBaseRevision handling), then can
+// retry commit. A legacy overlay entry (BaseRevision == "", persisted by a
+// pre-Phase-1 binary) is always reported as a conflict — there's no reliable
+// per-path base to compare, so it can't be silently cleared the way a
+// modern matching entry can.
+func (s *Store) RebaseFork(workspaceID, forkID string) (RebaseResponse, error) {
+	workspaceID = strings.TrimSpace(workspaceID)
+	forkID = strings.TrimSpace(forkID)
+	if workspaceID == "" || forkID == "" {
+		return RebaseResponse{}, ErrInvalidInput
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	fork, err := s.getLiveForkLocked(workspaceID, forkID, time.Now().UTC())
+	if err != nil {
+		return RebaseResponse{}, err
+	}
+
+	ws := s.ensureWorkspaceLocked(workspaceID)
+	paths := make([]string, 0, len(fork.Overlay))
+	for path := range fork.Overlay {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+
+	cleanCount := 0
+	conflicts := make([]RebaseConflict, 0)
+	for _, path := range paths {
+		entry := fork.Overlay[path]
+		liveFile, liveExists := ws.Files[path]
+		liveRevision := "0"
+		if liveExists {
+			liveRevision = liveFile.Revision
+		}
+
+		if entry.BaseRevision != "" && entry.BaseRevision == liveRevision {
+			cleanCount++
+			continue
+		}
+
+		conflict := RebaseConflict{
+			Path:         path,
+			ForkType:     entry.Type,
+			LiveExists:   liveExists,
+			LiveRevision: liveRevision,
+		}
+		if liveExists {
+			conflict.LiveContentPreview = truncatePreview(liveFile.Content)
+		}
+		conflicts = append(conflicts, conflict)
+	}
+
+	fork.ParentRevision = s.currentWorkspaceRevisionLocked(workspaceID)
+	_ = s.saveLocked()
+
+	return RebaseResponse{
+		ParentRevision: fork.ParentRevision,
+		CleanCount:     cleanCount,
+		Conflicts:      conflicts,
+	}, nil
+}
+
 func (s *Store) ReadForkFile(workspaceID, forkID, path string) (File, error) {
 	if strings.TrimSpace(path) == "" {
 		return File{}, ErrInvalidInput
@@ -1928,15 +2021,40 @@ func (s *Store) WriteForkFile(req WriteRequest, forkID string) (WriteResult, err
 	}
 	path := normalizePath(req.Path)
 	existing, exists := s.readForkFileLocked(fork, path)
+	var resolvedBaseRevision *string
+	if exists && req.IfMatch != "*" && req.IfMatch != existing.Revision {
+		// The fork's own overlay revision didn't match. If this path was
+		// already touched in this fork, the caller may be resolving a
+		// rebase conflict (RebaseFork reports the live parent's current
+		// revision for a conflicting path) rather than continuing a normal
+		// edit sequence — accept it if IfMatch cites that live revision
+		// exactly, and reset BaseRevision to it so a subsequent commit
+		// no longer sees this path as conflicting.
+		if _, touched := fork.Overlay[path]; touched {
+			ws := s.ensureWorkspaceLocked(req.WorkspaceID)
+			liveRevision := "0"
+			if liveFile, liveExists := ws.Files[path]; liveExists {
+				liveRevision = liveFile.Revision
+			}
+			if req.IfMatch == liveRevision {
+				resolvedBaseRevision = &liveRevision
+			} else {
+				return WriteResult{}, &ConflictError{
+					ExpectedRevision:      req.IfMatch,
+					CurrentRevision:       existing.Revision,
+					CurrentContentPreview: truncatePreview(existing.Content),
+				}
+			}
+		} else {
+			return WriteResult{}, &ConflictError{
+				ExpectedRevision:      req.IfMatch,
+				CurrentRevision:       existing.Revision,
+				CurrentContentPreview: truncatePreview(existing.Content),
+			}
+		}
+	}
 	if !exists && req.IfMatch != "0" && req.IfMatch != "*" {
 		return WriteResult{}, ErrNotFound
-	}
-	if exists && req.IfMatch != "*" && req.IfMatch != existing.Revision {
-		return WriteResult{}, &ConflictError{
-			ExpectedRevision:      req.IfMatch,
-			CurrentRevision:       existing.Revision,
-			CurrentContentPreview: truncatePreview(existing.Content),
-		}
 	}
 
 	result := s.writeForkOverlayLocked(fork, WriteRequest{
@@ -1948,7 +2066,7 @@ func (s *Store) WriteForkFile(req WriteRequest, forkID string) (WriteResult, err
 		Encoding:      encoding,
 		Semantics:     req.Semantics,
 		CorrelationID: req.CorrelationID,
-	}, existing, exists)
+	}, existing, exists, resolvedBaseRevision)
 	_ = s.saveLocked()
 	return result, nil
 }
@@ -2035,7 +2153,7 @@ func (s *Store) BulkWriteFork(workspaceID, forkID string, files []BulkWriteFile)
 			ContentType: input.ContentType,
 			Content:     input.Content,
 			Encoding:    encoding,
-		}, existing, exists)
+		}, existing, exists, nil)
 		contentType := strings.TrimSpace(input.ContentType)
 		if contentType == "" {
 			contentType = "text/markdown"
@@ -2070,19 +2188,47 @@ func (s *Store) DeleteForkFile(req DeleteRequest, forkID string) (WriteResult, e
 	if !exists {
 		return WriteResult{}, ErrNotFound
 	}
+	var resolvedBaseRevision *string
 	if req.IfMatch != "*" && req.IfMatch != existing.Revision {
-		return WriteResult{}, &ConflictError{
-			ExpectedRevision:      req.IfMatch,
-			CurrentRevision:       existing.Revision,
-			CurrentContentPreview: truncatePreview(existing.Content),
+		// Same rebase-conflict-resolution allowance as WriteForkFile: if
+		// this path was already touched and IfMatch cites the live
+		// parent's current revision instead of the fork's own overlay
+		// revision, accept the delete and reset BaseRevision to it.
+		if _, touched := fork.Overlay[path]; touched {
+			ws := s.ensureWorkspaceLocked(req.WorkspaceID)
+			liveRevision := "0"
+			if liveFile, liveExists := ws.Files[path]; liveExists {
+				liveRevision = liveFile.Revision
+			}
+			if req.IfMatch == liveRevision {
+				resolvedBaseRevision = &liveRevision
+			} else {
+				return WriteResult{}, &ConflictError{
+					ExpectedRevision:      req.IfMatch,
+					CurrentRevision:       existing.Revision,
+					CurrentContentPreview: truncatePreview(existing.Content),
+				}
+			}
+		} else {
+			return WriteResult{}, &ConflictError{
+				ExpectedRevision:      req.IfMatch,
+				CurrentRevision:       existing.Revision,
+				CurrentContentPreview: truncatePreview(existing.Content),
+			}
 		}
 	}
 
-	baseRevision := "0"
-	if entry, touched := fork.Overlay[path]; touched {
-		baseRevision = entry.BaseRevision
-	} else if exists {
-		baseRevision = existing.Revision
+	var baseRevision string
+	switch {
+	case resolvedBaseRevision != nil:
+		baseRevision = *resolvedBaseRevision
+	default:
+		baseRevision = "0"
+		if entry, touched := fork.Overlay[path]; touched {
+			baseRevision = entry.BaseRevision
+		} else if exists {
+			baseRevision = existing.Revision
+		}
 	}
 	revision := s.nextForkOverlayRevisionLocked(fork)
 	fork.Overlay[path] = ForkOverlayEntry{
@@ -4615,7 +4761,14 @@ func (s *Store) readForkFileLocked(fork *forkState, path string) (File, bool) {
 	return File{}, false
 }
 
-func (s *Store) writeForkOverlayLocked(fork *forkState, req WriteRequest, existing File, exists bool) WriteResult {
+// writeForkOverlayLocked writes path into fork's overlay. baseRevision is
+// pinned at first-touch (later writes to the same path keep the original
+// base) UNLESS resolvedBaseRevision is non-nil, in which case it's used
+// directly — the caller (WriteForkFile, resolving a reported rebase
+// conflict by citing the live parent's current revision) has already
+// determined the correct new base and re-pinning must happen even though
+// the path was touched before.
+func (s *Store) writeForkOverlayLocked(fork *forkState, req WriteRequest, existing File, exists bool, resolvedBaseRevision *string) WriteResult {
 	path := normalizePath(req.Path)
 	contentType := strings.TrimSpace(req.ContentType)
 	if contentType == "" {
@@ -4629,11 +4782,17 @@ func (s *Store) writeForkOverlayLocked(fork *forkState, req WriteRequest, existi
 	if provider == "" {
 		provider = inferProviderFromPath(path)
 	}
-	baseRevision := "0"
-	if entry, touched := fork.Overlay[path]; touched {
-		baseRevision = entry.BaseRevision
-	} else if exists {
-		baseRevision = existing.Revision
+	var baseRevision string
+	switch {
+	case resolvedBaseRevision != nil:
+		baseRevision = *resolvedBaseRevision
+	default:
+		baseRevision = "0"
+		if entry, touched := fork.Overlay[path]; touched {
+			baseRevision = entry.BaseRevision
+		} else if exists {
+			baseRevision = existing.Revision
+		}
 	}
 	revision := s.nextForkOverlayRevisionLocked(fork)
 	file := File{
