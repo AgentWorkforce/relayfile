@@ -13,13 +13,16 @@ and `internal/httpapi/assessment_fork_contention_test.go`.
 
 ## Verdict
 
-**Status update:** all four gaps below that originally motivated the
+**Status update:** all five gaps below that originally motivated the
 "partial" verdict have now been fixed and measured — silent-overwrite on the
 shared-mount write path (PR #370), false fork contention (PR #371), no
-recovery primitive for a genuine same-path fork conflict (PR #372), and no
+recovery primitive for a genuine same-path fork conflict (PR #372), no
 merge path for two agents concurrently editing the same file (PR #373, added
 as a fourth phase beyond the original gap list, at symbol/function
-granularity for Go). The verdict paragraph and gap list below are left in
+granularity for Go), and that merge requiring an explicit `mergeFile` call
+instead of triggering automatically from an ordinary mounted-workspace
+conflict (PR #374, "mount rollout"). The verdict paragraph and gap list below
+are left in
 their original form, with inline corrections, so the document remains an
 accurate record of what was actually found and in what order it was fixed —
 each fixed gap is marked fixed in place rather than rewritten away.
@@ -413,11 +416,7 @@ prior — so this is a two-machine, not three-machine, confirmation).
    (fail-closed, writes nothing) when both sides changed the same function
    or the merge base can't be cryptographically verified against a bounded
    in-memory provenance ledger. Exposed over HTTP
-   (`POST /v1/workspaces/{id}/fs/merge`) and the TypeScript SDK. **Explicitly
-   out of scope for this phase** (by user decision, not oversight):
-   automatic mountsync routing to the merge endpoint ("mount rollout" — an
-   agent must currently call `mergeFile` directly rather than have a
-   same-path write silently attempt a merge), and non-Go languages. **Size
+   (`POST /v1/workspaces/{id}/fs/merge`) and the TypeScript SDK. **Size
    (actual):** in-line with the "weeks" estimate implied by gap #3's note
    that this class of work is new cross-layer surface. **Risk (actual):**
    low in production impact (fails closed on any parse ambiguity, `.go`-only
@@ -426,14 +425,45 @@ prior — so this is a two-machine, not three-machine, confirmation).
    exact class of bug — workspace-wide CAS instead of per-file CAS — plus a
    comment-preservation correctness bug, both fixed before merge.
 
-5. **Docs oversell current behavior.** `docs/guides/collaboration.md:54-76`
+5. **FIXED (`goal-b/phase-4-mount-rollout`, PR #374).** **Mount rollout —
+   gap #4's merge endpoint existed but a shared-mount push that conflicted
+   still always fell to a whole-file conflict artifact; an agent had to
+   call `mergeFile` directly to get the symbol-level behavior.** **Fix
+   (implemented):** `internal/mountsync` now attempts a symbol-level merge
+   automatically on a same-path `.go` conflict, before falling back to
+   today's conflict-artifact behavior unchanged for every other case. The
+   blocking design gap: `Store.MergeFile` requires actual base *content*
+   (hash-verified against the server's provenance ledger), not just a
+   revision string, and mountsync tracked only revision/hash per file,
+   never content as-of-a-revision. Solved with an opportunistic shadow
+   cache (`.relay/.mount-shadow/`) that snapshots `.go` content at the one
+   point in the sync loop where local content is *proven* to exactly match
+   server state; a cache miss is always a safe, expected fallback, never
+   an error. **Explicitly out of scope**, unchanged from gap #4: non-Go
+   languages (`mountRolloutMergeEligible` and `Store.MergeFile`'s strategy
+   are both Go-only). **Size (actual):** matched a days-scale mechanism
+   plus test coverage, as expected for wiring an existing endpoint into an
+   existing sync loop rather than new store-layer surface. **Risk
+   (actual):** low in the end, but the path there needed two live-proof-
+   driven fixes before it was actually low — the shadow cache silently
+   never populated under the default poll mode (fixed), then populated
+   with empty content that would have made every real merge attempt fail
+   server-side provenance verification (fixed) — both caught only by
+   driving the real `relayfile-mount` daemon across two physical Macs, not
+   by the unit tests, which happened to always route through a full-content
+   code path that masked both bugs. This is the concrete case for this
+   initiative's standing cross-machine verification requirement: a green
+   test suite believed the feature worked; only the live daemon proved it
+   didn't, twice, before it actually did.
+
+6. **Docs oversell current behavior.** `docs/guides/collaboration.md:54-76`
    claims conflict-safety the code doesn't have (see gap #1);
    `cmd/relayfile-cli/`'s mount help text undersells actual propagation
    speed (says "polls... every 30s", actual steady-state is sub-200ms via
    websocket). Cheap to fix, should happen alongside #1 so the doc becomes
    true rather than requiring a retraction later.
 
-6. **No same-file simultaneous co-editing (CRDT/OT).** **Correction to an
+7. **No same-file simultaneous co-editing (CRDT/OT).** **Correction to an
    earlier framing of this finding:** this *was* scoped and explicitly
    rejected, not merely unaddressed. `docs/relayfile-v1-spec.md:30-35`
    ("Non-Goals (v1)", doc dated 2026-02-17, status "Draft for
@@ -446,14 +476,15 @@ prior — so this is a two-machine, not three-machine, confirmation).
    itself — `git show f1ed3e4:.trajectories/active/traj_dnzgabyc2ijd.json`
    — indeed never re-litigates CRDT/OT, consistent with the decision having
    already been made two months earlier rather than being reconsidered at
-   fork-design time.) **Still holds after Phase 3:** gap #4's symbol-level
-   `MergeFile` is deliberately *not* CRDT/OT — it's an explicit, agent-called
-   endpoint operating on a bounded, verifiable unit (a parsed Go function),
-   not a background live-merge of keystrokes. It's evidence the "isolation
-   plus an explicit narrow merge primitive" direction implied by the original
-   CRDT rejection was the right one, not a reversal of it.
+   fork-design time.) **Still holds after Phases 3-4:** gap #4's symbol-level
+   `MergeFile`, now auto-triggered from the mount on a real conflict, is
+   deliberately *not* CRDT/OT — it's a bounded, verifiable merge over a
+   parsed Go function on an actual write conflict, not a background
+   live-merge of keystrokes. It's evidence the "isolation plus an explicit
+   narrow merge primitive" direction implied by the original CRDT rejection
+   was the right one, not a reversal of it.
    **Recommendation: still not in scope for a general CRDT/OT engine** —
-   isolation (forks) plus scoped, verifiable merge (gap #4, currently
+   isolation (forks) plus scoped, verifiable merge (gaps #4-#5, currently
    Go-only) is the answer for agent-to-agent collaboration, not
    background-live merge-based co-editing; true simultaneous same-line
    editing is a human-collaboration problem (Google-Docs-style) that doesn't
@@ -462,18 +493,19 @@ prior — so this is a two-machine, not three-machine, confirmation).
 
 ## Recommendation
 
-Gaps #1-#4 are all fixed (see the gap list above): the shared-mount mode is
+Gaps #1-#5 are all fixed (see the gap list above): the shared-mount mode is
 now honest about what it guarantees, forks no longer false-contend on
 disjoint paths, a genuine same-path fork collision has a rebase path instead
-of forced discard-and-redo, and two agents concurrently editing different
-functions in the same Go file now merge automatically instead of forcing a
-whole-file conflict. What remains deliberately out of scope, by explicit user
-decision rather than oversight: automatic mountsync routing to the merge
-endpoint ("mount rollout" — gap #4 today requires an agent to call
-`mergeFile` directly), and merge support for languages other than Go.
+of forced discard-and-redo, two agents concurrently editing different
+functions in the same Go file merge automatically instead of forcing a
+whole-file conflict, and that merge now triggers automatically from an
+ordinary mounted-workspace conflict rather than requiring an agent to call
+the merge endpoint directly. What remains deliberately out of scope: merge
+support for languages other than Go (`Store.MergeFile`'s strategy and
+`mountRolloutMergeEligible` are both Go-only).
 
 Don't invest in a general CRDT/OT engine — it was explicitly scoped out of
-v1 (`docs/relayfile-v1-spec.md:30-35`, see gap #6), and gap #4's scoped,
+v1 (`docs/relayfile-v1-spec.md:30-35`, see gap #7), and gap #4's scoped,
 AST-verified merge is a better fit for how agents actually need this
 (a discrete "did my change survive, and if not, why" answer) than
 background live-merge would be.
