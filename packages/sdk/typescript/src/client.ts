@@ -39,6 +39,9 @@ import {
   type ListWebhooksOptions,
   type ListDurableResourceSubscriptionsOptions,
   type ListTreeOptions,
+  type MergeConflictDetail,
+  type MergeFileInput,
+  type MergeFileResponse,
   type OperationFeedResponse,
   type OperationStatusResponse,
   type QueuedResponse,
@@ -78,6 +81,7 @@ import type { ForkHandle } from "@relayfile/core";
 import { RelayFileSync, normalizeFilesystemEvent } from "./sync.js";
 import {
   InvalidStateError,
+  MergeConflictError,
   ParentMovedError,
   PayloadTooLargeError,
   QueueFullError,
@@ -1599,6 +1603,27 @@ export class RelayFileClient {
     return result;
   }
 
+  async mergeFile(input: MergeFileInput): Promise<MergeFileResponse> {
+    const query = buildQuery({ path: input.path });
+    const result = await this.request<MergeFileResponse>({
+      method: "POST",
+      path: `/v1/workspaces/${encodeURIComponent(input.workspaceId)}/fs/merge${query}`,
+      correlationId: input.correlationId,
+      body: {
+        strategy: input.strategy,
+        content: input.content,
+        baseRevision: input.baseRevision,
+        baseContent: input.baseContent,
+        contentType: input.contentType,
+        contentIdentity: input.contentIdentity
+      },
+      signal: input.signal
+    });
+    const cache = getFileReadCache(this);
+    if (cache !== false) cache.evict(input.workspaceId, input.path);
+    return result;
+  }
+
   async bulkWrite(input: BulkWriteInput): Promise<BulkWriteResponse> {
     const query = buildQuery({ forkId: input.forkId });
     const response = await this.performRequest({
@@ -2599,8 +2624,30 @@ export class RelayFileClient {
       expectedRevision?: string;
       currentRevision?: string;
       currentContentPreview?: string;
+      conflicts?: MergeConflictDetail[];
     };
     const details = normalizeErrorDetails(rawData, data.details);
+
+    if (status === 409 && data.code === "merge_conflict") {
+      const currentRevision = typeof data.currentRevision === "string"
+        ? data.currentRevision
+        : typeof details?.currentRevision === "string"
+          ? details.currentRevision
+          : "";
+      const conflicts = Array.isArray(data.conflicts)
+        ? data.conflicts
+        : Array.isArray(details?.conflicts)
+          ? details.conflicts as MergeConflictDetail[]
+          : [];
+      throw new MergeConflictError(status, {
+        code: data.code,
+        message: data.message ?? "Merge conflict",
+        correlationId: data.correlationId,
+        details,
+        currentRevision,
+        conflicts
+      });
+    }
 
     if (
       status === 409 &&
@@ -2667,6 +2714,15 @@ export class RelayFileClient {
       throw new PayloadTooLargeError(status, {
         code: data.code ?? "payload_too_large",
         message: data.message ?? "Request payload exceeds configured limit",
+        correlationId: data.correlationId,
+        details
+      });
+    }
+
+    if (data.code === "merge_base_unavailable" || data.code === "merge_ineligible") {
+      throw new RelayFileApiError(status, {
+        code: data.code,
+        message: data.message ?? (data.code === "merge_base_unavailable" ? "Merge base unavailable" : "Merge ineligible"),
         correlationId: data.correlationId,
         details
       });

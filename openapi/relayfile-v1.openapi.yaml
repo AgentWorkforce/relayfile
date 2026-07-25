@@ -215,6 +215,68 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /v1/workspaces/{workspaceId}/fs/merge:
+    post:
+      tags: [Filesystem]
+      operationId: mergeFile
+      summary: Three-way merge a stale Go file at top-level function granularity
+      description: |
+        Attempts an all-or-nothing, symbol-level three-way merge of the
+        caller's proposed Go source against the current live file. The
+        caller-supplied base revision and content must match server-recorded
+        provenance. A successful merge writes the complete validated result;
+        conflicts and ineligible inputs write nothing.
+      security:
+        - BearerAuth: [fs:write]
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/CorrelationId'
+        - name: path
+          in: query
+          required: true
+          schema:
+            type: string
+            pattern: '^/.*'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MergeRequest'
+      responses:
+        '200':
+          description: Merge applied successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MergeResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: Merge conflict or unverifiable merge base
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/MergeConflictErrorResponse'
+                  - $ref: '#/components/schemas/MergeBaseUnavailableErrorResponse'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '422':
+          description: The requested merge strategy cannot process this file or content
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MergeIneligibleErrorResponse'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
   /v1/workspaces/{workspaceId}/fs/export:
     get:
       tags: [Filesystem]
@@ -2381,6 +2443,113 @@ components:
           description: Content encoding, e.g. "base64" for binary data
         semantics:
           $ref: '#/components/schemas/FileSemantics'
+
+    MergeRequest:
+      type: object
+      additionalProperties: false
+      required: [strategy, content, baseRevision, baseContent]
+      properties:
+        strategy:
+          type: string
+          enum: [go-top-level-functions-v1]
+        content:
+          type: string
+          description: The caller's proposed complete Go file content (mine).
+        baseRevision:
+          type: string
+          minLength: 1
+          description: Revision from which baseContent was read.
+        baseContent:
+          type: string
+          description: Complete file content read at baseRevision.
+        contentType:
+          type: string
+          default: text/plain
+        contentIdentity:
+          $ref: '#/components/schemas/ContentIdentity'
+
+    MergeResponse:
+      type: object
+      additionalProperties: false
+      required: [targetRevision, strategy, baseRevision, mergedAgainstRevision]
+      properties:
+        targetRevision:
+          type: string
+          description: Revision created by the successful merged write.
+        strategy:
+          type: string
+          enum: [go-top-level-functions-v1]
+        baseRevision:
+          type: string
+          description: Caller-supplied revision used as the verified merge base.
+        mergedAgainstRevision:
+          type: string
+          description: Live workspace revision against which the result was merged.
+
+    MergeConflictDetail:
+      type: object
+      additionalProperties: false
+      required: [unit, reason]
+      properties:
+        unit:
+          type: string
+          description: Conflicting function/method name or file-scope unit.
+        reason:
+          type: string
+        base:
+          type: string
+        mine:
+          type: string
+        theirs:
+          type: string
+
+    MergeConflictErrorResponse:
+      type: object
+      additionalProperties: false
+      required: [code, message, correlationId, currentRevision, conflicts]
+      properties:
+        code:
+          type: string
+          enum: [merge_conflict]
+        message:
+          type: string
+        correlationId:
+          type: string
+        currentRevision:
+          type: string
+        conflicts:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/MergeConflictDetail'
+
+    MergeBaseUnavailableErrorResponse:
+      type: object
+      additionalProperties: false
+      required: [code, message, correlationId]
+      properties:
+        code:
+          type: string
+          enum: [merge_base_unavailable]
+        message:
+          type: string
+        correlationId:
+          type: string
+
+    MergeIneligibleErrorResponse:
+      type: object
+      additionalProperties: false
+      required: [code, message, correlationId, reason]
+      properties:
+        code:
+          type: string
+          enum: [merge_ineligible]
+        message:
+          type: string
+        correlationId:
+          type: string
+        reason:
+          type: string
 
     FileQueryItem:
       type: object
