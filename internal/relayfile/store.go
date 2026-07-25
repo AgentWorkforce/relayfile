@@ -195,12 +195,20 @@ type BulkWriteFile struct {
 	Encoding        string           `json:"encoding"`
 	ContentIdentity *ContentIdentity `json:"contentIdentity,omitempty"`
 	WritebackIntent string           `json:"writebackIntent,omitempty"`
+	// IfMatch is an optional per-file optimistic-concurrency precondition,
+	// same semantics as WriteRequest.IfMatch: "0" or "*" to create only if
+	// absent, an exact revision to require an unchanged base, "*" to force.
+	// Empty means no check (preserves prior unconditional-overwrite
+	// behavior for callers that don't track revisions, e.g. tarball import).
+	IfMatch string `json:"ifMatch,omitempty"`
 }
 
 type BulkWriteError struct {
-	Path    string `json:"path"`
-	Code    string `json:"code"`
-	Message string `json:"message"`
+	Path             string `json:"path"`
+	Code             string `json:"code"`
+	Message          string `json:"message"`
+	ExpectedRevision string `json:"expectedRevision,omitempty"`
+	CurrentRevision  string `json:"currentRevision,omitempty"`
 }
 
 type BulkWriteResult struct {
@@ -1464,7 +1472,30 @@ func (s *Store) BulkWrite(workspaceID string, files []BulkWriteFile) (int, []Bul
 			results = append(results, bulkWriteResultFromOperationLocked(ws, existingOp, path, contentType))
 			continue
 		}
-		_, existed := ws.Files[path]
+		existingFile, existed := ws.Files[path]
+		ifMatch := strings.TrimSpace(input.IfMatch)
+		if ifMatch != "" {
+			if !existed {
+				if ifMatch != "0" && ifMatch != "*" {
+					errorsOut = append(errorsOut, BulkWriteError{
+						Path:             path,
+						Code:             "conflict",
+						Message:          fmt.Sprintf("expected revision %q but %s does not exist", ifMatch, path),
+						ExpectedRevision: ifMatch,
+					})
+					continue
+				}
+			} else if ifMatch != "*" && ifMatch != existingFile.Revision {
+				errorsOut = append(errorsOut, BulkWriteError{
+					Path:             path,
+					Code:             "conflict",
+					Message:          fmt.Sprintf("expected revision %q but current revision is %q", ifMatch, existingFile.Revision),
+					ExpectedRevision: ifMatch,
+					CurrentRevision:  existingFile.Revision,
+				})
+				continue
+			}
+		}
 		revision := s.nextRevisionLocked()
 		file := ws.Files[path]
 		file.Path = path
@@ -1950,6 +1981,29 @@ func (s *Store) BulkWriteFork(workspaceID, forkID string, files []BulkWriteFile)
 			continue
 		}
 		existing, exists := s.readForkFileLocked(fork, path)
+		ifMatch := strings.TrimSpace(input.IfMatch)
+		if ifMatch != "" {
+			if !exists {
+				if ifMatch != "0" && ifMatch != "*" {
+					errorsOut = append(errorsOut, BulkWriteError{
+						Path:             path,
+						Code:             "conflict",
+						Message:          fmt.Sprintf("expected revision %q but %s does not exist", ifMatch, path),
+						ExpectedRevision: ifMatch,
+					})
+					continue
+				}
+			} else if ifMatch != "*" && ifMatch != existing.Revision {
+				errorsOut = append(errorsOut, BulkWriteError{
+					Path:             path,
+					Code:             "conflict",
+					Message:          fmt.Sprintf("expected revision %q but current revision is %q", ifMatch, existing.Revision),
+					ExpectedRevision: ifMatch,
+					CurrentRevision:  existing.Revision,
+				})
+				continue
+			}
+		}
 		result := s.writeForkOverlayLocked(fork, WriteRequest{
 			WorkspaceID: workspaceID,
 			Path:        path,

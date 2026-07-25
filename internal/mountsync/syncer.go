@@ -2444,6 +2444,7 @@ func outboxRecordsAsBulkFiles(records []outboxRecord) []BulkWriteFile {
 			Content:         record.Content,
 			Encoding:        record.Encoding,
 			ContentIdentity: outboxRecordContentIdentity(record),
+			IfMatch:         record.ExpectedRevision,
 		})
 	}
 	return files

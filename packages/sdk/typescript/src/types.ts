@@ -95,6 +95,13 @@ export interface BulkWriteFile {
   content: string;
   encoding?: "utf-8" | "base64";
   contentIdentity?: ContentIdentity;
+  /**
+   * Optional per-file optimistic-concurrency precondition, same semantics
+   * as the single-file write's If-Match header: "0" or "*" to create only
+   * if the path is absent, an exact revision to require an unchanged base,
+   * "*" to force. Omitted means no check (unconditional overwrite).
+   */
+  ifMatch?: string;
 }
 
 export interface BulkWriteInput {
@@ -112,6 +119,10 @@ export interface BulkWriteResponse {
     path: string;
     code: string;
     message: string;
+    /** Present when code is "conflict" — the ifMatch value that was sent. */
+    expectedRevision?: string;
+    /** Present when code is "conflict" and the path exists — the file's actual current revision. */
+    currentRevision?: string;
   }>;
   results?: Array<{
     path: string;

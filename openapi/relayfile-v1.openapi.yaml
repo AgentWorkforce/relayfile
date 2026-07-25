@@ -3559,6 +3559,18 @@ components:
           type: string
           enum: [update]
           description: Explicit agent-authored writeback intent for canonical provider record updates.
+        ifMatch:
+          type: string
+          description: >-
+            Optional per-file optimistic-concurrency precondition, same
+            semantics as the single-file write's If-Match header: "0" or "*"
+            to create only if the path is absent, an exact revision to
+            require an unchanged base, "*" to force. Omitted or empty means
+            no check (unconditional overwrite), preserving prior behavior
+            for callers that don't track revisions. Honored on both the
+            workspace bulk-write path and the fork bulk-write path (when
+            forkId is set) — for a fork write, the compared revision is the
+            path's current revision within the fork's merged view.
 
     ContentIdentity:
       type: object
@@ -3589,6 +3601,12 @@ components:
           type: string
         message:
           type: string
+        expectedRevision:
+          type: string
+          description: Present when code is "conflict" — the ifMatch value the caller sent.
+        currentRevision:
+          type: string
+          description: Present when code is "conflict" and the path exists — the file's actual current revision.
 
     BulkWriteWritebackResult:
       type: object

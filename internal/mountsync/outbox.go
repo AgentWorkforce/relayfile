@@ -53,6 +53,13 @@ type outboxRecord struct {
 	Revision          string       `json:"revision,omitempty"`
 	CorrelationID     string       `json:"correlationId,omitempty"`
 	LocalRelativePath string       `json:"localRelativePath,omitempty"`
+	// ExpectedRevision is the base revision this record's edit was made
+	// against — the tracked (last-known-synced) revision at the moment the
+	// local change was detected, or "0" if the path had no prior tracked
+	// state (a genuinely new local file). Sent as BulkWriteFile.IfMatch so
+	// the server can detect a write that raced another writer instead of
+	// silently overwriting it. Set once at record creation; never mutated.
+	ExpectedRevision string `json:"expectedRevision,omitempty"`
 }
 
 type outboxSummary struct {
@@ -236,6 +243,19 @@ func (s *Syncer) ensureOutboxRecord(pending pendingBulkWrite) (outboxRecord, err
 		}
 	}
 	now := s.now().UTC().Format(time.RFC3339Nano)
+	// Default to create-only ("0"): the local side has no confirmed remote
+	// revision for this path, so the fail-safe precondition is "only succeed
+	// if the path is still absent" — never force. This also covers
+	// pending.exists=true with an empty tracked.Revision (e.g. a tracked
+	// entry left over from a create whose write was ACL-denied before ever
+	// syncing a revision): using "*" there would let this local write
+	// silently overwrite a genuinely different file another writer created
+	// at the same path in the meantime, exactly the race this check exists
+	// to catch.
+	expectedRevision := "0"
+	if pending.exists && pending.tracked.Revision != "" {
+		expectedRevision = pending.tracked.Revision
+	}
 	record := outboxRecord{
 		CommandID:         newOutboxCommandID(s.workspace, pending.remotePath, pending.snapshot.Hash, now),
 		WorkspaceID:       s.workspace,
@@ -249,6 +269,7 @@ func (s *Syncer) ensureOutboxRecord(pending pendingBulkWrite) (outboxRecord, err
 		FirstSeenAt:       now,
 		CorrelationID:     "",
 		LocalRelativePath: pending.tracked.LocalRelativePath,
+		ExpectedRevision:  expectedRevision,
 	}
 	record.CorrelationID = record.CommandID
 	if err := s.saveOutboxRecord(record); err != nil {
