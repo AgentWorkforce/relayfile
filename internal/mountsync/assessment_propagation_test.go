@@ -194,25 +194,22 @@ func TestAssessPropagationLatencyPollOnly(t *testing.T) {
 // two sandboxes editing the SAME path within about one sync cycle of each
 // other.
 //
-// FINDING (see docs/multi-agent-collaboration-assessment.md): the
-// .relay/conflicts/<path>.<baseRevision>.local materialization path
-// (Syncer.materializeConflict, syncer.go:2624) only fires when the server
-// returns ErrConflict for a write. But the mount daemon's local-edit push
-// path (fsnotify -> HandleLocalChange -> pushSingleFile ->
-// flushOutboxRecordChunk -> client.WriteFilesBulk, syncer.go:2258) goes
-// through Store.BulkWrite (internal/relayfile/store.go:1409), which has NO
-// If-Match / expected-revision field on BulkWriteFile
-// (internal/relayfile/store.go:191-198) and unconditionally calls
-// nextRevisionLocked() (store.go:1468) with no compare against the existing
-// file's revision. Contrast Store.WriteFile (store.go:1328), the single-file
-// PUT path, which REQUIRES IfMatch (store.go:1329) and rejects a stale one.
-// So the documented "conflict-safe writeback ... concurrent changes are
-// detected instead of silently overwritten" claim
-// (docs/guides/collaboration.md, "Conflict Resolution" section) does not
-// hold for the default local-edit-to-mount-daemon push path: it's last-write-
-// wins with no detection, and the loser's local copy is never reverted or
-// flagged — it silently diverges from the server until the next pull
-// overwrites it with no warning.
+// REGRESSION TEST for the Phase 0 fix (see
+// docs/multi-agent-collaboration-assessment.md, gap #1): BulkWriteFile
+// (internal/relayfile/store.go:191-198) previously had no If-Match /
+// expected-revision field, and Store.BulkWrite unconditionally overwrote —
+// last-write-wins with no detection, contradicting
+// docs/guides/collaboration.md's "concurrent changes are detected instead of
+// silently overwritten" claim. Store.BulkWrite now accepts an optional
+// per-file IfMatch (checked the same way Store.WriteFile checks it,
+// store.go:1328-1329), and mountsync's pushLocal/outbox path
+// (ensureOutboxRecord in outbox.go, outboxRecordsAsBulkFiles in
+// syncer.go:2438) populates it from the tracked base revision. This test
+// asserts the fixed behavior: the losing write is rejected with a
+// "conflict" BulkWriteError, Syncer.materializeConflict (syncer.go:2625)
+// fires and preserves the loser's edit at
+// .relay/conflicts/<path>.<baseRevision>.local, and the loser's working
+// copy is reverted to match the server instead of silently diverging.
 func TestAssessSameFileNearSimultaneousWrite(t *testing.T) {
 	t.Parallel()
 	store := newAssessStore(t)
@@ -276,49 +273,99 @@ func TestAssessSameFileNearSimultaneousWrite(t *testing.T) {
 	}()
 	wg.Wait()
 
-	t.Logf("push results: errA=%v errB=%v (both nil == both writes accepted unconditionally)", errA, errB)
-	if errA != nil || errB != nil {
-		t.Fatalf("expected BOTH pushes to be accepted with no error (BulkWrite has no revision check) got errA=%v errB=%v", errA, errB)
-	}
-
-	finalA, _ := os.ReadFile(filepath.Join(localDirA, "Shared.md"))
-	finalB, _ := os.ReadFile(filepath.Join(localDirB, "Shared.md"))
-	t.Logf("local working copies after push: A=%q B=%q (each sandbox still shows its OWN edit — neither was reverted)", finalA, finalB)
-	if string(finalA) != "edit from A" || string(finalB) != "edit from B" {
-		t.Fatalf("expected each sandbox's local copy to remain unchanged post-push (no revert), got A=%q B=%q", finalA, finalB)
-	}
-
-	conflictsA := listConflictArtifacts(t, localDirA)
-	conflictsB := listConflictArtifacts(t, localDirB)
-	t.Logf("conflict artifacts: A=%v B=%v (expected: none — BulkWrite path never surfaces ErrConflict)", conflictsA, conflictsB)
-	if len(conflictsA) != 0 || len(conflictsB) != 0 {
-		t.Fatalf("expected NO conflict artifacts (BulkWrite has no conflict detection), got A=%v B=%v", conflictsA, conflictsB)
-	}
+	// handleWriteError treats a detected conflict as gracefully handled (like
+	// permission denial), not a hard Go error — materializeConflict returns
+	// nil on success. So errA/errB nil-ness does NOT distinguish old-buggy
+	// (silent overwrite) from fixed (detected + materialized) behavior; the
+	// observable outcome (artifact + reverted local copy + server content)
+	// is what proves the fix. Both are logged for diagnosis only.
+	t.Logf("push results: errA=%v errB=%v", errA, errB)
 
 	remoteFile, readErr := syncerA.client.ReadFile(ctx, workspaceID, "/notion/Shared.md")
 	if readErr != nil {
 		t.Fatalf("read final server content: %v", readErr)
 	}
 	serverContent := remoteFile.Content
-	t.Logf("server's final stored content: %q (silent last-write-wins; whichever push reached Store.BulkWrite second)", serverContent)
 	if serverContent != "edit from A" && serverContent != "edit from B" {
-		t.Fatalf("expected server content to be exactly one writer's content (silent overwrite), got %q", serverContent)
+		t.Fatalf("expected server content to be exactly one writer's content, got %q", serverContent)
+	}
+
+	// Store.BulkWrite serializes the two racing pushes under a single mutex
+	// (store.go BulkWrite), so exactly one wins outright and the other's
+	// If-Match (the shared pre-race base revision) is stale by the time it's
+	// checked — a clean win/lose split, not a partial/racy outcome.
+	winner, loser := "A", "B"
+	winnerDir, loserDir := localDirA, localDirB
+	if serverContent == "edit from B" {
+		winner, loser = "B", "A"
+		winnerDir, loserDir = localDirB, localDirA
+	}
+	t.Logf("winner=%s loser=%s (server content=%q)", winner, loser, serverContent)
+
+	winnerConflicts := listConflictArtifacts(t, winnerDir)
+	loserConflicts := listConflictArtifacts(t, loserDir)
+	t.Logf("conflict artifacts: winner(%s)=%v loser(%s)=%v", winner, winnerConflicts, loser, loserConflicts)
+	if len(winnerConflicts) != 0 {
+		t.Fatalf("winner (%s) should have no conflict artifact, got %v", winner, winnerConflicts)
+	}
+	if len(loserConflicts) != 1 {
+		t.Fatalf("loser (%s) should have exactly one conflict artifact preserving its overwritten edit, got %v", loser, loserConflicts)
+	}
+	loserArtifactContent, err := os.ReadFile(filepath.Join(loserDir, ".relay", "conflicts", loserConflicts[0]))
+	if err != nil {
+		t.Fatalf("read loser conflict artifact: %v", err)
+	}
+	wantLoserArtifact := "edit from " + loser
+	if string(loserArtifactContent) != wantLoserArtifact {
+		t.Fatalf("conflict artifact should preserve the loser's overwritten edit %q, got %q", wantLoserArtifact, loserArtifactContent)
+	}
+
+	// The winner's working copy keeps its own edit; the loser's working copy
+	// is reverted to match the server (the winner's content) — data isn't
+	// lost, it's moved into the conflict artifact instead of silently gone.
+	finalWinner, _ := os.ReadFile(filepath.Join(winnerDir, "Shared.md"))
+	finalLoser, _ := os.ReadFile(filepath.Join(loserDir, "Shared.md"))
+	t.Logf("local working copies after push: winner(%s)=%q loser(%s)=%q", winner, finalWinner, loser, finalLoser)
+	if string(finalWinner) != "edit from "+winner {
+		t.Fatalf("winner's local copy should still show its own edit, got %q", finalWinner)
+	}
+	if string(finalLoser) != serverContent {
+		t.Fatalf("loser's local copy should be reverted to the server's (winner's) content %q, got %q", serverContent, finalLoser)
 	}
 }
 
+// listConflictArtifacts returns conflict-artifact paths relative to
+// .relay/conflicts/, recursively — per conflictArtifactPath (syncer.go),
+// an artifact for remote path "/notion/Shared.md" lands nested at
+// "notion/Shared.md.<rev>.local", not flat in the top-level directory.
+// Artifacts already moved under conflicts/resolved/ (resolveConflictArtifacts,
+// syncer.go) are excluded — those are resolved, not current conflicts.
 func listConflictArtifacts(t *testing.T, localDir string) []string {
 	t.Helper()
 	dir := filepath.Join(localDir, ".relay", "conflicts")
-	entries, err := os.ReadDir(dir)
+	var names []string
+	err := filepath.WalkDir(dir, func(path string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			if os.IsNotExist(walkErr) {
+				return nil
+			}
+			return walkErr
+		}
+		if d.IsDir() {
+			if d.Name() == "resolved" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		rel, relErr := filepath.Rel(dir, path)
+		if relErr != nil {
+			return relErr
+		}
+		names = append(names, rel)
+		return nil
+	})
 	if err != nil {
 		return nil
-	}
-	var names []string
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		names = append(names, e.Name())
 	}
 	sort.Strings(names)
 	return names
