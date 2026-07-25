@@ -188,6 +188,10 @@ func (c *bootstrapClient) DeleteFile(ctx context.Context, workspaceID, path, bas
 	return nil
 }
 
+func (c *bootstrapClient) MergeFile(ctx context.Context, workspaceID, path, strategy, baseRevision, baseContent, content, contentType string) (MergeResult, error) {
+	return MergeResult{}, &HTTPError{StatusCode: 422, Code: "merge_ineligible", Message: "not supported by bootstrapClient"}
+}
+
 func loadPersistedState(t *testing.T, localDir string) mountState {
 	t.Helper()
 	data, err := os.ReadFile(filepath.Join(localDir, ".relayfile-mount-state.json"))

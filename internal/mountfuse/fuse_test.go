@@ -91,6 +91,12 @@ func (f *fakeRemoteClient) DeleteFile(_ context.Context, _, path, baseRevision s
 	return nil
 }
 
+// MergeFile is unused by mountfuse's tests (mount rollout is a mountsync
+// concern); returns merge_ineligible so it can never silently participate.
+func (f *fakeRemoteClient) MergeFile(_ context.Context, _, _, _, _, _, _, _ string) (mountsync.MergeResult, error) {
+	return mountsync.MergeResult{}, &mountsync.HTTPError{StatusCode: 422, Code: "merge_ineligible", Message: "not supported by fakeRemoteClient"}
+}
+
 type fakeLazyRemoteClient struct {
 	*fakeRemoteClient
 

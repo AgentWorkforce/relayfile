@@ -307,6 +307,28 @@ type RemoteClient interface {
 	WriteFilesBulk(ctx context.Context, workspaceID string, files []BulkWriteFile) (BulkWriteResponse, error)
 	GetOperation(ctx context.Context, workspaceID, opID string) (OperationStatus, error)
 	DeleteFile(ctx context.Context, workspaceID, path, baseRevision string) error
+	// MergeFile requests a symbol-level merge (see MergeStrategyGoTopLevelFunctions)
+	// instead of a whole-file overwrite. Used by mount rollout to reconcile a
+	// same-path conflict before falling back to a conflict artifact. Every
+	// error return means the same thing to the caller: "cannot merge, fall
+	// back to materializeConflict." A *HTTPError's Code distinguishes why
+	// ("merge_conflict", "merge_ineligible", "merge_base_unavailable") for
+	// logging only — it never changes the fallback decision.
+	MergeFile(ctx context.Context, workspaceID, path, strategy, baseRevision, baseContent, content, contentType string) (MergeResult, error)
+}
+
+// MergeStrategyGoTopLevelFunctions is the only merge strategy the server
+// currently supports (internal/relayfile.MergeStrategyGoTopLevelFunctions).
+// Duplicated here rather than imported to keep internal/mountsync free of a
+// dependency on internal/relayfile's store package.
+const MergeStrategyGoTopLevelFunctions = "go-top-level-functions-v1"
+
+// MergeResult mirrors internal/relayfile.MergeResponse.
+type MergeResult struct {
+	TargetRevision        string `json:"targetRevision"`
+	Strategy              string `json:"strategy"`
+	BaseRevision          string `json:"baseRevision"`
+	MergedAgainstRevision string `json:"mergedAgainstRevision"`
 }
 
 type exportSnapshotClient interface {
@@ -573,6 +595,24 @@ func (c *HTTPClient) GetOperation(ctx context.Context, workspaceID, opID string)
 	return out, err
 }
 
+func (c *HTTPClient) MergeFile(ctx context.Context, workspaceID, path, strategy, baseRevision, baseContent, content, contentType string) (MergeResult, error) {
+	if contentType == "" {
+		contentType = "text/x-go"
+	}
+	body := map[string]any{
+		"strategy":     strategy,
+		"content":      content,
+		"baseRevision": baseRevision,
+		"baseContent":  baseContent,
+		"contentType":  contentType,
+	}
+	q := url.Values{}
+	q.Set("path", normalizeRemotePath(path))
+	var out MergeResult
+	err := c.doJSON(ctx, http.MethodPost, fmt.Sprintf("/v1/workspaces/%s/fs/merge?%s", url.PathEscape(workspaceID), q.Encode()), nil, body, &out)
+	return out, err
+}
+
 func (c *HTTPClient) DeleteFile(ctx context.Context, workspaceID, path, baseRevision string) error {
 	q := url.Values{}
 	q.Set("path", normalizeRemotePath(path))
@@ -778,7 +818,13 @@ func (c *HTTPClient) doJSON(
 			Message string `json:"message"`
 		}
 		_ = json.Unmarshal(payloadBytes, &errPayload)
-		if resp.StatusCode == http.StatusConflict {
+		// Only a plain revision conflict (the shape WriteFile/WriteFilesBulk/
+		// DeleteFile return) collapses to the untyped ErrConflict sentinel.
+		// A differently-coded 409 (e.g. merge_conflict, merge_base_unavailable
+		// from MergeFile) falls through to the typed HTTPError below so its
+		// Code survives — callers that don't recognize a given code already
+		// treat any error as "operation failed," so this is purely additive.
+		if resp.StatusCode == http.StatusConflict && (errPayload.Code == "" || errPayload.Code == "revision_conflict") {
 			return &ConflictError{Path: requestPath}
 		}
 		return &HTTPError{
@@ -1025,6 +1071,7 @@ type Syncer struct {
 	publicStatePath      string
 	conflictsDir         string
 	resolvedConflictsDir string
+	mountShadowDir       string
 	deadLetterDir        string
 	outboxDir            string
 	eventProvider        string
@@ -1541,6 +1588,7 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 	publicStatePath := filepath.Join(localRoot, ".relay", "state.json")
 	conflictsDir := filepath.Join(localRoot, ".relay", "conflicts")
 	resolvedConflictsDir := filepath.Join(conflictsDir, "resolved")
+	mountShadowDir := filepath.Join(localRoot, ".relay", ".mount-shadow")
 	deadLetterDir := filepath.Join(localRoot, ".relay", "dead-letter")
 	outboxDir := filepath.Join(localRoot, ".relay", "outbox")
 	scopes := normalizeScopes(opts.Scopes)
@@ -1559,6 +1607,9 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 		return nil, err
 	}
 	if err := os.MkdirAll(resolvedConflictsDir, 0o755); err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(mountShadowDir, 0o755); err != nil {
 		return nil, err
 	}
 	if err := os.MkdirAll(deadLetterDir, 0o755); err != nil {
@@ -1722,6 +1773,7 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 		publicStatePath:       publicStatePath,
 		conflictsDir:          conflictsDir,
 		resolvedConflictsDir:  resolvedConflictsDir,
+		mountShadowDir:        mountShadowDir,
 		deadLetterDir:         deadLetterDir,
 		outboxDir:             outboxDir,
 		eventProvider:         eventProvider,
@@ -2119,6 +2171,13 @@ func (s *Syncer) preparePendingBulkWrite(
 		}
 		tracked.ReadOnly = false
 		s.state.Files[remotePath] = tracked
+		// The local copy is confirmed to exactly match the server's content
+		// at tracked.Revision right now — refresh the mount-rollout merge
+		// base cache while we have proof of that equivalence. This is the
+		// only point in the sync loop where that proof exists; a future
+		// local edit's base can only be trusted if captured here, not
+		// reconstructed later.
+		s.recordShadowContent(remotePath, tracked.Revision, snapshot.RawContent)
 		return nil, nil
 	}
 
@@ -2579,6 +2638,16 @@ func (s *Syncer) handleWriteError(
 	err error,
 ) error {
 	if errors.Is(err, ErrConflict) {
+		// Mount rollout: for a merge-eligible path with a verified base in
+		// the shadow cache, try a symbol-level merge before treating this
+		// as a conflict at all. Any miss or failure here — cache miss,
+		// merge_conflict, merge_ineligible, merge_base_unavailable, a
+		// transport error, an unreadable readback — falls straight through
+		// to today's conflict-artifact behavior below; a failed merge
+		// attempt must never be worse than not having attempted one.
+		if s.attemptMountRolloutMerge(ctx, remotePath, localPath, snapshot, tracked) {
+			return nil
+		}
 		if conflicted != nil {
 			conflicted[remotePath] = struct{}{}
 		}
@@ -2670,6 +2739,87 @@ func (s *Syncer) materializeConflict(ctx context.Context, remotePath, localPath 
 	}
 	s.logf("conflict at %s; local saved at %s", remotePath, artifactPath)
 	return nil
+}
+
+// attemptMountRolloutMerge tries to resolve a same-path push conflict via
+// Store.MergeFile before the caller falls back to materializeConflict's
+// conflict-artifact-and-revert behavior. Returns true only when the merge
+// was requested, applied on the server, AND the merged content was
+// successfully confirmed and written to the local mirror — i.e. only when
+// it is fully safe for the caller to treat this conflict as resolved. Any
+// other outcome (no cached base, a merge_conflict/merge_ineligible/
+// merge_base_unavailable response, a transport error, a readback or local
+// write failure) returns false and leaves tracked/state untouched, so the
+// caller's existing conflict handling runs exactly as it does today.
+func (s *Syncer) attemptMountRolloutMerge(ctx context.Context, remotePath, localPath string, snapshot localSnapshot, tracked trackedFile) bool {
+	if !mountRolloutMergeEligible(remotePath) {
+		return false
+	}
+	baseContent, ok := s.readShadowContent(remotePath, tracked.Revision)
+	if !ok {
+		return false
+	}
+	contentType := snapshot.ContentType
+	if contentType == "" {
+		contentType = "text/x-go"
+	}
+	result, err := s.client.MergeFile(ctx, s.workspace, remotePath, MergeStrategyGoTopLevelFunctions, tracked.Revision, string(baseContent), string(snapshot.RawContent), contentType)
+	if err != nil {
+		var httpErr *HTTPError
+		if errors.As(err, &httpErr) {
+			s.logf("mount rollout: merge attempt for %s did not apply (%s), falling back to conflict handling", remotePath, httpErr.Code)
+		} else {
+			s.logf("mount rollout: merge attempt for %s failed (%v), falling back to conflict handling", remotePath, err)
+		}
+		return false
+	}
+
+	// The merge landed on the server. From here on, any failure to confirm
+	// and mirror it locally falls back rather than guesses — the fallback
+	// path re-reads the server's current (now-merged) state on its own, so
+	// worst case is a redundant conflict artifact, never a wrong local file.
+	remoteFile, readErr := s.client.ReadFile(ctx, s.workspace, remotePath)
+	if readErr != nil {
+		s.logf("mount rollout: merge for %s applied (revision %s) but readback failed (%v), falling back to conflict handling", remotePath, result.TargetRevision, readErr)
+		return false
+	}
+	remoteBytes, decodeErr := decodeRemoteFileContent(remoteFile)
+	if decodeErr != nil {
+		s.logf("mount rollout: merge for %s applied but readback content was undecodable (%v), falling back to conflict handling", remotePath, decodeErr)
+		return false
+	}
+	if err := s.assertNotMountRoot(localPath); err != nil {
+		s.logf("skipping merge materialization for %s: %v", remotePath, err)
+		return false
+	}
+	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+		s.logf("mount rollout: merge for %s applied but local write failed (%v), falling back to conflict handling", remotePath, err)
+		return false
+	}
+	if err := writeFileAtomic(localPath, remoteBytes, 0o644); err != nil {
+		s.logf("mount rollout: merge for %s applied but local write failed (%v), falling back to conflict handling", remotePath, err)
+		return false
+	}
+	if err := s.applyLocalPermissions(localPath, s.canWritePath(remotePath)); err != nil {
+		s.logf("mount rollout: merge for %s applied but permission apply failed (%v), falling back to conflict handling", remotePath, err)
+		return false
+	}
+
+	contentTypeOut := strings.TrimSpace(remoteFile.ContentType)
+	if contentTypeOut == "" {
+		contentTypeOut = snapshot.ContentType
+	}
+	s.state.Files[remotePath] = trackedFile{
+		Revision:          remoteFile.Revision,
+		ContentType:       contentTypeOut,
+		Encoding:          normalizeEncoding(remoteFile.Encoding),
+		Hash:              hashBytes(remoteBytes),
+		LocalRelativePath: tracked.LocalRelativePath,
+		ReadOnly:          !s.canWritePath(remotePath),
+	}
+	s.recordShadowContent(remotePath, remoteFile.Revision, remoteBytes)
+	s.logf("mount rollout: auto-merged %s (base %s -> %s)", remotePath, tracked.Revision, remoteFile.Revision)
+	return true
 }
 
 // materializeSchemaInvalid implements contract §8.2: park the local body in
@@ -6941,6 +7091,72 @@ func (s *Syncer) writeConflictArtifact(remotePath, baseRevision string, content 
 		return "", err
 	}
 	return artifactPath, writeFileAtomic(artifactPath, content, 0o644)
+}
+
+// mountRolloutMergeEligible reports whether remotePath is a candidate for the
+// symbol-level merge attempted by mount rollout before falling back to a
+// conflict artifact. Scoped to .go files, matching Store.MergeFile's
+// currently-supported strategy (MergeStrategyGoTopLevelFunctions).
+func mountRolloutMergeEligible(remotePath string) bool {
+	return strings.HasSuffix(remotePath, ".go")
+}
+
+// recordShadowContent opportunistically caches the bytes known to exactly
+// match the server's content at revision, for later use as a merge base if a
+// future local edit to this path conflicts on push. It is a best-effort
+// cache, not a source of truth: callers must treat a cache miss as "cannot
+// attempt a merge, fall back to the existing conflict-artifact behavior,"
+// never as an error. Scoped to merge-eligible paths to bound disk cost —
+// most tracked files never need a merge base.
+func (s *Syncer) recordShadowContent(remotePath, revision string, content []byte) {
+	if !mountRolloutMergeEligible(remotePath) || strings.TrimSpace(revision) == "" {
+		return
+	}
+	artifactPath := shadowArtifactPath(s.mountShadowDir, remotePath, revision)
+	if err := os.MkdirAll(filepath.Dir(artifactPath), 0o755); err != nil {
+		return
+	}
+	if err := writeFileAtomic(artifactPath, content, 0o644); err != nil {
+		return
+	}
+	// Prune shadow entries for this path at other revisions — only the
+	// current one is ever a valid merge base.
+	pattern := shadowArtifactGlob(s.mountShadowDir, remotePath)
+	matches, err := filepath.Glob(pattern)
+	if err != nil {
+		return
+	}
+	for _, match := range matches {
+		if match == artifactPath {
+			continue
+		}
+		_ = os.Remove(match)
+	}
+}
+
+// readShadowContent returns the cached base content for remotePath at
+// exactly revision, if present. A false return is a normal, expected outcome
+// (never logged as an error) — it means mount rollout cannot attempt a merge
+// for this conflict and must fall back to materializeConflict.
+func (s *Syncer) readShadowContent(remotePath, revision string) ([]byte, bool) {
+	if !mountRolloutMergeEligible(remotePath) || strings.TrimSpace(revision) == "" {
+		return nil, false
+	}
+	content, err := os.ReadFile(shadowArtifactPath(s.mountShadowDir, remotePath, revision))
+	if err != nil {
+		return nil, false
+	}
+	return content, true
+}
+
+func shadowArtifactPath(baseDir, remotePath, revision string) string {
+	rel := strings.TrimPrefix(normalizeRemotePath(remotePath), "/")
+	return filepath.Join(baseDir, filepath.FromSlash(rel)+"."+sanitizeRevision(revision)+".shadow")
+}
+
+func shadowArtifactGlob(baseDir, remotePath string) string {
+	rel := strings.TrimPrefix(normalizeRemotePath(remotePath), "/")
+	return filepath.Join(baseDir, filepath.FromSlash(rel)+".*.shadow")
 }
 
 func (s *Syncer) resolveConflictArtifacts(remotePath string) {
