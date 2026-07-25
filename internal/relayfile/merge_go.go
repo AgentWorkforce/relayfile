@@ -110,17 +110,25 @@ func goExtractUnits(src []byte) (goExtractedFile, error) {
 	}
 	prologue := string(src[:firstFuncStart])
 
+	// Units are gapless and contiguous, together spanning exactly
+	// [firstFuncStart, len(src)) with no bytes unaccounted for: each unit
+	// starts exactly where the previous one (or the prologue, for the
+	// first) ended, and the LAST unit is extended to EOF. This is what
+	// makes extraction lossless — a standalone comment between two
+	// functions, or trailing content after the last one, naturally
+	// belongs to a unit instead of falling into an uncaptured gap that
+	// goThreeWayMerge's reconstruction would otherwise silently drop even
+	// though the result still parses as valid Go.
 	units := make([]goFuncUnit, 0, len(file.Decls)-firstFuncIdx)
 	seen := map[string]int{}
+	prevEnd := firstFuncStart
 	for i := firstFuncIdx; i < len(file.Decls); i++ {
 		fn := file.Decls[i].(*ast.FuncDecl)
-		start := offset(fn.Pos())
-		if fn.Doc != nil {
-			if docStart := offset(fn.Doc.Pos()); docStart < start {
-				start = docStart
-			}
-		}
+		start := prevEnd
 		end := offset(fn.End())
+		if i == len(file.Decls)-1 {
+			end = len(src)
+		}
 		if start < 0 || end > len(src) || start > end {
 			return goExtractedFile{}, fmt.Errorf("invalid byte range for function %q", funcDisplayName(fn))
 		}
@@ -140,6 +148,7 @@ func goExtractUnits(src []byte) (goExtractedFile, error) {
 			Text:   string(src[start:end]),
 			IsInit: fn.Name != nil && fn.Name.Name == "init" && fn.Recv == nil,
 		})
+		prevEnd = offset(fn.End())
 	}
 
 	return goExtractedFile{Prologue: prologue, Funcs: units}, nil
@@ -157,10 +166,14 @@ func funcDisplayName(fn *ast.FuncDecl) string {
 }
 
 func funcKey(fn *ast.FuncDecl) string {
-	if fn.Recv == nil || len(fn.Recv.List) == 0 {
-		return "func:" + fn.Name.Name
+	name := "<anonymous>"
+	if fn.Name != nil {
+		name = fn.Name.Name
 	}
-	return "method:" + recvTypeString(fn.Recv.List[0].Type) + "." + fn.Name.Name
+	if fn.Recv == nil || len(fn.Recv.List) == 0 {
+		return "func:" + name
+	}
+	return "method:" + recvTypeString(fn.Recv.List[0].Type) + "." + name
 }
 
 func recvTypeString(expr ast.Expr) string {
@@ -170,9 +183,12 @@ func recvTypeString(expr ast.Expr) string {
 	case *ast.Ident:
 		return t.Name
 	case *ast.IndexExpr:
-		// Generic receiver, e.g. Foo[T] — use the base name only; type
-		// parameters aren't part of the identity we need for matching
-		// across versions.
+		// Generic receiver with one type parameter, e.g. Foo[T] — use the
+		// base name only; type parameters aren't part of the identity we
+		// need for matching across versions.
+		return recvTypeString(t.X)
+	case *ast.IndexListExpr:
+		// Generic receiver with multiple type parameters, e.g. Foo[T, U].
 		return recvTypeString(t.X)
 	default:
 		return "?"
@@ -201,6 +217,23 @@ type goMergeResult struct {
 // of (result, nil) or (nil, conflicts) — the caller commits the former or
 // surfaces the latter as a 409, and never writes anything in the conflict
 // case.
+// textsDiffer compares two function units' Text for change-detection
+// purposes, ignoring purely leading/trailing WHITESPACE (not comments —
+// actual comment content still counts as a real difference). A function's
+// captured span (goExtractUnits) includes the gap since the previous
+// declaration (or none, if it's first) and, only for the last declaration
+// in the file, everything through EOF. That means the exact same function
+// body can gain or lose leading/trailing whitespace purely because it
+// stopped or started being the first/last declaration in one version but
+// not another (e.g. base has only function B; mine adds a function before
+// it, or theirs adds one after) — with no actual edit to B at all.
+// Comparing raw Text would treat that as "changed" and cause a false
+// conflict. Reconstruction still uses the raw, untrimmed Text (see
+// goThreeWayMerge's assembly step) — only the comparison ignores it.
+func textsDiffer(a, b string) bool {
+	return strings.TrimSpace(a) != strings.TrimSpace(b)
+}
+
 func goThreeWayMerge(base, mine, theirs goExtractedFile) (*goMergeResult, []goMergeConflict) {
 	var conflicts []goMergeConflict
 
@@ -243,7 +276,7 @@ func goThreeWayMerge(base, mine, theirs goExtractedFile) (*goMergeResult, []goMe
 				resolvedByKey[t.Key] = t.Text
 				continue
 			}
-			changedByOthers := t.Text != b.Text
+			changedByOthers := textsDiffer(t.Text, b.Text)
 			if changedByOthers {
 				conflicts = append(conflicts, goMergeConflict{
 					Unit: t.Name, Reason: "deleted by one side, modified by the other",
@@ -260,7 +293,7 @@ func goThreeWayMerge(base, mine, theirs goExtractedFile) (*goMergeResult, []goMe
 		if !inBase {
 			// Both mine and theirs have it but base doesn't: both sides
 			// independently added a function with the same key.
-			if m.Text == t.Text {
+			if !textsDiffer(m.Text, t.Text) {
 				resolvedByKey[t.Key] = t.Text
 			} else if t.IsInit || m.IsInit {
 				conflicts = append(conflicts, goMergeConflict{
@@ -276,15 +309,15 @@ func goThreeWayMerge(base, mine, theirs goExtractedFile) (*goMergeResult, []goMe
 			continue
 		}
 
-		changedByMe := m.Text != b.Text
-		changedByOthers := t.Text != b.Text
+		changedByMe := textsDiffer(m.Text, b.Text)
+		changedByOthers := textsDiffer(t.Text, b.Text)
 		switch {
-		case t.IsInit && (changedByMe || changedByOthers) && m.Text != t.Text:
+		case t.IsInit && (changedByMe || changedByOthers) && textsDiffer(m.Text, t.Text):
 			conflicts = append(conflicts, goMergeConflict{
 				Unit: t.Name, Reason: "init() is never auto-merged",
 				Base: b.Text, Mine: m.Text, Theirs: t.Text,
 			})
-		case changedByMe && changedByOthers && m.Text != t.Text:
+		case changedByMe && changedByOthers && textsDiffer(m.Text, t.Text):
 			conflicts = append(conflicts, goMergeConflict{
 				Unit: t.Name, Reason: "concurrently changed",
 				Base: b.Text, Mine: m.Text, Theirs: t.Text,
@@ -303,21 +336,28 @@ func goThreeWayMerge(base, mine, theirs goExtractedFile) (*goMergeResult, []goMe
 	// only fires for keys theirs HAS. A key present in base+mine but
 	// absent from theirs needs handling here too (theirs deleted a
 	// function I didn't touch, or did touch).
+	newAppendKeys := map[string]bool{}
 	for _, m := range mine.Funcs {
 		if _, inTheirs := theirs.funcByKey(m.Key); inTheirs {
 			continue // already resolved above
 		}
 		b, inBase := base.funcByKey(m.Key)
 		if !inBase {
-			// Purely new function only I have. Safe to append regardless
-			// of order — it didn't exist before, so there's no ordering
-			// expectation to preserve.
+			// Purely new function only I have. Appended after everything
+			// from theirs, in mine's relative order — trimmed and given
+			// explicit separation below rather than using the raw
+			// gap-inclusive Text, since that span may carry leading/
+			// trailing content specific to MINE's own file layout (e.g.
+			// mine's own EOF, if this happened to be mine's last
+			// declaration) that has no meaningful position in theirs's
+			// reconstructed structure.
 			order = append(order, m.Key)
-			resolvedByKey[m.Key] = m.Text
+			newAppendKeys[m.Key] = true
+			resolvedByKey[m.Key] = strings.TrimSpace(m.Text)
 			continue
 		}
 		// In base and mine, not in theirs: theirs deleted it.
-		if m.Text == b.Text {
+		if !textsDiffer(m.Text, b.Text) {
 			// I didn't touch it either — respect the deletion.
 			continue
 		}
@@ -339,18 +379,27 @@ func goThreeWayMerge(base, mine, theirs goExtractedFile) (*goMergeResult, []goMe
 		if !ok || text == "" {
 			continue // deleted
 		}
-		// Function unit text never includes its own trailing separator
-		// (goExtractUnits captures exactly [start, fn.End())) — insert one
-		// between consecutive functions so they don't get concatenated
-		// with no whitespace, which Go's automatic-semicolon-insertion
-		// would fail to parse.
-		if wroteAny {
-			sb.WriteString("\n\n")
+		if newAppendKeys[key] {
+			// A brand-new function with no natural position in theirs's
+			// structure: give it explicit, clean separation rather than
+			// relying on any gap content, since (being trimmed above) it
+			// no longer carries its own.
+			if wroteAny {
+				sb.WriteString("\n\n")
+			}
+			sb.WriteString(text)
+		} else {
+			// Units sourced from theirs's own order (whether keeping
+			// theirs's text or substituting mine's changed version)
+			// already carry their own correct leading gap — from
+			// goExtractUnits's gapless extraction — so no separator is
+			// added here. Adding one would double up the blank line
+			// already present in that gap.
+			sb.WriteString(text)
 		}
-		sb.WriteString(text)
 		wroteAny = true
 	}
-	if wroteAny {
+	if wroteAny && !strings.HasSuffix(sb.String(), "\n") {
 		sb.WriteString("\n")
 	}
 	return &goMergeResult{Content: sb.String()}, nil

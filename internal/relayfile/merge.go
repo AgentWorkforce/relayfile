@@ -141,13 +141,13 @@ func (s *Store) MergeFile(req MergeRequest) (MergeResponse, error) {
 		ws := s.workspaces[workspaceID]
 		var liveContent string
 		var liveExists bool
-		var currentRevision string
+		var liveFileRevision string
 		if ws != nil {
 			if f, exists := ws.Files[path]; exists {
 				liveContent = f.Content
 				liveExists = true
+				liveFileRevision = f.Revision
 			}
-			currentRevision = ws.Revision
 		}
 		baseEntry, baseKnown := s.lookupRevisionProvenanceLocked(workspaceID, path, req.BaseRevision)
 		s.mu.RUnlock()
@@ -182,7 +182,7 @@ func (s *Store) MergeFile(req MergeRequest) (MergeResponse, error) {
 					Unit: c.Unit, Reason: c.Reason, Base: c.Base, Mine: c.Mine, Theirs: c.Theirs,
 				})
 			}
-			return MergeResponse{}, &MergeConflictError{CurrentRevision: currentRevision, Conflicts: details}
+			return MergeResponse{}, &MergeConflictError{CurrentRevision: liveFileRevision, Conflicts: details}
 		}
 
 		// Final self-check before ever committing: the merge result must
@@ -194,20 +194,34 @@ func (s *Store) MergeFile(req MergeRequest) (MergeResponse, error) {
 			return MergeResponse{}, fmt.Errorf("internal error: merge produced invalid Go, refusing to write: %w", err)
 		}
 
-		lastCurrentRevision = currentRevision
-		resp, committed, err := s.commitMergeResultLocked(workspaceID, path, req, result.Content, currentRevision)
+		lastCurrentRevision = liveFileRevision
+		// CAS on the TARGET FILE's own revision, not the workspace-wide
+		// counter — an unrelated write to any other path in the workspace
+		// must never invalidate this commit. (This mirrors exactly what
+		// Phase 1 fixed for fork commits: a whole-workspace check punishes
+		// disjoint activity that has nothing to do with the operation in
+		// flight. Re-introducing that mistake here would undo the point of
+		// this whole effort.)
+		resp, committed, err := s.commitMergeResult(workspaceID, path, req, result.Content, liveFileRevision)
 		if err != nil {
 			return MergeResponse{}, err
 		}
 		if committed {
 			return resp, nil
 		}
-		// currentRevision moved between snapshot and commit — recompute
-		// against the new live state and retry, bounded by
+		// The target file's revision moved between snapshot and commit —
+		// recompute against the new live state and retry, bounded by
 		// maxMergeCommitAttempts.
 	}
 	return MergeResponse{}, fmt.Errorf("merge did not converge after %d attempts (currentRevision kept moving, last seen %q)", maxMergeCommitAttempts, lastCurrentRevision)
 }
+
+// mergeProviderResultKey namespaces the merge-specific metadata this store
+// stashes on an operation's generic ProviderResult map, so a deduplicated
+// retry (same ContentIdentity) can return the exact same complete
+// MergeResponse the original call did, not just the fields
+// findOperationByContentIdentityLocked's generic caller happens to need.
+const mergeProviderResultKey = "goal_b_merge"
 
 // findExistingMergeOpLocked mirrors BulkWrite's content-identity dedupe
 // (findOperationByContentIdentityLocked) so a retried merge request (e.g.
@@ -226,20 +240,34 @@ func (s *Store) findExistingMergeOpLocked(workspaceID string, identity *ContentI
 	if !ok {
 		return MergeResponse{}, false
 	}
-	return MergeResponse{
+	resp := MergeResponse{
 		TargetRevision: op.Revision,
 		Strategy:       MergeStrategyGoTopLevelFunctions,
-	}, true
+	}
+	if meta, ok := op.ProviderResult[mergeProviderResultKey].(map[string]any); ok {
+		if v, ok := meta["baseRevision"].(string); ok {
+			resp.BaseRevision = v
+		}
+		if v, ok := meta["mergedAgainstRevision"].(string); ok {
+			resp.MergedAgainstRevision = v
+		}
+	}
+	return resp, true
 }
 
-// commitMergeResultLocked takes the store's write lock, re-verifies the
-// live revision is still what the merge was computed against, and commits
-// if so. Returns committed=false (not an error) if the revision moved —
-// the caller recomputes against fresh state and retries.
-func (s *Store) commitMergeResultLocked(workspaceID, path string, req MergeRequest, mergedContent, expectedRevision string) (MergeResponse, bool, error) {
+// commitMergeResult takes the store's write lock itself (unlike this
+// codebase's other *Locked-suffixed helpers, which require the caller to
+// already hold it — this one does not follow that convention, hence the
+// different name, to avoid a future caller assuming it can call this while
+// already holding s.mu and deadlocking on the non-reentrant RWMutex). It
+// re-verifies the TARGET FILE's revision — not the workspace-wide counter —
+// is still what the merge was computed against, and commits if so. Returns
+// committed=false (not an error) if it moved — the caller recomputes
+// against fresh state and retries.
+func (s *Store) commitMergeResult(workspaceID, path string, req MergeRequest, mergedContent, expectedFileRevision string) (MergeResponse, bool, error) {
 	s.mu.Lock()
 	ws := s.ensureWorkspaceLocked(workspaceID)
-	if ws.Revision != expectedRevision {
+	if current, exists := ws.Files[path]; !exists || current.Revision != expectedFileRevision {
 		s.mu.Unlock()
 		return MergeResponse{}, false, nil
 	}
@@ -269,6 +297,16 @@ func (s *Store) commitMergeResultLocked(workspaceID, path string, req MergeReque
 		eventType = "file.created"
 	}
 	result, task := s.recordWriteWithContentIdentityLocked(ws, path, revision, eventType, file.Provider, req.CorrelationID, req.ContentIdentity)
+	if op, ok := ws.Ops[result.OpID]; ok {
+		if op.ProviderResult == nil {
+			op.ProviderResult = map[string]any{}
+		}
+		op.ProviderResult[mergeProviderResultKey] = map[string]any{
+			"baseRevision":          req.BaseRevision,
+			"mergedAgainstRevision": expectedFileRevision,
+		}
+		ws.Ops[result.OpID] = op
+	}
 	_ = s.saveLocked()
 	s.mu.Unlock()
 
@@ -278,6 +316,6 @@ func (s *Store) commitMergeResultLocked(workspaceID, path string, req MergeReque
 		TargetRevision:        result.TargetRevision,
 		Strategy:              MergeStrategyGoTopLevelFunctions,
 		BaseRevision:          req.BaseRevision,
-		MergedAgainstRevision: expectedRevision,
+		MergedAgainstRevision: expectedFileRevision,
 	}, true, nil
 }

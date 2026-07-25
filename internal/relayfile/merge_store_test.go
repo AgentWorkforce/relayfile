@@ -2,6 +2,7 @@ package relayfile
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -122,6 +123,35 @@ func TestMergeFileRejectsUnverifiableBase(t *testing.T) {
 		}
 	})
 
+	t.Run("base revision aged out of the provenance ring buffer", func(t *testing.T) {
+		evictPath := "/evicted.go"
+		evictSeed, err := store.WriteFile(WriteRequest{WorkspaceID: workspaceID, Path: evictPath, IfMatch: "0", Content: preamble + "func A() {}\n"})
+		if err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		baseContent := preamble + "func A() {}\n"
+		rev := evictSeed.TargetRevision
+		// One more than maxRevisionProvenancePerPath guarantees the seed
+		// revision's entry has been pushed out of the bounded ring buffer
+		// by the time we try to merge against it.
+		for i := 0; i < maxRevisionProvenancePerPath+1; i++ {
+			res, err := store.WriteFile(WriteRequest{WorkspaceID: workspaceID, Path: evictPath, IfMatch: rev, Content: fmt.Sprintf("%sfunc A() { _ = %d }\n", preamble, i)})
+			if err != nil {
+				t.Fatalf("churn write %d: %v", i, err)
+			}
+			rev = res.TargetRevision
+		}
+		_, err = store.MergeFile(MergeRequest{
+			WorkspaceID: workspaceID, Path: evictPath, Strategy: MergeStrategyGoTopLevelFunctions,
+			Content:      preamble + "func A() { x := 1; _ = x }\n",
+			BaseRevision: evictSeed.TargetRevision,
+			BaseContent:  baseContent,
+		})
+		if !errors.Is(err, ErrMergeBaseUnavailable) {
+			t.Fatalf("expected ErrMergeBaseUnavailable for an evicted (aged-out) base revision, got %v", err)
+		}
+	})
+
 	t.Run("revision never recorded", func(t *testing.T) {
 		_, err := store.MergeFile(MergeRequest{
 			WorkspaceID: workspaceID, Path: path, Strategy: MergeStrategyGoTopLevelFunctions,
@@ -206,18 +236,25 @@ func TestMergeFileConcurrentCommitRetries(t *testing.T) {
 
 	var wg sync.WaitGroup
 	// One goroutine repeatedly touches B and C (unrelated to A) to keep
-	// the live revision moving while the merge below is computing. Kept
-	// well under maxRevisionProvenancePerPath so the seed revision the
-	// merge cites as its base doesn't get evicted from the ring buffer —
-	// that's a real, separately-covered fail-closed case
+	// the target file's own revision moving while the merge below is
+	// computing — forcing MergeFile's snapshot/compute/verify loop to
+	// retry at least once, without exhausting maxMergeCommitAttempts (5):
+	// kept comfortably below it so an unlucky interleaving (every attempt
+	// invalidated) can't flake this test, and well under
+	// maxRevisionProvenancePerPath so the seed revision the merge cites as
+	// its base doesn't get evicted from the ring buffer either — that's a
+	// real, separately-covered fail-closed case
 	// (TestMergeFileRejectsUnverifiableBase), not what this test is for.
+	const churnIterations = 3
 	stop := make(chan struct{})
+	churnErrs := make(chan error, 1)
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		defer close(churnErrs)
 		rev := seed.TargetRevision
 		content := baseContent
-		for i := 0; i < 5; i++ {
+		for i := 0; i < churnIterations; i++ {
 			select {
 			case <-stop:
 				return
@@ -229,6 +266,14 @@ func TestMergeFileConcurrentCommitRetries(t *testing.T) {
 			}
 			res, err := store.WriteFile(WriteRequest{WorkspaceID: workspaceID, Path: path, IfMatch: rev, Content: next})
 			if err != nil {
+				// A churn write losing its own race (stale IfMatch against
+				// a merge commit that landed first) is an expected, benign
+				// outcome, not a bug — but any OTHER error is worth
+				// surfacing rather than silently stopping the churn.
+				var conflictErr *ConflictError
+				if !errors.As(err, &conflictErr) {
+					churnErrs <- fmt.Errorf("unexpected churn write error: %w", err)
+				}
 				return
 			}
 			rev = res.TargetRevision
@@ -243,6 +288,9 @@ func TestMergeFileConcurrentCommitRetries(t *testing.T) {
 	})
 	close(stop)
 	wg.Wait()
+	if churnErr, ok := <-churnErrs; ok && churnErr != nil {
+		t.Fatalf("churn goroutine hit an unexpected error: %v", churnErr)
+	}
 
 	if err != nil {
 		t.Fatalf("expected merge to eventually succeed despite concurrent unrelated churn, got %v", err)

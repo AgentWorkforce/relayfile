@@ -306,6 +306,56 @@ func TestMergeResultsAreAlwaysValidGo(t *testing.T) {
 	}
 }
 
+// TestMergeUnattachedCommentsSurviveASuccessfulMerge is the regression test
+// for the gap goExtractUnits used to have: a standalone comment between two
+// functions (not attached as either's fn.Doc) or trailing after the last
+// function was captured by neither the prologue nor any unit, so a
+// successful merge silently deleted it — and the merge's own
+// always-valid-Go self-check couldn't catch the loss, since the result
+// still parsed fine without it.
+func TestMergeUnattachedCommentsSurviveASuccessfulMerge(t *testing.T) {
+	base := mustExtract(t, preamble+`func A() { x := 1; _ = x }
+
+// --- section: user management ---
+
+func B() { y := 1; _ = y }
+
+// trailing note after the last function
+`)
+	// Disjoint edits: I change A, they change B — both unrelated to the
+	// comments, which neither side touched.
+	mine := mustExtract(t, preamble+`func A() { x := 2; _ = x }
+
+// --- section: user management ---
+
+func B() { y := 1; _ = y }
+
+// trailing note after the last function
+`)
+	theirs := mustExtract(t, preamble+`func A() { x := 1; _ = x }
+
+// --- section: user management ---
+
+func B() { y := 2; _ = y }
+
+// trailing note after the last function
+`)
+
+	result, conflicts := goThreeWayMerge(base, mine, theirs)
+	if len(conflicts) != 0 {
+		t.Fatalf("expected no conflicts, got %+v", conflicts)
+	}
+	if !strings.Contains(result.Content, "// --- section: user management ---") {
+		t.Fatalf("banner comment between functions was dropped:\n%s", result.Content)
+	}
+	if !strings.Contains(result.Content, "// trailing note after the last function") {
+		t.Fatalf("trailing comment after the last function was dropped:\n%s", result.Content)
+	}
+	if !strings.Contains(result.Content, "x := 2") || !strings.Contains(result.Content, "y := 2") {
+		t.Fatalf("expected both disjoint edits to survive alongside the comments:\n%s", result.Content)
+	}
+}
+
 func TestMergeBothAddDifferentSameNamedFunctionConflicts(t *testing.T) {
 	base := mustExtract(t, preamble+"func A() {}\n")
 	mine := mustExtract(t, preamble+"func A() {}\n\nfunc New() { x := 1; _ = x }\n")
