@@ -159,6 +159,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case len(parts) == 6 && parts[3] == "forks" && parts[5] == "commit" && r.Method == http.MethodPost:
 		requiredScope = "fs:write"
 		route = "commit_fork"
+	case len(parts) == 6 && parts[3] == "forks" && parts[5] == "rebase" && r.Method == http.MethodPost:
+		requiredScope = "fs:write"
+		route = "rebase_fork"
 	case len(parts) == 5 && parts[3] == "fs" && parts[4] == "tree" && r.Method == http.MethodGet:
 		requiredScope = "fs:read"
 		route = "tree"
@@ -308,6 +311,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleDiscardFork(w, r, workspaceID, parts[4], correlationID)
 	case "commit_fork":
 		s.handleCommitFork(w, r, workspaceID, parts[4], correlationID, claims)
+	case "rebase_fork":
+		s.handleRebaseFork(w, r, workspaceID, parts[4], correlationID)
 	case "tree":
 		s.handleTree(w, r, workspaceID, correlationID, claims)
 	case "bulk_write":
@@ -1421,6 +1426,27 @@ func (s *Server) handleDiscardFork(w http.ResponseWriter, _ *http.Request, works
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleRebaseFork(w http.ResponseWriter, _ *http.Request, workspaceID, forkID, correlationID string) {
+	resp, err := s.store.RebaseFork(workspaceID, forkID)
+	if err != nil {
+		switch err {
+		case relayfile.ErrForkExpired:
+			writeJSON(w, http.StatusGone, map[string]any{
+				"error":         "fork_expired",
+				"correlationId": correlationID,
+			})
+		case relayfile.ErrNotFound:
+			writeError(w, http.StatusNotFound, "not_found", err.Error(), correlationID)
+		case relayfile.ErrInvalidInput:
+			writeError(w, http.StatusBadRequest, "bad_request", err.Error(), correlationID)
+		default:
+			writeError(w, http.StatusInternalServerError, "internal_error", err.Error(), correlationID)
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) handleCommitFork(w http.ResponseWriter, _ *http.Request, workspaceID, forkID, correlationID string, claims tokenClaims) {

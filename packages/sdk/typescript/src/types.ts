@@ -988,6 +988,27 @@ export interface CommitForkResponse {
   deletedCount: number;
 }
 
+export interface RebaseForkInput {
+  workspaceId: string;
+  forkId: string;
+  correlationId?: string;
+  signal?: AbortSignal;
+}
+
+export interface RebaseConflict {
+  path: string;
+  forkType: "write" | "delete";
+  liveExists: boolean;
+  liveRevision: string;
+  liveContentPreview?: string;
+}
+
+export interface RebaseForkResponse {
+  parentRevision: string;
+  cleanCount: number;
+  conflicts: RebaseConflict[];
+}
+
 export interface IngestWebhookInput {
   workspaceId: string;
   provider: string;

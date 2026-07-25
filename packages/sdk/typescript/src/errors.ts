@@ -30,6 +30,16 @@ export class RevisionConflictError extends RelayFileApiError {
   }
 }
 
+export class ParentMovedError extends RelayFileApiError {
+  public readonly currentRevision: string;
+
+  constructor(status: number, payload: Partial<ErrorResponse> & { currentRevision: string }) {
+    super(status, payload);
+    this.name = "ParentMovedError";
+    this.currentRevision = payload.currentRevision;
+  }
+}
+
 export class QueueFullError extends RelayFileApiError {
   public readonly retryAfterSeconds?: number;
 
