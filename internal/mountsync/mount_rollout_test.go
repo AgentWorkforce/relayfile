@@ -316,8 +316,20 @@ func TestMountRolloutConflictPathWithoutShadowFallsBack(t *testing.T) {
 	if err := syncer.SyncOnce(context.Background()); err != nil {
 		t.Fatalf("bootstrap sync: %v", err)
 	}
+	// A bootstrap pull followed by pushLocal's own confirmed-clean
+	// short-circuit (within the same SyncOnce) now populates the shadow
+	// cache immediately — that's the correct, intended behavior (mount
+	// rollout should work as early as possible, not require an extra idle
+	// cycle first). To still exercise the no-cached-base fallback path
+	// covered by this test, force a cold cache the way it would exist in
+	// practice: e.g. the shadow directory was pruned externally, or this
+	// mount daemon restarted with fresh private state but an already-clean
+	// local mirror.
+	if err := os.RemoveAll(syncer.mountShadowDir); err != nil {
+		t.Fatalf("evict shadow cache: %v", err)
+	}
 	if _, ok := syncer.readShadowContent(remotePath, "rev_base"); ok {
-		t.Fatal("fresh tracked file unexpectedly has a shadow cache entry")
+		t.Fatal("evicted shadow cache should miss")
 	}
 
 	localPath := filepath.Join(syncer.localRoot, "pkg", "service.go")

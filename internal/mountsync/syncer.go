@@ -6270,6 +6270,15 @@ func (s *Syncer) pushLocal(ctx context.Context) (map[string]struct{}, error) {
 			continue
 		}
 		if exists && tracked.Hash == snapshot.Hash && !tracked.Dirty {
+			// This is pushLocal's own confirmed-clean short-circuit — it
+			// returns before ever calling preparePendingBulkWrite, so it is
+			// the only place the default poll-mode scan proves a .go file's
+			// on-disk content exactly matches tracked.Revision. Without this
+			// call here, mount rollout's shadow cache would only ever
+			// populate via the filesystem-watcher path (HandleLocalChange),
+			// never via periodic polling — silently inert in the default,
+			// recommended mount mode.
+			s.recordShadowContent(remotePath, tracked.Revision, snapshot.RawContent)
 			continue
 		}
 		// Skip re-pushing a previously write-denied file whose content hasn't
