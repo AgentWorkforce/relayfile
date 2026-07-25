@@ -1614,10 +1614,13 @@ export class RelayFileClient {
         content: input.content,
         baseRevision: input.baseRevision,
         baseContent: input.baseContent,
-        // Merge is restricted to .go files server-side; default here
-        // rather than relying on an omitted field falling through to the
-        // server's generic "text/plain" fallback for an unrelated code path.
-        contentType: input.contentType ?? "text/x-go",
+        // Default per-strategy: go-top-level-functions-v1 is Go-only, so
+        // existing callers that omit contentType must keep getting
+        // "text/x-go" (changing this would silently rewrite their file's
+        // stored content type and provider-writeback metadata on every
+        // merge). three-way-lines-v1 has no language restriction, so
+        // "text/plain" is the right neutral default there.
+        contentType: input.contentType ?? (input.strategy === "go-top-level-functions-v1" ? "text/x-go" : "text/plain"),
         contentIdentity: input.contentIdentity
       },
       signal: input.signal

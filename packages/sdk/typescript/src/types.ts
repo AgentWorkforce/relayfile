@@ -954,7 +954,7 @@ export interface WriteFileInput {
 export interface MergeFileInput {
   workspaceId: string;
   path: string;
-  strategy: "go-top-level-functions-v1";
+  strategy: "go-top-level-functions-v1" | "three-way-lines-v1";
   content: string;
   baseRevision: string;
   baseContent: string;
@@ -966,7 +966,7 @@ export interface MergeFileInput {
 
 export interface MergeFileResponse {
   targetRevision: string;
-  strategy: "go-top-level-functions-v1";
+  strategy: "go-top-level-functions-v1" | "three-way-lines-v1";
   baseRevision: string;
   mergedAgainstRevision: string;
 }

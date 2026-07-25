@@ -1849,7 +1849,7 @@ describe("RelayFileClient — existing methods", () => {
     it("mergeFile posts the complete three-way merge request and returns revisions", async () => {
       const payload = {
         targetRevision: "rev_3",
-        strategy: "go-top-level-functions-v1",
+        strategy: "three-way-lines-v1",
         baseRevision: "rev_1",
         mergedAgainstRevision: "rev_2",
       };
@@ -1858,12 +1858,11 @@ describe("RelayFileClient — existing methods", () => {
 
       const res = await client.mergeFile({
         workspaceId: "ws_acme",
-        path: "/src/a.go",
-        strategy: "go-top-level-functions-v1",
-        content: "package sample\n\nfunc Alpha() int { return 2 }\n",
+        path: "/src/a.ts",
+        strategy: "three-way-lines-v1",
+        content: "export const alpha = 2;\n",
         baseRevision: "rev_1",
-        baseContent: "package sample\n\nfunc Alpha() int { return 1 }\n",
-        contentType: "text/x-go",
+        baseContent: "export const alpha = 1;\n",
         contentIdentity: { kind: "merge", key: "merge-1", ttlSeconds: 60 },
         correlationId: "corr_merge_1",
       });
@@ -1871,17 +1870,45 @@ describe("RelayFileClient — existing methods", () => {
       expect(res).toEqual(payload);
       const url = f.mock.calls[0]![0] as string;
       const init = f.mock.calls[0]![1] as RequestInit;
-      expect(url).toBe("https://relay.test/v1/workspaces/ws_acme/fs/merge?path=%2Fsrc%2Fa.go");
+      expect(url).toBe("https://relay.test/v1/workspaces/ws_acme/fs/merge?path=%2Fsrc%2Fa.ts");
       expect(init.method).toBe("POST");
       expect((init.headers as Record<string, string>)["X-Correlation-Id"]).toBe("corr_merge_1");
       expect(JSON.parse(init.body as string)).toEqual({
+        strategy: "three-way-lines-v1",
+        content: "export const alpha = 2;\n",
+        baseRevision: "rev_1",
+        baseContent: "export const alpha = 1;\n",
+        contentType: "text/plain",
+        contentIdentity: { kind: "merge", key: "merge-1", ttlSeconds: 60 },
+      });
+    });
+
+    it("mergeFile defaults contentType per strategy when omitted", async () => {
+      const f = mockFetch({
+        targetRevision: "rev_2",
+        strategy: "go-top-level-functions-v1",
+        baseRevision: "rev_1",
+        mergedAgainstRevision: "rev_1",
+      });
+      const client = makeClient(f);
+
+      await client.mergeFile({
+        workspaceId: "ws_acme",
+        path: "/src/a.go",
         strategy: "go-top-level-functions-v1",
         content: "package sample\n\nfunc Alpha() int { return 2 }\n",
         baseRevision: "rev_1",
         baseContent: "package sample\n\nfunc Alpha() int { return 1 }\n",
-        contentType: "text/x-go",
-        contentIdentity: { kind: "merge", key: "merge-1", ttlSeconds: 60 },
       });
+
+      // go-top-level-functions-v1 is Go-only: an omitted contentType must
+      // keep defaulting to "text/x-go", not the neutral "text/plain" the
+      // language-agnostic three-way-lines-v1 strategy uses — regression
+      // coverage for a real bug where a blanket neutral default would have
+      // silently rewritten every existing Go merge caller's stored content
+      // type and provider-writeback metadata.
+      const init = f.mock.calls[0]![1] as RequestInit;
+      expect(JSON.parse(init.body as string).contentType).toBe("text/x-go");
     });
 
     it("writeFile with forkId appends forkId and leaves body unchanged", async () => {

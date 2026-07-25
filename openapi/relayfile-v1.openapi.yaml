@@ -219,13 +219,15 @@ paths:
     post:
       tags: [Filesystem]
       operationId: mergeFile
-      summary: Three-way merge a stale Go file at top-level function granularity
+      summary: Three-way merge a stale file
       description: |
-        Attempts an all-or-nothing, symbol-level three-way merge of the
-        caller's proposed Go source against the current live file. The
-        caller-supplied base revision and content must match server-recorded
-        provenance. A successful merge writes the complete validated result;
-        conflicts and ineligible inputs write nothing.
+        Attempts an all-or-nothing three-way merge of the caller's proposed
+        content against the current live file. The go-top-level-functions-v1
+        strategy is restricted to Go files and merges top-level functions;
+        three-way-lines-v1 is a language-agnostic diff3-style merge over raw
+        text lines. The caller-supplied base revision and content must match
+        server-recorded provenance. A successful merge writes the complete
+        result; conflicts and ineligible inputs write nothing.
       security:
         - BearerAuth: [fs:write]
       parameters:
@@ -2451,10 +2453,10 @@ components:
       properties:
         strategy:
           type: string
-          enum: [go-top-level-functions-v1]
+          enum: [go-top-level-functions-v1, three-way-lines-v1]
         content:
           type: string
-          description: The caller's proposed complete Go file content (mine).
+          description: The caller's proposed complete file content (mine).
         baseRevision:
           type: string
           minLength: 1
@@ -2478,7 +2480,7 @@ components:
           description: Revision created by the successful merged write.
         strategy:
           type: string
-          enum: [go-top-level-functions-v1]
+          enum: [go-top-level-functions-v1, three-way-lines-v1]
         baseRevision:
           type: string
           description: Caller-supplied revision used as the verified merge base.
@@ -2493,7 +2495,7 @@ components:
       properties:
         unit:
           type: string
-          description: Conflicting function/method name or file-scope unit.
+          description: Conflicting Go function/method or line range.
         reason:
           type: string
         base:

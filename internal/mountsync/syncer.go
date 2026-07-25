@@ -307,9 +307,9 @@ type RemoteClient interface {
 	WriteFilesBulk(ctx context.Context, workspaceID string, files []BulkWriteFile) (BulkWriteResponse, error)
 	GetOperation(ctx context.Context, workspaceID, opID string) (OperationStatus, error)
 	DeleteFile(ctx context.Context, workspaceID, path, baseRevision string) error
-	// MergeFile requests a symbol-level merge (see MergeStrategyGoTopLevelFunctions)
-	// instead of a whole-file overwrite. Used by mount rollout to reconcile a
-	// same-path conflict before falling back to a conflict artifact. Every
+	// MergeFile requests a three-way merge instead of a whole-file overwrite.
+	// Mount rollout uses it to reconcile a same-path conflict before falling
+	// back to a conflict artifact. Every
 	// error return means the same thing to the caller: "cannot merge, fall
 	// back to materializeConflict." A *HTTPError's Code distinguishes why
 	// ("merge_conflict", "merge_ineligible", "merge_base_unavailable") for
@@ -317,11 +317,13 @@ type RemoteClient interface {
 	MergeFile(ctx context.Context, workspaceID, path, strategy, baseRevision, baseContent, content, contentType string) (MergeResult, error)
 }
 
-// MergeStrategyGoTopLevelFunctions is the only merge strategy the server
-// currently supports (internal/relayfile.MergeStrategyGoTopLevelFunctions).
-// Duplicated here rather than imported to keep internal/mountsync free of a
-// dependency on internal/relayfile's store package.
-const MergeStrategyGoTopLevelFunctions = "go-top-level-functions-v1"
+// Merge strategy constants mirror the server's internal/relayfile package.
+// They are duplicated here rather than imported to keep internal/mountsync
+// free of a dependency on the store package.
+const (
+	MergeStrategyGoTopLevelFunctions = "go-top-level-functions-v1"
+	MergeStrategyThreeWayLines       = "three-way-lines-v1"
+)
 
 // MergeResult mirrors internal/relayfile.MergeResponse.
 type MergeResult struct {
@@ -597,7 +599,7 @@ func (c *HTTPClient) GetOperation(ctx context.Context, workspaceID, opID string)
 
 func (c *HTTPClient) MergeFile(ctx context.Context, workspaceID, path, strategy, baseRevision, baseContent, content, contentType string) (MergeResult, error) {
 	if contentType == "" {
-		contentType = "text/x-go"
+		contentType = "text/plain"
 	}
 	body := map[string]any{
 		"strategy":        strategy,
@@ -2658,7 +2660,7 @@ func (s *Syncer) handleWriteError(
 ) error {
 	if errors.Is(err, ErrConflict) {
 		// Mount rollout: for a merge-eligible path with a verified base in
-		// the shadow cache, try a symbol-level merge before treating this
+		// the shadow cache, try a three-way line merge before treating this
 		// as a conflict at all. Any miss or failure here — cache miss,
 		// merge_conflict, merge_ineligible, merge_base_unavailable, a
 		// transport error, an unreadable readback — falls straight through
@@ -2780,9 +2782,9 @@ func (s *Syncer) attemptMountRolloutMerge(ctx context.Context, remotePath, local
 	}
 	contentType := snapshot.ContentType
 	if contentType == "" {
-		contentType = "text/x-go"
+		contentType = "text/plain"
 	}
-	result, err := s.client.MergeFile(ctx, s.workspace, remotePath, MergeStrategyGoTopLevelFunctions, tracked.Revision, string(baseContent), string(snapshot.RawContent), contentType)
+	result, err := s.client.MergeFile(ctx, s.workspace, remotePath, MergeStrategyThreeWayLines, tracked.Revision, string(baseContent), string(snapshot.RawContent), contentType)
 	if err != nil {
 		var httpErr *HTTPError
 		if errors.As(err, &httpErr) {
@@ -6296,8 +6298,8 @@ func (s *Syncer) pushLocal(ctx context.Context) (map[string]struct{}, error) {
 		if exists && tracked.Hash == snapshot.Hash && !tracked.Dirty {
 			// This is pushLocal's own confirmed-clean short-circuit — it
 			// returns before ever calling preparePendingBulkWrite, so it is
-			// the only place the default poll-mode scan proves a .go file's
-			// on-disk content exactly matches tracked.Revision. Without this
+			// the only place the default poll-mode scan proves an eligible text
+			// file's on-disk content exactly matches tracked.Revision. Without this
 			// call here, mount rollout's shadow cache would only ever
 			// populate via the filesystem-watcher path (HandleLocalChange),
 			// never via periodic polling — silently inert in the default,
@@ -6311,9 +6313,9 @@ func (s *Syncer) pushLocal(ctx context.Context) (map[string]struct{}, error) {
 			// server's provenance hash check would then reject on every
 			// merge attempt — mount rollout would silently never succeed,
 			// worse than never attempting it. s.refreshShadowContentFromDisk
-			// does the one real extra read this requires (bounded to .go
-			// paths, and skipped entirely once this exact revision is
-			// already cached, so steady-state clean files cost nothing
+			// does the one real extra read this requires, bounded to eligible
+			// text paths and skipped entirely once this exact revision is already
+			// cached, so steady-state clean files cost nothing
 			// beyond the stat this branch already implies).
 			s.refreshShadowContentFromDisk(remotePath, tracked.Revision, localPath)
 			continue
@@ -7140,11 +7142,11 @@ func (s *Syncer) writeConflictArtifact(remotePath, baseRevision string, content 
 }
 
 // mountRolloutMergeEligible reports whether remotePath is a candidate for the
-// symbol-level merge attempted by mount rollout before falling back to a
-// conflict artifact. Scoped to .go files, matching Store.MergeFile's
-// currently-supported strategy (MergeStrategyGoTopLevelFunctions).
+// language-agnostic three-way line merge attempted by mount rollout before
+// falling back to a conflict artifact. Text-like paths are eligible; known
+// binary content types are excluded.
 func mountRolloutMergeEligible(remotePath string) bool {
-	return strings.HasSuffix(remotePath, ".go")
+	return isTextLikeContentType(detectContentType(remotePath))
 }
 
 // recordShadowContent opportunistically caches the bytes known to exactly
@@ -7160,10 +7162,11 @@ func (s *Syncer) recordShadowContent(remotePath, revision string, content []byte
 	}
 	artifactPath := shadowArtifactPath(s.mountShadowDir, remotePath, revision)
 	// Steady-state fast path: this is called on every clean-file observation
-	// (every scan/push cycle, for every tracked .go file), but the cached
+	// (every scan/push cycle, for every tracked merge-eligible text file), but
+	// the cached
 	// base for a given revision is immutable once written — a size match is
 	// enough to skip the atomic write + glob + prune below, which would
-	// otherwise be real per-cycle disk I/O across a large Go tree for
+	// otherwise be real per-cycle disk I/O across a large source tree for
 	// content that's already cached almost every time.
 	if info, statErr := os.Stat(artifactPath); statErr == nil && info.Size() == int64(len(content)) {
 		return
@@ -8011,6 +8014,13 @@ func detectContentType(path string) string {
 	ext := strings.ToLower(filepath.Ext(path))
 	if ext == ".md" || ext == ".markdown" {
 		return "text/markdown"
+	}
+	// Go's MIME registry maps .ts to video/mp2t (MPEG transport stream),
+	// but in a source workspace this extension conventionally denotes a
+	// TypeScript text file. Prefer the source-code meaning so text handling
+	// and mount rollout merge eligibility are correct.
+	if ext == ".ts" {
+		return "text/typescript"
 	}
 	m := mime.TypeByExtension(ext)
 	if m == "" {

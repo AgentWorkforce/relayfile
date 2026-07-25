@@ -8,9 +8,13 @@ import (
 	"time"
 )
 
-// MergeStrategyGoTopLevelFunctions is the only supported merge strategy in
-// v1. See merge_go.go for the actual algorithm and
-// docs/multi-agent-collaboration-assessment.md (Phase 3) for the design.
+// MergeStrategyGoTopLevelFunctions is a Go-specific, AST-based merge
+// strategy: symbol-level (top-level function) three-way merge, guaranteeing
+// each merged unit is syntactically complete Go. See merge_go.go for the
+// algorithm and docs/multi-agent-collaboration-assessment.md (Phase 3) for
+// the design. MergeStrategyThreeWayLines (merge_lines.go, Phase 4/5) is the
+// language-agnostic alternative — prefer it unless the AST guarantee
+// specifically matters.
 const MergeStrategyGoTopLevelFunctions = "go-top-level-functions-v1"
 
 // maxMergeContentBytes bounds request size for the merge path — parsing
@@ -107,28 +111,34 @@ func (s *Store) MergeFile(req MergeRequest) (MergeResponse, error) {
 	if workspaceID == "" || path == "" || strings.TrimSpace(req.BaseRevision) == "" {
 		return MergeResponse{}, ErrInvalidInput
 	}
-	if req.Strategy != MergeStrategyGoTopLevelFunctions {
+	if req.Strategy != MergeStrategyGoTopLevelFunctions && req.Strategy != MergeStrategyThreeWayLines {
 		return MergeResponse{}, &ErrMergeIneligible{Reason: fmt.Sprintf("unsupported strategy %q", req.Strategy)}
 	}
 	if len(req.Content) > maxMergeContentBytes || len(req.BaseContent) > maxMergeContentBytes {
 		return MergeResponse{}, &ErrMergeIneligible{Reason: "content exceeds merge size limit"}
 	}
-	if !strings.HasSuffix(path, ".go") {
+	if req.Strategy == MergeStrategyGoTopLevelFunctions && !strings.HasSuffix(path, ".go") {
 		return MergeResponse{}, &ErrMergeIneligible{Reason: "only .go files are eligible for go-top-level-functions-v1"}
 	}
 
-	// Extraction and merge computation are pure functions of (base, mine,
-	// theirs) and don't need the store lock at all — only reading "theirs"
-	// (the live content) and committing the result do. Parsing three files
-	// and diffing them while holding the store's single global RWMutex
-	// would block every other workspace's unrelated writes for no reason.
-	baseExtracted, err := goExtractUnits([]byte(req.BaseContent))
-	if err != nil {
-		return MergeResponse{}, &ErrMergeIneligible{Reason: "base content: " + err.Error()}
-	}
-	mineExtracted, err := goExtractUnits([]byte(req.Content))
-	if err != nil {
-		return MergeResponse{}, &ErrMergeIneligible{Reason: "proposed content: " + err.Error()}
+	// Extraction (Go strategy only — three-way-lines-v1 works directly on
+	// the raw strings, no separate extraction step) is a pure function of
+	// (base, mine) and doesn't need the store lock at all — only reading
+	// "theirs" (the live content) and committing the result do. Parsing
+	// files and diffing them while holding the store's single global
+	// RWMutex would block every other workspace's unrelated writes for no
+	// reason.
+	var baseExtracted, mineExtracted goExtractedFile
+	if req.Strategy == MergeStrategyGoTopLevelFunctions {
+		var err error
+		baseExtracted, err = goExtractUnits([]byte(req.BaseContent))
+		if err != nil {
+			return MergeResponse{}, &ErrMergeIneligible{Reason: "base content: " + err.Error()}
+		}
+		mineExtracted, err = goExtractUnits([]byte(req.Content))
+		if err != nil {
+			return MergeResponse{}, &ErrMergeIneligible{Reason: "proposed content: " + err.Error()}
+		}
 	}
 
 	var lastCurrentRevision string
@@ -169,29 +179,36 @@ func (s *Store) MergeFile(req MergeRequest) (MergeResponse, error) {
 			return MergeResponse{}, &ErrMergeIneligible{Reason: "live file no longer exists"}
 		}
 
-		theirsExtracted, err := goExtractUnits([]byte(liveContent))
-		if err != nil {
-			return MergeResponse{}, &ErrMergeIneligible{Reason: "live content: " + err.Error()}
-		}
-
-		result, conflicts := goThreeWayMerge(baseExtracted, mineExtracted, theirsExtracted)
-		if len(conflicts) > 0 {
-			details := make([]MergeConflictDetail, 0, len(conflicts))
-			for _, c := range conflicts {
-				details = append(details, MergeConflictDetail{
-					Unit: c.Unit, Reason: c.Reason, Base: c.Base, Mine: c.Mine, Theirs: c.Theirs,
-				})
+		var mergedContent string
+		switch req.Strategy {
+		case MergeStrategyGoTopLevelFunctions:
+			theirsExtracted, err := goExtractUnits([]byte(liveContent))
+			if err != nil {
+				return MergeResponse{}, &ErrMergeIneligible{Reason: "live content: " + err.Error()}
 			}
-			return MergeResponse{}, &MergeConflictError{CurrentRevision: liveFileRevision, Conflicts: details}
-		}
-
-		// Final self-check before ever committing: the merge result must
-		// itself be valid, parseable Go. This is the same invariant
-		// TestMergeResultsAreAlwaysValidGo enforces in isolation — belt
-		// and suspenders, since a bug in goThreeWayMerge must never reach
-		// disk even if the unit tests somehow missed it.
-		if _, err := goExtractUnits([]byte(result.Content)); err != nil {
-			return MergeResponse{}, fmt.Errorf("internal error: merge produced invalid Go, refusing to write: %w", err)
+			result, conflicts := goThreeWayMerge(baseExtracted, mineExtracted, theirsExtracted)
+			if len(conflicts) > 0 {
+				return MergeResponse{}, &MergeConflictError{CurrentRevision: liveFileRevision, Conflicts: goConflictsToDetails(conflicts)}
+			}
+			// Final self-check before ever committing: the merge result
+			// must itself be valid, parseable Go. This is the same
+			// invariant TestMergeResultsAreAlwaysValidGo enforces in
+			// isolation — belt and suspenders, since a bug in
+			// goThreeWayMerge must never reach disk even if the unit
+			// tests somehow missed it.
+			if _, err := goExtractUnits([]byte(result.Content)); err != nil {
+				return MergeResponse{}, fmt.Errorf("internal error: merge produced invalid Go, refusing to write: %w", err)
+			}
+			mergedContent = result.Content
+		case MergeStrategyThreeWayLines:
+			result, conflicts, err := linesThreeWayMerge(req.BaseContent, req.Content, liveContent)
+			if err != nil {
+				return MergeResponse{}, &ErrMergeIneligible{Reason: err.Error()}
+			}
+			if len(conflicts) > 0 {
+				return MergeResponse{}, &MergeConflictError{CurrentRevision: liveFileRevision, Conflicts: lineConflictsToDetails(conflicts)}
+			}
+			mergedContent = result.Content
 		}
 
 		lastCurrentRevision = liveFileRevision
@@ -202,7 +219,7 @@ func (s *Store) MergeFile(req MergeRequest) (MergeResponse, error) {
 		// disjoint activity that has nothing to do with the operation in
 		// flight. Re-introducing that mistake here would undo the point of
 		// this whole effort.)
-		resp, committed, err := s.commitMergeResult(workspaceID, path, req, result.Content, liveFileRevision)
+		resp, committed, err := s.commitMergeResult(workspaceID, path, req, mergedContent, liveFileRevision)
 		if err != nil {
 			return MergeResponse{}, err
 		}
@@ -214,6 +231,26 @@ func (s *Store) MergeFile(req MergeRequest) (MergeResponse, error) {
 		// maxMergeCommitAttempts.
 	}
 	return MergeResponse{}, fmt.Errorf("merge did not converge after %d attempts (currentRevision kept moving, last seen %q)", maxMergeCommitAttempts, lastCurrentRevision)
+}
+
+func goConflictsToDetails(conflicts []goMergeConflict) []MergeConflictDetail {
+	details := make([]MergeConflictDetail, 0, len(conflicts))
+	for _, c := range conflicts {
+		details = append(details, MergeConflictDetail{
+			Unit: c.Unit, Reason: c.Reason, Base: c.Base, Mine: c.Mine, Theirs: c.Theirs,
+		})
+	}
+	return details
+}
+
+func lineConflictsToDetails(conflicts []lineMergeConflict) []MergeConflictDetail {
+	details := make([]MergeConflictDetail, 0, len(conflicts))
+	for _, c := range conflicts {
+		details = append(details, MergeConflictDetail{
+			Unit: c.Unit, Reason: c.Reason, Base: c.Base, Mine: c.Mine, Theirs: c.Theirs,
+		})
+	}
+	return details
 }
 
 // mergeProviderResultKey namespaces the merge-specific metadata this store
@@ -242,9 +279,14 @@ func (s *Store) findExistingMergeOpLocked(workspaceID string, identity *ContentI
 	}
 	resp := MergeResponse{
 		TargetRevision: op.Revision,
-		Strategy:       MergeStrategyGoTopLevelFunctions,
+		// Fallback for pre-Phase-5 in-memory ops that never stashed a
+		// strategy field — always overwritten below when present.
+		Strategy: MergeStrategyGoTopLevelFunctions,
 	}
 	if meta, ok := op.ProviderResult[mergeProviderResultKey].(map[string]any); ok {
+		if v, ok := meta["strategy"].(string); ok && v != "" {
+			resp.Strategy = v
+		}
 		if v, ok := meta["baseRevision"].(string); ok {
 			resp.BaseRevision = v
 		}
@@ -302,6 +344,7 @@ func (s *Store) commitMergeResult(workspaceID, path string, req MergeRequest, me
 			op.ProviderResult = map[string]any{}
 		}
 		op.ProviderResult[mergeProviderResultKey] = map[string]any{
+			"strategy":              req.Strategy,
 			"baseRevision":          req.BaseRevision,
 			"mergedAgainstRevision": expectedFileRevision,
 		}
@@ -314,7 +357,7 @@ func (s *Store) commitMergeResult(workspaceID, path string, req MergeRequest, me
 
 	return MergeResponse{
 		TargetRevision:        result.TargetRevision,
-		Strategy:              MergeStrategyGoTopLevelFunctions,
+		Strategy:              req.Strategy,
 		BaseRevision:          req.BaseRevision,
 		MergedAgainstRevision: expectedFileRevision,
 	}, true, nil
