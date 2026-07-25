@@ -334,6 +334,134 @@ func TestAssessSameFileNearSimultaneousWrite(t *testing.T) {
 	}
 }
 
+// TestAssessSameFileNearSimultaneousWriteGoMergeAutoMerges is the Go-file
+// counterpart to TestAssessSameFileNearSimultaneousWrite. Both sandboxes race
+// from one confirmed-clean revision, but their edits target separate
+// top-level functions. The losing write must use the mount-rollout merge path
+// instead of becoming a conflict artifact.
+func TestAssessSameFileNearSimultaneousWriteGoMergeAutoMerges(t *testing.T) {
+	t.Parallel()
+	store := newAssessStore(t)
+	workspaceID := "ws_assess_same_go_file"
+	handler := newMountsyncAPIHandler(t, store)
+	api := httptest.NewServer(handler)
+	defer api.Close()
+
+	tokenA := mustMountsyncTestJWT(t, "dev-secret", workspaceID, "SandboxA", []string{"fs:read", "fs:write"}, time.Now().Add(time.Hour))
+	tokenB := mustMountsyncTestJWT(t, "dev-secret", workspaceID, "SandboxB", []string{"fs:read", "fs:write"}, time.Now().Add(time.Hour))
+	const (
+		remotePath  = "/notion/Shared.go"
+		baseContent = "package shared\n\nfunc Alpha() string { return \"base alpha\" }\n\nfunc Beta() string { return \"base beta\" }\n"
+		editA       = "package shared\n\nfunc Alpha() string { return \"edit from A\" }\n\nfunc Beta() string { return \"base beta\" }\n"
+		editB       = "package shared\n\nfunc Alpha() string { return \"base alpha\" }\n\nfunc Beta() string { return \"edit from B\" }\n"
+	)
+	writeMountsyncRemoteFile(t, api.Client(), api.URL, tokenA, workspaceID, remotePath, "0", baseContent)
+
+	localDirA := t.TempDir()
+	localDirB := t.TempDir()
+	wsDisabled := false
+	syncerA, err := NewSyncer(NewHTTPClient(api.URL, tokenA, api.Client()), SyncerOptions{
+		WorkspaceID: workspaceID, RemoteRoot: "/notion", LocalRoot: localDirA, WebSocket: &wsDisabled,
+	})
+	if err != nil {
+		t.Fatalf("new syncer A: %v", err)
+	}
+	syncerB, err := NewSyncer(NewHTTPClient(api.URL, tokenB, api.Client()), SyncerOptions{
+		WorkspaceID: workspaceID, RemoteRoot: "/notion", LocalRoot: localDirB, WebSocket: &wsDisabled,
+	})
+	if err != nil {
+		t.Fatalf("new syncer B: %v", err)
+	}
+
+	ctx := context.Background()
+	if err := syncerA.SyncOnce(ctx); err != nil {
+		t.Fatalf("A bootstrap: %v", err)
+	}
+	if err := syncerB.SyncOnce(ctx); err != nil {
+		t.Fatalf("B bootstrap: %v", err)
+	}
+	localPathA := filepath.Join(localDirA, "Shared.go")
+	localPathB := filepath.Join(localDirB, "Shared.go")
+	assertLocalFileContent(t, localPathA, baseContent)
+	assertLocalFileContent(t, localPathB, baseContent)
+
+	// A no-op watcher pass is the only place the rollout cache is populated:
+	// it proves each local copy exactly matches its tracked server revision.
+	if err := syncerA.HandleLocalChange(ctx, "Shared.go", 0); err != nil {
+		t.Fatalf("A confirmed-clean pass: %v", err)
+	}
+	if err := syncerB.HandleLocalChange(ctx, "Shared.go", 0); err != nil {
+		t.Fatalf("B confirmed-clean pass: %v", err)
+	}
+	baseRevisionA := syncerA.state.Files[remotePath].Revision
+	baseRevisionB := syncerB.state.Files[remotePath].Revision
+	if _, ok := syncerA.readShadowContent(remotePath, baseRevisionA); !ok {
+		t.Fatal("A confirmed-clean pass did not populate a Go merge base")
+	}
+	if _, ok := syncerB.readShadowContent(remotePath, baseRevisionB); !ok {
+		t.Fatal("B confirmed-clean pass did not populate a Go merge base")
+	}
+
+	if err := os.WriteFile(localPathA, []byte(editA), 0o644); err != nil {
+		t.Fatalf("write local A edit: %v", err)
+	}
+	if err := os.WriteFile(localPathB, []byte(editB), 0o644); err != nil {
+		t.Fatalf("write local B edit: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	var errA, errB error
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		errA = syncerA.HandleLocalChange(ctx, "Shared.go", 0)
+	}()
+	go func() {
+		defer wg.Done()
+		errB = syncerB.HandleLocalChange(ctx, "Shared.go", 0)
+	}()
+	wg.Wait()
+	if errA != nil || errB != nil {
+		t.Fatalf("racing Go pushes failed: A=%v B=%v", errA, errB)
+	}
+
+	remoteFile, err := syncerA.client.ReadFile(ctx, workspaceID, remotePath)
+	if err != nil {
+		t.Fatalf("read merged server file: %v", err)
+	}
+	if !strings.Contains(remoteFile.Content, "func Alpha() string { return \"edit from A\" }") ||
+		!strings.Contains(remoteFile.Content, "func Beta() string { return \"edit from B\" }") {
+		t.Fatalf("merged server content should include both edits, got:\n%s", remoteFile.Content)
+	}
+
+	// The winner needs one ordinary poll to see the merge that was initiated
+	// by the loser. This checks eventual local convergence as well as the
+	// server-side merged result.
+	if err := syncerA.SyncOnce(ctx); err != nil {
+		t.Fatalf("A convergence sync: %v", err)
+	}
+	if err := syncerB.SyncOnce(ctx); err != nil {
+		t.Fatalf("B convergence sync: %v", err)
+	}
+	for label, localPath := range map[string]string{"A": localPathA, "B": localPathB} {
+		content, readErr := os.ReadFile(localPath)
+		if readErr != nil {
+			t.Fatalf("read final local %s file: %v", label, readErr)
+		}
+		if !strings.Contains(string(content), "func Alpha() string { return \"edit from A\" }") ||
+			!strings.Contains(string(content), "func Beta() string { return \"edit from B\" }") {
+			t.Fatalf("final local %s content should include both edits, got:\n%s", label, content)
+		}
+	}
+
+	if artifacts := listConflictArtifacts(t, localDirA); len(artifacts) != 0 {
+		t.Fatalf("A should have no conflict artifact after an auto-merge, got %v", artifacts)
+	}
+	if artifacts := listConflictArtifacts(t, localDirB); len(artifacts) != 0 {
+		t.Fatalf("B should have no conflict artifact after an auto-merge, got %v", artifacts)
+	}
+}
+
 // listConflictArtifacts returns conflict-artifact paths relative to
 // .relay/conflicts/, recursively — per conflictArtifactPath (syncer.go),
 // an artifact for remote path "/notion/Shared.md" lands nested at
