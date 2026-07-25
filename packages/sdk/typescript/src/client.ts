@@ -45,6 +45,8 @@ import {
   type ResourceAtEventResult,
   type ReadFileInput,
   type QueryFilesOptions,
+  type RebaseForkInput,
+  type RebaseForkResponse,
   type RegisterWebhookInput,
   type RegisterWebhookResponse,
   type RelayFileReadCacheOptions,
@@ -76,6 +78,7 @@ import type { ForkHandle } from "@relayfile/core";
 import { RelayFileSync, normalizeFilesystemEvent } from "./sync.js";
 import {
   InvalidStateError,
+  ParentMovedError,
   PayloadTooLargeError,
   QueueFullError,
   RelayFileApiError,
@@ -1667,6 +1670,15 @@ export class RelayFileClient {
     });
   }
 
+  async rebaseFork(input: RebaseForkInput): Promise<RebaseForkResponse> {
+    return this.request<RebaseForkResponse>({
+      method: "POST",
+      path: `/v1/workspaces/${encodeURIComponent(input.workspaceId)}/forks/${encodeURIComponent(input.forkId)}/rebase`,
+      correlationId: input.correlationId,
+      signal: input.signal
+    });
+  }
+
   async getEvents(workspaceId: string, options: GetEventsOptions = {}): Promise<EventFeedResponse> {
     const query = buildQuery({
       provider: options.provider,
@@ -2612,6 +2624,21 @@ export class RelayFileClient {
         message: data.message ?? "Invalid resource state",
         correlationId: data.correlationId,
         details
+      });
+    }
+
+    if (status === 409 && data.code === "parent_moved") {
+      const currentRevision = typeof data.currentRevision === "string"
+        ? data.currentRevision
+        : typeof details?.currentRevision === "string"
+          ? details.currentRevision
+          : "";
+      throw new ParentMovedError(status, {
+        code: data.code,
+        message: data.message ?? "Parent moved",
+        correlationId: data.correlationId,
+        details,
+        currentRevision
       });
     }
 

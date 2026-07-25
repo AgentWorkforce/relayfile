@@ -91,6 +91,7 @@ export {
 } from "./onWrite.js";
 export {
   InvalidStateError,
+  ParentMovedError,
   PayloadTooLargeError,
   QueueFullError,
   RelayFileApiError,
@@ -218,6 +219,9 @@ export type {
   OperationStatusResponse,
   QueuedResponse,
   QueryFilesOptions,
+  RebaseConflict,
+  RebaseForkInput,
+  RebaseForkResponse,
   ReadFileInput,
   RegisterWebhookInput,
   RegisterWebhookResponse,

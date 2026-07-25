@@ -5,6 +5,7 @@ import {
   RevisionConflictError,
   QueueFullError,
   InvalidStateError,
+  ParentMovedError,
   PayloadTooLargeError,
 } from "./errors.js";
 import type {
@@ -1816,6 +1817,34 @@ describe("RelayFileClient — existing methods", () => {
       expect(init.body).toBeUndefined();
     });
 
+    it("rebaseFork posts and returns clean paths and conflicts", async () => {
+      const payload = {
+        parentRevision: "rev_3",
+        cleanCount: 1,
+        conflicts: [{
+          path: "/docs/a.md",
+          forkType: "write",
+          liveExists: true,
+          liveRevision: "rev_2",
+          liveContentPreview: "# live",
+        }],
+      };
+      const f = mockFetch(payload);
+      const client = makeClient(f);
+
+      const res = await client.rebaseFork({
+        workspaceId: "ws_acme",
+        forkId: "fork_123",
+      });
+
+      expect(res).toEqual(payload);
+      const url = f.mock.calls[0]![0] as string;
+      const init = f.mock.calls[0]![1] as RequestInit;
+      expect(url).toBe("https://relay.test/v1/workspaces/ws_acme/forks/fork_123/rebase");
+      expect(init.method).toBe("POST");
+      expect(init.body).toBeUndefined();
+    });
+
     it("writeFile with forkId appends forkId and leaves body unchanged", async () => {
       const f = mockFetch({ opId: "op_1", status: "queued", targetRevision: "fork:fork_123:1" });
       const client = makeClient(f);
@@ -2012,7 +2041,7 @@ describe("RelayFileClient — error handling", () => {
     ).rejects.toThrow(RevisionConflictError);
   });
 
-  it("preserves parent_moved details on commitFork errors", async () => {
+  it("throws ParentMovedError with the current revision on parent_moved", async () => {
     const body = {
       code: "parent_moved",
       message: "parent moved",
@@ -2025,9 +2054,10 @@ describe("RelayFileClient — error handling", () => {
       await client.commitFork({ workspaceId: "ws_1", forkId: "fork_1" });
       expect.unreachable("Should have thrown");
     } catch (error) {
-      expect(error).toBeInstanceOf(RelayFileApiError);
-      const apiError = error as RelayFileApiError;
+      expect(error).toBeInstanceOf(ParentMovedError);
+      const apiError = error as ParentMovedError;
       expect(apiError.code).toBe("parent_moved");
+      expect(apiError.currentRevision).toBe("rev_new");
       expect(apiError.details?.currentRevision).toBe("rev_new");
     }
   });

@@ -776,6 +776,84 @@ func TestForkCommitAllowsDisjointParentWrite(t *testing.T) {
 	}
 }
 
+func TestForkRebaseClean(t *testing.T) {
+	server := newForkTestServer(t)
+	const workspaceID = "ws_fork_rebase_clean"
+	token := forkTestToken(t, workspaceID)
+	seed := writeFileForTest(t, server, token, workspaceID, "/notion/Fork.md", "0", "# base", "corr_fork_rebase_clean_seed")
+	fork := createForkForTest(t, server, token, workspaceID, "proposal-rebase-clean", nil)
+	writeForkFileForTest(t, server, token, workspaceID, fork.ForkID, "/notion/Fork.md", seed.TargetRevision, "# fork", "corr_fork_rebase_clean_overlay")
+	writeFileForTest(t, server, token, workspaceID, "/notion/Unrelated.md", "0", "# unrelated", "corr_fork_rebase_clean_parent")
+
+	rebase := rebaseForkForTest(t, server, token, workspaceID, fork.ForkID, "corr_fork_rebase_clean")
+	if rebase.ParentRevision == "" || rebase.CleanCount != 1 || len(rebase.Conflicts) != 0 {
+		t.Fatalf("unexpected clean rebase response: %+v", rebase)
+	}
+}
+
+func TestForkRebaseReportsGenuineConflict(t *testing.T) {
+	server := newForkTestServer(t)
+	const (
+		workspaceID = "ws_fork_rebase_conflict"
+		path        = "/notion/Fork.md"
+	)
+	token := forkTestToken(t, workspaceID)
+	seed := writeFileForTest(t, server, token, workspaceID, path, "0", "# base", "corr_fork_rebase_conflict_seed")
+	fork := createForkForTest(t, server, token, workspaceID, "proposal-rebase-conflict", nil)
+	writeForkFileForTest(t, server, token, workspaceID, fork.ForkID, path, seed.TargetRevision, "# fork edit", "corr_fork_rebase_conflict_overlay")
+	live := writeFileForTest(t, server, token, workspaceID, path, seed.TargetRevision, "# live edit", "corr_fork_rebase_conflict_parent")
+
+	rebase := rebaseForkForTest(t, server, token, workspaceID, fork.ForkID, "corr_fork_rebase_conflict")
+	if rebase.CleanCount != 0 || len(rebase.Conflicts) != 1 {
+		t.Fatalf("expected exactly one rebase conflict, got %+v", rebase)
+	}
+	conflict := rebase.Conflicts[0]
+	if conflict.Path != path ||
+		conflict.ForkType != "write" ||
+		!conflict.LiveExists ||
+		conflict.LiveRevision != live.TargetRevision ||
+		conflict.LiveContentPreview != "# live edit" {
+		t.Fatalf("unexpected rebase conflict: %+v", conflict)
+	}
+}
+
+func TestForkRebaseResolveThenCommit(t *testing.T) {
+	server := newForkTestServer(t)
+	const (
+		workspaceID = "ws_fork_rebase_resolve"
+		path        = "/notion/Fork.md"
+	)
+	token := forkTestToken(t, workspaceID)
+	seed := writeFileForTest(t, server, token, workspaceID, path, "0", "# base", "corr_fork_rebase_resolve_seed")
+	fork := createForkForTest(t, server, token, workspaceID, "proposal-rebase-resolve", nil)
+	writeForkFileForTest(t, server, token, workspaceID, fork.ForkID, path, seed.TargetRevision, "# fork edit", "corr_fork_rebase_resolve_overlay")
+	writeFileForTest(t, server, token, workspaceID, path, seed.TargetRevision, "# live edit", "corr_fork_rebase_resolve_parent")
+
+	rebase := rebaseForkForTest(t, server, token, workspaceID, fork.ForkID, "corr_fork_rebase_resolve")
+	if len(rebase.Conflicts) != 1 {
+		t.Fatalf("expected one rebase conflict, got %+v", rebase)
+	}
+	writeForkFileForTest(
+		t,
+		server,
+		token,
+		workspaceID,
+		fork.ForkID,
+		path,
+		rebase.Conflicts[0].LiveRevision,
+		"# reconciled edit",
+		"corr_fork_rebase_resolve_rewrite",
+	)
+	commit := commitForkForTest(t, server, token, workspaceID, fork.ForkID, "corr_fork_rebase_resolve_commit")
+	if commit.WrittenCount != 1 || commit.DeletedCount != 0 {
+		t.Fatalf("unexpected resolved commit response: %+v", commit)
+	}
+	parent := readFileForTest(t, server, token, workspaceID, path, "corr_fork_rebase_resolve_read")
+	if parent.Content != "# reconciled edit" {
+		t.Fatalf("expected reconciled content after commit, got %q", parent.Content)
+	}
+}
+
 func TestForkCommitReturnsParentMovedConflict(t *testing.T) {
 	server := newForkTestServer(t)
 	token := forkTestToken(t, "ws_fork_conflict")
@@ -6723,6 +6801,26 @@ func commitForkForTest(t *testing.T, server http.Handler, token, workspaceID, fo
 	var result relayfile.ForkCommitResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		t.Fatalf("decode fork commit response: %v", err)
+	}
+	return result
+}
+
+func rebaseForkForTest(t *testing.T, server http.Handler, token, workspaceID, forkID, correlationID string) relayfile.RebaseResponse {
+	t.Helper()
+	resp := doRequest(t, server, request{
+		method: http.MethodPost,
+		path:   "/v1/workspaces/" + workspaceID + "/forks/" + forkID + "/rebase",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": correlationID,
+		},
+	})
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200 rebasing fork, got %d (%s)", resp.Code, resp.Body.String())
+	}
+	var result relayfile.RebaseResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode fork rebase response: %v", err)
 	}
 	return result
 }

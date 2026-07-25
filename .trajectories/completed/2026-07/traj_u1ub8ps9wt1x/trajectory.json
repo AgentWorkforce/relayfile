@@ -1,0 +1,74 @@
+{
+  "id": "traj_u1ub8ps9wt1x",
+  "version": 1,
+  "task": {
+    "title": "Implement Phase 2 rebase fork HTTP and TypeScript SDK surfaces"
+  },
+  "status": "completed",
+  "startedAt": "2026-07-25T11:05:33.829Z",
+  "completedAt": "2026-07-25T11:07:38.969Z",
+  "agents": [
+    {
+      "name": "default",
+      "role": "lead",
+      "joinedAt": "2026-07-25T11:05:45.502Z"
+    }
+  ],
+  "chapters": [
+    {
+      "id": "chap_6xwl10pmawtm",
+      "title": "Work",
+      "agentName": "default",
+      "startedAt": "2026-07-25T11:05:45.502Z",
+      "endedAt": "2026-07-25T11:07:38.969Z",
+      "events": [
+        {
+          "ts": 1784977545503,
+          "type": "decision",
+          "content": "Return RebaseFork conflicts as successful response data: Return RebaseFork conflicts as successful response data",
+          "raw": {
+            "question": "Return RebaseFork conflicts as successful response data",
+            "chosen": "Return RebaseFork conflicts as successful response data",
+            "alternatives": [],
+            "reasoning": "Store semantics intentionally leave genuinely diverged overlay entries untouched; callers resolve by citing each reported liveRevision in a fork write or delete before commit"
+          },
+          "significance": "high"
+        },
+        {
+          "ts": 1784977545662,
+          "type": "reflection",
+          "content": "HTTP, OpenAPI, SDK, typed parent_moved recovery, and tests are implemented; build, vet, contract, client tests, and typecheck pass, while full Go and SDK suites are limited only by sandbox loopback and process-inspection restrictions",
+          "raw": {
+            "focalPoints": [
+              "contract-parity",
+              "sandbox-validation",
+              "typed-errors"
+            ],
+            "adjustments": "Used writable Go caches and read-only cached Node dependencies; preserved explicit evidence for blocked listener tests",
+            "confidence": 0.88
+          },
+          "significance": "high",
+          "tags": [
+            "focal:contract-parity",
+            "focal:sandbox-validation",
+            "focal:typed-errors",
+            "confidence:0.88"
+          ]
+        }
+      ]
+    }
+  ],
+  "retrospective": {
+    "summary": "Added the fork rebase HTTP endpoint and OpenAPI schemas, TypeScript SDK types/client method, typed ParentMovedError recovery, HTTP and SDK tests, and SDK parity classification; build, vet, contract, focused SDK tests, and typecheck pass, with listener/process tests explicitly blocked by sandbox policy",
+    "approach": "Standard approach",
+    "confidence": 0.88
+  },
+  "commits": [],
+  "filesChanged": [],
+  "projectId": "/Users/khaliqgant/relayfile",
+  "tags": [],
+  "_trace": {
+    "startRef": "36702620cf58dc6019386e809528fbe5b6ee8352",
+    "endRef": "36702620cf58dc6019386e809528fbe5b6ee8352"
+  }
+}

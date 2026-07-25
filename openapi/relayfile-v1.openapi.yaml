@@ -1039,6 +1039,54 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /v1/workspaces/{workspaceId}/forks/{forkId}/rebase:
+    post:
+      tags: [Forks]
+      operationId: rebaseFork
+      summary: Rebase staged fork changes against the current workspace
+      description: |
+        Re-pins the fork to the current workspace revision. Staged paths whose
+        recorded base still matches live state are counted as clean. Paths that
+        diverged are returned as structured conflicts and remain unchanged in
+        the fork until explicitly resolved by rewriting or deleting them with
+        the reported `liveRevision` as `If-Match`.
+      security:
+        - BearerAuth: [fs:write]
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/CorrelationId'
+        - name: forkId
+          in: path
+          required: true
+          schema:
+            type: string
+            minLength: 1
+      responses:
+        '200':
+          description: Fork rebased; any genuine path conflicts are returned as data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RebaseResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '410':
+          description: Fork has expired and can no longer be rebased
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
   /v1/workspaces/{workspaceId}/ops/{opId}:
     get:
       tags: [Operations]
@@ -3803,6 +3851,41 @@ components:
           type: integer
           minimum: 0
           description: Number of files deleted from the workspace.
+
+    RebaseResponse:
+      type: object
+      additionalProperties: false
+      required: [parentRevision, cleanCount, conflicts]
+      properties:
+        parentRevision:
+          type: string
+          description: Current workspace revision to which the fork was re-pinned.
+        cleanCount:
+          type: integer
+          minimum: 0
+          description: Number of staged paths whose recorded base still matched live state.
+        conflicts:
+          type: array
+          items:
+            $ref: '#/components/schemas/RebaseConflict'
+
+    RebaseConflict:
+      type: object
+      additionalProperties: false
+      required: [path, forkType, liveExists, liveRevision]
+      properties:
+        path:
+          type: string
+        forkType:
+          type: string
+          enum: [write, delete]
+        liveExists:
+          type: boolean
+        liveRevision:
+          type: string
+        liveContentPreview:
+          type: string
+          maxLength: 4000
 
     ForkCommitConflictResponse:
       allOf:
