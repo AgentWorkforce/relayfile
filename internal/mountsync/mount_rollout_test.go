@@ -54,33 +54,33 @@ func assertNoMountRolloutConflictArtifact(t *testing.T, syncer *Syncer, remotePa
 
 func TestMountRolloutShadowCache(t *testing.T) {
 	syncer := newMountRolloutTestSyncer(t, &fakeClient{})
-	const remotePath = "/notion/pkg/rollout.go"
+	const remotePath = "/notion/pkg/rollout.ts"
 
-	t.Run("round trips eligible Go content", func(t *testing.T) {
+	t.Run("round trips eligible text content", func(t *testing.T) {
 		const revision = "rev_base"
-		want := []byte("package pkg\n\nfunc Base() {}\n")
+		want := []byte("export const base = true;\n")
 		syncer.recordShadowContent(remotePath, revision, want)
 
 		got, ok := syncer.readShadowContent(remotePath, revision)
 		if !ok {
-			t.Fatal("expected recorded Go shadow content to be readable")
+			t.Fatal("expected recorded text shadow content to be readable")
 		}
 		if string(got) != string(want) {
 			t.Fatalf("shadow content = %q, want %q", got, want)
 		}
 	})
 
-	t.Run("non Go content is never cached", func(t *testing.T) {
+	t.Run("binary content is never cached", func(t *testing.T) {
 		const (
-			path     = "/notion/pkg/rollout.md"
-			revision = "rev_markdown"
+			path     = "/notion/assets/logo.png"
+			revision = "rev_png"
 		)
-		syncer.recordShadowContent(path, revision, []byte("# ignored"))
+		syncer.recordShadowContent(path, revision, []byte{0x89, 0x50, 0x4e, 0x47})
 		if _, ok := syncer.readShadowContent(path, revision); ok {
-			t.Fatal("non-Go shadow content should always miss")
+			t.Fatal("binary shadow content should always miss")
 		}
 		if _, err := os.Stat(shadowArtifactPath(syncer.mountShadowDir, path, revision)); !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("non-Go record unexpectedly created a shadow file: %v", err)
+			t.Fatalf("binary record unexpectedly created a shadow file: %v", err)
 		}
 	})
 
@@ -92,12 +92,12 @@ func TestMountRolloutShadowCache(t *testing.T) {
 
 	t.Run("new revision prunes old shadow", func(t *testing.T) {
 		const (
-			path        = "/notion/pkg/prune.go"
+			path        = "/notion/pkg/prune.ts"
 			oldRevision = "rev_old"
 			newRevision = "rev_new"
 		)
-		syncer.recordShadowContent(path, oldRevision, []byte("package pkg\n"))
-		syncer.recordShadowContent(path, newRevision, []byte("package pkg\n// newer\n"))
+		syncer.recordShadowContent(path, oldRevision, []byte("export const value = 1;\n"))
+		syncer.recordShadowContent(path, newRevision, []byte("export const value = 2;\n"))
 
 		matches, err := filepath.Glob(shadowArtifactGlob(syncer.mountShadowDir, path))
 		if err != nil {
@@ -110,6 +110,27 @@ func TestMountRolloutShadowCache(t *testing.T) {
 			t.Fatalf("old shadow file should be pruned, stat error = %v", err)
 		}
 	})
+}
+
+func TestMountRolloutMergeEligible(t *testing.T) {
+	tests := []struct {
+		path string
+		want bool
+	}{
+		{path: "/src/app.ts", want: true},
+		{path: "/src/app.py", want: true},
+		{path: "/config/settings.json", want: true},
+		{path: "/README", want: true},
+		{path: "/assets/logo.png", want: false},
+		{path: "/build/archive.zip", want: false},
+	}
+	for _, test := range tests {
+		t.Run(test.path, func(t *testing.T) {
+			if got := mountRolloutMergeEligible(test.path); got != test.want {
+				t.Fatalf("mountRolloutMergeEligible(%q) = %t, want %t (content type %q)", test.path, got, test.want, detectContentType(test.path))
+			}
+		})
+	}
 }
 
 // TestMountRolloutShadowCachePopulatesFromPollModeAlone is a regression test
@@ -191,13 +212,13 @@ func TestAttemptMountRolloutMergeAppliesVerifiedResult(t *testing.T) {
 		remotePath: {Path: remotePath, Revision: "rev_merged", ContentType: "text/x-go", Content: merged},
 	}}
 	client.mergeFileFunc = func(_ context.Context, workspaceID, path, strategy, baseRevision, baseContent, content, contentType string) (MergeResult, error) {
-		if workspaceID != "ws_mount_rollout" || path != remotePath || strategy != MergeStrategyGoTopLevelFunctions {
+		if workspaceID != "ws_mount_rollout" || path != remotePath || strategy != MergeStrategyThreeWayLines {
 			t.Fatalf("unexpected merge request workspace=%q path=%q strategy=%q", workspaceID, path, strategy)
 		}
 		if baseRevision != "rev_base" || baseContent != base || content != local || contentType == "" {
 			t.Fatalf("unexpected merge request baseRevision=%q baseContent=%q content=%q contentType=%q", baseRevision, baseContent, content, contentType)
 		}
-		return MergeResult{TargetRevision: "rev_merged", Strategy: MergeStrategyGoTopLevelFunctions}, nil
+		return MergeResult{TargetRevision: "rev_merged", Strategy: MergeStrategyThreeWayLines}, nil
 	}
 	syncer := newMountRolloutTestSyncer(t, client)
 	localPath, snapshot := writeMountRolloutLocalFile(t, syncer, "pkg/service.go", local)
@@ -299,11 +320,11 @@ func TestMountRolloutConflictPathAutoMergesGoFile(t *testing.T) {
 		return BulkWriteResponse{}, nil
 	}
 	client.mergeFileFunc = func(_ context.Context, _, path, strategy, baseRevision, baseContent, content, contentType string) (MergeResult, error) {
-		if path != remotePath || strategy != MergeStrategyGoTopLevelFunctions || baseRevision != "rev_base" || baseContent != base || content != local || contentType == "" {
+		if path != remotePath || strategy != MergeStrategyThreeWayLines || baseRevision != "rev_base" || baseContent != base || content != local || contentType == "" {
 			t.Fatalf("unexpected merge request path=%q strategy=%q baseRevision=%q baseContent=%q content=%q contentType=%q", path, strategy, baseRevision, baseContent, content, contentType)
 		}
 		client.files[remotePath] = RemoteFile{Path: remotePath, Revision: "rev_merged", ContentType: "text/x-go", Content: merged}
-		return MergeResult{TargetRevision: "rev_merged", Strategy: MergeStrategyGoTopLevelFunctions}, nil
+		return MergeResult{TargetRevision: "rev_merged", Strategy: MergeStrategyThreeWayLines}, nil
 	}
 	syncer := newMountRolloutTestSyncer(t, client)
 	if err := syncer.SyncOnce(context.Background()); err != nil {
@@ -324,6 +345,62 @@ func TestMountRolloutConflictPathAutoMergesGoFile(t *testing.T) {
 
 	if err := syncer.HandleLocalChange(context.Background(), "pkg/service.go", fsnotify.Write); err != nil {
 		t.Fatalf("conflicting Go push: %v", err)
+	}
+	assertLocalFileContent(t, localPath, merged)
+	assertNoMountRolloutConflictArtifact(t, syncer, remotePath)
+	if client.mergeFileCalls != 1 {
+		t.Fatalf("MergeFile calls = %d, want 1", client.mergeFileCalls)
+	}
+}
+
+func TestMountRolloutConflictPathAutoMergesTypeScriptFile(t *testing.T) {
+	const (
+		remotePath = "/notion/src/app.ts"
+		base       = "export const alpha = \"base\";\nexport const beta = \"base\";\n"
+		remote     = "export const alpha = \"base\";\nexport const beta = \"remote\";\n"
+		local      = "export const alpha = \"local\";\nexport const beta = \"base\";\n"
+		merged     = "export const alpha = \"local\";\nexport const beta = \"remote\";\n"
+	)
+	client := &fakeClient{files: map[string]RemoteFile{
+		remotePath: {Path: remotePath, Revision: "rev_base", ContentType: "text/typescript", Content: base},
+	}}
+	client.bulkWriteResponseFunc = func(_ context.Context, _ string, files []BulkWriteFile) (BulkWriteResponse, error) {
+		for _, file := range files {
+			current := client.files[normalizeRemotePath(file.Path)]
+			if file.IfMatch != current.Revision {
+				return BulkWriteResponse{ErrorCount: 1, Errors: []BulkWriteError{{
+					Path: file.Path, Code: "conflict", Message: "revision conflict",
+				}}}, nil
+			}
+		}
+		return BulkWriteResponse{}, nil
+	}
+	client.mergeFileFunc = func(_ context.Context, _, path, strategy, baseRevision, baseContent, content, contentType string) (MergeResult, error) {
+		if path != remotePath || strategy != MergeStrategyThreeWayLines || baseRevision != "rev_base" || baseContent != base || content != local || contentType == "" {
+			t.Fatalf("unexpected merge request path=%q strategy=%q baseRevision=%q baseContent=%q content=%q contentType=%q", path, strategy, baseRevision, baseContent, content, contentType)
+		}
+		client.files[remotePath] = RemoteFile{Path: remotePath, Revision: "rev_merged", ContentType: "text/typescript", Content: merged}
+		return MergeResult{TargetRevision: "rev_merged", Strategy: MergeStrategyThreeWayLines}, nil
+	}
+	syncer := newMountRolloutTestSyncer(t, client)
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("bootstrap sync: %v", err)
+	}
+
+	localPath := filepath.Join(syncer.localRoot, "src", "app.ts")
+	if err := syncer.HandleLocalChange(context.Background(), "src/app.ts", fsnotify.Write); err != nil {
+		t.Fatalf("confirmed-clean local change: %v", err)
+	}
+	if _, ok := syncer.readShadowContent(remotePath, "rev_base"); !ok {
+		t.Fatal("confirmed-clean cycle did not populate the shadow cache")
+	}
+	client.files[remotePath] = RemoteFile{Path: remotePath, Revision: "rev_remote", ContentType: "text/typescript", Content: remote}
+	if err := os.WriteFile(localPath, []byte(local), 0o644); err != nil {
+		t.Fatalf("write local TypeScript edit: %v", err)
+	}
+
+	if err := syncer.HandleLocalChange(context.Background(), "src/app.ts", fsnotify.Write); err != nil {
+		t.Fatalf("conflicting TypeScript push: %v", err)
 	}
 	assertLocalFileContent(t, localPath, merged)
 	assertNoMountRolloutConflictArtifact(t, syncer, remotePath)

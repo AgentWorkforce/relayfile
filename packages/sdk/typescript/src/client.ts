@@ -1614,10 +1614,9 @@ export class RelayFileClient {
         content: input.content,
         baseRevision: input.baseRevision,
         baseContent: input.baseContent,
-        // Merge is restricted to .go files server-side; default here
-        // rather than relying on an omitted field falling through to the
-        // server's generic "text/plain" fallback for an unrelated code path.
-        contentType: input.contentType ?? "text/x-go",
+        // A neutral default matches the server and works for either merge
+        // strategy when the caller did not provide a more specific type.
+        contentType: input.contentType ?? "text/plain",
         contentIdentity: input.contentIdentity
       },
       signal: input.signal

@@ -1849,7 +1849,7 @@ describe("RelayFileClient — existing methods", () => {
     it("mergeFile posts the complete three-way merge request and returns revisions", async () => {
       const payload = {
         targetRevision: "rev_3",
-        strategy: "go-top-level-functions-v1",
+        strategy: "three-way-lines-v1",
         baseRevision: "rev_1",
         mergedAgainstRevision: "rev_2",
       };
@@ -1858,12 +1858,11 @@ describe("RelayFileClient — existing methods", () => {
 
       const res = await client.mergeFile({
         workspaceId: "ws_acme",
-        path: "/src/a.go",
-        strategy: "go-top-level-functions-v1",
-        content: "package sample\n\nfunc Alpha() int { return 2 }\n",
+        path: "/src/a.ts",
+        strategy: "three-way-lines-v1",
+        content: "export const alpha = 2;\n",
         baseRevision: "rev_1",
-        baseContent: "package sample\n\nfunc Alpha() int { return 1 }\n",
-        contentType: "text/x-go",
+        baseContent: "export const alpha = 1;\n",
         contentIdentity: { kind: "merge", key: "merge-1", ttlSeconds: 60 },
         correlationId: "corr_merge_1",
       });
@@ -1871,15 +1870,15 @@ describe("RelayFileClient — existing methods", () => {
       expect(res).toEqual(payload);
       const url = f.mock.calls[0]![0] as string;
       const init = f.mock.calls[0]![1] as RequestInit;
-      expect(url).toBe("https://relay.test/v1/workspaces/ws_acme/fs/merge?path=%2Fsrc%2Fa.go");
+      expect(url).toBe("https://relay.test/v1/workspaces/ws_acme/fs/merge?path=%2Fsrc%2Fa.ts");
       expect(init.method).toBe("POST");
       expect((init.headers as Record<string, string>)["X-Correlation-Id"]).toBe("corr_merge_1");
       expect(JSON.parse(init.body as string)).toEqual({
-        strategy: "go-top-level-functions-v1",
-        content: "package sample\n\nfunc Alpha() int { return 2 }\n",
+        strategy: "three-way-lines-v1",
+        content: "export const alpha = 2;\n",
         baseRevision: "rev_1",
-        baseContent: "package sample\n\nfunc Alpha() int { return 1 }\n",
-        contentType: "text/x-go",
+        baseContent: "export const alpha = 1;\n",
+        contentType: "text/plain",
         contentIdentity: { kind: "merge", key: "merge-1", ttlSeconds: 60 },
       });
     });
