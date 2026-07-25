@@ -171,6 +171,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case len(parts) == 5 && parts[3] == "fs" && parts[4] == "bulk" && r.Method == http.MethodPost:
 		requiredScope = "fs:write"
 		route = "bulk_write"
+	case len(parts) == 5 && parts[3] == "fs" && parts[4] == "merge" && r.Method == http.MethodPost:
+		requiredScope = "fs:write"
+		route = "merge_file"
 	case len(parts) == 6 && parts[3] == "fs" && parts[4] == "import" && parts[5] == "github-tarball" && r.Method == http.MethodPost:
 		requiredScope = "fs:write"
 		route = "github_tarball_import"
@@ -262,7 +265,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		switch route {
 		case "tree":
 			scopePath = normalizeRoutePath(r.URL.Query().Get("path"))
-		case "read_file", "write_file", "delete_file":
+		case "read_file", "write_file", "merge_file", "delete_file":
 			scopePath = strings.TrimSpace(r.URL.Query().Get("path"))
 		case "export", "query_files":
 			scopePath = normalizeRoutePath(r.URL.Query().Get("path"))
@@ -317,6 +320,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleTree(w, r, workspaceID, correlationID, claims)
 	case "bulk_write":
 		s.handleBulkWrite(w, r, workspaceID, correlationID, claims)
+	case "merge_file":
+		s.handleMergeFile(w, r, workspaceID, correlationID, claims)
 	case "export":
 		s.handleExport(w, r, workspaceID, correlationID, claims)
 	case "github_tarball_import":
@@ -1248,6 +1253,8 @@ func aclCheckPath(route string, r *http.Request) (string, bool, bool) {
 		return path, true, true
 	case "write_file":
 		return path, aclTargetExists(r), true
+	case "merge_file":
+		return path, true, true
 	case "tree", "query_files":
 		// Directory-level operations: check ACL for the path prefix.
 		// Handlers also do per-file ACL filtering as a second layer of defense.
@@ -1828,6 +1835,89 @@ func (s *Server) handleWriteFile(w http.ResponseWriter, r *http.Request, workspa
 		return
 	}
 	writeJSON(w, http.StatusAccepted, result)
+}
+
+func (s *Server) handleMergeFile(w http.ResponseWriter, r *http.Request, workspaceID, correlationID string, claims tokenClaims) {
+	path := r.URL.Query().Get("path")
+	if path == "" {
+		writeError(w, http.StatusBadRequest, "bad_request", "missing path query", correlationID)
+		return
+	}
+
+	_, readErr := s.store.ReadFile(workspaceID, path)
+	if readErr == nil {
+		existingPermissions := s.store.ResolveFilePermissions(workspaceID, path, true)
+		if !filePermissionAllows(existingPermissions, workspaceID, &claims) {
+			writeError(w, http.StatusForbidden, "forbidden", "file access denied by permission policy", correlationID)
+			return
+		}
+	} else if readErr == relayfile.ErrNotFound {
+		inheritedPermissions := s.store.ResolveFilePermissions(workspaceID, path, false)
+		if !filePermissionAllows(inheritedPermissions, workspaceID, &claims) {
+			writeError(w, http.StatusForbidden, "forbidden", "file access denied by permission policy", correlationID)
+			return
+		}
+	}
+
+	var body struct {
+		Strategy        string                     `json:"strategy"`
+		Content         string                     `json:"content"`
+		BaseRevision    string                     `json:"baseRevision"`
+		BaseContent     string                     `json:"baseContent"`
+		ContentType     string                     `json:"contentType"`
+		ContentIdentity *relayfile.ContentIdentity `json:"contentIdentity"`
+	}
+	if !s.decodeJSONBody(w, r, correlationID, &body) {
+		return
+	}
+
+	result, err := s.store.MergeFile(relayfile.MergeRequest{
+		WorkspaceID:     workspaceID,
+		Path:            path,
+		Strategy:        body.Strategy,
+		Content:         body.Content,
+		BaseRevision:    body.BaseRevision,
+		BaseContent:     body.BaseContent,
+		ContentType:     body.ContentType,
+		CorrelationID:   correlationID,
+		ContentIdentity: body.ContentIdentity,
+	})
+	if err != nil {
+		var conflict *relayfile.MergeConflictError
+		if errors.As(err, &conflict) {
+			writeJSON(w, http.StatusConflict, map[string]any{
+				"code":            "merge_conflict",
+				"message":         err.Error(),
+				"currentRevision": conflict.CurrentRevision,
+				"conflicts":       conflict.Conflicts,
+				"correlationId":   correlationID,
+			})
+			return
+		}
+
+		var ineligible *relayfile.ErrMergeIneligible
+		if errors.As(err, &ineligible) {
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{
+				"code":          "merge_ineligible",
+				"message":       err.Error(),
+				"reason":        ineligible.Reason,
+				"correlationId": correlationID,
+			})
+			return
+		}
+
+		switch {
+		case errors.Is(err, relayfile.ErrMergeBaseUnavailable):
+			writeError(w, http.StatusConflict, "merge_base_unavailable", err.Error(), correlationID)
+		case errors.Is(err, relayfile.ErrInvalidInput):
+			writeError(w, http.StatusBadRequest, "bad_request", err.Error(), correlationID)
+		default:
+			writeError(w, http.StatusInternalServerError, "internal_error", err.Error(), correlationID)
+		}
+		return
+	}
+
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (s *Server) handleDeleteFile(w http.ResponseWriter, r *http.Request, workspaceID, correlationID string, claims tokenClaims) {

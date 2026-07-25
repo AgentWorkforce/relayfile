@@ -951,6 +951,34 @@ export interface WriteFileInput {
   signal?: AbortSignal;
 }
 
+export interface MergeFileInput {
+  workspaceId: string;
+  path: string;
+  strategy: "go-top-level-functions-v1";
+  content: string;
+  baseRevision: string;
+  baseContent: string;
+  contentType?: string;
+  contentIdentity?: ContentIdentity;
+  correlationId?: string;
+  signal?: AbortSignal;
+}
+
+export interface MergeFileResponse {
+  targetRevision: string;
+  strategy: "go-top-level-functions-v1";
+  baseRevision: string;
+  mergedAgainstRevision: string;
+}
+
+export interface MergeConflictDetail {
+  unit: string;
+  reason: string;
+  base?: string;
+  mine?: string;
+  theirs?: string;
+}
+
 export interface DeleteFileInput {
   workspaceId: string;
   path: string;

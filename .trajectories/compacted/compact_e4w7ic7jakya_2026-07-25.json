@@ -1,0 +1,48 @@
+{
+  "id": "compact_e4w7ic7jakya",
+  "version": 1,
+  "type": "compacted",
+  "compactedAt": "2026-07-25T12:49:52.183Z",
+  "sourceTrajectories": [
+    "traj_n3ttdne1iddd"
+  ],
+  "dateRange": {
+    "start": "2026-07-25T12:37:47.418Z",
+    "end": "2026-07-25T12:49:51.915Z"
+  },
+  "summary": {
+    "totalDecisions": 2,
+    "totalEvents": 3,
+    "uniqueAgents": [
+      "default"
+    ]
+  },
+  "decisionGroups": [
+    {
+      "category": "architecture",
+      "decisions": [
+        {
+          "question": "Expose merge ineligibility as HTTP 422 and preserve fallback errors as generic SDK API errors",
+          "chosen": "Expose merge ineligibility as HTTP 422 and preserve fallback errors as generic SDK API errors",
+          "reasoning": "The request is syntactically valid but cannot be processed by the selected symbol-merge strategy; only merge_conflict needs a dedicated structured SDK class, while merge_base_unavailable and merge_ineligible remain branchable through RelayFileApiError.code.",
+          "fromTrajectory": "traj_n3ttdne1iddd"
+        }
+      ]
+    },
+    {
+      "category": "api",
+      "decisions": [
+        {
+          "question": "Apply merge authorization to the target path as an ordinary fs:write mutation",
+          "chosen": "Apply merge authorization to the target path as an ordinary fs:write mutation",
+          "reasoning": "The endpoint mutates the existing live file, so it uses the same path-scoped bearer checks and effective target-file permission checks as PUT /fs/file.",
+          "fromTrajectory": "traj_n3ttdne1iddd"
+        }
+      ]
+    }
+  ],
+  "keyLearnings": [],
+  "keyFindings": [],
+  "filesAffected": [],
+  "commits": []
+}

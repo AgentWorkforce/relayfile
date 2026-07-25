@@ -545,6 +545,15 @@ type Store struct {
 	providerWriteConfigured bool
 	providerWriteAction     ProviderWriteActionFunc
 	adapters                map[string]ProviderAdapter
+	// revisionProvenance is an in-memory-only, bounded ledger of
+	// (workspaceID, path, revision) -> content hash, used by MergeFile to
+	// verify a caller-supplied merge base actually matches what was really
+	// at that revision before trusting it for a three-way merge. Keyed by
+	// workspaceID+"\x00"+path; not persisted (a restart just means an
+	// in-flight merge citing a pre-restart revision safely falls back to
+	// merge_base_unavailable, the same fail-closed behavior as any other
+	// provenance miss).
+	revisionProvenance map[string][]revisionProvenanceEntry
 	backendProfile          string
 	maxAttempts             int
 	retryDelay              time.Duration
@@ -950,6 +959,7 @@ func NewStoreWithOptions(opts StoreOptions) *Store {
 		envelopeAttempts:        map[string]int{},
 		envelopeNextAttempt:     map[string]time.Time{},
 		deadLetters:             map[string]EnvelopeDeadLetter{},
+		revisionProvenance:      map[string][]revisionProvenanceEntry{},
 		providerWrite:           writer,
 		providerWriteConfigured: legacyWriterConfigured,
 		providerWriteAction:     actionWriter,
@@ -3778,6 +3788,52 @@ func nowRFC3339NanoUTC() string {
 	return time.Now().UTC().Format(time.RFC3339Nano)
 }
 
+// maxRevisionProvenancePerPath bounds how many past (revision -> hash)
+// entries are retained per path — a ring buffer, not full history. Only
+// needs to cover the realistic staleness window a merge caller might cite;
+// older entries age out and a merge against them safely reports
+// merge_base_unavailable (fail-closed, not an error).
+const maxRevisionProvenancePerPath = 20
+
+type revisionProvenanceEntry struct {
+	Revision string
+	Hash     string
+	Deleted  bool
+}
+
+func revisionProvenanceKey(workspaceID, path string) string {
+	return workspaceID + "\x00" + normalizePath(path)
+}
+
+func (s *Store) recordRevisionProvenanceLocked(workspaceID, path, revision, hash string) {
+	key := revisionProvenanceKey(workspaceID, path)
+	entries := s.revisionProvenance[key]
+	entries = append(entries, revisionProvenanceEntry{
+		Revision: revision,
+		Hash:     hash,
+		Deleted:  hash == "",
+	})
+	if len(entries) > maxRevisionProvenancePerPath {
+		entries = entries[len(entries)-maxRevisionProvenancePerPath:]
+	}
+	s.revisionProvenance[key] = entries
+}
+
+// lookupRevisionProvenanceLocked returns the recorded content hash for
+// (workspaceID, path, revision), and whether it was found at all. A miss
+// means the revision is too old (evicted), was never recorded (pre-Phase-3
+// data, or a restart since — the ledger is in-memory only), or never
+// existed — callers must treat a miss as "cannot verify," not "matches."
+func (s *Store) lookupRevisionProvenanceLocked(workspaceID, path, revision string) (revisionProvenanceEntry, bool) {
+	key := revisionProvenanceKey(workspaceID, path)
+	for _, entry := range s.revisionProvenance[key] {
+		if entry.Revision == revision {
+			return entry, true
+		}
+	}
+	return revisionProvenanceEntry{}, false
+}
+
 func (s *Store) recordWriteLocked(ws *workspaceState, path, revision, eventType, provider, correlationID string) (WriteResult, writebackTask) {
 	return s.recordWriteWithContentIdentityLocked(ws, path, revision, eventType, provider, correlationID, nil)
 }
@@ -3807,6 +3863,7 @@ func (s *Store) recordWriteWithContentIdentityLocked(ws *workspaceState, path, r
 	if eventType != "file.deleted" {
 		contentHash = storedContentHashForFile(ws.Files[path])
 	}
+	s.recordRevisionProvenanceLocked(workspaceID, path, revision, contentHash)
 	event := Event{
 		EventID:       s.nextEventIDLocked(),
 		Type:          eventType,

@@ -1,4 +1,4 @@
-import type { ConflictErrorResponse, ErrorResponse } from "./types.js";
+import type { ConflictErrorResponse, ErrorResponse, MergeConflictDetail } from "./types.js";
 
 export class RelayFileApiError extends Error {
   public readonly status: number;
@@ -37,6 +37,21 @@ export class ParentMovedError extends RelayFileApiError {
     super(status, payload);
     this.name = "ParentMovedError";
     this.currentRevision = payload.currentRevision;
+  }
+}
+
+export class MergeConflictError extends RelayFileApiError {
+  public readonly currentRevision: string;
+  public readonly conflicts: MergeConflictDetail[];
+
+  constructor(
+    status: number,
+    payload: Partial<ErrorResponse> & { currentRevision: string; conflicts: MergeConflictDetail[] }
+  ) {
+    super(status, payload);
+    this.name = "MergeConflictError";
+    this.currentRevision = payload.currentRevision;
+    this.conflicts = payload.conflicts;
   }
 }
 

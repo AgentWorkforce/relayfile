@@ -679,6 +679,274 @@ func TestLifecycleAndConflicts(t *testing.T) {
 	t.Fatalf("expected at least one file_delete operation in filtered list")
 }
 
+func TestMergeFileHTTPContract(t *testing.T) {
+	t.Parallel()
+
+	const (
+		strategy = relayfile.MergeStrategyGoTopLevelFunctions
+		filePath = "/src/merge.go"
+		base     = "package sample\n\nfunc Alpha() int { return 1 }\n\nfunc Beta() int { return 1 }\n"
+	)
+
+	tests := []struct {
+		name string
+		run  func(t *testing.T)
+	}{
+		{
+			name: "auto-merges disjoint functions and returns revisions",
+			run: func(t *testing.T) {
+				const workspaceID = "ws_merge_success"
+				server := newMergeTestServer(t)
+				token := forkTestToken(t, workspaceID)
+				seed := writeFileForTest(t, server, token, workspaceID, filePath, "0", base, "corr_merge_success_seed")
+				liveContent := "package sample\n\nfunc Alpha() int { return 1 }\n\nfunc Beta() int { return 3 }\n"
+				live := writeFileForTest(t, server, token, workspaceID, filePath, seed.TargetRevision, liveContent, "corr_merge_success_live")
+
+				resp := postMergeFileForTest(t, server, token, relayfile.MergeRequest{
+					WorkspaceID:     workspaceID,
+					Path:            filePath,
+					Strategy:        strategy,
+					Content:         "package sample\n\nfunc Alpha() int { return 2 }\n\nfunc Beta() int { return 1 }\n",
+					BaseRevision:    seed.TargetRevision,
+					BaseContent:     base,
+					ContentType:     "text/x-go",
+					CorrelationID:   "corr_merge_success",
+					ContentIdentity: &relayfile.ContentIdentity{Kind: "merge-test", Key: "success"},
+				})
+				if resp.Code != http.StatusOK {
+					t.Fatalf("expected 200 merging file, got %d (%s)", resp.Code, resp.Body.String())
+				}
+				var result relayfile.MergeResponse
+				if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+					t.Fatalf("decode merge response: %v", err)
+				}
+				if result.TargetRevision == "" || result.TargetRevision == live.TargetRevision ||
+					result.Strategy != strategy ||
+					result.BaseRevision != seed.TargetRevision ||
+					result.MergedAgainstRevision != live.TargetRevision {
+					t.Fatalf("unexpected merge response: %+v", result)
+				}
+
+				merged := readFileForTest(t, server, token, workspaceID, filePath, "corr_merge_success_read")
+				if !strings.Contains(merged.Content, "func Alpha() int { return 2 }") ||
+					!strings.Contains(merged.Content, "func Beta() int { return 3 }") {
+					t.Fatalf("expected both disjoint edits in merged content, got:\n%s", merged.Content)
+				}
+				if merged.Revision != result.TargetRevision || merged.ContentType != "text/x-go" {
+					t.Fatalf("unexpected merged file metadata: %+v", merged)
+				}
+			},
+		},
+		{
+			name: "reports per-unit details for a genuine conflict",
+			run: func(t *testing.T) {
+				const workspaceID = "ws_merge_conflict"
+				server := newMergeTestServer(t)
+				token := forkTestToken(t, workspaceID)
+				seed := writeFileForTest(t, server, token, workspaceID, filePath, "0", base, "corr_merge_conflict_seed")
+				liveContent := "package sample\n\nfunc Alpha() int { return 3 }\n\nfunc Beta() int { return 1 }\n"
+				live := writeFileForTest(t, server, token, workspaceID, filePath, seed.TargetRevision, liveContent, "corr_merge_conflict_live")
+
+				resp := postMergeFileForTest(t, server, token, relayfile.MergeRequest{
+					WorkspaceID:   workspaceID,
+					Path:          filePath,
+					Strategy:      strategy,
+					Content:       "package sample\n\nfunc Alpha() int { return 2 }\n\nfunc Beta() int { return 1 }\n",
+					BaseRevision:  seed.TargetRevision,
+					BaseContent:   base,
+					CorrelationID: "corr_merge_conflict",
+				})
+				if resp.Code != http.StatusConflict {
+					t.Fatalf("expected 409 merging conflicting file, got %d (%s)", resp.Code, resp.Body.String())
+				}
+				var payload struct {
+					Code            string                          `json:"code"`
+					CorrelationID   string                          `json:"correlationId"`
+					CurrentRevision string                          `json:"currentRevision"`
+					Conflicts       []relayfile.MergeConflictDetail `json:"conflicts"`
+				}
+				if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+					t.Fatalf("decode merge conflict response: %v", err)
+				}
+				if payload.Code != "merge_conflict" || payload.CorrelationID != "corr_merge_conflict" || payload.CurrentRevision != live.TargetRevision {
+					t.Fatalf("unexpected merge conflict envelope: %+v", payload)
+				}
+				if len(payload.Conflicts) != 1 {
+					t.Fatalf("expected one unit conflict, got %+v", payload.Conflicts)
+				}
+				conflict := payload.Conflicts[0]
+				if conflict.Unit != "Alpha" || conflict.Reason != "concurrently changed" ||
+					conflict.Base != "func Alpha() int { return 1 }" ||
+					conflict.Mine != "func Alpha() int { return 2 }" ||
+					conflict.Theirs != "func Alpha() int { return 3 }" {
+					t.Fatalf("unexpected per-unit conflict details: %+v", conflict)
+				}
+				unchanged := readFileForTest(t, server, token, workspaceID, filePath, "corr_merge_conflict_read")
+				if unchanged.Content != liveContent || unchanged.Revision != live.TargetRevision {
+					t.Fatalf("conflicting merge must not mutate live file: %+v", unchanged)
+				}
+			},
+		},
+		{
+			name: "reports an unverifiable base",
+			run: func(t *testing.T) {
+				const workspaceID = "ws_merge_base_unavailable"
+				server := newMergeTestServer(t)
+				token := forkTestToken(t, workspaceID)
+				seed := writeFileForTest(t, server, token, workspaceID, filePath, "0", base, "corr_merge_base_seed")
+
+				resp := postMergeFileForTest(t, server, token, relayfile.MergeRequest{
+					WorkspaceID:   workspaceID,
+					Path:          filePath,
+					Strategy:      strategy,
+					Content:       "package sample\n\nfunc Alpha() int { return 2 }\n\nfunc Beta() int { return 1 }\n",
+					BaseRevision:  "rev_unknown",
+					BaseContent:   base,
+					CorrelationID: "corr_merge_base_unavailable",
+				})
+				if resp.Code != http.StatusConflict {
+					t.Fatalf("expected 409 for unavailable merge base, got %d (%s)", resp.Code, resp.Body.String())
+				}
+				var payload map[string]any
+				if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+					t.Fatalf("decode merge base error: %v", err)
+				}
+				if payload["code"] != "merge_base_unavailable" || payload["correlationId"] != "corr_merge_base_unavailable" {
+					t.Fatalf("unexpected merge base error: %+v", payload)
+				}
+				unchanged := readFileForTest(t, server, token, workspaceID, filePath, "corr_merge_base_read")
+				if unchanged.Content != base || unchanged.Revision != seed.TargetRevision {
+					t.Fatalf("unverifiable merge base must not mutate live file: %+v", unchanged)
+				}
+			},
+		},
+		{
+			name: "reports an ineligible merge with its reason",
+			run: func(t *testing.T) {
+				const workspaceID = "ws_merge_ineligible"
+				server := newMergeTestServer(t)
+				token := forkTestToken(t, workspaceID)
+				seed := writeFileForTest(t, server, token, workspaceID, filePath, "0", base, "corr_merge_ineligible_seed")
+
+				resp := postMergeFileForTest(t, server, token, relayfile.MergeRequest{
+					WorkspaceID:   workspaceID,
+					Path:          filePath,
+					Strategy:      "unsupported",
+					Content:       base,
+					BaseRevision:  seed.TargetRevision,
+					BaseContent:   base,
+					CorrelationID: "corr_merge_ineligible",
+				})
+				if resp.Code != http.StatusUnprocessableEntity {
+					t.Fatalf("expected 422 for ineligible merge, got %d (%s)", resp.Code, resp.Body.String())
+				}
+				var payload map[string]any
+				if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+					t.Fatalf("decode merge ineligible error: %v", err)
+				}
+				if payload["code"] != "merge_ineligible" ||
+					payload["correlationId"] != "corr_merge_ineligible" ||
+					!strings.Contains(fmt.Sprint(payload["reason"]), "unsupported strategy") {
+					t.Fatalf("unexpected merge ineligible error: %+v", payload)
+				}
+			},
+		},
+		{
+			name: "maps invalid store input to bad request",
+			run: func(t *testing.T) {
+				const workspaceID = "ws_merge_invalid"
+				server := newMergeTestServer(t)
+				token := forkTestToken(t, workspaceID)
+				writeFileForTest(t, server, token, workspaceID, filePath, "0", base, "corr_merge_invalid_seed")
+
+				resp := postMergeFileForTest(t, server, token, relayfile.MergeRequest{
+					WorkspaceID:   workspaceID,
+					Path:          filePath,
+					Strategy:      strategy,
+					Content:       base,
+					BaseContent:   base,
+					CorrelationID: "corr_merge_invalid",
+				})
+				if resp.Code != http.StatusBadRequest {
+					t.Fatalf("expected 400 for invalid merge input, got %d (%s)", resp.Code, resp.Body.String())
+				}
+				var payload map[string]any
+				if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+					t.Fatalf("decode invalid merge error: %v", err)
+				}
+				if payload["code"] != "bad_request" || payload["correlationId"] != "corr_merge_invalid" {
+					t.Fatalf("unexpected invalid merge error: %+v", payload)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			tt.run(t)
+		})
+	}
+}
+
+func TestMergeFileEnforcesPathScopedWriteAuthorization(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		scopes     []string
+		wantStatus int
+	}{
+		{name: "requires fs write", scopes: []string{"fs:read"}, wantStatus: http.StatusForbidden},
+		{name: "rejects a grant outside the target path", scopes: []string{"relayfile:fs:write:/allowed/*"}, wantStatus: http.StatusForbidden},
+		{name: "accepts a grant covering the target path", scopes: []string{"relayfile:fs:write:/src/*"}, wantStatus: http.StatusOK},
+	}
+
+	for i, tt := range tests {
+		i, tt := i, tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			workspaceID := fmt.Sprintf("ws_merge_auth_%d", i)
+			server := newMergeTestServer(t)
+			ownerToken := forkTestToken(t, workspaceID)
+			const base = "package sample\n\nfunc Alpha() int { return 1 }\n"
+			seed := writeFileForTest(t, server, ownerToken, workspaceID, "/src/merge.go", "0", base, "corr_merge_auth_seed")
+			limitedToken := mustTestJWT(t, "dev-secret", workspaceID, "Limited", tt.scopes, time.Now().Add(time.Hour))
+
+			resp := postMergeFileForTest(t, server, limitedToken, relayfile.MergeRequest{
+				WorkspaceID:   workspaceID,
+				Path:          "/src/merge.go",
+				Strategy:      relayfile.MergeStrategyGoTopLevelFunctions,
+				Content:       "package sample\n\nfunc Alpha() int { return 2 }\n",
+				BaseRevision:  seed.TargetRevision,
+				BaseContent:   base,
+				CorrelationID: fmt.Sprintf("corr_merge_auth_%d", i),
+			})
+			if resp.Code != tt.wantStatus {
+				t.Fatalf("expected %d for path-scoped merge, got %d (%s)", tt.wantStatus, resp.Code, resp.Body.String())
+			}
+			if tt.wantStatus == http.StatusOK {
+				var payload relayfile.MergeResponse
+				if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+					t.Fatalf("decode authorized merge response: %v", err)
+				}
+				if payload.TargetRevision == "" {
+					t.Fatalf("expected authorized merge to return a target revision: %+v", payload)
+				}
+				return
+			}
+			var payload map[string]any
+			if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode authorization error: %v", err)
+			}
+			if payload["code"] != "forbidden" {
+				t.Fatalf("expected forbidden error code, got %+v", payload)
+			}
+		})
+	}
+}
+
 func TestForkWriteReadOverlay(t *testing.T) {
 	server := newForkTestServer(t)
 	token := forkTestToken(t, "ws_fork_overlay")
@@ -6658,6 +6926,38 @@ func newForkTestServer(t *testing.T) http.Handler {
 	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
 	t.Cleanup(store.Close)
 	return NewServer(store)
+}
+
+func newMergeTestServer(t *testing.T) http.Handler {
+	t.Helper()
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
+	t.Cleanup(store.Close)
+	return NewServer(store)
+}
+
+func postMergeFileForTest(t *testing.T, server http.Handler, token string, input relayfile.MergeRequest) *httptest.ResponseRecorder {
+	t.Helper()
+	body := map[string]any{
+		"strategy":     input.Strategy,
+		"content":      input.Content,
+		"baseRevision": input.BaseRevision,
+		"baseContent":  input.BaseContent,
+	}
+	if input.ContentType != "" {
+		body["contentType"] = input.ContentType
+	}
+	if input.ContentIdentity != nil {
+		body["contentIdentity"] = input.ContentIdentity
+	}
+	return doRequest(t, server, request{
+		method: http.MethodPost,
+		path:   "/v1/workspaces/" + input.WorkspaceID + "/fs/merge?path=" + url.QueryEscape(input.Path),
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": input.CorrelationID,
+		},
+		body: body,
+	})
 }
 
 func forkTestToken(t *testing.T, workspaceID string) string {

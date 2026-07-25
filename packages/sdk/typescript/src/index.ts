@@ -91,6 +91,7 @@ export {
 } from "./onWrite.js";
 export {
   InvalidStateError,
+  MergeConflictError,
   ParentMovedError,
   PayloadTooLargeError,
   QueueFullError,
@@ -214,6 +215,9 @@ export type {
   ListWebhooksOptions,
   ListDurableResourceSubscriptionsOptions,
   ListTreeOptions,
+  MergeConflictDetail,
+  MergeFileInput,
+  MergeFileResponse,
   OperationFeedResponse,
   OperationStatus,
   OperationStatusResponse,

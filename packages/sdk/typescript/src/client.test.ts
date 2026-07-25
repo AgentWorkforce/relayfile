@@ -5,6 +5,7 @@ import {
   RevisionConflictError,
   QueueFullError,
   InvalidStateError,
+  MergeConflictError,
   ParentMovedError,
   PayloadTooLargeError,
 } from "./errors.js";
@@ -1845,6 +1846,44 @@ describe("RelayFileClient — existing methods", () => {
       expect(init.body).toBeUndefined();
     });
 
+    it("mergeFile posts the complete three-way merge request and returns revisions", async () => {
+      const payload = {
+        targetRevision: "rev_3",
+        strategy: "go-top-level-functions-v1",
+        baseRevision: "rev_1",
+        mergedAgainstRevision: "rev_2",
+      };
+      const f = mockFetch(payload);
+      const client = makeClient(f);
+
+      const res = await client.mergeFile({
+        workspaceId: "ws_acme",
+        path: "/src/a.go",
+        strategy: "go-top-level-functions-v1",
+        content: "package sample\n\nfunc Alpha() int { return 2 }\n",
+        baseRevision: "rev_1",
+        baseContent: "package sample\n\nfunc Alpha() int { return 1 }\n",
+        contentType: "text/x-go",
+        contentIdentity: { kind: "merge", key: "merge-1", ttlSeconds: 60 },
+        correlationId: "corr_merge_1",
+      });
+
+      expect(res).toEqual(payload);
+      const url = f.mock.calls[0]![0] as string;
+      const init = f.mock.calls[0]![1] as RequestInit;
+      expect(url).toBe("https://relay.test/v1/workspaces/ws_acme/fs/merge?path=%2Fsrc%2Fa.go");
+      expect(init.method).toBe("POST");
+      expect((init.headers as Record<string, string>)["X-Correlation-Id"]).toBe("corr_merge_1");
+      expect(JSON.parse(init.body as string)).toEqual({
+        strategy: "go-top-level-functions-v1",
+        content: "package sample\n\nfunc Alpha() int { return 2 }\n",
+        baseRevision: "rev_1",
+        baseContent: "package sample\n\nfunc Alpha() int { return 1 }\n",
+        contentType: "text/x-go",
+        contentIdentity: { kind: "merge", key: "merge-1", ttlSeconds: 60 },
+      });
+    });
+
     it("writeFile with forkId appends forkId and leaves body unchanged", async () => {
       const f = mockFetch({ opId: "op_1", status: "queued", targetRevision: "fork:fork_123:1" });
       const client = makeClient(f);
@@ -2059,6 +2098,67 @@ describe("RelayFileClient — error handling", () => {
       expect(apiError.code).toBe("parent_moved");
       expect(apiError.currentRevision).toBe("rev_new");
       expect(apiError.details?.currentRevision).toBe("rev_new");
+    }
+  });
+
+  it("throws MergeConflictError with current revision and per-unit details", async () => {
+    const conflicts = [{
+      unit: "Alpha",
+      reason: "concurrently changed",
+      base: "func Alpha() int { return 1 }",
+      mine: "func Alpha() int { return 2 }",
+      theirs: "func Alpha() int { return 3 }",
+    }];
+    const body = {
+      code: "merge_conflict",
+      message: "merge conflict: 1 unit(s) concurrently changed",
+      correlationId: "c_merge",
+      currentRevision: "rev_live",
+      conflicts,
+    };
+    const f = mockFetch(body, 409);
+    const client = makeClient(f);
+
+    try {
+      await client.mergeFile({
+        workspaceId: "ws_1",
+        path: "/src/a.go",
+        strategy: "go-top-level-functions-v1",
+        content: "package sample\n\nfunc Alpha() int { return 2 }\n",
+        baseRevision: "rev_base",
+        baseContent: "package sample\n\nfunc Alpha() int { return 1 }\n",
+      });
+      expect.unreachable("Should have thrown");
+    } catch (error) {
+      expect(error).toBeInstanceOf(MergeConflictError);
+      const apiError = error as MergeConflictError;
+      expect(apiError.code).toBe("merge_conflict");
+      expect(apiError.currentRevision).toBe("rev_live");
+      expect(apiError.conflicts).toEqual(conflicts);
+      expect(apiError.details?.conflicts).toEqual(conflicts);
+    }
+  });
+
+  it.each([
+    ["merge_base_unavailable", 409],
+    ["merge_ineligible", 422],
+  ])("preserves merge fallback code %s as RelayFileApiError", async (code, status) => {
+    const f = mockFetch({ code, message: code, correlationId: "c_merge_fallback" }, status);
+    const client = makeClient(f);
+
+    try {
+      await client.mergeFile({
+        workspaceId: "ws_1",
+        path: "/src/a.go",
+        strategy: "go-top-level-functions-v1",
+        content: "package sample\n",
+        baseRevision: "rev_base",
+        baseContent: "package sample\n",
+      });
+      expect.unreachable("Should have thrown");
+    } catch (error) {
+      expect(error).toBeInstanceOf(RelayFileApiError);
+      expect((error as RelayFileApiError).code).toBe(code);
     }
   });
 
