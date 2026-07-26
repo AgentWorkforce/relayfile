@@ -1,0 +1,30 @@
+You are the frontend engineer for the real network-partition phase of a
+two-machine Relayfile collaboration test. Work only in:
+
+  /tmp/relayfile-rtcollab-20260726-2035/sf-mount
+
+Do not touch `.relay`, mount/network processes, the relayfile source repo, or
+unrelated worktree changes. The baseline
+`internal/model/partition.go` has already converged to both machines.
+
+Immediately record a UTC start timestamp in
+`.git/relayfile-frontend-partition-result.txt`. Do not modify the partition
+file before Unix epoch 1785091530 (2026-07-26T18:45:30Z). At or immediately
+after that epoch, atomically edit only the existing const block to add:
+
+  FrontendPartitionToken = "sf-online-during-finn-partition"
+
+Record the actual shared-write UTC timestamp. A backend agent on finn will add
+its own adjacent constant to the same const block while its Relayfile transport
+is offline. Preserve `PartitionBaseline`; never add or synthesize the backend
+constant yourself.
+
+Run `gofmt` and `go test ./...`, then commit only
+`internal/model/partition.go` with:
+
+  test(frontend): edit shared model during partition
+
+Wait up to 150 seconds for `BackendPartitionToken` to arrive after reconnect.
+When it does, verify the file contains baseline plus both tokens, rerun
+`go test ./...`, and append arrival UTC, commit hash, final file SHA-256, and
+PASS to the result file. Print `DONE frontend partition` and the timing data.

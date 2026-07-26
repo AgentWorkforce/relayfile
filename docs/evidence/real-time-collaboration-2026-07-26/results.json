@@ -1,0 +1,73 @@
+{
+  "result": "PASS",
+  "date": "2026-07-26",
+  "base_commit": "ad231edd9515fd13dd0d4a3b853d38455e019744",
+  "machines": {
+    "server_and_frontend": "sf-mac-mini",
+    "backend": "finn-mac-mini",
+    "transport": "Tailscale SSH port forward"
+  },
+  "relayfile_workspace": "ws_rt_collab_20260726",
+  "agent_relay": {
+    "workspace": "relayfile-rt-collab-20260726",
+    "node": "rt-collab-finn-20260726",
+    "node_id": "node_7434a07dfe1a560acd47a7604d4a4ba5",
+    "backend_worker": "rt-collab-backend-finn-20260726",
+    "invocation_id": "inv_207205120393256960",
+    "version": "11.2.0"
+  },
+  "collaboration": {
+    "frontend_commit": "6b895ae",
+    "backend_commit": "5d426db",
+    "restart_frontend_commit": "5670a93",
+    "restart_backend_commit": "b688552",
+    "partition_frontend_commit": "01b0b36",
+    "partition_backend_commit": "2e4d94c",
+    "same_type_frontend_write_utc": "2026-07-26T18:39:54Z",
+    "same_type_backend_write_utc": "2026-07-26T18:40:09Z",
+    "restart_window_utc": [
+      "2026-07-26T18:43:01Z",
+      "2026-07-26T18:43:07Z"
+    ],
+    "partition_window_utc": [
+      "2026-07-26T18:45:42Z",
+      "2026-07-26T18:46:00Z"
+    ],
+    "offline_backend_write_utc": "2026-07-26T18:45:46Z",
+    "frontend_observed_replay_utc": "2026-07-26T18:46:36Z"
+  },
+  "convergence": {
+    "file_count": 11,
+    "manifest_sha256": "78d6ec6466524fed964f9137af1947cb3c11b402342347d9f82eb7c52f79e6c3",
+    "partition_file_sha256": "19546b7969cd71d21eeb881d0e88e1435930097e04d48a2c62565489cf6a7851",
+    "conflict_artifacts": 0,
+    "tests_on_both_mounts": "PASS"
+  },
+  "latency_ms": {
+    "sf_to_finn": {
+      "n": 12,
+      "min": 119.548,
+      "median": 156.951,
+      "mean": 168.487,
+      "p95": 216.512,
+      "max": 216.512
+    },
+    "finn_to_sf": {
+      "n": 12,
+      "min": 199.368,
+      "median": 214.277,
+      "mean": 222.967,
+      "p95": 253.959,
+      "max": 253.959
+    }
+  },
+  "bug": {
+    "summary": "WebSocket dial errors exposed bearer tokens in mount logs",
+    "regression_tests_added": 3,
+    "live_fix_replay": {
+      "raw_token_occurrences": 0,
+      "redaction_markers": 3,
+      "binary_sha256_local_and_remote": "7b05197cf81f61451af6f48c7bed52cd2d2371cd8899f9bb4beb2d20a98a7779"
+    }
+  }
+}

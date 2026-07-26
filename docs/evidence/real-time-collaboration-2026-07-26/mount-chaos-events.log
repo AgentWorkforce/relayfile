@@ -1,0 +1,20 @@
+2026-07-26T18:39:20Z frontend_agent_start machine=sf-mac-mini
+2026-07-26T18:39:42Z backend_agent_start machine=finn-mac-mini mechanism=agent-relay-fleet
+2026-07-26T18:39:54Z frontend_shared_type_write
+2026-07-26T18:40:09Z backend_shared_type_write
+2026-07-26T18:40:17Z frontend_observed_merged_fields
+2026-07-26T18:43:01Z finn_mount_stop sf_sequence=2
+2026-07-26T18:43:07Z finn_mount_restart sf_sequence=12
+2026-07-26T18:43:36Z restart_storm_complete frontend_sequence=20 backend_sequence=20 tests=PASS
+2026-07-26T18:45:30Z frontend_partition_token_write
+2026-07-26T18:45:42Z tailscale_ssh_transport_down
+2026-07-26T18:45:46Z backend_partition_token_write transport=offline
+2026-07-26T18:46:00Z tailscale_ssh_transport_restored
+2026-07-26T18:46:00Z finn_outbox_pending count=1
+2026-07-26T18:46:35Z finn_outbox_replay method=POST
+2026-07-26T18:46:36Z frontend_observed_backend_token
+2026-07-26T18:46:36Z partition_converged sha256=19546b7969cd71d21eeb881d0e88e1435930097e04d48a2c62565489cf6a7851 tests=PASS
+2026-07-26T18:50:17Z final_manifest_match files=11 sha256=78d6ec6466524fed964f9137af1947cb3c11b402342347d9f82eb7c52f79e6c3 conflicts=0
+2026-07-26T19:01:53Z final_fix_partition_start
+2026-07-26T19:02:04Z final_fix_partition_end
+2026-07-26T19:02:04Z websocket_log_redaction raw_token_occurrences=0 redaction_markers=3 binary_sha256=7b05197cf81f61451af6f48c7bed52cd2d2371cd8899f9bb4beb2d20a98a7779

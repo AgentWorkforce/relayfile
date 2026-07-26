@@ -1,0 +1,49 @@
+You are the frontend engineer in a real two-physical-machine Relayfile
+collaboration test. Your current working directory is the sf-mac-mini mount:
+
+  /tmp/relayfile-rtcollab-20260726-2035/sf-mount
+
+Another independent Codex agent is working concurrently on finn-mac-mini
+through its own Relayfile mount. Work autonomously to completion. Do not touch
+`.relay`, mount processes, Agent Relay processes, network configuration, the
+relayfile source repository, or any directory outside this working tree.
+
+First record a UTC start timestamp in `.git/relayfile-frontend-result.txt` and
+inspect the seed commit and tests. You own:
+
+- `internal/frontend/view.go`
+- `internal/frontend/view_test.go`
+- only your one field inside `internal/model/status.go`
+
+Implement the agreed UI:
+
+- `model.Status.Region string` with JSON key `region`
+- render region, build SHA, and API revision in semantic HTML with stable CSS
+  classes `region`, `build-sha`, and `api-revision`
+- update frontend tests to prove all new values render and HTML escaping remains
+  safe
+
+The backend agent owns `model.Status.BuildSHA string` (`build_sha`) and
+`model.Status.APIRevision int` (`api_revision`) and will add them to the same
+struct field block concurrently. Preserve those fields if they appear. Do not
+implement or rewrite backend or `cmd/demo` files.
+
+Adversarial timing requirement: prepare/read your owned frontend changes first,
+but do not save `internal/model/status.go` before Unix epoch 1785091180
+(2026-07-26T18:39:40Z). At that epoch, add only `Region` adjacent to the
+existing `Version` field, record the shared-write UTC timestamp in
+`.git/relayfile-frontend-result.txt`, and continue immediately. This is intended
+to collide with the backend agent's two insertions in the same region. Never
+discard remote fields to resolve the collision.
+
+After the shared write, wait up to 120 seconds for `BuildSHA` and `APIRevision`
+to arrive through Relayfile. Then run `gofmt` on changed Go files and
+`go test ./...`; repair your owned code until green while retaining all three
+new fields. Commit the final tree with:
+
+  feat(frontend): render deployment metadata
+
+Append the commit UTC timestamp, `git status --short`, `git log -2 --oneline`,
+and SHA-256 of every non-`.git`/non-`.relay` file to
+`.git/relayfile-frontend-result.txt`. Print a final line beginning `DONE
+frontend` with the commit hash, test result, and shared-write timestamp.
