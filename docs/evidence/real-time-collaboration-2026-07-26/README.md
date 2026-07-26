@@ -70,7 +70,7 @@ File content is the convergence oracle.
 
 | Check | Outcome |
 |---|---|
-| Concurrent, interdependent work | Backend added `BuildSHA`, `APIRevision`, and `Region`; frontend rendered them and added tests. `go test ./...` passed in both mounts. |
+| Concurrent, interdependent work | Backend added `BuildSHA` and `APIRevision`; frontend added `Region`, rendered all three fields, and added tests. `go test ./...` passed in both mounts. |
 | Same-file/same-type overlap | Both agents edited `internal/model/status.go` while concurrently active. The final type contains all fields and no conflict artifact. |
 | Near-concurrent commits | Frontend `6b895ae`; backend `5d426db`. Both retained the converged source. |
 | Mount restart mid-storm | Finn mount restarted while both agents were issuing 20-write sequences. Final frontend and backend probes both reached sequence 20. |
@@ -79,19 +79,27 @@ File content is the convergence oracle.
 | Shared partition file | Identical SHA-256 on sf and finn: `19546b7969cd71d21eeb881d0e88e1435930097e04d48a2c62565489cf6a7851`. |
 | Conflict artifacts | No entries under `.relay/conflicts` on either mount. |
 
-## Propagation latency
+## Propagation round-trip latency
 
-After convergence, twelve uniquely timestamped writes were measured in each
-direction using `scripts/measure-mount-latency.rb`. Values are end-to-end from
-the writer's wall clock to the peer observing the exact payload.
+The first run recorded cross-host wall-clock arrival deltas. PR review correctly
+identified that subtracting timestamps from separate machines includes
+unbounded clock skew, so those provisional values were discarded.
 
-| Direction | n | Min | Median | Mean | p95 / max |
+The measurement was rerun over a fresh isolated relayfile workspace after
+review. Each initiating machine atomically wrote a uniquely prefixed ping, the
+other physical machine acknowledged it through its own mount, and the initiator
+measured ping-to-ack time using only its own monotonic clock. Each sample
+therefore includes two relayfile propagations and peer acknowledgment time, but
+no cross-machine clock subtraction.
+
+| Initiator | n | Min | Median | Mean | p95 / max |
 |---|---:|---:|---:|---:|---:|
-| sf → finn | 12 | 119.548 ms | 156.951 ms | 168.487 ms | 216.512 ms |
-| finn → sf | 12 | 199.368 ms | 214.277 ms | 222.967 ms | 253.959 ms |
+| sf | 12 | 232.044 ms | 315.526 ms | 311.452 ms | 372.479 ms |
+| finn | 12 | 330.921 ms | 373.230 ms | 374.977 ms | 423.875 ms |
 
-Raw samples are in `sf-to-finn-latency.csv` and
-`finn-to-sf-latency.csv`.
+Raw samples are in `sf-initiated-round-trip.csv` and
+`finn-initiated-round-trip.csv`. The even-sized medians are the arithmetic mean
+of the two central samples.
 
 ## Evidence files
 
@@ -99,7 +107,7 @@ Raw samples are in `sf-to-finn-latency.csv` and
 - `project-sha256.txt`: the identical final content manifest.
 - `mount-chaos-events.log`: curated restart, partition, replay, and redaction
   assertions. Credentials are intentionally absent.
-- `*-latency.csv`: all 24 latency observations.
+- `*-round-trip.csv`: all 24 monotonic round-trip observations.
 - `*-agent-prompt.txt`: exact role and chaos prompts.
 - `testdata/realtime-collaboration`: reusable seed project.
 

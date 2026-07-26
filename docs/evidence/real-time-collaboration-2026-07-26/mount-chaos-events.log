@@ -18,3 +18,5 @@
 2026-07-26T19:01:53Z final_fix_partition_start
 2026-07-26T19:02:04Z final_fix_partition_end
 2026-07-26T19:02:04Z websocket_log_redaction raw_token_occurrences=0 redaction_markers=3 binary_sha256=7b05197cf81f61451af6f48c7bed52cd2d2371cd8899f9bb4beb2d20a98a7779
+2026-07-26T19:20:14Z review_latency_rerun initiator=sf method=monotonic_ping_ack samples=12 median_ms=315.526
+2026-07-26T19:20:35Z review_latency_rerun initiator=finn method=monotonic_ping_ack samples=12 median_ms=373.230

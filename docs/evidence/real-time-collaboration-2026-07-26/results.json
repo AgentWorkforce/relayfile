@@ -43,22 +43,23 @@
     "conflict_artifacts": 0,
     "tests_on_both_mounts": "PASS"
   },
-  "latency_ms": {
-    "sf_to_finn": {
+  "round_trip_ms": {
+    "method": "unique ping/ack measured by the initiator's monotonic clock",
+    "sf_initiated": {
       "n": 12,
-      "min": 119.548,
-      "median": 156.951,
-      "mean": 168.487,
-      "p95": 216.512,
-      "max": 216.512
+      "min": 232.044,
+      "median": 315.526,
+      "mean": 311.452,
+      "p95": 372.479,
+      "max": 372.479
     },
-    "finn_to_sf": {
+    "finn_initiated": {
       "n": 12,
-      "min": 199.368,
-      "median": 214.277,
-      "mean": 222.967,
-      "p95": 253.959,
-      "max": 253.959
+      "min": 330.921,
+      "median": 373.23,
+      "mean": 374.977,
+      "p95": 423.875,
+      "max": 423.875
     }
   },
   "bug": {
