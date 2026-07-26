@@ -4886,7 +4886,7 @@ func TestBulkWrite_ChunksBySerializedRequestSize(t *testing.T) {
 	}
 }
 
-func TestPushLocalRequiresDirtyForTrackedHashDrift(t *testing.T) {
+func TestPushLocalRecoversTrackedHashDriftWithoutWatcherEvent(t *testing.T) {
 	client := &fakeClient{
 		files: map[string]RemoteFile{
 			"/notion/Docs/A.md": {
@@ -4915,21 +4915,132 @@ func TestPushLocalRequiresDirtyForTrackedHashDrift(t *testing.T) {
 	if err := os.WriteFile(localFile, []byte("# local drift"), 0o644); err != nil {
 		t.Fatalf("write local drift failed: %v", err)
 	}
+
+	restarted, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_mount_hash_drift_no_push",
+		RemoteRoot:  "/notion",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("new restarted syncer failed: %v", err)
+	}
 	client.bulkWriteCalls = 0
 	client.bulkWriteBatches = nil
-	if err := syncer.SyncOnce(context.Background()); err != nil {
+	if err := restarted.SyncOnce(context.Background()); err != nil {
 		t.Fatalf("sync after local drift failed: %v", err)
 	}
 
-	if client.bulkWriteCalls != 0 {
-		t.Fatalf("expected tracked hash drift without Dirty state not to write back, got %d bulk calls", client.bulkWriteCalls)
+	if client.bulkWriteCalls == 0 {
+		t.Fatal("expected tracked hash drift to be recovered when the watcher missed the edit")
 	}
-	if got := client.files["/notion/Docs/A.md"].Content; got != "# A" {
-		t.Fatalf("expected remote content to remain unchanged, got %q", got)
+	if got := client.files["/notion/Docs/A.md"].Content; got != "# local drift" {
+		t.Fatalf("expected remote content to contain recovered local drift, got %q", got)
 	}
 }
 
-func TestRemotePullOverwritesUnmarkedLocalDrift(t *testing.T) {
+func TestPushLocalDoesNotPromoteSteadyStateTrackedHashDrift(t *testing.T) {
+	client := &fakeClient{
+		files: map[string]RemoteFile{
+			"/notion/Docs/A.md": {
+				Path:        "/notion/Docs/A.md",
+				Revision:    "rev_1",
+				ContentType: "text/markdown",
+				Content:     "# A",
+			},
+		},
+		revisionCounter: 1,
+	}
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_mount_steady_state_hash_drift",
+		RemoteRoot:  "/notion",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("initial sync failed: %v", err)
+	}
+
+	remotePath := "/notion/Docs/A.md"
+	tracked := syncer.state.Files[remotePath]
+	tracked.Hash = hashString("# stale tracked hash")
+	tracked.Dirty = false
+	tracked.DeletePending = false
+	syncer.state.Files[remotePath] = tracked
+
+	client.bulkWriteCalls = 0
+	client.bulkWriteBatches = nil
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("steady-state sync after tracked hash drift failed: %v", err)
+	}
+
+	if client.bulkWriteCalls != 0 {
+		t.Fatalf("expected steady-state tracked hash drift without Dirty not to write back, got %d bulk calls", client.bulkWriteCalls)
+	}
+	if got := client.files[remotePath].Content; got != "# A" {
+		t.Fatalf("remote content = %q, want unchanged server content", got)
+	}
+	if got := syncer.state.Files[remotePath]; got.Dirty {
+		t.Fatalf("steady-state tracked hash drift was promoted to Dirty: %+v", got)
+	}
+}
+
+func TestRestartRecoversTrackedHashDriftWrittenWhileOffline(t *testing.T) {
+	client := &fakeClient{
+		files: map[string]RemoteFile{
+			"/notion/Docs/A.md": {
+				Path:        "/notion/Docs/A.md",
+				Revision:    "rev_1",
+				ContentType: "text/markdown",
+				Content:     "# A",
+			},
+		},
+		revisionCounter: 1,
+	}
+	localDir := t.TempDir()
+	first, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_mount_offline_hash_drift",
+		RemoteRoot:  "/notion",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("new first syncer failed: %v", err)
+	}
+	if err := first.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("initial sync failed: %v", err)
+	}
+
+	localFile := filepath.Join(localDir, "Docs", "A.md")
+	if err := os.WriteFile(localFile, []byte("# offline local edit"), 0o644); err != nil {
+		t.Fatalf("write offline local edit failed: %v", err)
+	}
+
+	restarted, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_mount_offline_hash_drift",
+		RemoteRoot:  "/notion",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("new restarted syncer failed: %v", err)
+	}
+	if err := restarted.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("restart sync failed: %v", err)
+	}
+
+	if client.bulkWriteCalls == 0 {
+		t.Fatal("expected restart to durably upload the offline local edit before pulling")
+	}
+	if got := client.files["/notion/Docs/A.md"].Content; got != "# offline local edit" {
+		t.Fatalf("remote content = %q, want recovered offline edit", got)
+	}
+	if got := restarted.state.Files["/notion/Docs/A.md"]; got.Dirty {
+		t.Fatalf("recovered file remained dirty after acknowledged write: %+v", got)
+	}
+}
+
+func TestRemotePullPreservesUnmarkedLocalDriftInConflictArtifact(t *testing.T) {
 	client := &fakeClient{
 		files: map[string]RemoteFile{
 			"/notion/Docs/A.md": {
@@ -4972,18 +5083,47 @@ func TestRemotePullOverwritesUnmarkedLocalDrift(t *testing.T) {
 		Content:     "# remote v2",
 	}
 	client.appendEvent("file.updated", "/notion/Docs/A.md", "rev_2")
+
+	restarted, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_mount_remote_overwrites_unmarked_drift",
+		RemoteRoot:  "/notion",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("new restarted syncer failed: %v", err)
+	}
 	client.bulkWriteCalls = 0
 	client.bulkWriteBatches = nil
+	client.bulkWriteResponseFunc = func(_ context.Context, _ string, files []BulkWriteFile) (BulkWriteResponse, error) {
+		if len(files) != 1 {
+			t.Fatalf("expected one recovered drift write, got %d", len(files))
+		}
+		return BulkWriteResponse{
+			Errors: []BulkWriteError{{
+				Path:    "/notion/Docs/A.md",
+				Code:    "conflict",
+				Message: "expected revision rev_1 but current revision is rev_2",
+			}},
+		}, nil
+	}
 
-	if err := syncer.SyncOnce(context.Background()); err != nil {
+	if err := restarted.SyncOnce(context.Background()); err != nil {
 		t.Fatalf("sync after remote update failed: %v", err)
 	}
 
-	if client.bulkWriteCalls != 0 {
-		t.Fatalf("expected remote pull not to write back unmarked local drift, got %d bulk calls", client.bulkWriteCalls)
+	if client.bulkWriteCalls == 0 {
+		t.Fatal("expected unmarked local drift to be submitted before the remote pull")
 	}
 	assertLocalFileContent(t, localFile, "# remote v2")
-	if syncer.state.Files["/notion/Docs/A.md"].Dirty {
+	artifact := conflictArtifactPath(restarted.conflictsDir, "/notion/Docs/A.md", "rev_1")
+	artifactBytes, err := os.ReadFile(artifact)
+	if err != nil {
+		t.Fatalf("read preserved local drift artifact: %v", err)
+	}
+	if got := string(artifactBytes); got != "# local drift" {
+		t.Fatalf("conflict artifact = %q, want local drift", got)
+	}
+	if restarted.state.Files["/notion/Docs/A.md"].Dirty {
 		t.Fatalf("expected remote pull to keep tracked file clean")
 	}
 }

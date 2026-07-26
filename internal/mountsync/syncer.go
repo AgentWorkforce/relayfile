@@ -1084,6 +1084,12 @@ type Syncer struct {
 	state                mountState
 	loaded               bool
 	bootstrapped         bool
+	// recoverStartupDrift is true only for this process instance's
+	// first complete pushLocal pass. Before that pass, the watcher could not
+	// have observed edits made while the daemon was stopped. Afterward,
+	// Dirty/DeletePending remain the authoritative local-mutation signals so
+	// stale or corrupted tracked hashes cannot trigger steady-state writeback.
+	recoverStartupDrift  bool
 	websocket            bool
 	rootCtx              context.Context
 	wsConn               *websocket.Conn
@@ -1782,6 +1788,7 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 		eventProvider:         eventProvider,
 		scopes:                scopes,
 		websocket:             websocketEnabled,
+		recoverStartupDrift:   true,
 		rootCtx:               rootCtx,
 		logger:                opts.Logger,
 		denialLogPath:         filepath.Join(localRoot, ".relay", "permissions-denied.log"),
@@ -6244,6 +6251,19 @@ func (s *Syncer) pushLocal(ctx context.Context) (map[string]struct{}, error) {
 	for _, remotePath := range localRemotePaths {
 		snapshot := localFiles[remotePath]
 		tracked, exists := s.state.Files[remotePath]
+		if s.recoverStartupDrift &&
+			exists &&
+			!tracked.Dirty &&
+			tracked.Hash != snapshot.Hash {
+			// A fresh process cannot have observed edits made while the daemon
+			// was stopped. Recover that startup-only drift before pullRemote can
+			// overwrite it. Later passes preserve the explicit-mutation
+			// invariant: hash drift alone is not writeback eligibility.
+			tracked.Dirty = true
+			tracked.DeletePending = false
+			s.state.Files[remotePath] = tracked
+			s.logf("recovering local change not observed by the watcher: %s", remotePath)
+		}
 		localPath := snapshot.LocalPath
 		if strings.TrimSpace(localPath) == "" {
 			localPath, err = s.remoteToLocalPath(remotePath)
@@ -6416,6 +6436,7 @@ func (s *Syncer) pushLocal(ctx context.Context) (map[string]struct{}, error) {
 		}
 		delete(s.state.Files, remotePath)
 	}
+	s.recoverStartupDrift = false
 	return conflicted, nil
 }
 
