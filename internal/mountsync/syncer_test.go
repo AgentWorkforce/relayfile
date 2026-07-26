@@ -4987,6 +4987,73 @@ func TestPushLocalDoesNotPromoteSteadyStateTrackedHashDrift(t *testing.T) {
 	}
 }
 
+func TestFreshProcessDriftRecoverySkipsReadOnlyFiles(t *testing.T) {
+	disableWebSocket := false
+	token := mustMountsyncTestJWT(t, "dev-secret", "ws_readonly_startup_drift", "MountSync", []string{"relayfile:fs:read:/readonly/notes.md"}, time.Now().Add(time.Hour))
+	localDir := t.TempDir()
+	server := newMockMountsyncServer(t, map[string]RemoteFile{
+		"/notion/readonly/notes.md": {
+			Path:        "/notion/readonly/notes.md",
+			Revision:    "rev_1",
+			ContentType: "text/markdown",
+			Content:     "# readonly",
+		},
+	}, nil, map[string]struct{}{"/notion/readonly/notes.md": {}})
+	defer server.Close()
+
+	client := NewHTTPClient(server.URL, token, server.Client())
+	first, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_readonly_startup_drift",
+		RemoteRoot:  "/notion",
+		LocalRoot:   localDir,
+		WebSocket:   &disableWebSocket,
+	})
+	if err != nil {
+		t.Fatalf("new first syncer failed: %v", err)
+	}
+	if err := first.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("initial pull failed: %v", err)
+	}
+
+	// Simulate a chmod-bypass tamper made while no daemon process was
+	// running to catch it via the watcher or the readonly-revert path.
+	localPath := filepath.Join(localDir, "readonly", "notes.md")
+	if err := os.Chmod(localPath, 0o644); err != nil {
+		t.Fatalf("chmod writable for tamper failed: %v", err)
+	}
+	if err := os.WriteFile(localPath, []byte("# tampered while offline"), 0o644); err != nil {
+		t.Fatalf("tamper local file failed: %v", err)
+	}
+
+	// A fresh process (recoverStartupDrift=true) must still treat this
+	// drift as a chmod-bypass tamper to revert, not a local edit to push —
+	// read-only status takes priority over startup-drift recovery.
+	restarted, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_readonly_startup_drift",
+		RemoteRoot:  "/notion",
+		LocalRoot:   localDir,
+		WebSocket:   &disableWebSocket,
+	})
+	if err != nil {
+		t.Fatalf("new restarted syncer failed: %v", err)
+	}
+	if err := restarted.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("restart sync failed: %v", err)
+	}
+
+	assertLocalFileContent(t, localPath, "# readonly")
+	mode, err := os.Stat(localPath)
+	if err != nil {
+		t.Fatalf("stat local file failed: %v", err)
+	}
+	if mode.Mode().Perm() != 0o444 {
+		t.Fatalf("expected reverted readonly file mode 0444, got %o", mode.Mode().Perm())
+	}
+	if got := restarted.state.Files["/notion/readonly/notes.md"]; got.Dirty {
+		t.Fatalf("reverted readonly file left Dirty after startup drift recovery: %+v", got)
+	}
+}
+
 func TestRestartRecoversTrackedHashDriftWrittenWhileOffline(t *testing.T) {
 	client := &fakeClient{
 		files: map[string]RemoteFile{

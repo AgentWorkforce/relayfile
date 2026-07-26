@@ -203,8 +203,14 @@ func mergeWithAlignment(baseLines, mineLines, theirsLines []string, matchMine, m
 			// Theirs left this component untouched; mine's change wins.
 			output = append(output, mineRegion...)
 		default:
+			unit := fmt.Sprintf("base lines %d-%d", start+1, end)
+			if start == end {
+				// A pure insertion has no base-line span of its own; describe
+				// it by the insertion point instead of an inverted range.
+				unit = fmt.Sprintf("insertion before base line %d", start+1)
+			}
 			conflicts = append(conflicts, lineMergeConflict{
-				Unit:   fmt.Sprintf("base lines %d-%d", start+1, end),
+				Unit:   unit,
 				Reason: "concurrently changed",
 				Base:   baseText,
 				Mine:   mineText,

@@ -239,6 +239,9 @@ func TestLinesMergeDifferentInsertionsAtSamePositionConflict(t *testing.T) {
 	if conflicts[0].Base != "" {
 		t.Fatalf("conflict.Base = %q, want empty (pure insertion, nothing in base)", conflicts[0].Base)
 	}
+	if want := "insertion before base line 2"; conflicts[0].Unit != want {
+		t.Fatalf("conflict.Unit = %q, want %q (pure insertion must not use an inverted base-line range)", conflicts[0].Unit, want)
+	}
 }
 
 // TestLinesMergeAmbiguousDuplicateInsertionsConflict is a regression test

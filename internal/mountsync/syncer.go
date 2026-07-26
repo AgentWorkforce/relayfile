@@ -6251,19 +6251,6 @@ func (s *Syncer) pushLocal(ctx context.Context) (map[string]struct{}, error) {
 	for _, remotePath := range localRemotePaths {
 		snapshot := localFiles[remotePath]
 		tracked, exists := s.state.Files[remotePath]
-		if s.recoverStartupDrift &&
-			exists &&
-			!tracked.Dirty &&
-			tracked.Hash != snapshot.Hash {
-			// A fresh process cannot have observed edits made while the daemon
-			// was stopped. Recover that startup-only drift before pullRemote can
-			// overwrite it. Later passes preserve the explicit-mutation
-			// invariant: hash drift alone is not writeback eligibility.
-			tracked.Dirty = true
-			tracked.DeletePending = false
-			s.state.Files[remotePath] = tracked
-			s.logf("recovering local change not observed by the watcher: %s", remotePath)
-		}
 		localPath := snapshot.LocalPath
 		if strings.TrimSpace(localPath) == "" {
 			localPath, err = s.remoteToLocalPath(remotePath)
@@ -6273,6 +6260,23 @@ func (s *Syncer) pushLocal(ctx context.Context) (map[string]struct{}, error) {
 		}
 		canWrite := s.canWritePath(remotePath)
 		tracked.ReadOnly = !canWrite
+		if s.recoverStartupDrift &&
+			exists &&
+			canWrite &&
+			!tracked.Dirty &&
+			tracked.Hash != snapshot.Hash {
+			// A fresh process cannot have observed edits made while the daemon
+			// was stopped. Recover that startup-only drift before pullRemote can
+			// overwrite it. Later passes preserve the explicit-mutation
+			// invariant: hash drift alone is not writeback eligibility. Only
+			// writable files qualify — a read-only file's drift is a
+			// chmod-bypass tamper, not a recoverable edit, and is handled by
+			// the read-only revert branch below.
+			tracked.Dirty = true
+			tracked.DeletePending = false
+			s.state.Files[remotePath] = tracked
+			s.logf("recovering local change not observed by the watcher: %s", remotePath)
+		}
 		if exists && tracked.Denied {
 			if err := s.assertNotMountRoot(localPath); err != nil {
 				s.logf("skipping denied-file removal for %s: %v", remotePath, err)
@@ -6304,6 +6308,10 @@ func (s *Syncer) pushLocal(ctx context.Context) (map[string]struct{}, error) {
 			if err := s.applyLocalPermissions(localPath, false); err != nil && !errors.Is(err, os.ErrNotExist) {
 				return nil, err
 			}
+			// A read-only file is never writeback-eligible regardless of how
+			// Dirty was set — clear it explicitly so a stale Dirty flag can't
+			// survive to trigger a push if permissions are later relaxed.
+			tracked.Dirty = false
 			s.state.Files[remotePath] = tracked
 			continue
 		}
