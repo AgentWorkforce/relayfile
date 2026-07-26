@@ -114,7 +114,7 @@ func lcsMatchPreferFirst(base, other []string) []int {
 			match[i] = j
 			i++
 			j++
-		} else if dp[i+1][j] >= dp[i][j+1] {
+		} else if dp[i+1][j] > dp[i][j+1] {
 			i++
 		} else {
 			j++
@@ -125,9 +125,9 @@ func lcsMatchPreferFirst(base, other []string) []int {
 
 // lcsMatchPreferLast is lcsMatchPreferFirst's mirror image: it computes a
 // PREFIX LCS table (dp[i][j] = LCS length of base[:i], other[:j]) and
-// backtracks from the end of both sequences toward the start, greedily
-// matching the LATEST valid occurrence of a repeated line instead of the
-// earliest. See lcsMatchPreferFirst's doc comment for why both exist.
+// backtracks from the end of both sequences toward the start. On a tie it
+// skips other (rather than base), preserving the latest possible base index;
+// that is the exact opposite of lcsMatchPreferFirst's tie handling.
 func lcsMatchPreferLast(base, other []string) []int {
 	n, m := len(base), len(other)
 	match := make([]int, n)
@@ -142,24 +142,23 @@ func lcsMatchPreferLast(base, other []string) []int {
 		dp[i] = make([]int32, m+1)
 	}
 	for i := 1; i <= n; i++ {
-		row, prevRow := dp[i], dp[i-1]
+		row, previousRow := dp[i], dp[i-1]
 		for j := 1; j <= m; j++ {
 			if base[i-1] == other[j-1] {
-				row[j] = prevRow[j-1] + 1
-			} else if prevRow[j] >= row[j-1] {
-				row[j] = prevRow[j]
+				row[j] = previousRow[j-1] + 1
+			} else if previousRow[j] >= row[j-1] {
+				row[j] = previousRow[j]
 			} else {
 				row[j] = row[j-1]
 			}
 		}
 	}
-	i, j := n, m
-	for i > 0 && j > 0 {
+	for i, j := n, m; i > 0 && j > 0; {
 		if base[i-1] == other[j-1] {
 			match[i-1] = j - 1
 			i--
 			j--
-		} else if dp[i-1][j] >= dp[i][j-1] {
+		} else if dp[i-1][j] > dp[i][j-1] {
 			i--
 		} else {
 			j--
@@ -168,79 +167,180 @@ func lcsMatchPreferLast(base, other []string) []int {
 	return match
 }
 
-// mergeWithAlignment implements the core diff3-style resolution given a
-// pair of already-computed base-vs-mine / base-vs-theirs alignments: walk
-// "sync points" (base lines matched in both alignments) and between them
-// take whichever side actually changed something relative to base, or —
-// if both changed it identically — either; only a genuine divergence
-// (both sides changed the same span to different content) is a conflict.
+// mergeWithAlignment implements the core diff3-style resolution given a pair
+// of already-computed base-vs-mine / base-vs-theirs alignments. It first
+// converts each alignment to replacement hunks in base coordinates, then
+// combines only overlapping hunk components. This is more precise than
+// treating the complete span between two shared sync points as one region:
+// adjacent base-line edits can have no shared unchanged line between them
+// while still being independent and safely mergeable.
 func mergeWithAlignment(baseLines, mineLines, theirsLines []string, matchMine, matchTheirs []int) (lineMergeResult, []lineMergeConflict) {
-	type syncPoint struct {
-		base, mine, theirs int
-	}
-	syncPoints := make([]syncPoint, 0, len(baseLines)+2)
-	syncPoints = append(syncPoints, syncPoint{base: -1, mine: -1, theirs: -1})
-	for i := 0; i < len(baseLines); i++ {
-		if matchMine[i] >= 0 && matchTheirs[i] >= 0 {
-			syncPoints = append(syncPoints, syncPoint{base: i, mine: matchMine[i], theirs: matchTheirs[i]})
-		}
-	}
-	syncPoints = append(syncPoints, syncPoint{base: len(baseLines), mine: len(mineLines), theirs: len(theirsLines)})
-
-	var output []string
+	mineChanges := lineChangesFromAlignment(baseLines, mineLines, matchMine)
+	theirsChanges := lineChangesFromAlignment(baseLines, theirsLines, matchTheirs)
+	output := make([]string, 0, len(baseLines)+len(mineChanges)+len(theirsChanges))
 	var conflicts []lineMergeConflict
+	mineIndex, theirsIndex, baseIndex := 0, 0, 0
+	for mineIndex < len(mineChanges) || theirsIndex < len(theirsChanges) {
+		mineGroup, theirsGroup, nextMine, nextTheirs := overlappingChangeComponent(mineChanges, theirsChanges, mineIndex, theirsIndex)
+		start, end := changeComponentBounds(mineGroup, theirsGroup)
+		output = append(output, baseLines[baseIndex:start]...)
 
-	for k := 0; k < len(syncPoints)-1; k++ {
-		prev, next := syncPoints[k], syncPoints[k+1]
-
-		baseRegion := baseLines[prev.base+1 : next.base]
-		mineRegion := mineLines[prev.mine+1 : next.mine]
-		theirsRegion := theirsLines[prev.theirs+1 : next.theirs]
-
+		baseRegion := baseLines[start:end]
+		mineRegion := renderChangeComponent(baseLines, start, end, mineGroup)
+		theirsRegion := renderChangeComponent(baseLines, start, end, theirsGroup)
 		baseText := strings.Join(baseRegion, "")
 		mineText := strings.Join(mineRegion, "")
 		theirsText := strings.Join(theirsRegion, "")
 
 		switch {
 		case mineText == theirsText:
-			// Includes the common "neither side changed this span" case,
-			// and "both sides made the identical change" — neither is a
-			// real conflict.
+			// Includes identical changes on both sides.
 			output = append(output, mineRegion...)
 		case mineText == baseText:
-			// Mine left this span untouched; theirs' change wins.
+			// Mine left this component untouched; theirs' change wins.
 			output = append(output, theirsRegion...)
 		case theirsText == baseText:
-			// Theirs left this span untouched; mine's change wins.
+			// Theirs left this component untouched; mine's change wins.
 			output = append(output, mineRegion...)
 		default:
+			unit := fmt.Sprintf("base lines %d-%d", start+1, end)
+			if start == end {
+				// A pure insertion has no base-line span of its own; describe
+				// it by the insertion point instead of an inverted range.
+				unit = fmt.Sprintf("insertion before base line %d", start+1)
+			}
 			conflicts = append(conflicts, lineMergeConflict{
-				Unit:   fmt.Sprintf("base lines %d-%d", prev.base+2, next.base+1),
+				Unit:   unit,
 				Reason: "concurrently changed",
 				Base:   baseText,
 				Mine:   mineText,
 				Theirs: theirsText,
 			})
-			// Deliberately keep scanning rather than return immediately:
-			// collecting every conflict in one pass gives the caller a
-			// complete picture instead of a single one at a time across
-			// repeated retries. output from here on is never used (any
-			// conflict discards the whole result), so no further
-			// bookkeeping is needed for this region.
+			// Keep scanning to report every independent conflict. Output is
+			// discarded below whenever this slice is non-empty.
 		}
 
-		if next.base < len(baseLines) {
-			// The sync point's own line: by construction it matches both
-			// mine[next.mine] and theirs[next.theirs] exactly, so any of
-			// the three copies is identical.
-			output = append(output, baseLines[next.base])
-		}
+		baseIndex = end
+		mineIndex, theirsIndex = nextMine, nextTheirs
 	}
+	output = append(output, baseLines[baseIndex:]...)
 
 	if len(conflicts) > 0 {
 		return lineMergeResult{}, conflicts
 	}
 	return lineMergeResult{Content: strings.Join(output, "")}, nil
+}
+
+// lineChange replaces base[start:end] with lines. An insertion has
+// start == end. Changes from one side never overlap because they come from a
+// single ordered LCS alignment.
+type lineChange struct {
+	start, end int
+	lines      []string
+}
+
+func lineChangesFromAlignment(base, other []string, match []int) []lineChange {
+	changes := make([]lineChange, 0)
+	previousBase, previousOther := -1, -1
+	for baseIndex := 0; baseIndex <= len(base); baseIndex++ {
+		otherIndex := len(other)
+		if baseIndex < len(base) {
+			if match[baseIndex] < 0 {
+				continue
+			}
+			otherIndex = match[baseIndex]
+		}
+		start, end := previousBase+1, baseIndex
+		if start != end || previousOther+1 != otherIndex {
+			changes = append(changes, lineChange{
+				start: start,
+				end:   end,
+				lines: other[previousOther+1 : otherIndex],
+			})
+		}
+		previousBase, previousOther = baseIndex, otherIndex
+	}
+	return changes
+}
+
+// overlappingChangeComponent returns the next connected component of the
+// bipartite overlap graph between mine's and theirs' hunks. Adjacent hunks
+// from the same side alone do not join a component, but a hunk on one side
+// may bridge several hunks on the other.
+func overlappingChangeComponent(mine, theirs []lineChange, mineIndex, theirsIndex int) ([]lineChange, []lineChange, int, int) {
+	mineGroup, theirsGroup := make([]lineChange, 0), make([]lineChange, 0)
+	if theirsIndex == len(theirs) || (mineIndex < len(mine) && mine[mineIndex].start <= theirs[theirsIndex].start) {
+		mineGroup = append(mineGroup, mine[mineIndex])
+		mineIndex++
+	} else {
+		theirsGroup = append(theirsGroup, theirs[theirsIndex])
+		theirsIndex++
+	}
+
+	for expanded := true; expanded; {
+		expanded = false
+		for mineIndex < len(mine) && changeOverlapsAny(mine[mineIndex], theirsGroup) {
+			mineGroup = append(mineGroup, mine[mineIndex])
+			mineIndex++
+			expanded = true
+		}
+		for theirsIndex < len(theirs) && changeOverlapsAny(theirs[theirsIndex], mineGroup) {
+			theirsGroup = append(theirsGroup, theirs[theirsIndex])
+			theirsIndex++
+			expanded = true
+		}
+	}
+	return mineGroup, theirsGroup, mineIndex, theirsIndex
+}
+
+func changeOverlapsAny(change lineChange, others []lineChange) bool {
+	for _, other := range others {
+		if lineChangesOverlap(change, other) {
+			return true
+		}
+	}
+	return false
+}
+
+func lineChangesOverlap(first, second lineChange) bool {
+	firstInsertion := first.start == first.end
+	secondInsertion := second.start == second.end
+	switch {
+	case firstInsertion && secondInsertion:
+		return first.start == second.start
+	case firstInsertion:
+		return first.start >= second.start && first.start <= second.end
+	case secondInsertion:
+		return second.start >= first.start && second.start <= first.end
+	default:
+		return first.start < second.end && second.start < first.end
+	}
+}
+
+func changeComponentBounds(mine, theirs []lineChange) (int, int) {
+	start, end := -1, -1
+	for _, changes := range [][]lineChange{mine, theirs} {
+		for _, change := range changes {
+			if start < 0 || change.start < start {
+				start = change.start
+			}
+			if change.end > end {
+				end = change.end
+			}
+		}
+	}
+	return start, end
+}
+
+func renderChangeComponent(base []string, start, end int, changes []lineChange) []string {
+	output := make([]string, 0, end-start)
+	baseIndex := start
+	for _, change := range changes {
+		output = append(output, base[baseIndex:change.start]...)
+		output = append(output, change.lines...)
+		baseIndex = change.end
+	}
+	return append(output, base[baseIndex:end]...)
 }
 
 // linesThreeWayMerge implements the three-way-lines-v1 strategy.
@@ -258,12 +358,13 @@ func mergeWithAlignment(baseLines, mineLines, theirsLines []string, matchMine, m
 // something nearby (see TestLinesMergeAmbiguousDuplicateInsertionsConflict
 // for a concrete example matching what `git merge-file` resolves
 // correctly by choosing a different, non-colliding alignment). Rather than
-// try to replicate git's exact resolution heuristic, this computes the
-// merge TWICE — once preferring the earliest occurrence when a repeated
-// line admits a choice, once preferring the latest — and only trusts the
-// result when both agree. Disagreement (different content, or one finds a
-// conflict the other doesn't) means the alignment was ambiguous, and the
-// safe response is a conflict, never a guess.
+// try to replicate git's exact resolution heuristic, this computes earliest
+// and latest LCS alignments for each side and only proceeds when the complete
+// base-to-side match maps are identical. Comparing only the resulting merge
+// content is not strong enough: correlated choices can make multiple
+// alignments appear to agree while silently collapsing an independent edit.
+// A differing match map means the correspondence itself is ambiguous, so the
+// safe response is a conflict before attributing any change to a base line.
 func linesThreeWayMerge(base, mine, theirs string) (lineMergeResult, []lineMergeConflict, error) {
 	baseLines := splitLinesKeepEnds(base)
 	mineLines := splitLinesKeepEnds(mine)
@@ -272,31 +373,51 @@ func linesThreeWayMerge(base, mine, theirs string) (lineMergeResult, []lineMerge
 	if len(baseLines) > maxMergeDiffLines || len(mineLines) > maxMergeDiffLines || len(theirsLines) > maxMergeDiffLines {
 		return lineMergeResult{}, nil, fmt.Errorf("content exceeds %d lines, too large for %s", maxMergeDiffLines, MergeStrategyThreeWayLines)
 	}
-
-	firstResult, firstConflicts := mergeWithAlignment(baseLines, mineLines, theirsLines,
-		lcsMatchPreferFirst(baseLines, mineLines), lcsMatchPreferFirst(baseLines, theirsLines))
-	lastResult, lastConflicts := mergeWithAlignment(baseLines, mineLines, theirsLines,
-		lcsMatchPreferLast(baseLines, mineLines), lcsMatchPreferLast(baseLines, theirsLines))
-
-	if len(firstConflicts) == 0 && len(lastConflicts) == 0 && firstResult.Content == lastResult.Content {
-		return firstResult, nil, nil
+	// If both sides already have identical bytes, there is no merge decision
+	// to make. In particular, repeated lines can still give the two LCS
+	// backtracks different valid alignments of that same content; the
+	// ambiguity check below must not turn this identity into a conflict.
+	if mine == theirs {
+		return lineMergeResult{Content: mine}, nil, nil
+	}
+	if mine == base {
+		return lineMergeResult{Content: theirs}, nil, nil
+	}
+	if theirs == base {
+		return lineMergeResult{Content: mine}, nil, nil
 	}
 
-	// Disagreement between the two alignments, or a conflict found by
-	// either one: fail closed. Report whichever conflict list is
-	// non-empty; if both claim success but produced DIFFERENT content,
-	// there's no more specific unit to point at than the whole file.
-	if len(firstConflicts) > 0 {
-		return lineMergeResult{}, firstConflicts, nil
+	firstMineMatch := lcsMatchPreferFirst(baseLines, mineLines)
+	lastMineMatch := lcsMatchPreferLast(baseLines, mineLines)
+	firstTheirsMatch := lcsMatchPreferFirst(baseLines, theirsLines)
+	lastTheirsMatch := lcsMatchPreferLast(baseLines, theirsLines)
+
+	// Any difference proves that there are at least two equally optimal ways
+	// to associate a base line with a side. Do not infer an edit location from
+	// that ambiguity: doing so can turn a delete-vs-replace conflict into a
+	// clean-looking, lossy merge.
+	if !lcsMatchesEqual(firstMineMatch, lastMineMatch) || !lcsMatchesEqual(firstTheirsMatch, lastTheirsMatch) {
+		return lineMergeResult{}, []lineMergeConflict{{
+			Unit:   "whole file",
+			Reason: "ambiguous merge alignment: repeated or duplicated lines admit more than one valid resolution",
+			Base:   base,
+			Mine:   mine,
+			Theirs: theirs,
+		}}, nil
 	}
-	if len(lastConflicts) > 0 {
-		return lineMergeResult{}, lastConflicts, nil
+
+	result, conflicts := mergeWithAlignment(baseLines, mineLines, theirsLines, firstMineMatch, firstTheirsMatch)
+	return result, conflicts, nil
+}
+
+func lcsMatchesEqual(first, last []int) bool {
+	if len(first) != len(last) {
+		return false
 	}
-	return lineMergeResult{}, []lineMergeConflict{{
-		Unit:   "whole file",
-		Reason: "ambiguous merge alignment: repeated or duplicated lines admit more than one valid resolution",
-		Base:   base,
-		Mine:   mine,
-		Theirs: theirs,
-	}}, nil
+	for i := range first {
+		if first[i] != last[i] {
+			return false
+		}
+	}
+	return true
 }

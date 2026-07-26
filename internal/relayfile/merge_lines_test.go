@@ -182,6 +182,30 @@ func TestLinesMergeDeleteVsUnchangedAppliesTheDeletion(t *testing.T) {
 	}
 }
 
+// TestLinesMergeAdjacentDisjointChangesAutoMerge is a regression test for a
+// fuzz-discovered false conflict. The original sync-point implementation
+// treated all edits between shared unchanged lines as one region, so these
+// adjacent but disjoint base-line changes (theirs replaces line one; mine
+// deletes line two) collided merely because no unchanged line separated
+// them. Diff hunks in base coordinates must merge them independently.
+func TestLinesMergeAdjacentDisjointChangesAutoMerge(t *testing.T) {
+	base := "b\nz\naa\n"
+	mine := "b\naa\n"
+	theirs := "a\nz\naa\n"
+	want := "a\naa\n"
+
+	result, conflicts, err := linesThreeWayMerge(base, mine, theirs)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(conflicts) != 0 {
+		t.Fatalf("unexpected conflicts: %+v", conflicts)
+	}
+	if result.Content != want {
+		t.Fatalf("merged content = %q, want %q", result.Content, want)
+	}
+}
+
 func TestLinesMergeNoChangesReturnsBaseUnchanged(t *testing.T) {
 	base := "alpha\nbeta\ngamma\n"
 
@@ -215,6 +239,9 @@ func TestLinesMergeDifferentInsertionsAtSamePositionConflict(t *testing.T) {
 	if conflicts[0].Base != "" {
 		t.Fatalf("conflict.Base = %q, want empty (pure insertion, nothing in base)", conflicts[0].Base)
 	}
+	if want := "insertion before base line 2"; conflicts[0].Unit != want {
+		t.Fatalf("conflict.Unit = %q, want %q (pure insertion must not use an inverted base-line range)", conflicts[0].Unit, want)
+	}
 }
 
 // TestLinesMergeAmbiguousDuplicateInsertionsConflict is a regression test
@@ -246,6 +273,61 @@ func TestLinesMergeAmbiguousDuplicateInsertionsConflict(t *testing.T) {
 	}
 	if len(conflicts) == 0 {
 		t.Fatal("expected at least one conflict for an ambiguous alignment, got none — this means one side's independent insertion was silently dropped")
+	}
+}
+
+// TestLinesMergeCrossAlignmentAmbiguityConflict is a regression test for a
+// fuzz-discovered ambiguity that output-only dual-alignment checking missed.
+// With repeated "z" lines, first/first and last/last LCS pairings can each
+// produce the same apparently clean merge while silently coalescing mine's
+// and theirs' independent inserted "z" lines. The underlying match maps
+// still differ, proving that apparent output agreement is correlated
+// alignment bias rather than a trustworthy merge. The algorithm must fail
+// closed whenever those earliest/latest maps differ.
+func TestLinesMergeCrossAlignmentAmbiguityConflict(t *testing.T) {
+	base := "z\nz\na\nz\n"
+	mine := "z\nz\na\nz\nz\n"
+	theirs := "a\nz\nz\na\nz\nz\n"
+
+	result, conflicts, err := linesThreeWayMerge(base, mine, theirs)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Content != "" {
+		t.Fatalf("expected no content on correlated alignment ambiguity, got %q", result.Content)
+	}
+	if len(conflicts) == 0 {
+		t.Fatal("expected a conflict: agreeing first/first and last/last alignments must not hide a cross-alignment disagreement")
+	}
+}
+
+// TestLCSMatchPreferLastFindsTheActualLatestAlignment guards the tie pattern
+// found by fuzzing. The old prefix-DP backtrack could make an intermediate
+// tie choice that landed on the same mapping as prefer-first, even though a
+// later valid base correspondence existed. That hid an ambiguity and let a
+// subsequent merge silently discard content.
+func TestLCSMatchPreferLastFindsTheActualLatestAlignment(t *testing.T) {
+	base := []string{"aa\n", "aa\n", "z\n", "z\n", "z\n"}
+	other := []string{"aa\n", "a\n", "z\n", "z\n"}
+	wantFirst := []int{0, -1, 2, 3, -1}
+	wantLast := []int{-1, 0, -1, 2, 3}
+
+	for name, got := range map[string][]int{
+		"prefer first": lcsMatchPreferFirst(base, other),
+		"prefer last":  lcsMatchPreferLast(base, other),
+	} {
+		want := wantFirst
+		if name == "prefer last" {
+			want = wantLast
+		}
+		if len(got) != len(want) {
+			t.Fatalf("%s match length = %d, want %d", name, len(got), len(want))
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("%s match[%d] = %d, want %d (got %v)", name, i, got[i], want[i], got)
+			}
+		}
 	}
 }
 
