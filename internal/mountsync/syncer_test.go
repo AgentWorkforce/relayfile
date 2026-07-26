@@ -61,6 +61,90 @@ func TestHTTPClientRetryDelayHonorsRetryAfter(t *testing.T) {
 	}
 }
 
+func TestSyncerLogfRedactsWebSocketTokenFromWrappedDialError(t *testing.T) {
+	const secret = "eyJhbGciOiJSUzI1NiJ9.super-secret.signature"
+	logger := &captureLogger{}
+	syncer := &Syncer{logger: logger}
+	dialErr := webSocketDialError{err: fmt.Errorf(
+		`failed to WebSocket dial: failed to send handshake request: Get "http://127.0.0.1:18081/v1/workspaces/ws/fs/ws?cursor=evt_7&token=%s&mode=poll": dial tcp 127.0.0.1:18081: connect: connection refused`,
+		secret,
+	)}
+
+	syncer.logf("websocket unavailable; using polling sync: %v", dialErr)
+
+	if len(logger.lines) != 1 {
+		t.Fatalf("log lines = %d, want 1", len(logger.lines))
+	}
+	got := logger.lines[0]
+	if strings.Contains(got, secret) {
+		t.Fatalf("log leaked websocket bearer token: %s", got)
+	}
+	for _, want := range []string{
+		"websocket unavailable; using polling sync",
+		"cursor=evt_7",
+		"token=[REDACTED]",
+		"mode=poll",
+		"connect: connection refused",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("redacted log %q does not contain %q", got, want)
+		}
+	}
+}
+
+func TestWebSocketDialErrorRedactsTokenForExternalCallers(t *testing.T) {
+	const secret = "external-caller-secret"
+	err := webSocketDialError{err: fmt.Errorf(
+		`Get "ws://example.test/fs/ws?token=%s": connection refused`,
+		secret,
+	)}
+
+	got := err.Error()
+	if strings.Contains(got, secret) {
+		t.Fatalf("websocket dial error leaked token: %s", got)
+	}
+	if !strings.Contains(got, "token=[REDACTED]") {
+		t.Fatalf("websocket dial error did not preserve a redaction marker: %s", got)
+	}
+}
+
+func TestRedactSensitiveLogQueryValues(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "token",
+			input: `Get "wss://example.test/fs/ws?token=secret.jwt": EOF`,
+			want:  `Get "wss://example.test/fs/ws?token=[REDACTED]": EOF`,
+		},
+		{
+			name:  "multiple sensitive values and safe query",
+			input: `https://example.test/ws?api_key=first&cursor=7&ACCESS_TOKEN=second`,
+			want:  `https://example.test/ws?api_key=[REDACTED]&cursor=7&ACCESS_TOKEN=[REDACTED]`,
+		},
+		{
+			name:  "ordinary error unchanged",
+			input: "dial tcp 127.0.0.1:18081: connect: connection refused",
+			want:  "dial tcp 127.0.0.1:18081: connect: connection refused",
+		},
+		{
+			name:  "similarly named key unchanged",
+			input: "https://example.test/ws?not_token=public&cursor=7",
+			want:  "https://example.test/ws?not_token=public&cursor=7",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := redactSensitiveLogQueryValues(tt.input); got != tt.want {
+				t.Fatalf("redacted value = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestWebSocketReconnectDelayBounds(t *testing.T) {
 	if got := websocketReconnectDelay(1); got < defaultWebSocketReconnectBase || got > defaultWebSocketReconnectBase+defaultWebSocketReconnectJitter {
 		t.Fatalf("first reconnect delay out of bounds: %s", got)

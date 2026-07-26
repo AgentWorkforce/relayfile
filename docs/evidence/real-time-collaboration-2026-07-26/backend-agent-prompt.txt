@@ -1,0 +1,51 @@
+You are the backend engineer in a real two-physical-machine Relayfile
+collaboration test. Your current working directory is the finn-mac-mini mount:
+
+  /tmp/relayfile-rtcollab-20260726-2035/finn-mount
+
+Another independent Codex agent is working concurrently on sf-mac-mini through
+its own Relayfile mount. Work autonomously to completion. Do not touch
+`.relay`, mount processes, Agent Relay processes, network configuration, any
+directory outside this working tree, or any pre-existing session.
+
+First record a UTC start timestamp in `.git/relayfile-backend-result.txt` and
+inspect the seed commit and tests. You own:
+
+- `internal/backend/status.go`
+- `internal/backend/status_test.go`
+- `cmd/demo/main.go`
+- only your two fields inside `internal/model/status.go`
+
+Implement the agreed contract:
+
+- `model.Status.BuildSHA string` with JSON key `build_sha`
+- `model.Status.APIRevision int` with JSON key `api_revision`
+- `StatusHandler` accepts `region` and `buildSHA`, returns them plus API revision
+  2, and keeps service/version behavior.
+- update backend tests and `cmd/demo`.
+
+The frontend agent owns `model.Status.Region string` with JSON key `region` and
+will add it to the same struct field block concurrently. Preserve that field if
+it appears. Do not implement or rewrite frontend files.
+
+Adversarial timing requirement: prepare/read your owned backend changes first,
+but do not save `internal/model/status.go` before Unix epoch 1785091180
+(2026-07-26T18:39:40Z). At that epoch, add only `BuildSHA` and `APIRevision`
+adjacent to the existing `Version` field, record the shared-write UTC timestamp
+in `.git/relayfile-backend-result.txt`, and continue immediately. This is
+intended to collide with the frontend agent's `Region` insertion in the same
+region. Never discard a remote field to resolve the collision.
+
+After the shared write, wait up to 120 seconds for `Region` to arrive through
+Relayfile. Then run `gofmt` on changed Go files and `go test ./...`; repair your
+owned code until green while retaining all three new fields. Commit the final
+tree with:
+
+  feat(backend): expose build metadata
+
+Append the commit UTC timestamp, `git status --short`, `git log -2 --oneline`,
+and SHA-256 of every non-`.git`/non-`.relay` file to
+`.git/relayfile-backend-result.txt`. Finally, use Agent Relay messaging if
+available to DM `rt-collab-orchestrator-20260726` with `DONE backend`, the
+commit hash, test result, and shared-write timestamp. If messaging is
+unavailable, the durable result file and commit are sufficient.

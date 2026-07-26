@@ -1,0 +1,375 @@
+{
+  "version": "1.0.0",
+  "id": "26ba6623-7cfe-4a3a-8046-079dc500bd55",
+  "timestamp": "2026-07-26T19:12:15.291Z",
+  "trajectory": "traj_snj7hxsnw561",
+  "files": [
+    {
+      "path": "docs/evidence/real-time-collaboration-2026-07-26/README.md",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 1,
+              "end_line": 114,
+              "revision": "9718cf1a80673dbb7208feaf3c8910dd4fcc6540"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "docs/evidence/real-time-collaboration-2026-07-26/backend-agent-prompt.txt",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 1,
+              "end_line": 51,
+              "revision": "9718cf1a80673dbb7208feaf3c8910dd4fcc6540"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "docs/evidence/real-time-collaboration-2026-07-26/finn-to-sf-latency.csv",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 1,
+              "end_line": 13,
+              "revision": "9718cf1a80673dbb7208feaf3c8910dd4fcc6540"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "docs/evidence/real-time-collaboration-2026-07-26/frontend-agent-prompt.txt",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 1,
+              "end_line": 49,
+              "revision": "9718cf1a80673dbb7208feaf3c8910dd4fcc6540"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "docs/evidence/real-time-collaboration-2026-07-26/frontend-partition-prompt.txt",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 1,
+              "end_line": 30,
+              "revision": "9718cf1a80673dbb7208feaf3c8910dd4fcc6540"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "docs/evidence/real-time-collaboration-2026-07-26/frontend-restart-chaos-prompt.txt",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 1,
+              "end_line": 29,
+              "revision": "9718cf1a80673dbb7208feaf3c8910dd4fcc6540"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "docs/evidence/real-time-collaboration-2026-07-26/mount-chaos-events.log",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 1,
+              "end_line": 20,
+              "revision": "9718cf1a80673dbb7208feaf3c8910dd4fcc6540"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "docs/evidence/real-time-collaboration-2026-07-26/project-sha256.txt",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 1,
+              "end_line": 11,
+              "revision": "9718cf1a80673dbb7208feaf3c8910dd4fcc6540"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "docs/evidence/real-time-collaboration-2026-07-26/results.json",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 1,
+              "end_line": 73,
+              "revision": "9718cf1a80673dbb7208feaf3c8910dd4fcc6540"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "docs/evidence/real-time-collaboration-2026-07-26/sf-to-finn-latency.csv",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 1,
+              "end_line": 13,
+              "revision": "9718cf1a80673dbb7208feaf3c8910dd4fcc6540"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "internal/mountsync/syncer.go",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 41,
+              "end_line": 48,
+              "revision": "9718cf1a80673dbb7208feaf3c8910dd4fcc6540"
+            },
+            {
+              "start_line": 7493,
+              "end_line": 7509,
+              "revision": "9718cf1a80673dbb7208feaf3c8910dd4fcc6540"
+            },
+            {
+              "start_line": 8117,
+              "end_line": 8126,
+              "revision": "9718cf1a80673dbb7208feaf3c8910dd4fcc6540"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "internal/mountsync/syncer_test.go",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 61,
+              "end_line": 150,
+              "revision": "9718cf1a80673dbb7208feaf3c8910dd4fcc6540"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "scripts/measure-mount-latency.rb",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 1,
+              "end_line": 80,
+              "revision": "9718cf1a80673dbb7208feaf3c8910dd4fcc6540"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "testdata/realtime-collaboration/README.md",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 1,
+              "end_line": 12,
+              "revision": "9718cf1a80673dbb7208feaf3c8910dd4fcc6540"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "testdata/realtime-collaboration/cmd/demo/main.go",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 1,
+              "end_line": 14,
+              "revision": "9718cf1a80673dbb7208feaf3c8910dd4fcc6540"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "testdata/realtime-collaboration/go.mod",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 1,
+              "end_line": 3,
+              "revision": "9718cf1a80673dbb7208feaf3c8910dd4fcc6540"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "testdata/realtime-collaboration/internal/backend/status.go",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 1,
+              "end_line": 15,
+              "revision": "9718cf1a80673dbb7208feaf3c8910dd4fcc6540"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "testdata/realtime-collaboration/internal/backend/status_test.go",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 1,
+              "end_line": 26,
+              "revision": "9718cf1a80673dbb7208feaf3c8910dd4fcc6540"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "testdata/realtime-collaboration/internal/frontend/view.go",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 1,
+              "end_line": 20,
+              "revision": "9718cf1a80673dbb7208feaf3c8910dd4fcc6540"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "testdata/realtime-collaboration/internal/frontend/view_test.go",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 1,
+              "end_line": 21,
+              "revision": "9718cf1a80673dbb7208feaf3c8910dd4fcc6540"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "testdata/realtime-collaboration/internal/model/status.go",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 1,
+              "end_line": 13,
+              "revision": "9718cf1a80673dbb7208feaf3c8910dd4fcc6540"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

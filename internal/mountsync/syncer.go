@@ -41,6 +41,8 @@ import (
 
 var ErrConflict = errors.New("revision conflict")
 
+var sensitiveLogQueryValue = regexp.MustCompile(`(?i)([?&](?:token|access_token|api_key)=)[^&#\s"']*`)
+
 // ErrSchemaValidation is returned when the cloud rejects a writeback because
 // the body fails the adapter's declared schema (contract §8.2). The CLI
 // quarantines the offending local file and restores the prior remote
@@ -7491,7 +7493,17 @@ func (s *Syncer) logf(format string, args ...any) {
 	if s.logger == nil {
 		return
 	}
-	s.logger.Printf(format, args...)
+	s.logger.Printf("%s", redactSensitiveLogQueryValues(fmt.Sprintf(format, args...)))
+}
+
+// redactSensitiveLogQueryValues removes bearer/API credentials embedded in
+// URLs carried by wrapped transport errors. The WebSocket endpoint currently
+// authenticates through a token query parameter, and net/http includes the
+// complete request URL in dial failures. Sanitizing at the logging boundary
+// preserves the original error for retry and classification while ensuring it
+// cannot leak through any Syncer logf call.
+func redactSensitiveLogQueryValues(value string) string {
+	return sensitiveLogQueryValue.ReplaceAllString(value, `${1}[REDACTED]`)
 }
 
 func normalizeRemotePath(path string) string {
@@ -8105,7 +8117,10 @@ func (e webSocketDialError) Error() string {
 	if e.err == nil {
 		return "websocket dial failed"
 	}
-	return e.err.Error()
+	// WebSocket authentication currently uses a query parameter. Dial errors
+	// include the full request URL and escape Syncer's logger when callers log
+	// the returned maintenance error themselves, so redact at the error boundary.
+	return redactSensitiveLogQueryValues(e.err.Error())
 }
 
 func (e webSocketDialError) Unwrap() error {

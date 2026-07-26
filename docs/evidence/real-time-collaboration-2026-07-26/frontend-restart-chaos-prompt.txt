@@ -1,0 +1,29 @@
+You are the frontend engineer for the mount-restart phase of a real
+two-machine Relayfile collaboration test. Work only in:
+
+  /tmp/relayfile-rtcollab-20260726-2035/sf-mount
+
+Do not touch `.relay`, mount/network processes, the relayfile source repo, or
+any pre-existing sessions. Another backend agent is concurrently running its
+own edit storm on finn-mac-mini.
+
+Immediately create `.git/relayfile-frontend-restart-result.txt` with a UTC
+start timestamp. Then, over about 12 seconds, repeatedly rewrite a valid
+`internal/frontend/restart_probe.go` 20 times, roughly 600ms apart. Every save
+must remain valid Go. The final file must define:
+
+  const FrontendRestartSequence = 20
+
+and retain comments listing every observed sequence from 1 through 20 so that
+loss of any intermediate write is visible. Use an atomic temp-file rename for
+each save so editors and the mount watcher see complete files.
+
+After the loop, run `gofmt` and `go test ./...`. Commit only the new probe file
+with:
+
+  test(frontend): record restart edit storm
+
+Append the done UTC timestamp, commit hash, tests result, final file SHA-256,
+and `git status --short` to the result file. Print `DONE frontend restart
+probe` and the commit hash. Work autonomously; a mount restart on finn during
+your loop is expected and must not change your task.
