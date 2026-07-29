@@ -1249,8 +1249,16 @@ func runAgentRelayLogin(stdin io.Reader, stdout io.Writer, noOpen bool) error {
 
 func cloudCredentialsFromAgentRelay() (cloudCredentials, error) {
 	var session agentRelayCloudSession
-	if err := runAgentRelayJSON([]string{"cloud", "session", "--json"}, &session); err != nil {
-		return cloudCredentials{}, err
+	// agent-relay masks accessToken in `cloud session --json` unless
+	// --reveal-token is passed; CLIs predating the flag reject it as an
+	// unknown option. Ask for the raw token first, fall back for older CLIs.
+	if err := runAgentRelayJSON([]string{"cloud", "session", "--json", "--reveal-token"}, &session); err != nil {
+		if !strings.Contains(err.Error(), "unknown option") {
+			return cloudCredentials{}, err
+		}
+		if err := runAgentRelayJSON([]string{"cloud", "session", "--json"}, &session); err != nil {
+			return cloudCredentials{}, err
+		}
 	}
 	apiURL := strings.TrimRight(strings.TrimSpace(session.APIURL), "/")
 	accessToken := strings.TrimSpace(session.AccessToken)
@@ -1266,6 +1274,9 @@ func cloudCredentialsFromAgentRelay() (cloudCredentials, error) {
 	if accessToken == "" {
 		return cloudCredentials{}, errors.New("agent-relay cloud session --json did not include an accessToken")
 	}
+	if strings.Contains(accessToken, "…") {
+		return cloudCredentials{}, errors.New("agent-relay cloud session --json returned a masked accessToken; upgrade the agent-relay CLI or re-run `agent-relay cloud login`")
+	}
 	return cloudCredentials{
 		APIURL:      apiURL,
 		AccessToken: accessToken,
@@ -1275,8 +1286,16 @@ func cloudCredentialsFromAgentRelay() (cloudCredentials, error) {
 
 func activeWorkspaceFromAgentRelay() (agentRelayActiveWorkspace, error) {
 	var workspace agentRelayActiveWorkspace
-	if err := runAgentRelayJSON([]string{"workspace", "active", "--json"}, &workspace); err != nil {
-		return agentRelayActiveWorkspace{}, classifyAgentRelayActiveWorkspaceError(err)
+	// agent-relay masks workspace keys in `workspace active --json` unless
+	// --reveal-secrets is passed; CLIs predating the flag reject it as an
+	// unknown option. Ask for raw keys first, fall back for older CLIs.
+	if err := runAgentRelayJSON([]string{"workspace", "active", "--json", "--reveal-secrets"}, &workspace); err != nil {
+		if !strings.Contains(err.Error(), "unknown option") {
+			return agentRelayActiveWorkspace{}, classifyAgentRelayActiveWorkspaceError(err)
+		}
+		if err := runAgentRelayJSON([]string{"workspace", "active", "--json"}, &workspace); err != nil {
+			return agentRelayActiveWorkspace{}, classifyAgentRelayActiveWorkspaceError(err)
+		}
 	}
 	if strings.TrimSpace(workspace.RelayfileWorkspaceID) == "" {
 		return agentRelayActiveWorkspace{}, errors.New("agent-relay workspace active --json did not include relayfileWorkspaceId")
@@ -1300,12 +1319,19 @@ func classifyAgentRelayActiveWorkspaceError(err error) error {
 		!strings.Contains(normalized, "404") {
 		return err
 	}
-	match := agentRelayWorkspaceKeyInResolverError.FindStringSubmatch(detail)
-	if len(match) != 2 {
-		return err
+	workspaceKey := ""
+	if match := agentRelayWorkspaceKeyInResolverError.FindStringSubmatch(detail); len(match) == 2 {
+		if unescaped, unescapeErr := url.QueryUnescape(match[1]); unescapeErr == nil {
+			workspaceKey = unescaped
+		}
 	}
-	workspaceKey, unescapeErr := url.QueryUnescape(match[1])
-	if unescapeErr != nil || !strings.HasPrefix(workspaceKey, "rk_live_") {
+	if !strings.HasPrefix(workspaceKey, "rk_live_") || strings.Contains(workspaceKey, "…") {
+		// agent-relay redacts credentials in its error output, so the key can
+		// no longer be read out of the message; fall back to the environment
+		// and the shared workspace store.
+		workspaceKey = activeWorkspaceKeyFromAgentRelayStore()
+	}
+	if !strings.HasPrefix(workspaceKey, "rk_live_") {
 		return err
 	}
 
@@ -1329,6 +1355,40 @@ func classifyAgentRelayActiveWorkspaceError(err error) error {
 			statusCode,
 		)
 	}
+}
+
+// activeWorkspaceKeyFromAgentRelayStore resolves the active workspace key the
+// way agent-relay itself does: canonical env vars first, then the shared
+// workspace store at $AGENT_RELAY_HOME (default ~/.agentworkforce/relay)
+// /workspaces.json. Returns "" when no key can be resolved.
+func activeWorkspaceKeyFromAgentRelayStore() string {
+	for _, name := range []string{"AGENT_RELAY_WORKSPACE_KEY", "RELAY_WORKSPACE_KEY", "RELAY_API_KEY"} {
+		if value := strings.TrimSpace(os.Getenv(name)); strings.HasPrefix(value, "rk_live_") {
+			return value
+		}
+	}
+	dir := strings.TrimSpace(os.Getenv("AGENT_RELAY_HOME"))
+	if dir == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return ""
+		}
+		dir = filepath.Join(home, ".agentworkforce", "relay")
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "workspaces.json"))
+	if err != nil {
+		return ""
+	}
+	var store struct {
+		Active     string `json:"active"`
+		Workspaces map[string]struct {
+			Key string `json:"key"`
+		} `json:"workspaces"`
+	}
+	if json.Unmarshal(data, &store) != nil || store.Active == "" {
+		return ""
+	}
+	return strings.TrimSpace(store.Workspaces[store.Active].Key)
 }
 
 func validateRelaycastWorkspaceKey(ctx context.Context, workspaceKey string) (string, int, error) {

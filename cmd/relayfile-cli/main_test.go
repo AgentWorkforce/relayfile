@@ -2885,11 +2885,11 @@ fi
 func installFakeAgentRelaySession(t *testing.T, apiURL, accessToken, name, cloudWorkspaceID, relayfileWorkspaceID string) {
 	t.Helper()
 	body := fmt.Sprintf(`
-if [ "$*" = "cloud session --json" ]; then
+if [ "$*" = "cloud session --json --reveal-token" ] || [ "$*" = "cloud session --json" ]; then
   echo '{"apiUrl":%q,"accessToken":%q}'
   exit 0
 fi
-if [ "$*" = "workspace active --json" ]; then
+if [ "$*" = "workspace active --json --reveal-secrets" ] || [ "$*" = "workspace active --json" ]; then
   echo '{"name":%q,"cloudWorkspaceId":%q,"relayfileWorkspaceId":%q}'
   exit 0
 fi
@@ -2897,6 +2897,49 @@ echo "unexpected args: $*" >&2
 exit 2
 `, apiURL, accessToken, name, cloudWorkspaceID, relayfileWorkspaceID)
 	installFakeAgentRelay(t, body)
+}
+
+func TestCloudCredentialsFallBackWhenRevealTokenUnsupported(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+	installFakeAgentRelay(t, `
+if [ "$*" = "cloud session --json --reveal-token" ]; then
+  echo "error: unknown option '--reveal-token'" >&2
+  exit 1
+fi
+if [ "$*" = "cloud session --json" ]; then
+  echo '{"apiUrl":"https://cloud.test","accessToken":"cld_at_raw_fallback_token"}'
+  exit 0
+fi
+echo "unexpected args: $*" >&2
+exit 2
+`)
+
+	creds, err := cloudCredentialsFromAgentRelay()
+	if err != nil {
+		t.Fatalf("cloudCredentialsFromAgentRelay failed: %v", err)
+	}
+	if creds.AccessToken != "cld_at_raw_fallback_token" {
+		t.Fatalf("unexpected access token: %q", creds.AccessToken)
+	}
+}
+
+func TestCloudCredentialsRejectMaskedAccessToken(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+	installFakeAgentRelay(t, `
+if [ "$*" = "cloud session --json --reveal-token" ] || [ "$*" = "cloud session --json" ]; then
+  echo '{"apiUrl":"https://cloud.test","accessToken":"cld_at_…oken"}'
+  exit 0
+fi
+echo "unexpected args: $*" >&2
+exit 2
+`)
+
+	_, err := cloudCredentialsFromAgentRelay()
+	if err == nil || !strings.Contains(err.Error(), "masked accessToken") {
+		t.Fatalf("expected masked accessToken error, got %v", err)
+	}
 }
 
 func relayfileCLITestFixture(t *testing.T, name string) string {
@@ -2910,6 +2953,63 @@ func relayfileCLITestFixture(t *testing.T, name string) string {
 
 func agentRelayResolver404Error(workspaceKey, body string) error {
 	return errors.New("Workspace resolve failed at /api/v1/workspaces/active?key=" + workspaceKey + ": 404 " + body)
+}
+
+func TestActiveWorkspaceClassifierFallsBackToStoreWhenErrorRedacted(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+	for _, name := range []string{"AGENT_RELAY_WORKSPACE_KEY", "RELAY_WORKSPACE_KEY", "RELAY_API_KEY", "AGENT_RELAY_HOME"} {
+		t.Setenv(name, "")
+	}
+
+	const workspaceKey = "rk_live_messaging_only_redacted"
+	var validationCalls int
+	relaycast := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		validationCalls++
+		if got := r.Header.Get("Authorization"); got != "Bearer "+workspaceKey {
+			t.Fatalf("unexpected Relaycast Authorization: %q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true,"data":{"id":"rc_123","name":"chat-only"}}`))
+	}))
+	defer relaycast.Close()
+	t.Setenv("RELAYCAST_BASE_URL", relaycast.URL)
+
+	storeDir := filepath.Join(os.Getenv("HOME"), ".agentworkforce", "relay")
+	if err := os.MkdirAll(storeDir, 0o700); err != nil {
+		t.Fatalf("mkdir workspace store dir failed: %v", err)
+	}
+	store := `{"active":"demo","workspaces":{"demo":{"key":"` + workspaceKey + `"}}}`
+	if err := os.WriteFile(filepath.Join(storeDir, "workspaces.json"), []byte(store), 0o600); err != nil {
+		t.Fatalf("write workspace store failed: %v", err)
+	}
+
+	// A CLI that redacts credentials emits a masked key the resolver-error
+	// regex cannot capture; the classifier must fall back to the store.
+	resolverFailure := agentRelayResolver404Error("rk_live_…cted", relayfileCLITestFixture(t, "cloud-workspace-not-found.json"))
+	installFakeAgentRelay(t, fmt.Sprintf(`
+if [ "$*" = "workspace active --json --reveal-secrets" ] || [ "$*" = "workspace active --json" ]; then
+  printf '%%s\n' %s >&2
+  exit 1
+fi
+echo "unexpected args: $*" >&2
+exit 2
+`, strconv.Quote(resolverFailure.Error())))
+
+	_, err := activeWorkspaceFromAgentRelay()
+	if err == nil {
+		t.Fatal("expected messaging-only workspace error")
+	}
+	var messagingOnly *agentRelayMessagingOnlyWorkspaceError
+	if !errors.As(err, &messagingOnly) {
+		t.Fatalf("expected agentRelayMessagingOnlyWorkspaceError, got %T: %v", err, err)
+	}
+	if messagingOnly.Name != "chat-only" {
+		t.Fatalf("messaging-only workspace name = %q, want chat-only", messagingOnly.Name)
+	}
+	if validationCalls != 1 {
+		t.Fatalf("expected exactly one Relaycast validation call, got %d", validationCalls)
+	}
 }
 
 func TestActiveWorkspaceFromAgentRelayReportsMessagingOnlyWorkspace(t *testing.T) {
@@ -2936,7 +3036,7 @@ func TestActiveWorkspaceFromAgentRelayReportsMessagingOnlyWorkspace(t *testing.T
 	t.Setenv("RELAYCAST_BASE_URL", relaycast.URL)
 	resolverFailure := agentRelayResolver404Error(workspaceKey, relayfileCLITestFixture(t, "cloud-workspace-not-found.json"))
 	installFakeAgentRelay(t, fmt.Sprintf(`
-if [ "$*" = "workspace active --json" ]; then
+if [ "$*" = "workspace active --json --reveal-secrets" ] || [ "$*" = "workspace active --json" ]; then
   printf '%%s\n' %s >&2
   exit 1
 fi
@@ -3060,7 +3160,7 @@ func TestActiveWorkspaceFromAgentRelayDoesNotMisclassifyInvalidKey(t *testing.T)
 	defer relaycast.Close()
 	t.Setenv("RELAYCAST_BASE_URL", relaycast.URL)
 	installFakeAgentRelay(t, `
-if [ "$*" = "workspace active --json" ]; then
+if [ "$*" = "workspace active --json --reveal-secrets" ] || [ "$*" = "workspace active --json" ]; then
   echo 'Workspace resolve failed at /api/v1/workspaces/`+workspaceKey+`/resolve: 404 Workspace not found' >&2
   exit 1
 fi
@@ -3137,11 +3237,11 @@ if [ "$*" = "cloud login --no-open" ]; then
   echo "agent-relay login ok"
   exit 0
 fi
-if [ "$*" = "cloud session --json" ]; then
+if [ "$*" = "cloud session --json --reveal-token" ] || [ "$*" = "cloud session --json" ]; then
   echo '{"apiUrl":"`+cloud.URL+`","accessToken":"cld_access"}'
   exit 0
 fi
-if [ "$*" = "workspace active --json" ]; then
+if [ "$*" = "workspace active --json --reveal-secrets" ] || [ "$*" = "workspace active --json" ]; then
   printf '%%s\n' %s >&2
   exit 1
 fi
@@ -5200,11 +5300,11 @@ if [ "$*" = "cloud login --no-open" ]; then
   echo "agent-relay login ok"
   exit 0
 fi
-if [ "$*" = "cloud session --json" ]; then
+if [ "$*" = "cloud session --json --reveal-token" ] || [ "$*" = "cloud session --json" ]; then
   echo '{"apiUrl":"`+server.URL+`","accessToken":"cld_new"}'
   exit 0
 fi
-if [ "$*" = "workspace active --json" ]; then
+if [ "$*" = "workspace active --json --reveal-secrets" ] || [ "$*" = "workspace active --json" ]; then
   echo '{"name":"demo","cloudWorkspaceId":"ws_123","relayfileWorkspaceId":"ws_123"}'
   exit 0
 fi
@@ -5633,7 +5733,7 @@ func TestRefreshDelegatedCredentialsSurfacesRemintFailure(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)
 	installFakeAgentRelay(t, `
-if [ "$*" = "cloud session --json" ]; then
+if [ "$*" = "cloud session --json --reveal-token" ] || [ "$*" = "cloud session --json" ]; then
   echo "no active cloud session" >&2
   exit 2
 fi
@@ -5794,7 +5894,7 @@ func TestEnsureCloudCredentialsUsesAgentRelaySession(t *testing.T) {
 		t.Fatalf("saveCloudCredentials failed: %v", err)
 	}
 	installFakeAgentRelay(t, `
-if [ "$*" = "cloud session --json" ]; then
+if [ "$*" = "cloud session --json --reveal-token" ] || [ "$*" = "cloud session --json" ]; then
   echo '{"apiUrl":"https://relay-cloud.test","accessToken":"agent_cloud_token"}'
   exit 0
 fi
@@ -5832,7 +5932,7 @@ if [ "$*" = "--version" ]; then
   echo "8.3.7"
   exit 0
 fi
-if [ "$*" = "cloud session --json" ]; then
+if [ "$*" = "cloud session --json --reveal-token" ] || [ "$*" = "cloud session --json" ]; then
   touch %q
   echo '{"apiUrl":"https://relay-cloud.test","accessToken":"agent_cloud_token"}'
   exit 0
@@ -5930,7 +6030,7 @@ func TestWorkspaceCurrentPrefersAgentRelayActiveWorkspace(t *testing.T) {
 		t.Fatalf("setDefaultWorkspace failed: %v", err)
 	}
 	installFakeAgentRelay(t, `
-if [ "$*" = "workspace active --json" ]; then
+if [ "$*" = "workspace active --json --reveal-secrets" ] || [ "$*" = "workspace active --json" ]; then
   echo '{"name":"canonical","cloudWorkspaceId":"rw_cloud","relayfileWorkspaceId":"rw_relayfile","relaycastWorkspaceId":"rw_relaycast","relayauthWorkspaceId":"rw_relayauth"}'
   exit 0
 fi
@@ -5961,7 +6061,7 @@ func TestResolveWorkspaceUsesAgentRelayRelayfileWorkspaceID(t *testing.T) {
 		t.Fatalf("setDefaultWorkspace failed: %v", err)
 	}
 	installFakeAgentRelay(t, `
-if [ "$*" = "workspace active --json" ]; then
+if [ "$*" = "workspace active --json --reveal-secrets" ] || [ "$*" = "workspace active --json" ]; then
   echo '{"name":"canonical","cloudWorkspaceId":"rw_cloud","relayfileWorkspaceId":"rw_relayfile"}'
   exit 0
 fi
