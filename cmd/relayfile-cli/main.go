@@ -3954,6 +3954,17 @@ func validateMountResetMode(localDir, layout string, resetAfterClobber bool) err
 	)
 }
 
+func resolveCLIMountRemotePaths(requested, recorded []string, envRemotePath string) []string {
+	if len(requested) == 0 && strings.TrimSpace(envRemotePath) == "" && len(recorded) > 0 {
+		requested = append([]string(nil), recorded...)
+	}
+	fallback := strings.TrimSpace(envRemotePath)
+	if fallback == "" {
+		fallback = "/"
+	}
+	return mountscope.NormalizePaths(requested, fallback)
+}
+
 func absolutePathOrClean(value string) string {
 	trimmed := strings.TrimSpace(value)
 	if trimmed == "" {
@@ -6122,9 +6133,11 @@ func runMount(args []string) error {
 	if err != nil {
 		return err
 	}
-	if len(allRemotePaths) == 0 && strings.TrimSpace(os.Getenv("RELAYFILE_REMOTE_PATH")) == "" && len(recordedRemotePaths) > 0 {
-		allRemotePaths = append(allRemotePaths, recordedRemotePaths...)
-	}
+	effectiveRemotePaths := resolveCLIMountRemotePaths(
+		allRemotePaths,
+		recordedRemotePaths,
+		os.Getenv("RELAYFILE_REMOTE_PATH"),
+	)
 	if !stateFileProvided &&
 		!stateDirProvided &&
 		strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_STATE_FILE")) == "" &&
@@ -6149,14 +6162,14 @@ func runMount(args []string) error {
 	if err := validateMountLayoutTransition(previousRecord, absLocalDir, resolvedLocalLayout); err != nil {
 		return err
 	}
-	if err := validateMountScopeTransition(previousRecord, absLocalDir, resolvedLocalLayout, allRemotePaths); err != nil {
+	if err := validateMountScopeTransition(previousRecord, absLocalDir, resolvedLocalLayout, effectiveRemotePaths); err != nil {
 		return err
 	}
 	mountScopes, err := mountscope.Plan(
 		absLocalDir,
 		resolvedLocalLayout,
-		allRemotePaths,
-		envOrDefault("RELAYFILE_REMOTE_PATH", "/"),
+		effectiveRemotePaths,
+		"/",
 		*stateFile,
 	)
 	if err != nil {

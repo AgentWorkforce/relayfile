@@ -2533,6 +2533,26 @@ func TestValidateMountScopeTransitionRejectsInPlaceRemoval(t *testing.T) {
 	}
 }
 
+func TestResolveCLIMountRemotePathsAppliesEnvironmentBeforeTransitionValidation(t *testing.T) {
+	got := resolveCLIMountRemotePaths(nil, []string{"/github"}, "/github")
+	if len(got) != 1 || got[0] != "/github" {
+		t.Fatalf("environment path resolved to %v, want [/github]", got)
+	}
+	previous := workspaceRecord{
+		LocalDir:    t.TempDir(),
+		LocalLayout: mountscope.LayoutScoped,
+		RemotePaths: []string{"/github"},
+	}
+	if err := validateMountScopeTransition(previous, previous.LocalDir, mountscope.LayoutScoped, got); err != nil {
+		t.Fatalf("matching environment path should not look like removal: %v", err)
+	}
+
+	got = resolveCLIMountRemotePaths(nil, []string{"/github", "/slack"}, "")
+	if want := "/github,/slack"; strings.Join(got, ",") != want {
+		t.Fatalf("recorded restart paths = %q, want %q", strings.Join(got, ","), want)
+	}
+}
+
 func TestValidateMountResetModeRefusesScopedAcknowledgedReset(t *testing.T) {
 	localRoot := t.TempDir()
 	err := validateMountResetMode(localRoot, mountscope.LayoutScoped, true)
