@@ -188,6 +188,21 @@ func Plan(localRoot, layout string, paths []string, fallback, stateFile string) 
 	if len(normalized) > 1 && resolvedLayout != LayoutScoped {
 		return nil, fmt.Errorf("multiple --remote-path values require --local-layout=%s", LayoutScoped)
 	}
+	if resolvedLayout == LayoutScoped {
+		for i, left := range normalized {
+			for _, right := range normalized[i+1:] {
+				foldedLeft := strings.ToLower(left)
+				foldedRight := strings.ToLower(right)
+				if IsWithin(foldedLeft, foldedRight) || IsWithin(foldedRight, foldedLeft) {
+					return nil, fmt.Errorf(
+						"scoped remote roots %s and %s overlap on case-insensitive filesystems; choose roots with distinct case-folded paths",
+						left,
+						right,
+					)
+				}
+			}
+		}
+	}
 	if len(normalized) > 1 && strings.TrimSpace(stateFile) != "" {
 		return nil, fmt.Errorf("--state-file cannot be shared across multiple scoped mounts; use --state-dir instead")
 	}
@@ -196,7 +211,7 @@ func Plan(localRoot, layout string, paths []string, fallback, stateFile string) 
 		localDir := localRoot
 		if resolvedLayout == LayoutScoped {
 			firstSegment := strings.SplitN(strings.TrimPrefix(remotePath, "/"), "/", 2)[0]
-			if _, reserved := reservedScopedLocalTopLevels[firstSegment]; reserved {
+			if _, reserved := reservedScopedLocalTopLevels[strings.ToLower(firstSegment)]; reserved {
 				return nil, fmt.Errorf(
 					"scoped remote root %s overlaps reserved local path %s; choose a non-reserved remote root or use --local-layout=%s for a single path",
 					remotePath,

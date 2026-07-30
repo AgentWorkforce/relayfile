@@ -1,0 +1,57 @@
+{
+  "id": "traj_rw26ij8x9yhr",
+  "version": 1,
+  "task": {
+    "title": "Reject case-folded scoped root collisions",
+    "source": {
+      "system": "plain",
+      "id": "relayfile#379"
+    }
+  },
+  "status": "completed",
+  "startedAt": "2026-07-30T05:56:19.212Z",
+  "completedAt": "2026-07-30T06:00:44.272Z",
+  "agents": [
+    {
+      "name": "default",
+      "role": "lead",
+      "joinedAt": "2026-07-30T06:00:44.209Z"
+    }
+  ],
+  "chapters": [
+    {
+      "id": "chap_kcrhyreuavx1",
+      "title": "Work",
+      "agentName": "default",
+      "startedAt": "2026-07-30T06:00:44.209Z",
+      "endedAt": "2026-07-30T06:00:44.272Z",
+      "events": [
+        {
+          "ts": 1785391244211,
+          "type": "decision",
+          "content": "Reject scoped roots that alias after case folding: Reject scoped roots that alias after case folding",
+          "raw": {
+            "question": "Reject scoped roots that alias after case folding",
+            "chosen": "Reject scoped roots that alias after case folding",
+            "alternatives": [],
+            "reasoning": "Relayfile configurations move between hosts; accepting /github and /GitHub on a case-sensitive machine creates concurrent Syncers over one directory when used on common case-insensitive macOS or Windows filesystems. Rejecting at the shared scope boundary makes the portable configuration safe by construction."
+          },
+          "significance": "high"
+        }
+      ]
+    }
+  ],
+  "retrospective": {
+    "summary": "Rejected case-folded scoped-root overlaps and mixed-case reserved runtime directories; focused mountscope tests and full go vet/go test suite pass.",
+    "approach": "Standard approach",
+    "confidence": 0.95
+  },
+  "commits": [],
+  "filesChanged": [],
+  "projectId": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-b",
+  "tags": [],
+  "_trace": {
+    "startRef": "cf593598a75983ed322db8f46a635f829c3bafb0",
+    "endRef": "cf593598a75983ed322db8f46a635f829c3bafb0"
+  }
+}

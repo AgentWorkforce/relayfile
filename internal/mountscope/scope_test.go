@@ -68,7 +68,7 @@ func TestPlanRejectsSharedStateFile(t *testing.T) {
 
 func TestPlanRejectsScopedRootsThatOverlapReservedLocalPaths(t *testing.T) {
 	root := t.TempDir()
-	for _, remotePath := range []string{"/.git/config", "/.relay", "/.skills/tools", "/digests", "/node_modules/pkg"} {
+	for _, remotePath := range []string{"/.git/config", "/.Relay", "/.skills/tools", "/Digests", "/NODE_MODULES/pkg"} {
 		t.Run(remotePath, func(t *testing.T) {
 			_, err := Plan(root, LayoutScoped, []string{remotePath}, "/", "")
 			if err == nil ||
@@ -81,6 +81,22 @@ func TestPlanRejectsScopedRootsThatOverlapReservedLocalPaths(t *testing.T) {
 	}
 	if _, err := Plan(root, LayoutExact, []string{"/.relay"}, "/", ""); err != nil {
 		t.Fatalf("single exact mount should not map its remote root beneath the reserved path: %v", err)
+	}
+}
+
+func TestPlanRejectsCaseFoldedScopedRootOverlap(t *testing.T) {
+	root := t.TempDir()
+	for _, paths := range [][]string{
+		{"/github", "/GitHub"},
+		{"/GitHub", "/github/repos/acme"},
+	} {
+		_, err := Plan(root, LayoutScoped, paths, "/", "")
+		if err == nil ||
+			!strings.Contains(err.Error(), paths[0]) ||
+			!strings.Contains(err.Error(), paths[1]) ||
+			!strings.Contains(err.Error(), "case-insensitive") {
+			t.Fatalf("expected case-folded overlap refusal for %v, got %v", paths, err)
+		}
 	}
 }
 
