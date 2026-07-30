@@ -84,7 +84,11 @@ func listWorkspaceWritebackItems(workspaceID string, record workspaceRecord, sta
 			if err != nil {
 				return nil, err
 			}
-			items, err := readPendingWritebackItemsFromState(workspaceID, scope.LocalDir, scope.RemotePath, stateFile)
+			remoteRoot, err := workspaceRemoteRootForLocalDir(record, scope.LocalDir)
+			if err != nil {
+				return nil, err
+			}
+			items, err := readPendingWritebackItemsFromState(workspaceID, scope.LocalDir, remoteRoot, stateFile)
 			if err != nil {
 				return nil, err
 			}
@@ -122,30 +126,6 @@ func validWritebackListState(state string) bool {
 	default:
 		return false
 	}
-}
-
-// listLocalWritebackItems returns per-operation writeback rows for the given
-// state. `pending` is sourced from dirty tracked files in
-// `<localDir>/.relayfile-mount-state.json`; `dead` is sourced from per-op
-// records under `<localDir>/.relay/dead-letter/`. Aggregate counters in
-// `.relay/state.json` are deliberately not expanded into synthetic rows.
-func listLocalWritebackItems(workspaceID, localDir, state string) ([]writebackListItem, error) {
-	if strings.TrimSpace(localDir) == "" {
-		return []writebackListItem{}, nil
-	}
-	if state == "dead" {
-		return readDeadWritebackItems(workspaceID, localDir)
-	}
-	return readPendingWritebackItems(workspaceID, localDir)
-}
-
-func readPendingWritebackItems(workspaceID, localDir string) ([]writebackListItem, error) {
-	return readPendingWritebackItemsFromState(
-		workspaceID,
-		localDir,
-		readMountRemoteRoot(localDir),
-		filepath.Join(localDir, ".relayfile-mount-state.json"),
-	)
 }
 
 func readPendingWritebackItemsFromState(workspaceID, localDir, remoteRoot, stateFile string) ([]writebackListItem, error) {

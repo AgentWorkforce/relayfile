@@ -4051,6 +4051,30 @@ func workspaceMountScopes(record workspaceRecord) []mountscope.Scope {
 	return scopes
 }
 
+func workspaceRemoteRootForLocalDir(record workspaceRecord, localDir string) (string, error) {
+	if strings.TrimSpace(record.LocalLayout) == mountscope.LayoutScoped {
+		target := filepath.Clean(localDir)
+		for _, scope := range workspaceMountScopes(record) {
+			if filepath.Clean(scope.LocalDir) == target {
+				return scope.RemotePath, nil
+			}
+		}
+		return "", fmt.Errorf("scoped mount root is unknown for local directory %s", localDir)
+	}
+	for _, remotePath := range record.RemotePaths {
+		if strings.TrimSpace(remotePath) != "" {
+			return mountscope.NormalizePath(remotePath), nil
+		}
+	}
+	if root, ok := readMountRemoteRootIfPresent(localDir); ok {
+		return root, nil
+	}
+	return "", fmt.Errorf(
+		"mount root is unknown for legacy exact mirror %s; restore its .relay/state.json or remount before operating on pending writes",
+		localDir,
+	)
+}
+
 // workspaceStateDirs includes the catalog root for compatibility with
 // pre-scoped state, then every persisted scoped runtime root. Consumers use
 // this sweep so state written by any sibling mount remains discoverable.
@@ -4578,12 +4602,16 @@ func resolveWritebackPushPath(localPath, workspaceValue string) (writebackPushRe
 	if rel == "." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || rel == ".." {
 		return writebackPushResolvedPath{}, fmt.Errorf("%s is outside mount root %s", abs, root)
 	}
-	remotePath := joinRemotePath(readMountRemoteRoot(mountRoot), filepath.ToSlash(rel))
+	remoteRoot, ok := readMountRemoteRootIfPresent(mountRoot)
+	if !ok {
+		return writebackPushResolvedPath{}, fmt.Errorf("%s missing remoteRoot", filepath.Join(mountRoot, ".relay", "state.json"))
+	}
+	remotePath := joinRemotePath(remoteRoot, filepath.ToSlash(rel))
 	return writebackPushResolvedPath{
 		LocalPath:   abs,
 		MountRoot:   mountRoot,
 		WorkspaceID: workspaceID,
-		RemoteRoot:  readMountRemoteRoot(mountRoot),
+		RemoteRoot:  remoteRoot,
 		RemotePath:  remotePath,
 	}, nil
 }
@@ -5007,9 +5035,13 @@ func runWritebackRetry(args []string, stdout io.Writer) error {
 		return fmt.Errorf("dead-letter record %s contains opId %q, expected %q", recordPath, dl.OpID, op)
 	}
 
+	remoteRoot, err := workspaceRemoteRootForLocalDir(record, recordLocalDir)
+	if err != nil {
+		return err
+	}
 	retryRecord := record
 	retryRecord.LocalDir = recordLocalDir
-	if err := retryDeadLetterWriteback(workspaceID, retryRecord, dl); err != nil {
+	if err := retryDeadLetterWriteback(workspaceID, retryRecord, remoteRoot, dl); err != nil {
 		return fmt.Errorf("retry op %s: %w", op, err)
 	}
 	if err := os.Remove(recordPath); err != nil && !os.IsNotExist(err) {
@@ -5334,7 +5366,7 @@ func printWritebackStatus(stdout io.Writer, record workspaceRecord, report write
 	}
 }
 
-func retryDeadLetterWriteback(workspaceID string, record workspaceRecord, dl deadLetterRecord) error {
+func retryDeadLetterWriteback(workspaceID string, record workspaceRecord, remoteRoot string, dl deadLetterRecord) error {
 	if strings.TrimSpace(record.LocalDir) == "" {
 		return errors.New("workspace has no local mirror")
 	}
@@ -5367,13 +5399,6 @@ func retryDeadLetterWriteback(workspaceID string, record workspaceRecord, dl dea
 	client := mountsync.NewHTTPClient(server, tokenValue, &http.Client{
 		Transport: newWritebackFailureTransport(record.LocalDir, log.Default(), mountsync.NewSyncTransport()),
 	})
-	// Read the live mount's remoteRoot from .relay/state.json instead
-	// of hardcoding "/". CodeRabbit flagged on PR #84: a mount created
-	// with `--remote-path /github` has dead-letter paths under /github,
-	// and retrying with RemoteRoot:"/" would look up `<localDir>/github/...`
-	// instead of `<localDir>/...`, so replay would fail even though the
-	// mirrored file exists.
-	remoteRoot := readMountRemoteRoot(record.LocalDir)
 	websocketDisabled := false
 	syncer, err := mountsync.NewSyncer(client, mountsync.SyncerOptions{
 		WorkspaceID:   workspaceID,
@@ -5404,17 +5429,6 @@ func retryDeadLetterWriteback(workspaceID string, record workspaceRecord, dl dea
 		}
 	}
 	return nil
-}
-
-// readMountRemoteRoot reads the live mount's remoteRoot from
-// <localDir>/.relay/state.json. Defaults to "/" when missing or
-// unparseable so retry on a root mount works without state.json
-// being present.
-func readMountRemoteRoot(localDir string) string {
-	if root, ok := readMountRemoteRootIfPresent(localDir); ok {
-		return root
-	}
-	return "/"
 }
 
 func readMountRemoteRootIfPresent(localDir string) (string, bool) {
@@ -10678,9 +10692,10 @@ func providerReadyForMirror(client *apiClient, workspaceID, provider string, sta
 }
 
 func buildSyncStateSnapshot(status syncStatusResponse, workspaceID, mode string, interval time.Duration, localDir string, pid int, stallReason string) syncStateFile {
+	remoteRoot, _ := readMountRemoteRootIfPresent(localDir)
 	snapshot := syncStateFile{
 		WorkspaceID:      workspaceID,
-		RemoteRoot:       readMountRemoteRoot(localDir),
+		RemoteRoot:       remoteRoot,
 		Mode:             defaultIfBlank(mode, defaultMountMode),
 		IntervalMs:       interval.Milliseconds(),
 		PendingWriteback: countPendingTrackedFiles(localDir),

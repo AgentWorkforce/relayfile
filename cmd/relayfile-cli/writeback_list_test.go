@@ -247,7 +247,7 @@ func TestWritebackListPendingUsesRemoteRootForNonRootMount(t *testing.T) {
 		t.Fatalf("write mount state failed: %v", err)
 	}
 	writeWritebackListState(t, localDir, syncStateFile{WorkspaceID: "ws_demo", RemoteRoot: "/notion"})
-	upsertWritebackListWorkspace(t, localDir)
+	upsertWritebackListWorkspace(t, localDir, "/notion")
 
 	var out bytes.Buffer
 	if err := run([]string{"writeback", "list", "--state", "pending", "--workspace", "demo", "--json"}, strings.NewReader(""), &out, &out); err != nil {
@@ -267,6 +267,50 @@ func TestWritebackListPendingUsesRemoteRootForNonRootMount(t *testing.T) {
 	want := []string{"/notion/pages/draft.json", "/notion/pages/page-1.json", "/notion/pages/page-2.json"}
 	if strings.Join(paths, ",") != strings.Join(want, ",") {
 		t.Fatalf("pending paths = %v, want %v", paths, want)
+	}
+}
+
+func TestWritebackListPendingUsesCatalogRootWithoutPublicSnapshot(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	localDir := t.TempDir()
+	if err := os.WriteFile(
+		filepath.Join(localDir, mountsync.LegacyMountStateFileName),
+		[]byte(`{"files":{"/notion/pages/page-1.json":{"dirty":true}}}`),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	record := workspaceRecord{
+		ID:          "ws_demo",
+		LocalDir:    localDir,
+		LocalLayout: "exact",
+		RemotePaths: []string{"/notion"},
+	}
+	items, err := listWorkspaceWritebackItems("ws_demo", record, "pending")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].Path != "/notion/pages/page-1.json" {
+		t.Fatalf("catalog-root pending items = %#v", items)
+	}
+}
+
+func TestWritebackListPendingRefusesUnknownLegacyExactRoot(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	localDir := t.TempDir()
+	if err := os.WriteFile(
+		filepath.Join(localDir, mountsync.LegacyMountStateFileName),
+		[]byte(`{"files":{"/notion/pages/page-1.json":{"dirty":true}}}`),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	_, err := listWorkspaceWritebackItems("ws_demo", workspaceRecord{
+		ID:       "ws_demo",
+		LocalDir: localDir,
+	}, "pending")
+	if err == nil || !strings.Contains(err.Error(), "mount root is unknown") {
+		t.Fatalf("expected unknown legacy root refusal, got %v", err)
 	}
 }
 
@@ -512,14 +556,19 @@ func TestWritebackListDeadJSONMergesErrorSidecar(t *testing.T) {
 	}
 }
 
-func upsertWritebackListWorkspace(t *testing.T, localDir string) {
+func upsertWritebackListWorkspace(t *testing.T, localDir string, remoteRoots ...string) {
 	t.Helper()
+	if len(remoteRoots) == 0 {
+		remoteRoots = []string{"/"}
+	}
 	if _, err := upsertWorkspaceDetails(workspaceRecord{
-		Name:       "demo",
-		ID:         "ws_demo",
-		LocalDir:   localDir,
-		CreatedAt:  time.Now().UTC().Format(time.RFC3339),
-		LastUsedAt: time.Now().UTC().Format(time.RFC3339),
+		Name:        "demo",
+		ID:          "ws_demo",
+		LocalDir:    localDir,
+		LocalLayout: "exact",
+		RemotePaths: remoteRoots,
+		CreatedAt:   time.Now().UTC().Format(time.RFC3339),
+		LastUsedAt:  time.Now().UTC().Format(time.RFC3339),
 	}); err != nil {
 		t.Fatalf("upsertWorkspaceDetails failed: %v", err)
 	}
