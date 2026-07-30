@@ -533,6 +533,7 @@ type relayIntegrationBindingStore struct {
 
 type daemonPIDState struct {
 	PID         int    `json:"pid"`
+	Registered  bool   `json:"registered,omitempty"`
 	WorkspaceID string `json:"workspaceId"`
 	LocalDir    string `json:"localDir"`
 	LogFile     string `json:"logFile"`
@@ -4667,11 +4668,19 @@ func mountStartLockUserNamespace() (string, error) {
 
 func trustedMountStartLockBase() (string, error) {
 	userCacheDir, _ := os.UserCacheDir()
+	privateTempDir := ""
+	if namespace, err := mountStartLockUserNamespace(); err == nil {
+		privateTempDir = privateMountStartLockTempDir(os.TempDir(), namespace)
+	}
 	return trustedMountStartLockBaseFrom([]string{
 		strings.TrimSpace(os.Getenv("XDG_RUNTIME_DIR")),
-		os.TempDir(),
+		privateTempDir,
 		userCacheDir,
 	})
+}
+
+func privateMountStartLockTempDir(tempDir, namespace string) string {
+	return filepath.Join(tempDir, "relayfile-runtime-"+namespace)
 }
 
 func trustedMountStartLockBaseFrom(candidates []string) (string, error) {
@@ -7085,13 +7094,14 @@ func runMount(args []string) error {
 	if !mountKindProvided && strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_KIND")) == "" && strings.TrimSpace(previousRecord.MountKind) != "" {
 		*mountKind = previousRecord.MountKind
 	}
-	resolvedLocalLayout := *localLayout
-	if !localLayoutProvided && strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_LOCAL_LAYOUT")) == "" && recordedLocalLayout != "" {
-		resolvedLocalLayout = recordedLocalLayout
-	}
-	resolvedLocalLayout, err = mountscope.ResolveLayout(resolvedLocalLayout)
+	resolvedLocalLayout, err := resolveCLIRequestedLocalLayout(
+		*localLayout,
+		os.Getenv("RELAYFILE_MOUNT_LOCAL_LAYOUT"),
+		recordedLocalLayout,
+		localLayoutProvided,
+	)
 	if err != nil {
-		return fmt.Errorf("resolve local layout: %w", err)
+		return err
 	}
 	if err := validateMountLayoutTransition(previousRecord, absLocalDir, resolvedLocalLayout); err != nil {
 		return err
@@ -7282,6 +7292,7 @@ func runMount(args []string) error {
 	if registerPID {
 		if err := writeDaemonPIDState(pidFile, daemonPIDState{
 			PID:         os.Getpid(),
+			Registered:  true,
 			WorkspaceID: workspaceID,
 			LocalDir:    absLocalDir,
 			LogFile:     logFile,
@@ -7355,6 +7366,24 @@ func runMount(args []string) error {
 			&sharedAuthMu,
 		)
 	})
+}
+
+// resolveCLIRequestedLocalLayout gives the explicit flag precedence over the
+// environment and persisted topology, then validates the selected layout.
+func resolveCLIRequestedLocalLayout(flagValue, envValue, recordedValue string, flagProvided bool) (string, error) {
+	resolved := flagValue
+	if !flagProvided {
+		if strings.TrimSpace(envValue) != "" {
+			resolved = envValue
+		} else if strings.TrimSpace(recordedValue) != "" {
+			resolved = recordedValue
+		}
+	}
+	resolved, err := mountscope.ResolveLayout(resolved)
+	if err != nil {
+		return "", fmt.Errorf("resolve local layout: %w", err)
+	}
+	return resolved, nil
 }
 
 type cliMountScopeRunner func(context.Context, mountscope.Scope) error
@@ -7501,8 +7530,9 @@ Common flags:
   --local-dir DIR      local mirror directory (defaults to the recorded mirror)
   --remote-path PATH   remote subtree to mount (repeat for an allowlist)
   --paths-file FILE    remote subtrees as a JSON array or newline-separated list
-  --local-layout exact|scoped
-                       append each remote path under LOCAL_DIR for scoped mounts;
+  --local-layout exact
+                       scoped layout is temporarily unavailable until operator
+                       surfaces can enumerate every child runtime directory;
                        required with multiple remote paths
   --mode poll|fuse     poll (synced mirror, default) or fuse
   --interval 30s       sync interval (default 30s)
@@ -11848,7 +11878,10 @@ func verifyDaemonProcess(localDir, workspaceID string) (pid int, verified bool) 
 }
 
 func shouldRefuseCompetingMount(daemonized bool) bool {
-	return !daemonized
+	// Daemonized children must perform the same read-only discovery as their
+	// foreground parent. The caller's own PID is excluded by
+	// runningMountDaemons, so this does not self-refuse.
+	return true
 }
 
 func workspaceNameForStart(workspaceID string) string {
@@ -11859,6 +11892,23 @@ func workspaceNameForStart(workspaceID string) string {
 		return record.Name
 	}
 	return workspaceID
+}
+
+func workspaceNameForLocalDir(localDir string) string {
+	abs, err := filepath.Abs(localDir)
+	if err != nil {
+		abs = filepath.Clean(localDir)
+	}
+	catalog, err := loadWorkspaceCatalog()
+	if err == nil {
+		for _, record := range catalog.Workspaces {
+			recorded, rerr := filepath.Abs(record.LocalDir)
+			if rerr == nil && filepath.Clean(recorded) == filepath.Clean(abs) && strings.TrimSpace(record.Name) != "" {
+				return record.Name
+			}
+		}
+	}
+	return abs
 }
 
 func runningMountDaemons(localDir, workspaceID, workspaceName string) ([]mountDaemonProcess, int, error) {
@@ -13690,19 +13740,68 @@ func spawnBackgroundMountProcess(originalArgs, resolvedRemotePaths []string, loc
 	go func() {
 		childExited <- cmd.Wait()
 	}()
+	// Publish an ownership record before waiting. The daemon writes its full
+	// state once initialization reaches the registration point, but a bounded
+	// wait must not release the only exclusion against a second background
+	// start while this child is still alive and unregistered.
+	if err := writeDaemonPIDStateIfAbsent(pidFile, daemonPIDState{
+		PID:        childPID,
+		LocalDir:   localDir,
+		LogFile:    logFile,
+		StartedAt:  time.Now().UTC().Format(time.RFC3339),
+		Executable: executable,
+	}); err != nil {
+		_ = cmd.Process.Kill()
+		<-childExited
+		return fmt.Errorf("record background mount process %d before registration: %w", childPID, err)
+	}
 	if err := waitForBackgroundMountRegistration(pidFile, localDir, childPID, childExited, 10*time.Second); err != nil {
+		if !processAlive(childPID) {
+			if state, structured := readDaemonPIDStateFile(pidFile); structured && state.PID == childPID {
+				_ = os.Remove(pidFile)
+			}
+		}
 		return err
 	}
 	fmt.Fprintf(os.Stdout, "Mirror started in background at %s. Logs: %s\n", localDir, logFile)
 	return nil
 }
 
+func writeDaemonPIDStateIfAbsent(path string, state daemonPIDState) error {
+	if strings.TrimSpace(path) == "" {
+		return errors.New("empty daemon pid file path")
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	payload, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		return err
+	}
+	payload = append(payload, '\n')
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return nil
+		}
+		return err
+	}
+	if _, err := file.Write(payload); err != nil {
+		_ = os.Remove(path)
+		return err
+	}
+	return file.Close()
+}
+
+var backgroundMountRegistrationTimeout = 2 * time.Minute
+
 func waitForBackgroundMountRegistration(pidFile, localDir string, childPID int, childExited <-chan error, slowNoticeAfter time.Duration) error {
 	slowNoticeAt := time.Now().Add(slowNoticeAfter)
+	deadline := time.Now().Add(backgroundMountRegistrationTimeout)
 	slowNoticeLogged := false
 	for {
 		state, structured := readDaemonPIDStateFile(pidFile)
-		if structured && state.PID == childPID {
+		if structured && state.Registered && state.PID == childPID {
 			return nil
 		}
 		select {
@@ -13714,6 +13813,24 @@ func waitForBackgroundMountRegistration(pidFile, localDir string, childPID int, 
 				exitErr,
 			)
 		default:
+		}
+		if !time.Now().Before(deadline) {
+			// The child is still alive but has not become authoritative. Keep the
+			// PID/log/state paths intact so an operator can inspect or reconcile a
+			// late registration; do not leave the foreground caller waiting forever.
+			logPath := mountLogFile(localDir)
+			if registeredState, registeredStructured := readDaemonPIDStateFile(pidFile); registeredStructured && strings.TrimSpace(registeredState.LogFile) != "" {
+				logPath = registeredState.LogFile
+			}
+			return fmt.Errorf(
+				"background mount process %d did not register daemon state within %s for %s; child may still be initializing (pid file: %s, log: %s). If it remains stuck, run `relayfile stop %s` to release the mount",
+				childPID,
+				backgroundMountRegistrationTimeout,
+				localDir,
+				pidFile,
+				logPath,
+				workspaceNameForLocalDir(localDir),
+			)
 		}
 		if !slowNoticeLogged && slowNoticeAfter > 0 && time.Now().After(slowNoticeAt) {
 			log.Printf(

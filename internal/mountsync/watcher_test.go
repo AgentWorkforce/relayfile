@@ -66,7 +66,13 @@ func TestWatcherBasenameGuardMatchesRemoteRootMapping(t *testing.T) {
 			t.Fatalf("root mount skipped case-distinct provider path %q", relativePath)
 		}
 	}
-	probeRoot := t.TempDir()
+	// Probe the same directory boundary that the watcher evaluates. Some
+	// filesystems can vary case behavior per mount/volume, so a separate
+	// temporary directory is not evidence about rootWatcher.localDir.
+	probeRoot := rootWatcher.localDir
+	if err := os.MkdirAll(probeRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.Mkdir(filepath.Join(probeRoot, ".Git"), 0o755); err != nil {
 		t.Fatal(err)
 	}

@@ -18,6 +18,7 @@ func TestNewRelativeRemotePath_Rejects(t *testing.T) {
 		{"leading-slash", "/foo.txt", "mount"},
 		{"parent-traversal", "../escape.txt", "mount"},
 		{"embedded-traversal", "sub/../../escape", "mount"},
+		{"unix-backslash-filename", "foo\\bar", "mount"},
 		{"collides-with-basename", "mount", "mount"},
 	}
 	for _, tc := range cases {
@@ -26,6 +27,14 @@ func TestNewRelativeRemotePath_Rejects(t *testing.T) {
 				t.Fatalf("expected rejection for %q", tc.rel)
 			}
 		})
+	}
+}
+
+func TestRelativeRemotePathFromLocal_RejectsUnixBackslashFilename(t *testing.T) {
+	root := t.TempDir()
+	localPath := filepath.Join(root, "foo\\bar")
+	if _, err := RelativeRemotePathFromLocal(root, localPath); err == nil {
+		t.Fatal("expected a Unix backslash filename to be rejected at the local-to-remote boundary")
 	}
 }
 

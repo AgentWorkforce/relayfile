@@ -116,6 +116,86 @@ describe("default mount launcher", () => {
     }
   })
 
+  it("starts a direct scoped-layout configuration in its scoped child root", async () => {
+    const tempRoot = await mkdtemp(
+      path.join(os.tmpdir(), "relayfile-default-launcher-scoped-layout-")
+    )
+    const localDir = path.join(tempRoot, "mirror")
+    const scopedDir = path.join(localDir, "notion")
+    const child = new FakeChildProcess()
+    const spawnImpl = vi.fn().mockReturnValue(child as never)
+    const launcher = createDefaultMountLauncher({ spawnImpl })
+
+    try {
+      await mkdir(path.join(scopedDir, ".relay"), { recursive: true })
+      await writeFile(
+        path.join(scopedDir, ".relay", "state.json"),
+        JSON.stringify({
+          mode: "poll",
+          intervalMs: 30_000,
+          lastReconcileAt: new Date().toISOString(),
+          providers: [{ status: "ready" }]
+        }),
+        "utf8"
+      )
+      const instance = await launcher.start({
+        env: {
+          ...createMountEnv(localDir),
+          RELAYFILE_MOUNT_LOCAL_LAYOUT: "scoped"
+        },
+        readyTimeoutMs: 1_000
+      })
+      await instance.ready
+      expect(spawnImpl).toHaveBeenCalledOnce()
+      expect(spawnImpl.mock.calls[0]?.[2]).toMatchObject({ cwd: scopedDir })
+      await instance.stop()
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true })
+    }
+  })
+
+  it("starts an inherited scoped-layout configuration in its scoped child root", async () => {
+    const tempRoot = await mkdtemp(
+      path.join(os.tmpdir(), "relayfile-default-launcher-inherited-scoped-layout-")
+    )
+    const localDir = path.join(tempRoot, "mirror")
+    const scopedDir = path.join(localDir, "notion")
+    const child = new FakeChildProcess()
+    const spawnImpl = vi.fn().mockReturnValue(child as never)
+    const launcher = createDefaultMountLauncher({ spawnImpl })
+    const previousLayout = process.env.RELAYFILE_MOUNT_LOCAL_LAYOUT
+    process.env.RELAYFILE_MOUNT_LOCAL_LAYOUT = "scoped"
+
+    try {
+      await mkdir(path.join(scopedDir, ".relay"), { recursive: true })
+      await writeFile(
+        path.join(scopedDir, ".relay", "state.json"),
+        JSON.stringify({
+          mode: "poll",
+          intervalMs: 30_000,
+          lastReconcileAt: new Date().toISOString(),
+          providers: [{ status: "ready" }]
+        }),
+        "utf8"
+      )
+      const instance = await launcher.start({
+        env: createMountEnv(localDir),
+        readyTimeoutMs: 1_000
+      })
+      await instance.ready
+      expect(spawnImpl).toHaveBeenCalledOnce()
+      expect(spawnImpl.mock.calls[0]?.[2]).toMatchObject({ cwd: scopedDir })
+      await instance.stop()
+    } finally {
+      if (previousLayout === undefined) {
+        delete process.env.RELAYFILE_MOUNT_LOCAL_LAYOUT
+      } else {
+        process.env.RELAYFILE_MOUNT_LOCAL_LAYOUT = previousLayout
+      }
+      await rm(tempRoot, { recursive: true, force: true })
+    }
+  })
+
   it("times out readiness, then stops the child process", async () => {
     const tempRoot = await mkdtemp(
       path.join(os.tmpdir(), "relayfile-default-launcher-timeout-")

@@ -208,6 +208,14 @@ func TestResolveLocalLayout(t *testing.T) {
 	}
 }
 
+func TestValidateCLIRequestedLocalLayoutAcceptsSupportedLayouts(t *testing.T) {
+	for _, layout := range []string{localLayoutExact, localLayoutScoped} {
+		if err := validateCLIRequestedLocalLayout(layout); err != nil {
+			t.Fatalf("supported layout %q should remain available: %v", layout, err)
+		}
+	}
+}
+
 func TestResolveSyncMode(t *testing.T) {
 	tests := []struct {
 		name    string

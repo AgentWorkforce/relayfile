@@ -158,6 +158,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("invalid local layout: %v", err)
 	}
+	if err := validateCLIRequestedLocalLayout(resolvedLocalLayout); err != nil {
+		log.Fatalf("unsupported local layout: %v", err)
+	}
 	resolvedSyncMode, err := resolveSyncMode(*syncModeFlag)
 	if err != nil {
 		log.Fatalf("invalid sync mode: %v", err)
@@ -227,6 +230,11 @@ func resolveMountMode(mode string, fuse bool) (string, error) {
 
 func resolveLocalLayout(layout string) (string, error) {
 	return mountscope.ResolveLayout(layout)
+}
+
+func validateCLIRequestedLocalLayout(layout string) error {
+	_, err := mountscope.ResolveLayout(layout)
+	return err
 }
 
 func resolveSyncMode(mode string) (string, error) {

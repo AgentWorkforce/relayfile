@@ -198,12 +198,15 @@ class RelayfileMountProcessInstance implements MountLauncherInstance {
   }
 
   async status(): Promise<MountedWorkspaceStatus> {
+    // startRelayfileMount resolves scoped topology before constructing the
+    // instance. Treat this.localDir as the concrete process root here so a
+    // direct scoped input does not append the remote path a second time.
     const status = await readMountedWorkspaceStatus({
       localDir: this.localDir,
       workspaceId: this.input.env.RELAYFILE_WORKSPACE ?? "",
-      remotePath: this.input.env.RELAYFILE_REMOTE_PATH ?? "/",
+      remotePath: "/",
       mode: normalizeMountMode(this.input.env.RELAYFILE_MOUNT_MODE) ?? "poll",
-      localLayout: normalizeMountLocalLayout(this.input.env.RELAYFILE_MOUNT_LOCAL_LAYOUT),
+      localLayout: "exact",
       syncMode: normalizeMountSyncMode(this.input.env.RELAYFILE_MOUNT_SYNC_MODE),
       relayfileBaseUrl: this.input.env.RELAYFILE_BASE_URL ?? "",
       relayfileToken: this.input.env.RELAYFILE_TOKEN ?? "",

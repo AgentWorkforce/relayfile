@@ -54,6 +54,43 @@ func TestWorkspaceCreateStoresCatalogEntry(t *testing.T) {
 	}
 }
 
+func TestResolveCLIRequestedLocalLayoutAcceptsAllScopedRoutes(t *testing.T) {
+	tests := []struct {
+		name          string
+		flagValue     string
+		envValue      string
+		recordedValue string
+		flagProvided  bool
+	}{
+		{name: "flag", flagValue: mountscope.LayoutScoped, flagProvided: true},
+		{name: "environment", flagValue: mountscope.LayoutExact, envValue: mountscope.LayoutScoped},
+		{name: "recorded inheritance", flagValue: mountscope.LayoutExact, recordedValue: mountscope.LayoutScoped},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := resolveCLIRequestedLocalLayout(tc.flagValue, tc.envValue, tc.recordedValue, tc.flagProvided)
+			if err != nil || got != mountscope.LayoutScoped {
+				t.Fatalf("scoped layout route resolved to %q, err=%v", got, err)
+			}
+		})
+	}
+	if got, err := resolveCLIRequestedLocalLayout(mountscope.LayoutExact, "", mountscope.LayoutExact, false); err != nil || got != mountscope.LayoutExact {
+		t.Fatalf("exact layout should remain available, got %q err=%v", got, err)
+	}
+}
+
+// skipUntilScopedOperatorSurfacesReady keeps the scoped-runtime coverage
+// dormant only while the CLI guard is active. When the guard is removed, the
+// helper stops skipping these tests automatically; if the guard is deleted
+// without updating this call site, the compile-time dependency makes that
+// omission visible.
+func skipUntilScopedOperatorSurfacesReady(t *testing.T) {
+	t.Helper()
+	if _, err := resolveCLIRequestedLocalLayout(mountscope.LayoutScoped, "", "", true); err != nil {
+		t.Skipf("scoped runtime is intentionally refused until Unit C operator surfaces land: %v", err)
+	}
+}
+
 func TestResolveServerDefaultsToHostedRelayfile(t *testing.T) {
 	clearRelayfileEnv(t)
 
@@ -2319,6 +2356,7 @@ func TestMountUsesRecordedLocalDirWhenOmitted(t *testing.T) {
 }
 
 func TestMountMirrorsRepeatedRemotePathsUnderScopedLayout(t *testing.T) {
+	skipUntilScopedOperatorSurfacesReady(t)
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)
 
@@ -2438,6 +2476,7 @@ func TestMountRejectsRepeatedRemotePathsWithoutScopedLayout(t *testing.T) {
 }
 
 func TestMountRejectsProviderFilterAcrossHeterogeneousScopesBeforeInitializingMirror(t *testing.T) {
+	skipUntilScopedOperatorSurfacesReady(t)
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)
 	localRoot := filepath.Join(t.TempDir(), "mirror")
@@ -2506,6 +2545,7 @@ func TestValidateExplicitPathsFileAllowlistDistinguishesUnsetFromEmpty(t *testin
 }
 
 func TestMountRefusesScopedResetBeforeInitializingMirror(t *testing.T) {
+	skipUntilScopedOperatorSurfacesReady(t)
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)
 
@@ -2529,6 +2569,7 @@ func TestMountRefusesScopedResetBeforeInitializingMirror(t *testing.T) {
 }
 
 func TestMountPersistsScopedTopologyBeforeBackgroundSpawnFailure(t *testing.T) {
+	skipUntilScopedOperatorSurfacesReady(t)
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)
 
@@ -3046,6 +3087,18 @@ func TestTrustedMountStartLockBaseRejectsSymlinkCandidate(t *testing.T) {
 	}
 }
 
+func TestPrivateMountStartLockTempDirUsesPerUserChild(t *testing.T) {
+	tempDir := t.TempDir()
+	got := privateMountStartLockTempDir(tempDir, "user-namespace")
+	want := filepath.Join(tempDir, "relayfile-runtime-user-namespace")
+	if got != want {
+		t.Fatalf("private temp lock directory = %q, want %q", got, want)
+	}
+	if got == tempDir {
+		t.Fatal("private temp lock directory must not use the shared temp root")
+	}
+}
+
 func TestAcquireMountStartLockSerializesSymlinkAliasesAndMissingDescendants(t *testing.T) {
 	parent := t.TempDir()
 	realParent := filepath.Join(parent, "real")
@@ -3377,6 +3430,7 @@ func TestMountRehomeRefusesRunningRecordedDaemon(t *testing.T) {
 }
 
 func TestMountRefusesCompetingDaemonBeforePersistingAddedScope(t *testing.T) {
+	skipUntilScopedOperatorSurfacesReady(t)
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)
 
@@ -3432,6 +3486,7 @@ func TestMountRefusesCompetingDaemonBeforePersistingAddedScope(t *testing.T) {
 }
 
 func TestMountOnceRefusesCompetingDaemonBeforePersistingAddedScope(t *testing.T) {
+	skipUntilScopedOperatorSurfacesReady(t)
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)
 
