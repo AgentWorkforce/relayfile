@@ -18,6 +18,68 @@ type watcherEvent struct {
 	op   fsnotify.Op
 }
 
+func TestWatcherBasenameGuardMatchesRemoteRootMapping(t *testing.T) {
+	localDir := filepath.Join(t.TempDir(), "Docs")
+	rootWatcher, err := NewFileWatcher(localDir, func(string, fsnotify.Op) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = rootWatcher.Close() })
+	if !rootWatcher.shouldSkip(filepath.Join("Docs", "page.md")) {
+		t.Fatal("root mount must retain the round-trip basename guard")
+	}
+
+	scopedWatcher, err := NewFileWatcherForTopology(localDir, "/notion/Docs", true, func(string, fsnotify.Op) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = scopedWatcher.Close() })
+	if scopedWatcher.shouldSkip(filepath.Join("Docs", "page.md")) {
+		t.Fatal("non-root mount must not skip a legitimate basename-named descendant")
+	}
+	for _, relativePath := range []string{
+		filepath.Join("digests", "page.md"),
+		filepath.Join(".skills", "page.md"),
+		filepath.Join("node_modules", "package.json"),
+		"_PERMISSIONS.md",
+	} {
+		if scopedWatcher.shouldSkip(relativePath) {
+			t.Fatalf("non-root mount skipped legitimate provider descendant %q", relativePath)
+		}
+	}
+	if !scopedWatcher.shouldSkip(filepath.Join(".git", "config")) {
+		t.Fatal("non-root mount did not reserve local .git metadata")
+	}
+	exactSubtreeWatcher, err := NewFileWatcherForRemoteRoot(localDir, "/github", func(string, fsnotify.Op) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = exactSubtreeWatcher.Close() })
+	if !exactSubtreeWatcher.shouldSkip(filepath.Join(".skills", "activity-summary.md")) {
+		t.Fatal("exact non-root mount did not reserve generated catalog artifact")
+	}
+	for _, relativePath := range []string{
+		filepath.Join("Digests", "page.md"),
+		filepath.Join("NODE_MODULES", "package.json"),
+	} {
+		if rootWatcher.shouldSkip(relativePath) {
+			t.Fatalf("root mount skipped case-distinct provider path %q", relativePath)
+		}
+	}
+	probeRoot := t.TempDir()
+	if err := os.Mkdir(filepath.Join(probeRoot, ".Git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_, canonicalProbeErr := os.Stat(filepath.Join(probeRoot, ".git"))
+	caseInsensitive := canonicalProbeErr == nil
+	if canonicalProbeErr != nil && !errors.Is(canonicalProbeErr, os.ErrNotExist) {
+		t.Fatalf("inspect filesystem case behavior: %v", canonicalProbeErr)
+	}
+	if got := rootWatcher.shouldSkip(filepath.Join(".Git", "config")); got != caseInsensitive {
+		t.Fatalf("case-distinct infrastructure skip = %t, want filesystem case behavior %t", got, caseInsensitive)
+	}
+}
+
 func startFileWatcher(t *testing.T, localDir string) (chan watcherEvent, context.CancelFunc, *FileWatcher) {
 	t.Helper()
 

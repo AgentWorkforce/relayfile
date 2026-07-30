@@ -223,8 +223,8 @@ func TestWritebackListPendingUsesRemoteRootForNonRootMount(t *testing.T) {
 	clearRelayfileEnv(t)
 
 	localDir := t.TempDir()
-	if err := ensureMirrorLayout(localDir); err != nil {
-		t.Fatalf("ensureMirrorLayout failed: %v", err)
+	if err := ensureMountRuntimeLayout(localDir); err != nil {
+		t.Fatalf("ensureMountRuntimeLayout failed: %v", err)
 	}
 	changedPath := filepath.Join(localDir, "pages", "page-1.json")
 	untrackedPath := filepath.Join(localDir, "pages", "draft.json")
@@ -238,6 +238,20 @@ func TestWritebackListPendingUsesRemoteRootForNonRootMount(t *testing.T) {
 	}
 	if err := os.WriteFile(untrackedPath, []byte("new draft"), 0o644); err != nil {
 		t.Fatalf("write untracked failed: %v", err)
+	}
+	gitMetadataPath := filepath.Join(localDir, ".git", "config")
+	if err := os.MkdirAll(filepath.Dir(gitMetadataPath), 0o755); err != nil {
+		t.Fatalf("mkdir git metadata failed: %v", err)
+	}
+	if err := os.WriteFile(gitMetadataPath, []byte("[remote \"origin\"]\n\turl = https://token@example.test/repo.git\n"), 0o600); err != nil {
+		t.Fatalf("write git metadata failed: %v", err)
+	}
+	generatedSkillPath := filepath.Join(localDir, ".skills", "activity-summary.md")
+	if err := os.MkdirAll(filepath.Dir(generatedSkillPath), 0o755); err != nil {
+		t.Fatalf("mkdir generated skill failed: %v", err)
+	}
+	if err := os.WriteFile(generatedSkillPath, []byte("generated skill"), 0o644); err != nil {
+		t.Fatalf("write generated skill failed: %v", err)
 	}
 	mountState := []byte(`{"files":{
   "/notion/pages/page-1.json":{"revision":"rev_1","hash":"old_hash"},
@@ -267,6 +281,29 @@ func TestWritebackListPendingUsesRemoteRootForNonRootMount(t *testing.T) {
 	want := []string{"/notion/pages/draft.json", "/notion/pages/page-1.json", "/notion/pages/page-2.json"}
 	if strings.Join(paths, ",") != strings.Join(want, ",") {
 		t.Fatalf("pending paths = %v, want %v", paths, want)
+	}
+	for _, item := range items {
+		if strings.Contains(item.Path, "/.git/") || strings.Contains(item.Path, "/.skills/") {
+			t.Fatalf("local bookkeeping entered pending writeback list: %+v", item)
+		}
+	}
+}
+
+func TestLocalWritebackHashesIncludesCatalogNamedProviderContentForScopedChild(t *testing.T) {
+	localDir := t.TempDir()
+	providerPath := filepath.Join(localDir, "digests", "page.json")
+	if err := os.MkdirAll(filepath.Dir(providerPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(providerPath, []byte("provider digest"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	hashes, err := localWritebackHashes(localDir, "/notion", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := hashes["/notion/digests/page.json"]; !ok {
+		t.Fatalf("scoped provider content missing from local hashes: %#v", hashes)
 	}
 }
 

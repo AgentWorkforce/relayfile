@@ -1,0 +1,57 @@
+{
+  "id": "traj_zx3ypuzq5t1j",
+  "version": 1,
+  "task": {
+    "title": "Reject explicitly empty scoped allowlists",
+    "source": {
+      "system": "plain",
+      "id": "relayfile#379"
+    }
+  },
+  "status": "completed",
+  "startedAt": "2026-07-30T07:27:38.808Z",
+  "completedAt": "2026-07-30T07:32:43.868Z",
+  "agents": [
+    {
+      "name": "default",
+      "role": "lead",
+      "joinedAt": "2026-07-30T07:32:42.989Z"
+    }
+  ],
+  "chapters": [
+    {
+      "id": "chap_h329nbyridyg",
+      "title": "Work",
+      "agentName": "default",
+      "startedAt": "2026-07-30T07:32:42.989Z",
+      "endedAt": "2026-07-30T07:32:43.868Z",
+      "events": [
+        {
+          "ts": 1785396762990,
+          "type": "decision",
+          "content": "Distinguish configured empty allowlists from absent configuration: Distinguish configured empty allowlists from absent configuration",
+          "raw": {
+            "question": "Distinguish configured empty allowlists from absent configuration",
+            "chosen": "Distinguish configured empty allowlists from absent configuration",
+            "alternatives": [],
+            "reasoning": "An unset paths-file retains the historical root fallback; a configured file with no usable roots is an explicit restriction and must refuse before initialization."
+          },
+          "significance": "high"
+        }
+      ]
+    }
+  ],
+  "retrospective": {
+    "summary": "Rejected configured paths files with no usable roots while preserving the unset default; covered both arms and all empty-file forms; full Go validation passes.",
+    "approach": "Standard approach",
+    "confidence": 0.96
+  },
+  "commits": [],
+  "filesChanged": [],
+  "projectId": "AgentWorkforce/relayfile",
+  "tags": [],
+  "_trace": {
+    "startRef": "99970e60e34771b9f0cdc4adae156bb6aa12c7c5",
+    "endRef": "99970e60e34771b9f0cdc4adae156bb6aa12c7c5"
+  }
+}

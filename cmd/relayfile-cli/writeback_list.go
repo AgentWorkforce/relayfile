@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/agentworkforce/relayfile/internal/mountscope"
 )
 
 const writebackListUsage = "usage: relayfile writeback list --state pending|dead [--workspace WS] [--json]"
@@ -88,7 +90,13 @@ func listWorkspaceWritebackItems(workspaceID string, record workspaceRecord, sta
 			if err != nil {
 				return nil, err
 			}
-			items, err := readPendingWritebackItemsFromState(workspaceID, scope.LocalDir, remoteRoot, stateFile)
+			items, err := readPendingWritebackItemsFromState(
+				workspaceID,
+				scope.LocalDir,
+				remoteRoot,
+				stateFile,
+				strings.TrimSpace(record.LocalLayout) == mountscope.LayoutScoped,
+			)
 			if err != nil {
 				return nil, err
 			}
@@ -128,7 +136,7 @@ func validWritebackListState(state string) bool {
 	}
 }
 
-func readPendingWritebackItemsFromState(workspaceID, localDir, remoteRoot, stateFile string) ([]writebackListItem, error) {
+func readPendingWritebackItemsFromState(workspaceID, localDir, remoteRoot, stateFile string, scopedChild bool) ([]writebackListItem, error) {
 	var state struct {
 		Files map[string]struct {
 			Revision    string `json:"revision"`
@@ -149,7 +157,7 @@ func readPendingWritebackItemsFromState(workspaceID, localDir, remoteRoot, state
 	if err := json.Unmarshal(payload, &state); err != nil {
 		return nil, fmt.Errorf("invalid mount state: %w", err)
 	}
-	localHashes, err := localWritebackHashes(localDir, remoteRoot)
+	localHashes, err := localWritebackHashes(localDir, remoteRoot, scopedChild)
 	if err != nil {
 		return nil, err
 	}
@@ -202,7 +210,7 @@ func readPendingWritebackItemsFromState(workspaceID, localDir, remoteRoot, state
 	return items, nil
 }
 
-func localWritebackHashes(localDir, remoteRoot string) (map[string]string, error) {
+func localWritebackHashes(localDir, remoteRoot string, scopedChild bool) (map[string]string, error) {
 	hashes := map[string]string{}
 	err := filepath.WalkDir(localDir, func(path string, entry os.DirEntry, err error) error {
 		if err != nil {
@@ -214,14 +222,12 @@ func localWritebackHashes(localDir, remoteRoot string) (map[string]string, error
 		}
 		first := strings.SplitN(rel, string(os.PathSeparator), 2)[0]
 		if entry.IsDir() {
-			if first == entry.Name() && writebackListReservedTopLevel(first) {
+			if first == entry.Name() && writebackListReservedTopLevel(scopedChild, localDir, first) {
 				return filepath.SkipDir
 			}
 			return nil
 		}
-		if first == ".relayfile-mount-state.json" ||
-			strings.HasPrefix(first, ".relayfile-mount-state.json.tmp-") ||
-			writebackListReservedTopLevel(first) {
+		if writebackListReservedTopLevel(scopedChild, localDir, first) {
 			return nil
 		}
 		info, err := entry.Info()
@@ -256,10 +262,11 @@ func remotePathForLocalRel(remoteRoot, rel string) string {
 	return normalizeWritebackListPath(strings.TrimRight(root, "/") + "/" + rel)
 }
 
-func writebackListReservedTopLevel(name string) bool {
-	return name == ".git" || name == ".relay" || name == ".skills" ||
-		name == "digests" || name == "node_modules" ||
-		name == "_PERMISSIONS.md"
+func writebackListReservedTopLevel(scopedChild bool, localRoot, name string) bool {
+	if mountscope.IsReservedRuntimeSegment(name) || mountscope.IsInfrastructureTopLevelAt(localRoot, name) {
+		return true
+	}
+	return !scopedChild && mountscope.IsCatalogOwnedTopLevel(name)
 }
 
 func hashLocalWritebackFile(path string) (string, error) {

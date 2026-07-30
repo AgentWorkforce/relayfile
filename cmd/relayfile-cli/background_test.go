@@ -8,11 +8,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/agentworkforce/relayfile/internal/mountscope"
 )
 
 // TestA14BackgroundModeWritesPidAndStopSignalsCleanly is the acceptance test
@@ -113,6 +116,77 @@ func TestA14BackgroundModeWritesPidAndStopSignalsCleanly(t *testing.T) {
 		t.Fatalf("subprocess exited with unexpected error: %v", err)
 	case <-time.After(time.Until(deadline)):
 		t.Fatalf("subprocess did not exit within 5s of SIGTERM")
+	}
+}
+
+func TestWaitForBackgroundMountRegistrationUsesConfiguredPIDFile(t *testing.T) {
+	localDir := t.TempDir()
+	customPIDFile := filepath.Join(t.TempDir(), "custom", "relayfile.pid")
+	const childPID = 4242
+	if err := writeDaemonPIDState(customPIDFile, daemonPIDState{
+		PID:      childPID,
+		LocalDir: localDir,
+	}); err != nil {
+		t.Fatalf("write custom daemon PID state: %v", err)
+	}
+
+	if err := waitForBackgroundMountRegistration(customPIDFile, localDir, childPID, nil, time.Second); err != nil {
+		t.Fatalf("wait for custom PID-file registration: %v", err)
+	}
+	if _, err := os.Stat(mountPIDFile(localDir)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("test unexpectedly depended on default PID file: %v", err)
+	}
+}
+
+func TestWaitForBackgroundMountRegistrationKeepsWaitingForLiveChild(t *testing.T) {
+	cmd := exec.Command("sleep", "2")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	childExited := make(chan error, 1)
+	go func() {
+		childExited <- cmd.Wait()
+	}()
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		<-childExited
+	})
+	localDir := t.TempDir()
+	customPIDFile := filepath.Join(t.TempDir(), "custom", "relayfile.pid")
+	writeErr := make(chan error, 1)
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		writeErr <- writeDaemonPIDState(customPIDFile, daemonPIDState{
+			PID:      cmd.Process.Pid,
+			LocalDir: localDir,
+		})
+	}()
+
+	started := time.Now()
+	if err := waitForBackgroundMountRegistration(customPIDFile, localDir, cmd.Process.Pid, childExited, 10*time.Millisecond); err != nil {
+		t.Fatalf("live child was treated as timed out: %v", err)
+	}
+	if err := <-writeErr; err != nil {
+		t.Fatalf("write delayed PID registration: %v", err)
+	}
+	if elapsed := time.Since(started); elapsed < 75*time.Millisecond {
+		t.Fatalf("wait returned before delayed registration: %s", elapsed)
+	}
+}
+
+func TestWaitForBackgroundMountRegistrationReportsChildExit(t *testing.T) {
+	childExited := make(chan error, 1)
+	childExited <- errors.New("synthetic child failure")
+	err := waitForBackgroundMountRegistration(
+		filepath.Join(t.TempDir(), "missing.pid"),
+		t.TempDir(),
+		4242,
+		childExited,
+		time.Second,
+	)
+	if err == nil || !strings.Contains(err.Error(), "exited before registering") ||
+		!strings.Contains(err.Error(), "synthetic child failure") {
+		t.Fatalf("unexpected child-exit result: %v", err)
 	}
 }
 
@@ -463,10 +537,16 @@ func TestMountBackgroundClearsDeadStructuredPIDBeforeStart(t *testing.T) {
 
 	oldSpawn := spawnBackgroundMountProcessFn
 	spawned := false
-	spawnBackgroundMountProcessFn = func(originalArgs []string, absLocalDir, pidFile, logFile string) error {
+	spawnBackgroundMountProcessFn = func(originalArgs, resolvedRemotePaths []string, absLocalDir, pidFile, logFile, localLayout string) error {
 		spawned = true
 		if absLocalDir != localDir {
 			t.Fatalf("spawn localDir = %q, want %q", absLocalDir, localDir)
+		}
+		if localLayout != mountscope.LayoutExact {
+			t.Fatalf("spawn localLayout = %q, want exact", localLayout)
+		}
+		if len(resolvedRemotePaths) != 1 || resolvedRemotePaths[0] != "/" {
+			t.Fatalf("spawn resolvedRemotePaths = %v, want [/]", resolvedRemotePaths)
 		}
 		if _, err := os.Stat(pidFile); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("expected stale pid file to be cleared before spawn, got %v", err)
@@ -484,6 +564,34 @@ func TestMountBackgroundClearsDeadStructuredPIDBeforeStart(t *testing.T) {
 	}
 	if _, err := os.Stat(mountPIDFile(localDir)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("expected stale pid file to remain cleared, got %v", err)
+	}
+}
+
+func TestResolvedBackgroundMountArgsUsesValidatedAllowlist(t *testing.T) {
+	got := resolvedBackgroundMountArgs(
+		[]string{
+			"demo",
+			"--background",
+			"--paths-file", "/tmp/mutable-paths.json",
+			"--remote-path=/stale",
+			"--interval", "30s",
+		},
+		[]string{"/github", "/slack/channels/ops"},
+	)
+	want := []string{
+		"demo",
+		"--interval", "30s",
+		"--paths-file=",
+		"--remote-path", "/github",
+		"--remote-path", "/slack/channels/ops",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("resolved background args = %v, want %v", got, want)
+	}
+	for _, arg := range got {
+		if strings.Contains(arg, "mutable-paths.json") || arg == "/stale" {
+			t.Fatalf("background child retained mutable or stale allowlist input: %v", got)
+		}
 	}
 }
 

@@ -113,9 +113,20 @@ func NewRelativeRemotePath(rel, mountBasename string) (RelativeRemotePath, error
 // absolute (or relative-to-cwd) localPath under localRoot. Returns an
 // error if localPath escapes localRoot or maps onto the mount root.
 func RelativeRemotePathFromLocal(localRoot, localPath string) (RelativeRemotePath, error) {
+	return RelativeRemotePathFromLocalUnderRoot(localRoot, "/", localPath)
+}
+
+// RelativeRemotePathFromLocalUnderRoot derives a typed relative path using the
+// active remote root. The mount-basename collision exists only for root
+// mounts; for non-root mounts a same-named child maps beneath remoteRoot.
+func RelativeRemotePathFromLocalUnderRoot(localRoot, remoteRoot, localPath string) (RelativeRemotePath, error) {
 	rel, err := filepath.Rel(localRoot, localPath)
 	if err != nil {
 		return RelativeRemotePath{}, err
 	}
-	return NewRelativeRemotePath(rel, filepath.Base(filepath.Clean(localRoot)))
+	mountBasename := ""
+	if normalizeRemotePath(remoteRoot) == "/" {
+		mountBasename = filepath.Base(filepath.Clean(localRoot))
+	}
+	return NewRelativeRemotePath(rel, mountBasename)
 }

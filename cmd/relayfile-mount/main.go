@@ -65,6 +65,7 @@ type mountConfig struct {
 	memlogInterval        time.Duration
 	logHTTPStatus         bool
 	scopes                []string
+	scopedChild           bool
 	once                  bool
 	flushOutboxOnce       bool
 	pushLocalOnce         bool
@@ -143,6 +144,9 @@ func main() {
 	fileRemotePaths, err := mountscope.ReadPathsFile(*pathsFile)
 	if err != nil {
 		log.Fatalf("read paths-file: %v", err)
+	}
+	if err := mountscope.ValidateExplicitPathsFile(*pathsFile, fileRemotePaths, remotePaths.Values()); err != nil {
+		log.Fatalf("invalid paths-file: %v", err)
 	}
 	allRemotePaths := append(remotePaths.Values(), fileRemotePaths...)
 	*intervalJitter = clampJitterRatio(*intervalJitter)
@@ -271,6 +275,12 @@ func runPollingMountWithRunner(rootCtx context.Context, cfg mountConfig, run pol
 	if len(remotePaths) > 1 {
 		return fmt.Errorf("multiple --remote-path values require --local-layout=%s", localLayoutScoped)
 	}
+	if err := logStandaloneMountContentPolicy([]mountscope.Scope{{
+		RemotePath: normalizeMountRemotePath(remotePaths[0]),
+		LocalDir:   cfg.localDir,
+	}}); err != nil {
+		return err
+	}
 	cfg.remotePath = normalizeMountRemotePath(remotePaths[0])
 	cfg.remotePaths = nil
 	return run(rootCtx, cfg)
@@ -293,12 +303,19 @@ func runScopedPollingMountsWithRunner(
 	if err != nil {
 		return err
 	}
+	if err := mountscope.ValidateEventProvider(remotePaths, cfg.eventProvider); err != nil {
+		return err
+	}
+	if err := logStandaloneMountContentPolicy(plan); err != nil {
+		return err
+	}
 	scopedMounts := make([]scopedMount, 0, len(plan))
 	for _, scope := range plan {
 		scoped := cfg
 		scoped.remotePath = scope.RemotePath
 		scoped.remotePaths = nil
 		scoped.localDir = scope.LocalDir
+		scoped.scopedChild = true
 		scoped.stateFile = cfg.stateFile
 		if err := os.MkdirAll(scoped.localDir, 0o755); err != nil {
 			return fmt.Errorf("create scoped local dir for %s: %w", scope.RemotePath, err)
@@ -334,6 +351,30 @@ func runScopedPollingMountsWithRunner(
 	return firstErr
 }
 
+func logStandaloneMountContentPolicy(scopes []mountscope.Scope) error {
+	for _, scope := range scopes {
+		report, err := mountscope.InspectLocalContentPolicy(scope.LocalDir)
+		if err != nil {
+			return fmt.Errorf("inspect local mount content policy for %s: %w", scope.LocalDir, err)
+		}
+		if len(report.ExcludedInfrastructure) > 0 {
+			log.Printf(
+				"excluded incidental infrastructure from %s (not synced): %s",
+				scope.LocalDir,
+				strings.Join(report.ExcludedInfrastructure, ", "),
+			)
+		}
+		if len(report.SensitiveUserContent) > 0 {
+			log.Printf(
+				"warning: convention-sensitive user content under %s will sync: %s; review or move it if that is not intended",
+				scope.LocalDir,
+				strings.Join(report.SensitiveUserContent, ", "),
+			)
+		}
+	}
+	return nil
+}
+
 func readRemotePathsFile(path string) ([]string, error) {
 	return mountscope.ReadPathsFile(path)
 }
@@ -353,6 +394,7 @@ func runSinglePollingMount(rootCtx context.Context, cfg mountConfig) error {
 		WorkspaceID:           cfg.workspaceID,
 		RemoteRoot:            cfg.remotePath,
 		EventProvider:         cfg.eventProvider,
+		ScopedChild:           cfg.scopedChild,
 		LocalRoot:             cfg.localDir,
 		StateFile:             cfg.stateFile,
 		StateDir:              cfg.stateDir,
@@ -437,7 +479,7 @@ func runSinglePollingMount(rootCtx context.Context, cfg mountConfig) error {
 		return nil
 	}
 
-	watcher, err := mountsync.NewFileWatcher(cfg.localDir, func(relativePath string, op fsnotify.Op) {
+	watcher, err := syncer.NewFileWatcher(func(relativePath string, op fsnotify.Op) {
 		ctx, cancel := context.WithTimeout(rootCtx, cfg.timeout)
 		defer cancel()
 		if err := syncer.HandleLocalChange(ctx, relativePath, op); err != nil {

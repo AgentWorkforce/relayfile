@@ -33,6 +33,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/agentworkforce/relayfile/internal/digest"
+	"github.com/agentworkforce/relayfile/internal/mountscope"
 	"github.com/agentworkforce/relayfile/internal/relayfile"
 	"github.com/fsnotify/fsnotify"
 	"nhooyr.io/websocket"
@@ -885,13 +886,17 @@ type SyncerOptions struct {
 	MountKind     string
 	ValidateState bool
 	EventProvider string
-	Scopes        []string
-	WebSocket     *bool
-	RootCtx       context.Context
-	Logger        Logger
-	Mode          string
-	SyncMode      string
-	Interval      time.Duration
+	// ScopedChild identifies a Syncer whose local root is one child beneath a
+	// catalog root. Provider paths that resemble catalog-only artifacts are
+	// ordinary content there; exact mounts keep those artifacts reserved.
+	ScopedChild bool
+	Scopes      []string
+	WebSocket   *bool
+	RootCtx     context.Context
+	Logger      Logger
+	Mode        string
+	SyncMode    string
+	Interval    time.Duration
 	// FullPullEvery controls how often the incremental pull path forces a
 	// full tree pull as a "trust but verify" safety net against cloud-side
 	// revision reuse (see fix/cloud-side-rev-reuse-defense). 0 means use
@@ -1080,6 +1085,7 @@ type Syncer struct {
 	deadLetterDir        string
 	outboxDir            string
 	eventProvider        string
+	scopedChild          bool
 	scopes               []string
 	logger               Logger
 	denialLogPath        string // path to .relay/permissions-denied.log
@@ -1226,6 +1232,9 @@ func (s *Syncer) now() time.Time {
 }
 
 type mountState struct {
+	WorkspaceID                string                 `json:"workspaceId,omitempty"`
+	RemoteRoot                 string                 `json:"remoteRoot,omitempty"`
+	LocalRoot                  string                 `json:"localRoot,omitempty"`
 	Files                      map[string]trackedFile `json:"files"`
 	EventsCursor               string                 `json:"eventsCursor,omitempty"`
 	IncrementalCheckpoint      *incrementalCheckpoint `json:"incrementalCheckpoint,omitempty"`
@@ -1788,6 +1797,7 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 		deadLetterDir:         deadLetterDir,
 		outboxDir:             outboxDir,
 		eventProvider:         eventProvider,
+		scopedChild:           opts.ScopedChild,
 		scopes:                scopes,
 		websocket:             websocketEnabled,
 		recoverStartupDrift:   true,
@@ -1820,7 +1830,10 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 		maxOutboxAttempts:     defaultOutboxMaxAttempts,
 		nowFn:                 opts.Now,
 		state: mountState{
-			Files: map[string]trackedFile{},
+			WorkspaceID: workspace,
+			RemoteRoot:  remoteRoot,
+			LocalRoot:   localRoot,
+			Files:       map[string]trackedFile{},
 		},
 	}, nil
 }
@@ -1835,6 +1848,12 @@ func (s *Syncer) SetCredentialExpiry(expiresAt string) {
 	s.mu.Lock()
 	s.credExpiresAt = strings.TrimSpace(expiresAt)
 	s.mu.Unlock()
+}
+
+// NewFileWatcher creates a watcher with the same local/remote mapping as this
+// Syncer so path-collision guards cannot diverge between event and scan paths.
+func (s *Syncer) NewFileWatcher(onChange func(string, fsnotify.Op)) (*FileWatcher, error) {
+	return NewFileWatcherForTopology(s.localRoot, s.remoteRoot, s.scopedChild, onChange)
 }
 
 func parseScopesFromJWT(token string) []string {
@@ -2037,7 +2056,10 @@ func (s *Syncer) HandleLocalChange(ctx context.Context, relativePath string, op 
 		s.logMountControlPathSkipped(relativePath)
 		return nil
 	}
-	if first := strings.SplitN(relativePath, "/", 2)[0]; reservedTopLevel(first) {
+	if first := strings.SplitN(relativePath, "/", 2)[0]; reservedTopLevel(s.scopedChild, s.localRoot, first) {
+		if mountscope.IsInfrastructureTopLevelAt(s.localRoot, first) {
+			s.logLocalInfrastructureSkipped(first)
+		}
 		return nil
 	}
 
@@ -4300,6 +4322,10 @@ func (s *Syncer) applyGithubWorkingTreeTarSeed(tarBody GithubWorkingTreeTar, tre
 		if err != nil {
 			return nil, err
 		}
+		if s.excludeInfrastructureLocalPath(localPath, meta.RemotePath, conflicted) {
+			remotePaths[meta.RemotePath] = struct{}{}
+			continue
+		}
 		if err := s.assertNotMountRoot(localPath); err != nil {
 			return nil, err
 		}
@@ -5962,6 +5988,13 @@ func (s *Syncer) applyRemoteFile(remotePath string, file RemoteFile, conflicted 
 	if s.fullPullPathTouchedByUpPath(remotePath) {
 		return nil
 	}
+	localPath, err := s.remoteToLocalPath(remotePath)
+	if err != nil {
+		return nil
+	}
+	if s.excludeInfrastructureLocalPath(localPath, remotePath, conflicted) {
+		return nil
+	}
 	remoteBytes, err := decodeRemoteFileContent(file)
 	if err != nil {
 		return err
@@ -5971,10 +6004,6 @@ func (s *Syncer) applyRemoteFile(remotePath string, file RemoteFile, conflicted 
 	tracked.ReadOnly = !canWrite
 	tracked.Denied = false
 	if tracked.Dirty {
-		localPath, err := s.remoteToLocalPath(remotePath)
-		if err != nil {
-			return nil
-		}
 		tracked.LocalRelativePath = s.state.Files[remotePath].LocalRelativePath
 		if err := s.assertNotMountRoot(localPath); err != nil {
 			s.logf("skipping remote file %s: %v", remotePath, err)
@@ -5988,10 +6017,6 @@ func (s *Syncer) applyRemoteFile(remotePath string, file RemoteFile, conflicted 
 		}
 		s.state.Files[remotePath] = tracked
 		materialized = true
-		return nil
-	}
-	localPath, err := s.remoteToLocalPath(remotePath)
-	if err != nil {
 		return nil
 	}
 	tracked.LocalRelativePath = s.state.Files[remotePath].LocalRelativePath
@@ -6202,6 +6227,10 @@ func (s *Syncer) applyRemoteDelete(remotePath string, conflicted map[string]stru
 			return nil
 		}
 	}
+	localPath, pathErr := s.remoteToLocalPath(remotePath)
+	if pathErr == nil && s.excludeInfrastructureLocalPath(localPath, remotePath, conflicted) {
+		return nil
+	}
 	// An authoritative remote delete resolves any earlier local
 	// materialization failure even when the file was never tracked locally.
 	s.clearSkippedMaterialization(remotePath)
@@ -6217,7 +6246,7 @@ func (s *Syncer) applyRemoteDelete(remotePath string, conflicted map[string]stru
 	if tracked.WriteDenied {
 		return nil
 	}
-	localPath, err := s.remoteToLocalPath(remotePath)
+	localPath, err = s.remoteToLocalPath(remotePath)
 	if err != nil {
 		delete(s.state.Files, remotePath)
 		return nil
@@ -6498,23 +6527,32 @@ func (s *Syncer) scanLocalFiles() (map[string]localSnapshot, error) {
 			if d.Name() == ".relay" {
 				return filepath.SkipDir
 			}
-			if rel, relErr := filepath.Rel(s.localRoot, path); relErr == nil &&
-				rel != "." &&
-				isMountRuntimeRelativePath(rel) {
-				s.logMountControlPathSkipped(rel)
-				return filepath.SkipDir
+			if rel, relErr := filepath.Rel(s.localRoot, path); relErr == nil && rel != "." {
+				if isMountRuntimeRelativePath(rel) {
+					s.logMountControlPathSkipped(rel)
+					return filepath.SkipDir
+				}
+				first := strings.SplitN(rel, string(os.PathSeparator), 2)[0]
+				if first == d.Name() && mountscope.IsInfrastructureTopLevelAt(s.localRoot, first) {
+					s.logLocalInfrastructureSkipped(first)
+					return filepath.SkipDir
+				}
 			}
 			return nil
 		}
-		// Data-loss guard: skip any top-level entry whose name collides
-		// with the mount directory's own basename (round-trip-onto-root).
+		// Data-loss guard for root mounts: skip a top-level entry whose name
+		// collides with the mount directory's own basename. Non-root mounts map
+		// the same entry beneath remoteRoot, where it is a valid descendant.
 		if rel, relErr := filepath.Rel(s.localRoot, path); relErr == nil {
 			if isMountRuntimeRelativePath(rel) {
 				s.logMountControlPathSkipped(rel)
 				return nil
 			}
 			first := strings.SplitN(rel, string(os.PathSeparator), 2)[0]
-			if reservedTopLevel(first) || first == filepath.Base(s.localRoot) {
+			if reservedTopLevel(s.scopedChild, s.localRoot, first) || collidesWithMountRootBasename(s.localRoot, s.remoteRoot, first) {
+				if mountscope.IsInfrastructureTopLevelAt(s.localRoot, first) {
+					s.logLocalInfrastructureSkipped(first)
+				}
 				return nil
 			}
 		}
@@ -6817,9 +6855,7 @@ func mountRuntimeRemoteRoot(path string) string {
 		if segment == "" || segment == "." {
 			continue
 		}
-		if segment == ".relay" ||
-			segment == ".relayfile-mount-state.json" ||
-			strings.HasPrefix(segment, ".relayfile-mount-state.json.tmp-") {
+		if mountscope.IsReservedRuntimeSegment(segment) {
 			return normalizeRemotePath("/" + strings.Join(segments[:index+1], "/"))
 		}
 	}
@@ -6839,6 +6875,52 @@ func (s *Syncer) logMountControlPathSkipped(relativePath string) {
 	}
 	s.controlSkipLogged[normalized] = struct{}{}
 	s.logf("skipping mount control path before upload: %s", normalized)
+}
+
+func (s *Syncer) logLocalInfrastructureSkipped(relativePath string) {
+	normalized := filepath.ToSlash(strings.TrimSpace(relativePath))
+	if normalized == "" || normalized == "." {
+		return
+	}
+	key := "infrastructure:" + normalized
+	if s.controlSkipLogged == nil {
+		s.controlSkipLogged = map[string]struct{}{}
+	}
+	if _, seen := s.controlSkipLogged[key]; seen {
+		return
+	}
+	s.controlSkipLogged[key] = struct{}{}
+	s.logf("excluded incidental local infrastructure from sync: %s", normalized)
+}
+
+// excludeInfrastructureLocalPath enforces the infrastructure boundary in the
+// remote-to-local direction. Without this guard, suppressing watcher/writeback
+// events alone would still allow remote hydration or deletion to modify source
+// control metadata under the mirror root.
+func (s *Syncer) excludeInfrastructureLocalPath(localPath, remotePath string, conflicted map[string]struct{}) bool {
+	rel, err := filepath.Rel(s.localRoot, localPath)
+	if err != nil {
+		return false
+	}
+	rel = filepath.ToSlash(filepath.Clean(rel))
+	if rel == "" || rel == "." || strings.HasPrefix(rel, "../") {
+		return false
+	}
+	first := strings.SplitN(rel, "/", 2)[0]
+	// Remote hydration uses the target filesystem's identity even before a
+	// path exists. An absent `.Git` is the future `.git` on an insensitive
+	// filesystem, but remains ordinary user content on a sensitive one. This
+	// must agree with local scanning or the two directions diverge.
+	if !mountscope.IsInfrastructureTopLevelAt(s.localRoot, first) {
+		return false
+	}
+	s.logLocalInfrastructureSkipped(first)
+	delete(s.state.Files, remotePath)
+	s.clearIncrementalReadNotReady(remotePath)
+	if conflicted != nil {
+		delete(conflicted, remotePath)
+	}
+	return true
 }
 
 func (s *Syncer) loadState() error {
@@ -6862,6 +6944,9 @@ func (s *Syncer) loadState() error {
 		state.Files = map[string]trackedFile{}
 	}
 	s.state = state
+	s.state.WorkspaceID = s.workspace
+	s.state.RemoteRoot = s.remoteRoot
+	s.state.LocalRoot = s.localRoot
 	if s.state.BootstrapComplete && s.state.SyncMode == "write-only" && !s.writeOnly {
 		s.logf("syncMode transition write-only->mirror detected; resetting BootstrapComplete to force a full bootstrap pull (backfills records missed while write-only)")
 		s.state.BootstrapComplete = false
@@ -7716,7 +7801,7 @@ func (s *Syncer) localPathToRemotePath(localPath string, githubPathIndex map[str
 		return remotePath, nil
 	}
 	if s.githubWorkingTree != nil {
-		rel, err := RelativeRemotePathFromLocal(s.localRoot, localPath)
+		rel, err := RelativeRemotePathFromLocalUnderRoot(s.localRoot, s.remoteRoot, localPath)
 		if err != nil {
 			return "", err
 		}
@@ -8013,7 +8098,7 @@ func localToRemotePath(localRoot, remoteRoot, localPath string) (string, error) 
 	// mount-dir basename) is rejected by construction. Existing callers
 	// still receive the legacy string return value; the newtype is purely
 	// defensive here. Empty / "." / leading-".." paths are also rejected.
-	typed, err := RelativeRemotePathFromLocal(localRoot, localPath)
+	typed, err := RelativeRemotePathFromLocalUnderRoot(localRoot, remoteRoot, localPath)
 	if err != nil {
 		return "", err
 	}

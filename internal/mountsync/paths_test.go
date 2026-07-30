@@ -110,3 +110,21 @@ func TestRelativeRemotePathFromLocal_RejectsRoot(t *testing.T) {
 		t.Fatalf("legitimate child rejected: %v", err)
 	}
 }
+
+func TestRelativeRemotePathFromLocalUnderRootAllowsBasenameNamedDescendant(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "Docs")
+	localPath := filepath.Join(root, "Docs", "page.md")
+
+	rel, err := RelativeRemotePathFromLocalUnderRoot(root, "/notion/Docs", localPath)
+	if err != nil {
+		t.Fatalf("non-root basename descendant rejected: %v", err)
+	}
+	if got := rel.Slash(); got != "Docs/page.md" {
+		t.Fatalf("relative path = %q, want %q", got, "Docs/page.md")
+	}
+	if got, err := localToRemotePath(root, "/notion/Docs", localPath); err != nil {
+		t.Fatalf("map non-root basename descendant: %v", err)
+	} else if got != "/notion/Docs/Docs/page.md" {
+		t.Fatalf("remote path = %q, want %q", got, "/notion/Docs/Docs/page.md")
+	}
+}

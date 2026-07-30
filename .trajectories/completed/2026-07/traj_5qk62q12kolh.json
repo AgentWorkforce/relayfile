@@ -29,12 +29,12 @@
         {
           "ts": 1785387108966,
           "type": "decision",
-          "content": "Legacy blank layout continues only as exact; scoped migration refuses in place: Legacy blank layout continues only as exact; scoped migration refuses in place",
+          "content": "Legacy blank layout with mount state continues only as exact: Allow unmounted blank records to start scoped; refuse in-place scoped migration when mount state exists",
           "raw": {
-            "question": "Legacy blank layout continues only as exact; scoped migration refuses in place",
-            "chosen": "Legacy blank layout continues only as exact; scoped migration refuses in place",
+            "question": "Legacy blank layout with mount state continues only as exact",
+            "chosen": "Allow unmounted blank records to start scoped; refuse in-place scoped migration when mount state exists",
             "alternatives": [],
-            "reasoning": "Pre-layout records were created when exact was the only supported topology, so exact restarts remain compatible. Blank cannot establish scoped topology; enabling scoped at the same LOCAL_DIR refuses and requires a new LOCAL_DIR with --rehome."
+            "reasoning": "Pre-layout records were created when exact was the only supported topology, so exact restarts remain compatible. A blank record with persisted mount state cannot establish its prior topology and must use a new LOCAL_DIR with --rehome; a current setup record with no mount state has nothing to orphan and may start scoped."
           },
           "significance": "high"
         },
@@ -104,7 +104,7 @@
   },
   "commits": [],
   "filesChanged": [],
-  "projectId": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-b",
+  "projectId": "AgentWorkforce/relayfile",
   "tags": [],
   "_trace": {
     "startRef": "6233a2572ec64eefc42c5fa6e79c4b3fa665963e",

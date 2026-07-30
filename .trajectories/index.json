@@ -154,6 +154,69 @@
       "status": "active",
       "startedAt": "2026-07-30T06:43:30.836Z",
       "path": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-c/.trajectories/active/traj_krf3a8bxjpku.json"
+    },
+    "traj_uymnrxehl9bf": {
+      "title": "Address Unit B exact GitHub review findings",
+      "status": "completed",
+      "startedAt": "2026-07-30T06:22:14.368Z",
+      "completedAt": "2026-07-30T06:34:46.195Z",
+      "path": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-b/.trajectories/completed/2026-07/traj_uymnrxehl9bf.json"
+    },
+    "traj_ybwfsutm6tzl": {
+      "title": "Address final Unit B review findings",
+      "status": "completed",
+      "startedAt": "2026-07-30T06:48:17.241Z",
+      "completedAt": "2026-07-30T06:54:18.507Z",
+      "path": ".trajectories/completed/2026-07/traj_ybwfsutm6tzl.json"
+    },
+    "traj_9iljc1uad7l1": {
+      "title": "Attribute private mount state during legacy migration",
+      "status": "completed",
+      "startedAt": "2026-07-30T06:59:37.414Z",
+      "completedAt": "2026-07-30T06:59:39.087Z",
+      "path": ".trajectories/completed/2026-07/traj_9iljc1uad7l1.json"
+    },
+    "traj_vo9bz6cff5fm": {
+      "title": "Fix scoped background initialization regression",
+      "status": "completed",
+      "startedAt": "2026-07-30T07:20:21.370Z",
+      "completedAt": "2026-07-30T07:23:51.176Z",
+      "path": ".trajectories/completed/2026-07/traj_vo9bz6cff5fm.json"
+    },
+    "traj_zx3ypuzq5t1j": {
+      "title": "Reject explicitly empty scoped allowlists",
+      "status": "completed",
+      "startedAt": "2026-07-30T07:27:38.808Z",
+      "completedAt": "2026-07-30T07:32:43.868Z",
+      "path": ".trajectories/completed/2026-07/traj_zx3ypuzq5t1j.json"
+    },
+    "traj_ewsm04d3yriw": {
+      "title": "Fix Unit B exact-head review findings",
+      "status": "completed",
+      "startedAt": "2026-07-30T07:41:40.506Z",
+      "completedAt": "2026-07-30T07:45:19.961Z",
+      "path": ".trajectories/completed/2026-07/traj_ewsm04d3yriw.json"
+    },
+    "traj_vbh4sg9b9wle": {
+      "title": "Fix reserved-boundary review findings",
+      "status": "completed",
+      "startedAt": "2026-07-30T07:58:05.992Z",
+      "completedAt": "2026-07-30T08:00:16.521Z",
+      "path": ".trajectories/completed/2026-07/traj_vbh4sg9b9wle.json"
+    },
+    "traj_kd7iuol8b4d2": {
+      "title": "Reserve local Git metadata across scoped mount roots",
+      "status": "completed",
+      "startedAt": "2026-07-30T08:05:17.369Z",
+      "completedAt": "2026-07-30T09:00:17.230Z",
+      "path": ".trajectories/completed/2026-07/traj_kd7iuol8b4d2.json"
+    },
+    "traj_1kmlyo9fwsnv": {
+      "title": "Complete Unit B derived safety gate for scoped multi-path mounts",
+      "status": "completed",
+      "startedAt": "2026-07-30T09:02:41.145Z",
+      "completedAt": "2026-07-30T09:58:24.657Z",
+      "path": ".trajectories/completed/2026-07/traj_1kmlyo9fwsnv.json"
     }
   }
 }
