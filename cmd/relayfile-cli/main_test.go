@@ -53,6 +53,31 @@ func TestWorkspaceCreateStoresCatalogEntry(t *testing.T) {
 	}
 }
 
+func TestResolveCLIRequestedLocalLayoutRefusesAllScopedRoutes(t *testing.T) {
+	tests := []struct {
+		name          string
+		flagValue     string
+		envValue      string
+		recordedValue string
+		flagProvided  bool
+	}{
+		{name: "flag", flagValue: mountscope.LayoutScoped, flagProvided: true},
+		{name: "environment", flagValue: mountscope.LayoutExact, envValue: mountscope.LayoutScoped},
+		{name: "recorded inheritance", flagValue: mountscope.LayoutExact, recordedValue: mountscope.LayoutScoped},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := resolveCLIRequestedLocalLayout(tc.flagValue, tc.envValue, tc.recordedValue, tc.flagProvided)
+			if err == nil || !strings.Contains(err.Error(), "operator surfaces") || !strings.Contains(err.Error(), "--local-layout=exact") {
+				t.Fatalf("expected scoped-layout refusal with exact-layout remedy, got %v", err)
+			}
+		})
+	}
+	if got, err := resolveCLIRequestedLocalLayout(mountscope.LayoutExact, "", mountscope.LayoutExact, false); err != nil || got != mountscope.LayoutExact {
+		t.Fatalf("exact layout should remain available, got %q err=%v", got, err)
+	}
+}
+
 func TestResolveServerDefaultsToHostedRelayfile(t *testing.T) {
 	clearRelayfileEnv(t)
 

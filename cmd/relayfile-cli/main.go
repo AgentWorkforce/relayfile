@@ -6611,13 +6611,14 @@ func runMount(args []string) error {
 	if !mountKindProvided && strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_KIND")) == "" && strings.TrimSpace(previousRecord.MountKind) != "" {
 		*mountKind = previousRecord.MountKind
 	}
-	resolvedLocalLayout := *localLayout
-	if !localLayoutProvided && strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_LOCAL_LAYOUT")) == "" && recordedLocalLayout != "" {
-		resolvedLocalLayout = recordedLocalLayout
-	}
-	resolvedLocalLayout, err = mountscope.ResolveLayout(resolvedLocalLayout)
+	resolvedLocalLayout, err := resolveCLIRequestedLocalLayout(
+		*localLayout,
+		os.Getenv("RELAYFILE_MOUNT_LOCAL_LAYOUT"),
+		recordedLocalLayout,
+		localLayoutProvided,
+	)
 	if err != nil {
-		return fmt.Errorf("resolve local layout: %w", err)
+		return err
 	}
 	if err := validateMountLayoutTransition(previousRecord, absLocalDir, resolvedLocalLayout); err != nil {
 		return err
@@ -6882,6 +6883,29 @@ func runMount(args []string) error {
 			&sharedAuthMu,
 		)
 	})
+}
+
+// Scoped runtime state is implemented below this CLI boundary, but its
+// operator surfaces are not yet complete. Refuse every route that can select
+// scoped layout (flag, environment, or recorded catalog inheritance) until
+// status/list/retry can see every scoped child state location.
+func resolveCLIRequestedLocalLayout(flagValue, envValue, recordedValue string, flagProvided bool) (string, error) {
+	resolved := flagValue
+	if !flagProvided {
+		if strings.TrimSpace(envValue) != "" {
+			resolved = envValue
+		} else if strings.TrimSpace(recordedValue) != "" {
+			resolved = recordedValue
+		}
+	}
+	resolved, err := mountscope.ResolveLayout(resolved)
+	if err != nil {
+		return "", fmt.Errorf("resolve local layout: %w", err)
+	}
+	if resolved == mountscope.LayoutScoped {
+		return "", fmt.Errorf("--local-layout=%s is temporarily unavailable until scoped operator surfaces are ready; use --local-layout=%s", mountscope.LayoutScoped, mountscope.LayoutExact)
+	}
+	return resolved, nil
 }
 
 type cliMountScopeRunner func(context.Context, mountscope.Scope) error
