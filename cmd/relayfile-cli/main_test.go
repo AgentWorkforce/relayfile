@@ -2729,6 +2729,20 @@ func TestMergeWorkspaceRecordsUpdatesMountStateIdentityOnlyWhenExplicit(t *testi
 	}
 }
 
+func TestMergeWorkspaceRecordsReplacesCurrentRemotePaths(t *testing.T) {
+	current := workspaceRecord{
+		ID:          "ws_demo",
+		RemotePaths: []string{"/github", "/retired"},
+	}
+	merged := mergeWorkspaceRecords(current, workspaceRecord{
+		ID:          "ws_demo",
+		RemotePaths: []string{"/github", "/slack"},
+	})
+	if got, want := strings.Join(merged.RemotePaths, ","), "/github,/slack"; got != want {
+		t.Fatalf("merged remote paths = %q, want %q", got, want)
+	}
+}
+
 func TestMountWithoutTokenRejectsWorkspaceOutsideAgentRelayActive(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)

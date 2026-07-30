@@ -18,6 +18,27 @@ type watcherEvent struct {
 	op   fsnotify.Op
 }
 
+func TestWatcherBasenameGuardMatchesRemoteRootMapping(t *testing.T) {
+	localDir := filepath.Join(t.TempDir(), "Docs")
+	rootWatcher, err := NewFileWatcher(localDir, func(string, fsnotify.Op) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = rootWatcher.Close() })
+	if !rootWatcher.shouldSkip(filepath.Join("Docs", "page.md")) {
+		t.Fatal("root mount must retain the round-trip basename guard")
+	}
+
+	scopedWatcher, err := NewFileWatcherForRemoteRoot(localDir, "/notion/Docs", func(string, fsnotify.Op) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = scopedWatcher.Close() })
+	if scopedWatcher.shouldSkip(filepath.Join("Docs", "page.md")) {
+		t.Fatal("non-root mount must not skip a legitimate basename-named descendant")
+	}
+}
+
 func startFileWatcher(t *testing.T, localDir string) (chan watcherEvent, context.CancelFunc, *FileWatcher) {
 	t.Helper()
 

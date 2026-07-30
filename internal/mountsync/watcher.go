@@ -23,6 +23,7 @@ var ErrWatcherLimitExceeded = errors.New("mount file watcher directory limit exc
 type FileWatcher struct {
 	watcher     *fsnotify.Watcher
 	localDir    string
+	remoteRoot  string
 	onChange    func(relativePath string, op fsnotify.Op)
 	maxDirs     int
 	watchedDirs int
@@ -33,16 +34,25 @@ type FileWatcher struct {
 }
 
 func NewFileWatcher(localDir string, onChange func(string, fsnotify.Op)) (*FileWatcher, error) {
+	return NewFileWatcherForRemoteRoot(localDir, "/", onChange)
+}
+
+// NewFileWatcherForRemoteRoot creates a watcher whose basename collision
+// guard matches the Syncer's path mapping. A child named after localDir only
+// round-trips onto the mount root when the remote root is "/"; beneath a
+// non-root mount it is an ordinary descendant.
+func NewFileWatcherForRemoteRoot(localDir, remoteRoot string, onChange func(string, fsnotify.Op)) (*FileWatcher, error) {
 	w, err := fsnotify.NewWatcher()
 	if err != nil {
 		return nil, err
 	}
 	return &FileWatcher{
-		watcher:  w,
-		localDir: localDir,
-		onChange: onChange,
-		maxDirs:  watcherMaxDirsFromEnv(),
-		debounce: make(map[string]*time.Timer),
+		watcher:    w,
+		localDir:   localDir,
+		remoteRoot: normalizeRemotePath(remoteRoot),
+		onChange:   onChange,
+		maxDirs:    watcherMaxDirsFromEnv(),
+		debounce:   make(map[string]*time.Timer),
 	}, nil
 }
 
@@ -123,13 +133,19 @@ func (fw *FileWatcher) shouldSkip(rel string) bool {
 	if watcherIgnoredTopLevel(first) {
 		return true
 	}
-	// Data-loss guard: a top-level entry whose name equals the mount
-	// directory's own basename is the round-trip-onto-root collision.
-	// Never sync it.
-	if fw.localDir != "" && first == filepath.Base(filepath.Clean(fw.localDir)) {
+	// Data-loss guard for root mounts: a top-level entry whose name equals the
+	// mount directory's own basename is the round-trip-onto-root collision.
+	// Non-root mounts map that entry beneath remoteRoot and must retain it.
+	if collidesWithMountRootBasename(fw.localDir, fw.remoteRoot, first) {
 		return true
 	}
 	return false
+}
+
+func collidesWithMountRootBasename(localRoot, remoteRoot, first string) bool {
+	return strings.TrimSpace(localRoot) != "" &&
+		normalizeRemotePath(remoteRoot) == "/" &&
+		first == filepath.Base(filepath.Clean(localRoot))
 }
 
 // reservedTopLevel reports whether a top-level entry name is internal

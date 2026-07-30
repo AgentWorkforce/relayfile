@@ -437,7 +437,7 @@ func runSinglePollingMount(rootCtx context.Context, cfg mountConfig) error {
 		return nil
 	}
 
-	watcher, err := mountsync.NewFileWatcher(cfg.localDir, func(relativePath string, op fsnotify.Op) {
+	watcher, err := syncer.NewFileWatcher(func(relativePath string, op fsnotify.Op) {
 		ctx, cancel := context.WithTimeout(rootCtx, cfg.timeout)
 		defer cancel()
 		if err := syncer.HandleLocalChange(ctx, relativePath, op); err != nil {

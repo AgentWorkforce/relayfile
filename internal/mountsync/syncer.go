@@ -1837,6 +1837,12 @@ func (s *Syncer) SetCredentialExpiry(expiresAt string) {
 	s.mu.Unlock()
 }
 
+// NewFileWatcher creates a watcher with the same local/remote mapping as this
+// Syncer so path-collision guards cannot diverge between event and scan paths.
+func (s *Syncer) NewFileWatcher(onChange func(string, fsnotify.Op)) (*FileWatcher, error) {
+	return NewFileWatcherForRemoteRoot(s.localRoot, s.remoteRoot, onChange)
+}
+
 func parseScopesFromJWT(token string) []string {
 	parts := strings.Split(strings.TrimSpace(token), ".")
 	if len(parts) != 3 {
@@ -6506,15 +6512,16 @@ func (s *Syncer) scanLocalFiles() (map[string]localSnapshot, error) {
 			}
 			return nil
 		}
-		// Data-loss guard: skip any top-level entry whose name collides
-		// with the mount directory's own basename (round-trip-onto-root).
+		// Data-loss guard for root mounts: skip a top-level entry whose name
+		// collides with the mount directory's own basename. Non-root mounts map
+		// the same entry beneath remoteRoot, where it is a valid descendant.
 		if rel, relErr := filepath.Rel(s.localRoot, path); relErr == nil {
 			if isMountRuntimeRelativePath(rel) {
 				s.logMountControlPathSkipped(rel)
 				return nil
 			}
 			first := strings.SplitN(rel, string(os.PathSeparator), 2)[0]
-			if reservedTopLevel(first) || first == filepath.Base(s.localRoot) {
+			if reservedTopLevel(first) || collidesWithMountRootBasename(s.localRoot, s.remoteRoot, first) {
 				return nil
 			}
 		}
@@ -7716,7 +7723,7 @@ func (s *Syncer) localPathToRemotePath(localPath string, githubPathIndex map[str
 		return remotePath, nil
 	}
 	if s.githubWorkingTree != nil {
-		rel, err := RelativeRemotePathFromLocal(s.localRoot, localPath)
+		rel, err := RelativeRemotePathFromLocalUnderRoot(s.localRoot, s.remoteRoot, localPath)
 		if err != nil {
 			return "", err
 		}
@@ -8013,7 +8020,7 @@ func localToRemotePath(localRoot, remoteRoot, localPath string) (string, error) 
 	// mount-dir basename) is rejected by construction. Existing callers
 	// still receive the legacy string return value; the newtype is purely
 	// defensive here. Empty / "." / leading-".." paths are also rejected.
-	typed, err := RelativeRemotePathFromLocal(localRoot, localPath)
+	typed, err := RelativeRemotePathFromLocalUnderRoot(localRoot, remoteRoot, localPath)
 	if err != nil {
 		return "", err
 	}

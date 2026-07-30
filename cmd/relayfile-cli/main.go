@@ -6202,23 +6202,20 @@ func runMount(args []string) error {
 	recordedRemotePaths := []string(nil)
 	recordedLocalLayout := ""
 	previousRecord := workspaceRecord{}
+	applyRecoveredRecord := func(record workspaceRecord) {
+		previousRecord = record
+		recordedLocalDir = strings.TrimSpace(record.LocalDir)
+		recordedRemotePaths = append(recordedRemotePaths[:0], record.RemotePaths...)
+		recordedLocalLayout = strings.TrimSpace(record.LocalLayout)
+	}
 	if record, ok := workspaceRecordByID(workspaceID); ok {
-		previousRecord = record
-		recordedLocalDir = strings.TrimSpace(record.LocalDir)
-		recordedRemotePaths = append(recordedRemotePaths, record.RemotePaths...)
-		recordedLocalLayout = strings.TrimSpace(record.LocalLayout)
+		applyRecoveredRecord(record)
 	} else if record, ok := workspaceRecordByName(workspaceID); ok && strings.TrimSpace(record.ID) == "" {
-		previousRecord = record
-		recordedLocalDir = strings.TrimSpace(record.LocalDir)
-		recordedRemotePaths = append(recordedRemotePaths, record.RemotePaths...)
-		recordedLocalLayout = strings.TrimSpace(record.LocalLayout)
+		applyRecoveredRecord(record)
 	}
 	if recordedLocalDir == "" && usesDelegatedWorkspace && requestedWorkspace != "" && workspaceRequestMatchesDelegatedCredentials(requestedWorkspace, canonicalWorkspaceID) {
 		if record, ok := workspaceRecordByName(requestedWorkspace); ok {
-			previousRecord = record
-			recordedLocalDir = strings.TrimSpace(record.LocalDir)
-			recordedRemotePaths = append(recordedRemotePaths, record.RemotePaths...)
-			recordedLocalLayout = strings.TrimSpace(record.LocalLayout)
+			applyRecoveredRecord(record)
 		}
 	}
 	if localDir == "" {
@@ -12461,7 +12458,7 @@ func runMountLoopWithAuthLock(rootCtx context.Context, syncer *mountsync.Syncer,
 	// Syncer's state lock to this callback, and unchanged down-mirror echoes are
 	// filtered by HandleLocalChange's tracked hash check.
 	if !once {
-		watcher, err := mountsync.NewFileWatcher(localDir, func(relativePath string, op fsnotify.Op) {
+		watcher, err := syncer.NewFileWatcher(func(relativePath string, op fsnotify.Op) {
 			if isDegraded() {
 				// Local edit observed while delegated credentials are unusable.
 				// Leave the dirty state in place so the next successful cycle

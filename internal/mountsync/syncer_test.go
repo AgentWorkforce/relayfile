@@ -171,6 +171,36 @@ func TestWebSocketConnectDueRespectsScheduledBackoff(t *testing.T) {
 	}
 }
 
+func TestScanLocalFilesIncludesBasenameNamedDescendantForNonRootMount(t *testing.T) {
+	localRoot := filepath.Join(t.TempDir(), "Docs")
+	localPath := filepath.Join(localRoot, "Docs", "page.md")
+	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(localPath, []byte("draft"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	syncer, err := NewSyncer(
+		NewHTTPClient("http://127.0.0.1", "test-token", http.DefaultClient),
+		SyncerOptions{
+			WorkspaceID: "ws_scoped",
+			RemoteRoot:  "/notion/Docs",
+			LocalRoot:   localRoot,
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	files, err := syncer.scanLocalFiles()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := files["/notion/Docs/Docs/page.md"]; !ok {
+		t.Fatalf("basename-named descendant missing from scan: %#v", files)
+	}
+}
+
 func TestMaintainWebSocketHonorsRetryAfter(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Retry-After", "17")
