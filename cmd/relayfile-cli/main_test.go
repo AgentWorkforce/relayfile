@@ -78,6 +78,18 @@ func TestResolveCLIRequestedLocalLayoutRefusesAllScopedRoutes(t *testing.T) {
 	}
 }
 
+// skipUntilScopedOperatorSurfacesReady keeps the scoped-runtime coverage
+// dormant only while the CLI guard is active. When the guard is removed, the
+// helper stops skipping these tests automatically; if the guard is deleted
+// without updating this call site, the compile-time dependency makes that
+// omission visible.
+func skipUntilScopedOperatorSurfacesReady(t *testing.T) {
+	t.Helper()
+	if _, err := resolveCLIRequestedLocalLayout(mountscope.LayoutScoped, "", "", true); err != nil {
+		t.Skipf("scoped runtime is intentionally refused until Unit C operator surfaces land: %v", err)
+	}
+}
+
 func TestResolveServerDefaultsToHostedRelayfile(t *testing.T) {
 	clearRelayfileEnv(t)
 
@@ -2343,7 +2355,7 @@ func TestMountUsesRecordedLocalDirWhenOmitted(t *testing.T) {
 }
 
 func TestMountMirrorsRepeatedRemotePathsUnderScopedLayout(t *testing.T) {
-	t.Skip("scoped runtime is intentionally refused until Unit C operator surfaces land")
+	skipUntilScopedOperatorSurfacesReady(t)
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)
 
@@ -2463,7 +2475,7 @@ func TestMountRejectsRepeatedRemotePathsWithoutScopedLayout(t *testing.T) {
 }
 
 func TestMountRejectsProviderFilterAcrossHeterogeneousScopesBeforeInitializingMirror(t *testing.T) {
-	t.Skip("scoped runtime is intentionally refused until Unit C operator surfaces land")
+	skipUntilScopedOperatorSurfacesReady(t)
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)
 	localRoot := filepath.Join(t.TempDir(), "mirror")
@@ -2532,7 +2544,7 @@ func TestValidateExplicitPathsFileAllowlistDistinguishesUnsetFromEmpty(t *testin
 }
 
 func TestMountRefusesScopedResetBeforeInitializingMirror(t *testing.T) {
-	t.Skip("scoped runtime is intentionally refused until Unit C operator surfaces land")
+	skipUntilScopedOperatorSurfacesReady(t)
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)
 
@@ -2556,7 +2568,7 @@ func TestMountRefusesScopedResetBeforeInitializingMirror(t *testing.T) {
 }
 
 func TestMountPersistsScopedTopologyBeforeBackgroundSpawnFailure(t *testing.T) {
-	t.Skip("scoped runtime is intentionally refused until Unit C operator surfaces land")
+	skipUntilScopedOperatorSurfacesReady(t)
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)
 
@@ -3405,7 +3417,7 @@ func TestMountRehomeRefusesRunningRecordedDaemon(t *testing.T) {
 }
 
 func TestMountRefusesCompetingDaemonBeforePersistingAddedScope(t *testing.T) {
-	t.Skip("scoped runtime is intentionally refused until Unit C operator surfaces land")
+	skipUntilScopedOperatorSurfacesReady(t)
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)
 
@@ -3461,7 +3473,7 @@ func TestMountRefusesCompetingDaemonBeforePersistingAddedScope(t *testing.T) {
 }
 
 func TestMountOnceRefusesCompetingDaemonBeforePersistingAddedScope(t *testing.T) {
-	t.Skip("scoped runtime is intentionally refused until Unit C operator surfaces land")
+	skipUntilScopedOperatorSurfacesReady(t)
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)
 
