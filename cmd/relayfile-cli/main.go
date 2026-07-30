@@ -4012,7 +4012,14 @@ func hasExistingMountState(record workspaceRecord, localDir string) (bool, error
 			statePath := filepath.Join(stateDir, entry.Name(), "state.json")
 			info, err := os.Stat(statePath)
 			if err == nil && info.Mode().IsRegular() {
-				return true, nil
+				belongs, attributable, matchErr := privateMountStateMatchesRecord(statePath, record, localDir)
+				if matchErr != nil {
+					return false, matchErr
+				}
+				if belongs || !attributable {
+					return true, nil
+				}
+				continue
 			}
 			if err != nil && !errors.Is(err, os.ErrNotExist) {
 				return false, fmt.Errorf("inspect private mount state entry %s: %w", statePath, err)
@@ -4020,6 +4027,43 @@ func hasExistingMountState(record workspaceRecord, localDir string) (bool, error
 		}
 	}
 	return false, nil
+}
+
+func privateMountStateMatchesRecord(statePath string, record workspaceRecord, localDir string) (belongs, attributable bool, err error) {
+	payload, err := os.ReadFile(statePath)
+	if err != nil {
+		return false, false, fmt.Errorf("read private mount state identity %s: %w", statePath, err)
+	}
+	var identity struct {
+		WorkspaceID string `json:"workspaceId"`
+		LocalRoot   string `json:"localRoot"`
+	}
+	if err := json.Unmarshal(payload, &identity); err != nil {
+		// A legacy or corrupt state file still proves that prior topology may
+		// exist, but cannot safely be attributed away from this record.
+		return false, false, nil
+	}
+	workspaceID := strings.TrimSpace(identity.WorkspaceID)
+	stateLocalRoot := strings.TrimSpace(identity.LocalRoot)
+	if workspaceID == "" || stateLocalRoot == "" {
+		return false, false, nil
+	}
+	wantWorkspaceIDs := []string{record.ID, record.RelayWorkspaceID, record.Name}
+	workspaceMatches := false
+	for _, candidate := range wantWorkspaceIDs {
+		if strings.TrimSpace(candidate) != "" && workspaceID == strings.TrimSpace(candidate) {
+			workspaceMatches = true
+			break
+		}
+	}
+	if !workspaceMatches {
+		return false, true, nil
+	}
+	sameRoot, err := sameFilesystemPath(stateLocalRoot, localDir)
+	if err != nil {
+		return false, false, fmt.Errorf("compare private mount state root %s: %w", statePath, err)
+	}
+	return sameRoot, true, nil
 }
 
 func validateMountResetMode(localDir, layout string, resetAfterClobber bool) error {

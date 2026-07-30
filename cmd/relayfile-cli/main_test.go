@@ -2604,6 +2604,61 @@ func TestValidateMountLayoutTransitionFindsPrivateLegacyState(t *testing.T) {
 	}
 }
 
+func TestValidateMountLayoutTransitionIgnoresAttributedUnrelatedPrivateState(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	targetRoot := t.TempDir()
+	otherRoot := t.TempDir()
+	resolvedState, err := mountsync.ResolveMountStatePath(mountsync.MountStatePathOptions{
+		WorkspaceID: "ws_other",
+		RemoteRoot:  "/notion",
+		LocalRoot:   otherRoot,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	statePath := resolvedState.StateFile
+	if err := os.MkdirAll(filepath.Dir(statePath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	payload := fmt.Sprintf(
+		`{"workspaceId":"ws_other","remoteRoot":"/notion","localRoot":%q,"files":{}}`,
+		otherRoot,
+	)
+	if err := os.WriteFile(statePath, []byte(payload), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	record := workspaceRecord{ID: "ws_target", LocalDir: targetRoot}
+	if err := validateMountLayoutTransition(record, targetRoot, mountscope.LayoutScoped); err != nil {
+		t.Fatalf("unrelated attributed private state blocked an unstarted record: %v", err)
+	}
+}
+
+func TestPrivateMountStateIdentityMatchesWorkspaceAndFilesystemRoot(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	localRoot := t.TempDir()
+	alias := filepath.Join(t.TempDir(), "mirror-alias")
+	if err := os.Symlink(localRoot, alias); err != nil {
+		t.Fatal(err)
+	}
+	payload := fmt.Sprintf(`{"workspaceId":"ws_demo","localRoot":%q,"files":{}}`, alias)
+	if err := os.WriteFile(statePath, []byte(payload), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	belongs, attributable, err := privateMountStateMatchesRecord(
+		statePath,
+		workspaceRecord{ID: "ws_demo"},
+		localRoot,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !belongs || !attributable {
+		t.Fatalf("identity match = belongs %v, attributable %v", belongs, attributable)
+	}
+}
+
 func TestMountTransitionGuardsUseFilesystemIdentity(t *testing.T) {
 	localRoot := t.TempDir()
 	alias := filepath.Join(t.TempDir(), "mirror-alias")

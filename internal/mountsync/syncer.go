@@ -1226,6 +1226,9 @@ func (s *Syncer) now() time.Time {
 }
 
 type mountState struct {
+	WorkspaceID                string                 `json:"workspaceId,omitempty"`
+	RemoteRoot                 string                 `json:"remoteRoot,omitempty"`
+	LocalRoot                  string                 `json:"localRoot,omitempty"`
 	Files                      map[string]trackedFile `json:"files"`
 	EventsCursor               string                 `json:"eventsCursor,omitempty"`
 	IncrementalCheckpoint      *incrementalCheckpoint `json:"incrementalCheckpoint,omitempty"`
@@ -1820,7 +1823,10 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 		maxOutboxAttempts:     defaultOutboxMaxAttempts,
 		nowFn:                 opts.Now,
 		state: mountState{
-			Files: map[string]trackedFile{},
+			WorkspaceID: workspace,
+			RemoteRoot:  remoteRoot,
+			LocalRoot:   localRoot,
+			Files:       map[string]trackedFile{},
 		},
 	}, nil
 }
@@ -6869,6 +6875,9 @@ func (s *Syncer) loadState() error {
 		state.Files = map[string]trackedFile{}
 	}
 	s.state = state
+	s.state.WorkspaceID = s.workspace
+	s.state.RemoteRoot = s.remoteRoot
+	s.state.LocalRoot = s.localRoot
 	if s.state.BootstrapComplete && s.state.SyncMode == "write-only" && !s.writeOnly {
 		s.logf("syncMode transition write-only->mirror detected; resetting BootstrapComplete to force a full bootstrap pull (backfills records missed while write-only)")
 		s.state.BootstrapComplete = false

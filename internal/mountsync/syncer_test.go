@@ -191,6 +191,11 @@ func TestScanLocalFilesIncludesBasenameNamedDescendantForNonRootMount(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
+	if syncer.state.WorkspaceID != "ws_scoped" ||
+		syncer.state.RemoteRoot != "/notion/Docs" ||
+		syncer.state.LocalRoot != localRoot {
+		t.Fatalf("private state identity = %#v", syncer.state)
+	}
 
 	files, err := syncer.scanLocalFiles()
 	if err != nil {
