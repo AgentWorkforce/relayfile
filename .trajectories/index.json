@@ -99,6 +99,13 @@
       "startedAt": "2026-07-30T05:56:19.212Z",
       "completedAt": "2026-07-30T06:00:44.272Z",
       "path": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-b/.trajectories/completed/2026-07/traj_rw26ij8x9yhr.json"
+    },
+    "traj_3gdyy15i9c13": {
+      "title": "Aggregate scoped mount operator surfaces",
+      "status": "completed",
+      "startedAt": "2026-07-30T05:08:42.612Z",
+      "completedAt": "2026-07-30T05:16:54.894Z",
+      "path": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-c/.trajectories/completed/2026-07/traj_3gdyy15i9c13.json"
     }
   }
 }

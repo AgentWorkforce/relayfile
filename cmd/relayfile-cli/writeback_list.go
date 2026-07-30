@@ -65,7 +65,7 @@ func runWritebackList(args []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	items, err := listLocalWritebackItems(workspaceID, record.LocalDir, normalizedState)
+	items, err := listWorkspaceWritebackItems(workspaceID, record, normalizedState)
 	if err != nil {
 		return err
 	}
@@ -74,6 +74,32 @@ func runWritebackList(args []string, stdout io.Writer) error {
 	}
 	printWritebackList(stdout, items)
 	return nil
+}
+
+func listWorkspaceWritebackItems(workspaceID string, record workspaceRecord, state string) ([]writebackListItem, error) {
+	dirs := workspaceRuntimeStateDirs(record)
+	if state == "dead" {
+		// Include the catalog root for compatibility with dead letters written
+		// before scoped topology was persisted, then each active child root.
+		dirs = workspaceStateDirs(record)
+	}
+	itemsByKey := map[string]writebackListItem{}
+	for _, localDir := range dirs {
+		items, err := listLocalWritebackItems(workspaceID, localDir, state)
+		if err != nil {
+			return nil, err
+		}
+		for _, item := range items {
+			key := firstNonBlank(strings.TrimSpace(item.ID), strings.TrimSpace(item.Path))
+			itemsByKey[key] = item
+		}
+	}
+	items := make([]writebackListItem, 0, len(itemsByKey))
+	for _, item := range itemsByKey {
+		items = append(items, item)
+	}
+	sortWritebackListItems(items)
+	return items, nil
 }
 
 func validWritebackListState(state string) bool {

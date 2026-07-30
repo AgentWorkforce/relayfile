@@ -10,6 +10,54 @@ import (
 	"time"
 )
 
+func TestListWorkspaceWritebackItemsAggregatesScopedChildren(t *testing.T) {
+	localRoot := t.TempDir()
+	record := workspaceRecord{
+		ID:          "ws_demo",
+		LocalDir:    localRoot,
+		LocalLayout: "scoped",
+		RemotePaths: []string{"/github", "/slack"},
+	}
+	for _, scope := range workspaceMountScopes(record) {
+		relayDir := filepath.Join(scope.LocalDir, ".relay")
+		if err := os.MkdirAll(filepath.Join(relayDir, "dead-letter"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		state := `{"remoteRoot":"` + scope.RemotePath + `"}`
+		if err := os.WriteFile(filepath.Join(relayDir, "state.json"), []byte(state), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		tracked := `{"files":{"` + scope.RemotePath + `/draft.md":{"dirty":true}}}`
+		if err := os.WriteFile(filepath.Join(scope.LocalDir, ".relayfile-mount-state.json"), []byte(tracked), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		dead := `{"opId":"op_` + scope.RemotePath[1:] + `","path":"` + scope.RemotePath + `/failed.md"}`
+		if err := os.WriteFile(
+			filepath.Join(relayDir, "dead-letter", "op_"+scope.RemotePath[1:]+".json"),
+			[]byte(dead),
+			0o644,
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	pending, err := listWorkspaceWritebackItems("ws_demo", record, "pending")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 2 || pending[0].Path != "/github/draft.md" || pending[1].Path != "/slack/draft.md" {
+		t.Fatalf("scoped pending items = %#v", pending)
+	}
+
+	dead, err := listWorkspaceWritebackItems("ws_demo", record, "dead")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dead) != 2 || dead[0].Path != "/github/failed.md" || dead[1].Path != "/slack/failed.md" {
+		t.Fatalf("scoped dead items = %#v", dead)
+	}
+}
+
 // writebackListSDKItem mirrors WritebackItem from
 // packages/sdk/typescript/src/types.ts. Field names MUST stay in sync with the
 // SDK; this struct is the load-bearing assertion that the CLI emits an
