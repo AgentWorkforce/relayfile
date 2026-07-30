@@ -5823,9 +5823,17 @@ func TestWorkspaceMountScopesRecoversLegacyExactRuntimeRoot(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
-	scopes := workspaceMountScopes(workspaceRecord{LocalDir: localDir})
+	record := workspaceRecord{LocalDir: localDir, RemotePaths: []string{"/slack"}}
+	scopes := workspaceMountScopes(record)
 	if len(scopes) != 1 || scopes[0].RemotePath != "/github" || scopes[0].LocalDir != localDir {
 		t.Fatalf("legacy exact scopes = %#v, want persisted runtime root /github", scopes)
+	}
+	remoteRoot, err := workspaceRemoteRootForLocalDir(record, localDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if remoteRoot != "/github" {
+		t.Fatalf("legacy exact retry root = %q, want persisted runtime root /github", remoteRoot)
 	}
 }
 
@@ -8066,6 +8074,46 @@ func TestProviderDisconnectPreflightIgnoresOtherProvidersInBroadScope(t *testing
 	err = preflightProviderDisconnect(record, "github")
 	if err == nil || !strings.Contains(err.Error(), "deadLetters=1") {
 		t.Fatalf("GitHub disconnect with second-position bulk dead letter = %v, want refusal", err)
+	}
+}
+
+func TestProviderDisconnectPreflightInspectsScopedCatalogCompatibilityState(t *testing.T) {
+	localRoot := t.TempDir()
+	record := workspaceRecord{
+		ID:               "ws_cloud",
+		RelayWorkspaceID: "ws_runtime",
+		LocalDir:         localRoot,
+		LocalLayout:      mountscope.LayoutScoped,
+		RemotePaths:      []string{"/github", "/slack"},
+		MountStateDir:    t.TempDir(),
+		MountKind:        mountsync.MountKindDaemon,
+	}
+	for _, scope := range workspaceMountScopes(record) {
+		stateFile, err := workspaceMountStateFile(record.RelayWorkspaceID, record, scope)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Dir(stateFile), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(stateFile, []byte(`{"files":{}}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	deadLetterDir := filepath.Join(localRoot, ".relay", "dead-letter")
+	if err := os.MkdirAll(deadLetterDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(deadLetterDir, "mixed-op.json"),
+		[]byte(`{"opId":"mixed-op","path":"/slack/channels/project/message.json,/github/repos/acme/pending.json"}`),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+	err := preflightProviderDisconnect(record, "github")
+	if err == nil || !strings.Contains(err.Error(), "deadLetters=1") {
+		t.Fatalf("scoped catalog compatibility dead letter preflight = %v, want refusal", err)
 	}
 }
 

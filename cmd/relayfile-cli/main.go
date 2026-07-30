@@ -4253,15 +4253,17 @@ func workspaceMountScopes(record workspaceRecord) []mountscope.Scope {
 		return nil
 	}
 	if strings.TrimSpace(record.LocalLayout) != mountscope.LayoutScoped {
-		remoteRoot := ""
-		for _, candidate := range record.RemotePaths {
-			if strings.TrimSpace(candidate) != "" {
-				remoteRoot = mountscope.NormalizePath(candidate)
-				break
-			}
-		}
+		// The runtime state is authoritative for an existing exact mount.
+		// Catalog topology can lag a remount, so it is only a fallback when
+		// no live root can be recovered.
+		remoteRoot, _ := readMountRemoteRootIfPresent(localRoot)
 		if remoteRoot == "" {
-			remoteRoot, _ = readMountRemoteRootIfPresent(localRoot)
+			for _, candidate := range record.RemotePaths {
+				if strings.TrimSpace(candidate) != "" {
+					remoteRoot = mountscope.NormalizePath(candidate)
+					break
+				}
+			}
 		}
 		if remoteRoot == "" {
 			remoteRoot = "/"
@@ -4289,13 +4291,13 @@ func workspaceRemoteRootForLocalDir(record workspaceRecord, localDir string) (st
 		}
 		return "", fmt.Errorf("scoped mount root is unknown for local directory %s", localDir)
 	}
+	if root, ok := readMountRemoteRootIfPresent(localDir); ok {
+		return root, nil
+	}
 	for _, remotePath := range record.RemotePaths {
 		if strings.TrimSpace(remotePath) != "" {
 			return mountscope.NormalizePath(remotePath), nil
 		}
-	}
-	if root, ok := readMountRemoteRootIfPresent(localDir); ok {
-		return root, nil
 	}
 	return "", fmt.Errorf(
 		"mount root is unknown for legacy exact mirror %s; restore its .relay/state.json or remount before operating on pending writes",
@@ -12286,6 +12288,10 @@ func planProviderDisconnect(record workspaceRecord, provider string) (providerDi
 		return plan, nil
 	}
 
+	// Scoped mounts can retain compatibility dead letters at the catalog
+	// root, including bulk operations spanning more than one child. Inspect
+	// that root with provider filtering before any destructive disconnect.
+	plan.stateDirs = append(plan.stateDirs, localRoot)
 	matchedScope := false
 	for _, scope := range workspaceMountScopes(record) {
 		switch {

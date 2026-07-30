@@ -1,0 +1,69 @@
+{
+  "id": "traj_0kko9s6utmhy",
+  "version": 1,
+  "task": {
+    "title": "Close exact-root and scoped-disconnect review findings",
+    "source": {
+      "system": "plain",
+      "id": "relayfile#379"
+    }
+  },
+  "status": "completed",
+  "startedAt": "2026-07-30T10:46:44.245Z",
+  "completedAt": "2026-07-30T10:48:54.739Z",
+  "agents": [
+    {
+      "name": "default",
+      "role": "lead",
+      "joinedAt": "2026-07-30T10:46:44.599Z"
+    }
+  ],
+  "chapters": [
+    {
+      "id": "chap_q1gn18sd0h46",
+      "title": "Work",
+      "agentName": "default",
+      "startedAt": "2026-07-30T10:46:44.599Z",
+      "endedAt": "2026-07-30T10:48:54.739Z",
+      "events": [
+        {
+          "ts": 1785408404600,
+          "type": "decision",
+          "content": "Treat live exact runtime root as authoritative and catalog topology as fallback: Treat live exact runtime root as authoritative and catalog topology as fallback",
+          "raw": {
+            "question": "Treat live exact runtime root as authoritative and catalog topology as fallback",
+            "chosen": "Treat live exact runtime root as authoritative and catalog topology as fallback",
+            "alternatives": [],
+            "reasoning": "Exact mounts can retain stale catalog RemotePaths after remount; operator surfaces must follow the active root recorded in .relay/state.json."
+          },
+          "significance": "high"
+        },
+        {
+          "ts": 1785408404931,
+          "type": "decision",
+          "content": "Inspect scoped catalog-root compatibility state during provider disconnect: Inspect scoped catalog-root compatibility state during provider disconnect",
+          "raw": {
+            "question": "Inspect scoped catalog-root compatibility state during provider disconnect",
+            "chosen": "Inspect scoped catalog-root compatibility state during provider disconnect",
+            "alternatives": [],
+            "reasoning": "Cross-scope bulk dead letters are deliberately stored at the catalog root, so child-only inspection can falsely declare a destructive disconnect safe."
+          },
+          "significance": "high"
+        }
+      ]
+    }
+  ],
+  "retrospective": {
+    "summary": "Made live exact runtime topology authoritative and added scoped catalog-root compatibility-state inspection before provider disconnect.",
+    "approach": "Standard approach",
+    "confidence": 0.9
+  },
+  "commits": [],
+  "filesChanged": [],
+  "projectId": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-c",
+  "tags": [],
+  "_trace": {
+    "startRef": "777410815d0d0aeb9787909db462f5b012de3a2f",
+    "endRef": "777410815d0d0aeb9787909db462f5b012de3a2f"
+  }
+}
