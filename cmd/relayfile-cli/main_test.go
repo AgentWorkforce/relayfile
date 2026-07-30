@@ -7092,7 +7092,7 @@ func TestIntegrationAdoptClearsDisconnectMarker(t *testing.T) {
 	// workspace as disconnected — otherwise the operator gets a stale
 	// "disconnected" reading for a workspace they just adopted into.
 	_, localDir := setupAdoptWorkspace(t)
-	if err := markProviderDisconnected(localDir, "github"); err != nil {
+	if err := markProviderDisconnected(workspaceRecord{LocalDir: localDir}, "github"); err != nil {
 		t.Fatalf("markProviderDisconnected failed: %v", err)
 	}
 	markerPath := filepath.Join(localDir, ".relay", "disconnected", "github.json")
@@ -7117,6 +7117,51 @@ func TestIntegrationAdoptClearsDisconnectMarker(t *testing.T) {
 	}
 	if _, err := os.Stat(markerPath); !os.IsNotExist(err) {
 		t.Fatalf("expected disconnect marker to be removed, got: %v", err)
+	}
+}
+
+func TestMarkProviderDisconnectedPreservesScopedRuntimeState(t *testing.T) {
+	localRoot := t.TempDir()
+	record := workspaceRecord{
+		LocalDir:    localRoot,
+		LocalLayout: mountscope.LayoutScoped,
+		RemotePaths: []string{
+			"/github/repos/acme",
+			"/slack/channels/project",
+		},
+	}
+	githubScope := mountscope.LocalDir(localRoot, "/github/repos/acme")
+	githubMirror := filepath.Join(githubScope, "README.md")
+	githubOutbox := filepath.Join(githubScope, ".relay", "outbox", "pending.json")
+	slackMirror := filepath.Join(mountscope.LocalDir(localRoot, "/slack/channels/project"), "topic.md")
+	for path, content := range map[string]string{
+		githubMirror: "mirrored",
+		githubOutbox: "queued",
+		slackMirror:  "unrelated",
+	} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", filepath.Dir(path), err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+	}
+
+	if err := markProviderDisconnected(record, "github"); err != nil {
+		t.Fatalf("markProviderDisconnected failed: %v", err)
+	}
+	if _, err := os.Stat(githubMirror); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected github mirror content removed, got %v", err)
+	}
+	if payload, err := os.ReadFile(githubOutbox); err != nil || string(payload) != "queued" {
+		t.Fatalf("expected scoped runtime outbox preserved, payload=%q err=%v", payload, err)
+	}
+	if payload, err := os.ReadFile(slackMirror); err != nil || string(payload) != "unrelated" {
+		t.Fatalf("expected unrelated scoped mirror preserved, payload=%q err=%v", payload, err)
+	}
+	markerPath := filepath.Join(localRoot, ".relay", "disconnected", "github.json")
+	if _, err := os.Stat(markerPath); err != nil {
+		t.Fatalf("expected common-root disconnect marker: %v", err)
 	}
 }
 

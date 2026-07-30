@@ -1,0 +1,57 @@
+{
+  "id": "traj_0ivieo04w496",
+  "version": 1,
+  "task": {
+    "title": "Preserve scoped runtime state on integration disconnect",
+    "source": {
+      "system": "plain",
+      "id": "relayfile#379"
+    }
+  },
+  "status": "completed",
+  "startedAt": "2026-07-30T06:02:06.962Z",
+  "completedAt": "2026-07-30T06:02:43.614Z",
+  "agents": [
+    {
+      "name": "default",
+      "role": "lead",
+      "joinedAt": "2026-07-30T06:02:43.550Z"
+    }
+  ],
+  "chapters": [
+    {
+      "id": "chap_rqh3cwblwbgt",
+      "title": "Work",
+      "agentName": "default",
+      "startedAt": "2026-07-30T06:02:43.550Z",
+      "endedAt": "2026-07-30T06:02:43.614Z",
+      "events": [
+        {
+          "ts": 1785391363551,
+          "type": "decision",
+          "content": "Preserve scoped .relay state while deleting disconnected provider content: Preserve scoped .relay state while deleting disconnected provider content",
+          "raw": {
+            "question": "Preserve scoped .relay state while deleting disconnected provider content",
+            "chosen": "Preserve scoped .relay state while deleting disconnected provider content",
+            "alternatives": [],
+            "reasoning": "A scoped child directory combines mirrored provider data with operational conflicts, dead letters, outbox, and cursor state. Whole-subtree deletion is unsafe; disconnect removes non-.relay entries at provider scopes and keeps sibling scopes untouched."
+          },
+          "significance": "high"
+        }
+      ]
+    }
+  ],
+  "retrospective": {
+    "summary": "Changed integration disconnect to remove scoped provider mirror content without erasing child .relay operational state; focused disconnect and adopt-marker tests pass.",
+    "approach": "Standard approach",
+    "confidence": 0.9
+  },
+  "commits": [],
+  "filesChanged": [],
+  "projectId": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-c",
+  "tags": [],
+  "_trace": {
+    "startRef": "7c78426109948000b19c1f32751e0bd2e8809f6a",
+    "endRef": "7c78426109948000b19c1f32751e0bd2e8809f6a"
+  }
+}

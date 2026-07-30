@@ -3558,7 +3558,7 @@ func runIntegrationDisconnect(args []string, stdin io.Reader, stdout io.Writer) 
 	if _, _, err := client.do(context.Background(), http.MethodDelete, fmt.Sprintf("/api/v1/workspaces/%s/integrations/%s/status", url.PathEscape(record.ID), url.PathEscape(provider)), nil); err != nil {
 		return err
 	}
-	if err := markProviderDisconnected(record.LocalDir, provider); err != nil {
+	if err := markProviderDisconnected(record, provider); err != nil {
 		return err
 	}
 	fmt.Fprintf(stdout, "%s disconnected from workspace %s\n", provider, record.Name)
@@ -11597,11 +11597,14 @@ func loadSavedConnectionID(localDir, provider string) string {
 	return strings.TrimSpace(state.ConnectionID)
 }
 
-func markProviderDisconnected(localDir, provider string) error {
+func markProviderDisconnected(record workspaceRecord, provider string) error {
+	localDir := strings.TrimSpace(record.LocalDir)
 	if localDir == "" {
 		return nil
 	}
-	_ = os.RemoveAll(filepath.Join(localDir, providerRootDir(provider)))
+	if err := removeProviderMirror(record, provider); err != nil {
+		return err
+	}
 	if err := ensureMountRuntimeLayout(localDir); err != nil {
 		return err
 	}
@@ -11619,6 +11622,52 @@ func markProviderDisconnected(localDir, provider string) error {
 	}
 	_ = os.Remove(integrationConnectionPath(localDir, provider))
 	return nil
+}
+
+func removeProviderMirror(record workspaceRecord, provider string) error {
+	localRoot := strings.TrimSpace(record.LocalDir)
+	providerRoot := mountscope.NormalizePath("/" + providerRootDir(provider))
+	if strings.TrimSpace(record.LocalLayout) != mountscope.LayoutScoped {
+		return os.RemoveAll(filepath.Join(localRoot, filepath.FromSlash(strings.TrimPrefix(providerRoot, "/"))))
+	}
+
+	matchedScope := false
+	for _, scope := range workspaceMountScopes(record) {
+		switch {
+		case mountscope.IsWithin(providerRoot, scope.RemotePath):
+			// This scope's .relay directory contains conflicts, dead letters,
+			// outbox entries, and cursor state. Remove only mirrored content.
+			matchedScope = true
+			entries, err := os.ReadDir(scope.LocalDir)
+			if err != nil {
+				if errors.Is(err, os.ErrNotExist) {
+					continue
+				}
+				return err
+			}
+			for _, entry := range entries {
+				if entry.Name() == ".relay" {
+					continue
+				}
+				if err := os.RemoveAll(filepath.Join(scope.LocalDir, entry.Name())); err != nil {
+					return err
+				}
+			}
+		case mountscope.IsWithin(scope.RemotePath, providerRoot):
+			// A broader scope (normally "/") keeps its runtime state outside
+			// the provider subtree, so the provider subtree is safe to remove.
+			matchedScope = true
+			relative := strings.TrimPrefix(providerRoot, scope.RemotePath)
+			relative = strings.TrimPrefix(relative, "/")
+			if err := os.RemoveAll(filepath.Join(scope.LocalDir, filepath.FromSlash(relative))); err != nil {
+				return err
+			}
+		}
+	}
+	if matchedScope {
+		return nil
+	}
+	return os.RemoveAll(filepath.Join(localRoot, filepath.FromSlash(strings.TrimPrefix(providerRoot, "/"))))
 }
 
 // providerRootDir maps a provider id to the directory name it occupies
