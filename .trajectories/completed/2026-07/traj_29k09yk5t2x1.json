@@ -1,0 +1,69 @@
+{
+  "id": "traj_29k09yk5t2x1",
+  "version": 1,
+  "task": {
+    "title": "Close reserved-root and inherited-env mount boundaries",
+    "source": {
+      "system": "plain",
+      "id": "relayfile#379"
+    }
+  },
+  "status": "completed",
+  "startedAt": "2026-07-30T05:50:08.873Z",
+  "completedAt": "2026-07-30T05:52:21.363Z",
+  "agents": [
+    {
+      "name": "default",
+      "role": "lead",
+      "joinedAt": "2026-07-30T05:52:21.241Z"
+    }
+  ],
+  "chapters": [
+    {
+      "id": "chap_pcy9hbif8ivv",
+      "title": "Work",
+      "agentName": "default",
+      "startedAt": "2026-07-30T05:52:21.241Z",
+      "endedAt": "2026-07-30T05:52:21.363Z",
+      "events": [
+        {
+          "ts": 1785390741242,
+          "type": "decision",
+          "content": "Reject scoped roots that occupy reserved local namespaces: Reject scoped roots that occupy reserved local namespaces",
+          "raw": {
+            "question": "Reject scoped roots that occupy reserved local namespaces",
+            "chosen": "Reject scoped roots that occupy reserved local namespaces",
+            "alternatives": [],
+            "reasoning": "Scoped mapping strips the remote prefix and places the child beneath the same local path used for runtime, digest, skill, VCS, or dependency artifacts. Rejecting in the shared planner makes the collision unrepresentable for both CLI and standalone daemon."
+          },
+          "significance": "high"
+        },
+        {
+          "ts": 1785390741303,
+          "type": "decision",
+          "content": "Use one effective environment for launcher validation and spawn: Use one effective environment for launcher validation and spawn",
+          "raw": {
+            "question": "Use one effective environment for launcher validation and spawn",
+            "chosen": "Use one effective environment for launcher validation and spawn",
+            "alternatives": [],
+            "reasoning": "Validating input.env while spawning a process.env merge creates two interpretations of the same launch. The launcher now derives topology and validates multi-path refusal from the exact env passed to the child."
+          },
+          "significance": "high"
+        }
+      ]
+    }
+  ],
+  "retrospective": {
+    "summary": "Rejected scoped roots overlapping reserved local namespaces and made the TypeScript launcher validate its effective merged environment before side effects; contract, build, 236 SDK tests, vet, and full Go suite pass.",
+    "approach": "Standard approach",
+    "confidence": 0.95
+  },
+  "commits": [],
+  "filesChanged": [],
+  "projectId": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-b",
+  "tags": [],
+  "_trace": {
+    "startRef": "311c59c1b416b08d17088e62bfe5ab70183a578c",
+    "endRef": "311c59c1b416b08d17088e62bfe5ab70183a578c"
+  }
+}

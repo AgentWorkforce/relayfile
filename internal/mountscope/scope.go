@@ -13,6 +13,14 @@ const (
 	LayoutScoped = "scoped"
 )
 
+var reservedScopedLocalTopLevels = map[string]struct{}{
+	".git":         {},
+	".relay":       {},
+	".skills":      {},
+	"digests":      {},
+	"node_modules": {},
+}
+
 // StringListFlag preserves every occurrence of a repeatable string flag.
 type StringListFlag []string
 
@@ -187,6 +195,15 @@ func Plan(localRoot, layout string, paths []string, fallback, stateFile string) 
 	for _, remotePath := range normalized {
 		localDir := localRoot
 		if resolvedLayout == LayoutScoped {
+			firstSegment := strings.SplitN(strings.TrimPrefix(remotePath, "/"), "/", 2)[0]
+			if _, reserved := reservedScopedLocalTopLevels[firstSegment]; reserved {
+				return nil, fmt.Errorf(
+					"scoped remote root %s overlaps reserved local path %s; choose a non-reserved remote root or use --local-layout=%s for a single path",
+					remotePath,
+					filepath.Join(localRoot, filepath.FromSlash(firstSegment)),
+					LayoutExact,
+				)
+			}
 			localDir = LocalDir(localRoot, remotePath)
 		}
 		scopes = append(scopes, Scope{

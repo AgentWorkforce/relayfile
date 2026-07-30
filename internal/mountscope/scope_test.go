@@ -66,6 +66,24 @@ func TestPlanRejectsSharedStateFile(t *testing.T) {
 	}
 }
 
+func TestPlanRejectsScopedRootsThatOverlapReservedLocalPaths(t *testing.T) {
+	root := t.TempDir()
+	for _, remotePath := range []string{"/.git/config", "/.relay", "/.skills/tools", "/digests", "/node_modules/pkg"} {
+		t.Run(remotePath, func(t *testing.T) {
+			_, err := Plan(root, LayoutScoped, []string{remotePath}, "/", "")
+			if err == nil ||
+				!strings.Contains(err.Error(), remotePath) ||
+				!strings.Contains(err.Error(), "reserved local path") ||
+				!strings.Contains(err.Error(), "--local-layout=exact") {
+				t.Fatalf("expected reserved scoped-root refusal with remedy, got %v", err)
+			}
+		})
+	}
+	if _, err := Plan(root, LayoutExact, []string{"/.relay"}, "/", ""); err != nil {
+		t.Fatalf("single exact mount should not map its remote root beneath the reserved path: %v", err)
+	}
+}
+
 func TestReadPathsFileSupportsJSONAndLines(t *testing.T) {
 	dir := t.TempDir()
 	jsonPath := filepath.Join(dir, "paths.json")

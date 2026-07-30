@@ -105,14 +105,18 @@ async function startRelayfileMount(
   input: MountLauncherStart,
   options: DefaultMountLauncherOptions
 ): Promise<MountLauncherInstance> {
-  if ((input.env.RELAYFILE_MOUNT_PATHS_FILE ?? "").trim() !== "") {
+  const effectiveEnv = {
+    ...process.env,
+    ...input.env
+  }
+  if ((effectiveEnv.RELAYFILE_MOUNT_PATHS_FILE ?? "").trim() !== "") {
     throw new MountMultiPathUnsupportedError()
   }
-  const localDir = path.resolve(input.env.RELAYFILE_LOCAL_DIR ?? process.cwd())
+  const localDir = path.resolve(effectiveEnv.RELAYFILE_LOCAL_DIR ?? process.cwd())
   const mountLocalDir = resolveMountLocalDir(
     localDir,
-    input.env.RELAYFILE_REMOTE_PATH,
-    input.env.RELAYFILE_MOUNT_LOCAL_LAYOUT
+    effectiveEnv.RELAYFILE_REMOTE_PATH,
+    effectiveEnv.RELAYFILE_MOUNT_LOCAL_LAYOUT
   )
   const relayDir = path.join(mountLocalDir, ".relay")
   const logPath = path.join(relayDir, "mount.log")
@@ -124,10 +128,7 @@ async function startRelayfileMount(
   const args = input.background === false ? ["--once"] : []
   const child = (options.spawnImpl ?? spawn)(command, args, {
     cwd: input.cwd ?? mountLocalDir,
-    env: {
-      ...process.env,
-      ...input.env
-    },
+    env: effectiveEnv,
     stdio: ["ignore", "pipe", "pipe"]
   })
 
