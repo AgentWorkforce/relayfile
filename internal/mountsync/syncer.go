@@ -7592,25 +7592,7 @@ func redactSensitiveLogQueryValues(value string) string {
 }
 
 func normalizeRemotePath(path string) string {
-	path = strings.TrimSpace(path)
-	if path == "" {
-		return "/"
-	}
-	if !strings.HasPrefix(path, "/") {
-		path = "/" + path
-	}
-	// Clean the path to resolve any ".." or "." components, preventing traversal.
-	path = filepath.ToSlash(filepath.Clean(path))
-	if path == "." || path == "" {
-		return "/"
-	}
-	if !strings.HasPrefix(path, "/") {
-		path = "/" + path
-	}
-	if len(path) > 1 {
-		path = strings.TrimSuffix(path, "/")
-	}
-	return path
+	return mountscope.NormalizePath(path)
 }
 
 func inferProviderFromRoot(remoteRoot string) string {

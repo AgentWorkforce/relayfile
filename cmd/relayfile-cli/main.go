@@ -1619,13 +1619,7 @@ func providerPromptText(entries []integrationCatalogEntry) string {
 }
 
 func normalizeProviderID(value string) string {
-	value = strings.ToLower(strings.TrimSpace(value))
-	switch value {
-	case "slack", "slack-sage":
-		return "slack"
-	default:
-		return value
-	}
+	return mountscope.NormalizeProviderID(value)
 }
 
 func validateLocalProviderID(provider string) error {
@@ -1798,14 +1792,18 @@ func isAPIConflict(err error) bool {
 }
 
 func fallbackIntegrationCatalog() []integrationCatalogEntry {
-	return []integrationCatalogEntry{
-		{ID: "github", DisplayName: "GitHub", VFSRoot: "/github"},
-		{ID: "notion", DisplayName: "Notion", VFSRoot: "/notion"},
-		{ID: "linear", DisplayName: "Linear", VFSRoot: "/linear"},
-		{ID: "slack", DisplayName: "Slack", VFSRoot: "/slack"},
-		{ID: "slack-my-senior-dev", DisplayName: "Slack (MSD)", VFSRoot: "/slack-msd"},
-		{ID: "slack-nightcto", DisplayName: "Slack (NightCTO)", VFSRoot: "/slack-nightcto"},
+	entries := []integrationCatalogEntry{
+		{ID: "github", DisplayName: "GitHub"},
+		{ID: "notion", DisplayName: "Notion"},
+		{ID: "linear", DisplayName: "Linear"},
+		{ID: "slack", DisplayName: "Slack"},
+		{ID: "slack-my-senior-dev", DisplayName: "Slack (MSD)"},
+		{ID: "slack-nightcto", DisplayName: "Slack (NightCTO)"},
 	}
+	for i := range entries {
+		entries[i].VFSRoot = "/" + mountscope.ProviderRoot(entries[i].ID)
+	}
+	return entries
 }
 
 // preflightMountRootInvariant enforces the recovery-mode contract before
@@ -11757,7 +11755,7 @@ func markProviderDisconnected(localDir, provider string) error {
 // catalog endpoint advertise — otherwise status probes and disconnect
 // cleanup would target the wrong path for that provider.
 func providerRootDir(provider string) string {
-	return mountscope.ProviderRoot(normalizeProviderID(provider))
+	return mountscope.ProviderRoot(provider)
 }
 
 func writeJSON(w io.Writer, value any) error {

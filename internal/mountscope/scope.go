@@ -234,13 +234,27 @@ func ValidateEventProvider(paths []string, provider string) error {
 	return nil
 }
 
-// ProviderRoot maps public provider identifiers to the top-level VFS segment
-// they own. Provider filters and CLI cleanup share this owner so aliases whose
-// ids differ from their storage roots cannot drift between planning and use.
-func ProviderRoot(provider string) string {
+// NormalizeProviderID canonicalizes public provider aliases used by the CLI
+// and mount runtime. Keeping alias identity beside ProviderRoot prevents the
+// provider name and its VFS storage root from being normalized independently.
+func NormalizeProviderID(provider string) string {
 	provider = strings.ToLower(strings.TrimSpace(provider))
 	switch provider {
 	case "slack", "slack-sage":
+		return "slack"
+	default:
+		return provider
+	}
+}
+
+// ProviderRoot maps public provider identifiers to the top-level VFS segment
+// they own. Provider filters, catalogs, and CLI cleanup share this owner so
+// aliases whose ids differ from their storage roots cannot drift between
+// planning and use.
+func ProviderRoot(provider string) string {
+	provider = NormalizeProviderID(provider)
+	switch provider {
+	case "slack":
 		return "slack"
 	case "slack-my-senior-dev":
 		return "slack-msd"

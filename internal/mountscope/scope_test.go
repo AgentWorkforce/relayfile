@@ -307,6 +307,19 @@ func TestProviderRootMatchesPublicProviderStorage(t *testing.T) {
 	}
 }
 
+func TestNormalizeProviderIDOwnsPublicAliases(t *testing.T) {
+	for provider, want := range map[string]string{
+		"github":        "github",
+		"slack":         "slack",
+		"slack-sage":    "slack",
+		"  SLACK-SAGE ": "slack",
+	} {
+		if got := NormalizeProviderID(provider); got != want {
+			t.Fatalf("NormalizeProviderID(%q) = %q, want %q", provider, got, want)
+		}
+	}
+}
+
 func TestValidateExplicitPathsFileRejectsEmptyAllowlist(t *testing.T) {
 	for name, paths := range map[string][]string{
 		"empty": nil,
