@@ -3653,7 +3653,8 @@ func runIntegrationDisconnect(args []string, stdin io.Reader, stdout io.Writer) 
 			return nil
 		}
 	}
-	if err := preflightProviderDisconnect(record, provider); err != nil {
+	disconnectPlan, err := prepareProviderDisconnect(record, provider)
+	if err != nil {
 		return err
 	}
 	cloudCreds, err := ensureCloudCredentials(strings.TrimSpace(*cloudAPIURL), "", 5*time.Minute, false, io.Discard)
@@ -3667,7 +3668,7 @@ func runIntegrationDisconnect(args []string, stdin io.Reader, stdout io.Writer) 
 	if _, _, err := client.do(context.Background(), http.MethodDelete, fmt.Sprintf("/api/v1/workspaces/%s/integrations/%s/status", url.PathEscape(record.ID), url.PathEscape(provider)), nil); err != nil {
 		return err
 	}
-	if err := markProviderDisconnected(record, provider); err != nil {
+	if err := markProviderDisconnectedWithPlan(record, provider, disconnectPlan); err != nil {
 		return err
 	}
 	fmt.Fprintf(stdout, "%s disconnected from workspace %s\n", provider, record.Name)
@@ -12239,11 +12240,19 @@ func loadSavedConnectionID(localDir, provider string) string {
 }
 
 func markProviderDisconnected(record workspaceRecord, provider string) error {
+	plan, err := prepareProviderDisconnect(record, provider)
+	if err != nil {
+		return err
+	}
+	return markProviderDisconnectedWithPlan(record, provider, plan)
+}
+
+func markProviderDisconnectedWithPlan(record workspaceRecord, provider string, plan providerDisconnectPlan) error {
 	localDir := strings.TrimSpace(record.LocalDir)
 	if localDir == "" {
 		return nil
 	}
-	if err := removeProviderMirror(record, provider); err != nil {
+	if err := removeProviderMirrorWithPlan(plan); err != nil {
 		return err
 	}
 	if err := ensureMountRuntimeLayout(localDir); err != nil {
@@ -12384,19 +12393,24 @@ func workspaceMountStateFilesForRecord(record workspaceRecord, scope mountscope.
 }
 
 func preflightProviderDisconnect(record workspaceRecord, provider string) error {
+	_, err := prepareProviderDisconnect(record, provider)
+	return err
+}
+
+func prepareProviderDisconnect(record workspaceRecord, provider string) (providerDisconnectPlan, error) {
 	if strings.TrimSpace(record.LocalDir) == "" {
-		return nil
+		return providerDisconnectPlan{}, nil
 	}
 	plan, err := planProviderDisconnect(record, provider)
 	if err != nil {
-		return fmt.Errorf("resolve mount state before disconnecting %s: %w", provider, err)
+		return providerDisconnectPlan{}, fmt.Errorf("resolve mount state before disconnecting %s: %w", provider, err)
 	}
 	running, stalePID, err := runningMountDaemons(record.LocalDir, record.ID, record.Name)
 	if err != nil {
-		return fmt.Errorf("check running mounts before disconnecting %s: %w", provider, err)
+		return providerDisconnectPlan{}, fmt.Errorf("check running mounts before disconnecting %s: %w", provider, err)
 	}
 	if len(running) > 0 {
-		return fmt.Errorf(
+		return providerDisconnectPlan{}, fmt.Errorf(
 			"refusing to disconnect %s while workspace %s has a running mount (%s); stop the mount before disconnecting",
 			provider,
 			firstNonBlank(record.Name, record.ID),
@@ -12404,7 +12418,7 @@ func preflightProviderDisconnect(record workspaceRecord, provider string) error 
 		)
 	}
 	if stalePID != 0 {
-		return fmt.Errorf(
+		return providerDisconnectPlan{}, fmt.Errorf(
 			"refusing to disconnect %s while workspace %s has unverified mount state (pid %d); confirm the mount is stopped and clear %s before disconnecting",
 			provider,
 			firstNonBlank(record.Name, record.ID),
@@ -12412,17 +12426,21 @@ func preflightProviderDisconnect(record workspaceRecord, provider string) error 
 			mountPIDFile(record.LocalDir),
 		)
 	}
-	return refuseProviderDisconnectWithPendingState(provider, plan)
+	if err := refuseProviderDisconnectWithPendingState(provider, plan); err != nil {
+		return providerDisconnectPlan{}, err
+	}
+	return plan, nil
 }
 
 func removeProviderMirror(record workspaceRecord, provider string) error {
-	plan, err := planProviderDisconnect(record, provider)
+	plan, err := prepareProviderDisconnect(record, provider)
 	if err != nil {
-		return fmt.Errorf("resolve provider mirror before disconnecting %s: %w", provider, err)
-	}
-	if err := preflightProviderDisconnect(record, provider); err != nil {
 		return err
 	}
+	return removeProviderMirrorWithPlan(plan)
+}
+
+func removeProviderMirrorWithPlan(plan providerDisconnectPlan) error {
 	for _, scopeDir := range plan.cleanScopeDirs {
 		entries, err := os.ReadDir(scopeDir)
 		if err != nil {

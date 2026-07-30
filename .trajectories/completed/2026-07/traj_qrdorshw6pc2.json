@@ -1,0 +1,57 @@
+{
+  "id": "traj_qrdorshw6pc2",
+  "version": 1,
+  "task": {
+    "title": "Carry disconnect preflight across the Cloud commit boundary",
+    "source": {
+      "system": "plain",
+      "id": "relayfile#379"
+    }
+  },
+  "status": "completed",
+  "startedAt": "2026-07-30T11:34:07.140Z",
+  "completedAt": "2026-07-30T11:36:20.247Z",
+  "agents": [
+    {
+      "name": "default",
+      "role": "lead",
+      "joinedAt": "2026-07-30T11:34:07.518Z"
+    }
+  ],
+  "chapters": [
+    {
+      "id": "chap_cko07w4dqno4",
+      "title": "Work",
+      "agentName": "default",
+      "startedAt": "2026-07-30T11:34:07.518Z",
+      "endedAt": "2026-07-30T11:36:20.247Z",
+      "events": [
+        {
+          "ts": 1785411247519,
+          "type": "decision",
+          "content": "Pass one validated cleanup plan through Cloud DELETE: Pass one validated cleanup plan through Cloud DELETE",
+          "raw": {
+            "question": "Pass one validated cleanup plan through Cloud DELETE",
+            "chosen": "Pass one validated cleanup plan through Cloud DELETE",
+            "alternatives": [],
+            "reasoning": "Re-running a mutable refusal after an irreversible external mutation can return failure with Cloud disconnected and local state still connected-looking."
+          },
+          "significance": "high"
+        }
+      ]
+    }
+  ],
+  "retrospective": {
+    "summary": "Passed one validated provider-disconnect cleanup plan across the Cloud DELETE boundary and pinned both pre- and post-mutation outcomes",
+    "approach": "Standard approach",
+    "confidence": 0.92
+  },
+  "commits": [],
+  "filesChanged": [],
+  "projectId": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-c",
+  "tags": [],
+  "_trace": {
+    "startRef": "6fdd016d1aedb3fffd69ea13d5c4f5c4a42fe9ff",
+    "endRef": "6fdd016d1aedb3fffd69ea13d5c4f5c4a42fe9ff"
+  }
+}

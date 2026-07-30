@@ -8092,6 +8092,73 @@ func TestIntegrationDisconnectRefusesBeforeCloudMutationWhenScopedStateIsPending
 	}
 }
 
+func TestIntegrationDisconnectCommitsPrevalidatedPlanAfterCloudMutation(t *testing.T) {
+	record, localRoot := setupAdoptWorkspace(t)
+	record.RelayWorkspaceID = "ws_relay_runtime"
+	record.LocalLayout = mountscope.LayoutScoped
+	record.RemotePaths = []string{"/github/repos/acme"}
+	record.MountStateDir = t.TempDir()
+	record.mountStateSet = true
+	if _, err := upsertWorkspaceDetails(record); err != nil {
+		t.Fatalf("persist scoped workspace: %v", err)
+	}
+	scope := workspaceMountScopes(record)[0]
+	mirrorPath := filepath.Join(scope.LocalDir, "README.md")
+	if err := os.MkdirAll(filepath.Dir(mirrorPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(mirrorPath, []byte("mirrored"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stateFile, err := workspaceMountStateFile(record.RelayWorkspaceID, record, scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(stateFile), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(stateFile, []byte(`{"files":{}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	deleteCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete ||
+			r.URL.Path != "/api/v1/workspaces/ws_123/integrations/github/status" {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		deleteCalls++
+		// The preflighted cursor can disappear after Cloud commits. Local
+		// cleanup must consume the already-validated plan instead of turning
+		// that post-mutation change into a second refusal.
+		if err := os.Remove(stateFile); err != nil {
+			t.Fatal(err)
+		}
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer server.Close()
+	pointAdoptCloudCredentials(t, server.URL)
+
+	var stdout bytes.Buffer
+	err = runIntegrationDisconnect(
+		[]string{"github", "--workspace", "demo", "--yes", "--cloud-api-url", server.URL},
+		strings.NewReader(""),
+		&stdout,
+	)
+	if err != nil {
+		t.Fatalf("disconnect after successful Cloud mutation = %v", err)
+	}
+	if deleteCalls != 1 {
+		t.Fatalf("Cloud DELETE calls = %d, want 1", deleteCalls)
+	}
+	if _, err := os.Stat(mirrorPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("prevalidated mirror cleanup did not run: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(localRoot, ".relay", "disconnected", "github.json")); err != nil {
+		t.Fatalf("disconnect marker missing after Cloud mutation: %v", err)
+	}
+}
+
 func TestProviderDisconnectPreflightIgnoresOtherProvidersInBroadScope(t *testing.T) {
 	localRoot := t.TempDir()
 	record := workspaceRecord{

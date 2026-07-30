@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "lastUpdated": "2026-07-30T11:29:40.362Z",
+  "lastUpdated": "2026-07-30T11:36:20.361Z",
   "trajectories": {
     "traj_4pvrlmqfnzng": {
       "title": "Review PR #278 in AgentWorkforce/relayfile",
@@ -316,6 +316,20 @@
       "startedAt": "2026-07-30T11:23:34.612Z",
       "completedAt": "2026-07-30T11:29:40.251Z",
       "path": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-c/.trajectories/completed/2026-07/traj_dowdovihdusp.json"
+    },
+    "traj_kya5brhilqxi": {
+      "title": "Review changes against fix/scoped-multipath-cli-runtime",
+      "status": "completed",
+      "startedAt": "2026-07-30T11:30:11.161Z",
+      "completedAt": "2026-07-30T11:32:34.683Z",
+      "path": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-c/.trajectories/completed/2026-07/traj_kya5brhilqxi.json"
+    },
+    "traj_qrdorshw6pc2": {
+      "title": "Carry disconnect preflight across the Cloud commit boundary",
+      "status": "completed",
+      "startedAt": "2026-07-30T11:34:07.140Z",
+      "completedAt": "2026-07-30T11:36:20.247Z",
+      "path": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-c/.trajectories/completed/2026-07/traj_qrdorshw6pc2.json"
     }
   }
 }

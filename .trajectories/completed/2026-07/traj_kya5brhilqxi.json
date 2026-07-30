@@ -1,0 +1,53 @@
+{
+  "id": "traj_kya5brhilqxi",
+  "version": 1,
+  "task": {
+    "title": "Review changes against fix/scoped-multipath-cli-runtime"
+  },
+  "status": "completed",
+  "startedAt": "2026-07-30T11:30:11.161Z",
+  "completedAt": "2026-07-30T11:32:34.683Z",
+  "agents": [
+    {
+      "name": "default",
+      "role": "lead",
+      "joinedAt": "2026-07-30T11:32:34.348Z"
+    }
+  ],
+  "chapters": [
+    {
+      "id": "chap_0ajq2i0qn6p6",
+      "title": "Work",
+      "agentName": "default",
+      "startedAt": "2026-07-30T11:32:34.348Z",
+      "endedAt": "2026-07-30T11:32:34.683Z",
+      "events": [
+        {
+          "ts": 1785411154348,
+          "type": "decision",
+          "content": "Focused review on scoped operator aggregation, dead-letter routing, and disconnect safety; no source edits: Focused review on scoped operator aggregation, dead-letter routing, and disconnect safety; no source edits",
+          "raw": {
+            "question": "Focused review on scoped operator aggregation, dead-letter routing, and disconnect safety; no source edits",
+            "chosen": "Focused review on scoped operator aggregation, dead-letter routing, and disconnect safety; no source edits",
+            "alternatives": [],
+            "reasoning": "These are the functional surfaces changed by the patch"
+          },
+          "significance": "high"
+        }
+      ]
+    }
+  ],
+  "retrospective": {
+    "summary": "Reviewed scoped multipath operator-surface changes and identified a disconnect post-mutation race",
+    "approach": "Standard approach",
+    "confidence": 0.82
+  },
+  "commits": [],
+  "filesChanged": [],
+  "projectId": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-c",
+  "tags": [],
+  "_trace": {
+    "startRef": "6fdd016d1aedb3fffd69ea13d5c4f5c4a42fe9ff",
+    "endRef": "6fdd016d1aedb3fffd69ea13d5c4f5c4a42fe9ff"
+  }
+}
