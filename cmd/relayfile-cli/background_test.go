@@ -13,6 +13,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/agentworkforce/relayfile/internal/mountscope"
 )
 
 // TestA14BackgroundModeWritesPidAndStopSignalsCleanly is the acceptance test
@@ -463,10 +465,13 @@ func TestMountBackgroundClearsDeadStructuredPIDBeforeStart(t *testing.T) {
 
 	oldSpawn := spawnBackgroundMountProcessFn
 	spawned := false
-	spawnBackgroundMountProcessFn = func(originalArgs []string, absLocalDir, pidFile, logFile string) error {
+	spawnBackgroundMountProcessFn = func(originalArgs []string, absLocalDir, pidFile, logFile, localLayout string) error {
 		spawned = true
 		if absLocalDir != localDir {
 			t.Fatalf("spawn localDir = %q, want %q", absLocalDir, localDir)
+		}
+		if localLayout != mountscope.LayoutExact {
+			t.Fatalf("spawn localLayout = %q, want exact", localLayout)
 		}
 		if _, err := os.Stat(pidFile); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("expected stale pid file to be cleared before spawn, got %v", err)

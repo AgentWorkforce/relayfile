@@ -2464,7 +2464,7 @@ func TestMountPersistsScopedTopologyBeforeBackgroundSpawnFailure(t *testing.T) {
 	clearRelayfileEnv(t)
 
 	oldSpawn := spawnBackgroundMountProcessFn
-	spawnBackgroundMountProcessFn = func([]string, string, string, string) error {
+	spawnBackgroundMountProcessFn = func([]string, string, string, string, string) error {
 		return errors.New("synthetic spawn failure")
 	}
 	t.Cleanup(func() { spawnBackgroundMountProcessFn = oldSpawn })
@@ -2490,6 +2490,26 @@ func TestMountPersistsScopedTopologyBeforeBackgroundSpawnFailure(t *testing.T) {
 	}
 	if got := strings.Join(record.RemotePaths, ","); got != "/github,/slack" {
 		t.Fatalf("failed current writer persisted paths %q, want /github,/slack", got)
+	}
+}
+
+func TestPrepareBackgroundMountLayoutPreservesScopedArtifactAbsence(t *testing.T) {
+	localRoot := filepath.Join(t.TempDir(), "mirror")
+	logFile := filepath.Join(localRoot, ".relay", "mount.log")
+
+	if err := prepareBackgroundMountLayout(localRoot, logFile, mountscope.LayoutScoped); err != nil {
+		t.Fatalf("prepare scoped background layout: %v", err)
+	}
+	for _, artifact := range []string{
+		filepath.Join(localRoot, mountscope.DigestsTopLevel),
+		filepath.Join(localRoot, mountscope.SkillsTopLevel),
+	} {
+		if _, err := os.Stat(artifact); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("scoped background preparation created unsynchronized root artifact %s: %v", artifact, err)
+		}
+	}
+	if info, err := os.Stat(filepath.Join(localRoot, mountscope.RuntimeTopLevel)); err != nil || !info.IsDir() {
+		t.Fatalf("scoped background preparation did not create runtime root: info=%v err=%v", info, err)
 	}
 }
 

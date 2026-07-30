@@ -6463,7 +6463,7 @@ func runMount(args []string) error {
 	*intervalJitter = clampJitterRatio(*intervalJitter)
 
 	if *background && !*daemonized {
-		return spawnBackgroundMountProcessFn(args, absLocalDir, pidFile, logFile)
+		return spawnBackgroundMountProcessFn(args, absLocalDir, pidFile, logFile, resolvedLocalLayout)
 	}
 	registerPID := shouldRegisterMountPID(*daemonized, *once)
 	if *daemonized {
@@ -12133,11 +12133,8 @@ func jitteredIntervalWithSample(base time.Duration, jitterRatio, sample float64)
 
 var spawnBackgroundMountProcessFn = spawnBackgroundMountProcess
 
-func spawnBackgroundMountProcess(originalArgs []string, localDir, pidFile, logFile string) error {
-	if err := ensureMirrorLayout(localDir); err != nil {
-		return err
-	}
-	if err := rotateLogFile(logFile); err != nil {
+func spawnBackgroundMountProcess(originalArgs []string, localDir, pidFile, logFile, localLayout string) error {
+	if err := prepareBackgroundMountLayout(localDir, logFile, localLayout); err != nil {
 		return err
 	}
 	executable, err := os.Executable()
@@ -12176,6 +12173,17 @@ func spawnBackgroundMountProcess(originalArgs []string, localDir, pidFile, logFi
 	}
 	fmt.Fprintf(os.Stdout, "Mirror started in background at %s. Logs: %s\n", localDir, logFile)
 	return nil
+}
+
+func prepareBackgroundMountLayout(localDir, logFile, localLayout string) error {
+	// The foreground path has already initialized the topology, but repeat the
+	// operation here so the detached-process boundary remains self-contained.
+	// It must remain topology-aware: the legacy exact-root initializer creates
+	// global digests and skills that a scoped mount cannot honestly populate.
+	if err := ensureMirrorLayoutForTopology(localDir, localLayout); err != nil {
+		return err
+	}
+	return rotateLogFile(logFile)
 }
 
 // logStuckEventSummary surfaces the stuck-event drain outcome of a reconcile
