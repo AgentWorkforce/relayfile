@@ -4384,6 +4384,44 @@ func workspaceRetryTarget(record workspaceRecord, recordLocalDir, remotePath str
 	return recordLocalDir, remoteRoot, nil
 }
 
+type workspaceDeadLetterRetryGroup struct {
+	LocalDir   string
+	RemoteRoot string
+	Paths      []string
+}
+
+func workspaceDeadLetterRetryGroups(record workspaceRecord, recordLocalDir, rawPaths string) ([]workspaceDeadLetterRetryGroup, error) {
+	paths := deadLetterRetryPaths(rawPaths)
+	if len(paths) == 0 {
+		return nil, errors.New("dead-letter record has no retryable path")
+	}
+	groupIndexes := map[string]int{}
+	groups := make([]workspaceDeadLetterRetryGroup, 0, len(paths))
+	for _, remotePath := range paths {
+		localDir, remoteRoot, err := workspaceRetryTarget(record, recordLocalDir, remotePath)
+		if err != nil {
+			return nil, err
+		}
+		// Resolve every relative path before any Syncer is invoked so a bad
+		// cross-scope record cannot partially retry one group and fail later.
+		if _, err := retryRelativePath(localDir, remoteRoot, remotePath); err != nil {
+			return nil, err
+		}
+		key := filepath.Clean(localDir) + "\x00" + mountscope.NormalizePath(remoteRoot)
+		if index, ok := groupIndexes[key]; ok {
+			groups[index].Paths = append(groups[index].Paths, remotePath)
+			continue
+		}
+		groupIndexes[key] = len(groups)
+		groups = append(groups, workspaceDeadLetterRetryGroup{
+			LocalDir:   localDir,
+			RemoteRoot: remoteRoot,
+			Paths:      []string{remotePath},
+		})
+	}
+	return groups, nil
+}
+
 // workspaceMountStateFile resolves the same private cursor identity used by
 // the Syncer. New mounts keep state beneath MountStateDir; the in-mirror file
 // remains only as a compatibility fallback for pre-private-state mounts.
@@ -5457,14 +5495,18 @@ func runWritebackRetry(args []string, stdout io.Writer) error {
 		return fmt.Errorf("dead-letter record %s contains opId %q, expected %q", recordPath, dl.OpID, op)
 	}
 
-	retryLocalDir, remoteRoot, err := workspaceRetryTarget(record, recordLocalDir, dl.Path)
+	retryGroups, err := workspaceDeadLetterRetryGroups(record, recordLocalDir, dl.Path)
 	if err != nil {
 		return err
 	}
-	retryRecord := record
-	retryRecord.LocalDir = retryLocalDir
-	if err := retryDeadLetterWriteback(workspaceID, retryRecord, remoteRoot, dl); err != nil {
-		return fmt.Errorf("retry op %s: %w", op, err)
+	for _, group := range retryGroups {
+		retryRecord := record
+		retryRecord.LocalDir = group.LocalDir
+		retryDL := dl
+		retryDL.Path = strings.Join(group.Paths, ",")
+		if err := retryDeadLetterWriteback(workspaceID, retryRecord, group.RemoteRoot, retryDL); err != nil {
+			return fmt.Errorf("retry op %s for mount root %s: %w", op, group.RemoteRoot, err)
+		}
 	}
 	if err := os.Remove(recordPath); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("retry queued but failed to remove %s: %w", recordPath, err)

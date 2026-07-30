@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "lastUpdated": "2026-07-30T10:31:08.726Z",
+  "lastUpdated": "2026-07-30T10:42:00.555Z",
   "trajectories": {
     "traj_4pvrlmqfnzng": {
       "title": "Review PR #278 in AgentWorkforce/relayfile",
@@ -239,6 +239,20 @@
       "startedAt": "2026-07-30T10:27:28.401Z",
       "completedAt": "2026-07-30T10:31:08.607Z",
       "path": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-c/.trajectories/completed/2026-07/traj_mdp5m449wxp3.json"
+    },
+    "traj_bua53wamitju": {
+      "title": "Review changes against fix/scoped-multipath-cli-runtime",
+      "status": "completed",
+      "startedAt": "2026-07-30T10:34:12.908Z",
+      "completedAt": "2026-07-30T10:37:12.687Z",
+      "path": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-c/.trajectories/completed/2026-07/traj_bua53wamitju.json"
+    },
+    "traj_unv64id5jv6z": {
+      "title": "Route cross-scope dead-letter retries per scoped runtime root",
+      "status": "completed",
+      "startedAt": "2026-07-30T10:39:35.159Z",
+      "completedAt": "2026-07-30T10:42:00.443Z",
+      "path": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-c/.trajectories/completed/2026-07/traj_unv64id5jv6z.json"
     }
   }
 }

@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -5841,6 +5842,120 @@ func TestWorkspaceRetryTargetRoutesCatalogCompatibilityRecordToScopedChild(t *te
 	}
 	if want := mountscope.LocalDir(localRoot, "/slack/channels/project"); localDir != want || remoteRoot != "/slack/channels/project" {
 		t.Fatalf("retry target = %q at %q, want %q at /slack/channels/project", localDir, remoteRoot, want)
+	}
+}
+
+func TestWorkspaceDeadLetterRetryGroupsRoutesEveryScopedRoot(t *testing.T) {
+	localRoot := t.TempDir()
+	record := workspaceRecord{
+		LocalDir:    localRoot,
+		LocalLayout: mountscope.LayoutScoped,
+		RemotePaths: []string{"/github", "/slack/channels/project"},
+	}
+	for _, remotePath := range []string{
+		"/github/repos/acme/cloud/issue.json",
+		"/github/repos/acme/cloud/pr.json",
+		"/slack/channels/project/message.json",
+	} {
+		scope, ok := workspaceMountScopeForRemotePath(record, remotePath)
+		if !ok {
+			t.Fatalf("missing test scope for %s", remotePath)
+		}
+		relative := strings.TrimPrefix(remotePath, scope.RemotePath)
+		localPath := filepath.Join(scope.LocalDir, filepath.FromSlash(strings.TrimPrefix(relative, "/")))
+		if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(localPath, []byte("{}"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tests := []struct {
+		name     string
+		rawPaths string
+		want     []workspaceDeadLetterRetryGroup
+	}{
+		{
+			name:     "allowlist order",
+			rawPaths: "/github/repos/acme/cloud/issue.json,/slack/channels/project/message.json",
+			want: []workspaceDeadLetterRetryGroup{
+				{
+					LocalDir:   mountscope.LocalDir(localRoot, "/github"),
+					RemoteRoot: "/github",
+					Paths:      []string{"/github/repos/acme/cloud/issue.json"},
+				},
+				{
+					LocalDir:   mountscope.LocalDir(localRoot, "/slack/channels/project"),
+					RemoteRoot: "/slack/channels/project",
+					Paths:      []string{"/slack/channels/project/message.json"},
+				},
+			},
+		},
+		{
+			name:     "reverse order",
+			rawPaths: "/slack/channels/project/message.json,/github/repos/acme/cloud/issue.json",
+			want: []workspaceDeadLetterRetryGroup{
+				{
+					LocalDir:   mountscope.LocalDir(localRoot, "/slack/channels/project"),
+					RemoteRoot: "/slack/channels/project",
+					Paths:      []string{"/slack/channels/project/message.json"},
+				},
+				{
+					LocalDir:   mountscope.LocalDir(localRoot, "/github"),
+					RemoteRoot: "/github",
+					Paths:      []string{"/github/repos/acme/cloud/issue.json"},
+				},
+			},
+		},
+		{
+			name:     "same root stays one retry",
+			rawPaths: "/github/repos/acme/cloud/issue.json,/github/repos/acme/cloud/pr.json",
+			want: []workspaceDeadLetterRetryGroup{
+				{
+					LocalDir:   mountscope.LocalDir(localRoot, "/github"),
+					RemoteRoot: "/github",
+					Paths: []string{
+						"/github/repos/acme/cloud/issue.json",
+						"/github/repos/acme/cloud/pr.json",
+					},
+				},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := workspaceDeadLetterRetryGroups(record, localRoot, tt.rawPaths)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("retry groups = %#v, want %#v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestWorkspaceDeadLetterRetryGroupsRejectsInvalidPathBeforeRetry(t *testing.T) {
+	localRoot := t.TempDir()
+	record := workspaceRecord{
+		LocalDir:    localRoot,
+		LocalLayout: mountscope.LayoutScoped,
+		RemotePaths: []string{"/github", "/slack"},
+	}
+	githubPath := filepath.Join(mountscope.LocalDir(localRoot, "/github"), "repos", "acme", "cloud", "issue.json")
+	if err := os.MkdirAll(filepath.Dir(githubPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(githubPath, []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := workspaceDeadLetterRetryGroups(
+		record,
+		localRoot,
+		"/github/repos/acme/cloud/issue.json,/linear/issues/ENG-123.json",
+	)
+	if err == nil || !strings.Contains(err.Error(), "outside the persisted scoped allowlist") {
+		t.Fatalf("retry groups error = %v, want scoped allowlist refusal", err)
 	}
 }
 

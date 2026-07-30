@@ -1,0 +1,57 @@
+{
+  "id": "traj_unv64id5jv6z",
+  "version": 1,
+  "task": {
+    "title": "Route cross-scope dead-letter retries per scoped runtime root",
+    "source": {
+      "system": "plain",
+      "id": "relayfile#379"
+    }
+  },
+  "status": "completed",
+  "startedAt": "2026-07-30T10:39:35.159Z",
+  "completedAt": "2026-07-30T10:42:00.443Z",
+  "agents": [
+    {
+      "name": "default",
+      "role": "lead",
+      "joinedAt": "2026-07-30T10:39:35.513Z"
+    }
+  ],
+  "chapters": [
+    {
+      "id": "chap_nuuzmrtg4fni",
+      "title": "Work",
+      "agentName": "default",
+      "startedAt": "2026-07-30T10:39:35.513Z",
+      "endedAt": "2026-07-30T10:42:00.443Z",
+      "events": [
+        {
+          "ts": 1785407975514,
+          "type": "decision",
+          "content": "Precompute and validate every retry group before invoking any Syncer: Precompute and validate every retry group before invoking any Syncer",
+          "raw": {
+            "question": "Precompute and validate every retry group before invoking any Syncer",
+            "chosen": "Precompute and validate every retry group before invoking any Syncer",
+            "alternatives": [],
+            "reasoning": "A comma-joined dead-letter can span scoped roots; selecting one Syncer makes later paths unretryable, while resolving the complete plan first prevents partial retries when any path is invalid."
+          },
+          "significance": "high"
+        }
+      ]
+    }
+  ],
+  "retrospective": {
+    "summary": "Grouped comma-joined dead-letter paths by scoped runtime root, prevalidated the complete plan, and routed one Syncer retry per group with order-independent coverage.",
+    "approach": "Standard approach",
+    "confidence": 0.9
+  },
+  "commits": [],
+  "filesChanged": [],
+  "projectId": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-c",
+  "tags": [],
+  "_trace": {
+    "startRef": "bbde8a17097f26acbcaa3227f6e2be6372c750c0",
+    "endRef": "bbde8a17097f26acbcaa3227f6e2be6372c750c0"
+  }
+}
