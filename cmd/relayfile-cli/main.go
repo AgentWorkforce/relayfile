@@ -1359,9 +1359,10 @@ func classifyAgentRelayActiveWorkspaceError(err error) error {
 }
 
 // usableAgentRelayWorkspaceKey converts external key-shaped input into either a
-// validated workspace key or the empty sentinel. Agent Relay's masked display
-// values deliberately retain the rk_live_ prefix, so prefix checks alone cannot
-// distinguish them from usable credentials.
+// validated workspace key or the empty sentinel. Agent Relay intentionally
+// keeps masked values recognizable by retaining the rk_live_ prefix, so
+// relayfile must enforce usability at its own trust boundary instead of trying
+// to change or outguess Relay's display contract.
 func usableAgentRelayWorkspaceKey(value string) string {
 	value = strings.TrimSpace(value)
 	if !usableAgentRelayWorkspaceKeyPattern.MatchString(value) {

@@ -2849,10 +2849,6 @@ func clearRelayfileEnv(t *testing.T) {
 	t.Setenv("RELAYCAST_BASE_URL", "")
 	t.Setenv("RELAY_BASE_URL", "")
 	t.Setenv("AGENT_RELAY_BIN", "")
-	t.Setenv("AGENT_RELAY_WORKSPACE_KEY", "")
-	t.Setenv("RELAY_WORKSPACE_KEY", "")
-	t.Setenv("RELAY_API_KEY", "")
-	t.Setenv("AGENT_RELAY_HOME", "")
 }
 
 func installFakeAgentRelay(t *testing.T, scriptBody string) string {
@@ -2992,7 +2988,11 @@ func TestActiveWorkspaceClassifierFallsBackToStoreWhenErrorRedacted(t *testing.T
 	}
 	// A masked environment value must normalize to the empty sentinel so it
 	// cannot block fallback to the usable key in the shared workspace store.
-	t.Setenv("AGENT_RELAY_WORKSPACE_KEY", "rk_live_…masked")
+	const maskedWorkspaceKey = "rk_live_…masked"
+	if got := usableAgentRelayWorkspaceKey(maskedWorkspaceKey); got != "" {
+		t.Fatalf("masked workspace key normalized to %q, want empty sentinel", got)
+	}
+	t.Setenv("AGENT_RELAY_WORKSPACE_KEY", maskedWorkspaceKey)
 
 	const workspaceKey = "rk_live_messaging_only_redacted"
 	var validationCalls int
@@ -3159,8 +3159,14 @@ func TestClassifyAgentRelayActiveWorkspaceErrorReportsUnexpectedRelaycastStatus(
 }
 
 func TestClassifyAgentRelayActiveWorkspaceErrorPreservesRegexMiss(t *testing.T) {
+	// A regex miss falls through to Agent Relay's shared workspace store.
+	// Isolate every store input so this test cannot read an operator's live key.
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)
+	for _, name := range []string{"AGENT_RELAY_WORKSPACE_KEY", "RELAY_WORKSPACE_KEY", "RELAY_API_KEY"} {
+		t.Setenv(name, "")
+	}
+	t.Setenv("AGENT_RELAY_HOME", t.TempDir())
 
 	var validationCalls int
 	relaycast := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
