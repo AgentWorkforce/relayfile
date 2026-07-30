@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/agentworkforce/relayfile/internal/delegatedauth"
+	"github.com/agentworkforce/relayfile/internal/mountscope"
 	"github.com/agentworkforce/relayfile/internal/mountsync"
 )
 
@@ -2321,6 +2322,7 @@ func TestMountMirrorsRepeatedRemotePathsUnderScopedLayout(t *testing.T) {
 	clearRelayfileEnv(t)
 
 	localRoot := t.TempDir()
+	stateDir := t.TempDir()
 	token := testJWTWithWorkspace("ws_demo")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -2351,6 +2353,7 @@ func TestMountMirrorsRepeatedRemotePathsUnderScopedLayout(t *testing.T) {
 		"--remote-path", "/github/repos/acme/cloud",
 		"--remote-path", "/slack/channels/proj-cloud",
 		"--local-layout", "scoped",
+		"--state-dir", stateDir,
 		"--once",
 		"--websocket=false",
 	}, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
@@ -2381,6 +2384,9 @@ func TestMountMirrorsRepeatedRemotePathsUnderScopedLayout(t *testing.T) {
 	if record.LocalLayout != "scoped" {
 		t.Fatalf("persisted local layout = %q, want scoped", record.LocalLayout)
 	}
+	if record.MountStateDir != stateDir || record.MountKind != mountsync.MountKindDaemon {
+		t.Fatalf("persisted mount state identity = dir %q kind %q, want %q/%q", record.MountStateDir, record.MountKind, stateDir, mountsync.MountKindDaemon)
+	}
 
 	// A later start/restart supplies no path flags, so the catalog must carry
 	// the allowlist instead of silently widening the mount back to "/".
@@ -2393,6 +2399,19 @@ func TestMountMirrorsRepeatedRemotePathsUnderScopedLayout(t *testing.T) {
 	}, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
 	if err != nil {
 		t.Fatalf("rerun with persisted scoped paths failed: %v", err)
+	}
+
+	err = run([]string{
+		"mount", "ws_demo", localRoot,
+		"--server", server.URL,
+		"--token", token,
+		"--remote-path", "/slack/channels/proj-cloud",
+		"--local-layout", "scoped",
+		"--once",
+		"--websocket=false",
+	}, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "/github/repos/acme/cloud") || !strings.Contains(err.Error(), "--rehome") {
+		t.Fatalf("expected in-place scope removal to require rehome, got %v", err)
 	}
 }
 
@@ -4922,6 +4941,95 @@ func TestScopedWorkspaceConsumersAggregateChildRuntimeState(t *testing.T) {
 	}
 	if localDir != scopes[1].LocalDir || path != filepath.Join(scopes[1].LocalDir, ".relay", "dead-letter", "op_2.json") {
 		t.Fatalf("scoped retry lookup = %q in %q, want second scope", path, localDir)
+	}
+}
+
+func TestValidateMountLayoutTransitionRejectsInPlaceChange(t *testing.T) {
+	localDir := t.TempDir()
+	record := workspaceRecord{LocalDir: localDir, LocalLayout: "scoped"}
+	err := validateMountLayoutTransition(record, localDir, "exact")
+	if err == nil || !strings.Contains(err.Error(), "--rehome") {
+		t.Fatalf("expected rehome guidance, got %v", err)
+	}
+	if err := validateMountLayoutTransition(record, filepath.Join(t.TempDir(), "new-root"), "exact"); err != nil {
+		t.Fatalf("layout change at a new root should be allowed, got %v", err)
+	}
+}
+
+func TestValidateMountScopeTransitionRejectsInPlaceRemoval(t *testing.T) {
+	localRoot := t.TempDir()
+	previous := workspaceRecord{
+		LocalDir:    localRoot,
+		LocalLayout: "scoped",
+		RemotePaths: []string{"/github", "/slack"},
+	}
+	err := validateMountScopeTransition(previous, localRoot, "scoped", []string{"/slack"})
+	if err == nil || !strings.Contains(err.Error(), "/github") || !strings.Contains(err.Error(), "--rehome") {
+		t.Fatalf("expected removed-scope rehome guidance, got %v", err)
+	}
+	if err := validateMountScopeTransition(previous, localRoot, "scoped", []string{"/github", "/slack", "/email"}); err != nil {
+		t.Fatalf("adding a scope should not require lifecycle migration, got %v", err)
+	}
+	if err := validateMountScopeTransition(previous, filepath.Join(t.TempDir(), "new-root"), "scoped", []string{"/slack"}); err != nil {
+		t.Fatalf("scope change at a new root should be allowed, got %v", err)
+	}
+}
+
+func TestWorkspaceMountScopesPreservesExactRemoteRoot(t *testing.T) {
+	localRoot := t.TempDir()
+	scopes := workspaceMountScopes(workspaceRecord{
+		LocalDir:    localRoot,
+		LocalLayout: "exact",
+		RemotePaths: []string{"/github/repos/acme/cloud"},
+	})
+	if len(scopes) != 1 || scopes[0].RemotePath != "/github/repos/acme/cloud" || scopes[0].LocalDir != localRoot {
+		t.Fatalf("exact mount scopes = %#v", scopes)
+	}
+}
+
+func TestMergeWorkspaceRecordsUpdatesMountStateIdentityOnlyWhenExplicit(t *testing.T) {
+	current := workspaceRecord{
+		ID:             "ws_demo",
+		MountStateFile: "/old/state.json",
+		MountStateDir:  "/old",
+		MountKind:      mountsync.MountKindDaemon,
+	}
+	ordinary := mergeWorkspaceRecords(current, workspaceRecord{ID: "ws_demo", Name: "demo"})
+	if ordinary.MountStateFile != current.MountStateFile || ordinary.MountStateDir != current.MountStateDir || ordinary.MountKind != current.MountKind {
+		t.Fatalf("ordinary catalog update changed mount state identity: %#v", ordinary)
+	}
+	explicit := mergeWorkspaceRecords(current, workspaceRecord{
+		ID:            "ws_demo",
+		MountStateDir: "/new",
+		MountKind:     mountsync.MountKindFlush,
+		mountStateSet: true,
+	})
+	if explicit.MountStateFile != "" || explicit.MountStateDir != "/new" || explicit.MountKind != mountsync.MountKindFlush {
+		t.Fatalf("explicit catalog update did not replace mount state identity: %#v", explicit)
+	}
+}
+
+func TestSkipStuckAcrossScopesVisitsEachCursorAndSharesLimit(t *testing.T) {
+	scopes := []mountscope.Scope{
+		{RemotePath: "/github", LocalDir: "/tmp/github"},
+		{RemotePath: "/slack", LocalDir: "/tmp/slack"},
+	}
+	var calls []string
+	skipped, backlog, err := skipStuckAcrossScopes(scopes, 3, func(scope mountscope.Scope, max int) (int, bool, error) {
+		calls = append(calls, fmt.Sprintf("%s:%d", scope.RemotePath, max))
+		if scope.RemotePath == "/github" {
+			return 1, false, nil
+		}
+		return 2, false, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if skipped != 3 || backlog {
+		t.Fatalf("skip result = %d/%v, want 3/false", skipped, backlog)
+	}
+	if want := []string{"/github:3", "/slack:2"}; strings.Join(calls, ",") != strings.Join(want, ",") {
+		t.Fatalf("scope calls = %v, want %v", calls, want)
 	}
 }
 

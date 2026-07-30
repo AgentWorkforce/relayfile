@@ -1,0 +1,102 @@
+{
+  "id": "traj_fpxnvldwqkpj",
+  "version": 1,
+  "task": {
+    "title": "Close PR #384 scoped mount lifecycle gaps",
+    "source": {
+      "system": "plain",
+      "id": "relayfile#379"
+    }
+  },
+  "status": "completed",
+  "startedAt": "2026-07-30T04:01:49.140Z",
+  "completedAt": "2026-07-30T04:07:36.014Z",
+  "agents": [
+    {
+      "name": "default",
+      "role": "lead",
+      "joinedAt": "2026-07-30T04:01:49.229Z"
+    }
+  ],
+  "chapters": [
+    {
+      "id": "chap_7ffq9ss9grv1",
+      "title": "Work",
+      "agentName": "default",
+      "startedAt": "2026-07-30T04:01:49.229Z",
+      "endedAt": "2026-07-30T04:07:36.014Z",
+      "events": [
+        {
+          "ts": 1785384109229,
+          "type": "decision",
+          "content": "Persist retired runtime roots as absolute catalog pointers while they contain pending records: Persist retired runtime roots as absolute catalog pointers while they contain pending records",
+          "raw": {
+            "question": "Persist retired runtime roots as absolute catalog pointers while they contain pending records",
+            "chosen": "Persist retired runtime roots as absolute catalog pointers while they contain pending records",
+            "alternatives": [],
+            "reasoning": "Allowlist changes and rehomes otherwise erase the only discoverable path to dead letters, outboxes, conflicts, and dirty tracked files that remain on disk"
+          },
+          "significance": "high"
+        },
+        {
+          "ts": 1785384109292,
+          "type": "decision",
+          "content": "Persist mount state-file, state-dir, and mount-kind identity with the workspace: Persist mount state-file, state-dir, and mount-kind identity with the workspace",
+          "raw": {
+            "question": "Persist mount state-file, state-dir, and mount-kind identity with the workspace",
+            "chosen": "Persist mount state-file, state-dir, and mount-kind identity with the workspace",
+            "alternatives": [],
+            "reasoning": "Scoped skip-stuck must reopen the exact private cursor used by each running syncer; local root and remote root alone are insufficient when operators override state storage"
+          },
+          "significance": "high"
+        },
+        {
+          "ts": 1785384306531,
+          "type": "decision",
+          "content": "Split lifecycle migration out of PR #384 and reject destructive in-place transitions: Split lifecycle migration out of PR #384 and reject destructive in-place transitions",
+          "raw": {
+            "question": "Split lifecycle migration out of PR #384 and reject destructive in-place transitions",
+            "chosen": "Split lifecycle migration out of PR #384 and reject destructive in-place transitions",
+            "alternatives": [],
+            "reasoning": "The complete state model is enumerable only if the current PR refuses layout changes and scoped allowlist removals at the same local root. Additions preserve existing scope roots; unchanged/omitted configuration reuses persisted paths, layout, and cursor identity; removals or layout changes require a new LOCAL_DIR with --rehome. Historical-root retention is deferred until a real lifecycle use case defines drain semantics. Per-scope skip-stuck remains because it is correctness for the shipped command."
+          },
+          "significance": "high"
+        },
+        {
+          "ts": 1785384306593,
+          "type": "reflection",
+          "content": "The third review round exposed one multi-root lifecycle blast radius rather than unrelated bugs. Narrowing to explicit refusal makes the allowed state transitions finite and reviewable; focused tests now pass for both refusal boundaries, exact-root reconstruction, cursor identity merge semantics, and per-scope skip-stuck.",
+          "raw": {
+            "focalPoints": [
+              "scope-transitions",
+              "cursor-identity",
+              "reviewability"
+            ],
+            "adjustments": "Removed historical-root retention; reject in-place scope removal; preserve state identity and iterate active cursors",
+            "confidence": 0.86
+          },
+          "significance": "high",
+          "tags": [
+            "focal:scope-transitions",
+            "focal:cursor-identity",
+            "focal:reviewability",
+            "confidence:0.86"
+          ]
+        }
+      ]
+    }
+  ],
+  "retrospective": {
+    "summary": "Narrowed PR #384 lifecycle behavior to explicit refusal: in-place layout changes and scoped allowlist removals require rehome; persisted mount state identity lets skip-stuck visit every active scope cursor. Removed historical-root migration, preserved exact remote roots, and added focused end-to-end/unit coverage. Full go test ./... -count=1, go vet ./..., and focused race suite pass.",
+    "approach": "Standard approach",
+    "confidence": 0.9
+  },
+  "commits": [],
+  "filesChanged": [],
+  "projectId": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379",
+  "tags": [],
+  "_trace": {
+    "startRef": "765a463b1d07a97fb14c21743b0454313f70eb0d",
+    "endRef": "765a463b1d07a97fb14c21743b0454313f70eb0d"
+  }
+}
