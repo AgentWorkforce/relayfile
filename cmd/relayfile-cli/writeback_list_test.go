@@ -8,15 +8,19 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/agentworkforce/relayfile/internal/mountsync"
 )
 
 func TestListWorkspaceWritebackItemsAggregatesScopedChildren(t *testing.T) {
 	localRoot := t.TempDir()
 	record := workspaceRecord{
-		ID:          "ws_demo",
-		LocalDir:    localRoot,
-		LocalLayout: "scoped",
-		RemotePaths: []string{"/github", "/slack"},
+		ID:            "ws_demo",
+		LocalDir:      localRoot,
+		LocalLayout:   "scoped",
+		RemotePaths:   []string{"/github", "/slack"},
+		MountStateDir: t.TempDir(),
+		MountKind:     mountsync.MountKindDaemon,
 	}
 	for _, scope := range workspaceMountScopes(record) {
 		relayDir := filepath.Join(scope.LocalDir, ".relay")
@@ -27,8 +31,15 @@ func TestListWorkspaceWritebackItemsAggregatesScopedChildren(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(relayDir, "state.json"), []byte(state), 0o644); err != nil {
 			t.Fatal(err)
 		}
+		stateFile, err := workspaceMountStateFile("ws_demo", record, scope)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Dir(stateFile), 0o755); err != nil {
+			t.Fatal(err)
+		}
 		tracked := `{"files":{"` + scope.RemotePath + `/draft.md":{"dirty":true}}}`
-		if err := os.WriteFile(filepath.Join(scope.LocalDir, ".relayfile-mount-state.json"), []byte(tracked), 0o644); err != nil {
+		if err := os.WriteFile(stateFile, []byte(tracked), 0o644); err != nil {
 			t.Fatal(err)
 		}
 		dead := `{"opId":"op_` + scope.RemotePath[1:] + `","path":"` + scope.RemotePath + `/failed.md"}`

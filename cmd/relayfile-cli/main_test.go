@@ -3848,20 +3848,29 @@ func TestWritebackPushScopesRequireProviderSubtree(t *testing.T) {
 	}
 }
 
-func TestReadLocalMountCursorHealthAggregatesStateFiles(t *testing.T) {
+func TestReadWorkspaceMountCursorHealthUsesPersistedPrivateState(t *testing.T) {
 	localDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(localDir, ".relayfile-mount-state.json"), []byte(`{"incrementalReadNotReadySince":{"a":"now"},"incrementalBacklogDraining":false}`), 0o644); err != nil {
-		t.Fatalf("write public state failed: %v", err)
+	record := workspaceRecord{
+		ID:            "ws_demo",
+		LocalDir:      localDir,
+		LocalLayout:   mountscope.LayoutExact,
+		RemotePaths:   []string{"/github"},
+		MountStateDir: t.TempDir(),
+		MountKind:     mountsync.MountKindDaemon,
 	}
-	privateDir := filepath.Join(localDir, mountsync.DefaultMountStateDirName)
-	if err := os.MkdirAll(privateDir, 0o755); err != nil {
+	scope := workspaceMountScopes(record)[0]
+	stateFile, err := workspaceMountStateFile("ws_demo", record, scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(stateFile), 0o755); err != nil {
 		t.Fatalf("mkdir private state failed: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(privateDir, "state.json"), []byte(`{"incrementalReadNotReadySince":{"a":"now","b":"now"},"incrementalBacklogDraining":true}`), 0o644); err != nil {
+	if err := os.WriteFile(stateFile, []byte(`{"incrementalReadNotReadySince":{"a":"now","b":"now"},"incrementalBacklogDraining":true}`), 0o644); err != nil {
 		t.Fatalf("write private state failed: %v", err)
 	}
 
-	stuck, backlog := readLocalMountCursorHealth(localDir)
+	stuck, backlog := readWorkspaceMountCursorHealth("ws_demo", record, scope)
 	if stuck != 2 || !backlog {
 		t.Fatalf("cursor health = %d/%v, want 2/true", stuck, backlog)
 	}
@@ -5119,10 +5128,12 @@ func TestOpsListReadsLocalDeadLetterMirror(t *testing.T) {
 func TestScopedWorkspaceConsumersAggregateChildRuntimeState(t *testing.T) {
 	localRoot := t.TempDir()
 	record := workspaceRecord{
-		ID:          "ws_demo",
-		LocalDir:    localRoot,
-		LocalLayout: "scoped",
-		RemotePaths: []string{"/github", "/slack"},
+		ID:            "ws_demo",
+		LocalDir:      localRoot,
+		LocalLayout:   "scoped",
+		RemotePaths:   []string{"/github", "/slack"},
+		MountStateDir: t.TempDir(),
+		MountKind:     mountsync.MountKindDaemon,
 	}
 	scopes := workspaceMountScopes(record)
 	if len(scopes) != 2 {
@@ -5151,11 +5162,18 @@ func TestScopedWorkspaceConsumersAggregateChildRuntimeState(t *testing.T) {
 		); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(
-			filepath.Join(scope.LocalDir, ".relayfile-mount-state.json"),
-			[]byte(`{"files":{"pending.md":{"dirty":true}}}`),
-			0o644,
-		); err != nil {
+		stateFile, err := workspaceMountStateFile("ws_demo", record, scope)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Dir(stateFile), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		privateState := fmt.Sprintf(
+			`{"files":{"%s/pending.md":{"dirty":true}},"incrementalReadNotReadySince":{"private":"now"}}`,
+			scope.RemotePath,
+		)
+		if err := os.WriteFile(stateFile, []byte(privateState), 0o644); err != nil {
 			t.Fatal(err)
 		}
 		conflictDir := filepath.Join(scope.LocalDir, ".relay", "conflicts")

@@ -4098,6 +4098,47 @@ func workspaceStateDirForRemotePath(record workspaceRecord, remotePath string) s
 	return bestDir
 }
 
+// workspaceMountStateFile resolves the same private cursor identity used by
+// the Syncer. New mounts keep state beneath MountStateDir; the in-mirror file
+// remains only as a compatibility fallback for pre-private-state mounts.
+func workspaceMountStateFile(workspaceID string, record workspaceRecord, scope mountscope.Scope) (string, error) {
+	resolved, err := mountsync.ResolveMountStatePath(mountsync.MountStatePathOptions{
+		WorkspaceID: strings.TrimSpace(workspaceID),
+		RemoteRoot:  scope.RemotePath,
+		LocalRoot:   scope.LocalDir,
+		StateFile:   record.MountStateFile,
+		StateDir:    record.MountStateDir,
+		MountKind:   record.MountKind,
+	})
+	if err != nil {
+		return "", err
+	}
+	candidates := []string{
+		resolved.StateFile,
+		filepath.Join(scope.LocalDir, mountsync.LegacyMountStateFileName),
+		filepath.Join(scope.LocalDir, mountsync.DefaultMountStateDirName, "state.json"),
+	}
+	seen := map[string]struct{}{}
+	for _, candidate := range candidates {
+		candidate = filepath.Clean(candidate)
+		if _, ok := seen[candidate]; ok {
+			continue
+		}
+		seen[candidate] = struct{}{}
+		info, statErr := os.Stat(candidate)
+		if statErr == nil {
+			if !info.Mode().IsRegular() {
+				return "", fmt.Errorf("mount state path %s is not a regular file", candidate)
+			}
+			return candidate, nil
+		}
+		if !errors.Is(statErr, os.ErrNotExist) {
+			return "", fmt.Errorf("inspect mount state %s: %w", candidate, statErr)
+		}
+	}
+	return resolved.StateFile, nil
+}
+
 func deadLetterErrorPathFor(localDir, opID string) string {
 	return filepath.Join(deadLetterDirFor(localDir), opID+".error.json")
 }
@@ -5328,12 +5369,16 @@ func retryDeadLetterWriteback(workspaceID string, record workspaceRecord, dl dea
 	remoteRoot := readMountRemoteRoot(record.LocalDir)
 	websocketDisabled := false
 	syncer, err := mountsync.NewSyncer(client, mountsync.SyncerOptions{
-		WorkspaceID: workspaceID,
-		RemoteRoot:  remoteRoot,
-		LocalRoot:   record.LocalDir,
-		WebSocket:   &websocketDisabled,
-		RootCtx:     context.Background(),
-		Logger:      log.Default(),
+		WorkspaceID:   workspaceID,
+		RemoteRoot:    remoteRoot,
+		LocalRoot:     record.LocalDir,
+		StateFile:     record.MountStateFile,
+		StateDir:      record.MountStateDir,
+		MountKind:     record.MountKind,
+		ValidateState: true,
+		WebSocket:     &websocketDisabled,
+		RootCtx:       context.Background(),
+		Logger:        log.Default(),
 	})
 	if err != nil {
 		return err
@@ -5995,7 +6040,8 @@ func buildWorkspaceHealthReport(workspaceID string, record workspaceRecord) work
 	}
 	statuses := map[string]struct{}{}
 	errorsSeen := map[string]struct{}{}
-	for _, localDir := range workspaceRuntimeStateDirs(record) {
+	for _, scope := range workspaceMountScopes(record) {
+		localDir := scope.LocalDir
 		state := readWritebackStateBestEffort(localDir)
 		if status := strings.TrimSpace(state.Status); status != "" {
 			statuses[status] = struct{}{}
@@ -6015,7 +6061,7 @@ func buildWorkspaceHealthReport(workspaceID string, record workspaceRecord) work
 		// outbox queues are additive across roots. Within one root, retain the
 		// existing max(public state, private cursor) rule.
 		scopeStuckCount := len(state.IncrementalReadNotReadySince)
-		cursorStuckCount, backlogDraining := readLocalMountCursorHealth(localDir)
+		cursorStuckCount, backlogDraining := readWorkspaceMountCursorHealth(workspaceID, record, scope)
 		if cursorStuckCount > scopeStuckCount {
 			scopeStuckCount = cursorStuckCount
 		}
@@ -6047,28 +6093,23 @@ func readWritebackStateBestEffort(localDir string) syncStateFile {
 	return syncStateFile{}
 }
 
-func readLocalMountCursorHealth(localDir string) (stuckCount int, backlogDraining bool) {
-	for _, path := range []string{
-		filepath.Join(localDir, ".relayfile-mount-state.json"),
-		filepath.Join(localDir, mountsync.DefaultMountStateDirName, "state.json"),
-	} {
-		payload, err := os.ReadFile(path)
-		if err != nil {
-			continue
-		}
-		var state struct {
-			IncrementalReadNotReadySince map[string]string `json:"incrementalReadNotReadySince"`
-			IncrementalBacklogDraining   bool              `json:"incrementalBacklogDraining"`
-		}
-		if json.Unmarshal(payload, &state) != nil {
-			continue
-		}
-		if count := len(state.IncrementalReadNotReadySince); count > stuckCount {
-			stuckCount = count
-		}
-		backlogDraining = backlogDraining || state.IncrementalBacklogDraining
+func readWorkspaceMountCursorHealth(workspaceID string, record workspaceRecord, scope mountscope.Scope) (stuckCount int, backlogDraining bool) {
+	stateFile, err := workspaceMountStateFile(workspaceID, record, scope)
+	if err != nil {
+		return 0, false
 	}
-	return stuckCount, backlogDraining
+	payload, err := os.ReadFile(stateFile)
+	if err != nil {
+		return 0, false
+	}
+	var state struct {
+		IncrementalReadNotReadySince map[string]string `json:"incrementalReadNotReadySince"`
+		IncrementalBacklogDraining   bool              `json:"incrementalBacklogDraining"`
+	}
+	if json.Unmarshal(payload, &state) != nil {
+		return 0, false
+	}
+	return len(state.IncrementalReadNotReadySince), state.IncrementalBacklogDraining
 }
 
 func countJSONFiles(dir string) int {
@@ -8211,8 +8252,12 @@ func buildWorkspaceSyncStateSnapshot(status syncStatusResponse, workspaceID stri
 	snapshot.Bootstrap = nil
 
 	stallReasons := map[string]struct{}{}
-	for _, localDir := range workspaceRuntimeStateDirs(record) {
+	for _, scope := range workspaceMountScopes(record) {
+		localDir := scope.LocalDir
 		local := buildSyncStateSnapshot(syncStatusResponse{}, workspaceID, defaultMountMode, defaultMountInterval, localDir, 0, readPersistedStallReason(localDir))
+		if stateFile, err := workspaceMountStateFile(workspaceID, record, scope); err == nil {
+			local.PendingWriteback = countDirtyTrackedFilesAt(stateFile)
+		}
 		snapshot.PendingWriteback += local.PendingWriteback
 		snapshot.PendingConflicts += local.PendingConflicts
 		snapshot.DeniedPaths += local.DeniedPaths
@@ -10847,12 +10892,16 @@ func countDirtyTrackedFiles(localDir string) int {
 	if localDir == "" {
 		return 0
 	}
+	return countDirtyTrackedFilesAt(filepath.Join(localDir, mountsync.LegacyMountStateFileName))
+}
+
+func countDirtyTrackedFilesAt(stateFile string) int {
 	var state struct {
 		Files map[string]struct {
 			Dirty bool `json:"dirty"`
 		} `json:"files"`
 	}
-	payload, err := os.ReadFile(filepath.Join(localDir, ".relayfile-mount-state.json"))
+	payload, err := os.ReadFile(stateFile)
 	if err != nil {
 		return 0
 	}

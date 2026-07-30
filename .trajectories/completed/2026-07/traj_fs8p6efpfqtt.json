@@ -1,0 +1,57 @@
+{
+  "id": "traj_fs8p6efpfqtt",
+  "version": 1,
+  "task": {
+    "title": "Resolve scoped operator state through persisted private identities",
+    "source": {
+      "system": "plain",
+      "id": "relayfile#379"
+    }
+  },
+  "status": "completed",
+  "startedAt": "2026-07-30T05:32:48.408Z",
+  "completedAt": "2026-07-30T05:34:52.700Z",
+  "agents": [
+    {
+      "name": "default",
+      "role": "lead",
+      "joinedAt": "2026-07-30T05:32:48.494Z"
+    }
+  ],
+  "chapters": [
+    {
+      "id": "chap_pwtz2phwj7ai",
+      "title": "Work",
+      "agentName": "default",
+      "startedAt": "2026-07-30T05:32:48.494Z",
+      "endedAt": "2026-07-30T05:34:52.700Z",
+      "events": [
+        {
+          "ts": 1785389568495,
+          "type": "decision",
+          "content": "Resolve every scoped operator read from the persisted mount identity: Resolve every scoped operator read from the persisted mount identity",
+          "raw": {
+            "question": "Resolve every scoped operator read from the persisted mount identity",
+            "chosen": "Resolve every scoped operator read from the persisted mount identity",
+            "alternatives": [],
+            "reasoning": "Normal mounts store private state under hashed MountStateDir paths. Operator commands must derive the same workspace, remote root, local root, state-file/state-dir, and mount-kind identity instead of assuming legacy files under each child."
+          },
+          "significance": "high"
+        }
+      ]
+    }
+  ],
+  "retrospective": {
+    "summary": "Resolved scoped status, health, dead-letter, skip-stuck, and writeback reads through each persisted private mount-state identity; regression fixtures now use production hashed paths; full vet and Go suite pass.",
+    "approach": "Standard approach",
+    "confidence": 0.91
+  },
+  "commits": [],
+  "filesChanged": [],
+  "projectId": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-c",
+  "tags": [],
+  "_trace": {
+    "startRef": "8fc6b8219ce48266ea7cf630be6eb0ded1206e4a",
+    "endRef": "8fc6b8219ce48266ea7cf630be6eb0ded1206e4a"
+  }
+}
