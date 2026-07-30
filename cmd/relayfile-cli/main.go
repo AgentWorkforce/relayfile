@@ -11757,17 +11757,7 @@ func markProviderDisconnected(localDir, provider string) error {
 // catalog endpoint advertise — otherwise status probes and disconnect
 // cleanup would target the wrong path for that provider.
 func providerRootDir(provider string) string {
-	provider = normalizeProviderID(provider)
-	switch provider {
-	case "slack", "slack-sage":
-		return "slack"
-	case "slack-my-senior-dev":
-		return "slack-msd"
-	case "slack-nightcto":
-		return "slack-nightcto"
-	default:
-		return provider
-	}
+	return mountscope.ProviderRoot(normalizeProviderID(provider))
 }
 
 func writeJSON(w io.Writer, value any) error {
