@@ -22,7 +22,7 @@ func TestListWorkspaceWritebackItemsAggregatesScopedChildren(t *testing.T) {
 		MountStateDir: t.TempDir(),
 		MountKind:     mountsync.MountKindDaemon,
 	}
-	for _, scope := range workspaceMountScopes(record) {
+	for index, scope := range workspaceMountScopes(record) {
 		relayDir := filepath.Join(scope.LocalDir, ".relay")
 		if err := os.MkdirAll(filepath.Join(relayDir, "dead-letter"), 0o755); err != nil {
 			t.Fatal(err)
@@ -34,12 +34,20 @@ func TestListWorkspaceWritebackItemsAggregatesScopedChildren(t *testing.T) {
 		if err := os.MkdirAll(filepath.Dir(stateFile), 0o755); err != nil {
 			t.Fatal(err)
 		}
-		tracked := `{"files":{"` + scope.RemotePath + `/draft.md":{"dirty":true}}}`
+		trackedState := `"dirty":true`
+		if index == 1 {
+			// A queued delete has no local file and no hash. The authoritative
+			// deletePending bit must still surface as a pending writeback.
+			trackedState = `"deletePending":true`
+		}
+		tracked := `{"files":{"` + scope.RemotePath + `/draft.md":{` + trackedState + `}}}`
 		if err := os.WriteFile(stateFile, []byte(tracked), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(filepath.Join(scope.LocalDir, "draft.md"), []byte("local draft"), 0o644); err != nil {
-			t.Fatal(err)
+		if index == 0 {
+			if err := os.WriteFile(filepath.Join(scope.LocalDir, "draft.md"), []byte("local draft"), 0o644); err != nil {
+				t.Fatal(err)
+			}
 		}
 		dead := `{"opId":"op_` + scope.RemotePath[1:] + `","path":"` + scope.RemotePath + `/failed.md"}`
 		if err := os.WriteFile(

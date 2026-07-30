@@ -11548,10 +11548,7 @@ func countPendingTrackedFilesAt(stateFile string) int {
 
 func pendingTrackedFileCountAt(stateFile string) (int, error) {
 	var state struct {
-		Files map[string]struct {
-			Dirty         bool `json:"dirty"`
-			DeletePending bool `json:"deletePending"`
-		} `json:"files"`
+		Files map[string]mountsync.TrackedFileState `json:"files"`
 	}
 	payload, err := os.ReadFile(stateFile)
 	if err != nil {
@@ -11565,7 +11562,7 @@ func pendingTrackedFileCountAt(stateFile string) (int, error) {
 	}
 	count := 0
 	for _, tracked := range state.Files {
-		if tracked.Dirty || tracked.DeletePending {
+		if tracked.HasPendingWriteback() {
 			count++
 		}
 	}
@@ -12580,10 +12577,7 @@ func countProviderOutboxRecords(dir, providerRoot string) (int, error) {
 
 func pendingTrackedFileCountForProvider(stateFile, providerRoot string) (int, error) {
 	var state struct {
-		Files map[string]struct {
-			Dirty         bool `json:"dirty"`
-			DeletePending bool `json:"deletePending"`
-		} `json:"files"`
+		Files map[string]mountsync.TrackedFileState `json:"files"`
 	}
 	payload, err := os.ReadFile(stateFile)
 	if err != nil {
@@ -12598,7 +12592,7 @@ func pendingTrackedFileCountForProvider(stateFile, providerRoot string) (int, er
 	count := 0
 	for remotePath, tracked := range state.Files {
 		if (strings.TrimSpace(remotePath) == "" || mountscope.IsWithin(providerRoot, remotePath)) &&
-			(tracked.Dirty || tracked.DeletePending) {
+			tracked.HasPendingWriteback() {
 			count++
 		}
 	}

@@ -1428,7 +1428,10 @@ type skippedMaterialization struct {
 	LastError     string `json:"lastError"`
 }
 
-type trackedFile struct {
+// TrackedFileState is the persisted per-path cursor shape. It is exported from
+// this internal package so operator surfaces can deserialize the writer-owned
+// schema instead of maintaining partial lookalike structs.
+type TrackedFileState struct {
 	Revision    string `json:"revision"`
 	ContentType string `json:"contentType"`
 	Encoding    string `json:"encoding,omitempty"`
@@ -1452,6 +1455,12 @@ type trackedFile struct {
 	DeniedHash  string `json:"deniedHash,omitempty"`
 	ReadOnly    bool   `json:"readonly,omitempty"`
 }
+
+func (tracked TrackedFileState) HasPendingWriteback() bool {
+	return tracked.Dirty || tracked.DeletePending
+}
+
+type trackedFile = TrackedFileState
 
 type githubWorkingTreeMount struct {
 	Owner        string
@@ -7034,7 +7043,7 @@ func (s *Syncer) savePublicState() error {
 			fileStatus = "write-denied"
 		case tracked.Denied:
 			fileStatus = "read-denied"
-		case tracked.Dirty || tracked.DeletePending:
+		case tracked.HasPendingWriteback():
 			fileStatus = "writeback-pending"
 		}
 		if !s.lowMemory {

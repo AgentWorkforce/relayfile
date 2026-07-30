@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/agentworkforce/relayfile/internal/mountscope"
+	"github.com/agentworkforce/relayfile/internal/mountsync"
 )
 
 const writebackListUsage = "usage: relayfile writeback list --state pending|dead [--workspace WS] [--json]"
@@ -138,14 +139,7 @@ func validWritebackListState(state string) bool {
 
 func readPendingWritebackItemsFromState(workspaceID, localDir, remoteRoot, stateFile string, scopedChild bool) ([]writebackListItem, error) {
 	var state struct {
-		Files map[string]struct {
-			Revision    string `json:"revision"`
-			Hash        string `json:"hash"`
-			Dirty       bool   `json:"dirty"`
-			Denied      bool   `json:"denied"`
-			WriteDenied bool   `json:"writeDenied"`
-			ReadOnly    bool   `json:"readonly"`
-		} `json:"files"`
+		Files map[string]mountsync.TrackedFileState `json:"files"`
 	}
 	payload, err := os.ReadFile(stateFile)
 	if err != nil {
@@ -170,7 +164,7 @@ func readPendingWritebackItemsFromState(workspaceID, localDir, remoteRoot, state
 			continue
 		}
 		localHash, hasLocal := localHashes[path]
-		pending := tracked.Dirty
+		pending := tracked.HasPendingWriteback()
 		if !pending && !tracked.Denied && !tracked.WriteDenied {
 			switch {
 			case hasLocal && tracked.Hash != "" && localHash != tracked.Hash:
