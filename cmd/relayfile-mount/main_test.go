@@ -208,6 +208,16 @@ func TestResolveLocalLayout(t *testing.T) {
 	}
 }
 
+func TestValidateCLIRequestedLocalLayoutRefusesScopedUntilOperatorSurfacesReady(t *testing.T) {
+	if err := validateCLIRequestedLocalLayout(localLayoutExact); err != nil {
+		t.Fatalf("exact layout should remain available: %v", err)
+	}
+	err := validateCLIRequestedLocalLayout(localLayoutScoped)
+	if err == nil || !strings.Contains(err.Error(), "operator surfaces") || !strings.Contains(err.Error(), "--local-layout=exact") {
+		t.Fatalf("expected scoped-layout refusal with exact-layout remedy, got %v", err)
+	}
+}
+
 func TestResolveSyncMode(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -630,6 +640,28 @@ func TestRunScopedPollingMountsKeepsSharedStateDirForHashResolver(t *testing.T) 
 		if cfg.stateFile != "" {
 			t.Fatalf("expected state-file to stay empty so mountsync derives hashed path, got %q", cfg.stateFile)
 		}
+		if !cfg.scopedChild {
+			t.Fatal("scoped runner did not preserve child-topology identity")
+		}
+	}
+}
+
+func TestRunScopedPollingMountsRejectsProviderFilterAcrossHeterogeneousRoots(t *testing.T) {
+	localRoot := filepath.Join(t.TempDir(), "mirror")
+	err := runScopedPollingMountsWithRunner(
+		context.Background(),
+		mountConfig{localDir: localRoot, stateDir: t.TempDir(), eventProvider: "github"},
+		[]string{"/github", "/slack"},
+		func(_ context.Context, cfg mountConfig) error {
+			t.Fatalf("runner should not start with heterogeneous provider filter: %+v", cfg)
+			return nil
+		},
+	)
+	if err == nil || !strings.Contains(err.Error(), "/slack") || !strings.Contains(err.Error(), "omit --provider") {
+		t.Fatalf("expected heterogeneous provider-filter refusal, got %v", err)
+	}
+	if _, statErr := os.Stat(localRoot); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("provider-filter refusal initialized mirror: %v", statErr)
 	}
 }
 

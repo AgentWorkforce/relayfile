@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/agentworkforce/relayfile/internal/mountscope"
 	"github.com/fsnotify/fsnotify"
 )
 
@@ -22,6 +23,8 @@ var ErrWatcherLimitExceeded = errors.New("mount file watcher directory limit exc
 type FileWatcher struct {
 	watcher     *fsnotify.Watcher
 	localDir    string
+	remoteRoot  string
+	scopedChild bool
 	onChange    func(relativePath string, op fsnotify.Op)
 	maxDirs     int
 	watchedDirs int
@@ -32,16 +35,34 @@ type FileWatcher struct {
 }
 
 func NewFileWatcher(localDir string, onChange func(string, fsnotify.Op)) (*FileWatcher, error) {
+	return NewFileWatcherForRemoteRoot(localDir, "/", onChange)
+}
+
+// NewFileWatcherForRemoteRoot creates a watcher whose basename collision
+// guard matches the Syncer's path mapping. A child named after localDir only
+// round-trips onto the mount root when the remote root is "/"; beneath a
+// non-root mount it is an ordinary descendant.
+func NewFileWatcherForRemoteRoot(localDir, remoteRoot string, onChange func(string, fsnotify.Op)) (*FileWatcher, error) {
+	return NewFileWatcherForTopology(localDir, remoteRoot, false, onChange)
+}
+
+// NewFileWatcherForTopology binds reserved-path handling to the actual local
+// topology rather than inferring it from remoteRoot. Exact non-root mounts and
+// scoped children can share a remote root while requiring different treatment
+// of catalog-only artifacts.
+func NewFileWatcherForTopology(localDir, remoteRoot string, scopedChild bool, onChange func(string, fsnotify.Op)) (*FileWatcher, error) {
 	w, err := fsnotify.NewWatcher()
 	if err != nil {
 		return nil, err
 	}
 	return &FileWatcher{
-		watcher:  w,
-		localDir: localDir,
-		onChange: onChange,
-		maxDirs:  watcherMaxDirsFromEnv(),
-		debounce: make(map[string]*time.Timer),
+		watcher:     w,
+		localDir:    localDir,
+		remoteRoot:  normalizeRemotePath(remoteRoot),
+		scopedChild: scopedChild,
+		onChange:    onChange,
+		maxDirs:     watcherMaxDirsFromEnv(),
+		debounce:    make(map[string]*time.Timer),
 	}, nil
 }
 
@@ -119,27 +140,35 @@ func (fw *FileWatcher) shouldSkip(rel string) bool {
 		strings.HasPrefix(first, ".relayfile-mount-state.json.tmp-") {
 		return true
 	}
-	if watcherIgnoredTopLevel(first) {
+	if watcherIgnoredTopLevel(fw.scopedChild, fw.localDir, first) {
 		return true
 	}
-	// Data-loss guard: a top-level entry whose name equals the mount
-	// directory's own basename is the round-trip-onto-root collision.
-	// Never sync it.
-	if fw.localDir != "" && first == filepath.Base(filepath.Clean(fw.localDir)) {
+	// Data-loss guard for root mounts: a top-level entry whose name equals the
+	// mount directory's own basename is the round-trip-onto-root collision.
+	// Non-root mounts map that entry beneath remoteRoot and must retain it.
+	if collidesWithMountRootBasename(fw.localDir, fw.remoteRoot, first) {
 		return true
 	}
 	return false
 }
 
-// reservedTopLevel reports whether a top-level entry name is internal
-// bookkeeping that must never participate in sync. Centralized so the
-// watcher and scanLocalFiles stay in agreement. This list applies to
-// top-level entries, including files such as _PERMISSIONS.md; addDirRecursive
-// is directory-only and skips a different sentinel for the mount state file.
-func reservedTopLevel(name string) bool {
-	return name == ".git" || name == ".relay" || name == ".skills" ||
-		name == "digests" || name == "node_modules" ||
-		name == "_PERMISSIONS.md"
+func collidesWithMountRootBasename(localRoot, remoteRoot, first string) bool {
+	return strings.TrimSpace(localRoot) != "" &&
+		normalizeRemotePath(remoteRoot) == "/" &&
+		first == filepath.Base(filepath.Clean(localRoot))
+}
+
+// reservedTopLevel reports whether an entry is bookkeeping at this Syncer's
+// topology boundary. Catalog artifacts are reserved for every exact mount;
+// under a scoped child the same names are ordinary provider content.
+// Mount-runtime sentinels and incidental infrastructure remain reserved at
+// every scope so local repository credentials and objects can never become
+// sync content.
+func reservedTopLevel(scopedChild bool, localRoot, name string) bool {
+	if mountscope.IsReservedRuntimeSegment(name) || mountscope.IsInfrastructureTopLevelAt(localRoot, name) {
+		return true
+	}
+	return !scopedChild && mountscope.IsCatalogOwnedTopLevel(name)
 }
 
 func (fw *FileWatcher) queueChange(rel string, op fsnotify.Op) {
@@ -184,8 +213,8 @@ func (fw *FileWatcher) emitExistingFileEvents(base string) {
 	})
 }
 
-func watcherIgnoredTopLevel(name string) bool {
-	return reservedTopLevel(name) && name != "digests"
+func watcherIgnoredTopLevel(scopedChild bool, localRoot, name string) bool {
+	return reservedTopLevel(scopedChild, localRoot, name) && name != mountscope.DigestsTopLevel
 }
 
 // addDirRecursive walks `base` and adds every directory underneath it to the
@@ -258,7 +287,7 @@ func (fw *FileWatcher) isTopLevelReservedDir(path, name string) bool {
 	if first != name {
 		return false
 	}
-	return watcherIgnoredTopLevel(name)
+	return watcherIgnoredTopLevel(fw.scopedChild, fw.localDir, name)
 }
 
 func (fw *FileWatcher) Close() error {

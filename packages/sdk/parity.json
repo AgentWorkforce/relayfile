@@ -263,7 +263,7 @@
     {
       "id": "setup-errors",
       "status": "both",
-      "summary": "Typed setup/control-plane error classes.",
+      "summary": "Typed setup/control-plane error classes. MountMultiPathUnsupportedError is TypeScript-only because the TypeScript launcher is the only public SDK surface whose env parameter can reach the multi-path daemon capability.",
       "tsExports": [
         "CloudAbortError",
         "CloudApiError",
@@ -274,6 +274,7 @@
         "InvalidRemotePathError",
         "MalformedCloudResponseError",
         "MissingConnectionIdError",
+        "MountMultiPathUnsupportedError",
         "MountModeUnavailableError",
         "MountReadyTimeoutError",
         "MountSessionInputError",

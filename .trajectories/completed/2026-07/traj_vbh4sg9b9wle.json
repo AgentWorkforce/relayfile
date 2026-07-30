@@ -1,0 +1,57 @@
+{
+  "id": "traj_vbh4sg9b9wle",
+  "version": 1,
+  "task": {
+    "title": "Fix reserved-boundary review findings",
+    "source": {
+      "system": "plain",
+      "id": "relayfile#379"
+    }
+  },
+  "status": "completed",
+  "startedAt": "2026-07-30T07:58:05.992Z",
+  "completedAt": "2026-07-30T08:00:16.521Z",
+  "agents": [
+    {
+      "name": "default",
+      "role": "lead",
+      "joinedAt": "2026-07-30T07:58:06.078Z"
+    }
+  ],
+  "chapters": [
+    {
+      "id": "chap_goi686qom89s",
+      "title": "Work",
+      "agentName": "default",
+      "startedAt": "2026-07-30T07:58:06.078Z",
+      "endedAt": "2026-07-30T08:00:16.521Z",
+      "events": [
+        {
+          "ts": 1785398286079,
+          "type": "decision",
+          "content": "Separate collision identity from runtime reservation and scope catalog-root artifacts to root mounts: Separate collision identity from runtime reservation and scope catalog-root artifacts to root mounts",
+          "raw": {
+            "question": "Separate collision identity from runtime reservation and scope catalog-root artifacts to root mounts",
+            "chosen": "Separate collision identity from runtime reservation and scope catalog-root artifacts to root mounts",
+            "alternatives": [],
+            "reasoning": "Scoped planning must conservatively reject case-folded local collisions, while runtime sync must preserve case-distinct provider paths and treat catalog artifacts as reserved only at remote root '/'. Mount-runtime sentinels remain reserved at every segment and every scope."
+          },
+          "significance": "high"
+        }
+      ]
+    }
+  ],
+  "retrospective": {
+    "summary": "Separated case-folded planning collisions from exact runtime reservations, reserved catalog artifacts only for root mounts, and rejected runtime sentinels at every scoped path segment.",
+    "approach": "Standard approach",
+    "confidence": 0.93
+  },
+  "commits": [],
+  "filesChanged": [],
+  "projectId": "AgentWorkforce/relayfile",
+  "tags": [],
+  "_trace": {
+    "startRef": "7f1271e4e6e0d71e37db32b76c78bf4f7184186f",
+    "endRef": "7f1271e4e6e0d71e37db32b76c78bf4f7184186f"
+  }
+}

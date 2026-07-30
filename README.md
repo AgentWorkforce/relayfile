@@ -198,24 +198,48 @@ RELAYFILE_TOKEN="$TOKEN" go run ./cmd/relayfile-mount \
   --local-dir ./relayfile-mount
 ```
 
-Limit the standalone daemon to one or more remote subtrees by repeating
-`--remote-path`. Multiple roots require `--local-layout scoped`; each subtree
-is then mirrored under the matching path inside `--local-dir`, which avoids
-full-workspace export pulls on large workspaces:
+Multi-path/scoped mounts are temporarily unavailable in both mount binaries
+until the status, list, and retry surfaces can enumerate every scoped child
+runtime directory. The binaries refuse `--local-layout scoped` (including
+values inherited from `RELAYFILE_MOUNT_LOCAL_LAYOUT` or a recorded catalog
+entry); use the exact layout for now. The scoped capability and its multi-path
+examples will return here when that operator-surface contract is complete.
 
-```bash
-RELAYFILE_TOKEN="$TOKEN" go run ./cmd/relayfile-mount \
-  --base-url http://localhost:9090 \
-  --workspace ws_demo \
-  --local-dir ./relayfile-mount \
-  --remote-path /github \
-  --remote-path /slack/channels/proj-cloud \
-  --local-layout scoped
-```
+When re-enabled, Relayfile will persist the allowlist and layout for later
+starts, so omitting the flags does not widen a scoped mount back to `/`. It will
+refuse in-place layout changes and removal of scoped roots because those
+transitions require moving runtime state and queued writes. Choose a new
+`LOCAL_DIR`; pass `--rehome` when that choice changes the workspace's registered
+mirror directory. Records created before layout persistence that already have
+local mount state must use that same new-directory migration before enabling
+scoped mounts. A setup-created record that has never mounted has no state to
+orphan and may start scoped in its chosen directory.
 
-For long path lists, pass `--paths-file ./paths.json`; the file may be a JSON
-array of remote roots or a newline-separated list. Multiple paths from a file
-also require `--local-layout scoped`.
+Mount startup visibly lists incidental source-control infrastructure that is
+excluded from sync (`.git`, `.hg`, `.svn`, `.bzr`, `_darcs`, and `.jj`). These
+directories are tool-owned metadata and may contain credential-bearing remote
+configuration. Convention-sensitive user files such as `.env`, `.env.*`,
+`.npmrc`, `.pypirc`, `.netrc`, and `.git-credentials` remain ordinary mount
+content, but Relayfile warns once at startup when it finds them so the operator
+can move them before sync if needed. Ordinary content is synced without a
+warning.
+
+When re-enabled, scoped mounts will intentionally omit the root-level `digests/` and
+`.skills/activity-summary.md` surfaces. Workspace digests can summarize
+providers outside the persisted path allowlist, so mirroring them implicitly
+would widen a scoped mount and leaving empty or stale artifacts would falsely
+promise current data. Filtered, explicitly scoped digests require a separate
+contract.
+
+`--reset-after-clobber` is supported only for exact mounts. When scoped mounts
+return, scoped recovery will refuse until all child roots can be recovered
+transactionally; use a new `LOCAL_DIR` (and `--rehome` when changing the
+registered mirror) rather than accepting a partial reset.
+
+The exported TypeScript mount launcher currently models one `remotePath` and
+rejects `RELAYFILE_MOUNT_PATHS_FILE` before creating directories or spawning a
+process. Use the `relayfile` CLI directly for multi-path mounts until the
+TypeScript session and status types represent multiple roots.
 
 The FUSE layer caches file content in kernel memory independently of its attribute TTL. By default content is held for 30 seconds and attributes for 2 seconds. Tune with `--fuse-content-ttl` (or `RELAYFILE_MOUNT_FUSE_CONTENT_TTL`) if your workload needs fresher reads or can tolerate a longer cache window:
 

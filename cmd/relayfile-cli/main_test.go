@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/agentworkforce/relayfile/internal/delegatedauth"
+	"github.com/agentworkforce/relayfile/internal/mountscope"
 	"github.com/agentworkforce/relayfile/internal/mountsync"
 )
 
@@ -49,6 +50,43 @@ func TestWorkspaceCreateStoresCatalogEntry(t *testing.T) {
 	}
 	if catalog.Workspaces[0].ID != "demo" {
 		t.Fatalf("expected workspace id demo, got %q", catalog.Workspaces[0].ID)
+	}
+}
+
+func TestResolveCLIRequestedLocalLayoutRefusesAllScopedRoutes(t *testing.T) {
+	tests := []struct {
+		name          string
+		flagValue     string
+		envValue      string
+		recordedValue string
+		flagProvided  bool
+	}{
+		{name: "flag", flagValue: mountscope.LayoutScoped, flagProvided: true},
+		{name: "environment", flagValue: mountscope.LayoutExact, envValue: mountscope.LayoutScoped},
+		{name: "recorded inheritance", flagValue: mountscope.LayoutExact, recordedValue: mountscope.LayoutScoped},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := resolveCLIRequestedLocalLayout(tc.flagValue, tc.envValue, tc.recordedValue, tc.flagProvided)
+			if err == nil || !strings.Contains(err.Error(), "operator surfaces") || !strings.Contains(err.Error(), "--local-layout=exact") {
+				t.Fatalf("expected scoped-layout refusal with exact-layout remedy, got %v", err)
+			}
+		})
+	}
+	if got, err := resolveCLIRequestedLocalLayout(mountscope.LayoutExact, "", mountscope.LayoutExact, false); err != nil || got != mountscope.LayoutExact {
+		t.Fatalf("exact layout should remain available, got %q err=%v", got, err)
+	}
+}
+
+// skipUntilScopedOperatorSurfacesReady keeps the scoped-runtime coverage
+// dormant only while the CLI guard is active. When the guard is removed, the
+// helper stops skipping these tests automatically; if the guard is deleted
+// without updating this call site, the compile-time dependency makes that
+// omission visible.
+func skipUntilScopedOperatorSurfacesReady(t *testing.T) {
+	t.Helper()
+	if _, err := resolveCLIRequestedLocalLayout(mountscope.LayoutScoped, "", "", true); err != nil {
+		t.Skipf("scoped runtime is intentionally refused until Unit C operator surfaces land: %v", err)
 	}
 }
 
@@ -2316,6 +2354,870 @@ func TestMountUsesRecordedLocalDirWhenOmitted(t *testing.T) {
 	}
 }
 
+func TestMountMirrorsRepeatedRemotePathsUnderScopedLayout(t *testing.T) {
+	skipUntilScopedOperatorSurfacesReady(t)
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	localRoot := t.TempDir()
+	token := testJWTWithWorkspace("ws_demo")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/workspaces/ws_demo/fs/export":
+			switch got := r.URL.Query().Get("path"); got {
+			case "/github/repos/acme/cloud":
+				_, _ = w.Write([]byte(`[{"path":"/github/repos/acme/cloud/README.md","revision":"rev_github","contentType":"text/markdown","content":"# Cloud"}]`))
+			case "/slack/channels/proj-cloud":
+				_, _ = w.Write([]byte(`[{"path":"/slack/channels/proj-cloud/topic.md","revision":"rev_slack","contentType":"text/markdown","content":"Scoped channel"}]`))
+			default:
+				t.Fatalf("unexpected export path: %q", got)
+			}
+		case "/v1/workspaces/ws_demo/fs/events":
+			_, _ = w.Write([]byte(`{"events":[]}`))
+		case "/v1/workspaces/ws_demo/sync/status":
+			_, _ = w.Write([]byte(`{"workspaceId":"ws_demo","providers":[]}`))
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	err := run([]string{
+		"mount", "ws_demo", localRoot,
+		"--server", server.URL,
+		"--token", token,
+		"--remote-path", "/github/repos/acme/cloud",
+		"--remote-path", "/slack/channels/proj-cloud",
+		"--local-layout", "scoped",
+		"--once",
+		"--websocket=false",
+	}, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("run scoped multi-path mount failed: %v", err)
+	}
+
+	assertFileContent := func(relativePath, want string) {
+		t.Helper()
+		payload, readErr := os.ReadFile(filepath.Join(localRoot, filepath.FromSlash(relativePath)))
+		if readErr != nil {
+			t.Fatalf("read scoped file %s: %v", relativePath, readErr)
+		}
+		if got := string(payload); got != want {
+			t.Fatalf("scoped file %s = %q, want %q", relativePath, got, want)
+		}
+	}
+	assertFileContent("github/repos/acme/cloud/README.md", "# Cloud")
+	assertFileContent("slack/channels/proj-cloud/topic.md", "Scoped channel")
+
+	githubChild := filepath.Join(localRoot, "github", "repos", "acme", "cloud")
+	for _, relativePath := range []string{
+		filepath.Join(".relay", "integrations"),
+		filepath.Join(".relay", "disconnected"),
+		filepath.Join(".relay", "conflicts"),
+	} {
+		info, statErr := os.Stat(filepath.Join(githubChild, relativePath))
+		if statErr != nil {
+			t.Fatalf("expected scoped child runtime directory %s: %v", relativePath, statErr)
+		}
+		if !info.IsDir() {
+			t.Fatalf("scoped child runtime path %s is not a directory", relativePath)
+		}
+	}
+	for _, rootOnlyPath := range []string{"digests", ".skills"} {
+		if _, statErr := os.Stat(filepath.Join(githubChild, rootOnlyPath)); !errors.Is(statErr, os.ErrNotExist) {
+			t.Fatalf("scoped child root-only path %s exists or could not be inspected: %v", rootOnlyPath, statErr)
+		}
+		if _, statErr := os.Stat(filepath.Join(localRoot, rootOnlyPath)); !errors.Is(statErr, os.ErrNotExist) {
+			t.Fatalf("scoped catalog root falsely exposes unsynchronized %s: %v", rootOnlyPath, statErr)
+		}
+	}
+
+	record, ok := workspaceRecordByID("ws_demo")
+	if !ok {
+		t.Fatal("expected mount to persist workspace record")
+	}
+	if got, want := strings.Join(record.RemotePaths, ","), "/github/repos/acme/cloud,/slack/channels/proj-cloud"; got != want {
+		t.Fatalf("persisted remote paths = %q, want %q", got, want)
+	}
+	if record.LocalLayout != "scoped" {
+		t.Fatalf("persisted local layout = %q, want scoped", record.LocalLayout)
+	}
+
+	// A later start/restart supplies no path flags, so the catalog must carry
+	// the allowlist instead of silently widening the mount back to "/".
+	err = run([]string{
+		"mount", "ws_demo", localRoot,
+		"--server", server.URL,
+		"--token", token,
+		"--once",
+		"--websocket=false",
+	}, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("rerun with persisted scoped paths failed: %v", err)
+	}
+}
+
+func TestMountRejectsRepeatedRemotePathsWithoutScopedLayout(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	err := run([]string{
+		"mount", "ws_demo", t.TempDir(),
+		"--token", testJWTWithWorkspace("ws_demo"),
+		"--remote-path", "/github",
+		"--remote-path", "/slack",
+		"--once",
+	}, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "--local-layout=scoped") {
+		t.Fatalf("expected scoped-layout guidance, got %v", err)
+	}
+}
+
+func TestMountRejectsProviderFilterAcrossHeterogeneousScopesBeforeInitializingMirror(t *testing.T) {
+	skipUntilScopedOperatorSurfacesReady(t)
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+	localRoot := filepath.Join(t.TempDir(), "mirror")
+
+	err := run([]string{
+		"mount", "ws_demo", localRoot,
+		"--token", testJWTWithWorkspace("ws_demo"),
+		"--remote-path", "/github",
+		"--remote-path", "/slack",
+		"--local-layout", "scoped",
+		"--provider", "github",
+		"--once",
+	}, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "/slack") || !strings.Contains(err.Error(), "omit --provider") {
+		t.Fatalf("expected heterogeneous provider-filter refusal, got %v", err)
+	}
+	if _, statErr := os.Stat(localRoot); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("provider-filter refusal initialized mirror: %v", statErr)
+	}
+}
+
+func TestMountRejectsExplicitlyEmptyPathsFileWithoutWidening(t *testing.T) {
+	for name, contents := range map[string]string{
+		"empty":      "",
+		"comments":   "\n# intentionally no roots\n",
+		"empty-json": "[]",
+		"blank-json": `[null, "", "  "]`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			clearRelayfileEnv(t)
+
+			pathsFile := filepath.Join(t.TempDir(), "paths")
+			if err := os.WriteFile(pathsFile, []byte(contents), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			localRoot := filepath.Join(t.TempDir(), "mirror")
+			err := run([]string{
+				"mount", "ws_demo", localRoot,
+				"--token", testJWTWithWorkspace("ws_demo"),
+				"--paths-file", pathsFile,
+				"--local-layout", "scoped",
+				"--once",
+			}, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
+			if err == nil || !strings.Contains(err.Error(), "contains no usable remote roots") ||
+				!strings.Contains(err.Error(), "refusing to widen") {
+				t.Fatalf("expected explicit empty allowlist refusal, got %v", err)
+			}
+			if _, statErr := os.Stat(localRoot); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("empty allowlist initialized mirror before refusal: %v", statErr)
+			}
+		})
+	}
+}
+
+func TestValidateExplicitPathsFileAllowlistDistinguishesUnsetFromEmpty(t *testing.T) {
+	if err := validateExplicitPathsFileAllowlist("", nil, nil); err != nil {
+		t.Fatalf("unset paths-file must retain the default mount fallback: %v", err)
+	}
+	if err := validateExplicitPathsFileAllowlist("/tmp/paths", []string{"", "  "}, nil); err == nil {
+		t.Fatal("configured paths-file with no usable roots must refuse")
+	}
+	if err := validateExplicitPathsFileAllowlist("/tmp/paths", nil, []string{"/github"}); err != nil {
+		t.Fatalf("direct remote path should make an empty companion file harmless: %v", err)
+	}
+}
+
+func TestMountRefusesScopedResetBeforeInitializingMirror(t *testing.T) {
+	skipUntilScopedOperatorSurfacesReady(t)
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	parent := t.TempDir()
+	localRoot := filepath.Join(parent, "mirror")
+	err := run([]string{
+		"mount", "ws_demo", localRoot,
+		"--token", testJWTWithWorkspace("ws_demo"),
+		"--remote-path", "/github",
+		"--remote-path", "/slack",
+		"--local-layout", "scoped",
+		"--reset-after-clobber",
+		"--once",
+	}, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "transactionally") || !strings.Contains(err.Error(), "--rehome") {
+		t.Fatalf("expected scoped reset refusal with remedy, got %v", err)
+	}
+	if _, statErr := os.Stat(localRoot); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("scoped reset initialized mirror before refusing: %v", statErr)
+	}
+}
+
+func TestMountPersistsScopedTopologyBeforeBackgroundSpawnFailure(t *testing.T) {
+	skipUntilScopedOperatorSurfacesReady(t)
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	oldSpawn := spawnBackgroundMountProcessFn
+	spawnBackgroundMountProcessFn = func([]string, []string, string, string, string, string) error {
+		return errors.New("synthetic spawn failure")
+	}
+	t.Cleanup(func() { spawnBackgroundMountProcessFn = oldSpawn })
+
+	localRoot := filepath.Join(t.TempDir(), "mirror")
+	err := run([]string{
+		"mount", "ws_demo", localRoot,
+		"--token", testJWTWithWorkspace("ws_demo"),
+		"--remote-path", "/github",
+		"--remote-path", "/slack",
+		"--local-layout", "scoped",
+		"--background",
+	}, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "synthetic spawn failure") {
+		t.Fatalf("expected synthetic background failure, got %v", err)
+	}
+	record, ok := workspaceRecordByID("ws_demo")
+	if !ok {
+		t.Fatal("expected failed current writer to leave a catalog record")
+	}
+	if record.LocalLayout != mountscope.LayoutScoped {
+		t.Fatalf("failed current writer left blank/incorrect layout %q", record.LocalLayout)
+	}
+	if got := strings.Join(record.RemotePaths, ","); got != "/github,/slack" {
+		t.Fatalf("failed current writer persisted paths %q, want /github,/slack", got)
+	}
+}
+
+func TestPrepareBackgroundMountLayoutPreservesScopedArtifactAbsence(t *testing.T) {
+	localRoot := filepath.Join(t.TempDir(), "mirror")
+	logFile := filepath.Join(localRoot, ".relay", "mount.log")
+
+	if err := prepareBackgroundMountLayout(localRoot, logFile, mountscope.LayoutScoped); err != nil {
+		t.Fatalf("prepare scoped background layout: %v", err)
+	}
+	for _, artifact := range []string{
+		filepath.Join(localRoot, mountscope.DigestsTopLevel),
+		filepath.Join(localRoot, mountscope.SkillsTopLevel),
+	} {
+		if _, err := os.Stat(artifact); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("scoped background preparation created unsynchronized root artifact %s: %v", artifact, err)
+		}
+	}
+	if info, err := os.Stat(filepath.Join(localRoot, mountscope.RuntimeTopLevel)); err != nil || !info.IsDir() {
+		t.Fatalf("scoped background preparation did not create runtime root: info=%v err=%v", info, err)
+	}
+}
+
+func TestPrepareScopedCatalogRootRemovesOnlyGeneratedArtifacts(t *testing.T) {
+	localRoot := filepath.Join(t.TempDir(), "mirror")
+	if err := ensureMirrorLayout(localRoot); err != nil {
+		t.Fatal(err)
+	}
+	if err := prepareScopedCatalogRoot(localRoot); err != nil {
+		t.Fatalf("prepare generated setup root for scoped mount: %v", err)
+	}
+	for _, artifact := range []string{
+		filepath.Join(localRoot, mountscope.DigestsTopLevel),
+		filepath.Join(localRoot, mountscope.SkillsTopLevel),
+	} {
+		if _, err := os.Stat(artifact); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("generated artifact remains after scoped preparation %s: %v", artifact, err)
+		}
+	}
+}
+
+func TestPrepareScopedCatalogRootRefusesUnknownContentWithoutMutation(t *testing.T) {
+	localRoot := filepath.Join(t.TempDir(), "mirror")
+	if err := ensureMirrorLayout(localRoot); err != nil {
+		t.Fatal(err)
+	}
+	unknownPath := filepath.Join(localRoot, mountscope.DigestsTopLevel, "today.md")
+	if err := os.WriteFile(unknownPath, []byte("existing digest"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := prepareScopedCatalogRoot(localRoot)
+	if err == nil || !strings.Contains(err.Error(), unknownPath) || !strings.Contains(err.Error(), "--rehome") {
+		t.Fatalf("expected actionable unknown-artifact refusal, got %v", err)
+	}
+	for _, path := range []string{
+		unknownPath,
+		filepath.Join(localRoot, mountscope.SkillsTopLevel, "activity-summary.md"),
+	} {
+		if _, statErr := os.Stat(path); statErr != nil {
+			t.Fatalf("refusal mutated existing artifact %s: %v", path, statErr)
+		}
+	}
+}
+
+func TestRemoveGeneratedScopedCatalogArtifactPreservesReplacement(t *testing.T) {
+	localRoot := t.TempDir()
+	path := filepath.Join(localRoot, mountscope.SkillsTopLevel, "activity-summary.md")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("user replacement"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := removeGeneratedScopedCatalogArtifact(path, []byte(activitySummarySkillMarkdown))
+	if err == nil || !strings.Contains(err.Error(), "changed during scoped transition") {
+		t.Fatalf("replacement removal = %v, want refusal", err)
+	}
+	if payload, readErr := os.ReadFile(path); readErr != nil || string(payload) != "user replacement" {
+		t.Fatalf("replacement was not restored, payload=%q err=%v", payload, readErr)
+	}
+}
+
+func TestSetupMirrorLayoutPreservesPersistedScopedTopology(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+	if _, err := upsertWorkspaceDetails(workspaceRecord{
+		Name:        "demo",
+		ID:          "ws_demo",
+		LocalLayout: mountscope.LayoutScoped,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := setupMirrorLayout("demo"); got != mountscope.LayoutScoped {
+		t.Fatalf("setup layout = %q, want scoped", got)
+	}
+	if got := setupMirrorLayout("new-workspace"); got != mountscope.LayoutExact {
+		t.Fatalf("new workspace setup layout = %q, want exact", got)
+	}
+}
+
+func TestValidateMountLayoutTransitionRejectsInPlaceChange(t *testing.T) {
+	localDir := t.TempDir()
+	record := workspaceRecord{LocalDir: localDir, LocalLayout: mountscope.LayoutScoped}
+	err := validateMountLayoutTransition(record, localDir, mountscope.LayoutExact)
+	if err == nil || !strings.Contains(err.Error(), "--rehome") {
+		t.Fatalf("expected rehome guidance, got %v", err)
+	}
+	if err := validateMountLayoutTransition(record, filepath.Join(t.TempDir(), "new-root"), mountscope.LayoutExact); err != nil {
+		t.Fatalf("layout change at a new root should be allowed, got %v", err)
+	}
+}
+
+func TestValidateMountLayoutTransitionTreatsLegacyBlankAsUnknown(t *testing.T) {
+	localDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(localDir, ".relay"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(localDir, ".relay", "state.json"), []byte(`{"remoteRoot":"/"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	record := workspaceRecord{LocalDir: localDir}
+	err := validateMountLayoutTransition(record, localDir, mountscope.LayoutScoped)
+	if err == nil ||
+		!strings.Contains(err.Error(), "unknown") ||
+		!strings.Contains(err.Error(), "--rehome") ||
+		!strings.Contains(err.Error(), localDir) {
+		t.Fatalf("expected legacy-topology refusal with path and remedy, got %v", err)
+	}
+	if err := validateMountLayoutTransition(record, filepath.Join(t.TempDir(), "new-root"), mountscope.LayoutScoped); err != nil {
+		t.Fatalf("legacy record should allow explicit re-home to a new root, got %v", err)
+	}
+	if err := validateMountLayoutTransition(record, localDir, mountscope.LayoutExact); err != nil {
+		t.Fatalf("legacy exact mount should remain restartable, got %v", err)
+	}
+}
+
+func TestValidateMountLayoutTransitionAllowsUnstartedBlankRecordToStartScoped(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	localDir := t.TempDir()
+	record := workspaceRecord{LocalDir: localDir}
+	if err := validateMountLayoutTransition(record, localDir, mountscope.LayoutScoped); err != nil {
+		t.Fatalf("pre-mount record has no state to orphan and should start scoped, got %v", err)
+	}
+}
+
+func TestValidateMountLayoutTransitionFindsPrivateLegacyState(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	for _, tc := range []struct {
+		name      string
+		configure func(*workspaceRecord)
+		statePath func(workspaceRecord) (string, error)
+	}{
+		{
+			name:      "default-dir-unknown-legacy-root",
+			configure: func(*workspaceRecord) {},
+			statePath: func(record workspaceRecord) (string, error) {
+				resolved, err := mountsync.ResolveMountStatePath(mountsync.MountStatePathOptions{
+					WorkspaceID: record.ID,
+					RemoteRoot:  "/notion",
+					LocalRoot:   record.LocalDir,
+				})
+				return resolved.StateFile, err
+			},
+		},
+		{
+			name: "state-dir",
+			configure: func(record *workspaceRecord) {
+				record.MountStateDir = t.TempDir()
+			},
+			statePath: func(record workspaceRecord) (string, error) {
+				resolved, err := mountsync.ResolveMountStatePath(mountsync.MountStatePathOptions{
+					WorkspaceID: record.ID,
+					RemoteRoot:  "/",
+					LocalRoot:   record.LocalDir,
+					StateDir:    record.MountStateDir,
+				})
+				return resolved.StateFile, err
+			},
+		},
+		{
+			name: "state-file",
+			configure: func(record *workspaceRecord) {
+				record.MountStateFile = filepath.Join(t.TempDir(), "explicit-state.json")
+			},
+			statePath: func(record workspaceRecord) (string, error) {
+				return record.MountStateFile, nil
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			localDir := t.TempDir()
+			record := workspaceRecord{ID: "ws_demo", LocalDir: localDir}
+			tc.configure(&record)
+			statePath, err := tc.statePath(record)
+			if err != nil {
+				t.Fatalf("resolve private state: %v", err)
+			}
+			if err := os.MkdirAll(filepath.Dir(statePath), 0o755); err != nil {
+				t.Fatalf("mkdir private state: %v", err)
+			}
+			if err := os.WriteFile(statePath, []byte(`{"files":{}}`), 0o600); err != nil {
+				t.Fatalf("write private state: %v", err)
+			}
+			err = validateMountLayoutTransition(record, localDir, mountscope.LayoutScoped)
+			if err == nil || !strings.Contains(err.Error(), "unknown") || !strings.Contains(err.Error(), "--rehome") {
+				t.Fatalf("expected private-state migration refusal, got %v", err)
+			}
+		})
+	}
+}
+
+func TestValidateMountLayoutTransitionIgnoresAttributedUnrelatedPrivateState(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	targetRoot := t.TempDir()
+	otherRoot := t.TempDir()
+	resolvedState, err := mountsync.ResolveMountStatePath(mountsync.MountStatePathOptions{
+		WorkspaceID: "ws_other",
+		RemoteRoot:  "/notion",
+		LocalRoot:   otherRoot,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	statePath := resolvedState.StateFile
+	if err := os.MkdirAll(filepath.Dir(statePath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	payload := fmt.Sprintf(
+		`{"workspaceId":"ws_other","remoteRoot":"/notion","localRoot":%q,"files":{}}`,
+		otherRoot,
+	)
+	if err := os.WriteFile(statePath, []byte(payload), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	record := workspaceRecord{ID: "ws_target", LocalDir: targetRoot}
+	if err := validateMountLayoutTransition(record, targetRoot, mountscope.LayoutScoped); err != nil {
+		t.Fatalf("unrelated attributed private state blocked an unstarted record: %v", err)
+	}
+}
+
+func TestPrivateMountStateIdentityMatchesWorkspaceAndFilesystemRoot(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	localRoot := t.TempDir()
+	alias := filepath.Join(t.TempDir(), "mirror-alias")
+	if err := os.Symlink(localRoot, alias); err != nil {
+		t.Fatal(err)
+	}
+	payload := fmt.Sprintf(`{"workspaceId":"ws_demo","localRoot":%q,"files":{}}`, alias)
+	if err := os.WriteFile(statePath, []byte(payload), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	belongs, attributable, err := privateMountStateMatchesRecord(
+		statePath,
+		workspaceRecord{ID: "ws_demo"},
+		localRoot,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !belongs || !attributable {
+		t.Fatalf("identity match = belongs %v, attributable %v", belongs, attributable)
+	}
+}
+
+func TestMountTransitionGuardsUseFilesystemIdentity(t *testing.T) {
+	localRoot := t.TempDir()
+	alias := filepath.Join(t.TempDir(), "mirror-alias")
+	if err := os.Symlink(localRoot, alias); err != nil {
+		t.Fatalf("create mount-root alias: %v", err)
+	}
+	record := workspaceRecord{
+		LocalDir:    localRoot,
+		LocalLayout: mountscope.LayoutScoped,
+		RemotePaths: []string{"/github", "/slack"},
+	}
+	if err := validateMountScopeTransition(record, alias, mountscope.LayoutScoped, []string{"/slack"}); err == nil || !strings.Contains(err.Error(), "--rehome") {
+		t.Fatalf("expected aliased root to retain in-place scope refusal, got %v", err)
+	}
+	if err := validateMountLayoutTransition(record, alias, mountscope.LayoutExact); err == nil || !strings.Contains(err.Error(), "--rehome") {
+		t.Fatalf("expected aliased root to retain in-place layout refusal, got %v", err)
+	}
+}
+
+func TestValidateMountScopeTransitionRejectsInPlaceRemoval(t *testing.T) {
+	localRoot := t.TempDir()
+	previous := workspaceRecord{
+		LocalDir:    localRoot,
+		LocalLayout: mountscope.LayoutScoped,
+		RemotePaths: []string{"/github", "/slack"},
+	}
+	err := validateMountScopeTransition(previous, localRoot, mountscope.LayoutScoped, []string{"/slack"})
+	if err == nil || !strings.Contains(err.Error(), "/github") || !strings.Contains(err.Error(), "--rehome") {
+		t.Fatalf("expected removed-scope rehome guidance, got %v", err)
+	}
+	if err := validateMountScopeTransition(previous, localRoot, mountscope.LayoutScoped, []string{"/github", "/slack", "/email"}); err != nil {
+		t.Fatalf("adding a scope should not require lifecycle migration, got %v", err)
+	}
+	if err := validateMountScopeTransition(previous, filepath.Join(t.TempDir(), "new-root"), mountscope.LayoutScoped, []string{"/slack"}); err != nil {
+		t.Fatalf("scope change at a new root should be allowed, got %v", err)
+	}
+}
+
+func TestValidateMountScopeTransitionRejectsPersistedNestedTopology(t *testing.T) {
+	localRoot := t.TempDir()
+	previous := workspaceRecord{
+		LocalDir:    localRoot,
+		LocalLayout: mountscope.LayoutScoped,
+		RemotePaths: []string{"/github", "/github/repos/acme"},
+	}
+	err := validateMountScopeTransition(
+		previous,
+		localRoot,
+		mountscope.LayoutScoped,
+		[]string{"/github"},
+	)
+	if err == nil ||
+		!strings.Contains(err.Error(), "cannot be represented safely") ||
+		!strings.Contains(err.Error(), "--rehome") {
+		t.Fatalf("expected persisted nested-scope refusal, got %v", err)
+	}
+}
+
+func TestValidateMountScopeTransitionAllowsMalformedLegacyTopologyToRehome(t *testing.T) {
+	previousRoot := t.TempDir()
+	previous := workspaceRecord{
+		LocalDir:    previousRoot,
+		LocalLayout: mountscope.LayoutScoped,
+		RemotePaths: []string{"/github", "/github/repos/acme"},
+	}
+	if err := validateMountScopeTransition(
+		previous,
+		filepath.Join(t.TempDir(), "new-root"),
+		mountscope.LayoutScoped,
+		[]string{"/github", "/slack"},
+	); err != nil {
+		t.Fatalf("safe rehome was blocked by malformed persisted topology: %v", err)
+	}
+}
+
+func TestResolveCLIMountRemotePathsAppliesEnvironmentBeforeTransitionValidation(t *testing.T) {
+	got := resolveCLIMountRemotePaths(nil, []string{"/github"}, "/github")
+	if len(got) != 1 || got[0] != "/github" {
+		t.Fatalf("environment path resolved to %v, want [/github]", got)
+	}
+	previous := workspaceRecord{
+		LocalDir:    t.TempDir(),
+		LocalLayout: mountscope.LayoutScoped,
+		RemotePaths: []string{"/github"},
+	}
+	if err := validateMountScopeTransition(previous, previous.LocalDir, mountscope.LayoutScoped, got); err != nil {
+		t.Fatalf("matching environment path should not look like removal: %v", err)
+	}
+
+	got = resolveCLIMountRemotePaths(nil, []string{"/github", "/slack"}, "")
+	if want := "/github,/slack"; strings.Join(got, ",") != want {
+		t.Fatalf("recorded restart paths = %q, want %q", strings.Join(got, ","), want)
+	}
+}
+
+func TestValidateMountResetModeRefusesScopedAcknowledgedReset(t *testing.T) {
+	localRoot := t.TempDir()
+	err := validateMountResetMode(localRoot, mountscope.LayoutScoped, true)
+	if err == nil ||
+		!strings.Contains(err.Error(), "transactionally") ||
+		!strings.Contains(err.Error(), "--rehome") ||
+		!strings.Contains(err.Error(), localRoot) {
+		t.Fatalf("expected scoped reset refusal with reason and remedy, got %v", err)
+	}
+	if err := validateMountResetMode(localRoot, mountscope.LayoutExact, true); err != nil {
+		t.Fatalf("exact acknowledged reset should remain supported, got %v", err)
+	}
+}
+
+func TestPreflightScopedMountRootInvariantRefusesWithoutMutating(t *testing.T) {
+	localRoot := t.TempDir()
+	clobbered := filepath.Join(localRoot, "github")
+	if err := os.WriteFile(clobbered, []byte("preserve me"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	child := filepath.Join(clobbered, "repos", "acme")
+	err := preflightScopedMountRootInvariant(localRoot, child)
+	if err == nil || !strings.Contains(err.Error(), clobbered) || !strings.Contains(err.Error(), "--rehome") {
+		t.Fatalf("expected scoped clobber refusal, got %v", err)
+	}
+	content, readErr := os.ReadFile(clobbered)
+	if readErr != nil || string(content) != "preserve me" {
+		t.Fatalf("preflight mutated clobbered path: content=%q err=%v", content, readErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(localRoot, "github", "repos")); statErr == nil {
+		t.Fatal("preflight initialized child path")
+	}
+}
+
+func TestPreflightScopedMountRootInvariantAllowsMissingChildTree(t *testing.T) {
+	localRoot := t.TempDir()
+	child := filepath.Join(localRoot, "github", "repos", "acme")
+	if err := preflightScopedMountRootInvariant(localRoot, child); err != nil {
+		t.Fatalf("fresh scoped child should be allowed, got %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(localRoot, "github")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("preflight initialized missing child: %v", err)
+	}
+}
+
+func TestAcquireMountStartLockSerializesSamePortableRoot(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	localRoot := filepath.Join(t.TempDir(), "Mirror")
+	release, err := acquireMountStartLock(localRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := acquireMountStartLock(strings.ToUpper(localRoot)); err == nil ||
+		!strings.Contains(err.Error(), "already in progress") {
+		release()
+		t.Fatalf("portable alias acquired a second mount-start lock: %v", err)
+	}
+	release()
+	releaseAgain, err := acquireMountStartLock(localRoot)
+	if err != nil {
+		t.Fatalf("mount-start lock remained held after release: %v", err)
+	}
+	releaseAgain()
+}
+
+func TestAcquireMountStartLockDoesNotDependOnDefaultStateDirectory(t *testing.T) {
+	homeFile := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(homeFile, []byte("read-only home sentinel"), 0o400); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", homeFile)
+
+	release, err := acquireMountStartLock(filepath.Join(t.TempDir(), "mirror"))
+	if err != nil {
+		t.Fatalf("mount-start lock depended on default state directory: %v", err)
+	}
+	release()
+}
+
+func TestTrustedMountStartLockBaseRejectsAttackerWritableCandidate(t *testing.T) {
+	parent := t.TempDir()
+	attackerWritable := filepath.Join(parent, "shared")
+	trusted := filepath.Join(parent, "owned")
+	if err := os.Mkdir(attackerWritable, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(attackerWritable, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(trusted, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	got, err := trustedMountStartLockBaseFrom([]string{attackerWritable, trusted})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != trusted {
+		t.Fatalf("selected lock base = %q, want trusted fallback %q", got, trusted)
+	}
+}
+
+func TestTrustedMountStartLockBaseRejectsSymlinkCandidate(t *testing.T) {
+	parent := t.TempDir()
+	target := filepath.Join(parent, "target")
+	if err := os.Mkdir(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(parent, "alias")
+	if err := os.Symlink(target, alias); err != nil {
+		t.Skipf("filesystem does not support symlinks: %v", err)
+	}
+	trusted := filepath.Join(parent, "owned")
+	if err := os.Mkdir(trusted, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	got, err := trustedMountStartLockBaseFrom([]string{alias, trusted})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != trusted {
+		t.Fatalf("selected lock base = %q, want non-symlink fallback %q", got, trusted)
+	}
+}
+
+func TestPrivateMountStartLockTempDirUsesPerUserChild(t *testing.T) {
+	tempDir := t.TempDir()
+	got := privateMountStartLockTempDir(tempDir, "user-namespace")
+	want := filepath.Join(tempDir, "relayfile-runtime-user-namespace")
+	if got != want {
+		t.Fatalf("private temp lock directory = %q, want %q", got, want)
+	}
+	if got == tempDir {
+		t.Fatal("private temp lock directory must not use the shared temp root")
+	}
+}
+
+func TestAcquireMountStartLockSerializesSymlinkAliasesAndMissingDescendants(t *testing.T) {
+	parent := t.TempDir()
+	realParent := filepath.Join(parent, "real")
+	if err := os.MkdirAll(realParent, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	aliasParent := filepath.Join(parent, "alias")
+	if err := os.Symlink(realParent, aliasParent); err != nil {
+		t.Skipf("filesystem does not support symlinks: %v", err)
+	}
+	realRoot := filepath.Join(realParent, "not-created-yet")
+	aliasRoot := filepath.Join(aliasParent, "not-created-yet")
+
+	release, err := acquireMountStartLock(realRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	if _, err := acquireMountStartLock(aliasRoot); err == nil ||
+		!strings.Contains(err.Error(), "already in progress") {
+		t.Fatalf("symlink alias acquired a second mount-start lock: %v", err)
+	}
+}
+
+func TestReportMountContentPolicyEnumeratesExclusionsAndSensitiveContent(t *testing.T) {
+	localRoot := t.TempDir()
+	scopeDir := filepath.Join(localRoot, "github")
+	if err := os.MkdirAll(filepath.Join(scopeDir, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(scopeDir, ".env"), []byte("SECRET=value"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	err := reportMountContentPolicy(&output, localRoot, []mountscope.Scope{{
+		RemotePath: "/github",
+		LocalDir:   scopeDir,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := output.String()
+	if !strings.Contains(got, "github/.git") || !strings.Contains(got, "not synced") {
+		t.Fatalf("infrastructure exclusion was not visible: %q", got)
+	}
+	if !strings.Contains(got, "github/.env") || !strings.Contains(got, "will sync") {
+		t.Fatalf("sensitive user content was not surfaced: %q", got)
+	}
+}
+
+func TestValidateMountStatePathsRefusesScopedPrivateStateBeforeMutation(t *testing.T) {
+	localRoot := t.TempDir()
+	scopes, err := mountscope.Plan(
+		localRoot,
+		mountscope.LayoutScoped,
+		[]string{"/github", "/slack"},
+		"/",
+		"",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stateFile := filepath.Join(scopes[0].LocalDir, ".relay", "private-state.json")
+	err = validateMountStatePaths(
+		"ws_demo",
+		scopes,
+		stateFile,
+		"",
+		mountsync.MountKindDaemon,
+	)
+	if err == nil ||
+		!strings.Contains(err.Error(), "/github") ||
+		!strings.Contains(err.Error(), "before updating workspace topology") {
+		t.Fatalf("expected pre-persistence private-state refusal, got %v", err)
+	}
+	entries, readErr := os.ReadDir(localRoot)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("private-state preflight mutated mount root: %v", entries)
+	}
+}
+
+func TestMergeWorkspaceRecordsUpdatesMountStateIdentityOnlyWhenExplicit(t *testing.T) {
+	current := workspaceRecord{
+		ID:             "ws_demo",
+		MountStateFile: "/old/state.json",
+		MountStateDir:  "/old",
+		MountKind:      mountsync.MountKindDaemon,
+	}
+	ordinary := mergeWorkspaceRecords(current, workspaceRecord{ID: "ws_demo", Name: "demo"})
+	if ordinary.MountStateFile != current.MountStateFile || ordinary.MountStateDir != current.MountStateDir || ordinary.MountKind != current.MountKind {
+		t.Fatalf("ordinary catalog update changed mount state identity: %#v", ordinary)
+	}
+	explicit := mergeWorkspaceRecords(current, workspaceRecord{
+		ID:            "ws_demo",
+		MountStateDir: "/new",
+		MountKind:     mountsync.MountKindFlush,
+		mountStateSet: true,
+	})
+	if explicit.MountStateFile != "" || explicit.MountStateDir != "/new" || explicit.MountKind != mountsync.MountKindFlush {
+		t.Fatalf("explicit catalog update did not replace mount state identity: %#v", explicit)
+	}
+}
+
+func TestMergeWorkspaceRecordsReplacesCurrentRemotePaths(t *testing.T) {
+	current := workspaceRecord{
+		ID:          "ws_demo",
+		RemotePaths: []string{"/github", "/retired"},
+	}
+	merged := mergeWorkspaceRecords(current, workspaceRecord{
+		ID:          "ws_demo",
+		RemotePaths: []string{"/github", "/slack"},
+	})
+	if got, want := strings.Join(merged.RemotePaths, ","), "/github,/slack"; got != want {
+		t.Fatalf("merged remote paths = %q, want %q", got, want)
+	}
+}
+
 func TestMountWithoutTokenRejectsWorkspaceOutsideAgentRelayActive(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)
@@ -2526,6 +3428,118 @@ func TestMountRehomeRefusesRunningRecordedDaemon(t *testing.T) {
 	}
 }
 
+func TestMountRefusesCompetingDaemonBeforePersistingAddedScope(t *testing.T) {
+	skipUntilScopedOperatorSurfacesReady(t)
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	localDir := t.TempDir()
+	now := time.Now().UTC().Format(time.RFC3339)
+	if err := saveWorkspaceCatalog(workspaceCatalog{
+		Default: "demo",
+		Workspaces: []workspaceRecord{{
+			Name:        "demo",
+			ID:          "ws_demo",
+			LocalDir:    localDir,
+			LocalLayout: mountscope.LayoutScoped,
+			RemotePaths: []string{"/github"},
+			CreatedAt:   now,
+			LastUsedAt:  now,
+		}},
+	}); err != nil {
+		t.Fatalf("saveWorkspaceCatalog failed: %v", err)
+	}
+	if err := ensureMirrorLayout(localDir); err != nil {
+		t.Fatalf("ensureMirrorLayout failed: %v", err)
+	}
+	if err := writeDaemonPIDState(mountPIDFile(localDir), daemonPIDState{
+		PID:         os.Getpid(),
+		WorkspaceID: "ws_demo",
+		LocalDir:    localDir,
+		Executable:  resolvedSelfExecutable(),
+	}); err != nil {
+		t.Fatalf("write daemon pid state failed: %v", err)
+	}
+
+	err := run([]string{
+		"mount", "demo", localDir,
+		"--token", testJWTWithWorkspace("ws_demo"),
+		"--remote-path", "/github",
+		"--remote-path", "/slack",
+		"--local-layout", "scoped",
+		"--background",
+	}, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "already has a running mount") {
+		t.Fatalf("expected competing-daemon refusal, got %v", err)
+	}
+	record, ok := workspaceRecordByID("ws_demo")
+	if !ok {
+		t.Fatal("expected persisted workspace record")
+	}
+	if got := strings.Join(record.RemotePaths, ","); got != "/github" {
+		t.Fatalf("refused start changed persisted paths to %q", got)
+	}
+	if _, statErr := os.Stat(filepath.Join(localDir, "slack")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("refused start initialized added scope: %v", statErr)
+	}
+}
+
+func TestMountOnceRefusesCompetingDaemonBeforePersistingAddedScope(t *testing.T) {
+	skipUntilScopedOperatorSurfacesReady(t)
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	localDir := t.TempDir()
+	now := time.Now().UTC().Format(time.RFC3339)
+	if err := saveWorkspaceCatalog(workspaceCatalog{
+		Default: "demo",
+		Workspaces: []workspaceRecord{{
+			Name:        "demo",
+			ID:          "ws_demo",
+			LocalDir:    localDir,
+			LocalLayout: mountscope.LayoutScoped,
+			RemotePaths: []string{"/github"},
+			CreatedAt:   now,
+			LastUsedAt:  now,
+		}},
+	}); err != nil {
+		t.Fatalf("saveWorkspaceCatalog failed: %v", err)
+	}
+	if err := ensureMirrorLayout(localDir); err != nil {
+		t.Fatalf("ensureMirrorLayout failed: %v", err)
+	}
+	if err := writeDaemonPIDState(mountPIDFile(localDir), daemonPIDState{
+		PID:         os.Getpid(),
+		WorkspaceID: "ws_demo",
+		LocalDir:    localDir,
+		Executable:  resolvedSelfExecutable(),
+	}); err != nil {
+		t.Fatalf("write daemon pid state failed: %v", err)
+	}
+
+	err := run([]string{
+		"mount", "demo", localDir,
+		"--token", testJWTWithWorkspace("ws_demo"),
+		"--remote-path", "/github",
+		"--remote-path", "/slack",
+		"--local-layout", "scoped",
+		"--once",
+	}, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "already has a running mount") {
+		t.Fatalf("expected one-shot competing-daemon refusal, got %v", err)
+	}
+	record, ok := workspaceRecordByID("ws_demo")
+	if !ok {
+		t.Fatal("expected persisted workspace record")
+	}
+	if got := strings.Join(record.RemotePaths, ","); got != "/github" {
+		t.Fatalf("refused one-shot changed persisted paths to %q", got)
+	}
+	if _, statErr := os.Stat(filepath.Join(localDir, "slack")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("refused one-shot initialized added scope: %v", statErr)
+	}
+}
+
 func TestMountRehomeRefusesUnverifiedRecordedDaemon(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)
@@ -2583,15 +3597,20 @@ func TestMountRehomeAllowsExplicitMoveAndPersistsLocalDir(t *testing.T) {
 
 	localDir := t.TempDir()
 	otherDir := t.TempDir()
+	oldStateFile := filepath.Join(t.TempDir(), "old-explicit-state.json")
+	if err := os.WriteFile(oldStateFile, []byte(`not valid mount state`), 0o600); err != nil {
+		t.Fatalf("write old explicit state file: %v", err)
+	}
 	now := time.Now().UTC().Format(time.RFC3339)
 	if err := saveWorkspaceCatalog(workspaceCatalog{
 		Default: "demo",
 		Workspaces: []workspaceRecord{{
-			Name:       "demo",
-			ID:         "ws_demo",
-			LocalDir:   localDir,
-			CreatedAt:  now,
-			LastUsedAt: now,
+			Name:           "demo",
+			ID:             "ws_demo",
+			LocalDir:       localDir,
+			MountStateFile: oldStateFile,
+			CreatedAt:      now,
+			LastUsedAt:     now,
 		}},
 	}); err != nil {
 		t.Fatalf("saveWorkspaceCatalog failed: %v", err)
@@ -2635,6 +3654,9 @@ func TestMountRehomeAllowsExplicitMoveAndPersistsLocalDir(t *testing.T) {
 	wantLocalDir, _ := filepath.Abs(otherDir)
 	if record.LocalDir != wantLocalDir {
 		t.Fatalf("LocalDir = %q, want %q", record.LocalDir, wantLocalDir)
+	}
+	if record.MountStateFile != "" {
+		t.Fatalf("rehomed mount retained old explicit state file %q", record.MountStateFile)
 	}
 }
 
@@ -6462,7 +7484,7 @@ func TestIntegrationAdoptClearsDisconnectMarker(t *testing.T) {
 	// workspace as disconnected — otherwise the operator gets a stale
 	// "disconnected" reading for a workspace they just adopted into.
 	_, localDir := setupAdoptWorkspace(t)
-	if err := markProviderDisconnected(localDir, "github"); err != nil {
+	if err := markProviderDisconnected(localDir, "github", mountscope.LayoutExact); err != nil {
 		t.Fatalf("markProviderDisconnected failed: %v", err)
 	}
 	markerPath := filepath.Join(localDir, ".relay", "disconnected", "github.json")
@@ -6487,6 +7509,31 @@ func TestIntegrationAdoptClearsDisconnectMarker(t *testing.T) {
 	}
 	if _, err := os.Stat(markerPath); !os.IsNotExist(err) {
 		t.Fatalf("expected disconnect marker to be removed, got: %v", err)
+	}
+}
+
+func TestMarkProviderDisconnectedScopedPreservesRuntimeState(t *testing.T) {
+	localDir := t.TempDir()
+	child := filepath.Join(localDir, "github")
+	child = filepath.Join(child, "repos", "acme", "cloud")
+	runtime := filepath.Join(child, mountscope.RuntimeTopLevel)
+	if err := os.MkdirAll(filepath.Join(runtime, "outbox"), 0o755); err != nil {
+		t.Fatalf("create runtime state: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(runtime, "outbox", "pending.json"), []byte("pending"), 0o644); err != nil {
+		t.Fatalf("write pending state: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(child, "README.md"), []byte("mirrored"), 0o644); err != nil {
+		t.Fatalf("write mirrored content: %v", err)
+	}
+	if err := markProviderDisconnected(localDir, "github", mountscope.LayoutScoped); err != nil {
+		t.Fatalf("markProviderDisconnected failed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(runtime, "outbox", "pending.json")); err != nil {
+		t.Fatalf("scoped disconnect deleted runtime state: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(child, "README.md")); !os.IsNotExist(err) {
+		t.Fatalf("expected mirrored content removed, stat err=%v", err)
 	}
 }
 

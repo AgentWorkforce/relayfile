@@ -65,6 +65,7 @@ type mountConfig struct {
 	memlogInterval        time.Duration
 	logHTTPStatus         bool
 	scopes                []string
+	scopedChild           bool
 	once                  bool
 	flushOutboxOnce       bool
 	pushLocalOnce         bool
@@ -89,7 +90,7 @@ func main() {
 	pathsFile := flag.String("paths-file", strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_PATHS_FILE")), "file containing remote root paths, as JSON array or newline-separated list")
 	eventProvider := flag.String("provider", strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_PROVIDER")), "event provider filter")
 	localDir := flag.String("local-dir", strings.TrimSpace(os.Getenv("RELAYFILE_LOCAL_DIR")), "local mirror directory")
-	localLayout := flag.String("local-layout", envOrDefault("RELAYFILE_MOUNT_LOCAL_LAYOUT", localLayoutExact), "local directory layout: exact (local-dir is mirror root) or scoped (remote path is appended under local-dir)")
+	localLayout := flag.String("local-layout", envOrDefault("RELAYFILE_MOUNT_LOCAL_LAYOUT", localLayoutExact), "local directory layout: exact (scoped layout is temporarily unavailable until operator surfaces are ready)")
 	stateFile := flag.String("state-file", strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_STATE_FILE")), "state file path")
 	stateDir := flag.String("state-dir", envOrDefault("RELAYFILE_MOUNT_STATE_DIR", mountsync.DefaultMountStateDir()), "directory for private mount state")
 	mountKind := flag.String("mount-kind", envOrDefault("RELAYFILE_MOUNT_KIND", mountsync.MountKindDaemon), "private state identity kind: daemon, flush, or initial-sync")
@@ -144,6 +145,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("read paths-file: %v", err)
 	}
+	if err := mountscope.ValidateExplicitPathsFile(*pathsFile, fileRemotePaths, remotePaths.Values()); err != nil {
+		log.Fatalf("invalid paths-file: %v", err)
+	}
 	allRemotePaths := append(remotePaths.Values(), fileRemotePaths...)
 	*intervalJitter = clampJitterRatio(*intervalJitter)
 	resolvedMode, err := resolveMountMode(*mode, *fuse)
@@ -153,6 +157,9 @@ func main() {
 	resolvedLocalLayout, err := resolveLocalLayout(*localLayout)
 	if err != nil {
 		log.Fatalf("invalid local layout: %v", err)
+	}
+	if err := validateCLIRequestedLocalLayout(resolvedLocalLayout); err != nil {
+		log.Fatalf("unsupported local layout: %v", err)
 	}
 	resolvedSyncMode, err := resolveSyncMode(*syncModeFlag)
 	if err != nil {
@@ -225,6 +232,16 @@ func resolveLocalLayout(layout string) (string, error) {
 	return mountscope.ResolveLayout(layout)
 }
 
+// Scoped runtime state is implemented below this CLI boundary, but its
+// operator surfaces are not yet complete. Refuse the user-facing capability
+// until status/list/retry can see every scoped child state location.
+func validateCLIRequestedLocalLayout(layout string) error {
+	if layout == localLayoutScoped {
+		return fmt.Errorf("--local-layout=%s is temporarily unavailable until scoped operator surfaces are ready; use --local-layout=%s", localLayoutScoped, localLayoutExact)
+	}
+	return nil
+}
+
 func resolveSyncMode(mode string) (string, error) {
 	normalized := strings.ToLower(strings.TrimSpace(mode))
 	if normalized == "" {
@@ -271,6 +288,12 @@ func runPollingMountWithRunner(rootCtx context.Context, cfg mountConfig, run pol
 	if len(remotePaths) > 1 {
 		return fmt.Errorf("multiple --remote-path values require --local-layout=%s", localLayoutScoped)
 	}
+	if err := logStandaloneMountContentPolicy([]mountscope.Scope{{
+		RemotePath: normalizeMountRemotePath(remotePaths[0]),
+		LocalDir:   cfg.localDir,
+	}}); err != nil {
+		return err
+	}
 	cfg.remotePath = normalizeMountRemotePath(remotePaths[0])
 	cfg.remotePaths = nil
 	return run(rootCtx, cfg)
@@ -293,12 +316,19 @@ func runScopedPollingMountsWithRunner(
 	if err != nil {
 		return err
 	}
+	if err := mountscope.ValidateEventProvider(remotePaths, cfg.eventProvider); err != nil {
+		return err
+	}
+	if err := logStandaloneMountContentPolicy(plan); err != nil {
+		return err
+	}
 	scopedMounts := make([]scopedMount, 0, len(plan))
 	for _, scope := range plan {
 		scoped := cfg
 		scoped.remotePath = scope.RemotePath
 		scoped.remotePaths = nil
 		scoped.localDir = scope.LocalDir
+		scoped.scopedChild = true
 		scoped.stateFile = cfg.stateFile
 		if err := os.MkdirAll(scoped.localDir, 0o755); err != nil {
 			return fmt.Errorf("create scoped local dir for %s: %w", scope.RemotePath, err)
@@ -334,6 +364,30 @@ func runScopedPollingMountsWithRunner(
 	return firstErr
 }
 
+func logStandaloneMountContentPolicy(scopes []mountscope.Scope) error {
+	for _, scope := range scopes {
+		report, err := mountscope.InspectLocalContentPolicy(scope.LocalDir)
+		if err != nil {
+			return fmt.Errorf("inspect local mount content policy for %s: %w", scope.LocalDir, err)
+		}
+		if len(report.ExcludedInfrastructure) > 0 {
+			log.Printf(
+				"excluded incidental infrastructure from %s (not synced): %s",
+				scope.LocalDir,
+				strings.Join(report.ExcludedInfrastructure, ", "),
+			)
+		}
+		if len(report.SensitiveUserContent) > 0 {
+			log.Printf(
+				"warning: convention-sensitive user content under %s will sync: %s; review or move it if that is not intended",
+				scope.LocalDir,
+				strings.Join(report.SensitiveUserContent, ", "),
+			)
+		}
+	}
+	return nil
+}
+
 func readRemotePathsFile(path string) ([]string, error) {
 	return mountscope.ReadPathsFile(path)
 }
@@ -353,6 +407,7 @@ func runSinglePollingMount(rootCtx context.Context, cfg mountConfig) error {
 		WorkspaceID:           cfg.workspaceID,
 		RemoteRoot:            cfg.remotePath,
 		EventProvider:         cfg.eventProvider,
+		ScopedChild:           cfg.scopedChild,
 		LocalRoot:             cfg.localDir,
 		StateFile:             cfg.stateFile,
 		StateDir:              cfg.stateDir,
@@ -437,7 +492,7 @@ func runSinglePollingMount(rootCtx context.Context, cfg mountConfig) error {
 		return nil
 	}
 
-	watcher, err := mountsync.NewFileWatcher(cfg.localDir, func(relativePath string, op fsnotify.Op) {
+	watcher, err := syncer.NewFileWatcher(func(relativePath string, op fsnotify.Op) {
 		ctx, cancel := context.WithTimeout(rootCtx, cfg.timeout)
 		defer cancel()
 		if err := syncer.HandleLocalChange(ctx, relativePath, op); err != nil {

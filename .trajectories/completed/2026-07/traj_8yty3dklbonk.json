@@ -1,0 +1,57 @@
+{
+  "id": "traj_8yty3dklbonk",
+  "version": 1,
+  "task": {
+    "title": "Classify TS-only multi-path launcher refusal",
+    "source": {
+      "system": "plain",
+      "id": "relayfile#386-ci"
+    }
+  },
+  "status": "completed",
+  "startedAt": "2026-07-30T05:15:57.155Z",
+  "completedAt": "2026-07-30T05:15:57.307Z",
+  "agents": [
+    {
+      "name": "default",
+      "role": "lead",
+      "joinedAt": "2026-07-30T05:15:57.242Z"
+    }
+  ],
+  "chapters": [
+    {
+      "id": "chap_c6quzmdcsnrc",
+      "title": "Work",
+      "agentName": "default",
+      "startedAt": "2026-07-30T05:15:57.242Z",
+      "endedAt": "2026-07-30T05:15:57.307Z",
+      "events": [
+        {
+          "ts": 1785388557243,
+          "type": "decision",
+          "content": "Classify MountMultiPathUnsupportedError as TS-only within setup errors: Classify MountMultiPathUnsupportedError as TS-only within setup errors",
+          "raw": {
+            "question": "Classify MountMultiPathUnsupportedError as TS-only within setup errors",
+            "chosen": "Classify MountMultiPathUnsupportedError as TS-only within setup errors",
+            "alternatives": [],
+            "reasoning": "Python exposes no mount launcher or env bag and its mount placeholders always raise ts_only_sdk_feature; no Go or Swift SDK launcher exists in this repo. Only the TypeScript launcher can pass RELAYFILE_MOUNT_PATHS_FILE to the daemon."
+          },
+          "significance": "high"
+        }
+      ]
+    }
+  ],
+  "retrospective": {
+    "summary": "Declared the public TypeScript-only launcher refusal in SDK parity with the capability reason; contract, build, typecheck, and 235 SDK tests pass.",
+    "approach": "Standard approach",
+    "confidence": 0.98
+  },
+  "commits": [],
+  "filesChanged": [],
+  "projectId": "AgentWorkforce/relayfile",
+  "tags": [],
+  "_trace": {
+    "startRef": "42ec7270ed2ac5f7675bcbd474c0ad2052c3a4fe",
+    "endRef": "42ec7270ed2ac5f7675bcbd474c0ad2052c3a4fe"
+  }
+}

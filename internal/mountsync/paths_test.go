@@ -18,6 +18,7 @@ func TestNewRelativeRemotePath_Rejects(t *testing.T) {
 		{"leading-slash", "/foo.txt", "mount"},
 		{"parent-traversal", "../escape.txt", "mount"},
 		{"embedded-traversal", "sub/../../escape", "mount"},
+		{"unix-backslash-filename", "foo\\bar", "mount"},
 		{"collides-with-basename", "mount", "mount"},
 	}
 	for _, tc := range cases {
@@ -26,6 +27,14 @@ func TestNewRelativeRemotePath_Rejects(t *testing.T) {
 				t.Fatalf("expected rejection for %q", tc.rel)
 			}
 		})
+	}
+}
+
+func TestRelativeRemotePathFromLocal_RejectsUnixBackslashFilename(t *testing.T) {
+	root := t.TempDir()
+	localPath := filepath.Join(root, "foo\\bar")
+	if _, err := RelativeRemotePathFromLocal(root, localPath); err == nil {
+		t.Fatal("expected a Unix backslash filename to be rejected at the local-to-remote boundary")
 	}
 }
 
@@ -108,5 +117,23 @@ func TestRelativeRemotePathFromLocal_RejectsRoot(t *testing.T) {
 	}
 	if _, err := RelativeRemotePathFromLocal(root, filepath.Join(root, "ok.md")); err != nil {
 		t.Fatalf("legitimate child rejected: %v", err)
+	}
+}
+
+func TestRelativeRemotePathFromLocalUnderRootAllowsBasenameNamedDescendant(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "Docs")
+	localPath := filepath.Join(root, "Docs", "page.md")
+
+	rel, err := RelativeRemotePathFromLocalUnderRoot(root, "/notion/Docs", localPath)
+	if err != nil {
+		t.Fatalf("non-root basename descendant rejected: %v", err)
+	}
+	if got := rel.Slash(); got != "Docs/page.md" {
+		t.Fatalf("relative path = %q, want %q", got, "Docs/page.md")
+	}
+	if got, err := localToRemotePath(root, "/notion/Docs", localPath); err != nil {
+		t.Fatalf("map non-root basename descendant: %v", err)
+	} else if got != "/notion/Docs/Docs/page.md" {
+		t.Fatalf("remote path = %q, want %q", got, "/notion/Docs/Docs/page.md")
 	}
 }

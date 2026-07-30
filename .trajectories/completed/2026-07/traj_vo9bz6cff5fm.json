@@ -1,0 +1,57 @@
+{
+  "id": "traj_vo9bz6cff5fm",
+  "version": 1,
+  "task": {
+    "title": "Fix scoped background initialization regression",
+    "source": {
+      "system": "plain",
+      "id": "relayfile#379"
+    }
+  },
+  "status": "completed",
+  "startedAt": "2026-07-30T07:20:21.370Z",
+  "completedAt": "2026-07-30T07:23:51.176Z",
+  "agents": [
+    {
+      "name": "default",
+      "role": "lead",
+      "joinedAt": "2026-07-30T07:23:50.338Z"
+    }
+  ],
+  "chapters": [
+    {
+      "id": "chap_3do6thrzrbs8",
+      "title": "Work",
+      "agentName": "default",
+      "startedAt": "2026-07-30T07:23:50.338Z",
+      "endedAt": "2026-07-30T07:23:51.176Z",
+      "events": [
+        {
+          "ts": 1785396230339,
+          "type": "decision",
+          "content": "Keep detached background preparation topology-aware: Keep detached background preparation topology-aware",
+          "raw": {
+            "question": "Keep detached background preparation topology-aware",
+            "chosen": "Keep detached background preparation topology-aware",
+            "alternatives": [],
+            "reasoning": "The detached spawn boundary repeats layout preparation for self-containment, but must use the persisted local layout so scoped mounts never recreate global digest or skill artifacts."
+          },
+          "significance": "high"
+        }
+      ]
+    }
+  ],
+  "retrospective": {
+    "summary": "Made background mount preparation topology-aware and added a regression proving scoped background setup preserves absence of unsynchronized root artifacts; full validation passes.",
+    "approach": "Standard approach",
+    "confidence": 0.95
+  },
+  "commits": [],
+  "filesChanged": [],
+  "projectId": "AgentWorkforce/relayfile",
+  "tags": [],
+  "_trace": {
+    "startRef": "c97a789fa3dd96991e3a1c78b5c098f5a18656e1",
+    "endRef": "c97a789fa3dd96991e3a1c78b5c098f5a18656e1"
+  }
+}

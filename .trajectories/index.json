@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "lastUpdated": "2026-07-30T04:23:38.150Z",
+  "lastUpdated": "2026-07-30T12:51:42.275Z",
   "trajectories": {
     "traj_4pvrlmqfnzng": {
       "title": "Review PR #278 in AgentWorkforce/relayfile",
@@ -43,6 +43,146 @@
       "startedAt": "2026-07-30T04:20:38.199Z",
       "completedAt": "2026-07-30T04:23:38.033Z",
       "path": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-a/.trajectories/completed/2026-07/traj_jj88zowb0k05.json"
+    },
+    "traj_5qk62q12kolh": {
+      "title": "Ship scoped multi-path CLI runtime with explicit refusal boundaries",
+      "status": "completed",
+      "startedAt": "2026-07-30T04:44:16.955Z",
+      "completedAt": "2026-07-30T05:00:20.731Z",
+      "path": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-b/.trajectories/completed/2026-07/traj_5qk62q12kolh.json"
+    },
+    "traj_nb6cq7m894kp": {
+      "title": "Address Unit B local review findings",
+      "status": "completed",
+      "startedAt": "2026-07-30T05:03:29.674Z",
+      "completedAt": "2026-07-30T05:03:42.202Z",
+      "path": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-b/.trajectories/completed/2026-07/traj_nb6cq7m894kp.json"
+    },
+    "traj_8yty3dklbonk": {
+      "title": "Classify TS-only multi-path launcher refusal",
+      "status": "completed",
+      "startedAt": "2026-07-30T05:15:57.155Z",
+      "completedAt": "2026-07-30T05:15:57.307Z",
+      "path": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-b/.trajectories/completed/2026-07/traj_8yty3dklbonk.json"
+    },
+    "traj_67s301119cc2": {
+      "title": "Fix scoped child mirror-root artifact leakage",
+      "status": "completed",
+      "startedAt": "2026-07-30T05:23:47.124Z",
+      "completedAt": "2026-07-30T05:26:30.407Z",
+      "path": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-b/.trajectories/completed/2026-07/traj_67s301119cc2.json"
+    },
+    "traj_tdew3mg9dnit": {
+      "title": "Reset explicit mount state identity on rehome",
+      "status": "completed",
+      "startedAt": "2026-07-30T05:30:01.698Z",
+      "completedAt": "2026-07-30T05:32:10.925Z",
+      "path": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-b/.trajectories/completed/2026-07/traj_tdew3mg9dnit.json"
+    },
+    "traj_uuzgy4neo8fh": {
+      "title": "Refuse competing mount before topology mutation",
+      "status": "completed",
+      "startedAt": "2026-07-30T05:42:47.387Z",
+      "completedAt": "2026-07-30T05:45:28.010Z",
+      "path": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-b/.trajectories/completed/2026-07/traj_uuzgy4neo8fh.json"
+    },
+    "traj_29k09yk5t2x1": {
+      "title": "Close reserved-root and inherited-env mount boundaries",
+      "status": "completed",
+      "startedAt": "2026-07-30T05:50:08.873Z",
+      "completedAt": "2026-07-30T05:52:21.363Z",
+      "path": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-b/.trajectories/completed/2026-07/traj_29k09yk5t2x1.json"
+    },
+    "traj_rw26ij8x9yhr": {
+      "title": "Reject case-folded scoped root collisions",
+      "status": "completed",
+      "startedAt": "2026-07-30T05:56:19.212Z",
+      "completedAt": "2026-07-30T06:00:44.272Z",
+      "path": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-b/.trajectories/completed/2026-07/traj_rw26ij8x9yhr.json"
+    },
+    "traj_uymnrxehl9bf": {
+      "title": "Address Unit B exact GitHub review findings",
+      "status": "completed",
+      "startedAt": "2026-07-30T06:22:14.368Z",
+      "completedAt": "2026-07-30T06:34:46.195Z",
+      "path": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-b/.trajectories/completed/2026-07/traj_uymnrxehl9bf.json"
+    },
+    "traj_ybwfsutm6tzl": {
+      "title": "Address final Unit B review findings",
+      "status": "completed",
+      "startedAt": "2026-07-30T06:48:17.241Z",
+      "completedAt": "2026-07-30T06:54:18.507Z",
+      "path": ".trajectories/completed/2026-07/traj_ybwfsutm6tzl.json"
+    },
+    "traj_9iljc1uad7l1": {
+      "title": "Attribute private mount state during legacy migration",
+      "status": "completed",
+      "startedAt": "2026-07-30T06:59:37.414Z",
+      "completedAt": "2026-07-30T06:59:39.087Z",
+      "path": ".trajectories/completed/2026-07/traj_9iljc1uad7l1.json"
+    },
+    "traj_vo9bz6cff5fm": {
+      "title": "Fix scoped background initialization regression",
+      "status": "completed",
+      "startedAt": "2026-07-30T07:20:21.370Z",
+      "completedAt": "2026-07-30T07:23:51.176Z",
+      "path": ".trajectories/completed/2026-07/traj_vo9bz6cff5fm.json"
+    },
+    "traj_zx3ypuzq5t1j": {
+      "title": "Reject explicitly empty scoped allowlists",
+      "status": "completed",
+      "startedAt": "2026-07-30T07:27:38.808Z",
+      "completedAt": "2026-07-30T07:32:43.868Z",
+      "path": ".trajectories/completed/2026-07/traj_zx3ypuzq5t1j.json"
+    },
+    "traj_ewsm04d3yriw": {
+      "title": "Fix Unit B exact-head review findings",
+      "status": "completed",
+      "startedAt": "2026-07-30T07:41:40.506Z",
+      "completedAt": "2026-07-30T07:45:19.961Z",
+      "path": ".trajectories/completed/2026-07/traj_ewsm04d3yriw.json"
+    },
+    "traj_vbh4sg9b9wle": {
+      "title": "Fix reserved-boundary review findings",
+      "status": "completed",
+      "startedAt": "2026-07-30T07:58:05.992Z",
+      "completedAt": "2026-07-30T08:00:16.521Z",
+      "path": ".trajectories/completed/2026-07/traj_vbh4sg9b9wle.json"
+    },
+    "traj_kd7iuol8b4d2": {
+      "title": "Reserve local Git metadata across scoped mount roots",
+      "status": "completed",
+      "startedAt": "2026-07-30T08:05:17.369Z",
+      "completedAt": "2026-07-30T09:00:17.230Z",
+      "path": ".trajectories/completed/2026-07/traj_kd7iuol8b4d2.json"
+    },
+    "traj_1kmlyo9fwsnv": {
+      "title": "Complete Unit B derived safety gate for scoped multi-path mounts",
+      "status": "completed",
+      "startedAt": "2026-07-30T09:02:41.145Z",
+      "completedAt": "2026-07-30T09:58:24.657Z",
+      "path": ".trajectories/completed/2026-07/traj_1kmlyo9fwsnv.json"
+    },
+    "traj_scyyoykk4ura": {
+      "title": "Close scoped catalog cleanup TOCTOU",
+      "status": "completed",
+      "startedAt": "2026-07-30T12:27:24.305Z",
+      "completedAt": "2026-07-30T12:33:02.559Z",
+      "path": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-b/.trajectories/completed/2026-07/traj_scyyoykk4ura.json"
+    },
+    "traj_xp2c0f2k4e9k": {
+      "title": "Normalize provider filters to VFS roots",
+      "status": "completed",
+      "startedAt": "2026-07-30T12:41:15.057Z",
+      "completedAt": "2026-07-30T12:43:43.947Z",
+      "path": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-b/.trajectories/completed/2026-07/traj_xp2c0f2k4e9k.json"
+    },
+    "traj_fksma6kiqy93": {
+      "title": "Enumerate shared B/C mount concepts and settle Unit B exact head",
+      "status": "completed",
+      "startedAt": "2026-07-30T12:46:12.964Z",
+      "completedAt": "2026-07-30T12:51:42.114Z",
+      "path": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-b/.trajectories/completed/2026-07/traj_fksma6kiqy93.json"
     }
   }
 }

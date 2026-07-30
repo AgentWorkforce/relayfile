@@ -22,6 +22,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"os/user"
 	"path"
 	"path/filepath"
 	"regexp"
@@ -35,6 +36,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/agentworkforce/relayfile/internal/delegatedauth"
+	"github.com/agentworkforce/relayfile/internal/mountscope"
 	"github.com/agentworkforce/relayfile/internal/mountsync"
 	"github.com/agentworkforce/relayfile/internal/relayfile"
 	"github.com/agentworkforce/relayfile/internal/writeback"
@@ -153,6 +155,12 @@ type workspaceRecord struct {
 	AgentName        string   `json:"agentName,omitempty"`
 	Scopes           []string `json:"scopes,omitempty"`
 	Timezone         string   `json:"timezone,omitempty"`
+	RemotePaths      []string `json:"remotePaths,omitempty"`
+	LocalLayout      string   `json:"localLayout,omitempty"`
+	MountStateFile   string   `json:"mountStateFile,omitempty"`
+	MountStateDir    string   `json:"mountStateDir,omitempty"`
+	MountKind        string   `json:"mountKind,omitempty"`
+	mountStateSet    bool
 }
 
 type apiClient struct {
@@ -483,6 +491,7 @@ type relayIntegrationBindingStore struct {
 
 type daemonPIDState struct {
 	PID         int    `json:"pid"`
+	Registered  bool   `json:"registered,omitempty"`
 	WorkspaceID string `json:"workspaceId"`
 	LocalDir    string `json:"localDir"`
 	LogFile     string `json:"logFile"`
@@ -1015,8 +1024,14 @@ func runSetup(args []string, stdin io.Reader, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if err := ensureMirrorLayout(absLocalDir); err != nil {
+	releaseMountStartLock, err := acquireMountStartLock(absLocalDir)
+	if err != nil {
 		return err
+	}
+	layoutErr := ensureMirrorLayoutForTopology(absLocalDir, setupMirrorLayout(name))
+	releaseMountStartLock()
+	if layoutErr != nil {
+		return layoutErr
 	}
 
 	record, createdWorkspace, err := ensureWorkspaceForSetup(tokenSet, name, absLocalDir)
@@ -1605,13 +1620,7 @@ func providerPromptText(entries []integrationCatalogEntry) string {
 }
 
 func normalizeProviderID(value string) string {
-	value = strings.ToLower(strings.TrimSpace(value))
-	switch value {
-	case "slack", "slack-sage":
-		return "slack"
-	default:
-		return value
-	}
+	return mountscope.NormalizeProviderID(value)
 }
 
 func validateLocalProviderID(provider string) error {
@@ -1784,14 +1793,18 @@ func isAPIConflict(err error) bool {
 }
 
 func fallbackIntegrationCatalog() []integrationCatalogEntry {
-	return []integrationCatalogEntry{
-		{ID: "github", DisplayName: "GitHub", VFSRoot: "/github"},
-		{ID: "notion", DisplayName: "Notion", VFSRoot: "/notion"},
-		{ID: "linear", DisplayName: "Linear", VFSRoot: "/linear"},
-		{ID: "slack", DisplayName: "Slack", VFSRoot: "/slack"},
-		{ID: "slack-my-senior-dev", DisplayName: "Slack (MSD)", VFSRoot: "/slack-msd"},
-		{ID: "slack-nightcto", DisplayName: "Slack (NightCTO)", VFSRoot: "/slack-nightcto"},
+	entries := []integrationCatalogEntry{
+		{ID: "github", DisplayName: "GitHub"},
+		{ID: "notion", DisplayName: "Notion"},
+		{ID: "linear", DisplayName: "Linear"},
+		{ID: "slack", DisplayName: "Slack"},
+		{ID: "slack-my-senior-dev", DisplayName: "Slack (MSD)"},
+		{ID: "slack-nightcto", DisplayName: "Slack (NightCTO)"},
 	}
+	for i := range entries {
+		entries[i].VFSRoot = "/" + mountscope.ProviderRoot(entries[i].ID)
+	}
+	return entries
 }
 
 // preflightMountRootInvariant enforces the recovery-mode contract before
@@ -1854,6 +1867,38 @@ func preflightMountRootInvariant(absLocalDir string, ack bool) error {
 	return nil
 }
 
+// preflightScopedMountRootInvariant inspects every existing path component
+// between the common root and a scoped child. Missing components are a valid
+// first-mount state; an existing non-directory component is a clobber and is
+// never reset piecemeal.
+func preflightScopedMountRootInvariant(localRoot, scopedLocalDir string) error {
+	root := filepath.Clean(localRoot)
+	child := filepath.Clean(scopedLocalDir)
+	relative, err := filepath.Rel(root, child)
+	if err != nil || relative == "." || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("scoped local dir %s is outside mount root %s", child, root)
+	}
+	current := root
+	for _, part := range strings.Split(relative, string(filepath.Separator)) {
+		current = filepath.Join(current, part)
+		info, statErr := os.Lstat(current)
+		if os.IsNotExist(statErr) {
+			return nil
+		}
+		if statErr != nil {
+			return fmt.Errorf("inspect scoped mount root %s: %w", current, statErr)
+		}
+		if !info.IsDir() {
+			return fmt.Errorf(
+				"scoped mount path %s is %s; move it aside or choose a new LOCAL_DIR (pass --rehome only when changing the registered mirror) rather than resetting one child in place",
+				current,
+				info.Mode().String(),
+			)
+		}
+	}
+	return nil
+}
+
 // classifyMountRootKind reports the kind string used in incident reports.
 func classifyMountRootKind(info os.FileInfo) string {
 	switch {
@@ -1870,13 +1915,13 @@ func ensureMirrorLayout(localDir string) error {
 	if err := os.MkdirAll(localDir, 0o755); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Join(localDir, "digests"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(localDir, mountscope.DigestsTopLevel), 0o755); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Join(localDir, ".skills"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(localDir, mountscope.SkillsTopLevel), 0o755); err != nil {
 		return err
 	}
-	skillPath := filepath.Join(localDir, ".skills", "activity-summary.md")
+	skillPath := filepath.Join(localDir, mountscope.SkillsTopLevel, "activity-summary.md")
 	skillContent := []byte(activitySummarySkillMarkdown)
 	if current, err := os.ReadFile(skillPath); err == nil {
 		if !bytes.Equal(current, skillContent) {
@@ -1891,16 +1936,174 @@ func ensureMirrorLayout(localDir string) error {
 	} else {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Join(localDir, ".relay"), 0o755); err != nil {
+	return ensureMountRuntimeLayout(localDir)
+}
+
+func ensureMirrorLayoutForTopology(localDir, layout string) error {
+	if strings.TrimSpace(layout) == mountscope.LayoutScoped {
+		// A workspace digest is global: it can name provider events outside a
+		// scoped mount's allowlist. Creating the directory and activity skill
+		// here would promise a current digest that no scoped child can safely
+		// pull. Honest absence preserves the allowlist until filtered digests
+		// have their own explicit contract.
+		if err := prepareScopedCatalogRoot(localDir); err != nil {
+			return err
+		}
+		return ensureMountRuntimeLayout(localDir)
+	}
+	return ensureMirrorLayout(localDir)
+}
+
+func setupMirrorLayout(workspaceName string) string {
+	if existing, ok := workspaceRecordByName(workspaceName); ok &&
+		strings.TrimSpace(existing.LocalLayout) == mountscope.LayoutScoped {
+		return mountscope.LayoutScoped
+	}
+	return mountscope.LayoutExact
+}
+
+// prepareScopedCatalogRoot removes only artifacts Relayfile can prove it
+// generated. Unknown content under either catalog-only tree refuses without
+// mutation so switching to scoped layout cannot silently discard user data.
+func prepareScopedCatalogRoot(localDir string) error {
+	type removableArtifact struct {
+		dir       string
+		knownFile string
+		content   []byte
+	}
+	artifacts := []removableArtifact{
+		{dir: filepath.Join(localDir, mountscope.DigestsTopLevel)},
+		{
+			dir:       filepath.Join(localDir, mountscope.SkillsTopLevel),
+			knownFile: "activity-summary.md",
+			content:   []byte(activitySummarySkillMarkdown),
+		},
+	}
+
+	for _, artifact := range artifacts {
+		info, statErr := os.Lstat(artifact.dir)
+		if errors.Is(statErr, os.ErrNotExist) {
+			continue
+		}
+		if statErr != nil {
+			return fmt.Errorf("inspect scoped catalog artifact %s: %w", artifact.dir, statErr)
+		}
+		if !info.IsDir() {
+			return fmt.Errorf(
+				"scoped mount root %s contains non-directory catalog artifact %s; move that content or choose a new LOCAL_DIR (pass --rehome only when changing the registered mirror)",
+				localDir,
+				artifact.dir,
+			)
+		}
+		entries, err := os.ReadDir(artifact.dir)
+		if err != nil {
+			return fmt.Errorf("inspect scoped catalog artifact %s: %w", artifact.dir, err)
+		}
+		for _, entry := range entries {
+			if artifact.knownFile == "" || entry.Name() != artifact.knownFile || entry.IsDir() {
+				return fmt.Errorf(
+					"scoped mount root %s contains catalog-only content at %s; move that content or choose a new LOCAL_DIR (pass --rehome only when changing the registered mirror) rather than hiding or deleting it",
+					localDir,
+					filepath.Join(artifact.dir, entry.Name()),
+				)
+			}
+			payload, err := os.ReadFile(filepath.Join(artifact.dir, entry.Name()))
+			if err != nil {
+				return fmt.Errorf("inspect generated scoped catalog artifact %s: %w", filepath.Join(artifact.dir, entry.Name()), err)
+			}
+			if !bytes.Equal(payload, artifact.content) {
+				return fmt.Errorf(
+					"scoped mount root %s contains modified catalog-only content at %s; move that content or choose a new LOCAL_DIR (pass --rehome only when changing the registered mirror) rather than deleting it",
+					localDir,
+					filepath.Join(artifact.dir, entry.Name()),
+				)
+			}
+		}
+	}
+
+	for _, artifact := range artifacts {
+		if artifact.knownFile != "" {
+			if err := removeGeneratedScopedCatalogArtifact(
+				filepath.Join(artifact.dir, artifact.knownFile),
+				artifact.content,
+			); err != nil {
+				return fmt.Errorf("remove generated scoped catalog artifact: %w", err)
+			}
+		}
+		if err := os.Remove(artifact.dir); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("remove empty scoped catalog directory %s: %w", artifact.dir, err)
+		}
+	}
+	return nil
+}
+
+func removeGeneratedScopedCatalogArtifact(path string, expected []byte) error {
+	if _, err := os.Lstat(path); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
 		return err
 	}
-	if err := os.MkdirAll(filepath.Join(localDir, ".relay", "integrations"), 0o755); err != nil {
+	quarantine, err := os.CreateTemp(filepath.Dir(path), ".relayfile-scoped-transition-*")
+	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Join(localDir, ".relay", "disconnected"), 0o755); err != nil {
+	quarantinePath := quarantine.Name()
+	if err := quarantine.Close(); err != nil {
+		_ = os.Remove(quarantinePath)
 		return err
 	}
-	return os.MkdirAll(filepath.Join(localDir, ".relay", "conflicts"), 0o755)
+	if err := os.Remove(quarantinePath); err != nil {
+		return err
+	}
+	if err := os.Rename(path, quarantinePath); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	payload, err := os.ReadFile(quarantinePath)
+	if err != nil {
+		return fmt.Errorf("inspect quarantined generated artifact %s: %w", quarantinePath, err)
+	}
+	if !bytes.Equal(payload, expected) {
+		if _, statErr := os.Lstat(path); errors.Is(statErr, os.ErrNotExist) {
+			if restoreErr := os.Rename(quarantinePath, path); restoreErr != nil {
+				return fmt.Errorf(
+					"generated artifact %s changed during scoped transition and is preserved at %s (restore failed: %v)",
+					path,
+					quarantinePath,
+					restoreErr,
+				)
+			}
+			return fmt.Errorf("generated artifact %s changed during scoped transition and was restored", path)
+		}
+		return fmt.Errorf(
+			"generated artifact %s changed during scoped transition and is preserved at %s",
+			path,
+			quarantinePath,
+		)
+	}
+	if err := os.Remove(quarantinePath); err != nil {
+		return fmt.Errorf("remove quarantined generated artifact %s: %w", quarantinePath, err)
+	}
+	return nil
+}
+
+// ensureMountRuntimeLayout creates only the per-Syncer runtime directories.
+// Scoped children must not receive mirror-root artifacts such as digests or
+// skills because those paths would become remote content inside the subtree.
+func ensureMountRuntimeLayout(localDir string) error {
+	if err := os.MkdirAll(filepath.Join(localDir, mountscope.RuntimeTopLevel), 0o755); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Join(localDir, mountscope.RuntimeTopLevel, "integrations"), 0o755); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Join(localDir, mountscope.RuntimeTopLevel, "disconnected"), 0o755); err != nil {
+		return err
+	}
+	return os.MkdirAll(filepath.Join(localDir, mountscope.RuntimeTopLevel, "conflicts"), 0o755)
 }
 
 const activitySummarySkillMarkdown = `# activity-summary
@@ -3474,7 +3677,7 @@ func runIntegrationDisconnect(args []string, stdin io.Reader, stdout io.Writer) 
 	if _, _, err := client.do(context.Background(), http.MethodDelete, fmt.Sprintf("/api/v1/workspaces/%s/integrations/%s/status", url.PathEscape(record.ID), url.PathEscape(provider)), nil); err != nil {
 		return err
 	}
-	if err := markProviderDisconnected(record.LocalDir, provider); err != nil {
+	if err := markProviderDisconnected(record.LocalDir, provider, record.LocalLayout); err != nil {
 		return err
 	}
 	fmt.Fprintf(stdout, "%s disconnected from workspace %s\n", provider, record.Name)
@@ -3818,6 +4021,408 @@ const (
 
 func deadLetterDirFor(localDir string) string {
 	return filepath.Join(localDir, ".relay", "dead-letter")
+}
+
+func validateMountScopeTransition(record workspaceRecord, nextLocalDir, nextLayout string, nextPaths []string) error {
+	if strings.TrimSpace(record.LocalLayout) != mountscope.LayoutScoped || nextLayout != mountscope.LayoutScoped {
+		return nil
+	}
+	previousAbs := absolutePathOrClean(record.LocalDir)
+	nextAbs := absolutePathOrClean(nextLocalDir)
+	sameRoot, err := sameFilesystemPath(previousAbs, nextAbs)
+	if err != nil {
+		return fmt.Errorf("compare scoped mount roots: %w", err)
+	}
+	if previousAbs == "" || !sameRoot {
+		return nil
+	}
+	if err := mountscope.ValidateScopedPathSet(record.RemotePaths); err != nil {
+		return fmt.Errorf(
+			"workspace has a persisted scoped allowlist that cannot be represented safely (%v); choose a new LOCAL_DIR and pass --rehome if changing the registered mirror",
+			err,
+		)
+	}
+	nextSet := map[string]struct{}{}
+	for _, remotePath := range mountscope.NormalizePaths(nextPaths, "/") {
+		nextSet[remotePath] = struct{}{}
+	}
+	var removed []string
+	for _, remotePath := range mountscope.NormalizePaths(record.RemotePaths, "/") {
+		if _, ok := nextSet[remotePath]; !ok {
+			removed = append(removed, remotePath)
+		}
+	}
+	if len(removed) == 0 {
+		return nil
+	}
+	return fmt.Errorf(
+		"workspace scoped allowlist cannot remove %s in place at %s; choose a new LOCAL_DIR and pass --rehome when changing the registered mirror",
+		strings.Join(removed, ", "),
+		nextAbs,
+	)
+}
+
+func validateMountLayoutTransition(record workspaceRecord, nextLocalDir, nextLayout string) error {
+	previousLocalDir := strings.TrimSpace(record.LocalDir)
+	if previousLocalDir == "" {
+		return nil
+	}
+	previousAbs := absolutePathOrClean(previousLocalDir)
+	nextAbs := absolutePathOrClean(nextLocalDir)
+	sameRoot, err := sameFilesystemPath(previousAbs, nextAbs)
+	if err != nil {
+		return fmt.Errorf("compare mount layout roots: %w", err)
+	}
+	if !sameRoot {
+		return nil
+	}
+	previousLayout := strings.TrimSpace(record.LocalLayout)
+	if previousLayout == "" {
+		// Legacy records predate configurable layout and can continue in the
+		// only topology that release knew: exact. They cannot prove a scoped
+		// topology when mount state already exists, so enabling scoped in
+		// place must refuse rather than orphan that state. A current pre-mount
+		// catalog record has no state to orphan and may start scoped.
+		if nextLayout == mountscope.LayoutExact {
+			return nil
+		}
+		hasState, err := hasExistingMountState(record, nextAbs)
+		if err != nil {
+			return err
+		}
+		if !hasState {
+			return nil
+		}
+		return fmt.Errorf(
+			"workspace mirror layout is unknown for the legacy record with existing mount state at %s; choose a new LOCAL_DIR and pass --rehome when changing the registered mirror so relayfile does not orphan the existing exact topology",
+			nextAbs,
+		)
+	}
+	if previousLayout == nextLayout {
+		return nil
+	}
+	return fmt.Errorf(
+		"workspace mirror layout cannot change in place from %s to %s at %s; choose a new LOCAL_DIR and pass --rehome when changing the registered mirror",
+		previousLayout,
+		nextLayout,
+		nextAbs,
+	)
+}
+
+func hasExistingMountState(record workspaceRecord, localDir string) (bool, error) {
+	candidates := []string{
+		filepath.Join(localDir, ".relay", "state.json"),
+		filepath.Join(localDir, mountsync.LegacyMountStateFileName),
+		filepath.Join(localDir, mountsync.DefaultMountStateDirName, "state.json"),
+	}
+	resolved, err := mountsync.ResolveMountStatePath(mountsync.MountStatePathOptions{
+		WorkspaceID: firstNonBlank(record.ID, record.RelayWorkspaceID, record.Name),
+		RemoteRoot:  mountscope.FirstPath(record.RemotePaths, "/"),
+		LocalRoot:   localDir,
+		StateFile:   record.MountStateFile,
+		StateDir:    record.MountStateDir,
+		MountKind:   record.MountKind,
+	})
+	if err != nil {
+		return false, fmt.Errorf("resolve existing private mount state: %w", err)
+	}
+	candidates = append(candidates, resolved.StateFile)
+	seen := map[string]struct{}{}
+	for _, candidate := range candidates {
+		candidate = filepath.Clean(candidate)
+		if _, ok := seen[candidate]; ok {
+			continue
+		}
+		seen[candidate] = struct{}{}
+		_, err := os.Stat(candidate)
+		if err == nil {
+			return true, nil
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return false, fmt.Errorf("inspect existing mount state %s: %w", candidate, err)
+		}
+	}
+	// Private state introduced before the catalog persisted RemotePaths has an
+	// opaque mount ID derived partly from the now-unknown exact remote root.
+	// Its file cannot be reconstructed from the legacy record. In that state,
+	// any private-state entry means prior topology cannot be ruled out, so the
+	// safe migration is a new LOCAL_DIR with --rehome.
+	if strings.TrimSpace(record.MountStateFile) == "" {
+		stateDir := firstNonBlank(record.MountStateDir, mountsync.DefaultMountStateDir())
+		entries, err := os.ReadDir(stateDir)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return false, nil
+			}
+			return false, fmt.Errorf("inspect private mount state directory %s: %w", stateDir, err)
+		}
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+			statePath := filepath.Join(stateDir, entry.Name(), "state.json")
+			info, err := os.Stat(statePath)
+			if err == nil && info.Mode().IsRegular() {
+				belongs, attributable, matchErr := privateMountStateMatchesRecord(statePath, record, localDir)
+				if matchErr != nil {
+					return false, matchErr
+				}
+				if belongs || !attributable {
+					return true, nil
+				}
+				continue
+			}
+			if err != nil && !errors.Is(err, os.ErrNotExist) {
+				return false, fmt.Errorf("inspect private mount state entry %s: %w", statePath, err)
+			}
+		}
+	}
+	return false, nil
+}
+
+func privateMountStateMatchesRecord(statePath string, record workspaceRecord, localDir string) (belongs, attributable bool, err error) {
+	payload, err := os.ReadFile(statePath)
+	if err != nil {
+		return false, false, fmt.Errorf("read private mount state identity %s: %w", statePath, err)
+	}
+	var identity struct {
+		WorkspaceID string `json:"workspaceId"`
+		LocalRoot   string `json:"localRoot"`
+	}
+	if err := json.Unmarshal(payload, &identity); err != nil {
+		// A legacy or corrupt state file still proves that prior topology may
+		// exist, but cannot safely be attributed away from this record.
+		return false, false, nil
+	}
+	workspaceID := strings.TrimSpace(identity.WorkspaceID)
+	stateLocalRoot := strings.TrimSpace(identity.LocalRoot)
+	if workspaceID == "" || stateLocalRoot == "" {
+		return false, false, nil
+	}
+	wantWorkspaceIDs := []string{record.ID, record.RelayWorkspaceID, record.Name}
+	workspaceMatches := false
+	for _, candidate := range wantWorkspaceIDs {
+		if strings.TrimSpace(candidate) != "" && workspaceID == strings.TrimSpace(candidate) {
+			workspaceMatches = true
+			break
+		}
+	}
+	if !workspaceMatches {
+		return false, true, nil
+	}
+	sameRoot, err := sameFilesystemPath(stateLocalRoot, localDir)
+	if err != nil {
+		return false, false, fmt.Errorf("compare private mount state root %s: %w", statePath, err)
+	}
+	return sameRoot, true, nil
+}
+
+func validateMountResetMode(localDir, layout string, resetAfterClobber bool) error {
+	if layout != mountscope.LayoutScoped || !resetAfterClobber {
+		return nil
+	}
+	return fmt.Errorf(
+		"--reset-after-clobber cannot recover a scoped mount transactionally at %s; choose a new LOCAL_DIR and pass --rehome when changing the registered mirror",
+		localDir,
+	)
+}
+
+func resolveCLIMountRemotePaths(requested, recorded []string, envRemotePath string) []string {
+	if len(requested) == 0 && strings.TrimSpace(envRemotePath) == "" && len(recorded) > 0 {
+		requested = append([]string(nil), recorded...)
+	}
+	fallback := strings.TrimSpace(envRemotePath)
+	if fallback == "" {
+		fallback = "/"
+	}
+	return mountscope.NormalizePaths(requested, fallback)
+}
+
+func validateExplicitPathsFileAllowlist(pathsFile string, fileRemotePaths, directRemotePaths []string) error {
+	return mountscope.ValidateExplicitPathsFile(pathsFile, fileRemotePaths, directRemotePaths)
+}
+
+func absolutePathOrClean(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return ""
+	}
+	absolute, err := filepath.Abs(trimmed)
+	if err != nil {
+		return filepath.Clean(trimmed)
+	}
+	return absolute
+}
+
+func sameFilesystemPath(left, right string) (bool, error) {
+	left = absolutePathOrClean(left)
+	right = absolutePathOrClean(right)
+	if left == "" || right == "" {
+		return left == right, nil
+	}
+	if filepath.Clean(left) == filepath.Clean(right) {
+		return true, nil
+	}
+	leftInfo, leftErr := os.Stat(left)
+	rightInfo, rightErr := os.Stat(right)
+	switch {
+	case leftErr == nil && rightErr == nil:
+		return os.SameFile(leftInfo, rightInfo), nil
+	case leftErr != nil && !errors.Is(leftErr, os.ErrNotExist):
+		return false, fmt.Errorf("inspect %s: %w", left, leftErr)
+	case rightErr != nil && !errors.Is(rightErr, os.ErrNotExist):
+		return false, fmt.Errorf("inspect %s: %w", right, rightErr)
+	default:
+		return false, nil
+	}
+}
+
+func acquireMountStartLock(localDir string) (func(), error) {
+	canonicalRoot, err := canonicalMountStartLockRoot(localDir)
+	if err != nil {
+		return nil, fmt.Errorf("resolve mount-start lock identity for %s: %w", localDir, err)
+	}
+	identity := mountscope.PortableLocalPathIdentity(canonicalRoot)
+	sum := sha256.Sum256([]byte(identity))
+	// Startup coordination must remain available when HOME/default state is
+	// read-only and must not split when callers choose different state-file or
+	// state-dir overrides. Use only a trusted per-user runtime/cache parent:
+	// a predictable child directly beneath a shared /tmp can be pre-created by
+	// another user and turn the lock into a mount-start denial of service.
+	userNamespace, err := mountStartLockUserNamespace()
+	if err != nil {
+		return nil, err
+	}
+	lockBase, err := trustedMountStartLockBase()
+	if err != nil {
+		return nil, err
+	}
+	lockDir := filepath.Join(lockBase, "relayfile-mount-start-locks-"+userNamespace)
+	if err := os.MkdirAll(lockDir, 0o700); err != nil {
+		return nil, fmt.Errorf("create mount-start lock directory: %w", err)
+	}
+	if trusted, err := mountStartLockDirectoryTrusted(lockDir); err != nil {
+		return nil, fmt.Errorf("inspect mount-start lock directory: %w", err)
+	} else if !trusted {
+		return nil, fmt.Errorf("mount-start lock directory %s is not owned securely by the current user", lockDir)
+	}
+	lockPath := filepath.Join(lockDir, hex.EncodeToString(sum[:])+".lock")
+	file, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("open mount-start lock: %w", err)
+	}
+	unlock, acquired, err := tryLockFileExclusive(file)
+	if err != nil {
+		_ = file.Close()
+		return nil, fmt.Errorf("lock mount start for %s: %w", localDir, err)
+	}
+	if !acquired {
+		_ = file.Close()
+		return nil, fmt.Errorf(
+			"another mount initialization is already in progress for %s; wait for it to finish or stop the active mount before retrying",
+			localDir,
+		)
+	}
+	return func() {
+		unlock()
+		_ = file.Close()
+	}, nil
+}
+
+func canonicalMountStartLockRoot(localDir string) (string, error) {
+	absolute := absolutePathOrClean(localDir)
+	if absolute == "" {
+		return "", errors.New("local mount root is empty")
+	}
+	current := absolute
+	var missing []string
+	for {
+		_, err := os.Lstat(current)
+		switch {
+		case err == nil:
+			resolved, err := filepath.EvalSymlinks(current)
+			if err != nil {
+				return "", err
+			}
+			for index := len(missing) - 1; index >= 0; index-- {
+				resolved = filepath.Join(resolved, missing[index])
+			}
+			return filepath.Clean(resolved), nil
+		case errors.Is(err, os.ErrNotExist):
+			parent := filepath.Dir(current)
+			if parent == current {
+				return absolute, nil
+			}
+			missing = append(missing, filepath.Base(current))
+			current = parent
+			continue
+		default:
+			return "", err
+		}
+	}
+}
+
+func mountStartLockUserNamespace() (string, error) {
+	current, err := user.Current()
+	identity := ""
+	if err == nil {
+		identity = strings.TrimSpace(current.Uid)
+		if identity == "" {
+			identity = strings.TrimSpace(current.Username)
+		}
+	}
+	if identity == "" {
+		identity = firstNonBlank(
+			os.Getenv("UID"),
+			os.Getenv("USERNAME"),
+			os.Getenv("USER"),
+		)
+	}
+	if identity == "" {
+		return "", errors.New("cannot identify current user for mount-start lock namespace")
+	}
+	sum := sha256.Sum256([]byte(identity))
+	return hex.EncodeToString(sum[:8]), nil
+}
+
+func trustedMountStartLockBase() (string, error) {
+	userCacheDir, _ := os.UserCacheDir()
+	privateTempDir := ""
+	if namespace, err := mountStartLockUserNamespace(); err == nil {
+		privateTempDir = privateMountStartLockTempDir(os.TempDir(), namespace)
+	}
+	return trustedMountStartLockBaseFrom([]string{
+		strings.TrimSpace(os.Getenv("XDG_RUNTIME_DIR")),
+		privateTempDir,
+		userCacheDir,
+	})
+}
+
+func privateMountStartLockTempDir(tempDir, namespace string) string {
+	return filepath.Join(tempDir, "relayfile-runtime-"+namespace)
+}
+
+func trustedMountStartLockBaseFrom(candidates []string) (string, error) {
+	seen := map[string]struct{}{}
+	for _, candidate := range candidates {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "" {
+			continue
+		}
+		candidate = filepath.Clean(candidate)
+		if _, duplicate := seen[candidate]; duplicate {
+			continue
+		}
+		seen[candidate] = struct{}{}
+		if err := os.MkdirAll(candidate, 0o700); err != nil {
+			continue
+		}
+		trusted, err := mountStartLockDirectoryTrusted(candidate)
+		if err == nil && trusted {
+			return candidate, nil
+		}
+	}
+	return "", errors.New("no trusted per-user runtime or cache directory is available for mount-start coordination")
 }
 
 func deadLetterErrorPathFor(localDir, opID string) string {
@@ -5779,7 +6384,10 @@ func runMount(args []string) error {
 	server := fs.String("server", resolveServer("", credentials{}), "relayfile server URL")
 	token := fs.String("token", strings.TrimSpace(os.Getenv("RELAYFILE_TOKEN")), "bearer token")
 	credsFile := fs.String("creds-file", strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_CREDS_FILE")), "delegated relayfile credentials file")
-	remotePath := fs.String("remote-path", envOrDefault("RELAYFILE_REMOTE_PATH", "/"), "remote root path")
+	var remotePaths mountscope.StringListFlag
+	fs.Var(&remotePaths, "remote-path", "remote root path (may be repeated)")
+	pathsFile := fs.String("paths-file", strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_PATHS_FILE")), "file containing remote root paths, as a JSON array or newline-separated list")
+	localLayout := fs.String("local-layout", envOrDefault("RELAYFILE_MOUNT_LOCAL_LAYOUT", mountscope.LayoutExact), "local directory layout: exact or scoped")
 	eventProvider := fs.String("provider", strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_PROVIDER")), "event provider filter")
 	stateFile := fs.String("state-file", strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_STATE_FILE")), "state file path")
 	stateDir := fs.String("state-dir", envOrDefault("RELAYFILE_MOUNT_STATE_DIR", mountsync.DefaultMountStateDir()), "directory for private mount state")
@@ -5808,6 +6416,8 @@ func runMount(args []string) error {
 		"token":               true,
 		"creds-file":          true,
 		"remote-path":         true,
+		"paths-file":          true,
+		"local-layout":        true,
 		"provider":            true,
 		"state-file":          true,
 		"state-dir":           true,
@@ -5845,6 +6455,30 @@ func runMount(args []string) error {
 	if fs.NArg() > 2 {
 		return errors.New("usage: relayfile mount [WORKSPACE] [LOCAL_DIR]")
 	}
+	localLayoutProvided := false
+	stateFileProvided := false
+	stateDirProvided := false
+	mountKindProvided := false
+	fs.Visit(func(parsed *flag.Flag) {
+		switch parsed.Name {
+		case "local-layout":
+			localLayoutProvided = true
+		case "state-file":
+			stateFileProvided = true
+		case "state-dir":
+			stateDirProvided = true
+		case "mount-kind":
+			mountKindProvided = true
+		}
+	})
+	fileRemotePaths, pathsErr := mountscope.ReadPathsFile(*pathsFile)
+	if pathsErr != nil {
+		return fmt.Errorf("read paths-file: %w", pathsErr)
+	}
+	if err := validateExplicitPathsFileAllowlist(*pathsFile, fileRemotePaths, remotePaths.Values()); err != nil {
+		return err
+	}
+	allRemotePaths := append(remotePaths.Values(), fileRemotePaths...)
 
 	workspaceID := ""
 	localDir := ""
@@ -5915,14 +6549,23 @@ func runMount(args []string) error {
 		return err
 	}
 	recordedLocalDir := ""
+	recordedRemotePaths := []string(nil)
+	recordedLocalLayout := ""
+	previousRecord := workspaceRecord{}
+	applyRecoveredRecord := func(record workspaceRecord) {
+		previousRecord = record
+		recordedLocalDir = strings.TrimSpace(record.LocalDir)
+		recordedRemotePaths = append(recordedRemotePaths[:0], record.RemotePaths...)
+		recordedLocalLayout = strings.TrimSpace(record.LocalLayout)
+	}
 	if record, ok := workspaceRecordByID(workspaceID); ok {
-		recordedLocalDir = strings.TrimSpace(record.LocalDir)
+		applyRecoveredRecord(record)
 	} else if record, ok := workspaceRecordByName(workspaceID); ok && strings.TrimSpace(record.ID) == "" {
-		recordedLocalDir = strings.TrimSpace(record.LocalDir)
+		applyRecoveredRecord(record)
 	}
 	if recordedLocalDir == "" && usesDelegatedWorkspace && requestedWorkspace != "" && workspaceRequestMatchesDelegatedCredentials(requestedWorkspace, canonicalWorkspaceID) {
 		if record, ok := workspaceRecordByName(requestedWorkspace); ok {
-			recordedLocalDir = strings.TrimSpace(record.LocalDir)
+			applyRecoveredRecord(record)
 		}
 	}
 	if localDir == "" {
@@ -5938,19 +6581,90 @@ func runMount(args []string) error {
 	if err != nil {
 		return err
 	}
-	if localDirExplicit && recordedLocalDir != "" {
-		absRecorded, aerr := filepath.Abs(recordedLocalDir)
-		if aerr != nil {
+	if !*daemonized {
+		releaseMountStartLock, lockErr := acquireMountStartLock(absLocalDir)
+		if lockErr != nil {
+			return lockErr
+		}
+		defer releaseMountStartLock()
+	}
+	absRecorded := ""
+	sameRecordedRoot := true
+	if recordedLocalDir != "" {
+		absRecorded, err = filepath.Abs(recordedLocalDir)
+		if err != nil {
 			absRecorded = recordedLocalDir
 		}
-		if absRecorded != absLocalDir && !*rehome {
+		sameRecordedRoot, err = sameFilesystemPath(absRecorded, absLocalDir)
+		if err != nil {
+			return fmt.Errorf("compare recorded mount root: %w", err)
+		}
+	}
+	effectiveRemotePaths := resolveCLIMountRemotePaths(
+		allRemotePaths,
+		recordedRemotePaths,
+		os.Getenv("RELAYFILE_REMOTE_PATH"),
+	)
+	if !stateFileProvided &&
+		!stateDirProvided &&
+		sameRecordedRoot &&
+		strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_STATE_FILE")) == "" &&
+		strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_STATE_DIR")) == "" &&
+		strings.TrimSpace(previousRecord.MountStateFile) != "" {
+		*stateFile = previousRecord.MountStateFile
+	}
+	if !stateDirProvided && strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_STATE_DIR")) == "" && strings.TrimSpace(previousRecord.MountStateDir) != "" {
+		*stateDir = previousRecord.MountStateDir
+	}
+	if !mountKindProvided && strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_KIND")) == "" && strings.TrimSpace(previousRecord.MountKind) != "" {
+		*mountKind = previousRecord.MountKind
+	}
+	resolvedLocalLayout, err := resolveCLIRequestedLocalLayout(
+		*localLayout,
+		os.Getenv("RELAYFILE_MOUNT_LOCAL_LAYOUT"),
+		recordedLocalLayout,
+		localLayoutProvided,
+	)
+	if err != nil {
+		return err
+	}
+	if err := validateMountLayoutTransition(previousRecord, absLocalDir, resolvedLocalLayout); err != nil {
+		return err
+	}
+	if err := validateMountScopeTransition(previousRecord, absLocalDir, resolvedLocalLayout, effectiveRemotePaths); err != nil {
+		return err
+	}
+	mountScopes, err := mountscope.Plan(
+		absLocalDir,
+		resolvedLocalLayout,
+		effectiveRemotePaths,
+		"/",
+		*stateFile,
+	)
+	if err != nil {
+		return fmt.Errorf("resolve mount scopes: %w", err)
+	}
+	if err := mountscope.ValidateEventProvider(effectiveRemotePaths, *eventProvider); err != nil {
+		return err
+	}
+	if err := validateMountStatePaths(
+		workspaceID,
+		mountScopes,
+		strings.TrimSpace(*stateFile),
+		strings.TrimSpace(*stateDir),
+		strings.TrimSpace(*mountKind),
+	); err != nil {
+		return err
+	}
+	if localDirExplicit && recordedLocalDir != "" {
+		if !sameRecordedRoot && !*rehome {
 			return fmt.Errorf(
 				"workspace %s is already mirrored at %s; refusing to silently re-home it to %s.\n"+
 					"Pass --rehome to move the mirror there, or omit LOCAL_DIR to use the registered directory",
 				workspaceID, absRecorded, absLocalDir,
 			)
 		}
-		if absRecorded != absLocalDir && *rehome {
+		if !sameRecordedRoot && *rehome {
 			pid, verified := verifyDaemonProcess(recordedLocalDir, workspaceID)
 			if pid != 0 && verified {
 				return fmt.Errorf(
@@ -5967,30 +6681,29 @@ func runMount(args []string) error {
 			}
 		}
 	}
-	// Recovery-mode precheck: refuse to (re)create a mount root if a prior
-	// run's directory was clobbered (replaced by a file, or missing in a
-	// surprising way) unless the operator explicitly acknowledges. The
-	// acknowledgment flag also tolerates the "missing root" case so that
-	// fresh installs continue to work.
-	if err := preflightMountRootInvariant(absLocalDir, *resetAfterClobber); err != nil {
+	if err := validateMountResetMode(absLocalDir, resolvedLocalLayout, *resetAfterClobber); err != nil {
 		return err
 	}
-	if err := ensureMirrorLayout(absLocalDir); err != nil {
-		return err
-	}
-
 	if strings.EqualFold(strings.TrimSpace(*mode), "fuse") || boolEnv("RELAYFILE_MOUNT_FUSE", false) {
 		return errors.New("fuse mode is not available in this build; rerun with --mode=poll")
 	}
-	if *interval <= 0 {
-		*interval = defaultMountInterval
+	// Exact mounts retain the acknowledged reset path. Scoped mounts first
+	// inspect every root without authorizing mutation: a reset that recovers
+	// only the catalog root would report success while child roots remain
+	// clobbered.
+	if err := preflightMountRootInvariant(absLocalDir, *resetAfterClobber && resolvedLocalLayout == mountscope.LayoutExact); err != nil {
+		return err
 	}
-	*interval = enforcePollIntervalFloor(*interval)
-	if *timeout <= 0 {
-		*timeout = defaultMountTimeout
+	if resolvedLocalLayout == mountscope.LayoutScoped {
+		for _, scope := range mountScopes {
+			if scope.LocalDir == absLocalDir {
+				continue
+			}
+			if err := preflightScopedMountRootInvariant(absLocalDir, scope.LocalDir); err != nil {
+				return fmt.Errorf("preflight scoped local dir for %s: %w", scope.RemotePath, err)
+			}
+		}
 	}
-	*intervalJitter = clampJitterRatio(*intervalJitter)
-
 	pidFile := strings.TrimSpace(*pidFileFlag)
 	if pidFile == "" {
 		pidFile = mountPIDFile(absLocalDir)
@@ -5999,8 +6712,10 @@ func runMount(args []string) error {
 	if logFile == "" {
 		logFile = mountLogFile(absLocalDir)
 	}
-
-	if shouldRefuseCompetingMount(*daemonized, *once) {
+	// Refuse a competing daemon before persisting topology or initializing
+	// child roots. A rejected start must not change the allowlist that the
+	// already-running process, status commands, or a later restart observe.
+	if shouldRefuseCompetingMount(*daemonized) {
 		running, stalePID, derr := runningMountDaemons(absLocalDir, workspaceID, workspaceNameForStart(workspaceID))
 		if derr != nil {
 			return fmt.Errorf("check for existing mount daemon: %w", derr)
@@ -6019,66 +6734,22 @@ func runMount(args []string) error {
 			)
 		}
 	}
-
-	if *background && !*daemonized {
-		return spawnBackgroundMountProcessFn(args, absLocalDir, pidFile, logFile)
-	}
-	registerPID := shouldRegisterMountPID(*daemonized, *once)
-	if *daemonized {
-		if err := rotateLogFile(logFile); err != nil {
+	if !*daemonized {
+		if err := reportMountContentPolicy(os.Stdout, absLocalDir, mountScopes); err != nil {
 			return err
 		}
 	}
-	if registerPID {
-		if err := writeDaemonPIDState(pidFile, daemonPIDState{
-			PID:         os.Getpid(),
-			WorkspaceID: workspaceID,
-			LocalDir:    absLocalDir,
-			LogFile:     logFile,
-			StartedAt:   time.Now().UTC().Format(time.RFC3339),
-			Executable:  resolvedSelfExecutable(),
-		}); err != nil {
+	// Validate and remove only provably generated catalog artifacts before
+	// persisting scoped topology. An unsafe artifact refusal must leave both
+	// the filesystem and the prior workspace record unchanged.
+	if resolvedLocalLayout == mountscope.LayoutScoped {
+		if err := prepareScopedCatalogRoot(absLocalDir); err != nil {
 			return err
 		}
-		defer os.Remove(pidFile)
 	}
-
-	rootCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
-	// No whole-request Timeout (see dead-letter syncer above): the
-	// bootstrap full-pull streams large bodies well past *timeout, and
-	// net/http's http.Client.Timeout would abort it mid-stream regardless
-	// of context. Per-cycle/bootstrap/cursor contexts own cancellation.
-	client := mountsync.NewHTTPClient(*server, tokenValue, &http.Client{
-		Transport: newWritebackFailureTransport(absLocalDir, log.Default(), mountsync.NewSyncTransport()),
-	})
-	syncer, err := mountsync.NewSyncer(client, mountsync.SyncerOptions{
-		WorkspaceID:        workspaceID,
-		RemoteRoot:         *remotePath,
-		EventProvider:      strings.TrimSpace(*eventProvider),
-		LocalRoot:          absLocalDir,
-		StateFile:          strings.TrimSpace(*stateFile),
-		StateDir:           strings.TrimSpace(*stateDir),
-		MountKind:          strings.TrimSpace(*mountKind),
-		ValidateState:      true,
-		WebSocket:          boolPtr(*websocketEnabled),
-		LowMemory:          boolPtr(*lowMemory),
-		RootCtx:            rootCtx,
-		Logger:             log.Default(),
-		BootstrapTimeout:   *bootstrapTimeout,
-		CursorTimeout:      *cursorTimeout,
-		ForceFullReconcile: boolPtr(*fullReconcile),
-	})
-	if err != nil {
-		return fmt.Errorf("failed to initialize mount syncer: %w", err)
-	}
-	if initialCredExpiresAt != "" {
-		syncer.SetCredentialExpiry(initialCredExpiresAt)
-	}
-	if _, err := mountsync.StartDiagnostics(rootCtx, strings.TrimSpace(*pprofAddr), *memlogInterval, log.Default()); err != nil {
-		return fmt.Errorf("start diagnostics: %w", err)
-	}
+	// Persist the resolved topology before creating any mirror directory. A
+	// current writer must never leave scoped child roots behind a blank
+	// LocalLayout if a later initialization step fails.
 	if _, err := upsertWorkspace(workspaceID); err != nil {
 		return err
 	}
@@ -6097,13 +6768,252 @@ func runMount(args []string) error {
 	if len(record.Scopes) == 0 {
 		record.Scopes = append([]string(nil), defaultJoinScopes...)
 	}
-	_, _ = upsertWorkspaceDetails(record)
+	record.RemotePaths = make([]string, 0, len(mountScopes))
+	for _, scope := range mountScopes {
+		record.RemotePaths = append(record.RemotePaths, scope.RemotePath)
+	}
+	record.LocalLayout = resolvedLocalLayout
+	record.MountStateFile = absolutePathIfSet(*stateFile)
+	record.MountStateDir = absolutePathIfSet(*stateDir)
+	record.MountKind = mountsync.NormalizeMountKind(*mountKind)
+	record.mountStateSet = true
+	if _, err := upsertWorkspaceDetails(record); err != nil {
+		return err
+	}
+	if err := ensureMirrorLayoutForTopology(absLocalDir, resolvedLocalLayout); err != nil {
+		return err
+	}
+	for _, scope := range mountScopes {
+		if scope.LocalDir == absLocalDir {
+			continue
+		}
+		if err := ensureMountRuntimeLayout(scope.LocalDir); err != nil {
+			return fmt.Errorf("prepare scoped local dir for %s: %w", scope.RemotePath, err)
+		}
+	}
 
+	if *interval <= 0 {
+		*interval = defaultMountInterval
+	}
+	*interval = enforcePollIntervalFloor(*interval)
+	if *timeout <= 0 {
+		*timeout = defaultMountTimeout
+	}
+	*intervalJitter = clampJitterRatio(*intervalJitter)
+
+	if *background && !*daemonized {
+		resolvedRemotePaths := make([]string, 0, len(mountScopes))
+		for _, scope := range mountScopes {
+			resolvedRemotePaths = append(resolvedRemotePaths, scope.RemotePath)
+		}
+		return spawnBackgroundMountProcessFn(args, resolvedRemotePaths, absLocalDir, pidFile, logFile, resolvedLocalLayout)
+	}
+	registerPID := shouldRegisterMountPID(*daemonized, *once)
+	if *daemonized {
+		if err := rotateLogFile(logFile); err != nil {
+			return err
+		}
+	}
+	if registerPID {
+		if err := writeDaemonPIDState(pidFile, daemonPIDState{
+			PID:         os.Getpid(),
+			Registered:  true,
+			WorkspaceID: workspaceID,
+			LocalDir:    absLocalDir,
+			LogFile:     logFile,
+			StartedAt:   time.Now().UTC().Format(time.RFC3339),
+			Executable:  resolvedSelfExecutable(),
+		}); err != nil {
+			return err
+		}
+		defer os.Remove(pidFile)
+	}
+
+	rootCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	if _, err := mountsync.StartDiagnostics(rootCtx, strings.TrimSpace(*pprofAddr), *memlogInterval, log.Default()); err != nil {
+		return fmt.Errorf("start diagnostics: %w", err)
+	}
 	loopDelegatedCredsPath := ""
 	if usesDelegatedWorkspace {
 		loopDelegatedCredsPath = delegatedCredsPath
 	}
-	return runMountLoop(rootCtx, syncer, absLocalDir, workspaceID, strings.TrimRight(strings.TrimSpace(*server), "/"), loopDelegatedCredsPath, *timeout, *interval, *intervalJitter, *websocketEnabled, *once, *daemonized, pidFile, logFile)
+	serverURL := strings.TrimRight(strings.TrimSpace(*server), "/")
+	var sharedAuthMu sync.Mutex
+	return runCLIMountScopes(rootCtx, mountScopes, func(scopeCtx context.Context, scope mountscope.Scope) error {
+		// No whole-request Timeout (see dead-letter syncer above): the
+		// bootstrap full-pull streams large bodies well past *timeout, and
+		// net/http's http.Client.Timeout would abort it mid-stream regardless
+		// of context. Per-cycle/bootstrap/cursor contexts own cancellation.
+		client := mountsync.NewHTTPClient(serverURL, tokenValue, &http.Client{
+			Transport: newWritebackFailureTransport(scope.LocalDir, log.Default(), mountsync.NewSyncTransport()),
+		})
+		syncer, err := mountsync.NewSyncer(client, mountsync.SyncerOptions{
+			WorkspaceID:        workspaceID,
+			RemoteRoot:         scope.RemotePath,
+			EventProvider:      strings.TrimSpace(*eventProvider),
+			ScopedChild:        resolvedLocalLayout == mountscope.LayoutScoped,
+			LocalRoot:          scope.LocalDir,
+			StateFile:          strings.TrimSpace(*stateFile),
+			StateDir:           strings.TrimSpace(*stateDir),
+			MountKind:          strings.TrimSpace(*mountKind),
+			ValidateState:      true,
+			WebSocket:          boolPtr(*websocketEnabled),
+			LowMemory:          boolPtr(*lowMemory),
+			RootCtx:            scopeCtx,
+			Logger:             log.Default(),
+			BootstrapTimeout:   *bootstrapTimeout,
+			CursorTimeout:      *cursorTimeout,
+			ForceFullReconcile: boolPtr(*fullReconcile),
+		})
+		if err != nil {
+			return fmt.Errorf("failed to initialize mount syncer for %s: %w", scope.RemotePath, err)
+		}
+		if initialCredExpiresAt != "" {
+			syncer.SetCredentialExpiry(initialCredExpiresAt)
+		}
+		return runMountLoopWithAuthLock(
+			scopeCtx,
+			syncer,
+			scope.LocalDir,
+			workspaceID,
+			serverURL,
+			loopDelegatedCredsPath,
+			*timeout,
+			*interval,
+			*intervalJitter,
+			*websocketEnabled,
+			*once,
+			*daemonized,
+			pidFile,
+			logFile,
+			&sharedAuthMu,
+		)
+	})
+}
+
+// Scoped runtime state is implemented below this CLI boundary, but its
+// operator surfaces are not yet complete. Refuse every route that can select
+// scoped layout (flag, environment, or recorded catalog inheritance) until
+// status/list/retry can see every scoped child state location.
+func resolveCLIRequestedLocalLayout(flagValue, envValue, recordedValue string, flagProvided bool) (string, error) {
+	resolved := flagValue
+	if !flagProvided {
+		if strings.TrimSpace(envValue) != "" {
+			resolved = envValue
+		} else if strings.TrimSpace(recordedValue) != "" {
+			resolved = recordedValue
+		}
+	}
+	resolved, err := mountscope.ResolveLayout(resolved)
+	if err != nil {
+		return "", fmt.Errorf("resolve local layout: %w", err)
+	}
+	if resolved == mountscope.LayoutScoped {
+		return "", fmt.Errorf("--local-layout=%s is temporarily unavailable until scoped operator surfaces are ready; use --local-layout=%s", mountscope.LayoutScoped, mountscope.LayoutExact)
+	}
+	return resolved, nil
+}
+
+type cliMountScopeRunner func(context.Context, mountscope.Scope) error
+
+func validateMountStatePaths(workspaceID string, scopes []mountscope.Scope, stateFile, stateDir, mountKind string) error {
+	for _, scope := range scopes {
+		if _, err := mountsync.ResolveMountStatePath(mountsync.MountStatePathOptions{
+			WorkspaceID:     workspaceID,
+			RemoteRoot:      scope.RemotePath,
+			LocalRoot:       scope.LocalDir,
+			StateFile:       stateFile,
+			StateDir:        stateDir,
+			MountKind:       mountKind,
+			ValidateOutside: true,
+		}); err != nil {
+			return fmt.Errorf("validate private mount state for %s before updating workspace topology: %w", scope.RemotePath, err)
+		}
+	}
+	return nil
+}
+
+func reportMountContentPolicy(w io.Writer, localRoot string, scopes []mountscope.Scope) error {
+	excluded := map[string]struct{}{}
+	sensitive := map[string]struct{}{}
+	for _, scope := range scopes {
+		report, err := mountscope.InspectLocalContentPolicy(scope.LocalDir)
+		if err != nil {
+			return fmt.Errorf("inspect local mount content policy for %s: %w", scope.LocalDir, err)
+		}
+		relativeRoot, err := filepath.Rel(localRoot, scope.LocalDir)
+		if err != nil {
+			return fmt.Errorf("describe local mount scope %s: %w", scope.LocalDir, err)
+		}
+		joinDisplay := func(name string) string {
+			if relativeRoot == "." {
+				return filepath.ToSlash(name)
+			}
+			return filepath.ToSlash(filepath.Join(relativeRoot, name))
+		}
+		for _, name := range report.ExcludedInfrastructure {
+			excluded[joinDisplay(name)] = struct{}{}
+		}
+		for _, name := range report.SensitiveUserContent {
+			sensitive[joinDisplay(name)] = struct{}{}
+		}
+	}
+	excludedPaths := sortedStringSet(excluded)
+	sensitivePaths := sortedStringSet(sensitive)
+	if len(excludedPaths) > 0 {
+		fmt.Fprintf(w, "Excluded incidental infrastructure (not synced): %s\n", strings.Join(excludedPaths, ", "))
+	}
+	if len(sensitivePaths) > 0 {
+		fmt.Fprintf(
+			w,
+			"Warning: convention-sensitive user content will sync: %s. Review or move it before continuing if that is not intended.\n",
+			strings.Join(sensitivePaths, ", "),
+		)
+	}
+	return nil
+}
+
+func sortedStringSet(values map[string]struct{}) []string {
+	out := make([]string, 0, len(values))
+	for value := range values {
+		out = append(out, value)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func runCLIMountScopes(rootCtx context.Context, scopes []mountscope.Scope, run cliMountScopeRunner) error {
+	if len(scopes) == 0 {
+		return nil
+	}
+	ctx, cancel := context.WithCancel(rootCtx)
+	defer cancel()
+
+	errCh := make(chan error, len(scopes))
+	var wg sync.WaitGroup
+	for _, scope := range scopes {
+		scope := scope
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errCh <- run(ctx, scope)
+		}()
+	}
+	go func() {
+		wg.Wait()
+		close(errCh)
+	}()
+
+	var firstErr error
+	for err := range errCh {
+		if err != nil && firstErr == nil {
+			firstErr = err
+			cancel()
+		}
+	}
+	return firstErr
 }
 
 func shouldRegisterMountPID(daemonized, once bool) bool {
@@ -6148,6 +7058,12 @@ Synced-mirror limitations (§3.6 of the productized cloud-mount contract):
 Common flags:
   --workspace NAME     workspace name or id (defaults to the active workspace)
   --local-dir DIR      local mirror directory (defaults to the recorded mirror)
+  --remote-path PATH   remote subtree to mount (repeat for an allowlist)
+  --paths-file FILE    remote subtrees as a JSON array or newline-separated list
+  --local-layout exact
+                       scoped layout is temporarily unavailable until operator
+                       surfaces can enumerate every child runtime directory;
+                       required with multiple remote paths
   --mode poll|fuse     poll (synced mirror, default) or fuse
   --interval 30s       sync interval (default 30s)
   --background         detach and keep syncing in the background
@@ -9524,6 +10440,13 @@ func upsertWorkspaceDetails(record workspaceRecord) (workspaceRecord, error) {
 	record.CloudAPIURL = strings.TrimRight(strings.TrimSpace(record.CloudAPIURL), "/")
 	record.AgentName = strings.TrimSpace(record.AgentName)
 	record.Timezone = strings.TrimSpace(record.Timezone)
+	if len(record.RemotePaths) > 0 {
+		record.RemotePaths = mountscope.NormalizePaths(record.RemotePaths, "/")
+	}
+	record.LocalLayout = strings.TrimSpace(record.LocalLayout)
+	record.MountStateFile = strings.TrimSpace(record.MountStateFile)
+	record.MountStateDir = strings.TrimSpace(record.MountStateDir)
+	record.MountKind = strings.TrimSpace(record.MountKind)
 	if len(record.Scopes) == 0 {
 		record.Scopes = append([]string(nil), defaultJoinScopes...)
 	}
@@ -9590,7 +10513,30 @@ func mergeWorkspaceRecords(current, update workspaceRecord) workspaceRecord {
 	if len(update.Scopes) > 0 {
 		merged.Scopes = append([]string(nil), update.Scopes...)
 	}
+	if len(update.RemotePaths) > 0 {
+		merged.RemotePaths = append([]string(nil), update.RemotePaths...)
+	}
+	if update.LocalLayout != "" {
+		merged.LocalLayout = update.LocalLayout
+	}
+	if update.mountStateSet {
+		merged.MountStateFile = update.MountStateFile
+		merged.MountStateDir = update.MountStateDir
+		merged.MountKind = update.MountKind
+	}
 	return merged
+}
+
+func absolutePathIfSet(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return ""
+	}
+	absolute, err := filepath.Abs(trimmed)
+	if err != nil {
+		return filepath.Clean(trimmed)
+	}
+	return absolute
 }
 
 func workspaceRecordByName(name string) (workspaceRecord, bool) {
@@ -10035,7 +10981,7 @@ func writeMirrorStateFile(localDir string, snapshot syncStateFile) error {
 	if localDir == "" {
 		return nil
 	}
-	if err := ensureMirrorLayout(localDir); err != nil {
+	if err := ensureMountRuntimeLayout(localDir); err != nil {
 		return err
 	}
 	failedWritebacksStateMu.Lock()
@@ -10216,7 +11162,14 @@ func readDaemonPIDState(localDir string) (daemonPIDState, bool) {
 	if localDir == "" {
 		return daemonPIDState{}, false
 	}
-	payload, err := os.ReadFile(mountPIDFile(localDir))
+	return readDaemonPIDStateFile(mountPIDFile(localDir))
+}
+
+func readDaemonPIDStateFile(pidFile string) (daemonPIDState, bool) {
+	if strings.TrimSpace(pidFile) == "" {
+		return daemonPIDState{}, false
+	}
+	payload, err := os.ReadFile(pidFile)
 	if err != nil {
 		return daemonPIDState{}, false
 	}
@@ -10283,8 +11236,11 @@ func verifyDaemonProcess(localDir, workspaceID string) (pid int, verified bool) 
 	return state.PID, true
 }
 
-func shouldRefuseCompetingMount(daemonized, once bool) bool {
-	return !daemonized && !once
+func shouldRefuseCompetingMount(daemonized bool) bool {
+	// Daemonized children must perform the same read-only discovery as their
+	// foreground parent. The caller's own PID is excluded by
+	// runningMountDaemons, so this does not self-refuse.
+	return true
 }
 
 func workspaceNameForStart(workspaceID string) string {
@@ -10295,6 +11251,23 @@ func workspaceNameForStart(workspaceID string) string {
 		return record.Name
 	}
 	return workspaceID
+}
+
+func workspaceNameForLocalDir(localDir string) string {
+	abs, err := filepath.Abs(localDir)
+	if err != nil {
+		abs = filepath.Clean(localDir)
+	}
+	catalog, err := loadWorkspaceCatalog()
+	if err == nil {
+		for _, record := range catalog.Workspaces {
+			recorded, rerr := filepath.Abs(record.LocalDir)
+			if rerr == nil && filepath.Clean(recorded) == filepath.Clean(abs) && strings.TrimSpace(record.Name) != "" {
+				return record.Name
+			}
+		}
+	}
+	return abs
 }
 
 func runningMountDaemons(localDir, workspaceID, workspaceName string) ([]mountDaemonProcess, int, error) {
@@ -10776,7 +11749,7 @@ func saveIntegrationConnection(localDir string, state integrationConnectionState
 	if localDir == "" || strings.TrimSpace(state.Provider) == "" {
 		return nil
 	}
-	if err := ensureMirrorLayout(localDir); err != nil {
+	if err := ensureMountRuntimeLayout(localDir); err != nil {
 		return err
 	}
 	payload, err := json.MarshalIndent(state, "", "  ")
@@ -10807,12 +11780,22 @@ func loadSavedConnectionID(localDir, provider string) string {
 	return strings.TrimSpace(state.ConnectionID)
 }
 
-func markProviderDisconnected(localDir, provider string) error {
+func markProviderDisconnected(localDir, provider, localLayout string) error {
 	if localDir == "" {
 		return nil
 	}
-	_ = os.RemoveAll(filepath.Join(localDir, providerRootDir(provider)))
-	if err := ensureMirrorLayout(localDir); err != nil {
+	providerPath := filepath.Join(localDir, providerRootDir(provider))
+	if strings.TrimSpace(localLayout) == mountscope.LayoutScoped {
+		// Scoped child roots own runtime state under .relay. Remove only
+		// mirrored provider content; recursively deleting the child would
+		// destroy outbox/dead-letter/retry state while a syncer may use it.
+		if err := removeScopedProviderContent(providerPath); err != nil {
+			return err
+		}
+	} else {
+		_ = os.RemoveAll(providerPath)
+	}
+	if err := ensureMountRuntimeLayout(localDir); err != nil {
 		return err
 	}
 	marker := map[string]string{
@@ -10831,23 +11814,44 @@ func markProviderDisconnected(localDir, provider string) error {
 	return nil
 }
 
+func removeScopedProviderContent(root string) error {
+	entries, err := os.ReadDir(root)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if entry.Name() == mountscope.RuntimeTopLevel {
+			continue
+		}
+		path := filepath.Join(root, entry.Name())
+		if entry.IsDir() {
+			if err := removeScopedProviderContent(path); err != nil {
+				return err
+			}
+			// Remove now-empty mirror directories, but retain any directory
+			// that still contains a nested runtime tree.
+			if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) && !errors.Is(err, syscall.ENOTEMPTY) {
+				return err
+			}
+			continue
+		}
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	return nil
+}
+
 // providerRootDir maps a provider id to the directory name it occupies
 // inside the local mirror. The mapping must stay aligned with the
 // `vfsRoot` values that fallbackIntegrationCatalog and the cloud
 // catalog endpoint advertise — otherwise status probes and disconnect
 // cleanup would target the wrong path for that provider.
 func providerRootDir(provider string) string {
-	provider = normalizeProviderID(provider)
-	switch provider {
-	case "slack", "slack-sage":
-		return "slack"
-	case "slack-my-senior-dev":
-		return "slack-msd"
-	case "slack-nightcto":
-		return "slack-nightcto"
-	default:
-		return provider
-	}
+	return mountscope.ProviderRoot(provider)
 }
 
 func writeJSON(w io.Writer, value any) error {
@@ -11622,28 +12626,15 @@ func jitteredIntervalWithSample(base time.Duration, jitterRatio, sample float64)
 
 var spawnBackgroundMountProcessFn = spawnBackgroundMountProcess
 
-func spawnBackgroundMountProcess(originalArgs []string, localDir, pidFile, logFile string) error {
-	if err := ensureMirrorLayout(localDir); err != nil {
-		return err
-	}
-	if err := rotateLogFile(logFile); err != nil {
+func spawnBackgroundMountProcess(originalArgs, resolvedRemotePaths []string, localDir, pidFile, logFile, localLayout string) error {
+	if err := prepareBackgroundMountLayout(localDir, logFile, localLayout); err != nil {
 		return err
 	}
 	executable, err := os.Executable()
 	if err != nil {
 		return err
 	}
-	filteredArgs := make([]string, 0, len(originalArgs)+5)
-	for i := 0; i < len(originalArgs); i++ {
-		arg := originalArgs[i]
-		if arg == "--background" || arg == "-background" {
-			continue
-		}
-		if strings.HasPrefix(arg, "--background=") || strings.HasPrefix(arg, "-background=") {
-			continue
-		}
-		filteredArgs = append(filteredArgs, arg)
-	}
+	filteredArgs := resolvedBackgroundMountArgs(originalArgs, resolvedRemotePaths)
 	childArgs := append([]string{"mount"}, filteredArgs...)
 	childArgs = append(childArgs, "--daemonized", "--pid-file", pidFile, "--log-file", logFile)
 	logHandle, err := os.OpenFile(logFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
@@ -11660,11 +12651,154 @@ func spawnBackgroundMountProcess(originalArgs []string, localDir, pidFile, logFi
 	if err := cmd.Start(); err != nil {
 		return err
 	}
-	if err := cmd.Process.Release(); err != nil {
+	childPID := cmd.Process.Pid
+	childExited := make(chan error, 1)
+	go func() {
+		childExited <- cmd.Wait()
+	}()
+	// Publish an ownership record before waiting. The daemon writes its full
+	// state once initialization reaches the registration point, but a bounded
+	// wait must not release the only exclusion against a second background
+	// start while this child is still alive and unregistered.
+	if err := writeDaemonPIDStateIfAbsent(pidFile, daemonPIDState{
+		PID:        childPID,
+		LocalDir:   localDir,
+		LogFile:    logFile,
+		StartedAt:  time.Now().UTC().Format(time.RFC3339),
+		Executable: executable,
+	}); err != nil {
+		_ = cmd.Process.Kill()
+		<-childExited
+		return fmt.Errorf("record background mount process %d before registration: %w", childPID, err)
+	}
+	if err := waitForBackgroundMountRegistration(pidFile, localDir, childPID, childExited, 10*time.Second); err != nil {
+		if !processAlive(childPID) {
+			if state, structured := readDaemonPIDStateFile(pidFile); structured && state.PID == childPID {
+				_ = os.Remove(pidFile)
+			}
+		}
 		return err
 	}
 	fmt.Fprintf(os.Stdout, "Mirror started in background at %s. Logs: %s\n", localDir, logFile)
 	return nil
+}
+
+func writeDaemonPIDStateIfAbsent(path string, state daemonPIDState) error {
+	if strings.TrimSpace(path) == "" {
+		return errors.New("empty daemon pid file path")
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	payload, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		return err
+	}
+	payload = append(payload, '\n')
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return nil
+		}
+		return err
+	}
+	if _, err := file.Write(payload); err != nil {
+		_ = os.Remove(path)
+		return err
+	}
+	return file.Close()
+}
+
+var backgroundMountRegistrationTimeout = 2 * time.Minute
+
+func waitForBackgroundMountRegistration(pidFile, localDir string, childPID int, childExited <-chan error, slowNoticeAfter time.Duration) error {
+	slowNoticeAt := time.Now().Add(slowNoticeAfter)
+	deadline := time.Now().Add(backgroundMountRegistrationTimeout)
+	slowNoticeLogged := false
+	for {
+		state, structured := readDaemonPIDStateFile(pidFile)
+		if structured && state.Registered && state.PID == childPID {
+			return nil
+		}
+		select {
+		case exitErr := <-childExited:
+			return fmt.Errorf(
+				"background mount process %d exited before registering its daemon state for %s: %v",
+				childPID,
+				localDir,
+				exitErr,
+			)
+		default:
+		}
+		if !time.Now().Before(deadline) {
+			// The child is still alive but has not become authoritative. Keep the
+			// PID/log/state paths intact so an operator can inspect or reconcile a
+			// late registration; do not leave the foreground caller waiting forever.
+			logPath := mountLogFile(localDir)
+			if registeredState, registeredStructured := readDaemonPIDStateFile(pidFile); registeredStructured && strings.TrimSpace(registeredState.LogFile) != "" {
+				logPath = registeredState.LogFile
+			}
+			return fmt.Errorf(
+				"background mount process %d did not register daemon state within %s for %s; child may still be initializing (pid file: %s, log: %s). If it remains stuck, run `relayfile stop %s` to release the mount",
+				childPID,
+				backgroundMountRegistrationTimeout,
+				localDir,
+				pidFile,
+				logPath,
+				workspaceNameForLocalDir(localDir),
+			)
+		}
+		if !slowNoticeLogged && slowNoticeAfter > 0 && time.Now().After(slowNoticeAt) {
+			log.Printf(
+				"background mount process %d is still initializing for %s; waiting for daemon registration",
+				childPID,
+				localDir,
+			)
+			slowNoticeLogged = true
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+}
+
+func resolvedBackgroundMountArgs(originalArgs, resolvedRemotePaths []string) []string {
+	filteredArgs := make([]string, 0, len(originalArgs)+len(resolvedRemotePaths)*2+1)
+	for i := 0; i < len(originalArgs); i++ {
+		arg := originalArgs[i]
+		if arg == "--background" || arg == "-background" {
+			continue
+		}
+		if strings.HasPrefix(arg, "--background=") || strings.HasPrefix(arg, "-background=") {
+			continue
+		}
+		if arg == "--paths-file" || arg == "-paths-file" || arg == "--remote-path" || arg == "-remote-path" {
+			i++
+			continue
+		}
+		if strings.HasPrefix(arg, "--paths-file=") || strings.HasPrefix(arg, "-paths-file=") ||
+			strings.HasPrefix(arg, "--remote-path=") || strings.HasPrefix(arg, "-remote-path=") {
+			continue
+		}
+		filteredArgs = append(filteredArgs, arg)
+	}
+	// The parent has already read, normalized, validated, and persisted the
+	// allowlist. Override any inherited paths-file environment default and
+	// hand the resolved roots to the detached child as immutable argv values.
+	filteredArgs = append(filteredArgs, "--paths-file=")
+	for _, remotePath := range resolvedRemotePaths {
+		filteredArgs = append(filteredArgs, "--remote-path", remotePath)
+	}
+	return filteredArgs
+}
+
+func prepareBackgroundMountLayout(localDir, logFile, localLayout string) error {
+	// The foreground path has already initialized the topology, but repeat the
+	// operation here so the detached-process boundary remains self-contained.
+	// It must remain topology-aware: the legacy exact-root initializer creates
+	// global digests and skills that a scoped mount cannot honestly populate.
+	if err := ensureMirrorLayoutForTopology(localDir, localLayout); err != nil {
+		return err
+	}
+	return rotateLogFile(logFile)
 }
 
 // logStuckEventSummary surfaces the stuck-event drain outcome of a reconcile
@@ -11686,6 +12820,26 @@ func logStuckEventSummary(syncer *mountsync.Syncer, cycleErr error) {
 }
 
 func runMountLoop(rootCtx context.Context, syncer *mountsync.Syncer, localDir, workspaceID, serverURL, delegatedCredsFile string, timeout, interval time.Duration, intervalJitter float64, websocketEnabled, once, daemonized bool, pidFile, logFile string) error {
+	return runMountLoopWithAuthLock(
+		rootCtx,
+		syncer,
+		localDir,
+		workspaceID,
+		serverURL,
+		delegatedCredsFile,
+		timeout,
+		interval,
+		intervalJitter,
+		websocketEnabled,
+		once,
+		daemonized,
+		pidFile,
+		logFile,
+		&sync.Mutex{},
+	)
+}
+
+func runMountLoopWithAuthLock(rootCtx context.Context, syncer *mountsync.Syncer, localDir, workspaceID, serverURL, delegatedCredsFile string, timeout, interval time.Duration, intervalJitter float64, websocketEnabled, once, daemonized bool, pidFile, logFile string, authMu *sync.Mutex) error {
 	interval = enforcePollIntervalFloor(interval)
 	httpClient, _ := syncerClient(syncer)
 	record, _ := workspaceRecordByID(workspaceID)
@@ -11781,7 +12935,9 @@ func runMountLoop(rootCtx context.Context, syncer *mountsync.Syncer, localDir, w
 		return stallReason
 	}
 
-	var authMu sync.Mutex
+	if authMu == nil {
+		authMu = &sync.Mutex{}
+	}
 	refreshMountAuth := func(force bool) error {
 		authMu.Lock()
 		defer authMu.Unlock()
@@ -11969,7 +13125,7 @@ func runMountLoop(rootCtx context.Context, syncer *mountsync.Syncer, localDir, w
 	// Syncer's state lock to this callback, and unchanged down-mirror echoes are
 	// filtered by HandleLocalChange's tracked hash check.
 	if !once {
-		watcher, err := mountsync.NewFileWatcher(localDir, func(relativePath string, op fsnotify.Op) {
+		watcher, err := syncer.NewFileWatcher(func(relativePath string, op fsnotify.Op) {
 			if isDegraded() {
 				// Local edit observed while delegated credentials are unusable.
 				// Leave the dirty state in place so the next successful cycle

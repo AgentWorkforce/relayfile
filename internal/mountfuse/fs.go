@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/agentworkforce/relayfile/internal/mountscope"
 	"github.com/agentworkforce/relayfile/internal/mountsync"
 	gofusefs "github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
@@ -605,15 +606,7 @@ func durationPtr(value time.Duration) *time.Duration {
 }
 
 func normalizeRemotePath(value string) string {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return "/"
-	}
-	cleaned := path.Clean("/" + strings.TrimPrefix(value, "/"))
-	if cleaned == "." {
-		return "/"
-	}
-	return cleaned
+	return mountscope.NormalizePath(value)
 }
 
 func splitParent(remotePath string) (string, string) {

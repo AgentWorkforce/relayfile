@@ -113,6 +113,15 @@ export class MountSessionInputError extends RelayfileSetupError {
   }
 }
 
+export class MountMultiPathUnsupportedError extends RelayfileSetupError {
+  constructor() {
+    super(
+      "The TypeScript mount launcher detected RELAYFILE_MOUNT_PATHS_FILE but supports only one remotePath; use the relayfile CLI for multi-path mounts until the TypeScript session and status types support multiple roots.",
+      "mount_multi_path_unsupported"
+    )
+  }
+}
+
 export class InvalidMountModeError extends RelayfileSetupError {
   readonly mode: string
 

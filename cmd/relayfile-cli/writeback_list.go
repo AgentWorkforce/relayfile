@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/agentworkforce/relayfile/internal/mountscope"
 )
 
 const writebackListUsage = "usage: relayfile writeback list --state pending|dead [--workspace WS] [--json]"
@@ -122,7 +124,7 @@ func readPendingWritebackItems(workspaceID, localDir string) ([]writebackListIte
 		return nil, fmt.Errorf("invalid mount state: %w", err)
 	}
 	remoteRoot := readMountRemoteRoot(localDir)
-	localHashes, err := localWritebackHashes(localDir, remoteRoot)
+	localHashes, err := localWritebackHashes(localDir, remoteRoot, false)
 	if err != nil {
 		return nil, err
 	}
@@ -175,7 +177,7 @@ func readPendingWritebackItems(workspaceID, localDir string) ([]writebackListIte
 	return items, nil
 }
 
-func localWritebackHashes(localDir, remoteRoot string) (map[string]string, error) {
+func localWritebackHashes(localDir, remoteRoot string, scopedChild bool) (map[string]string, error) {
 	hashes := map[string]string{}
 	err := filepath.WalkDir(localDir, func(path string, entry os.DirEntry, err error) error {
 		if err != nil {
@@ -187,14 +189,12 @@ func localWritebackHashes(localDir, remoteRoot string) (map[string]string, error
 		}
 		first := strings.SplitN(rel, string(os.PathSeparator), 2)[0]
 		if entry.IsDir() {
-			if first == entry.Name() && writebackListReservedTopLevel(first) {
+			if first == entry.Name() && writebackListReservedTopLevel(scopedChild, localDir, first) {
 				return filepath.SkipDir
 			}
 			return nil
 		}
-		if first == ".relayfile-mount-state.json" ||
-			strings.HasPrefix(first, ".relayfile-mount-state.json.tmp-") ||
-			writebackListReservedTopLevel(first) {
+		if writebackListReservedTopLevel(scopedChild, localDir, first) {
 			return nil
 		}
 		info, err := entry.Info()
@@ -229,10 +229,11 @@ func remotePathForLocalRel(remoteRoot, rel string) string {
 	return normalizeWritebackListPath(strings.TrimRight(root, "/") + "/" + rel)
 }
 
-func writebackListReservedTopLevel(name string) bool {
-	return name == ".git" || name == ".relay" || name == ".skills" ||
-		name == "digests" || name == "node_modules" ||
-		name == "_PERMISSIONS.md"
+func writebackListReservedTopLevel(scopedChild bool, localRoot, name string) bool {
+	if mountscope.IsReservedRuntimeSegment(name) || mountscope.IsInfrastructureTopLevelAt(localRoot, name) {
+		return true
+	}
+	return !scopedChild && mountscope.IsCatalogOwnedTopLevel(name)
 }
 
 func hashLocalWritebackFile(path string) (string, error) {
