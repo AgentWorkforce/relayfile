@@ -5790,12 +5790,57 @@ func TestScopedWorkspaceConsumersAggregateChildRuntimeState(t *testing.T) {
 		t.Fatalf("last reconcile = %q, want newest child timestamp", health.LastReconcileAt)
 	}
 
+	compatibilityDir := filepath.Join(localRoot, ".relay", "dead-letter")
+	if err := os.MkdirAll(compatibilityDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(compatibilityDir, "op_2.json"),
+		[]byte(`{"opId":"op_2","path":"/github/stale.md"}`),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
 	path, localDir, _, err := findWorkspaceDeadLetterRecord(record, "op_2")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if localDir != scopes[1].LocalDir || path != filepath.Join(scopes[1].LocalDir, ".relay", "dead-letter", "op_2.json") {
-		t.Fatalf("scoped retry lookup = %q in %q, want second scope", path, localDir)
+		t.Fatalf("scoped retry lookup = %q in %q, want authoritative second scope instead of catalog duplicate", path, localDir)
+	}
+}
+
+func TestWorkspaceMountScopesRecoversLegacyExactRuntimeRoot(t *testing.T) {
+	localDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(localDir, ".relay"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(localDir, ".relay", "state.json"),
+		[]byte(`{"remoteRoot":"/github"}`),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+	scopes := workspaceMountScopes(workspaceRecord{LocalDir: localDir})
+	if len(scopes) != 1 || scopes[0].RemotePath != "/github" || scopes[0].LocalDir != localDir {
+		t.Fatalf("legacy exact scopes = %#v, want persisted runtime root /github", scopes)
+	}
+}
+
+func TestWorkspaceRetryTargetRoutesCatalogCompatibilityRecordToScopedChild(t *testing.T) {
+	localRoot := t.TempDir()
+	record := workspaceRecord{
+		LocalDir:    localRoot,
+		LocalLayout: mountscope.LayoutScoped,
+		RemotePaths: []string{"/github", "/slack/channels/project"},
+	}
+	localDir, remoteRoot, err := workspaceRetryTarget(record, localRoot, "/slack/channels/project/message.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := mountscope.LocalDir(localRoot, "/slack/channels/project"); localDir != want || remoteRoot != "/slack/channels/project" {
+		t.Fatalf("retry target = %q at %q, want %q at /slack/channels/project", localDir, remoteRoot, want)
 	}
 }
 
@@ -7751,6 +7796,20 @@ func TestMarkProviderDisconnectedPreservesScopedRuntimeState(t *testing.T) {
 	markerPath := filepath.Join(localRoot, ".relay", "disconnected", "github.json")
 	if _, err := os.Stat(markerPath); err != nil {
 		t.Fatalf("expected common-root disconnect marker: %v", err)
+	}
+}
+
+func TestProviderDisconnectPreflightAllowsCloudOnlyWorkspace(t *testing.T) {
+	record := workspaceRecord{ID: "ws_cloud_only", Name: "cloud-only"}
+	plan, err := planProviderDisconnect(record, "github")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.cleanScopeDirs) != 0 || len(plan.removeSubtrees) != 0 || len(plan.stateDirs) != 0 || len(plan.stateFiles) != 0 {
+		t.Fatalf("cloud-only disconnect produced local cleanup plan: %#v", plan)
+	}
+	if err := preflightProviderDisconnect(record, "github"); err != nil {
+		t.Fatalf("cloud-only disconnect preflight = %v, want no local gate", err)
 	}
 }
 

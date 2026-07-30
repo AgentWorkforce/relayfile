@@ -4252,10 +4252,23 @@ func workspaceMountScopes(record workspaceRecord) []mountscope.Scope {
 	if localRoot == "" {
 		return nil
 	}
-	paths := mountscope.NormalizePaths(record.RemotePaths, "/")
 	if strings.TrimSpace(record.LocalLayout) != mountscope.LayoutScoped {
-		return []mountscope.Scope{{RemotePath: paths[0], LocalDir: localRoot}}
+		remoteRoot := ""
+		for _, candidate := range record.RemotePaths {
+			if strings.TrimSpace(candidate) != "" {
+				remoteRoot = mountscope.NormalizePath(candidate)
+				break
+			}
+		}
+		if remoteRoot == "" {
+			remoteRoot, _ = readMountRemoteRootIfPresent(localRoot)
+		}
+		if remoteRoot == "" {
+			remoteRoot = "/"
+		}
+		return []mountscope.Scope{{RemotePath: remoteRoot, LocalDir: localRoot}}
 	}
+	paths := mountscope.NormalizePaths(record.RemotePaths, "/")
 	scopes := make([]mountscope.Scope, 0, len(paths))
 	for _, remotePath := range paths {
 		scopes = append(scopes, mountscope.Scope{
@@ -4338,6 +4351,37 @@ func workspaceStateDirForRemotePath(record workspaceRecord, remotePath string) s
 		bestDir = scope.LocalDir
 	}
 	return bestDir
+}
+
+func workspaceMountScopeForRemotePath(record workspaceRecord, remotePath string) (mountscope.Scope, bool) {
+	path := mountscope.NormalizePath(remotePath)
+	var best mountscope.Scope
+	for _, scope := range workspaceMountScopes(record) {
+		if !mountscope.IsWithin(scope.RemotePath, path) || len(scope.RemotePath) <= len(best.RemotePath) {
+			continue
+		}
+		best = scope
+	}
+	return best, strings.TrimSpace(best.RemotePath) != ""
+}
+
+func workspaceRetryTarget(record workspaceRecord, recordLocalDir, remotePath string) (localDir, remoteRoot string, err error) {
+	if strings.TrimSpace(record.LocalLayout) == mountscope.LayoutScoped &&
+		filepath.Clean(recordLocalDir) == filepath.Clean(record.LocalDir) {
+		scope, ok := workspaceMountScopeForRemotePath(record, remotePath)
+		if !ok {
+			return "", "", fmt.Errorf(
+				"dead-letter path %s is outside the persisted scoped allowlist; cannot choose a retry root",
+				remotePath,
+			)
+		}
+		return scope.LocalDir, scope.RemotePath, nil
+	}
+	remoteRoot, err = workspaceRemoteRootForLocalDir(record, recordLocalDir)
+	if err != nil {
+		return "", "", err
+	}
+	return recordLocalDir, remoteRoot, nil
 }
 
 // workspaceMountStateFile resolves the same private cursor identity used by
@@ -5413,12 +5457,12 @@ func runWritebackRetry(args []string, stdout io.Writer) error {
 		return fmt.Errorf("dead-letter record %s contains opId %q, expected %q", recordPath, dl.OpID, op)
 	}
 
-	remoteRoot, err := workspaceRemoteRootForLocalDir(record, recordLocalDir)
+	retryLocalDir, remoteRoot, err := workspaceRetryTarget(record, recordLocalDir, dl.Path)
 	if err != nil {
 		return err
 	}
 	retryRecord := record
-	retryRecord.LocalDir = recordLocalDir
+	retryRecord.LocalDir = retryLocalDir
 	if err := retryDeadLetterWriteback(workspaceID, retryRecord, remoteRoot, dl); err != nil {
 		return fmt.Errorf("retry op %s: %w", op, err)
 	}
@@ -5434,7 +5478,22 @@ func runWritebackRetry(args []string, stdout io.Writer) error {
 }
 
 func findWorkspaceDeadLetterRecord(record workspaceRecord, opID string) (recordPath, localDir string, payload []byte, err error) {
-	for _, candidateDir := range workspaceStateDirs(record) {
+	// Active child roots are authoritative. The catalog root is searched last
+	// only for compatibility with records written before scoped topology was
+	// persisted, so a stale compatibility duplicate cannot shadow live state.
+	candidateDirs := append([]string(nil), workspaceRuntimeStateDirs(record)...)
+	catalogRoot := strings.TrimSpace(record.LocalDir)
+	catalogSeen := false
+	for _, candidateDir := range candidateDirs {
+		if filepath.Clean(candidateDir) == filepath.Clean(catalogRoot) {
+			catalogSeen = true
+			break
+		}
+	}
+	if catalogRoot != "" && !catalogSeen {
+		candidateDirs = append(candidateDirs, catalogRoot)
+	}
+	for _, candidateDir := range candidateDirs {
 		candidate := filepath.Join(deadLetterDirFor(candidateDir), opID+".json")
 		payload, err = os.ReadFile(candidate)
 		if err == nil {
@@ -12156,6 +12215,9 @@ type providerDisconnectPlan struct {
 
 func planProviderDisconnect(record workspaceRecord, provider string) (providerDisconnectPlan, error) {
 	localRoot := strings.TrimSpace(record.LocalDir)
+	if localRoot == "" {
+		return providerDisconnectPlan{}, nil
+	}
 	providerRoot := mountscope.NormalizePath("/" + providerRootDir(provider))
 	var plan providerDisconnectPlan
 	addScopeState := func(scope mountscope.Scope) error {
@@ -12214,6 +12276,9 @@ func planProviderDisconnect(record workspaceRecord, provider string) (providerDi
 }
 
 func preflightProviderDisconnect(record workspaceRecord, provider string) error {
+	if strings.TrimSpace(record.LocalDir) == "" {
+		return nil
+	}
 	plan, err := planProviderDisconnect(record, provider)
 	if err != nil {
 		return fmt.Errorf("resolve mount state before disconnecting %s: %w", provider, err)
