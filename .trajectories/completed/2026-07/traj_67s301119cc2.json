@@ -1,0 +1,57 @@
+{
+  "id": "traj_67s301119cc2",
+  "version": 1,
+  "task": {
+    "title": "Fix scoped child mirror-root artifact leakage",
+    "source": {
+      "system": "plain",
+      "id": "relayfile#379"
+    }
+  },
+  "status": "completed",
+  "startedAt": "2026-07-30T05:23:47.124Z",
+  "completedAt": "2026-07-30T05:26:30.407Z",
+  "agents": [
+    {
+      "name": "default",
+      "role": "lead",
+      "joinedAt": "2026-07-30T05:26:30.341Z"
+    }
+  ],
+  "chapters": [
+    {
+      "id": "chap_1c6z5kxlfyt9",
+      "title": "Work",
+      "agentName": "default",
+      "startedAt": "2026-07-30T05:26:30.341Z",
+      "endedAt": "2026-07-30T05:26:30.407Z",
+      "events": [
+        {
+          "ts": 1785389190342,
+          "type": "decision",
+          "content": "Separated mirror-root artifacts from per-Syncer runtime layout: Separated mirror-root artifacts from per-Syncer runtime layout",
+          "raw": {
+            "question": "Separated mirror-root artifacts from per-Syncer runtime layout",
+            "chosen": "Separated mirror-root artifacts from per-Syncer runtime layout",
+            "alternatives": [],
+            "reasoning": "Scoped children are real remote subtrees; creating digests or skills beneath them turns root-only local artifacts into remote content. All .relay-only writers now use one runtime initializer, while root setup retains the full layout."
+          },
+          "significance": "high"
+        }
+      ]
+    }
+  ],
+  "retrospective": {
+    "summary": "Prevented scoped child Syncers and state writers from creating root-only digest/skill artifacts; added E2E absence and runtime-directory assertions; full vet and Go suite pass.",
+    "approach": "Standard approach",
+    "confidence": 0.93
+  },
+  "commits": [],
+  "filesChanged": [],
+  "projectId": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-b",
+  "tags": [],
+  "_trace": {
+    "startRef": "1bbaaf0b8a958cb66d71d3d7ca169542587e008e",
+    "endRef": "1bbaaf0b8a958cb66d71d3d7ca169542587e008e"
+  }
+}

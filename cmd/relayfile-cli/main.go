@@ -1926,6 +1926,13 @@ func ensureMirrorLayout(localDir string) error {
 	} else {
 		return err
 	}
+	return ensureMountRuntimeLayout(localDir)
+}
+
+// ensureMountRuntimeLayout creates only the per-Syncer runtime directories.
+// Scoped children must not receive mirror-root artifacts such as digests or
+// skills because those paths would become remote content inside the subtree.
+func ensureMountRuntimeLayout(localDir string) error {
 	if err := os.MkdirAll(filepath.Join(localDir, ".relay"), 0o755); err != nil {
 		return err
 	}
@@ -6267,7 +6274,7 @@ func runMount(args []string) error {
 		if scope.LocalDir == absLocalDir {
 			continue
 		}
-		if err := ensureMirrorLayout(scope.LocalDir); err != nil {
+		if err := ensureMountRuntimeLayout(scope.LocalDir); err != nil {
 			return fmt.Errorf("prepare scoped local dir for %s: %w", scope.RemotePath, err)
 		}
 	}
@@ -10394,7 +10401,7 @@ func writeMirrorStateFile(localDir string, snapshot syncStateFile) error {
 	if localDir == "" {
 		return nil
 	}
-	if err := ensureMirrorLayout(localDir); err != nil {
+	if err := ensureMountRuntimeLayout(localDir); err != nil {
 		return err
 	}
 	failedWritebacksStateMu.Lock()
@@ -11135,7 +11142,7 @@ func saveIntegrationConnection(localDir string, state integrationConnectionState
 	if localDir == "" || strings.TrimSpace(state.Provider) == "" {
 		return nil
 	}
-	if err := ensureMirrorLayout(localDir); err != nil {
+	if err := ensureMountRuntimeLayout(localDir); err != nil {
 		return err
 	}
 	payload, err := json.MarshalIndent(state, "", "  ")
@@ -11171,7 +11178,7 @@ func markProviderDisconnected(localDir, provider string) error {
 		return nil
 	}
 	_ = os.RemoveAll(filepath.Join(localDir, providerRootDir(provider)))
-	if err := ensureMirrorLayout(localDir); err != nil {
+	if err := ensureMountRuntimeLayout(localDir); err != nil {
 		return err
 	}
 	marker := map[string]string{

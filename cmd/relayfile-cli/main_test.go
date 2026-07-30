@@ -2372,6 +2372,26 @@ func TestMountMirrorsRepeatedRemotePathsUnderScopedLayout(t *testing.T) {
 	assertFileContent("github/repos/acme/cloud/README.md", "# Cloud")
 	assertFileContent("slack/channels/proj-cloud/topic.md", "Scoped channel")
 
+	githubChild := filepath.Join(localRoot, "github", "repos", "acme", "cloud")
+	for _, relativePath := range []string{
+		filepath.Join(".relay", "integrations"),
+		filepath.Join(".relay", "disconnected"),
+		filepath.Join(".relay", "conflicts"),
+	} {
+		info, statErr := os.Stat(filepath.Join(githubChild, relativePath))
+		if statErr != nil {
+			t.Fatalf("expected scoped child runtime directory %s: %v", relativePath, statErr)
+		}
+		if !info.IsDir() {
+			t.Fatalf("scoped child runtime path %s is not a directory", relativePath)
+		}
+	}
+	for _, rootOnlyPath := range []string{"digests", ".skills"} {
+		if _, statErr := os.Stat(filepath.Join(githubChild, rootOnlyPath)); !errors.Is(statErr, os.ErrNotExist) {
+			t.Fatalf("scoped child root-only path %s exists or could not be inspected: %v", rootOnlyPath, statErr)
+		}
+	}
+
 	record, ok := workspaceRecordByID("ws_demo")
 	if !ok {
 		t.Fatal("expected mount to persist workspace record")
