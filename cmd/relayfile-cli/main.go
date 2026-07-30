@@ -3677,7 +3677,7 @@ func runIntegrationDisconnect(args []string, stdin io.Reader, stdout io.Writer) 
 	if _, _, err := client.do(context.Background(), http.MethodDelete, fmt.Sprintf("/api/v1/workspaces/%s/integrations/%s/status", url.PathEscape(record.ID), url.PathEscape(provider)), nil); err != nil {
 		return err
 	}
-	if err := markProviderDisconnected(record.LocalDir, provider); err != nil {
+	if err := markProviderDisconnected(record.LocalDir, provider, record.LocalLayout); err != nil {
 		return err
 	}
 	fmt.Fprintf(stdout, "%s disconnected from workspace %s\n", provider, record.Name)
@@ -11204,7 +11204,10 @@ func verifyDaemonProcess(localDir, workspaceID string) (pid int, verified bool) 
 }
 
 func shouldRefuseCompetingMount(daemonized bool) bool {
-	return !daemonized
+	// Daemonized children must perform the same read-only discovery as their
+	// foreground parent. The caller's own PID is excluded by
+	// runningMountDaemons, so this does not self-refuse.
+	return true
 }
 
 func workspaceNameForStart(workspaceID string) string {
@@ -11215,6 +11218,23 @@ func workspaceNameForStart(workspaceID string) string {
 		return record.Name
 	}
 	return workspaceID
+}
+
+func workspaceNameForLocalDir(localDir string) string {
+	abs, err := filepath.Abs(localDir)
+	if err != nil {
+		abs = filepath.Clean(localDir)
+	}
+	catalog, err := loadWorkspaceCatalog()
+	if err == nil {
+		for _, record := range catalog.Workspaces {
+			recorded, rerr := filepath.Abs(record.LocalDir)
+			if rerr == nil && filepath.Clean(recorded) == filepath.Clean(abs) && strings.TrimSpace(record.Name) != "" {
+				return record.Name
+			}
+		}
+	}
+	return abs
 }
 
 func runningMountDaemons(localDir, workspaceID, workspaceName string) ([]mountDaemonProcess, int, error) {
@@ -11727,11 +11747,21 @@ func loadSavedConnectionID(localDir, provider string) string {
 	return strings.TrimSpace(state.ConnectionID)
 }
 
-func markProviderDisconnected(localDir, provider string) error {
+func markProviderDisconnected(localDir, provider, localLayout string) error {
 	if localDir == "" {
 		return nil
 	}
-	_ = os.RemoveAll(filepath.Join(localDir, providerRootDir(provider)))
+	providerPath := filepath.Join(localDir, providerRootDir(provider))
+	if strings.TrimSpace(localLayout) == mountscope.LayoutScoped {
+		// Scoped child roots own runtime state under .relay. Remove only
+		// mirrored provider content; recursively deleting the child would
+		// destroy outbox/dead-letter/retry state while a syncer may use it.
+		if err := removeScopedProviderContent(providerPath); err != nil {
+			return err
+		}
+	} else {
+		_ = os.RemoveAll(providerPath)
+	}
 	if err := ensureMountRuntimeLayout(localDir); err != nil {
 		return err
 	}
@@ -11748,6 +11778,37 @@ func markProviderDisconnected(localDir, provider string) error {
 		return err
 	}
 	_ = os.Remove(integrationConnectionPath(localDir, provider))
+	return nil
+}
+
+func removeScopedProviderContent(root string) error {
+	entries, err := os.ReadDir(root)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if entry.Name() == mountscope.RuntimeTopLevel {
+			continue
+		}
+		path := filepath.Join(root, entry.Name())
+		if entry.IsDir() {
+			if err := removeScopedProviderContent(path); err != nil {
+				return err
+			}
+			// Remove now-empty mirror directories, but retain any directory
+			// that still contains a nested runtime tree.
+			if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) && !errors.Is(err, syscall.ENOTEMPTY) {
+				return err
+			}
+			continue
+		}
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -12593,6 +12654,9 @@ func writeDaemonPIDStateIfAbsent(path string, state daemonPIDState) error {
 	if strings.TrimSpace(path) == "" {
 		return errors.New("empty daemon pid file path")
 	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
 	payload, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
 		return err
@@ -12637,12 +12701,18 @@ func waitForBackgroundMountRegistration(pidFile, localDir string, childPID int, 
 			// The child is still alive but has not become authoritative. Keep the
 			// PID/log/state paths intact so an operator can inspect or reconcile a
 			// late registration; do not leave the foreground caller waiting forever.
+			logPath := mountLogFile(localDir)
+			if registeredState, registeredStructured := readDaemonPIDStateFile(pidFile); registeredStructured && strings.TrimSpace(registeredState.LogFile) != "" {
+				logPath = registeredState.LogFile
+			}
 			return fmt.Errorf(
-				"background mount process %d did not register daemon state within %s for %s; child may still be initializing (pid file: %s)",
+				"background mount process %d did not register daemon state within %s for %s; child may still be initializing (pid file: %s, log: %s). If it remains stuck, run `relayfile stop %s` to release the mount",
 				childPID,
 				backgroundMountRegistrationTimeout,
 				localDir,
 				pidFile,
+				logPath,
+				workspaceNameForLocalDir(localDir),
 			)
 		}
 		if !slowNoticeLogged && slowNoticeAfter > 0 && time.Now().After(slowNoticeAt) {

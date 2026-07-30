@@ -7429,7 +7429,7 @@ func TestIntegrationAdoptClearsDisconnectMarker(t *testing.T) {
 	// workspace as disconnected — otherwise the operator gets a stale
 	// "disconnected" reading for a workspace they just adopted into.
 	_, localDir := setupAdoptWorkspace(t)
-	if err := markProviderDisconnected(localDir, "github"); err != nil {
+	if err := markProviderDisconnected(localDir, "github", mountscope.LayoutExact); err != nil {
 		t.Fatalf("markProviderDisconnected failed: %v", err)
 	}
 	markerPath := filepath.Join(localDir, ".relay", "disconnected", "github.json")
@@ -7454,6 +7454,31 @@ func TestIntegrationAdoptClearsDisconnectMarker(t *testing.T) {
 	}
 	if _, err := os.Stat(markerPath); !os.IsNotExist(err) {
 		t.Fatalf("expected disconnect marker to be removed, got: %v", err)
+	}
+}
+
+func TestMarkProviderDisconnectedScopedPreservesRuntimeState(t *testing.T) {
+	localDir := t.TempDir()
+	child := filepath.Join(localDir, "github")
+	child = filepath.Join(child, "repos", "acme", "cloud")
+	runtime := filepath.Join(child, mountscope.RuntimeTopLevel)
+	if err := os.MkdirAll(filepath.Join(runtime, "outbox"), 0o755); err != nil {
+		t.Fatalf("create runtime state: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(runtime, "outbox", "pending.json"), []byte("pending"), 0o644); err != nil {
+		t.Fatalf("write pending state: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(child, "README.md"), []byte("mirrored"), 0o644); err != nil {
+		t.Fatalf("write mirrored content: %v", err)
+	}
+	if err := markProviderDisconnected(localDir, "github", mountscope.LayoutScoped); err != nil {
+		t.Fatalf("markProviderDisconnected failed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(runtime, "outbox", "pending.json")); err != nil {
+		t.Fatalf("scoped disconnect deleted runtime state: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(child, "README.md")); !os.IsNotExist(err) {
+		t.Fatalf("expected mirrored content removed, stat err=%v", err)
 	}
 }
 

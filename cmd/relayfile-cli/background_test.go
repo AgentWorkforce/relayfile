@@ -265,6 +265,34 @@ func TestBackgroundMountProvisionalPIDStateBlocksCompetingStart(t *testing.T) {
 	}
 }
 
+func TestWriteDaemonPIDStateIfAbsentCreatesCustomParent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "custom", "nested", "relayfile.pid")
+	if err := writeDaemonPIDStateIfAbsent(path, daemonPIDState{PID: 1234}); err != nil {
+		t.Fatalf("writeDaemonPIDStateIfAbsent failed: %v", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("expected pid file at custom path: %v", err)
+	}
+}
+
+func TestBackgroundMountRegistrationTimeoutNamesRecoveryPaths(t *testing.T) {
+	oldTimeout := backgroundMountRegistrationTimeout
+	backgroundMountRegistrationTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { backgroundMountRegistrationTimeout = oldTimeout })
+	localDir := t.TempDir()
+	cmd := exec.Command("sleep", "1")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	childExited := make(chan error, 1)
+	go func() { childExited <- cmd.Wait() }()
+	t.Cleanup(func() { _ = cmd.Process.Kill(); <-childExited })
+	err := waitForBackgroundMountRegistration(filepath.Join(localDir, "relayfile.pid"), localDir, cmd.Process.Pid, childExited, 0)
+	if err == nil || !strings.Contains(err.Error(), "log:") || !strings.Contains(err.Error(), "relayfile stop") {
+		t.Fatalf("timeout omitted recovery paths: %v", err)
+	}
+}
+
 func TestStopEscalatesToKillWhenDaemonIgnoresTerm(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)
