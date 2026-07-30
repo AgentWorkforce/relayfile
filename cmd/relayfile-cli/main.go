@@ -5990,6 +5990,12 @@ func runMount(args []string) error {
 	if fs.NArg() > 2 {
 		return errors.New("usage: relayfile mount [WORKSPACE] [LOCAL_DIR]")
 	}
+	localLayoutProvided := false
+	fs.Visit(func(parsed *flag.Flag) {
+		if parsed.Name == "local-layout" {
+			localLayoutProvided = true
+		}
+	})
 	fileRemotePaths, pathsErr := mountscope.ReadPathsFile(*pathsFile)
 	if pathsErr != nil {
 		return fmt.Errorf("read paths-file: %w", pathsErr)
@@ -6100,7 +6106,7 @@ func runMount(args []string) error {
 		allRemotePaths = append(allRemotePaths, recordedRemotePaths...)
 	}
 	resolvedLocalLayout := *localLayout
-	if !mountFlagProvided(args, "local-layout") && strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_LOCAL_LAYOUT")) == "" && recordedLocalLayout != "" {
+	if !localLayoutProvided && strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_LOCAL_LAYOUT")) == "" && recordedLocalLayout != "" {
 		resolvedLocalLayout = recordedLocalLayout
 	}
 	resolvedLocalLayout, err = mountscope.ResolveLayout(resolvedLocalLayout)
@@ -6316,17 +6322,6 @@ func runMount(args []string) error {
 			&sharedAuthMu,
 		)
 	})
-}
-
-func mountFlagProvided(args []string, name string) bool {
-	long := "--" + name
-	short := "-" + name
-	for _, arg := range args {
-		if arg == long || arg == short || strings.HasPrefix(arg, long+"=") || strings.HasPrefix(arg, short+"=") {
-			return true
-		}
-	}
-	return false
 }
 
 type cliMountScopeRunner func(context.Context, mountscope.Scope) error

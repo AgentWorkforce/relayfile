@@ -243,6 +243,13 @@ func executeMount(rootCtx context.Context, cfg mountConfig, runPoll pollRunner, 
 	case mountModePoll:
 		return runPoll(rootCtx, cfg)
 	case mountModeFuse:
+		remotePaths := cfg.remotePaths
+		if len(remotePaths) == 0 {
+			remotePaths = []string{cfg.remotePath}
+		}
+		if len(mountscope.NormalizePaths(remotePaths, "/")) > 1 {
+			return fmt.Errorf("multiple --remote-path values are not supported with --mode=%s; use --mode=%s", mountModeFuse, mountModePoll)
+		}
 		return runFuse(rootCtx, cfg)
 	default:
 		return fmt.Errorf("unsupported mount mode %q", cfg.mode)

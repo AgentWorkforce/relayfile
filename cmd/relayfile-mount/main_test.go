@@ -293,6 +293,30 @@ func TestExecuteMountDispatchesFuseMode(t *testing.T) {
 	}
 }
 
+func TestExecuteMountRejectsMultipleFusePaths(t *testing.T) {
+	cfg := mountConfig{
+		mode:        mountModeFuse,
+		localLayout: localLayoutScoped,
+		remotePaths: []string{"/github", "/slack"},
+	}
+	fuseCalled := false
+	err := executeMount(
+		context.Background(),
+		cfg,
+		func(context.Context, mountConfig) error { return nil },
+		func(context.Context, mountConfig) error {
+			fuseCalled = true
+			return nil
+		},
+	)
+	if err == nil || !strings.Contains(err.Error(), "--mode=poll") {
+		t.Fatalf("expected poll-mode guidance, got %v", err)
+	}
+	if fuseCalled {
+		t.Fatal("FUSE runner must not receive a multi-path config it cannot honor")
+	}
+}
+
 func TestExecuteMountReturnsRunnerError(t *testing.T) {
 	wantErr := errors.New("boom")
 	cfg := mountConfig{mode: mountModeFuse}
