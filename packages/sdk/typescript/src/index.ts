@@ -30,6 +30,7 @@ export {
   MalformedCloudResponseError,
   MissingConnectionIdError,
   MountModeUnavailableError,
+  MountMultiPathUnsupportedError,
   MountReadyTimeoutError,
   MountSessionInputError,
   ProviderNotConnectedError,

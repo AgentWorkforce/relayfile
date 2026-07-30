@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/agentworkforce/relayfile/internal/delegatedauth"
+	"github.com/agentworkforce/relayfile/internal/mountscope"
 	"github.com/agentworkforce/relayfile/internal/mountsync"
 )
 
@@ -2313,6 +2314,289 @@ func TestMountUsesRecordedLocalDirWhenOmitted(t *testing.T) {
 	}
 	if string(data) != "# A" {
 		t.Fatalf("unexpected mirrored content: %q", data)
+	}
+}
+
+func TestMountMirrorsRepeatedRemotePathsUnderScopedLayout(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	localRoot := t.TempDir()
+	token := testJWTWithWorkspace("ws_demo")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/workspaces/ws_demo/fs/export":
+			switch got := r.URL.Query().Get("path"); got {
+			case "/github/repos/acme/cloud":
+				_, _ = w.Write([]byte(`[{"path":"/github/repos/acme/cloud/README.md","revision":"rev_github","contentType":"text/markdown","content":"# Cloud"}]`))
+			case "/slack/channels/proj-cloud":
+				_, _ = w.Write([]byte(`[{"path":"/slack/channels/proj-cloud/topic.md","revision":"rev_slack","contentType":"text/markdown","content":"Scoped channel"}]`))
+			default:
+				t.Fatalf("unexpected export path: %q", got)
+			}
+		case "/v1/workspaces/ws_demo/fs/events":
+			_, _ = w.Write([]byte(`{"events":[]}`))
+		case "/v1/workspaces/ws_demo/sync/status":
+			_, _ = w.Write([]byte(`{"workspaceId":"ws_demo","providers":[]}`))
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	err := run([]string{
+		"mount", "ws_demo", localRoot,
+		"--server", server.URL,
+		"--token", token,
+		"--remote-path", "/github/repos/acme/cloud",
+		"--remote-path", "/slack/channels/proj-cloud",
+		"--local-layout", "scoped",
+		"--once",
+		"--websocket=false",
+	}, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("run scoped multi-path mount failed: %v", err)
+	}
+
+	assertFileContent := func(relativePath, want string) {
+		t.Helper()
+		payload, readErr := os.ReadFile(filepath.Join(localRoot, filepath.FromSlash(relativePath)))
+		if readErr != nil {
+			t.Fatalf("read scoped file %s: %v", relativePath, readErr)
+		}
+		if got := string(payload); got != want {
+			t.Fatalf("scoped file %s = %q, want %q", relativePath, got, want)
+		}
+	}
+	assertFileContent("github/repos/acme/cloud/README.md", "# Cloud")
+	assertFileContent("slack/channels/proj-cloud/topic.md", "Scoped channel")
+
+	record, ok := workspaceRecordByID("ws_demo")
+	if !ok {
+		t.Fatal("expected mount to persist workspace record")
+	}
+	if got, want := strings.Join(record.RemotePaths, ","), "/github/repos/acme/cloud,/slack/channels/proj-cloud"; got != want {
+		t.Fatalf("persisted remote paths = %q, want %q", got, want)
+	}
+	if record.LocalLayout != "scoped" {
+		t.Fatalf("persisted local layout = %q, want scoped", record.LocalLayout)
+	}
+
+	// A later start/restart supplies no path flags, so the catalog must carry
+	// the allowlist instead of silently widening the mount back to "/".
+	err = run([]string{
+		"mount", "ws_demo", localRoot,
+		"--server", server.URL,
+		"--token", token,
+		"--once",
+		"--websocket=false",
+	}, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("rerun with persisted scoped paths failed: %v", err)
+	}
+}
+
+func TestMountRejectsRepeatedRemotePathsWithoutScopedLayout(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	err := run([]string{
+		"mount", "ws_demo", t.TempDir(),
+		"--token", testJWTWithWorkspace("ws_demo"),
+		"--remote-path", "/github",
+		"--remote-path", "/slack",
+		"--once",
+	}, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "--local-layout=scoped") {
+		t.Fatalf("expected scoped-layout guidance, got %v", err)
+	}
+}
+
+func TestMountRefusesScopedResetBeforeInitializingMirror(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	parent := t.TempDir()
+	localRoot := filepath.Join(parent, "mirror")
+	err := run([]string{
+		"mount", "ws_demo", localRoot,
+		"--token", testJWTWithWorkspace("ws_demo"),
+		"--remote-path", "/github",
+		"--remote-path", "/slack",
+		"--local-layout", "scoped",
+		"--reset-after-clobber",
+		"--once",
+	}, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "transactionally") || !strings.Contains(err.Error(), "--rehome") {
+		t.Fatalf("expected scoped reset refusal with remedy, got %v", err)
+	}
+	if _, statErr := os.Stat(localRoot); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("scoped reset initialized mirror before refusing: %v", statErr)
+	}
+}
+
+func TestMountPersistsScopedTopologyBeforeBackgroundSpawnFailure(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	oldSpawn := spawnBackgroundMountProcessFn
+	spawnBackgroundMountProcessFn = func([]string, string, string, string) error {
+		return errors.New("synthetic spawn failure")
+	}
+	t.Cleanup(func() { spawnBackgroundMountProcessFn = oldSpawn })
+
+	localRoot := filepath.Join(t.TempDir(), "mirror")
+	err := run([]string{
+		"mount", "ws_demo", localRoot,
+		"--token", testJWTWithWorkspace("ws_demo"),
+		"--remote-path", "/github",
+		"--remote-path", "/slack",
+		"--local-layout", "scoped",
+		"--background",
+	}, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "synthetic spawn failure") {
+		t.Fatalf("expected synthetic background failure, got %v", err)
+	}
+	record, ok := workspaceRecordByID("ws_demo")
+	if !ok {
+		t.Fatal("expected failed current writer to leave a catalog record")
+	}
+	if record.LocalLayout != mountscope.LayoutScoped {
+		t.Fatalf("failed current writer left blank/incorrect layout %q", record.LocalLayout)
+	}
+	if got := strings.Join(record.RemotePaths, ","); got != "/github,/slack" {
+		t.Fatalf("failed current writer persisted paths %q, want /github,/slack", got)
+	}
+}
+
+func TestValidateMountLayoutTransitionRejectsInPlaceChange(t *testing.T) {
+	localDir := t.TempDir()
+	record := workspaceRecord{LocalDir: localDir, LocalLayout: mountscope.LayoutScoped}
+	err := validateMountLayoutTransition(record, localDir, mountscope.LayoutExact)
+	if err == nil || !strings.Contains(err.Error(), "--rehome") {
+		t.Fatalf("expected rehome guidance, got %v", err)
+	}
+	if err := validateMountLayoutTransition(record, filepath.Join(t.TempDir(), "new-root"), mountscope.LayoutExact); err != nil {
+		t.Fatalf("layout change at a new root should be allowed, got %v", err)
+	}
+}
+
+func TestValidateMountLayoutTransitionTreatsLegacyBlankAsUnknown(t *testing.T) {
+	localDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(localDir, ".relay"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(localDir, ".relay", "state.json"), []byte(`{"remoteRoot":"/"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	record := workspaceRecord{LocalDir: localDir}
+	err := validateMountLayoutTransition(record, localDir, mountscope.LayoutScoped)
+	if err == nil ||
+		!strings.Contains(err.Error(), "unknown") ||
+		!strings.Contains(err.Error(), "--rehome") ||
+		!strings.Contains(err.Error(), localDir) {
+		t.Fatalf("expected legacy-topology refusal with path and remedy, got %v", err)
+	}
+	if err := validateMountLayoutTransition(record, filepath.Join(t.TempDir(), "new-root"), mountscope.LayoutScoped); err != nil {
+		t.Fatalf("legacy record should allow explicit re-home to a new root, got %v", err)
+	}
+	if err := validateMountLayoutTransition(record, localDir, mountscope.LayoutExact); err != nil {
+		t.Fatalf("legacy exact mount should remain restartable, got %v", err)
+	}
+}
+
+func TestValidateMountLayoutTransitionAllowsUnstartedBlankRecordToStartScoped(t *testing.T) {
+	localDir := t.TempDir()
+	record := workspaceRecord{LocalDir: localDir}
+	if err := validateMountLayoutTransition(record, localDir, mountscope.LayoutScoped); err != nil {
+		t.Fatalf("pre-mount record has no state to orphan and should start scoped, got %v", err)
+	}
+}
+
+func TestValidateMountScopeTransitionRejectsInPlaceRemoval(t *testing.T) {
+	localRoot := t.TempDir()
+	previous := workspaceRecord{
+		LocalDir:    localRoot,
+		LocalLayout: mountscope.LayoutScoped,
+		RemotePaths: []string{"/github", "/slack"},
+	}
+	err := validateMountScopeTransition(previous, localRoot, mountscope.LayoutScoped, []string{"/slack"})
+	if err == nil || !strings.Contains(err.Error(), "/github") || !strings.Contains(err.Error(), "--rehome") {
+		t.Fatalf("expected removed-scope rehome guidance, got %v", err)
+	}
+	if err := validateMountScopeTransition(previous, localRoot, mountscope.LayoutScoped, []string{"/github", "/slack", "/email"}); err != nil {
+		t.Fatalf("adding a scope should not require lifecycle migration, got %v", err)
+	}
+	if err := validateMountScopeTransition(previous, filepath.Join(t.TempDir(), "new-root"), mountscope.LayoutScoped, []string{"/slack"}); err != nil {
+		t.Fatalf("scope change at a new root should be allowed, got %v", err)
+	}
+}
+
+func TestValidateMountResetModeRefusesScopedAcknowledgedReset(t *testing.T) {
+	localRoot := t.TempDir()
+	err := validateMountResetMode(localRoot, mountscope.LayoutScoped, true)
+	if err == nil ||
+		!strings.Contains(err.Error(), "transactionally") ||
+		!strings.Contains(err.Error(), "--rehome") ||
+		!strings.Contains(err.Error(), localRoot) {
+		t.Fatalf("expected scoped reset refusal with reason and remedy, got %v", err)
+	}
+	if err := validateMountResetMode(localRoot, mountscope.LayoutExact, true); err != nil {
+		t.Fatalf("exact acknowledged reset should remain supported, got %v", err)
+	}
+}
+
+func TestPreflightScopedMountRootInvariantRefusesWithoutMutating(t *testing.T) {
+	localRoot := t.TempDir()
+	clobbered := filepath.Join(localRoot, "github")
+	if err := os.WriteFile(clobbered, []byte("preserve me"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	child := filepath.Join(clobbered, "repos", "acme")
+	err := preflightScopedMountRootInvariant(localRoot, child)
+	if err == nil || !strings.Contains(err.Error(), clobbered) || !strings.Contains(err.Error(), "--reset-after-clobber") {
+		t.Fatalf("expected scoped clobber refusal, got %v", err)
+	}
+	content, readErr := os.ReadFile(clobbered)
+	if readErr != nil || string(content) != "preserve me" {
+		t.Fatalf("preflight mutated clobbered path: content=%q err=%v", content, readErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(localRoot, "github", "repos")); statErr == nil {
+		t.Fatal("preflight initialized child path")
+	}
+}
+
+func TestPreflightScopedMountRootInvariantAllowsMissingChildTree(t *testing.T) {
+	localRoot := t.TempDir()
+	child := filepath.Join(localRoot, "github", "repos", "acme")
+	if err := preflightScopedMountRootInvariant(localRoot, child); err != nil {
+		t.Fatalf("fresh scoped child should be allowed, got %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(localRoot, "github")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("preflight initialized missing child: %v", err)
+	}
+}
+
+func TestMergeWorkspaceRecordsUpdatesMountStateIdentityOnlyWhenExplicit(t *testing.T) {
+	current := workspaceRecord{
+		ID:             "ws_demo",
+		MountStateFile: "/old/state.json",
+		MountStateDir:  "/old",
+		MountKind:      mountsync.MountKindDaemon,
+	}
+	ordinary := mergeWorkspaceRecords(current, workspaceRecord{ID: "ws_demo", Name: "demo"})
+	if ordinary.MountStateFile != current.MountStateFile || ordinary.MountStateDir != current.MountStateDir || ordinary.MountKind != current.MountKind {
+		t.Fatalf("ordinary catalog update changed mount state identity: %#v", ordinary)
+	}
+	explicit := mergeWorkspaceRecords(current, workspaceRecord{
+		ID:            "ws_demo",
+		MountStateDir: "/new",
+		MountKind:     mountsync.MountKindFlush,
+		mountStateSet: true,
+	})
+	if explicit.MountStateFile != "" || explicit.MountStateDir != "/new" || explicit.MountKind != mountsync.MountKindFlush {
+		t.Fatalf("explicit catalog update did not replace mount state identity: %#v", explicit)
 	}
 }
 

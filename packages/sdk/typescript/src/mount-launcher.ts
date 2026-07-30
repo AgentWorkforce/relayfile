@@ -15,6 +15,7 @@ import { getRelayfileMountBinaryPath } from "./mount-path.js"
 import {
   CloudAbortError,
   MountModeUnavailableError,
+  MountMultiPathUnsupportedError,
   MountReadyTimeoutError,
   RelayfileSetupError
 } from "./setup-errors.js"
@@ -104,6 +105,9 @@ async function startRelayfileMount(
   input: MountLauncherStart,
   options: DefaultMountLauncherOptions
 ): Promise<MountLauncherInstance> {
+  if ((input.env.RELAYFILE_MOUNT_PATHS_FILE ?? "").trim() !== "") {
+    throw new MountMultiPathUnsupportedError()
+  }
   const localDir = path.resolve(input.env.RELAYFILE_LOCAL_DIR ?? process.cwd())
   const mountLocalDir = resolveMountLocalDir(
     localDir,

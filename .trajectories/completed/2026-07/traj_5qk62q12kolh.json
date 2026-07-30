@@ -1,0 +1,113 @@
+{
+  "id": "traj_5qk62q12kolh",
+  "version": 1,
+  "task": {
+    "title": "Ship scoped multi-path CLI runtime with explicit refusal boundaries",
+    "source": {
+      "system": "plain",
+      "id": "relayfile#379-unit-b"
+    }
+  },
+  "status": "completed",
+  "startedAt": "2026-07-30T04:44:16.955Z",
+  "completedAt": "2026-07-30T05:00:20.731Z",
+  "agents": [
+    {
+      "name": "default",
+      "role": "lead",
+      "joinedAt": "2026-07-30T04:51:48.965Z"
+    }
+  ],
+  "chapters": [
+    {
+      "id": "chap_6mrbvoywnz1w",
+      "title": "Work",
+      "agentName": "default",
+      "startedAt": "2026-07-30T04:51:48.965Z",
+      "endedAt": "2026-07-30T05:00:20.731Z",
+      "events": [
+        {
+          "ts": 1785387108966,
+          "type": "decision",
+          "content": "Legacy blank layout continues only as exact; scoped migration refuses in place: Legacy blank layout continues only as exact; scoped migration refuses in place",
+          "raw": {
+            "question": "Legacy blank layout continues only as exact; scoped migration refuses in place",
+            "chosen": "Legacy blank layout continues only as exact; scoped migration refuses in place",
+            "alternatives": [],
+            "reasoning": "Pre-layout records were created when exact was the only supported topology, so exact restarts remain compatible. Blank cannot establish scoped topology; enabling scoped at the same LOCAL_DIR refuses and requires a new LOCAL_DIR with --rehome."
+          },
+          "significance": "high"
+        },
+        {
+          "ts": 1785387109028,
+          "type": "decision",
+          "content": "Reject TypeScript paths-file configuration before launcher side effects: Reject TypeScript paths-file configuration before launcher side effects",
+          "raw": {
+            "question": "Reject TypeScript paths-file configuration before launcher side effects",
+            "chosen": "Reject TypeScript paths-file configuration before launcher side effects",
+            "alternatives": [],
+            "reasoning": "The exported low-level env accepts RELAYFILE_MOUNT_PATHS_FILE, but the TS handle models and observes one remotePath. Refusal prevents a multi-root process from appearing singly observable."
+          },
+          "significance": "high"
+        },
+        {
+          "ts": 1785387250561,
+          "type": "reflection",
+          "content": "Unit B now has a finite refusal boundary: persisted multi-path runtime, legacy blank-to-scoped migration refusal, transactional scoped-reset refusal, and TypeScript low-level multi-path refusal. Focused Go and TS coverage pass; full validation is running.",
+          "raw": {
+            "focalPoints": [
+              "lifecycle-boundary",
+              "item-22",
+              "verification"
+            ],
+            "confidence": 0.82
+          },
+          "significance": "high",
+          "tags": [
+            "focal:lifecycle-boundary",
+            "focal:item-22",
+            "focal:verification",
+            "confidence:0.82"
+          ]
+        },
+        {
+          "ts": 1785387357534,
+          "type": "decision",
+          "content": "Persist resolved mount topology before mirror initialization: Persist resolved mount topology before mirror initialization",
+          "raw": {
+            "question": "Persist resolved mount topology before mirror initialization",
+            "chosen": "Persist resolved mount topology before mirror initialization",
+            "alternatives": [],
+            "reasoning": "No catalog epoch marker exists. Writing the nonblank layout and allowlist after non-mutating preflight but before mkdir/spawn makes it impossible for a current scoped writer to leave child roots behind a blank record; blank remains safe to interpret as historical exact-only or current pre-mount state."
+          },
+          "significance": "high"
+        },
+        {
+          "ts": 1785387503137,
+          "type": "decision",
+          "content": "Refuse legacy scoped migration only when local mount state exists: Refuse legacy scoped migration only when local mount state exists",
+          "raw": {
+            "question": "Refuse legacy scoped migration only when local mount state exists",
+            "chosen": "Refuse legacy scoped migration only when local mount state exists",
+            "alternatives": [],
+            "reasoning": "Blank catalog records also come from current setup before the first mount. The safety fact is persisted exact mount state that scoping would orphan, not blankness itself; unmounted blank records may start scoped, while blank records with public or legacy state must rehome."
+          },
+          "significance": "high"
+        }
+      ]
+    }
+  ],
+  "retrospective": {
+    "summary": "Implemented Unit B scoped multi-path CLI runtime with write-ahead topology persistence and three explicit refusal boundaries: existing exact state cannot become scoped in place, scoped clobber reset refuses until transactional recovery exists, and the singular TypeScript launcher rejects multi-path env before side effects. Added lifecycle, restart, no-side-effect, and TS coverage plus migration docs.",
+    "approach": "Standard approach",
+    "confidence": 0.9
+  },
+  "commits": [],
+  "filesChanged": [],
+  "projectId": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-b",
+  "tags": [],
+  "_trace": {
+    "startRef": "6233a2572ec64eefc42c5fa6e79c4b3fa665963e",
+    "endRef": "6233a2572ec64eefc42c5fa6e79c4b3fa665963e"
+  }
+}

@@ -10,6 +10,7 @@ import {
 } from "./mount-launcher.js"
 import {
   MountModeUnavailableError,
+  MountMultiPathUnsupportedError,
   MountReadyTimeoutError
 } from "./setup-errors.js"
 
@@ -53,6 +54,34 @@ describe("default mount launcher", () => {
 
   afterEach(async () => {
     vi.useRealTimers()
+  })
+
+  it("refuses multi-path configuration before filesystem or process side effects", async () => {
+    const tempRoot = await mkdtemp(
+      path.join(os.tmpdir(), "relayfile-default-launcher-multipath-")
+    )
+    const localDir = path.join(tempRoot, "mirror")
+    const spawnImpl = vi.fn()
+    const launcher = createDefaultMountLauncher({ spawnImpl })
+
+    try {
+      await expect(
+        launcher.start({
+          env: {
+            ...createMountEnv(localDir),
+            RELAYFILE_MOUNT_PATHS_FILE: "/tmp/relayfile-paths.json"
+          },
+          readyTimeoutMs: 50
+        })
+      ).rejects.toMatchObject({
+        name: "MountMultiPathUnsupportedError",
+        code: "mount_multi_path_unsupported"
+      } satisfies Partial<MountMultiPathUnsupportedError>)
+      expect(spawnImpl).not.toHaveBeenCalled()
+      await expect(stat(localDir)).rejects.toMatchObject({ code: "ENOENT" })
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true })
+    }
   })
 
   it("times out readiness, then stops the child process", async () => {
