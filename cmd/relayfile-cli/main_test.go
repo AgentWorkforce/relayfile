@@ -2907,15 +2907,20 @@ func TestMountRehomeAllowsExplicitMoveAndPersistsLocalDir(t *testing.T) {
 
 	localDir := t.TempDir()
 	otherDir := t.TempDir()
+	oldStateFile := filepath.Join(t.TempDir(), "old-explicit-state.json")
+	if err := os.WriteFile(oldStateFile, []byte(`not valid mount state`), 0o600); err != nil {
+		t.Fatalf("write old explicit state file: %v", err)
+	}
 	now := time.Now().UTC().Format(time.RFC3339)
 	if err := saveWorkspaceCatalog(workspaceCatalog{
 		Default: "demo",
 		Workspaces: []workspaceRecord{{
-			Name:       "demo",
-			ID:         "ws_demo",
-			LocalDir:   localDir,
-			CreatedAt:  now,
-			LastUsedAt: now,
+			Name:           "demo",
+			ID:             "ws_demo",
+			LocalDir:       localDir,
+			MountStateFile: oldStateFile,
+			CreatedAt:      now,
+			LastUsedAt:     now,
 		}},
 	}); err != nil {
 		t.Fatalf("saveWorkspaceCatalog failed: %v", err)
@@ -2959,6 +2964,9 @@ func TestMountRehomeAllowsExplicitMoveAndPersistsLocalDir(t *testing.T) {
 	wantLocalDir, _ := filepath.Abs(otherDir)
 	if record.LocalDir != wantLocalDir {
 		t.Fatalf("LocalDir = %q, want %q", record.LocalDir, wantLocalDir)
+	}
+	if record.MountStateFile != "" {
+		t.Fatalf("rehomed mount retained old explicit state file %q", record.MountStateFile)
 	}
 }
 

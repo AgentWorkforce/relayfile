@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "lastUpdated": "2026-07-30T05:26:30.550Z",
+  "lastUpdated": "2026-07-30T05:32:11.059Z",
   "trajectories": {
     "traj_4pvrlmqfnzng": {
       "title": "Review PR #278 in AgentWorkforce/relayfile",
@@ -71,6 +71,13 @@
       "startedAt": "2026-07-30T05:23:47.124Z",
       "completedAt": "2026-07-30T05:26:30.407Z",
       "path": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-b/.trajectories/completed/2026-07/traj_67s301119cc2.json"
+    },
+    "traj_tdew3mg9dnit": {
+      "title": "Reset explicit mount state identity on rehome",
+      "status": "completed",
+      "startedAt": "2026-07-30T05:30:01.698Z",
+      "completedAt": "2026-07-30T05:32:10.925Z",
+      "path": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-b/.trajectories/completed/2026-07/traj_tdew3mg9dnit.json"
     }
   }
 }

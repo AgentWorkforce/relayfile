@@ -6147,6 +6147,7 @@ func runMount(args []string) error {
 	)
 	if !stateFileProvided &&
 		!stateDirProvided &&
+		!*rehome &&
 		strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_STATE_FILE")) == "" &&
 		strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_STATE_DIR")) == "" &&
 		strings.TrimSpace(previousRecord.MountStateFile) != "" {

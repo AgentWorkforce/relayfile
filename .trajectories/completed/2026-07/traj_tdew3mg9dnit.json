@@ -1,0 +1,57 @@
+{
+  "id": "traj_tdew3mg9dnit",
+  "version": 1,
+  "task": {
+    "title": "Reset explicit mount state identity on rehome",
+    "source": {
+      "system": "plain",
+      "id": "relayfile#379"
+    }
+  },
+  "status": "completed",
+  "startedAt": "2026-07-30T05:30:01.698Z",
+  "completedAt": "2026-07-30T05:32:10.925Z",
+  "agents": [
+    {
+      "name": "default",
+      "role": "lead",
+      "joinedAt": "2026-07-30T05:32:10.863Z"
+    }
+  ],
+  "chapters": [
+    {
+      "id": "chap_6yh0pc1p2mp9",
+      "title": "Work",
+      "agentName": "default",
+      "startedAt": "2026-07-30T05:32:10.863Z",
+      "endedAt": "2026-07-30T05:32:10.925Z",
+      "events": [
+        {
+          "ts": 1785389530864,
+          "type": "decision",
+          "content": "Do not inherit an explicit state file during rehome: Do not inherit an explicit state file during rehome",
+          "raw": {
+            "question": "Do not inherit an explicit state file during rehome",
+            "chosen": "Do not inherit an explicit state file during rehome",
+            "alternatives": [],
+            "reasoning": "An explicit state file is a fixed identity outside the local-root hash. Reusing it at a new root can falsely claim bootstrap completion for files that exist only in the old mirror. StateDir remains reusable because its state ID includes the new local root."
+          },
+          "significance": "high"
+        }
+      ]
+    }
+  ],
+  "retrospective": {
+    "summary": "Made rehome select fresh state instead of inheriting an explicit prior state file; regression uses invalid old state to prove it is not read; full vet and Go suite pass.",
+    "approach": "Standard approach",
+    "confidence": 0.94
+  },
+  "commits": [],
+  "filesChanged": [],
+  "projectId": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-b",
+  "tags": [],
+  "_trace": {
+    "startRef": "487b05cee55b1beb02022c52a44f3134549f4c4c",
+    "endRef": "487b05cee55b1beb02022c52a44f3134549f4c4c"
+  }
+}
