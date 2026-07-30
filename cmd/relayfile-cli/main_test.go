@@ -7941,6 +7941,17 @@ func TestProviderDisconnectPreflightIgnoresOtherProvidersInBroadScope(t *testing
 	if err := preflightProviderDisconnect(record, "github"); err != nil {
 		t.Fatalf("GitHub disconnect was blocked by unrelated Slack state: %v", err)
 	}
+	if err := os.WriteFile(
+		filepath.Join(deadLetterDir, "mixed-op.json"),
+		[]byte(`{"opId":"mixed-op","path":"/slack/channels/project/other.json,/github/repos/acme/pending.json"}`),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+	err = preflightProviderDisconnect(record, "github")
+	if err == nil || !strings.Contains(err.Error(), "deadLetters=1") {
+		t.Fatalf("GitHub disconnect with second-position bulk dead letter = %v, want refusal", err)
+	}
 }
 
 func TestProviderDisconnectPreflightRefusesUnknownPrivateState(t *testing.T) {
@@ -7956,6 +7967,20 @@ func TestProviderDisconnectPreflightRefusesUnknownPrivateState(t *testing.T) {
 	err := preflightProviderDisconnect(record, "github")
 	if err == nil || !strings.Contains(err.Error(), "private mount state is unknown") {
 		t.Fatalf("missing private state preflight = %v, want explicit unknown-state refusal", err)
+	}
+}
+
+func TestDeadLetterRecordBelongsToProviderChecksEveryBulkPath(t *testing.T) {
+	for _, rawPath := range []string{
+		"/github/repos/acme/pending.json,/slack/channels/project/other.json",
+		"/slack/channels/project/other.json,/github/repos/acme/pending.json",
+	} {
+		if !deadLetterRecordBelongsToProvider(rawPath, "/github") {
+			t.Fatalf("mixed-provider dead letter %q did not match GitHub", rawPath)
+		}
+	}
+	if deadLetterRecordBelongsToProvider("/slack/channels/project/other.json", "/github") {
+		t.Fatal("Slack-only dead letter matched GitHub")
 	}
 }
 

@@ -12431,7 +12431,7 @@ func refuseProviderDisconnectWithPendingState(provider string, plan providerDisc
 			return fmt.Errorf("inspect dead letters before disconnecting %s: %w", provider, err)
 		}
 		for _, record := range records {
-			if wholeDir || strings.TrimSpace(record.Path) == "" || mountscope.IsWithin(providerRoot, record.Path) {
+			if wholeDir || deadLetterRecordBelongsToProvider(record.Path, providerRoot) {
 				deadLetters++
 			}
 		}
@@ -12462,6 +12462,20 @@ func refuseProviderDisconnectWithPendingState(provider string, plan providerDisc
 		deadLetters,
 		privatePending,
 	)
+}
+
+func deadLetterRecordBelongsToProvider(rawPath, providerRoot string) bool {
+	paths := deadLetterRetryPaths(rawPath)
+	if len(paths) == 0 {
+		// Missing or unparseable ownership cannot be proven unrelated.
+		return true
+	}
+	for _, remotePath := range paths {
+		if mountscope.IsWithin(providerRoot, remotePath) {
+			return true
+		}
+	}
+	return false
 }
 
 func countProviderOutboxRecords(dir, providerRoot string) (int, error) {
