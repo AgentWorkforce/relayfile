@@ -1,0 +1,57 @@
+{
+  "id": "traj_s57bw9graew3",
+  "version": 1,
+  "task": {
+    "title": "Refuse integration disconnect with unsynced scoped state",
+    "source": {
+      "system": "plain",
+      "id": "relayfile#379"
+    }
+  },
+  "status": "completed",
+  "startedAt": "2026-07-30T06:05:24.821Z",
+  "completedAt": "2026-07-30T06:07:48.718Z",
+  "agents": [
+    {
+      "name": "default",
+      "role": "lead",
+      "joinedAt": "2026-07-30T06:07:48.652Z"
+    }
+  ],
+  "chapters": [
+    {
+      "id": "chap_2vpynmsqldrt",
+      "title": "Work",
+      "agentName": "default",
+      "startedAt": "2026-07-30T06:07:48.652Z",
+      "endedAt": "2026-07-30T06:07:48.718Z",
+      "events": [
+        {
+          "ts": 1785391668653,
+          "type": "decision",
+          "content": "Refuse disconnect before Cloud mutation when local work is pending: Refuse disconnect before Cloud mutation when local work is pending",
+          "raw": {
+            "question": "Refuse disconnect before Cloud mutation when local work is pending",
+            "chosen": "Refuse disconnect before Cloud mutation when local work is pending",
+            "alternatives": [],
+            "reasoning": "Conflicts, dead letters, and pending/failed/attention outbox records are the only copies of work not accepted remotely. The preflight must run before the Cloud DELETE and again before local cleanup; it reports counts and preserves every file on refusal. Active or unverified mounts also refuse to close the check-delete race."
+          },
+          "significance": "high"
+        }
+      ]
+    }
+  ],
+  "retrospective": {
+    "summary": "Made integration disconnect preflight all provider-owned runtime roots before Cloud mutation, refuse active mounts and counted unsynced state, and preserve all mirror/runtime files on refusal. Focused disconnect and inherited case-fold boundary tests pass.",
+    "approach": "Standard approach",
+    "confidence": 0.93
+  },
+  "commits": [],
+  "filesChanged": [],
+  "projectId": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-c",
+  "tags": [],
+  "_trace": {
+    "startRef": "dfc3bf37e2f2e9719174cff3aab1d2e05f6f07d2",
+    "endRef": "dfc3bf37e2f2e9719174cff3aab1d2e05f6f07d2"
+  }
+}

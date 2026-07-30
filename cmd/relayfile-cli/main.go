@@ -3547,6 +3547,9 @@ func runIntegrationDisconnect(args []string, stdin io.Reader, stdout io.Writer) 
 			return nil
 		}
 	}
+	if err := preflightProviderDisconnect(record, provider); err != nil {
+		return err
+	}
 	cloudCreds, err := ensureCloudCredentials(strings.TrimSpace(*cloudAPIURL), "", 5*time.Minute, false, io.Discard)
 	if err != nil {
 		return err
@@ -11624,13 +11627,23 @@ func markProviderDisconnected(record workspaceRecord, provider string) error {
 	return nil
 }
 
-func removeProviderMirror(record workspaceRecord, provider string) error {
+type providerDisconnectPlan struct {
+	cleanScopeDirs []string
+	removeSubtrees []string
+	stateDirs      []string
+}
+
+func planProviderDisconnect(record workspaceRecord, provider string) providerDisconnectPlan {
 	localRoot := strings.TrimSpace(record.LocalDir)
 	providerRoot := mountscope.NormalizePath("/" + providerRootDir(provider))
 	if strings.TrimSpace(record.LocalLayout) != mountscope.LayoutScoped {
-		return os.RemoveAll(filepath.Join(localRoot, filepath.FromSlash(strings.TrimPrefix(providerRoot, "/"))))
+		return providerDisconnectPlan{
+			removeSubtrees: []string{filepath.Join(localRoot, filepath.FromSlash(strings.TrimPrefix(providerRoot, "/")))},
+			stateDirs:      []string{localRoot},
+		}
 	}
 
+	var plan providerDisconnectPlan
 	matchedScope := false
 	for _, scope := range workspaceMountScopes(record) {
 		switch {
@@ -11638,36 +11651,114 @@ func removeProviderMirror(record workspaceRecord, provider string) error {
 			// This scope's .relay directory contains conflicts, dead letters,
 			// outbox entries, and cursor state. Remove only mirrored content.
 			matchedScope = true
-			entries, err := os.ReadDir(scope.LocalDir)
-			if err != nil {
-				if errors.Is(err, os.ErrNotExist) {
-					continue
-				}
-				return err
-			}
-			for _, entry := range entries {
-				if entry.Name() == ".relay" {
-					continue
-				}
-				if err := os.RemoveAll(filepath.Join(scope.LocalDir, entry.Name())); err != nil {
-					return err
-				}
-			}
+			plan.cleanScopeDirs = append(plan.cleanScopeDirs, scope.LocalDir)
+			plan.stateDirs = append(plan.stateDirs, scope.LocalDir)
 		case mountscope.IsWithin(scope.RemotePath, providerRoot):
 			// A broader scope (normally "/") keeps its runtime state outside
 			// the provider subtree, so the provider subtree is safe to remove.
 			matchedScope = true
 			relative := strings.TrimPrefix(providerRoot, scope.RemotePath)
 			relative = strings.TrimPrefix(relative, "/")
-			if err := os.RemoveAll(filepath.Join(scope.LocalDir, filepath.FromSlash(relative))); err != nil {
+			plan.removeSubtrees = append(plan.removeSubtrees, filepath.Join(scope.LocalDir, filepath.FromSlash(relative)))
+			plan.stateDirs = append(plan.stateDirs, scope.LocalDir)
+		}
+	}
+	if !matchedScope {
+		plan.removeSubtrees = append(plan.removeSubtrees, filepath.Join(localRoot, filepath.FromSlash(strings.TrimPrefix(providerRoot, "/"))))
+		plan.stateDirs = append(plan.stateDirs, localRoot)
+	}
+	return plan
+}
+
+func preflightProviderDisconnect(record workspaceRecord, provider string) error {
+	plan := planProviderDisconnect(record, provider)
+	running, stalePID, err := runningMountDaemons(record.LocalDir, record.ID, record.Name)
+	if err != nil {
+		return fmt.Errorf("check running mounts before disconnecting %s: %w", provider, err)
+	}
+	if len(running) > 0 {
+		return fmt.Errorf(
+			"refusing to disconnect %s while workspace %s has a running mount (%s); stop the mount before disconnecting",
+			provider,
+			firstNonBlank(record.Name, record.ID),
+			formatDaemonPIDs(running),
+		)
+	}
+	if stalePID != 0 {
+		return fmt.Errorf(
+			"refusing to disconnect %s while workspace %s has unverified mount state (pid %d); confirm the mount is stopped and clear %s before disconnecting",
+			provider,
+			firstNonBlank(record.Name, record.ID),
+			stalePID,
+			mountPIDFile(record.LocalDir),
+		)
+	}
+	return refuseProviderDisconnectWithPendingState(provider, plan.stateDirs)
+}
+
+func removeProviderMirror(record workspaceRecord, provider string) error {
+	plan := planProviderDisconnect(record, provider)
+	if err := preflightProviderDisconnect(record, provider); err != nil {
+		return err
+	}
+	for _, scopeDir := range plan.cleanScopeDirs {
+		entries, err := os.ReadDir(scopeDir)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			return err
+		}
+		for _, entry := range entries {
+			if entry.Name() == ".relay" {
+				continue
+			}
+			if err := os.RemoveAll(filepath.Join(scopeDir, entry.Name())); err != nil {
 				return err
 			}
 		}
 	}
-	if matchedScope {
+	for _, subtree := range plan.removeSubtrees {
+		if err := os.RemoveAll(subtree); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func refuseProviderDisconnectWithPendingState(provider string, localDirs []string) error {
+	seen := map[string]struct{}{}
+	outbox, conflicts, deadLetters := 0, 0, 0
+	for _, localDir := range localDirs {
+		cleaned := filepath.Clean(strings.TrimSpace(localDir))
+		if cleaned == "." {
+			continue
+		}
+		if _, ok := seen[cleaned]; ok {
+			continue
+		}
+		seen[cleaned] = struct{}{}
+		runtimeRoot := filepath.Join(cleaned, ".relay")
+		outbox += countJSONFiles(filepath.Join(runtimeRoot, "outbox", "pending"))
+		outbox += countJSONFiles(filepath.Join(runtimeRoot, "outbox", "failed"))
+		outbox += countJSONFiles(filepath.Join(runtimeRoot, "outbox", "attention"))
+		conflicts += countFilesInDir(filepath.Join(runtimeRoot, "conflicts"))
+		records, err := readDeadLetterRecords(cleaned)
+		if err != nil {
+			return fmt.Errorf("inspect dead letters before disconnecting %s: %w", provider, err)
+		}
+		deadLetters += len(records)
+	}
+	if outbox == 0 && conflicts == 0 && deadLetters == 0 {
 		return nil
 	}
-	return os.RemoveAll(filepath.Join(localRoot, filepath.FromSlash(strings.TrimPrefix(providerRoot, "/"))))
+	return fmt.Errorf(
+		"refusing to disconnect %s while unsynced local state remains (outbox=%d conflicts=%d deadLetters=%d); resolve or replay the pending work before disconnecting",
+		provider,
+		outbox,
+		conflicts,
+		deadLetters,
+	)
 }
 
 // providerRootDir maps a provider id to the directory name it occupies

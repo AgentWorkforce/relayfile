@@ -7132,12 +7132,16 @@ func TestMarkProviderDisconnectedPreservesScopedRuntimeState(t *testing.T) {
 	}
 	githubScope := mountscope.LocalDir(localRoot, "/github/repos/acme")
 	githubMirror := filepath.Join(githubScope, "README.md")
-	githubOutbox := filepath.Join(githubScope, ".relay", "outbox", "pending.json")
+	githubOutbox := filepath.Join(githubScope, ".relay", "outbox", "pending", "queued.json")
+	githubConflict := filepath.Join(githubScope, ".relay", "conflicts", "README.md.local")
+	githubDeadLetter := filepath.Join(githubScope, ".relay", "dead-letter", "op_dead.json")
 	slackMirror := filepath.Join(mountscope.LocalDir(localRoot, "/slack/channels/project"), "topic.md")
 	for path, content := range map[string]string{
-		githubMirror: "mirrored",
-		githubOutbox: "queued",
-		slackMirror:  "unrelated",
+		githubMirror:     "mirrored",
+		githubOutbox:     "queued",
+		githubConflict:   "unresolved",
+		githubDeadLetter: `{"opId":"op_dead"}`,
+		slackMirror:      "unrelated",
 	} {
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			t.Fatalf("mkdir %s: %v", filepath.Dir(path), err)
@@ -7147,14 +7151,32 @@ func TestMarkProviderDisconnectedPreservesScopedRuntimeState(t *testing.T) {
 		}
 	}
 
+	err := markProviderDisconnected(record, "github")
+	if err == nil ||
+		!strings.Contains(err.Error(), "outbox=1") ||
+		!strings.Contains(err.Error(), "conflicts=1") ||
+		!strings.Contains(err.Error(), "deadLetters=1") {
+		t.Fatalf("expected actionable pending-state refusal, got %v", err)
+	}
+	for _, path := range []string{githubMirror, githubOutbox, githubConflict, githubDeadLetter, slackMirror} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("expected refused disconnect to preserve %s: %v", path, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(localRoot, ".relay", "disconnected", "github.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected refused disconnect not to write marker, got %v", err)
+	}
+
+	for _, path := range []string{githubOutbox, githubConflict, githubDeadLetter} {
+		if err := os.Remove(path); err != nil {
+			t.Fatalf("clear pending state %s: %v", path, err)
+		}
+	}
 	if err := markProviderDisconnected(record, "github"); err != nil {
-		t.Fatalf("markProviderDisconnected failed: %v", err)
+		t.Fatalf("markProviderDisconnected after clearing pending state failed: %v", err)
 	}
 	if _, err := os.Stat(githubMirror); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("expected github mirror content removed, got %v", err)
-	}
-	if payload, err := os.ReadFile(githubOutbox); err != nil || string(payload) != "queued" {
-		t.Fatalf("expected scoped runtime outbox preserved, payload=%q err=%v", payload, err)
 	}
 	if payload, err := os.ReadFile(slackMirror); err != nil || string(payload) != "unrelated" {
 		t.Fatalf("expected unrelated scoped mirror preserved, payload=%q err=%v", payload, err)
@@ -7162,6 +7184,54 @@ func TestMarkProviderDisconnectedPreservesScopedRuntimeState(t *testing.T) {
 	markerPath := filepath.Join(localRoot, ".relay", "disconnected", "github.json")
 	if _, err := os.Stat(markerPath); err != nil {
 		t.Fatalf("expected common-root disconnect marker: %v", err)
+	}
+}
+
+func TestIntegrationDisconnectRefusesBeforeCloudMutationWhenScopedStateIsPending(t *testing.T) {
+	record, localRoot := setupAdoptWorkspace(t)
+	record.LocalLayout = mountscope.LayoutScoped
+	record.RemotePaths = []string{"/github/repos/acme"}
+	if _, err := upsertWorkspaceDetails(record); err != nil {
+		t.Fatalf("persist scoped workspace: %v", err)
+	}
+	githubScope := mountscope.LocalDir(localRoot, "/github/repos/acme")
+	githubMirror := filepath.Join(githubScope, "README.md")
+	githubOutbox := filepath.Join(githubScope, ".relay", "outbox", "pending", "queued.json")
+	githubConflict := filepath.Join(githubScope, ".relay", "conflicts", "README.md.local")
+	for path, content := range map[string]string{
+		githubMirror:   "mirrored",
+		githubOutbox:   "queued",
+		githubConflict: "unresolved",
+	} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", filepath.Dir(path), err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+	}
+
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		t.Fatalf("refused disconnect reached Cloud: %s %s", r.Method, r.URL.Path)
+	}))
+	defer server.Close()
+	err := runIntegrationDisconnect(
+		[]string{"github", "--workspace", "demo", "--yes", "--cloud-api-url", server.URL},
+		strings.NewReader(""),
+		io.Discard,
+	)
+	if err == nil || !strings.Contains(err.Error(), "outbox=1") || !strings.Contains(err.Error(), "conflicts=1") {
+		t.Fatalf("expected pending-state refusal, got %v", err)
+	}
+	if requests != 0 {
+		t.Fatalf("Cloud requests = %d, want 0", requests)
+	}
+	for _, path := range []string{githubMirror, githubOutbox, githubConflict} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("expected refused disconnect to preserve %s: %v", path, err)
+		}
 	}
 }
 
