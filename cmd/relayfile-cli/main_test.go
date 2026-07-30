@@ -2436,6 +2436,52 @@ func TestMountRejectsRepeatedRemotePathsWithoutScopedLayout(t *testing.T) {
 	}
 }
 
+func TestMountRejectsExplicitlyEmptyPathsFileWithoutWidening(t *testing.T) {
+	for name, contents := range map[string]string{
+		"empty":      "",
+		"comments":   "\n# intentionally no roots\n",
+		"empty-json": "[]",
+		"blank-json": `[null, "", "  "]`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			clearRelayfileEnv(t)
+
+			pathsFile := filepath.Join(t.TempDir(), "paths")
+			if err := os.WriteFile(pathsFile, []byte(contents), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			localRoot := filepath.Join(t.TempDir(), "mirror")
+			err := run([]string{
+				"mount", "ws_demo", localRoot,
+				"--token", testJWTWithWorkspace("ws_demo"),
+				"--paths-file", pathsFile,
+				"--local-layout", "scoped",
+				"--once",
+			}, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
+			if err == nil || !strings.Contains(err.Error(), "contains no usable remote roots") ||
+				!strings.Contains(err.Error(), "refusing to widen") {
+				t.Fatalf("expected explicit empty allowlist refusal, got %v", err)
+			}
+			if _, statErr := os.Stat(localRoot); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("empty allowlist initialized mirror before refusal: %v", statErr)
+			}
+		})
+	}
+}
+
+func TestValidateExplicitPathsFileAllowlistDistinguishesUnsetFromEmpty(t *testing.T) {
+	if err := validateExplicitPathsFileAllowlist("", nil, nil); err != nil {
+		t.Fatalf("unset paths-file must retain the default mount fallback: %v", err)
+	}
+	if err := validateExplicitPathsFileAllowlist("/tmp/paths", []string{"", "  "}, nil); err == nil {
+		t.Fatal("configured paths-file with no usable roots must refuse")
+	}
+	if err := validateExplicitPathsFileAllowlist("/tmp/paths", nil, []string{"/github"}); err != nil {
+		t.Fatalf("direct remote path should make an empty companion file harmless: %v", err)
+	}
+}
+
 func TestMountRefusesScopedResetBeforeInitializingMirror(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)

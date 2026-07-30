@@ -4087,6 +4087,24 @@ func resolveCLIMountRemotePaths(requested, recorded []string, envRemotePath stri
 	return mountscope.NormalizePaths(requested, fallback)
 }
 
+func validateExplicitPathsFileAllowlist(pathsFile string, fileRemotePaths, directRemotePaths []string) error {
+	// An unset paths file is absence and retains the historical fallback. A
+	// configured path that resolves to no usable roots is an explicit empty
+	// allowlist; treating it as absent would invert the restriction into "/".
+	if strings.TrimSpace(pathsFile) == "" || len(directRemotePaths) > 0 {
+		return nil
+	}
+	for _, remotePath := range fileRemotePaths {
+		if strings.TrimSpace(remotePath) != "" {
+			return nil
+		}
+	}
+	return fmt.Errorf(
+		"paths-file %s contains no usable remote roots; refusing to widen an explicit empty allowlist to /",
+		pathsFile,
+	)
+}
+
 func absolutePathOrClean(value string) string {
 	trimmed := strings.TrimSpace(value)
 	if trimmed == "" {
@@ -6171,6 +6189,9 @@ func runMount(args []string) error {
 	fileRemotePaths, pathsErr := mountscope.ReadPathsFile(*pathsFile)
 	if pathsErr != nil {
 		return fmt.Errorf("read paths-file: %w", pathsErr)
+	}
+	if err := validateExplicitPathsFileAllowlist(*pathsFile, fileRemotePaths, remotePaths.Values()); err != nil {
+		return err
 	}
 	allRemotePaths := append(remotePaths.Values(), fileRemotePaths...)
 
