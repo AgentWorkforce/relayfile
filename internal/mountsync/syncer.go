@@ -33,6 +33,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/agentworkforce/relayfile/internal/digest"
+	"github.com/agentworkforce/relayfile/internal/mountscope"
 	"github.com/agentworkforce/relayfile/internal/relayfile"
 	"github.com/fsnotify/fsnotify"
 	"nhooyr.io/websocket"
@@ -6830,9 +6831,7 @@ func mountRuntimeRemoteRoot(path string) string {
 		if segment == "" || segment == "." {
 			continue
 		}
-		if segment == ".relay" ||
-			segment == ".relayfile-mount-state.json" ||
-			strings.HasPrefix(segment, ".relayfile-mount-state.json.tmp-") {
+		if mountscope.IsReservedRuntimeSegment(segment) {
 			return normalizeRemotePath("/" + strings.Join(segments[:index+1], "/"))
 		}
 	}

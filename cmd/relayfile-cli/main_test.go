@@ -2510,7 +2510,7 @@ func TestMountPersistsScopedTopologyBeforeBackgroundSpawnFailure(t *testing.T) {
 	clearRelayfileEnv(t)
 
 	oldSpawn := spawnBackgroundMountProcessFn
-	spawnBackgroundMountProcessFn = func([]string, string, string, string, string) error {
+	spawnBackgroundMountProcessFn = func([]string, []string, string, string, string, string) error {
 		return errors.New("synthetic spawn failure")
 	}
 	t.Cleanup(func() { spawnBackgroundMountProcessFn = oldSpawn })

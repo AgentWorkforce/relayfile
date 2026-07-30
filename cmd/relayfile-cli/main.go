@@ -6484,7 +6484,11 @@ func runMount(args []string) error {
 	*intervalJitter = clampJitterRatio(*intervalJitter)
 
 	if *background && !*daemonized {
-		return spawnBackgroundMountProcessFn(args, absLocalDir, pidFile, logFile, resolvedLocalLayout)
+		resolvedRemotePaths := make([]string, 0, len(mountScopes))
+		for _, scope := range mountScopes {
+			resolvedRemotePaths = append(resolvedRemotePaths, scope.RemotePath)
+		}
+		return spawnBackgroundMountProcessFn(args, resolvedRemotePaths, absLocalDir, pidFile, logFile, resolvedLocalLayout)
 	}
 	registerPID := shouldRegisterMountPID(*daemonized, *once)
 	if *daemonized {
@@ -12154,7 +12158,7 @@ func jitteredIntervalWithSample(base time.Duration, jitterRatio, sample float64)
 
 var spawnBackgroundMountProcessFn = spawnBackgroundMountProcess
 
-func spawnBackgroundMountProcess(originalArgs []string, localDir, pidFile, logFile, localLayout string) error {
+func spawnBackgroundMountProcess(originalArgs, resolvedRemotePaths []string, localDir, pidFile, logFile, localLayout string) error {
 	if err := prepareBackgroundMountLayout(localDir, logFile, localLayout); err != nil {
 		return err
 	}
@@ -12162,17 +12166,7 @@ func spawnBackgroundMountProcess(originalArgs []string, localDir, pidFile, logFi
 	if err != nil {
 		return err
 	}
-	filteredArgs := make([]string, 0, len(originalArgs)+5)
-	for i := 0; i < len(originalArgs); i++ {
-		arg := originalArgs[i]
-		if arg == "--background" || arg == "-background" {
-			continue
-		}
-		if strings.HasPrefix(arg, "--background=") || strings.HasPrefix(arg, "-background=") {
-			continue
-		}
-		filteredArgs = append(filteredArgs, arg)
-	}
+	filteredArgs := resolvedBackgroundMountArgs(originalArgs, resolvedRemotePaths)
 	childArgs := append([]string{"mount"}, filteredArgs...)
 	childArgs = append(childArgs, "--daemonized", "--pid-file", pidFile, "--log-file", logFile)
 	logHandle, err := os.OpenFile(logFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
@@ -12194,6 +12188,36 @@ func spawnBackgroundMountProcess(originalArgs []string, localDir, pidFile, logFi
 	}
 	fmt.Fprintf(os.Stdout, "Mirror started in background at %s. Logs: %s\n", localDir, logFile)
 	return nil
+}
+
+func resolvedBackgroundMountArgs(originalArgs, resolvedRemotePaths []string) []string {
+	filteredArgs := make([]string, 0, len(originalArgs)+len(resolvedRemotePaths)*2+1)
+	for i := 0; i < len(originalArgs); i++ {
+		arg := originalArgs[i]
+		if arg == "--background" || arg == "-background" {
+			continue
+		}
+		if strings.HasPrefix(arg, "--background=") || strings.HasPrefix(arg, "-background=") {
+			continue
+		}
+		if arg == "--paths-file" || arg == "-paths-file" || arg == "--remote-path" || arg == "-remote-path" {
+			i++
+			continue
+		}
+		if strings.HasPrefix(arg, "--paths-file=") || strings.HasPrefix(arg, "-paths-file=") ||
+			strings.HasPrefix(arg, "--remote-path=") || strings.HasPrefix(arg, "-remote-path=") {
+			continue
+		}
+		filteredArgs = append(filteredArgs, arg)
+	}
+	// The parent has already read, normalized, validated, and persisted the
+	// allowlist. Override any inherited paths-file environment default and
+	// hand the resolved roots to the detached child as immutable argv values.
+	filteredArgs = append(filteredArgs, "--paths-file=")
+	for _, remotePath := range resolvedRemotePaths {
+		filteredArgs = append(filteredArgs, "--remote-path", remotePath)
+	}
+	return filteredArgs
 }
 
 func prepareBackgroundMountLayout(localDir, logFile, localLayout string) error {

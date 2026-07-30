@@ -84,6 +84,24 @@ func TestPlanRejectsScopedRootsThatOverlapReservedLocalPaths(t *testing.T) {
 	}
 }
 
+func TestPlanRejectsScopedRootsContainingNestedRuntimeSegments(t *testing.T) {
+	root := t.TempDir()
+	for _, remotePath := range []string{
+		"/github/.relay/private",
+		"/github/.relayfile-mount-state.json",
+		"/github/.relayfile-mount-state.json.tmp-123",
+	} {
+		t.Run(remotePath, func(t *testing.T) {
+			_, err := Plan(root, LayoutScoped, []string{remotePath}, "/", "")
+			if err == nil ||
+				!strings.Contains(err.Error(), remotePath) ||
+				!strings.Contains(err.Error(), "reserved mount runtime segment") {
+				t.Fatalf("expected nested runtime segment refusal, got %v", err)
+			}
+		})
+	}
+}
+
 func TestPlanRejectsLocalFilesystemIdentityOverlap(t *testing.T) {
 	root := t.TempDir()
 	for _, paths := range [][]string{

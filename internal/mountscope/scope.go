@@ -228,7 +228,8 @@ func Plan(localRoot, layout string, paths []string, fallback, stateFile string) 
 	for _, remotePath := range normalized {
 		localDir := localRoot
 		if resolvedLayout == LayoutScoped {
-			firstSegment := strings.SplitN(strings.TrimPrefix(remotePath, "/"), "/", 2)[0]
+			segments := strings.Split(strings.TrimPrefix(remotePath, "/"), "/")
+			firstSegment := segments[0]
 			if IsReservedLocalTopLevel(firstSegment) {
 				return nil, fmt.Errorf(
 					"scoped remote root %s overlaps reserved local path %s; choose a non-reserved remote root or use --local-layout=%s for a single path",
@@ -236,6 +237,15 @@ func Plan(localRoot, layout string, paths []string, fallback, stateFile string) 
 					filepath.Join(localRoot, filepath.FromSlash(firstSegment)),
 					LayoutExact,
 				)
+			}
+			for _, segment := range segments[1:] {
+				if IsReservedRuntimeSegment(segment) {
+					return nil, fmt.Errorf(
+						"scoped remote root %s contains reserved mount runtime segment %s; choose a remote root outside mount runtime state",
+						remotePath,
+						segment,
+					)
+				}
 			}
 			localDir = LocalDir(localRoot, remotePath)
 		}
@@ -254,6 +264,16 @@ func Plan(localRoot, layout string, paths []string, fallback, stateFile string) 
 func IsReservedLocalTopLevel(name string) bool {
 	_, ok := reservedLocalTopLevels[localPathIdentity(name)]
 	return ok
+}
+
+// IsReservedRuntimeSegment reports whether a single remote path segment is
+// owned by mount runtime state. These names are pruned anywhere in a remote
+// path, so scoped roots containing one cannot be mounted as provider content.
+func IsReservedRuntimeSegment(name string) bool {
+	name = strings.TrimSpace(name)
+	return name == RuntimeTopLevel ||
+		name == ".relayfile-mount-state.json" ||
+		strings.HasPrefix(name, ".relayfile-mount-state.json.tmp-")
 }
 
 // localPathIdentity models the equality rules that can collapse distinct

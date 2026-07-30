@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"syscall"
@@ -465,13 +466,16 @@ func TestMountBackgroundClearsDeadStructuredPIDBeforeStart(t *testing.T) {
 
 	oldSpawn := spawnBackgroundMountProcessFn
 	spawned := false
-	spawnBackgroundMountProcessFn = func(originalArgs []string, absLocalDir, pidFile, logFile, localLayout string) error {
+	spawnBackgroundMountProcessFn = func(originalArgs, resolvedRemotePaths []string, absLocalDir, pidFile, logFile, localLayout string) error {
 		spawned = true
 		if absLocalDir != localDir {
 			t.Fatalf("spawn localDir = %q, want %q", absLocalDir, localDir)
 		}
 		if localLayout != mountscope.LayoutExact {
 			t.Fatalf("spawn localLayout = %q, want exact", localLayout)
+		}
+		if len(resolvedRemotePaths) != 1 || resolvedRemotePaths[0] != "/" {
+			t.Fatalf("spawn resolvedRemotePaths = %v, want [/]", resolvedRemotePaths)
 		}
 		if _, err := os.Stat(pidFile); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("expected stale pid file to be cleared before spawn, got %v", err)
@@ -489,6 +493,34 @@ func TestMountBackgroundClearsDeadStructuredPIDBeforeStart(t *testing.T) {
 	}
 	if _, err := os.Stat(mountPIDFile(localDir)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("expected stale pid file to remain cleared, got %v", err)
+	}
+}
+
+func TestResolvedBackgroundMountArgsUsesValidatedAllowlist(t *testing.T) {
+	got := resolvedBackgroundMountArgs(
+		[]string{
+			"demo",
+			"--background",
+			"--paths-file", "/tmp/mutable-paths.json",
+			"--remote-path=/stale",
+			"--interval", "30s",
+		},
+		[]string{"/github", "/slack/channels/ops"},
+	)
+	want := []string{
+		"demo",
+		"--interval", "30s",
+		"--paths-file=",
+		"--remote-path", "/github",
+		"--remote-path", "/slack/channels/ops",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("resolved background args = %v, want %v", got, want)
+	}
+	for _, arg := range got {
+		if strings.Contains(arg, "mutable-paths.json") || arg == "/stale" {
+			t.Fatalf("background child retained mutable or stale allowlist input: %v", got)
+		}
 	}
 }
 
