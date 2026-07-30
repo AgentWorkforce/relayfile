@@ -344,6 +344,13 @@
       "startedAt": "2026-07-30T11:40:53.561Z",
       "completedAt": "2026-07-30T12:33:29.593Z",
       "path": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-c/.trajectories/completed/2026-07/traj_juhkgunm7iz9.json"
+    },
+    "traj_scyyoykk4ura": {
+      "title": "Close scoped catalog cleanup TOCTOU",
+      "status": "completed",
+      "startedAt": "2026-07-30T12:27:24.305Z",
+      "completedAt": "2026-07-30T12:33:02.559Z",
+      "path": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-b/.trajectories/completed/2026-07/traj_scyyoykk4ura.json"
     }
   }
 }

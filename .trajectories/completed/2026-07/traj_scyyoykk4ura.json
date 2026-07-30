@@ -1,0 +1,57 @@
+{
+  "id": "traj_scyyoykk4ura",
+  "version": 1,
+  "task": {
+    "title": "Close scoped catalog cleanup TOCTOU",
+    "source": {
+      "system": "plain",
+      "id": "relayfile#379"
+    }
+  },
+  "status": "completed",
+  "startedAt": "2026-07-30T12:27:24.305Z",
+  "completedAt": "2026-07-30T12:33:02.559Z",
+  "agents": [
+    {
+      "name": "default",
+      "role": "lead",
+      "joinedAt": "2026-07-30T12:27:43.618Z"
+    }
+  ],
+  "chapters": [
+    {
+      "id": "chap_gsmh80t4qswc",
+      "title": "Work",
+      "agentName": "default",
+      "startedAt": "2026-07-30T12:27:43.618Z",
+      "endedAt": "2026-07-30T12:33:02.559Z",
+      "events": [
+        {
+          "ts": 1785414463619,
+          "type": "decision",
+          "content": "Quarantine generated catalog artifacts before deletion: Quarantine generated catalog artifacts before deletion",
+          "raw": {
+            "question": "Quarantine generated catalog artifacts before deletion",
+            "chosen": "Quarantine generated catalog artifacts before deletion",
+            "alternatives": [],
+            "reasoning": "An atomic rename captures the exact artifact being removed; content is verified after capture, changed replacements are restored or preserved, and later arrivals remain outside the deletion."
+          },
+          "significance": "high"
+        }
+      ]
+    }
+  ],
+  "retrospective": {
+    "summary": "Closed scoped catalog cleanup TOCTOU by atomically quarantining and verifying the exact generated artifact before deletion; replacements are restored or preserved.",
+    "approach": "Standard approach",
+    "confidence": 0.93
+  },
+  "commits": [],
+  "filesChanged": [],
+  "projectId": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-b",
+  "tags": [],
+  "_trace": {
+    "startRef": "7259b13d667aadeaa900c3624eb8acb32ae64eaa",
+    "endRef": "7259b13d667aadeaa900c3624eb8acb32ae64eaa"
+  }
+}

@@ -2624,6 +2624,25 @@ func TestPrepareScopedCatalogRootRefusesUnknownContentWithoutMutation(t *testing
 	}
 }
 
+func TestRemoveGeneratedScopedCatalogArtifactPreservesReplacement(t *testing.T) {
+	localRoot := t.TempDir()
+	path := filepath.Join(localRoot, mountscope.SkillsTopLevel, "activity-summary.md")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("user replacement"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := removeGeneratedScopedCatalogArtifact(path, []byte(activitySummarySkillMarkdown))
+	if err == nil || !strings.Contains(err.Error(), "changed during scoped transition") {
+		t.Fatalf("replacement removal = %v, want refusal", err)
+	}
+	if payload, readErr := os.ReadFile(path); readErr != nil || string(payload) != "user replacement" {
+		t.Fatalf("replacement was not restored, payload=%q err=%v", payload, readErr)
+	}
+}
+
 func TestSetupMirrorLayoutPreservesPersistedScopedTopology(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)
