@@ -2316,6 +2316,102 @@ func TestMountUsesRecordedLocalDirWhenOmitted(t *testing.T) {
 	}
 }
 
+func TestMountMirrorsRepeatedRemotePathsUnderScopedLayout(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	localRoot := t.TempDir()
+	token := testJWTWithWorkspace("ws_demo")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/workspaces/ws_demo/fs/export":
+			switch got := r.URL.Query().Get("path"); got {
+			case "/github/repos/acme/cloud":
+				_, _ = w.Write([]byte(`[{"path":"/github/repos/acme/cloud/README.md","revision":"rev_github","contentType":"text/markdown","content":"# Cloud"}]`))
+			case "/slack/channels/proj-cloud":
+				_, _ = w.Write([]byte(`[{"path":"/slack/channels/proj-cloud/topic.md","revision":"rev_slack","contentType":"text/markdown","content":"Scoped channel"}]`))
+			default:
+				t.Fatalf("unexpected export path: %q", got)
+			}
+		case "/v1/workspaces/ws_demo/fs/events":
+			_, _ = w.Write([]byte(`{"events":[]}`))
+		case "/v1/workspaces/ws_demo/sync/status":
+			_, _ = w.Write([]byte(`{"workspaceId":"ws_demo","providers":[]}`))
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	err := run([]string{
+		"mount", "ws_demo", localRoot,
+		"--server", server.URL,
+		"--token", token,
+		"--remote-path", "/github/repos/acme/cloud",
+		"--remote-path", "/slack/channels/proj-cloud",
+		"--local-layout", "scoped",
+		"--once",
+		"--websocket=false",
+	}, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("run scoped multi-path mount failed: %v", err)
+	}
+
+	assertFileContent := func(relativePath, want string) {
+		t.Helper()
+		payload, readErr := os.ReadFile(filepath.Join(localRoot, filepath.FromSlash(relativePath)))
+		if readErr != nil {
+			t.Fatalf("read scoped file %s: %v", relativePath, readErr)
+		}
+		if got := string(payload); got != want {
+			t.Fatalf("scoped file %s = %q, want %q", relativePath, got, want)
+		}
+	}
+	assertFileContent("github/repos/acme/cloud/README.md", "# Cloud")
+	assertFileContent("slack/channels/proj-cloud/topic.md", "Scoped channel")
+
+	record, ok := workspaceRecordByID("ws_demo")
+	if !ok {
+		t.Fatal("expected mount to persist workspace record")
+	}
+	if got, want := strings.Join(record.RemotePaths, ","), "/github/repos/acme/cloud,/slack/channels/proj-cloud"; got != want {
+		t.Fatalf("persisted remote paths = %q, want %q", got, want)
+	}
+	if record.LocalLayout != "scoped" {
+		t.Fatalf("persisted local layout = %q, want scoped", record.LocalLayout)
+	}
+
+	// A later start/restart supplies no path flags, so the catalog must carry
+	// the allowlist instead of silently widening the mount back to "/".
+	err = run([]string{
+		"mount", "ws_demo", localRoot,
+		"--server", server.URL,
+		"--token", token,
+		"--once",
+		"--websocket=false",
+	}, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("rerun with persisted scoped paths failed: %v", err)
+	}
+}
+
+func TestMountRejectsRepeatedRemotePathsWithoutScopedLayout(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	err := run([]string{
+		"mount", "ws_demo", t.TempDir(),
+		"--token", testJWTWithWorkspace("ws_demo"),
+		"--remote-path", "/github",
+		"--remote-path", "/slack",
+		"--once",
+	}, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "--local-layout=scoped") {
+		t.Fatalf("expected scoped-layout guidance, got %v", err)
+	}
+}
+
 func TestMountWithoutTokenRejectsWorkspaceOutsideAgentRelayActive(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)

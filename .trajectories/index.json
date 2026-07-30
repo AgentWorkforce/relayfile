@@ -1,0 +1,48 @@
+{
+  "version": 1,
+  "lastUpdated": "2026-07-30T03:21:56.615Z",
+  "trajectories": {
+    "traj_4pvrlmqfnzng": {
+      "title": "Review PR #278 in AgentWorkforce/relayfile",
+      "status": "completed",
+      "startedAt": "2026-06-15T07:37:32.072Z",
+      "completedAt": "2026-06-15T11:11:23.101Z",
+      "path": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379/.trajectories/completed/2026-06/traj_4pvrlmqfnzng/trajectory.json"
+    },
+    "traj_7c0yqouml6gq": {
+      "title": "Review PR #277 in AgentWorkforce/relayfile",
+      "status": "completed",
+      "startedAt": "2026-06-14T19:15:23.611Z",
+      "completedAt": "2026-06-14T19:15:24.233Z",
+      "path": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379/.trajectories/completed/2026-06/traj_7c0yqouml6gq.json"
+    },
+    "traj_snj7hxsnw561": {
+      "title": "Real-time two-machine multi-agent collaboration proof with adversarial relayfile mount conditions",
+      "status": "completed",
+      "startedAt": "2026-07-26T18:26:51.011Z",
+      "completedAt": "2026-07-26T19:12:15.234Z",
+      "path": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379/.trajectories/completed/2026-07/traj_snj7hxsnw561.json"
+    },
+    "traj_u1ub8ps9wt1x": {
+      "title": "Implement Phase 2 rebase fork HTTP and TypeScript SDK surfaces",
+      "status": "completed",
+      "startedAt": "2026-07-25T11:05:33.829Z",
+      "completedAt": "2026-07-25T11:07:38.969Z",
+      "path": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379/.trajectories/completed/2026-07/traj_u1ub8ps9wt1x/trajectory.json"
+    },
+    "traj_vm1r083knbl8": {
+      "title": "Repair PR #377 review findings and finish proven merge",
+      "status": "completed",
+      "startedAt": "2026-07-26T19:21:21.267Z",
+      "completedAt": "2026-07-26T19:25:55.239Z",
+      "path": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379/.trajectories/completed/2026-07/traj_vm1r083knbl8.json"
+    },
+    "traj_i81eik5bq4x2": {
+      "title": "Expose multi-subtree mount scoping in shipped CLI",
+      "status": "completed",
+      "startedAt": "2026-07-30T03:06:45.274Z",
+      "completedAt": "2026-07-30T03:21:56.486Z",
+      "path": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379/.trajectories/completed/2026-07/traj_i81eik5bq4x2.json"
+    }
+  }
+}

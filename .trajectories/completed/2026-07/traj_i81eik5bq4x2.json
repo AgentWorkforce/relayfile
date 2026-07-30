@@ -1,0 +1,77 @@
+{
+  "id": "traj_i81eik5bq4x2",
+  "version": 1,
+  "task": {
+    "title": "Expose multi-subtree mount scoping in shipped CLI",
+    "source": {
+      "system": "plain",
+      "id": "relayfile#379"
+    }
+  },
+  "status": "completed",
+  "startedAt": "2026-07-30T03:06:45.274Z",
+  "completedAt": "2026-07-30T03:21:56.486Z",
+  "agents": [
+    {
+      "name": "default",
+      "role": "lead",
+      "joinedAt": "2026-07-30T03:13:44.411Z"
+    }
+  ],
+  "chapters": [
+    {
+      "id": "chap_dk8e43w7gluu",
+      "title": "Work",
+      "agentName": "default",
+      "startedAt": "2026-07-30T03:13:44.411Z",
+      "endedAt": "2026-07-30T03:21:56.486Z",
+      "events": [
+        {
+          "ts": 1785381224412,
+          "type": "decision",
+          "content": "Use one scoped sync loop per allowlisted remote root and centralize scope planning: Use one scoped sync loop per allowlisted remote root and centralize scope planning",
+          "raw": {
+            "question": "Use one scoped sync loop per allowlisted remote root and centralize scope planning",
+            "chosen": "Use one scoped sync loop per allowlisted remote root and centralize scope planning",
+            "alternatives": [],
+            "reasoning": "A single Syncer has one RemoteRoot and one local state namespace. Running one loop per normalized root preserves that invariant while scoped local directories prevent file and .relay state collisions. Extracting flag parsing, path normalization, layout validation, and planning into internal/mountscope keeps relayfile and relayfile-mount on the same contract."
+          },
+          "significance": "high"
+        },
+        {
+          "ts": 1785381224468,
+          "type": "reflection",
+          "content": "The shipped CLI now reaches the daemon's multi-subtree capability without duplicating its parsing contract. Focused E2E observed two exports land under separate scoped roots; full CLI and daemon suites pass. Remaining review focus is lifecycle/status behavior of the shared root and background process semantics.",
+          "raw": {
+            "focalPoints": [
+              "scope-planning",
+              "lifecycle",
+              "status"
+            ],
+            "confidence": 0.82
+          },
+          "significance": "high",
+          "tags": [
+            "focal:scope-planning",
+            "focal:lifecycle",
+            "focal:status",
+            "confidence:0.82"
+          ]
+        }
+      ]
+    }
+  ],
+  "retrospective": {
+    "summary": "Added repeatable remote-path and paths-file scoping to the shipped CLI, centralized mount scope planning with the daemon, persisted allowlists across restarts, serialized delegated-auth refresh across scoped loops, documented the surface, and added end-to-end and unit coverage.",
+    "approach": "Standard approach",
+    "confidence": 0.92
+  },
+  "commits": [],
+  "filesChanged": [],
+  "projectId": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379",
+  "tags": [],
+  "_trace": {
+    "startRef": "2089059b0f2ee794f604a06f6153f2217153dd7e",
+    "endRef": "2089059b0f2ee794f604a06f6153f2217153dd7e"
+  }
+}
