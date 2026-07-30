@@ -222,6 +222,38 @@ func TestWaitForBackgroundMountRegistrationBoundsLiveUnregisteredChild(t *testin
 	}
 }
 
+func TestBackgroundMountProvisionalPIDStateBlocksCompetingStart(t *testing.T) {
+	localDir := t.TempDir()
+	cmd := exec.Command("sleep", "2")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+
+	executable := cmd.Path
+	if resolved, err := filepath.EvalSymlinks(executable); err == nil {
+		executable = resolved
+	}
+	pidFile := mountPIDFile(localDir)
+	if err := os.MkdirAll(filepath.Dir(pidFile), 0o700); err != nil {
+		t.Fatalf("create pid directory: %v", err)
+	}
+	if err := writeDaemonPIDStateIfAbsent(pidFile, daemonPIDState{
+		PID:        cmd.Process.Pid,
+		LocalDir:   localDir,
+		LogFile:    mountLogFile(localDir),
+		StartedAt:  time.Now().UTC().Format(time.RFC3339),
+		Executable: executable,
+	}); err != nil {
+		t.Fatalf("write provisional daemon state: %v", err)
+	}
+
+	pid, verified := verifyDaemonProcess(localDir, "")
+	if !verified || pid != cmd.Process.Pid {
+		t.Fatalf("provisional daemon state was not authoritative: pid=%d verified=%v", pid, verified)
+	}
+}
+
 func TestStopEscalatesToKillWhenDaemonIgnoresTerm(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)

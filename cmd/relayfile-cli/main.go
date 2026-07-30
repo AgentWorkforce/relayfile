@@ -12560,11 +12560,55 @@ func spawnBackgroundMountProcess(originalArgs, resolvedRemotePaths []string, loc
 	go func() {
 		childExited <- cmd.Wait()
 	}()
+	// Publish an ownership record before waiting. The daemon writes its full
+	// state once initialization reaches the registration point, but a bounded
+	// wait must not release the only exclusion against a second background
+	// start while this child is still alive and unregistered.
+	if err := writeDaemonPIDStateIfAbsent(pidFile, daemonPIDState{
+		PID:        childPID,
+		LocalDir:   localDir,
+		LogFile:    logFile,
+		StartedAt:  time.Now().UTC().Format(time.RFC3339),
+		Executable: executable,
+	}); err != nil {
+		_ = cmd.Process.Kill()
+		<-childExited
+		return fmt.Errorf("record background mount process %d before registration: %w", childPID, err)
+	}
 	if err := waitForBackgroundMountRegistration(pidFile, localDir, childPID, childExited, 10*time.Second); err != nil {
+		select {
+		case <-childExited:
+			_ = os.Remove(pidFile)
+		default:
+		}
 		return err
 	}
 	fmt.Fprintf(os.Stdout, "Mirror started in background at %s. Logs: %s\n", localDir, logFile)
 	return nil
+}
+
+func writeDaemonPIDStateIfAbsent(path string, state daemonPIDState) error {
+	if strings.TrimSpace(path) == "" {
+		return errors.New("empty daemon pid file path")
+	}
+	payload, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		return err
+	}
+	payload = append(payload, '\n')
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return nil
+		}
+		return err
+	}
+	defer file.Close()
+	if _, err := file.Write(payload); err != nil {
+		_ = os.Remove(path)
+		return err
+	}
+	return file.Close()
 }
 
 var backgroundMountRegistrationTimeout = 2 * time.Minute
