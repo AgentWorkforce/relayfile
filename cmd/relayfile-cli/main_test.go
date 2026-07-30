@@ -2849,6 +2849,10 @@ func clearRelayfileEnv(t *testing.T) {
 	t.Setenv("RELAYCAST_BASE_URL", "")
 	t.Setenv("RELAY_BASE_URL", "")
 	t.Setenv("AGENT_RELAY_BIN", "")
+	t.Setenv("AGENT_RELAY_WORKSPACE_KEY", "")
+	t.Setenv("RELAY_WORKSPACE_KEY", "")
+	t.Setenv("RELAY_API_KEY", "")
+	t.Setenv("AGENT_RELAY_HOME", "")
 }
 
 func installFakeAgentRelay(t *testing.T, scriptBody string) string {
@@ -2942,6 +2946,31 @@ exit 2
 	}
 }
 
+func TestActiveWorkspaceFallsBackWhenRevealSecretsUnsupported(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+	installFakeAgentRelay(t, `
+if [ "$*" = "workspace active --json --reveal-secrets" ]; then
+  echo "error: unknown option '--reveal-secrets'" >&2
+  exit 1
+fi
+if [ "$*" = "workspace active --json" ]; then
+  echo '{"name":"legacy","cloudWorkspaceId":"rw_cloud","relayfileWorkspaceId":"rw_relayfile"}'
+  exit 0
+fi
+echo "unexpected args: $*" >&2
+exit 2
+`)
+
+	workspace, err := activeWorkspaceFromAgentRelay()
+	if err != nil {
+		t.Fatalf("activeWorkspaceFromAgentRelay failed: %v", err)
+	}
+	if workspace.Name != "legacy" || workspace.CloudWorkspaceID != "rw_cloud" || workspace.RelayfileWorkspaceID != "rw_relayfile" {
+		t.Fatalf("unexpected workspace fallback result: %+v", workspace)
+	}
+}
+
 func relayfileCLITestFixture(t *testing.T, name string) string {
 	t.Helper()
 	content, err := os.ReadFile(filepath.Join("testdata", name))
@@ -2961,6 +2990,9 @@ func TestActiveWorkspaceClassifierFallsBackToStoreWhenErrorRedacted(t *testing.T
 	for _, name := range []string{"AGENT_RELAY_WORKSPACE_KEY", "RELAY_WORKSPACE_KEY", "RELAY_API_KEY", "AGENT_RELAY_HOME"} {
 		t.Setenv(name, "")
 	}
+	// A masked environment value must normalize to the empty sentinel so it
+	// cannot block fallback to the usable key in the shared workspace store.
+	t.Setenv("AGENT_RELAY_WORKSPACE_KEY", "rk_live_…masked")
 
 	const workspaceKey = "rk_live_messaging_only_redacted"
 	var validationCalls int
@@ -3127,6 +3159,7 @@ func TestClassifyAgentRelayActiveWorkspaceErrorReportsUnexpectedRelaycastStatus(
 }
 
 func TestClassifyAgentRelayActiveWorkspaceErrorPreservesRegexMiss(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)
 
 	var validationCalls int

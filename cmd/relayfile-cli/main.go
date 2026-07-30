@@ -64,6 +64,7 @@ var relayfileVersion = relayfileDefaultVersion
 var relayIntegrationBindingsMu sync.Mutex
 
 var agentRelayWorkspaceKeyInResolverError = regexp.MustCompile(`(?:[?&]key=|/api/v1/workspaces/)(rk_live_[A-Za-z0-9_-]+)`)
+var usableAgentRelayWorkspaceKeyPattern = regexp.MustCompile(`^rk_live_[A-Za-z0-9_-]+$`)
 
 // defaultJoinScopes are the scopes minted for every delegated-credential
 // workspace join. ops:read is required for writeback op-status polling
@@ -1322,16 +1323,16 @@ func classifyAgentRelayActiveWorkspaceError(err error) error {
 	workspaceKey := ""
 	if match := agentRelayWorkspaceKeyInResolverError.FindStringSubmatch(detail); len(match) == 2 {
 		if unescaped, unescapeErr := url.QueryUnescape(match[1]); unescapeErr == nil {
-			workspaceKey = unescaped
+			workspaceKey = usableAgentRelayWorkspaceKey(unescaped)
 		}
 	}
-	if !strings.HasPrefix(workspaceKey, "rk_live_") || strings.Contains(workspaceKey, "…") {
+	if workspaceKey == "" {
 		// agent-relay redacts credentials in its error output, so the key can
 		// no longer be read out of the message; fall back to the environment
 		// and the shared workspace store.
 		workspaceKey = activeWorkspaceKeyFromAgentRelayStore()
 	}
-	if !strings.HasPrefix(workspaceKey, "rk_live_") {
+	if workspaceKey == "" {
 		return err
 	}
 
@@ -1357,13 +1358,25 @@ func classifyAgentRelayActiveWorkspaceError(err error) error {
 	}
 }
 
+// usableAgentRelayWorkspaceKey converts external key-shaped input into either a
+// validated workspace key or the empty sentinel. Agent Relay's masked display
+// values deliberately retain the rk_live_ prefix, so prefix checks alone cannot
+// distinguish them from usable credentials.
+func usableAgentRelayWorkspaceKey(value string) string {
+	value = strings.TrimSpace(value)
+	if !usableAgentRelayWorkspaceKeyPattern.MatchString(value) {
+		return ""
+	}
+	return value
+}
+
 // activeWorkspaceKeyFromAgentRelayStore resolves the active workspace key the
 // way agent-relay itself does: canonical env vars first, then the shared
 // workspace store at $AGENT_RELAY_HOME (default ~/.agentworkforce/relay)
 // /workspaces.json. Returns "" when no key can be resolved.
 func activeWorkspaceKeyFromAgentRelayStore() string {
 	for _, name := range []string{"AGENT_RELAY_WORKSPACE_KEY", "RELAY_WORKSPACE_KEY", "RELAY_API_KEY"} {
-		if value := strings.TrimSpace(os.Getenv(name)); strings.HasPrefix(value, "rk_live_") {
+		if value := usableAgentRelayWorkspaceKey(os.Getenv(name)); value != "" {
 			return value
 		}
 	}
@@ -1388,7 +1401,7 @@ func activeWorkspaceKeyFromAgentRelayStore() string {
 	if json.Unmarshal(data, &store) != nil || store.Active == "" {
 		return ""
 	}
-	return strings.TrimSpace(store.Workspaces[store.Active].Key)
+	return usableAgentRelayWorkspaceKey(store.Workspaces[store.Active].Key)
 }
 
 func validateRelaycastWorkspaceKey(ctx context.Context, workspaceKey string) (string, int, error) {
