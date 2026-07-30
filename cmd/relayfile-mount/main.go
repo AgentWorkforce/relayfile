@@ -90,7 +90,7 @@ func main() {
 	pathsFile := flag.String("paths-file", strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_PATHS_FILE")), "file containing remote root paths, as JSON array or newline-separated list")
 	eventProvider := flag.String("provider", strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_PROVIDER")), "event provider filter")
 	localDir := flag.String("local-dir", strings.TrimSpace(os.Getenv("RELAYFILE_LOCAL_DIR")), "local mirror directory")
-	localLayout := flag.String("local-layout", envOrDefault("RELAYFILE_MOUNT_LOCAL_LAYOUT", localLayoutExact), "local directory layout: exact (local-dir is mirror root) or scoped (remote path is appended under local-dir)")
+	localLayout := flag.String("local-layout", envOrDefault("RELAYFILE_MOUNT_LOCAL_LAYOUT", localLayoutExact), "local directory layout: exact (scoped layout is temporarily unavailable until operator surfaces are ready)")
 	stateFile := flag.String("state-file", strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_STATE_FILE")), "state file path")
 	stateDir := flag.String("state-dir", envOrDefault("RELAYFILE_MOUNT_STATE_DIR", mountsync.DefaultMountStateDir()), "directory for private mount state")
 	mountKind := flag.String("mount-kind", envOrDefault("RELAYFILE_MOUNT_KIND", mountsync.MountKindDaemon), "private state identity kind: daemon, flush, or initial-sync")

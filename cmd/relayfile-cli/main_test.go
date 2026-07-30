@@ -3086,6 +3086,18 @@ func TestTrustedMountStartLockBaseRejectsSymlinkCandidate(t *testing.T) {
 	}
 }
 
+func TestPrivateMountStartLockTempDirUsesPerUserChild(t *testing.T) {
+	tempDir := t.TempDir()
+	got := privateMountStartLockTempDir(tempDir, "user-namespace")
+	want := filepath.Join(tempDir, "relayfile-runtime-user-namespace")
+	if got != want {
+		t.Fatalf("private temp lock directory = %q, want %q", got, want)
+	}
+	if got == tempDir {
+		t.Fatal("private temp lock directory must not use the shared temp root")
+	}
+}
+
 func TestAcquireMountStartLockSerializesSymlinkAliasesAndMissingDescendants(t *testing.T) {
 	parent := t.TempDir()
 	realParent := filepath.Join(parent, "real")

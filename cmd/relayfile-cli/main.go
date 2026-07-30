@@ -4387,11 +4387,19 @@ func mountStartLockUserNamespace() (string, error) {
 
 func trustedMountStartLockBase() (string, error) {
 	userCacheDir, _ := os.UserCacheDir()
+	privateTempDir := ""
+	if namespace, err := mountStartLockUserNamespace(); err == nil {
+		privateTempDir = privateMountStartLockTempDir(os.TempDir(), namespace)
+	}
 	return trustedMountStartLockBaseFrom([]string{
 		strings.TrimSpace(os.Getenv("XDG_RUNTIME_DIR")),
-		os.TempDir(),
+		privateTempDir,
 		userCacheDir,
 	})
+}
+
+func privateMountStartLockTempDir(tempDir, namespace string) string {
+	return filepath.Join(tempDir, "relayfile-runtime-"+namespace)
 }
 
 func trustedMountStartLockBaseFrom(candidates []string) (string, error) {
@@ -7052,8 +7060,9 @@ Common flags:
   --local-dir DIR      local mirror directory (defaults to the recorded mirror)
   --remote-path PATH   remote subtree to mount (repeat for an allowlist)
   --paths-file FILE    remote subtrees as a JSON array or newline-separated list
-  --local-layout exact|scoped
-                       append each remote path under LOCAL_DIR for scoped mounts;
+  --local-layout exact
+                       scoped layout is temporarily unavailable until operator
+                       surfaces can enumerate every child runtime directory;
                        required with multiple remote paths
   --mode poll|fuse     poll (synced mirror, default) or fuse
   --interval 30s       sync interval (default 30s)

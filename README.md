@@ -198,32 +198,12 @@ RELAYFILE_TOKEN="$TOKEN" go run ./cmd/relayfile-mount \
   --local-dir ./relayfile-mount
 ```
 
-Limit either mount command to one or more remote subtrees by repeating
-`--remote-path`. Multiple roots require `--local-layout scoped`; each subtree
-is then mirrored under the matching path inside the local root, which avoids
-full-workspace export pulls on large workspaces:
-
-```bash
-# Shipped CLI
-relayfile mount ws_demo ./relayfile-mount \
-  --server http://localhost:9090 \
-  --remote-path /github \
-  --remote-path /slack/channels/proj-cloud \
-  --local-layout scoped
-
-# Standalone daemon
-RELAYFILE_TOKEN="$TOKEN" go run ./cmd/relayfile-mount \
-  --base-url http://localhost:9090 \
-  --workspace ws_demo \
-  --local-dir ./relayfile-mount \
-  --remote-path /github \
-  --remote-path /slack/channels/proj-cloud \
-  --local-layout scoped
-```
-
-For long path lists, pass `--paths-file ./paths.json`; the file may be a JSON
-array of remote roots or a newline-separated list. Multiple paths from a file
-also require `--local-layout scoped`.
+Multi-path/scoped mounts are temporarily unavailable in both mount binaries
+until the status, list, and retry surfaces can enumerate every scoped child
+runtime directory. The binaries refuse `--local-layout scoped` (including
+values inherited from `RELAYFILE_MOUNT_LOCAL_LAYOUT` or a recorded catalog
+entry); use the exact layout for now. The scoped capability and its multi-path
+examples will return here when that operator-surface contract is complete.
 
 Relayfile persists the allowlist and layout for later starts, so omitting the
 flags does not widen a scoped mount back to `/`. It refuses in-place layout
