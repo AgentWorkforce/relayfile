@@ -190,6 +190,38 @@ func TestWaitForBackgroundMountRegistrationReportsChildExit(t *testing.T) {
 	}
 }
 
+func TestWaitForBackgroundMountRegistrationBoundsLiveUnregisteredChild(t *testing.T) {
+	oldTimeout := backgroundMountRegistrationTimeout
+	backgroundMountRegistrationTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { backgroundMountRegistrationTimeout = oldTimeout })
+
+	cmd := exec.Command("sleep", "2")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	childExited := make(chan error, 1)
+	go func() { childExited <- cmd.Wait() }()
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		<-childExited
+	})
+
+	pidFile := filepath.Join(t.TempDir(), "late", "relayfile.pid")
+	localDir := t.TempDir()
+	started := time.Now()
+	err := waitForBackgroundMountRegistration(pidFile, localDir, cmd.Process.Pid, childExited, 0)
+	if err == nil || !strings.Contains(err.Error(), "did not register daemon state") ||
+		!strings.Contains(err.Error(), pidFile) {
+		t.Fatalf("unexpected bounded registration result: %v", err)
+	}
+	if elapsed := time.Since(started); elapsed < 15*time.Millisecond || elapsed > time.Second {
+		t.Fatalf("registration wait was not bounded: %s", elapsed)
+	}
+	if _, statErr := os.Stat(pidFile); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("unexpected PID state mutation during timeout: %v", statErr)
+	}
+}
+
 func TestStopEscalatesToKillWhenDaemonIgnoresTerm(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)

@@ -12567,8 +12567,11 @@ func spawnBackgroundMountProcess(originalArgs, resolvedRemotePaths []string, loc
 	return nil
 }
 
+var backgroundMountRegistrationTimeout = 2 * time.Minute
+
 func waitForBackgroundMountRegistration(pidFile, localDir string, childPID int, childExited <-chan error, slowNoticeAfter time.Duration) error {
 	slowNoticeAt := time.Now().Add(slowNoticeAfter)
+	deadline := time.Now().Add(backgroundMountRegistrationTimeout)
 	slowNoticeLogged := false
 	for {
 		state, structured := readDaemonPIDStateFile(pidFile)
@@ -12584,6 +12587,18 @@ func waitForBackgroundMountRegistration(pidFile, localDir string, childPID int, 
 				exitErr,
 			)
 		default:
+		}
+		if !time.Now().Before(deadline) {
+			// The child is still alive but has not become authoritative. Keep the
+			// PID/log/state paths intact so an operator can inspect or reconcile a
+			// late registration; do not leave the foreground caller waiting forever.
+			return fmt.Errorf(
+				"background mount process %d did not register daemon state within %s for %s; child may still be initializing (pid file: %s)",
+				childPID,
+				backgroundMountRegistrationTimeout,
+				localDir,
+				pidFile,
+			)
 		}
 		if !slowNoticeLogged && slowNoticeAfter > 0 && time.Now().After(slowNoticeAt) {
 			log.Printf(
