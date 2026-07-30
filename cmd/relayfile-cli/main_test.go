@@ -5760,6 +5760,19 @@ func TestScopedWorkspaceConsumersAggregateChildRuntimeState(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	for state, name := range map[string]string{
+		"pending": "compat-pending.json",
+		"failed":  "compat-failed.json",
+		"acked":   "compat-acked.json",
+	} {
+		dir := filepath.Join(localRoot, ".relay", "outbox", state)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(`{}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
 
 	writeback, err := buildWritebackStatusReport("ws_demo", record)
 	if err != nil {
@@ -5784,8 +5797,12 @@ func TestScopedWorkspaceConsumersAggregateChildRuntimeState(t *testing.T) {
 	}
 
 	health := buildWorkspaceHealthReport("ws_demo", record)
-	if health.Status != "scope-1; scope-2" || health.StuckEventCount != 2 || health.OutboxPending != 2 {
-		t.Fatalf("scoped health report = %#v, want both scope states and queues", health)
+	if health.Status != "scope-1; scope-2" ||
+		health.StuckEventCount != 2 ||
+		health.OutboxPending != 3 ||
+		health.OutboxFailed != 1 ||
+		health.OutboxAcked != 1 {
+		t.Fatalf("scoped health report = %#v, want child states and child/catalog queues", health)
 	}
 	if health.LastReconcileAt != "2026-07-30T03:02:00Z" {
 		t.Fatalf("last reconcile = %q, want newest child timestamp", health.LastReconcileAt)
@@ -5964,6 +5981,47 @@ func TestWorkspaceDeadLetterRetryGroupsRejectsInvalidPathBeforeRetry(t *testing.
 	)
 	if err == nil || !strings.Contains(err.Error(), "outside the persisted scoped allowlist") {
 		t.Fatalf("retry groups error = %v, want scoped allowlist refusal", err)
+	}
+}
+
+func TestWorkspaceDeadLetterRetryGroupsIgnoreCompatibilityRecordStorageRoot(t *testing.T) {
+	localRoot := t.TempDir()
+	record := workspaceRecord{
+		LocalDir:    localRoot,
+		LocalLayout: mountscope.LayoutScoped,
+		RemotePaths: []string{"/github", "/slack"},
+	}
+	for _, remotePath := range []string{
+		"/github/repos/acme/cloud/issue.json",
+		"/slack/channels/project/message.json",
+	} {
+		scope, ok := workspaceMountScopeForRemotePath(record, remotePath)
+		if !ok {
+			t.Fatalf("missing test scope for %s", remotePath)
+		}
+		relative := strings.TrimPrefix(strings.TrimPrefix(remotePath, scope.RemotePath), "/")
+		localPath := filepath.Join(scope.LocalDir, filepath.FromSlash(relative))
+		if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(localPath, []byte("{}"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	githubChild := mountscope.LocalDir(localRoot, "/github")
+	groups, err := workspaceDeadLetterRetryGroups(
+		record,
+		githubChild,
+		"/github/repos/acme/cloud/issue.json,/slack/channels/project/message.json",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(groups) != 2 ||
+		groups[0].RemoteRoot != "/github" ||
+		groups[1].RemoteRoot != "/slack" ||
+		groups[1].LocalDir != mountscope.LocalDir(localRoot, "/slack") {
+		t.Fatalf("retry groups from child-stored compatibility record = %#v, want both scoped roots", groups)
 	}
 }
 

@@ -4368,8 +4368,10 @@ func workspaceMountScopeForRemotePath(record workspaceRecord, remotePath string)
 }
 
 func workspaceRetryTarget(record workspaceRecord, recordLocalDir, remotePath string) (localDir, remoteRoot string, err error) {
-	if strings.TrimSpace(record.LocalLayout) == mountscope.LayoutScoped &&
-		filepath.Clean(recordLocalDir) == filepath.Clean(record.LocalDir) {
+	if strings.TrimSpace(record.LocalLayout) == mountscope.LayoutScoped {
+		// The persisted allowlist, not the dead-letter record's storage
+		// directory, owns retry routing. Compatibility and bulk records can
+		// live at either the catalog root or one child root.
 		scope, ok := workspaceMountScopeForRemotePath(record, remotePath)
 		if !ok {
 			return "", "", fmt.Errorf(
@@ -6566,9 +6568,8 @@ func buildWorkspaceHealthReport(workspaceID string, record workspaceRecord) work
 				errorsSeen[message] = struct{}{}
 			}
 		}
-		// Each scoped loop owns an independent cursor, so stuck events and
-		// outbox queues are additive across roots. Within one root, retain the
-		// existing max(public state, private cursor) rule.
+		// Each scoped loop owns an independent cursor. Within one root, retain
+		// the existing max(public state, private cursor) rule.
 		scopeStuckCount := len(state.IncrementalReadNotReadySince)
 		cursorStuckCount, backlogDraining := readWorkspaceMountCursorHealth(workspaceID, record, scope)
 		if cursorStuckCount > scopeStuckCount {
@@ -6576,6 +6577,11 @@ func buildWorkspaceHealthReport(workspaceID string, record workspaceRecord) work
 		}
 		report.StuckEventCount += scopeStuckCount
 		report.IncrementalBacklogDraining = report.IncrementalBacklogDraining || backlogDraining
+	}
+	// Outbox state can remain at the catalog root for compatibility even when
+	// active scoped loops own child roots. Sweep the complete deduplicated
+	// state-dir set so health never reports a clean queue by omission.
+	for _, localDir := range workspaceStateDirs(record) {
 		report.OutboxPending += countJSONFiles(filepath.Join(localDir, ".relay", "outbox", "pending"))
 		report.OutboxFailed += countJSONFiles(filepath.Join(localDir, ".relay", "outbox", "failed"))
 		report.OutboxAcked += countJSONFiles(filepath.Join(localDir, ".relay", "outbox", "acked"))

@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "lastUpdated": "2026-07-30T10:48:54.852Z",
+  "lastUpdated": "2026-07-30T10:54:45.843Z",
   "trajectories": {
     "traj_4pvrlmqfnzng": {
       "title": "Review PR #278 in AgentWorkforce/relayfile",
@@ -267,6 +267,20 @@
       "startedAt": "2026-07-30T10:46:44.245Z",
       "completedAt": "2026-07-30T10:48:54.739Z",
       "path": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-c/.trajectories/completed/2026-07/traj_0kko9s6utmhy.json"
+    },
+    "traj_86dy5h7bjo8i": {
+      "title": "Review changes against fix/scoped-multipath-cli-runtime",
+      "status": "completed",
+      "startedAt": "2026-07-30T10:49:13.217Z",
+      "completedAt": "2026-07-30T10:51:23.530Z",
+      "path": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-c/.trajectories/completed/2026-07/traj_86dy5h7bjo8i.json"
+    },
+    "traj_1sp08l8m1pe4": {
+      "title": "Make retry and health independent of compatibility storage root",
+      "status": "completed",
+      "startedAt": "2026-07-30T10:52:38.466Z",
+      "completedAt": "2026-07-30T10:54:45.729Z",
+      "path": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-c/.trajectories/completed/2026-07/traj_1sp08l8m1pe4.json"
     }
   }
 }

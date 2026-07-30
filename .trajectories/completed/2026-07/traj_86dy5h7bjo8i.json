@@ -1,0 +1,25 @@
+{
+  "id": "traj_86dy5h7bjo8i",
+  "version": 1,
+  "task": {
+    "title": "Review changes against fix/scoped-multipath-cli-runtime"
+  },
+  "status": "completed",
+  "startedAt": "2026-07-30T10:49:13.217Z",
+  "completedAt": "2026-07-30T10:51:23.530Z",
+  "agents": [],
+  "chapters": [],
+  "retrospective": {
+    "summary": "Reviewed scoped multipath operator-surface changes; identified cross-scope bulk dead-letter routing and compatibility-root health counter gaps",
+    "approach": "Standard approach",
+    "confidence": 0.9
+  },
+  "commits": [],
+  "filesChanged": [],
+  "projectId": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-c",
+  "tags": [],
+  "_trace": {
+    "startRef": "6b10be542d27cfd78ff2b7815a72d8811b8a99c3",
+    "endRef": "6b10be542d27cfd78ff2b7815a72d8811b8a99c3"
+  }
+}
