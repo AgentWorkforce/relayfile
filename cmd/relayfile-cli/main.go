@@ -5408,23 +5408,30 @@ func retryDeadLetterWriteback(workspaceID string, record workspaceRecord, dl dea
 // unparseable so retry on a root mount works without state.json
 // being present.
 func readMountRemoteRoot(localDir string) string {
+	if root, ok := readMountRemoteRootIfPresent(localDir); ok {
+		return root
+	}
+	return "/"
+}
+
+func readMountRemoteRootIfPresent(localDir string) (string, bool) {
 	if strings.TrimSpace(localDir) == "" {
-		return "/"
+		return "", false
 	}
 	data, err := os.ReadFile(filepath.Join(localDir, ".relay", "state.json"))
 	if err != nil {
-		return "/"
+		return "", false
 	}
 	var s struct {
 		RemoteRoot string `json:"remoteRoot"`
 	}
 	if json.Unmarshal(data, &s) != nil {
-		return "/"
+		return "", false
 	}
 	if root := strings.TrimSpace(s.RemoteRoot); root != "" {
-		return root
+		return root, true
 	}
-	return "/"
+	return "", false
 }
 
 func deadLetterRetryPaths(raw string) []string {
@@ -8247,6 +8254,13 @@ func readPersistedStallReason(localDir string) string {
 func buildWorkspaceSyncStateSnapshot(status syncStatusResponse, workspaceID string, record workspaceRecord) syncStateFile {
 	localRoot := strings.TrimSpace(record.LocalDir)
 	snapshot := buildSyncStateSnapshot(status, workspaceID, defaultMountMode, defaultMountInterval, localRoot, readDaemonPID(localRoot), "")
+	if strings.TrimSpace(record.LocalLayout) == mountscope.LayoutExact {
+		if runtimeRoot, ok := readMountRemoteRootIfPresent(localRoot); ok {
+			snapshot.RemoteRoot = runtimeRoot
+		} else {
+			snapshot.RemoteRoot = mountscope.NormalizePaths(record.RemotePaths, "/")[0]
+		}
+	}
 	snapshot.PendingWriteback = 0
 	snapshot.PendingConflicts = 0
 	snapshot.DeniedPaths = 0

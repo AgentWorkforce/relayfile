@@ -5286,6 +5286,48 @@ func TestWorkspaceSyncStatusJSONMakesTopologyClaimsExclusive(t *testing.T) {
 	}
 }
 
+func TestWorkspaceSyncStatusExactUsesPersistedRootWithoutReadableRuntimeState(t *testing.T) {
+	for _, tt := range []struct {
+		name           string
+		prepareRuntime func(t *testing.T, localDir string)
+	}{
+		{name: "absent"},
+		{
+			name: "unreadable",
+			prepareRuntime: func(t *testing.T, localDir string) {
+				t.Helper()
+				if err := os.MkdirAll(filepath.Join(localDir, ".relay", "state.json"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			localDir := t.TempDir()
+			if tt.prepareRuntime != nil {
+				tt.prepareRuntime(t, localDir)
+			}
+			record := workspaceRecord{
+				LocalDir:    localDir,
+				LocalLayout: mountscope.LayoutExact,
+				RemotePaths: []string{"/github"},
+			}
+			snapshot := buildWorkspaceSyncStateSnapshot(syncStatusResponse{}, "ws_demo", record)
+			payload, err := json.Marshal(workspaceSyncStatusJSON(snapshot, record))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got map[string]any
+			if err := json.Unmarshal(payload, &got); err != nil {
+				t.Fatal(err)
+			}
+			if got["remoteRoot"] != "/github" {
+				t.Fatalf("remoteRoot = %v, want persisted /github; payload=%s", got["remoteRoot"], payload)
+			}
+		})
+	}
+}
+
 func TestSkipStuckAcrossScopesVisitsEachCursorAndSharesLimit(t *testing.T) {
 	scopes := []mountscope.Scope{
 		{RemotePath: "/github", LocalDir: "/tmp/github"},

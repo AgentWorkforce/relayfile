@@ -120,6 +120,13 @@
       "startedAt": "2026-07-30T05:43:10.555Z",
       "completedAt": "2026-07-30T05:43:18.024Z",
       "path": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-c/.trajectories/completed/2026-07/traj_0rjz89laoif3.json"
+    },
+    "traj_w7xxtfcagb89": {
+      "title": "Preserve exact root when runtime state is unavailable",
+      "status": "completed",
+      "startedAt": "2026-07-30T05:52:04.691Z",
+      "completedAt": "2026-07-30T05:52:32.927Z",
+      "path": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-c/.trajectories/completed/2026-07/traj_w7xxtfcagb89.json"
     }
   }
 }
