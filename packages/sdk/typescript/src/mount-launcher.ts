@@ -12,6 +12,7 @@ import path from "node:path"
 import process from "node:process"
 import { RelayFileClient } from "./client.js"
 import { getRelayfileMountBinaryPath } from "./mount-path.js"
+import { assertExactMountLayout } from "./mount-layout-guard.js"
 import {
   CloudAbortError,
   MountModeUnavailableError,
@@ -109,6 +110,7 @@ async function startRelayfileMount(
     ...process.env,
     ...input.env
   }
+  assertExactMountLayout(effectiveEnv)
   if ((effectiveEnv.RELAYFILE_MOUNT_PATHS_FILE ?? "").trim() !== "") {
     throw new MountMultiPathUnsupportedError()
   }

@@ -17,6 +17,7 @@ import https from 'node:https';
 import { createRequire } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
+import { assertExactMountLayout } from './mount-layout-guard.js';
 
 const require = createRequire(import.meta.url);
 const RELAYFILE_VERSION = String(require('../package.json').version);
@@ -368,6 +369,7 @@ async function stopMountProcess(processRef: ChildProcess): Promise<void> {
 }
 
 export async function ensureRelayfileMount(config: MountConfig): Promise<MountHandle> {
+  assertExactMountLayout(process.env);
   const binaryPath = await ensureRelayfileMountBinary(config.binaryPath);
   if (!existsSync(binaryPath)) {
     throw new Error(`missing relayfile mount binary: ${binaryPath}`);

@@ -116,6 +116,63 @@ describe("default mount launcher", () => {
     }
   })
 
+  it("refuses direct scoped-layout configuration before filesystem or process side effects", async () => {
+    const tempRoot = await mkdtemp(
+      path.join(os.tmpdir(), "relayfile-default-launcher-scoped-layout-")
+    )
+    const localDir = path.join(tempRoot, "mirror")
+    const spawnImpl = vi.fn()
+    const launcher = createDefaultMountLauncher({ spawnImpl })
+
+    try {
+      await expect(
+        launcher.start({
+          env: {
+            ...createMountEnv(localDir),
+            RELAYFILE_MOUNT_LOCAL_LAYOUT: "scoped"
+          },
+          readyTimeoutMs: 50
+        })
+      ).rejects.toMatchObject({
+        name: "MountSessionInputError",
+        code: "mount_session_input_error"
+      })
+      expect(spawnImpl).not.toHaveBeenCalled()
+      await expect(stat(localDir)).rejects.toMatchObject({ code: "ENOENT" })
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true })
+    }
+  })
+
+  it("refuses inherited scoped-layout configuration before filesystem or process side effects", async () => {
+    const tempRoot = await mkdtemp(
+      path.join(os.tmpdir(), "relayfile-default-launcher-inherited-scoped-layout-")
+    )
+    const localDir = path.join(tempRoot, "mirror")
+    const spawnImpl = vi.fn()
+    const launcher = createDefaultMountLauncher({ spawnImpl })
+    const previousLayout = process.env.RELAYFILE_MOUNT_LOCAL_LAYOUT
+    process.env.RELAYFILE_MOUNT_LOCAL_LAYOUT = "scoped"
+
+    try {
+      await expect(
+        launcher.start({ env: createMountEnv(localDir), readyTimeoutMs: 50 })
+      ).rejects.toMatchObject({
+        name: "MountSessionInputError",
+        code: "mount_session_input_error"
+      })
+      expect(spawnImpl).not.toHaveBeenCalled()
+      await expect(stat(localDir)).rejects.toMatchObject({ code: "ENOENT" })
+    } finally {
+      if (previousLayout === undefined) {
+        delete process.env.RELAYFILE_MOUNT_LOCAL_LAYOUT
+      } else {
+        process.env.RELAYFILE_MOUNT_LOCAL_LAYOUT = previousLayout
+      }
+      await rm(tempRoot, { recursive: true, force: true })
+    }
+  })
+
   it("times out readiness, then stops the child process", async () => {
     const tempRoot = await mkdtemp(
       path.join(os.tmpdir(), "relayfile-default-launcher-timeout-")
