@@ -2,9 +2,11 @@ package mountscope
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"golang.org/x/text/cases"
@@ -18,35 +20,68 @@ const (
 	RuntimeTopLevel     = ".relay"
 	SkillsTopLevel      = ".skills"
 	DigestsTopLevel     = "digests"
-	GitTopLevel         = ".git"
 	NodeModulesTopLevel = "node_modules"
 	PermissionsFile     = "_PERMISSIONS.md"
 )
 
-var reservedLocalTopLevelNames = []string{
-	RuntimeTopLevel,
-	SkillsTopLevel,
-	DigestsTopLevel,
-	GitTopLevel,
-	NodeModulesTopLevel,
-	PermissionsFile,
+type localTopLevelPolicy struct {
+	name           string
+	catalogOwned   bool
+	infrastructure bool
 }
 
-var reservedLocalTopLevels = func() map[string]struct{} {
-	out := make(map[string]struct{}, len(reservedLocalTopLevelNames))
-	for _, name := range reservedLocalTopLevelNames {
-		out[name] = struct{}{}
+// localTopLevelPolicies is the single inventory for names Relayfile must
+// reserve at a mount boundary. Infrastructure roots are incidental metadata
+// owned by source-control tools and can carry repository credentials; catalog
+// roots are Relayfile bookkeeping and are reserved only at an exact/catalog
+// root. Every derived predicate below comes from this table so planning,
+// runtime exclusion, and the user-visible exclusion summary cannot drift.
+var localTopLevelPolicies = []localTopLevelPolicy{
+	{name: RuntimeTopLevel, catalogOwned: true},
+	{name: SkillsTopLevel, catalogOwned: true},
+	{name: DigestsTopLevel, catalogOwned: true},
+	{name: NodeModulesTopLevel, catalogOwned: true},
+	{name: PermissionsFile, catalogOwned: true},
+	{name: ".git", infrastructure: true},
+	{name: ".hg", infrastructure: true},
+	{name: ".svn", infrastructure: true},
+	{name: ".bzr", infrastructure: true},
+	{name: "_darcs", infrastructure: true},
+	{name: ".jj", infrastructure: true},
+}
+
+var reservedLocalTopLevels = func() map[string]localTopLevelPolicy {
+	out := make(map[string]localTopLevelPolicy, len(localTopLevelPolicies))
+	for _, policy := range localTopLevelPolicies {
+		out[policy.name] = policy
 	}
 	return out
 }()
 
 var reservedLocalTopLevelIdentities = func() map[string]struct{} {
-	out := make(map[string]struct{}, len(reservedLocalTopLevelNames))
-	for _, name := range reservedLocalTopLevelNames {
-		out[localPathIdentity(name)] = struct{}{}
+	out := make(map[string]struct{}, len(localTopLevelPolicies))
+	for _, policy := range localTopLevelPolicies {
+		out[localPathIdentity(policy.name)] = struct{}{}
 	}
 	return out
 }()
+
+var infrastructureTopLevelIdentities = func() map[string]struct{} {
+	out := make(map[string]struct{})
+	for _, policy := range localTopLevelPolicies {
+		if policy.infrastructure {
+			out[localPathIdentity(policy.name)] = struct{}{}
+		}
+	}
+	return out
+}()
+
+// LocalContentPolicyReport describes existing top-level content that a mount
+// must either exclude visibly or surface as convention-sensitive user data.
+type LocalContentPolicyReport struct {
+	ExcludedInfrastructure []string
+	SensitiveUserContent   []string
+}
 
 // StringListFlag preserves every occurrence of a repeatable string flag.
 type StringListFlag []string
@@ -261,18 +296,8 @@ func Plan(localRoot, layout string, paths []string, fallback, stateFile string) 
 		return nil, fmt.Errorf("multiple --remote-path values require --local-layout=%s", LayoutScoped)
 	}
 	if resolvedLayout == LayoutScoped {
-		for i, left := range normalized {
-			for _, right := range normalized[i+1:] {
-				foldedLeft := localPathIdentity(left)
-				foldedRight := localPathIdentity(right)
-				if IsWithin(foldedLeft, foldedRight) || IsWithin(foldedRight, foldedLeft) {
-					return nil, fmt.Errorf(
-						"scoped remote roots %s and %s overlap on case- or normalization-insensitive filesystems; choose roots with distinct local path identities",
-						left,
-						right,
-					)
-				}
-			}
+		if err := ValidateScopedPathSet(normalized); err != nil {
+			return nil, err
 		}
 	}
 	if len(normalized) > 1 && strings.TrimSpace(stateFile) != "" {
@@ -300,6 +325,13 @@ func Plan(localRoot, layout string, paths []string, fallback, stateFile string) 
 				)
 			}
 			for _, segment := range segments {
+				if IsInfrastructureTopLevelIdentity(segment) {
+					return nil, fmt.Errorf(
+						"scoped remote root %s contains incidental infrastructure segment %s, which is excluded from mounts; choose a content root outside source-control metadata",
+						remotePath,
+						segment,
+					)
+				}
 				if IsReservedRuntimeSegment(segment) {
 					return nil, fmt.Errorf(
 						"scoped remote root %s contains reserved mount runtime segment %s; choose a remote root outside mount runtime state",
@@ -318,6 +350,38 @@ func Plan(localRoot, layout string, paths []string, fallback, stateFile string) 
 	return scopes, nil
 }
 
+// ValidateScopedPathSet rejects roots that can collapse or overlap when a
+// configuration moves between case- or normalization-sensitive filesystems.
+// It is also used when reading persisted pre-planner configurations so a
+// nested historical child cannot be normalized away with its private state
+// left behind.
+func ValidateScopedPathSet(paths []string) error {
+	normalized := make([]string, 0, len(paths))
+	for _, remotePath := range paths {
+		if strings.TrimSpace(remotePath) == "" {
+			return fmt.Errorf("scoped remote roots contain a blank entry whose prior scope is unknown")
+		}
+		normalized = append(normalized, NormalizePath(remotePath))
+	}
+	if len(normalized) == 0 {
+		return fmt.Errorf("scoped remote roots are empty, so the prior scope is unknown")
+	}
+	for i, left := range normalized {
+		for _, right := range normalized[i+1:] {
+			foldedLeft := localPathIdentity(left)
+			foldedRight := localPathIdentity(right)
+			if IsWithin(foldedLeft, foldedRight) || IsWithin(foldedRight, foldedLeft) {
+				return fmt.Errorf(
+					"scoped remote roots %s and %s overlap on case- or normalization-insensitive filesystems; choose roots with distinct local path identities",
+					left,
+					right,
+				)
+			}
+		}
+	}
+	return nil
+}
+
 // IsReservedLocalTopLevel reports whether an exact root-level name belongs to
 // Relayfile bookkeeping or a host tool tree. Runtime consumers use exact
 // matching so case-distinct provider paths remain valid on case-sensitive
@@ -327,6 +391,14 @@ func IsReservedLocalTopLevel(name string) bool {
 	return ok
 }
 
+// IsCatalogOwnedTopLevel reports whether an exact root-level name is
+// Relayfile-owned bookkeeping. Unlike incidental infrastructure, these names
+// remain ordinary provider content under an isolated scoped child.
+func IsCatalogOwnedTopLevel(name string) bool {
+	policy, ok := reservedLocalTopLevels[strings.TrimSpace(filepath.ToSlash(name))]
+	return ok && policy.catalogOwned
+}
+
 // IsReservedLocalTopLevelIdentity reports whether a name would collide with a
 // reserved top-level path on case- or normalization-insensitive filesystems.
 // Mount planning uses this conservative identity check before it creates a
@@ -334,6 +406,135 @@ func IsReservedLocalTopLevel(name string) bool {
 func IsReservedLocalTopLevelIdentity(name string) bool {
 	_, ok := reservedLocalTopLevelIdentities[localPathIdentity(name)]
 	return ok
+}
+
+// IsInfrastructureTopLevelIdentity reports whether a path segment could
+// collide with an incidental source-control metadata root on a case- or
+// normalization-insensitive filesystem. Planning is deliberately
+// host-independent so a portable scoped config cannot become unsafe later.
+func IsInfrastructureTopLevelIdentity(name string) bool {
+	_, ok := infrastructureTopLevelIdentities[localPathIdentity(name)]
+	return ok
+}
+
+// IsInfrastructureTopLevelAt reports whether name is the actual incidental
+// infrastructure entry on this filesystem. Exact spelling is enough on every
+// host; existing aliases use os.SameFile, while absent aliases use the case
+// behavior of an existing ancestor. That keeps a future `.Git` from creating
+// `.git` on an insensitive filesystem without excluding case-distinct user
+// content on a sensitive filesystem.
+func IsInfrastructureTopLevelAt(localRoot, name string) bool {
+	name = strings.TrimSpace(filepath.ToSlash(name))
+	policy, exact := reservedLocalTopLevels[name]
+	if exact && policy.infrastructure {
+		return true
+	}
+	candidatePath := filepath.Join(localRoot, filepath.FromSlash(name))
+	candidateInfo, err := os.Stat(candidatePath)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return false
+	}
+	if err == nil {
+		for _, policy := range localTopLevelPolicies {
+			if !policy.infrastructure {
+				continue
+			}
+			canonicalInfo, err := os.Stat(filepath.Join(localRoot, policy.name))
+			if err == nil && os.SameFile(candidateInfo, canonicalInfo) {
+				return true
+			}
+		}
+	}
+	return IsInfrastructureTopLevelIdentity(name) && filesystemFoldsPathCaseAt(localRoot)
+}
+
+func filesystemFoldsPathCaseAt(path string) bool {
+	current := filepath.Clean(path)
+	for {
+		info, err := os.Stat(current)
+		if err == nil {
+			base := filepath.Base(current)
+			for index := 0; index < len(base); index++ {
+				flipped := base[index]
+				switch {
+				case flipped >= 'a' && flipped <= 'z':
+					flipped -= 'a' - 'A'
+				case flipped >= 'A' && flipped <= 'Z':
+					flipped += 'a' - 'A'
+				default:
+					continue
+				}
+				aliasBase := base[:index] + string(flipped) + base[index+1:]
+				aliasInfo, aliasErr := os.Stat(filepath.Join(filepath.Dir(current), aliasBase))
+				if aliasErr == nil {
+					return os.SameFile(info, aliasInfo)
+				}
+				if errors.Is(aliasErr, os.ErrNotExist) {
+					return false
+				}
+			}
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return false
+		}
+		current = parent
+	}
+}
+
+// InfrastructureTopLevelNames returns the exclusion inventory derived from
+// localTopLevelPolicies. Callers use this for docs and diagnostics rather than
+// maintaining a second list.
+func InfrastructureTopLevelNames() []string {
+	names := make([]string, 0)
+	for _, policy := range localTopLevelPolicies {
+		if policy.infrastructure {
+			names = append(names, policy.name)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+// PortableLocalPathIdentity returns the conservative identity used when a
+// process-wide boundary (such as the mount-start lock) must remain stable
+// across case- and normalization-insensitive filesystems.
+func PortableLocalPathIdentity(path string) string {
+	return localPathIdentity(filepath.Clean(path))
+}
+
+// InspectLocalContentPolicy enumerates existing top-level paths whose mount
+// treatment must be visible. Infrastructure is excluded; convention-sensitive
+// files remain user content and are only surfaced so the operator can decide.
+func InspectLocalContentPolicy(localRoot string) (LocalContentPolicyReport, error) {
+	var report LocalContentPolicyReport
+	entries, err := os.ReadDir(localRoot)
+	if errors.Is(err, os.ErrNotExist) {
+		return report, nil
+	}
+	if err != nil {
+		return report, err
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		switch {
+		case IsInfrastructureTopLevelAt(localRoot, name):
+			report.ExcludedInfrastructure = append(report.ExcludedInfrastructure, name)
+		case isConventionSensitiveUserContent(name):
+			report.SensitiveUserContent = append(report.SensitiveUserContent, name)
+		}
+	}
+	return report, nil
+}
+
+func isConventionSensitiveUserContent(name string) bool {
+	name = strings.TrimSpace(name)
+	return name == ".env" ||
+		strings.HasPrefix(name, ".env.") ||
+		name == ".npmrc" ||
+		name == ".pypirc" ||
+		name == ".netrc" ||
+		name == ".git-credentials"
 }
 
 // IsReservedRuntimeSegment reports whether a single remote path segment is

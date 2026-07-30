@@ -119,6 +119,77 @@ func TestA14BackgroundModeWritesPidAndStopSignalsCleanly(t *testing.T) {
 	}
 }
 
+func TestWaitForBackgroundMountRegistrationUsesConfiguredPIDFile(t *testing.T) {
+	localDir := t.TempDir()
+	customPIDFile := filepath.Join(t.TempDir(), "custom", "relayfile.pid")
+	const childPID = 4242
+	if err := writeDaemonPIDState(customPIDFile, daemonPIDState{
+		PID:      childPID,
+		LocalDir: localDir,
+	}); err != nil {
+		t.Fatalf("write custom daemon PID state: %v", err)
+	}
+
+	if err := waitForBackgroundMountRegistration(customPIDFile, localDir, childPID, nil, time.Second); err != nil {
+		t.Fatalf("wait for custom PID-file registration: %v", err)
+	}
+	if _, err := os.Stat(mountPIDFile(localDir)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("test unexpectedly depended on default PID file: %v", err)
+	}
+}
+
+func TestWaitForBackgroundMountRegistrationKeepsWaitingForLiveChild(t *testing.T) {
+	cmd := exec.Command("sleep", "2")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	childExited := make(chan error, 1)
+	go func() {
+		childExited <- cmd.Wait()
+	}()
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		<-childExited
+	})
+	localDir := t.TempDir()
+	customPIDFile := filepath.Join(t.TempDir(), "custom", "relayfile.pid")
+	writeErr := make(chan error, 1)
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		writeErr <- writeDaemonPIDState(customPIDFile, daemonPIDState{
+			PID:      cmd.Process.Pid,
+			LocalDir: localDir,
+		})
+	}()
+
+	started := time.Now()
+	if err := waitForBackgroundMountRegistration(customPIDFile, localDir, cmd.Process.Pid, childExited, 10*time.Millisecond); err != nil {
+		t.Fatalf("live child was treated as timed out: %v", err)
+	}
+	if err := <-writeErr; err != nil {
+		t.Fatalf("write delayed PID registration: %v", err)
+	}
+	if elapsed := time.Since(started); elapsed < 75*time.Millisecond {
+		t.Fatalf("wait returned before delayed registration: %s", elapsed)
+	}
+}
+
+func TestWaitForBackgroundMountRegistrationReportsChildExit(t *testing.T) {
+	childExited := make(chan error, 1)
+	childExited <- errors.New("synthetic child failure")
+	err := waitForBackgroundMountRegistration(
+		filepath.Join(t.TempDir(), "missing.pid"),
+		t.TempDir(),
+		4242,
+		childExited,
+		time.Second,
+	)
+	if err == nil || !strings.Contains(err.Error(), "exited before registering") ||
+		!strings.Contains(err.Error(), "synthetic child failure") {
+		t.Fatalf("unexpected child-exit result: %v", err)
+	}
+}
+
 func TestStopEscalatesToKillWhenDaemonIgnoresTerm(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)

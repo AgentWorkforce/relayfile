@@ -61,11 +61,22 @@ func TestWatcherBasenameGuardMatchesRemoteRootMapping(t *testing.T) {
 	for _, relativePath := range []string{
 		filepath.Join("Digests", "page.md"),
 		filepath.Join("NODE_MODULES", "package.json"),
-		filepath.Join(".Git", "config"),
 	} {
 		if rootWatcher.shouldSkip(relativePath) {
 			t.Fatalf("root mount skipped case-distinct provider path %q", relativePath)
 		}
+	}
+	probeRoot := t.TempDir()
+	if err := os.Mkdir(filepath.Join(probeRoot, ".Git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_, canonicalProbeErr := os.Stat(filepath.Join(probeRoot, ".git"))
+	caseInsensitive := canonicalProbeErr == nil
+	if canonicalProbeErr != nil && !errors.Is(canonicalProbeErr, os.ErrNotExist) {
+		t.Fatalf("inspect filesystem case behavior: %v", canonicalProbeErr)
+	}
+	if got := rootWatcher.shouldSkip(filepath.Join(".Git", "config")); got != caseInsensitive {
+		t.Fatalf("case-distinct infrastructure skip = %t, want filesystem case behavior %t", got, caseInsensitive)
 	}
 }
 

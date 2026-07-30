@@ -275,6 +275,12 @@ func runPollingMountWithRunner(rootCtx context.Context, cfg mountConfig, run pol
 	if len(remotePaths) > 1 {
 		return fmt.Errorf("multiple --remote-path values require --local-layout=%s", localLayoutScoped)
 	}
+	if err := logStandaloneMountContentPolicy([]mountscope.Scope{{
+		RemotePath: normalizeMountRemotePath(remotePaths[0]),
+		LocalDir:   cfg.localDir,
+	}}); err != nil {
+		return err
+	}
 	cfg.remotePath = normalizeMountRemotePath(remotePaths[0])
 	cfg.remotePaths = nil
 	return run(rootCtx, cfg)
@@ -298,6 +304,9 @@ func runScopedPollingMountsWithRunner(
 		return err
 	}
 	if err := mountscope.ValidateEventProvider(remotePaths, cfg.eventProvider); err != nil {
+		return err
+	}
+	if err := logStandaloneMountContentPolicy(plan); err != nil {
 		return err
 	}
 	scopedMounts := make([]scopedMount, 0, len(plan))
@@ -340,6 +349,30 @@ func runScopedPollingMountsWithRunner(
 		}
 	}
 	return firstErr
+}
+
+func logStandaloneMountContentPolicy(scopes []mountscope.Scope) error {
+	for _, scope := range scopes {
+		report, err := mountscope.InspectLocalContentPolicy(scope.LocalDir)
+		if err != nil {
+			return fmt.Errorf("inspect local mount content policy for %s: %w", scope.LocalDir, err)
+		}
+		if len(report.ExcludedInfrastructure) > 0 {
+			log.Printf(
+				"excluded incidental infrastructure from %s (not synced): %s",
+				scope.LocalDir,
+				strings.Join(report.ExcludedInfrastructure, ", "),
+			)
+		}
+		if len(report.SensitiveUserContent) > 0 {
+			log.Printf(
+				"warning: convention-sensitive user content under %s will sync: %s; review or move it if that is not intended",
+				scope.LocalDir,
+				strings.Join(report.SensitiveUserContent, ", "),
+			)
+		}
+	}
+	return nil
 }
 
 func readRemotePathsFile(path string) ([]string, error) {

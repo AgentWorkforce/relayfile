@@ -140,7 +140,7 @@ func (fw *FileWatcher) shouldSkip(rel string) bool {
 		strings.HasPrefix(first, ".relayfile-mount-state.json.tmp-") {
 		return true
 	}
-	if watcherIgnoredTopLevel(fw.scopedChild, first) {
+	if watcherIgnoredTopLevel(fw.scopedChild, fw.localDir, first) {
 		return true
 	}
 	// Data-loss guard for root mounts: a top-level entry whose name equals the
@@ -161,14 +161,14 @@ func collidesWithMountRootBasename(localRoot, remoteRoot, first string) bool {
 // reservedTopLevel reports whether an entry is bookkeeping at this Syncer's
 // topology boundary. Catalog artifacts are reserved for every exact mount;
 // under a scoped child the same names are ordinary provider content.
-// Mount-runtime sentinels and exact .git metadata remain reserved at every
-// scope so local repository credentials and objects can never become
-// writeback content.
-func reservedTopLevel(scopedChild bool, name string) bool {
-	if mountscope.IsReservedRuntimeSegment(name) || name == mountscope.GitTopLevel {
+// Mount-runtime sentinels and incidental infrastructure remain reserved at
+// every scope so local repository credentials and objects can never become
+// sync content.
+func reservedTopLevel(scopedChild bool, localRoot, name string) bool {
+	if mountscope.IsReservedRuntimeSegment(name) || mountscope.IsInfrastructureTopLevelAt(localRoot, name) {
 		return true
 	}
-	return !scopedChild && mountscope.IsReservedLocalTopLevel(name)
+	return !scopedChild && mountscope.IsCatalogOwnedTopLevel(name)
 }
 
 func (fw *FileWatcher) queueChange(rel string, op fsnotify.Op) {
@@ -213,8 +213,8 @@ func (fw *FileWatcher) emitExistingFileEvents(base string) {
 	})
 }
 
-func watcherIgnoredTopLevel(scopedChild bool, name string) bool {
-	return reservedTopLevel(scopedChild, name) && name != mountscope.DigestsTopLevel
+func watcherIgnoredTopLevel(scopedChild bool, localRoot, name string) bool {
+	return reservedTopLevel(scopedChild, localRoot, name) && name != mountscope.DigestsTopLevel
 }
 
 // addDirRecursive walks `base` and adds every directory underneath it to the
@@ -287,7 +287,7 @@ func (fw *FileWatcher) isTopLevelReservedDir(path, name string) bool {
 	if first != name {
 		return false
 	}
-	return watcherIgnoredTopLevel(fw.scopedChild, name)
+	return watcherIgnoredTopLevel(fw.scopedChild, fw.localDir, name)
 }
 
 func (fw *FileWatcher) Close() error {

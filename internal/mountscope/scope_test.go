@@ -1,6 +1,7 @@
 package mountscope
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -111,6 +112,25 @@ func TestPlanRejectsScopedRootsContainingNestedRuntimeSegments(t *testing.T) {
 	}
 }
 
+func TestPlanRejectsInfrastructureSegmentsAnywhereInScopedRoot(t *testing.T) {
+	root := t.TempDir()
+	for _, remotePath := range []string{
+		"/github/.git/config",
+		"/notion/.HG/store",
+		"/slack/.svn/wc.db",
+		"/linear/.jj/repo",
+	} {
+		t.Run(remotePath, func(t *testing.T) {
+			_, err := Plan(root, LayoutScoped, []string{remotePath}, "/", "")
+			if err == nil ||
+				!strings.Contains(err.Error(), remotePath) ||
+				!strings.Contains(err.Error(), "incidental infrastructure") {
+				t.Fatalf("expected infrastructure-root refusal, got %v", err)
+			}
+		})
+	}
+}
+
 func TestPlanRejectsLocalFilesystemIdentityOverlap(t *testing.T) {
 	root := t.TempDir()
 	for _, paths := range [][]string{
@@ -126,6 +146,87 @@ func TestPlanRejectsLocalFilesystemIdentityOverlap(t *testing.T) {
 			!strings.Contains(err.Error(), "normalization-insensitive") {
 			t.Fatalf("expected local-identity overlap refusal for %v, got %v", paths, err)
 		}
+	}
+}
+
+func TestValidateScopedPathSetRejectsPersistedNestedAndFoldedRoots(t *testing.T) {
+	for _, paths := range [][]string{
+		{"/github", "/github/repos/acme"},
+		{"/GitHub", "/github"},
+		{"/Café", "/Cafe\u0301"},
+		{"/github", ""},
+		{},
+	} {
+		if err := ValidateScopedPathSet(paths); err == nil {
+			t.Fatalf("ValidateScopedPathSet(%v) accepted an ambiguous persisted topology", paths)
+		}
+	}
+	if err := ValidateScopedPathSet([]string{"/github", "/slack"}); err != nil {
+		t.Fatalf("ValidateScopedPathSet rejected disjoint roots: %v", err)
+	}
+}
+
+func TestInspectLocalContentPolicyUsesDerivedInfrastructureAndSurfacesSensitiveUserFiles(t *testing.T) {
+	root := t.TempDir()
+	for _, name := range InfrastructureTopLevelNames() {
+		if err := os.MkdirAll(filepath.Join(root, name), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, name := range []string{".env", ".env.production", ".npmrc", "notes.md"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte("content"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	report, err := InspectLocalContentPolicy(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := report.ExcludedInfrastructure, InfrastructureTopLevelNames(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("excluded infrastructure = %v, want derived inventory %v", got, want)
+	}
+	if got, want := report.SensitiveUserContent, []string{".env", ".env.production", ".npmrc"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("sensitive user content = %v, want %v", got, want)
+	}
+}
+
+func TestInfrastructureRuntimeIdentityUsesActualFilesystemIdentity(t *testing.T) {
+	root := t.TempDir()
+	canonical := filepath.Join(root, ".git")
+	if err := os.WriteFile(canonical, []byte("metadata"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(root, ".Git")
+	if err := os.Link(canonical, alias); err != nil {
+		t.Skipf("filesystem cannot create case-distinct hard-link alias: %v", err)
+	}
+	if !IsInfrastructureTopLevelAt(root, ".Git") {
+		t.Fatal("filesystem-identical case alias bypassed infrastructure exclusion")
+	}
+	if err := os.Remove(alias); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(alias, []byte("user content"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if IsInfrastructureTopLevelAt(root, ".Git") {
+		t.Fatal("case-distinct user content was excluded on a case-sensitive filesystem")
+	}
+}
+
+func TestFilesystemFoldsPathCaseAtMatchesCaseAliasProbe(t *testing.T) {
+	root := t.TempDir()
+	probe := filepath.Join(root, ".Git")
+	if err := os.Mkdir(probe, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_, canonicalErr := os.Stat(filepath.Join(root, ".git"))
+	want := canonicalErr == nil
+	if canonicalErr != nil && !errors.Is(canonicalErr, os.ErrNotExist) {
+		t.Fatal(canonicalErr)
+	}
+	if got := filesystemFoldsPathCaseAt(root); got != want {
+		t.Fatalf("filesystemFoldsPathCaseAt(%q) = %t, want %t", root, got, want)
 	}
 }
 

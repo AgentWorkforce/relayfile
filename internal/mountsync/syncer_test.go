@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/agentworkforce/relayfile/internal/httpapi"
+	"github.com/agentworkforce/relayfile/internal/mountscope"
 	"github.com/agentworkforce/relayfile/internal/relayfile"
 	"github.com/fsnotify/fsnotify"
 )
@@ -188,12 +189,14 @@ func TestScanLocalFilesIncludesBasenameNamedDescendantForNonRootMount(t *testing
 			t.Fatal(err)
 		}
 	}
-	gitMetadataPath := filepath.Join(localRoot, ".git", "config")
-	if err := os.MkdirAll(filepath.Dir(gitMetadataPath), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(gitMetadataPath, []byte("[remote \"origin\"]\n\turl = https://token@example.test/repo.git\n"), 0o600); err != nil {
-		t.Fatal(err)
+	for _, infrastructureRoot := range mountscope.InfrastructureTopLevelNames() {
+		metadataPath := filepath.Join(localRoot, infrastructureRoot, "credential-bearing-config")
+		if err := os.MkdirAll(filepath.Dir(metadataPath), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(metadataPath, []byte("https://token@example.test/repo\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
 	syncer, err := NewSyncer(
 		NewHTTPClient("http://127.0.0.1", "test-token", http.DefaultClient),
@@ -228,8 +231,11 @@ func TestScanLocalFilesIncludesBasenameNamedDescendantForNonRootMount(t *testing
 			t.Fatalf("scoped provider descendant %s missing from scan: %#v", remotePath, files)
 		}
 	}
-	if _, ok := files["/notion/Docs/.git/config"]; ok {
-		t.Fatalf("local git metadata entered scoped provider scan: %#v", files)
+	for _, infrastructureRoot := range mountscope.InfrastructureTopLevelNames() {
+		remotePath := "/notion/Docs/" + infrastructureRoot + "/credential-bearing-config"
+		if _, ok := files[remotePath]; ok {
+			t.Fatalf("local infrastructure metadata %s entered scoped provider scan: %#v", remotePath, files)
+		}
 	}
 }
 
@@ -260,10 +266,118 @@ func TestScanLocalFilesPreservesCaseDistinctTopLevelNames(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, remotePath := range []string{"/Digests/page.md", "/NODE_MODULES/package.json", "/.Git/config"} {
+	for _, remotePath := range []string{"/Digests/page.md", "/NODE_MODULES/package.json"} {
 		if _, ok := files[remotePath]; !ok {
 			t.Fatalf("case-distinct provider path %s missing from scan: %#v", remotePath, files)
 		}
+	}
+	_, canonicalGitErr := os.Stat(filepath.Join(localRoot, ".git"))
+	_, scannedCaseVariant := files["/.Git/config"]
+	if canonicalGitErr == nil {
+		if scannedCaseVariant {
+			t.Fatalf("filesystem-equivalent .Git alias bypassed .git infrastructure exclusion: %#v", files)
+		}
+	} else if !errors.Is(canonicalGitErr, os.ErrNotExist) {
+		t.Fatalf("inspect filesystem case identity: %v", canonicalGitErr)
+	} else if !scannedCaseVariant {
+		t.Fatalf("case-distinct provider path /.Git/config missing on a case-sensitive filesystem: %#v", files)
+	}
+}
+
+func TestRemoteHydrationCannotModifyLocalInfrastructure(t *testing.T) {
+	localRoot := t.TempDir()
+	metadataPath := filepath.Join(localRoot, ".git", "config")
+	if err := os.MkdirAll(filepath.Dir(metadataPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const localMetadata = "[remote \"origin\"]\n\turl = https://local-token@example.test/repo.git\n"
+	if err := os.WriteFile(metadataPath, []byte(localMetadata), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	syncer, err := NewSyncer(&fakeClient{}, SyncerOptions{
+		WorkspaceID: "ws_remote_infrastructure",
+		RemoteRoot:  "/notion/Docs",
+		LocalRoot:   localRoot,
+		ScopedChild: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	remotePath := "/notion/Docs/.git/config"
+	syncer.state.Files[remotePath] = trackedFile{
+		Hash: hashBytes([]byte(localMetadata)),
+	}
+
+	if err := syncer.applyRemoteFile(remotePath, RemoteFile{
+		Path:        remotePath,
+		Revision:    "rev_remote",
+		ContentType: "text/plain",
+		Content:     "[remote \"origin\"]\n\turl = https://remote-token@example.test/repo.git\n",
+	}, nil); err != nil {
+		t.Fatalf("apply excluded remote infrastructure file: %v", err)
+	}
+	if err := syncer.applyRemoteDelete(remotePath, nil); err != nil {
+		t.Fatalf("apply excluded remote infrastructure delete: %v", err)
+	}
+
+	got, err := os.ReadFile(metadataPath)
+	if err != nil {
+		t.Fatalf("read preserved local infrastructure: %v", err)
+	}
+	if string(got) != localMetadata {
+		t.Fatalf("remote hydration changed local infrastructure: %q", got)
+	}
+	if _, tracked := syncer.state.Files[remotePath]; tracked {
+		t.Fatalf("excluded infrastructure remained in tracked remote state")
+	}
+}
+
+func TestRemoteHydrationUsesFilesystemIdentityForAbsentCaseFoldedInfrastructure(t *testing.T) {
+	localRoot := t.TempDir()
+	probeRoot := t.TempDir()
+	if err := os.Mkdir(filepath.Join(probeRoot, ".Git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_, canonicalProbeErr := os.Stat(filepath.Join(probeRoot, ".git"))
+	caseInsensitive := canonicalProbeErr == nil
+	if canonicalProbeErr != nil && !errors.Is(canonicalProbeErr, os.ErrNotExist) {
+		t.Fatalf("inspect filesystem case behavior: %v", canonicalProbeErr)
+	}
+	if !mountscope.IsInfrastructureTopLevelIdentity(".Git") {
+		t.Fatal("case-folded infrastructure identity is not recognized")
+	}
+	if got := mountscope.IsInfrastructureTopLevelAt(localRoot, ".Git"); got != caseInsensitive {
+		t.Fatalf("absent infrastructure identity at %q = %t, want filesystem case behavior %t", localRoot, got, caseInsensitive)
+	}
+	syncer, err := NewSyncer(&fakeClient{}, SyncerOptions{
+		WorkspaceID: "ws_remote_folded_infrastructure",
+		RemoteRoot:  "/",
+		LocalRoot:   localRoot,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	remotePath := "/.Git/config"
+	if err := syncer.applyRemoteFile(remotePath, RemoteFile{
+		Path:        remotePath,
+		Revision:    "rev_remote",
+		ContentType: "text/plain",
+		Content:     "[remote \"origin\"]\n\turl = https://remote-token@example.test/repo.git\n",
+	}, nil); err != nil {
+		t.Fatalf("apply case-folded remote infrastructure file: %v", err)
+	}
+	content, readErr := os.ReadFile(filepath.Join(localRoot, ".Git", "config"))
+	if caseInsensitive {
+		if !errors.Is(readErr, os.ErrNotExist) {
+			t.Fatalf("remote hydration created case-folded infrastructure on insensitive filesystem: %v", readErr)
+		}
+		return
+	}
+	if readErr != nil {
+		t.Fatalf("remote hydration dropped case-distinct user content on sensitive filesystem: %v", readErr)
+	}
+	if !strings.Contains(string(content), "remote-token") {
+		t.Fatalf("unexpected hydrated case-distinct content: %q", content)
 	}
 }
 

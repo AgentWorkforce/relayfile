@@ -228,11 +228,21 @@ also require `--local-layout scoped`.
 Relayfile persists the allowlist and layout for later starts, so omitting the
 flags does not widen a scoped mount back to `/`. It refuses in-place layout
 changes and removal of scoped roots because those transitions require moving
-runtime state and queued writes. Choose a new `LOCAL_DIR` and pass `--rehome`
-instead. Records created before layout persistence that already have local
-mount state must use that same new-directory `--rehome` migration before
-enabling scoped mounts. A setup-created record that has never mounted has no
-state to orphan and may start scoped in its chosen directory.
+runtime state and queued writes. Choose a new `LOCAL_DIR`; pass `--rehome` when
+that choice changes the workspace's registered mirror directory. Records
+created before layout persistence that already have local mount state must use
+that same new-directory migration before enabling scoped mounts. A
+setup-created record that has never mounted has no state to orphan and may
+start scoped in its chosen directory.
+
+Mount startup visibly lists incidental source-control infrastructure that is
+excluded from sync (`.git`, `.hg`, `.svn`, `.bzr`, `_darcs`, and `.jj`). These
+directories are tool-owned metadata and may contain credential-bearing remote
+configuration. Convention-sensitive user files such as `.env`, `.env.*`,
+`.npmrc`, `.pypirc`, `.netrc`, and `.git-credentials` remain ordinary mount
+content, but Relayfile warns once at startup when it finds them so the operator
+can move them before sync if needed. Ordinary content is synced without a
+warning.
 
 Scoped mounts intentionally omit the root-level `digests/` and
 `.skills/activity-summary.md` surfaces. Workspace digests can summarize
@@ -243,7 +253,8 @@ contract.
 
 `--reset-after-clobber` is supported only for exact mounts. Scoped recovery
 refuses until all child roots can be recovered transactionally; use a new
-`LOCAL_DIR` with `--rehome` rather than accepting a partial reset.
+`LOCAL_DIR` (and `--rehome` when changing the registered mirror) rather than
+accepting a partial reset.
 
 The exported TypeScript mount launcher currently models one `remotePath` and
 rejects `RELAYFILE_MOUNT_PATHS_FILE` before creating directories or spawning a

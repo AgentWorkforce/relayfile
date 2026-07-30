@@ -2845,6 +2845,43 @@ func TestValidateMountScopeTransitionRejectsInPlaceRemoval(t *testing.T) {
 	}
 }
 
+func TestValidateMountScopeTransitionRejectsPersistedNestedTopology(t *testing.T) {
+	localRoot := t.TempDir()
+	previous := workspaceRecord{
+		LocalDir:    localRoot,
+		LocalLayout: mountscope.LayoutScoped,
+		RemotePaths: []string{"/github", "/github/repos/acme"},
+	}
+	err := validateMountScopeTransition(
+		previous,
+		localRoot,
+		mountscope.LayoutScoped,
+		[]string{"/github"},
+	)
+	if err == nil ||
+		!strings.Contains(err.Error(), "cannot be represented safely") ||
+		!strings.Contains(err.Error(), "--rehome") {
+		t.Fatalf("expected persisted nested-scope refusal, got %v", err)
+	}
+}
+
+func TestValidateMountScopeTransitionAllowsMalformedLegacyTopologyToRehome(t *testing.T) {
+	previousRoot := t.TempDir()
+	previous := workspaceRecord{
+		LocalDir:    previousRoot,
+		LocalLayout: mountscope.LayoutScoped,
+		RemotePaths: []string{"/github", "/github/repos/acme"},
+	}
+	if err := validateMountScopeTransition(
+		previous,
+		filepath.Join(t.TempDir(), "new-root"),
+		mountscope.LayoutScoped,
+		[]string{"/github", "/slack"},
+	); err != nil {
+		t.Fatalf("safe rehome was blocked by malformed persisted topology: %v", err)
+	}
+}
+
 func TestResolveCLIMountRemotePathsAppliesEnvironmentBeforeTransitionValidation(t *testing.T) {
 	got := resolveCLIMountRemotePaths(nil, []string{"/github"}, "/github")
 	if len(got) != 1 || got[0] != "/github" {
@@ -2907,6 +2944,169 @@ func TestPreflightScopedMountRootInvariantAllowsMissingChildTree(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(localRoot, "github")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("preflight initialized missing child: %v", err)
+	}
+}
+
+func TestAcquireMountStartLockSerializesSamePortableRoot(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	localRoot := filepath.Join(t.TempDir(), "Mirror")
+	release, err := acquireMountStartLock(localRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := acquireMountStartLock(strings.ToUpper(localRoot)); err == nil ||
+		!strings.Contains(err.Error(), "already in progress") {
+		release()
+		t.Fatalf("portable alias acquired a second mount-start lock: %v", err)
+	}
+	release()
+	releaseAgain, err := acquireMountStartLock(localRoot)
+	if err != nil {
+		t.Fatalf("mount-start lock remained held after release: %v", err)
+	}
+	releaseAgain()
+}
+
+func TestAcquireMountStartLockDoesNotDependOnDefaultStateDirectory(t *testing.T) {
+	homeFile := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(homeFile, []byte("read-only home sentinel"), 0o400); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", homeFile)
+
+	release, err := acquireMountStartLock(filepath.Join(t.TempDir(), "mirror"))
+	if err != nil {
+		t.Fatalf("mount-start lock depended on default state directory: %v", err)
+	}
+	release()
+}
+
+func TestTrustedMountStartLockBaseRejectsAttackerWritableCandidate(t *testing.T) {
+	parent := t.TempDir()
+	attackerWritable := filepath.Join(parent, "shared")
+	trusted := filepath.Join(parent, "owned")
+	if err := os.Mkdir(attackerWritable, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(attackerWritable, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(trusted, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	got, err := trustedMountStartLockBaseFrom([]string{attackerWritable, trusted})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != trusted {
+		t.Fatalf("selected lock base = %q, want trusted fallback %q", got, trusted)
+	}
+}
+
+func TestTrustedMountStartLockBaseRejectsSymlinkCandidate(t *testing.T) {
+	parent := t.TempDir()
+	target := filepath.Join(parent, "target")
+	if err := os.Mkdir(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(parent, "alias")
+	if err := os.Symlink(target, alias); err != nil {
+		t.Skipf("filesystem does not support symlinks: %v", err)
+	}
+	trusted := filepath.Join(parent, "owned")
+	if err := os.Mkdir(trusted, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	got, err := trustedMountStartLockBaseFrom([]string{alias, trusted})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != trusted {
+		t.Fatalf("selected lock base = %q, want non-symlink fallback %q", got, trusted)
+	}
+}
+
+func TestAcquireMountStartLockSerializesSymlinkAliasesAndMissingDescendants(t *testing.T) {
+	parent := t.TempDir()
+	realParent := filepath.Join(parent, "real")
+	if err := os.MkdirAll(realParent, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	aliasParent := filepath.Join(parent, "alias")
+	if err := os.Symlink(realParent, aliasParent); err != nil {
+		t.Skipf("filesystem does not support symlinks: %v", err)
+	}
+	realRoot := filepath.Join(realParent, "not-created-yet")
+	aliasRoot := filepath.Join(aliasParent, "not-created-yet")
+
+	release, err := acquireMountStartLock(realRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	if _, err := acquireMountStartLock(aliasRoot); err == nil ||
+		!strings.Contains(err.Error(), "already in progress") {
+		t.Fatalf("symlink alias acquired a second mount-start lock: %v", err)
+	}
+}
+
+func TestReportMountContentPolicyEnumeratesExclusionsAndSensitiveContent(t *testing.T) {
+	localRoot := t.TempDir()
+	scopeDir := filepath.Join(localRoot, "github")
+	if err := os.MkdirAll(filepath.Join(scopeDir, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(scopeDir, ".env"), []byte("SECRET=value"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	err := reportMountContentPolicy(&output, localRoot, []mountscope.Scope{{
+		RemotePath: "/github",
+		LocalDir:   scopeDir,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := output.String()
+	if !strings.Contains(got, "github/.git") || !strings.Contains(got, "not synced") {
+		t.Fatalf("infrastructure exclusion was not visible: %q", got)
+	}
+	if !strings.Contains(got, "github/.env") || !strings.Contains(got, "will sync") {
+		t.Fatalf("sensitive user content was not surfaced: %q", got)
+	}
+}
+
+func TestValidateMountStatePathsRefusesScopedPrivateStateBeforeMutation(t *testing.T) {
+	localRoot := t.TempDir()
+	scopes, err := mountscope.Plan(
+		localRoot,
+		mountscope.LayoutScoped,
+		[]string{"/github", "/slack"},
+		"/",
+		"",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stateFile := filepath.Join(scopes[0].LocalDir, ".relay", "private-state.json")
+	err = validateMountStatePaths(
+		"ws_demo",
+		scopes,
+		stateFile,
+		"",
+		mountsync.MountKindDaemon,
+	)
+	if err == nil ||
+		!strings.Contains(err.Error(), "/github") ||
+		!strings.Contains(err.Error(), "before updating workspace topology") {
+		t.Fatalf("expected pre-persistence private-state refusal, got %v", err)
+	}
+	entries, readErr := os.ReadDir(localRoot)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("private-state preflight mutated mount root: %v", entries)
 	}
 }
 

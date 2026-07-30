@@ -189,14 +189,12 @@ func localWritebackHashes(localDir, remoteRoot string, scopedChild bool) (map[st
 		}
 		first := strings.SplitN(rel, string(os.PathSeparator), 2)[0]
 		if entry.IsDir() {
-			if first == entry.Name() && writebackListReservedTopLevel(scopedChild, first) {
+			if first == entry.Name() && writebackListReservedTopLevel(scopedChild, localDir, first) {
 				return filepath.SkipDir
 			}
 			return nil
 		}
-		if first == ".relayfile-mount-state.json" ||
-			strings.HasPrefix(first, ".relayfile-mount-state.json.tmp-") ||
-			writebackListReservedTopLevel(scopedChild, first) {
+		if writebackListReservedTopLevel(scopedChild, localDir, first) {
 			return nil
 		}
 		info, err := entry.Info()
@@ -231,11 +229,11 @@ func remotePathForLocalRel(remoteRoot, rel string) string {
 	return normalizeWritebackListPath(strings.TrimRight(root, "/") + "/" + rel)
 }
 
-func writebackListReservedTopLevel(scopedChild bool, name string) bool {
-	if mountscope.IsReservedRuntimeSegment(name) || name == mountscope.GitTopLevel {
+func writebackListReservedTopLevel(scopedChild bool, localRoot, name string) bool {
+	if mountscope.IsReservedRuntimeSegment(name) || mountscope.IsInfrastructureTopLevelAt(localRoot, name) {
 		return true
 	}
-	return !scopedChild && mountscope.IsReservedLocalTopLevel(name)
+	return !scopedChild && mountscope.IsCatalogOwnedTopLevel(name)
 }
 
 func hashLocalWritebackFile(path string) (string, error) {

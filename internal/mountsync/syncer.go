@@ -2056,7 +2056,10 @@ func (s *Syncer) HandleLocalChange(ctx context.Context, relativePath string, op 
 		s.logMountControlPathSkipped(relativePath)
 		return nil
 	}
-	if first := strings.SplitN(relativePath, "/", 2)[0]; reservedTopLevel(s.scopedChild, first) {
+	if first := strings.SplitN(relativePath, "/", 2)[0]; reservedTopLevel(s.scopedChild, s.localRoot, first) {
+		if mountscope.IsInfrastructureTopLevelAt(s.localRoot, first) {
+			s.logLocalInfrastructureSkipped(first)
+		}
 		return nil
 	}
 
@@ -4319,6 +4322,10 @@ func (s *Syncer) applyGithubWorkingTreeTarSeed(tarBody GithubWorkingTreeTar, tre
 		if err != nil {
 			return nil, err
 		}
+		if s.excludeInfrastructureLocalPath(localPath, meta.RemotePath, conflicted) {
+			remotePaths[meta.RemotePath] = struct{}{}
+			continue
+		}
 		if err := s.assertNotMountRoot(localPath); err != nil {
 			return nil, err
 		}
@@ -5981,6 +5988,13 @@ func (s *Syncer) applyRemoteFile(remotePath string, file RemoteFile, conflicted 
 	if s.fullPullPathTouchedByUpPath(remotePath) {
 		return nil
 	}
+	localPath, err := s.remoteToLocalPath(remotePath)
+	if err != nil {
+		return nil
+	}
+	if s.excludeInfrastructureLocalPath(localPath, remotePath, conflicted) {
+		return nil
+	}
 	remoteBytes, err := decodeRemoteFileContent(file)
 	if err != nil {
 		return err
@@ -5990,10 +6004,6 @@ func (s *Syncer) applyRemoteFile(remotePath string, file RemoteFile, conflicted 
 	tracked.ReadOnly = !canWrite
 	tracked.Denied = false
 	if tracked.Dirty {
-		localPath, err := s.remoteToLocalPath(remotePath)
-		if err != nil {
-			return nil
-		}
 		tracked.LocalRelativePath = s.state.Files[remotePath].LocalRelativePath
 		if err := s.assertNotMountRoot(localPath); err != nil {
 			s.logf("skipping remote file %s: %v", remotePath, err)
@@ -6007,10 +6017,6 @@ func (s *Syncer) applyRemoteFile(remotePath string, file RemoteFile, conflicted 
 		}
 		s.state.Files[remotePath] = tracked
 		materialized = true
-		return nil
-	}
-	localPath, err := s.remoteToLocalPath(remotePath)
-	if err != nil {
 		return nil
 	}
 	tracked.LocalRelativePath = s.state.Files[remotePath].LocalRelativePath
@@ -6221,6 +6227,10 @@ func (s *Syncer) applyRemoteDelete(remotePath string, conflicted map[string]stru
 			return nil
 		}
 	}
+	localPath, pathErr := s.remoteToLocalPath(remotePath)
+	if pathErr == nil && s.excludeInfrastructureLocalPath(localPath, remotePath, conflicted) {
+		return nil
+	}
 	// An authoritative remote delete resolves any earlier local
 	// materialization failure even when the file was never tracked locally.
 	s.clearSkippedMaterialization(remotePath)
@@ -6236,7 +6246,7 @@ func (s *Syncer) applyRemoteDelete(remotePath string, conflicted map[string]stru
 	if tracked.WriteDenied {
 		return nil
 	}
-	localPath, err := s.remoteToLocalPath(remotePath)
+	localPath, err = s.remoteToLocalPath(remotePath)
 	if err != nil {
 		delete(s.state.Files, remotePath)
 		return nil
@@ -6517,11 +6527,16 @@ func (s *Syncer) scanLocalFiles() (map[string]localSnapshot, error) {
 			if d.Name() == ".relay" {
 				return filepath.SkipDir
 			}
-			if rel, relErr := filepath.Rel(s.localRoot, path); relErr == nil &&
-				rel != "." &&
-				isMountRuntimeRelativePath(rel) {
-				s.logMountControlPathSkipped(rel)
-				return filepath.SkipDir
+			if rel, relErr := filepath.Rel(s.localRoot, path); relErr == nil && rel != "." {
+				if isMountRuntimeRelativePath(rel) {
+					s.logMountControlPathSkipped(rel)
+					return filepath.SkipDir
+				}
+				first := strings.SplitN(rel, string(os.PathSeparator), 2)[0]
+				if first == d.Name() && mountscope.IsInfrastructureTopLevelAt(s.localRoot, first) {
+					s.logLocalInfrastructureSkipped(first)
+					return filepath.SkipDir
+				}
 			}
 			return nil
 		}
@@ -6534,7 +6549,10 @@ func (s *Syncer) scanLocalFiles() (map[string]localSnapshot, error) {
 				return nil
 			}
 			first := strings.SplitN(rel, string(os.PathSeparator), 2)[0]
-			if reservedTopLevel(s.scopedChild, first) || collidesWithMountRootBasename(s.localRoot, s.remoteRoot, first) {
+			if reservedTopLevel(s.scopedChild, s.localRoot, first) || collidesWithMountRootBasename(s.localRoot, s.remoteRoot, first) {
+				if mountscope.IsInfrastructureTopLevelAt(s.localRoot, first) {
+					s.logLocalInfrastructureSkipped(first)
+				}
 				return nil
 			}
 		}
@@ -6857,6 +6875,52 @@ func (s *Syncer) logMountControlPathSkipped(relativePath string) {
 	}
 	s.controlSkipLogged[normalized] = struct{}{}
 	s.logf("skipping mount control path before upload: %s", normalized)
+}
+
+func (s *Syncer) logLocalInfrastructureSkipped(relativePath string) {
+	normalized := filepath.ToSlash(strings.TrimSpace(relativePath))
+	if normalized == "" || normalized == "." {
+		return
+	}
+	key := "infrastructure:" + normalized
+	if s.controlSkipLogged == nil {
+		s.controlSkipLogged = map[string]struct{}{}
+	}
+	if _, seen := s.controlSkipLogged[key]; seen {
+		return
+	}
+	s.controlSkipLogged[key] = struct{}{}
+	s.logf("excluded incidental local infrastructure from sync: %s", normalized)
+}
+
+// excludeInfrastructureLocalPath enforces the infrastructure boundary in the
+// remote-to-local direction. Without this guard, suppressing watcher/writeback
+// events alone would still allow remote hydration or deletion to modify source
+// control metadata under the mirror root.
+func (s *Syncer) excludeInfrastructureLocalPath(localPath, remotePath string, conflicted map[string]struct{}) bool {
+	rel, err := filepath.Rel(s.localRoot, localPath)
+	if err != nil {
+		return false
+	}
+	rel = filepath.ToSlash(filepath.Clean(rel))
+	if rel == "" || rel == "." || strings.HasPrefix(rel, "../") {
+		return false
+	}
+	first := strings.SplitN(rel, "/", 2)[0]
+	// Remote hydration uses the target filesystem's identity even before a
+	// path exists. An absent `.Git` is the future `.git` on an insensitive
+	// filesystem, but remains ordinary user content on a sensitive one. This
+	// must agree with local scanning or the two directions diverge.
+	if !mountscope.IsInfrastructureTopLevelAt(s.localRoot, first) {
+		return false
+	}
+	s.logLocalInfrastructureSkipped(first)
+	delete(s.state.Files, remotePath)
+	s.clearIncrementalReadNotReady(remotePath)
+	if conflicted != nil {
+		delete(conflicted, remotePath)
+	}
+	return true
 }
 
 func (s *Syncer) loadState() error {
