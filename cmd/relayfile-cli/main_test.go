@@ -2436,6 +2436,28 @@ func TestMountRejectsRepeatedRemotePathsWithoutScopedLayout(t *testing.T) {
 	}
 }
 
+func TestMountRejectsProviderFilterAcrossHeterogeneousScopesBeforeInitializingMirror(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+	localRoot := filepath.Join(t.TempDir(), "mirror")
+
+	err := run([]string{
+		"mount", "ws_demo", localRoot,
+		"--token", testJWTWithWorkspace("ws_demo"),
+		"--remote-path", "/github",
+		"--remote-path", "/slack",
+		"--local-layout", "scoped",
+		"--provider", "github",
+		"--once",
+	}, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "/slack") || !strings.Contains(err.Error(), "omit --provider") {
+		t.Fatalf("expected heterogeneous provider-filter refusal, got %v", err)
+	}
+	if _, statErr := os.Stat(localRoot); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("provider-filter refusal initialized mirror: %v", statErr)
+	}
+}
+
 func TestMountRejectsExplicitlyEmptyPathsFileWithoutWidening(t *testing.T) {
 	for name, contents := range map[string]string{
 		"empty":      "",
@@ -2556,6 +2578,66 @@ func TestPrepareBackgroundMountLayoutPreservesScopedArtifactAbsence(t *testing.T
 	}
 	if info, err := os.Stat(filepath.Join(localRoot, mountscope.RuntimeTopLevel)); err != nil || !info.IsDir() {
 		t.Fatalf("scoped background preparation did not create runtime root: info=%v err=%v", info, err)
+	}
+}
+
+func TestPrepareScopedCatalogRootRemovesOnlyGeneratedArtifacts(t *testing.T) {
+	localRoot := filepath.Join(t.TempDir(), "mirror")
+	if err := ensureMirrorLayout(localRoot); err != nil {
+		t.Fatal(err)
+	}
+	if err := prepareScopedCatalogRoot(localRoot); err != nil {
+		t.Fatalf("prepare generated setup root for scoped mount: %v", err)
+	}
+	for _, artifact := range []string{
+		filepath.Join(localRoot, mountscope.DigestsTopLevel),
+		filepath.Join(localRoot, mountscope.SkillsTopLevel),
+	} {
+		if _, err := os.Stat(artifact); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("generated artifact remains after scoped preparation %s: %v", artifact, err)
+		}
+	}
+}
+
+func TestPrepareScopedCatalogRootRefusesUnknownContentWithoutMutation(t *testing.T) {
+	localRoot := filepath.Join(t.TempDir(), "mirror")
+	if err := ensureMirrorLayout(localRoot); err != nil {
+		t.Fatal(err)
+	}
+	unknownPath := filepath.Join(localRoot, mountscope.DigestsTopLevel, "today.md")
+	if err := os.WriteFile(unknownPath, []byte("existing digest"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := prepareScopedCatalogRoot(localRoot)
+	if err == nil || !strings.Contains(err.Error(), unknownPath) || !strings.Contains(err.Error(), "--rehome") {
+		t.Fatalf("expected actionable unknown-artifact refusal, got %v", err)
+	}
+	for _, path := range []string{
+		unknownPath,
+		filepath.Join(localRoot, mountscope.SkillsTopLevel, "activity-summary.md"),
+	} {
+		if _, statErr := os.Stat(path); statErr != nil {
+			t.Fatalf("refusal mutated existing artifact %s: %v", path, statErr)
+		}
+	}
+}
+
+func TestSetupMirrorLayoutPreservesPersistedScopedTopology(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+	if _, err := upsertWorkspaceDetails(workspaceRecord{
+		Name:        "demo",
+		ID:          "ws_demo",
+		LocalLayout: mountscope.LayoutScoped,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := setupMirrorLayout("demo"); got != mountscope.LayoutScoped {
+		t.Fatalf("setup layout = %q, want scoped", got)
+	}
+	if got := setupMirrorLayout("new-workspace"); got != mountscope.LayoutExact {
+		t.Fatalf("new workspace setup layout = %q, want exact", got)
 	}
 }
 

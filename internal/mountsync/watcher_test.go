@@ -29,13 +29,43 @@ func TestWatcherBasenameGuardMatchesRemoteRootMapping(t *testing.T) {
 		t.Fatal("root mount must retain the round-trip basename guard")
 	}
 
-	scopedWatcher, err := NewFileWatcherForRemoteRoot(localDir, "/notion/Docs", func(string, fsnotify.Op) {})
+	scopedWatcher, err := NewFileWatcherForTopology(localDir, "/notion/Docs", true, func(string, fsnotify.Op) {})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = scopedWatcher.Close() })
 	if scopedWatcher.shouldSkip(filepath.Join("Docs", "page.md")) {
 		t.Fatal("non-root mount must not skip a legitimate basename-named descendant")
+	}
+	for _, relativePath := range []string{
+		filepath.Join("digests", "page.md"),
+		filepath.Join(".skills", "page.md"),
+		filepath.Join("node_modules", "package.json"),
+		"_PERMISSIONS.md",
+	} {
+		if scopedWatcher.shouldSkip(relativePath) {
+			t.Fatalf("non-root mount skipped legitimate provider descendant %q", relativePath)
+		}
+	}
+	if !scopedWatcher.shouldSkip(filepath.Join(".git", "config")) {
+		t.Fatal("non-root mount did not reserve local .git metadata")
+	}
+	exactSubtreeWatcher, err := NewFileWatcherForRemoteRoot(localDir, "/github", func(string, fsnotify.Op) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = exactSubtreeWatcher.Close() })
+	if !exactSubtreeWatcher.shouldSkip(filepath.Join(".skills", "activity-summary.md")) {
+		t.Fatal("exact non-root mount did not reserve generated catalog artifact")
+	}
+	for _, relativePath := range []string{
+		filepath.Join("Digests", "page.md"),
+		filepath.Join("NODE_MODULES", "package.json"),
+		filepath.Join(".Git", "config"),
+	} {
+		if rootWatcher.shouldSkip(relativePath) {
+			t.Fatalf("root mount skipped case-distinct provider path %q", relativePath)
+		}
 	}
 }
 

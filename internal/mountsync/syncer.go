@@ -886,13 +886,17 @@ type SyncerOptions struct {
 	MountKind     string
 	ValidateState bool
 	EventProvider string
-	Scopes        []string
-	WebSocket     *bool
-	RootCtx       context.Context
-	Logger        Logger
-	Mode          string
-	SyncMode      string
-	Interval      time.Duration
+	// ScopedChild identifies a Syncer whose local root is one child beneath a
+	// catalog root. Provider paths that resemble catalog-only artifacts are
+	// ordinary content there; exact mounts keep those artifacts reserved.
+	ScopedChild bool
+	Scopes      []string
+	WebSocket   *bool
+	RootCtx     context.Context
+	Logger      Logger
+	Mode        string
+	SyncMode    string
+	Interval    time.Duration
 	// FullPullEvery controls how often the incremental pull path forces a
 	// full tree pull as a "trust but verify" safety net against cloud-side
 	// revision reuse (see fix/cloud-side-rev-reuse-defense). 0 means use
@@ -1081,6 +1085,7 @@ type Syncer struct {
 	deadLetterDir        string
 	outboxDir            string
 	eventProvider        string
+	scopedChild          bool
 	scopes               []string
 	logger               Logger
 	denialLogPath        string // path to .relay/permissions-denied.log
@@ -1792,6 +1797,7 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 		deadLetterDir:         deadLetterDir,
 		outboxDir:             outboxDir,
 		eventProvider:         eventProvider,
+		scopedChild:           opts.ScopedChild,
 		scopes:                scopes,
 		websocket:             websocketEnabled,
 		recoverStartupDrift:   true,
@@ -1847,7 +1853,7 @@ func (s *Syncer) SetCredentialExpiry(expiresAt string) {
 // NewFileWatcher creates a watcher with the same local/remote mapping as this
 // Syncer so path-collision guards cannot diverge between event and scan paths.
 func (s *Syncer) NewFileWatcher(onChange func(string, fsnotify.Op)) (*FileWatcher, error) {
-	return NewFileWatcherForRemoteRoot(s.localRoot, s.remoteRoot, onChange)
+	return NewFileWatcherForTopology(s.localRoot, s.remoteRoot, s.scopedChild, onChange)
 }
 
 func parseScopesFromJWT(token string) []string {
@@ -2050,7 +2056,7 @@ func (s *Syncer) HandleLocalChange(ctx context.Context, relativePath string, op 
 		s.logMountControlPathSkipped(relativePath)
 		return nil
 	}
-	if first := strings.SplitN(relativePath, "/", 2)[0]; reservedTopLevel(first) {
+	if first := strings.SplitN(relativePath, "/", 2)[0]; reservedTopLevel(s.scopedChild, first) {
 		return nil
 	}
 
@@ -6528,7 +6534,7 @@ func (s *Syncer) scanLocalFiles() (map[string]localSnapshot, error) {
 				return nil
 			}
 			first := strings.SplitN(rel, string(os.PathSeparator), 2)[0]
-			if reservedTopLevel(first) || collidesWithMountRootBasename(s.localRoot, s.remoteRoot, first) {
+			if reservedTopLevel(s.scopedChild, first) || collidesWithMountRootBasename(s.localRoot, s.remoteRoot, first) {
 				return nil
 			}
 		}

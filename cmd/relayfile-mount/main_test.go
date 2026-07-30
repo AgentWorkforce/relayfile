@@ -630,6 +630,28 @@ func TestRunScopedPollingMountsKeepsSharedStateDirForHashResolver(t *testing.T) 
 		if cfg.stateFile != "" {
 			t.Fatalf("expected state-file to stay empty so mountsync derives hashed path, got %q", cfg.stateFile)
 		}
+		if !cfg.scopedChild {
+			t.Fatal("scoped runner did not preserve child-topology identity")
+		}
+	}
+}
+
+func TestRunScopedPollingMountsRejectsProviderFilterAcrossHeterogeneousRoots(t *testing.T) {
+	localRoot := filepath.Join(t.TempDir(), "mirror")
+	err := runScopedPollingMountsWithRunner(
+		context.Background(),
+		mountConfig{localDir: localRoot, stateDir: t.TempDir(), eventProvider: "github"},
+		[]string{"/github", "/slack"},
+		func(_ context.Context, cfg mountConfig) error {
+			t.Fatalf("runner should not start with heterogeneous provider filter: %+v", cfg)
+			return nil
+		},
+	)
+	if err == nil || !strings.Contains(err.Error(), "/slack") || !strings.Contains(err.Error(), "omit --provider") {
+		t.Fatalf("expected heterogeneous provider-filter refusal, got %v", err)
+	}
+	if _, statErr := os.Stat(localRoot); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("provider-filter refusal initialized mirror: %v", statErr)
 	}
 }
 

@@ -1022,7 +1022,7 @@ func runSetup(args []string, stdin io.Reader, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if err := ensureMirrorLayout(absLocalDir); err != nil {
+	if err := ensureMirrorLayoutForTopology(absLocalDir, setupMirrorLayout(name)); err != nil {
 		return err
 	}
 
@@ -1940,9 +1940,92 @@ func ensureMirrorLayoutForTopology(localDir, layout string) error {
 		// here would promise a current digest that no scoped child can safely
 		// pull. Honest absence preserves the allowlist until filtered digests
 		// have their own explicit contract.
+		if err := prepareScopedCatalogRoot(localDir); err != nil {
+			return err
+		}
 		return ensureMountRuntimeLayout(localDir)
 	}
 	return ensureMirrorLayout(localDir)
+}
+
+func setupMirrorLayout(workspaceName string) string {
+	if existing, ok := workspaceRecordByName(workspaceName); ok &&
+		strings.TrimSpace(existing.LocalLayout) == mountscope.LayoutScoped {
+		return mountscope.LayoutScoped
+	}
+	return mountscope.LayoutExact
+}
+
+// prepareScopedCatalogRoot removes only artifacts Relayfile can prove it
+// generated. Unknown content under either catalog-only tree refuses without
+// mutation so switching to scoped layout cannot silently discard user data.
+func prepareScopedCatalogRoot(localDir string) error {
+	type removableArtifact struct {
+		dir       string
+		knownFile string
+		content   []byte
+	}
+	artifacts := []removableArtifact{
+		{dir: filepath.Join(localDir, mountscope.DigestsTopLevel)},
+		{
+			dir:       filepath.Join(localDir, mountscope.SkillsTopLevel),
+			knownFile: "activity-summary.md",
+			content:   []byte(activitySummarySkillMarkdown),
+		},
+	}
+
+	for _, artifact := range artifacts {
+		info, statErr := os.Lstat(artifact.dir)
+		if errors.Is(statErr, os.ErrNotExist) {
+			continue
+		}
+		if statErr != nil {
+			return fmt.Errorf("inspect scoped catalog artifact %s: %w", artifact.dir, statErr)
+		}
+		if !info.IsDir() {
+			return fmt.Errorf(
+				"scoped mount root %s contains non-directory catalog artifact %s; choose a new LOCAL_DIR with --rehome",
+				localDir,
+				artifact.dir,
+			)
+		}
+		entries, err := os.ReadDir(artifact.dir)
+		if err != nil {
+			return fmt.Errorf("inspect scoped catalog artifact %s: %w", artifact.dir, err)
+		}
+		for _, entry := range entries {
+			if artifact.knownFile == "" || entry.Name() != artifact.knownFile || entry.IsDir() {
+				return fmt.Errorf(
+					"scoped mount root %s contains catalog-only content at %s; choose a new LOCAL_DIR with --rehome rather than hiding or deleting it",
+					localDir,
+					filepath.Join(artifact.dir, entry.Name()),
+				)
+			}
+			payload, err := os.ReadFile(filepath.Join(artifact.dir, entry.Name()))
+			if err != nil {
+				return fmt.Errorf("inspect generated scoped catalog artifact %s: %w", filepath.Join(artifact.dir, entry.Name()), err)
+			}
+			if !bytes.Equal(payload, artifact.content) {
+				return fmt.Errorf(
+					"scoped mount root %s contains modified catalog-only content at %s; choose a new LOCAL_DIR with --rehome rather than deleting it",
+					localDir,
+					filepath.Join(artifact.dir, entry.Name()),
+				)
+			}
+		}
+	}
+
+	for _, artifact := range artifacts {
+		if artifact.knownFile != "" {
+			if err := os.Remove(filepath.Join(artifact.dir, artifact.knownFile)); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("remove generated scoped catalog artifact: %w", err)
+			}
+		}
+		if err := os.Remove(artifact.dir); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("remove empty scoped catalog directory %s: %w", artifact.dir, err)
+		}
+	}
+	return nil
 }
 
 // ensureMountRuntimeLayout creates only the per-Syncer runtime directories.
@@ -4088,21 +4171,7 @@ func resolveCLIMountRemotePaths(requested, recorded []string, envRemotePath stri
 }
 
 func validateExplicitPathsFileAllowlist(pathsFile string, fileRemotePaths, directRemotePaths []string) error {
-	// An unset paths file is absence and retains the historical fallback. A
-	// configured path that resolves to no usable roots is an explicit empty
-	// allowlist; treating it as absent would invert the restriction into "/".
-	if strings.TrimSpace(pathsFile) == "" || len(directRemotePaths) > 0 {
-		return nil
-	}
-	for _, remotePath := range fileRemotePaths {
-		if strings.TrimSpace(remotePath) != "" {
-			return nil
-		}
-	}
-	return fmt.Errorf(
-		"paths-file %s contains no usable remote roots; refusing to widen an explicit empty allowlist to /",
-		pathsFile,
-	)
+	return mountscope.ValidateExplicitPathsFile(pathsFile, fileRemotePaths, directRemotePaths)
 }
 
 func absolutePathOrClean(value string) string {
@@ -6351,6 +6420,9 @@ func runMount(args []string) error {
 	if err != nil {
 		return fmt.Errorf("resolve mount scopes: %w", err)
 	}
+	if err := mountscope.ValidateEventProvider(effectiveRemotePaths, *eventProvider); err != nil {
+		return err
+	}
 	if localDirExplicit && recordedLocalDir != "" {
 		if !sameRecordedRoot && !*rehome {
 			return fmt.Errorf(
@@ -6427,6 +6499,14 @@ func runMount(args []string) error {
 				absLocalDir,
 				formatDaemonPIDs(running),
 			)
+		}
+	}
+	// Validate and remove only provably generated catalog artifacts before
+	// persisting scoped topology. An unsafe artifact refusal must leave both
+	// the filesystem and the prior workspace record unchanged.
+	if resolvedLocalLayout == mountscope.LayoutScoped {
+		if err := prepareScopedCatalogRoot(absLocalDir); err != nil {
+			return err
 		}
 	}
 	// Persist the resolved topology before creating any mirror directory. A
@@ -6534,6 +6614,7 @@ func runMount(args []string) error {
 			WorkspaceID:        workspaceID,
 			RemoteRoot:         scope.RemotePath,
 			EventProvider:      strings.TrimSpace(*eventProvider),
+			ScopedChild:        resolvedLocalLayout == mountscope.LayoutScoped,
 			LocalRoot:          scope.LocalDir,
 			StateFile:          strings.TrimSpace(*stateFile),
 			StateDir:           strings.TrimSpace(*stateDir),

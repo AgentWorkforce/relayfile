@@ -173,11 +173,26 @@ func TestWebSocketConnectDueRespectsScheduledBackoff(t *testing.T) {
 
 func TestScanLocalFilesIncludesBasenameNamedDescendantForNonRootMount(t *testing.T) {
 	localRoot := filepath.Join(t.TempDir(), "Docs")
-	localPath := filepath.Join(localRoot, "Docs", "page.md")
-	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+	for _, relativePath := range []string{
+		filepath.Join("Docs", "page.md"),
+		filepath.Join("digests", "page.md"),
+		filepath.Join(".skills", "page.md"),
+		filepath.Join("node_modules", "page.md"),
+		"_PERMISSIONS.md",
+	} {
+		localPath := filepath.Join(localRoot, relativePath)
+		if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(localPath, []byte("draft"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gitMetadataPath := filepath.Join(localRoot, ".git", "config")
+	if err := os.MkdirAll(filepath.Dir(gitMetadataPath), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(localPath, []byte("draft"), 0o644); err != nil {
+	if err := os.WriteFile(gitMetadataPath, []byte("[remote \"origin\"]\n\turl = https://token@example.test/repo.git\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	syncer, err := NewSyncer(
@@ -186,6 +201,7 @@ func TestScanLocalFilesIncludesBasenameNamedDescendantForNonRootMount(t *testing
 			WorkspaceID: "ws_scoped",
 			RemoteRoot:  "/notion/Docs",
 			LocalRoot:   localRoot,
+			ScopedChild: true,
 		},
 	)
 	if err != nil {
@@ -201,8 +217,79 @@ func TestScanLocalFilesIncludesBasenameNamedDescendantForNonRootMount(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := files["/notion/Docs/Docs/page.md"]; !ok {
-		t.Fatalf("basename-named descendant missing from scan: %#v", files)
+	for _, remotePath := range []string{
+		"/notion/Docs/Docs/page.md",
+		"/notion/Docs/digests/page.md",
+		"/notion/Docs/.skills/page.md",
+		"/notion/Docs/node_modules/page.md",
+		"/notion/Docs/_PERMISSIONS.md",
+	} {
+		if _, ok := files[remotePath]; !ok {
+			t.Fatalf("scoped provider descendant %s missing from scan: %#v", remotePath, files)
+		}
+	}
+	if _, ok := files["/notion/Docs/.git/config"]; ok {
+		t.Fatalf("local git metadata entered scoped provider scan: %#v", files)
+	}
+}
+
+func TestScanLocalFilesPreservesCaseDistinctTopLevelNames(t *testing.T) {
+	localRoot := t.TempDir()
+	for _, relativePath := range []string{
+		filepath.Join("Digests", "page.md"),
+		filepath.Join("NODE_MODULES", "package.json"),
+		filepath.Join(".Git", "config"),
+	} {
+		localPath := filepath.Join(localRoot, relativePath)
+		if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(localPath, []byte("provider content"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	syncer, err := NewSyncer(&fakeClient{}, SyncerOptions{
+		WorkspaceID: "ws_case_distinct",
+		RemoteRoot:  "/",
+		LocalRoot:   localRoot,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	files, err := syncer.scanLocalFiles()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, remotePath := range []string{"/Digests/page.md", "/NODE_MODULES/package.json", "/.Git/config"} {
+		if _, ok := files[remotePath]; !ok {
+			t.Fatalf("case-distinct provider path %s missing from scan: %#v", remotePath, files)
+		}
+	}
+}
+
+func TestScanLocalFilesKeepsGeneratedArtifactsReservedForExactSubtree(t *testing.T) {
+	localRoot := t.TempDir()
+	generatedPath := filepath.Join(localRoot, ".skills", "activity-summary.md")
+	if err := os.MkdirAll(filepath.Dir(generatedPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(generatedPath, []byte("generated skill"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	syncer, err := NewSyncer(&fakeClient{}, SyncerOptions{
+		WorkspaceID: "ws_exact_subtree",
+		RemoteRoot:  "/github",
+		LocalRoot:   localRoot,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	files, err := syncer.scanLocalFiles()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := files["/github/.skills/activity-summary.md"]; ok {
+		t.Fatalf("generated artifact entered exact-subtree scan: %#v", files)
 	}
 }
 

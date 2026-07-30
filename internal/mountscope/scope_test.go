@@ -15,6 +15,13 @@ func TestPlanRequiresScopedLayoutForMultiplePaths(t *testing.T) {
 	}
 }
 
+func TestPlanRejectsWorkspaceRootWithScopedLayout(t *testing.T) {
+	_, err := Plan(t.TempDir(), LayoutScoped, []string{"/"}, "/", "")
+	if err == nil || !strings.Contains(err.Error(), "has no isolated child root") || !strings.Contains(err.Error(), "--local-layout=exact") {
+		t.Fatalf("expected exact-layout guidance for scoped workspace root, got %v", err)
+	}
+}
+
 func TestPlanDeduplicatesAndScopesRemotePaths(t *testing.T) {
 	root := t.TempDir()
 	got, err := Plan(
@@ -87,6 +94,8 @@ func TestPlanRejectsScopedRootsThatOverlapReservedLocalPaths(t *testing.T) {
 func TestPlanRejectsScopedRootsContainingNestedRuntimeSegments(t *testing.T) {
 	root := t.TempDir()
 	for _, remotePath := range []string{
+		"/.relayfile-mount-state.json",
+		"/.relayfile-mount-state.json.tmp-123",
 		"/github/.relay/private",
 		"/github/.relayfile-mount-state.json",
 		"/github/.relayfile-mount-state.json.tmp-123",
@@ -158,5 +167,38 @@ func TestReadPathsFileNullEntryCannotWidenAllowlist(t *testing.T) {
 	}
 	if got, want := NormalizePaths(paths, "/"), []string{"/github"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("normalized JSON paths = %v, want %v", got, want)
+	}
+}
+
+func TestValidateEventProviderRejectsHeterogeneousRoots(t *testing.T) {
+	err := ValidateEventProvider([]string{"/github", "/slack/channels/project"}, "github")
+	if err == nil || !strings.Contains(err.Error(), "/slack/channels/project") || !strings.Contains(err.Error(), "omit --provider") {
+		t.Fatalf("ValidateEventProvider error = %v, want actionable heterogeneous-root refusal", err)
+	}
+	if err := ValidateEventProvider([]string{"/github/issues", "/github/repos"}, "github"); err != nil {
+		t.Fatalf("same-provider roots rejected: %v", err)
+	}
+	if err := ValidateEventProvider([]string{"/github", "/slack"}, ""); err != nil {
+		t.Fatalf("inferred per-scope providers rejected: %v", err)
+	}
+}
+
+func TestValidateExplicitPathsFileRejectsEmptyAllowlist(t *testing.T) {
+	for name, paths := range map[string][]string{
+		"empty": nil,
+		"blank": {"", "  "},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := ValidateExplicitPathsFile("/tmp/paths.json", paths, nil)
+			if err == nil || !strings.Contains(err.Error(), "refusing to widen") {
+				t.Fatalf("expected empty allowlist refusal, got %v", err)
+			}
+		})
+	}
+	if err := ValidateExplicitPathsFile("", nil, nil); err != nil {
+		t.Fatalf("absent paths file rejected: %v", err)
+	}
+	if err := ValidateExplicitPathsFile("/tmp/paths.json", nil, []string{"/github"}); err != nil {
+		t.Fatalf("direct root did not make empty companion file harmless: %v", err)
 	}
 }

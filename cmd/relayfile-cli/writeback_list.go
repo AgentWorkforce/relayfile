@@ -124,7 +124,7 @@ func readPendingWritebackItems(workspaceID, localDir string) ([]writebackListIte
 		return nil, fmt.Errorf("invalid mount state: %w", err)
 	}
 	remoteRoot := readMountRemoteRoot(localDir)
-	localHashes, err := localWritebackHashes(localDir, remoteRoot)
+	localHashes, err := localWritebackHashes(localDir, remoteRoot, false)
 	if err != nil {
 		return nil, err
 	}
@@ -177,7 +177,7 @@ func readPendingWritebackItems(workspaceID, localDir string) ([]writebackListIte
 	return items, nil
 }
 
-func localWritebackHashes(localDir, remoteRoot string) (map[string]string, error) {
+func localWritebackHashes(localDir, remoteRoot string, scopedChild bool) (map[string]string, error) {
 	hashes := map[string]string{}
 	err := filepath.WalkDir(localDir, func(path string, entry os.DirEntry, err error) error {
 		if err != nil {
@@ -189,14 +189,14 @@ func localWritebackHashes(localDir, remoteRoot string) (map[string]string, error
 		}
 		first := strings.SplitN(rel, string(os.PathSeparator), 2)[0]
 		if entry.IsDir() {
-			if first == entry.Name() && writebackListReservedTopLevel(first) {
+			if first == entry.Name() && writebackListReservedTopLevel(scopedChild, first) {
 				return filepath.SkipDir
 			}
 			return nil
 		}
 		if first == ".relayfile-mount-state.json" ||
 			strings.HasPrefix(first, ".relayfile-mount-state.json.tmp-") ||
-			writebackListReservedTopLevel(first) {
+			writebackListReservedTopLevel(scopedChild, first) {
 			return nil
 		}
 		info, err := entry.Info()
@@ -231,8 +231,11 @@ func remotePathForLocalRel(remoteRoot, rel string) string {
 	return normalizeWritebackListPath(strings.TrimRight(root, "/") + "/" + rel)
 }
 
-func writebackListReservedTopLevel(name string) bool {
-	return mountscope.IsReservedLocalTopLevel(name)
+func writebackListReservedTopLevel(scopedChild bool, name string) bool {
+	if mountscope.IsReservedRuntimeSegment(name) || name == mountscope.GitTopLevel {
+		return true
+	}
+	return !scopedChild && mountscope.IsReservedLocalTopLevel(name)
 }
 
 func hashLocalWritebackFile(path string) (string, error) {

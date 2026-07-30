@@ -65,6 +65,7 @@ type mountConfig struct {
 	memlogInterval        time.Duration
 	logHTTPStatus         bool
 	scopes                []string
+	scopedChild           bool
 	once                  bool
 	flushOutboxOnce       bool
 	pushLocalOnce         bool
@@ -143,6 +144,9 @@ func main() {
 	fileRemotePaths, err := mountscope.ReadPathsFile(*pathsFile)
 	if err != nil {
 		log.Fatalf("read paths-file: %v", err)
+	}
+	if err := mountscope.ValidateExplicitPathsFile(*pathsFile, fileRemotePaths, remotePaths.Values()); err != nil {
+		log.Fatalf("invalid paths-file: %v", err)
 	}
 	allRemotePaths := append(remotePaths.Values(), fileRemotePaths...)
 	*intervalJitter = clampJitterRatio(*intervalJitter)
@@ -293,12 +297,16 @@ func runScopedPollingMountsWithRunner(
 	if err != nil {
 		return err
 	}
+	if err := mountscope.ValidateEventProvider(remotePaths, cfg.eventProvider); err != nil {
+		return err
+	}
 	scopedMounts := make([]scopedMount, 0, len(plan))
 	for _, scope := range plan {
 		scoped := cfg
 		scoped.remotePath = scope.RemotePath
 		scoped.remotePaths = nil
 		scoped.localDir = scope.LocalDir
+		scoped.scopedChild = true
 		scoped.stateFile = cfg.stateFile
 		if err := os.MkdirAll(scoped.localDir, 0o755); err != nil {
 			return fmt.Errorf("create scoped local dir for %s: %w", scope.RemotePath, err)
@@ -353,6 +361,7 @@ func runSinglePollingMount(rootCtx context.Context, cfg mountConfig) error {
 		WorkspaceID:           cfg.workspaceID,
 		RemoteRoot:            cfg.remotePath,
 		EventProvider:         cfg.eventProvider,
+		ScopedChild:           cfg.scopedChild,
 		LocalRoot:             cfg.localDir,
 		StateFile:             cfg.stateFile,
 		StateDir:              cfg.stateDir,

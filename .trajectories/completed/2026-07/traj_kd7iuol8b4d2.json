@@ -1,0 +1,117 @@
+{
+  "id": "traj_kd7iuol8b4d2",
+  "version": 1,
+  "task": {
+    "title": "Reserve local Git metadata across scoped mount roots",
+    "source": {
+      "system": "plain",
+      "id": "relayfile#379"
+    }
+  },
+  "status": "completed",
+  "startedAt": "2026-07-30T08:05:17.369Z",
+  "completedAt": "2026-07-30T09:00:17.230Z",
+  "agents": [
+    {
+      "name": "default",
+      "role": "lead",
+      "joinedAt": "2026-07-30T08:05:17.462Z"
+    }
+  ],
+  "chapters": [
+    {
+      "id": "chap_6ooihj17sjrv",
+      "title": "Work",
+      "agentName": "default",
+      "startedAt": "2026-07-30T08:05:17.462Z",
+      "endedAt": "2026-07-30T09:00:17.230Z",
+      "events": [
+        {
+          "ts": 1785398717463,
+          "type": "decision",
+          "content": "Keep exact .git reserved at every Syncer topology boundary: Keep exact .git reserved at every Syncer topology boundary",
+          "raw": {
+            "question": "Keep exact .git reserved at every Syncer topology boundary",
+            "chosen": "Keep exact .git reserved at every Syncer topology boundary",
+            "alternatives": [],
+            "reasoning": "Provider-specific catalog names become valid content below non-root scopes, but local .git objects, indexes, configs, and remote credentials must never enter sync or writeback; case-distinct .Git remains valid on case-sensitive filesystems."
+          },
+          "significance": "high"
+        },
+        {
+          "ts": 1785399285226,
+          "type": "decision",
+          "content": "Carry scoped-child topology explicitly into Syncer and watcher: Carry scoped-child topology explicitly into Syncer and watcher",
+          "raw": {
+            "question": "Carry scoped-child topology explicitly into Syncer and watcher",
+            "chosen": "Carry scoped-child topology explicitly into Syncer and watcher",
+            "alternatives": [],
+            "reasoning": "RemoteRoot cannot distinguish an exact non-root mount from a scoped child: exact mounts reserve generated catalog artifacts, while scoped children may contain the same names as provider data. An explicit topology bit makes the two states unambiguous."
+          },
+          "significance": "high"
+        },
+        {
+          "ts": 1785399285289,
+          "type": "decision",
+          "content": "Reject heterogeneous multi-root mounts with one explicit provider filter: Reject heterogeneous multi-root mounts with one explicit provider filter",
+          "raw": {
+            "question": "Reject heterogeneous multi-root mounts with one explicit provider filter",
+            "chosen": "Reject heterogeneous multi-root mounts with one explicit provider filter",
+            "alternatives": [],
+            "reasoning": "A blank filter lets each Syncer infer its provider; applying one explicit filter across other providers makes those scopes permanently stale, so refusal is safer than partial success."
+          },
+          "significance": "high"
+        },
+        {
+          "ts": 1785399756748,
+          "type": "decision",
+          "content": "Clean only provably generated catalog artifacts before scoped mount: Clean only provably generated catalog artifacts before scoped mount",
+          "raw": {
+            "question": "Clean only provably generated catalog artifacts before scoped mount",
+            "chosen": "Clean only provably generated catalog artifacts before scoped mount",
+            "alternatives": [],
+            "reasoning": "Setup can pre-create global digests and the activity-summary skill. Scoped mounts must not display them, but unknown or modified content cannot be deleted safely; validate the full trees first, remove only the exact generated skill and empty directories, otherwise refuse with --rehome guidance."
+          },
+          "significance": "high"
+        },
+        {
+          "ts": 1785401343992,
+          "type": "decision",
+          "content": "Reject workspace root with scoped layout: Reject workspace root with scoped layout",
+          "raw": {
+            "question": "Reject workspace root with scoped layout",
+            "chosen": "Reject workspace root with scoped layout",
+            "alternatives": [],
+            "reasoning": "The workspace root has no isolated child directory; treating it as ScopedChild removes catalog artifacts and relaxes exact-root reservations at the same filesystem root. Exact layout is the only honest topology for /."
+          },
+          "significance": "high"
+        },
+        {
+          "ts": 1785401712457,
+          "type": "decision",
+          "content": "Give CLI and standalone daemon one explicit-empty paths-file guard: Give CLI and standalone daemon one explicit-empty paths-file guard",
+          "raw": {
+            "question": "Give CLI and standalone daemon one explicit-empty paths-file guard",
+            "chosen": "Give CLI and standalone daemon one explicit-empty paths-file guard",
+            "alternatives": [],
+            "reasoning": "Both binaries normalize an absent allowlist to /, so a configured file with zero usable roots must be distinguished before fallback. Centralizing the guard in mountscope prevents either entry point from silently widening."
+          },
+          "significance": "high"
+        }
+      ]
+    }
+  ],
+  "retrospective": {
+    "summary": "Closed scoped mount topology boundaries: explicit collision/runtime identities, immutable background allowlists, exact-vs-scoped artifact handling, provider-filter validation, setup artifact migration, and shared empty allowlist refusal",
+    "approach": "Standard approach",
+    "confidence": 0.94
+  },
+  "commits": [],
+  "filesChanged": [],
+  "projectId": "AgentWorkforce/relayfile",
+  "tags": [],
+  "_trace": {
+    "startRef": "7f1271e4e6e0d71e37db32b76c78bf4f7184186f",
+    "endRef": "7f1271e4e6e0d71e37db32b76c78bf4f7184186f"
+  }
+}

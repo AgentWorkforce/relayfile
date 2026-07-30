@@ -23,17 +23,26 @@ const (
 	PermissionsFile     = "_PERMISSIONS.md"
 )
 
+var reservedLocalTopLevelNames = []string{
+	RuntimeTopLevel,
+	SkillsTopLevel,
+	DigestsTopLevel,
+	GitTopLevel,
+	NodeModulesTopLevel,
+	PermissionsFile,
+}
+
 var reservedLocalTopLevels = func() map[string]struct{} {
-	names := []string{
-		RuntimeTopLevel,
-		SkillsTopLevel,
-		DigestsTopLevel,
-		GitTopLevel,
-		NodeModulesTopLevel,
-		PermissionsFile,
+	out := make(map[string]struct{}, len(reservedLocalTopLevelNames))
+	for _, name := range reservedLocalTopLevelNames {
+		out[name] = struct{}{}
 	}
-	out := make(map[string]struct{}, len(names))
-	for _, name := range names {
+	return out
+}()
+
+var reservedLocalTopLevelIdentities = func() map[string]struct{} {
+	out := make(map[string]struct{}, len(reservedLocalTopLevelNames))
+	for _, name := range reservedLocalTopLevelNames {
 		out[localPathIdentity(name)] = struct{}{}
 	}
 	return out
@@ -162,6 +171,51 @@ func FirstPath(paths []string, fallback string) string {
 	return NormalizePaths(paths, fallback)[0]
 }
 
+// ValidateEventProvider ensures one explicit provider filter can observe every
+// configured root. A blank filter lets each Syncer infer its provider from its
+// own root. A single root may intentionally use any server-supported filter,
+// but a multi-root mount must not silently apply one provider to another
+// provider's event feed.
+func ValidateEventProvider(paths []string, provider string) error {
+	normalized := NormalizePaths(paths, "/")
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if provider == "" || len(normalized) <= 1 {
+		return nil
+	}
+	for _, remotePath := range normalized {
+		segment := strings.TrimPrefix(remotePath, "/")
+		if i := strings.IndexByte(segment, '/'); i >= 0 {
+			segment = segment[:i]
+		}
+		if strings.ToLower(strings.TrimSpace(segment)) != provider {
+			return fmt.Errorf(
+				"--provider %s cannot filter multi-root mount containing %s; omit --provider so each scoped Syncer infers its own provider",
+				provider,
+				remotePath,
+			)
+		}
+	}
+	return nil
+}
+
+// ValidateExplicitPathsFile distinguishes an absent paths file from an
+// explicitly configured file that contains no usable roots. The latter is an
+// empty allowlist and must never fall through to the historical "/" fallback.
+func ValidateExplicitPathsFile(pathsFile string, filePaths, directPaths []string) error {
+	if strings.TrimSpace(pathsFile) == "" || len(directPaths) > 0 {
+		return nil
+	}
+	for _, remotePath := range filePaths {
+		if strings.TrimSpace(remotePath) != "" {
+			return nil
+		}
+	}
+	return fmt.Errorf(
+		"paths-file %s contains no usable remote roots; refusing to widen an explicit empty allowlist to /",
+		pathsFile,
+	)
+}
+
 // NormalizePath converts a remote path to a cleaned absolute slash path.
 func NormalizePath(remotePath string) string {
 	trimmed := strings.TrimSpace(remotePath)
@@ -228,9 +282,16 @@ func Plan(localRoot, layout string, paths []string, fallback, stateFile string) 
 	for _, remotePath := range normalized {
 		localDir := localRoot
 		if resolvedLayout == LayoutScoped {
+			if remotePath == "/" {
+				return nil, fmt.Errorf(
+					"workspace root / cannot use --local-layout=%s because it has no isolated child root; use --local-layout=%s",
+					LayoutScoped,
+					LayoutExact,
+				)
+			}
 			segments := strings.Split(strings.TrimPrefix(remotePath, "/"), "/")
 			firstSegment := segments[0]
-			if IsReservedLocalTopLevel(firstSegment) {
+			if IsReservedLocalTopLevelIdentity(firstSegment) {
 				return nil, fmt.Errorf(
 					"scoped remote root %s overlaps reserved local path %s; choose a non-reserved remote root or use --local-layout=%s for a single path",
 					remotePath,
@@ -238,7 +299,7 @@ func Plan(localRoot, layout string, paths []string, fallback, stateFile string) 
 					LayoutExact,
 				)
 			}
-			for _, segment := range segments[1:] {
+			for _, segment := range segments {
 				if IsReservedRuntimeSegment(segment) {
 					return nil, fmt.Errorf(
 						"scoped remote root %s contains reserved mount runtime segment %s; choose a remote root outside mount runtime state",
@@ -257,12 +318,21 @@ func Plan(localRoot, layout string, paths []string, fallback, stateFile string) 
 	return scopes, nil
 }
 
-// IsReservedLocalTopLevel reports whether a root-level name belongs to
-// Relayfile bookkeeping or a host tool tree that a mirror must not interpret
-// as provider content. It is the shared owner for mount planning, filesystem
-// watching, and writeback scans so those boundaries cannot drift.
+// IsReservedLocalTopLevel reports whether an exact root-level name belongs to
+// Relayfile bookkeeping or a host tool tree. Runtime consumers use exact
+// matching so case-distinct provider paths remain valid on case-sensitive
+// filesystems.
 func IsReservedLocalTopLevel(name string) bool {
-	_, ok := reservedLocalTopLevels[localPathIdentity(name)]
+	_, ok := reservedLocalTopLevels[strings.TrimSpace(filepath.ToSlash(name))]
+	return ok
+}
+
+// IsReservedLocalTopLevelIdentity reports whether a name would collide with a
+// reserved top-level path on case- or normalization-insensitive filesystems.
+// Mount planning uses this conservative identity check before it creates a
+// scoped local path.
+func IsReservedLocalTopLevelIdentity(name string) bool {
+	_, ok := reservedLocalTopLevelIdentities[localPathIdentity(name)]
 	return ok
 }
 
