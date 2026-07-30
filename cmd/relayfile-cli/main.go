@@ -491,6 +491,7 @@ type relayIntegrationBindingStore struct {
 
 type daemonPIDState struct {
 	PID         int    `json:"pid"`
+	Registered  bool   `json:"registered,omitempty"`
 	WorkspaceID string `json:"workspaceId"`
 	LocalDir    string `json:"localDir"`
 	LogFile     string `json:"logFile"`
@@ -6807,6 +6808,7 @@ func runMount(args []string) error {
 	if registerPID {
 		if err := writeDaemonPIDState(pidFile, daemonPIDState{
 			PID:         os.Getpid(),
+			Registered:  true,
 			WorkspaceID: workspaceID,
 			LocalDir:    absLocalDir,
 			LogFile:     logFile,
@@ -12576,10 +12578,10 @@ func spawnBackgroundMountProcess(originalArgs, resolvedRemotePaths []string, loc
 		return fmt.Errorf("record background mount process %d before registration: %w", childPID, err)
 	}
 	if err := waitForBackgroundMountRegistration(pidFile, localDir, childPID, childExited, 10*time.Second); err != nil {
-		select {
-		case <-childExited:
-			_ = os.Remove(pidFile)
-		default:
+		if !processAlive(childPID) {
+			if state, structured := readDaemonPIDStateFile(pidFile); structured && state.PID == childPID {
+				_ = os.Remove(pidFile)
+			}
 		}
 		return err
 	}
@@ -12603,7 +12605,6 @@ func writeDaemonPIDStateIfAbsent(path string, state daemonPIDState) error {
 		}
 		return err
 	}
-	defer file.Close()
 	if _, err := file.Write(payload); err != nil {
 		_ = os.Remove(path)
 		return err
@@ -12619,7 +12620,7 @@ func waitForBackgroundMountRegistration(pidFile, localDir string, childPID int, 
 	slowNoticeLogged := false
 	for {
 		state, structured := readDaemonPIDStateFile(pidFile)
-		if structured && state.PID == childPID {
+		if structured && state.Registered && state.PID == childPID {
 			return nil
 		}
 		select {

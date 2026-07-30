@@ -124,8 +124,9 @@ func TestWaitForBackgroundMountRegistrationUsesConfiguredPIDFile(t *testing.T) {
 	customPIDFile := filepath.Join(t.TempDir(), "custom", "relayfile.pid")
 	const childPID = 4242
 	if err := writeDaemonPIDState(customPIDFile, daemonPIDState{
-		PID:      childPID,
-		LocalDir: localDir,
+		PID:        childPID,
+		Registered: true,
+		LocalDir:   localDir,
 	}); err != nil {
 		t.Fatalf("write custom daemon PID state: %v", err)
 	}
@@ -157,8 +158,9 @@ func TestWaitForBackgroundMountRegistrationKeepsWaitingForLiveChild(t *testing.T
 	go func() {
 		time.Sleep(100 * time.Millisecond)
 		writeErr <- writeDaemonPIDState(customPIDFile, daemonPIDState{
-			PID:      cmd.Process.Pid,
-			LocalDir: localDir,
+			PID:        cmd.Process.Pid,
+			Registered: true,
+			LocalDir:   localDir,
 		})
 	}()
 
@@ -223,12 +225,17 @@ func TestWaitForBackgroundMountRegistrationBoundsLiveUnregisteredChild(t *testin
 }
 
 func TestBackgroundMountProvisionalPIDStateBlocksCompetingStart(t *testing.T) {
+	oldTimeout := backgroundMountRegistrationTimeout
+	backgroundMountRegistrationTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { backgroundMountRegistrationTimeout = oldTimeout })
 	localDir := t.TempDir()
 	cmd := exec.Command("sleep", "2")
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+	childExited := make(chan error, 1)
+	go func() { childExited <- cmd.Wait() }()
+	t.Cleanup(func() { _ = cmd.Process.Kill(); <-childExited })
 
 	executable := cmd.Path
 	if resolved, err := filepath.EvalSymlinks(executable); err == nil {
@@ -251,6 +258,10 @@ func TestBackgroundMountProvisionalPIDStateBlocksCompetingStart(t *testing.T) {
 	pid, verified := verifyDaemonProcess(localDir, "")
 	if !verified || pid != cmd.Process.Pid {
 		t.Fatalf("provisional daemon state was not authoritative: pid=%d verified=%v", pid, verified)
+	}
+	err := waitForBackgroundMountRegistration(pidFile, localDir, cmd.Process.Pid, childExited, 0)
+	if err == nil || !strings.Contains(err.Error(), "did not register daemon state") {
+		t.Fatalf("provisional state incorrectly counted as registration: %v", err)
 	}
 }
 
