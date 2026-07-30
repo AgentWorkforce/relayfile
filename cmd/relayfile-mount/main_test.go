@@ -208,6 +208,16 @@ func TestResolveLocalLayout(t *testing.T) {
 	}
 }
 
+func TestValidateCLIRequestedLocalLayoutRefusesScopedUntilOperatorSurfacesReady(t *testing.T) {
+	if err := validateCLIRequestedLocalLayout(localLayoutExact); err != nil {
+		t.Fatalf("exact layout should remain available: %v", err)
+	}
+	err := validateCLIRequestedLocalLayout(localLayoutScoped)
+	if err == nil || !strings.Contains(err.Error(), "operator surfaces") || !strings.Contains(err.Error(), "--local-layout=exact") {
+		t.Fatalf("expected scoped-layout refusal with exact-layout remedy, got %v", err)
+	}
+}
+
 func TestResolveSyncMode(t *testing.T) {
 	tests := []struct {
 		name    string

@@ -158,6 +158,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("invalid local layout: %v", err)
 	}
+	if err := validateCLIRequestedLocalLayout(resolvedLocalLayout); err != nil {
+		log.Fatalf("unsupported local layout: %v", err)
+	}
 	resolvedSyncMode, err := resolveSyncMode(*syncModeFlag)
 	if err != nil {
 		log.Fatalf("invalid sync mode: %v", err)
@@ -227,6 +230,16 @@ func resolveMountMode(mode string, fuse bool) (string, error) {
 
 func resolveLocalLayout(layout string) (string, error) {
 	return mountscope.ResolveLayout(layout)
+}
+
+// Scoped runtime state is implemented below this CLI boundary, but its
+// operator surfaces are not yet complete. Refuse the user-facing capability
+// until status/list/retry can see every scoped child state location.
+func validateCLIRequestedLocalLayout(layout string) error {
+	if layout == localLayoutScoped {
+		return fmt.Errorf("--local-layout=%s is temporarily unavailable until scoped operator surfaces are ready; use --local-layout=%s", localLayoutScoped, localLayoutExact)
+	}
+	return nil
 }
 
 func resolveSyncMode(mode string) (string, error) {
