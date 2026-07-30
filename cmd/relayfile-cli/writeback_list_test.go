@@ -27,10 +27,6 @@ func TestListWorkspaceWritebackItemsAggregatesScopedChildren(t *testing.T) {
 		if err := os.MkdirAll(filepath.Join(relayDir, "dead-letter"), 0o755); err != nil {
 			t.Fatal(err)
 		}
-		state := `{"remoteRoot":"` + scope.RemotePath + `"}`
-		if err := os.WriteFile(filepath.Join(relayDir, "state.json"), []byte(state), 0o644); err != nil {
-			t.Fatal(err)
-		}
 		stateFile, err := workspaceMountStateFile("ws_demo", record, scope)
 		if err != nil {
 			t.Fatal(err)
@@ -40,6 +36,9 @@ func TestListWorkspaceWritebackItemsAggregatesScopedChildren(t *testing.T) {
 		}
 		tracked := `{"files":{"` + scope.RemotePath + `/draft.md":{"dirty":true}}}`
 		if err := os.WriteFile(stateFile, []byte(tracked), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(scope.LocalDir, "draft.md"), []byte("local draft"), 0o644); err != nil {
 			t.Fatal(err)
 		}
 		dead := `{"opId":"op_` + scope.RemotePath[1:] + `","path":"` + scope.RemotePath + `/failed.md"}`

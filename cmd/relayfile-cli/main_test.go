@@ -5168,9 +5168,14 @@ func TestScopedWorkspaceConsumersAggregateChildRuntimeState(t *testing.T) {
 		if err := os.MkdirAll(filepath.Dir(stateFile), 0o755); err != nil {
 			t.Fatal(err)
 		}
+		pendingField := `"dirty":true`
+		if index == 1 {
+			pendingField = `"deletePending":true`
+		}
 		privateState := fmt.Sprintf(
-			`{"files":{"%s/pending.md":{"dirty":true}},"incrementalReadNotReadySince":{"private":"now"}}`,
+			`{"files":{"%s/pending.md":{%s}},"incrementalReadNotReadySince":{"private":"now"}}`,
 			scope.RemotePath,
+			pendingField,
 		)
 		if err := os.WriteFile(stateFile, []byte(privateState), 0o644); err != nil {
 			t.Fatal(err)
@@ -7123,8 +7128,9 @@ func TestIntegrationAdoptClearsDisconnectMarker(t *testing.T) {
 func TestMarkProviderDisconnectedPreservesScopedRuntimeState(t *testing.T) {
 	localRoot := t.TempDir()
 	record := workspaceRecord{
-		LocalDir:    localRoot,
-		LocalLayout: mountscope.LayoutScoped,
+		LocalDir:      localRoot,
+		LocalLayout:   mountscope.LayoutScoped,
+		MountStateDir: t.TempDir(),
 		RemotePaths: []string{
 			"/github/repos/acme",
 			"/slack/channels/project",
@@ -7191,24 +7197,28 @@ func TestIntegrationDisconnectRefusesBeforeCloudMutationWhenScopedStateIsPending
 	record, localRoot := setupAdoptWorkspace(t)
 	record.LocalLayout = mountscope.LayoutScoped
 	record.RemotePaths = []string{"/github/repos/acme"}
+	record.MountStateDir = t.TempDir()
+	record.mountStateSet = true
 	if _, err := upsertWorkspaceDetails(record); err != nil {
 		t.Fatalf("persist scoped workspace: %v", err)
 	}
 	githubScope := mountscope.LocalDir(localRoot, "/github/repos/acme")
 	githubMirror := filepath.Join(githubScope, "README.md")
-	githubOutbox := filepath.Join(githubScope, ".relay", "outbox", "pending", "queued.json")
-	githubConflict := filepath.Join(githubScope, ".relay", "conflicts", "README.md.local")
-	for path, content := range map[string]string{
-		githubMirror:   "mirrored",
-		githubOutbox:   "queued",
-		githubConflict: "unresolved",
-	} {
-		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-			t.Fatalf("mkdir %s: %v", filepath.Dir(path), err)
-		}
-		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-			t.Fatalf("write %s: %v", path, err)
-		}
+	if err := os.MkdirAll(filepath.Dir(githubMirror), 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", filepath.Dir(githubMirror), err)
+	}
+	if err := os.WriteFile(githubMirror, []byte("mirrored"), 0o644); err != nil {
+		t.Fatalf("write %s: %v", githubMirror, err)
+	}
+	stateFile, err := workspaceMountStateFile("ws_123", record, workspaceMountScopes(record)[0])
+	if err != nil {
+		t.Fatalf("resolve private state: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(stateFile), 0o755); err != nil {
+		t.Fatalf("mkdir private state: %v", err)
+	}
+	if err := os.WriteFile(stateFile, []byte(`{"files":{"/github/repos/acme/README.md":{"dirty":true},"/github/repos/acme/removed.md":{"deletePending":true}}}`), 0o644); err != nil {
+		t.Fatalf("write private state: %v", err)
 	}
 
 	requests := 0
@@ -7217,18 +7227,18 @@ func TestIntegrationDisconnectRefusesBeforeCloudMutationWhenScopedStateIsPending
 		t.Fatalf("refused disconnect reached Cloud: %s %s", r.Method, r.URL.Path)
 	}))
 	defer server.Close()
-	err := runIntegrationDisconnect(
+	err = runIntegrationDisconnect(
 		[]string{"github", "--workspace", "demo", "--yes", "--cloud-api-url", server.URL},
 		strings.NewReader(""),
 		io.Discard,
 	)
-	if err == nil || !strings.Contains(err.Error(), "outbox=1") || !strings.Contains(err.Error(), "conflicts=1") {
-		t.Fatalf("expected pending-state refusal, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "privatePending=2") {
+		t.Fatalf("expected private pending-state refusal, got %v", err)
 	}
 	if requests != 0 {
 		t.Fatalf("Cloud requests = %d, want 0", requests)
 	}
-	for _, path := range []string{githubMirror, githubOutbox, githubConflict} {
+	for _, path := range []string{githubMirror, stateFile} {
 		if _, err := os.Stat(path); err != nil {
 			t.Fatalf("expected refused disconnect to preserve %s: %v", path, err)
 		}

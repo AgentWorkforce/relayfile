@@ -84,7 +84,7 @@ func listWorkspaceWritebackItems(workspaceID string, record workspaceRecord, sta
 			if err != nil {
 				return nil, err
 			}
-			items, err := readPendingWritebackItemsFromState(workspaceID, scope.LocalDir, stateFile)
+			items, err := readPendingWritebackItemsFromState(workspaceID, scope.LocalDir, scope.RemotePath, stateFile)
 			if err != nil {
 				return nil, err
 			}
@@ -143,11 +143,12 @@ func readPendingWritebackItems(workspaceID, localDir string) ([]writebackListIte
 	return readPendingWritebackItemsFromState(
 		workspaceID,
 		localDir,
+		readMountRemoteRoot(localDir),
 		filepath.Join(localDir, ".relayfile-mount-state.json"),
 	)
 }
 
-func readPendingWritebackItemsFromState(workspaceID, localDir, stateFile string) ([]writebackListItem, error) {
+func readPendingWritebackItemsFromState(workspaceID, localDir, remoteRoot, stateFile string) ([]writebackListItem, error) {
 	var state struct {
 		Files map[string]struct {
 			Revision    string `json:"revision"`
@@ -168,7 +169,6 @@ func readPendingWritebackItemsFromState(workspaceID, localDir, stateFile string)
 	if err := json.Unmarshal(payload, &state); err != nil {
 		return nil, fmt.Errorf("invalid mount state: %w", err)
 	}
-	remoteRoot := readMountRemoteRoot(localDir)
 	localHashes, err := localWritebackHashes(localDir, remoteRoot)
 	if err != nil {
 		return nil, err
