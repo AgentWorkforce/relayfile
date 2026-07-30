@@ -113,6 +113,13 @@
       "startedAt": "2026-07-30T05:32:48.408Z",
       "completedAt": "2026-07-30T05:34:52.700Z",
       "path": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-c/.trajectories/completed/2026-07/traj_fs8p6efpfqtt.json"
+    },
+    "traj_0rjz89laoif3": {
+      "title": "Read scoped writeback status from private state",
+      "status": "completed",
+      "startedAt": "2026-07-30T05:43:10.555Z",
+      "completedAt": "2026-07-30T05:43:18.024Z",
+      "path": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-c/.trajectories/completed/2026-07/traj_0rjz89laoif3.json"
     }
   }
 }

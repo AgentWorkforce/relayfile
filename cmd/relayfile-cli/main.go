@@ -5234,12 +5234,16 @@ func buildWritebackStatusReport(workspaceID string, workspace workspaceRecord) (
 		return report, nil
 	}
 
-	for _, localDir := range workspaceRuntimeStateDirs(workspace) {
-		state, err := readWritebackState(localDir)
+	for _, scope := range workspaceMountScopes(workspace) {
+		state, err := readWritebackState(scope.LocalDir)
 		if err != nil {
 			return writebackStatusReport{}, err
 		}
-		report.Pending += state.PendingWriteback
+		stateFile, err := workspaceMountStateFile(workspaceID, workspace, scope)
+		if err != nil {
+			return writebackStatusReport{}, err
+		}
+		report.Pending += countDirtyTrackedFilesAt(stateFile)
 		report.Failed += state.FailedWritebacks
 		for _, provider := range state.Providers {
 			name := strings.TrimSpace(provider.Provider)

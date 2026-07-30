@@ -5144,8 +5144,7 @@ func TestScopedWorkspaceConsumersAggregateChildRuntimeState(t *testing.T) {
 			t.Fatal(err)
 		}
 		state := fmt.Sprintf(
-			`{"status":"scope-%d","lastReconcileAt":"2026-07-30T03:0%d:00Z","pendingWriteback":%d,"failedWritebacks":%d,"stallReason":"scope-%d stalled","incrementalReadNotReadySince":{"event":"now"},"bootstrap":{"phase":"pull","filesSynced":%d,"filesTotal":10}}`,
-			index+1,
+			`{"status":"scope-%d","lastReconcileAt":"2026-07-30T03:0%d:00Z","pendingWriteback":99,"failedWritebacks":%d,"stallReason":"scope-%d stalled","incrementalReadNotReadySince":{"event":"now"},"bootstrap":{"phase":"pull","filesSynced":%d,"filesTotal":10}}`,
 			index+1,
 			index+1,
 			index+3,
@@ -5199,8 +5198,8 @@ func TestScopedWorkspaceConsumersAggregateChildRuntimeState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if writeback.Pending != 3 || writeback.Failed != 7 || len(writeback.DeadLettered) != 2 {
-		t.Fatalf("scoped writeback report = %#v, want pending=3 failed=7 dead-lettered=2", writeback)
+	if writeback.Pending != 2 || writeback.Failed != 7 || len(writeback.DeadLettered) != 2 {
+		t.Fatalf("scoped writeback report = %#v, want private pending=2 failed=7 dead-lettered=2", writeback)
 	}
 
 	snapshot := buildWorkspaceSyncStateSnapshot(syncStatusResponse{}, "ws_demo", record)
