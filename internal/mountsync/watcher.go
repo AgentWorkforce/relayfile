@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/agentworkforce/relayfile/internal/mountscope"
 	"github.com/fsnotify/fsnotify"
 )
 
@@ -137,9 +138,7 @@ func (fw *FileWatcher) shouldSkip(rel string) bool {
 // top-level entries, including files such as _PERMISSIONS.md; addDirRecursive
 // is directory-only and skips a different sentinel for the mount state file.
 func reservedTopLevel(name string) bool {
-	return name == ".git" || name == ".relay" || name == ".skills" ||
-		name == "digests" || name == "node_modules" ||
-		name == "_PERMISSIONS.md"
+	return mountscope.IsReservedLocalTopLevel(name)
 }
 
 func (fw *FileWatcher) queueChange(rel string, op fsnotify.Op) {

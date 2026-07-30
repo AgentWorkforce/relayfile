@@ -1,0 +1,101 @@
+{
+  "id": "traj_uymnrxehl9bf",
+  "version": 1,
+  "task": {
+    "title": "Address Unit B exact GitHub review findings",
+    "source": {
+      "system": "plain",
+      "id": "relayfile#379"
+    }
+  },
+  "status": "completed",
+  "startedAt": "2026-07-30T06:22:14.368Z",
+  "completedAt": "2026-07-30T06:34:46.195Z",
+  "agents": [
+    {
+      "name": "default",
+      "role": "lead",
+      "joinedAt": "2026-07-30T06:28:14.607Z"
+    }
+  ],
+  "chapters": [
+    {
+      "id": "chap_5du6lijid3ba",
+      "title": "Work",
+      "agentName": "default",
+      "startedAt": "2026-07-30T06:28:14.607Z",
+      "endedAt": "2026-07-30T06:34:46.195Z",
+      "events": [
+        {
+          "ts": 1785392894608,
+          "type": "decision",
+          "content": "Compare mount transition roots by filesystem identity: Compare mount transition roots by filesystem identity",
+          "raw": {
+            "question": "Compare mount transition roots by filesystem identity",
+            "chosen": "Compare mount transition roots by filesystem identity",
+            "alternatives": [],
+            "reasoning": "Path spelling is not identity on symlinked, case-insensitive, or normalization-insensitive filesystems; refusing only exact spellings lets in-place scope and layout transitions bypass the rehome boundary."
+          },
+          "significance": "high"
+        },
+        {
+          "ts": 1785392894669,
+          "type": "decision",
+          "content": "Derive local reserved-root checks from one mountscope owner: Derive local reserved-root checks from one mountscope owner",
+          "raw": {
+            "question": "Derive local reserved-root checks from one mountscope owner",
+            "chosen": "Derive local reserved-root checks from one mountscope owner",
+            "alternatives": [],
+            "reasoning": "Mount planning, filesystem watching, and writeback scans were three handwritten copies of a security boundary. Shared constants plus one Unicode case-folded NFC identity predicate keep runtime directories and ignored local trees aligned."
+          },
+          "significance": "high"
+        },
+        {
+          "ts": 1785392894731,
+          "type": "decision",
+          "content": "Do not auto-pull workspace-global digests across a scoped allowlist: Do not auto-pull workspace-global digests across a scoped allowlist",
+          "raw": {
+            "question": "Do not auto-pull workspace-global digests across a scoped allowlist",
+            "chosen": "Do not auto-pull workspace-global digests across a scoped allowlist",
+            "alternatives": [],
+            "reasoning": "Canonical digests can contain events from providers outside the requested roots. A common-root digest sync would make a scoped mount disclose out-of-allowlist summaries; honest absence or explicit opt-in is safer than hidden widening."
+          },
+          "significance": "high"
+        },
+        {
+          "ts": 1785393286130,
+          "type": "reflection",
+          "content": "The exact-head review produced a bounded five-part correction: topology changes now compare filesystem identity, one-shot mounts cannot race a daemon, legacy private state cannot be missed when its remote root is unknowable, reserved local roots have one Unicode-aware owner, and scoped topology withdraws the false digest-currency promise. Full Go validation is green.",
+          "raw": {
+            "focalPoints": [
+              "review-convergence",
+              "scope-boundary",
+              "fail-closed"
+            ],
+            "confidence": 0.9
+          },
+          "significance": "high",
+          "tags": [
+            "focal:review-convergence",
+            "focal:scope-boundary",
+            "focal:fail-closed",
+            "confidence:0.9"
+          ]
+        }
+      ]
+    }
+  ],
+  "retrospective": {
+    "summary": "Closed Unit B exact-head findings with filesystem-identity transition guards, comprehensive legacy private-state detection, one-shot competing-daemon refusal, a shared Unicode-aware reserved-root boundary, and honest scoped digest absence; full contract, vet, and Go tests pass.",
+    "approach": "Standard approach",
+    "confidence": 0.9
+  },
+  "commits": [],
+  "filesChanged": [],
+  "projectId": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-b",
+  "tags": [],
+  "_trace": {
+    "startRef": "27599fd2445eb0565ecbd0fe102475fa19143cc3",
+    "endRef": "27599fd2445eb0565ecbd0fe102475fa19143cc3"
+  }
+}

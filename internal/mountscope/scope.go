@@ -6,20 +6,38 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"golang.org/x/text/cases"
+	"golang.org/x/text/unicode/norm"
 )
 
 const (
 	LayoutExact  = "exact"
 	LayoutScoped = "scoped"
+
+	RuntimeTopLevel     = ".relay"
+	SkillsTopLevel      = ".skills"
+	DigestsTopLevel     = "digests"
+	GitTopLevel         = ".git"
+	NodeModulesTopLevel = "node_modules"
+	PermissionsFile     = "_PERMISSIONS.md"
 )
 
-var reservedScopedLocalTopLevels = map[string]struct{}{
-	".git":         {},
-	".relay":       {},
-	".skills":      {},
-	"digests":      {},
-	"node_modules": {},
-}
+var reservedLocalTopLevels = func() map[string]struct{} {
+	names := []string{
+		RuntimeTopLevel,
+		SkillsTopLevel,
+		DigestsTopLevel,
+		GitTopLevel,
+		NodeModulesTopLevel,
+		PermissionsFile,
+	}
+	out := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		out[localPathIdentity(name)] = struct{}{}
+	}
+	return out
+}()
 
 // StringListFlag preserves every occurrence of a repeatable string flag.
 type StringListFlag []string
@@ -191,11 +209,11 @@ func Plan(localRoot, layout string, paths []string, fallback, stateFile string) 
 	if resolvedLayout == LayoutScoped {
 		for i, left := range normalized {
 			for _, right := range normalized[i+1:] {
-				foldedLeft := strings.ToLower(left)
-				foldedRight := strings.ToLower(right)
+				foldedLeft := localPathIdentity(left)
+				foldedRight := localPathIdentity(right)
 				if IsWithin(foldedLeft, foldedRight) || IsWithin(foldedRight, foldedLeft) {
 					return nil, fmt.Errorf(
-						"scoped remote roots %s and %s overlap on case-insensitive filesystems; choose roots with distinct case-folded paths",
+						"scoped remote roots %s and %s overlap on case- or normalization-insensitive filesystems; choose roots with distinct local path identities",
 						left,
 						right,
 					)
@@ -211,7 +229,7 @@ func Plan(localRoot, layout string, paths []string, fallback, stateFile string) 
 		localDir := localRoot
 		if resolvedLayout == LayoutScoped {
 			firstSegment := strings.SplitN(strings.TrimPrefix(remotePath, "/"), "/", 2)[0]
-			if _, reserved := reservedScopedLocalTopLevels[strings.ToLower(firstSegment)]; reserved {
+			if IsReservedLocalTopLevel(firstSegment) {
 				return nil, fmt.Errorf(
 					"scoped remote root %s overlaps reserved local path %s; choose a non-reserved remote root or use --local-layout=%s for a single path",
 					remotePath,
@@ -227,4 +245,21 @@ func Plan(localRoot, layout string, paths []string, fallback, stateFile string) 
 		})
 	}
 	return scopes, nil
+}
+
+// IsReservedLocalTopLevel reports whether a root-level name belongs to
+// Relayfile bookkeeping or a host tool tree that a mirror must not interpret
+// as provider content. It is the shared owner for mount planning, filesystem
+// watching, and writeback scans so those boundaries cannot drift.
+func IsReservedLocalTopLevel(name string) bool {
+	_, ok := reservedLocalTopLevels[localPathIdentity(name)]
+	return ok
+}
+
+// localPathIdentity models the equality rules that can collapse distinct
+// remote spellings onto one local directory on common filesystems. It does
+// not rewrite the remote path; it exists only for collision and reservation
+// checks at the remote-to-local boundary.
+func localPathIdentity(value string) string {
+	return cases.Fold().String(norm.NFC.String(strings.TrimSpace(filepath.ToSlash(value))))
 }

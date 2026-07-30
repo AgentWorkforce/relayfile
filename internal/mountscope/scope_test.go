@@ -68,7 +68,7 @@ func TestPlanRejectsSharedStateFile(t *testing.T) {
 
 func TestPlanRejectsScopedRootsThatOverlapReservedLocalPaths(t *testing.T) {
 	root := t.TempDir()
-	for _, remotePath := range []string{"/.git/config", "/.Relay", "/.skills/tools", "/Digests", "/NODE_MODULES/pkg"} {
+	for _, remotePath := range []string{"/.git/config", "/.Relay", "/.skills/tools", "/Digests", "/NODE_MODULES/pkg", "/_permissions.md"} {
 		t.Run(remotePath, func(t *testing.T) {
 			_, err := Plan(root, LayoutScoped, []string{remotePath}, "/", "")
 			if err == nil ||
@@ -84,18 +84,20 @@ func TestPlanRejectsScopedRootsThatOverlapReservedLocalPaths(t *testing.T) {
 	}
 }
 
-func TestPlanRejectsCaseFoldedScopedRootOverlap(t *testing.T) {
+func TestPlanRejectsLocalFilesystemIdentityOverlap(t *testing.T) {
 	root := t.TempDir()
 	for _, paths := range [][]string{
 		{"/github", "/GitHub"},
 		{"/GitHub", "/github/repos/acme"},
+		{"/Straße", "/STRASSE"},
+		{"/Café", "/Cafe\u0301"},
 	} {
 		_, err := Plan(root, LayoutScoped, paths, "/", "")
 		if err == nil ||
 			!strings.Contains(err.Error(), paths[0]) ||
 			!strings.Contains(err.Error(), paths[1]) ||
-			!strings.Contains(err.Error(), "case-insensitive") {
-			t.Fatalf("expected case-folded overlap refusal for %v, got %v", paths, err)
+			!strings.Contains(err.Error(), "normalization-insensitive") {
+			t.Fatalf("expected local-identity overlap refusal for %v, got %v", paths, err)
 		}
 	}
 }

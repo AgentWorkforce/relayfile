@@ -234,6 +234,13 @@ mount state must use that same new-directory `--rehome` migration before
 enabling scoped mounts. A setup-created record that has never mounted has no
 state to orphan and may start scoped in its chosen directory.
 
+Scoped mounts intentionally omit the root-level `digests/` and
+`.skills/activity-summary.md` surfaces. Workspace digests can summarize
+providers outside the persisted path allowlist, so mirroring them implicitly
+would widen a scoped mount and leaving empty or stale artifacts would falsely
+promise current data. Filtered, explicitly scoped digests require a separate
+contract.
+
 `--reset-after-clobber` is supported only for exact mounts. Scoped recovery
 refuses until all child roots can be recovered transactionally; use a new
 `LOCAL_DIR` with `--rehome` rather than accepting a partial reset.

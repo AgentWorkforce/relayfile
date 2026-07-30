@@ -2390,6 +2390,9 @@ func TestMountMirrorsRepeatedRemotePathsUnderScopedLayout(t *testing.T) {
 		if _, statErr := os.Stat(filepath.Join(githubChild, rootOnlyPath)); !errors.Is(statErr, os.ErrNotExist) {
 			t.Fatalf("scoped child root-only path %s exists or could not be inspected: %v", rootOnlyPath, statErr)
 		}
+		if _, statErr := os.Stat(filepath.Join(localRoot, rootOnlyPath)); !errors.Is(statErr, os.ErrNotExist) {
+			t.Fatalf("scoped catalog root falsely exposes unsynchronized %s: %v", rootOnlyPath, statErr)
+		}
 	}
 
 	record, ok := workspaceRecordByID("ws_demo")
@@ -2527,10 +2530,96 @@ func TestValidateMountLayoutTransitionTreatsLegacyBlankAsUnknown(t *testing.T) {
 }
 
 func TestValidateMountLayoutTransitionAllowsUnstartedBlankRecordToStartScoped(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	localDir := t.TempDir()
 	record := workspaceRecord{LocalDir: localDir}
 	if err := validateMountLayoutTransition(record, localDir, mountscope.LayoutScoped); err != nil {
 		t.Fatalf("pre-mount record has no state to orphan and should start scoped, got %v", err)
+	}
+}
+
+func TestValidateMountLayoutTransitionFindsPrivateLegacyState(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	for _, tc := range []struct {
+		name      string
+		configure func(*workspaceRecord)
+		statePath func(workspaceRecord) (string, error)
+	}{
+		{
+			name:      "default-dir-unknown-legacy-root",
+			configure: func(*workspaceRecord) {},
+			statePath: func(record workspaceRecord) (string, error) {
+				resolved, err := mountsync.ResolveMountStatePath(mountsync.MountStatePathOptions{
+					WorkspaceID: record.ID,
+					RemoteRoot:  "/notion",
+					LocalRoot:   record.LocalDir,
+				})
+				return resolved.StateFile, err
+			},
+		},
+		{
+			name: "state-dir",
+			configure: func(record *workspaceRecord) {
+				record.MountStateDir = t.TempDir()
+			},
+			statePath: func(record workspaceRecord) (string, error) {
+				resolved, err := mountsync.ResolveMountStatePath(mountsync.MountStatePathOptions{
+					WorkspaceID: record.ID,
+					RemoteRoot:  "/",
+					LocalRoot:   record.LocalDir,
+					StateDir:    record.MountStateDir,
+				})
+				return resolved.StateFile, err
+			},
+		},
+		{
+			name: "state-file",
+			configure: func(record *workspaceRecord) {
+				record.MountStateFile = filepath.Join(t.TempDir(), "explicit-state.json")
+			},
+			statePath: func(record workspaceRecord) (string, error) {
+				return record.MountStateFile, nil
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			localDir := t.TempDir()
+			record := workspaceRecord{ID: "ws_demo", LocalDir: localDir}
+			tc.configure(&record)
+			statePath, err := tc.statePath(record)
+			if err != nil {
+				t.Fatalf("resolve private state: %v", err)
+			}
+			if err := os.MkdirAll(filepath.Dir(statePath), 0o755); err != nil {
+				t.Fatalf("mkdir private state: %v", err)
+			}
+			if err := os.WriteFile(statePath, []byte(`{"files":{}}`), 0o600); err != nil {
+				t.Fatalf("write private state: %v", err)
+			}
+			err = validateMountLayoutTransition(record, localDir, mountscope.LayoutScoped)
+			if err == nil || !strings.Contains(err.Error(), "unknown") || !strings.Contains(err.Error(), "--rehome") {
+				t.Fatalf("expected private-state migration refusal, got %v", err)
+			}
+		})
+	}
+}
+
+func TestMountTransitionGuardsUseFilesystemIdentity(t *testing.T) {
+	localRoot := t.TempDir()
+	alias := filepath.Join(t.TempDir(), "mirror-alias")
+	if err := os.Symlink(localRoot, alias); err != nil {
+		t.Fatalf("create mount-root alias: %v", err)
+	}
+	record := workspaceRecord{
+		LocalDir:    localRoot,
+		LocalLayout: mountscope.LayoutScoped,
+		RemotePaths: []string{"/github", "/slack"},
+	}
+	if err := validateMountScopeTransition(record, alias, mountscope.LayoutScoped, []string{"/slack"}); err == nil || !strings.Contains(err.Error(), "--rehome") {
+		t.Fatalf("expected aliased root to retain in-place scope refusal, got %v", err)
+	}
+	if err := validateMountLayoutTransition(record, alias, mountscope.LayoutExact); err == nil || !strings.Contains(err.Error(), "--rehome") {
+		t.Fatalf("expected aliased root to retain in-place layout refusal, got %v", err)
 	}
 }
 
@@ -2595,7 +2684,7 @@ func TestPreflightScopedMountRootInvariantRefusesWithoutMutating(t *testing.T) {
 	}
 	child := filepath.Join(clobbered, "repos", "acme")
 	err := preflightScopedMountRootInvariant(localRoot, child)
-	if err == nil || !strings.Contains(err.Error(), clobbered) || !strings.Contains(err.Error(), "--reset-after-clobber") {
+	if err == nil || !strings.Contains(err.Error(), clobbered) || !strings.Contains(err.Error(), "--rehome") {
 		t.Fatalf("expected scoped clobber refusal, got %v", err)
 	}
 	content, readErr := os.ReadFile(clobbered)
@@ -2902,6 +2991,61 @@ func TestMountRefusesCompetingDaemonBeforePersistingAddedScope(t *testing.T) {
 	}
 	if _, statErr := os.Stat(filepath.Join(localDir, "slack")); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("refused start initialized added scope: %v", statErr)
+	}
+}
+
+func TestMountOnceRefusesCompetingDaemonBeforePersistingAddedScope(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	localDir := t.TempDir()
+	now := time.Now().UTC().Format(time.RFC3339)
+	if err := saveWorkspaceCatalog(workspaceCatalog{
+		Default: "demo",
+		Workspaces: []workspaceRecord{{
+			Name:        "demo",
+			ID:          "ws_demo",
+			LocalDir:    localDir,
+			LocalLayout: mountscope.LayoutScoped,
+			RemotePaths: []string{"/github"},
+			CreatedAt:   now,
+			LastUsedAt:  now,
+		}},
+	}); err != nil {
+		t.Fatalf("saveWorkspaceCatalog failed: %v", err)
+	}
+	if err := ensureMirrorLayout(localDir); err != nil {
+		t.Fatalf("ensureMirrorLayout failed: %v", err)
+	}
+	if err := writeDaemonPIDState(mountPIDFile(localDir), daemonPIDState{
+		PID:         os.Getpid(),
+		WorkspaceID: "ws_demo",
+		LocalDir:    localDir,
+		Executable:  resolvedSelfExecutable(),
+	}); err != nil {
+		t.Fatalf("write daemon pid state failed: %v", err)
+	}
+
+	err := run([]string{
+		"mount", "demo", localDir,
+		"--token", testJWTWithWorkspace("ws_demo"),
+		"--remote-path", "/github",
+		"--remote-path", "/slack",
+		"--local-layout", "scoped",
+		"--once",
+	}, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "already has a running mount") {
+		t.Fatalf("expected one-shot competing-daemon refusal, got %v", err)
+	}
+	record, ok := workspaceRecordByID("ws_demo")
+	if !ok {
+		t.Fatal("expected persisted workspace record")
+	}
+	if got := strings.Join(record.RemotePaths, ","); got != "/github" {
+		t.Fatalf("refused one-shot changed persisted paths to %q", got)
+	}
+	if _, statErr := os.Stat(filepath.Join(localDir, "slack")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("refused one-shot initialized added scope: %v", statErr)
 	}
 }
 

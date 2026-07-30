@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/agentworkforce/relayfile/internal/mountscope"
 )
 
 const writebackListUsage = "usage: relayfile writeback list --state pending|dead [--workspace WS] [--json]"
@@ -230,9 +232,7 @@ func remotePathForLocalRel(remoteRoot, rel string) string {
 }
 
 func writebackListReservedTopLevel(name string) bool {
-	return name == ".git" || name == ".relay" || name == ".skills" ||
-		name == "digests" || name == "node_modules" ||
-		name == "_PERMISSIONS.md"
+	return mountscope.IsReservedLocalTopLevel(name)
 }
 
 func hashLocalWritebackFile(path string) (string, error) {

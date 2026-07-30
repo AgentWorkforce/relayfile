@@ -18,9 +18,9 @@ Implemented Unit B scoped multi-path CLI runtime with write-ahead topology persi
 
 ## Key Decisions
 
-### Legacy blank layout continues only as exact; scoped migration refuses in place
-- **Chose:** Legacy blank layout continues only as exact; scoped migration refuses in place
-- **Reasoning:** Pre-layout records were created when exact was the only supported topology, so exact restarts remain compatible. Blank cannot establish scoped topology; enabling scoped at the same LOCAL_DIR refuses and requires a new LOCAL_DIR with --rehome.
+### Legacy blank layout with mount state continues only as exact
+- **Chose:** Allow unmounted blank records to start scoped; refuse in-place scoped migration when mount state exists
+- **Reasoning:** Pre-layout records were created when exact was the only supported topology, so exact restarts remain compatible. A blank record with persisted mount state cannot establish its prior topology and must use a new LOCAL_DIR with --rehome; a current setup record with no mount state has nothing to orphan and may start scoped.
 
 ### Reject TypeScript paths-file configuration before launcher side effects
 - **Chose:** Reject TypeScript paths-file configuration before launcher side effects
