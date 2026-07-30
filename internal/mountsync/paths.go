@@ -89,6 +89,13 @@ func NewRelativeRemotePath(rel, mountBasename string) (RelativeRemotePath, error
 	// Re-clean to collapse double slashes etc.; reject if cleaning would
 	// reintroduce a forbidden form.
 	cleaned := filepath.ToSlash(filepath.Clean(rel))
+	// A backslash is a legal filename character on Unix, but it is a
+	// separator in relay's remote-path syntax. Reject it at the local-to-
+	// remote boundary so a Unix filename such as "foo\\bar" cannot be
+	// silently reinterpreted as the remote path "foo/bar" downstream.
+	if strings.Contains(cleaned, "\\") {
+		return RelativeRemotePath{}, fmt.Errorf("relative path %q contains a backslash that is ambiguous in remote paths", rel)
+	}
 	if cleaned == "" || cleaned == "." || cleaned == "/" {
 		return RelativeRemotePath{}, fmt.Errorf("relative path %q resolves onto the mount root after cleaning", rel)
 	}
