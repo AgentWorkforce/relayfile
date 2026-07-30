@@ -2024,13 +2024,69 @@ func prepareScopedCatalogRoot(localDir string) error {
 
 	for _, artifact := range artifacts {
 		if artifact.knownFile != "" {
-			if err := os.Remove(filepath.Join(artifact.dir, artifact.knownFile)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			if err := removeGeneratedScopedCatalogArtifact(
+				filepath.Join(artifact.dir, artifact.knownFile),
+				artifact.content,
+			); err != nil {
 				return fmt.Errorf("remove generated scoped catalog artifact: %w", err)
 			}
 		}
 		if err := os.Remove(artifact.dir); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("remove empty scoped catalog directory %s: %w", artifact.dir, err)
 		}
+	}
+	return nil
+}
+
+func removeGeneratedScopedCatalogArtifact(path string, expected []byte) error {
+	if _, err := os.Lstat(path); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	quarantine, err := os.CreateTemp(filepath.Dir(path), ".relayfile-scoped-transition-*")
+	if err != nil {
+		return err
+	}
+	quarantinePath := quarantine.Name()
+	if err := quarantine.Close(); err != nil {
+		_ = os.Remove(quarantinePath)
+		return err
+	}
+	if err := os.Remove(quarantinePath); err != nil {
+		return err
+	}
+	if err := os.Rename(path, quarantinePath); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	payload, err := os.ReadFile(quarantinePath)
+	if err != nil {
+		return fmt.Errorf("inspect quarantined generated artifact %s: %w", quarantinePath, err)
+	}
+	if !bytes.Equal(payload, expected) {
+		if _, statErr := os.Lstat(path); errors.Is(statErr, os.ErrNotExist) {
+			if restoreErr := os.Rename(quarantinePath, path); restoreErr != nil {
+				return fmt.Errorf(
+					"generated artifact %s changed during scoped transition and is preserved at %s (restore failed: %v)",
+					path,
+					quarantinePath,
+					restoreErr,
+				)
+			}
+			return fmt.Errorf("generated artifact %s changed during scoped transition and was restored", path)
+		}
+		return fmt.Errorf(
+			"generated artifact %s changed during scoped transition and is preserved at %s",
+			path,
+			quarantinePath,
+		)
+	}
+	if err := os.Remove(quarantinePath); err != nil {
+		return fmt.Errorf("remove quarantined generated artifact %s: %w", quarantinePath, err)
 	}
 	return nil
 }
