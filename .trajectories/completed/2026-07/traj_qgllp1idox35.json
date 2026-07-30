@@ -1,0 +1,69 @@
+{
+  "id": "traj_qgllp1idox35",
+  "version": 1,
+  "task": {
+    "title": "Preserve local infrastructure and centralize cross-scope dead letters",
+    "source": {
+      "system": "plain",
+      "id": "relayfile#379"
+    }
+  },
+  "status": "completed",
+  "startedAt": "2026-07-30T10:58:04.858Z",
+  "completedAt": "2026-07-30T11:00:10.991Z",
+  "agents": [
+    {
+      "name": "default",
+      "role": "lead",
+      "joinedAt": "2026-07-30T10:58:05.206Z"
+    }
+  ],
+  "chapters": [
+    {
+      "id": "chap_vjex5y4dt8ef",
+      "title": "Work",
+      "agentName": "default",
+      "startedAt": "2026-07-30T10:58:05.206Z",
+      "endedAt": "2026-07-30T11:00:10.991Z",
+      "events": [
+        {
+          "ts": 1785409085207,
+          "type": "decision",
+          "content": "Store cross-scope dead-letter records at the catalog root: Store cross-scope dead-letter records at the catalog root",
+          "raw": {
+            "question": "Store cross-scope dead-letter records at the catalog root",
+            "chosen": "Store cross-scope dead-letter records at the catalog root",
+            "alternatives": [],
+            "reasoning": "A sibling provider's disconnect preflight cannot discover a bulk record stored only under the first child's runtime root."
+          },
+          "significance": "high"
+        },
+        {
+          "ts": 1785409085535,
+          "type": "decision",
+          "content": "Preserve mount-excluded infrastructure during scoped disconnect: Preserve mount-excluded infrastructure during scoped disconnect",
+          "raw": {
+            "question": "Preserve mount-excluded infrastructure during scoped disconnect",
+            "chosen": "Preserve mount-excluded infrastructure during scoped disconnect",
+            "alternatives": [],
+            "reasoning": "Entries such as .git are intentionally outside mount synchronization and therefore cannot be deleted as mirrored provider content."
+          },
+          "significance": "high"
+        }
+      ]
+    }
+  ],
+  "retrospective": {
+    "summary": "Centralized multi-root dead letters at the catalog root and preserved mount-excluded infrastructure during scoped disconnect cleanup.",
+    "approach": "Standard approach",
+    "confidence": 0.9
+  },
+  "commits": [],
+  "filesChanged": [],
+  "projectId": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-c",
+  "tags": [],
+  "_trace": {
+    "startRef": "c2fdcc6bf68d6f0101e8d0df91985210fce911b4",
+    "endRef": "c2fdcc6bf68d6f0101e8d0df91985210fce911b4"
+  }
+}

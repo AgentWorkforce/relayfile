@@ -4341,18 +4341,30 @@ func workspaceRuntimeStateDirs(record workspaceRecord) []string {
 	return dirs
 }
 
-func workspaceStateDirForRemotePath(record workspaceRecord, remotePath string) string {
-	path := mountscope.NormalizePath(remotePath)
-	bestRoot := ""
-	bestDir := strings.TrimSpace(record.LocalDir)
-	for _, scope := range workspaceMountScopes(record) {
-		if !mountscope.IsWithin(scope.RemotePath, path) || len(scope.RemotePath) <= len(bestRoot) {
+func workspaceStateDirForDeadLetterPaths(record workspaceRecord, rawPaths string) string {
+	catalogRoot := strings.TrimSpace(record.LocalDir)
+	paths := deadLetterRetryPaths(rawPaths)
+	if len(paths) == 0 {
+		return catalogRoot
+	}
+	resolvedDir := ""
+	for _, path := range paths {
+		scope, ok := workspaceMountScopeForRemotePath(record, path)
+		if !ok {
+			return catalogRoot
+		}
+		if resolvedDir == "" {
+			resolvedDir = scope.LocalDir
 			continue
 		}
-		bestRoot = scope.RemotePath
-		bestDir = scope.LocalDir
+		if filepath.Clean(resolvedDir) != filepath.Clean(scope.LocalDir) {
+			// One record spanning multiple scoped roots belongs at their
+			// shared catalog root so every provider's operator preflight can
+			// discover it.
+			return catalogRoot
+		}
 	}
-	return bestDir
+	return resolvedDir
 }
 
 func workspaceMountScopeForRemotePath(record workspaceRecord, remotePath string) (mountscope.Scope, bool) {
@@ -6045,7 +6057,7 @@ func refreshDeadLetterMirror(record workspaceRecord, serverOverride, tokenOverri
 			}
 			continue
 		}
-		targetDir := workspaceStateDirForRemotePath(record, item.Path)
+		targetDir := workspaceStateDirForDeadLetterPaths(record, item.Path)
 		if targetDir == "" {
 			targetDir = record.LocalDir
 		}
@@ -12423,7 +12435,7 @@ func removeProviderMirror(record workspaceRecord, provider string) error {
 			return err
 		}
 		for _, entry := range entries {
-			if entry.Name() == ".relay" {
+			if entry.Name() == ".relay" || mountscope.IsInfrastructureTopLevelAt(scopeDir, entry.Name()) {
 				continue
 			}
 			if err := os.RemoveAll(filepath.Join(scopeDir, entry.Name())); err != nil {

@@ -5870,6 +5870,29 @@ func TestWorkspaceRetryTargetRoutesCatalogCompatibilityRecordToScopedChild(t *te
 	}
 }
 
+func TestWorkspaceStateDirForDeadLetterPathsKeepsCrossScopeAtCatalogRoot(t *testing.T) {
+	localRoot := t.TempDir()
+	record := workspaceRecord{
+		LocalDir:    localRoot,
+		LocalLayout: mountscope.LayoutScoped,
+		RemotePaths: []string{"/github", "/slack"},
+	}
+	for _, rawPaths := range []string{
+		"/github/repos/acme/issue.json,/slack/channels/project/message.json",
+		"/slack/channels/project/message.json,/github/repos/acme/issue.json",
+	} {
+		if got := workspaceStateDirForDeadLetterPaths(record, rawPaths); got != localRoot {
+			t.Fatalf("cross-scope dead-letter dir for %q = %q, want catalog root %q", rawPaths, got, localRoot)
+		}
+	}
+	if got, want := workspaceStateDirForDeadLetterPaths(
+		record,
+		"/github/repos/acme/issue.json,/github/repos/acme/pr.json",
+	), mountscope.LocalDir(localRoot, "/github"); got != want {
+		t.Fatalf("single-scope dead-letter dir = %q, want %q", got, want)
+	}
+}
+
 func TestWorkspaceDeadLetterRetryGroupsRoutesEveryScopedRoot(t *testing.T) {
 	localRoot := t.TempDir()
 	record := workspaceRecord{
@@ -7932,6 +7955,7 @@ func TestMarkProviderDisconnectedPreservesScopedRuntimeState(t *testing.T) {
 	githubOutbox := filepath.Join(githubScope, ".relay", "outbox", "pending", "queued.json")
 	githubConflict := filepath.Join(githubScope, ".relay", "conflicts", "README.md.local")
 	githubDeadLetter := filepath.Join(githubScope, ".relay", "dead-letter", "op_dead.json")
+	githubInfrastructure := filepath.Join(githubScope, ".git", "config")
 	slackMirror := filepath.Join(mountscope.LocalDir(localRoot, "/slack/channels/project"), "topic.md")
 	for _, scope := range workspaceMountScopes(record) {
 		stateFile, err := workspaceMountStateFile(record.ID, record, scope)
@@ -7946,11 +7970,12 @@ func TestMarkProviderDisconnectedPreservesScopedRuntimeState(t *testing.T) {
 		}
 	}
 	for path, content := range map[string]string{
-		githubMirror:     "mirrored",
-		githubOutbox:     "queued",
-		githubConflict:   "unresolved",
-		githubDeadLetter: `{"opId":"op_dead"}`,
-		slackMirror:      "unrelated",
+		githubMirror:         "mirrored",
+		githubOutbox:         "queued",
+		githubConflict:       "unresolved",
+		githubDeadLetter:     `{"opId":"op_dead"}`,
+		githubInfrastructure: "[core]\n",
+		slackMirror:          "unrelated",
 	} {
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			t.Fatalf("mkdir %s: %v", filepath.Dir(path), err)
@@ -7967,7 +7992,7 @@ func TestMarkProviderDisconnectedPreservesScopedRuntimeState(t *testing.T) {
 		!strings.Contains(err.Error(), "deadLetters=1") {
 		t.Fatalf("expected actionable pending-state refusal, got %v", err)
 	}
-	for _, path := range []string{githubMirror, githubOutbox, githubConflict, githubDeadLetter, slackMirror} {
+	for _, path := range []string{githubMirror, githubOutbox, githubConflict, githubDeadLetter, githubInfrastructure, slackMirror} {
 		if _, err := os.Stat(path); err != nil {
 			t.Fatalf("expected refused disconnect to preserve %s: %v", path, err)
 		}
@@ -7986,6 +8011,9 @@ func TestMarkProviderDisconnectedPreservesScopedRuntimeState(t *testing.T) {
 	}
 	if _, err := os.Stat(githubMirror); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("expected github mirror content removed, got %v", err)
+	}
+	if payload, err := os.ReadFile(githubInfrastructure); err != nil || string(payload) != "[core]\n" {
+		t.Fatalf("expected excluded github infrastructure preserved, payload=%q err=%v", payload, err)
 	}
 	if payload, err := os.ReadFile(slackMirror); err != nil || string(payload) != "unrelated" {
 		t.Fatalf("expected unrelated scoped mirror preserved, payload=%q err=%v", payload, err)
