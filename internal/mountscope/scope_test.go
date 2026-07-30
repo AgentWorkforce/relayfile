@@ -279,8 +279,44 @@ func TestValidateEventProviderRejectsHeterogeneousRoots(t *testing.T) {
 	if err := ValidateEventProvider([]string{"/github/issues", "/github/repos"}, "github"); err != nil {
 		t.Fatalf("same-provider roots rejected: %v", err)
 	}
+	for provider, roots := range map[string][]string{
+		"slack-sage":          {"/slack/channels/one", "/slack/channels/two"},
+		"slack-my-senior-dev": {"/slack-msd/channels/one", "/slack-msd/channels/two"},
+	} {
+		if err := ValidateEventProvider(roots, provider); err != nil {
+			t.Fatalf("mapped provider %s roots rejected: %v", provider, err)
+		}
+	}
 	if err := ValidateEventProvider([]string{"/github", "/slack"}, ""); err != nil {
 		t.Fatalf("inferred per-scope providers rejected: %v", err)
+	}
+}
+
+func TestProviderRootMatchesPublicProviderStorage(t *testing.T) {
+	for provider, want := range map[string]string{
+		"github":                 "github",
+		"slack":                  "slack",
+		"slack-sage":             "slack",
+		"slack-my-senior-dev":    "slack-msd",
+		"slack-nightcto":         "slack-nightcto",
+		"  SLACK-MY-SENIOR-DEV ": "slack-msd",
+	} {
+		if got := ProviderRoot(provider); got != want {
+			t.Fatalf("ProviderRoot(%q) = %q, want %q", provider, got, want)
+		}
+	}
+}
+
+func TestNormalizeProviderIDOwnsPublicAliases(t *testing.T) {
+	for provider, want := range map[string]string{
+		"github":        "github",
+		"slack":         "slack",
+		"slack-sage":    "slack",
+		"  SLACK-SAGE ": "slack",
+	} {
+		if got := NormalizeProviderID(provider); got != want {
+			t.Fatalf("NormalizeProviderID(%q) = %q, want %q", provider, got, want)
+		}
 	}
 }
 

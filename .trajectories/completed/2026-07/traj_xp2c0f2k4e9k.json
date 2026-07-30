@@ -1,0 +1,57 @@
+{
+  "id": "traj_xp2c0f2k4e9k",
+  "version": 1,
+  "task": {
+    "title": "Normalize provider filters to VFS roots",
+    "source": {
+      "system": "plain",
+      "id": "relayfile#379"
+    }
+  },
+  "status": "completed",
+  "startedAt": "2026-07-30T12:41:15.057Z",
+  "completedAt": "2026-07-30T12:43:43.947Z",
+  "agents": [
+    {
+      "name": "default",
+      "role": "lead",
+      "joinedAt": "2026-07-30T12:41:36.123Z"
+    }
+  ],
+  "chapters": [
+    {
+      "id": "chap_uv8d81yvukhd",
+      "title": "Work",
+      "agentName": "default",
+      "startedAt": "2026-07-30T12:41:36.123Z",
+      "endedAt": "2026-07-30T12:43:43.947Z",
+      "events": [
+        {
+          "ts": 1785415296124,
+          "type": "decision",
+          "content": "Centralize provider-to-VFS-root mapping in mountscope: Centralize provider-to-VFS-root mapping in mountscope",
+          "raw": {
+            "question": "Centralize provider-to-VFS-root mapping in mountscope",
+            "chosen": "Centralize provider-to-VFS-root mapping in mountscope",
+            "alternatives": [],
+            "reasoning": "Planning validates VFS path segments while event APIs use provider ids; one shared mapping keeps CLI cleanup and both mount entrypoints aligned for aliases."
+          },
+          "significance": "high"
+        }
+      ]
+    }
+  ],
+  "retrospective": {
+    "summary": "Mapped public provider IDs to VFS roots in mountscope so valid aliased multi-root provider filters pass and CLI cleanup shares the same mapping.",
+    "approach": "Standard approach",
+    "confidence": 0.94
+  },
+  "commits": [],
+  "filesChanged": [],
+  "projectId": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-b",
+  "tags": [],
+  "_trace": {
+    "startRef": "e55a0e6b089a34de4735d64f18dd9d7978a6b251",
+    "endRef": "e55a0e6b089a34de4735d64f18dd9d7978a6b251"
+  }
+}

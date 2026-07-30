@@ -217,12 +217,13 @@ func ValidateEventProvider(paths []string, provider string) error {
 	if provider == "" || len(normalized) <= 1 {
 		return nil
 	}
+	providerRoot := ProviderRoot(provider)
 	for _, remotePath := range normalized {
 		segment := strings.TrimPrefix(remotePath, "/")
 		if i := strings.IndexByte(segment, '/'); i >= 0 {
 			segment = segment[:i]
 		}
-		if strings.ToLower(strings.TrimSpace(segment)) != provider {
+		if strings.ToLower(strings.TrimSpace(segment)) != providerRoot {
 			return fmt.Errorf(
 				"--provider %s cannot filter multi-root mount containing %s; omit --provider so each scoped Syncer infers its own provider",
 				provider,
@@ -231,6 +232,37 @@ func ValidateEventProvider(paths []string, provider string) error {
 		}
 	}
 	return nil
+}
+
+// NormalizeProviderID canonicalizes public provider aliases used by the CLI
+// and mount runtime. Keeping alias identity beside ProviderRoot prevents the
+// provider name and its VFS storage root from being normalized independently.
+func NormalizeProviderID(provider string) string {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	switch provider {
+	case "slack", "slack-sage":
+		return "slack"
+	default:
+		return provider
+	}
+}
+
+// ProviderRoot maps public provider identifiers to the top-level VFS segment
+// they own. Provider filters, catalogs, and CLI cleanup share this owner so
+// aliases whose ids differ from their storage roots cannot drift between
+// planning and use.
+func ProviderRoot(provider string) string {
+	provider = NormalizeProviderID(provider)
+	switch provider {
+	case "slack":
+		return "slack"
+	case "slack-my-senior-dev":
+		return "slack-msd"
+	case "slack-nightcto":
+		return "slack-nightcto"
+	default:
+		return provider
+	}
 }
 
 // ValidateExplicitPathsFile distinguishes an absent paths file from an
