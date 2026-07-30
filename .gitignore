@@ -33,6 +33,10 @@ node_modules/
 dist/
 *.tsbuildinfo
 
+# Agent Relay resident state
+.agentworkforce/relay/
+*.log
+
 # Python
 __pycache__/
 *.pyc

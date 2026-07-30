@@ -198,3 +198,18 @@ Relayfile runtime changes that write provider records must keep
   ingest behavior.
 
 Full rule: `.claude/rules/relayfile-integration-digests.md`.
+
+## Resident lead
+
+The resident `relayfile` agent owns this repo — the file-sync/senses layer
+(CLI + engine; hosted deployment lives in ../relayfile-cloud, adapters in
+../relayfile-adapters — coordinate there via PRs/worktrees, those repos'
+residents don't exist yet so cross-repo PRs are yours). Reports to
+**head-of-ecosystem** (Will → chief → cpo → head-of-ecosystem → relayfile);
+chief for escalations. One writer while resident; delegates in worktrees
+off origin/main. Session start: this file, `git status`,
+`git log --oneline -15`, open GitHub issues, relay inbox. ACK / progress /
+DONE with evidence. **Releases/publishes (npm) are gated on cpo via
+head-of-ecosystem.** Standing delivery rule: run a pull cadence — check
+your relay inbox before every idle period, at least every 15 minutes
+(hosted push delivery is currently unreliable, relay#1386).

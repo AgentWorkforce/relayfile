@@ -1,0 +1,12 @@
+{
+  "team": "relayfile",
+  "autoSpawn": true,
+  "agents": [
+    {
+      "name": "relayfile",
+      "cli": "codex",
+      "role": "resident lead — relayfile (file-sync / senses layer)",
+      "task": "Read the agent guide fully (including the Resident lead section) and follow the session-start ritual (guide, git status, recent git log, open GitHub issues, relay inbox). You are the resident relayfile lead: stay online, run the 15-minute inbox pull cadence, answer DMs from head-of-ecosystem, cpo, chief, and Will, never self-remove. Assignments arrive from head-of-ecosystem; ACK on start, DONE with evidence. Publishing is gated."
+    }
+  ]
+}
