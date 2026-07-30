@@ -47,6 +47,18 @@ func TestNormalizePathsCollapsesOverlappingRoots(t *testing.T) {
 	}
 }
 
+func TestNormalizePathsIgnoresBlankEntriesBeforeApplyingFallback(t *testing.T) {
+	got := NormalizePaths([]string{"/github", "", " \t "}, "/")
+	if want := []string{"/github"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("NormalizePaths() = %v, want %v", got, want)
+	}
+
+	got = NormalizePaths([]string{"", " "}, "/slack")
+	if want := []string{"/slack"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("NormalizePaths(all blank) = %v, want fallback %v", got, want)
+	}
+}
+
 func TestPlanRejectsSharedStateFile(t *testing.T) {
 	_, err := Plan(t.TempDir(), LayoutScoped, []string{"/github", "/slack"}, "/", "state.json")
 	if err == nil || !strings.Contains(err.Error(), "use --state-dir") {
@@ -78,5 +90,19 @@ func TestReadPathsFileSupportsJSONAndLines(t *testing.T) {
 	}
 	if want := []string{"/github", "/slack/channels/proj-cloud"}; !reflect.DeepEqual(gotLines, want) {
 		t.Fatalf("ReadPathsFile(lines) = %v, want %v", gotLines, want)
+	}
+}
+
+func TestReadPathsFileNullEntryCannotWidenAllowlist(t *testing.T) {
+	filePath := filepath.Join(t.TempDir(), "paths.json")
+	if err := os.WriteFile(filePath, []byte(`["/github",null,""]`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	paths, err := ReadPathsFile(filePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := NormalizePaths(paths, "/"), []string{"/github"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("normalized JSON paths = %v, want %v", got, want)
 	}
 }

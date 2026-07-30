@@ -77,12 +77,15 @@ func ReadPathsFile(filePath string) ([]string, error) {
 }
 
 func NormalizePaths(paths []string, fallback string) []string {
-	if len(paths) == 0 {
-		paths = []string{fallback}
-	}
 	seen := map[string]struct{}{}
 	normalized := make([]string, 0, len(paths))
 	for _, remotePath := range paths {
+		// Empty entries are not roots. In particular, a blank/null entry from
+		// a JSON paths file must not normalize to "/" and silently widen an
+		// otherwise scoped allowlist.
+		if strings.TrimSpace(remotePath) == "" {
+			continue
+		}
 		cleaned := NormalizePath(remotePath)
 		if _, ok := seen[cleaned]; ok {
 			continue
@@ -110,7 +113,7 @@ func NormalizePaths(paths []string, fallback string) []string {
 		normalized = append(normalized, cleaned)
 	}
 	if len(normalized) == 0 {
-		return []string{"/"}
+		return []string{NormalizePath(fallback)}
 	}
 	return normalized
 }

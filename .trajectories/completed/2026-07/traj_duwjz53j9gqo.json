@@ -1,0 +1,89 @@
+{
+  "id": "traj_duwjz53j9gqo",
+  "version": 1,
+  "task": {
+    "title": "Address PR #384 scoped mount review findings",
+    "source": {
+      "system": "plain",
+      "id": "relayfile#379"
+    }
+  },
+  "status": "completed",
+  "startedAt": "2026-07-30T03:43:11.680Z",
+  "completedAt": "2026-07-30T03:43:53.457Z",
+  "agents": [
+    {
+      "name": "default",
+      "role": "lead",
+      "joinedAt": "2026-07-30T03:43:17.916Z"
+    }
+  ],
+  "chapters": [
+    {
+      "id": "chap_5p7cvbch19e7",
+      "title": "Work",
+      "agentName": "default",
+      "startedAt": "2026-07-30T03:43:17.916Z",
+      "endedAt": "2026-07-30T03:43:53.457Z",
+      "events": [
+        {
+          "ts": 1785382997917,
+          "type": "decision",
+          "content": "Treat persisted scoped roots as the runtime-state boundary and sweep the catalog root only for legacy dead letters: Treat persisted scoped roots as the runtime-state boundary and sweep the catalog root only for legacy dead letters",
+          "raw": {
+            "question": "Treat persisted scoped roots as the runtime-state boundary and sweep the catalog root only for legacy dead letters",
+            "chosen": "Treat persisted scoped roots as the runtime-state boundary and sweep the catalog root only for legacy dead letters",
+            "alternatives": [],
+            "reasoning": "Each scoped syncer owns child .relay state; aggregating the common root would double-count stale exact-layout state, while dead-letter compatibility must still discover pre-scoped root records"
+          },
+          "significance": "high"
+        },
+        {
+          "ts": 1785382997981,
+          "type": "decision",
+          "content": "Ignore blank path candidates before normalization and apply fallback only when no valid candidates remain: Ignore blank path candidates before normalization and apply fallback only when no valid candidates remain",
+          "raw": {
+            "question": "Ignore blank path candidates before normalization and apply fallback only when no valid candidates remain",
+            "chosen": "Ignore blank path candidates before normalization and apply fallback only when no valid candidates remain",
+            "alternatives": [],
+            "reasoning": "Relay intentionally treats / as a real full-workspace root, so blank/null display input must never become indistinguishable from an explicit root selection"
+          },
+          "significance": "high"
+        },
+        {
+          "ts": 1785382998046,
+          "type": "reflection",
+          "content": "All three review findings are addressed with behavioral tests: scoped allowlists cannot widen through blanks, runtime status aggregates sibling roots, and dead-letter list/refresh/retry/replay remain discoverable",
+          "raw": {
+            "focalPoints": [
+              "allowlist-safety",
+              "status-observability",
+              "dead-letter-recovery"
+            ],
+            "confidence": 0.92
+          },
+          "significance": "high",
+          "tags": [
+            "focal:allowlist-safety",
+            "focal:status-observability",
+            "focal:dead-letter-recovery",
+            "confidence:0.92"
+          ]
+        }
+      ]
+    }
+  ],
+  "retrospective": {
+    "summary": "Closed PR #384 review gaps: blank/null paths cannot widen a scoped allowlist, CLI status aggregates sibling runtime roots, and dead-letter list/refresh/retry/replay traverse persisted scoped roots",
+    "approach": "Standard approach",
+    "confidence": 0.92
+  },
+  "commits": [],
+  "filesChanged": [],
+  "projectId": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379",
+  "tags": [],
+  "_trace": {
+    "startRef": "30832d8a8c42358b4ef03642a381416975ecfcaa",
+    "endRef": "30832d8a8c42358b4ef03642a381416975ecfcaa"
+  }
+}

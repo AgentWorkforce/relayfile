@@ -4792,7 +4792,8 @@ func TestOpsListReadsLocalDeadLetterMirror(t *testing.T) {
 	if err := ensureMirrorLayout(localDir); err != nil {
 		t.Fatalf("ensureMirrorLayout failed: %v", err)
 	}
-	dlDir := filepath.Join(localDir, ".relay", "dead-letter")
+	scopedLocalDir := filepath.Join(localDir, "notion")
+	dlDir := filepath.Join(scopedLocalDir, ".relay", "dead-letter")
 	if err := os.MkdirAll(dlDir, 0o755); err != nil {
 		t.Fatalf("mkdir dead-letter failed: %v", err)
 	}
@@ -4801,11 +4802,13 @@ func TestOpsListReadsLocalDeadLetterMirror(t *testing.T) {
 		t.Fatalf("write dead-letter record failed: %v", err)
 	}
 	if _, err := upsertWorkspaceDetails(workspaceRecord{
-		Name:       "demo",
-		ID:         "ws_demo",
-		LocalDir:   localDir,
-		CreatedAt:  time.Now().UTC().Format(time.RFC3339),
-		LastUsedAt: time.Now().UTC().Format(time.RFC3339),
+		Name:        "demo",
+		ID:          "ws_demo",
+		LocalDir:    localDir,
+		RemotePaths: []string{"/notion"},
+		LocalLayout: "scoped",
+		CreatedAt:   time.Now().UTC().Format(time.RFC3339),
+		LastUsedAt:  time.Now().UTC().Format(time.RFC3339),
 	}); err != nil {
 		t.Fatalf("upsertWorkspaceDetails failed: %v", err)
 	}
@@ -4819,6 +4822,106 @@ func TestOpsListReadsLocalDeadLetterMirror(t *testing.T) {
 		if !strings.Contains(got, fragment) {
 			t.Fatalf("expected %q in ops list output, got %q", fragment, got)
 		}
+	}
+}
+
+func TestScopedWorkspaceConsumersAggregateChildRuntimeState(t *testing.T) {
+	localRoot := t.TempDir()
+	record := workspaceRecord{
+		ID:          "ws_demo",
+		LocalDir:    localRoot,
+		LocalLayout: "scoped",
+		RemotePaths: []string{"/github", "/slack"},
+	}
+	scopes := workspaceMountScopes(record)
+	if len(scopes) != 2 {
+		t.Fatalf("workspaceMountScopes() = %#v, want 2 scopes", scopes)
+	}
+	for index, scope := range scopes {
+		if err := os.MkdirAll(filepath.Join(scope.LocalDir, ".relay", "dead-letter"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		state := fmt.Sprintf(
+			`{"status":"scope-%d","lastReconcileAt":"2026-07-30T03:0%d:00Z","pendingWriteback":%d,"failedWritebacks":%d,"stallReason":"scope-%d stalled","incrementalReadNotReadySince":{"event":"now"},"bootstrap":{"phase":"pull","filesSynced":%d,"filesTotal":10}}`,
+			index+1,
+			index+1,
+			index+1,
+			index+3,
+			index+1,
+			index+2,
+		)
+		if err := os.WriteFile(filepath.Join(scope.LocalDir, ".relay", "state.json"), []byte(state), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(
+			filepath.Join(scope.LocalDir, ".relay", "dead-letter", fmt.Sprintf("op_%d.json", index+1)),
+			[]byte(fmt.Sprintf(`{"opId":"op_%d","path":"%s/file.md"}`, index+1, scope.RemotePath)),
+			0o644,
+		); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(
+			filepath.Join(scope.LocalDir, ".relayfile-mount-state.json"),
+			[]byte(`{"files":{"pending.md":{"dirty":true}}}`),
+			0o644,
+		); err != nil {
+			t.Fatal(err)
+		}
+		conflictDir := filepath.Join(scope.LocalDir, ".relay", "conflicts")
+		if err := os.MkdirAll(conflictDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(conflictDir, "conflict.json"), []byte(`{}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(scope.LocalDir, ".relay", "permissions-denied.log"), []byte("one\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		outboxDir := filepath.Join(scope.LocalDir, ".relay", "outbox", "pending")
+		if err := os.MkdirAll(outboxDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(outboxDir, "pending.json"), []byte(`{}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	writeback, err := buildWritebackStatusReport("ws_demo", record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if writeback.Pending != 3 || writeback.Failed != 7 || len(writeback.DeadLettered) != 2 {
+		t.Fatalf("scoped writeback report = %#v, want pending=3 failed=7 dead-lettered=2", writeback)
+	}
+
+	snapshot := buildWorkspaceSyncStateSnapshot(syncStatusResponse{}, "ws_demo", record)
+	if snapshot.PendingWriteback != 2 || snapshot.PendingConflicts != 2 || snapshot.DeniedPaths != 2 {
+		t.Fatalf("scoped sync snapshot = %#v, want pending/conflicts/denied = 2/2/2", snapshot)
+	}
+	if snapshot.FailedWritebacks != 7 {
+		t.Fatalf("failed writebacks = %d, want 7", snapshot.FailedWritebacks)
+	}
+	if snapshot.Bootstrap == nil || snapshot.Bootstrap.FilesSynced != 5 || snapshot.Bootstrap.FilesTotal != 20 {
+		t.Fatalf("aggregated bootstrap = %#v, want files 5/20", snapshot.Bootstrap)
+	}
+	if got := snapshot.StallReason; got != "scope-1 stalled; scope-2 stalled" {
+		t.Fatalf("aggregated stall reason = %q", got)
+	}
+
+	health := buildWorkspaceHealthReport("ws_demo", record)
+	if health.Status != "scope-1; scope-2" || health.StuckEventCount != 2 || health.OutboxPending != 2 {
+		t.Fatalf("scoped health report = %#v, want both scope states and queues", health)
+	}
+	if health.LastReconcileAt != "2026-07-30T03:02:00Z" {
+		t.Fatalf("last reconcile = %q, want newest child timestamp", health.LastReconcileAt)
+	}
+
+	path, localDir, _, err := findWorkspaceDeadLetterRecord(record, "op_2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if localDir != scopes[1].LocalDir || path != filepath.Join(scopes[1].LocalDir, ".relay", "dead-letter", "op_2.json") {
+		t.Fatalf("scoped retry lookup = %q in %q, want second scope", path, localDir)
 	}
 }
 
@@ -4854,7 +4957,7 @@ func TestOpsListRefreshesMirrorFromServer(t *testing.T) {
 	if err := ensureMirrorLayout(localDir); err != nil {
 		t.Fatalf("ensureMirrorLayout failed: %v", err)
 	}
-	dlDir := filepath.Join(localDir, ".relay", "dead-letter")
+	dlDir := filepath.Join(localDir, "notion", ".relay", "dead-letter")
 	if err := os.MkdirAll(dlDir, 0o755); err != nil {
 		t.Fatalf("mkdir dead-letter failed: %v", err)
 	}
@@ -4863,11 +4966,13 @@ func TestOpsListRefreshesMirrorFromServer(t *testing.T) {
 		t.Fatalf("write stale record failed: %v", err)
 	}
 	if _, err := upsertWorkspaceDetails(workspaceRecord{
-		Name:       "demo",
-		ID:         "ws_demo",
-		LocalDir:   localDir,
-		CreatedAt:  time.Now().UTC().Format(time.RFC3339),
-		LastUsedAt: time.Now().UTC().Format(time.RFC3339),
+		Name:        "demo",
+		ID:          "ws_demo",
+		LocalDir:    localDir,
+		RemotePaths: []string{"/notion"},
+		LocalLayout: "scoped",
+		CreatedAt:   time.Now().UTC().Format(time.RFC3339),
+		LastUsedAt:  time.Now().UTC().Format(time.RFC3339),
 	}); err != nil {
 		t.Fatalf("upsertWorkspaceDetails failed: %v", err)
 	}
@@ -5285,7 +5390,7 @@ func TestOpsReplayPostsToCloudAndRemovesLocalRecord(t *testing.T) {
 	if err := ensureMirrorLayout(localDir); err != nil {
 		t.Fatalf("ensureMirrorLayout failed: %v", err)
 	}
-	dlDir := filepath.Join(localDir, ".relay", "dead-letter")
+	dlDir := filepath.Join(localDir, "github", ".relay", "dead-letter")
 	if err := os.MkdirAll(dlDir, 0o755); err != nil {
 		t.Fatalf("mkdir dead-letter failed: %v", err)
 	}
@@ -5294,13 +5399,15 @@ func TestOpsReplayPostsToCloudAndRemovesLocalRecord(t *testing.T) {
 		t.Fatalf("write dead-letter record failed: %v", err)
 	}
 	if _, err := upsertWorkspaceDetails(workspaceRecord{
-		Name:       "demo",
-		ID:         "ws_demo",
-		LocalDir:   localDir,
-		AgentName:  "relayfile-cli",
-		Scopes:     append([]string(nil), defaultJoinScopes...),
-		CreatedAt:  time.Now().UTC().Format(time.RFC3339),
-		LastUsedAt: time.Now().UTC().Format(time.RFC3339),
+		Name:        "demo",
+		ID:          "ws_demo",
+		LocalDir:    localDir,
+		RemotePaths: []string{"/github"},
+		LocalLayout: "scoped",
+		AgentName:   "relayfile-cli",
+		Scopes:      append([]string(nil), defaultJoinScopes...),
+		CreatedAt:   time.Now().UTC().Format(time.RFC3339),
+		LastUsedAt:  time.Now().UTC().Format(time.RFC3339),
 	}); err != nil {
 		t.Fatalf("upsertWorkspaceDetails failed: %v", err)
 	}
