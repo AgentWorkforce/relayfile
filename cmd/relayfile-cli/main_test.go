@@ -7702,8 +7702,11 @@ func TestIntegrationAdoptClearsDisconnectMarker(t *testing.T) {
 	// must clear that marker so the status probe stops reporting the
 	// workspace as disconnected — otherwise the operator gets a stale
 	// "disconnected" reading for a workspace they just adopted into.
-	_, localDir := setupAdoptWorkspace(t)
-	if err := markProviderDisconnected(workspaceRecord{LocalDir: localDir}, "github"); err != nil {
+	record, localDir := setupAdoptWorkspace(t)
+	if err := os.WriteFile(filepath.Join(localDir, mountsync.LegacyMountStateFileName), []byte(`{"files":{}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := markProviderDisconnected(record, "github"); err != nil {
 		t.Fatalf("markProviderDisconnected failed: %v", err)
 	}
 	markerPath := filepath.Join(localDir, ".relay", "disconnected", "github.json")
@@ -7734,6 +7737,7 @@ func TestIntegrationAdoptClearsDisconnectMarker(t *testing.T) {
 func TestMarkProviderDisconnectedPreservesScopedRuntimeState(t *testing.T) {
 	localRoot := t.TempDir()
 	record := workspaceRecord{
+		ID:            "ws_demo",
 		LocalDir:      localRoot,
 		LocalLayout:   mountscope.LayoutScoped,
 		MountStateDir: t.TempDir(),
@@ -7748,6 +7752,18 @@ func TestMarkProviderDisconnectedPreservesScopedRuntimeState(t *testing.T) {
 	githubConflict := filepath.Join(githubScope, ".relay", "conflicts", "README.md.local")
 	githubDeadLetter := filepath.Join(githubScope, ".relay", "dead-letter", "op_dead.json")
 	slackMirror := filepath.Join(mountscope.LocalDir(localRoot, "/slack/channels/project"), "topic.md")
+	for _, scope := range workspaceMountScopes(record) {
+		stateFile, err := workspaceMountStateFile(record.ID, record, scope)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Dir(stateFile), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(stateFile, []byte(`{"files":{}}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	for path, content := range map[string]string{
 		githubMirror:     "mirrored",
 		githubOutbox:     "queued",
@@ -7805,7 +7821,8 @@ func TestProviderDisconnectPreflightAllowsCloudOnlyWorkspace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(plan.cleanScopeDirs) != 0 || len(plan.removeSubtrees) != 0 || len(plan.stateDirs) != 0 || len(plan.stateFiles) != 0 {
+	if len(plan.cleanScopeDirs) != 0 || len(plan.removeSubtrees) != 0 || len(plan.stateDirs) != 0 ||
+		len(plan.wholeProviderDirs) != 0 || len(plan.stateFiles) != 0 || len(plan.unknownStateRoots) != 0 {
 		t.Fatalf("cloud-only disconnect produced local cleanup plan: %#v", plan)
 	}
 	if err := preflightProviderDisconnect(record, "github"); err != nil {
@@ -7815,6 +7832,7 @@ func TestProviderDisconnectPreflightAllowsCloudOnlyWorkspace(t *testing.T) {
 
 func TestIntegrationDisconnectRefusesBeforeCloudMutationWhenScopedStateIsPending(t *testing.T) {
 	record, localRoot := setupAdoptWorkspace(t)
+	record.RelayWorkspaceID = "ws_relay_runtime"
 	record.LocalLayout = mountscope.LayoutScoped
 	record.RemotePaths = []string{"/github/repos/acme"}
 	record.MountStateDir = t.TempDir()
@@ -7830,7 +7848,7 @@ func TestIntegrationDisconnectRefusesBeforeCloudMutationWhenScopedStateIsPending
 	if err := os.WriteFile(githubMirror, []byte("mirrored"), 0o644); err != nil {
 		t.Fatalf("write %s: %v", githubMirror, err)
 	}
-	stateFile, err := workspaceMountStateFile("ws_123", record, workspaceMountScopes(record)[0])
+	stateFile, err := workspaceMountStateFile(record.RelayWorkspaceID, record, workspaceMountScopes(record)[0])
 	if err != nil {
 		t.Fatalf("resolve private state: %v", err)
 	}
@@ -7862,6 +7880,82 @@ func TestIntegrationDisconnectRefusesBeforeCloudMutationWhenScopedStateIsPending
 		if _, err := os.Stat(path); err != nil {
 			t.Fatalf("expected refused disconnect to preserve %s: %v", path, err)
 		}
+	}
+}
+
+func TestProviderDisconnectPreflightIgnoresOtherProvidersInBroadScope(t *testing.T) {
+	localRoot := t.TempDir()
+	record := workspaceRecord{
+		ID:               "ws_cloud",
+		RelayWorkspaceID: "ws_runtime",
+		LocalDir:         localRoot,
+		LocalLayout:      mountscope.LayoutExact,
+		RemotePaths:      []string{"/"},
+		MountStateDir:    t.TempDir(),
+		MountKind:        mountsync.MountKindDaemon,
+	}
+	scope := workspaceMountScopes(record)[0]
+	stateFile, err := workspaceMountStateFile(record.RelayWorkspaceID, record, scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(stateFile), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		stateFile,
+		[]byte(`{"files":{"/slack/channels/project/message.json":{"dirty":true}}}`),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+	outboxDir := filepath.Join(localRoot, ".relay", "outbox", "pending")
+	if err := os.MkdirAll(outboxDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(outboxDir, "slack.json"),
+		[]byte(`{"remotePath":"/slack/channels/project/message.json"}`),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+	conflictPath := filepath.Join(localRoot, ".relay", "conflicts", "slack", "channels", "project", "message.json.rev.local")
+	if err := os.MkdirAll(filepath.Dir(conflictPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(conflictPath, []byte("conflict"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	deadLetterDir := filepath.Join(localRoot, ".relay", "dead-letter")
+	if err := os.MkdirAll(deadLetterDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(deadLetterDir, "slack-op.json"),
+		[]byte(`{"opId":"slack-op","path":"/slack/channels/project/message.json"}`),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := preflightProviderDisconnect(record, "github"); err != nil {
+		t.Fatalf("GitHub disconnect was blocked by unrelated Slack state: %v", err)
+	}
+}
+
+func TestProviderDisconnectPreflightRefusesUnknownPrivateState(t *testing.T) {
+	record := workspaceRecord{
+		ID:               "ws_cloud",
+		RelayWorkspaceID: "ws_runtime",
+		LocalDir:         t.TempDir(),
+		LocalLayout:      mountscope.LayoutExact,
+		RemotePaths:      []string{"/github"},
+		MountStateDir:    t.TempDir(),
+		MountKind:        mountsync.MountKindDaemon,
+	}
+	err := preflightProviderDisconnect(record, "github")
+	if err == nil || !strings.Contains(err.Error(), "private mount state is unknown") {
+		t.Fatalf("missing private state preflight = %v, want explicit unknown-state refusal", err)
 	}
 }
 

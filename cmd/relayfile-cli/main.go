@@ -12207,10 +12207,12 @@ func markProviderDisconnected(record workspaceRecord, provider string) error {
 }
 
 type providerDisconnectPlan struct {
-	cleanScopeDirs []string
-	removeSubtrees []string
-	stateDirs      []string
-	stateFiles     []string
+	cleanScopeDirs    []string
+	removeSubtrees    []string
+	stateDirs         []string
+	wholeProviderDirs []string
+	stateFiles        []string
+	unknownStateRoots []string
 }
 
 func planProviderDisconnect(record workspaceRecord, provider string) (providerDisconnectPlan, error) {
@@ -12221,15 +12223,15 @@ func planProviderDisconnect(record workspaceRecord, provider string) (providerDi
 	providerRoot := mountscope.NormalizePath("/" + providerRootDir(provider))
 	var plan providerDisconnectPlan
 	addScopeState := func(scope mountscope.Scope) error {
-		stateFile, err := workspaceMountStateFile(
-			firstNonBlank(record.ID, record.RelayWorkspaceID, record.Name),
-			record,
-			scope,
-		)
+		stateFiles, err := workspaceMountStateFilesForRecord(record, scope)
 		if err != nil {
 			return err
 		}
-		plan.stateFiles = append(plan.stateFiles, stateFile)
+		if len(stateFiles) == 0 {
+			plan.unknownStateRoots = append(plan.unknownStateRoots, scope.LocalDir)
+			return nil
+		}
+		plan.stateFiles = append(plan.stateFiles, stateFiles...)
 		return nil
 	}
 	if strings.TrimSpace(record.LocalLayout) != mountscope.LayoutScoped {
@@ -12251,6 +12253,7 @@ func planProviderDisconnect(record workspaceRecord, provider string) (providerDi
 			matchedScope = true
 			plan.cleanScopeDirs = append(plan.cleanScopeDirs, scope.LocalDir)
 			plan.stateDirs = append(plan.stateDirs, scope.LocalDir)
+			plan.wholeProviderDirs = append(plan.wholeProviderDirs, scope.LocalDir)
 			if err := addScopeState(scope); err != nil {
 				return providerDisconnectPlan{}, err
 			}
@@ -12273,6 +12276,48 @@ func planProviderDisconnect(record workspaceRecord, provider string) (providerDi
 		plan.stateFiles = append(plan.stateFiles, filepath.Join(localRoot, mountsync.LegacyMountStateFileName))
 	}
 	return plan, nil
+}
+
+func workspaceMountStateFilesForRecord(record workspaceRecord, scope mountscope.Scope) ([]string, error) {
+	// Mounts key private state by the runtime workspace ID passed to Syncer.
+	// Delegated Cloud records persist that identity as RelayWorkspaceID, while
+	// older/direct records may have used ID or Name. Inspect every distinct
+	// identity that can have keyed this record rather than guessing an order.
+	workspaceIDs := []string{record.RelayWorkspaceID, record.ID, record.Name}
+	seenIDs := map[string]struct{}{}
+	seenPaths := map[string]struct{}{}
+	var stateFiles []string
+	for _, workspaceID := range workspaceIDs {
+		workspaceID = strings.TrimSpace(workspaceID)
+		if workspaceID == "" {
+			continue
+		}
+		if _, ok := seenIDs[workspaceID]; ok {
+			continue
+		}
+		seenIDs[workspaceID] = struct{}{}
+		stateFile, err := workspaceMountStateFile(workspaceID, record, scope)
+		if err != nil {
+			return nil, err
+		}
+		stateFile = filepath.Clean(stateFile)
+		if _, ok := seenPaths[stateFile]; ok {
+			continue
+		}
+		info, err := os.Stat(stateFile)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			return nil, fmt.Errorf("inspect mount state %s: %w", stateFile, err)
+		}
+		if !info.Mode().IsRegular() {
+			return nil, fmt.Errorf("mount state path %s is not a regular file", stateFile)
+		}
+		seenPaths[stateFile] = struct{}{}
+		stateFiles = append(stateFiles, stateFile)
+	}
+	return stateFiles, nil
 }
 
 func preflightProviderDisconnect(record workspaceRecord, provider string) error {
@@ -12304,7 +12349,7 @@ func preflightProviderDisconnect(record workspaceRecord, provider string) error 
 			mountPIDFile(record.LocalDir),
 		)
 	}
-	return refuseProviderDisconnectWithPendingState(provider, plan.stateDirs, plan.stateFiles)
+	return refuseProviderDisconnectWithPendingState(provider, plan)
 }
 
 func removeProviderMirror(record workspaceRecord, provider string) error {
@@ -12340,10 +12385,22 @@ func removeProviderMirror(record workspaceRecord, provider string) error {
 	return nil
 }
 
-func refuseProviderDisconnectWithPendingState(provider string, localDirs, stateFiles []string) error {
+func refuseProviderDisconnectWithPendingState(provider string, plan providerDisconnectPlan) error {
+	if len(plan.unknownStateRoots) > 0 {
+		return fmt.Errorf(
+			"refusing to disconnect %s because private mount state is unknown for %s; restore the mount state or remount before disconnecting",
+			provider,
+			strings.Join(plan.unknownStateRoots, ", "),
+		)
+	}
 	seen := map[string]struct{}{}
+	providerRoot := mountscope.NormalizePath("/" + providerRootDir(provider))
+	wholeProviderDir := map[string]struct{}{}
+	for _, localDir := range plan.wholeProviderDirs {
+		wholeProviderDir[filepath.Clean(strings.TrimSpace(localDir))] = struct{}{}
+	}
 	outbox, conflicts, deadLetters, privatePending := 0, 0, 0, 0
-	for _, localDir := range localDirs {
+	for _, localDir := range plan.stateDirs {
 		cleaned := filepath.Clean(strings.TrimSpace(localDir))
 		if cleaned == "." {
 			continue
@@ -12353,17 +12410,33 @@ func refuseProviderDisconnectWithPendingState(provider string, localDirs, stateF
 		}
 		seen[cleaned] = struct{}{}
 		runtimeRoot := filepath.Join(cleaned, ".relay")
-		outbox += countJSONFiles(filepath.Join(runtimeRoot, "outbox", "pending"))
-		outbox += countJSONFiles(filepath.Join(runtimeRoot, "outbox", "failed"))
-		outbox += countJSONFiles(filepath.Join(runtimeRoot, "outbox", "attention"))
-		conflicts += countFilesInDir(filepath.Join(runtimeRoot, "conflicts"))
+		_, wholeDir := wholeProviderDir[cleaned]
+		if wholeDir {
+			for _, state := range []string{"pending", "failed", "attention"} {
+				outbox += countJSONFiles(filepath.Join(runtimeRoot, "outbox", state))
+			}
+			conflicts += countFilesInDir(filepath.Join(runtimeRoot, "conflicts"))
+		} else {
+			for _, state := range []string{"pending", "failed", "attention"} {
+				count, err := countProviderOutboxRecords(filepath.Join(runtimeRoot, "outbox", state), providerRoot)
+				if err != nil {
+					return fmt.Errorf("inspect outbox before disconnecting %s: %w", provider, err)
+				}
+				outbox += count
+			}
+			conflicts += countFilesInDir(filepath.Join(runtimeRoot, "conflicts", filepath.FromSlash(strings.TrimPrefix(providerRoot, "/"))))
+		}
 		records, err := readDeadLetterRecords(cleaned)
 		if err != nil {
 			return fmt.Errorf("inspect dead letters before disconnecting %s: %w", provider, err)
 		}
-		deadLetters += len(records)
+		for _, record := range records {
+			if wholeDir || strings.TrimSpace(record.Path) == "" || mountscope.IsWithin(providerRoot, record.Path) {
+				deadLetters++
+			}
+		}
 	}
-	for _, stateFile := range stateFiles {
+	for _, stateFile := range plan.stateFiles {
 		cleaned := filepath.Clean(strings.TrimSpace(stateFile))
 		if cleaned == "." {
 			continue
@@ -12372,7 +12445,7 @@ func refuseProviderDisconnectWithPendingState(provider string, localDirs, stateF
 			continue
 		}
 		seen[cleaned] = struct{}{}
-		count, err := pendingTrackedFileCountAt(cleaned)
+		count, err := pendingTrackedFileCountForProvider(cleaned, providerRoot)
 		if err != nil {
 			return fmt.Errorf("inspect private mount state before disconnecting %s: %w", provider, err)
 		}
@@ -12389,6 +12462,67 @@ func refuseProviderDisconnectWithPendingState(provider string, localDirs, stateF
 		deadLetters,
 		privatePending,
 	)
+}
+
+func countProviderOutboxRecords(dir, providerRoot string) (int, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	count := 0
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		payload, err := os.ReadFile(filepath.Join(dir, entry.Name()))
+		if err != nil {
+			return 0, err
+		}
+		var record struct {
+			RemotePath string `json:"remotePath"`
+		}
+		if err := json.Unmarshal(payload, &record); err != nil {
+			// An unreadable record cannot be proven unrelated to the provider.
+			// Count it conservatively so disconnect refuses instead of deleting
+			// state whose ownership is unknown.
+			count++
+			continue
+		}
+		if strings.TrimSpace(record.RemotePath) == "" || mountscope.IsWithin(providerRoot, record.RemotePath) {
+			count++
+		}
+	}
+	return count, nil
+}
+
+func pendingTrackedFileCountForProvider(stateFile, providerRoot string) (int, error) {
+	var state struct {
+		Files map[string]struct {
+			Dirty         bool `json:"dirty"`
+			DeletePending bool `json:"deletePending"`
+		} `json:"files"`
+	}
+	payload, err := os.ReadFile(stateFile)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	if err := json.Unmarshal(payload, &state); err != nil {
+		return 0, err
+	}
+	count := 0
+	for remotePath, tracked := range state.Files {
+		if (strings.TrimSpace(remotePath) == "" || mountscope.IsWithin(providerRoot, remotePath)) &&
+			(tracked.Dirty || tracked.DeletePending) {
+			count++
+		}
+	}
+	return count, nil
 }
 
 // providerRootDir maps a provider id to the directory name it occupies

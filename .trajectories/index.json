@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "lastUpdated": "2026-07-30T10:13:35.302Z",
+  "lastUpdated": "2026-07-30T10:27:07.683Z",
   "trajectories": {
     "traj_4pvrlmqfnzng": {
       "title": "Review PR #278 in AgentWorkforce/relayfile",
@@ -218,6 +218,20 @@
       "startedAt": "2026-07-30T09:02:41.145Z",
       "completedAt": "2026-07-30T09:58:24.657Z",
       "path": ".trajectories/completed/2026-07/traj_1kmlyo9fwsnv.json"
+    },
+    "traj_2a93tcgvb68h": {
+      "title": "Review changes against fix/scoped-multipath-cli-runtime",
+      "status": "completed",
+      "startedAt": "2026-07-30T10:13:57.008Z",
+      "completedAt": "2026-07-30T10:16:19.338Z",
+      "path": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-c/.trajectories/completed/2026-07/traj_2a93tcgvb68h.json"
+    },
+    "traj_3dm6nse5csdk": {
+      "title": "Close Unit C second-review disconnect findings",
+      "status": "completed",
+      "startedAt": "2026-07-30T10:17:52.747Z",
+      "completedAt": "2026-07-30T10:27:07.565Z",
+      "path": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-c/.trajectories/completed/2026-07/traj_3dm6nse5csdk.json"
     }
   }
 }
