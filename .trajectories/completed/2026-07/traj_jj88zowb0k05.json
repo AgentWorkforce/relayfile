@@ -1,0 +1,57 @@
+{
+  "id": "traj_jj88zowb0k05",
+  "version": 1,
+  "task": {
+    "title": "Extract shared mount scope contract from PR #384",
+    "source": {
+      "system": "plain",
+      "id": "relayfile#379"
+    }
+  },
+  "status": "completed",
+  "startedAt": "2026-07-30T04:20:38.199Z",
+  "completedAt": "2026-07-30T04:23:38.033Z",
+  "agents": [
+    {
+      "name": "default",
+      "role": "lead",
+      "joinedAt": "2026-07-30T04:21:20.560Z"
+    }
+  ],
+  "chapters": [
+    {
+      "id": "chap_2t7ibmkdjg7h",
+      "title": "Work",
+      "agentName": "default",
+      "startedAt": "2026-07-30T04:21:20.560Z",
+      "endedAt": "2026-07-30T04:23:38.033Z",
+      "events": [
+        {
+          "ts": 1785385280561,
+          "type": "decision",
+          "content": "Split #379 into a three-PR review stack without partial rollout: Split #379 into a three-PR review stack without partial rollout",
+          "raw": {
+            "question": "Split #379 into a three-PR review stack without partial rollout",
+            "chosen": "Split #379 into a three-PR review stack without partial rollout",
+            "alternatives": [],
+            "reasoning": "PR #384 accumulated same-class multi-root findings across four review rounds. Unit A can land independently because it only centralizes the existing daemon scope contract. Units B and C are stacked for reviewability, but B must not merge until C is ready because a working scoped mount with single-root operator reporting would misrepresent a security-relevant boundary."
+          },
+          "significance": "high"
+        }
+      ]
+    }
+  ],
+  "retrospective": {
+    "summary": "Extracted the standalone daemon's path parsing and scoped layout planning into internal/mountscope, added overlap/blank/path-file protections and multi-path FUSE refusal, and clarified daemon-only scoped usage. No shipped relayfile CLI behavior changes. Full go test ./... -count=1, focused vet, and focused race tests pass.",
+    "approach": "Standard approach",
+    "confidence": 0.92
+  },
+  "commits": [],
+  "filesChanged": [],
+  "projectId": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-a",
+  "tags": [],
+  "_trace": {
+    "startRef": "2089059b0f2ee794f604a06f6153f2217153dd7e",
+    "endRef": "2089059b0f2ee794f604a06f6153f2217153dd7e"
+  }
+}
