@@ -6235,6 +6235,36 @@ func runMount(args []string) error {
 			}
 		}
 	}
+	pidFile := strings.TrimSpace(*pidFileFlag)
+	if pidFile == "" {
+		pidFile = mountPIDFile(absLocalDir)
+	}
+	logFile := strings.TrimSpace(*logFileFlag)
+	if logFile == "" {
+		logFile = mountLogFile(absLocalDir)
+	}
+	// Refuse a competing daemon before persisting topology or initializing
+	// child roots. A rejected start must not change the allowlist that the
+	// already-running process, status commands, or a later restart observe.
+	if shouldRefuseCompetingMount(*daemonized, *once) {
+		running, stalePID, derr := runningMountDaemons(absLocalDir, workspaceID, workspaceNameForStart(workspaceID))
+		if derr != nil {
+			return fmt.Errorf("check for existing mount daemon: %w", derr)
+		}
+		if stalePID != 0 {
+			if rerr := os.Remove(mountPIDFile(absLocalDir)); rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
+				return fmt.Errorf("failed to clear stale background mount state for %s: %w", workspaceID, rerr)
+			}
+		}
+		if len(running) > 0 {
+			return fmt.Errorf(
+				"workspace %s already has a running mount for %s (%s); stop it before starting another",
+				workspaceID,
+				absLocalDir,
+				formatDaemonPIDs(running),
+			)
+		}
+	}
 	// Persist the resolved topology before creating any mirror directory. A
 	// current writer must never leave scoped child roots behind a blank
 	// LocalLayout if a later initialization step fails.
@@ -6288,35 +6318,6 @@ func runMount(args []string) error {
 		*timeout = defaultMountTimeout
 	}
 	*intervalJitter = clampJitterRatio(*intervalJitter)
-
-	pidFile := strings.TrimSpace(*pidFileFlag)
-	if pidFile == "" {
-		pidFile = mountPIDFile(absLocalDir)
-	}
-	logFile := strings.TrimSpace(*logFileFlag)
-	if logFile == "" {
-		logFile = mountLogFile(absLocalDir)
-	}
-
-	if shouldRefuseCompetingMount(*daemonized, *once) {
-		running, stalePID, derr := runningMountDaemons(absLocalDir, workspaceID, workspaceNameForStart(workspaceID))
-		if derr != nil {
-			return fmt.Errorf("check for existing mount daemon: %w", derr)
-		}
-		if stalePID != 0 {
-			if rerr := os.Remove(mountPIDFile(absLocalDir)); rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
-				return fmt.Errorf("failed to clear stale background mount state for %s: %w", workspaceID, rerr)
-			}
-		}
-		if len(running) > 0 {
-			return fmt.Errorf(
-				"workspace %s already has a running mount for %s (%s); stop it before starting another",
-				workspaceID,
-				absLocalDir,
-				formatDaemonPIDs(running),
-			)
-		}
-	}
 
 	if *background && !*daemonized {
 		return spawnBackgroundMountProcessFn(args, absLocalDir, pidFile, logFile)

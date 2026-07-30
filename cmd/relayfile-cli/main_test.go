@@ -2850,6 +2850,61 @@ func TestMountRehomeRefusesRunningRecordedDaemon(t *testing.T) {
 	}
 }
 
+func TestMountRefusesCompetingDaemonBeforePersistingAddedScope(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	localDir := t.TempDir()
+	now := time.Now().UTC().Format(time.RFC3339)
+	if err := saveWorkspaceCatalog(workspaceCatalog{
+		Default: "demo",
+		Workspaces: []workspaceRecord{{
+			Name:        "demo",
+			ID:          "ws_demo",
+			LocalDir:    localDir,
+			LocalLayout: mountscope.LayoutScoped,
+			RemotePaths: []string{"/github"},
+			CreatedAt:   now,
+			LastUsedAt:  now,
+		}},
+	}); err != nil {
+		t.Fatalf("saveWorkspaceCatalog failed: %v", err)
+	}
+	if err := ensureMirrorLayout(localDir); err != nil {
+		t.Fatalf("ensureMirrorLayout failed: %v", err)
+	}
+	if err := writeDaemonPIDState(mountPIDFile(localDir), daemonPIDState{
+		PID:         os.Getpid(),
+		WorkspaceID: "ws_demo",
+		LocalDir:    localDir,
+		Executable:  resolvedSelfExecutable(),
+	}); err != nil {
+		t.Fatalf("write daemon pid state failed: %v", err)
+	}
+
+	err := run([]string{
+		"mount", "demo", localDir,
+		"--token", testJWTWithWorkspace("ws_demo"),
+		"--remote-path", "/github",
+		"--remote-path", "/slack",
+		"--local-layout", "scoped",
+		"--background",
+	}, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "already has a running mount") {
+		t.Fatalf("expected competing-daemon refusal, got %v", err)
+	}
+	record, ok := workspaceRecordByID("ws_demo")
+	if !ok {
+		t.Fatal("expected persisted workspace record")
+	}
+	if got := strings.Join(record.RemotePaths, ","); got != "/github" {
+		t.Fatalf("refused start changed persisted paths to %q", got)
+	}
+	if _, statErr := os.Stat(filepath.Join(localDir, "slack")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("refused start initialized added scope: %v", statErr)
+	}
+}
+
 func TestMountRehomeRefusesUnverifiedRecordedDaemon(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)

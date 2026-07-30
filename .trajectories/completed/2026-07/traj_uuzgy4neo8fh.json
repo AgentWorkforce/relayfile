@@ -1,0 +1,57 @@
+{
+  "id": "traj_uuzgy4neo8fh",
+  "version": 1,
+  "task": {
+    "title": "Refuse competing mount before topology mutation",
+    "source": {
+      "system": "plain",
+      "id": "relayfile#379"
+    }
+  },
+  "status": "completed",
+  "startedAt": "2026-07-30T05:42:47.387Z",
+  "completedAt": "2026-07-30T05:45:28.010Z",
+  "agents": [
+    {
+      "name": "default",
+      "role": "lead",
+      "joinedAt": "2026-07-30T05:45:27.944Z"
+    }
+  ],
+  "chapters": [
+    {
+      "id": "chap_zf0h402ypfit",
+      "title": "Work",
+      "agentName": "default",
+      "startedAt": "2026-07-30T05:45:27.944Z",
+      "endedAt": "2026-07-30T05:45:28.010Z",
+      "events": [
+        {
+          "ts": 1785390327945,
+          "type": "decision",
+          "content": "Check competing daemons before write-ahead topology persistence: Check competing daemons before write-ahead topology persistence",
+          "raw": {
+            "question": "Check competing daemons before write-ahead topology persistence",
+            "chosen": "Check competing daemons before write-ahead topology persistence",
+            "alternatives": [],
+            "reasoning": "Write-ahead persistence protects starts that are actually proceeding, but a rejected competing start is not a start. Its refusal must precede every catalog and filesystem mutation so failure preserves the running mount's observable configuration."
+          },
+          "significance": "high"
+        }
+      ]
+    }
+  ],
+  "retrospective": {
+    "summary": "Moved competing-daemon refusal ahead of topology persistence and child initialization; regression proves a rejected scope addition leaves the catalog and filesystem unchanged; full vet and Go suite pass.",
+    "approach": "Standard approach",
+    "confidence": 0.95
+  },
+  "commits": [],
+  "filesChanged": [],
+  "projectId": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-b",
+  "tags": [],
+  "_trace": {
+    "startRef": "e48398617b64a12e9928877904b1f63cc4726b3a",
+    "endRef": "e48398617b64a12e9928877904b1f63cc4726b3a"
+  }
+}
