@@ -315,6 +315,17 @@ func TestLocalWritebackHashesIncludesCatalogNamedProviderContentForScopedChild(t
 	}
 }
 
+func TestLocalWritebackHashesTreatsMissingScopeAsEmpty(t *testing.T) {
+	localDir := filepath.Join(t.TempDir(), "not-materialized")
+	hashes, err := localWritebackHashes(localDir, "/github", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hashes) != 0 {
+		t.Fatalf("missing scope hashes = %#v, want empty", hashes)
+	}
+}
+
 func TestWritebackListPendingUsesCatalogRootWithoutPublicSnapshot(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	localDir := t.TempDir()

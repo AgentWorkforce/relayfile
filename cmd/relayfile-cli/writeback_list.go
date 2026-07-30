@@ -206,7 +206,17 @@ func readPendingWritebackItemsFromState(workspaceID, localDir, remoteRoot, state
 
 func localWritebackHashes(localDir, remoteRoot string, scopedChild bool) (map[string]string, error) {
 	hashes := map[string]string{}
-	err := filepath.WalkDir(localDir, func(path string, entry os.DirEntry, err error) error {
+	info, err := os.Stat(localDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return hashes, nil
+		}
+		return nil, err
+	}
+	if !info.IsDir() {
+		return nil, fmt.Errorf("local writeback root %s is not a directory", localDir)
+	}
+	err = filepath.WalkDir(localDir, func(path string, entry os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}

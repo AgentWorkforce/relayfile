@@ -6006,19 +6006,57 @@ func firstNonBlank(values ...string) string {
 }
 
 type opsListResponse struct {
-	Items []struct {
-		OpID          string  `json:"opId"`
-		Path          string  `json:"path,omitempty"`
-		Action        string  `json:"action,omitempty"`
-		Provider      string  `json:"provider,omitempty"`
-		Status        string  `json:"status"`
-		AttemptCount  int     `json:"attemptCount"`
-		LastError     *string `json:"lastError,omitempty"`
-		CreatedAt     string  `json:"createdAt,omitempty"`
-		UpdatedAt     string  `json:"updatedAt,omitempty"`
-		CorrelationID string  `json:"correlationId,omitempty"`
-	} `json:"items"`
-	NextCursor *string `json:"nextCursor,omitempty"`
+	Items      []opsListItem `json:"items"`
+	NextCursor *string       `json:"nextCursor,omitempty"`
+}
+
+type opsListItem struct {
+	OpID          string  `json:"opId"`
+	Path          string  `json:"path,omitempty"`
+	Action        string  `json:"action,omitempty"`
+	Provider      string  `json:"provider,omitempty"`
+	Status        string  `json:"status"`
+	AttemptCount  int     `json:"attemptCount"`
+	LastError     *string `json:"lastError,omitempty"`
+	CreatedAt     string  `json:"createdAt,omitempty"`
+	UpdatedAt     string  `json:"updatedAt,omitempty"`
+	CorrelationID string  `json:"correlationId,omitempty"`
+}
+
+// deadLetterRefreshPlan exists only for a complete, validated server set.
+// Callers cannot accidentally prune from a partial response because no plan
+// is returned for a missing array, unsafe id, or duplicate id.
+type deadLetterRefreshPlan struct {
+	items      []opsListItem
+	targetDirs map[string]string
+}
+
+func validateDeadLetterRefreshPlan(record workspaceRecord, feed opsListResponse) (deadLetterRefreshPlan, error) {
+	if feed.Items == nil {
+		return deadLetterRefreshPlan{}, errors.New("dead-letter response is missing required items array")
+	}
+	plan := deadLetterRefreshPlan{
+		items:      feed.Items,
+		targetDirs: make(map[string]string, len(feed.Items)),
+	}
+	for _, item := range feed.Items {
+		opID := safeWritebackOpID(item.OpID)
+		if opID == "" {
+			return deadLetterRefreshPlan{}, fmt.Errorf(
+				"dead-letter response contains unsafe or missing opId %q",
+				strings.TrimSpace(item.OpID),
+			)
+		}
+		if _, exists := plan.targetDirs[opID]; exists {
+			return deadLetterRefreshPlan{}, fmt.Errorf("dead-letter response contains duplicate opId %q", opID)
+		}
+		targetDir := workspaceStateDirForDeadLetterPaths(record, item.Path)
+		if targetDir == "" {
+			targetDir = record.LocalDir
+		}
+		plan.targetDirs[opID] = targetDir
+	}
+	return plan, nil
 }
 
 // refreshDeadLetterMirror reconciles the local .relay/dead-letter/ directory
@@ -6047,22 +6085,15 @@ func refreshDeadLetterMirror(record workspaceRecord, serverOverride, tokenOverri
 	); err != nil {
 		return err
 	}
+	plan, err := validateDeadLetterRefreshPlan(record, feed)
+	if err != nil {
+		return err
+	}
 
-	targetDirs := make(map[string]string, len(feed.Items))
 	baseURL := strings.TrimRight(client.baseURL, "/")
-	for _, item := range feed.Items {
+	for _, item := range plan.items {
 		opID := safeWritebackOpID(item.OpID)
-		if opID == "" {
-			if trimmed := strings.TrimSpace(item.OpID); trimmed != "" {
-				fmt.Fprintf(os.Stderr, "warning: skipping dead-letter op with unsafe id %q\n", trimmed)
-			}
-			continue
-		}
-		targetDir := workspaceStateDirForDeadLetterPaths(record, item.Path)
-		if targetDir == "" {
-			targetDir = record.LocalDir
-		}
-		targetDirs[opID] = targetDir
+		targetDir := plan.targetDirs[opID]
 		dir := deadLetterDirFor(targetDir)
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return err
@@ -6115,7 +6146,7 @@ func refreshDeadLetterMirror(record workspaceRecord, serverOverride, tokenOverri
 				continue
 			}
 			opID := strings.TrimSuffix(name, ".json")
-			targetDir, retained := targetDirs[opID]
+			targetDir, retained := plan.targetDirs[opID]
 			if retained && filepath.Clean(targetDir) == filepath.Clean(localDir) {
 				continue
 			}
@@ -6564,18 +6595,24 @@ func buildWorkspaceHealthReport(workspaceID string, record workspaceRecord) work
 	}
 	statuses := map[string]struct{}{}
 	errorsSeen := map[string]struct{}{}
+	lastSuccessfulReconcileUnknown := false
+	lastReconcileUnknown := false
 	for _, scope := range workspaceMountScopes(record) {
 		localDir := scope.LocalDir
 		state := readWritebackStateBestEffort(localDir)
 		if status := strings.TrimSpace(state.Status); status != "" {
 			statuses[status] = struct{}{}
 		}
-		if state.LastSuccessfulReconcileAt > report.LastSuccessfulReconcileAt {
-			report.LastSuccessfulReconcileAt = strings.TrimSpace(state.LastSuccessfulReconcileAt)
-		}
-		if state.LastReconcileAt > report.LastReconcileAt {
-			report.LastReconcileAt = strings.TrimSpace(state.LastReconcileAt)
-		}
+		report.LastSuccessfulReconcileAt, lastSuccessfulReconcileUnknown = latestRFC3339Timestamp(
+			report.LastSuccessfulReconcileAt,
+			state.LastSuccessfulReconcileAt,
+			lastSuccessfulReconcileUnknown,
+		)
+		report.LastReconcileAt, lastReconcileUnknown = latestRFC3339Timestamp(
+			report.LastReconcileAt,
+			state.LastReconcileAt,
+			lastReconcileUnknown,
+		)
 		if state.LastError != nil {
 			if message := strings.TrimSpace(firstNonBlank(state.LastError.Message, state.LastError.Code)); message != "" {
 				errorsSeen[message] = struct{}{}
@@ -6595,13 +6632,39 @@ func buildWorkspaceHealthReport(workspaceID string, record workspaceRecord) work
 	// active scoped loops own child roots. Sweep the complete deduplicated
 	// state-dir set so health never reports a clean queue by omission.
 	for _, localDir := range workspaceStateDirs(record) {
-		report.OutboxPending += countJSONFiles(filepath.Join(localDir, ".relay", "outbox", "pending"))
-		report.OutboxFailed += countJSONFiles(filepath.Join(localDir, ".relay", "outbox", "failed"))
-		report.OutboxAcked += countJSONFiles(filepath.Join(localDir, ".relay", "outbox", "acked"))
+		report.OutboxPending += countJSONFiles(filepath.Join(localDir, ".relay", "outbox", "pending")).Count
+		report.OutboxFailed += countJSONFiles(filepath.Join(localDir, ".relay", "outbox", "failed")).Count
+		report.OutboxAcked += countJSONFiles(filepath.Join(localDir, ".relay", "outbox", "acked")).Count
 	}
 	report.Status = joinSortedKeys(statuses)
 	report.LastError = joinSortedKeys(errorsSeen)
 	return report
+}
+
+func latestRFC3339Timestamp(current, candidate string, unknown bool) (string, bool) {
+	if unknown {
+		return "", true
+	}
+	current = strings.TrimSpace(current)
+	candidate = strings.TrimSpace(candidate)
+	if candidate == "" {
+		return current, false
+	}
+	candidateTime, candidateErr := time.Parse(time.RFC3339Nano, candidate)
+	if candidateErr != nil {
+		// One malformed child makes the aggregate latest time unknown. Picking
+		// a parseable sibling would present a confident answer from partial
+		// persisted state.
+		return "", true
+	}
+	currentTime, currentErr := time.Parse(time.RFC3339Nano, current)
+	if current != "" && currentErr != nil {
+		return "", true
+	}
+	if current == "" || candidateTime.After(currentTime) {
+		return candidate, false
+	}
+	return current, false
 }
 
 func joinSortedKeys(values map[string]struct{}) string {
@@ -6640,10 +6703,18 @@ func readWorkspaceMountCursorHealth(workspaceID string, record workspaceRecord, 
 	return len(state.IncrementalReadNotReadySince), state.IncrementalBacklogDraining
 }
 
-func countJSONFiles(dir string) int {
+type observedFileCount struct {
+	Count int
+	Err   error
+}
+
+func countJSONFiles(dir string) observedFileCount {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return 0
+		if errors.Is(err, os.ErrNotExist) {
+			return observedFileCount{}
+		}
+		return observedFileCount{Err: err}
 	}
 	count := 0
 	for _, entry := range entries {
@@ -6651,7 +6722,7 @@ func countJSONFiles(dir string) int {
 			count++
 		}
 	}
-	return count
+	return observedFileCount{Count: count}
 }
 
 func printWorkspaceHealthReport(stdout io.Writer, report workspaceHealthReport) {
@@ -11310,7 +11381,7 @@ func buildSyncStateSnapshot(status syncStatusResponse, workspaceID, mode string,
 		Mode:             defaultIfBlank(mode, defaultMountMode),
 		IntervalMs:       interval.Milliseconds(),
 		PendingWriteback: countPendingTrackedFiles(localDir),
-		PendingConflicts: countFilesInDir(filepath.Join(localDir, ".relay", "conflicts")),
+		PendingConflicts: countFilesInDir(filepath.Join(localDir, ".relay", "conflicts")).Count,
 		DeniedPaths:      countLines(filepath.Join(localDir, ".relay", "permissions-denied.log")),
 		FailedWritebacks: readPersistedFailedWritebacks(localDir),
 		StallReason:      stallReason,
@@ -11570,10 +11641,13 @@ func pendingTrackedFileCountAt(stateFile string) (int, error) {
 	return count, nil
 }
 
-func countFilesInDir(dir string) int {
+func countFilesInDir(dir string) observedFileCount {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return 0
+		if errors.Is(err, os.ErrNotExist) {
+			return observedFileCount{}
+		}
+		return observedFileCount{Err: err}
 	}
 	count := 0
 	for _, entry := range entries {
@@ -11581,14 +11655,18 @@ func countFilesInDir(dir string) int {
 			if entry.Name() == "resolved" {
 				continue
 			}
-			count += countFilesInDir(filepath.Join(dir, entry.Name()))
+			child := countFilesInDir(filepath.Join(dir, entry.Name()))
+			count += child.Count
+			if child.Err != nil {
+				return observedFileCount{Count: count, Err: child.Err}
+			}
 			continue
 		}
 		if !entry.IsDir() {
 			count++
 		}
 	}
-	return count
+	return observedFileCount{Count: count}
 }
 
 func countLines(path string) int {
@@ -12280,7 +12358,22 @@ type providerDisconnectPlan struct {
 	stateDirs         []string
 	wholeProviderDirs []string
 	stateFiles        []string
+	stateSources      []providerDisconnectStateSource
 	unknownStateRoots []string
+	deletions         []providerDisconnectDeletion
+}
+
+type providerDisconnectDeletion struct {
+	path        string
+	kind        string
+	fingerprint string
+}
+
+type providerDisconnectStateSource struct {
+	stateFile   string
+	localDir    string
+	remoteRoot  string
+	scopedChild bool
 }
 
 func planProviderDisconnect(record workspaceRecord, provider string) (providerDisconnectPlan, error) {
@@ -12299,7 +12392,15 @@ func planProviderDisconnect(record workspaceRecord, provider string) (providerDi
 			plan.unknownStateRoots = append(plan.unknownStateRoots, scope.LocalDir)
 			return nil
 		}
-		plan.stateFiles = append(plan.stateFiles, stateFiles...)
+		for _, stateFile := range stateFiles {
+			plan.stateFiles = append(plan.stateFiles, stateFile)
+			plan.stateSources = append(plan.stateSources, providerDisconnectStateSource{
+				stateFile:   stateFile,
+				localDir:    scope.LocalDir,
+				remoteRoot:  scope.RemotePath,
+				scopedChild: strings.TrimSpace(record.LocalLayout) == mountscope.LayoutScoped,
+			})
+		}
 		return nil
 	}
 	if strings.TrimSpace(record.LocalLayout) != mountscope.LayoutScoped {
@@ -12343,9 +12444,15 @@ func planProviderDisconnect(record workspaceRecord, provider string) (providerDi
 		}
 	}
 	if !matchedScope {
+		legacyStateFile := filepath.Join(localRoot, mountsync.LegacyMountStateFileName)
 		plan.removeSubtrees = append(plan.removeSubtrees, filepath.Join(localRoot, filepath.FromSlash(strings.TrimPrefix(providerRoot, "/"))))
 		plan.stateDirs = append(plan.stateDirs, localRoot)
-		plan.stateFiles = append(plan.stateFiles, filepath.Join(localRoot, mountsync.LegacyMountStateFileName))
+		plan.stateFiles = append(plan.stateFiles, legacyStateFile)
+		plan.stateSources = append(plan.stateSources, providerDisconnectStateSource{
+			stateFile:  legacyStateFile,
+			localDir:   localRoot,
+			remoteRoot: "/",
+		})
 	}
 	return plan, nil
 }
@@ -12429,6 +12536,9 @@ func prepareProviderDisconnect(record workspaceRecord, provider string) (provide
 	if err := refuseProviderDisconnectWithPendingState(provider, plan); err != nil {
 		return providerDisconnectPlan{}, err
 	}
+	if err := captureProviderDisconnectDeletions(&plan); err != nil {
+		return providerDisconnectPlan{}, fmt.Errorf("snapshot local files before disconnecting %s: %w", provider, err)
+	}
 	return plan, nil
 }
 
@@ -12441,29 +12551,124 @@ func removeProviderMirror(record workspaceRecord, provider string) error {
 }
 
 func removeProviderMirrorWithPlan(plan providerDisconnectPlan) error {
-	for _, scopeDir := range plan.cleanScopeDirs {
-		entries, err := os.ReadDir(scopeDir)
+	// Verify the complete allow-list before deleting any entry. The plan is a
+	// snapshot, not a rule: paths created after preflight are never selected.
+	for _, deletion := range plan.deletions {
+		kind, fingerprint, err := providerDisconnectPathIdentity(deletion.path)
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
 				continue
 			}
 			return err
 		}
-		for _, entry := range entries {
-			if entry.Name() == ".relay" || mountscope.IsInfrastructureTopLevelAt(scopeDir, entry.Name()) {
-				continue
-			}
-			if err := os.RemoveAll(filepath.Join(scopeDir, entry.Name())); err != nil {
-				return err
-			}
+		if kind != deletion.kind || fingerprint != deletion.fingerprint {
+			return fmt.Errorf(
+				"refusing local disconnect cleanup because %s changed after preflight",
+				deletion.path,
+			)
 		}
 	}
-	for _, subtree := range plan.removeSubtrees {
-		if err := os.RemoveAll(subtree); err != nil {
+	for _, deletion := range plan.deletions {
+		err := os.Remove(deletion.path)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
 	}
 	return nil
+}
+
+func captureProviderDisconnectDeletions(plan *providerDisconnectPlan) error {
+	if plan == nil {
+		return nil
+	}
+	seen := map[string]struct{}{}
+	addTree := func(root string, includeRoot, preserveInfrastructure bool) error {
+		root = filepath.Clean(strings.TrimSpace(root))
+		if root == "." {
+			return nil
+		}
+		return filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+			if err != nil {
+				if path == root && errors.Is(err, os.ErrNotExist) {
+					return nil
+				}
+				return err
+			}
+			if path == root && !includeRoot {
+				return nil
+			}
+			if preserveInfrastructure && path != root {
+				rel, relErr := filepath.Rel(root, path)
+				if relErr != nil {
+					return relErr
+				}
+				topLevel := strings.SplitN(rel, string(os.PathSeparator), 2)[0]
+				if topLevel == ".relay" || mountscope.IsInfrastructureTopLevelAt(root, topLevel) {
+					if entry.IsDir() && rel == topLevel {
+						return filepath.SkipDir
+					}
+					return nil
+				}
+			}
+			cleaned := filepath.Clean(path)
+			if _, ok := seen[cleaned]; ok {
+				return nil
+			}
+			kind, fingerprint, identityErr := providerDisconnectPathIdentity(cleaned)
+			if identityErr != nil {
+				return identityErr
+			}
+			seen[cleaned] = struct{}{}
+			plan.deletions = append(plan.deletions, providerDisconnectDeletion{
+				path:        cleaned,
+				kind:        kind,
+				fingerprint: fingerprint,
+			})
+			return nil
+		})
+	}
+	for _, scopeDir := range plan.cleanScopeDirs {
+		if err := addTree(scopeDir, false, true); err != nil {
+			return err
+		}
+	}
+	for _, subtree := range plan.removeSubtrees {
+		if err := addTree(subtree, true, false); err != nil {
+			return err
+		}
+	}
+	sort.Slice(plan.deletions, func(i, j int) bool {
+		leftDepth := strings.Count(filepath.Clean(plan.deletions[i].path), string(os.PathSeparator))
+		rightDepth := strings.Count(filepath.Clean(plan.deletions[j].path), string(os.PathSeparator))
+		if leftDepth != rightDepth {
+			return leftDepth > rightDepth
+		}
+		return plan.deletions[i].path > plan.deletions[j].path
+	})
+	return nil
+}
+
+func providerDisconnectPathIdentity(path string) (string, string, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return "", "", err
+	}
+	switch {
+	case info.IsDir():
+		return "directory", "", nil
+	case info.Mode().IsRegular():
+		hash, hashErr := hashLocalWritebackFile(path)
+		return "file", hash, hashErr
+	case info.Mode()&os.ModeSymlink != 0:
+		target, readErr := os.Readlink(path)
+		if readErr != nil {
+			return "", "", readErr
+		}
+		sum := sha256.Sum256([]byte(target))
+		return "symlink", hex.EncodeToString(sum[:]), nil
+	default:
+		return "", "", fmt.Errorf("unsupported local entry %s (%s)", path, info.Mode())
+	}
 }
 
 func refuseProviderDisconnectWithPendingState(provider string, plan providerDisconnectPlan) error {
@@ -12494,9 +12699,17 @@ func refuseProviderDisconnectWithPendingState(provider string, plan providerDisc
 		_, wholeDir := wholeProviderDir[cleaned]
 		if wholeDir {
 			for _, state := range []string{"pending", "failed", "attention"} {
-				outbox += countJSONFiles(filepath.Join(runtimeRoot, "outbox", state))
+				count := countFilesInDir(filepath.Join(runtimeRoot, "outbox", state))
+				if count.Err != nil {
+					return fmt.Errorf("inspect outbox before disconnecting %s: %w", provider, count.Err)
+				}
+				outbox += count.Count
 			}
-			conflicts += countFilesInDir(filepath.Join(runtimeRoot, "conflicts"))
+			count := countFilesInDir(filepath.Join(runtimeRoot, "conflicts"))
+			if count.Err != nil {
+				return fmt.Errorf("inspect conflicts before disconnecting %s: %w", provider, count.Err)
+			}
+			conflicts += count.Count
 		} else {
 			for _, state := range []string{"pending", "failed", "attention"} {
 				count, err := countProviderOutboxRecords(filepath.Join(runtimeRoot, "outbox", state), providerRoot)
@@ -12505,7 +12718,13 @@ func refuseProviderDisconnectWithPendingState(provider string, plan providerDisc
 				}
 				outbox += count
 			}
-			conflicts += countFilesInDir(filepath.Join(runtimeRoot, "conflicts", filepath.FromSlash(strings.TrimPrefix(providerRoot, "/"))))
+			count := countFilesInDir(
+				filepath.Join(runtimeRoot, "conflicts", filepath.FromSlash(strings.TrimPrefix(providerRoot, "/"))),
+			)
+			if count.Err != nil {
+				return fmt.Errorf("inspect conflicts before disconnecting %s: %w", provider, count.Err)
+			}
+			conflicts += count.Count
 		}
 		records, err := readDeadLetterRecords(cleaned)
 		if err != nil {
@@ -12517,8 +12736,8 @@ func refuseProviderDisconnectWithPendingState(provider string, plan providerDisc
 			}
 		}
 	}
-	for _, stateFile := range plan.stateFiles {
-		cleaned := filepath.Clean(strings.TrimSpace(stateFile))
+	for _, source := range plan.stateSources {
+		cleaned := filepath.Clean(strings.TrimSpace(source.stateFile))
 		if cleaned == "." {
 			continue
 		}
@@ -12526,11 +12745,21 @@ func refuseProviderDisconnectWithPendingState(provider string, plan providerDisc
 			continue
 		}
 		seen[cleaned] = struct{}{}
-		count, err := pendingTrackedFileCountForProvider(cleaned, providerRoot)
+		items, err := readPendingWritebackItemsFromState(
+			"",
+			source.localDir,
+			source.remoteRoot,
+			cleaned,
+			source.scopedChild,
+		)
 		if err != nil {
 			return fmt.Errorf("inspect private mount state before disconnecting %s: %w", provider, err)
 		}
-		privatePending += count
+		for _, item := range items {
+			if strings.TrimSpace(item.Path) == "" || mountscope.IsWithin(providerRoot, item.Path) {
+				privatePending++
+			}
+		}
 	}
 	if outbox == 0 && conflicts == 0 && deadLetters == 0 && privatePending == 0 {
 		return nil
@@ -12570,6 +12799,9 @@ func countProviderOutboxRecords(dir, providerRoot string) (int, error) {
 	count := 0
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			// An entry with an unexpected shape cannot be proven unrelated to
+			// the provider, so make the destructive preflight refuse.
+			count++
 			continue
 		}
 		payload, err := os.ReadFile(filepath.Join(dir, entry.Name()))
@@ -12587,30 +12819,6 @@ func countProviderOutboxRecords(dir, providerRoot string) (int, error) {
 			continue
 		}
 		if strings.TrimSpace(record.RemotePath) == "" || mountscope.IsWithin(providerRoot, record.RemotePath) {
-			count++
-		}
-	}
-	return count, nil
-}
-
-func pendingTrackedFileCountForProvider(stateFile, providerRoot string) (int, error) {
-	var state struct {
-		Files map[string]mountsync.TrackedFileState `json:"files"`
-	}
-	payload, err := os.ReadFile(stateFile)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return 0, nil
-		}
-		return 0, err
-	}
-	if err := json.Unmarshal(payload, &state); err != nil {
-		return 0, err
-	}
-	count := 0
-	for remotePath, tracked := range state.Files {
-		if (strings.TrimSpace(remotePath) == "" || mountscope.IsWithin(providerRoot, remotePath)) &&
-			tracked.HasPendingWriteback() {
 			count++
 		}
 	}

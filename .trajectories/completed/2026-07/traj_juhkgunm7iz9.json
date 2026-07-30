@@ -1,0 +1,126 @@
+{
+  "id": "traj_juhkgunm7iz9",
+  "version": 1,
+  "task": {
+    "title": "Refuse disconnect on unobserved local drift",
+    "source": {
+      "system": "plain",
+      "id": "relayfile#379"
+    }
+  },
+  "status": "completed",
+  "startedAt": "2026-07-30T11:40:53.561Z",
+  "completedAt": "2026-07-30T12:33:29.593Z",
+  "agents": [
+    {
+      "name": "default",
+      "role": "lead",
+      "joinedAt": "2026-07-30T11:40:53.918Z"
+    }
+  ],
+  "chapters": [
+    {
+      "id": "chap_rtectra8tums",
+      "title": "Work",
+      "agentName": "default",
+      "startedAt": "2026-07-30T11:40:53.918Z",
+      "endedAt": "2026-07-30T12:33:29.593Z",
+      "events": [
+        {
+          "ts": 1785411653919,
+          "type": "decision",
+          "content": "Use the writeback-list filesystem scan as disconnect evidence: Use the writeback-list filesystem scan as disconnect evidence",
+          "raw": {
+            "question": "Use the writeback-list filesystem scan as disconnect evidence",
+            "chosen": "Use the writeback-list filesystem scan as disconnect evidence",
+            "alternatives": [],
+            "reasoning": "Persisted dirty flags alone do not cover edits or new files made while the watcher is stopped; destructive cleanup must prove there is no pending local obligation."
+          },
+          "significance": "high"
+        },
+        {
+          "ts": 1785411654251,
+          "type": "decision",
+          "content": "Parse RFC3339Nano before selecting aggregate timestamps: Parse RFC3339Nano before selecting aggregate timestamps",
+          "raw": {
+            "question": "Parse RFC3339Nano before selecting aggregate timestamps",
+            "chosen": "Parse RFC3339Nano before selecting aggregate timestamps",
+            "alternatives": [],
+            "reasoning": "Variable-width fractional seconds are not lexicographically ordered."
+          },
+          "significance": "high"
+        },
+        {
+          "ts": 1785411729812,
+          "type": "decision",
+          "content": "Treat an absent scoped local directory as an empty local scan: Treat an absent scoped local directory as an empty local scan",
+          "raw": {
+            "question": "Treat an absent scoped local directory as an empty local scan",
+            "chosen": "Treat an absent scoped local directory as an empty local scan",
+            "alternatives": [],
+            "reasoning": "A private state file can exist before its child mirror is materialized; absence proves there are no local files, while permission and non-directory errors still refuse."
+          },
+          "significance": "high"
+        },
+        {
+          "ts": 1785411819069,
+          "type": "decision",
+          "content": "Make disconnect cleanup an observed allow-list: Make disconnect cleanup an observed allow-list",
+          "raw": {
+            "question": "Make disconnect cleanup an observed allow-list",
+            "chosen": "Make disconnect cleanup an observed allow-list",
+            "alternatives": [],
+            "reasoning": "Preflight cannot safely re-read after Cloud DELETE, so execution must delete only paths enumerated before the mutation and must verify observed file/symlink fingerprints; non-recursive directory removal preserves later arrivals."
+          },
+          "significance": "high"
+        },
+        {
+          "ts": 1785411819498,
+          "type": "decision",
+          "content": "Make malformed aggregate timestamps unknown: Make malformed aggregate timestamps unknown",
+          "raw": {
+            "question": "Make malformed aggregate timestamps unknown",
+            "chosen": "Make malformed aggregate timestamps unknown",
+            "alternatives": [],
+            "reasoning": "Selecting a valid sibling timestamp when any child timestamp is unparseable would report a confident latest value from partial state."
+          },
+          "significance": "high"
+        },
+        {
+          "ts": 1785412145267,
+          "type": "reflection",
+          "content": "The destructive-decision sweep expanded the same absent-evidence class beyond cursor flags",
+          "raw": {
+            "focalPoints": [
+              "disconnect strictness",
+              "dead-letter refresh",
+              "transition cleanup"
+            ],
+            "adjustments": "Use strict filesystem counts in disconnect, validate the entire server feed before mirror mutation, and hold the transition cleanup race for Unit B placement",
+            "confidence": 0.9
+          },
+          "significance": "high",
+          "tags": [
+            "focal:disconnect strictness",
+            "focal:dead-letter refresh",
+            "focal:transition cleanup",
+            "confidence:0.9"
+          ]
+        }
+      ]
+    }
+  ],
+  "retrospective": {
+    "summary": "Closed stopped-mount drift deletion, enumerated post-preflight cleanup, timestamp ordering, incomplete filesystem counts, and incomplete dead-letter feed pruning for Unit C.",
+    "approach": "Standard approach",
+    "confidence": 0.9
+  },
+  "commits": [],
+  "filesChanged": [],
+  "projectId": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-c",
+  "tags": [],
+  "_trace": {
+    "startRef": "9ff464a113e97dd520cef5e61110b86b9f09768b",
+    "endRef": "9ff464a113e97dd520cef5e61110b86b9f09768b"
+  }
+}

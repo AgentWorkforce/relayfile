@@ -4799,7 +4799,7 @@ func TestWritebackPushPostsBulkAndWritesAckedReceipt(t *testing.T) {
 	if got := stdout.String(); !strings.Contains(got, "Pushed ") || !strings.Contains(got, opID) {
 		t.Fatalf("unexpected stdout: %s", got)
 	}
-	if got := countJSONFiles(filepath.Join(localDir, ".relay", "outbox", "pending")); got != 0 {
+	if got := countJSONFiles(filepath.Join(localDir, ".relay", "outbox", "pending")).Count; got != 0 {
 		t.Fatalf("pending receipt count = %d, want 0", got)
 	}
 	ackedDir := filepath.Join(localDir, ".relay", "outbox", "acked")
@@ -4972,10 +4972,10 @@ func TestWritebackUpdateCanonicalPathAllowsMissingOperationAndSendsIntent(t *tes
 	if got := stdout.String(); !strings.Contains(got, "Updated ") || !strings.Contains(got, " -> "+remotePath) {
 		t.Fatalf("unexpected stdout: %s", got)
 	}
-	if got := countJSONFiles(filepath.Join(localDir, ".relay", "outbox", "failed")); got != 0 {
+	if got := countJSONFiles(filepath.Join(localDir, ".relay", "outbox", "failed")).Count; got != 0 {
 		t.Fatalf("failed receipt count = %d, want 0", got)
 	}
-	if got := countJSONFiles(filepath.Join(localDir, ".relay", "outbox", "acked")); got != 1 {
+	if got := countJSONFiles(filepath.Join(localDir, ".relay", "outbox", "acked")).Count; got != 1 {
 		t.Fatalf("acked receipt count = %d, want 1", got)
 	}
 	ackedDir := filepath.Join(localDir, ".relay", "outbox", "acked")
@@ -5046,10 +5046,10 @@ func TestWritebackUpdateMissingOperationIDPendingStateNeedsAttention(t *testing.
 	if got := err.Error(); !strings.Contains(got, "cannot be tracked") {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if got := countJSONFiles(filepath.Join(localDir, ".relay", "outbox", "failed")); got != 0 {
+	if got := countJSONFiles(filepath.Join(localDir, ".relay", "outbox", "failed")).Count; got != 0 {
 		t.Fatalf("failed receipt count = %d, want 0", got)
 	}
-	if got := countJSONFiles(filepath.Join(localDir, ".relay", "outbox", "acked")); got != 0 {
+	if got := countJSONFiles(filepath.Join(localDir, ".relay", "outbox", "acked")).Count; got != 0 {
 		t.Fatalf("acked receipt count = %d, want 0", got)
 	}
 	pendingDir := filepath.Join(localDir, ".relay", "outbox", "pending")
@@ -5103,7 +5103,7 @@ func TestWritebackUpdateRejectsDraftPath(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	for _, state := range []string{"pending", "acked", "failed"} {
-		if got := countJSONFiles(filepath.Join(localDir, ".relay", "outbox", state)); got != 0 {
+		if got := countJSONFiles(filepath.Join(localDir, ".relay", "outbox", state)).Count; got != 0 {
 			t.Fatalf("%s receipt count = %d, want 0", state, got)
 		}
 	}
@@ -5211,10 +5211,10 @@ func TestWritebackDeleteRequiresOperationID(t *testing.T) {
 	if !sawDelete.Load() {
 		t.Fatal("expected delete request")
 	}
-	if got := countJSONFiles(filepath.Join(localDir, ".relay", "outbox", "failed")); got != 1 {
+	if got := countJSONFiles(filepath.Join(localDir, ".relay", "outbox", "failed")).Count; got != 1 {
 		t.Fatalf("failed receipt count = %d, want 1", got)
 	}
-	if got := countJSONFiles(filepath.Join(localDir, ".relay", "outbox", "acked")); got != 0 {
+	if got := countJSONFiles(filepath.Join(localDir, ".relay", "outbox", "acked")).Count; got != 0 {
 		t.Fatalf("acked receipt count = %d, want 0", got)
 	}
 }
@@ -5263,10 +5263,10 @@ func TestWritebackUpdateFailsWhenOperationFails(t *testing.T) {
 	if got := err.Error(); !strings.Contains(got, "writeback operation "+opID+" failed") {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if got := countJSONFiles(filepath.Join(localDir, ".relay", "outbox", "failed")); got != 1 {
+	if got := countJSONFiles(filepath.Join(localDir, ".relay", "outbox", "failed")).Count; got != 1 {
 		t.Fatalf("failed receipt count = %d, want 1", got)
 	}
-	if got := countJSONFiles(filepath.Join(localDir, ".relay", "outbox", "acked")); got != 0 {
+	if got := countJSONFiles(filepath.Join(localDir, ".relay", "outbox", "acked")).Count; got != 0 {
 		t.Fatalf("acked receipt count = %d, want 0", got)
 	}
 }
@@ -5705,10 +5705,15 @@ func TestScopedWorkspaceConsumersAggregateChildRuntimeState(t *testing.T) {
 		if err := os.MkdirAll(filepath.Join(scope.LocalDir, ".relay", "dead-letter"), 0o755); err != nil {
 			t.Fatal(err)
 		}
+		reconcileAt := []string{
+			"2026-07-30T03:00:00.1Z",
+			"2026-07-30T03:00:00.12Z",
+		}[index]
 		state := fmt.Sprintf(
-			`{"status":"scope-%d","lastReconcileAt":"2026-07-30T03:0%d:00Z","pendingWriteback":99,"failedWritebacks":%d,"stallReason":"scope-%d stalled","incrementalReadNotReadySince":{"event":"now"},"bootstrap":{"phase":"pull","filesSynced":%d,"filesTotal":10}}`,
+			`{"status":"scope-%d","lastReconcileAt":"%s","lastSuccessfulReconcileAt":"%s","pendingWriteback":99,"failedWritebacks":%d,"stallReason":"scope-%d stalled","incrementalReadNotReadySince":{"event":"now"},"bootstrap":{"phase":"pull","filesSynced":%d,"filesTotal":10}}`,
 			index+1,
-			index+1,
+			reconcileAt,
+			reconcileAt,
 			index+3,
 			index+1,
 			index+2,
@@ -5804,8 +5809,28 @@ func TestScopedWorkspaceConsumersAggregateChildRuntimeState(t *testing.T) {
 		health.OutboxAcked != 1 {
 		t.Fatalf("scoped health report = %#v, want child states and child/catalog queues", health)
 	}
-	if health.LastReconcileAt != "2026-07-30T03:02:00Z" {
-		t.Fatalf("last reconcile = %q, want newest child timestamp", health.LastReconcileAt)
+	if health.LastReconcileAt != "2026-07-30T03:00:00.12Z" ||
+		health.LastSuccessfulReconcileAt != "2026-07-30T03:00:00.12Z" {
+		t.Fatalf(
+			"reconcile timestamps = %q/%q, want later variable-width fraction",
+			health.LastReconcileAt,
+			health.LastSuccessfulReconcileAt,
+		)
+	}
+	if err := os.WriteFile(
+		filepath.Join(scopes[0].LocalDir, ".relay", "state.json"),
+		[]byte(`{"lastReconcileAt":"invalid","lastSuccessfulReconcileAt":"invalid"}`),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+	unknownHealth := buildWorkspaceHealthReport("ws_demo", record)
+	if unknownHealth.LastReconcileAt != "" || unknownHealth.LastSuccessfulReconcileAt != "" {
+		t.Fatalf(
+			"malformed child timestamps produced aggregate claims %q/%q, want unknown",
+			unknownHealth.LastReconcileAt,
+			unknownHealth.LastSuccessfulReconcileAt,
+		)
 	}
 
 	compatibilityDir := filepath.Join(localRoot, ".relay", "dead-letter")
@@ -6269,7 +6294,7 @@ func TestOpsListRefreshesMirrorFromServer(t *testing.T) {
 	}
 }
 
-func TestOpsListRefreshRejectsUnsafeOpIDAndKeepsSidecar(t *testing.T) {
+func TestOpsListRefreshRejectsUnsafeOpIDWithoutMutatingMirror(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)
 
@@ -6323,26 +6348,68 @@ func TestOpsListRefreshRejectsUnsafeOpIDAndKeepsSidecar(t *testing.T) {
 	if err := run([]string{"ops", "list", "--workspace", "demo"}, strings.NewReader(""), &stdout, &stdout); err != nil {
 		t.Fatalf("run ops list failed: %v", err)
 	}
+	if !strings.Contains(stdout.String(), "unsafe or missing opId") {
+		t.Fatalf("refresh warning = %q, want unsafe opId refusal", stdout.String())
+	}
 
 	// The traversal op id must not escape the dead-letter directory.
 	traversal := filepath.Join(localDir, "pwn.json")
 	if _, err := os.Stat(traversal); !os.IsNotExist(err) {
 		t.Fatalf("unsafe opId escaped dead-letter dir: %s exists (err=%v)", traversal, err)
 	}
-	if _, err := os.Stat(filepath.Join(dlDir, "op_keep.json")); err != nil {
-		t.Fatalf("expected op_keep payload written: %v", err)
+	if _, err := os.Stat(filepath.Join(dlDir, "op_keep.json")); !os.IsNotExist(err) {
+		t.Fatalf("invalid response partially wrote op_keep payload, err=%v", err)
 	}
-	// Sidecar for a still-live op must be preserved, not pruned as if it
-	// were a standalone payload named "op_keep.error".
+	// No local mutation is allowed when any response item is invalid.
 	if _, err := os.Stat(filepath.Join(dlDir, "op_keep.error.json")); err != nil {
 		t.Fatalf("expected op_keep.error.json preserved: %v", err)
 	}
-	// Stale payload and its sidecar must both be removed.
-	if _, err := os.Stat(filepath.Join(dlDir, "op_old.json")); !os.IsNotExist(err) {
-		t.Fatalf("expected stale op_old.json pruned, err=%v", err)
+	if _, err := os.Stat(filepath.Join(dlDir, "op_old.json")); err != nil {
+		t.Fatalf("invalid response pruned op_old.json, err=%v", err)
 	}
-	if _, err := os.Stat(filepath.Join(dlDir, "op_old.error.json")); !os.IsNotExist(err) {
-		t.Fatalf("expected stale op_old.error.json pruned, err=%v", err)
+	if _, err := os.Stat(filepath.Join(dlDir, "op_old.error.json")); err != nil {
+		t.Fatalf("invalid response pruned op_old.error.json, err=%v", err)
+	}
+}
+
+func TestOpsListRefreshMissingItemsPreservesMirror(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	localDir := t.TempDir()
+	deadLetterDir := filepath.Join(localDir, ".relay", "dead-letter")
+	if err := os.MkdirAll(deadLetterDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	recordPath := filepath.Join(deadLetterDir, "op_local.json")
+	if err := os.WriteFile(recordPath, []byte(`{"opId":"op_local"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := upsertWorkspaceDetails(workspaceRecord{
+		Name:     "demo",
+		ID:       "ws_demo",
+		LocalDir: localDir,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"nextCursor":null}`))
+	}))
+	defer server.Close()
+	if err := saveCredentials(credentials{Server: server.URL, Token: "token"}); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout bytes.Buffer
+	if err := run([]string{"ops", "list", "--workspace", "demo"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stdout.String(), "missing required items array") {
+		t.Fatalf("refresh output = %q, want missing-items refusal", stdout.String())
+	}
+	if _, err := os.Stat(recordPath); err != nil {
+		t.Fatalf("missing-items response pruned local record: %v", err)
 	}
 }
 
@@ -7957,6 +8024,7 @@ func TestMarkProviderDisconnectedPreservesScopedRuntimeState(t *testing.T) {
 	githubDeadLetter := filepath.Join(githubScope, ".relay", "dead-letter", "op_dead.json")
 	githubInfrastructure := filepath.Join(githubScope, ".git", "config")
 	slackMirror := filepath.Join(mountscope.LocalDir(localRoot, "/slack/channels/project"), "topic.md")
+	var githubStateFile string
 	for _, scope := range workspaceMountScopes(record) {
 		stateFile, err := workspaceMountStateFile(record.ID, record, scope)
 		if err != nil {
@@ -7967,6 +8035,9 @@ func TestMarkProviderDisconnectedPreservesScopedRuntimeState(t *testing.T) {
 		}
 		if err := os.WriteFile(stateFile, []byte(`{"files":{}}`), 0o600); err != nil {
 			t.Fatal(err)
+		}
+		if scope.RemotePath == "/github/repos/acme" {
+			githubStateFile = stateFile
 		}
 	}
 	for path, content := range map[string]string{
@@ -7984,8 +8055,19 @@ func TestMarkProviderDisconnectedPreservesScopedRuntimeState(t *testing.T) {
 			t.Fatalf("write %s: %v", path, err)
 		}
 	}
+	githubHash, err := hashLocalWritebackFile(githubMirror)
+	if err != nil {
+		t.Fatal(err)
+	}
+	githubState := fmt.Sprintf(
+		`{"files":{"/github/repos/acme/README.md":{"hash":%q}}}`,
+		githubHash,
+	)
+	if err := os.WriteFile(githubStateFile, []byte(githubState), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
-	err := markProviderDisconnected(record, "github")
+	err = markProviderDisconnected(record, "github")
 	if err == nil ||
 		!strings.Contains(err.Error(), "outbox=1") ||
 		!strings.Contains(err.Error(), "conflicts=1") ||
@@ -8092,6 +8174,77 @@ func TestIntegrationDisconnectRefusesBeforeCloudMutationWhenScopedStateIsPending
 	}
 }
 
+func TestIntegrationDisconnectRefusesUnobservedLocalDriftBeforeCloudMutation(t *testing.T) {
+	record, localRoot := setupAdoptWorkspace(t)
+	record.RelayWorkspaceID = "ws_relay_runtime"
+	record.LocalLayout = mountscope.LayoutScoped
+	record.RemotePaths = []string{"/github/repos/acme"}
+	record.MountStateDir = t.TempDir()
+	record.mountStateSet = true
+	if _, err := upsertWorkspaceDetails(record); err != nil {
+		t.Fatalf("persist scoped workspace: %v", err)
+	}
+	scope := workspaceMountScopes(record)[0]
+	trackedPath := filepath.Join(scope.LocalDir, "README.md")
+	untrackedPath := filepath.Join(scope.LocalDir, "draft.md")
+	if err := os.MkdirAll(scope.LocalDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(trackedPath, []byte("original"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	originalHash, err := hashLocalWritebackFile(trackedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stateFile, err := workspaceMountStateFile(record.RelayWorkspaceID, record, scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(stateFile), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	privateState := fmt.Sprintf(
+		`{"files":{"/github/repos/acme/README.md":{"hash":%q}}}`,
+		originalHash,
+	)
+	if err := os.WriteFile(stateFile, []byte(privateState), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(trackedPath, []byte("edited while stopped"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(untrackedPath, []byte("new local work"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		t.Fatalf("drifted disconnect reached Cloud: %s %s", r.Method, r.URL.Path)
+	}))
+	defer server.Close()
+	err = runIntegrationDisconnect(
+		[]string{"github", "--workspace", "demo", "--yes", "--cloud-api-url", server.URL},
+		strings.NewReader(""),
+		io.Discard,
+	)
+	if err == nil || !strings.Contains(err.Error(), "privatePending=2") {
+		t.Fatalf("expected tracked and untracked local drift refusal, got %v", err)
+	}
+	if requests != 0 {
+		t.Fatalf("Cloud requests = %d, want 0", requests)
+	}
+	for _, path := range []string{trackedPath, untrackedPath, stateFile} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("refused disconnect deleted local work %s: %v", path, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(localRoot, ".relay", "disconnected", "github.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("refused disconnect wrote marker: %v", err)
+	}
+}
+
 func TestIntegrationDisconnectCommitsPrevalidatedPlanAfterCloudMutation(t *testing.T) {
 	record, localRoot := setupAdoptWorkspace(t)
 	record.RelayWorkspaceID = "ws_relay_runtime"
@@ -8110,6 +8263,10 @@ func TestIntegrationDisconnectCommitsPrevalidatedPlanAfterCloudMutation(t *testi
 	if err := os.WriteFile(mirrorPath, []byte("mirrored"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	mirrorHash, err := hashLocalWritebackFile(mirrorPath)
+	if err != nil {
+		t.Fatal(err)
+	}
 	stateFile, err := workspaceMountStateFile(record.RelayWorkspaceID, record, scope)
 	if err != nil {
 		t.Fatal(err)
@@ -8117,11 +8274,16 @@ func TestIntegrationDisconnectCommitsPrevalidatedPlanAfterCloudMutation(t *testi
 	if err := os.MkdirAll(filepath.Dir(stateFile), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(stateFile, []byte(`{"files":{}}`), 0o600); err != nil {
+	state := fmt.Sprintf(
+		`{"files":{"/github/repos/acme/README.md":{"hash":%q}}}`,
+		mirrorHash,
+	)
+	if err := os.WriteFile(stateFile, []byte(state), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
 	deleteCalls := 0
+	latePath := filepath.Join(scope.LocalDir, "created-after-preflight.md")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodDelete ||
 			r.URL.Path != "/api/v1/workspaces/ws_123/integrations/github/status" {
@@ -8132,6 +8294,9 @@ func TestIntegrationDisconnectCommitsPrevalidatedPlanAfterCloudMutation(t *testi
 		// cleanup must consume the already-validated plan instead of turning
 		// that post-mutation change into a second refusal.
 		if err := os.Remove(stateFile); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(latePath, []byte("created after preflight"), 0o644); err != nil {
 			t.Fatal(err)
 		}
 		_, _ = w.Write([]byte(`{"ok":true}`))
@@ -8154,8 +8319,33 @@ func TestIntegrationDisconnectCommitsPrevalidatedPlanAfterCloudMutation(t *testi
 	if _, err := os.Stat(mirrorPath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("prevalidated mirror cleanup did not run: %v", err)
 	}
+	if payload, err := os.ReadFile(latePath); err != nil || string(payload) != "created after preflight" {
+		t.Fatalf("post-preflight file was not preserved, payload=%q err=%v", payload, err)
+	}
 	if _, err := os.Stat(filepath.Join(localRoot, ".relay", "disconnected", "github.json")); err != nil {
 		t.Fatalf("disconnect marker missing after Cloud mutation: %v", err)
+	}
+}
+
+func TestProviderDisconnectCleanupRefusesChangedPlannedFile(t *testing.T) {
+	scopeDir := t.TempDir()
+	path := filepath.Join(scopeDir, "README.md")
+	if err := os.WriteFile(path, []byte("observed"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	plan := providerDisconnectPlan{cleanScopeDirs: []string{scopeDir}}
+	if err := captureProviderDisconnectDeletions(&plan); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("changed after preflight"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err := removeProviderMirrorWithPlan(plan)
+	if err == nil || !strings.Contains(err.Error(), "changed after preflight") {
+		t.Fatalf("changed planned file cleanup = %v, want refusal", err)
+	}
+	if payload, readErr := os.ReadFile(path); readErr != nil || string(payload) != "changed after preflight" {
+		t.Fatalf("changed planned file was deleted, payload=%q err=%v", payload, readErr)
 	}
 }
 
@@ -8267,6 +8457,60 @@ func TestProviderDisconnectPreflightInspectsScopedCatalogCompatibilityState(t *t
 	err := preflightProviderDisconnect(record, "github")
 	if err == nil || !strings.Contains(err.Error(), "deadLetters=1") {
 		t.Fatalf("scoped catalog compatibility dead letter preflight = %v, want refusal", err)
+	}
+}
+
+func TestProviderDisconnectPreflightRefusesUnreadableConflictShape(t *testing.T) {
+	localRoot := t.TempDir()
+	record := workspaceRecord{
+		ID:               "ws_cloud",
+		RelayWorkspaceID: "ws_runtime",
+		LocalDir:         localRoot,
+		LocalLayout:      mountscope.LayoutScoped,
+		RemotePaths:      []string{"/github"},
+		MountStateDir:    t.TempDir(),
+		MountKind:        mountsync.MountKindDaemon,
+	}
+	scope := workspaceMountScopes(record)[0]
+	stateFile, err := workspaceMountStateFile(record.RelayWorkspaceID, record, scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(stateFile), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(stateFile, []byte(`{"files":{}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	conflictsPath := filepath.Join(scope.LocalDir, ".relay", "conflicts")
+	if err := os.MkdirAll(filepath.Dir(conflictsPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(conflictsPath, []byte("unexpected non-directory"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	err = preflightProviderDisconnect(record, "github")
+	if err == nil || !strings.Contains(err.Error(), "inspect conflicts before disconnecting github") {
+		t.Fatalf("unreadable conflict shape preflight = %v, want refusal", err)
+	}
+	if payload, readErr := os.ReadFile(conflictsPath); readErr != nil || string(payload) != "unexpected non-directory" {
+		t.Fatalf("refused preflight mutated conflict path, payload=%q err=%v", payload, readErr)
+	}
+}
+
+func TestObservedFileCountsCarryUnreadableState(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(path, []byte("opaque"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for name, observed := range map[string]observedFileCount{
+		"json": countJSONFiles(path),
+		"all":  countFilesInDir(path),
+	} {
+		if observed.Err == nil {
+			t.Fatalf("%s count = %#v, want incompleteness error", name, observed)
+		}
 	}
 }
 
