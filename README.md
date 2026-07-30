@@ -198,9 +198,10 @@ RELAYFILE_TOKEN="$TOKEN" go run ./cmd/relayfile-mount \
   --local-dir ./relayfile-mount
 ```
 
-Limit the daemon to one or more remote subtrees by repeating
-`--remote-path`. Each subtree is mirrored under the matching path inside
-`--local-dir`, which avoids full-workspace export pulls on large workspaces:
+Limit the standalone daemon to one or more remote subtrees by repeating
+`--remote-path`. Multiple roots require `--local-layout scoped`; each subtree
+is then mirrored under the matching path inside `--local-dir`, which avoids
+full-workspace export pulls on large workspaces:
 
 ```bash
 RELAYFILE_TOKEN="$TOKEN" go run ./cmd/relayfile-mount \
@@ -208,11 +209,13 @@ RELAYFILE_TOKEN="$TOKEN" go run ./cmd/relayfile-mount \
   --workspace ws_demo \
   --local-dir ./relayfile-mount \
   --remote-path /github \
-  --remote-path /slack/channels/proj-cloud
+  --remote-path /slack/channels/proj-cloud \
+  --local-layout scoped
 ```
 
 For long path lists, pass `--paths-file ./paths.json`; the file may be a JSON
-array of remote roots or a newline-separated list.
+array of remote roots or a newline-separated list. Multiple paths from a file
+also require `--local-layout scoped`.
 
 The FUSE layer caches file content in kernel memory independently of its attribute TTL. By default content is held for 30 seconds and attributes for 2 seconds. Tune with `--fuse-content-ttl` (or `RELAYFILE_MOUNT_FUSE_CONTENT_TTL`) if your workload needs fresher reads or can tolerate a longer cache window:
 

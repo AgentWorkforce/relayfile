@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/agentworkforce/relayfile/internal/delegatedauth"
+	"github.com/agentworkforce/relayfile/internal/mountscope"
 	"github.com/agentworkforce/relayfile/internal/mountsync"
 	"github.com/fsnotify/fsnotify"
 )
@@ -26,8 +27,8 @@ import (
 const (
 	mountModePoll           = "poll"
 	mountModeFuse           = "fuse"
-	localLayoutExact        = "exact"
-	localLayoutScoped       = "scoped"
+	localLayoutExact        = mountscope.LayoutExact
+	localLayoutScoped       = mountscope.LayoutScoped
 	syncModeMirror          = "mirror"
 	syncModeWriteOnly       = "write-only"
 	websocketReconcileEvery = 10
@@ -83,7 +84,7 @@ func main() {
 	token := flag.String("token", strings.TrimSpace(os.Getenv("RELAYFILE_TOKEN")), "bearer token")
 	credsFile := flag.String("creds-file", strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_CREDS_FILE")), "JSON credentials file containing a relayfile bearer token; takes precedence over --token")
 	workspaceID := flag.String("workspace", strings.TrimSpace(os.Getenv("RELAYFILE_WORKSPACE")), "workspace ID")
-	var remotePaths repeatedStringFlag
+	var remotePaths mountscope.StringListFlag
 	flag.Var(&remotePaths, "remote-path", "remote root path (may be repeated)")
 	pathsFile := flag.String("paths-file", strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_PATHS_FILE")), "file containing remote root paths, as JSON array or newline-separated list")
 	eventProvider := flag.String("provider", strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_PROVIDER")), "event provider filter")
@@ -139,7 +140,7 @@ func main() {
 	if *timeout <= 0 {
 		*timeout = 15 * time.Second
 	}
-	fileRemotePaths, err := readRemotePathsFile(*pathsFile)
+	fileRemotePaths, err := mountscope.ReadPathsFile(*pathsFile)
 	if err != nil {
 		log.Fatalf("read paths-file: %v", err)
 	}
@@ -166,8 +167,8 @@ func main() {
 		token:                 resolvedToken,
 		credsFile:             resolvedCredsFile,
 		workspaceID:           strings.TrimSpace(*workspaceID),
-		remotePath:            firstRemotePath(allRemotePaths, envOrDefault("RELAYFILE_REMOTE_PATH", "/")),
-		remotePaths:           normalizeRemotePaths(allRemotePaths, envOrDefault("RELAYFILE_REMOTE_PATH", "/")),
+		remotePath:            mountscope.FirstPath(allRemotePaths, envOrDefault("RELAYFILE_REMOTE_PATH", "/")),
+		remotePaths:           mountscope.NormalizePaths(allRemotePaths, envOrDefault("RELAYFILE_REMOTE_PATH", "/")),
 		eventProvider:         strings.TrimSpace(*eventProvider),
 		localDir:              *localDir,
 		localLayout:           resolvedLocalLayout,
@@ -221,16 +222,7 @@ func resolveMountMode(mode string, fuse bool) (string, error) {
 }
 
 func resolveLocalLayout(layout string) (string, error) {
-	normalized := strings.ToLower(strings.TrimSpace(layout))
-	if normalized == "" {
-		return localLayoutExact, nil
-	}
-	switch normalized {
-	case localLayoutExact, localLayoutScoped:
-		return normalized, nil
-	default:
-		return "", fmt.Errorf("%q (supported: %s, %s)", layout, localLayoutExact, localLayoutScoped)
-	}
+	return mountscope.ResolveLayout(layout)
 }
 
 func resolveSyncMode(mode string) (string, error) {
@@ -251,6 +243,13 @@ func executeMount(rootCtx context.Context, cfg mountConfig, runPoll pollRunner, 
 	case mountModePoll:
 		return runPoll(rootCtx, cfg)
 	case mountModeFuse:
+		remotePaths := cfg.remotePaths
+		if len(remotePaths) == 0 {
+			remotePaths = []string{cfg.remotePath}
+		}
+		if len(mountscope.NormalizePaths(remotePaths, "/")) > 1 {
+			return fmt.Errorf("multiple --remote-path values are not supported with --mode=%s; use --mode=%s", mountModeFuse, mountModePoll)
+		}
 		return runFuse(rootCtx, cfg)
 	default:
 		return fmt.Errorf("unsupported mount mode %q", cfg.mode)
@@ -290,24 +289,19 @@ func runScopedPollingMountsWithRunner(
 	type scopedMount struct {
 		cfg mountConfig
 	}
-	scopedMounts := make([]scopedMount, 0, len(remotePaths))
-	seen := map[string]struct{}{}
-	if len(remotePaths) > 1 && strings.TrimSpace(cfg.stateFile) != "" {
-		return fmt.Errorf("--state-file cannot be shared across multiple scoped mounts; use --state-dir instead")
+	plan, err := mountscope.Plan(cfg.localDir, localLayoutScoped, remotePaths, "/", cfg.stateFile)
+	if err != nil {
+		return err
 	}
-	for _, remotePath := range remotePaths {
-		remotePath := normalizeMountRemotePath(remotePath)
-		if _, ok := seen[remotePath]; ok {
-			continue
-		}
-		seen[remotePath] = struct{}{}
+	scopedMounts := make([]scopedMount, 0, len(plan))
+	for _, scope := range plan {
 		scoped := cfg
-		scoped.remotePath = remotePath
+		scoped.remotePath = scope.RemotePath
 		scoped.remotePaths = nil
-		scoped.localDir = scopedLocalDir(cfg.localDir, remotePath)
+		scoped.localDir = scope.LocalDir
 		scoped.stateFile = cfg.stateFile
 		if err := os.MkdirAll(scoped.localDir, 0o755); err != nil {
-			return fmt.Errorf("create scoped local dir for %s: %w", remotePath, err)
+			return fmt.Errorf("create scoped local dir for %s: %w", scope.RemotePath, err)
 		}
 		scopedMounts = append(scopedMounts, scopedMount{cfg: scoped})
 	}
@@ -341,34 +335,7 @@ func runScopedPollingMountsWithRunner(
 }
 
 func readRemotePathsFile(path string) ([]string, error) {
-	path = strings.TrimSpace(path)
-	if path == "" {
-		return nil, nil
-	}
-	payload, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	trimmed := strings.TrimSpace(string(payload))
-	if trimmed == "" {
-		return nil, nil
-	}
-	var jsonPaths []string
-	if strings.HasPrefix(trimmed, "[") {
-		if err := json.Unmarshal(payload, &jsonPaths); err != nil {
-			return nil, err
-		}
-		return jsonPaths, nil
-	}
-	var paths []string
-	for _, line := range strings.Split(trimmed, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		paths = append(paths, line)
-	}
-	return paths, nil
+	return mountscope.ReadPathsFile(path)
 }
 
 func runSinglePollingMount(rootCtx context.Context, cfg mountConfig) error {
@@ -589,75 +556,22 @@ func installCredsFileRefresh(client *mountsync.HTTPClient, cfg mountConfig) {
 	})
 }
 
-type repeatedStringFlag []string
-
-func (f *repeatedStringFlag) String() string {
-	return strings.Join(*f, ",")
-}
-
-func (f *repeatedStringFlag) Set(value string) error {
-	trimmed := strings.TrimSpace(value)
-	if trimmed == "" {
-		return nil
-	}
-	*f = append(*f, trimmed)
-	return nil
-}
-
-func (f repeatedStringFlag) Values() []string {
-	return append([]string(nil), f...)
-}
+type repeatedStringFlag = mountscope.StringListFlag
 
 func firstRemotePath(paths []string, fallback string) string {
-	normalized := normalizeRemotePaths(paths, fallback)
-	if len(normalized) == 0 {
-		return "/"
-	}
-	return normalized[0]
+	return mountscope.FirstPath(paths, fallback)
 }
 
 func normalizeRemotePaths(paths []string, fallback string) []string {
-	if len(paths) == 0 {
-		paths = []string{fallback}
-	}
-	seen := map[string]struct{}{}
-	normalized := make([]string, 0, len(paths))
-	for _, path := range paths {
-		cleaned := normalizeMountRemotePath(path)
-		if _, ok := seen[cleaned]; ok {
-			continue
-		}
-		seen[cleaned] = struct{}{}
-		normalized = append(normalized, cleaned)
-	}
-	if len(normalized) == 0 {
-		return []string{"/"}
-	}
-	return normalized
+	return mountscope.NormalizePaths(paths, fallback)
 }
 
 func normalizeMountRemotePath(path string) string {
-	trimmed := strings.TrimSpace(path)
-	if trimmed == "" || trimmed == "/" {
-		return "/"
-	}
-	trimmed = strings.ReplaceAll(trimmed, "\\", "/")
-	if !strings.HasPrefix(trimmed, "/") {
-		trimmed = "/" + trimmed
-	}
-	cleaned := filepath.Clean(trimmed)
-	if cleaned == "." || cleaned == string(filepath.Separator) {
-		return "/"
-	}
-	return filepath.ToSlash(cleaned)
+	return mountscope.NormalizePath(path)
 }
 
 func scopedLocalDir(localRoot, remotePath string) string {
-	remotePath = normalizeMountRemotePath(remotePath)
-	if remotePath == "/" {
-		return localRoot
-	}
-	return filepath.Join(localRoot, filepath.FromSlash(strings.TrimPrefix(remotePath, "/")))
+	return mountscope.LocalDir(localRoot, remotePath)
 }
 
 func mountStartupLogLine(cfg mountConfig) string {
