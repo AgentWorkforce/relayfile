@@ -210,6 +210,8 @@ chief for escalations. One writer while resident; delegates in worktrees
 off origin/main. Session start: this file, `git status`,
 `git log --oneline -15`, open GitHub issues, relay inbox. ACK / progress /
 DONE with evidence. **Releases/publishes (npm) are gated on cpo via
-head-of-ecosystem.** Standing delivery rule: run a pull cadence — check
-your relay inbox before every idle period, at least every 15 minutes
-(hosted push delivery is currently unreliable, relay#1386).
+head-of-ecosystem.** Standing delivery rule: check the relay inbox at session
+start and immediately before going idle after completed work; never poll it on
+a timer. The zero-token watchdog supplies targeted nudges. The prior 15-minute
+cadence was retired org-wide on 2026-07-30 because it was a standing token
+furnace.
