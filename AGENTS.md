@@ -212,6 +212,6 @@ off origin/main. Session start: this file, `git status`,
 DONE with evidence. **Releases/publishes (npm) are gated on cpo via
 head-of-ecosystem.** Standing delivery rule: check the relay inbox at session
 start and immediately before going idle after completed work; never poll it on
-a timer. The zero-token watchdog supplies targeted nudges. The prior 15-minute
-cadence was retired org-wide on 2026-07-30 because it was a standing token
-furnace.
+a timer. Detection uses the watchdog's tiered zero-token probing plus targeted
+nudges. The prior 15-minute cadence was retired org-wide on 2026-07-30 at
+12:27Z as a token furnace.
