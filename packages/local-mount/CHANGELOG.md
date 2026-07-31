@@ -6,7 +6,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_No unreleased changes._
+### Fixed
+
+- Auto-sync no longer writes through a hardlink or a symlink at the destination. A hardlink inside the mount pointing at a file outside it, or a target swapped for a symlink between the check and the copy, could overwrite a file outside the mount or project directory. Content is now copied into a temporary sibling and renamed over the target, which replaces the directory entry rather than writing through it. The write is also atomic — readers never see a partial or zero-length file — and reflink cloning is unchanged.
+- Creating a destination directory no longer creates directories outside the root before refusing. Path components are created one at a time and a symlinked component is refused rather than traversed.
 
 ## [0.10.37] - 2026-07-26
 
