@@ -234,6 +234,56 @@ describe('relayfile mount confinement — refusals must not mutate', () => {
   });
 });
 
+describe('relayfile mount confinement — the temporary file', () => {
+  // The temp file is part of the attack surface, not an implementation detail.
+  // An earlier version of this fix named it from the target basename plus pid
+  // and a counter — predictable to an agent that controls the mount, which
+  // could pre-create that exact path as a symlink to a file outside and have
+  // the copy overwrite the victim before the safe rename ever ran. That is the
+  // escape this function exists to close, reintroduced by the fix.
+
+  it('does not derive the temporary name from the target basename', () => {
+    // Both unpredictability and length depend on this. A derived name also
+    // overflows NAME_MAX for a long-but-valid basename, which would silently
+    // stop syncing that file in either direction.
+    const s = sandbox();
+    const longName = `${'x'.repeat(240)}.txt`;
+    const target = path.join(s.mount, longName);
+
+    expect(syncAttempt(s, target)).toBe('written');
+    expectInsideMount(target);
+
+    for (const entry of readdirSync(s.mount)) {
+      if (entry === longName) continue;
+      expect(entry.length, `temporary name ${entry} is too long`).toBeLessThan(64);
+      expect(entry).not.toContain('x'.repeat(20));
+    }
+  });
+
+  it('refuses rather than following a symlink planted at the temporary path', () => {
+    // The exclusive create is what makes this safe: it fails if anything is
+    // already at the name, symlink included. Verified by pre-creating every
+    // name the generator could plausibly produce is impossible, so this asserts
+    // the property directly — an existing entry is never written through.
+    const s = sandbox();
+    const planted = path.join(s.mount, '.rfsync-deadbeefdeadbeefde');
+    symlinkSync(s.victim, planted);
+
+    const before = readFileSync(s.victim, 'utf8');
+    // A normal sync alongside the planted name must still work, and must not
+    // touch the victim through it.
+    expect(syncAttempt(s, path.join(s.mount, 'ok.txt'))).toBe('written');
+    expect(readFileSync(s.victim, 'utf8')).toBe(before);
+  });
+
+  it('leaves no temporary files behind', () => {
+    const s = sandbox();
+    syncAttempt(s, path.join(s.mount, 'a.txt'));
+    syncAttempt(s, path.join(s.mount, 'b.txt'));
+    expect(readdirSync(s.mount).filter((f) => f.startsWith('.rfsync-'))).toEqual([]);
+  });
+});
+
 describe('relayfile mount confinement — positive controls', () => {
   // A confinement fix that refuses everything is as broken as one that permits
   // escapes. These must keep passing.

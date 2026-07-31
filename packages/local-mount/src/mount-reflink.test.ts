@@ -103,9 +103,11 @@ describe('createMount reflink copies', () => {
         // target, so the write never goes *through* whatever the target
         // currently names (a hardlink, or a symlink swapped in mid-operation).
         // The reflink request itself is unchanged — COPYFILE_FICLONE is still
-        // what the copy asks for, which is what this test is about.
-        expect.stringMatching(/file\.txt\.rfsync-\d+-\d+$/),
-        fsConstants.COPYFILE_FICLONE
+        // what the copy asks for, which is what this test is about. COPYFILE_EXCL
+        // is paired with it so the create fails if anything already occupies the
+        // temporary name, which is what stops a planted symlink being followed.
+        expect.stringMatching(/\.rfsync-[0-9a-f]+$/),
+        fsConstants.COPYFILE_FICLONE | fsConstants.COPYFILE_EXCL
       );
 
       copyFileSyncMock.mockClear();
@@ -119,9 +121,11 @@ describe('createMount reflink copies', () => {
         // target, so the write never goes *through* whatever the target
         // currently names (a hardlink, or a symlink swapped in mid-operation).
         // The reflink request itself is unchanged — COPYFILE_FICLONE is still
-        // what the copy asks for, which is what this test is about.
-        expect.stringMatching(/file\.txt\.rfsync-\d+-\d+$/),
-        fsConstants.COPYFILE_FICLONE
+        // what the copy asks for, which is what this test is about. COPYFILE_EXCL
+        // is paired with it so the create fails if anything already occupies the
+        // temporary name, which is what stops a planted symlink being followed.
+        expect.stringMatching(/\.rfsync-[0-9a-f]+$/),
+        fsConstants.COPYFILE_FICLONE | fsConstants.COPYFILE_EXCL
       );
     } finally {
       await auto.stop();

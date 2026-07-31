@@ -1,10 +1,12 @@
 import {
   chmodSync,
+  closeSync,
   constants as fsConstants,
   copyFileSync,
   existsSync,
   lstatSync,
   mkdirSync,
+  openSync,
   unlinkSync,
   renameSync,
   readdirSync,
@@ -14,6 +16,7 @@ import {
   statSync,
 } from 'node:fs';
 import type { Stats } from 'node:fs';
+import { randomBytes } from 'node:crypto';
 import path from 'node:path';
 import watcher, { type AsyncSubscription } from '@parcel/watcher';
 import { preserveMtime, statsImplySameContent } from './stat-compare.js';
@@ -887,21 +890,67 @@ function createDirectoriesWithin(root: string, dir: string): boolean {
   const relative = path.relative(root, dir);
   if (relative.startsWith('..') || path.isAbsolute(relative)) return false;
 
-  let current = root;
-  for (const segment of relative.split(path.sep)) {
-    if (!segment) continue;
-    current = path.join(current, segment);
-    const info = lstatSync(current, { throwIfNoEntry: false });
-    if (!info) {
-      mkdirSync(current); // one component, never recursive
-      continue;
+  // Each component is opened and held for the duration, and — where the
+  // platform allows — the next component is resolved *relative to that
+  // descriptor* rather than by recomputed path.
+  //
+  // Checking a component with `lstat` and then creating the next one by path is
+  // a race: an already-accepted directory can be swapped for an
+  // outside-directed symlink before the following segment is created, and
+  // `mkdirSync` would then create directories outside the root. Resolving
+  // through the held descriptor means a swap on disk cannot redirect the
+  // create, because the descriptor still refers to the directory that was
+  // validated.
+  //
+  // On Linux `/proc/self/fd/<fd>/name` gives that resolution from the kernel.
+  // Elsewhere there is no equivalent without a native `openat`, so the walk
+  // falls back to paths and the held descriptors serve a narrower purpose: they
+  // pin each inode so it cannot be freed and recycled, which keeps the caller's
+  // subsequent `realpath` containment check meaningful. The write is still
+  // refused in that case — the residual is that a directory may have been
+  // created outside the root before the refusal.
+  const held: number[] = [];
+  try {
+    let parentFd = openSync(root, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY);
+    held.push(parentFd);
+    let currentPath = root;
+
+    for (const segment of relative.split(path.sep)) {
+      if (!segment) continue;
+
+      currentPath = path.join(currentPath, segment);
+      const childPath = DESCRIPTOR_RELATIVE
+        ? `/proc/self/fd/${parentFd}/${segment}`
+        : currentPath;
+
+      const info = lstatSync(childPath, { throwIfNoEntry: false });
+      if (!info) {
+        mkdirSync(childPath); // one component, never recursive
+      } else if (info.isSymbolicLink() || !info.isDirectory()) {
+        // Refused rather than followed.
+        return false;
+      }
+
+      // O_NOFOLLOW so a symlink that appeared since the lstat cannot be opened;
+      // O_DIRECTORY so anything no longer a directory cannot be either.
+      parentFd = openSync(
+        childPath,
+        fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW
+      );
+      held.push(parentFd);
     }
-    // A symlink here is refused rather than followed, and nothing has been
-    // created outside the root by the time we return.
-    if (info.isSymbolicLink() || !info.isDirectory()) return false;
+    return true;
+  } catch {
+    return false;
+  } finally {
+    for (const fd of held) {
+      try { closeSync(fd); } catch { /* already closed */ }
+    }
   }
-  return true;
 }
+
+/** True where `/proc/self/fd` provides kernel-side descriptor-relative resolution. */
+const DESCRIPTOR_RELATIVE = process.platform === 'linux';
 
 /**
  * Copy `source` onto `target` without ever writing *through* whatever `target`
@@ -929,9 +978,28 @@ function createDirectoriesWithin(root: string, dir: string): boolean {
  */
 export function safeCopyOnto(source: string, target: string, mode?: number): boolean {
   const dir = path.dirname(target);
-  const temp = path.join(dir, `.${path.basename(target)}.rfsync-${process.pid}-${syncTempCounter++}`);
+
+  // The temporary name is RANDOM and SHORT, and the copy is EXCLUSIVE. Both
+  // properties are load-bearing:
+  //
+  //   - Random + exclusive, because the agent controls the mount. A name
+  //     derived from the target basename plus pid and a counter is predictable,
+  //     and `copyFileSync` follows a destination symlink — so the agent could
+  //     pre-create that exact path pointing at a file outside the mount and the
+  //     copy would overwrite the victim *before* the safe rename ever ran. That
+  //     is the same escape this function exists to close, reintroduced by the
+  //     fix; COPYFILE_EXCL makes the create fail if anything is already there,
+  //     symlink included, and randomness means there is nothing to pre-empt.
+  //
+  //   - Short and independent of the target basename, because a basename near
+  //     the filesystem's per-component limit (NAME_MAX, typically 255) would
+  //     make a derived temporary name too long. `copyFileSync` then fails
+  //     ENAMETOOLONG, which this function reports as a refusal, and auto-sync
+  //     silently stops updating that file in either direction.
+  const temp = path.join(dir, `.rfsync-${randomBytes(9).toString('hex')}`);
+
   try {
-    copyFileSync(source, temp, fsConstants.COPYFILE_FICLONE);
+    copyFileSync(source, temp, fsConstants.COPYFILE_FICLONE | fsConstants.COPYFILE_EXCL);
     if (mode !== undefined) {
       try { chmodSync(temp, mode); } catch { /* best effort */ }
     }
@@ -942,8 +1010,6 @@ export function safeCopyOnto(source: string, target: string, mode?: number): boo
     return false;
   }
 }
-
-let syncTempCounter = 0;
 
 function walk(
   root: string,
