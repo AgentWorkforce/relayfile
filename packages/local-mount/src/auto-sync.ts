@@ -5,6 +5,8 @@ import {
   existsSync,
   lstatSync,
   mkdirSync,
+  unlinkSync,
+  renameSync,
   readdirSync,
   readFileSync,
   realpathSync,
@@ -687,7 +689,7 @@ function doMountToProject(
     updateState(state, relPosix, mountAbs, target);
     return false;
   }
-  copyFileSync(mountAbs, target, fsConstants.COPYFILE_FICLONE);
+  if (!safeCopyOnto(mountAbs, target)) return false;
   const mountStat = safeFileStat(mountAbs);
   if (mountStat) preserveMtime(target, mountStat);
   updateState(state, relPosix, mountAbs, target);
@@ -709,22 +711,15 @@ function doProjectToMount(
     updateState(state, relPosix, target, projectAbs);
     return false;
   }
-  // The mount copy of a readonly file has mode 0o444, which blocks
-  // copyFileSync from overwriting it. Temporarily restore write permission.
-  if (existsSync(target)) {
-    try { chmodSync(target, 0o644); } catch { /* best effort */ }
-  }
-  copyFileSync(projectAbs, target, fsConstants.COPYFILE_FICLONE);
+  // The mode is applied to the temporary file before the rename, so a readonly
+  // (0o444) mount copy no longer has to be chmod'd writable first. That
+  // temporary un-protection was a small window in which the readonly guarantee
+  // did not hold; renaming over the target removes the need for it entirely.
   const sourceStat = safeFileStat(projectAbs);
+  const mode = readonly ? 0o444 : sourceStat?.mode !== undefined ? sourceStat.mode & 0o777 : undefined;
+
+  if (!safeCopyOnto(projectAbs, target, mode)) return false;
   if (sourceStat) preserveMtime(target, sourceStat);
-  if (readonly) {
-    try { chmodSync(target, 0o444); } catch { /* best effort */ }
-  } else {
-    const mode = safeFileStat(projectAbs)?.mode;
-    if (mode !== undefined) {
-      try { chmodSync(target, mode & 0o777); } catch { /* best effort */ }
-    }
-  }
   updateState(state, relPosix, target, projectAbs);
   return true;
 }
@@ -845,6 +840,8 @@ function sameContentBytes(left: string, right: string): boolean {
  * nothing about this code.
  */
 export function resolveSafeWriteTarget(root: string, candidate: string): string | null {
+  // `root` must already be realpath'd — the only caller does this at
+  // mount.ts:195. Passing an unresolved root will reject everything.
   const resolvedRoot = path.resolve(root);
   const resolvedCandidate = path.resolve(candidate);
   if (
@@ -855,7 +852,17 @@ export function resolveSafeWriteTarget(root: string, candidate: string): string 
   }
   const parent = path.dirname(resolvedCandidate);
   try {
-    mkdirSync(parent, { recursive: true });
+    // Directories are created one component at a time, refusing to traverse a
+    // symlink, and only after the component is known to be safe.
+    //
+    // `mkdirSync(parent, { recursive: true })` used to run BEFORE the resolved
+    // parent was validated, so a symlinked component caused directories to be
+    // created outside the root and only then was the write refused — a refusal
+    // with a side effect. `recursive: true` also creates *through* a symlinked
+    // component, which is the traversal it was supposed to prevent.
+    if (!createDirectoriesWithin(resolvedRoot, parent)) {
+      return null;
+    }
     const realParent = realpathSync(parent);
     if (
       realParent !== resolvedRoot &&
@@ -868,6 +875,75 @@ export function resolveSafeWriteTarget(root: string, candidate: string): string 
     return null;
   }
 }
+
+/**
+ * Create every missing component of `dir` beneath `root`, one at a time,
+ * refusing to follow or create through a symlink. Returns false on the first
+ * component that is not a real directory.
+ */
+function createDirectoriesWithin(root: string, dir: string): boolean {
+  if (dir === root) return true;
+
+  const relative = path.relative(root, dir);
+  if (relative.startsWith('..') || path.isAbsolute(relative)) return false;
+
+  let current = root;
+  for (const segment of relative.split(path.sep)) {
+    if (!segment) continue;
+    current = path.join(current, segment);
+    const info = lstatSync(current, { throwIfNoEntry: false });
+    if (!info) {
+      mkdirSync(current); // one component, never recursive
+      continue;
+    }
+    // A symlink here is refused rather than followed, and nothing has been
+    // created outside the root by the time we return.
+    if (info.isSymbolicLink() || !info.isDirectory()) return false;
+  }
+  return true;
+}
+
+/**
+ * Copy `source` onto `target` without ever writing *through* whatever `target`
+ * currently names.
+ *
+ * The content is written to a temporary sibling inside the already-validated
+ * parent directory and then renamed over the target. That is what makes this
+ * safe, and it closes two confirmed escapes that a check-then-copy sequence
+ * could not:
+ *
+ *   - **Hardlink.** A hardlink inside the root pointing at a file outside it is
+ *     path-indistinguishable from a real file and `realpath` cannot resolve it,
+ *     because a hardlink has no target. `copyFileSync` onto that name wrote
+ *     straight through to the outside file. `rename` replaces the *directory
+ *     entry* instead, so the linked file keeps its content.
+ *
+ *   - **TOCTOU.** `isSymlinkTarget(target)` followed by `copyFileSync(target)`
+ *     is two path lookups, and a target swapped for a symlink in between was
+ *     followed. `rename` does not follow a final symlink — it replaces it.
+ *
+ * It also makes the write atomic: a reader sees the old file or the new one,
+ * never a partial or zero-length one, and an interrupted copy leaves the target
+ * untouched. Reflink cloning is preserved, since the copy into the temporary
+ * file still uses COPYFILE_FICLONE.
+ */
+export function safeCopyOnto(source: string, target: string, mode?: number): boolean {
+  const dir = path.dirname(target);
+  const temp = path.join(dir, `.${path.basename(target)}.rfsync-${process.pid}-${syncTempCounter++}`);
+  try {
+    copyFileSync(source, temp, fsConstants.COPYFILE_FICLONE);
+    if (mode !== undefined) {
+      try { chmodSync(temp, mode); } catch { /* best effort */ }
+    }
+    renameSync(temp, target);
+    return true;
+  } catch {
+    try { unlinkSync(temp); } catch { /* best effort */ }
+    return false;
+  }
+}
+
+let syncTempCounter = 0;
 
 function walk(
   root: string,

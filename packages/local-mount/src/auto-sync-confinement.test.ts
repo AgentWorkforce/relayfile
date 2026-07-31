@@ -12,7 +12,7 @@
  *     const target = resolveSafeWriteTarget(ctx.realMountDir, mountAbs);
  *     if (!target) return false;
  *     if (isSymlinkTarget(target)) return false;
- *     copyFileSync(projectAbs, target, COPYFILE_FICLONE);
+ *     safeCopyOnto(projectAbs, target, mode);
  *
  * Two contracts are asserted separately, because conflating them is what hid
  * the worst defect in the equivalent code elsewhere — a refusal that deleted
@@ -52,7 +52,7 @@ import {
 import os from 'node:os';
 import path from 'node:path';
 
-import { isSymlinkTarget, resolveSafeWriteTarget } from './auto-sync.js';
+import { isSymlinkTarget, resolveSafeWriteTarget, safeCopyOnto } from './auto-sync.js';
 
 const VICTIM = 'IMPORTANT PRE-EXISTING CONTENT';
 const PAYLOAD = 'PAYLOAD-FROM-INSIDE-THE-MOUNT';
@@ -117,18 +117,35 @@ function syncAttempt(s: Sandbox, mountAbs: string, between?: () => void): 'refus
   if (!target) return 'refused';
   if (isSymlinkTarget(target)) return 'refused';
   between?.();
-  copyFileSync(s.source, target, fsConstants.COPYFILE_FICLONE);
-  return 'written';
+  return safeCopyOnto(s.source, target) ? 'written' : 'refused';
 }
 
-/** Assert C1: refused, and nothing that existed outside the mount changed. */
+/**
+ * Assert the containment property: **nothing outside the mount is modified,
+ * deleted, or receives the payload.**
+ *
+ * Deliberately does not assert *refusal*. There are two defensible responses to
+ * a hostile target, and which one is right depends on what the component is
+ * for:
+ *
+ *   - **Refuse** — correct for a one-shot authorized write, where the caller
+ *     wants to know its request could not be honoured safely.
+ *   - **Sever and write inside the boundary** — correct for a *sync engine*.
+ *     `rename` replaces the directory entry rather than writing through it, so
+ *     a hardlinked or symlinked target is detached and the mount receives the
+ *     correct content. Refusing would stall sync on that path indefinitely,
+ *     which is a denial of service an adversary can trigger by planting one
+ *     link.
+ *
+ * Relayfile takes the second. `expectInsideMount` below pins that the write
+ * still lands, so "safe" cannot quietly become "broken".
+ */
 function expectContained(s: Sandbox, run: () => 'refused' | 'written'): void {
   const before = snapshot(s.outside);
-  let outcome: 'refused' | 'written' | 'threw' = 'threw';
   try {
-    outcome = run();
+    run();
   } catch {
-    outcome = 'threw';
+    /* throwing is an acceptable refusal */
   }
   const after = snapshot(s.outside);
 
@@ -138,7 +155,12 @@ function expectContained(s: Sandbox, run: () => 'refused' | 'written'): void {
   for (const [key, value] of Object.entries(after)) {
     expect(value, `payload escaped the mount into ${key}`).not.toBe(PAYLOAD);
   }
-  expect(outcome, 'the write should not have completed').not.toBe('written');
+}
+
+/** The content landed at this path inside the mount — sync was not stalled. */
+function expectInsideMount(target: string): void {
+  expect(existsSync(target), 'the write should still land inside the mount').toBe(true);
+  expect(readFileSync(target, 'utf8')).toBe(PAYLOAD);
 }
 
 describe('relayfile mount confinement — escapes', () => {
@@ -168,8 +190,13 @@ describe('relayfile mount confinement — escapes', () => {
     // A hardlink is path-indistinguishable from a real file and realpath cannot
     // resolve it — it has no target. Link count is the only signal.
     const s = sandbox();
-    linkSync(s.victim, path.join(s.mount, 'hard.txt'));
-    expectContained(s, () => syncAttempt(s, path.join(s.mount, 'hard.txt')));
+    const target = path.join(s.mount, 'hard.txt');
+    linkSync(s.victim, target);
+    expectContained(s, () => syncAttempt(s, target));
+    // The link is severed, not followed: the mount copy is updated and the
+    // file it pointed at outside keeps its content.
+    expectInsideMount(target);
+    expect(readFileSync(s.victim, 'utf8')).toBe(VICTIM);
   });
 
   it('refuses when the target is swapped for a symlink after the check', () => {
@@ -183,6 +210,9 @@ describe('relayfile mount confinement — escapes', () => {
         symlinkSync(s.victim, target);
       }),
     );
+    // rename replaces the symlink itself rather than following it.
+    expectInsideMount(target);
+    expect(readFileSync(s.victim, 'utf8')).toBe(VICTIM);
   });
 });
 

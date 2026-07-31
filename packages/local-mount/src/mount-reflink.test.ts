@@ -99,7 +99,12 @@ describe('createMount reflink copies', () => {
       await waitFor(() => readFileSync(path.join(projectDir, 'file.txt'), 'utf8') === 'edited-in-mount');
       expect(copyFileSyncMock).toHaveBeenCalledWith(
         expect.stringMatching(/file\.txt$/),
-        expect.stringMatching(/file\.txt$/),
+        // Auto-sync copies into a temporary sibling and renames it over the
+        // target, so the write never goes *through* whatever the target
+        // currently names (a hardlink, or a symlink swapped in mid-operation).
+        // The reflink request itself is unchanged — COPYFILE_FICLONE is still
+        // what the copy asks for, which is what this test is about.
+        expect.stringMatching(/file\.txt\.rfsync-\d+-\d+$/),
         fsConstants.COPYFILE_FICLONE
       );
 
@@ -110,7 +115,12 @@ describe('createMount reflink copies', () => {
       );
       expect(copyFileSyncMock).toHaveBeenCalledWith(
         expect.stringMatching(/file\.txt$/),
-        expect.stringMatching(/file\.txt$/),
+        // Auto-sync copies into a temporary sibling and renames it over the
+        // target, so the write never goes *through* whatever the target
+        // currently names (a hardlink, or a symlink swapped in mid-operation).
+        // The reflink request itself is unchanged — COPYFILE_FICLONE is still
+        // what the copy asks for, which is what this test is about.
+        expect.stringMatching(/file\.txt\.rfsync-\d+-\d+$/),
         fsConstants.COPYFILE_FICLONE
       );
     } finally {
