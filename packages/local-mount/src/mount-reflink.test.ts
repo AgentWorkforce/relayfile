@@ -99,8 +99,15 @@ describe('createMount reflink copies', () => {
       await waitFor(() => readFileSync(path.join(projectDir, 'file.txt'), 'utf8') === 'edited-in-mount');
       expect(copyFileSyncMock).toHaveBeenCalledWith(
         expect.stringMatching(/file\.txt$/),
-        expect.stringMatching(/file\.txt$/),
-        fsConstants.COPYFILE_FICLONE
+        // Auto-sync copies into a temporary sibling and renames it over the
+        // target, so the write never goes *through* whatever the target
+        // currently names (a hardlink, or a symlink swapped in mid-operation).
+        // The reflink request itself is unchanged — COPYFILE_FICLONE is still
+        // what the copy asks for, which is what this test is about. COPYFILE_EXCL
+        // is paired with it so the create fails if anything already occupies the
+        // temporary name, which is what stops a planted symlink being followed.
+        expect.stringMatching(/\.rfsync-[0-9a-f]+$/),
+        fsConstants.COPYFILE_FICLONE | fsConstants.COPYFILE_EXCL
       );
 
       copyFileSyncMock.mockClear();
@@ -110,8 +117,15 @@ describe('createMount reflink copies', () => {
       );
       expect(copyFileSyncMock).toHaveBeenCalledWith(
         expect.stringMatching(/file\.txt$/),
-        expect.stringMatching(/file\.txt$/),
-        fsConstants.COPYFILE_FICLONE
+        // Auto-sync copies into a temporary sibling and renames it over the
+        // target, so the write never goes *through* whatever the target
+        // currently names (a hardlink, or a symlink swapped in mid-operation).
+        // The reflink request itself is unchanged — COPYFILE_FICLONE is still
+        // what the copy asks for, which is what this test is about. COPYFILE_EXCL
+        // is paired with it so the create fails if anything already occupies the
+        // temporary name, which is what stops a planted symlink being followed.
+        expect.stringMatching(/\.rfsync-[0-9a-f]+$/),
+        fsConstants.COPYFILE_FICLONE | fsConstants.COPYFILE_EXCL
       );
     } finally {
       await auto.stop();

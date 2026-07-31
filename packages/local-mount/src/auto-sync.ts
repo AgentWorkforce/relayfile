@@ -1,10 +1,14 @@
 import {
   chmodSync,
+  closeSync,
   constants as fsConstants,
   copyFileSync,
   existsSync,
   lstatSync,
   mkdirSync,
+  openSync,
+  unlinkSync,
+  renameSync,
   readdirSync,
   readFileSync,
   realpathSync,
@@ -12,6 +16,7 @@ import {
   statSync,
 } from 'node:fs';
 import type { Stats } from 'node:fs';
+import { randomBytes } from 'node:crypto';
 import path from 'node:path';
 import watcher, { type AsyncSubscription } from '@parcel/watcher';
 import { preserveMtime, statsImplySameContent } from './stat-compare.js';
@@ -687,7 +692,7 @@ function doMountToProject(
     updateState(state, relPosix, mountAbs, target);
     return false;
   }
-  copyFileSync(mountAbs, target, fsConstants.COPYFILE_FICLONE);
+  if (!safeCopyOnto(mountAbs, target)) return false;
   const mountStat = safeFileStat(mountAbs);
   if (mountStat) preserveMtime(target, mountStat);
   updateState(state, relPosix, mountAbs, target);
@@ -709,22 +714,15 @@ function doProjectToMount(
     updateState(state, relPosix, target, projectAbs);
     return false;
   }
-  // The mount copy of a readonly file has mode 0o444, which blocks
-  // copyFileSync from overwriting it. Temporarily restore write permission.
-  if (existsSync(target)) {
-    try { chmodSync(target, 0o644); } catch { /* best effort */ }
-  }
-  copyFileSync(projectAbs, target, fsConstants.COPYFILE_FICLONE);
+  // The mode is applied to the temporary file before the rename, so a readonly
+  // (0o444) mount copy no longer has to be chmod'd writable first. That
+  // temporary un-protection was a small window in which the readonly guarantee
+  // did not hold; renaming over the target removes the need for it entirely.
   const sourceStat = safeFileStat(projectAbs);
+  const mode = readonly ? 0o444 : sourceStat?.mode !== undefined ? sourceStat.mode & 0o777 : undefined;
+
+  if (!safeCopyOnto(projectAbs, target, mode)) return false;
   if (sourceStat) preserveMtime(target, sourceStat);
-  if (readonly) {
-    try { chmodSync(target, 0o444); } catch { /* best effort */ }
-  } else {
-    const mode = safeFileStat(projectAbs)?.mode;
-    if (mode !== undefined) {
-      try { chmodSync(target, mode & 0o777); } catch { /* best effort */ }
-    }
-  }
   updateState(state, relPosix, target, projectAbs);
   return true;
 }
@@ -802,7 +800,8 @@ function safeFileStat(p: string): Stats | null {
   }
 }
 
-function isSymlinkTarget(target: string): boolean {
+/** @internal exported for the adversarial confinement suite. */
+export function isSymlinkTarget(target: string): boolean {
   // If the target already exists as a symlink, writing through it would
   // follow the link and potentially escape the mount/project root. Refuse.
   try {
@@ -837,7 +836,15 @@ function sameContentBytes(left: string, right: string): boolean {
   }
 }
 
-function resolveSafeWriteTarget(root: string, candidate: string): string | null {
+/**
+ * Exported for the adversarial confinement suite in
+ * auto-sync-confinement.test.ts. Not part of the package's public API — the
+ * test drives the real resolver rather than a copy of it, because a copy proves
+ * nothing about this code.
+ */
+export function resolveSafeWriteTarget(root: string, candidate: string): string | null {
+  // `root` must already be realpath'd — the only caller does this at
+  // mount.ts:195. Passing an unresolved root will reject everything.
   const resolvedRoot = path.resolve(root);
   const resolvedCandidate = path.resolve(candidate);
   if (
@@ -848,7 +855,17 @@ function resolveSafeWriteTarget(root: string, candidate: string): string | null 
   }
   const parent = path.dirname(resolvedCandidate);
   try {
-    mkdirSync(parent, { recursive: true });
+    // Directories are created one component at a time, refusing to traverse a
+    // symlink, and only after the component is known to be safe.
+    //
+    // `mkdirSync(parent, { recursive: true })` used to run BEFORE the resolved
+    // parent was validated, so a symlinked component caused directories to be
+    // created outside the root and only then was the write refused — a refusal
+    // with a side effect. `recursive: true` also creates *through* a symlinked
+    // component, which is the traversal it was supposed to prevent.
+    if (!createDirectoriesWithin(resolvedRoot, parent)) {
+      return null;
+    }
     const realParent = realpathSync(parent);
     if (
       realParent !== resolvedRoot &&
@@ -859,6 +876,138 @@ function resolveSafeWriteTarget(root: string, candidate: string): string | null 
     return path.join(realParent, path.basename(resolvedCandidate));
   } catch {
     return null;
+  }
+}
+
+/**
+ * Create every missing component of `dir` beneath `root`, one at a time,
+ * refusing to follow or create through a symlink. Returns false on the first
+ * component that is not a real directory.
+ */
+function createDirectoriesWithin(root: string, dir: string): boolean {
+  if (dir === root) return true;
+
+  const relative = path.relative(root, dir);
+  if (relative.startsWith('..') || path.isAbsolute(relative)) return false;
+
+  // Each component is opened and held for the duration, and — where the
+  // platform allows — the next component is resolved *relative to that
+  // descriptor* rather than by recomputed path.
+  //
+  // Checking a component with `lstat` and then creating the next one by path is
+  // a race: an already-accepted directory can be swapped for an
+  // outside-directed symlink before the following segment is created, and
+  // `mkdirSync` would then create directories outside the root. Resolving
+  // through the held descriptor means a swap on disk cannot redirect the
+  // create, because the descriptor still refers to the directory that was
+  // validated.
+  //
+  // On Linux `/proc/self/fd/<fd>/name` gives that resolution from the kernel.
+  // Elsewhere there is no equivalent without a native `openat`, so the walk
+  // falls back to paths and the held descriptors serve a narrower purpose: they
+  // pin each inode so it cannot be freed and recycled, which keeps the caller's
+  // subsequent `realpath` containment check meaningful. The write is still
+  // refused in that case — the residual is that a directory may have been
+  // created outside the root before the refusal.
+  const held: number[] = [];
+  try {
+    let parentFd = openSync(root, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY);
+    held.push(parentFd);
+    let currentPath = root;
+
+    for (const segment of relative.split(path.sep)) {
+      if (!segment) continue;
+
+      currentPath = path.join(currentPath, segment);
+      const childPath = DESCRIPTOR_RELATIVE
+        ? `/proc/self/fd/${parentFd}/${segment}`
+        : currentPath;
+
+      const info = lstatSync(childPath, { throwIfNoEntry: false });
+      if (!info) {
+        mkdirSync(childPath); // one component, never recursive
+      } else if (info.isSymbolicLink() || !info.isDirectory()) {
+        // Refused rather than followed.
+        return false;
+      }
+
+      // O_NOFOLLOW so a symlink that appeared since the lstat cannot be opened;
+      // O_DIRECTORY so anything no longer a directory cannot be either.
+      parentFd = openSync(
+        childPath,
+        fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW
+      );
+      held.push(parentFd);
+    }
+    return true;
+  } catch {
+    return false;
+  } finally {
+    for (const fd of held) {
+      try { closeSync(fd); } catch { /* already closed */ }
+    }
+  }
+}
+
+/** True where `/proc/self/fd` provides kernel-side descriptor-relative resolution. */
+const DESCRIPTOR_RELATIVE = process.platform === 'linux';
+
+/**
+ * Copy `source` onto `target` without ever writing *through* whatever `target`
+ * currently names.
+ *
+ * The content is written to a temporary sibling inside the already-validated
+ * parent directory and then renamed over the target. That is what makes this
+ * safe, and it closes two confirmed escapes that a check-then-copy sequence
+ * could not:
+ *
+ *   - **Hardlink.** A hardlink inside the root pointing at a file outside it is
+ *     path-indistinguishable from a real file and `realpath` cannot resolve it,
+ *     because a hardlink has no target. `copyFileSync` onto that name wrote
+ *     straight through to the outside file. `rename` replaces the *directory
+ *     entry* instead, so the linked file keeps its content.
+ *
+ *   - **TOCTOU.** `isSymlinkTarget(target)` followed by `copyFileSync(target)`
+ *     is two path lookups, and a target swapped for a symlink in between was
+ *     followed. `rename` does not follow a final symlink — it replaces it.
+ *
+ * It also makes the write atomic: a reader sees the old file or the new one,
+ * never a partial or zero-length one, and an interrupted copy leaves the target
+ * untouched. Reflink cloning is preserved, since the copy into the temporary
+ * file still uses COPYFILE_FICLONE.
+ */
+export function safeCopyOnto(source: string, target: string, mode?: number): boolean {
+  const dir = path.dirname(target);
+
+  // The temporary name is RANDOM and SHORT, and the copy is EXCLUSIVE. Both
+  // properties are load-bearing:
+  //
+  //   - Random + exclusive, because the agent controls the mount. A name
+  //     derived from the target basename plus pid and a counter is predictable,
+  //     and `copyFileSync` follows a destination symlink — so the agent could
+  //     pre-create that exact path pointing at a file outside the mount and the
+  //     copy would overwrite the victim *before* the safe rename ever ran. That
+  //     is the same escape this function exists to close, reintroduced by the
+  //     fix; COPYFILE_EXCL makes the create fail if anything is already there,
+  //     symlink included, and randomness means there is nothing to pre-empt.
+  //
+  //   - Short and independent of the target basename, because a basename near
+  //     the filesystem's per-component limit (NAME_MAX, typically 255) would
+  //     make a derived temporary name too long. `copyFileSync` then fails
+  //     ENAMETOOLONG, which this function reports as a refusal, and auto-sync
+  //     silently stops updating that file in either direction.
+  const temp = path.join(dir, `.rfsync-${randomBytes(9).toString('hex')}`);
+
+  try {
+    copyFileSync(source, temp, fsConstants.COPYFILE_FICLONE | fsConstants.COPYFILE_EXCL);
+    if (mode !== undefined) {
+      try { chmodSync(temp, mode); } catch { /* best effort */ }
+    }
+    renameSync(temp, target);
+    return true;
+  } catch {
+    try { unlinkSync(temp); } catch { /* best effort */ }
+    return false;
   }
 }
 
