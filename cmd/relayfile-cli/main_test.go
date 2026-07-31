@@ -6487,6 +6487,68 @@ func TestOpsListRefreshMissingItemsPreservesMirror(t *testing.T) {
 	}
 }
 
+func TestOpsListRefreshPaginatedFirstPagePreservesPageTwoMirror(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	localDir := t.TempDir()
+	deadLetterDir := filepath.Join(localDir, ".relay", "dead-letter")
+	if err := os.MkdirAll(deadLetterDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pageTwoPath := filepath.Join(deadLetterDir, "op_page_two.json")
+	if err := os.WriteFile(pageTwoPath, []byte(`{"opId":"op_page_two"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := upsertWorkspaceDetails(workspaceRecord{
+		Name:     "demo",
+		ID:       "ws_demo",
+		LocalDir: localDir,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	firstPage := make([]opsListItem, 200)
+	for i := range firstPage {
+		firstPage[i] = opsListItem{
+			OpID:   fmt.Sprintf("op_page_one_%03d", i),
+			Path:   fmt.Sprintf("/notion/page-%03d.json", i),
+			Status: "dead_lettered",
+		}
+	}
+	nextCursor := "page-two"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("limit"); got != "200" {
+			t.Fatalf("limit = %q, want 200", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(opsListResponse{
+			Items:      firstPage,
+			NextCursor: &nextCursor,
+		}); err != nil {
+			t.Fatalf("encode first page: %v", err)
+		}
+	}))
+	defer server.Close()
+	if err := saveCredentials(credentials{Server: server.URL, Token: "token"}); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout bytes.Buffer
+	if err := run([]string{"ops", "list", "--workspace", "demo"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stdout.String(), "paginated") {
+		t.Fatalf("refresh output = %q, want pagination refusal", stdout.String())
+	}
+	if _, err := os.Stat(pageTwoPath); err != nil {
+		t.Fatalf("page-two local obligation was pruned: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(deadLetterDir, "op_page_one_000.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("partial first page mutated local mirror, stat err=%v", err)
+	}
+}
+
 func TestPullTriggersSyncRefreshForConnectedProviders(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)
@@ -8341,6 +8403,18 @@ func TestIntegrationDisconnectCommitsPrevalidatedPlanAfterCloudMutation(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
+	plannedDir := filepath.Join(scope.LocalDir, "nested")
+	nestedMirrorPath := filepath.Join(plannedDir, "mirrored.md")
+	if err := os.MkdirAll(plannedDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(nestedMirrorPath, []byte("nested mirror"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	nestedMirrorHash, err := hashLocalWritebackFile(nestedMirrorPath)
+	if err != nil {
+		t.Fatal(err)
+	}
 	stateFile, err := workspaceMountStateFile(record.RelayWorkspaceID, record, scope)
 	if err != nil {
 		t.Fatal(err)
@@ -8349,8 +8423,9 @@ func TestIntegrationDisconnectCommitsPrevalidatedPlanAfterCloudMutation(t *testi
 		t.Fatal(err)
 	}
 	state := fmt.Sprintf(
-		`{"files":{"/github/repos/acme/README.md":{"hash":%q}}}`,
+		`{"files":{"/github/repos/acme/README.md":{"hash":%q},"/github/repos/acme/nested/mirrored.md":{"hash":%q}}}`,
 		mirrorHash,
+		nestedMirrorHash,
 	)
 	if err := os.WriteFile(stateFile, []byte(state), 0o600); err != nil {
 		t.Fatal(err)
@@ -8358,6 +8433,7 @@ func TestIntegrationDisconnectCommitsPrevalidatedPlanAfterCloudMutation(t *testi
 
 	deleteCalls := 0
 	latePath := filepath.Join(scope.LocalDir, "created-after-preflight.md")
+	nestedLatePath := filepath.Join(plannedDir, "created-after-preflight.md")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodDelete ||
 			r.URL.Path != "/api/v1/workspaces/ws_123/integrations/github/status" {
@@ -8371,6 +8447,9 @@ func TestIntegrationDisconnectCommitsPrevalidatedPlanAfterCloudMutation(t *testi
 			t.Fatal(err)
 		}
 		if err := os.WriteFile(latePath, []byte("created after preflight"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(nestedLatePath, []byte("nested after preflight"), 0o644); err != nil {
 			t.Fatal(err)
 		}
 		_, _ = w.Write([]byte(`{"ok":true}`))
@@ -8395,6 +8474,12 @@ func TestIntegrationDisconnectCommitsPrevalidatedPlanAfterCloudMutation(t *testi
 	}
 	if payload, err := os.ReadFile(latePath); err != nil || string(payload) != "created after preflight" {
 		t.Fatalf("post-preflight file was not preserved, payload=%q err=%v", payload, err)
+	}
+	if _, err := os.Stat(nestedMirrorPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("prevalidated nested mirror cleanup did not run: %v", err)
+	}
+	if payload, err := os.ReadFile(nestedLatePath); err != nil || string(payload) != "nested after preflight" {
+		t.Fatalf("nested post-preflight file was not preserved, payload=%q err=%v", payload, err)
 	}
 	if _, err := os.Stat(filepath.Join(localRoot, ".relay", "disconnected", "github.json")); err != nil {
 		t.Fatalf("disconnect marker missing after Cloud mutation: %v", err)

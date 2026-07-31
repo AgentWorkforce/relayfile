@@ -301,6 +301,42 @@ func TestExecuteMountDispatchesFuseMode(t *testing.T) {
 	}
 }
 
+func TestExecuteMountPlansSingleScopedFusePathBeforeDispatch(t *testing.T) {
+	catalogDir := t.TempDir()
+	cfg := mountConfig{
+		mode:        mountModeFuse,
+		localDir:    catalogDir,
+		localLayout: localLayoutScoped,
+		remotePaths: []string{"/github"},
+	}
+	var received mountConfig
+
+	err := executeMount(
+		context.Background(),
+		cfg,
+		func(context.Context, mountConfig) error { return nil },
+		func(_ context.Context, planned mountConfig) error {
+			received = planned
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("executeMount returned error: %v", err)
+	}
+	if got, want := received.localDir, filepath.Join(catalogDir, "github"); got != want {
+		t.Fatalf("FUSE local dir = %q, want scoped child %q", got, want)
+	}
+	if received.remotePath != "/github" {
+		t.Fatalf("FUSE remote path = %q, want /github", received.remotePath)
+	}
+	if got := strings.Join(received.remotePaths, ","); got != "/github" {
+		t.Fatalf("FUSE remote paths = %q, want /github", got)
+	}
+	if !received.scopedChild {
+		t.Fatal("expected FUSE config to be marked as a scoped child")
+	}
+}
+
 func TestExecuteMountRejectsMultipleFusePaths(t *testing.T) {
 	cfg := mountConfig{
 		mode:        mountModeFuse,

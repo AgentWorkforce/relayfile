@@ -347,6 +347,31 @@ function ensureProcessRunning(processRef: ChildProcess): boolean {
   return processRef.exitCode === null && !processRef.killed;
 }
 
+function resolveConcreteMountPoint(
+  mountPoint: string,
+  mountEnv: NodeJS.ProcessEnv
+): string {
+  if (
+    (mountEnv.RELAYFILE_MOUNT_LOCAL_LAYOUT ?? "").trim().toLowerCase() !==
+    "scoped"
+  ) {
+    return mountPoint;
+  }
+  const remotePath = (mountEnv.RELAYFILE_REMOTE_PATH ?? "/")
+    .trim()
+    .replace(/\\/g, "/");
+  const normalizedRemote = path.posix.normalize(
+    remotePath.startsWith("/") ? remotePath : `/${remotePath}`
+  );
+  if (normalizedRemote === "/") {
+    return mountPoint;
+  }
+  return path.join(
+    mountPoint,
+    ...normalizedRemote.split("/").filter(Boolean)
+  );
+}
+
 async function stopMountProcess(processRef: ChildProcess): Promise<void> {
   if (processRef.exitCode !== null || !processRef.pid) {
     return;
@@ -452,10 +477,11 @@ export async function ensureRelayfileMount(config: MountConfig): Promise<MountHa
 
   let stopPromise: Promise<void> | undefined;
   const startedMountProc = mountProc;
+  const concreteMountPoint = resolveConcreteMountPoint(mountPoint, mountEnv);
 
   return {
     pid: mountProc.pid,
-    mountPoint,
+    mountPoint: concreteMountPoint,
     async stop(): Promise<void> {
       if (!stopPromise) {
         // Memoize the in-flight shutdown so concurrent callers all await the

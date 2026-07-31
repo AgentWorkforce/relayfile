@@ -6098,6 +6098,9 @@ func validateDeadLetterRefreshPlan(record workspaceRecord, feed opsListResponse)
 	if feed.Items == nil {
 		return deadLetterRefreshPlan{}, errors.New("dead-letter response is missing required items array")
 	}
+	if feed.NextCursor != nil && strings.TrimSpace(*feed.NextCursor) != "" {
+		return deadLetterRefreshPlan{}, errors.New("dead-letter response is paginated; refusing to refresh or prune the local mirror from an incomplete server set")
+	}
 	plan := deadLetterRefreshPlan{
 		items:      feed.Items,
 		targetDirs: make(map[string]string, len(feed.Items)),
@@ -12674,6 +12677,13 @@ func removeProviderMirrorWithPlan(plan providerDisconnectPlan) error {
 	}
 	for _, deletion := range plan.deletions {
 		err := os.Remove(deletion.path)
+		if deletion.kind == "directory" && errors.Is(err, syscall.ENOTEMPTY) {
+			// A child created after preflight is intentionally absent from the
+			// deletion allow-list. Preserve that arrival and keep committing
+			// the validated cleanup instead of stranding the disconnect after
+			// the Cloud DELETE has already succeeded.
+			continue
+		}
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
