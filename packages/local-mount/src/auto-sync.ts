@@ -802,7 +802,8 @@ function safeFileStat(p: string): Stats | null {
   }
 }
 
-function isSymlinkTarget(target: string): boolean {
+/** @internal exported for the adversarial confinement suite. */
+export function isSymlinkTarget(target: string): boolean {
   // If the target already exists as a symlink, writing through it would
   // follow the link and potentially escape the mount/project root. Refuse.
   try {
@@ -837,7 +838,13 @@ function sameContentBytes(left: string, right: string): boolean {
   }
 }
 
-function resolveSafeWriteTarget(root: string, candidate: string): string | null {
+/**
+ * Exported for the adversarial confinement suite in
+ * auto-sync-confinement.test.ts. Not part of the package's public API — the
+ * test drives the real resolver rather than a copy of it, because a copy proves
+ * nothing about this code.
+ */
+export function resolveSafeWriteTarget(root: string, candidate: string): string | null {
   const resolvedRoot = path.resolve(root);
   const resolvedCandidate = path.resolve(candidate);
   if (
