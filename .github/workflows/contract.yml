@@ -40,3 +40,6 @@ jobs:
 
       - name: Validate contract surface
         run: ./scripts/check-contract-surface.sh
+
+      - name: Validate protected release workflow
+        run: ./scripts/check-publish-workflow.sh

@@ -84,16 +84,18 @@ jobs:
 
     steps:
       - name: Validate release mode
+        env:
+          RELEASE_PACKAGE: ${{ github.event.inputs.package }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
         run: |
           set -euo pipefail
-          if [ "${{ github.event.inputs.package }}" != "all" ] && [ "${{ github.event.inputs.dry_run }}" != "true" ]; then
+          if [ "$RELEASE_PACKAGE" != "all" ] && [ "$DRY_RUN" != "true" ]; then
             cat >&2 <<'EOF'
           ERROR: the publish workflow version-bumps every @relayfile package, and
-          release lockfile regeneration needs every @relayfile/mount-* package at
-          the new version to have been published so npm can resolve tarball
-          integrity metadata. Run the release with package=all, or split
-          single-package releases into a workflow that does not rewrite all
-          package manifests and lockfiles.
+          publishing only one package would leave the other package manifests at
+          an unpublished version inside the release artifact. Run the release
+          with package=all, or split single-package releases into a workflow that
+          does not rewrite every package manifest.
           EOF
             exit 1
           fi
@@ -125,15 +127,15 @@ jobs:
 
       - name: Version all packages
         id: bump
+        env:
+          CUSTOM_VERSION: ${{ github.event.inputs.custom_version }}
+          VERSION_TYPE: ${{ github.event.inputs.version }}
+          PREID: ${{ github.event.inputs.preid }}
         run: |
           set -euo pipefail
-          CUSTOM_VERSION="${{ github.event.inputs.custom_version }}"
-          VERSION_TYPE="${{ github.event.inputs.version }}"
-          PREID="${{ github.event.inputs.preid }}"
           MANIFEST_VERSION=$(node -p "require('./package.json').version")
-          LATEST_TAG=$(git for-each-ref \
+          LATEST_TAG=$(git -c versionsort.suffix=- for-each-ref \
             --sort=-version:refname \
-            --sort=-creatordate \
             --format='%(refname:short)' \
             'refs/tags/v[0-9]*' | sed -n '1p')
 
@@ -352,16 +354,46 @@ jobs:
           path: relayfile-mount-${{ matrix.suffix }}
           retention-days: 1
 
+  # Reserve the version on the remote before any irreversible npm publish.
+  # The explicit tag refspec is atomic for this ref: either a competing tag
+  # writer wins or this job wins, but packages are never published first and
+  # then left without their intended tag.
+  reserve-release-tag:
+    name: Reserve release tag
+    needs: [build, build-mount-binaries]
+    runs-on: ubuntu-latest
+    if: |
+      github.event.inputs.dry_run != 'true' &&
+      needs.build.result == 'success' &&
+      needs.build-mount-binaries.result == 'success'
+    steps:
+      - name: Checkout source commit
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Reserve version tag
+        env:
+          NEW_VERSION: ${{ needs.build.outputs.new_version }}
+        run: |
+          set -euo pipefail
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          git tag -a "v${NEW_VERSION}" -m "Release v${NEW_VERSION}"
+          git push origin "refs/tags/v${NEW_VERSION}:refs/tags/v${NEW_VERSION}"
+
   # Publish all packages in parallel
   publish-packages:
     name: Publish ${{ matrix.package }}
-    needs: [build, build-mount-binaries]
+    needs: [build, build-mount-binaries, reserve-release-tag]
     runs-on: ubuntu-latest
     if: |
       always() &&
       github.event.inputs.package == 'all' &&
       needs.build.result == 'success' &&
-      (github.event.inputs.dry_run == 'true' || needs.build-mount-binaries.result == 'success')
+      (github.event.inputs.dry_run == 'true' ||
+        (needs.build-mount-binaries.result == 'success' && needs.reserve-release-tag.result == 'success'))
     strategy:
       fail-fast: false
       max-parallel: 10
@@ -444,26 +476,31 @@ jobs:
       - name: Dry run check
         if: github.event.inputs.dry_run == 'true'
         working-directory: ${{ matrix.path }}
+        env:
+          NPM_TAG: ${{ github.event.inputs.tag }}
         run: |
           PACKAGE_NAME=$(node -p "require('./package.json').name")
           echo "Dry run - would publish ${PACKAGE_NAME}"
-          npm publish --dry-run --access public --tag ${{ github.event.inputs.tag }} --ignore-scripts
+          npm publish --dry-run --access public --tag "$NPM_TAG" --ignore-scripts
 
       - name: Publish to NPM
         if: github.event.inputs.dry_run != 'true'
         working-directory: ${{ matrix.path }}
-        run: npm publish --access public --provenance --tag ${{ github.event.inputs.tag }} --ignore-scripts
+        env:
+          NPM_TAG: ${{ github.event.inputs.tag }}
+        run: npm publish --access public --provenance --tag "$NPM_TAG" --ignore-scripts
 
   # Publish single package (when not 'all')
   publish-single:
     name: Publish single package
-    needs: [build, build-mount-binaries]
+    needs: [build, build-mount-binaries, reserve-release-tag]
     runs-on: ubuntu-latest
     if: |
       always() &&
       github.event.inputs.package != 'all' &&
       needs.build.result == 'success' &&
-      (github.event.inputs.dry_run == 'true' || needs.build-mount-binaries.result == 'success')
+      (github.event.inputs.dry_run == 'true' ||
+        (needs.build-mount-binaries.result == 'success' && needs.reserve-release-tag.result == 'success'))
 
     steps:
       - name: Checkout code
@@ -487,8 +524,10 @@ jobs:
 
       - name: Resolve package path
         id: resolve-package
+        env:
+          RELEASE_PACKAGE: ${{ github.event.inputs.package }}
         run: |
-          case "${{ github.event.inputs.package }}" in
+          case "$RELEASE_PACKAGE" in
             core) echo "path=packages/core" >> "$GITHUB_OUTPUT"; echo "mount_binary=" >> "$GITHUB_OUTPUT" ;;
             sdk) echo "path=packages/sdk/typescript" >> "$GITHUB_OUTPUT"; echo "mount_binary=" >> "$GITHUB_OUTPUT" ;;
             client) echo "path=packages/client" >> "$GITHUB_OUTPUT"; echo "mount_binary=" >> "$GITHUB_OUTPUT" ;;
@@ -501,7 +540,7 @@ jobs:
             mount-linux-arm64) echo "path=packages/mount-linux-arm64" >> "$GITHUB_OUTPUT"; echo "mount_binary=relayfile-mount-linux-arm64" >> "$GITHUB_OUTPUT" ;;
             mount-linux-x64) echo "path=packages/mount-linux-x64" >> "$GITHUB_OUTPUT"; echo "mount_binary=relayfile-mount-linux-amd64" >> "$GITHUB_OUTPUT" ;;
             *)
-              echo "Unsupported package: ${{ github.event.inputs.package }}" >&2
+              echo "Unsupported package: $RELEASE_PACKAGE" >&2
               exit 1
               ;;
           esac
@@ -529,24 +568,29 @@ jobs:
       - name: Dry run check
         if: github.event.inputs.dry_run == 'true'
         working-directory: ${{ steps.resolve-package.outputs.path }}
+        env:
+          NPM_TAG: ${{ github.event.inputs.tag }}
         run: |
           PACKAGE_NAME=$(node -p "require('./package.json').name")
           echo "Dry run - would publish ${PACKAGE_NAME}"
-          npm publish --dry-run --access public --tag ${{ github.event.inputs.tag }} --ignore-scripts
+          npm publish --dry-run --access public --tag "$NPM_TAG" --ignore-scripts
 
       - name: Publish to NPM
         if: github.event.inputs.dry_run != 'true'
         working-directory: ${{ steps.resolve-package.outputs.path }}
-        run: npm publish --access public --provenance --tag ${{ github.event.inputs.tag }} --ignore-scripts
+        env:
+          NPM_TAG: ${{ github.event.inputs.tag }}
+        run: npm publish --access public --provenance --tag "$NPM_TAG" --ignore-scripts
 
   create-release:
     name: Create Release
-    needs: [build, publish-packages, publish-single, build-mount-binaries]
+    needs: [build, publish-packages, publish-single, build-mount-binaries, reserve-release-tag]
     runs-on: ubuntu-latest
     if: |
       always() &&
       github.event.inputs.dry_run != 'true' &&
       needs.build-mount-binaries.result == 'success' &&
+      needs.reserve-release-tag.result == 'success' &&
       (needs.publish-packages.result == 'success' || needs.publish-single.result == 'success')
 
     steps:
@@ -598,17 +642,6 @@ jobs:
           ( cd mount-binaries && sha256sum relayfile-mount-* ) > checksums.txt
           ( cd packages/cli/bin && sha256sum relayfile-cli-* ) >> checksums.txt
           cat checksums.txt
-
-      - name: Create and push release tag
-        env:
-          NEW_VERSION: ${{ needs.build.outputs.new_version }}
-        run: |
-          set -euo pipefail
-          git config user.name "GitHub Actions"
-          git config user.email "actions@github.com"
-          echo "Tagging source commit $(git rev-parse HEAD) as v${NEW_VERSION}"
-          git tag -a "v${NEW_VERSION}" -m "Release v${NEW_VERSION}"
-          git push origin "v${NEW_VERSION}"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -669,21 +702,25 @@ jobs:
 
   summary:
     name: Summary
-    needs: [build, publish-packages, publish-single, build-mount-binaries, create-release]
+    needs: [build, publish-packages, publish-single, build-mount-binaries, reserve-release-tag, create-release]
     runs-on: ubuntu-latest
     if: always()
 
     steps:
       - name: Summary
+        env:
+          RELEASE_PACKAGE: ${{ github.event.inputs.package }}
+          NPM_TAG: ${{ github.event.inputs.tag }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
         run: |
           {
             echo "## Publish Summary"
             echo ""
-            echo "**Package**: \`${{ github.event.inputs.package }}\`"
+            echo "**Package**: \`${RELEASE_PACKAGE}\`"
             echo "**Version**: \`${{ needs.build.outputs.new_version }}\`"
-            echo "**NPM Tag**: \`${{ github.event.inputs.tag }}\`"
+            echo "**NPM Tag**: \`${NPM_TAG}\`"
             echo "**Prerelease**: \`${{ needs.build.outputs.is_prerelease }}\`"
-            echo "**Dry Run**: \`${{ github.event.inputs.dry_run }}\`"
+            echo "**Dry Run**: \`${DRY_RUN}\`"
             echo "**Provenance**: \`enabled\`"
             echo ""
             echo "### Results"
