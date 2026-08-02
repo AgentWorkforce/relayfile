@@ -6487,7 +6487,7 @@ func TestOpsListRefreshMissingItemsPreservesMirror(t *testing.T) {
 	}
 }
 
-func TestOpsListRefreshPaginatedFirstPagePreservesPageTwoMirror(t *testing.T) {
+func TestOpsListRefreshFetchesEveryPageBeforePruning(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)
 
@@ -6496,8 +6496,8 @@ func TestOpsListRefreshPaginatedFirstPagePreservesPageTwoMirror(t *testing.T) {
 	if err := os.MkdirAll(deadLetterDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	pageTwoPath := filepath.Join(deadLetterDir, "op_page_two.json")
-	if err := os.WriteFile(pageTwoPath, []byte(`{"opId":"op_page_two"}`), 0o644); err != nil {
+	stalePath := filepath.Join(deadLetterDir, "op_stale.json")
+	if err := os.WriteFile(stalePath, []byte(`{"opId":"op_stale"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := upsertWorkspaceDetails(workspaceRecord{
@@ -6517,16 +6517,31 @@ func TestOpsListRefreshPaginatedFirstPagePreservesPageTwoMirror(t *testing.T) {
 		}
 	}
 	nextCursor := "page-two"
+	requests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
 		if got := r.URL.Query().Get("limit"); got != "200" {
 			t.Fatalf("limit = %q, want 200", got)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(opsListResponse{
-			Items:      firstPage,
-			NextCursor: &nextCursor,
-		}); err != nil {
-			t.Fatalf("encode first page: %v", err)
+		switch cursor := r.URL.Query().Get("cursor"); cursor {
+		case "":
+			if err := json.NewEncoder(w).Encode(opsListResponse{
+				Items:      firstPage,
+				NextCursor: &nextCursor,
+			}); err != nil {
+				t.Fatalf("encode first page: %v", err)
+			}
+		case nextCursor:
+			if err := json.NewEncoder(w).Encode(opsListResponse{Items: []opsListItem{{
+				OpID:   "op_page_two",
+				Path:   "/notion/page-two.json",
+				Status: "dead_lettered",
+			}}}); err != nil {
+				t.Fatalf("encode second page: %v", err)
+			}
+		default:
+			t.Fatalf("unexpected cursor %q", cursor)
 		}
 	}))
 	defer server.Close()
@@ -6538,14 +6553,88 @@ func TestOpsListRefreshPaginatedFirstPagePreservesPageTwoMirror(t *testing.T) {
 	if err := run([]string{"ops", "list", "--workspace", "demo"}, strings.NewReader(""), &stdout, &stdout); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(stdout.String(), "paginated") {
-		t.Fatalf("refresh output = %q, want pagination refusal", stdout.String())
+	if requests != 2 {
+		t.Fatalf("requests = %d, want two pages", requests)
 	}
-	if _, err := os.Stat(pageTwoPath); err != nil {
-		t.Fatalf("page-two local obligation was pruned: %v", err)
+	if _, err := os.Stat(filepath.Join(deadLetterDir, "op_page_one_000.json")); err != nil {
+		t.Fatalf("page-one record missing: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(deadLetterDir, "op_page_one_000.json")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("partial first page mutated local mirror, stat err=%v", err)
+	if _, err := os.Stat(filepath.Join(deadLetterDir, "op_page_two.json")); err != nil {
+		t.Fatalf("page-two record missing: %v", err)
+	}
+	if _, err := os.Stat(stalePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stale record was not pruned after the complete feed validated: %v", err)
+	}
+}
+
+func TestOpsListRefreshLaterPageFailureOrCursorLoopPreservesMirror(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		secondPage func(http.ResponseWriter)
+		want       string
+	}{
+		{
+			name: "later page failure",
+			secondPage: func(w http.ResponseWriter) {
+				http.Error(w, "try again", http.StatusBadGateway)
+			},
+			want: "502",
+		},
+		{
+			name: "repeated cursor",
+			secondPage: func(w http.ResponseWriter) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"items":[],"nextCursor":"page-two"}`))
+			},
+			want: "repeated cursor",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			clearRelayfileEnv(t)
+
+			localDir := t.TempDir()
+			deadLetterDir := filepath.Join(localDir, ".relay", "dead-letter")
+			if err := os.MkdirAll(deadLetterDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			localPath := filepath.Join(deadLetterDir, "op_local.json")
+			if err := os.WriteFile(localPath, []byte(`{"opId":"op_local"}`), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := upsertWorkspaceDetails(workspaceRecord{
+				Name: "demo", ID: "ws_demo", LocalDir: localDir,
+			}); err != nil {
+				t.Fatal(err)
+			}
+
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Query().Get("cursor") == "page-two" {
+					test.secondPage(w)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"items":[{"opId":"op_page_one","path":"/notion/page-one.json","status":"dead_lettered"}],"nextCursor":"page-two"}`))
+			}))
+			defer server.Close()
+			if err := saveCredentials(credentials{Server: server.URL, Token: "token"}); err != nil {
+				t.Fatal(err)
+			}
+
+			var stdout bytes.Buffer
+			if err := run([]string{"ops", "list", "--workspace", "demo"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(stdout.String(), test.want) {
+				t.Fatalf("refresh output = %q, want %q", stdout.String(), test.want)
+			}
+			if _, err := os.Stat(localPath); err != nil {
+				t.Fatalf("later-page failure pruned local record: %v", err)
+			}
+			if _, err := os.Stat(filepath.Join(deadLetterDir, "op_page_one.json")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("partial feed mutated local mirror: %v", err)
+			}
+		})
 	}
 }
 

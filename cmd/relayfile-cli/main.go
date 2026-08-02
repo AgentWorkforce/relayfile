@@ -6098,9 +6098,6 @@ func validateDeadLetterRefreshPlan(record workspaceRecord, feed opsListResponse)
 	if feed.Items == nil {
 		return deadLetterRefreshPlan{}, errors.New("dead-letter response is missing required items array")
 	}
-	if feed.NextCursor != nil && strings.TrimSpace(*feed.NextCursor) != "" {
-		return deadLetterRefreshPlan{}, errors.New("dead-letter response is paginated; refusing to refresh or prune the local mirror from an incomplete server set")
-	}
 	plan := deadLetterRefreshPlan{
 		items:      feed.Items,
 		targetDirs: make(map[string]string, len(feed.Items)),
@@ -6125,6 +6122,49 @@ func validateDeadLetterRefreshPlan(record workspaceRecord, feed opsListResponse)
 	return plan, nil
 }
 
+func fetchAllDeadLetterOps(ctx context.Context, client *apiClient, workspaceID string) (opsListResponse, error) {
+	items := make([]opsListItem, 0)
+	cursor := ""
+	seenCursors := map[string]struct{}{}
+	for {
+		query := url.Values{
+			"status": []string{"dead_lettered"},
+			"limit":  []string{"200"},
+		}
+		if cursor != "" {
+			query.Set("cursor", cursor)
+		}
+		var page opsListResponse
+		if err := client.getJSON(
+			ctx,
+			fmt.Sprintf("/v1/workspaces/%s/ops?%s", url.PathEscape(workspaceID), query.Encode()),
+			&page,
+		); err != nil {
+			return opsListResponse{}, err
+		}
+		if page.Items == nil {
+			return opsListResponse{}, errors.New("dead-letter response is missing required items array")
+		}
+		items = append(items, page.Items...)
+
+		nextCursor := ""
+		if page.NextCursor != nil {
+			nextCursor = strings.TrimSpace(*page.NextCursor)
+		}
+		if nextCursor == "" {
+			return opsListResponse{Items: items}, nil
+		}
+		if nextCursor == cursor {
+			return opsListResponse{}, fmt.Errorf("dead-letter response repeated cursor %q", nextCursor)
+		}
+		if _, exists := seenCursors[nextCursor]; exists {
+			return opsListResponse{}, fmt.Errorf("dead-letter response cursor loop detected at %q", nextCursor)
+		}
+		seenCursors[nextCursor] = struct{}{}
+		cursor = nextCursor
+	}
+}
+
 // refreshDeadLetterMirror reconciles the local .relay/dead-letter/ directory
 // against the server's view per contract §8.4. New dead-lettered ops are
 // written; ops the server no longer reports as dead-lettered are pruned so
@@ -6143,12 +6183,8 @@ func refreshDeadLetterMirror(record workspaceRecord, serverOverride, tokenOverri
 		return err
 	}
 
-	var feed opsListResponse
-	if err := client.getJSON(
-		context.Background(),
-		fmt.Sprintf("/v1/workspaces/%s/ops?status=dead_lettered&limit=200", url.PathEscape(record.ID)),
-		&feed,
-	); err != nil {
+	feed, err := fetchAllDeadLetterOps(context.Background(), client, record.ID)
+	if err != nil {
 		return err
 	}
 	plan, err := validateDeadLetterRefreshPlan(record, feed)
