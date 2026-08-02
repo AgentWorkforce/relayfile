@@ -1,0 +1,157 @@
+{
+  "id": "traj_krf3a8bxjpku",
+  "version": 1,
+  "task": {
+    "title": "Finish scoped multi-path operator surfaces",
+    "source": {
+      "system": "plain",
+      "id": "relayfile#379 / Unit C"
+    }
+  },
+  "status": "completed",
+  "startedAt": "2026-07-30T06:43:30.836Z",
+  "completedAt": "2026-07-30T10:13:35.117Z",
+  "agents": [
+    {
+      "name": "default",
+      "role": "lead",
+      "joinedAt": "2026-07-30T10:00:13.728Z"
+    }
+  ],
+  "chapters": [
+    {
+      "id": "chap_nj5ow1ldkhuu",
+      "title": "Work",
+      "agentName": "default",
+      "startedAt": "2026-07-30T10:00:13.728Z",
+      "endedAt": "2026-07-30T10:13:35.117Z",
+      "events": [
+        {
+          "ts": 1785405613729,
+          "type": "decision",
+          "content": "Represent missing exact remote-root state as unknown instead of silently defaulting to workspace root: Represent missing exact remote-root state as unknown instead of silently defaulting to workspace root",
+          "raw": {
+            "question": "Represent missing exact remote-root state as unknown instead of silently defaulting to workspace root",
+            "chosen": "Represent missing exact remote-root state as unknown instead of silently defaulting to workspace root",
+            "alternatives": [],
+            "reasoning": "A singular child root is truthful only when persisted topology or the child snapshot supplies it. Falling back to / converts absent state into an unscoped claim and can misroute pending writeback operations; operator surfaces now refuse when the legacy exact root cannot be established."
+          },
+          "significance": "high"
+        },
+        {
+          "ts": 1785406032690,
+          "type": "decision",
+          "content": "Closed all three Unit C review findings at their trust boundaries: Closed all three Unit C review findings at their trust boundaries",
+          "raw": {
+            "question": "Closed all three Unit C review findings at their trust boundaries",
+            "chosen": "Closed all three Unit C review findings at their trust boundaries",
+            "alternatives": [],
+            "reasoning": "Cloud-only disconnect now treats missing LocalDir as no local cleanup; legacy exact records recover their child root from persisted runtime state; scoped retry resolves catalog compatibility records to the matching child and child records take precedence over stale catalog duplicates."
+          },
+          "significance": "high"
+        },
+        {
+          "ts": 1785406415056,
+          "type": "reflection",
+          "content": "Unit C's first independent review found three consumer defects beyond the inventory's intended behavior; all are now fixed at routing/topology boundaries and the complete Go/TS/contract/Windows validation set is green.",
+          "raw": {
+            "focalPoints": [
+              "consumer-inventory",
+              "legacy-topology",
+              "scoped-retry",
+              "cloud-only-workspaces"
+            ],
+            "adjustments": "Require the second exact-head local review to validate that the fixes closed the class before opening the stacked PR.",
+            "confidence": 0.87
+          },
+          "significance": "high",
+          "tags": [
+            "focal:consumer-inventory",
+            "focal:legacy-topology",
+            "focal:scoped-retry",
+            "focal:cloud-only-workspaces",
+            "confidence:0.87"
+          ]
+        }
+      ]
+    }
+  ],
+  "retrospective": {
+    "summary": "Implemented Unit C operator surfaces for scoped multi-path mounts, then fixed independent-review findings in legacy topology recovery, catalog compatibility retry routing, child-state precedence, and cloud-only disconnect planning.",
+    "approach": "Standard approach",
+    "confidence": 0.88
+  },
+  "commits": [
+    "8293a6f",
+    "73ee96d",
+    "7259b13",
+    "2b665ae",
+    "7f1271e",
+    "7d3f439",
+    "99970e6",
+    "c97a789",
+    "da4ce69",
+    "0e6711b"
+  ],
+  "filesChanged": [
+    ".trajectories/active/traj_krf3a8bxjpku.json",
+    ".trajectories/completed/2026-07/traj_1kmlyo9fwsnv.json",
+    ".trajectories/completed/2026-07/traj_1kmlyo9fwsnv.md",
+    ".trajectories/completed/2026-07/traj_29k09yk5t2x1.json",
+    ".trajectories/completed/2026-07/traj_5qk62q12kolh.json",
+    ".trajectories/completed/2026-07/traj_5qk62q12kolh.md",
+    ".trajectories/completed/2026-07/traj_67s301119cc2.json",
+    ".trajectories/completed/2026-07/traj_8yty3dklbonk.json",
+    ".trajectories/completed/2026-07/traj_9iljc1uad7l1.json",
+    ".trajectories/completed/2026-07/traj_9iljc1uad7l1.md",
+    ".trajectories/completed/2026-07/traj_ewsm04d3yriw.json",
+    ".trajectories/completed/2026-07/traj_ewsm04d3yriw.md",
+    ".trajectories/completed/2026-07/traj_jj88zowb0k05.json",
+    ".trajectories/completed/2026-07/traj_kd7iuol8b4d2.json",
+    ".trajectories/completed/2026-07/traj_kd7iuol8b4d2.md",
+    ".trajectories/completed/2026-07/traj_nb6cq7m894kp.json",
+    ".trajectories/completed/2026-07/traj_rw26ij8x9yhr.json",
+    ".trajectories/completed/2026-07/traj_tdew3mg9dnit.json",
+    ".trajectories/completed/2026-07/traj_u1ub8ps9wt1x/trajectory.json",
+    ".trajectories/completed/2026-07/traj_uuzgy4neo8fh.json",
+    ".trajectories/completed/2026-07/traj_uymnrxehl9bf.json",
+    ".trajectories/completed/2026-07/traj_uymnrxehl9bf.md",
+    ".trajectories/completed/2026-07/traj_vbh4sg9b9wle.json",
+    ".trajectories/completed/2026-07/traj_vbh4sg9b9wle.md",
+    ".trajectories/completed/2026-07/traj_vo9bz6cff5fm.json",
+    ".trajectories/completed/2026-07/traj_vo9bz6cff5fm.md",
+    ".trajectories/completed/2026-07/traj_ybwfsutm6tzl.json",
+    ".trajectories/completed/2026-07/traj_ybwfsutm6tzl.md",
+    ".trajectories/completed/2026-07/traj_zx3ypuzq5t1j.json",
+    ".trajectories/completed/2026-07/traj_zx3ypuzq5t1j.md",
+    ".trajectories/index.json",
+    "README.md",
+    "cmd/relayfile-cli/background_test.go",
+    "cmd/relayfile-cli/filelock_other.go",
+    "cmd/relayfile-cli/filelock_unix.go",
+    "cmd/relayfile-cli/filelock_windows.go",
+    "cmd/relayfile-cli/main.go",
+    "cmd/relayfile-cli/main_test.go",
+    "cmd/relayfile-cli/writeback_list.go",
+    "cmd/relayfile-cli/writeback_list_test.go",
+    "cmd/relayfile-mount/main.go",
+    "cmd/relayfile-mount/main_test.go",
+    "go.mod",
+    "internal/mountscope/scope.go",
+    "internal/mountscope/scope_test.go",
+    "internal/mountsync/paths.go",
+    "internal/mountsync/paths_test.go",
+    "internal/mountsync/syncer.go",
+    "internal/mountsync/syncer_test.go",
+    "internal/mountsync/watcher.go",
+    "internal/mountsync/watcher_test.go",
+    "packages/sdk/typescript/src/setup-errors.ts"
+  ],
+  "projectId": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-c",
+  "tags": [],
+  "_trace": {
+    "startRef": "e35eeb56963152665b592c4f8541239639db5159",
+    "endRef": "8293a6f7b72dae60d575880e75178648cd369376",
+    "traceId": "bc892cf0-1c09-449e-a7a4-ddeb2d74280c"
+  }
+}

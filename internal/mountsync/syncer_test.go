@@ -52,6 +52,21 @@ func markLocalDirtyForTest(t *testing.T, syncer *Syncer, remotePath, localPath s
 	syncer.state.Files[normalizeRemotePath(remotePath)] = tracked
 }
 
+func TestTrackedFileStateHasPendingWriteback(t *testing.T) {
+	for name, tracked := range map[string]TrackedFileState{
+		"clean":          {},
+		"dirty":          {Dirty: true},
+		"delete-pending": {DeletePending: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			want := name != "clean"
+			if got := tracked.HasPendingWriteback(); got != want {
+				t.Fatalf("HasPendingWriteback() = %v, want %v", got, want)
+			}
+		})
+	}
+}
+
 func TestHTTPClientRetryDelayHonorsRetryAfter(t *testing.T) {
 	client := NewHTTPClient("https://example.test", "token", nil)
 	if got := client.retryDelay(1, "30"); got != 30*time.Second {

@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -53,7 +54,7 @@ func TestWorkspaceCreateStoresCatalogEntry(t *testing.T) {
 	}
 }
 
-func TestResolveCLIRequestedLocalLayoutRefusesAllScopedRoutes(t *testing.T) {
+func TestResolveCLIRequestedLocalLayoutAcceptsAllScopedRoutes(t *testing.T) {
 	tests := []struct {
 		name          string
 		flagValue     string
@@ -67,9 +68,9 @@ func TestResolveCLIRequestedLocalLayoutRefusesAllScopedRoutes(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := resolveCLIRequestedLocalLayout(tc.flagValue, tc.envValue, tc.recordedValue, tc.flagProvided)
-			if err == nil || !strings.Contains(err.Error(), "operator surfaces") || !strings.Contains(err.Error(), "--local-layout=exact") {
-				t.Fatalf("expected scoped-layout refusal with exact-layout remedy, got %v", err)
+			got, err := resolveCLIRequestedLocalLayout(tc.flagValue, tc.envValue, tc.recordedValue, tc.flagProvided)
+			if err != nil || got != mountscope.LayoutScoped {
+				t.Fatalf("scoped layout route resolved to %q, err=%v", got, err)
 			}
 		})
 	}
@@ -4483,20 +4484,29 @@ func TestWritebackPushScopesRequireProviderSubtree(t *testing.T) {
 	}
 }
 
-func TestReadLocalMountCursorHealthAggregatesStateFiles(t *testing.T) {
+func TestReadWorkspaceMountCursorHealthUsesPersistedPrivateState(t *testing.T) {
 	localDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(localDir, ".relayfile-mount-state.json"), []byte(`{"incrementalReadNotReadySince":{"a":"now"},"incrementalBacklogDraining":false}`), 0o644); err != nil {
-		t.Fatalf("write public state failed: %v", err)
+	record := workspaceRecord{
+		ID:            "ws_demo",
+		LocalDir:      localDir,
+		LocalLayout:   mountscope.LayoutExact,
+		RemotePaths:   []string{"/github"},
+		MountStateDir: t.TempDir(),
+		MountKind:     mountsync.MountKindDaemon,
 	}
-	privateDir := filepath.Join(localDir, mountsync.DefaultMountStateDirName)
-	if err := os.MkdirAll(privateDir, 0o755); err != nil {
+	scope := workspaceMountScopes(record)[0]
+	stateFile, err := workspaceMountStateFile("ws_demo", record, scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(stateFile), 0o755); err != nil {
 		t.Fatalf("mkdir private state failed: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(privateDir, "state.json"), []byte(`{"incrementalReadNotReadySince":{"a":"now","b":"now"},"incrementalBacklogDraining":true}`), 0o644); err != nil {
+	if err := os.WriteFile(stateFile, []byte(`{"incrementalReadNotReadySince":{"a":"now","b":"now"},"incrementalBacklogDraining":true}`), 0o644); err != nil {
 		t.Fatalf("write private state failed: %v", err)
 	}
 
-	stuck, backlog := readLocalMountCursorHealth(localDir)
+	stuck, backlog := readWorkspaceMountCursorHealth("ws_demo", record, scope)
 	if stuck != 2 || !backlog {
 		t.Fatalf("cursor health = %d/%v, want 2/true", stuck, backlog)
 	}
@@ -4863,7 +4873,7 @@ func TestWritebackPushPostsBulkAndWritesAckedReceipt(t *testing.T) {
 	if got := stdout.String(); !strings.Contains(got, "Pushed ") || !strings.Contains(got, opID) {
 		t.Fatalf("unexpected stdout: %s", got)
 	}
-	if got := countJSONFiles(filepath.Join(localDir, ".relay", "outbox", "pending")); got != 0 {
+	if got := countJSONFiles(filepath.Join(localDir, ".relay", "outbox", "pending")).Count; got != 0 {
 		t.Fatalf("pending receipt count = %d, want 0", got)
 	}
 	ackedDir := filepath.Join(localDir, ".relay", "outbox", "acked")
@@ -5036,10 +5046,10 @@ func TestWritebackUpdateCanonicalPathAllowsMissingOperationAndSendsIntent(t *tes
 	if got := stdout.String(); !strings.Contains(got, "Updated ") || !strings.Contains(got, " -> "+remotePath) {
 		t.Fatalf("unexpected stdout: %s", got)
 	}
-	if got := countJSONFiles(filepath.Join(localDir, ".relay", "outbox", "failed")); got != 0 {
+	if got := countJSONFiles(filepath.Join(localDir, ".relay", "outbox", "failed")).Count; got != 0 {
 		t.Fatalf("failed receipt count = %d, want 0", got)
 	}
-	if got := countJSONFiles(filepath.Join(localDir, ".relay", "outbox", "acked")); got != 1 {
+	if got := countJSONFiles(filepath.Join(localDir, ".relay", "outbox", "acked")).Count; got != 1 {
 		t.Fatalf("acked receipt count = %d, want 1", got)
 	}
 	ackedDir := filepath.Join(localDir, ".relay", "outbox", "acked")
@@ -5110,10 +5120,10 @@ func TestWritebackUpdateMissingOperationIDPendingStateNeedsAttention(t *testing.
 	if got := err.Error(); !strings.Contains(got, "cannot be tracked") {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if got := countJSONFiles(filepath.Join(localDir, ".relay", "outbox", "failed")); got != 0 {
+	if got := countJSONFiles(filepath.Join(localDir, ".relay", "outbox", "failed")).Count; got != 0 {
 		t.Fatalf("failed receipt count = %d, want 0", got)
 	}
-	if got := countJSONFiles(filepath.Join(localDir, ".relay", "outbox", "acked")); got != 0 {
+	if got := countJSONFiles(filepath.Join(localDir, ".relay", "outbox", "acked")).Count; got != 0 {
 		t.Fatalf("acked receipt count = %d, want 0", got)
 	}
 	pendingDir := filepath.Join(localDir, ".relay", "outbox", "pending")
@@ -5167,7 +5177,7 @@ func TestWritebackUpdateRejectsDraftPath(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	for _, state := range []string{"pending", "acked", "failed"} {
-		if got := countJSONFiles(filepath.Join(localDir, ".relay", "outbox", state)); got != 0 {
+		if got := countJSONFiles(filepath.Join(localDir, ".relay", "outbox", state)).Count; got != 0 {
 			t.Fatalf("%s receipt count = %d, want 0", state, got)
 		}
 	}
@@ -5275,10 +5285,10 @@ func TestWritebackDeleteRequiresOperationID(t *testing.T) {
 	if !sawDelete.Load() {
 		t.Fatal("expected delete request")
 	}
-	if got := countJSONFiles(filepath.Join(localDir, ".relay", "outbox", "failed")); got != 1 {
+	if got := countJSONFiles(filepath.Join(localDir, ".relay", "outbox", "failed")).Count; got != 1 {
 		t.Fatalf("failed receipt count = %d, want 1", got)
 	}
-	if got := countJSONFiles(filepath.Join(localDir, ".relay", "outbox", "acked")); got != 0 {
+	if got := countJSONFiles(filepath.Join(localDir, ".relay", "outbox", "acked")).Count; got != 0 {
 		t.Fatalf("acked receipt count = %d, want 0", got)
 	}
 }
@@ -5327,10 +5337,10 @@ func TestWritebackUpdateFailsWhenOperationFails(t *testing.T) {
 	if got := err.Error(); !strings.Contains(got, "writeback operation "+opID+" failed") {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if got := countJSONFiles(filepath.Join(localDir, ".relay", "outbox", "failed")); got != 1 {
+	if got := countJSONFiles(filepath.Join(localDir, ".relay", "outbox", "failed")).Count; got != 1 {
 		t.Fatalf("failed receipt count = %d, want 1", got)
 	}
-	if got := countJSONFiles(filepath.Join(localDir, ".relay", "outbox", "acked")); got != 0 {
+	if got := countJSONFiles(filepath.Join(localDir, ".relay", "outbox", "acked")).Count; got != 0 {
 		t.Fatalf("acked receipt count = %d, want 0", got)
 	}
 }
@@ -5718,7 +5728,8 @@ func TestOpsListReadsLocalDeadLetterMirror(t *testing.T) {
 	if err := ensureMirrorLayout(localDir); err != nil {
 		t.Fatalf("ensureMirrorLayout failed: %v", err)
 	}
-	dlDir := filepath.Join(localDir, ".relay", "dead-letter")
+	scopedLocalDir := filepath.Join(localDir, "notion")
+	dlDir := filepath.Join(scopedLocalDir, ".relay", "dead-letter")
 	if err := os.MkdirAll(dlDir, 0o755); err != nil {
 		t.Fatalf("mkdir dead-letter failed: %v", err)
 	}
@@ -5727,11 +5738,13 @@ func TestOpsListReadsLocalDeadLetterMirror(t *testing.T) {
 		t.Fatalf("write dead-letter record failed: %v", err)
 	}
 	if _, err := upsertWorkspaceDetails(workspaceRecord{
-		Name:       "demo",
-		ID:         "ws_demo",
-		LocalDir:   localDir,
-		CreatedAt:  time.Now().UTC().Format(time.RFC3339),
-		LastUsedAt: time.Now().UTC().Format(time.RFC3339),
+		Name:        "demo",
+		ID:          "ws_demo",
+		LocalDir:    localDir,
+		RemotePaths: []string{"/notion"},
+		LocalLayout: "scoped",
+		CreatedAt:   time.Now().UTC().Format(time.RFC3339),
+		LastUsedAt:  time.Now().UTC().Format(time.RFC3339),
 	}); err != nil {
 		t.Fatalf("upsertWorkspaceDetails failed: %v", err)
 	}
@@ -5745,6 +5758,511 @@ func TestOpsListReadsLocalDeadLetterMirror(t *testing.T) {
 		if !strings.Contains(got, fragment) {
 			t.Fatalf("expected %q in ops list output, got %q", fragment, got)
 		}
+	}
+}
+
+func TestScopedWorkspaceConsumersAggregateChildRuntimeState(t *testing.T) {
+	localRoot := t.TempDir()
+	record := workspaceRecord{
+		ID:            "ws_demo",
+		LocalDir:      localRoot,
+		LocalLayout:   "scoped",
+		RemotePaths:   []string{"/github", "/slack"},
+		MountStateDir: t.TempDir(),
+		MountKind:     mountsync.MountKindDaemon,
+	}
+	scopes := workspaceMountScopes(record)
+	if len(scopes) != 2 {
+		t.Fatalf("workspaceMountScopes() = %#v, want 2 scopes", scopes)
+	}
+	for index, scope := range scopes {
+		if err := os.MkdirAll(filepath.Join(scope.LocalDir, ".relay", "dead-letter"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		reconcileAt := []string{
+			"2026-07-30T03:00:00.1Z",
+			"2026-07-30T03:00:00.12Z",
+		}[index]
+		state := fmt.Sprintf(
+			`{"status":"scope-%d","lastReconcileAt":"%s","lastSuccessfulReconcileAt":"%s","pendingWriteback":99,"failedWritebacks":%d,"stallReason":"scope-%d stalled","incrementalReadNotReadySince":{"event":"now"},"bootstrap":{"phase":"pull","filesSynced":%d,"filesTotal":10}}`,
+			index+1,
+			reconcileAt,
+			reconcileAt,
+			index+3,
+			index+1,
+			index+2,
+		)
+		if err := os.WriteFile(filepath.Join(scope.LocalDir, ".relay", "state.json"), []byte(state), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(
+			filepath.Join(scope.LocalDir, ".relay", "dead-letter", fmt.Sprintf("op_%d.json", index+1)),
+			[]byte(fmt.Sprintf(`{"opId":"op_%d","path":"%s/file.md"}`, index+1, scope.RemotePath)),
+			0o644,
+		); err != nil {
+			t.Fatal(err)
+		}
+		stateFile, err := workspaceMountStateFile("ws_demo", record, scope)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Dir(stateFile), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		pendingField := `"dirty":true`
+		if index == 1 {
+			pendingField = `"deletePending":true`
+		}
+		privateState := fmt.Sprintf(
+			`{"files":{"%s/pending.md":{%s}},"incrementalReadNotReadySince":{"private":"now"}}`,
+			scope.RemotePath,
+			pendingField,
+		)
+		if err := os.WriteFile(stateFile, []byte(privateState), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		conflictDir := filepath.Join(scope.LocalDir, ".relay", "conflicts")
+		if err := os.MkdirAll(conflictDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(conflictDir, "conflict.json"), []byte(`{}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(scope.LocalDir, ".relay", "permissions-denied.log"), []byte("one\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		outboxDir := filepath.Join(scope.LocalDir, ".relay", "outbox", "pending")
+		if err := os.MkdirAll(outboxDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(outboxDir, "pending.json"), []byte(`{}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for state, name := range map[string]string{
+		"pending": "compat-pending.json",
+		"failed":  "compat-failed.json",
+		"acked":   "compat-acked.json",
+	} {
+		dir := filepath.Join(localRoot, ".relay", "outbox", state)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(`{}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	writeback, err := buildWritebackStatusReport("ws_demo", record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if writeback.Pending != 2 || writeback.Failed != 7 || len(writeback.DeadLettered) != 2 {
+		t.Fatalf("scoped writeback report = %#v, want private pending=2 failed=7 dead-lettered=2", writeback)
+	}
+
+	snapshot := buildWorkspaceSyncStateSnapshot(syncStatusResponse{}, "ws_demo", record)
+	if snapshot.PendingWriteback != 2 || snapshot.PendingConflicts != 2 || snapshot.DeniedPaths != 2 {
+		t.Fatalf("scoped sync snapshot = %#v, want pending/conflicts/denied = 2/2/2", snapshot)
+	}
+	if snapshot.FailedWritebacks != 7 {
+		t.Fatalf("failed writebacks = %d, want 7", snapshot.FailedWritebacks)
+	}
+	if snapshot.Bootstrap == nil || snapshot.Bootstrap.FilesSynced != 5 || snapshot.Bootstrap.FilesTotal != 20 {
+		t.Fatalf("aggregated bootstrap = %#v, want files 5/20", snapshot.Bootstrap)
+	}
+	if got := snapshot.StallReason; got != "scope-1 stalled; scope-2 stalled" {
+		t.Fatalf("aggregated stall reason = %q", got)
+	}
+
+	health := buildWorkspaceHealthReport("ws_demo", record)
+	if health.Status != "scope-1; scope-2" ||
+		health.StuckEventCount != 2 ||
+		health.OutboxPending != 3 ||
+		health.OutboxFailed != 1 ||
+		health.OutboxAcked != 1 {
+		t.Fatalf("scoped health report = %#v, want child states and child/catalog queues", health)
+	}
+	if health.LastReconcileAt != "2026-07-30T03:00:00.12Z" ||
+		health.LastSuccessfulReconcileAt != "2026-07-30T03:00:00.12Z" {
+		t.Fatalf(
+			"reconcile timestamps = %q/%q, want later variable-width fraction",
+			health.LastReconcileAt,
+			health.LastSuccessfulReconcileAt,
+		)
+	}
+	if err := os.WriteFile(
+		filepath.Join(scopes[0].LocalDir, ".relay", "state.json"),
+		[]byte(`{"lastReconcileAt":"invalid","lastSuccessfulReconcileAt":"invalid"}`),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+	unknownHealth := buildWorkspaceHealthReport("ws_demo", record)
+	if unknownHealth.LastReconcileAt != "" || unknownHealth.LastSuccessfulReconcileAt != "" {
+		t.Fatalf(
+			"malformed child timestamps produced aggregate claims %q/%q, want unknown",
+			unknownHealth.LastReconcileAt,
+			unknownHealth.LastSuccessfulReconcileAt,
+		)
+	}
+
+	compatibilityDir := filepath.Join(localRoot, ".relay", "dead-letter")
+	if err := os.MkdirAll(compatibilityDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(compatibilityDir, "op_2.json"),
+		[]byte(`{"opId":"op_2","path":"/github/stale.md"}`),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+	path, localDir, _, err := findWorkspaceDeadLetterRecord(record, "op_2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if localDir != scopes[1].LocalDir || path != filepath.Join(scopes[1].LocalDir, ".relay", "dead-letter", "op_2.json") {
+		t.Fatalf("scoped retry lookup = %q in %q, want authoritative second scope instead of catalog duplicate", path, localDir)
+	}
+}
+
+func TestWorkspaceMountScopesRecoversLegacyExactRuntimeRoot(t *testing.T) {
+	localDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(localDir, ".relay"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(localDir, ".relay", "state.json"),
+		[]byte(`{"remoteRoot":"/github"}`),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+	record := workspaceRecord{LocalDir: localDir, RemotePaths: []string{"/slack"}}
+	scopes := workspaceMountScopes(record)
+	if len(scopes) != 1 || scopes[0].RemotePath != "/github" || scopes[0].LocalDir != localDir {
+		t.Fatalf("legacy exact scopes = %#v, want persisted runtime root /github", scopes)
+	}
+	remoteRoot, err := workspaceRemoteRootForLocalDir(record, localDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if remoteRoot != "/github" {
+		t.Fatalf("legacy exact retry root = %q, want persisted runtime root /github", remoteRoot)
+	}
+}
+
+func TestWorkspaceRetryTargetRoutesCatalogCompatibilityRecordToScopedChild(t *testing.T) {
+	localRoot := t.TempDir()
+	record := workspaceRecord{
+		LocalDir:    localRoot,
+		LocalLayout: mountscope.LayoutScoped,
+		RemotePaths: []string{"/github", "/slack/channels/project"},
+	}
+	localDir, remoteRoot, err := workspaceRetryTarget(record, localRoot, "/slack/channels/project/message.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := mountscope.LocalDir(localRoot, "/slack/channels/project"); localDir != want || remoteRoot != "/slack/channels/project" {
+		t.Fatalf("retry target = %q at %q, want %q at /slack/channels/project", localDir, remoteRoot, want)
+	}
+}
+
+func TestWorkspaceStateDirForDeadLetterPathsKeepsCrossScopeAtCatalogRoot(t *testing.T) {
+	localRoot := t.TempDir()
+	record := workspaceRecord{
+		LocalDir:    localRoot,
+		LocalLayout: mountscope.LayoutScoped,
+		RemotePaths: []string{"/github", "/slack"},
+	}
+	for _, rawPaths := range []string{
+		"/github/repos/acme/issue.json,/slack/channels/project/message.json",
+		"/slack/channels/project/message.json,/github/repos/acme/issue.json",
+	} {
+		if got := workspaceStateDirForDeadLetterPaths(record, rawPaths); got != localRoot {
+			t.Fatalf("cross-scope dead-letter dir for %q = %q, want catalog root %q", rawPaths, got, localRoot)
+		}
+	}
+	if got, want := workspaceStateDirForDeadLetterPaths(
+		record,
+		"/github/repos/acme/issue.json,/github/repos/acme/pr.json",
+	), mountscope.LocalDir(localRoot, "/github"); got != want {
+		t.Fatalf("single-scope dead-letter dir = %q, want %q", got, want)
+	}
+}
+
+func TestWorkspaceDeadLetterRetryGroupsRoutesEveryScopedRoot(t *testing.T) {
+	localRoot := t.TempDir()
+	record := workspaceRecord{
+		LocalDir:    localRoot,
+		LocalLayout: mountscope.LayoutScoped,
+		RemotePaths: []string{"/github", "/slack/channels/project"},
+	}
+	for _, remotePath := range []string{
+		"/github/repos/acme/cloud/issue.json",
+		"/github/repos/acme/cloud/pr.json",
+		"/slack/channels/project/message.json",
+	} {
+		scope, ok := workspaceMountScopeForRemotePath(record, remotePath)
+		if !ok {
+			t.Fatalf("missing test scope for %s", remotePath)
+		}
+		relative := strings.TrimPrefix(remotePath, scope.RemotePath)
+		localPath := filepath.Join(scope.LocalDir, filepath.FromSlash(strings.TrimPrefix(relative, "/")))
+		if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(localPath, []byte("{}"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tests := []struct {
+		name     string
+		rawPaths string
+		want     []workspaceDeadLetterRetryGroup
+	}{
+		{
+			name:     "allowlist order",
+			rawPaths: "/github/repos/acme/cloud/issue.json,/slack/channels/project/message.json",
+			want: []workspaceDeadLetterRetryGroup{
+				{
+					LocalDir:   mountscope.LocalDir(localRoot, "/github"),
+					RemoteRoot: "/github",
+					Paths:      []string{"/github/repos/acme/cloud/issue.json"},
+				},
+				{
+					LocalDir:   mountscope.LocalDir(localRoot, "/slack/channels/project"),
+					RemoteRoot: "/slack/channels/project",
+					Paths:      []string{"/slack/channels/project/message.json"},
+				},
+			},
+		},
+		{
+			name:     "reverse order",
+			rawPaths: "/slack/channels/project/message.json,/github/repos/acme/cloud/issue.json",
+			want: []workspaceDeadLetterRetryGroup{
+				{
+					LocalDir:   mountscope.LocalDir(localRoot, "/slack/channels/project"),
+					RemoteRoot: "/slack/channels/project",
+					Paths:      []string{"/slack/channels/project/message.json"},
+				},
+				{
+					LocalDir:   mountscope.LocalDir(localRoot, "/github"),
+					RemoteRoot: "/github",
+					Paths:      []string{"/github/repos/acme/cloud/issue.json"},
+				},
+			},
+		},
+		{
+			name:     "same root stays one retry",
+			rawPaths: "/github/repos/acme/cloud/issue.json,/github/repos/acme/cloud/pr.json",
+			want: []workspaceDeadLetterRetryGroup{
+				{
+					LocalDir:   mountscope.LocalDir(localRoot, "/github"),
+					RemoteRoot: "/github",
+					Paths: []string{
+						"/github/repos/acme/cloud/issue.json",
+						"/github/repos/acme/cloud/pr.json",
+					},
+				},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := workspaceDeadLetterRetryGroups(record, localRoot, tt.rawPaths)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("retry groups = %#v, want %#v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestWorkspaceDeadLetterRetryGroupsRejectsInvalidPathBeforeRetry(t *testing.T) {
+	localRoot := t.TempDir()
+	record := workspaceRecord{
+		LocalDir:    localRoot,
+		LocalLayout: mountscope.LayoutScoped,
+		RemotePaths: []string{"/github", "/slack"},
+	}
+	githubPath := filepath.Join(mountscope.LocalDir(localRoot, "/github"), "repos", "acme", "cloud", "issue.json")
+	if err := os.MkdirAll(filepath.Dir(githubPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(githubPath, []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := workspaceDeadLetterRetryGroups(
+		record,
+		localRoot,
+		"/github/repos/acme/cloud/issue.json,/linear/issues/ENG-123.json",
+	)
+	if err == nil || !strings.Contains(err.Error(), "outside the persisted scoped allowlist") {
+		t.Fatalf("retry groups error = %v, want scoped allowlist refusal", err)
+	}
+}
+
+func TestWorkspaceDeadLetterRetryGroupsIgnoreCompatibilityRecordStorageRoot(t *testing.T) {
+	localRoot := t.TempDir()
+	record := workspaceRecord{
+		LocalDir:    localRoot,
+		LocalLayout: mountscope.LayoutScoped,
+		RemotePaths: []string{"/github", "/slack"},
+	}
+	for _, remotePath := range []string{
+		"/github/repos/acme/cloud/issue.json",
+		"/slack/channels/project/message.json",
+	} {
+		scope, ok := workspaceMountScopeForRemotePath(record, remotePath)
+		if !ok {
+			t.Fatalf("missing test scope for %s", remotePath)
+		}
+		relative := strings.TrimPrefix(strings.TrimPrefix(remotePath, scope.RemotePath), "/")
+		localPath := filepath.Join(scope.LocalDir, filepath.FromSlash(relative))
+		if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(localPath, []byte("{}"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	githubChild := mountscope.LocalDir(localRoot, "/github")
+	groups, err := workspaceDeadLetterRetryGroups(
+		record,
+		githubChild,
+		"/github/repos/acme/cloud/issue.json,/slack/channels/project/message.json",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(groups) != 2 ||
+		groups[0].RemoteRoot != "/github" ||
+		groups[1].RemoteRoot != "/slack" ||
+		groups[1].LocalDir != mountscope.LocalDir(localRoot, "/slack") {
+		t.Fatalf("retry groups from child-stored compatibility record = %#v, want both scoped roots", groups)
+	}
+}
+
+func TestWorkspaceSyncStatusJSONMakesTopologyClaimsExclusive(t *testing.T) {
+	snapshot := syncStateFile{
+		WorkspaceID: "ws_demo",
+		RemoteRoot:  "/github",
+		Mode:        defaultMountMode,
+	}
+	tests := []struct {
+		name       string
+		record     workspaceRecord
+		wantLayout string
+		wantRoot   bool
+		wantRoots  bool
+	}{
+		{
+			name:       "exact",
+			record:     workspaceRecord{LocalLayout: mountscope.LayoutExact, RemotePaths: []string{"/github"}},
+			wantLayout: mountscope.LayoutExact,
+			wantRoot:   true,
+		},
+		{
+			name:       "scoped",
+			record:     workspaceRecord{LocalLayout: mountscope.LayoutScoped, RemotePaths: []string{"/github", "/slack"}},
+			wantLayout: mountscope.LayoutScoped,
+			wantRoots:  true,
+		},
+		{
+			name:       "legacy unknown",
+			record:     workspaceRecord{},
+			wantLayout: "unknown",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			payload, err := json.Marshal(workspaceSyncStatusJSON(snapshot, tt.record))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got map[string]any
+			if err := json.Unmarshal(payload, &got); err != nil {
+				t.Fatal(err)
+			}
+			if got["localLayout"] != tt.wantLayout {
+				t.Fatalf("localLayout = %v, want %q; payload=%s", got["localLayout"], tt.wantLayout, payload)
+			}
+			_, hasRoot := got["remoteRoot"]
+			_, hasRoots := got["remoteRoots"]
+			if hasRoot != tt.wantRoot || hasRoots != tt.wantRoots {
+				t.Fatalf("topology fields root=%v roots=%v, want %v/%v; payload=%s", hasRoot, hasRoots, tt.wantRoot, tt.wantRoots, payload)
+			}
+		})
+	}
+}
+
+func TestWorkspaceSyncStatusExactUsesPersistedRootWithoutReadableRuntimeState(t *testing.T) {
+	for _, tt := range []struct {
+		name           string
+		prepareRuntime func(t *testing.T, localDir string)
+	}{
+		{name: "absent"},
+		{
+			name: "unreadable",
+			prepareRuntime: func(t *testing.T, localDir string) {
+				t.Helper()
+				if err := os.MkdirAll(filepath.Join(localDir, ".relay", "state.json"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			localDir := t.TempDir()
+			if tt.prepareRuntime != nil {
+				tt.prepareRuntime(t, localDir)
+			}
+			record := workspaceRecord{
+				LocalDir:    localDir,
+				LocalLayout: mountscope.LayoutExact,
+				RemotePaths: []string{"/github"},
+			}
+			snapshot := buildWorkspaceSyncStateSnapshot(syncStatusResponse{}, "ws_demo", record)
+			payload, err := json.Marshal(workspaceSyncStatusJSON(snapshot, record))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got map[string]any
+			if err := json.Unmarshal(payload, &got); err != nil {
+				t.Fatal(err)
+			}
+			if got["remoteRoot"] != "/github" {
+				t.Fatalf("remoteRoot = %v, want persisted /github; payload=%s", got["remoteRoot"], payload)
+			}
+		})
+	}
+}
+
+func TestSkipStuckAcrossScopesVisitsEachCursorAndSharesLimit(t *testing.T) {
+	scopes := []mountscope.Scope{
+		{RemotePath: "/github", LocalDir: "/tmp/github"},
+		{RemotePath: "/slack", LocalDir: "/tmp/slack"},
+	}
+	var calls []string
+	skipped, backlog, err := skipStuckAcrossScopes(scopes, 3, func(scope mountscope.Scope, max int) (int, bool, error) {
+		calls = append(calls, fmt.Sprintf("%s:%d", scope.RemotePath, max))
+		if scope.RemotePath == "/github" {
+			return 1, false, nil
+		}
+		return 2, false, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if skipped != 3 || backlog {
+		t.Fatalf("skip result = %d/%v, want 3/false", skipped, backlog)
+	}
+	if want := []string{"/github:3", "/slack:2"}; strings.Join(calls, ",") != strings.Join(want, ",") {
+		t.Fatalf("scope calls = %v, want %v", calls, want)
 	}
 }
 
@@ -5780,7 +6298,7 @@ func TestOpsListRefreshesMirrorFromServer(t *testing.T) {
 	if err := ensureMirrorLayout(localDir); err != nil {
 		t.Fatalf("ensureMirrorLayout failed: %v", err)
 	}
-	dlDir := filepath.Join(localDir, ".relay", "dead-letter")
+	dlDir := filepath.Join(localDir, "notion", ".relay", "dead-letter")
 	if err := os.MkdirAll(dlDir, 0o755); err != nil {
 		t.Fatalf("mkdir dead-letter failed: %v", err)
 	}
@@ -5789,11 +6307,13 @@ func TestOpsListRefreshesMirrorFromServer(t *testing.T) {
 		t.Fatalf("write stale record failed: %v", err)
 	}
 	if _, err := upsertWorkspaceDetails(workspaceRecord{
-		Name:       "demo",
-		ID:         "ws_demo",
-		LocalDir:   localDir,
-		CreatedAt:  time.Now().UTC().Format(time.RFC3339),
-		LastUsedAt: time.Now().UTC().Format(time.RFC3339),
+		Name:        "demo",
+		ID:          "ws_demo",
+		LocalDir:    localDir,
+		RemotePaths: []string{"/notion"},
+		LocalLayout: "scoped",
+		CreatedAt:   time.Now().UTC().Format(time.RFC3339),
+		LastUsedAt:  time.Now().UTC().Format(time.RFC3339),
 	}); err != nil {
 		t.Fatalf("upsertWorkspaceDetails failed: %v", err)
 	}
@@ -5848,7 +6368,7 @@ func TestOpsListRefreshesMirrorFromServer(t *testing.T) {
 	}
 }
 
-func TestOpsListRefreshRejectsUnsafeOpIDAndKeepsSidecar(t *testing.T) {
+func TestOpsListRefreshRejectsUnsafeOpIDWithoutMutatingMirror(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)
 
@@ -5902,26 +6422,219 @@ func TestOpsListRefreshRejectsUnsafeOpIDAndKeepsSidecar(t *testing.T) {
 	if err := run([]string{"ops", "list", "--workspace", "demo"}, strings.NewReader(""), &stdout, &stdout); err != nil {
 		t.Fatalf("run ops list failed: %v", err)
 	}
+	if !strings.Contains(stdout.String(), "unsafe or missing opId") {
+		t.Fatalf("refresh warning = %q, want unsafe opId refusal", stdout.String())
+	}
 
 	// The traversal op id must not escape the dead-letter directory.
 	traversal := filepath.Join(localDir, "pwn.json")
 	if _, err := os.Stat(traversal); !os.IsNotExist(err) {
 		t.Fatalf("unsafe opId escaped dead-letter dir: %s exists (err=%v)", traversal, err)
 	}
-	if _, err := os.Stat(filepath.Join(dlDir, "op_keep.json")); err != nil {
-		t.Fatalf("expected op_keep payload written: %v", err)
+	if _, err := os.Stat(filepath.Join(dlDir, "op_keep.json")); !os.IsNotExist(err) {
+		t.Fatalf("invalid response partially wrote op_keep payload, err=%v", err)
 	}
-	// Sidecar for a still-live op must be preserved, not pruned as if it
-	// were a standalone payload named "op_keep.error".
+	// No local mutation is allowed when any response item is invalid.
 	if _, err := os.Stat(filepath.Join(dlDir, "op_keep.error.json")); err != nil {
 		t.Fatalf("expected op_keep.error.json preserved: %v", err)
 	}
-	// Stale payload and its sidecar must both be removed.
-	if _, err := os.Stat(filepath.Join(dlDir, "op_old.json")); !os.IsNotExist(err) {
-		t.Fatalf("expected stale op_old.json pruned, err=%v", err)
+	if _, err := os.Stat(filepath.Join(dlDir, "op_old.json")); err != nil {
+		t.Fatalf("invalid response pruned op_old.json, err=%v", err)
 	}
-	if _, err := os.Stat(filepath.Join(dlDir, "op_old.error.json")); !os.IsNotExist(err) {
-		t.Fatalf("expected stale op_old.error.json pruned, err=%v", err)
+	if _, err := os.Stat(filepath.Join(dlDir, "op_old.error.json")); err != nil {
+		t.Fatalf("invalid response pruned op_old.error.json, err=%v", err)
+	}
+}
+
+func TestOpsListRefreshMissingItemsPreservesMirror(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	localDir := t.TempDir()
+	deadLetterDir := filepath.Join(localDir, ".relay", "dead-letter")
+	if err := os.MkdirAll(deadLetterDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	recordPath := filepath.Join(deadLetterDir, "op_local.json")
+	if err := os.WriteFile(recordPath, []byte(`{"opId":"op_local"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := upsertWorkspaceDetails(workspaceRecord{
+		Name:     "demo",
+		ID:       "ws_demo",
+		LocalDir: localDir,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"nextCursor":null}`))
+	}))
+	defer server.Close()
+	if err := saveCredentials(credentials{Server: server.URL, Token: "token"}); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout bytes.Buffer
+	if err := run([]string{"ops", "list", "--workspace", "demo"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stdout.String(), "missing required items array") {
+		t.Fatalf("refresh output = %q, want missing-items refusal", stdout.String())
+	}
+	if _, err := os.Stat(recordPath); err != nil {
+		t.Fatalf("missing-items response pruned local record: %v", err)
+	}
+}
+
+func TestOpsListRefreshFetchesEveryPageBeforePruning(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	localDir := t.TempDir()
+	deadLetterDir := filepath.Join(localDir, ".relay", "dead-letter")
+	if err := os.MkdirAll(deadLetterDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stalePath := filepath.Join(deadLetterDir, "op_stale.json")
+	if err := os.WriteFile(stalePath, []byte(`{"opId":"op_stale"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := upsertWorkspaceDetails(workspaceRecord{
+		Name:     "demo",
+		ID:       "ws_demo",
+		LocalDir: localDir,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	firstPage := make([]opsListItem, 200)
+	for i := range firstPage {
+		firstPage[i] = opsListItem{
+			OpID:   fmt.Sprintf("op_page_one_%03d", i),
+			Path:   fmt.Sprintf("/notion/page-%03d.json", i),
+			Status: "dead_lettered",
+		}
+	}
+	nextCursor := "page-two"
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if got := r.URL.Query().Get("limit"); got != "200" {
+			t.Fatalf("limit = %q, want 200", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch cursor := r.URL.Query().Get("cursor"); cursor {
+		case "":
+			if err := json.NewEncoder(w).Encode(opsListResponse{
+				Items:      firstPage,
+				NextCursor: &nextCursor,
+			}); err != nil {
+				t.Fatalf("encode first page: %v", err)
+			}
+		case nextCursor:
+			if err := json.NewEncoder(w).Encode(opsListResponse{Items: []opsListItem{{
+				OpID:   "op_page_two",
+				Path:   "/notion/page-two.json",
+				Status: "dead_lettered",
+			}}}); err != nil {
+				t.Fatalf("encode second page: %v", err)
+			}
+		default:
+			t.Fatalf("unexpected cursor %q", cursor)
+		}
+	}))
+	defer server.Close()
+	if err := saveCredentials(credentials{Server: server.URL, Token: "token"}); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout bytes.Buffer
+	if err := run([]string{"ops", "list", "--workspace", "demo"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatal(err)
+	}
+	if requests != 2 {
+		t.Fatalf("requests = %d, want two pages", requests)
+	}
+	if _, err := os.Stat(filepath.Join(deadLetterDir, "op_page_one_000.json")); err != nil {
+		t.Fatalf("page-one record missing: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(deadLetterDir, "op_page_two.json")); err != nil {
+		t.Fatalf("page-two record missing: %v", err)
+	}
+	if _, err := os.Stat(stalePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stale record was not pruned after the complete feed validated: %v", err)
+	}
+}
+
+func TestOpsListRefreshLaterPageFailureOrCursorLoopPreservesMirror(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		secondPage func(http.ResponseWriter)
+		want       string
+	}{
+		{
+			name: "later page failure",
+			secondPage: func(w http.ResponseWriter) {
+				http.Error(w, "try again", http.StatusBadGateway)
+			},
+			want: "502",
+		},
+		{
+			name: "repeated cursor",
+			secondPage: func(w http.ResponseWriter) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"items":[],"nextCursor":"page-two"}`))
+			},
+			want: "repeated cursor",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			clearRelayfileEnv(t)
+
+			localDir := t.TempDir()
+			deadLetterDir := filepath.Join(localDir, ".relay", "dead-letter")
+			if err := os.MkdirAll(deadLetterDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			localPath := filepath.Join(deadLetterDir, "op_local.json")
+			if err := os.WriteFile(localPath, []byte(`{"opId":"op_local"}`), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := upsertWorkspaceDetails(workspaceRecord{
+				Name: "demo", ID: "ws_demo", LocalDir: localDir,
+			}); err != nil {
+				t.Fatal(err)
+			}
+
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Query().Get("cursor") == "page-two" {
+					test.secondPage(w)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"items":[{"opId":"op_page_one","path":"/notion/page-one.json","status":"dead_lettered"}],"nextCursor":"page-two"}`))
+			}))
+			defer server.Close()
+			if err := saveCredentials(credentials{Server: server.URL, Token: "token"}); err != nil {
+				t.Fatal(err)
+			}
+
+			var stdout bytes.Buffer
+			if err := run([]string{"ops", "list", "--workspace", "demo"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(stdout.String(), test.want) {
+				t.Fatalf("refresh output = %q, want %q", stdout.String(), test.want)
+			}
+			if _, err := os.Stat(localPath); err != nil {
+				t.Fatalf("later-page failure pruned local record: %v", err)
+			}
+			if _, err := os.Stat(filepath.Join(deadLetterDir, "op_page_one.json")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("partial feed mutated local mirror: %v", err)
+			}
+		})
 	}
 }
 
@@ -6211,7 +6924,7 @@ func TestOpsReplayPostsToCloudAndRemovesLocalRecord(t *testing.T) {
 	if err := ensureMirrorLayout(localDir); err != nil {
 		t.Fatalf("ensureMirrorLayout failed: %v", err)
 	}
-	dlDir := filepath.Join(localDir, ".relay", "dead-letter")
+	dlDir := filepath.Join(localDir, "github", ".relay", "dead-letter")
 	if err := os.MkdirAll(dlDir, 0o755); err != nil {
 		t.Fatalf("mkdir dead-letter failed: %v", err)
 	}
@@ -6220,13 +6933,15 @@ func TestOpsReplayPostsToCloudAndRemovesLocalRecord(t *testing.T) {
 		t.Fatalf("write dead-letter record failed: %v", err)
 	}
 	if _, err := upsertWorkspaceDetails(workspaceRecord{
-		Name:       "demo",
-		ID:         "ws_demo",
-		LocalDir:   localDir,
-		AgentName:  "relayfile-cli",
-		Scopes:     append([]string(nil), defaultJoinScopes...),
-		CreatedAt:  time.Now().UTC().Format(time.RFC3339),
-		LastUsedAt: time.Now().UTC().Format(time.RFC3339),
+		Name:        "demo",
+		ID:          "ws_demo",
+		LocalDir:    localDir,
+		RemotePaths: []string{"/github"},
+		LocalLayout: "scoped",
+		AgentName:   "relayfile-cli",
+		Scopes:      append([]string(nil), defaultJoinScopes...),
+		CreatedAt:   time.Now().UTC().Format(time.RFC3339),
+		LastUsedAt:  time.Now().UTC().Format(time.RFC3339),
 	}); err != nil {
 		t.Fatalf("upsertWorkspaceDetails failed: %v", err)
 	}
@@ -7483,8 +8198,11 @@ func TestIntegrationAdoptClearsDisconnectMarker(t *testing.T) {
 	// must clear that marker so the status probe stops reporting the
 	// workspace as disconnected — otherwise the operator gets a stale
 	// "disconnected" reading for a workspace they just adopted into.
-	_, localDir := setupAdoptWorkspace(t)
-	if err := markProviderDisconnected(localDir, "github", mountscope.LayoutExact); err != nil {
+	record, localDir := setupAdoptWorkspace(t)
+	if err := os.WriteFile(filepath.Join(localDir, mountsync.LegacyMountStateFileName), []byte(`{"files":{}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := markProviderDisconnected(record, "github"); err != nil {
 		t.Fatalf("markProviderDisconnected failed: %v", err)
 	}
 	markerPath := filepath.Join(localDir, ".relay", "disconnected", "github.json")
@@ -7512,28 +8230,565 @@ func TestIntegrationAdoptClearsDisconnectMarker(t *testing.T) {
 	}
 }
 
-func TestMarkProviderDisconnectedScopedPreservesRuntimeState(t *testing.T) {
-	localDir := t.TempDir()
-	child := filepath.Join(localDir, "github")
-	child = filepath.Join(child, "repos", "acme", "cloud")
-	runtime := filepath.Join(child, mountscope.RuntimeTopLevel)
-	if err := os.MkdirAll(filepath.Join(runtime, "outbox"), 0o755); err != nil {
-		t.Fatalf("create runtime state: %v", err)
+func TestMarkProviderDisconnectedPreservesScopedRuntimeState(t *testing.T) {
+	localRoot := t.TempDir()
+	record := workspaceRecord{
+		ID:            "ws_demo",
+		LocalDir:      localRoot,
+		LocalLayout:   mountscope.LayoutScoped,
+		MountStateDir: t.TempDir(),
+		RemotePaths: []string{
+			"/github/repos/acme",
+			"/slack/channels/project",
+		},
 	}
-	if err := os.WriteFile(filepath.Join(runtime, "outbox", "pending.json"), []byte("pending"), 0o644); err != nil {
-		t.Fatalf("write pending state: %v", err)
+	githubScope := mountscope.LocalDir(localRoot, "/github/repos/acme")
+	githubMirror := filepath.Join(githubScope, "README.md")
+	githubOutbox := filepath.Join(githubScope, ".relay", "outbox", "pending", "queued.json")
+	githubConflict := filepath.Join(githubScope, ".relay", "conflicts", "README.md.local")
+	githubDeadLetter := filepath.Join(githubScope, ".relay", "dead-letter", "op_dead.json")
+	githubInfrastructure := filepath.Join(githubScope, ".git", "config")
+	slackMirror := filepath.Join(mountscope.LocalDir(localRoot, "/slack/channels/project"), "topic.md")
+	var githubStateFile string
+	for _, scope := range workspaceMountScopes(record) {
+		stateFile, err := workspaceMountStateFile(record.ID, record, scope)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Dir(stateFile), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(stateFile, []byte(`{"files":{}}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if scope.RemotePath == "/github/repos/acme" {
+			githubStateFile = stateFile
+		}
 	}
-	if err := os.WriteFile(filepath.Join(child, "README.md"), []byte("mirrored"), 0o644); err != nil {
-		t.Fatalf("write mirrored content: %v", err)
+	for path, content := range map[string]string{
+		githubMirror:         "mirrored",
+		githubOutbox:         "queued",
+		githubConflict:       "unresolved",
+		githubDeadLetter:     `{"opId":"op_dead"}`,
+		githubInfrastructure: "[core]\n",
+		slackMirror:          "unrelated",
+	} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", filepath.Dir(path), err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
 	}
-	if err := markProviderDisconnected(localDir, "github", mountscope.LayoutScoped); err != nil {
-		t.Fatalf("markProviderDisconnected failed: %v", err)
+	githubHash, err := hashLocalWritebackFile(githubMirror)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if _, err := os.Stat(filepath.Join(runtime, "outbox", "pending.json")); err != nil {
-		t.Fatalf("scoped disconnect deleted runtime state: %v", err)
+	githubState := fmt.Sprintf(
+		`{"files":{"/github/repos/acme/README.md":{"hash":%q}}}`,
+		githubHash,
+	)
+	if err := os.WriteFile(githubStateFile, []byte(githubState), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	if _, err := os.Stat(filepath.Join(child, "README.md")); !os.IsNotExist(err) {
-		t.Fatalf("expected mirrored content removed, stat err=%v", err)
+
+	err = markProviderDisconnected(record, "github")
+	if err == nil ||
+		!strings.Contains(err.Error(), "outbox=1") ||
+		!strings.Contains(err.Error(), "conflicts=1") ||
+		!strings.Contains(err.Error(), "deadLetters=1") {
+		t.Fatalf("expected actionable pending-state refusal, got %v", err)
+	}
+	for _, path := range []string{githubMirror, githubOutbox, githubConflict, githubDeadLetter, githubInfrastructure, slackMirror} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("expected refused disconnect to preserve %s: %v", path, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(localRoot, ".relay", "disconnected", "github.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected refused disconnect not to write marker, got %v", err)
+	}
+
+	for _, path := range []string{githubOutbox, githubConflict, githubDeadLetter} {
+		if err := os.Remove(path); err != nil {
+			t.Fatalf("clear pending state %s: %v", path, err)
+		}
+	}
+	if err := markProviderDisconnected(record, "github"); err != nil {
+		t.Fatalf("markProviderDisconnected after clearing pending state failed: %v", err)
+	}
+	if _, err := os.Stat(githubMirror); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected github mirror content removed, got %v", err)
+	}
+	if payload, err := os.ReadFile(githubInfrastructure); err != nil || string(payload) != "[core]\n" {
+		t.Fatalf("expected excluded github infrastructure preserved, payload=%q err=%v", payload, err)
+	}
+	if payload, err := os.ReadFile(slackMirror); err != nil || string(payload) != "unrelated" {
+		t.Fatalf("expected unrelated scoped mirror preserved, payload=%q err=%v", payload, err)
+	}
+	markerPath := filepath.Join(localRoot, ".relay", "disconnected", "github.json")
+	if _, err := os.Stat(markerPath); err != nil {
+		t.Fatalf("expected common-root disconnect marker: %v", err)
+	}
+}
+
+func TestProviderDisconnectPreflightAllowsCloudOnlyWorkspace(t *testing.T) {
+	record := workspaceRecord{ID: "ws_cloud_only", Name: "cloud-only"}
+	plan, err := planProviderDisconnect(record, "github")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.cleanScopeDirs) != 0 || len(plan.removeSubtrees) != 0 || len(plan.stateDirs) != 0 ||
+		len(plan.wholeProviderDirs) != 0 || len(plan.stateFiles) != 0 || len(plan.unknownStateRoots) != 0 {
+		t.Fatalf("cloud-only disconnect produced local cleanup plan: %#v", plan)
+	}
+	if err := preflightProviderDisconnect(record, "github"); err != nil {
+		t.Fatalf("cloud-only disconnect preflight = %v, want no local gate", err)
+	}
+}
+
+func TestIntegrationDisconnectRefusesBeforeCloudMutationWhenScopedStateIsPending(t *testing.T) {
+	record, localRoot := setupAdoptWorkspace(t)
+	record.RelayWorkspaceID = "ws_relay_runtime"
+	record.LocalLayout = mountscope.LayoutScoped
+	record.RemotePaths = []string{"/github/repos/acme"}
+	record.MountStateDir = t.TempDir()
+	record.mountStateSet = true
+	if _, err := upsertWorkspaceDetails(record); err != nil {
+		t.Fatalf("persist scoped workspace: %v", err)
+	}
+	githubScope := mountscope.LocalDir(localRoot, "/github/repos/acme")
+	githubMirror := filepath.Join(githubScope, "README.md")
+	if err := os.MkdirAll(filepath.Dir(githubMirror), 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", filepath.Dir(githubMirror), err)
+	}
+	if err := os.WriteFile(githubMirror, []byte("mirrored"), 0o644); err != nil {
+		t.Fatalf("write %s: %v", githubMirror, err)
+	}
+	stateFile, err := workspaceMountStateFile(record.RelayWorkspaceID, record, workspaceMountScopes(record)[0])
+	if err != nil {
+		t.Fatalf("resolve private state: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(stateFile), 0o755); err != nil {
+		t.Fatalf("mkdir private state: %v", err)
+	}
+	if err := os.WriteFile(stateFile, []byte(`{"files":{"/github/repos/acme/README.md":{"dirty":true},"/github/repos/acme/removed.md":{"deletePending":true}}}`), 0o644); err != nil {
+		t.Fatalf("write private state: %v", err)
+	}
+
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		t.Fatalf("refused disconnect reached Cloud: %s %s", r.Method, r.URL.Path)
+	}))
+	defer server.Close()
+	err = runIntegrationDisconnect(
+		[]string{"github", "--workspace", "demo", "--yes", "--cloud-api-url", server.URL},
+		strings.NewReader(""),
+		io.Discard,
+	)
+	if err == nil || !strings.Contains(err.Error(), "privatePending=2") {
+		t.Fatalf("expected private pending-state refusal, got %v", err)
+	}
+	if requests != 0 {
+		t.Fatalf("Cloud requests = %d, want 0", requests)
+	}
+	for _, path := range []string{githubMirror, stateFile} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("expected refused disconnect to preserve %s: %v", path, err)
+		}
+	}
+}
+
+func TestIntegrationDisconnectRefusesUnobservedLocalDriftBeforeCloudMutation(t *testing.T) {
+	record, localRoot := setupAdoptWorkspace(t)
+	record.RelayWorkspaceID = "ws_relay_runtime"
+	record.LocalLayout = mountscope.LayoutScoped
+	record.RemotePaths = []string{"/github/repos/acme"}
+	record.MountStateDir = t.TempDir()
+	record.mountStateSet = true
+	if _, err := upsertWorkspaceDetails(record); err != nil {
+		t.Fatalf("persist scoped workspace: %v", err)
+	}
+	scope := workspaceMountScopes(record)[0]
+	trackedPath := filepath.Join(scope.LocalDir, "README.md")
+	untrackedPath := filepath.Join(scope.LocalDir, "draft.md")
+	if err := os.MkdirAll(scope.LocalDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(trackedPath, []byte("original"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	originalHash, err := hashLocalWritebackFile(trackedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stateFile, err := workspaceMountStateFile(record.RelayWorkspaceID, record, scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(stateFile), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	privateState := fmt.Sprintf(
+		`{"files":{"/github/repos/acme/README.md":{"hash":%q}}}`,
+		originalHash,
+	)
+	if err := os.WriteFile(stateFile, []byte(privateState), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(trackedPath, []byte("edited while stopped"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(untrackedPath, []byte("new local work"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		t.Fatalf("drifted disconnect reached Cloud: %s %s", r.Method, r.URL.Path)
+	}))
+	defer server.Close()
+	err = runIntegrationDisconnect(
+		[]string{"github", "--workspace", "demo", "--yes", "--cloud-api-url", server.URL},
+		strings.NewReader(""),
+		io.Discard,
+	)
+	if err == nil || !strings.Contains(err.Error(), "privatePending=2") {
+		t.Fatalf("expected tracked and untracked local drift refusal, got %v", err)
+	}
+	if requests != 0 {
+		t.Fatalf("Cloud requests = %d, want 0", requests)
+	}
+	for _, path := range []string{trackedPath, untrackedPath, stateFile} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("refused disconnect deleted local work %s: %v", path, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(localRoot, ".relay", "disconnected", "github.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("refused disconnect wrote marker: %v", err)
+	}
+}
+
+func TestIntegrationDisconnectCommitsPrevalidatedPlanAfterCloudMutation(t *testing.T) {
+	record, localRoot := setupAdoptWorkspace(t)
+	record.RelayWorkspaceID = "ws_relay_runtime"
+	record.LocalLayout = mountscope.LayoutScoped
+	record.RemotePaths = []string{"/github/repos/acme"}
+	record.MountStateDir = t.TempDir()
+	record.mountStateSet = true
+	if _, err := upsertWorkspaceDetails(record); err != nil {
+		t.Fatalf("persist scoped workspace: %v", err)
+	}
+	scope := workspaceMountScopes(record)[0]
+	mirrorPath := filepath.Join(scope.LocalDir, "README.md")
+	if err := os.MkdirAll(filepath.Dir(mirrorPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(mirrorPath, []byte("mirrored"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mirrorHash, err := hashLocalWritebackFile(mirrorPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plannedDir := filepath.Join(scope.LocalDir, "nested")
+	nestedMirrorPath := filepath.Join(plannedDir, "mirrored.md")
+	if err := os.MkdirAll(plannedDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(nestedMirrorPath, []byte("nested mirror"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	nestedMirrorHash, err := hashLocalWritebackFile(nestedMirrorPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stateFile, err := workspaceMountStateFile(record.RelayWorkspaceID, record, scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(stateFile), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	state := fmt.Sprintf(
+		`{"files":{"/github/repos/acme/README.md":{"hash":%q},"/github/repos/acme/nested/mirrored.md":{"hash":%q}}}`,
+		mirrorHash,
+		nestedMirrorHash,
+	)
+	if err := os.WriteFile(stateFile, []byte(state), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	deleteCalls := 0
+	latePath := filepath.Join(scope.LocalDir, "created-after-preflight.md")
+	nestedLatePath := filepath.Join(plannedDir, "created-after-preflight.md")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete ||
+			r.URL.Path != "/api/v1/workspaces/ws_123/integrations/github/status" {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		deleteCalls++
+		// The preflighted cursor can disappear after Cloud commits. Local
+		// cleanup must consume the already-validated plan instead of turning
+		// that post-mutation change into a second refusal.
+		if err := os.Remove(stateFile); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(latePath, []byte("created after preflight"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(nestedLatePath, []byte("nested after preflight"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer server.Close()
+	pointAdoptCloudCredentials(t, server.URL)
+
+	var stdout bytes.Buffer
+	err = runIntegrationDisconnect(
+		[]string{"github", "--workspace", "demo", "--yes", "--cloud-api-url", server.URL},
+		strings.NewReader(""),
+		&stdout,
+	)
+	if err != nil {
+		t.Fatalf("disconnect after successful Cloud mutation = %v", err)
+	}
+	if deleteCalls != 1 {
+		t.Fatalf("Cloud DELETE calls = %d, want 1", deleteCalls)
+	}
+	if _, err := os.Stat(mirrorPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("prevalidated mirror cleanup did not run: %v", err)
+	}
+	if payload, err := os.ReadFile(latePath); err != nil || string(payload) != "created after preflight" {
+		t.Fatalf("post-preflight file was not preserved, payload=%q err=%v", payload, err)
+	}
+	if _, err := os.Stat(nestedMirrorPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("prevalidated nested mirror cleanup did not run: %v", err)
+	}
+	if payload, err := os.ReadFile(nestedLatePath); err != nil || string(payload) != "nested after preflight" {
+		t.Fatalf("nested post-preflight file was not preserved, payload=%q err=%v", payload, err)
+	}
+	if _, err := os.Stat(filepath.Join(localRoot, ".relay", "disconnected", "github.json")); err != nil {
+		t.Fatalf("disconnect marker missing after Cloud mutation: %v", err)
+	}
+}
+
+func TestProviderDisconnectCleanupRefusesChangedPlannedFile(t *testing.T) {
+	scopeDir := t.TempDir()
+	path := filepath.Join(scopeDir, "README.md")
+	if err := os.WriteFile(path, []byte("observed"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	plan := providerDisconnectPlan{cleanScopeDirs: []string{scopeDir}}
+	if err := captureProviderDisconnectDeletions(&plan); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("changed after preflight"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err := removeProviderMirrorWithPlan(plan)
+	if err == nil || !strings.Contains(err.Error(), "changed after preflight") {
+		t.Fatalf("changed planned file cleanup = %v, want refusal", err)
+	}
+	if payload, readErr := os.ReadFile(path); readErr != nil || string(payload) != "changed after preflight" {
+		t.Fatalf("changed planned file was deleted, payload=%q err=%v", payload, readErr)
+	}
+}
+
+func TestProviderDisconnectPreflightIgnoresOtherProvidersInBroadScope(t *testing.T) {
+	localRoot := t.TempDir()
+	record := workspaceRecord{
+		ID:               "ws_cloud",
+		RelayWorkspaceID: "ws_runtime",
+		LocalDir:         localRoot,
+		LocalLayout:      mountscope.LayoutExact,
+		RemotePaths:      []string{"/"},
+		MountStateDir:    t.TempDir(),
+		MountKind:        mountsync.MountKindDaemon,
+	}
+	scope := workspaceMountScopes(record)[0]
+	stateFile, err := workspaceMountStateFile(record.RelayWorkspaceID, record, scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(stateFile), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		stateFile,
+		[]byte(`{"files":{"/slack/channels/project/message.json":{"dirty":true}}}`),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+	outboxDir := filepath.Join(localRoot, ".relay", "outbox", "pending")
+	if err := os.MkdirAll(outboxDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(outboxDir, "slack.json"),
+		[]byte(`{"remotePath":"/slack/channels/project/message.json"}`),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+	conflictPath := filepath.Join(localRoot, ".relay", "conflicts", "slack", "channels", "project", "message.json.rev.local")
+	if err := os.MkdirAll(filepath.Dir(conflictPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(conflictPath, []byte("conflict"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	deadLetterDir := filepath.Join(localRoot, ".relay", "dead-letter")
+	if err := os.MkdirAll(deadLetterDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(deadLetterDir, "slack-op.json"),
+		[]byte(`{"opId":"slack-op","path":"/slack/channels/project/message.json"}`),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := preflightProviderDisconnect(record, "github"); err != nil {
+		t.Fatalf("GitHub disconnect was blocked by unrelated Slack state: %v", err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(deadLetterDir, "mixed-op.json"),
+		[]byte(`{"opId":"mixed-op","path":"/slack/channels/project/other.json,/github/repos/acme/pending.json"}`),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+	err = preflightProviderDisconnect(record, "github")
+	if err == nil || !strings.Contains(err.Error(), "deadLetters=1") {
+		t.Fatalf("GitHub disconnect with second-position bulk dead letter = %v, want refusal", err)
+	}
+}
+
+func TestProviderDisconnectPreflightInspectsScopedCatalogCompatibilityState(t *testing.T) {
+	localRoot := t.TempDir()
+	record := workspaceRecord{
+		ID:               "ws_cloud",
+		RelayWorkspaceID: "ws_runtime",
+		LocalDir:         localRoot,
+		LocalLayout:      mountscope.LayoutScoped,
+		RemotePaths:      []string{"/github", "/slack"},
+		MountStateDir:    t.TempDir(),
+		MountKind:        mountsync.MountKindDaemon,
+	}
+	for _, scope := range workspaceMountScopes(record) {
+		stateFile, err := workspaceMountStateFile(record.RelayWorkspaceID, record, scope)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Dir(stateFile), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(stateFile, []byte(`{"files":{}}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	deadLetterDir := filepath.Join(localRoot, ".relay", "dead-letter")
+	if err := os.MkdirAll(deadLetterDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(deadLetterDir, "mixed-op.json"),
+		[]byte(`{"opId":"mixed-op","path":"/slack/channels/project/message.json,/github/repos/acme/pending.json"}`),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+	err := preflightProviderDisconnect(record, "github")
+	if err == nil || !strings.Contains(err.Error(), "deadLetters=1") {
+		t.Fatalf("scoped catalog compatibility dead letter preflight = %v, want refusal", err)
+	}
+}
+
+func TestProviderDisconnectPreflightRefusesUnreadableConflictShape(t *testing.T) {
+	localRoot := t.TempDir()
+	record := workspaceRecord{
+		ID:               "ws_cloud",
+		RelayWorkspaceID: "ws_runtime",
+		LocalDir:         localRoot,
+		LocalLayout:      mountscope.LayoutScoped,
+		RemotePaths:      []string{"/github"},
+		MountStateDir:    t.TempDir(),
+		MountKind:        mountsync.MountKindDaemon,
+	}
+	scope := workspaceMountScopes(record)[0]
+	stateFile, err := workspaceMountStateFile(record.RelayWorkspaceID, record, scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(stateFile), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(stateFile, []byte(`{"files":{}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	conflictsPath := filepath.Join(scope.LocalDir, ".relay", "conflicts")
+	if err := os.MkdirAll(filepath.Dir(conflictsPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(conflictsPath, []byte("unexpected non-directory"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	err = preflightProviderDisconnect(record, "github")
+	if err == nil || !strings.Contains(err.Error(), "inspect conflicts before disconnecting github") {
+		t.Fatalf("unreadable conflict shape preflight = %v, want refusal", err)
+	}
+	if payload, readErr := os.ReadFile(conflictsPath); readErr != nil || string(payload) != "unexpected non-directory" {
+		t.Fatalf("refused preflight mutated conflict path, payload=%q err=%v", payload, readErr)
+	}
+}
+
+func TestObservedFileCountsCarryUnreadableState(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(path, []byte("opaque"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for name, observed := range map[string]observedFileCount{
+		"json": countJSONFiles(path),
+		"all":  countFilesInDir(path),
+	} {
+		if observed.Err == nil {
+			t.Fatalf("%s count = %#v, want incompleteness error", name, observed)
+		}
+	}
+}
+
+func TestProviderDisconnectPreflightRefusesUnknownPrivateState(t *testing.T) {
+	record := workspaceRecord{
+		ID:               "ws_cloud",
+		RelayWorkspaceID: "ws_runtime",
+		LocalDir:         t.TempDir(),
+		LocalLayout:      mountscope.LayoutExact,
+		RemotePaths:      []string{"/github"},
+		MountStateDir:    t.TempDir(),
+		MountKind:        mountsync.MountKindDaemon,
+	}
+	err := preflightProviderDisconnect(record, "github")
+	if err == nil || !strings.Contains(err.Error(), "private mount state is unknown") {
+		t.Fatalf("missing private state preflight = %v, want explicit unknown-state refusal", err)
+	}
+}
+
+func TestDeadLetterRecordBelongsToProviderChecksEveryBulkPath(t *testing.T) {
+	for _, rawPath := range []string{
+		"/github/repos/acme/pending.json,/slack/channels/project/other.json",
+		"/slack/channels/project/other.json,/github/repos/acme/pending.json",
+	} {
+		if !deadLetterRecordBelongsToProvider(rawPath, "/github") {
+			t.Fatalf("mixed-provider dead letter %q did not match GitHub", rawPath)
+		}
+	}
+	if deadLetterRecordBelongsToProvider("/slack/channels/project/other.json", "/github") {
+		t.Fatal("Slack-only dead letter matched GitHub")
 	}
 }
 

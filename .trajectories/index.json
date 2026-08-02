@@ -100,6 +100,62 @@
       "completedAt": "2026-07-30T06:00:44.272Z",
       "path": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-b/.trajectories/completed/2026-07/traj_rw26ij8x9yhr.json"
     },
+    "traj_3gdyy15i9c13": {
+      "title": "Aggregate scoped mount operator surfaces",
+      "status": "completed",
+      "startedAt": "2026-07-30T05:08:42.612Z",
+      "completedAt": "2026-07-30T05:16:54.894Z",
+      "path": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-c/.trajectories/completed/2026-07/traj_3gdyy15i9c13.json"
+    },
+    "traj_fs8p6efpfqtt": {
+      "title": "Resolve scoped operator state through persisted private identities",
+      "status": "completed",
+      "startedAt": "2026-07-30T05:32:48.408Z",
+      "completedAt": "2026-07-30T05:34:52.700Z",
+      "path": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-c/.trajectories/completed/2026-07/traj_fs8p6efpfqtt.json"
+    },
+    "traj_0rjz89laoif3": {
+      "title": "Read scoped writeback status from private state",
+      "status": "completed",
+      "startedAt": "2026-07-30T05:43:10.555Z",
+      "completedAt": "2026-07-30T05:43:18.024Z",
+      "path": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-c/.trajectories/completed/2026-07/traj_0rjz89laoif3.json"
+    },
+    "traj_w7xxtfcagb89": {
+      "title": "Preserve exact root when runtime state is unavailable",
+      "status": "completed",
+      "startedAt": "2026-07-30T05:52:04.691Z",
+      "completedAt": "2026-07-30T05:52:32.927Z",
+      "path": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-c/.trajectories/completed/2026-07/traj_w7xxtfcagb89.json"
+    },
+    "traj_0ivieo04w496": {
+      "title": "Preserve scoped runtime state on integration disconnect",
+      "status": "completed",
+      "startedAt": "2026-07-30T06:02:06.962Z",
+      "completedAt": "2026-07-30T06:02:43.614Z",
+      "path": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-c/.trajectories/completed/2026-07/traj_0ivieo04w496.json"
+    },
+    "traj_s57bw9graew3": {
+      "title": "Refuse integration disconnect with unsynced scoped state",
+      "status": "completed",
+      "startedAt": "2026-07-30T06:05:24.821Z",
+      "completedAt": "2026-07-30T06:07:48.718Z",
+      "path": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-c/.trajectories/completed/2026-07/traj_s57bw9graew3.json"
+    },
+    "traj_gch0k1mre9do": {
+      "title": "Address Unit C exact review findings",
+      "status": "completed",
+      "startedAt": "2026-07-30T06:17:45.263Z",
+      "completedAt": "2026-07-30T06:20:10.418Z",
+      "path": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-c/.trajectories/completed/2026-07/traj_gch0k1mre9do.json"
+    },
+    "traj_krf3a8bxjpku": {
+      "title": "Finish scoped multi-path operator surfaces",
+      "status": "completed",
+      "startedAt": "2026-07-30T06:43:30.836Z",
+      "completedAt": "2026-07-30T10:13:35.117Z",
+      "path": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-c/.trajectories/completed/2026-07/traj_krf3a8bxjpku.json"
+    },
     "traj_uymnrxehl9bf": {
       "title": "Address Unit B exact GitHub review findings",
       "status": "completed",
@@ -162,6 +218,132 @@
       "startedAt": "2026-07-30T09:02:41.145Z",
       "completedAt": "2026-07-30T09:58:24.657Z",
       "path": ".trajectories/completed/2026-07/traj_1kmlyo9fwsnv.json"
+    },
+    "traj_2a93tcgvb68h": {
+      "title": "Review changes against fix/scoped-multipath-cli-runtime",
+      "status": "completed",
+      "startedAt": "2026-07-30T10:13:57.008Z",
+      "completedAt": "2026-07-30T10:16:19.338Z",
+      "path": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-c/.trajectories/completed/2026-07/traj_2a93tcgvb68h.json"
+    },
+    "traj_3dm6nse5csdk": {
+      "title": "Close Unit C second-review disconnect findings",
+      "status": "completed",
+      "startedAt": "2026-07-30T10:17:52.747Z",
+      "completedAt": "2026-07-30T10:27:07.565Z",
+      "path": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-c/.trajectories/completed/2026-07/traj_3dm6nse5csdk.json"
+    },
+    "traj_mdp5m449wxp3": {
+      "title": "Review changes against fix/scoped-multipath-cli-runtime",
+      "status": "completed",
+      "startedAt": "2026-07-30T10:27:28.401Z",
+      "completedAt": "2026-07-30T10:31:08.607Z",
+      "path": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-c/.trajectories/completed/2026-07/traj_mdp5m449wxp3.json"
+    },
+    "traj_bua53wamitju": {
+      "title": "Review changes against fix/scoped-multipath-cli-runtime",
+      "status": "completed",
+      "startedAt": "2026-07-30T10:34:12.908Z",
+      "completedAt": "2026-07-30T10:37:12.687Z",
+      "path": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-c/.trajectories/completed/2026-07/traj_bua53wamitju.json"
+    },
+    "traj_unv64id5jv6z": {
+      "title": "Route cross-scope dead-letter retries per scoped runtime root",
+      "status": "completed",
+      "startedAt": "2026-07-30T10:39:35.159Z",
+      "completedAt": "2026-07-30T10:42:00.443Z",
+      "path": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-c/.trajectories/completed/2026-07/traj_unv64id5jv6z.json"
+    },
+    "traj_k2nocx979usx": {
+      "title": "Review code changes against fix/scoped-multipath-cli-runtime",
+      "status": "completed",
+      "startedAt": "2026-07-30T10:42:20.534Z",
+      "completedAt": "2026-07-30T10:45:37.827Z",
+      "path": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-c/.trajectories/completed/2026-07/traj_k2nocx979usx.json"
+    },
+    "traj_0kko9s6utmhy": {
+      "title": "Close exact-root and scoped-disconnect review findings",
+      "status": "completed",
+      "startedAt": "2026-07-30T10:46:44.245Z",
+      "completedAt": "2026-07-30T10:48:54.739Z",
+      "path": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-c/.trajectories/completed/2026-07/traj_0kko9s6utmhy.json"
+    },
+    "traj_86dy5h7bjo8i": {
+      "title": "Review changes against fix/scoped-multipath-cli-runtime",
+      "status": "completed",
+      "startedAt": "2026-07-30T10:49:13.217Z",
+      "completedAt": "2026-07-30T10:51:23.530Z",
+      "path": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-c/.trajectories/completed/2026-07/traj_86dy5h7bjo8i.json"
+    },
+    "traj_1sp08l8m1pe4": {
+      "title": "Make retry and health independent of compatibility storage root",
+      "status": "completed",
+      "startedAt": "2026-07-30T10:52:38.466Z",
+      "completedAt": "2026-07-30T10:54:45.729Z",
+      "path": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-c/.trajectories/completed/2026-07/traj_1sp08l8m1pe4.json"
+    },
+    "traj_31gi21o8cioq": {
+      "title": "Review changes against fix/scoped-multipath-cli-runtime",
+      "status": "completed",
+      "startedAt": "2026-07-30T10:55:05.524Z",
+      "completedAt": "2026-07-30T10:57:00.921Z",
+      "path": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-c/.trajectories/completed/2026-07/traj_31gi21o8cioq.json"
+    },
+    "traj_qgllp1idox35": {
+      "title": "Preserve local infrastructure and centralize cross-scope dead letters",
+      "status": "completed",
+      "startedAt": "2026-07-30T10:58:04.858Z",
+      "completedAt": "2026-07-30T11:00:10.991Z",
+      "path": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-c/.trajectories/completed/2026-07/traj_qgllp1idox35.json"
+    },
+    "traj_a4qloqpqajl3": {
+      "title": "Review changes against fix/scoped-multipath-cli-runtime",
+      "status": "abandoned",
+      "startedAt": "2026-07-30T11:00:27.036Z",
+      "completedAt": "2026-07-30T11:19:46.819Z",
+      "path": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-c/.trajectories/completed/2026-07/traj_a4qloqpqajl3.json"
+    },
+    "traj_ndv3lptktys4": {
+      "title": "Review changes against fix/scoped-multipath-cli-runtime",
+      "status": "completed",
+      "startedAt": "2026-07-30T11:19:58.851Z",
+      "completedAt": "2026-07-30T11:20:08.227Z",
+      "path": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-c/.trajectories/completed/2026-07/traj_ndv3lptktys4.json"
+    },
+    "traj_dowdovihdusp": {
+      "title": "Keep delete-pending writebacks visible",
+      "status": "completed",
+      "startedAt": "2026-07-30T11:23:34.612Z",
+      "completedAt": "2026-07-30T11:29:40.251Z",
+      "path": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-c/.trajectories/completed/2026-07/traj_dowdovihdusp.json"
+    },
+    "traj_kya5brhilqxi": {
+      "title": "Review changes against fix/scoped-multipath-cli-runtime",
+      "status": "completed",
+      "startedAt": "2026-07-30T11:30:11.161Z",
+      "completedAt": "2026-07-30T11:32:34.683Z",
+      "path": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-c/.trajectories/completed/2026-07/traj_kya5brhilqxi.json"
+    },
+    "traj_qrdorshw6pc2": {
+      "title": "Carry disconnect preflight across the Cloud commit boundary",
+      "status": "completed",
+      "startedAt": "2026-07-30T11:34:07.140Z",
+      "completedAt": "2026-07-30T11:36:20.247Z",
+      "path": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-c/.trajectories/completed/2026-07/traj_qrdorshw6pc2.json"
+    },
+    "traj_heylf6s1ddr1": {
+      "title": "Review changes against fix/scoped-multipath-cli-runtime",
+      "status": "completed",
+      "startedAt": "2026-07-30T11:36:43.414Z",
+      "completedAt": "2026-07-30T11:39:12.593Z",
+      "path": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-c/.trajectories/completed/2026-07/traj_heylf6s1ddr1.json"
+    },
+    "traj_juhkgunm7iz9": {
+      "title": "Refuse disconnect on unobserved local drift",
+      "status": "completed",
+      "startedAt": "2026-07-30T11:40:53.561Z",
+      "completedAt": "2026-07-30T12:33:29.593Z",
+      "path": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-c/.trajectories/completed/2026-07/traj_juhkgunm7iz9.json"
     },
     "traj_scyyoykk4ura": {
       "title": "Close scoped catalog cleanup TOCTOU",

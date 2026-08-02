@@ -1166,7 +1166,7 @@ class MountedWorkspaceHandleImpl implements MountedWorkspaceHandle {
   }) {
     this.mountSession = input.mountSession
     this.workspaceId = input.mountSession.workspaceId
-    this.localDir = input.mountSession.localDir
+    this.localDir = resolveMountedWorkspaceLocalDir(input.mountSession)
     this.remotePath = input.mountSession.remotePath
     this.mode = input.mountSession.mode
     this.expiresAt = input.mountSession.expiresAt
@@ -1181,7 +1181,14 @@ class MountedWorkspaceHandleImpl implements MountedWorkspaceHandle {
   }
 
   env(): Record<string, string> {
-    return buildMountedWorkspaceEnv(this.mountSession)
+    return {
+      ...buildMountedWorkspaceEnv(this.mountSession),
+      RELAYFILE_LOCAL_DIR: this.localDir,
+      // The handle exposes the post-resolution path. Consumers that reuse
+      // this env must therefore treat it as exact rather than append the
+      // remote path again.
+      RELAYFILE_MOUNT_LOCAL_LAYOUT: "exact"
+    }
   }
 
   async status(): Promise<MountedWorkspaceStatus> {
@@ -1201,7 +1208,9 @@ class MountedWorkspaceHandleImpl implements MountedWorkspaceHandle {
       workspaceId: this.workspaceId,
       remotePath: this.remotePath,
       mode: this.mode,
-      localLayout: this.mountSession.localLayout,
+      // this.localDir is already the concrete scoped child exposed by the
+      // handle, so status reads must not append remotePath a second time.
+      localLayout: "exact",
       syncMode: this.mountSession.syncMode,
       relayfileBaseUrl: this.mountSession.relayfileBaseUrl,
       relayfileToken: this.mountSession.relayfileToken,
@@ -1953,6 +1962,20 @@ function buildMountedWorkspaceEnv(
     RELAYCAST_BASE_URL: relaycastBaseUrl,
     RELAY_BASE_URL: relaycastBaseUrl
   })
+}
+
+function resolveMountedWorkspaceLocalDir(
+  mountSession: MountSessionResult
+): string {
+  if (
+    mountSession.localLayout !== "scoped" ||
+    mountSession.remotePath === "/"
+  ) {
+    return mountSession.localDir
+  }
+  return resolveLocalDir(
+    `${mountSession.localDir}/${mountSession.remotePath.replace(/^\/+/, "")}`
+  )
 }
 
 function buildMountLauncherEnv(

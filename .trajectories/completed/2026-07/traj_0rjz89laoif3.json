@@ -1,0 +1,57 @@
+{
+  "id": "traj_0rjz89laoif3",
+  "version": 1,
+  "task": {
+    "title": "Read scoped writeback status from private state",
+    "source": {
+      "system": "plain",
+      "id": "relayfile#379"
+    }
+  },
+  "status": "completed",
+  "startedAt": "2026-07-30T05:43:10.555Z",
+  "completedAt": "2026-07-30T05:43:18.024Z",
+  "agents": [
+    {
+      "name": "default",
+      "role": "lead",
+      "joinedAt": "2026-07-30T05:43:17.959Z"
+    }
+  ],
+  "chapters": [
+    {
+      "id": "chap_g7ymsuanoe6s",
+      "title": "Work",
+      "agentName": "default",
+      "startedAt": "2026-07-30T05:43:17.959Z",
+      "endedAt": "2026-07-30T05:43:18.024Z",
+      "events": [
+        {
+          "ts": 1785390197960,
+          "type": "decision",
+          "content": "Treat private mount state as the pending-writeback source of truth: Treat private mount state as the pending-writeback source of truth",
+          "raw": {
+            "question": "Treat private mount state as the pending-writeback source of truth",
+            "chosen": "Treat private mount state as the pending-writeback source of truth",
+            "alternatives": [],
+            "reasoning": "The public child snapshot historically derives pending counts from an obsolete in-mirror legacy file. Operator status now resolves the exact private state identity for each scope and counts dirty tracked files there."
+          },
+          "significance": "high"
+        }
+      ]
+    }
+  ],
+  "retrospective": {
+    "summary": "Made aggregate writeback status count dirty files from each scope's persisted private mount state; regression proves bogus public pending counts are ignored.",
+    "approach": "Standard approach",
+    "confidence": 0.93
+  },
+  "commits": [],
+  "filesChanged": [],
+  "projectId": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-c",
+  "tags": [],
+  "_trace": {
+    "startRef": "a0fd23f1f24e02d6d4eb36d9c5d2aefe49412488",
+    "endRef": "a0fd23f1f24e02d6d4eb36d9c5d2aefe49412488"
+  }
+}

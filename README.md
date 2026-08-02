@@ -198,22 +198,25 @@ RELAYFILE_TOKEN="$TOKEN" go run ./cmd/relayfile-mount \
   --local-dir ./relayfile-mount
 ```
 
-Multi-path/scoped mounts are temporarily unavailable in both mount binaries
-until the status, list, and retry surfaces can enumerate every scoped child
-runtime directory. The binaries refuse `--local-layout scoped` (including
-values inherited from `RELAYFILE_MOUNT_LOCAL_LAYOUT` or a recorded catalog
-entry); use the exact layout for now. The scoped capability and its multi-path
-examples will return here when that operator-surface contract is complete.
+Use a scoped layout to mount more than one allowlisted remote root beneath a
+single catalog directory:
 
-When re-enabled, Relayfile will persist the allowlist and layout for later
-starts, so omitting the flags does not widen a scoped mount back to `/`. It will
-refuse in-place layout changes and removal of scoped roots because those
-transitions require moving runtime state and queued writes. Choose a new
-`LOCAL_DIR`; pass `--rehome` when that choice changes the workspace's registered
-mirror directory. Records created before layout persistence that already have
-local mount state must use that same new-directory migration before enabling
-scoped mounts. A setup-created record that has never mounted has no state to
-orphan and may start scoped in its chosen directory.
+```bash
+relayfile mount my-workspace ./relayfile-mount \
+  --local-layout scoped \
+  --remote-path /github \
+  --remote-path /slack
+```
+
+Relayfile persists the allowlist and layout for later starts, so omitting the
+flags does not widen a scoped mount back to `/`. It refuses in-place layout
+changes and removal of scoped roots because those transitions require moving
+runtime state and queued writes. Choose a new `LOCAL_DIR`; pass `--rehome` when
+that choice changes the workspace's registered mirror directory. Records
+created before layout persistence that already have local mount state must use
+that same new-directory migration before enabling scoped mounts. A setup-created
+record that has never mounted has no state to orphan and may start scoped in its
+chosen directory.
 
 Mount startup visibly lists incidental source-control infrastructure that is
 excluded from sync (`.git`, `.hg`, `.svn`, `.bzr`, `_darcs`, and `.jj`). These

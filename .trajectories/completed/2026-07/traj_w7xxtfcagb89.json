@@ -1,0 +1,57 @@
+{
+  "id": "traj_w7xxtfcagb89",
+  "version": 1,
+  "task": {
+    "title": "Preserve exact root when runtime state is unavailable",
+    "source": {
+      "system": "plain",
+      "id": "relayfile#379"
+    }
+  },
+  "status": "completed",
+  "startedAt": "2026-07-30T05:52:04.691Z",
+  "completedAt": "2026-07-30T05:52:32.927Z",
+  "agents": [
+    {
+      "name": "default",
+      "role": "lead",
+      "joinedAt": "2026-07-30T05:52:32.864Z"
+    }
+  ],
+  "chapters": [
+    {
+      "id": "chap_gltcywpy7cv8",
+      "title": "Work",
+      "agentName": "default",
+      "startedAt": "2026-07-30T05:52:32.864Z",
+      "endedAt": "2026-07-30T05:52:32.927Z",
+      "events": [
+        {
+          "ts": 1785390752865,
+          "type": "decision",
+          "content": "Distinguish absent runtime topology from the root path: Distinguish absent runtime topology from the root path",
+          "raw": {
+            "question": "Distinguish absent runtime topology from the root path",
+            "chosen": "Distinguish absent runtime topology from the root path",
+            "alternatives": [],
+            "reasoning": "The legacy helper returns / for both a real root mount and missing/unreadable state. Aggregate exact status now uses a presence-aware read and falls back to the persisted exact root only when runtime state makes no claim."
+          },
+          "significance": "high"
+        }
+      ]
+    }
+  ],
+  "retrospective": {
+    "summary": "Made exact aggregate status preserve the persisted non-root path when runtime state is absent or unreadable; focused topology tests pass.",
+    "approach": "Standard approach",
+    "confidence": 0.94
+  },
+  "commits": [],
+  "filesChanged": [],
+  "projectId": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-c",
+  "tags": [],
+  "_trace": {
+    "startRef": "7019269642da19d3fc2fd90b2dab3b6b94644caf",
+    "endRef": "7019269642da19d3fc2fd90b2dab3b6b94644caf"
+  }
+}

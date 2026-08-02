@@ -1,0 +1,20 @@
+{
+  "id": "traj_a4qloqpqajl3",
+  "version": 1,
+  "task": {
+    "title": "Review changes against fix/scoped-multipath-cli-runtime"
+  },
+  "status": "abandoned",
+  "startedAt": "2026-07-30T11:00:27.036Z",
+  "completedAt": "2026-07-30T11:19:46.819Z",
+  "agents": [],
+  "chapters": [],
+  "commits": [],
+  "filesChanged": [],
+  "projectId": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-c",
+  "tags": [],
+  "_trace": {
+    "startRef": "59e5f4ab21a094092801449bd33ce573b2f360b8",
+    "endRef": "59e5f4ab21a094092801449bd33ce573b2f360b8"
+  }
+}

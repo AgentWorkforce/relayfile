@@ -1,0 +1,69 @@
+{
+  "id": "traj_dowdovihdusp",
+  "version": 1,
+  "task": {
+    "title": "Keep delete-pending writebacks visible",
+    "source": {
+      "system": "plain",
+      "id": "relayfile#379"
+    }
+  },
+  "status": "completed",
+  "startedAt": "2026-07-30T11:23:34.612Z",
+  "completedAt": "2026-07-30T11:29:40.251Z",
+  "agents": [
+    {
+      "name": "default",
+      "role": "lead",
+      "joinedAt": "2026-07-30T11:23:34.960Z"
+    }
+  ],
+  "chapters": [
+    {
+      "id": "chap_vzkx9ec2zsgn",
+      "title": "Work",
+      "agentName": "default",
+      "startedAt": "2026-07-30T11:23:34.960Z",
+      "endedAt": "2026-07-30T11:29:40.251Z",
+      "events": [
+        {
+          "ts": 1785410614960,
+          "type": "decision",
+          "content": "Treat deletePending as authoritative pending state: Treat deletePending as authoritative pending state",
+          "raw": {
+            "question": "Treat deletePending as authoritative pending state",
+            "chosen": "Treat deletePending as authoritative pending state",
+            "alternatives": [],
+            "reasoning": "A queued delete can have neither a local file nor a stored hash; dropping its explicit state hides a destructive operation and makes list disagree with status."
+          },
+          "significance": "high"
+        },
+        {
+          "ts": 1785410823200,
+          "type": "decision",
+          "content": "Make mountsync own the persisted tracked-file shape and pending predicate: Make mountsync own the persisted tracked-file shape and pending predicate",
+          "raw": {
+            "question": "Make mountsync own the persisted tracked-file shape and pending predicate",
+            "chosen": "Make mountsync own the persisted tracked-file shape and pending predicate",
+            "alternatives": [],
+            "reasoning": "Four consumers (writer public status, CLI aggregate status, disconnect preflight, and writeback list) must not re-declare either the JSON fields or Dirty/DeletePending semantics independently."
+          },
+          "significance": "high"
+        }
+      ]
+    }
+  ],
+  "retrospective": {
+    "summary": "Centralized tracked-file JSON parsing and pending-writeback semantics, including delete-pending list coverage",
+    "approach": "Standard approach",
+    "confidence": 0.92
+  },
+  "commits": [],
+  "filesChanged": [],
+  "projectId": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-c",
+  "tags": [],
+  "_trace": {
+    "startRef": "59e5f4ab21a094092801449bd33ce573b2f360b8",
+    "endRef": "59e5f4ab21a094092801449bd33ce573b2f360b8"
+  }
+}

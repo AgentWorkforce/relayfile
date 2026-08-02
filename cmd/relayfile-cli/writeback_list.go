@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/agentworkforce/relayfile/internal/mountscope"
+	"github.com/agentworkforce/relayfile/internal/mountsync"
 )
 
 const writebackListUsage = "usage: relayfile writeback list --state pending|dead [--workspace WS] [--json]"
@@ -67,7 +68,7 @@ func runWritebackList(args []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	items, err := listLocalWritebackItems(workspaceID, record.LocalDir, normalizedState)
+	items, err := listWorkspaceWritebackItems(workspaceID, record, normalizedState)
 	if err != nil {
 		return err
 	}
@@ -76,6 +77,55 @@ func runWritebackList(args []string, stdout io.Writer) error {
 	}
 	printWritebackList(stdout, items)
 	return nil
+}
+
+func listWorkspaceWritebackItems(workspaceID string, record workspaceRecord, state string) ([]writebackListItem, error) {
+	itemsByKey := map[string]writebackListItem{}
+	if state == "pending" {
+		for _, scope := range workspaceMountScopes(record) {
+			stateFile, err := workspaceMountStateFile(workspaceID, record, scope)
+			if err != nil {
+				return nil, err
+			}
+			remoteRoot, err := workspaceRemoteRootForLocalDir(record, scope.LocalDir)
+			if err != nil {
+				return nil, err
+			}
+			items, err := readPendingWritebackItemsFromState(
+				workspaceID,
+				scope.LocalDir,
+				remoteRoot,
+				stateFile,
+				strings.TrimSpace(record.LocalLayout) == mountscope.LayoutScoped,
+			)
+			if err != nil {
+				return nil, err
+			}
+			for _, item := range items {
+				key := firstNonBlank(strings.TrimSpace(item.ID), strings.TrimSpace(item.Path))
+				itemsByKey[key] = item
+			}
+		}
+	} else {
+		// Include the catalog root for compatibility with dead letters written
+		// before scoped topology was persisted, then each active child root.
+		for _, localDir := range workspaceStateDirs(record) {
+			items, err := readDeadWritebackItems(workspaceID, localDir)
+			if err != nil {
+				return nil, err
+			}
+			for _, item := range items {
+				key := firstNonBlank(strings.TrimSpace(item.ID), strings.TrimSpace(item.Path))
+				itemsByKey[key] = item
+			}
+		}
+	}
+	items := make([]writebackListItem, 0, len(itemsByKey))
+	for _, item := range itemsByKey {
+		items = append(items, item)
+	}
+	sortWritebackListItems(items)
+	return items, nil
 }
 
 func validWritebackListState(state string) bool {
@@ -87,33 +137,11 @@ func validWritebackListState(state string) bool {
 	}
 }
 
-// listLocalWritebackItems returns per-operation writeback rows for the given
-// state. `pending` is sourced from dirty tracked files in
-// `<localDir>/.relayfile-mount-state.json`; `dead` is sourced from per-op
-// records under `<localDir>/.relay/dead-letter/`. Aggregate counters in
-// `.relay/state.json` are deliberately not expanded into synthetic rows.
-func listLocalWritebackItems(workspaceID, localDir, state string) ([]writebackListItem, error) {
-	if strings.TrimSpace(localDir) == "" {
-		return []writebackListItem{}, nil
-	}
-	if state == "dead" {
-		return readDeadWritebackItems(workspaceID, localDir)
-	}
-	return readPendingWritebackItems(workspaceID, localDir)
-}
-
-func readPendingWritebackItems(workspaceID, localDir string) ([]writebackListItem, error) {
+func readPendingWritebackItemsFromState(workspaceID, localDir, remoteRoot, stateFile string, scopedChild bool) ([]writebackListItem, error) {
 	var state struct {
-		Files map[string]struct {
-			Revision    string `json:"revision"`
-			Hash        string `json:"hash"`
-			Dirty       bool   `json:"dirty"`
-			Denied      bool   `json:"denied"`
-			WriteDenied bool   `json:"writeDenied"`
-			ReadOnly    bool   `json:"readonly"`
-		} `json:"files"`
+		Files map[string]mountsync.TrackedFileState `json:"files"`
 	}
-	payload, err := os.ReadFile(filepath.Join(localDir, ".relayfile-mount-state.json"))
+	payload, err := os.ReadFile(stateFile)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return []writebackListItem{}, nil
@@ -123,8 +151,7 @@ func readPendingWritebackItems(workspaceID, localDir string) ([]writebackListIte
 	if err := json.Unmarshal(payload, &state); err != nil {
 		return nil, fmt.Errorf("invalid mount state: %w", err)
 	}
-	remoteRoot := readMountRemoteRoot(localDir)
-	localHashes, err := localWritebackHashes(localDir, remoteRoot, false)
+	localHashes, err := localWritebackHashes(localDir, remoteRoot, scopedChild)
 	if err != nil {
 		return nil, err
 	}
@@ -137,7 +164,7 @@ func readPendingWritebackItems(workspaceID, localDir string) ([]writebackListIte
 			continue
 		}
 		localHash, hasLocal := localHashes[path]
-		pending := tracked.Dirty
+		pending := tracked.HasPendingWriteback()
 		if !pending && !tracked.Denied && !tracked.WriteDenied {
 			switch {
 			case hasLocal && tracked.Hash != "" && localHash != tracked.Hash:
@@ -179,7 +206,17 @@ func readPendingWritebackItems(workspaceID, localDir string) ([]writebackListIte
 
 func localWritebackHashes(localDir, remoteRoot string, scopedChild bool) (map[string]string, error) {
 	hashes := map[string]string{}
-	err := filepath.WalkDir(localDir, func(path string, entry os.DirEntry, err error) error {
+	info, err := os.Stat(localDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return hashes, nil
+		}
+		return nil, err
+	}
+	if !info.IsDir() {
+		return nil, fmt.Errorf("local writeback root %s is not a directory", localDir)
+	}
+	err = filepath.WalkDir(localDir, func(path string, entry os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}

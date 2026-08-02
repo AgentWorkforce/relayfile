@@ -1,0 +1,25 @@
+{
+  "id": "traj_2a93tcgvb68h",
+  "version": 1,
+  "task": {
+    "title": "Review changes against fix/scoped-multipath-cli-runtime"
+  },
+  "status": "completed",
+  "startedAt": "2026-07-30T10:13:57.008Z",
+  "completedAt": "2026-07-30T10:16:19.338Z",
+  "agents": [],
+  "chapters": [],
+  "retrospective": {
+    "summary": "Reviewed scoped multi-path CLI changes; identified disconnect preflight issues around dual workspace IDs and provider-unfiltered pending state.",
+    "approach": "Standard approach",
+    "confidence": 0.9
+  },
+  "commits": [],
+  "filesChanged": [],
+  "projectId": "/Users/will/Projects/AgentWorkforce/relayfile-wt-379-c",
+  "tags": [],
+  "_trace": {
+    "startRef": "82b3f9afb11e7b7745441d33702384084375c489",
+    "endRef": "82b3f9afb11e7b7745441d33702384084375c489"
+  }
+}
