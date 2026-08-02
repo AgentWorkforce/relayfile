@@ -81,6 +81,7 @@ jobs:
     outputs:
       new_version: ${{ steps.bump.outputs.new_version }}
       is_prerelease: ${{ steps.bump.outputs.is_prerelease }}
+      is_recovery: ${{ steps.bump.outputs.is_recovery }}
 
     steps:
       - name: Validate release mode
@@ -131,16 +132,35 @@ jobs:
           CUSTOM_VERSION: ${{ github.event.inputs.custom_version }}
           VERSION_TYPE: ${{ github.event.inputs.version }}
           PREID: ${{ github.event.inputs.preid }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           MANIFEST_VERSION=$(node -p "require('./package.json').version")
-          LATEST_TAG=$(git -c versionsort.suffix=- for-each-ref \
+          LATEST_TAG=""
+          while IFS= read -r CANDIDATE_TAG; do
+            RELEASE_ERROR=$(mktemp)
+            if gh api \
+              "repos/${GITHUB_REPOSITORY}/releases/tags/${CANDIDATE_TAG}" \
+              --silent 2>"$RELEASE_ERROR"; then
+              LATEST_TAG="$CANDIDATE_TAG"
+              rm -f "$RELEASE_ERROR"
+              break
+            fi
+            if grep -q 'HTTP 404' "$RELEASE_ERROR"; then
+              rm -f "$RELEASE_ERROR"
+              continue
+            fi
+            cat "$RELEASE_ERROR" >&2
+            rm -f "$RELEASE_ERROR"
+            echo "ERROR: could not verify completed release ${CANDIDATE_TAG}" >&2
+            exit 1
+          done < <(git -c versionsort.suffix=- for-each-ref \
             --sort=-version:refname \
             --format='%(refname:short)' \
-            'refs/tags/v[0-9]*' | sed -n '1p')
+            'refs/tags/v[0-9]*')
 
           if [ -z "$LATEST_TAG" ]; then
-            echo "ERROR: no release tag exists; cannot derive the release baseline" >&2
+            echo "ERROR: no completed GitHub release exists; cannot derive the release baseline" >&2
             exit 1
           fi
 
@@ -164,8 +184,15 @@ jobs:
 
           NEW_VERSION=$(node -p "require('./package.json').version")
           if git show-ref --verify --quiet "refs/tags/v${NEW_VERSION}"; then
-            echo "ERROR: release tag v${NEW_VERSION} already exists" >&2
-            exit 1
+            TAG_COMMIT=$(git rev-list -n 1 "refs/tags/v${NEW_VERSION}")
+            if [ "$TAG_COMMIT" != "$GITHUB_SHA" ]; then
+              echo "ERROR: release tag v${NEW_VERSION} already exists at ${TAG_COMMIT}, not ${GITHUB_SHA}" >&2
+              exit 1
+            fi
+            echo "Recovering release v${NEW_VERSION} reserved by this source commit"
+            echo "is_recovery=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_recovery=false" >> "$GITHUB_OUTPUT"
           fi
           echo "new_version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
           echo "New version: $NEW_VERSION"
@@ -380,6 +407,15 @@ jobs:
           set -euo pipefail
           git config user.name "GitHub Actions"
           git config user.email "actions@github.com"
+          if git show-ref --verify --quiet "refs/tags/v${NEW_VERSION}"; then
+            TAG_COMMIT=$(git rev-list -n 1 "refs/tags/v${NEW_VERSION}")
+            if [ "$TAG_COMMIT" != "$GITHUB_SHA" ]; then
+              echo "ERROR: release tag v${NEW_VERSION} belongs to ${TAG_COMMIT}, not ${GITHUB_SHA}" >&2
+              exit 1
+            fi
+            echo "Release tag v${NEW_VERSION} is already reserved by this source commit"
+            exit 0
+          fi
           git tag -a "v${NEW_VERSION}" -m "Release v${NEW_VERSION}"
           git push origin "refs/tags/v${NEW_VERSION}:refs/tags/v${NEW_VERSION}"
 
@@ -478,6 +514,7 @@ jobs:
         working-directory: ${{ matrix.path }}
         env:
           NPM_TAG: ${{ github.event.inputs.tag }}
+          RELEASE_RECOVERY: ${{ needs.build.outputs.is_recovery }}
         run: |
           PACKAGE_NAME=$(node -p "require('./package.json').name")
           echo "Dry run - would publish ${PACKAGE_NAME}"
@@ -488,7 +525,28 @@ jobs:
         working-directory: ${{ matrix.path }}
         env:
           NPM_TAG: ${{ github.event.inputs.tag }}
-        run: npm publish --access public --provenance --tag "$NPM_TAG" --ignore-scripts
+        run: |
+          set -euo pipefail
+          PACKAGE_NAME=$(node -p "require('./package.json').name")
+          PACKAGE_VERSION=$(node -p "require('./package.json').version")
+          VIEW_ERROR=$(mktemp)
+          if npm view "${PACKAGE_NAME}@${PACKAGE_VERSION}" version --json >/dev/null 2>"$VIEW_ERROR"; then
+            rm -f "$VIEW_ERROR"
+            if [ "$RELEASE_RECOVERY" != "true" ]; then
+              echo "ERROR: ${PACKAGE_NAME}@${PACKAGE_VERSION} exists without a same-commit tag reservation" >&2
+              exit 1
+            fi
+            echo "${PACKAGE_NAME}@${PACKAGE_VERSION} is already published; continuing recovery"
+            exit 0
+          fi
+          if ! grep -q 'E404' "$VIEW_ERROR"; then
+            cat "$VIEW_ERROR" >&2
+            rm -f "$VIEW_ERROR"
+            echo "ERROR: could not determine whether ${PACKAGE_NAME}@${PACKAGE_VERSION} is published" >&2
+            exit 1
+          fi
+          rm -f "$VIEW_ERROR"
+          npm publish --access public --provenance --tag "$NPM_TAG" --ignore-scripts
 
   # Publish single package (when not 'all')
   publish-single:
@@ -570,6 +628,7 @@ jobs:
         working-directory: ${{ steps.resolve-package.outputs.path }}
         env:
           NPM_TAG: ${{ github.event.inputs.tag }}
+          RELEASE_RECOVERY: ${{ needs.build.outputs.is_recovery }}
         run: |
           PACKAGE_NAME=$(node -p "require('./package.json').name")
           echo "Dry run - would publish ${PACKAGE_NAME}"
@@ -580,7 +639,28 @@ jobs:
         working-directory: ${{ steps.resolve-package.outputs.path }}
         env:
           NPM_TAG: ${{ github.event.inputs.tag }}
-        run: npm publish --access public --provenance --tag "$NPM_TAG" --ignore-scripts
+        run: |
+          set -euo pipefail
+          PACKAGE_NAME=$(node -p "require('./package.json').name")
+          PACKAGE_VERSION=$(node -p "require('./package.json').version")
+          VIEW_ERROR=$(mktemp)
+          if npm view "${PACKAGE_NAME}@${PACKAGE_VERSION}" version --json >/dev/null 2>"$VIEW_ERROR"; then
+            rm -f "$VIEW_ERROR"
+            if [ "$RELEASE_RECOVERY" != "true" ]; then
+              echo "ERROR: ${PACKAGE_NAME}@${PACKAGE_VERSION} exists without a same-commit tag reservation" >&2
+              exit 1
+            fi
+            echo "${PACKAGE_NAME}@${PACKAGE_VERSION} is already published; continuing recovery"
+            exit 0
+          fi
+          if ! grep -q 'E404' "$VIEW_ERROR"; then
+            cat "$VIEW_ERROR" >&2
+            rm -f "$VIEW_ERROR"
+            echo "ERROR: could not determine whether ${PACKAGE_NAME}@${PACKAGE_VERSION} is published" >&2
+            exit 1
+          fi
+          rm -f "$VIEW_ERROR"
+          npm publish --access public --provenance --tag "$NPM_TAG" --ignore-scripts
 
   create-release:
     name: Create Release

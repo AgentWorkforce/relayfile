@@ -42,4 +42,10 @@ jobs:
         run: ./scripts/check-contract-surface.sh
 
       - name: Validate protected release workflow
-        run: ./scripts/check-publish-workflow.sh
+        run: |
+          for workflow in .github/workflows/*.yml; do
+            ./scripts/check-publish-workflow.sh "$workflow" allow-zero
+          done
+          ./scripts/check-publish-workflow.sh
+          ./scripts/check-publish-workflow.sh .github/workflows/publish-python.yml
+          ./scripts/test-check-publish-workflow.sh
