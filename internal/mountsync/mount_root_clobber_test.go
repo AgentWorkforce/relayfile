@@ -478,9 +478,16 @@ func TestOversizedTrackedFileDoesNotBecomeRemoteDelete(t *testing.T) {
 	if _, ok := fc.files[remotePath]; !ok {
 		t.Fatalf("remote oversized file was deleted")
 	}
+	info, err := os.Stat(huge)
+	if err != nil {
+		t.Fatalf("stat preserved oversized local file: %v", err)
+	}
+	if got, want := info.Size(), int64(4096); got != want {
+		t.Fatalf("oversized local edit was not preserved: size=%d, want %d", got, want)
+	}
 
 	state := readPublicState(t, localDir)
-	if state.PendingWriteback != 0 || state.Files[remotePath].Status != "ready" {
-		t.Fatalf("oversized tracked drift should settle without writeback: %+v", state)
+	if state.PendingWriteback != 0 || state.Files[remotePath].Status != "writeback-skipped" || !state.Files[remotePath].Dirty {
+		t.Fatalf("oversized tracked drift should remain preserved and surface the writeback cap: %+v", state)
 	}
 }

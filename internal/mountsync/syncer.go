@@ -5999,7 +5999,7 @@ func (s *Syncer) applyRemoteFile(remotePath string, file RemoteFile, conflicted 
 	if err != nil {
 		return err
 	}
-	tracked := s.state.Files[remotePath]
+	tracked, trackedExists := s.state.Files[remotePath]
 	canWrite := s.canWritePath(remotePath)
 	tracked.ReadOnly = !canWrite
 	tracked.Denied = false
@@ -6046,6 +6046,44 @@ func (s *Syncer) applyRemoteFile(remotePath string, file RemoteFile, conflicted 
 		localHash := hashBytes(current)
 		if localHash == remoteHash {
 			shouldWrite = false
+		} else {
+			// A local filesystem event is debounced for 100ms before
+			// HandleLocalChange marks the tracked entry Dirty. A competing
+			// writer's WebSocket update can arrive inside that window. Treat
+			// on-disk divergence from the last confirmed base as local work
+			// before replacing the working copy, otherwise the remote update
+			// silently erases the edit before it ever reaches the outbox CAS.
+			//
+			// Revisions are opaque identifiers, not ordered clocks, so decide
+			// from content alone: both local and remote must diverge from the
+			// last confirmed base, and from each other. A duplicate remote event
+			// whose content still equals the base therefore stays harmless. If
+			// the base hash is unavailable, fail safe and preserve. For an
+			// untracked path, the simultaneous-create case has no base and uses
+			// create-only revision "0" in the artifact name.
+			baseHashUnavailable := trackedExists && tracked.Hash == ""
+			localDivergedFromBase := !trackedExists || baseHashUnavailable || localHash != tracked.Hash
+			remoteDivergedFromBase := !trackedExists || baseHashUnavailable || remoteHash != tracked.Hash
+			if canWrite && !tracked.Dirty && localDivergedFromBase && !remoteDivergedFromBase {
+				// A duplicate or stale remote event still represents the tracked
+				// base, so it must not replace a newer local edit or create a
+				// conflict artifact. The local writeback path remains responsible
+				// for the local bytes, including its size and policy limits.
+				shouldWrite = false
+			} else if canWrite && !tracked.Dirty && localDivergedFromBase && remoteDivergedFromBase {
+				baseRevision := tracked.Revision
+				if !trackedExists {
+					baseRevision = "0"
+				}
+				artifactPath, artifactErr := s.writeConflictArtifact(remotePath, baseRevision, current)
+				if artifactErr != nil {
+					return artifactErr
+				}
+				if conflicted != nil {
+					conflicted[remotePath] = struct{}{}
+				}
+				s.logf("conflict at %s before remote apply; debounced local edit saved at %s", remotePath, artifactPath)
+			}
 		}
 	}
 	if shouldWrite {

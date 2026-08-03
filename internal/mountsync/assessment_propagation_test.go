@@ -334,6 +334,153 @@ func TestAssessSameFileNearSimultaneousWrite(t *testing.T) {
 	}
 }
 
+// TestAssessSameFileWebSocketBeatsDebouncedWatcher covers the real-daemon
+// ordering that TestAssessSameFileNearSimultaneousWrite cannot exercise:
+// fsnotify waits 100ms for a local save to settle, while a competing writer's
+// WebSocket update may be applied immediately. The remote update must preserve
+// the on-disk edit even though HandleLocalChange has not marked it Dirty yet.
+func TestAssessSameFileWebSocketBeatsDebouncedWatcher(t *testing.T) {
+	t.Parallel()
+	store := newAssessStore(t)
+	workspaceID := "ws_assess_same_file_ws_debounce"
+	handler := newMountsyncAPIHandler(t, store)
+	api := httptest.NewServer(handler)
+	defer api.Close()
+
+	tokenA := mustMountsyncTestJWT(t, "dev-secret", workspaceID, "SandboxA", []string{"fs:read", "fs:write"}, time.Now().Add(time.Hour))
+	tokenB := mustMountsyncTestJWT(t, "dev-secret", workspaceID, "SandboxB", []string{"fs:read", "fs:write"}, time.Now().Add(time.Hour))
+	const remotePath = "/notion/Shared.md"
+	writeMountsyncRemoteFile(t, api.Client(), api.URL, tokenA, workspaceID, remotePath, "0", "base content")
+
+	localDirA := t.TempDir()
+	localDirB := t.TempDir()
+	wsDisabled := false
+	syncerA, err := NewSyncer(NewHTTPClient(api.URL, tokenA, api.Client()), SyncerOptions{
+		WorkspaceID: workspaceID, RemoteRoot: "/notion", LocalRoot: localDirA, WebSocket: &wsDisabled,
+	})
+	if err != nil {
+		t.Fatalf("new syncer A: %v", err)
+	}
+	syncerB, err := NewSyncer(NewHTTPClient(api.URL, tokenB, api.Client()), SyncerOptions{
+		WorkspaceID: workspaceID, RemoteRoot: "/notion", LocalRoot: localDirB, WebSocket: &wsDisabled,
+	})
+	if err != nil {
+		t.Fatalf("new syncer B: %v", err)
+	}
+
+	ctx := context.Background()
+	if err := syncerA.SyncOnce(ctx); err != nil {
+		t.Fatalf("A bootstrap: %v", err)
+	}
+	if err := syncerB.SyncOnce(ctx); err != nil {
+		t.Fatalf("B bootstrap: %v", err)
+	}
+	// Revision identifiers are opaque by contract. Make B's base sort after
+	// the incoming store revision so any implementation that incorrectly uses
+	// revision ordering to gate preservation fails this regression.
+	trackedB := syncerB.state.Files[remotePath]
+	trackedB.Revision = "zzzz_opaque_base"
+	syncerB.state.Files[remotePath] = trackedB
+	localPathA := filepath.Join(localDirA, "Shared.md")
+	localPathB := filepath.Join(localDirB, "Shared.md")
+	if err := os.WriteFile(localPathA, []byte("edit from A"), 0o644); err != nil {
+		t.Fatalf("local write A: %v", err)
+	}
+	if err := os.WriteFile(localPathB, []byte("edit from B"), 0o644); err != nil {
+		t.Fatalf("local write B: %v", err)
+	}
+
+	// A's watcher callback wins the server race. On B, model the WebSocket
+	// callback arriving before fsnotify's 100ms debounced callback.
+	if err := syncerA.HandleLocalChange(ctx, "Shared.md", 0); err != nil {
+		t.Fatalf("A push: %v", err)
+	}
+	if err := syncerB.applyWebSocketEvent(ctx, websocketEvent{
+		Type:      "file.updated",
+		Path:      remotePath,
+		Timestamp: time.Now().UTC().Format(time.RFC3339Nano),
+	}); err != nil {
+		t.Fatalf("B websocket apply: %v", err)
+	}
+	if err := syncerB.HandleLocalChange(ctx, "Shared.md", 0); err != nil {
+		t.Fatalf("B delayed watcher callback: %v", err)
+	}
+
+	assertLocalFileContent(t, localPathB, "edit from A")
+	conflicts := listConflictArtifacts(t, localDirB)
+	if len(conflicts) != 1 {
+		t.Fatalf("B should preserve its debounced local edit in one conflict artifact, got %v", conflicts)
+	}
+	artifact, err := os.ReadFile(filepath.Join(localDirB, ".relay", "conflicts", conflicts[0]))
+	if err != nil {
+		t.Fatalf("read B conflict artifact: %v", err)
+	}
+	if got := string(artifact); got != "edit from B" {
+		t.Fatalf("B conflict artifact = %q, want %q", got, "edit from B")
+	}
+}
+
+// A duplicate or stale WebSocket event can arrive during the same debounce
+// window even when the server content has not advanced from the tracked base.
+// It must leave the local edit for the watcher to push without manufacturing a
+// conflict, because only one side has actually changed.
+func TestAssessDuplicateRemoteBasePreservesDebouncedLocalEdit(t *testing.T) {
+	t.Parallel()
+	store := newAssessStore(t)
+	workspaceID := "ws_assess_duplicate_remote_base"
+	handler := newMountsyncAPIHandler(t, store)
+	api := httptest.NewServer(handler)
+	defer api.Close()
+
+	token := mustMountsyncTestJWT(t, "dev-secret", workspaceID, "SandboxB", []string{"fs:read", "fs:write"}, time.Now().Add(time.Hour))
+	const remotePath = "/notion/Shared.md"
+	writeMountsyncRemoteFile(t, api.Client(), api.URL, token, workspaceID, remotePath, "0", "base content")
+
+	localDir := t.TempDir()
+	wsDisabled := false
+	syncer, err := NewSyncer(NewHTTPClient(api.URL, token, api.Client()), SyncerOptions{
+		WorkspaceID: workspaceID, RemoteRoot: "/notion", LocalRoot: localDir, WebSocket: &wsDisabled,
+	})
+	if err != nil {
+		t.Fatalf("new syncer: %v", err)
+	}
+	ctx := context.Background()
+	if err := syncer.SyncOnce(ctx); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+
+	localPath := filepath.Join(localDir, "Shared.md")
+	if err := os.WriteFile(localPath, []byte("edit from B"), 0o644); err != nil {
+		t.Fatalf("local write: %v", err)
+	}
+	if err := syncer.applyWebSocketEvent(ctx, websocketEvent{
+		Type:      "file.updated",
+		Path:      remotePath,
+		Timestamp: time.Now().UTC().Format(time.RFC3339Nano),
+	}); err != nil {
+		t.Fatalf("duplicate websocket apply: %v", err)
+	}
+
+	assertLocalFileContent(t, localPath, "edit from B")
+	if conflicts := listConflictArtifacts(t, localDir); len(conflicts) != 0 {
+		t.Fatalf("duplicate remote base should not create a conflict artifact, got %v", conflicts)
+	}
+	if err := syncer.HandleLocalChange(ctx, "Shared.md", 0); err != nil {
+		t.Fatalf("delayed watcher callback: %v", err)
+	}
+	assertLocalFileContent(t, localPath, "edit from B")
+	remoteFile, err := syncer.client.ReadFile(ctx, workspaceID, remotePath)
+	if err != nil {
+		t.Fatalf("read server file after delayed watcher: %v", err)
+	}
+	if got := remoteFile.Content; got != "edit from B" {
+		t.Fatalf("server content after delayed watcher = %q, want %q", got, "edit from B")
+	}
+	if conflicts := listConflictArtifacts(t, localDir); len(conflicts) != 0 {
+		t.Fatalf("single-sided local edit should remain conflict-free after push, got %v", conflicts)
+	}
+}
+
 // TestAssessSameFileNearSimultaneousWriteGoMergeAutoMerges is the Go-file
 // counterpart to TestAssessSameFileNearSimultaneousWrite. Both sandboxes race
 // from one confirmed-clean revision, but their edits target separate
