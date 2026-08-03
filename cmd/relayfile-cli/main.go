@@ -11396,7 +11396,7 @@ func runningMountDaemons(localDir, workspaceID, workspaceName string) ([]mountDa
 		seen[process.PID] = struct{}{}
 	}
 
-	if pid, verified, strong := verifyDaemonProcessForDiscovery(localDir, workspaceID); pid != 0 {
+	if pid, verified, strong := verifyDaemonProcessForDiscovery(localDir, workspaceID); pid != 0 && pid != os.Getpid() {
 		_, foundByScan := seen[pid]
 		switch {
 		case !processAlive(pid):
@@ -11460,6 +11460,11 @@ func mountDaemonCommandMatches(command, localDir, workspaceID, workspaceName str
 	if !commandHasMountSubcommand(fields) || commandHasOnceFlag(fields) {
 		return false
 	}
+	// `mount --background` is a transient launcher. Only the child carrying
+	// `--daemonized` serves the mount and should participate in discovery.
+	if commandHasEnabledBoolFlag(fields, "background") && !commandHasEnabledBoolFlag(fields, "daemonized") {
+		return false
+	}
 	targets := daemonWorkspaceTargets(workspaceID, workspaceName)
 	if commandMatchesWorkspace(fields, targets) {
 		return true
@@ -11492,12 +11497,18 @@ func commandHasMountSubcommand(fields []string) bool {
 }
 
 func commandHasOnceFlag(fields []string) bool {
+	return commandHasEnabledBoolFlag(fields, "once")
+}
+
+func commandHasEnabledBoolFlag(fields []string, name string) bool {
+	longFlag := "--" + name
+	shortFlag := "-" + name
 	for _, field := range fields {
-		if field == "--once" || field == "-once" {
+		if field == longFlag || field == shortFlag {
 			return true
 		}
-		if strings.HasPrefix(field, "--once=") || strings.HasPrefix(field, "-once=") {
-			value := strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(field, "--once="), "-once="))
+		if strings.HasPrefix(field, longFlag+"=") || strings.HasPrefix(field, shortFlag+"=") {
+			value := strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(field, longFlag+"="), shortFlag+"="))
 			if value == "" {
 				return true
 			}

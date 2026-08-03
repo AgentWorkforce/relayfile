@@ -24,6 +24,19 @@ import (
 	"github.com/agentworkforce/relayfile/internal/mountsync"
 )
 
+const relayfileCLITestSubprocessEnv = "RELAYFILE_CLI_TEST_SUBPROCESS"
+
+func TestMain(m *testing.M) {
+	if os.Getenv(relayfileCLITestSubprocessEnv) == "1" {
+		if err := run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+	os.Exit(m.Run())
+}
+
 func TestWorkspaceCreateStoresCatalogEntry(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)
@@ -2230,6 +2243,15 @@ func TestStatusSurfacesOrphanDaemonFromProcessScan(t *testing.T) {
 
 func TestMountDaemonCommandMatchesAliasesAndLocalDirBoundaries(t *testing.T) {
 	localDir := filepath.Join(t.TempDir(), "ws")
+	if mountDaemonCommandMatches("relayfile mount demo "+localDir+" --background", localDir, "ws_demo", "demo") {
+		t.Fatalf("transient --background launcher must not match a serving daemon")
+	}
+	if !mountDaemonCommandMatches("relayfile mount demo "+localDir+" --background=false", localDir, "ws_demo", "demo") {
+		t.Fatalf("foreground mount with --background=false must still match a serving daemon")
+	}
+	if !mountDaemonCommandMatches("relayfile mount demo "+localDir+" --background --daemonized", localDir, "ws_demo", "demo") {
+		t.Fatalf("daemonized child must still match even if inherited argv contains --background")
+	}
 	if !mountDaemonCommandMatches("relayfile start demo "+localDir+" --daemonized", localDir, "ws_demo", "demo") {
 		t.Fatalf("expected relayfile start alias to match daemon command")
 	}
@@ -2241,6 +2263,32 @@ func TestMountDaemonCommandMatchesAliasesAndLocalDirBoundaries(t *testing.T) {
 	}
 	if !mountDaemonCommandMatches("relayfile mount other "+filepath.Join(localDir, "nested")+" --daemonized", localDir, "ws_demo", "demo") {
 		t.Fatalf("expected localDir subpath token to match")
+	}
+}
+
+func TestRunningMountDaemonsExcludesCallerPIDFromPIDFile(t *testing.T) {
+	localDir := t.TempDir()
+	if err := ensureMirrorLayout(localDir); err != nil {
+		t.Fatalf("ensureMirrorLayout failed: %v", err)
+	}
+	if err := writeDaemonPIDState(mountPIDFile(localDir), daemonPIDState{
+		PID:        os.Getpid(),
+		LocalDir:   localDir,
+		StartedAt:  time.Now().UTC().Format(time.RFC3339),
+		Executable: resolvedSelfExecutable(),
+	}); err != nil {
+		t.Fatalf("writeDaemonPIDState failed: %v", err)
+	}
+	oldList := listProcessCommands
+	listProcessCommands = func() ([]processCommandSnapshot, error) { return nil, nil }
+	t.Cleanup(func() { listProcessCommands = oldList })
+
+	running, stalePID, err := runningMountDaemons(localDir, "ws_demo", "demo")
+	if err != nil {
+		t.Fatalf("runningMountDaemons failed: %v", err)
+	}
+	if len(running) != 0 || stalePID != 0 {
+		t.Fatalf("caller pid reported as competing daemon: running=%+v stalePID=%d", running, stalePID)
 	}
 }
 
@@ -2620,6 +2668,73 @@ func TestPrepareBackgroundMountLayoutPreservesScopedArtifactAbsence(t *testing.T
 	}
 	if info, err := os.Stat(filepath.Join(localRoot, mountscope.RuntimeTopLevel)); err != nil || !info.IsDir() {
 		t.Fatalf("scoped background preparation did not create runtime root: info=%v err=%v", info, err)
+	}
+}
+
+func TestSpawnBackgroundMountProcessRegistersRealChild(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+	t.Setenv(relayfileCLITestSubprocessEnv, "1")
+
+	token := testJWTWithWorkspace("ws_background")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got, want := r.Header.Get("Authorization"), "Bearer "+token; got != want {
+			t.Fatalf("Authorization = %q, want %q", got, want)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/workspaces/ws_background/fs/export":
+			_, _ = w.Write([]byte(`[]`))
+		case "/v1/workspaces/ws_background/fs/events":
+			_, _ = w.Write([]byte(`{"events":[]}`))
+		case "/v1/workspaces/ws_background/sync/status":
+			_, _ = w.Write([]byte(`{"workspaceId":"ws_background","providers":[]}`))
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	localDir := filepath.Join(t.TempDir(), "mirror")
+	stateDir := t.TempDir()
+	pidFile := mountPIDFile(localDir)
+	logFile := mountLogFile(localDir)
+	args := []string{
+		"ws_background", localDir,
+		"--server", server.URL,
+		"--token", token,
+		"--state-dir", stateDir,
+		"--interval", "1h",
+		"--websocket=false",
+	}
+	if err := spawnBackgroundMountProcess(args, []string{"/"}, localDir, pidFile, logFile, mountscope.LayoutExact); err != nil {
+		logBytes, _ := os.ReadFile(logFile)
+		t.Fatalf("spawnBackgroundMountProcess failed: %v\nlog:\n%s", err, logBytes)
+	}
+	state, structured := readDaemonPIDStateFile(pidFile)
+	if !structured || !state.Registered || state.PID <= 0 {
+		t.Fatalf("background child did not register: structured=%v state=%+v", structured, state)
+	}
+	t.Cleanup(func() {
+		if processAlive(state.PID) {
+			if process, err := os.FindProcess(state.PID); err == nil {
+				_ = forceDaemonStop(process)
+			}
+		}
+	})
+	process, err := os.FindProcess(state.PID)
+	if err != nil {
+		t.Fatalf("find background child: %v", err)
+	}
+	if err := signalDaemonStop(process); err != nil && !isProcessAlreadyGone(err) {
+		t.Fatalf("stop background child: %v", err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for processAlive(state.PID) && time.Now().Before(deadline) {
+		time.Sleep(25 * time.Millisecond)
+	}
+	if processAlive(state.PID) {
+		t.Fatalf("background child %d did not exit after stop", state.PID)
 	}
 }
 
