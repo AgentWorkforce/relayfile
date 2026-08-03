@@ -6381,6 +6381,7 @@ func runMount(args []string) error {
 	fs := flag.NewFlagSet("mount", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 
+	creds, _ := loadCredentials()
 	server := fs.String("server", resolveServer("", credentials{}), "relayfile server URL")
 	token := fs.String("token", strings.TrimSpace(os.Getenv("RELAYFILE_TOKEN")), "bearer token")
 	credsFile := fs.String("creds-file", strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_CREDS_FILE")), "delegated relayfile credentials file")
@@ -6459,8 +6460,11 @@ func runMount(args []string) error {
 	stateFileProvided := false
 	stateDirProvided := false
 	mountKindProvided := false
+	serverProvided := false
 	fs.Visit(func(parsed *flag.Flag) {
 		switch parsed.Name {
+		case "server":
+			serverProvided = true
 		case "local-layout":
 			localLayoutProvided = true
 		case "state-file":
@@ -6495,25 +6499,41 @@ func runMount(args []string) error {
 	if tokenValue == "" {
 		bundle, path, berr := loadDelegatedCredentialsForRequest(*credsFile, requestedWorkspace, defaultJoinScopes)
 		if berr != nil {
-			return fmt.Errorf("resolve delegated relayfile credentials: %w", berr)
+			tokenValue = strings.TrimSpace(creds.Token)
+			if tokenValue == "" {
+				return fmt.Errorf("resolve delegated relayfile credentials: %w", berr)
+			}
+			if !serverProvided {
+				*server = resolveServer("", creds)
+			}
+			delegatedCredsPath = ""
+		} else {
+			delegatedCredsPath = path
+			bundle, berr = refreshDelegatedCredentials(path, bundle, false)
+			if berr != nil {
+				tokenValue = strings.TrimSpace(creds.Token)
+				if tokenValue == "" {
+					return fmt.Errorf("refresh delegated relayfile credentials: %w", berr)
+				}
+				if !serverProvided {
+					*server = resolveServer("", creds)
+				}
+				delegatedCredsPath = ""
+			} else {
+				canonicalWorkspaceID = bundle.Workspace()
+				if requestedWorkspace != "" && !workspaceRequestMatchesDelegatedCredentials(requestedWorkspace, canonicalWorkspaceID) {
+					return fmt.Errorf(
+						"relayfile mount without --token uses delegated relayfile workspace %s; pass --token for explicit workspace %q or re-bootstrap delegated credentials for that workspace",
+						canonicalWorkspaceID,
+						requestedWorkspace,
+					)
+				}
+				tokenValue = bundle.BearerToken()
+				initialCredExpiresAt = bundle.BearerExpiresAt()
+				*server = strings.TrimRight(bundle.ServerURL(), "/")
+				usesDelegatedWorkspace = true
+			}
 		}
-		delegatedCredsPath = path
-		bundle, berr = refreshDelegatedCredentials(path, bundle, false)
-		if berr != nil {
-			return fmt.Errorf("refresh delegated relayfile credentials: %w", berr)
-		}
-		canonicalWorkspaceID = bundle.Workspace()
-		if requestedWorkspace != "" && !workspaceRequestMatchesDelegatedCredentials(requestedWorkspace, canonicalWorkspaceID) {
-			return fmt.Errorf(
-				"relayfile mount without --token uses delegated relayfile workspace %s; pass --token for explicit workspace %q or re-bootstrap delegated credentials for that workspace",
-				canonicalWorkspaceID,
-				requestedWorkspace,
-			)
-		}
-		tokenValue = bundle.BearerToken()
-		initialCredExpiresAt = bundle.BearerExpiresAt()
-		*server = strings.TrimRight(bundle.ServerURL(), "/")
-		usesDelegatedWorkspace = true
 	}
 	var err error
 	switch fs.NArg() {
@@ -7104,15 +7124,27 @@ func prepareWorkspaceCommandClient(workspaceValue, serverFlag, tokenFlag string,
 	if !directToken && strings.TrimSpace(tokenValue) == "" {
 		bundle, credsFile, err = loadOrBootstrapDelegatedCredentials(workspaceValue, requestedScopes)
 		if err != nil {
-			return nil, fmt.Errorf("resolve delegated relayfile credentials: %w", err)
-		}
-		bundle, err = refreshDelegatedCredentials(credsFile, bundle, false)
-		if err != nil {
-			return nil, fmt.Errorf("refresh delegated relayfile credentials: %w", err)
-		}
-		tokenValue = bundle.BearerToken()
-		if strings.TrimSpace(serverFlag) == "" {
-			serverFlag = bundle.ServerURL()
+			tokenValue = strings.TrimSpace(creds.Token)
+			if tokenValue == "" {
+				return nil, fmt.Errorf("resolve delegated relayfile credentials: %w", err)
+			}
+			directToken = true
+			credsFile = ""
+		} else {
+			bundle, err = refreshDelegatedCredentials(credsFile, bundle, false)
+			if err != nil {
+				tokenValue = strings.TrimSpace(creds.Token)
+				if tokenValue == "" {
+					return nil, fmt.Errorf("refresh delegated relayfile credentials: %w", err)
+				}
+				directToken = true
+				credsFile = ""
+			} else {
+				tokenValue = bundle.BearerToken()
+				if strings.TrimSpace(serverFlag) == "" {
+					serverFlag = bundle.ServerURL()
+				}
+			}
 		}
 	}
 	workspaceID := ""
@@ -7181,10 +7213,10 @@ func prepareWorkspaceCommandClient(workspaceValue, serverFlag, tokenFlag string,
 }
 
 func workspaceRecordForCommand(workspaceValue, workspaceID string) workspaceRecord {
-	if record, ok := workspaceRecordByName(strings.TrimSpace(workspaceValue)); ok {
+	if record, ok := workspaceRecordByID(workspaceID); ok {
 		return normalizeWorkspaceCommandRecord(record, workspaceID)
 	}
-	if record, ok := workspaceRecordByID(workspaceID); ok {
+	if record, ok := workspaceRecordByName(strings.TrimSpace(workspaceValue)); ok {
 		return normalizeWorkspaceCommandRecord(record, workspaceID)
 	}
 	return workspaceRecord{
@@ -10591,21 +10623,27 @@ func resolveWorkspaceRecord(nameOrID string) (workspaceRecord, error) {
 func resolveWorkspaceIDWithToken(value, token string) (string, error) {
 	value = strings.TrimSpace(value)
 	if value != "" {
-		if id, ok := catalogWorkspaceID(value); ok {
+		if id, ok, err := catalogWorkspaceIDForRequest(value, token); err != nil {
+			return "", err
+		} else if ok {
 			return id, nil
 		}
 		return value, nil
 	}
 
 	if workspaceID := strings.TrimSpace(os.Getenv("RELAYFILE_WORKSPACE")); workspaceID != "" {
-		if id, ok := catalogWorkspaceID(workspaceID); ok {
+		if id, ok, err := catalogWorkspaceIDForRequest(workspaceID, token); err != nil {
+			return "", err
+		} else if ok {
 			return id, nil
 		}
 		return workspaceID, nil
 	}
 
 	if workspaceID := workspaceIDFromToken(token); workspaceID != "" {
-		if id, ok := catalogWorkspaceID(workspaceID); ok {
+		if id, ok, err := catalogWorkspaceIDForRequest(workspaceID, token); err != nil {
+			return "", err
+		} else if ok {
 			return id, nil
 		}
 		return workspaceID, nil
@@ -10621,12 +10659,80 @@ func resolveWorkspaceIDWithToken(value, token string) (string, error) {
 	}
 	defaultName := strings.TrimSpace(catalog.Default)
 	if defaultName != "" {
-		if id, ok := catalogWorkspaceIDFromCatalog(catalog, defaultName); ok {
+		if id, ok, err := catalogWorkspaceIDFromCatalogForRequest(catalog, defaultName, token); err != nil {
+			return "", err
+		} else if ok {
 			return id, nil
 		}
 		return defaultName, nil
 	}
 	return "", errors.New("workspace is required; pass WORKSPACE, set RELAYFILE_WORKSPACE, or run 'agent-relay workspace switch NAME'")
+}
+
+func catalogWorkspaceIDForRequest(name, token string) (string, bool, error) {
+	catalog, err := loadWorkspaceCatalog()
+	if err != nil {
+		return "", false, nil
+	}
+	return catalogWorkspaceIDFromCatalogForRequest(catalog, name, token)
+}
+
+func catalogWorkspaceIDFromCatalogForRequest(catalog workspaceCatalog, name, token string) (string, bool, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "", false, nil
+	}
+
+	// An exact ID is already unambiguous, even if another record happens to
+	// reuse that value as its display name.
+	for _, workspace := range catalog.Workspaces {
+		if strings.TrimSpace(workspace.ID) == name {
+			return name, true, nil
+		}
+	}
+
+	matches := make([]workspaceRecord, 0, 1)
+	ids := map[string]struct{}{}
+	for _, workspace := range catalog.Workspaces {
+		if strings.TrimSpace(workspace.Name) != name {
+			continue
+		}
+		id := strings.TrimSpace(workspace.ID)
+		if id == "" {
+			id = name
+		}
+		matches = append(matches, workspace)
+		ids[id] = struct{}{}
+	}
+	if len(ids) == 0 {
+		return "", false, nil
+	}
+	if len(ids) == 1 {
+		for id := range ids {
+			return id, true, nil
+		}
+	}
+
+	tokenWorkspaceID := workspaceIDFromToken(token)
+	if tokenWorkspaceID != "" {
+		matchedID := ""
+		for _, workspace := range matches {
+			if strings.TrimSpace(workspace.ID) != tokenWorkspaceID && strings.TrimSpace(workspace.RelayWorkspaceID) != tokenWorkspaceID {
+				continue
+			}
+			if matchedID != "" {
+				return "", false, fmt.Errorf("workspace %q is ambiguous in %s; pass an exact workspace id", name, workspacesPath())
+			}
+			matchedID = strings.TrimSpace(workspace.ID)
+			if matchedID == "" {
+				matchedID = name
+			}
+		}
+		if matchedID != "" {
+			return matchedID, true, nil
+		}
+	}
+	return "", false, fmt.Errorf("workspace %q is ambiguous in %s; pass an exact workspace id", name, workspacesPath())
 }
 
 func catalogWorkspaceID(name string) (string, bool) {

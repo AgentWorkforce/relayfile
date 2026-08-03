@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -3873,6 +3874,22 @@ func clearRelayfileEnv(t *testing.T) {
 	t.Setenv("AGENT_RELAY_BIN", "")
 }
 
+func setPathWithPSOnly(t *testing.T) {
+	t.Helper()
+	psPath, err := exec.LookPath("ps")
+	if err != nil {
+		t.Fatalf("locate ps for mount process discovery: %v", err)
+	}
+	binDir := t.TempDir()
+	if err := os.Symlink(psPath, filepath.Join(binDir, "ps")); err != nil {
+		t.Fatalf("link ps into isolated PATH: %v", err)
+	}
+	t.Setenv("PATH", binDir)
+	if _, err := exec.LookPath("agent-relay"); err == nil {
+		t.Fatal("isolated PATH unexpectedly contains agent-relay")
+	}
+}
+
 func installFakeAgentRelay(t *testing.T, scriptBody string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "agent-relay")
@@ -6315,6 +6332,120 @@ func TestLoginWithExplicitTokenPersistsServerCreds(t *testing.T) {
 	}
 	if _, err := os.Stat(cloudCredentialsPath()); !os.IsNotExist(err) {
 		t.Fatalf("expected stale cloud credentials removed, got err=%v", err)
+	}
+}
+
+func TestLoginCredentialsAuthorizeMountAndStatusWithoutAgentRelay(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+	setPathWithPSOnly(t)
+
+	localDir := t.TempDir()
+	token := testJWTWithWorkspace("ws_saved")
+	var healthCalls, exportCalls, eventsCalls, statusCalls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got, want := r.Header.Get("Authorization"), "Bearer "+token; got != want {
+			t.Fatalf("Authorization = %q, want %q", got, want)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/health":
+			healthCalls++
+			w.WriteHeader(http.StatusOK)
+		case "/v1/workspaces/ws_saved/fs/export":
+			exportCalls++
+			_, _ = w.Write([]byte(`[]`))
+		case "/v1/workspaces/ws_saved/fs/events":
+			eventsCalls++
+			_, _ = w.Write([]byte(`{"events":[]}`))
+		case "/v1/workspaces/ws_saved/sync/status":
+			statusCalls++
+			_, _ = w.Write([]byte(`{"workspaceId":"ws_saved","providers":[]}`))
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	if err := saveWorkspaceCatalog(workspaceCatalog{
+		Default: "demo",
+		Workspaces: []workspaceRecord{{
+			Name:      "demo",
+			ID:        "ws_saved",
+			CreatedAt: now,
+		}},
+	}); err != nil {
+		t.Fatalf("saveWorkspaceCatalog failed: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := run([]string{"login", "--server", server.URL, "--token", token}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("run login failed: %v\noutput:\n%s", err, stdout.String())
+	}
+	stdout.Reset()
+	if err := run([]string{"mount", "demo", localDir, "--once", "--websocket=false"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("run mount with saved login failed: %v\noutput:\n%s", err, stdout.String())
+	}
+	stdout.Reset()
+	if err := run([]string{"status", "demo"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("run status with saved login failed: %v\noutput:\n%s", err, stdout.String())
+	}
+	if healthCalls != 1 || exportCalls == 0 || eventsCalls == 0 || statusCalls == 0 {
+		t.Fatalf("unexpected request counts: health=%d export=%d events=%d status=%d", healthCalls, exportCalls, eventsCalls, statusCalls)
+	}
+	creds, err := loadCredentials()
+	if err != nil {
+		t.Fatalf("loadCredentials after mount/status failed: %v", err)
+	}
+	if creds.Server != server.URL || creds.Token != token {
+		t.Fatalf("saved login changed after mount/status: %#v", creds)
+	}
+}
+
+func TestStatusUsesSavedTokenToDisambiguateDuplicateWorkspaceNames(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+	setPathWithPSOnly(t)
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	if err := saveWorkspaceCatalog(workspaceCatalog{
+		Default: "demo",
+		Workspaces: []workspaceRecord{
+			{Name: "demo", ID: "ws_stale", RelayWorkspaceID: "relay_ws_stale", LocalDir: filepath.Join(t.TempDir(), "stale"), CreatedAt: now},
+			{Name: "demo", ID: "ws_current", RelayWorkspaceID: "relay_ws_current", LocalDir: filepath.Join(t.TempDir(), "current"), CreatedAt: now},
+		},
+	}); err != nil {
+		t.Fatalf("saveWorkspaceCatalog failed: %v", err)
+	}
+	if _, err := resolveWorkspaceIDWithToken("demo", "opaque-token"); err == nil || !strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("opaque token should fail closed on duplicate workspace names, got %v", err)
+	}
+
+	// The token claim identifies the relay workspace, while API requests must
+	// use the matching catalog record's canonical Relayfile workspace ID.
+	token := testJWTWithWorkspace("relay_ws_current")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/workspaces/ws_current/sync/status" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		if got, want := r.Header.Get("Authorization"), "Bearer "+token; got != want {
+			t.Fatalf("Authorization = %q, want %q", got, want)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"workspaceId":"ws_current","providers":[]}`))
+	}))
+	defer server.Close()
+	if err := saveCredentials(credentials{Server: server.URL, Token: token}); err != nil {
+		t.Fatalf("saveCredentials failed: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := run([]string{"status", "demo"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("run status failed: %v\noutput:\n%s", err, stdout.String())
+	}
+	if got := stdout.String(); !strings.Contains(got, "workspace ws_current (demo)") {
+		t.Fatalf("status used the wrong duplicate workspace record: %q", got)
 	}
 }
 
