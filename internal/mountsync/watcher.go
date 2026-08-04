@@ -26,6 +26,7 @@ type FileWatcher struct {
 	remoteRoot  string
 	scopedChild bool
 	onChange    func(relativePath string, op fsnotify.Op)
+	onObserve   func(relativePath string)
 	maxDirs     int
 	watchedDirs int
 	mu          sync.Mutex
@@ -176,6 +177,14 @@ func (fw *FileWatcher) queueChange(rel string, op fsnotify.Op) {
 	if fw.closed {
 		fw.mu.Unlock()
 		return
+	}
+	// Persist observation before the debounce window starts. A teardown can
+	// stop the watcher before the delayed callback runs; the Syncer's observer
+	// leaves a durable per-path record for the fresh drain process in that
+	// case. This hook intentionally runs while fw.mu is held so Close cannot
+	// return between observing the event and recording it.
+	if fw.onObserve != nil {
+		fw.onObserve(rel)
 	}
 	if t, ok := fw.debounce[rel]; ok {
 		if t.Stop() {
