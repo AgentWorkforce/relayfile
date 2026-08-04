@@ -3320,6 +3320,14 @@ func (s *Syncer) applyWebSocketEvent(ctx context.Context, event websocketEvent) 
 		if remotePath == "/" || !isUnderRemoteRoot(s.remoteRoot, remotePath) {
 			return nil
 		}
+		// ReadFile intentionally runs without mu so local writeback is not
+		// blocked by remote I/O. Remember the path state before that read: a
+		// watcher callback can otherwise push a local edit while ReadFile is in
+		// flight, and the stale response would then use the post-write hash as
+		// its divergence base and overwrite the newer working copy.
+		s.mu.Lock()
+		observedTracked, observedTrackedExists := s.state.Files[remotePath]
+		s.mu.Unlock()
 		file, err := s.client.ReadFile(ctx, s.workspace, remotePath)
 		if err != nil {
 			var httpErr *HTTPError
@@ -3338,6 +3346,13 @@ func (s *Syncer) applyWebSocketEvent(ctx context.Context, event websocketEvent) 
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		s.state.LastEventAt = eventAt
+		currentTracked, currentTrackedExists := s.state.Files[remotePath]
+		if currentTrackedExists != observedTrackedExists ||
+			(currentTrackedExists && currentTracked != observedTracked) {
+			s.logf("discarding stale websocket read for %s after tracked state advanced", remotePath)
+			s.markSyncSuccess()
+			return s.saveState()
+		}
 		if err := s.applyRemoteFile(remotePath, file, nil); err != nil {
 			return err
 		}

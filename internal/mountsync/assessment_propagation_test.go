@@ -37,6 +37,28 @@ func newAssessStore(t *testing.T) *relayfile.Store {
 	return store
 }
 
+type blockingReadFileClient struct {
+	RemoteClient
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (c *blockingReadFileClient) ReadFile(ctx context.Context, workspaceID, path string) (RemoteFile, error) {
+	file, err := c.RemoteClient.ReadFile(ctx, workspaceID, path)
+	c.once.Do(func() {
+		close(c.started)
+		select {
+		case <-c.release:
+		case <-ctx.Done():
+		}
+	})
+	if err == nil && ctx.Err() != nil {
+		return RemoteFile{}, ctx.Err()
+	}
+	return file, err
+}
+
 // TestAssessPropagationLatencyWebSocket measures wall-clock time from a
 // remote write landing on the server to sandbox B's local mirror reflecting
 // it, with WebSocket push enabled (the default: RELAYFILE_MOUNT_WEBSOCKET
@@ -478,6 +500,84 @@ func TestAssessDuplicateRemoteBasePreservesDebouncedLocalEdit(t *testing.T) {
 	}
 	if conflicts := listConflictArtifacts(t, localDir); len(conflicts) != 0 {
 		t.Fatalf("single-sided local edit should remain conflict-free after push, got %v", conflicts)
+	}
+}
+
+// A duplicate WebSocket read starts from the tracked base but does not hold
+// the Syncer's mutex during network I/O. If the watcher pushes a local edit
+// before that read is applied, the stale response must not roll the working
+// copy or its tracked state back to the old base.
+func TestAssessDuplicateWebSocketReadDoesNotEraseCompletedLocalWrite(t *testing.T) {
+	t.Parallel()
+	store := newAssessStore(t)
+	workspaceID := "ws_assess_duplicate_ws_completed_write"
+	handler := newMountsyncAPIHandler(t, store)
+	api := httptest.NewServer(handler)
+	defer api.Close()
+
+	token := mustMountsyncTestJWT(t, "dev-secret", workspaceID, "SandboxB", []string{"fs:read", "fs:write"}, time.Now().Add(time.Hour))
+	const remotePath = "/notion/Shared.md"
+	writeMountsyncRemoteFile(t, api.Client(), api.URL, token, workspaceID, remotePath, "0", "base content")
+
+	localDir := t.TempDir()
+	wsDisabled := false
+	syncer, err := NewSyncer(NewHTTPClient(api.URL, token, api.Client()), SyncerOptions{
+		WorkspaceID: workspaceID, RemoteRoot: "/notion", LocalRoot: localDir, WebSocket: &wsDisabled,
+	})
+	if err != nil {
+		t.Fatalf("new syncer: %v", err)
+	}
+	ctx := context.Background()
+	if err := syncer.SyncOnce(ctx); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+
+	blockedClient := &blockingReadFileClient{
+		RemoteClient: syncer.client,
+		started:      make(chan struct{}),
+		release:      make(chan struct{}),
+	}
+	syncer.client = blockedClient
+	eventResult := make(chan error, 1)
+	go func() {
+		eventResult <- syncer.applyWebSocketEvent(ctx, websocketEvent{
+			Type:      "file.updated",
+			Path:      remotePath,
+			Timestamp: time.Now().UTC().Format(time.RFC3339Nano),
+		})
+	}()
+
+	select {
+	case <-blockedClient.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("websocket ReadFile did not reach the interleaving barrier")
+	}
+	localPath := filepath.Join(localDir, "Shared.md")
+	if err := os.WriteFile(localPath, []byte("completed local edit"), 0o644); err != nil {
+		t.Fatalf("local write: %v", err)
+	}
+	if err := syncer.HandleLocalChange(ctx, "Shared.md", 0); err != nil {
+		t.Fatalf("local watcher push while websocket read was blocked: %v", err)
+	}
+	close(blockedClient.release)
+	if err := <-eventResult; err != nil {
+		t.Fatalf("duplicate websocket apply: %v", err)
+	}
+
+	assertLocalFileContent(t, localPath, "completed local edit")
+	tracked := syncer.state.Files[remotePath]
+	if tracked.Hash != hashBytes([]byte("completed local edit")) || tracked.Dirty {
+		t.Fatalf("tracked state rolled back after stale websocket read: %+v", tracked)
+	}
+	remoteFile, err := syncer.client.ReadFile(ctx, workspaceID, remotePath)
+	if err != nil {
+		t.Fatalf("read server file after interleaving: %v", err)
+	}
+	if got := remoteFile.Content; got != "completed local edit" {
+		t.Fatalf("server content after interleaving = %q, want %q", got, "completed local edit")
+	}
+	if conflicts := listConflictArtifacts(t, localDir); len(conflicts) != 0 {
+		t.Fatalf("duplicate remote base should remain conflict-free, got %v", conflicts)
 	}
 }
 
