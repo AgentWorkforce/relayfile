@@ -68,7 +68,6 @@ type mountConfig struct {
 	scopedChild           bool
 	once                  bool
 	flushOutboxOnce       bool
-	pushLocalOnce         bool
 	mode                  string
 	fuseContentTTL        time.Duration
 }
@@ -112,8 +111,7 @@ func main() {
 	fuse := flag.Bool("fuse", boolEnv("RELAYFILE_MOUNT_FUSE", false), "shortcut for --mode=fuse")
 	fuseContentTTL := flag.Duration("fuse-content-ttl", durationEnv("RELAYFILE_MOUNT_FUSE_CONTENT_TTL", 0), "FUSE in-memory file content cache TTL (default 30s; 0 = use default)")
 	once := flag.Bool("once", false, "run one sync cycle and exit")
-	flushOutboxOnce := flag.Bool("flush-outbox-once", false, "flush durable writeback outbox once and exit without reconciling the local mirror")
-	pushLocalOnce := flag.Bool("push-local-once", false, "ingest pending local writeback drafts (one pushLocal pass) then flush the outbox once and exit; no pullRemote/digest/reconcile — the teardown drain for last-moment drafts")
+	flushOutboxOnce := flag.Bool("flush-outbox-once", false, "ingest watcher-journaled local drafts, flush the durable outbox, and exit; bounded to pending paths with no mirror scan or reconcile")
 	flag.Parse()
 
 	resolvedToken := strings.TrimSpace(*token)
@@ -199,7 +197,6 @@ func main() {
 		scopes:                parseTokenScopes(resolvedToken),
 		once:                  *once,
 		flushOutboxOnce:       *flushOutboxOnce,
-		pushLocalOnce:         *pushLocalOnce,
 		mode:                  resolvedMode,
 		fuseContentTTL:        *fuseContentTTL,
 	}
@@ -433,22 +430,13 @@ func runSinglePollingMount(rootCtx context.Context, cfg mountConfig) error {
 	if _, err := mountsync.StartDiagnostics(rootCtx, cfg.pprofAddr, cfg.memlogInterval, log.Default()); err != nil {
 		return fmt.Errorf("start diagnostics: %w", err)
 	}
-	if cfg.pushLocalOnce {
-		ctx, cancel := context.WithTimeout(rootCtx, cfg.timeout)
-		defer cancel()
-		if err := syncer.PushLocalAndFlushOnce(ctx); err != nil {
-			return fmt.Errorf("push local and flush once: %w", err)
-		}
-		log.Printf("local push + outbox flush completed")
-		return nil
-	}
 	if cfg.flushOutboxOnce {
 		ctx, cancel := context.WithTimeout(rootCtx, cfg.timeout)
 		defer cancel()
 		if err := syncer.FlushOutboxOnce(ctx); err != nil {
 			return fmt.Errorf("flush outbox once: %w", err)
 		}
-		log.Printf("outbox flush completed")
+		log.Printf("bounded writeback drain completed")
 		return nil
 	}
 	log.Printf("%s", mountStartupLogLine(cfg))

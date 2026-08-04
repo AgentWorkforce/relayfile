@@ -170,6 +170,35 @@ func TestWatcherCloseCancelsPendingDebounce(t *testing.T) {
 	assertNoWatcherEvents(t, events, 150*time.Millisecond)
 }
 
+func TestWatcherObserverRunsBeforeDebounceAndSurvivesClose(t *testing.T) {
+	localDir := t.TempDir()
+	observed := make(chan string, 1)
+	callbacks := make(chan watcherEvent, 1)
+	watcher, err := NewFileWatcher(localDir, func(relativePath string, op fsnotify.Op) {
+		callbacks <- watcherEvent{path: relativePath, op: op}
+	})
+	if err != nil {
+		t.Fatalf("create file watcher: %v", err)
+	}
+	watcher.onObserve = func(relativePath string) {
+		observed <- filepath.ToSlash(relativePath)
+	}
+
+	watcher.queueChange("final-reply.json", fsnotify.Write)
+	select {
+	case got := <-observed:
+		if got != "final-reply.json" {
+			t.Fatalf("observed path = %q", got)
+		}
+	default:
+		t.Fatal("observer did not run synchronously before debounce")
+	}
+	if err := watcher.Close(); err != nil {
+		t.Fatalf("close watcher: %v", err)
+	}
+	assertNoWatcherEvents(t, callbacks, 150*time.Millisecond)
+}
+
 func TestWatcherStartReturnsLimitExceededWhenDirectoryBudgetExceeded(t *testing.T) {
 	t.Setenv("RELAYFILE_MOUNT_MAX_WATCH_DIRS", "1")
 	localDir := t.TempDir()
