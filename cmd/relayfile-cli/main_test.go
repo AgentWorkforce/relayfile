@@ -2714,16 +2714,16 @@ func TestSpawnBackgroundMountProcessRegistersRealChild(t *testing.T) {
 		t.Fatalf("spawnBackgroundMountProcess failed: %v\nlog:\n%s", err, logBytes)
 	}
 	state, structured := readDaemonPIDStateFile(pidFile)
-	if !structured || !state.Registered || state.PID <= 0 {
-		t.Fatalf("background child did not register: structured=%v state=%+v", structured, state)
-	}
 	t.Cleanup(func() {
-		if processAlive(state.PID) {
+		if state.PID > 0 && processAlive(state.PID) {
 			if process, err := os.FindProcess(state.PID); err == nil {
 				_ = forceDaemonStop(process)
 			}
 		}
 	})
+	if !structured || !state.Registered || state.PID <= 0 {
+		t.Fatalf("background child did not register: structured=%v state=%+v", structured, state)
+	}
 	process, err := os.FindProcess(state.PID)
 	if err != nil {
 		t.Fatalf("find background child: %v", err)
