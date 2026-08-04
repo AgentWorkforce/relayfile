@@ -3918,6 +3918,7 @@ func TestMountSkipsDataPlaneWhenDelegatedRefreshRejected(t *testing.T) {
 
 	refreshCalls := 0
 	dataPlaneCalls := 0
+	savedToken := testJWTWithWorkspace("ws_refresh")
 	var server *httptest.Server
 	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -3928,7 +3929,17 @@ func TestMountSkipsDataPlaneWhenDelegatedRefreshRejected(t *testing.T) {
 			_, _ = w.Write([]byte(`{"code":"delegation_expired","message":"delegation expired"}`))
 		case "/v1/workspaces/ws_refresh/fs/events", "/v1/workspaces/ws_refresh/fs/export", "/v1/workspaces/ws_refresh/sync/status":
 			dataPlaneCalls++
-			t.Fatalf("data-plane call should be skipped after rejected refresh: %s", r.URL.Path)
+			if got, want := r.Header.Get("Authorization"), "Bearer "+savedToken; got != want {
+				t.Fatalf("fallback Authorization = %q, want %q", got, want)
+			}
+			switch r.URL.Path {
+			case "/v1/workspaces/ws_refresh/fs/export":
+				_, _ = w.Write([]byte(`[]`))
+			case "/v1/workspaces/ws_refresh/fs/events":
+				_, _ = w.Write([]byte(`{"events":[]}`))
+			default:
+				_, _ = w.Write([]byte(`{"workspaceId":"ws_refresh","providers":[]}`))
+			}
 		default:
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
@@ -3943,6 +3954,9 @@ func TestMountSkipsDataPlaneWhenDelegatedRefreshRejected(t *testing.T) {
 		RefreshTokenExpiresAt: time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339),
 		RelayauthURL:          server.URL,
 	})
+	if err := saveCredentials(credentials{Server: server.URL, Token: savedToken}); err != nil {
+		t.Fatalf("save fallback login credentials: %v", err)
+	}
 	before, err := os.ReadFile(credsPath)
 	if err != nil {
 		t.Fatalf("read delegated credentials before mount failed: %v", err)
@@ -3951,6 +3965,7 @@ func TestMountSkipsDataPlaneWhenDelegatedRefreshRejected(t *testing.T) {
 	err = run([]string{
 		"mount", "ws_refresh", localDir,
 		"--server", server.URL,
+		"--creds-file", credsPath,
 		"--once",
 		"--websocket=false",
 	}, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
@@ -6520,6 +6535,87 @@ func TestLoginCredentialsAuthorizeMountAndStatusWithoutAgentRelay(t *testing.T) 
 	}
 	if creds.Server != server.URL || creds.Token != token {
 		t.Fatalf("saved login changed after mount/status: %#v", creds)
+	}
+}
+
+func TestExplicitDelegatedCredentialsDoNotFallBackToSavedLogin(t *testing.T) {
+	tests := []struct {
+		name      string
+		command   string
+		configure func(t *testing.T, path string) []string
+	}{
+		{
+			name:    "mount flag selects missing file",
+			command: "mount",
+			configure: func(t *testing.T, path string) []string {
+				return []string{"--creds-file", path}
+			},
+		},
+		{
+			name:    "mount environment selects malformed file",
+			command: "mount",
+			configure: func(t *testing.T, path string) []string {
+				if err := os.WriteFile(path, []byte("not-json"), 0o600); err != nil {
+					t.Fatalf("write malformed delegated credentials: %v", err)
+				}
+				t.Setenv("RELAYFILE_MOUNT_CREDS_FILE", path)
+				return nil
+			},
+		},
+		{
+			name:    "status environment selects malformed file",
+			command: "status",
+			configure: func(t *testing.T, path string) []string {
+				if err := os.WriteFile(path, []byte("not-json"), 0o600); err != nil {
+					t.Fatalf("write malformed delegated credentials: %v", err)
+				}
+				t.Setenv("RELAYFILE_MOUNT_CREDS_FILE", path)
+				return nil
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			clearRelayfileEnv(t)
+
+			token := testJWTWithWorkspace("ws_saved")
+			requestCount := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requestCount++
+				w.Header().Set("Content-Type", "application/json")
+				switch r.URL.Path {
+				case "/v1/workspaces/ws_saved/fs/export":
+					_, _ = w.Write([]byte(`[]`))
+				case "/v1/workspaces/ws_saved/fs/events":
+					_, _ = w.Write([]byte(`{"events":[]}`))
+				case "/v1/workspaces/ws_saved/sync/status":
+					_, _ = w.Write([]byte(`{"workspaceId":"ws_saved","providers":[]}`))
+				default:
+					t.Fatalf("unexpected fallback request: %s %s", r.Method, r.URL.Path)
+				}
+			}))
+			defer server.Close()
+			if err := saveCredentials(credentials{Server: server.URL, Token: token}); err != nil {
+				t.Fatalf("save credentials: %v", err)
+			}
+
+			selectedPath := filepath.Join(t.TempDir(), "explicit-delegated.json")
+			extraArgs := tc.configure(t, selectedPath)
+			args := []string{tc.command, "ws_saved"}
+			if tc.command == "mount" {
+				args = append(args, t.TempDir(), "--once", "--websocket=false")
+			}
+			args = append(args, extraArgs...)
+			err := run(args, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
+			if err == nil || !strings.Contains(err.Error(), "resolve delegated relayfile credentials") {
+				t.Fatalf("explicit delegated credential failure = %v, want resolution error", err)
+			}
+			if requestCount != 0 {
+				t.Fatalf("saved login was used after explicit delegated credential failure: %d request(s)", requestCount)
+			}
+		})
 	}
 }
 

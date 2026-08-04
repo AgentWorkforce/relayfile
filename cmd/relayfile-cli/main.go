@@ -6491,6 +6491,7 @@ func runMount(args []string) error {
 	canonicalWorkspaceID := ""
 	requestedWorkspace := ""
 	delegatedCredsPath := resolveDelegatedCredentialsPath(*credsFile)
+	_, delegatedCredsExplicit := explicitDelegatedCredentialsPath(*credsFile)
 	usesDelegatedWorkspace := false
 	initialCredExpiresAt := ""
 	if fs.NArg() > 0 {
@@ -6499,6 +6500,9 @@ func runMount(args []string) error {
 	if tokenValue == "" {
 		bundle, path, berr := loadDelegatedCredentialsForRequest(*credsFile, requestedWorkspace, defaultJoinScopes)
 		if berr != nil {
+			if delegatedCredsExplicit {
+				return fmt.Errorf("resolve delegated relayfile credentials: %w", berr)
+			}
 			tokenValue = strings.TrimSpace(creds.Token)
 			if tokenValue == "" {
 				return fmt.Errorf("resolve delegated relayfile credentials: %w", berr)
@@ -6511,6 +6515,9 @@ func runMount(args []string) error {
 			delegatedCredsPath = path
 			bundle, berr = refreshDelegatedCredentials(path, bundle, false)
 			if berr != nil {
+				if delegatedCredsExplicit {
+					return fmt.Errorf("refresh delegated relayfile credentials: %w", berr)
+				}
 				tokenValue = strings.TrimSpace(creds.Token)
 				if tokenValue == "" {
 					return fmt.Errorf("refresh delegated relayfile credentials: %w", berr)
@@ -7119,11 +7126,19 @@ func prepareWorkspaceCommandClient(workspaceValue, serverFlag, tokenFlag string,
 	tokenValue := resolveExplicitToken(tokenFlag)
 	directToken := tokenValue != ""
 	credsFile := ""
+	_, delegatedCredsExplicit := explicitDelegatedCredentialsPath("")
 	var bundle delegatedauth.Bundle
 	var err error
 	if !directToken && strings.TrimSpace(tokenValue) == "" {
-		bundle, credsFile, err = loadOrBootstrapDelegatedCredentials(workspaceValue, requestedScopes)
+		if delegatedCredsExplicit {
+			bundle, credsFile, err = loadDelegatedCredentialsForRequest("", workspaceValue, requestedScopes)
+		} else {
+			bundle, credsFile, err = loadOrBootstrapDelegatedCredentials(workspaceValue, requestedScopes)
+		}
 		if err != nil {
+			if delegatedCredsExplicit {
+				return nil, fmt.Errorf("resolve delegated relayfile credentials: %w", err)
+			}
 			tokenValue = strings.TrimSpace(creds.Token)
 			if tokenValue == "" {
 				return nil, fmt.Errorf("resolve delegated relayfile credentials: %w", err)
@@ -7133,6 +7148,9 @@ func prepareWorkspaceCommandClient(workspaceValue, serverFlag, tokenFlag string,
 		} else {
 			bundle, err = refreshDelegatedCredentials(credsFile, bundle, false)
 			if err != nil {
+				if delegatedCredsExplicit {
+					return nil, fmt.Errorf("refresh delegated relayfile credentials: %w", err)
+				}
 				tokenValue = strings.TrimSpace(creds.Token)
 				if tokenValue == "" {
 					return nil, fmt.Errorf("refresh delegated relayfile credentials: %w", err)
