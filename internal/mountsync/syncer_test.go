@@ -608,6 +608,79 @@ func TestSyncOnceWriteOnlySkipsRemotePullButPushesLocalFiles(t *testing.T) {
 	}
 }
 
+func TestSyncOnceWriteOnlyToMirrorBackfillsExistingRemoteFiles(t *testing.T) {
+	client := &fakeClient{
+		files: map[string]RemoteFile{
+			"/slack/channels/C123/messages/history.json": {
+				Path:        "/slack/channels/C123/messages/history.json",
+				Revision:    "rev_1",
+				ContentType: "application/json",
+				Content:     `{"text":"history predating the mount"}`,
+			},
+		},
+		revisionCounter: 1,
+	}
+	localDir := t.TempDir()
+
+	writeOnly, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_write_only_to_mirror",
+		RemoteRoot:  "/slack/channels/C123/messages",
+		LocalRoot:   localDir,
+		SyncMode:    "write-only",
+	})
+	if err != nil {
+		t.Fatalf("new write-only syncer failed: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(localDir, "wb-pear-ack.json"), []byte(`{"text":"ack"}`), 0o644); err != nil {
+		t.Fatalf("write local draft failed: %v", err)
+	}
+	if err := writeOnly.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("write-only sync failed: %v", err)
+	}
+	if !writeOnly.state.BootstrapComplete {
+		t.Fatal("write-only sync did not persist the legacy BootstrapComplete state needed to reproduce the mode-flip bug")
+	}
+	if writeOnly.state.SyncMode != "write-only" {
+		t.Fatalf("persisted sync mode = %q, want write-only", writeOnly.state.SyncMode)
+	}
+	if len(writeOnly.state.Files) == 0 {
+		t.Fatal("write-only sync did not track its uploaded file, so the restart fast-path would not be eligible")
+	}
+	if _, err := os.Stat(filepath.Join(localDir, "history.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("write-only sync unexpectedly mirrored provider history, stat err=%v", err)
+	}
+
+	// Recreate the daemon against the same local/state directory, but in
+	// mirror mode. Before the fix, loadState trusted BootstrapComplete=true,
+	// seeded the events cursor to the writeback event at the feed tip, and
+	// returned without ever listing or reading the pre-existing history file.
+	mirror, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_write_only_to_mirror",
+		RemoteRoot:  "/slack/channels/C123/messages",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("new mirror syncer failed: %v", err)
+	}
+	if err := mirror.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("first mirror sync after mode flip failed: %v", err)
+	}
+
+	if client.listTreeCalls == 0 {
+		t.Fatal("write-only to mirror flip skipped the full bootstrap tree listing")
+	}
+	if client.readFileCalls == 0 {
+		t.Fatal("write-only to mirror flip skipped reading pre-existing remote content")
+	}
+	assertLocalFileContent(t, filepath.Join(localDir, "history.json"), `{"text":"history predating the mount"}`)
+	if !mirror.state.BootstrapComplete {
+		t.Fatal("successful mirror backfill did not mark bootstrap complete")
+	}
+	if mirror.state.SyncMode != "mirror" {
+		t.Fatalf("persisted sync mode after backfill = %q, want mirror", mirror.state.SyncMode)
+	}
+}
+
 func TestHandleLocalChangeIgnoresAlreadyTrackedContent(t *testing.T) {
 	client := &fakeClient{
 		files: map[string]RemoteFile{
