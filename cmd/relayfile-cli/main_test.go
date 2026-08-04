@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -3991,9 +3992,12 @@ func clearRelayfileEnv(t *testing.T) {
 
 func setPathWithPSOnly(t *testing.T) {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("requires Unix ps-based mount process discovery")
+	}
 	psPath, err := exec.LookPath("ps")
 	if err != nil {
-		t.Fatalf("locate ps for mount process discovery: %v", err)
+		t.Skipf("ps is unavailable for mount process discovery: %v", err)
 	}
 	binDir := t.TempDir()
 	if err := os.Symlink(psPath, filepath.Join(binDir, "ps")); err != nil {
