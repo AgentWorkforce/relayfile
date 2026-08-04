@@ -537,6 +537,11 @@ func TestAssessDuplicateWebSocketReadDoesNotEraseCompletedLocalWrite(t *testing.
 		started:      make(chan struct{}),
 		release:      make(chan struct{}),
 	}
+	var releaseOnce sync.Once
+	releaseBlockedRead := func() {
+		releaseOnce.Do(func() { close(blockedClient.release) })
+	}
+	defer releaseBlockedRead()
 	syncer.client = blockedClient
 	eventResult := make(chan error, 1)
 	go func() {
@@ -559,9 +564,14 @@ func TestAssessDuplicateWebSocketReadDoesNotEraseCompletedLocalWrite(t *testing.
 	if err := syncer.HandleLocalChange(ctx, "Shared.md", 0); err != nil {
 		t.Fatalf("local watcher push while websocket read was blocked: %v", err)
 	}
-	close(blockedClient.release)
-	if err := <-eventResult; err != nil {
-		t.Fatalf("duplicate websocket apply: %v", err)
+	releaseBlockedRead()
+	select {
+	case err := <-eventResult:
+		if err != nil {
+			t.Fatalf("duplicate websocket apply: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("duplicate websocket apply did not finish")
 	}
 
 	assertLocalFileContent(t, localPath, "completed local edit")
