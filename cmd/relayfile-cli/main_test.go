@@ -2708,6 +2708,7 @@ func TestSpawnBackgroundMountProcessRegistersRealChild(t *testing.T) {
 		"--interval", "1h",
 		"--websocket=false",
 	}
+	setPathWithPSOnly(t)
 	if err := spawnBackgroundMountProcess(args, []string{"/"}, localDir, pidFile, logFile, mountscope.LayoutExact); err != nil {
 		logBytes, _ := os.ReadFile(logFile)
 		t.Fatalf("spawnBackgroundMountProcess failed: %v\nlog:\n%s", err, logBytes)
