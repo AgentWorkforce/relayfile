@@ -16,7 +16,8 @@
   "scripts": {
     "workflow": "agent-relay run",
     "build": "npm run build --workspace=packages/core && npm run build --workspace=packages/sdk/typescript && npm run build --workspace=@relayfile/client && npm run build --workspace=packages/agents && npm run build --workspace=packages/local-mount && npm run build --workspace=packages/cli",
-    "test": "npm run test --workspace=packages/core && npm run test --workspace=packages/sdk/typescript && npm run test --workspace=@relayfile/client && npm run test --workspace=packages/local-mount && npm run test --workspace=@relayfile/file-observer && npm run test:go",
+    "test": "npm run test:trail-portability && npm run test --workspace=packages/core && npm run test --workspace=packages/sdk/typescript && npm run test --workspace=@relayfile/client && npm run test --workspace=packages/local-mount && npm run test --workspace=@relayfile/file-observer && npm run test:go",
+    "test:trail-portability": "node --test test/trail-portability.test.mjs",
     "test:go": "go test ./...",
     "typecheck": "npm run typecheck --workspace=packages/sdk/typescript && npm run typecheck --workspace=@relayfile/client && npm run typecheck --workspace=packages/agents && npm run typecheck --workspace=packages/local-mount && npm run typecheck:go",
     "typecheck:go": "go vet ./...",
@@ -32,7 +33,7 @@
     "@agent-assistant/telemetry": "^0.4.31",
     "@agent-relay/sdk": "^4.0.28",
     "@agentworkforce/workload-router": "^0.3.0",
-    "agent-trajectories": "^0.5.8",
+    "agent-trajectories": "^0.6.1",
     "tsx": "^4.21.0"
   }
 }
