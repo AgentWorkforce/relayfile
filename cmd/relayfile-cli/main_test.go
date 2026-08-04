@@ -11,7 +11,9 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -22,6 +24,19 @@ import (
 	"github.com/agentworkforce/relayfile/internal/mountscope"
 	"github.com/agentworkforce/relayfile/internal/mountsync"
 )
+
+const relayfileCLITestSubprocessEnv = "RELAYFILE_CLI_TEST_SUBPROCESS"
+
+func TestMain(m *testing.M) {
+	if os.Getenv(relayfileCLITestSubprocessEnv) == "1" {
+		if err := run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+	os.Exit(m.Run())
+}
 
 func TestWorkspaceCreateStoresCatalogEntry(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
@@ -2229,6 +2244,15 @@ func TestStatusSurfacesOrphanDaemonFromProcessScan(t *testing.T) {
 
 func TestMountDaemonCommandMatchesAliasesAndLocalDirBoundaries(t *testing.T) {
 	localDir := filepath.Join(t.TempDir(), "ws")
+	if mountDaemonCommandMatches("relayfile mount demo "+localDir+" --background", localDir, "ws_demo", "demo") {
+		t.Fatalf("transient --background launcher must not match a serving daemon")
+	}
+	if !mountDaemonCommandMatches("relayfile mount demo "+localDir+" --background=false", localDir, "ws_demo", "demo") {
+		t.Fatalf("foreground mount with --background=false must still match a serving daemon")
+	}
+	if !mountDaemonCommandMatches("relayfile mount demo "+localDir+" --background --daemonized", localDir, "ws_demo", "demo") {
+		t.Fatalf("daemonized child must still match even if inherited argv contains --background")
+	}
 	if !mountDaemonCommandMatches("relayfile start demo "+localDir+" --daemonized", localDir, "ws_demo", "demo") {
 		t.Fatalf("expected relayfile start alias to match daemon command")
 	}
@@ -2240,6 +2264,32 @@ func TestMountDaemonCommandMatchesAliasesAndLocalDirBoundaries(t *testing.T) {
 	}
 	if !mountDaemonCommandMatches("relayfile mount other "+filepath.Join(localDir, "nested")+" --daemonized", localDir, "ws_demo", "demo") {
 		t.Fatalf("expected localDir subpath token to match")
+	}
+}
+
+func TestRunningMountDaemonsExcludesCallerPIDFromPIDFile(t *testing.T) {
+	localDir := t.TempDir()
+	if err := ensureMirrorLayout(localDir); err != nil {
+		t.Fatalf("ensureMirrorLayout failed: %v", err)
+	}
+	if err := writeDaemonPIDState(mountPIDFile(localDir), daemonPIDState{
+		PID:        os.Getpid(),
+		LocalDir:   localDir,
+		StartedAt:  time.Now().UTC().Format(time.RFC3339),
+		Executable: resolvedSelfExecutable(),
+	}); err != nil {
+		t.Fatalf("writeDaemonPIDState failed: %v", err)
+	}
+	oldList := listProcessCommands
+	listProcessCommands = func() ([]processCommandSnapshot, error) { return nil, nil }
+	t.Cleanup(func() { listProcessCommands = oldList })
+
+	running, stalePID, err := runningMountDaemons(localDir, "ws_demo", "demo")
+	if err != nil {
+		t.Fatalf("runningMountDaemons failed: %v", err)
+	}
+	if len(running) != 0 || stalePID != 0 {
+		t.Fatalf("caller pid reported as competing daemon: running=%+v stalePID=%d", running, stalePID)
 	}
 }
 
@@ -2619,6 +2669,74 @@ func TestPrepareBackgroundMountLayoutPreservesScopedArtifactAbsence(t *testing.T
 	}
 	if info, err := os.Stat(filepath.Join(localRoot, mountscope.RuntimeTopLevel)); err != nil || !info.IsDir() {
 		t.Fatalf("scoped background preparation did not create runtime root: info=%v err=%v", info, err)
+	}
+}
+
+func TestSpawnBackgroundMountProcessRegistersRealChild(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+	t.Setenv(relayfileCLITestSubprocessEnv, "1")
+
+	token := testJWTWithWorkspace("ws_background")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got, want := r.Header.Get("Authorization"), "Bearer "+token; got != want {
+			t.Fatalf("Authorization = %q, want %q", got, want)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/workspaces/ws_background/fs/export":
+			_, _ = w.Write([]byte(`[]`))
+		case "/v1/workspaces/ws_background/fs/events":
+			_, _ = w.Write([]byte(`{"events":[]}`))
+		case "/v1/workspaces/ws_background/sync/status":
+			_, _ = w.Write([]byte(`{"workspaceId":"ws_background","providers":[]}`))
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	localDir := filepath.Join(t.TempDir(), "mirror")
+	stateDir := t.TempDir()
+	pidFile := mountPIDFile(localDir)
+	logFile := mountLogFile(localDir)
+	args := []string{
+		"ws_background", localDir,
+		"--server", server.URL,
+		"--token", token,
+		"--state-dir", stateDir,
+		"--interval", "1h",
+		"--websocket=false",
+	}
+	setPathWithPSOnly(t)
+	if err := spawnBackgroundMountProcess(args, []string{"/"}, localDir, pidFile, logFile, mountscope.LayoutExact); err != nil {
+		logBytes, _ := os.ReadFile(logFile)
+		t.Fatalf("spawnBackgroundMountProcess failed: %v\nlog:\n%s", err, logBytes)
+	}
+	state, structured := readDaemonPIDStateFile(pidFile)
+	t.Cleanup(func() {
+		if state.PID > 0 && processAlive(state.PID) {
+			if process, err := os.FindProcess(state.PID); err == nil {
+				_ = forceDaemonStop(process)
+			}
+		}
+	})
+	if !structured || !state.Registered || state.PID <= 0 {
+		t.Fatalf("background child did not register: structured=%v state=%+v", structured, state)
+	}
+	process, err := os.FindProcess(state.PID)
+	if err != nil {
+		t.Fatalf("find background child: %v", err)
+	}
+	if err := signalDaemonStop(process); err != nil && !isProcessAlreadyGone(err) {
+		t.Fatalf("stop background child: %v", err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for processAlive(state.PID) && time.Now().Before(deadline) {
+		time.Sleep(25 * time.Millisecond)
+	}
+	if processAlive(state.PID) {
+		t.Fatalf("background child %d did not exit after stop", state.PID)
 	}
 }
 
@@ -3800,6 +3918,7 @@ func TestMountSkipsDataPlaneWhenDelegatedRefreshRejected(t *testing.T) {
 
 	refreshCalls := 0
 	dataPlaneCalls := 0
+	savedToken := testJWTWithWorkspace("ws_refresh")
 	var server *httptest.Server
 	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -3810,7 +3929,17 @@ func TestMountSkipsDataPlaneWhenDelegatedRefreshRejected(t *testing.T) {
 			_, _ = w.Write([]byte(`{"code":"delegation_expired","message":"delegation expired"}`))
 		case "/v1/workspaces/ws_refresh/fs/events", "/v1/workspaces/ws_refresh/fs/export", "/v1/workspaces/ws_refresh/sync/status":
 			dataPlaneCalls++
-			t.Fatalf("data-plane call should be skipped after rejected refresh: %s", r.URL.Path)
+			if got, want := r.Header.Get("Authorization"), "Bearer "+savedToken; got != want {
+				t.Fatalf("fallback Authorization = %q, want %q", got, want)
+			}
+			switch r.URL.Path {
+			case "/v1/workspaces/ws_refresh/fs/export":
+				_, _ = w.Write([]byte(`[]`))
+			case "/v1/workspaces/ws_refresh/fs/events":
+				_, _ = w.Write([]byte(`{"events":[]}`))
+			default:
+				_, _ = w.Write([]byte(`{"workspaceId":"ws_refresh","providers":[]}`))
+			}
 		default:
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
@@ -3825,6 +3954,9 @@ func TestMountSkipsDataPlaneWhenDelegatedRefreshRejected(t *testing.T) {
 		RefreshTokenExpiresAt: time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339),
 		RelayauthURL:          server.URL,
 	})
+	if err := saveCredentials(credentials{Server: server.URL, Token: savedToken}); err != nil {
+		t.Fatalf("save fallback login credentials: %v", err)
+	}
 	before, err := os.ReadFile(credsPath)
 	if err != nil {
 		t.Fatalf("read delegated credentials before mount failed: %v", err)
@@ -3833,6 +3965,7 @@ func TestMountSkipsDataPlaneWhenDelegatedRefreshRejected(t *testing.T) {
 	err = run([]string{
 		"mount", "ws_refresh", localDir,
 		"--server", server.URL,
+		"--creds-file", credsPath,
 		"--once",
 		"--websocket=false",
 	}, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
@@ -3871,6 +4004,25 @@ func clearRelayfileEnv(t *testing.T) {
 	t.Setenv("RELAYCAST_BASE_URL", "")
 	t.Setenv("RELAY_BASE_URL", "")
 	t.Setenv("AGENT_RELAY_BIN", "")
+}
+
+func setPathWithPSOnly(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("requires Unix ps-based mount process discovery")
+	}
+	psPath, err := exec.LookPath("ps")
+	if err != nil {
+		t.Skipf("ps is unavailable for mount process discovery: %v", err)
+	}
+	binDir := t.TempDir()
+	if err := os.Symlink(psPath, filepath.Join(binDir, "ps")); err != nil {
+		t.Fatalf("link ps into isolated PATH: %v", err)
+	}
+	t.Setenv("PATH", binDir)
+	if _, err := exec.LookPath("agent-relay"); err == nil {
+		t.Fatal("isolated PATH unexpectedly contains agent-relay")
+	}
 }
 
 func installFakeAgentRelay(t *testing.T, scriptBody string) string {
@@ -6315,6 +6467,201 @@ func TestLoginWithExplicitTokenPersistsServerCreds(t *testing.T) {
 	}
 	if _, err := os.Stat(cloudCredentialsPath()); !os.IsNotExist(err) {
 		t.Fatalf("expected stale cloud credentials removed, got err=%v", err)
+	}
+}
+
+func TestLoginCredentialsAuthorizeMountAndStatusWithoutAgentRelay(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+	setPathWithPSOnly(t)
+
+	localDir := t.TempDir()
+	token := testJWTWithWorkspace("ws_saved")
+	var healthCalls, exportCalls, eventsCalls, statusCalls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got, want := r.Header.Get("Authorization"), "Bearer "+token; got != want {
+			t.Fatalf("Authorization = %q, want %q", got, want)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/health":
+			healthCalls++
+			w.WriteHeader(http.StatusOK)
+		case "/v1/workspaces/ws_saved/fs/export":
+			exportCalls++
+			_, _ = w.Write([]byte(`[]`))
+		case "/v1/workspaces/ws_saved/fs/events":
+			eventsCalls++
+			_, _ = w.Write([]byte(`{"events":[]}`))
+		case "/v1/workspaces/ws_saved/sync/status":
+			statusCalls++
+			_, _ = w.Write([]byte(`{"workspaceId":"ws_saved","providers":[]}`))
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	if err := saveWorkspaceCatalog(workspaceCatalog{
+		Default: "demo",
+		Workspaces: []workspaceRecord{{
+			Name:      "demo",
+			ID:        "ws_saved",
+			CreatedAt: now,
+		}},
+	}); err != nil {
+		t.Fatalf("saveWorkspaceCatalog failed: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := run([]string{"login", "--server", server.URL, "--token", token}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("run login failed: %v\noutput:\n%s", err, stdout.String())
+	}
+	stdout.Reset()
+	if err := run([]string{"mount", "demo", localDir, "--once", "--websocket=false"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("run mount with saved login failed: %v\noutput:\n%s", err, stdout.String())
+	}
+	stdout.Reset()
+	if err := run([]string{"status", "demo"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("run status with saved login failed: %v\noutput:\n%s", err, stdout.String())
+	}
+	if healthCalls != 1 || exportCalls == 0 || eventsCalls == 0 || statusCalls == 0 {
+		t.Fatalf("unexpected request counts: health=%d export=%d events=%d status=%d", healthCalls, exportCalls, eventsCalls, statusCalls)
+	}
+	creds, err := loadCredentials()
+	if err != nil {
+		t.Fatalf("loadCredentials after mount/status failed: %v", err)
+	}
+	if creds.Server != server.URL || creds.Token != token {
+		t.Fatalf("saved login changed after mount/status: %#v", creds)
+	}
+}
+
+func TestExplicitDelegatedCredentialsDoNotFallBackToSavedLogin(t *testing.T) {
+	tests := []struct {
+		name      string
+		command   string
+		configure func(t *testing.T, path string) []string
+	}{
+		{
+			name:    "mount flag selects missing file",
+			command: "mount",
+			configure: func(t *testing.T, path string) []string {
+				return []string{"--creds-file", path}
+			},
+		},
+		{
+			name:    "mount environment selects malformed file",
+			command: "mount",
+			configure: func(t *testing.T, path string) []string {
+				if err := os.WriteFile(path, []byte("not-json"), 0o600); err != nil {
+					t.Fatalf("write malformed delegated credentials: %v", err)
+				}
+				t.Setenv("RELAYFILE_MOUNT_CREDS_FILE", path)
+				return nil
+			},
+		},
+		{
+			name:    "status environment selects malformed file",
+			command: "status",
+			configure: func(t *testing.T, path string) []string {
+				if err := os.WriteFile(path, []byte("not-json"), 0o600); err != nil {
+					t.Fatalf("write malformed delegated credentials: %v", err)
+				}
+				t.Setenv("RELAYFILE_MOUNT_CREDS_FILE", path)
+				return nil
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			clearRelayfileEnv(t)
+
+			token := testJWTWithWorkspace("ws_saved")
+			requestCount := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requestCount++
+				w.Header().Set("Content-Type", "application/json")
+				switch r.URL.Path {
+				case "/v1/workspaces/ws_saved/fs/export":
+					_, _ = w.Write([]byte(`[]`))
+				case "/v1/workspaces/ws_saved/fs/events":
+					_, _ = w.Write([]byte(`{"events":[]}`))
+				case "/v1/workspaces/ws_saved/sync/status":
+					_, _ = w.Write([]byte(`{"workspaceId":"ws_saved","providers":[]}`))
+				default:
+					t.Fatalf("unexpected fallback request: %s %s", r.Method, r.URL.Path)
+				}
+			}))
+			defer server.Close()
+			if err := saveCredentials(credentials{Server: server.URL, Token: token}); err != nil {
+				t.Fatalf("save credentials: %v", err)
+			}
+
+			selectedPath := filepath.Join(t.TempDir(), "explicit-delegated.json")
+			extraArgs := tc.configure(t, selectedPath)
+			args := []string{tc.command, "ws_saved"}
+			if tc.command == "mount" {
+				args = append(args, t.TempDir(), "--once", "--websocket=false")
+			}
+			args = append(args, extraArgs...)
+			err := run(args, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
+			if err == nil || !strings.Contains(err.Error(), "resolve delegated relayfile credentials") {
+				t.Fatalf("explicit delegated credential failure = %v, want resolution error", err)
+			}
+			if requestCount != 0 {
+				t.Fatalf("saved login was used after explicit delegated credential failure: %d request(s)", requestCount)
+			}
+		})
+	}
+}
+
+func TestStatusUsesSavedTokenToDisambiguateDuplicateWorkspaceNames(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+	setPathWithPSOnly(t)
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	if err := saveWorkspaceCatalog(workspaceCatalog{
+		Default: "demo",
+		Workspaces: []workspaceRecord{
+			{Name: "demo", ID: "ws_stale", RelayWorkspaceID: "relay_ws_stale", LocalDir: filepath.Join(t.TempDir(), "stale"), CreatedAt: now},
+			{Name: "demo", ID: "ws_current", RelayWorkspaceID: "relay_ws_current", LocalDir: filepath.Join(t.TempDir(), "current"), CreatedAt: now},
+		},
+	}); err != nil {
+		t.Fatalf("saveWorkspaceCatalog failed: %v", err)
+	}
+	if _, err := resolveWorkspaceIDWithToken("demo", "opaque-token"); err == nil || !strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("opaque token should fail closed on duplicate workspace names, got %v", err)
+	}
+
+	// The token claim identifies the relay workspace, while API requests must
+	// use the matching catalog record's canonical Relayfile workspace ID.
+	token := testJWTWithWorkspace("relay_ws_current")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/workspaces/ws_current/sync/status" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		if got, want := r.Header.Get("Authorization"), "Bearer "+token; got != want {
+			t.Fatalf("Authorization = %q, want %q", got, want)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"workspaceId":"ws_current","providers":[]}`))
+	}))
+	defer server.Close()
+	if err := saveCredentials(credentials{Server: server.URL, Token: token}); err != nil {
+		t.Fatalf("saveCredentials failed: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := run([]string{"status", "demo"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("run status failed: %v\noutput:\n%s", err, stdout.String())
+	}
+	if got := stdout.String(); !strings.Contains(got, "workspace ws_current (demo)") {
+		t.Fatalf("status used the wrong duplicate workspace record: %q", got)
 	}
 }
 
