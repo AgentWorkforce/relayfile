@@ -1245,15 +1245,14 @@ func runAgentRelayJSON(args []string, out any) error {
 	return nil
 }
 
-func runAgentRelayLogin(stdin io.Reader, stdout io.Writer, noOpen bool) error {
+func runAgentRelayLogin(stdin io.Reader, stdout io.Writer, _ bool) error {
 	if err := ensureAgentRelayCLICompatible(); err != nil {
 		return err
 	}
-	args := []string{"cloud", "login"}
-	if noOpen {
-		args = append(args, "--no-open")
-	}
-	cmd := exec.Command(agentRelayBinary(), args...)
+	// Keep relayfile's --no-open flag for headless callers, but do not forward it:
+	// agent-relay cloud login does not support that flag and prints the sign-in URL
+	// itself when a browser cannot be opened.
+	cmd := exec.Command(agentRelayBinary(), "cloud", "login")
 	cmd.Stdin = stdin
 	cmd.Stdout = stdout
 	cmd.Stderr = stdout
@@ -2574,7 +2573,7 @@ func runLogin(args []string, stdin io.Reader, stdout io.Writer) error {
 	cloudAPIURL := fs.String("cloud-api-url", envOrDefault("RELAYFILE_CLOUD_API_URL", defaultCloudAPIURL), "Relayfile Cloud API URL")
 	cloudToken := fs.String("cloud-token", strings.TrimSpace(os.Getenv("RELAYFILE_CLOUD_TOKEN")), "Relayfile Cloud access token; skips browser login when set")
 	apiKey := fs.Bool("api-key", false, "use the legacy API-key flow against --server instead of the cloud browser login")
-	noOpen := fs.Bool("no-open", false, "print the cloud sign-in URL instead of opening it")
+	noOpen := fs.Bool("no-open", false, "accepted for headless compatibility; Agent Relay controls browser behavior")
 	loginTimeout := fs.Duration("login-timeout", 5*time.Minute, "cloud login timeout")
 	workspaceFlag := fs.String("workspace", "", "workspace name or id to refresh; defaults to the active workspace")
 	skipWorkspace := fs.Bool("skip-workspace-refresh", false, "sign into the cloud only; do not refresh the workspace token")
