@@ -238,8 +238,10 @@ registered mirror) rather than accepting a partial reset.
 
 The exported TypeScript mount launcher currently models one `remotePath` and
 rejects `RELAYFILE_MOUNT_PATHS_FILE` before creating directories or spawning a
-process. Use the `relayfile` CLI directly for multi-path mounts until the
-TypeScript session and status types represent multiple roots.
+process. The `relayfile` CLI is also single-root while scoped mount operator
+surfaces are unavailable, so configure one remote path only. Multi-root
+configuration will return when the TypeScript session and CLI operator surfaces
+represent every scoped child root.
 
 The FUSE layer caches file content in kernel memory independently of its attribute TTL. By default content is held for 30 seconds and attributes for 2 seconds. Tune with `--fuse-content-ttl` (or `RELAYFILE_MOUNT_FUSE_CONTENT_TTL`) if your workload needs fresher reads or can tolerate a longer cache window:
 
