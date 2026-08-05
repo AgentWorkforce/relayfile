@@ -6665,6 +6665,51 @@ func TestStatusUsesSavedTokenToDisambiguateDuplicateWorkspaceNames(t *testing.T)
 	}
 }
 
+type funcRoundTripper func(*http.Request) (*http.Response, error)
+
+func (fn funcRoundTripper) RoundTrip(request *http.Request) (*http.Response, error) {
+	return fn(request)
+}
+
+func TestLoginWithTokenDefaultsToHostedRelayfile(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	previousTransport := http.DefaultTransport
+	t.Cleanup(func() {
+		http.DefaultTransport = previousTransport
+	})
+
+	var requestedURL string
+	http.DefaultTransport = funcRoundTripper(func(request *http.Request) (*http.Response, error) {
+		requestedURL = request.URL.String()
+		if got := request.Header.Get("Authorization"); got != "Bearer rf_test" {
+			t.Fatalf("unexpected Authorization: %q", got)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader("")),
+			Header:     make(http.Header),
+			Request:    request,
+		}, nil
+	})
+
+	var stdout bytes.Buffer
+	if err := run([]string{"login", "--token", "rf_test"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("run login failed: %v\noutput:\n%s", err, stdout.String())
+	}
+	if want := defaultServerURL + "/health"; requestedURL != want {
+		t.Fatalf("login health check URL = %q, want %q", requestedURL, want)
+	}
+	creds, err := loadCredentials()
+	if err != nil {
+		t.Fatalf("loadCredentials failed: %v", err)
+	}
+	if creds.Server != defaultServerURL {
+		t.Fatalf("stored server = %q, want %q", creds.Server, defaultServerURL)
+	}
+}
+
 // TestLoginDelegatesToAgentRelay covers the unified auth behavior: relayfile
 // login no longer writes its own cloud credential store; it delegates to the
 // canonical agent-relay login command.
