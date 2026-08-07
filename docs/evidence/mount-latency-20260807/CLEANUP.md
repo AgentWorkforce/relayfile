@@ -72,15 +72,19 @@ ssh "$RECEIVER_SSH_ALIAS" '
     test -f "$identity" || return 0
     { IFS= read -r pid; IFS= read -r recorded_start; IFS= read -r recorded_executable; } < "$identity"
     case "$pid" in *[!0-9]*|"") return 2 ;; esac
-    current_start=$(ps -p "$pid" -o lstart= | sed "s/^ *//; s/ *$//") || return 0
-    current_executable=$(ps -p "$pid" -o comm= | sed "s/^ *//; s/ *$//") || return 0
+    current_start=$(ps -p "$pid" -o lstart=) || return 0
+    current_start=$(printf "%s\n" "$current_start" | sed "s/^ *//; s/ *$//")
+    current_executable=$(ps -p "$pid" -o comm=) || return 0
+    current_executable=$(printf "%s\n" "$current_executable" | sed "s/^ *//; s/ *$//")
     test "$current_start" = "$recorded_start" || return 3
     test "$current_executable" = "$recorded_executable" || return 3
     kill "$pid"
     attempts=0
     while test "$attempts" -lt 100; do
-      current_start=$(ps -p "$pid" -o lstart= | sed "s/^ *//; s/ *$//") || return 0
-      current_executable=$(ps -p "$pid" -o comm= | sed "s/^ *//; s/ *$//") || return 0
+      current_start=$(ps -p "$pid" -o lstart=) || return 0
+      current_start=$(printf "%s\n" "$current_start" | sed "s/^ *//; s/ *$//")
+      current_executable=$(ps -p "$pid" -o comm=) || return 0
+      current_executable=$(printf "%s\n" "$current_executable" | sed "s/^ *//; s/ *$//")
       test "$current_start" = "$recorded_start" || return 0
       test "$current_executable" = "$recorded_executable" || return 0
       sleep 0.1
@@ -106,15 +110,19 @@ stop_recorded() {
   test -f "$identity" || return 0
   { IFS= read -r pid; IFS= read -r recorded_start; IFS= read -r recorded_executable; } < "$identity"
   case "$pid" in *[!0-9]*|"") return 2 ;; esac
-  current_start=$(ps -p "$pid" -o lstart= | sed 's/^ *//; s/ *$//') || return 0
-  current_executable=$(ps -p "$pid" -o comm= | sed 's/^ *//; s/ *$//') || return 0
+  current_start=$(ps -p "$pid" -o lstart=) || return 0
+  current_start=$(printf '%s\n' "$current_start" | sed 's/^ *//; s/ *$//')
+  current_executable=$(ps -p "$pid" -o comm=) || return 0
+  current_executable=$(printf '%s\n' "$current_executable" | sed 's/^ *//; s/ *$//')
   test "$current_start" = "$recorded_start" || return 3
   test "$current_executable" = "$recorded_executable" || return 3
   kill "$pid"
   attempts=0
   while test "$attempts" -lt 100; do
-    current_start=$(ps -p "$pid" -o lstart= | sed 's/^ *//; s/ *$//') || return 0
-    current_executable=$(ps -p "$pid" -o comm= | sed 's/^ *//; s/ *$//') || return 0
+    current_start=$(ps -p "$pid" -o lstart=) || return 0
+    current_start=$(printf '%s\n' "$current_start" | sed 's/^ *//; s/ *$//')
+    current_executable=$(ps -p "$pid" -o comm=) || return 0
+    current_executable=$(printf '%s\n' "$current_executable" | sed 's/^ *//; s/ *$//')
     test "$current_start" = "$recorded_start" || return 0
     test "$current_executable" = "$recorded_executable" || return 0
     sleep 0.1

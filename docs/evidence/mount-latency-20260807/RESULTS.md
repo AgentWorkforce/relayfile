@@ -222,7 +222,7 @@ when its **last** file arrives; ordering across files is not assumed.
 
 ```sh
 cd docs/evidence/mount-latency-20260807
-python3 harness/assertions.py          # 33 named assertions over the raw data
+python3 harness/assertions.py          # 37 named assertions over the raw data
 python3 harness/analyse.py raw/clock-offset-pre.jsonl raw/clock-offset-post.jsonl \
         raw/trials-small.jsonl raw/mount-watch.jsonl small r2
 python3 harness/analyse.py raw/clock-offset-pre.jsonl raw/clock-offset-post.jsonl \
