@@ -1,0 +1,14 @@
+{"sampledAtLocalUtc":"2026-08-07T11:10:48.300000+00:00","node":{"present": true, "lastHeartbeatAt": "2026-08-07T11:09:54.000Z", "status": "offline", "live": false, "activeAgents": 7}}
+{"sampledAtLocalUtc":"2026-08-07T11:10:59.300000+00:00","node":{"present": true, "lastHeartbeatAt": "2026-08-07T11:11:00.000Z", "status": "online", "live": true, "activeAgents": 7}}
+{"sampledAtLocalUtc":"2026-08-07T11:11:11.300000+00:00","node":{"present": true, "lastHeartbeatAt": "2026-08-07T11:11:00.000Z", "status": "online", "live": true, "activeAgents": 7}}
+{"sampledAtLocalUtc":"2026-08-07T11:11:22.300000+00:00","node":{"present": true, "lastHeartbeatAt": "2026-08-07T11:11:00.000Z", "status": "online", "live": true, "activeAgents": 7}}
+{"sampledAtLocalUtc":"2026-08-07T11:11:33.300000+00:00","node":{"present": true, "lastHeartbeatAt": "2026-08-07T11:11:00.000Z", "status": "online", "live": true, "activeAgents": 7}}
+{"sampledAtLocalUtc":"2026-08-07T11:11:44.300000+00:00","node":{"present": true, "lastHeartbeatAt": "2026-08-07T11:11:00.000Z", "status": "offline", "live": false, "activeAgents": 7}}
+{"sampledAtLocalUtc":"2026-08-07T11:11:56.300000+00:00","node":{"present": true, "lastHeartbeatAt": "2026-08-07T11:11:00.000Z", "status": "offline", "live": false, "activeAgents": 7}}
+{"sampledAtLocalUtc":"2026-08-07T11:12:07.300000+00:00","node":{"present": true, "lastHeartbeatAt": "2026-08-07T11:12:00.000Z", "status": "online", "live": true, "activeAgents": 7}}
+{"sampledAtLocalUtc":"2026-08-07T11:12:18.300000+00:00","node":{"present": true, "lastHeartbeatAt": "2026-08-07T11:12:00.000Z", "status": "online", "live": true, "activeAgents": 7}}
+{"sampledAtLocalUtc":"2026-08-07T11:12:30.300000+00:00","node":{"present": true, "lastHeartbeatAt": "2026-08-07T11:12:00.000Z", "status": "online", "live": true, "activeAgents": 7}}
+{"sampledAtLocalUtc":"2026-08-07T11:12:42.300000+00:00","node":{"present": true, "lastHeartbeatAt": "2026-08-07T11:12:00.000Z", "status": "online", "live": true, "activeAgents": 7}}
+{"sampledAtLocalUtc":"2026-08-07T11:12:53.300000+00:00","node":{"present": true, "lastHeartbeatAt": "2026-08-07T11:12:00.000Z", "status": "offline", "live": false, "activeAgents": 7}}
+{"sampledAtLocalUtc":"2026-08-07T11:13:04.300000+00:00","node":{"present": true, "lastHeartbeatAt": "2026-08-07T11:13:00.000Z", "status": "online", "live": true, "activeAgents": 7}}
+{"sampledAtLocalUtc":"2026-08-07T11:13:16.300000+00:00","node":{"present": true, "lastHeartbeatAt": "2026-08-07T11:13:00.000Z", "status": "online", "live": true, "activeAgents": 7}}
