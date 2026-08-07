@@ -5702,6 +5702,92 @@ func TestReadGuardCountersAcceptsMountsyncCountersShape(t *testing.T) {
 	}
 }
 
+func TestProviderEventLivenessDistinguishesActiveSilentAndUnverified(t *testing.T) {
+	now := time.Date(2026, 8, 7, 12, 0, 0, 0, time.UTC)
+	activeAt := now.Add(-time.Hour).Format(time.RFC3339Nano)
+	silentAt := now.Add(-48 * time.Hour).Format(time.RFC3339Nano)
+	invalidAt := "not-a-timestamp"
+
+	for _, tc := range []struct {
+		name      string
+		watermark *string
+		want      string
+		wantIdle  int64
+	}{
+		{name: "active", watermark: &activeAt, want: "active", wantIdle: 3600},
+		{name: "silent", watermark: &silentAt, want: "silent", wantIdle: 48 * 3600},
+		{name: "missing", want: "unverified"},
+		{name: "invalid", watermark: &invalidAt, want: "unverified"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, idle := providerEventLiveness(syncProviderStatus{WatermarkTs: tc.watermark}, now, 24*time.Hour)
+			if got != tc.want || idle != tc.wantIdle {
+				t.Fatalf("providerEventLiveness() = (%q, %d), want (%q, %d)", got, idle, tc.want, tc.wantIdle)
+			}
+		})
+	}
+}
+
+func TestStatusMakesHealthyButSilentEventFeedLoud(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("RELAYFILE_EVENT_SILENCE_THRESHOLD", "24h")
+	clearRelayfileEnv(t)
+
+	localDir := t.TempDir()
+	if err := ensureMirrorLayout(localDir); err != nil {
+		t.Fatalf("ensureMirrorLayout failed: %v", err)
+	}
+	if _, err := upsertWorkspaceDetails(workspaceRecord{
+		Name:       "demo",
+		ID:         "ws_demo",
+		LocalDir:   localDir,
+		CreatedAt:  time.Now().UTC().Format(time.RFC3339),
+		LastUsedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("upsertWorkspaceDetails failed: %v", err)
+	}
+	watermark := time.Now().UTC().Add(-48 * time.Hour).Format(time.RFC3339Nano)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"workspaceId":"ws_demo","providers":[{"provider":"github","status":"healthy","lagSeconds":0,"watermarkTs":%q}]}`, watermark)
+	}))
+	defer server.Close()
+
+	writeDelegatedCredentialsForTest(t, delegatedauth.Bundle{
+		RelayfileURL:         server.URL,
+		RelayfileWorkspaceID: "ws_demo",
+		AccessToken:          "delegated_token",
+	})
+
+	var stdout bytes.Buffer
+	if err := run([]string{"status", "demo"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("run status failed: %v", err)
+	}
+	got := stdout.String()
+	for _, want := range []string{
+		"github       healthy  queue lag 0s",
+		"event silent",
+		"github event feed silent",
+		"queue lag 0s only means no queued work",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("status output missing %q: %q", want, got)
+		}
+	}
+
+	var jsonOutput bytes.Buffer
+	if err := run([]string{"status", "demo", "--json"}, strings.NewReader(""), &jsonOutput, &jsonOutput); err != nil {
+		t.Fatalf("run status --json failed: %v", err)
+	}
+	var snapshot syncStateFile
+	if err := json.Unmarshal(jsonOutput.Bytes(), &snapshot); err != nil {
+		t.Fatalf("decode status JSON: %v\n%s", err, jsonOutput.String())
+	}
+	if len(snapshot.Providers) != 1 || snapshot.Providers[0].EventStatus != "silent" || snapshot.Providers[0].EventIdleSeconds < 47*3600 {
+		t.Fatalf("expected silent provider liveness in JSON, got %#v", snapshot.Providers)
+	}
+}
+
 func TestStatusRendersWebhookUnhealthyWarning(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)
@@ -5792,7 +5878,7 @@ func TestStatusExplainsLaggingProviderWithoutWatermark(t *testing.T) {
 		t.Fatalf("run status failed: %v", err)
 	}
 	got := stdout.String()
-	if !strings.Contains(got, "github       lagging  lag 0s") {
+	if !strings.Contains(got, "github       lagging  queue lag 0s") {
 		t.Fatalf("expected lagging provider row, got: %q", got)
 	}
 	if !strings.Contains(got, "reason: no sync cursor or watermark; no provider-specific ingress events recorded") {
