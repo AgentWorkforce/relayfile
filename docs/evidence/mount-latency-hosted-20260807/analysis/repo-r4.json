@@ -12,6 +12,7 @@
   "trials_sent": 22,
   "trials_complete": 22,
   "trials_incomplete": 0,
+  "trials_ambiguous": 0,
   "trials_non_202": 0,
   "incomplete_detail": [],
   "ambiguous_detail": [],

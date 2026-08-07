@@ -125,7 +125,7 @@ def main():
         check(f"{label}_no_incomplete", summary["trials_incomplete"] == 0, summary["incomplete_detail"])
         check(
             f"{label}_one_to_one_path_pairing",
-            summary.get("ambiguous_detail") == [],
+            summary.get("trials_ambiguous") == 0,
             summary.get("ambiguous_detail"),
         )
         check(

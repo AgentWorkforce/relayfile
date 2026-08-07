@@ -229,7 +229,8 @@ def main():
             + len(non_202)
         ),
         "trials_complete": len(values),
-        "trials_incomplete": len(incomplete) + len(ambiguous),
+        "trials_incomplete": len(incomplete),
+        "trials_ambiguous": len(ambiguous),
         "trials_non_202": len(non_202),
         "incomplete_detail": incomplete,
         "ambiguous_detail": ambiguous,
