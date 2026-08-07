@@ -19,6 +19,7 @@ Usage:
 
 import json
 import os
+import re
 import sys
 import time
 
@@ -28,10 +29,16 @@ def main():
     count = int(count)
     spacing = float(spacing)
     os.makedirs(control_dir, exist_ok=True)
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", run_id):
+        raise SystemExit("RUN_ID must contain only letters, digits, '.', '_' or '-'")
+    run_dir = os.path.join(control_dir, run_id)
+    if os.path.isdir(run_dir) and os.listdir(run_dir):
+        raise SystemExit(f"control run already exists: {run_id}")
+    os.makedirs(run_dir, exist_ok=True)
 
     with open(out_path, "a") as raw:
         for trial in range(1, count + 1):
-            directory = os.path.join(control_dir, f"control-{trial:03d}")
+            directory = os.path.join(run_dir, f"control-{trial:03d}")
             os.makedirs(directory, exist_ok=True)
             final_path = os.path.join(directory, "probe.txt")
             temporary_path = final_path + ".tmp"
@@ -42,18 +49,22 @@ def main():
                 handle.flush()
                 os.fsync(handle.fileno())
 
-            # The instant the path becomes visible, by the same mechanism the
-            # mount daemon uses.
-            t_create_ns = time.time_ns()
+            # Visibility occurs during this rename syscall, by the same
+            # mechanism the mount daemon uses. Record both bounds.
+            t_publish_start_ns = time.time_ns()
             os.rename(temporary_path, final_path)
+            t_publish_end_ns = time.time_ns()
 
             record = {
                 "kind": "control_create",
                 "run_id": run_id,
                 "trial": trial,
                 "path": os.path.relpath(final_path, control_dir),
-                "t_create_ns": t_create_ns,
-                "host": "sf-mini",
+                # Visibility occurs within this interval. The analysis reports
+                # an interval rather than pretending the rename is instant.
+                "t_publish_start_ns": t_publish_start_ns,
+                "t_publish_end_ns": t_publish_end_ns,
+                "host": "receiver",
                 "clock": "CLOCK_REALTIME",
             }
             raw.write(json.dumps(record) + "\n")

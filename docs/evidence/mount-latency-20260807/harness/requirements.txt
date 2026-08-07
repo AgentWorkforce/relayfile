@@ -1,0 +1,2 @@
+# Dependency used only by dev-authd.py to mint the run-scoped RS256 key.
+cryptography==46.0.5

@@ -29,9 +29,10 @@ linearly interpolated to each trial's own send time between the two anchor
 measurements. Trials outside the anchor span are extrapolated and flagged.
 
 Usage:
-    analyse.py OFFSET_PRE_JSONL OFFSET_POST_JSONL SENDS_JSONL ARRIVALS_JSONL [LABEL]
+    analyse.py OFFSET_PRE_JSONL OFFSET_POST_JSONL SENDS_JSONL ARRIVALS_JSONL [LABEL] [RUN_ID]
 """
 
+import bisect
 import json
 import os
 import sys
@@ -51,7 +52,7 @@ def percentile(values, fraction):
 
 
 def load_arrivals(path):
-    """Map workspace path -> earliest observation, ignoring daemon temp files."""
+    """Map workspace path -> sorted observations, ignoring daemon temp files."""
     arrivals = {}
     for line in open(path):
         line = line.strip()
@@ -67,9 +68,17 @@ def load_arrivals(path):
         if ".tmp-" in base or base.endswith(".tmp"):
             continue
         key = "/" + relative
-        if key not in arrivals or record["observed_ns"] < arrivals[key]:
-            arrivals[key] = record["observed_ns"]
+        arrivals.setdefault(key, []).append(record["observed_ns"])
+    for observations in arrivals.values():
+        observations.sort()
     return arrivals
+
+
+def first_arrival_at_or_after(arrivals, path, lower_bound_ns):
+    """Select this trial's arrival, never a stale observation from an older run."""
+    observations = arrivals.get(path, [])
+    index = bisect.bisect_left(observations, lower_bound_ns)
+    return observations[index] if index < len(observations) else None
 
 
 def anchor(path):
@@ -97,6 +106,10 @@ def offset_at(send_ns, pre, post):
 
 
 def main():
+    if not 5 <= len(sys.argv) <= 7:
+        sys.stderr.write(__doc__)
+        return 2
+
     pre = anchor(sys.argv[1])
     post = anchor(sys.argv[2])
     sends_path, arrivals_path = sys.argv[3], sys.argv[4]
@@ -124,7 +137,15 @@ def main():
             non_202.append((send["correlation_id"], send.get("http_status"), send.get("error")))
             continue
 
-        observed = [arrivals.get(path) for path in send["paths"]]
+        trial_offset_ns, extrapolated = offset_at(send["t_send_ns"], pre, post)
+        # Receiver timestamps before this modeled instant cannot belong to this
+        # send. This prevents an append-only arrival file from pairing a rerun
+        # with an older observation of the same path.
+        receiver_send_floor_ns = send["t_send_ns"] + trial_offset_ns
+        observed = [
+            first_arrival_at_or_after(arrivals, path, receiver_send_floor_ns)
+            for path in send["paths"]
+        ]
         if any(value is None for value in observed):
             missing = [p for p, v in zip(send["paths"], observed) if v is None]
             incomplete.append((send["correlation_id"], len(missing), len(send["paths"])))
@@ -137,7 +158,6 @@ def main():
         # Leg B: server -> receiver mount. This is the only leg that crosses
         # the Tailscale LAN, and it is the one a cloud deployment would
         # replace with a WAN path.
-        trial_offset_ns, extrapolated = offset_at(send["t_send_ns"], pre, post)
         if extrapolated:
             extrapolated_trials.append(send["correlation_id"])
         corrected_arrival_ns = completion_ns - trial_offset_ns
@@ -162,6 +182,9 @@ def main():
         "clock_offset_post_ms": post[1] / 1e6,
         "clock_drift_across_run_ms": (post[1] - pre[1]) / 1e6,
         "clock_correction": "linearly interpolated to each trial's send time",
+        "clock_model_error_bound": (
+            "unbounded between anchors; endpoint samples cannot exclude a clock step"
+        ),
         "trials_extrapolated_outside_anchors": extrapolated_trials,
         "trials_sent": len(latencies) + len(incomplete) + len(non_202),
         "trials_complete": len(values),
@@ -175,18 +198,24 @@ def main():
             "p95": percentile(values, 0.95),
             "max": values[-1] if values else None,
         },
-        "leg_a_sender_to_server_loopback_ms": {
+        "p95_note": (
+            "n=20: interpolated p95 depends on the two largest observations"
+            if len(values) == 20
+            else None
+        ),
+        "leg_a_sender_to_server_ms": {
             "median": percentile(acks, 0.50),
             "p95": percentile(acks, 0.95),
         },
-        "leg_b_server_to_receiver_lan_ms": {
+        "leg_b_server_to_receiver_ms": {
             "median": percentile(legs_b, 0.50),
             "p95": percentile(legs_b, 0.95),
         },
         "per_trial": latencies,
     }
     print(json.dumps(summary, indent=2))
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

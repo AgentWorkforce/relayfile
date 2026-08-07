@@ -1,7 +1,7 @@
 # One-way mount propagation latency — methodology
 
 Date: 2026-08-07
-Author: `herdr-t2-relayfile-latency-b1`
+Author: measurement operator (identity omitted from the permanent artifact)
 Status: written **before** any trial was run, per the measurement brief.
 
 ## Why this run exists
@@ -36,16 +36,19 @@ This run replaces the inference with a directly measured one-way number.
 host issues a file write, to the instant that file's content is readable on
 the receiver host's mounted workspace.
 
-The receiver is `sf-mac-mini` (Tailscale `100.102.30.76`), as required by the
-brief. The sender and the relayfile server are `khaliqs-macbook-pro`
-(Tailscale `100.89.219.17`).
+The two machines are identified only by the stable aliases `sender` and
+`receiver`. Their private addresses and hostnames are deliberately omitted.
+The relayfile server ran on `sender`.
 
 ### Which latency the watcher actually observes
 
 This matters, and it was settled by reading the delivery path before any trial
 was run.
 
-`relayfile-cli mount` runs in `poll` mode by default
+All source semantics and line references in this section were inspected at
+commit `5480825403ceae8bafb809e9eb0432000d41a91a`; symbol names are included so
+the reasoning remains traceable if line numbers move. `relayfile-cli mount`
+runs in `poll` mode by default
 (`cmd/relayfile-cli/main.go:58`). Despite the name, `poll` does **not** mean
 "poll the server for changes" — it means "materialise a mirror of real files
 on local disk", as opposed to `fuse` (which this build hard-refuses,
@@ -82,7 +85,7 @@ Two consequences:
 
 ## Clock handling
 
-The two hosts' clocks are **not** assumed equal, and were not equal: sf-mini's
+The two hosts' clocks are **not** assumed equal, and were not equal: the receiver's
 realtime clock measured **6.441 ms behind** this laptop. On a ~150 ms signal
 that is a ~4% systematic error, and on any faster path it would matter much
 more.
@@ -95,21 +98,24 @@ on the Tailscale LAN (`harness/clock-offset.py`):
 
 Both formulas assume path symmetry, which is weakest under queueing, so many
 samples are taken and the one with the **smallest delay** is selected — the
-least-queued sample is the least asymmetric. Residual uncertainty is bounded
-at ±delay/2 and is reported alongside the result, so the final latency carries
-an honest error bar rather than a false precision.
+least-queued sample is the least asymmetric. Path-asymmetry uncertainty at an
+anchor is bounded at ±delay/2 and is reported. That is not a total error bar:
+two endpoint anchors do not exclude a clock step or nonlinear slew between
+them, so interpolation-model error inside the trial block is unbounded by this
+dataset and is disclosed as such in the results.
 
 An ssh-based clock comparison was rejected: its round trip is of the same order
 as the signal being measured, so it could not bound the offset usefully.
 
-Offset is measured **before and after** the trial block. The difference bounds
-relative clock drift over the run; if drift is material it is reported as part
-of the uncertainty rather than ignored.
+Offset is measured **before and after** the trial block. Linear interpolation
+is the stated analysis model, not a measured fact about the clocks. The anchor
+difference is reported, while model error between those anchors remains
+unbounded because no intermediate offset sample was taken.
 
 ## Receiver watcher
 
-An in-box resident watcher runs on sf-mini and records arrival timestamps
-**locally**, using sf-mini's own `CLOCK_REALTIME` via `time.time_ns()`. No
+An in-box resident watcher runs on the receiver and records arrival timestamps
+**locally**, using the receiver's own `CLOCK_REALTIME` via `time.time_ns()`. No
 timestamp is taken over ssh, because ssh round-trip would be added to every
 sample.
 
@@ -119,11 +125,13 @@ microseconds, so the loop can run at a ~1 ms period without meaningful cost.
 That 1 ms is the quantisation floor, versus 5 ms in the prior run.
 
 **Measurement overhead is itself measured, not assumed.** A control experiment
-creates files locally on sf-mini — same directory, same watcher, no network
-involved — and records the watcher's own detection delay distribution. The
-reported latency is quoted both raw and with this control subtracted, so the
-"measurement overhead exceeds the signal" hedge can be either retired or
-confirmed with a number instead of a guess.
+creates files locally on receiver — same directory, same watcher, no network
+involved — and records the watcher's own detection delay distribution. Latency
+is reported raw, with the control reported separately; no adjusted percentile
+is manufactured by subtracting one distribution from another. In this run the
+control timestamp preceded the atomic rename, so its delay is a conservative
+upper bound that includes the rename syscall. The revised harness records both
+sides of the rename and reports an interval for future runs.
 
 ## Trial design
 
@@ -143,7 +151,7 @@ host failure leaves usable evidence rather than nothing.
 
 ## Liveness gate
 
-sf-mini's participation is gated on its **own `lastHeartbeatAt` advancing**
+The receiver's participation is gated on its **own `lastHeartbeatAt` advancing**
 across ≥90 s, sampled before the trials and again at result time.
 
 Two weaker signals are explicitly rejected:
@@ -151,7 +159,7 @@ Two weaker signals are explicitly rejected:
 - **Absence from a fleet listing is not evidence of offline.** The listing
   returns nondeterministic subsets.
 - **`status` and `live` are registration fields, not liveness fields.** During
-  the pre-trial gate window sf-mini's `status` flipped `online`↔`offline` four
+  the pre-trial gate window receiver's `status` flipped `online`↔`offline` four
   times while its heartbeat advanced monotonically, and an MCP `query_nodes`
   call at 11:08Z reported it `offline`/`live:false` while its heartbeat was
   38 s old and advancing. Only monotonic advance is trusted.
@@ -167,7 +175,7 @@ from a failed run.** Until valid results exist the public claim stays exactly:
 and is never stated as sub-100ms.
 
 **Outcome (added after the run):** both liveness gates passed, the propagation
-path held for all 52 trials, and 26/26 named assertions pass. Results are in
+path held for all 52 trials, and 33/33 named assertions pass. Results are in
 [`RESULTS.md`](RESULTS.md). Both halves of the claim above turned out to be
 wrong — "sub-200ms" is false for realistic repo-sized change sets (median
 216.7 ms), and the measurement overhead is ~1.2 ms against signals of 20.2 ms
@@ -177,11 +185,16 @@ that does not represent the hosted product path.
 
 ## Isolation and cleanup
 
-The pre-existing `.dev-collab-stack/` and `.salvaged-from-minis/` directories,
-their processes, ports, state, and the existing sf-mini mounts are **not
-touched or reused**. This run stands up a fresh server on a separate port with
-a separate state directory, a fresh workspace, and a distinct receiver mount
-path. Cleanup instructions are recorded in `CLEANUP.md`.
+The run did not reuse the pre-existing `.dev-collab-stack/` and
+`.salvaged-from-minis/` directories, their ports, state, or mounts. It stood up
+a fresh server on a separate port with a separate state directory, a fresh
+workspace, and a distinct receiver mount path. No before/after snapshot of the
+pre-existing untracked directories was captured, so this evidence does not
+claim to prove their contents were unchanged. Cleanup instructions are in
+`CLEANUP.md`.
 
 Test credentials are minted fresh for this run, are short-lived, and are never
 written to any artifact or transmitted over Relay.
+
+`dev-authd.py` requires the pinned dependency in `harness/requirements.txt`;
+install it in an isolated environment before starting a new measurement run.

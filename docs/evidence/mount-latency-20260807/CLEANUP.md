@@ -1,74 +1,93 @@
 # Cleanup for the 2026-08-07 mount latency run
 
-Everything this run created is disposable. Nothing here touches the
-pre-existing `.dev-collab-stack/` or `.salvaged-from-minis/` directories,
-their processes, their ports, or the existing sf-mini mounts — those were
-deliberately left alone and must stay that way.
+Everything this run created is disposable. The run used distinct ports, state,
+workspace, and mount paths rather than reusing the pre-existing development
+stack. Hostnames, addresses, and home paths are represented by variables that
+must be supplied outside this repository.
 
 ## What this run started
 
-**On the sender host (`khaliqs-macbook-pro`, Tailscale `100.89.219.17`)**
+**On the `sender` host**
 
 | Thing | Where |
 |---|---|
-| `relayfile-server` | bound to `100.89.219.17:18299` (Tailscale address only, not `0.0.0.0`) |
+| `relayfile-server` | `${SENDER_TAILNET_ADDRESS}:18299` (Tailscale address only, not `0.0.0.0`) |
 | `dev-authd.py serve` (JWKS) | `127.0.0.1:19091`, loopback only |
-| Server state file | `<scratch>/latency-run/state/state.json` — outside the repo |
-| Throwaway RSA private key + minted tokens | `<scratch>/latency-run/keys/` — outside the repo, mode 0600 |
+| Server state file | `$RELAYFILE_SENDER_SCRATCH/mount-latency-20260807/state/state.json` |
+| Throwaway RSA private key + minted tokens | `$RELAYFILE_SENDER_SCRATCH/mount-latency-20260807/keys/`, mode 0600 |
 
-**On the receiver host (`sf-mac-mini`, Tailscale `100.102.30.76`)**
+**On the `receiver` host**
 
 | Thing | Where |
 |---|---|
-| `relayfile-cli mount ws_latency_20260807` | mirror at `~/relayfile-latency-mount-20260807` |
-| `receiver-watch.py` | writing `~/.relayfile-latency-harness/raw/` |
-| `clock-offset.py server` | port `19299` |
-| Deployed harness + receiver token | `~/.relayfile-latency-harness/` |
+| `relayfile-cli mount ws_latency_20260807` | `$RELAYFILE_RECEIVER_SCRATCH/mount-latency-20260807/mount` |
+| `receiver-watch.py` | `$RELAYFILE_RECEIVER_SCRATCH/mount-latency-20260807/raw/` |
+| `clock-offset.py server` | explicit `$RECEIVER_TAILNET_ADDRESS` bind, port `19299` |
+| Deployed harness + receiver token | `$RELAYFILE_RECEIVER_SCRATCH/mount-latency-20260807/harness/` |
+
+For every rerun, start each process in the background and immediately record
+its exact PID under the run directory's `pids/` subdirectory, using
+`printf '%s\n' "$!" > "$pidfile"`. Cleanup must use only those PID files;
+process-name matching is deliberately not part of the revised procedure.
+
+The unauthenticated network `QUIT` command was removed from
+`clock-offset.py`. Its listener is stopped only by its recorded local PID,
+and the server now requires an explicit bind address.
 
 ## Teardown
 
-Receiver:
+Receiver (the variables are configured outside the evidence repository):
 
 ```sh
-ssh sf-mini '
-  pkill -f "relayfile-cli mount ws_latency_20260807"
-  pkill -f receiver-watch.py
-  pkill -f "clock-offset.py server"
-  rm -rf ~/relayfile-latency-mount-20260807
-  rm -rf ~/.relayfile-latency-harness
+ssh "$RECEIVER_SSH_ALIAS" '
+  run_dir="${RELAYFILE_RECEIVER_SCRATCH:?}/mount-latency-20260807"
+  case "$run_dir" in */mount-latency-20260807) ;; *) exit 2 ;; esac
+  for name in mount watcher clock-offset; do
+    pidfile="$run_dir/pids/$name.pid"
+    test -f "$pidfile" || continue
+    IFS= read -r pid < "$pidfile"
+    case "$pid" in *[!0-9]*|"") exit 2 ;; esac
+    kill "$pid"
+  done
+  rm -rf -- "$run_dir"
 '
 ```
 
 Sender:
 
 ```sh
-pkill -f "bin/relayfile-server"
-pkill -f "dev-authd.py serve"
-rm -rf <scratch>/latency-run
+run_dir="${RELAYFILE_SENDER_SCRATCH:?}/mount-latency-20260807"
+case "$run_dir" in */mount-latency-20260807) ;; *) exit 2 ;; esac
+for name in relayfile-server dev-authd; do
+  pidfile="$run_dir/pids/$name.pid"
+  test -f "$pidfile" || continue
+  IFS= read -r pid < "$pidfile"
+  case "$pid" in *[!0-9]*|"") exit 2 ;; esac
+  kill "$pid"
+done
+rm -rf -- "$run_dir"
 ```
 
-`pkill -f "relayfile-cli mount ws_latency_20260807"` is deliberately matched on
-the full workspace name. sf-mini also runs unrelated pre-existing mounts
-(`relayfile-dev-collab`, `relay-dev-collab`); a looser pattern would kill them.
+This avoids the earlier broad `pkill` examples, which could have matched an
+unrelated server or watcher on either host.
 
-## Verifying nothing else was disturbed
+## Post-cleanup checks and limitation
 
 ```sh
-lsof -nP -iTCP:8299 -sTCP:LISTEN     # dev-collab server port: expected untouched
-ssh sf-mini 'pgrep -fl "relayfile-cli.*dev-collab"'   # pre-existing mounts still up
-git -C <repo> status --short         # .dev-collab-stack/ and .salvaged-from-minis/ still untracked, unmodified
+lsof -nP -iTCP:8299 -sTCP:LISTEN
+ssh "$RECEIVER_SSH_ALIAS" 'test -d "${PREEXISTING_MOUNT_ROOT:?}"'
+git -C "$RELAYFILE_REPO" status --short
 ```
+
+These post-run checks show that the separate service and paths still exist;
+they do **not** prove that untracked directory contents were unchanged. No
+before/after content snapshot or hash was captured, so no stronger isolation
+claim is made.
 
 ## Credentials
 
-The RSA key and the bearer tokens minted for this run are throwaway, scoped to
-workspace `ws_latency_20260807`, short-lived, and were never written into any
-committed artifact or sent over Relay. Deleting the scratch directory and
-`~/.relayfile-latency-harness` on the receiver destroys them.
-
-Separately, and unrelated to this run: a routine `ps` on sf-mini exposes live
-`RELAY_API_KEY` and agent-token values in broker process argv, because they are
-passed as command-line arguments. Those are pre-existing production credentials,
-readable by any local process, and were reported for rotation. This run
-deliberately passed its own receiver token via the `RELAYFILE_TOKEN` environment
-variable rather than `--token` so as not to add to that exposure.
+The RSA key and bearer tokens minted for this run are throwaway, scoped to
+workspace `ws_latency_20260807`, short-lived, and were never written into a
+committed artifact or sent over Relay. Deleting the two validated run
+directories destroys them. The receiver token was passed through the
+`RELAYFILE_TOKEN` environment variable, never as a command-line argument.

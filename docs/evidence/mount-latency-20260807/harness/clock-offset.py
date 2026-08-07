@@ -21,12 +21,13 @@ ssh-based comparison would have an RTT far larger than the signal).
 Both formulas assume a symmetric path. That assumption is weakest when the
 network is congested, so we take many samples and select the one with the
 SMALLEST delay -- the least-queued sample is the least asymmetric. The residual
-uncertainty on that offset is bounded by +/- delay/2, which we report so the
-final latency number can be quoted with an honest error bar.
+path-symmetry uncertainty on each anchor is bounded by +/- delay/2. This is
+not a total latency error bar: endpoint anchors cannot bound a clock step or
+nonlinear slew between them.
 
 Usage:
-    clock-offset.py server [BIND_HOST] [PORT]
-    clock-offset.py client HOST PORT SAMPLES OUTPUT_JSONL
+    clock-offset.py server BIND_HOST PORT
+    clock-offset.py client HOST PORT SAMPLES OUTPUT_JSONL PEER_ALIAS
 """
 
 import json
@@ -53,15 +54,17 @@ def serve(bind_host, port):
                 if not line.strip():
                     continue
                 receipt_ns = time.time_ns()
-                if line.strip() == b"QUIT":
-                    return
+                # There is intentionally no network shutdown command. The
+                # listener is stopped only through its recorded local PID.
                 reply_ns = time.time_ns()
                 stream.write(f"{receipt_ns} {reply_ns}\n".encode())
                 stream.flush()
 
 
-def measure(host, port, samples, output_path):
+def measure(host, port, samples, output_path, peer_alias):
     """Take `samples` NTP-style exchanges and keep the minimum-delay estimate."""
+    if samples <= 0:
+        raise ValueError("SAMPLES must be greater than zero")
     connection = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     connection.settimeout(10)
@@ -99,15 +102,13 @@ def measure(host, port, samples, output_path):
             raw.flush()
             time.sleep(0.005)
 
-    stream.write(b"QUIT\n")
-    stream.flush()
     connection.close()
 
     best = min(observations, key=lambda obs: obs["delay_ns"])
     offsets = sorted(obs["offset_ns"] for obs in observations)
     summary = {
         "kind": "clock_offset_summary",
-        "host": host,
+        "host": peer_alias,
         "samples": len(observations),
         # server_clock - client_clock, from the least-queued exchange
         "offset_ns": best["offset_ns"],
@@ -128,13 +129,19 @@ def measure(host, port, samples, output_path):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) >= 2 and sys.argv[1] == "server":
-        serve(
-            sys.argv[2] if len(sys.argv) > 2 else "0.0.0.0",
-            int(sys.argv[3]) if len(sys.argv) > 3 else 19299,
+    if len(sys.argv) == 4 and sys.argv[1] == "server":
+        serve(sys.argv[2], int(sys.argv[3]))
+    elif len(sys.argv) == 7 and sys.argv[1] == "client":
+        try:
+            sample_count = int(sys.argv[4])
+            if sample_count <= 0:
+                raise ValueError
+        except ValueError:
+            sys.stderr.write("SAMPLES must be a positive integer\n")
+            sys.exit(2)
+        measure(
+            sys.argv[2], int(sys.argv[3]), sample_count, sys.argv[5], sys.argv[6]
         )
-    elif len(sys.argv) == 6 and sys.argv[1] == "client":
-        measure(sys.argv[2], int(sys.argv[3]), int(sys.argv[4]), sys.argv[5])
     else:
         sys.stderr.write(__doc__)
         sys.exit(2)

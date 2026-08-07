@@ -11,8 +11,10 @@ pass there is no median to publish, only a blocker.
 
 import json
 import os
+import statistics
 import subprocess
 import sys
+from datetime import datetime
 
 RESULTS = []
 
@@ -25,23 +27,33 @@ def load(path):
     return [json.loads(line) for line in open(path) if line.strip()]
 
 
+def parse_timestamp(value):
+    """Parse RFC 3339 timestamps, including the common UTC Z suffix."""
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
 def heartbeat_gate(path, label):
-    """sf-mini is live iff its OWN lastHeartbeatAt advances across >=90s."""
+    """The receiver is live iff its OWN lastHeartbeatAt advances across >=90s."""
     if not os.path.exists(path):
         check(f"{label}_gate_present", False, f"{path} missing")
         return
     samples = load(path)
     stamps = [s["node"].get("lastHeartbeatAt") for s in samples]
     distinct = [s for i, s in enumerate(stamps) if s and (i == 0 or s != stamps[i - 1])]
+    span_seconds = 0.0
     span = None
     if len(samples) >= 2:
         first, last = samples[0]["sampledAtLocalUtc"], samples[-1]["sampledAtLocalUtc"]
         span = (first, last)
+        try:
+            span_seconds = (parse_timestamp(last) - parse_timestamp(first)).total_seconds()
+        except (TypeError, ValueError):
+            span_seconds = 0.0
 
     check(
         f"{label}_window_at_least_90s",
-        len(samples) >= 9,
-        f"{len(samples)} samples at ~10s spacing spanning {span}",
+        span_seconds >= 90.0,
+        f"{len(samples)} samples spanning {span_seconds:.3f}s ({span})",
     )
     check(
         f"{label}_heartbeat_advanced",
@@ -111,7 +123,18 @@ def main():
              "raw/mount-watch.jsonl", shape, CLEAN_BATCH],
             capture_output=True, text=True,
         )
-        summary = json.loads(output.stdout)
+        check(
+            f"{shape}_analysis_exited_cleanly",
+            output.returncode == 0,
+            f"exit {output.returncode}; stderr={output.stderr[:240]!r}",
+        )
+        if output.returncode != 0:
+            continue
+        try:
+            summary = json.loads(output.stdout)
+        except json.JSONDecodeError as exc:
+            check(f"{shape}_analysis_json_valid", False, str(exc))
+            continue
         summaries[shape] = summary
         check(
             f"{shape}_at_least_20_complete_trials",
@@ -135,52 +158,81 @@ def main():
             f"the run; every trial interpolated within the anchor span",
         )
         check(
+            f"{shape}_clock_model_error_disclosed",
+            summary.get("clock_model_error_bound", "").startswith("unbounded"),
+            summary.get("clock_model_error_bound"),
+        )
+        check(
+            f"{shape}_small_sample_p95_disclosed",
+            summary.get("p95_note") is not None,
+            summary.get("p95_note"),
+        )
+        maximum = summary["latency_ms"]["max"]
+        check(
             f"{shape}_no_sample_hit_the_polling_fallback",
-            (summary["latency_ms"]["max"] or 0) < 30_000,
-            f"max {summary['latency_ms']['max']:.1f} ms; the websocket-off "
+            maximum is not None and maximum < 30_000,
+            f"max {(maximum or 0):.1f} ms; the websocket-off "
             f"reconcile safety net is ~30 s and would be obvious here",
         )
 
     # --- the measurement-overhead claim ---------------------------------
-    if os.path.exists("raw/control-watch.jsonl") and os.path.exists("raw/control-create.jsonl"):
+    control_watch = "raw/control-watch.jsonl"
+    control_create = "raw/control-create.jsonl"
+    control_present = os.path.exists(control_watch) and os.path.exists(control_create)
+    check(
+        "control_evidence_present",
+        control_present,
+        f"watch={os.path.exists(control_watch)}, create={os.path.exists(control_create)}",
+    )
+    if control_present:
+        control_run = "ctrl20260807"
         observed = {}
-        for record in load("raw/control-watch.jsonl"):
+        for record in load(control_watch):
             if record.get("kind"):
                 continue
             observed.setdefault(record["path"], record["observed_ns"])
-        delays = sorted(
-            (observed[c["path"]] - c["t_create_ns"]) / 1e6
-            for c in load("raw/control-create.jsonl")
-            if c["path"] in observed
+        intervals = []
+        selected_creates = [
+            record for record in load(control_create)
+            if record.get("run_id") == control_run
+        ]
+        for create in selected_creates:
+            if create["path"] not in observed:
+                continue
+            publish_start = create.get("t_publish_start_ns", create.get("t_create_ns"))
+            publish_end = create.get("t_publish_end_ns", publish_start)
+            intervals.append(
+                (
+                    max(0, observed[create["path"]] - publish_end) / 1e6,
+                    (observed[create["path"]] - publish_start) / 1e6,
+                )
+            )
+        lower_delays = sorted(interval[0] for interval in intervals)
+        upper_delays = sorted(interval[1] for interval in intervals)
+        check(
+            "control_selected_run_isolated",
+            len(selected_creates) == 25,
+            f"{len(selected_creates)} create records for run {control_run}",
         )
-        check("control_paired_at_least_20", len(delays) >= 20, f"{len(delays)} pairs")
-        overhead_median = delays[len(delays) // 2]
+        check("control_paired_at_least_20", len(intervals) >= 20, f"{len(intervals)} pairs")
+        overhead_lower_median = statistics.median(lower_delays) if lower_delays else None
+        overhead_upper_median = statistics.median(upper_delays) if upper_delays else None
         check(
             "watcher_overhead_measured_not_assumed",
-            len(delays) > 0,
-            f"watcher detection delay median {overhead_median:.3f} ms, "
-            f"max {delays[-1]:.3f} ms",
+            len(intervals) > 0,
+            f"watcher delay median interval {overhead_lower_median or 0:.3f}.."
+            f"{overhead_upper_median or 0:.3f} ms, upper max "
+            f"{upper_delays[-1] if upper_delays else 0:.3f} ms",
         )
         if "small" in summaries and summaries["small"]["latency_ms"]["median"]:
             signal = summaries["small"]["latency_ms"]["median"]
             check(
                 "overhead_does_not_exceed_signal",
-                overhead_median < signal,
-                f"overhead {overhead_median:.3f} ms vs signal {signal:.1f} ms — the "
+                overhead_upper_median is not None and overhead_upper_median < signal,
+                f"overhead upper median {overhead_upper_median or 0:.3f} ms vs "
+                f"signal {signal:.1f} ms — the "
                 f"existing public wording asserts the opposite",
             )
-
-    # --- isolation ------------------------------------------------------
-    status = subprocess.run(
-        ["git", "status", "--porcelain", ".dev-collab-stack", ".salvaged-from-minis"],
-        capture_output=True, text=True, cwd="../../..",
-    ).stdout.strip().splitlines()
-    disturbed = [line for line in status if not line.startswith("??")]
-    check(
-        "preexisting_untracked_dirs_untouched",
-        not disturbed,
-        f"{len(status)} entries, all still untracked: {[s[:3] for s in status]}",
-    )
 
     # --- report ---------------------------------------------------------
     width = max(len(name) for name, _, _ in RESULTS)

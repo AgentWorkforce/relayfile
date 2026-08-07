@@ -2,10 +2,9 @@
 
 Date: 2026-08-07
 Base commit: `ea67a73` (`chore(release): v0.10.39`)
-Sender: `khaliqs-macbook-pro`, Tailscale `100.89.219.17`
-Receiver: `sf-mac-mini` ("sf-mini"), Tailscale `100.102.30.76`
+Hosts: stable aliases `sender` and `receiver`; addresses are intentionally redacted
 Method: [`METHODOLOGY.md`](METHODOLOGY.md) — written before any trial was run
-Assertions: 26/26 pass (`harness/assertions.py`)
+Assertions: 33/33 pass (`harness/assertions.py`)
 
 ---
 
@@ -20,6 +19,13 @@ that was being checked:
 |---|---|---|---|---|---|
 | Single small file (~300 B) | 20 | **20.2 ms** | 161.7 ms | 12.3 ms | 183.3 ms |
 | Repo-sized change set (11 files, ~14 KB) | 20 | **216.7 ms** | 303.9 ms | 165.9 ms | 328.9 ms |
+
+These statistics are conditional on linear clock drift between the two offset
+anchors. The endpoint measurements cannot exclude an intervening clock step,
+so the clock-model error between anchors is unbounded; the ±2.3 ms figure below
+is only the path-symmetry uncertainty at the anchors. With n=20, each
+interpolated p95 depends on the two largest observations and should not be read
+as a well-resolved tail estimate.
 
 **Every number in this table holds only under this precondition: the relayfile
 server ran on the sender's own machine, so the sender→server leg was loopback,
@@ -56,9 +62,12 @@ agents commit change sets.
 order of magnitude, and is retired by this run.** The watcher's own detection
 delay was measured, not assumed: 25 local create/detect pairs on the receiver,
 same clock, same watcher code, same filesystem, no network, published by atomic
-rename to match how the mount daemon materialises remote content.
+rename to match how the mount daemon materialises remote content. The original
+control timestamp was taken immediately before `rename`, so these values are
+conservative upper bounds that also include the rename syscall; future runs
+record both sides of the visibility transition and report a delay interval.
 
-| Watcher detection delay | min | median | p95 | max |
+| Watcher detection-delay upper bound | min | median | p95 | max |
 |---|---|---|---|---|
 | Control, n=25 | 0.360 ms | **1.225 ms** | 2.349 ms | 2.455 ms |
 
@@ -75,7 +84,8 @@ sf-initiated median 315.526 ms / p95 372.479 ms (n=12), finn-initiated median
 problems: a round trip is not symmetric (the ack leg is a second full
 write-and-propagate plus the responder's scheduling delay); the responder
 polled at 5 ms granularity (`scripts/measure-mount-latency.rb:39,93`); and
-n=12 per direction cannot support a p95. That run was honest about avoiding
+n=12 per direction cannot support a meaningful tail estimate. That run was
+honest about avoiding
 clock skew — it used a single monotonic clock deliberately — but the cost of
 that choice was that it could not produce a one-way number at all.
 
@@ -96,7 +106,8 @@ above cannot be carried over to the product.
 
 Leg B carries essentially all of the change-set cost: 212.4 ms of the 216.7 ms
 median. The receive path is `applyWebSocketEvent` → `ReadFile` →
-`writeFileAtomic` per file (`internal/mountsync/syncer.go:3310,3320,3339`), so
+`writeFileAtomic` per file (`applyWebSocketEvent`, `ReadFile`, and
+`applyRemoteFile`, inspected at commit `5480825403ceae8bafb809e9eb0432000d41a91a`), so
 an 11-file change set costs 11 sequential server round trips on the receiver's
 side after the single websocket notification. That is the dominant term, and it
 scales with file count rather than with bytes — which is why the change-set
@@ -106,8 +117,8 @@ median is ~10× the single-file median for only ~47× the bytes.
 
 Repeated here in full because every figure in this document depends on it:
 
-- The relayfile server ran on the **sender's own machine**
-  (`100.89.219.17:18299`). The sender→server leg was loopback.
+- The relayfile server ran on the **sender's own machine**, bound to
+  `${SENDER_TAILNET_ADDRESS}:18299`. The sender→server leg was loopback.
 - The only network hop was **server→receiver**, across a Tailscale LAN between
   two Macs on the same tailnet, min RTT ~4.5 ms.
 - The receiver was a Mac mini on that same tailnet, not a typical end-user
@@ -145,7 +156,7 @@ selecting the minimum-delay sample:
 | Before trials | −6.441 ms | 4.537 ms | ±2.268 ms | 145 |
 | After trials | −14.765 ms | 4.577 ms | ±2.288 ms | 200 |
 
-**The offset moved 8.323 ms across a ~21 minute run** — roughly 8 ppm of
+**The offset moved 8.323 ms across a ~17 minute clock-anchor interval** — roughly 8 ppm of
 relative drift, and comparable to the entire small-file signal. Pinning a
 single offset would have biased every trial by up to the full drift; an
 early-run trial and a late-run trial would have been corrected by amounts
@@ -156,26 +167,28 @@ send time** between the two anchors. Zero trials fell outside the anchor span.
 This correction only exists because the offset was measured twice; a single
 measurement would have looked perfectly reasonable and been quietly wrong.
 
-Residual uncertainty from the symmetry assumption is ±2.3 ms, which is ~11% of
-the small-file median and ~1% of the change-set median.
+Residual uncertainty from the symmetry assumption at each anchor is ±2.3 ms,
+which is ~11% of the small-file median and ~1% of the change-set median. It is
+not a total error bar: with no offset sample inside the trial block, a clock
+step or nonlinear slew between anchors cannot be bounded by this evidence.
 
 ## Liveness gates
 
-sf-mini's participation was gated on its **own `lastHeartbeatAt` advancing**
+receiver's participation was gated on its **own `lastHeartbeatAt` advancing**
 across ≥90 s, before the trials and again at result time. Both passed.
 
 | Gate | Window | Samples | Distinct heartbeats observed |
 |---|---|---|---|
 | Pre-trial | 11:10:48Z → 11:13:16Z (148 s) | 14 | 11:09:54Z → 11:11:00Z → 11:12:00Z → 11:13:00Z |
-| Post-trial | 11:29:21Z → 11:31:36Z (135 s) | 13 | 11:29:08Z → 11:30:08Z → 11:31:09Z |
+| Post-trial | 11:29:21Z → 11:31:47Z (146 s) | 14 | 11:29:08Z → 11:30:08Z → 11:31:09Z |
 
 The node was present in every sample of both windows.
 
 **Two weaker signals were explicitly rejected, and the run demonstrates why.**
-Within the pre-trial window sf-mini's `status`/`live` flipped
+Within the pre-trial window receiver's `status`/`live` flipped
 `online`↔`offline` four times while its heartbeat advanced monotonically, and
 the post-trial window showed the same flapping. Separately, an MCP
-`query_nodes` call at 11:08Z reported sf-mini `status: "offline"`,
+`query_nodes` call at 11:08Z reported receiver `status: "offline"`,
 `live: false`, `handlersLive: false` while its heartbeat was 38 s old and
 advancing. Had either signal been trusted, this run would have been abandoned
 against a perfectly healthy host. `status` and `live` are registration fields,
@@ -209,10 +222,19 @@ when its **last** file arrives; ordering across files is not assumed.
 
 ```sh
 cd docs/evidence/mount-latency-20260807
-python3 harness/assertions.py          # 26 named assertions over the raw data
+python3 harness/assertions.py          # 33 named assertions over the raw data
+python3 harness/analyse.py raw/clock-offset-pre.jsonl raw/clock-offset-post.jsonl \
+        raw/trials-small.jsonl raw/mount-watch.jsonl small r2
+python3 harness/analyse.py raw/clock-offset-pre.jsonl raw/clock-offset-post.jsonl \
+        raw/trials-small.jsonl raw/mount-watch.jsonl small run20260807
 python3 harness/analyse.py raw/clock-offset-pre.jsonl raw/clock-offset-post.jsonl \
         raw/trials-repo.jsonl raw/mount-watch.jsonl repo r2
 ```
+
+The assertion command regenerates and checks both headline populations, both
+clock anchors, both liveness windows, and the selected `ctrl20260807` local
+control. Install the one non-stdlib auth-helper dependency for a new run with
+`python3 -m pip install -r harness/requirements.txt`.
 
 Raw evidence, appended live as each trial completed:
 
@@ -220,12 +242,16 @@ Raw evidence, appended live as each trial completed:
 |---|---|
 | `raw/trials-small.jsonl` | sender records, both small-file batches |
 | `raw/trials-repo.jsonl` | sender records, repo-sized batch |
-| `raw/mount-watch.jsonl` | receiver arrival timestamps, sf-mini's own clock |
+| `raw/mount-watch.jsonl` | receiver arrival timestamps, receiver's own clock |
 | `raw/control-create.jsonl`, `raw/control-watch.jsonl` | watcher-overhead control |
 | `raw/clock-offset-pre.jsonl`, `raw/clock-offset-post.jsonl` | clock offset anchors |
 | `raw/heartbeat-gate-pre.jsonl`, `raw/heartbeat-gate-post.jsonl` | liveness gates |
 
-Teardown and isolation verification: [`CLEANUP.md`](CLEANUP.md).
+Teardown and isolation scope: [`CLEANUP.md`](CLEANUP.md). The run used fresh
+ports, state, workspace, and mount paths, but no before/after content snapshot
+of the pre-existing untracked directories was captured. The earlier git-status
+check could not prove those directories were unchanged, so that assertion and
+claim have been retired rather than overstated.
 
 ## Follow-ups this run surfaced
 

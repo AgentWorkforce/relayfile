@@ -21,10 +21,11 @@ Trial shapes:
            a reader can expect from real agent work.
 
 Usage:
-    sender-trials.py SHAPE SERVER WORKSPACE TOKEN_FILE RUN_ID COUNT SPACING_S OUT_JSONL
+    sender-trials.py SHAPE SERVER WORKSPACE TOKEN_FILE RUN_ID COUNT SPACING_S OUT_JSONL HOST_ALIAS
 """
 
 import json
+import re
 import sys
 import time
 import urllib.error
@@ -47,6 +48,9 @@ def body_for(shape, run_id, trial):
             "fs/file",
             {"path": path, "content": content},
         )
+
+    if shape != "repo":
+        raise ValueError(f"unsupported shape: {shape!r}; expected 'small' or 'repo'")
 
     per_file = REPO_TOTAL_BYTES // REPO_FILE_COUNT
     files = []
@@ -81,6 +85,9 @@ def request(server, workspace, endpoint, payload, token, correlation_id):
 
 
 def main():
+    if len(sys.argv) != 10:
+        sys.stderr.write(__doc__)
+        return 2
     (
         shape,
         server,
@@ -90,7 +97,12 @@ def main():
         count,
         spacing,
         out_path,
-    ) = sys.argv[1:9]
+        host_alias,
+    ) = sys.argv[1:10]
+    if shape not in {"small", "repo"}:
+        raise SystemExit("SHAPE must be 'small' or 'repo'")
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", host_alias):
+        raise SystemExit("HOST_ALIAS must be a non-identifying slug")
     count = int(count)
     spacing = float(spacing)
     with open(token_file) as handle:
@@ -111,7 +123,11 @@ def main():
                 )
                 error = None
             except urllib.error.HTTPError as exc:
-                status, error = exc.code, exc.read().decode()[:400]
+                try:
+                    error = exc.read().decode(errors="replace")[:400]
+                except Exception as read_exc:  # preserve the failed trial record
+                    error = f"unable to read HTTP error body: {read_exc!r}"
+                status = exc.code
             except Exception as exc:  # noqa: BLE001 - record, never lose a trial
                 status, error = None, repr(exc)
             t_ack_ns = time.time_ns()
@@ -129,7 +145,7 @@ def main():
                 "ack_ms": (t_ack_ns - t_send_ns) / 1e6,
                 "http_status": status,
                 "error": error,
-                "host": "khaliqs-macbook-pro",
+                "host": host_alias,
                 "clock": "CLOCK_REALTIME",
             }
             raw.write(json.dumps(record) + "\n")
@@ -140,7 +156,8 @@ def main():
             )
             if trial < count:
                 time.sleep(spacing)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
