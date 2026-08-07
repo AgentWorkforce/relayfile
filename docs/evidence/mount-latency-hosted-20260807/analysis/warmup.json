@@ -1,0 +1,48 @@
+{
+  "label": "warmup",
+  "arrival_path_prefix": "",
+  "clock_offset_pre_ms": -2.012,
+  "clock_offset_post_ms": 1.173,
+  "clock_drift_across_run_ms": 3.185,
+  "clock_correction": "linearly interpolated to each trial's send time",
+  "clock_model_error_bound": "unbounded between anchors; endpoint samples cannot exclude a clock step",
+  "trials_extrapolated_outside_anchors": [],
+  "trials_sent": 2,
+  "trials_complete": 1,
+  "trials_incomplete": 0,
+  "trials_non_202": 1,
+  "incomplete_detail": [],
+  "non_202_detail": [
+    [
+      "hostedsf-warmup-small-001",
+      403,
+      "error code: 1010\n"
+    ]
+  ],
+  "latency_ms": {
+    "min": 25915.833856,
+    "median": 25915.833856,
+    "p95": 25915.833856,
+    "max": 25915.833856
+  },
+  "p95_note": null,
+  "leg_a_sender_to_server_ms": {
+    "median": 1889.626,
+    "p95": 1889.626
+  },
+  "leg_b_server_to_receiver_ms": {
+    "median": 24026.207744,
+    "p95": 24026.207744
+  },
+  "per_trial": [
+    {
+      "correlation_id": "hostedsf-warmup2-small-001",
+      "files": 1,
+      "bytes": 300,
+      "offset_applied_ms": -0.3917120837646769,
+      "leg_a_sender_to_server_ms": 1889.626,
+      "leg_b_server_to_receiver_ms": 24026.207744,
+      "latency_ms": 25915.833856
+    }
+  ]
+}

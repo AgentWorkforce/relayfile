@@ -1,0 +1,11 @@
+{
+  "deployment_url": "https://api.relayfile.dev",
+  "observed_date_utc": "2026-08-07",
+  "health_http_status": 200,
+  "health_body": {
+    "status": "ok"
+  },
+  "server_header": "cloudflare",
+  "application_build": "undetermined",
+  "build_discovery": "The public health body and response headers exposed no application build or version identifier."
+}

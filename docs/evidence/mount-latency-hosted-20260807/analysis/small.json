@@ -1,0 +1,213 @@
+{
+  "label": "small",
+  "arrival_path_prefix": "trials",
+  "clock_offset_pre_ms": 1.173,
+  "clock_offset_post_ms": 1.436,
+  "clock_drift_across_run_ms": 0.263,
+  "clock_correction": "linearly interpolated to each trial's send time",
+  "clock_model_error_bound": "unbounded between anchors; endpoint samples cannot exclude a clock step",
+  "trials_extrapolated_outside_anchors": [],
+  "trials_sent": 20,
+  "trials_complete": 20,
+  "trials_incomplete": 0,
+  "trials_non_202": 0,
+  "incomplete_detail": [],
+  "non_202_detail": [],
+  "latency_ms": {
+    "min": 1357.23264,
+    "median": 1475.612416,
+    "p95": 1929.8995840000007,
+    "max": 2859.55712
+  },
+  "p95_note": "n=20: interpolated p95 depends on the two largest observations",
+  "leg_a_sender_to_server_ms": {
+    "median": 1037.9099999999999,
+    "p95": 1417.4987000000006
+  },
+  "leg_b_server_to_receiver_ms": {
+    "median": 422.092672,
+    "p95": 536.2784256000001
+  },
+  "per_trial": [
+    {
+      "correlation_id": "hosted20260807-small-001",
+      "files": 1,
+      "bytes": 300,
+      "offset_applied_ms": 1.176114825095245,
+      "leg_a_sender_to_server_ms": 1038.008,
+      "leg_b_server_to_receiver_ms": 709.250048,
+      "latency_ms": 1747.258112
+    },
+    {
+      "correlation_id": "hosted20260807-small-002",
+      "files": 1,
+      "bytes": 300,
+      "offset_applied_ms": 1.1771751607494012,
+      "leg_a_sender_to_server_ms": 951.949,
+      "leg_b_server_to_receiver_ms": 422.695936,
+      "latency_ms": 1374.644992
+    },
+    {
+      "correlation_id": "hosted20260807-small-003",
+      "files": 1,
+      "bytes": 300,
+      "offset_applied_ms": 1.178217665240667,
+      "leg_a_sender_to_server_ms": 1102.197,
+      "leg_b_server_to_receiver_ms": 398.692864,
+      "latency_ms": 1500.889856
+    },
+    {
+      "correlation_id": "hosted20260807-small-004",
+      "files": 1,
+      "bytes": 300,
+      "offset_applied_ms": 1.1792906051135652,
+      "leg_a_sender_to_server_ms": 1016.361,
+      "leg_b_server_to_receiver_ms": 527.174656,
+      "latency_ms": 1543.535616
+    },
+    {
+      "correlation_id": "hosted20260807-small-005",
+      "files": 1,
+      "bytes": 300,
+      "offset_applied_ms": 1.180346555631817,
+      "leg_a_sender_to_server_ms": 1027.913,
+      "leg_b_server_to_receiver_ms": 502.472704,
+      "latency_ms": 1530.385664
+    },
+    {
+      "correlation_id": "hosted20260807-small-006",
+      "files": 1,
+      "bytes": 300,
+      "offset_applied_ms": 1.1814041046611299,
+      "leg_a_sender_to_server_ms": 1066.189,
+      "leg_b_server_to_receiver_ms": 377.165568,
+      "latency_ms": 1443.354368
+    },
+    {
+      "correlation_id": "hosted20260807-small-007",
+      "files": 1,
+      "bytes": 300,
+      "offset_applied_ms": 1.182470554036966,
+      "leg_a_sender_to_server_ms": 1025.409,
+      "leg_b_server_to_receiver_ms": 448.15744,
+      "latency_ms": 1473.566464
+    },
+    {
+      "correlation_id": "hosted20260807-small-008",
+      "files": 1,
+      "bytes": 300,
+      "offset_applied_ms": 1.1835287185571295,
+      "leg_a_sender_to_server_ms": 1039.107,
+      "leg_b_server_to_receiver_ms": 421.489408,
+      "latency_ms": 1460.59648
+    },
+    {
+      "correlation_id": "hosted20260807-small-009",
+      "files": 1,
+      "bytes": 300,
+      "offset_applied_ms": 1.1845897690968687,
+      "leg_a_sender_to_server_ms": 1255.339,
+      "leg_b_server_to_receiver_ms": 237.733632,
+      "latency_ms": 1493.07264
+    },
+    {
+      "correlation_id": "hosted20260807-small-010",
+      "files": 1,
+      "bytes": 300,
+      "offset_applied_ms": 1.1856947838391478,
+      "leg_a_sender_to_server_ms": 1228.071,
+      "leg_b_server_to_receiver_ms": 208.172032,
+      "latency_ms": 1436.2432
+    },
+    {
+      "correlation_id": "hosted20260807-small-011",
+      "files": 1,
+      "bytes": 300,
+      "offset_applied_ms": 1.1867943030823764,
+      "leg_a_sender_to_server_ms": 1367.463,
+      "leg_b_server_to_receiver_ms": 513.507072,
+      "latency_ms": 1880.97024
+    },
+    {
+      "correlation_id": "hosted20260807-small-012",
+      "files": 1,
+      "bytes": 300,
+      "offset_applied_ms": 1.1879239851597356,
+      "leg_a_sender_to_server_ms": 1037.812,
+      "leg_b_server_to_receiver_ms": 348.261376,
+      "latency_ms": 1386.073344
+    },
+    {
+      "correlation_id": "hosted20260807-small-013",
+      "files": 1,
+      "bytes": 300,
+      "offset_applied_ms": 1.1889836185365206,
+      "leg_a_sender_to_server_ms": 2368.177,
+      "leg_b_server_to_receiver_ms": 491.380224,
+      "latency_ms": 2859.55712
+    },
+    {
+      "correlation_id": "hosted20260807-small-014",
+      "files": 1,
+      "bytes": 300,
+      "offset_applied_ms": 1.1903238232808488,
+      "leg_a_sender_to_server_ms": 1015.827,
+      "leg_b_server_to_receiver_ms": 421.133568,
+      "latency_ms": 1436.960512
+    },
+    {
+      "correlation_id": "hosted20260807-small-015",
+      "files": 1,
+      "bytes": 300,
+      "offset_applied_ms": 1.1913783990837905,
+      "leg_a_sender_to_server_ms": 1079.659,
+      "leg_b_server_to_receiver_ms": 396.589824,
+      "latency_ms": 1476.248576
+    },
+    {
+      "correlation_id": "hosted20260807-small-016",
+      "files": 1,
+      "bytes": 300,
+      "offset_applied_ms": 1.1924461849300292,
+      "leg_a_sender_to_server_ms": 952.569,
+      "leg_b_server_to_receiver_ms": 404.663552,
+      "latency_ms": 1357.23264
+    },
+    {
+      "correlation_id": "hosted20260807-small-017",
+      "files": 1,
+      "bytes": 300,
+      "offset_applied_ms": 1.1934878791335792,
+      "leg_a_sender_to_server_ms": 1032.723,
+      "leg_b_server_to_receiver_ms": 473.320448,
+      "latency_ms": 1506.043392
+    },
+    {
+      "correlation_id": "hosted20260807-small-018",
+      "files": 1,
+      "bytes": 300,
+      "offset_applied_ms": 1.1945469598504332,
+      "leg_a_sender_to_server_ms": 1107.582,
+      "leg_b_server_to_receiver_ms": 381.672448,
+      "latency_ms": 1489.2544
+    },
+    {
+      "correlation_id": "hosted20260807-small-019",
+      "files": 1,
+      "bytes": 300,
+      "offset_applied_ms": 1.1956219462461692,
+      "leg_a_sender_to_server_ms": 969.288,
+      "leg_b_server_to_receiver_ms": 505.68832,
+      "latency_ms": 1474.976256
+    },
+    {
+      "correlation_id": "hosted20260807-small-020",
+      "files": 1,
+      "bytes": 300,
+      "offset_applied_ms": 1.1966663871485606,
+      "leg_a_sender_to_server_ms": 942.652,
+      "leg_b_server_to_receiver_ms": 474.769664,
+      "latency_ms": 1417.421568
+    }
+  ]
+}

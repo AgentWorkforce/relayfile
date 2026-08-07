@@ -1,0 +1,219 @@
+{
+  "label": "repo-r3",
+  "arrival_path_prefix": "trials",
+  "clock_offset_pre_ms": 1.173,
+  "clock_offset_post_ms": 1.436,
+  "clock_drift_across_run_ms": 0.263,
+  "clock_correction": "linearly interpolated to each trial's send time",
+  "clock_model_error_bound": "unbounded between anchors; endpoint samples cannot exclude a clock step",
+  "trials_extrapolated_outside_anchors": [],
+  "trials_sent": 25,
+  "trials_complete": 15,
+  "trials_incomplete": 10,
+  "trials_non_202": 0,
+  "incomplete_detail": [
+    [
+      "hosted20260807r3-repo-001",
+      11,
+      11
+    ],
+    [
+      "hosted20260807r3-repo-002",
+      11,
+      11
+    ],
+    [
+      "hosted20260807r3-repo-003",
+      11,
+      11
+    ],
+    [
+      "hosted20260807r3-repo-004",
+      11,
+      11
+    ],
+    [
+      "hosted20260807r3-repo-005",
+      11,
+      11
+    ],
+    [
+      "hosted20260807r3-repo-006",
+      11,
+      11
+    ],
+    [
+      "hosted20260807r3-repo-007",
+      11,
+      11
+    ],
+    [
+      "hosted20260807r3-repo-008",
+      11,
+      11
+    ],
+    [
+      "hosted20260807r3-repo-009",
+      11,
+      11
+    ],
+    [
+      "hosted20260807r3-repo-010",
+      7,
+      11
+    ]
+  ],
+  "non_202_detail": [],
+  "latency_ms": {
+    "min": 21043.529216,
+    "median": 48358.316288,
+    "p95": 82530.95390719999,
+    "max": 87520.86016
+  },
+  "p95_note": null,
+  "leg_a_sender_to_server_ms": {
+    "median": 6276.693,
+    "p95": 8047.622599999999
+  },
+  "leg_b_server_to_receiver_ms": {
+    "median": 41295.134208,
+    "p95": 74483.331328
+  },
+  "per_trial": [
+    {
+      "correlation_id": "hosted20260807r3-repo-011",
+      "files": 11,
+      "bytes": 13992,
+      "offset_applied_ms": 1.3267393081506895,
+      "leg_a_sender_to_server_ms": 8343.962,
+      "leg_b_server_to_receiver_ms": 79176.898304,
+      "latency_ms": 87520.86016
+    },
+    {
+      "correlation_id": "hosted20260807r3-repo-012",
+      "files": 11,
+      "bytes": 13992,
+      "offset_applied_ms": 1.3293347139190255,
+      "leg_a_sender_to_server_ms": 7920.62,
+      "leg_b_server_to_receiver_ms": 72471.802624,
+      "latency_ms": 80392.422656
+    },
+    {
+      "correlation_id": "hosted20260807r3-repo-013",
+      "files": 11,
+      "bytes": 13992,
+      "offset_applied_ms": 1.3318418638890612,
+      "leg_a_sender_to_server_ms": 6033.745,
+      "leg_b_server_to_receiver_ms": 67487.762944,
+      "latency_ms": 73521.50784
+    },
+    {
+      "correlation_id": "hosted20260807r3-repo-014",
+      "files": 11,
+      "bytes": 13992,
+      "offset_applied_ms": 1.3339506370384673,
+      "leg_a_sender_to_server_ms": 6213.131,
+      "leg_b_server_to_receiver_ms": 62824.528128,
+      "latency_ms": 69037.659136
+    },
+    {
+      "correlation_id": "hosted20260807r3-repo-015",
+      "files": 11,
+      "bytes": 13992,
+      "offset_applied_ms": 1.3360984758901697,
+      "leg_a_sender_to_server_ms": 6553.651,
+      "leg_b_server_to_receiver_ms": 57476.952064,
+      "latency_ms": 64030.603008
+    },
+    {
+      "correlation_id": "hosted20260807r3-repo-016",
+      "files": 11,
+      "bytes": 13992,
+      "offset_applied_ms": 1.338317007722046,
+      "leg_a_sender_to_server_ms": 7030.993,
+      "leg_b_server_to_receiver_ms": 51839.642624,
+      "latency_ms": 58870.635776
+    },
+    {
+      "correlation_id": "hosted20260807r3-repo-017",
+      "files": 11,
+      "bytes": 13992,
+      "offset_applied_ms": 1.3406370011927824,
+      "leg_a_sender_to_server_ms": 6276.693,
+      "leg_b_server_to_receiver_ms": 46743.568384,
+      "latency_ms": 53020.261376
+    },
+    {
+      "correlation_id": "hosted20260807r3-repo-018",
+      "files": 11,
+      "bytes": 13992,
+      "offset_applied_ms": 1.3427983987048249,
+      "leg_a_sender_to_server_ms": 7063.182,
+      "leg_b_server_to_receiver_ms": 41295.134208,
+      "latency_ms": 48358.316288
+    },
+    {
+      "correlation_id": "hosted20260807r3-repo-019",
+      "files": 11,
+      "bytes": 13992,
+      "offset_applied_ms": 1.3451236953993886,
+      "leg_a_sender_to_server_ms": 5950.645,
+      "leg_b_server_to_receiver_ms": 36955.006976,
+      "latency_ms": 42905.651968
+    },
+    {
+      "correlation_id": "hosted20260807r3-repo-020",
+      "files": 11,
+      "bytes": 13992,
+      "offset_applied_ms": 1.3472164237593145,
+      "leg_a_sender_to_server_ms": 5818.373,
+      "leg_b_server_to_receiver_ms": 33179.746816,
+      "latency_ms": 38998.11968
+    },
+    {
+      "correlation_id": "hosted20260807r3-repo-021",
+      "files": 11,
+      "bytes": 13992,
+      "offset_applied_ms": 1.3492806415912062,
+      "leg_a_sender_to_server_ms": 6122.922,
+      "leg_b_server_to_receiver_ms": 28535.82976,
+      "latency_ms": 34658.751744
+    },
+    {
+      "correlation_id": "hosted20260807r3-repo-022",
+      "files": 11,
+      "bytes": 13992,
+      "offset_applied_ms": 1.351409959820994,
+      "leg_a_sender_to_server_ms": 6794.837,
+      "leg_b_server_to_receiver_ms": 23587.107584,
+      "latency_ms": 30381.944576
+    },
+    {
+      "correlation_id": "hosted20260807r3-repo-023",
+      "files": 11,
+      "bytes": 13992,
+      "offset_applied_ms": 1.3536804662723494,
+      "leg_a_sender_to_server_ms": 6061.308,
+      "leg_b_server_to_receiver_ms": 19283.25248,
+      "latency_ms": 25344.560384
+    },
+    {
+      "correlation_id": "hosted20260807r3-repo-024",
+      "files": 11,
+      "bytes": 13992,
+      "offset_applied_ms": 1.3557955935399983,
+      "leg_a_sender_to_server_ms": 6237.663,
+      "leg_b_server_to_receiver_ms": 14805.86624,
+      "latency_ms": 21043.529216
+    },
+    {
+      "correlation_id": "hosted20260807r3-repo-025",
+      "files": 11,
+      "bytes": 13992,
+      "offset_applied_ms": 1.357947277686023,
+      "leg_a_sender_to_server_ms": 6683.14,
+      "leg_b_server_to_receiver_ms": 25767.327232,
+      "latency_ms": 32450.467328
+    }
+  ]
+}
