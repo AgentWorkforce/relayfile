@@ -175,7 +175,7 @@ from a failed run.** Until valid results exist the public claim stays exactly:
 and is never stated as sub-100ms.
 
 **Outcome (added after the run):** both liveness gates passed, the propagation
-path held for all 52 trials, and 33/33 named assertions pass. Results are in
+path held for all 52 trials, and 37/37 named assertions pass. Results are in
 [`RESULTS.md`](RESULTS.md). Both halves of the claim above turned out to be
 wrong — "sub-200ms" is false for realistic repo-sized change sets (median
 216.7 ms), and the measurement overhead is ~1.2 ms against signals of 20.2 ms

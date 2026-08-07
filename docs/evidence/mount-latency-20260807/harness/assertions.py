@@ -147,6 +147,16 @@ def main():
             f"incomplete: {summary['incomplete_detail']}",
         )
         check(
+            f"{shape}_one_to_one_path_pairing",
+            summary.get("ambiguous_detail") == [],
+            f"ambiguous: {summary.get('ambiguous_detail')}",
+        )
+        check(
+            f"{shape}_no_clock_ambiguous_arrivals",
+            summary.get("clock_ambiguous_detail") == [],
+            f"flagged: {summary.get('clock_ambiguous_detail')}",
+        )
+        check(
             f"{shape}_all_writes_accepted",
             summary["trials_non_202"] == 0,
             f"non-202: {summary['non_202_detail']}",
@@ -214,7 +224,11 @@ def main():
             len(selected_creates) == 25,
             f"{len(selected_creates)} create records for run {control_run}",
         )
-        check("control_paired_at_least_20", len(intervals) >= 20, f"{len(intervals)} pairs")
+        check(
+            "control_paired_all_selected",
+            len(intervals) == len(selected_creates) == 25,
+            f"{len(intervals)} pairs from {len(selected_creates)} selected creates",
+        )
         overhead_lower_median = statistics.median(lower_delays) if lower_delays else None
         overhead_upper_median = statistics.median(upper_delays) if upper_delays else None
         check(

@@ -101,6 +101,8 @@ def main():
     ) = sys.argv[1:10]
     if shape not in {"small", "repo"}:
         raise SystemExit("SHAPE must be 'small' or 'repo'")
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", run_id) or run_id in {".", ".."}:
+        raise SystemExit("RUN_ID must be a safe slug")
     if not re.fullmatch(r"[A-Za-z0-9._-]+", host_alias):
         raise SystemExit("HOST_ALIAS must be a non-identifying slug")
     count = int(count)

@@ -4,7 +4,7 @@ Date: 2026-08-07
 Base commit: `ea67a73` (`chore(release): v0.10.39`)
 Hosts: stable aliases `sender` and `receiver`; addresses are intentionally redacted
 Method: [`METHODOLOGY.md`](METHODOLOGY.md) — written before any trial was run
-Assertions: 33/33 pass (`harness/assertions.py`)
+Assertions: 37/37 pass (`harness/assertions.py`)
 
 ---
 
