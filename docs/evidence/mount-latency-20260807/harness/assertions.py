@@ -148,7 +148,7 @@ def main():
         )
         check(
             f"{shape}_one_to_one_path_pairing",
-            summary.get("ambiguous_detail") == [],
+            summary.get("trials_ambiguous") == 0,
             f"ambiguous: {summary.get('ambiguous_detail')}",
         )
         check(
