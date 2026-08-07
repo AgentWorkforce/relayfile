@@ -57,6 +57,7 @@ const (
 	websocketReconcileEvery                   = 10
 	defaultMountMode                          = "poll"
 	defaultMountInterval                      = 30 * time.Second
+	defaultEventSilenceThreshold              = 24 * time.Hour
 	minMountPollInterval                      = 5 * time.Second
 	defaultMountTimeout                       = 15 * time.Second
 )
@@ -450,12 +451,14 @@ type syncStateGuardCirc struct {
 }
 
 type syncStateProvider struct {
-	Provider        string `json:"provider"`
-	Status          string `json:"status"`
-	LagSeconds      int    `json:"lagSeconds"`
-	DeadLetteredOps int    `json:"deadLetteredOps"`
-	LastError       string `json:"lastError,omitempty"`
-	LastEventAt     string `json:"lastEventAt,omitempty"`
+	Provider         string `json:"provider"`
+	Status           string `json:"status"`
+	LagSeconds       int    `json:"lagSeconds"`
+	DeadLetteredOps  int    `json:"deadLetteredOps"`
+	LastError        string `json:"lastError,omitempty"`
+	LastEventAt      string `json:"lastEventAt,omitempty"`
+	EventStatus      string `json:"eventStatus"`
+	EventIdleSeconds int64  `json:"eventIdleSeconds,omitempty"`
 }
 
 type syncStateDaemon struct {
@@ -8557,9 +8560,12 @@ func runStatus(args []string, stdout io.Writer) error {
 		if hasNonEmptyString(provider.WatermarkTs) {
 			lastEvent = humanizeRecentTime(strings.TrimSpace(*provider.WatermarkTs))
 		}
-		line := fmt.Sprintf("  %-12s %-8s lag %s", provider.Provider, provider.Status, formatLag(provider.LagSeconds))
+		eventStatus, eventIdleSeconds := providerEventLiveness(provider, time.Now().UTC(), eventSilenceThreshold())
+		line := fmt.Sprintf("  %-12s %-8s queue lag %s", provider.Provider, provider.Status, formatLag(provider.LagSeconds))
 		if lastEvent != "-" {
-			line += "   last event " + lastEvent
+			line += "   event " + eventStatus + "; last event " + lastEvent
+		} else {
+			line += "   event " + eventStatus
 		}
 		if provider.LastError != nil && strings.TrimSpace(*provider.LastError) != "" {
 			line += "   last error: " + strings.TrimSpace(*provider.LastError)
@@ -8574,6 +8580,13 @@ func runStatus(args []string, stdout io.Writer) error {
 		if provider.WebhookHealthy != nil && !*provider.WebhookHealthy && provider.LagSeconds > 60 {
 			fmt.Fprintf(stdout, "    %s webhook unhealthy — falling back to periodic sync (lag %s)\n",
 				provider.Provider, formatLag(provider.LagSeconds))
+		}
+		switch eventStatus {
+		case "silent":
+			fmt.Fprintf(stdout, "    %s event feed silent for %s — queue lag %s only means no queued work\n",
+				provider.Provider, formatLag(int(eventIdleSeconds)), formatLag(provider.LagSeconds))
+		case "unverified":
+			fmt.Fprintf(stdout, "    %s event feed liveness unverified — no provider event watermark has been recorded\n", provider.Provider)
 		}
 	}
 	if record.LocalDir != "" {
@@ -10889,6 +10902,33 @@ func hasNonEmptyString(value *string) bool {
 	return value != nil && strings.TrimSpace(*value) != ""
 }
 
+func eventSilenceThreshold() time.Duration {
+	threshold := durationEnv("RELAYFILE_EVENT_SILENCE_THRESHOLD", defaultEventSilenceThreshold)
+	if threshold <= 0 {
+		return defaultEventSilenceThreshold
+	}
+	return threshold
+}
+
+func providerEventLiveness(provider syncProviderStatus, now time.Time, threshold time.Duration) (string, int64) {
+	if !hasNonEmptyString(provider.WatermarkTs) {
+		return "unverified", 0
+	}
+	lastEventAt, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(*provider.WatermarkTs))
+	if err != nil {
+		return "unverified", 0
+	}
+	idle := now.UTC().Sub(lastEventAt.UTC())
+	if idle < 0 {
+		idle = 0
+	}
+	idleSeconds := int64(idle / time.Second)
+	if threshold > 0 && idle >= threshold {
+		return "silent", idleSeconds
+	}
+	return "active", idleSeconds
+}
+
 func ingressProviderStatusFor(ingress *syncIngressStatusResponse, provider string) (syncIngressProviderStatus, bool) {
 	if ingress == nil || len(ingress.IngressByProvider) == 0 {
 		return syncIngressProviderStatus{}, false
@@ -10979,12 +11019,17 @@ func buildSyncStateSnapshot(status syncStatusResponse, workspaceID, mode string,
 	}
 	providers := make([]syncStateProvider, 0, len(status.Providers))
 	var lastEvent string
+	now := time.Now().UTC()
+	silenceThreshold := eventSilenceThreshold()
 	for _, provider := range status.Providers {
+		eventStatus, eventIdleSeconds := providerEventLiveness(provider, now, silenceThreshold)
 		item := syncStateProvider{
-			Provider:        provider.Provider,
-			Status:          provider.Status,
-			LagSeconds:      provider.LagSeconds,
-			DeadLetteredOps: provider.DeadLetteredOps,
+			Provider:         provider.Provider,
+			Status:           provider.Status,
+			LagSeconds:       provider.LagSeconds,
+			DeadLetteredOps:  provider.DeadLetteredOps,
+			EventStatus:      eventStatus,
+			EventIdleSeconds: eventIdleSeconds,
 		}
 		if provider.LastError != nil {
 			item.LastError = strings.TrimSpace(*provider.LastError)
