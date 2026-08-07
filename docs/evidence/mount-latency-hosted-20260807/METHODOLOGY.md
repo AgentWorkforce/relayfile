@@ -110,7 +110,21 @@ then given one explicit stable header:
     User-Agent: relayfile-latency-harness/1
 
 No payload, timestamp boundary, trial shape, retry policy, or statistic changed.
-The exact modified harness is committed here.
+
+## Post-capture review hardening
+
+The capture-time harness is preserved in parent evidence commit `7637b16`. The
+current committed harness adds two review hardenings that do not change behavior
+for these recorded safe, unique run IDs:
+
+- sender and control run IDs now reject dot segments before path construction;
+- analysis pairs exact paths one-to-one, reports duplicate observations as
+  ambiguous, and reports a complete pairing that the clock model places before
+  send as clock-ambiguous instead of using modeled time as a hard cutoff.
+
+Every committed analysis JSON was regenerated from the unchanged raw JSONL with
+that hardened policy. All headline figures and attempt counts remained the
+same, and 54/54 named assertions pass.
 
 ## Receiver-local control
 

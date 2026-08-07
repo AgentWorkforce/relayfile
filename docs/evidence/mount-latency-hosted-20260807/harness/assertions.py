@@ -123,6 +123,16 @@ def main():
             f"{summary['trials_complete']} complete of {summary['trials_sent']}",
         )
         check(f"{label}_no_incomplete", summary["trials_incomplete"] == 0, summary["incomplete_detail"])
+        check(
+            f"{label}_one_to_one_path_pairing",
+            summary.get("ambiguous_detail") == [],
+            summary.get("ambiguous_detail"),
+        )
+        check(
+            f"{label}_no_clock_ambiguous_arrivals",
+            summary.get("clock_ambiguous_detail") == [],
+            summary.get("clock_ambiguous_detail"),
+        )
         check(f"{label}_all_accepted", summary["trials_non_202"] == 0, summary["non_202_detail"])
         check(
             f"{label}_inside_clock_anchors",

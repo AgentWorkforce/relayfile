@@ -7,6 +7,8 @@
   "clock_correction": "linearly interpolated to each trial's send time",
   "clock_model_error_bound": "unbounded between anchors; endpoint samples cannot exclude a clock step",
   "trials_extrapolated_outside_anchors": [],
+  "trials_clock_ambiguous": 0,
+  "clock_ambiguous_detail": [],
   "trials_sent": 20,
   "trials_complete": 14,
   "trials_incomplete": 6,
@@ -43,6 +45,7 @@
       11
     ]
   ],
+  "ambiguous_detail": [],
   "non_202_detail": [],
   "latency_ms": {
     "min": 10717.92128,

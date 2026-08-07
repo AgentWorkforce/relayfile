@@ -29,8 +29,8 @@ def main():
     count = int(count)
     spacing = float(spacing)
     os.makedirs(control_dir, exist_ok=True)
-    if not re.fullmatch(r"[A-Za-z0-9._-]+", run_id):
-        raise SystemExit("RUN_ID must contain only letters, digits, '.', '_' or '-'")
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", run_id) or run_id in {".", ".."}:
+        raise SystemExit("RUN_ID must be a safe slug")
     run_dir = os.path.join(control_dir, run_id)
     if os.path.isdir(run_dir) and os.listdir(run_dir):
         raise SystemExit(f"control run already exists: {run_id}")

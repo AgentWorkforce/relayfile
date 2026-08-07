@@ -17,6 +17,12 @@ Rules this script enforces rather than papers over:
   - A trial with any missing arrival is reported as INCOMPLETE and excluded
     from percentiles, but is always counted and named in the output. Losses
     are never silently dropped.
+  - The exact workspace path is the trial identity. Every selected send path
+    and final-path observation must pair one-to-one; repeated paths or repeated
+    observations are AMBIGUOUS and excluded rather than time-guessed.
+  - A one-to-one arrival that the interpolated clock model places before its
+    send is CLOCK-AMBIGUOUS, not missing. It is named and excluded from latency
+    percentiles because the between-anchor clock-model error is unbounded.
   - The daemon's atomic-write temp files (`.name.tmp-<pid>`) are not arrivals.
   - Percentiles are computed with linear interpolation, and p95 on n=20 is
     reported with an explicit note that it rests on the top few samples.
@@ -32,7 +38,6 @@ Usage:
     analyse.py OFFSET_PRE_JSONL OFFSET_POST_JSONL SENDS_JSONL ARRIVALS_JSONL [LABEL] [RUN_ID] [ARRIVAL_PREFIX]
 """
 
-import bisect
 import json
 import os
 import sys
@@ -79,13 +84,6 @@ def load_arrivals(path, arrival_prefix=""):
     return arrivals
 
 
-def first_arrival_at_or_after(arrivals, path, lower_bound_ns):
-    """Select this trial's arrival, never a stale observation from an older run."""
-    observations = arrivals.get(path, [])
-    index = bisect.bisect_left(observations, lower_bound_ns)
-    return observations[index] if index < len(observations) else None
-
-
 def anchor(path):
     """Return (reference_time_ns, offset_ns) from the least-queued exchange."""
     # The trailing summary record also mentions delay (`min_delay_ns`), so
@@ -127,35 +125,54 @@ def main():
     arrival_prefix = sys.argv[7] if len(sys.argv) > 7 else ""
 
     arrivals = load_arrivals(arrivals_path, arrival_prefix)
+    sends = [
+        send
+        for send in (json.loads(line) for line in open(sends_path) if line.strip())
+        if not run_filter or send.get("run_id") == run_filter
+    ]
+    # A workspace path is the trial identity: sender-trials.py embeds the
+    # validated run id, shape, and trial number in every unique path. Refuse
+    # ambiguous reuse instead of choosing an observation by modeled time.
+    path_send_counts = {}
+    for send in sends:
+        if send.get("http_status") != 202:
+            continue
+        for path in send["paths"]:
+            path_send_counts[path] = path_send_counts.get(path, 0) + 1
     latencies = []
     extrapolated_trials = []
+    clock_ambiguous = []
     incomplete = []
+    ambiguous = []
     non_202 = []
 
-    for line in open(sends_path):
-        line = line.strip()
-        if not line:
-            continue
-        send = json.loads(line)
-        if run_filter and send.get("run_id") != run_filter:
-            continue
+    for send in sends:
         if send.get("http_status") != 202:
             non_202.append((send["correlation_id"], send.get("http_status"), send.get("error")))
             continue
 
         trial_offset_ns, extrapolated = offset_at(send["t_send_ns"], pre, post)
-        # Receiver timestamps before this modeled instant cannot belong to this
-        # send. This prevents an append-only arrival file from pairing a rerun
-        # with an older observation of the same path.
-        receiver_send_floor_ns = send["t_send_ns"] + trial_offset_ns
-        observed = [
-            first_arrival_at_or_after(arrivals, path, receiver_send_floor_ns)
-            for path in send["paths"]
-        ]
-        if any(value is None for value in observed):
-            missing = [p for p, v in zip(send["paths"], observed) if v is None]
+        missing = [path for path in send["paths"] if not arrivals.get(path)]
+        if missing:
             incomplete.append((send["correlation_id"], len(missing), len(send["paths"])))
             continue
+        ambiguous_paths = [
+            path
+            for path in send["paths"]
+            if path_send_counts.get(path) != 1 or len(arrivals.get(path, [])) != 1
+        ]
+        if ambiguous_paths:
+            ambiguous.append(
+                (
+                    send["correlation_id"],
+                    [
+                        (path, path_send_counts.get(path, 0), len(arrivals.get(path, [])))
+                        for path in ambiguous_paths
+                    ],
+                )
+            )
+            continue
+        observed = [arrivals[path][0] for path in send["paths"]]
 
         # Change set is complete when its last file lands.
         completion_ns = max(observed)
@@ -164,6 +181,18 @@ def main():
         if extrapolated:
             extrapolated_trials.append(send["correlation_id"])
         corrected_arrival_ns = completion_ns - trial_offset_ns
+        if corrected_arrival_ns < send["t_send_ns"]:
+            # Do not use the interpolated model as a hard causal cutoff: the
+            # stated between-anchor clock error is unbounded. Preserve the
+            # complete path pairing as clock-ambiguous, but do not let an
+            # impossible modeled latency enter the percentile distribution.
+            clock_ambiguous.append(
+                (
+                    send["correlation_id"],
+                    (corrected_arrival_ns - send["t_send_ns"]) / 1e6,
+                )
+            )
+            continue
         latencies.append(
             {
                 "correlation_id": send["correlation_id"],
@@ -190,11 +219,20 @@ def main():
             "unbounded between anchors; endpoint samples cannot exclude a clock step"
         ),
         "trials_extrapolated_outside_anchors": extrapolated_trials,
-        "trials_sent": len(latencies) + len(incomplete) + len(non_202),
+        "trials_clock_ambiguous": len(clock_ambiguous),
+        "clock_ambiguous_detail": clock_ambiguous,
+        "trials_sent": (
+            len(latencies)
+            + len(incomplete)
+            + len(ambiguous)
+            + len(clock_ambiguous)
+            + len(non_202)
+        ),
         "trials_complete": len(values),
-        "trials_incomplete": len(incomplete),
+        "trials_incomplete": len(incomplete) + len(ambiguous),
         "trials_non_202": len(non_202),
         "incomplete_detail": incomplete,
+        "ambiguous_detail": ambiguous,
         "non_202_detail": non_202,
         "latency_ms": {
             "min": values[0] if values else None,

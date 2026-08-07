@@ -129,4 +129,4 @@ for a sub-200 ms hosted-product claim.
 | `harness/` | exact measurement, analysis, and assertion code used |
 
 From this directory, `python3 harness/assertions.py` regenerates the analyses
-and gates the claims against raw evidence.
+and gates the claims against raw evidence; 54/54 named assertions pass.
