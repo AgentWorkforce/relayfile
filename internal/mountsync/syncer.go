@@ -1106,6 +1106,9 @@ type Syncer struct {
 	wsReconnectFailures  int
 	wsConnecting         bool
 	wsGeneration         int64
+	wsLastConnectedAt    time.Time
+	wsLastAttemptAt      time.Time
+	listenerHeartbeatAt  time.Time
 	bulkFlushThreshold   int
 	mode                 string
 	interval             time.Duration
@@ -1537,6 +1540,19 @@ type publicState struct {
 	// CredExpiresInSecs is seconds until the delegated access token expires.
 	// Negative means already expired. Omitted (0) when unknown.
 	CredExpiresInSecs int64 `json:"credExpiresInSecs,omitempty"`
+	// EventListener is a liveness signal, not an event-volume metric. An idle
+	// websocket can be healthy with no new events; a reconnecting or disabled
+	// listener is a different operational state and must be surfaced as such.
+	EventListener eventListenerHealth `json:"eventListener"`
+}
+
+type eventListenerHealth struct {
+	Mode            string `json:"mode"`
+	Status          string `json:"status"`
+	HeartbeatAt     string `json:"heartbeatAt,omitempty"`
+	LastConnectedAt string `json:"lastConnectedAt,omitempty"`
+	LastAttemptAt   string `json:"lastAttemptAt,omitempty"`
+	NextAttemptAt   string `json:"nextAttemptAt,omitempty"`
 }
 
 // bootstrapStatus is the public, cursor-free view of bootstrap progress.
@@ -3239,6 +3255,7 @@ func (s *Syncer) connectWebSocket(ctx context.Context) error {
 		return nil
 	}
 	s.wsConnecting = true
+	s.wsLastAttemptAt = time.Now().UTC()
 	generation := s.wsGeneration
 	s.mu.Unlock()
 
@@ -3281,6 +3298,7 @@ func (s *Syncer) connectWebSocket(ctx context.Context) error {
 	s.wsCancel = cancel
 	s.wsNextAttempt = time.Time{}
 	s.wsReconnectFailures = 0
+	s.wsLastConnectedAt = time.Now().UTC()
 	s.mu.Unlock()
 
 	go s.readWebSocketLoop(readCtx, conn)
@@ -3498,6 +3516,40 @@ func websocketReconnectDelay(failures int) time.Duration {
 		return defaultWebSocketReconnectMax
 	}
 	return delay
+}
+
+// listenerHealthLocked returns listener state independently of LastEventAt.
+// Callers that publish public state already hold s.mu, so this intentionally
+// does not take the lock itself.
+func (s *Syncer) listenerHealthLocked() eventListenerHealth {
+	health := eventListenerHealth{
+		HeartbeatAt:     formatListenerTime(s.listenerHeartbeatAt),
+		LastConnectedAt: formatListenerTime(s.wsLastConnectedAt),
+		LastAttemptAt:   formatListenerTime(s.wsLastAttemptAt),
+		NextAttemptAt:   formatListenerTime(s.wsNextAttempt),
+	}
+	if !s.websocket {
+		health.Mode = "poll"
+		health.Status = "polling"
+		return health
+	}
+	health.Mode = "websocket"
+	switch {
+	case s.wsConn != nil:
+		health.Status = "listening"
+	case s.wsConnecting:
+		health.Status = "connecting"
+	default:
+		health.Status = "reconnecting"
+	}
+	return health
+}
+
+func formatListenerTime(value time.Time) string {
+	if value.IsZero() {
+		return ""
+	}
+	return value.UTC().Format(time.RFC3339Nano)
 }
 
 func (s *Syncer) HTTPClient() (*HTTPClient, bool) {
@@ -7221,6 +7273,7 @@ func (s *Syncer) savePublicState() error {
 		Outbox:                    outbox,
 		LastAppliedRevision:       s.state.LastAppliedRevision,
 		Bootstrap:                 bootstrap,
+		EventListener:             s.listenerHealthLocked(),
 	}
 	if s.circuit != nil {
 		snap := s.circuit.Snapshot()
@@ -7436,17 +7489,21 @@ func (s *Syncer) markReconcileStarted() {
 }
 
 func (s *Syncer) markSyncSuccess() {
-	now := time.Now().UTC().Format(time.RFC3339Nano)
+	nowTime := time.Now().UTC()
+	now := nowTime.Format(time.RFC3339Nano)
 	s.state.LastReconcileAt = now
 	if !s.state.IncrementalBacklogDraining {
 		s.state.LastSuccessfulReconcileAt = now
 	}
 	s.state.LastError = nil
+	s.listenerHeartbeatAt = nowTime
 }
 
 func (s *Syncer) markSyncError(err error) {
-	s.state.LastReconcileAt = time.Now().UTC().Format(time.RFC3339Nano)
+	now := time.Now().UTC()
+	s.state.LastReconcileAt = now.Format(time.RFC3339Nano)
 	s.state.LastError = classifyStatusError(err)
+	s.listenerHeartbeatAt = now
 }
 
 func parseStateTime(value string) (time.Time, error) {
