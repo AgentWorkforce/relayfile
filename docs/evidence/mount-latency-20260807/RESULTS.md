@@ -264,6 +264,8 @@ claim have been retired rather than overstated.
    assessment flagged the help text as underselling propagation speed. With
    these numbers the correction is not simply "it's faster" — it is
    size-dependent, and any replacement wording should say so.
-3. **The hosted path is still unmeasured.** Both this run and the 2026-07-26
-   run put the server on one of the two participating machines. No evidence
-   currently exists for the product topology.
+3. **This run does not measure the hosted path.** Both this run and the
+   2026-07-26 run put the server on one of the two participating machines, so
+   none of their figures license a hosted-product claim. A separate first
+   hosted measurement, including its failed and incomplete attempts, is now
+   recorded in [`../mount-latency-hosted-20260807/`](../mount-latency-hosted-20260807/).

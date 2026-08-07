@@ -1,0 +1,24 @@
+{
+  "run_id": "hostedctrl20260807",
+  "created": 25,
+  "paired": 25,
+  "detection_delay_upper_ms": {
+    "min": 0.417,
+    "median": 1.693,
+    "p95": 3.500799999999999,
+    "max": 3.621
+  },
+  "detection_delay_lower_ms": {
+    "min": -0.022,
+    "median": 1.371,
+    "p95": 3.130399999999999,
+    "max": 3.219
+  },
+  "publish_interval_ms": {
+    "min": 0.076,
+    "median": 0.368,
+    "p95": 0.4255999999999999,
+    "max": 0.439
+  },
+  "interpretation": "visibility occurs between publish start and publish end; detection delay is bounded by the reported lower/upper distributions"
+}

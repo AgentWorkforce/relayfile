@@ -1,0 +1,16 @@
+{"kind": "watcher_started", "watch_dir": "receiver-mount-root", "poll_seconds": 0.001, "primed_paths": 218, "started_ns": 1786124953062322000}
+{"path": "google-mail/threads/19f9a476425ec387.json", "observed_ns": 1786124996788011000, "size": 8789, "host": "receiver", "clock": "CLOCK_REALTIME"}
+{"path": "google-mail/threads/by-id/19f9800867015226.json", "observed_ns": 1786124997280649000, "size": 225, "host": "receiver", "clock": "CLOCK_REALTIME"}
+{"path": "google-mail/threads/by-id/19f9800affaae67b.json", "observed_ns": 1786124997746908000, "size": 225, "host": "receiver", "clock": "CLOCK_REALTIME"}
+{"path": "google-mail/threads/by-id/19f9801733034544.json", "observed_ns": 1786124998313259000, "size": 225, "host": "receiver", "clock": "CLOCK_REALTIME"}
+{"path": "google-mail/threads/by-id/19f9817226bd923d.json", "observed_ns": 1786124998840927000, "size": 225, "host": "receiver", "clock": "CLOCK_REALTIME"}
+{"path": "google-mail/threads/by-id/19f981cd2148ceb2.json", "observed_ns": 1786124999312623000, "size": 225, "host": "receiver", "clock": "CLOCK_REALTIME"}
+{"path": "google-mail/threads/by-id/19f985422463d3d5.json", "observed_ns": 1786124999806219000, "size": 225, "host": "receiver", "clock": "CLOCK_REALTIME"}
+{"path": "google-mail/threads/by-id/19f9888674d3e888.json", "observed_ns": 1786125000599849000, "size": 225, "host": "receiver", "clock": "CLOCK_REALTIME"}
+{"path": "google-mail/threads/by-id/19f989c736a7f53a.json", "observed_ns": 1786125001206780000, "size": 225, "host": "receiver", "clock": "CLOCK_REALTIME"}
+{"path": "google-mail/threads/by-id/19f98d702832a302.json", "observed_ns": 1786125001701290000, "size": 225, "host": "receiver", "clock": "CLOCK_REALTIME"}
+{"path": "google-mail/threads/by-id/19f9a078e60fb463.json", "observed_ns": 1786125002188311000, "size": 225, "host": "receiver", "clock": "CLOCK_REALTIME"}
+{"path": "google-mail/threads/by-id/19f9a082d6512164.json", "observed_ns": 1786125002637829000, "size": 225, "host": "receiver", "clock": "CLOCK_REALTIME"}
+{"path": "digests/.this-week.md.tmp-869046170", "observed_ns": 1786125015561300000, "size": 0, "host": "receiver", "clock": "CLOCK_REALTIME"}
+{"path": "digests/.this-week.md.tmp-2621041247", "observed_ns": 1786125054766602000, "size": 170760, "host": "receiver", "clock": "CLOCK_REALTIME"}
+{"path": "trials/hostedsf-warmup2/small-001/probe.txt", "observed_ns": 1786125056191589000, "size": 300, "host": "receiver", "clock": "CLOCK_REALTIME"}
