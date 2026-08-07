@@ -554,7 +554,7 @@ func TestWorkspaceRequiresSubcommandMentionsJoin(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected workspace without subcommand to fail")
 	}
-	if got := err.Error(); !strings.Contains(got, "create, join, use, list, current, status, or delete") {
+	if got := err.Error(); !strings.Contains(got, "create, join, use, list, current, view, status, or delete") {
 		t.Fatalf("workspace subcommand error = %q", got)
 	}
 }
@@ -6953,6 +6953,127 @@ func TestIsTerminalWritebackOpStatus(t *testing.T) {
 		if isTerminalWritebackOpStatus(s) {
 			t.Errorf("isTerminalWritebackOpStatus(%q) = true, want false", s)
 		}
+	}
+}
+
+func TestWorkspaceViewsShareCanonicalMirrorWithoutRehome(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	canonical := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(canonical, "senses"), 0o755); err != nil {
+		t.Fatalf("create canonical subtree: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(canonical, "senses", "event.json"), []byte(`{"event":"current"}`), 0o644); err != nil {
+		t.Fatalf("write canonical event: %v", err)
+	}
+	if _, err := upsertWorkspaceDetails(workspaceRecord{Name: "demo", ID: "ws_demo", LocalDir: canonical}); err != nil {
+		t.Fatalf("upsert workspace: %v", err)
+	}
+
+	viewDir := filepath.Join(t.TempDir(), "consumer", "senses")
+	var stdout bytes.Buffer
+	if err := run([]string{"workspace", "view", "add", "/senses", viewDir, "--workspace", "demo"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("add workspace view: %v", err)
+	}
+	info, err := os.Lstat(viewDir)
+	if err != nil {
+		t.Fatalf("stat view: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("view is not a symlink: %v", info.Mode())
+	}
+	if got, err := os.ReadFile(filepath.Join(viewDir, "event.json")); err != nil || string(got) != `{"event":"current"}` {
+		t.Fatalf("view did not read canonical content: got=%q err=%v", got, err)
+	}
+	if err := os.WriteFile(filepath.Join(viewDir, "event.json"), []byte(`{"event":"updated"}`), 0o644); err != nil {
+		t.Fatalf("write through view: %v", err)
+	}
+	if got, err := os.ReadFile(filepath.Join(canonical, "senses", "event.json")); err != nil || string(got) != `{"event":"updated"}` {
+		t.Fatalf("view write did not reach canonical mirror: got=%q err=%v", got, err)
+	}
+
+	record, ok := workspaceRecordByName("demo")
+	if !ok {
+		t.Fatal("workspace record disappeared")
+	}
+	if record.LocalDir != canonical {
+		t.Fatalf("view changed canonical LocalDir: got %q want %q", record.LocalDir, canonical)
+	}
+	if len(record.Views) != 1 || record.Views[0].RemotePath != "/senses" {
+		t.Fatalf("unexpected persisted views: %#v", record.Views)
+	}
+	if err := run([]string{"workspace", "view", "remove", viewDir, "--workspace", "demo"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("remove workspace view: %v", err)
+	}
+	if _, err := os.Lstat(viewDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("removed view still exists: %v", err)
+	}
+	record, _ = workspaceRecordByName("demo")
+	if record.LocalDir != canonical || len(record.Views) != 0 {
+		t.Fatalf("remove changed canonical mirror or retained view: %#v", record)
+	}
+}
+
+func TestWorkspaceViewStatusSeparatesIdleListenerFromBrokenProjection(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	canonical := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(canonical, "github", "repos"), 0o755); err != nil {
+		t.Fatalf("create canonical subtree: %v", err)
+	}
+	viewDir := filepath.Join(t.TempDir(), "consumer", "integrations")
+	if _, err := upsertWorkspaceDetails(workspaceRecord{
+		Name:     "demo",
+		ID:       "ws_demo",
+		LocalDir: canonical,
+		Views: []workspaceViewRecord{{
+			RemotePath: "/github/repos",
+			LocalDir:   viewDir,
+		}},
+	}); err != nil {
+		t.Fatalf("upsert workspace: %v", err)
+	}
+	target := filepath.Join(canonical, "github", "repos")
+	if err := os.MkdirAll(filepath.Dir(viewDir), 0o755); err != nil {
+		t.Fatalf("create view parent: %v", err)
+	}
+	if err := os.Symlink(target, viewDir); err != nil {
+		t.Fatalf("create view link: %v", err)
+	}
+	if err := writeMirrorStateFile(canonical, syncStateFile{
+		WorkspaceID:               "ws_demo",
+		Status:                    "ready",
+		IntervalMs:                30_000,
+		LastSuccessfulReconcileAt: time.Now().UTC().Format(time.RFC3339Nano),
+		EventListener: &syncStateEventListener{
+			Mode:        "websocket",
+			Status:      "listening",
+			HeartbeatAt: time.Now().UTC().Format(time.RFC3339Nano),
+		},
+	}); err != nil {
+		t.Fatalf("write mirror state: %v", err)
+	}
+
+	record, _ := workspaceRecordByName("demo")
+	health := buildWorkspaceHealthReport("ws_demo", record)
+	if len(health.Views) != 1 || health.Views[0].Status != "ready" {
+		t.Fatalf("expected ready projection with idle listener, got %#v", health.Views)
+	}
+	if health.Views[0].EventListener == nil || health.Views[0].EventListener.Status != "listening" {
+		t.Fatalf("expected listener state to be preserved, got %#v", health.Views[0].EventListener)
+	}
+
+	if err := os.Remove(viewDir); err != nil {
+		t.Fatalf("remove view: %v", err)
+	}
+	if err := os.Symlink(filepath.Join(t.TempDir(), "wrong"), viewDir); err != nil {
+		t.Fatalf("replace with wrong-target view: %v", err)
+	}
+	health = buildWorkspaceHealthReport("ws_demo", record)
+	if len(health.Views) != 1 || health.Views[0].Status != "wrong-target" {
+		t.Fatalf("expected wrong-target view to be unhealthy, got %#v", health.Views)
 	}
 }
 
