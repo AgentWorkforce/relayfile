@@ -499,10 +499,23 @@ prior — so this is a two-machine, not three-machine, confirmation).
 
 7. **Docs oversell current behavior.** `docs/guides/collaboration.md:54-76`
    claims conflict-safety the code doesn't have (see gap #1);
-   `cmd/relayfile-cli/`'s mount help text undersells actual propagation
-   speed (says "polls... every 30s", actual steady-state is sub-200ms via
-   websocket). Cheap to fix, should happen alongside #1 so the doc becomes
-   true rather than requiring a retraction later.
+   `cmd/relayfile-cli/`'s mount help text describes propagation speed
+   inaccurately (says "polls... every 30s", when steady-state delivery is by
+   websocket). **Correction, 2026-08-07:** this finding previously read
+   "undersells actual propagation speed... actual steady-state is sub-200ms
+   via websocket". That sub-200ms figure was an inference — the 2026-07-26
+   evidence measured a *round trip* (median 315.5 ms, n=12) and halved it. A
+   direct one-way measurement (`docs/evidence/mount-latency-20260807/`) shows
+   the real answer is size-dependent, and one of the two cases is not
+   sub-200ms: a single small file propagates in a median of 20.2 ms
+   (p95 161.7 ms, n=20), but a repo-sized change set of 11 files / ~14 KB
+   takes a median of **216.7 ms** (p95 303.9 ms, n=20) — because the receive
+   path fetches each file with its own server round trip, so cost scales with
+   file count. Both figures were measured with the server on the sender's own
+   machine and a Tailscale LAN to the receiver, so they are LAN best cases and
+   are **not** measurements of the hosted product path. Any replacement help
+   text should say the speed depends on change-set size rather than quoting a
+   single number.
 
 8. **No same-file simultaneous co-editing (CRDT/OT).** **Correction to an
    earlier framing of this finding:** this *was* scoped and explicitly
