@@ -6313,15 +6313,20 @@ func runWorkspaceViewAdd(args []string, stdout io.Writer) error {
 	if filepath.Clean(localDir) == filepath.Clean(target) {
 		return errors.New("workspace view local directory must differ from its canonical mirror target")
 	}
-	if err := installWorkspaceView(localDir, target, *replace); err != nil {
-		return err
-	}
+	previousViews := append([]workspaceViewRecord(nil), record.Views...)
 	record.Views = upsertWorkspaceView(record.Views, workspaceViewRecord{
 		RemotePath: remotePath,
 		LocalDir:   localDir,
 		CreatedAt:  time.Now().UTC().Format(time.RFC3339),
 	})
 	if _, err := upsertWorkspaceDetails(record); err != nil {
+		return err
+	}
+	if err := installWorkspaceView(localDir, target, *replace); err != nil {
+		record.Views = previousViews
+		if _, rollbackErr := upsertWorkspaceDetails(record); rollbackErr != nil {
+			return errors.Join(err, fmt.Errorf("roll back workspace view registration: %w", rollbackErr))
+		}
 		return err
 	}
 	fmt.Fprintf(stdout, "Workspace view added for %s\n", workspaceID)
@@ -6408,7 +6413,7 @@ func normalizeWorkspaceViewRemotePath(value string) (string, error) {
 	if value == "" {
 		return "", errors.New("workspace view remote path is required")
 	}
-	value = strings.ReplaceAll(value, "\\\\", "/")
+	value = strings.ReplaceAll(value, "\\", "/")
 	if !strings.HasPrefix(value, "/") {
 		value = "/" + value
 	}
@@ -6456,6 +6461,12 @@ func workspaceViewRemotePathWithin(root, candidate string) bool {
 }
 
 func workspaceViewPathWithin(root, candidate string) bool {
+	if resolved, err := canonicalMountStartLockRoot(root); err == nil {
+		root = resolved
+	}
+	if resolved, err := canonicalMountStartLockRoot(candidate); err == nil {
+		candidate = resolved
+	}
 	rel, err := filepath.Rel(filepath.Clean(root), filepath.Clean(candidate))
 	if err != nil {
 		return false
@@ -6688,8 +6699,6 @@ func canonicalViewStatus(state syncStateFile) string {
 				return "stale"
 			}
 		}
-	} else {
-		return "not-listening"
 	}
 	return strings.TrimSpace(state.Status)
 }
@@ -7133,6 +7142,12 @@ func runMount(args []string) error {
 			)
 		}
 		if !sameRecordedRoot && *rehome {
+			if len(previousRecord.Views) > 0 {
+				return fmt.Errorf(
+					"workspace %s has %d registered view(s); remove them before re-homing the canonical mirror",
+					workspaceID, len(previousRecord.Views),
+				)
+			}
 			pid, verified := verifyDaemonProcess(recordedLocalDir, workspaceID)
 			if pid != 0 && verified {
 				return fmt.Errorf(

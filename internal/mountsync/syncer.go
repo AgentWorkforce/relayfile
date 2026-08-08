@@ -3155,6 +3155,7 @@ func (s *Syncer) syncReserved(ctx context.Context, forcePoll bool) error {
 	// Re-acquire lock for the remainder of the sync operation.
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.listenerHeartbeatAt = time.Now().UTC()
 	s.markReconcileStarted()
 	s.staleAliasSkips = 0
 	if err := s.runClosingDigestJobsLocked(ctx); err != nil {
@@ -3364,6 +3365,7 @@ func (s *Syncer) applyWebSocketEvent(ctx context.Context, event websocketEvent) 
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		s.state.LastEventAt = eventAt
+		s.listenerHeartbeatAt = time.Now().UTC()
 		currentTracked, currentTrackedExists := s.state.Files[remotePath]
 		if currentTrackedExists != observedTrackedExists ||
 			(currentTrackedExists && currentTracked != observedTracked) {
@@ -3384,6 +3386,7 @@ func (s *Syncer) applyWebSocketEvent(ctx context.Context, event websocketEvent) 
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		s.state.LastEventAt = eventAt
+		s.listenerHeartbeatAt = time.Now().UTC()
 		if err := s.applyRemoteDelete(remotePath, nil); err != nil {
 			return err
 		}
@@ -3401,6 +3404,7 @@ func (s *Syncer) applyWebSocketEvent(ctx context.Context, event websocketEvent) 
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		s.state.LastEventAt = eventAt
+		s.listenerHeartbeatAt = time.Now().UTC()
 		if err := s.ensureProviderLayout(provider); err != nil {
 			return err
 		}
@@ -3527,6 +3531,11 @@ func (s *Syncer) listenerHealthLocked() eventListenerHealth {
 		LastConnectedAt: formatListenerTime(s.wsLastConnectedAt),
 		LastAttemptAt:   formatListenerTime(s.wsLastAttemptAt),
 		NextAttemptAt:   formatListenerTime(s.wsNextAttempt),
+	}
+	if s.writeOnly {
+		health.Mode = "disabled"
+		health.Status = "disabled"
+		return health
 	}
 	if !s.websocket {
 		health.Mode = "poll"
@@ -7489,21 +7498,18 @@ func (s *Syncer) markReconcileStarted() {
 }
 
 func (s *Syncer) markSyncSuccess() {
-	nowTime := time.Now().UTC()
-	now := nowTime.Format(time.RFC3339Nano)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
 	s.state.LastReconcileAt = now
 	if !s.state.IncrementalBacklogDraining {
 		s.state.LastSuccessfulReconcileAt = now
 	}
 	s.state.LastError = nil
-	s.listenerHeartbeatAt = nowTime
 }
 
 func (s *Syncer) markSyncError(err error) {
 	now := time.Now().UTC()
 	s.state.LastReconcileAt = now.Format(time.RFC3339Nano)
 	s.state.LastError = classifyStatusError(err)
-	s.listenerHeartbeatAt = now
 }
 
 func parseStateTime(value string) (time.Time, error) {

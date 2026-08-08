@@ -590,8 +590,9 @@ func TestSyncOnceWriteOnlySkipsRemotePullButPushesLocalFiles(t *testing.T) {
 		t.Fatalf("expected write-only mount to keep dead-letter feedback dir: %v", err)
 	}
 	var public struct {
-		Mode     string `json:"mode"`
-		SyncMode string `json:"syncMode"`
+		Mode          string              `json:"mode"`
+		SyncMode      string              `json:"syncMode"`
+		EventListener eventListenerHealth `json:"eventListener"`
 	}
 	data, err := os.ReadFile(filepath.Join(localDir, ".relay", "state.json"))
 	if err != nil {
@@ -603,8 +604,25 @@ func TestSyncOnceWriteOnlySkipsRemotePullButPushesLocalFiles(t *testing.T) {
 	if public.Mode != "poll" || public.SyncMode != "write-only" {
 		t.Fatalf("expected public state mode poll/write-only, got %+v", public)
 	}
+	if public.EventListener.Mode != "disabled" || public.EventListener.Status != "disabled" {
+		t.Fatalf("expected write-only listener health to be disabled, got %+v", public.EventListener)
+	}
 	if _, err := os.Stat(filepath.Join(localDir, "history.json")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("write-only sync mirrored provider history, stat err=%v", err)
+	}
+}
+
+func TestOneShotStatusUpdatesDoNotRefreshListenerHeartbeat(t *testing.T) {
+	baseline := time.Date(2026, 8, 7, 12, 0, 0, 0, time.UTC)
+	syncer := &Syncer{listenerHeartbeatAt: baseline}
+
+	syncer.markSyncSuccess()
+	if !syncer.listenerHeartbeatAt.Equal(baseline) {
+		t.Fatalf("one-shot success refreshed listener heartbeat to %s", syncer.listenerHeartbeatAt)
+	}
+	syncer.markSyncError(errors.New("writeback failed"))
+	if !syncer.listenerHeartbeatAt.Equal(baseline) {
+		t.Fatalf("one-shot error refreshed listener heartbeat to %s", syncer.listenerHeartbeatAt)
 	}
 }
 
