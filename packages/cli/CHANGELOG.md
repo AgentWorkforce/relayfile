@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- `relayfile status` now distinguishes queue lag from provider-event silence, warns when a feed has been idle for 24 hours, and exposes `eventStatus` and `eventIdleSeconds` in JSON output.
+- `relayfile status` now distinguishes queue lag from provider-event silence, warns when a feed has been idle for 24 hours by default (configurable via `RELAYFILE_EVENT_SILENCE_THRESHOLD`), and exposes `eventStatus` and `eventIdleSeconds` in JSON output.
 
 ## [0.10.39] - 2026-07-31
 

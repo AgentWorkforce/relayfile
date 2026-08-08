@@ -5728,6 +5728,20 @@ func TestProviderEventLivenessDistinguishesActiveSilentAndUnverified(t *testing.
 	}
 }
 
+func TestSyncStateProviderJSONIncludesZeroEventIdleSeconds(t *testing.T) {
+	payload, err := json.Marshal(syncStateProvider{
+		Provider:    "github",
+		Status:      "healthy",
+		EventStatus: "active",
+	})
+	if err != nil {
+		t.Fatalf("marshal sync provider: %v", err)
+	}
+	if !bytes.Contains(payload, []byte(`"eventIdleSeconds":0`)) {
+		t.Fatalf("expected zero event idle seconds in JSON, got %s", payload)
+	}
+}
+
 func TestStatusMakesHealthyButSilentEventFeedLoud(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("RELAYFILE_EVENT_SILENCE_THRESHOLD", "24h")

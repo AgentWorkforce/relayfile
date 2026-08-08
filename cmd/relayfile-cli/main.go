@@ -458,7 +458,7 @@ type syncStateProvider struct {
 	LastError        string `json:"lastError,omitempty"`
 	LastEventAt      string `json:"lastEventAt,omitempty"`
 	EventStatus      string `json:"eventStatus"`
-	EventIdleSeconds int64  `json:"eventIdleSeconds,omitempty"`
+	EventIdleSeconds int64  `json:"eventIdleSeconds"`
 }
 
 type syncStateDaemon struct {
@@ -8586,7 +8586,7 @@ func runStatus(args []string, stdout io.Writer) error {
 			fmt.Fprintf(stdout, "    %s event feed silent for %s — queue lag %s only means no queued work\n",
 				provider.Provider, formatLag(int(eventIdleSeconds)), formatLag(provider.LagSeconds))
 		case "unverified":
-			fmt.Fprintf(stdout, "    %s event feed liveness unverified — no provider event watermark has been recorded\n", provider.Provider)
+			fmt.Fprintf(stdout, "    %s event feed liveness unverified — no valid provider event watermark has been recorded\n", provider.Provider)
 		}
 	}
 	if record.LocalDir != "" {
