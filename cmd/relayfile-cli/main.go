@@ -145,23 +145,34 @@ type workspaceCatalog struct {
 }
 
 type workspaceRecord struct {
-	Name             string   `json:"name"`
-	ID               string   `json:"id,omitempty"`
-	RelayWorkspaceID string   `json:"relayWorkspaceId,omitempty"`
-	CreatedAt        string   `json:"createdAt"`
-	LastUsedAt       string   `json:"lastUsedAt,omitempty"`
-	LocalDir         string   `json:"localDir,omitempty"`
-	Server           string   `json:"server,omitempty"`
-	CloudAPIURL      string   `json:"cloudApiUrl,omitempty"`
-	AgentName        string   `json:"agentName,omitempty"`
-	Scopes           []string `json:"scopes,omitempty"`
-	Timezone         string   `json:"timezone,omitempty"`
-	RemotePaths      []string `json:"remotePaths,omitempty"`
-	LocalLayout      string   `json:"localLayout,omitempty"`
-	MountStateFile   string   `json:"mountStateFile,omitempty"`
-	MountStateDir    string   `json:"mountStateDir,omitempty"`
-	MountKind        string   `json:"mountKind,omitempty"`
+	Name             string                `json:"name"`
+	ID               string                `json:"id,omitempty"`
+	RelayWorkspaceID string                `json:"relayWorkspaceId,omitempty"`
+	CreatedAt        string                `json:"createdAt"`
+	LastUsedAt       string                `json:"lastUsedAt,omitempty"`
+	LocalDir         string                `json:"localDir,omitempty"`
+	Server           string                `json:"server,omitempty"`
+	CloudAPIURL      string                `json:"cloudApiUrl,omitempty"`
+	AgentName        string                `json:"agentName,omitempty"`
+	Scopes           []string              `json:"scopes,omitempty"`
+	Timezone         string                `json:"timezone,omitempty"`
+	RemotePaths      []string              `json:"remotePaths,omitempty"`
+	LocalLayout      string                `json:"localLayout,omitempty"`
+	MountStateFile   string                `json:"mountStateFile,omitempty"`
+	MountStateDir    string                `json:"mountStateDir,omitempty"`
+	MountKind        string                `json:"mountKind,omitempty"`
+	Views            []workspaceViewRecord `json:"views,omitempty"`
 	mountStateSet    bool
+}
+
+// workspaceViewRecord is a local projection of a subtree from the one
+// canonical workspace mirror. A view is intentionally not another mirror:
+// its local directory is a symlink into LocalDir, so one daemon retains sole
+// ownership of the watcher, event cursor, private state, and durable outbox.
+type workspaceViewRecord struct {
+	RemotePath string `json:"remotePath"`
+	LocalDir   string `json:"localDir"`
+	CreatedAt  string `json:"createdAt,omitempty"`
 }
 
 type apiClient struct {
@@ -404,6 +415,19 @@ type syncStateFile struct {
 	// .relay/state.json so `relayfile status` can show progress instead of
 	// a misleading stall. Additive/omitempty; nil when not bootstrapping.
 	Bootstrap *syncStateBootstrap `json:"bootstrap,omitempty"`
+	// EventListener is intentionally separate from LastEventAt: a quiet
+	// workspace can be listened to successfully, while a disconnected listener
+	// must not be reported as merely having no events.
+	EventListener *syncStateEventListener `json:"eventListener,omitempty"`
+}
+
+type syncStateEventListener struct {
+	Mode            string `json:"mode"`
+	Status          string `json:"status"`
+	HeartbeatAt     string `json:"heartbeatAt,omitempty"`
+	LastConnectedAt string `json:"lastConnectedAt,omitempty"`
+	LastAttemptAt   string `json:"lastAttemptAt,omitempty"`
+	NextAttemptAt   string `json:"nextAttemptAt,omitempty"`
 }
 
 // syncStateBootstrap is the CLI-surface mirror of mountsync's public
@@ -737,6 +761,8 @@ func printWorkspaceUsage(w io.Writer, subcommand string) {
 		fmt.Fprintln(w, "Usage: relayfile workspace list [--names-only]")
 	case "current":
 		fmt.Fprintln(w, "Usage: relayfile workspace current [--verbose]")
+	case "view":
+		fmt.Fprintln(w, "Usage: relayfile workspace view <add|list|remove> ...")
 	case "status":
 		fmt.Fprintln(w, "Usage: relayfile workspace status [--workspace NAME] [--json]")
 	case "delete":
@@ -748,6 +774,7 @@ func printWorkspaceUsage(w io.Writer, subcommand string) {
   relayfile workspace use NAME
   relayfile workspace list [--names-only]
   relayfile workspace current [--verbose]
+  relayfile workspace view <add|list|remove> ...
   relayfile workspace status [--workspace NAME] [--json]
   relayfile workspace delete NAME [--yes]`)
 	}
@@ -2715,7 +2742,7 @@ func loginWithAPIKey(serverValue, tokenValue string, stdout io.Writer) error {
 
 func runWorkspace(args []string, stdin io.Reader, stdout io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("workspace subcommand is required: create, join, use, list, current, status, or delete")
+		return errors.New("workspace subcommand is required: create, join, use, list, current, view, status, or delete")
 	}
 	switch args[0] {
 	case "create":
@@ -2728,6 +2755,8 @@ func runWorkspace(args []string, stdin io.Reader, stdout io.Writer) error {
 		return runWorkspaceList(args[1:], stdout)
 	case "current":
 		return runWorkspaceCurrent(args[1:], stdout)
+	case "view":
+		return runWorkspaceView(args[1:], stdout)
 	case "status":
 		return runWorkspaceStatus(args[1:], stdout)
 	case "delete":
@@ -3998,18 +4027,31 @@ func (r writebackPushReceipt) withoutBody() writebackPushReceipt {
 }
 
 type workspaceHealthReport struct {
-	WorkspaceID                string `json:"workspaceId"`
-	Name                       string `json:"name,omitempty"`
-	LocalDir                   string `json:"localDir,omitempty"`
-	Status                     string `json:"status,omitempty"`
-	LastSuccessfulReconcileAt  string `json:"lastSuccessfulReconcileAt,omitempty"`
-	LastReconcileAt            string `json:"lastReconcileAt,omitempty"`
-	LastError                  string `json:"lastError,omitempty"`
-	StuckEventCount            int    `json:"stuckEventCount"`
-	OutboxPending              int    `json:"outboxPending"`
-	OutboxFailed               int    `json:"outboxFailed"`
-	OutboxAcked                int    `json:"outboxAcked"`
-	IncrementalBacklogDraining bool   `json:"incrementalBacklogDraining,omitempty"`
+	WorkspaceID                string                  `json:"workspaceId"`
+	Name                       string                  `json:"name,omitempty"`
+	LocalDir                   string                  `json:"localDir,omitempty"`
+	Status                     string                  `json:"status,omitempty"`
+	LastSuccessfulReconcileAt  string                  `json:"lastSuccessfulReconcileAt,omitempty"`
+	LastReconcileAt            string                  `json:"lastReconcileAt,omitempty"`
+	LastError                  string                  `json:"lastError,omitempty"`
+	StuckEventCount            int                     `json:"stuckEventCount"`
+	OutboxPending              int                     `json:"outboxPending"`
+	OutboxFailed               int                     `json:"outboxFailed"`
+	OutboxAcked                int                     `json:"outboxAcked"`
+	IncrementalBacklogDraining bool                    `json:"incrementalBacklogDraining,omitempty"`
+	EventListener              *syncStateEventListener `json:"eventListener,omitempty"`
+	Views                      []workspaceViewHealth   `json:"views,omitempty"`
+}
+
+// workspaceViewHealth reports the projection separately from the canonical
+// mirror. A healthy workspace never masks a missing, redirected, or stale
+// consumer view.
+type workspaceViewHealth struct {
+	RemotePath                string                  `json:"remotePath"`
+	LocalDir                  string                  `json:"localDir"`
+	Status                    string                  `json:"status"`
+	LastSuccessfulReconcileAt string                  `json:"lastSuccessfulReconcileAt,omitempty"`
+	EventListener             *syncStateEventListener `json:"eventListener,omitempty"`
 }
 
 var errWritebackFailuresPresent = errors.New("writeback failures present")
@@ -6208,6 +6250,321 @@ func runWorkspaceCurrent(args []string, stdout io.Writer) error {
 	return nil
 }
 
+func runWorkspaceView(args []string, stdout io.Writer) error {
+	if len(args) == 0 {
+		return errors.New("workspace view subcommand is required: add, list, or remove")
+	}
+	switch args[0] {
+	case "add":
+		return runWorkspaceViewAdd(args[1:], stdout)
+	case "list":
+		return runWorkspaceViewList(args[1:], stdout)
+	case "remove":
+		return runWorkspaceViewRemove(args[1:], stdout)
+	default:
+		return fmt.Errorf("unknown workspace view subcommand %q", args[0])
+	}
+}
+
+// runWorkspaceViewAdd creates an alias into the registered canonical mirror.
+// It deliberately does not invoke mount: an alias must never acquire its own
+// event cursor, watcher, writeback outbox, or workspace registration.
+func runWorkspaceViewAdd(args []string, stdout io.Writer) error {
+	fs := flag.NewFlagSet("workspace view add", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	workspaceName := fs.String("workspace", "", "workspace name or id")
+	replace := fs.Bool("replace", false, "replace an existing relayfile view symlink")
+	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
+		"workspace": true,
+		"replace":   false,
+	})); err != nil {
+		return err
+	}
+	if fs.NArg() != 2 {
+		return errors.New("usage: relayfile workspace view add REMOTE_PATH LOCAL_DIR [--workspace NAME] [--replace]")
+	}
+	workspaceID, record, err := resolveWorkspaceLikeStatus(strings.TrimSpace(*workspaceName))
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(record.LocalDir) == "" {
+		return fmt.Errorf("workspace %s has no registered canonical mirror; mount it before adding a view", workspaceID)
+	}
+	remotePath, err := normalizeWorkspaceViewRemotePath(fs.Arg(0))
+	if err != nil {
+		return err
+	}
+	localInput := strings.TrimSpace(fs.Arg(1))
+	if localInput == "" {
+		return errors.New("workspace view local directory is required")
+	}
+	localDir, err := filepath.Abs(localInput)
+	if err != nil {
+		return err
+	}
+	canonicalRoot, err := filepath.Abs(record.LocalDir)
+	if err != nil {
+		return err
+	}
+	if workspaceViewPathWithin(canonicalRoot, localDir) {
+		return errors.New("workspace view local directory must be outside the canonical mirror")
+	}
+	target, err := workspaceViewTarget(record.LocalDir, remotePath)
+	if err != nil {
+		return err
+	}
+	if filepath.Clean(localDir) == filepath.Clean(target) {
+		return errors.New("workspace view local directory must differ from its canonical mirror target")
+	}
+	previousViews := append([]workspaceViewRecord(nil), record.Views...)
+	record.Views = upsertWorkspaceView(record.Views, workspaceViewRecord{
+		RemotePath: remotePath,
+		LocalDir:   localDir,
+		CreatedAt:  time.Now().UTC().Format(time.RFC3339),
+	})
+	if _, err := upsertWorkspaceDetails(record); err != nil {
+		return err
+	}
+	if err := installWorkspaceView(localDir, target, *replace); err != nil {
+		record.Views = previousViews
+		if _, rollbackErr := upsertWorkspaceDetails(record); rollbackErr != nil {
+			return errors.Join(err, fmt.Errorf("roll back workspace view registration: %w", rollbackErr))
+		}
+		return err
+	}
+	fmt.Fprintf(stdout, "Workspace view added for %s\n", workspaceID)
+	return nil
+}
+
+func runWorkspaceViewList(args []string, stdout io.Writer) error {
+	fs := flag.NewFlagSet("workspace view list", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	workspaceName := fs.String("workspace", "", "workspace name or id")
+	jsonOutput := fs.Bool("json", false, "emit JSON")
+	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
+		"workspace": true,
+		"json":      false,
+	})); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return errors.New("usage: relayfile workspace view list [--workspace NAME] [--json]")
+	}
+	workspaceID, record, err := resolveWorkspaceLikeStatus(strings.TrimSpace(*workspaceName))
+	if err != nil {
+		return err
+	}
+	report := buildWorkspaceHealthReport(workspaceID, record)
+	if *jsonOutput {
+		return writeJSON(stdout, report.Views)
+	}
+	for _, view := range report.Views {
+		fmt.Fprintf(stdout, "%s  %s\n", view.RemotePath, view.Status)
+	}
+	return nil
+}
+
+func runWorkspaceViewRemove(args []string, stdout io.Writer) error {
+	fs := flag.NewFlagSet("workspace view remove", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	workspaceName := fs.String("workspace", "", "workspace name or id")
+	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{"workspace": true})); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return errors.New("usage: relayfile workspace view remove LOCAL_DIR [--workspace NAME]")
+	}
+	workspaceID, record, err := resolveWorkspaceLikeStatus(strings.TrimSpace(*workspaceName))
+	if err != nil {
+		return err
+	}
+	localInput := strings.TrimSpace(fs.Arg(0))
+	if localInput == "" {
+		return errors.New("workspace view local directory is required")
+	}
+	localDir, err := filepath.Abs(localInput)
+	if err != nil {
+		return err
+	}
+	view, found := workspaceViewByLocalDir(record.Views, localDir)
+	if !found {
+		return fmt.Errorf("workspace %s has no registered view at the requested local directory", workspaceID)
+	}
+	target, err := workspaceViewTarget(record.LocalDir, view.RemotePath)
+	if err != nil {
+		return err
+	}
+	if err := removeWorkspaceViewLink(localDir, target); err != nil {
+		return err
+	}
+	filtered := make([]workspaceViewRecord, 0, len(record.Views)-1)
+	for _, candidate := range record.Views {
+		if filepath.Clean(candidate.LocalDir) != filepath.Clean(localDir) {
+			filtered = append(filtered, candidate)
+		}
+	}
+	record.Views = filtered
+	if _, err := upsertWorkspaceDetails(record); err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "Workspace view removed for %s\n", workspaceID)
+	return nil
+}
+
+func normalizeWorkspaceViewRemotePath(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", errors.New("workspace view remote path is required")
+	}
+	value = strings.ReplaceAll(value, "\\", "/")
+	if !strings.HasPrefix(value, "/") {
+		value = "/" + value
+	}
+	cleaned := filepath.ToSlash(filepath.Clean(value))
+	if cleaned == "." || cleaned == "" {
+		return "/", nil
+	}
+	if !strings.HasPrefix(cleaned, "/") {
+		cleaned = "/" + cleaned
+	}
+	return cleaned, nil
+}
+
+func workspaceViewTarget(canonicalRoot, remotePath string) (string, error) {
+	canonicalRoot, err := filepath.Abs(strings.TrimSpace(canonicalRoot))
+	if err != nil {
+		return "", err
+	}
+	remotePath, err = normalizeWorkspaceViewRemotePath(remotePath)
+	if err != nil {
+		return "", err
+	}
+	canonicalRemoteRoot, err := normalizeWorkspaceViewRemotePath(readMountRemoteRoot(canonicalRoot))
+	if err != nil {
+		return "", err
+	}
+	if !workspaceViewRemotePathWithin(canonicalRemoteRoot, remotePath) {
+		return "", fmt.Errorf("workspace view remote path %s is outside the canonical mirror scope %s", remotePath, canonicalRemoteRoot)
+	}
+	target := canonicalRoot
+	if remotePath != canonicalRemoteRoot {
+		rel := strings.TrimPrefix(remotePath, canonicalRemoteRoot)
+		target = filepath.Join(canonicalRoot, filepath.FromSlash(strings.TrimPrefix(rel, "/")))
+	}
+	if !workspaceViewPathWithin(canonicalRoot, target) {
+		return "", errors.New("workspace view target escapes canonical mirror")
+	}
+	return target, nil
+}
+
+func workspaceViewRemotePathWithin(root, candidate string) bool {
+	root, _ = normalizeWorkspaceViewRemotePath(root)
+	candidate, _ = normalizeWorkspaceViewRemotePath(candidate)
+	return root == "/" || candidate == root || strings.HasPrefix(candidate, root+"/")
+}
+
+func workspaceViewPathWithin(root, candidate string) bool {
+	if resolved, err := canonicalMountStartLockRoot(root); err == nil {
+		root = resolved
+	}
+	if resolved, err := canonicalMountStartLockRoot(candidate); err == nil {
+		candidate = resolved
+	}
+	rel, err := filepath.Rel(filepath.Clean(root), filepath.Clean(candidate))
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
+}
+
+func installWorkspaceView(localDir, target string, replace bool) error {
+	info, err := os.Lstat(localDir)
+	if err == nil {
+		if info.Mode()&os.ModeSymlink == 0 {
+			return fmt.Errorf("refusing to replace non-symlink workspace view at %s", localDir)
+		}
+		matches, matchErr := workspaceViewLinkMatches(localDir, target)
+		if matchErr != nil {
+			return matchErr
+		}
+		if matches {
+			return nil
+		}
+		if !replace {
+			return fmt.Errorf("workspace view already exists at %s; pass --replace only after verifying the existing symlink", localDir)
+		}
+		if err := os.Remove(localDir); err != nil {
+			return err
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(localDir), 0o755); err != nil {
+		return err
+	}
+	return os.Symlink(target, localDir)
+}
+
+func removeWorkspaceViewLink(localDir, target string) error {
+	info, err := os.Lstat(localDir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		return fmt.Errorf("refusing to remove non-symlink workspace view at %s", localDir)
+	}
+	matches, err := workspaceViewLinkMatches(localDir, target)
+	if err != nil {
+		return err
+	}
+	if !matches {
+		return fmt.Errorf("refusing to remove workspace view at %s because its target changed", localDir)
+	}
+	return os.Remove(localDir)
+}
+
+func workspaceViewLinkMatches(localDir, target string) (bool, error) {
+	linkTarget, err := os.Readlink(localDir)
+	if err != nil {
+		return false, err
+	}
+	if !filepath.IsAbs(linkTarget) {
+		linkTarget = filepath.Join(filepath.Dir(localDir), linkTarget)
+	}
+	absTarget, err := filepath.Abs(linkTarget)
+	if err != nil {
+		return false, err
+	}
+	return filepath.Clean(absTarget) == filepath.Clean(target), nil
+}
+
+func upsertWorkspaceView(views []workspaceViewRecord, update workspaceViewRecord) []workspaceViewRecord {
+	update.LocalDir = filepath.Clean(update.LocalDir)
+	update.RemotePath, _ = normalizeWorkspaceViewRemotePath(update.RemotePath)
+	for i := range views {
+		if filepath.Clean(views[i].LocalDir) == update.LocalDir {
+			if views[i].CreatedAt != "" {
+				update.CreatedAt = views[i].CreatedAt
+			}
+			views[i] = update
+			return views
+		}
+	}
+	return append(views, update)
+}
+
+func workspaceViewByLocalDir(views []workspaceViewRecord, localDir string) (workspaceViewRecord, bool) {
+	for _, view := range views {
+		if filepath.Clean(view.LocalDir) == filepath.Clean(localDir) {
+			return view, true
+		}
+	}
+	return workspaceViewRecord{}, false
+}
+
 func runWorkspaceStatus(args []string, stdout io.Writer) error {
 	fs := flag.NewFlagSet("workspace status", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -6251,6 +6608,7 @@ func buildWorkspaceHealthReport(workspaceID string, record workspaceRecord) work
 	report.Status = strings.TrimSpace(state.Status)
 	report.LastSuccessfulReconcileAt = strings.TrimSpace(state.LastSuccessfulReconcileAt)
 	report.LastReconcileAt = strings.TrimSpace(state.LastReconcileAt)
+	report.EventListener = cloneSyncStateEventListener(state.EventListener)
 	if state.LastError != nil {
 		report.LastError = strings.TrimSpace(firstNonBlank(state.LastError.Message, state.LastError.Code))
 	}
@@ -6267,7 +6625,93 @@ func buildWorkspaceHealthReport(workspaceID string, record workspaceRecord) work
 	report.OutboxPending = countJSONFiles(filepath.Join(report.LocalDir, ".relay", "outbox", "pending"))
 	report.OutboxFailed = countJSONFiles(filepath.Join(report.LocalDir, ".relay", "outbox", "failed"))
 	report.OutboxAcked = countJSONFiles(filepath.Join(report.LocalDir, ".relay", "outbox", "acked"))
+	report.Views = buildWorkspaceViewHealth(record, state)
 	return report
+}
+
+func buildWorkspaceViewHealth(record workspaceRecord, state syncStateFile) []workspaceViewHealth {
+	if len(record.Views) == 0 {
+		return nil
+	}
+	views := make([]workspaceViewHealth, 0, len(record.Views))
+	for _, view := range record.Views {
+		remotePath, err := normalizeWorkspaceViewRemotePath(view.RemotePath)
+		if err != nil {
+			remotePath = strings.TrimSpace(view.RemotePath)
+		}
+		report := workspaceViewHealth{
+			RemotePath:                remotePath,
+			LocalDir:                  strings.TrimSpace(view.LocalDir),
+			Status:                    "missing",
+			LastSuccessfulReconcileAt: strings.TrimSpace(state.LastSuccessfulReconcileAt),
+			EventListener:             cloneSyncStateEventListener(state.EventListener),
+		}
+		target, targetErr := workspaceViewTarget(record.LocalDir, remotePath)
+		if targetErr != nil {
+			report.Status = "invalid"
+			views = append(views, report)
+			continue
+		}
+		info, statErr := os.Lstat(report.LocalDir)
+		if statErr != nil {
+			if !errors.Is(statErr, os.ErrNotExist) {
+				report.Status = "unreadable"
+			}
+			views = append(views, report)
+			continue
+		}
+		if info.Mode()&os.ModeSymlink == 0 {
+			report.Status = "not-a-symlink"
+			views = append(views, report)
+			continue
+		}
+		matches, matchErr := workspaceViewLinkMatches(report.LocalDir, target)
+		if matchErr != nil || !matches {
+			report.Status = "wrong-target"
+			views = append(views, report)
+			continue
+		}
+		if _, statErr := os.Stat(target); statErr != nil {
+			if errors.Is(statErr, os.ErrNotExist) {
+				report.Status = "target-missing"
+			} else {
+				report.Status = "unreadable"
+			}
+			views = append(views, report)
+			continue
+		}
+		report.Status = canonicalViewStatus(state)
+		views = append(views, report)
+	}
+	return views
+}
+
+func canonicalViewStatus(state syncStateFile) string {
+	if state.Bootstrap != nil {
+		return "bootstrapping"
+	}
+	if strings.TrimSpace(state.Status) == "" {
+		return "not-listening"
+	}
+	if listener := state.EventListener; listener != nil {
+		if strings.EqualFold(listener.Mode, "websocket") && !strings.EqualFold(listener.Status, "listening") {
+			return "not-listening"
+		}
+		if heartbeat, err := time.Parse(time.RFC3339Nano, listener.HeartbeatAt); err == nil && state.IntervalMs > 0 {
+			if time.Now().UTC().After(heartbeat.Add(2 * time.Duration(state.IntervalMs) * time.Millisecond)) {
+				return "stale"
+			}
+		}
+	}
+	return strings.TrimSpace(state.Status)
+}
+
+func cloneSyncStateEventListener(listener *syncStateEventListener) *syncStateEventListener {
+	if listener == nil {
+		return nil
+	}
+	clone := *listener
+	return &clone
 }
 
 func readWritebackStateBestEffort(localDir string) syncStateFile {
@@ -6332,6 +6776,12 @@ func printWorkspaceHealthReport(stdout io.Writer, report workspaceHealthReport) 
 	fmt.Fprintf(stdout, "last reconcile: %s\n", defaultIfBlank(report.LastReconcileAt, "-"))
 	fmt.Fprintf(stdout, "stuck events: %d\n", report.StuckEventCount)
 	fmt.Fprintf(stdout, "outbox: pending=%d failed=%d acked=%d\n", report.OutboxPending, report.OutboxFailed, report.OutboxAcked)
+	if report.EventListener != nil {
+		fmt.Fprintf(stdout, "event listener: %s (%s)\n", report.EventListener.Status, report.EventListener.Mode)
+	}
+	for _, view := range report.Views {
+		fmt.Fprintf(stdout, "view %s: %s\n", view.RemotePath, view.Status)
+	}
 	if report.LastError != "" {
 		fmt.Fprintf(stdout, "last error: %s\n", report.LastError)
 	}
@@ -6695,6 +7145,12 @@ func runMount(args []string) error {
 			)
 		}
 		if !sameRecordedRoot && *rehome {
+			if len(previousRecord.Views) > 0 {
+				return fmt.Errorf(
+					"workspace %s has %d registered view(s); remove them before re-homing the canonical mirror",
+					workspaceID, len(previousRecord.Views),
+				)
+			}
 			pid, verified := verifyDaemonProcess(recordedLocalDir, workspaceID)
 			if pid != 0 && verified {
 				return fmt.Errorf(
@@ -10587,6 +11043,9 @@ func mergeWorkspaceRecords(current, update workspaceRecord) workspaceRecord {
 		merged.MountStateDir = update.MountStateDir
 		merged.MountKind = update.MountKind
 	}
+	if update.Views != nil {
+		merged.Views = append([]workspaceViewRecord(nil), update.Views...)
+	}
 	return merged
 }
 
@@ -11046,6 +11505,7 @@ func buildSyncStateSnapshot(status syncStatusResponse, workspaceID, mode string,
 	snapshot.LastEventAt = lastEvent
 	snapshot.Guards = readGuardCounters(localDir)
 	snapshot.Bootstrap = readBootstrapStatus(localDir)
+	snapshot.EventListener = readEventListenerHealth(localDir)
 	return snapshot
 }
 
@@ -11068,6 +11528,23 @@ func readBootstrapStatus(localDir string) *syncStateBootstrap {
 		return nil
 	}
 	return view.Bootstrap
+}
+
+func readEventListenerHealth(localDir string) *syncStateEventListener {
+	if localDir == "" {
+		return nil
+	}
+	payload, err := os.ReadFile(filepath.Join(localDir, ".relay", "state.json"))
+	if err != nil {
+		return nil
+	}
+	var view struct {
+		EventListener *syncStateEventListener `json:"eventListener"`
+	}
+	if json.Unmarshal(payload, &view) != nil {
+		return nil
+	}
+	return view.EventListener
 }
 
 // readGuardCounters reads the mountsync public state file under
