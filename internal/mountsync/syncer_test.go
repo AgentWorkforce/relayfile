@@ -4379,20 +4379,22 @@ func TestFlushOutboxOnceFlushesPendingWithoutMirrorScan(t *testing.T) {
 	}
 }
 
-// A draft written but never ingested by a sync cycle (the teardown race: a
-// final fire-and-forget reply right before shutdown) is on disk but not in the
-// outbox. FlushOutboxOnce drops it (outbox-only, no local scan);
-// PushLocalAndFlushOnce ingests it by scanning the on-disk mirror, then flushes.
-func TestPushLocalAndFlushOnceIngestsUnsyncedLocalDraft(t *testing.T) {
+// A draft observed by the watcher but not ingested before shutdown is durably
+// journaled. The fresh teardown process reads only that O(pending) journal,
+// ingests the draft, and flushes it without scanning unrelated local files.
+func TestFlushOutboxOnceIngestsOnlyJournaledLocalDraft(t *testing.T) {
 	localDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(localDir, "command.json"), []byte(`{"text":"hello"}`), 0o644); err != nil {
 		t.Fatalf("seed local command failed: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(localDir, "unrelated.txt"), []byte("must not be scanned"), 0o644); err != nil {
+		t.Fatalf("seed unrelated local file failed: %v", err)
 	}
 
 	// Baseline: FlushOutboxOnce must NOT ingest the unsynced draft (the bug).
 	flushClient := &fakeClient{files: map[string]RemoteFile{}}
 	flushOnly, err := NewSyncer(flushClient, SyncerOptions{
-		WorkspaceID: "ws_push_local_once",
+		WorkspaceID: "ws_bounded_drain",
 		RemoteRoot:  "/slack/channels/C123/messages",
 		LocalRoot:   localDir,
 	})
@@ -4406,29 +4408,39 @@ func TestPushLocalAndFlushOnceIngestsUnsyncedLocalDraft(t *testing.T) {
 		t.Fatalf("FlushOutboxOnce must not ingest an unsynced local draft, got %d uploads", flushClient.bulkWriteCalls)
 	}
 
-	// Fix: PushLocalAndFlushOnce scans the on-disk mirror, ingests the draft,
-	// uploads it, and drains the outbox.
+	// The watcher observer writes this before its debounce callback. Teardown
+	// therefore knows the exact path even in a fresh process.
+	if err := flushOnly.recordPendingLocalChange("command.json"); err != nil {
+		t.Fatalf("record pending local draft: %v", err)
+	}
+
 	pushClient := &fakeClient{files: map[string]RemoteFile{}}
 	drain, err := NewSyncer(pushClient, SyncerOptions{
-		WorkspaceID: "ws_push_local_once",
+		WorkspaceID: "ws_bounded_drain",
 		RemoteRoot:  "/slack/channels/C123/messages",
 		LocalRoot:   localDir,
 	})
 	if err != nil {
 		t.Fatalf("NewSyncer drain: %v", err)
 	}
-	if err := drain.PushLocalAndFlushOnce(context.Background()); err != nil {
-		t.Fatalf("PushLocalAndFlushOnce failed: %v", err)
+	if err := drain.FlushOutboxOnce(context.Background()); err != nil {
+		t.Fatalf("FlushOutboxOnce failed: %v", err)
 	}
 	if pushClient.bulkWriteCalls != 1 {
 		t.Fatalf("expected the unsynced draft to be ingested + uploaded once, got %d", pushClient.bulkWriteCalls)
 	}
 	if pending := readPendingOutboxRecordsForTest(t, localDir); len(pending) != 0 {
-		t.Fatalf("expected outbox drained after push+flush, got %+v", pending)
+		t.Fatalf("expected outbox drained after bounded drain, got %+v", pending)
+	}
+	if records, err := drain.pendingLocalChanges(); err != nil || len(records) != 0 {
+		t.Fatalf("expected local pending journal drained, records=%+v err=%v", records, err)
+	}
+	if _, ok := pushClient.files["/slack/channels/C123/messages/unrelated.txt"]; ok {
+		t.Fatal("bounded drain scanned and uploaded an unjournaled local file")
 	}
 }
 
-func TestPushLocalAndFlushOnceSkipsSelfReferentialOutboxControlFiles(t *testing.T) {
+func TestFlushOutboxOnceSkipsSelfReferentialOutboxControlFiles(t *testing.T) {
 	localDir := t.TempDir()
 	client := &fakeClient{files: map[string]RemoteFile{}}
 	logger := &captureLogger{}
@@ -4456,8 +4468,8 @@ func TestPushLocalAndFlushOnceSkipsSelfReferentialOutboxControlFiles(t *testing.
 		t.Fatalf("seed self-referential outbox record: %v", err)
 	}
 
-	if err := syncer.PushLocalAndFlushOnce(context.Background()); err != nil {
-		t.Fatalf("PushLocalAndFlushOnce failed: %v", err)
+	if err := syncer.FlushOutboxOnce(context.Background()); err != nil {
+		t.Fatalf("FlushOutboxOnce failed: %v", err)
 	}
 
 	if client.bulkWriteCalls != 0 || client.writeFileCalls != 0 {

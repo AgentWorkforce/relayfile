@@ -6863,6 +6863,7 @@ func runMount(args []string) error {
 	logFileFlag := fs.String("log-file", "", "log file path for background mode")
 	daemonized := fs.Bool("daemonized", false, "internal flag used by relayfile mount --background")
 	once := fs.Bool("once", false, "run one sync cycle and exit")
+	flushOutboxOnce := fs.Bool("flush-outbox-once", false, "ingest watcher-journaled local drafts, flush the durable outbox, and exit without scanning or reconciling the mirror")
 	resetAfterClobber := fs.Bool("reset-after-clobber", boolEnv("RELAYFILE_RESET_AFTER_CLOBBER", false), "acknowledge a mount-root clobber and authorize daemon to recreate the directory")
 	rehome := fs.Bool("rehome", false, "allow re-homing an already-registered workspace mirror to a different LOCAL_DIR")
 	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
@@ -6892,6 +6893,7 @@ func runMount(args []string) error {
 		"log-file":            true,
 		"daemonized":          false,
 		"once":                false,
+		"flush-outbox-once":   false,
 		"reset-after-clobber": false,
 		"rehome":              false,
 		"local-dir":           true,
@@ -7294,7 +7296,7 @@ func runMount(args []string) error {
 		}
 		return spawnBackgroundMountProcessFn(args, resolvedRemotePaths, absLocalDir, pidFile, logFile, resolvedLocalLayout)
 	}
-	registerPID := shouldRegisterMountPID(*daemonized, *once)
+	registerPID := shouldRegisterMountPID(*daemonized, *once || *flushOutboxOnce)
 	if *daemonized {
 		if err := rotateLogFile(logFile); err != nil {
 			return err
@@ -7358,6 +7360,14 @@ func runMount(args []string) error {
 		}
 		if initialCredExpiresAt != "" {
 			syncer.SetCredentialExpiry(initialCredExpiresAt)
+		}
+		if *flushOutboxOnce {
+			drainCtx, cancel := context.WithTimeout(scopeCtx, *timeout)
+			defer cancel()
+			if err := syncer.FlushOutboxOnce(drainCtx); err != nil {
+				return fmt.Errorf("drain writebacks for %s: %w", scope.RemotePath, err)
+			}
+			return nil
 		}
 		return runMountLoopWithAuthLock(
 			scopeCtx,
@@ -7554,6 +7564,9 @@ Common flags:
   --interval 30s       sync interval (default 30s)
   --background         detach and keep syncing in the background
   --once               run one sync cycle and exit (used by setup/CI)
+  --flush-outbox-once
+                       bounded teardown: ingest watcher-journaled local drafts,
+                       flush the durable outbox, and exit without a tree scan
   --timeout 5m         per-sync timeout
   --bootstrap-timeout 0s
                        hard cap for initial/full-tree bootstrap (0 = progress-based)

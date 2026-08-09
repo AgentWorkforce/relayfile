@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -23,6 +24,7 @@ import (
 	"github.com/agentworkforce/relayfile/internal/delegatedauth"
 	"github.com/agentworkforce/relayfile/internal/mountscope"
 	"github.com/agentworkforce/relayfile/internal/mountsync"
+	"github.com/fsnotify/fsnotify"
 )
 
 const relayfileCLITestSubprocessEnv = "RELAYFILE_CLI_TEST_SUBPROCESS"
@@ -2401,6 +2403,121 @@ func TestMountUsesRecordedLocalDirWhenOmitted(t *testing.T) {
 	}
 	if string(data) != "# A" {
 		t.Fatalf("unexpected mirrored content: %q", data)
+	}
+}
+
+func TestMountFlushOutboxOnceIngestsJournaledDraftWithoutTreeScan(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	const (
+		workspaceID = "ws_bounded_teardown"
+		remoteRoot  = "/slack/channels/C123/messages"
+	)
+	localDir := t.TempDir()
+	stateDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(localDir, "unrelated.txt"), []byte("must not upload"), 0o644); err != nil {
+		t.Fatalf("seed unrelated file: %v", err)
+	}
+
+	token := testJWTWithWorkspace(workspaceID)
+	var bulkCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		wantPath := remoteRoot + "/command.json"
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/workspaces/"+workspaceID+"/fs/bulk":
+			bulkCalls.Add(1)
+			var req bulkWriteRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatalf("decode bounded drain request: %v", err)
+			}
+			if len(req.Files) != 1 {
+				t.Fatalf("bounded drain files = %+v, want only journaled draft", req.Files)
+			}
+			file := req.Files[0]
+			if file.Path != wantPath || file.Content != `{"text":"final reply"}` {
+				t.Fatalf("bounded drain file = %+v, want path %s and final reply", file, wantPath)
+			}
+			_, _ = io.WriteString(w, `{"written":1,"errorCount":0,"correlationId":"corr_drain","results":[{"path":"`+wantPath+`","revision":"rev_1","opId":"op_drain","writeback":{"provider":"slack","state":"succeeded"}}]}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/workspaces/"+workspaceID+"/ops/op_drain":
+			_, _ = io.WriteString(w, `{"opId":"op_drain","path":"`+wantPath+`","status":"succeeded","revision":"rev_1"}`)
+		default:
+			t.Fatalf("bounded drain made unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	producer, err := mountsync.NewSyncer(
+		mountsync.NewHTTPClient(server.URL, token, server.Client()),
+		mountsync.SyncerOptions{
+			WorkspaceID: workspaceID,
+			RemoteRoot:  remoteRoot,
+			LocalRoot:   localDir,
+			StateDir:    stateDir,
+			MountKind:   mountsync.MountKindDaemon,
+		},
+	)
+	if err != nil {
+		t.Fatalf("create producer syncer: %v", err)
+	}
+	watchCtx, cancelWatch := context.WithCancel(context.Background())
+	watcher, err := producer.NewFileWatcher(func(string, fsnotify.Op) {})
+	if err != nil {
+		t.Fatalf("create producer watcher: %v", err)
+	}
+	if err := watcher.Start(watchCtx); err != nil {
+		t.Fatalf("start producer watcher: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(localDir, "command.json"), []byte(`{"text":"final reply"}`), 0o644); err != nil {
+		t.Fatalf("write final draft: %v", err)
+	}
+	journalDir := filepath.Join(localDir, ".relay", "outbox", "local-pending")
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		entries, readErr := os.ReadDir(journalDir)
+		if readErr == nil && len(entries) == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("watcher did not persist pending draft before teardown: entries=%d err=%v", len(entries), readErr)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancelWatch()
+	if err := watcher.Close(); err != nil {
+		t.Fatalf("close producer watcher: %v", err)
+	}
+
+	err = run([]string{
+		"mount", workspaceID, localDir,
+		"--server", server.URL,
+		"--token", token,
+		"--remote-path", remoteRoot,
+		"--state-dir", stateDir,
+		"--mount-kind", mountsync.MountKindDaemon,
+		"--timeout", "2s",
+		"--flush-outbox-once",
+	}, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("run bounded teardown drain: %v", err)
+	}
+	if got := bulkCalls.Load(); got != 1 {
+		t.Fatalf("bulk calls = %d, want 1", got)
+	}
+	entries, err := os.ReadDir(journalDir)
+	if err != nil {
+		t.Fatalf("read drained journal: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("pending local journal still has %d entries", len(entries))
+	}
+}
+
+func TestMountRetiresPushLocalOnceSplitFlag(t *testing.T) {
+	err := runMount([]string{"--push-local-once"})
+	if err == nil || !strings.Contains(err.Error(), "flag provided but not defined") {
+		t.Fatalf("retired --push-local-once returned %v", err)
 	}
 }
 

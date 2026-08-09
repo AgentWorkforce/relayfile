@@ -1084,12 +1084,14 @@ type Syncer struct {
 	mountShadowDir       string
 	deadLetterDir        string
 	outboxDir            string
+	pendingLocalDir      string
 	eventProvider        string
 	scopedChild          bool
 	scopes               []string
 	logger               Logger
 	denialLogPath        string // path to .relay/permissions-denied.log
 	state                mountState
+	pendingLocalSequence atomic.Uint64
 	loaded               bool
 	bootstrapped         bool
 	// recoverStartupDrift is true only for this process instance's
@@ -1627,6 +1629,7 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 	mountShadowDir := filepath.Join(localRoot, ".relay", ".mount-shadow")
 	deadLetterDir := filepath.Join(localRoot, ".relay", "dead-letter")
 	outboxDir := filepath.Join(localRoot, ".relay", "outbox")
+	pendingLocalDir := filepath.Join(outboxDir, "local-pending")
 	scopes := normalizeScopes(opts.Scopes)
 	if len(scopes) == 0 {
 		if httpClient, ok := client.(*HTTPClient); ok {
@@ -1660,7 +1663,7 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 			opts.Logger.Printf("quarantined %d legacy private mount state file(s) outside mounted tree", len(moved))
 		}
 	}
-	for _, dir := range []string{outboxDir, filepath.Join(outboxDir, "pending"), filepath.Join(outboxDir, "acked"), filepath.Join(outboxDir, "failed")} {
+	for _, dir := range []string{outboxDir, filepath.Join(outboxDir, "pending"), filepath.Join(outboxDir, "acked"), filepath.Join(outboxDir, "failed"), pendingLocalDir} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return nil, err
 		}
@@ -1812,6 +1815,7 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 		mountShadowDir:        mountShadowDir,
 		deadLetterDir:         deadLetterDir,
 		outboxDir:             outboxDir,
+		pendingLocalDir:       pendingLocalDir,
 		eventProvider:         eventProvider,
 		scopedChild:           opts.ScopedChild,
 		scopes:                scopes,
@@ -1869,7 +1873,16 @@ func (s *Syncer) SetCredentialExpiry(expiresAt string) {
 // NewFileWatcher creates a watcher with the same local/remote mapping as this
 // Syncer so path-collision guards cannot diverge between event and scan paths.
 func (s *Syncer) NewFileWatcher(onChange func(string, fsnotify.Op)) (*FileWatcher, error) {
-	return NewFileWatcherForTopology(s.localRoot, s.remoteRoot, s.scopedChild, onChange)
+	watcher, err := NewFileWatcherForTopology(s.localRoot, s.remoteRoot, s.scopedChild, onChange)
+	if err != nil {
+		return nil, err
+	}
+	watcher.onObserve = func(relativePath string) {
+		if err := s.recordPendingLocalChange(relativePath); err != nil {
+			s.logf("failed to persist pending local change %s: %v", relativePath, err)
+		}
+	}
+	return watcher, nil
 }
 
 func parseScopesFromJWT(token string) []string {
@@ -1948,10 +1961,10 @@ func (s *Syncer) SkipStuck(ctx context.Context, max int) (int, error) {
 	return count, err
 }
 
-// FlushOutboxOnce uploads only persisted durable outbox records and exits
-// without reconciling the local mirror. It is intentionally O(outbox): no
-// local tree scan, pushLocal, pullRemote, websocket, or digest work.
-func (s *Syncer) FlushOutboxOnce(ctx context.Context) error {
+// flushPersistedOutboxOnce uploads only persisted durable outbox records. The
+// exported teardown entrypoint is FlushOutboxOnce in pending_local.go, which
+// first ingests watcher-journaled local paths and then calls this helper.
+func (s *Syncer) flushPersistedOutboxOnce(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -1980,66 +1993,6 @@ func (s *Syncer) FlushOutboxOnce(ctx context.Context) error {
 	return s.saveStateWithoutLocalScan()
 }
 
-// PushLocalAndFlushOnce ingests pending local writeback drafts with a single
-// pushLocal pass, then flushes the durable outbox, and exits — without
-// pullRemote, digest, websocket, or a full reconcile cycle.
-//
-// It is the teardown drain. Local writeback drafts are normally ingested into
-// the outbox by the running daemon's sync cycle (watcher + pushLocal). A draft
-// written after that daemon's last cycle and just before shutdown — e.g. a
-// final fire-and-forget reply right before a one-shot sandbox is torn down — is
-// still on disk but not yet in the outbox, so FlushOutboxOnce (outbox-only, no
-// local scan) silently drops it. Running pushLocal here, in the fresh cleanup
-// process that scans the on-disk mirror, ingests those drafts before flushing.
-//
-// The local scan is the cost (the same O(tree) work FlushOutboxOnce exists to
-// avoid), so callers should invoke this only when pending local writes are
-// detected and keep FlushOutboxOnce for the no-pending-writes fast path. Unlike
-// a full reconcile it still skips pullRemote/digest/websocket, so it cannot
-// reintroduce the pull-side flush-124 stalls.
-func (s *Syncer) PushLocalAndFlushOnce(ctx context.Context) error {
-	// Same top-of-cycle invariant as syncReserved: pushLocal scans and mutates
-	// the local mirror, so refuse to run if the mount root was wiped/clobbered
-	// (recovery is gated behind --reset-after-clobber). FlushOutboxOnce skips
-	// this because it is outbox-only and never touches the mirror.
-	if err := s.assertMountRootInvariant(); err != nil {
-		return err
-	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if err := s.loadState(); err != nil {
-		return err
-	}
-	conflicted, err := s.pushLocal(ctx)
-	if err != nil {
-		s.markSyncError(err)
-		_ = s.saveStateWithoutLocalScan()
-		return err
-	}
-	if err := s.flushOutboxRecords(ctx, conflicted, true); err != nil {
-		s.markSyncError(err)
-		_ = s.saveStateWithoutLocalScan()
-		return err
-	}
-	outbox := s.summarizeOutbox()
-	if outbox.NeedsAttention > 0 {
-		err := fmt.Errorf("outbox needs attention: %d command(s)", outbox.NeedsAttention)
-		s.markSyncError(err)
-		_ = s.saveStateWithoutLocalScan()
-		return err
-	}
-	if outbox.Pending > 0 {
-		err := fmt.Errorf("outbox pending remains: %d command(s)", outbox.Pending)
-		s.markSyncError(err)
-		_ = s.saveStateWithoutLocalScan()
-		return err
-	}
-	s.markSyncSuccess()
-	return s.saveState()
-}
-
 // HandleLocalChange routes a local filesystem event to the appropriate
 // writeback action.
 //
@@ -2064,6 +2017,10 @@ func (s *Syncer) PushLocalAndFlushOnce(ctx context.Context) error {
 // is no actual content change, so spurious events (Chmod-only on an
 // unmodified file) do not generate noise on the wire.
 func (s *Syncer) HandleLocalChange(ctx context.Context, relativePath string, op fsnotify.Op) error {
+	return s.handleLocalChange(ctx, relativePath, op, false)
+}
+
+func (s *Syncer) handleLocalChange(ctx context.Context, relativePath string, op fsnotify.Op, saveWithoutScan bool) (resultErr error) {
 	relativePath = filepath.ToSlash(strings.TrimSpace(filepath.Clean(relativePath)))
 	if relativePath == "" || relativePath == "." {
 		return nil
@@ -2078,6 +2035,12 @@ func (s *Syncer) HandleLocalChange(ctx context.Context, relativePath string, op 
 		}
 		return nil
 	}
+	journalToken := s.pendingLocalChangeToken(relativePath)
+	defer func() {
+		if resultErr == nil {
+			resultErr = s.clearPendingLocalChange(relativePath, journalToken)
+		}
+	}()
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -2100,10 +2063,17 @@ func (s *Syncer) HandleLocalChange(ctx context.Context, relativePath string, op 
 	saveWithStatus := func(run func() error) error {
 		if err := run(); err != nil {
 			s.markSyncError(err)
-			_ = s.saveState()
+			if saveWithoutScan {
+				_ = s.saveStateWithoutLocalScan()
+			} else {
+				_ = s.saveState()
+			}
 			return err
 		}
 		s.markSyncSuccess()
+		if saveWithoutScan {
+			return s.saveStateWithoutLocalScan()
+		}
 		return s.saveState()
 	}
 
