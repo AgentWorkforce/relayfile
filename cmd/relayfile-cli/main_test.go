@@ -4485,7 +4485,7 @@ func TestLoginCanProvisionSeparateWorkspaceForMessagingOnlyRelaycastWorkspace(t 
 
 	resolverFailure := agentRelayResolver404Error(workspaceKey, relayfileCLITestFixture(t, "cloud-workspace-not-found.json"))
 	installFakeAgentRelay(t, fmt.Sprintf(`
-if [ "$*" = "cloud login --no-open" ]; then
+if [ "$*" = "cloud login" ]; then
   echo "agent-relay login ok"
   exit 0
 fi
@@ -6844,6 +6844,10 @@ func TestLoginDelegatesToAgentRelay(t *testing.T) {
 	installFakeAgentRelay(t, `
 printf '%s\n' "$*" >> "$AGENT_RELAY_LOG"
 if [ "$*" = "cloud login --no-open" ]; then
+  echo "error: unknown option '--no-open'" >&2
+  exit 1
+fi
+if [ "$*" = "cloud login" ]; then
   echo "agent-relay login ok"
   exit 0
 fi
@@ -6882,10 +6886,13 @@ exit 2
 		t.Fatalf("read fake agent-relay log failed: %v", err)
 	}
 	gotLog := strings.TrimSpace(string(logBytes))
-	for _, want := range []string{"cloud login --no-open", "cloud session --json", "workspace active --json"} {
+	for _, want := range []string{"cloud login", "cloud session --json", "workspace active --json"} {
 		if !strings.Contains(gotLog, want) {
 			t.Fatalf("expected agent-relay %s call, got %q", want, string(logBytes))
 		}
+	}
+	if strings.Contains(gotLog, "cloud login --no-open") {
+		t.Fatalf("relayfile must not forward --no-open to agent-relay cloud login, got %q", gotLog)
 	}
 	if _, err := os.Stat(cloudCredentialsPath()); !os.IsNotExist(err) {
 		t.Fatalf("expected stale relayfile cloud credentials removed, got err=%v", err)
