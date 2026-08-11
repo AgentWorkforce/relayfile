@@ -3550,7 +3550,8 @@ func runIntegrationList(args []string, stdout io.Writer) error {
 	workspaceName := fs.String("workspace", "", "workspace name or id")
 	jsonOutput := fs.Bool("json", false, "emit JSON")
 	cloudAPIURL := fs.String("cloud-api-url", envOrDefault("RELAYFILE_CLOUD_API_URL", defaultCloudAPIURL), "Relayfile Cloud API URL")
-	cloudToken := fs.String("cloud-token", strings.TrimSpace(os.Getenv("RELAYFILE_CLOUD_TOKEN")), "Relayfile Cloud access token")
+	inheritedCloudToken := strings.TrimSpace(os.Getenv("RELAYFILE_CLOUD_TOKEN"))
+	cloudToken := fs.String("cloud-token", inheritedCloudToken, "Relayfile Cloud access token")
 	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
 		"workspace":     true,
 		"json":          false,
@@ -3562,6 +3563,10 @@ func runIntegrationList(args []string, stdout io.Writer) error {
 	if fs.NArg() > 0 {
 		return errors.New("usage: relayfile integration list [--workspace NAME] [--json] [--cloud-token TOKEN]")
 	}
+	cloudTokenPassedExplicitly := false
+	fs.Visit(func(item *flag.Flag) {
+		cloudTokenPassedExplicitly = cloudTokenPassedExplicitly || item.Name == "cloud-token"
+	})
 	record, err := resolveWorkspaceRecord(strings.TrimSpace(*workspaceName))
 	if err != nil {
 		return err
@@ -3575,7 +3580,25 @@ func runIntegrationList(args []string, stdout io.Writer) error {
 		return err
 	}
 	var entries []cloudIntegrationListEntry
-	if err := client.getJSON(context.Background(), fmt.Sprintf("/api/v1/workspaces/%s/integrations", url.PathEscape(record.ID)), &entries); err != nil {
+	integrationsPath := fmt.Sprintf("/api/v1/workspaces/%s/integrations", url.PathEscape(record.ID))
+	err = client.getJSON(context.Background(), integrationsPath, &entries)
+	if err != nil && inheritedCloudToken != "" && !cloudTokenPassedExplicitly && isAPIAuthError(err) {
+		// A detached control-plane daemon inherits its environment once, while
+		// Cloud access tokens rotate. On an authentication failure, refresh from
+		// the canonical Agent Relay session and retry once. An explicit CLI flag
+		// remains authoritative and is never silently replaced.
+		cloudCreds, refreshErr := ensureCloudCredentials(strings.TrimSpace(*cloudAPIURL), "", 5*time.Minute, false, io.Discard)
+		if refreshErr != nil {
+			return refreshErr
+		}
+		client, refreshErr = newAPIClient(cloudCreds.APIURL, cloudCreds.AccessToken)
+		if refreshErr != nil {
+			return refreshErr
+		}
+		entries = nil
+		err = client.getJSON(context.Background(), integrationsPath, &entries)
+	}
+	if err != nil {
 		return err
 	}
 	entries = overlayIntegrationListRuntimeStatus(entries, record)

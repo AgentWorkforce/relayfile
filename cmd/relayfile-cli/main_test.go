@@ -1824,6 +1824,42 @@ func TestIntegrationListUsesCloudTokenFromEnvironment(t *testing.T) {
 	}
 }
 
+func TestIntegrationListRefreshesInheritedCloudTokenAfterAuthFailure(t *testing.T) {
+	_, _ = setupAdoptWorkspace(t)
+	requestCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/workspaces/ws_123/integrations" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		requestCount++
+		w.Header().Set("Content-Type", "application/json")
+		switch got := r.Header.Get("Authorization"); got {
+		case "Bearer cld_expired":
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"code":"unauthorized","message":"expired token"}`))
+		case "Bearer cld_refreshed":
+			_, _ = w.Write([]byte(`[{"provider":"github","status":"ready","lagSeconds":0}]`))
+		default:
+			t.Fatalf("unexpected Authorization: %q", got)
+		}
+	}))
+	defer server.Close()
+	installFakeAgentRelaySession(t, server.URL, "cld_refreshed", "demo", "ws_123", "ws_123")
+	t.Setenv("RELAYFILE_CLOUD_API_URL", server.URL)
+	t.Setenv("RELAYFILE_CLOUD_TOKEN", "cld_expired")
+
+	var stdout bytes.Buffer
+	if err := run([]string{"integration", "list", "--workspace", "demo", "--json"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("integration list failed: %v\noutput:\n%s", err, stdout.String())
+	}
+	if requestCount != 2 {
+		t.Fatalf("integration list request count = %d, want 2", requestCount)
+	}
+	if got := stdout.String(); !strings.Contains(got, `"provider": "github"`) {
+		t.Fatalf("expected github integration JSON, got %q", got)
+	}
+}
+
 func TestIntegrationListBoundsOptionalRuntimeStatusOverlay(t *testing.T) {
 	_, _ = setupAdoptWorkspace(t)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
