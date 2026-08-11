@@ -36,6 +36,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/agentworkforce/relayfile/internal/delegatedauth"
+	"github.com/agentworkforce/relayfile/internal/mountlease"
 	"github.com/agentworkforce/relayfile/internal/mountscope"
 	"github.com/agentworkforce/relayfile/internal/mountsync"
 	"github.com/agentworkforce/relayfile/internal/relayfile"
@@ -6852,6 +6853,8 @@ func runMount(args []string) error {
 	intervalJitter := fs.Float64("interval-jitter", floatEnv("RELAYFILE_MOUNT_INTERVAL_JITTER", 0.2), "sync interval jitter ratio (0.0-1.0)")
 	timeout := fs.Duration("timeout", durationEnv("RELAYFILE_MOUNT_TIMEOUT", defaultMountTimeout), "per-sync timeout")
 	bootstrapTimeout := fs.Duration("bootstrap-timeout", durationEnv("RELAYFILE_BOOTSTRAP_TIMEOUT", 0), "hard cap for the one-time/full-tree bootstrap pull (0 = unbounded while making progress)")
+	bootstrapMaxFiles := fs.Int("bootstrap-max-files-per-cycle", intEnv("RELAYFILE_BOOTSTRAP_MAX_FILES_PER_CYCLE", 2000), "maximum files materialized per resumable tree-bootstrap cycle (-1 = legacy unbounded tree behavior)")
+	fullPullMinIntervalArg := fs.String("full-pull-min-interval", durationEnv("RELAYFILE_MOUNT_FULL_PULL_MIN_INTERVAL", 24*time.Hour).String(), "minimum wall-clock interval between completed periodic full-tree audits (-1 disables the time guard)")
 	cursorTimeout := fs.Duration("cursor-timeout", durationEnv("RELAYFILE_CURSOR_TIMEOUT", 60*time.Second), "independent timeout for events-cursor resolution")
 	fullReconcile := fs.Bool("full-reconcile", boolEnv("RELAYFILE_FORCE_FULL_RECONCILE", false), "force one full reconcile regardless of bootstrap-complete state (escape hatch)")
 	websocketEnabled := fs.Bool("websocket", boolEnv("RELAYFILE_MOUNT_WEBSOCKET", true), "enable websocket event streaming when available")
@@ -6866,35 +6869,37 @@ func runMount(args []string) error {
 	resetAfterClobber := fs.Bool("reset-after-clobber", boolEnv("RELAYFILE_RESET_AFTER_CLOBBER", false), "acknowledge a mount-root clobber and authorize daemon to recreate the directory")
 	rehome := fs.Bool("rehome", false, "allow re-homing an already-registered workspace mirror to a different LOCAL_DIR")
 	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
-		"server":              true,
-		"token":               true,
-		"creds-file":          true,
-		"remote-path":         true,
-		"paths-file":          true,
-		"local-layout":        true,
-		"provider":            true,
-		"state-file":          true,
-		"state-dir":           true,
-		"mount-kind":          true,
-		"mode":                true,
-		"interval":            true,
-		"interval-jitter":     true,
-		"timeout":             true,
-		"bootstrap-timeout":   true,
-		"cursor-timeout":      true,
-		"full-reconcile":      false,
-		"websocket":           false,
-		"low-memory":          false,
-		"pprof-addr":          true,
-		"memlog-interval":     true,
-		"background":          false,
-		"pid-file":            true,
-		"log-file":            true,
-		"daemonized":          false,
-		"once":                false,
-		"reset-after-clobber": false,
-		"rehome":              false,
-		"local-dir":           true,
+		"server":                        true,
+		"token":                         true,
+		"creds-file":                    true,
+		"remote-path":                   true,
+		"paths-file":                    true,
+		"local-layout":                  true,
+		"provider":                      true,
+		"state-file":                    true,
+		"state-dir":                     true,
+		"mount-kind":                    true,
+		"mode":                          true,
+		"interval":                      true,
+		"interval-jitter":               true,
+		"timeout":                       true,
+		"bootstrap-timeout":             true,
+		"bootstrap-max-files-per-cycle": true,
+		"full-pull-min-interval":        true,
+		"cursor-timeout":                true,
+		"full-reconcile":                false,
+		"websocket":                     false,
+		"low-memory":                    false,
+		"pprof-addr":                    true,
+		"memlog-interval":               true,
+		"background":                    false,
+		"pid-file":                      true,
+		"log-file":                      true,
+		"daemonized":                    false,
+		"once":                          false,
+		"reset-after-clobber":           false,
+		"rehome":                        false,
+		"local-dir":                     true,
 	})); err != nil {
 		// `--help` / `-h` come back from flag.ContinueOnError as
 		// flag.ErrHelp. Per contract A13 §3.6, surface the synced-mirror
@@ -6905,6 +6910,10 @@ func runMount(args []string) error {
 			return nil
 		}
 		return err
+	}
+	fullPullMinInterval, fullPullIntervalErr := parseDurationWithNegativeOne(*fullPullMinIntervalArg)
+	if fullPullIntervalErr != nil {
+		return fmt.Errorf("invalid --full-pull-min-interval: %w", fullPullIntervalErr)
 	}
 	if fs.NArg() > 2 {
 		return errors.New("usage: relayfile mount [WORKSPACE] [LOCAL_DIR]")
@@ -7173,23 +7182,6 @@ func runMount(args []string) error {
 	if strings.EqualFold(strings.TrimSpace(*mode), "fuse") || boolEnv("RELAYFILE_MOUNT_FUSE", false) {
 		return errors.New("fuse mode is not available in this build; rerun with --mode=poll")
 	}
-	// Exact mounts retain the acknowledged reset path. Scoped mounts first
-	// inspect every root without authorizing mutation: a reset that recovers
-	// only the catalog root would report success while child roots remain
-	// clobbered.
-	if err := preflightMountRootInvariant(absLocalDir, *resetAfterClobber && resolvedLocalLayout == mountscope.LayoutExact); err != nil {
-		return err
-	}
-	if resolvedLocalLayout == mountscope.LayoutScoped {
-		for _, scope := range mountScopes {
-			if scope.LocalDir == absLocalDir {
-				continue
-			}
-			if err := preflightScopedMountRootInvariant(absLocalDir, scope.LocalDir); err != nil {
-				return fmt.Errorf("preflight scoped local dir for %s: %w", scope.RemotePath, err)
-			}
-		}
-	}
 	pidFile := strings.TrimSpace(*pidFileFlag)
 	if pidFile == "" {
 		pidFile = mountPIDFile(absLocalDir)
@@ -7198,9 +7190,17 @@ func runMount(args []string) error {
 	if logFile == "" {
 		logFile = mountLogFile(absLocalDir)
 	}
-	// Refuse a competing daemon before persisting topology or initializing
-	// child roots. A rejected start must not change the allowlist that the
-	// already-running process, status commands, or a later restart observe.
+	backgroundParent := *background && !*daemonized
+	if !backgroundParent {
+		lease, err := mountlease.Acquire(strings.TrimRight(strings.TrimSpace(*server), "/"), workspaceID, absLocalDir)
+		if err != nil {
+			return fmt.Errorf("acquire workspace mount lease: %w", err)
+		}
+		defer lease.Release()
+	}
+	// Preserve the background parent's process-scan and stale-PID cleanup
+	// contract before it spawns. The parent still makes no topology or mirror
+	// mutations; the daemonized child acquires the lifetime lease before those.
 	if shouldRefuseCompetingMount(*daemonized) {
 		running, stalePID, derr := runningMountDaemons(absLocalDir, workspaceID, workspaceNameForStart(workspaceID))
 		if derr != nil {
@@ -7218,6 +7218,30 @@ func runMount(args []string) error {
 				absLocalDir,
 				formatDaemonPIDs(running),
 			)
+		}
+	}
+	if backgroundParent {
+		resolvedRemotePaths := make([]string, 0, len(mountScopes))
+		for _, scope := range mountScopes {
+			resolvedRemotePaths = append(resolvedRemotePaths, scope.RemotePath)
+		}
+		return spawnBackgroundMountProcessFn(args, resolvedRemotePaths, absLocalDir, pidFile, logFile, resolvedLocalLayout)
+	}
+	// Exact mounts retain the acknowledged reset path. Scoped mounts first
+	// inspect every root without authorizing mutation: a reset that recovers
+	// only the catalog root would report success while child roots remain
+	// clobbered.
+	if err := preflightMountRootInvariant(absLocalDir, *resetAfterClobber && resolvedLocalLayout == mountscope.LayoutExact); err != nil {
+		return err
+	}
+	if resolvedLocalLayout == mountscope.LayoutScoped {
+		for _, scope := range mountScopes {
+			if scope.LocalDir == absLocalDir {
+				continue
+			}
+			if err := preflightScopedMountRootInvariant(absLocalDir, scope.LocalDir); err != nil {
+				return fmt.Errorf("preflight scoped local dir for %s: %w", scope.RemotePath, err)
+			}
 		}
 	}
 	if !*daemonized {
@@ -7287,13 +7311,6 @@ func runMount(args []string) error {
 	}
 	*intervalJitter = clampJitterRatio(*intervalJitter)
 
-	if *background && !*daemonized {
-		resolvedRemotePaths := make([]string, 0, len(mountScopes))
-		for _, scope := range mountScopes {
-			resolvedRemotePaths = append(resolvedRemotePaths, scope.RemotePath)
-		}
-		return spawnBackgroundMountProcessFn(args, resolvedRemotePaths, absLocalDir, pidFile, logFile, resolvedLocalLayout)
-	}
 	registerPID := shouldRegisterMountPID(*daemonized, *once)
 	if *daemonized {
 		if err := rotateLogFile(logFile); err != nil {
@@ -7336,22 +7353,24 @@ func runMount(args []string) error {
 			Transport: newWritebackFailureTransport(scope.LocalDir, log.Default(), mountsync.NewSyncTransport()),
 		})
 		syncer, err := mountsync.NewSyncer(client, mountsync.SyncerOptions{
-			WorkspaceID:        workspaceID,
-			RemoteRoot:         scope.RemotePath,
-			EventProvider:      strings.TrimSpace(*eventProvider),
-			ScopedChild:        resolvedLocalLayout == mountscope.LayoutScoped,
-			LocalRoot:          scope.LocalDir,
-			StateFile:          strings.TrimSpace(*stateFile),
-			StateDir:           strings.TrimSpace(*stateDir),
-			MountKind:          strings.TrimSpace(*mountKind),
-			ValidateState:      true,
-			WebSocket:          boolPtr(*websocketEnabled),
-			LowMemory:          boolPtr(*lowMemory),
-			RootCtx:            scopeCtx,
-			Logger:             log.Default(),
-			BootstrapTimeout:   *bootstrapTimeout,
-			CursorTimeout:      *cursorTimeout,
-			ForceFullReconcile: boolPtr(*fullReconcile),
+			WorkspaceID:               workspaceID,
+			RemoteRoot:                scope.RemotePath,
+			EventProvider:             strings.TrimSpace(*eventProvider),
+			ScopedChild:               resolvedLocalLayout == mountscope.LayoutScoped,
+			LocalRoot:                 scope.LocalDir,
+			StateFile:                 strings.TrimSpace(*stateFile),
+			StateDir:                  strings.TrimSpace(*stateDir),
+			MountKind:                 strings.TrimSpace(*mountKind),
+			ValidateState:             true,
+			WebSocket:                 boolPtr(*websocketEnabled),
+			LowMemory:                 boolPtr(*lowMemory),
+			RootCtx:                   scopeCtx,
+			Logger:                    log.Default(),
+			BootstrapTimeout:          *bootstrapTimeout,
+			BootstrapMaxFilesPerCycle: *bootstrapMaxFiles,
+			FullPullMinInterval:       fullPullMinInterval,
+			CursorTimeout:             *cursorTimeout,
+			ForceFullReconcile:        boolPtr(*fullReconcile),
 		})
 		if err != nil {
 			return fmt.Errorf("failed to initialize mount syncer for %s: %w", scope.RemotePath, err)
@@ -7557,6 +7576,10 @@ Common flags:
   --timeout 5m         per-sync timeout
   --bootstrap-timeout 0s
                        hard cap for initial/full-tree bootstrap (0 = progress-based)
+  --bootstrap-max-files-per-cycle 2000
+                       yield a resumable tree bootstrap after this many files
+  --full-pull-min-interval 24h
+                       minimum interval between periodic full-tree audits
   --cursor-timeout 60s timeout for events-cursor resolution
   --full-reconcile     force one full reconcile regardless of bootstrap state
   --state-dir DIR      private mount state directory (default $HOME/.relayfile-mount-state)
@@ -13202,9 +13225,33 @@ func durationEnv(name string, fallback time.Duration) time.Duration {
 	if raw == "" {
 		return fallback
 	}
+	if raw == "-1" {
+		return -1
+	}
 	value, err := time.ParseDuration(raw)
 	if err != nil {
 		log.Printf("invalid %s=%q, using fallback %s", name, raw, fallback.String())
+		return fallback
+	}
+	return value
+}
+
+func parseDurationWithNegativeOne(raw string) (time.Duration, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "-1" {
+		return -1, nil
+	}
+	return time.ParseDuration(raw)
+}
+
+func intEnv(name string, fallback int) int {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return fallback
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil {
+		log.Printf("invalid %s=%q, using fallback %d", name, raw, fallback)
 		return fallback
 	}
 	return value
@@ -13775,12 +13822,11 @@ func runMountLoopWithAuthLock(rootCtx context.Context, syncer *mountsync.Syncer,
 		return nil
 	}
 
-	// The watcher must be accepting local edits before the initial bootstrap
-	// starts. A large full-tree export can run for minutes; starting the
-	// watcher afterward creates a blind window where a writeback draft is on
-	// disk but never reaches /fs/bulk until teardown. Full-pull I/O yields the
-	// Syncer's state lock to this callback, and unchanged down-mirror echoes are
-	// filtered by HandleLocalChange's tracked hash check.
+	// Prefer the watcher before the initial bootstrap so local edits are admitted
+	// immediately. When the platform or directory budget makes a recursive
+	// watcher unsafe, retain polling reconciliation: every poll performs the same
+	// pushLocal scan, so writebacks remain correct without descriptor fan-out.
+	watcherActive := false
 	if !once {
 		watcher, err := syncer.NewFileWatcher(func(relativePath string, op fsnotify.Op) {
 			if isDegraded() {
@@ -13804,13 +13850,16 @@ func runMountLoopWithAuthLock(rootCtx context.Context, syncer *mountsync.Syncer,
 			writeSnapshot()
 		})
 		if err != nil {
-			return fmt.Errorf("create file watcher: %w", err)
-		}
-		if err := watcher.Start(rootCtx); err != nil {
+			syncer.EnablePollingLocalChangeDetection()
+			log.Printf("file watcher unavailable; continuing with polling reconciliation: %v", err)
+		} else if err := watcher.Start(rootCtx); err != nil {
 			_ = watcher.Close()
-			return fmt.Errorf("start file watcher: %w", err)
+			syncer.EnablePollingLocalChangeDetection()
+			log.Printf("file watcher disabled; continuing with polling reconciliation: %v", err)
+		} else {
+			watcherActive = true
+			defer watcher.Close()
 		}
-		defer watcher.Close()
 	}
 
 	log.Print(mountStartBanner(localDir, interval, intervalJitter))
@@ -13841,7 +13890,7 @@ func runMountLoopWithAuthLock(rootCtx context.Context, syncer *mountsync.Syncer,
 			}
 		case <-timer.C:
 			cycle++
-			reconcile := shouldReconcileMountCycle(websocketEnabled, cycle)
+			reconcile := shouldReconcileMountCycle(websocketEnabled && watcherActive, cycle)
 			if reconcile {
 				_ = runCycle(true)
 			}

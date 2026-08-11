@@ -76,12 +76,13 @@ const (
 )
 
 // defaultFullPullEvery is the default cadence for the "trust but verify"
-// periodic full tree pull that runs from the incremental path. At 30s sync
-// intervals, 20 cycles is roughly every 10 minutes. This is the safety net
-// for cloud-side revision reuse: even when the events feed says "nothing
-// changed at rev_X," every Nth cycle we re-export the tree and let
-// applyRemoteFile re-hash and overwrite any drift between the daemon's
-// tracked.Hash and the actual remote content.
+// periodic full tree pull that runs from the incremental path. The cycle gate
+// is paired with defaultFullPullMinInterval, so the default can run at most
+// once per 24 hours even though 20 quiet cycles elapse much sooner. This is the
+// safety net for cloud-side revision reuse: even when the events feed says
+// "nothing changed at rev_X," the audit eventually re-exports the tree and lets
+// applyRemoteFile re-hash and overwrite drift between the daemon's tracked.Hash
+// and the actual remote content.
 const defaultFullPullEvery = 20
 
 // Bootstrap / cursor timeout defaults. The bootstrap default is the
@@ -92,6 +93,14 @@ const defaultFullPullEvery = 20
 const (
 	defaultBootstrapTimeout     = 0 * time.Second
 	defaultBootstrapIdleTimeout = 90 * time.Second
+	// defaultBootstrapMaxFilesPerCycle keeps the resumable tree fallback from
+	// monopolizing disk and network indefinitely. Atomic exports have separate
+	// response-size and timeout bounds; the tree traversal persists its cursor
+	// and resumes on the next poll cycle.
+	defaultBootstrapMaxFilesPerCycle = 2000
+	// defaultFullPullMinInterval rate-limits the expensive trust-but-verify
+	// audit. Incremental events remain the normal reconciliation path.
+	defaultFullPullMinInterval = 24 * time.Hour
 	// defaultBootstrapStallCycles is the maximum number of consecutive
 	// bootstrap cycles allowed to leave the persisted traversal checkpoint
 	// unchanged. It turns a permanently failing resume point into an explicit
@@ -171,6 +180,21 @@ func resolveBootstrapStallCycles(opt int, logger Logger) int {
 		}
 	}
 	return defaultBootstrapStallCycles
+}
+
+func resolveBootstrapMaxFilesPerCycle(opt int, logger Logger) int {
+	if opt != 0 {
+		return opt
+	}
+	const env = "RELAYFILE_BOOTSTRAP_MAX_FILES_PER_CYCLE"
+	if raw := strings.TrimSpace(os.Getenv(env)); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed != 0 {
+			return parsed
+		} else if logger != nil {
+			logger.Printf("ignoring invalid %s=%q; expected a non-zero integer", env, raw)
+		}
+	}
+	return defaultBootstrapMaxFilesPerCycle
 }
 
 var providerLayoutAliasSegments = []string{
@@ -900,9 +924,14 @@ type SyncerOptions struct {
 	// FullPullEvery controls how often the incremental pull path forces a
 	// full tree pull as a "trust but verify" safety net against cloud-side
 	// revision reuse (see fix/cloud-side-rev-reuse-defense). 0 means use
-	// the default (defaultFullPullEvery, ~10 min at 30s intervals). A
-	// negative value disables the periodic full pull entirely.
+	// the default (defaultFullPullEvery). The separate wall-clock guard keeps
+	// this cheap cycle counter from triggering repeated heavy pulls. A negative
+	// value disables the periodic full pull entirely.
 	FullPullEvery int
+	// FullPullMinInterval is a second, wall-clock guard on periodic full-tree
+	// audits. Zero uses RELAYFILE_MOUNT_FULL_PULL_MIN_INTERVAL and then the
+	// 24-hour default. A negative value disables only this time guard.
+	FullPullMinInterval time.Duration
 	// BootstrapTimeout caps the one-time full-tree bootstrap / periodic
 	// full pull. It is derived from the Syncer's RootCtx (NOT the inbound
 	// per-cycle ctx) so a tiny per-cycle deadline cannot starve a large
@@ -911,6 +940,12 @@ type SyncerOptions struct {
 	// sentinel (<=0): the bootstrap runs to completion as long as it keeps
 	// applying files within the idle window.
 	BootstrapTimeout time.Duration
+	// BootstrapMaxFilesPerCycle bounds initial materialization work in the
+	// resumable tree fallback before it yields to the mount loop. Atomic exports
+	// remain separately bounded by response size and ExportTimeout. Zero uses
+	// RELAYFILE_BOOTSTRAP_MAX_FILES_PER_CYCLE and then the default (2000). A
+	// negative value preserves the legacy unbounded bootstrap behavior.
+	BootstrapMaxFilesPerCycle int
 	// BootstrapStallCycles is the maximum number of consecutive bootstrap
 	// cycles that may leave the persisted traversal checkpoint unchanged. 0
 	// falls back to RELAYFILE_BOOTSTRAP_STALL_CYCLES, then the default (20).
@@ -1092,36 +1127,41 @@ type Syncer struct {
 	state                mountState
 	loaded               bool
 	bootstrapped         bool
-	// recoverStartupDrift is true only for this process instance's
-	// first complete pushLocal pass. Before that pass, the watcher could not
-	// have observed edits made while the daemon was stopped. Afterward,
-	// Dirty/DeletePending remain the authoritative local-mutation signals so
-	// stale or corrupted tracked hashes cannot trigger steady-state writeback.
-	recoverStartupDrift  bool
-	websocket            bool
-	rootCtx              context.Context
-	wsConn               *websocket.Conn
-	wsCancel             context.CancelFunc
-	wsNextAttempt        time.Time
-	wsReconnectFailures  int
-	wsConnecting         bool
-	wsGeneration         int64
-	wsLastConnectedAt    time.Time
-	wsLastAttemptAt      time.Time
-	listenerHeartbeatAt  time.Time
-	bulkFlushThreshold   int
-	mode                 string
-	interval             time.Duration
-	fullPullEvery        int
-	cursorTimeout        time.Duration
-	exportTimeout        time.Duration
-	outboxFlushTimeout   time.Duration
-	bootstrapTimeout     time.Duration
-	bootstrapIdleTimeout time.Duration
-	bootstrapStallCycles int
-	readNotReadyTTL      time.Duration
-	forceFullReconcile   bool
-	incrementalCycles    int
+	// recoverStartupDrift is true only for this process instance's first
+	// complete pushLocal pass. Before that pass, the watcher could not have
+	// observed edits made while the daemon was stopped. In watcher mode,
+	// Dirty/DeletePending remain the authoritative steady-state mutation
+	// signals. pollLocalChanges is enabled only when the watcher is unavailable;
+	// it deliberately promotes hash drift and missing tracked files found by the
+	// existing scan to those explicit signals.
+	recoverStartupDrift       bool
+	pollLocalChanges          bool
+	websocket                 bool
+	rootCtx                   context.Context
+	wsConn                    *websocket.Conn
+	wsCancel                  context.CancelFunc
+	wsNextAttempt             time.Time
+	wsReconnectFailures       int
+	wsConnecting              bool
+	wsGeneration              int64
+	wsLastConnectedAt         time.Time
+	wsLastAttemptAt           time.Time
+	listenerHeartbeatAt       time.Time
+	bulkFlushThreshold        int
+	mode                      string
+	interval                  time.Duration
+	fullPullEvery             int
+	fullPullMinInterval       time.Duration
+	bootstrapMaxFilesPerCycle int
+	cursorTimeout             time.Duration
+	exportTimeout             time.Duration
+	outboxFlushTimeout        time.Duration
+	bootstrapTimeout          time.Duration
+	bootstrapIdleTimeout      time.Duration
+	bootstrapStallCycles      int
+	readNotReadyTTL           time.Duration
+	forceFullReconcile        bool
+	incrementalCycles         int
 	// staleAliasSkips counts stale provider-layout-alias events drained in the
 	// current reconcile cycle. Reset at the start of each cycle and surfaced to
 	// the CLI (e.g. `relayfile pull` summary, `workspace status`) so operators
@@ -1143,6 +1183,7 @@ type Syncer struct {
 	// by that up-path are remembered for the lifetime of the snapshot so stale
 	// export/tree data cannot overwrite or tombstone a concurrent local write.
 	fullPullActive        bool
+	fullPullAuthoritative bool
 	fullPullUpPaths       map[string]struct{}
 	oversizedLogged       map[string]struct{}
 	controlSkipLogged     map[string]struct{}
@@ -1262,11 +1303,18 @@ type mountState struct {
 	BootstrapComplete    bool     `json:"bootstrapComplete,omitempty"`
 	BootstrapDirectories []string `json:"bootstrapDirectories,omitempty"`
 	BootstrapCursor      string   `json:"bootstrapCursor,omitempty"`
-	BootstrapFilesSynced int      `json:"bootstrapFilesSynced,omitempty"`
-	BootstrapFilesTotal  int      `json:"bootstrapFilesTotal,omitempty"`
-	BootstrapStartedAt   string   `json:"bootstrapStartedAt,omitempty"`
+	// BootstrapPageOffset resumes within a server page that exceeds the
+	// per-cycle file budget. It is scoped by BootstrapDirectories[0] and
+	// BootstrapCursor and resets whenever either advances.
+	BootstrapPageOffset  int    `json:"bootstrapPageOffset,omitempty"`
+	BootstrapFilesSynced int    `json:"bootstrapFilesSynced,omitempty"`
+	BootstrapFilesTotal  int    `json:"bootstrapFilesTotal,omitempty"`
+	BootstrapStartedAt   string `json:"bootstrapStartedAt,omitempty"`
+	// LastFullPullAt persists the last completed authoritative full-tree audit
+	// so process restarts cannot accidentally re-arm an expensive audit storm.
+	LastFullPullAt string `json:"lastFullPullAt,omitempty"`
 	// BootstrapStallCycles counts consecutive bootstrap cycles that did not
-	// advance the resumable directory/cursor checkpoint. It is persisted so a
+	// advance the resumable directory/page-offset/cursor checkpoint. It is persisted so a
 	// process restart cannot evade the hard-stall guard.
 	BootstrapStallCycles int `json:"bootstrapStallCycles,omitempty"`
 	// QuarantinedPaths holds remote paths that cannot be materialized locally
@@ -1686,6 +1734,33 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 			fullPullEvery = defaultFullPullEvery
 		}
 	}
+	fullPullMinInterval := opts.FullPullMinInterval
+	if fullPullMinInterval == 0 {
+		const env = "RELAYFILE_MOUNT_FULL_PULL_MIN_INTERVAL"
+		fallback := func() time.Duration {
+			if opts.FullPullEvery != 0 {
+				// Explicit cycle cadences retain their historical semantics
+				// unless the caller also opts into the wall-clock guard.
+				return -1
+			}
+			return defaultFullPullMinInterval
+		}
+		if raw := strings.TrimSpace(os.Getenv(env)); raw != "" {
+			if raw == "-1" {
+				fullPullMinInterval = -1
+			} else if parsed, err := time.ParseDuration(raw); err == nil && parsed != 0 {
+				fullPullMinInterval = parsed
+			} else {
+				fullPullMinInterval = fallback()
+				if opts.Logger != nil {
+					opts.Logger.Printf("ignoring invalid or zero %s=%q; using fallback %s", env, raw, fullPullMinInterval)
+				}
+			}
+		} else {
+			fullPullMinInterval = fallback()
+		}
+	}
+	bootstrapMaxFilesPerCycle := resolveBootstrapMaxFilesPerCycle(opts.BootstrapMaxFilesPerCycle, opts.Logger)
 	cursorTimeout := resolveDurationEnv(opts.CursorTimeout, "RELAYFILE_CURSOR_TIMEOUT", defaultCursorTimeout, opts.Logger)
 	if cursorTimeout <= 0 {
 		cursorTimeout = defaultCursorTimeout
@@ -1800,51 +1875,53 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 	}
 	githubWorkingTree := detectGithubWorkingTreeMount(remoteRoot)
 	return &Syncer{
-		client:                client,
-		workspace:             workspace,
-		remoteRoot:            remoteRoot,
-		localRoot:             localRoot,
-		localDir:              localRoot,
-		stateFile:             stateFile,
-		publicStatePath:       publicStatePath,
-		conflictsDir:          conflictsDir,
-		resolvedConflictsDir:  resolvedConflictsDir,
-		mountShadowDir:        mountShadowDir,
-		deadLetterDir:         deadLetterDir,
-		outboxDir:             outboxDir,
-		eventProvider:         eventProvider,
-		scopedChild:           opts.ScopedChild,
-		scopes:                scopes,
-		websocket:             websocketEnabled,
-		recoverStartupDrift:   true,
-		rootCtx:               rootCtx,
-		logger:                opts.Logger,
-		denialLogPath:         filepath.Join(localRoot, ".relay", "permissions-denied.log"),
-		bulkFlushThreshold:    bulkFlushThreshold,
-		mode:                  strings.TrimSpace(opts.Mode),
-		writeOnly:             normalizeSyncMode(opts.SyncMode) == "write-only",
-		interval:              opts.Interval,
-		fullPullEvery:         fullPullEvery,
-		cursorTimeout:         cursorTimeout,
-		exportTimeout:         exportTimeout,
-		outboxFlushTimeout:    outboxFlushTimeout,
-		bootstrapTimeout:      bootstrapTimeout,
-		bootstrapIdleTimeout:  bootstrapIdleTimeout,
-		bootstrapStallCycles:  bootstrapStallCycles,
-		readNotReadyTTL:       readNotReadyTTL,
-		forceFullReconcile:    forceFullReconcile,
-		oversizedLogged:       map[string]struct{}{},
-		quarantinedPaths:      map[string]struct{}{},
-		lazyRepos:             lazyRepos,
-		lazySkipUntrackedPush: lazySkipUntrackedPush,
-		lowMemory:             lowMemory,
-		layoutRegistrar:       opts.ProviderLayoutRegistrar,
-		githubWorkingTree:     githubWorkingTree,
-		closeScheduler:        closeScheduler,
-		rollingCoalescer:      rollingCoalescer,
-		circuit:               NewCloudErrorCircuit(),
-		maxOutboxAttempts:     defaultOutboxMaxAttempts,
-		nowFn:                 opts.Now,
+		client:                    client,
+		workspace:                 workspace,
+		remoteRoot:                remoteRoot,
+		localRoot:                 localRoot,
+		localDir:                  localRoot,
+		stateFile:                 stateFile,
+		publicStatePath:           publicStatePath,
+		conflictsDir:              conflictsDir,
+		resolvedConflictsDir:      resolvedConflictsDir,
+		mountShadowDir:            mountShadowDir,
+		deadLetterDir:             deadLetterDir,
+		outboxDir:                 outboxDir,
+		eventProvider:             eventProvider,
+		scopedChild:               opts.ScopedChild,
+		scopes:                    scopes,
+		websocket:                 websocketEnabled,
+		recoverStartupDrift:       true,
+		rootCtx:                   rootCtx,
+		logger:                    opts.Logger,
+		denialLogPath:             filepath.Join(localRoot, ".relay", "permissions-denied.log"),
+		bulkFlushThreshold:        bulkFlushThreshold,
+		mode:                      strings.TrimSpace(opts.Mode),
+		writeOnly:                 normalizeSyncMode(opts.SyncMode) == "write-only",
+		interval:                  opts.Interval,
+		fullPullEvery:             fullPullEvery,
+		fullPullMinInterval:       fullPullMinInterval,
+		bootstrapMaxFilesPerCycle: bootstrapMaxFilesPerCycle,
+		cursorTimeout:             cursorTimeout,
+		exportTimeout:             exportTimeout,
+		outboxFlushTimeout:        outboxFlushTimeout,
+		bootstrapTimeout:          bootstrapTimeout,
+		bootstrapIdleTimeout:      bootstrapIdleTimeout,
+		bootstrapStallCycles:      bootstrapStallCycles,
+		readNotReadyTTL:           readNotReadyTTL,
+		forceFullReconcile:        forceFullReconcile,
+		oversizedLogged:           map[string]struct{}{},
+		quarantinedPaths:          map[string]struct{}{},
+		lazyRepos:                 lazyRepos,
+		lazySkipUntrackedPush:     lazySkipUntrackedPush,
+		lowMemory:                 lowMemory,
+		layoutRegistrar:           opts.ProviderLayoutRegistrar,
+		githubWorkingTree:         githubWorkingTree,
+		closeScheduler:            closeScheduler,
+		rollingCoalescer:          rollingCoalescer,
+		circuit:                   NewCloudErrorCircuit(),
+		maxOutboxAttempts:         defaultOutboxMaxAttempts,
+		nowFn:                     opts.Now,
 		state: mountState{
 			WorkspaceID: workspace,
 			RemoteRoot:  remoteRoot,
@@ -1869,7 +1946,21 @@ func (s *Syncer) SetCredentialExpiry(expiresAt string) {
 // NewFileWatcher creates a watcher with the same local/remote mapping as this
 // Syncer so path-collision guards cannot diverge between event and scan paths.
 func (s *Syncer) NewFileWatcher(onChange func(string, fsnotify.Op)) (*FileWatcher, error) {
+	if !recursiveWatcherAllowed() {
+		return nil, fmt.Errorf("%w: fsnotify uses descriptor-per-file kqueue on macOS; continuing with polling reconciliation (set RELAYFILE_MOUNT_FORCE_RECURSIVE_WATCHER=1 only for a deliberately small mirror)", ErrRecursiveWatcherUnsafe)
+	}
 	return NewFileWatcherForTopology(s.localRoot, s.remoteRoot, s.scopedChild, onChange)
+}
+
+// EnablePollingLocalChangeDetection makes each existing local-tree scan treat
+// hash drift and missing tracked files as explicit local mutations. Mount loops
+// call this only when their recursive watcher cannot run. scanLocalFiles already
+// hashes the tree on every reconciliation, so this changes write eligibility
+// without adding another traversal.
+func (s *Syncer) EnablePollingLocalChangeDetection() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pollLocalChanges = true
 }
 
 func parseScopesFromJWT(token string) []string {
@@ -3183,8 +3274,9 @@ func (s *Syncer) syncReserved(ctx context.Context, forcePoll bool) error {
 	} else if !s.state.BootstrapComplete || s.forceFullReconcile {
 		previousBootstrapCursor := s.state.BootstrapCursor
 		previousBootstrapDirectories := append([]string(nil), s.state.BootstrapDirectories...)
+		previousBootstrapPageOffset := s.state.BootstrapPageOffset
 		pullErr := s.pullRemote(ctx, conflicted)
-		if stallErr := s.recordBootstrapCycle(previousBootstrapCursor, previousBootstrapDirectories, pullErr); stallErr != nil {
+		if stallErr := s.recordBootstrapCycle(previousBootstrapCursor, previousBootstrapDirectories, previousBootstrapPageOffset, pullErr); stallErr != nil {
 			s.markSyncError(stallErr)
 			_ = s.saveState()
 			return stallErr
@@ -3735,7 +3827,7 @@ func (s *Syncer) pullRemote(ctx context.Context, conflicted map[string]struct{})
 	if err := s.retrySkippedMaterializations(ctx, conflicted); err != nil {
 		return err
 	}
-	if s.state.EventsCursor != "" && !s.forceFullReconcile {
+	if s.state.BootstrapComplete && s.state.EventsCursor != "" && !s.forceFullReconcile {
 		// Skip-if-no-events short-circuit. Most reconcile cycles on a
 		// quiet workspace have nothing to pull; turning that into a
 		// single cheap ListEvents probe avoids the worst-case full-tree
@@ -3793,15 +3885,19 @@ func (s *Syncer) pullRemote(ctx context.Context, conflicted map[string]struct{})
 		if err == nil && len(feed.Events) == 0 {
 			s.state.IncrementalBacklogDraining = false
 			if s.fullPullEvery > 0 {
-				s.incrementalCycles++
-				if s.incrementalCycles >= s.fullPullEvery {
+				if s.incrementalCycles < s.fullPullEvery {
+					s.incrementalCycles++
+				}
+				if s.incrementalCycles >= s.fullPullEvery && s.periodicFullPullDue() {
 					return forceFullPull(fmt.Sprintf("forcing periodic full tree pull (every %d quiet/incremental cycles) as defense against cloud-side revision reuse and missing events", s.fullPullEvery))
 				}
 			}
 			return nil
 		}
-		s.incrementalCycles++
-		if s.fullPullEvery > 0 && s.incrementalCycles >= s.fullPullEvery {
+		if s.fullPullEvery > 0 && s.incrementalCycles < s.fullPullEvery {
+			s.incrementalCycles++
+		}
+		if s.fullPullEvery > 0 && s.incrementalCycles >= s.fullPullEvery && s.periodicFullPullDue() {
 			return forceFullPull(fmt.Sprintf("forcing periodic full tree pull (every %d quiet/incremental cycles) as defense against cloud-side revision reuse and missing events", s.fullPullEvery))
 		}
 
@@ -3922,6 +4018,12 @@ func (s *Syncer) pullRemote(ctx context.Context, conflicted map[string]struct{})
 	if err := s.pullRemoteFull(bctx, conflicted, bprog); err != nil {
 		return err
 	}
+	// A budgeted tree pull returns successfully after persisting a resume
+	// checkpoint. Do not seed an events fast-path until every bootstrap page has
+	// materialized, or the next cycle can skip the saved tree cursor forever.
+	if !s.state.BootstrapComplete {
+		return nil
+	}
 	s.state.IncrementalCheckpoint = nil
 	s.state.IncrementalBacklogDraining = false
 	s.clearAllIncrementalReadNotReady()
@@ -3947,7 +4049,35 @@ func (s *Syncer) pullRemote(ctx context.Context, conflicted map[string]struct{})
 	return nil
 }
 
-func (s *Syncer) pullRemoteFull(ctx context.Context, conflicted map[string]struct{}, prog bootstrapProgress) error {
+func (s *Syncer) periodicFullPullDue() bool {
+	if s.fullPullMinInterval <= 0 {
+		return true
+	}
+	raw := strings.TrimSpace(s.state.LastFullPullAt)
+	if raw == "" {
+		return true
+	}
+	last, err := time.Parse(time.RFC3339Nano, raw)
+	if err != nil {
+		now := s.now().UTC()
+		s.state.LastFullPullAt = now.Format(time.RFC3339Nano)
+		s.logf("invalid lastFullPullAt %q; resetting the periodic full-pull guard baseline", raw)
+		return false
+	}
+	now := s.now()
+	if last.After(now) {
+		return true
+	}
+	return !now.Before(last.Add(s.fullPullMinInterval))
+}
+
+func (s *Syncer) pullRemoteFull(ctx context.Context, conflicted map[string]struct{}, prog bootstrapProgress) (returnErr error) {
+	s.fullPullAuthoritative = false
+	defer func() {
+		if returnErr == nil && s.fullPullAuthoritative {
+			s.state.LastFullPullAt = s.now().UTC().Format(time.RFC3339Nano)
+		}
+	}()
 	// syncActive means this full pull was entered through SyncOnce/Reconcile,
 	// where the caller holds mu. Low-level tests also call pullRemoteFull
 	// directly without that reservation; keep those calls on the historical
@@ -4076,6 +4206,7 @@ func (s *Syncer) pullRemoteFullGithubTarSeed(ctx context.Context, client githubW
 	if err := s.applyRemoteSnapshotDeletesRev(remotePaths, conflicted, maxObservedRevision); err != nil {
 		return true, err
 	}
+	s.fullPullAuthoritative = true
 	s.markBootstrapComplete()
 	s.state.EventsCursor = cursor
 	s.state.IncrementalCheckpoint = nil
@@ -4181,6 +4312,7 @@ func (s *Syncer) pullRemoteFullExport(ctx context.Context, client exportSnapshot
 	}
 	// Export is atomic: a successful ExportFiles + apply is a complete
 	// one-shot mirror with no resume cursor.
+	s.fullPullAuthoritative = true
 	s.markBootstrapComplete()
 	return true, nil
 }
@@ -4571,6 +4703,7 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 	// representative Slack tree in a few requests rather than one per directory.
 	directories := []string{s.remoteRoot}
 	cursor := ""
+	pageOffset := 0
 	startedFromEmpty := true
 	if !s.state.BootstrapComplete && len(s.state.BootstrapDirectories) > 0 {
 		resumedDirectories := make([]string, 0, len(s.state.BootstrapDirectories))
@@ -4584,8 +4717,9 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 		if len(resumedDirectories) > 0 {
 			directories = resumedDirectories
 			cursor = strings.TrimSpace(s.state.BootstrapCursor)
+			pageOffset = s.state.BootstrapPageOffset
 			startedFromEmpty = false
-			s.logf("resuming bootstrap bounded-tree pull at %s from persisted cursor (%d directories pending, %d files already synced)", directories[0], len(directories), s.state.BootstrapFilesSynced)
+			s.logf("resuming bootstrap bounded-tree pull at %s from persisted cursor and page offset %d (%d directories pending, %d files already synced)", directories[0], pageOffset, len(directories), s.state.BootstrapFilesSynced)
 		}
 	} else if !s.state.BootstrapComplete && strings.TrimSpace(s.state.BootstrapCursor) != "" {
 		// v0.10.28 and older persisted a cursor into one depth=200 listing.
@@ -4593,6 +4727,7 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 		// the root. The local-hash fast path avoids re-reading unchanged files.
 		s.logf("discarding legacy deep-tree bootstrap cursor and restarting bounded traversal from %s", s.remoteRoot)
 		s.state.BootstrapCursor = ""
+		s.state.BootstrapPageOffset = 0
 	}
 	queuedDirectories := make(map[string]struct{}, len(directories))
 	for _, directory := range directories {
@@ -4607,6 +4742,7 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 		}
 		s.state.BootstrapDirectories = append([]string(nil), directories...)
 		s.state.BootstrapCursor = cursor
+		s.state.BootstrapPageOffset = pageOffset
 		s.state.BootstrapFilesSynced += filesThisPage
 		prog.touch()
 		if err := s.saveState(); err != nil {
@@ -4616,6 +4752,12 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 		return nil
 	}
 	maxObservedRevision := ""
+	filesThisTraversal := 0
+	shouldYieldBootstrap := func() bool {
+		return !s.state.BootstrapComplete &&
+			s.bootstrapMaxFilesPerCycle > 0 &&
+			filesThisTraversal >= s.bootstrapMaxFilesPerCycle
+	}
 	var transientBootstrapAbort bool
 	prunedRuntimeRoots := map[string]struct{}{}
 	for len(directories) > 0 {
@@ -4632,9 +4774,38 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 		}
 		s.recordCloudSuccess()
 		prog.touch()
+		entryStart := pageOffset
+		if entryStart < 0 || entryStart > len(page.Entries) {
+			s.logf("discarding invalid bootstrap page offset %d for page with %d entries", entryStart, len(page.Entries))
+			entryStart = 0
+			pageOffset = 0
+		}
+		entryEnd := len(page.Entries)
+		fileEntriesThisChunk := 0
+		remainingFileBudget := -1
+		if s.bootstrapMaxFilesPerCycle > 0 {
+			remainingFileBudget = s.bootstrapMaxFilesPerCycle - filesThisTraversal
+			if remainingFileBudget <= 0 {
+				if err := persistTraversal(0); err != nil {
+					return err
+				}
+				return nil
+			}
+		}
+		for i := entryStart; i < len(page.Entries); i++ {
+			if page.Entries[i].Type != "file" {
+				continue
+			}
+			if remainingFileBudget >= 0 && fileEntriesThisChunk >= remainingFileBudget {
+				entryEnd = i
+				break
+			}
+			fileEntriesThisChunk++
+		}
+		pageComplete := entryEnd == len(page.Entries)
 		filesThisPage := 0
-		readJobs := make([]bootstrapReadJob, 0, len(page.Entries))
-		for _, entry := range page.Entries {
+		readJobs := make([]bootstrapReadJob, 0, entryEnd-entryStart)
+		for _, entry := range page.Entries[entryStart:entryEnd] {
 			remotePath := normalizeRemotePath(entry.Path)
 			metrics.entriesSeen++
 			switch entry.Type {
@@ -4780,10 +4951,24 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 			}
 			break
 		}
+		pageOffset = entryEnd
+		filesThisTraversal += fileEntriesThisChunk
+		if !pageComplete {
+			if err := persistTraversal(filesThisPage); err != nil {
+				return err
+			}
+			s.logf("bootstrap file budget reached (%d files this cycle, max %d); yielding at entry %d of the current server page", filesThisTraversal, s.bootstrapMaxFilesPerCycle, pageOffset)
+			return nil
+		}
+		pageOffset = 0
 		if page.NextCursor != nil && *page.NextCursor != "" {
 			cursor = *page.NextCursor
 			if err := persistTraversal(filesThisPage); err != nil {
 				return err
+			}
+			if shouldYieldBootstrap() {
+				s.logf("bootstrap file budget reached (%d files this cycle, max %d); yielding and resuming from persisted cursor on the next cycle", filesThisTraversal, s.bootstrapMaxFilesPerCycle)
+				return nil
 			}
 			continue
 		}
@@ -4795,6 +4980,10 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 		if len(directories) > 0 {
 			if err := persistTraversal(filesThisPage); err != nil {
 				return err
+			}
+			if shouldYieldBootstrap() {
+				s.logf("bootstrap file budget reached (%d files this cycle, max %d); yielding and resuming from persisted directory queue on the next cycle", filesThisTraversal, s.bootstrapMaxFilesPerCycle)
+				return nil
 			}
 			continue
 		}
@@ -4841,6 +5030,7 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 	if err := s.applyRemoteSnapshotDeletesRev(remotePaths, conflicted, maxObservedRevision); err != nil {
 		return err
 	}
+	s.fullPullAuthoritative = true
 	s.markBootstrapComplete()
 	return nil
 }
@@ -4989,6 +5179,7 @@ func (s *Syncer) markBootstrapComplete() {
 	s.state.BootstrapComplete = true
 	s.state.BootstrapDirectories = nil
 	s.state.BootstrapCursor = ""
+	s.state.BootstrapPageOffset = 0
 	s.state.BootstrapStartedAt = ""
 	s.state.BootstrapFilesSynced = 0
 	s.state.BootstrapFilesTotal = 0
@@ -5003,11 +5194,14 @@ func (s *Syncer) markBootstrapComplete() {
 }
 
 // bootstrapCheckpointAdvanced reports whether this cycle moved the persisted
-// resumable traversal checkpoint. Directory queue changes matter just as much
-// as a page cursor change: bounded-depth traversals can finish a directory and
-// begin the next one with an empty page cursor.
-func (s *Syncer) bootstrapCheckpointAdvanced(previousCursor string, previousDirectories []string) bool {
+// resumable traversal checkpoint. Directory queue and page-offset changes
+// matter just as much as a page cursor change: bounded-depth traversals can
+// finish a directory and begin the next one with an empty page cursor.
+func (s *Syncer) bootstrapCheckpointAdvanced(previousCursor string, previousDirectories []string, previousPageOffset int) bool {
 	if strings.TrimSpace(s.state.BootstrapCursor) != strings.TrimSpace(previousCursor) {
+		return true
+	}
+	if s.state.BootstrapPageOffset != previousPageOffset {
 		return true
 	}
 	if len(s.state.BootstrapDirectories) != len(previousDirectories) {
@@ -5026,8 +5220,8 @@ func (s *Syncer) bootstrapCheckpointAdvanced(previousCursor string, previousDire
 // completes, so retries across process restarts cannot spin forever at the
 // same cursor. At the configured limit it returns a typed hard failure and
 // intentionally leaves BootstrapComplete false.
-func (s *Syncer) recordBootstrapCycle(previousCursor string, previousDirectories []string, cause error) error {
-	if s.state.BootstrapComplete || s.bootstrapCheckpointAdvanced(previousCursor, previousDirectories) {
+func (s *Syncer) recordBootstrapCycle(previousCursor string, previousDirectories []string, previousPageOffset int, cause error) error {
+	if s.state.BootstrapComplete || s.bootstrapCheckpointAdvanced(previousCursor, previousDirectories, previousPageOffset) {
 		s.state.BootstrapStallCycles = 0
 		return nil
 	}
@@ -6405,18 +6599,17 @@ func (s *Syncer) pushLocal(ctx context.Context) (map[string]struct{}, error) {
 		}
 		canWrite := s.canWritePath(remotePath)
 		tracked.ReadOnly = !canWrite
-		if s.recoverStartupDrift &&
+		if (s.recoverStartupDrift || s.pollLocalChanges) &&
 			exists &&
 			canWrite &&
 			!tracked.Dirty &&
 			tracked.Hash != snapshot.Hash {
 			// A fresh process cannot have observed edits made while the daemon
-			// was stopped. Recover that startup-only drift before pullRemote can
-			// overwrite it. Later passes preserve the explicit-mutation
-			// invariant: hash drift alone is not writeback eligibility. Only
-			// writable files qualify — a read-only file's drift is a
-			// chmod-bypass tamper, not a recoverable edit, and is handled by
-			// the read-only revert branch below.
+			// was stopped. A watcherless process must likewise infer edits from
+			// the hash scan it already performs. In watcher mode, later passes
+			// preserve the explicit-mutation invariant. Only writable files
+			// qualify — a read-only file's drift is a chmod-bypass tamper, not a
+			// recoverable edit, and is handled by the read-only revert branch.
 			tracked.Dirty = true
 			tracked.DeletePending = false
 			s.state.Files[remotePath] = tracked
@@ -6563,6 +6756,12 @@ func (s *Syncer) pushLocal(ctx context.Context) (map[string]struct{}, error) {
 		}
 		if _, ok := localFiles[remotePath]; ok {
 			continue
+		}
+		if s.pollLocalChanges && !tracked.DeletePending {
+			tracked.DeletePending = true
+			tracked.Dirty = false
+			s.state.Files[remotePath] = tracked
+			s.logf("recovering local deletion not observed by the watcher: %s", remotePath)
 		}
 		if !tracked.DeletePending {
 			s.state.Files[remotePath] = tracked
@@ -7066,10 +7265,18 @@ func (s *Syncer) loadState() error {
 		s.state.BootstrapComplete = false
 		s.state.BootstrapDirectories = nil
 		s.state.BootstrapCursor = ""
+		s.state.BootstrapPageOffset = 0
 		s.state.BootstrapStartedAt = ""
 		s.state.BootstrapFilesSynced = 0
 		s.state.BootstrapFilesTotal = 0
 		s.state.BootstrapStallCycles = 0
+	}
+	if s.state.BootstrapComplete && s.fullPullMinInterval > 0 && strings.TrimSpace(s.state.LastFullPullAt) == "" {
+		// Completed state written by an older version has no audit timestamp.
+		// Seed it at upgrade/load time so a coordinated fleet restart does not
+		// trigger one full-tree audit per mount after the short cycle gate.
+		s.state.LastFullPullAt = s.now().UTC().Format(time.RFC3339Nano)
+		s.logf("initialized periodic full-pull guard for legacy completed mount state")
 	}
 	if s.githubWorkingTree != nil && strings.TrimSpace(s.state.GithubWorkingTreeHeadSHA) != "" {
 		s.githubWorkingTree.HeadSHA = strings.TrimSpace(s.state.GithubWorkingTreeHeadSHA)

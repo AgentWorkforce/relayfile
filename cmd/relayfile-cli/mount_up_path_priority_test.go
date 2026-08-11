@@ -92,6 +92,7 @@ func (c *blockingBootstrapClient) GetOperation(_ context.Context, _ string, opID
 }
 
 func TestMountLoopStartsWatcherBeforeBlockedInitialBootstrap(t *testing.T) {
+	t.Setenv("RELAYFILE_MOUNT_FORCE_RECURSIVE_WATCHER", "1")
 	localDir := t.TempDir()
 	draftRel := filepath.FromSlash("slack/channels/C123/messages/messages 5ab77d67-1111-4111-8111-123456789abc.json")
 	draftPath := filepath.Join(localDir, draftRel)
@@ -198,6 +199,7 @@ func TestMountLoopStartsWatcherBeforeBlockedInitialBootstrap(t *testing.T) {
 }
 
 func TestMountLoopSerializesStatusWhenWatcherAndInitialBootstrapFailTogether(t *testing.T) {
+	t.Setenv("RELAYFILE_MOUNT_FORCE_RECURSIVE_WATCHER", "1")
 	localDir := t.TempDir()
 	draftRel := filepath.FromSlash("slack/channels/C123/messages/messages 6ab77d67-1111-4111-8111-123456789abc.json")
 	draftPath := filepath.Join(localDir, draftRel)
