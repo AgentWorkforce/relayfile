@@ -188,6 +188,17 @@ func TestWatcherStartReturnsLimitExceededWhenDirectoryBudgetExceeded(t *testing.
 	}
 }
 
+func TestWatcherDirectoryBudgetCannotBeDisabledWithNonPositiveEnv(t *testing.T) {
+	for _, value := range []string{"0", "-1"} {
+		t.Run(value, func(t *testing.T) {
+			t.Setenv("RELAYFILE_MOUNT_MAX_WATCH_DIRS", value)
+			if got := watcherMaxDirsFromEnv(); got != defaultMaxWatchedDirs {
+				t.Fatalf("watcher limit for %q = %d, want safe default %d", value, got, defaultMaxWatchedDirs)
+			}
+		})
+	}
+}
+
 func TestWatcherAddErrorClassificationDoesNotHideMissingPaths(t *testing.T) {
 	if !isBenignWatcherAddError(errors.New("file already exists")) {
 		t.Fatal("expected duplicate watcher add errors to be benign")

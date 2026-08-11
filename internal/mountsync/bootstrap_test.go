@@ -487,7 +487,7 @@ func TestBootstrapStallCycleGuardIgnoresCanceledContext(t *testing.T) {
 	s.state.BootstrapStallCycles = 1
 
 	wrappedCanceled := fmt.Errorf("mount shutting down: %w", context.Canceled)
-	if err := s.recordBootstrapCycle("resume-cursor", nil, wrappedCanceled); err != nil {
+	if err := s.recordBootstrapCycle("resume-cursor", nil, 0, wrappedCanceled); err != nil {
 		t.Fatalf("canceled context must not trip the stall guard: %v", err)
 	}
 	if got := s.state.BootstrapStallCycles; got != 1 {
@@ -496,7 +496,7 @@ func TestBootstrapStallCycleGuardIgnoresCanceledContext(t *testing.T) {
 
 	// DeadlineExceeded is a failed retry at the same checkpoint, so it still
 	// consumes the remaining attempt and produces the typed hard stop.
-	err := s.recordBootstrapCycle("resume-cursor", nil, context.DeadlineExceeded)
+	err := s.recordBootstrapCycle("resume-cursor", nil, 0, context.DeadlineExceeded)
 	var stalled *BootstrapStalledError
 	if !errors.As(err, &stalled) {
 		t.Fatalf("deadline exceeded must count toward the stall limit, got %v", err)

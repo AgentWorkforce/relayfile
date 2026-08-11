@@ -19,8 +19,10 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -5574,6 +5576,91 @@ func TestMissingTrackedFileRequiresDeletePending(t *testing.T) {
 	}
 }
 
+func TestPollingLocalChangeDetectionPushesHashDrift(t *testing.T) {
+	client := &fakeClient{
+		files: map[string]RemoteFile{
+			"/notion/Docs/A.md": {
+				Path:        "/notion/Docs/A.md",
+				Revision:    "rev_1",
+				ContentType: "text/markdown",
+				Content:     "# A",
+			},
+		},
+		revisionCounter: 1,
+	}
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_mount_polling_hash_drift",
+		RemoteRoot:  "/notion",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("initial sync failed: %v", err)
+	}
+	syncer.EnablePollingLocalChangeDetection()
+	client.bulkWriteCalls = 0
+
+	localFile := filepath.Join(localDir, "Docs", "A.md")
+	if err := os.WriteFile(localFile, []byte("# polling edit"), 0o644); err != nil {
+		t.Fatalf("write polling edit failed: %v", err)
+	}
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("polling sync failed: %v", err)
+	}
+
+	if client.bulkWriteCalls != 1 {
+		t.Fatalf("bulk write calls = %d, want 1", client.bulkWriteCalls)
+	}
+	if got := client.files["/notion/Docs/A.md"].Content; got != "# polling edit" {
+		t.Fatalf("remote content = %q, want polling edit", got)
+	}
+}
+
+func TestPollingLocalChangeDetectionPushesDeletion(t *testing.T) {
+	client := &fakeClient{
+		files: map[string]RemoteFile{
+			"/notion/Docs/A.md": {
+				Path:        "/notion/Docs/A.md",
+				Revision:    "rev_1",
+				ContentType: "text/markdown",
+				Content:     "# A",
+			},
+		},
+		revisionCounter: 1,
+	}
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_mount_polling_delete",
+		RemoteRoot:  "/notion",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("initial sync failed: %v", err)
+	}
+	syncer.EnablePollingLocalChangeDetection()
+
+	localFile := filepath.Join(localDir, "Docs", "A.md")
+	if err := os.Remove(localFile); err != nil {
+		t.Fatalf("remove local file failed: %v", err)
+	}
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("polling sync failed: %v", err)
+	}
+
+	if len(client.deleteCalls) != 1 || client.deleteCalls[0].Path != "/notion/Docs/A.md" {
+		t.Fatalf("delete calls = %+v, want /notion/Docs/A.md", client.deleteCalls)
+	}
+	if _, exists := client.files["/notion/Docs/A.md"]; exists {
+		t.Fatal("remote file remained after polling deletion")
+	}
+}
+
 func TestBulkWrite_PartialErrors(t *testing.T) {
 	client := &fakeClient{
 		files: map[string]RemoteFile{},
@@ -8039,6 +8126,52 @@ type hierarchicalTreeCall struct {
 	path    string
 	depth   int
 	entries int
+}
+
+type pagedTreeClient struct {
+	*fakeClient
+	pageSize int
+}
+
+func (c *pagedTreeClient) ListTree(_ context.Context, _ string, path string, _ int, cursor string) (TreeResponse, error) {
+	c.listTreeCalls++
+	base := normalizeRemotePath(path)
+	paths := make([]string, 0, len(c.files))
+	for remotePath := range c.files {
+		if isUnderRemoteRoot(base, remotePath) {
+			paths = append(paths, remotePath)
+		}
+	}
+	sort.Strings(paths)
+	start := 0
+	if cursor != "" {
+		parsed, err := strconv.Atoi(cursor)
+		if err != nil {
+			return TreeResponse{}, err
+		}
+		start = parsed
+	}
+	end := start + c.pageSize
+	if end > len(paths) {
+		end = len(paths)
+	}
+	entries := make([]TreeEntry, 0, end-start)
+	for _, remotePath := range paths[start:end] {
+		file := c.files[remotePath]
+		entries = append(entries, TreeEntry{
+			Path:        remotePath,
+			Type:        "file",
+			Revision:    file.Revision,
+			ContentHash: file.ContentHash,
+			Size:        int64(len(file.Content)),
+		})
+	}
+	var next *string
+	if end < len(paths) {
+		value := strconv.Itoa(end)
+		next = &value
+	}
+	return TreeResponse{Path: base, Entries: entries, NextCursor: next}, nil
 }
 
 // hierarchicalTreeClient mirrors the production tree contract: a request
@@ -10966,6 +11099,245 @@ func TestQuietEventCyclesEventuallyRunPeriodicFullPull(t *testing.T) {
 		t.Fatalf("second quiet reconcile: %v", err)
 	}
 	assertLocalFileContent(t, filepath.Join(localDir, "Docs", "B.md"), "# B")
+}
+
+func TestPeriodicFullPullHonorsPersistedWallClockGuard(t *testing.T) {
+	now := time.Date(2026, time.August, 11, 12, 0, 0, 0, time.UTC)
+	client := &fakeClient{
+		files: map[string]RemoteFile{
+			"/notion/Docs/A.md": {
+				Path:     "/notion/Docs/A.md",
+				Revision: "rev_1",
+				Content:  "# A",
+			},
+		},
+		events: []FilesystemEvent{{
+			EventID:  "evt_1",
+			Type:     "file.created",
+			Path:     "/notion/Docs/A.md",
+			Revision: "rev_1",
+		}},
+	}
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID:         "ws_periodic_time_guard",
+		RemoteRoot:          "/notion",
+		LocalRoot:           t.TempDir(),
+		FullPullEvery:       1,
+		FullPullMinInterval: 24 * time.Hour,
+		Now:                 func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatalf("new syncer: %v", err)
+	}
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+	if client.listTreeCalls != 1 {
+		t.Fatalf("bootstrap list calls = %d, want 1", client.listTreeCalls)
+	}
+	if syncer.state.LastFullPullAt == "" {
+		t.Fatal("completed bootstrap did not persist lastFullPullAt")
+	}
+
+	now = now.Add(time.Hour)
+	if err := syncer.Reconcile(context.Background()); err != nil {
+		t.Fatalf("guarded reconcile: %v", err)
+	}
+	if client.listTreeCalls != 1 {
+		t.Fatalf("full pull repeated inside 24h guard: list calls = %d", client.listTreeCalls)
+	}
+
+	now = now.Add(24 * time.Hour)
+	if err := syncer.Reconcile(context.Background()); err != nil {
+		t.Fatalf("due reconcile: %v", err)
+	}
+	if client.listTreeCalls != 2 {
+		t.Fatalf("full pull did not run after guard elapsed: list calls = %d", client.listTreeCalls)
+	}
+}
+
+func TestPeriodicFullPullDoesNotStayDeferredAfterClockMovesBackward(t *testing.T) {
+	now := time.Date(2026, time.August, 11, 12, 0, 0, 0, time.UTC)
+	syncer := &Syncer{
+		fullPullMinInterval: 24 * time.Hour,
+		nowFn:               func() time.Time { return now },
+		state: mountState{
+			LastFullPullAt: now.Add(time.Hour).Format(time.RFC3339Nano),
+		},
+	}
+	if !syncer.periodicFullPullDue() {
+		t.Fatal("future lastFullPullAt should fail open after a backward clock adjustment")
+	}
+}
+
+func TestLegacyCompletedStateSeedsFullPullGuardAtLoadTime(t *testing.T) {
+	now := time.Date(2026, time.August, 11, 12, 0, 0, 0, time.UTC)
+	localDir := t.TempDir()
+	stateFile := filepath.Join(localDir, ".relay", "mount-state.json")
+	if err := os.MkdirAll(filepath.Dir(stateFile), 0o755); err != nil {
+		t.Fatalf("mkdir state dir: %v", err)
+	}
+	persisted := mountState{
+		WorkspaceID:       "ws_legacy_full_pull_guard",
+		RemoteRoot:        "/notion",
+		LocalRoot:         localDir,
+		BootstrapComplete: true,
+		EventsCursor:      "evt_1",
+		Files:             map[string]trackedFile{},
+	}
+	payload, err := json.Marshal(persisted)
+	if err != nil {
+		t.Fatalf("marshal state: %v", err)
+	}
+	if err := os.WriteFile(stateFile, payload, 0o644); err != nil {
+		t.Fatalf("write state: %v", err)
+	}
+	client := &fakeClient{files: map[string]RemoteFile{}, events: []FilesystemEvent{{EventID: "evt_1"}}}
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID:         "ws_legacy_full_pull_guard",
+		RemoteRoot:          "/notion",
+		LocalRoot:           localDir,
+		StateFile:           stateFile,
+		FullPullEvery:       1,
+		FullPullMinInterval: 24 * time.Hour,
+		Now:                 func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatalf("new syncer: %v", err)
+	}
+	if err := syncer.Reconcile(context.Background()); err != nil {
+		t.Fatalf("legacy-state reconcile: %v", err)
+	}
+	if syncer.state.LastFullPullAt != now.Format(time.RFC3339Nano) {
+		t.Fatalf("lastFullPullAt = %q, want load baseline %q", syncer.state.LastFullPullAt, now.Format(time.RFC3339Nano))
+	}
+	if client.listTreeCalls != 0 {
+		t.Fatalf("legacy state triggered immediate full pull: %d tree calls", client.listTreeCalls)
+	}
+}
+
+func TestTransientFullPullDoesNotAdvanceAuditTimestamp(t *testing.T) {
+	baseline := time.Date(2026, time.August, 10, 12, 0, 0, 0, time.UTC).Format(time.RFC3339Nano)
+	client := &fakeClient{
+		files: map[string]RemoteFile{
+			"/notion/Docs/A.md": {Path: "/notion/Docs/A.md", Revision: "rev_1", Content: "# A"},
+		},
+		readFileErrAfter: 0,
+		readFileErr:      &HTTPError{StatusCode: http.StatusServiceUnavailable, Code: "unavailable", Message: "synthetic interruption"},
+	}
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_incomplete_audit_timestamp",
+		RemoteRoot:  "/notion",
+		LocalRoot:   t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("new syncer: %v", err)
+	}
+	syncer.state.BootstrapComplete = true
+	syncer.state.LastFullPullAt = baseline
+	if err := syncer.pullRemoteFull(context.Background(), nil, bootstrapProgress{}); err != nil {
+		t.Fatalf("transient tree pull should pause for retry: %v", err)
+	}
+	if syncer.state.LastFullPullAt != baseline {
+		t.Fatalf("incomplete audit advanced timestamp from %q to %q", baseline, syncer.state.LastFullPullAt)
+	}
+}
+
+func TestInvalidFullPullIntervalEnvKeepsSafeDefault(t *testing.T) {
+	for _, raw := range []string{"0", "invalid"} {
+		t.Run(raw, func(t *testing.T) {
+			t.Setenv("RELAYFILE_MOUNT_FULL_PULL_MIN_INTERVAL", raw)
+			syncer, err := NewSyncer(&fakeClient{files: map[string]RemoteFile{}}, SyncerOptions{
+				WorkspaceID: "ws_invalid_full_pull_env",
+				RemoteRoot:  "/",
+				LocalRoot:   t.TempDir(),
+			})
+			if err != nil {
+				t.Fatalf("new syncer: %v", err)
+			}
+			if syncer.fullPullMinInterval != defaultFullPullMinInterval {
+				t.Fatalf("interval = %s, want safe default %s", syncer.fullPullMinInterval, defaultFullPullMinInterval)
+			}
+		})
+	}
+}
+
+func TestInitialTreeBootstrapYieldsAtFileBudgetAndResumes(t *testing.T) {
+	files := map[string]RemoteFile{}
+	for i := 0; i < 5; i++ {
+		path := fmt.Sprintf("/notion/Docs/%d.md", i)
+		files[path] = RemoteFile{Path: path, Revision: fmt.Sprintf("rev_%d", i), Content: fmt.Sprintf("# %d", i)}
+	}
+	base := &fakeClient{files: files}
+	client := &pagedTreeClient{fakeClient: base, pageSize: 5}
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID:               "ws_bounded_bootstrap",
+		RemoteRoot:                "/notion",
+		LocalRoot:                 t.TempDir(),
+		BootstrapMaxFilesPerCycle: 2,
+		FullPullEvery:             -1,
+	})
+	if err != nil {
+		t.Fatalf("new syncer: %v", err)
+	}
+	// An existing cursor must not divert an incomplete, budgeted bootstrap to
+	// the incremental path on subsequent reconciles.
+	syncer.state.EventsCursor = "evt_existing"
+
+	if err := syncer.Reconcile(context.Background()); err != nil {
+		t.Fatalf("first bounded bootstrap cycle: %v", err)
+	}
+	if syncer.state.BootstrapComplete {
+		t.Fatal("bootstrap completed despite remaining pages")
+	}
+	if got := len(syncer.state.Files); got != 2 {
+		t.Fatalf("first cycle materialized %d files, want 2", got)
+	}
+	if syncer.state.BootstrapCursor != "" || syncer.state.BootstrapPageOffset != 2 {
+		t.Fatalf("first cycle checkpoint = cursor %q offset %d, want same page offset 2", syncer.state.BootstrapCursor, syncer.state.BootstrapPageOffset)
+	}
+
+	if err := syncer.Reconcile(context.Background()); err != nil {
+		t.Fatalf("second bounded bootstrap cycle: %v", err)
+	}
+	if got := len(syncer.state.Files); got != 4 {
+		t.Fatalf("second cycle materialized %d files, want 4", got)
+	}
+	if syncer.state.BootstrapCursor != "" || syncer.state.BootstrapPageOffset != 4 {
+		t.Fatalf("second cycle checkpoint = cursor %q offset %d, want same page offset 4", syncer.state.BootstrapCursor, syncer.state.BootstrapPageOffset)
+	}
+
+	if err := syncer.Reconcile(context.Background()); err != nil {
+		t.Fatalf("final bounded bootstrap cycle: %v", err)
+	}
+	if !syncer.state.BootstrapComplete {
+		t.Fatal("bootstrap did not complete after final page")
+	}
+	if got := len(syncer.state.Files); got != 5 {
+		t.Fatalf("final cycle materialized %d files, want 5", got)
+	}
+	if syncer.state.LastFullPullAt != "" {
+		t.Fatalf("resumed non-authoritative traversal stamped lastFullPullAt %q", syncer.state.LastFullPullAt)
+	}
+}
+
+func TestSyncerDisablesRecursiveWatcherOnDarwinByDefault(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("macOS kqueue safety policy")
+	}
+	t.Setenv("RELAYFILE_MOUNT_FORCE_RECURSIVE_WATCHER", "")
+	syncer, err := NewSyncer(&fakeClient{files: map[string]RemoteFile{}}, SyncerOptions{
+		WorkspaceID: "ws_watcher_guard",
+		RemoteRoot:  "/",
+		LocalRoot:   t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("new syncer: %v", err)
+	}
+	watcher, err := syncer.NewFileWatcher(func(string, fsnotify.Op) {})
+	if watcher != nil || !errors.Is(err, ErrRecursiveWatcherUnsafe) {
+		t.Fatalf("watcher = %#v, err = %v; want macOS safety refusal", watcher, err)
+	}
 }
 
 // TestPullRestartFastPathSkipsFullPull pins the daemon-restart half of

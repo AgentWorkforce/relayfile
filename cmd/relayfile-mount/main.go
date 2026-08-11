@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/agentworkforce/relayfile/internal/delegatedauth"
+	"github.com/agentworkforce/relayfile/internal/mountlease"
 	"github.com/agentworkforce/relayfile/internal/mountscope"
 	"github.com/agentworkforce/relayfile/internal/mountsync"
 	"github.com/fsnotify/fsnotify"
@@ -55,6 +56,8 @@ type mountConfig struct {
 	intervalJitter        float64
 	timeout               time.Duration
 	bootstrapTimeout      time.Duration
+	bootstrapMaxFiles     int
+	fullPullMinInterval   time.Duration
 	cursorTimeout         time.Duration
 	forceFullRecon        bool
 	websocketEnabled      bool
@@ -99,6 +102,8 @@ func main() {
 	intervalJitter := flag.Float64("interval-jitter", floatEnv("RELAYFILE_MOUNT_INTERVAL_JITTER", 0.2), "sync interval jitter ratio (0.0-1.0)")
 	timeout := flag.Duration("timeout", durationEnv("RELAYFILE_MOUNT_TIMEOUT", 15*time.Second), "per-sync timeout")
 	bootstrapTimeout := flag.Duration("bootstrap-timeout", durationEnv("RELAYFILE_BOOTSTRAP_TIMEOUT", 0), "hard cap for the one-time/full-tree bootstrap pull (0 = unbounded while making progress)")
+	bootstrapMaxFiles := flag.Int("bootstrap-max-files-per-cycle", intEnv("RELAYFILE_BOOTSTRAP_MAX_FILES_PER_CYCLE", 2000), "maximum files materialized per resumable tree-bootstrap cycle (-1 = legacy unbounded tree behavior)")
+	fullPullMinIntervalArg := flag.String("full-pull-min-interval", durationEnv("RELAYFILE_MOUNT_FULL_PULL_MIN_INTERVAL", 24*time.Hour).String(), "minimum wall-clock interval between completed periodic full-tree audits (-1 disables the time guard)")
 	cursorTimeout := flag.Duration("cursor-timeout", durationEnv("RELAYFILE_CURSOR_TIMEOUT", 60*time.Second), "independent timeout for events-cursor resolution")
 	fullReconcile := flag.Bool("full-reconcile", boolEnv("RELAYFILE_FORCE_FULL_RECONCILE", false), "force one full reconcile regardless of bootstrap-complete state (escape hatch)")
 	websocketEnabled := flag.Bool("websocket", boolEnv("RELAYFILE_MOUNT_WEBSOCKET", true), "enable websocket event streaming when available")
@@ -115,6 +120,10 @@ func main() {
 	flushOutboxOnce := flag.Bool("flush-outbox-once", false, "flush durable writeback outbox once and exit without reconciling the local mirror")
 	pushLocalOnce := flag.Bool("push-local-once", false, "ingest pending local writeback drafts (one pushLocal pass) then flush the outbox once and exit; no pullRemote/digest/reconcile — the teardown drain for last-moment drafts")
 	flag.Parse()
+	fullPullMinInterval, err := parseDurationWithNegativeOne(*fullPullMinIntervalArg)
+	if err != nil {
+		log.Fatalf("invalid --full-pull-min-interval: %v", err)
+	}
 
 	resolvedToken := strings.TrimSpace(*token)
 	resolvedCredsFile := strings.TrimSpace(*credsFile)
@@ -187,6 +196,8 @@ func main() {
 		intervalJitter:        *intervalJitter,
 		timeout:               *timeout,
 		bootstrapTimeout:      *bootstrapTimeout,
+		bootstrapMaxFiles:     *bootstrapMaxFiles,
+		fullPullMinInterval:   fullPullMinInterval,
 		cursorTimeout:         *cursorTimeout,
 		forceFullRecon:        *fullReconcile,
 		websocketEnabled:      *websocketEnabled,
@@ -256,6 +267,13 @@ func resolveSyncMode(mode string) (string, error) {
 }
 
 func executeMount(rootCtx context.Context, cfg mountConfig, runPoll pollRunner, runFuse fuseRunner) error {
+	if strings.TrimSpace(cfg.baseURL) != "" && strings.TrimSpace(cfg.workspaceID) != "" {
+		lease, err := mountlease.Acquire(cfg.baseURL, cfg.workspaceID, cfg.localDir)
+		if err != nil {
+			return fmt.Errorf("acquire workspace mount lease: %w", err)
+		}
+		defer lease.Release()
+	}
 	switch cfg.mode {
 	case mountModePoll:
 		return runPoll(rootCtx, cfg)
@@ -404,28 +422,30 @@ func runSinglePollingMount(rootCtx context.Context, cfg mountConfig) error {
 		client.SetHTTPStatusLogger(log.Default())
 	}
 	syncer, err := mountsync.NewSyncer(client, mountsync.SyncerOptions{
-		WorkspaceID:           cfg.workspaceID,
-		RemoteRoot:            cfg.remotePath,
-		EventProvider:         cfg.eventProvider,
-		ScopedChild:           cfg.scopedChild,
-		LocalRoot:             cfg.localDir,
-		StateFile:             cfg.stateFile,
-		StateDir:              cfg.stateDir,
-		MountKind:             cfg.mountKind,
-		ValidateState:         true,
-		Scopes:                cfg.scopes,
-		WebSocket:             boolPtr(cfg.websocketEnabled),
-		RootCtx:               rootCtx,
-		Logger:                log.Default(),
-		Mode:                  cfg.mode,
-		Interval:              cfg.interval,
-		LazyRepos:             boolPtr(cfg.lazyRepos),
-		LazySkipUntrackedPush: boolPtr(cfg.lazySkipUntrackedPush),
-		LowMemory:             boolPtr(cfg.lowMemory),
-		BootstrapTimeout:      cfg.bootstrapTimeout,
-		CursorTimeout:         cfg.cursorTimeout,
-		ForceFullReconcile:    boolPtr(cfg.forceFullRecon),
-		SyncMode:              cfg.syncMode,
+		WorkspaceID:               cfg.workspaceID,
+		RemoteRoot:                cfg.remotePath,
+		EventProvider:             cfg.eventProvider,
+		ScopedChild:               cfg.scopedChild,
+		LocalRoot:                 cfg.localDir,
+		StateFile:                 cfg.stateFile,
+		StateDir:                  cfg.stateDir,
+		MountKind:                 cfg.mountKind,
+		ValidateState:             true,
+		Scopes:                    cfg.scopes,
+		WebSocket:                 boolPtr(cfg.websocketEnabled),
+		RootCtx:                   rootCtx,
+		Logger:                    log.Default(),
+		Mode:                      cfg.mode,
+		Interval:                  cfg.interval,
+		LazyRepos:                 boolPtr(cfg.lazyRepos),
+		LazySkipUntrackedPush:     boolPtr(cfg.lazySkipUntrackedPush),
+		LowMemory:                 boolPtr(cfg.lowMemory),
+		BootstrapTimeout:          cfg.bootstrapTimeout,
+		BootstrapMaxFilesPerCycle: cfg.bootstrapMaxFiles,
+		FullPullMinInterval:       cfg.fullPullMinInterval,
+		CursorTimeout:             cfg.cursorTimeout,
+		ForceFullReconcile:        boolPtr(cfg.forceFullRecon),
+		SyncMode:                  cfg.syncMode,
 	})
 	if err != nil {
 		return fmt.Errorf("initialize mount syncer: %w", err)
@@ -500,9 +520,11 @@ func runSinglePollingMount(rootCtx context.Context, cfg mountConfig) error {
 		}
 	})
 	if err != nil {
+		syncer.EnablePollingLocalChangeDetection()
 		log.Printf("file watcher unavailable; continuing with polling sync: %v", err)
 	} else if err := watcher.Start(rootCtx); err != nil {
 		_ = watcher.Close()
+		syncer.EnablePollingLocalChangeDetection()
 		log.Printf("file watcher disabled; continuing with polling sync: %v", err)
 		watcher = nil
 	}
@@ -685,9 +707,33 @@ func durationEnv(name string, fallback time.Duration) time.Duration {
 	if raw == "" {
 		return fallback
 	}
+	if raw == "-1" {
+		return -1
+	}
 	value, err := time.ParseDuration(raw)
 	if err != nil {
 		log.Printf("invalid %s=%q, using fallback %s", name, raw, fallback.String())
+		return fallback
+	}
+	return value
+}
+
+func parseDurationWithNegativeOne(raw string) (time.Duration, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "-1" {
+		return -1, nil
+	}
+	return time.ParseDuration(raw)
+}
+
+func intEnv(name string, fallback int) int {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return fallback
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil {
+		log.Printf("invalid %s=%q, using fallback %d", name, raw, fallback)
 		return fallback
 	}
 	return value

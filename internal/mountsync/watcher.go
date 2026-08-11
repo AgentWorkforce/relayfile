@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -16,10 +17,15 @@ import (
 
 const defaultMaxWatchedDirs = 8192
 
-var ErrWatcherLimitExceeded = errors.New("mount file watcher directory limit exceeded")
+var (
+	ErrWatcherLimitExceeded   = errors.New("mount file watcher directory limit exceeded")
+	ErrRecursiveWatcherUnsafe = errors.New("recursive mount file watcher is unsafe on this platform")
+)
 
 // FileWatcher watches a local directory for changes using OS-level
-// notifications (inotify on Linux, FSEvents on macOS).
+// notifications. fsnotify uses inotify on Linux and kqueue on macOS. kqueue
+// opens a descriptor for every watched file, so production mount loops disable
+// this recursive watcher on macOS by default and retain polling reconciliation.
 type FileWatcher struct {
 	watcher     *fsnotify.Watcher
 	localDir    string
@@ -32,6 +38,28 @@ type FileWatcher struct {
 	debounce    map[string]*time.Timer // debounce rapid events per file
 	closed      bool
 	wg          sync.WaitGroup
+}
+
+// recursiveWatcherAllowed reports whether a production Syncer may attach the
+// recursive fsnotify watcher. On macOS fsnotify is backed by kqueue, which opens
+// one file descriptor for every watched file. A large provider mirror can
+// therefore exhaust the process and host file tables even when the number of
+// watched directories is capped. Polling reconciliation already scans for
+// local writebacks, so fail soft to that bounded path by default.
+//
+// The opt-in exists for small, controlled mirrors and tests. It is deliberately
+// explicit: raising RLIMIT_NOFILE or removing the directory cap is not a safe
+// production fix for an unbounded recursive mirror.
+func recursiveWatcherAllowed() bool {
+	if runtime.GOOS != "darwin" {
+		return true
+	}
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_FORCE_RECURSIVE_WATCHER"))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
 }
 
 func NewFileWatcher(localDir string, onChange func(string, fsnotify.Op)) (*FileWatcher, error) {
@@ -261,8 +289,8 @@ func watcherMaxDirsFromEnv() int {
 	if err != nil {
 		return defaultMaxWatchedDirs
 	}
-	if value < 0 {
-		return 0
+	if value <= 0 {
+		return defaultMaxWatchedDirs
 	}
 	return value
 }
