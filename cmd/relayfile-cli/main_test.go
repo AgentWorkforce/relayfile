@@ -1798,6 +1798,67 @@ func TestIntegrationListOverlaysRuntimeReadyStatus(t *testing.T) {
 	}
 }
 
+func TestIntegrationListUsesCloudTokenFromEnvironment(t *testing.T) {
+	_, _ = setupAdoptWorkspace(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/workspaces/ws_123/integrations" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer cld_explicit" {
+			t.Fatalf("unexpected Authorization: %q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[{"provider":"github","status":"ready","lagSeconds":0}]`))
+	}))
+	defer server.Close()
+	t.Setenv("RELAYFILE_CLOUD_API_URL", server.URL)
+	t.Setenv("RELAYFILE_CLOUD_TOKEN", "cld_explicit")
+	t.Setenv("AGENT_RELAY_BIN", filepath.Join(t.TempDir(), "missing-agent-relay"))
+
+	var stdout bytes.Buffer
+	if err := run([]string{"integration", "list", "--workspace", "demo", "--json"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("integration list failed: %v\noutput:\n%s", err, stdout.String())
+	}
+	if got := stdout.String(); !strings.Contains(got, `"provider": "github"`) {
+		t.Fatalf("expected github integration JSON, got %q", got)
+	}
+}
+
+func TestIntegrationListBoundsOptionalRuntimeStatusOverlay(t *testing.T) {
+	_, _ = setupAdoptWorkspace(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/workspaces/ws_123/integrations":
+			_, _ = w.Write([]byte(`[{"provider":"github","status":"connected","lagSeconds":0}]`))
+		case "/v1/workspaces/ws_123/sync/status":
+			<-r.Context().Done()
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	t.Setenv("RELAYFILE_CLOUD_API_URL", server.URL)
+	t.Setenv("RELAYFILE_CLOUD_TOKEN", "cld_explicit")
+	writeDelegatedCredentialsForTest(t, delegatedauth.Bundle{
+		RelayfileURL:         server.URL,
+		RelayfileWorkspaceID: "ws_123",
+		AccessToken:          "rf_join",
+	})
+
+	started := time.Now()
+	var stdout bytes.Buffer
+	if err := run([]string{"integration", "list", "--workspace", "demo", "--json"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("integration list failed: %v\noutput:\n%s", err, stdout.String())
+	}
+	if elapsed := time.Since(started); elapsed > 3*time.Second {
+		t.Fatalf("optional runtime overlay delayed integration list for %s", elapsed)
+	}
+	if got := stdout.String(); !strings.Contains(got, `"status": "connected"`) {
+		t.Fatalf("expected authoritative Cloud status after overlay timeout, got %q", got)
+	}
+}
+
 func TestIntegrationListUsesSavedWorkspaceScopesForRuntimeStatus(t *testing.T) {
 	record, _ := setupAdoptWorkspace(t)
 	var seenRuntimeStatus bool
