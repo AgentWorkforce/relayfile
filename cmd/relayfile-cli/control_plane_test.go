@@ -421,6 +421,55 @@ func TestControlPlaneCloudIntegrationConformance(t *testing.T) {
 	}
 }
 
+func TestControlPlaneProviderStatusUsesCloudTokenFromEnvironment(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+	if err := saveWorkspaceCatalog(workspaceCatalog{
+		Default: "demo",
+		Workspaces: []workspaceRecord{{
+			Name:      "demo",
+			ID:        "ws_123",
+			LocalDir:  t.TempDir(),
+			CreatedAt: time.Now().UTC().Format(time.RFC3339),
+		}},
+	}); err != nil {
+		t.Fatalf("save workspace catalog failed: %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/workspaces/ws_123/integrations" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer cld_explicit" {
+			t.Fatalf("unexpected Authorization: %q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[{"provider":"github","status":"ready"}]`))
+	}))
+	defer server.Close()
+	t.Setenv("RELAYFILE_CLOUD_API_URL", server.URL)
+	t.Setenv("RELAYFILE_CLOUD_TOKEN", "cld_explicit")
+	t.Setenv("AGENT_RELAY_BIN", filepath.Join(t.TempDir(), "missing-agent-relay"))
+
+	client, baseURL, cleanup := startControlPlaneTestServer(t)
+	defer cleanup()
+	var statusEntry cloudIntegrationListEntry
+	status := controlPlaneJSON(
+		t,
+		client,
+		http.MethodGet,
+		baseURL+"/v1/integrations/provider-status?provider=github&workspace=demo",
+		nil,
+		&statusEntry,
+	)
+	if status != http.StatusOK {
+		t.Fatalf("provider-status status = %d", status)
+	}
+	if statusEntry.Provider != "github" || statusEntry.Status != "ready" {
+		t.Fatalf("unexpected provider status: %#v", statusEntry)
+	}
+}
+
 func startControlPlaneTestServer(t *testing.T) (*http.Client, string, func()) {
 	t.Helper()
 	sock := filepath.Join(os.TempDir(), fmt.Sprintf("rfcp-%d-%d.sock", os.Getpid(), time.Now().UnixNano()))
