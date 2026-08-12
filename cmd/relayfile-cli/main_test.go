@@ -1824,14 +1824,14 @@ func TestIntegrationListUsesCloudTokenFromEnvironment(t *testing.T) {
 	}
 }
 
-func TestIntegrationListRefreshesInheritedCloudTokenAfterAuthFailure(t *testing.T) {
+func TestIntegrationListRefreshesInheritedCloudTokenWithoutChangingCloudAPIURL(t *testing.T) {
 	_, _ = setupAdoptWorkspace(t)
-	requestCount := 0
+	var requestCount atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/v1/workspaces/ws_123/integrations" {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
-		requestCount++
+		requestCount.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		switch got := r.Header.Get("Authorization"); got {
 		case "Bearer cld_expired":
@@ -1844,7 +1844,18 @@ func TestIntegrationListRefreshesInheritedCloudTokenAfterAuthFailure(t *testing.
 		}
 	}))
 	defer server.Close()
-	installFakeAgentRelaySession(t, server.URL, "cld_refreshed", "demo", "ws_123", "ws_123")
+
+	// Session discovery may report a different default deployment. It is the
+	// canonical source of the refreshed token, not an override for the endpoint
+	// explicitly selected by this integration-list invocation.
+	var sessionAPIRequests atomic.Int32
+	sessionAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sessionAPIRequests.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[{"provider":"wrong-deployment","status":"ready"}]`))
+	}))
+	defer sessionAPI.Close()
+	installFakeAgentRelaySession(t, sessionAPI.URL, "cld_refreshed", "demo", "ws_123", "ws_123")
 	t.Setenv("RELAYFILE_CLOUD_API_URL", server.URL)
 	t.Setenv("RELAYFILE_CLOUD_TOKEN", "cld_expired")
 
@@ -1852,8 +1863,11 @@ func TestIntegrationListRefreshesInheritedCloudTokenAfterAuthFailure(t *testing.
 	if err := run([]string{"integration", "list", "--workspace", "demo", "--json"}, strings.NewReader(""), &stdout, &stdout); err != nil {
 		t.Fatalf("integration list failed: %v\noutput:\n%s", err, stdout.String())
 	}
-	if requestCount != 2 {
-		t.Fatalf("integration list request count = %d, want 2", requestCount)
+	if got := requestCount.Load(); got != 2 {
+		t.Fatalf("integration list request count = %d, want 2", got)
+	}
+	if got := sessionAPIRequests.Load(); got != 0 {
+		t.Fatalf("refreshed token changed the selected Cloud API URL; session endpoint requests = %d, want 0", got)
 	}
 	if got := stdout.String(); !strings.Contains(got, `"provider": "github"`) {
 		t.Fatalf("expected github integration JSON, got %q", got)

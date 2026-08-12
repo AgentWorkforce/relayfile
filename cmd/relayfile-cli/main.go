@@ -3586,12 +3586,15 @@ func runIntegrationList(args []string, stdout io.Writer) error {
 		// A detached control-plane daemon inherits its environment once, while
 		// Cloud access tokens rotate. On an authentication failure, refresh from
 		// the canonical Agent Relay session and retry once. An explicit CLI flag
-		// remains authoritative and is never silently replaced.
+		// remains authoritative and is never silently replaced. Preserve the
+		// caller-selected endpoint: the refreshed session supplies only the new
+		// token and may belong to a different default Cloud deployment.
+		refreshAPIURL := client.baseURL
 		cloudCreds, refreshErr := ensureCloudCredentials(strings.TrimSpace(*cloudAPIURL), "", 5*time.Minute, false, io.Discard)
 		if refreshErr != nil {
 			return refreshErr
 		}
-		client, refreshErr = newAPIClient(cloudCreds.APIURL, cloudCreds.AccessToken)
+		client, refreshErr = newAPIClient(refreshAPIURL, cloudCreds.AccessToken)
 		if refreshErr != nil {
 			return refreshErr
 		}
