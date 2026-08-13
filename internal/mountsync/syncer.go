@@ -3659,15 +3659,44 @@ func (s *Syncer) HTTPClient() (*HTTPClient, bool) {
 }
 
 // bootstrapProgress carries the watchdog "touch" mechanism back to the
-// heavy full-pull loops so they can signal liveness. touch() is a no-op
-// in hard-cap mode.
+// heavy full-pull loops so they can signal liveness. The internal
+// idle-cancel tracking (last) is a no-op in hard-cap mode, but the state
+// file mtime refresh below still applies there too.
+//
+// touch() also refreshes the on-disk state file's mtime via a cheap
+// os.Chtimes — deliberately NOT a full saveState() — every time it fires.
+// An external supervisor that starts/monitors this process (e.g. a
+// sandbox orchestrator's shell-level idle watchdog) frequently has no way
+// to observe this process's internal touch() calls; the state file's mtime
+// is the only liveness signal it can see. Without this, the file's mtime
+// only advances once per FULLY COMPLETED page — persistTraversal() calls
+// saveState() only after every file in that page has been read via
+// readBootstrapFiles — so a single page with many/large files can leave the
+// file's mtime frozen well past an external idle timeout while this
+// process is making real per-file progress (touch() already fires per file
+// read and per ListTree page) the whole time. Observed in production as a
+// false-positive external cancellation ("relayfile initial sync made no
+// progress for 60s; canceling") on a bounded-tree bootstrap reconcile that
+// was never actually stalled — 873 entries / 758 files were seen across 4
+// ListTree pages in the ~56s before the external watchdog killed it, none
+// of which registered as "progress" externally because no page had yet
+// fully completed and reached persistTraversal()'s saveState() call.
 type bootstrapProgress struct {
-	last *atomic.Int64
+	last      *atomic.Int64
+	stateFile string
 }
 
 func (p bootstrapProgress) touch() {
 	if p.last != nil {
 		p.last.Store(time.Now().UnixNano())
+	}
+	if p.stateFile != "" {
+		now := time.Now()
+		// Best-effort: the file may not exist yet on a brand-new bootstrap
+		// (before the first saveState()) — that's fine, this only needs to
+		// help once the file exists, which is exactly the resumed-large-
+		// state case where the false-cancel was observed.
+		_ = os.Chtimes(p.stateFile, now, now)
 	}
 }
 
@@ -3687,10 +3716,10 @@ func (s *Syncer) bootstrapContext(parent context.Context) (context.Context, cont
 	_ = parent // intentionally derive from rootCtx, not the per-cycle ctx
 	if s.bootstrapTimeout > 0 {
 		ctx, cancel := context.WithTimeout(s.rootCtx, s.bootstrapTimeout)
-		return ctx, cancel, bootstrapProgress{}
+		return ctx, cancel, bootstrapProgress{stateFile: s.stateFile}
 	}
 	ctx, cancel := context.WithCancel(s.rootCtx)
-	prog := bootstrapProgress{last: &atomic.Int64{}}
+	prog := bootstrapProgress{last: &atomic.Int64{}, stateFile: s.stateFile}
 	prog.touch()
 	idle := s.bootstrapIdleTimeout
 	if idle <= 0 {

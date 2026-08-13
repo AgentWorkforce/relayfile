@@ -318,6 +318,142 @@ func TestBootstrapProgressExtension(t *testing.T) {
 	})
 }
 
+// TestBootstrapProgressTouchRefreshesStateFileMtime is a direct,
+// deterministic unit test on bootstrapProgress.touch()'s state-file mtime
+// refresh: an external supervisor that starts/monitors relayfile-mount
+// (e.g. AgentWorkforce/sandbox's shell-level idle watchdog in
+// buildIdleWatchedCommand) has no visibility into this process's internal
+// touch() calls — the --state-file's mtime is the only liveness signal it
+// can observe. touch() must refresh it on every real progress signal, not
+// only when a full page finishes and saveState() runs.
+func TestBootstrapProgressTouchRefreshesStateFileMtime(t *testing.T) {
+	dir := t.TempDir()
+	stateFile := filepath.Join(dir, "state.json")
+	if err := os.WriteFile(stateFile, []byte("{}"), 0o644); err != nil {
+		t.Fatalf("seed state file: %v", err)
+	}
+	old := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(stateFile, old, old); err != nil {
+		t.Fatalf("backdate state file: %v", err)
+	}
+
+	prog := bootstrapProgress{last: &atomic.Int64{}, stateFile: stateFile}
+	prog.touch()
+
+	info, err := os.Stat(stateFile)
+	if err != nil {
+		t.Fatalf("stat state file: %v", err)
+	}
+	if !info.ModTime().After(old) {
+		t.Fatalf("expected touch() to advance the state file mtime past %v, got %v", old, info.ModTime())
+	}
+
+	// A missing state file (fresh bootstrap, no saveState() yet) or an
+	// unset stateFile (hard-cap mode's zero-value bootstrapProgress from
+	// earlier code paths) must stay best-effort: no panic, no error
+	// surfaced to the caller.
+	missing := bootstrapProgress{last: &atomic.Int64{}, stateFile: filepath.Join(dir, "missing.json")}
+	missing.touch()
+	empty := bootstrapProgress{last: &atomic.Int64{}}
+	empty.touch()
+}
+
+// TestBootstrapProgressTouchesStateFileMidPage reproduces the production
+// false-cancel end to end: a single page containing many files must
+// refresh the on-disk --state-file's mtime as each file is read, not only
+// once the whole page finishes and persistTraversal() calls saveState().
+//
+// Observed in production: resuming a bounded-tree bootstrap against a
+// large tracked-file set (17384 files), a page's downloads ran for ~56s
+// (873 entries / 758 files across 4 ListTree calls, all genuine progress)
+// while an external supervisor watching only the state file's mtime saw it
+// frozen the whole time and killed the process with "no progress for 60s"
+// — a false positive, not a real stall.
+func TestBootstrapProgressTouchesStateFileMidPage(t *testing.T) {
+	t.Setenv("RELAYFILE_BOOTSTRAP_READ_CONCURRENCY", "1") // serialize reads for deterministic mid-page sampling
+
+	// Cycle 1: interrupt after the first (small) page so a real,
+	// non-empty state file lands on disk — matching the production
+	// "resuming bootstrap bounded-tree pull ... from persisted cursor"
+	// scenario, not a from-scratch mount that has no file to touch yet.
+	const totalFiles = 8
+	client := newBootstrapClient(totalFiles, 2)
+	client.listTreeFailAt = 2
+	client.listTreeFailErr = &HTTPError{StatusCode: 502, Code: "bad_gateway", Message: "boom"}
+	client.listTreeFailOnce = true
+	localDir := t.TempDir()
+	s := newBootstrapSyncer(t, client, localDir, SyncerOptions{RootCtx: context.Background()})
+	if err := s.Reconcile(context.Background()); err == nil {
+		t.Fatalf("expected cycle 1 to fail mid-traversal")
+	}
+	stateFile := filepath.Join(localDir, ".relayfile-mount-state.json")
+	st := loadPersistedState(t, localDir)
+	if st.BootstrapComplete {
+		t.Fatalf("bootstrap should not be complete after an interrupted first cycle")
+	}
+	syncedBeforeCycle2 := st.BootstrapFilesSynced
+	if syncedBeforeCycle2 == 0 {
+		t.Fatalf("expected some files synced in cycle 1")
+	}
+
+	// Backdate well past filesystem mtime resolution so any advance during
+	// cycle 2 is unambiguous.
+	backdated := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(stateFile, backdated, backdated); err != nil {
+		t.Fatalf("backdate state file: %v", err)
+	}
+
+	// Cycle 2: every remaining file lands in ONE page (page size covers
+	// them all), each read artificially slow, concurrency forced to 1 —
+	// so persistTraversal (and its saveState() full rewrite) cannot fire
+	// again until every remaining file in the page has been read.
+	client2 := newBootstrapClient(totalFiles, totalFiles)
+	client2.readFileSleep = 30 * time.Millisecond
+	s2 := newBootstrapSyncer(t, client2, localDir, SyncerOptions{RootCtx: context.Background()})
+
+	done := make(chan error, 1)
+	go func() { done <- s2.Reconcile(context.Background()) }()
+
+	sawMidPageAdvance := false
+	deadline := time.Now().Add(5 * time.Second)
+poll:
+	for time.Now().Before(deadline) {
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("cycle 2 reconcile failed before a mid-page sample landed: %v", err)
+			}
+			t.Fatalf("cycle 2 completed before a mid-page mtime advance was observed; tighten test timing")
+		case <-time.After(2 * time.Millisecond):
+		}
+		info, statErr := os.Stat(stateFile)
+		if statErr != nil {
+			continue
+		}
+		if !info.ModTime().After(backdated) {
+			continue
+		}
+		if got := loadPersistedState(t, localDir); got.BootstrapFilesSynced == syncedBeforeCycle2 {
+			sawMidPageAdvance = true
+			break poll
+		}
+	}
+	if !sawMidPageAdvance {
+		t.Fatalf("expected the state file mtime to advance mid-page (before persistTraversal ran), proving touch() refreshes it independently of the page-level saveState()")
+	}
+
+	if err := <-done; err != nil {
+		t.Fatalf("cycle 2 reconcile: %v", err)
+	}
+	if got := countLocalFiles(t, localDir); got != totalFiles {
+		t.Fatalf("expected %d files mirrored after both cycles, got %d", totalFiles, got)
+	}
+	final := loadPersistedState(t, localDir)
+	if !final.BootstrapComplete {
+		t.Fatalf("expected BootstrapComplete=true after cycle 2 finishes the resumed page")
+	}
+}
+
 // TestBootstrapResumesFromPersistedCursor: a mid-traversal failure
 // persists the cursor + BootstrapComplete=false; the next cycle resumes
 // from the persisted cursor and completes.
