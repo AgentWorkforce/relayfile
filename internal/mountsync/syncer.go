@@ -3692,10 +3692,11 @@ func (p bootstrapProgress) touch() {
 	}
 	if p.stateFile != "" {
 		now := time.Now()
-		// Best-effort: the file may not exist yet on a brand-new bootstrap
-		// (before the first saveState()) — that's fine, this only needs to
-		// help once the file exists, which is exactly the resumed-large-
-		// state case where the false-cancel was observed.
+		// Best-effort: bootstrapContext creates a valid private-state file
+		// before starting a full pull, so production progress touches have a
+		// watchdog-visible target from the first page onward. Keep this call
+		// tolerant for zero-value/unit-test progress values and for a target
+		// removed by an external process after bootstrap starts.
 		_ = os.Chtimes(p.stateFile, now, now)
 	}
 }
@@ -3712,14 +3713,19 @@ func (p bootstrapProgress) touch() {
 //
 // Callers MUST defer the returned CancelFunc on every exit path; doing so
 // also tears the watchdog goroutine down (no leak).
-func (s *Syncer) bootstrapContext(parent context.Context) (context.Context, context.CancelFunc, bootstrapProgress) {
+func (s *Syncer) bootstrapContext(parent context.Context) (context.Context, context.CancelFunc, bootstrapProgress, error) {
 	_ = parent // intentionally derive from rootCtx, not the per-cycle ctx
+	if err := s.ensureBootstrapProgressStateFile(); err != nil {
+		return nil, nil, bootstrapProgress{}, fmt.Errorf("initialize bootstrap progress state file: %w", err)
+	}
+	prog := bootstrapProgress{stateFile: s.stateFile}
 	if s.bootstrapTimeout > 0 {
 		ctx, cancel := context.WithTimeout(s.rootCtx, s.bootstrapTimeout)
-		return ctx, cancel, bootstrapProgress{stateFile: s.stateFile}
+		prog.touch()
+		return ctx, cancel, prog, nil
 	}
 	ctx, cancel := context.WithCancel(s.rootCtx)
-	prog := bootstrapProgress{last: &atomic.Int64{}, stateFile: s.stateFile}
+	prog.last = &atomic.Int64{}
 	prog.touch()
 	idle := s.bootstrapIdleTimeout
 	if idle <= 0 {
@@ -3762,7 +3768,7 @@ func (s *Syncer) bootstrapContext(parent context.Context) (context.Context, cont
 		close(done)
 		cancel()
 	}
-	return ctx, wrapped, prog
+	return ctx, wrapped, prog, nil
 }
 
 // outboxContext returns a deadline for a durable writeback/outbox flush. Like
@@ -3892,7 +3898,10 @@ func (s *Syncer) pullRemote(ctx context.Context, conflicted map[string]struct{})
 			// across loop iterations. Matches the deferred-cancel pattern
 			// used on the post-fast-path full-pull sibling below.
 			if err := func() error {
-				bctx, bcancel, bprog := s.bootstrapContext(ctx)
+				bctx, bcancel, bprog, bootstrapErr := s.bootstrapContext(ctx)
+				if bootstrapErr != nil {
+					return bootstrapErr
+				}
 				defer bcancel()
 				return s.pullRemoteFull(bctx, conflicted, bprog)
 			}(); err != nil {
@@ -4042,7 +4051,10 @@ func (s *Syncer) pullRemote(ctx context.Context, conflicted map[string]struct{})
 	// by a tiny RELAYFILE_MOUNT_TIMEOUT. resolveLatestEventCursor already
 	// owns its own short rootCtx-derived deadline (Step 3) so it is also
 	// safe under a tiny inbound ctx.
-	bctx, bcancel, bprog := s.bootstrapContext(ctx)
+	bctx, bcancel, bprog, bootstrapErr := s.bootstrapContext(ctx)
+	if bootstrapErr != nil {
+		return bootstrapErr
+	}
 	defer bcancel()
 	if err := s.pullRemoteFull(bctx, conflicted, bprog); err != nil {
 		return err
@@ -7320,7 +7332,7 @@ func (s *Syncer) currentSyncMode() string {
 	return "mirror"
 }
 
-func (s *Syncer) saveState() error {
+func (s *Syncer) savePrivateState() error {
 	s.state.SyncMode = s.currentSyncMode()
 	data, err := json.Marshal(s.state)
 	if err != nil {
@@ -7330,26 +7342,39 @@ func (s *Syncer) saveState() error {
 		return err
 	}
 	if err := writeFileAtomic(s.stateFile, data, 0o644); err != nil {
+		return err
+	}
+	return nil
+}
+
+// ensureBootstrapProgressStateFile establishes the watchdog-visible liveness
+// target before any potentially slow bootstrap page begins. loadState keeps a
+// missing state file in memory only, so without this prologue a from-scratch
+// bootstrap cannot expose touch() progress until its first page is completely
+// read and persistTraversal saves the first checkpoint.
+func (s *Syncer) ensureBootstrapProgressStateFile() error {
+	if _, err := os.Stat(s.stateFile); err == nil {
+		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return s.savePrivateState()
+}
+
+func (s *Syncer) saveState() error {
+	if err := s.savePrivateState(); err != nil {
 		return err
 	}
 	return s.savePublicState()
 }
 
 func (s *Syncer) saveStateWithoutLocalScan() error {
-	s.state.SyncMode = s.currentSyncMode()
-	data, err := json.Marshal(s.state)
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(s.stateFile), 0o755); err != nil {
-		return err
-	}
-	if err := writeFileAtomic(s.stateFile, data, 0o644); err != nil {
+	if err := s.savePrivateState(); err != nil {
 		return err
 	}
 	wasLowMemory := s.lowMemory
 	s.lowMemory = true
-	err = s.savePublicState()
+	err := s.savePublicState()
 	s.lowMemory = wasLowMemory
 	return err
 }

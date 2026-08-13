@@ -33,6 +33,8 @@ type bootstrapClient struct {
 	listTreeFailErr  error // error returned at failAt
 	listTreeFailOnce bool  // clear failAt after firing once
 	readFileSleep    time.Duration
+	firstReadStarted chan struct{}
+	firstReadOnce    sync.Once
 
 	listEventsSleep time.Duration
 	events          []FilesystemEvent
@@ -147,6 +149,11 @@ func (c *bootstrapClient) ListEvents(ctx context.Context, workspaceID, provider,
 
 func (c *bootstrapClient) ReadFile(ctx context.Context, workspaceID, path string) (RemoteFile, error) {
 	c.readFileCalls.Add(1)
+	c.firstReadOnce.Do(func() {
+		if c.firstReadStarted != nil {
+			close(c.firstReadStarted)
+		}
+	})
 	active := c.activeReads.Add(1)
 	for {
 		currentMax := c.maxActiveRead.Load()
@@ -409,10 +416,29 @@ func TestBootstrapProgressTouchesStateFileMidPage(t *testing.T) {
 	// again until every remaining file in the page has been read.
 	client2 := newBootstrapClient(totalFiles, totalFiles)
 	client2.readFileSleep = 30 * time.Millisecond
+	client2.firstReadStarted = make(chan struct{})
 	s2 := newBootstrapSyncer(t, client2, localDir, SyncerOptions{RootCtx: context.Background()})
 
 	done := make(chan error, 1)
 	go func() { done <- s2.Reconcile(context.Background()) }()
+	select {
+	case <-client2.firstReadStarted:
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("cycle 2 reconcile failed before its first file read: %v", err)
+		}
+		t.Fatalf("cycle 2 completed before its first file read was observed")
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for cycle 2's first file read")
+	}
+	prologueInfo, err := os.Stat(stateFile)
+	if err != nil {
+		t.Fatalf("stat state file after bootstrap prologue touch: %v", err)
+	}
+	prologueMtime := prologueInfo.ModTime()
+	if !prologueMtime.After(backdated) {
+		t.Fatalf("expected bootstrap prologue touch to advance state file mtime past %v, got %v", backdated, prologueMtime)
+	}
 
 	sawMidPageAdvance := false
 	deadline := time.Now().Add(5 * time.Second)
@@ -430,7 +456,10 @@ poll:
 		if statErr != nil {
 			continue
 		}
-		if !info.ModTime().After(backdated) {
+		// The first read has started, so prologue and ListTree touches have
+		// already happened. Requiring a second advance beyond that captured
+		// mtime isolates the per-file touch in readBootstrapFiles.
+		if !info.ModTime().After(prologueMtime) {
 			continue
 		}
 		if got := loadPersistedState(t, localDir); got.BootstrapFilesSynced == syncedBeforeCycle2 {
@@ -439,7 +468,7 @@ poll:
 		}
 	}
 	if !sawMidPageAdvance {
-		t.Fatalf("expected the state file mtime to advance mid-page (before persistTraversal ran), proving touch() refreshes it independently of the page-level saveState()")
+		t.Fatalf("expected the state file mtime to advance after the first file read (and before persistTraversal ran), proving the per-file touch refreshes it independently of prologue/page-level touches")
 	}
 
 	if err := <-done; err != nil {
@@ -451,6 +480,96 @@ poll:
 	final := loadPersistedState(t, localDir)
 	if !final.BootstrapComplete {
 		t.Fatalf("expected BootstrapComplete=true after cycle 2 finishes the resumed page")
+	}
+}
+
+// TestBootstrapProgressCreatesStateFileBeforeSlowFirstPage covers a brand-new
+// mount with no private state on disk. A wrapper-level idle watchdog only sees
+// that file's mtime, so bootstrap must create a valid target before the first
+// page and keep refreshing it as slow per-file reads complete.
+func TestBootstrapProgressCreatesStateFileBeforeSlowFirstPage(t *testing.T) {
+	t.Setenv("RELAYFILE_BOOTSTRAP_READ_CONCURRENCY", "1")
+	t.Setenv("RELAYFILE_BOOTSTRAP_IDLE_TIMEOUT", "2s")
+
+	const totalFiles = 20
+	client := newBootstrapClient(totalFiles, totalFiles)
+	client.readFileSleep = 100 * time.Millisecond
+	client.firstReadStarted = make(chan struct{})
+	localDir := t.TempDir()
+	stateFile := filepath.Join(localDir, ".relayfile-mount-state.json")
+	if _, err := os.Stat(stateFile); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("brand-new bootstrap unexpectedly has a state file: %v", err)
+	}
+
+	rootCtx, cancelRoot := context.WithCancel(context.Background())
+	defer cancelRoot()
+	s := newBootstrapSyncer(t, client, localDir, SyncerOptions{RootCtx: rootCtx})
+
+	// Model the external wrapper: absence of the state file and a frozen
+	// mtime both count as no progress. The page takes much longer than this
+	// threshold, while each individual read completes comfortably inside it.
+	const externalIdleTimeout = time.Second
+	watchdogStop := make(chan struct{})
+	watchdogDone := make(chan struct{})
+	var watchdogCanceled atomic.Bool
+	go func() {
+		defer close(watchdogDone)
+		ticker := time.NewTicker(10 * time.Millisecond)
+		defer ticker.Stop()
+		lastProgressAt := time.Now()
+		var lastMtime time.Time
+		for {
+			select {
+			case <-watchdogStop:
+				return
+			case now := <-ticker.C:
+				if info, err := os.Stat(stateFile); err == nil && (lastMtime.IsZero() || info.ModTime().After(lastMtime)) {
+					lastMtime = info.ModTime()
+					lastProgressAt = now
+				}
+				if now.Sub(lastProgressAt) > externalIdleTimeout {
+					watchdogCanceled.Store(true)
+					cancelRoot()
+					return
+				}
+			}
+		}
+	}()
+
+	reconcileDone := make(chan error, 1)
+	go func() { reconcileDone <- s.Reconcile(context.Background()) }()
+	select {
+	case <-client.firstReadStarted:
+		// The target must already exist, contain valid state, and still show
+		// zero completed page progress while the first read is in flight.
+		st := loadPersistedState(t, localDir)
+		if st.BootstrapFilesSynced != 0 || st.BootstrapComplete {
+			t.Fatalf("unexpected bootstrap checkpoint before first page completes: synced=%d complete=%t", st.BootstrapFilesSynced, st.BootstrapComplete)
+		}
+	case err := <-reconcileDone:
+		close(watchdogStop)
+		<-watchdogDone
+		t.Fatalf("bootstrap ended before its first file read was observed: %v", err)
+	case <-time.After(5 * time.Second):
+		close(watchdogStop)
+		<-watchdogDone
+		t.Fatalf("timed out waiting for the slow first page to begin")
+	}
+
+	err := <-reconcileDone
+	close(watchdogStop)
+	<-watchdogDone
+	if watchdogCanceled.Load() {
+		t.Fatalf("external mtime watchdog falsely canceled a progressing first bootstrap page")
+	}
+	if err != nil {
+		t.Fatalf("brand-new bootstrap reconcile: %v", err)
+	}
+	if got := countLocalFiles(t, localDir); got != totalFiles {
+		t.Fatalf("expected %d files mirrored after first page, got %d", totalFiles, got)
+	}
+	if final := loadPersistedState(t, localDir); !final.BootstrapComplete {
+		t.Fatalf("expected BootstrapComplete=true after the slow first page")
 	}
 }
 
