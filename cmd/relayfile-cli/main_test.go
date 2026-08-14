@@ -2252,7 +2252,7 @@ func TestStatusWarnsWhenDaemonPredatesLastLogin(t *testing.T) {
 		RelayfileWorkspaceID: "ws_demo",
 		AccessToken:          "delegated_token",
 	})
-	agentRelayAuthPath := agentRelayCloudAuthPath()
+	agentRelayAuthPath := mustAgentRelayCloudAuthPath(t)
 	if err := os.MkdirAll(filepath.Dir(agentRelayAuthPath), 0o700); err != nil {
 		t.Fatalf("mkdir agent-relay auth dir failed: %v", err)
 	}
@@ -4169,33 +4169,59 @@ func writeAgentRelayCloudAuthForTest(t *testing.T, apiURL, accessToken string) s
 	return writeAgentRelayCloudAuthExpiringForTest(t, apiURL, accessToken, time.Now().Add(24*time.Hour))
 }
 
+// mustAgentRelayCloudAuthPath resolves the canonical credential file for tests.
+// agentRelayCloudAuthPath returns an error rather than a relative fallback when
+// the home directory cannot be resolved; every test sets HOME first, so a
+// failure here is a broken fixture rather than a case to handle.
+func mustAgentRelayCloudAuthPath(t *testing.T) string {
+	t.Helper()
+	path, err := agentRelayCloudAuthPath()
+	if err != nil {
+		t.Fatalf("resolve canonical cloud auth path: %v", err)
+	}
+	return path
+}
+
 // agentRelayCloudLoginStub returns the shell fragment a fake agent-relay needs
 // so that `cloud login` behaves like the real command: it writes the canonical
 // credential file. relayfile reads the session from that file, never from the
 // CLI's stdout.
+//
+// The payload is marshalled in Go and staged on disk, and the stub only copies
+// it into place. Interpolating JSON into the script with %q would emit Go
+// escape syntax that POSIX sh does not expand, so any non-ASCII byte in the URL
+// or token would land in the file as literal backslash text.
 func agentRelayCloudLoginStub(t *testing.T, apiURL, accessToken string) string {
 	t.Helper()
-	path := agentRelayCloudAuthPath()
-	payload := fmt.Sprintf(
-		`{"apiUrl":%q,"accessToken":%q,"refreshToken":"cld_rt_test_refresh","accessTokenExpiresAt":%q,"refreshTokenExpiresAt":%q}`,
-		apiURL, accessToken,
-		time.Now().Add(24*time.Hour).UTC().Format(time.RFC3339),
-		time.Now().Add(90*24*time.Hour).UTC().Format(time.RFC3339),
-	)
+	path := mustAgentRelayCloudAuthPath(t)
+	payload, err := json.Marshal(agentRelayStoredAuth{
+		APIURL:                apiURL,
+		AccessToken:           accessToken,
+		RefreshToken:          "cld_rt_test_refresh",
+		AccessTokenExpiresAt:  time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339),
+		RefreshTokenExpiresAt: time.Now().Add(90 * 24 * time.Hour).UTC().Format(time.RFC3339),
+	})
+	if err != nil {
+		t.Fatalf("marshal login stub payload: %v", err)
+	}
+	staged := filepath.Join(t.TempDir(), "cloud-auth.staged.json")
+	if err := os.WriteFile(staged, append(payload, '\n'), 0o600); err != nil {
+		t.Fatalf("stage login stub payload: %v", err)
+	}
 	return fmt.Sprintf(`
 if [ "$*" = "cloud login --no-open" ] || [ "$*" = "cloud login" ]; then
-  mkdir -p %q
-  printf '%%s\n' %q > %q
-  chmod 600 %q
+  mkdir -p '%s'
+  cp '%s' '%s'
+  chmod 600 '%s'
   echo "agent-relay login ok"
   exit 0
 fi
-`, filepath.Dir(path), payload, path, path)
+`, filepath.Dir(path), staged, path, path)
 }
 
 func writeAgentRelayCloudAuthExpiringForTest(t *testing.T, apiURL, accessToken string, accessTokenExpiresAt time.Time) string {
 	t.Helper()
-	path := agentRelayCloudAuthPath()
+	path := mustAgentRelayCloudAuthPath(t)
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatalf("mkdir agent-relay auth dir failed: %v", err)
 	}
@@ -7059,7 +7085,7 @@ func TestLogoutClearsAuthCredentialsOnly(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("save cached delegated credentials failed: %v", err)
 	}
-	agentRelayAuth := agentRelayCloudAuthPath()
+	agentRelayAuth := mustAgentRelayCloudAuthPath(t)
 	if err := os.MkdirAll(filepath.Dir(agentRelayAuth), 0o700); err != nil {
 		t.Fatalf("mkdir agent-relay auth dir failed: %v", err)
 	}

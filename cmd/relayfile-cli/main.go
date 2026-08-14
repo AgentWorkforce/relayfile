@@ -1179,9 +1179,16 @@ func agentRelayCLIProbeError(bin, origin string, args []string, detail string) e
 	)
 }
 
+// agentRelayCLIProbeTimeout bounds each compatibility probe. Every workspace
+// call funnels through ensureAgentRelayCLICompatible, so an unbounded probe
+// against a wedged binary would stall relayfile with no diagnostic at all.
+const agentRelayCLIProbeTimeout = 15 * time.Second
+
 func ensureAgentRelayCLICompatible() error {
 	bin, origin := agentRelayBinary()
-	versionOutput, err := exec.Command(bin, "--version").CombinedOutput()
+	ctx, cancel := context.WithTimeout(context.Background(), agentRelayCLIProbeTimeout)
+	defer cancel()
+	versionOutput, err := exec.CommandContext(ctx, bin, "--version").CombinedOutput()
 	if err != nil {
 		detail := strings.TrimSpace(string(versionOutput))
 		if detail == "" {
@@ -1206,7 +1213,9 @@ func ensureAgentRelayCLICompatible() error {
 		{"workspace", "active", "--help"},
 		{"workspace", "switch", "--help"},
 	} {
-		output, err := exec.Command(bin, args...).CombinedOutput()
+		probeCtx, probeCancel := context.WithTimeout(context.Background(), agentRelayCLIProbeTimeout)
+		output, err := exec.CommandContext(probeCtx, bin, args...).CombinedOutput()
+		probeCancel()
 		if err != nil {
 			detail := strings.TrimSpace(string(output))
 			if detail == "" {
@@ -1306,7 +1315,9 @@ func runAgentRelayLogin(stdin io.Reader, stdout io.Writer, noOpen bool) error {
 		args = append(args, "--no-open")
 	}
 	bin, _ := agentRelayBinary()
-	cmd := exec.Command(bin, args...)
+	// No deadline: this is the interactive browser login, and the user may
+	// legitimately take minutes at the consent screen.
+	cmd := exec.CommandContext(context.Background(), bin, args...)
 	cmd.Stdin = stdin
 	cmd.Stdout = stdout
 	cmd.Stderr = stdout
@@ -9163,7 +9174,13 @@ func daemonCredentialFreshnessAuthLine(localDir string) string {
 	if !ok {
 		return ""
 	}
-	latest, ok := latestCredentialModTime(credentialsPath(), agentRelayCloudAuthPath())
+	credentialPaths := []string{credentialsPath()}
+	// A machine with no resolvable home has no canonical session to compare
+	// against; the freshness hint is advisory, so drop it rather than fail.
+	if agentRelayAuth, err := agentRelayCloudAuthPath(); err == nil {
+		credentialPaths = append(credentialPaths, agentRelayAuth)
+	}
+	latest, ok := latestCredentialModTime(credentialPaths...)
 	if ok && latest.After(startedAt) {
 		return "auth: daemon predates last login - restart the daemon"
 	}

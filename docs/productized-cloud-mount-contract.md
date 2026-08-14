@@ -63,7 +63,7 @@ step **MUST** be idempotent on re-run:
 1. **Print intent.** A single line stating: "Relayfile setup. This signs
    you in, connects an integration, and prepares a local VFS mount."
 2. **Cloud login.**
-   - Cloud authentication is owned by `agent-relay login` and the
+   - Cloud authentication is owned by `agent-relay cloud login` and the
      `@agent-relay/cloud` session store.
    - Relayfile obtains Cloud auth by reading that store's canonical credential
      file, `~/.agentworkforce/relay/cloud-auth.json` — never by invoking the
@@ -483,7 +483,7 @@ If the refresh token also expires (default 7 days), the mount **MUST**:
 - Refuse local writes for affected paths and place them in
   `.relay/permissions-denied.log` with reason `cloud_session_expired`.
 - Print one stderr line per minute (capped) directing the user to run
-  `agent-relay login`. This is the only condition under which v1 mounts
+  `agent-relay cloud login`. This is the only condition under which v1 mounts
   enter a degraded read-only state.
 
 ---

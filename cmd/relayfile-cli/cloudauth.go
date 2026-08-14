@@ -39,10 +39,19 @@ const (
 	agentRelayAccessTokenRefreshWindow  = 5 * time.Minute
 	agentRelayRefreshTokenRefreshWindow = 24 * time.Hour
 
-	agentRelayCloudRefreshTimeout = 30 * time.Second
+	// relay's DEFAULT_REFRESH_TIMEOUT_MS (packages/cloud/src/types.ts:278).
+	// This MUST stay well below agentRelayAuthLockStaleAfter: the lock's mtime
+	// is not heartbeaten while the holder waits on the refresh HTTP call, so a
+	// holder that can outlive the stale window would have its lock reclaimed
+	// mid-flight and two processes would refresh the same single-use token.
+	// relay keeps a 3x margin (10s vs 30s); matching its constant restores it.
+	agentRelayCloudRefreshTimeout = 10 * time.Second
 
 	// Same lock discipline as relay packages/cloud/src/auth.ts, so a relayfile
 	// refresh and an agent-relay refresh cannot interleave on the same file.
+	// These must stay equal to relay's: a longer stale window here would let
+	// relayfile reclaim a lock relay still considers live, and a shorter one
+	// would let relay reclaim relayfile's.
 	agentRelayAuthLockRetryDelay = 50 * time.Millisecond
 	agentRelayAuthLockStaleAfter = 30 * time.Second
 	agentRelayAuthLockTimeout    = 30 * time.Second
@@ -66,16 +75,25 @@ const (
 	agentRelayCloudSessionFromFile agentRelayCloudSessionSource = "cloud-auth.json"
 )
 
-func agentRelayCloudAuthPath() string {
+// agentRelayCloudAuthPath resolves the canonical credential file. It returns an
+// error rather than a relative fallback when the home directory cannot be
+// resolved: a relative path would read and, after a refresh, *write* Cloud
+// tokens into the process's working directory — usually a repository — and that
+// copy would be invisible to `agent-relay`, silently forking the session.
+func agentRelayCloudAuthPath() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return filepath.Join(".agentworkforce", "relay", "cloud-auth.json")
+		return "", fmt.Errorf("locate the Agent Relay cloud session: resolve the home directory: %w", err)
 	}
-	return filepath.Join(home, ".agentworkforce", "relay", "cloud-auth.json")
+	return filepath.Join(home, ".agentworkforce", "relay", "cloud-auth.json"), nil
 }
 
-func agentRelayCloudAuthLockPath() string {
-	return agentRelayCloudAuthPath() + ".lock"
+func agentRelayCloudAuthLockPath() (string, error) {
+	path, err := agentRelayCloudAuthPath()
+	if err != nil {
+		return "", err
+	}
+	return path + ".lock", nil
 }
 
 func (a agentRelayStoredAuth) valid() bool {
@@ -100,6 +118,12 @@ func (a agentRelayStoredAuth) valid() bool {
 // inside its window, and roll the pair early when the refresh token itself is
 // within a day of expiring.
 func (a agentRelayStoredAuth) needsRefresh(now time.Time) bool {
+	// Never attempt a refresh without a refresh credential to present. This
+	// matters for the access-token-only environment shape, where there is
+	// nothing to roll and rolling would fail rather than recover.
+	if strings.TrimSpace(a.RefreshToken) == "" {
+		return false
+	}
 	expiresAt, ok := parseRFC3339(a.AccessTokenExpiresAt)
 	if !ok {
 		return true
@@ -117,24 +141,48 @@ func (a agentRelayStoredAuth) needsRefresh(now time.Time) bool {
 	return refreshExpiresAt.Sub(now) <= agentRelayRefreshTokenRefreshWindow
 }
 
+// agentRelayStoredAuthFromEnv reads the non-interactive escape hatch. The
+// contract is relayfile's own, from packages/agents/src/connect.ts:93-108: an
+// access token alone is a usable session. CI commonly exports only
+// CLOUD_API_ACCESS_TOKEN, having no refresh token to give and no need of one.
+//
+// This is deliberately looser than relay's readEnvAuth, which requires the full
+// quartet. relay can demand it because a partial set there falls through to a
+// login flow; here it would fall through to an unrelated credential file, or
+// to "no session exists" while the caller has plainly supplied one.
 func agentRelayStoredAuthFromEnv() (agentRelayStoredAuth, bool) {
+	accessToken := strings.TrimSpace(os.Getenv("CLOUD_API_ACCESS_TOKEN"))
+	if accessToken == "" {
+		return agentRelayStoredAuth{}, false
+	}
 	auth := agentRelayStoredAuth{
 		APIURL:                strings.TrimSpace(os.Getenv("CLOUD_API_URL")),
-		AccessToken:           strings.TrimSpace(os.Getenv("CLOUD_API_ACCESS_TOKEN")),
+		AccessToken:           accessToken,
 		RefreshToken:          strings.TrimSpace(os.Getenv("CLOUD_API_REFRESH_TOKEN")),
 		AccessTokenExpiresAt:  strings.TrimSpace(os.Getenv("CLOUD_API_ACCESS_TOKEN_EXPIRES_AT")),
 		RefreshTokenExpiresAt: strings.TrimSpace(os.Getenv("CLOUD_API_REFRESH_TOKEN_EXPIRES_AT")),
 	}
-	// relay requires the full quartet before it treats the environment as a
-	// session; a partial set falls through to the file.
-	if !auth.valid() {
-		return agentRelayStoredAuth{}, false
+	if auth.APIURL == "" {
+		auth.APIURL = defaultCloudAPIURL
+	}
+	if _, ok := parseRFC3339(auth.AccessTokenExpiresAt); !ok {
+		// Same defaulting as connect.ts: with no refresh token there is nothing
+		// to roll, so pin the expiry far out rather than treating an unstated
+		// expiry as "expired" and failing a session that works.
+		if auth.RefreshToken == "" {
+			auth.AccessTokenExpiresAt = time.Now().Add(365 * 24 * time.Hour).UTC().Format(time.RFC3339)
+		} else {
+			auth.AccessTokenExpiresAt = time.Now().Add(time.Minute).UTC().Format(time.RFC3339)
+		}
 	}
 	return auth, true
 }
 
 func readAgentRelayStoredAuthFile() (agentRelayStoredAuth, error) {
-	path := agentRelayCloudAuthPath()
+	path, err := agentRelayCloudAuthPath()
+	if err != nil {
+		return agentRelayStoredAuth{}, err
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return agentRelayStoredAuth{}, err
@@ -147,7 +195,10 @@ func readAgentRelayStoredAuthFile() (agentRelayStoredAuth, error) {
 }
 
 func writeAgentRelayStoredAuthFile(auth agentRelayStoredAuth) error {
-	path := agentRelayCloudAuthPath()
+	path, err := agentRelayCloudAuthPath()
+	if err != nil {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
@@ -160,7 +211,10 @@ func writeAgentRelayStoredAuthFile(auth agentRelayStoredAuth) error {
 }
 
 func acquireAgentRelayAuthLock(ctx context.Context) (func(), error) {
-	lockPath := agentRelayCloudAuthLockPath()
+	lockPath, err := agentRelayCloudAuthLockPath()
+	if err != nil {
+		return nil, err
+	}
 	if err := os.MkdirAll(filepath.Dir(lockPath), 0o700); err != nil {
 		return nil, err
 	}
@@ -216,7 +270,7 @@ func refreshAgentRelayStoredAuth(ctx context.Context, auth agentRelayStoredAuth)
 	if err != nil {
 		return agentRelayStoredAuth{}, fmt.Errorf("refresh the Agent Relay cloud session at %s: %w", endpoint, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	var payload agentRelayStoredAuth
 	decodeErr := json.NewDecoder(resp.Body).Decode(&payload)
@@ -238,11 +292,18 @@ func refreshAgentRelayStoredAuth(ctx context.Context, auth agentRelayStoredAuth)
 		)
 	}
 	next := agentRelayStoredAuth{
-		APIURL:                firstNonEmpty(strings.TrimSpace(payload.APIURL), apiURL),
-		AccessToken:           strings.TrimSpace(payload.AccessToken),
-		RefreshToken:          strings.TrimSpace(payload.RefreshToken),
-		AccessTokenExpiresAt:  strings.TrimSpace(payload.AccessTokenExpiresAt),
-		RefreshTokenExpiresAt: firstNonEmpty(strings.TrimSpace(payload.RefreshTokenExpiresAt), strings.TrimSpace(auth.RefreshTokenExpiresAt)),
+		APIURL:               firstNonEmpty(strings.TrimSpace(payload.APIURL), apiURL),
+		AccessToken:          strings.TrimSpace(payload.AccessToken),
+		RefreshToken:         strings.TrimSpace(payload.RefreshToken),
+		AccessTokenExpiresAt: strings.TrimSpace(payload.AccessTokenExpiresAt),
+		// Deliberately NOT inherited from the previous token when the server
+		// omits it. refreshTokenExpiresAt describes a specific refresh token,
+		// and the response carries a *new* one. Carrying the old token's expiry
+		// forward would re-arm the 24-hour refresh-token window immediately, so
+		// every subsequent command would rotate again — an endless refresh loop
+		// that also multiplies rotation races. Absent means unknown, and
+		// needsRefresh treats unknown as "do not force a refresh".
+		RefreshTokenExpiresAt: strings.TrimSpace(payload.RefreshTokenExpiresAt),
 	}
 	return next, nil
 }
@@ -267,7 +328,10 @@ func ensureAgentRelayCloudSession(ctx context.Context) (agentRelayStoredAuth, ag
 		return refreshed, agentRelayCloudSessionFromEnv, nil
 	}
 
-	path := agentRelayCloudAuthPath()
+	path, err := agentRelayCloudAuthPath()
+	if err != nil {
+		return agentRelayStoredAuth{}, agentRelayCloudSessionFromFile, err
+	}
 	auth, err := readAgentRelayStoredAuthFile()
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -294,10 +358,18 @@ func ensureAgentRelayCloudSession(ctx context.Context) (agentRelayStoredAuth, ag
 	}
 	defer release()
 
-	// Another process may have refreshed while we waited for the lock.
-	if latest, err := readAgentRelayStoredAuthFile(); err == nil && latest.valid() &&
-		latest.APIURL == auth.APIURL && !latest.needsRefresh(time.Now()) {
-		return latest, agentRelayCloudSessionFromFile, nil
+	// Another process may have refreshed — or a fresh `agent-relay cloud login`
+	// may have replaced the session entirely — while we waited for the lock.
+	// Re-read and ADOPT whatever is on disk: we hold the lock, so the file is
+	// now the authoritative session, and the pre-lock copy's refresh token may
+	// already have been rotated out from under us. Refreshing the stale copy
+	// would present a dead refresh token and, on success, overwrite the newer
+	// session — the lost update this double-check exists to prevent.
+	if latest, readErr := readAgentRelayStoredAuthFile(); readErr == nil && latest.valid() {
+		if !latest.needsRefresh(time.Now()) {
+			return latest, agentRelayCloudSessionFromFile, nil
+		}
+		auth = latest
 	}
 
 	refreshed, err := refreshAgentRelayStoredAuth(ctx, auth)
