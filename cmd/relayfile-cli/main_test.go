@@ -2252,7 +2252,7 @@ func TestStatusWarnsWhenDaemonPredatesLastLogin(t *testing.T) {
 		RelayfileWorkspaceID: "ws_demo",
 		AccessToken:          "delegated_token",
 	})
-	agentRelayAuthPath := agentRelayCloudAuthPath()
+	agentRelayAuthPath := mustAgentRelayCloudAuthPath(t)
 	if err := os.MkdirAll(filepath.Dir(agentRelayAuthPath), 0o700); err != nil {
 		t.Fatalf("mkdir agent-relay auth dir failed: %v", err)
 	}
@@ -4154,6 +4154,92 @@ func clearRelayfileEnv(t *testing.T) {
 	t.Setenv("RELAYCAST_BASE_URL", "")
 	t.Setenv("RELAY_BASE_URL", "")
 	t.Setenv("AGENT_RELAY_BIN", "")
+	t.Setenv("RELAYFILE_AGENT_RELAY_BIN", "")
+	t.Setenv("CLOUD_API_URL", "")
+	t.Setenv("CLOUD_API_ACCESS_TOKEN", "")
+	t.Setenv("CLOUD_API_REFRESH_TOKEN", "")
+	t.Setenv("CLOUD_API_ACCESS_TOKEN_EXPIRES_AT", "")
+	t.Setenv("CLOUD_API_REFRESH_TOKEN_EXPIRES_AT", "")
+}
+
+// writeAgentRelayCloudAuthForTest writes the canonical credential file
+// `agent-relay cloud login` produces. Tests set HOME to a temp dir first.
+func writeAgentRelayCloudAuthForTest(t *testing.T, apiURL, accessToken string) string {
+	t.Helper()
+	return writeAgentRelayCloudAuthExpiringForTest(t, apiURL, accessToken, time.Now().Add(24*time.Hour))
+}
+
+// mustAgentRelayCloudAuthPath resolves the canonical credential file for tests.
+// agentRelayCloudAuthPath returns an error rather than a relative fallback when
+// the home directory cannot be resolved; every test sets HOME first, so a
+// failure here is a broken fixture rather than a case to handle.
+func mustAgentRelayCloudAuthPath(t *testing.T) string {
+	t.Helper()
+	path, err := agentRelayCloudAuthPath()
+	if err != nil {
+		t.Fatalf("resolve canonical cloud auth path: %v", err)
+	}
+	return path
+}
+
+// agentRelayCloudLoginStub returns the shell fragment a fake agent-relay needs
+// so that `cloud login` behaves like the real command: it writes the canonical
+// credential file. relayfile reads the session from that file, never from the
+// CLI's stdout.
+//
+// The payload is marshalled in Go and staged on disk, and the stub only copies
+// it into place. Interpolating JSON into the script with %q would emit Go
+// escape syntax that POSIX sh does not expand, so any non-ASCII byte in the URL
+// or token would land in the file as literal backslash text.
+func agentRelayCloudLoginStub(t *testing.T, apiURL, accessToken string) string {
+	t.Helper()
+	path := mustAgentRelayCloudAuthPath(t)
+	payload, err := json.Marshal(agentRelayStoredAuth{
+		APIURL:                apiURL,
+		AccessToken:           accessToken,
+		RefreshToken:          "cld_rt_test_refresh",
+		AccessTokenExpiresAt:  time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339),
+		RefreshTokenExpiresAt: time.Now().Add(90 * 24 * time.Hour).UTC().Format(time.RFC3339),
+	})
+	if err != nil {
+		t.Fatalf("marshal login stub payload: %v", err)
+	}
+	staged := filepath.Join(t.TempDir(), "cloud-auth.staged.json")
+	if err := os.WriteFile(staged, append(payload, '\n'), 0o600); err != nil {
+		t.Fatalf("stage login stub payload: %v", err)
+	}
+	return fmt.Sprintf(`
+if [ "$*" = "cloud login --no-open" ] || [ "$*" = "cloud login" ]; then
+  mkdir -p '%s'
+  cp '%s' '%s'
+  chmod 600 '%s'
+  echo "agent-relay login ok"
+  exit 0
+fi
+`, filepath.Dir(path), staged, path, path)
+}
+
+func writeAgentRelayCloudAuthExpiringForTest(t *testing.T, apiURL, accessToken string, accessTokenExpiresAt time.Time) string {
+	t.Helper()
+	path := mustAgentRelayCloudAuthPath(t)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatalf("mkdir agent-relay auth dir failed: %v", err)
+	}
+	payload := agentRelayStoredAuth{
+		APIURL:                apiURL,
+		AccessToken:           accessToken,
+		RefreshToken:          "cld_rt_test_refresh",
+		AccessTokenExpiresAt:  accessTokenExpiresAt.UTC().Format(time.RFC3339),
+		RefreshTokenExpiresAt: time.Now().Add(90 * 24 * time.Hour).UTC().Format(time.RFC3339),
+	}
+	data, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal agent-relay cloud auth failed: %v", err)
+	}
+	if err := os.WriteFile(path, append(data, '\n'), 0o600); err != nil {
+		t.Fatalf("write agent-relay cloud auth failed: %v", err)
+	}
+	return path
 }
 
 func setPathWithPSOnly(t *testing.T) {
@@ -4202,68 +4288,26 @@ fi
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
 		t.Fatalf("write fake agent-relay failed: %v", err)
 	}
-	t.Setenv("AGENT_RELAY_BIN", path)
+	// relayfile resolves the CLI through its own variable, never through
+	// AGENT_RELAY_BIN (which relay uses for the broker binary).
+	t.Setenv("RELAYFILE_AGENT_RELAY_BIN", path)
 	return path
 }
 
 func installFakeAgentRelaySession(t *testing.T, apiURL, accessToken, name, cloudWorkspaceID, relayfileWorkspaceID string) {
 	t.Helper()
+	// The cloud session comes from the canonical credential file, not from the
+	// CLI; only workspace resolution still shells out.
+	writeAgentRelayCloudAuthForTest(t, apiURL, accessToken)
 	body := fmt.Sprintf(`
-if [ "$*" = "cloud session --json --reveal-token" ] || [ "$*" = "cloud session --json" ]; then
-  echo '{"apiUrl":%q,"accessToken":%q}'
-  exit 0
-fi
 if [ "$*" = "workspace active --json --reveal-secrets" ] || [ "$*" = "workspace active --json" ]; then
   echo '{"name":%q,"cloudWorkspaceId":%q,"relayfileWorkspaceId":%q}'
   exit 0
 fi
 echo "unexpected args: $*" >&2
 exit 2
-`, apiURL, accessToken, name, cloudWorkspaceID, relayfileWorkspaceID)
+`, name, cloudWorkspaceID, relayfileWorkspaceID)
 	installFakeAgentRelay(t, body)
-}
-
-func TestCloudCredentialsFallBackWhenRevealTokenUnsupported(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	clearRelayfileEnv(t)
-	installFakeAgentRelay(t, `
-if [ "$*" = "cloud session --json --reveal-token" ]; then
-  echo "error: unknown option '--reveal-token'" >&2
-  exit 1
-fi
-if [ "$*" = "cloud session --json" ]; then
-  echo '{"apiUrl":"https://cloud.test","accessToken":"cld_at_raw_fallback_token"}'
-  exit 0
-fi
-echo "unexpected args: $*" >&2
-exit 2
-`)
-
-	creds, err := cloudCredentialsFromAgentRelay()
-	if err != nil {
-		t.Fatalf("cloudCredentialsFromAgentRelay failed: %v", err)
-	}
-	if creds.AccessToken != "cld_at_raw_fallback_token" {
-		t.Fatalf("unexpected access token: %q", creds.AccessToken)
-	}
-}
-
-func TestCloudCredentialsRejectMaskedAccessToken(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	clearRelayfileEnv(t)
-	installFakeAgentRelay(t, `
-if [ "$*" = "cloud session --json --reveal-token" ] || [ "$*" = "cloud session --json" ]; then
-  echo '{"apiUrl":"https://cloud.test","accessToken":"cld_at_…oken"}'
-  exit 0
-fi
-echo "unexpected args: $*" >&2
-exit 2
-`)
-
-	_, err := cloudCredentialsFromAgentRelay()
-	if err == nil || !strings.Contains(err.Error(), "masked accessToken") {
-		t.Fatalf("expected masked accessToken error, got %v", err)
-	}
 }
 
 func TestActiveWorkspaceFallsBackWhenRevealSecretsUnsupported(t *testing.T) {
@@ -4595,13 +4639,10 @@ func TestLoginCanProvisionSeparateWorkspaceForMessagingOnlyRelaycastWorkspace(t 
 	defer cloud.Close()
 
 	resolverFailure := agentRelayResolver404Error(workspaceKey, relayfileCLITestFixture(t, "cloud-workspace-not-found.json"))
+	writeAgentRelayCloudAuthForTest(t, cloud.URL, "cld_access")
 	installFakeAgentRelay(t, fmt.Sprintf(`
 if [ "$*" = "cloud login --no-open" ]; then
   echo "agent-relay login ok"
-  exit 0
-fi
-if [ "$*" = "cloud session --json --reveal-token" ] || [ "$*" = "cloud session --json" ]; then
-  echo '{"apiUrl":"`+cloud.URL+`","accessToken":"cld_access"}'
   exit 0
 fi
 if [ "$*" = "workspace active --json --reveal-secrets" ] || [ "$*" = "workspace active --json" ]; then
@@ -6954,14 +6995,7 @@ func TestLoginDelegatesToAgentRelay(t *testing.T) {
 	defer server.Close()
 	installFakeAgentRelay(t, `
 printf '%s\n' "$*" >> "$AGENT_RELAY_LOG"
-if [ "$*" = "cloud login --no-open" ]; then
-  echo "agent-relay login ok"
-  exit 0
-fi
-if [ "$*" = "cloud session --json --reveal-token" ] || [ "$*" = "cloud session --json" ]; then
-  echo '{"apiUrl":"`+server.URL+`","accessToken":"cld_new"}'
-  exit 0
-fi
+`+agentRelayCloudLoginStub(t, server.URL, "cld_new")+`
 if [ "$*" = "workspace active --json --reveal-secrets" ] || [ "$*" = "workspace active --json" ]; then
   echo '{"name":"demo","cloudWorkspaceId":"ws_123","relayfileWorkspaceId":"ws_123"}'
   exit 0
@@ -6993,10 +7027,15 @@ exit 2
 		t.Fatalf("read fake agent-relay log failed: %v", err)
 	}
 	gotLog := strings.TrimSpace(string(logBytes))
-	for _, want := range []string{"cloud login --no-open", "cloud session --json", "workspace active --json"} {
+	for _, want := range []string{"cloud login --no-open", "workspace active --json"} {
 		if !strings.Contains(gotLog, want) {
 			t.Fatalf("expected agent-relay %s call, got %q", want, string(logBytes))
 		}
+	}
+	// The cloud session is read from the canonical credential file, so the CLI
+	// must never be asked for it.
+	if strings.Contains(gotLog, "cloud session") {
+		t.Fatalf("relayfile must not shell out for the cloud session, got %q", string(logBytes))
 	}
 	if _, err := os.Stat(cloudCredentialsPath()); !os.IsNotExist(err) {
 		t.Fatalf("expected stale relayfile cloud credentials removed, got err=%v", err)
@@ -7046,7 +7085,7 @@ func TestLogoutClearsAuthCredentialsOnly(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("save cached delegated credentials failed: %v", err)
 	}
-	agentRelayAuth := agentRelayCloudAuthPath()
+	agentRelayAuth := mustAgentRelayCloudAuthPath(t)
 	if err := os.MkdirAll(filepath.Dir(agentRelayAuth), 0o700); err != nil {
 		t.Fatalf("mkdir agent-relay auth dir failed: %v", err)
 	}
@@ -7390,14 +7429,8 @@ func TestRefreshDelegatedCredentialsFallsBackToCloudRemint(t *testing.T) {
 func TestRefreshDelegatedCredentialsSurfacesRemintFailure(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)
-	installFakeAgentRelay(t, `
-if [ "$*" = "cloud session --json --reveal-token" ] || [ "$*" = "cloud session --json" ]; then
-  echo "no active cloud session" >&2
-  exit 2
-fi
-echo "unexpected args: $*" >&2
-exit 2
-`)
+	// No canonical cloud session on this machine, so the cloud re-mint
+	// fallback cannot run and its reason must reach the caller.
 
 	expired := testJWTWithWorkspaceAgentAndExpiry("ws_refresh", "relayfile-cli", time.Now().Add(-time.Minute))
 	var server *httptest.Server
@@ -7432,8 +7465,8 @@ exit 2
 	if !errors.Is(err, ErrDelegatedRelayfileCredentialsExpired) {
 		t.Fatalf("expected delegated expiry sentinel, got %v", err)
 	}
-	if !strings.Contains(err.Error(), "no active cloud session") {
-		t.Fatalf("expected remint failure detail, got %v", err)
+	if !strings.Contains(err.Error(), "no Agent Relay cloud session") || !strings.Contains(err.Error(), "cloud-auth.json") {
+		t.Fatalf("expected remint failure detail naming the missing cloud session, got %v", err)
 	}
 }
 
@@ -7551,14 +7584,7 @@ func TestEnsureCloudCredentialsUsesAgentRelaySession(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("saveCloudCredentials failed: %v", err)
 	}
-	installFakeAgentRelay(t, `
-if [ "$*" = "cloud session --json --reveal-token" ] || [ "$*" = "cloud session --json" ]; then
-  echo '{"apiUrl":"https://relay-cloud.test","accessToken":"agent_cloud_token"}'
-  exit 0
-fi
-echo "unexpected args: $*" >&2
-exit 2
-`)
+	writeAgentRelayCloudAuthForTest(t, "https://relay-cloud.test", "agent_cloud_token")
 
 	creds, err := ensureCloudCredentials("", "", 0, false, io.Discard)
 	if err != nil {
@@ -7579,10 +7605,12 @@ exit 2
 	}
 }
 
-func TestEnsureCloudCredentialsRejectsStaleAgentRelayBeforeSessionCommand(t *testing.T) {
+// The stale-CLI gate now guards workspace resolution only — the cloud session
+// no longer goes through the CLI at all, so an old CLI must not block it.
+func TestActiveWorkspaceRejectsStaleAgentRelayBeforeWorkspaceCommand(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)
-	marker := filepath.Join(t.TempDir(), "session-called")
+	marker := filepath.Join(t.TempDir(), "workspace-called")
 	path := filepath.Join(t.TempDir(), "agent-relay")
 	script := fmt.Sprintf(`#!/bin/sh
 set -eu
@@ -7590,9 +7618,9 @@ if [ "$*" = "--version" ]; then
   echo "8.3.7"
   exit 0
 fi
-if [ "$*" = "cloud session --json --reveal-token" ] || [ "$*" = "cloud session --json" ]; then
+if [ "$*" = "workspace active --json --reveal-secrets" ] || [ "$*" = "workspace active --json" ]; then
   touch %q
-  echo '{"apiUrl":"https://relay-cloud.test","accessToken":"agent_cloud_token"}'
+  echo '{"name":"demo","cloudWorkspaceId":"ws_cloud","relayfileWorkspaceId":"rw_demo"}'
   exit 0
 fi
 echo "unexpected args: $*" >&2
@@ -7601,20 +7629,43 @@ exit 2
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
 		t.Fatalf("write fake stale agent-relay failed: %v", err)
 	}
-	t.Setenv("AGENT_RELAY_BIN", path)
+	t.Setenv("RELAYFILE_AGENT_RELAY_BIN", path)
 
-	_, err := ensureCloudCredentials("", "", 0, false, io.Discard)
+	_, err := activeWorkspaceFromAgentRelay()
 	if err == nil {
 		t.Fatal("expected stale agent-relay CLI to be rejected")
 	}
 	got := err.Error()
-	for _, want := range []string{"agent-relay CLI >= 8.7.0 required", "8.3.7", "npm install -g agent-relay@8.7.0", "sandbox image"} {
+	for _, want := range []string{"agent-relay CLI >= 8.7.0 required", "8.3.7", "npm install -g agent-relay@8.7.0", "sandbox image", path, "RELAYFILE_AGENT_RELAY_BIN"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("expected error to contain %q, got %q", want, got)
 		}
 	}
 	if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
-		t.Fatalf("expected cloud session command to be skipped, stat err=%v", statErr)
+		t.Fatalf("expected workspace command to be skipped, stat err=%v", statErr)
+	}
+}
+
+// A cloud session must resolve from the canonical credential file even when
+// the agent-relay CLI is too old for workspace resolution: the two concerns
+// are independent now, and coupling them is what turned a token expiry into
+// an outage.
+func TestEnsureCloudCredentialsSucceedsWithStaleAgentRelayCLI(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+	path := filepath.Join(t.TempDir(), "agent-relay")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\necho \"8.3.7\"\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write fake stale agent-relay failed: %v", err)
+	}
+	t.Setenv("RELAYFILE_AGENT_RELAY_BIN", path)
+	writeAgentRelayCloudAuthForTest(t, "https://relay-cloud.test", "agent_cloud_token")
+
+	creds, err := ensureCloudCredentials("", "", 0, false, io.Discard)
+	if err != nil {
+		t.Fatalf("ensureCloudCredentials failed: %v", err)
+	}
+	if creds.AccessToken != "agent_cloud_token" {
+		t.Fatalf("unexpected access token: %q", creds.AccessToken)
 	}
 }
 

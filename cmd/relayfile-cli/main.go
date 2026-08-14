@@ -91,15 +91,6 @@ type cloudCredentials struct {
 	UpdatedAt            string `json:"updatedAt,omitempty"`
 }
 
-type agentRelayCloudSession struct {
-	APIURL      string `json:"apiUrl"`
-	AccessToken string `json:"accessToken"`
-	Auth        struct {
-		APIURL      string `json:"apiUrl"`
-		AccessToken string `json:"accessToken"`
-	} `json:"auth"`
-}
-
 type agentRelayActiveWorkspace struct {
 	ID                       string            `json:"id"`
 	Name                     string            `json:"name"`
@@ -1157,42 +1148,80 @@ func ensureCloudCredentials(cloudAPIURL, explicitToken string, timeout time.Dura
 	return creds, nil
 }
 
-func agentRelayBinary() string {
-	if value := strings.TrimSpace(os.Getenv("AGENT_RELAY_BIN")); value != "" {
-		return value
+// agentRelayCLIOverrideEnv is relayfile's own override for the agent-relay
+// Node CLI. It is deliberately not AGENT_RELAY_BIN: relay uses that variable
+// for the *broker* binary (see relay packages/cli/src/cli/lib/client-factory.ts),
+// and every relay-spawned agent exports it as agent-relay-broker. Reading it
+// here made relayfile exec the broker, which has no `workspace` or `cloud`
+// subcommand, and then report the failure as an agent-relay CLI version
+// problem. Cloud session auth no longer shells out at all (see cloudauth.go);
+// what remains is workspace resolution, and it resolves its binary here.
+const agentRelayCLIOverrideEnv = "RELAYFILE_AGENT_RELAY_BIN"
+
+// agentRelayBinary returns the agent-relay CLI to exec and a human-readable
+// description of how it was chosen, so failures can name their own cause.
+func agentRelayBinary() (bin string, origin string) {
+	if value := strings.TrimSpace(os.Getenv(agentRelayCLIOverrideEnv)); value != "" {
+		return value, agentRelayCLIOverrideEnv
 	}
-	return "agent-relay"
+	return "agent-relay", "PATH"
 }
 
+func agentRelayCLIProbeError(bin, origin string, args []string, detail string) error {
+	probed := strings.Join(append([]string{"agent-relay"}, args...), " ")
+	hint := fmt.Sprintf("Run `npm install -g agent-relay@%s`, or point %s at the agent-relay CLI.", minAgentRelayCLIVersion, agentRelayCLIOverrideEnv)
+	if origin == agentRelayCLIOverrideEnv {
+		hint = fmt.Sprintf("%s is set to %q — point it at the agent-relay CLI, not the relay broker (agent-relay-broker), or unset it to use PATH.", agentRelayCLIOverrideEnv, bin)
+	}
+	return fmt.Errorf(
+		"agent-relay CLI probe failed: ran `%s` using %q (resolved from %s) and it failed with: %s. relayfile needs `%s` for workspace resolution. %s",
+		probed, bin, origin, detail, probed, hint,
+	)
+}
+
+// agentRelayCLIProbeTimeout bounds each compatibility probe. Every workspace
+// call funnels through ensureAgentRelayCLICompatible, so an unbounded probe
+// against a wedged binary would stall relayfile with no diagnostic at all.
+const agentRelayCLIProbeTimeout = 15 * time.Second
+
 func ensureAgentRelayCLICompatible() error {
-	bin := agentRelayBinary()
-	versionOutput, err := exec.Command(bin, "--version").CombinedOutput()
+	bin, origin := agentRelayBinary()
+	ctx, cancel := context.WithTimeout(context.Background(), agentRelayCLIProbeTimeout)
+	defer cancel()
+	versionOutput, err := exec.CommandContext(ctx, bin, "--version").CombinedOutput()
 	if err != nil {
 		detail := strings.TrimSpace(string(versionOutput))
 		if detail == "" {
 			detail = err.Error()
 		}
-		return fmt.Errorf("agent-relay CLI >= %s required; run `npm install -g agent-relay@%s` or set AGENT_RELAY_BIN to a compatible binary (%s)", minAgentRelayCLIVersion, minAgentRelayCLIVersion, detail)
+		return agentRelayCLIProbeError(bin, origin, []string{"--version"}, detail)
 	}
 	version := firstSemver(string(versionOutput))
 	if version == "" || compareSemver(version, minAgentRelayCLIVersion) < 0 {
 		if version == "" {
 			version = strings.TrimSpace(string(versionOutput))
 		}
-		return fmt.Errorf("agent-relay CLI >= %s required; found %q. Run `npm install -g agent-relay@%s` or update the sandbox image", minAgentRelayCLIVersion, version, minAgentRelayCLIVersion)
+		return fmt.Errorf(
+			"agent-relay CLI >= %s required for workspace resolution; %q (resolved from %s) reported %q. Run `npm install -g agent-relay@%s` or update the sandbox image",
+			minAgentRelayCLIVersion, bin, origin, version, minAgentRelayCLIVersion,
+		)
 	}
+	// Only the workspace subcommands are probed. Cloud session auth is read
+	// straight from the canonical credential file (cloudauth.go), so a CLI
+	// without `cloud` is no longer a reason to fail.
 	for _, args := range [][]string{
-		{"cloud", "session", "--help"},
 		{"workspace", "active", "--help"},
 		{"workspace", "switch", "--help"},
 	} {
-		output, err := exec.Command(bin, args...).CombinedOutput()
+		probeCtx, probeCancel := context.WithTimeout(context.Background(), agentRelayCLIProbeTimeout)
+		output, err := exec.CommandContext(probeCtx, bin, args...).CombinedOutput()
+		probeCancel()
 		if err != nil {
 			detail := strings.TrimSpace(string(output))
 			if detail == "" {
 				detail = err.Error()
 			}
-			return fmt.Errorf("agent-relay CLI >= %s required with `%s`; run `npm install -g agent-relay@%s` or update the sandbox image (%s)", minAgentRelayCLIVersion, strings.Join(append([]string{"agent-relay"}, args...), " "), minAgentRelayCLIVersion, detail)
+			return agentRelayCLIProbeError(bin, origin, args, detail)
 		}
 	}
 	return nil
@@ -1258,7 +1287,8 @@ func runAgentRelayJSON(args []string, out any) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, agentRelayBinary(), args...)
+	bin, _ := agentRelayBinary()
+	cmd := exec.CommandContext(ctx, bin, args...)
 	output, err := cmd.CombinedOutput()
 	if ctx.Err() == context.DeadlineExceeded {
 		return fmt.Errorf("agent-relay %s timed out; run 'agent-relay cloud login' and try again", strings.Join(args, " "))
@@ -1284,7 +1314,10 @@ func runAgentRelayLogin(stdin io.Reader, stdout io.Writer, noOpen bool) error {
 	if noOpen {
 		args = append(args, "--no-open")
 	}
-	cmd := exec.Command(agentRelayBinary(), args...)
+	bin, _ := agentRelayBinary()
+	// No deadline: this is the interactive browser login, and the user may
+	// legitimately take minutes at the consent screen.
+	cmd := exec.CommandContext(context.Background(), bin, args...)
 	cmd.Stdin = stdin
 	cmd.Stdout = stdout
 	cmd.Stderr = stdout
@@ -1294,40 +1327,24 @@ func runAgentRelayLogin(stdin io.Reader, stdout io.Writer, noOpen bool) error {
 	return nil
 }
 
+// cloudCredentialsFromAgentRelay resolves the Agent Relay cloud session from
+// the canonical credential file (or the CLOUD_API_* environment), refreshing
+// the access token in place when it is inside its expiry window. It no longer
+// shells out to `agent-relay cloud session`; see cloudauth.go for why.
 func cloudCredentialsFromAgentRelay() (cloudCredentials, error) {
-	var session agentRelayCloudSession
-	// agent-relay masks accessToken in `cloud session --json` unless
-	// --reveal-token is passed; CLIs predating the flag reject it as an
-	// unknown option. Ask for the raw token first, fall back for older CLIs.
-	if err := runAgentRelayJSON([]string{"cloud", "session", "--json", "--reveal-token"}, &session); err != nil {
-		if !strings.Contains(err.Error(), "unknown option") {
-			return cloudCredentials{}, err
-		}
-		if err := runAgentRelayJSON([]string{"cloud", "session", "--json"}, &session); err != nil {
-			return cloudCredentials{}, err
-		}
+	auth, _, err := ensureAgentRelayCloudSession(context.Background())
+	if err != nil {
+		return cloudCredentials{}, err
 	}
-	apiURL := strings.TrimRight(strings.TrimSpace(session.APIURL), "/")
-	accessToken := strings.TrimSpace(session.AccessToken)
-	if apiURL == "" {
-		apiURL = strings.TrimRight(strings.TrimSpace(session.Auth.APIURL), "/")
-	}
-	if accessToken == "" {
-		accessToken = strings.TrimSpace(session.Auth.AccessToken)
-	}
+	apiURL := strings.TrimRight(strings.TrimSpace(auth.APIURL), "/")
 	if apiURL == "" {
 		apiURL = defaultCloudAPIURL
 	}
-	if accessToken == "" {
-		return cloudCredentials{}, errors.New("agent-relay cloud session --json did not include an accessToken")
-	}
-	if strings.Contains(accessToken, "…") {
-		return cloudCredentials{}, errors.New("agent-relay cloud session --json returned a masked accessToken; upgrade the agent-relay CLI or re-run `agent-relay cloud login`")
-	}
 	return cloudCredentials{
-		APIURL:      apiURL,
-		AccessToken: accessToken,
-		UpdatedAt:   time.Now().UTC().Format(time.RFC3339),
+		APIURL:               apiURL,
+		AccessToken:          strings.TrimSpace(auth.AccessToken),
+		AccessTokenExpiresAt: strings.TrimSpace(auth.AccessTokenExpiresAt),
+		UpdatedAt:            time.Now().UTC().Format(time.RFC3339),
 	}, nil
 }
 
@@ -6150,7 +6167,8 @@ func runWorkspaceUse(args []string, stdout io.Writer) error {
 	if err := ensureAgentRelayCLICompatible(); err != nil {
 		return err
 	}
-	cmd := exec.Command(agentRelayBinary(), "workspace", "switch", fs.Arg(0))
+	agentRelayBin, _ := agentRelayBinary()
+	cmd := exec.Command(agentRelayBin, "workspace", "switch", fs.Arg(0))
 	cmd.Stdout = stdout
 	cmd.Stderr = stdout
 	if err := cmd.Run(); err != nil {
@@ -9156,7 +9174,13 @@ func daemonCredentialFreshnessAuthLine(localDir string) string {
 	if !ok {
 		return ""
 	}
-	latest, ok := latestCredentialModTime(credentialsPath(), agentRelayCloudAuthPath())
+	credentialPaths := []string{credentialsPath()}
+	// A machine with no resolvable home has no canonical session to compare
+	// against; the freshness hint is advisory, so drop it rather than fail.
+	if agentRelayAuth, err := agentRelayCloudAuthPath(); err == nil {
+		credentialPaths = append(credentialPaths, agentRelayAuth)
+	}
+	latest, ok := latestCredentialModTime(credentialPaths...)
 	if ok && latest.After(startedAt) {
 		return "auth: daemon predates last login - restart the daemon"
 	}
@@ -10692,14 +10716,6 @@ func delegatedBundleMintScopes(bundle delegatedauth.Bundle) []string {
 		return append([]string(nil), bundle.RelayfileScopes...)
 	}
 	return append([]string(nil), defaultJoinScopes...)
-}
-
-func agentRelayCloudAuthPath() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return filepath.Join(".agentworkforce", "relay", "cloud-auth.json")
-	}
-	return filepath.Join(home, ".agentworkforce", "relay", "cloud-auth.json")
 }
 
 func workspacesPath() string {
