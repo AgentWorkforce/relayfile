@@ -81,6 +81,11 @@ type TreeResponse struct {
 	Path       string      `json:"path"`
 	Entries    []TreeEntry `json:"entries"`
 	NextCursor *string     `json:"nextCursor"`
+	// TotalFiles is the authoritative number of files below Path before
+	// pagination. HTTP handlers replace it with the caller-visible count after
+	// permission filtering. Clients can therefore render real N/M bootstrap
+	// progress instead of treating a missing total as zero.
+	TotalFiles int `json:"totalFiles,omitempty"`
 }
 
 type FileSemantics struct {
@@ -1160,6 +1165,7 @@ func (s *Store) ListTree(workspaceID, path string, depth int, cursor string) (Tr
 	}
 
 	entryMap := map[string]TreeEntry{}
+	totalFiles := 0
 	for filePath, file := range ws.Files {
 		if !withinBase(base, filePath) {
 			continue
@@ -1169,6 +1175,7 @@ func (s *Store) ListTree(workspaceID, path string, depth int, cursor string) (Tr
 		if rest == "" {
 			continue
 		}
+		totalFiles++
 		parts := strings.Split(rest, "/")
 		if len(parts) == 0 {
 			continue
@@ -1212,7 +1219,7 @@ func (s *Store) ListTree(workspaceID, path string, depth int, cursor string) (Tr
 		return TreeResponse{}, err
 	}
 
-	return TreeResponse{Path: base, Entries: entries, NextCursor: nextCursor}, nil
+	return TreeResponse{Path: base, Entries: entries, NextCursor: nextCursor, TotalFiles: totalFiles}, nil
 }
 
 func (s *Store) ReadFile(workspaceID, path string) (File, error) {
@@ -4916,6 +4923,7 @@ func listTreeFromFiles(files map[string]File, path string, depth int, cursor str
 	}
 
 	entryMap := map[string]TreeEntry{}
+	totalFiles := 0
 	for filePath, file := range files {
 		if !withinBase(base, filePath) {
 			continue
@@ -4925,6 +4933,7 @@ func listTreeFromFiles(files map[string]File, path string, depth int, cursor str
 		if rest == "" {
 			continue
 		}
+		totalFiles++
 		parts := strings.Split(rest, "/")
 		if len(parts) == 0 {
 			continue
@@ -4968,7 +4977,7 @@ func listTreeFromFiles(files map[string]File, path string, depth int, cursor str
 		return TreeResponse{}, err
 	}
 
-	return TreeResponse{Path: base, Entries: entries, NextCursor: nextCursor}, nil
+	return TreeResponse{Path: base, Entries: entries, NextCursor: nextCursor, TotalFiles: totalFiles}, nil
 }
 
 // paginateTreeEntries slices the supplied entries with the supplied cursor.

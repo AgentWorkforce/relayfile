@@ -2,10 +2,15 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"io"
 	"log"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -13,6 +18,87 @@ import (
 	"github.com/agentworkforce/relayfile/internal/mountsync"
 	"github.com/agentworkforce/relayfile/internal/relayfile"
 )
+
+func TestCLIMountLoopStopsAndPersistsStatusOnBootstrapStall(t *testing.T) {
+	t.Setenv("RELAYFILE_MOUNT_FORCE_RECURSIVE_WATCHER", "1")
+	const workspaceID = "ws_cli_bootstrap_stall"
+	var treeCalls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/sync/status"):
+			_, _ = io.WriteString(w, `{"workspaceId":"ws_cli_bootstrap_stall","providers":[{"provider":"github","status":"healthy","lagSeconds":0}]}`)
+		case strings.HasSuffix(r.URL.Path, "/fs/export"):
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = io.WriteString(w, `{"code":"bad_request","message":"use paginated tree"}`)
+		case strings.HasSuffix(r.URL.Path, "/fs/tree"):
+			treeCalls++
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = io.WriteString(w, `{"code":"bad_request","message":"stuck subtree"}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	localDir := t.TempDir()
+	client := mountsync.NewHTTPClient(server.URL, "test-token", server.Client())
+	syncer, err := mountsync.NewSyncer(client, mountsync.SyncerOptions{
+		WorkspaceID:          workspaceID,
+		RemoteRoot:           "/neon/advisors/by-project",
+		LocalRoot:            localDir,
+		StateDir:             t.TempDir(),
+		RootCtx:              context.Background(),
+		WebSocket:            boolPtr(false),
+		BootstrapStallCycles: 1,
+		Logger:               log.New(io.Discard, "", 0),
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer: %v", err)
+	}
+
+	previousLogWriter := log.Writer()
+	log.SetOutput(io.Discard)
+	defer log.SetOutput(previousLogWriter)
+	err = runMountLoop(
+		context.Background(),
+		syncer,
+		localDir,
+		workspaceID,
+		server.URL,
+		"",
+		time.Second,
+		time.Hour,
+		0,
+		false,
+		false,
+		false,
+		mountPIDFile(localDir),
+		mountLogFile(localDir),
+	)
+	var stalled *mountsync.BootstrapStalledError
+	if !errors.As(err, &stalled) {
+		t.Fatalf("CLI mount loop must return terminal bootstrap stall, got %v", err)
+	}
+	if treeCalls != 1 {
+		t.Fatalf("tree calls = %d, want one terminal attempt", treeCalls)
+	}
+
+	payload, readErr := os.ReadFile(filepath.Join(localDir, ".relay", "state.json"))
+	if readErr != nil {
+		t.Fatalf("read public state: %v", readErr)
+	}
+	var state syncStateFile
+	if err := json.Unmarshal(payload, &state); err != nil {
+		t.Fatalf("decode public state: %v", err)
+	}
+	if state.Status != "stalled" || state.Bootstrap == nil || state.Bootstrap.Phase != "stalled" {
+		t.Fatalf("CLI status writer hid hard stall: status=%q bootstrap=%+v", state.Status, state.Bootstrap)
+	}
+	if state.Bootstrap.CurrentPath != "/neon/advisors/by-project" || !strings.Contains(state.StallReason, "stuck subtree") {
+		t.Fatalf("CLI status lacks actionable subtree/reason: %+v stall=%q", state.Bootstrap, state.StallReason)
+	}
+}
 
 // blockingBootstrapClient embeds the full RemoteClient contract and overrides
 // only the calls this regression reaches. The nil promoted methods are a
