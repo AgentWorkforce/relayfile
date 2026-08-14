@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Cloud session auth no longer shells out to `agent-relay cloud session`. The CLI reads the canonical credential file `agent-relay cloud login` writes (`~/.agentworkforce/relay/cloud-auth.json`), or the `CLOUD_API_*` environment, and refreshes an expired access token through Cloud's own `/api/v1/auth/token/refresh` endpoint, writing the rotated pair back under the same lock `agent-relay` uses. This restores auto-recovery from a routine token expiry.
+- Relayfile no longer reads `AGENT_RELAY_BIN` to locate the `agent-relay` CLI. Agent Relay uses that variable for the *broker* binary, so every relay-spawned agent pointed Relayfile at `agent-relay-broker` — which has no `cloud` or `workspace` subcommand — and a routine expiry surfaced as `agent-relay CLI >= 8.7.0 required`. Use `RELAYFILE_AGENT_RELAY_BIN` to override the CLI path; otherwise `agent-relay` is resolved from `PATH`.
+- The `agent-relay` CLI compatibility probe now names the exact argv it ran, the binary it ran it with, and how that binary was resolved. It no longer probes `cloud session`, since Relayfile does not use it.
+
+### Changed
+
+- The minimum `agent-relay` CLI version now gates workspace resolution only. A CLI without a `cloud` subcommand no longer blocks Relayfile's cloud session.
+
 - `relayfile integration list` and the local integration control plane now honor `RELAYFILE_CLOUD_TOKEN` and bound optional runtime-status enrichment, avoiding provider-status timeouts when explicit Cloud credentials are available or the runtime data plane is slow.
 - `relayfile status` now distinguishes queue lag from provider-event silence, warns when a feed has been idle for 24 hours by default (configurable via `RELAYFILE_EVENT_SILENCE_THRESHOLD`), and exposes `eventStatus` and `eventIdleSeconds` in JSON output.
 

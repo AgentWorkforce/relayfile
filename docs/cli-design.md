@@ -26,7 +26,7 @@ The `relayfile` CLI is the primary interface for humans and CI systems to intera
 |----------|--------|----------|
 | 1 | `--token` flag | One-off override |
 | 2 | `RELAYFILE_TOKEN` env var | CI/CD pipelines |
-| 3 | `agent-relay cloud session --json` + `agent-relay workspace active --json` | Cloud-hosted interactive use |
+| 3 | `~/.agentworkforce/relay/cloud-auth.json` (or `CLOUD_API_*`) + `agent-relay workspace active --json` | Cloud-hosted interactive use |
 | 4 | `~/.relayfile/credentials.json` | Self-hosted/API-key compatibility |
 
 ### Auth flow: Cloud-hosted
@@ -39,13 +39,24 @@ relayfile mount
 
 1. `agent-relay login` writes the canonical cloud session in the relay SDK store.
 2. `agent-relay workspace switch <name>` selects the active relay workspace.
-3. `relayfile` commands call `agent-relay cloud session --json` for a short-lived access token and `agent-relay workspace active --json` for the canonical `relayfileWorkspaceId`.
+3. `relayfile` commands read the cloud session from the canonical credential
+   file `agent-relay cloud login` writes
+   (`~/.agentworkforce/relay/cloud-auth.json`), or from the `CLOUD_API_*`
+   environment, and call `agent-relay workspace active --json` for the
+   canonical `relayfileWorkspaceId`. An access token inside its expiry window
+   is refreshed through Cloud's `/api/v1/auth/token/refresh` and the rotated
+   pair is written back under the same lock `agent-relay` uses, so relayfile
+   never holds a session the CLI has lost. Relayfile does not shell out for the
+   cloud session.
 4. Relayfile runtime tokens are minted with Cloud `/join` and kept in memory; they are not persisted as a second cloud session.
 
 Relayfile requires the `agent-relay` CLI binary on `PATH` to be version
-`8.7.0` or newer, because that is the first published CLI version with the
-`cloud session --json` and `workspace active --json` surfaces. Operators can
-override the binary with `AGENT_RELAY_BIN`. Sandboxes and Daytona/base images
+`8.7.0` or newer for *workspace resolution*, because that is the first
+published CLI version with the `workspace active --json` surface. Operators can
+override the binary with `RELAYFILE_AGENT_RELAY_BIN`. Relayfile deliberately
+does **not** read `AGENT_RELAY_BIN`: throughout Agent Relay that variable names
+the *broker* binary (`agent-relay-broker`), which has no `cloud` or `workspace`
+subcommand, and every relay-spawned agent exports it. Sandboxes and Daytona/base images
 that run relayfile must install or update `agent-relay` before exercising the
 Cloud-hosted path. The cloud/workforce sandbox image owner is responsible for
 that runtime rollout; Relayfile enforces the version at startup but does not
@@ -104,7 +115,9 @@ relayfile setup [--provider github] [--workspace my-project] [--local-dir ./rela
 **Behavior:**
 
 1. Ensure the user has run `agent-relay login`; `relayfile setup` reads the canonical relay session instead of starting its own login flow.
-2. Use `agent-relay cloud session --json` for the Cloud access token.
+2. Read the Cloud access token from the canonical credential file
+   `~/.agentworkforce/relay/cloud-auth.json` (or the `CLOUD_API_*`
+   environment), refreshing it in place when it is inside its expiry window.
 3. Use `agent-relay workspace active --json` for the canonical workspace descriptor and `relayfileWorkspaceId`.
 4. Create/join the Cloud workspace when needed, minting Relayfile runtime credentials without persisting them as a second login.
 5. Request a hosted Nango connect session for the selected integration and wait until the Cloud status endpoint reports it ready.

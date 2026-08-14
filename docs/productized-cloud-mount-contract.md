@@ -65,9 +65,9 @@ step **MUST** be idempotent on re-run:
 2. **Cloud login.**
    - Cloud authentication is owned by `agent-relay login` and the
      `@agent-relay/cloud` session store.
-   - Relayfile obtains Cloud auth by invoking
-     `agent-relay cloud session --json`, which returns only `apiUrl`,
-     `accessToken`, and `accessTokenExpiresAt`.
+   - Relayfile obtains Cloud auth by reading that store's canonical credential
+     file, `~/.agentworkforce/relay/cloud-auth.json` — never by invoking the
+     `agent-relay` CLI.
    - Relayfile does not persist `~/.relayfile/cloud-credentials.json` as a
      Cloud session source of truth.
 3. **Workspace name.** Use `--workspace`, else prompt. Default suggestion:
@@ -369,22 +369,38 @@ two layers: Cloud login tokens (user identity) and Relayfile VFS tokens
 
 ### 5.1 Credential files
 
-- `agent-relay cloud session --json`:
+- `~/.agentworkforce/relay/cloud-auth.json` (`0600`, written by
+  `agent-relay cloud login`; read but never created by Relayfile):
   ```json
   {
     "apiUrl": "https://agentrelay.com/cloud",
     "accessToken": "...",
-    "accessTokenExpiresAt": "2026-05-03T18:00:00Z"
+    "refreshToken": "...",
+    "accessTokenExpiresAt": "2026-05-03T18:00:00Z",
+    "refreshTokenExpiresAt": "2026-08-01T18:00:00Z"
   }
   ```
 - `agent-relay workspace active --json` includes the canonical
   `relayfileWorkspaceId` used by Relayfile data-plane calls.
+- The cloud session itself is read from the canonical credential file
+  (`~/.agentworkforce/relay/cloud-auth.json`, `0600`) that
+  `agent-relay cloud login` writes, or from `CLOUD_API_URL` /
+  `CLOUD_API_ACCESS_TOKEN` / `CLOUD_API_REFRESH_TOKEN` /
+  `CLOUD_API_ACCESS_TOKEN_EXPIRES_AT`. Relayfile refreshes an expiring access
+  token through Cloud's `/api/v1/auth/token/refresh` and writes the rotated
+  pair back under the same `cloud-auth.json.lock` directory lock the CLI uses.
+  No CLI process is involved, so cloud auth cannot be broken by a missing,
+  stale, or misidentified binary.
 - Relayfile shells out to the external `agent-relay` binary on `PATH`, or to
-  `AGENT_RELAY_BIN` when set. The runtime environment, including sandbox and
+  `RELAYFILE_AGENT_RELAY_BIN` when set, for **workspace resolution only**. It
+  must never read `AGENT_RELAY_BIN`: across Agent Relay that variable names the
+  broker binary, and reading it here made relayfile exec `agent-relay-broker`.
+  The runtime environment, including sandbox and
   Daytona/base images, must provide `agent-relay` CLI `8.7.0` or newer before
   using the Cloud-hosted path. Relayfile must fail fast with an actionable
-  upgrade message when the binary is missing, stale, or lacks the required
-  `cloud session`, `workspace active`, or `workspace switch` commands.
+  message naming the argv it probed, the binary it used, and how that binary
+  was resolved, when the binary is missing, stale, or lacks the required
+  `workspace active` or `workspace switch` commands.
   The cloud/workforce sandbox image owner must ship that binary update before
   enabling the unified Relayfile path in production; Relayfile validates the
   binary but does not mutate the runtime image.
@@ -403,12 +419,31 @@ two layers: Cloud login tokens (user identity) and Relayfile VFS tokens
 
 ### 5.2 Cloud token refresh
 
-Relayfile **MUST NOT** refresh Cloud tokens itself. When it needs Cloud
-credentials it invokes `agent-relay cloud session --json`; the relay SDK owns
-refresh, timeout, and typed failure behavior. If that command fails because the
-canonical session is expired, Relayfile surfaces an actionable `agent-relay
-login` recovery hint. The mount process **MUST** keep running on the existing
-VFS token until that token also expires.
+Relayfile **MUST NOT** own a Cloud session of its own. It reads the canonical
+session and refreshes it in place, against the same endpoint and with the same
+windows as `@agent-relay/cloud`:
+
+- Read `~/.agentworkforce/relay/cloud-auth.json` (or the `CLOUD_API_*`
+  environment). Never write a second session store.
+- Refresh when the access token is within 5 minutes of expiry, or when the
+  refresh token is within 24 hours of expiry, by `POST`ing
+  `{"refreshToken": ...}` to `<apiUrl>/api/v1/auth/token/refresh`.
+- Hold the `cloud-auth.json.lock` directory lock across the refresh, re-read
+  the file inside the lock, and write the rotated pair back at `0600`. Cloud
+  rotates the refresh token on every refresh, so keeping the new pair private
+  would invalidate the copy `agent-relay` reads.
+- A session supplied through the environment is owned by whoever exported it:
+  refresh it in memory, never to disk.
+- When refresh is refused, surface an actionable `agent-relay cloud login`
+  recovery hint. The mount process **MUST** keep running on the existing VFS
+  token until that token also expires.
+
+An earlier revision of this contract required Relayfile to obtain Cloud
+credentials by invoking `agent-relay cloud session --json` and forbade it from
+refreshing at all. That coupled a routine token expiry to locating and
+executing a Node CLI — and, because the binary was selected by `AGENT_RELAY_BIN`
+(the *broker* variable), relay-spawned agents could not auto-recover at all.
+The clause is retired.
 
 ### 5.3 Relayfile VFS token rejoin
 
@@ -430,7 +465,7 @@ Triggers:
 
 The rejoin **MUST**:
 
-- Use the Cloud access token returned by `agent-relay cloud session --json`.
+- Use the Cloud access token from the canonical session (§5.2).
 - Keep the minted Relayfile runtime token in memory; do not write it to
   `~/.relayfile/credentials.json`.
 - Update the in-memory token of the running syncer/HTTP client without
