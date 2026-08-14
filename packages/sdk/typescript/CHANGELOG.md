@@ -6,7 +6,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_No unreleased changes._
+- Added optional `TreeResponse.totalFiles`, the caller-visible file count below the requested path before pagination.
 
 ## [0.10.42] - 2026-08-14
 

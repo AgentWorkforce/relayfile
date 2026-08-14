@@ -111,7 +111,7 @@ func (c *bootstrapClient) ListTree(ctx context.Context, workspaceID, path string
 		f := c.files[p]
 		entries = append(entries, TreeEntry{Path: p, Type: "file", Revision: f.Revision, ContentHash: f.ContentHash})
 	}
-	resp := TreeResponse{Path: normalizeRemotePath(path), Entries: entries}
+	resp := TreeResponse{Path: normalizeRemotePath(path), Entries: entries, TotalFiles: len(paths)}
 	if end < len(paths) {
 		next := paths[end-1]
 		resp.NextCursor = &next
@@ -731,6 +731,101 @@ func TestBootstrapStallCycleGuardPersistsAndFailsHard(t *testing.T) {
 	if st.LastError == nil || st.LastError.Kind != "bootstrap_stalled" || st.LastError.Code != "bootstrap_stall_cycle_limit" {
 		t.Fatalf("expected structured persisted bootstrap stall error, got %#v", st.LastError)
 	}
+	if !strings.Contains(st.LastError.Message, `path "/"`) || !strings.Contains(st.LastError.Message, "page cursor") {
+		t.Fatalf("stall error must identify the full directory/page checkpoint, got %q", st.LastError.Message)
+	}
+	pub := readPublicStateFile(t, localDir)
+	if pub.Status != "stalled" || pub.Bootstrap == nil || pub.Bootstrap.Phase != "stalled" {
+		t.Fatalf("hard stall must override bootstrapping health, got status=%q bootstrap=%+v", pub.Status, pub.Bootstrap)
+	}
+	if pub.Bootstrap.CurrentPath != "/" || pub.Bootstrap.FilesTotal != 30 || pub.Bootstrap.FilesSynced > pub.Bootstrap.FilesTotal {
+		t.Fatalf("unexpected actionable stalled bootstrap progress: %+v", pub.Bootstrap)
+	}
+
+	// A supervisor restart must not spend another request at a checkpoint that
+	// already exhausted the configured limit. The private cursor/directory
+	// checkpoint remains intact and raising the limit deliberately re-arms it.
+	callsBeforeRestart := client.listTreeCalls.Load()
+	s = newBootstrapSyncer(t, client, localDir, opts)
+	err = s.Reconcile(context.Background())
+	if !errors.As(err, &stalled) {
+		t.Fatalf("expected persisted terminal stall after restart, got %v", err)
+	}
+	if got := client.listTreeCalls.Load(); got != callsBeforeRestart {
+		t.Fatalf("terminal restart made %d new tree requests, want 0", got-callsBeforeRestart)
+	}
+}
+
+func TestBootstrapDirectoryTraversalLimitFailsLoudlyAndPersistsPath(t *testing.T) {
+	client := &hierarchicalTreeClient{fakeClient: &fakeClient{files: map[string]RemoteFile{
+		"/a/one/two/three/file.md": {Path: "/a/one/two/three/file.md", Revision: "rev_a", Content: "a"},
+		"/b/one/two/three/file.md": {Path: "/b/one/two/three/file.md", Revision: "rev_b", Content: "b"},
+	}}}
+	localDir := t.TempDir()
+	s, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID:             "ws_directory_limit",
+		RemoteRoot:              "/",
+		LocalRoot:               localDir,
+		RootCtx:                 context.Background(),
+		BootstrapMaxDirectories: 2,
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer: %v", err)
+	}
+
+	err = s.Reconcile(context.Background())
+	var limitErr *BootstrapTraversalLimitError
+	if !errors.As(err, &limitErr) {
+		t.Fatalf("expected terminal directory traversal limit, got %v", err)
+	}
+	if limitErr.Path != "/b/one/two" || limitErr.DirectoriesDiscovered != 2 || limitErr.Limit != 2 {
+		t.Fatalf("unexpected traversal limit detail: %#v", limitErr)
+	}
+	st := loadPersistedState(t, localDir)
+	if st.LastError == nil || st.LastError.Kind != "bootstrap_stalled" || st.LastError.Code != "bootstrap_traversal_limit" {
+		t.Fatalf("expected persisted traversal-limit status, got %#v", st.LastError)
+	}
+	pub := readPublicStateFile(t, localDir)
+	if pub.Status != "stalled" || pub.Bootstrap == nil || pub.Bootstrap.CurrentPath != "/b/one/two" {
+		t.Fatalf("traversal limit must expose the blocked path, got status=%q bootstrap=%+v", pub.Status, pub.Bootstrap)
+	}
+
+	callsBeforeRestart := len(client.calls)
+	restarted, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID:             "ws_directory_limit",
+		RemoteRoot:              "/",
+		LocalRoot:               localDir,
+		RootCtx:                 context.Background(),
+		BootstrapMaxDirectories: 2,
+	})
+	if err != nil {
+		t.Fatalf("restart NewSyncer: %v", err)
+	}
+	if err := restarted.Reconcile(context.Background()); !errors.As(err, &limitErr) {
+		t.Fatalf("expected persisted traversal limit on restart, got %v", err)
+	}
+	if len(client.calls) != callsBeforeRestart {
+		t.Fatalf("terminal traversal-limit restart issued %d new tree calls", len(client.calls)-callsBeforeRestart)
+	}
+
+	// Raising the bound after operator inspection re-arms the same persisted
+	// directory checkpoint; no bootstrap state is discarded.
+	rearmed, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID:             "ws_directory_limit",
+		RemoteRoot:              "/",
+		LocalRoot:               localDir,
+		RootCtx:                 context.Background(),
+		BootstrapMaxDirectories: 3,
+	})
+	if err != nil {
+		t.Fatalf("rearm NewSyncer: %v", err)
+	}
+	if err := rearmed.Reconcile(context.Background()); err != nil {
+		t.Fatalf("raised traversal bound did not resume saved checkpoint: %v", err)
+	}
+	if st := loadPersistedState(t, localDir); !st.BootstrapComplete {
+		t.Fatalf("re-armed traversal did not complete: %#v", st)
+	}
 }
 
 func TestBootstrapStallCycleGuardIgnoresCanceledContext(t *testing.T) {
@@ -828,6 +923,24 @@ func TestBootstrapStallCycleLimitUsesOptionThenEnvThenDefault(t *testing.T) {
 	t.Setenv("RELAYFILE_BOOTSTRAP_STALL_CYCLES", "not-a-number")
 	if got := newSyncer(t, SyncerOptions{}).bootstrapStallCycles; got != defaultBootstrapStallCycles {
 		t.Fatalf("invalid env bootstrap stall limit = %d, want default %d", got, defaultBootstrapStallCycles)
+	}
+}
+
+func TestBootstrapDirectoryLimitUsesOptionThenEnvThenDefault(t *testing.T) {
+	newSyncer := func(t *testing.T, opts SyncerOptions) *Syncer {
+		t.Helper()
+		return newBootstrapSyncer(t, newBootstrapClient(1, 1), t.TempDir(), opts)
+	}
+	t.Setenv("RELAYFILE_BOOTSTRAP_MAX_DIRECTORIES", "123")
+	if got := newSyncer(t, SyncerOptions{}).bootstrapMaxDirectories; got != 123 {
+		t.Fatalf("env bootstrap directory limit = %d, want 123", got)
+	}
+	if got := newSyncer(t, SyncerOptions{BootstrapMaxDirectories: 7}).bootstrapMaxDirectories; got != 7 {
+		t.Fatalf("explicit bootstrap directory limit = %d, want 7", got)
+	}
+	t.Setenv("RELAYFILE_BOOTSTRAP_MAX_DIRECTORIES", "invalid")
+	if got := newSyncer(t, SyncerOptions{}).bootstrapMaxDirectories; got != defaultBootstrapMaxDirectories {
+		t.Fatalf("invalid env bootstrap directory limit = %d, want default %d", got, defaultBootstrapMaxDirectories)
 	}
 }
 

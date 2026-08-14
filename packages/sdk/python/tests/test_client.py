@@ -46,6 +46,7 @@ class TestRelayFileClient:
             "path": "/",
             "entries": [{"path": "/zendesk", "type": "dir", "revision": "rev_1"}],
             "nextCursor": None,
+            "totalFiles": 1,
         }
         respx.get(f"{BASE}/v1/workspaces/ws_acme/fs/tree").mock(
             return_value=httpx.Response(200, json=payload)
@@ -54,6 +55,7 @@ class TestRelayFileClient:
         res = client.list_tree("ws_acme")
         assert len(res["entries"]) == 1
         assert res["entries"][0]["path"] == "/zendesk"
+        assert res["totalFiles"] == 1
 
     @respx.mock
     def test_list_tree_params(self) -> None:

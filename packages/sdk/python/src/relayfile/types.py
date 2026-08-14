@@ -79,6 +79,7 @@ class TreeResponse:
     path: str
     entries: list[TreeEntry]
     next_cursor: str | None = None
+    total_files: int | None = None
 
 
 @dataclass
