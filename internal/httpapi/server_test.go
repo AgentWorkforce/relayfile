@@ -2338,6 +2338,9 @@ func TestTreeEndpointPaginatesBoundedEntries(t *testing.T) {
 	if len(pageOne.Entries) != 1000 {
 		t.Fatalf("expected 1000 page-one entries, got %d", len(pageOne.Entries))
 	}
+	if pageOne.TotalFiles != 1002 {
+		t.Fatalf("page-one totalFiles = %d, want 1002", pageOne.TotalFiles)
+	}
 	if pageOne.NextCursor == nil || *pageOne.NextCursor != "/notion/Paged/File0999.md" {
 		t.Fatalf("unexpected page-one next cursor: %v", pageOne.NextCursor)
 	}
@@ -2359,6 +2362,9 @@ func TestTreeEndpointPaginatesBoundedEntries(t *testing.T) {
 	}
 	if len(pageTwo.Entries) != 2 {
 		t.Fatalf("expected 2 page-two entries, got %d", len(pageTwo.Entries))
+	}
+	if pageTwo.TotalFiles != 1002 {
+		t.Fatalf("page-two totalFiles = %d, want stable total 1002", pageTwo.TotalFiles)
 	}
 	if pageTwo.NextCursor != nil {
 		t.Fatalf("expected nil page-two next cursor, got %q", *pageTwo.NextCursor)
@@ -2778,6 +2784,9 @@ func TestTreeEndpointFiltersUnauthorizedFiles(t *testing.T) {
 	}
 	if _, ok := paths["/notion/private"]; ok {
 		t.Fatalf("expected restricted dir to be hidden when no accessible descendants")
+	}
+	if tree.TotalFiles != 1 {
+		t.Fatalf("permission-filtered totalFiles = %d, want 1 caller-visible file", tree.TotalFiles)
 	}
 }
 

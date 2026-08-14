@@ -1164,6 +1164,9 @@ func TestListTreePaginatesBoundedEntries(t *testing.T) {
 	if len(pageOne.Entries) != maxTreeEntriesPerPage {
 		t.Fatalf("expected %d page-one entries, got %d", maxTreeEntriesPerPage, len(pageOne.Entries))
 	}
+	if pageOne.TotalFiles != maxTreeEntriesPerPage+2 {
+		t.Fatalf("page-one totalFiles = %d, want %d", pageOne.TotalFiles, maxTreeEntriesPerPage+2)
+	}
 	if pageOne.NextCursor == nil {
 		t.Fatalf("expected page-one next cursor")
 	}
@@ -1177,6 +1180,9 @@ func TestListTreePaginatesBoundedEntries(t *testing.T) {
 	}
 	if len(pageTwo.Entries) != 2 {
 		t.Fatalf("expected 2 page-two entries, got %d", len(pageTwo.Entries))
+	}
+	if pageTwo.TotalFiles != maxTreeEntriesPerPage+2 {
+		t.Fatalf("page-two totalFiles = %d, want stable total %d", pageTwo.TotalFiles, maxTreeEntriesPerPage+2)
 	}
 	if pageTwo.Entries[0].Path != "/external/File1000.md" || pageTwo.Entries[1].Path != "/external/File1001.md" {
 		t.Fatalf("unexpected page-two entries: %+v", pageTwo.Entries)

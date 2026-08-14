@@ -2400,6 +2400,10 @@ components:
         nextCursor:
           type: string
           nullable: true
+        totalFiles:
+          type: integer
+          minimum: 0
+          description: Total caller-visible files below path before pagination; omitted by older servers.
 
     FileReadResponse:
       type: object
