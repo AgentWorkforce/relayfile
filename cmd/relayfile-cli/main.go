@@ -9182,7 +9182,7 @@ func formatBootstrapFileProgress(bootstrap *syncStateBootstrap) string {
 	if bootstrap.FilesTotal > 0 {
 		return fmt.Sprintf("%d/%d files", bootstrap.FilesSynced, bootstrap.FilesTotal)
 	}
-	return fmt.Sprintf("%d files synced (total not reported by the saved checkpoint)", bootstrap.FilesSynced)
+	return fmt.Sprintf("%d files synced (authoritative total unavailable)", bootstrap.FilesSynced)
 }
 
 func readPersistedStallReason(localDir string) string {

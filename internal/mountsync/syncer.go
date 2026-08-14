@@ -1377,10 +1377,15 @@ type mountState struct {
 	// BootstrapPageOffset resumes within a server page that exceeds the
 	// per-cycle file budget. It is scoped by BootstrapDirectories[0] and
 	// BootstrapCursor and resets whenever either advances.
-	BootstrapPageOffset  int    `json:"bootstrapPageOffset,omitempty"`
-	BootstrapFilesSynced int    `json:"bootstrapFilesSynced,omitempty"`
-	BootstrapFilesTotal  int    `json:"bootstrapFilesTotal,omitempty"`
-	BootstrapStartedAt   string `json:"bootstrapStartedAt,omitempty"`
+	BootstrapPageOffset  int `json:"bootstrapPageOffset,omitempty"`
+	BootstrapFilesSynced int `json:"bootstrapFilesSynced,omitempty"`
+	BootstrapFilesTotal  int `json:"bootstrapFilesTotal,omitempty"`
+	// BootstrapFilesTotalUnavailable is persisted once traversal prunes a
+	// reserved runtime subtree. The server's total includes those descendants,
+	// but the mount intentionally never enumerates them, so retaining that
+	// denominator would make N/M unreachable across page and process resumes.
+	BootstrapFilesTotalUnavailable bool   `json:"bootstrapFilesTotalUnavailable,omitempty"`
+	BootstrapStartedAt             string `json:"bootstrapStartedAt,omitempty"`
 	// BootstrapDirectoriesDiscovered is monotonic for one bootstrap and backs
 	// the runaway-directory guard across process restarts. BootstrapBlockedPath
 	// names the first directory refused by that guard.
@@ -4446,8 +4451,10 @@ func (s *Syncer) pullRemoteFullExport(ctx context.Context, client exportSnapshot
 			// The export total includes intentionally-unhydrated GitHub repo
 			// contents, so it is not a valid materialization denominator.
 			s.state.BootstrapFilesTotal = 0
+			s.state.BootstrapFilesTotalUnavailable = true
 		} else {
 			s.state.BootstrapFilesTotal = len(files)
+			s.state.BootstrapFilesTotalUnavailable = false
 		}
 	}
 	remotePaths := map[string]struct{}{}
@@ -4975,7 +4982,7 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 		}
 		s.recordCloudSuccess()
 		prog.touch()
-		if currentDirectory == s.remoteRoot && !s.lazyRepos && page.TotalFiles > 0 {
+		if currentDirectory == s.remoteRoot && !s.lazyRepos && !s.state.BootstrapFilesTotalUnavailable && page.TotalFiles > 0 {
 			// totalFiles is stable across server pagination and counts the full
 			// caller-visible subtree, not just this page. Persist it on the root
 			// frontier so N/M is an actual completion denominator. Older servers
@@ -5028,6 +5035,16 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 			runtimeRoot := mountRuntimeRemoteRoot(remotePath)
 			if runtimeRoot != "" {
 				metrics.runtimeEntriesSeen++
+				if !s.state.BootstrapFilesTotalUnavailable {
+					// totalFiles counts every caller-visible remote file, including
+					// reserved mount runtime descendants. This traversal prunes those
+					// subtrees before enumeration, so their exact contribution is
+					// unknown. Persistently suppress the denominator instead of
+					// displaying an unreachable total after a page/process resume.
+					s.state.BootstrapFilesTotal = 0
+					s.state.BootstrapFilesTotalUnavailable = true
+					s.logf("bootstrap file total unavailable after pruning reserved runtime subtree %s", runtimeRoot)
+				}
 			}
 			if !isUnderRemoteRoot(s.remoteRoot, remotePath) {
 				continue
@@ -5408,6 +5425,7 @@ func (s *Syncer) markBootstrapComplete() {
 	s.state.BootstrapStartedAt = ""
 	s.state.BootstrapFilesSynced = 0
 	s.state.BootstrapFilesTotal = 0
+	s.state.BootstrapFilesTotalUnavailable = false
 	s.state.BootstrapStallCycles = 0
 	s.state.BootstrapDirectoriesDiscovered = 0
 	s.state.BootstrapBlockedPath = ""
@@ -7517,6 +7535,7 @@ func (s *Syncer) loadState() error {
 		s.state.BootstrapStartedAt = ""
 		s.state.BootstrapFilesSynced = 0
 		s.state.BootstrapFilesTotal = 0
+		s.state.BootstrapFilesTotalUnavailable = false
 		s.state.BootstrapStallCycles = 0
 		s.state.BootstrapDirectoriesDiscovered = 0
 		s.state.BootstrapBlockedPath = ""
