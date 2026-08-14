@@ -8210,11 +8210,13 @@ func (c *hierarchicalTreeClient) ListTree(ctx context.Context, _ string, path st
 		return TreeResponse{}, errors.New("synthetic ListTree failure")
 	}
 	entriesByPath := map[string]TreeEntry{}
+	totalFiles := 0
 	for remotePath, file := range c.files {
 		remotePath = normalizeRemotePath(remotePath)
 		if !isUnderRemoteRoot(base, remotePath) || remotePath == base {
 			continue
 		}
+		totalFiles++
 		relative := strings.TrimPrefix(strings.TrimPrefix(remotePath, base), "/")
 		parts := strings.Split(relative, "/")
 		levels := depth
@@ -8258,7 +8260,7 @@ func (c *hierarchicalTreeClient) ListTree(ctx context.Context, _ string, path st
 	for _, entry := range entries {
 		c.returnedPaths = append(c.returnedPaths, entry.Path)
 	}
-	return TreeResponse{Path: base, Entries: entries}, nil
+	return TreeResponse{Path: base, Entries: entries, TotalFiles: totalFiles}, nil
 }
 
 func (c *fakeClient) LatestEventID(ctx context.Context, workspaceID, provider string) (string, error) {
@@ -10804,6 +10806,72 @@ func TestSkipMountRuntimeRemotePathPreservesActiveRootRuntime(t *testing.T) {
 		if _, err := os.Stat(activePath); err != nil {
 			t.Fatalf("active mount runtime %s was removed: %v", activePath, err)
 		}
+	}
+}
+
+func TestBootstrapProgressSuppressesRuntimeInclusiveTotalAcrossRestart(t *testing.T) {
+	files := map[string]RemoteFile{
+		"/workspace/.relay/state.json": {
+			Path: "/workspace/.relay/state.json", Revision: "rev_runtime", Content: `{"runtime":true}`,
+		},
+		"/workspace/a.txt": {Path: "/workspace/a.txt", Revision: "rev_a", Content: "a"},
+		"/workspace/b.txt": {Path: "/workspace/b.txt", Revision: "rev_b", Content: "b"},
+	}
+	localDir := t.TempDir()
+	newSyncer := func(client RemoteClient) *Syncer {
+		t.Helper()
+		syncer, err := NewSyncer(client, SyncerOptions{
+			WorkspaceID:               "ws_runtime_total",
+			RemoteRoot:                "/workspace",
+			LocalRoot:                 localDir,
+			BootstrapMaxFilesPerCycle: 1,
+			BootstrapStallCycles:      5,
+		})
+		if err != nil {
+			t.Fatalf("new syncer failed: %v", err)
+		}
+		return syncer
+	}
+
+	first := newSyncer(&hierarchicalTreeClient{fakeClient: &fakeClient{files: files}})
+	if err := first.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("first bootstrap cycle failed: %v", err)
+	}
+	state := loadPersistedState(t, localDir)
+	if state.BootstrapComplete {
+		t.Fatalf("first bounded cycle unexpectedly completed bootstrap")
+	}
+	if state.BootstrapFilesTotal != 0 || !state.BootstrapFilesTotalUnavailable {
+		t.Fatalf("runtime-inclusive total remained publishable: total=%d unavailable=%t", state.BootstrapFilesTotal, state.BootstrapFilesTotalUnavailable)
+	}
+
+	// A fresh process revisits the root page with the server's raw total, but
+	// must honor the persisted invalidation instead of restoring an unreachable
+	// denominator after the saved page offset.
+	second := newSyncer(&hierarchicalTreeClient{fakeClient: &fakeClient{files: files}})
+	if err := second.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("resumed bootstrap cycle failed: %v", err)
+	}
+	state = loadPersistedState(t, localDir)
+	if state.BootstrapFilesSynced != 1 {
+		t.Fatalf("resumed files synced = %d, want 1", state.BootstrapFilesSynced)
+	}
+	if state.BootstrapFilesTotal != 0 || !state.BootstrapFilesTotalUnavailable {
+		t.Fatalf("process restart restored runtime-inclusive total: total=%d unavailable=%t", state.BootstrapFilesTotal, state.BootstrapFilesTotalUnavailable)
+	}
+
+	publicBytes, err := os.ReadFile(filepath.Join(localDir, ".relay", "state.json"))
+	if err != nil {
+		t.Fatalf("read public state: %v", err)
+	}
+	var public struct {
+		Bootstrap map[string]json.RawMessage `json:"bootstrap"`
+	}
+	if err := json.Unmarshal(publicBytes, &public); err != nil {
+		t.Fatalf("decode public state: %v", err)
+	}
+	if _, published := public.Bootstrap["filesTotal"]; published {
+		t.Fatalf("public state published unreachable runtime-inclusive total: %s", publicBytes)
 	}
 }
 

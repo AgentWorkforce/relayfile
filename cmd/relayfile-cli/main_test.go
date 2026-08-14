@@ -5894,7 +5894,7 @@ func TestStatusDistinguishesStalledBootstrapFromHealthyProvider(t *testing.T) {
 
 func TestBootstrapProgressNeverRendersZeroDenominator(t *testing.T) {
 	got := formatBootstrapFileProgress(&syncStateBootstrap{FilesSynced: 27392})
-	if strings.Contains(got, "/0") || !strings.Contains(got, "total not reported") {
+	if strings.Contains(got, "/0") || !strings.Contains(got, "total unavailable") {
 		t.Fatalf("unknown denominator rendered as fake completion ratio: %q", got)
 	}
 }

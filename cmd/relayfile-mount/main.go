@@ -697,7 +697,7 @@ func formatBootstrapProgress(synced, total int) string {
 	if total > 0 {
 		return fmt.Sprintf("%d/%d files", synced, total)
 	}
-	return fmt.Sprintf("%d files synced (total not reported by the saved checkpoint)", synced)
+	return fmt.Sprintf("%d files synced (authoritative total unavailable)", synced)
 }
 
 func envOrDefault(name, fallback string) string {
