@@ -6732,6 +6732,87 @@ func TestWritebackAckWithExternalIDReconcilesDraft(t *testing.T) {
 	}
 }
 
+// Issue #3033: the provider-style Slack receipt may carry its native ts
+// without a duplicated externalId field. The HTTP ack boundary treats that
+// receipt as terminal, reconciles locally, and makes a delayed failure replay
+// idempotent instead of downgrading delivery or generating another write.
+func TestWritebackAckSlackReceiptIsTerminalWithoutExplicitExternalID(t *testing.T) {
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{ExternalWritebackMode: true})
+	defer store.Close()
+	server := NewServer(store)
+	token := mustTestJWT(t, "dev-secret", "ws_receipt", "Worker1", []string{"fs:read", "fs:write", "sync:trigger"}, time.Now().Add(time.Hour))
+
+	draftPath := "/slack/channels/C0B9Z4CLG1J/messages/1786747000_000001/replies/replies 0e89a031-65f0-480e-a823-ab1d94b324ea.json"
+	write, err := store.WriteFile(relayfile.WriteRequest{
+		WorkspaceID:   "ws_receipt",
+		Path:          draftPath,
+		IfMatch:       "0",
+		ContentType:   "application/json",
+		Content:       `{"text":"shipping the fix"}`,
+		CorrelationID: "corr_receipt_write",
+	})
+	if err != nil {
+		t.Fatalf("write reply draft: %v", err)
+	}
+
+	ack := func(success bool, body map[string]any) map[string]any {
+		t.Helper()
+		body["success"] = success
+		resp := doRequest(t, server, request{
+			method: http.MethodPost,
+			path:   "/v1/workspaces/ws_receipt/writeback/" + write.OpID + "/ack",
+			headers: map[string]string{
+				"Authorization":    "Bearer " + token,
+				"X-Correlation-Id": "corr_receipt_ack",
+			},
+			body: body,
+		})
+		if resp.Code != http.StatusOK {
+			t.Fatalf("ack status = %d (%s)", resp.Code, resp.Body.String())
+		}
+		var decoded map[string]any
+		if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
+			t.Fatalf("decode ack response: %v", err)
+		}
+		return decoded
+	}
+
+	first := ack(true, map[string]any{
+		"providerResult": map[string]any{
+			"provider":       "slack",
+			"action":         "reply_in_thread",
+			"endpoint":       "/chat.postMessage",
+			"status":         200,
+			"channel":        "C0B9Z4CLG1J",
+			"ts":             "1786747030.233189",
+			"acknowledgedAt": "2026-08-14T22:37:11.171Z",
+		},
+	})
+	if first["success"] != true {
+		t.Fatalf("successful receipt response = %+v", first)
+	}
+	draft, _ := first["draft"].(map[string]any)
+	if draft == nil || draft["action"] != "renamed" {
+		t.Fatalf("Slack ts did not reconcile draft: %+v", first)
+	}
+	canonicalPath := "/slack/channels/C0B9Z4CLG1J/messages/1786747000_000001/replies/1786747030.233189.json"
+	if _, err := store.ReadFile("ws_receipt", canonicalPath); err != nil {
+		t.Fatalf("read receipt-reconciled reply: %v", err)
+	}
+
+	replayed := ack(false, map[string]any{"error": "Field \"ts\" is read-only and cannot be written"})
+	if replayed["success"] != true || replayed["replayed"] != true {
+		t.Fatalf("failure replay contradicted terminal receipt: %+v", replayed)
+	}
+	op, err := store.GetOperation("ws_receipt", write.OpID)
+	if err != nil {
+		t.Fatalf("get terminal operation: %v", err)
+	}
+	if op.Status != "succeeded" || op.LastError != nil || op.ProviderResult["externalId"] != "1786747030.233189" {
+		t.Fatalf("terminal operation lost receipt evidence: %+v", op)
+	}
+}
+
 func TestWritebackAckRejectsMissingSuccess(t *testing.T) {
 	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{ExternalWritebackMode: true})
 	defer store.Close()

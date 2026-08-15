@@ -268,21 +268,26 @@ type WriteResult struct {
 }
 
 type OperationStatus struct {
-	OpID            string           `json:"opId"`
-	Path            string           `json:"path,omitempty"`
-	Revision        string           `json:"revision,omitempty"`
-	Action          string           `json:"action,omitempty"`
-	Provider        string           `json:"provider,omitempty"`
-	Status          string           `json:"status"`
-	AttemptCount    int              `json:"attemptCount"`
-	NextAttemptAt   *string          `json:"nextAttemptAt,omitempty"`
-	LastError       *string          `json:"lastError,omitempty"`
-	ProviderResult  map[string]any   `json:"providerResult,omitempty"`
-	ContentIdentity *ContentIdentity `json:"contentIdentity,omitempty"`
-	CorrelationID   string           `json:"correlationId,omitempty"`
-	CreatedAt       string           `json:"createdAt,omitempty"`
-	UpdatedAt       string           `json:"updatedAt,omitempty"`
-	CompletedAt     *string          `json:"completedAt,omitempty"`
+	OpID          string  `json:"opId"`
+	Path          string  `json:"path,omitempty"`
+	Revision      string  `json:"revision,omitempty"`
+	Action        string  `json:"action,omitempty"`
+	Provider      string  `json:"provider,omitempty"`
+	Status        string  `json:"status"`
+	AttemptCount  int     `json:"attemptCount"`
+	NextAttemptAt *string `json:"nextAttemptAt,omitempty"`
+	LastError     *string `json:"lastError,omitempty"`
+	// BookkeepingError reports a post-delivery local reconciliation or
+	// persistence failure. It never changes a provider-confirmed succeeded
+	// status and is intentionally separate from LastError, which describes the
+	// provider delivery outcome.
+	BookkeepingError *string          `json:"bookkeepingError,omitempty"`
+	ProviderResult   map[string]any   `json:"providerResult,omitempty"`
+	ContentIdentity  *ContentIdentity `json:"contentIdentity,omitempty"`
+	CorrelationID    string           `json:"correlationId,omitempty"`
+	CreatedAt        string           `json:"createdAt,omitempty"`
+	UpdatedAt        string           `json:"updatedAt,omitempty"`
+	CompletedAt      *string          `json:"completedAt,omitempty"`
 }
 
 type OperationFeed struct {
@@ -437,11 +442,11 @@ type StoreOptions struct {
 }
 
 // ProviderWriteFunc and ProviderWriteActionFunc execute a writeback against
-// the external provider. They return an optional providerResult map — the
-// fields the provider echoed back about the written record (e.g. a Slack
-// message `ts`, the created issue id) — which is surfaced verbatim on the
-// operation's ProviderResult so agents can recover server-assigned ids
-// without a second round-trip. A nil map means "nothing to surface".
+// the external provider. They return an optional providerResult map: terminal
+// receipt fields owned by the provider (e.g. a Slack message `ts`, the created
+// issue id). The receipt is surfaced on the operation's ProviderResult so
+// agents can recover server-assigned ids without a second round-trip; it is
+// never reused as write input. A nil map means "nothing to surface".
 type ProviderWriteFunc func(workspaceID, path, revision string) (map[string]any, error)
 type ProviderWriteActionFunc func(action WritebackAction) (map[string]any, error)
 
@@ -553,7 +558,7 @@ type Store struct {
 	// in-flight merge citing a pre-restart revision safely falls back to
 	// merge_base_unavailable, the same fail-closed behavior as any other
 	// provenance miss).
-	revisionProvenance map[string][]revisionProvenanceEntry
+	revisionProvenance      map[string][]revisionProvenanceEntry
 	backendProfile          string
 	maxAttempts             int
 	retryDelay              time.Duration
@@ -584,8 +589,20 @@ type workspaceState struct {
 	Files              map[string]File            `json:"files"`
 	Events             []Event                    `json:"events"`
 	Ops                map[string]OperationStatus `json:"ops"`
+	RequestedWrites    map[string]requestedWrite  `json:"requestedWrites,omitempty"`
 	ProviderIndex      map[string]string          `json:"providerIndex,omitempty"`
 	ProviderWatermarks map[string]string          `json:"providerWatermarks,omitempty"`
+}
+
+// requestedWrite is the immutable provider input captured when an operation
+// is created. It is persisted separately from both the mutable materialized
+// file and the provider-owned receipt on OperationStatus.ProviderResult.
+type requestedWrite struct {
+	Type             WritebackActionType `json:"type"`
+	Provider         string              `json:"provider,omitempty"`
+	ProviderObjectID string              `json:"providerObjectId,omitempty"`
+	ContentType      string              `json:"contentType,omitempty"`
+	Content          string              `json:"content,omitempty"`
 }
 
 type WritebackQueueItem struct {
@@ -3465,26 +3482,47 @@ func (s *Store) AcknowledgeWriteback(workspaceID, itemID string, ack WritebackAc
 	if !ok {
 		return nil, ErrNotFound
 	}
+	alreadySucceeded := op.Status == "succeeded"
+
+	response := map[string]any{
+		"status":        "acknowledged",
+		"id":            itemID,
+		"correlationId": correlationID,
+		"success":       ack.Success,
+	}
+	if alreadySucceeded {
+		response["replayed"] = true
+	}
+
+	// Provider-confirmed success is terminal. A stale retry, delayed failure,
+	// or local post-delivery error cannot turn the delivery back into a failed
+	// operation or make it eligible for another provider write.
+	if alreadySucceeded && !ack.Success {
+		response["success"] = true
+		if op.BookkeepingError != nil {
+			response["bookkeepingError"] = *op.BookkeepingError
+		}
+		return response, nil
+	}
 
 	// Update operation status based on acknowledgment
 	nowTS := nowRFC3339NanoUTC()
 	if ack.Success {
 		op.Status = "succeeded"
 		op.LastError = nil
-		op.CompletedAt = &nowTS
-		// Fold the consumer-reported externalId into the provider-echoed fields
-		// so it lands on providerResult alongside any ts/channel the consumer
-		// sent. mergeProviderResult keeps providerRevision server-owned.
-		echoed := ack.ProviderResult
-		if externalID := strings.TrimSpace(ack.ExternalID); externalID != "" {
-			merged := make(map[string]any, len(echoed)+1)
-			for k, v := range echoed {
-				merged[k] = v
-			}
-			merged["externalId"] = externalID
-			echoed = merged
+		op.BookkeepingError = nil
+		if op.CompletedAt == nil {
+			op.CompletedAt = &nowTS
 		}
-		op.ProviderResult = mergeProviderResult(op.Revision, echoed)
+		// Merge the receipt into prior terminal evidence. A provider-native Slack
+		// ts is accepted as the external id, but the receipt remains operation
+		// output and is never routed through write classification.
+		op.ProviderResult = mergeProviderResult(op.Revision, op.ProviderResult, ack.ProviderResult)
+		externalID := providerReceiptExternalID(op.Provider, ack.ExternalID, op.ProviderResult)
+		if externalID != "" {
+			op.ProviderResult["externalId"] = externalID
+		}
+		delete(ws.RequestedWrites, itemID)
 	} else {
 		op.Status = "dead_lettered"
 		if ack.Error != "" {
@@ -3498,24 +3536,36 @@ func (s *Store) AcknowledgeWriteback(workspaceID, itemID string, ack WritebackAc
 
 	ws.Ops[itemID] = op
 
-	response := map[string]any{
-		"status":        "acknowledged",
-		"id":            itemID,
-		"correlationId": correlationID,
-		"success":       ack.Success,
-	}
-	if ack.Success && strings.TrimSpace(ack.ExternalID) != "" {
-		disposition := s.reconcileAckedDraftLocked(workspaceID, ws, op, ack, correlationID)
-		draft := map[string]any{"action": disposition.Action}
-		if disposition.From != "" {
-			draft["from"] = disposition.From
+	if ack.Success {
+		receiptAck := ack
+		receiptAck.ExternalID = providerReceiptExternalID(op.Provider, ack.ExternalID, op.ProviderResult)
+		if strings.TrimSpace(receiptAck.CanonicalPath) == "" {
+			receiptAck.CanonicalPath = providerReceiptCanonicalPath(op.ProviderResult)
 		}
-		if disposition.To != "" {
-			draft["to"] = disposition.To
+		if receiptAck.ExternalID != "" {
+			disposition := s.reconcileAckedDraftLocked(workspaceID, ws, op, receiptAck, correlationID)
+			draft := map[string]any{"action": disposition.Action}
+			if disposition.From != "" {
+				draft["from"] = disposition.From
+			}
+			if disposition.To != "" {
+				draft["to"] = disposition.To
+			}
+			response["draft"] = draft
 		}
-		response["draft"] = draft
 	}
-	_ = s.saveLocked()
+	if saveErr := s.saveLocked(); saveErr != nil && ack.Success {
+		// The provider outcome is already known. Retain succeeded and report the
+		// persistence/reconciliation problem separately so callers cannot mistake
+		// it for a failed delivery and retry the provider action.
+		bookkeepingError := saveErr.Error()
+		op.BookkeepingError = &bookkeepingError
+		ws.Ops[itemID] = op
+		response["bookkeepingError"] = bookkeepingError
+		// Best-effort repair persists the terminal outcome and its separate
+		// bookkeeping diagnostic without ever re-entering provider dispatch.
+		_ = s.saveLocked()
+	}
 
 	return response, nil
 }
@@ -3749,6 +3799,9 @@ func (s *Store) ReplayOperationAny(opID, correlationID string) (QueuedResponse, 
 func (s *Store) ensureWorkspaceLocked(workspaceID string) *workspaceState {
 	ws, ok := s.workspaces[workspaceID]
 	if ok {
+		if ws.RequestedWrites == nil {
+			ws.RequestedWrites = map[string]requestedWrite{}
+		}
 		if ws.ProviderIndex == nil {
 			ws.ProviderIndex = map[string]string{}
 		}
@@ -3762,6 +3815,7 @@ func (s *Store) ensureWorkspaceLocked(workspaceID string) *workspaceState {
 		Files:              map[string]File{},
 		Events:             []Event{},
 		Ops:                map[string]OperationStatus{},
+		RequestedWrites:    map[string]requestedWrite{},
 		ProviderIndex:      map[string]string{},
 		ProviderWatermarks: map[string]string{},
 	}
@@ -3858,6 +3912,24 @@ func (s *Store) recordWriteWithContentIdentityLocked(ws *workspaceState, path, r
 		UpdatedAt:       nowTS,
 	}
 	ws.Ops[opID] = op
+	if op.Action == string(WritebackActionFileUpsert) {
+		if file, exists := ws.Files[path]; exists {
+			if ws.RequestedWrites == nil {
+				ws.RequestedWrites = map[string]requestedWrite{}
+			}
+			requestProvider := file.Provider
+			if requestProvider == "" {
+				requestProvider = provider
+			}
+			ws.RequestedWrites[opID] = requestedWrite{
+				Type:             WritebackActionFileUpsert,
+				Provider:         requestProvider,
+				ProviderObjectID: file.ProviderObjectID,
+				ContentType:      file.ContentType,
+				Content:          providerWritableContent(requestProvider, file.Content),
+			}
+		}
+	}
 
 	contentHash := ""
 	if eventType != "file.deleted" {
@@ -3919,10 +3991,12 @@ func (s *Store) enqueueWriteback(task writebackTask) {
 // GET /ops/{opId} without a second request, then stamps the server-owned
 // providerRevision last so a provider- or caller-supplied value can never
 // overwrite it (keeping providerRevision a stable, server-authoritative field).
-func mergeProviderResult(revision string, providerResult map[string]any) map[string]any {
-	result := make(map[string]any, len(providerResult)+1)
-	for k, v := range providerResult {
-		result[k] = v
+func mergeProviderResult(revision string, providerResults ...map[string]any) map[string]any {
+	result := make(map[string]any)
+	for _, providerResult := range providerResults {
+		for k, v := range providerResult {
+			result[k] = v
+		}
 	}
 	result["providerRevision"] = revision
 	return result
@@ -4258,6 +4332,14 @@ func (s *Store) processWriteback(task writebackTask) {
 	if op.Action != "" {
 		writeAction.Type = WritebackActionType(op.Action)
 	}
+	requested, hasRequestedWrite := ws.RequestedWrites[task.OpID]
+	if hasRequestedWrite {
+		writeAction.Type = requested.Type
+		writeAction.Provider = requested.Provider
+		writeAction.ProviderObjectID = requested.ProviderObjectID
+		writeAction.ContentType = requested.ContentType
+		writeAction.Content = requested.Content
+	}
 	if writeAction.Type == "" {
 		if _, exists := ws.Files[task.Path]; exists {
 			writeAction.Type = WritebackActionFileUpsert
@@ -4265,12 +4347,15 @@ func (s *Store) processWriteback(task writebackTask) {
 			writeAction.Type = WritebackActionFileDelete
 		}
 	}
-	if file, exists := ws.Files[task.Path]; exists {
+	if file, exists := ws.Files[task.Path]; exists && !hasRequestedWrite {
 		writeAction.Provider = file.Provider
 		writeAction.ProviderObjectID = file.ProviderObjectID
 		if writeAction.Type == WritebackActionFileUpsert {
 			writeAction.ContentType = file.ContentType
-			writeAction.Content = file.Content
+			// A canonical provider record can contain receipt-owned fields (for
+			// Slack, ts/id/timestamps). Derive a writable request payload without
+			// mutating the enriched local record.
+			writeAction.Content = providerWritableContent(file.Provider, file.Content)
 		}
 	}
 	if writeAction.Provider == "" {
@@ -4319,11 +4404,17 @@ func (s *Store) processWriteback(task writebackTask) {
 	if err == nil {
 		op.Status = "succeeded"
 		op.LastError = nil
+		op.BookkeepingError = nil
 		op.NextAttemptAt = nil
-		op.ProviderResult = mergeProviderResult(task.Revision, providerResult)
+		op.ProviderResult = mergeProviderResult(task.Revision, op.ProviderResult, providerResult)
+		externalID := providerReceiptExternalID(writeAction.Provider, "", op.ProviderResult)
+		if externalID != "" {
+			op.ProviderResult["externalId"] = externalID
+		}
 		op.UpdatedAt = nowTS
 		op.CompletedAt = &nowTS
 		ws.Ops[task.OpID] = op
+		delete(ws.RequestedWrites, task.OpID)
 		s.appendWorkspaceEventLocked(task.WorkspaceID, ws, Event{
 			EventID:       s.nextEventIDLocked(),
 			Type:          "writeback.succeeded",
@@ -4335,7 +4426,31 @@ func (s *Store) processWriteback(task writebackTask) {
 			Timestamp:     nowTS,
 		})
 		s.recordSuppressionLocked(task.WorkspaceID, writeAction.Provider, task.OpID, task.CorrelationID, now)
-		_ = s.saveLocked()
+
+		// The provider receipt is terminal output, not a second provider input.
+		// Reconcile an agent-authored draft directly under the store lock using
+		// the classification-exempt system path. A native Slack ts is accepted
+		// when the provider has not normalized it to externalId yet.
+		receiptAck := WritebackAck{
+			Success:        true,
+			ExternalID:     externalID,
+			CanonicalPath:  providerReceiptCanonicalPath(op.ProviderResult),
+			ProviderResult: op.ProviderResult,
+		}
+		if receiptAck.ExternalID != "" {
+			s.reconcileAckedDraftLocked(task.WorkspaceID, ws, op, receiptAck, task.CorrelationID)
+		}
+
+		if saveErr := s.saveLocked(); saveErr != nil {
+			// Delivery is already confirmed. Preserve succeeded and report only
+			// the local bookkeeping failure on its dedicated channel.
+			bookkeepingError := saveErr.Error()
+			op.BookkeepingError = &bookkeepingError
+			ws.Ops[task.OpID] = op
+			// Best-effort repair persists the terminal outcome and its separate
+			// bookkeeping diagnostic without ever re-entering provider dispatch.
+			_ = s.saveLocked()
+		}
 		return
 	}
 
@@ -4577,6 +4692,9 @@ func (s *Store) loadFromDisk() error {
 			}
 			if ws.Ops == nil {
 				ws.Ops = map[string]OperationStatus{}
+			}
+			if ws.RequestedWrites == nil {
+				ws.RequestedWrites = map[string]requestedWrite{}
 			}
 			if ws.ProviderIndex == nil {
 				ws.ProviderIndex = map[string]string{}

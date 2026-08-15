@@ -526,6 +526,9 @@ export interface OperationStatusResponse {
   attemptCount: number;
   nextAttemptAt?: string | null;
   lastError?: string | null;
+  /** Post-delivery local error; does not change a succeeded delivery status. */
+  bookkeepingError?: string | null;
+  /** Terminal provider receipt data, never a new provider write payload. */
   providerResult?: Record<string, unknown>;
   correlationId?: string;
   createdAt?: string;
@@ -1114,10 +1117,10 @@ export interface AckWritebackInput {
   canonicalPath?: string;
   /**
    * Optional fields the provider echoed back about the written record (e.g. a
-   * Slack message `ts` and `channel`). They are surfaced verbatim on the
-   * operation's providerResult (recoverable via getOp), letting an agent reply
-   * in a Slack thread using the returned ts as thread_ts. The reserved key
-   * `providerRevision` is server-owned and cannot be overridden via this map.
+   * Slack message `ts` and `channel`). They are terminal receipt data surfaced
+   * on the operation's providerResult and are never re-ingested as a provider
+   * write. The reserved key `providerRevision` is server-owned and cannot be
+   * overridden via this map.
    */
   providerResult?: Record<string, unknown>;
   correlationId?: string;
@@ -1136,7 +1139,11 @@ export interface AckWritebackResponse {
   id: string;
   correlationId?: string;
   success: boolean;
-  /** Present only when the ack was successful and carried an externalId. */
+  /** True when the operation had already reached succeeded. */
+  replayed?: boolean;
+  /** Post-delivery local error; delivery remains succeeded. */
+  bookkeepingError?: string;
+  /** Present for successful receipts; Slack ts can stand in for externalId. */
   draft?: AckWritebackDraftDisposition;
 }
 

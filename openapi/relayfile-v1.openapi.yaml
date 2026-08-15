@@ -2047,11 +2047,12 @@ paths:
                   description: |
                     Optional fields the provider echoed back about the written
                     record (e.g. a Slack message `ts` and `channel`). They are
-                    surfaced verbatim on the operation's providerResult, so an
-                    agent can recover them from GET /ops/{opId} — for example to
-                    reply in a Slack thread using the returned ts as thread_ts.
-                    The reserved key `providerRevision` is server-owned and
-                    cannot be overridden via this map.
+                    terminal receipt data: they are surfaced on the operation's
+                    providerResult and are never re-ingested as a new provider
+                    write. A Slack `ts` is also accepted as the external id for
+                    draft reconciliation when externalId is omitted. The
+                    reserved key `providerRevision` is server-owned and cannot
+                    be overridden via this map.
       responses:
         '200':
           description: Acknowledgment accepted
@@ -2069,12 +2070,24 @@ paths:
                     type: string
                   success:
                     type: boolean
+                    description: |
+                      Terminal provider delivery outcome. Once true for an
+                      operation, a replayed failure cannot downgrade it.
+                  replayed:
+                    type: boolean
+                    description: True when the operation was already succeeded.
+                  bookkeepingError:
+                    type: string
+                    description: |
+                      Post-delivery local persistence or reconciliation error.
+                      This does not change success or the operation's succeeded
+                      status and must not trigger a provider retry.
                   draft:
                     type: object
                     description: |
                       Disposition of the agent-authored draft file. Present
-                      only when the ack was successful and carried an
-                      externalId.
+                      for successful receipts. A provider-native Slack `ts`
+                      can supply the external id when externalId is omitted.
                     properties:
                       action:
                         type: string
@@ -3262,9 +3275,19 @@ components:
         lastError:
           type: string
           nullable: true
+        bookkeepingError:
+          type: string
+          nullable: true
+          description: |
+            Post-delivery local persistence or reconciliation error. Delivery
+            remains succeeded and lastError remains reserved for provider
+            delivery failures.
         providerResult:
           type: object
           additionalProperties: true
+          description: |
+            Terminal provider receipt fields. They are retained as operation
+            output and are never re-ingested as a provider write payload.
         contentIdentity:
           $ref: '#/components/schemas/ContentIdentity'
         correlationId:

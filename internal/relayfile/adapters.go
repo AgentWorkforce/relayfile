@@ -31,9 +31,9 @@ type ProviderAdapter interface {
 
 type ProviderWritebackAdapter interface {
 	// ApplyWriteback executes the writeback against the provider. The returned
-	// map, when non-nil, carries provider-echoed fields about the written
-	// record (e.g. a Slack message `ts`) that are surfaced on the operation's
-	// ProviderResult.
+	// map, when non-nil, is a terminal receipt carrying provider-owned fields
+	// about the written record (e.g. a Slack message `ts`). It is surfaced on
+	// the operation's ProviderResult and must never be reused as write input.
 	ApplyWriteback(action WritebackAction) (map[string]any, error)
 }
 
