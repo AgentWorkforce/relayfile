@@ -1515,7 +1515,7 @@ func (s *Server) handleTree(w http.ResponseWriter, r *http.Request, workspaceID,
 		writeForkAwareError(w, err, correlationID)
 		return
 	}
-	if len(resp.Entries) > 0 {
+	if len(resp.Entries) > 0 || resp.TotalFiles > 0 {
 		base := normalizeRoutePath(resp.Path)
 		visibleFiles := map[string]struct{}{}
 		visibleDirs := map[string]struct{}{}
@@ -1586,6 +1586,10 @@ func (s *Server) handleTree(w http.ResponseWriter, r *http.Request, workspaceID,
 			}
 		}
 		resp.Entries = filtered
+		// Store-level totals include every file below the requested path. The
+		// HTTP contract must expose only files this caller can see, while still
+		// keeping the total stable across pagination pages.
+		resp.TotalFiles = len(visibleFiles)
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

@@ -98,6 +98,19 @@ const (
 	// response-size and timeout bounds; the tree traversal persists its cursor
 	// and resumes on the next poll cycle.
 	defaultBootstrapMaxFilesPerCycle = 2000
+	// bootstrapCheckpointFiles is deliberately smaller than a server tree
+	// page (currently up to 1000 entries). Each batch is applied and persisted
+	// before the next batch starts, so a process deadline cannot repeatedly
+	// discard an otherwise-successful prefix of one slow page. This is a
+	// checkpoint granularity, not a workload limit: the same cycle continues
+	// reading the already-fetched page until its file budget is exhausted.
+	bootstrapCheckpointFiles = 32
+	// defaultBootstrapMaxDirectories bounds the number of distinct directory
+	// checkpoints a bounded-tree bootstrap may discover. The queue is
+	// de-duplicated, so exceeding this limit indicates either a pathologically
+	// broad workspace or a server namespace that expands cyclically through
+	// ever-new paths. Both require operator action rather than unbounded growth.
+	defaultBootstrapMaxDirectories = 50000
 	// defaultFullPullMinInterval rate-limits the expensive trust-but-verify
 	// audit. Incremental events remain the normal reconciliation path.
 	defaultFullPullMinInterval = 24 * time.Hour
@@ -197,6 +210,24 @@ func resolveBootstrapMaxFilesPerCycle(opt int, logger Logger) int {
 	return defaultBootstrapMaxFilesPerCycle
 }
 
+func resolveBootstrapMaxDirectories(opt int, logger Logger) int {
+	if opt > 0 {
+		return opt
+	}
+	if opt < 0 && logger != nil {
+		logger.Printf("ignoring invalid BootstrapMaxDirectories=%d; using env/default", opt)
+	}
+	const env = "RELAYFILE_BOOTSTRAP_MAX_DIRECTORIES"
+	if raw := strings.TrimSpace(os.Getenv(env)); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
+			return parsed
+		} else if logger != nil {
+			logger.Printf("ignoring invalid %s=%q; expected a positive integer", env, raw)
+		}
+	}
+	return defaultBootstrapMaxDirectories
+}
+
 var providerLayoutAliasSegments = []string{
 	"by-title",
 	"by-id",
@@ -253,14 +284,25 @@ func (e *IncrementalReadNotReadyError) Error() string {
 // so callers can distinguish an operator-actionable hard stop from a normal
 // transient cloud failure.
 type BootstrapStalledError struct {
-	Cycles int
-	Limit  int
-	Cursor string
-	Cause  error
+	Cycles             int
+	Limit              int
+	Path               string
+	Cursor             string
+	PageOffset         int
+	DirectoriesPending int
+	Cause              error
 }
 
 func (e *BootstrapStalledError) Error() string {
-	message := fmt.Sprintf("bootstrap stalled for %d consecutive checkpoint-stable cycles (limit %d, cursor %q)", e.Cycles, e.Limit, e.Cursor)
+	message := fmt.Sprintf(
+		"bootstrap stalled for %d consecutive checkpoint-stable cycles (limit %d, path %q, page cursor %q, page offset %d, %d directories pending)",
+		e.Cycles,
+		e.Limit,
+		normalizeRemotePath(e.Path),
+		e.Cursor,
+		e.PageOffset,
+		e.DirectoriesPending,
+	)
 	if e.Cause != nil {
 		return message + ": " + e.Cause.Error()
 	}
@@ -268,6 +310,36 @@ func (e *BootstrapStalledError) Error() string {
 }
 
 func (e *BootstrapStalledError) Unwrap() error { return e.Cause }
+
+// BootstrapTraversalLimitError is a terminal bootstrap failure raised before
+// a pathological/cyclic namespace can grow the persisted directory frontier
+// without bound. Raising RELAYFILE_BOOTSTRAP_MAX_DIRECTORIES after inspecting
+// and fixing the named subtree deliberately re-arms the saved checkpoint.
+type BootstrapTraversalLimitError struct {
+	Path                  string
+	DirectoriesDiscovered int
+	Limit                 int
+}
+
+func (e *BootstrapTraversalLimitError) Error() string {
+	return fmt.Sprintf(
+		"bootstrap directory traversal limit reached at %q (%d distinct directories discovered, limit %d); inspect the subtree for cyclic/expanding aliases, then raise RELAYFILE_BOOTSTRAP_MAX_DIRECTORIES to resume the persisted checkpoint",
+		normalizeRemotePath(e.Path),
+		e.DirectoriesDiscovered,
+		e.Limit,
+	)
+}
+
+// IsBootstrapTerminalError identifies bootstrap failures that polling runners
+// must return instead of treating as one more retryable cycle failure.
+func IsBootstrapTerminalError(err error) bool {
+	var stalled *BootstrapStalledError
+	if errors.As(err, &stalled) {
+		return true
+	}
+	var traversalLimit *BootstrapTraversalLimitError
+	return errors.As(err, &traversalLimit)
+}
 
 type TreeEntry struct {
 	Path        string `json:"path"`
@@ -282,6 +354,7 @@ type TreeResponse struct {
 	Path       string      `json:"path"`
 	Entries    []TreeEntry `json:"entries"`
 	NextCursor *string     `json:"nextCursor"`
+	TotalFiles int         `json:"totalFiles,omitempty"`
 }
 
 type FilesystemEvent struct {
@@ -950,6 +1023,10 @@ type SyncerOptions struct {
 	// cycles that may leave the persisted traversal checkpoint unchanged. 0
 	// falls back to RELAYFILE_BOOTSTRAP_STALL_CYCLES, then the default (20).
 	BootstrapStallCycles int
+	// BootstrapMaxDirectories bounds distinct directory checkpoints discovered
+	// by the bounded-tree fallback. 0 uses
+	// RELAYFILE_BOOTSTRAP_MAX_DIRECTORIES, then the default (50000).
+	BootstrapMaxDirectories int
 	// CursorTimeout bounds each resolveLatestEventCursor attempt with its OWN
 	// deadline derived from RootCtx. Timeout-class failures are retried with
 	// backoff before the caller decides whether a full pull is safe.
@@ -1159,6 +1236,7 @@ type Syncer struct {
 	bootstrapTimeout          time.Duration
 	bootstrapIdleTimeout      time.Duration
 	bootstrapStallCycles      int
+	bootstrapMaxDirectories   int
 	readNotReadyTTL           time.Duration
 	forceFullReconcile        bool
 	incrementalCycles         int
@@ -1306,10 +1384,20 @@ type mountState struct {
 	// BootstrapPageOffset resumes within a server page that exceeds the
 	// per-cycle file budget. It is scoped by BootstrapDirectories[0] and
 	// BootstrapCursor and resets whenever either advances.
-	BootstrapPageOffset  int    `json:"bootstrapPageOffset,omitempty"`
-	BootstrapFilesSynced int    `json:"bootstrapFilesSynced,omitempty"`
-	BootstrapFilesTotal  int    `json:"bootstrapFilesTotal,omitempty"`
-	BootstrapStartedAt   string `json:"bootstrapStartedAt,omitempty"`
+	BootstrapPageOffset  int `json:"bootstrapPageOffset,omitempty"`
+	BootstrapFilesSynced int `json:"bootstrapFilesSynced,omitempty"`
+	BootstrapFilesTotal  int `json:"bootstrapFilesTotal,omitempty"`
+	// BootstrapFilesTotalUnavailable is persisted once traversal prunes a
+	// reserved runtime subtree. The server's total includes those descendants,
+	// but the mount intentionally never enumerates them, so retaining that
+	// denominator would make N/M unreachable across page and process resumes.
+	BootstrapFilesTotalUnavailable bool   `json:"bootstrapFilesTotalUnavailable,omitempty"`
+	BootstrapStartedAt             string `json:"bootstrapStartedAt,omitempty"`
+	// BootstrapDirectoriesDiscovered is monotonic for one bootstrap and backs
+	// the runaway-directory guard across process restarts. BootstrapBlockedPath
+	// names the first directory refused by that guard.
+	BootstrapDirectoriesDiscovered int    `json:"bootstrapDirectoriesDiscovered,omitempty"`
+	BootstrapBlockedPath           string `json:"bootstrapBlockedPath,omitempty"`
 	// LastFullPullAt persists the last completed authoritative full-tree audit
 	// so process restarts cannot accidentally re-arm an expensive audit storm.
 	LastFullPullAt string `json:"lastFullPullAt,omitempty"`
@@ -1605,10 +1693,17 @@ type eventListenerHealth struct {
 
 // bootstrapStatus is the public, cursor-free view of bootstrap progress.
 type bootstrapStatus struct {
-	Phase       string `json:"phase"`
-	FilesSynced int    `json:"filesSynced"`
-	FilesTotal  int    `json:"filesTotal,omitempty"`
-	StartedAt   string `json:"startedAt,omitempty"`
+	Phase                 string `json:"phase"`
+	FilesSynced           int    `json:"filesSynced"`
+	FilesTotal            int    `json:"filesTotal,omitempty"`
+	StartedAt             string `json:"startedAt,omitempty"`
+	CurrentPath           string `json:"currentPath,omitempty"`
+	PageOffset            int    `json:"pageOffset,omitempty"`
+	DirectoriesPending    int    `json:"directoriesPending,omitempty"`
+	DirectoriesDiscovered int    `json:"directoriesDiscovered,omitempty"`
+	StallCycles           int    `json:"stallCycles,omitempty"`
+	StallLimit            int    `json:"stallLimit,omitempty"`
+	Reason                string `json:"reason,omitempty"`
 }
 
 type publicStateFlags struct {
@@ -1771,6 +1866,7 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 		bootstrapIdleTimeout = defaultBootstrapIdleTimeout
 	}
 	bootstrapStallCycles := resolveBootstrapStallCycles(opts.BootstrapStallCycles, opts.Logger)
+	bootstrapMaxDirectories := resolveBootstrapMaxDirectories(opts.BootstrapMaxDirectories, opts.Logger)
 	exportTimeout := resolveDurationEnv(opts.ExportTimeout, "RELAYFILE_EXPORT_TIMEOUT", defaultExportTimeout, opts.Logger)
 	if exportTimeout <= 0 {
 		exportTimeout = defaultExportTimeout
@@ -1908,6 +2004,7 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 		bootstrapTimeout:          bootstrapTimeout,
 		bootstrapIdleTimeout:      bootstrapIdleTimeout,
 		bootstrapStallCycles:      bootstrapStallCycles,
+		bootstrapMaxDirectories:   bootstrapMaxDirectories,
 		readNotReadyTTL:           readNotReadyTTL,
 		forceFullReconcile:        forceFullReconcile,
 		oversizedLogged:           map[string]struct{}{},
@@ -3234,6 +3331,28 @@ func (s *Syncer) syncReserved(ctx context.Context, forcePoll bool) error {
 		s.mu.Unlock()
 		return err
 	}
+	// Write-only mounts never run the read-side bootstrap traversal (below,
+	// they call markBootstrapComplete unconditionally), so a bootstrap
+	// terminal error persisted before a mount was reconfigured write-only
+	// must not permanently block it: skip the gate entirely rather than let
+	// a stale read-side stall wedge writes that no longer depend on it.
+	if !s.writeOnly {
+		if terminalErr := s.persistedBootstrapTerminalError(); terminalErr != nil {
+			// A process/supervisor restart must not silently re-arm a checkpoint
+			// that already exhausted its bounded retry policy. Re-publish the saved
+			// structured status and return before making any cloud request. Local
+			// writes must not pause indefinitely just because the read-side
+			// bootstrap is terminally wedged: keep draining the outbox so pending
+			// writebacks are still delivered while the mount reports stalled.
+			terminalConflicted := map[string]struct{}{}
+			if flushErr := s.flushDueOutboxRecords(ctx, terminalConflicted); flushErr != nil {
+				s.logf("outbox flush failed while bootstrap is terminally stalled: %v", flushErr)
+			}
+			_ = s.saveState()
+			s.mu.Unlock()
+			return terminalErr
+		}
+	}
 
 	s.mu.Unlock()
 
@@ -3308,6 +3427,50 @@ func (s *Syncer) syncReserved(ctx context.Context, forcePoll bool) error {
 	}
 	s.markSyncSuccess()
 	return s.saveState()
+}
+
+func (s *Syncer) persistedBootstrapTerminalError() error {
+	if s.state.BootstrapComplete || s.state.LastError == nil {
+		return nil
+	}
+	switch s.state.LastError.Code {
+	case "bootstrap_stall_cycle_limit":
+		limit := s.bootstrapStallCycles
+		if limit <= 0 {
+			limit = defaultBootstrapStallCycles
+		}
+		if s.state.BootstrapStallCycles < limit {
+			// The operator raised the bounded retry limit after addressing the
+			// checkpoint. Re-arm in place without discarding cursor progress.
+			s.state.LastError = nil
+			return nil
+		}
+		return &BootstrapStalledError{
+			Cycles:             s.state.BootstrapStallCycles,
+			Limit:              limit,
+			Path:               s.bootstrapCurrentPath(),
+			Cursor:             strings.TrimSpace(s.state.BootstrapCursor),
+			PageOffset:         s.state.BootstrapPageOffset,
+			DirectoriesPending: len(s.state.BootstrapDirectories),
+		}
+	case "bootstrap_traversal_limit":
+		limit := s.bootstrapMaxDirectories
+		if limit <= 0 {
+			limit = defaultBootstrapMaxDirectories
+		}
+		if s.state.BootstrapDirectoriesDiscovered < limit {
+			s.state.LastError = nil
+			s.state.BootstrapBlockedPath = ""
+			return nil
+		}
+		return &BootstrapTraversalLimitError{
+			Path:                  s.bootstrapCurrentPath(),
+			DirectoriesDiscovered: s.state.BootstrapDirectoriesDiscovered,
+			Limit:                 limit,
+		}
+	default:
+		return nil
+	}
 }
 
 func (s *Syncer) runClosingDigestJobsLocked(ctx context.Context) error {
@@ -3664,23 +3827,27 @@ func (s *Syncer) HTTPClient() (*HTTPClient, bool) {
 // file mtime refresh below still applies there too.
 //
 // touch() also refreshes the on-disk state file's mtime via a cheap
-// os.Chtimes — deliberately NOT a full saveState() — every time it fires.
-// An external supervisor that starts/monitors this process (e.g. a
-// sandbox orchestrator's shell-level idle watchdog) frequently has no way
-// to observe this process's internal touch() calls; the state file's mtime
-// is the only liveness signal it can see. Without this, the file's mtime
-// only advances once per FULLY COMPLETED page — persistTraversal() calls
-// saveState() only after every file in that page has been read via
-// readBootstrapFiles — so a single page with many/large files can leave the
-// file's mtime frozen well past an external idle timeout while this
-// process is making real per-file progress (touch() already fires per file
-// read and per ListTree page) the whole time. Observed in production as a
-// false-positive external cancellation ("relayfile initial sync made no
-// progress for 60s; canceling") on a bounded-tree bootstrap reconcile that
-// was never actually stalled — 873 entries / 758 files were seen across 4
-// ListTree pages in the ~56s before the external watchdog killed it, none
-// of which registered as "progress" externally because no page had yet
-// fully completed and reached persistTraversal()'s saveState() call.
+// os.Chtimes — deliberately NOT a full saveState()/savePublicState() —
+// every time it fires. An external supervisor that starts/monitors this
+// process (e.g. a sandbox orchestrator's shell-level idle watchdog)
+// frequently has no way to observe this process's internal touch() calls;
+// the state file's mtime is the only liveness signal it can see. Without
+// this, the file's mtime would only advance at persistTraversal()'s
+// boundaries, which historically (before per-chunk checkpointing) meant
+// once per FULLY COMPLETED page, so a single page with many/large files
+// could leave the file's mtime frozen well past an external idle timeout
+// while this process was making real per-file progress (touch() already
+// fires per file read and per ListTree page) the whole time. Observed in
+// production as a false-positive external cancellation ("relayfile initial
+// sync made no progress for 60s; canceling") on a bounded-tree bootstrap
+// reconcile that was never actually stalled — 873 entries / 758 files were
+// seen across 4 ListTree pages in the ~56s before the external watchdog
+// killed it, none of which registered as "progress" externally because no
+// page had yet fully completed and reached persistTraversal()'s durable
+// write. persistTraversal() now checkpoints the durable, cheap private
+// state every bootstrapCheckpointFiles (32) files, which closed the
+// original gap independently of touch(); touch()'s mtime refresh remains
+// for the per-file/per-request granularity in between checkpoints.
 type bootstrapProgress struct {
 	last      *atomic.Int64
 	stateFile string
@@ -3715,6 +3882,9 @@ func (p bootstrapProgress) touch() {
 // also tears the watchdog goroutine down (no leak).
 func (s *Syncer) bootstrapContext(parent context.Context) (context.Context, context.CancelFunc, bootstrapProgress, error) {
 	_ = parent // intentionally derive from rootCtx, not the per-cycle ctx
+	if !s.state.BootstrapComplete && strings.TrimSpace(s.state.BootstrapStartedAt) == "" {
+		s.state.BootstrapStartedAt = s.now().UTC().Format(time.RFC3339Nano)
+	}
 	if err := s.ensureBootstrapProgressStateFile(); err != nil {
 		return nil, nil, bootstrapProgress{}, fmt.Errorf("initialize bootstrap progress state file: %w", err)
 	}
@@ -4300,6 +4470,18 @@ func (s *Syncer) pullRemoteFullExport(ctx context.Context, client exportSnapshot
 	sort.Slice(files, func(i, j int) bool {
 		return normalizeRemotePath(files[i].Path) < normalizeRemotePath(files[j].Path)
 	})
+	if !s.state.BootstrapComplete {
+		s.state.BootstrapFilesSynced = 0
+		if s.lazyRepos {
+			// The export total includes intentionally-unhydrated GitHub repo
+			// contents, so it is not a valid materialization denominator.
+			s.state.BootstrapFilesTotal = 0
+			s.state.BootstrapFilesTotalUnavailable = true
+		} else {
+			s.state.BootstrapFilesTotal = len(files)
+			s.state.BootstrapFilesTotalUnavailable = false
+		}
+	}
 	remotePaths := map[string]struct{}{}
 	maxObservedRevision := ""
 	for i := range files {
@@ -4324,6 +4506,9 @@ func (s *Syncer) pullRemoteFullExport(ctx context.Context, client exportSnapshot
 		s.yieldFullPullStateLock()
 		prog.touch()
 		remotePaths[remotePath] = struct{}{}
+		if !s.state.BootstrapComplete {
+			s.state.BootstrapFilesSynced++
+		}
 		files[i].Content = ""
 	}
 
@@ -4718,7 +4903,26 @@ func isLazyGithubRepoSubtreePath(path string) bool {
 	return false
 }
 
+// markBootstrapTotalUnavailable persistently suppresses the bootstrap file
+// total once a reserved runtime subtree is discovered anywhere in the
+// traversal. totalFiles counts every caller-visible remote file, including
+// reserved mount runtime descendants, but this traversal prunes those
+// subtrees before enumeration, so their exact contribution is unknown; an
+// already-suppressed total is left alone rather than logged again.
+func (s *Syncer) markBootstrapTotalUnavailable(runtimeRoot string) {
+	if s.state.BootstrapFilesTotalUnavailable {
+		return
+	}
+	s.state.BootstrapFilesTotal = 0
+	s.state.BootstrapFilesTotalUnavailable = true
+	s.logf("bootstrap file total unavailable after pruning reserved runtime subtree %s", runtimeRoot)
+}
+
 func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]struct{}, prog bootstrapProgress) (returnErr error) {
+	maxDirectories := s.bootstrapMaxDirectories
+	if maxDirectories <= 0 {
+		maxDirectories = defaultBootstrapMaxDirectories
+	}
 	metrics := fullTreeTraversalMetrics{startedAt: time.Now()}
 	defer func() {
 		s.logf(
@@ -4774,10 +4978,50 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 	for _, directory := range directories {
 		queuedDirectories[directory] = struct{}{}
 	}
-	if s.state.BootstrapStartedAt == "" {
-		s.state.BootstrapStartedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	if startedFromEmpty {
+		// A fresh traversal (initial bootstrap start, or a periodic/forced
+		// full-tree audit of an already-BootstrapComplete mount) is not
+		// resuming a persisted directory frontier, so any counter value left
+		// over from a prior traversal (including one that hit the limit and
+		// failed) does not describe this run. Reset rather than extend, or a
+		// completed mount whose earlier audit tripped the limit would start
+		// every subsequent audit already pinned at the limit and fail
+		// immediately regardless of this run's actual traversal size.
+		s.state.BootstrapDirectoriesDiscovered = len(queuedDirectories)
+	} else if s.state.BootstrapDirectoriesDiscovered < len(queuedDirectories) {
+		s.state.BootstrapDirectoriesDiscovered = len(queuedDirectories)
 	}
-	persistTraversal := func(filesThisPage int) error {
+	if !startedFromEmpty && s.state.BootstrapDirectoriesDiscovered >= maxDirectories {
+		// A resumed checkpoint can already sit at or past the limit if an
+		// operator lowered RELAYFILE_BOOTSTRAP_MAX_DIRECTORIES, or an older
+		// build persisted a frontier before this guard existed. Refuse the
+		// oversized frontier as a terminal error up front rather than issuing
+		// ListTree against it: the in-loop check only catches a NEWLY
+		// discovered directory, so it would never fire here and would keep
+		// silently retrying a checkpoint this limit already forbids.
+		s.state.BootstrapBlockedPath = directories[0]
+		return &BootstrapTraversalLimitError{
+			Path:                  directories[0],
+			DirectoriesDiscovered: s.state.BootstrapDirectoriesDiscovered,
+			Limit:                 maxDirectories,
+		}
+	}
+	if s.state.BootstrapStartedAt == "" {
+		s.state.BootstrapStartedAt = s.now().UTC().Format(time.RFC3339Nano)
+	}
+	// persistTraversal is the durable resume checkpoint: the private state
+	// write (cursor, page offset, directory queue, files-synced count) is
+	// everything a restart needs to resume without rereading committed
+	// files. It also refreshes the public "relayfile status" bootstrap
+	// block on every call — via the cheap saveStateWithoutLocalScan() path,
+	// which skips scanning the local mirror's per-file status — so operators
+	// see live progress every bootstrapCheckpointFiles (32) chunk without
+	// paying for a full local-file scan that often. refreshPublicState opts
+	// into that full per-file status scan too, worth its cost once per
+	// page/directory/cycle boundary but not on every chunk: at the default
+	// 2000-file cycle budget an unconditional full scan would run up to ~62
+	// times per cycle for no resume-durability benefit.
+	persistTraversal := func(filesThisPage int, refreshPublicState bool) error {
 		if s.state.BootstrapComplete {
 			return nil
 		}
@@ -4786,7 +5030,11 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 		s.state.BootstrapPageOffset = pageOffset
 		s.state.BootstrapFilesSynced += filesThisPage
 		prog.touch()
-		if err := s.saveState(); err != nil {
+		if refreshPublicState {
+			if err := s.saveState(); err != nil {
+				return err
+			}
+		} else if err := s.saveStateWithoutLocalScan(); err != nil {
 			return err
 		}
 		prog.touch()
@@ -4801,20 +5049,59 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 	}
 	var transientBootstrapAbort bool
 	prunedRuntimeRoots := map[string]struct{}{}
+	var page TreeResponse
+	pageLoaded := false
+	loadedDirectory := ""
+	loadedCursor := ""
 	for len(directories) > 0 {
 		currentDirectory := directories[0]
-		var page TreeResponse
-		var err error
-		s.runFullPullIO(func() {
-			page, err = s.client.ListTree(ctx, s.workspace, currentDirectory, fullTreeTraversalDepth, cursor)
-		})
-		metrics.listCalls++
-		if err != nil {
-			s.recordCloudFailure(err)
-			return err
+		if !pageLoaded || loadedDirectory != currentDirectory || loadedCursor != cursor {
+			var err error
+			s.runFullPullIO(func() {
+				page, err = s.client.ListTree(ctx, s.workspace, currentDirectory, fullTreeTraversalDepth, cursor)
+			})
+			metrics.listCalls++
+			if err != nil {
+				s.recordCloudFailure(err)
+				return err
+			}
+			s.recordCloudSuccess()
+			prog.touch()
+			pageLoaded = true
+			loadedDirectory = currentDirectory
+			loadedCursor = cursor
+			if !s.state.BootstrapFilesTotalUnavailable {
+				// The per-cycle file budget below only walks a chunk of page.Entries,
+				// so a reserved runtime subtree can sit past that chunk on this very
+				// page. Scan the full page up front: trusting totalFiles before this
+				// check would persist an unreachable denominator for every cycle
+				// between now and whichever later cycle happens to walk that entry.
+				for _, entry := range page.Entries {
+					if runtimeRoot := mountRuntimeRemoteRoot(normalizeRemotePath(entry.Path)); runtimeRoot != "" {
+						s.markBootstrapTotalUnavailable(runtimeRoot)
+						break
+					}
+				}
+			}
+			if currentDirectory == s.remoteRoot && !s.lazyRepos && !s.state.BootstrapFilesTotalUnavailable && page.TotalFiles > 0 {
+				// totalFiles is stable across server pagination and counts the full
+				// caller-visible subtree, not just this page. Persist it on the root
+				// frontier so N/M is an actual completion denominator. Older servers
+				// omit it (zero), in which case status intentionally renders N only.
+				//
+				// A runtime subtree that only appears on a later page of the root
+				// frontier's own pagination can still leave this total transiently
+				// wrong until that later page is walked and markBootstrapTotalUnavailable
+				// self-corrects it (both scans above run on every page). Deferring
+				// publication until the root frontier's pagination fully drains would
+				// close that window, but it also delays the very early-progress signal
+				// this field exists for during a large, slow, multi-page bootstrap
+				// (TestBootstrapStallCycleGuardPersistsAndFailsHard depends on the
+				// eager value surfacing across repeatedly-retried, never-draining
+				// cycles). Eager-and-self-correcting is the intentional tradeoff.
+				s.state.BootstrapFilesTotal = page.TotalFiles
+			}
 		}
-		s.recordCloudSuccess()
-		prog.touch()
 		entryStart := pageOffset
 		if entryStart < 0 || entryStart > len(page.Entries) {
 			s.logf("discarding invalid bootstrap page offset %d for page with %d entries", entryStart, len(page.Entries))
@@ -4827,7 +5114,7 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 		if s.bootstrapMaxFilesPerCycle > 0 {
 			remainingFileBudget = s.bootstrapMaxFilesPerCycle - filesThisTraversal
 			if remainingFileBudget <= 0 {
-				if err := persistTraversal(0); err != nil {
+				if err := persistTraversal(0, true); err != nil {
 					return err
 				}
 				return nil
@@ -4838,6 +5125,10 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 				continue
 			}
 			if remainingFileBudget >= 0 && fileEntriesThisChunk >= remainingFileBudget {
+				entryEnd = i
+				break
+			}
+			if fileEntriesThisChunk >= bootstrapCheckpointFiles {
 				entryEnd = i
 				break
 			}
@@ -4861,6 +5152,7 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 			runtimeRoot := mountRuntimeRemoteRoot(remotePath)
 			if runtimeRoot != "" {
 				metrics.runtimeEntriesSeen++
+				s.markBootstrapTotalUnavailable(runtimeRoot)
 			}
 			if !isUnderRemoteRoot(s.remoteRoot, remotePath) {
 				continue
@@ -4882,7 +5174,19 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 					if _, exists := queuedDirectories[remotePath]; exists {
 						continue
 					}
+					if s.state.BootstrapDirectoriesDiscovered >= maxDirectories {
+						s.state.BootstrapBlockedPath = remotePath
+						s.state.BootstrapDirectories = append([]string(nil), directories...)
+						s.state.BootstrapCursor = cursor
+						s.state.BootstrapPageOffset = pageOffset
+						return &BootstrapTraversalLimitError{
+							Path:                  remotePath,
+							DirectoriesDiscovered: s.state.BootstrapDirectoriesDiscovered,
+							Limit:                 maxDirectories,
+						}
+					}
 					queuedDirectories[remotePath] = struct{}{}
+					s.state.BootstrapDirectoriesDiscovered++
 					directories = append(directories, remotePath)
 				}
 				continue
@@ -4954,6 +5258,7 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 						if markErr := s.markReadDenied(result.RemotePath); markErr != nil {
 							return markErr
 						}
+						filesThisPage++
 						continue
 					}
 					// Transient HTTP error (503, 429, etc.): stop the current
@@ -4987,7 +5292,11 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 		// cursor so the same page (including the failing path) is retried next
 		// cycle. Save state up to the last successfully-committed cursor.
 		if transientBootstrapAbort {
-			if err := persistTraversal(filesThisPage); err != nil {
+			// The page checkpoint intentionally does not advance when a transient
+			// read fails. Do not add its successfully-applied prefix to the durable
+			// progress counter either: the next cycle will revisit that prefix, and
+			// counting it twice can make FilesSynced exceed the authoritative total.
+			if err := persistTraversal(0, true); err != nil {
 				return err
 			}
 			break
@@ -4995,16 +5304,27 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 		pageOffset = entryEnd
 		filesThisTraversal += fileEntriesThisChunk
 		if !pageComplete {
-			if err := persistTraversal(filesThisPage); err != nil {
+			yielding := shouldYieldBootstrap()
+			if err := persistTraversal(filesThisPage, yielding); err != nil {
 				return err
 			}
-			s.logf("bootstrap file budget reached (%d files this cycle, max %d); yielding at entry %d of the current server page", filesThisTraversal, s.bootstrapMaxFilesPerCycle, pageOffset)
-			return nil
+			if yielding {
+				s.logf("bootstrap file budget reached (%d files this cycle, max %d); yielding at entry %d of the current server page", filesThisTraversal, s.bootstrapMaxFilesPerCycle, pageOffset)
+				return nil
+			}
+			// Logged at a coarser cadence than the checkpoint itself: a
+			// 1000-entry page persists a checkpoint every bootstrapCheckpointFiles
+			// (32) but only needs a periodic progress line, not one per chunk.
+			if pageOffset%(bootstrapCheckpointFiles*8) == 0 {
+				s.logf("bootstrap page checkpoint persisted at entry %d after %d files this cycle; continuing current server page", pageOffset, filesThisTraversal)
+			}
+			continue
 		}
+		pageLoaded = false
 		pageOffset = 0
 		if page.NextCursor != nil && *page.NextCursor != "" {
 			cursor = *page.NextCursor
-			if err := persistTraversal(filesThisPage); err != nil {
+			if err := persistTraversal(filesThisPage, true); err != nil {
 				return err
 			}
 			if shouldYieldBootstrap() {
@@ -5019,7 +5339,7 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 		directories = directories[1:]
 		cursor = ""
 		if len(directories) > 0 {
-			if err := persistTraversal(filesThisPage); err != nil {
+			if err := persistTraversal(filesThisPage, true); err != nil {
 				return err
 			}
 			if shouldYieldBootstrap() {
@@ -5224,7 +5544,10 @@ func (s *Syncer) markBootstrapComplete() {
 	s.state.BootstrapStartedAt = ""
 	s.state.BootstrapFilesSynced = 0
 	s.state.BootstrapFilesTotal = 0
+	s.state.BootstrapFilesTotalUnavailable = false
 	s.state.BootstrapStallCycles = 0
+	s.state.BootstrapDirectoriesDiscovered = 0
+	s.state.BootstrapBlockedPath = ""
 	// Clear persisted quarantine so a fixed adapter gets a clean slate.
 	s.state.QuarantinedPaths = nil
 	s.clearAllIncrementalReadNotReady()
@@ -5262,8 +5585,16 @@ func (s *Syncer) bootstrapCheckpointAdvanced(previousCursor string, previousDire
 // same cursor. At the configured limit it returns a typed hard failure and
 // intentionally leaves BootstrapComplete false.
 func (s *Syncer) recordBootstrapCycle(previousCursor string, previousDirectories []string, previousPageOffset int, cause error) error {
-	if s.state.BootstrapComplete || s.bootstrapCheckpointAdvanced(previousCursor, previousDirectories, previousPageOffset) {
+	if s.state.BootstrapComplete {
 		s.state.BootstrapStallCycles = 0
+		s.state.BootstrapBlockedPath = ""
+		return nil
+	}
+	if s.bootstrapCheckpointAdvanced(previousCursor, previousDirectories, previousPageOffset) {
+		s.state.BootstrapStallCycles = 0
+		if !IsBootstrapTerminalError(cause) {
+			s.state.BootstrapBlockedPath = ""
+		}
 		return nil
 	}
 	// Root-context cancellation means this runner is intentionally stopping,
@@ -5282,11 +5613,24 @@ func (s *Syncer) recordBootstrapCycle(previousCursor string, previousDirectories
 		return nil
 	}
 	return &BootstrapStalledError{
-		Cycles: s.state.BootstrapStallCycles,
-		Limit:  limit,
-		Cursor: strings.TrimSpace(s.state.BootstrapCursor),
-		Cause:  cause,
+		Cycles:             s.state.BootstrapStallCycles,
+		Limit:              limit,
+		Path:               s.bootstrapCurrentPath(),
+		Cursor:             strings.TrimSpace(s.state.BootstrapCursor),
+		PageOffset:         s.state.BootstrapPageOffset,
+		DirectoriesPending: len(s.state.BootstrapDirectories),
+		Cause:              cause,
 	}
+}
+
+func (s *Syncer) bootstrapCurrentPath() string {
+	if blocked := strings.TrimSpace(s.state.BootstrapBlockedPath); blocked != "" {
+		return normalizeRemotePath(blocked)
+	}
+	if len(s.state.BootstrapDirectories) > 0 {
+		return normalizeRemotePath(s.state.BootstrapDirectories[0])
+	}
+	return s.remoteRoot
 }
 
 // snapshotDeleteUnsafe reports whether running snapshot-driven deletes is
@@ -7310,7 +7654,10 @@ func (s *Syncer) loadState() error {
 		s.state.BootstrapStartedAt = ""
 		s.state.BootstrapFilesSynced = 0
 		s.state.BootstrapFilesTotal = 0
+		s.state.BootstrapFilesTotalUnavailable = false
 		s.state.BootstrapStallCycles = 0
+		s.state.BootstrapDirectoriesDiscovered = 0
+		s.state.BootstrapBlockedPath = ""
 	}
 	if s.state.BootstrapComplete && s.fullPullMinInterval > 0 && strings.TrimSpace(s.state.LastFullPullAt) == "" {
 		// Completed state written by an older version has no audit timestamp.
@@ -7496,18 +7843,43 @@ func (s *Syncer) savePublicState() error {
 		status = "stale"
 	}
 
-	// Bootstrap-in-progress overrides "stale"/"ready": surface explicit
-	// progress so operators (and the CLI status surface) see
-	// "bootstrapping N/M" instead of a misleading stall while a large
-	// initial mirror is still running.
+	// Bootstrap state overrides "stale"/"ready"/"offline" only. A terminal
+	// bootstrap stall is always surfaced as the final safety net, even over
+	// an otherwise more urgent status. "offline" here is the generic
+	// last-cloud-call-failed bucket (5xx/429/timeout, see
+	// classifyStatusError) that fires routinely on ordinary transient
+	// retries mid-bootstrap — masking it behind "bootstrapping" is the
+	// existing, intentional behavior (TestBootstrapStatusSurfacesPhase), not
+	// a gap: an operator should not be paged for a single retried page
+	// fetch. Genuinely independent, actionable states unrelated to the
+	// read-side bootstrap — "writeback-needs-attention" and "conflict" —
+	// still carry their own operator action and must not be hidden by a
+	// long-running bootstrap. The nested `states`/`bootstrap` detail is
+	// always populated either way, so no information is lost — only the
+	// top-level status precedence changes.
 	var bootstrap *bootstrapStatus
 	if !s.state.BootstrapComplete && strings.TrimSpace(s.state.BootstrapStartedAt) != "" {
-		status = "bootstrapping"
+		phase := "bootstrapping"
+		reason := ""
+		if s.state.LastError != nil && s.state.LastError.Kind == "bootstrap_stalled" {
+			phase = "stalled"
+			status = "stalled"
+			reason = s.state.LastError.Message
+		} else if status == "ready" || status == "stale" || status == "offline" {
+			status = "bootstrapping"
+		}
 		bootstrap = &bootstrapStatus{
-			Phase:       "bootstrapping",
-			FilesSynced: s.state.BootstrapFilesSynced,
-			FilesTotal:  s.state.BootstrapFilesTotal,
-			StartedAt:   s.state.BootstrapStartedAt,
+			Phase:                 phase,
+			FilesSynced:           s.state.BootstrapFilesSynced,
+			FilesTotal:            s.state.BootstrapFilesTotal,
+			StartedAt:             s.state.BootstrapStartedAt,
+			CurrentPath:           s.bootstrapCurrentPath(),
+			PageOffset:            s.state.BootstrapPageOffset,
+			DirectoriesPending:    len(s.state.BootstrapDirectories),
+			DirectoriesDiscovered: s.state.BootstrapDirectoriesDiscovered,
+			StallCycles:           s.state.BootstrapStallCycles,
+			StallLimit:            s.bootstrapStallCycles,
+			Reason:                reason,
 		}
 	}
 
@@ -7927,6 +8299,12 @@ func classifyStatusError(err error) *statusError {
 	if errors.As(err, &bootstrapStalled) {
 		status.Kind = "bootstrap_stalled"
 		status.Code = "bootstrap_stall_cycle_limit"
+		return status
+	}
+	var traversalLimit *BootstrapTraversalLimitError
+	if errors.As(err, &traversalLimit) {
+		status.Kind = "bootstrap_stalled"
+		status.Code = "bootstrap_traversal_limit"
 		return status
 	}
 	var httpErr *HTTPError

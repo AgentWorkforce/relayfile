@@ -1153,12 +1153,14 @@ describe("RelayFileClient — existing methods", () => {
           { path: "/readme.md", type: "file", revision: "rev_2" },
         ],
         nextCursor: null,
+        totalFiles: 2,
       };
       const f = mockFetch(payload);
       const client = makeClient(f);
       const res = await client.listTree("ws_acme");
       expect(res.entries).toHaveLength(2);
       expect(res.entries[0]!.path).toBe("/zendesk");
+      expect(res.totalFiles).toBe(2);
       const url = f.mock.calls[0]![0] as string;
       expect(url).toContain("/v1/workspaces/ws_acme/fs/tree");
     });

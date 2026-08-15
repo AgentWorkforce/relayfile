@@ -7996,6 +7996,25 @@ type blockingTreeReadClient struct {
 	once        sync.Once
 }
 
+type delayedBootstrapReadClient struct {
+	*fakeClient
+	delay  time.Duration
+	active atomic.Int32
+}
+
+func (c *delayedBootstrapReadClient) ReadFile(ctx context.Context, workspaceID, path string) (RemoteFile, error) {
+	c.active.Add(1)
+	defer c.active.Add(-1)
+	timer := time.NewTimer(c.delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return c.fakeClient.ReadFile(ctx, workspaceID, path)
+	case <-ctx.Done():
+		return RemoteFile{}, ctx.Err()
+	}
+}
+
 func (c *blockingTreeReadClient) ReadFile(ctx context.Context, workspaceID, path string) (RemoteFile, error) {
 	file, err := c.fakeExportClient.ReadFile(ctx, workspaceID, path)
 	if normalizeRemotePath(path) != normalizeRemotePath(c.blockedPath) {
@@ -8131,6 +8150,10 @@ type hierarchicalTreeCall struct {
 type pagedTreeClient struct {
 	*fakeClient
 	pageSize int
+	// totalFiles, when nonzero, is reported on every page as TreeResponse.TotalFiles,
+	// mirroring the production contract that the total is stable across
+	// server pagination.
+	totalFiles int
 }
 
 func (c *pagedTreeClient) ListTree(_ context.Context, _ string, path string, _ int, cursor string) (TreeResponse, error) {
@@ -8171,7 +8194,7 @@ func (c *pagedTreeClient) ListTree(_ context.Context, _ string, path string, _ i
 		value := strconv.Itoa(end)
 		next = &value
 	}
-	return TreeResponse{Path: base, Entries: entries, NextCursor: next}, nil
+	return TreeResponse{Path: base, Entries: entries, NextCursor: next, TotalFiles: c.totalFiles}, nil
 }
 
 // hierarchicalTreeClient mirrors the production tree contract: a request
@@ -8210,11 +8233,13 @@ func (c *hierarchicalTreeClient) ListTree(ctx context.Context, _ string, path st
 		return TreeResponse{}, errors.New("synthetic ListTree failure")
 	}
 	entriesByPath := map[string]TreeEntry{}
+	totalFiles := 0
 	for remotePath, file := range c.files {
 		remotePath = normalizeRemotePath(remotePath)
 		if !isUnderRemoteRoot(base, remotePath) || remotePath == base {
 			continue
 		}
+		totalFiles++
 		relative := strings.TrimPrefix(strings.TrimPrefix(remotePath, base), "/")
 		parts := strings.Split(relative, "/")
 		levels := depth
@@ -8258,7 +8283,7 @@ func (c *hierarchicalTreeClient) ListTree(ctx context.Context, _ string, path st
 	for _, entry := range entries {
 		c.returnedPaths = append(c.returnedPaths, entry.Path)
 	}
-	return TreeResponse{Path: base, Entries: entries}, nil
+	return TreeResponse{Path: base, Entries: entries, TotalFiles: totalFiles}, nil
 }
 
 func (c *fakeClient) LatestEventID(ctx context.Context, workspaceID, provider string) (string, error) {
@@ -10807,6 +10832,182 @@ func TestSkipMountRuntimeRemotePathPreservesActiveRootRuntime(t *testing.T) {
 	}
 }
 
+func TestBootstrapProgressSuppressesRuntimeInclusiveTotalAcrossRestart(t *testing.T) {
+	files := map[string]RemoteFile{
+		"/workspace/.relay/state.json": {
+			Path: "/workspace/.relay/state.json", Revision: "rev_runtime", Content: `{"runtime":true}`,
+		},
+		"/workspace/a.txt": {Path: "/workspace/a.txt", Revision: "rev_a", Content: "a"},
+		"/workspace/b.txt": {Path: "/workspace/b.txt", Revision: "rev_b", Content: "b"},
+	}
+	localDir := t.TempDir()
+	newSyncer := func(client RemoteClient) *Syncer {
+		t.Helper()
+		syncer, err := NewSyncer(client, SyncerOptions{
+			WorkspaceID:               "ws_runtime_total",
+			RemoteRoot:                "/workspace",
+			LocalRoot:                 localDir,
+			BootstrapMaxFilesPerCycle: 1,
+			BootstrapStallCycles:      5,
+		})
+		if err != nil {
+			t.Fatalf("new syncer failed: %v", err)
+		}
+		return syncer
+	}
+
+	first := newSyncer(&hierarchicalTreeClient{fakeClient: &fakeClient{files: files}})
+	if err := first.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("first bootstrap cycle failed: %v", err)
+	}
+	state := loadPersistedState(t, localDir)
+	if state.BootstrapComplete {
+		t.Fatalf("first bounded cycle unexpectedly completed bootstrap")
+	}
+	if state.BootstrapFilesTotal != 0 || !state.BootstrapFilesTotalUnavailable {
+		t.Fatalf("runtime-inclusive total remained publishable: total=%d unavailable=%t", state.BootstrapFilesTotal, state.BootstrapFilesTotalUnavailable)
+	}
+
+	// A fresh process revisits the root page with the server's raw total, but
+	// must honor the persisted invalidation instead of restoring an unreachable
+	// denominator after the saved page offset.
+	second := newSyncer(&hierarchicalTreeClient{fakeClient: &fakeClient{files: files}})
+	if err := second.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("resumed bootstrap cycle failed: %v", err)
+	}
+	state = loadPersistedState(t, localDir)
+	if state.BootstrapFilesSynced != 1 {
+		t.Fatalf("resumed files synced = %d, want 1", state.BootstrapFilesSynced)
+	}
+	if state.BootstrapFilesTotal != 0 || !state.BootstrapFilesTotalUnavailable {
+		t.Fatalf("process restart restored runtime-inclusive total: total=%d unavailable=%t", state.BootstrapFilesTotal, state.BootstrapFilesTotalUnavailable)
+	}
+
+	publicBytes, err := os.ReadFile(filepath.Join(localDir, ".relay", "state.json"))
+	if err != nil {
+		t.Fatalf("read public state: %v", err)
+	}
+	var public struct {
+		Bootstrap map[string]json.RawMessage `json:"bootstrap"`
+	}
+	if err := json.Unmarshal(publicBytes, &public); err != nil {
+		t.Fatalf("decode public state: %v", err)
+	}
+	if _, published := public.Bootstrap["filesTotal"]; published {
+		t.Fatalf("public state published unreachable runtime-inclusive total: %s", publicBytes)
+	}
+}
+
+// TestBootstrapProgressSuppressesTotalWhenRuntimeSubtreeOutlivesFileBudget
+// covers a runtime subtree whose entries sort after enough real files to
+// fall outside the per-cycle file budget's processed chunk on the very page
+// that already reported an authoritative-looking page.TotalFiles. The
+// runtime dir/file never enter s.state via the budget-limited entry loop
+// this cycle, so only a full-page scan ahead of persisting the total catches
+// it; persisting page.TotalFiles here renders an unreachable N/M until some
+// later cycle happens to walk that entry.
+func TestBootstrapProgressSuppressesTotalWhenRuntimeSubtreeOutlivesFileBudget(t *testing.T) {
+	files := map[string]RemoteFile{
+		"/workspace/a.txt": {Path: "/workspace/a.txt", Revision: "rev_a", Content: "a"},
+		"/workspace/b.txt": {Path: "/workspace/b.txt", Revision: "rev_b", Content: "b"},
+		"/workspace/z/.relay/state.json": {
+			Path: "/workspace/z/.relay/state.json", Revision: "rev_runtime", Content: `{"runtime":true}`,
+		},
+	}
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(&hierarchicalTreeClient{fakeClient: &fakeClient{files: files}}, SyncerOptions{
+		WorkspaceID:               "ws_runtime_total_budget",
+		RemoteRoot:                "/workspace",
+		LocalRoot:                 localDir,
+		BootstrapMaxFilesPerCycle: 1,
+		BootstrapStallCycles:      5,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+
+	// The single-file budget's chunk this cycle covers only a.txt: b.txt and
+	// the nested runtime subtree sort after it and stay outside the loop that
+	// would otherwise discover the runtime path and suppress the total.
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("first bootstrap cycle failed: %v", err)
+	}
+	state := loadPersistedState(t, localDir)
+	if state.BootstrapFilesSynced != 1 {
+		t.Fatalf("files synced = %d, want 1 (only a.txt processed this cycle)", state.BootstrapFilesSynced)
+	}
+	if state.BootstrapFilesTotal != 0 || !state.BootstrapFilesTotalUnavailable {
+		t.Fatalf("runtime subtree outside the budgeted chunk left an unreachable total publishable: total=%d unavailable=%t", state.BootstrapFilesTotal, state.BootstrapFilesTotalUnavailable)
+	}
+}
+
+// TestBootstrapProgressSelfCorrectsWhenRuntimeSubtreeIsOnALaterRootPage
+// covers a pruned runtime subtree that only appears on a later cursor page
+// of the remote root's own listing. The first root page reports a positive
+// totalFiles and contains no runtime entries, so it is published eagerly
+// (matching TestBootstrapStallCycleGuardPersistsAndFailsHard's expectation
+// that a large, slow, multi-page bootstrap gets an early progress signal
+// rather than none at all while its own pagination is still in flight). The
+// total is transiently optimistic until the runtime-bearing page is reached,
+// at which point it must self-correct to unavailable rather than staying
+// published as an unreachable denominator forever.
+func TestBootstrapProgressSelfCorrectsWhenRuntimeSubtreeIsOnALaterRootPage(t *testing.T) {
+	files := map[string]RemoteFile{
+		"/workspace/a.txt": {Path: "/workspace/a.txt", Revision: "rev_a", Content: "a"},
+		"/workspace/b.txt": {Path: "/workspace/b.txt", Revision: "rev_b", Content: "b"},
+		"/workspace/z/.relay/state.json": {
+			Path: "/workspace/z/.relay/state.json", Revision: "rev_runtime", Content: `{"runtime":true}`,
+		},
+		// Real work still pending after the runtime page keeps bootstrap
+		// incomplete past cycle 2, so the self-corrected flag persists long
+		// enough to assert on rather than being cleared by completion.
+		"/workspace/zz_extra1.txt": {Path: "/workspace/zz_extra1.txt", Revision: "rev_e1", Content: "e1"},
+		"/workspace/zz_extra2.txt": {Path: "/workspace/zz_extra2.txt", Revision: "rev_e2", Content: "e2"},
+	}
+	localDir := t.TempDir()
+	client := &pagedTreeClient{fakeClient: &fakeClient{files: files}, pageSize: 2, totalFiles: 5}
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID:               "ws_runtime_total_paginated_root",
+		RemoteRoot:                "/workspace",
+		LocalRoot:                 localDir,
+		BootstrapMaxFilesPerCycle: 2,
+		BootstrapStallCycles:      5,
+		FullPullEvery:             -1,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+
+	// Root page 1 (a.txt, b.txt) exactly fills this cycle's budget and
+	// reports totalFiles=5; the runtime subtree is not on this page, so the
+	// total is published eagerly as the early progress signal.
+	if err := syncer.pullRemoteFullTree(context.Background(), nil, bootstrapProgress{}); err != nil {
+		t.Fatalf("first bootstrap cycle failed: %v", err)
+	}
+	if got := syncer.state.BootstrapFilesSynced; got != 2 {
+		t.Fatalf("files synced = %d, want 2 (root page 1 only)", got)
+	}
+	if syncer.state.BootstrapFilesTotal != 5 {
+		t.Fatalf("root page 1's totalFiles was not published eagerly: total=%d", syncer.state.BootstrapFilesTotal)
+	}
+	if syncer.state.BootstrapCursor == "" {
+		t.Fatalf("expected a persisted cursor into root page 2, got none")
+	}
+
+	// Root page 2, reached by cursor, carries the pruned runtime subtree.
+	// The previously-published total must self-correct to unavailable
+	// instead of staying published as an unreachable denominator.
+	if err := syncer.pullRemoteFullTree(context.Background(), nil, bootstrapProgress{}); err != nil {
+		t.Fatalf("second bootstrap cycle failed: %v", err)
+	}
+	if syncer.state.BootstrapComplete {
+		t.Fatalf("bootstrap unexpectedly completed with root pagination still pending")
+	}
+	if syncer.state.BootstrapFilesTotal != 0 || !syncer.state.BootstrapFilesTotalUnavailable {
+		t.Fatalf("runtime subtree on a later root pagination page left an unreachable total published: total=%d unavailable=%t", syncer.state.BootstrapFilesTotal, syncer.state.BootstrapFilesTotalUnavailable)
+	}
+}
+
 func TestPullRemoteFullTreePrunesNestedMountRuntimeBeforeDescendantEnumeration(t *testing.T) {
 	files := map[string]RemoteFile{
 		"/slack/channels/C123/messages/1780145510_376649.json": {
@@ -11318,6 +11519,87 @@ func TestInitialTreeBootstrapYieldsAtFileBudgetAndResumes(t *testing.T) {
 	}
 	if syncer.state.LastFullPullAt != "" {
 		t.Fatalf("resumed non-authoritative traversal stamped lastFullPullAt %q", syncer.state.LastFullPullAt)
+	}
+}
+
+func TestTreeBootstrapPersistsWithinPageBeforeDeadlineAndResumes(t *testing.T) {
+	files := make(map[string]RemoteFile, 140)
+	for i := 0; i < 140; i++ {
+		path := fmt.Sprintf("/neon/advisors/by-project/project-%03d/advisor.json", i)
+		files[path] = RemoteFile{
+			Path:        path,
+			Revision:    fmt.Sprintf("rev_%03d", i),
+			ContentType: "application/json",
+			Content:     fmt.Sprintf(`{"advisor":%d}`, i),
+		}
+	}
+	base := &fakeClient{files: files}
+	client := &delayedBootstrapReadClient{
+		fakeClient: base,
+		delay:      60 * time.Millisecond,
+	}
+	stateFile := filepath.Join(t.TempDir(), "state.json")
+	localDir := t.TempDir()
+
+	first, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID:               "ws_neon_checkpoint",
+		RemoteRoot:                "/neon/advisors/by-project",
+		LocalRoot:                 localDir,
+		StateFile:                 stateFile,
+		BootstrapTimeout:          210 * time.Millisecond,
+		BootstrapMaxFilesPerCycle: -1,
+		FullPullEvery:             -1,
+	})
+	if err != nil {
+		t.Fatalf("new first syncer: %v", err)
+	}
+	if err := first.SyncOnce(context.Background()); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("first bootstrap error = %v, want deadline exceeded", err)
+	}
+	if first.state.BootstrapComplete {
+		t.Fatal("deadline-limited bootstrap unexpectedly completed")
+	}
+	if got := first.state.BootstrapPageOffset; got < bootstrapCheckpointFiles || got >= len(files) {
+		t.Fatalf("durable within-page offset = %d, want [%d,%d)", got, bootstrapCheckpointFiles, len(files))
+	}
+	checkpoint := first.state.BootstrapPageOffset
+	if got := first.state.BootstrapFilesSynced; got != checkpoint {
+		t.Fatalf("durable files synced = %d, want checkpoint %d", got, checkpoint)
+	}
+	if got := client.active.Load(); got != 0 {
+		t.Fatalf("read workers still active after deadline: %d", got)
+	}
+
+	restarted, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID:               "ws_neon_checkpoint",
+		RemoteRoot:                "/neon/advisors/by-project",
+		LocalRoot:                 localDir,
+		StateFile:                 stateFile,
+		BootstrapTimeout:          3 * time.Second,
+		BootstrapMaxFilesPerCycle: -1,
+		FullPullEvery:             -1,
+	})
+	if err != nil {
+		t.Fatalf("new restarted syncer: %v", err)
+	}
+	if err := restarted.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("restarted bootstrap: %v", err)
+	}
+	if !restarted.state.BootstrapComplete {
+		t.Fatal("restarted bootstrap did not complete")
+	}
+	if got := len(restarted.state.Files); got != len(files) {
+		t.Fatalf("restarted bootstrap tracked %d files, want %d", got, len(files))
+	}
+	firstPath := "/neon/advisors/by-project/project-000/advisor.json"
+	base.mu.Lock()
+	firstPathReads := base.readFileCallsByPath[firstPath]
+	base.mu.Unlock()
+	if firstPathReads != 1 {
+		t.Fatalf("restart reread committed prefix %s %d times, want once", firstPath, firstPathReads)
+	}
+	if got := client.active.Load(); got != 0 {
+		t.Fatalf("read workers still active after completion: %d", got)
 	}
 }
 

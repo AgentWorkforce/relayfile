@@ -425,10 +425,17 @@ type syncStateEventListener struct {
 // syncStateBootstrap is the CLI-surface mirror of mountsync's public
 // bootstrap status block.
 type syncStateBootstrap struct {
-	Phase       string `json:"phase"`
-	FilesSynced int    `json:"filesSynced"`
-	FilesTotal  int    `json:"filesTotal,omitempty"`
-	StartedAt   string `json:"startedAt,omitempty"`
+	Phase                 string `json:"phase"`
+	FilesSynced           int    `json:"filesSynced"`
+	FilesTotal            int    `json:"filesTotal,omitempty"`
+	StartedAt             string `json:"startedAt,omitempty"`
+	CurrentPath           string `json:"currentPath,omitempty"`
+	PageOffset            int    `json:"pageOffset,omitempty"`
+	DirectoriesPending    int    `json:"directoriesPending,omitempty"`
+	DirectoriesDiscovered int    `json:"directoriesDiscovered,omitempty"`
+	StallCycles           int    `json:"stallCycles,omitempty"`
+	StallLimit            int    `json:"stallLimit,omitempty"`
+	Reason                string `json:"reason,omitempty"`
 }
 
 // syncStateGuards mirrors mountsync.telemetryCounters and the circuit
@@ -6741,6 +6748,9 @@ func buildWorkspaceViewHealth(record workspaceRecord, state syncStateFile) []wor
 
 func canonicalViewStatus(state syncStateFile) string {
 	if state.Bootstrap != nil {
+		if phase := strings.TrimSpace(state.Bootstrap.Phase); phase != "" {
+			return phase
+		}
 		return "bootstrapping"
 	}
 	if strings.TrimSpace(state.Status) == "" {
@@ -9083,6 +9093,9 @@ func runStatus(args []string, stdout io.Writer) error {
 		workspaceLabel = fmt.Sprintf("%s (%s)", workspaceID, record.Name)
 	}
 	fmt.Fprintf(stdout, "workspace %s   mode: %s   lag: %s\n", workspaceLabel, snapshot.Mode, formatLag(maxLagSeconds(status.Providers)))
+	if mountStatus := operatorMountStatus(snapshot.Status); mountStatus != "" {
+		fmt.Fprintf(stdout, "mount: %s\n", mountStatus)
+	}
 	if authLine := statusAuthLine(record.LocalDir, time.Now().UTC()); authLine != "" {
 		fmt.Fprintln(stdout, authLine)
 	}
@@ -9125,22 +9138,51 @@ func runStatus(args []string, stdout io.Writer) error {
 		fmt.Fprintln(stdout, daemonStatusLine(record))
 	}
 	if snapshot.Bootstrap != nil {
-		// Initial mirror in progress: show progress instead of a
-		// misleading generic stall.
-		line := fmt.Sprintf("\nbootstrapping: %d", snapshot.Bootstrap.FilesSynced)
-		if snapshot.Bootstrap.FilesTotal > 0 {
-			line += fmt.Sprintf("/%d", snapshot.Bootstrap.FilesTotal)
+		phase := strings.ToLower(strings.TrimSpace(snapshot.Bootstrap.Phase))
+		prefix := "bootstrapping"
+		if phase == "stalled" {
+			prefix = "bootstrap stalled"
 		}
-		line += " files"
+		line := "\n" + prefix + ": " + formatBootstrapFileProgress(snapshot.Bootstrap)
 		if started := strings.TrimSpace(snapshot.Bootstrap.StartedAt); started != "" {
 			line += " (started " + humanizeRecentTime(started) + ")"
 		}
 		fmt.Fprintln(stdout, line)
+		if snapshot.Bootstrap.DirectoriesPending > 0 {
+			fmt.Fprintf(stdout, "  directories pending: %d\n", snapshot.Bootstrap.DirectoriesPending)
+		}
+		if currentPath := strings.TrimSpace(snapshot.Bootstrap.CurrentPath); currentPath != "" {
+			fmt.Fprintf(stdout, "  current path: %s (page offset %d)\n", currentPath, snapshot.Bootstrap.PageOffset)
+		}
+		if phase == "stalled" {
+			reason := firstNonBlank(snapshot.Bootstrap.Reason, persistedStallReason)
+			if reason != "" {
+				fmt.Fprintf(stdout, "  reason: %s\n", reason)
+			}
+		}
 	} else if persistedStallReason != "" {
 		fmt.Fprintf(stdout, "\nstall: %s\n", persistedStallReason)
 	}
 	fmt.Fprintf(stdout, "\npending writebacks: %d    conflicts: %d    denied: %d\n", snapshot.PendingWriteback, snapshot.PendingConflicts, snapshot.DeniedPaths)
 	return nil
+}
+
+func operatorMountStatus(status string) string {
+	status = strings.ToLower(strings.TrimSpace(status))
+	if status == "ready" {
+		return "healthy"
+	}
+	return status
+}
+
+func formatBootstrapFileProgress(bootstrap *syncStateBootstrap) string {
+	if bootstrap == nil {
+		return "0 files synced"
+	}
+	if bootstrap.FilesTotal > 0 {
+		return fmt.Sprintf("%d/%d files", bootstrap.FilesSynced, bootstrap.FilesTotal)
+	}
+	return fmt.Sprintf("%d files synced (authoritative total unavailable)", bootstrap.FilesSynced)
 }
 
 func readPersistedStallReason(localDir string) string {
@@ -11531,16 +11573,28 @@ func providerReadyForMirror(client *apiClient, workspaceID, provider string, sta
 }
 
 func buildSyncStateSnapshot(status syncStatusResponse, workspaceID, mode string, interval time.Duration, localDir string, pid int, stallReason string) syncStateFile {
+	var localState syncStateFile
+	var pendingConflicts, deniedPaths int
+	if strings.TrimSpace(localDir) != "" {
+		localState = readWritebackStateBestEffort(localDir)
+		pendingConflicts = countFilesInDir(filepath.Join(localDir, ".relay", "conflicts"))
+		deniedPaths = countLines(filepath.Join(localDir, ".relay", "permissions-denied.log"))
+	}
 	snapshot := syncStateFile{
-		WorkspaceID:      workspaceID,
-		RemoteRoot:       readMountRemoteRoot(localDir),
-		Mode:             defaultIfBlank(mode, defaultMountMode),
-		IntervalMs:       interval.Milliseconds(),
-		PendingWriteback: countDirtyTrackedFiles(localDir),
-		PendingConflicts: countFilesInDir(filepath.Join(localDir, ".relay", "conflicts")),
-		DeniedPaths:      countLines(filepath.Join(localDir, ".relay", "permissions-denied.log")),
-		FailedWritebacks: readPersistedFailedWritebacks(localDir),
-		StallReason:      stallReason,
+		WorkspaceID:                  workspaceID,
+		RemoteRoot:                   readMountRemoteRoot(localDir),
+		Mode:                         defaultIfBlank(mode, defaultMountMode),
+		Status:                       strings.TrimSpace(localState.Status),
+		IntervalMs:                   interval.Milliseconds(),
+		LastReconcileAt:              strings.TrimSpace(localState.LastReconcileAt),
+		LastSuccessfulReconcileAt:    strings.TrimSpace(localState.LastSuccessfulReconcileAt),
+		PendingWriteback:             countDirtyTrackedFiles(localDir),
+		PendingConflicts:             pendingConflicts,
+		DeniedPaths:                  deniedPaths,
+		FailedWritebacks:             readPersistedFailedWritebacks(localDir),
+		StallReason:                  stallReason,
+		LastError:                    localState.LastError,
+		IncrementalReadNotReadySince: localState.IncrementalReadNotReadySince,
 	}
 	if pid != 0 {
 		snapshot.Daemon = &syncStateDaemon{
@@ -11577,8 +11631,16 @@ func buildSyncStateSnapshot(status syncStatusResponse, workspaceID, mode string,
 	snapshot.Providers = providers
 	snapshot.LastEventAt = lastEvent
 	snapshot.Guards = readGuardCounters(localDir)
-	snapshot.Bootstrap = readBootstrapStatus(localDir)
-	snapshot.EventListener = readEventListenerHealth(localDir)
+	snapshot.Bootstrap = localState.Bootstrap
+	snapshot.EventListener = localState.EventListener
+	switch {
+	case snapshot.Bootstrap != nil && strings.EqualFold(snapshot.Bootstrap.Phase, "stalled"):
+		snapshot.Status = "stalled"
+	case snapshot.Bootstrap != nil:
+		snapshot.Status = "bootstrapping"
+	case strings.TrimSpace(stallReason) != "":
+		snapshot.Status = "stalled"
+	}
 	return snapshot
 }
 
@@ -11601,23 +11663,6 @@ func readBootstrapStatus(localDir string) *syncStateBootstrap {
 		return nil
 	}
 	return view.Bootstrap
-}
-
-func readEventListenerHealth(localDir string) *syncStateEventListener {
-	if localDir == "" {
-		return nil
-	}
-	payload, err := os.ReadFile(filepath.Join(localDir, ".relay", "state.json"))
-	if err != nil {
-		return nil
-	}
-	var view struct {
-		EventListener *syncStateEventListener `json:"eventListener"`
-	}
-	if json.Unmarshal(payload, &view) != nil {
-		return nil
-	}
-	return view.EventListener
 }
 
 // readGuardCounters reads the mountsync public state file under
@@ -13848,6 +13893,20 @@ func runMountLoopWithAuthLock(rootCtx context.Context, syncer *mountsync.Syncer,
 				writeSnapshot()
 				return err
 			}
+			if mountsync.IsBootstrapTerminalError(err) {
+				// The CLI daemon used to treat this typed hard stop as one ordinary
+				// failed cycle, which let supervisors and the poll ticker retry the
+				// identical checkpoint forever. Persist the actionable reason and
+				// let it escape the runner.
+				reason := err.Error()
+				if bs := readBootstrapStatus(localDir); bs != nil && strings.TrimSpace(bs.Reason) != "" {
+					reason = strings.TrimSpace(bs.Reason)
+				}
+				setStallReason(reason)
+				log.Printf("mount bootstrap terminal failure: %v", err)
+				writeSnapshot()
+				return err
+			}
 			// Mid-bootstrap, a per-cycle deadline exceeded is expected
 			// progress, not a stall: the rootCtx-derived bootstrap
 			// context keeps the heavy pull alive across cycles and
@@ -13856,7 +13915,7 @@ func runMountLoopWithAuthLock(rootCtx context.Context, syncer *mountsync.Syncer,
 			if errors.Is(err, context.DeadlineExceeded) {
 				if bs := readBootstrapStatus(localDir); bs != nil {
 					setStallReason("")
-					log.Printf("mount bootstrapping: %d/%d files (in progress)", bs.FilesSynced, bs.FilesTotal)
+					log.Printf("mount bootstrapping: %s (in progress)", formatBootstrapFileProgress(bs))
 					writeSnapshot()
 					return err
 				}
@@ -13915,6 +13974,9 @@ func runMountLoopWithAuthLock(rootCtx context.Context, syncer *mountsync.Syncer,
 	log.Print(mountStartBanner(localDir, interval, intervalJitter))
 	initialErr := runCycle(true)
 	logStuckEventSummary(syncer, initialErr)
+	if mountsync.IsBootstrapTerminalError(initialErr) {
+		return initialErr
+	}
 	if once {
 		return initialErr
 	}
@@ -13942,14 +14004,22 @@ func runMountLoopWithAuthLock(rootCtx context.Context, syncer *mountsync.Syncer,
 			cycle++
 			reconcile := shouldReconcileMountCycle(websocketEnabled && watcherActive, cycle)
 			if reconcile {
-				_ = runCycle(true)
+				if err := runCycle(true); mountsync.IsBootstrapTerminalError(err) {
+					return err
+				}
 			}
 			if !isDegraded() && time.Since(lastSuccessAt()) >= 10*time.Minute {
 				if bs := readBootstrapStatus(localDir); bs != nil {
-					// Long-running initial mirror is making progress
-					// across cycles — not a stall.
-					setStallReason("")
-					log.Printf("mount bootstrapping: %d/%d files (in progress)", bs.FilesSynced, bs.FilesTotal)
+					if strings.EqualFold(bs.Phase, "stalled") {
+						reason := firstNonBlank(bs.Reason, currentStallReason())
+						setStallReason(reason)
+						log.Printf("mount bootstrap stalled: %s; path=%s directories_pending=%d reason=%s", formatBootstrapFileProgress(bs), bs.CurrentPath, bs.DirectoriesPending, reason)
+					} else {
+						// Long-running initial mirror is making progress
+						// across cycles — not a stall.
+						setStallReason("")
+						log.Printf("mount bootstrapping: %s (in progress)", formatBootstrapFileProgress(bs))
+					}
 					writeSnapshot()
 				} else {
 					setStallReason("no successful reconcile for 10m")

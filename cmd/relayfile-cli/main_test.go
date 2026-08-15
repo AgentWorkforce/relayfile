@@ -5804,6 +5804,101 @@ func TestStatusSurfacesDegradedStallReason(t *testing.T) {
 	}
 }
 
+func TestStatusDistinguishesStalledBootstrapFromHealthyProvider(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	localDir := t.TempDir()
+	if err := ensureMirrorLayout(localDir); err != nil {
+		t.Fatalf("ensureMirrorLayout failed: %v", err)
+	}
+	stallReason := `bootstrap stalled for 20 consecutive checkpoint-stable cycles (limit 20, path "/neon/advisors/by-project", page cursor "", page offset 0, 14822 directories pending)`
+	if err := writeMirrorStateFile(localDir, syncStateFile{
+		WorkspaceID: "rw_7ccfea89",
+		Mode:        defaultMountMode,
+		Status:      "stalled",
+		StallReason: stallReason,
+		LastError: &statusError{
+			Kind:    "bootstrap_stalled",
+			Code:    "bootstrap_stall_cycle_limit",
+			Message: stallReason,
+		},
+		Bootstrap: &syncStateBootstrap{
+			Phase:              "stalled",
+			FilesSynced:        27392,
+			FilesTotal:         40000,
+			StartedAt:          time.Now().UTC().Add(-164 * time.Hour).Format(time.RFC3339Nano),
+			CurrentPath:        "/neon/advisors/by-project",
+			DirectoriesPending: 14822,
+			StallCycles:        20,
+			StallLimit:         20,
+			Reason:             stallReason,
+		},
+	}); err != nil {
+		t.Fatalf("writeMirrorStateFile failed: %v", err)
+	}
+	if _, err := upsertWorkspaceDetails(workspaceRecord{
+		Name:       "default",
+		ID:         "rw_7ccfea89",
+		LocalDir:   localDir,
+		CreatedAt:  time.Now().UTC().Format(time.RFC3339),
+		LastUsedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("upsertWorkspaceDetails failed: %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"workspaceId":"rw_7ccfea89","providers":[{"provider":"github","status":"healthy","lagSeconds":0}]}`)
+	}))
+	defer server.Close()
+	writeDelegatedCredentialsForTest(t, delegatedauth.Bundle{
+		RelayfileURL:         server.URL,
+		RelayfileWorkspaceID: "rw_7ccfea89",
+		AccessToken:          "delegated_token",
+	})
+
+	var stdout bytes.Buffer
+	if err := run([]string{"status", "default"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("run status failed: %v", err)
+	}
+	got := stdout.String()
+	for _, want := range []string{
+		"mount: stalled",
+		"github       healthy",
+		"bootstrap stalled: 27392/40000 files",
+		"directories pending: 14822",
+		"current path: /neon/advisors/by-project",
+		"reason: bootstrap stalled",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("status output missing %q: %q", want, got)
+		}
+	}
+	if strings.Contains(got, "\nbootstrapping:") {
+		t.Fatalf("stalled bootstrap was rendered as in-progress: %q", got)
+	}
+
+	var jsonOutput bytes.Buffer
+	if err := run([]string{"status", "default", "--json"}, strings.NewReader(""), &jsonOutput, &jsonOutput); err != nil {
+		t.Fatalf("run status --json failed: %v", err)
+	}
+	var snapshot syncStateFile
+	if err := json.Unmarshal(jsonOutput.Bytes(), &snapshot); err != nil {
+		t.Fatalf("decode status JSON: %v\n%s", err, jsonOutput.String())
+	}
+	if snapshot.Status != "stalled" || snapshot.Bootstrap == nil || snapshot.Bootstrap.Phase != "stalled" {
+		t.Fatalf("status JSON hid stalled bootstrap: status=%q bootstrap=%+v", snapshot.Status, snapshot.Bootstrap)
+	}
+}
+
+func TestBootstrapProgressNeverRendersZeroDenominator(t *testing.T) {
+	got := formatBootstrapFileProgress(&syncStateBootstrap{FilesSynced: 27392})
+	if strings.Contains(got, "/0") || !strings.Contains(got, "total unavailable") {
+		t.Fatalf("unknown denominator rendered as fake completion ratio: %q", got)
+	}
+}
+
 func TestEnsureMirrorLayoutDoesNotRewriteUnchangedSkill(t *testing.T) {
 	localDir := t.TempDir()
 	if err := ensureMirrorLayout(localDir); err != nil {

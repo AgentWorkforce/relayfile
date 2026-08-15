@@ -40,6 +40,8 @@ export interface TreeResponse {
   path: string;
   entries: TreeEntry[];
   nextCursor: string | null;
+  /** Total caller-visible files below `path`, before pagination. */
+  totalFiles?: number;
 }
 
 export interface FileSemantics {

@@ -484,8 +484,7 @@ func runSinglePollingMount(rootCtx context.Context, cfg mountConfig) error {
 			err = syncer.SyncOnce(ctx)
 		}
 		if err != nil {
-			var stalled *mountsync.BootstrapStalledError
-			if errors.As(err, &stalled) {
+			if mountsync.IsBootstrapTerminalError(err) {
 				// This is an operator-actionable hard stop, not a transient
 				// cycle failure. Returning it terminates this runner (and, for
 				// scoped layouts, cancels sibling runners) instead of letting
@@ -494,7 +493,7 @@ func runSinglePollingMount(rootCtx context.Context, cfg mountConfig) error {
 			}
 			if errors.Is(err, context.DeadlineExceeded) {
 				if synced, total, ok := readBootstrapProgress(cfg.localDir); ok {
-					log.Printf("mount bootstrapping: %d/%d files (in progress)", synced, total)
+					log.Printf("mount bootstrapping: %s (in progress)", formatBootstrapProgress(synced, total))
 					return nil
 				}
 			}
@@ -692,6 +691,13 @@ func readBootstrapProgress(localDir string) (synced, total int, ok bool) {
 		return 0, 0, false
 	}
 	return view.Bootstrap.FilesSynced, view.Bootstrap.FilesTotal, true
+}
+
+func formatBootstrapProgress(synced, total int) string {
+	if total > 0 {
+		return fmt.Sprintf("%d/%d files", synced, total)
+	}
+	return fmt.Sprintf("%d files synced (authoritative total unavailable)", synced)
 }
 
 func envOrDefault(name, fallback string) string {
