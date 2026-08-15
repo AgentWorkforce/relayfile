@@ -7996,6 +7996,25 @@ type blockingTreeReadClient struct {
 	once        sync.Once
 }
 
+type delayedBootstrapReadClient struct {
+	*fakeClient
+	delay  time.Duration
+	active atomic.Int32
+}
+
+func (c *delayedBootstrapReadClient) ReadFile(ctx context.Context, workspaceID, path string) (RemoteFile, error) {
+	c.active.Add(1)
+	defer c.active.Add(-1)
+	timer := time.NewTimer(c.delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return c.fakeClient.ReadFile(ctx, workspaceID, path)
+	case <-ctx.Done():
+		return RemoteFile{}, ctx.Err()
+	}
+}
+
 func (c *blockingTreeReadClient) ReadFile(ctx context.Context, workspaceID, path string) (RemoteFile, error) {
 	file, err := c.fakeExportClient.ReadFile(ctx, workspaceID, path)
 	if normalizeRemotePath(path) != normalizeRemotePath(c.blockedPath) {
@@ -11500,6 +11519,87 @@ func TestInitialTreeBootstrapYieldsAtFileBudgetAndResumes(t *testing.T) {
 	}
 	if syncer.state.LastFullPullAt != "" {
 		t.Fatalf("resumed non-authoritative traversal stamped lastFullPullAt %q", syncer.state.LastFullPullAt)
+	}
+}
+
+func TestTreeBootstrapPersistsWithinPageBeforeDeadlineAndResumes(t *testing.T) {
+	files := make(map[string]RemoteFile, 140)
+	for i := 0; i < 140; i++ {
+		path := fmt.Sprintf("/neon/advisors/by-project/project-%03d/advisor.json", i)
+		files[path] = RemoteFile{
+			Path:        path,
+			Revision:    fmt.Sprintf("rev_%03d", i),
+			ContentType: "application/json",
+			Content:     fmt.Sprintf(`{"advisor":%d}`, i),
+		}
+	}
+	base := &fakeClient{files: files}
+	client := &delayedBootstrapReadClient{
+		fakeClient: base,
+		delay:      60 * time.Millisecond,
+	}
+	stateFile := filepath.Join(t.TempDir(), "state.json")
+	localDir := t.TempDir()
+
+	first, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID:               "ws_neon_checkpoint",
+		RemoteRoot:                "/neon/advisors/by-project",
+		LocalRoot:                 localDir,
+		StateFile:                 stateFile,
+		BootstrapTimeout:          210 * time.Millisecond,
+		BootstrapMaxFilesPerCycle: -1,
+		FullPullEvery:             -1,
+	})
+	if err != nil {
+		t.Fatalf("new first syncer: %v", err)
+	}
+	if err := first.SyncOnce(context.Background()); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("first bootstrap error = %v, want deadline exceeded", err)
+	}
+	if first.state.BootstrapComplete {
+		t.Fatal("deadline-limited bootstrap unexpectedly completed")
+	}
+	if got := first.state.BootstrapPageOffset; got < bootstrapCheckpointFiles || got >= len(files) {
+		t.Fatalf("durable within-page offset = %d, want [%d,%d)", got, bootstrapCheckpointFiles, len(files))
+	}
+	checkpoint := first.state.BootstrapPageOffset
+	if got := first.state.BootstrapFilesSynced; got != checkpoint {
+		t.Fatalf("durable files synced = %d, want checkpoint %d", got, checkpoint)
+	}
+	if got := client.active.Load(); got != 0 {
+		t.Fatalf("read workers still active after deadline: %d", got)
+	}
+
+	restarted, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID:               "ws_neon_checkpoint",
+		RemoteRoot:                "/neon/advisors/by-project",
+		LocalRoot:                 localDir,
+		StateFile:                 stateFile,
+		BootstrapTimeout:          3 * time.Second,
+		BootstrapMaxFilesPerCycle: -1,
+		FullPullEvery:             -1,
+	})
+	if err != nil {
+		t.Fatalf("new restarted syncer: %v", err)
+	}
+	if err := restarted.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("restarted bootstrap: %v", err)
+	}
+	if !restarted.state.BootstrapComplete {
+		t.Fatal("restarted bootstrap did not complete")
+	}
+	if got := len(restarted.state.Files); got != len(files) {
+		t.Fatalf("restarted bootstrap tracked %d files, want %d", got, len(files))
+	}
+	firstPath := "/neon/advisors/by-project/project-000/advisor.json"
+	base.mu.Lock()
+	firstPathReads := base.readFileCallsByPath[firstPath]
+	base.mu.Unlock()
+	if firstPathReads != 1 {
+		t.Fatalf("restart reread committed prefix %s %d times, want once", firstPath, firstPathReads)
+	}
+	if got := client.active.Load(); got != 0 {
+		t.Fatalf("read workers still active after completion: %d", got)
 	}
 }
 

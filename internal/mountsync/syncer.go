@@ -98,6 +98,13 @@ const (
 	// response-size and timeout bounds; the tree traversal persists its cursor
 	// and resumes on the next poll cycle.
 	defaultBootstrapMaxFilesPerCycle = 2000
+	// bootstrapCheckpointFiles is deliberately smaller than a server tree
+	// page (currently up to 1000 entries). Each batch is applied and persisted
+	// before the next batch starts, so a process deadline cannot repeatedly
+	// discard an otherwise-successful prefix of one slow page. This is a
+	// checkpoint granularity, not a workload limit: the same cycle continues
+	// reading the already-fetched page until its file budget is exhausted.
+	bootstrapCheckpointFiles = 32
 	// defaultBootstrapMaxDirectories bounds the number of distinct directory
 	// checkpoints a bounded-tree bootstrap may discover. The queue is
 	// de-duplicated, so exceeding this limit indicates either a pathologically
@@ -4983,50 +4990,58 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 	}
 	var transientBootstrapAbort bool
 	prunedRuntimeRoots := map[string]struct{}{}
+	var page TreeResponse
+	pageLoaded := false
+	loadedDirectory := ""
+	loadedCursor := ""
 	for len(directories) > 0 {
 		currentDirectory := directories[0]
-		var page TreeResponse
-		var err error
-		s.runFullPullIO(func() {
-			page, err = s.client.ListTree(ctx, s.workspace, currentDirectory, fullTreeTraversalDepth, cursor)
-		})
-		metrics.listCalls++
-		if err != nil {
-			s.recordCloudFailure(err)
-			return err
-		}
-		s.recordCloudSuccess()
-		prog.touch()
-		if !s.state.BootstrapFilesTotalUnavailable {
-			// The per-cycle file budget below only walks a chunk of page.Entries,
-			// so a reserved runtime subtree can sit past that chunk on this very
-			// page. Scan the full page up front: trusting totalFiles before this
-			// check would persist an unreachable denominator for every cycle
-			// between now and whichever later cycle happens to walk that entry.
-			for _, entry := range page.Entries {
-				if runtimeRoot := mountRuntimeRemoteRoot(normalizeRemotePath(entry.Path)); runtimeRoot != "" {
-					s.markBootstrapTotalUnavailable(runtimeRoot)
-					break
+		if !pageLoaded || loadedDirectory != currentDirectory || loadedCursor != cursor {
+			var err error
+			s.runFullPullIO(func() {
+				page, err = s.client.ListTree(ctx, s.workspace, currentDirectory, fullTreeTraversalDepth, cursor)
+			})
+			metrics.listCalls++
+			if err != nil {
+				s.recordCloudFailure(err)
+				return err
+			}
+			s.recordCloudSuccess()
+			prog.touch()
+			pageLoaded = true
+			loadedDirectory = currentDirectory
+			loadedCursor = cursor
+			if !s.state.BootstrapFilesTotalUnavailable {
+				// The per-cycle file budget below only walks a chunk of page.Entries,
+				// so a reserved runtime subtree can sit past that chunk on this very
+				// page. Scan the full page up front: trusting totalFiles before this
+				// check would persist an unreachable denominator for every cycle
+				// between now and whichever later cycle happens to walk that entry.
+				for _, entry := range page.Entries {
+					if runtimeRoot := mountRuntimeRemoteRoot(normalizeRemotePath(entry.Path)); runtimeRoot != "" {
+						s.markBootstrapTotalUnavailable(runtimeRoot)
+						break
+					}
 				}
 			}
-		}
-		if currentDirectory == s.remoteRoot && !s.lazyRepos && !s.state.BootstrapFilesTotalUnavailable && page.TotalFiles > 0 {
-			// totalFiles is stable across server pagination and counts the full
-			// caller-visible subtree, not just this page. Persist it on the root
-			// frontier so N/M is an actual completion denominator. Older servers
-			// omit it (zero), in which case status intentionally renders N only.
-			//
-			// A runtime subtree that only appears on a later page of the root
-			// frontier's own pagination can still leave this total transiently
-			// wrong until that later page is walked and markBootstrapTotalUnavailable
-			// self-corrects it (both scans above run on every page). Deferring
-			// publication until the root frontier's pagination fully drains would
-			// close that window, but it also delays the very early-progress signal
-			// this field exists for during a large, slow, multi-page bootstrap
-			// (TestBootstrapStallCycleGuardPersistsAndFailsHard depends on the
-			// eager value surfacing across repeatedly-retried, never-draining
-			// cycles). Eager-and-self-correcting is the intentional tradeoff.
-			s.state.BootstrapFilesTotal = page.TotalFiles
+			if currentDirectory == s.remoteRoot && !s.lazyRepos && !s.state.BootstrapFilesTotalUnavailable && page.TotalFiles > 0 {
+				// totalFiles is stable across server pagination and counts the full
+				// caller-visible subtree, not just this page. Persist it on the root
+				// frontier so N/M is an actual completion denominator. Older servers
+				// omit it (zero), in which case status intentionally renders N only.
+				//
+				// A runtime subtree that only appears on a later page of the root
+				// frontier's own pagination can still leave this total transiently
+				// wrong until that later page is walked and markBootstrapTotalUnavailable
+				// self-corrects it (both scans above run on every page). Deferring
+				// publication until the root frontier's pagination fully drains would
+				// close that window, but it also delays the very early-progress signal
+				// this field exists for during a large, slow, multi-page bootstrap
+				// (TestBootstrapStallCycleGuardPersistsAndFailsHard depends on the
+				// eager value surfacing across repeatedly-retried, never-draining
+				// cycles). Eager-and-self-correcting is the intentional tradeoff.
+				s.state.BootstrapFilesTotal = page.TotalFiles
+			}
 		}
 		entryStart := pageOffset
 		if entryStart < 0 || entryStart > len(page.Entries) {
@@ -5051,6 +5066,10 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 				continue
 			}
 			if remainingFileBudget >= 0 && fileEntriesThisChunk >= remainingFileBudget {
+				entryEnd = i
+				break
+			}
+			if fileEntriesThisChunk >= bootstrapCheckpointFiles {
 				entryEnd = i
 				break
 			}
@@ -5229,9 +5248,14 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 			if err := persistTraversal(filesThisPage); err != nil {
 				return err
 			}
-			s.logf("bootstrap file budget reached (%d files this cycle, max %d); yielding at entry %d of the current server page", filesThisTraversal, s.bootstrapMaxFilesPerCycle, pageOffset)
-			return nil
+			if shouldYieldBootstrap() {
+				s.logf("bootstrap file budget reached (%d files this cycle, max %d); yielding at entry %d of the current server page", filesThisTraversal, s.bootstrapMaxFilesPerCycle, pageOffset)
+				return nil
+			}
+			s.logf("bootstrap page checkpoint persisted at entry %d after %d files; continuing current server page", pageOffset, filesThisPage)
+			continue
 		}
+		pageLoaded = false
 		pageOffset = 0
 		if page.NextCursor != nil && *page.NextCursor != "" {
 			cursor = *page.NextCursor
