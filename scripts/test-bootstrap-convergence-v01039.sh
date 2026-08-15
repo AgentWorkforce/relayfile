@@ -13,21 +13,23 @@ baseline_bin="$scratch/v0.10.39/relayfile"
 candidate_bin="$scratch/candidate/relayfile"
 mkdir -p "$baseline_src" "$(dirname -- "$baseline_bin")" "$(dirname -- "$candidate_bin")"
 
+if ! git -C "$repo_root" rev-parse --verify --quiet refs/tags/v0.10.39 >/dev/null; then
+	printf 'fetching missing tag v0.10.39\n'
+	git -C "$repo_root" fetch --quiet origin tag v0.10.39
+fi
 git -C "$repo_root" archive v0.10.39 | tar -x -C "$baseline_src"
 
-printf 'building v0.10.39 CLI and mount helper from tag ea67a73\n'
+printf 'building v0.10.39 CLI from tag ea67a73\n'
 (
 	cd "$baseline_src"
 	CGO_ENABLED=0 go build -ldflags "-s -w -X main.relayfileVersion=0.10.39" -o "$baseline_bin" ./cmd/relayfile-cli
-	CGO_ENABLED=0 go build -ldflags "-s -w" -o "$scratch/v0.10.39/relayfile-mount" ./cmd/relayfile-mount
 )
 
 candidate_commit=$(git -C "$repo_root" rev-parse --short=12 HEAD)
-printf 'building candidate CLI and mount helper from commit %s\n' "$candidate_commit"
+printf 'building candidate CLI from commit %s\n' "$candidate_commit"
 (
 	cd "$repo_root"
 	CGO_ENABLED=0 go build -ldflags "-s -w -X main.relayfileVersion=issue-424-$candidate_commit" -o "$candidate_bin" ./cmd/relayfile-cli
-	CGO_ENABLED=0 go build -ldflags "-s -w" -o "$scratch/candidate/relayfile-mount" ./cmd/relayfile-mount
 )
 
 printf 'running built-CLI convergence comparison\n'

@@ -828,6 +828,187 @@ func TestBootstrapDirectoryTraversalLimitFailsLoudlyAndPersistsPath(t *testing.T
 	}
 }
 
+// TestResumedBootstrapAboveMaxDirectoriesFailsWithoutListTree covers a
+// checkpoint that already sits at/over BootstrapMaxDirectories when a
+// traversal resumes (e.g. an operator lowered the limit, or the frontier was
+// persisted by a build predating this guard). The in-loop guard only fires
+// on a NEWLY discovered directory, so without an up-front check this
+// oversized, already-blocked frontier would issue a live ListTree request
+// every cycle instead of failing immediately as a terminal error.
+func TestResumedBootstrapAboveMaxDirectoriesFailsWithoutListTree(t *testing.T) {
+	client := &hierarchicalTreeClient{fakeClient: &fakeClient{files: map[string]RemoteFile{
+		"/a/file.md": {Path: "/a/file.md", Revision: "rev_a", Content: "a"},
+	}}}
+	localDir := t.TempDir()
+	stateFile := filepath.Join(localDir, ".relayfile-mount-state.json")
+	if err := writeMountState(stateFile, mountState{
+		Files:                          map[string]trackedFile{},
+		BootstrapComplete:              false,
+		BootstrapDirectories:           []string{"/a", "/b", "/c"},
+		BootstrapCursor:                "",
+		BootstrapPageOffset:            0,
+		BootstrapDirectoriesDiscovered: 3,
+		BootstrapStartedAt:             "2026-08-01T00:00:00Z",
+	}); err != nil {
+		t.Fatalf("seed state: %v", err)
+	}
+
+	s, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID:             "ws_resumed_over_limit",
+		RemoteRoot:              "/",
+		LocalRoot:               localDir,
+		RootCtx:                 context.Background(),
+		BootstrapMaxDirectories: 2,
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer: %v", err)
+	}
+
+	err = s.Reconcile(context.Background())
+	var limitErr *BootstrapTraversalLimitError
+	if !errors.As(err, &limitErr) {
+		t.Fatalf("expected terminal directory traversal limit on resume, got %v", err)
+	}
+	if limitErr.Path != "/a" || limitErr.DirectoriesDiscovered != 3 || limitErr.Limit != 2 {
+		t.Fatalf("unexpected traversal limit detail: %#v", limitErr)
+	}
+	if len(client.calls) != 0 {
+		t.Fatalf("an already-over-limit resumed frontier issued %d ListTree calls, want 0", len(client.calls))
+	}
+	st := loadPersistedState(t, localDir)
+	if st.LastError == nil || st.LastError.Code != "bootstrap_traversal_limit" {
+		t.Fatalf("expected persisted traversal-limit status, got %#v", st.LastError)
+	}
+}
+
+// TestWriteOnlyMountBypassesPersistedBootstrapTerminalError covers a mount
+// reconfigured write-only after a prior read-side bootstrap terminally
+// stalled. Write-only mounts never run the read-side traversal (they call
+// markBootstrapComplete unconditionally), so the persisted terminal error
+// must not permanently block them.
+func TestWriteOnlyMountBypassesPersistedBootstrapTerminalError(t *testing.T) {
+	localDir := t.TempDir()
+	stateFile := filepath.Join(localDir, ".relayfile-mount-state.json")
+	if err := writeMountState(stateFile, mountState{
+		Files:                map[string]trackedFile{},
+		BootstrapComplete:    false,
+		BootstrapDirectories: []string{"/neon/advisors/by-project"},
+		BootstrapCursor:      "",
+		BootstrapPageOffset:  0,
+		BootstrapStallCycles: 2,
+		BootstrapStartedAt:   "2026-08-01T00:00:00Z",
+		LastError: &statusError{
+			Kind:    "bootstrap_stalled",
+			Code:    "bootstrap_stall_cycle_limit",
+			Message: "bootstrap stalled for 2 consecutive checkpoint-stable cycles",
+			At:      "2026-08-01T00:00:00Z",
+		},
+	}); err != nil {
+		t.Fatalf("seed state: %v", err)
+	}
+
+	client := &fakeClient{files: map[string]RemoteFile{}}
+	s, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_write_only_unblock",
+		RemoteRoot:  "/",
+		LocalRoot:   localDir,
+		RootCtx:     context.Background(),
+		SyncMode:    "write-only",
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer: %v", err)
+	}
+
+	var stalled *BootstrapStalledError
+	if err := s.Reconcile(context.Background()); err != nil {
+		if errors.As(err, &stalled) {
+			t.Fatalf("write-only mount must not be blocked by a stale read-side bootstrap terminal error: %v", err)
+		}
+		t.Fatalf("unexpected Reconcile error: %v", err)
+	}
+	st := loadPersistedState(t, localDir)
+	if !st.BootstrapComplete {
+		t.Fatalf("write-only mount did not mark bootstrap complete: %#v", st)
+	}
+	if st.LastError != nil {
+		t.Fatalf("expected LastError cleared after a successful write-only cycle, got %#v", st.LastError)
+	}
+}
+
+// TestPersistedBootstrapTerminalErrorStillFlushesDueOutbox covers a mount
+// whose read-side bootstrap already hit its persisted terminal stall. Local
+// writes do not depend on the read-side traversal completing, so a pending,
+// due outbox record must still be dispatched on restart instead of queuing
+// indefinitely behind a wedge that may never clear without operator action.
+func TestPersistedBootstrapTerminalErrorStillFlushesDueOutbox(t *testing.T) {
+	localDir := t.TempDir()
+	stateFile := filepath.Join(localDir, ".relayfile-mount-state.json")
+	if err := writeMountState(stateFile, mountState{
+		Files:                map[string]trackedFile{},
+		BootstrapComplete:    false,
+		BootstrapDirectories: []string{"/neon/advisors/by-project"},
+		BootstrapStallCycles: 2,
+		BootstrapStartedAt:   "2026-08-01T00:00:00Z",
+		LastError: &statusError{
+			Kind:    "bootstrap_stalled",
+			Code:    "bootstrap_stall_cycle_limit",
+			Message: "bootstrap stalled for 2 consecutive checkpoint-stable cycles",
+			At:      "2026-08-01T00:00:00Z",
+		},
+	}); err != nil {
+		t.Fatalf("seed state: %v", err)
+	}
+
+	client := &fakeClient{files: map[string]RemoteFile{}}
+	s, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID:          "ws_terminal_outbox_flush",
+		RemoteRoot:           "/",
+		LocalRoot:            localDir,
+		RootCtx:              context.Background(),
+		BootstrapStallCycles: 2,
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer: %v", err)
+	}
+
+	record := outboxRecord{
+		CommandID:     "cmd_due_during_stall",
+		WorkspaceID:   "ws_terminal_outbox_flush",
+		RemotePath:    "/a.md",
+		ContentType:   "text/markdown",
+		Content:       "hello",
+		Status:        outboxStatusPending,
+		FirstSeenAt:   time.Now().UTC().Add(-time.Minute).Format(time.RFC3339Nano),
+		NextAttemptAt: time.Now().UTC().Add(-time.Second).Format(time.RFC3339Nano),
+	}
+	data, err := json.Marshal(record)
+	if err != nil {
+		t.Fatalf("marshal outbox record: %v", err)
+	}
+	if err := os.MkdirAll(s.outboxPendingDir(), 0o755); err != nil {
+		t.Fatalf("mkdir outbox pending dir: %v", err)
+	}
+	if err := os.WriteFile(s.pendingOutboxPath(record.CommandID), data, 0o644); err != nil {
+		t.Fatalf("write pending outbox record: %v", err)
+	}
+
+	var stalled *BootstrapStalledError
+	err = s.Reconcile(context.Background())
+	if !errors.As(err, &stalled) {
+		t.Fatalf("expected the persisted bootstrap terminal error to still surface, got %v", err)
+	}
+	if client.bulkWriteCalls != 1 {
+		t.Fatalf("expected the due outbox record to be dispatched despite the terminal bootstrap stall, got %d bulk write calls", client.bulkWriteCalls)
+	}
+	if pending := readPendingOutboxRecordsForTest(t, localDir); len(pending) != 0 {
+		t.Fatalf("expected pending outbox drained after dispatch, got %+v", pending)
+	}
+	acked := readOutboxRecordsInDirForTest(t, filepath.Join(localDir, ".relay", "outbox", "acked"))
+	if len(acked) != 1 || acked[0].CommandID != record.CommandID {
+		t.Fatalf("expected acked outbox record for %s, got %+v", record.CommandID, acked)
+	}
+}
+
 func TestBootstrapStallCycleGuardIgnoresCanceledContext(t *testing.T) {
 	s := newBootstrapSyncer(t, newBootstrapClient(1, 1), t.TempDir(), SyncerOptions{
 		RootCtx:              context.Background(),
@@ -1129,6 +1310,49 @@ func TestBootstrapStatusSurfacesPhase(t *testing.T) {
 	}
 	if pub.Status == "bootstrapping" {
 		t.Fatalf("expected status to leave bootstrapping after completion, got %q", pub.Status)
+	}
+}
+
+// TestBootstrapStatusDoesNotHideOutboxNeedsAttention: a long-running
+// bootstrap must not mask an already-actionable outbox state. Unlike a
+// routine "offline" retry (TestBootstrapStatusSurfacesPhase, intentionally
+// still masked by "bootstrapping"), writeback-needs-attention is a distinct
+// operator action and must remain the surfaced top-level status.
+func TestBootstrapStatusDoesNotHideOutboxNeedsAttention(t *testing.T) {
+	localDir := t.TempDir()
+	s := newBootstrapSyncer(t, &fakeClient{files: map[string]RemoteFile{}}, localDir, SyncerOptions{RootCtx: context.Background()})
+
+	record := outboxRecord{
+		CommandID:      "cmd_needs_attention",
+		WorkspaceID:    "ws_bootstrap",
+		RemotePath:     "/a.md",
+		Status:         outboxStatusPending,
+		FirstSeenAt:    time.Now().UTC().Format(time.RFC3339Nano),
+		NeedsAttention: true,
+	}
+	data, err := json.Marshal(record)
+	if err != nil {
+		t.Fatalf("marshal outbox record: %v", err)
+	}
+	if err := os.MkdirAll(s.outboxPendingDir(), 0o755); err != nil {
+		t.Fatalf("mkdir outbox pending dir: %v", err)
+	}
+	if err := os.WriteFile(s.pendingOutboxPath(record.CommandID), data, 0o644); err != nil {
+		t.Fatalf("write pending outbox record: %v", err)
+	}
+
+	s.state.BootstrapComplete = false
+	s.state.BootstrapStartedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	if err := s.savePublicState(); err != nil {
+		t.Fatalf("savePublicState: %v", err)
+	}
+
+	pub := readPublicStateFile(t, localDir)
+	if pub.Status != "writeback-needs-attention" {
+		t.Fatalf("expected an in-progress bootstrap to leave an actionable outbox status surfaced, got %q", pub.Status)
+	}
+	if pub.Bootstrap == nil || pub.Bootstrap.Phase != "bootstrapping" {
+		t.Fatalf("expected the bootstrap detail block to still be populated, got %+v", pub.Bootstrap)
 	}
 }
 
